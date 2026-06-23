@@ -34,92 +34,202 @@ const TerminalCore = core.TerminalCore;
 /// **핵심 불변식**: alt 화면은 `cap == 0`인 빈 인스턴스를 갖는다 — 그래서 `pushScrollback`이 무동작이고
 /// 스크롤백 뷰포트가 잠긴다(분기 없이 모델로 떠받친다). 행 push/get/rewrap 로직은 TerminalCore가 이 필드들을
 /// 직접 다루고(cross-file 필드 접근), 이 struct는 메모리 수명(free/cap 재구성)만 소유한다.
+/// 스크롤백 행을 담는 고정 행수 페이지(§11 A1). 행마다 개별 heap `dupe`하던 ring(per-row 할당)을 연속 arena로
+/// 묶어 할당 수를 `rows_per_page`분의 1로 낮춘다 — "수백만 줄" 목표의 토대(100만 행 = 100만 할당 → ~수천
+/// 페이지, + 미래 mmap backing 전제, §11.6). 한 페이지의 모든 행은 같은 폭(`width`)이고, 폭이 다른 행(resize
+/// 직후·rewrap 전)은 새 페이지에서 시작한다. 행 r 셀 = `cells[r*width .. (r+1)*width]`(연속).
+const ScrollbackPage = struct {
+    cells: []types.Cell, // rows_per_page * width
+    wrapped: []bool, // rows_per_page
+    prompt_marks: []types.RowPrompt, // rows_per_page
+    width: usize,
+    filled: usize = 0, // append된 행 수(단조 증가, 0..rows_per_page). live = [evicted_abs..pushed_abs) 교집합
+    abs_start: usize = 0, // 이 페이지 첫 슬롯의 절대 행 id(단조). live 논리 i ↔ abs = evicted_abs + i
+
+    fn rowCells(self: *const ScrollbackPage, r: usize) []types.Cell {
+        return self.cells[r * self.width .. (r + 1) * self.width];
+    }
+};
+
+/// 한 화면의 스크롤백. per-row ring → **page 리스트 + pool**(§11 A1). 공개 동작은 보존한다 — `count`(live 행
+/// 수)·row-count `cap`·eviction(가장 오래된 행부터)·`setCap` 반환(버린 행 수)·rewrap 접근자. 논리 행 i(0=가장
+/// 오래된)는 `abs = evicted_abs + i`로 매핑하고 페이지를 abs_start 이진탐색한다. pool이 비워진 페이지를 재사용해
+/// steady-state 할당을 0으로 유지한다(옛 ring이 슬롯을 memcpy 재활용하던 것과 동률).
 pub const Scrollback = struct {
-    ring: []?[]types.Cell = &.{},
-    wrapped: []bool = &.{},
-    prompt_marks: []types.RowPrompt = &.{},
-    head: usize = 0,
-    count: usize = 0,
+    const rows_per_page: usize = 512;
+
+    pages: std.ArrayList(*ScrollbackPage) = .empty, // 오래된→최신 순(abs_start 오름차순)
+    pool: std.ArrayList(*ScrollbackPage) = .empty, // 비워진 free 페이지(재사용 — steady-state 0 할당)
+    count: usize = 0, // live 행 수(공개 동작 보존)
     cap: usize = 0,
-    // 재-wrap 지연 마크. resize는 비싼 ring 재구성을 즉시 하지 않고 이 플래그만 세우고, 과거를 실제로
-    // 보는 순간(scrollViewport/renderSnapshot)에 현재 폭으로 1회 수행한다.
+    evicted_abs: usize = 0, // 지금까지 evict된 행 수 = 가장 오래된 live 행의 abs
+    pushed_abs: usize = 0, // 지금까지 push된 행 수 = 다음 append의 abs
+    // 재-wrap 지연 마크. resize는 비싼 재구성을 즉시 하지 않고 이 플래그만 세우고, 과거를 실제로 보는
+    // 순간(scrollViewport/renderSnapshot)에 현재 폭으로 1회 수행한다.
     rewrap_pending: bool = false,
 
-    /// ring 슬롯의 행 버퍼를 모두 해제하고 null로 비운다(슬롯 배열 자체는 유지 — 재사용 경로용).
-    /// deinit·clearScrollback·rewrapScrollbackInner이 공유한다(같은 free 루프 3벌 중복 제거).
-    pub fn freeSlots(self: *Scrollback, allocator: std.mem.Allocator) void {
-        for (self.ring) |*slot| {
-            if (slot.*) |cells_row| {
-                allocator.free(cells_row);
-                slot.* = null;
+    fn freePage(allocator: std.mem.Allocator, page: *ScrollbackPage) void {
+        allocator.free(page.cells);
+        allocator.free(page.wrapped);
+        allocator.free(page.prompt_marks);
+        allocator.destroy(page);
+    }
+
+    /// 비울 때 페이지를 pool로 회수(재사용). pool도 비울 땐 freePage. cells 배열은 width별 크기라, 재사용 시
+    /// 폭이 다르면 acquirePage가 realloc한다(steady-state 동일 폭이면 그대로 재사용 — 0 할당).
+    fn recyclePage(self: *Scrollback, allocator: std.mem.Allocator, page: *ScrollbackPage) void {
+        page.filled = 0;
+        self.pool.append(allocator, page) catch {
+            freePage(allocator, page); // pool append OOM이면 그냥 해제(누수 방지)
+        };
+    }
+
+    /// 새(또는 pool 재사용) 페이지를 끝에 붙인다. 폭(w)이 다르면 cells를 realloc. OOM이면 null.
+    fn acquirePage(self: *Scrollback, allocator: std.mem.Allocator, w: usize) ?*ScrollbackPage {
+        const need_cells = rows_per_page * w;
+        if (self.pool.pop()) |page| {
+            if (page.width != w) {
+                const new_cells = allocator.realloc(page.cells, need_cells) catch {
+                    freePage(allocator, page);
+                    return null;
+                };
+                page.cells = new_cells;
+                page.width = w;
+            }
+            page.filled = 0;
+            page.abs_start = self.pushed_abs;
+            return page;
+        }
+        const page = allocator.create(ScrollbackPage) catch return null;
+        page.cells = allocator.alloc(types.Cell, need_cells) catch {
+            allocator.destroy(page);
+            return null;
+        };
+        page.wrapped = allocator.alloc(bool, rows_per_page) catch {
+            allocator.free(page.cells);
+            allocator.destroy(page);
+            return null;
+        };
+        page.prompt_marks = allocator.alloc(types.RowPrompt, rows_per_page) catch {
+            allocator.free(page.cells);
+            allocator.free(page.wrapped);
+            allocator.destroy(page);
+            return null;
+        };
+        page.* = .{ .cells = page.cells, .wrapped = page.wrapped, .prompt_marks = page.prompt_marks, .width = w, .filled = 0, .abs_start = self.pushed_abs };
+        return page;
+    }
+
+    /// live 논리 행 i(0=가장 오래된)의 페이지와 페이지 내 행 인덱스. 범위 밖이면 null.
+    fn locate(self: *const Scrollback, i: usize) ?struct { page: *ScrollbackPage, row: usize } {
+        if (i >= self.count) return null;
+        const abs = self.evicted_abs + i;
+        var lo: usize = 0;
+        var hi: usize = self.pages.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const p = self.pages.items[mid];
+            if (abs < p.abs_start) {
+                hi = mid;
+            } else if (abs >= p.abs_start + p.filled) {
+                lo = mid + 1;
+            } else {
+                return .{ .page = p, .row = abs - p.abs_start };
             }
         }
+        return null;
+    }
+
+    pub fn row(self: *const Scrollback, i: usize) ?[]const types.Cell {
+        const loc = self.locate(i) orelse return null;
+        return loc.page.rowCells(loc.row);
+    }
+
+    pub fn rowWrapped(self: *const Scrollback, i: usize) bool {
+        const loc = self.locate(i) orelse return false;
+        return loc.page.wrapped[loc.row];
+    }
+
+    pub fn rowPrompt(self: *const Scrollback, i: usize) types.RowPrompt {
+        const loc = self.locate(i) orelse return .{};
+        return loc.page.prompt_marks[loc.row];
+    }
+
+    /// live 행 i의 OSC 133 종료코드를 갱신한다(거터 색용 — setPromptExitAtAbs). 범위 밖이면 무동작.
+    pub fn setRowPromptExit(self: *Scrollback, i: usize, exit: i16) void {
+        const loc = self.locate(i) orelse return;
+        loc.page.prompt_marks[loc.row].exit = exit;
+    }
+
+    /// 가장 오래된 한 행을 버린다(eviction). 첫 페이지가 다 소진되면 pool로 회수한다. 좌표 보정은 호출자
+    /// (pushScrollback)가 한다 — 데이터/좌표 책임 분리(옛 ring과 동일 규율).
+    fn evictOldest(self: *Scrollback, allocator: std.mem.Allocator) void {
+        if (self.count == 0) return;
+        self.evicted_abs += 1;
+        self.count -= 1;
+        const first = self.pages.items[0];
+        if (first.abs_start + first.filled <= self.evicted_abs) {
+            _ = self.pages.orderedRemove(0);
+            self.recyclePage(allocator, first);
+        }
+    }
+
+    /// storage-level 행 push(append + cap 초과 시 가장 오래된 1행 evict). 성공 여부 반환. 좌표 보정은
+    /// 하지 않는다(pushScrollback 래퍼가 eviction 여부로 처리). cap==0이면 무동작.
+    pub fn pushRow(self: *Scrollback, allocator: std.mem.Allocator, cells: []const types.Cell, wrapped_flag: bool, mark: types.RowPrompt) bool {
+        if (self.cap == 0) return false;
+        const w = cells.len;
+        const last: ?*ScrollbackPage = if (self.pages.items.len > 0) self.pages.items[self.pages.items.len - 1] else null;
+        const page = blk: {
+            if (last) |p| {
+                if (p.width == w and p.filled < rows_per_page) break :blk p;
+            }
+            const np = self.acquirePage(allocator, w) orelse return false;
+            self.pages.append(allocator, np) catch {
+                self.recyclePage(allocator, np);
+                return false;
+            };
+            break :blk np;
+        };
+        const r = page.filled;
+        @memcpy(page.cells[r * w .. r * w + w], cells);
+        page.wrapped[r] = wrapped_flag;
+        page.prompt_marks[r] = mark;
+        page.filled += 1;
+        self.pushed_abs += 1;
+        self.count += 1;
+        if (self.count > self.cap) self.evictOldest(allocator);
+        return true;
+    }
+
+    /// 모든 페이지를 pool로 회수하고 비운다(재사용 토대 유지). clearScrollback이 쓴다.
+    pub fn clear(self: *Scrollback, allocator: std.mem.Allocator) void {
+        while (self.pages.items.len > 0) {
+            const p = self.pages.pop().?;
+            self.recyclePage(allocator, p);
+        }
+        self.count = 0;
+        self.evicted_abs = 0;
+        self.pushed_abs = 0;
     }
 
     pub fn deinit(self: *Scrollback, allocator: std.mem.Allocator) void {
-        self.freeSlots(allocator);
-        if (self.ring.len > 0) allocator.free(self.ring);
-        if (self.wrapped.len > 0) allocator.free(self.wrapped);
-        if (self.prompt_marks.len > 0) allocator.free(self.prompt_marks);
+        for (self.pages.items) |p| freePage(allocator, p);
+        self.pages.deinit(allocator);
+        for (self.pool.items) |p| freePage(allocator, p);
+        self.pool.deinit(allocator);
     }
 
-    /// 용량을 바꾼다. cap을 갱신하고, ring이 할당돼 있으면 새 cap 크기로 **재구성**한다 — 가장 최근
-    /// min(count, new_cap)개 행을 보존하고, 넘치는 가장 오래된 행은 행 버퍼까지 해제한다. 이로써
-    /// ring.len이 항상 cap을 따라가 cap>ring.len(rewrap OOB의 전제)이 생기지 않고, 런타임 config 변경이
-    /// 상향(더 보관)·하향(즉시 트림 + 메모리 회수) 양쪽으로 즉시 반영된다.
-    ///
-    /// **버려진(가장 오래된) 행 수를 반환**한다 — 호출자(setMaxScrollback)가 그만큼 abs 좌표
-    /// (선택·kitty placement·view_offset)를 당겨야 한다(eviction과 동일 규율). 행을 안 버리는
-    /// 상향/동일은 0을 반환해 좌표 보정이 불필요하다. 미할당이면 cap만 바꾸고 0(다음 lazy push가
-    /// new_cap로 잡음). OOM이면 옛 ring을 유지하고 0(best-effort — rewrap의 ring.len clamp가 안전망).
+    /// 용량을 바꾼다. 가장 최근 min(count, new_cap)개 행을 보존하고 넘치는 가장 오래된 행을 버린다.
+    /// **버려진 행 수를 반환**한다 — 호출자(setMaxScrollback)가 그만큼 abs 좌표(선택·placement·view_offset)를
+    /// 당겨야 한다(eviction과 동일 규율). new_cap==0이면 전부 비운다(cap=0은 alt 불변식).
     pub fn setCap(self: *Scrollback, allocator: std.mem.Allocator, new_cap: usize) usize {
-        if (self.ring.len == 0 or self.ring.len == new_cap) { // 미할당·동일 크기 — cap만 갱신(드랍 없음)
-            self.cap = new_cap;
-            return 0;
-        }
         const keep = @min(self.count, new_cap);
-        const drop = self.count - keep; // 버릴 가장 오래된 행 수(논리 [0, drop))
-        if (new_cap == 0) { // 스크롤백 끄기 — 행·배열 전부 해제(cap=0은 Scrollback 기본값)
-            self.deinit(allocator);
-            self.* = .{};
-            return drop;
-        }
-        // 세 배열을 먼저 확보한다 — 하나라도 OOM이면 옛 ring·cap을 그대로 두고(일관성 유지) 0을 반환한다.
-        // cap을 미리 바꾸지 않으므로 OOM이 cap>ring.len 같은 불일치를 남기지 않는다(rewrap의 ring.len
-        // clamp는 그래도 OOB 안전망으로 유지).
-        const new_ring = allocator.alloc(?[]types.Cell, new_cap) catch return 0;
-        const new_wrapped = allocator.alloc(bool, new_cap) catch {
-            allocator.free(new_ring);
-            return 0;
-        };
-        const new_pmarks = allocator.alloc(types.RowPrompt, new_cap) catch {
-            allocator.free(new_ring);
-            allocator.free(new_wrapped);
-            return 0;
-        };
-        @memset(new_ring, null);
-        @memset(new_wrapped, false);
-        @memset(new_pmarks, .{});
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) {
-            const src = (self.head + i) % self.ring.len;
-            if (i < drop) {
-                if (self.ring[src]) |row| allocator.free(row); // 버려지는 가장 오래된 행
-            } else {
-                new_ring[i - drop] = self.ring[src];
-                new_wrapped[i - drop] = self.wrapped[src];
-                new_pmarks[i - drop] = self.prompt_marks[src];
-            }
-        }
-        allocator.free(self.ring);
-        allocator.free(self.wrapped);
-        allocator.free(self.prompt_marks);
-        self.ring = new_ring;
-        self.wrapped = new_wrapped;
-        self.prompt_marks = new_pmarks;
-        self.head = 0;
-        self.count = keep;
-        self.cap = new_cap; // 성공 경로에서만 cap 확정(OOM 시 옛 cap 유지 — 위 catch return 0)
+        const drop = self.count - keep;
+        var n: usize = 0;
+        while (n < drop) : (n += 1) self.evictOldest(allocator); // 가장 오래된 drop개 제거(페이지 회수 포함)
+        self.cap = new_cap;
+        if (new_cap == 0) self.clear(allocator); // 끄기 — 남은 페이지도 pool로(다음 push가 다시 잡음)
         return drop;
     }
 };
@@ -391,13 +501,11 @@ pub fn wideContinuationCell(style: types.Style, link: u32) types.Cell {
 // 파일 bare 호출; isBlankCell만 core selection이 cross-file로 써 pub). invalidateSelection·shiftCoordsForEviction은
 // core 잔류라 self.(pub)로 호출한다.
 
-/// 스크롤백을 비운다(ED 3). 행 버퍼는 해제하고 ring 슬롯 배열은 유지해 다음 push가 재할당
-/// 없이 다시 쓴다. 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
+/// 스크롤백을 비운다(ED 3). 페이지를 pool로 회수해 다음 push가 재할당 없이 다시 쓴다(§11 A1).
+/// 뷰포트는 바닥으로 스냅한다(지워진 과거를 보고 있을 수 없으니).
 pub fn clearScrollback(self: *TerminalCore) void {
-    self.screen.sb.freeSlots(self.allocator);
-    self.screen.sb.head = 0;
-    self.screen.sb.count = 0;
-    self.screen.sb.rewrap_pending = false; // 비운 ring에 지연 재-wrap이 남을 이유 없다(상태 위생)
+    self.screen.sb.clear(self.allocator);
+    self.screen.sb.rewrap_pending = false; // 비운 스크롤백에 지연 재-wrap이 남을 이유 없다(상태 위생)
     self.view_offset = 0;
     self.invalidateSelection(); // 스크롤백을 지우면 abs 좌표가 무효 — 선택 해제(필드 주석의 약속)
 }
@@ -458,7 +566,7 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
     // 물리적 ring.len으로 묶는다(cap이 아니라) — setCap이 cap과 ring.len을 항상 같게 유지하지만,
     // 여기서 ring.len을 쓰면 cap이 어떤 경로로 ring보다 커져도 아래 ring[k] 쓰기가 OOB가 될 수 없다.
     // rewrap은 count>0일 때만 오므로 ring은 항상 할당돼 있다.
-    const keep = @min(total_out, self.screen.sb.ring.len);
+    const keep = @min(total_out, self.screen.sb.cap);
     const skip = total_out - keep; // 생성 없이 건너뛸 산출 행 수(가장 오래된 쪽)
 
     var rows: std.ArrayList([]types.Cell) = .empty;
@@ -546,18 +654,12 @@ fn rewrapScrollbackInner(self: *TerminalCore, new_cols: u16, anchor_row: ?usize)
         i = j + 1;
     }
 
-    // 기존 ring 행을 비우고(슬롯 배열은 재사용) 새 행으로 채운다. ring이 아직 lazy 미할당이면
-    // sb.count==0이라 여기 못 온다(가드).
-    self.screen.sb.freeSlots(self.allocator);
+    // 기존 페이지를 pool로 회수하고(§11 A1) 재-wrap된 행을 새로 push한다. keep(≤cap)개라 push 중 eviction은
+    // 없다. pushRow가 페이지로 **복사**하므로 임시 rows 버퍼 소유권은 그대로 — defer가 해제한다(이중 해제 없음).
+    self.screen.sb.clear(self.allocator);
     for (rows.items, 0..) |row_cells, k| {
-        self.screen.sb.ring[k] = row_cells;
-        self.screen.sb.wrapped[k] = wraps.items[k];
-        self.screen.sb.prompt_marks[k] = pmarks.items[k]; // 재-wrap된 행과 정렬된 OSC 133 태그
+        _ = self.screen.sb.pushRow(self.allocator, row_cells, wraps.items[k], pmarks.items[k]);
     }
-    self.screen.sb.head = 0;
-    self.screen.sb.count = rows.items.len;
-    // 소유권 이전 완료 — defer가 이중 해제하지 않게 목록을 비운다.
-    rows.items.len = 0;
 
     if (anchor_out) |a| {
         if (a >= skip) return a - skip; // cap 드랍을 반영한 새 행 인덱스
@@ -597,55 +699,15 @@ pub fn trimmedLen(row: []const types.Cell) usize {
     return len;
 }
 
-/// 행을 스크롤백에 보관한다. OOM 등으로 실제 보관에 실패하면 false — 호출자(scroll-lock)는
-/// 보관된 경우에만 view_offset을 보정해야 보던 위치가 어긋나지 않는다.
+/// 행을 스크롤백에 보관한다(§11 A1 page 저장에 위임). OOM 등으로 실제 보관에 실패하면 false — 호출자
+/// (scroll-lock)는 보관된 경우에만 view_offset을 보정해야 보던 위치가 어긋나지 않는다. 가득 찬 상태에서
+/// push하면 가장 오래된 행이 밀려나(eviction) 절대 행 좌표가 한 칸 당겨지므로, 그때만 선택·placement
+/// anchor를 보정한다(밀려난 행에 걸리면 선택 해제·placement 제거). count는 cap로 불변이라 view_offset
+/// 클램프는 불필요. 데이터(page 저장)와 좌표 보정의 책임을 분리한다(pushRow는 좌표를 모른다).
 pub fn pushScrollback(self: *TerminalCore, row_cells: []const types.Cell, wrapped_flag: bool, mark: types.RowPrompt) bool {
-    if (self.screen.sb.cap == 0) return false;
-    if (self.screen.sb.ring.len == 0) {
-        const ring = self.allocator.alloc(?[]types.Cell, self.screen.sb.cap) catch return false;
-        @memset(ring, null);
-        // wrap·semantic 병렬 ring도 함께 할당한다. 하나라도 실패하면 전부 포기해 세 ring 길이를
-        // 항상 같게 유지한다((sb_head+i)%len 인덱싱이 어긋나면 안 된다).
-        const wring = self.allocator.alloc(bool, self.screen.sb.cap) catch {
-            self.allocator.free(ring);
-            return false;
-        };
-        @memset(wring, false);
-        const pring = self.allocator.alloc(types.RowPrompt, self.screen.sb.cap) catch {
-            self.allocator.free(ring);
-            self.allocator.free(wring);
-            return false;
-        };
-        @memset(pring, .{});
-        self.screen.sb.ring = ring;
-        self.screen.sb.wrapped = wring;
-        self.screen.sb.prompt_marks = pring;
-    }
-    const cap = self.screen.sb.ring.len;
-    // 가득 차면 (sb_head+sb_count)%cap == sb_head라, 가장 오래된 슬롯을 재사용해 덮어쓴다.
-    const idx = (self.screen.sb.head + self.screen.sb.count) % cap;
-    if (self.screen.sb.ring[idx]) |existing| {
-        if (existing.len == row_cells.len) {
-            @memcpy(existing, row_cells);
-        } else {
-            const dup = self.allocator.dupe(types.Cell, row_cells) catch return false; // OOM이면 옛 행 유지
-            self.allocator.free(existing);
-            self.screen.sb.ring[idx] = dup;
-        }
-    } else {
-        self.screen.sb.ring[idx] = self.allocator.dupe(types.Cell, row_cells) catch return false;
-    }
-    self.screen.sb.wrapped[idx] = wrapped_flag;
-    self.screen.sb.prompt_marks[idx] = mark;
-    if (self.screen.sb.count == cap) {
-        self.screen.sb.head = (self.screen.sb.head + 1) % cap;
-        // ring이 가득 차 가장 오래된 행이 밀려나면 절대 행 좌표가 한 칸 당겨진다 — 선택·placement
-        // anchor를 같이 보정한다(밀려난 행에 걸리면 선택 해제·placement 제거). count는 불변(ring-full)
-        // 이라 view_offset 클램프는 불필요.
-        self.shiftCoordsForEviction(1);
-    } else {
-        self.screen.sb.count += 1;
-    }
+    const was_full = self.screen.sb.cap > 0 and self.screen.sb.count == self.screen.sb.cap;
+    if (!self.screen.sb.pushRow(self.allocator, row_cells, wrapped_flag, mark)) return false;
+    if (was_full) self.shiftCoordsForEviction(1);
     return true;
 }
 

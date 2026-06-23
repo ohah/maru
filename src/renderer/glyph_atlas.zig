@@ -246,13 +246,23 @@ pub const GlyphAtlas = struct {
     /// 크기만 바꾼다 — 좌표(next_x/y)·캐시 비우기는 호출 흐름의 invalidate가 맡는다(grow→invalidate→
     /// 재시작 순서라 다음 패스가 커진 텍스처에 (0,0)부터 한 세대로 repack된다).
     pub fn grow(self: *GlyphAtlas) bool {
+        // **실제로 커졌을 때만 true.** 0-dim atlas(0*|2=0)나 doubling이 값을 못 올리는 경우 true를 주면,
+        // prepareGlyphFrame의 재시작 루프가 grow의 false에만 종료를 의존하므로 영원히 돈다(무한 루프).
+        // 0이 아닌 어떤 dim이든 doubling은 항상 증가하므로(또는 max로 clamp돼 증가), grown>현재 검사가
+        // 0-dim만 정확히 걸러 false를 돌려 루프가 degraded로 진행하게 한다(0-dim은 InvalidAtlasTextureSize 경로).
         if (self.config.atlas_height_px < self.config.max_atlas_height_px) {
-            self.config.atlas_height_px = @min(self.config.atlas_height_px *| 2, self.config.max_atlas_height_px);
-            return true;
+            const grown = @min(self.config.atlas_height_px *| 2, self.config.max_atlas_height_px);
+            if (grown > self.config.atlas_height_px) {
+                self.config.atlas_height_px = grown;
+                return true;
+            }
         }
         if (self.config.atlas_width_px < self.config.max_atlas_width_px) {
-            self.config.atlas_width_px = @min(self.config.atlas_width_px *| 2, self.config.max_atlas_width_px);
-            return true;
+            const grown = @min(self.config.atlas_width_px *| 2, self.config.max_atlas_width_px);
+            if (grown > self.config.atlas_width_px) {
+                self.config.atlas_width_px = grown;
+                return true;
+            }
         }
         return false;
     }
@@ -560,6 +570,25 @@ test "glyph atlas evicts the oldest slot when capacity is full" {
     try std.testing.expectEqual(a.slot.id, c.evicted.?.id);
     try std.testing.expectEqual(@as(usize, 2), atlas.entryCount());
     try std.testing.expectEqual(@as(usize, 1), atlas.stats.evictions);
+}
+
+test "glyph atlas grow() returns false when it cannot enlarge (0-dim 무한 루프 가드)" {
+    // 회귀: prepareGlyphFrame 재시작 루프는 grow()의 false에만 종료를 의존한다. 0-dim atlas는
+    // 0*|2=0이라 옛 grow()가 true를 줘 영원히 돌았다(state.zig의 InvalidAtlasTextureSize 경로). 이제
+    // 실제로 커졌을 때만 true → 0-dim은 false로 즉시 종료.
+    var zero = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 0, .atlas_height_px = 0 });
+    defer zero.deinit();
+    try std.testing.expect(!zero.grow()); // 못 키움 → false(무한 루프 안 함)
+
+    // 정상 atlas: max(8192)까지 유한 단계로 doubling 후 반드시 false(종료 보장).
+    var a = GlyphAtlas.init(std.testing.allocator, .{ .atlas_width_px = 1024, .atlas_height_px = 1024 });
+    defer a.deinit();
+    var trues: usize = 0;
+    while (a.grow()) : (trues += 1) {
+        try std.testing.expect(trues < 64); // 유한 종료(무한 루프 아님)
+    }
+    try std.testing.expectEqual(@as(u32, 8192), a.config.atlas_width_px);
+    try std.testing.expectEqual(@as(u32, 8192), a.config.atlas_height_px);
 }
 
 test "glyph atlas invalidation clears slots and records the reason" {

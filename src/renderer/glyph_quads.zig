@@ -60,25 +60,37 @@ pub fn uvRectForSlot(
     slot: glyph_atlas.AtlasSlot,
     texture_size: AtlasTextureSize,
 ) GlyphQuadError!GlyphUvRect {
-    // AtlasSlot은 pixel 좌표를 가진다. Metal/WebGPU shader는 0.0~1.0 UV를 쓰므로,
-    // 이 변환을 renderer domain에서 한 번만 정의한다. backend가 각자 나눗셈과 bounds
-    // check를 다시 만들면 slot overflow/scale bug가 platform마다 다르게 난다.
+    return uvRectForPx(slot.x_px, slot.y_px, slot.width_px, slot.height_px, texture_size);
+}
+
+/// pixel 좌표(rect) → 0.0~1.0 UV 변환의 **단일 출처**. Metal/WebGPU shader는 정규화 UV를 쓰므로,
+/// 이 나눗셈과 bounds check를 renderer domain에서 한 번만 정의한다 — backend가 각자 만들면 slot
+/// overflow/scale bug가 platform마다 다르게 난다. `uvRectForSlot`(AtlasSlot 경로)과 draw-time
+/// 재정규화(`metal_frame.renormalizeGlyphCellUvs` — 멀티 페인 grow 시 최종 dims로 다시 정규화)가
+/// 모두 이 함수를 쓴다.
+pub fn uvRectForPx(
+    x_px: u32,
+    y_px: u32,
+    width_px: u32,
+    height_px: u32,
+    texture_size: AtlasTextureSize,
+) GlyphQuadError!GlyphUvRect {
     if (texture_size.width_px == 0 or texture_size.height_px == 0) {
         return error.InvalidAtlasTextureSize;
     }
-    if (slot.width_px == 0 or slot.height_px == 0) {
+    if (width_px == 0 or height_px == 0) {
         return error.InvalidAtlasSlotSize;
     }
-    if (!slotFitsTexture(slot, texture_size)) {
+    if (!rangeFits(x_px, width_px, texture_size.width_px) or !rangeFits(y_px, height_px, texture_size.height_px)) {
         return error.AtlasSlotOutsideTexture;
     }
 
     const width_f: f32 = @floatFromInt(texture_size.width_px);
     const height_f: f32 = @floatFromInt(texture_size.height_px);
-    const x0: f32 = @floatFromInt(slot.x_px);
-    const y0: f32 = @floatFromInt(slot.y_px);
-    const x1: f32 = @floatFromInt(slot.x_px + slot.width_px);
-    const y1: f32 = @floatFromInt(slot.y_px + slot.height_px);
+    const x0: f32 = @floatFromInt(x_px);
+    const y0: f32 = @floatFromInt(y_px);
+    const x1: f32 = @floatFromInt(x_px + width_px);
+    const y1: f32 = @floatFromInt(y_px + height_px);
 
     return .{
         .u0 = x0 / width_f,

@@ -73,6 +73,21 @@ pub fn isConjoiningJamo(cp: u21) bool {
     return cp >= 0x1100 and cp <= 0x11FF;
 }
 
+/// UAX#29 GB11(이모지 ZWJ 시퀀스: `\p{Extended_Pictographic} Extend* ZWJ × \p{Extended_Pictographic}`)
+/// 판정용 그림문자 근사. ZWJ로 이어지는 base가 그림문자인지, ZWJ 뒤 글자가 그림문자인지 본다.
+/// width.zig "small first table" 철학대로 **흔한 이모지 블록만 큐레이션**한다 — 완전한 Extended_Pictographic
+/// 속성표는 fixture로 확장한다(font-strategy.md). 동그란 번호(0x2460~24FF, isWideRenderSymbol)는
+/// 그림문자가 아니라 이 범위에서 제외돼 skin-tone/ZWJ 흡수 대상이 안 된다.
+pub fn isExtendedPictographic(cp: u21) bool {
+    return switch (cp) {
+        0x2600...0x27BF, // Misc Symbols + Dingbats (❤ U+2764·☺·✊✋✌·✨·⚧ U+26A7 …)
+        0x2B00...0x2BFF, // Misc Symbols and Arrows (⭐ U+2B50·⬛⬜ …)
+        0x1F000...0x1FAFF, // 주요 이모지 블록(사람·가족·역할·손·물체 — ZWJ 가족 대부분 + 스킨톤·RI)
+        => true,
+        else => false,
+    };
+}
+
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
@@ -149,4 +164,19 @@ test "isConjoiningJamo: NFD 자모만 true, 완성형·ZWJ·일반문자는 fals
     try expect(!isConjoiningJamo(0xAC00)); // 완성형 '가' — 제 셀을 차지
     try expect(!isConjoiningJamo(0x200D)); // ZWJ — 폭 1, 제 경로
     try expect(!isConjoiningJamo('a'));
+}
+
+test "isExtendedPictographic: 이모지(가족·❤·손)는 true, 동그란 번호·일반문자는 false (GB11)" {
+    // 왜 중요: ZWJ 가족(👨‍👩‍👧) 잇기·스킨톤 흡수가 이 판정을 쓴다. 동그란 번호(③)는 ambiguous-wide지만
+    // 그림문자가 아니라 false여야 스킨톤/ZWJ를 안 빨아들인다.
+    try expect(isExtendedPictographic(0x1F468)); // 👨
+    try expect(isExtendedPictographic(0x1F469)); // 👩
+    try expect(isExtendedPictographic(0x1F91D)); // 🤝
+    try expect(isExtendedPictographic(0x2764)); // ❤ (text-default지만 ZWJ 합류 가능)
+    try expect(isExtendedPictographic(0x26A7)); // ⚧ (트랜스 깃발 ZWJ)
+    try expect(isExtendedPictographic(0x2B50)); // ⭐
+    try expect(!isExtendedPictographic(0x2462)); // ③ 동그란 번호 — 그림문자 아님
+    try expect(!isExtendedPictographic('a'));
+    try expect(!isExtendedPictographic(0xAC00)); // 완성형 한글
+    try expect(!isExtendedPictographic(0x200D)); // ZWJ 자체는 그림문자 아님
 }

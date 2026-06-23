@@ -5180,6 +5180,45 @@ test "mode 2027: skin tone and flags cluster only when on" {
     try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[14].codepoint); // 별도 셀
 }
 
+test "emoji ZWJ 시퀀스(GB11): 가족 이모지가 mode 2027에서 한 셀(폭 2)로 묶인다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[?2027h");
+    // 👨‍👩‍👧 = 👨(1F468) ZWJ 👩(1F469) ZWJ 👧(1F467). ZWJ로 이어진 가족은 한 글자(폭 2)다.
+    try core.write("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // 한 글자 = 2칸
+    try std.testing.expectEqual(@as(u21, 0x1F468), s.cells[0].codepoint); // base
+    try std.testing.expectEqual(@as(u2, 2), s.cells[0].width);
+    try std.testing.expect(s.cells[1].continuation);
+    try std.testing.expect(s.cells[0].grapheme_id != 0);
+    try expectCluster(&core, s.cells[0].grapheme_id, &.{ 0x200D, 0x1F469, 0x200D, 0x1F467 });
+
+    // dump 무손실: 전체 ZWJ 시퀀스가 복원된다(클립보드·재출력 — 잘림 금지).
+    const text = try core.dumpUtf8(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}") != null);
+
+    // 2027 off면 ZWJ가 안 묶여 별도 셀(가족이 흩어짐 — 앱과 폭 합의 없음).
+    try core.write("\x1b[?2027l\r\n\u{1F468}\u{200D}\u{1F469}");
+    try std.testing.expectEqual(@as(u21, 0x1F468), core.screen.cells[8].codepoint);
+    try expectCluster(&core, core.screen.cells[8].grapheme_id, &.{}); // 묶지 않음
+}
+
+test "emoji ZWJ + 스킨톤: 사람마다 스킨톤이 다른 가족도 한 셀로 (통합 경로)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    try core.write("\x1b[?2027h");
+    // 🧑🏻‍🤝‍🧑🏽 = 🧑(1F9D1) 🏻(1F3FB) ZWJ 🤝(1F91D) ZWJ 🧑(1F9D1) 🏽(1F3FD).
+    // 둘째 사람의 스킨톤(🏽)은 grapheme_id가 이미 있는 cluster에 붙는다 — lone 제한 없이 흡수돼야
+    // 가족 전체가 한 셀로 모인다(통합 경로의 핵심: skin-tone이 non-lone 그림문자 cluster에도 붙음).
+    try core.write("\u{1F9D1}\u{1F3FB}\u{200D}\u{1F91D}\u{200D}\u{1F9D1}\u{1F3FD}");
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // 한 글자 = 2칸
+    try std.testing.expectEqual(@as(u21, 0x1F9D1), s.cells[0].codepoint);
+    try expectCluster(&core, s.cells[0].grapheme_id, &.{ 0x1F3FB, 0x200D, 0x1F91D, 0x200D, 0x1F9D1, 0x1F3FD });
+}
+
 test "DECRQM reports mode 2027 state so apps can detect support" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();

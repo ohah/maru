@@ -60,14 +60,11 @@ pub const Cell = struct {
     style: Style = .{},
     width: u2 = 1,
     continuation: bool = false,
-    // base(codepoint) 뒤에 붙는 grapheme cluster 본체(NFD 한글 V/T·다중 combining·ZWJ 시퀀스).
-    // grapheme_id(0=없음)가 TerminalCore.grapheme_store의 코드포인트 배열을 가리킨다 —
-    // link/link_store와 동형(셀엔 id만, 본체는 store에). 긴 cluster도 무손실(잘림 없음).
+    // base(codepoint) 뒤에 붙는 grapheme cluster 본체(악센트·VS16·NFD 한글 V/T·키캡·ZWJ 시퀀스).
+    // grapheme_id(0=없음)가 TerminalCore.grapheme_store의 코드포인트 배열을 가리킨다 — link/link_store와
+    // 동형(셀엔 id만, 본체는 store에). extra가 1개든 N개든 전부 여기로(pure-B, 단일 출처) — 긴 cluster도
+    // 무손실. (단일 extra가 반복돼 누적되면 회수/dedup은 측정 후 후속, 설계 §5 HG3b.)
     grapheme_id: u32 = 0,
-    // 단일 extra(combining 1개)의 잠정 그림자(HG2a). grapheme_id가 있을 땐 store가 권위이고
-    // combining은 첫 extra의 사본이라 무시한다(렌더 back-compat용 — HG2b에서 제거). grapheme_id가
-    // 0이면 이 필드가 0개/1개 extra의 단일 출처다(악센트·VS16 등 흔한 단일 결합은 store 비용 0).
-    combining: ?u21 = null,
     // OSC 8 하이퍼링크 id(0=없음). URI 자체는 TerminalCore.link_store에 한 번만 저장하고
     // 셀은 id만 든다 — 링크가 걸린 긴 출력에서도 셀 메모리가 URI 길이에 비례하지 않는다.
     link: u32 = 0,
@@ -123,16 +120,15 @@ pub const ShellEvent = union(enum) {
 /// exactly one place instead of being re-derived per consumer — and stays
 /// lossless (clipboard/re-output get every codepoint, not just the first).
 ///
-/// `graphemes` is `TerminalCore.grapheme_store.items` (id-1 indexed). When it
-/// is empty (default) or a cell's `grapheme_id` is 0, the iterator falls back
-/// to the single `combining` shadow — so legacy callers that only pass `cells`
-/// keep their old base+combining behavior.
+/// `graphemes` is `TerminalCore.grapheme_store.items` (id-1 indexed) — the
+/// single source for every cell's extra codepoints. A cell with `grapheme_id`
+/// 0 has no extras (just its base). Callers that consume row text MUST pass
+/// `graphemes`, else cluster bodies are dropped.
 pub const RowCodepoints = struct {
     cells: []const Cell,
     graphemes: []const []const u21 = &.{},
     col: usize = 0,
     pending: []const u21 = &.{}, // grapheme_id store 슬라이스의 아직 안 내보낸 꼬리
-    pending_combining: ?u21 = null, // grapheme_id 없을 때의 단일 combining
 
     pub fn next(self: *RowCodepoints) ?u21 {
         if (self.pending.len > 0) {
@@ -140,21 +136,13 @@ pub const RowCodepoints = struct {
             self.pending = self.pending[1..];
             return cp;
         }
-        if (self.pending_combining) |combining| {
-            self.pending_combining = null;
-            return combining;
-        }
         while (self.col < self.cells.len) {
             const cell = self.cells[self.col];
             self.col += 1;
             if (cell.continuation) continue;
+            // store가 cluster 본체의 단일 출처 — id가 있으면 base 뒤에 그 전체를 내보낸다.
             if (cell.grapheme_id != 0 and cell.grapheme_id <= self.graphemes.len) {
-                // store가 권위 — cluster 본체 전체를 내보낸다(combining 그림자는 무시).
                 self.pending = self.graphemes[cell.grapheme_id - 1];
-                self.pending_combining = null;
-            } else {
-                self.pending = &.{};
-                self.pending_combining = cell.combining;
             }
             return cell.codepoint;
         }

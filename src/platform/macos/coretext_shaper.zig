@@ -20,14 +20,12 @@ pub const NativeDrawCell = extern struct {
     // 스타일 플래그(비트필드). bit0(draw_cell_bold_bit)=bold. native MaruCoreTextDrawCell.style_flags와 동일.
     style_flags: u16 = 0,
     codepoint: u32,
-    // 단일 combining 그림자(폴백·색판정용). grapheme_count>0이면 셰이퍼는 풀을 권위로 보고 이 값을 무시한다.
-    combining: u32,
-    // grapheme cluster 본체(base 뒤 extra 코드포인트)를 shape 호출의 grapheme_pool에서 가리킨다 —
-    // [grapheme_offset, grapheme_offset+grapheme_count). count>0이면 base 뒤에 풀의 코드포인트를 모두
-    // 붙여 cluster 전체를 셰이핑한다(NFD 한글 종성·다중 악센트·키캡 무손실). 0이면 combining 폴백.
+    // grapheme cluster 본체(base 뒤 extra 코드포인트 — 악센트·VS16·NFD 한글 V/T·키캡·ZWJ)를 shape
+    // 호출의 grapheme_pool에서 가리킨다 — [grapheme_offset, grapheme_offset+grapheme_count). count>0이면
+    // base 뒤에 풀의 코드포인트를 모두 붙여 cluster 전체를 셰이핑한다(무손실). 0이면 extra 없음.
     grapheme_offset: u32 = 0,
     grapheme_count: u16 = 0,
-    reserved: u16 = 0, // 24바이트 정렬 패딩(ObjC MaruCoreTextDrawCell와 동형 레이아웃)
+    reserved: u16 = 0, // 20바이트 정렬 패딩(ObjC MaruCoreTextDrawCell와 동형 레이아웃)
 };
 
 pub const NativeDrawGlyphRecord = extern struct {
@@ -37,7 +35,6 @@ pub const NativeDrawGlyphRecord = extern struct {
     cell_width: u16,
     reserved: u16 = 0,
     codepoint: u32,
-    combining: u32,
     glyph_id: u32,
     drawable: u32,
     fallback: u32,
@@ -192,7 +189,6 @@ fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell) NativeDrawCell {
         .width = cell.width,
         .style_flags = (if (cell.style.bold) draw_cell_bold_bit else 0) | (if (cell.style.italic) draw_cell_italic_bit else 0),
         .codepoint = cell.codepoint,
-        .combining = cell.combining orelse 0,
         .grapheme_offset = cell.grapheme_offset,
         .grapheme_count = cell.grapheme_count,
     };
@@ -205,7 +201,6 @@ fn emptyNativeDrawGlyphRecord() NativeDrawGlyphRecord {
         .col = 0,
         .cell_width = 0,
         .codepoint = 0,
-        .combining = 0,
         .glyph_id = 0,
         .drawable = 0,
         .fallback = 0,
@@ -221,7 +216,6 @@ fn coreTextGlyphRecordFromDrawRecord(
     if (record.cell_index >= cells.len) return error.CoreTextDrawListRecordOutsideInput;
     if (record.cell_width > 2) return error.CoreTextDrawListInvalidCellWidth;
     if (record.codepoint > std.math.maxInt(u21)) return error.CoreTextDrawListInvalidCodepoint;
-    if (record.combining > std.math.maxInt(u21)) return error.CoreTextDrawListInvalidCodepoint;
 
     const source_cell = cells[@intCast(record.cell_index)];
     return .{
@@ -229,7 +223,6 @@ fn coreTextGlyphRecordFromDrawRecord(
         .col = record.col,
         .cell_width = @intCast(record.cell_width),
         .codepoint = @intCast(record.codepoint),
-        .combining = if (record.combining == 0) null else @intCast(record.combining),
         .glyph_id = record.glyph_id,
         .font_name = coretext_probe.cStringField(&record.font_name),
         .fallback = record.fallback != 0,
@@ -328,7 +321,6 @@ pub fn buildProbeDrawListFromCoreTextGlyphs(
             .row = record.row,
             .col = record.col,
             .codepoint = record.codepoint,
-            .combining = record.combining,
             .width = record.cell_width,
             .style = record.style,
         });
@@ -525,7 +517,7 @@ fn fakeShapeDrawList(
     _: usize, // italic family len
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
-    _: [*]const u32, // grapheme_pool ptr (fake shaper는 combining 그림자만 본다)
+    _: [*]const u32, // grapheme_pool ptr (fake shaper는 풀 미사용 — codepoint 기반 색판정)
     _: usize, // grapheme_pool_len
     result: *NativeDrawListShapeResult,
     records_ptr: [*]NativeDrawGlyphRecord,
@@ -559,7 +551,6 @@ fn fakeShapeDrawList(
         record.col = cell.col;
         record.cell_width = cell.width;
         record.codepoint = cell.codepoint;
-        record.combining = cell.combining;
         record.glyph_id = cell.codepoint + 100;
         record.drawable = 1;
         record.fallback = if (fallback) 1 else 0;
@@ -652,8 +643,8 @@ test "CoreText draw list native ABI sizes stay aligned" {
     // 이 테스트는 Objective-C bridge와 Zig가 같은 메모리 레이아웃을 본다는 계약이다.
     // 필드 하나가 추가되거나 순서가 바뀌면 glyph id나 font name을 엉뚱한 위치에서 읽게
     // 되므로, 실제 CoreText smoke가 깨지기 전에 unit test에서 먼저 실패해야 한다.
-    try std.testing.expectEqual(@as(usize, 24), @sizeOf(NativeDrawCell));
-    try std.testing.expectEqual(@as(usize, 164), @sizeOf(NativeDrawGlyphRecord));
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(NativeDrawCell));
+    try std.testing.expectEqual(@as(usize, 160), @sizeOf(NativeDrawGlyphRecord));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeDrawListShapeResult));
 }
 
@@ -676,7 +667,6 @@ test "CoreText draw list shaper preserves DrawList metadata and styles" {
             .row = 1,
             .col = 0,
             .codepoint = 'A',
-            .combining = 0x0301,
             .width = 1,
             .style = .{ .bold = true, .underline = true },
         },
@@ -710,7 +700,7 @@ test "CoreText draw list shaper preserves DrawList metadata and styles" {
     try std.testing.expectEqual(@as(usize, 2), shaped.runs.overlays.len);
     try std.testing.expectEqual(@as(usize, 2), shaped.runs.glyphs.len);
     try std.testing.expectEqual(@as(usize, 2), registry.count());
-    try std.testing.expectEqual(@as(?u21, 0x0301), shaped.runs.glyphs[0].combining);
+    try std.testing.expectEqual(@as(u21, 'A'), shaped.runs.glyphs[0].codepoint);
     try std.testing.expect(shaped.runs.glyphs[0].style.bold);
     try std.testing.expect(shaped.runs.glyphs[0].style.underline);
     try std.testing.expect(shaped.runs.glyphs[0].cache_key.style.bold);

@@ -47,12 +47,10 @@ typedef struct {
     // 스타일 플래그(비트필드). bit0(MaruDrawCellBoldBit)=bold. Zig NativeDrawCell.style_flags와 동형.
     uint16_t style_flags;
     uint32_t codepoint;
-    // 단일 combining 그림자(폴백·색판정용). grapheme_count>0이면 무시하고 풀을 권위로 본다.
-    uint32_t combining;
-    // grapheme cluster 본체(base 뒤 extra 코드포인트)를 shape 인자 grapheme_pool에서 가리킨다 —
-    // [grapheme_offset, grapheme_offset+grapheme_count). count>0이면 base 뒤에 풀의 코드포인트를 모두
-    // 붙여 cluster 전체를 셰이핑한다(NFD 한글 종성·다중 악센트·키캡 무손실). 0이면 combining 폴백.
-    // Zig NativeDrawCell와 24바이트 동형(grapheme_offset u32 + grapheme_count u16 + reserved u16).
+    // grapheme cluster 본체(base 뒤 extra 코드포인트 — 악센트·VS16·NFD 한글 V/T·키캡·ZWJ)를 shape
+    // 인자 grapheme_pool에서 가리킨다 — [grapheme_offset, grapheme_offset+grapheme_count). count>0이면
+    // base 뒤에 풀의 코드포인트를 모두 붙여 cluster 전체를 셰이핑한다(무손실). 0이면 extra 없음.
+    // Zig NativeDrawCell와 20바이트 동형(grapheme_offset u32 + grapheme_count u16 + reserved u16).
     uint32_t grapheme_offset;
     uint16_t grapheme_count;
     uint16_t reserved;
@@ -70,7 +68,6 @@ typedef struct {
     uint16_t cell_width;
     uint16_t reserved;
     uint32_t codepoint;
-    uint32_t combining;
     uint32_t glyph_id;
     uint32_t drawable;
     uint32_t fallback;
@@ -532,53 +529,33 @@ static CFStringRef maru_create_string_for_draw_cell(
     const uint32_t *grapheme_pool,
     size_t grapheme_pool_len
 ) {
-    // cluster 본체가 있으면(grapheme_count>0) base 뒤에 풀의 코드포인트를 모두 붙여 cluster 전체를
-    // 셰이핑한다 — 길이 제한 없이 무손실(NFD 한글 종성·다중 악센트·키캡 base+VS16+U+20E3). 단일
-    // combining 슬롯의 손실(키캡 VS16 덮임·다중 악센트 마지막만) 보정. 가변 길이라 CFMutableString 사용.
-    if (cell.grapheme_count > 0 &&
-        (size_t)cell.grapheme_offset + (size_t)cell.grapheme_count <= grapheme_pool_len) {
-        CFMutableStringRef str = CFStringCreateMutable(kCFAllocatorDefault, 0);
-        if (str == NULL) {
-            return NULL;
-        }
-        UniChar scalar[2];
-        CFIndex base_len = 0;
-        if (!maru_append_utf16_scalar(cell.codepoint, scalar, &base_len, 2)) {
-            CFRelease(str);
-            return NULL;
-        }
-        CFStringAppendCharacters(str, scalar, base_len);
-        for (uint16_t i = 0; i < cell.grapheme_count; i++) {
-            CFIndex n = 0;
-            if (maru_append_utf16_scalar(grapheme_pool[cell.grapheme_offset + i], scalar, &n, 2)) {
-                CFStringAppendCharacters(str, scalar, n);
-            }
-        }
-        return str;
-    }
-
-    UniChar units[4];
-    CFIndex len = 0;
-    if (!maru_append_utf16_scalar(cell.codepoint, units, &len, 4)) {
+    // base + cluster 본체(grapheme_pool)를 그대로 CoreText에 넘긴다 — 악센트·VS16·NFD 한글 V/T·키캡
+    // (base+VS16+U+20E3)이 store에 온전히 담겨 있어, 단일 combining 슬롯 시절의 VS16 재주입 같은 보정이
+    // 필요 없다(원본 시퀀스 그대로 셰이핑). 키캡은 풀에 VS16이 들어 있어 CoreText가 컬러 키캡을 고른다.
+    UniChar base_units[2];
+    CFIndex base_len = 0;
+    if (!maru_append_utf16_scalar(cell.codepoint, base_units, &base_len, 2)) {
         return NULL;
     }
-    if (cell.combining != 0) {
-        // 키캡 이모지(2️⃣ = base + VS16 + U+20E3)는 코드포인트 3개지만, maru 셀은 combining을 하나만
-        // 저장해 VS16(U+FE0F)이 U+20E3에 덮여 사라진다. VS16 없이 'base + U+20E3'만 주면 CoreText가
-        // AppleColorEmoji 대신 텍스트 폰트(LucidaGrande)로 폴백해 얇은 테두리 박스로 그린다(컬러 키캡 X).
-        // U+20E3(COMBINING ENCLOSING KEYCAP)은 항상 키캡 이모지 시퀀스에서만 쓰이므로 VS16을 재주입해
-        // 'base + VS16 + U+20E3' 온전한 시퀀스를 만든다 → CoreText가 AppleColorEmoji 단일 글리프(예: 키캡-2)를
-        // 골라 rasterizer(CTFontDrawGlyphs)가 컬러 키캡을 그린다. units[4]에 base(1)+VS16(1)+keycap(1) 들어간다.
-        // 이 'U+20E3 ⇒ 키캡(VS16 재주입)' 가정의 Zig측 단일 출처는 width.isKeycapCombining이다(metal_frame.isColorGlyph가
-        // 컬러로 인정하고 core.appendRowUtf8가 복사 시 VS16을 재주입한다 — 단일-combining 셀 모델을 셋이 같이 보정).
-        if (cell.combining == 0x20E3 && !maru_append_utf16_scalar(0xFE0F, units, &len, 4)) {
-            return NULL;
-        }
-        if (!maru_append_utf16_scalar(cell.combining, units, &len, 4)) {
-            return NULL;
+    // extra 없음(또는 범위 밖) — base 한 글자. 대부분의 셀이라 빠른 경로(할당 1회)로 둔다.
+    if (cell.grapheme_count == 0 ||
+        (size_t)cell.grapheme_offset + (size_t)cell.grapheme_count > grapheme_pool_len) {
+        return CFStringCreateWithCharacters(kCFAllocatorDefault, base_units, base_len);
+    }
+    // cluster — 가변 길이라 CFMutableString으로 base 뒤에 풀 전체를 무손실 append.
+    CFMutableStringRef str = CFStringCreateMutable(kCFAllocatorDefault, 0);
+    if (str == NULL) {
+        return NULL;
+    }
+    CFStringAppendCharacters(str, base_units, base_len);
+    for (uint16_t i = 0; i < cell.grapheme_count; i++) {
+        UniChar scalar[2];
+        CFIndex n = 0;
+        if (maru_append_utf16_scalar(grapheme_pool[cell.grapheme_offset + i], scalar, &n, 2)) {
+            CFStringAppendCharacters(str, scalar, n);
         }
     }
-    return CFStringCreateWithCharacters(kCFAllocatorDefault, units, len);
+    return str;
 }
 
 static bool maru_validate_raster_request(
@@ -783,7 +760,6 @@ static void maru_append_draw_glyph_record(
     record->cell_width = cell.width;
     record->reserved = 0;
     record->codepoint = cell.codepoint;
-    record->combining = cell.combining;
     // synth는 codepoint로 합성하므로 폰트 glyph_id는 무의미하다. 0으로 정규화해 downstream(cache_key)이
     // codepoint로 키잉하게 한다(glyph_id!=0이면 폰트 glyph_id로 키잉되어 중복/aliasing). 비-synth는 그대로.
     record->glyph_id = synth ? 0 : (uint32_t)glyph;

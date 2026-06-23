@@ -181,7 +181,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 - **HG2b — combining 경로의 무손실 저장 이전(순수 Zig)**: 다중 combining 마크(악센트 2개 이상)와 키캡(`base+VS16+U+20E3`)을 `grapheme_store`에 누적 저장해, **둘째 mark부터 잃던 데이터**를 dump·복사·snapshot이 무손실로 보존하게 한다(`attachCombiningMark` 일반화). `Cell.combining`은 렌더 그림자(현행대로 **마지막 mark**)로 유지해 **동작 보존**(기존 이모지/키캡 테스트 green 유지가 합격선). renderer·ObjC·hack은 손대지 않아 Linux CI로 닫힌다. (VS16·skin-tone·국기는 extra가 1개뿐이라 이미 combining만으로 무손실 — 키캡과 다중 악센트만 store로 승격된다.)
 - **HG3a — 렌더·셰이핑 통합 + ObjC ABI(cluster 풀)**: `DrawList.grapheme_pool` + `DrawCell.grapheme_offset/count`(buildDrawList가 `snapshot.graphemes`로 적재), `NativeDrawCell`/`MaruCoreTextDrawCell`에 풀 참조 추가(shape fn에 grapheme_pool 인자), `maru_create_string_for_draw_cell`이 base 뒤에 풀 전체를 CFMutableString으로 무손실 append → CoreText가 NFD 한글 종성·다중 악센트·키캡을 합성. `Cell.combining`은 단일-extra 폴백/색판정 그림자로 잠정 유지. 검증: 실제 CoreText에서 NFD '한'이 완성형 '한'과 동일 glyph_id(폰트 무관).
 - **HG3b — `Cell.combining`·단일-combining hack 제거(pure-B)**: producer가 단일 extra도 `grapheme_store`에 담아(combining 그림자 폐지), `Cell.combining`과 renderer 체인(`DrawCell`/`GlyphRun`/`ShapedGlyphRecord`/`NativeDrawCell`/`CoreTextGlyphRecord`)의 combining 필드, 보정 hack 3곳(`isColorGlyph`는 셰이퍼가 주는 `color_glyph_kind`로 대체·셰이퍼 VS16 재주입·`selection` 복사)과 `width.isKeycapCombining`을 제거한다. 메모리 근거: 단일 combining을 store에 담는 비용은 셀당 ~수십 바이트·append-only로 `link_store`/HG2b와 같은 프로파일이라 실사용에서 무시할 수준 — 컨벤션(`architecture.md` 메모리 전략: "성급한 최적화 금지")상 dual-path보다 단순 균일 모델이 옳다. 회수(refcount)·단일-mark dedup은 측정 후 후속.
-- **HG4 — 검증·fixture**: NFD `ls` 시나리오·옛한글·정렬(vim/tmux/htop) fixture-oracle + 실제 렌더 캡처.
+- **HG4 — 검증·fixture**: NFD `ls` 시나리오 recorded-oracle fixture(`tests/fixtures/ansi/nfd_hangul.ansi` ↔ `tests/golden/screen/xterm/nfd_hangul.txt`, `tests/oracle/recorded.zig`의 `nfd_hangul` 케이스) — NFD '한글'이 음절당 한 셀(width 2)로 묶여 dumpUtf8가 자모 6개를 무손실 복원하는지 maru-vs-golden으로 고정. 외부 oracle(libvterm/Alacritty)은 conjoining 자모를 다르게 다룰 수 있어 `cases.zig`가 아니라 recorded로만 둔다(§6). 실제 CoreText 합성은 `test-macos-coretext-smoke`가 NFD '한'≡완성형 '한' glyph로 이미 고정(HG3a). 픽셀 PNG 캡처는 폰트 의존이라 visible 앱 수동 절차로 둔다(§6).
 
 각 단계는 작은 PR로 진행한다(progressive enhancement). 베이스 = UAX#29(공개 명세), Ghostty는 동작 비교만(clean-room).
 
@@ -189,8 +189,9 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 - **코어 단위(순수 Zig, Linux CI)**: NFD 자모 시퀀스 → cluster 분절·개수·폭 단언. 현대 한글·옛한글·자모 + combining 혼합·경계(초성만, 중성 없는 시퀀스)·이모지 ZWJ/skin-tone가 같은 cluster 경로를 타는지.
 - **저장 round-trip**: cluster 셀을 `appendRowUtf8`로 복사·trace/snapshot 직렬화 후 코드포인트가 보존되는지(다중 자모 손실 없음).
-- **오라클**: 같은 NFD 입력에서 Maru와 레퍼런스(Ghostty/Terminal.app)의 **화면 동작**(셀 점유·정렬) 비교. 코드는 보지 않는다.
-- **렌더 캡처**: macOS opt-in smoke로 NFD `ls` 출력의 음절 결합·폭 정렬을 RGBA 덤프→PNG로 확인(자동 비교는 폰트 의존이라 기본 CI 제외, 수동 검증 절차 기록).
+- **오라클(recorded, CI)**: `nfd_hangul` recorded 케이스가 NFD '한글' 입력의 maru dumpUtf8를 golden과 비교(무손실 round-trip). 같은 비교가 snapshot 아티팩트(`tests/artifacts/oracle/nfd_hangul/maru.snapshot.txt`)에 음절당 width 2 + cluster(`grapheme=U+1161,U+11AB` 등)를 남겨 셀 점유·폭을 기록한다. 외부 oracle은 NFD 클러스터가 maru/Ghostty 동작이라 recorded로만 둔다(libvterm/Alacritty는 자모 분절이 다를 수 있음).
+- **셰이핑(macOS, 실 CoreText)**: `test-macos-coretext-smoke`가 NFD '한'을 grapheme_pool로 셰이핑해 완성형 '한'과 **동일 glyph_id+font_id**임을 확인 — 같은 글리프 ⇒ 동일 래스터 픽셀이므로, 단일 스크린샷보다 폰트-견고하게 렌더 정확성을 고정한다.
+- **렌더 캡처(수동)**: 최종 화면 픽셀은 폰트/AA 의존이라 자동 비교 대신 visible 앱(macOS)에서 NFD 한글 폴더 `ls` 출력을 RGBA 덤프→PNG로 캡처해 사람이 음절 결합·정렬을 확인한다(기본 CI 제외).
 - [검증 매트릭스](verification-matrix.md)의 `wide-character` 항목에 NFD 한글 cluster 케이스를 추가한다.
 
 ## 7. 잔여와 후속

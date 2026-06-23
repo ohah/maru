@@ -60,6 +60,23 @@ test "recorded terminal oracle snapshots match Maru output" {
                 },
             },
         },
+        .{
+            // macOS 파일명 NFD 시나리오(HG4): `ls`가 '한글'을 conjoining 자모(초성 U+1112·중성 U+1161·
+            // 종성 U+11AB / U+1100·U+1173·U+11AF)로 보낸다. 두 음절이 각각 한 셀(width 2)로 묶여 cols=4에
+            // 꼭 맞고, dumpUtf8가 원본 NFD 자모 6개를 무손실로 복원한다(잘림 금지 — 클립보드·재출력 일치).
+            // 외부 oracle(libvterm/Alacritty)은 conjoining 자모를 다르게 다룰 수 있어 cases.zig가 아니라
+            // maru-vs-golden(recorded)으로만 고정한다(설계 §6 — NFD 클러스터는 maru/Ghostty 동작).
+            .name = "nfd_hangul",
+            .size = .{ .cols = 4, .rows = 1 },
+            .input_fixture_path = "tests/fixtures/ansi/nfd_hangul.ansi",
+            .oracles = &.{
+                .{
+                    .name = "xterm-compatible",
+                    .source = "recorded expectation for NFD Hangul conjoining jamo clustered into syllable cells",
+                    .expected_screen = "tests/golden/screen/xterm/nfd_hangul.txt",
+                },
+            },
+        },
     };
 
     inline for (cases) |case| {

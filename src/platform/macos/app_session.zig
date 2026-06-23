@@ -7666,7 +7666,12 @@ pub const AppSession = struct {
     /// 보낸 것이라 사용자가 이미 그 화면을 보고 있을 가능성이 커 false — 전면이면 배너 없이 알림 센터 목록에만 남긴다
     /// (자기 화면 알림 노이즈 억제). "전면에서 배너를 띄울지"는 알림 종류가 결정하는 정책이라 Zig가 정하고, 실제
     /// 표시 스타일 적용은 Swift willPresent(OS 표면)가 한다(경계).
-    pub fn pendingNotification(self: *AppSession) ?struct { title: []const u8, body: []const u8, surface_id: u64, foreground_banner: bool } {
+    /// pendingNotification/drainOscNotificationFrom 공유 반환 타입 — Zig는 동일 필드 익명 struct도 서로 다른 타입으로
+    /// 봐서 두 함수가 같은 익명 struct를 못 쓰므로 named로 둔다. surface_id로 클릭 점프(activateSurfaceById), foreground_banner는
+    /// 전면 배너 여부(에이전트=1, OSC=0). Swift ABI 래퍼(app_host_abi.zig)가 필드를 out 인자로 꺼낸다.
+    pub const PendingNotification = struct { title: []const u8, body: []const u8, surface_id: u64, foreground_banner: bool };
+
+    pub fn pendingNotification(self: *AppSession) ?PendingNotification {
         // 에이전트 완료 알림(running→idle)을 OSC 9/777보다 먼저 드레인한다 — 큐의 owned 버퍼를 그대로 반환하고
         // 직전 반환 버퍼는 여기서 해제(다음 pendingNotification/destroy까지 유효 규약은 동일).
         if (self.agent_notifications.items.len > 0) {
@@ -7680,15 +7685,39 @@ pub const AppSession = struct {
             return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = n.surface_id, .foreground_banner = true };
         }
         if (!self.surface_initialized) return null;
-        // OSC 9/777은 활성 surface의 코어가 파싱했으므로(아래 activeSurface().core 드레인) 발신 surface=활성 surface.
-        // 그 id를 알림 식별자에 실어 클릭이 이 터미널로 점프하게 한다.
-        const osc_surface_id = self.activeSurface().id;
-        const pending = self.activeSurface().core.pendingNotification() orelse return null;
-        // config notifications.osc=false면 OSC 9/777 알림을 끈다 — 코어 pending만 비우고(다음 tick 재발화 방지) 띄우지
-        // 않는다(데스크톱 배너·인앱 센터 둘 다 안 만듦). 에이전트 완료(enqueueAgentCompletion의 agent_complete 게이트)와
-        // 대칭: 종류별 on/off를 각 발화 지점에서 단일하게 막는다.
+        // OSC 9/777: 발신 surface의 코어가 자기 시퀀스를 파싱한다(reader 스레드가 core_mutex 아래 적용). 예전엔
+        // activeSurface().core만 drain해 **비활성 pane/Term이 보낸 OSC 알림이 영영 안 나왔다** — 모든 Term의 코어를
+        // 훑어 첫 pending을 그 surface.id로 실어 보낸다(클릭이 발신 Term으로 점프, activateSurfaceById). 한 호출에
+        // 하나씩 drain하므로 여러 surface가 동시에 pending이면 다음 tick들에 이어 나온다(에이전트 큐 drain과 같은 결).
+        // 전면 배너 결정용: 사용자가 지금 그 안에 있는 Term(포커스 창의 활성 탭·pane·Term). 발신 Term이 이것이면 OSC
+        // 배너를 전면에서 억제(목록만), 그 외 background pane/가로탭/비활성 탭이면 전면에서도 배너(에이전트 is_current 대칭).
+        const focused_term: ?*Term = if (self.window_focused) self.activeTab().activePane().activeTerm() else null;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (!term.live_initialized or term.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
+                    if (self.drainOscNotificationFrom(term, focused_term)) |n| return n;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// 한 Term의 코어에 쌓인 OSC 9/777 데스크톱 알림을 drain한다(있으면 그 알림, 없으면 null). reader 스레드가
+    /// core_mutex 아래 notification_pending/title/body를 세우므로 **lockCore 아래에서 읽고 owned 버퍼로 복사**한다
+    /// (pendingNotification 반환 슬라이스는 코어 메모리를 가리켜, 락 없이 들고 dupe하면 reader가 clearNotification으로
+    /// 비우는 사이 torn read가 난다 — focusedTermCwd와 같은 함정). 반환 슬라이스는 self.notification_*_out 소유라
+    /// 락 밖에서도 유효하다. config notifications.osc=false면 pending만 비우고(다음 tick 재발화 방지) null — 호출 루프가
+    /// 다음 surface로 넘어가 모든 pending을 정리한다(종류별 on/off를 발화 지점에서 단일하게 막는 정책, 에이전트와 대칭).
+    /// dupe 실패도 pending을 비우고 null(best-effort). 인앱 히스토리에도 dupe 보관한다(OSC라 is_agent=false).
+    /// `focused_term`=지금 보고 있는 그 Term(없으면 null=창 비포커스) — 발신 Term이 이것이면 foreground_banner=false
+    /// (전면에서 자기 화면 노이즈 억제, 목록만), 그 외면 true(전면이어도 배너). 에이전트 완료 is_current 게이트와 대칭.
+    fn drainOscNotificationFrom(self: *AppSession, term: *Term, focused_term: ?*Term) ?PendingNotification {
+        term.surface.lockCore(self.io);
+        defer term.surface.unlockCore(self.io);
+        const pending = term.surface.core.pendingNotification() orelse return null;
         if (!self.loaded_config.config.notifications.osc) {
-            self.activeSurface().core.clearNotification();
+            term.surface.core.clearNotification();
             return null;
         }
         if (self.notification_title_out.len > 0) {
@@ -7701,19 +7730,22 @@ pub const AppSession = struct {
         }
         // title은 빈 문자열일 수 있다(OSC 9). dupe가 실패하면 그 알림은 버린다(best-effort, 코어 pending은 비운다).
         self.notification_title_out = self.allocator.dupe(u8, pending.title) catch {
-            self.activeSurface().core.clearNotification();
+            term.surface.core.clearNotification();
             return null;
         };
         self.notification_body_out = self.allocator.dupe(u8, pending.body) catch {
             self.allocator.free(self.notification_title_out);
             self.notification_title_out = &.{};
-            self.activeSurface().core.clearNotification();
+            term.surface.core.clearNotification();
             return null;
         };
-        self.activeSurface().core.clearNotification();
-        // 인앱 히스토리에도 보관(OSC 9/777이라 is_agent=false).
+        term.surface.core.clearNotification();
+        const osc_surface_id = term.surface.id;
+        // 발신 Term이 지금 보고 있는 그 Term이면 전면 배너 억제(목록만), 그 외(background pane/가로탭/비활성 탭)면 배너.
+        const fg_banner = !(focused_term != null and term == focused_term.?);
+        // 코어 락을 든 채지만 pushNotificationHistory는 코어를 안 만져(히스토리 ring + alloc) 데드락이 없다.
         self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id, false);
-        return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = false };
+        return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = fg_banner };
     }
 
     /// 인앱 알림 센터 히스토리에 한 건 보관한다(title/body dupe — pendingNotification이 드레인하는 owned 버퍼와
@@ -8893,42 +8925,69 @@ pub const AppSession = struct {
         if (self.agent_poll_ticks < agent_poll_interval_ticks) return;
         self.agent_poll_ticks = 0;
         if (!self.surface_initialized) return;
-        // 사이드바가 보여주는 건 워크스페이스별 **활성 pane의 활성 Term** 하나뿐이라(buildSidebarTitleFrame), 그 Term만
-        // poll한다 — 모든 split pane·백그라운드 Term까지 poll하면 syscall이 Term 수로 불어나고, 안 보이는 Term의 agent_kind
-        // 변화가 metal_dirty를 올려 동일 프레임을 헛 재렌더한다(code-review 지적). 활성 Term은 전환 후 ≤0.5s 안에 갱신.
+        // **모든 pane × 모든 Term**을 poll한다 — background split pane·가로탭(Term)에서 끝난 에이전트도 완료 알림을
+        // 내고, 클릭이 그 Term으로 점프하려면(activateSurfaceById) 발신 Term의 surface_id가 필요하기 때문이다. 예전엔
+        // 탭당 활성 pane의 활성 Term 하나만 poll해(사이드바가 그 Term만 보여줘서), 비활성 pane/Term에서 끝난 에이전트는
+        // 완료 알림 자체가 안 났고 docs/notifications.md "split panel+가로탭까지 포커스" 능력이 사실상 트리거되지 않았다.
+        // 비용 가드: foregroundProcessName syscall은 agent_poll_interval_ticks(≈0.5s)로 throttle되고, metal_dirty(재렌더)는
+        // **사이드바에 보이는** Term(워크스페이스별 활성 pane의 활성 Term)의 변화에만 올린다 — 안 보이는 Term의 agent_kind/
+        // 상태 변화로 동일 프레임을 헛 재렌더하지 않게(예전 code-review 지적 보존; 안 보이는 Term은 표시될 때 switch가 dirty).
+        // is_current(완료 알림 억제 게이트)는 **Term 단위**다 — 사용자가 지금 실제로 그 안에 있는 Term 하나(포커스 창의
+        // 활성 탭·활성 pane·활성 Term)뿐 억제하고, 그 외 모든 Term(비활성 탭·활성 탭의 background split·background 가로탭)은
+        // 완료 시 알림한다. 탭 단위로 묶으면 같은 탭의 다른 pane에서 끝난 에이전트를 알림으로 열람·점프할 길이 막혀 직관에
+        // 어긋난다(사용자 피드백). 창이 비포커스면 어떤 Term도 "지금 보는" 게 아니라(null) 전부 알림한다.
         var buf: [256]u8 = undefined;
-        for (self.tabs.items, 0..) |tab, idx| {
-            const term = tab.activePane().activeTerm();
-            if (!term.live_initialized) continue;
-            const prev = term.agent_kind;
-            term.agent_kind = classifyAgent(term.live_pty.session.foregroundProcessName(&buf));
-            if (term.agent_kind != prev) {
-                self.metal_dirty = true; // 표시되는 Term의 에이전트 변화 → 사이드바 재렌더
-                if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
-                // kind가 바뀌면(새 에이전트 시작/종료/claude↔codex 직접 전환) 상태 캐시를 **전부** 리셋한다 —
-                // 옛 세션의 mtime/상태/답변이 새 에이전트로 새지 않게. 특히 agent_state를 unknown으로 되돌려야
-                // 직접 전환(claude .running → codex) 때 stale한 prev_state로 가짜 running→idle 알림이 안 뜬다.
-                term.agent_session_mtime = 0;
-                term.agent_state = .unknown;
-                term.agent_answer_len = 0;
+        const focused_term: ?*Term = if (self.window_focused) self.activeTab().activePane().activeTerm() else null;
+        for (self.tabs.items) |tab| {
+            const shown_term = tab.activePane().activeTerm(); // 이 워크스페이스 사이드바 행이 보여주는 Term
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (!term.live_initialized or term.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
+                    const displayed = term == shown_term; // 사이드바에 이 Term이 보이는가(재렌더 게이트)
+                    const prev = term.agent_kind;
+                    term.agent_kind = classifyAgent(term.live_pty.session.foregroundProcessName(&buf));
+                    if (term.agent_kind != prev) {
+                        if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
+                        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
+                        // kind가 바뀌면(새 에이전트 시작/종료/claude↔codex 직접 전환) 상태 캐시를 **전부** 리셋한다 —
+                        // 옛 세션의 mtime/상태/답변이 새 에이전트로 새지 않게. 특히 agent_state를 unknown으로 되돌려야
+                        // 직접 전환(claude .running → codex) 때 stale한 prev_state로 가짜 running→idle 알림이 안 뜬다.
+                        term.agent_session_mtime = 0;
+                        term.agent_state = .unknown;
+                        term.agent_answer_len = 0;
+                    }
+                    const is_current = focused_term != null and term == focused_term.?; // 지금 그 안에 있는 그 Term만 억제
+                    if (term.agent_kind != .none) self.pollAgentState(term, tab, is_current, displayed);
+                }
             }
-            // "보고 있는" 탭 = 포커스 창의 활성 탭. 그 외(비활성 탭 / 백그라운드 창)에서 완료되면 알림한다.
-            const is_current = idx == self.app_window.active_tab and self.window_focused;
-            if (term.agent_kind != .none) self.pollAgentState(term, tab, is_current);
         }
     }
 
     /// 에이전트 포그라운드인 Term의 진행 상태(running/idle)를 세션 JSONL tail로 갱신한다. 세션 파일 위치 I/O는
     /// agent_session(L4)이, 바이트→상태 판정은 session core가 한다. cwd(OSC 7)를 모르면(아직 미보고) 보류한다 —
     /// 잘못된 cwd로 엉뚱한 세션을 읽지 않게. mtime이 직전과 같으면 agent_session.poll이 재파싱을 건너뛴다.
-    /// `is_current`=포커스 창의 활성 탭(사용자가 보고 있음) — 그게 아닌데 running→idle로 끝나면 완료 알림을 큐에 넣는다.
-    fn pollAgentState(self: *AppSession, term: *Term, tab: *Tab, is_current: bool) void {
+    /// `is_current`=사용자가 지금 그 안에 있는 그 Term(포커스 창의 활성 탭·활성 pane·활성 Term) — 그게 아닌데(비활성 탭·
+    /// background split·background 가로탭) running→idle로 끝나면 완료 알림을 큐에 넣는다(Term 단위 — 같은 탭 다른 pane도 알림).
+    /// `displayed`=이 Term이 사이드바에 보이는가(워크스페이스별 활성 pane의 활성 Term) — 상태/답변 변화 시 metal_dirty는
+    /// 보이는 Term에만 올린다(안 보이는 background Term까지 poll하면서 헛 재렌더하지 않게 — pollAgentKinds 게이트와 짝).
+    fn pollAgentState(self: *AppSession, term: *Term, tab: *Tab, is_current: bool, displayed: bool) void {
         const kind: agent_session.Kind = switch (term.agent_kind) {
             .none => return,
             .claude => .claude,
             .codex => .codex,
         };
-        const cwd = term.surface.core.currentCwd();
+        // cwd는 reader 스레드가 core_mutex 아래 OSC 7로 free·재할당하므로(dispatchOscCwd), 락 없이 들고 있으면
+        // use-after-free/torn read가 난다(focusedTermCwd와 같은 함정). 락 아래에서 읽어 즉시 로컬 버퍼로 복사해 끊는다 —
+        // 이후 세션 파일 I/O는 코어 수명과 무관한 cwd_buf 슬라이스로 한다(background Term까지 poll하며 노출이 늘어 필수).
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = blk: {
+            term.surface.lockCore(self.io);
+            defer term.surface.unlockCore(self.io);
+            const live = term.surface.core.currentCwd();
+            if (live.len == 0 or live.len > cwd_buf.len) break :blk "";
+            @memcpy(cwd_buf[0..live.len], live);
+            break :blk cwd_buf[0..live.len];
+        };
         if (cwd.len == 0) return; // OSC 7 cwd 아직 없음 — 다음 poll에.
         const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else return;
         const subdir: []const u8 = switch (kind) {
@@ -8951,7 +9010,7 @@ pub const AppSession = struct {
         term.agent_session_mtime = r.mtime;
         const new_answer_len: usize = if (new_state == .idle) r.answer_len else 0;
         if (new_state != term.agent_state or new_answer_len != term.agent_answer_len) {
-            self.metal_dirty = true; // 상태/답변 변화 → 사이드바 재렌더
+            if (displayed) self.metal_dirty = true; // 보이는 Term의 상태/답변 변화만 사이드바 재렌더(pollAgentKinds 게이트와 짝)
             if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent state: {s}", .{@tagName(new_state)});
         }
         term.agent_state = new_state;
@@ -11905,6 +11964,61 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
     try std.testing.expect(!session.activateSurfaceById(0xFFFF_FFFF));
     try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term);
+}
+
+test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id로 drain한다" {
+    // 예전엔 activeSurface().core만 drain해 background split pane·가로탭이 보낸 OSC 9/777 알림이 영영 안 나왔다 —
+    // 클릭이 발신 Term으로 점프하려면(activateSurfaceById) 발신 Term의 surface_id가 알림에 실려야 하는데, 활성
+    // surface의 id만 실려 "탭은 맞는데 pane/Term이 어긋나는" 증상이 났다. 이제 모든 Term의 코어를 훑어 발신 Term의
+    // surface_id를 싣는다. 비활성 pane Term에 OSC 9를 먹이고(활성 surface엔 알림 없음), 그 비활성 Term의 알림을
+    // surface_id까지 정확히 돌려주는지 + 그 id로 점프가 비활성 pane을 포커스하는지 본다(알림→점프 전제 폐곡선).
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane/newTermInActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+    session.loaded_config.config.notifications.osc = true; // OSC 게이트 명시(기본값 의존 안 함)
+    session.window_focused = true; // 포커스 창 — 활성 Term이 "지금 보는" Term이 되게(전면 배너 억제 대상)
+
+    // 활성 탭에 split을 만들어 비활성 pane을 둔다: panes [p0, p1], 활성 p1. 발신원 = 비활성 p0의 Term.
+    try session.splitActivePane(.horizontal);
+    try std.testing.expectEqual(@as(usize, 1), session.activeTab().active_pane); // p1 활성
+    const bg_term = session.activeTab().panes.items[0].terms.items[0]; // 비활성 p0의 Term(*Term)
+    const bg_id = bg_term.surface.id;
+    const active_id = session.activeSurface().id; // 활성 p1의 Term(지금 보는 Term)
+    try std.testing.expect(bg_id != active_id); // 활성과 다른 surface여야 의미 있음
+
+    // 두 Term 모두 OSC 9(iTerm2: ESC ] 9 ; <body> BEL)를 먹인다 — title 없음, body=메시지.
+    try bg_term.surface.core.write("\x1b]9;배경 pane 빌드 완료\x07");
+    try session.activeSurface().core.write("\x1b]9;활성 pane 알림\x07");
+
+    // 루프는 p0(배경)→p1(활성) 순. 첫 drain = 배경 Term: surface_id=bg_id, 안 보는 곳이라 **전면 배너 뜸**(=1).
+    const n1 = session.pendingNotification() orelse return error.TestExpectedNotification;
+    try std.testing.expectEqualStrings("배경 pane 빌드 완료", n1.body);
+    try std.testing.expectEqual(bg_id, n1.surface_id);
+    try std.testing.expect(n1.foreground_banner); // 배경 pane OSC → 전면에서도 배너(사용자가 안 보는 곳)
+
+    // 둘째 drain = 활성(지금 보는) Term: 자기 화면 노이즈라 전면 배너 억제(=0, 목록만).
+    const n2 = session.pendingNotification() orelse return error.TestExpectedNotification;
+    try std.testing.expectEqual(active_id, n2.surface_id);
+    try std.testing.expect(!n2.foreground_banner); // 지금 보는 Term OSC → 전면 배너 억제
+
+    // 모두 소비됐으니 다음 호출은 null(clearNotification으로 코어 pending 비움 — 다음 tick 재발화 방지).
+    try std.testing.expect(session.pendingNotification() == null);
+
+    // 배경 Term의 surface_id로 점프하면 비활성 p0로 정확히 활성화된다(알림→점프 전제가 닫힌다).
+    try std.testing.expect(session.activateSurfaceById(bg_id));
+    try std.testing.expectEqual(@as(usize, 0), session.activeTab().active_pane);
 }
 
 test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatRelativeTime 경계" {

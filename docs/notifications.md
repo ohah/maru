@@ -8,11 +8,20 @@
 
 | 소스 | 트리거 | 발신 surface | 단일 출처 |
 |---|---|---|---|
-| **OSC 9 / OSC 777** | 셸/TUI가 `ESC ] 9 ; … ST`(iTerm2) 또는 `ESC ] 777 ; notify ; … ST`(rxvt)를 출력 | 활성(보이는) surface — 코어가 그 surface에서 파싱 | `src/terminal/core.zig` `dispatchOscNotify9/777` |
-| **에이전트 완료** | claude/codex 세션이 `running → idle` 전환, 그리고 **지금 보고 있는 탭이 아님**(`!is_current`) | 완료한 Term의 surface | `app_session.zig` `enqueueAgentCompletion` |
+| **OSC 9 / OSC 777** | 셸/TUI가 `ESC ] 9 ; … ST`(iTerm2) 또는 `ESC ] 777 ; notify ; … ST`(rxvt)를 출력 | **시퀀스를 출력한 그 surface**(background split pane·가로탭 포함) — 코어가 각 surface에서 파싱 | `src/terminal/osc.zig` `dispatchNotify9/777` + `app_session.zig` `drainOscNotificationFrom` |
+| **에이전트 완료** | claude/codex 세션이 `running → idle` 전환, 그리고 **지금 그 안에 있는 Term이 아님**(`!is_current`, **Term 단위** — 포커스 창의 활성 탭·활성 pane·활성 Term 하나만 억제) | **완료한 Term의 surface**(background split pane·가로탭 포함) | `app_session.zig` `pollAgentKinds`(모든 pane×Term poll) → `enqueueAgentCompletion` |
 
 두 소스는 `AppSession.pendingNotification()` 한 funnel로 합류한다(에이전트 큐를 OSC보다 먼저 드레인). 반환은
-`{ title, body, surface_id, foreground_banner }` — Swift가 tick마다 poll한다.
+`{ title, body, surface_id, foreground_banner }`(`PendingNotification`) — Swift가 tick마다 poll한다.
+
+**모든 pane·Term을 본다(핵심)**: 두 소스 모두 활성(보이는) surface만이 아니라 **모든 탭의 모든 split pane·모든 가로탭
+(Term)**을 본다 — 에이전트는 `pollAgentKinds`가 탭당 활성 Term 하나만이 아니라 모든 Term을 poll하고(예전엔 활성 Term만
+poll해 background pane/Term 완료가 아예 알림 안 됐다), OSC는 `pendingNotification`이 `activeSurface().core`만이 아니라 모든
+Term의 코어를 훑어 첫 pending을 그 surface.id로 실어 보낸다. 이래야 알림의 `surface_id`가 **발신 Term**을 가리켜, 클릭이
+탭뿐 아니라 그 split pane·가로탭까지 정확히 점프한다(`activateSurfaceById`, §2 클릭 절). 비용 가드: 에이전트
+`foregroundProcessName` syscall은 ≈0.5s throttle, `metal_dirty`(재렌더)는 **사이드바에 보이는** Term(워크스페이스별 활성
+pane의 활성 Term) 변화에만 — 안 보이는 Term 변화로 헛 재렌더하지 않는다. reader 스레드가 `core_mutex` 아래 OSC pending·
+cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아래에서 읽어 owned 버퍼로 복사한다(torn read/UAF 방지).
 
 종류별 표시는 config `notifications.*`가 각 발화 지점에서 게이트한다 — `agent-complete`(에이전트 완료, `enqueueAgentCompletion`)·
 `osc`(OSC 9/777, `pendingNotification`)를 끄면 데스크톱 배너·인앱 센터 둘 다 안 만든다. 인앱 센터 보관 개수는
@@ -46,9 +55,10 @@
 ### 전면 배너 게이트
 
 앱이 전면일 때 OS는 `willPresent`를 부른다. `foreground_banner`(Zig 결정)로 표시 스타일을 가른다:
-- **에이전트 완료(=1)**: "지금 안 보는 탭"이 대상이라 전면에서도 `[.banner, .sound]`로 알린다.
-- **OSC 9/777(=0)**: 활성(보이는) surface가 보내 사용자가 이미 그 화면을 볼 가능성이 커, 전면이면 `[.list]`로 알림
-  센터 목록에만 남긴다(자기 화면 알림 배너 노이즈 억제).
+- **에이전트 완료(=1)**: "지금 그 안에 있지 않은 Term"이 대상이라(is_current 게이트) 전면에서도 `[.banner, .sound]`로 알린다.
+- **OSC 9/777**: 발신 Term이 **지금 보고 있는 그 Term이면 =0** — 사용자가 그 화면을 보고 있어 전면이면 `[.list]`로 알림
+  센터 목록에만 남긴다(자기 화면 배너 노이즈 억제). **그 외(background split pane·가로탭·비활성 탭)면 =1** — 안 보는
+  곳이라 전면에서도 배너로 알린다(`drainOscNotificationFrom`이 `focused_term` 비교로 결정 — 에이전트 is_current와 대칭).
 
 ## 3. 인앱 알림 센터 (maru chrome, 2단계)
 
@@ -148,6 +158,8 @@
 
 - **단위(Zig 헤드리스)**: `notifications.zig`(state·handle·itemAt 2행·view ops·panelRect clamp), 히스토리 ring buffer
   (push 상한·unread 증감·markRead·formatRelativeTime), `acceptNotification` 역순 매핑, `activateSurfaceById` 역조회,
+  **비활성 pane/Term OSC drain**(`pendingNotification`이 background split pane Term에 먹인 OSC 9를 그 surface_id로 돌려주고
+  그 id로 점프가 비활성 pane을 포커스 — 모든 surface를 훑는지),
   `headerHit` 4-아이콘 zone, **접힘 종 hit-test**(`collapsedNotificationRect` 종 글리프 동심·◧ rect 비겹침·클릭→패널 열림).
 - **렌더 1회**: op 방출만으론 부족(modal_box 회귀 전례) — `buildSidebarHeaderFrame`(펼침)·`buildCollapsedToggleFrame`(접힘)이
   공유하는 `appendBellAndBadge` 종/배지 cell + 오버레이 lowering으로 2줄 카드가 cell 그리드에 들어가고 한글 본문이 안
@@ -157,7 +169,8 @@
   `MARU_OPEN_NOTIFICATIONS_EMPTY=1`로 헤더 밴드 + 일러스트(아이콘·제목·부제)를 확인한다. 접힘 종은 `MARU_COLLAPSE_SIDEBAR`로
   ◧↔종 띠 세로 정렬·좌측 텍스트 배지 확인. 빨강 원은 GpuQuad **layer 4**(bg strip 뒤·헤더 글리프 앞)로 흰 숫자 아래에 그려진다.
 - **수동 E2E**(`.app` 번들): OSC/에이전트 알림 → 배너 클릭 → 발신 터미널 점프 / 멀티 윈도우 토큰 라우팅 / 종 클릭 →
-  카드 패널 → 항목 클릭 점프 / 안읽음 배지·점.
+  카드 패널 → 항목 클릭 점프 / 안읽음 배지·점. **background split pane·가로탭에서 에이전트 완료 또는 OSC 알림 →
+  클릭이 탭뿐 아니라 그 pane/Term까지 포커스**(이 경로가 예전엔 알림 자체가 안 나 검증 불가였다).
 
 ## 6. 범위 밖 (후속)
 

@@ -414,7 +414,8 @@ pub const TerminalCore = struct {
     /// 0x60..0x7e를 box 문자로 변환. 베이스: VT100 special graphics·xterm ctlseqs(Ghostty `charsets.zig` 동작 비교).
     pub const Charset = enum { ascii, dec_special };
 
-    const max_csi_params = 16;
+    pub const max_csi_params = 16; // parser.applySgr/applyExtendedColor(cross-file)도 참조 — pub
+
     const default_max_scrollback = 1000;
     /// 한 세션이 동시에 가질 수 있는 kitty graphics placement 상한 — maru가 정한 실용 값이다(kitty
     /// 명세는 상한을 규정하지 않는다). (image_id, placement_id) 키 교체로 대부분 자연히 묶이지만, 한
@@ -2405,7 +2406,8 @@ pub const TerminalCore = struct {
     }
 
     /// i번째 CSI 파라미터를 raw로 돌려준다(없으면 0). erase mode처럼 0이 유효값인 곳에 쓴다.
-    fn csiRawParam(self: *const TerminalCore, i: usize) u16 {
+    /// parser의 SGR/모드 dispatch(setPrivateModes·applySgr 등)가 cross-file 호출 — pub. 20/N서 csiRawParam이 parser.zig로 가며 정리.
+    pub fn csiRawParam(self: *const TerminalCore, i: usize) u16 {
         const count = @min(self.csi_param_count, max_csi_params);
         return if (i >= count) 0 else self.csi_params[i];
     }
@@ -2430,7 +2432,7 @@ pub const TerminalCore = struct {
                     // DECRQM(CSI ? Ps $ p): private mode 상태 질의. 앱(terminal-unicode-core 등)이
                     // mode 2027 지원 여부를 이걸로 먼저 묻고, "지원함"이면 DECSET 2027로 켠다. 응답이
                     // 없으면 미지원으로 보고 안 켜므로, 우리가 아는 모드는 현재 상태를 보고한다.
-                    'p' => if (self.csi_marker == '?') self.reportPrivateMode(self.csiRawParam(0)),
+                    'p' => if (self.csi_marker == '?') parser.reportPrivateMode(self, self.csiRawParam(0)),
                     else => {},
                 },
                 else => {}, // `$r`(DECCARA) 등 미지원 조합은 무시
@@ -2443,11 +2445,11 @@ pub const TerminalCore = struct {
         if (self.csi_marker != 0) {
             switch (self.csi_marker) {
                 '?' => switch (final) {
-                    'h' => self.setPrivateModes(true),
-                    'l' => self.setPrivateModes(false),
+                    'h' => parser.setPrivateModes(self, true),
+                    'l' => parser.setPrivateModes(self, false),
                     // kitty keyboard(CSI ? u): 현재 flag 스택 최상단을 CSI ? flags u로 보고. 앱이 지원
                     // 여부·현재 모드를 감지한다(flags=0이면 비활성). 베이스: kitty keyboard protocol query.
-                    'u' => self.reportKittyFlags(),
+                    'u' => parser.reportKittyFlags(self),
                     else => {},
                 },
                 '>' => switch (final) {
@@ -2462,7 +2464,7 @@ pub const TerminalCore = struct {
                     'q' => if (self.csiRawParam(0) == 0)
                         self.appendResponse("\x1bP>|" ++ terminal_name ++ " " ++ terminal_version ++ "\x1b\\"),
                     // kitty keyboard(CSI > flags u): flag 스택에 push(enable). flags는 u5로 truncate.
-                    'u' => self.kitty_flags.push(kittyFlagsFromParam(self.csiRawParam(0))),
+                    'u' => self.kitty_flags.push(parser.kittyFlagsFromParam(self.csiRawParam(0))),
                     else => {},
                 },
                 '<' => switch (final) {
@@ -2476,7 +2478,7 @@ pub const TerminalCore = struct {
                         2 => .@"or",
                         3 => .not,
                         else => .set,
-                    }, kittyFlagsFromParam(self.csiRawParam(0))),
+                    }, parser.kittyFlagsFromParam(self.csiRawParam(0))),
                     else => {},
                 },
                 else => {},
@@ -2484,7 +2486,7 @@ pub const TerminalCore = struct {
             return;
         }
         switch (final) {
-            'm' => self.applySgr(),
+            'm' => parser.applySgr(self),
             'H', 'f' => screen.cursorPosition(self),
             'A' => screen.cursorVertical(self, self.csiParam(0, 1), true),
             'B', 'e' => screen.cursorVertical(self, self.csiParam(0, 1), false),
@@ -2495,7 +2497,7 @@ pub const TerminalCore = struct {
             'J' => screen.eraseInDisplay(self, self.csiRawParam(0)),
             'K' => screen.eraseInLine(self, self.csiRawParam(0)),
             'X' => screen.eraseCharacters(self, self.csiParam(0, 1)), // ECH: 커서부터 N개(기본 1) cell blank, 커서 유지 — nvim이 모드 라벨(-- INSERT --) clear에 이걸 쓴다
-            'n' => self.deviceStatusReport(),
+            'n' => parser.deviceStatusReport(self),
             'r' => screen.setScrollRegion(self),
             'L' => screen.insertLines(self, self.csiParam(0, 1)),
             'M' => screen.deleteLines(self, self.csiParam(0, 1)),
@@ -2503,11 +2505,11 @@ pub const TerminalCore = struct {
             'P' => screen.deleteChars(self, self.csiParam(0, 1)), // DCH: 커서에서 N개(기본 1) 삭제, 왼쪽으로 당긴다
             'Z' => screen.cursorBackTab(self, self.csiParam(0, 1)), // CBT: 역방향 N개(기본 1) 탭스톱 — Shift+Tab 폼 역이동
             'g' => screen.clearTabstop(self, self.csiRawParam(0)), // TBC: 0(기본)=커서 열 탭스톱 제거, 3=전체 제거
-            'b' => self.repeatLastChar(self.csiParam(0, 1)), // REP(G5): 직전 graphic 글자를 N회 반복
+            'b' => parser.repeatLastChar(self, self.csiParam(0, 1)), // REP(G5): 직전 graphic 글자를 N회 반복
             'S' => screen.scrollRangeUp(self, self.scroll_top, self.scroll_bottom, self.csiParam(0, 1), false), // SU(G7): scroll region N줄 위로 팬(history 미보관)
             'T' => screen.scrollRangeDown(self, self.scroll_top, self.scroll_bottom, self.csiParam(0, 1)), // SD(G7): scroll region N줄 아래로 팬
-            'h' => self.setAnsiModes(true), // SM(G6): 비-private ANSI 모드 set(IRM=4 등)
-            'l' => self.setAnsiModes(false), // RM(G6): 비-private ANSI 모드 reset
+            'h' => parser.setAnsiModes(self, true), // SM(G6): 비-private ANSI 모드 set(IRM=4 등)
+            'l' => parser.setAnsiModes(self, false), // RM(G6): 비-private ANSI 모드 reset
             // SCOSC/SCORC(CSI s / CSI u): ANSI(SCO) 커서 저장/복원. DECSC/DECRC(ESC 7/8)와 같은 슬롯을
             // 쓴다(위치+pen+pending_wrap). xterm은 좌우 margin 모드(DECLRMM ?69)일 때만 CSI s를 DECSLRM으로
             // 보지만, maru는 좌우 margin 미구현이라 항상 save로 처리한다. multi-line progress(brew 등)가
@@ -2523,68 +2525,6 @@ pub const TerminalCore = struct {
             'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[?6c"),
             else => {},
         }
-    }
-
-    /// DECSET(h)/DECRST(l)의 alternate-screen 계열 모드를 적용한다. 파라미터가 여러 개면 각각 적용.
-    /// 47/1047=alt 전환만(둘의 차이인 "1047은 나갈 때 alt clear"는 alt 버퍼를 해제하는 현 구현에선
-    /// 구분이 무의미하다), 1048=커서 저장/복원만, 1049=결합(들어갈 때 커서 저장+빈 alt, 나갈 때
-    /// 커서 복원) — vim/less가 쓰는 표준 조합이다.
-    fn setPrivateModes(self: *TerminalCore, set: bool) void {
-        var i: usize = 0;
-        while (i < self.csi_param_count) : (i += 1) {
-            switch (self.csiRawParam(i)) {
-                1 => self.application_cursor_keys = set, // DECCKM: 화살표 SS3/CSI 인코딩 전환
-                5 => if (self.reverse_screen != set) { // DECSCNM(G9): 화면 전역 반전 — 바뀌면 전체 재칠
-                    self.reverse_screen = set;
-                    self.dirty = fullDirty(self.size);
-                },
-                6 => screen.setOriginMode(self, set), // DECOM: CUP/HVP origin을 scroll region 상단으로 + 커서 home
-                25 => { // DECTCEM: 커서 표시/숨김. 커서 행만 다시 그리면 된다.
-                    self.cursor_visible = set;
-                    screen.markDirty(self, self.cursor.row);
-                },
-                1007 => self.alternate_scroll = set, // alt screen 휠 -> 화살표 변환 on/off
-                2004 => self.bracketed_paste = set, // bracketed paste(붙여넣기 감싸기)
-                1004 => self.focus_events = set, // focus reporting(창 포커스 in/out → CSI I/O)
-                9 => self.mouse_tracking = if (set) .x10 else .none, // X10 mouse(press만)
-                1000 => self.mouse_tracking = if (set) .normal else .none, // normal(press+release)
-                1002 => self.mouse_tracking = if (set) .button else .none, // button(+버튼 눌린 채 drag)
-                1003 => self.mouse_tracking = if (set) .any else .none, // any(+모든 motion)
-                1006 => self.mouse_format = if (set) .sgr else .x10, // SGR 인코딩(좌표 무제한)
-                1016 => self.mouse_format = if (set) .sgr_pixels else .x10, // SGR-pixels 인코딩
-                1015 => self.mouse_format = if (set) .urxvt else .x10, // urxvt 인코딩(G13 — 거의 1006으로 대체)
-                7 => self.autowrap = set, // DECAWM(G8): autowrap on/off — off면 마지막 칸에서 덮어쓴다
-                2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
-                2026 => self.sync_output = set, // synchronized output(set=BSU hold 시작, reset=ESU flush)
-                47, 1047 => if (set) screen.enterAltScreen(self, false) else screen.leaveAltScreen(self, false),
-                1048 => if (set) screen.saveCursorState(self) else screen.restoreCursorState(self),
-                1049 => if (set) screen.enterAltScreen(self, true) else screen.leaveAltScreen(self, true),
-                else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.
-            }
-        }
-    }
-
-    /// SM/RM(CSI Ps h/l, private marker 없음): 비-private ANSI 모드. 현재 IRM(4)=insert mode만 지원(그 외 소비).
-    fn setAnsiModes(self: *TerminalCore, set: bool) void {
-        var i: usize = 0;
-        while (i < self.csi_param_count) : (i += 1) {
-            switch (self.csiRawParam(i)) {
-                4 => self.insert_mode = set, // IRM(G6): insert/replace
-                else => {},
-            }
-        }
-    }
-
-    /// REP(CSI Ps b): 직전에 출력한 graphic 글자(last_printed_cp)를 N회(기본 1) 더 반복한다. 아직 출력이
-    /// 없으면(0) 무동작. 각 반복은 writeCodepoint 경로(wrap·IRM·DECAWM·charset 적용)를 그대로 탄다.
-    fn repeatLastChar(self: *TerminalCore, count: u16) void {
-        if (self.last_printed_cp == 0) return;
-        const cp = self.last_printed_cp;
-        var n = @max(count, 1);
-        // putCell을 직접 호출한다(writeCodepoint가 아니라) — last_printed_cp는 이미 charset 변환을 거친 최종
-        // 글리프라, writeCodepoint로 다시 보내면 translateCharset이 두 번 적용된다(현 charset이 dec_special이면
-        // 오변환). putCell이 wrap·IRM·DECAWM·wide를 그대로 처리하고 charset만 건너뛴다.
-        while (n > 0) : (n -= 1) screen.putCell(self, cp);
     }
 
     /// focus reporting(DECSET 1004)이 켜져 있으면 창 포커스 변화를 CSI I(gained)/CSI O(lost)로 PTY에 리포트한다.
@@ -2641,58 +2581,6 @@ pub const TerminalCore = struct {
         self.appendResponse(out);
     }
 
-    /// DSR(CSI Ps n): 호스트의 상태 질의에 응답한다. 응답은 response 버퍼에 쌓이고 app이 PTY로 되쓴다.
-    /// 5n=터미널 OK(CSI 0n), 6n=커서 위치 보고(CPR, CSI row;col R, 1-indexed). zsh가 SIGWINCH
-    /// redraw 때 6n으로 커서를 물으므로 응답이 없으면 redraw가 어긋난다(프롬프트 중복 등).
-    fn deviceStatusReport(self: *TerminalCore) void {
-        switch (self.csiRawParam(0)) {
-            5 => self.appendResponse("\x1b[0n"),
-            6 => {
-                var buf: [40]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{
-                    self.cursor.row + 1,
-                    self.cursor.col + 1,
-                }) catch return;
-                self.appendResponse(s);
-            },
-            else => {},
-        }
-    }
-
-    /// DECRQM(CSI ? Ps $ p) 응답 — DECRPM(CSI ? Ps ; Pm $ y). Pm: 0=미인식, 1=set, 2=reset,
-    /// 3=영구 set, 4=영구 reset. 우리가 추적하는 모드는 현재 상태(1/2)를 알려 앱이 지원을 감지하고
-    /// 켤 수 있게 한다(특히 mode 2027). 모르는 모드는 0(미인식)으로 답해 앱이 폴백하게 둔다.
-    fn reportPrivateMode(self: *TerminalCore, mode: u16) void {
-        const state: u8 = switch (mode) {
-            2027 => if (self.grapheme_cluster_mode) 1 else 2,
-            2026 => if (self.sync_output) 1 else 2,
-            2004 => if (self.bracketed_paste) 1 else 2,
-            25 => if (self.cursor_visible) 1 else 2,
-            1 => if (self.application_cursor_keys) 1 else 2,
-            6 => if (self.origin_mode) 1 else 2, // DECOM(origin mode)
-            else => 0, // 미인식 — 앱이 보수적으로 폴백
-        };
-        var buf: [32]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "\x1b[?{d};{d}$y", .{ mode, state }) catch return;
-        self.appendResponse(s);
-    }
-
-    /// CSI 파라미터(u16)를 kitty flags로 — Maru가 실제 인코딩하는 disambiguate(bit 0)만 통과시킨다.
-    /// report_events/report_alternates/report_all/report_associated는 미구현이므로 스택에 저장하지
-    /// 않는다: 저장하면 query(CSI ? u)가 미구현 능력을 활성으로 거짓 보고하고(앱이 켜진 줄 알고 key
-    /// release·대체키·연관텍스트를 기대), 인코딩은 disambiguate 수준만 나가 광고와 동작이 어긋난다.
-    /// 지원 flag가 늘면 이 마스크를 넓힌다.
-    fn kittyFlagsFromParam(v: u16) KittyFlags {
-        return .{ .disambiguate = (v & 1) != 0 };
-    }
-
-    /// kitty keyboard query(CSI ? u) 응답: 현재 스택 최상단 flags를 CSI ? flags u로 보고한다.
-    fn reportKittyFlags(self: *TerminalCore) void {
-        var buf: [16]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "\x1b[?{d}u", .{self.kitty_flags.current().int()}) catch return;
-        self.appendResponse(s);
-    }
-
     /// 호스트(PTY)로 보낼 응답 바이트를 버퍼에 적재한다(best-effort). osc.zig 등 목적별 host-reply 모듈이
     /// 호출하므로 pub다(구조와 파일 분리 — 같은 응답 버퍼를 단일 경로로 쓴다).
     pub fn appendResponse(self: *TerminalCore, bytes: []const u8) void {
@@ -2706,127 +2594,6 @@ pub const TerminalCore = struct {
 
     pub fn clearResponse(self: *TerminalCore) void {
         self.response.clearRetainingCapacity();
-    }
-
-    fn applySgr(self: *TerminalCore) void {
-        const count = @min(self.csi_param_count, max_csi_params);
-        var i: usize = 0;
-        while (i < count) {
-            const p = self.csi_params[i];
-            switch (p) {
-                0 => self.pen = .{},
-                7 => self.pen.reverse = true,
-                27 => self.pen.reverse = false,
-                1 => self.pen.bold = true,
-                2 => self.pen.dim = true, // SGR 2: faint/decreased intensity (ECMA-48)
-                3 => self.pen.italic = true,
-                4 => {
-                    // underline. colon 형식 4:x(ITU T.416 — x는 underline 스타일)는 x=0이면 off, x=2면 double,
-                    // 그 외 x>0은 single on(curly/dotted 등 스타일 종류는 single로 근사). 세미콜론 plain 4는 single on.
-                    // sub-param은 아래 루프 끝에서 소비한다.
-                    const styled = i + 1 < count and self.csi_subparam[i + 1];
-                    if (styled) {
-                        const sub = self.csi_params[i + 1];
-                        self.pen.underline = sub != 0;
-                        self.pen.underline_double = sub == 2; // 4:2 = double underline
-                    } else {
-                        self.pen.underline = true;
-                        self.pen.underline_double = false;
-                    }
-                },
-                22 => { // SGR 22: normal intensity — bold·faint 둘 다 off (ECMA-48)
-                    self.pen.bold = false;
-                    self.pen.dim = false;
-                },
-                23 => self.pen.italic = false,
-                24 => { // SGR 24: underline off — single·double 둘 다 끈다
-                    self.pen.underline = false;
-                    self.pen.underline_double = false;
-                },
-                21 => { // SGR 21: doubly underlined — 하단 2중선
-                    self.pen.underline = true;
-                    self.pen.underline_double = true;
-                },
-                9 => self.pen.strikethrough = true, // SGR 9: crossed-out (ECMA-48)
-                29 => self.pen.strikethrough = false, // SGR 29: not crossed-out
-                53 => self.pen.overline = true, // SGR 53: overlined (ECMA-48)
-                55 => self.pen.overline = false, // SGR 55: not overlined
-                5, 6 => self.pen.blink = true, // SGR 5(slow)/6(rapid) blink — 파싱·저장만(렌더 정적)
-                25 => self.pen.blink = false, // SGR 25: blink off
-                8 => self.pen.conceal = true, // SGR 8: concealed(invisible)
-                28 => self.pen.conceal = false, // SGR 28: reveal
-                59 => self.pen.underline_color = .default, // SGR 59: underline color를 default(전경색)로
-                30...37 => self.pen.foreground = .{ .indexed = @intCast(p - 30) },
-                39 => self.pen.foreground = .default,
-                40...47 => self.pen.background = .{ .indexed = @intCast(p - 40) },
-                49 => self.pen.background = .default,
-                90...97 => self.pen.foreground = .{ .indexed = @intCast(p - 90 + 8) },
-                100...107 => self.pen.background = .{ .indexed = @intCast(p - 100 + 8) },
-                38 => {
-                    i = self.applyExtendedColor(i, &self.pen.foreground);
-                    continue;
-                },
-                48 => {
-                    i = self.applyExtendedColor(i, &self.pen.background);
-                    continue;
-                },
-                58 => { // SGR 58: underline color(58;2;r;g;b·58;5;n) — 전경과 별개 밑줄 색(nvim/helix LSP)
-                    i = self.applyExtendedColor(i, &self.pen.underline_color);
-                    continue;
-                },
-                else => {},
-            }
-            i += 1;
-            // 직전 주 파라미터에 딸린 colon sub-parameter는 그 파라미터에 종속이라 별도 SGR로 처리하지
-            // 않는다(ITU T.416). 4:3은 underline 스타일이지 italic(SGR 3)이 아니고, 4:0은 underline off지
-            // SGR 0(전체 리셋)이 아니다 — 4 case에서 이미 소비했으니 여기선 건너뛰기만 한다. 38/48은 위에서
-            // continue로 i를 직접 점프하므로 여기 오지 않는다.
-            while (i < count and self.csi_subparam[i]) i += 1;
-        }
-    }
-
-    /// 38/48 (확장 색)을 처리하고 다음으로 읽을 파라미터 인덱스를 돌려준다. 세미콜론
-    /// (38;2;r;g;b, 38;5;n)과 colon sub-parameter(38:2:colorspace:r:g:b, 38:5:n)를 모두 지원한다.
-    fn applyExtendedColor(self: *TerminalCore, start: usize, target: *types.Color) usize {
-        const count = @min(self.csi_param_count, max_csi_params);
-        const mode = if (start + 1 < count) self.csi_params[start + 1] else 0;
-        // mode가 ':'로 들어왔으면 colon 형식이다. colon mode 2는 r,g,b 앞에 colorspace
-        // 컴포넌트가 하나 더 있다(빈 경우 '::'). mode 5는 두 형식 모두 n 위치가 같다.
-        const colon_form = start + 1 < count and self.csi_subparam[start + 1];
-        if (mode == 5 and start + 2 < count) {
-            target.* = .{ .indexed = @intCast(@min(self.csi_params[start + 2], 255)) };
-            return start + 3;
-        }
-        if (mode == 2) {
-            if (colon_form) {
-                // colon 형식은 mode 뒤의 colon sub-parameter가 [r,g,b](3개) 또는
-                // [colorspace,r,g,b](4개, colorspace는 빈 '::'일 수 있음)다. colorspace가
-                // 있는지 개수로 정해진 게 아니므로(38:2:r:g:b처럼 생략 가능) mode 뒤 colon
-                // 컴포넌트 수를 세어, r,g,b는 항상 마지막 3개로 읽는다. 이전에는 colorspace가
-                // 항상 있다고 가정해 38:2:r:g:b(5컴포넌트)를 통째로 버렸다.
-                var n: usize = 0;
-                while (start + 2 + n < count and self.csi_subparam[start + 2 + n]) : (n += 1) {}
-                if (n >= 3) {
-                    const rgb_start = start + 2 + (n - 3);
-                    target.* = .{ .rgb = .{
-                        .r = @intCast(@min(self.csi_params[rgb_start], 255)),
-                        .g = @intCast(@min(self.csi_params[rgb_start + 1], 255)),
-                        .b = @intCast(@min(self.csi_params[rgb_start + 2], 255)),
-                    } };
-                    return start + 2 + n;
-                }
-            } else if (start + 4 < count) {
-                // 세미콜론 형식 38;2;r;g;b — r,g,b가 mode 바로 뒤.
-                target.* = .{ .rgb = .{
-                    .r = @intCast(@min(self.csi_params[start + 2], 255)),
-                    .g = @intCast(@min(self.csi_params[start + 3], 255)),
-                    .b = @intCast(@min(self.csi_params[start + 4], 255)),
-                } };
-                return start + 5;
-            }
-        }
-        // 형식이 안 맞으면 나머지 파라미터를 버린다.
-        return count;
     }
 
     /// 그리드 크기 변경. 본문(reflow·스크롤백 push)은 screen.resize가 소유 — 외부(app/runtime·host·

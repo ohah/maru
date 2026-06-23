@@ -715,3 +715,171 @@ pub fn clampSavedCursor(slot: *core.SavedCursor, size: types.Size) void {
     slot.cursor.row = @min(slot.cursor.row, size.rows - 1);
     slot.cursor.col = clamped_col;
 }
+
+// ── erase / insert / delete (행 내 셀 편집) ─────────────────────────────────────────────────────
+// EL(K)·ECH(X)·ICH(@)·DCH(P)·ED(J). 모두 현재 pen 배경(BCE)으로 채우고, 경계에 걸친 wide glyph 반쪽을
+// repairWideGlyphEdges로 정리하며, deferred autowrap(pending_wrap)·grapheme run(last_print)을 끊는다.
+// dispatchCsi(core 잔류, parser 후속)와 putCell(insert_mode)이 위임한다.
+
+/// erase로 [start, end) 범위를 비울 때, 경계에 걸친 wide glyph(width=2)의 반쪽을 정리한다.
+/// clearCellForWrite가 쓰기 시 하던 짝 정리를 erase에도 적용해, 짝 잃은 base나 orphan
+/// continuation이 남아 half-glyph로 그려지는 것을 막는다.
+fn repairWideGlyphEdges(self: *TerminalCore, row: u16, start: u16, end: u16) void {
+    const blank: types.Cell = .{ .style = self.pen };
+    // 왼쪽 경계: start-1이 width=2 base면 그 continuation(start)이 지워졌으므로 base도 비운다.
+    if (start > 0 and self.cells[self.index(row, start - 1)].width == 2) {
+        self.cells[self.index(row, start - 1)] = blank;
+    }
+    // 오른쪽 경계: end가 continuation이면 그 base(end-1)가 지워졌으므로 continuation도 비운다.
+    if (end < self.size.cols and self.cells[self.index(row, end)].continuation) {
+        self.cells[self.index(row, end)] = blank;
+    }
+}
+
+pub fn eraseInLine(self: *TerminalCore, mode: u16) void {
+    const row = self.cursor.row;
+    if (self.size.cols == 0 or row >= self.size.rows) return;
+    const start: u16 = switch (mode) {
+        1, 2 => 0,
+        else => self.cursor.col,
+    };
+    const end: u16 = switch (mode) {
+        1 => @min(self.cursor.col + 1, self.size.cols),
+        else => self.size.cols,
+    };
+    var col = start;
+    while (col < end) : (col += 1) {
+        // erase는 현재 pen의 배경색으로 채워야 하므로 blank cell에 style만 남긴다.
+        self.cells[self.index(row, col)] = .{ .style = self.pen };
+    }
+    repairWideGlyphEdges(self, row, start, end);
+    // 행의 오른쪽 끝을 지우면(mode 0=커서~끝, mode 2=전체) soft-wrap 연속성이 끊긴다. mode 1
+    // (시작~커서)은 오른쪽 끝이 멀쩡해 줄이 여전히 다음 행으로 이어질 수 있으므로 wrapped를 끄지
+    // 않는다 — 안 그러면 reflow가 한 논리 줄을 둘로 쪼갠다.
+    if (mode != 1) self.wrapped[row] = false;
+    markDirty(self, row);
+    // 모든 EL 모드는 deferred autowrap을 무효화한다(xterm/Ghostty 동작). 안 끄면 마지막 칸
+    // 출력(pending) 후 EL+글자 시퀀스가 한 줄 일찍 wrap돼 상대 커서 이동이 어긋난다.
+    self.pending_wrap = false;
+    // 다른 cursor/erase op과 같이 grapheme run을 끝낸다. 안 하면 CSI K 뒤 combining mark가
+    // 방금 지운 셀에 붙는다.
+    self.last_print = null;
+}
+
+/// ECH(CSI Ps X): 커서 위치부터 Ps개(기본 1) cell을 현재 pen 배경의 blank로 지운다. EL과 달리 줄 끝까지가
+/// 아니라 N개만, DCH(CSI P)와 달리 뒤 cell을 당기지도 않는다(제자리 blank). **커서는 안 움직인다**.
+/// 베이스: xterm `ECH`("Erase Ps Character(s)") — nvim이 모드 라벨(`-- INSERT --`)을 이 시퀀스로 지운다(EL 아님).
+pub fn eraseCharacters(self: *TerminalCore, count: u16) void {
+    const row = self.cursor.row;
+    if (self.size.cols == 0 or row >= self.size.rows) return;
+    const start = self.cursor.col;
+    const end: u16 = @min(start +| @max(count, 1), self.size.cols);
+    var col = start;
+    while (col < end) : (col += 1) {
+        // erase는 현재 pen의 배경색으로 채운다(blank cell + style만) — eraseInLine과 동일 규칙(bce).
+        self.cells[self.index(row, col)] = .{ .style = self.pen };
+    }
+    repairWideGlyphEdges(self, row, start, end);
+    markDirty(self, row);
+    // ECH는 부분 erase라 soft-wrap flag를 끄지 않는다(EL mode 1과 같은 결 — 줄 끝이 남아 다음 행으로
+    // 이어질 수 있다). deferred autowrap만 무효화(다른 erase op과 동일).
+    self.pending_wrap = false;
+    self.last_print = null;
+}
+
+/// ICH (CSI Ps @): 커서 위치에 Ps개(기본 1) 빈 칸을 삽입한다. 커서부터 줄 끝까지의 셀을 오른쪽으로
+/// 밀고, 줄 끝을 넘는 셀은 버린다. 빈 칸은 현재 pen 배경(BCE — eraseCharacters와 동일 규칙). 커서
+/// 위치는 불변. 베이스: ECMA-48 ICH / xterm ctlseqs `CSI Ps @`. 좌우 margin(DECSLRM) 미구현이라
+/// 줄 전체에서 작동한다.
+pub fn insertChars(self: *TerminalCore, count: u16) void {
+    const row = self.cursor.row;
+    if (self.size.cols == 0 or row >= self.size.rows) return;
+    const start = self.cursor.col;
+    if (start >= self.size.cols) return;
+    const cols = self.size.cols;
+    const n: u16 = @min(@max(count, 1), cols - start);
+    const blank: types.Cell = .{ .style = self.pen };
+    // 커서부터 오른쪽 셀을 n칸 오른쪽으로(역순 복사라 영역이 겹쳐도 안전). 줄 끝을 넘는 셀은 버린다.
+    var col: u16 = cols;
+    while (col > start + n) {
+        col -= 1;
+        self.cells[self.index(row, col)] = self.cells[self.index(row, col - n)];
+    }
+    // 삽입된 빈 칸.
+    col = start;
+    while (col < start + n) : (col += 1) self.cells[self.index(row, col)] = blank;
+    // 왼쪽 경계에서 쪼개진 wide(start-1 base의 continuation이 밀려남)를 복구하고, 줄 끝으로 밀려
+    // continuation이 줄 밖으로 나간 wide base를 비운다.
+    repairWideGlyphEdges(self, row, start, cols);
+    if (self.cells[self.index(row, cols - 1)].width == 2) self.cells[self.index(row, cols - 1)] = blank;
+    markDirty(self, row);
+    self.pending_wrap = false;
+    self.last_print = null;
+}
+
+/// DCH (CSI Ps P): 커서 위치에서 Ps개(기본 1) 문자를 삭제한다. 커서 오른쪽 셀을 왼쪽으로 당기고,
+/// 줄 끝의 빈 자리는 현재 pen 배경(BCE). 커서 위치는 불변. 베이스: ECMA-48 DCH / xterm `CSI Ps P`.
+pub fn deleteChars(self: *TerminalCore, count: u16) void {
+    const row = self.cursor.row;
+    if (self.size.cols == 0 or row >= self.size.rows) return;
+    const start = self.cursor.col;
+    if (start >= self.size.cols) return;
+    const cols = self.size.cols;
+    const n: u16 = @min(@max(count, 1), cols - start);
+    const blank: types.Cell = .{ .style = self.pen };
+    // 커서 오른쪽 셀을 n칸 왼쪽으로 당긴다.
+    var col = start;
+    while (col + n < cols) : (col += 1) {
+        self.cells[self.index(row, col)] = self.cells[self.index(row, col + n)];
+    }
+    // 줄 끝 n칸은 빈 칸.
+    while (col < cols) : (col += 1) self.cells[self.index(row, col)] = blank;
+    // 왼쪽 경계에서 쪼개진 wide(start-1 base)를 복구하고, 당겨와서 base를 잃은 continuation을 비운다.
+    repairWideGlyphEdges(self, row, start, cols);
+    if (self.cells[self.index(row, start)].continuation) self.cells[self.index(row, start)] = blank;
+    markDirty(self, row);
+    self.pending_wrap = false;
+    self.last_print = null;
+}
+
+pub fn eraseInDisplay(self: *TerminalCore, mode: u16) void {
+    if (self.size.rows == 0 or self.size.cols == 0) return;
+    // 모든 ED 모드는 deferred autowrap을 무효화한다(EL과 동일한 이유, xterm/Ghostty 동작).
+    self.pending_wrap = false;
+    const blank: types.Cell = .{ .style = self.pen };
+    switch (mode) {
+        // 2/3: 화면 전체. 3(xterm E3)은 저장된 줄(스크롤백)까지 지운다 — `clear`가 보내는
+        // \e[3J의 핵심 의미로, 비밀 출력 후 history를 비우는 용도다.
+        2, 3 => {
+            @memset(self.cells, blank);
+            @memset(self.wrapped, false);
+            @memset(self.prompt_marks, .{}); // 전체 clear는 OSC 133 분류도 지운다
+            self.semantic_state = .unknown; // 진행 중 영역도 끝낸다(셸이 곧 프롬프트를 재마킹)
+            if (mode == 3) clearScrollback(self);
+            self.dirty = core.fullDirty(self.size);
+        },
+        // 1: 화면 시작 ~ 커서까지.
+        1 => {
+            const cursor_index = self.index(self.cursor.row, self.cursor.col);
+            var i: usize = 0;
+            while (i <= cursor_index and i < self.cells.len) : (i += 1) self.cells[i] = blank;
+            for (0..@min(@as(usize, self.cursor.row) + 1, self.wrapped.len)) |r| self.wrapped[r] = false;
+            repairWideGlyphEdges(self, self.cursor.row, 0, @min(self.cursor.col + 1, self.size.cols));
+            // dirty를 덮어쓰지 않고 markDirty로 병합한다 — 같은 write()에서 앞서 dirty된 행
+            // (예: 방금 출력한 아래쪽 행)을 잃어 렌더가 stale glyph를 남기지 않게 한다.
+            markDirty(self, 0);
+            markDirty(self, self.cursor.row);
+        },
+        // 0(기본): 커서 ~ 화면 끝까지.
+        else => {
+            const cursor_index = self.index(self.cursor.row, self.cursor.col);
+            var i: usize = cursor_index;
+            while (i < self.cells.len) : (i += 1) self.cells[i] = blank;
+            for (self.cursor.row..self.size.rows) |r| self.wrapped[r] = false;
+            repairWideGlyphEdges(self, self.cursor.row, self.cursor.col, self.size.cols);
+            markDirty(self, self.cursor.row);
+            markDirty(self, self.size.rows - 1);
+        },
+    }
+    self.last_print = null;
+}

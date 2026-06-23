@@ -9201,6 +9201,8 @@ pub const AppSession = struct {
             self.dropQuadsByLayer(1); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
+            self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
+            self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
@@ -10546,16 +10548,71 @@ pub const AppSession = struct {
     /// 드리프트하지 않는다. 배지는 안 읽은 알림이 있을 때만 종 한 칸 왼쪽부터: 1~9는 숫자 1칸(`bell_col-1`), 10개 이상은
     /// "9+" 2칸(`bell_col-2`·`bell_col-1`). 종 색은 fg(sidebar_foreground), 배지는 coral. 호출처가 폭을 보장해
     /// (펼침 cols≥13 → bell_col=cols-11≥2, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
-    fn appendBellAndBadge(self: *AppSession, cells: *std.ArrayList(renderer.DrawCell), bell_col: u16, fg: terminal.Color) !void {
+    fn appendBellAndBadge(self: *AppSession, cells: *std.ArrayList(renderer.DrawCell), bell_col: u16, fg: terminal.Color, round_badge: bool) !void {
         try cells.append(self.allocator, .{ .row = 0, .col = bell_col, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
         if (self.notification_unread == 0) return;
-        const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
-        if (self.notification_unread > 9) {
-            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 2, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
-            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
+        if (round_badge) {
+            // 펼침 헤더: 종 **우상단** 빨강 원형 배지(iOS/macOS식). 빨강 원은 GPU quad(appendNotificationBadge, layer 4 —
+            // 헤더 글리프 '뒤')가 그리고, 여기선 그 원 위에 올라갈 **흰 숫자**만 셀로 둔다(같은 col=bell_col+2 단일 출처 —
+            // notificationBadgeCol). 원형 1칸 제약상 1~9는 숫자, 10개 이상은 '9'로 cap한다(2칸 "9+"는 종 우측에 ◧가 붙어
+            // 자리가 없다 — docs/notifications.md §3). 배경은 default(투명)라 원 quad가 비친다.
+            const white: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+            const digit: u21 = '0' + @as(u21, @intCast(@min(self.notification_unread, 9)));
+            try cells.append(self.allocator, .{ .row = 0, .col = notificationBadgeCol(bell_col), .codepoint = digit, .style = .{ .foreground = white } });
         } else {
-            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
+            // 접힘 타이틀바: 종 **좌측** 빨강 텍스트 배지(기존 유지). 접힘 헤더는 터미널 위에 그려져 layer 4 quad가 터미널
+            // 셀에 가리므로(원형 quad 부적합) 텍스트 배지로 둔다. 1~9는 숫자 1칸, 10개 이상은 "9+" 2칸.
+            const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
+            if (self.notification_unread > 9) {
+                try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 2, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
+                try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
+            } else {
+                try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
+            }
         }
+    }
+
+    /// 펼침 헤더 알림 배지(흰 숫자 cell·빨강 원 quad)가 올라갈 col — 종(2칸, bell_col·bell_col+1) **우측 한 칸**.
+    /// appendBellAndBadge(셀)와 appendNotificationBadge(quad)의 단일 출처라 둘이 어긋나지 않는다.
+    fn notificationBadgeCol(bell_col: u16) u16 {
+        return bell_col + 2;
+    }
+
+    /// 펼침 헤더 종 우상단 알림 배지의 **빨강 원형 quad**(layer 4 — 사이드바 bg strip 뒤·헤더 글리프 앞)를 self.gpu_quads에
+    /// 1개 append한다. 그 원 위에 올라갈 흰 숫자는 appendBellAndBadge가 헤더 frame 셀(col=notificationBadgeCol)로 둔다 —
+    /// cell↔quad가 같은 col에서 만나 어긋나지 않는다. 안 읽은 알림이 없거나 헤더가 안 그려지는 폭/상태면 무동작.
+    /// **접힘은 제외**한다(접힘 헤더는 터미널 위에 그려져 layer 4 quad가 터미널 셀에 가려 안 보임 — 접힘은 텍스트 배지 유지).
+    /// per-frame: renderFrame이 dropQuadsByLayer(4) 직후 호출(헤더 frame의 흰 숫자와 같은 주기로 갱신).
+    fn appendNotificationBadge(self: *AppSession) void {
+        if (self.notification_unread == 0 or self.sidebar_collapsed) return;
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0 or self.tabs.items.len == 0) return;
+        if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return;
+        const cols = self.sidebar_width_px / cw;
+        if (cols < 13) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderFrame cols<13과 정합) — 배지도 생략
+        const cw_f: f32 = @floatFromInt(cw);
+        const ch_f: f32 = @floatFromInt(ch);
+        const badge_col = notificationBadgeCol(@intCast(cols - 11)); // 종(cols-11) 우측 한 칸 = cols-9
+        // 배지 셀 중심(가로)·헤더 row 0 세로 중심(backing px). 흰 숫자가 원 가운데 오게 셀 중심에 맞춘다. center_y는 digit
+        // 글리프 시각 중심(셀 중앙보다 약간 위)에 맞춰 0.46ch로 둔다(검증). 원이 너무 크면 옆 ◧ 아이콘에 닿으므로 0.82ch.
+        const center_x: f32 = (@as(f32, @floatFromInt(badge_col)) + 0.5) * cw_f;
+        const center_y: f32 = ch_f * 0.46;
+        const d: f32 = ch_f * 0.82; // 원 지름(또렷하면서 ◧ 아이콘과 안 닿게)
+        const red = packRgbAlpha(.{ .r = 0xE5, .g = 0x48, .b = 0x4D }, 0xFF); // 알림 배지 빨강(흰 숫자 대비). straight-alpha(셰이더 rgb*=a)
+        self.gpu_quads.append(self.allocator, .{
+            .x = center_x - d / 2.0,
+            .y = center_y - d / 2.0,
+            .w = d,
+            .h = d,
+            .corner_radii = .{ d / 2.0, d / 2.0, d / 2.0, d / 2.0 }, // 원형
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = red,
+            .fill_color1 = red,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 4, // 사이드바 bg strip 뒤·헤더 글리프 앞(흰 숫자가 위에 보이게)
+        }) catch {};
     }
 
     fn buildSidebarHeaderFrame(self: *AppSession) !?renderer.RenderFrame {
@@ -10591,7 +10648,7 @@ pub const AppSession = struct {
         // headerHit의 notifications zone(cols-12..cols-9)이 종 글리프(cols-11·cols-10)와 배지(cols-12)를 모두 포함한다.
         // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는 안 읽은 알림이 있을 때만 종
         // 좌측에(1~9=cols-12 1칸, 10+="9+" cols-13·cols-12). 글리프·색·"9+" 규칙은 appendBellAndBadge가 접힘 토글과 공유.
-        try self.appendBellAndBadge(&cells, cols - 11, fg);
+        try self.appendBellAndBadge(&cells, cols - 11, fg, true); // 펼침: 종 우상단 원형 배지(흰 숫자 + 빨강 원 quad)
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
@@ -10678,7 +10735,7 @@ pub const AppSession = struct {
         // 좌→우: 종+배지(가장 왼쪽, 펼침 헤더와 같은 순서) → ◧ 펼치기 토글. 알림 종은 접힘에도 유지 — 펼침 헤더와 같은
         // 글리프/색/"9+" 규칙(appendBellAndBadge 단일 출처). 렌더러가 접힘 헤더 줄0 글리프(종·배지·◧)를 타이틀바 띠
         // 세로 중앙에 함께 정렬한다(terminal_origin_x_px==0 분기).
-        try self.appendBellAndBadge(&cells, bell_col, fg);
+        try self.appendBellAndBadge(&cells, bell_col, fg, false); // 접힘: 종 좌측 텍스트 배지(터미널 위라 quad 부적합)
         try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         const draw_list = renderer.DrawList{
             .size = .{ .cols = btn_col + 2, .rows = 1 }, // ◧(가장 오른쪽, 1칸) + 여유 1칸

@@ -312,3 +312,10 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 > **kitty.zig 분리 완결**(K1~K3 머지): core.zig 6715→6233줄, kitty.zig 516줄. core 잔류 = 별칭 3개(필드 타입 KittyGraphicsCommand·StoredPlacement·KittyImageStorage)·필드(kitty_images·kitty_placements·kitty_chunk_cmd·placement_views·image_views)·facade 2개(buildPlacementViews·buildImageViews)·seam(shiftCoordsForEviction→kitty.shiftPlacementsForEviction)·KittyFlags/KittyFlagStack(keyboard protocol). 후속 남음: input/report.zig(§6)·Screen struct fold(§2).
 
 검증·리뷰는 §5 그대로(매 PR 4종 게이트 green auto-merge --rebase). PR 3개라 마지막에 `/code-review max` 1회.
+
+### 8.3 리뷰 cleanup (K1~K3 `/code-review max` 후속)
+
+누적 리뷰(10 angle) 결과 **정확성 버그 0**(순수 이동 — 17개 함수 byte-identical 확인 + build + 322 테스트 + check-boundaries + ast-check green). selection §7.3과 같은 cleanup만 tip에서 정리:
+
+- **API 표면 축소**: kitty.zig의 intra-only 6개(`kittyAdvanceRows`·`addOrReplacePlacement`·`removePlacementsForImage`·`removeOnePlacement`·`storeKittyImage`·`deleteByZ`) + `KittyImage` struct + `KittyImageStorage.add`/`.remove`를 `pub`→private 데모트. K2 시점엔 store/deleteByZ가 core orchestrator에 cross-file 호출돼 pub였지만 K3에서 orchestrator가 kitty.zig로 와 intra-only가 됨. **pub 유지(cross-file)**: `execKittyGraphics`(parser)·`shiftPlacementsForEviction`(core seam)·`buildPlacementViews`/`buildImageViews`(core facade)·`kittyImageHasPlacement`(테스트)·struct 3개(필드 타입)·`KittyImageStorage.clear`/`.deinit`(core fullReset/deinit).
+- **stale 포인터**: `types.zig`의 KittyPlacement 주석 "core.zig의 KittyGraphicsCommand" → "kitty.zig의 …"(K1서 이동), `max_kitty_placements` 주석 정정.

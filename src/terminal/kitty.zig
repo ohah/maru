@@ -72,7 +72,7 @@ pub const StoredPlacement = struct {
 /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA). generation은 storage가
 /// (재)transmit마다 단조 증가로 찍어 주는 업로드 캐시 무효화 키다(렌더러가 image_id별 텍스처를
 /// 이 값이 바뀔 때만 다시 업로드 — K2d).
-pub const KittyImage = struct {
+const KittyImage = struct {
     id: u32,
     width: u32,
     height: u32,
@@ -111,7 +111,7 @@ pub const KittyImageStorage = struct {
     }
     /// 이미지를 저장한다 — img.data의 소유권을 가져간다(성공=map 보관, 거부/실패=즉시 free).
     /// 성공 시 새 generation을 찍어(같은 id 교체도 새 값) 렌더러 업로드 캐시를 무효화한다.
-    pub fn add(self: *KittyImageStorage, alloc: std.mem.Allocator, img: KittyImage) void {
+    fn add(self: *KittyImageStorage, alloc: std.mem.Allocator, img: KittyImage) void {
         if (self.map.fetchRemove(img.id)) |old| { // 같은 id는 교체(기존 free)
             self.total_bytes -= old.value.data.len;
             alloc.free(old.value.data);
@@ -129,7 +129,7 @@ pub const KittyImageStorage = struct {
         };
         self.total_bytes += stored.data.len;
     }
-    pub fn remove(self: *KittyImageStorage, alloc: std.mem.Allocator, id: u32) void {
+    fn remove(self: *KittyImageStorage, alloc: std.mem.Allocator, id: u32) void {
         if (self.map.fetchRemove(id)) |old| {
             self.total_bytes -= old.value.data.len;
             alloc.free(old.value.data);
@@ -140,7 +140,7 @@ pub const KittyImageStorage = struct {
 // ── placement·render-view leaf (다른 kitty fn 호출 없음 — 필드·types만) ────────────────────────────
 
 /// display(cmd.rows 미지정)에서 이미지 셀 높이를 자동 환산한다. 셀 메트릭(cell_height_px) 없으면 0.
-pub fn kittyAdvanceRows(self: *const TerminalCore, cmd: KittyGraphicsCommand) u16 {
+fn kittyAdvanceRows(self: *const TerminalCore, cmd: KittyGraphicsCommand) u16 {
     if (cmd.rows > 0) return @intCast(@min(cmd.rows, @as(u32, std.math.maxInt(u16))));
     if (self.cell_height_px == 0) return 0; // 셀 메트릭 미보유 — 자동 크기 환산 불가
     const img = self.kitty_images.map.get(cmd.image_id) orelse return 0;
@@ -162,7 +162,7 @@ pub fn kittyAdvanceRows(self: *const TerminalCore, cmd: KittyGraphicsCommand) u1
 
 /// placement를 추가하거나 같은 (image_id, placement_id)면 교체한다. 상한 초과면 거부(graceful),
 /// OOM이면 표시를 포기한다(절대 panic 없음 — 출력 경로 견고성).
-pub fn addOrReplacePlacement(self: *TerminalCore, p: StoredPlacement) void {
+fn addOrReplacePlacement(self: *TerminalCore, p: StoredPlacement) void {
     for (self.kitty_placements.items) |*existing| {
         if (existing.image_id == p.image_id and existing.placement_id == p.placement_id) {
             existing.* = p;
@@ -175,7 +175,7 @@ pub fn addOrReplacePlacement(self: *TerminalCore, p: StoredPlacement) void {
 
 /// 특정 image_id의 placement를 모두 제거한다(delete 시 이미지와 함께). 순서를 보존해(orderedRemove)
 /// 노출 순서를 결정적으로 둔다 — placement 수는 작아 비용이 무시할 만하다.
-pub fn removePlacementsForImage(self: *TerminalCore, image_id: u32) void {
+fn removePlacementsForImage(self: *TerminalCore, image_id: u32) void {
     var i: usize = 0;
     while (i < self.kitty_placements.items.len) {
         if (self.kitty_placements.items[i].image_id == image_id) {
@@ -185,7 +185,7 @@ pub fn removePlacementsForImage(self: *TerminalCore, image_id: u32) void {
 }
 
 /// (image_id, placement_id) 한 placement만 제거한다(delete d=i + p 지정).
-pub fn removeOnePlacement(self: *TerminalCore, image_id: u32, placement_id: u32) void {
+fn removeOnePlacement(self: *TerminalCore, image_id: u32, placement_id: u32) void {
     for (self.kitty_placements.items, 0..) |p, i| {
         if (p.image_id == image_id and p.placement_id == placement_id) {
             _ = self.kitty_placements.orderedRemove(i);
@@ -286,7 +286,7 @@ pub fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
 /// 이미지를 저장하되, 320MB 한도를 넘기면 먼저 evict해 자리를 만든다(K4b). 한 장이 한도보다 크면 거부.
 /// 같은 id 교체분은 회수되니 계산에서 뺀다. evict 정책은 evictKittyImagesFor — placement 없는 것·오래된
 /// 것 우선(kitty 명세 권장). evict 후에도 못 들어가면 add가 한도 체크로 거부한다(graceful, img.data free).
-pub fn storeKittyImage(self: *TerminalCore, img: KittyImage) void {
+fn storeKittyImage(self: *TerminalCore, img: KittyImage) void {
     if (img.data.len > self.kitty_images.limit) { // 한 장이 전체 한도 초과 — 불가
         self.allocator.free(img.data);
         return;
@@ -341,7 +341,7 @@ fn pickKittyEvictionVictim(self: *TerminalCore, exclude_id: u32) ?u32 {
 
 /// z-index가 target과 같은 placement를 제거한다. free_images면 그 placement가 가리키던 이미지도 free하고
 /// (그 이미지의 다른 placement까지 제거해 orphan을 막는다). placement 수가 작아 재시작 비용은 무시할 만하다.
-pub fn deleteByZ(self: *TerminalCore, target_z: i32, free_images: bool) void {
+fn deleteByZ(self: *TerminalCore, target_z: i32, free_images: bool) void {
     var i: usize = 0;
     while (i < self.kitty_placements.items.len) {
         const p = self.kitty_placements.items[i];

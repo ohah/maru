@@ -188,7 +188,7 @@ pub const KittyImageView = struct {
 /// placement_id로 구분되는 여러 placement가 있을 수 있다. 좌표는 뷰포트 상대 — row는 placement가 앵커된
 /// 셀의 뷰포트 행(top 기준 오프셋, i32라 위로 스크롤돼 화면 위로 벗어난 앵커는 음수). 셀 단위 크기(span)는
 /// 코어가 셀 픽셀 크기를 모르므로 계산하지 않는다: source rect(픽셀)와 명시 columns/rows만 담고, 픽셀→셀
-/// 환산·클립은 셀 메트릭을 가진 렌더러가 한다. 키 의미의 단일 출처는 core.zig의 KittyGraphicsCommand
+/// 환산·클립은 셀 메트릭을 가진 렌더러가 한다. 키 의미의 단일 출처는 kitty.zig의 KittyGraphicsCommand
 /// 주석이다. 베이스: kitty graphics protocol(placement/display).
 pub const KittyPlacement = struct {
     image_id: u32,

@@ -426,7 +426,7 @@ pub const TerminalCore = struct {
     /// 명세는 상한을 규정하지 않는다). (image_id, placement_id) 키 교체로 대부분 자연히 묶이지만, 한
     /// 이미지에 placement_id를 무한히 바꿔 보내는 폭주를 막는 방어선이다(이미지 320MB·APC 버퍼 한계와
     /// 같은 결). 보통 화면에 떠 있는 이미지는 한 자릿수~수십이라 1024는 충분히 여유롭다.
-    pub const max_kitty_placements = 1024; // kitty.addOrReplacePlacement(cross-file)가 참조 — pub
+    pub const max_kitty_placements = 1024; // kitty.zig(addOrReplacePlacement)가 core.TerminalCore.로 cross-file 참조 — pub
     /// chunked(m=1) 전송에서 누적할 수 있는 base64 payload 상한 — 악의적 m=1 무한 전송의 메모리 폭주를
     /// 막는 방어선(이미지 320MB·APC 4096·placement 1024 한계와 같은 결). 디코드된 이미지는 320MB로 따로
     /// 제한되므로, base64 오버헤드(~4/3)를 감안해 480MB로 둔다. 초과하면 그 chunked 전송을 폐기한다.

@@ -4654,13 +4654,25 @@ pub const AppSession = struct {
         // text 행(after_enums..after_texts)은 ←/→ 무동작(편집은 hex 클릭).
     }
 
-    /// 메모리의 loaded_config(스키마 필드 in-place 변경 — 세팅 GUI 토글)에서 appearance를 다시 resolve해 적용한다.
+    /// 세팅 GUI 라이브 재적용(토글·슬라이더·enum·색·배경 이미지·테마)의 공통 진입점. **런타임 ⌘+/− 줌을 보존한다** —
+    /// 폰트와 무관한 토글(커서 깜빡임 등)이 확대/축소를 리셋하지 않게(버그 수정). 통합 리셋(resetAllSettings)은 줌까지
+    /// config 기본으로 되돌려야 하므로 applyLoadedConfig(false)를 직접 부른다.
+    fn reapplyLoadedConfig(self: *AppSession) void {
+        self.applyLoadedConfig(true);
+    }
+
+    /// reapplyLoadedConfig 본체. 메모리의 loaded_config(스키마 필드 in-place 변경)에서 appearance를 다시 resolve해 적용한다.
     /// reloadConfig(파일 재로드)의 적용 단계만 떼어낸 것 — loaded_config를 교체/free하지 않으므로(같은 arena 유지)
     /// appearance가 그 arena를 계속 빌려도 안전하다(reloadConfig의 swap-then-free 순서 가드는 불필요). resolve 실패면
     /// 무동작(forgiving — appearance 보존). behavior 캐시·palette·scrollback·ambiguous-width·사이드바도 함께 갱신.
-    fn reapplyLoadedConfig(self: *AppSession) void {
+    /// preserve_zoom이면 ⌘+/− 런타임 줌을 보존하고(applyAppearancePreservingZoom — 단 폰트 크기 자체가 바뀐 GUI
+    /// 변경이면 그 값이 사용자 의도라 줌을 안 얹는다), false면(통합 리셋) 줌까지 config 기본 크기로 되돌린다.
+    fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
         const new_appearance = config_mod.resolveAppearance(self.loaded_config.config) catch return;
-        self.applyAppearance(new_appearance);
+        if (preserve_zoom)
+            self.applyAppearancePreservingZoom(new_appearance)
+        else
+            self.applyAppearance(new_appearance); // 통합 리셋 — 줌도 config 기본 크기로(applyAppearance가 base=appearance=config)
         self.audible_bell = self.loaded_config.config.bell.audible;
         self.bell_visual = self.loaded_config.config.bell.visual;
         self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
@@ -4676,8 +4688,8 @@ pub const AppSession = struct {
         // 커맨드 카탈로그는 여기서 재빌드하지 않는다 — reapplyLoadedConfig 자체는 keybindings/unbinds를 바꾸지 않는다
         // (GUI 토글·슬라이더·색 선택은 스키마 GUI 필드라 keybind 무관). keybind를 실제로 바꾸는 경로가 직접 재빌드한다:
         // rebind/unbindActionEntry·reloadConfig·resetAllSettings. **resetAllSettings는 keybind 4종을 빈 슬라이스로 비운 뒤**
-        // reapplyLoadedConfig를 부르고, 그 **뒤에** 자체적으로 rebuildCommandCatalog를 호출한다(#2-b). 즉 reapply는 keybind-불변
-        // 경로라 여기서 카탈로그를 안 건드리는 게 맞고, reset의 keybind 변경 반영은 resetAllSettings의 명시 재빌드가 책임진다.
+        // applyLoadedConfig(false)로 재적용하고, 그 **뒤에** 자체적으로 rebuildCommandCatalog를 호출한다(#2-b). 즉 이 경로는
+        // keybind-불변이라 여기서 카탈로그를 안 건드리는 게 맞고, reset의 keybind 변경 반영은 resetAllSettings의 명시 재빌드가 책임진다.
         self.metal_dirty = true;
     }
 
@@ -5380,6 +5392,26 @@ pub const AppSession = struct {
         self.applyMetricsPipeline();
     }
 
+    /// applyAppearance에 런타임 ⌘+/− 줌 보존을 얹은 변형 — config를 라이브 재적용하는 두 경로(GUI 토글
+    /// reapplyLoadedConfig·파일 재로드 reloadConfig)가 공유해 줌 처리를 일치시킨다. setFontSize(⌘+/−)는 런타임
+    /// appearance.font.size만 바꾸고 config는 안 건드리므로, config 재resolve가 그 줌을 날린다. 이를 막되:
+    ///   - **config 폰트 크기가 그대로일 때만**(`config_size == base_font_size`) base 대비 줌 델타를 새 크기 위에
+    ///     다시 얹는다. 폰트 크기 자체를 GUI(슬라이더/스텝)나 파일로 바꿨다면 그 값이 사용자가 의도한 절대 크기이므로
+    ///     줌을 안 얹고 그대로 둔다 — 안 그러면 슬라이더 표시값과 렌더 크기가 어긋난다(code-review high #1).
+    ///   - 경계 클램프는 ⌘+/− 와 동일하게 초과분을 흡수한다(clamp-forget): 줌 델타를 별도 저장하지 않고 appearance에서
+    ///     유도하므로, max/min을 넘긴 줌은 그만큼만 남는다. ⌘+/− 도 같은 의미라(누른 만큼 못 가면 잊음) 일관적이다.
+    /// ⌘0 기준 base_font_size는 줌 제외한 config 크기로 둔다(applyAppearance가 줌 포함 크기로 세운 것을 교정).
+    fn applyAppearancePreservingZoom(self: *AppSession, new_appearance: config_mod.ResolvedAppearance) void {
+        var appe = new_appearance;
+        const config_size = new_appearance.font.size; // ⌘0 기준이 될 config 폰트 크기(줌 제외)
+        if (config_size == self.base_font_size) {
+            const zoom_delta = self.appearance.font.size - self.base_font_size;
+            appe.font.size = std.math.clamp(config_size + zoom_delta, font_size_min, font_size_max);
+        }
+        self.applyAppearance(appe);
+        self.base_font_size = config_size; // applyAppearance가 줌 포함 크기로 세운 ⌘0 기준을 줌 제외 config 값으로 교정
+    }
+
     /// appearance.font(크기·family·line-height·letter-spacing)·window_padding이 바뀐 뒤 cell 메트릭과 그것에서
     /// 파생되는 모든 것을 다시 잡는다(setFontSize·applyAppearance 공유): ① refreshCellMetrics(cell 픽셀·사이드바·
     /// 패딩 px 재계산) → ② atlas 무효화(새 크기로 재래스터·옛 슬롯 회수) → ③ 같은 창(backing px)에서 grid 재산출
@@ -5412,7 +5444,9 @@ pub const AppSession = struct {
             new_parsed.deinit();
             return;
         };
-        self.applyAppearance(new_appearance); // appearance 통째 교체 — 옛 family를 더는 안 읽는다
+        // appearance 통째 교체 — 옛 family를 더는 안 읽는다. 줌 보존(GUI 토글과 일치 — code-review high #2)은
+        // 옛 appearance.font.size·base_font_size(둘 다 스칼라 f32)만 읽으므로 옛 arena family slice를 deref하지 않아 UAF 없음.
+        self.applyAppearancePreservingZoom(new_appearance);
         self.loaded_config.deinit(); // 이제 옛 loaded_config(arena)를 버려도 안전
         self.loaded_config = new_parsed;
         // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
@@ -5475,7 +5509,7 @@ pub const AppSession = struct {
         self.loaded_config.global_bindings = &.{};
         self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
         self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
-        self.reapplyLoadedConfig(); // resolve→apply→behavior 캐시→reapply* 재적용(resolve-first 안전; reloadConfig 미러 — 중복 제거, 리뷰 #827)
+        self.applyLoadedConfig(false); // resolve→apply→behavior 캐시→reapply* 재적용. false=런타임 줌도 config 기본으로(통합 리셋이라 ⌘+/− 확대 해제; resolve-first 안전, reloadConfig 미러 — 리뷰 #827)
         // **config 파일을 기본 상태로 덮어쓴다**(삭제 아님) → 빈+주석이라 다음 로드는 schema·특수 키·주석 전부 기본값.
         // 부분 갱신(updateForKeys)이 아닌 전체 덮어쓰기인 이유: 기본값 위 override만 쓰는 정책상 (a) 비-schema 키
         // (theme.preset/palette/env/cursor.color/shell.args)가 안 지워지고 (b) 빈 항목까지 40여 줄을 쏟는다(리뷰 #827).
@@ -14511,6 +14545,57 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     i = 0;
     while (i < 200) : (i += 1) session.dispatchAppAction(.increase_font_size);
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
+}
+
+// reapplyLoadedConfig(세팅 GUI 라이브 재적용 — 커서 깜빡임 토글 등)가 런타임 ⌘+/− 줌을 날리지 않는지(버그 회귀
+// 가드: 확대 상태에서 폰트 무관 설정을 토글하면 확대가 리셋되던 문제). config 폰트 크기가 바뀌면 줌이 그 위에
+// 상대로 얹히는지(base_font_size=⌘0 기준은 줌 제외 config 값)도 함께 본다.
+test "reapplyLoadedConfig: GUI 토글이 런타임 줌(⌘+/−)을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 메트릭 + PTY
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
+
+    const factory = try config_mod.resolveAppearance(.{});
+    const cw0 = session.cell_width_px;
+    try std.testing.expectEqual(factory.font.size, session.appearance.font.size);
+    try std.testing.expectEqual(factory.font.size, session.base_font_size);
+
+    // ⌘+ 로 6pt 확대 — appearance만 바뀌고 loaded_config.config.font.size는 파일 기본 그대로.
+    session.setFontSize(factory.font.size + 6);
+    const zoomed_cw = session.cell_width_px;
+    try std.testing.expect(zoomed_cw > cw0);
+    try std.testing.expectEqual(factory.font.size + 6, session.appearance.font.size);
+
+    // 폰트와 무관한 설정 토글(예: cursor.blink) → loaded_config in-place flip 후 reapplyLoadedConfig.
+    _ = config_mod.schema.setBool(&session.loaded_config.config, "cursor.blink", false);
+    session.reapplyLoadedConfig();
+    try std.testing.expectEqual(factory.font.size + 6, session.appearance.font.size); // 줌 보존(버그였다면 factory로 리셋)
+    try std.testing.expectEqual(factory.font.size, session.base_font_size); // ⌘0 기준은 줌 제외 config 값
+    try std.testing.expectEqual(zoomed_cw, session.cell_width_px); // cell 메트릭도 확대 그대로
+
+    // ⌘0 reset은 여전히 config 기본으로 복귀(base 보존 확인).
+    session.resetFontSize();
+    try std.testing.expectEqual(factory.font.size, session.appearance.font.size);
+    try std.testing.expectEqual(cw0, session.cell_width_px);
+
+    // config 폰트 크기 자체를 GUI(슬라이더/스텝)로 바꾸면, 그 값이 사용자가 의도한 절대 크기다 — 줌을 얹지 않고
+    // 그 값으로 간다(슬라이더 표시 == 렌더 크기, code-review high #1). 확대 상태에서 슬라이더를 끌어도 줌이 흡수돼
+    // base=appearance=새 config 값이 된다(안 그러면 슬라이더는 14를 가리키는데 렌더는 20이 되는 불일치).
+    session.setFontSize(factory.font.size + 6); // 다시 +6 확대(appearance=base+6, base=base)
+    session.loaded_config.config.font.size = factory.font.size + 2; // 슬라이더로 config 폰트 크기 변경
+    session.reapplyLoadedConfig();
+    try std.testing.expectEqual(factory.font.size + 2, session.base_font_size); // ⌘0 기준 = 새 config 값
+    try std.testing.expectEqual(factory.font.size + 2, session.appearance.font.size); // 줌 안 얹힘 — 슬라이더 값 그대로
 }
 
 // resetAllSettings(통합 리셋 — 메뉴 Reset to Defaults·커맨드 팝업 공용 단일 함수)가 런타임 줌·config 변경을 공장

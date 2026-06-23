@@ -1484,7 +1484,20 @@ fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
     // the current run (stream start, or right after CR/LF), the mark has
     // nothing to attach to and is dropped.
     const last = self.last_print orelse return;
-    self.screen.cells[self.index(last.row, last.col)].combining = codepoint;
+    const idx = self.index(last.row, last.col);
+    var cell = self.screen.cells[idx];
+    // 무손실 저장(HG2b): 둘째 mark부터 grapheme_store에 누적한다 — 예전엔 단일 combining 슬롯이라
+    // 키캡(base+VS16+U+20E3)에서 VS16이 U+20E3에 덮이고, 다중 악센트(e+◌́+◌̣)도 마지막만 남아
+    // dump·복사에서 잃었다. 첫 mark는 흔한 단일 결합처럼 store 없이 combining만(0 비용). combining은
+    // 렌더 그림자로 **마지막 mark**를 그대로 유지한다 — renderer·hack은 이 그림자를 읽어 동작 보존
+    // (cluster 전체를 읽는 셰이퍼 이전·combining 제거는 HG3). 무손실 권위는 store(grapheme_id).
+    if (cell.grapheme_id != 0) {
+        cell.grapheme_id = self.appendGraphemeCodepoint(cell.grapheme_id, codepoint) catch cell.grapheme_id;
+    } else if (cell.combining) |first| {
+        cell.grapheme_id = self.internGrapheme(&.{ first, codepoint }) catch 0;
+    }
+    cell.combining = codepoint;
+    self.screen.cells[idx] = cell;
     markDirty(self, last.row);
 }
 

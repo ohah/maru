@@ -68,7 +68,14 @@
   안 읽은 개수 배지(coral)는 **종 한 칸 왼쪽**부터 — 1~9는 숫자 1칸(`cols-12`), 10개 이상은 "9+" 2칸(`cols-13·cols-12`).
   `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 — 종 글리프
   (`cols-11·cols-10`)+배지(`cols-12`)를 포함하는 3칸 zone `[cols-12, cols-9)`. 안 그리면 hit-test도 none(`cols < 13`
-  좁은 사이드바, 우측 아이콘 4개가 안 들어감).
+  좁은 사이드바, 우측 아이콘 4개가 안 들어감). 사이드바 **최소 폭**(`sidebarMinPt`)은 신호등 클리어런스 + **13칸**으로,
+  알림 그룹 좌단("9+" 배지 `cols-13`)까지 신호등과 안 겹치게 둔다(예전 10칸은 ◧까지만 잡아 종+배지가 겹쳤다).
+- **접힘에도 알림 종 유지**: 사이드바 접힘(`sidebar_collapsed`, 폭 0)이면 좌상단 타이틀바 띠에 ◧ 펼치기 토글만 떴는데,
+  이제 그 오른쪽(`collapsedBellCol()` = `collapsedToggleCol()+3`)에 **종 + 배지**도 그린다(`buildCollapsedToggleFrame`).
+  렌더러는 접힘(terminal_origin_x_px==0) 헤더 줄0 글리프(◧·종·배지)를 모두 타이틀바 띠 세로 중앙에 정렬한다(예전 ◧
+  전용 `is_collapsed_toggle`을 헤더 줄0 전체 `is_collapsed_header`로 일반화). 종 클릭(`collapsedNotificationRect`)은
+  `openNotificationPanel`이 접힘 분기로 띠 아래에 패널을 띄우고(`is_window_drag_region`·hover 커서도 이 영역 제외/포인터),
+  ◧ 클릭은 펼치기(별개 영역, 클릭 우선순위 종→◧).
 - **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(context_menu를 본뜸). 한 항목 = **2줄 카드**
   (제목 + 본문), 안읽음 점(●), 우측 상대시간("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤
   윈도우·위치 clamp)을 view·hitTest·panelRect가 공유(보이는 카드 == 클릭되는 카드). 카드 구분선은 `.fill`(1px)로 —
@@ -118,10 +125,11 @@
 
 - **단위(Zig 헤드리스)**: `notifications.zig`(state·handle·itemAt 2행·view ops·panelRect clamp), 히스토리 ring buffer
   (push 상한·unread 증감·markRead·formatRelativeTime), `acceptNotification` 역순 매핑, `activateSurfaceById` 역조회,
-  `headerHit` 4-아이콘 zone.
-- **렌더 1회**: op 방출만으론 부족(modal_box 회귀 전례) — `buildSidebarHeaderFrame` 종/배지 cell + 오버레이 lowering으로
-  2줄 카드가 cell 그리드에 들어가고 한글 본문이 안 잘리는지(EAW). **종 글리프(🔔)는 실제 렌더로 fallback 확인** —
-  깨지면 BMP 기호로 교체(`agentSymbolCodepoint` 규율: JetBrains Mono 보유 글리프만).
+  `headerHit` 4-아이콘 zone, **접힘 종 hit-test**(`collapsedNotificationRect` 종 글리프 동심·◧ rect 비겹침·클릭→패널 열림).
+- **렌더 1회**: op 방출만으론 부족(modal_box 회귀 전례) — `buildSidebarHeaderFrame`(펼침)·`buildCollapsedToggleFrame`(접힘)이
+  공유하는 `appendBellAndBadge` 종/배지 cell + 오버레이 lowering으로 2줄 카드가 cell 그리드에 들어가고 한글 본문이 안
+  잘리는지(EAW). **종 글리프(🔔)는 실제 렌더로 fallback 확인** — 깨지면 BMP 기호로 교체(`agentSymbolCodepoint` 규율:
+  JetBrains Mono 보유 글리프만). 접힘 종은 `MARU_COLLAPSE_SIDEBAR` 헤드리스 스크린샷으로 ◧↔종 띠 세로 정렬 확인.
 - **수동 E2E**(`.app` 번들): OSC/에이전트 알림 → 배너 클릭 → 발신 터미널 점프 / 멀티 윈도우 토큰 라우팅 / 종 클릭 →
   카드 패널 → 항목 클릭 점프 / 안읽음 배지·점.
 

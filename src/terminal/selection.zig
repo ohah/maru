@@ -43,7 +43,7 @@ fn isWordBoundaryCell(cell: types.Cell, separators: []const u21) bool {
 /// 절대-행 [start, end] 선형 범위를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null). 선택
 /// 하이라이트와 URL 밑줄이 같은 규칙을 쓰게 공유한다.
 fn clipAbsSpanToViewport(self: *const TerminalCore, start: types.SelectionPoint, end: types.SelectionPoint, block: bool) ?types.SelectionSpan {
-    const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
+    const top_abs = self.screen.sb.count - @min(self.view_offset, self.screen.sb.count);
     const bottom_abs = top_abs + self.size.rows - 1;
     if (end.row < top_abs or start.row > bottom_abs) return null;
     const start_row: u16 = if (start.row < top_abs) 0 else @intCast(start.row - top_abs);
@@ -334,7 +334,7 @@ pub fn selectLineAt(self: *TerminalCore, viewport_row: u16) void {
 pub fn selectAll(self: *TerminalCore) void {
     screen.ensureScrollbackRewrapped(self); // selectLineAt와 같은 이유 — abs 좌표 쓰기 전 스크롤백 rewrap 확정
     if (self.size.rows == 0) return;
-    const last_abs = self.sb.count + self.size.rows - 1;
+    const last_abs = self.screen.sb.count + self.size.rows - 1;
     const end_cells = screen.absRow(self, last_abs) orelse return;
     self.selection_anchor = .{ .row = 0, .col = 0 };
     self.selection_head = .{ .row = last_abs, .col = @intCast(end_cells.len -| 1) };
@@ -371,7 +371,7 @@ pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?type
 /// 절대 좌표 anchor에서 시작하는 URL 단어의 현재 뷰포트 밑줄 범위. 매 frame 호출돼 스크롤/
 /// 출력/resize 후에도 현재 폭/위치에 맞게 클립된다(stale span OOB 차단).
 pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
-    const top_abs = self.sb.count - @min(self.view_offset, self.sb.count);
+    const top_abs = self.screen.sb.count - @min(self.view_offset, self.screen.sb.count);
     const bottom_abs = top_abs + self.size.rows - 1;
     if (anchor.row < top_abs or anchor.row > bottom_abs) return null; // anchor가 화면 밖
     const id = cellLinkAt(self, anchor.row, anchor.col);
@@ -464,7 +464,7 @@ pub fn findMatches(self: *TerminalCore, allocator: std.mem.Allocator, needle_utf
     if (needle.items.len == 0) return;
 
     // 스크롤백 포함 [0, total) 전체를 검색한다(abs 0부터). alt에선 sb.count==0이라 자연히 현재 화면뿐.
-    const total = self.sb.count + self.size.rows;
+    const total = self.screen.sb.count + self.size.rows;
     // 논리 줄마다 코드포인트 시퀀스(cps)와 각 코드포인트의 절대 좌표(coords)를 만들어 검색하고, 다음 줄에서
     // 버퍼를 재사용한다(스크롤백 전체를 한 문자열로 들지 않음 — 메모리는 가장 긴 논리 줄 하나).
     var cps: std.ArrayList(u21) = .empty;

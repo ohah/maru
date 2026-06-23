@@ -2165,9 +2165,9 @@ pub const AppSession = struct {
 
     /// 사이드바 최소 폭(pt) — 헤더 아이콘 줄(좌측 네이티브 신호등 ~72pt + 우측 🔔/◧/⚙/+ 아이콘, sidebar.zig headerHit)이
     /// 겹치지 않는 하한. 아이콘은 cell 폭에 비례하므로 고정 sidebar_min_pt(120)로는 큰 폰트에서 신호등과 겹친다 — 신호등
-    /// 클리어런스 + 13칸을 px로 잡아 pt 환산한 값과 sidebar_min_pt 중 큰 쪽이다. 13칸 = 알림 그룹의 좌단(안읽음 "9+" 배지
-    /// `cols-13`, 단일 배지 `cols-12`, 종 글리프 `cols-11·cols-10`)까지를 클리어런스 오른쪽에 둔다 — 예전 10칸은 ◧(`cols-8`)
-    /// 까지만 잡아 종+배지가 신호등과 겹쳤다(사용자 피드백). **단 sidebar_max_pt를 넘지 않게 cap**(clamp 하한이 상한을 넘으면
+    /// 클리어런스 + 13칸을 px로 잡아 pt 환산한 값과 sidebar_min_pt 중 큰 쪽이다. 13칸 = 알림 그룹의 좌단(펼침 헤더의 종
+    /// 글리프 좌단 `cols-12`, 종 점유 `cols-12·cols-11`, 우상단 배지 `cols-10`)까지를 클리어런스 오른쪽에 둔다 — 예전 10칸은
+    /// ◧(`cols-8`)까지만 잡아 종+배지가 신호등과 겹쳤다(사용자 피드백). **단 sidebar_max_pt를 넘지 않게 cap**(clamp 하한이 상한을 넘으면
     /// std.math.clamp가 assert로 패닉 — 거대 폰트에선 max 우선). 폭을 정하는 **모든 경로**(드래그 setSidebarWidthPx·메트릭 변경
     /// refreshCellMetrics)가 공유하는 단일 출처라 어느 경로로도 겹침이 새지 않는다.
     fn sidebarMinPt(self: *const AppSession) u32 {
@@ -9846,7 +9846,7 @@ pub const AppSession = struct {
                     .toggle_sidebar => cols -| 8,
                     .view_options => cols -| 5,
                     .new_workspace => cols -| 2,
-                    .notifications => cols -| 11, // 벨 글리프(col cols-11, 2칸 폭)와 hover 정렬 — 2.6칸 폭 quad가 cols-11·cols-10 글리프를 덮는다
+                    .notifications => cols -| 12, // 벨 글리프(col cols-12, 2칸 폭)와 hover 정렬 — 2.6칸 폭 quad가 cols-12·cols-11 글리프를 덮는다
                     .search, .none => cols, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
                 };
                 const cw: f32 = @floatFromInt(self.cell_width_px);
@@ -10593,7 +10593,7 @@ pub const AppSession = struct {
         if (cols < 13) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderFrame cols<13과 정합) — 배지도 생략
         const cw_f: f32 = @floatFromInt(cw);
         const ch_f: f32 = @floatFromInt(ch);
-        const badge_col = notificationBadgeCol(@intCast(cols - 11)); // 종(cols-11) 우측 한 칸 = cols-9
+        const badge_col = notificationBadgeCol(@intCast(cols - 12)); // 종(cols-12, 2칸) 우측 한 칸 = cols-10 (◧ cols-8과 cols-9 한 칸 띄움)
         // 배지 셀 중심(가로)·헤더 row 0 세로 중심(backing px). 흰 숫자가 원 가운데 오게 셀 중심에 맞춘다. center_y는 digit
         // 글리프 시각 중심(셀 중앙보다 약간 위)에 맞춰 0.46ch로 둔다(검증). 원이 너무 크면 옆 ◧ 아이콘에 닿으므로 0.82ch.
         const center_x: f32 = (@as(f32, @floatFromInt(badge_col)) + 0.5) * cw_f;
@@ -10640,15 +10640,13 @@ pub const AppSession = struct {
         // 아이콘 색은 호버 여부와 무관하게 항상 sidebar_foreground다 — hover 강조는 아래 호버 배경 quad(밝은 반투명)가
         // 맡는다. 예전엔 호버 아이콘을 sidebar_active로 재색칠했는데, Ghostty 테마에선 sidebar_active가 밝은 전경색이
         // 아니라 어두운 밴드색이라 아이콘이 오히려 어두워졌다(사용자 피드백) — 재색칠을 제거한다.
-        // 알림 종(글리프 col cols-11, EAW 2칸이라 cols-11·cols-10 점유) + 안 읽은 개수 배지(종 좌측 cols-12). 종은 2칸
-        // 폭이라, 1칸 폭 아이콘과 중심 간격을 맞추려면 글리프 좌단을 cols-11에 둔다(중심 픽셀 (cols-10)*cw). 그러면
-        // 종↔토글 중심 간격이 (cols-10)→(cols-7.5)=2.5칸이 아니라… 실제로 1칸 아이콘 중심은 (cols-7.5)·(cols-4.5)·
-        // (cols-1.5)로 3칸 간격이고, 종 글리프 두 셀(cols-11·cols-10) 중심 (cols-10.5)*cw도 토글 (cols-7.5)*cw와 3칸 —
-        // 즉 [종]–[토글]–[⚙]–[+]가 균일 3칸 간격이 된다(예전 cols-12는 4칸이라 종만 신호등 쪽으로 밀려 보였다).
-        // headerHit의 notifications zone(cols-12..cols-9)이 종 글리프(cols-11·cols-10)와 배지(cols-12)를 모두 포함한다.
-        // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는 안 읽은 알림이 있을 때만 종
-        // 좌측에(1~9=cols-12 1칸, 10+="9+" cols-13·cols-12). 글리프·색·"9+" 규칙은 appendBellAndBadge가 접힘 토글과 공유.
-        try self.appendBellAndBadge(&cells, cols - 11, fg, true); // 펼침: 종 우상단 원형 배지(흰 숫자 + 빨강 원 quad)
+        // 알림 종(글리프 좌단 col cols-12, EAW 2칸이라 cols-12·cols-11 점유, 렌더 -0.5 nudge로 중심 (cols-11.5)*cw) + 종 우상단
+        // 원형 배지(흰 숫자 cols-10 + 빨강 원 quad는 appendNotificationBadge). 종을 cols-12에 둬 배지(cols-10)와 ◧(cols-8)
+        // 사이에 cols-9 한 칸 간격을 둔다 — ◧가 1.7×라 cols-9로 번져, 배지를 cols-9에 두면 ◧에 닿던 것을 떼기 위함(사용자 피드백).
+        // headerHit의 notifications zone(cols-12..cols-9)이 종 글리프(cols-12·cols-11)와 배지(cols-10)를 모두 포함한다(클릭→패널).
+        // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 글리프·색·배지 규칙은 appendBellAndBadge가
+        // 접힘 토글과 공유(접힘은 좌측 텍스트 배지 — round_badge=false). 1~9 숫자·10+ "9" cap은 원형 1칸 제약(docs §3).
+        try self.appendBellAndBadge(&cells, cols - 12, fg, true); // 펼침: 종(cols-12) 우상단 원형 배지(흰 숫자 cols-10 + 빨강 원 quad)
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
@@ -11293,8 +11291,8 @@ pub const AppSession = struct {
 
     /// 알림 패널 말풍선 caret을 GPU 삼각형(gpu_quads gradient_kind=3) **1개**(채움 surface_bg, 패널 배경과 같은 색)로
     /// 그린다. 예전엔 focus_accent 외곽선 삼각형 위에 채움 삼각형을 얹었는데 채움 빗변의 fwidth edge-AA가 내부까지 부분
-    /// 커버리지를 줘 외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다(사용자 피드백). 벨 글리프 중심(렌더러 가로 nudge 반영: col cols-11·width 2 슬롯이 0.5칸
-    /// 왼쪽으로 밀려 중심 (cols-10.5)*cw)에 apex를 두고, 밑변을 패널 상단에 overlap만큼 겹쳐 상단 테두리를 caret
+    /// 커버리지를 줘 외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다(사용자 피드백). 벨 글리프 중심(렌더러 가로 nudge 반영: col cols-12·width 2 슬롯이 0.5칸
+    /// 왼쪽으로 밀려 중심 (cols-11.5)*cw)에 apex를 두고, 밑변을 패널 상단에 overlap만큼 겹쳐 상단 테두리를 caret
     /// 폭만큼 덮어 'bubble을 연다'. 패널이 세로 clamp로 anchor보다 위로 밀렸거나 벨이 패널 가로 밖이면 생략(벨과
     /// 어긋난 caret 방지). buildChromeOverlayFrame이 패널 배경 quad를 self.gpu_quads에 append한 '뒤'에 부른다(테두리 위로).
     fn appendNotificationCaret(self: *AppSession, items: []const chrome.components.notifications.Item, props: chrome.ChromeProps, tk: *const chrome.Tokens) void {
@@ -11307,7 +11305,7 @@ pub const AppSession = struct {
         if (panel.y < self.chrome_host.notifications.anchor_y) return; // 세로 clamp로 위로 밀림 — 벨과 어긋나니 생략
         const cw_f: f32 = @floatFromInt(cw);
         const ch_f: f32 = @floatFromInt(ch);
-        const bell_cx: f32 = (@as(f32, @floatFromInt(cols)) - 10.5) * cw_f; // 벨 중심(가로 nudge 반영)
+        const bell_cx: f32 = (@as(f32, @floatFromInt(cols)) - 11.5) * cw_f; // 벨 중심(cols-12, 2칸, 가로 -0.5 nudge 반영 → cols-11.5)
         // panelRect는 content rect(셀 격자)다. rich 모달 배경 quad는 lowering이 사방 modal_padding_px만큼 outset하므로
         // **보이는** 패널 경계는 content rect를 mp만큼 키운 것 — caret은 그 보이는 경계 기준으로 맞춰야 패널과 닿는다.
         const mp: f32 = @floatFromInt(tk.space.modal_padding_px);

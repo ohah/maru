@@ -774,11 +774,11 @@ bool maru_metal_renderer_draw(
                 const float py_nudge = (is_corner_icon || is_bell_icon) ? ch * 0.30f : 0.0f;
                 py_top = (float)tc.origin_y + (float)tc.row * ch + py_nudge;
             }
-            // 종(🔔)은 EAW 2칸 글리프라 정수 col(cols-11)+width 2의 슬롯 중심이 (cols-10)*cw에 떨어진다. 1칸 아이콘
-            // (◧/⚙/+) 중심은 (col+0.5)*cw로 서로 3칸 간격인데, 종이 그 패턴에 맞으려면 중심이 (cols-10.5)*cw여야 한다
-            // ([종]–[토글] 3칸). 현재 (cols-10)이라 토글 쪽으로 0.5칸 쏠려 좌우 패딩이 어긋났다(사용자 피드백). hover
-            // 배경 quad도 (cols-11+0.5)=(cols-10.5)*cw 중심이라, 종 글리프를 0.5칸 왼쪽으로 밀면 균일 간격·hover 중앙
-            // 정렬에 동시에 맞는다(2칸 글리프 중심은 정수 col로는 반칸에 못 와 렌더 단계 가로 nudge가 필요 — py_nudge와 동형).
+            // 종(🔔)은 EAW 2칸 글리프라 정수 col(좌단)+width 2의 슬롯 중심이 셀 경계(정수 col)에 떨어진다 — 1칸 아이콘
+            // (◧/⚙/+) 중심 (col+0.5)*cw와 반칸 어긋난다(좌우 패딩·hover 중앙·말풍선 caret 동심이 안 맞음, 사용자 피드백).
+            // 그래서 종 글리프만 0.5칸 왼쪽으로 미는 가로 nudge를 줘 중심을 (좌단 col + 0.5)*cw에 맞춘다(글리프 codepoint
+            // 기준이라 종을 어느 col에 둬도 따라온다 — col 하드코딩 아님). 2칸 글리프 중심은 정수 col로는 반칸에 못 와 렌더
+            // 단계 가로 nudge가 필요(py_nudge와 동형). 현재 펼침 종은 cols-12(점유 cols-12·cols-11) → 중심 (cols-11.5)*cw.
             const float px_nudge = is_bell_icon ? cw * -0.5f : 0.0f;
             maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale);
         }

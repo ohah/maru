@@ -111,6 +111,17 @@ pub const SavedCursor = struct {
 /// rewrap 등 연산은 free 함수가 self.screen.<field>(또는 self.screen.sb.<field>)를 직접 다룬다(struct는 데이터 그릇).
 const Screen = screen.Screen;
 
+/// grapheme_ids 해시맵의 키 컨텍스트 — cluster 본체([]u21)를 바이트로 해시·비교해 dedup한다.
+/// link_ids(StringHashMap, []u8 키)의 []u21 판이다(같은 cluster를 한 번만 저장).
+const GraphemeKeyContext = struct {
+    pub fn hash(_: GraphemeKeyContext, key: []const u21) u64 {
+        return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(key));
+    }
+    pub fn eql(_: GraphemeKeyContext, a: []const u21, b: []const u21) bool {
+        return std.mem.eql(u21, a, b);
+    }
+};
+
 pub const TerminalCore = struct {
     allocator: std.mem.Allocator,
     size: types.Size,
@@ -252,12 +263,16 @@ pub const TerminalCore = struct {
     link_ids: std.StringHashMapUnmanaged(u32) = .empty,
     pen_link: u32 = 0,
     // grapheme cluster 본체 저장소(셀 base 뒤에 붙는 extra 코드포인트 배열). Cell.grapheme_id가
-    // 인덱스+1로 가리킨다 — link_store와 동형의 "셀엔 id, 본체는 store" 패턴(NFD 한글 V/T·다중
-    // combining·ZWJ 시퀀스를 무손실 저장). dedup하지 않는다(grapheme은 셀마다 거의 고유). HG2a는
-    // append-only다 — flat cells:[]Cell grid의 memcpy(스크롤·reflow)가 grapheme_id를 값 복사해
-    // 한 항목을 여러 셀이 잠시 공유하므로 단순 회수는 dangling을 낳는다(link_store가 append-only인
-    // 이유와 동일). reset(RIS)·deinit에서만 일괄 free하고, 안전한 회수(refcount)는 후속 PR이다.
+    // 인덱스+1로 가리킨다 — link_store/link_ids와 **완전 동형**의 "셀엔 id, 본체는 store, dedup" 패턴.
+    // grapheme_ids로 같은 cluster를 한 번만 저장하므로(같은 '한'을 천 번 찍어도 1 entry) store는
+    // 셀 수가 아니라 **distinct cluster 수**만큼만 큰다 — 악센트·NFD 음절·키캡처럼 반복되는 cluster의
+    // per-cell 증가를 막는다. append-only(reset·deinit에서만 free)라 flat cells:[]Cell의 memcpy가
+    // grapheme_id를 복사해도 dangling이 없다(link과 동일). 화면에서 사라진 cluster의 **구조적 회수**는
+    // grapheme 저장을 Screen/page 수명에 귀속시키는 page-aligned storage(아키텍처 §메모리 전략)와
+    // 함께 들어온다 — 그때 이 전역 store·dedup은 page-local 저장으로 흡수된다(전역 refcount/GC는
+    // 위험하고 임시품이라 도입하지 않는다).
     grapheme_store: std.ArrayListUnmanaged([]u21) = .empty,
+    grapheme_ids: std.HashMapUnmanaged([]const u21, u32, GraphemeKeyContext, std.hash_map.default_max_load_percentage) = .empty,
     // IME 조합 중(preedit) 텍스트(UTF-8, core 소유). 셀 그리드를 더럽히지 않고 renderSnapshot
     // 합성 단계에서만 커서 위치에 반전 스타일로 표시된다 — 조합이 끝나면(확정/취소) 비워진다.
     preedit: ?[]u8 = null,
@@ -528,6 +543,7 @@ pub const TerminalCore = struct {
         self.link_ids.deinit(self.allocator);
         for (self.grapheme_store.items) |g| self.allocator.free(g);
         self.grapheme_store.deinit(self.allocator);
+        self.grapheme_ids.deinit(self.allocator);
         self.allocator.free(self.screen.cells);
         if (self.screen.wrapped.len > 0) self.allocator.free(self.screen.wrapped);
         if (self.screen.prompt_marks.len > 0) self.allocator.free(self.screen.prompt_marks);
@@ -1107,26 +1123,32 @@ pub const TerminalCore = struct {
         return self.link_store.items[id - 1];
     }
 
-    /// cluster 본체(base 뒤 extra 코드포인트 배열)를 store에 복사 저장하고 id(인덱스+1)를 돌려준다.
-    /// link과 달리 dedup하지 않는다(grapheme은 셀마다 거의 고유). append-only — 회수는 refcount 후속.
+    /// cluster 본체(base 뒤 extra 코드포인트 배열)를 store에 intern하고 id(인덱스+1)를 돌려준다.
+    /// link과 같이 **dedup**한다 — 같은 cluster는 한 번만 저장(grapheme_ids 해시맵). 같은 '한'을 천 번
+    /// 찍어도 1 entry라 store가 셀 수가 아니라 distinct cluster 수만큼만 큰다. append-only.
     pub fn internGrapheme(self: *TerminalCore, cps: []const u21) !u32 {
+        if (self.grapheme_ids.getContext(cps, .{})) |id| return id; // dedup: 같은 cluster 재사용
         const owned = try self.allocator.dupe(u21, cps);
         errdefer self.allocator.free(owned);
+        const id: u32 = @intCast(self.grapheme_store.items.len + 1);
         try self.grapheme_store.append(self.allocator, owned);
-        return @intCast(self.grapheme_store.items.len);
+        errdefer _ = self.grapheme_store.pop();
+        try self.grapheme_ids.putContext(self.allocator, owned, id, .{}); // 키는 store가 소유한 owned
+        return id;
     }
 
-    /// 기존 cluster(id; 0이면 빈 것으로 취급) 뒤에 cp 하나를 덧붙인 새 cluster를 intern해 새 id를
-    /// 돌려준다. append-only라 옛 항목은 그대로 둔다(회수는 refcount 후속). NFD 한글 자모가 음절에
+    /// 기존 cluster(id; 0이면 빈 것으로 취급) 뒤에 cp 하나를 덧붙인 새 cluster를 intern해 id를 돌려준다.
+    /// internGrapheme를 거치므로 dedup된다(같은 결과 cluster면 기존 id 재사용). NFD 한글 자모가 음절에
     /// 차례로 붙을 때(writeCodepoint의 cluster 확장) 호출된다. screen.zig가 cross-file 호출 — pub.
     pub fn appendGraphemeCodepoint(self: *TerminalCore, id: u32, cp: u21) !u32 {
         const old: []const u21 = self.graphemeCluster(id) orelse &.{};
-        const owned = try self.allocator.alloc(u21, old.len + 1);
-        errdefer self.allocator.free(owned);
-        @memcpy(owned[0..old.len], old);
-        owned[old.len] = cp;
-        try self.grapheme_store.append(self.allocator, owned);
-        return @intCast(self.grapheme_store.items.len);
+        // old ++ cp를 임시 버퍼에 만들어 intern(dedup). 이미 있는 cluster면 internGrapheme이 임시를
+        // 안 쓰고 기존 id를 돌려준다(새 cluster일 때만 store가 복사 보관).
+        const tmp = try self.allocator.alloc(u21, old.len + 1);
+        defer self.allocator.free(tmp);
+        @memcpy(tmp[0..old.len], old);
+        tmp[old.len] = cp;
+        return self.internGrapheme(tmp);
     }
 
     /// grapheme id -> cluster 본체(없으면 null). RowCodepoints(직렬화)·screen.writeCodepoint가
@@ -1137,10 +1159,11 @@ pub const TerminalCore = struct {
     }
 
     /// grapheme store를 비운다(RIS 등 하드 리셋 — 이후 셀이 다 지워져 grapheme_id가 가리킬 대상이
-    /// 없다). clearLinkStore와 같은 자리에서 호출된다.
+    /// 없다). clearLinkStore와 같은 자리에서 호출된다. dedup 맵도 함께 비운다(키가 store 메모리라 free 후).
     fn clearGraphemeStore(self: *TerminalCore) void {
         for (self.grapheme_store.items) |g| self.allocator.free(g);
         self.grapheme_store.clearRetainingCapacity();
+        self.grapheme_ids.clearRetainingCapacity();
     }
 
     /// i번째 CSI 파라미터를 raw로 돌려준다(없으면 0). erase mode처럼 0이 유효값인 곳에 쓴다.
@@ -4787,9 +4810,10 @@ test "scrollback re-wrap clears a truncated wide-glyph base at narrow widths" {
     }
 }
 
-test "grapheme_store: intern/lookup/append round-trip (link 패턴, append-only)" {
+test "grapheme_store: intern/lookup/append round-trip + dedup (link_ids 패턴)" {
     // 왜 중요: NFD 한글·ZWJ 시퀀스의 cluster 본체가 셀 밖 store에 무손실로 담겨야(잘림 금지)
-    // 클립보드·재출력·trace가 전체 코드포인트를 복원한다. id 키라 dedup 없이 셀마다 고유하다.
+    // 클립보드·재출력·trace가 전체 코드포인트를 복원한다. 그리고 link과 같이 dedup해 같은 cluster를
+    // 한 번만 저장 — store가 셀 수가 아니라 distinct cluster 수만큼만 커진다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
     defer core.deinit();
 
@@ -4799,14 +4823,22 @@ test "grapheme_store: intern/lookup/append round-trip (link 패턴, append-only)
     try std.testing.expectEqual(@as(u32, 1), id1); // 인덱스+1
     try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB }, core.graphemeCluster(id1).?);
 
-    const id2 = try core.internGrapheme(&.{0x0301}); // 다른 cluster — dedup 안 함(고유 id)
+    const id2 = try core.internGrapheme(&.{0x0301}); // 다른 cluster — 새 id
     try std.testing.expectEqual(@as(u32, 2), id2);
 
-    // append: 기존 cluster 뒤에 cp 하나를 더한 새 cluster를 intern(옛 항목은 그대로 — append-only).
+    // **dedup**: 같은 cluster를 다시 intern하면 같은 id를 돌려주고 store는 안 커진다.
+    const id1_again = try core.internGrapheme(&.{ 0x1161, 0x11AB });
+    try std.testing.expectEqual(id1, id1_again);
+    try std.testing.expectEqual(@as(usize, 2), core.grapheme_store.items.len); // 2개 그대로
+
+    // append: 기존 cluster 뒤에 cp 하나 더한 새 cluster를 intern.
     const id3 = try core.appendGraphemeCodepoint(id1, 0x0323);
     try std.testing.expectEqual(@as(u32, 3), id3);
     try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB, 0x0323 }, core.graphemeCluster(id3).?);
     try std.testing.expectEqualSlices(u21, &.{ 0x1161, 0x11AB }, core.graphemeCluster(id1).?); // 불변
+    // 같은 append를 또 하면 dedup으로 id3 재사용(store 불변).
+    try std.testing.expectEqual(id3, try core.appendGraphemeCodepoint(id1, 0x0323));
+    try std.testing.expectEqual(@as(usize, 3), core.grapheme_store.items.len);
     // id=0에서 append면 빈 것 뒤에 붙어 1개짜리 cluster가 된다.
     const id4 = try core.appendGraphemeCodepoint(0, 0x1175);
     try std.testing.expectEqualSlices(u21, &.{0x1175}, core.graphemeCluster(id4).?);
@@ -4814,9 +4846,12 @@ test "grapheme_store: intern/lookup/append round-trip (link 패턴, append-only)
     // 범위 밖 id는 null(안전).
     try std.testing.expectEqual(@as(?[]const u21, null), core.graphemeCluster(999));
 
-    // RIS(하드 리셋)는 store를 비운다(셀도 함께 사라져 dangling 없음).
+    // RIS(하드 리셋)는 store·dedup 맵을 비운다(셀도 함께 사라져 dangling 없음).
     core.fullReset();
     try std.testing.expectEqual(@as(usize, 0), core.grapheme_store.items.len);
+    try std.testing.expectEqual(@as(u32, 0), core.grapheme_ids.size);
+    // 리셋 후 다시 intern하면 id가 1부터 재시작(dedup 맵도 비워졌다).
+    try std.testing.expectEqual(@as(u32, 1), try core.internGrapheme(&.{ 0x1161, 0x11AB }));
 }
 
 test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" {

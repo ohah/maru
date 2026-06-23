@@ -185,7 +185,7 @@ test "glyph frame preserves overlays for draw-time effects" {
     // UI 효과를 그릴 수 없으므로, frame 계약에서 반드시 보존한다.
     core.clearDirty();
     try core.write("A");
-    core.cells[0].style.underline = true;
+    core.screen.cells[0].style.underline = true;
 
     var list = try draw_list.buildDrawList(std.testing.allocator, core.snapshot());
     defer list.deinit(std.testing.allocator);

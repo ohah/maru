@@ -191,7 +191,7 @@ test "terminal snapshot records styled cells separately from visible text" {
     // protects future color/bold/underline work from becoming invisible to
     // snapshot tests.
     try core.write("A");
-    core.cells[0].style = .{ .foreground = .{ .indexed = 2 }, .bold = true };
+    core.screen.cells[0].style = .{ .foreground = .{ .indexed = 2 }, .bold = true };
 
     const rendered = try renderTerminalSnapshot(std.testing.allocator, core.snapshot());
     defer std.testing.allocator.free(rendered);

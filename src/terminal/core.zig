@@ -110,12 +110,17 @@ pub const SavedCursor = struct {
 /// storage 책임). core는 `sb`/`saved_sb` 필드로 이 타입을 쓰고, 행 push/get/rewrap 로직은 이 파일에서 그
 /// 필드들(ring/head/count/cap 등)을 직접 다룬다 — struct는 메모리 수명(free/cap 재구성)만 소유한다(screen.zig 주석).
 const Scrollback = screen.Scrollback;
+/// 활성 화면 grid(cells·wrapped·prompt_marks)를 묶는 2단계 Screen struct(B-min). self-contained라 screen.zig
+/// 소유, core가 `screen: Screen` 필드로 보유(Scrollback 선례). 행 연산은 self.screen.<field> 직접 접근.
+const Screen = screen.Screen;
 
 pub const TerminalCore = struct {
     allocator: std.mem.Allocator,
     size: types.Size,
     cursor: types.Cursor = .{},
-    cells: []types.Cell,
+    // 활성 화면 grid(cells·wrapped·prompt_marks) — 2단계 Screen struct(B-min). 행 연산은 self.screen.<field>로
+    // 접근(screen.zig 소유, Scrollback 선례). B2에서 sb, B-full에서 cursor·모드가 여기로 흡수된다.
+    screen: Screen = .{},
     // core_mutex(Surface 소유)를 잡는 스레드를 추적하는 디버그 전용 안전망. lock은 Surface.lockCore
     // 와 reader가 owner_dbg.lock/unlock으로만 잡아 재진입(self-deadlock)을 lock 전에 panic으로
     // 노출한다. release에선 @sizeOf 0(ABI 영향 없음). 단일 출처: src/terminal/core_owner.zig.
@@ -217,17 +222,8 @@ pub const TerminalCore = struct {
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
     csi_subparam: [max_csi_params]bool = [_]bool{false} ** max_csi_params,
-    // 활성 화면의 soft-wrap 추적. wrapped[r]==true는 "행 r이 autowrap으로 행 r+1로 이어진다"는
-    // r↔r+1 경계의 속성이다(내용이 아니라 경계). hard 줄끝(LF, 또는 셸이 그린 뒤 CR/LF/CUP로 떠난
-    // 줄)은 wrapped[r]=false다. autowrap(마지막 칸 넘침)일 때만 true가 되고, 그 행에 새로 쓰면 다시
-    // false로 리셋된다(redraw가 스스로 교정됨). resize 시 reflow가 이 플래그로 논리 줄을 잇는다.
-    // 길이는 항상 size.rows.
-    wrapped: []bool = &.{},
-    // 활성 화면의 행별 OSC 133 semantic 분류(길이=size.rows). `wrapped`와 같은 병렬 배열 패턴이지만
-    // 결정적 차이: glyph 쓰기(putCell)로 리셋하지 않는다 — 셸이 프롬프트를 redraw해도 그 행의
-    // 프롬프트/입력/출력 분류는 유지돼야 한다. 상태 머신(semantic_state)·scroll·clear·OSC 마커만
-    // 이 배열을 건드린다. OSC 133 마킹이 없으면 전부 .unknown이다.
-    prompt_marks: []types.RowPrompt = &.{},
+    // wrapped(soft-wrap 추적)·prompt_marks(행별 OSC 133 분류)는 활성 grid라 2단계 Screen struct로 이동
+    // (self.screen.wrapped / self.screen.prompt_marks — 정의·주석은 screen.zig Screen).
     // 현재 활성 중인 semantic 영역(OSC 133 A→prompt, B→input, C→command, D→unknown). lineFeed가
     // 다음 행에 이 값을 전파해 여러 줄 프롬프트/출력이 전부 태깅된다.
     semantic_state: types.SemanticPrompt = .unknown,
@@ -448,9 +444,7 @@ pub const TerminalCore = struct {
         return .{
             .allocator = allocator,
             .size = grid,
-            .cells = cells,
-            .wrapped = wrapped,
-            .prompt_marks = prompt_marks,
+            .screen = .{ .cells = cells, .wrapped = wrapped, .prompt_marks = prompt_marks },
             .tabstops = tabstops,
             .dirty = fullDirty(grid),
             .scroll_bottom = grid.rows - 1,
@@ -471,9 +465,9 @@ pub const TerminalCore = struct {
     /// RIS(ESC c) 하드 리셋. parser.handleEscapeByte(ESC c)가 cross-file 호출 — pub.
     pub fn fullReset(self: *TerminalCore) void {
         if (self.alt_active) screen.leaveAltScreen(self, false);
-        @memset(self.cells, .{});
-        @memset(self.wrapped, false);
-        @memset(self.prompt_marks, .{});
+        @memset(self.screen.cells, .{});
+        @memset(self.screen.wrapped, false);
+        @memset(self.screen.prompt_marks, .{});
         self.semantic_state = .unknown;
         self.last_command_exit = null;
         screen.clearScrollback(self); // sb 비우기 + 선택 해제
@@ -542,9 +536,9 @@ pub const TerminalCore = struct {
         for (self.link_store.items) |uri| self.allocator.free(uri);
         self.link_store.deinit(self.allocator);
         self.link_ids.deinit(self.allocator);
-        self.allocator.free(self.cells);
-        if (self.wrapped.len > 0) self.allocator.free(self.wrapped);
-        if (self.prompt_marks.len > 0) self.allocator.free(self.prompt_marks);
+        self.allocator.free(self.screen.cells);
+        if (self.screen.wrapped.len > 0) self.allocator.free(self.screen.wrapped);
+        if (self.screen.prompt_marks.len > 0) self.allocator.free(self.screen.prompt_marks);
         if (self.tabstops.len > 0) self.allocator.free(self.tabstops);
         if (self.saved_cells.len > 0) self.allocator.free(self.saved_cells);
         if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
@@ -661,7 +655,7 @@ pub const TerminalCore = struct {
     fn promptAtAbs(self: *const TerminalCore, abs: usize) types.RowPrompt {
         if (abs < self.sb.count) return self.scrollbackRowPrompt(abs);
         const active = abs - self.sb.count;
-        if (active < self.prompt_marks.len) return self.prompt_marks[active];
+        if (active < self.screen.prompt_marks.len) return self.screen.prompt_marks[active];
         return .{};
     }
 
@@ -681,7 +675,7 @@ pub const TerminalCore = struct {
     fn setPromptExitAtAbs(self: *TerminalCore, abs: usize, exit: i16) void {
         if (abs >= self.sb.count) {
             const active = abs - self.sb.count;
-            if (active < self.prompt_marks.len) self.prompt_marks[active].exit = exit;
+            if (active < self.screen.prompt_marks.len) self.screen.prompt_marks[active].exit = exit;
         } else if (self.sb.prompt_marks.len > 0) {
             self.sb.prompt_marks[(self.sb.head + abs) % self.sb.prompt_marks.len].exit = exit;
         }
@@ -757,7 +751,7 @@ pub const TerminalCore = struct {
         }
         const active_row = ci - self.sb.count;
         const start = active_row * self.size.cols;
-        return self.cells[start .. start + self.size.cols];
+        return self.screen.cells[start .. start + self.size.cols];
     }
 
     /// 보이는 뷰포트에 blink(SGR 5) 셀이 하나라도 있는가. app이 blink 위상을 진행/재빌드할지 게이트로 쓴다
@@ -776,7 +770,7 @@ pub const TerminalCore = struct {
     pub fn viewportRowPrompt(self: *const TerminalCore, r: u16) types.RowPrompt {
         const ci = self.sb.count - @min(self.view_offset, self.sb.count) + r; // underflow 가드(다른 호출부와 동일)
         if (ci < self.sb.count) return self.scrollbackRowPrompt(ci);
-        return self.prompt_marks[ci - self.sb.count];
+        return self.screen.prompt_marks[ci - self.sb.count];
     }
 
     /// scroll로 위로 밀려나는 맨 윗줄을 스크롤백 ring에 보관한다. 슬롯 버퍼를 재사용해(같은 길이면
@@ -861,9 +855,9 @@ pub const TerminalCore = struct {
         const blank: types.Cell = .{ .style = self.pen };
 
         if (isPromptish(self.semantic_state)) {
-            @memset(self.cells, blank);
-            @memset(self.wrapped, false);
-            @memset(self.prompt_marks, .{}); // 전체 clear는 OSC 133 분류도 지운다(셸이 곧 재마킹)
+            @memset(self.screen.cells, blank);
+            @memset(self.screen.wrapped, false);
+            @memset(self.screen.prompt_marks, .{}); // 전체 clear는 OSC 133 분류도 지운다(셸이 곧 재마킹)
             self.semantic_state = .unknown;
             self.cursor = .{ .row = 0, .col = 0 };
             self.last_print = null;
@@ -874,10 +868,10 @@ pub const TerminalCore = struct {
         // 비프롬프트: 커서 행 위쪽만 비운다. index(row,0) = 커서 행 시작 셀 인덱스 = 위쪽 행들의 셀 수.
         if (self.cursor.row > 0) {
             const above = self.index(self.cursor.row, 0);
-            @memset(self.cells[0..above], blank);
+            @memset(self.screen.cells[0..above], blank);
             for (0..self.cursor.row) |r| {
-                self.wrapped[r] = false;
-                self.prompt_marks[r] = .{};
+                self.screen.wrapped[r] = false;
+                self.screen.prompt_marks[r] = .{};
             }
             self.last_print = null;
             self.dirty = fullDirty(self.size);
@@ -1216,7 +1210,7 @@ pub const TerminalCore = struct {
         for (0..self.size.rows) |row| {
             if (row != 0) try output.append(allocator, '\n');
             const row_start = self.index(row, 0);
-            var codepoints: types.RowCodepoints = .{ .cells = self.cells[row_start..][0..self.size.cols] };
+            var codepoints: types.RowCodepoints = .{ .cells = self.screen.cells[row_start..][0..self.size.cols] };
             while (codepoints.next()) |codepoint| {
                 var buffer: [4]u8 = undefined;
                 const len = try std.unicode.utf8Encode(codepoint, &buffer);
@@ -1691,7 +1685,7 @@ test "terminal core: TAB breaks the grapheme run so a following combining mark i
     // which all clear last_print. Before the fix the mark wrongly mutated cells[0].combining.
     try core.write("a\t\u{0301}");
 
-    try std.testing.expect(core.cells[0].combining == null);
+    try std.testing.expect(core.screen.cells[0].combining == null);
 }
 
 test "terminal core marks old and new cursor rows dirty across line feed" {
@@ -1728,7 +1722,7 @@ test "SGR sets the pen style stamped onto written cells" {
     defer core.deinit();
 
     try core.write("\x1b[1;4;31mA");
-    const cell = core.cells[core.index(0, 0)];
+    const cell = core.screen.cells[core.index(0, 0)];
     try std.testing.expectEqual(@as(u21, 'A'), cell.codepoint);
     try std.testing.expect(cell.style.bold);
     try std.testing.expect(cell.style.underline);
@@ -1742,15 +1736,15 @@ test "SGR 9/29 toggle strikethrough on the pen stamped onto cells" {
     // SGR 9(crossed-out) → A는 strikethrough, SGR 29(not crossed-out) → B는 아님.
     // 베이스: ECMA-48 SGR 9/29, xterm ctlseqs 동일. underline(4)과 독립 비트라 같이 켤 수 있다.
     try core.write("\x1b[9mA\x1b[29mB");
-    const a = core.cells[core.index(0, 0)];
-    const b = core.cells[core.index(0, 1)];
+    const a = core.screen.cells[core.index(0, 0)];
+    const b = core.screen.cells[core.index(0, 1)];
     try std.testing.expect(a.style.strikethrough);
     try std.testing.expect(!b.style.strikethrough);
 
     // SGR 0(reset)은 strikethrough도 끈다(전체 리셋이 pen을 기본값으로).
     try core.write("\x1b[9mC\x1b[0mD");
-    try std.testing.expect(core.cells[core.index(0, 2)].style.strikethrough);
-    try std.testing.expect(!core.cells[core.index(0, 3)].style.strikethrough);
+    try std.testing.expect(core.screen.cells[core.index(0, 2)].style.strikethrough);
+    try std.testing.expect(!core.screen.cells[core.index(0, 3)].style.strikethrough);
 }
 
 test "SGR 53/55 toggle overline on the pen stamped onto cells" {
@@ -1760,13 +1754,13 @@ test "SGR 53/55 toggle overline on the pen stamped onto cells" {
     // SGR 53(overlined) → A는 overline, SGR 55(not overlined) → B는 아님. 베이스: ECMA-48 SGR 53/55,
     // xterm ctlseqs. strikethrough/underline과 독립 비트라 같이 켤 수 있다.
     try core.write("\x1b[53mA\x1b[55mB");
-    try std.testing.expect(core.cells[core.index(0, 0)].style.overline);
-    try std.testing.expect(!core.cells[core.index(0, 1)].style.overline);
+    try std.testing.expect(core.screen.cells[core.index(0, 0)].style.overline);
+    try std.testing.expect(!core.screen.cells[core.index(0, 1)].style.overline);
 
     // SGR 0(reset)은 overline도 끈다(전체 리셋이 pen을 기본값으로).
     try core.write("\x1b[53mC\x1b[0mD");
-    try std.testing.expect(core.cells[core.index(0, 2)].style.overline);
-    try std.testing.expect(!core.cells[core.index(0, 3)].style.overline);
+    try std.testing.expect(core.screen.cells[core.index(0, 2)].style.overline);
+    try std.testing.expect(!core.screen.cells[core.index(0, 3)].style.overline);
 }
 
 test "SGR 2/22 toggle dim, and 22 also clears bold (ECMA-48 normal intensity)" {
@@ -1776,8 +1770,8 @@ test "SGR 2/22 toggle dim, and 22 also clears bold (ECMA-48 normal intensity)" {
     // SGR 2(faint) → A는 dim. 같은 셀에 bold(1)도 켜 두고, SGR 22(normal intensity)가 bold와 dim을
     // 둘 다 끄는지(ECMA-48) B에서 확인한다.
     try core.write("\x1b[1;2mA\x1b[22mB");
-    const a = core.cells[core.index(0, 0)];
-    const b = core.cells[core.index(0, 1)];
+    const a = core.screen.cells[core.index(0, 0)];
+    const b = core.screen.cells[core.index(0, 1)];
     try std.testing.expect(a.style.dim);
     try std.testing.expect(a.style.bold);
     try std.testing.expect(!b.style.dim);
@@ -1785,8 +1779,8 @@ test "SGR 2/22 toggle dim, and 22 also clears bold (ECMA-48 normal intensity)" {
 
     // SGR 0(reset)도 dim을 끈다.
     try core.write("\x1b[2mC\x1b[0mD");
-    try std.testing.expect(core.cells[core.index(0, 2)].style.dim);
-    try std.testing.expect(!core.cells[core.index(0, 3)].style.dim);
+    try std.testing.expect(core.screen.cells[core.index(0, 2)].style.dim);
+    try std.testing.expect(!core.screen.cells[core.index(0, 3)].style.dim);
 }
 
 test "SGR reset returns the pen to default for following cells" {
@@ -1794,8 +1788,8 @@ test "SGR reset returns the pen to default for following cells" {
     defer core.deinit();
 
     try core.write("\x1b[1;31mA\x1b[0mB");
-    const a = core.cells[core.index(0, 0)];
-    const b = core.cells[core.index(0, 1)];
+    const a = core.screen.cells[core.index(0, 0)];
+    const b = core.screen.cells[core.index(0, 1)];
     try std.testing.expect(a.style.bold);
     try std.testing.expect(!b.style.bold);
     try std.testing.expectEqual(types.Color.default, b.style.foreground);
@@ -1806,12 +1800,12 @@ test "SGR 256-color and rgb extended forms set the foreground" {
     defer core.deinit();
 
     try core.write("\x1b[38;5;200mA");
-    try std.testing.expectEqual(types.Color{ .indexed = 200 }, core.cells[core.index(0, 0)].style.foreground);
+    try std.testing.expectEqual(types.Color{ .indexed = 200 }, core.screen.cells[core.index(0, 0)].style.foreground);
 
     try core.write("\x1b[38;2;10;20;30mB");
     try std.testing.expectEqual(
         types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
-        core.cells[core.index(0, 1)].style.foreground,
+        core.screen.cells[core.index(0, 1)].style.foreground,
     );
 }
 
@@ -1921,7 +1915,7 @@ test "escape sequence split across writes is parsed as one sequence" {
     try core.write("\x1b[3");
     try core.write("1mX");
 
-    const cell = core.cells[core.index(0, 0)];
+    const cell = core.screen.cells[core.index(0, 0)];
     try std.testing.expectEqual(@as(u21, 'X'), cell.codepoint);
     try std.testing.expectEqual(types.Color{ .indexed = 1 }, cell.style.foreground);
 }
@@ -2107,7 +2101,7 @@ test "ESC inside a CSI restarts as a new escape instead of leaking as text" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("X     ", dump);
-    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.cells[core.index(0, 0)].style.foreground);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.screen.cells[core.index(0, 0)].style.foreground);
 }
 
 test "C0 control inside a CSI is executed and the CSI still completes" {
@@ -2120,7 +2114,7 @@ test "C0 control inside a CSI is executed and the CSI still completes" {
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("X   ", dump);
-    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.cells[core.index(0, 0)].style.foreground);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.screen.cells[core.index(0, 0)].style.foreground);
 }
 
 test "CSI with more than 16 parameters discards the overflow instead of corrupting param 15" {
@@ -2130,7 +2124,7 @@ test "CSI with more than 16 parameters discards the overflow instead of corrupti
     // 16 zero params fill the buffer; the 17th param (1 = bold) is past the cap and must be dropped,
     // not folded into params[15] (which the old guard did, applying spurious bold).
     try core.write("\x1b[0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;0;1mA");
-    try std.testing.expect(!core.cells[core.index(0, 0)].style.bold);
+    try std.testing.expect(!core.screen.cells[core.index(0, 0)].style.bold);
 }
 
 test "resize clears a wide glyph whose continuation is clipped at the new right edge" {
@@ -2138,11 +2132,11 @@ test "resize clears a wide glyph whose continuation is clipped at the new right 
     defer core.deinit();
 
     try core.write("A한");
-    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(0, 1)].width);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[core.index(0, 1)].width);
 
     // Shrink so the wide glyph's continuation (col 2) is clipped; the dangling base must be cleared.
     try core.resize(2, 1);
-    try std.testing.expect(core.cells[core.index(0, 1)].width != 2);
+    try std.testing.expect(core.screen.cells[core.index(0, 1)].width != 2);
 }
 
 test "erasing the continuation half of a wide glyph clears its dangling base" {
@@ -2150,11 +2144,11 @@ test "erasing the continuation half of a wide glyph clears its dangling base" {
     defer core.deinit();
 
     try core.write("한X");
-    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(0, 0)].width);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[core.index(0, 0)].width);
 
     // Cursor onto the continuation (col 1), erase cursor-to-end: the base at col 0 is now dangling.
     try core.write("\x1b[2G\x1b[K");
-    try std.testing.expect(core.cells[core.index(0, 0)].width != 2);
+    try std.testing.expect(core.screen.cells[core.index(0, 0)].width != 2);
 }
 
 test "eraseInLine ends the grapheme run so a later combining mark is dropped" {
@@ -2165,7 +2159,7 @@ test "eraseInLine ends the grapheme run so a later combining mark is dropped" {
     try core.write("\x1b[1G\x1b[K");
     try core.write("\u{0301}");
 
-    try std.testing.expectEqual(@as(?u21, null), core.cells[core.index(0, 0)].combining);
+    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[core.index(0, 0)].combining);
 }
 
 test "SGR colon sub-parameter direct color (38:2:cs:r:g:b) reads RGB past the colorspace slot" {
@@ -2177,18 +2171,18 @@ test "SGR colon sub-parameter direct color (38:2:cs:r:g:b) reads RGB past the co
     try core.write("\x1b[38:2::10:20:30mA");
     try std.testing.expectEqual(
         types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
-        core.cells[core.index(0, 0)].style.foreground,
+        core.screen.cells[core.index(0, 0)].style.foreground,
     );
 
     // Colon 256-color form: n sits at the same offset as the semicolon form.
     try core.write("\x1b[38:5:200mB");
-    try std.testing.expectEqual(types.Color{ .indexed = 200 }, core.cells[core.index(0, 1)].style.foreground);
+    try std.testing.expectEqual(types.Color{ .indexed = 200 }, core.screen.cells[core.index(0, 1)].style.foreground);
 
     // Semicolon form must stay correct (no colorspace component).
     try core.write("\x1b[48;2;1;2;3mC");
     try std.testing.expectEqual(
         types.Color{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
-        core.cells[core.index(0, 2)].style.background,
+        core.screen.cells[core.index(0, 2)].style.background,
     );
 }
 
@@ -2196,9 +2190,9 @@ test "printable characters auto-wrap to the next line at the right edge (DECAWM)
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("ABCDE"); // ABCD fills row 0; E wraps to row 1
-    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'E'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'A'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.screen.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'E'), core.screen.cells[core.index(1, 0)].codepoint);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 }
@@ -2209,8 +2203,8 @@ test "a line filled exactly then CR/LF does not insert a blank wrapped line" {
     // ABCD가 row 0을 정확히 채워 pending_wrap이 서지만, \r\n이 그걸 무효화해 X는 row 1에 온다
     // (deferred wrap이 아니면 \n이 한 줄 더 내려가 X가 row 2에 떨어진다).
     try core.write("ABCD\r\nX");
-    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.screen.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'X'), core.screen.cells[core.index(1, 0)].codepoint);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
 }
 
@@ -2223,9 +2217,9 @@ test "overflow fill wraps so a following prompt lands on a new line, not over th
     try core.write("\x1b[44mBLUE\x1b[0m"); // BLUE(파란 배경) at row 0, cursor (0,4)
     try core.write("            "); // 12 spaces: 4 fill row 0, wrap, 8 fill row 1
     try core.write("\rPROMPT"); // \r clears pending_wrap; PROMPT at row 1
-    try std.testing.expectEqual(@as(u21, 'B'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(types.Color{ .indexed = 4 }, core.cells[core.index(0, 0)].style.background);
-    try std.testing.expectEqual(@as(u21, 'P'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'B'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(types.Color{ .indexed = 4 }, core.screen.cells[core.index(0, 0)].style.background);
+    try std.testing.expectEqual(@as(u21, 'P'), core.screen.cells[core.index(1, 0)].codepoint);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
 }
 
@@ -2235,7 +2229,7 @@ test "cursor positioning cancels a pending wrap" {
     try core.write("ABCD"); // fills row 0, pending_wrap set
     try core.write("\x1b[1;1H"); // CUP to (0,0) cancels pending_wrap
     try core.write("X"); // X overwrites (0,0), does NOT wrap to row 1
-    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'X'), core.screen.cells[core.index(0, 0)].codepoint);
     try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 }
@@ -2245,9 +2239,9 @@ test "a wide glyph with one column left wraps whole to the next line" {
     defer core.deinit();
     try core.write("ABC"); // A,B,C at cols 0,1,2; cursor (0,3) one column left
     try core.write("한"); // wide(2): doesn't fit in 1 col -> wraps to row 1
-    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(1, 0)].codepoint);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(1, 0)].width);
-    try std.testing.expect(core.cells[core.index(1, 1)].continuation);
+    try std.testing.expectEqual(@as(u21, '한'), core.screen.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[core.index(1, 0)].width);
+    try std.testing.expect(core.screen.cells[core.index(1, 1)].continuation);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
 }
 
@@ -2259,9 +2253,9 @@ test "the grid is clamped to at least 2 columns so wide glyphs never write out o
     try std.testing.expectEqual(@as(u16, 2), core.size.cols);
     try std.testing.expectEqual(@as(u16, 1), core.size.rows);
     try core.write("한"); // wide(2)가 OOB/degrade 없이 2칸으로 들어간다
-    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(0, 0)].width);
-    try std.testing.expect(core.cells[core.index(0, 1)].continuation);
+    try std.testing.expectEqual(@as(u21, '한'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[core.index(0, 0)].width);
+    try std.testing.expect(core.screen.cells[core.index(0, 1)].continuation);
     // resize도 같은 최소 크기를 보장한다.
     try core.resize(1, 4);
     try std.testing.expectEqual(@as(u16, 2), core.size.cols);
@@ -2278,9 +2272,9 @@ test "a bottom-row line feed clears pending wrap so the next char does not doubl
     try core.write("X"); // pending_wrap stale면 또 scroll돼 ABCD 유실. 고쳐지면 한 번만 scroll.
     // 핵심: ABCD가 row 0에 보존된다(버그면 두 번 scroll돼 row 0이 빈칸). bare LF는 컬럼을
     // 보존하므로 X는 (1,3)에 온다.
-    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(1, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'A'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.screen.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'X'), core.screen.cells[core.index(1, 3)].codepoint);
 }
 
 test "autowrap at the scroll-bottom keeps the soft-wrap flag (reflow가 논리 줄을 안 쪼갠다)" {
@@ -2293,9 +2287,9 @@ test "autowrap at the scroll-bottom keeps the soft-wrap flag (reflow가 논리 �
     try core.write("efgh"); // 'e'가 row1로 wrap, row1 가득 -> pending_wrap at scroll_bottom
     try core.write("i"); // autowrap + scroll: efgh -> row0, i -> row1 col0
     // efgh(row0)는 i 줄(row1)로 이어지는 soft-wrap이다 — 플래그가 scroll fixup에 안 지워져야 한다.
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     // i 하나만 있는 마지막 줄은 아직 어디로도 안 이어진다(회귀: 새로 쓴 행은 wrap 리셋).
-    try std.testing.expect(!core.wrapped[1]);
+    try std.testing.expect(!core.screen.wrapped[1]);
 }
 
 test "SGR colon direct color without a colorspace component (38:2:r:g:b) sets RGB" {
@@ -2306,13 +2300,13 @@ test "SGR colon direct color without a colorspace component (38:2:r:g:b) sets RG
     try core.write("\x1b[38:2:10:20:30mA");
     try std.testing.expectEqual(
         types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
-        core.cells[core.index(0, 0)].style.foreground,
+        core.screen.cells[core.index(0, 0)].style.foreground,
     );
     // 빈 colorspace(38:2::r:g:b)와 colorspace 있는(38:2:1:r:g:b) 6컴포넌트도 여전히 정확.
     try core.write("\x1b[38:2::40:50:60mB");
     try std.testing.expectEqual(
         types.Color{ .rgb = .{ .r = 40, .g = 50, .b = 60 } },
-        core.cells[core.index(0, 1)].style.foreground,
+        core.screen.cells[core.index(0, 1)].style.foreground,
     );
 }
 
@@ -2332,9 +2326,9 @@ test "HT(tab)는 지나는 셀을 덮지 않고 커서만 옮긴다 (xterm/Ghost
     try core.write("ABCDEF"); // col0~5
     try core.write("\r\t"); // CR(col0) → HT → 다음 8-탭스톱(col8)
     // ABCDEF가 보존된다 — 예전엔 putCell(' ')로 col0~7을 덮어 글자가 사라졌다.
-    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(0, 2)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'F'), core.cells[core.index(0, 5)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'A'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'C'), core.screen.cells[core.index(0, 2)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'F'), core.screen.cells[core.index(0, 5)].codepoint);
     try std.testing.expectEqual(@as(u16, 8), core.cursor.col); // 커서만 탭스톱으로 이동
 }
 
@@ -2344,7 +2338,7 @@ test "backspace cancels a pending wrap so the next char does not wrap" {
     try core.write("ABCD"); // row 0을 채움 -> pending_wrap at (0,3)
     try core.write("\x08"); // backspace -> (0,2), markCursorMoveDirty가 pending_wrap을 끈다
     try core.write("X"); // (0,2)에 덮어쓰고 wrap하지 않는다
-    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(0, 2)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'X'), core.screen.cells[core.index(0, 2)].codepoint);
     try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
 }
 
@@ -2355,7 +2349,7 @@ test "SGR colon background direct color (48:2:r:g:b) sets the cell background" {
     try core.write("\x1b[48:2:10:20:30mA");
     try std.testing.expectEqual(
         types.Color{ .rgb = .{ .r = 10, .g = 20, .b = 30 } },
-        core.cells[core.index(0, 0)].style.background,
+        core.screen.cells[core.index(0, 0)].style.background,
     );
 }
 
@@ -2381,12 +2375,12 @@ test "printable text wraps across multiple rows filling each line" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 3 });
     defer core.deinit();
     try core.write("ABCDEF"); // AB / CD / EF
-    try std.testing.expectEqual(@as(u21, 'A'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'B'), core.cells[core.index(0, 1)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(1, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(1, 1)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'E'), core.cells[core.index(2, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'F'), core.cells[core.index(2, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'A'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'B'), core.screen.cells[core.index(0, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'C'), core.screen.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.screen.cells[core.index(1, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'E'), core.screen.cells[core.index(2, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'F'), core.screen.cells[core.index(2, 1)].codepoint);
 }
 
 test "a wide glyph filling the last two columns sets pending wrap and the next char wraps" {
@@ -2395,9 +2389,9 @@ test "a wide glyph filling the last two columns sets pending wrap and the next c
     try core.write("AB"); // A(0,0) B(0,1), 커서 (0,2)
     try core.write("한"); // 마지막 두 칸(2,3)을 채움 -> 커서 (0,3) pending_wrap
     try core.write("X"); // 다음 줄로 wrap
-    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(0, 2)].codepoint);
-    try std.testing.expect(core.cells[core.index(0, 3)].continuation);
-    try std.testing.expectEqual(@as(u21, 'X'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, '한'), core.screen.cells[core.index(0, 2)].codepoint);
+    try std.testing.expect(core.screen.cells[core.index(0, 3)].continuation);
+    try std.testing.expectEqual(@as(u21, 'X'), core.screen.cells[core.index(1, 0)].codepoint);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
 }
 
@@ -2424,8 +2418,8 @@ test "scrollback keeps rows that scroll off the top" {
     try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
     try std.testing.expectEqual(@as(u21, 'a'), core.scrollbackRow(0).?[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'b'), core.scrollbackRow(1).?[0].codepoint);
-    try std.testing.expectEqual(@as(u21, 'c'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'c'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.screen.cells[core.index(1, 0)].codepoint);
 }
 
 test "scrollback ring drops the oldest rows past max_scrollback" {
@@ -2437,8 +2431,8 @@ test "scrollback ring drops the oldest rows past max_scrollback" {
     try std.testing.expectEqual(@as(usize, 2), core.scrollbackLen());
     try std.testing.expectEqual(@as(u21, 'b'), core.scrollbackRow(0).?[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'c'), core.scrollbackRow(1).?[0].codepoint);
-    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'e'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'e'), core.screen.cells[core.index(1, 0)].codepoint);
 }
 
 test "scrollback disabled when max_scrollback is zero" {
@@ -2509,33 +2503,33 @@ test "wrapped flag: autowrap sets it, rewriting the row clears it" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("abcde"); // abcd가 row0를 채우고 'e'가 autowrap으로 row1로 넘어간다
-    try std.testing.expect(core.wrapped[0]); // row0는 soft-wrap
-    try std.testing.expect(!core.wrapped[1]); // row1은 아직 wrap 아님
+    try std.testing.expect(core.screen.wrapped[0]); // row0는 soft-wrap
+    try std.testing.expect(!core.screen.wrapped[1]); // row1은 아직 wrap 아님
     try core.write("\x1b[1;1Hxy"); // CUP (0,0) 후 짧게 다시 그림 -> wrapped[0] 리셋
-    try std.testing.expect(!core.wrapped[0]);
+    try std.testing.expect(!core.screen.wrapped[0]);
 }
 
 test "wrapped flag: a wide glyph pushed whole to the next row marks soft-wrap" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("abc한"); // abc가 0..2를 채우고 한(width2)이 col3에 안 들어가 통째로 row1로
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
 }
 
 test "wrapped flag: a hard line-end stays false even with the cursor parked past content" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
     defer core.deinit();
     try core.write("ab\r"); // 줄을 안 채운 프롬프트 + CR -> 커서 (0,0). row0는 hard 줄끝
-    try std.testing.expect(!core.wrapped[0]);
+    try std.testing.expect(!core.screen.wrapped[0]);
     try core.write("\x1b[1;6H"); // 커서를 내용 너머(col5)로 이동 -> wrap은 안 변함
-    try std.testing.expect(!core.wrapped[0]);
+    try std.testing.expect(!core.screen.wrapped[0]);
 }
 
 test "wrapped flag: scrolled-off soft-wrapped row carries its flag into scrollback" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();
     try core.write("abcde"); // wrapped[0]=true (abcd가 'e'로 soft-wrap)
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try core.write("\r\nfg"); // 바닥에서 scroll -> abcd(wrapped=true)가 스크롤백으로
     try std.testing.expectEqual(@as(usize, 1), core.scrollbackLen());
     try std.testing.expect(core.scrollbackRowWrapped(0));
@@ -2545,21 +2539,21 @@ test "wrapped flag: erase-in-display mode 2 clears all wrap flags" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("abcde"); // wrapped[0]=true
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try core.write("\x1b[2J"); // 화면 전체 지움 -> 모든 wrap 플래그 false
-    try std.testing.expect(!core.wrapped[0]);
+    try std.testing.expect(!core.screen.wrapped[0]);
 }
 
 test "reflow: the cursor's wrapped line is left unchanged, not re-wrapped" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("abcdef"); // 4칸에서 abcd|ef로 soft-wrap, 커서 (1,2)
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try core.resize(8, 3); // 넓혀도 커서 줄이라 합치지 않고 그대로 둔다(셸이 다시 그림)
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("abcd    \nef      \n        ", dump);
-    try std.testing.expect(core.wrapped[0]); // verbatim이라 wrap 플래그 유지
+    try std.testing.expect(core.screen.wrapped[0]); // verbatim이라 wrap 플래그 유지
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
 }
@@ -2568,13 +2562,13 @@ test "reflow: a non-cursor wrapped line IS reflowed (joined on widen)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("abcdef\r\n"); // abcd|ef(행0~1)는 wrap, \r\n으로 커서를 행2로 -> abcdef는 커서 줄 아님
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
     try core.resize(8, 3); // 커서가 다른 줄이라 abcdef는 reflow돼 한 줄로 합쳐진다
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expectEqualStrings("abcdef  \n        \n        ", dump);
-    try std.testing.expect(!core.wrapped[0]); // 합쳐져 더는 wrap 아님
+    try std.testing.expect(!core.screen.wrapped[0]); // 합쳐져 더는 wrap 아님
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row); // 커서(빈 줄)는 한 칸 위로
 }
 
@@ -2586,7 +2580,7 @@ test "reflow: a cursor parked past content on its line clamps (line not reflowed
     try core.resize(4, 3); // 커서 줄이라 reflow 안 함. 커서는 새 폭으로 clamp(6 -> 3).
     try std.testing.expectEqual(@as(u16, 0), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
-    try std.testing.expect(!core.wrapped[0]);
+    try std.testing.expect(!core.screen.wrapped[0]);
 }
 
 test "reflow: a hard prompt line never merges into the next across repeated resizes (no cascade)" {
@@ -2598,7 +2592,7 @@ test "reflow: a hard prompt line never merges into the next across repeated resi
     try core.resize(4, 4);
     try core.resize(12, 4);
     try core.resize(6, 4);
-    try std.testing.expect(!core.wrapped[0]); // 프롬프트 줄은 hard 유지(cascade 없음)
+    try std.testing.expect(!core.screen.wrapped[0]); // 프롬프트 줄은 hard 유지(cascade 없음)
     const dump = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(dump);
     try std.testing.expect(std.mem.startsWith(u8, dump, "ok")); // 첫 줄은 여전히 프롬프트
@@ -2648,9 +2642,9 @@ test "eraseInLine mode 1 (erase to cursor) keeps the row's soft-wrap flag" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();
     try core.write("abcde"); // abcd|e: wrapped[0]=true
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try core.write("\x1b[1;2H\x1b[1K"); // CUP (0,1) 후 CSI 1K(시작~커서 지움) — 오른쪽 끝은 멀쩡
-    try std.testing.expect(core.wrapped[0]); // mode 1은 wrap 연속성을 안 끊는다
+    try std.testing.expect(core.screen.wrapped[0]); // mode 1은 wrap 연속성을 안 끊는다
 }
 
 test "ECH (CSI Ps X) blanks N cells from the cursor in place, cursor unmoved (nvim mode-label clear)" {
@@ -2661,7 +2655,7 @@ test "ECH (CSI Ps X) blanks N cells from the cursor in place, cursor unmoved (nv
     try core.write("\x1b[12X"); // ECH 12 — nvim이 모드 라벨을 지우는 바로 그 시퀀스
     var c: u16 = 0;
     while (c < 12) : (c += 1) {
-        const cp = core.cells[core.index(0, c)].codepoint;
+        const cp = core.screen.cells[core.index(0, c)].codepoint;
         try std.testing.expect(cp == ' ' or cp == 0); // 12칸 전부 blank
     }
     try std.testing.expectEqual(@as(u16, 0), core.cursor.col); // 커서는 제자리(EL과 달리 이동 없음)
@@ -2674,9 +2668,9 @@ test "ECH default param is 1 and does not pull following cells (not DCH)" {
     try core.write("ABCDE");
     try core.write("\x1b[1;2H"); // 커서 (0,1)=B
     try core.write("\x1b[X"); // ECH 기본 1 — B만 blank
-    const b = core.cells[core.index(0, 1)].codepoint;
+    const b = core.screen.cells[core.index(0, 1)].codepoint;
     try std.testing.expect(b == ' ' or b == 0);
-    try std.testing.expectEqual(@as(u21, 'C'), core.cells[core.index(0, 2)].codepoint); // C는 그대로 — 뒤를 당기지 않는다
+    try std.testing.expectEqual(@as(u21, 'C'), core.screen.cells[core.index(0, 2)].codepoint); // C는 그대로 — 뒤를 당기지 않는다
 }
 
 test "ICH (CSI Ps @) inserts N blanks at the cursor, pushing the rest right and dropping past the edge" {
@@ -2685,11 +2679,11 @@ test "ICH (CSI Ps @) inserts N blanks at the cursor, pushing the rest right and 
     try core.write("abcde");
     try core.write("\x1b[1;2H"); // 커서 (0,1)=b
     try core.write("\x1b[2@"); // ICH 2: b 자리에 빈 칸 2개, bc를 오른쪽으로(de는 edge 넘어 버림)
-    try std.testing.expectEqual(@as(u21, 'a'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expect(core.cells[core.index(0, 1)].codepoint == ' ' or core.cells[core.index(0, 1)].codepoint == 0);
-    try std.testing.expect(core.cells[core.index(0, 2)].codepoint == ' ' or core.cells[core.index(0, 2)].codepoint == 0);
-    try std.testing.expectEqual(@as(u21, 'b'), core.cells[core.index(0, 3)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'c'), core.cells[core.index(0, 4)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'a'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expect(core.screen.cells[core.index(0, 1)].codepoint == ' ' or core.screen.cells[core.index(0, 1)].codepoint == 0);
+    try std.testing.expect(core.screen.cells[core.index(0, 2)].codepoint == ' ' or core.screen.cells[core.index(0, 2)].codepoint == 0);
+    try std.testing.expectEqual(@as(u21, 'b'), core.screen.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'c'), core.screen.cells[core.index(0, 4)].codepoint);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col); // 커서는 제자리(ICH는 이동 없음)
 }
 
@@ -2699,14 +2693,14 @@ test "DCH (CSI Ps P) deletes N chars, pulling the rest left with blanks at the e
     try core.write("abcde");
     try core.write("\x1b[1;2H"); // 커서 (0,1)=b
     try core.write("\x1b[2P"); // DCH 2: b,c 삭제, de를 왼쪽으로 당김
-    try std.testing.expectEqual(@as(u21, 'a'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(0, 1)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'e'), core.cells[core.index(0, 2)].codepoint);
-    try std.testing.expect(core.cells[core.index(0, 3)].codepoint == ' ' or core.cells[core.index(0, 3)].codepoint == 0);
-    try std.testing.expect(core.cells[core.index(0, 4)].codepoint == ' ' or core.cells[core.index(0, 4)].codepoint == 0);
+    try std.testing.expectEqual(@as(u21, 'a'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.screen.cells[core.index(0, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'e'), core.screen.cells[core.index(0, 2)].codepoint);
+    try std.testing.expect(core.screen.cells[core.index(0, 3)].codepoint == ' ' or core.screen.cells[core.index(0, 3)].codepoint == 0);
+    try std.testing.expect(core.screen.cells[core.index(0, 4)].codepoint == ' ' or core.screen.cells[core.index(0, 4)].codepoint == 0);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col); // 커서 불변
     try core.write("\x1b[1;1H\x1b[P"); // 커서 home, DCH 기본 1 — a 삭제, d 당김
-    try std.testing.expectEqual(@as(u21, 'd'), core.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'd'), core.screen.cells[core.index(0, 0)].codepoint);
 }
 
 test "DCH pulls a double-width glyph intact when deleting a preceding cell" {
@@ -2715,9 +2709,9 @@ test "DCH pulls a double-width glyph intact when deleting a preceding cell" {
     try core.write("a한bc"); // a(0) 한(1-2, wide) b(3) c(4)
     try core.write("\x1b[1;1H"); // 커서 home (0,0)=a
     try core.write("\x1b[P"); // DCH 1 — a 삭제, 한이 col0-1로 통째 당겨짐
-    try std.testing.expectEqual(@as(u21, '한'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expect(core.cells[core.index(0, 1)].continuation); // 한 base+continuation 정합 유지
-    try std.testing.expectEqual(@as(u21, 'b'), core.cells[core.index(0, 2)].codepoint);
+    try std.testing.expectEqual(@as(u21, '한'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expect(core.screen.cells[core.index(0, 1)].continuation); // 한 base+continuation 정합 유지
+    try std.testing.expectEqual(@as(u21, 'b'), core.screen.cells[core.index(0, 2)].codepoint);
 }
 
 test "ICH clears a wide glyph base pushed half off the line edge" {
@@ -2726,8 +2720,8 @@ test "ICH clears a wide glyph base pushed half off the line edge" {
     try core.write("abc한"); // a(0) b(1) c(2) 한(3-4, wide)
     try core.write("\x1b[1;1H"); // 커서 home
     try core.write("\x1b[@"); // ICH 1 — 한이 줄 끝으로 밀려 continuation이 줄 밖으로
-    try std.testing.expectEqual(@as(u21, 'c'), core.cells[core.index(0, 3)].codepoint);
-    const last = core.cells[core.index(0, 4)];
+    try std.testing.expectEqual(@as(u21, 'c'), core.screen.cells[core.index(0, 3)].codepoint);
+    const last = core.screen.cells[core.index(0, 4)];
     try std.testing.expect(last.codepoint != '한' and last.width != 2); // 고아 base 없이 비워짐
 }
 
@@ -2779,8 +2773,8 @@ test "resetInputModes: 입력 모드만 끄고 화면·커서는 보존한다" {
     try std.testing.expectEqualStrings("", core.pendingResponse());
     // 보이는 내용과 커서는 그대로 보존된다(비파괴).
     try std.testing.expectEqual(cursor_before, core.cursor);
-    try std.testing.expectEqual(@as(u21, 'h'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'i'), core.cells[core.index(0, 1)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'h'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'i'), core.screen.cells[core.index(0, 1)].codepoint);
 }
 
 test "mouse reporting (DECSET 1000 + SGR 1006): off=무리포트, press/release/wheel, mode off" {
@@ -2901,14 +2895,14 @@ test "BCE: 스크롤로 들어오는 빈 줄·ED가 현재 pen 배경을 잇는�
 
     // 화면을 채우고 LF로 한 번 스크롤 → 새로 들어온 맨 아래 빈 줄이 pen 배경을 이어야 한다(BCE).
     try core.write("A\r\nB\r\n");
-    const scrolled = core.cells[core.index(1, 0)];
+    const scrolled = core.screen.cells[core.index(1, 0)];
     try std.testing.expectEqual(@as(u21, ' '), scrolled.codepoint);
     try std.testing.expectEqual(bg, scrolled.style.background);
 
     // ED(\e[2J)도 같은 규칙: 전체를 pen 배경으로 지운다(기존 동작 고정).
     try core.write("\x1b[2J");
-    try std.testing.expectEqual(bg, core.cells[core.index(0, 0)].style.background);
-    try std.testing.expectEqual(bg, core.cells[core.index(1, 3)].style.background);
+    try std.testing.expectEqual(bg, core.screen.cells[core.index(0, 0)].style.background);
+    try std.testing.expectEqual(bg, core.screen.cells[core.index(1, 3)].style.background);
 }
 
 test "DECSTBM ignores an invalid (top>=bottom) region and keeps the prior one" {
@@ -3326,11 +3320,11 @@ test "SGR 7/27 set and clear reverse video on the pen (0 resets it too)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();
     try core.write("\x1b[7mX");
-    try std.testing.expect(core.cells[0].style.reverse);
+    try std.testing.expect(core.screen.cells[0].style.reverse);
     try core.write("\x1b[27mY");
-    try std.testing.expect(!core.cells[1].style.reverse);
+    try std.testing.expect(!core.screen.cells[1].style.reverse);
     try core.write("\x1b[7m\x1b[0mZ"); // SGR 0이 reverse도 리셋
-    try std.testing.expect(!core.cells[2].style.reverse);
+    try std.testing.expect(!core.screen.cells[2].style.reverse);
 }
 
 test "DECSC/DECRC (ESC 7/8) save and restore the cursor around a DECSTBM reset (claude CLI startup)" {
@@ -3381,8 +3375,8 @@ test "restoreFromSlot (CSI u / DECRC) preserves pending_wrap saved at line end" 
     try core.write("\x1b[u"); // SCORC: 복원 → pending_wrap도 true로 돌아와야 한다
     try core.write("E"); // pending_wrap이면 'E'가 먼저 다음 줄로 넘어가 그려진다
     // 복원이 무효화됐으면(버그) 'E'가 row0 col3(D 자리)를 덮는다. 복원되면 D 유지 + E는 다음 줄.
-    try std.testing.expectEqual(@as(u21, 'D'), core.cells[core.index(0, 3)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'E'), core.cells[core.index(1, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'D'), core.screen.cells[core.index(0, 3)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'E'), core.screen.cells[core.index(1, 0)].codepoint);
 }
 
 test "DA1 (CSI c) answers with a VT102 identification over the response path" {
@@ -3788,7 +3782,7 @@ test "G1 SGR ext: blink(5/25), conceal(8/28), double-underline(21), underline co
     defer core.deinit();
     // SGR 5(blink)·8(conceal)·21(double→underline)·58;2;10;20;30(underline color) → pen에 반영.
     try core.write("\x1b[5;8;21;58;2;10;20;30mA");
-    const c0 = core.cells[core.index(0, 0)];
+    const c0 = core.screen.cells[core.index(0, 0)];
     try std.testing.expect(c0.style.blink);
     try std.testing.expect(c0.style.conceal);
     try std.testing.expect(c0.style.underline);
@@ -3796,7 +3790,7 @@ test "G1 SGR ext: blink(5/25), conceal(8/28), double-underline(21), underline co
 
     // SGR 25(blink off)·28(reveal)·24(underline off)·59(underline color default) → 끄기.
     try core.write("\x1b[25;28;24;59mB");
-    const c1 = core.cells[core.index(0, 1)];
+    const c1 = core.screen.cells[core.index(0, 1)];
     try std.testing.expect(!c1.style.blink);
     try std.testing.expect(!c1.style.conceal);
     try std.testing.expect(!c1.style.underline);
@@ -3804,7 +3798,7 @@ test "G1 SGR ext: blink(5/25), conceal(8/28), double-underline(21), underline co
 
     // 58;5;n(indexed) underline color.
     try core.write("\x1b[58;5;42mC");
-    try std.testing.expectEqual(types.Color{ .indexed = 42 }, core.cells[core.index(0, 2)].style.underline_color);
+    try std.testing.expectEqual(types.Color{ .indexed = 42 }, core.screen.cells[core.index(0, 2)].style.underline_color);
 }
 
 test "G14 DCS/DECRQSS: SGR(m), DECSTBM(r), cursor style( q), invalid → DCS 0 \\$r" {
@@ -3885,11 +3879,11 @@ test "resize while in the alt screen preserves the saved primary's soft-wrap fla
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 4 });
     defer core.deinit();
     try core.write("abcdef"); // abcd|ef soft-wrap: wrapped[0]=true
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try core.write("\x1b[?1049h");
     try core.resize(4, 3); // alt 중 행 수만 축소
     try core.write("\x1b[?1049l");
-    try std.testing.expect(core.wrapped[0]); // primary 복원 후에도 wrap 메타데이터 생존
+    try std.testing.expect(core.screen.wrapped[0]); // primary 복원 후에도 wrap 메타데이터 생존
 }
 
 test "region scrolls break stale soft-wrap links at the range boundaries" {
@@ -3897,10 +3891,10 @@ test "region scrolls break stale soft-wrap links at the range boundaries" {
     defer core.deinit();
     // 행2-3에 걸친 soft-wrap 줄을 만든다: 행0/1 채우고 "abcdef"(행2 abcd|행3 ef).
     try core.write("x\r\ny\r\nabcdef");
-    try std.testing.expect(core.wrapped[2]);
+    try std.testing.expect(core.screen.wrapped[2]);
     // 커서 행3에서 IL: 행3이 비고 wrapped[2]의 연속 주장은 깨져야 한다.
     try core.write("\x1b[L");
-    try std.testing.expect(!core.wrapped[2]);
+    try std.testing.expect(!core.screen.wrapped[2]);
     // resize가 빈 행을 이전 줄에 합치지 않는다.
     try core.resize(8, 4);
     const dump = try core.dumpUtf8(std.testing.allocator);
@@ -3925,8 +3919,8 @@ test "a CSI split across writes survives a resize in between (parser state kept)
     try core.write("\x1b[31"); // SGR 빨강의 앞부분(쪼개진 read)
     try core.resize(10, 3); // 시퀀스 한가운데 resize
     try core.write("mX"); // 꼬리 도착: 'm'은 글자가 아니라 SGR 완성이어야 한다
-    try std.testing.expectEqual(@as(u21, 'X'), core.cells[0].codepoint);
-    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.cells[0].style.foreground);
+    try std.testing.expectEqual(@as(u21, 'X'), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(types.Color{ .indexed = 1 }, core.screen.cells[0].style.foreground);
 }
 
 test "CSI sequences with intermediates are consumed, not dispatched as their bare final" {
@@ -3946,7 +3940,7 @@ test "DA2 (CSI > c) is answered and '>'-marked sequences never leak into SGR" {
     core.clearResponse();
     try core.write("\x1b[>4;2m"); // modifyOtherKeys — SGR(4;2=underline)로 새면 안 된다
     try core.write("X");
-    try std.testing.expect(!core.cells[0].style.underline);
+    try std.testing.expect(!core.screen.cells[0].style.underline);
 }
 
 test "ED 3 (CSI 3J) clears the scrollback while ED 2 keeps it" {
@@ -4123,8 +4117,8 @@ test "selection re-injects VS16 for keycap emoji so copied bytes match the rende
     defer core.deinit();
     // 2️⃣ = '2' + VS16(FE0F) + U+20E3. 단일 combining 슬롯이라 VS16이 U+20E3에 덮여 combining=0x20E3만 남는다.
     try core.write("\x32\xef\xb8\x8f\xe2\x83\xa3");
-    try std.testing.expectEqual(@as(u21, 0x32), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x20E3), core.cells[0].combining);
+    try std.testing.expectEqual(@as(u21, 0x32), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x20E3), core.screen.cells[0].combining);
 
     core.selectionStart(0, 0);
     core.selectionExtend(0, 3);
@@ -4261,7 +4255,7 @@ test "double-click selects the word run, extending across a soft-wrap boundary" 
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
     defer core.deinit();
     try core.write("ab cdefghij kl"); // 8칸: "ab cdefg"|"hij kl" — 단어 cdefghij가 wrap을 넘는다
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
 
     core.selectWordAt(0, 4, ""); // 행0 col4('e') 더블클릭
     const text = (try core.extractSelection(std.testing.allocator)).?;
@@ -4359,7 +4353,7 @@ test "extractUrlAt finds an http(s) URL in the clicked word, across soft-wrap, t
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 3 });
     defer core.deinit();
     try core.write("see (https://a.bc/dpath)."); // 12칸 wrap: "see (https:/"|"/a.bc/dpath)"|"."
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
 
     // wrap된 URL의 두 번째 행을 Cmd+클릭해도 전체 URL이 나오고, 끝 ")."는 다듬어진다.
     const url = (try core.extractUrlAt(std.testing.allocator, 1, 3)).?;
@@ -4504,7 +4498,7 @@ test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" 
     // 링크 밖("tail")은 아니다.
     try std.testing.expect(!selection.wordIsUrl(&core, 0, 12));
     // 닫은 뒤 출력엔 링크가 없다.
-    try std.testing.expectEqual(@as(u32, 0), core.cells[12].link);
+    try std.testing.expectEqual(@as(u32, 0), core.screen.cells[12].link);
 }
 
 test "OSC 8 hyperlink: BEL terminator, id= params ignored, same URI interned once" {
@@ -4512,7 +4506,7 @@ test "OSC 8 hyperlink: BEL terminator, id= params ignored, same URI interned onc
     defer core.deinit();
     try core.write("\x1b]8;id=x;https://a.bc\x07one\x1b]8;;\x07 \x1b]8;;https://a.bc\x07two\x1b]8;;\x07");
     try std.testing.expectEqual(@as(usize, 1), core.link_store.items.len); // dedup
-    try std.testing.expectEqual(core.cells[0].link, core.cells[5].link); // 같은 id 재사용
+    try std.testing.expectEqual(core.screen.cells[0].link, core.screen.cells[5].link); // 같은 id 재사용
     const url = (try core.extractUrlAt(std.testing.allocator, 0, 0)).?;
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://a.bc", url);
@@ -4522,7 +4516,7 @@ test "OSC 8 hyperlink: span underlines the whole link run and survives soft-wrap
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 3 });
     defer core.deinit();
     try core.write("\x1b]8;;https://a.bc/long\x1b\\abcdefgh\x1b]8;;\x1b\\"); // 6칸 wrap: abcdef|gh
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     const anchor = core.urlAnchorAt(1, 1).?; // 둘째 줄에서 클릭해도
     try std.testing.expectEqual(@as(usize, 0), anchor.row); // run 시작은 첫 줄
     const span = core.urlSpanAtAbs(anchor).?;
@@ -4545,7 +4539,7 @@ test "OSC 8 oversized URI is ignored and plain heuristic still works" {
     try core.write(&big);
     try core.write("\x07hello");
     try std.testing.expectEqual(@as(usize, 0), core.link_store.items.len);
-    try std.testing.expectEqual(@as(u21, 'h'), core.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'h'), core.screen.cells[0].codepoint);
     // 휴리스틱은 여전히 동작.
     try core.write("\r\nhttps://x.yz ");
     try std.testing.expect(selection.wordIsUrl(&core, 1, 3));
@@ -4565,7 +4559,7 @@ test "preedit composition shows the in-progress hangul at the cursor without tou
     try std.testing.expect(snap.cells[3].continuation);
     try std.testing.expect(!snap.cursor.visible); // 조합 중 블록 커서 숨김(반전 preedit이 커서 역할)
     // 실제 그리드는 오염되지 않는다.
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[2].codepoint);
 
     // 조합 갱신('않' 등 다른 글자로 교체)도 같은 자리에.
     try core.setPreedit("않");
@@ -4609,8 +4603,8 @@ test "preedit inserts mid-line, shifting trailing glyphs (가나다 + 나앞 조
     try std.testing.expect(!snap.cursor.visible);
     try std.testing.expectEqual(@as(u16, 4), snap.cursor.col); // 커서는 조합 끝
     // 실제 그리드는 불변 — 확정 전까지 셸 상태는 "가나다" 그대로다.
-    try std.testing.expectEqual(@as(u21, 0xB098), core.cells[2].codepoint); // grid의 '나'는 col2
-    try std.testing.expectEqual(@as(u21, 0xB2E4), core.cells[4].codepoint); // grid의 '다'는 col4
+    try std.testing.expectEqual(@as(u21, 0xB098), core.screen.cells[2].codepoint); // grid의 '나'는 col2
+    try std.testing.expectEqual(@as(u21, 0xB2E4), core.screen.cells[4].codepoint); // grid의 '다'는 col4
 }
 
 test "preedit ambiguous-width=wide: circled number drawn 2 cells matches the insert shift (no gap)" {
@@ -4655,12 +4649,12 @@ test "zsh wide-glyph erase sequence (BS BS SP SP BS BS) cleans the hangul cell p
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
     try core.write("ls \xec\x95\x88"); // "ls 안" — 안은 col3(wide)+col4(continuation)
-    try std.testing.expectEqual(@as(u2, 2), core.cells[3].width);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[3].width);
     try core.write("\x08\x08  \x08\x08");
     // 한글이 지워지고 "ls "만 남는다 — continuation 잔재 없이.
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[3].codepoint);
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[4].codepoint);
-    try std.testing.expect(!core.cells[4].continuation);
+    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[3].codepoint);
+    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[4].codepoint);
+    try std.testing.expect(!core.screen.cells[4].continuation);
     try std.testing.expectEqual(@as(u16, 3), core.cursor.col);
 }
 
@@ -4669,12 +4663,12 @@ test "OSC 8 pen_link resets on alt-screen switch and RIS (no stale clickable cel
     defer core.deinit();
     // 링크를 열고 닫지 않은 채(악성/부분 출력) 글자 출력 — 그 글자엔 링크가 찍힌다.
     try core.write("\x1b]8;;https://x.yz\x1b\\ab");
-    try std.testing.expect(core.cells[0].link != 0);
+    try std.testing.expect(core.screen.cells[0].link != 0);
 
     // alt 진입: pen_link이 리셋돼 alt에서 출력한 글자엔 링크가 안 찍힌다.
     try core.write("\x1b[?1049h");
     try core.write("Z");
-    try std.testing.expectEqual(@as(u32, 0), core.cells[0].link); // alt 화면 cell
+    try std.testing.expectEqual(@as(u32, 0), core.screen.cells[0].link); // alt 화면 cell
     try std.testing.expectEqual(@as(u32, 0), core.pen_link);
 
     // primary 복귀도 pen_link 0.
@@ -4687,7 +4681,7 @@ test "OSC 8 pen_link resets on alt-screen switch and RIS (no stale clickable cel
     try core.write("\x1bc"); // RIS
     try std.testing.expectEqual(@as(usize, 0), core.link_store.items.len);
     try std.testing.expectEqual(@as(u32, 0), core.pen_link);
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[0].codepoint); // 화면 비움
+    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[0].codepoint); // 화면 비움
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen()); // 스크롤백 비움
     try std.testing.expectEqual(@as(u16, 0), core.cursor.col);
 }
@@ -4699,19 +4693,19 @@ test "emoji grapheme: skin tone modifier and flag (RI pair) cluster into one wid
     // 스킨톤 modifier(🏽 U+1F3FD)는 EAW Wide(2)라 별도 셀로 둔다 — zsh의 ZLE 너비(👍2+🏽2=4)와
     // 일치시켜 붙여넣기 redraw가 안 깨지게(너비 합의). 👍는 col0-1, 🏽는 col2-3.
     try core.write("\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
-    try std.testing.expectEqual(@as(u21, 0x1F44D), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, null), core.cells[0].combining); // 클러스터 안 함
-    try std.testing.expectEqual(@as(u2, 2), core.cells[0].width);
-    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.cells[2].codepoint); // 스킨톤은 별도 셀
+    try std.testing.expectEqual(@as(u21, 0x1F44D), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[0].combining); // 클러스터 안 함
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[0].width);
+    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[2].codepoint); // 스킨톤은 별도 셀
     try std.testing.expectEqual(@as(u16, 4), core.cursor.col); // 4칸(zsh와 일치)
 
     // 국기 RI(🇰🇷 = U+1F1F0 U+1F1F7)는 zsh와 같이 낱자(각 width 1)로 둔다 — 클러스터하면
     // 우리는 width-2 한 셀, zsh는 width-1 둘이라 구조가 달라 붙여넣기 redraw가 깨졌다.
     try core.write("\r\n\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7");
-    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[10].codepoint);
-    try std.testing.expectEqual(@as(u2, 1), core.cells[10].width); // RI = width 1(EAW Neutral)
-    try std.testing.expectEqual(@as(u21, 0x1F1F7), core.cells[11].codepoint); // 둘째 RI 별도 셀
-    try std.testing.expectEqual(@as(?u21, null), core.cells[10].combining);
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[10].codepoint);
+    try std.testing.expectEqual(@as(u2, 1), core.screen.cells[10].width); // RI = width 1(EAW Neutral)
+    try std.testing.expectEqual(@as(u21, 0x1F1F7), core.screen.cells[11].codepoint); // 둘째 RI 별도 셀
+    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[10].combining);
 }
 
 test "mode 2027: VS16 promotes to width 2 only when grapheme cluster mode is on" {
@@ -4719,16 +4713,16 @@ test "mode 2027: VS16 promotes to width 2 only when grapheme cluster mode is on"
     defer core.deinit();
     // 기본(2027 off): ❤+VS16 = width 1(EAW, zsh 일치).
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤️
-    try std.testing.expectEqual(@as(u2, 1), core.cells[0].width);
+    try std.testing.expectEqual(@as(u2, 1), core.screen.cells[0].width);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 
     // 2027 on: 풀사이즈 width 2.
     try core.write("\r\n\x1b[?2027h\xe2\x9d\xa4\xef\xb8\x8f");
     try std.testing.expect(core.grapheme_cluster_mode);
-    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[10].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[10].combining);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[10].width);
-    try std.testing.expect(core.cells[11].continuation);
+    try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[10].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.screen.cells[10].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[10].width);
+    try std.testing.expect(core.screen.cells[11].continuation);
 }
 
 test "emoji_wide promotes VS16/keycap to width 2 without mode 2027 (text.emoji-width=wide)" {
@@ -4742,22 +4736,22 @@ test "emoji_wide promotes VS16/keycap to width 2 without mode 2027 (text.emoji-w
 
     // ❤+VS16 = ❤️ → width 2 + continuation.
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f");
-    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[0].width);
-    try std.testing.expect(core.cells[1].continuation);
+    try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[0].width);
+    try std.testing.expect(core.screen.cells[1].continuation);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.col); // advance 2
 
     // 키캡 2️⃣ = '2'(0x32) + VS16(FE0F) + 엔클로징 키캡(U+20E3) → base 승격(FE0F가 트리거).
     try core.write("\r\n\x32\xef\xb8\x8f\xe2\x83\xa3");
-    try std.testing.expectEqual(@as(u21, 0x32), core.cells[10].codepoint);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[10].width);
-    try std.testing.expect(core.cells[11].continuation);
+    try std.testing.expectEqual(@as(u21, 0x32), core.screen.cells[10].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[10].width);
+    try std.testing.expect(core.screen.cells[11].continuation);
 
     // 대조: emoji_wide=false면 같은 ❤️가 width 1 유지(zsh 정렬 보호 — 기존 동작).
     var narrow = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer narrow.deinit();
     try narrow.write("\xe2\x9d\xa4\xef\xb8\x8f");
-    try std.testing.expectEqual(@as(u2, 1), narrow.cells[0].width);
+    try std.testing.expectEqual(@as(u2, 1), narrow.screen.cells[0].width);
 }
 
 test "mode 2027: skin tone and flags cluster only when on" {
@@ -4766,19 +4760,19 @@ test "mode 2027: skin tone and flags cluster only when on" {
     try core.write("\x1b[?2027h");
     // 스킨톤: 👍🏽 한 셀 width 2.
     try core.write("\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
-    try std.testing.expectEqual(@as(u21, 0x1F44D), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F3FD), core.cells[0].combining);
+    try std.testing.expectEqual(@as(u21, 0x1F44D), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F3FD), core.screen.cells[0].combining);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
     // 국기: 🇰🇷 한 셀 width 2.
     try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7");
-    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[2].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[2].combining);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[2].width);
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[2].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.screen.cells[2].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[2].width);
 
     // 2027 off면 스킨톤은 별도 셀(EAW Wide).
     try core.write("\x1b[?2027l\r\n\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd");
-    try std.testing.expectEqual(@as(?u21, null), core.cells[12].combining);
-    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.cells[14].codepoint); // 별도 셀
+    try std.testing.expectEqual(@as(?u21, null), core.screen.cells[12].combining);
+    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[14].codepoint); // 별도 셀
 }
 
 test "DECRQM reports mode 2027 state so apps can detect support" {
@@ -4885,12 +4879,12 @@ test "APC (ESC _ ... ESC \\): kitty graphics payload가 화면에 텍스트로 �
     defer core.deinit();
     // kitty graphics APC — control+payload가 셀에 안 찍히고 소비된다(과거 ESC_ 미처리면 누수).
     try core.write("\x1b_Ga=T,f=32;AAAA\x1b\\");
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[0].codepoint); // 텍스트 누수 없음
+    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[0].codepoint); // 텍스트 누수 없음
     try std.testing.expectEqual(@as(u16, 0), core.cursor.col); // 커서 안 움직임
     // APC 종료(ESC \) 후 일반 텍스트는 정상 — ground 복귀 확인.
     try core.write("hi");
-    try std.testing.expectEqual(@as(u21, 'h'), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(u21, 'i'), core.cells[1].codepoint);
+    try std.testing.expectEqual(@as(u21, 'h'), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'i'), core.screen.cells[1].codepoint);
 }
 
 test "kitty graphics command 파싱: control k=v 주요 key (audit 5/5b)" {
@@ -5613,10 +5607,10 @@ test "mode 2027: skin tone after a flag does not clobber the flag's combining (r
     // 국기 🇰🇷 한 셀(combining = 2번째 RI). 이어서 스킨톤 modifier 🏽.
     try core.write("\xf0\x9f\x87\xb0\xf0\x9f\x87\xb7\xf0\x9f\x8f\xbd");
     // 국기의 combining은 2번째 RI 그대로 — 스킨톤이 덮어쓰지 않는다.
-    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.cells[0].combining); // 안 깨짐
+    try std.testing.expectEqual(@as(u21, 0x1F1F0), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0x1F1F7), core.screen.cells[0].combining); // 안 깨짐
     // 스킨톤은 국기에 못 붙으니 별도 셀(putCell, EAW Wide).
-    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u21, 0x1F3FD), core.screen.cells[2].codepoint);
 }
 
 test "mode 2027: emoji promotion at the last column wraps to next line as width 2 (review #9)" {
@@ -5626,12 +5620,12 @@ test "mode 2027: emoji promotion at the last column wraps to next line as width 
     try core.write("abcd"); // cols 0-3, 커서 col4(마지막)
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(col4, width1) + VS16 -> 마지막 칸 승격 불가 -> wrap
     // 이전 줄 마지막 칸은 비워지고, ❤️가 다음 줄에 width 2로.
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[4].codepoint); // row0 col4 비움
-    try std.testing.expect(core.wrapped[0]); // soft-wrap 표시
-    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[5].codepoint); // row1 col0
-    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[5].combining);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[5].width);
-    try std.testing.expect(core.cells[6].continuation);
+    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[4].codepoint); // row0 col4 비움
+    try std.testing.expect(core.screen.wrapped[0]); // soft-wrap 표시
+    try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[5].codepoint); // row1 col0
+    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.screen.cells[5].combining);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[5].width);
+    try std.testing.expect(core.screen.cells[6].continuation);
     try std.testing.expectEqual(@as(u16, 1), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
 }
@@ -5671,7 +5665,7 @@ test "conformance: XTVERSION (CSI > q) reports terminal name and version over DC
     // '>' 마커 시퀀스가 뒤따르는 SGR로 새지 않는다(DA2 격리 테스트와 같은 불변식).
     try core.write("\x1b[4m"); // underline on
     try core.write("X");
-    try std.testing.expect(core.cells[0].style.underline);
+    try std.testing.expect(core.screen.cells[0].style.underline);
 }
 
 test "XTVERSION (CSI > q) ignores non-zero Ps (only Ps=0 is defined)" {
@@ -5752,10 +5746,10 @@ test "mode 2027: emoji wrap at the last column on the scroll-bottom keeps the so
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤+VS16 -> 마지막 칸 승격 불가 -> wrap + scroll
     // scroll로 한 줄 올라가고, '이전 줄'(이제 row1)이 이모지 줄(row2)로 soft-wrap돼야 한다 —
     // scrollRangeUp 경계 fixup이 지우지 않게 lineFeed 후에 세운다.
-    try std.testing.expect(core.wrapped[1]); // 이전 줄 soft-wrap 유지(핵심)
-    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[core.index(2, 0)].codepoint);
-    try std.testing.expectEqual(@as(u2, 2), core.cells[core.index(2, 0)].width);
-    try std.testing.expect(core.cells[core.index(2, 1)].continuation);
+    try std.testing.expect(core.screen.wrapped[1]); // 이전 줄 soft-wrap 유지(핵심)
+    try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[core.index(2, 0)].codepoint);
+    try std.testing.expectEqual(@as(u2, 2), core.screen.cells[core.index(2, 0)].width);
+    try std.testing.expect(core.screen.cells[core.index(2, 1)].continuation);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.row);
     try std.testing.expectEqual(@as(u16, 2), core.cursor.col);
 }
@@ -5778,13 +5772,13 @@ test "OSC 133: A/B/C tag the cursor row and update state (ST + BEL terminators)"
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\"); // ST 종료
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
     try std.testing.expectEqual(types.SemanticPrompt.prompt, core.semantic_state);
     try core.write("\x1b]133;B\x07"); // BEL 종료 — 같은 행을 최신 마커로 덮어쓴다
-    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[0].kind);
     try std.testing.expectEqual(types.SemanticPrompt.input, core.semantic_state);
     try core.write("\x1b]133;C\x1b\\");
-    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.screen.prompt_marks[0].kind);
 }
 
 test "OSC 133: regions tag distinct rows via line-feed propagation" {
@@ -5796,11 +5790,11 @@ test "OSC 133: regions tag distinct rows via line-feed propagation" {
     try core.write("\r\n"); // row2 ← input 전파
     try core.write("\x1b]133;C\x1b\\"); // row2 = command
     try core.write("\r\nout"); // row3 ← command 전파
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[1].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[2].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[3].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[4].kind); // 영역 밖
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[1].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.screen.prompt_marks[2].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.screen.prompt_marks[3].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[4].kind); // 영역 밖
 }
 
 test "OSC 133: a multi-row prompt propagates prompt to every line" {
@@ -5808,12 +5802,12 @@ test "OSC 133: a multi-row prompt propagates prompt to every line" {
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\"); // row0 = prompt
     try core.write("\n\n"); // LF×2 → row1·row2 ← prompt 전파
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[2].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[1].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[2].kind);
     try core.write("\x1b]133;B\x1b\\"); // 현재 행(row2)만 input으로
-    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[2].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1].kind); // 앞 행은 유지
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[2].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[1].kind); // 앞 행은 유지
 }
 
 test "OSC 133: autowrap continuation keeps the tag (glyph writes do NOT reset it)" {
@@ -5821,10 +5815,10 @@ test "OSC 133: autowrap continuation keeps the tag (glyph writes do NOT reset it
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\");
     try core.write("abcdef"); // abcd|ef soft-wrap: row0 채움 → 자동 wrap → row1
-    try std.testing.expect(core.wrapped[0]); // soft-wrap 표시
+    try std.testing.expect(core.screen.wrapped[0]); // soft-wrap 표시
     // 핵심: 글자 쓰기가 태그를 리셋하지 않는다(wrapped와 다른 점). 두 행 모두 prompt.
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[1].kind);
 }
 
 test "OSC 133: D decodes the exit code; bare/invalid leaves it unchanged" {
@@ -5849,7 +5843,7 @@ test "OSC 133: D resets state so the next row is not tagged" {
     try core.write("\x1b]133;C\x1b\\"); // state=command
     try core.write("\x1b]133;D;0\x07"); // state=unknown
     try core.write("\r\nx"); // 다음 행은 전파되지 않아야 한다
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[1].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[1].kind);
 }
 
 test "OSC 133: a tagged row scrolled off carries its tag into scrollback" {
@@ -5867,10 +5861,10 @@ test "OSC 133: RIS clears all tags, exit code, and state" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\X\x1b]133;D;5\x07");
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
     try std.testing.expectEqual(@as(?i32, 5), core.last_command_exit);
     try core.write("\x1bc"); // RIS
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind);
     try std.testing.expectEqual(@as(?i32, null), core.last_command_exit);
     try std.testing.expectEqual(types.SemanticPrompt.unknown, core.semantic_state);
 }
@@ -5879,9 +5873,9 @@ test "OSC 133: erase-in-display mode 2 clears tags" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 6, .rows = 2 });
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\");
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
     try core.write("\x1b[2J");
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind);
     try std.testing.expectEqual(types.SemanticPrompt.unknown, core.semantic_state);
 }
 
@@ -5890,30 +5884,30 @@ test "OSC 133: alt screen is isolated; primary tags survive the round trip" {
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\"); // primary row0 = prompt
     try core.write("\x1b[?1049h"); // alt 진입
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind); // alt는 비분류
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind); // alt는 비분류
     try core.write("\x1b]133;C\x1b\\"); // alt row0 = command
-    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.screen.prompt_marks[0].kind);
     try core.write("\x1b[?1049l"); // primary 복귀
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind); // primary 분류 복원
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind); // primary 분류 복원
 }
 
 test "OSC 133: liberal option parsing ignores unknown keys" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
     try core.write("\x1b]133;A;aid=14;cl=line;k=i\x07"); // 모르는 옵션 무시, 여전히 prompt
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
     try core.write("\x1b]133;B;barekey\x07"); // 정수 아닌 옵션도 무해
-    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[0].kind);
 }
 
 test "OSC 133: malformed or unknown action is ignored" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
     try core.write("\x1b]133;Pextra\x07"); // action 뒤 ';' 없는 잉여 내용 → invalid
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind);
     try std.testing.expectEqual(types.SemanticPrompt.unknown, core.semantic_state);
     try core.write("\x1b]133;Z\x07"); // 모르는 action → no-op
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind);
 }
 
 test "OSC 133: an overflowing sequence is ignored, later OSC still works" {
@@ -5924,9 +5918,9 @@ test "OSC 133: an overflowing sequence is ignored, later OSC still works" {
     try core.write("\x1b]133;A;"); // OSC 시작
     try core.write(&big); // 2048 버퍼 초과 → osc_overflow
     try core.write("\x07"); // 종료 — overflow라 dispatch가 무시
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind); // 태깅 안 됨
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind); // 태깅 안 됨
     try core.write("\x1b]133;A\x07"); // 다음 OSC는 정상 동작(overflow 리셋)
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[0].kind);
 }
 
 test "OSC 133: snapshot exposes prompt_marks and last_command_exit (non-scrolled)" {
@@ -5976,21 +5970,21 @@ test "OSC 133: reflow carries the tag of a re-wrapped (non-cursor) line" {
     defer core.deinit();
     try core.write("\x1b]133;C\x1b\\"); // row0 = command(출력 영역)
     try core.write("abcdef"); // abcd|ef soft-wrap: row0(wrapped)·row1 = command
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try core.write("\r\nx"); // row2(.command 전파)로 커서 이동 → 위 wrap 줄은 커서 줄이 아니다
     try core.resize(8, 4); // 넓힘 → "abcdef"가 한 줄로 합쳐진다(재-wrap)
-    try std.testing.expectEqual(@as(u21, 'a'), core.cells[core.index(0, 0)].codepoint);
-    try std.testing.expectEqual(@as(u21, 'f'), core.cells[core.index(0, 5)].codepoint);
-    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[0].kind); // 재-wrap 후 태그 보존
+    try std.testing.expectEqual(@as(u21, 'a'), core.screen.cells[core.index(0, 0)].codepoint);
+    try std.testing.expectEqual(@as(u21, 'f'), core.screen.cells[core.index(0, 5)].codepoint);
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.screen.prompt_marks[0].kind); // 재-wrap 후 태그 보존
 }
 
 test "OSC 133: the verbatim cursor line keeps its tag across resize" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\p$ \x1b]133;B\x1b\\ls"); // row0: 프롬프트+입력 → .input(커서 줄)
-    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[0].kind);
     try core.resize(6, 4); // 좁힘 — 커서 줄은 verbatim(clip), 태그 1:1 보존
-    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0].kind);
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[0].kind);
 }
 
 test "OSC 133: rows pushed to scrollback during resize carry their tag" {
@@ -6011,7 +6005,7 @@ test "OSC 133: scrollback re-wrap keeps tags aligned with re-wrapped rows" {
     try core.write("\x1b]133;C\x1b\\"); // command 영역
     try core.write("abcdefgh"); // row0 꽉 채움(.command, pending wrap)
     try core.write("ij"); // wrap → row1(.command), 커서 row1
-    try std.testing.expect(core.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[0]);
     try core.write("\r\n\r\n"); // 두 번 scroll → 논리 줄 abcdefghij가 스크롤백으로(.command)
     try std.testing.expect(core.scrollbackLen() >= 2);
     screen.rewrapScrollback(&core, 4); // 폭 4로 재-wrap: abcd|efgh|ij — 모두 .command 유지
@@ -6037,8 +6031,8 @@ test "OSC 133: a realistic zsh prompt+command sequence classifies rows" {
     try core.write("\x1b]133;C\x1b\\"); // 출력 시작 → row1=.command
     try core.write("hi\r\n"); // 명령 출력 → row2(.command 전파)
     try core.write("\x1b]133;D;0\x07"); // 명령 끝, exit 0 → state=unknown
-    try std.testing.expectEqual(types.SemanticPrompt.input, core.prompt_marks[0].kind); // 프롬프트+입력 줄
-    try std.testing.expectEqual(types.SemanticPrompt.command, core.prompt_marks[1].kind); // 출력 줄
+    try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[0].kind); // 프롬프트+입력 줄
+    try std.testing.expectEqual(types.SemanticPrompt.command, core.screen.prompt_marks[1].kind); // 출력 줄
     try std.testing.expectEqual(@as(?i32, 0), core.last_command_exit);
 }
 
@@ -6047,12 +6041,12 @@ test "OSC 133: D stamps the exit code on the command's prompt-start row" {
     defer core.deinit();
     // 성공 명령: A $ B ls C out D;0 — exit 0이 프롬프트 시작 행(row0)에 스탬프된다.
     try core.write("\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\ls\r\n\x1b]133;C\x1b\\out\r\n\x1b]133;D;0\x07");
-    try std.testing.expectEqual(@as(?i16, 0), core.prompt_marks[0].exit); // 프롬프트 시작 행
-    try std.testing.expectEqual(@as(?i16, null), core.prompt_marks[1].exit); // 출력 행엔 없음
+    try std.testing.expectEqual(@as(?i16, 0), core.screen.prompt_marks[0].exit); // 프롬프트 시작 행
+    try std.testing.expectEqual(@as(?i16, null), core.screen.prompt_marks[1].exit); // 출력 행엔 없음
     // 실패 명령: 다음 프롬프트(row2 시작)에 exit 1.
     try core.write("\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\false\r\n\x1b]133;C\x1b\\\r\n\x1b]133;D;1\x07");
-    try std.testing.expectEqual(@as(?i16, 1), core.prompt_marks[2].exit);
-    try std.testing.expectEqual(@as(?i16, 0), core.prompt_marks[0].exit); // 첫 명령 exit는 그대로
+    try std.testing.expectEqual(@as(?i16, 1), core.screen.prompt_marks[2].exit);
+    try std.testing.expectEqual(@as(?i16, 0), core.screen.prompt_marks[0].exit); // 첫 명령 exit는 그대로
 }
 
 test "OSC 133: the stamped exit carries with the row into scrollback" {
@@ -6074,13 +6068,13 @@ test "OSC 133: re-wrap keeps the exit on exactly one row (no duplicate gutter) [
     try core.write("\r\n\x1b]133;C\x1b\\\r\n\x1b]133;D;0\x07");
     var before: usize = 0;
     for (0..core.size.rows) |r| {
-        if (core.prompt_marks[r].exit != null) before += 1;
+        if (core.screen.prompt_marks[r].exit != null) before += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), before); // leader 한 행에만
     try core.resize(8, 8); // 좁힘 → 그 줄이 더 쪼개진다. exit는 여전히 한 행에만(중복 거터 방지).
     var after: usize = 0;
     for (0..core.size.rows) |r| {
-        if (core.prompt_marks[r].exit != null) after += 1;
+        if (core.screen.prompt_marks[r].exit != null) after += 1;
     }
     for (0..core.scrollbackLen()) |i| {
         if (core.scrollbackRowPrompt(i).exit != null) after += 1;
@@ -6093,8 +6087,8 @@ test "OSC 133: scrollRangeDown (RI/IL) carries the tag down and blanks the inser
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\"); // row0 = .prompt, 커서 row0(scroll_top)
     try core.write("\x1bM"); // RI: scroll region을 아래로 → row0 내용·태그가 row1로, row0은 빈 행
-    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.prompt_marks[0].kind); // 삽입된 빈 행 비분류
-    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.prompt_marks[1].kind); // 태그가 내려감
+    try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind); // 삽입된 빈 행 비분류
+    try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[1].kind); // 태그가 내려감
 }
 
 test "OSC 133: renderSnapshot composes prompt_marks for the scrolled viewport" {
@@ -6158,9 +6152,9 @@ test "VS16 attaches to the base as a combining mark (one cell), shaper sees the 
     defer core.deinit();
     try core.write("\xe2\x9d\xa4\xef\xb8\x8f"); // ❤(U+2764) + VS16(U+FE0F)
     // 폭은 EAW per-codepoint(❤=1, VS16=0) — zsh와 일치시켜 붙여넣기 redraw가 안 깨지게(폭 승격하면 CSI<N>D recolor 어긋남).
-    try std.testing.expectEqual(@as(u21, 0x2764), core.cells[0].codepoint);
-    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.cells[0].combining);
-    try std.testing.expectEqual(@as(u2, 1), core.cells[0].width); // EAW Neutral = 1(zsh 일치)
-    try std.testing.expectEqual(@as(u21, ' '), core.cells[1].codepoint); // 다음 칸은 빈칸
+    try std.testing.expectEqual(@as(u21, 0x2764), core.screen.cells[0].codepoint);
+    try std.testing.expectEqual(@as(?u21, 0xFE0F), core.screen.cells[0].combining);
+    try std.testing.expectEqual(@as(u2, 1), core.screen.cells[0].width); // EAW Neutral = 1(zsh 일치)
+    try std.testing.expectEqual(@as(u21, ' '), core.screen.cells[1].codepoint); // 다음 칸은 빈칸
     try std.testing.expectEqual(@as(u16, 1), core.cursor.col);
 }

@@ -276,7 +276,7 @@ test "glyph cache key separates style size scale and color glyph kind" {
     // glyph bitmap을 같은 atlas slot으로 재사용하는 버그가 난다.
     core.clearDirty();
     try core.write("A🚀");
-    core.cells[0].style = .{ .bold = true, .underline = true };
+    core.screen.cells[0].style = .{ .bold = true, .underline = true };
 
     var list = try draw_list.buildDrawList(std.testing.allocator, core.snapshot());
     defer list.deinit(std.testing.allocator);

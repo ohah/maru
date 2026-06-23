@@ -413,7 +413,7 @@ test "draw list carries style and combining mark for font layout" {
     // DrawList는 나중에 glyph shaping과 atlas upload의 입력이 된다. 그래서 화면에
     // 보이는 글자뿐 아니라 style과 combining mark도 같이 이동해야 한다.
     try core.write("e\u{0301}");
-    core.cells[0].style = .{
+    core.screen.cells[0].style = .{
         .foreground = .{ .indexed = 2 },
         .background = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
         .underline = true,
@@ -445,7 +445,7 @@ test "G1 underline color: underline overlay uses underline_color, strikethrough 
     defer core.deinit();
     try core.write("a");
     // 전경 indexed 2, underline_color rgb(9,8,7), underline+strikethrough 켜짐.
-    core.cells[0].style = .{
+    core.screen.cells[0].style = .{
         .foreground = .{ .indexed = 2 },
         .underline = true,
         .strikethrough = true,
@@ -567,8 +567,8 @@ test "G1 double underline: SGR 21 sets underline_double and emits underline + do
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 1 });
     defer core.deinit();
     try core.write("\x1b[21mA"); // SGR 21 = double underline
-    try std.testing.expect(core.cells[0].style.underline);
-    try std.testing.expect(core.cells[0].style.underline_double);
+    try std.testing.expect(core.screen.cells[0].style.underline);
+    try std.testing.expect(core.screen.cells[0].style.underline_double);
 
     var dl = try buildDrawList(std.testing.allocator, core.snapshot());
     defer dl.deinit(std.testing.allocator);
@@ -588,6 +588,6 @@ test "G1 double underline: SGR 21 sets underline_double and emits underline + do
 
     // SGR 24는 둘 다 끈다.
     try core.write("\x1b[24mB");
-    try std.testing.expect(!core.cells[1].style.underline);
-    try std.testing.expect(!core.cells[1].style.underline_double);
+    try std.testing.expect(!core.screen.cells[1].style.underline);
+    try std.testing.expect(!core.screen.cells[1].style.underline_double);
 }

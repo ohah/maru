@@ -210,7 +210,7 @@ test "glyph quad frame converts glyph frame slots into shader uv input" {
     // backend가 텍스트와 draw-time 효과를 같은 frame에서 그릴 수 있다.
     core.clearDirty();
     try core.write("AA");
-    core.cells[0].style.underline = true;
+    core.screen.cells[0].style.underline = true;
 
     var list = try @import("draw_list.zig").buildDrawList(std.testing.allocator, core.snapshot());
     defer list.deinit(std.testing.allocator);

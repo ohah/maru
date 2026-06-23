@@ -220,7 +220,7 @@ test "renderer state builds a frame from already-shaped product glyph runs" {
     // 준비 경로를 쓰고, surface metadata와 overlay를 잃지 않는지 고정한다.
     core.clearDirty();
     try core.write("A한");
-    core.cells[0].style.underline = true;
+    core.screen.cells[0].style.underline = true;
 
     var list = try draw_list.buildDrawList(std.testing.allocator, core.snapshot());
     var list_owned_by_test = true;

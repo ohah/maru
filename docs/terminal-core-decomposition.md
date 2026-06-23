@@ -178,7 +178,8 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 | **8/N** `screen.zig` 확장 | tabstops(`isTabstop`·`resetTabstops`·`rebuildTabstops`·`writeTab`·`cursorBackTab`·`clearTabstop`) | core의 CSI dispatch가 `screen.x(self)`로 호출(아직 dispatch는 core) | 낮음 |
 | **9/N** | dirty 추적(`markDirty`·`markCursorMoveDirty`·`markCursorRowDirty`; `takeDirty`/`clearDirty`는 위임 메서드) | 거의 모든 screen 연산이 부르는 헬퍼 — 먼저 옮겨 안정화 | 낮음 |
 | **10/N** | charset·print 폭 헬퍼(`translateCharset`·`decSpecial`·`designateCharset`·emoji/RI 판정 6개·`wideContinuationCell`) | 순수 함수 다수 | 낮음~중 |
-| **11/N** | 스크롤백 행 연산(`pushScrollback`·`rewrap*` 5개·`countRewrapRows`·`trimmedLen`·`absRow`·`absRowWrapped`·`clearScrollback`; scrollback 접근자 pub 위임) | Scrollback struct와 짝 완성. rewrap 정교하나 테스트 풍부 | 중 |
+| **11/N** | 스크롤백 행 저장·재-wrap(`pushScrollback`·`clearScrollback`·`ensureScrollbackRewrapped`·`rewrapScrollback`/`Anchored`/`Inner`·`countRewrapRows`·`trimmedLen`) | rewrap 엔진 응집 이동. `absRow`/`absRowWrapped`는 selection 공유(19+6 호출)라 후속 accessor PR로 분리 — 본 PR을 작게·검증 가능하게. 잔류 헬퍼 4개(invalidateSelection·shiftCoordsForEviction·isBlankCell·clearTruncatedWideBase) pub 승격 | 중 |
+| **11b/N(후속)** | 스크롤백 accessor(`absRow`·`absRowWrapped`) → screen.zig | selection/url/snapshot의 25 호출 redirect. selection 인접 작업과 함께 | 중 |
 
 ### Phase C — screen 본체
 

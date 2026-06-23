@@ -1227,21 +1227,15 @@ pub fn enterAltScreen(self: *TerminalCore, save_cursor: bool) void {
 
     // 세 할당이 성공한 뒤에야 상태를 바꾼다(OOM 경로가 저장 슬롯을 오염시키지 않게).
     if (save_cursor) saveCursorState(self); // primary 슬롯(아직 alt_active=false)
-    self.saved_cells = self.screen.cells;
-    self.saved_wrapped = self.screen.wrapped;
-    self.saved_prompt_marks = self.screen.prompt_marks; // primary의 OSC 133 분류 보관
-    self.screen.cells = alt_cells;
-    self.screen.wrapped = alt_wrapped;
-    self.screen.prompt_marks = alt_prompt_marks; // alt 화면은 셸 프롬프트 의미가 없다(전부 .unknown)
+    // primary 화면(grid+스크롤백)을 통째로 보관 슬롯으로 옮기고, alt는 새 빈 grid + cap=0 빈 스크롤백(Screen 기본)을
+    // 쓴다. alt 출력은 history에 안 쌓이고(pushScrollback 무동작), sb.count가 0이라 스크롤 뷰·스크롤바·검색이
+    // by-construction으로 잠긴다("alt엔 스크롤백 없음"이 타입으로 보장). alt 화면은 셸 프롬프트 의미가 없어
+    // prompt_marks는 전부 .unknown이다. 보던 과거를 닫고 선택도 해제한다(활성 cells가 alt로 바뀌어 abs 좌표가
+    // 다른 내용을 가리키므로 — xterm.js도 버퍼 전환 시 선택 해제).
+    self.saved_screen = self.screen;
+    self.screen = .{ .cells = alt_cells, .wrapped = alt_wrapped, .prompt_marks = alt_prompt_marks };
     self.semantic_state = .unknown; // alt 진입 — primary의 진행 중 영역을 이어받지 않는다
     self.alt_active = true;
-    // primary 스크롤백을 보관 슬롯으로 옮기고 alt는 cap=0인 빈 스크롤백을 쓴다 — alt 출력은
-    // history에 안 쌓이고(pushScrollback 무동작), count가 0이라 스크롤 뷰·스크롤바·검색이
-    // by-construction으로 잠긴다(grid의 saved_cells 스왑과 같은 패턴). 보던 과거를 닫고 선택도
-    // 해제한다(활성 cells가 alt로 바뀌어 abs 좌표가 다른 내용을 가리키므로 — xterm.js도 버퍼
-    // 전환 시 선택 해제).
-    self.saved_sb = self.screen.sb;
-    self.screen.sb = .{};
     self.view_offset = 0;
     self.invalidateSelection();
     self.pen_link = 0; // OSC 8 링크는 화면에 스코프된다 — 전환 시 닫는다(Ghostty endHyperlink)
@@ -1259,18 +1253,14 @@ pub fn leaveAltScreen(self: *TerminalCore, restore_cursor: bool) void {
         if (restore_cursor) restoreFromSlot(self, self.saved_cursor_primary);
         return;
     }
+    // alt 화면(grid+빈 스크롤백)을 해제하고 보관해 둔 primary Screen을 통째로 복원한다 — grid·스크롤백
+    // (ring·count·cap·rewrap 마크)이 한 번에 돌아온다. alt의 sb는 빈 인스턴스라 deinit은 보통 no-op.
     self.allocator.free(self.screen.cells);
     self.allocator.free(self.screen.wrapped);
     if (self.screen.prompt_marks.len > 0) self.allocator.free(self.screen.prompt_marks);
-    self.screen.cells = self.saved_cells;
-    self.screen.wrapped = self.saved_wrapped;
-    self.screen.prompt_marks = self.saved_prompt_marks; // primary 분류 복원
-    self.saved_cells = &.{};
-    self.saved_wrapped = &.{};
-    self.saved_prompt_marks = &.{};
     self.screen.sb.deinit(self.allocator); // alt의 빈 스크롤백 해제(보통 ring 미할당 — no-op)
-    self.screen.sb = self.saved_sb; // primary 스크롤백 복원(보관해 둔 ring·count·cap·rewrap 마크 그대로)
-    self.saved_sb = .{};
+    self.screen = self.saved_screen; // primary 화면(grid+스크롤백) 통째 복원
+    self.saved_screen = .{};
     self.semantic_state = .unknown; // primary 복귀 — 진행 중 영역을 이어받지 않는다(다음 프롬프트가 재마킹)
     self.alt_active = false;
     self.pending_wrap = false;
@@ -1600,7 +1590,7 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
     if (self.alt_active) {
         const new_alt = try copyRegionResize(self.allocator, self.screen.cells, old_rows, old_cols, next_size);
         errdefer self.allocator.free(new_alt);
-        const new_saved = try copyRegionResize(self.allocator, self.saved_cells, old_rows, old_cols, next_size);
+        const new_saved = try copyRegionResize(self.allocator, self.saved_screen.cells, old_rows, old_cols, next_size);
         errdefer self.allocator.free(new_saved);
         const new_wrapped = try self.allocator.alloc(bool, new_rows);
         errdefer self.allocator.free(new_wrapped);
@@ -1619,22 +1609,22 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         // 규칙으로 보존한다(저장된 primary의 프롬프트 분류가 복귀 후에도 살아 있어야 한다).
         const keep_rows = @min(old_rows, new_rows);
         @memcpy(new_wrapped[0..keep_rows], self.screen.wrapped[0..keep_rows]);
-        @memcpy(new_saved_wrapped[0..keep_rows], self.saved_wrapped[0..keep_rows]);
+        @memcpy(new_saved_wrapped[0..keep_rows], self.saved_screen.wrapped[0..keep_rows]);
         if (self.screen.prompt_marks.len >= keep_rows) @memcpy(new_prompt_marks[0..keep_rows], self.screen.prompt_marks[0..keep_rows]);
-        if (self.saved_prompt_marks.len >= keep_rows) @memcpy(new_saved_prompt_marks[0..keep_rows], self.saved_prompt_marks[0..keep_rows]);
+        if (self.saved_screen.prompt_marks.len >= keep_rows) @memcpy(new_saved_prompt_marks[0..keep_rows], self.saved_screen.prompt_marks[0..keep_rows]);
 
         self.allocator.free(self.screen.cells);
-        self.allocator.free(self.saved_cells);
+        self.allocator.free(self.saved_screen.cells);
         if (self.screen.wrapped.len > 0) self.allocator.free(self.screen.wrapped);
-        if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
+        if (self.saved_screen.wrapped.len > 0) self.allocator.free(self.saved_screen.wrapped);
         if (self.screen.prompt_marks.len > 0) self.allocator.free(self.screen.prompt_marks);
-        if (self.saved_prompt_marks.len > 0) self.allocator.free(self.saved_prompt_marks);
+        if (self.saved_screen.prompt_marks.len > 0) self.allocator.free(self.saved_screen.prompt_marks);
         self.screen.cells = new_alt;
-        self.saved_cells = new_saved;
+        self.saved_screen.cells = new_saved;
         self.screen.wrapped = new_wrapped;
-        self.saved_wrapped = new_saved_wrapped;
+        self.saved_screen.wrapped = new_saved_wrapped;
         self.screen.prompt_marks = new_prompt_marks;
-        self.saved_prompt_marks = new_saved_prompt_marks;
+        self.saved_screen.prompt_marks = new_saved_prompt_marks;
         self.size = next_size;
         self.scroll_top = 0;
         self.scroll_bottom = new_rows - 1;
@@ -1650,7 +1640,7 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         // alt 중 폭이 바뀌면 보관된 primary 스크롤백(saved_sb)을 복귀 후 현재 폭으로 재-wrap하도록
         // 마크한다(활성 alt sb는 빈 인스턴스라 무의미 — primary는 saved_sb에 있다). leaveAltScreen이
         // 복원하면 ensureScrollbackRewrapped가 1회 수행한다. 안 그러면 옛 폭 행이 복귀 후 stale로 보인다.
-        if (new_cols != old_cols) self.saved_sb.rewrap_pending = true;
+        if (new_cols != old_cols) self.saved_screen.sb.rewrap_pending = true;
         return;
     }
 

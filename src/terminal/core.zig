@@ -209,10 +209,10 @@ pub const TerminalCore = struct {
     // DECSCUSR(CSI Ps SP q): 커서 모양과 깜빡임. vim이 모드별로 bar/block을 전환하는 표준 수단.
     cursor_shape: types.CursorShape = .block,
     cursor_blink: bool = true,
-    saved_cells: []types.Cell = &.{},
-    saved_wrapped: []bool = &.{},
-    // alt screen 전환 때 primary의 OSC 133 행 태그를 보관(saved_wrapped와 같은 슬롯 패턴).
-    saved_prompt_marks: []types.RowPrompt = &.{},
+    // alt 화면 동안 비활성 화면(primary)을 통째로 보관하는 슬롯 — grid(cells·wrapped·prompt_marks) + 스크롤백(sb)을
+    // 한 Screen으로 묶어 alt 전환이 `self.screen ↔ saved_screen` struct 교환 한 번이 된다(B3). primary 활성 중엔
+    // 빈 인스턴스(cells 등 &.{}, sb cap 0). "alt엔 스크롤백 없음"이 grid까지 타입으로 보장된다(architecture.md 2단계).
+    saved_screen: Screen = .{},
     // DECSC/DECRC + 1048/1049가 쓰는 저장 커서. xterm처럼 화면(primary/alt)마다 별도 슬롯을 둔다 —
     // 한 슬롯을 공유하면 TUI가 alt 안에서 ESC 7/8을 쓸 때 1049가 저장한 셸 커서가 덮여, 종료 시
     // 프롬프트가 엉뚱한 위치(예: 화면 맨 위)로 복원된다.
@@ -237,11 +237,8 @@ pub const TerminalCore = struct {
     // 전이 스트림이라 RIS는 건드리지 않는다(프레임마다 drain되어 어차피 짧게 유지).
     shell_events: std.ArrayListUnmanaged(types.ShellEvent) = .empty,
     shell_events_overflow: bool = false,
-    // 활성 화면 스크롤백 ring은 활성 grid라 Screen으로 이동(self.screen.sb — B2). primary cap은 init이
-    // `.screen = .{ … .sb = .{ .cap = default_max_scrollback } }`로 세팅(정의·주석은 screen.zig Screen.sb).
-    // alt 화면 동안 primary의 스크롤백을 보관하는 슬롯(grid의 saved_cells와 같은 스왑 패턴).
-    // primary 활성 중에는 비어 있다. (B3에서 saved_cells 등과 함께 saved_screen: Screen으로 합쳐진다.)
-    saved_sb: Scrollback = .{},
+    // 활성 화면 스크롤백 ring은 Screen으로 이동(self.screen.sb — B2). primary cap은 init이
+    // `.screen = .{ … .sb = .{ .cap = default_max_scrollback } }`로 세팅. alt 보관분은 saved_screen.sb(B3).
     // EAW Ambiguous(동그란 번호 등)를 2칸으로 advance할지(text.ambiguous-width=wide). 기본 false(narrow — 정렬
     // 안전·Ghostty/xterm.js 호환). putCell이 셀 폭을 정할 때 width.cellWidthAmbiguous로 반영하므로 grid·커서·렌더가
     // 같은 폭을 본다(단일 출처). app_session이 loaded_config에서 set(max_scrollback과 같은 직접 대입 패턴).
@@ -538,11 +535,11 @@ pub const TerminalCore = struct {
         if (self.screen.wrapped.len > 0) self.allocator.free(self.screen.wrapped);
         if (self.screen.prompt_marks.len > 0) self.allocator.free(self.screen.prompt_marks);
         if (self.tabstops.len > 0) self.allocator.free(self.tabstops);
-        if (self.saved_cells.len > 0) self.allocator.free(self.saved_cells);
-        if (self.saved_wrapped.len > 0) self.allocator.free(self.saved_wrapped);
-        if (self.saved_prompt_marks.len > 0) self.allocator.free(self.saved_prompt_marks);
+        if (self.saved_screen.cells.len > 0) self.allocator.free(self.saved_screen.cells);
+        if (self.saved_screen.wrapped.len > 0) self.allocator.free(self.saved_screen.wrapped);
+        if (self.saved_screen.prompt_marks.len > 0) self.allocator.free(self.saved_screen.prompt_marks);
         self.screen.sb.deinit(self.allocator);
-        self.saved_sb.deinit(self.allocator); // alt 중 destroy면 primary 스크롤백이 여기 보관돼 있다
+        self.saved_screen.sb.deinit(self.allocator); // alt 중 destroy면 primary 스크롤백이 여기 보관돼 있다
         if (self.viewport_cells.len > 0) self.allocator.free(self.viewport_cells);
         if (self.viewport_prompt_marks.len > 0) self.allocator.free(self.viewport_prompt_marks);
         if (self.reflow_cells.len > 0) self.allocator.free(self.reflow_cells);
@@ -573,7 +570,7 @@ pub const TerminalCore = struct {
     /// alt_active 가드가 되살아난다). alt 중에는 활성 sb가 빈(cap=0) 인스턴스라 config 값은 보관
     /// 슬롯(primary)에서 읽는다.
     pub fn maxScrollback(self: *const TerminalCore) usize {
-        return if (self.alt_active) self.saved_sb.cap else self.screen.sb.cap;
+        return if (self.alt_active) self.saved_screen.sb.cap else self.screen.sb.cap;
     }
 
     /// scrollback.lines config를 반영한다(런타임 reload 포함). 화면 단위 정책이라 활성 화면과 무관하게
@@ -587,7 +584,7 @@ pub const TerminalCore = struct {
     /// (alt-space) kitty placement가 primary의 drop 수만큼 잘못 시프트/제거된다. alt 중 트림도 메모리는
     /// 회수하되 활성 좌표는 건드리지 않는다(선택은 alt 진입 시 해제·view_offset은 0이라 어차피 무동작).
     pub fn setMaxScrollback(self: *TerminalCore, lines: usize) void {
-        const target = if (self.alt_active) &self.saved_sb else &self.screen.sb;
+        const target = if (self.alt_active) &self.saved_screen.sb else &self.screen.sb;
         const dropped = target.setCap(self.allocator, lines);
         if (dropped > 0 and !self.alt_active) { // 활성 primary를 트림했을 때만 좌표 보정
             self.shiftCoordsForEviction(dropped); // 선택(걸리면 해제)·placement anchor를 dropped만큼 당김
@@ -3163,7 +3160,7 @@ test "resize during alt: 폭 변경이 복귀 후 primary 스크롤백 재-wrap�
 
     try core.write("\x1b[?1049h"); // alt 진입 — primary는 saved_sb로 보관
     try core.resize(3, 2); // alt 중 폭 변경(6→3)
-    try std.testing.expect(core.saved_sb.rewrap_pending); // 보관된 primary가 재-wrap 마크됨
+    try std.testing.expect(core.saved_screen.sb.rewrap_pending); // 보관된 primary가 재-wrap 마크됨
     try core.write("\x1b[?1049l"); // 복귀 — sb=saved_sb(rewrap_pending 동반)
     try std.testing.expect(core.screen.sb.rewrap_pending);
     core.scrollViewport(@intCast(core.scrollbackLen())); // 트리거 → 현재 폭(3)으로 재-wrap

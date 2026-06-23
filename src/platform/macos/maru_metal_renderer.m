@@ -756,14 +756,15 @@ bool maru_metal_renderer_draw(
             // '보이는 ink'를 슬롯 세로 중앙에 앉히므로(coretext_smoke.m maru_center_ink_vertically), 종과 단색
             // 아이콘은 같은 nudge면 자동으로 정렬된다 — 종 전용 보정 상수를 제거했다.
             const bool is_bell_icon = is_header && tc.row == 0u && tc.codepoint == 0x1F514u;
-            // 접힘 펼치기 토글(◧)은 사이드바가 없을 때(terminal_origin_x_px==0) 신호등 바로 옆에 단독으로 떠,
-            // 신호등과 수직 정렬돼야 한다. 펼침 헤더 아이콘(◧/⚙/+)은 사이드바 안(origin_x>0)이라 신호등과
-            // 비교되지 않으므로 기존 0.3ch nudge를 유지한다. 접힘 토글이면 타이틀바 띠 [0, titlebar_strip_px]
-            // 안에 셀(높이 ch)을 세로 중앙 배치한다 — 띠는 max(cell_h, 30pt)라 0.3ch nudge로는 위로 쏠렸다.
-            const bool is_collapsed_toggle = is_corner_icon && tc.codepoint == 0x25E7u && terminal_origin_x_px == 0u;
+            // 접힘(terminal_origin_x_px==0, 사이드바 폭 0)이면 헤더 줄0 글리프(◧ 펼치기 토글 + 알림 종 🔔 + 배지)가
+            // 신호등 옆에 단독으로 떠 신호등과 수직 정렬돼야 한다 — 셋을 모두 타이틀바 띠 [0, titlebar_strip_px] 안에 세로
+            // 중앙 배치한다(띠는 max(cell_h, 30pt)라 0.3ch nudge로는 위로 쏠렸다). 예전엔 ◧만 정렬했으나 접힘에도 알림 종을
+            // 유지하면서 종/배지도 같은 정렬이 필요해 헤더 줄0 전체로 일반화(사용자 피드백). 펼침 헤더(◧/⚙/+/종)는
+            // origin_x>0이라 신호등과 안 겹쳐 아래 py_nudge 경로(무영향).
+            const bool is_collapsed_header = is_header && tc.row == 0u && terminal_origin_x_px == 0u;
             const float hscale = is_corner_icon ? 1.7f : 1.0f;
             float py_top;
-            if (is_collapsed_toggle && titlebar_strip_px > 0u) {
+            if (is_collapsed_header && titlebar_strip_px > 0u) {
                 const float strip = (float)titlebar_strip_px;
                 py_top = (strip > ch) ? (strip - ch) * 0.5f : 0.0f; // 띠 안 세로 중앙(신호등 정렬)
             } else {

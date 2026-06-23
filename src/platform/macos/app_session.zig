@@ -137,6 +137,9 @@ const traffic_light_clearance_pt: u32 = 72;
 // 접힘 펼치기 토글(◧)을 신호등 클리어런스에서 더 오른쪽으로 미는 칸 수 — 호버 배경이 셀 중심 기준 좌측으로
 // ≈0.8칸 번지므로, 1칸이면 신호등에 닿을 만큼 붙어 보였다(사용자 피드백). 2칸으로 한 칸 이상 간격을 둔다.
 const collapsed_toggle_gap_cells: u32 = 2;
+// 접힘 시 알림 종(🔔)을 ◧ 펼치기 토글에서 오른쪽으로 띄우는 칸 수 — 펼침 헤더의 아이콘 간격(3칸)과 같게 둬 ◧↔종이
+// 같은 리듬으로 보인다(접힘에도 알림 아이콘 유지, 사용자 피드백). 종 글리프 col = collapsedToggleCol() + 이 값.
+const collapsed_bell_gap_cells: u32 = 3;
 // 접힘 시 상단 타이틀바 띠의 최소 높이(논리 pt) — 신호등 세로 높이(~28pt)를 가려야 터미널/탭이 신호등을 침범 안 함.
 // 펼침은 한 줄(터미널이 사이드바 우측이라 신호등 아래가 아님)이지만, 접힘은 터미널이 전폭이라 신호등 높이를 확보한다.
 const collapsed_titlebar_min_pt: u32 = 30;
@@ -2157,15 +2160,16 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 사이드바 최소 폭(pt) — 헤더 아이콘 줄(좌측 네이티브 신호등 ~72pt + 우측 ◧/⚙/+ 아이콘, sidebar.zig headerHit)이
+    /// 사이드바 최소 폭(pt) — 헤더 아이콘 줄(좌측 네이티브 신호등 ~72pt + 우측 🔔/◧/⚙/+ 아이콘, sidebar.zig headerHit)이
     /// 겹치지 않는 하한. 아이콘은 cell 폭에 비례하므로 고정 sidebar_min_pt(120)로는 큰 폰트에서 신호등과 겹친다 — 신호등
-    /// 클리어런스 + 10칸(아이콘 9 + 여유 1, headerHit의 cols<10 가드도 만족)을 px로 잡아 pt 환산한 값과 sidebar_min_pt 중
-    /// 큰 쪽, **단 sidebar_max_pt를 넘지 않게 cap**(clamp 하한이 상한을 넘으면 std.math.clamp가 assert로 패닉 — 거대 폰트에선
-    /// max 우선). 폭을 정하는 **모든 경로**(드래그 setSidebarWidthPx·메트릭 변경 refreshCellMetrics)가 공유하는 단일 출처라
-    /// 어느 경로로도 겹침이 새지 않는다(드래그만 막던 갭 제거).
+    /// 클리어런스 + 13칸을 px로 잡아 pt 환산한 값과 sidebar_min_pt 중 큰 쪽이다. 13칸 = 알림 그룹의 좌단(안읽음 "9+" 배지
+    /// `cols-13`, 단일 배지 `cols-12`, 종 글리프 `cols-11·cols-10`)까지를 클리어런스 오른쪽에 둔다 — 예전 10칸은 ◧(`cols-8`)
+    /// 까지만 잡아 종+배지가 신호등과 겹쳤다(사용자 피드백). **단 sidebar_max_pt를 넘지 않게 cap**(clamp 하한이 상한을 넘으면
+    /// std.math.clamp가 assert로 패닉 — 거대 폰트에선 max 우선). 폭을 정하는 **모든 경로**(드래그 setSidebarWidthPx·메트릭 변경
+    /// refreshCellMetrics)가 공유하는 단일 출처라 어느 경로로도 겹침이 새지 않는다.
     fn sidebarMinPt(self: *const AppSession) u32 {
         if (self.scale_milli == 0) return sidebar_min_pt;
-        const header_min_px = ptToPx(traffic_light_clearance_pt, self.scale_milli) + 10 * self.cell_width_px;
+        const header_min_px = ptToPx(traffic_light_clearance_pt, self.scale_milli) + 13 * self.cell_width_px;
         return @min(@max(sidebar_min_pt, header_min_px * 1000 / self.scale_milli), sidebar_max_pt);
     }
 
@@ -3874,6 +3878,15 @@ pub const AppSession = struct {
         // (self-verify). NSAppearance를 헤드리스로 못 바꾸므로 setSystemAppearance를 직접 호출한다. config follow-system on 필요.
         if (std.c.getenv("MARU_FORCE_SYS_APPEARANCE")) |sv| {
             self.setSystemAppearance(std.mem.eql(u8, std.mem.span(sv), "dark"));
+        }
+        // MARU_COLLAPSE_SIDEBAR=N — 첫 frame에 테스트 알림 N개(미설정/0→3)를 시드하고 사이드바를 접는다(접힘 좌상단 ◧+종+
+        // 배지를 헤드리스 스크린샷으로 self-verify하는 debug-gate). MARU_OPEN_NOTIFICATIONS와 함께 쓰면 접힘 상태에서 패널까지.
+        if (std.c.getenv("MARU_COLLAPSE_SIDEBAR")) |cv| {
+            var seed: usize = std.fmt.parseInt(usize, std.mem.span(cv), 10) catch 3;
+            if (seed == 0) seed = 3;
+            var i: usize = 0;
+            while (i < seed) : (i += 1) self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
+            if (!self.sidebar_collapsed) self.toggleSidebarCollapsed();
         }
         // MARU_OPEN_NOTIFICATIONS=N — 첫 frame에 테스트 알림 N개(미설정/0→2)를 시드하고 알림 패널을 연다(말풍선 caret·
         // 최소 높이·footer를 헤드리스 스크린샷으로 self-verify하는 debug-gate). env 미설정이면 무동작.
@@ -6384,6 +6397,18 @@ pub const AppSession = struct {
             }
             return;
         }
+        // 접힘 상태 좌상단 알림 종(🔔) 클릭 → 알림 패널(◧ 펼치기보다 먼저 — 별개 영역, 접힘에도 알림 유지).
+        if (kind == 1) {
+            if (self.collapsedNotificationRect()) |r| {
+                const rx: f64 = @floatFromInt(r.x);
+                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w)) and
+                    y_px >= 0 and y_px < @as(f64, @floatFromInt(r.h)))
+                {
+                    self.openNotificationPanel();
+                    return;
+                }
+            }
+        }
         // 접힘 상태 좌상단 펼치기 버튼(◧) 클릭 → 펼친다. 사이드바 폭 0이라 inSidebar=false(아래 분기를 안 탐)라 별도 체크.
         if (kind == 1 and self.collapsedToggleRect() != null) {
             const r = self.collapsedToggleRect().?;
@@ -7396,6 +7421,19 @@ pub const AppSession = struct {
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
         if (self.sidebar_collapsed) {
+            // 접힘 알림 종(◧ 오른쪽) 호버 — 클릭 가능(알림 패널). ◧보다 먼저(별개 영역, 클릭 우선순위와 일치).
+            if (self.collapsedNotificationRect()) |r| {
+                const rx: f64 = @floatFromInt(r.x);
+                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w)) and
+                    y_px >= 0 and y_px < @as(f64, @floatFromInt(r.h)))
+                {
+                    self.setHoveredCollapsedToggle(false); // 종 위면 ◧ 호버는 끈다
+                    self.setHoveredSlot(null);
+                    self.setHoveredTab(null);
+                    self.clearHoverUrlAnchor();
+                    return .link;
+                }
+            }
             if (self.collapsedToggleRect()) |r| {
                 const rx: f64 = @floatFromInt(r.x);
                 const ry: f64 = @floatFromInt(r.y);
@@ -9626,11 +9664,15 @@ pub const AppSession = struct {
             if (y_px >= @as(f64, @floatFromInt(self.sidebar_header_height_px))) return false;
             return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px) == .none;
         }
-        // ② 상단 타이틀바 띠(터미널 위, 또는 접힘 시 전체 폭): 한 줄. 접힘 ◧ 펼치기 버튼 위면 드래그 아님(클릭).
+        // ② 상단 타이틀바 띠(터미널 위, 또는 접힘 시 전체 폭): 한 줄. 접힘 ◧ 펼치기 버튼·알림 종 위면 드래그 아님(클릭).
         if (self.titlebar_strip_px > 0 and y_px < @as(f64, @floatFromInt(self.titlebar_strip_px))) {
             if (self.collapsedToggleRect()) |r| {
                 const rx: f64 = @floatFromInt(r.x);
                 if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false;
+            }
+            if (self.collapsedNotificationRect()) |r| {
+                const rx: f64 = @floatFromInt(r.x);
+                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 접힘 종 클릭 영역 — 창 드래그 아님
             }
             return true;
         }
@@ -10488,6 +10530,23 @@ pub const AppSession = struct {
     /// 기반 cells로 헤더 영역 [0, header)에 직접 박는다(카드·밴드는 .m이 header_h만큼 아래로 시프트). 폭이 너무
     /// 좁거나 헤더 없으면 null(헤더 안 그림). 아이콘 우측 정렬(⚙=cols-4, +=cols-2)은 sidebar.headerHit과 같은
     /// 레이아웃 — 그려진 아이콘과 클릭 영역이 일치한다(§5.4 단일 레이아웃 소스). 검색 입력 텍스트·caret은 P3.
+    /// 알림 종(🔔) + 안 읽은 개수 배지를 row 0의 `bell_col`에 추가한다 — 펼침 헤더(buildSidebarHeaderFrame)와 접힘 토글
+    /// (buildCollapsedToggleFrame)의 **단일 출처**라 글리프(U+1F514, EAW 2칸)·배지 색(coral)·"9+" 규칙이 두 곳에서
+    /// 드리프트하지 않는다. 배지는 안 읽은 알림이 있을 때만 종 한 칸 왼쪽부터: 1~9는 숫자 1칸(`bell_col-1`), 10개 이상은
+    /// "9+" 2칸(`bell_col-2`·`bell_col-1`). 종 색은 fg(sidebar_foreground), 배지는 coral. 호출처가 폭을 보장해
+    /// (펼침 cols≥13 → bell_col=cols-11≥2, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
+    fn appendBellAndBadge(self: *AppSession, cells: *std.ArrayList(renderer.DrawCell), bell_col: u16, fg: terminal.Color) !void {
+        try cells.append(self.allocator, .{ .row = 0, .col = bell_col, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
+        if (self.notification_unread == 0) return;
+        const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
+        if (self.notification_unread > 9) {
+            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 2, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
+            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
+        } else {
+            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
+        }
+    }
+
     fn buildSidebarHeaderFrame(self: *AppSession) !?renderer.RenderFrame {
         const cw = self.cell_width_px;
         if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
@@ -10519,20 +10578,9 @@ pub const AppSession = struct {
         // (cols-1.5)로 3칸 간격이고, 종 글리프 두 셀(cols-11·cols-10) 중심 (cols-10.5)*cw도 토글 (cols-7.5)*cw와 3칸 —
         // 즉 [종]–[토글]–[⚙]–[+]가 균일 3칸 간격이 된다(예전 cols-12는 4칸이라 종만 신호등 쪽으로 밀려 보였다).
         // headerHit의 notifications zone(cols-12..cols-9)이 종 글리프(cols-11·cols-10)와 배지(cols-12)를 모두 포함한다.
-        // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는 안 읽은 알림이 있을 때만
-        // 종 좌측에: 1~9는 숫자 1칸(cols-12), 10개 이상은 "9+" 2칸(cols-13·cols-12). 종(cols-11)과 겹치지 않는다. 색은 coral.
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 11, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
-        if (self.notification_unread > 0) {
-            const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
-            if (self.notification_unread > 9) {
-                // "9+": 종 좌측 cols-13·cols-12. notifications zone(cols-12..)에 cols-12는 들지만 cols-13은 신호등 쪽 —
-                // 배지는 시각 표시라 무해(드문 영역), 종 클릭 영역은 cols-11·cols-10이 zone 안이라 그대로 동작.
-                try cells.append(self.allocator, .{ .row = 0, .col = cols - 13, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
-                try cells.append(self.allocator, .{ .row = 0, .col = cols - 12, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
-            } else {
-                try cells.append(self.allocator, .{ .row = 0, .col = cols - 12, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
-            }
-        }
+        // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 배지는 안 읽은 알림이 있을 때만 종
+        // 좌측에(1~9=cols-12 1칸, 10+="9+" cols-13·cols-12). 글리프·색·"9+" 규칙은 appendBellAndBadge가 접힘 토글과 공유.
+        try self.appendBellAndBadge(&cells, cols - 11, fg);
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
         try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
@@ -10599,6 +10647,12 @@ pub const AppSession = struct {
         return @intCast(@min(clearance_px / self.cell_width_px + collapsed_toggle_gap_cells, @as(u32, std.math.maxInt(u16))));
     }
 
+    /// 접힘 시 알림 종(🔔) 글리프 col(◧ 오른쪽 collapsed_bell_gap_cells칸). render(buildCollapsedToggleFrame)·hit-test
+    /// (collapsedNotificationRect)·패널 anchor(openNotificationPanel)가 같은 값을 써야 그려진 종·클릭 영역·팝업이 일치한다(단일 출처).
+    fn collapsedBellCol(self: *const AppSession) u16 {
+        return self.collapsedToggleCol() + @as(u16, @intCast(collapsed_bell_gap_cells));
+    }
+
     /// 접힘 상태 좌상단 펼치기 버튼(◧)만 그린 frame — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서
     /// suffix 앞에 끼워 터미널 '위'에). 신호등 오른쪽 col(collapsedToggleCol) 줄0에 1글자. 헤더 frame과 같은 절대 좌표 경로.
     fn buildCollapsedToggleFrame(self: *AppSession) !?renderer.RenderFrame {
@@ -10606,11 +10660,15 @@ pub const AppSession = struct {
         if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         const btn_col = self.collapsedToggleCol();
+        const bell_col = self.collapsedBellCol();
         var cells: std.ArrayList(renderer.DrawCell) = .empty;
         errdefer cells.deinit(self.allocator);
         try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+        // 알림 종(접힘에도 유지) + 안 읽은 개수 배지 — 펼침 헤더와 같은 글리프/색/"9+" 규칙(appendBellAndBadge 단일 출처).
+        // 렌더러가 접힘 헤더 줄0 글리프(◧·종·배지)를 타이틀바 띠 세로 중앙에 함께 정렬한다(terminal_origin_x_px==0 분기).
+        try self.appendBellAndBadge(&cells, bell_col, fg);
         const draw_list = renderer.DrawList{
-            .size = .{ .cols = btn_col + 2, .rows = 1 },
+            .size = .{ .cols = bell_col + 3, .rows = 1 }, // ◧ + 종(2칸) + 여유 1칸
             .cursor = .{ .row = 0, .col = 0 },
             .dirty = null,
             .cells = try cells.toOwnedSlice(self.allocator),
@@ -10637,11 +10695,26 @@ pub const AppSession = struct {
     /// 좌측 일부가 안 눌리므로(code-review), 셀 중심에 2칸 폭을 중앙 정렬한다([(col-0.5),(col+1.5)]·cw — 호버 quad·
     /// 글리프와 동심).
     fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
+        // 글리프 중심 (col+0.5)·cw에 2칸 폭 rect를 중앙 정렬(◧는 .m이 셀 중심 기준 1.7×로 키워 ≈[(col-0.35),(col+1.35)]·cw에
+        // 그려지므로, col·cw부터 잡으면 0.5칸 우측으로 치우쳐 글리프 좌측이 안 눌린다 — code-review). collapsedIconRect 단일 출처.
+        return self.collapsedIconRect(self.collapsedToggleCol(), 2 * self.cell_width_px);
+    }
+
+    /// 접힘 시 알림 종(🔔)의 backing-px rect(클릭 hit-test) — collapsedBellCol()과 같은 col(단일 출처). 마우스 핸들러가 이
+    /// rect 클릭이면 openNotificationPanel한다(◧ 토글과 별개 영역). 종 글리프 중심((bell_col+0.5)·cw, 렌더러 가로 −0.5칸
+    /// nudge 반영)에 3칸 폭(배지+종)을 중앙 정렬. (3cw)/2 == cw + cw/2라 collapsedIconRect 중앙 정렬이 그대로 종 중심에 온다.
+    fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
+        return self.collapsedIconRect(self.collapsedBellCol(), 3 * self.cell_width_px);
+    }
+
+    /// 접힘 좌상단 띠 아이콘의 클릭 rect — 글리프 중심 (col+0.5)·cw에 width_px(backing) 폭을 중앙 정렬, 높이=타이틀바 띠
+    /// 전체(1.7× 글리프가 cell_h 밖으로 삐져나가는 데드존 방지). collapsedToggleRect(◧, 2cw)·collapsedNotificationRect(종, 3cw)
+    /// 단일 출처 — 접힘/cell/띠/탭 전제와 중앙-정렬 수학을 한 곳에 둬 둘이 드리프트하지 않는다.
+    fn collapsedIconRect(self: *const AppSession, col: u16, width_px: u32) ?chrome.draw.Rect {
         if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.titlebar_strip_px == 0 or self.tabs.items.len == 0) return null;
         const cw = self.cell_width_px;
-        // 글리프 중심 (col+0.5)·cw에 2칸 폭 rect를 중앙 정렬 → 좌단 = col·cw − cw/2.
-        const center_x = @as(i32, self.collapsedToggleCol()) * @as(i32, @intCast(cw)) + @as(i32, @intCast(cw / 2));
-        return .{ .x = center_x - @as(i32, @intCast(cw)), .y = 0, .w = 2 * cw, .h = self.titlebar_strip_px };
+        const center_x = @as(i32, col) * @as(i32, @intCast(cw)) + @as(i32, @intCast(cw / 2)); // 글리프 중심 (col+0.5)·cw
+        return .{ .x = center_x - @as(i32, @intCast(width_px / 2)), .y = 0, .w = width_px, .h = self.titlebar_strip_px };
     }
 
     /// 오버레이(커맨드 팝업·Find·Notice) frame의 공통 마무리. 채워진 cells(소유권 인계) + 격자 크기(cols×rows) +
@@ -11125,14 +11198,23 @@ pub const AppSession = struct {
     /// caret이 들어갈 자리). 항목은 collect 시점에 히스토리에서 빌드(buildNotificationItems) — show엔 개수만 준다(키 nav clamp).
     fn openNotificationPanel(self: *AppSession) void {
         if (self.cell_width_px == 0) return;
-        const hcols = self.sidebar_width_px / self.cell_width_px;
-        const anchor_x: i32 = @intCast((hcols -| 12) * self.cell_width_px); // 알림 그룹 좌단(배지 col cols-12)
-        // content top(셀 격자)을 줄2 + modal_padding_px로 둔다. rich 모달 배경 quad는 lowering(rasterizeOverlayCells)이
-        // content rect를 사방 modal_padding_px만큼 outset하므로 **보이는** 패널 상단 = content_top − mp. mp를 더해 그
-        // 보이는 상단이 줄2(=2ch)에 와 벨(줄0)을 한 줄 띄우고, 그 사이(줄1)가 말풍선 caret 자리가 된다. mp를 빼먹으면
-        // 보이는 패널이 벨에 거의 붙어(2ch−12) caret이 들어갈 틈이 없다(코드리뷰 — 패딩 미반영 버그 정정).
+        // rich 모달 배경 quad는 lowering(rasterizeOverlayCells)이 content rect를 사방 modal_padding_px만큼 outset하므로
+        // **보이는** 패널 상단 = content_top − mp. mp를 더해 보이는 상단을 원하는 줄에 맞춘다(안 더하면 패널이 벨/띠에 붙음).
         const mp: u32 = self.buildChromeTokens().space.modal_padding_px;
-        const anchor_y: i32 = @intCast(self.cell_height_px * 2 + mp); // 보이는 패널 상단을 줄2에 — 벨 안 가림 + caret 틈
+        var anchor_x: i32 = undefined;
+        var anchor_y: i32 = undefined;
+        if (self.sidebar_collapsed) {
+            // 접힘: 종은 타이틀바 띠 안 collapsedBellCol(). 패널 좌단을 종 묶음(배지) 좌단에, 보이는 상단을 띠 하단에 둔다.
+            // (접힘은 사이드바 폭 0이라 말풍선 caret은 appendNotificationCaret의 cols<13 가드로 자동 생략 — 띠 아래 드롭다운.)
+            anchor_x = @intCast(@as(u32, self.collapsedBellCol() -| 1) * self.cell_width_px); // 배지/종 묶음 좌단
+            anchor_y = @intCast(self.titlebar_strip_px + mp); // content_top − mp = titlebar_strip_px(띠 하단)
+        } else {
+            // 펼침: 패널 좌단을 알림 그룹 좌단(배지 col cols-12)에, 보이는 상단을 줄2에 둔다 — 벨(줄0, py_nudge로 ~1.30ch)을
+            // 한 줄 띄우고 그 사이(줄1)가 말풍선 caret 자리. mp를 빼먹으면 보이는 패널이 벨에 붙어(2ch−mp) caret 틈이 없다.
+            const hcols = self.sidebar_width_px / self.cell_width_px;
+            anchor_x = @intCast((hcols -| 12) * self.cell_width_px);
+            anchor_y = @intCast(self.cell_height_px * 2 + mp);
+        }
         self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
         self.metal_dirty = true;
     }
@@ -17444,7 +17526,7 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     session.setSidebarWidthPx(1_000_000);
     try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
     session.setSidebarWidthPx(0);
-    // 좁게 → 헤더 아이콘(신호등 + ◧/⚙/+)이 겹치지 않는 동적 최소(sidebarMinPt)로 clamp. 독립 검증: [sidebar_min_pt, max] 안.
+    // 좁게 → 헤더 아이콘(신호등 + 🔔/◧/⚙/+ 과 배지)이 겹치지 않는 동적 최소(sidebarMinPt, 13칸)로 clamp. 독립 검증: [sidebar_min_pt, max] 안.
     try std.testing.expectEqual(session.sidebarMinPt(), session.sidebar_width_pt);
     try std.testing.expect(session.sidebar_width_pt >= sidebar_min_pt and session.sidebar_width_pt <= sidebar_max_pt);
     // cap: cell 폭이 거대해 헤더 하한이 max를 넘어도 pt는 sidebar_max_pt를 안 넘는다(clamp lower>upper assert 패닉 방지 —
@@ -18906,6 +18988,51 @@ test "collapsed toggle: hover emits a highlight quad and metalFrame carries titl
     _ = session.hoverCursor(far_x, 1, 0);
     try std.testing.expect(!session.hovered_collapsed_toggle);
     try std.testing.expect(!hasHoverQuad(session, hover_fill));
+}
+
+// 접힘에도 알림 종 유지: 좌상단 띠에 ◧ 오른쪽 종(collapsedBellCol=collapsedToggleCol+3)을 그리고, 그 클릭 rect는
+// 종 글리프와 동심·◧ rect와 비겹침이며, 클릭하면 알림 패널이 열린다(접힘 분기 anchor). 드러난-것=클릭되는-것 단일 출처.
+test "collapsed notification bell: hit-test rect is concentric with the glyph, clears the ◧ toggle, and opens the panel" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try std.testing.expect(session.collapsedNotificationRect() == null); // 펼침일 땐 종 rect 없음(접힘 전제)
+    session.pushNotificationHistory("t", "b", 0, true); // 안읽음 1 → 배지 표시(종 좌측)
+    session.toggleSidebarCollapsed();
+    try std.testing.expect(session.sidebar_collapsed);
+
+    // collapsedBellCol = collapsedToggleCol + 3(아이콘 간격 단일 출처).
+    try std.testing.expectEqual(session.collapsedToggleCol() + @as(u16, 3), session.collapsedBellCol());
+
+    const cw_i: i32 = @intCast(session.cell_width_px);
+    const r = session.collapsedNotificationRect().?;
+    // rect 높이 = 타이틀바 띠 전체(데드존 방지 — collapsedToggleRect와 같은 규약).
+    try std.testing.expectEqual(session.titlebar_strip_px, r.h);
+    // 클릭 rect 중심 == 종 글리프 시각 중심 (bell_col+0.5)·cw(렌더러 −0.5칸 px_nudge 반영; (3cw)/2 == cw + cw/2라 홀/짝 cw 무관).
+    const bell_center = @as(i32, session.collapsedBellCol()) * cw_i + @divTrunc(cw_i, 2);
+    try std.testing.expectEqual(bell_center, r.x + @as(i32, @intCast(r.w / 2)));
+    // 종 rect와 ◧ 토글 rect는 안 겹친다(클릭 모호성 없음) — 종 좌단 ≥ 토글 우단.
+    const t = session.collapsedToggleRect().?;
+    try std.testing.expect(r.x >= t.x + @as(i32, @intCast(t.w)));
+
+    // 종 클릭 → 알림 패널 열림(접힘 분기 anchor). 종은 ◧와 별개라 펼치지 않는다(폭 0 유지).
+    const cx: f64 = @floatFromInt(r.x + @as(i32, @intCast(r.w / 2)));
+    const cy: f64 = @floatFromInt(@as(i32, @intCast(r.h / 2)));
+    session.mouse(1, cx, cy, 0, 0);
+    try std.testing.expect(session.chrome_host.notifications.open);
+    try std.testing.expect(session.sidebar_collapsed); // 종 클릭은 펼치지 않는다(◧와 별개 영역)
 }
 
 // window.opacity(F1-1): ResolvedAppearance.window_opacity가 metalFrame.window_opacity_milli(×1000, 0~1000)로 실린다.

@@ -817,120 +817,22 @@ pub const TerminalCore = struct {
         return try out.toOwnedSlice(allocator);
     }
 
-    /// 선택 시작(마우스 다운). 뷰포트 행/열을 받아 절대 행으로 저장한다. 미뤄둔 스크롤백 재-wrap이
-    /// 있으면 먼저 끝낸다 — 안 하면 절대 좌표를 옛 ring 기준으로 만들었다가 드래그 도중 첫
-    /// scrollViewport(자동 스크롤 포함)가 재-wrap을 수행하며 선택을 지워버린다.
+    // ── 선택/검색/URL facade — 본문은 selection.zig(외부 점-호출이라 struct 메서드로 잔류) ──────────
+    /// 선택 시작(마우스 다운). 본문: selection.selectionStart.
     pub fn selectionStart(self: *TerminalCore, viewport_row: u16, col: u16) void {
-        screen.ensureScrollbackRewrapped(self);
-        const abs = selection.absRowFromViewport(self, viewport_row);
-        self.selection_anchor = .{ .row = abs, .col = @min(col, self.size.cols -| 1) };
-        self.selection_head = self.selection_anchor;
-        self.selection_block = false; // 기본 선형 — 블록은 setSelectionBlock으로 켠다(start 직후, Option+드래그)
-        self.dirty = fullDirty(self.size);
+        selection.selectionStart(self, viewport_row, col);
     }
-
-    /// 블록(직사각형) 선택 모드를 켜고 끈다. platform이 selectionStart 직후 Option+드래그면 켠다(시그니처를
-    /// 안 바꿔 기존 selectionStart 호출처 보존). 진행 중 anchor가 없으면(선택 없음) 무시.
+    /// 블록(직사각형) 선택 모드 토글. 본문: selection.setSelectionBlock.
     pub fn setSelectionBlock(self: *TerminalCore, on: bool) void {
-        if (self.selection_anchor == null or self.selection_block == on) return;
-        self.selection_block = on;
-        self.dirty = fullDirty(self.size);
+        selection.setSelectionBlock(self, on);
     }
-
-    /// 선택 확장(드래그). anchor가 없으면 무시.
+    /// 선택 확장(드래그). 본문: selection.selectionExtend.
     pub fn selectionExtend(self: *TerminalCore, viewport_row: u16, col: u16) void {
-        if (self.selection_anchor == null) return;
-        self.selection_head = .{ .row = selection.absRowFromViewport(self, viewport_row), .col = @min(col, self.size.cols -| 1) };
-        self.dirty = fullDirty(self.size);
+        selection.selectionExtend(self, viewport_row, col);
     }
-
-    /// 더블클릭 단어 선택: 클릭한 셀이 속한 비공백 run을 좌우로 확장한다. soft-wrap 경계는
-    /// 논리 줄로 이어지므로 행을 넘어 계속 확장한다(wrap된 긴 URL을 통째로 선택). 공백을
-    /// 클릭하면 선택하지 않는다(해제).
-    /// 더블클릭 단어 선택의 추가 구분자 최대 개수(config input.word-separators codepoint 수). 스택 디코드 버퍼 크기 —
-    /// 초과분은 무시한다(구분자는 보통 문장부호 십수 개라 충분; 폭주 방어선).
-    pub const max_word_separators: usize = 64;
-
-    /// 더블클릭 단어 선택. separator_bytes(config input.word-separators, UTF-8)를 codepoint로 디코드해 공백 외
-    /// 추가 경계로 쓴다 — app이 매 호출 현재 config를 넘기므로 reload-safe(코어는 구분자 상태를 안 든다). 빈 값이면
-    /// 공백만 경계(현행 — 비공백 run 선택). **URL 감지는 wordBoundsAt(구분자 없음)이라 영향 없다.**
+    /// 더블클릭 단어 선택. 본문: selection.selectWordAt.
     pub fn selectWordAt(self: *TerminalCore, viewport_row: u16, col: u16, separator_bytes: []const u8) void {
-        screen.ensureScrollbackRewrapped(self); // selectionStart와 같은 이유(절대 좌표를 최종 ring 기준으로)
-        // config 구분자 바이트를 codepoint 스택 버퍼로 디코드(공백은 항상 경계라 제외, 상한 초과·잘못된 UTF-8은 무시).
-        var sep_buf: [max_word_separators]u21 = undefined;
-        var sep_len: usize = 0;
-        if (std.unicode.Utf8View.init(separator_bytes)) |view| {
-            var it = view.iterator();
-            while (it.nextCodepoint()) |cp| {
-                if (cp == ' ' or sep_len >= sep_buf.len) continue;
-                sep_buf[sep_len] = cp;
-                sep_len += 1;
-            }
-        } else |_| {}
-        const bounds = self.wordBoundsAtImpl(viewport_row, col, sep_buf[0..sep_len]) orelse {
-            self.selectionClear();
-            return;
-        };
-        self.selection_anchor = bounds.start;
-        self.selection_head = bounds.end;
-        self.selection_block = false; // 새 선택은 선형 — 블록은 setSelectionBlock으로만 opt-in(selectionStart와 일관)
-        self.dirty = fullDirty(self.size);
-    }
-
-    /// 클릭 위치가 속한 비공백 run(단어)의 절대 좌표 경계. soft-wrap을 넘어 확장한다.
-    /// 공백 위치면 null.
-    /// 단어 경계의 절대 좌표 [start, end]. wordBoundsAt(URL)·wordBoundsAtImpl(선택)이 같은 named 타입을 반환해야
-    /// 호출 위임이 타입 일치한다(익명 struct는 호출마다 별도 타입이라 어긋난다).
-    const WordBounds = struct { start: types.SelectionPoint, end: types.SelectionPoint };
-
-    /// URL 감지용(공백만 경계 — 구분자 무시). selectWordAt(선택)은 wordBoundsAtImpl에 config 구분자를 넘긴다.
-    fn wordBoundsAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?WordBounds {
-        return self.wordBoundsAtImpl(viewport_row, col, &.{});
-    }
-
-    fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, separators: []const u21) ?WordBounds {
-        const abs = selection.absRowFromViewport(self, viewport_row);
-        const row_cells = screen.absRow(self, abs) orelse return null;
-        const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
-        if (screen.isBlankCell(row_cells[c])) return null; // 공백 클릭 → 선택 없음(현행)
-        // 구분자 클릭: 구분자는 제 자신이 한 토큰 → 그 1칸만 선택(Ghostty/iTerm2 관례). separators 비면 false라 무관.
-        if (selection.isWordSeparatorCell(row_cells[c], separators)) {
-            return .{ .start = .{ .row = abs, .col = c }, .end = .{ .row = abs, .col = c } };
-        }
-
-        // 왼쪽 경계: 행 안에서 경계(공백/구분자)까지, 행 시작에 닿으면 이전 행이 soft-wrap으로 이어질 때 계속.
-        var start_row = abs;
-        var start_col: u16 = c;
-        outer_left: while (true) {
-            const cells_row = screen.absRow(self, start_row) orelse break;
-            while (start_col > 0) {
-                if (selection.isWordBoundaryCell(cells_row[start_col - 1], separators)) break :outer_left;
-                start_col -= 1;
-            }
-            if (start_row == 0 or !screen.absRowWrapped(self, start_row - 1)) break;
-            const prev = screen.absRow(self, start_row - 1) orelse break;
-            if (prev.len == 0 or selection.isWordBoundaryCell(prev[prev.len - 1], separators)) break;
-            start_row -= 1;
-            start_col = @intCast(prev.len - 1);
-        }
-
-        // 오른쪽 경계: 대칭 — 행 끝에 닿으면 이 행이 soft-wrap일 때 다음 행으로 계속.
-        var end_row = abs;
-        var end_col: u16 = c;
-        outer_right: while (true) {
-            const cells_row = screen.absRow(self, end_row) orelse break;
-            while (end_col + 1 < cells_row.len) {
-                if (selection.isWordBoundaryCell(cells_row[end_col + 1], separators)) break :outer_right;
-                end_col += 1;
-            }
-            if (!screen.absRowWrapped(self, end_row)) break;
-            const next = screen.absRow(self, end_row + 1) orelse break;
-            if (next.len == 0 or selection.isWordBoundaryCell(next[0], separators)) break;
-            end_row += 1;
-            end_col = 0;
-        }
-
-        return .{ .start = .{ .row = start_row, .col = start_col }, .end = .{ .row = end_row, .col = end_col } };
+        selection.selectWordAt(self, viewport_row, col, separator_bytes);
     }
 
     /// Cmd+hover 위치의 URL 단어 범위(뷰포트 좌표로 클립). URL이 아니면 null. 밑줄 하이라이트
@@ -944,7 +846,7 @@ pub const TerminalCore = struct {
         const id = selection.cellLinkAt(self, abs, col);
         if (id != 0) return selection.linkBoundsAt(self, abs, col, id).start;
         if (!self.wordIsUrl(viewport_row, col)) return null;
-        const bounds = self.wordBoundsAt(viewport_row, col) orelse return null;
+        const bounds = selection.wordBoundsAt(self, viewport_row, col) orelse return null;
         return bounds.start;
     }
 
@@ -960,7 +862,7 @@ pub const TerminalCore = struct {
             return selection.clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
         }
         const vp_row: u16 = @intCast(anchor.row - top_abs);
-        const bounds = self.wordBoundsAt(vp_row, anchor.col) orelse return null;
+        const bounds = selection.wordBoundsAt(self, vp_row, anchor.col) orelse return null;
         return selection.clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
     }
 
@@ -975,7 +877,7 @@ pub const TerminalCore = struct {
             const uri = self.linkUri(link_id) orelse return null;
             return try allocator.dupe(u8, uri);
         }
-        const bounds = self.wordBoundsAt(viewport_row, col) orelse return null;
+        const bounds = selection.wordBoundsAt(self, viewport_row, col) orelse return null;
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         var abs = bounds.start.row;
@@ -998,7 +900,7 @@ pub const TerminalCore = struct {
     /// extractUrlAt의 alloc 없이 같은 판정만 한다.
     pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
         if (selection.cellLinkAt(self, selection.absRowFromViewport(self, viewport_row), col) != 0) return true;
-        const bounds = self.wordBoundsAt(viewport_row, col) orelse return false;
+        const bounds = selection.wordBoundsAt(self, viewport_row, col) orelse return false;
         // URL은 보통 한 단어라 짧은 스택 버퍼로 충분하고, 넘치면 URL일 수 있으니 통과시킨다.
         var buf: [2048]u8 = undefined;
         var len: usize = 0;
@@ -1021,34 +923,13 @@ pub const TerminalCore = struct {
         return selection.urlSpanInWord(buf[0..len]) != null;
     }
 
-    /// 트리플클릭 줄 선택: 클릭한 행이 속한 논리 줄 전체(soft-wrap된 행들 포함)를 선택한다.
+    /// 트리플클릭 줄 선택. 본문: selection.selectLineAt.
     pub fn selectLineAt(self: *TerminalCore, viewport_row: u16) void {
-        screen.ensureScrollbackRewrapped(self); // selectionStart와 같은 이유
-        const abs = selection.absRowFromViewport(self, viewport_row);
-        if (screen.absRow(self, abs) == null) return;
-        var start_row = abs;
-        while (start_row > 0 and screen.absRowWrapped(self, start_row - 1)) start_row -= 1;
-        var end_row = abs;
-        while (screen.absRowWrapped(self, end_row) and screen.absRow(self, end_row + 1) != null) end_row += 1;
-        const end_cells = screen.absRow(self, end_row) orelse return;
-        self.selection_anchor = .{ .row = start_row, .col = 0 };
-        self.selection_head = .{ .row = end_row, .col = @intCast(end_cells.len -| 1) };
-        self.selection_block = false; // 새 선택은 선형(selectionStart와 일관)
-        self.dirty = fullDirty(self.size);
+        selection.selectLineAt(self, viewport_row);
     }
-
-    /// 전체 내용(스크롤백 + 화면)을 선택한다 — Select All. 절대 좌표라 현재 스크롤 위치(view_offset)와
-    /// 무관하게 첫 스크롤백 행(abs 0)부터 마지막 화면 행까지 잡는다. extractSelection이 행별 trailing 공백을
-    /// 다듬으므로 빈 마지막 행까지 잡아도 복사 결과는 깔끔하다. 화면 행이 0이면 무동작.
+    /// 전체 내용(스크롤백 + 화면) 선택(⌘A). 본문: selection.selectAll.
     pub fn selectAll(self: *TerminalCore) void {
-        screen.ensureScrollbackRewrapped(self); // selectLineAt와 같은 이유 — abs 좌표 쓰기 전 스크롤백 rewrap 확정
-        if (self.size.rows == 0) return;
-        const last_abs = self.sb.count + self.size.rows - 1;
-        const end_cells = screen.absRow(self, last_abs) orelse return;
-        self.selection_anchor = .{ .row = 0, .col = 0 };
-        self.selection_head = .{ .row = last_abs, .col = @intCast(end_cells.len -| 1) };
-        self.selection_block = false; // 새 선택은 선형 — Option+드래그 블록 뒤 ⌘A가 직사각형으로 새던 누수 수정
-        self.dirty = fullDirty(self.size);
+        selection.selectAll(self);
     }
 
     /// 화면 + 스크롤백을 비운다(⌘K). 베이스/결정: Ghostty `clear_screen`(키바인딩 수렴의 1차 레퍼런스 —
@@ -1183,12 +1064,9 @@ pub const TerminalCore = struct {
         self.dirty = fullDirty(self.size);
     }
 
+    /// 선택 해제. 본문: selection.selectionClear. screen.clearScrollback·invalidateSelection seam이 self로 호출.
     pub fn selectionClear(self: *TerminalCore) void {
-        if (self.selection_anchor == null) return;
-        self.selection_anchor = null;
-        self.selection_head = null;
-        self.selection_block = false;
-        self.dirty = fullDirty(self.size);
+        selection.selectionClear(self);
     }
 
     /// 행을 재배치하는 연산이 선택의 절대-행 좌표 불변식을 깨면 선택을 해제하는 단일 chokepoint.

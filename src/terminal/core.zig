@@ -1,9 +1,9 @@
 const std = @import("std");
 const input = @import("input.zig");
 const types = @import("types.zig");
-const osc = @import("osc.zig"); // OSC host-reply 핸들러(색·팔레트 OSC 10/11/4/104) — 목적별 분리(구조와 파일 분리)
-const parser = @import("parser.zig"); // VT 파서 dispatch(DCS DECRQSS·XTGETTCAP) — 목적별 분리(구조와 파일 분리)
-const screen = @import("screen.zig"); // 화면 storage(Scrollback ring) — 목적별 분리(구조와 파일 분리)
+const osc = @import("osc.zig"); // OSC host-reply 핸들러(색·팔레트·클립보드·hyperlink·semantic) — 목적별 분리(구조와 파일 분리)
+const parser = @import("parser.zig"); // VT 파서(write feed + escape/CSI/OSC/DCS/APC dispatch + UTF-8) — 목적별 분리
+const screen = @import("screen.zig"); // 화면 storage + 활성 화면 연산(grid·cursor·scroll·print·resize·snapshot) — 목적별 분리
 const png = @import("png.zig"); // kitty graphics f=100 PNG 디코드(K3c)
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)

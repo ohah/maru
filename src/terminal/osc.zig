@@ -1,9 +1,10 @@
-//! OSC(Operating System Command) host-reply 핸들러 — 색·팔레트 질의/설정(OSC 10/11/4/104).
+//! OSC(Operating System Command) host-reply 핸들러 — 색·팔레트 질의/설정(OSC 10/11/4/104/110/111),
+//! 클립보드(OSC 52)·notify(OSC 9/777)·hyperlink(OSC 8)·cwd(OSC 7)·maru(OSC 5379)·semantic prompt(OSC 133).
 //!
 //! `TerminalCore`의 "host-reply/encoding" 책임(rule: parser·storage·encoding이 한 파일에서 서로 다른 이유로
 //! 바뀌면 facade는 유지하되 구현을 목적별로 분리 — docs/project-rules.md "구조와 파일 분리")을 목적별 파일로 떼어낸다.
 //! struct·facade(terminal.zig)는 불변이고, 각 핸들러는 `*TerminalCore`를 받는 free 함수다(필드 + pub helper만 접근).
-//! 진입점 `dispatchOsc`는 core.zig에 남아 여기 함수로 위임한다(점진 분리 — PR 단위로 나머지 OSC도 이리로 이주).
+//! OSC 라우터 진입점 `dispatchOsc`는 parser.zig에 있고(분할 6/N), 코드별로 여기 핸들러에 위임한다.
 //!
 //! 베이스: xterm ctlseqs OSC 4/10/11/104(사실상 표준). 단일 표준 없는 동작의 결정은 해당 핸들러 주석·
 //! docs/terminal-compatibility-policy.md를 단일 출처로 둔다.

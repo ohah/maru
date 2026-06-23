@@ -279,3 +279,80 @@ pub fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
     }
     return self.image_views[0..i];
 }
+
+// ── storage/evict mid (leaf 위에 빌드 — orchestrator가 호출) ───────────────────────────────────────
+
+/// 이미지를 저장하되, 320MB 한도를 넘기면 먼저 evict해 자리를 만든다(K4b). 한 장이 한도보다 크면 거부.
+/// 같은 id 교체분은 회수되니 계산에서 뺀다. evict 정책은 evictKittyImagesFor — placement 없는 것·오래된
+/// 것 우선(kitty 명세 권장). evict 후에도 못 들어가면 add가 한도 체크로 거부한다(graceful, img.data free).
+pub fn storeKittyImage(self: *TerminalCore, img: KittyImage) void {
+    if (img.data.len > self.kitty_images.limit) { // 한 장이 전체 한도 초과 — 불가
+        self.allocator.free(img.data);
+        return;
+    }
+    const existing: usize = if (self.kitty_images.map.get(img.id)) |old| old.data.len else 0;
+    const after = self.kitty_images.total_bytes - existing + img.data.len;
+    if (after > self.kitty_images.limit) {
+        evictKittyImagesFor(self, after - self.kitty_images.limit, img.id); // 부족분만큼 자리 확보
+    }
+    self.kitty_images.add(self.allocator, img); // 같은-id 교체 + 최종 한도 체크(evict 후 통과)
+    // add가 한도로 거부하면 같은 id의 기존 이미지는 이미 제거됐고(같은-id 교체 규칙) 새 것도 안 들어가
+    // map에 그 id가 없다 — 그 id를 가리키던 placement가 orphan으로 남지 않게 함께 정리한다(code review #8).
+    if (!self.kitty_images.map.contains(img.id)) removePlacementsForImage(self, img.id);
+}
+
+/// 한도 초과 시 부족분(needed 바이트) 이상을 비우도록 이미지를 evict한다(exclude_id·그 이미지는 제외 —
+/// 지금 넣으려는 새 이미지). 한 번에 한 장씩, **placement 없는(안 쓰이는) 것 중 오래된(generation 작은) 것**
+/// 만 고른다(kitty 명세 "unused first"; Ghostty 동작 비교). 화면 표시 중(used)인 이미지는 보호한다 —
+/// 모두 쓰이면 후보가 없어 멈추고(이후 add가 새 이미지를 거부), 화면 이미지를 조용히 지우지 않는다
+/// (code review #9). placement/이미지 수가 작아 비용은 무시할 만하다.
+fn evictKittyImagesFor(self: *TerminalCore, needed: usize, exclude_id: u32) void {
+    var freed: usize = 0;
+    while (freed < needed) {
+        const victim = pickKittyEvictionVictim(self, exclude_id) orelse break;
+        const sz = if (self.kitty_images.map.get(victim)) |im| im.data.len else 0;
+        removePlacementsForImage(self, victim); // 안전망(victim은 unused라 보통 placement 없음)
+        self.kitty_images.remove(self.allocator, victim);
+        freed += sz;
+    }
+}
+
+/// evict 후보를 고른다 — **placement 없는(안 쓰이는) 이미지 중** generation 작은(오래된) 것. exclude_id
+/// 제외. 화면 표시 중(placement 있는)인 이미지는 후보에서 빼 보호한다 — 모두 쓰이면 null을 돌려 새 transmit이
+/// 거부되게 한다(화면 이미지를 조용히 지우지 않음, code review #9). 베이스: kitty 명세 "unused first"
+/// (Ghostty graphics_storage evictImage 동작) — maru는 used를 evict하지 않고 보호를 우선한다.
+fn pickKittyEvictionVictim(self: *TerminalCore, exclude_id: u32) ?u32 {
+    var best: ?u32 = null;
+    var best_gen: u64 = std.math.maxInt(u64);
+    var it = self.kitty_images.map.iterator();
+    while (it.next()) |kv| {
+        const id = kv.key_ptr.*;
+        if (id == exclude_id) continue;
+        if (kittyImageHasPlacement(self, id)) continue; // 화면 표시 중인 이미지는 보호(evict 안 함)
+        const gen = kv.value_ptr.generation;
+        if (best == null or gen < best_gen) {
+            best = id;
+            best_gen = gen;
+        }
+    }
+    return best;
+}
+
+/// z-index가 target과 같은 placement를 제거한다. free_images면 그 placement가 가리키던 이미지도 free하고
+/// (그 이미지의 다른 placement까지 제거해 orphan을 막는다). placement 수가 작아 재시작 비용은 무시할 만하다.
+pub fn deleteByZ(self: *TerminalCore, target_z: i32, free_images: bool) void {
+    var i: usize = 0;
+    while (i < self.kitty_placements.items.len) {
+        const p = self.kitty_placements.items[i];
+        if (p.z == target_z) {
+            if (free_images) {
+                const id = p.image_id;
+                self.kitty_images.remove(self.allocator, id);
+                removePlacementsForImage(self, id); // 그 이미지의 모든 placement 제거(배열 변형)
+                i = 0; // 배열이 바뀌었으니 처음부터 다시 스캔
+            } else {
+                _ = self.kitty_placements.orderedRemove(i);
+            }
+        } else i += 1;
+    }
+}

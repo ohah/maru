@@ -1217,3 +1217,223 @@ pub fn leaveAltScreen(self: *TerminalCore, restore_cursor: bool) void {
     if (restore_cursor) restoreFromSlot(self, self.saved_cursor_primary);
     self.dirty = core.fullDirty(self.size);
 }
+
+// ── print 핫패스 (codepoint → 셀) ───────────────────────────────────────────────────────────────
+// 모든 printable/control codepoint가 거치는 가장 뜨거운 경로. control(CR/LF/BS/HT/SO/SI/BEL)은 즉시 처리,
+// printable은 charset 변환 → grapheme/combining/이모지 폭 판정 → putCell(셀 쓰기 + deferred autowrap + BCE).
+// write 루프·completePendingUtf8(parser, core 잔류)·repeatLastChar(REP)가 위임한다.
+
+pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
+    switch (codepoint) {
+        '\r' => {
+            const old_cursor = self.cursor;
+            self.cursor.col = 0;
+            markCursorMoveDirty(self, old_cursor, self.cursor);
+            self.last_print = null;
+        },
+        '\n' => {
+            lineFeed(self);
+            self.last_print = null;
+        },
+        '\t' => writeTab(self),
+        0x07 => self.bell_pending = true, // BEL: 시스템 벨 요청(platform이 drain — NSSound.beep)
+        0x0b, 0x0c => lineFeed(self), // VT(0x0b)/FF(0x0c): LF처럼 한 줄 내림(col 유지) — printf '\f'/'\v'
+        0x0e => self.charset_gl = 1, // SO(shift out): G1을 GL로 호출(ESC ) 0 후 box 문자 시작)
+        0x0f => self.charset_gl = 0, // SI(shift in): G0을 GL로 호출(box 문자 끝, ASCII 복귀)
+        0x08 => {
+            // BS는 정확히 1칸 왼쪽이다(ECMA-48; xterm.js InputHandler.backspace와 동일).
+            // 예전엔 wide continuation 위에 서면 base로 한 칸 더 당겼는데, 셸은 BS를 항상
+            // 1칸으로 계산하고 wide 글자엔 BS를 두 번 보내므로(zsh 캡처: "\b\b  \b\b")
+            // 그 친절이 셸 계산과 한 칸 어긋나 지우기 공백이 프롬프트를 침범했다(라이브
+            // 한글 삭제에서 실제 발생). continuation 위에 선 커서의 다음 쓰기는
+            // clearCellForWrite가 base/continuation을 정리하므로 안전하다.
+            const old_cursor = self.cursor;
+            if (self.cursor.col > 0) self.cursor.col -= 1;
+            markCursorMoveDirty(self, old_cursor, self.cursor);
+            self.last_print = null;
+        },
+        else => {
+            if (codepoint < 0x20) return;
+            // G3: GL에 호출된 G-set(G0/G1)의 charset으로 변환한다(dec_special이면 0x60..0x7e→box 문자,
+            // ascii면 무변환). box 문자는 width 1·non-combining이라 아래 grapheme/combining 로직과 호환.
+            const cp = translateCharset(self, codepoint);
+            if (width.cellWidth(cp) == 0) {
+                // VS16(U+FE0F) 등 변형 선택자/결합 문자는 0폭 combining으로 앞 글자에 붙인다.
+                attachCombiningMark(self, cp);
+                // VS16이 앞 글자를 이모지 표현(width 2)으로 승격해 풀사이즈로 그린다(❤+VS16=❤️, 키캡 2️⃣ 2칸).
+                // 승격 조건은 둘 중 하나: (1) mode 2027(grapheme cluster) — 앱이 너비를 합의함, (2) emoji_wide
+                // (text.emoji-width=wide, 기본) — Ghostty/iTerm2처럼 이모지를 항상 2칸으로 본다(모던 TUI 정합).
+                // narrow(emoji_wide=false)면 EAW 그대로 1칸 — zsh ZLE가 ❤+VS16을 1칸으로 보는 환경의 줄 편집 보호.
+                if ((self.grapheme_cluster_mode or self.emoji_wide) and cp == 0xFE0F) promoteLastToEmojiWidth(self);
+                return;
+            }
+            // mode 2027: grapheme을 한 셀로 묶는다(앱과 너비 합의 상태라 안전).
+            if (self.grapheme_cluster_mode) {
+                // 스킨톤 modifier(👍 + 🏽): 앞 이모지에 combining으로 붙여 한 글자. base는 이미
+                // width 2(EAW Wide)라 폭 승격 불필요.
+                if (isSkinToneModifier(cp) and lastCellIsWideEmoji(self)) {
+                    attachCombiningMark(self, cp);
+                    return;
+                }
+                // 국기: 지역 표시자(RI) 2개를 한 셀(width 2)로. 직전이 짝 없는 RI면 combining + 승격.
+                if (isRegionalIndicator(cp) and lastCellIsLoneRegionalIndicator(self)) {
+                    attachCombiningMark(self, cp);
+                    promoteLastToEmojiWidth(self);
+                    return;
+                }
+            }
+            putCell(self, cp);
+        },
+    }
+}
+
+pub fn putCell(self: *TerminalCore, codepoint: u21) void {
+    if (self.size.cols == 0 or self.size.rows == 0) return;
+    // deferred autowrap: 직전 글자가 마지막 칸을 채웠으면(pending_wrap), 이 글자를 그리기
+    // 전에 다음 줄 첫 칸으로 넘긴다(바닥이면 scroll). 이렇게 다음 글자 시점에 wrap해야 줄을
+    // 정확히 채운 마지막 글자마다 빈 줄이 끼지 않는다(표준 VT 동작, zsh prompt 등이 의존).
+    if (self.pending_wrap) {
+        // 다음 줄로 넘긴다. lineFeed가 pending_wrap을 끈다. 이 행은 autowrap으로 다음 줄로 이어지는
+        // soft-wrap이다(reflow가 이 플래그로 잇는다). soft-wrap 플래그는 lineFeed '후'에 세운다 — 커서가
+        // scroll_bottom이라 lineFeed가 scroll이면 scrollRangeUp의 경계 fixup이 lineFeed 전에 세운
+        // wrapped를 지우기 때문이다(promoteLastToEmojiWidth와 같은 이유). scroll 여부와 무관하게 "직전
+        // 줄(row-1)이 이 줄로 이어진다"를 정확히 남긴다.
+        self.cursor.col = 0;
+        lineFeed(self);
+        if (self.cursor.row > 0) self.wrapped[self.cursor.row - 1] = true;
+    }
+    if (self.cursor.col >= self.size.cols) self.cursor.col = self.size.cols - 1;
+    if (self.cursor.row >= self.size.rows) self.cursor.row = self.size.rows - 1;
+
+    const cell_width: u2 = width.cellWidthAmbiguous(codepoint, self.ambiguous_wide);
+    // wide glyph(2칸)가 줄 끝(마지막 칸, 1칸만 남음)에 안 들어가면 통째로 다음 줄로 넘긴다
+    // (이전 줄 마지막 칸은 빈칸으로 남는다). grid는 항상 cols>=2라(clampGridSize) 넘긴 뒤엔
+    // 반드시 들어가므로, 칸을 줄이는 degrade 없이 그대로 width 2로 쓴다.
+    if (cell_width == 2 and self.cursor.col + 1 >= self.size.cols) {
+        // wide glyph를 통째로 다음 줄로 넘긴다 — 직전 줄이 이 줄로 이어지는 soft-wrap이다. 플래그는 위
+        // pending_wrap과 같은 이유로 lineFeed '후'에 세운다(scroll 시 scrollRangeUp fixup이 지우지 않게).
+        self.cursor.col = 0;
+        lineFeed(self);
+        if (self.cursor.row > 0) self.wrapped[self.cursor.row - 1] = true;
+    }
+
+    const row = self.cursor.row;
+    const col = self.cursor.col;
+    // G6 IRM(insert mode): 켜져 있으면 쓰기 전에 커서 위치에 cell_width칸을 삽입(오른쪽 밀기) — 덮어쓰기 대신
+    // 삽입이 된다. insertChars가 커서는 안 옮기고 줄만 민다.
+    if (self.insert_mode) insertChars(self, cell_width);
+    // 이 행에 새로 쓰므로 wrap 상태를 리셋한다. 다시 채워 마지막 칸을 넘기면 위 autowrap 분기가
+    // true로 재설정한다. 덕분에 셸이 한 줄을 다시 그리면(redraw) wrap 플래그가 스스로 교정된다.
+    self.wrapped[row] = false;
+
+    clearCellForWrite(self, row, col);
+    if (cell_width == 2) clearCellForWrite(self, row, col + 1);
+
+    self.cells[self.index(row, col)] = .{
+        .codepoint = codepoint,
+        .style = self.pen,
+        .width = cell_width,
+        .link = self.pen_link,
+    };
+    if (cell_width == 2) {
+        self.cells[self.index(row, col + 1)] = .{
+            .style = self.pen,
+            .width = 0,
+            .continuation = true,
+            .link = self.pen_link,
+        };
+    }
+    self.last_print = .{ .row = row, .col = col };
+    self.last_printed_cp = codepoint; // G5 REP: 직전 출력 글자 추적
+    markDirty(self, self.cursor.row);
+
+    if (self.cursor.col + cell_width < self.size.cols) {
+        self.cursor.col += cell_width;
+    } else {
+        // 마지막 칸을 채웠다. autowrap(DECAWM)이 켜져 있으면 커서를 마지막 칸에 두고 pending_wrap을 세워
+        // 다음 printable 글자가 먼저 다음 줄로 넘어가게 한다(deferred autowrap). off(?7l)면 wrap 없이
+        // 마지막 칸에 머물러 다음 글자가 그 칸을 덮어쓴다(G8).
+        self.cursor.col = self.size.cols - 1;
+        if (self.autowrap) self.pending_wrap = true;
+    }
+}
+
+/// grapheme(VS16/RI 페어 등)이 붙은 직전 base 셀을 width 1 -> 2로 승격한다(이미 2면 무시).
+/// mode 2027 또는 emoji_wide(text.emoji-width=wide)에서 호출된다 — 둘 다 이모지를 2칸으로 보는 상태다.
+fn promoteLastToEmojiWidth(self: *TerminalCore) void {
+    const last = self.last_print orelse return;
+    const base_idx = self.index(last.row, last.col);
+    if (self.cells[base_idx].width == 2) return; // 이미 wide
+
+    // base가 줄 마지막 칸이면 오른쪽 continuation 칸이 없다. 폭만 키우면 안 되고(다음 칸이
+    // 다음 글자라 침범), wide glyph autowrap처럼 base를 통째로 다음 줄로 옮겨 2칸을 차지하게
+    // 한다 — 안 그러면 mode 2027에서도 줄 끝 이모지가 width 1로 남아 앱과 너비가 어긋난다.
+    if (last.col + 1 >= self.size.cols) {
+        const base = self.cells[base_idx];
+        self.cells[base_idx] = .{}; // 이전 줄 마지막 칸은 빈칸으로
+        markDirty(self, last.row);
+        self.cursor.col = 0;
+        lineFeed(self);
+        const row = self.cursor.row;
+        // soft-wrap 플래그는 lineFeed '후'에 세운다. lineFeed가 scroll(커서가 scroll_bottom)일
+        // 때 scrollRangeUp의 경계 fixup이 lineFeed 전에 세운 wrapped를 지우기 때문이다 —
+        // scroll 여부와 무관하게 "이전 줄(row-1)이 이 이모지 줄로 이어진다"를 정확히 남긴다.
+        if (row > 0) self.wrapped[row - 1] = true;
+        self.wrapped[row] = false;
+        self.cells[self.index(row, 0)] = base;
+        self.cells[self.index(row, 0)].width = 2;
+        self.cells[self.index(row, 1)] = wideContinuationCell(base.style, base.link);
+        self.last_print = .{ .row = row, .col = 0 };
+        markDirty(self, row);
+        if (2 < self.size.cols) {
+            self.cursor.col = 2;
+            self.pending_wrap = false;
+        } else {
+            self.cursor.col = self.size.cols - 1;
+            self.pending_wrap = true;
+        }
+        return;
+    }
+
+    self.cells[base_idx].width = 2;
+    self.cells[self.index(last.row, last.col + 1)] = wideContinuationCell(self.cells[base_idx].style, self.cells[base_idx].link);
+    markDirty(self, last.row);
+    // 커서가 base 바로 뒤(width-1 전진 위치)면 2칸짜리로 한 칸 더 민다.
+    if (self.cursor.row == last.row and self.cursor.col == last.col + 1) {
+        if (last.col + 2 < self.size.cols) {
+            self.cursor.col = last.col + 2;
+            self.pending_wrap = false;
+        } else {
+            self.cursor.col = self.size.cols - 1;
+            self.pending_wrap = true;
+        }
+    }
+}
+
+fn attachCombiningMark(self: *TerminalCore, codepoint: u21) void {
+    // A combining mark is zero-width and belongs to the most recently
+    // printed base cell, wherever the cursor ended up. Deriving the base
+    // from the cursor was wrong at the last column (cursor parks on the
+    // base, so cursor-1 pointed at the previous glyph) and after a line
+    // feed (cursor sat over a blank cell on the new row). With no base on
+    // the current run (stream start, or right after CR/LF), the mark has
+    // nothing to attach to and is dropped.
+    const last = self.last_print orelse return;
+    self.cells[self.index(last.row, last.col)].combining = codepoint;
+    markDirty(self, last.row);
+}
+
+fn clearCellForWrite(self: *TerminalCore, row: u16, col: u16) void {
+    const cell_index = self.index(row, col);
+    const cell = self.cells[cell_index];
+    if (cell.continuation and col > 0) {
+        const previous_index = self.index(row, col - 1);
+        if (self.cells[previous_index].width == 2) {
+            self.cells[previous_index] = .{};
+        }
+    }
+    if (cell.width == 2 and col + 1 < self.size.cols) {
+        self.cells[self.index(row, col + 1)] = .{};
+    }
+    self.cells[cell_index] = .{};
+}

@@ -462,7 +462,8 @@ pub const TerminalCore = struct {
 
     /// RIS(ESC c) 하드 리셋: 화면을 비우고 스크롤백·선택·링크 저장소를 지우고 pen·모드를
     /// 공장 초기 상태로 되돌린다(VT100 RIS 의미론 근사). alt 화면이면 primary로 복귀한다.
-    fn fullReset(self: *TerminalCore) void {
+    /// RIS(ESC c) 하드 리셋. parser.handleEscapeByte(ESC c)가 cross-file 호출 — pub.
+    pub fn fullReset(self: *TerminalCore) void {
         if (self.alt_active) screen.leaveAltScreen(self, false);
         @memset(self.cells, .{});
         @memset(self.wrapped, false);
@@ -1462,127 +1463,12 @@ pub const TerminalCore = struct {
         return true;
     }
 
+    /// PTY 출력 바이트를 VT 상태기계로 처리한다. 본문(escape/CSI/OSC/DCS/APC + UTF-8 디코드)은
+    /// parser.feed가 소유 — 외부(session/app)가 점-호출하므로 facade 메서드로 남긴다(Zig dot-call 계약).
+    /// owner_dbg 확인은 public 진입 계약이라 여기 둔다(reader 노출 시 core_mutex 보유 강제 §6-5).
     pub fn write(self: *TerminalCore, bytes: []const u8) !void {
-        self.owner_dbg.assertOwnedBySelf(); // reader 노출 시 core_mutex 보유 강제(디버그 전용 §6-5)
-        // Process output bytes through a small VT escape-sequence state machine
-        // (planned in implementation-plan.md: expand the parser only as the
-        // shell path needs). ground state still converts UTF-8 to cells; ESC
-        // switches into escape/CSI/OSC handling so shell prompt color/cursor
-        // sequences are interpreted instead of printed as literal text. State
-        // persists across write() calls, so sequences split across PTY reads
-        // are handled.
-        var index_: usize = 0;
-        while (index_ < bytes.len) {
-            switch (self.parser) {
-                .ground => {
-                    if (self.utf8_tail_len != 0) {
-                        index_ = try self.completePendingUtf8(bytes, index_);
-                        continue;
-                    }
-                    const byte = bytes[index_];
-                    if (byte == 0x1b) {
-                        self.parser = .escape;
-                        index_ += 1;
-                        continue;
-                    }
-
-                    const sequence_len = utf8SequenceLength(byte) catch return error.InvalidUtf8;
-                    const end = index_ + sequence_len;
-                    if (end > bytes.len) {
-                        self.storePendingUtf8(bytes[index_..]);
-                        return;
-                    }
-
-                    const codepoint = decodeUtf8(bytes[index_..end]) catch return error.InvalidUtf8;
-                    screen.writeCodepoint(self, codepoint);
-                    index_ = end;
-                },
-                .escape => {
-                    self.handleEscapeByte(bytes[index_]);
-                    index_ += 1;
-                },
-                .escape_intermediate => {
-                    // ESC <intermediate> <final>: DECALN(ESC # 8)이면 화면을 'E'로 채우고, 아니면 charset 지정
-                    // (intermediate '('=G0·')'=G1, final '0'=dec_special·'B'=ascii). 미지원 조합은 ascii로 소비.
-                    const final = bytes[index_];
-                    if (self.escape_intermediate_byte == '#' and final == '8') {
-                        screen.decAlign(self); // DECALN(G11)
-                    } else {
-                        screen.designateCharset(self, self.escape_intermediate_byte, final);
-                    }
-                    self.parser = .ground;
-                    index_ += 1;
-                },
-                .csi => {
-                    parser.handleCsiByte(self, bytes[index_]);
-                    index_ += 1;
-                },
-                .osc => {
-                    const byte = bytes[index_];
-                    // OSC string은 BEL(0x07) 또는 ST(ESC \)로 끝난다. 내용은 버퍼에 모아 종료
-                    // 시점에 해석한다(현재 OSC 8 하이퍼링크만 적용, title 등은 소비).
-                    if (byte == 0x07) {
-                        parser.dispatchOsc(self);
-                        self.parser = .ground;
-                    } else if (byte == 0x1b) {
-                        self.parser = .osc_escape;
-                    } else if (self.osc_len < self.osc_buffer.len) {
-                        self.osc_buffer[self.osc_len] = byte;
-                        self.osc_len += 1;
-                    } else {
-                        self.osc_overflow = true; // 너무 긴 OSC — 통째로 무시
-                    }
-                    index_ += 1;
-                },
-                .osc_escape => {
-                    // OSC 안에서 ESC 다음 바이트. ST(ESC \)면 정상 종료로 해석하고, 그 외도
-                    // OSC를 끝낸다(관대 처리 — 내용은 버린다).
-                    if (bytes[index_] == '\\') parser.dispatchOsc(self);
-                    self.parser = .ground;
-                    index_ += 1;
-                },
-                .apc => {
-                    const byte = bytes[index_];
-                    // APC는 ST(ESC \)로 끝난다. ESC면 apc_escape로, 아니면 버퍼에 모은다(넘치면 overflow
-                    // 표시 후 무시 — 거대/악의적 시퀀스 방어). OSC 수집과 동형.
-                    if (byte == 0x1b) {
-                        self.parser = .apc_escape;
-                    } else if (self.apc_buffer.items.len < max_kitty_chunk_bytes) {
-                        self.apc_buffer.append(self.allocator, byte) catch {
-                            self.apc_overflow = true; // OOM도 폐기(graceful)
-                        };
-                    } else {
-                        self.apc_overflow = true; // 상한 초과 — 거대/악의적 시퀀스 방어
-                    }
-                    index_ += 1;
-                },
-                .apc_escape => {
-                    // APC 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외도 APC를 끝낸다(관대 처리).
-                    if (bytes[index_] == '\\') parser.dispatchApc(self);
-                    self.parser = .ground;
-                    index_ += 1;
-                },
-                .dcs => {
-                    const byte = bytes[index_];
-                    // DCS는 ST(ESC \)로만 끝난다(OSC와 달리 BEL 종료 없음). 내용을 모아 종료 시 dispatch.
-                    if (byte == 0x1b) {
-                        self.parser = .dcs_escape;
-                    } else if (self.dcs_len < self.dcs_buffer.len) {
-                        self.dcs_buffer[self.dcs_len] = byte;
-                        self.dcs_len += 1;
-                    } else {
-                        self.dcs_overflow = true; // 너무 긴 DCS(Sixel 등 미지원) — 폐기
-                    }
-                    index_ += 1;
-                },
-                .dcs_escape => {
-                    // DCS 안에서 ESC 다음 바이트. ST(ESC \)면 dispatch, 그 외도 DCS를 끝낸다(관대 처리).
-                    if (bytes[index_] == '\\') parser.dispatchDcs(self);
-                    self.parser = .ground;
-                    index_ += 1;
-                },
-            }
-        }
+        self.owner_dbg.assertOwnedBySelf();
+        return parser.feed(self, bytes);
     }
 
     /// OSC 10/11로 설정된 전경/배경 색 override(없으면 null = theme 기본). app이 렌더러 default 색과 화면
@@ -2254,92 +2140,6 @@ pub const TerminalCore = struct {
         return self.link_store.items[id - 1];
     }
 
-    fn handleEscapeByte(self: *TerminalCore, byte: u8) void {
-        switch (byte) {
-            '[' => {
-                parser.beginCsi(self);
-                self.parser = .csi;
-            },
-            ']' => {
-                self.osc_len = 0;
-                self.osc_overflow = false;
-                self.parser = .osc;
-            },
-            // APC(ESC _): application program command. kitty graphics(`ESC _ G ...`)가 쓴다. OSC와
-            // 동형으로 버퍼에 모아 ESC \(ST)에서 dispatch한다 — 안 받으면 payload가 화면에 텍스트로 샌다.
-            '_' => {
-                self.apc_buffer.clearRetainingCapacity();
-                self.apc_overflow = false;
-                self.parser = .apc;
-            },
-            // DCS(ESC P ... ST): device control string. 현재 DECRQSS(`DCS $ q`)만 처리하고 ST에서 dispatch한다.
-            // 안 받으면 payload(예: tmux의 `$q`)가 화면에 텍스트로 샌다. G14 — Sixel/DECDLD의 토대 상태기계.
-            'P' => {
-                self.dcs_len = 0;
-                self.dcs_overflow = false;
-                self.parser = .dcs;
-            },
-            // IND(ESC D): index. CR 없이 한 줄 내림 + 하단 margin이면 scroll region을 위로 민다(LF와 동일).
-            'D' => {
-                screen.lineFeed(self);
-                self.parser = .ground;
-            },
-            // RI(ESC M): reverse index. 한 줄 올림 + 상단 margin이면 scroll region을 아래로 민다.
-            'M' => {
-                screen.reverseIndex(self);
-                self.parser = .ground;
-            },
-            // HTS(ESC H): 현재 커서 열에 탭스톱을 설정한다(G4 동적 탭스톱).
-            'H' => {
-                if (self.cursor.col < self.tabstops.len) self.tabstops[self.cursor.col] = true;
-                self.parser = .ground;
-            },
-            // NEL(ESC E): next line = CR + LF. 커서를 다음 줄 0열로 옮긴다(하단 margin이면 스크롤). G12.
-            'E' => {
-                const old_cursor = self.cursor;
-                self.cursor.col = 0;
-                screen.markCursorMoveDirty(self, old_cursor, self.cursor);
-                screen.lineFeed(self);
-                self.parser = .ground;
-            },
-            // DECSC(ESC 7)/DECRC(ESC 8): 커서(위치+pen+pending_wrap) 저장/복원. claude CLI 등이
-            // 시작 시 `ESC 7, CSI r, ESC 8`로 scroll region을 리셋하는데, CSI r의 부수효과(커서
-            // home)를 ESC 8이 되돌린다 — 복원이 없으면 커서가 (0,0)에 남아 UI가 기존 화면 맨 위를
-            // 덮는다. DECSET 1048과 같은 저장 슬롯을 쓴다(xterm 동일).
-            '7' => {
-                screen.saveCursorState(self);
-                self.parser = .ground;
-            },
-            '8' => {
-                screen.restoreCursorState(self);
-                self.parser = .ground;
-            },
-            // RIS(ESC c): 하드 리셋. 화면/스크롤백/선택/링크 저장소를 비우고 pen·pen_link·모드를
-            // 초기화한다. 안 하면 열린 OSC 8 링크(pen_link)·intern된 URI가 리셋을 넘어 살아남는다.
-            'c' => {
-                self.fullReset();
-                self.parser = .ground;
-            },
-            // DECKPAM(ESC =)/DECKPNM(ESC >): application/numeric keypad 모드(G10). 모드만 추적(numpad 인코딩은 후속).
-            '=' => {
-                self.application_keypad = true;
-                self.parser = .ground;
-            },
-            '>' => {
-                self.application_keypad = false;
-                self.parser = .ground;
-            },
-            // ESC <intermediate>(0x20..0x2f) <final>: charset designation 등 2바이트 시퀀스. intermediate를
-            // 기억해 escape_intermediate가 final과 함께 해석한다(G0 `(` vs G1 `)` 구분).
-            0x20...0x2f => {
-                self.escape_intermediate_byte = byte;
-                self.parser = .escape_intermediate;
-            },
-            // 그 밖의 ESC <final>(NEL 등)은 A1에서 소비만 한다.
-            else => self.parser = .ground,
-        }
-    }
-
     /// i번째 CSI 파라미터를 raw로 돌려준다(없으면 0). erase mode처럼 0이 유효값인 곳에 쓴다.
     /// parser의 SGR/모드 dispatch(setPrivateModes·applySgr 등)가 cross-file 호출 — pub. 20/N서 csiRawParam이 parser.zig로 가며 정리.
     pub fn csiRawParam(self: *const TerminalCore, i: usize) u16 {
@@ -2487,53 +2287,11 @@ pub const TerminalCore = struct {
         return output.toOwnedSlice(allocator);
     }
 
-    fn completePendingUtf8(self: *TerminalCore, bytes: []const u8, index_: usize) !usize {
-        const sequence_len = utf8SequenceLength(self.utf8_tail[0]) catch {
-            self.utf8_tail_len = 0;
-            return error.InvalidUtf8;
-        };
-        const needed = sequence_len - self.utf8_tail_len;
-        const available = bytes.len - index_;
-        const take = @min(needed, available);
-
-        @memcpy(
-            self.utf8_tail[self.utf8_tail_len .. self.utf8_tail_len + take],
-            bytes[index_ .. index_ + take],
-        );
-        self.utf8_tail_len += take;
-
-        if (self.utf8_tail_len < sequence_len) return bytes.len;
-
-        const codepoint = decodeUtf8(self.utf8_tail[0..sequence_len]) catch {
-            self.utf8_tail_len = 0;
-            return error.InvalidUtf8;
-        };
-        self.utf8_tail_len = 0;
-        screen.writeCodepoint(self, codepoint);
-        return index_ + take;
-    }
-
-    fn storePendingUtf8(self: *TerminalCore, bytes: []const u8) void {
-        // PTY reads can stop in the middle of a codepoint. Keeping the partial
-        // bytes inside TerminalCore preserves the layer boundary: PTY remains a
-        // byte transport and does not need text-decoding logic.
-        @memcpy(self.utf8_tail[0..bytes.len], bytes);
-        self.utf8_tail_len = bytes.len;
-    }
-
     /// 행·열 → cells 1차원 인덱스. screen.zig 활성 화면 연산(lastCellIs*)도 cross-file 호출 — pub.
     pub fn index(self: *const TerminalCore, row: usize, col: usize) usize {
         return row * self.size.cols + col;
     }
 };
-
-fn utf8SequenceLength(first_byte: u8) !usize {
-    return std.unicode.utf8ByteSequenceLength(first_byte) catch error.InvalidUtf8;
-}
-
-fn decodeUtf8(bytes: []const u8) !u21 {
-    return std.unicode.utf8Decode(bytes) catch error.InvalidUtf8;
-}
 
 /// grid 셀 수(rows×cols). screen.enterAltScreen(alt 버퍼 할당)이 cross-file 호출 — pub.
 pub fn cellCount(size: types.Size) usize {

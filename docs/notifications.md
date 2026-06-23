@@ -98,7 +98,8 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   `openNotificationPanel`이 접힘 분기로 띠 아래에 패널을 띄우고(`is_window_drag_region`·hover 커서도 이 영역 제외/포인터),
   ◧ 클릭은 펼치기(별개 영역, 클릭 우선순위 종→◧).
 - **떠 있는 카드 패널**: `src/chrome/components/notifications.zig`(Maru 독립 설계). **상단 헤더 밴드**("알림" 제목 +
-  우측 액션 "모두 읽음"/"모두 지우기")와 그 아래 본문(카드 목록 또는 빈 상태 일러스트)으로 구성된다 — 헤더는 viewport
+  우측 액션 **버튼** "모두 읽음"/"모두 지우기" — 아래 "읽음/지우기 액션 버튼" 참조)와 그 아래 본문(카드 목록 또는 빈 상태
+  일러스트)으로 구성된다 — 헤더는 viewport
   상단 sticky, 카드는 그 아래에서 스크롤한다. 한 항목 = **2줄 카드**(제목 + 본문), 안읽음 점(●), 우측 상대시간
   ("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤 윈도우·위치 clamp)을 view·hitTest·panelRect가
   공유(보이는 카드 == 클릭되는 카드). 헤더 구분선·카드 구분선은 `.fill`(1px)로 — `.rule` op은 macOS lowering에서 no-op이라.
@@ -137,11 +138,14 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   되돌려 그 카드의 surface를 봤다는 의미로 **같은 surface의 안읽음을 모두** 읽음 처리(`markNotificationsReadBySurface`
   — 2단계 배너 클릭과 **동일 정책**)하고, `activateSurfaceById(surface_id)`(1단계 재사용)로 점프한 뒤 패널을 닫는다.
   닫힌 surface면 점프 없이 닫기만(카드는 이미 회색). 배너든 카드든 "그 터미널을 봤다"는 한 가지 읽음 정책으로 통일.
-- **읽음/지우기 액션**: 마우스 hit-test는 `Hit` union(`card`/`close`/`mark_all_read`/`clear_all`/`background`)으로 가른다 — 카드
-  우측 ✕(본문줄)=개별 삭제(`deleteNotification`), 키보드 Backspace=선택 카드 삭제. **상단 헤더 우측**의 "모두 읽음"
-  (`markAllNotificationsRead` — 점/배지만 끄고 항목 유지) / "모두 지우기"(`clearNotifications` — 전체 삭제). 헤더 좌측
-  제목 영역과 빈 상태 본문은 `background`(클릭해도 안 닫힘 — 박스 밖만 닫기). unread 캐시는 push/markRead/delete/markAll/
-  clear 헬퍼에서만 증감(단일 출처).
+- **읽음/지우기 액션 버튼**: 마우스 hit-test는 `Hit` union(`card`/`close`/`mark_all_read`/`clear_all`/`background`)으로 가른다 —
+  카드 우측 ✕(본문줄)=개별 삭제(`deleteNotification`), 키보드 Backspace=선택 카드 삭제. **상단 헤더 우측**의 "모두 읽음"
+  (`markAllNotificationsRead` — 점/배지만 끄고 항목 유지) / "모두 지우기"(`clearNotifications` — 전체 삭제)를 **버튼**으로 그린다 —
+  `confirm` 다이얼로그와 같은 관용구(셀 fill 배경 + 라벨 좌우 패딩 `btn_pad`, 토큰 색; GPU quad 아닌 `.fill`이라 tui/rich 양립).
+  **항목이 있으면 활성**(`tab_hover_bg` 배경 + `surface_fg` 라벨, 클릭 가능함이 드러남), **빈 상태면 비활성**(배경 없이 `muted_fg`).
+  버튼 [x0,x1) 칸 범위는 `headerActions`가 view(배경 fill)·hitTest(클릭 zone) 단일 출처. 헤더 좌측 제목·버튼 사이 여백·빈 상태
+  본문은 `background`(클릭해도 안 닫힘 — 박스 밖만 닫기). unread 캐시는 push/markRead/delete/markAll/clear 헬퍼에서만 증감(단일 출처).
+  > 후속: 세 번째 버튼 소비처(예: 세팅 액션)가 나오면 `modal_box`처럼 공유 `button` 프리미티브로 추출해 confirm·notifications·settings가 공유한다.
 
 ## 4. 경계 분담 (단일 출처)
 

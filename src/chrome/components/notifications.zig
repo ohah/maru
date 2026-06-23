@@ -27,9 +27,9 @@ const header_rows: u32 = 1;
 /// 제목/본문 좌측 들여쓰기(칸) — 점(●) 자리 1칸 + 공백 1칸. 점은 안읽음일 때만 그 자리에 그린다(읽음이면 공백).
 const text_indent_cols: u32 = 2;
 
-/// 패널 **최소** 폭(칸). 헤더의 "알림" + "모두 읽음"·"모두 지우기" 액션이 겹치지 않게, 또 카드가 답답하지 않게 둘
-/// 넉넉한 하한(~360px at 12px cell). content가 이보다 작아도 이 폭을 보장한다.
-const min_panel_cols: u32 = 30;
+/// 패널 **최소** 폭(칸). 헤더의 "알림" 제목 + "모두 읽음"·"모두 지우기" **버튼**(라벨+좌우 패딩)이 겹치지 않게, 또
+/// 카드가 답답하지 않게 둘 넉넉한 하한. 버튼은 plain 텍스트보다 패딩만큼 넓어 30→34로 키운다. content가 이보다 작아도 보장.
+const min_panel_cols: u32 = 34;
 
 /// 패널 **최대** 폭(칸). 내용(긴 본문 등)이 길어도 패널이 화면을 가로지를 만큼 넓어지지 않게 cap한다(사용자 피드백
 /// "maxwidth가 있어서 적당한 크기"). 넘치는 제목/본문은 view가 `truncateToCols`로 …말줄임한다. ~520px at 12px cell.
@@ -59,8 +59,11 @@ const close_glyph = "\u{2715}"; // ✕ U+2715
 const mark_all_label = "모두 읽음";
 const clear_all_label = "모두 지우기";
 
-/// 헤더 우측 액션 라벨 사이 간격(칸).
-const action_gap_cols: u32 = 2;
+/// 헤더 액션 버튼(모두 읽음/지우기) 치수 — confirm 다이얼로그 버튼과 같은 관용구(셀 fill 배경 + 라벨 패딩, 토큰 색).
+/// 라벨 좌우 btn_pad칸으로 배경이 라벨을 감싸 버튼처럼, 두 버튼 사이 btn_gap칸. 항목이 있을 때만 활성(tab_hover_bg 배경
+/// + surface_fg 라벨), 빈 상태는 비활성(배경 없이 muted_fg). GPU quad 아닌 셀 fill이라 tui/rich 양립(메모리: tui 위젯은 셀 정렬).
+const btn_pad: u32 = 1; // 버튼 라벨 좌우 패딩(칸)
+const btn_gap: u32 = 1; // 두 버튼 사이 간격(칸)
 
 /// host가 주입하는 알림 한 줄(카드). 중립 바이트/bool — platform이 히스토리에서 만든다(컴포넌트는 surface_id를 안
 /// 본다). title/body는 표시 문자열, relative_time="N분 전"(platform 포맷), is_read=안읽음 점 표시, is_alive=false면
@@ -190,15 +193,30 @@ fn cardCols(it: Item) u32 {
     return @max(title_line, body_line);
 }
 
-/// 헤더 우측 액션 라벨의 panel-local 시작 col(view·hitTest 단일 출처). "모두 지우기"가 우측 끝(1칸 패딩), "모두 읽음"이
-/// 그 왼쪽으로 action_gap_cols 띄운 자리. 좁은 폭이면 saturating으로 0까지(제목과 겹칠 수 있으나 min_panel_cols가 방어).
-const HeaderActions = struct { mark_x0: u32, mark_cols: u32, clear_x0: u32, clear_cols: u32 };
+/// 헤더 우측 액션 버튼의 panel-local 기하(view·hitTest 단일 출처 — confirm.buttonGeom 선례). "모두 지우기"가 우측 끝
+/// (1칸 여백), "모두 읽음"이 그 왼쪽 btn_gap칸. 각 버튼 [x0, x1) 칸 범위(배경 fill·클릭 zone)와 라벨 시작 col(x0+btn_pad).
+/// 좁은 폭이면 saturating으로 0까지(제목과 겹칠 수 있으나 min_panel_cols가 방어).
+const HeaderActions = struct {
+    mark_x0: u32,
+    mark_x1: u32,
+    mark_label_x: u32,
+    clear_x0: u32,
+    clear_x1: u32,
+    clear_label_x: u32,
+};
 fn headerActions(panel_cols: u32) HeaderActions {
-    const clear_cols = overlay_input.displayCols(clear_all_label);
-    const mark_cols = overlay_input.displayCols(mark_all_label);
-    const clear_x0 = panel_cols -| clear_cols -| 1; // 우측 1칸 패딩
-    const mark_x0 = clear_x0 -| action_gap_cols -| mark_cols;
-    return .{ .mark_x0 = mark_x0, .mark_cols = mark_cols, .clear_x0 = clear_x0, .clear_cols = clear_cols };
+    const clear_w = overlay_input.displayCols(clear_all_label) + 2 * btn_pad;
+    const mark_w = overlay_input.displayCols(mark_all_label) + 2 * btn_pad;
+    const clear_x0 = panel_cols -| 1 -| clear_w; // 우측 1칸 여백
+    const mark_x0 = clear_x0 -| btn_gap -| mark_w;
+    return .{
+        .mark_x0 = mark_x0,
+        .mark_x1 = mark_x0 + mark_w,
+        .mark_label_x = mark_x0 + btn_pad,
+        .clear_x0 = clear_x0,
+        .clear_x1 = clear_x0 + clear_w,
+        .clear_label_x = clear_x0 + btn_pad,
+    };
 }
 
 /// 카드 윈도우(보이는 카드 수·스크롤 여부·최대 offset) — **width 없이** 개수와 화면 높이(metrics)만으로 계산한다.
@@ -322,12 +340,14 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     const rel_y = y_px - y0;
     const col: u32 = @intFromFloat((x_px - x0) / cw);
 
-    // 상단 헤더(sticky): 좌측 제목 = background(닫지 않음), 우측 "모두 읽음"/"모두 지우기" = 액션. view의 headerActions와 단일 출처.
+    // 상단 헤더(sticky): 좌측 제목·버튼 사이 여백 = background(닫지 않음), 우측 "모두 읽음"/"모두 지우기" 버튼 = 액션.
+    // 버튼 [x0,x1) 칸 범위로 정확히 가른다(view의 fill 배경과 같은 zone — headerActions 단일 출처). 빈 상태도 같은 zone
+    // (비활성 버튼이지만 클릭=markAll/clearAll은 빈 히스토리에서 무해한 no-op이라 geometry를 통일).
     if (rel_y < @as(f64, @floatFromInt(l.header_h))) {
         const ha = headerActions(l.panel_cols);
-        if (col >= ha.clear_x0) return .clear_all;
-        if (col >= ha.mark_x0) return .mark_all_read;
-        return .background; // 제목 영역
+        if (col >= ha.clear_x0 and col < ha.clear_x1) return .clear_all;
+        if (col >= ha.mark_x0 and col < ha.mark_x1) return .mark_all_read;
+        return .background; // 제목 영역·버튼 사이 여백
     }
 
     // 빈 목록: 헤더 아래 본문(일러스트)은 background(닫지 않음 — 박스 밖만 닫기).
@@ -346,16 +366,26 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     return .{ .card = card_idx };
 }
 
-/// 헤더 우측 액션 라벨(모두 읽음/지우기)을 그린다 — view·빈 상태 공유(헤더는 항상 같은 모양). muted_fg(보조 액션).
-fn appendHeaderActions(l: Layout, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
-    const cw: i32 = @intCast(l.cw);
+/// 헤더 우측 액션 버튼(모두 읽음/지우기)을 그린다 — confirm 버튼 관용구(셀 fill 배경 + 라벨, 토큰 색). enabled면
+/// tab_hover_bg 배경 + surface_fg 라벨(클릭 가능 버튼), 빈 상태(!enabled)면 배경 없이 muted_fg 라벨(비활성). 배경은
+/// 헤더 행 안에 세로로 inset해 꽉 찬 바가 아니라 버튼처럼 보이게 한다. 셀 fill(.fill)이라 tui/rich 둘 다 안전. view·빈 상태 공유.
+fn appendHeaderActions(l: Layout, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op), enabled: bool) !void {
+    const cw = l.cw;
     const ha = headerActions(l.panel_cols);
+    const label_role: tokens.ColorRole = if (enabled) .surface_fg else .muted_fg;
+    if (enabled) {
+        const pad_y: u32 = l.ch / 5; // 헤더 행 안 세로 inset(버튼 높이 = ch×3/5, 가운데)
+        const btn_h: u32 = l.ch -| 2 * pad_y;
+        const btn_y: i32 = l.rect.y + @as(i32, @intCast(pad_y));
+        try out.append(arena, .{ .fill = .{ .rect = .{ .x = l.rect.x + @as(i32, @intCast(ha.mark_x0 * cw)), .y = btn_y, .w = (ha.mark_x1 - ha.mark_x0) * cw, .h = btn_h }, .role = .tab_hover_bg } });
+        try out.append(arena, .{ .fill = .{ .rect = .{ .x = l.rect.x + @as(i32, @intCast(ha.clear_x0 * cw)), .y = btn_y, .w = (ha.clear_x1 - ha.clear_x0) * cw, .h = btn_h }, .role = .tab_hover_bg } });
+    }
     const mark_runs = try arena.alloc(draw.Run, 1);
     mark_runs[0] = .{ .text = mark_all_label };
-    try out.append(arena, .{ .text = .{ .origin = .{ .x = l.rect.x + @as(i32, @intCast(ha.mark_x0)) * cw, .y = l.rect.y }, .runs = mark_runs, .role = .muted_fg } });
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = l.rect.x + @as(i32, @intCast(ha.mark_label_x * cw)), .y = l.rect.y }, .runs = mark_runs, .role = label_role } });
     const clear_runs = try arena.alloc(draw.Run, 1);
     clear_runs[0] = .{ .text = clear_all_label };
-    try out.append(arena, .{ .text = .{ .origin = .{ .x = l.rect.x + @as(i32, @intCast(ha.clear_x0)) * cw, .y = l.rect.y }, .runs = clear_runs, .role = .muted_fg } });
+    try out.append(arena, .{ .text = .{ .origin = .{ .x = l.rect.x + @as(i32, @intCast(ha.clear_label_x * cw)), .y = l.rect.y }, .runs = clear_runs, .role = label_role } });
 }
 
 /// 한 줄 텍스트를 패널 폭 안에 가로 가운데 정렬해 그린다(빈 상태 일러스트). EAW 폭 기준.
@@ -398,7 +428,7 @@ pub fn view(
     const heading_runs = try arena.alloc(draw.Run, 1);
     heading_runs[0] = .{ .text = panel_heading };
     try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + cw, .y = rect.y }, .runs = heading_runs, .role = .surface_fg } });
-    try appendHeaderActions(l, arena, out);
+    try appendHeaderActions(l, arena, out, items.len > 0); // 항목 있으면 활성 버튼, 빈 상태면 비활성(dim)
     try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = rect.y + header_h_i - 1, .w = rect.w, .h = 1 }, .role = .divider } });
 
     if (items.len == 0) {
@@ -513,7 +543,7 @@ test "notifications handle: ↑↓=이동, Enter=accept, Backspace=delete, Esc·
     try std.testing.expect(!s.open);
 }
 
-test "notifications hitTest: 헤더 액션(모두읽음/지우기)·제목=background / 카드 본문=card / 본문줄 우측 ✕=close" {
+test "notifications hitTest: 헤더 액션 버튼(모두읽음/지우기)·제목/버튼사이=background / 카드 본문=card / 본문줄 우측 ✕=close" {
     const p = props.ChromeProps{ .metrics = .{
         .cell_width_px = 8,
         .cell_height_px = 16,
@@ -527,16 +557,17 @@ test "notifications hitTest: 헤더 액션(모두읽음/지우기)·제목=backg
     };
     var s: State = .{};
     s.show(100, 50, items.len);
-    // box_w=(max(content,30)+2)*8=256, x=100, panel_cols=32. 헤더 h=16([50,66)). 카드 first 시작=rect.y+16=66.
+    // box_w=(max(content,34)+2)*8=288, x=100, panel_cols=36. 헤더 h=16([50,66)). 카드 first 시작=rect.y+16=66.
     // 항목 2 → content_h=16+2*32=80인데 최소 높이 min_panel_rows(8)×16=128이 더 커 box_h=128(=[50,178)).
     // 카드0=[66,98)(제목 66~82·본문 82~98), 카드1=[98,130). 카드영역 아래 gap=[130,178)=background.
-    // headerActions(32): clear_x0=32-11-1=20, mark_x0=20-2-9=9.
-    try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 110, 55).?); // 헤더 좌측 제목 → background(안 닫음)
-    try std.testing.expectEqual(Hit.mark_all_read, hitTest(&s, &items, p, 100 + 10 * 8, 55).?); // 헤더 "모두 읽음"(col 10)
-    try std.testing.expectEqual(Hit.clear_all, hitTest(&s, &items, p, 100 + 25 * 8, 55).?); // 헤더 "모두 지우기"(col 25)
+    // headerActions(36): clear_w=13,mark_w=11. clear=[22,35), mark=[10,21). 사이 col 21=gap.
+    try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 108, 55).?); // 헤더 좌측 제목(col 1) → background
+    try std.testing.expectEqual(Hit.mark_all_read, hitTest(&s, &items, p, 100 + 12 * 8, 55).?); // "모두 읽음" 버튼(col 12 ∈ [10,21))
+    try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 100 + 21 * 8, 55).?); // 두 버튼 사이 gap(col 21) → background
+    try std.testing.expectEqual(Hit.clear_all, hitTest(&s, &items, p, 100 + 25 * 8, 55).?); // "모두 지우기" 버튼(col 25 ∈ [22,35))
     try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 110, 70).?); // 카드0 제목 좌측
-    try std.testing.expectEqual(Hit{ .close = 0 }, hitTest(&s, &items, p, 345, 85).?); // 카드0 본문줄 우측 ✕
-    try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 345, 70).?); // 제목줄 우측은 ✕ 아님(시간 영역)
+    try std.testing.expectEqual(Hit{ .close = 0 }, hitTest(&s, &items, p, 375, 85).?); // 카드0 본문줄 우측 ✕(col≥34)
+    try std.testing.expectEqual(Hit{ .card = 0 }, hitTest(&s, &items, p, 375, 70).?); // 제목줄 우측은 ✕ 아님(시간 영역)
     try std.testing.expectEqual(Hit{ .card = 1 }, hitTest(&s, &items, p, 110, 110).?); // 카드1
     try std.testing.expectEqual(Hit.background, hitTest(&s, &items, p, 150, 150).?); // 카드 아래 gap → 무시(닫지 않음)
     try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &items, p, 110, 400)); // 박스 아래 밖 → null(닫기)
@@ -567,12 +598,18 @@ test "notifications view: 빈목록=헤더+일러스트(아이콘·제목·부�
     try view(&closed, &.{}, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 
-    // 빈 목록 → 패널 quad + 헤더(제목+모두읽음+모두지우기=3) + 구분선 + 일러스트(아이콘+제목+부제=3) = 8.
+    // 빈 목록 → 패널 quad + 헤더(제목+모두읽음 라벨+모두지우기 라벨=3, 비활성이라 버튼 배경 없음) + 구분선 + 일러스트(아이콘+제목+부제=3) = 8.
     out.clearRetainingCapacity();
     var empty: State = .{};
     empty.show(100, 50, 0);
     try view(&empty, &.{}, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 8), out.items.len);
+    // 빈 상태 액션 라벨은 비활성(muted_fg) + 배경 fill 없음.
+    var empty_action_bg: usize = 0;
+    for (out.items) |op| if (op == .fill and op.fill.role == .tab_hover_bg) {
+        empty_action_bg += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), empty_action_bg);
     try std.testing.expect(out.items[0] == .quad);
     var saw_heading = false;
     var saw_empty_heading = false;
@@ -597,25 +634,31 @@ test "notifications view: 빈목록=헤더+일러스트(아이콘·제목·부�
     var s: State = .{};
     s.show(100, 50, items.len);
     try view(&s, &items, p, &tk, arena, &out);
-    // quad + 헤더(제목+모두읽음+모두지우기=3) + 헤더 구분선(1) + 카드0(선택fill+점+제목+시간+본문+✕+구분선=7) +
-    // 카드1(제목+시간+본문+✕=4, 점·구분선 없음) = 16.
-    try std.testing.expectEqual(@as(usize, 16), out.items.len);
+    // quad + 헤더(제목 라벨 + 모두읽음 버튼[배경+라벨] + 모두지우기 버튼[배경+라벨]=5) + 헤더 구분선(1) +
+    // 카드0(선택fill+점+제목+시간+본문+✕+구분선=7) + 카드1(제목+시간+본문+✕=4) = 18.
+    try std.testing.expectEqual(@as(usize, 18), out.items.len);
     try std.testing.expect(out.items[0] == .quad);
     // 헤더 제목은 surface_fg, 첫 text op.
     try std.testing.expect(out.items[1] == .text and out.items[1].text.role == .surface_fg);
     try std.testing.expectEqualStrings(panel_heading, out.items[1].text.runs[0].text);
-    // 구분선(.fill divider) + 안읽음 점(focus_accent) + 닫힌 surface 제목(muted_fg) + 카드 ✕ 존재 확인.
+    // 구분선(divider) + 액션 버튼 배경(tab_hover_bg 2개) + 안읽음 점(focus_accent) + 닫힌 surface 제목(muted_fg) + 카드 ✕ 확인.
     var divider_count: usize = 0;
+    var action_bg: usize = 0;
     var saw_dot = false;
     var saw_closed_title = false;
     var close_count: usize = 0;
+    var active_action_labels: usize = 0;
     for (out.items) |op| {
         if (op == .fill and op.fill.role == .divider) divider_count += 1;
+        if (op == .fill and op.fill.role == .tab_hover_bg) action_bg += 1;
         if (op == .text and op.text.role == .focus_accent and std.mem.eql(u8, op.text.runs[0].text, "\u{25CF}")) saw_dot = true;
         if (op == .text and op.text.role == .muted_fg and std.mem.eql(u8, op.text.runs[0].text, "web")) saw_closed_title = true;
         if (op == .text and std.mem.eql(u8, op.text.runs[0].text, close_glyph)) close_count += 1;
+        if (op == .text and op.text.role == .surface_fg and (std.mem.eql(u8, op.text.runs[0].text, mark_all_label) or std.mem.eql(u8, op.text.runs[0].text, clear_all_label))) active_action_labels += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), divider_count); // 헤더 구분선 + 카드0↔카드1 구분선
+    try std.testing.expectEqual(@as(usize, 2), action_bg); // 활성 액션 버튼 배경 2개(모두읽음·지우기)
+    try std.testing.expectEqual(@as(usize, 2), active_action_labels); // 활성 라벨 surface_fg 2개
     try std.testing.expect(saw_dot); // 안읽음 점(카드0)
     try std.testing.expect(saw_closed_title); // 닫힌 surface 제목은 muted_fg(dim)
     try std.testing.expectEqual(@as(usize, 2), close_count); // 카드마다 ✕ 1개

@@ -567,6 +567,8 @@ fn testShapeDrawList(
     _: usize, // italic family len
     cells_ptr: [*]const coretext_shaper.NativeDrawCell,
     cell_count: usize,
+    _: [*]const u32, // grapheme_pool ptr (fake shaper는 combining 그림자만 본다)
+    _: usize, // grapheme_pool_len
     result: *coretext_shaper.NativeDrawListShapeResult,
     records_ptr: [*]coretext_shaper.NativeDrawGlyphRecord,
     record_capacity: usize,
@@ -631,6 +633,8 @@ fn failingShapeDrawList(
     _: usize, // italic family len
     _: [*]const coretext_shaper.NativeDrawCell,
     _: usize,
+    _: [*]const u32, // grapheme_pool ptr
+    _: usize, // grapheme_pool_len
     result: *coretext_shaper.NativeDrawListShapeResult,
     _: [*]coretext_shaper.NativeDrawGlyphRecord,
     _: usize,

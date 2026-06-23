@@ -744,6 +744,47 @@ test "CoreText draw-list shaper normalizes synthesized box glyph to codepoint ca
     try std.testing.expect(box_seen >= 1);
 }
 
+test "CoreText draw-list shaper composes an NFD Hangul cluster identically to its precomposed syllable (HG3a)" {
+    // 회귀 고정(HG3a): macOS 파일명 NFD '한' = 초성 U+1112 + 중성 U+1161 + 종성 U+11AB가 한 셀
+    // cluster로 저장된다. DrawList가 grapheme_pool에 [중성, 종성]을 싣고 셰이퍼가 base 뒤에 붙여
+    // CoreText에 넘기면, CoreText가 셋을 합성해 완성형 '한'(U+D55C)과 **같은 음절 글리프**를 낸다.
+    // 풀 경로가 종성을 못 넘기면 NFD는 '하'로 합성돼 glyph_id가 달라진다 — 그 회귀를 폰트 무관하게 잡는다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+
+    // col 0의 drawable 글리프(font_id, glyph_id)를 뽑는 헬퍼 — NFD와 완성형을 같은 방식으로 비교.
+    const Probe = struct {
+        fn glyphAtCol0(a: std.mem.Allocator, sh: coretext_shaper.CoreTextDrawListShaper, bytes: []const u8) !struct { font_id: renderer.FontId, glyph_id: renderer.GlyphId } {
+            var core = try terminal.TerminalCore.init(a, .{ .cols = 8, .rows = 1 });
+            defer core.deinit();
+            core.clearDirty();
+            try core.write(bytes);
+            var dl = try renderer.buildDrawList(a, core.snapshot());
+            defer dl.deinit(a);
+            var fr = renderer.FontIdentityRegistry.init(a);
+            defer fr.deinit();
+            var shaped = try sh.shape(a, dl, &fr);
+            defer shaped.deinit(a);
+            for (shaped.runs.glyphs) |g| {
+                if (g.col == 0) return .{ .font_id = g.font_id, .glyph_id = g.glyph_id };
+            }
+            return error.NoGlyphAtCol0;
+        }
+    };
+
+    const nfd = try Probe.glyphAtCol0(allocator, shaper, "\u{1112}\u{1161}\u{11AB}"); // NFD 한
+    const nfc = try Probe.glyphAtCol0(allocator, shaper, "\u{D55C}"); // 완성형 한
+
+    // 같은 음절로 합성됐다 — 풀이 종성까지 온전히 CoreText에 전달됐다는 증거(아니면 '하'로 달라짐).
+    try std.testing.expectEqual(nfc.font_id, nfd.font_id);
+    try std.testing.expectEqual(nfc.glyph_id, nfd.glyph_id);
+    try std.testing.expect(nfd.glyph_id != 0); // notdef가 아니라 실제 음절 글리프
+}
+
 test "CoreText smoke does not treat fallback as required for shaping" {
     // fallback 관측은 유용한 진단 신호지만, OS와 설치 폰트에 따라 run 분리가 달라질 수
     // 있다. smoke의 pass/fail은 "글자를 glyph run으로 만들 수 있는가"에 둔다.

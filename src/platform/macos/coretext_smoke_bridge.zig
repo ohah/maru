@@ -43,6 +43,8 @@ pub extern fn maru_macos_coretext_shape_draw_list(
     italic_family_len: usize,
     cells: [*]const coretext_shaper.NativeDrawCell,
     cell_count: usize,
+    grapheme_pool: [*]const u32, // grapheme cluster 본체 풀(NativeDrawCell.grapheme_offset/count가 가리킴)
+    grapheme_pool_len: usize,
     result: *coretext_shaper.NativeDrawListShapeResult,
     glyph_records: [*]coretext_shaper.NativeDrawGlyphRecord,
     glyph_record_capacity: usize,

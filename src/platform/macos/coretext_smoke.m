@@ -44,11 +44,18 @@ typedef struct {
     uint16_t row;
     uint16_t col;
     uint16_t width;
-    // 스타일 플래그(비트필드). bit0(MaruDrawCellBoldBit)=bold. Zig NativeDrawCell.style_flags와
-    // 같은 16바이트 레이아웃 — bold cell은 bold 폰트 face로 셰이핑해 굵은 glyph를 만든다.
+    // 스타일 플래그(비트필드). bit0(MaruDrawCellBoldBit)=bold. Zig NativeDrawCell.style_flags와 동형.
     uint16_t style_flags;
     uint32_t codepoint;
+    // 단일 combining 그림자(폴백·색판정용). grapheme_count>0이면 무시하고 풀을 권위로 본다.
     uint32_t combining;
+    // grapheme cluster 본체(base 뒤 extra 코드포인트)를 shape 인자 grapheme_pool에서 가리킨다 —
+    // [grapheme_offset, grapheme_offset+grapheme_count). count>0이면 base 뒤에 풀의 코드포인트를 모두
+    // 붙여 cluster 전체를 셰이핑한다(NFD 한글 종성·다중 악센트·키캡 무손실). 0이면 combining 폴백.
+    // Zig NativeDrawCell와 24바이트 동형(grapheme_offset u32 + grapheme_count u16 + reserved u16).
+    uint32_t grapheme_offset;
+    uint16_t grapheme_count;
+    uint16_t reserved;
 } MaruCoreTextDrawCell;
 
 enum {
@@ -520,7 +527,36 @@ static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFInde
     return true;
 }
 
-static CFStringRef maru_create_string_for_draw_cell(MaruCoreTextDrawCell cell) {
+static CFStringRef maru_create_string_for_draw_cell(
+    MaruCoreTextDrawCell cell,
+    const uint32_t *grapheme_pool,
+    size_t grapheme_pool_len
+) {
+    // cluster 본체가 있으면(grapheme_count>0) base 뒤에 풀의 코드포인트를 모두 붙여 cluster 전체를
+    // 셰이핑한다 — 길이 제한 없이 무손실(NFD 한글 종성·다중 악센트·키캡 base+VS16+U+20E3). 단일
+    // combining 슬롯의 손실(키캡 VS16 덮임·다중 악센트 마지막만) 보정. 가변 길이라 CFMutableString 사용.
+    if (cell.grapheme_count > 0 &&
+        (size_t)cell.grapheme_offset + (size_t)cell.grapheme_count <= grapheme_pool_len) {
+        CFMutableStringRef str = CFStringCreateMutable(kCFAllocatorDefault, 0);
+        if (str == NULL) {
+            return NULL;
+        }
+        UniChar scalar[2];
+        CFIndex base_len = 0;
+        if (!maru_append_utf16_scalar(cell.codepoint, scalar, &base_len, 2)) {
+            CFRelease(str);
+            return NULL;
+        }
+        CFStringAppendCharacters(str, scalar, base_len);
+        for (uint16_t i = 0; i < cell.grapheme_count; i++) {
+            CFIndex n = 0;
+            if (maru_append_utf16_scalar(grapheme_pool[cell.grapheme_offset + i], scalar, &n, 2)) {
+                CFStringAppendCharacters(str, scalar, n);
+            }
+        }
+        return str;
+    }
+
     UniChar units[4];
     CFIndex len = 0;
     if (!maru_append_utf16_scalar(cell.codepoint, units, &len, 4)) {
@@ -938,6 +974,9 @@ void maru_macos_coretext_shape_draw_list(
     size_t italic_family_len,
     const MaruCoreTextDrawCell *cells,
     size_t cell_count,
+    // grapheme cluster 본체 풀(base 제외한 extra 코드포인트). cell.grapheme_offset/count가 가리킨다.
+    const uint32_t *grapheme_pool,
+    size_t grapheme_pool_len,
     MaruCoreTextDrawListShapeResult *result,
     MaruCoreTextDrawGlyphRecord *glyph_records,
     size_t glyph_record_capacity
@@ -1051,7 +1090,7 @@ void maru_macos_coretext_shape_draw_list(
             // 기억한다. 모든 glyph가 .notdef(glyph 0)면 record가 안 늘므로 shaped로 세지 않는다.
             const uint32_t records_before_cell = result->glyph_record_count;
 
-            CFStringRef string = maru_create_string_for_draw_cell(cell);
+            CFStringRef string = maru_create_string_for_draw_cell(cell, grapheme_pool, grapheme_pool_len);
             if (string == NULL) {
                 result->missing_glyph_count += 1;
                 continue;

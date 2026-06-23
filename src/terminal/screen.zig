@@ -159,6 +159,10 @@ pub const Screen = struct {
     last_print: ?struct { row: u16, col: u16 } = null,
     /// 직전 printable codepoint(REP·grapheme 연속용). per-screen(커서 render 상태와 함께 swap).
     last_printed_cp: u21 = 0,
+    /// DECSC/DECRC(ESC 7/8)·CSI s/u·DECSET 1048이 쓰는 저장 커서 슬롯. per-screen — 커서와 함께 swap을 타므로
+    /// primary 슬롯은 alt 왕복에도 생존하고, alt 슬롯은 alt 진입마다 fresh다(Ghostty Screen.saved_cursor 동형,
+    /// §10.8). alt가 매 진입 재생성되므로 alt 세션 간 슬롯 persist는 의도적으로 사라진다(§10.8.5 B5).
+    saved_cursor: core.SavedCursor = .{},
 };
 
 // ── G4 동적 탭스톱 ───────────────────────────────────────────────────────────────────────────────
@@ -1181,11 +1185,11 @@ pub fn setScrollRegion(self: *TerminalCore) void {
 // saved_* 슬롯으로 스왑하고 빈 alt 버퍼를 쓴다(alt는 cap=0 스크롤백 → history 안 쌓임). 복귀 시 되돌린다.
 // dispatchCsi·setPrivateModes·handleEscapeByte·fullReset가 위임한다.
 
-/// 현재 활성 화면의 DECSC 저장 슬롯. ESC 7/8과 1048은 항상 "지금 보이는 화면"의 슬롯을 쓴다
-/// (xterm 동일). 1049의 enter(저장)/leave(복원)는 primary 슬롯을 쓴다 — 셸 커서를 보관했다가
-/// TUI 종료 시 되돌리는 용도라서다.
+/// 현재 활성 화면의 DECSC 저장 슬롯. ESC 7/8과 1048은 항상 "지금 보이는 화면"의 슬롯을 쓴다(xterm 동일).
+/// 슬롯이 Screen에 귀속(per-screen, §10.8 B5)돼 alt 전환 swap을 타므로, 더는 alt_active로 슬롯을 고르지 않고
+/// 늘 활성 화면(self.screen)의 슬롯을 가리킨다 — primary/alt 분리는 swap이 by-construction으로 보장한다.
 fn activeSavedCursor(self: *TerminalCore) *core.SavedCursor {
-    return if (self.alt_active) &self.saved_cursor_alt else &self.saved_cursor_primary;
+    return &self.screen.saved_cursor;
 }
 
 pub fn saveCursorState(self: *TerminalCore) void {
@@ -1694,8 +1698,9 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         // leaveAltScreen이 이걸 통째로 복원하므로, 안 하면 축소 후 복귀 시 OOB 커서가 살아난다.
         self.saved_screen.cursor.row = @min(self.saved_screen.cursor.row, new_rows - 1);
         self.saved_screen.cursor.col = @min(self.saved_screen.cursor.col, new_cols - 1);
-        clampSavedCursor(&self.saved_cursor_primary, next_size);
-        clampSavedCursor(&self.saved_cursor_alt, next_size);
+        // DECSC 슬롯도 화면 귀속(per-screen, §10.8 B5)이라 활성(alt)·보관(primary) 둘 다 clamp한다.
+        clampSavedCursor(&self.screen.saved_cursor, next_size);
+        clampSavedCursor(&self.saved_screen.saved_cursor, next_size);
         self.screen.pending_wrap = false;
         self.screen.last_print = null;
         // 보관 primary의 deferred-wrap·combining 앵커도 무효화(resize는 reflow라 활성 화면과 동일 처리).

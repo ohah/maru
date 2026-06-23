@@ -798,6 +798,18 @@ fn clampSavedCursor(slot: *core.SavedCursor, size: types.Size) void {
     slot.cursor.col = clamped_col;
 }
 
+/// 한 화면(Screen)의 커서 상태를 새 크기에 맞춘다 — 활성 커서·DECSC 슬롯을 clamp하고 deferred-wrap·combining
+/// 앵커를 무효화한다(resize는 reflow라 모호해진 상태를 버린다). 커서가 화면 귀속(per-screen, §10.8)이라 alt 중
+/// resize는 활성 화면과 보관된 primary(saved_screen)에 똑같이 적용해야 swap 복원 시 OOB가 살아나지 않는다 —
+/// swap 단위를 한 곳에서 처리해 두 호출이 어긋날 여지를 없앤다.
+fn clampScreenCursorForResize(s: *Screen, size: types.Size) void {
+    s.cursor.row = @min(s.cursor.row, size.rows - 1);
+    s.cursor.col = @min(s.cursor.col, size.cols - 1);
+    clampSavedCursor(&s.saved_cursor, size);
+    s.pending_wrap = false;
+    s.last_print = null;
+}
+
 // ── erase / insert / delete (행 내 셀 편집) ─────────────────────────────────────────────────────
 // EL(K)·ECH(X)·ICH(@)·DCH(P)·ED(J). 모두 현재 pen 배경(BCE)으로 채우고, 경계에 걸친 wide glyph 반쪽을
 // repairWideGlyphEdges로 정리하며, deferred autowrap(pending_wrap)·grapheme run(last_print)을 끊는다.
@@ -1185,15 +1197,11 @@ pub fn setScrollRegion(self: *TerminalCore) void {
 // saved_* 슬롯으로 스왑하고 빈 alt 버퍼를 쓴다(alt는 cap=0 스크롤백 → history 안 쌓임). 복귀 시 되돌린다.
 // dispatchCsi·setPrivateModes·handleEscapeByte·fullReset가 위임한다.
 
-/// 현재 활성 화면의 DECSC 저장 슬롯. ESC 7/8과 1048은 항상 "지금 보이는 화면"의 슬롯을 쓴다(xterm 동일).
-/// 슬롯이 Screen에 귀속(per-screen, §10.8 B5)돼 alt 전환 swap을 타므로, 더는 alt_active로 슬롯을 고르지 않고
-/// 늘 활성 화면(self.screen)의 슬롯을 가리킨다 — primary/alt 분리는 swap이 by-construction으로 보장한다.
-fn activeSavedCursor(self: *TerminalCore) *core.SavedCursor {
-    return &self.screen.saved_cursor;
-}
-
+/// DECSC(ESC 7)·CSI s·DECSET 1048h가 커서·pen·deferred-wrap을 현재 화면의 슬롯에 저장한다. 슬롯이 Screen에
+/// 귀속(per-screen, §10.8 B5)돼 alt 전환 swap을 타므로 늘 활성 화면(self.screen.saved_cursor)을 쓴다 —
+/// primary/alt 분리는 swap이 by-construction으로 보장한다(옛 alt_active 슬롯 선택은 불필요해져 제거).
 pub fn saveCursorState(self: *TerminalCore) void {
-    activeSavedCursor(self).* = .{
+    self.screen.saved_cursor = .{
         .cursor = self.screen.cursor,
         .pen = self.screen.pen,
         .pending_wrap = self.screen.pending_wrap,
@@ -1201,7 +1209,7 @@ pub fn saveCursorState(self: *TerminalCore) void {
 }
 
 pub fn restoreCursorState(self: *TerminalCore) void {
-    restoreFromSlot(self, activeSavedCursor(self).*);
+    restoreFromSlot(self, self.screen.saved_cursor);
 }
 
 fn restoreFromSlot(self: *TerminalCore, slot: core.SavedCursor) void {
@@ -1696,20 +1704,11 @@ pub fn resize(self: *TerminalCore, cols_in: u16, rows_in: u16) !void {
         self.size = next_size;
         self.scroll_top = 0;
         self.scroll_bottom = new_rows - 1;
-        self.screen.cursor.row = @min(self.screen.cursor.row, new_rows - 1);
-        self.screen.cursor.col = @min(self.screen.cursor.col, new_cols - 1);
-        // 보관된 primary 커서(saved_screen)도 새 크기로 clamp한다 — 커서가 화면 귀속(per-screen, §10.8)이라
-        // leaveAltScreen이 이걸 통째로 복원하므로, 안 하면 축소 후 복귀 시 OOB 커서가 살아난다.
-        self.saved_screen.cursor.row = @min(self.saved_screen.cursor.row, new_rows - 1);
-        self.saved_screen.cursor.col = @min(self.saved_screen.cursor.col, new_cols - 1);
-        // DECSC 슬롯도 화면 귀속(per-screen, §10.8 B5)이라 활성(alt)·보관(primary) 둘 다 clamp한다.
-        clampSavedCursor(&self.screen.saved_cursor, next_size);
-        clampSavedCursor(&self.saved_screen.saved_cursor, next_size);
-        self.screen.pending_wrap = false;
-        self.screen.last_print = null;
-        // 보관 primary의 deferred-wrap·combining 앵커도 무효화(resize는 reflow라 활성 화면과 동일 처리).
-        self.saved_screen.pending_wrap = false;
-        self.saved_screen.last_print = null;
+        // 커서가 화면 귀속(per-screen, §10.8)이라 활성(alt)·보관(primary, saved_screen) 두 화면 모두 새 크기로
+        // 맞춘다 — 안 하면 leaveAltScreen이 통째 복원할 때 보관 화면의 OOB 커서가 되살아난다. swap 단위(Screen)를
+        // 한 헬퍼로 처리해 두 블록이 어긋나지 않게 한다(리뷰 B6).
+        clampScreenCursorForResize(&self.screen, next_size);
+        clampScreenCursorForResize(&self.saved_screen, next_size);
         // CSI 파서 상태/UTF-8 꼬리는 유지(아래 일반 경로와 동일한 이유).
         self.dirty = core.fullDirty(next_size);
         rebuildTabstops(self, old_cols); // 탭스톱을 새 cols에 맞춘다(겹침 보존·새 열 8칸 기본).

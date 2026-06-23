@@ -106,12 +106,9 @@ pub const SavedCursor = struct {
     pending_wrap: bool = false,
 };
 
-/// 스크롤백 ring buffer(Scrollback)는 화면 storage라 src/terminal/screen.zig로 분리했다(구조와 파일 분리 —
-/// storage 책임). core는 `sb`/`saved_sb` 필드로 이 타입을 쓰고, 행 push/get/rewrap 로직은 이 파일에서 그
-/// 필드들(ring/head/count/cap 등)을 직접 다룬다 — struct는 메모리 수명(free/cap 재구성)만 소유한다(screen.zig 주석).
-const Scrollback = screen.Scrollback;
-/// 활성 화면 grid(cells·wrapped·prompt_marks)를 묶는 2단계 Screen struct(B-min). self-contained라 screen.zig
-/// 소유, core가 `screen: Screen` 필드로 보유(Scrollback 선례). 행 연산은 self.screen.<field> 직접 접근.
+/// 활성 화면 grid(cells·wrapped·prompt_marks) + 스크롤백(sb)을 묶는 2단계 Screen struct(B-min). storage라
+/// screen.zig 소유(Scrollback도 그 안에 귀속 — B2), core는 `screen`/`saved_screen` 필드로 보유. 행 push/get/
+/// rewrap 등 연산은 free 함수가 self.screen.<field>(또는 self.screen.sb.<field>)를 직접 다룬다(struct는 데이터 그릇).
 const Screen = screen.Screen;
 
 pub const TerminalCore = struct {
@@ -224,6 +221,7 @@ pub const TerminalCore = struct {
     csi_subparam: [max_csi_params]bool = [_]bool{false} ** max_csi_params,
     // wrapped(soft-wrap 추적)·prompt_marks(행별 OSC 133 분류)는 활성 grid라 2단계 Screen struct로 이동
     // (self.screen.wrapped / self.screen.prompt_marks — 정의·주석은 screen.zig Screen).
+
     // 현재 활성 중인 semantic 영역(OSC 133 A→prompt, B→input, C→command, D→unknown). lineFeed가
     // 다음 행에 이 값을 전파해 여러 줄 프롬프트/출력이 전부 태깅된다.
     semantic_state: types.SemanticPrompt = .unknown,

@@ -470,6 +470,10 @@ pub const TerminalCore = struct {
         self.screen.pen = .{};
         self.screen.pending_wrap = false;
         self.screen.last_print = null;
+        // RIS는 DECSC 저장 슬롯도 공장 초기화한다(이후 DECRC/CSI u는 home 복원). 베이스: VT100 RIS = power-on
+        // 상태 + Ghostty Screen.reset()이 saved_cursor=null. alt는 위 leaveAltScreen으로 이미 폐기됐으니 활성
+        // (primary) 슬롯만 비우면 된다. (per-screen saved_cursor, §10.8 B5 — 옛 평평 슬롯 시절엔 미초기화였다.)
+        self.screen.saved_cursor = .{};
         self.scroll_top = 0;
         self.scroll_bottom = self.size.rows - 1;
         self.cursor_visible = true; // DECTCEM(25) — 입력 모드가 아니라 화면 표시라 fullReset에 남긴다.
@@ -4151,6 +4155,18 @@ test "CSI s/u (SCO save/restore) use the active screen's saved_cursor (B5)" {
     try core.write("\x1b[u"); // CSI u 복원 → (0,2)
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.row);
     try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
+}
+
+test "RIS clears the DECSC saved-cursor slot (xterm power-on reset)" {
+    // 베이스: VT100 RIS = power-on 상태 + Ghostty Screen.reset() saved_cursor=null. RIS 후 DECRC는 home 복원.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("hello\x1b7"); // 커서 (0,5), DECSC → 슬롯 (0,5)
+    try core.write("\x1bc"); // RIS — 슬롯도 공장 초기화
+    try core.write("\x1b[2;3H"); // 커서 (1,2)로
+    try core.write("\x1b8"); // DECRC → RIS가 슬롯을 비웠으면 home (0,0)
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.row);
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 }
 
 test "resize while in the alt screen preserves the saved primary's soft-wrap flags" {

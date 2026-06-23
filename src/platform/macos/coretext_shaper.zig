@@ -17,11 +17,17 @@ pub const NativeDrawCell = extern struct {
     row: u16,
     col: u16,
     width: u16,
-    // 스타일 플래그(비트필드). bit0(draw_cell_bold_bit)=bold. 16바이트 레이아웃을 유지하려고
-    // 기존 패딩 자리를 의미 있는 필드로 쓴다 — native MaruCoreTextDrawCell.style_flags와 동일.
+    // 스타일 플래그(비트필드). bit0(draw_cell_bold_bit)=bold. native MaruCoreTextDrawCell.style_flags와 동일.
     style_flags: u16 = 0,
     codepoint: u32,
+    // 단일 combining 그림자(폴백·색판정용). grapheme_count>0이면 셰이퍼는 풀을 권위로 보고 이 값을 무시한다.
     combining: u32,
+    // grapheme cluster 본체(base 뒤 extra 코드포인트)를 shape 호출의 grapheme_pool에서 가리킨다 —
+    // [grapheme_offset, grapheme_offset+grapheme_count). count>0이면 base 뒤에 풀의 코드포인트를 모두
+    // 붙여 cluster 전체를 셰이핑한다(NFD 한글 종성·다중 악센트·키캡 무손실). 0이면 combining 폴백.
+    grapheme_offset: u32 = 0,
+    grapheme_count: u16 = 0,
+    reserved: u16 = 0, // 24바이트 정렬 패딩(ObjC MaruCoreTextDrawCell와 동형 레이아웃)
 };
 
 pub const NativeDrawGlyphRecord = extern struct {
@@ -64,6 +70,9 @@ pub const ShapeDrawListFn = *const fn (
     italic_family_len: usize,
     cells: [*]const NativeDrawCell,
     cell_count: usize,
+    // grapheme cluster 본체 풀(base 제외한 extra 코드포인트). NativeDrawCell.grapheme_offset/count가 가리킨다.
+    grapheme_pool: [*]const u32,
+    grapheme_pool_len: usize,
     result: *NativeDrawListShapeResult,
     glyph_records: [*]NativeDrawGlyphRecord,
     glyph_record_capacity: usize,
@@ -148,6 +157,8 @@ pub const CoreTextDrawListShaper = struct {
             self.appearance.font.family_italic.len,
             native_cells.items.ptr,
             native_cells.items.len,
+            list.grapheme_pool.ptr,
+            list.grapheme_pool.len,
             &native,
             native_records.ptr,
             native_records.len,
@@ -182,6 +193,8 @@ fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell) NativeDrawCell {
         .style_flags = (if (cell.style.bold) draw_cell_bold_bit else 0) | (if (cell.style.italic) draw_cell_italic_bit else 0),
         .codepoint = cell.codepoint,
         .combining = cell.combining orelse 0,
+        .grapheme_offset = cell.grapheme_offset,
+        .grapheme_count = cell.grapheme_count,
     };
 }
 
@@ -512,6 +525,8 @@ fn fakeShapeDrawList(
     _: usize, // italic family len
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
+    _: [*]const u32, // grapheme_pool ptr (fake shaper는 combining 그림자만 본다)
+    _: usize, // grapheme_pool_len
     result: *NativeDrawListShapeResult,
     records_ptr: [*]NativeDrawGlyphRecord,
     record_capacity: usize,
@@ -574,6 +589,8 @@ fn failingShapeDrawList(
     _: usize, // italic family len
     _: [*]const NativeDrawCell,
     _: usize,
+    _: [*]const u32, // grapheme_pool ptr
+    _: usize, // grapheme_pool_len
     result: *NativeDrawListShapeResult,
     _: [*]NativeDrawGlyphRecord,
     _: usize,
@@ -602,6 +619,8 @@ fn outOfRangeRecordShapeDrawList(
     _: usize, // italic family len
     cells_ptr: [*]const NativeDrawCell,
     cell_count: usize,
+    _: [*]const u32, // grapheme_pool ptr
+    _: usize, // grapheme_pool_len
     result: *NativeDrawListShapeResult,
     records_ptr: [*]NativeDrawGlyphRecord,
     _: usize,
@@ -633,7 +652,7 @@ test "CoreText draw list native ABI sizes stay aligned" {
     // 이 테스트는 Objective-C bridge와 Zig가 같은 메모리 레이아웃을 본다는 계약이다.
     // 필드 하나가 추가되거나 순서가 바뀌면 glyph id나 font name을 엉뚱한 위치에서 읽게
     // 되므로, 실제 CoreText smoke가 깨지기 전에 unit test에서 먼저 실패해야 한다.
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(NativeDrawCell));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(NativeDrawCell));
     try std.testing.expectEqual(@as(usize, 164), @sizeOf(NativeDrawGlyphRecord));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeDrawListShapeResult));
 }

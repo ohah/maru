@@ -7,6 +7,12 @@ pub const DrawCell = struct {
     col: u16,
     codepoint: u21,
     combining: ?u21 = null,
+    // grapheme cluster 본체(base 뒤 extra 코드포인트)를 DrawList.grapheme_pool의 [offset, offset+count)로
+    // 가리킨다. count>0이면 CoreText 셰이퍼가 풀의 코드포인트를 base 뒤에 모두 붙여 cluster 전체를
+    // 셰이핑한다(NFD 한글 종성·다중 악센트·키캡 무손실 — combining 단일 슬롯의 손실 보정). count==0이면
+    // cluster가 없어 combining(단일 그림자) 폴백. combining은 색판정·fake 경로용으로 유지(HG3b 제거).
+    grapheme_offset: u32 = 0,
+    grapheme_count: u16 = 0,
     width: u2 = 1,
     style: terminal.Style = .{},
 };
@@ -67,10 +73,15 @@ pub const DrawList = struct {
     dirty: ?terminal.DirtyRegion,
     cells: []DrawCell,
     overlays: []DrawOverlay,
+    // DrawCell.grapheme_offset/count가 가리키는 cluster 본체 풀(base 제외한 extra 코드포인트, u32로
+    // 노출 — ObjC ABI와 동형). CoreText 셰이퍼가 통째로 ObjC에 넘긴다. cluster 없는 셀이 대부분이라
+    // 보통 비어 있다(append 비용 0). DrawList가 소유하고 deinit에서 free한다(snapshot 수명과 분리).
+    grapheme_pool: []u32 = &.{},
 
     pub fn deinit(self: *DrawList, allocator: std.mem.Allocator) void {
         allocator.free(self.cells);
         allocator.free(self.overlays);
+        if (self.grapheme_pool.len > 0) allocator.free(self.grapheme_pool);
         self.* = undefined;
     }
 };
@@ -93,6 +104,10 @@ pub fn buildDrawListWithUnfocused(
     errdefer cells.deinit(allocator);
     var overlays: std.ArrayList(DrawOverlay) = .empty;
     errdefer overlays.deinit(allocator);
+    // grapheme cluster 본체 풀 — cluster가 있는 셀만 채운다(대부분 비어 있다). DrawCell이 offset/count로
+    // 참조하고, CoreText 셰이퍼가 base 뒤에 붙여 cluster 전체를 셰이핑한다(단일 combining 손실 보정).
+    var grapheme_pool: std.ArrayList(u32) = .empty;
+    errdefer grapheme_pool.deinit(allocator);
 
     if (snapshot.dirty) |dirty| {
         const row_count: usize = snapshot.size.rows;
@@ -141,11 +156,24 @@ pub fn buildDrawListWithUnfocused(
                             }
                         }
 
+                        // cluster 본체(grapheme_id가 있으면 store에서, 없으면 풀 미사용 → combining 폴백)를
+                        // 풀에 적재하고 셀이 [offset, count)로 참조하게 한다. 셰이퍼가 base 뒤에 붙인다.
+                        var g_offset: u32 = 0;
+                        var g_count: u16 = 0;
+                        if (cell.grapheme_id != 0 and cell.grapheme_id <= snapshot.graphemes.len) {
+                            const cluster = snapshot.graphemes[cell.grapheme_id - 1];
+                            g_offset = @intCast(grapheme_pool.items.len);
+                            for (cluster) |cp| try grapheme_pool.append(allocator, @as(u32, cp));
+                            g_count = @intCast(cluster.len);
+                        }
+
                         cells.appendAssumeCapacity(.{
                             .row = @intCast(row),
                             .col = @intCast(col),
                             .codepoint = cell.codepoint,
                             .combining = cell.combining,
+                            .grapheme_offset = g_offset,
+                            .grapheme_count = g_count,
                             .width = render_width,
                             .style = cell.style,
                         });
@@ -201,6 +229,7 @@ pub fn buildDrawListWithUnfocused(
         .dirty = snapshot.dirty,
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = try overlays.toOwnedSlice(allocator),
+        .grapheme_pool = try grapheme_pool.toOwnedSlice(allocator),
     };
 }
 

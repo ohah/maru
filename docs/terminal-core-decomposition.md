@@ -241,6 +241,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 - **kitty.zig** ✅ **완료**: kitty graphics 본체를 §8(K1~K3)로 분리 완결(core.zig 6715→6233줄, kitty.zig 516줄). parser는 파싱(7/N) + `kitty.execKittyGraphics` 위임.
 - **input/report.zig**: `reportFocus`/`reportMouse`/`encodeKey` 등 입력→host-reply 인코딩.
 - **RIS가 DECSC 슬롯 초기화** ✅ **완료**(B4~B5 리뷰서 확인, §10.8.7): `fullReset`(ESC c)이 `screen.saved_cursor`를 안 비우던 기존 동작(평평 슬롯 시절부터 — 분해가 도입한 게 아님)을 고쳐, RIS가 슬롯도 공장 초기화한다(이후 DECRC/CSI u는 home 복원). **베이스**: VT100 RIS = power-on 상태 + Ghostty `Screen.reset()`이 `saved_cursor=null`. **결정**: RIS는 완전한 공장 리셋이므로 저장 커서도 비우는 게 정합(슬롯 생존은 사실상 버그). alt는 RIS의 leaveAltScreen으로 이미 폐기돼 활성(primary) 슬롯만 비우면 충분. 테스트 1건 추가.
+- **setup-path OOM 누수**(§11 A1 OOM-sweep서 발견, 범위 밖): `FailingAllocator`로 write/resize 도중 할당을 실패시키면 일부 경로가 할당을 잃는다(스크롤백 page 저장과 무관 — 기존 코드). A1 rewrap OOM 테스트는 실패 주입을 rewrap 단계로 한정해 우회했다. 별도 후속으로 grapheme/reflow scratch·write 경로의 OOM errdefer를 감사한다(크래시 아님 — best-effort OOM 경로의 누수).
 
 ---
 
@@ -545,3 +546,20 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 각 단계 doc-first + 누적 `/code-review max`. A1은 동작 보존이라 "정확성 버그 0" 기준, A2/P4는 메모리·동작 변경이라 측정+검증.
 
 **A1 확정 세부**: `ROWS_PER_PAGE` 고정(예 512), uniform-width 페이지(폭 변경=새 페이지), page **pool**로 steady-state 0 할당 유지(ring과 동률), row-count cap 유지(바이트 cap은 A2/config 후속), 논리 행 i→(page,row)는 cumulative 인덱스.
+
+### 11.7 A2 설계 — 가변폭/trailing-trim (실제 메모리 절감, 설계·합의 대기)
+
+**목표**: 스크롤백 행을 끝 default-cell까지 잘라 **가변폭**으로 저장 → 전형 출력(짧은 줄 다수)에서 메모리 ~10×↓. A1은 할당 수만 줄였고(데이터는 여전히 cap×cols×Cell), **A2가 실제 메모리를 줄여** 수백만 줄 viability에 기여한다.
+
+**소비자 안전(grounding 완료)**: 짧은(cols 미만) 스크롤백 행은 이미 안전하다 —
+- `renderSnapshot`이 read 시 pad한다: `n=@min(src.len, cols); @memcpy(dst[0..n], src); @memset(dst[n..], blank)`(screen.zig). wide 끝 잘림도 `clearTruncatedWideBase`로 정리.
+- `rewrap`은 hard 행에 `trimmedLen` 적용(이미 가변폭 가정).
+- 단 **A2 착수 시 selection/search/absRow 소비자가 `row.len`을 존중하는지 전수 확인**(현재 scrollback 행은 resize transient에만 가변폭이었고 rewrap이 곧 정규화 → A2는 영구 가변폭).
+
+**페이지 모델 변경**: A1의 uniform-width(`rows_per_page × width` 연속) → **per-row-descriptor arena**. `Page = { cells: []Cell(arena), row_descs: [{ offset, len, wrapped, prompt }], used }`. 행을 trim된 len으로 arena에 팩, `locate(i)`는 cumulative row count로 페이지+desc 이진탐색. soft-wrap 행은 full width(내용이 끝까지)라 trim 안 함; **hard 행만** 끝 default trim(rewrap `trimmedLen` 규칙과 동일 — 단일 출처).
+
+**동작 영향**: `scrollbackRow(i).len`이 cols보다 작을 수 있다(A1까진 push가 full-width 저장). 관측 동작은 불변(render가 pad, 내용·선택·검색 결과 동일). OOM 트랜잭션(rewrap)·row-count cap·eviction 유지.
+
+**위험**: per-row-descriptor arena가 A1보다 복잡(arena 팩·eviction 시 단편화/compaction, locate 이진탐색 2단). wide-glyph 끝 trim 경계. **메모리 절감을 probe로 검증**(게이트 — 전형 출력 ~10×↓ 확인, 안 나오면 재고).
+
+**테스트**: trim len 정확성(짧은 줄), render pad 동일성(snapshot 불변), selection/search 짧은 행 안전, 메모리 probe(절감 수치), OOM 트랜잭션 유지. A2는 동작 보존이라 "정확성 버그 0" + 메모리 절감 측정.

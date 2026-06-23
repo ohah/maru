@@ -785,6 +785,38 @@ test "CoreText draw-list shaper composes an NFD Hangul cluster identically to it
     try std.testing.expect(nfd.glyph_id != 0); // notdef가 아니라 실제 음절 글리프
 }
 
+test "CoreText draw-list shaper shapes a ZWJ emoji family into a color glyph (GB11)" {
+    // 회귀 고정(GB11): mode 2027에서 👨‍👩‍👧(👨 ZWJ 👩 ZWJ 👧)가 한 셀 cluster로 저장되고, DrawList가
+    // grapheme_pool로 전체 시퀀스를 CoreText에 넘기면 컬러(AppleColorEmoji) 글리프로 셰이핑된다.
+    // producer가 ZWJ 가족을 안 묶었으면(셀 분리) 또는 풀이 시퀀스를 못 넘기면 col 0이 비거나 단색이 된다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("\x1b[?2027h"); // grapheme cluster mode — 가족이 한 셀로 묶인다
+    try core.write("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"); // 👨‍👩‍👧
+
+    var dl = try renderer.buildDrawList(allocator, core.snapshot());
+    defer dl.deinit(allocator);
+    var fr = renderer.FontIdentityRegistry.init(allocator);
+    defer fr.deinit();
+    var shaped = try shaper.shape(allocator, dl, &fr);
+    defer shaped.deinit(allocator);
+
+    // col 0이 컬러 글리프로 셰이핑됐다 — 풀로 전달된 ZWJ 시퀀스를 CoreText가 이모지(컬러)로 그린다.
+    var saw_color_at_col0 = false;
+    for (shaped.runs.glyphs) |g| {
+        if (g.col == 0 and g.cache_key.color_glyph_kind == .color) saw_color_at_col0 = true;
+    }
+    try std.testing.expect(saw_color_at_col0);
+}
+
 test "CoreText smoke does not treat fallback as required for shaping" {
     // fallback 관측은 유용한 진단 신호지만, OS와 설치 폰트에 따라 run 분리가 달라질 수
     // 있다. smoke의 pass/fail은 "글자를 glyph run으로 만들 수 있는가"에 둔다.

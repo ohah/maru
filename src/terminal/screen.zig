@@ -476,23 +476,25 @@ pub fn isRegionalIndicator(codepoint: u21) bool {
     return codepoint >= 0x1F1E6 and codepoint <= 0x1F1FF;
 }
 
-/// 직전 출력 셀이 짝 없는(아직 combining 안 붙은) wide 이모지 base인지 — 스킨톤 modifier를
-/// 거기 붙이기 위함. combining이 이미 있으면(예: 국기의 2번째 RI) 거기에 스킨톤을 또 붙이면
-/// 그 슬롯(하나뿐)을 덮어써 국기가 깨지므로 제외한다.
-pub fn lastCellIsWideEmoji(self: *const TerminalCore) bool {
-    const last = self.screen.last_print orelse return false;
-    const cell = self.screen.cells[self.index(last.row, last.col)];
-    // width 2를 wide emoji 대용으로 본다(스킨톤 modifier 부착 대상). 단 ambiguous-width=wide로 2칸이 된
-    // 동그란 번호(isWideRenderSymbol)는 이모지가 아니라 스킨톤 부착 대상이 아니므로 제외 — 안 그러면 ③ 뒤
-    // 스킨톤이 ③ cluster에 잘못 병합된다(mode 2027). grapheme_id==0 = 아직 extra가 안 붙은 단독 base.
-    return cell.width == 2 and cell.grapheme_id == 0 and !width.isWideRenderSymbol(cell.codepoint);
-}
-
-/// 직전 출력 셀이 짝 없는(extra 안 붙은) 지역 표시자인지 — 다음 RI와 국기로 묶기 위함.
-pub fn lastCellIsLoneRegionalIndicator(self: *const TerminalCore) bool {
-    const last = self.screen.last_print orelse return false;
-    const cell = self.screen.cells[self.index(last.row, last.col)];
-    return isRegionalIndicator(cell.codepoint) and cell.grapheme_id == 0;
+/// mode 2027에서 직전 출력 셀의 emoji cluster가 cp로 이어지는가 — 흡수 판정의 단일 출처.
+/// 스킨톤(GB9 modifier)·국기(GB12/13 RI 쌍)·ZWJ 시퀀스(GB11)가 서로 다른 UAX#29 규칙이지만 여기서
+/// 함께 판정해 흡수+폭승격 경로를 공유한다. base=cluster 시작 글자(cell.codepoint), 흡수 후 호출자가
+/// promoteLastToEmojiWidth로 폭을 맞춘다(RI만 1→2). cellWidth 0인 VS16/Extend는 이 함수 이전의 별도
+/// 경로가 처리한다. NFD 한글은 게이팅(무조건)이 달라 여기 들어오지 않는다.
+fn emojiClusterExtends(self: *const TerminalCore, cell: types.Cell, cp: u21) bool {
+    const base = cell.codepoint;
+    // 스킨톤 modifier: 그림문자 cluster에 붙는다(modifier는 GB9 Extend지만 폭 2라 cellWidth-0 경로를 안 탐).
+    // 단 (1) 동그란 번호(③ ambiguous-wide)는 그림문자가 아니라 제외, (2) **국기(RI base)는 제외** — 완성된
+    // 국기 뒤 스킨톤이 cluster에 잘못 병합돼 국기가 깨지면 안 된다(review #15). lone이 아니어도(ZWJ 가족 안
+    // 사람마다 스킨톤) base가 그림문자면 붙는다 — base는 cluster 시작 글자라 가족 전체가 한 셀로 모인다.
+    if (isSkinToneModifier(cp)) return grapheme.isExtendedPictographic(base) and !isRegionalIndicator(base) and !width.isWideRenderSymbol(base);
+    // 국기: 짝 없는(extra 없는) RI에 둘째 RI만 묶는다(GB12/13 — 3개 이상은 안 이어 다음 국기가 새 셀로).
+    if (isRegionalIndicator(cp)) return isRegionalIndicator(base) and cell.grapheme_id == 0;
+    // ZWJ: 그림문자 cluster 뒤에 붙는다(GB11 좌변). base가 그림문자면 OK — 사이에 VS16 등 Extend가 끼어도.
+    if (cp == 0x200D) return grapheme.isExtendedPictographic(base);
+    // ZWJ 뒤 그림문자: 합류한다(GB11 우변 — trailing이 방금 붙은 ZWJ).
+    if (grapheme.isExtendedPictographic(cp)) return trailingClusterCp(self, cell) == 0x200D;
+    return false;
 }
 
 /// wide glyph의 오른쪽 continuation 칸(0폭). base의 style/link를 물려받는다 — putCell과
@@ -1413,19 +1415,18 @@ pub fn writeCodepoint(self: *TerminalCore, codepoint: u21) void {
                 if ((self.grapheme_cluster_mode or self.emoji_wide) and cp == 0xFE0F) promoteLastToEmojiWidth(self);
                 return;
             }
-            // mode 2027: grapheme을 한 셀로 묶는다(앱과 너비 합의 상태라 안전).
+            // mode 2027: emoji grapheme(스킨톤·국기 RI 쌍·ZWJ 시퀀스)을 한 셀로 묶는다(앱과 너비 합의
+            // 상태라 안전). 셋은 서로 다른 UAX#29 규칙이지만(GB9 modifier·GB12/13 RI·GB11 ZWJ)
+            // emojiClusterExtends 한 판정 + 단일 흡수+폭승격 경로를 공유한다. promoteLastToEmojiWidth는
+            // RI(폭 1→2)만 올리고 이미 폭 2인 스킨톤·ZWJ엔 no-op이다.
             if (self.grapheme_cluster_mode) {
-                // 스킨톤 modifier(👍 + 🏽): 앞 이모지에 combining으로 붙여 한 글자. base는 이미
-                // width 2(EAW Wide)라 폭 승격 불필요.
-                if (isSkinToneModifier(cp) and lastCellIsWideEmoji(self)) {
-                    appendClusterCodepoint(self, cp);
-                    return;
-                }
-                // 국기: 지역 표시자(RI) 2개를 한 셀(width 2)로. 직전이 짝 없는 RI면 combining + 승격.
-                if (isRegionalIndicator(cp) and lastCellIsLoneRegionalIndicator(self)) {
-                    appendClusterCodepoint(self, cp);
-                    promoteLastToEmojiWidth(self);
-                    return;
+                if (self.screen.last_print) |last| {
+                    const last_cell = self.screen.cells[self.index(last.row, last.col)];
+                    if (emojiClusterExtends(self, last_cell, cp)) {
+                        appendClusterCodepoint(self, cp);
+                        promoteLastToEmojiWidth(self);
+                        return;
+                    }
                 }
             }
             // NFD 한글 conjoining 자모(GB6/7/8): 중성(V)·종성(T)은 단독 폭이 1이라 위 combining

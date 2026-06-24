@@ -736,18 +736,27 @@ const NormalizedConfig = struct {
 };
 
 /// 한 터미널의 런타임 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는
-/// pump. `LivePtySession`의 reader thread가 `&live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
+/// pump. `LivePtySession`의 reader thread가 `&rt.live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
 /// 안 된다 — heap-pin(`*Term`)이라 ArrayList realloc·트리 회전·탭 재정렬에도 본체(reader가 잡는
-/// `&live_pty.reader`, SplitTree leaf가 잡는 `&surface`)가 안 움직인다. pump는 안정 `*queue`만 들어 이동
+/// `&rt.live_pty.reader`, SplitTree leaf가 잡는 `&surface`)가 안 움직인다. pump는 안정 `*queue`만 들어 이동
 /// 제약이 없다. 탭→pane 모델에서 한 Pane(split leaf)이 이 Term을 가로 탭으로 여러 개 들 수 있다(⌘T로 추가).
-const Term = struct {
-    surface: app.Surface = undefined,
+///
+/// `TermRuntime` = Term의 런타임 부착(PTY 세션·이벤트 펌프·생애 플래그) — OS/런타임 결합부. 모델(surface·
+/// 메타)과 분리해 격리한다(S2-3a, docs/layering-and-portability.md §3.1). heap-pin Term 안에 nested라
+/// reader가 잡는 `&rt.live_pty.reader` 주소 안정성은 그대로다. 후속 S2에서 platform이 분리 소유하고
+/// `session.Term`(모델)은 추상 핸들만 보게 한다.
+const TermRuntime = struct {
     live_pty: app.LivePtySession = undefined,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
+};
+const Term = struct {
+    surface: app.Surface = undefined,
+    // 런타임 부착(PTY 세션·pump·생애 플래그). 모델 필드(surface·메타)와 분리해 격리 — S2-3a(§3.1).
+    rt: TermRuntime = .{},
     // git 브랜치 표시 캐시(owned). cwd(OSC 7)에서 .git/HEAD를 walk-up해 도출한 브랜치명과, 그걸 계산한 cwd.
     // termGitBranch가 cwd가 바뀔 때만 재계산(매 프레임 fs 읽기 회피). destroyTerm이 해제. 영속 안 함(파생값 — restore가 재도출).
     git_branch: ?[]const u8 = null,
@@ -1590,7 +1599,7 @@ pub const AppSession = struct {
         // 첫 탭을 만든다 — Tab + 첫 panel(셸 PTY spawn + surface + runtime attach + pump) + tabs/surface_ptrs
         // append + app_window 갱신을 createTab이 한 묶음으로 한다(create/switch 후속도 같은 경로를 쓴다).
         // Swift는 opaque handle만 보유하고 AppSession은 heap에 고정된다(LivePtySession reader가
-        // `&pane.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
+        // `&pane.rt.live_pty.reader`를 잡으므로 Pane도 heap-pin — createPane이 allocator.create로 띄운다).
         var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, integ_dir, self.new_tab_ssh_bin);
         // launch cwd가 `/`인지 한 번 캐시(.app 더블클릭 home 승격용 — workspaceRootCwd가 매번 getcwd하지 않게).
         self.launch_cwd_is_root = detectLaunchCwdIsRoot(io);
@@ -1615,7 +1624,7 @@ pub const AppSession = struct {
         // (읽히지 않는 필드를 유지하는 방어 코드 불필요). frame_loop.tick/tickWithFrameBuilder로 바꾸려면 그때 pump를 살려야 한다.
         // io는 frame 조립 경로의 코어 락에 쓰인다 — frame_loop.pump는 위 주석대로 안 읽히므로 그 queue.io에 기대지
         // 않고(undefined일 수 있다) AppSession이 가진 valid한 io를 직접 넘긴다(docs/io-render-threading.md PR3).
-        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().activeTerm().pump, &self.renderer_state, io);
+        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().activeTerm().rt.pump, &self.renderer_state, io);
         // 활성 panel rect를 초기화한다 — refreshCellMetrics가 사이드바 폭을 채운 '뒤'라야 단일 panel 기준
         // (x = 사이드바 폭, y = 0)이 맞다(createTab 시점엔 사이드바 폭이 아직 0이라 여기서 다시 잡는다).
         self.recomputeActivePaneRect();
@@ -2759,7 +2768,7 @@ pub const AppSession = struct {
     fn findTerminatedTerm(self: *AppSession) ?TermLoc {
         return self.findTermWhere({}, struct {
             fn pred(_: void, term: *Term) bool {
-                return term.terminated;
+                return term.rt.terminated;
             }
         }.pred);
     }
@@ -2926,7 +2935,7 @@ pub const AppSession = struct {
     }
 
     /// 한 Term(터미널)을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
-    /// `LivePtySession` reader가 `&term.live_pty.reader`를 잡으므로 Term은 heap 고정(ArrayList는 `*Term`만 들어
+    /// `LivePtySession` reader가 `&term.rt.live_pty.reader`를 잡으므로 Term은 heap 고정(ArrayList는 `*Term`만 들어
     /// realloc·탭 재정렬에도 본체 안 움직임). surface_id·pty_id 발급(next_id), 부분 실패는 errdefer로 정리
     /// (create→live_pty→surface 역순). Pane에 거는 건 호출자(createPane/⌘T)가 한다.
     fn createTerm(
@@ -2942,9 +2951,9 @@ pub const AppSession = struct {
         term.* = .{};
 
         const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
-        try term.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
-        errdefer term.live_pty.deinit();
-        term.live_initialized = true;
+        try term.rt.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
+        errdefer term.rt.live_pty.deinit();
+        term.rt.live_initialized = true;
 
         term.surface = try app.Surface.init(self.allocator, id, size);
         errdefer term.surface.deinit();
@@ -2968,8 +2977,8 @@ pub const AppSession = struct {
 
         // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
         // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
-        _ = try term.live_pty.attachSurface(&self.runtime, &term.surface, request.login);
-        term.pump = term.live_pty.pump(&self.runtime);
+        _ = try term.rt.live_pty.attachSurface(&self.runtime, &term.surface, request.login);
+        term.rt.pump = term.rt.live_pty.pump(&self.runtime);
         self.next_id += 1;
         return term;
     }
@@ -2988,10 +2997,10 @@ pub const AppSession = struct {
             self.context_menu_target = null;
             self.chrome_host.context_menu.hide();
         };
-        if (term.live_initialized) {
-            if (self.runtime_initialized) term.live_pty.closeAndDetach(&self.runtime);
-            term.live_pty.deinit();
-            term.live_initialized = false;
+        if (term.rt.live_initialized) {
+            if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(&self.runtime);
+            term.rt.live_pty.deinit();
+            term.rt.live_initialized = false;
         }
         // custom_name(사용자 rename, owned)만 해제 — surface.title은 정적/borrowed라 해제 안 함. Surface.deinit에
         // allocator가 없어 owned 문자열 해제는 세션 allocator를 가진 이 funnel에서 한다.
@@ -3242,9 +3251,9 @@ pub const AppSession = struct {
     /// 이미 종료(exited)면 false(명령 없음). PtySession.hasForegroundJob이 tcgetpgrp≠셸 pid로 판정한다(틱 스레드
     /// 전용 — 닫기 경로는 메인/틱 스레드라 안전). 단일 출처: src/pty/macos.zig hasForegroundJob 주석.
     fn termHasRunningJob(term: *Term) bool {
-        if (!term.live_initialized) return false;
+        if (!term.rt.live_initialized) return false;
         if (term.surface.process_state == .exited) return false;
-        return term.live_pty.session.hasForegroundJob();
+        return term.rt.live_pty.session.hasForegroundJob();
     }
 
     fn paneHasRunningJob(pane: *Pane) bool {
@@ -3623,7 +3632,7 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (term.live_initialized and !term.terminated) return false;
+                    if (term.rt.live_initialized and !term.rt.terminated) return false;
                 }
             }
         }
@@ -7770,7 +7779,7 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (!term.live_initialized or term.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
+                    if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
                     if (self.drainOscNotificationFrom(term, focused_term)) |n| return n;
                 }
             }
@@ -7921,7 +7930,7 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (!term.live_initialized or term.terminated) continue;
+                    if (!term.rt.live_initialized or term.rt.terminated) continue;
                     if (term.surface.core.takeBell()) rang = true; // 매 live core drain(클리어) — OR로 누적
                 }
             }
@@ -8517,12 +8526,12 @@ pub const AppSession = struct {
             .claude => if (self.loaded_config.config.workspace.restore_claude) .claude else return .{},
             .codex => if (self.loaded_config.config.workspace.restore_codex) .codex else return .{},
         };
-        if (!term.live_initialized) return .{};
+        if (!term.rt.live_initialized) return .{};
 
         // 1) exec_path + 전체 argv 캡처(틱이 멈춘 종료 시점이라 정적 procargs_buf 공유 안전).
         var str_buf: [16 * 1024]u8 = undefined;
         var argv_raw: [app.workspace.max_agent_argv][]const u8 = undefined;
-        const cap = term.live_pty.session.captureAgentArgv(&str_buf, &argv_raw) orelse return .{};
+        const cap = term.rt.live_pty.session.captureAgentArgv(&str_buf, &argv_raw) orelse return .{};
         if (cap.argv.len == 0) return .{};
         // stale agent_kind 방어: 캡처된 실제 프로그램(node 래퍼면 argv[1] 스크립트, 아니면 exec_path)이 기대 kind와
         // 일치하는지 재확인한다 — agent_kind는 ~0.5s 폴 캐시라, claude 종료 직후 셸이 idle이거나 다른 명령이 뜬
@@ -9135,10 +9144,10 @@ pub const AppSession = struct {
             const shown_term = tab.activePane().activeTerm(); // 이 워크스페이스 사이드바 행이 보여주는 Term
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (!term.live_initialized or term.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
+                    if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
                     const displayed = term == shown_term; // 사이드바에 이 Term이 보이는가(재렌더 게이트)
                     const prev = term.agent_kind;
-                    term.agent_kind = classifyAgent(term.live_pty.session.foregroundProcessName(&buf));
+                    term.agent_kind = classifyAgent(term.rt.live_pty.session.foregroundProcessName(&buf));
                     if (term.agent_kind != prev) {
                         if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
@@ -9245,7 +9254,7 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (!term.live_initialized) continue;
+                    if (!term.rt.live_initialized) continue;
                     term.surface.lockCore(self.io);
                     defer term.surface.unlockCore(self.io);
                     const live = term.surface.core.windowTitle();
@@ -9280,14 +9289,14 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (!term.live_initialized) continue;
-                    const ds = try term.pump.drainAvailable();
+                    if (!term.rt.live_initialized) continue;
+                    const ds = try term.rt.pump.drainAvailable();
                     drain_summary.output_events += ds.output_events;
                     drain_summary.exit_events += ds.exit_events;
                     // Term별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' Term이 끝났을 때.
-                    if (ds.ended != null and !term.terminated) {
-                        term.live_pty.finishAfterTermination();
-                        term.terminated = true;
+                    if (ds.ended != null and !term.rt.terminated) {
+                        term.rt.live_pty.finishAfterTermination();
+                        term.rt.terminated = true;
                         drain_summary.ended = ds.ended; // 마지막 관측 종료를 frame 보고에 싣는다
                     }
                 }
@@ -9853,10 +9862,10 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (term.live_initialized and self.runtime_initialized) {
-                        term.live_pty.closeAndDetach(&self.runtime);
-                    } else if (term.live_initialized) {
-                        term.live_pty.close();
+                    if (term.rt.live_initialized and self.runtime_initialized) {
+                        term.rt.live_pty.closeAndDetach(&self.runtime);
+                    } else if (term.rt.live_initialized) {
+                        term.rt.live_pty.close();
                     }
                 }
             }
@@ -11736,10 +11745,10 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    if (term.live_initialized) {
-                        if (self.runtime_initialized) term.live_pty.closeAndDetach(&self.runtime);
-                        term.live_pty.deinit();
-                        term.live_initialized = false;
+                    if (term.rt.live_initialized) {
+                        if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(&self.runtime);
+                        term.rt.live_pty.deinit();
+                        term.rt.live_initialized = false;
                     }
                 }
             }
@@ -17449,7 +17458,7 @@ test "hoverCursor returns region-specific cursor kinds" {
 
 // PR5b(exit 자동 collapse): 개별 Term의 셸이 exit하면 그 Term을 자동으로 닫고(Term→pane→워크스페이스 cascade)
 // 살아있는 Term이 남아 있으면 세션을 유지한다. 비동기 PTY exit 폴링은 flaky하므로, drain이 종료를 관측한 상태
-// (term.terminated=true)를 세팅하고 reapTerminatedTerms를 직접 호출해 cascade를 결정적으로 고정한다(구조 연산
+// (term.rt.terminated=true)를 세팅하고 reapTerminatedTerms를 직접 호출해 cascade를 결정적으로 고정한다(구조 연산
 // 단위 테스트 관행 — closeTab/Cmd+W 테스트와 같은 방식). 실 init/spawn이라 macOS 게이트.
 
 // ① pane 안 형제 Term: 한 Term이 exit하면 그 Term만 닫히고 형제가 활성으로 남는다(pane/탭 그대로).
@@ -17478,7 +17487,7 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
     const t1_id = pane.terms.items[1].surface.id; // 살아남을(활성) Term
 
     // 배경 Term T0의 셸이 exit → reap. T0만 닫히고 T1이 인덱스 0·활성으로 clamp, 대표 surface = T1.
-    pane.terms.items[0].terminated = true;
+    pane.terms.items[0].rt.terminated = true;
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
     try std.testing.expectEqual(t1_id, pane.terms.items[0].surface.id);
@@ -17519,7 +17528,7 @@ test "PR5b regression: reaping a lower-indexed sibling keeps the middle-active T
     const t1_id = pane.terms.items[1].surface.id; // 계속 활성이어야 할 Term
 
     // 배경 T0(인덱스 0 < active_term 1)의 셸이 exit → reap. T1이 인덱스 0으로 당겨지고 active_term도 0으로 보정돼야 한다.
-    pane.terms.items[0].terminated = true;
+    pane.terms.items[0].rt.terminated = true;
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     try std.testing.expectEqual(@as(usize, 0), pane.active_term); // 1→0 시프트 보정(버그면 1로 남아 T2를 가리킴)
@@ -17571,7 +17580,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
     try std.testing.expect(session.chrome_host.confirm.open);
 
-    pane.terms.items[0].terminated = true; // 배경 Term이 셸 종료
+    pane.terms.items[0].rt.terminated = true; // 배경 Term이 셸 종료
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // T0 reap됨(트리 변경)
     try std.testing.expect(session.pending_close == null); // 보류 취소
@@ -17583,7 +17592,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     try std.testing.expectEqual(@as(usize, 2), pane2.terms.items.len);
     session.pending_close = .window;
     session.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?");
-    pane2.terms.items[0].terminated = true;
+    pane2.terms.items[0].rt.terminated = true;
     session.reapTerminatedTerms();
     try std.testing.expect(session.pending_close != null); // .window 유지
     try std.testing.expect(session.chrome_host.confirm.open); // 모달 유지
@@ -17679,7 +17688,7 @@ test "PR5b: a split pane whose only Term exits collapses to its sibling" {
     // 왼쪽(배경) pane P0의 유일한 Term 셸이 exit → reap → P0 collapse, P1만 전체 폭으로 남고 활성 유지.
     const active_pane = session.activePane();
     for (session.activeTab().panes.items) |p| {
-        if (p != active_pane) p.terms.items[0].terminated = true; // P0
+        if (p != active_pane) p.terms.items[0].rt.terminated = true; // P0
     }
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
@@ -17723,7 +17732,7 @@ test "PR5b: a background workspace whose last Term exits is closed; the other su
     const survivor_id = session.tabs.items[1].activePane().activeTerm().surface.id;
 
     // 배경 탭 0의 유일한 Term이 exit → reap → 탭 0 워크스페이스 닫힘, 탭 1만 남고 active 0으로 보정.
-    session.tabs.items[0].activePane().terms.items[0].terminated = true;
+    session.tabs.items[0].activePane().terms.items[0].rt.terminated = true;
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
@@ -17749,7 +17758,7 @@ test "PR5b: the last Term exiting is not reaped (session-end latch owns it)" {
     defer session.deinit();
 
     // 단일 탭·단일 pane·단일 Term이 exit → reap 무동작(구조 유지). 세션 종료는 reap이 아니라 tick latch가 한다.
-    session.activePane().terms.items[0].terminated = true;
+    session.activePane().terms.items[0].rt.terminated = true;
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);

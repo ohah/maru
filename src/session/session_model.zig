@@ -11,9 +11,9 @@
 
 const std = @import("std");
 const surface_mod = @import("../app/surface.zig");
-const split_tree = @import("../app/split_tree.zig");
+const split_tree = @import("split_tree.zig");
 const agent_transcript = @import("agent_transcript.zig");
-const workspace = @import("../app/workspace.zig"); // OS-중립 직렬화 모델(app.workspace.v1) — TreeNode 변환용
+const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(app.workspace.v1) — TreeNode 변환용
 
 const Surface = surface_mod.Surface;
 

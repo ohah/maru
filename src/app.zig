@@ -13,9 +13,7 @@ pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
 pub const smoke_drain = @import("app/smoke_drain.zig");
 pub const surface = @import("app/surface.zig");
-pub const split_tree = @import("app/split_tree.zig");
 pub const window = @import("app/window.zig");
-pub const workspace = @import("app/workspace.zig");
 
 pub const AppWindow = window.AppWindow;
 pub const AppHostFrame = host.AppHostFrame;
@@ -59,13 +57,7 @@ pub const SmokeDrainDeadlineConfig = smoke_drain.DeadlineConfig;
 pub const Surface = surface.Surface;
 pub const SurfaceId = runtime.SurfaceId;
 pub const SurfaceRuntime = runtime.SurfaceRuntime;
-// SplitTree는 leaf 타입에 대해 generic이다(app이 platform의 Pane 타입에 의존하지 않게) — platform이
-// `app.SplitTree(*Pane)`으로 인스턴스화해 Node/Split/LeafRect를 그 인스턴스에서 얻는다.
-pub const SplitTree = split_tree.SplitTree;
-pub const SplitDirection = split_tree.SplitDirection;
-pub const SplitRect = split_tree.Rect;
-pub const splitRect = split_tree.splitRect; // leaf-독립 헬퍼(생성용 a/b rect)
-pub const clampRatio = split_tree.clampRatio; // divider 드래그가 layout과 같은 ratio 한도를 쓰게(단일 출처)
+// SplitTree·SplitDirection·SplitRect·splitRect·clampRatio는 split_tree와 함께 session으로 이동(D1) — maru.session.X.
 pub const TerminalInput = runtime.TerminalInput;
 pub const ProcessState = surface.ProcessState;
 

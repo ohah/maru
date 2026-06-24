@@ -153,7 +153,7 @@ fn applyKey(
         // 개별 theme.* 키가 이 줄 *뒤에* 오면 그 색만 override한다(loader 순차 적용 — 나중 줄 우선). 프리셋 색은
         // 정적 리터럴이라 arena dupe 불필요. 알 수 없는 값은 forgiving(기본 maru 유지 + diagnostic).
         const preset = parseThemePreset(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "theme.preset은 maru|ghostty|gruvbox-dark|solarized-dark|solarized-light|dracula|catppuccin-mocha|catppuccin-latte|light-pink — 기본값 유지" });
+            try diags.append(a, .{ .line = line_no, .message = "theme.preset은 " ++ theme.preset_names_joined ++ " — 기본값 유지" });
             return;
         };
         config.theme = theme.presetColors(preset);
@@ -429,16 +429,9 @@ fn dupValidColor(
 // parseCursorShape는 cursor.shape가 스키마-주도로 이주(CS-1)해 schema의 enum 파싱이 대신한다 — 제거.
 
 fn parseThemePreset(value: []const u8) ?theme.ThemePreset {
-    if (std.mem.eql(u8, value, "maru")) return .maru;
-    if (std.mem.eql(u8, value, "ghostty")) return .ghostty;
-    if (std.mem.eql(u8, value, "gruvbox-dark")) return .gruvbox_dark;
-    if (std.mem.eql(u8, value, "solarized-dark")) return .solarized_dark;
-    if (std.mem.eql(u8, value, "solarized-light")) return .solarized_light;
-    if (std.mem.eql(u8, value, "dracula")) return .dracula;
-    if (std.mem.eql(u8, value, "catppuccin-mocha")) return .catppuccin_mocha;
-    if (std.mem.eql(u8, value, "catppuccin-latte")) return .catppuccin_latte;
-    if (std.mem.eql(u8, value, "light-pink")) return .light_pink;
-    return null;
+    // 제너릭 reflection 파서에 위임(theme.parsePreset = dash→underscore + stringToEnum). enum만 늘리면 자동 인식 —
+    // 프리셋 추가 시 이 함수와 아래 diagnostic 문구(theme.preset_names_joined)는 손대지 않는다(수동 나열 drift 제거).
+    return theme.parsePreset(value);
 }
 
 /// 음이 아닌 정수를 [0, max]로 파싱한다 — 음수/비정수/max 초과는 null(기본값 유지). 0은 유효.
@@ -1558,6 +1551,101 @@ test "parse: theme.preset supports all named presets with correct palettes; ligh
     const ra = try appearance.resolve(cl.config);
     try std.testing.expectEqual(terminal.Rgb{ .r = 0xef, .g = 0xf1, .b = 0xf5 }, ra.theme.background);
     try std.testing.expectEqual(terminal.Rgb{ .r = 0xe6, .g = 0xe9, .b = 0xef }, ra.theme.sidebar_background);
+}
+
+test "parse: theme.preset 신규 프리셋(rose-pine·tokyo-night·nord·one-dark/light) + 라이트 override" {
+    const a = std.testing.allocator;
+    // 다크 프리셋: 배경/팔레트 표준값, sidebar_*는 null(배경 파생).
+    var rp = try parse(a, "theme.preset = rose-pine");
+    defer rp.deinit();
+    try std.testing.expectEqualStrings("#191724", rp.config.theme.background);
+    try std.testing.expectEqualStrings("#eb6f92", rp.config.theme.palette[1].?); // love(red)
+    try std.testing.expect(rp.config.theme.sidebar_background == null); // 다크 → 파생
+
+    var tn = try parse(a, "theme.preset = tokyo-night");
+    defer tn.deinit();
+    try std.testing.expectEqualStrings("#1a1b26", tn.config.theme.background);
+    try std.testing.expectEqualStrings("#7aa2f7", tn.config.theme.palette[4].?); // blue
+
+    // nord: 스킴 selection(#eceff4 밝음)을 polar night(#434c5e)로 override(밝은 글자 가독).
+    var nd = try parse(a, "theme.preset = nord");
+    defer nd.deinit();
+    try std.testing.expectEqualStrings("#2e3440", nd.config.theme.background);
+    try std.testing.expectEqualStrings("#434c5e", nd.config.theme.selection);
+
+    var od = try parse(a, "theme.preset = one-dark");
+    defer od.deinit();
+    try std.testing.expectEqualStrings("#21252b", od.config.theme.background);
+
+    // 라이트 프리셋: sidebar_*·search_match* override 명시(라이트 함정 회피).
+    var rd = try parse(a, "theme.preset = rose-pine-dawn");
+    defer rd.deinit();
+    try std.testing.expectEqualStrings("#faf4ed", rd.config.theme.background);
+    try std.testing.expectEqualStrings("#f2e9e1", rd.config.theme.sidebar_background.?);
+    // override 4값 전부 가드(light_pink/solarized_light 선례 — resolve 가드는 유효 hex만 잡고 값 swap은 못 잡음).
+    try std.testing.expectEqualStrings("#cecacd", rd.config.theme.sidebar_active.?);
+    try std.testing.expectEqualStrings("#f2dfc9", rd.config.theme.search_match); // 골드 톤(다크 앰버 아님)
+    try std.testing.expectEqualStrings("#ead0a3", rd.config.theme.search_match_current);
+
+    var ol = try parse(a, "theme.preset = one-light");
+    defer ol.deinit();
+    try std.testing.expectEqualStrings("#f9f9f9", ol.config.theme.background);
+    try std.testing.expectEqualStrings("#2a2c33", ol.config.theme.cursor); // 스킴 #bbbbbb 대신 진한 잉크(캐럿 가독)
+    try std.testing.expectEqualStrings("#eaeaeb", ol.config.theme.sidebar_background.?);
+    try std.testing.expectEqualStrings("#dbdbdc", ol.config.theme.sidebar_active.?);
+    try std.testing.expectEqualStrings("#f3e6bf", ol.config.theme.search_match);
+    try std.testing.expectEqualStrings("#e6cf92", ol.config.theme.search_match_current);
+}
+
+test "presetColors: 모든 프리셋이 resolve에 성공(유효 hex 가드 — 새 프리셋 오타 즉시 검출)" {
+    // 새 프리셋의 색·16팔레트에 오타 hex(#zzz 등)가 있으면 resolve가 ResolveError를 던져 이 테스트가 깨진다.
+    // enum을 inline for로 돌아 모든 변형을 자동 커버한다(프리셋 추가 시 이 테스트는 손대지 않아도 새 프리셋을 검증).
+    inline for (@typeInfo(theme.ThemePreset).@"enum".fields) |f| {
+        var cfg = theme.Config{};
+        cfg.theme = theme.presetColors(@enumFromInt(f.value));
+        _ = try appearance.resolve(cfg);
+    }
+}
+
+test "theme.preset_names_joined: comptime 목록이 enum과 일치(diagnostic drift 가드)" {
+    // 수동 나열을 comptime 생성으로 바꾼 리팩토링 가드. **순서 비결합** — 대표 이름이 dashed로 들어갔는지(언더스코어
+    // →대시 변환)와 구분자 개수만 본다(enum 재정렬·rename에 안 깨짐; 순서 결합 startsWith/endsWith는 의도적으로 안 씀).
+    inline for ([_][]const u8{ "maru", "gruvbox-dark", "tokyo-night", "one-light" }) |name| {
+        // 단어 경계까지 본다(부분일치 오탐 방지): "|name|" 또는 양끝. inline이라 name이 comptime → `++` 가능.
+        const j = theme.preset_names_joined;
+        const ok = std.mem.eql(u8, j, name) or
+            std.mem.startsWith(u8, j, name ++ "|") or
+            std.mem.endsWith(u8, j, "|" ++ name) or
+            std.mem.indexOf(u8, j, "|" ++ name ++ "|") != null;
+        try std.testing.expect(ok);
+    }
+    // 언더스코어가 남아 있으면 변환 실패(dashed 보장).
+    try std.testing.expect(std.mem.indexOfScalar(u8, theme.preset_names_joined, '_') == null);
+    // 구분자 개수 = 프리셋 수 - 1(빠짐·중복 없음).
+    var pipes: usize = 0;
+    for (theme.preset_names_joined) |c| {
+        if (c == '|') pipes += 1;
+    }
+    try std.testing.expectEqual(@typeInfo(theme.ThemePreset).@"enum".fields.len - 1, pipes);
+}
+
+test "presetColors: 모든 프리셋의 주 색 4-tuple(bg/fg/cursor/selection)이 유일(detectThemePreset 라운드트립 가드)" {
+    // detectThemePreset이 주 색 4개로 프리셋을 역식별하므로(first-match-wins), 두 프리셋이 4-tuple을 공유하면 뒤 프리셋이
+    // 앞으로 alias돼 GUI 드롭다운 표시·←→ 순환이 깨진다. 새 프리셋이 기존과 4-tuple을 겹치지 않는지 O(n²)로 검사한다.
+    const fields = @typeInfo(theme.ThemePreset).@"enum".fields;
+    inline for (fields, 0..) |fa, ia| {
+        const a = theme.presetColors(@enumFromInt(fa.value));
+        inline for (fields, 0..) |fb, ib| {
+            if (ib > ia) {
+                const b = theme.presetColors(@enumFromInt(fb.value));
+                const same = std.ascii.eqlIgnoreCase(a.background, b.background) and
+                    std.ascii.eqlIgnoreCase(a.foreground, b.foreground) and
+                    std.ascii.eqlIgnoreCase(a.cursor, b.cursor) and
+                    std.ascii.eqlIgnoreCase(a.selection, b.selection);
+                try std.testing.expect(!same);
+            }
+        }
+    }
 }
 
 test "parse: resolved appearance never fails on parsed config (values pre-validated)" {

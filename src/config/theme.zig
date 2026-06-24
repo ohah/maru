@@ -3,6 +3,8 @@
 // 엔진(parse/serialize)은 src/config/schema.zig가 comptime으로 소비한다. 메타 타입을 여기 두는 이유: schema decl이
 // 이 파일에 있어 import 사이클을 피한다(theme는 schema를 import하지 않는다). 단일 출처: docs/config-schema.md.
 
+const std = @import("std");
+
 /// 세팅 GUI 위젯 종류(타입에서 유추하되 명시 override). CS-4+ 제너릭 렌더러가 소비.
 pub const Widget = enum { auto, toggle, number, slider, dropdown, text, color };
 
@@ -141,7 +143,46 @@ pub const ThemePreset = enum {
     catppuccin_mocha, // Catppuccin Mocha(파스텔 다크).
     catppuccin_latte, // Catppuccin Latte(파스텔 라이트).
     light_pink, // Light Pink(mgwg light-pink-theme — 로즈·골드·틸 라이트).
+    rose_pine, // Rosé Pine(뮤트한 로즈·파인 다크).
+    rose_pine_dawn, // Rosé Pine Dawn(Rosé Pine 라이트 — 크림 배경).
+    tokyo_night, // Tokyo Night(블루·퍼플 네온 다크).
+    nord, // Nord(아틱 블루그레이 다크).
+    one_dark, // Atom One Dark(Atom 아이코닉 다크).
+    one_light, // Atom One Light(Atom 아이코닉 라이트).
 };
+
+/// dashed config 토큰("gruvbox-dark")을 enum으로 파싱(제너릭). '-'→'_' 정규화 후 `std.meta.stringToEnum`(reflection —
+/// 변형 추가 시 enum만 늘리면 자동 인식). 너무 길면(>buf) null. **enum 토큰 정규화 규칙의 단일 출처** — schema.parseEnum이
+/// 이 함수에 위임한다(schema→theme 단방향 import라 사이클 없음; theme는 schema를 import하지 않는다). 그래서 theme.preset과
+/// schema'd enum(preset-light/dark·cursor.shape 등)이 같은 정규화를 공유한다(과거 byte-단위 fork를 단일 출처로 통합).
+pub fn parseDashedEnum(comptime T: type, value: []const u8) ?T {
+    var buf: [64]u8 = undefined;
+    if (value.len > buf.len) return null;
+    for (value, 0..) |c, i| buf[i] = if (c == '-') '_' else c; // dash→underscore(config는 dash, enum tag는 underscore)
+    return std.meta.stringToEnum(T, buf[0..value.len]);
+}
+
+/// enum 허용 토큰을 dashed로 "a|b|c" 결합(diagnostic 메시지용, comptime). tag의 '_'→'-'. **단일 출처** — schema.enumTokens가
+/// 이 함수에 위임하고, preset_names_joined도 이걸 쓴다(과거 3중 복제였던 underscore→dash join을 한 곳으로).
+pub fn enumNamesJoined(comptime T: type) []const u8 {
+    var out: []const u8 = "";
+    for (@typeInfo(T).@"enum".fields, 0..) |f, i| {
+        var seg: []const u8 = "";
+        for (f.name) |c| seg = seg ++ &[_]u8{if (c == '_') '-' else c};
+        out = if (i == 0) seg else out ++ "|" ++ seg;
+    }
+    return out;
+}
+
+/// dashed config 토큰("gruvbox-dark")을 ThemePreset로(parseDashedEnum의 ThemePreset 특수화). theme.preset 전용 핸들러가
+/// 쓴다(loader). 프리셋 추가 시 enum만 늘리면 자동 인식 — 이 함수와 아래 preset_names_joined는 손대지 않는다.
+pub fn parsePreset(value: []const u8) ?ThemePreset {
+    return parseDashedEnum(ThemePreset, value);
+}
+
+/// 모든 프리셋 이름을 dashed로 `|` 결합한 comptime 문자열(예: "maru|ghostty|…|one-light"). loader diagnostic이 이걸
+/// 써 프리셋 추가 시 안내 문구가 자동 동기화된다(수동 나열 drift 제거 — light_pink 추가 때 손댄 자리 중 하나).
+pub const preset_names_joined = enumNamesJoined(ThemePreset);
 
 // 각 프리셋의 ANSI 16색(0~15). 출처: iTerm2-Color-Schemes(mbadolato/iTerm2-Color-Schemes)의 Ghostty 형식 파일 —
 // 사실상 표준 색 스킴 저장소에서 **색 값만** 가져왔다(코드 표현은 옮기지 않음 — clean-room). xterm 표준(color.ansi16)과
@@ -187,6 +228,37 @@ const light_pink_palette: [16]?[]const u8 = .{
     "#c7b9c1", "#d2304b", "#5b9a6e", "#b08b35", "#6688c0", "#9466aa", "#1f6e89", "#6e6569",
     "#b3a5ad", "#e0506c", "#66a878", "#c19a40", "#7896cc", "#a878be", "#2e7e98", "#3a3034",
 };
+// 아래 6개(rose-pine·tokyo-night·nord·one-dark/light)는 iTerm2-Color-Schemes Ghostty 포맷의 표준 색 **값만** 가져왔다
+// (코드 표현 미복사 — gruvbox/solarized/dracula/catppuccin과 같은 clean-room). 출처 파일명은 각 presetColors 케이스 주석.
+const rose_pine_palette: [16]?[]const u8 = .{
+    "#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
+    "#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
+};
+const rose_pine_dawn_palette: [16]?[]const u8 = .{
+    "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+    "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+};
+const tokyo_night_palette: [16]?[]const u8 = .{
+    "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+    "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
+};
+const nord_palette: [16]?[]const u8 = .{
+    "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+    "#596377", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+};
+const one_dark_palette: [16]?[]const u8 = .{
+    "#21252b", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+    "#767676", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+};
+// Atom One Light 업스트림 값 그대로(verbatim). 두 가지 업스트림 특이점을 의도적으로 보존한다(타이핑 오류 아님):
+// (1) cyan(6/14)=green(2/10)=#3f953a — 이 스킴은 cyan을 green과 같게 정의한다(원본 그대로). (2) white(7)=#bbbbbb·
+// bright-white(15)=#ffffff는 라이트 배경(#f9f9f9)에서 대비가 약하다 — light_pink는 derived라 black↔white를 반전했지만,
+// iTerm2-sourced 프리셋은 "스킴 표준값 그대로" 정책(아래 docstring)이라 여기선 반전하지 않는다. 본문 기본색은
+// foreground(#2a2c33, 대비 충분)이고 명시적 SGR white(37/97)만 영향이라, 스킴 충실성을 우선했다.
+const one_light_palette: [16]?[]const u8 = .{
+    "#000000", "#de3e35", "#3f953a", "#d2b67c", "#2f5af3", "#950095", "#3f953a", "#bbbbbb",
+    "#000000", "#de3e35", "#3f953a", "#d2b67c", "#2f5af3", "#a00095", "#3f953a", "#ffffff",
+};
 
 /// 프리셋의 색 세트를 ThemeConfig로 돌려준다(loader가 `theme.preset`을 만나면 config.theme에 통째로 깐다).
 /// 반환 색 문자열은 전부 **정적 리터럴**이라 arena dupe가 필요 없다(영구 수명 — resolve가 빌려도 안전).
@@ -194,15 +266,18 @@ const light_pink_palette: [16]?[]const u8 = .{
 /// 베이스/결정(메모리 "베이스·의사결정 명시"):
 /// - ghostty는 references/ghostty 기본값(Config.zig 배경/전경, terminal/color.zig 팔레트). cursor/selection을
 ///   Ghostty가 안 정하므로(null=동적/반전) maru 기본과 같게 명시한다.
-/// - 나머지(gruvbox/solarized/dracula/catppuccin)는 iTerm2-Color-Schemes의 표준 값을 그대로 쓴다 — background/
-///   foreground/cursor/selection/palette를 그 스킴이 정의한 대로. search_match*(스크롤백 Find)는 maru 고유라
-///   이 다크 프리셋들에선 maru 기본(다크 앰버)을 유지한다(테마 스킴이 정의하지 않음). **예외: light_pink**는 라이트
-///   배경(#f5f5f5)에서 다크 앰버가 거의 안 보여 테마의 findMatch(피치) 색으로 search_match*를 override한다(아래 케이스).
-/// - **라이트 테마**(solarized_light/catppuccin_latte/light_pink)는 sidebar_*를 명시한다: resolveTheme의 사이드바 파생은
-///   배경을 lighten(+24/+48)하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라진다. 그래서 배경보다 **어두운**(또는 더
-///   짙은 핑크) 표면색을 직접 준다(Solarized base2 / Catppuccin mantle·surface0 / light_pink는 VS Code activityBar·titleBar 핑크).
-/// - catppuccin의 selection은 스킴 원값이 rosewater(밝은색)이고 selection-foreground와 함께 쓰는 전제다. maru는
-///   selection 글자색을 안 바꾸고 배경만 칠하므로, 밝은 글자 가독성을 위해 어두운/중간 표면색(surface2/surface1)으로 둔다.
+/// - 나머지(gruvbox/solarized/dracula/catppuccin/rose-pine/tokyo-night/nord/one-dark)는 iTerm2-Color-Schemes의 표준 값을
+///   그대로 쓴다 — background/foreground/cursor/selection/palette를 그 스킴이 정의한 대로(파일명은 각 케이스 주석). search_match*
+///   (스크롤백 Find)는 maru 고유라 **다크 프리셋**에선 maru 기본(다크 앰버)을 유지한다(테마 스킴이 정의하지 않음). **예외:
+///   라이트 프리셋**(light_pink/rose_pine_dawn/one_light)은 라이트 배경에서 다크 앰버가 거의 안 보여 테마의 따뜻한 골드/피치
+///   톤으로 search_match*를 override한다(아래 케이스). solarized_light/catppuccin_latte는 이 정책 도입 전이라 maru 기본 유지.
+/// - **라이트 테마**(solarized_light/catppuccin_latte/light_pink/rose_pine_dawn/one_light)는 sidebar_*를 명시한다: resolveTheme의
+///   사이드바 파생은 배경을 lighten(+24/+48)하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라진다. 그래서 배경보다 **어두운**
+///   (또는 더 짙은 톤) 표면색을 직접 준다(Solarized base2 / Catppuccin mantle·surface0 / light_pink는 VS Code activityBar·titleBar
+///   핑크 / Rosé Pine Dawn overlay·highlightHigh / One Light는 한 단계 어두운 그레이).
+/// - selection 가독성: maru는 selection 글자색을 안 바꾸고 배경만 칠하므로, 스킴 원값이 **밝은색**(catppuccin rosewater,
+///   nord snow-storm #eceff4)이면 밝은 글자가 묻힌다 — catppuccin은 어두운 surface(surface2/surface1), nord는 polar night
+///   nord2(#434c5e)로 바꾼다. one_light cursor도 스킴 원값(#bbbbbb)이 라이트 배경에서 안 보여 foreground로 둔다.
 pub fn presetColors(preset: ThemePreset) ThemeConfig {
     return switch (preset) {
         .maru => .{}, // struct default가 곧 maru 테마.
@@ -277,6 +352,65 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .sidebar_background = "#f2e7ed",
             .sidebar_active = "#f5bedb",
             .palette = light_pink_palette,
+        },
+        // ── 아래 6개: iTerm2-Color-Schemes Ghostty 포맷 표준값(파일명 주석). 다크는 sidebar_* null(배경 파생),
+        //    라이트(rose_pine_dawn/one_light)만 sidebar_*·search_match*를 명시(라이트 함정 회피 — light_pink와 같은 규율).
+        .rose_pine => .{ // ghostty/"Rose Pine"
+            .background = "#191724",
+            .foreground = "#e0def4",
+            .cursor = "#e0def4",
+            .selection = "#403d52",
+            .palette = rose_pine_palette,
+        },
+        .rose_pine_dawn => .{ // ghostty/"Rose Pine Dawn"(라이트)
+            .background = "#faf4ed",
+            .foreground = "#575279",
+            .cursor = "#575279",
+            .selection = "#dfdad9", // highlightMed(밝은 글자 아님 — 진한 fg #575279라 가독)
+            // 라이트: 다크 앰버 search_match가 안 보여 테마의 따뜻한 골드 톤으로 override(light_pink 선례).
+            .search_match = "#f2dfc9",
+            .search_match_current = "#ead0a3",
+            // 라이트 배경: 사이드바를 배경(#faf4ed)보다 어둡게(Rosé Pine Dawn overlay·highlightHigh). 파생 lighten 회피.
+            .sidebar_background = "#f2e9e1",
+            .sidebar_active = "#cecacd",
+            .palette = rose_pine_dawn_palette,
+        },
+        .tokyo_night => .{ // ghostty/"TokyoNight"
+            .background = "#1a1b26",
+            .foreground = "#c0caf5",
+            .cursor = "#c0caf5",
+            .selection = "#33467c",
+            .palette = tokyo_night_palette,
+        },
+        .nord => .{ // ghostty/"Nord"
+            .background = "#2e3440",
+            .foreground = "#d8dee9",
+            .cursor = "#eceff4", // 스킴 cursor-color(snow storm — 다크 배경이라 밝은 커서 가독)
+            // 스킴 selection 원값(#eceff4 = snow storm)은 너무 밝아 maru(글자색 불변·배경만 칠함)에선 밝은 글자가 묻힌다.
+            // 그래서 어두운 Nord polar night(nord2 #434c5e)로 둔다(catppuccin selection override와 같은 결정).
+            .selection = "#434c5e",
+            .palette = nord_palette,
+        },
+        .one_dark => .{ // ghostty/"Atom One Dark"
+            .background = "#21252b",
+            .foreground = "#abb2bf",
+            .cursor = "#abb2bf",
+            .selection = "#323844",
+            .palette = one_dark_palette,
+        },
+        .one_light => .{ // ghostty/"Atom One Light"(라이트)
+            .background = "#f9f9f9",
+            .foreground = "#2a2c33",
+            // 스킴 cursor 원값(#bbbbbb)은 라이트 배경에서 대비가 약해 캐럿이 안 보인다 → foreground(진한 잉크)로 둔다.
+            .cursor = "#2a2c33",
+            .selection = "#ededed", // 밝은 회색 — 진한 fg #2a2c33라 가독
+            // 라이트: 다크 앰버 search_match가 안 보여 노란 톤으로 override(light_pink 선례).
+            .search_match = "#f3e6bf",
+            .search_match_current = "#e6cf92",
+            // 라이트 배경: 사이드바를 배경(#f9f9f9)보다 어둡게 명시. 파생 lighten 회피.
+            .sidebar_background = "#eaeaeb",
+            .sidebar_active = "#dbdbdc",
+            .palette = one_light_palette,
         },
     };
 }

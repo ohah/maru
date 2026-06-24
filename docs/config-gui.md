@@ -126,9 +126,9 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 ### 6.3 테마 프리셋(named 테마) — 특수 행
 
-테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink` 9종 + **"사용자 지정"**을 클릭/←→로 순환한다(프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 현재 색을 둔 채 잠금만 푼다). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
+테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light` 15종 + **"사용자 지정"**을 클릭/←→로 순환한다(프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 현재 색을 둔 채 잠금만 푼다). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
 
-- **표시값은 색에서 derive**: `detectThemePreset`이 config.theme의 주 색 4개(bg/fg/cursor/selection)를 9종 `presetColors`와 매칭 → 일치하면 그 이름, 없으면 "사용자 지정". 저장 안 해도 현재 프리셋을 안다.
+- **표시값은 색에서 derive**: `detectThemePreset`이 config.theme의 주 색 4개(bg/fg/cursor/selection)를 15종 `presetColors`와 매칭 → 일치하면 그 이름, 없으면 "사용자 지정". 저장 안 해도 현재 프리셋을 안다.
 - **주입·배치**: platform이 theme 섹션 `currentSectionFields.enums`에 **synthetic `EnumField`**(`key="theme.preset"`)를 **맨 앞에 `insert`**한다 → 색·팔레트보다 위(테마 섹션 최상단)에 도드라지게, 기존 dropdown/enum 경로 재사용(새 Kind·index 수술 없음).
 - **적용**: 핸들러가 `key=="theme.preset"`만 특수 처리 → `applyThemePreset`이 `config.theme = presetColors(next)`(정적 리터럴) + 라이브 재resolve + **주 색 4개(bg/fg/cursor/selection)만** write-back(`detectThemePreset`이 그 4개로 식별하므로 재시작 후에도 같은 프리셋으로 표시됨).
 - **프리셋 활성 시 색 잠금(옵션 A)**: `themePresetActive`(=색이 프리셋과 일치 ∧ `theme_user_custom`=false)면 색·팔레트 행을 `FieldRow.disabled`로 회색·잠금 표시한다(프리셋이 색을 정하므로 직접 편집은 혼란). 비활성 색을 **클릭하면**(swatch/hex 무관) 핸들러가 `theme_user_custom=true`로 "사용자 지정" 전환 후 바로 편집(picker/인라인)을 연다 — ←/→ 색 순환은 잠금 중 막힌다. `theme_user_custom`은 런타임 휘발(색은 derive하므로 영속 불요); 프리셋 재선택·reload·reset 시 false로 돌아간다(색이 프리셋과 같으면 자동으로 다시 잠금).

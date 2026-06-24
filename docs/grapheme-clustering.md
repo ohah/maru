@@ -31,7 +31,7 @@
 
 즉 정공법의 방향(UAX#29로 cluster를 묶어 폭을 정한다)은 처음부터 전략 문서에 있었다.
 
-### 1.2 구현은 "combining 1개"에서 멈춰 있다 — 알려진 미구현
+### 1.2 (착수 전 배경) 구현이 "combining 1개"에서 멈춰 있었다 — 현재는 해결 완료(§5 HG3b·§7)
 
 전략은 UAX#29인데 코드는 거기까지 가지 않았다. `font-strategy.md`가 스스로 적은 현재 한계:
 
@@ -43,7 +43,7 @@
 
 > "maru 셀은 combining을 하나만 저장해(`types.Cell.combining`: 단일 `?u21`) VS16(U+FE0F)이 U+20E3에 덮여 사라진다. … 단일-combining 셀 모델을 보정하는 세 곳이 이 한 함수를 단일 출처로 공유한다(**다중-combining 저장이 근본 해법**)." (`width.zig` `isKeycapCombining`)
 
-→ 셀이 base 코드포인트 1개 + combining 1개만 담는 모델은 **문서·코드가 모두 인정한 미구현 후속**이고, 근본 해법(다중 저장)도 코드 주석에 이미 적혀 있다.
+→ 셀이 base 코드포인트 1개 + combining 1개만 담는 모델은 착수 시점의 한계였고, 근본 해법(다중 저장)도 코드 주석에 이미 적혀 있었다. **현재는 `Cell.combining`(`?u21`)을 폐지하고 `grapheme_id`+`grapheme_store`(dedup append-only) 다중 저장으로 구현 완료**(§5 HG3b·§7 — `types.Cell.grapheme_id`).
 
 ### 1.3 "한글 NFD"라는 케이스 자체는 계획에서 누락됐다
 

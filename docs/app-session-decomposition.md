@@ -45,28 +45,31 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 점진 스택 PR. 각 단계 green(`zig build test`·`check-boundaries`·`macos-app-build`) + 머지 전 실앱(`zig build macos-app`, [[run-macos-app-before-merge]]) + 누적 `/code-review max`(순수 이동이라 정확성 버그 0 기대, [[cumulative-review-branch-false-compile-findings]] 유의).
 
+> **방향 확정(사용자 합의 2026-06): (b) 순수→session 이식 기여分만.** E1(find) 착수로 app_session 대부분이 orchestration(이식 무관 가독성)임이 실측돼, **orchestration 가독성 분리(E2 ime·E3 tab UI·E6 scroll 등)는 스킵**하고 **OS-중립 순수 로직을 `src/session`(L2)으로 빼는 그룹만** 진행한다(이식 기여 + 헤드리스 단위 test). E1은 이미 완료(orchestration이었으나 패턴 확립). 순수 후보: **b1 `layout_math`(완료)** → E4 sidebar 수학 순수부 → E5 workspace 순수 변환.
+
 | 단계 | 그룹 | 목적지 | 성격 | 대략 라인(+test) | 위험 |
 |---|---|---|---|---|---|
-| **E0** | 이 문서(doc-first) | — | — | 0 | 없음 |
-| **E1** ✅ | 스크롤백 Find(⌘F): 토글·재검색·네비·뷰스크롤 | `app_session/find.zig` | **orchestration(순수 0)** | ~67(본문) | 낮음 |
-| **E2** | IME 상태기계·커서 rect | `app_session/ime.zig` | 혼합 60% | ~257 | 낮음 |
-| **E3** | tab UI 드로잉(탭바 frame·floating glyph) | `app_session/tab_ui.zig` | 순수 85% | ~382 | 낮음 |
-| **E4** | sidebar 레이아웃 수학(`sidebarMinPt`·지오메트리) | `session/`(순수부) + `app_session/sidebar.zig`(렌더) | 순수 95% | ~280 | 낮음 |
-| **E5** | workspace 캡처/복원 변환 | `session_model` 확장 | 혼합 60% | ~143 | 중 |
-| **E6+** | scroll·clipboard 인코딩·command catalog·notification 파싱 | `app_session/<group>.zig` | 혼합 | 그룹별 | 중 |
-| (잔류) | `tick`·`mouse`·`handleKeyEvent`·`init`/`deinit`·config apply·split(PTY spawn) | `app_session.zig` | orchestration 허브 | — | — |
+| 단계 | 그룹 | 목적지 | 성격 | 대략 라인 | 위험 |
+|---|---|---|---|---|---|
+| **E0** ✅ | 이 문서(doc-first) | — | — | 0 | 없음 |
+| **E1** ✅ | 스크롤백 Find(⌘F): 토글·재검색·네비·뷰스크롤 | `app_session/find.zig` | orchestration(순수 0) — 패턴 확립용 | ~67(본문) | 낮음 |
+| **b1** ✅ | 레이아웃 기하: grid·pt→px·hit-test·drop-zone(`gridFromBacking`·`gridFromRectPx`·`ptToPx`·`pointInRect`·`halfRect`·`paneDropZone` + `PaddingPx`·`PaneDropZone`) | **`session/layout_math.zig`** | **순수(이식 기여)** | ~110(+단위 test 4) | 낮음 |
+| **E4** | sidebar 레이아웃 수학(`sidebarMinPt`·지오메트리)의 **순수부만** | `session/`(순수부) | 순수 | 측정 예정 | 낮음 |
+| **E5** | workspace 캡처/복원의 **순수 변환**(트리 flatten/build) | `session_model` 확장 | 순수부 | 측정 예정 | 중 |
+| ~~E2 ime·E3 tab UI·E6 scroll·clipboard·command·notification~~ | (b)서 **스킵** — orchestration 가독성 분리라 이식 무관 | — | orchestration | — | — |
+| (잔류) | `tick`·`mouse`·`handleKeyEvent`·`init`/`deinit`·config apply·split(PTY spawn)·**모든 orchestration** | `app_session.zig` | L4 허브·어댑터 | — | — |
 
-E1~E4는 상호 의존이 적고 응집·저위험이라 **먼저**(순수도는 그룹별 상이 — E1 find는 실측 orchestration이었고, E4 sidebar 수학·E5 workspace 변환은 순수분이 있어 session 후보), E5+는 트리 변형·런타임 결합이라 **나중**. 매 단계가 독립 PR이라 어디서 멈춰도 green. accessor pub화 발생분(E1: `activeSurface`)은 각 PR에 기록.
+(b) 방향에선 **순수→session 그룹만** 진행한다 — b1(`layout_math`) 완료, 다음은 E4(sidebar 수학 순수부)·E5(workspace 순수 변환). orchestration 그룹(E2·E3·E6)은 이식 무관이라 **스킵**하고 app_session에 잔류(필요 시 별도 가독성 정리로). 각 순수 그룹은 헤드리스 단위 test 동반(이식성 증거). accessor pub화분(E1: `activeSurface`)은 각 PR에 기록.
 
 ## 5. 검증
 
 - **회귀 그물**: 순수 이동이라 동반 이동한 기존 test가 그대로 그물. `zig build test`·`check-boundaries`(session行 그룹 OS 타입 0)·`macos-app-build`.
-- **헤드리스**: 순수 그룹(find 매치선택·sidebar 수학·workspace 변환·`pxToCell`)을 session에서 fake로 단언(이식성 증거 확장).
+- **헤드리스**: 순수 그룹(레이아웃 기하 `layout_math`(b1 완료)·sidebar 수학·workspace 변환)을 session에서 OS 없이 단위 test로 단언(이식성 증거 — b1은 `gridFromBacking`·`pointInRect`·`paneDropZone`·`halfRect` 4 test 동반).
 - **실앱**: 매 단계 `macos-app`로 탭/split/포커스/find/IME/sidebar 동작 보존.
 
 ## 6. 리스크 / 한계 (정직)
 
-- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 이식 기여 0. **순수 그룹(E1·E4·E5 일부)만** session으로 가 이식에 기여한다 — 그 외는 가독성/테스트 격리 가치로만 정당화한다.
+- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 이식 기여 0. **순수 그룹(b1 `layout_math`·E4·E5 일부)만** session으로 가 이식에 기여한다 — (b) 방향이 이 순수 그룹에 집중한다(orchestration은 스킵). E1(find)은 orchestration이었으나 패턴 확립 목적의 예외.
 - **cross-group accessor pub화**: 캡슐화 일부 양보(§2-c-2). core.zig 선례가 있고, accessor는 어차피 안정 표면이라 수용.
 - **허브 잔류**: `tick`/`mouse`/`handleKeyEvent`는 본질적 횡단이라 파일 분해 비대상. 거대 메서드의 가독성은 소함수 추출·주석으로(별 PR).
 - **ROI 분산**: 그룹당 100~400줄 + test라 단일 PR 감소폭은 작다. 누적으로 `app_session.zig`가 그룹 facade + 허브만 남는 게 종착.

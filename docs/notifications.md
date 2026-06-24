@@ -104,7 +104,14 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   상단 sticky, 카드는 그 아래에서 스크롤한다. 한 항목 = **2줄 카드**(제목 + 본문), 안읽음 점(●), 우측 상대시간
   ("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤 윈도우·위치 clamp)을 view·hitTest·panelRect가
   공유(보이는 카드 == 클릭되는 카드). 헤더 구분선·카드 구분선은 `.fill`(1px)로 — `.rule` op은 macOS lowering에서 no-op이라.
+  **카드 구분선은 보이는 카드마다 아래에** 긋는다(마지막 카드 포함) — 항목 경계를 분명히 보이게 한다. 안읽음 점(●, col 1)과
+  텍스트(col 3) 사이엔 빈 칸(col 2)을 두어 점이 텍스트에 바짝 붙지 않게 한다(`text_indent_cols`).
   항목은 platform이 매 프레임 arena로 주입(palette `Row` 선례) — chrome은 중립(surface_id·라이브 포인터 모름).
+- **선택·호버 강조**: 키보드 `selected`(↑↓·열 때 0=최신)는 `tab_active_bg`로, 마우스 `hovered`(카드 위 포인터)는
+  `tab_hover_bg`(선택과 다른 톤)로 카드 2행을 칠한다 — 마우스가 가리키는 항목을 구분 인식하게 한다. 둘은 별개 상태고
+  (사이드바 `hovered_slot`↔active와 동형) 같은 카드면 선택이 우선(hover 생략). `hovered`는 `notifications.State`가 들고,
+  platform `hoverCursor`가 패널 열림 시 `hitTest`로 매 마우스 이동마다 갱신한다(카드/✕=그 카드 + pointingHand, 그 외 해제).
+  알림 패널은 최상위 모달이라 열려 있는 동안 뒤 사이드바/탭/스크롤바 호버는 끈다(클릭 라우팅과 같은 게이트).
 - **빈 상태 일러스트**: 알림이 없으면 헤더 아래 본문에 **종-슬래시 아이콘(🔕) + 굵은 제목("아직 알림이 없습니다") +
   부제("데스크톱 알림이 여기에 표시됩니다.")**를 가로 가운데로 그린다(예전 좌상단 "알림 없음" 한 줄을 대체). 아이콘은
   이모지라 CoreText fallback에 의존 — 실제 렌더로 확인하고 깨지면 BMP 기호로 교체한다(종 글리프와 같은 규율, §5).

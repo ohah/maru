@@ -1267,6 +1267,12 @@ pub const AppSession = struct {
     // 접힘 펼치기 토글(◧, 신호등 옆) 호버 여부. 접힘 시엔 사이드바 폭 0이라 hovered_header_region 경로(inSidebar)가
     // 안 타므로 별도 추적한다. true면 rebuildSidebar가 토글 뒤에 둥근 호버 배경(헤더 아이콘과 같은 스타일)을 그린다.
     hovered_collapsed_toggle: bool = false,
+    // 알림 패널이 열려 있는 동안 직전 프레임에 그린 패널 content rect(없으면 null). hoverCursor가 마우스 이동마다
+    // 호버 카드를 판정할 때, 이 rect로 coarse bounding-box 게이트를 먼저 본다 — 포인터가 패널 밖이면(대부분의 이동:
+    // 터미널 위·idle jitter) 무거운 buildNotificationItems(히스토리 walk + per-item 라이브 surface 스캔 + 시간 포맷)를
+    // 건너뛰고 바로 호버 해제한다. content rect는 hitTest의 bounds와 같은 출처라 "밖이면 hitTest=null"과 동치다.
+    // buildChromeOverlayFrame이 매 프레임 갱신하고, openNotificationPanel이 null로 리셋한다(재오픈 시 stale 게이트 방지).
+    notif_panel_rect: ?chrome.draw.Rect = null,
     // 인라인 rename 상태(없으면 null=비활성). 활성이면 키/IME가 rename_input으로 라우팅되고(모달), 렌더가 대상
     // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 find/palette와 같은 OverlayInput(IME preedit·EAW·
     // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
@@ -3902,6 +3908,15 @@ pub const AppSession = struct {
             var i: usize = 0;
             while (i < seed) : (i += 1) self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
             self.openNotificationPanel();
+            // MARU_NOTIF_HOVER=K — 위에서 시드한 카드 K에 마우스 호버 강조(tab_hover_bg)를 건 채로 연다. 호버는 마우스
+            // 이동(hoverCursor→hitTest)으로만 갱신돼 헤드리스 스크린샷 하니스로는 재현이 안 되므로, 호버 카드 색을 self-verify
+            // 하는 debug-gate다. MARU_OPEN_NOTIFICATIONS의 **하위 옵션**이다(단독으로는 무효 — 시드된 카드와 열린 패널이
+            // 필요해 이 블록 안에서만 읽는다). K가 시드 개수 밖이거나 비숫자면 무시한다 — 잘못된 K로 '강조 없음'이 정상처럼
+            // 보여 self-verify가 오판하지 않게(범위 밖은 view가 어차피 강조를 안 그린다). 미설정이면 무동작.
+            if (std.c.getenv("MARU_NOTIF_HOVER")) |hv| {
+                const k = std.fmt.parseInt(usize, std.mem.span(hv), 10) catch seed; // 비숫자 → seed(=범위 밖)로 무시
+                if (k < seed) self.chrome_host.notifications.hovered = k;
+            }
         }
         // MARU_OPEN_NOTIFICATIONS_EMPTY=1 — 알림 0개로 패널을 연다(빈 상태 일러스트: 아이콘+제목+부제를 헤드리스
         // 스크린샷으로 self-verify하는 debug-gate). MARU_OPEN_NOTIFICATIONS와 배타(둘 다면 위에서 이미 시드됨).
@@ -6249,13 +6264,10 @@ pub const AppSession = struct {
             return;
         }
         // 알림 센터 패널이 열려 있으면 클릭을 패널로 라우팅한다 — 카드 본문=점프, 카드 우측 ✕=삭제, 하단 액션 행=
-        // 모두 읽음/지우기, 패널 밖=닫기. hitTest에 줄 동적 Item을 임시 arena로 빌드한다(buildNotificationItems — 역순).
+        // 모두 읽음/지우기, 패널 밖=닫기. 빌드+hitTest는 hover 경로와 공유하는 notificationHitAt 단일 출처를 쓴다.
         if (self.chrome_host.notifications.open) {
             if (kind == 1) {
-                var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-                defer arena_state.deinit();
-                const items = self.buildNotificationItems(arena_state.allocator()) catch return;
-                if (chrome.components.notifications.hitTest(&self.chrome_host.notifications, items, self.buildChromeProps(), x_px, y_px)) |hit| {
+                if (self.notificationHitAt(x_px, y_px)) |hit| {
                     switch (hit) {
                         .card => |idx| {
                             self.chrome_host.notifications.selected = idx;
@@ -7459,6 +7471,35 @@ pub const AppSession = struct {
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
         // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
         if (self.chrome_host.confirm.open) return .default;
+        // 알림 센터 패널이 열려 있으면 호버를 패널에 라우팅한다(최상위 모달 — 사이드바/탭/divider/터미널보다 먼저, 클릭
+        // 라우팅 mouse()의 게이트와 짝). 카드/✕ 위면 그 카드를 hovered로 강조(tab_hover_bg) + pointingHand, 헤더 액션
+        // 버튼은 강조 없이 pointingHand, 그 외(제목·빈 여백·패널 밖)는 hovered 해제 + default. 모달이라 뒤 사이드바/탭/
+        // 스크롤바/URL 호버는 모두 끈다(stale 강조가 패널 뒤로 비치지 않게 — confirm 게이트와 같은 규율, clearAllHover 단일 출처).
+        if (self.chrome_host.notifications.open) {
+            self.clearAllHover();
+            // coarse 게이트: 직전 프레임 패널 rect 밖이면(대부분의 이동) 무거운 item 빌드 없이 바로 호버 해제. rect는
+            // hitTest의 bounds와 같은 content rect라 "밖 ⇒ hitTest=null ⇒ hovered=null/default"와 동치다. rect 미캐시
+            // (오픈 직후 첫 이동)면 게이트를 건너뛰고 아래 정확 판정으로 떨어진다(빌드).
+            if (self.notif_panel_rect) |pr| {
+                const inside = x_px >= @as(f64, @floatFromInt(pr.x)) and x_px < @as(f64, @floatFromInt(pr.x + @as(i32, @intCast(pr.w)))) and
+                    y_px >= @as(f64, @floatFromInt(pr.y)) and y_px < @as(f64, @floatFromInt(pr.y + @as(i32, @intCast(pr.h))));
+                if (!inside) {
+                    self.setHoveredNotification(null);
+                    return .default;
+                }
+            }
+            const hit = self.notificationHitAt(x_px, y_px); // 빌드+hitTest 단일 출처(클릭 경로와 공유)
+            const hovered_card: ?usize = if (hit) |h| switch (h) {
+                .card => |idx| idx,
+                .close => |idx| idx, // ✕ 위에서도 같은 행이라 그 카드 강조를 유지
+                else => null,
+            } else null;
+            self.setHoveredNotification(hovered_card);
+            return switch (hit orelse .background) {
+                .card, .close, .mark_all_read, .clear_all => .link, // 클릭 가능 → pointingHand
+                .background => .default, // 제목·빈 여백·패널 밖
+            };
+        }
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
         self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
@@ -9917,6 +9958,24 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 호버 중인 알림 카드를 갱신한다(알림 패널 열림 시 hoverCursor가 hitTest 결과로 호출). 바뀌면 재드로우만 — 카드
+    /// 데이터는 매 프레임 platform이 주입하므로 사이드바처럼 rebuild는 필요 없다. 같은 카드면 무동작(한 카드 안 이동 dedup).
+    fn setHoveredNotification(self: *AppSession, idx: ?usize) void {
+        if (usizeOptEql(self.chrome_host.notifications.hovered, idx)) return;
+        self.chrome_host.notifications.hovered = idx;
+        self.metal_dirty = true;
+    }
+
+    /// 알림 패널 hit-test 단일 출처(클릭 라우팅 mouse()와 호버 라우팅 hoverCursor가 공유). 임시 arena로 동적 Item을
+    /// 빌드(buildNotificationItems — 역순)해 컴포넌트 hitTest에 넘기고 결과 Hit만 돌려준다(Item은 함수 안에서만 살고
+    /// Hit은 인덱스/태그라 escape하지 않는다). 빌드 실패(OOM)면 null. 클릭/호버가 같은 좌표→Hit 매핑을 쓰게 해 둘이 어긋나지 않는다.
+    fn notificationHitAt(self: *AppSession, x_px: f64, y_px: f64) ?chrome.components.notifications.Hit {
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const items = self.buildNotificationItems(arena_state.allocator()) catch return null;
+        return chrome.components.notifications.hitTest(&self.chrome_host.notifications, items, self.buildChromeProps(), x_px, y_px);
+    }
+
     /// 호버 중인 per-pane 탭을 갱신한다. 바뀌면 재드로우한다(호버 ✕가 생기거나 사라진다). 같은 탭이면 무동작.
     fn setHoveredTab(self: *AppSession, tab: ?TabRef) void {
         if (tabRefEql(self.hovered_tab, tab)) return;
@@ -11446,6 +11505,9 @@ pub const AppSession = struct {
         if (self.chrome_host.notifications.open) {
             notif_items = try self.buildNotificationItems(arena); // 히스토리 → 카드(역순) 주입
             self.chrome_host.notifications.setItemCount(notif_items.len); // 패널 열린 채 새 알림 도착 시 selected clamp 동기화
+            // 다음 프레임들의 hoverCursor coarse 게이트가 쓸 패널 content rect를 캐시한다(이미 빌드한 notif_items 재사용 —
+            // 추가 비용 없음). 게이트가 이 rect로 "포인터가 패널 밖이면 빌드 스킵"을 판정한다(notif_panel_rect 주석 참조).
+            self.notif_panel_rect = chrome.components.notifications.panelRect(&self.chrome_host.notifications, notif_items, props);
             try self.chrome_host.collectNotificationsDraws(notif_items, props, &tokens, arena, &draws);
         }
         if (self.chrome_host.settings.open) {
@@ -11497,6 +11559,10 @@ pub const AppSession = struct {
             anchor_y = @intCast(self.cell_height_px * 2 + mp);
         }
         self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
+        // 모달을 여는 즉시 배경 호버 강조(탭 ✕·슬롯 밴드·스크롤바·URL)를 끈다 — hoverCursor는 다음 마우스 이동에야
+        // 정리하므로, 그 사이 패널 뒤로 stale 호버가 비치는 것을 막는다(close-confirm 모달 showConfirmButtons와 같은 규율).
+        self.clearAllHover();
+        self.notif_panel_rect = null; // 재오픈 — 직전 오픈의 stale rect로 hover 게이트가 오판하지 않게(첫 프레임이 다시 채운다)
         self.metal_dirty = true;
     }
 

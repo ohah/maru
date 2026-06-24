@@ -582,71 +582,12 @@ fn tabbarHighlightCell(m: chrome.components.tabbar.Metrics, tab_index: usize, bg
 }
 
 /// 스크린 점(backing px)을 담는 panel(없으면 null). split 탭에서 마우스 클릭이 어느 panel에 떨어졌는지
-/// hit-test한다 — 각 leaf rect는 [x, x+w) × [y, y+h) 반열린 구간으로 본다(경계는 다음 panel에). 비유한
-/// 좌표는 null. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
-fn paneAtPoint(leaf_rects: []const PaneTree.LeafRect, x_px: f64, y_px: f64) ?*Pane {
-    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-    for (leaf_rects) |lr| {
-        const x0: f64 = @floatFromInt(lr.rect.x);
-        const y0: f64 = @floatFromInt(lr.rect.y);
-        if (x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(lr.rect.w)) and
-            y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(lr.rect.h)))
-        {
-            return lr.leaf;
-        }
-    }
-    return null;
-}
+// pane hit-test(paneAtPoint)·방향 탐색(paneInDirection)·FocusDirection은 session core로 이동(후속) —
+// Model.paneAtPoint/paneInDirection/FocusDirection. 순수(레이아웃 rect만)라 헤드리스 테스트도 session_model로.
+// platform은 termRect→layout으로 leaf_rects를 만들어 넘긴다. 단일 출처: src/session/session_model.zig.
+const FocusDirection = Model.FocusDirection;
 
-/// 키보드 pane 이동 방향(좌/우/상/하). split 탭에서 활성 panel 기준 인접 panel을 고른다.
-const FocusDirection = enum { left, right, up, down };
-
-/// 활성 panel(active_pane)에서 direction 방향으로 가장 가까운 인접 panel(없으면 null). 각 panel rect의
-/// '중심'을 비교해 — 방향 반평면 안(left면 중심 x가 더 작음 등)인 후보 중, 주축 거리(이동 방향) + 부축
-/// 어긋남×2(정렬 페널티)가 최소인 것을 고른다. 좌우 split이면 상/하는 후보가 없어 null(이동 안 함), 격자
-/// 배치면 같은 행/열의 정렬된 panel을 우선한다. 순수 함수라 OS 무관 단위 테스트한다(레이아웃 rect만 입력).
-fn paneInDirection(leaf_rects: []const PaneTree.LeafRect, active_pane: *Pane, dir: FocusDirection) ?*Pane {
-    var active_rect: ?app.SplitRect = null;
-    for (leaf_rects) |lr| {
-        if (lr.leaf == active_pane) {
-            active_rect = lr.rect;
-            break;
-        }
-    }
-    const ar = active_rect orelse return null;
-    const acx = @as(f64, @floatFromInt(ar.x)) + @as(f64, @floatFromInt(ar.w)) / 2.0;
-    const acy = @as(f64, @floatFromInt(ar.y)) + @as(f64, @floatFromInt(ar.h)) / 2.0;
-    var best: ?*Pane = null;
-    var best_score: f64 = std.math.inf(f64);
-    for (leaf_rects) |lr| {
-        if (lr.leaf == active_pane) continue;
-        const cx = @as(f64, @floatFromInt(lr.rect.x)) + @as(f64, @floatFromInt(lr.rect.w)) / 2.0;
-        const cy = @as(f64, @floatFromInt(lr.rect.y)) + @as(f64, @floatFromInt(lr.rect.h)) / 2.0;
-        const dx = cx - acx;
-        const dy = cy - acy;
-        const in_dir = switch (dir) {
-            .left => dx < 0,
-            .right => dx > 0,
-            .up => dy < 0,
-            .down => dy > 0,
-        };
-        if (!in_dir) continue;
-        const primary: f64 = switch (dir) {
-            .left, .right => @abs(dx),
-            .up, .down => @abs(dy),
-        };
-        const secondary: f64 = switch (dir) {
-            .left, .right => @abs(dy),
-            .up, .down => @abs(dx),
-        };
-        const score = primary + 2.0 * secondary; // 부축 정렬(같은 행/열)을 우대
-        if (score < best_score) {
-            best_score = score;
-            best = lr.leaf;
-        }
-    }
-    return best;
-}
+// (paneInDirection은 위 주석대로 session core로 이동 — Model.paneInDirection)
 
 // adjustActiveForMove·rotateMove·reselectAfterClose·wheelDeltaToLines는 session core로 추출됐다 — 위 file-scope
 // alias(input_math.*)로 bare 이름 그대로 호출한다. 정의·단위 테스트는 src/session/input_math.zig.
@@ -2788,7 +2729,7 @@ pub const AppSession = struct {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
-        if (paneInDirection(leaf_rects.items, self.activePane(), dir)) |pane| {
+        if (Model.paneInDirection(leaf_rects.items, self.activePane(), dir)) |pane| {
             _ = self.focusPaneByPtr(pane);
         }
     }
@@ -6569,7 +6510,7 @@ pub const AppSession = struct {
                     return;
                 }
                 // ② split에서 다른 panel의 터미널 영역 클릭 → 그 pane 포커스(활성 panel이면 아래 선택 경로로).
-                if (paneAtPoint(leaf_rects.items, x_px, y_px)) |pane| {
+                if (Model.paneAtPoint(leaf_rects.items, x_px, y_px)) |pane| {
                     if (pane != self.activePane() and self.focusPaneByPtr(pane)) {
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
@@ -15837,57 +15778,7 @@ test "move_pane_to_workspace:N 액션: 활성 pane을 N번 워크스페이스에
     try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
 }
 
-// paneAtPoint가 스크린 점을 담는 leaf rect의 panel을 고르는지(반열린 구간 경계·밖·비유한) — 마우스
-// pane 전환의 hit-test 코어라 헤드리스 단위로 고정한다(레이아웃 rect만 입력, OS 무관). leaf는 deref되지
-// 않아(pointer-identity만) 빈 Pane 더미로 충분하다.
-test "paneAtPoint hit-tests which leaf rect contains a screen point" {
-    var a: Pane = .{};
-    var b: Pane = .{};
-    // 좌우 2-panel: a=[0,100)×[0,200), b=[100,200)×[0,200).
-    const rects = [_]PaneTree.LeafRect{
-        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
-        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
-    };
-    try std.testing.expectEqual(&a, paneAtPoint(&rects, 50, 100).?);
-    try std.testing.expectEqual(&b, paneAtPoint(&rects, 150, 100).?);
-    try std.testing.expectEqual(&a, paneAtPoint(&rects, 0, 0).?); // 좌상단 경계 포함
-    try std.testing.expectEqual(&b, paneAtPoint(&rects, 100, 0).?); // x=100 경계는 b(반열린 [x, x+w))
-    try std.testing.expect(paneAtPoint(&rects, 200, 0) == null); // 오른쪽 밖
-    try std.testing.expect(paneAtPoint(&rects, 50, 200) == null); // 아래 밖
-    try std.testing.expect(paneAtPoint(&rects, std.math.nan(f64), 5) == null); // 비유한
-}
-
-// paneInDirection이 활성 panel 기준 방향 인접 panel을 고르는지(반평면 + 정렬, 잘못된 축은 null) — 키보드
-// pane 이동의 기하 코어라 헤드리스 단위로 고정한다. 좌우 split·2×2 격자·미발견을 다 본다.
-test "paneInDirection picks the adjacent pane in a direction" {
-    var a: Pane = .{};
-    var b: Pane = .{};
-    var c: Pane = .{};
-    var d: Pane = .{};
-
-    // 좌우 2-panel: a 왼쪽, b 오른쪽.
-    const lr = [_]PaneTree.LeafRect{
-        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
-        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
-    };
-    try std.testing.expectEqual(&b, paneInDirection(&lr, &a, .right).?);
-    try std.testing.expectEqual(&a, paneInDirection(&lr, &b, .left).?);
-    try std.testing.expect(paneInDirection(&lr, &a, .up) == null); // 좌우 split이라 위/아래 없음
-    try std.testing.expect(paneInDirection(&lr, &a, .down) == null);
-    try std.testing.expect(paneInDirection(&lr, &c, .left) == null); // 활성 panel이 leaf에 없음
-
-    // 2×2 격자: a=좌상, b=우상, c=좌하, d=우하. 정렬(같은 행/열)을 우대한다.
-    const grid = [_]PaneTree.LeafRect{
-        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 } },
-        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 100 } },
-        .{ .leaf = &c, .rect = .{ .x = 0, .y = 100, .w = 100, .h = 100 } },
-        .{ .leaf = &d, .rect = .{ .x = 100, .y = 100, .w = 100, .h = 100 } },
-    };
-    try std.testing.expectEqual(&b, paneInDirection(&grid, &a, .right).?); // a→우: b(같은 행)
-    try std.testing.expectEqual(&c, paneInDirection(&grid, &a, .down).?); // a→하: c(같은 열)
-    try std.testing.expectEqual(&d, paneInDirection(&grid, &b, .down).?); // b→하: d
-    try std.testing.expectEqual(&c, paneInDirection(&grid, &d, .left).?); // d→좌: c(같은 행, a 아님)
-}
+// paneAtPoint·paneInDirection 단위 테스트는 session core로 이동(Model 기반 헤드리스) — src/session/session_model.zig.
 
 // paneBarBgCell이 바 rect를 sentinel-UV 배경 셀(origin 박힌, 폭=cols)로 만들고, 너무 작으면 null인지 — pane
 // 탭 바 배경의 코어라 헤드리스 단위로 고정한다(순수 함수, OS 무관).

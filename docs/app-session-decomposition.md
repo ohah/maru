@@ -45,7 +45,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 점진 스택 PR. 각 단계 green(`zig build test`·`check-boundaries`·`macos-app-build`) + 머지 전 실앱(`zig build macos-app`, [[run-macos-app-before-merge]]) + 누적 `/code-review max`(순수 이동이라 정확성 버그 0 기대, [[cumulative-review-branch-false-compile-findings]] 유의).
 
-> **방향 확정(사용자 합의 2026-06): (b) 순수→session 이식 기여分만.** E1(find) 착수로 app_session 대부분이 orchestration(이식 무관 가독성)임이 실측돼, **orchestration 가독성 분리(E2 ime·E3 tab UI·E6 scroll 등)는 스킵**하고 **OS-중립 순수 로직을 `src/session`(L2)으로 빼는 그룹만** 진행한다(이식 기여 + 헤드리스 단위 test). E1은 이미 완료(orchestration이었으나 패턴 확립). 순수 후보: **b1·b2 `layout_math`(완료 — grid·hit-test·drop-zone·pt→px + pxToCell)** → E5 workspace 순수 변환(E4 sidebar는 실측 순수 극소라 축소).
+> **방향 확정(사용자 합의 2026-06): (b) 순수→session 이식 기여分만.** E1(find) 착수로 app_session 대부분이 orchestration(이식 무관 가독성)임이 실측돼, **orchestration 가독성 분리(E2 ime·E3 tab UI·E6 scroll 등)는 스킵**하고 **OS-중립 순수 로직을 `src/session`(L2)으로 빼는 그룹만** 진행한다(이식 기여 + 헤드리스 단위 test). E1은 이미 완료(orchestration이었으나 패턴 확립). **순수分은 `layout_math`(b1·b2 — grid·hit-test·drop-zone·pt→px·px↔cell)가 전부였고, (b)는 이로써 일단락한다.** E4 sidebar(`metal_frame`·색·렌더 결합)·E5 workspace(캡처=agent PTY·복원=`createPane` spawn·직렬화=이미 session) 모두 실측 결과 orchestration 결합이라 순수分이 미미해 (b) 대상이 아니다.
 
 | 단계 | 그룹 | 목적지 | 성격 | 대략 라인 | 위험 |
 |---|---|---|---|---|---|
@@ -54,11 +54,11 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **b1** ✅ | 레이아웃 기하: grid·pt→px·hit-test·drop-zone(`gridFromBacking`·`gridFromRectPx`·`ptToPx`·`pointInRect`·`halfRect`·`paneDropZone` + `PaddingPx`·`PaneDropZone`) | **`session/layout_math.zig`** | **순수(이식 기여)** | ~110(+단위 test 4) | 낮음 |
 | **b2** ✅ | 픽셀↔셀 hit-test 기하(`pxToCell`+`CellHit`) — self/surface에서 cell·grid 크기만 뽑아 위임 | **`session/layout_math.zig`** | **순수(이식 기여)** | ~35(+단위 test) | 낮음 |
 | ~~E4~~ | sidebar 레이아웃 수학 — 실측 결과 **순수 극소**(`sidebarMinPt` 4줄·self 의존, 나머지는 `metal_frame` 셀·색·hit-test·렌더 orchestration) → (b)서 **축소/스킵** | — | 거의 orchestration | — | 낮음 |
-| **E5** | workspace 캡처/복원의 **순수 변환**(트리 flatten/build) | `session_model` 확장 | 순수부 | 측정 예정 | 중 |
+| ~~E5~~ | workspace — 실측 결과 캡처=`captureAgentForRestore`(`term.rt.live_pty` PTY)·복원=`buildWorkspaceTab`(`createPane` spawn)·직렬화=이미 `session.workspace.serializeWindow`. 순수分 미미(surface 메타뿐, agent 콜백 필요) → (b)서 **축소/스킵** | — | 거의 orchestration | — | — |
 | ~~E2 ime·E3 tab UI·E6 scroll·clipboard·command·notification~~ | (b)서 **스킵** — orchestration 가독성 분리라 이식 무관 | — | orchestration | — | — |
 | (잔류) | `tick`·`mouse`·`handleKeyEvent`·`init`/`deinit`·config apply·split(PTY spawn)·**모든 orchestration** | `app_session.zig` | L4 허브·어댑터 | — | — |
 
-(b) 방향에선 **순수→session 그룹만** 진행한다 — b1·b2(`layout_math`) 완료, 다음은 E5(workspace 순수 변환). E4 sidebar는 실측 결과 순수가 `sidebarMinPt`(self 의존 4줄)뿐이고 나머지는 `metal_frame` 셀·색·렌더라 **축소/스킵**. orchestration 그룹(E2·E3·E6)도 이식 무관이라 스킵하고 app_session에 잔류. 각 순수 그룹은 헤드리스 단위 test 동반(이식성 증거). accessor pub화분(E1: `activeSurface`)은 각 PR에 기록.
+(b) 방향은 **b1·b2(`layout_math`)로 일단락**한다 — 좌표 변환 기하(grid·hit-test·drop-zone·pt→px·px↔cell)가 session(L2)으로 가 이식 시 통째 재사용된다. 나머지 후보(E4 sidebar·E5 workspace)는 실측 결과 각각 `metal_frame`·PTY agent·spawn 결합이라 순수分이 미미해 (b) 대상이 아니다. orchestration 그룹(E2·E3·E6)도 이식 무관이라 스킵하고 app_session에 잔류(필요 시 별도 가독성 정리로). 순수 그룹은 헤드리스 단위 test 동반(이식성 증거). accessor pub화분(E1: `activeSurface`)은 각 PR에 기록.
 
 ## 5. 검증
 
@@ -68,7 +68,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 ## 6. 리스크 / 한계 (정직)
 
-- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 이식 기여 0. **순수 그룹(b1·b2 `layout_math`·E5 일부)만** session으로 가 이식에 기여한다 — (b) 방향이 이 순수 그룹에 집중한다(orchestration은 스킵). E1(find)은 orchestration이었으나 패턴 확립 목적의 예외.
+- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 이식 기여 0. **순수 그룹(b1·b2 `layout_math`)만** session으로 가 이식에 기여했고, (b)는 이로써 일단락한다(좌표 변환 기하 = 이식 핵심). E1 find·E4 sidebar·E5 workspace는 실측 결과 모두 orchestration 결합이라 (b) 대상이 아니었다 — Explore 사전 추정(순수 85~95%)은 셋 다 빗나갔고, 착수 코드 재검증이 정정했다([[roadmap-docs-stale-verify-with-code]]).
 - **cross-group accessor pub화**: 캡슐화 일부 양보(§2-c-2). core.zig 선례가 있고, accessor는 어차피 안정 표면이라 수용.
 - **허브 잔류**: `tick`/`mouse`/`handleKeyEvent`는 본질적 횡단이라 파일 분해 비대상. 거대 메서드의 가독성은 소함수 추출·주석으로(별 PR).
 - **ROI 분산**: 그룹당 100~400줄 + test라 단일 PR 감소폭은 작다. 누적으로 `app_session.zig`가 그룹 facade + 허브만 남는 게 종착.

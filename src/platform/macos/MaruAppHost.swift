@@ -2477,6 +2477,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         switch event.keyCode {
         case 36:
             keyCode = UInt32(MaruAppHostKeyCodeEnter.rawValue)
+        // 키패드(numpad) Enter(kVK_ANSI_KeypadEnter=76). 메인 Return과 똑같이 Enter로 매핑해 codepoint=0으로
+        // 넘긴다 — 안 잡으면 default가 NSEnterCharacter(0x03)를 codepoint로 흘려 Zig가 `.char`로 해석한다(터미널엔
+        // raw 0x03, chrome 모달엔 y/n 아닌 글자라 무시 → 키패드 Enter로 확인 모달이 안 닫힘). keypad 여부는
+        // raw_key_code(76)→keycode.isKeypad로 따로 보존되어, application keypad 모드의 SS3(`ESC O M`)도 유지된다.
+        case 76:
+            keyCode = UInt32(MaruAppHostKeyCodeEnter.rawValue)
         case 53:
             keyCode = UInt32(MaruAppHostKeyCodeEscape.rawValue)
         case 48:

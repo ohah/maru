@@ -140,6 +140,7 @@ pub const ThemePreset = enum {
     dracula, // Dracula(보라·핑크 다크).
     catppuccin_mocha, // Catppuccin Mocha(파스텔 다크).
     catppuccin_latte, // Catppuccin Latte(파스텔 라이트).
+    light_pink, // Light Pink(mgwg light-pink-theme — 로즈·골드·틸 라이트).
 };
 
 // 각 프리셋의 ANSI 16색(0~15). 출처: iTerm2-Color-Schemes(mbadolato/iTerm2-Color-Schemes)의 Ghostty 형식 파일 —
@@ -173,6 +174,19 @@ const catppuccin_latte_palette: [16]?[]const u8 = .{
     "#bcc0cc", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#5c5f77",
     "#acb0be", "#e7103f", "#46b02f", "#e49931", "#3878f6", "#ef95d7", "#19a1a8", "#6c6f85",
 };
+// Light Pink는 light-pink-theme가 **터미널 ANSI 색을 정의하지 않아**(UI·구문 색만) iTerm2 표준값을 가져올 소스가 없다.
+// 그래서 이 16색은 테마 **구문 색**(README/themes의 tokenColors)에서 의미 매핑으로 파생했다(clean-room — 색 의도만).
+// `원색→실값`은 가독성 위해 조정한 것(괄호 없으면 원색이 곧 실값): red=invalid #d2304b, yellow=numbers/constants #b08b35,
+// blue=tags #91b3e0→#6688c0(라이트 배경 가독성 위해 어둡게), magenta=types/vars #9466aa, cyan=strings(틸) #1f6e89. green은
+// 테마에 없어 핑크와 안 부딪는 세이지 #5b9a6e로 보강했다(테마 functions/rose #9d3c5e는 magenta를 퍼플로 둬 팔레트엔 안 썼다).
+// **라이트 배경(#f5f5f5)이라 catppuccin_latte처럼 black↔white 명암을 반전**한다 — 대부분 CLI가 default/white로 본문을 찍으므로
+// white를 진한 잉크로 둬 라이트에서 읽히게 한다: black(0 #c7b9c1)/bright-black(8 #b3a5ad)은 옅은 모브-그레이(faint), white
+// (7 #6e6569)는 중간-진한 그레이, bright-white(15 #3a3034)는 가장 진한 잉크다(라이트에선 bright=더 진해 강조가 또렷 — 본문
+// 기본색 foreground #54494b와도 구분돼 SGR bright-white 강조가 default 텍스트에 묻히지 않는다).
+const light_pink_palette: [16]?[]const u8 = .{
+    "#c7b9c1", "#d2304b", "#5b9a6e", "#b08b35", "#6688c0", "#9466aa", "#1f6e89", "#6e6569",
+    "#b3a5ad", "#e0506c", "#66a878", "#c19a40", "#7896cc", "#a878be", "#2e7e98", "#3a3034",
+};
 
 /// 프리셋의 색 세트를 ThemeConfig로 돌려준다(loader가 `theme.preset`을 만나면 config.theme에 통째로 깐다).
 /// 반환 색 문자열은 전부 **정적 리터럴**이라 arena dupe가 필요 없다(영구 수명 — resolve가 빌려도 안전).
@@ -182,10 +196,11 @@ const catppuccin_latte_palette: [16]?[]const u8 = .{
 ///   Ghostty가 안 정하므로(null=동적/반전) maru 기본과 같게 명시한다.
 /// - 나머지(gruvbox/solarized/dracula/catppuccin)는 iTerm2-Color-Schemes의 표준 값을 그대로 쓴다 — background/
 ///   foreground/cursor/selection/palette를 그 스킴이 정의한 대로. search_match*(스크롤백 Find)는 maru 고유라
-///   전 프리셋에서 maru 기본을 유지한다(테마 스킴이 정의하지 않음).
-/// - **라이트 테마**(solarized_light/catppuccin_latte)는 sidebar_*를 명시한다: resolveTheme의 사이드바 파생은
-///   배경을 lighten(+24/+48)하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라진다. 그래서 배경보다 **어두운**
-///   표면색을 직접 준다(Solarized base2 / Catppuccin mantle·surface0).
+///   이 다크 프리셋들에선 maru 기본(다크 앰버)을 유지한다(테마 스킴이 정의하지 않음). **예외: light_pink**는 라이트
+///   배경(#f5f5f5)에서 다크 앰버가 거의 안 보여 테마의 findMatch(피치) 색으로 search_match*를 override한다(아래 케이스).
+/// - **라이트 테마**(solarized_light/catppuccin_latte/light_pink)는 sidebar_*를 명시한다: resolveTheme의 사이드바 파생은
+///   배경을 lighten(+24/+48)하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라진다. 그래서 배경보다 **어두운**(또는 더
+///   짙은 핑크) 표면색을 직접 준다(Solarized base2 / Catppuccin mantle·surface0 / light_pink는 VS Code activityBar·titleBar 핑크).
 /// - catppuccin의 selection은 스킴 원값이 rosewater(밝은색)이고 selection-foreground와 함께 쓰는 전제다. maru는
 ///   selection 글자색을 안 바꾸고 배경만 칠하므로, 밝은 글자 가독성을 위해 어두운/중간 표면색(surface2/surface1)으로 둔다.
 pub fn presetColors(preset: ThemePreset) ThemeConfig {
@@ -248,6 +263,20 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .sidebar_background = "#e6e9ef",
             .sidebar_active = "#ccd0da",
             .palette = catppuccin_latte_palette,
+        },
+        .light_pink => .{
+            .background = "#f5f5f5", // editor.background
+            .foreground = "#54494b", // editorCursor.foreground(테마의 가장 진한 중성 잉크 — 본문 대비 확보)
+            .cursor = "#54494b", // editorCursor.foreground
+            .selection = "#d6d1e8", // editor.selectionBackground(라벤더 — 진한 글자 그대로 읽힘)
+            // search_match: editor.findMatchHighlightBackground(뷰 안 매치, 옅은 피치), current: editor.findMatchBackground(현재, 더 진함).
+            .search_match = "#fbe0c5",
+            .search_match_current = "#f3d5b9",
+            // 라이트 배경: 사이드바를 배경(#f5f5f5)보다 핑크 쪽으로 명시(파생 lighten이 라이트에서 흰색 되는 함정 회피).
+            // VS Code 크롬 색을 차용 — activityBar.background(옅은 핑크) / titleBar.activeBackground(활성 강조 핑크).
+            .sidebar_background = "#f2e7ed",
+            .sidebar_active = "#f5bedb",
+            .palette = light_pink_palette,
         },
     };
 }

@@ -4826,6 +4826,23 @@ test "extractUrlAt finds an http(s) URL in the clicked word, across soft-wrap, t
     try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 3)) == null);
 }
 
+test "extractUrlAt stops at a background-colored (bce) space — URL not swallowing trailing text" {
+    // 회귀: 상태줄/프롬프트/erase가 배경색(SGR 44)으로 칠한 공백은 codepoint=' '이지만 background≠default라
+    // isBlankCell이 false다. 단어 경계가 그걸 공백으로 안 보면 URL 뒤 " foo"가 통째로 빨려들어 "https://a.bc/d foo"가
+    // 브라우저로 열린다. 경계는 배경 무관 공백(isBoundarySpace)을 봐야 한다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 24, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b[44mhttps://a.bc/d foo\x1b[0m"); // 파란 배경: URL·공백·foo 모두 background=indexed 4
+    // 공백 셀이 실제로 비기본 배경인지 확인(가드가 의미 있으려면 isBlankCell이 false여야 한다).
+    try std.testing.expectEqual(types.Color{ .indexed = 4 }, core.screen.cells[core.index(0, 14)].style.background);
+
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 2)).?; // URL 안 클릭
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://a.bc/d", url); // 공백에서 끊겨 foo가 안 붙는다
+    // 색칠된 공백 위 클릭은 선택/URL 없음(배경색 무관 — 일반 공백과 동일).
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 14)) == null);
+}
+
 test "urlAnchorAt + urlSpanAtAbs project the hovered URL word, following content and rejecting non-URLs" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 3 });
     defer core.deinit();

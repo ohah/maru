@@ -6,7 +6,7 @@ const live_pty_mod = @import("live_pty.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const artifact_io = @import("artifact_io.zig");
-const surface_mod = @import("surface.zig");
+const surface_mod = @import("../session/surface.zig");
 
 pub const default_artifact_dir = "zig-out/maru-demo";
 

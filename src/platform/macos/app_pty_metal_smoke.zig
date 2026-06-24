@@ -117,7 +117,7 @@ const LivePtyMetalFixture = struct {
     screen: []u8,
     snapshot: []u8,
     drain_summary: app.RuntimePumpDrainSummary,
-    process_state: app.ProcessState,
+    process_state: maru.session.ProcessState,
     screen_contains_expected: bool,
     native_keydown: metal_smoke.NativeKeyDownSmokeResult,
     native_keydown_source: NativeKeyDownSource,
@@ -192,13 +192,13 @@ fn buildLivePtyFixture(
     }, 16);
     defer live_pty.deinit();
 
-    var surfaces = [_]app.Surface{try app.Surface.init(allocator, 1, smoke_config.size)};
+    var surfaces = [_]maru.session.Surface{try maru.session.Surface.init(allocator, 1, smoke_config.size)};
     defer surfaces[0].deinit();
     surfaces[0].title = "app pty metal smoke";
     surfaces[0].command = smoke_config.command;
 
-    var tab_ptrs = [_]*app.Surface{&surfaces[0]};
-    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
+    var tab_ptrs = [_]*maru.session.Surface{&surfaces[0]};
+    var app_window: maru.session.AppWindow = .{ .tabs = &tab_ptrs };
 
     var runtime = app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();

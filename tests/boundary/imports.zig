@@ -81,12 +81,11 @@ const rules = [_]Rule{
         // renderer(L1)는 의존 방향이 L2→L1이라 허용한다(금지 안 함). terminal(중립 입력 타입)도 허용. chrome(L3)은
         // 위 레이어라 금지한다(L2가 L3를 import하면 위상 역전).
         //
-        // ⚠️ 한계(리뷰 발견): 이 체커는 **직접 @import만** 본다(transitive 미추적). `app`은 forbidden에 없어서
-        // session 파일이 `../app.zig`를 import하면 통과하는데, app.zig는 pty·platform을 transitive로 끌어온다.
-        // app을 통째 금지하진 못한다 — 후속 슬라이스의 세션 모델(Pane/Tab/Term)이 app의 중립 타입(Surface·
-        // split_tree·workspace)을 정당하게 필요로 하기 때문. 그래서 규칙은 "직접 pty/platform 금지"로 두고,
-        // app 경유 중립 타입만 쓰는 건 컨벤션으로 지킨다(세션 모델 추출 슬라이스에서 어느 app 타입이 중립인지
-        // 명시). transitive 강제는 체커 고도화(import 그래프 추적)가 필요 — 현재는 의도적 비범위.
+        // session→app 금지(D3, 3차 추출 완료): 세션 모델이 쓰던 app의 중립 타입(Surface·split_tree·workspace·
+        // window·core_command)을 3차(D1·D2)로 session으로 옮겨 session→app 직접 의존이 0이 됐다. 이제 app을
+        // 통째 금지해 의존 소거를 가드로 고정한다(과거엔 "app 경유 중립 타입"이 컨벤션이었으나 이제 강제 —
+        // docs/app-layer-decomposition.md). app.zig는 pty·platform을 transitive로 끌어오므로, app 금지가 곧 그
+        // 차단이기도 하다(직접 @import만 보는 한계는 동일하나, session→app=0이면 transitive 누수 경로가 닫힌다).
         .layer = "session",
         .barrel = "src/session.zig",
         .implementation_dir = "src/session",
@@ -94,6 +93,7 @@ const rules = [_]Rule{
             .{ .layer = "pty" },
             .{ .layer = "platform" },
             .{ .layer = "chrome" },
+            .{ .layer = "app" },
         },
     },
     .{

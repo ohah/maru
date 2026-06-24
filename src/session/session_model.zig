@@ -10,7 +10,7 @@
 //! 중립 판정 결과(agent_transcript.AgentState)다.
 
 const std = @import("std");
-const surface_mod = @import("../app/surface.zig");
+const surface_mod = @import("surface.zig");
 const split_tree = @import("split_tree.zig");
 const agent_transcript = @import("agent_transcript.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(app.workspace.v1) — TreeNode 변환용

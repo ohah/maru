@@ -11,8 +11,8 @@ const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
 const artifact_io = @import("artifact_io.zig");
 const smoke_drain = @import("smoke_drain.zig");
-const surface_mod = @import("surface.zig");
-const window_mod = @import("window.zig");
+const surface_mod = @import("../session/surface.zig");
+const window_mod = @import("../session/window.zig");
 
 pub const default_artifact_dir = "zig-out/maru-app-pty-loop-smoke";
 pub const default_interactive_artifact_dir = "zig-out/maru-app-pty-interactive-loop-smoke";

@@ -12,10 +12,7 @@ pub const pty_reader = @import("app/pty_reader.zig");
 pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
 pub const smoke_drain = @import("app/smoke_drain.zig");
-pub const surface = @import("app/surface.zig");
-pub const window = @import("app/window.zig");
 
-pub const AppWindow = window.AppWindow;
 pub const AppHostFrame = host.AppHostFrame;
 pub const AppHostError = host.HostError;
 pub const AppFrameLoop = frame_loop.FrameLoop;
@@ -43,7 +40,6 @@ pub const CoreCommand = pty_reader.CoreCommand;
 pub const CoreCommandQueue = pty_reader.CoreCommandQueue;
 pub const QueuedPtyEvent = pty_reader.QueuedPtyEvent;
 pub const QueueError = pty_reader.QueueError;
-pub const RestorableSurfaceMetadata = surface.RestorableSurfaceMetadata;
 pub const RuntimeError = runtime.RuntimeError;
 pub const RuntimeEventPump = runtime_pump.RuntimeEventPump;
 pub const RuntimeLink = runtime.RuntimeLink;
@@ -54,12 +50,9 @@ pub const RuntimePumpTermination = runtime_pump.Termination;
 pub const RuntimePumpedEvent = runtime_pump.PumpedEvent;
 pub const RuntimePumpedEventKind = runtime_pump.PumpedEventKind;
 pub const SmokeDrainDeadlineConfig = smoke_drain.DeadlineConfig;
-pub const Surface = surface.Surface;
 pub const SurfaceId = runtime.SurfaceId;
 pub const SurfaceRuntime = runtime.SurfaceRuntime;
-// SplitTree·SplitDirection·SplitRect·splitRect·clampRatio는 split_tree와 함께 session으로 이동(D1) — maru.session.X.
 pub const TerminalInput = runtime.TerminalInput;
-pub const ProcessState = surface.ProcessState;
 
 pub const buildAppHostFrame = host.buildFrame;
 pub const buildAppHostFrameAfterDrain = host.buildFrameAfterDrain;
@@ -72,7 +65,6 @@ pub const runAppPtySmoke = pty_smoke.run;
 pub const runAppSmoke = host.runSmoke;
 pub const sendInputToActiveSurface = host.sendInputToActiveSurface;
 pub const runHeadlessDemo = headless_demo.run;
-// 라벨 해석 단일 출처(사용자 지정 이름 우선·없으면 자동/폴백) — 사이드바·pane 탭바·workspace label이 공유한다.
 pub const pickLabel = label.pick;
 
 test {

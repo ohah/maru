@@ -2,7 +2,7 @@ const std = @import("std");
 const pty = @import("../pty.zig");
 const runtime_mod = @import("runtime.zig");
 const terminal = @import("../terminal.zig");
-const core_command = @import("core_command.zig");
+const core_command = @import("../session/core_command.zig");
 
 /// reader-로컬 응답 outbound 버퍼(runProcessing의 out_buf)의 상한. 자식이 stdin을 안 비우면서(POLLOUT 미발화) 응답
 /// 유발 출력(CPR·DA·OSC 10/11 등)을 쏟으면 out_buf가 무한 증가하던 경로(버그헌트 감사서 확정)를 막는다 — pending(미전송

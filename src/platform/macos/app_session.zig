@@ -753,30 +753,37 @@ const TermRuntime = struct {
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
 };
-const Term = struct {
-    surface: app.Surface = undefined,
-    // 런타임 부착(PTY 세션·pump·생애 플래그). 모델 필드(surface·메타)와 분리해 격리 — S2-3a(§3.1).
-    rt: TermRuntime = .{},
-    // git 브랜치 표시 캐시(owned). cwd(OSC 7)에서 .git/HEAD를 walk-up해 도출한 브랜치명과, 그걸 계산한 cwd.
-    // termGitBranch가 cwd가 바뀔 때만 재계산(매 프레임 fs 읽기 회피). destroyTerm이 해제. 영속 안 함(파생값 — restore가 재도출).
-    git_branch: ?[]const u8 = null,
-    git_branch_cwd: ?[]const u8 = null,
-    // 이 Term의 포그라운드 프로세스가 어떤 에이전트 CLI인지(none/claude/codex). pollAgentKinds가 ≈0.5s마다
-    // tcgetpgrp+proc_name으로 갱신. 사이드바 라벨에 에이전트 심볼로 표시. 파생값(영속 안 함).
-    agent_kind: AgentKind = .none,
-    // 에이전트 세션 진행 상태(unknown/running/idle) — pollAgentState가 세션 JSONL tail로 판정(agent_kind가 none이
-    // 아닐 때만 의미). 사이드바 상태줄·아이콘 펄스에 쓴다. 파생값(영속 안 함). agent_session_mtime=찾은 세션 파일의
-    // 마지막 mtime(나노초) — 안 바뀌면 tail 재파싱 skip. agent_answer_buf/_len=idle일 때 마지막 답변 첫 줄(inline
-    // 버퍼라 alloc 없음 — 사이드바 폭으로 다시 말줄임). 모두 derived: destroyTerm이 따로 해제할 owned 포인터 없음.
-    agent_state: agent_session.State = .unknown,
-    agent_session_mtime: i128 = 0,
-    agent_answer_buf: [agent_answer_max]u8 = undefined,
-    agent_answer_len: usize = 0,
-    // 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 매 tick core_mutex 하에 core.windowTitle()
-    // (OSC 0/2 제목 > cwd basename)을 복사해 채운다 — 렌더 스레드(termLabel)가 reader 스레드의 core.title/cwd
-    // free(OSC 0/2/7)와 경합하지 않게(io-render-threading PR3). 파생값(영속 안 함). destroyTerm이 해제.
-    auto_title: std.ArrayListUnmanaged(u8) = .empty,
-};
+/// 한 터미널의 모델 — surface(OS-중립 그리드/스크롤백)와 라벨·git·agent 메타. 런타임 부착은 generic
+/// 파라미터 `Rt`로 주입한다(platform=`TermRuntime`). session으로 옮겨도 `Rt`(PTY 결합)를 모른 채 모델만
+/// 소유한다 — `SplitTree(comptime Leaf)`와 같은 generic 분리(S2-3b, §3.1). 별칭(`const Term =
+/// TermGeneric(TermRuntime)`)이라 platform의 기존 `Term`/`*Term` 참조는 전부 그대로다(동작 보존).
+fn TermGeneric(comptime Rt: type) type {
+    return struct {
+        surface: app.Surface = undefined,
+        // 런타임 부착(PTY 세션·pump·생애 플래그). generic `Rt`로 주입 — platform이 `TermRuntime`을 넣는다(S2-3b).
+        rt: Rt = .{},
+        // git 브랜치 표시 캐시(owned). cwd(OSC 7)에서 .git/HEAD를 walk-up해 도출한 브랜치명과, 그걸 계산한 cwd.
+        // termGitBranch가 cwd가 바뀔 때만 재계산(매 프레임 fs 읽기 회피). destroyTerm이 해제. 영속 안 함(파생값 — restore가 재도출).
+        git_branch: ?[]const u8 = null,
+        git_branch_cwd: ?[]const u8 = null,
+        // 이 Term의 포그라운드 프로세스가 어떤 에이전트 CLI인지(none/claude/codex). pollAgentKinds가 ≈0.5s마다
+        // tcgetpgrp+proc_name으로 갱신. 사이드바 라벨에 에이전트 심볼로 표시. 파생값(영속 안 함).
+        agent_kind: AgentKind = .none,
+        // 에이전트 세션 진행 상태(unknown/running/idle) — pollAgentState가 세션 JSONL tail로 판정(agent_kind가 none이
+        // 아닐 때만 의미). 사이드바 상태줄·아이콘 펄스에 쓴다. 파생값(영속 안 함). agent_session_mtime=찾은 세션 파일의
+        // 마지막 mtime(나노초) — 안 바뀌면 tail 재파싱 skip. agent_answer_buf/_len=idle일 때 마지막 답변 첫 줄(inline
+        // 버퍼라 alloc 없음 — 사이드바 폭으로 다시 말줄임). 모두 derived: destroyTerm이 따로 해제할 owned 포인터 없음.
+        agent_state: agent_session.State = .unknown,
+        agent_session_mtime: i128 = 0,
+        agent_answer_buf: [agent_answer_max]u8 = undefined,
+        agent_answer_len: usize = 0,
+        // 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 매 tick core_mutex 하에 core.windowTitle()
+        // (OSC 0/2 제목 > cwd basename)을 복사해 채운다 — 렌더 스레드(termLabel)가 reader 스레드의 core.title/cwd
+        // free(OSC 0/2/7)와 경합하지 않게(io-render-threading PR3). 파생값(영속 안 함). destroyTerm이 해제.
+        auto_title: std.ArrayListUnmanaged(u8) = .empty,
+    };
+}
+const Term = TermGeneric(TermRuntime);
 
 /// 닫기 확인이 보류한 닫기 **진입점**(어떤 UI 동작이 닫기를 요청했나). 진입점마다 cascade 정책이 달라, 확정 시 같은
 /// 판단을 다시 하려고 어느 경로였는지 기억한다. 진입점 → 실제 teardown 범위(CloseScope) 변환은 resolveCloseScope가

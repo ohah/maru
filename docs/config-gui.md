@@ -174,7 +174,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **stale unbind 정리**: 어떤 chord를 다시 사용자 바인딩으로 묶으면(rebind), 옛 `keybind = <chord> = unbind` 줄이 모순되게 남는 걸 정리한다 — `clearStaleUnbind`가 ① 라이브 `unbinds`에서 제거 ② 이번 세션 펜딩 unbind-append 취소 ③ 파일의 옛 줄 제거 예약(`removeKeybindUnbindLines`, chord 기준). resolver는 사용자 바인딩을 unbinds보다 먼저 봐서 동작은 정상이었지만 파일 위생을 맞춘다.
 - **한계(후속)**: terminal 매크로(`keybind = <chord> = text:`/`esc:`) GUI 편집(chord뿐 아니라 전송 rhs 편집 위젯 신규 — config 파일 직접 편집 영역)·F13+ 키(F1~F12만 키 이벤트로 들어옴, ABI/Swift 매핑 신규 — 니치). (rebind 완전 교체·다중-chord·**global 바인딩 편집(rebind/unbind/라이브 OS 재등록)**·stale unbind는 해결.)
 
-### 6.8 폼 검색(현재 섹션 필터) (CS-4-4 후속)
+### 6.8 폼 검색(섹션 내 + 교차 섹션 필터) (CS-4-4 후속)
 
 섹션 폼이 커져서(입력 섹션은 keybind 행만 ~40개) 행을 빠르게 좁히는 검색을 둔다. `§4`에서 후속으로 미뤘던 항목.
 
@@ -218,7 +218,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | **CS-4-1** ✅ | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-3** ✅ | keybind recorder(`command_catalog` 행 + 키 캡처 + `keybind` 줄 write-back) — §6.7. unbind·충돌 UI는 후속 | 헤드리스 + 실기 |
-| **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 + **폼 검색**(`/` 현재 섹션 필터 — §6.8; 교차 섹션은 후속) | ✅ 머지(헤드리스 + 실기) |
+| **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 + **폼 검색**(`/` 필터 — 빈 쿼리=현재 섹션, 쿼리 입력 시 교차 섹션 — §6.8) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) · **env·shell.args ✅**(§6.6, upsert; 삭제는 후속) → keybind(CS-4-3) | 헤드리스 + 실기 |
 | **CS-4-6** ✅ | **color HSV picker** — SV 그리드 + hue 스트립 + 미리보기, 세팅 모달 모드(§6.9). `color.zig` HSV↔RGB | 헤드리스 + 실기 |
 | **CS-4-7+** | (선택) picker 연속 해상도·alpha·eyedropper, 고급화 | 실기 |

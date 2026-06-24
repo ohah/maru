@@ -239,7 +239,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 - **2단계(Screen struct fold)**: §2 — 필드를 `Screen` 하위 struct로 접는 architecture.md 종착지. 연산 추출 완료 후 별도 initiative.
 - **selection.zig** ✅ **완료**: 선택/검색/URL/preedit 클러스터를 §7(S1~S5)로 분리 완결(core.zig 7228→6715줄, selection.zig 587줄(리뷰 cleanup 후)).
 - **kitty.zig** ✅ **완료**: kitty graphics 본체를 §8(K1~K3)로 분리 완결(core.zig 6715→6233줄, kitty.zig 516줄). parser는 파싱(7/N) + `kitty.execKittyGraphics` 위임.
-- **input/report.zig**: `reportFocus`/`reportMouse`/`encodeKey` 등 입력→host-reply 인코딩.
+- **input_report.zig** ✅ **완료**: `reportFocus`/`reportMouse`/`encodeKey`/`encodeOptions`/`encodePaste` 입력→host-reply 인코딩을 §9(R1)로 분리 완결(core.zig facade 5개 + input_report.zig 112줄).
 - **RIS가 DECSC 슬롯 초기화** ✅ **완료**(B4~B5 리뷰서 확인, §10.8.7): `fullReset`(ESC c)이 `screen.saved_cursor`를 안 비우던 기존 동작(평평 슬롯 시절부터 — 분해가 도입한 게 아님)을 고쳐, RIS가 슬롯도 공장 초기화한다(이후 DECRC/CSI u는 home 복원). **베이스**: VT100 RIS = power-on 상태 + Ghostty `Screen.reset()`이 `saved_cursor=null`. **결정**: RIS는 완전한 공장 리셋이므로 저장 커서도 비우는 게 정합(슬롯 생존은 사실상 버그). alt는 RIS의 leaveAltScreen으로 이미 폐기돼 활성(primary) 슬롯만 비우면 충분. 테스트 1건 추가.
 - **setup-path OOM 누수**(§11 A1 OOM-sweep서 발견, 범위 밖): `FailingAllocator`로 write/resize 도중 할당을 실패시키면 일부 경로가 할당을 잃는다(스크롤백 page 저장과 무관 — 기존 코드). A1 rewrap OOM 테스트는 실패 주입을 rewrap 단계로 한정해 우회했다. 별도 후속으로 grapheme/reflow scratch·write 경로의 OOM errdefer를 감사한다(크래시 아님 — best-effort OOM 경로의 누수).
 
@@ -311,7 +311,7 @@ selection은 화면/스크롤백을 **읽어** 좌표·텍스트를 산출하는
 | **K2** ✅ | storage/evict mid(`pickKittyEvictionVictim`·`evictKittyImagesFor`·`storeKittyImage`·`deleteByZ`) | K1 leaf(removePlacementsForImage 등) 위에 빌드. storeKittyImage·deleteByZ는 pub(K3 orchestrator가 호출), evict/pick는 private(K2 intra). 호출부 self.X→kitty.X(self,) | 중 |
 | **K3** ✅ | orchestrator(`execKittyGraphics`·`kittyDisplay`·`kittyDelete`·`kittyTransmit`·`kittyTransmitPng`) + parser `dispatchApc` 연동(`kitty.execKittyGraphics`) | execKittyGraphics만 pub(parser 호출), 나머지 private(intra). kitty.zig에 `png` import 추가. KittyImage 별칭·core png import 제거(미사용). **kitty.zig 분리 완결** | 중~높 |
 
-> **kitty.zig 분리 완결**(K1~K3 머지): core.zig 6715→6233줄, kitty.zig 516줄. core 잔류 = 별칭 3개(필드 타입 KittyGraphicsCommand·StoredPlacement·KittyImageStorage)·필드(kitty_images·kitty_placements·kitty_chunk_cmd·placement_views·image_views)·facade 2개(buildPlacementViews·buildImageViews)·seam(shiftCoordsForEviction→kitty.shiftPlacementsForEviction)·KittyFlags/KittyFlagStack(keyboard protocol). 후속 남음: input/report.zig(§6)·Screen struct fold(§2).
+> **kitty.zig 분리 완결**(K1~K3 머지): core.zig 6715→6233줄, kitty.zig 516줄. core 잔류 = 별칭 3개(필드 타입 KittyGraphicsCommand·StoredPlacement·KittyImageStorage)·필드(kitty_images·kitty_placements·kitty_chunk_cmd·placement_views·image_views)·facade 2개(buildPlacementViews·buildImageViews)·seam(shiftCoordsForEviction→kitty.shiftPlacementsForEviction)·KittyFlags/KittyFlagStack(keyboard protocol). 후속 남음: Screen struct fold(§2). (input/report.zig는 §9 R1로 분리 완료.)
 
 검증·리뷰는 §5 그대로(매 PR 4종 게이트 green auto-merge --rebase). PR 3개라 마지막에 `/code-review max` 1회.
 

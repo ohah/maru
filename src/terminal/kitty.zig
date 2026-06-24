@@ -82,9 +82,10 @@ const KittyImage = struct {
 };
 
 /// kitty graphics 이미지 저장소(image_id → KittyImage). 총량 한계로 악의적/대량 전송을 막는다.
-/// 토대(1단계): 같은 id 교체 + 한계 초과 거부 — LRU evict(transmit_time 기준)는 후속이다.
-/// 베이스: kitty graphics protocol image storage. 자료구조(map + total_bytes)는 placement/LRU/
-/// 애니메이션 프레임 없이 image_id→픽셀만 담는 maru 단순 설계다(그 확장은 후속 단계).
+/// 같은 id 교체 + 총량 한계. 한계 초과 시 거부가 아니라 LRU evict(generation 기준, placement 없는·
+/// 오래된 것 우선)를 `addKittyImageEvicting`가 수행한다(K4b 완료). 베이스: kitty graphics protocol
+/// image storage. struct 자체는 map + total_bytes만 담고 evict 결정·placement는 바깥(kitty.zig)이다.
+/// 애니메이션 프레임(a=a/c/f)은 미지원(Ghostty도 미구현 — 후속).
 pub const KittyImageStorage = struct {
     map: std.AutoHashMapUnmanaged(u32, KittyImage) = .{},
     total_bytes: usize = 0,

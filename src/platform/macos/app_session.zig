@@ -137,7 +137,7 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = 0x25E7;
-// 검색 줄 레이아웃 — 렌더(buildSidebarHeaderFrame)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
+// 검색 줄 레이아웃 — 렌더(buildSidebarHeaderDrawList)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
 // 끝(col 0)에 붙이지 않고 좌측 패딩 1칸을 둔다(사용자 피드백: 너무 붙음). 입력/placeholder/caret은 🔍(2칸)+공백(1) 뒤.
 const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
 const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3; // 🔍(2칸)+공백(1) 뒤 = 입력/caret 시작 col(=4)
@@ -4784,7 +4784,7 @@ pub const AppSession = struct {
     }
 
     /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 검색 줄(마지막
-    /// 줄)의 y. 줄 수는 headerRows 단일 소스(headerHit·buildSidebarHeaderFrame과 동일 — 따로 계산하면 어긋난다).
+    /// 줄)의 y. 줄 수는 headerRows 단일 소스(headerHit·buildSidebarHeaderDrawList과 동일 — 따로 계산하면 어긋난다).
     fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
         if (!self.sidebar_search_active or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
         const cw = self.cell_width_px;
@@ -4793,7 +4793,7 @@ pub const AppSession = struct {
         const search_row = chrome.components.sidebar.headerRows(self.sidebar_header_height_px, ch) - 1;
         const prompt_cols: u32 = sidebar_search_text_col; // 🔍 좌측 패딩 + 🔍(2칸) + 공백(1) — 렌더와 단일 출처
         const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
-        // 검색어가 입력 영역(col 3..cols-4, 우측은 아이콘)을 넘으면 caret를 숨긴다 — buildSidebarHeaderFrame이 col
+        // 검색어가 입력 영역(col 3..cols-4, 우측은 아이콘)을 넘으면 caret를 숨긴다 — buildSidebarHeaderDrawList이 col
         // cols-4에서 query를 자르는 것과 동일. 안 그러면 IME 후보창이 사이드바 밖 터미널 pane 위로 떠 텍스트와 분리된다
         // (find.caretRect의 panel_cols 가드와 동형). cols<10이면 헤더 frame이 null이라 검색이 활성될 수 없으므로 cols≥10 전제.
         if (caret_col >= cols -| 4) return null;
@@ -6558,7 +6558,7 @@ pub const AppSession = struct {
         // 사이드바 아이콘은 suffix-trim으로 못 숨기는 별도 frame이라 text-blink/rename처럼 full rebuild(dirty)가 필요.
         const agent_pulsing = self.anyAgentRunning();
         // 사이드바 검색 caret도 깜빡인다 — 헤더 frame의 '|' 글자라(rename과 동형) full rebuild가 필요하다.
-        // 검색 caret이 '실제로 그려질' 때만 blink로 재투영한다(buildSidebarHeaderFrame이 caret을 그리는 조건과 동일:
+        // 검색 caret이 '실제로 그려질' 때만 blink로 재투영한다(buildSidebarHeaderDrawList이 caret을 그리는 조건과 동일:
         // 활성 + 접힘 아님 + cols≥10). 안 그러면 활성인 채 사이드바를 10칸 미만으로 드래그하면 안 보이는 caret 때문에 매
         // 틱 전체 grid가 CoreText 재셰이프된다(idle 못 듦). (접힘은 toggleSidebarCollapsed가 search_active를 끄지만 방어적으로 포함.)
         const sidebar_search = self.sidebar_search_active and !self.sidebar_collapsed and
@@ -9108,11 +9108,11 @@ pub const AppSession = struct {
                     // 활성 surface 커서: 창이 포커스를 잃었으면 cursor.unfocused(block/hollow/hidden) 적용(F1-4b-2).
                     .cursor_unfocused = self.unfocusedCursorMode(),
                 };
-                // shapeOnly 실패(드문 OOM)면 이 tick은 활성 frame 없이 chrome만 — 다음 tick 재시도(metal_dirty는 replace
-                // 성공 시에만 내려가는데, 활성 누락이어도 8개 chrome은 정상 배치된다). frame 카운터는 finishTick 대신
-                // advanceFrameIndex가 진행해 summary frame_loop_ticks를 보존한다.
+                // shapeOnly 실패(드문 OOM)면 active_shaped=null → 아래 active_failed 가드가 이 frame을 통째로 포기한다
+                // (chrome만 그려 blank/stale terminal을 합성하지 않게 — 기존 build-실패 동형). frame 카운터
+                // (advanceFrameIndex)는 활성이 실제 그려질 때만 올린다(placeAndDistribute 후) — 실패 frame은 기존처럼
+                // frame_loop_ticks를 안 올린다.
                 active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, self.io) catch null;
-                active_index = self.frame_loop.advanceFrameIndex();
             } else {
                 tick_result = try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
                 // 비-macOS(단일 leaf·fake backend)는 활성 멀티 페인 통합을 쓰지 않는다. active_*는 macOS 통합 경로
@@ -9353,14 +9353,8 @@ pub const AppSession = struct {
             // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
             const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
             if (builtin.os.tag == .macos) {
-                const pane_frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-                    .appearance = self.appearance,
-                    .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-                    .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-                    .scale_milli = self.scale_milli,
-                    .cell_width_px = @intCast(self.cell_width_px),
-                    .cell_height_px = @intCast(self.cell_height_px),
-                };
+                // grip/label/탭바/비활성/floating/활성 collect가 공유하는 finishPane용 builder(단일 출처 paneFrameBuilder).
+                const pane_frame_builder = self.paneFrameBuilder();
 
                 // 1) 각 pane의 탭 바 제목 frame — Term 제목들을 가로 등폭 탭으로(buildPaneTabBarDrawList). 활성 panel
                 //    커서 suffix가 합쳐진 cells의 끝에 남도록 '터미널 frame들 앞'에 둔다. 바 없는 작은 pane은 건너뜀.
@@ -9479,7 +9473,7 @@ pub const AppSession = struct {
                 // 이미 준비됨. builder는 finishPane(place/raster)용이라 cursor_unfocused 없는 pane_frame_builder로 충분하다
                 // (커서는 shapeOnly 단계의 DrawList에 이미 반영됨).
                 if (active_shaped) |ap| {
-                    self.collectShapedPane(&collected, ap, pane_frame_builder, .{ .active = .{ .origin_x = active_origin_x, .origin_y = active_origin_y, .colors = cell_colors } });
+                    self.collectShapedPane(&collected, ap, pane_frame_builder, .active);
                     active_shaped = null;
                 }
 
@@ -9488,9 +9482,17 @@ pub const AppSession = struct {
                 // suffix·floating 맨 위 직전)에 넣는다.
                 self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &active_result);
             }
+            // 활성 terminal frame 성공 여부를 확정한다. macOS에서 surface가 있는데 active_result==null이면 활성
+            // shapeOnly/place가 실패한 것(드문 OOM) — 기존 build-실패와 동형으로 이 frame을 통째로 포기해야 한다(chrome만
+            // 그려 blank/stale terminal을 합성하면 metal_dirty가 내려가 self-heal이 막히므로). 활성이 실제 그려질 때만
+            // frame 카운터를 올린다(실패 frame은 frame_loop_ticks를 안 올림 — 기존 build-실패 동형).
+            const active_failed = builtin.os.tag == .macos and self.surface_initialized and active_result == null;
+            if (builtin.os.tag == .macos and active_result != null) {
+                active_index = self.frame_loop.advanceFrameIndex();
+            }
             // 활성 panel 터미널을 맨 뒤에(커서 suffix). macOS면 통합 placeMultiPane 결과(active_result.rf — built_frames
             // 소유, pane_frames엔 view로), 비-macOS면 fake backend의 tick_result. 단일 leaf면 이게 유일한 터미널 frame이다
-            // (기존 동작). 활성 frame이 없으면(macOS shapeOnly/place 실패 — 드문 OOM) chrome만 그리고 다음 tick 재시도.
+            // (기존 동작). 활성 frame이 없으면(active_failed) 아래 replace/summary를 스킵해 frame을 통째로 포기한다.
             if (active_result) |ar| {
                 pane_frames.append(self.allocator, .{
                     .frame = ar.rf,
@@ -9509,7 +9511,10 @@ pub const AppSession = struct {
             // floating 탭은 활성 터미널·커서보다 위(맨 마지막 frame)에 그린다 — 드래그 ghost가 가장 위에 보이게.
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
-            if (pane_frames.items.len > 0) {
+            // active_failed면 replace를 스킵한다 — chrome panes만으로 blank/stale terminal을 합성하면 metal_dirty가
+            // 내려가 다음 tick에 재빌드되지 않아 깨진 frame이 화면에 고정된다. 스킵하면 metal_dirty가 유지돼 다음 tick에
+            // 재시도한다(기존 build-실패 frame 스킵 동형).
+            if (pane_frames.items.len > 0 and !active_failed) {
                 // kitty graphics(K2d): 활성 surface(이 frame을 만든 surface)의 placement를 GpuImage로 환산하고,
                 // generation이 바뀐 이미지만 업로드 채널로 만든다. dest origin은 활성 panel의 픽셀 origin(사이드바
                 // 폭·탭 바 아래)으로 박아 터미널 sub-rect에 그려지게 한다. 비활성 panel 이미지는 후속(단일 활성 기준).
@@ -9602,9 +9607,12 @@ pub const AppSession = struct {
             }
 
             // per-frame render 통계와 tick index를 summary에 덧씌운다. macOS면 통합 활성 frame(active_result.rf)로 직접
-            // 산출(finishTick을 안 거쳐서 — atlas entry는 통합 place 후 최종값), 비-macOS면 tick_result. 활성 frame이 없으면
-            // (드문 shapeOnly/place 실패) 마지막 frame 통계를 유지한다(idle 동형 — writeSummaryFromState만).
-            if (active_result) |ar| {
+            // 산출(finishTick을 안 거쳐서 — atlas entry는 통합 place 후 최종값), 비-macOS면 tick_result. active_failed(드문
+            // shapeOnly/place 실패)면 이 frame을 포기했으므로 마지막 frame 통계를 유지한다(idle 동형 — writeSummaryFromState만,
+            // frame_loop_ticks는 advanceFrameIndex를 안 했으므로 자동으로 그대로다).
+            if (active_failed) {
+                self.writeSummaryFromState();
+            } else if (active_result) |ar| {
                 self.writeSummaryFromRenderStats(active_index, renderer.renderFrameStats(ar.rf, self.renderer_state.atlas.entryCount()));
             } else if (tick_result) |t| {
                 self.writeSummaryFromTick(t);
@@ -9885,7 +9893,7 @@ pub const AppSession = struct {
             self.appendSolidQuad(0, uy, @floatFromInt(self.sidebar_width_px), thickness, self.dividerColor(), 0);
         }
         // 헤더 아이콘 호버 배경(웹 버튼 hover) — hovered_header_region이 아이콘이면 그 아이콘 뒤에 둥근 quad(layer 0,
-        // 아이콘 셀 아래). 아이콘 col은 buildSidebarHeaderFrame과 같은 단일 레이아웃(◧ cols-8·⚙ cols-5·+ cols-2).
+        // 아이콘 셀 아래). 아이콘 col은 buildSidebarHeaderDrawList과 같은 단일 레이아웃(◧ cols-8·⚙ cols-5·+ cols-2).
         // 아이콘은 .m이 1.7×로 확대+py_nudge 0.30하므로 셀 중심(가로)·~0.8ch(세로)에 앉는다 — quad를 거기에 맞춰 약 2칸×
         // 1.7줄로 덮고 가운데 정렬. 색은 탭 ‹›/슬롯 호버와 같은 sidebarHoverBg(중간 톤).
         if (self.hovered_header_region) |hr| {
@@ -10482,13 +10490,14 @@ pub const AppSession = struct {
         overlay: PanePlacement,
         pane: PanePlacement,
         floating: PanePlacement,
-        active: PanePlacement,
+        // 활성은 배치(origin/colors)를 안 들고 있는다 — 호출자가 active_origin_x/y·cell_colors locals로 직접 박는다.
+        active,
     };
 
-    /// 활성 panel의 placeMultiPane 결과(RenderFrame + 배치). placeAndDistribute가 out param으로 돌려주면 호출자가
-    /// pane_frames 맨 뒤(커서 suffix)에 view로 넣고 render_stats를 산출한다(활성 frame은 호출자가 소유·deinit하고
-    /// pane_frames는 view라 따로 deinit 안 한다 — built_frames 규율과 동형).
-    const ActiveResult = struct { rf: renderer.RenderFrame, placement: PanePlacement };
+    /// 활성 panel의 placeMultiPane 결과 RenderFrame. placeAndDistribute가 out param으로 돌려주면 호출자가 pane_frames
+    /// 맨 뒤(커서 suffix)에 view로 넣고 render_stats를 산출한다(배치 origin/colors는 호출자가 locals로 박으므로 placement는
+    /// 안 들고 있는다). 활성 frame은 built_frames가 소유(view라 따로 deinit 안 함 — built_frames 규율과 동형).
+    const ActiveResult = struct { rf: renderer.RenderFrame };
     const CollectedPane = struct {
         pane: coretext_frame_builder.ShapedPane,
         dest: CollectDest,
@@ -10519,15 +10528,14 @@ pub const AppSession = struct {
     /// DrawList(소유권 이전)를 shapeOnly로 만들어 collected에 추가한다. shapeOnly 실패면 dl은 shapeOnly가 정리하고
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
     fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
-        var pane = builder.shapeOnly(self.allocator, dl) catch return;
-        collected.append(self.allocator, .{ .pane = pane, .dest = dest, .builder = builder }) catch {
-            pane.deinit(self.allocator);
-        };
+        const pane = builder.shapeOnly(self.allocator, dl) catch return;
+        self.collectShapedPane(collected, pane, builder, dest);
     }
 
-    /// 이미 shapeOnly된 ShapedPane을 collected에 추가한다(활성 panel처럼 frame_builder가 shape를 미리 끝낸 경우 —
-    /// collectShaped는 DrawList부터, 이건 ShapedPane부터). append 실패면 그 페인만 deinit. 소유권은 collected로 이전되므로
-    /// 호출자는 넘긴 ShapedPane을 더는 deinit하지 않는다(중복 정리 방지 — 호출자가 보관 변수를 null로 비운다).
+    /// 이미 shapeOnly된 ShapedPane을 collected에 추가한다 — append-or-deinit 꼬리의 단일 출처다(collectShaped는 DrawList를
+    /// shapeOnly한 뒤 이걸 부르고, 활성 panel은 frame_builder가 미리 shape한 ShapedPane을 바로 넘긴다). append 실패면 그
+    /// 페인만 deinit. 소유권은 collected로 이전되므로 호출자는 넘긴 ShapedPane을 더는 deinit하지 않는다(호출자가 보관
+    /// 변수를 null로 비운다).
     fn collectShapedPane(self: *AppSession, collected: *std.ArrayList(CollectedPane), pane: coretext_frame_builder.ShapedPane, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
         var p = pane;
         collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder }) catch {
@@ -10594,9 +10602,9 @@ pub const AppSession = struct {
                 },
                 // 활성 panel: 다른 pane과 동형으로 built_frames가 소유(pane_frames·active_out은 view라 deinit 안 함).
                 // 호출자가 active_out.rf를 pane_frames 맨 뒤(커서 suffix, floating 앞)에 넣고 그 rf로 render_stats를 산출한다.
-                .active => |p| {
+                .active => {
                     if (built_frames.append(self.allocator, rf)) |_| {
-                        active_out.* = .{ .rf = rf, .placement = p };
+                        active_out.* = .{ .rf = rf };
                     } else |_| {
                         var v = rf;
                         v.deinit(self.allocator);
@@ -10738,8 +10746,8 @@ pub const AppSession = struct {
     /// 기반 cells로 헤더 영역 [0, header)에 직접 박는다(카드·밴드는 .m이 header_h만큼 아래로 시프트). 폭이 너무
     /// 좁거나 헤더 없으면 null(헤더 안 그림). 아이콘 우측 정렬(⚙=cols-4, +=cols-2)은 sidebar.headerHit과 같은
     /// 레이아웃 — 그려진 아이콘과 클릭 영역이 일치한다(§5.4 단일 레이아웃 소스). 검색 입력 텍스트·caret은 P3.
-    /// 알림 종(🔔) + 안 읽은 개수 배지를 row 0의 `bell_col`에 추가한다 — 펼침 헤더(buildSidebarHeaderFrame)와 접힘 토글
-    /// (buildCollapsedToggleFrame)의 **단일 출처**라 글리프(U+1F514, EAW 2칸)·배지 색(coral)·"9+" 규칙이 두 곳에서
+    /// 알림 종(🔔) + 안 읽은 개수 배지를 row 0의 `bell_col`에 추가한다 — 펼침 헤더(buildSidebarHeaderDrawList)와 접힘 토글
+    /// (buildCollapsedToggleDrawList)의 **단일 출처**라 글리프(U+1F514, EAW 2칸)·배지 색(coral)·"9+" 규칙이 두 곳에서
     /// 드리프트하지 않는다. 배지는 안 읽은 알림이 있을 때만 종 한 칸 왼쪽부터: 1~9는 숫자 1칸(`bell_col-1`), 10개 이상은
     /// "9+" 2칸(`bell_col-2`·`bell_col-1`). 종 색은 fg(sidebar_foreground), 배지는 coral. 호출처가 폭을 보장해
     /// (펼침 cols≥13 → bell_col=cols-11≥2, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
@@ -10785,7 +10793,7 @@ pub const AppSession = struct {
         if (cw == 0 or ch == 0 or self.tabs.items.len == 0) return;
         if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return;
         const cols = self.sidebar_width_px / cw;
-        if (cols < 13) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderFrame cols<13과 정합) — 배지도 생략
+        if (cols < 13) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList cols<13과 정합) — 배지도 생략
         const cw_f: f32 = @floatFromInt(cw);
         const ch_f: f32 = @floatFromInt(ch);
         const badge_col = notificationBadgeCol(@intCast(cols - 12)); // 종(cols-12, 2칸) 우측 한 칸 = cols-10 (◧ cols-8과 cols-9 한 칸 띄움)
@@ -10892,7 +10900,7 @@ pub const AppSession = struct {
 
     /// 사이드바 접힘 시 좌상단 알림 종(🔔) 글리프 col — 신호등 클리어런스 오른쪽 **첫(가장 왼쪽)** 아이콘. 펼침 헤더처럼
     /// 종이 ◧ '왼쪽'에 와 접힘↔펼침을 토글해도 종/◧ 순서가 안 바뀐다(사용자 피드백 "◧ 누르면 알림이랑 위치가 바뀜").
-    /// render(buildCollapsedToggleFrame)·hit-test(collapsedNotificationRect)·패널 anchor(openNotificationPanel)가 같은 값을
+    /// render(buildCollapsedToggleDrawList)·hit-test(collapsedNotificationRect)·패널 anchor(openNotificationPanel)가 같은 값을
     /// 쓴다(단일 출처). cell_width 0이면 0.
     fn collapsedBellCol(self: *const AppSession) u16 {
         if (self.cell_width_px == 0) return 0;
@@ -10903,7 +10911,7 @@ pub const AppSession = struct {
     }
 
     /// 접힘 시 ◧ 펼치기 토글 글리프 col — 종 오른쪽 collapsed_bell_gap_cells칸(펼침 헤더의 종↔◧ 3칸 간격과 같은 리듬).
-    /// render(buildCollapsedToggleFrame)·hit-test(collapsedToggleRect)가 같은 값을 써 그려진 버튼과 클릭 영역이 일치한다(단일 출처).
+    /// render(buildCollapsedToggleDrawList)·hit-test(collapsedToggleRect)가 같은 값을 써 그려진 버튼과 클릭 영역이 일치한다(단일 출처).
     fn collapsedToggleCol(self: *const AppSession) u16 {
         return self.collapsedBellCol() + @as(u16, @intCast(collapsed_bell_gap_cells));
     }
@@ -10933,7 +10941,7 @@ pub const AppSession = struct {
     }
 
     /// 접힘 상태 좌상단 펼치기 버튼의 backing-px rect(클릭 hit-test) — render(collapsedToggleCol)와 같은 col. 펼침/접힘
-    /// 아니거나 탭이 없으면(글리프 frame도 안 그려짐 — buildCollapsedToggleFrame과 같은 전제) null. mouse 핸들러가 이
+    /// 아니거나 탭이 없으면(글리프 frame도 안 그려짐 — buildCollapsedToggleDrawList과 같은 전제) null. mouse 핸들러가 이
     /// rect 안 클릭이면 toggleSidebarCollapsed(펼치기)한다(사이드바가 없어 inSidebar=false라 별도 체크). 높이는
     /// **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 max(cell_h, 30pt)라 1.7× 버튼이 cell_h 밖으로 삐져나가는데
     /// cell_h로 잡으면 그 부분이 데드존(클릭·드래그 둘 다 안 됨)이 된다. 가로는 **글리프 중심에 맞춘다**: .m이 ◧를
@@ -11095,7 +11103,7 @@ pub const AppSession = struct {
     /// 놓은 글리프. notice(박스 1개)·find(1행 다중 텍스트)·palette(N행 리스트)가 같은 lowering을 공유한다 —
     /// buildNoticeFrame의 "첫 fill+text" 특수형을 일반화(C1). rule op은 컴포넌트가 아직 안 내므로 무시한다.
     /// **순수**(CoreText 무관) — 셀·격자만 산출해 단위 테스트로 고정한다. 빈 box/0칸이면 에러(호출자가 무시).
-    /// 반환된 cells는 allocator 소유(호출자가 finishOverlayFrame에 넘겨 frame으로 이전하거나 실패 시 deinit).
+    /// 반환된 cells는 allocator 소유(호출자가 finishOverlayPrep에 넘겨 frame으로 이전하거나 실패 시 deinit).
     const OverlayRaster = struct {
         cells: std.ArrayList(renderer.DrawCell),
         // C4b 모달: rich 모달 배경 quad(둥근+테두리). buildChromeOverlayFrame이 self.gpu_quads(layer=1 over)에
@@ -11106,7 +11114,7 @@ pub const AppSession = struct {
         rows: u16,
         origin_x: u32,
         origin_y: u32,
-        // cursor-role fill을 PaneFrame.cursor(반전 블록)로 lower한 caret 위치(없으면 null). finishOverlayFrame이
+        // cursor-role fill을 PaneFrame.cursor(반전 블록)로 lower한 caret 위치(없으면 null). finishOverlayPrep이
         // draw_list.cursor·colors.cursor에 싣고, 컴포지터가 터미널 커서와 같은 경로로 그리고 suffix-trim으로 깜빡인다.
         cursor: ?terminal.Cursor = null,
         // C4b 모달 클리핑: draw.Op.clip의 px 영역(없으면 null). buildChromeOverlayFrame이 MetalFrame.modal_clip_*로
@@ -11178,7 +11186,7 @@ pub const AppSession = struct {
         @memset(cwid, 1);
 
         // 3) painter order로 ops 적용. 좌표는 origin 기준 셀로 환산(음수/범위 밖은 clamp/skip).
-        // cursor role fill은 bg로 안 칠하고 caret 셀로 기록한다 — finishOverlayFrame이 PaneFrame.cursor로 lower해
+        // cursor role fill은 bg로 안 칠하고 caret 셀로 기록한다 — finishOverlayPrep이 PaneFrame.cursor로 lower해
         // 터미널 커서와 같은 반전-블록 렌더·suffix-trim 깜빡임을 재활용한다(컴포넌트는 깜빡임 위상을 모른다).
         var cursor: ?terminal.Cursor = null;
         var overlay_clip: ?chrome.draw.Rect = null; // 모달 클리핑 영역(draw.Op.clip) — 여러 개면 마지막이 이김
@@ -11437,7 +11445,7 @@ pub const AppSession = struct {
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
         // C4b 모달-2b: 모달 배경 quad(layer=1)를 self.gpu_quads(over 패스)에 머지. renderFrame이 매 프레임
-        // dropQuadsByLayer(1)로 layer1을 비운 직후라 누적되지 않는다. cells 소유권은 finishOverlayFrame이.
+        // dropQuadsByLayer(1)로 layer1을 비운 직후라 누적되지 않는다. cells 소유권은 finishOverlayPrep이.
         self.gpu_quads.appendSlice(self.allocator, raster.gpu_quads.items) catch {};
         raster.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.appendSlice(self.allocator, raster.gpu_shadows.items) catch {};
@@ -11445,7 +11453,7 @@ pub const AppSession = struct {
         // 말풍선 caret(GPU 삼각형, gradient_kind=3) — 패널 배경 quad '뒤'에 append해 패널 상단 테두리를 caret 폭만큼
         // 덮어 'bubble을 연다'. 벨 바로 아래(빈 버퍼 행)에서 위로 뾰족. 패널이 세로 clamp로 밀렸거나 벨이 가로 밖이면 생략.
         if (self.chrome_host.notifications.open) self.appendNotificationCaret(notif_items, props, &tokens);
-        // finishOverlayFrame이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
+        // finishOverlayPrep이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
         // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
         errdefer raster.cells.deinit(self.allocator);
         return try self.finishOverlayPrep(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor, raster.clip_rect);
@@ -11503,7 +11511,7 @@ pub const AppSession = struct {
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const cols = self.sidebar_width_px / cw;
-        if (cols < 13) return; // 벨이 안 그려지는 폭 — caret도 생략(buildSidebarHeaderFrame cols<13과 정합)
+        if (cols < 13) return; // 벨이 안 그려지는 폭 — caret도 생략(buildSidebarHeaderDrawList cols<13과 정합)
         const panel = chrome.components.notifications.panelRect(&self.chrome_host.notifications, items, props) orelse return;
         if (panel.y < self.chrome_host.notifications.anchor_y) return; // 세로 clamp로 위로 밀림 — 벨과 어긋나니 생략
         const cw_f: f32 = @floatFromInt(cw);

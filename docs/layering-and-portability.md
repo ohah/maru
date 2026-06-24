@@ -82,6 +82,8 @@ flowchart TD
 
 ### 3.2 3차 추출 (계획): `src/app`의 중립 모델을 session core로
 
+> 실행 플랜·**선결 결정**(`src/app` 정체성 — L4 공통 런타임으로 규정)·단계 D0~D3 상세는 [app-layer-decomposition.md](app-layer-decomposition.md)를 단일 출처로 둔다(아래는 골격).
+
 **동기:** S2로 `Term`/`Pane`/`Tab`은 session으로 갔지만, 그 모델이 의존하는 **중립 모델이 아직 `src/app`에 남아** session이 `src/app`을 import한다(`session_model`이 `app/surface.zig`·`split_tree.zig`·`workspace.zig`를 참조). `src/app`은 중립 모델과 런타임이 섞인 혼합 레이어다(코드로 분류):
 
 | `src/app` 중립 모델 (`pty` 미참조) | `src/app` 런타임 어댑터 (`pty` 참조 = L4적) |

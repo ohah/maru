@@ -28,6 +28,7 @@ const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
 const command_palette = @import("command_palette.zig");
+const find_ops = @import("app_session/find.zig"); // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
 // chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
@@ -4651,19 +4652,7 @@ pub const AppSession = struct {
     /// 스크롤백 Find를 토글한다 — 열려 있으면 닫고(매치 하이라이트 정리), 아니면 연다(빈 검색어). 팝업과 배타적
     /// 이라 팝업을 닫고 연다. UI 상태는 chrome_host.find, 검색은 검색어가 생길 때 recomputeFind가 한다.
     fn toggleFind(self: *AppSession) void {
-        if (self.chrome_host.find.open) {
-            self.chrome_host.find.hide();
-            self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
-            self.find_nav = false; // ⌘G 닫힘-네비 세션도 종료
-        } else {
-            // alt screen(vim/less/Claude/Codex)에서도 연다 — alt에선 findMatches가 현재 화면만 검색해 매치를
-            // 하이라이트한다(스크롤백 매치 제외, 스크롤 네비는 무의미·무동작). 과거엔 iTerm2 관례로 막았으나,
-            // 자체 검색이 없는 TUI(Claude/Codex)를 위해 연다. 베이스: Ghostty(alt에서 active area 검색).
-            self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
-            self.chrome_host.palette.hide();
-            self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
-            self.find_nav = false; // 오버레이가 주도 — 닫힘-네비 플래그 해제
-        }
+        find_ops.toggleFind(self); // 본문 분리: app_session/find.zig(E1)
     }
 
     /// 인라인 rename을 시작한다 — 대상의 현재 custom_name으로 편집기를 시드(없으면 빈 편집기 = 새 이름)하고 다른
@@ -5039,21 +5028,7 @@ pub const AppSession = struct {
     /// 인덱스는 닫기 전 위치 유지 — setMatchCount가 범위 clamp), find_nav를 세워 하이라이트(현재 매치)·출력
     /// 시 재검색을 닫힌 채로도 유지한다. 오버레이가 열려 있으면 모달 라우팅이 키를 가로채 이 경로는 안 탄다.
     fn findNavigate(self: *AppSession, forward: bool) void {
-        if (!self.surface_initialized) return;
-        if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
-        if (self.find_matches.items.len == 0) {
-            // findMatches는 코어 mutate(스크롤백 rewrap)+읽기 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
-            const s = self.activeSurface();
-            s.lockCore(self.io);
-            s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch self.find_matches.clearRetainingCapacity();
-            s.unlockCore(self.io);
-            self.chrome_host.find.setMatchCount(self.find_matches.items.len); // current를 범위로 clamp(닫기 전 위치 보존)
-        }
-        if (self.find_matches.items.len == 0) return; // 매치 없음
-        self.find_nav = true;
-        if (forward) self.chrome_host.find.next() else self.chrome_host.find.prev();
-        self.scrollToCurrentMatch();
-        self.metal_dirty = true;
+        find_ops.findNavigate(self, forward); // 본문 분리: app_session/find.zig(E1)
     }
 
     /// chrome 컴포넌트가 낸 의도(HostAction)를 session 부수효과로 디스패치한다 — chrome은 session을 모르므로(경계)
@@ -5127,38 +5102,20 @@ pub const AppSession = struct {
     /// 스크롤한다(증분 검색 — 타이핑·Backspace마다). 검색어가 비면 매치 0. OOM이면 매치를 비워 안전하게 둔다.
     /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
     fn recomputeFind(self: *AppSession) void {
-        if (!self.surface_initialized) return;
-        {
-            // findMatches는 코어 mutate(ensureScrollbackRewrapped로 스크롤백 realloc)+읽기 — 락 아래
-            // (docs/io-render-threading.md PR3 — 리더 core.write와 경합 시 UAF/크래시 방지).
-            const s = self.activeSurface();
-            s.lockCore(self.io);
-            defer s.unlockCore(self.io);
-            s.core.findMatches(self.allocator, self.chrome_host.find.input.query.items, &self.find_matches) catch {
-                self.find_matches.clearRetainingCapacity();
-            };
-        }
-        self.chrome_host.find.setMatchCount(self.find_matches.items.len);
-        self.chrome_host.find.current = 0; // 재검색은 첫 매치로 리셋(증분)
-        self.scrollToCurrentMatch();
+        find_ops.recomputeFind(self); // 본문 분리: app_session/find.zig(E1)
     }
 
     /// 현재(네비게이션) 매치를 뷰포트로 스크롤한다 — 없으면 무동작. 검색·네비게이션 후 호출(scrollToAbs가
     /// 매치를 세로 중앙쯤에 둬 Find 오버레이(활성 pane 상단 한 줄)에 안 가린다). 현재 인덱스는 chrome_host.find.current.
     fn scrollToCurrentMatch(self: *AppSession) void {
-        if (!self.surface_initialized) return;
-        const cur = self.chrome_host.find.current;
-        if (cur >= self.find_matches.items.len) return;
-        const surface = self.activeSurface();
-        // scrollToAbs는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
-        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_abs = self.find_matches.items[cur].start.row }, self.io) catch {};
+        find_ops.scrollToCurrentMatch(self); // 본문 분리: app_session/find.zig(E1)
     }
 
     /// 현재 활성 탭의 surface. 모든 입력/IME/스크롤/마우스/렌더 경로가 이 seam을 거친다 —
     /// `app_window.active_tab`을 따라가므로 멀티-탭(후속 PR)에서 탭을 전환하면 자동으로 활성 탭에
     /// 라우팅된다. 지금은 단일 탭이라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로
     /// `surface_initialized`로 가드하므로 `active()`는 non-null이 보장된다.
-    fn activeSurface(self: *AppSession) *maru.session.Surface {
+    pub fn activeSurface(self: *AppSession) *maru.session.Surface {
         return self.app_window.active().?;
     }
 

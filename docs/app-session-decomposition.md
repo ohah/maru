@@ -17,7 +17,8 @@
 ## 2. 성격 규정 (정직 — 선결)
 
 - **이식성 직접 기여는 없다.** `app_session`은 **L4 macOS 어댑터**라, 다른 OS로 포팅 시 **재작성 대상**이다(`layering` §2 "L4 = 재작성"). 따라서 이 분해의 1차 목적은 **가독성·테스트 격리·유지보수**이지 이식이 아니다. 이 점을 먼저 못박는다([[prefer-policy-over-codebase-mimicry]]는 정책 우선이지, 없는 이식 효과를 만들지 않는다).
-- **단, 섞여 있는 OS-중립 순수 로직은 session(L2)으로 빼면 이식 기여 + 헤드리스 테스트가 따라온다.** 후보(측정): `pxToCell`/`gridFromBacking`(픽셀↔셀 기하)·find 매치 선택/URL 판정·sidebar 레이아웃 수학·workspace 트리 변환. **순수는 `src/session`으로, macOS orchestration은 `src/platform/macos/app_session/<group>.zig`로** 가른다.
+- **단, 섞여 있는 OS-중립 순수 로직은 session(L2)으로 빼면 이식 기여 + 헤드리스 테스트가 따라온다.** 후보(측정): `pxToCell`/`gridFromBacking`(픽셀↔셀 기하)·sidebar 레이아웃 수학·workspace 트리 변환. **순수는 `src/session`으로, macOS orchestration은 `src/platform/macos/app_session/<group>.zig`로** 가른다.
+  > **실측 정정(E1 착수):** Explore 사전조사가 "find 매치선택 순수 90%"로 추정했으나, 실제 Find(⌘F)는 `chrome_host.find`(UI 상태)·`activeSurface().core`(검색 락)·`runtime`(뷰 스크롤)·`metal_dirty`에 전부 결합한 **orchestration이라 순수분 0**(매치 선택조차 chrome 컴포넌트의 `next`/`prev` 소관)이다. 따라서 E1은 session 이동이 아니라 `app_session/find.zig` 가독성 분리다. 사전 추정 순수도는 착수 시 코드로 재검증한다([[roadmap-docs-stale-verify-with-code]]).
 - **(c) core.zig보다 어려운 3가지 난점:**
   1. **허브 횡단**: `tick`/`mouse`/`handleKeyEvent`가 모든 그룹을 횡단한다 → **잔류**(분해 대상 아님, 내부 가독성은 소함수·주석으로).
   2. **cross-group accessor pub화**: 그룹을 free fn 파일로 빼면, 그 함수가 부르는 공용 accessor(`activePane`·`activeTab`·`activeSurface`·`termRect`·`activeTabLeafRects`)가 **다른 파일에서 호출되므로 pub이어야 한다**. core.zig의 accessor 분리(`absRow` 등, [[core-zig-decomposition-initiative]])와 동형이며, 캡슐화를 약간 양보한다(필드는 Zig가 privacy 없어 무관, 메서드만).
@@ -47,7 +48,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | 단계 | 그룹 | 목적지 | 성격 | 대략 라인(+test) | 위험 |
 |---|---|---|---|---|---|
 | **E0** | 이 문서(doc-first) | — | — | 0 | 없음 |
-| **E1** | find/search(매치 선택·URL 판정·뷰 클립) | `session/`(순수부) + `app_session/find.zig`(신호) | 순수 90% | ~139 | 낮음 |
+| **E1** ✅ | 스크롤백 Find(⌘F): 토글·재검색·네비·뷰스크롤 | `app_session/find.zig` | **orchestration(순수 0)** | ~67(본문) | 낮음 |
 | **E2** | IME 상태기계·커서 rect | `app_session/ime.zig` | 혼합 60% | ~257 | 낮음 |
 | **E3** | tab UI 드로잉(탭바 frame·floating glyph) | `app_session/tab_ui.zig` | 순수 85% | ~382 | 낮음 |
 | **E4** | sidebar 레이아웃 수학(`sidebarMinPt`·지오메트리) | `session/`(순수부) + `app_session/sidebar.zig`(렌더) | 순수 95% | ~280 | 낮음 |
@@ -55,7 +56,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | **E6+** | scroll·clipboard 인코딩·command catalog·notification 파싱 | `app_session/<group>.zig` | 혼합 | 그룹별 | 중 |
 | (잔류) | `tick`·`mouse`·`handleKeyEvent`·`init`/`deinit`·config apply·split(PTY spawn) | `app_session.zig` | orchestration 허브 | — | — |
 
-E1~E4는 상호 의존이 적고 순수도가 높아 **먼저**, E5+는 트리 변형·런타임 결합이라 **나중**. 매 단계가 독립 PR이라 어디서 멈춰도 green.
+E1~E4는 상호 의존이 적고 응집·저위험이라 **먼저**(순수도는 그룹별 상이 — E1 find는 실측 orchestration이었고, E4 sidebar 수학·E5 workspace 변환은 순수분이 있어 session 후보), E5+는 트리 변형·런타임 결합이라 **나중**. 매 단계가 독립 PR이라 어디서 멈춰도 green. accessor pub화 발생분(E1: `activeSurface`)은 각 PR에 기록.
 
 ## 5. 검증
 

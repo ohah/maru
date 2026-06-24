@@ -149,6 +149,75 @@ pub fn Model(comptime Rt: type) type {
                 },
             }
         }
+
+        // ── pane hit-test / 방향 탐색(순수, 레이아웃 rect 기반) ──────────────────────────────────────
+        // 마우스 클릭 panel·키보드 방향 이동 대상을 split 레이아웃 rect로만 고른다(self/OS 무관). platform이
+        // termRect로 layout해 leaf_rects를 만들어 넘긴다 — divider/sidebar hit-test가 chrome인 것과 같은 결로,
+        // pane 선택은 session 모델 연산이다.
+
+        /// 키보드 pane 이동 방향(좌/우/상/하). split 탭에서 활성 panel 기준 인접 panel을 고른다.
+        pub const FocusDirection = enum { left, right, up, down };
+
+        /// 레이아웃 rect들에서 (x_px,y_px)를 담는 panel을 hit-test([x,x+w)×[y,y+h) 반열린). 비유한/밖이면 null.
+        /// 순수 함수(레이아웃 rect만 입력) — OS 무관.
+        pub fn paneAtPoint(leaf_rects: []const PaneTree.LeafRect, x_px: f64, y_px: f64) ?*Pane {
+            if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+            for (leaf_rects) |lr| {
+                const x0: f64 = @floatFromInt(lr.rect.x);
+                const y0: f64 = @floatFromInt(lr.rect.y);
+                if (x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(lr.rect.w)) and
+                    y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(lr.rect.h)))
+                {
+                    return lr.leaf;
+                }
+            }
+            return null;
+        }
+
+        /// 활성 panel에서 dir 방향 가장 가까운 인접 panel(없으면 null). panel rect 중심 비교 — 방향 반평면 안
+        /// 후보 중 주축거리 + 부축어긋남×2(정렬 우대) 최소. 순수 함수 — OS 무관.
+        pub fn paneInDirection(leaf_rects: []const PaneTree.LeafRect, active_pane: *Pane, dir: FocusDirection) ?*Pane {
+            var active_rect: ?split_tree.Rect = null;
+            for (leaf_rects) |lr| {
+                if (lr.leaf == active_pane) {
+                    active_rect = lr.rect;
+                    break;
+                }
+            }
+            const ar = active_rect orelse return null;
+            const acx = @as(f64, @floatFromInt(ar.x)) + @as(f64, @floatFromInt(ar.w)) / 2.0;
+            const acy = @as(f64, @floatFromInt(ar.y)) + @as(f64, @floatFromInt(ar.h)) / 2.0;
+            var best: ?*Pane = null;
+            var best_score: f64 = std.math.inf(f64);
+            for (leaf_rects) |lr| {
+                if (lr.leaf == active_pane) continue;
+                const cx = @as(f64, @floatFromInt(lr.rect.x)) + @as(f64, @floatFromInt(lr.rect.w)) / 2.0;
+                const cy = @as(f64, @floatFromInt(lr.rect.y)) + @as(f64, @floatFromInt(lr.rect.h)) / 2.0;
+                const dx = cx - acx;
+                const dy = cy - acy;
+                const in_dir = switch (dir) {
+                    .left => dx < 0,
+                    .right => dx > 0,
+                    .up => dy < 0,
+                    .down => dy > 0,
+                };
+                if (!in_dir) continue;
+                const primary: f64 = switch (dir) {
+                    .left, .right => @abs(dx),
+                    .up, .down => @abs(dy),
+                };
+                const secondary: f64 = switch (dir) {
+                    .left, .right => @abs(dy),
+                    .up, .down => @abs(dx),
+                };
+                const score = primary + 2.0 * secondary; // 부축 정렬(같은 행/열)을 우대
+                if (score < best_score) {
+                    best_score = score;
+                    best = lr.leaf;
+                }
+            }
+            return best;
+        }
     };
 }
 
@@ -224,4 +293,54 @@ test "session model: workspace 트리 round-trip(flattenTree→buildTreeNode, fa
     const root = try M.buildTreeNode(allocator, &panes, nodes.items, &idx, &splits, &used);
     try std.testing.expectEqual(@as(usize, 2), M.PaneTree.leafCount(root));
     try std.testing.expect(std.meta.activeTag(root) == .split);
+}
+
+// pane hit-test/방향 탐색이 레이아웃 rect만으로(self/OS 없이) 동작 — 마우스 pane 전환·키보드 pane 이동의
+// 기하 코어. leaf는 pointer-identity만 쓰므로 빈 Pane 더미로 충분하다.
+test "session model: paneAtPoint 헤드리스 hit-test(레이아웃 rect만, fake Rt)" {
+    const M = Model(struct {});
+    var a: M.Pane = .{};
+    var b: M.Pane = .{};
+    // 좌우 2-panel: a=[0,100)×[0,200), b=[100,200)×[0,200).
+    const rects = [_]M.PaneTree.LeafRect{
+        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
+        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
+    };
+    try std.testing.expectEqual(&a, M.paneAtPoint(&rects, 50, 100).?);
+    try std.testing.expectEqual(&b, M.paneAtPoint(&rects, 150, 100).?);
+    try std.testing.expectEqual(&a, M.paneAtPoint(&rects, 0, 0).?); // 좌상단 경계 포함
+    try std.testing.expectEqual(&b, M.paneAtPoint(&rects, 100, 0).?); // x=100 경계는 b(반열린)
+    try std.testing.expect(M.paneAtPoint(&rects, 200, 0) == null); // 오른쪽 밖
+    try std.testing.expect(M.paneAtPoint(&rects, 50, 200) == null); // 아래 밖
+    try std.testing.expect(M.paneAtPoint(&rects, std.math.nan(f64), 5) == null); // 비유한
+}
+
+test "session model: paneInDirection 헤드리스 방향 탐색(반평면+정렬, fake Rt)" {
+    const M = Model(struct {});
+    var a: M.Pane = .{};
+    var b: M.Pane = .{};
+    var c: M.Pane = .{};
+    var d: M.Pane = .{};
+
+    // 좌우 2-panel: a 왼쪽, b 오른쪽.
+    const lr = [_]M.PaneTree.LeafRect{
+        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 200 } },
+        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 200 } },
+    };
+    try std.testing.expectEqual(&b, M.paneInDirection(&lr, &a, .right).?);
+    try std.testing.expectEqual(&a, M.paneInDirection(&lr, &b, .left).?);
+    try std.testing.expect(M.paneInDirection(&lr, &a, .up) == null); // 좌우 split이라 위/아래 없음
+    try std.testing.expect(M.paneInDirection(&lr, &c, .left) == null); // 활성 panel이 leaf에 없음
+
+    // 2×2 격자: a=좌상, b=우상, c=좌하, d=우하. 정렬(같은 행/열) 우대.
+    const grid = [_]M.PaneTree.LeafRect{
+        .{ .leaf = &a, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 } },
+        .{ .leaf = &b, .rect = .{ .x = 100, .y = 0, .w = 100, .h = 100 } },
+        .{ .leaf = &c, .rect = .{ .x = 0, .y = 100, .w = 100, .h = 100 } },
+        .{ .leaf = &d, .rect = .{ .x = 100, .y = 100, .w = 100, .h = 100 } },
+    };
+    try std.testing.expectEqual(&b, M.paneInDirection(&grid, &a, .right).?); // a→우: b(같은 행)
+    try std.testing.expectEqual(&c, M.paneInDirection(&grid, &a, .down).?); // a→하: c(같은 열)
+    try std.testing.expectEqual(&d, M.paneInDirection(&grid, &b, .down).?); // b→하: d
+    try std.testing.expectEqual(&c, M.paneInDirection(&grid, &d, .left).?); // d→좌: c(같은 행)
 }

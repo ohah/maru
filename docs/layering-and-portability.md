@@ -88,9 +88,9 @@ flowchart TD
 
 **동기:** S2로 `Term`/`Pane`/`Tab`은 session으로 갔지만, 그 모델이 의존하는 **중립 모델이 아직 `src/app`에 남아** session이 `src/app`을 import한다(`session_model`이 `app/surface.zig`·`split_tree.zig`·`workspace.zig`를 참조). `src/app`은 중립 모델과 런타임이 섞인 혼합 레이어다(코드로 분류):
 
-| `src/app` 중립 모델 (`pty` 미참조) | `src/app` 런타임 어댑터 (`pty` 참조 = L4적) |
+| `src/app` → session 이동(모델, **session/chrome이 의존**) | `src/app` 잔류 |
 |---|---|
-| `surface`·`split_tree`·`workspace`·`window`·`core_command`·`label`·`agent_resume`·`artifact_io` | `live_pty`·`runtime`·`runtime_pump`·`frame_loop`·`host`·`pty_reader`·`live_pty_registry` |
+| `split_tree`·`workspace`·`surface`·`window`·`core_command` | **유틸**(순수하나 app/platform만 씀, 모델 아님): `label`·`agent_resume`·`artifact_io` · **런타임**(`pty` 참조): `live_pty`·`runtime`·`runtime_pump`·`frame_loop`·`host`·`pty_reader`·`live_pty_registry` |
 
 **목표:** 중립 모델을 session core(`src/session/`)로 모으고 `src/app`엔 런타임 어댑터만 남겨, `session→app` 의존을 **0으로** 만든다(session은 terminal·renderer 계약만 의존). 이식 시 모델 전부가 OS-중립으로 재사용된다.
 

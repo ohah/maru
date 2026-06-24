@@ -82,6 +82,14 @@ pub const SpawnRequest = struct {
     size: terminal.Size = terminal.Size.default,
 };
 
+/// captureAgentArgv가 KERN_PROCARGS2로 캡처한 결과 — exec_path(실제 실행 파일 절대경로)와 전체 argv. 두 슬라이스
+/// 모두 호출자가 넘긴 버퍼를 가리킨다(정적 procargs_buf 수명에 안 묶임). 백엔드 간 공유 타입이라 types에 둔다 —
+/// macOS 캡처(macos.zig)와 비-macOS 스텁(session.zig)이 같은 시그니처로 컴파일되게.
+pub const ProcArgs = struct {
+    exec_path: []const u8,
+    argv: []const []const u8,
+};
+
 pub fn plannedBackendForMacOS() Backend {
     return .macos_openpty;
 }

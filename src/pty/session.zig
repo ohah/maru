@@ -90,6 +90,15 @@ const UnsupportedPtySession = struct {
         return false;
     }
 
+    /// 비-macOS 스텁 — macOS 백엔드의 captureAgentArgv(workspace restore의 에이전트 argv 캡처)와 구조 동기.
+    /// 백엔드 없어 항상 null(에이전트 정보 없음 → 일반 셸 복원).
+    pub fn captureAgentArgv(self: *UnsupportedPtySession, str_buf: []u8, argv_out: [][]const u8) ?types.ProcArgs {
+        _ = self;
+        _ = str_buf;
+        _ = argv_out;
+        return null;
+    }
+
     pub fn currentSize(self: *UnsupportedPtySession) !terminal.Size {
         _ = self;
         return error.UnsupportedPlatform;

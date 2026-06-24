@@ -69,12 +69,8 @@ fn parseArgv1Basename(data: []const u8) ?[]const u8 {
     return if (base.len == 0) null else base; // 끝-슬래시뿐인 비정상 경로면 null
 }
 
-/// captureAgentArgv가 돌려주는 캡처 결과 — exec_path(실제 실행 파일 절대경로, command spawn용)와 전체 argv.
-/// 두 슬라이스 모두 호출자가 넘긴 str_buf 내부를 가리킨다(정적 procargs_buf 수명에 안 묶임).
-pub const ProcArgs = struct {
-    exec_path: []const u8,
-    argv: []const []const u8,
-};
+/// captureAgentArgv 캡처 결과 타입 — 비-macOS 스텁(session.zig)과 공유하려고 types.zig에 둔다.
+const ProcArgs = types.ProcArgs;
 
 /// str_buf의 `w` 위치에 src를 복사하고 그 슬라이스를 돌려준다(w 전진). 버퍼가 모자라면 null.
 fn copyInto(buf: []u8, w: *usize, src: []const u8) ?[]const u8 {

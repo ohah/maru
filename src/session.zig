@@ -6,6 +6,7 @@
 pub const input_math = @import("session/input_math.zig");
 pub const ime = @import("session/ime.zig");
 pub const agent_transcript = @import("session/agent_transcript.zig");
+pub const session_model = @import("session/session_model.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

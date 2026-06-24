@@ -35,7 +35,14 @@ const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh cont
 // SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
 // 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. 탭→pane
 // 모델: 한 leaf(Pane)가 여러 Term(터미널)을 가로 탭으로 들고, 화면엔 활성 Term의 surface를 그린다.
-const PaneTree = app.SplitTree(*Pane);
+// 세션 모델(Term/Pane/Tab + split 트리)은 session core가 generic으로 소유한다 — platform은 런타임 결합부
+// `TermRuntime`(아래 정의)을 주입해 인스턴스화하고, 별칭으로 기존 Term/*Term/Pane/Tab/PaneTree 참조를 그대로
+// 쓴다. 단일 출처: src/session/session_model.zig, docs/layering-and-portability.md §3.1.
+const Model = maru.session.session_model.Model(TermRuntime);
+const Term = Model.Term;
+const Pane = Model.Pane;
+const PaneTree = Model.PaneTree;
+const Tab = Model.Tab;
 
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
@@ -174,7 +181,7 @@ const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 const agent_poll_interval_ticks: u32 = 15; // ≈0.5s@30Hz — 포그라운드 프로세스(에이전트) polling 주기.
 // 에이전트 마지막 답변 미리보기를 담는 Term inline 버퍼 크기(바이트). 한 줄 미리보기라 충분하고, 사이드바가
 // 카드 폭으로 다시 말줄임하므로 여기선 넉넉히만 잡는다(UTF-8 경계로 잘려 들어옴).
-const agent_answer_max: usize = 192;
+// agent_answer_max(idle 답변 inline 버퍼 길이)는 Term과 함께 session core로 이동 — src/session/session_model.zig.
 // synchronized output(DECSET 2026) ESU-유실 복구 deadline. 30틱 = 1초(고정 30Hz). BSU(2026h) 후 ESU(2026l)가
 // 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
 // sync를 강제 해제하고 투영한다. 베이스: ESU-유실 안전장치(Ghostty termio sync_reset_ms=1000·xterm.js
@@ -741,10 +748,10 @@ const NormalizedConfig = struct {
 /// `&rt.live_pty.reader`, SplitTree leaf가 잡는 `&surface`)가 안 움직인다. pump는 안정 `*queue`만 들어 이동
 /// 제약이 없다. 탭→pane 모델에서 한 Pane(split leaf)이 이 Term을 가로 탭으로 여러 개 들 수 있다(⌘T로 추가).
 ///
-/// `TermRuntime` = Term의 런타임 부착(PTY 세션·이벤트 펌프·생애 플래그) — OS/런타임 결합부. 모델(surface·
-/// 메타)과 분리해 격리한다(S2-3a, docs/layering-and-portability.md §3.1). heap-pin Term 안에 nested라
-/// reader가 잡는 `&rt.live_pty.reader` 주소 안정성은 그대로다. 후속 S2에서 platform이 분리 소유하고
-/// `session.Term`(모델)은 추상 핸들만 보게 한다.
+/// `TermRuntime` = Term의 런타임 부착(PTY 세션·이벤트 펌프·생애 플래그) — platform이 소유하는 OS/런타임
+/// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). heap-pin
+/// Term 안에 nested라 reader가 잡는 `&rt.live_pty.reader` 주소 안정성은 그대로다. 모델 struct(Term/Pane/Tab)는
+/// session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
 const TermRuntime = struct {
     live_pty: app.LivePtySession = undefined,
     pump: app.RuntimeEventPump = undefined,
@@ -753,37 +760,6 @@ const TermRuntime = struct {
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
 };
-/// 한 터미널의 모델 — surface(OS-중립 그리드/스크롤백)와 라벨·git·agent 메타. 런타임 부착은 generic
-/// 파라미터 `Rt`로 주입한다(platform=`TermRuntime`). session으로 옮겨도 `Rt`(PTY 결합)를 모른 채 모델만
-/// 소유한다 — `SplitTree(comptime Leaf)`와 같은 generic 분리(S2-3b, §3.1). 별칭(`const Term =
-/// TermGeneric(TermRuntime)`)이라 platform의 기존 `Term`/`*Term` 참조는 전부 그대로다(동작 보존).
-fn TermGeneric(comptime Rt: type) type {
-    return struct {
-        surface: app.Surface = undefined,
-        // 런타임 부착(PTY 세션·pump·생애 플래그). generic `Rt`로 주입 — platform이 `TermRuntime`을 넣는다(S2-3b).
-        rt: Rt = .{},
-        // git 브랜치 표시 캐시(owned). cwd(OSC 7)에서 .git/HEAD를 walk-up해 도출한 브랜치명과, 그걸 계산한 cwd.
-        // termGitBranch가 cwd가 바뀔 때만 재계산(매 프레임 fs 읽기 회피). destroyTerm이 해제. 영속 안 함(파생값 — restore가 재도출).
-        git_branch: ?[]const u8 = null,
-        git_branch_cwd: ?[]const u8 = null,
-        // 이 Term의 포그라운드 프로세스가 어떤 에이전트 CLI인지(none/claude/codex). pollAgentKinds가 ≈0.5s마다
-        // tcgetpgrp+proc_name으로 갱신. 사이드바 라벨에 에이전트 심볼로 표시. 파생값(영속 안 함).
-        agent_kind: AgentKind = .none,
-        // 에이전트 세션 진행 상태(unknown/running/idle) — pollAgentState가 세션 JSONL tail로 판정(agent_kind가 none이
-        // 아닐 때만 의미). 사이드바 상태줄·아이콘 펄스에 쓴다. 파생값(영속 안 함). agent_session_mtime=찾은 세션 파일의
-        // 마지막 mtime(나노초) — 안 바뀌면 tail 재파싱 skip. agent_answer_buf/_len=idle일 때 마지막 답변 첫 줄(inline
-        // 버퍼라 alloc 없음 — 사이드바 폭으로 다시 말줄임). 모두 derived: destroyTerm이 따로 해제할 owned 포인터 없음.
-        agent_state: agent_session.State = .unknown,
-        agent_session_mtime: i128 = 0,
-        agent_answer_buf: [agent_answer_max]u8 = undefined,
-        agent_answer_len: usize = 0,
-        // 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 매 tick core_mutex 하에 core.windowTitle()
-        // (OSC 0/2 제목 > cwd basename)을 복사해 채운다 — 렌더 스레드(termLabel)가 reader 스레드의 core.title/cwd
-        // free(OSC 0/2/7)와 경합하지 않게(io-render-threading PR3). 파생값(영속 안 함). destroyTerm이 해제.
-        auto_title: std.ArrayListUnmanaged(u8) = .empty,
-    };
-}
-const Term = TermGeneric(TermRuntime);
 
 /// 닫기 확인이 보류한 닫기 **진입점**(어떤 UI 동작이 닫기를 요청했나). 진입점마다 cascade 정책이 달라, 확정 시 같은
 /// 판단을 다시 하려고 어느 경로였는지 기억한다. 진입점 → 실제 teardown 범위(CloseScope) 변환은 resolveCloseScope가
@@ -808,8 +784,9 @@ const CloseScope = union(enum) {
     session, // 창(세션) 전체
 };
 
-/// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✶, codex=◆).
-const AgentKind = enum(u8) { none = 0, claude, codex };
+/// Term 포그라운드에서 도는 에이전트 CLI 종류 — session core(OS-중립)로 이동, 여기선 별칭(S2-4a).
+/// 정의·심볼(claude=✶, codex=◆) 단일 출처: src/session/session_model.zig.
+const AgentKind = maru.session.session_model.AgentKind;
 
 /// 에이전트 완료 알림 한 건(owned). title=워크스페이스 이름, body=마지막 답변 일부. agent_notifications 큐에
 /// 쌓였다가 pendingNotification()이 드레인하며 title/body를 해제한다(surface_id는 POD라 해제 불요).
@@ -877,62 +854,8 @@ fn classifyAgent(name: ?[]const u8) AgentKind {
 
 /// 한 panel(split leaf = 화면의 한 분할 영역). 탭 모델로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
 /// — `⌘T`가 활성 Pane에 Term을 추가하고, Pane 상단 탭 바가 각 Term을 탭으로 보여준다(PR-C+). 지금(PR-A)은
-/// Pane당 Term 1개로 시작해 동작이 기존과 같다. SplitTree leaf는 이 Pane의 '활성 Term의 surface'를 가리킨다
-/// (활성 Term이 바뀌면 leaf surface를 그 Term으로 갱신 — PR-B). heap-pin(`*Pane`)이라 ArrayList realloc·트리
-/// 회전에도 본체가 안 움직인다(Term이 `&surface`/`&reader`를 거는 주소 안정).
-const Pane = struct {
-    // 이 panel의 Term들(가로 탭, heap-pin `*Term`). 항상 ≥1. `⌘T`가 늘리고 `⌘W`/✕가 줄인다(마지막이면 Pane
-    // collapse). tree leaf는 active_term의 surface를 가리킨다.
-    terms: std.ArrayList(*Term) = .empty,
-    // 이 panel에서 포커스된(보이는) Term 인덱스 — surface/PTY/pump 접근과 tree leaf가 이 Term을 본다.
-    active_term: usize = 0,
-    // Step 2: 가로 탭 스크롤 offset(컬럼). 탭이 바 폭을 넘으면 ‹›버튼/트랙패드가 이 값을 움직여 보이는 탭 창을
-    // 좌우로 민다(per-pane 독립). 0=맨 왼쪽(기본). barMetrics→Metrics.scroll_cols로 전달돼 segOf가 화면 좌표를 민다.
-    tab_scroll_cols: u32 = 0,
-    // 스크롤바 fade 타이머(per-pane — 각 pane이 독립적으로 흐려진다). updateScrollbarFade가 이 pane 활성 Term의
-    // view_offset 변화(스크롤)를 감지해 0(full)으로 리셋하고, idle하면 늘려 appendScrollbar가 alpha를 흐린다.
-    // 활성 pane은 hover/드래그면 0으로 핀(세션 상태). last_view_offset은 변화 감지용 직전 값.
-    scrollbar_idle_ticks: u32 = 0,
-    scrollbar_last_view_offset: usize = 0,
-    // 사용자 지정 이름(rename). Pane은 자동 제목 출처가 없어 custom_name 하나뿐(null=없음). 탭바 좌측 라벨
-    // 세그먼트로 표시(PR2). owned 문자열이라 destroyPane/deinit teardown에서 해제한다. 단일 출처:
-    // docs/workspace-restore.md "사용자 지정 이름(custom_name)과 자동 제목".
-    custom_name: ?[]const u8 = null,
-
-    /// 활성 Term(보이는 터미널). 입력/커서/렌더가 이 Term의 surface를 쓴다. Pane은 항상 Term ≥1.
-    fn activeTerm(self: *Pane) *Term {
-        return self.terms.items[self.active_term];
-    }
-};
-
-const Tab = struct {
-    // 이 워크스페이스(사이드바 탭)의 panel들(heap-pin `*Pane`). split이 늘린다. tree의 leaf가 각 Pane의
-    // 활성 Term `&surface`를 가리킨다.
-    panes: std.ArrayList(*Pane) = .empty,
-    // 포커스된 panel 인덱스 — 입력/커서/탭 대표 surface가 이 panel(의 활성 Term)을 본다. pane 포커스 이동이 바꾼다.
-    active_pane: usize = 0,
-    // 이 탭의 SplitTree 루트(split 모델). 단일 leaf(= 활성 Pane의 활성 Term surface)면 panel 1개 = 풀 탭 영역.
-    // split이 leaf를 split 노드로 바꿔 여러 panel이 된다.
-    tree: PaneTree.Node = undefined,
-    // 워크스페이스(사이드바 탭)의 사용자 지정 이름(rename). 자동 제목 출처가 없어 custom_name 하나뿐(null=없음).
-    // 없으면 사이드바 라벨은 활성 Term 라벨로 폴백한다(app.pickLabel). owned 문자열이라 destroyTabStandalone/deinit
-    // teardown에서 해제한다.
-    custom_name: ?[]const u8 = null,
-    // 위치 고정(우클릭 메뉴 Pin) — true면 드래그 재정렬에서 안 움직이고(moveTab no-op), 사이드바에 고정 표시. workspace.v1 영속.
-    pinned: bool = false,
-    // 사이드바 카드 배경 tint(0xRRGGBB, 0=없음/기본 테마색). 우클릭 메뉴 프리셋. workspace.v1 영속.
-    background_color: u32 = 0,
-
-    /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
-    fn activePane(self: *Tab) *Pane {
-        return self.panes.items[self.active_pane];
-    }
-
-    /// 포커스된 panel의 활성 Term(= 화면에 보이는 터미널). surface/PTY/pump 접근의 최종 단계.
-    fn activeTerm(self: *Tab) *Term {
-        return self.activePane().activeTerm();
-    }
-};
+// Pane/Tab 모델(가로 탭·split 트리)은 session core로 이동했다(§3.1) — 위 `Model` 별칭 참조.
+// 정의·메서드(activeTerm/activePane) 단일 출처: src/session/session_model.zig.
 
 /// 호버 중인 per-pane 탭 참조(어느 Pane의 몇 번째 Term 탭). 호버 ✕ 닫기 대상·렌더에 쓴다. Pane은 heap-pin
 /// 이라 포인터가 안정이고, 닫기 등으로 Pane이 사라지면 호출자가 hovered_tab을 null로 비운다.

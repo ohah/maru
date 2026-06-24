@@ -4,7 +4,7 @@
 //! 한 항목 = cell 2행(제목+본문)이고 안읽음 점(●)·상대시간·닫힌 surface 회색(role 교체)으로 표현한다. **빈 상태**는
 //! 종-슬래시 아이콘 + 굵은 제목 + 부제로 가운데 정렬한다. 패널 폭은 [min,max] cap이라 내용이 길어도 과도하게 넓어지지
 //! 않고(적당한 크기), 넘치는 제목/본문은 `truncateToCols`로 …말줄임한다. **항목은 platform이 주입**하고(palette Row
-//! 선례) '실행'(클릭→activateSurfaceById)도 platform이 한다 — 컴포넌트는 선택(selected)·anchor만 안다(chrome 중립:
+//! 선례) '실행'(클릭→activateSurfaceById)도 platform이 한다 — 컴포넌트는 선택(selected)·호버(hovered)·anchor만 안다(chrome 중립:
 //! surface_id·라이브 포인터 모름). 단일 출처: panelRect를 view·hitTest가 공유(docs/chrome-strategy.md §5.4,
 //! docs/notifications.md §3). 디자인은 Maru 독립 설계다.
 
@@ -24,8 +24,10 @@ const card_rows: u32 = 2;
 /// 상단 헤더 밴드("알림" 제목 + 우측 액션) 높이(cell). viewport 상단 sticky — 카드는 이 아래에서 스크롤한다.
 const header_rows: u32 = 1;
 
-/// 제목/본문 좌측 들여쓰기(칸) — 점(●) 자리 1칸 + 공백 1칸. 점은 안읽음일 때만 그 자리에 그린다(읽음이면 공백).
-const text_indent_cols: u32 = 2;
+/// 제목/본문 좌측 들여쓰기(칸, rect.x 기준). col 1 = 안읽음 점(●) 자리, col 2 = 점↔텍스트 빈 간격, col 3 = 텍스트 시작.
+/// 점은 작은 글리프라 텍스트에 바짝 붙으면 답답해 보여(사용자 피드백) 점↔텍스트 사이에 빈 칸 1개를 둔다(예전 2 → 3).
+/// 점은 안읽음일 때만 col 1에 그린다(읽음이면 빈 칸). 본문줄도 같은 들여쓰기로 제목과 좌측을 맞춘다.
+const text_indent_cols: u32 = 3;
 
 /// 패널 **최소** 폭(칸). 헤더의 "알림" 제목 + "모두 읽음"·"모두 지우기" **버튼**(라벨+좌우 패딩)이 겹치지 않게, 또
 /// 카드가 답답하지 않게 둘 넉넉한 하한. 버튼은 plain 텍스트보다 패딩만큼 넓어 30→34로 키운다. content가 이보다 작아도 보장.
@@ -83,6 +85,10 @@ pub const State = struct {
     anchor_x: i32 = 0,
     anchor_y: i32 = 0,
     selected: usize = 0,
+    /// 마우스가 올라간 카드 인덱스(없으면 null). 키보드 `selected`와 별개다(사이드바 `hovered_slot`↔active 관계와 동형) —
+    /// 마우스 이동마다 platform이 hitTest로 갱신하고 view가 tab_hover_bg로 강조해, 마우스가 가리키는 항목을 구분 인식하게
+    /// 한다(사용자 피드백). selected(tab_active_bg)가 우선이라 같은 카드면 hover는 안 그린다. 키보드 전용 흐름엔 늘 null.
+    hovered: ?usize = null,
     item_count: usize = 0,
     /// 보이는 첫 카드 인덱스(0=최신 위). 카드가 화면 높이를 넘으면 이 offset 윈도우만 렌더(카드 단위 스크롤 — draw.Op에
     /// scissor가 없어 부분 카드를 못 자르므로 통째 카드만). 상한 clamp는 layout(items·metrics 의존)이 하고, 여기선
@@ -94,6 +100,7 @@ pub const State = struct {
         self.anchor_x = x;
         self.anchor_y = y;
         self.selected = 0;
+        self.hovered = null; // 새로 열 때 stale 호버 강조 제거(첫 마우스 이동이 다시 채운다)
         self.item_count = item_count;
         self.scroll_offset = 0;
         self.open = true;
@@ -103,8 +110,13 @@ pub const State = struct {
         self.open = false;
     }
 
-    /// 패널이 열린 채 새 알림이 도착하면 item_count가 달라진다 — platform이 collect/pointer 시 동기화(selected clamp).
+    /// 패널이 열린 채 새 알림이 도착하거나(개수 증가) 카드가 삭제/전체삭제되면(감소) item_count가 달라진다 — platform이
+    /// collect(매 프레임)/삭제 시 동기화한다. selected는 clamp로 가장 가까운 유효 카드로 당긴다. hovered(마우스가 가리키는
+    /// 카드)는 **개수가 바뀔 때만** null로 비운다 — 삭제로 인덱스가 밀리면 그 슬롯에 올라온 다른 카드가 잘못 호버 강조되기
+    /// 때문이다(다음 마우스 이동이 hitTest로 다시 채운다). collect는 매 프레임 같은 n으로 부르므로, n이 그대로면 비우지
+    /// 않아 호버가 프레임 간 유지된다(n != item_count 가드가 그 동작을 가른다 — 리뷰 지적).
     pub fn setItemCount(self: *State, n: usize) void {
+        if (n != self.item_count) self.hovered = null;
         self.item_count = n;
         if (self.selected >= n) self.selected = if (n == 0) 0 else n - 1;
     }
@@ -401,7 +413,7 @@ fn appendCentered(l: Layout, arena: std.mem.Allocator, out: *std.ArrayList(draw.
 /// 패널(배경 quad + 헤더 밴드 + 보이는 카드 윈도우 또는 빈 상태 일러스트 + 스크롤바)을 `out`에 append한다. 안 열렸으면
 /// 무동작. 카드가 화면을 넘으면 items[first..first+visible]만 그린다(카드 단위 스크롤). 순수: state·items·props·tokens만
 /// 읽는다. ops·runs는 호출자 frame arena 소유. 색: surface_bg(박스)·surface_fg(제목·살아있는 글자)·muted_fg(닫힌
-/// surface·시간·액션·부제·스크롤바)·tab_active_bg(선택행)·focus_accent(테두리·안읽음 점)·divider(구분선).
+/// surface·시간·액션·부제·스크롤바)·tab_active_bg(선택행)·tab_hover_bg(호버행·액션 버튼 배경)·focus_accent(테두리·안읽음 점)·divider(구분선).
 pub fn view(
     state: *const State,
     items: []const Item,
@@ -442,15 +454,23 @@ pub fn view(
 
     // 보이는 윈도우: items[first .. first+visible]만 그린다. 화면 vis번째 카드 y = body_top + vis*card_h.
     const body_top = rect.y + header_h_i;
+    // 마지막 카드 아래 구분선은 카드 영역 바닥과 패널 하단 사이에 빈 여백(min_panel_rows baseline gap)이 있을 때만 긋는다.
+    // 스크롤 가능/딱 맞는 경우엔 box_h == header_h + visible*card_h라 카드 영역 바닥 = 패널 하단이고, 거기에 구분선을 그으면
+    // 둥근 테두리(배경 quad corner_radii/border) 위로 1px 선이 겹쳐 보인다(리뷰 지적). gap이 있으면 surface_bg 여백 안에 떨어져 안전.
+    const card_area_bottom = body_top + @as(i32, @intCast(l.visible)) * card_h_i;
+    const has_gap_below = card_area_bottom < rect.y + @as(i32, @intCast(rect.h));
     var vis: usize = 0;
     while (vis < l.visible) : (vis += 1) {
         const i = l.first + vis; // 실제 item 인덱스
         const it = items[i];
         const card_y = body_top + @as(i32, @intCast(vis)) * card_h_i;
         const fg: tokens.ColorRole = if (it.is_alive) .surface_fg else .muted_fg; // 닫힌 surface는 회색 dim
-        // 선택 카드 강조(2행 높이) — palette/context_menu 선택행과 같은 tab_active_bg. 텍스트가 그 위에.
-        if (i == state.selected) {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = rect.w, .h = l.card_h }, .role = .tab_active_bg } });
+        // 카드 배경 강조(2행 높이): 키보드 선택=tab_active_bg(palette/context_menu 선택행과 동일)가 우선, 아니면 마우스
+        // 호버=tab_hover_bg(선택과 다른 톤이라 마우스가 가리키는 항목을 구분 인식 — 사용자 피드백). 호버==선택이면 hover를
+        // 생략한다(같은 칸에 두 번 칠하지 않음). 두 강조의 rect는 role만 다르므로 역할만 고르고 fill은 한 번만 낸다(중복 제거).
+        const bg_role: ?tokens.ColorRole = if (i == state.selected) .tab_active_bg else if (state.hovered == i) .tab_hover_bg else null;
+        if (bg_role) |role| {
+            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y, .w = rect.w, .h = l.card_h }, .role = role } });
         }
         // 제목줄: 안읽음 점(●) + 제목(말줄임) + 우측정렬 상대시간.
         if (!it.is_read) {
@@ -486,8 +506,10 @@ pub fn view(
         const close_runs = try arena.alloc(draw.Run, 1);
         close_runs[0] = .{ .text = close_glyph };
         try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(panel_cols -| 2)) * cw, .y = card_y + ch }, .runs = close_runs, .role = .muted_fg } });
-        // 카드 구분선(보이는 마지막 카드 제외). `.rule`은 macOS no-op이라 `.fill` 1px.
-        if (vis + 1 < l.visible) {
+        // 카드 구분선 — 카드 사이엔 항상, 마지막 카드 아래엔 baseline gap이 있을 때만(has_gap_below) 1px 긋는다. 항목
+        // 경계를 분명히 보이게 한다(사용자 피드백 — 예전엔 마지막 카드를 무조건 건너뛰었다). 마지막 카드 아래 선은 카드↔
+        // 빈 여백 경계를 가르되, gap이 없으면(스크롤/딱 맞음) 패널 하단 테두리와 겹치므로 생략한다. `.rule`은 macOS no-op이라 `.fill`.
+        if (vis + 1 < l.visible or has_gap_below) {
             try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = card_y + card_h_i - 1, .w = rect.w, .h = 1 }, .role = .divider } });
         }
     }
@@ -526,6 +548,17 @@ test "notifications state: show/hide/moveSelection clamp + setItemCount" {
     s.moveSelection(2);
     s.setItemCount(1);
     try std.testing.expectEqual(@as(usize, 0), s.selected);
+    // hovered는 개수가 바뀔 때만 비운다 — 같은 개수면 유지(매 프레임 collect setItemCount가 호버를 지우지 않게).
+    s.setItemCount(1);
+    s.hovered = 0;
+    s.setItemCount(1); // n 불변 → hovered 유지
+    try std.testing.expectEqual(@as(?usize, 0), s.hovered);
+    s.setItemCount(2); // n 변함(삭제/도착) → 밀린 stale 인덱스 비움(다음 마우스 이동이 재설정)
+    try std.testing.expectEqual(@as(?usize, null), s.hovered);
+    // show도 stale 호버를 비운다.
+    s.hovered = 1;
+    s.show(0, 0, 2);
+    try std.testing.expectEqual(@as(?usize, null), s.hovered);
     s.hide();
     try std.testing.expect(!s.open);
 }
@@ -635,8 +668,8 @@ test "notifications view: 빈목록=헤더+일러스트(아이콘·제목·부�
     s.show(100, 50, items.len);
     try view(&s, &items, p, &tk, arena, &out);
     // quad + 헤더(제목 라벨 + 모두읽음 버튼[배경+라벨] + 모두지우기 버튼[배경+라벨]=5) + 헤더 구분선(1) +
-    // 카드0(선택fill+점+제목+시간+본문+✕+구분선=7) + 카드1(제목+시간+본문+✕=4) = 18.
-    try std.testing.expectEqual(@as(usize, 18), out.items.len);
+    // 카드0(선택fill+점+제목+시간+본문+✕+구분선=7) + 카드1(제목+시간+본문+✕+구분선=5) = 19.
+    try std.testing.expectEqual(@as(usize, 19), out.items.len);
     try std.testing.expect(out.items[0] == .quad);
     // 헤더 제목은 surface_fg, 첫 text op.
     try std.testing.expect(out.items[1] == .text and out.items[1].text.role == .surface_fg);
@@ -656,12 +689,66 @@ test "notifications view: 빈목록=헤더+일러스트(아이콘·제목·부�
         if (op == .text and std.mem.eql(u8, op.text.runs[0].text, close_glyph)) close_count += 1;
         if (op == .text and op.text.role == .surface_fg and (std.mem.eql(u8, op.text.runs[0].text, mark_all_label) or std.mem.eql(u8, op.text.runs[0].text, clear_all_label))) active_action_labels += 1;
     }
-    try std.testing.expectEqual(@as(usize, 2), divider_count); // 헤더 구분선 + 카드0↔카드1 구분선
+    try std.testing.expectEqual(@as(usize, 3), divider_count); // 헤더 구분선 + 카드0·카드1 각 아래 구분선(마지막 포함)
     try std.testing.expectEqual(@as(usize, 2), action_bg); // 활성 액션 버튼 배경 2개(모두읽음·지우기)
     try std.testing.expectEqual(@as(usize, 2), active_action_labels); // 활성 라벨 surface_fg 2개
     try std.testing.expect(saw_dot); // 안읽음 점(카드0)
     try std.testing.expect(saw_closed_title); // 닫힌 surface 제목은 muted_fg(dim)
     try std.testing.expectEqual(@as(usize, 2), close_count); // 카드마다 ✕ 1개
+}
+
+// 마우스 호버 강조: hovered 카드는 tab_hover_bg(선택과 다른 톤)로 칠해 "마우스가 가리키는 항목"을 구분 인식하게 한다
+// (사용자 피드백). 키보드 selected(tab_active_bg)가 우선이라 hovered==selected면 hover는 생략한다. 또 카드마다 아래
+// 구분선이 그어지는지(마지막 포함) 확인한다 — 항목 경계를 분명히 보이게 한 요구. tab_hover_bg는 헤더 액션 버튼 배경에도
+// 쓰여(작은 inset, h<card_h) 카드 호버 fill만 골라내려 높이(card_h=32)로 거른다.
+test "notifications view 호버: hovered 카드만 tab_hover_bg(선택 우선) + 카드마다 아래 구분선" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    // 3개 모두 읽음(점 없음)·살아있음. 600px라 셋 다 보이고 스크롤 없음(card_h=32).
+    const items = [_]Item{
+        .{ .title = "a", .body = "b1", .relative_time = "1분 전", .is_read = true, .is_alive = true },
+        .{ .title = "c", .body = "b2", .relative_time = "2분 전", .is_read = true, .is_alive = true },
+        .{ .title = "d", .body = "b3", .relative_time = "3분 전", .is_read = true, .is_alive = true },
+    };
+    const card_h: i32 = 32; // ch(16) × card_rows(2)
+
+    var s: State = .{};
+    s.show(0, 0, items.len); // selected=0(최신)
+    s.hovered = 2; // 카드2 위 마우스(선택과 다른 카드)
+    try view(&s, &items, p, &tk, arena, &out);
+    var active_bg: usize = 0;
+    var hover_card_bg: usize = 0;
+    var dividers: usize = 0;
+    for (out.items) |op| {
+        if (op == .fill and op.fill.role == .tab_active_bg) active_bg += 1;
+        if (op == .fill and op.fill.role == .tab_hover_bg and op.fill.rect.h == card_h) hover_card_bg += 1;
+        if (op == .fill and op.fill.role == .divider) dividers += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), active_bg); // 선택(카드0) 강조
+    try std.testing.expectEqual(@as(usize, 1), hover_card_bg); // 호버(카드2) 강조
+    try std.testing.expectEqual(@as(usize, 4), dividers); // 헤더 구분선 + 카드 3개 각 아래(마지막 포함)
+
+    // hovered==selected → 카드 호버 fill 생략(선택만, 중복 방지).
+    out.clearRetainingCapacity();
+    s.hovered = 0;
+    try view(&s, &items, p, &tk, arena, &out);
+    var hover_card_bg2: usize = 0;
+    for (out.items) |op| if (op == .fill and op.fill.role == .tab_hover_bg and op.fill.rect.h == card_h) {
+        hover_card_bg2 += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), hover_card_bg2);
 }
 
 test "notifications panelRect: 빈 제목 폴백 + [min,max] 폭 cap + 종 밑(사이드바 안 유지) + 화면 우/하단 clamp" {
@@ -745,12 +832,17 @@ test "notifications 스크롤: 화면 넘으면 카드 윈도우(헤더 예약) 
     try view(&s, items, p, &tk, arena_state.allocator(), &out);
     var saw_scrollbar = false;
     var card_titles: usize = 0;
+    var dividers: usize = 0;
     for (out.items) |op| {
         if (op == .fill and op.fill.role == .muted_fg and op.fill.rect.w == 2) saw_scrollbar = true;
         if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "t")) card_titles += 1;
+        if (op == .fill and op.fill.role == .divider) dividers += 1;
     }
     try std.testing.expect(saw_scrollbar); // 스크롤 가능 → thumb 표시
     try std.testing.expectEqual(@as(usize, 1), card_titles); // 보이는 카드 1장만(윈도우)
+    // 스크롤(딱 맞음, baseline gap 없음)이면 마지막=유일 카드 아래 구분선을 생략한다 — 패널 하단 테두리와 겹치지 않게.
+    // 남는 구분선은 헤더 구분선 1개뿐(카드 사이 구분선은 보이는 카드가 1장이라 없음).
+    try std.testing.expectEqual(@as(usize, 1), dividers);
 
     // 최대 스크롤(offset=4)에서도 thumb이 카드 영역(헤더 아래)을 넘지 않는다.
     s.scroll_offset = 4;

@@ -13,7 +13,7 @@ const std = @import("std");
 const surface_mod = @import("surface.zig");
 const split_tree = @import("split_tree.zig");
 const agent_transcript = @import("agent_transcript.zig");
-const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(app.workspace.v1) — TreeNode 변환용
+const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
 
 const Surface = surface_mod.Surface;
 
@@ -94,8 +94,8 @@ pub fn Model(comptime Rt: type) type {
             }
         };
 
-        // ── workspace 직렬화 변환(PaneTree ↔ app.workspace.TreeNode) ──────────────────────────────────
-        // 라이브 split 트리(세션 모델)와 직렬화 모델(app.workspace.v1) 사이의 pure 변환. PTY/렌더 없이
+        // ── workspace 직렬화 변환(PaneTree ↔ session.workspace.TreeNode) ──────────────────────────────────
+        // 라이브 split 트리(세션 모델)와 직렬화 모델(session.workspace.v1) 사이의 pure 변환. PTY/렌더 없이
         // 트리 구조만 다루므로 session core가 소유한다(capture/restore 오케스트레이션·PTY spawn은 platform).
 
         /// 활성 탭 트리(PaneTree, `*Pane` leaf)를 `workspace.TreeNode` preorder 리스트로 평탄화(저장용).

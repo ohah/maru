@@ -66,7 +66,7 @@ test "macOS openpty controlled command reaches SurfaceRuntime snapshot" {
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
     surface.title = "runtime pty";
     surface.command = "/bin/sh -c printf";
@@ -115,7 +115,7 @@ test "macOS openpty controlled command reaches SurfaceRuntime snapshot" {
     );
 
     try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
-    try std.testing.expectEqual(maru.app.ProcessState.exited, surface.process_state);
+    try std.testing.expectEqual(maru.session.ProcessState.exited, surface.process_state);
     try std.testing.expect(std.mem.indexOf(u8, raw.bytes, "runtime pty maru") != null);
     try std.testing.expect(std.mem.indexOf(u8, screen, "runtime pty maru") != null);
 }
@@ -140,7 +140,7 @@ test "macOS PTY reader and pump preserve large stdout through a bounded queue" {
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
     surface.title = "runtime pty stress";
     surface.command = "/bin/sh -c pty-stress";
@@ -200,7 +200,7 @@ test "macOS PTY reader and pump preserve large stdout through a bounded queue" {
     try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
     try std.testing.expectEqual(expected_lines, marker_count);
     try std.testing.expect(raw.output_events > 1);
-    try std.testing.expectEqual(maru.app.ProcessState.exited, surface.process_state);
+    try std.testing.expectEqual(maru.session.ProcessState.exited, surface.process_state);
     try std.testing.expect(std.mem.indexOf(u8, screen, expected_last_line) != null);
 }
 
@@ -247,7 +247,7 @@ test "macOS interactive shell accepts scripted input through a real PTY" {
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
     surface.title = "interactive shell pty";
     surface.command = shell_path;
@@ -309,7 +309,7 @@ test "macOS interactive shell accepts scripted input through a real PTY" {
     );
 
     try std.testing.expectEqual(maru.pty.ExitStatus{ .exited = 0 }, raw.exit_status);
-    try std.testing.expectEqual(maru.app.ProcessState.exited, surface.process_state);
+    try std.testing.expectEqual(maru.session.ProcessState.exited, surface.process_state);
     try std.testing.expect(std.mem.indexOf(u8, raw.bytes, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, screen, marker) != null);
 }
@@ -595,7 +595,7 @@ const InteractiveShellSummary = struct {
     exit_status: maru.pty.ExitStatus,
     output_events: usize,
     queue_capacity: usize,
-    process_state: maru.app.ProcessState,
+    process_state: maru.session.ProcessState,
 };
 
 fn renderInteractiveShellSummary(
@@ -656,7 +656,7 @@ fn exitStatusLabel(status: maru.pty.ExitStatus) []const u8 {
 
 fn renderSurfaceMetadata(
     allocator: std.mem.Allocator,
-    metadata: maru.app.RestorableSurfaceMetadata,
+    metadata: maru.session.RestorableSurfaceMetadata,
 ) ![]u8 {
     // Snapshot은 terminal grid를 보여주고, 이 작은 metadata artifact는
     // workspace restore가 저장 가능한 surface state만 보게 됐는지 확인한다.
@@ -715,7 +715,7 @@ test "macOS reader-processing delivers OSC 11 reply without any render tick (PR3
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
 
     // 리더-처리 켬: 출력을 락 아래 직접 core에 적용 + OSC 응답을 self.session으로 즉시 되쓰기(렌더 tick 무관).
@@ -770,7 +770,7 @@ test "macOS reader-processing answers OSC 11 within a bound under output flood (
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
 
     // 큐는 폭주의 "출력 발생" 빈 신호(청크당 1개, 빈-신호 coalescing 없음 — pty_reader)를 받는다. ~106KB/4KB≈27개
@@ -813,7 +813,7 @@ test "macOS reader write and render snapshot hammer concurrently without corrupt
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
 
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 1024); // ~70 chunk ≪ 1024 → 비블록(drain 불필요)
@@ -860,7 +860,7 @@ test "macOS close during flood reaps reader-processing child without UAF or zomb
     });
     const child_pid = session.child_pid;
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 16); // 작게 — 곧 차 reader가 backpressure 대기
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
     reader.setProcessing(&surface.core, &surface.core_mutex, std.testing.io);
@@ -905,7 +905,7 @@ test "macOS reader-processing writes main input via write_queue as the sole writ
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
 
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 64);
@@ -957,7 +957,7 @@ test "macOS close with pending main-input write unblocks producer and reaps with
     });
     const child_pid = session.child_pid;
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 64);
     var write_queue = try maru.app.PtyWriteQueue.init(std.testing.io, allocator, 1 << 16); // 64KiB cap
     var reader = maru.app.PtyReader.init(allocator, 10, &session, &queue);
@@ -1021,7 +1021,7 @@ test "macOS reader drains main input even when the output event queue is full �
     });
     defer session.deinit();
 
-    var surface = try maru.app.Surface.init(allocator, 1, size);
+    var surface = try maru.session.Surface.init(allocator, 1, size);
     defer surface.deinit();
 
     var queue = try maru.app.PtyEventQueue.init(std.testing.io, allocator, 4); // 작게 — 폭주가 곧 채운다

@@ -13,6 +13,7 @@ const std = @import("std");
 const surface_mod = @import("../app/surface.zig");
 const split_tree = @import("../app/split_tree.zig");
 const agent_transcript = @import("agent_transcript.zig");
+const workspace = @import("../app/workspace.zig"); // OS-중립 직렬화 모델(app.workspace.v1) — TreeNode 변환용
 
 const Surface = surface_mod.Surface;
 
@@ -92,6 +93,62 @@ pub fn Model(comptime Rt: type) type {
                 return self.activePane().activeTerm();
             }
         };
+
+        // ── workspace 직렬화 변환(PaneTree ↔ app.workspace.TreeNode) ──────────────────────────────────
+        // 라이브 split 트리(세션 모델)와 직렬화 모델(app.workspace.v1) 사이의 pure 변환. PTY/렌더 없이
+        // 트리 구조만 다루므로 session core가 소유한다(capture/restore 오케스트레이션·PTY spawn은 platform).
+
+        /// 활성 탭 트리(PaneTree, `*Pane` leaf)를 `workspace.TreeNode` preorder 리스트로 평탄화(저장용).
+        /// leaf는 `tab.panes`의 인덱스로, split은 방향+ratio_milli로 인코딩. arena만 할당하는 pure 함수.
+        pub fn flattenTree(arena: std.mem.Allocator, tab: *Tab, node: PaneTree.Node, out: *std.ArrayList(workspace.TreeNode)) !void {
+            switch (node) {
+                .leaf => |pane_ptr| {
+                    const idx = paneIndexOf(tab, pane_ptr) orelse return error.PaneNotFound;
+                    try out.append(arena, .{ .leaf = idx });
+                },
+                .split => |s| {
+                    const milli: u16 = @intFromFloat(@round(std.math.clamp(s.ratio, 0.0, 1.0) * 1000.0));
+                    try out.append(arena, .{ .split = .{ .direction = s.direction, .ratio_milli = milli } });
+                    try flattenTree(arena, tab, s.a, out);
+                    try flattenTree(arena, tab, s.b, out);
+                },
+            }
+        }
+
+        fn paneIndexOf(tab: *Tab, pane: *Pane) ?usize {
+            for (tab.panes.items, 0..) |p, i| {
+                if (p == pane) return i;
+            }
+            return null;
+        }
+
+        /// `workspace.TreeNode` preorder를 `PaneTree.Node`(`*Pane`)로 복원. leaf 인덱스→`panes[i]`, split은
+        /// 새 노드(allocator로 생성, `splits`에 추적). 같은 pane을 두 leaf로 참조하면 error(UAF 차단). allocator만
+        /// 쓰는 pure 함수 — `self.allocator` 대신 인자로 받아 platform 비의존(호출자가 splits capacity 예약).
+        pub fn buildTreeNode(allocator: std.mem.Allocator, panes: []const *Pane, nodes: []const workspace.TreeNode, idx: *usize, splits: *std.ArrayList(*PaneTree.Split), used: []bool) !PaneTree.Node {
+            if (idx.* >= nodes.len) return error.MalformedTree;
+            const node = nodes[idx.*];
+            idx.* += 1;
+            switch (node) {
+                .leaf => |pane_index| {
+                    if (pane_index >= panes.len) return error.MalformedTree;
+                    if (used[pane_index]) return error.MalformedTree; // 같은 pane을 두 leaf로 참조(중복) — UAF 차단
+                    used[pane_index] = true;
+                    return .{ .leaf = panes[pane_index] };
+                },
+                .split => |s| {
+                    const split = try allocator.create(PaneTree.Split);
+                    splits.appendAssumeCapacity(split); // capacity 예약됨 — 무실패 추적(create↔추적 사이 누수 없음)
+                    split.* = .{
+                        .direction = s.direction,
+                        .ratio = split_tree.clampRatio(@as(f32, @floatFromInt(s.ratio_milli)) / 1000.0),
+                        .a = try buildTreeNode(allocator, panes, nodes, idx, splits, used),
+                        .b = try buildTreeNode(allocator, panes, nodes, idx, splits, used),
+                    };
+                    return .{ .split = split };
+                },
+            }
+        }
     };
 }
 
@@ -127,4 +184,44 @@ test "session model: 헤드리스 — fake Rt로 Term/Pane/Tab/PaneTree 구성(P
     try tab.panes.append(allocator, &pane);
     try std.testing.expectEqual(&pane, tab.activePane());
     try std.testing.expectEqual(&t1, tab.activeTerm());
+}
+
+// workspace 직렬화 변환(flattenTree→buildTreeNode)이 라이브 트리를 PTY/surface 없이 round-trip한다.
+// 저장(라이브→TreeNode)·복원(TreeNode→라이브)이 session core에서 pure하게 닫힘을 증명한다(S2-5).
+test "session model: workspace 트리 round-trip(flattenTree→buildTreeNode, fake Rt)" {
+    const FakeRt = struct {};
+    const M = Model(FakeRt);
+    const allocator = std.testing.allocator;
+
+    var pane0: M.Pane = .{};
+    var pane1: M.Pane = .{};
+    defer pane0.terms.deinit(allocator);
+    defer pane1.terms.deinit(allocator);
+    var split = M.PaneTree.Split{ .direction = .vertical, .ratio = 0.4, .a = .{ .leaf = &pane0 }, .b = .{ .leaf = &pane1 } };
+
+    var tab: M.Tab = .{ .tree = .{ .split = &split } };
+    defer tab.panes.deinit(allocator);
+    try tab.panes.append(allocator, &pane0);
+    try tab.panes.append(allocator, &pane1);
+
+    // 라이브 트리 → preorder TreeNode 리스트([split, leaf0, leaf1]).
+    var arena_inst = std.heap.ArenaAllocator.init(allocator);
+    defer arena_inst.deinit();
+    var nodes: std.ArrayList(workspace.TreeNode) = .empty;
+    try M.flattenTree(arena_inst.allocator(), &tab, tab.tree, &nodes);
+    try std.testing.expectEqual(@as(usize, 3), nodes.items.len);
+
+    // TreeNode 리스트 → 라이브 트리 복원(leaf 인덱스→panes[i], split 새 노드).
+    const panes = [_]*M.Pane{ &pane0, &pane1 };
+    var splits: std.ArrayList(*M.PaneTree.Split) = .empty;
+    defer {
+        for (splits.items) |sp| allocator.destroy(sp);
+        splits.deinit(allocator);
+    }
+    try splits.ensureTotalCapacity(allocator, 1);
+    var used = [_]bool{ false, false };
+    var idx: usize = 0;
+    const root = try M.buildTreeNode(allocator, &panes, nodes.items, &idx, &splits, &used);
+    try std.testing.expectEqual(@as(usize, 2), M.PaneTree.leafCount(root));
+    try std.testing.expect(std.meta.activeTag(root) == .split);
 }

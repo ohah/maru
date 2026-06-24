@@ -18,12 +18,13 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
   각 surface의 shell_entry
   사용자가 명시한 startup_recipe
   사용자가 명시한 safe env overrides
+  claude/codex 세션 resume 정보(opt-in — agent_kind·session_id·보존 argv; 아래 allowlist 절)
 
 저장하지 않는 것:
   live PTY handle
   child process id
   임의의 전체 env dump
-  last_observed_command 자동 재실행 정보
+  임의 명령의 last_observed_command 자동 재실행 정보(claude/codex는 allowlist 예외 — 아래 절)
 ```
 
 ## 자동 복구와 명령 재실행은 다르다
@@ -48,6 +49,49 @@ workspace restore가 이것을 자동 재실행하면 위험하다.
 - repo별 기본 command는 사용자가 `startup_recipe`로 명시한 경우에만 실행 후보가 된다.
 - destructive할 수 있는 `startup_recipe` 자동 실행은 나중에 confirmation이나 allowlist가 필요하다.
 
+## 에이전트 세션 자동 resume (claude/codex allowlist 예외)
+
+위 "임의 명령 자동 재실행 금지"의 **명시적 예외**다. claude·codex는 자체 resume 기능을 가진 안전한 에이전트라,
+opt-in 토글이 켜졌을 때 종료 전 세션을 자동으로 다시 연다. 임의 셸 명령(`rm -rf`·`deploy-prod`) 재실행과 본질이
+다르다 — 에이전트 resume은 "직전 대화를 다시 연다"이지 "부수효과 명령을 재실행"이 아니다. claude `--resume <id>` /
+codex `resume <id>`는 그 도구가 설계한 정상 재개 경로다.
+
+### 무엇을 저장하나
+
+- `agent_kind`: `claude` | `codex`(그 외는 일반 셸 복원).
+- `session_id`: 트랜스크립트에서 발견한 세션 식별자. **새로 만들지 않고 이미 디스크에 있는 값을 읽는다** —
+  claude는 `~/.claude/projects/<enc(cwd)>/<uuid>.jsonl`의 파일명, codex는 rollout 첫 줄 `session_meta.payload.id`.
+- 보존 `argv`: 종료 시점 에이전트의 전체 argv. `--resume`이 권한 모드를 복원하지 않으므로(아래), 직전 플래그를
+  재현하려면 argv가 필요하다.
+
+### 다중 세션과 session_id
+
+같은 cwd에 세션이 여럿이면 claude `--continue`·codex `resume --last`는 "가장 최근 1개"만 잡는다. 그 페인들을 모두
+`--continue`로 복원하면 여러 프로세스가 한 transcript에 동시에 써서 대화가 뒤섞인다. 그래서 **session_id 단위로
+정확히** 복원한다(`--resume <id>` / `resume <id>`). session_id를 못 찾으면 `--continue` / `resume --last`로 graceful
+degrade한다(가장 최근 1개 — 다중 세션이면 부정확하나 세션을 잃지는 않는다).
+
+### 위험모드(권한 플래그) 재현
+
+claude `--resume`은 대화만 복원하고 `--dangerously-skip-permissions` 같은 권한 모드는 복원하지 않는다(런타임
+플래그라 세션에 저장되지 않음). 저장한 argv를 재주입해 직전 권한 모드를 그대로 재현한다. 이는 **새 위험을 만드는
+게 아니라 직전 상태 복원**이다 — 그래서 토글 기본값을 OFF(opt-in)로 두어 위험모드 자동 재현을 사용자가 명시적으로
+켜게 한다.
+
+### redaction 경계
+
+- `session_id`는 자격증명이 아니라 **불투명한 로컬 식별자**이고 이미 `~/.claude`·`~/.codex`에 평문으로 있다. 같은
+  사용자 홈의 또 다른 로컬 파일(workspace 저장본)에 둘 뿐 권한 경계가 늘지 않으므로 redaction 대상이 아니다.
+- 보존 `argv`는 redact한다. 토큰성 key(`TOKEN`·`SECRET`·`KEY`·`AUTH`·`PASSWORD`·`CREDENTIAL` 등 —
+  [프로젝트 규칙](project-rules.md) "민감정보 redaction 기준" 단일 출처)를 가진 `--key=value` 토큰은 **드롭**
+  (deny-by-default). `--dangerously-skip-permissions` 같은 무해 플래그만 보존한다.
+- env는 여전히 통째로 저장하지 않는다 — session_id는 트랜스크립트 파일에서 얻으므로 자식 env를 덤프하지 않는다.
+
+### config 토글
+
+- `workspace.restore-claude` / `workspace.restore-codex` — 각각 독립, **기본 false(opt-in)**.
+- 토글이 꺼지면 그 종류는 캡처·복원 양쪽 다 비활성(일반 셸로 복원).
+
 ## command 관련 용어
 
 `shell_entry`:
@@ -67,6 +111,7 @@ workspace restore가 이것을 자동 재실행하면 위험하다.
 - shell integration이 관측한 마지막 command다.
 - 최근 작업 세션 UI나 힌트에는 쓸 수 있지만 자동 재실행 대상은 아니다.
 - 이 값을 저장할 경우에도 민감정보 redaction과 사용자 동의가 필요하다.
+- 단, claude/codex는 위 "에이전트 세션 자동 resume" allowlist 예외로 별도 관리한다(임의 명령이 아니라 도구 자체 resume).
 
 ## 저장 모델 초안
 
@@ -188,3 +233,6 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 - `shell_entry`와 `startup_recipe argv`가 round-trip되는 테스트.
 - `last_observed_command`가 자동 실행 후보로 저장되지 않는 테스트.
 - cwd가 없을 때 surface별 restore failure artifact를 남기는 테스트.
+- claude/codex `agent_kind`·`session_id`·보존 `argv`가 round-trip되는 테스트.
+- 토큰성 key(`--api-key=…` 등)를 가진 argv 토큰이 redact(드롭)되는 테스트.
+- `session_id`를 못 찾을 때 `--continue`/`resume --last` 폴백으로 degrade하는 테스트.

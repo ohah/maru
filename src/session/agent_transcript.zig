@@ -215,10 +215,9 @@ pub fn parseCodexTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: 
     return .{ .state = state, .answer = answer_buf[0..answer_len] };
 }
 
-/// codex rollout 첫 줄(`session_meta`)에서 `payload.cwd`를 `out`으로 복사해 돌려준다. session_meta가 아니거나
-/// cwd가 없거나 버퍼가 작으면 null. codex는 날짜 분할(`<YYYY>/<MM>/<DD>/`)이라 cwd로 디렉터리를 못 찾으므로,
-/// platform이 최근 rollout들의 첫 줄을 읽어 이 함수로 cwd를 뽑아 일치하는 최신 세션을 고른다(순수 — 줄 파싱만).
-pub fn parseCodexCwd(scratch: std.mem.Allocator, first_line: []const u8, out: []u8) ?[]const u8 {
+/// codex rollout 첫 줄(`session_meta`)의 `payload.<field>` 문자열을 `out`으로 복사해 돌려준다. session_meta가
+/// 아니거나 필드가 없거나 버퍼가 작으면 null. parseCodexCwd/parseCodexId의 공통 구현(순수 — 줄 파싱만).
+fn parseCodexMetaField(scratch: std.mem.Allocator, first_line: []const u8, field: []const u8, out: []u8) ?[]const u8 {
     const line = std.mem.trim(u8, first_line, " \t\r\n");
     const parsed = std.json.parseFromSlice(std.json.Value, scratch, line, .{}) catch return null;
     defer parsed.deinit();
@@ -227,11 +226,23 @@ pub fn parseCodexCwd(scratch: std.mem.Allocator, first_line: []const u8, out: []
     const entry_type = asString(obj.get("type") orelse return null) orelse return null;
     if (!std.mem.eql(u8, entry_type, "session_meta")) return null;
     const payload = asObject(obj.get("payload") orelse return null) orelse return null;
-    const cwd = asString(payload.get("cwd") orelse return null) orelse return null;
+    const val = asString(payload.get(field) orelse return null) orelse return null;
 
-    if (cwd.len > out.len) return null;
-    @memcpy(out[0..cwd.len], cwd);
-    return out[0..cwd.len];
+    if (val.len > out.len) return null;
+    @memcpy(out[0..val.len], val);
+    return out[0..val.len];
+}
+
+/// codex rollout 첫 줄(`session_meta`)에서 `payload.cwd`를 뽑는다. codex는 날짜 분할(`<YYYY>/<MM>/<DD>/`)이라
+/// cwd로 디렉터리를 못 찾으므로, platform이 최근 rollout들의 첫 줄을 읽어 cwd 일치하는 최신 세션을 고른다.
+pub fn parseCodexCwd(scratch: std.mem.Allocator, first_line: []const u8, out: []u8) ?[]const u8 {
+    return parseCodexMetaField(scratch, first_line, "cwd", out);
+}
+
+/// codex rollout 첫 줄(`session_meta`)에서 `payload.id`(세션 UUID)를 뽑는다. `codex resume <id>`의 대상 식별자다
+/// (UUIDv7 — docs/workspace-restore.md "에이전트 세션 자동 resume"). 규칙은 parseCodexCwd와 동일.
+pub fn parseCodexId(scratch: std.mem.Allocator, first_line: []const u8, out: []u8) ?[]const u8 {
+    return parseCodexMetaField(scratch, first_line, "id", out);
 }
 
 /// JSON 문자열 값의 첫 줄을 `dst`에 UTF-8 경계로 말줄임 복사하고 쓴 바이트 수를 반환(문자열이 아니거나 null이면
@@ -468,4 +479,25 @@ test "parseCodexCwd: session_meta 첫 줄에서 payload.cwd 추출" {
         \\{"type":"session_meta","payload":{"id":"u"}}
     ;
     try std.testing.expectEqual(@as(?[]const u8, null), parseCodexCwd(std.testing.allocator, no_cwd, &scratch_buf));
+}
+
+test "parseCodexId: session_meta 첫 줄에서 payload.id(세션 UUID) 추출" {
+    var scratch_buf: [256]u8 = undefined;
+    const meta =
+        \\{"timestamp":"2026-06-01T18:52:03Z","type":"session_meta","payload":{"id":"019e8298-f7bf-7b63-b9a4-46626868c072","cwd":"/Users/yoonhb"}}
+    ;
+    try std.testing.expectEqualStrings(
+        "019e8298-f7bf-7b63-b9a4-46626868c072",
+        parseCodexId(std.testing.allocator, meta, &scratch_buf).?,
+    );
+    // session_meta가 아니면 null.
+    const not_meta =
+        \\{"type":"response_item","payload":{"type":"message"}}
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseCodexId(std.testing.allocator, not_meta, &scratch_buf));
+    // id 누락도 null.
+    const no_id =
+        \\{"type":"session_meta","payload":{"cwd":"/x"}}
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseCodexId(std.testing.allocator, no_id, &scratch_buf));
 }

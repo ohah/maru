@@ -69,6 +69,79 @@ fn parseArgv1Basename(data: []const u8) ?[]const u8 {
     return if (base.len == 0) null else base; // 끝-슬래시뿐인 비정상 경로면 null
 }
 
+/// captureAgentArgv가 돌려주는 캡처 결과 — exec_path(실제 실행 파일 절대경로, command spawn용)와 전체 argv.
+/// 두 슬라이스 모두 호출자가 넘긴 str_buf 내부를 가리킨다(정적 procargs_buf 수명에 안 묶임).
+pub const ProcArgs = struct {
+    exec_path: []const u8,
+    argv: []const []const u8,
+};
+
+/// str_buf의 `w` 위치에 src를 복사하고 그 슬라이스를 돌려준다(w 전진). 버퍼가 모자라면 null.
+fn copyInto(buf: []u8, w: *usize, src: []const u8) ?[]const u8 {
+    if (w.* + src.len > buf.len) return null;
+    @memcpy(buf[w.* .. w.* + src.len], src);
+    const out = buf[w.* .. w.* + src.len];
+    w.* += src.len;
+    return out;
+}
+
+/// KERN_PROCARGS2 버퍼에서 exec_path와 argv[0..argc]를 파싱해 str_buf로 복사하고 argv 슬라이스를 argv_out에
+/// 채운다(반환 슬라이스는 모두 str_buf 내부 — procargs_buf 수명에 안 묶여 캡처 후 안전). 레이아웃:
+/// [argc:int][exec_path\0][\0 패딩][argv0\0]…[argv(argc-1)\0][envp…]. str_buf·argv_out이 모자라면 거기까지만.
+/// 순수 함수(sysctl과 분리해 단위 테스트). argc=0이거나 토큰 0개면 null.
+fn parseProcArgs(data: []const u8, str_buf: []u8, argv_out: [][]const u8) ?ProcArgs {
+    if (data.len <= @sizeOf(c_int)) return null;
+    const argc: u32 = @as(u32, data[0]) | (@as(u32, data[1]) << 8) | (@as(u32, data[2]) << 16) | (@as(u32, data[3]) << 24);
+    if (argc == 0) return null;
+    var off: usize = @sizeOf(c_int);
+    const exec_start = off;
+    while (off < data.len and data[off] != 0) off += 1; // exec_path
+    var w: usize = 0;
+    const exec_path = copyInto(str_buf, &w, data[exec_start..off]) orelse return null;
+    while (off < data.len and data[off] == 0) off += 1; // argv 시작 전 null 패딩
+
+    var n: usize = 0;
+    while (n < argc and off < data.len) {
+        // argv_out·str_buf 부족은 **잘림**이다 — 부분 argv를 쓰면 꼬리의 위험모드 플래그가 silent하게 잘려
+        // 잘못 복원되므로, 부분 캡처 대신 null로 포기해 호출자가 폴백(--continue/일반 셸)하게 한다.
+        if (n >= argv_out.len) return null;
+        const s = off;
+        while (off < data.len and data[off] != 0) off += 1;
+        argv_out[n] = copyInto(str_buf, &w, data[s..off]) orelse return null;
+        n += 1;
+        if (off < data.len) off += 1; // 토큰 구분 null 건너뜀
+    }
+    if (n == 0) return null;
+    return .{ .exec_path = exec_path, .argv = argv_out[0..n] };
+}
+
+test "parseProcArgs: exec_path + 전체 argv 캡처(str_buf로 복사, argc 게이트로 envp 제외)" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a, &[_]u8{ 3, 0, 0, 0 }); // argc=3 (LE int)
+    try buf.appendSlice(a, "/Users/x/.local/bin/claude"); // exec_path
+    try buf.append(a, 0);
+    try buf.appendSlice(a, &[_]u8{ 0, 0 }); // null 패딩
+    try buf.appendSlice(a, "claude"); // argv[0]
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "--dangerously-skip-permissions"); // argv[1]
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "--resume"); // argv[2]
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "ANTHROPIC_API_KEY=secret"); // envp[0] — argc=3 게이트로 안 읽혀야 함
+    try buf.append(a, 0);
+
+    var str_buf: [512]u8 = undefined;
+    var argv_out: [8][]const u8 = undefined;
+    const r = parseProcArgs(buf.items, &str_buf, &argv_out) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("/Users/x/.local/bin/claude", r.exec_path);
+    try std.testing.expectEqual(@as(usize, 3), r.argv.len); // envp는 argc 게이트로 제외
+    try std.testing.expectEqualStrings("claude", r.argv[0]);
+    try std.testing.expectEqualStrings("--dangerously-skip-permissions", r.argv[1]);
+    try std.testing.expectEqualStrings("--resume", r.argv[2]);
+}
+
 /// 포그라운드 pgid의 argv[1] 스크립트 basename(KERN_PROCARGS2). 정적 procargs_buf의 슬라이스다.
 fn foregroundScriptBasename(pgid: c_int) ?[]const u8 {
     var mib = [_]c_int{ ctl_kern, kern_procargs2, pgid };
@@ -463,6 +536,23 @@ pub const PtySession = struct {
             }
         }
         return comm;
+    }
+
+    /// 포그라운드 pgid(=에이전트 프로세스)의 exec_path + 전체 argv를 KERN_PROCARGS2로 캡처해 str_buf/argv_out에
+    /// 복사해 돌려준다 — workspace restore가 종료 시점에 claude/codex의 보존 argv를 캡처하는 용도
+    /// (docs/workspace-restore.md "에이전트 세션 자동 resume"). 반환 슬라이스는 str_buf/argv_out 내부를 가리킨다
+    /// (정적 procargs_buf에 안 묶임 — 호출자가 따로 소유). **틱 스레드 전용**(procargs_buf 공유 —
+    /// foregroundProcessName과 같은 규약). 닫혔거나 fd 음수·pgid≤0·sysctl 실패·파싱 실패면 null.
+    pub fn captureAgentArgv(self: *PtySession, str_buf: []u8, argv_out: [][]const u8) ?ProcArgs {
+        if (self.closing.load(.acquire)) return null;
+        const fd = self.master_fd.load(.acquire);
+        if (fd < 0) return null;
+        const pgid = tcgetpgrp(fd);
+        if (pgid <= 0) return null;
+        var mib = [_]c_int{ ctl_kern, kern_procargs2, pgid };
+        var size: usize = procargs_buf.len;
+        if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
+        return parseProcArgs(procargs_buf[0..size], str_buf, argv_out);
     }
 
     /// 이 PTY에 **셸 자신이 아닌 포그라운드 작업(명령)이 돌고 있는지**를 반환한다. child(셸)는 spawn 때 setsid로

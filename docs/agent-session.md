@@ -11,6 +11,10 @@
 판정해 사이드바에 아이콘 표시(`pollAgentKinds`/`classifyAgent`/`Term.agent_kind`). 이 문서는 그 위에 **진행
 상태·마지막 답변·알림**을 얹는다. 신호원은 에이전트의 세션 JSONL이다.
 
+이 세션 파일 탐색 인프라(`resolveClaude`/`resolveCodex`)는 **workspace restore**가 종료 시점에 resume 대상
+**session id**를 캡처하는 데도 재사용된다(`resolveSessionId` — claude=파일명 uuid, codex=`session_meta.payload.id`;
+[workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 resume").
+
 ## 왜 JSONL인가 (방식 결정)
 
 | 방식 | running/idle | 마지막 답변 | 알림 | 백그라운드 | UX |

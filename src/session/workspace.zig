@@ -39,7 +39,7 @@ pub const TreeNode = union(enum) {
     };
 };
 
-/// 한 터미널(Term)의 복원 가능 선언 상태(app.surface.RestorableSurfaceMetadata의 직렬화 부분집합 — id/
+/// 한 터미널(Term)의 복원 가능 선언 상태(session.surface.RestorableSurfaceMetadata의 직렬화 부분집합 — id/
 /// process_state 같은 런타임 값은 복원에 불필요하므로 안 담는다). cwd=OSC 7, title=OSC 0/2, command=spawn argv[0].
 /// v1 복원이 실제로 소비하는 건 cwd·cols·rows뿐이다. title·command는 **목표 포맷의 선행 구현**으로 캡처·저장만
 /// 하고 복원 spawn엔 아직 안 쓴다(기본 셸·"Maru" 제목으로 살림). 헛방어/유령 필드가 아니라 docs/workspace-restore.md에

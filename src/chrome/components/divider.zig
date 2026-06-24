@@ -52,7 +52,7 @@ pub fn hitTest(segs: []const Seg, cell_width_px: u32, cell_height_px: u32, x_px:
 }
 
 /// 드래그 위치 → 새 분할 비율(normal 축 기준). 세로선=`(x − bounds.x)/bounds.w`, 가로선=`(y − bounds.y)/bounds.h`.
-/// 0폭/0높이·비유한이면 null(host가 무시). **클램프는 host가 한다**(app.clampRatio — chrome은 app 상수를 모른다).
+/// 0폭/0높이·비유한이면 null(host가 무시). **클램프는 host가 한다**(session.clampRatio — chrome은 app 상수를 모른다).
 /// (옛 dragDividerTo 수학 이전.)
 pub fn dragRatio(seg: Seg, x_px: f64, y_px: f64) ?f32 {
     const raw: f64 = switch (seg.orientation) {

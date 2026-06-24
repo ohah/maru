@@ -32,8 +32,8 @@ const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh cont
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
 // chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
 
-// SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). app 레이어는 generic만 노출하고 Pane은
-// 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 app→platform 의존이 생기지 않는다. 탭→pane
+// SplitTree를 leaf = `*Pane`으로 인스턴스화한다(트리는 panel 단위). session 레이어는 generic만 노출하고 Pane은
+// 이 platform 모듈이 정의하므로, 트리가 panel을 leaf로 들면서도 session→platform 의존이 생기지 않는다. 탭→pane
 // 모델: 한 leaf(Pane)가 여러 Term(터미널)을 가로 탭으로 들고, 화면엔 활성 Term의 surface를 그린다.
 // 세션 모델(Term/Pane/Tab + split 트리)은 session core가 generic으로 소유한다 — platform은 런타임 결합부
 // `TermRuntime`(아래 정의)을 주입해 인스턴스화하고, 별칭으로 기존 Term/*Term/Pane/Tab/PaneTree 참조를 그대로

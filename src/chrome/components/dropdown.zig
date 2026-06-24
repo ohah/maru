@@ -71,6 +71,26 @@ test "dropdown view: 현재값 + ▾ 텍스트(surface_fg, control rect 좌상�
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
+test "dropdown view: 표시 토큰의 '_'→'-' 변환(config dashed 규약 — 테마 프리셋·commit_only 등)" {
+    // @tagName은 underscore(rose_pine·commit_only), config 파일·문서는 dash(rose-pine·commit-only). 드롭다운은
+    // 표시 시점에 변환한다(schema.appendEnumField 주석의 설계 — 여기서 검증). underscore가 남으면 회귀.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    try view(test_rect, "rose_pine", &tk, arena, &out);
+    const label = out.items[0].text.runs[0].text;
+    try std.testing.expect(std.mem.startsWith(u8, label, "rose-pine")); // dashed로 표시
+    try std.testing.expect(std.mem.indexOfScalar(u8, label, '_') == null); // underscore 잔존 없음
+
+    // 다중 underscore(가상 토큰)도 전부 변환.
+    out.clearRetainingCapacity();
+    try view(test_rect, "a_b_c", &tk, arena, &out);
+    try std.testing.expect(std.mem.startsWith(u8, out.items[0].text.runs[0].text, "a-b-c"));
+}
+
 test "dropdown hitTest: rect 안=true, 밖/비유한=false" {
     try std.testing.expect(hitTest(test_rect, 150, 60));
     try std.testing.expect(hitTest(test_rect, 100, 50));

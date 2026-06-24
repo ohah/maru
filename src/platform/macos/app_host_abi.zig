@@ -805,7 +805,7 @@ pub export fn maru_macos_app_session_apply_workspace_window(
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const tp = text_ptr orelse return @intFromEnum(Status.null_out);
-    var parsed = maru.app.workspace.parse(app_session.allocator, tp[0..text_len]) catch return @intFromEnum(Status.invalid_config);
+    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return @intFromEnum(Status.invalid_config);
     defer parsed.deinit(); // apply가 cwd 슬라이스를 spawn에 다 쓴 뒤 arena 해제(안전)
     if (window_index >= parsed.workspace.windows.len) return @intFromEnum(Status.invalid_config);
     app_session.applyWorkspaceWindow(parsed.workspace.windows[window_index]) catch return @intFromEnum(Status.create_failed);
@@ -822,7 +822,7 @@ pub export fn maru_macos_app_session_workspace_window_count(
 ) i64 {
     const app_session = session orelse return -1;
     const tp = text_ptr orelse return -1;
-    var parsed = maru.app.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
+    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
     defer parsed.deinit();
     return @intCast(parsed.workspace.windows.len);
 }
@@ -1034,7 +1034,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
     try std.testing.expectEqual(@as(u32, c.MARU_MACOS_APP_HOST_ABI_VERSION), abi_version);
     // workspace 헤더도 .h define과 Zig 단일 출처(app.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
-    try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.app.workspace.header);
+    try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusOk), @intFromEnum(Status.ok));
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusNullOut), @intFromEnum(Status.null_out));
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusInvalidConfig), @intFromEnum(Status.invalid_config));

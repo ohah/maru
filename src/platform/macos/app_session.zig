@@ -190,7 +190,7 @@ const sync_timeout_ticks: u32 = 30;
 
 // 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
 // 실제 grid는 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
-fn restoreSurfaceSize(sm: app.workspace.Surface) terminal.Size {
+fn restoreSurfaceSize(sm: maru.session.workspace.Surface) terminal.Size {
     return terminal.clampGridSize(.{
         .cols = if (sm.cols > 0) sm.cols else terminal.Size.default.cols,
         .rows = if (sm.rows > 0) sm.rows else terminal.Size.default.rows,
@@ -456,7 +456,7 @@ fn sentinelBgCell(col: u16, width: u16, bg: u32, origin_x: u32, origin_y: u32) m
 /// pane 탭 바 배경 셀 1개(sentinel-UV, 배경만). bar rect 좌상단 origin에서 폭(cols)만큼 채운다 — 터미널 셀
 /// 스트림에 넣으면 maru_fill_cell_quad가 origin_x + col*cw, origin_y + row*ch(row 0)에 그려 바를 칠한다. 폭이
 /// term 폭과 같은 cols(floor)라 아래 터미널과 가로 정렬된다. 셀 폭/바 폭·높이 0이면 null. 순수 함수.
-fn paneBarBgCell(bar: app.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.NativeMetalCell {
+fn paneBarBgCell(bar: maru.session.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.NativeMetalCell {
     if (cell_width_px == 0 or bar.w == 0 or bar.h == 0) return null;
     const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols_u32 == 0) return null;
@@ -467,7 +467,7 @@ fn paneBarBgCell(bar: app.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.N
 // rasterizeOverlayCells의 placeText(EAW-폭)를 find와 공유한다. 코드포인트당 1칸 깔던 putUtf8이 한글을 자르던 원인.
 
 /// 점(backing px)이 사각형 안인가([x, x+w) × [y, y+h) 반열린). 탭 바 클릭 hit-test에 쓴다. 비유한은 false.
-fn pointInRect(x_px: f64, y_px: f64, rect: app.SplitRect) bool {
+fn pointInRect(x_px: f64, y_px: f64, rect: maru.session.SplitRect) bool {
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);
@@ -484,7 +484,7 @@ const PaneDropZone = enum { left, right, top, bottom };
 const DropTarget = struct { pane: *Pane, zone: ?PaneDropZone };
 
 /// rect를 zone 방향 절반으로 자른다(④b 하이라이트가 그 절반을 칠한다). left/right=좌우, top/bottom=상하.
-fn halfRect(rect: app.SplitRect, zone: PaneDropZone) app.SplitRect {
+fn halfRect(rect: maru.session.SplitRect, zone: PaneDropZone) maru.session.SplitRect {
     return switch (zone) {
         .left => .{ .x = rect.x, .y = rect.y, .w = rect.w / 2, .h = rect.h },
         .right => .{ .x = rect.x + rect.w / 2, .y = rect.y, .w = rect.w - rect.w / 2, .h = rect.h },
@@ -546,7 +546,7 @@ fn workspaceLabel(tab: *Tab) []const u8 {
 
 /// 점이 rect 안 어느 drop zone인지 — rect를 중앙에서 X자로 4등분해 가장 가까운 가장자리를 고른다(좌/우/상/하).
 /// rect 밖·0 크기·비유한이면 null. 렌더 drop-zone 하이라이트(후속 ④b)와 공유할 순수 함수라 OS 무관 단위 테스트.
-fn paneDropZone(rect: app.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
+fn paneDropZone(rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
     if (rect.w == 0 or rect.h == 0 or !pointInRect(x_px, y_px, rect)) return null;
     const fx = (x_px - @as(f64, @floatFromInt(rect.x))) / @as(f64, @floatFromInt(rect.w)); // [0,1)
     const fy = (y_px - @as(f64, @floatFromInt(rect.y))) / @as(f64, @floatFromInt(rect.h));
@@ -561,7 +561,7 @@ fn paneDropZone(rect: app.SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
 /// 것". coretext의 paneTabAreaCols/paneTabWidth(렌더가 쓰는 같은 공식)로 바를 [탭 영역 | "+" zone]으로 나눈다. cell·바·
 /// 탭 폭이 0이면(초소형 바) null을 줘 호출자가 탭 처리를 건너뛴다. hit-test 수학은 chrome tabbar로 이전(C3b) — platform은
 /// 메트릭 빌드 + 활성 밴드 단일 셀(tabbarHighlightCell)만(밴드가 한 칸이라 chrome view→cell round-trip이 무의미; 리뷰 §3).
-fn barMetrics(bar: app.SplitRect, cell_width_px: u32, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) ?chrome.components.tabbar.Metrics {
+fn barMetrics(bar: maru.session.SplitRect, cell_width_px: u32, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) ?chrome.components.tabbar.Metrics {
     if (cell_width_px == 0 or bar.w == 0 or term_count == 0) return null;
     const cols = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
     if (cols == 0) return null;
@@ -1058,7 +1058,7 @@ pub const AppSession = struct {
     // 기존과 동일하지만, split이면 활성 panel이 서브-rect에 있으므로 pxToCell/imeCursorRect가 사이드바 폭이
     // 아니라 이 rect의 origin을 기준으로 셀↔픽셀을 변환해야 마우스/커서/IME가 활성 panel에 맞는다. 레이아웃·
     // 포커스·리사이즈가 바뀔 때 recomputeActivePaneRect가 갱신한다. (w/h는 캐시만 — 현재 clamp는 surface grid로.)
-    active_pane_rect: app.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    active_pane_rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
     // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
     sidebar_slot_height_px: u32 = 0,
@@ -1518,7 +1518,7 @@ pub const AppSession = struct {
     /// 공유하는 단일 출처. window padding은 여기서 빼지 않는다 — 탭 바·divider·pane 배경 같은 chrome은 사이드바
     /// 경계/창 가장자리까지 꽉 차고, padding은 paneTermRect가 셀 그리드 영역에만 inset한다. backing 크기는 마지막
     /// resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일 leaf가 origin에만 그려진다(무해).
-    fn termRect(self: *const AppSession) app.SplitRect {
+    fn termRect(self: *const AppSession) maru.session.SplitRect {
         // 상단 타이틀바 띠(titlebar_strip_px)만큼 터미널 영역을 아래로 들인다 — 신호등·헤더 아이콘 줄과 pane 탭 바·
         // 서페이스가 안 겹친다(cmux식). 사이드바는 별도(좌측 전체 높이) — 띠는 터미널 영역에만. 단일 출처라 grid·
         // 렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합한다.
@@ -1562,10 +1562,10 @@ pub const AppSession = struct {
     /// resize·렌더 origin·IME(imeCursorRect)가 이 영역을 단일 출처로 쓰므로, padding을 여기 한 곳에 두면 grid
     /// origin·hit-test·IME 후보창이 함께 안쪽으로 정합한다. saturate(-|)로 바/패딩이 leaf보다 커도 언더플로 없이
     /// 0에 수렴 → gridFromRectPx가 clampGridSize 최소로 떨어진다.
-    fn paneTermRect(self: *const AppSession, rect: app.SplitRect) app.SplitRect {
+    fn paneTermRect(self: *const AppSession, rect: maru.session.SplitRect) maru.session.SplitRect {
         const bar_h = self.paneBarHeightPx();
         const pad = self.window_padding_px;
-        const body: app.SplitRect = if (bar_h > 0 and rect.h > bar_h)
+        const body: maru.session.SplitRect = if (bar_h > 0 and rect.h > bar_h)
             .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h }
         else
             rect;
@@ -1579,7 +1579,7 @@ pub const AppSession = struct {
     }
 
     /// panel leaf rect의 상단 탭 바 rect(못 그리면 null — 바 없을 만큼 작거나 cell 미상). paneTermRect의 보수.
-    fn paneBarRect(self: *const AppSession, rect: app.SplitRect) ?app.SplitRect {
+    fn paneBarRect(self: *const AppSession, rect: maru.session.SplitRect) ?maru.session.SplitRect {
         const bar_h = self.paneBarHeightPx();
         if (bar_h > 0 and rect.h > bar_h) {
             return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = bar_h };
@@ -1750,7 +1750,7 @@ pub const AppSession = struct {
 
     /// 탭 영역 sub-rect — 전체 바에서 좌측 라벨(label_cols)을 뗀 나머지. 탭 hit-test(barMetrics)·탭 제목 렌더가
     /// 이 sub-rect를 공유해 라벨만큼 우측으로 밀린다(label_cols=0이면 전체 바 == 기존 동작).
-    fn paneTabBarRect(bar: app.SplitRect, label_cols: u32, cw: u32) app.SplitRect {
+    fn paneTabBarRect(bar: maru.session.SplitRect, label_cols: u32, cw: u32) maru.session.SplitRect {
         const off = label_cols * cw;
         return .{ .x = bar.x + off, .y = bar.y, .w = bar.w -| off, .h = bar.h };
     }
@@ -1759,8 +1759,8 @@ pub const AppSession = struct {
     /// pane 통째 드래그 손잡이), `label_cols`(grip 뒤 custom_name 라벨 폭, 이름 없으면 0), `tabs`(grip+라벨 뗀 탭
     /// 영역: barMetrics·탭 제목·활성 밴드). 좌측 세그먼트 = `[full.x, tabs.x)` = grip + 라벨. 모든 hit-test/렌더가 이
     /// 한 함수를 거쳐 "보이는 == 클릭되는"을 유지한다. 바가 없거나 cell 미상이면 null. 좁은 바(min_tab 미보장)면 grip 0.
-    const PaneBar = struct { full: app.SplitRect, tabs: app.SplitRect, label_cols: u32, grip_cols: u32 };
-    fn paneBar(self: *const AppSession, rect: app.SplitRect, pane: *Pane) ?PaneBar {
+    const PaneBar = struct { full: maru.session.SplitRect, tabs: maru.session.SplitRect, label_cols: u32, grip_cols: u32 };
+    fn paneBar(self: *const AppSession, rect: maru.session.SplitRect, pane: *Pane) ?PaneBar {
         const full = self.paneBarRect(rect) orelse return null;
         const cw = self.cell_width_px;
         if (cw == 0) return null;
@@ -1783,7 +1783,7 @@ pub const AppSession = struct {
     fn activeTabLeafRects(
         self: *AppSession,
         allocator: std.mem.Allocator,
-        term_rect: app.SplitRect,
+        term_rect: maru.session.SplitRect,
         out: *std.ArrayList(PaneTree.LeafRect),
     ) !void {
         try PaneTree.layout(allocator, self.activeTab().tree, term_rect, out);
@@ -1997,7 +1997,7 @@ pub const AppSession = struct {
     /// 바가 없는 minimal에선 커서 말고는 어느 pane이 입력을 받는지 단서가 없으므로(full은 탭 바 하이라이트가 보여줌).
     /// 4변을 reserved 부분 사각형(3=좌·5=우·4=상·2=하, 각 ~2px 안쪽 띠)으로 그린다 — 좌/우는 행마다, 상/하는 폭 전체
     /// 한 칸. 색은 divider와 같은 sidebarActiveBg. chrome_minimal이 아니거나 단일 pane(테두리 불필요)이면 무동작.
-    fn appendActivePaneBorder(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), rect: app.SplitRect, pane_count: usize) void {
+    fn appendActivePaneBorder(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), rect: maru.session.SplitRect, pane_count: usize) void {
         if (!self.chrome_minimal) return; // full은 활성 pane을 탭 바 하이라이트로 구분한다
         if (pane_count <= 1) return; // split 아니면 전체가 활성 pane이라 테두리 불필요
         const cw = self.cell_width_px;
@@ -2036,14 +2036,14 @@ pub const AppSession = struct {
     }
 
     /// divider 드래그 중(kind 2) 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꾸고 panel을 재배치한다.
-    /// ratio = (mouse - bounds.origin) / bounds.size를 app.clampRatio(layout과 같은 한도)로 막는다. split이
+    /// ratio = (mouse - bounds.origin) / bounds.size를 maru.session.clampRatio(layout과 같은 한도)로 막는다. split이
     /// 사라졌으면(드래그 중 구조 변경) divider_drag가 null로 비워지므로 여기 안 온다.
     fn dragDividerTo(self: *AppSession, x_px: f64, y_px: f64) void {
         const sp = self.divider_drag orelse return;
         // ratio 수학은 chrome `divider.dragRatio`(normal 축 = (mouse − bounds.origin)/bounds.size)가 단일 출처. 클램프는
-        // 여기서(app.clampRatio — layout과 같은 한도, chrome은 app 상수를 모른다). 드래그 시작 시 저장한 neutral seg를 쓴다.
+        // 여기서(maru.session.clampRatio — layout과 같은 한도, chrome은 app 상수를 모른다). 드래그 시작 시 저장한 neutral seg를 쓴다.
         const raw = chrome.components.divider.dragRatio(self.divider_drag_seg, x_px, y_px) orelse return;
-        sp.ratio = app.clampRatio(raw);
+        sp.ratio = maru.session.clampRatio(raw);
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
         self.metal_dirty = true;
@@ -2250,7 +2250,7 @@ pub const AppSession = struct {
         if (src_idx >= src.terms.items.len) return;
         if (target == src and src.terms.items.len <= 1) return;
         const tab = self.activeTab();
-        const dir: app.SplitDirection = switch (zone) {
+        const dir: maru.session.SplitDirection = switch (zone) {
             .left, .right => .horizontal,
             .top, .bottom => .vertical,
         };
@@ -2739,7 +2739,7 @@ pub const AppSession = struct {
     /// leaf를 split{a: 기존 leaf, b: 새 leaf}로 교체하고, 기존 panel을 a 크기로 줄인 뒤 새 panel로 포커스를
     /// 옮긴다. 단일 panel 탭이면 첫 분할(2개), 이미 split이면 활성 panel이 다시 나뉜다(중첩). spawn/alloc
     /// 실패는 errdefer로 트리/탭을 원복한다(부분 상태를 남기지 않는다).
-    fn splitActivePane(self: *AppSession, direction: app.SplitDirection) !void {
+    fn splitActivePane(self: *AppSession, direction: maru.session.SplitDirection) !void {
         const tab = self.activeTab();
         const active = tab.activePane();
 
@@ -2747,7 +2747,7 @@ pub const AppSession = struct {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
-        var active_rect: ?app.SplitRect = null;
+        var active_rect: ?maru.session.SplitRect = null;
         for (leaf_rects.items) |lr| {
             if (lr.leaf == active) {
                 active_rect = lr.rect;
@@ -2758,7 +2758,7 @@ pub const AppSession = struct {
 
         // 2) active rect를 direction·0.5로 a(기존)·b(새)로 나눈 grid.
         // 두 자식 panel 각자 상단 탭 바를 예약하므로, Term grid는 leaf rect가 아니라 paneTermRect(바 아래)로 잰다.
-        const parts = app.splitRect(arect, direction, 0.5);
+        const parts = maru.session.splitRect(arect, direction, 0.5);
         const a_term = self.paneTermRect(parts.a);
         const b_term = self.paneTermRect(parts.b);
         const a_size = gridFromRectPx(self.cell_width_px, self.cell_height_px, a_term.w, a_term.h);
@@ -5928,7 +5928,7 @@ pub const AppSession = struct {
     /// 휠 라우팅 단일 출처 — 휠은 '커서 아래' surface가 스크롤백/mouse reporting을 처리하고 리포트 좌표도 그
     /// rect 기준이라 정합한다(pane↔좌표). 활성 탭 leaf rect를 펴 점을 담는 leaf를 찾는다(없으면 — 사이드바/밖
     /// — null). 단일 panel이면 그 panel(=활성)을 돌려준다.
-    fn scrollTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *app.Surface, rect: app.SplitRect } {
+    fn scrollTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *app.Surface, rect: maru.session.SplitRect } {
         if (!self.surface_initialized) return null;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -6070,7 +6070,7 @@ pub const AppSession = struct {
     /// 비활성 pane으로 리포트할 때 그 pane 기준 좌표(pane↔좌표 정합)를 얻는 데도 쓴다. 핵심: clamp를 float
     /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환에서 trap(앱
     /// 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null, 음수(영역 밖) 좌표는 0 clamp.
-    fn pxToCellIn(self: *const AppSession, surface: *const app.Surface, rect: app.SplitRect, x_px: f64, y_px: f64) ?CellHit {
+    fn pxToCellIn(self: *const AppSession, surface: *const app.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?CellHit {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
         const core = &surface.core;
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
@@ -8327,21 +8327,21 @@ pub const AppSession = struct {
         return true;
     }
 
-    /// 이 창(AppSession)의 라이브 상태를 workspace restore 모델(app.workspace.Window)로 캡처한다(R3). 탭→pane
+    /// 이 창(AppSession)의 라이브 상태를 workspace restore 모델(maru.session.workspace.Window)로 캡처한다(R3). 탭→pane
     /// split 트리→Term→surface를 걸어 선언적 상태만 모은다 — live PTY/process/grid는 안 담는다. cwd/title은 OSC
     /// 권위 소스(core.currentCwd/windowTitle), command는 spawn argv[0](surface.command). split 트리는 *Pane leaf를
     /// pane 인덱스로 환원해 preorder TreeNode로 평탄화(직렬화 모델과 같은 형태). 멀티 창 전체 모델은 호출자(R5)가
     /// 각 세션의 Window를 모아 만든다. 모든 슬라이스·문자열은 `arena`가 소유한다(호출자가 deinit).
-    pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator) !app.workspace.Window {
-        var tabs: std.ArrayList(app.workspace.Tab) = .empty;
+    pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator) !maru.session.workspace.Window {
+        var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
         for (self.tabs.items) |tab| try tabs.append(arena, try self.captureWorkspaceTab(arena, tab));
         return .{ .active_tab = self.app_window.active_tab, .tabs = try tabs.toOwnedSlice(arena) };
     }
 
-    fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !app.workspace.Tab {
-        var panes: std.ArrayList(app.workspace.Pane) = .empty;
+    fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !maru.session.workspace.Tab {
+        var panes: std.ArrayList(maru.session.workspace.Pane) = .empty;
         for (tab.panes.items) |pane| {
-            var surfaces: std.ArrayList(app.workspace.Surface) = .empty;
+            var surfaces: std.ArrayList(maru.session.workspace.Surface) = .empty;
             for (pane.terms.items) |term| {
                 const core = &term.surface.core;
                 const agent = self.captureAgentForRestore(arena, term);
@@ -8365,7 +8365,7 @@ pub const AppSession = struct {
                 .surfaces = try surfaces.toOwnedSlice(arena),
             });
         }
-        var tree: std.ArrayList(app.workspace.TreeNode) = .empty;
+        var tree: std.ArrayList(maru.session.workspace.TreeNode) = .empty;
         try Model.flattenTree(arena, tab, tab.tree, &tree);
         return .{
             .active_pane = tab.active_pane,
@@ -8401,7 +8401,7 @@ pub const AppSession = struct {
 
         // 1) exec_path + 전체 argv 캡처(틱이 멈춘 종료 시점이라 정적 procargs_buf 공유 안전).
         var str_buf: [16 * 1024]u8 = undefined;
-        var argv_raw: [app.workspace.max_agent_argv][]const u8 = undefined;
+        var argv_raw: [maru.session.workspace.max_agent_argv][]const u8 = undefined;
         const cap = term.rt.live_pty.session.captureAgentArgv(&str_buf, &argv_raw) orelse return .{};
         if (cap.argv.len == 0) return .{};
         // stale agent_kind 방어: 캡처된 실제 프로그램(node 래퍼면 argv[1] 스크립트, 아니면 exec_path)이 기대 kind와
@@ -8411,7 +8411,7 @@ pub const AppSession = struct {
         if (classifyAgent(std.fs.path.basename(prog_path)) != term.agent_kind) return .{};
 
         // 2) argv[0]을 exec_path(절대경로)로 교체 → 민감 인라인 토큰 redact.
-        var combined: [app.workspace.max_agent_argv][]const u8 = undefined;
+        var combined: [maru.session.workspace.max_agent_argv][]const u8 = undefined;
         var m: usize = 0;
         combined[m] = cap.exec_path;
         m += 1;
@@ -8420,7 +8420,7 @@ pub const AppSession = struct {
             combined[m] = a;
             m += 1;
         }
-        var redacted_buf: [app.workspace.max_agent_argv][]const u8 = undefined;
+        var redacted_buf: [maru.session.workspace.max_agent_argv][]const u8 = undefined;
         const redacted = app.agent_resume.redactArgv(combined[0..m], &redacted_buf);
 
         // 3) arena로 소유 이전(str_buf/combined는 지역이라 종료 시점 이후 무효).
@@ -8476,7 +8476,7 @@ pub const AppSession = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const win = try self.captureWorkspaceWindow(arena.allocator());
-        const text = try app.workspace.serializeWindow(self.allocator, win);
+        const text = try maru.session.workspace.serializeWindow(self.allocator, win);
         self.workspace_buffer = text;
         return text;
     }
@@ -8577,7 +8577,7 @@ pub const AppSession = struct {
     /// title/command는 정적 기본(셸이 OSC 0/2로 곧 재설정)·size는 모델값(이후 resize가 창에 맞게 보정). 새 탭들을
     /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 세션을 보존한다.
     /// 빈 모델이면 무동작(기본 유지). 빈 cwd면 기본 cwd로 spawn(저장 안 됐거나 셸 통합 없음).
-    pub fn applyWorkspaceWindow(self: *AppSession, win: app.workspace.Window) !void {
+    pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
         if (win.tabs.len == 0) return;
 
         // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
@@ -8654,7 +8654,7 @@ pub const AppSession = struct {
     /// 모델 Tab → 완성된 *Tab(panes + split 트리). pane들을 먼저 만들고(각 첫 surface로 spawn + 나머지 Term 추가),
     /// 트리를 모델 preorder대로 직접 짓는다(leaf 인덱스 → 그 pane, split → 새 PaneTree.Split). 부분 실패는 granular
     /// errdefer로 정리(트리는 아직 미세팅이라 destroyTabStandalone 안 씀). capacity 예약으로 append를 무실패화.
-    fn buildWorkspaceTab(self: *AppSession, m: app.workspace.Tab) !*Tab {
+    fn buildWorkspaceTab(self: *AppSession, m: maru.session.workspace.Tab) !*Tab {
         if (m.panes.len == 0) return error.EmptyTab;
         const tab = try self.allocator.create(Tab);
         errdefer self.allocator.destroy(tab);
@@ -8703,7 +8703,7 @@ pub const AppSession = struct {
     // Model.buildTreeNode(self.allocator 대신 allocator 인자로 pure화). 단일 출처: src/session/session_model.zig.
 
     /// 모델 Pane → 완성된 *Pane. 첫 surface로 createPane(=1 Term)하고 나머지 surface를 Term으로 추가한다.
-    fn buildWorkspacePane(self: *AppSession, m: app.workspace.Pane) !*Pane {
+    fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*Pane {
         if (m.surfaces.len == 0) return error.EmptyPane;
         const pane = try self.createPaneFromSurface(m.surfaces[0]);
         errdefer self.destroyPane(pane);
@@ -8717,7 +8717,7 @@ pub const AppSession = struct {
     /// 복원 surface 하나로 spawn 준비(createPane/createTerm 공통). new_tab_config에 저장 grid를 얹고, 사용 가능한
     /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
     /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
-    fn restoreSpawn(self: *AppSession, sm: app.workspace.Surface, args_buf: [][]const u8) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
+    fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface, args_buf: [][]const u8) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
@@ -8734,7 +8734,7 @@ pub const AppSession = struct {
     /// 에이전트 바이너리 자체는 PATH 무관하게 뜨지만, 에이전트가 spawn하는 하위 도구(git·rg 등)의 PATH는 login 셸이
     /// 아니라 maru 프로세스 env 기준이라 다를 수 있다(behavioral 한계 — 후속). args 슬라이스는 호출자 스택의 args_buf를
     /// 가리킨다 — createTermFromSurface가 동기 spawn하므로 spawn까지 유효. 단일 출처: docs/workspace-restore.md "에이전트 세션 자동 resume".
-    fn agentResumeRequest(self: *AppSession, sm: app.workspace.Surface, size: terminal.Size, args_buf: [][]const u8) ?maru.pty.SpawnRequest {
+    fn agentResumeRequest(self: *AppSession, sm: maru.session.workspace.Surface, size: terminal.Size, args_buf: [][]const u8) ?maru.pty.SpawnRequest {
         const kind = app.agent_resume.Kind.fromString(sm.agent_kind) orelse return null;
         const enabled = switch (kind) {
             .claude => self.loaded_config.config.workspace.restore_claude,
@@ -8763,8 +8763,8 @@ pub const AppSession = struct {
         return try self.allocator.dupe(u8, name);
     }
 
-    fn createPaneFromSurface(self: *AppSession, sm: app.workspace.Surface) !*Pane {
-        var args_buf: [app.workspace.max_agent_argv + 4][]const u8 = undefined;
+    fn createPaneFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Pane {
+        var args_buf: [maru.session.workspace.max_agent_argv + 4][]const u8 = undefined;
         const rs = self.restoreSpawn(sm, &args_buf);
         const cfg = self.new_tab_config;
         const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
@@ -8774,8 +8774,8 @@ pub const AppSession = struct {
         return pane;
     }
 
-    fn createTermFromSurface(self: *AppSession, sm: app.workspace.Surface) !*Term {
-        var args_buf: [app.workspace.max_agent_argv + 4][]const u8 = undefined;
+    fn createTermFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
+        var args_buf: [maru.session.workspace.max_agent_argv + 4][]const u8 = undefined;
         const rs = self.restoreSpawn(sm, &args_buf);
         const cfg = self.new_tab_config;
         const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
@@ -9367,7 +9367,7 @@ pub const AppSession = struct {
             const active_fallback = self.paneTermRect(self.termRect());
             var active_origin_x: u32 = active_fallback.x;
             var active_origin_y: u32 = active_fallback.y;
-            var active_term_rect: app.SplitRect = active_fallback;
+            var active_term_rect: maru.session.SplitRect = active_fallback;
             for (leaf_rects.items) |lr| {
                 if (lr.leaf == active_pane) {
                     const t = self.paneTermRect(lr.rect);
@@ -10376,7 +10376,7 @@ pub const AppSession = struct {
     /// alpha는 pane.scrollbar_idle_ticks로 fade(활성·비활성 모두 per-pane 독립). `is_active`면 추가로 hover/드래그
     /// 강조(굵게+full, 세션 상태) — 상호작용(hover/드래그)은 활성 pane만이라 비활성 pane은 fade만(emphasize 없음).
     /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 좌표는 backing 픽셀.
-    fn appendScrollbar(self: *AppSession, rect: app.SplitRect, pane: *Pane, is_active: bool) void {
+    fn appendScrollbar(self: *AppSession, rect: maru.session.SplitRect, pane: *Pane, is_active: bool) void {
         if (rect.w == 0) return;
         const core = &pane.activeTerm().surface.core;
         const geom = scrollbarThumbGeom(core.scrollbackLen(), core.viewOffset(), self.cell_height_px, rect.h) orelse return;
@@ -10408,7 +10408,7 @@ pub const AppSession = struct {
 
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
     /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). tui는 셀. 둘 다 part1 제목 셀 아래(layer 2).
-    fn appendBarBgQuad(self: *AppSession, bar: app.SplitRect, bg: u32) void {
+    fn appendBarBgQuad(self: *AppSession, bar: maru.session.SplitRect, bg: u32) void {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y), @floatFromInt(bar.w), @floatFromInt(bar.h), bg, 2);
     }
 
@@ -10418,7 +10418,7 @@ pub const AppSession = struct {
     /// 78행 `cov=1-smoothstep(-aa,aa,d)`)가 1px-tall(half_size.y=0.5)에서 cov≈0.84로 옅게 그려 선이 흐리고
     /// HiDPI 분수 스케일에서 떨린다. 형제 선 헬퍼(appendHorizontalLine)가 셀+reserved ~2px를 쓰는 것과 같은
     /// 이유로 토큰 두께(≥2px)면 중심 행이 cov≈1로 선명하다. 두께만큼 바 하단 안쪽에 둔다(바 위로 안 새게).
-    fn appendTabBarUnderline(self: *AppSession, bar: app.SplitRect, thickness: u32) void {
+    fn appendTabBarUnderline(self: *AppSession, bar: maru.session.SplitRect, thickness: u32) void {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y + bar.h -| thickness), @floatFromInt(bar.w), @floatFromInt(thickness), self.dividerColor(), 2);
     }
 
@@ -13213,16 +13213,16 @@ test "applyWorkspaceWindow: 섞인 [P,u,P,u] 복원을 고정-prefix로 stable-p
     _ = try session.resize(800, 600, 1000);
 
     // 4개 단일-pane 탭, 저장 순서 [P, u, P, u](#685 이전 빌드가 만든 섞인 상태). custom_name으로 정렬 추적.
-    const s0 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
-    const s1 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
-    const s2 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
-    const s3 = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
-    const p0 = [_]app.workspace.Pane{.{ .surfaces = &s0 }};
-    const p1 = [_]app.workspace.Pane{.{ .surfaces = &s1 }};
-    const p2 = [_]app.workspace.Pane{.{ .surfaces = &s2 }};
-    const p3 = [_]app.workspace.Pane{.{ .surfaces = &s3 }};
-    const leaf = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
-    const tabs = [_]app.workspace.Tab{
+    const s0 = [_]maru.session.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const s1 = [_]maru.session.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const s2 = [_]maru.session.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const s3 = [_]maru.session.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const p0 = [_]maru.session.workspace.Pane{.{ .surfaces = &s0 }};
+    const p1 = [_]maru.session.workspace.Pane{.{ .surfaces = &s1 }};
+    const p2 = [_]maru.session.workspace.Pane{.{ .surfaces = &s2 }};
+    const p3 = [_]maru.session.workspace.Pane{.{ .surfaces = &s3 }};
+    const leaf = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{
         .{ .custom_name = "P0", .pinned = true, .tree = &leaf, .panes = &p0 },
         .{ .custom_name = "u1", .pinned = false, .tree = &leaf, .panes = &p1 },
         .{ .custom_name = "P2", .pinned = true, .tree = &leaf, .panes = &p2 },
@@ -13610,7 +13610,7 @@ test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
     session.window_padding_px = .{};
     try std.testing.expectEqual(@as(u32, 0), session.sidebar_width_px);
     try std.testing.expectEqual(@as(u32, 0), session.paneBarHeightPx());
-    const rect: app.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+    const rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
     try std.testing.expect(session.paneBarRect(rect) == null);
     const term = session.paneTermRect(rect);
     try std.testing.expectEqual(@as(u32, 0), term.y);
@@ -13743,7 +13743,7 @@ test "minimal active pane border: 4 edges only in minimal split" {
     const allocator = std.testing.allocator;
     var out: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
     defer out.deinit(allocator);
-    const rect: app.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
+    const rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
 
     // ① minimal: 단일 pane이면 무동작, split(>1)이면 4변 테두리(reserved 2/3/4/5)·색=sidebarActiveBg.
     {
@@ -14752,8 +14752,8 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     try std.testing.expect(saw_cwd);
 
     // capture → serialize가 크래시 없이 기대 라인을 낸다(R1 writer와 결합).
-    const wins = [_]app.workspace.Window{win};
-    const text = try app.workspace.serialize(allocator, .{ .windows = &wins });
+    const wins = [_]maru.session.workspace.Window{win};
+    const text = try maru.session.workspace.serialize(allocator, .{ .windows = &wins });
     defer allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal") != null);
@@ -14801,18 +14801,18 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     _ = try session.resize(800, 600, 1000);
 
     // 모델: 창 1, 탭 2. 탭0 = split horizontal { pane0, pane1 }(각 1 Term), 활성 pane 1. 탭1 = 단일 pane 2 Term, 활성 term 1.
-    const sa = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
-    const sb = [_]app.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
-    const panes0 = [_]app.workspace.Pane{ .{ .surfaces = &sa }, .{ .surfaces = &sb } };
-    const tree0 = [_]app.workspace.TreeNode{
+    const sa = [_]maru.session.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const sb = [_]maru.session.workspace.Surface{.{ .cwd = "/tmp", .cols = 40, .rows = 24 }};
+    const panes0 = [_]maru.session.workspace.Pane{ .{ .surfaces = &sa }, .{ .surfaces = &sb } };
+    const tree0 = [_]maru.session.workspace.TreeNode{
         .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
         .{ .leaf = 0 },
         .{ .leaf = 1 },
     };
-    const sc = [_]app.workspace.Surface{ .{ .cwd = "/tmp", .cols = 40, .rows = 24 }, .{ .cwd = "/tmp", .cols = 40, .rows = 24 } };
-    const panes1 = [_]app.workspace.Pane{.{ .active_term = 1, .surfaces = &sc }};
-    const tree1 = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
-    const tabs = [_]app.workspace.Tab{
+    const sc = [_]maru.session.workspace.Surface{ .{ .cwd = "/tmp", .cols = 40, .rows = 24 }, .{ .cwd = "/tmp", .cols = 40, .rows = 24 } };
+    const panes1 = [_]maru.session.workspace.Pane{.{ .active_term = 1, .surfaces = &sc }};
+    const tree1 = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{
         .{ .active_pane = 1, .tree = &tree0, .panes = &panes0 },
         .{ .active_pane = 0, .tree = &tree1, .panes = &panes1 },
     };
@@ -14866,7 +14866,7 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
         "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
         "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
 
-    var parsed = try app.workspace.parse(allocator, text);
+    var parsed = try maru.session.workspace.parse(allocator, text);
     defer parsed.deinit();
     try session.applyWorkspaceWindow(parsed.workspace.windows[0]);
 
@@ -14900,12 +14900,12 @@ test "agentResumeRequest: 토글 게이팅 + node 래퍼 claude → command=node
     defer session.deinit();
 
     // codex처럼 node 래퍼 형태(exec_path=node, argv[1]=스크립트)로 저장된 surface — capture가 만드는 모양.
-    const sm = app.workspace.Surface{
+    const sm = maru.session.workspace.Surface{
         .agent_kind = "claude",
         .agent_session = "sid-123",
         .agent_argv = &[_][]const u8{ "/usr/bin/node", "/opt/claude/cli.js", "--dangerously-skip-permissions" },
     };
-    var args_buf: [app.workspace.max_agent_argv + 4][]const u8 = undefined;
+    var args_buf: [maru.session.workspace.max_agent_argv + 4][]const u8 = undefined;
 
     // 토글 off(기본 false) → null(일반 셸 복원).
     try std.testing.expectEqual(@as(?maru.pty.SpawnRequest, null), session.agentResumeRequest(sm, terminal.Size.default, &args_buf));
@@ -14922,7 +14922,7 @@ test "agentResumeRequest: 토글 게이팅 + node 래퍼 claude → command=node
     try std.testing.expectEqual(false, req.login); // 셸 아닌 바이너리 직접 exec
 
     // codex 토글은 별개 — claude만 켠 상태에서 codex surface는 게이트로 null.
-    const sm_codex = app.workspace.Surface{ .agent_kind = "codex", .agent_session = "cid", .agent_argv = &[_][]const u8{ "/usr/bin/codex", "resume", "old" } };
+    const sm_codex = maru.session.workspace.Surface{ .agent_kind = "codex", .agent_session = "cid", .agent_argv = &[_][]const u8{ "/usr/bin/codex", "resume", "old" } };
     try std.testing.expectEqual(@as(?maru.pty.SpawnRequest, null), session.agentResumeRequest(sm_codex, terminal.Size.default, &args_buf));
 }
 
@@ -15053,10 +15053,10 @@ test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, su
 
     // 없는 cwd → usableRestoreCwd가 null → 기본 cwd로 spawn. apply는 성공하고 탭/surface가 복원된다(셸이
     // 잘못된 cwd로 _exit(126) 나는 일 없이 살아 있음). 미리 확인 안 했으면 복원 셸이 즉시 죽었을 것.
-    const s = [_]app.workspace.Surface{.{ .cwd = "/no/such/maru-restore-xyz", .cols = 40, .rows = 24 }};
-    const panes = [_]app.workspace.Pane{.{ .surfaces = &s }};
-    const tree = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
-    const tabs = [_]app.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    const s = [_]maru.session.workspace.Surface{.{ .cwd = "/no/such/maru-restore-xyz", .cols = 40, .rows = 24 }};
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &s }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
     try session.applyWorkspaceWindow(.{ .tabs = &tabs }); // 실패 안 함
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
@@ -15077,26 +15077,26 @@ test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree�
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
 
-    const s = [_]app.workspace.Surface{
+    const s = [_]maru.session.workspace.Surface{
         .{ .cwd = "/tmp", .cols = 40, .rows = 24 },
         .{ .cwd = "/tmp", .cols = 40, .rows = 24 },
     };
-    const panes = [_]app.workspace.Pane{ .{ .surfaces = s[0..1] }, .{ .surfaces = s[1..2] } };
+    const panes = [_]maru.session.workspace.Pane{ .{ .surfaces = s[0..1] }, .{ .surfaces = s[1..2] } };
 
     // 중복 leaf: split{leaf 0, leaf 0}(panes=2). 노드 3개=2*2-1로 구조 불변식은 통과하지만 pane 0을 두 leaf가
     // 참조(같은 *Pane 두 번 → close 시 UAF)하고 pane 1은 고아다 → MalformedTree로 거부, 기존 세션은 그대로.
-    const dup_tree = [_]app.workspace.TreeNode{
+    const dup_tree = [_]maru.session.workspace.TreeNode{
         .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
         .{ .leaf = 0 },
         .{ .leaf = 0 },
     };
-    const dup_tabs = [_]app.workspace.Tab{.{ .tree = &dup_tree, .panes = &panes }};
+    const dup_tabs = [_]maru.session.workspace.Tab{.{ .tree = &dup_tree, .panes = &panes }};
     try std.testing.expectError(error.MalformedTree, session.applyWorkspaceWindow(.{ .tabs = &dup_tabs }));
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // swap 전 실패 — 기존 세션 보존
 
     // 고아 leaf: panes=2인데 트리는 leaf 0 하나만(pane 1 미참조) → 고아 검사로 MalformedTree.
-    const orphan_tree = [_]app.workspace.TreeNode{.{ .leaf = 0 }};
-    const orphan_tabs = [_]app.workspace.Tab{.{ .tree = &orphan_tree, .panes = &panes }};
+    const orphan_tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const orphan_tabs = [_]maru.session.workspace.Tab{.{ .tree = &orphan_tree, .panes = &panes }};
     try std.testing.expectError(error.MalformedTree, session.applyWorkspaceWindow(.{ .tabs = &orphan_tabs }));
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
@@ -15201,7 +15201,7 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
 
     var out: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer out.deinit(allocator);
-    const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
+    const rect: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
     try session.activeTabLeafRects(allocator, rect, &out);
     // 단일 leaf → rect 1개 = 입력 rect 전체, leaf = 활성 panel.
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
@@ -15248,7 +15248,7 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
     switch (session.activeTab().tree) {
         .leaf => return error.TestExpectedSplitNode,
         .split => |sp| {
-            try std.testing.expectEqual(app.SplitDirection.horizontal, sp.direction);
+            try std.testing.expectEqual(maru.session.SplitDirection.horizontal, sp.direction);
             try std.testing.expectEqual(old_pane, sp.a.leaf); // a = 기존 panel(왼쪽)
             try std.testing.expectEqual(new_pane, sp.b.leaf); // b = 새 panel(오른쪽)
         },
@@ -15804,7 +15804,7 @@ test "paneBarBgCell builds a bar-width background cell at the bar origin" {
 // 세그먼트 강조 셀(col=start·width·origin=bar)을 만드는지 — 탭 바 hit-test/렌더의 platform 측(메서드는 chrome tabbar.zig가
 // 테스트). 옛 BarMetrics 단위 테스트의 init-null·highlightCell 케이스를 이리로 보존한다(C3b 리뷰 반영 — 이주로 빠졌던 커버리지).
 test "barMetrics splits bar + tabbarHighlightCell active-tab band" {
-    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // cell 12 → 20칸, "+" zone 3 제외 탭 영역 17, 2탭 → tab_w=8
+    const bar: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // cell 12 → 20칸, "+" zone 3 제외 탭 영역 17, 2탭 → tab_w=8
     const m = barMetrics(bar, 12, 2, 0, 0).?;
     try std.testing.expectEqual(@as(u32, 20), m.cols);
     try std.testing.expectEqual(@as(u32, 17), m.tab_cols);
@@ -15827,7 +15827,7 @@ test "barMetrics splits bar + tabbarHighlightCell active-tab band" {
 // pane 라벨 세그먼트(PR2)의 폭 산출·탭 영역 offset 단일 출처 — custom_name 유무·좁은 바·max cap을 헤드리스로 고정한다.
 // 이 두 함수가 render(라벨/탭 origin)와 hit-test(barMetrics 입력)에서 같은 결과를 줘 "보이는 == 클릭되는"을 유지한다.
 test "paneLabelCols/paneTabBarRect: 라벨 없으면 0(전체 바), 있으면 폭 예약·탭 우측 offset" {
-    const full: app.SplitRect = .{ .x = 100, .y = 0, .w = 320, .h = 24 }; // cell 8 → 40칸
+    const full: maru.session.SplitRect = .{ .x = 100, .y = 0, .w = 320, .h = 24 }; // cell 8 → 40칸
 
     // custom_name 없음 → label_cols 0, 탭 sub-rect == 전체 바(기존 동작).
     var bare: Pane = .{ .custom_name = null };
@@ -15857,7 +15857,7 @@ test "paneLabelCols/paneTabBarRect: 라벨 없으면 0(전체 바), 있으면 �
 }
 
 test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)" {
-    const bar: app.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // 우경계 = 180+240 = 420
+    const bar: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // 우경계 = 180+240 = 420
     try std.testing.expect(pointInRect(180, 0, bar)); // 좌상단 포함
     try std.testing.expect(pointInRect(419, 11, bar)); // 우하 안쪽
     try std.testing.expect(!pointInRect(420, 0, bar)); // x = x+w 제외
@@ -15868,7 +15868,7 @@ test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)
 
 // paneDropZone이 rect를 X자 4등분해 가장 가까운 가장자리를 고르는지(④ split 재배치 drop-zone). 순수 함수.
 test "paneDropZone classifies a point into the nearest edge half" {
-    const r: app.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
+    const r: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
     try std.testing.expectEqual(PaneDropZone.left, paneDropZone(r, 10, 50).?); // 좌측 가장자리 근처
     try std.testing.expectEqual(PaneDropZone.right, paneDropZone(r, 90, 50).?); // 우측
     try std.testing.expectEqual(PaneDropZone.top, paneDropZone(r, 50, 10).?); // 상단
@@ -15882,11 +15882,11 @@ test "paneDropZone classifies a point into the nearest edge half" {
 
 // halfRect가 rect를 zone 방향 절반으로 자르고, premultipliedRgba가 alpha로 rgb를 미리 곱하는지(④b 하이라이트). 순수.
 test "halfRect splits a rect by zone; premultipliedRgba premultiplies rgb by alpha" {
-    const r: app.SplitRect = .{ .x = 10, .y = 20, .w = 100, .h = 80 };
-    try std.testing.expectEqual(app.SplitRect{ .x = 10, .y = 20, .w = 50, .h = 80 }, halfRect(r, .left));
-    try std.testing.expectEqual(app.SplitRect{ .x = 60, .y = 20, .w = 50, .h = 80 }, halfRect(r, .right));
-    try std.testing.expectEqual(app.SplitRect{ .x = 10, .y = 20, .w = 100, .h = 40 }, halfRect(r, .top));
-    try std.testing.expectEqual(app.SplitRect{ .x = 10, .y = 60, .w = 100, .h = 40 }, halfRect(r, .bottom));
+    const r: maru.session.SplitRect = .{ .x = 10, .y = 20, .w = 100, .h = 80 };
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 10, .y = 20, .w = 50, .h = 80 }, halfRect(r, .left));
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 60, .y = 20, .w = 50, .h = 80 }, halfRect(r, .right));
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 10, .y = 20, .w = 100, .h = 40 }, halfRect(r, .top));
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 10, .y = 60, .w = 100, .h = 40 }, halfRect(r, .bottom));
     // 0xFFFFFFFF를 alpha 0x80(=128)으로 → rgb 각 255*128/255=128, a=0x80. premultiplied.
     try std.testing.expectEqual(@as(u32, 0x80_80_80_80), premultipliedRgba(0x00FF_FFFF, 0x80));
     try std.testing.expectEqual(@as(u32, 0x00_00_00_00), premultipliedRgba(0x00FF_FFFF, 0)); // alpha 0 → 전부 0
@@ -15915,16 +15915,16 @@ test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
     session.cell_height_px = 12; // paneBarHeightPx = cell_height + 2*pad_y(tui 3) = 18
     session.window_padding_px = .{}; // paneTermRect가 이제 padding을 읽는다 — 바 기하만 격리(undefined UB 회피)
 
-    const rect: app.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
+    const rect: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
     const term = session.paneTermRect(rect);
-    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, term); // 바 18(=cell 12 + pad 3*2) 아래
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, term); // 바 18(=cell 12 + pad 3*2) 아래
     const bar = session.paneBarRect(rect).?;
-    try std.testing.expectEqual(app.SplitRect{ .x = 180, .y = 0, .w = 800, .h = 18 }, bar);
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 0, .w = 800, .h = 18 }, bar);
     // 바 + 터미널 = leaf rect(틈 없음).
     try std.testing.expectEqual(rect.h, bar.h + term.h);
 
     // 바 높이 이하의 작은 rect는 바 없음 — 터미널이 leaf rect 전체, paneBarRect는 null.
-    const tiny: app.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 12 };
+    const tiny: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 12 };
     try std.testing.expectEqual(tiny, session.paneTermRect(tiny));
     try std.testing.expect(session.paneBarRect(tiny) == null);
 }
@@ -17092,7 +17092,7 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
     try session.layoutActiveTabDividers(&segs);
     try std.testing.expectEqual(@as(usize, 1), segs.items.len);
     const seg = segs.items[0];
-    try std.testing.expectEqual(app.SplitDirection.horizontal, seg.direction);
+    try std.testing.expectEqual(maru.session.SplitDirection.horizontal, seg.direction);
     const split = seg.split;
     const div_x: f64 = @floatFromInt(seg.pos);
     const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);

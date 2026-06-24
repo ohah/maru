@@ -32,7 +32,7 @@ font.line-height = 1.0
 font.letter-spacing = 0.0
 
 # 컬러 테마 프리셋(선택). 한 줄로 색 세트를 고른다.
-# maru(기본)·ghostty·gruvbox-dark·solarized-dark·solarized-light·dracula·catppuccin-mocha·catppuccin-latte.
+# maru(기본)·ghostty·gruvbox-dark·solarized-dark·solarized-light·dracula·catppuccin-mocha·catppuccin-latte·light-pink.
 # 프리셋은 base다 — 아래 개별 theme.* 키를 프리셋 줄 *뒤에* 두면 그 색만 덮어쓴다.
 theme.preset = maru
 
@@ -74,9 +74,9 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `font.size-step` | 숫자 | `1` | ⌘+/⌘-(Bigger/Smaller)가 한 번에 바꾸는 증분(pt). 0.1~32 범위. ⌘0(Actual Size)은 step과 무관하게 `font.size`로 복귀 |
 | `font.line-height` | 숫자 | `1.0` | 행간 배수. 1.0=CoreText 자동 cell 높이, 1.5=50% 더 큰 줄 간격. 0.5~3.0 범위. 범위 밖/비숫자는 무시. 늘어난 높이는 글자를 셀 안 세로 가운데로 그려 위아래 여백이 된다 |
 | `font.letter-spacing` | 숫자 | `0.0` | 자간(논리 pt). 0=advance 그대로, 양수=칸 넓힘, 음수=칸 좁힘. -8~32 범위(음수 허용). 범위 밖/비숫자는 무시. 늘어난 폭은 글자를 셀 안 가로 가운데로 그려 좌우 여백이 된다 |
-| `theme.preset` | 프리셋 이름 | `maru` | 이름 붙은 컬러 테마 **base**. 색 세트(배경/전경/커서/선택 + ANSI 16색)를 한 번에 고른다. `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`. 개별 `theme.*` 키를 **이 줄 뒤에** 두면 그 색만 override(순차 적용, 나중 줄 우선). 그 외 값은 무시. 아래 [컬러 테마 프리셋](#컬러-테마-프리셋-themepreset) 참조 |
+| `theme.preset` | 프리셋 이름 | `maru` | 이름 붙은 컬러 테마 **base**. 색 세트(배경/전경/커서/선택 + ANSI 16색)를 한 번에 고른다. `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`. 개별 `theme.*` 키를 **이 줄 뒤에** 두면 그 색만 override(순차 적용, 나중 줄 우선). 그 외 값은 무시. 아래 [컬러 테마 프리셋](#컬러-테마-프리셋-themepreset) 참조 |
 | `theme.follow-system` | `true`\|`false` | `false` | **시스템 라이트/다크 외관을 따라 테마 색을 자동 전환**한다. `true`면 macOS가 라이트면 `theme.preset-light`, 다크면 `theme.preset-dark` 색 세트로 라이브 교체하고 외관이 바뀌면 즉시 따라간다. **켜져 있는 동안 `theme.preset`·개별 `theme.*` 색은 무시**되고 시스템이 색을 정한다(끄면 파일의 그 값으로 복귀). 시스템 외관 교체는 config 파일에 영속하지 않는다. 기본 `false`(현행 — 수동 테마) |
-| `theme.preset-light` | 프리셋 이름 | `solarized-light` | `theme.follow-system`이 켜졌을 때 **라이트** 외관에 쓸 프리셋(위 `theme.preset`과 같은 이름 집합). 라이트 테마(`solarized-light`·`catppuccin-latte`)를 권장 |
+| `theme.preset-light` | 프리셋 이름 | `solarized-light` | `theme.follow-system`이 켜졌을 때 **라이트** 외관에 쓸 프리셋(위 `theme.preset`과 같은 이름 집합). 라이트 테마(`solarized-light`·`catppuccin-latte`·`light-pink`)를 권장 |
 | `theme.preset-dark` | 프리셋 이름 | `maru` | `theme.follow-system`이 켜졌을 때 **다크** 외관에 쓸 프리셋. 다크 테마(`maru`·`gruvbox-dark`·`dracula` 등)를 권장 |
 | `theme.background` | `#RRGGBB` | `#101010` | 16진 색. 형식 오류는 무시 |
 | `theme.foreground` | `#RRGGBB` | `#e8e8e8` | |
@@ -160,17 +160,22 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `dracula` | Dracula(보라·핑크 다크) | `#282a36` |
 | `catppuccin-mocha` | Catppuccin Mocha(파스텔 다크) | `#1e1e2e` |
 | `catppuccin-latte` | Catppuccin Latte(**라이트** — 파스텔) | `#eff1f5` |
+| `light-pink` | Light Pink(**라이트** — 로즈·골드·틸 핑크) | `#f5f5f5` |
 
 > **베이스/결정**: `maru`는 Maru 기본값. `ghostty`는 Ghostty 기본값(배경/전경은 Ghostty `Config.zig`, ANSI 16색은
 > `terminal/color.zig`의 기본 팔레트)을 베이스로 하되, Ghostty가 정의하지 않는 `cursor`/`selection`은 Maru 기본을 쓴다.
 > 나머지(`gruvbox-dark`·`solarized-*`·`dracula`·`catppuccin-*`)는 **iTerm2-Color-Schemes**의 표준 색 값(배경/전경/커서/
 > 선택/팔레트)을 그대로 가져왔다 — 색 **값만** 인용했고 코드 표현은 옮기지 않았다(clean-room). 정확한 팔레트 16색은
 > `src/config/theme.zig`의 프리셋 상수가 단일 출처다.
+> `light-pink`는 mgwg **light-pink-theme**(VS Code)에서 배경/커서/선택/검색 매치 값을 가져오되, 이 테마가 **터미널 ANSI
+> 색을 정의하지 않으므로** ANSI 16색은 테마의 **구문 색**(키워드 로즈·숫자 골드·문자열 틸·타입 퍼플)에서 의미 매핑으로
+> 파생했다(역시 색 의도만 — clean-room). 라이트 배경이라 `catppuccin-latte`처럼 black↔white를 반전해 본문 가독성을 지킨다.
 >
-> - **검색 매치색**(스크롤백 Find 하이라이트)은 Maru 고유라 전 프리셋에서 Maru 기본을 유지한다. 사이드바 활성 좌측
->   앰버 막대(rich 룩)도 Maru 브랜드 고정이라 프리셋과 무관하다.
-> - **라이트 테마**(`solarized-light`·`catppuccin-latte`)는 사이드바 색을 명시한다 — 사이드바 기본 파생은 배경을 *밝게*
->   하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라지므로 배경보다 *어두운* 표면색을 직접 준다.
+> - **검색 매치색**(스크롤백 Find 하이라이트)은 Maru 고유라 다크 프리셋에선 Maru 기본(다크 앰버)을 유지한다. **예외:
+>   `light-pink`**는 라이트 배경에서 다크 앰버가 안 보여 테마의 findMatch(피치) 색으로 검색 매치색을 덮는다. 사이드바
+>   활성 좌측 앰버 막대(rich 룩)는 Maru 브랜드 고정이라 프리셋과 무관하다.
+> - **라이트 테마**(`solarized-light`·`catppuccin-latte`·`light-pink`)는 사이드바 색을 명시한다 — 사이드바 기본 파생은 배경을
+>   *밝게* 하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라지므로 배경보다 *어두운*(또는 더 짙은 핑크) 표면색을 직접 준다.
 > - `catppuccin-*`의 선택색은 스킴 원값(rosewater, 밝은색)이 selection-foreground와 함께 쓰는 전제라, Maru(선택 글자색을
 >   안 바꿈)에선 글자 가독성을 위해 어두운/중간 표면색으로 바꿨다.
 >

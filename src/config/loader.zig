@@ -153,7 +153,7 @@ fn applyKey(
         // 개별 theme.* 키가 이 줄 *뒤에* 오면 그 색만 override한다(loader 순차 적용 — 나중 줄 우선). 프리셋 색은
         // 정적 리터럴이라 arena dupe 불필요. 알 수 없는 값은 forgiving(기본 maru 유지 + diagnostic).
         const preset = parseThemePreset(value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "theme.preset은 maru|ghostty|gruvbox-dark|solarized-dark|solarized-light|dracula|catppuccin-mocha|catppuccin-latte — 기본값 유지" });
+            try diags.append(a, .{ .line = line_no, .message = "theme.preset은 maru|ghostty|gruvbox-dark|solarized-dark|solarized-light|dracula|catppuccin-mocha|catppuccin-latte|light-pink — 기본값 유지" });
             return;
         };
         config.theme = theme.presetColors(preset);
@@ -437,6 +437,7 @@ fn parseThemePreset(value: []const u8) ?theme.ThemePreset {
     if (std.mem.eql(u8, value, "dracula")) return .dracula;
     if (std.mem.eql(u8, value, "catppuccin-mocha")) return .catppuccin_mocha;
     if (std.mem.eql(u8, value, "catppuccin-latte")) return .catppuccin_latte;
+    if (std.mem.eql(u8, value, "light-pink")) return .light_pink;
     return null;
 }
 
@@ -1532,6 +1533,26 @@ test "parse: theme.preset supports all named presets with correct palettes; ligh
     defer cl.deinit();
     try std.testing.expectEqualStrings("#eff1f5", cl.config.theme.background);
     try std.testing.expectEqualStrings("#e6e9ef", cl.config.theme.sidebar_background.?);
+
+    var lp = try parse(std.testing.allocator, "theme.preset = light-pink");
+    defer lp.deinit();
+    try std.testing.expectEqualStrings("#f5f5f5", lp.config.theme.background); // editor.background
+    try std.testing.expectEqualStrings("#54494b", lp.config.theme.cursor); // editorCursor.foreground
+    try std.testing.expectEqualStrings("#d6d1e8", lp.config.theme.selection); // editor.selectionBackground
+    try std.testing.expectEqualStrings("#f2e7ed", lp.config.theme.sidebar_background.?); // 라이트: 배경보다 핑크로 명시
+    // light_pink만의 특징 — search_match*를 테마 findMatch(피치)로 override(라이트에서 다크 앰버는 안 보임). 회귀 가드.
+    try std.testing.expectEqualStrings("#fbe0c5", lp.config.theme.search_match); // findMatchHighlight(뷰 안 매치, 옅음)
+    try std.testing.expectEqualStrings("#f3d5b9", lp.config.theme.search_match_current); // findMatch(현재, 더 진함)
+    try std.testing.expectEqualStrings("#1f6e89", lp.config.theme.palette[6].?); // cyan = strings(틸)
+    // black↔white 명암 반전 가드(achromatic 4슬롯): black(0)/bright-black(8)=옅은 모브, white(7)=중간, bright-white(15)=가장 진함.
+    try std.testing.expectEqualStrings("#c7b9c1", lp.config.theme.palette[0].?); // black = 옅은 모브-그레이(faint)
+    try std.testing.expectEqualStrings("#b3a5ad", lp.config.theme.palette[8].?); // bright-black = 옅음
+    try std.testing.expectEqualStrings("#6e6569", lp.config.theme.palette[7].?); // white = 중간-진한 그레이
+    try std.testing.expectEqualStrings("#3a3034", lp.config.theme.palette[15].?); // bright-white = 가장 진한 잉크(≠ foreground)
+    // light_pink도 resolve 성공(모든 색·팔레트 유효) + 명시 사이드바가 파생 아닌 그 값으로 전파.
+    const rlp = try appearance.resolve(lp.config);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0xf5, .g = 0xf5, .b = 0xf5 }, rlp.theme.background);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0xf2, .g = 0xe7, .b = 0xed }, rlp.theme.sidebar_background);
 
     // 라이트 프리셋도 resolve 성공(모든 색 유효) + 명시 사이드바가 ResolvedTheme까지 전파(파생 아님).
     const ra = try appearance.resolve(cl.config);

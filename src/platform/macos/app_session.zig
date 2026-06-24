@@ -5943,8 +5943,8 @@ pub const AppSession = struct {
         self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods) } }, self.io) catch {};
     }
 
-    /// 스크린 px → 셀 변환 결과(grid 좌표 + SGR-Pixels 리포트용 본문 backing px). pxToCell/pxToCellIn 공유.
-    const CellHit = struct { row: u16, col: u16, term_x_px: u16, term_y_px: u16 };
+    /// 스크린 px → 셀 변환 결과. 순수 산술·CellHit는 session/layout_math.zig로 분리(b2) — 여긴 alias.
+    const CellHit = layout_math.CellHit;
 
     fn pxToCell(self: *const AppSession, x_px: f64, y_px: f64) ?CellHit {
         // 활성 변형: 활성 surface와 그 본문 rect(active_pane_rect)를 일반형에 넘긴다. 클릭·선택·hover·IME가 쓴다.
@@ -5957,34 +5957,8 @@ pub const AppSession = struct {
     /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환에서 trap(앱
     /// 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null, 음수(영역 밖) 좌표는 0 clamp.
     fn pxToCellIn(self: *const AppSession, surface: *const maru.session.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?CellHit {
-        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-        const core = &surface.core;
-        const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
-        const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
-        const max_col: f64 = @floatFromInt(core.size.cols - 1);
-        const max_row: f64 = @floatFromInt(core.size.rows - 1);
-        // panel은 자기 rect의 origin(paneTermRect 단일 출처, window padding·사이드바 포함)에서 그려진다 — 단일
-        // panel이면 (사이드바 폭+padding_x, padding_y), split이면 서브-rect의 origin. 셀 렌더 origin과 같은
-        // 출처라 정합한다(metalFrame.terminal_origin_x_px는 사이드바 bg strip 폭 전용 — 셀 위치엔 안 쓰임).
-        // 스크린 좌표에서 그 origin을 빼야 그 panel의 열/행이 된다 — 안 빼면 선택/클릭 블록이 origin만큼 어긋난다
-        // (라이브 제보). panel 왼쪽/위 바깥(음수) 클릭은 0 clamp라 (0,0) 모서리에 붙는다.
-        const term_x = x_px - @as(f64, @floatFromInt(rect.x));
-        const term_y = y_px - @as(f64, @floatFromInt(rect.y));
-        const col_f = std.math.clamp(@max(term_x, 0) / cw, 0, max_col);
-        const row_f = std.math.clamp(@max(term_y, 0) / ch, 0, max_row);
-        // SGR-Pixels(1016) mouse 리포트용 픽셀: 셀과 같은 origin(그 pane 좌상단)·음수 0 clamp 정책으로
-        // 터미널 영역 backing px를 구해 셀 리포트와 같은 지점을 가리키게 한다. 영역 폭/높이-1로 clamp하고
-        // u16 상한(65535)으로 saturate해 @intFromFloat가 안전하다.
-        const max_x: f64 = @min(@max(@as(f64, @floatFromInt(core.size.cols)) * cw - 1, 0), 65535);
-        const max_y: f64 = @min(@max(@as(f64, @floatFromInt(core.size.rows)) * ch - 1, 0), 65535);
-        const px_x = std.math.clamp(@max(term_x, 0), 0, max_x);
-        const px_y = std.math.clamp(@max(term_y, 0), 0, max_y);
-        return .{
-            .row = @intFromFloat(row_f),
-            .col = @intFromFloat(col_f),
-            .term_x_px = @intFromFloat(px_x),
-            .term_y_px = @intFromFloat(px_y),
-        };
+        // 본문 산술은 session/layout_math.zig로 분리(b2) — self/surface에서 cell 메트릭·grid 크기만 뽑아 위임.
+        return layout_math.pxToCell(self.cell_width_px, self.cell_height_px, surface.core.size.cols, surface.core.size.rows, rect, x_px, y_px);
     }
 
     /// 마우스 선택. kind 1=down(선택 시작), 2=drag(확장), 3=up(확정 — 드래그 선택인데 이동이

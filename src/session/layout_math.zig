@@ -84,6 +84,40 @@ pub fn paneDropZone(rect: SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
     return if (fy < 0.5) .top else .bottom;
 }
 
+/// 셀 hit-test 결과 — (row,col)은 grid 안 클램프된 셀, term_*_px는 그 pane 본문 좌상단 기준 backing 픽셀
+/// (SGR-Pixels(1016) mouse 리포트용 — 셀과 같은 origin·음수 0 clamp).
+pub const CellHit = struct { row: u16, col: u16, term_x_px: u16, term_y_px: u16 };
+
+/// backing 픽셀 (x,y)를 pane 본문 rect(origin·크기) 기준 (row,col) 셀로 변환한다(grid 안 clamp). cell 크기 0이면
+/// placeholder. 핵심: 클램프를 float 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성
+/// 입력)가 i64 변환에서 trap(앱 패닉)하던 것을 막는다. 비유한값은 null, panel 왼쪽/위 바깥(음수) 좌표는 0 clamp.
+/// cols/rows는 활성 surface의 `core.size`(>=2 보장), rect는 paneTermRect(window padding·사이드바 origin 포함).
+pub fn pxToCell(cell_width_px: u32, cell_height_px: u32, cols: u16, rows: u16, rect: SplitRect, x_px: f64, y_px: f64) ?CellHit {
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+    const cw: f64 = @floatFromInt(if (cell_width_px > 0) cell_width_px else input_math.placeholder_cell_width_px);
+    const ch: f64 = @floatFromInt(if (cell_height_px > 0) cell_height_px else input_math.placeholder_cell_height_px);
+    const max_col: f64 = @floatFromInt(cols - 1);
+    const max_row: f64 = @floatFromInt(rows - 1);
+    // panel은 자기 rect의 origin에서 그려지므로 스크린 좌표에서 그 origin을 빼야 panel의 열/행이 된다(안 빼면
+    // 선택/클릭이 origin만큼 어긋남). panel 왼쪽/위 바깥(음수)은 0 clamp라 (0,0) 모서리에 붙는다.
+    const term_x = x_px - @as(f64, @floatFromInt(rect.x));
+    const term_y = y_px - @as(f64, @floatFromInt(rect.y));
+    const col_f = std.math.clamp(@max(term_x, 0) / cw, 0, max_col);
+    const row_f = std.math.clamp(@max(term_y, 0) / ch, 0, max_row);
+    // SGR-Pixels(1016)용 픽셀: 셀과 같은 origin·0 clamp로 터미널 영역 backing px를 구한다. 영역 폭/높이-1로
+    // clamp하고 u16 상한(65535)으로 saturate해 @intFromFloat가 안전하다.
+    const max_x: f64 = @min(@max(@as(f64, @floatFromInt(cols)) * cw - 1, 0), 65535);
+    const max_y: f64 = @min(@max(@as(f64, @floatFromInt(rows)) * ch - 1, 0), 65535);
+    const px_x = std.math.clamp(@max(term_x, 0), 0, max_x);
+    const px_y = std.math.clamp(@max(term_y, 0), 0, max_y);
+    return .{
+        .row = @intFromFloat(row_f),
+        .col = @intFromFloat(col_f),
+        .term_x_px = @intFromFloat(px_x),
+        .term_y_px = @intFromFloat(px_y),
+    };
+}
+
 test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
     // 960×600 backing at 8×18 cell -> 120×33 (이전엔 Swift가 placeholder 12×24로 80×25를 잡아
     // 창과 grid가 어긋났다). 이제 app session이 실제 메트릭으로 직접 계산한다.
@@ -139,4 +173,21 @@ test "halfRect splits a rect by zone" {
     try std.testing.expectEqual(SplitRect{ .x = 60, .y = 20, .w = 50, .h = 80 }, halfRect(r, .right));
     try std.testing.expectEqual(SplitRect{ .x = 10, .y = 20, .w = 100, .h = 40 }, halfRect(r, .top));
     try std.testing.expectEqual(SplitRect{ .x = 10, .y = 60, .w = 100, .h = 40 }, halfRect(r, .bottom));
+}
+
+test "pxToCell maps backing px to clamped cell with rect origin offset" {
+    const r: SplitRect = .{ .x = 0, .y = 0, .w = 640, .h = 432 };
+    try std.testing.expectEqual(@as(u16, 2), pxToCell(8, 18, 80, 24, r, 16, 0).?.col); // x=16/8=2
+    try std.testing.expectEqual(@as(u16, 1), pxToCell(8, 18, 80, 24, r, 0, 18).?.row); // y=18/18=1
+    // rect origin offset(상하 split의 아래 panel): origin (0,16) → y에서 16 뺀 뒤 행.
+    const r2: SplitRect = .{ .x = 0, .y = 16, .w = 640, .h = 432 };
+    try std.testing.expectEqual(@as(u16, 0), pxToCell(8, 18, 80, 24, r2, 16, 16).?.row); // y=16-16=0
+    // grid 안 clamp: 영역 밖 큰 좌표는 cols-1.
+    try std.testing.expectEqual(@as(u16, 79), pxToCell(8, 18, 80, 24, r, 100000, 0).?.col);
+    // panel 위쪽 바깥(음수)은 0 clamp.
+    try std.testing.expectEqual(@as(u16, 0), pxToCell(8, 18, 80, 24, r2, 0, 0).?.row); // y=0-16<0 → 0
+    // cell 0이면 placeholder(12×24): x=12 → col 1.
+    try std.testing.expectEqual(@as(u16, 1), pxToCell(0, 0, 80, 24, r, 12, 0).?.col);
+    // 비유한은 null(i64 trap 방지).
+    try std.testing.expect(pxToCell(8, 18, 80, 24, r, std.math.nan(f64), 0) == null);
 }

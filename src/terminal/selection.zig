@@ -19,7 +19,7 @@
 const std = @import("std");
 const core = @import("core.zig");
 const types = @import("types.zig");
-const screen = @import("screen.zig"); // 화면/스크롤백 읽기(absRow·isBlankCell·ensureScrollbackRewrapped)
+const screen = @import("screen.zig"); // 화면/스크롤백 읽기(absRow·ensureScrollbackRewrapped)
 
 const TerminalCore = core.TerminalCore;
 
@@ -33,10 +33,19 @@ fn isWordSeparatorCell(cell: types.Cell, separators: []const u21) bool {
     return false;
 }
 
-/// 단어 경계 셀인가 — 공백(isBlankCell) 또는 separators 집합 멤버. URL 감지는 separators=&.{}라 공백만 본다
-/// (`:`·`/`·`.`가 URL을 쪼개지 않게). 선택은 config 구분자를 넘긴다.
+/// 경계용 공백 판정 — isBlankCell과 달리 **배경색을 보지 않는다**. 단어/URL 경계는 "보이는 글자가 공백인가"만
+/// 따져야 하므로, bce/erase·상태줄·프롬프트가 배경색으로 칠한 공백(codepoint=' '이지만 style.background ≠
+/// default)도 경계로 본다. continuation(wide 2번째 칸)은 공백이 아니다. isBlankCell의 배경 기본값 조건은 복사
+/// trim 등 다른 용도라 그대로 둔다.
+fn isBoundarySpace(cell: types.Cell) bool {
+    return cell.codepoint == ' ' and !cell.continuation;
+}
+
+/// 단어 경계 셀인가 — 공백(isBoundarySpace, 배경 무관) 또는 separators 집합 멤버. URL 감지는 separators=&.{}라
+/// 공백만 본다(`:`·`/`·`.`가 URL을 쪼개지 않게). 선택은 config 구분자를 넘긴다. **배경색 칠한 공백도 경계**라,
+/// bce로 색칠된 행(상태줄/프롬프트/erase)에서 URL 뒤의 공백·텍스트가 URL에 빨려들어 가지 않는다.
 fn isWordBoundaryCell(cell: types.Cell, separators: []const u21) bool {
-    return screen.isBlankCell(cell) or isWordSeparatorCell(cell, separators);
+    return isBoundarySpace(cell) or isWordSeparatorCell(cell, separators);
 }
 
 /// 절대-행 [start, end] 선형 범위를 현재 뷰포트 좌표로 클립한다(화면 밖이면 null). 선택
@@ -269,7 +278,7 @@ fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, sepa
     const row_cells = screen.absRow(self, abs) orelse return null;
     if (row_cells.len == 0) return null; // 빈 행(전부 공백 → A2 trim으로 len 0, §11) = 단어 없음 — [c] 인덱싱 전 가드
     const c = @min(col, @as(u16, @intCast(row_cells.len -| 1)));
-    if (screen.isBlankCell(row_cells[c])) return null; // 공백 클릭 → 선택 없음(현행)
+    if (isBoundarySpace(row_cells[c])) return null; // 공백 클릭 → 선택 없음(배경색 칠한 공백도 동일)
     // 구분자 클릭: 구분자는 제 자신이 한 토큰 → 그 1칸만 선택(Ghostty/iTerm2 관례). separators 비면 false라 무관.
     if (isWordSeparatorCell(row_cells[c], separators)) {
         return .{ .start = .{ .row = abs, .col = c }, .end = .{ .row = abs, .col = c } };

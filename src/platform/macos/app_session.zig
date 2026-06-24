@@ -8379,16 +8379,17 @@ pub const AppSession = struct {
     /// 각 세션의 Window를 모아 만든다. 모든 슬라이스·문자열은 `arena`가 소유한다(호출자가 deinit).
     pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator) !app.workspace.Window {
         var tabs: std.ArrayList(app.workspace.Tab) = .empty;
-        for (self.tabs.items) |tab| try tabs.append(arena, try captureWorkspaceTab(arena, tab));
+        for (self.tabs.items) |tab| try tabs.append(arena, try self.captureWorkspaceTab(arena, tab));
         return .{ .active_tab = self.app_window.active_tab, .tabs = try tabs.toOwnedSlice(arena) };
     }
 
-    fn captureWorkspaceTab(arena: std.mem.Allocator, tab: *Tab) !app.workspace.Tab {
+    fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !app.workspace.Tab {
         var panes: std.ArrayList(app.workspace.Pane) = .empty;
         for (tab.panes.items) |pane| {
             var surfaces: std.ArrayList(app.workspace.Surface) = .empty;
             for (pane.terms.items) |term| {
                 const core = &term.surface.core;
+                const agent = self.captureAgentForRestore(arena, term);
                 try surfaces.append(arena, .{
                     // custom_name = 사용자 rename(owned, 없으면 ""), title = 자동 제목(OSC). 둘은 별도 필드로 저장한다.
                     .custom_name = try arena.dupe(u8, term.surface.custom_name orelse ""),
@@ -8397,6 +8398,10 @@ pub const AppSession = struct {
                     .command = try arena.dupe(u8, term.surface.command orelse ""),
                     .cols = core.size.cols,
                     .rows = core.size.rows,
+                    // claude/codex 세션 자동 resume(opt-in). agent_kind 빈값이면 일반 셸 복원(docs/workspace-restore.md).
+                    .agent_kind = agent.kind,
+                    .agent_session = agent.session,
+                    .agent_argv = agent.argv,
                 });
             }
             try panes.append(arena, .{
@@ -8417,6 +8422,87 @@ pub const AppSession = struct {
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
+    }
+
+    /// (workspace restore) captureAgentForRestore 결과 — claude/codex 세션 자동 resume 정보(빈값이면 일반 셸 복원).
+    const AgentRestoreInfo = struct {
+        kind: []const u8 = "",
+        session: []const u8 = "",
+        argv: []const []const u8 = &.{},
+    };
+
+    /// 이 Term이 claude/codex이고 해당 토글이 켜졌으면, 종료 시점에 세션을 자동 resume하기 위한 정보(agent_kind·
+    /// session_id·보존 argv)를 캡처한다(아니면 빈값=일반 셸 복원). exec_path+argv는 KERN_PROCARGS2(captureAgentArgv —
+    /// **틱이 멈춘 종료 시점 호출이라 정적 procargs_buf 공유 안전**), session_id는 트랜스크립트 파일(resolveSessionId).
+    /// argv[0]은 exec_path 절대경로로 교체하고 민감 인라인 토큰은 redact한다. 결과는 arena 소유. 단일 출처:
+    /// docs/workspace-restore.md "에이전트 세션 자동 resume".
+    fn captureAgentForRestore(self: *AppSession, arena: std.mem.Allocator, term: *Term) AgentRestoreInfo {
+        const kind: app.agent_resume.Kind = switch (term.agent_kind) {
+            .none => return .{},
+            .claude => if (self.loaded_config.config.workspace.restore_claude) .claude else return .{},
+            .codex => if (self.loaded_config.config.workspace.restore_codex) .codex else return .{},
+        };
+        if (!term.live_initialized) return .{};
+
+        // 1) exec_path + 전체 argv 캡처(틱이 멈춘 종료 시점이라 정적 procargs_buf 공유 안전).
+        var str_buf: [16 * 1024]u8 = undefined;
+        var argv_raw: [app.workspace.max_agent_argv][]const u8 = undefined;
+        const cap = term.live_pty.session.captureAgentArgv(&str_buf, &argv_raw) orelse return .{};
+        if (cap.argv.len == 0) return .{};
+        // stale agent_kind 방어: 캡처된 실제 프로그램(node 래퍼면 argv[1] 스크립트, 아니면 exec_path)이 기대 kind와
+        // 일치하는지 재확인한다 — agent_kind는 ~0.5s 폴 캐시라, claude 종료 직후 셸이 idle이거나 다른 명령이 뜬
+        // 순간 종료하면 셸/그 명령의 argv를 잡을 수 있다(그 경우 classifyAgent=none → 빈값, 일반 셸 복원).
+        const prog_path = if (cap.argv.len >= 2 and app.agent_resume.isInterpreterPath(cap.exec_path)) cap.argv[1] else cap.exec_path;
+        if (classifyAgent(std.fs.path.basename(prog_path)) != term.agent_kind) return .{};
+
+        // 2) argv[0]을 exec_path(절대경로)로 교체 → 민감 인라인 토큰 redact.
+        var combined: [app.workspace.max_agent_argv][]const u8 = undefined;
+        var m: usize = 0;
+        combined[m] = cap.exec_path;
+        m += 1;
+        for (cap.argv[1..]) |a| {
+            if (m >= combined.len) break;
+            combined[m] = a;
+            m += 1;
+        }
+        var redacted_buf: [app.workspace.max_agent_argv][]const u8 = undefined;
+        const redacted = app.agent_resume.redactArgv(combined[0..m], &redacted_buf);
+
+        // 3) arena로 소유 이전(str_buf/combined는 지역이라 종료 시점 이후 무효).
+        const argv_out = arena.alloc([]const u8, redacted.len) catch return .{};
+        for (redacted, 0..) |a, i| argv_out[i] = arena.dupe(u8, a) catch return .{};
+
+        return .{
+            .kind = arena.dupe(u8, kind.toString()) catch return .{},
+            .session = self.captureAgentSessionId(arena, term, kind),
+            .argv = argv_out,
+        };
+    }
+
+    /// captureAgentForRestore의 session id 부분 — cwd(OSC 7, 락 아래 복사) + HOME으로 트랜스크립트 루트를 만들어
+    /// resolveSessionId. 못 구하면 ""(폴백 resume). pollAgentState의 root/cwd 구성과 같은 패턴.
+    fn captureAgentSessionId(self: *AppSession, arena: std.mem.Allocator, term: *Term, kind: app.agent_resume.Kind) []const u8 {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = blk: {
+            term.surface.lockCore(self.io);
+            defer term.surface.unlockCore(self.io);
+            const live = term.surface.core.currentCwd();
+            if (live.len == 0 or live.len > cwd_buf.len) break :blk "";
+            @memcpy(cwd_buf[0..live.len], live);
+            break :blk cwd_buf[0..live.len];
+        };
+        if (cwd.len == 0) return "";
+        const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else return "";
+        const subdir: []const u8 = switch (kind) {
+            .claude => ".claude/projects",
+            .codex => ".codex/sessions",
+        };
+        var root_buf: [4096]u8 = undefined;
+        const root = std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ home, subdir }) catch return "";
+        // agent_session.Kind는 app.agent_resume.Kind와 같은 타입이라(#6 통합) 변환 없이 그대로 넘긴다.
+        var id_buf: [256]u8 = undefined;
+        const id = agent_session.resolveSessionId(self.io, self.allocator, kind, root, cwd, &id_buf) orelse return "";
+        return arena.dupe(u8, id) catch "";
     }
 
     /// PaneTree 노드를 preorder로 평탄화한다 — leaf(*Pane)는 그 Pane의 tab.panes 인덱스로, split은 방향+ratio(천분율)
@@ -8717,13 +8803,43 @@ pub const AppSession = struct {
     /// 복원 surface 하나로 spawn 준비(createPane/createTerm 공통). new_tab_config에 저장 grid를 얹고, 사용 가능한
     /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
     /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
-    fn restoreSpawn(self: *AppSession, sm: app.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
+    fn restoreSpawn(self: *AppSession, sm: app.workspace.Surface, args_buf: [][]const u8) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
+        // claude/codex 세션 자동 resume(opt-in) — agent 정보가 있고 토글이 켜졌으면 기본 셸 대신 resume 명령으로 띄운다.
+        if (self.agentResumeRequest(sm, size, args_buf)) |req| return .{ .req = req, .size = size };
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
         return .{ .req = req, .size = size };
+    }
+
+    /// (workspace restore) sm이 claude/codex 에이전트이고 해당 토글이 켜졌으면 resume SpawnRequest를 만든다(아니면
+    /// null → 기본 셸). command=보존 argv[0](exec_path 절대경로), args=정확한 session_id로 재구성한 argv(session_id가
+    /// 없으면 --continue/resume --last 폴백). 셸이 아니라 바이너리 직접 exec이라 login=false다 — exec_path 절대경로라
+    /// 에이전트 바이너리 자체는 PATH 무관하게 뜨지만, 에이전트가 spawn하는 하위 도구(git·rg 등)의 PATH는 login 셸이
+    /// 아니라 maru 프로세스 env 기준이라 다를 수 있다(behavioral 한계 — 후속). args 슬라이스는 호출자 스택의 args_buf를
+    /// 가리킨다 — createTermFromSurface가 동기 spawn하므로 spawn까지 유효. 단일 출처: docs/workspace-restore.md "에이전트 세션 자동 resume".
+    fn agentResumeRequest(self: *AppSession, sm: app.workspace.Surface, size: terminal.Size, args_buf: [][]const u8) ?maru.pty.SpawnRequest {
+        const kind = app.agent_resume.Kind.fromString(sm.agent_kind) orelse return null;
+        const enabled = switch (kind) {
+            .claude => self.loaded_config.config.workspace.restore_claude,
+            .codex => self.loaded_config.config.workspace.restore_codex,
+        };
+        if (!enabled or sm.agent_argv.len == 0 or sm.agent_argv[0].len == 0) return null;
+        const args = app.agent_resume.rebuildAgentArgv(kind, sm.agent_argv, sm.agent_session, args_buf);
+        var req: maru.pty.SpawnRequest = .{
+            .command = sm.agent_argv[0], // exec_path 절대경로(PATH 의존 제거)
+            .args = args,
+            .login = false, // 셸 아닌 에이전트 바이너리 직접 exec
+            .size = size,
+        };
+        req.term = self.loaded_config.config.term;
+        req.env_overrides = self.loaded_config.config.env;
+        req.zdotdir = self.new_tab_zdotdir;
+        req.ssh_integration_bin = self.new_tab_ssh_bin;
+        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c;
+        return req;
     }
 
     /// 직렬화 모델의 custom_name(""=없음)을 라이브 owned `?[]const u8`(null=없음)로 변환한다 — 비면 null,
@@ -8734,7 +8850,8 @@ pub const AppSession = struct {
     }
 
     fn createPaneFromSurface(self: *AppSession, sm: app.workspace.Surface) !*Pane {
-        const rs = self.restoreSpawn(sm);
+        var args_buf: [app.workspace.max_agent_argv + 4][]const u8 = undefined;
+        const rs = self.restoreSpawn(sm, &args_buf);
         const cfg = self.new_tab_config;
         const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
         errdefer self.destroyPane(pane);
@@ -8744,7 +8861,8 @@ pub const AppSession = struct {
     }
 
     fn createTermFromSurface(self: *AppSession, sm: app.workspace.Surface) !*Term {
-        const rs = self.restoreSpawn(sm);
+        var args_buf: [app.workspace.max_agent_argv + 4][]const u8 = undefined;
+        const rs = self.restoreSpawn(sm, &args_buf);
         const cfg = self.new_tab_config;
         const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
         errdefer self.destroyTerm(term);
@@ -14754,9 +14872,9 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"left\"\n" ++
-        "surface custom-name=\"editor\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n" ++
+        "surface custom-name=\"editor\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n";
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
 
     var parsed = try app.workspace.parse(allocator, text);
     defer parsed.deinit();
@@ -14775,6 +14893,47 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     try std.testing.expectEqualStrings("left", cap.tabs[0].panes[0].custom_name); // Pane
     try std.testing.expectEqualStrings("editor", cap.tabs[0].panes[0].surfaces[0].custom_name); // Term
     try std.testing.expectEqualStrings("", cap.tabs[0].panes[1].custom_name); // 빈 custom_name = 이름 없음
+}
+
+test "agentResumeRequest: 토글 게이팅 + node 래퍼 claude → command=node, args=[script, 위험모드, --resume id]" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // session.init이 실 PTY spawn
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // codex처럼 node 래퍼 형태(exec_path=node, argv[1]=스크립트)로 저장된 surface — capture가 만드는 모양.
+    const sm = app.workspace.Surface{
+        .agent_kind = "claude",
+        .agent_session = "sid-123",
+        .agent_argv = &[_][]const u8{ "/usr/bin/node", "/opt/claude/cli.js", "--dangerously-skip-permissions" },
+    };
+    var args_buf: [app.workspace.max_agent_argv + 4][]const u8 = undefined;
+
+    // 토글 off(기본 false) → null(일반 셸 복원).
+    try std.testing.expectEqual(@as(?maru.pty.SpawnRequest, null), session.agentResumeRequest(sm, terminal.Size.default, &args_buf));
+
+    // 토글 on → resume SpawnRequest. node 래퍼라 스크립트를 보존하고 위험모드 + --resume <id>를 재구성한다.
+    session.loaded_config.config.workspace.restore_claude = true;
+    const req = session.agentResumeRequest(sm, terminal.Size.default, &args_buf).?;
+    try std.testing.expectEqualStrings("/usr/bin/node", req.command); // exec_path(인터프리터)가 command
+    try std.testing.expectEqual(@as(usize, 4), req.args.len);
+    try std.testing.expectEqualStrings("/opt/claude/cli.js", req.args[0]); // 스크립트 보존(`node /script …`)
+    try std.testing.expectEqualStrings("--dangerously-skip-permissions", req.args[1]); // 위험모드 보존
+    try std.testing.expectEqualStrings("--resume", req.args[2]);
+    try std.testing.expectEqualStrings("sid-123", req.args[3]);
+    try std.testing.expectEqual(false, req.login); // 셸 아닌 바이너리 직접 exec
+
+    // codex 토글은 별개 — claude만 켠 상태에서 codex surface는 게이트로 null.
+    const sm_codex = app.workspace.Surface{ .agent_kind = "codex", .agent_session = "cid", .agent_argv = &[_][]const u8{ "/usr/bin/codex", "resume", "old" } };
+    try std.testing.expectEqual(@as(?maru.pty.SpawnRequest, null), session.agentResumeRequest(sm_codex, terminal.Size.default, &args_buf));
 }
 
 test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 childExec graceful이 담당)" {

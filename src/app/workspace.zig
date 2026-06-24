@@ -21,6 +21,10 @@ pub const header = "maru.workspace.v1";
 /// 없어 sane 상한을 우리가 정함 — Ghostty는 바이너리 아카이버라 이 텍스트-깊은중첩 벡터 자체가 없다.
 pub const max_panes_per_tab = 1024;
 
+/// 한 surface가 보존하는 agent argv 토큰 수 sanity 상한 — 손상/변조 파일이 `agent-argc`를 부풀려 거대 루프를
+/// 돌지 않게 parseSurface가 먼저 가둔다. 현실 에이전트 argv는 한 자릿수~수십 개라 256은 어떤 정상 호출보다 크다.
+pub const max_agent_argv = 256;
+
 pub const SplitDirection = split_tree.SplitDirection;
 
 /// split 트리 한 노드(preorder). leaf는 pane 섹션 인덱스를 가리키고, split은 방향 + a의 비율(천분율 0..1000)을
@@ -51,6 +55,12 @@ pub const Surface = struct {
     command: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
+    // claude/codex 세션 자동 resume(opt-in allowlist 예외 — docs/workspace-restore.md "에이전트 세션 자동 resume").
+    // agent_kind=""면 일반 셸 복원. agent_session=""면 폴백 resume(--continue/resume --last). agent_argv는 종료
+    // 시점 보존 argv(redact 후)로, 복원 spawn이 세션지정 플래그를 갈아끼워 재구성한다.
+    agent_kind: []const u8 = "",
+    agent_session: []const u8 = "",
+    agent_argv: []const []const u8 = &.{},
 };
 
 /// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
@@ -143,7 +153,18 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
     try writeEscaped(w, s.cwd);
     try w.writeAll("\" command=\"");
     try writeEscaped(w, s.command);
-    try w.print("\" cols={d} rows={d}\n", .{ s.cols, s.rows });
+    try w.print("\" cols={d} rows={d} agent-kind=\"", .{ s.cols, s.rows });
+    try writeEscaped(w, s.agent_kind);
+    try w.writeAll("\" agent-session=\"");
+    try writeEscaped(w, s.agent_session);
+    try w.print("\" agent-argc={d}", .{s.agent_argv.len});
+    // agent-argc=N 뒤에 agent-arg="..."를 N개 — parsePane의 surfaces=N count+반복과 같은 self-delimiting 패턴.
+    for (s.agent_argv) |arg| {
+        try w.writeAll(" agent-arg=\"");
+        try writeEscaped(w, arg);
+        try w.writeAll("\"");
+    }
+    try w.writeAll("\n");
 }
 
 // ── R2: reader/parser ──────────────────────────────────────────────────────────
@@ -280,7 +301,30 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     const cols = try r.uint(u16);
     try r.key("rows=");
     const rows = try r.uint(u16);
-    return .{ .custom_name = custom_name, .title = title, .cwd = cwd, .command = command, .cols = cols, .rows = rows };
+    try r.key("agent-kind=");
+    const agent_kind = try r.quoted(a);
+    try r.key("agent-session=");
+    const agent_session = try r.quoted(a);
+    try r.key("agent-argc=");
+    const argc = try r.uint(usize);
+    if (argc > max_agent_argv) return error.BadLine; // 손상/변조 방어(거대 루프 차단)
+    var argv: std.ArrayList([]const u8) = .empty;
+    var ai: usize = 0;
+    while (ai < argc) : (ai += 1) {
+        try r.key("agent-arg=");
+        try argv.append(a, try r.quoted(a));
+    }
+    return .{
+        .custom_name = custom_name,
+        .title = title,
+        .cwd = cwd,
+        .command = command,
+        .cols = cols,
+        .rows = rows,
+        .agent_kind = agent_kind,
+        .agent_session = agent_session,
+        .agent_argv = try argv.toOwnedSlice(a),
+    };
 }
 
 /// 텍스트를 개행 단위 라인으로 나눈다(마지막 개행 뒤 빈 줄은 내지 않는다). peek은 소비 없이 다음 라인을 본다.
@@ -383,7 +427,7 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
     try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\" pinned=0 background-color=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n") != null);
 }
 
 test "workspace serialize: split 트리(중첩) + 멀티 pane" {
@@ -435,7 +479,7 @@ test "workspace serialize: 멀티 창 + cwd/title escape" {
         if (std.mem.startsWith(u8, line, "window ")) window_lines += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), window_lines);
-    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"a \\\"b\\\"\" cwd=\"/tmp/x y\\n\" command=\"/bin/zsh\" cols=10 rows=5\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"a \\\"b\\\"\" cwd=\"/tmp/x y\\n\" command=\"/bin/zsh\" cols=10 rows=5 agent-kind=\"\" agent-session=\"\" agent-argc=0\n") != null);
 }
 
 test "workspace round-trip: serialize → parse → 다시 serialize 동일(중첩 split·멀티 창·escape)" {
@@ -499,9 +543,9 @@ test "workspace parse: 구조·escape 해제·forgiving" {
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"left pane\"\n" ++
-        "surface custom-name=\"editor\" title=\"top\" cwd=\"/a b\\\"c\" command=\"/bin/zsh\" cols=80 rows=24\n" ++
+        "surface custom-name=\"editor\" title=\"top\" cwd=\"/a b\\\"c\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
-        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/bash\" cols=80 rows=10\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/bash\" cols=80 rows=10 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
         "trailing-garbage that should be ignored\n";
 
     var parsed = try parse(std.testing.allocator, text);
@@ -600,4 +644,47 @@ test "workspace serialize: 선언적 — env/fd/pid/last-observed 필드 없음(
     try std.testing.expect(std.mem.indexOf(u8, text, "last-observed") == null);
     // cwd는 경로라 정상 저장된다(redaction 대상은 env이지 path가 아님 — workspace-restore.md).
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/home/user/.secret-proj\"") != null);
+}
+
+test "workspace round-trip: agent_kind·agent_session·agent_argv 보존(escape 포함)" {
+    // claude/codex 세션 resume 정보가 serialize→parse를 통해 그대로 round-trip되는지. argv 토큰은 공백·따옴표를
+    // 포함해도 한 줄·토큰별로 안전히 인코딩돼야 한다(agent-argc=N + agent-arg="..." 패턴, docs/workspace-restore.md).
+    const argv = [_][]const u8{ "claude", "--dangerously-skip-permissions", "--resume", "id a\"b" };
+    const surfaces = [_]Surface{.{
+        .command = "/Users/me/.local/bin/claude",
+        .cols = 80,
+        .rows = 24,
+        .agent_kind = "claude",
+        .agent_session = "23cb4875-83e6-4e9e-b37f-6e1112d5fff9",
+        .agent_argv = &argv,
+    }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "agent-kind=\"claude\" agent-session=\"23cb4875-83e6-4e9e-b37f-6e1112d5fff9\" agent-argc=4") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const s = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0];
+    try std.testing.expectEqualStrings("claude", s.agent_kind);
+    try std.testing.expectEqualStrings("23cb4875-83e6-4e9e-b37f-6e1112d5fff9", s.agent_session);
+    try std.testing.expectEqual(@as(usize, 4), s.agent_argv.len);
+    try std.testing.expectEqualStrings("--dangerously-skip-permissions", s.agent_argv[1]);
+    try std.testing.expectEqualStrings("id a\"b", s.agent_argv[3]); // escape round-trip(따옴표 포함)
+}
+
+test "workspace parse: agent-argc 과대값은 graceful 차단(BadLine)" {
+    // 손상/변조 파일이 agent-argc를 부풀려도 max_agent_argv에서 먼저 막아 거대 루프를 돈다(복원 측은 기본 창 폴백).
+    const huge =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\" pinned=0 background-color=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"claude\" agent-session=\"\" agent-argc=999999\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, huge));
 }

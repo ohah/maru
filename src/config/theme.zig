@@ -659,11 +659,21 @@ pub const WorkspaceConfig = struct {
     /// (Ghostty `split-inherit-working-directory` 기본과 동일; tmux `split-window`·iTerm2 새 split도 현재 디렉터리
     /// 상속). `false`면 `root`에서 연다(상속할 cwd 없으면 마찬가지). loader가 `workspace.split-inherit-cwd` 키로 파싱.
     split_inherit_cwd: bool = true,
+    /// 종료 시 각 페인에서 돌던 claude 세션을 재시작 때 자동으로 다시 연다(`claude --resume <id>`). **기본 false
+    /// (opt-in)** — workspace restore가 임의 명령을 자동 재실행하지 않는다는 정책의 allowlist 예외라, 위험모드
+    /// (`--dangerously-skip-permissions`) 재현을 사용자가 명시적으로 켜게 한다. 단일 출처: docs/workspace-restore.md
+    /// "에이전트 세션 자동 resume". loader가 `workspace.restore-claude` 키로 파싱.
+    restore_claude: bool = false,
+    /// 종료 시 각 페인에서 돌던 codex 세션을 재시작 때 자동으로 다시 연다(`codex resume <id>`). **기본 false(opt-in)**,
+    /// restore_claude와 같은 정책. loader가 `workspace.restore-codex` 키로 파싱.
+    restore_codex: bool = false,
 
-    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit 토글만 스키마-주도.
-    pub const schema = .{ // 키: workspace.tab-inherit-cwd / workspace.split-inherit-cwd
+    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·restore 토글은 스키마-주도.
+    pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / restore-claude / restore-codex
         .tab_inherit_cwd = Meta{ .doc = "새 탭/Term이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
         .split_inherit_cwd = Meta{ .doc = "새 분할이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
+        .restore_claude = Meta{ .doc = "종료 후 claude 세션 자동 resume 복원", .widget = .toggle, .section = .workspace },
+        .restore_codex = Meta{ .doc = "종료 후 codex 세션 자동 resume 복원", .widget = .toggle, .section = .workspace },
     };
 };
 

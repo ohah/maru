@@ -103,6 +103,8 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `workspace.root` | 경로 | (없음) | 고정 시작 디렉터리(Ghostty `working-directory` 대응). 첫 창 + 상속이 꺼졌거나 상속할 cwd가 없을 때 폴백. 비어 있으면 maru cwd 상속(단 `/`면 `~`). `~`·`~/…`는 $HOME으로 확장. 아래 참조 |
 | `workspace.tab-inherit-cwd` | `true`\|`false` | `true` | 새 워크스페이스 탭(`new_tab`)·새 Term(`new_term`)이 포커스 Term의 현재 cwd(OSC 7)를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `tab-inherit-working-directory`). 아래 참조 |
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
+| `workspace.restore-claude` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 claude 세션을 자동 resume(`claude --resume <id>`). **opt-in** — 위험모드(`--dangerously-skip-permissions`) 재현을 명시적으로 켠다. 아래 참조 |
+| `workspace.restore-codex` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 codex 세션을 자동 resume(`codex resume <id>`). **opt-in**, restore-claude와 같은 정책. 아래 참조 |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `scroll.multiplier` | 실수(0.1~10.0) | `1.0` | 휠/트랙패드 **세로** 스크롤 속도 배수. `1.0`=OS 기본, `>1`=빠르게(예: `3`이면 한 틱에 3배 줄), `<1`=느리게. 가로(탭 바) 스크롤엔 적용 안 함. 배수는 maru 스크롤백뿐 아니라 **마우스 트래킹 앱(vim/tmux 등)에도 적용**된다(한 휠 틱이 더 많은 휠 이벤트로 전달 — Ghostty `mouse-scroll-multiplier`와 같은 동작). 범위 밖/비실수는 무시(기본 유지). `scrollback`(보관 줄 수)과 별개 |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
@@ -277,6 +279,10 @@ workspace.root = ~/projects
 # 상속 토글(기본 둘 다 true = 포커스 cwd 상속). false면 그 종류는 항상 root에서 연다.
 workspace.tab-inherit-cwd   = true   # 새 워크스페이스 탭(⌘⇧T) + 새 Term(⌘T)
 workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
+
+# 에이전트 세션 자동 resume(기본 둘 다 false = opt-in). 종료 후 재시작 시 claude/codex 세션을 이어 연다.
+workspace.restore-claude = false   # claude --resume <id>
+workspace.restore-codex  = false   # codex resume <id>
 ```
 
 - **`workspace.root`** — 고정 시작 디렉터리. **절대경로 또는 `~`/`~/…`만** 받는다 — 상대경로나 `~user`(다른
@@ -294,6 +300,13 @@ workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
 
 - **`workspace.split-inherit-cwd`** — 새 분할(`split_*`, 팬)의 cwd 상속 여부. `true`(기본)면 포커스 cwd
   상속, `false`면 `root`.
+
+- **`workspace.restore-claude`** / **`workspace.restore-codex`** — 종료 후 재시작 시 각 페인에서 돌던
+  claude/codex 세션을 자동으로 다시 연다(`claude --resume <id>` / `codex resume <id>`). 각각 독립, **기본
+  false(opt-in)**. workspace restore가 임의 명령을 자동 재실행하지 않는다는 정책의 allowlist 예외라(claude/codex는
+  자체 resume이 안전한 정상 경로), 위험모드(`--dangerously-skip-permissions`) 재현을 사용자가 명시적으로 켜게
+  한다. 세션 식별·redaction·다중세션 처리는 [Workspace Restore 전략](workspace-restore.md) "에이전트 세션 자동
+  resume" 단일 출처.
 
 > **베이스/결정**: 동작·기본값·키 의미를 모두 **Ghostty**(`working-directory`,
 > `window/tab/split-inherit-working-directory`, 모두 기본 `true`)에 맞췄다(레퍼런스는 동작만 비교, 코드

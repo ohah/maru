@@ -48,6 +48,34 @@ flowchart TD
 
 추출 후 `platform/macos`엔 **L4 어댑터만** 남는다: CoreText 프레임 빌드, render projection, Metal 렌더러, ABI, Swift host. (`split_tree.zig`는 이미 `src/app`에 generic·platform 무참조로 있어 2차의 선례다.)
 
+### 3.1 S2 추출 설계 (Term 모델/런타임 분리 — 측정 후 재개)
+
+**보류 사유의 실체:** `Term`(`app_session.zig`)이 런타임 핸들(`app.LivePtySession`·`RuntimeEventPump`)을 필드로 품고, `app`이 "의도적 혼합 레이어"라(§8) 모델을 `src/session/`(순수)으로 통째 옮기면 session→pty 의존이 생긴다. 그래서 한동안 "상호 합의 보류"였다.
+
+**측정(2026-06):** `Term`의 의존 표면을 코드로 셌다 — 정면돌파가 할 만함이 드러났다.
+- `surface.core`(36개 API)는 **이미 OS-중립**(`terminal.TerminalCore`)이라 동반 이동만 하면 된다 — 추상화 대상이 아니다.
+- 진짜 떼어낼 런타임 표면은 `live_pty`(9개, 대부분 init/소유권) + `pump`(1개 `drainAvailable`) = **약 10개**.
+- 추상화 선례: `PtyIo`(`src/app/runtime.zig`)가 `ctx + *const fn` vtable로 이미 있다 → 그대로 따른다.
+- 핫패스: 실질 vtable은 `pump.drainAvailable`(매 tick 1회/term) 하나. frame 빌드의 `lockCore`/`core.*`는 OS-중립이라 추상화하지 않아 vtable이 안 낀다. `mise run perf`로 회귀 감지.
+
+**핵심 설계 — `Term`을 둘로 쪼갠다(shim 없이 완전 분리, [project-rules.md] "구조와 파일 분리"):**
+- `session.Term`(모델, → `src/session/`): `surface`(OS-중립 `TerminalCore`+메타)·자식 관계·`auto_title` 등 순수 상태.
+- platform `TermRuntime`(`app_session` 잔류): `live_pty`·`pump`·`live_initialized`·`terminated`·agent 런타임 + PTY spawn·render·drag UI 포인터.
+- 모델은 런타임을 직접 모른다 — platform이 인덱스/포인터로 런타임을 매핑하거나 `PtyIo`식 추상 핸들만 모델에 준다.
+- `Pane`/`Tab`은 이미 OS 타입 참조 0(측정 확인) → 거의 그대로 모델로. `PaneTree = app.SplitTree(*Pane)`은 generic 선례.
+
+**단계(저→고위험, 각 green + 헤드리스 TDD):**
+
+| 단계 | 내용 | 위험 |
+|---|---|---|
+| S2-1 | 이 설계 명문화(본 절). 코드 0 | 없음 |
+| S2-2 | `pump.drainAvailable` 경계를 `PtyIo` 패턴으로 정리. perf 확인 | 낮음 |
+| S2-3 | `live_pty`/런타임 상태를 `TermRuntime`으로 분리. `Term`=surface+메타 | 중 |
+| S2-4 | `Term`/`Pane`/`Tab` + 순수 연산을 `src/session/session_model.zig`로 이동. 헤드리스 fake TDD | 중상 |
+| S2-5 | workspace capture/apply 순수 변환을 session으로(spawn 콜백 주입) | 중 |
+
+**검증:** 헤드리스(fake leaf/surface로 split→focus→close 단언 — `SplitTree(*u32)` 선례), `zig build test`·`zig build check-boundaries`(session에 pty/platform/OS 타입명 0)·`zig build macos-app-build`, `mise run perf`(S2-2 핫패스), 머지 전 `zig build macos-app` 실행([run-macos-app-before-merge]).
+
 ## 4. 렌더 백엔드 + 호스트 이식 (검증된 현실)
 
 이식 작업을 **GPU 백엔드(공유 가능) vs 플랫폼 호스트(타깃별 신규)** 2층으로 분리해 본다. 적대적 검증의 정직한 계량:
@@ -68,7 +96,7 @@ flowchart TD
 
 1. **C0 — Notice + chrome 백엔드 골격** (greenfield) ✅ **완료**. 손상 알림(`workspace_window_count < 0`) 연결, ChromeDraw→backend 패턴 증명.
 2. **S1 — session-tree 수명 계약 형식화**(§6) ✅ **완료**(`invalidateForFreedPane` chokepoint).
-3. **S2 — session core(L2) 물리 추출** → `src/session/`. **부분**: `input_math`·`ime`는 추출, 모델(Pane/Tab/Term)은 라이브-결합이라 **보류**(상호 합의). C1은 S2 모델 추출 없이 진행됨 — UI 상태만 chrome로, 모델은 session 소유 유지.
+3. **S2 — session core(L2) 물리 추출** → `src/session/`. `input_math`·`ime`는 추출 완료. 모델(Pane/Tab/Term)은 라이브-결합이라 한동안 보류였으나, 측정(§3.1) 결과 추상화 표면이 좁아(런타임 핸들 ~10개 + `PtyIo` 선례·핫패스 vtable 1개) **재개**한다 — `Term`을 모델/런타임으로 분리하는 S2-1~S2-5 단계로(§3.1). C1~C4는 S2 모델 추출 없이 완료됐고(UI 상태만 chrome로), 이제 모델을 session 소유로 물리 이동한다.
 4. **C1 — palette/find chrome 이주** ✅ **완료**(C1a=find, C1b=palette). 두 오버레이가 `src/chrome/components/{find,palette}.zig`(neutral State+view+handle)로, platform이 props·카탈로그 행 주입·ChromeDraw lowering. **입력 caret은 터미널 커서 메커니즘을 재활용**: cursor-role fill → 오버레이 `PaneFrame.cursor`(반전 블록) → `setCursorVisible`(suffix-trim) 깜빡임(틱-카운터 위상 공유, 재빌드 0). EAW 폭(한글 2칸)·IME 조합 표시도 find/palette/터미널이 같은 경로. **C2 — divider chrome 이주** ✅ **완료**: divider 선·hit-test·드래그 수학이 neutral `chrome/components/divider.zig`로 — **마우스 hit-test 컴포넌트의 첫 선례**(State 없는 순수 함수 `hitTest`(마우스→seg index)/`view`(seg→Rule op 선)/`dragRatio`; 키보드 오버레이의 State+handle 변형). platform이 `layoutDividers`→중립 `Seg` 변환 주입·app `*Split` 매핑(index)·드래그 상태(§6 라이브 트리 포인터는 platform 유지, freed 시 invalidate)·Rule op→부분사각형 `NativeMetalCell` lowering(overlay rasterizer가 아닌 pane chrome 셀)을 맡는다. **C3a — sidebar chrome 이주** ✅ **완료**: sidebar hit-test(순수 함수 6개 `inSidebar`/`onResizeEdge`/`slotAt`/`inPlus`/`closeButton`/`dragTargetSlot`)·밴드 view(활성/호버/+ fill)가 neutral `chrome/components/sidebar.zig`로 — divider 마우스 hit-test 패턴 확장(드래그 재정렬이 **인덱스 기반**이라 라이브 포인터 부담이 divider보다 적음). platform이 중립 `Tab`(라벨·활성) 주입·라이브 상태(폭·드래그 인덱스·hover)·제목 glyph(`buildSidebarTitleFrame` — CoreText는 platform 책임)·밴드 fill→`NativeMetalCell` lowering을 맡는다. **C3b — tabbar hit-test chrome 이주** ✅ **완료**: 탭 컬럼 분할 hit-test(tabIndex/inCloseZone/inPlusZone/hasPlusZone)가 neutral `chrome/components/tabbar.zig`의 `Metrics` 메서드로 — 호출처가 `m.tabIndex(...)`를 그대로 쓴다(옛 BarMetrics struct 제거, init→`barMetrics` helper). 활성 탭 강조 밴드는 platform이 **단일 셀**(tabbarHighlightCell)로 직접 그린다 — 밴드가 한 칸이라 chrome view→cell round-trip이 무의미(C3a 리뷰 §3 반영; divider/sidebar의 다중 op view와 달리 tabbar는 hit-test만 chrome). 라이브 `*Pane`·드롭존·제목 glyph(buildPaneTabBarDrawList)는 platform 유지(§6). 이로써 chrome hit-test(divider·sidebar·tabbar)가 전부 컴포넌트화 — **C4(rich 백엔드 + 토큰)**만 남는다.
 5. **C4a — rich 토큰셋 + config 분기** ✅ **완료**: tui가 sidebar_active로 공유하던 role(divider/focus_accent/drop_zone/tab_hover_bg/muted_fg)을 `Tokens.rich`가 분리 파생색(darken/lighten)으로 채우고, config `chrome.theme = tui|rich`로 `buildChromeTokens`가 분기. **컴포넌트·lowering 0줄 변경**(같은 ColorRole, 색만 다름 — 기본 tui). **C4b — GPU 렌더 프리미티브** ✅ **완료**: metal SDF quad/shadow 파이프라인(셀 패스와 별개 draw call)·`ChromeDraw.quad` Op + 모양 토큰(corner/border/shadow/modal_padding/gradient)·사이드바 둥근 밴드·모달 둥근 배경+테두리+그림자+안쪽 패딩·tabbar 픽셀 retrofit(§6 seam 해소 — `segCols` 단일 소스가 hit-test·활성 밴드·제목·✕를 공유)·둥근 활성 탭 + vertical gradient(draw layer 3분할 bottom/under/over로 제목 가림·바 배경 z-order 해소). **U — UI 형태 다듬기(C4b 이후, maru 독립 설계)**: 사이드바 세로 카드 + 좌측 maru-accent 막대(U1, accent=앰버 고정 브랜드색)·카드 레이아웃(U2)·가로 탭 VSCode식(U3 — 활성 탭을 채워진 밴드 대신 **평평한 약한 배경 + 하단 maru 앰버 언더바**(active indicator, 탭 seg 폭)로. 둥근 밴드·vertical gradient(C4b-5 초기안)는 폐기하고 평평 VSCode 탭으로 대체(`tab_corner_radius_px`·`tab_gradient_delta`·`shiftBrightnessU32` 제거). 탭바 하단 구분선은 `line_thickness_px` 토큰 두께로 1px GpuQuad SDF 흐림 회피. 활성 pane 강조도 사각 ring 대신 이 탭 언더바로 일원화. 그 위에 **탭 전용 고정 폭**(`tab_width_cols` — 균등 stretch 대신, 적으면 왼쪽정렬+빈 영역; tui는 0=균등 유지)·**탭 바 세로 패딩**(`tab_bar_pad_y_px` — 텍스트 위아래 여유, 제목 세로 중앙)·**넘치면 가로 스크롤**(`tabLayout`이 우측에 ‹·공백·›(3칸 사각 버튼) 예약하고 `Pane.tab_scroll_cols` offset을 `segCols` 단일 통합점에 적용 — view·hit-test 동시 이동(§6); `eff_scroll = min(scroll, total-tab_cols)` clamp로 탭 닫기 후 stale 자동 복구, rich 고정폭만; 활성 탭 선택(⌘[]·클릭) 시 `focusTerm`이 `ensureActiveTermVisible`로 그 탭이 보이게 자동 스크롤-인). ‹›는 사각 버튼·사이 공백(GpuQuad 배경)으로 표시하고 hover 시 밝게(`sidebarActiveBg` — 클릭 가능 표시)하며, 클릭 가능 영역(탭 바의 탭·‹/›·+·pane 포커스, 사이드바 워크스페이스 슬롯)은 hover 시 **pointingHand 커서**로 affordance를 준다(`hoverCursor`가 `CursorKind.link` 반환 → Swift NSCursor.pointingHand — URL hover용 기존 메커니즘 재사용, ABI 무변경). 또 ‹/›는 스크롤 여지가 있는 방향만 강조색(`active_fg`)으로·더 갈 수 없는 경계 방향은 muted(`fg`)로 그려, ‹가 진하면 "왼쪽에 잘린 부분 탭이 더 있음"을 알리는 단서가 된다(`eff_scroll` clamp로 경계 판정 정확, 새 색 인자 없이 기존 `fg`/`active_fg` 재사용). 트랙패드 2-finger 가로 스와이프(`scroll_wheel`의 `delta_x`, ABI v44 — Swift `scrollingDeltaX`→Zig `wheelDeltaToLines` 셀 환산→커서 아래 pane `tab_scroll_cols`를 클릭 ‹›와 같은 `eff` 기준으로 조정)로도 탭 바를 스크롤한다. **U3 완료**(VSCode 탭·고정폭·세로 패딩·가로 스크롤·‹› 사각 버튼/hover/커서/스크롤 방향 강조·트랙패드 가로).
 6. **B(병행)** ✅ **완료** — renderer **backend-neutrality 가드 테스트**(`tests/boundary/imports.zig`의 `scanForbiddenIdentifiers` — 중립 레이어 **terminal·renderer·session·chrome**에 OS 런타임 타입명(`MetalRenderer`·CT*·CG*·NS*·MTL*)이 식별자로 새면 빌드 실패; `@import` 금지 1차에 더한 2차 re-export 가드) **+** `metal_frame`(중립 투영 DTO) **renderer 이주**(platform/macos→renderer — 이름만 "Metal"인 frame 계약을 renderer가 소유해 백엔드 Metal/WebGPU가 공유). 가드는 이름이 아니라 **의존성** 기준(frame DTO=OS 의존 0이라 중립, 실제 OS 런타임만 platform).
@@ -92,4 +120,4 @@ flowchart TD
 ## 8. neutrality 가드 + topological note
 
 - **가드 테스트**(B) ✅: `NativeMetalCell`·`MetalFrame`·CoreText/CoreGraphics/AppKit/Metal 타입명이 중립 레이어(**terminal·renderer·session·chrome**)에 **식별자로 등장하면 빌드 실패**(`tests/boundary/imports.zig`의 `scanForbiddenIdentifiers` — `std.zig.Tokenizer`로 .identifier 토큰만 검사해 중립 계약을 설명하는 주석·문자열 속 "Metal"/"CoreText" 언급은 오탐 0). cross-layer `@import` 금지(1차)에 더한 **2차 re-export 가드**(import이 막혀도 타입명이 새는 경로 차단). `app`은 의도적 혼합 레이어(runtime+중립 모델)라 비범위 — 컨벤션으로 다룬다. = [renderer-strategy.md] WebGPU 조건 1("중립 frame만 소비함을 테스트로 증명")의 실제 충족.
-- **topological note**: `metal_frame.zig`(중립 투영 + `replace` Z-합성)는 B에서 **renderer로 이주 완료** — 이름만 "Metal"인 중립 frame 계약(NativeMetalCell·MetalFrame extern DTO, OS 의존 0)을 renderer가 소유해 백엔드(Metal/WebGPU)가 공유한다. 가드는 이제 **이름이 아니라 의존성** 기준이다(frame DTO는 중립, 실제 OS 런타임 `MetalRenderer`·CT*/CG*/NS*/MTL*만 platform 가드). 남은 "갇힌 중립 코드"는 session core뿐 — **행동상 중립인데 위치만 macOS**다(S2 모델 추출은 라이브-결합이라 상호 합의로 보류).
+- **topological note**: `metal_frame.zig`(중립 투영 + `replace` Z-합성)는 B에서 **renderer로 이주 완료** — 이름만 "Metal"인 중립 frame 계약(NativeMetalCell·MetalFrame extern DTO, OS 의존 0)을 renderer가 소유해 백엔드(Metal/WebGPU)가 공유한다. 가드는 이제 **이름이 아니라 의존성** 기준이다(frame DTO는 중립, 실제 OS 런타임 `MetalRenderer`·CT*/CG*/NS*/MTL*만 platform 가드). 남은 "갇힌 중립 코드"는 session core뿐 — **행동상 중립인데 위치만 macOS**다. S2 모델 추출은 측정 후 **재개**한다(§3.1: `Term`을 모델/런타임으로 분리, 추상화 표면 ~10개 + `PtyIo` 선례).

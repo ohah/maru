@@ -19,6 +19,15 @@ pub const SplitDirection = split_tree.SplitDirection;
 pub const SplitRect = split_tree.Rect;
 pub const splitRect = split_tree.splitRect; // leaf-독립 헬퍼(생성용 a/b rect)
 pub const clampRatio = split_tree.clampRatio; // divider 드래그가 layout과 같은 ratio 한도를 쓰게(단일 출처)
+pub const surface = @import("session/surface.zig");
+pub const window = @import("session/window.zig");
+pub const core_command = @import("session/core_command.zig");
+
+// surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).
+pub const Surface = surface.Surface;
+pub const RestorableSurfaceMetadata = surface.RestorableSurfaceMetadata;
+pub const ProcessState = surface.ProcessState;
+pub const AppWindow = window.AppWindow;
 
 test {
     @import("std").testing.refAllDecls(@This());

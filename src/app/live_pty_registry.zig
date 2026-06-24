@@ -2,9 +2,9 @@ const std = @import("std");
 const live_pty_mod = @import("live_pty.zig");
 const pty_reader_mod = @import("pty_reader.zig");
 const runtime_mod = @import("runtime.zig");
-const surface_mod = @import("surface.zig");
+const surface_mod = @import("../session/surface.zig");
 const terminal = @import("../terminal.zig");
-const window_mod = @import("window.zig");
+const window_mod = @import("../session/window.zig");
 
 pub const RegistryError = error{
     LivePtyNotAttached,

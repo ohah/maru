@@ -29,7 +29,7 @@ pub const CoreTextFrameBuilder = struct {
     pub fn build(
         self: CoreTextFrameBuilder,
         allocator: std.mem.Allocator,
-        app_window: *app.AppWindow,
+        app_window: *maru.session.AppWindow,
         renderer_state: *renderer.RendererState,
         drain_summary: app.RuntimePumpDrainSummary,
         io: std.Io,
@@ -680,13 +680,13 @@ test "CoreText frame builder builds AppHostFrame from active surface" {
     // CoreTextDrawListShaper/CoreTextGlyphRasterizer/RendererState를 지나 AppHostFrame으로
     // 소유권을 넘기는지 고정한다.
     const allocator = std.testing.allocator;
-    var surfaces = [_]app.Surface{try app.Surface.init(allocator, 7, .{ .cols = 8, .rows = 2 })};
+    var surfaces = [_]maru.session.Surface{try maru.session.Surface.init(allocator, 7, .{ .cols = 8, .rows = 2 })};
     defer surfaces[0].deinit();
     surfaces[0].process_state = .running;
     try surfaces[0].core.write("A한");
 
-    var tab_ptrs = [_]*app.Surface{&surfaces[0]};
-    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
+    var tab_ptrs = [_]*maru.session.Surface{&surfaces[0]};
+    var app_window: maru.session.AppWindow = .{ .tabs = &tab_ptrs };
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
 
@@ -701,7 +701,7 @@ test "CoreText frame builder builds AppHostFrame from active surface" {
     const stats = renderer.renderFrameStats(frame.render_frame, renderer_state.atlas.entryCount());
     try std.testing.expectEqual(@as(u64, 7), frame.surface_id);
     try std.testing.expectEqual(terminal.Size{ .cols = 8, .rows = 2 }, frame.size);
-    try std.testing.expectEqual(app.ProcessState.running, frame.process_state);
+    try std.testing.expectEqual(maru.session.ProcessState.running, frame.process_state);
     try std.testing.expectEqual(@as(usize, 1), frame.drain_summary.output_events);
     try std.testing.expect(stats.prepared());
     try std.testing.expectEqual(@as(usize, 2), stats.glyph_count);
@@ -714,8 +714,8 @@ test "CoreText frame builder reports no active surface before shaping" {
     // active surface가 없으면 CoreText bridge를 호출하기 전에 실패해야 한다. 그래야 window/tab
     // lifecycle 버그가 font/raster 실패처럼 보이지 않는다.
     const allocator = std.testing.allocator;
-    var tab_ptrs = [_]*app.Surface{};
-    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
+    var tab_ptrs = [_]*maru.session.Surface{};
+    var app_window: maru.session.AppWindow = .{ .tabs = &tab_ptrs };
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
     const builder = CoreTextFrameBuilder{
@@ -735,12 +735,12 @@ test "CoreText frame builder surfaces native shape failures" {
     // 실패가 renderer prepared=false로 숨어 버리면 root cause가 CoreText shape 단계인지
     // atlas/raster 단계인지 구분할 수 없기 때문이다.
     const allocator = std.testing.allocator;
-    var surfaces = [_]app.Surface{try app.Surface.init(allocator, 8, .{ .cols = 4, .rows = 1 })};
+    var surfaces = [_]maru.session.Surface{try maru.session.Surface.init(allocator, 8, .{ .cols = 4, .rows = 1 })};
     defer surfaces[0].deinit();
     try surfaces[0].core.write("A");
 
-    var tab_ptrs = [_]*app.Surface{&surfaces[0]};
-    var app_window: app.AppWindow = .{ .tabs = &tab_ptrs };
+    var tab_ptrs = [_]*maru.session.Surface{&surfaces[0]};
+    var app_window: maru.session.AppWindow = .{ .tabs = &tab_ptrs };
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
     const builder = CoreTextFrameBuilder{

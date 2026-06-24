@@ -1,8 +1,8 @@
 const std = @import("std");
 const pty = @import("../pty.zig");
 const terminal = @import("../terminal.zig");
-const surface_mod = @import("surface.zig");
-const core_command = @import("core_command.zig");
+const surface_mod = @import("../session/surface.zig");
+const core_command = @import("../session/core_command.zig");
 
 // PTY 출력의 제어 시퀀스를 찍는 진단 logger(드래그 시 zsh redraw 분석용). 게이트는 host가
 // SurfaceRuntime.debug_input으로 주입한다(플랫폼 무관 — runtime은 libc/env에 직접 의존하지 않음).

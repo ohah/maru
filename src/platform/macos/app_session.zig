@@ -859,7 +859,7 @@ pub const AppSession = struct {
     // app_window.tabs(`[]*Surface`)가 가리킬 surface 포인터 배열 — tabs와 1:1로, 각 탭의 대표(활성 panel)
     // surface 안정 주소를 모은다. tabs 변경(생성/닫기/이동)·활성 panel 변경 때 갱신하고 app_window.tabs를
     // 여기로 재바인딩한다. 단일 panel(지금)이면 panes[0].surface.
-    surface_ptrs: std.ArrayList(*app.Surface) = .empty,
+    surface_ptrs: std.ArrayList(*maru.session.Surface) = .empty,
     // surface_id·pty_id 발급(탭마다 유일). runtime이 두 id로 라우팅하므로 재사용하지 않는다.
     next_id: u64 = 1,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
@@ -874,7 +874,7 @@ pub const AppSession = struct {
     // opt-in ssh 라우팅(`shell-integration.ssh`)이 켜졌을 때 현재 maru 실행 파일 경로(owned). 새 탭 spawn에도
     // 필요하므로 init 끝에 free하지 않고 보관하다 deinit에서 푼다. 꺼졌거나 경로 해석 실패면 null(주입 안 함).
     new_tab_ssh_bin: ?[]const u8 = null,
-    app_window: app.AppWindow = undefined,
+    app_window: maru.session.AppWindow = undefined,
     runtime: app.SurfaceRuntime = undefined,
     renderer_state: renderer.RendererState = undefined,
     frame_loop: app.AppFrameLoop = undefined,
@@ -2826,7 +2826,7 @@ pub const AppSession = struct {
         errdefer term.rt.live_pty.deinit();
         term.rt.live_initialized = true;
 
-        term.surface = try app.Surface.init(self.allocator, id, size);
+        term.surface = try maru.session.Surface.init(self.allocator, id, size);
         errdefer term.surface.deinit();
         // 스크롤백 cell arena를 mmap 기반 page_allocator로(§11 P4 — demand-commit + 콜드 OS swap + free 즉시 반납,
         // history > RAM). 이 chokepoint는 모든 live surface가 첫 출력 전(페이지 0개)에 지나므로 arena 교체가 안전하다.
@@ -3417,7 +3417,7 @@ pub const AppSession = struct {
         const to = clampMoveToGroup(raw_to, self.tabs.items[from].pinned, self.countPinnedTabs(), len);
         if (from == to) return from; // 같은 그룹으로 clamp한 결과 제자리면 무동작
         rotateMove(*Tab, self.tabs.items, from, to);
-        rotateMove(*app.Surface, self.surface_ptrs.items, from, to);
+        rotateMove(*maru.session.Surface, self.surface_ptrs.items, from, to);
         self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
@@ -3434,7 +3434,7 @@ pub const AppSession = struct {
         const active_ptr: ?*Tab = if (self.app_window.active_tab < len) self.tabs.items[self.app_window.active_tab] else null;
         var new_tabs = self.allocator.alloc(*Tab, len) catch return; // 실패 시 재배열 생략(복원은 진행, 불변식만 미보장)
         defer self.allocator.free(new_tabs);
-        var new_surfaces = self.allocator.alloc(*app.Surface, len) catch return;
+        var new_surfaces = self.allocator.alloc(*maru.session.Surface, len) catch return;
         defer self.allocator.free(new_surfaces);
         var w: usize = 0;
         for (self.tabs.items, self.surface_ptrs.items) |t, s| if (t.pinned) { // pass 1: 고정(상대 순서 유지)
@@ -5158,7 +5158,7 @@ pub const AppSession = struct {
     /// `app_window.active_tab`을 따라가므로 멀티-탭(후속 PR)에서 탭을 전환하면 자동으로 활성 탭에
     /// 라우팅된다. 지금은 단일 탭이라 항상 `surfaces[0]`이고 외부 동작은 불변이다. 호출자는 기존대로
     /// `surface_initialized`로 가드하므로 `active()`는 non-null이 보장된다.
-    fn activeSurface(self: *AppSession) *app.Surface {
+    fn activeSurface(self: *AppSession) *maru.session.Surface {
         return self.app_window.active().?;
     }
 
@@ -5179,7 +5179,7 @@ pub const AppSession = struct {
 
     /// `activeSurface`의 읽기 전용(`*const self`) 변형 — `pxToCell`/`imeCursorRect`처럼 surface를
     /// 안 바꾸는 const 메서드가 같은 seam을 거치게 한다.
-    fn activeSurfaceConst(self: *const AppSession) *const app.Surface {
+    fn activeSurfaceConst(self: *const AppSession) *const maru.session.Surface {
         return self.app_window.activeConst().?;
     }
 
@@ -5928,7 +5928,7 @@ pub const AppSession = struct {
     /// 휠 라우팅 단일 출처 — 휠은 '커서 아래' surface가 스크롤백/mouse reporting을 처리하고 리포트 좌표도 그
     /// rect 기준이라 정합한다(pane↔좌표). 활성 탭 leaf rect를 펴 점을 담는 leaf를 찾는다(없으면 — 사이드바/밖
     /// — null). 단일 panel이면 그 panel(=활성)을 돌려준다.
-    fn scrollTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *app.Surface, rect: maru.session.SplitRect } {
+    fn scrollTargetAt(self: *AppSession, x_px: f64, y_px: f64) ?struct { surface: *maru.session.Surface, rect: maru.session.SplitRect } {
         if (!self.surface_initialized) return null;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -5972,7 +5972,7 @@ pub const AppSession = struct {
     /// 주어진 surface를 줄 수만큼 스크롤한다 — 휠은 커서 아래 panel(비활성 가능), 키보드는 활성. alt screen +
     /// alternate scroll(DECSET 1007)이면 그 surface PTY로 화살표 키를 보내고(less/vim 등 프로그램 스크롤),
     /// 아니면 그 surface의 뷰포트를 스크롤한다(scrollback). 줄 0이면 무동작.
-    fn scrollSurfaceLines(self: *AppSession, surface: *app.Surface, lines: i32) void {
+    fn scrollSurfaceLines(self: *AppSession, surface: *maru.session.Surface, lines: i32) void {
         if (lines == 0) return;
         const core = &surface.core;
         // alt+alternate_scroll 판정 + (alt면) encodeKey는 코어 read라 메인 락-아래(읽기는 위임 안 함, §9.1).
@@ -6070,7 +6070,7 @@ pub const AppSession = struct {
     /// 비활성 pane으로 리포트할 때 그 pane 기준 좌표(pane↔좌표 정합)를 얻는 데도 쓴다. 핵심: clamp를 float
     /// 도메인에서 먼저 한 뒤 @intFromFloat 한다 — 거대한 finite 좌표(손상/악성 입력)가 i64 변환에서 trap(앱
     /// 패닉)하던 것을 막는다(wheelDeltaToLines와 같은 규율). 비유한값은 null, 음수(영역 밖) 좌표는 0 clamp.
-    fn pxToCellIn(self: *const AppSession, surface: *const app.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?CellHit {
+    fn pxToCellIn(self: *const AppSession, surface: *const maru.session.Surface, rect: maru.session.SplitRect, x_px: f64, y_px: f64) ?CellHit {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
         const core = &surface.core;
         const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
@@ -11743,7 +11743,7 @@ fn commandName(kind: CommandKind) []const u8 {
     };
 }
 
-fn processStateCode(state: app.ProcessState) u32 {
+fn processStateCode(state: maru.session.ProcessState) u32 {
     return switch (state) {
         .starting => 0,
         .running => 1,
@@ -12538,10 +12538,10 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     session.allocator = std.testing.allocator;
     session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음(undefined면 garbage가 .rename 분기 → rename_input crash)
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     try std.testing.expect(tab_surface.core.preedit == null);
@@ -12555,7 +12555,7 @@ test "commitComposition is a safe no-op when there is no active preedit" {
 // (enqueue_command=null → enqueueCoreCommand가 코어 락 아래 즉시 apply). io도 세워 폴백의 lockCore에 넘긴다.
 fn testNoopPtyWrite(_: *anyopaque, _: []const u8) anyerror!void {}
 fn testNoopPtyResize(_: *anyopaque, _: terminal.Size) anyerror!void {}
-fn attachTestRuntime(session: *AppSession, surface: *app.Surface) !void {
+fn attachTestRuntime(session: *AppSession, surface: *maru.session.Surface) !void {
     session.io = std.testing.io;
     session.runtime = app.SurfaceRuntime.init(std.testing.allocator);
     _ = try session.runtime.attach(surface, surface.id, .{ .ctx = undefined, .write_input = testNoopPtyWrite, .resize_fn = testNoopPtyResize });
@@ -12563,10 +12563,10 @@ fn attachTestRuntime(session: *AppSession, surface: *app.Surface) !void {
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
     var session: AppSession = undefined;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     try attachTestRuntime(&session, &tab_surface);
     defer session.runtime.deinit();
@@ -12586,10 +12586,10 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘다 (audit MEDIUM)" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     try attachTestRuntime(&session, &tab_surface);
     defer session.runtime.deinit();
@@ -12621,10 +12621,10 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     try attachTestRuntime(&session, &tab_surface);
     defer session.runtime.deinit();
@@ -12681,10 +12681,10 @@ test "blinkIntervalTicks: cursor.blink-interval-ms를 30Hz 틱으로 환산(roun
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     session.metal_dirty = false;
     session.metal_buffer = .{};
@@ -14192,10 +14192,10 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
 test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 뒤 터미널 스크롤백을 보존(#4)" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     try attachTestRuntime(&session, &tab_surface);
     defer session.runtime.deinit();
@@ -19657,10 +19657,10 @@ test "closeTab tears down a tab and reselects, last tab closes the session" {
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     try attachTestRuntime(&session, &tab_surface);
     defer session.runtime.deinit();
@@ -20114,10 +20114,10 @@ test "configPath caches the resolved config path (single alloc, freed in deinit)
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     session.cell_width_px = 8;
     session.cell_height_px = 16;
@@ -20157,10 +20157,10 @@ test "pxToCell subtracts the active pane origin so clicks map to that pane's col
     // origin만큼 어긋난다(라이브 제보 회귀). split이면 origin은 서브-rect의 좌상단이다.
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
-    var tab_surface = try app.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
-    var st_ptrs = [_]*app.Surface{&tab_surface};
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
     session.cell_width_px = 8;
     session.cell_height_px = 16;

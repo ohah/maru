@@ -4,9 +4,9 @@ const pty = @import("../pty.zig");
 const terminal = @import("../terminal.zig");
 const runtime_mod = @import("runtime.zig");
 const runtime_pump = @import("runtime_pump.zig");
-const surface_mod = @import("surface.zig");
+const surface_mod = @import("../session/surface.zig");
 const pty_reader = @import("pty_reader.zig");
-const core_command = @import("core_command.zig");
+const core_command = @import("../session/core_command.zig");
 
 /// 입력 방향 write 큐 버퍼링 상한(바이트). 키 입력은 작아 paste 뒤에 막히지 않을 만큼 넉넉하게 두고, 큰
 /// paste는 per-tick enqueueSome으로 흘려보낸다(상한 초과분은 다음 tick). 사전 할당 없이 필요 시 이만큼까지 grow.

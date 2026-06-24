@@ -1253,6 +1253,30 @@ test "keyEventFromAbi maps function keys to terminal.Key" {
     try std.testing.expectEqual(@as(u8, 12), (try keyEventFromAbi(mk(.f12))).key.function);
 }
 
+test "keypad Enter chains through ABI to terminal .enter (keypad=true) — confirm 모달이 닫히고, app keypad는 SS3" {
+    // 키패드 Enter는 Swift normalizedKeyEvent가 메인 Return과 같이 key_code=Enter로 매핑하고 codepoint=0으로 넘긴다.
+    // raw_key_code=0x4C(kVK_ANSI_KeypadEnter)라 keycode.isKeypad가 keypad=true를 채운다. 회귀: 이 매핑이 빠지면
+    // codepoint(NSEnterCharacter 0x03)가 흘러 `.char`가 되고, chrome 확인 모달의 `.enter` 분기가 안 잡혀 안 닫혔다.
+    const abi_event = KeyEvent{
+        .codepoint = 0, // Swift가 keypad Enter를 잡아 codepoint를 비운다(default로 안 떨어짐)
+        .base_codepoint = 0,
+        .key_code = @intFromEnum(KeyCode.enter),
+        .modifier_shift = 0,
+        .modifier_control = 0,
+        .modifier_option = 0,
+        .modifier_command = 0,
+        .is_repeat = 0,
+        .raw_key_code = 0x4C, // kVK_ANSI_KeypadEnter
+    };
+    const ev = try keyEventFromAbi(abi_event);
+    try std.testing.expectEqual(terminal.input.Key.enter, ev.key); // chrome 모달의 `.enter` 경로를 탄다
+    try std.testing.expect(ev.keypad); // numpad 판정은 물리 키코드로 보존
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    // numeric(기본) keypad → CR. application keypad(DECKPAM) → SS3 `ESC O M`. raw 0x03이 아니다.
+    try std.testing.expectEqualStrings("\r", try terminal.input.encodeKey(ev, &buf, .{}));
+    try std.testing.expectEqualStrings("\x1bOM", try terminal.input.encodeKey(ev, &buf, .{ .application_keypad = true }));
+}
+
 test "Option+Backspace chains through ABI to meta-DEL (\\e\\x7f, word delete)" {
     const abi_event = KeyEvent{
         .codepoint = 0,

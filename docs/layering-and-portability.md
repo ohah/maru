@@ -117,7 +117,7 @@ flowchart TD
 
 ### 3.3 L4 내부 분해 (별개 — 이식 무관)
 
-위 S2·3차는 **L1~L3을 이식 가능하게** 정리하는 추출이다. 반면 L4 어댑터 자체의 거대 단일 파일(`platform/macos/app_session.zig`, 20k줄)을 목적별로 가르는 정리는 **이식과 무관한 가독성·테스트 격리** 작업이라 별도 문서 [app-session-decomposition.md](app-session-decomposition.md)를 단일 출처로 둔다(L4는 재작성 대상이라 위상엔 영향 없음). 단 그 안에 섞인 OS-중립 순수 로직(픽셀↔셀 기하·sidebar 수학·workspace 변환)은 `src/session`(L2)으로 빼 이식에 기여한다(find(⌘F)는 실측 결과 orchestration이라 제외).
+위 S2·3차는 **L1~L3을 이식 가능하게** 정리하는 추출이다. 반면 L4 어댑터 자체의 거대 단일 파일(`platform/macos/app_session.zig`, 20k줄)을 목적별로 가르는 정리는 **이식과 무관한 가독성·테스트 격리** 작업이라 별도 문서 [app-session-decomposition.md](app-session-decomposition.md)를 단일 출처로 둔다(L4는 재작성 대상이라 위상엔 영향 없음). 단 그 안에 섞인 OS-중립 순수 로직(레이아웃 기하는 **b1 `session/layout_math.zig` 완료**·sidebar 수학·workspace 변환은 후속)은 `src/session`(L2)으로 빼 이식에 기여한다 — 이게 (b) 방향이다(find(⌘F)는 실측 결과 orchestration이라 제외).
 
 ## 4. 렌더 백엔드 + 호스트 이식 (검증된 현실)
 

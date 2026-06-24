@@ -17,7 +17,7 @@
 ## 2. 성격 규정 (정직 — 선결)
 
 - **이식성 직접 기여는 없다.** `app_session`은 **L4 macOS 어댑터**라, 다른 OS로 포팅 시 **재작성 대상**이다(`layering` §2 "L4 = 재작성"). 따라서 이 분해의 1차 목적은 **가독성·테스트 격리·유지보수**이지 이식이 아니다. 이 점을 먼저 못박는다([[prefer-policy-over-codebase-mimicry]]는 정책 우선이지, 없는 이식 효과를 만들지 않는다).
-- **단, 섞여 있는 OS-중립 순수 로직은 session(L2)으로 빼면 이식 기여 + 헤드리스 테스트가 따라온다.** 후보(측정): `pxToCell`/`gridFromBacking`(픽셀↔셀 기하)·sidebar 레이아웃 수학·workspace 트리 변환. **순수는 `src/session`으로, macOS orchestration은 `src/platform/macos/app_session/<group>.zig`로** 가른다.
+- **단, 섞여 있는 OS-중립 순수 로직은 session(L2)으로 빼면 이식 기여 + 헤드리스 테스트가 따라온다.** 후보(측정): 레이아웃 기하(`gridFromBacking`·`pointInRect`·`paneDropZone` 등 — **b1로 `session/layout_math.zig` 완료**)·`pxToCell`(self 의존이라 인자 분리 필요, 후속)·sidebar 레이아웃 수학·workspace 트리 변환. **순수는 `src/session`으로, macOS orchestration은 `src/platform/macos/app_session/<group>.zig`로** 가른다.
   > **실측 정정(E1 착수):** Explore 사전조사가 "find 매치선택 순수 90%"로 추정했으나, 실제 Find(⌘F)는 `chrome_host.find`(UI 상태)·`activeSurface().core`(검색 락)·`runtime`(뷰 스크롤)·`metal_dirty`에 전부 결합한 **orchestration이라 순수분 0**(매치 선택조차 chrome 컴포넌트의 `next`/`prev` 소관)이다. 따라서 E1은 session 이동이 아니라 `app_session/find.zig` 가독성 분리다. 사전 추정 순수도는 착수 시 코드로 재검증한다([[roadmap-docs-stale-verify-with-code]]).
 - **(c) core.zig보다 어려운 3가지 난점:**
   1. **허브 횡단**: `tick`/`mouse`/`handleKeyEvent`가 모든 그룹을 횡단한다 → **잔류**(분해 대상 아님, 내부 가독성은 소함수·주석으로).
@@ -47,8 +47,6 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 > **방향 확정(사용자 합의 2026-06): (b) 순수→session 이식 기여分만.** E1(find) 착수로 app_session 대부분이 orchestration(이식 무관 가독성)임이 실측돼, **orchestration 가독성 분리(E2 ime·E3 tab UI·E6 scroll 등)는 스킵**하고 **OS-중립 순수 로직을 `src/session`(L2)으로 빼는 그룹만** 진행한다(이식 기여 + 헤드리스 단위 test). E1은 이미 완료(orchestration이었으나 패턴 확립). 순수 후보: **b1 `layout_math`(완료)** → E4 sidebar 수학 순수부 → E5 workspace 순수 변환.
 
-| 단계 | 그룹 | 목적지 | 성격 | 대략 라인(+test) | 위험 |
-|---|---|---|---|---|---|
 | 단계 | 그룹 | 목적지 | 성격 | 대략 라인 | 위험 |
 |---|---|---|---|---|---|
 | **E0** ✅ | 이 문서(doc-first) | — | — | 0 | 없음 |

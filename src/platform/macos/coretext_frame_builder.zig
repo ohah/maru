@@ -72,12 +72,39 @@ pub const CoreTextFrameBuilder = struct {
         draw_list: renderer.DrawList,
         renderer_state: *renderer.RendererState,
     ) !renderer.RenderFrame {
+        // 단일 페인 경로는 멀티 페인 통합 빌드의 lists.len==1 특수화다: shapeOnly → placeMultiPane([1]) →
+        // finishPane. 멀티 페인(app_session)은 여러 ShapedPane을 모아 한 번에 placeMultiPane해 cross-pane
+        // 정합을 얻는다. 기존 호출자는 이 wrapper로 동작이 보존된다.
+        var pane = try self.shapeOnly(allocator, draw_list);
+        const frames = renderer_state.placeMultiPane(allocator, &.{pane.shaped.runs}) catch |e| {
+            pane.deinit(allocator);
+            return e;
+        };
+        defer allocator.free(frames);
+        return self.finishPane(allocator, &pane, frames[0], renderer_state) catch |e| {
+            // finishPane 실패 시 frame은 buildQuadRasterFromGlyphFrame이 정리하고, ShapedPane은 consume되지
+            // 않았으므로 여기서 정리한다(성공 경로에선 finishPane이 consume하므로 pane.deinit을 부르지 않는다).
+            pane.deinit(allocator);
+            return e;
+        };
+    }
+
+    /// DrawList(소유권 이전)를 **shape까지만** 한다 — atlas는 안 건드린다. 결과 ShapedPane이 owned_list·
+    /// shaped·font_registry를 소유한다. 멀티 페인은 이걸 모아 한 번에 `placeMultiPane`(통합 배치)한 뒤
+    /// `finishPane`으로 per-pane RenderFrame을 만든다. font_registry는 rasterize까지 살아야 하므로
+    /// ShapedPane이 소유한다 — interned PostScript registry라 페인별 독립이다(멀티 페인이 동시에 서로 다른
+    /// registry를 들 수 있어 RendererState 단일 필드로 승격 불가).
+    pub fn shapeOnly(
+        self: CoreTextFrameBuilder,
+        allocator: std.mem.Allocator,
+        draw_list: renderer.DrawList,
+    ) !ShapedPane {
         var owned_list = draw_list;
         var draw_list_owned = true;
         errdefer if (draw_list_owned) owned_list.deinit(allocator);
 
         var font_registry = renderer.FontIdentityRegistry.init(allocator);
-        defer font_registry.deinit();
+        errdefer font_registry.deinit();
 
         const shaper = coretext_shaper.CoreTextDrawListShaper{
             .appearance = self.appearance,
@@ -88,23 +115,50 @@ pub const CoreTextFrameBuilder = struct {
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
         };
-        var shaped = try shaper.shape(allocator, owned_list, &font_registry);
-        defer shaped.deinit(allocator);
+        const shaped = try shaper.shape(allocator, owned_list, &font_registry);
+        draw_list_owned = false;
+        return .{ .owned_list = owned_list, .shaped = shaped, .font_registry = font_registry };
+    }
 
+    /// 통합 place로 만든 GlyphFrame과 ShapedPane을 합쳐 per-pane RenderFrame을 만든다(rasterizer가
+    /// pane.font_registry를 참조해 비트맵 생성). **ShapedPane을 consume한다**: 성공 시 owned_list가
+    /// RenderFrame으로 이동하고 shaped/font_registry는 정리되므로, caller는 성공한 pane에 deinit을 부르면
+    /// 안 된다. 실패 시 frame은 buildQuadRasterFromGlyphFrame이 정리하고, ShapedPane은 consume되지 않아
+    /// caller가 pane.deinit으로 정리한다.
+    pub fn finishPane(
+        self: CoreTextFrameBuilder,
+        allocator: std.mem.Allocator,
+        pane: *ShapedPane,
+        frame: renderer.glyph_frame.GlyphFrame,
+        renderer_state: *renderer.RendererState,
+    ) !renderer.RenderFrame {
         const rasterizer = coretext_raster.CoreTextGlyphRasterizer{
             .appearance = self.appearance,
-            .font_registry = &font_registry,
+            .font_registry = &pane.font_registry,
             .rasterize_glyph = self.rasterize_glyph,
             .scale_milli = self.scale_milli,
         };
-        const render_frame = try renderer_state.buildFrameFromGlyphRunListWithRasterizer(
-            allocator,
-            owned_list,
-            shaped.runs,
-            rasterizer,
-        );
-        draw_list_owned = false;
+        const render_frame = try renderer_state.buildQuadRasterFromGlyphFrame(allocator, pane.owned_list, frame, rasterizer);
+        // 성공: owned_list가 render_frame으로 이동했다. shaped/font_registry는 더 불필요 → 정리.
+        pane.shaped.deinit(allocator);
+        pane.font_registry.deinit();
         return render_frame;
+    }
+};
+
+/// shape만 끝낸 한 페인의 소유 상태(owned_list·shaped·font_registry). 멀티 페인 통합 빌드의 중간 단위:
+/// 여러 ShapedPane을 모아 한 번에 `placeMultiPane`한 뒤 `finishPane`으로 per-pane RenderFrame을 만든다.
+pub const ShapedPane = struct {
+    owned_list: renderer.DrawList,
+    shaped: renderer.ShapedGlyphRunList,
+    font_registry: renderer.FontIdentityRegistry,
+
+    /// shape 결과 전체를 정리한다(owned_list 포함). finishPane이 consume에 성공한 ShapedPane엔 호출하면
+    /// 안 된다(double-free) — finishPane 실패 경로/place 실패 경로에서만 부른다.
+    pub fn deinit(self: *ShapedPane, allocator: std.mem.Allocator) void {
+        self.shaped.deinit(allocator);
+        self.font_registry.deinit();
+        self.owned_list.deinit(allocator);
     }
 };
 

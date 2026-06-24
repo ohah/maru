@@ -43,99 +43,145 @@ pub const GlyphFrame = struct {
     }
 };
 
+fn baseStats(list: glyph_layout.GlyphRunList) GlyphFrameStats {
+    return .{
+        .glyph_count = list.glyphs.len,
+        .fallback_count = list.fallback_count,
+        .replacement_count = list.replacement_count,
+    };
+}
+
+/// 한 페인의 누적 버퍼. 멀티 페인 통합 빌드가 재시작할 때 모든 페인 버퍼를 함께 비워, 어느 페인이
+/// atlas를 소진하든 전 페인이 한 좌표 세대로 다시 배치되게 한다.
+const PaneAccum = struct {
+    prepared: std.ArrayList(PreparedGlyph) = .empty,
+    uploads: std.ArrayList(GlyphUpload) = .empty,
+    stats: GlyphFrameStats = .{},
+
+    fn deinit(self: *PaneAccum, allocator: std.mem.Allocator) void {
+        self.prepared.deinit(allocator);
+        self.uploads.deinit(allocator);
+    }
+};
+
 pub fn prepareGlyphFrame(
     allocator: std.mem.Allocator,
     glyphs: glyph_layout.GlyphRunList,
     atlas: *glyph_atlas.GlyphAtlas,
 ) !GlyphFrame {
-    // GlyphFrame은 제품 Metal/WebGPU backend가 소비할 첫 텍스트 frame 계약이다.
-    // 여기서는 GPU texture를 직접 만들지 않고, 각 glyph가 어느 atlas slot을 써야 하는지와
-    // 이번 frame에서 어떤 slot을 업로드해야 하는지만 결정한다. 이 경계가 있어야 다음
-    // backend 구현이 font/layout/cache 정책을 다시 해석하지 않는다.
-    var prepared: std.ArrayList(PreparedGlyph) = .empty;
-    errdefer prepared.deinit(allocator);
-    try prepared.ensureTotalCapacity(allocator, glyphs.glyphs.len);
+    // 단일 페인은 멀티 페인 통합 빌드의 lists.len==1 특수화다. 이렇게 한 출처로 두면 단일 페인 재시작과
+    // 멀티 페인 cross-pane 정합이 같은 코드를 쓴다(기존 단일 페인 동작은 lists.len==1에서 그대로다).
+    const frames = try prepareMultiPaneGlyphFrame(allocator, &.{glyphs}, atlas);
+    defer allocator.free(frames);
+    return frames[0];
+}
 
-    var uploads: std.ArrayList(GlyphUpload) = .empty;
-    errdefer uploads.deinit(allocator);
-    try uploads.ensureTotalCapacity(allocator, glyphs.glyphs.len);
+/// 여러 페인(GlyphRunList)을 **한 atlas 세대로** 함께 빌드한다. 멀티 페인이 한 atlas를 순차 공유할 때,
+/// 어떤 페인이 atlas 좌표를 소진해 invalidate/grow를 일으키면 **모든 페인의 누적을 버리고 처음부터 다시
+/// 빌드**한다 — 재시작 직후 atlas는 비어 있으므로 전 페인의 전 글리프가 miss가 되어(hit 0) 전부 uploads에
+/// 실린다. 이것이 cross-pane 깨짐(앞 페인의 cache-hit 글리프가 무효화된 좌표/빈 텍스처를 샘플)의 근본
+/// 차단이다: 각 페인이 독립적으로 "자기 miss만 업로드"하면 앞 페인이 빈 자리에 안 채워지지만, 통합 빌드는
+/// 한 세대의 모든 글리프를 한 번에 (재)업로드한다.
+///
+/// 재시작 정책은 단일 페인과 같다 — 1회차(attempt==0)는 grow 없이 clean repack(누적 좌표만 비움), 그 다음
+/// 또 소진되면 atlas.grow()로 텍스처를 키운다. 단일 페인과 다른 점은 **한 루프가 모든 페인의 합산 글리프를
+/// 보므로**, 멀티 페인 합산이 한 텍스처를 넘으면(각 페인은 단독으로 들어가더라도) grow까지 가서 수렴한다.
+/// 종료는 grow의 false(max 8192²)가 보장한다.
+///
+/// 성공하면 lists와 같은 길이의 GlyphFrame 슬라이스를 owned로 돌려준다(호출자가 각 frame.deinit + 슬라이스
+/// free). 실패하면 내부에서 전부 정리하고 caller는 lists를 그대로 소유한다.
+pub fn prepareMultiPaneGlyphFrame(
+    allocator: std.mem.Allocator,
+    lists: []const glyph_layout.GlyphRunList,
+    atlas: *glyph_atlas.GlyphAtlas,
+) ![]GlyphFrame {
+    const accums = try allocator.alloc(PaneAccum, lists.len);
+    var inited: usize = 0;
+    errdefer {
+        for (accums[0..inited]) |*a| a.deinit(allocator);
+        allocator.free(accums);
+    }
+    for (accums, lists) |*a, list| {
+        a.* = .{ .stats = baseStats(list) };
+        try a.prepared.ensureTotalCapacity(allocator, list.glyphs.len);
+        try a.uploads.ensureTotalCapacity(allocator, list.glyphs.len);
+        inited += 1;
+    }
 
-    var stats: GlyphFrameStats = .{
-        .glyph_count = glyphs.glyphs.len,
-        .fallback_count = glyphs.fallback_count,
-        .replacement_count = glyphs.replacement_count,
-    };
-
-    // atlas 좌표가 frame 중간에 소진되면(lookup.invalidated) 이미 나눠준 슬롯들이 무효가 된다 —
-    // 한 frame에 두 좌표 세대가 섞이면 앞 글리프들이 덮어쓰인 텍셀을 샘플해 화면이 깨진다(예: 보더라인
-    // ─가 나중 글리프 ?의 비트맵을 샘플). invalidate 직후 atlas는 비어 있으므로 frame을 처음부터 다시
-    // 빌드해 모든 글리프가 일관된 새 좌표를 받게 한다.
-    //
-    // 첫 재시작은 grow 없이 한다 — 소진이 "이전 frame들이 남긴 누적 좌표"(eviction이 좌표를 회수 안 함)
-    // 때문일 수 있어, clean repack((0,0)부터)만으로 들어가는 경우가 많다(기존 동작 보존). 그래도 또
-    // 소진되면(=이 frame의 고유 글리프가 현재 텍스처보다 많다) atlas.grow()로 텍스처를 키우고 재시작한다 —
-    // 들어갈 때까지 반복. 이게 충돌의 근본 차단: 좌표가 모자라 두 글리프를 같은 자리에 겹치는 대신
-    // **자리를 늘려** 모든 distinct 글리프가 고유 좌표를 받는다(Ghostty식 grow on full). grow가 false면
-    // (이미 max(8192²) 도달 — 한 frame이 그 용량마저 초과, 현실 도달 불가) 재시작해도 못 들어가니
-    // 멈추고 진행한다. 종료는 grow의 false가 보장한다 — 매번 2배라 max까지 유한 단계 뒤 반드시 false.
     var attempt: u8 = 0;
     build: while (true) {
-        for (glyphs.glyphs, 0..) |glyph, index| {
-            const lookup = try atlas.ensureGlyph(glyph);
-            // 1회차(attempt==0)는 grow 없이 clean repack. 2회차+는 grow로 자리를 만든다 — grow가 false면
-            // 더 못 키우니 재시작을 멈추고(아래로 떨어져) 진행한다(degraded, 다음 frame에 회복).
-            if (lookup.invalidated and (attempt == 0 or atlas.grow())) {
-                attempt += 1;
-                prepared.clearRetainingCapacity();
-                uploads.clearRetainingCapacity();
-                stats.upload_count = 0;
-                stats.upload_bytes = 0;
-                stats.evicted_count = 0;
-                stats.reused_count = 0;
-                // invalidate를 일으킨 글리프의 슬롯은 이미 atlas에 들어가 있다 — 그대로 두면
-                // 재시작 패스에서 hit이 돼 uploads에서 빠지고, Metal 텍스처엔 비트맵이 안 올라가
-                // 그 글리프만 빈 칸이 된다. 한 번 더 비워 재시작 패스가 전부 miss(=업로드)가 되게.
-                _ = atlas.invalidate(.atlas_full);
-                continue :build;
-            }
-            prepared.appendAssumeCapacity(.{
-                .run = glyph,
-                .slot = lookup.slot,
-            });
-
-            if (lookup.uploaded) {
-                stats.upload_count += 1;
-                stats.upload_bytes += lookup.upload_bytes;
-                if (lookup.evicted != null) stats.evicted_count += 1;
-                uploads.appendAssumeCapacity(.{
-                    .glyph_index = index,
-                    .slot = lookup.slot,
-                    .upload_bytes = lookup.upload_bytes,
-                    .evicted = lookup.evicted,
-                });
-            } else {
-                stats.reused_count += 1;
+        for (lists, 0..) |list, li| {
+            for (list.glyphs, 0..) |glyph, index| {
+                const lookup = try atlas.ensureGlyph(glyph);
+                // 1회차는 grow 없이 clean repack, 2회차+는 grow로 자리를 만든다. grow가 false면 더 못 키우니
+                // 재시작을 멈추고 진행한다(degraded, 다음 frame에 회복). 어느 페인에서 일어나든 **모든** 페인을
+                // 한 세대로 재시작해야 cross-pane 정합이 유지된다.
+                //
+                // 한계(degraded): grow가 max(8192²)에서 false면 재시작을 멈추고 진행한다. 이때 이미 append된 앞
+                // 글리프는 old 세대 좌표, 이후는 invalidate 후 좌표라 두 세대가 섞여 cross-pane 충돌이 다시 가능하다.
+                // 단 이는 **합산 distinct 글리프가 max(≈수만)을 넘는** 비현실적 극단에서만이다(터미널 한 화면은 수천
+                // 셀 미만이라 멀티 페인 합산도 도달 불가). 기존 단일 페인 prepareGlyphFrame의 degraded 한계를 그대로
+                // 상속한다 — 멀티 페인 합산이 reachability를 (비현실적으로) 높일 뿐이고, 실제 통합 후 합산 크기가
+                // 현실 문제가 되면 별도로 다룬다.
+                if (lookup.invalidated and (attempt == 0 or atlas.grow())) {
+                    attempt += 1;
+                    for (accums, lists) |*a, l| {
+                        a.prepared.clearRetainingCapacity();
+                        a.uploads.clearRetainingCapacity();
+                        a.stats = baseStats(l);
+                    }
+                    // invalidate를 일으킨 글리프 슬롯이 atlas에 남아 있으면 재시작 패스에서 hit이 돼 uploads에서
+                    // 빠진다 — 한 번 더 비워 재시작 패스가 전부 miss(=업로드)가 되게 한다.
+                    _ = atlas.invalidate(.atlas_full);
+                    continue :build;
+                }
+                accums[li].prepared.appendAssumeCapacity(.{ .run = glyph, .slot = lookup.slot });
+                if (lookup.uploaded) {
+                    accums[li].stats.upload_count += 1;
+                    accums[li].stats.upload_bytes += lookup.upload_bytes;
+                    if (lookup.evicted != null) accums[li].stats.evicted_count += 1;
+                    accums[li].uploads.appendAssumeCapacity(.{
+                        .glyph_index = index,
+                        .slot = lookup.slot,
+                        .upload_bytes = lookup.upload_bytes,
+                        .evicted = lookup.evicted,
+                    });
+                } else {
+                    accums[li].stats.reused_count += 1;
+                }
             }
         }
         break;
     }
 
-    const overlay_copy = try allocator.dupe(draw_list.DrawOverlay, glyphs.overlays);
-    errdefer allocator.free(overlay_copy);
-    const prepared_slice = try prepared.toOwnedSlice(allocator);
-    errdefer allocator.free(prepared_slice);
-    const upload_slice = try uploads.toOwnedSlice(allocator);
-    errdefer allocator.free(upload_slice);
-
-    return .{
-        .size = glyphs.size,
-        .cursor = glyphs.cursor,
-        .dirty = glyphs.dirty,
-        .glyphs = prepared_slice,
-        .overlays = overlay_copy,
-        .uploads = upload_slice,
-        .stats = stats,
-    };
+    const frames = try allocator.alloc(GlyphFrame, lists.len);
+    var built: usize = 0;
+    // 조립 실패 시: 완성된 frame은 frame.deinit으로, 아직 조립 안 된 accum은 위 accums errdefer가 정리한다
+    // (toOwnedSlice로 비운 accum의 deinit은 빈 ArrayList라 무해 — double-free 없음).
+    errdefer {
+        for (frames[0..built]) |*f| f.deinit(allocator);
+        allocator.free(frames);
+    }
+    for (frames, accums, lists) |*f, *a, list| {
+        const overlay_copy = try allocator.dupe(draw_list.DrawOverlay, list.overlays);
+        errdefer allocator.free(overlay_copy);
+        const prepared_slice = try a.prepared.toOwnedSlice(allocator);
+        errdefer allocator.free(prepared_slice);
+        const upload_slice = try a.uploads.toOwnedSlice(allocator);
+        f.* = .{
+            .size = list.size,
+            .cursor = list.cursor,
+            .dirty = list.dirty,
+            .glyphs = prepared_slice,
+            .overlays = overlay_copy,
+            .uploads = upload_slice,
+            .stats = a.stats,
+        };
+        built += 1;
+    }
+    // 성공: accums 내용은 toOwnedSlice로 frames에 이동했으므로 구조체 배열만 free한다.
+    allocator.free(accums);
+    return frames;
 }
 
 test "glyph frame prepares atlas slots and upload plan" {
@@ -379,4 +425,120 @@ test "glyph frame never maps two distinct glyphs to the same atlas coords (─�
             try std.testing.expect(!(same_coords and different_glyph));
         }
     }
+}
+
+/// 한 페인의 텍스트를 GlyphRunList로 만드는 테스트 헬퍼(core→DrawList→buildGlyphRunList). 14px/scale 1.
+fn paneRuns(allocator: std.mem.Allocator, text: []const u8) !glyph_layout.GlyphRunList {
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = @intCast(text.len), .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write(text);
+    var list = try draw_list.buildDrawList(allocator, core.snapshot());
+    defer list.deinit(allocator);
+    return glyph_layout.buildGlyphRunList(allocator, list, .{ .font_size_px = 14, .device_scale = 1 }, glyph_layout.FakeFontBackend{});
+}
+
+test "멀티 페인 통합 빌드: 한 페인 소진 시 전 페인 글리프가 한 세대로 재업로드된다 (cross-pane 근본 수정)" {
+    const allocator = std.testing.allocator;
+    // 28×56 = 14px 글리프 2열×4행 = 물리 용량 8칸. 두 페인 합산(12)이 이를 넘게 해, 한 atlas를 순차 공유하는
+    // 멀티 페인에서 좌표 소진(grow/invalidate)을 유발한다. baseline(페인별 독립 prepareGlyphFrame)이라면
+    // 페인1 글리프가 hit이라 uploads에서 빠져 빈 텍스처/무효 좌표에 안 채워지는 cross-pane 깨짐이 났다.
+    var atlas = glyph_atlas.GlyphAtlas.init(allocator, .{ .atlas_width_px = 28, .atlas_height_px = 56 });
+    defer atlas.deinit();
+
+    var p1 = try paneRuns(allocator, "abcd"); // 4개
+    defer p1.deinit(allocator);
+    var p2 = try paneRuns(allocator, "efghijkl"); // 8개 — 합산 12 > 8칸
+    defer p2.deinit(allocator);
+
+    const lists = [_]glyph_layout.GlyphRunList{ p1, p2 };
+    const frames = try prepareMultiPaneGlyphFrame(allocator, &lists, &atlas);
+    defer {
+        for (frames) |*f| f.deinit(allocator);
+        allocator.free(frames);
+    }
+    try std.testing.expectEqual(@as(usize, 2), frames.len);
+
+    // 불변 1(근본): 전 페인의 전 글리프가 uploads에 실린다(hit 0). 통합 재시작이 모든 글리프를 miss로 만들어
+    // 빈 텍스처(grow 재할당)·무효 좌표에도 전부 (재)업로드된다 — 이게 cross-pane blank/깨짐의 차단.
+    for (frames, lists) |f, list| {
+        try std.testing.expectEqual(list.glyphs.len, f.glyphs.len);
+        try std.testing.expectEqual(list.glyphs.len, f.uploads.len); // 전부 업로드(hit 없음)
+    }
+
+    // 불변 2: 모든 페인의 모든 슬롯이 같은 generation(한 좌표 세대) — 두 세대가 안 섞인다.
+    // (빈 페인 가드: frames[0].glyphs[0]을 직접 인덱싱하지 않고 첫 글리프를 찾아 기준 gen으로 둔다 — 빈 페인이
+    // 섞여도 OOB 없이 검증한다.)
+    var gen: ?u32 = null;
+    for (frames) |f| for (f.glyphs) |g| {
+        if (gen == null) gen = g.slot.generation;
+        try std.testing.expectEqual(gen.?, g.slot.generation);
+    };
+
+    // 불변 3: 페인 경계를 넘어 (같은 좌표 ∧ 다른 글리프)가 절대 없다 — cross-pane 텍셀 덮어쓰기 0.
+    for (frames[0].glyphs) |a| {
+        for (frames[1].glyphs) |b| {
+            const same = a.slot.x_px == b.slot.x_px and a.slot.y_px == b.slot.y_px;
+            const diff = !std.meta.eql(a.slot.key, b.slot.key);
+            try std.testing.expect(!(same and diff));
+        }
+    }
+
+    // 합산 12 > 8칸이라 clean-repack만으론 안 들어가 grow가 실제로 일어났다(텍스처가 커졌다).
+    try std.testing.expect(atlas.config.atlas_height_px > 56);
+}
+
+test "prepareGlyphFrame은 prepareMultiPaneGlyphFrame의 lists.len==1 위임이다 (단일 페인 동작 보존)" {
+    const allocator = std.testing.allocator;
+    var atlas = glyph_atlas.GlyphAtlas.init(allocator, .{});
+    defer atlas.deinit();
+
+    var runs = try paneRuns(allocator, "AAB"); // 'A' 반복(hit) + 'B'
+    defer runs.deinit(allocator);
+
+    var frame = try prepareGlyphFrame(allocator, runs, &atlas);
+    defer frame.deinit(allocator);
+
+    // 'A','A','B' → 'A' 두 번째는 hit(재사용), 'A'·'B'만 업로드. 단일 페인 dedup이 위임 후에도 그대로.
+    try std.testing.expectEqual(@as(usize, 3), frame.glyphs.len);
+    try std.testing.expectEqual(@as(usize, 2), frame.uploads.len);
+    try std.testing.expectEqual(@as(usize, 1), frame.stats.reused_count);
+    try std.testing.expectEqual(frame.glyphs[0].slot.id, frame.glyphs[1].slot.id); // 'A' 슬롯 재사용
+}
+
+test "멀티 페인 통합 빌드: 페인 간 공유 글리프도 한 세대로 정합 (cross-pane, hit 경로 포함)" {
+    const allocator = std.testing.allocator;
+    // distinct-only 테스트(위)가 못 보는 케이스: 두 페인이 글리프를 공유한다('a','b'). 공유 글리프는 한 슬롯을
+    // 공유해야 하고(중복 업로드 없음), 소진으로 grow가 일어나도 모든 슬롯이 한 세대 + cross-pane 충돌 0이어야 한다.
+    var atlas = glyph_atlas.GlyphAtlas.init(allocator, .{ .atlas_width_px = 28, .atlas_height_px = 56 });
+    defer atlas.deinit();
+
+    var p1 = try paneRuns(allocator, "abcdef"); // a b c d e f
+    defer p1.deinit(allocator);
+    var p2 = try paneRuns(allocator, "abghij"); // a b 공유 + g h i j → distinct 합산 10 > 8칸 → grow
+    defer p2.deinit(allocator);
+
+    const lists = [_]glyph_layout.GlyphRunList{ p1, p2 };
+    const frames = try prepareMultiPaneGlyphFrame(allocator, &lists, &atlas);
+    defer {
+        for (frames) |*f| f.deinit(allocator);
+        allocator.free(frames);
+    }
+
+    // 한 세대(빈 페인 가드 포함).
+    var gen: ?u32 = null;
+    for (frames) |f| for (f.glyphs) |g| {
+        if (gen == null) gen = g.slot.generation;
+        try std.testing.expectEqual(gen.?, g.slot.generation);
+    };
+    // cross-pane 충돌 0(같은 좌표 ∧ 다른 글리프 없음).
+    for (frames[0].glyphs) |a| for (frames[1].glyphs) |b| {
+        const same = a.slot.x_px == b.slot.x_px and a.slot.y_px == b.slot.y_px;
+        const diff = !std.meta.eql(a.slot.key, b.slot.key);
+        try std.testing.expect(!(same and diff));
+    };
+    // 공유 글리프 'a'(양 페인 첫 글자)는 같은 슬롯을 가리킨다 — 같은 atlas 세대라 한 슬롯 공유(중복 없음).
+    try std.testing.expectEqual(frames[0].glyphs[0].slot.key.glyph_id, frames[1].glyphs[0].slot.key.glyph_id);
+    try std.testing.expectEqual(frames[0].glyphs[0].slot.id, frames[1].glyphs[0].slot.id);
+    try std.testing.expect(atlas.config.atlas_height_px > 56); // 합산 10 > 8칸이라 grow 발생
 }

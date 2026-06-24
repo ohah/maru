@@ -110,16 +110,46 @@ pub const RendererState = struct {
         // 소유하고 deinit한다. 실패하면 caller가 여전히 `list`를 소유하므로 caller의
         // errdefer가 정리해야 한다. 이렇게 해야 CoreText shaper 실패와 frame 준비 실패를
         // 같은 DrawList artifact로 디버깅할 수 있다.
-        var frame = try glyph_frame.prepareGlyphFrame(allocator, glyphs, &self.atlas);
-        errdefer frame.deinit(allocator);
+        // frame 소유권을 buildQuadRasterFromGlyphFrame으로 넘긴다 — 성공 시 RenderFrame이, 실패 시 그 함수의
+        // errdefer가 frame을 정리한다. 여기서 errdefer frame.deinit을 또 두면 실패 경로에서 double-free다.
+        const frame = try glyph_frame.prepareGlyphFrame(allocator, glyphs, &self.atlas);
+        return self.buildQuadRasterFromGlyphFrame(allocator, list, frame, rasterizer);
+    }
 
-        var quad_frame = try glyph_quads.buildGlyphQuadFrame(allocator, frame, .{
+    /// 여러 페인(GlyphRunList)을 **한 atlas 세대로** 배치한다. 멀티 페인이 atlas를 공유할 때 어떤 페인이
+    /// 소진을 일으켜도 전 페인이 한 세대로 (재)배치+(재)업로드되어 cross-pane 깨짐을 차단한다(glyph_frame
+    /// 의 prepareMultiPaneGlyphFrame 참조). 반환 GlyphFrame 슬라이스는 owned — caller가 각 frame.deinit +
+    /// 슬라이스 free. shaping(GlyphRunList 생성)은 호출 전에 끝내고, 배치 후 per-pane quad/raster는
+    /// buildQuadRasterFromGlyphFrame으로 잇는다(shape/place/finalize 분리).
+    pub fn placeMultiPane(
+        self: *RendererState,
+        allocator: std.mem.Allocator,
+        lists: []const glyph_layout.GlyphRunList,
+    ) ![]glyph_frame.GlyphFrame {
+        return glyph_frame.prepareMultiPaneGlyphFrame(allocator, lists, &self.atlas);
+    }
+
+    /// 이미 배치된 GlyphFrame(place 결과)으로 quad/raster를 만들고 RenderFrame을 조립한다. atlas 크기는
+    /// place 시점 이후 grow됐을 수 있으므로 **현재 atlas dims**를 쓴다(멀티 페인 통합 후 단일 세대라
+    /// 빌드 dims==최종 dims로 수렴; renormalizeGlyphCellUvs가 안전망). ownership: 성공 시 RenderFrame이
+    /// frame과 list를 소유한다. 실패 시 frame은 여기서 정리하고, list는 caller가 소유한다(caller errdefer).
+    pub fn buildQuadRasterFromGlyphFrame(
+        self: *RendererState,
+        allocator: std.mem.Allocator,
+        list: draw_list.DrawList,
+        frame: glyph_frame.GlyphFrame,
+        rasterizer: anytype,
+    ) !types.RenderFrame {
+        var owned_frame = frame;
+        errdefer owned_frame.deinit(allocator);
+
+        var quad_frame = try glyph_quads.buildGlyphQuadFrame(allocator, owned_frame, .{
             .width_px = self.atlas.config.atlas_width_px,
             .height_px = self.atlas.config.atlas_height_px,
         });
         errdefer quad_frame.deinit(allocator);
 
-        var raster_frame = try glyph_raster.buildGlyphRasterFrame(allocator, frame, .{
+        var raster_frame = try glyph_raster.buildGlyphRasterFrame(allocator, owned_frame, .{
             .texture_size = .{
                 .width_px = self.atlas.config.atlas_width_px,
                 .height_px = self.atlas.config.atlas_height_px,
@@ -130,7 +160,7 @@ pub const RendererState = struct {
         return .{
             .backend = self.backend,
             .draw_list = list,
-            .glyph_frame = frame,
+            .glyph_frame = owned_frame,
             .glyph_quad_frame = quad_frame,
             .glyph_raster_frame = raster_frame,
         };

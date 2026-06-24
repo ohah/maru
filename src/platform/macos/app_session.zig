@@ -8425,7 +8425,7 @@ pub const AppSession = struct {
             });
         }
         var tree: std.ArrayList(app.workspace.TreeNode) = .empty;
-        try flattenPaneTree(arena, tab, tab.tree, &tree);
+        try Model.flattenTree(arena, tab, tab.tree, &tree);
         return .{
             .active_pane = tab.active_pane,
             // 워크스페이스(탭)의 사용자 rename(없으면 ""). 예전엔 데이터 출처가 없어 reserved placeholder였으나, 이제
@@ -8521,27 +8521,8 @@ pub const AppSession = struct {
 
     /// PaneTree 노드를 preorder로 평탄화한다 — leaf(*Pane)는 그 Pane의 tab.panes 인덱스로, split은 방향+ratio(천분율)
     /// 로. 직렬화 모델(self-delimiting preorder)과 같은 순서·형태.
-    fn flattenPaneTree(arena: std.mem.Allocator, tab: *Tab, node: PaneTree.Node, out: *std.ArrayList(app.workspace.TreeNode)) !void {
-        switch (node) {
-            .leaf => |pane_ptr| {
-                const idx = paneIndexOf(tab, pane_ptr) orelse return error.PaneNotFound;
-                try out.append(arena, .{ .leaf = idx });
-            },
-            .split => |s| {
-                const milli: u16 = @intFromFloat(@round(std.math.clamp(s.ratio, 0.0, 1.0) * 1000.0));
-                try out.append(arena, .{ .split = .{ .direction = s.direction, .ratio_milli = milli } });
-                try flattenPaneTree(arena, tab, s.a, out);
-                try flattenPaneTree(arena, tab, s.b, out);
-            },
-        }
-    }
-
-    fn paneIndexOf(tab: *Tab, pane: *Pane) ?usize {
-        for (tab.panes.items, 0..) |p, i| {
-            if (p == pane) return i;
-        }
-        return null;
-    }
+    // flattenPaneTree·paneIndexOf(PaneTree → workspace.TreeNode 평탄화)는 session core로 이동(§3.1) —
+    // Model.flattenTree(내부에 paneIndexOf). 단일 출처: src/session/session_model.zig.
 
     /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
     /// 캡처는 임시 arena로 하고, 결과 텍스트만 self.allocator로 보관한다(다음 호출/deinit까지 유효 — cwd ABI와
@@ -8762,7 +8743,7 @@ pub const AppSession = struct {
         defer self.allocator.free(used);
         @memset(used, false);
         var idx: usize = 0;
-        const root = try self.buildWorkspaceTreeNode(tab.panes.items, m.tree, &idx, &splits, used);
+        const root = try Model.buildTreeNode(self.allocator, tab.panes.items, m.tree, &idx, &splits, used);
         if (idx != m.tree.len) return error.MalformedTree; // preorder를 다 안 소비했다(노드 수 불일치)
         for (used) |u| if (!u) return error.MalformedTree; // 트리가 참조 안 한 고아 pane(보이지 않는 라이브 셸) 차단
         tab.tree = root;
@@ -8777,30 +8758,8 @@ pub const AppSession = struct {
 
     /// 모델 preorder TreeNode 한 subtree를 소비해 PaneTree.Node를 만든다. leaf는 panes[idx]를, split은 새 Split
     /// (dir/ratio)을 할당하고 뒤따르는 두 subtree(a,b)를 재귀로 짓는다. 할당한 split은 splits에 추적(에러 해제용).
-    fn buildWorkspaceTreeNode(self: *AppSession, panes: []const *Pane, nodes: []const app.workspace.TreeNode, idx: *usize, splits: *std.ArrayList(*PaneTree.Split), used: []bool) !PaneTree.Node {
-        if (idx.* >= nodes.len) return error.MalformedTree;
-        const node = nodes[idx.*];
-        idx.* += 1;
-        switch (node) {
-            .leaf => |pane_index| {
-                if (pane_index >= panes.len) return error.MalformedTree;
-                if (used[pane_index]) return error.MalformedTree; // 같은 pane을 두 leaf로 참조(중복) — UAF 차단
-                used[pane_index] = true;
-                return .{ .leaf = panes[pane_index] };
-            },
-            .split => |s| {
-                const split = try self.allocator.create(PaneTree.Split);
-                splits.appendAssumeCapacity(split); // capacity 예약됨 — 무실패 추적(create↔추적 사이 누수 없음)
-                split.* = .{
-                    .direction = s.direction,
-                    .ratio = app.split_tree.clampRatio(@as(f32, @floatFromInt(s.ratio_milli)) / 1000.0),
-                    .a = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits, used),
-                    .b = try self.buildWorkspaceTreeNode(panes, nodes, idx, splits, used),
-                };
-                return .{ .split = split };
-            },
-        }
-    }
+    // buildWorkspaceTreeNode(workspace.TreeNode → PaneTree.Node 복원)는 session core로 이동(§3.1) —
+    // Model.buildTreeNode(self.allocator 대신 allocator 인자로 pure화). 단일 출처: src/session/session_model.zig.
 
     /// 모델 Pane → 완성된 *Pane. 첫 surface로 createPane(=1 Term)하고 나머지 surface를 Term으로 추가한다.
     fn buildWorkspacePane(self: *AppSession, m: app.workspace.Pane) !*Pane {

@@ -2348,21 +2348,6 @@ pub const AppSession = struct {
         };
     }
 
-    /// floating 탭 PaneFrame(테스트·비통합 단발 경로). DrawList/배치는 buildFloatingTabDrawListAndPlacement 단일 출처.
-    fn buildFloatingTabFrame(
-        self: *AppSession,
-        builder: coretext_frame_builder.CoreTextFrameBuilder,
-        built_frames: *std.ArrayList(renderer.RenderFrame),
-    ) ?metal_frame.PaneFrame {
-        const dp = self.buildFloatingTabDrawListAndPlacement() orelse return null;
-        var f = builder.buildFromDrawList(self.allocator, dp.dl, &self.renderer_state) catch return null;
-        built_frames.append(self.allocator, f) catch {
-            f.deinit(self.allocator);
-            return null;
-        };
-        return .{ .frame = f, .origin_x = dp.placement.origin_x, .origin_y = dp.placement.origin_y, .colors = dp.placement.colors };
-    }
-
     /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
     /// 옮긴 Term을 dst의 활성 탭으로 만들고, src가 비면 collapse한다. 그 뒤 모든 panel을 새 leaf rect grid로
     /// resize + 좌표 재계산. insert 실패는 src로 원복한다. src==dst거나 인덱스 밖이면 무동작. Term은 heap-pin
@@ -10725,22 +10710,6 @@ pub const AppSession = struct {
         return draw_list;
     }
 
-    /// 사이드바 제목 카드 RenderFrame(테스트·비통합 단발 경로). DrawList 생성은 buildSidebarTitleDrawList 단일
-    /// 출처이고, 멀티 페인 통합(collectShaped)은 그 DrawList를 직접 shapeOnly해 한 atlas 세대로 묶는다.
-    fn buildSidebarTitleFrame(self: *AppSession) !renderer.RenderFrame {
-        const draw_list = try self.buildSidebarTitleDrawList();
-        // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
-        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-            .appearance = self.appearance,
-            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-            .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(self.cell_width_px),
-            .cell_height_px = @intCast(self.cell_height_px),
-        };
-        return frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
-    }
-
     /// 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) frame을 만든다.
     /// 카드(buildSidebarTitleFrame)와 달리 절대 좌표라 .m 헤더 시프트 대상이 아니다 — replace가 origin(0,0)
     /// 기반 cells로 헤더 영역 [0, header)에 직접 박는다(카드·밴드는 .m이 header_h만큼 아래로 시프트). 폭이 너무
@@ -11457,14 +11426,6 @@ pub const AppSession = struct {
         // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
         errdefer raster.cells.deinit(self.allocator);
         return try self.finishOverlayPrep(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor, raster.clip_rect);
-    }
-
-    /// chrome 오버레이 PaneFrame(테스트·비통합 단발 경로). prep/raster는 buildChromeOverlayPrep 단일 출처이고,
-    /// 멀티 페인 통합(collect)은 그 prep을 직접 shapeOnly해 한 atlas 세대로 묶는다.
-    fn buildChromeOverlayFrame(self: *AppSession) !metal_frame.PaneFrame {
-        const prep = (try self.buildChromeOverlayPrep()) orelse return error.NotOpen;
-        const f = try prep.builder.buildFromDrawList(self.allocator, prep.dl, &self.renderer_state);
-        return .{ .frame = f, .origin_x = prep.placement.origin_x, .origin_y = prep.placement.origin_y, .colors = prep.placement.colors, .clip_rect = prep.placement.clip_rect };
     }
 
     /// 알림 센터 패널을 종(🔔) 아이콘 아래에 연다 — 종 클릭과 디버그 훅(MARU_OPEN_NOTIFICATIONS)의 단일 출처.
@@ -12878,6 +12839,31 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
     }
 }
 
+// 아래 테스트 전용 헬퍼 — production 렌더는 모든 페인을 collectShaped→placeMultiPane([N])으로 한 atlas 세대에
+// 통합한다(cross-pane 정합). 이 헬퍼들은 sidebar/overlay/floating의 DrawList lowering(buildFromDrawList =
+// shapeOnly→placeMultiPane([1])→finishPane)을 단발로 검증한다 — production 통합[N] 경로 자체는 visible GPU smoke가
+// 검증한다(atlas readback). production fn으로 두면 미사용이라 test 전용 free 함수로 분리해 둔다.
+fn testBuildSidebarTitleFrame(session: *AppSession) !renderer.RenderFrame {
+    const dl = try session.buildSidebarTitleDrawList();
+    return session.paneFrameBuilder().buildFromDrawList(session.allocator, dl, &session.renderer_state);
+}
+
+fn testBuildChromeOverlayFrame(session: *AppSession) !metal_frame.PaneFrame {
+    const prep = (try session.buildChromeOverlayPrep()) orelse return error.NotOpen;
+    const f = try prep.builder.buildFromDrawList(session.allocator, prep.dl, &session.renderer_state);
+    return .{ .frame = f, .origin_x = prep.placement.origin_x, .origin_y = prep.placement.origin_y, .colors = prep.placement.colors, .clip_rect = prep.placement.clip_rect };
+}
+
+fn testBuildFloatingTabFrame(session: *AppSession, builder: coretext_frame_builder.CoreTextFrameBuilder, built_frames: *std.ArrayList(renderer.RenderFrame)) ?metal_frame.PaneFrame {
+    const dp = session.buildFloatingTabDrawListAndPlacement() orelse return null;
+    var f = builder.buildFromDrawList(session.allocator, dp.dl, &session.renderer_state) catch return null;
+    built_frames.append(session.allocator, f) catch {
+        f.deinit(session.allocator);
+        return null;
+    };
+    return .{ .frame = f, .origin_x = dp.placement.origin_x, .origin_y = dp.placement.origin_y, .colors = dp.placement.colors };
+}
+
 test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레임 빌드 성공(제목 사라짐 회귀 방지)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText shaper 경로
     const allocator = std.testing.allocator;
@@ -12893,19 +12879,19 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
     defer session.deinit();
     // 에이전트 없음 → 정상 빌드(baseline).
     {
-        var f = try session.buildSidebarTitleFrame();
+        var f = try testBuildSidebarTitleFrame(session);
         f.deinit(allocator);
     }
     // claude/codex 심볼 prefix가 붙어도 buildSidebarTitleFrame이 에러 없이 프레임을 만들어야 한다
     // (catch null로 흘러 전체 사이드바 제목이 사라지면 안 됨).
     session.activeTab().activePane().activeTerm().agent_kind = .claude;
     {
-        var f = try session.buildSidebarTitleFrame();
+        var f = try testBuildSidebarTitleFrame(session);
         f.deinit(allocator);
     }
     session.activeTab().activePane().activeTerm().agent_kind = .codex;
     {
-        var f = try session.buildSidebarTitleFrame();
+        var f = try testBuildSidebarTitleFrame(session);
         f.deinit(allocator);
     }
     // 3줄 카드(이름/브랜치/경로): buildSidebarTitleFrame은 buildSidebarDrawList 결과를 indent_cols만큼 우측 시프트한다.
@@ -13236,7 +13222,7 @@ fn assertPinnedPrefix(session: *AppSession) !void {
 /// 사이드바 제목 프레임에 📌(U+1F4CC) 핀 prefix 글리프 셀이 있는가 — buildSidebarTitleFrame이 names줄에
 /// "📌 "를 붙였을 때만 나타난다. 프레임은 매 frame 재-shape(tab.pinned 라이브)되므로 토글 직후 빌드하면 새 상태가 보인다.
 fn frameHasPinGlyph(session: *AppSession) !bool {
-    var f = try session.buildSidebarTitleFrame();
+    var f = try testBuildSidebarTitleFrame(session);
     defer f.deinit(session.allocator);
     for (f.draw_list.cells) |c| if (c.codepoint == 0x1F4CC) return true;
     return false;
@@ -13963,7 +13949,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
 
     // 열린 상태에서 chrome 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(palette.view → 일반 rasterizer).
     session.dispatchAppAction(.toggle_command_palette);
-    var pf = try session.buildChromeOverlayFrame();
+    var pf = try testBuildChromeOverlayFrame(session);
     defer pf.frame.deinit(allocator);
     try std.testing.expect(pf.frame.draw_list.cells.len > 0);
 
@@ -14021,7 +14007,7 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     try std.testing.expectEqual(@as(usize, 2), session.find_matches.items.len);
 
     // chrome 오버레이 프레임 빌드가 크래시 없이 셀을 낸다(find.view → 일반 rasterizer: "Find: …" + 카운터).
-    var ff = try session.buildChromeOverlayFrame();
+    var ff = try testBuildChromeOverlayFrame(session);
     defer ff.frame.deinit(allocator);
     try std.testing.expect(ff.frame.draw_list.cells.len > 0);
 
@@ -14324,7 +14310,7 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
     // 못 잡는다. 같은 세션에서 resize를 반복해 공유 atlas가 두 메트릭을 함께 들었을 때도 잘림이 없는지 본다.
     for ([_]u32{ 1000, 2000 }) |scale_milli| {
         _ = try session.resize(800, 600, scale_milli);
-        var ff = try session.buildChromeOverlayFrame();
+        var ff = try testBuildChromeOverlayFrame(session);
         defer ff.frame.deinit(allocator);
 
         // caret 재활용: cursor-role fill이 **cursor 오버레이**(glyph_quad_frame.overlays의 .cursor, visible)로 lower돼야
@@ -14380,7 +14366,7 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
     // scale 1.0·Retina 2.0 둘 다(실제 맥은 2.0).
     for ([_]u32{ 1000, 2000 }) |scale_milli| {
         _ = try session.resize(800, 600, scale_milli);
-        var ff = try session.buildChromeOverlayFrame();
+        var ff = try testBuildChromeOverlayFrame(session);
         defer ff.frame.deinit(allocator);
 
         // caret 재활용: cursor-role fill이 cursor 오버레이(glyph_quad_frame.overlays의 .cursor, visible)로 lower돼 터미널
@@ -14558,7 +14544,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
 
     // 닫힘이면 buildNoticeFrame은 NotOpen(오버레이 없음 — 호출자가 무시).
     try std.testing.expect(!session.chrome_host.notice.open);
-    try std.testing.expectError(error.NotOpen, session.buildChromeOverlayFrame());
+    try std.testing.expectError(error.NotOpen, testBuildChromeOverlayFrame(session));
 
     // showNotice는 메시지를 세션 소유 버퍼로 복사하고 연다 — 호출자의 transient 버퍼를 지워도 모달 메시지는 산다.
     {
@@ -14570,7 +14556,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
     try std.testing.expectEqualStrings("corrupt", session.chrome_host.notice.message);
 
     // 오버레이 프레임이 크래시 없이 셀을 낸다(박스 bg + 메시지 glyph — 컴포넌트 view→ChromeDraw→lower 경로).
-    var nf = try session.buildChromeOverlayFrame();
+    var nf = try testBuildChromeOverlayFrame(session);
     defer nf.frame.deinit(allocator);
     try std.testing.expect(nf.frame.draw_list.cells.len > 0);
 
@@ -16728,7 +16714,7 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     }
 
     // 드래그 전엔 floating 탭 없음.
-    try std.testing.expect(session.buildFloatingTabFrame(builder, &built) == null);
+    try std.testing.expect(testBuildFloatingTabFrame(session, builder, &built) == null);
 
     // 탭 down(arm) → drag(2)로 마우스 이동 → tab_drag_x/y 갱신.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -16742,14 +16728,14 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
     try std.testing.expectEqual(@as(f64, 222), session.tab_drag_y);
 
     // 드래그 중엔 floating 탭 frame이 빌드된다(커서 중심에 박스).
-    const pf = session.buildFloatingTabFrame(builder, &built);
+    const pf = testBuildFloatingTabFrame(session, builder, &built);
     try std.testing.expect(pf != null);
     try std.testing.expect(pf.?.origin_x < 333); // 박스가 커서 좌측으로 센터됨(폭/2 만큼)
 
     // up → 드래그 끝 → floating 탭 없음.
     session.mouse(3, 333, 222, 0, 0);
     try std.testing.expect(!session.tab_drag_active);
-    try std.testing.expect(session.buildFloatingTabFrame(builder, &built) == null);
+    try std.testing.expect(testBuildFloatingTabFrame(session, builder, &built) == null);
     _ = try session.tick();
 }
 

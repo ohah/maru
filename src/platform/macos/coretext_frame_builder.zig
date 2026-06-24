@@ -61,6 +61,23 @@ pub const CoreTextFrameBuilder = struct {
         };
     }
 
+    /// 활성 surface를 **shape까지만** 한다(build과 달리 place/raster·RenderFrame 없음 — atlas 무접촉). 멀티 페인
+    /// 통합이 활성 panel을 다른 페인과 한 placeMultiPane(한 atlas 세대)에 합류시키려고 쓴다. 코어 lock은 build과
+    /// 동형(읽기 락 아래 DrawList 복사, shape는 락 밖). renderer_state는 불필요(place를 안 한다).
+    pub fn shapeOnlyBuild(
+        self: CoreTextFrameBuilder,
+        allocator: std.mem.Allocator,
+        app_window: *maru.session.AppWindow,
+        io: std.Io,
+    ) !ShapedPane {
+        const active = app_window.active() orelse return error.NoActiveSurface;
+        active.lockCore(io);
+        const list_or = renderer.buildDrawListWithUnfocused(allocator, active.core.renderSnapshot(), self.cursor_unfocused);
+        active.unlockCore(io);
+        const draw_list = try list_or;
+        return self.shapeOnly(allocator, draw_list);
+    }
+
     /// 이미 만들어진 DrawList(소유권 이전)를 같은 CoreText shaper/rasterizer/renderer_state로
     /// shape → raster → RenderFrame까지 만든다. `build`(터미널 snapshot)와 사이드바 탭-제목 패스가
     /// 이 seam을 공유한다 — 둘이 같은 atlas(renderer_state)를 쓰므로 사이드바 제목 glyph도 터미널과

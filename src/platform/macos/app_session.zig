@@ -2306,11 +2306,9 @@ pub const AppSession = struct {
     /// 탭 드래그 중이면 끌리는 Term의 제목을 담은 'floating 탭'(박스 + 제목) frame을 만들어 PaneFrame으로 돌려준다
     /// (커서 중심에 배치). built_frames가 소유(deinit)하고, 반환 PaneFrame은 호출자가 pane_frames '맨 뒤'(맨 위)에
     /// 넣는다. 드래그 중이 아니거나 메트릭/제목을 못 구하면 null. macOS 렌더 패스(CoreText)에서만 부른다.
-    fn buildFloatingTabFrame(
-        self: *AppSession,
-        builder: coretext_frame_builder.CoreTextFrameBuilder,
-        built_frames: *std.ArrayList(renderer.RenderFrame),
-    ) ?metal_frame.PaneFrame {
+    /// floating 탭 미리보기의 DrawList + 배치(드래그 중이 아니면 null). 멀티 페인 통합(collect)·단발
+    /// (buildFloatingTabFrame)이 공유한다 — 같은 DrawList/배치 계산 단일 출처.
+    fn buildFloatingTabDrawListAndPlacement(self: *AppSession) ?struct { dl: renderer.DrawList, placement: PanePlacement } {
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return null;
@@ -2336,21 +2334,33 @@ pub const AppSession = struct {
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
         const bg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_active }; // 솔리드 박스 색(활성 강조색)
         const dl = coretext_frame_builder.buildFloatingTabDrawList(self.allocator, title, cols, fg, bg) catch return null;
-        var f = builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch return null;
-        built_frames.append(self.allocator, f) catch {
-            f.deinit(self.allocator);
-            return null;
-        };
         // 커서 중심으로 박스 배치(왼쪽 위가 음수면 0으로 clamp).
         const box_w: f64 = @floatFromInt(@as(u32, cols) * cw);
         const ox = drag_x - box_w / 2;
         const oy = drag_y - @as(f64, @floatFromInt(ch)) / 2;
         return .{
-            .frame = f,
-            .origin_x = if (ox > 0) @intFromFloat(@min(ox, @as(f64, @floatFromInt(std.math.maxInt(u32))))) else 0,
-            .origin_y = if (oy > 0) @intFromFloat(@min(oy, @as(f64, @floatFromInt(std.math.maxInt(u32))))) else 0,
-            .colors = .{ .default_fg = self.appearance.theme.foreground },
+            .dl = dl,
+            .placement = .{
+                .origin_x = if (ox > 0) @intFromFloat(@min(ox, @as(f64, @floatFromInt(std.math.maxInt(u32))))) else 0,
+                .origin_y = if (oy > 0) @intFromFloat(@min(oy, @as(f64, @floatFromInt(std.math.maxInt(u32))))) else 0,
+                .colors = .{ .default_fg = self.appearance.theme.foreground },
+            },
         };
+    }
+
+    /// floating 탭 PaneFrame(테스트·비통합 단발 경로). DrawList/배치는 buildFloatingTabDrawListAndPlacement 단일 출처.
+    fn buildFloatingTabFrame(
+        self: *AppSession,
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        built_frames: *std.ArrayList(renderer.RenderFrame),
+    ) ?metal_frame.PaneFrame {
+        const dp = self.buildFloatingTabDrawListAndPlacement() orelse return null;
+        var f = builder.buildFromDrawList(self.allocator, dp.dl, &self.renderer_state) catch return null;
+        built_frames.append(self.allocator, f) catch {
+            f.deinit(self.allocator);
+            return null;
+        };
+        return .{ .frame = f, .origin_x = dp.placement.origin_x, .origin_y = dp.placement.origin_y, .colors = dp.placement.colors };
     }
 
     /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
@@ -9067,7 +9077,27 @@ pub const AppSession = struct {
         // 넘기면 sync_active여도 막지 않아 freeze가 풀린다.
         const sync_blocks = sync_active and self.sync_hold_ticks < sync_timeout_ticks;
         if (self.metal_dirty and !sync_blocks) {
-            var tick_result = if (builtin.os.tag == .macos) blk: {
+            // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의
+            // placeMultiPane(한 atlas 세대)으로 배치+분배한다 — 개별 buildFromDrawList가 invalidate로 앞 페인을
+            // 무효화하는 cross-pane 깨짐을 차단한다. defer는 place 전 에러로 빠질 때만 남은 ShapedPane을 정리한다
+            // (정상 경로에선 placeAndDistribute가 collected를 비운다).
+            var collected: std.ArrayList(CollectedPane) = .empty;
+            defer {
+                for (collected.items) |*c| c.pane.deinit(self.allocator);
+                collected.deinit(self.allocator);
+            }
+            // 활성 panel: macOS면 shapeOnly까지만(atlas 무접촉) — 아래 멀티 페인 collect(.active)로 합류해 다른
+            // 페인과 한 placeMultiPane(한 atlas 세대)에 배치한다(활성이 atlas에 가장 먼저·크게 쓰므로 합류해야
+            // cross-pane 깨짐이 사라진다). 비-macOS는 fake backend로 RenderFrame까지(단일 leaf라 cross-pane 무관).
+            // active_shaped는 collect로 소유 이전되면 null로 비운다(중복 deinit 방지). active_result는 placeAndDistribute가
+            // 채우고 built_frames가 소유(view라 따로 deinit 안 함).
+            var active_shaped: ?coretext_frame_builder.ShapedPane = null;
+            defer if (active_shaped) |*ap| ap.deinit(self.allocator);
+            var active_result: ?ActiveResult = null;
+            var active_index: usize = 0;
+            var tick_result: ?app.AppFrameLoopTick = null;
+            defer if (tick_result) |*t| t.deinit(self.allocator);
+            if (builtin.os.tag == .macos) {
                 const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
                     .appearance = self.appearance,
                     .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
@@ -9078,9 +9108,20 @@ pub const AppSession = struct {
                     // 활성 surface 커서: 창이 포커스를 잃었으면 cursor.unfocused(block/hollow/hidden) 적용(F1-4b-2).
                     .cursor_unfocused = self.unfocusedCursorMode(),
                 };
-                break :blk try self.frame_loop.tickAfterDrainWithFrameBuilder(drain_summary, frame_builder);
-            } else try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
-            defer tick_result.deinit(self.allocator);
+                // shapeOnly 실패(드문 OOM)면 이 tick은 활성 frame 없이 chrome만 — 다음 tick 재시도(metal_dirty는 replace
+                // 성공 시에만 내려가는데, 활성 누락이어도 8개 chrome은 정상 배치된다). frame 카운터는 finishTick 대신
+                // advanceFrameIndex가 진행해 summary frame_loop_ticks를 보존한다.
+                active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, self.io) catch null;
+                active_index = self.frame_loop.advanceFrameIndex();
+            } else {
+                tick_result = try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
+                // 비-macOS(단일 leaf·fake backend)는 활성 멀티 페인 통합을 쓰지 않는다. active_*는 macOS 통합 경로
+                // 전용이라 여기서 명시 초기화해 비-macOS 빌드의 never-mutated 진단을 피한다(macOS 빌드에선 이 else가
+                // comptime dead라 무영향).
+                active_shaped = null;
+                active_result = null;
+                active_index = 0;
+            }
 
             // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
             // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
@@ -9164,18 +9205,24 @@ pub const AppSession = struct {
             // 무시하고 제목 없이 밴드만 그린다(세션을 죽이지 않음). 짧은 제목이라 매 frame 재-shape해도
             // 싸고, atlas dedup이 새 glyph만 업로드한다.
             var sidebar_frame: ?renderer.RenderFrame = null;
-            if (builtin.os.tag == .macos) {
-                sidebar_frame = self.buildSidebarTitleFrame() catch null;
-            }
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
+            if (builtin.os.tag == .macos) {
+                // 통합 수집: DrawList만 만들고 collect(.sidebar) — placeAndDistribute가 sidebar_frame을 채운다(한 atlas 세대).
+                if (self.buildSidebarTitleDrawList()) |dl| {
+                    self.collectShaped(&collected, dl, self.paneFrameBuilder(), .sidebar);
+                } else |_| {}
+            }
             // 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) — 절대 좌표라
             // 카드(sidebar_frame)와 별도 frame. replace가 origin(0,0) 기반 cells로 헤더 영역 [0,header)에 직접
             // 박는다(카드·밴드만 .m이 header_h 시프트). 실패는 무시(헤더 없이 정상). 같은 atlas라 slot 비충돌.
             var sidebar_header_frame: ?renderer.RenderFrame = null;
-            if (builtin.os.tag == .macos) {
-                sidebar_header_frame = self.buildSidebarHeaderFrame() catch null;
-            }
             defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
+            if (builtin.os.tag == .macos) {
+                // 통합 수집: DrawList만 만들고 collect(.sidebar_header) — placeAndDistribute가 sidebar_header_frame을 채운다.
+                if (self.buildSidebarHeaderDrawList()) |maybe_dl| {
+                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, self.paneFrameBuilder(), .sidebar_header);
+                } else |_| {}
+            }
             // 최상위 모달 오버레이 frame(열렸을 때만, macOS). Notice·Find·Palette는 배타적이라 하나만 그린다(replace의
             // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
             // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
@@ -9188,12 +9235,15 @@ pub const AppSession = struct {
             self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
+            defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
             if (builtin.os.tag == .macos) {
                 if (self.anyOverlayOpen()) {
-                    overlay_frame = self.buildChromeOverlayFrame() catch null;
+                    // 통합 수집: prep만 만들고 collect(.overlay) — placeAndDistribute가 overlay_frame(PaneFrame)을 조립한다.
+                    if (self.buildChromeOverlayPrep()) |maybe| {
+                        if (maybe) |prep| self.collectShaped(&collected, prep.dl, prep.builder, .{ .overlay = prep.placement });
+                    } else |_| {}
                 }
             }
-            defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
             // 제목 glyph 투영용 색(전경=테마 글자색). 밴드는 rebuildSidebar가 이미 색을 박아 넘긴다.
             const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
 
@@ -9280,7 +9330,8 @@ pub const AppSession = struct {
             // 드래그 중 floating 탭 미리보기 frame(맨 위에 둘 것). macOS 블록에서 빌드해 활성 터미널 뒤에 넣는다.
             var floating_pf: ?metal_frame.PaneFrame = null;
             // 탭 바 제목·비활성 panel frame은 여기서 소유하고 replace 뒤에 해제한다(pane_frames의 PaneFrame은 같은
-            // frame을 가리키는 view일 뿐이라 따로 deinit하지 않는다 — 이중 free 방지). 활성 frame은 tick_result가 소유.
+            // frame을 가리키는 view일 뿐이라 따로 deinit하지 않는다 — 이중 free 방지). 활성 frame은 macOS면 통합
+            // placeMultiPane 결과라 built_frames가 소유(active_result는 view), 비-macOS면 tick_result가 소유한다.
             var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
             defer {
                 for (built_frames.items) |*bf| bf.deinit(self.allocator);
@@ -9323,17 +9374,7 @@ pub const AppSession = struct {
                     if (pb.grip_cols > 0) {
                         const grip_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
                         if (coretext_frame_builder.buildPaneGripDrawList(self.allocator, @intCast(pb.grip_cols), grip_fg)) |gdl| {
-                            if (pane_frame_builder.buildFromDrawList(self.allocator, gdl, &self.renderer_state)) |gf| {
-                                var grip_frame = gf;
-                                if (built_frames.append(self.allocator, grip_frame)) |_| {
-                                    pane_frames.append(self.allocator, .{
-                                        .frame = grip_frame,
-                                        .origin_x = pb.full.x,
-                                        .origin_y = text_origin_y,
-                                        .colors = tabbar_colors,
-                                    }) catch {};
-                                } else |_| grip_frame.deinit(self.allocator); // 추적 실패 시만 해제(grip 생략, 탭은 계속)
-                            } else |_| {}
+                            self.collectShaped(&collected, gdl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                         } else |_| {}
                     }
 
@@ -9351,17 +9392,7 @@ pub const AppSession = struct {
                         } else app.pickLabel(lr.leaf.custom_name, "");
                         const label_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground }; // 밝은 전경(muted 비활성 탭과 구분)
                         if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg)) |ldl| {
-                            if (pane_frame_builder.buildFromDrawList(self.allocator, ldl, &self.renderer_state)) |lf| {
-                                var label_frame = lf;
-                                if (built_frames.append(self.allocator, label_frame)) |_| {
-                                    pane_frames.append(self.allocator, .{
-                                        .frame = label_frame,
-                                        .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, // grip 핸들 뒤에 이름
-                                        .origin_y = text_origin_y,
-                                        .colors = tabbar_colors,
-                                    }) catch {};
-                                } else |_| label_frame.deinit(self.allocator); // 추적 실패 시만 해제(라벨 생략, 탭은 계속)
-                            } else |_| {}
+                            self.collectShaped(&collected, ldl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, .origin_y = text_origin_y, .colors = tabbar_colors } });
                         } else |_| {}
                     }
 
@@ -9394,17 +9425,7 @@ pub const AppSession = struct {
                     // 이 pane의 탭이 호버 중이면 그 탭에 ✕를 그린다(다른 pane이면 null).
                     const close_tab: ?usize = if (self.hovered_tab) |h| (if (h.pane == lr.leaf) h.tab else null) else null;
                     const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) catch continue;
-                    var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
-                    built_frames.append(self.allocator, f) catch {
-                        f.deinit(self.allocator);
-                        continue;
-                    };
-                    pane_frames.append(self.allocator, .{
-                        .frame = f,
-                        .origin_x = pb.tabs.x, // 라벨 뒤 탭 영역 origin(라벨만큼 우측)
-                        .origin_y = text_origin_y,
-                        .colors = tabbar_colors,
-                    }) catch {};
+                    self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                 }
 
                 // 2) 비활성 panel 터미널 frame(자기 활성 Term surface, 바 아래 origin). split일 때만 여럿이다.
@@ -9432,12 +9453,9 @@ pub const AppSession = struct {
                         const pane_bg = pane_core.defaultBgOverride();
                         pane_surface.unlockCore(self.io);
                         const dl = dl_or catch continue;
-                        var f = pane_frame_builder.buildFromDrawList(self.allocator, dl, &self.renderer_state) catch continue;
-                        built_frames.append(self.allocator, f) catch {
-                            f.deinit(self.allocator);
-                            continue;
-                        };
-                        // 비활성 pane도 자기 core의 OSC 4 팔레트·OSC 10/11 색 설정을 쓴다(둘 다 per-터미널 상태).
+                        // 비활성 pane도 자기 core의 OSC 4 팔레트·OSC 10/11 색 설정을 쓴다(둘 다 per-터미널 상태). collect는
+                        // place를 미루므로 색을 먼저 모은다 — palette 포인터는 pane_palette_copies(루프 전 예약, 포인터 안정)라
+                        // frame 끝까지 유효하다.
                         var pane_colors = inactive_colors;
                         pane_colors.palette = pane_palette_ptr;
                         pane_colors.screen_reverse = pane_rev;
@@ -9445,26 +9463,49 @@ pub const AppSession = struct {
                         if (pane_fg) |fg| pane_colors.default_fg = fg;
                         if (pane_bg) |bg| pane_colors.default_bg = bg;
                         const t = self.paneTermRect(lr.rect); // 바 아래 영역 origin
-                        pane_frames.append(self.allocator, .{
-                            .frame = f, // built_frames가 소유(deinit) — 여기는 같은 frame을 가리키는 view
-                            .origin_x = t.x,
-                            .origin_y = t.y,
-                            .colors = pane_colors,
-                        }) catch {};
+                        self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = t.x, .origin_y = t.y, .colors = pane_colors } });
                     }
                 }
 
                 // 3) 드래그 중 floating 탭 미리보기 — 커서 위치에 박스+제목. 활성 터미널 '뒤'(맨 위)에 넣어야 하므로
                 //    여기선 빌드만 하고 아래에서 append한다(built_frames가 소유).
-                floating_pf = self.buildFloatingTabFrame(pane_frame_builder, &built_frames);
+                // floating 탭 미리보기(드래그 중일 때만) collect — placeAndDistribute가 .floating으로 floating_pf를 채운다.
+                if (self.buildFloatingTabDrawListAndPlacement()) |dp| {
+                    self.collectShaped(&collected, dp.dl, pane_frame_builder, .{ .floating = dp.placement });
+                }
+
+                // 활성 panel(위에서 shapeOnly됨)을 collect(.active)로 합류 — 다른 모든 페인과 한 placeMultiPane 세대.
+                // 소유권을 collected로 넘기고 active_shaped를 비운다(바깥 defer 중복 deinit 방지). cell_colors/active_origin은
+                // 이미 준비됨. builder는 finishPane(place/raster)용이라 cursor_unfocused 없는 pane_frame_builder로 충분하다
+                // (커서는 shapeOnly 단계의 DrawList에 이미 반영됨).
+                if (active_shaped) |ap| {
+                    self.collectShapedPane(&collected, ap, pane_frame_builder, .{ .active = .{ .origin_x = active_origin_x, .origin_y = active_origin_y, .colors = cell_colors } });
+                    active_shaped = null;
+                }
+
+                // 수집된 모든 페인(sidebar/header/overlay/grip/label/탭바/비활성/floating + 활성)을 한 번에 placeMultiPane으로
+                // 배치+분배한다 — cross-pane 정합(한 atlas 세대). 활성은 active_result로 받아 아래에서 pane_frames 맨 뒤(커서
+                // suffix·floating 맨 위 직전)에 넣는다.
+                self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &active_result);
             }
-            // 활성 panel 터미널을 맨 뒤에(커서 suffix). 단일 leaf·비-macOS면 이게 유일한 터미널 frame이다(기존 동작).
-            pane_frames.append(self.allocator, .{
-                .frame = tick_result.frame.render_frame,
-                .origin_x = active_origin_x,
-                .origin_y = active_origin_y,
-                .colors = cell_colors,
-            }) catch {};
+            // 활성 panel 터미널을 맨 뒤에(커서 suffix). macOS면 통합 placeMultiPane 결과(active_result.rf — built_frames
+            // 소유, pane_frames엔 view로), 비-macOS면 fake backend의 tick_result. 단일 leaf면 이게 유일한 터미널 frame이다
+            // (기존 동작). 활성 frame이 없으면(macOS shapeOnly/place 실패 — 드문 OOM) chrome만 그리고 다음 tick 재시도.
+            if (active_result) |ar| {
+                pane_frames.append(self.allocator, .{
+                    .frame = ar.rf,
+                    .origin_x = active_origin_x,
+                    .origin_y = active_origin_y,
+                    .colors = cell_colors,
+                }) catch {};
+            } else if (tick_result) |*t| {
+                pane_frames.append(self.allocator, .{
+                    .frame = t.frame.render_frame,
+                    .origin_x = active_origin_x,
+                    .origin_y = active_origin_y,
+                    .colors = cell_colors,
+                }) catch {};
+            }
             // floating 탭은 활성 터미널·커서보다 위(맨 마지막 frame)에 그린다 — 드래그 ghost가 가장 위에 보이게.
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
 
@@ -9560,8 +9601,16 @@ pub const AppSession = struct {
                 } else |_| {}
             }
 
-            // tick만 아는 per-frame render 통계와 tick index를 summary에 덧씌운다.
-            self.writeSummaryFromTick(tick_result);
+            // per-frame render 통계와 tick index를 summary에 덧씌운다. macOS면 통합 활성 frame(active_result.rf)로 직접
+            // 산출(finishTick을 안 거쳐서 — atlas entry는 통합 place 후 최종값), 비-macOS면 tick_result. 활성 frame이 없으면
+            // (드문 shapeOnly/place 실패) 마지막 frame 통계를 유지한다(idle 동형 — writeSummaryFromState만).
+            if (active_result) |ar| {
+                self.writeSummaryFromRenderStats(active_index, renderer.renderFrameStats(ar.rf, self.renderer_state.atlas.entryCount()));
+            } else if (tick_result) |t| {
+                self.writeSummaryFromTick(t);
+            } else {
+                self.writeSummaryFromState();
+            }
             self.logScreenIfDebug();
             self.drainShellEventsForFrame();
         } else {
@@ -10418,7 +10467,146 @@ pub const AppSession = struct {
     /// glyph도 터미널과 같은 slot을 재사용하고 새 glyph만 추가 업로드된다. macOS 전용(실 CoreText
     /// 브리지) — tick의 `builtin.os.tag == .macos` 가드 안에서만 호출한다. 사이드바가 꺼졌거나(폭 0)
     /// 탭이 없으면 error.NoSidebar로 빠져 호출부가 제목 없이 밴드만 그린다.
-    fn buildSidebarTitleFrame(self: *AppSession) !renderer.RenderFrame {
+    /// 멀티 페인 통합 빌드(cross-pane 정확성)의 수집 항목 목적지. 각 atlas-쓰는 빌드를 shapeOnly로 모아 한 번에
+    /// placeMultiPane(한 atlas 세대)한 뒤 dest별로 RenderFrame을 분배한다 — 개별 buildFromDrawList가 invalidate로
+    /// 앞 페인을 무효화하는 cross-pane 깨짐을 막는다(docs/font-strategy.md frame epoch).
+    const PanePlacement = struct {
+        origin_x: u32,
+        origin_y: u32,
+        colors: metal_frame.CellColors,
+        clip_rect: ?metal_frame.ClipPx = null,
+    };
+    const CollectDest = union(enum) {
+        sidebar,
+        sidebar_header,
+        overlay: PanePlacement,
+        pane: PanePlacement,
+        floating: PanePlacement,
+        active: PanePlacement,
+    };
+
+    /// 활성 panel의 placeMultiPane 결과(RenderFrame + 배치). placeAndDistribute가 out param으로 돌려주면 호출자가
+    /// pane_frames 맨 뒤(커서 suffix)에 view로 넣고 render_stats를 산출한다(활성 frame은 호출자가 소유·deinit하고
+    /// pane_frames는 view라 따로 deinit 안 한다 — built_frames 규율과 동형).
+    const ActiveResult = struct { rf: renderer.RenderFrame, placement: PanePlacement };
+    const CollectedPane = struct {
+        pane: coretext_frame_builder.ShapedPane,
+        dest: CollectDest,
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+    };
+
+    /// chrome 오버레이의 shape 전 준비 — DrawList + 배치(origin/colors/cursor/clip) + builder(오버레이는 호출자
+    /// appearance/cell_w/h를 쓴다). 단발(buildChromeOverlayFrame)·통합(collect)이 공유한다.
+    const OverlayPrep = struct {
+        dl: renderer.DrawList,
+        placement: PanePlacement,
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+    };
+
+    /// 사이드바/탭바/비활성/오버레이/floating 공용 frame builder(cursor_unfocused 없음 — 활성 panel만 cursor 모드를
+    /// 쓴다). macOS 전용 coretext bridge라 호출은 `if (builtin.os.tag == .macos)` 안에서만 한다(비-macOS는 lazy 미분석).
+    fn paneFrameBuilder(self: *const AppSession) coretext_frame_builder.CoreTextFrameBuilder {
+        return .{
+            .appearance = self.appearance,
+            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+            .scale_milli = self.scale_milli,
+            .cell_width_px = @intCast(self.cell_width_px),
+            .cell_height_px = @intCast(self.cell_height_px),
+        };
+    }
+
+    /// DrawList(소유권 이전)를 shapeOnly로 만들어 collected에 추가한다. shapeOnly 실패면 dl은 shapeOnly가 정리하고
+    /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
+    fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
+        var pane = builder.shapeOnly(self.allocator, dl) catch return;
+        collected.append(self.allocator, .{ .pane = pane, .dest = dest, .builder = builder }) catch {
+            pane.deinit(self.allocator);
+        };
+    }
+
+    /// 이미 shapeOnly된 ShapedPane을 collected에 추가한다(활성 panel처럼 frame_builder가 shape를 미리 끝낸 경우 —
+    /// collectShaped는 DrawList부터, 이건 ShapedPane부터). append 실패면 그 페인만 deinit. 소유권은 collected로 이전되므로
+    /// 호출자는 넘긴 ShapedPane을 더는 deinit하지 않는다(중복 정리 방지 — 호출자가 보관 변수를 null로 비운다).
+    fn collectShapedPane(self: *AppSession, collected: *std.ArrayList(CollectedPane), pane: coretext_frame_builder.ShapedPane, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
+        var p = pane;
+        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder }) catch {
+            p.deinit(self.allocator);
+        };
+    }
+
+    /// 수집된 모든 페인을 한 placeMultiPane(한 atlas 세대)으로 배치하고 dest별로 RenderFrame을 분배한다. finishPane이
+    /// ShapedPane을 consume하므로 이 함수가 collected를 비우며(clearRetainingCapacity) 모든 정리를 흡수한다 — 바깥 defer는
+    /// 빈 배열만 deinit(double-free 없음). place 실패면 전 페인 deinit + 이번 통합 생략(metal_dirty 유지로 다음 tick 재시도).
+    /// 분배: sidebar/header는 RenderFrame, overlay/floating은 PaneFrame, pane은 built_frames 소유 + pane_frames view.
+    fn placeAndDistribute(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        pane_frames: *std.ArrayList(metal_frame.PaneFrame),
+        built_frames: *std.ArrayList(renderer.RenderFrame),
+        sidebar_frame: *?renderer.RenderFrame,
+        sidebar_header_frame: *?renderer.RenderFrame,
+        overlay_frame: *?metal_frame.PaneFrame,
+        floating_pf: *?metal_frame.PaneFrame,
+        active_out: *?ActiveResult,
+    ) void {
+        defer collected.clearRetainingCapacity();
+        if (collected.items.len == 0) return;
+
+        const lists = self.allocator.alloc(renderer.glyph_layout.GlyphRunList, collected.items.len) catch {
+            for (collected.items) |*c| c.pane.deinit(self.allocator);
+            return;
+        };
+        defer self.allocator.free(lists);
+        for (collected.items, lists) |c, *l| l.* = c.pane.shaped.runs;
+
+        const frames = self.renderer_state.placeMultiPane(self.allocator, lists) catch {
+            for (collected.items) |*c| c.pane.deinit(self.allocator);
+            return;
+        };
+        defer self.allocator.free(frames);
+
+        for (collected.items, frames) |*c, frame| {
+            const rf = c.builder.finishPane(self.allocator, &c.pane, frame, &self.renderer_state) catch {
+                // finishPane 실패: frame은 buildQuadRaster가 정리, pane은 미consume → deinit. 그 페인만 skip.
+                c.pane.deinit(self.allocator);
+                continue;
+            };
+            switch (c.dest) {
+                .sidebar => sidebar_frame.* = rf,
+                .sidebar_header => sidebar_header_frame.* = rf,
+                .overlay => |p| overlay_frame.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect },
+                .pane => |p| {
+                    if (built_frames.append(self.allocator, rf)) |_| {
+                        pane_frames.append(self.allocator, .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect }) catch {};
+                    } else |_| {
+                        var v = rf;
+                        v.deinit(self.allocator);
+                    }
+                },
+                .floating => |p| {
+                    if (built_frames.append(self.allocator, rf)) |_| {
+                        floating_pf.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect };
+                    } else |_| {
+                        var v = rf;
+                        v.deinit(self.allocator);
+                    }
+                },
+                // 활성 panel: 다른 pane과 동형으로 built_frames가 소유(pane_frames·active_out은 view라 deinit 안 함).
+                // 호출자가 active_out.rf를 pane_frames 맨 뒤(커서 suffix, floating 앞)에 넣고 그 rf로 render_stats를 산출한다.
+                .active => |p| {
+                    if (built_frames.append(self.allocator, rf)) |_| {
+                        active_out.* = .{ .rf = rf, .placement = p };
+                    } else |_| {
+                        var v = rf;
+                        v.deinit(self.allocator);
+                    }
+                },
+            }
+        }
+    }
+
+    fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         const cw = self.cell_width_px;
         if (cw == 0 or self.tabs.items.len == 0) return error.NoSidebar;
         // U2/B2: 제목 영역 = 슬롯 폭에서 좌측(카드 패딩 + accent 막대)·우측(카드 패딩)을 inset한 content rect(선언적
@@ -10526,6 +10714,13 @@ pub const AppSession = struct {
             // (짧은 이름은 안 걸리던 잠재 버그를 경로줄이 깨움). full_cols ≥ sidebar_cols+indent_cols라 항상 수용한다.
             draw_list.size.cols = @intCast(@min(full_cols, @as(u32, std.math.maxInt(u16))));
         }
+        return draw_list;
+    }
+
+    /// 사이드바 제목 카드 RenderFrame(테스트·비통합 단발 경로). DrawList 생성은 buildSidebarTitleDrawList 단일
+    /// 출처이고, 멀티 페인 통합(collectShaped)은 그 DrawList를 직접 shapeOnly해 한 atlas 세대로 묶는다.
+    fn buildSidebarTitleFrame(self: *AppSession) !renderer.RenderFrame {
+        const draw_list = try self.buildSidebarTitleDrawList();
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
             .appearance = self.appearance,
@@ -10615,12 +10810,14 @@ pub const AppSession = struct {
         }) catch {};
     }
 
-    fn buildSidebarHeaderFrame(self: *AppSession) !?renderer.RenderFrame {
+    /// 사이드바 헤더 glyph의 DrawList(접힘이면 좌상단 토글 — buildCollapsedToggleDrawList 위임; 조건 미달이면 null).
+    /// 멀티 페인 통합(collectShaped)이 직접 써 통합 placeMultiPane으로 한 atlas 세대에 묶는다.
+    fn buildSidebarHeaderDrawList(self: *AppSession) !?renderer.DrawList {
         const cw = self.cell_width_px;
         if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
         // 접힘이면 헤더 대신 좌상단 펼치기 버튼만 — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서 suffix
         // '앞'에 끼워 터미널 위에 보임). 헤더 높이·검색·카드는 없다(완전히 숨김 + 좌상단 버튼).
-        if (self.sidebar_collapsed) return self.buildCollapsedToggleFrame();
+        if (self.sidebar_collapsed) return self.buildCollapsedToggleDrawList();
         if (self.sidebar_header_height_px == 0) return null;
         const cols: u16 = @intCast(@min(self.sidebar_width_px / cw, @as(u32, std.math.maxInt(u16))));
         if (cols < 13) return null; // 검색 줄 + 우측 아이콘 4개(종/◧/⚙/+, 각 3칸 간격)가 들어갈 최소 폭(headerHit cols<13과 정합)
@@ -10684,22 +10881,13 @@ pub const AppSession = struct {
             try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = '|', .style = .{ .foreground = fg } });
         }
 
-        const draw_list = renderer.DrawList{
+        return renderer.DrawList{
             .size = .{ .cols = cols, .rows = header_rows },
             .cursor = .{ .row = 0, .col = 0 },
             .dirty = null,
             .cells = try cells.toOwnedSlice(self.allocator),
             .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
         };
-        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-            .appearance = self.appearance,
-            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-            .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(self.cell_width_px),
-            .cell_height_px = @intCast(self.cell_height_px),
-        };
-        return try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
     }
 
     /// 사이드바 접힘 시 좌상단 알림 종(🔔) 글리프 col — 신호등 클리어런스 오른쪽 **첫(가장 왼쪽)** 아이콘. 펼침 헤더처럼
@@ -10722,7 +10910,7 @@ pub const AppSession = struct {
 
     /// 접힘 상태 좌상단 펼치기 버튼(◧)만 그린 frame — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서
     /// suffix 앞에 끼워 터미널 '위'에). 신호등 오른쪽 col(collapsedToggleCol) 줄0에 1글자. 헤더 frame과 같은 절대 좌표 경로.
-    fn buildCollapsedToggleFrame(self: *AppSession) !?renderer.RenderFrame {
+    fn buildCollapsedToggleDrawList(self: *AppSession) !?renderer.DrawList {
         const cw = self.cell_width_px;
         if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
         const fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
@@ -10735,22 +10923,13 @@ pub const AppSession = struct {
         // 세로 중앙에 함께 정렬한다(terminal_origin_x_px==0 분기).
         try self.appendBellAndBadge(&cells, bell_col, fg, false); // 접힘: 종 좌측 텍스트 배지(터미널 위라 quad 부적합)
         try cells.append(self.allocator, .{ .row = 0, .col = btn_col, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        const draw_list = renderer.DrawList{
+        return renderer.DrawList{
             .size = .{ .cols = btn_col + 2, .rows = 1 }, // ◧(가장 오른쪽, 1칸) + 여유 1칸
             .cursor = .{ .row = 0, .col = 0 },
             .dirty = null,
             .cells = try cells.toOwnedSlice(self.allocator),
             .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
         };
-        const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
-            .appearance = self.appearance,
-            .shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list,
-            .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
-            .scale_milli = self.scale_milli,
-            .cell_width_px = @intCast(self.cell_width_px),
-            .cell_height_px = @intCast(self.cell_height_px),
-        };
-        return try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
     }
 
     /// 접힘 상태 좌상단 펼치기 버튼의 backing-px rect(클릭 hit-test) — render(collapsedToggleCol)와 같은 col. 펼침/접힘
@@ -10789,7 +10968,7 @@ pub const AppSession = struct {
     /// backing-px origin을 받아 DrawList → CoreTextFrameBuilder → PaneFrame으로 굳힌다. 세 빌더가 같은 frame 계약
     /// (DrawList 리터럴·frame_builder 6필드·PaneFrame 반환)을 복제하던 boilerplate를 단일화한다 — frame 계약이
     /// 바뀌면 여기 한 곳만 고친다. cells는 toOwnedSlice로 가져가고, 실패 시 호출자 errdefer가 정리한다(아직 유효).
-    fn finishOverlayFrame(
+    fn finishOverlayPrep(
         self: *AppSession,
         cells: *std.ArrayList(renderer.DrawCell),
         cols: u16,
@@ -10801,7 +10980,7 @@ pub const AppSession = struct {
         cell_h: u32,
         cursor: ?terminal.Cursor,
         clip_rect: ?chrome.draw.Rect,
-    ) !metal_frame.PaneFrame {
+    ) !OverlayPrep {
         // caret(cursor-role fill에서 lower)이 있으면 **cursor 오버레이**(DrawOverlay.cursor)로 낸다 — buildNativeCellsSplit이
         // frame.overlays에서 .cursor를 찾아 반전-블록으로 그리고(메인 터미널 커서와 같은 경로) suffix-trim으로 깜빡인다.
         // draw_list.cursor 필드만으론 안 그려진다(렌더는 overlays를 본다 — 메인 buildDrawList도 cursor를 overlays에 넣는다).
@@ -10834,7 +11013,6 @@ pub const AppSession = struct {
             .cell_width_px = @intCast(cell_w),
             .cell_height_px = @intCast(cell_h),
         };
-        const frame = try frame_builder.buildFromDrawList(self.allocator, draw_list, &self.renderer_state);
         // caret이 있으면 cursor 색을 싣는다 — 컴포지터(metal_frame)가 colors.cursor가 있을 때만 반전 블록을 그린다.
         // block=cursor.color(없으면 theme.cursor)=caret 색, text=cursor.text(없으면 패널 bg=sidebar_background —
         // caret 아래 글자가 있으면 가독, 입력 끝 빈칸이라 보통 무관). cursor.* override는 메인 터미널 커서와 같은 색을 쓴다.
@@ -10842,7 +11020,17 @@ pub const AppSession = struct {
             .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
             .text = self.appearance.cursor.text orelse self.appearance.theme.sidebar_background,
         } else null;
-        return .{ .frame = frame, .origin_x = origin_x, .origin_y = origin_y, .colors = .{ .default_fg = self.appearance.theme.foreground, .cursor = cursor_colors }, .clip_rect = if (clip_rect) |c| .{ .x = @intCast(@max(0, c.x)), .y = @intCast(@max(0, c.y)), .w = c.w, .h = c.h } else null };
+        // DrawList 소유권을 prep로 넘긴다 — 단발(buildChromeOverlayFrame)·통합(collect)이 buildFromDrawList/shapeOnly로 소비.
+        return .{
+            .dl = draw_list,
+            .placement = .{
+                .origin_x = origin_x,
+                .origin_y = origin_y,
+                .colors = .{ .default_fg = self.appearance.theme.foreground, .cursor = cursor_colors },
+                .clip_rect = if (clip_rect) |c| .{ .x = @intCast(@max(0, c.x)), .y = @intCast(@max(0, c.y)), .w = c.w, .h = c.h } else null,
+            },
+            .builder = frame_builder,
+        };
     }
 
     // 커맨드 팝업·스크롤백 Find 오버레이는 chrome 컴포넌트로 이주했다(palette=C1b, find=C1a). 각 컴포넌트 view가
@@ -11208,7 +11396,7 @@ pub const AppSession = struct {
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
     /// 아니라 collectPaletteDraws로 따로 모은다. 닫혀 있거나 메트릭/박스 미상이면 에러(호출자가 무시). macOS 전용.
-    fn buildChromeOverlayFrame(self: *AppSession) !metal_frame.PaneFrame {
+    fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {
         // 오버레이는 터미널과 같은 셀·폰트(1×)로 그린다 — buildChromeProps도 같은 셀을 컴포넌트에 준다. 1.3× 확대는
         // 사용자 요청으로 제거(스케일 불일치로 한글이 약간 잘리던 문제도 함께 사라짐 — 셀=글리프 font size 일치).
         const cw = self.cell_width_px;
@@ -11245,7 +11433,7 @@ pub const AppSession = struct {
             const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
             try self.chrome_host.collectSettingsDraws(labels, fields, props, &tokens, arena, &draws);
         }
-        if (draws.items.len == 0) return error.NotOpen;
+        if (draws.items.len == 0) return null; // 열린 오버레이 없음 — prep 없음(래퍼가 error.NotOpen으로 환산)
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
         // C4b 모달-2b: 모달 배경 quad(layer=1)를 self.gpu_quads(over 패스)에 머지. renderFrame이 매 프레임
@@ -11260,7 +11448,15 @@ pub const AppSession = struct {
         // finishOverlayFrame이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
         // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
         errdefer raster.cells.deinit(self.allocator);
-        return self.finishOverlayFrame(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor, raster.clip_rect);
+        return try self.finishOverlayPrep(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor, raster.clip_rect);
+    }
+
+    /// chrome 오버레이 PaneFrame(테스트·비통합 단발 경로). prep/raster는 buildChromeOverlayPrep 단일 출처이고,
+    /// 멀티 페인 통합(collect)은 그 prep을 직접 shapeOnly해 한 atlas 세대로 묶는다.
+    fn buildChromeOverlayFrame(self: *AppSession) !metal_frame.PaneFrame {
+        const prep = (try self.buildChromeOverlayPrep()) orelse return error.NotOpen;
+        const f = try prep.builder.buildFromDrawList(self.allocator, prep.dl, &self.renderer_state);
+        return .{ .frame = f, .origin_x = prep.placement.origin_x, .origin_y = prep.placement.origin_y, .colors = prep.placement.colors, .clip_rect = prep.placement.clip_rect };
     }
 
     /// 알림 센터 패널을 종(🔔) 아이콘 아래에 연다 — 종 클릭과 디버그 훅(MARU_OPEN_NOTIFICATIONS)의 단일 출처.
@@ -11530,14 +11726,16 @@ pub const AppSession = struct {
     }
 
     fn writeSummaryFromTick(self: *AppSession, tick_result: app.AppFrameLoopTick) void {
-        // 공유 counter/size/state는 writeSummaryFromState가 단일 출처로 채운다. tick만 아는
-        // per-frame render 통계와 tick index만 여기서 덧씌운다. 이렇게 해야 두 writer가
-        // 필드별로 어긋나지 않고, 새 counter가 추가돼도 한 곳만 고치면 된다. key/resize/close
-        // summary의 render 필드는 "마지막으로 그려진 frame" 값(화면의 현재 상태)을 그대로
-        // 유지한다.
+        self.writeSummaryFromRenderStats(tick_result.index, tick_result.render_stats);
+    }
+
+    /// FrameLoopTick 없이도(멀티 페인 통합으로 활성 panel을 app_session이 직접 place한 macOS 경로) tick index와
+    /// per-frame render 통계만 summary에 덧씌운다. 공유 counter/size/state는 writeSummaryFromState가 단일 출처로
+    /// 채운다 — 이렇게 해야 두 writer가 필드별로 어긋나지 않고, 새 counter가 추가돼도 한 곳만 고치면 된다.
+    /// key/resize/close summary의 render 필드는 "마지막으로 그려진 frame" 값(화면의 현재 상태)을 그대로 유지한다.
+    fn writeSummaryFromRenderStats(self: *AppSession, index: usize, stats: renderer.RenderFrameStats) void {
         self.writeSummaryFromState();
-        const stats = tick_result.render_stats;
-        self.last_summary.last_tick_index = @intCast(tick_result.index);
+        self.last_summary.last_tick_index = @intCast(index);
         self.last_summary.glyph_count = @intCast(stats.glyph_count);
         self.last_summary.draw_cells = @intCast(stats.draw_cells);
         self.last_summary.atlas_entries = @intCast(stats.atlas_entries);

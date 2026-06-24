@@ -118,6 +118,15 @@ pub const FrameLoop = struct {
         };
     }
 
+    /// 활성 panel을 app_session이 멀티 페인 통합(한 placeMultiPane 세대)으로 직접 shape/place할 때(build/finishTick
+    /// 우회) frame 카운터만 진행시킨다 — finishTick의 frame_index++ 한 줄을 대신해 summary frame_loop_ticks를 보존한다.
+    /// render_stats는 호출자가 finishPane 후 renderFrameStats로 직접 산출한다. 반환=이번 frame index.
+    pub fn advanceFrameIndex(self: *FrameLoop) usize {
+        const index = self.frame_index;
+        self.frame_index += 1;
+        return index;
+    }
+
     pub fn handleKeyEvent(
         self: *FrameLoop,
         resolver: config_mod.KeyBindingResolver,

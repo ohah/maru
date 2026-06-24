@@ -12,7 +12,7 @@
 | `AppSession` struct 메서드 | ~10,900 (403개) | 그룹 분산 대상 |
 | 파일 레벨 free 헬퍼 | ~300 | `spawnRequest`·`normalizeConfig`·`sidebarBandCell` 등(이미 free) |
 
-**거대 메서드 top**: `tick`(590)·`mouse`(524)·`rasterizeOverlayCells`(201)·`handleKeyEvent`(145)·`init`(144)·`deinit`(136)·`buildSidebarTitleFrame`(130)·`hoverCursor`(129)·`rebuildSidebar`(123). `tick`/`mouse`/`handleKeyEvent`는 **오케스트레이션 허브**(프레임 루프·입력 라우터)다.
+**거대 메서드 top**: `tick`(멀티 페인 통합 빌드 합류로 590보다 증가)·`mouse`(524)·`rasterizeOverlayCells`(201)·`handleKeyEvent`(145)·`init`(144)·`deinit`(136)·`hoverCursor`(129)·`rebuildSidebar`(123). `tick`/`mouse`/`handleKeyEvent`는 **오케스트레이션 허브**(프레임 루프·입력 라우터)다 — `tick`은 멀티 페인 통합 빌드(`collectShaped`→`placeMultiPane`→`placeAndDistribute`, 활성 panel `shapeOnlyBuild` 합류)를 품는다. (`buildSidebarTitleFrame`/`buildChromeOverlayFrame`/`buildFloatingTabFrame`은 통합 후 production 미사용이라 test 전용 free 헬퍼로 분리했다.)
 
 ## 2. 성격 규정 (정직 — 선결)
 

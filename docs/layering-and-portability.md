@@ -30,7 +30,7 @@ flowchart TD
 
 **의존 방향**: L3→L2→L1, L4가 가장자리에서 셋을 구현/투영. L1~L3에 OS 타입이 새지 않는다(check-boundaries로 강제 — §8).
 
-**L4의 2단(D0 명문화 — [app-layer-decomposition.md](app-layer-decomposition.md) §2):** L4는 **OS 어댑터**(`platform/macos`·`pty/macos` — CoreText·Metal·ABI·OS host·PTY syscall, **타깃별 재작성**)와 **OS-중립 공통 런타임**(`src/app` — `live_pty`·`runtime`·`frame_loop` 본문; OS 호출은 어댑터로 위임, **이식 시 재사용**)으로 갈린다. 3차에선 `src/app`을 이 'L4 공통 런타임'으로 규정한다(옵션 A). 장기적으로 이를 `src/runtime/`로 독립시키는 정리는 4차(같은 문서 §2).
+**L4의 2단(D0 명문화 — [app-layer-decomposition.md](app-layer-decomposition.md) §2):** L4는 **OS 어댑터**(`platform/macos`·`pty/macos` — CoreText·Metal·ABI·OS host·PTY syscall, **타깃별 재작성**)와 **OS-중립 공통 런타임**(`src/app` — `live_pty`·`runtime`·`frame_loop` 본문; OS 호출은 어댑터로 위임, **이식 시 재사용**)으로 갈린다. `src/app`을 이 'L4 공통 런타임'으로 규정한다(옵션 A — 개명 0). 물리 개명(`src/runtime/`)은 `runtime/runtime.zig` 이름 중복 + `app`의 직관성 때문에 순이득이 없어 **보류**(app-layer-decomposition.md §2).
 
 **창 chrome 분해 예시(사이드바 헤더·신호등)**: 네이티브 타이틀바를 숨기고 신호등(traffic lights)만 남기는 **창 스타일 inset은 L4 macOS 전용**이다(AppKit `titlebarAppearsTransparent`/`.fullSizeContentView` — `platform/macos`의 Swift host, [macos-app-host-boundary.md](macos-app-host-boundary.md)). 반면 **헤더 레이아웃(검색바·view options·새 워크스페이스 아이콘의 위치·hit-test)은 L3 chrome**(`chrome/components/sidebar.zig` `headerHit`)이라 OS-중립으로 **재사용**된다 — 이식 시 타깃별로 새로 짜는 건 "신호등을 남기는 창 chrome" 한 조각뿐이고(Linux/Win/web은 각자의 창 데코레이션 모델), 그 위에 그려지는 헤더는 같은 L3 코드가 투영된다. 신호등 영역만큼 헤더를 아래로 미는 좌표 시프트(`sidebar_header_height_px`)는 L1 DTO로 L4에 전달돼 GPU 백엔드가 적용한다. 같은 분해가 **창 이동/확대**에도: '어디가 드래그/더블클릭-확대 영역인가'(헤더·타이틀바 띠의 빈 곳) hit-test는 **L3 chrome**(`isWindowDragRegion`)이라 OS-중립이고, 실제 창 이동/확대 호출(performDrag/zoom)만 **L4 platform**(AppKit) — 이식 시 타깃별 창 API로 그 한 줄만 바꾼다. 숨긴 타이틀바 높이만큼 터미널을 아래로 내리는 **타이틀바 띠**(`titlebar_strip_px`)는 L2/L3 레이아웃 수치(termRect inset)라 OS-중립으로 재사용된다.
 
@@ -106,7 +106,7 @@ flowchart TD
 | A2 | `surface`·`window`·`core_command`(`terminal`만 참조) | `session→terminal`(이미 있음). 런타임 참조처(`live_pty` 등) import 갱신 |
 | A3 | `session→app` 잔여 의존 0 확인 + `check-boundaries`에 `session`의 `app` 금지 추가 | 의존 소거를 가드로 고정 |
 
-**선결 결정(완료 — [app-layer-decomposition.md](app-layer-decomposition.md) §2, 사용자 합의):** 중립 모델이 빠진 `src/app`(OS-중립 런타임)을 **L4 공통 런타임으로 규정**한다(옵션 A — `src/app` 유지, 개명 0). `platform/macos`·`pty/macos`(OS 종속 어댑터)와 같은 L4지만 §2의 'L4 2단' 명문화로 구분한다. 런타임을 `src/runtime/`로 독립시키는 정리는 장기적으로 더 또렷하나 3차의 의존-0엔 불필요해 **4차로 등록**(같은 문서 §2).
+**선결 결정(완료 — [app-layer-decomposition.md](app-layer-decomposition.md) §2, 사용자 합의):** 중립 모델이 빠진 `src/app`(OS-중립 런타임)을 **L4 공통 런타임으로 규정**한다(옵션 A — `src/app` 유지, 개명 0). `platform/macos`·`pty/macos`(OS 종속 어댑터)와 같은 L4지만 §2의 'L4 2단' 명문화로 구분한다. 런타임을 `src/runtime/`로 물리 개명하는 정리(C)는 `runtime/runtime.zig` 이름 중복 + `app` 직관성으로 순이득이 없어 **보류**(app-layer-decomposition.md §2) — `src/app` 유지로 충분하다.
 
 **리스크/한계(정직):**
 - 작업량: `surface` 참조 런타임 10+ 파일 import 경로 변경(기계적·저위험, 동작 보존).

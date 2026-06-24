@@ -12864,6 +12864,75 @@ fn testBuildFloatingTabFrame(session: *AppSession, builder: coretext_frame_build
     return .{ .frame = f, .origin_x = dp.placement.origin_x, .origin_y = dp.placement.origin_y, .colors = dp.placement.colors };
 }
 
+test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected 소진 + 소유권(누수/double-free 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText shapeOnly/place 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // renderTick의 멀티 페인 빌드와 동일한 out 변수 셋업. defer들이 testing.allocator로 누수/double-free를 잡는다.
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.pane.deinit(allocator); // placeAndDistribute가 소진하면 빈 배열(no-op)
+        collected.deinit(allocator);
+    }
+    var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+    defer pane_frames.deinit(allocator);
+    var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
+    defer {
+        for (built_frames.items) |*bf| bf.deinit(allocator);
+        built_frames.deinit(allocator);
+    }
+    var sidebar_frame: ?renderer.RenderFrame = null;
+    defer if (sidebar_frame) |*f| f.deinit(allocator);
+    var sidebar_header_frame: ?renderer.RenderFrame = null;
+    defer if (sidebar_header_frame) |*f| f.deinit(allocator);
+    var overlay_frame: ?metal_frame.PaneFrame = null;
+    defer if (overlay_frame) |*pf| pf.frame.deinit(allocator);
+    var floating_pf: ?metal_frame.PaneFrame = null; // built_frames 소유(view) — 따로 deinit 안 함
+    var active_result: ?AppSession.ActiveResult = null; // built_frames 소유(view)
+
+    const builder = session.paneFrameBuilder();
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    // 활성 surface의 DrawList(실 CoreText shape 대상)를 dest별로 collect — sidebar/pane/active/floating 4종.
+    const dests = [_]AppSession.CollectDest{
+        .sidebar,
+        .{ .pane = .{ .origin_x = 100, .origin_y = 0, .colors = colors } },
+        .active,
+        .{ .floating = .{ .origin_x = 50, .origin_y = 50, .colors = colors } },
+    };
+    for (dests) |dest| {
+        const active = session.app_window.active().?;
+        active.lockCore(session.io);
+        const dl_or = renderer.buildDrawListWithUnfocused(allocator, active.core.renderSnapshot(), .normal);
+        active.unlockCore(session.io);
+        const dl = dl_or catch continue;
+        session.collectShaped(&collected, dl, builder, dest);
+    }
+    try std.testing.expectEqual(@as(usize, 4), collected.items.len); // 4종 전부 shapeOnly 성공
+
+    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &active_result);
+
+    // dest 분배 정확성(리뷰 #4: wrong dest routing 방지).
+    try std.testing.expect(sidebar_frame != null); // .sidebar → sidebar_frame(소유)
+    try std.testing.expect(active_result != null); // .active → active_result(built_frames 소유, view)
+    try std.testing.expect(floating_pf != null); // .floating → floating_pf(built_frames 소유, view)
+    try std.testing.expectEqual(@as(usize, 1), pane_frames.items.len); // .pane만 pane_frames(active append는 호출자 몫)
+    try std.testing.expectEqual(@as(usize, 3), built_frames.items.len); // .pane + .active + .floating 소유
+    // .pane placement 보존(분배 시 origin이 안 뒤섞임).
+    try std.testing.expectEqual(@as(u32, 100), pane_frames.items[0].origin_x);
+    // collected는 placeAndDistribute가 clearRetainingCapacity로 소진(finishPane consume ↔ 바깥 defer double-free 차단).
+    try std.testing.expectEqual(@as(usize, 0), collected.items.len);
+}
+
 test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레임 빌드 성공(제목 사라짐 회귀 방지)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText shaper 경로
     const allocator = std.testing.allocator;

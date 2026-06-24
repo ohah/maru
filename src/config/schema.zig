@@ -616,23 +616,15 @@ fn topKey(comptime field: []const u8, comptime meta: theme.Meta) []const u8 {
 }
 
 /// enum 토큰 파싱: '-'를 '_'로 정규화 후 stringToEnum(commit-only→commit_only; 나머지는 무변경). 너무 길면 null.
+/// 정규화 규칙의 단일 출처는 theme.parseDashedEnum(theme.preset 핸들러도 같은 함수 — 과거 byte-단위 fork 통합).
 fn parseEnum(comptime T: type, value: []const u8) ?T {
-    var buf: [64]u8 = undefined;
-    if (value.len > buf.len) return null;
-    for (value, 0..) |c, i| buf[i] = if (c == '-') '_' else c;
-    return std.meta.stringToEnum(T, buf[0..value.len]);
+    return theme.parseDashedEnum(T, value);
 }
 
 /// enum 허용 토큰을 "a|b|c"로(diagnostic 메시지용). tag의 '_'는 '-'로 바꾼다. **호출처에서 `comptime`으로 강제**
-/// (comptime-only — `@typeInfo` 필드 순회·문자열 concat은 comptime에서만).
+/// (comptime-only — `@typeInfo` 필드 순회·문자열 concat은 comptime에서만). 단일 출처는 theme.enumNamesJoined.
 fn enumTokens(comptime T: type) []const u8 {
-    var out: []const u8 = "";
-    for (@typeInfo(T).@"enum".fields, 0..) |f, i| {
-        var seg: []const u8 = "";
-        for (f.name) |c| seg = seg ++ &[_]u8{if (c == '_') '-' else c};
-        out = if (i == 0) seg else out ++ "|" ++ seg;
-    }
-    return out;
+    return theme.enumNamesJoined(T);
 }
 
 // ── 드리프트 차단(comptime): schema 항목은 반드시 실제 필드여야 한다 ─────────────────────────────────

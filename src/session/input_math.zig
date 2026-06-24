@@ -10,6 +10,10 @@ const terminal = @import("../terminal.zig");
 /// 플랫폼 프레임 빌더가 공유한다(platform 쪽은 alias로 참조). 단일 출처.
 pub const placeholder_cell_height_px: u32 = 24;
 
+/// cell 폭 미상(초기 프레임 등)일 때 쓰는 기본 cell 폭(px). 세션 cell 메트릭의 중립 기본값 — grid 기하
+/// (layout_math)·hit-test가 공유한다(platform 쪽은 alias로 참조). 단일 출처.
+pub const placeholder_cell_width_px: u32 = 12;
+
 /// 탭을 from→to로 옮긴 뒤 active_tab을 보정한다. 드래그한 탭이 active면 to를 따라가고, 사이 인덱스는
 /// 이동 방향대로 한 칸 밀린다(from<to면 그 사이가 -1, to<from이면 +1). 그 밖은 불변. 순수 함수.
 pub fn adjustActiveForMove(active: usize, from: usize, to: usize) usize {

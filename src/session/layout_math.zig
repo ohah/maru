@@ -1,0 +1,142 @@
+//! L2 session core — 순수 레이아웃 기하(OS·platform 무관). backing 픽셀 ↔ 터미널 grid·셀 hit-test·
+//! drop-zone 분할·pt↔px 환산을 모은다. platform/macos/app_session에서 추출했다
+//! (docs/app-session-decomposition.md "(b) 순수→session 이식 기여" 분리). terminal.Size·split_tree.Rect·
+//! input_math의 placeholder cell 메트릭만 의존하고 platform/pty/renderer/AppKit을 모른다 —
+//! tests/boundary/imports.zig가 강제. 순수 함수라 OS·렌더 없이 단위 테스트로 동작을 고정한다(다른 OS
+//! 어댑터도 이 grid·hit-test 계산을 그대로 재사용 — 이식 기여).
+
+const std = @import("std");
+const terminal = @import("../terminal.zig");
+const split_tree = @import("split_tree.zig");
+const input_math = @import("input_math.zig"); // placeholder cell 메트릭 단일 출처(휠 환산과 공유)
+
+const SplitRect = split_tree.Rect;
+
+/// 터미널 셀↔컨테이너 가장자리 4방 inset(backing px). 비대칭 window padding을 한 단위로 전달한다 —
+/// gridFromBacking이 left+right·top+bottom을 grid에서 빼고, paneTermRect가 좌상으로 left/top만큼 들인다.
+pub const PaddingPx = struct { left: u32 = 0, right: u32 = 0, top: u32 = 0, bottom: u32 = 0 };
+
+/// 드래그한 Term을 다른 pane '본문'에 떨어뜨릴 때의 가장자리 절반(④ split 재배치). left/right=좌우 split,
+/// top/bottom=상하 split.
+pub const PaneDropZone = enum { left, right, top, bottom };
+
+/// backing 픽셀 크기와 cell 픽셀 크기로 터미널 grid(cols/rows)를 구한다. cell 크기가 0이면
+/// placeholder로 대체하고, u16 상한으로 막은 뒤 terminal.clampGridSize로 최소 크기(cols>=2)를
+/// 적용한다 — cols>=2 불변식은 TerminalCore가 단일 소유하므로 여기서 직접 하드코딩하지 않는다.
+pub fn gridFromBacking(backing_width_px: u32, backing_height_px: u32, cell_width_px: u32, cell_height_px: u32, sidebar_width_px: u32, padding: PaddingPx) terminal.Size {
+    const cell_w = if (cell_width_px > 0) cell_width_px else input_math.placeholder_cell_width_px;
+    const cell_h = if (cell_height_px > 0) cell_height_px else input_math.placeholder_cell_height_px;
+    // 터미널 영역 = drawable − 세로 사이드바 폭 − 좌우 padding(left+right) − 상하 padding(top+bottom).
+    // 사이드바/패딩이 drawable보다 큰 비정상 상황은 0으로 saturate(언더플로 방지)해 clampGridSize가 최소 grid로
+    // 떨어뜨린다. termRect도 같은 양을 들이므로 spawn grid와 실제 pane grid가 정합한다(PR8 spawn-크기 레이스 회피).
+    const term_width = backing_width_px -| sidebar_width_px -| padding.left -| padding.right;
+    const term_height = backing_height_px -| padding.top -| padding.bottom;
+    const raw_cols = @min(term_width / cell_w, std.math.maxInt(u16));
+    const raw_rows = @min(term_height / cell_h, std.math.maxInt(u16));
+    return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
+}
+
+/// 사이드바를 이미 뺀 sub-사각형(panel leaf rect)의 픽셀 폭/높이로 grid를 구한다. `gridFromBacking`과
+/// 같은 cell/clamp 규칙이되 사이드바를 빼지 않는다(rect가 이미 터미널 영역 내부) — split된 panel을 자기
+/// leaf rect grid로 resize할 때 쓴다. 단일 leaf(rect.w = backing − sidebar)면 gridFromBacking과 동일.
+pub fn gridFromRectPx(cell_width_px: u32, cell_height_px: u32, w_px: u32, h_px: u32) terminal.Size {
+    const cell_w = if (cell_width_px > 0) cell_width_px else input_math.placeholder_cell_width_px;
+    const cell_h = if (cell_height_px > 0) cell_height_px else input_math.placeholder_cell_height_px;
+    const raw_cols = @min(w_px / cell_w, std.math.maxInt(u16));
+    const raw_rows = @min(h_px / cell_h, std.math.maxInt(u16));
+    return terminal.clampGridSize(.{ .cols = @intCast(raw_cols), .rows = @intCast(raw_rows) });
+}
+
+/// 논리 pt → backing 정수 px(분수 scale milli, ×scale_milli/1000). sidebar 폭·window padding 4방 같은 정수
+/// pt 환산의 단일 출처다(letter-spacing의 f32 경로는 분수 정밀이 필요해 applyFontSpacing이 별도로 처리한다).
+pub fn ptToPx(pt: u32, scale_milli: u32) u32 {
+    return pt * scale_milli / 1000;
+}
+
+/// 점(backing px)이 사각형 안인가([x, x+w) × [y, y+h) 반열린). 탭 바 클릭 hit-test에 쓴다. 비유한은 false.
+pub fn pointInRect(x_px: f64, y_px: f64, rect: SplitRect) bool {
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
+    const x0: f64 = @floatFromInt(rect.x);
+    const y0: f64 = @floatFromInt(rect.y);
+    return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(rect.w)) and
+        y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(rect.h));
+}
+
+/// rect를 zone 방향 절반으로 자른다(④b 하이라이트가 그 절반을 칠한다). left/right=좌우, top/bottom=상하.
+pub fn halfRect(rect: SplitRect, zone: PaneDropZone) SplitRect {
+    return switch (zone) {
+        .left => .{ .x = rect.x, .y = rect.y, .w = rect.w / 2, .h = rect.h },
+        .right => .{ .x = rect.x + rect.w / 2, .y = rect.y, .w = rect.w - rect.w / 2, .h = rect.h },
+        .top => .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h / 2 },
+        .bottom => .{ .x = rect.x, .y = rect.y + rect.h / 2, .w = rect.w, .h = rect.h - rect.h / 2 },
+    };
+}
+
+/// 점이 rect 안 어느 drop zone인지 — rect를 중앙에서 X자로 4등분해 가장 가까운 가장자리를 고른다(좌/우/상/하).
+/// rect 밖·0 크기·비유한이면 null. 렌더 drop-zone 하이라이트(④b)와 공유할 순수 함수라 OS 무관 단위 테스트.
+pub fn paneDropZone(rect: SplitRect, x_px: f64, y_px: f64) ?PaneDropZone {
+    if (rect.w == 0 or rect.h == 0 or !pointInRect(x_px, y_px, rect)) return null;
+    const fx = (x_px - @as(f64, @floatFromInt(rect.x))) / @as(f64, @floatFromInt(rect.w)); // [0,1)
+    const fy = (y_px - @as(f64, @floatFromInt(rect.y))) / @as(f64, @floatFromInt(rect.h));
+    const dx = @min(fx, 1 - fx); // 좌/우 가장자리까지의 거리(작을수록 가깝다)
+    const dy = @min(fy, 1 - fy); // 상/하 가장자리까지의 거리
+    if (dx <= dy) return if (fx < 0.5) .left else .right;
+    return if (fy < 0.5) .top else .bottom;
+}
+
+test "gridFromBacking divides backing pixels by cell size with placeholder + clamps" {
+    // 960×600 backing at 8×18 cell -> 120×33 (이전엔 Swift가 placeholder 12×24로 80×25를 잡아
+    // 창과 grid가 어긋났다). 이제 app session이 실제 메트릭으로 직접 계산한다.
+    try std.testing.expectEqual(terminal.Size{ .cols = 120, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 0, .{}));
+    // cell 크기 0(메트릭 없음, 이론상) -> placeholder 12×24.
+    try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 25 }, gridFromBacking(960, 600, 0, 0, 0, .{}));
+    // floor 동작 + 최소 1×1.
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(25, 16, 10, 16, 0, .{}));
+    // cols는 최소 2(TerminalCore가 wide glyph continuation 때문에 요구). 1픽셀/100px cell이라도 2칸.
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(1, 1, 100, 100, 0, .{}));
+    // 세로 사이드바 폭만큼 터미널 cols가 줄어든다: 960px − 160px 사이드바 = 800px / 8 = 100 cols(vs 120).
+    try std.testing.expectEqual(terminal.Size{ .cols = 100, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 160, .{}));
+    // 사이드바가 drawable보다 넓은 비정상도 언더플로 없이 최소 grid로 떨어진다(saturate).
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 33 }, gridFromBacking(960, 600, 8, 18, 2000, .{}));
+    // window padding(대칭 8/4): 좌우 합 16px·상하 합 8px를 grid에서 뺀다. cols: (960−16)/8=118, rows: (600−8)/18=32.
+    try std.testing.expectEqual(terminal.Size{ .cols = 118, .rows = 32 }, gridFromBacking(960, 600, 8, 18, 0, .{ .left = 8, .right = 8, .top = 4, .bottom = 4 }));
+    // 사이드바 + padding 동시: cols (960−160−16)/8=98, rows (600−8)/18=32.
+    try std.testing.expectEqual(terminal.Size{ .cols = 98, .rows = 32 }, gridFromBacking(960, 600, 8, 18, 160, .{ .left = 8, .right = 8, .top = 4, .bottom = 4 }));
+    // 비대칭 padding: left=10·right=20(합 30)·top=4·bottom=8(합 12). cols (960−30)/8=116, rows (600−12)/18=32.
+    try std.testing.expectEqual(terminal.Size{ .cols = 116, .rows = 32 }, gridFromBacking(960, 600, 8, 18, 0, .{ .left = 10, .right = 20, .top = 4, .bottom = 8 }));
+    // 비정상 큰 padding도 언더플로 없이 최소 grid로 saturate.
+    try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(960, 600, 8, 18, 0, .{ .left = 10000, .right = 10000, .top = 10000, .bottom = 10000 }));
+}
+
+test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)" {
+    const bar: SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // 우경계 = 180+240 = 420
+    try std.testing.expect(pointInRect(180, 0, bar)); // 좌상단 포함
+    try std.testing.expect(pointInRect(419, 11, bar)); // 우하 안쪽
+    try std.testing.expect(!pointInRect(420, 0, bar)); // x = x+w 제외
+    try std.testing.expect(!pointInRect(180, 12, bar)); // y = y+h 제외
+    try std.testing.expect(!pointInRect(179, 0, bar)); // 좌측 밖
+    try std.testing.expect(!pointInRect(std.math.nan(f64), 0, bar)); // 비유한
+}
+
+// paneDropZone이 rect를 X자 4등분해 가장 가까운 가장자리를 고르는지(④ split 재배치 drop-zone). 순수 함수.
+test "paneDropZone classifies a point into the nearest edge half" {
+    const r: SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 100 };
+    try std.testing.expectEqual(PaneDropZone.left, paneDropZone(r, 10, 50).?); // 좌측 가장자리 근처
+    try std.testing.expectEqual(PaneDropZone.right, paneDropZone(r, 90, 50).?); // 우측
+    try std.testing.expectEqual(PaneDropZone.top, paneDropZone(r, 50, 10).?); // 상단
+    try std.testing.expectEqual(PaneDropZone.bottom, paneDropZone(r, 50, 90).?); // 하단
+    try std.testing.expectEqual(PaneDropZone.left, paneDropZone(r, 25, 50).?); // 중앙 좌측(dx<dy)
+    // rect 밖·0 크기·비유한이면 null.
+    try std.testing.expect(paneDropZone(r, 150, 50) == null);
+    try std.testing.expect(paneDropZone(.{ .x = 0, .y = 0, .w = 0, .h = 100 }, 0, 50) == null);
+    try std.testing.expect(paneDropZone(r, std.math.nan(f64), 50) == null);
+}
+
+// halfRect가 rect를 zone 방향 절반으로 자르는지(④b 하이라이트). 순수.
+test "halfRect splits a rect by zone" {
+    const r: SplitRect = .{ .x = 10, .y = 20, .w = 100, .h = 80 };
+    try std.testing.expectEqual(SplitRect{ .x = 10, .y = 20, .w = 50, .h = 80 }, halfRect(r, .left));
+    try std.testing.expectEqual(SplitRect{ .x = 60, .y = 20, .w = 50, .h = 80 }, halfRect(r, .right));
+    try std.testing.expectEqual(SplitRect{ .x = 10, .y = 20, .w = 100, .h = 40 }, halfRect(r, .top));
+    try std.testing.expectEqual(SplitRect{ .x = 10, .y = 60, .w = 100, .h = 40 }, halfRect(r, .bottom));
+}

@@ -10934,7 +10934,7 @@ pub const AppSession = struct {
         if (sidebar_cols == 0) return error.NoSidebar;
 
         // 탭 카드를 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드): names=이름줄(📌 포함, 번호 없음),
-        // branch_lines=├ 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄). agents=에이전트
+        // branch_lines=octocat() 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄). agents=에이전트
         // 아이콘 코드포인트(0=없음) — 이름과 분리해 슬롯 세로 중앙에 독립 배치(buildSidebarDrawList).
         var names: std.ArrayList([]const u8) = .empty;
         defer {
@@ -10984,7 +10984,10 @@ pub const AppSession = struct {
                 const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시) — repo 판정에도 씀
                 const show_branch = self.loaded_config.config.sidebar.show_branch;
                 const show_folder = self.loaded_config.config.sidebar.show_folder;
-                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{F0001} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
+                // 브랜치줄 prefix = GitHub octocat(0xF0009). 예전 git-branch(0xF0001)는 얇은 선+링 3개라 카드 셀 크기
+                // (~8~12px)로 area-average 다운스케일되면 내부 구조가 뭉개져 ├(U+251C)처럼 보였다(사용자 피드백). octocat은
+                // 꽉 찬 단색 실루엣이라 작은 크기에서도 외곽이 살아 GitHub 마크로 읽힌다(icon_glyph fillCoverage 경로 동일).
+                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{F0009} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.agentStatusLine(term));
             }
@@ -13386,7 +13389,7 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
     // 사이드바 텍스트 전부 사라짐). 시프트 후 size.cols를 full_cols로 넓혀 수용하는지 고정 — 실 앱에서 못 봤던 버그.
     {
         const names = [_][]const u8{"\u{2733} maru"};
-        const branches = [_][]const u8{"\u{F0001} main"};
+        const branches = [_][]const u8{"\u{F0009} main"};
         const paths = [_][]const u8{"~/documents/workspace/maru"}; // 길어 좁은 폭을 꽉 채움 → 시프트 시 overflow
         const muted: terminal.Color = .{ .rgb = session.appearance.theme.sidebar_foreground };
         const sidebar_cols: u16 = 12;

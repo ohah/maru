@@ -31,6 +31,7 @@ ICONS = [
     ("sidebar", 0xF0006, "assets/icons/sidebar-collapse.svg"),
     ("sparkle", 0xF0007, "assets/icons/sparkle.svg"),
     ("diamond", 0xF0008, "assets/icons/diamond.svg"),
+    ("mark_github", 0xF0009, "assets/icons/mark-github.svg"),
 ]
 
 

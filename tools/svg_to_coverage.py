@@ -29,6 +29,8 @@ ICONS = [
     ("search", 0xF0004, "assets/icons/search.svg"),
     ("bell", 0xF0005, "assets/icons/bell.svg"),
     ("sidebar", 0xF0006, "assets/icons/sidebar-collapse.svg"),
+    ("sparkle", 0xF0007, "assets/icons/sparkle.svg"),
+    ("diamond", 0xF0008, "assets/icons/diamond.svg"),
 ]
 
 

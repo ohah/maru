@@ -136,7 +136,7 @@ const sidebar_slot_height_ratio_milli: u32 = 4600;
 const sidebar_header_height_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
-const sidebar_toggle_codepoint: u21 = 0x25E7;
+const sidebar_toggle_codepoint: u21 = 0xF0006; // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
 // 검색 줄 레이아웃 — 렌더(buildSidebarHeaderDrawList)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
 // 끝(col 0)에 붙이지 않고 좌측 패딩 1칸을 둔다(사용자 피드백: 너무 붙음). 입력/placeholder/caret은 🔍(2칸)+공백(1) 뒤.
 const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
@@ -10764,7 +10764,7 @@ pub const AppSession = struct {
                 // 경로를 이미 타므로, slot만 1.7×로 키우면 1.7× quad에 1:1로 들어가 선명해진다. '+'(U+002B)는
                 // 터미널 콘텐츠에도 흔해 center_symbol에 넣으면 전역 '+'가 슬롯을 꽉 채워 굵어지는 회귀라,
                 // 헤더 전용 cover-fit 신호가 필요한 별도 작업으로 둔다.
-                if (g.codepoint == 0x25E7 or g.codepoint == 0x2699) {
+                if (g.codepoint == 0xF0002 or g.codepoint == 0xF0003 or g.codepoint == 0xF0005 or g.codepoint == 0xF0006) {
                     g.cache_key.raster_width_px = rw;
                     g.cache_key.raster_height_px = rh;
                 }
@@ -10986,7 +10986,7 @@ pub const AppSession = struct {
     /// "9+" 2칸(`bell_col-2`·`bell_col-1`). 종 색은 fg(sidebar_foreground), 배지는 coral. 호출처가 폭을 보장해
     /// (펼침 cols≥13 → bell_col=cols-11≥2, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
     fn appendBellAndBadge(self: *AppSession, cells: *std.ArrayList(renderer.DrawCell), bell_col: u16, fg: terminal.Color, round_badge: bool) !void {
-        try cells.append(self.allocator, .{ .row = 0, .col = bell_col, .codepoint = 0x1F514, .width = 2, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = bell_col, .codepoint = 0xF0005, .width = 2, .style = .{ .foreground = fg } });
         if (self.notification_unread == 0) return;
         if (round_badge) {
             // 펼침 헤더: 종 **우상단** 빨강 원형 배지(iOS/macOS식). 빨강 원은 GPU quad(appendNotificationBadge, layer 4 —
@@ -11089,12 +11089,12 @@ pub const AppSession = struct {
         const sb_icon = chrome.components.sidebar;
         try self.appendBellAndBadge(&cells, cols - 12, fg, true); // 펼침: 종(cols-12) 우상단 원형 배지(흰 숫자 cols-10 + 빨강 원 quad)
         try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.toggle_sidebar, cols)), .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = 0x2699, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = '+', .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = 0xF0002, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = 0xF0003, .style = .{ .foreground = fg } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
-        try cells.append(self.allocator, .{ .row = search_row, .col = sidebar_search_icon_col, .codepoint = 0x1F50D, .width = 2, .style = .{ .foreground = muted } });
+        try cells.append(self.allocator, .{ .row = search_row, .col = sidebar_search_icon_col, .codepoint = 0xF0004, .width = 2, .style = .{ .foreground = muted } });
         const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
         const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
         var col: u16 = sidebar_search_text_col;

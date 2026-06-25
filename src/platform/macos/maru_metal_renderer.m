@@ -309,7 +309,7 @@ static void maru_fill_cell_quad(
     float cell_h,
     float drawable_w,
     float drawable_h,
-    float glyph_scale // 글리프 확대 배율(1.0=무확대). 사이드바 에이전트 심볼만 >1로 키운다.
+    float glyph_scale // 글리프 확대 배율(1.0=무확대). 헤더 줄0 아이콘(1.7×)·사이드바 에이전트 심볼(1.1×)이 >1.
 ) {
     const float span = (float)(cell.width == 0 ? 1 : cell.width);
     float px_left = origin_x + (float)cell.col * cw;
@@ -368,7 +368,8 @@ static void maru_fill_cell_quad(
         px_left = fmaxf(px_left, 0.0f);
         px_right = fmaxf(px_right, px_left);
     }
-    // 글리프 확대(사이드바 에이전트 심볼): 셀 사각형을 중앙 기준으로 키워 같은 atlas slot을 stretch한다(약간
+    // 글리프 확대: 셀 quad를 중앙 기준으로 키운다. 헤더 줄0 아이콘(1.7×)은 slot도 목표 px(raster_*_px)라 큰
+    // 텍스처를 큰 quad에 1:1로 그려 선명; 사이드바 에이전트 심볼(1.1×)은 slot이 셀 크기라 stretch한다(약간
     // 부드러우나 보조 심볼이라 무방). UV는 그대로라 글리프만 커진다. glyph_scale=1.0이면 무동작(일반 셀·커서).
     if (glyph_scale != 1.0f) {
         const float cx = (px_left + px_right) * 0.5f;
@@ -745,44 +746,38 @@ bool maru_metal_renderer_draw(
             // 사이드바 헤더 아이콘 확대/정렬. 헤더 frame은 origin(0,0)에 박힌다(setCellsPaneOrigin 0,0)라 origin_x==0 &&
             // origin_y==0이 헤더 cell이다. 터미널/pane은 상단 타이틀바 띠로 origin_y≥띠>0(메인 창)이라 안 걸리고, 펼침이면
             // 터미널 origin_x>0이라 더 확실하다. 그래서 펼침·접힘(터미널 origin_x=0이어도 origin_y>0) 모두 헤더만 잡는다.
-            //   ◧(사이드바 접기)·⚙(view options)·+(새 워크스페이스): 1.7× 확대(에이전트 심볼과 같은 slot-stretch) +
-            //   줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 약간 아래로 내린다(py_nudge=ch×0.30). 🔍(검색)은
-            //   검색 텍스트와 같은 크기라 확대 안 함. row 0으로 한정해 검색 줄(row≥1)에 친 '+'를 오확대하지 않는다.
-            // (quick terminal은 띠 0이라 터미널이 origin_y=0일 수 있으나 헤더 frame이 없어 ◧/⚙는 거의 없고 '+' 좌상단만
-            //  드물게 확대 — 무시 가능. NB: 화질은 slot-stretch라 약간 부드럽다 — per-cell 큰-크기 래스터화는 후속.)
+            //   헤더 아이콘(◧·⚙·+·🔔·🔍)은 모두 PUA SVG 합성 아이콘(renderer/icon_glyph.zig, Plane 15 PUA 0xF0000~).
+            //   줄0 아이콘(◧⚙+🔔)은 셀×1.7 목표 px로 atlas에 직접 래스터(app_session collectShaped가 raster_*_px 주입)돼
+            //   1.7× quad에 1:1로 들어가 선명하다 — 셀 크기로 굽고 GPU에서 확대하던 옛 slot-stretch(anti-alias 번짐)는 폐기.
+            //   줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 py_nudge=ch×0.30만큼 내린다. 🔍(검색)은 검색
+            //   텍스트와 같은 크기라 확대 안 함. row 0으로 한정해 검색 줄(row≥1)의 아이콘을 오확대하지 않는다.
             const bool is_header = (tc.origin_x == 0u && tc.origin_y == 0u);
-            const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0x2699u || tc.codepoint == (uint32_t)'+' || tc.codepoint == 0x25E7u);
-            // 알림 종(🔔 U+1F514)은 이모지(width=2, 컬러 fallback)라 단색 아이콘처럼 1.7×로 키우면 과대해진다 —
-            // 확대는 안 하고(hscale 1.0) py_nudge만 코너 아이콘과 '같은' 값으로 적용해 세로 정렬한다. 예전엔 종에만
-            // 0.40ch(단색 0.30보다 0.10 더 아래)를 손으로 맞췄는데, 이는 atlas가 종을 design bbox 중심으로 정렬해
-            // 보이는 artwork가 위로 떴기 때문이었다(폰트/DPI마다 다시 틀어지는 근사). 이제 atlas 래스터가 종의
-            // '보이는 ink'를 슬롯 세로 중앙에 앉히므로(coretext_smoke.m maru_center_ink_vertically), 종과 단색
-            // 아이콘은 같은 nudge면 자동으로 정렬된다 — 종 전용 보정 상수를 제거했다.
-            const bool is_bell_icon = is_header && tc.row == 0u && tc.codepoint == 0x1F514u;
+            const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0xF0002u || tc.codepoint == 0xF0003u || tc.codepoint == 0xF0006u); // gear·plus·sidebar(PUA icon_glyph)
+            // 알림 종(🔔)도 PUA 단색 합성 아이콘(0xF0005)이라 코너 아이콘(◧⚙+)과 같은 1.7×로 통일한다. 예전엔 컬러
+            // 이모지(width=2, fallback)라 1.7×면 과대해 1.0×로 두고 maru_center_ink_vertically로 보이는 ink를 슬롯 중앙에
+            // 맞췄으나(폰트/DPI마다 틀어지는 근사), 단색 합성은 fillCoverage가 슬롯 중앙에 직접 그려 그 보정이 불필요하다.
+            const bool is_bell_icon = is_header && tc.row == 0u && tc.codepoint == 0xF0005u; // bell(PUA icon_glyph) — 단색 합성이라 코너 아이콘과 같은 1.7×로 통일
             // 접힘(terminal_origin_x_px==0, 사이드바 폭 0)이면 헤더 줄0 글리프(◧ 펼치기 토글 + 알림 종 🔔 + 배지)가
             // 신호등 옆에 단독으로 떠 신호등과 수직 정렬돼야 한다 — 셋을 모두 타이틀바 띠 [0, titlebar_strip_px] 안에 세로
             // 중앙 배치한다(띠는 max(cell_h, 30pt)라 0.3ch nudge로는 위로 쏠렸다). 예전엔 ◧만 정렬했으나 접힘에도 알림 종을
             // 유지하면서 종/배지도 같은 정렬이 필요해 헤더 줄0 전체로 일반화(사용자 피드백). 펼침 헤더(◧/⚙/+/종)는
             // origin_x>0이라 신호등과 안 겹쳐 아래 py_nudge 경로(무영향).
             const bool is_collapsed_header = is_header && tc.row == 0u && terminal_origin_x_px == 0u;
-            const float hscale = is_corner_icon ? 1.7f : 1.0f;
+            const float hscale = (is_corner_icon || is_bell_icon) ? 1.7f : 1.0f;
             float py_top;
             if (is_collapsed_header && titlebar_strip_px > 0u) {
                 const float strip = (float)titlebar_strip_px;
                 py_top = (strip > ch) ? (strip - ch) * 0.5f : 0.0f; // 띠 안 세로 중앙(신호등 정렬)
             } else {
-                // 헤더 아이콘(코너 ◧/⚙/+ 과 종 🔔)은 줄0이 창 top에 붙어 위로 쏠리므로 같은 0.30ch만큼 아래로
-                // 내려 신호등/타이틀바 수직 중앙에 맞춘다. 종도 같은 값을 쓴다 — atlas가 보이는 ink를 슬롯 중앙에
-                // 앉히므로(maru_center_ink_vertically) 종 전용 보정이 필요 없다(예전 0.40ch 손튜닝 제거).
+                // 헤더 줄0 아이콘(◧⚙+🔔)은 창 top에 붙어 위로 쏠리므로 같은 0.30ch만큼 아래로 내려 신호등/타이틀바
+                // 수직 중앙에 맞춘다. PUA 합성이라 모두 슬롯 중앙에 그려져 글리프별 보정 없이 같은 nudge로 정렬된다.
                 const float py_nudge = (is_corner_icon || is_bell_icon) ? ch * 0.30f : 0.0f;
                 py_top = (float)tc.origin_y + (float)tc.row * ch + py_nudge;
             }
-            // 종(🔔)은 EAW 2칸 글리프라 정수 col(좌단)+width 2의 슬롯 중심이 셀 경계(정수 col)에 떨어진다 — 1칸 아이콘
-            // (◧/⚙/+) 중심 (col+0.5)*cw와 반칸 어긋난다(좌우 패딩·hover 중앙·말풍선 caret 동심이 안 맞음, 사용자 피드백).
-            // 그래서 종 글리프만 0.5칸 왼쪽으로 미는 가로 nudge를 줘 중심을 (좌단 col + 0.5)*cw에 맞춘다(글리프 codepoint
-            // 기준이라 종을 어느 col에 둬도 따라온다 — col 하드코딩 아님). 2칸 글리프 중심은 정수 col로는 반칸에 못 와 렌더
-            // 단계 가로 nudge가 필요(py_nudge와 동형). 현재 펼침 종은 cols-12(점유 cols-12·cols-11) → 중심 (cols-11.5)*cw.
-            const float px_nudge = is_bell_icon ? cw * -0.5f : 0.0f;
+            // PUA 합성 아이콘은 fillCoverage가 슬롯(EAW width 폭) 중앙에 그리므로, 이모지 시절 종(width 2)의 슬롯 중심이
+            // 셀 경계에 떨어져 1칸 아이콘과 반칸 어긋나 px_nudge(-0.5칸)로 보정하던 것이 불필요하다 — 합성 아이콘 중심이
+            // 곧 슬롯 중심이라 어느 width·col이든 정합한다(종/검색이 width 2여도 보정 0).
+            const float px_nudge = 0.0f; // PUA 합성 아이콘(◧⚙+🔔🔍)은 슬롯 중앙에 그려져 이모지 시절 2칸 중심 보정이 불필요
             maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale);
         }
         quad_index += cell_count;

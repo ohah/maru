@@ -35,18 +35,19 @@ pub const AgentState = enum {
     idle,
 };
 
-/// 상태 + (idle일 때) 마지막 답변 첫 줄 미리보기.
+/// 상태 + (idle일 때) 마지막 답변 미리보기(여러 줄 평탄화 — copyPreviewFlattened).
 pub const Status = struct {
     state: AgentState,
-    /// idle일 때 마지막 답변 첫 줄을 호출자 `answer_buf`에 UTF-8 경계로 말줄임 복사한 슬라이스. running/unknown
-    /// 이거나 답변 텍스트가 없으면 길이 0. `answer_buf`를 가리키므로 buf 수명만큼 유효하다.
+    /// idle일 때 마지막 답변을 **여러 줄→한 줄로 평탄화**(개행·탭·CR·연속 공백 → 공백 1칸)해 호출자 `answer_buf`에
+    /// UTF-8 경계로 복사한 슬라이스. running/unknown이거나 답변 텍스트가 없으면 길이 0. `answer_buf`를 가리키므로 buf
+    /// 수명만큼 유효하다. 알림 본문·사이드바 상태줄이 이 미리보기를 공유한다(copyPreviewFlattened 단일 출처).
     answer: []const u8,
 };
 
 /// claude 세션 JSONL의 tail 바이트에서 상태·마지막 답변을 계산한다(순수). `tail`은 파일 끝 N KB를 seek해 읽은
 /// 바이트라 보통 첫 줄이 잘려 있다 — JSON 파싱에 실패한 줄은 건너뛰므로(잘린 선두 줄·불량 줄 포함) "어디서부터
 /// 완전한 줄인가"를 알려주는 별도 플래그가 필요 없다. `scratch`는 줄 파싱용 임시 할당(각 줄 파싱 직후 해제).
-/// `answer_buf`엔 idle일 때 마지막 답변 첫 줄을 복사한다.
+/// `answer_buf`엔 idle일 때 마지막 답변의 평탄화 미리보기(copyPreviewFlattened)를 복사한다.
 ///
 /// 판정(줄을 순서대로 fold, 마지막 *대화* 엔트리의 mark가 최종):
 ///   - `type=="assistant"`: `message.stop_reason`가 턴-종료(end_turn/stop_sequence/max_tokens)면 **idle** +
@@ -116,8 +117,8 @@ fn isMetaTrue(v: ?std.json.Value) bool {
     };
 }
 
-/// assistant `content` 배열에서 첫 `text` 블록의 첫 줄을 `dst`에 UTF-8 경계로 말줄임 복사하고 쓴 바이트 수를
-/// 반환한다. content가 배열이 아니거나 text 블록이 없으면 0(thinking/tool_use만 있는 턴 등).
+/// assistant `content` 배열에서 첫 `text` 블록을 `dst`에 평탄화 미리보기로(여러 줄→한 줄, copyPreviewFlattened)
+/// 복사하고 쓴 바이트 수를 반환한다. content가 배열이 아니거나 text 블록이 없으면 0(thinking/tool_use만 있는 턴 등).
 fn copyAnswerPreview(dst: []u8, content: ?std.json.Value) usize {
     const arr = switch (content orelse return 0) {
         .array => |a| a,
@@ -151,7 +152,7 @@ fn copyPreviewFlattened(dst: []u8, src: []const u8) usize {
             i = end;
             continue;
         }
-        if (pending_space) { // 비공백 앞에서만 공백 1칸 flush → 말미 공백은 안 써진다
+        if (pending_space) { // 비공백 앞에서만 공백 1칸 flush
             if (n + 1 > dst.len) break;
             dst[n] = ' ';
             n += 1;
@@ -163,6 +164,9 @@ fn copyPreviewFlattened(dst: []u8, src: []const u8) usize {
         n += cplen;
         i = end;
     }
+    // 말미 공백 제거: 위에서 pending_space를 flush한 직후 다음 코드포인트가 dst를 넘쳐 break하면 끝에 공백 1칸이
+    // 남는다(버퍼 cap이 단어 경계에 딱 떨어질 때). 알림 본문 끝의 군더더기 공백을 없앤다.
+    while (n > 0 and dst[n - 1] == ' ') n -= 1;
     return n;
 }
 
@@ -294,6 +298,30 @@ fn asString(v: std.json.Value) ?[]const u8 {
 // 고정 JSONL fixture로 상태 판정을 못박는다. 파싱이 순수 함수라 OS·라이브 에이전트 무관. fixture의 \n은
 // `\\` 멀티라인 리터럴에서 escape 처리가 안 되므로 두 글자(backslash-n)로 남아 JSON escape가 되고, 파서가
 // 실제 개행으로 푼다(첫 줄 말줄임 테스트에 사용). 각 테스트는 무엇을 증명하는지 적는다.
+
+test "copyPreviewFlattened: 여러 줄 평탄화·공백 collapse·선두/말미 trim·버퍼 cap 말미공백·UTF-8 경계" {
+    var buf: [64]u8 = undefined;
+    // 선두 공백 무시 + 내부 개행/탭/연속공백 → 공백 1칸 + 말미 공백/개행 제거.
+    {
+        const n = copyPreviewFlattened(&buf, "  a\n\nb\t c   \n");
+        try std.testing.expectEqualStrings("a b c", buf[0..n]);
+    }
+    // 공백뿐/빈 입력이면 0.
+    try std.testing.expectEqual(@as(usize, 0), copyPreviewFlattened(&buf, "   \n\t "));
+    try std.testing.expectEqual(@as(usize, 0), copyPreviewFlattened(&buf, ""));
+    // 버퍼 cap이 flush된 단어 경계 공백에 딱 떨어져도 말미 공백이 안 남는다(회귀 가드 — trailing trim).
+    {
+        var small: [3]u8 = undefined; // "ab" + 공백 flush(n=3) 후 'c'가 안 들어감 → "ab "가 아니라 "ab"
+        const n = copyPreviewFlattened(&small, "ab cd");
+        try std.testing.expectEqualStrings("ab", small[0..n]);
+    }
+    // UTF-8 경계: 한글이 cap에 걸리면 깨진 바이트 없이 직전 코드포인트까지만.
+    {
+        var k: [5]u8 = undefined; // "가"(3B) + " " + "나"(3B) 중 "가 "(4B)까지만, "나"(3B)는 5<7이라 안 들어감
+        const n = copyPreviewFlattened(&k, "가 나");
+        try std.testing.expectEqualStrings("가", k[0..n]); // 말미 공백도 trim
+    }
+}
 
 test "parseClaudeTail: 마지막 대화가 user면 running (느린 API 갭 — 응답 전)" {
     // user 제출 즉시 기록되고 assistant는 응답 시 기록된다(실측 44초 갭). 그 사이 마지막 대화 = user → running.

@@ -29,6 +29,7 @@
 - [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)
 - [SSH 통합 전략](docs/ssh-integration.md)
 - [키 입력과 단축키 경계](docs/key-input-and-shortcuts.md)
+- [단축키 힌트(모디파이어 홀드 오버레이)](docs/keybind-hints.md)
 - [탭·split·레이아웃 전략](docs/tabs-splits-layout.md)
 - [Chrome 전략(디자인 시스템 구조)](docs/chrome-strategy.md)
 - [macOS 앱 호스트 경계](docs/macos-app-host-boundary.md)

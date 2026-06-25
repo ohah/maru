@@ -664,8 +664,9 @@ const CloseScope = union(enum) {
 /// 정의·심볼(claude=✶, codex=◆) 단일 출처: src/session/session_model.zig.
 const AgentKind = maru.session.session_model.AgentKind;
 
-/// 에이전트 완료 알림 한 건(owned). title=워크스페이스 이름, body=마지막 답변 일부. agent_notifications 큐에
-/// 쌓였다가 pendingNotification()이 드레인하며 title/body를 해제한다(surface_id는 POD라 해제 불요).
+/// 에이전트 완료 알림 한 건(owned). title=`{✶|◆} {Claude|Codex} · {끝난 Term 라벨}`(종류 없으면 워크스페이스
+/// 폴백), body=마지막 답변 평탄화 미리보기(또는 "완료") — 형식 단일 출처는 enqueueAgentCompletion. agent_notifications
+/// 큐에 쌓였다가 pendingNotification()이 드레인하며 title/body를 해제한다(surface_id는 POD라 해제 불요).
 /// surface_id=알림을 낸 Term의 surface.id — 알림 클릭이 그 터미널로 점프하도록 식별자에 싣는다(activateSurfaceById).
 const AgentNotification = struct { title: []u8, body: []u8, surface_id: u64 };
 
@@ -9003,22 +9004,25 @@ pub const AppSession = struct {
         }
     }
 
-    /// 완료 알림 한 건을 큐에 넣는다(title=워크스페이스 이름, body=마지막 답변 일부 또는 "완료"). owned dup 실패는
-    /// 조용히 버린다(best-effort — 알림은 부가 기능). 큐가 상한이면 가장 오래된 걸 버려 폭주를 막는다.
+    /// 완료 알림 한 건을 큐에 넣는다 — title=`{✶|◆} {Claude|Codex} · {끝난 Term 라벨}`(아래), body=마지막 답변
+    /// 평탄화 미리보기 또는 "완료". owned dup 실패는 조용히 버린다(best-effort — 알림은 부가 기능). 큐가 상한이면
+    /// 가장 오래된 걸 버려 폭주를 막는다.
     fn enqueueAgentCompletion(self: *AppSession, tab: *Tab, term: *Term) void {
         // 제목 = **에이전트 심볼 + 종류(Claude/Codex)** + **끝난 그 Term(세션) 라벨** — 어느 대화가 끝났는지 식별
         // (사용자 요청). 심볼은 사이드바 에이전트 아이콘과 같은 글리프(✶ claude=Anthropic 선버스트 근사, ◆ codex)로
         // 통일해 알림에서도 종류가 한눈에 구분된다(macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목 prefix로 구분).
+        // 글리프는 `agentSymbolCodepoint` 단일 출처에서 파생(사이드바 아이콘과 한 곳에서 바뀌게 — 하드코딩 중복 방지).
         // 옛 제목은 workspaceLabel(tab)=tab.activeTerm 라벨이라 background split/가로탭 Term 완료 시 활성 Term 이름이
         // 떠 어긋났다 — 끝난 term의 termLabel을 직접 써 그 세션을 가리킨다. 종류 없음(이론상 미발생)이면 워크스페이스 폴백.
-        const agent_badge: []const u8 = switch (term.agent_kind) {
-            .claude => "\u{2736} Claude", // ✶
-            .codex => "\u{25C6} Codex", // ◆
+        const agent_name: []const u8 = switch (term.agent_kind) {
+            .claude => "Claude",
+            .codex => "Codex",
             .none => "",
         };
         const session_label = termLabel(term);
-        const title = if (agent_badge.len > 0)
-            std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ agent_badge, session_label }) catch return
+        const title = if (agent_name.len > 0)
+            // {u}=심볼 codepoint를 UTF-8로(agentSymbolCodepoint 단일 출처) + 종류명 + 세션 라벨.
+            std.fmt.allocPrint(self.allocator, "{u} {s} · {s}", .{ agentSymbolCodepoint(term.agent_kind), agent_name, session_label }) catch return
         else
             self.allocator.dupe(u8, workspaceLabel(tab)) catch return;
         const body_src: []const u8 = if (term.agent_answer_len > 0) term.agent_answer_buf[0..term.agent_answer_len] else "완료";
@@ -10642,8 +10646,9 @@ pub const AppSession = struct {
     }
 
     /// 사이드바 카드 4번째 줄(상태줄) 텍스트를 owned 슬라이스로 만든다. 에이전트 포그라운드가 아니면(none) "" —
-    /// 그 줄은 생략된다. running이면 "● 진행중", idle이면 "✓ {답변 첫 줄}"(답변이 없으면 "✓ 완료"). 답변은 Term의
-    /// inline 버퍼(이미 UTF-8 경계로 말줄임됨)에서 가져오고, 사이드바가 카드 폭으로 다시 말줄임한다.
+    /// 그 줄은 생략된다. running이면 "● 진행중", idle이면 "✓ {답변 미리보기}"(답변이 없으면 "✓ 완료"). 답변은 Term의
+    /// inline 버퍼(여러 줄을 한 줄로 평탄화한 미리보기 — copyPreviewFlattened, 알림 본문과 공유)에서 가져오고,
+    /// 사이드바가 카드 폭으로 다시 말줄임한다(개행이 공백 1칸이라 한 줄로 보인다).
     fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
         if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
         return switch (term.agent_state) {
@@ -12200,6 +12205,7 @@ test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 �
 
     const tab = session.tabs.items[0];
     const term = tab.activePane().activeTerm();
+    term.agent_kind = .claude; // 배지 제목 경로(✶ Claude · …)를 실제로 검증
     // 완료 답변을 채우고 비활성 탭 완료를 모사해 enqueue(실제 경로 함수 사용).
     const ans = "PR 머지 완료";
     @memcpy(term.agent_answer_buf[0..ans.len], ans);
@@ -12210,7 +12216,9 @@ test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 �
     // pendingNotification이 OSC 9/777보다 먼저 에이전트 큐를 드레인하고, body=답변. 큐가 비워진다.
     const n = session.pendingNotification() orelse return error.TestExpectedNotification;
     try std.testing.expectEqualStrings(ans, n.body);
-    try std.testing.expect(n.title.len > 0); // title=워크스페이스 라벨(비어있지 않음)
+    // title = "{✶ agentSymbolCodepoint} Claude · {끝난 Term 세션 라벨}" — 배지 글리프·종류·세션 식별.
+    try std.testing.expect(std.mem.startsWith(u8, n.title, "\u{2736} Claude")); // ✶ + 종류
+    try std.testing.expect(std.mem.indexOf(u8, n.title, "\u{B7}") != null); // " · " 구분자 + 세션 라벨이 붙음
     try std.testing.expectEqual(@as(usize, 0), session.agent_notifications.items.len);
     // 큐가 비면 OSC 경로로 떨어지고, controlled_smoke엔 OSC 알림이 없어 null.
     try std.testing.expect(session.pendingNotification() == null);

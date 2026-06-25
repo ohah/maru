@@ -198,17 +198,24 @@ fn schemeUrlSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, e
     return .{ .start = start, .end = end };
 }
 
-/// URL 끝의 마무리 문장 부호를 다듬는다(균형 괄호는 보존). 반환은 [start, end)의 end.
+/// URL 끝의 마무리 문장 부호를 다듬는다(균형 잡힌 닫는 ')'·']'는 보존). 반환은 [start, end)의 end.
+/// 대괄호 균형은 IPv6 권위부(`http://[::1]`)와 경로의 `[...]`(`/x/[foo]`)가 마지막 ']'를 잃지 않게 한다.
 fn trimUrlTail(word: []const u8, start: usize) usize {
     var open_parens: usize = 0;
+    var open_brackets: usize = 0;
     for (word[start..]) |ch| {
         if (ch == '(') open_parens += 1;
+        if (ch == '[') open_brackets += 1;
     }
     var end_idx = word.len;
     while (end_idx > start) : (end_idx -= 1) {
         const ch = word[end_idx - 1];
         if (ch == ')' and open_parens > 0) {
             open_parens -= 1; // 균형 잡힌 닫는 괄호는 URL의 일부 — 다듬지 않는다
+            break;
+        }
+        if (ch == ']' and open_brackets > 0) {
+            open_brackets -= 1; // 균형 잡힌 닫는 대괄호(IPv6 등)는 URL의 일부
             break;
         }
         if (ch == '.' or ch == ',' or ch == ')' or ch == ']' or ch == '>' or ch == ';' or ch == '\'' or ch == '"') continue;
@@ -258,13 +265,19 @@ fn looksLikeBareRelative(word: []const u8) bool {
 fn trimPathTail(word: []const u8) usize {
     var end = std.mem.indexOfScalar(u8, word, ',') orelse word.len;
     var open_parens: usize = 0;
+    var open_brackets: usize = 0;
     for (word[0..end]) |ch| {
         if (ch == '(') open_parens += 1;
+        if (ch == '[') open_brackets += 1;
     }
     while (end > 0) {
         const ch = word[end - 1];
         if (ch == ')' and open_parens > 0) {
             open_parens -= 1; // 균형 괄호 보존
+            break;
+        }
+        if (ch == ']' and open_brackets > 0) {
+            open_brackets -= 1; // 균형 대괄호 보존(/x/[foo] 등)
             break;
         }
         if (ch == '.' or ch == ')' or ch == ']' or ch == '>' or ch == ';' or ch == '\'' or ch == '"') {

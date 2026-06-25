@@ -233,7 +233,7 @@ Wasm plugin은 Maru의 장기 차별화지만 v1 범위가 아니다. v1에서 �
 - plugin은 `TerminalCore` private storage, PTY handle, renderer resource를 직접 받지 않는다.
 - plugin failure는 surface/window 전체를 죽이지 않는다.
 - clipboard, filesystem, network, process 실행, workspace 읽기/쓰기 권한은 capability로 분리한다.
-- **터미널 텍스트의 파일 경로/URL 링크 열기**(수식키+클릭)는 filesystem capability에 해당한다. 명시 제스처에서만, 경로는 **존재를 확인**한 뒤, `NSWorkspace.open`(기본 앱/브라우저로 열기 — **임의 command 실행이 아님**)으로 여는 보수적 경로다. 셸 명령 자동 실행과 무관하다([링크 감지](link-detection.md)).
+- **터미널 텍스트의 파일 경로/URL 링크 열기**(수식키+클릭)는 filesystem capability에 해당한다. 명시 제스처에서만 동작하며, **휴리스틱 파일 경로**는 존재를 확인한 경로만 `NSWorkspace.open`(기본 앱으로 열기)으로 연다(셸 명령 자동 실행과 무관). 다만 `file://` URI·OSC 8 명시 링크·`.app`은 `NSWorkspace`의 표준 동작상 앱이 실행될 수 있다(Finder/Ghostty/iTerm2와 동일 — 사용자 명시 클릭 한정, 권한 상승 없음). 자세히는 [링크 감지](link-detection.md).
 
 Plugin ABI와 permission model을 확정해야 하는 순간이 오면, 구현 전에 별도 설계 문서를 만들고 사용자와 다시 논의한다.
 

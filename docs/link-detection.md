@@ -63,8 +63,10 @@
 ```
 
 - **cwd가 비면**(OSC 7 미수신 셸·원격) 상대·bare 경로는 resolve 불가 → 안 연다. 절대 경로·`~/`는 cwd 없이 가능.
-- **stat은 락 밖**: `urlAt`은 `copyText`와 달리 코어 락을 잡지 않으므로(클릭 1회성), blocking 파일 I/O를
-  락 아래 두는 문제가 없다([io-render-threading](io-render-threading.md) §9.1).
+- **락**: `urlAt`은 `lockCore` 아래에서 분류·resolve·존재검증을 한다 — 분류가 스크롤백을, resolve가 cwd를
+  읽는데 둘 다 reader 스레드가 OSC 7·출력으로 mutate하므로(cwd free+realloc, 스크롤백 evict) 락 없이 읽으면
+  use-after-free·torn read가 난다(`focusedTermCwd`·`copyText`가 같은 위험을 락으로 고친 선례). 존재검증
+  `access(F_OK)`는 빠른 syscall이라 락 아래 허용한다([io-render-threading](io-render-threading.md) §9.1).
 
 ## hover(밑줄)와 click(열림)의 의도적 불일치
 
@@ -90,9 +92,15 @@
 
 ## 보안
 
-- 파일 열기는 filesystem capability다([터미널 호환성/보안 정책](terminal-compatibility-policy.md)). 명시 제스처
-  (수식키+클릭)에서만, 존재하는 경로만, `NSWorkspace.open`(기본 앱으로 열기 — **임의 command 실행이 아님**)으로
-  여는 보수적 경로다. 셸 명령 자동 실행과 무관하다.
+- **휴리스틱 파일 경로**(절대/홈/상대/bare)는 명시 제스처(수식키+클릭)에서만, cwd/`$HOME` resolve 후 **존재를
+  확인**한 경로만 `NSWorkspace.open`(기본 앱으로 열기)으로 연다. `std.fs.path.resolve`는 lexical 정규화라 `../`로
+  cwd 밖을 가리킬 수 있으나, 결과는 "기본 앱으로 열기"지 **명령 실행이 아니다**(사용자가 직접 `open <path>` 하는
+  것과 같은 권한, 권한 상승 없음). 절대 경로도 stat 게이트를 거치므로 Ghostty(절대 경로를 raw로 여는)보다 엄격하다.
+- **스킴 URL·OSC 8 명시 링크**(`file://` 포함)는 존재 검증 없이 `URL(string:)`로 그대로 연다 — 프로그램이 지정한
+  것이거나 명확한 스킴이라 신뢰한다. 따라서 `file:///path/X.app` 같은 URI는 `NSWorkspace`의 표준 동작상 **앱이
+  실행될 수 있다**(Finder·Ghostty·iTerm2와 동일 — maru가 더 위험하지 않다). 임의 위치의 `.app`이 디스크에 이미
+  있어야 하고 사용자가 명시 클릭해야 하므로 실질 추가 공격면은 낮다. 파일 열기 = filesystem capability
+  ([터미널 호환성/보안 정책](terminal-compatibility-policy.md)).
 
 ## 한계와 후속
 
@@ -100,6 +108,12 @@
 - **`:line:col` 에디터 점프 미지원**(1차는 파일만 연다). `${EDITOR} +line file`은 별도 기능으로 후속.
 - **`$VAR/` 경로 확장 미지원**(Ghostty는 함). `~/`만 확장. 후속 결정.
 - **hover stat 미적용**(위 불일치). 후속 옵션.
+- **추가 스킴 일부 미지원**: Ghostty의 `ipfs://`·`ipns://`·`gemini://`·`gopher://`와 colon-form `file:`·`ssh:`는
+  데스크톱 사용 빈도가 낮아 뺐다(현재 지원 8종은 §감지 종류 표). 스킴이 더 적은 건 보수적이라 동작상 안전.
+- **스킴 대소문자 구분**: `HTTP://`처럼 대문자 스킴은 감지 안 한다(소문자만). RFC 3986은 case-insensitive지만
+  셸·로그 출력이 사실상 소문자라 1차는 소문자만 본다. 후속 결정.
+- **`:line:col`은 2단까지**: `a/b.c:12:34:56`(3단 이상)은 resolve가 2단만 떼어 미존재로 떨어질 수 있다(안 열림 —
+  안전 방향 실패). editor 관례가 `file:line:col`(2단)이라 실용 영향은 낮다.
 
 ## 코드 위치
 

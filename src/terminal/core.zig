@@ -910,9 +910,10 @@ pub const TerminalCore = struct {
 
     /// file_path 링크 raw 텍스트(`:line:col` 포함 가능)를 절대 경로로 resolve하고, 존재하면 그 경로(호출자 소유)를,
     /// 아니면 null을 돌려준다. `:line[:col]` 분리 → `~/`를 $HOME 확장 → 상대면 currentCwd()(OSC 7)와 join →
-    /// 정규화 → accessAbsolute 존재 검증. cwd가 비면 상대 경로는 resolve 불가(null). 단일 출처: docs/link-detection.md.
-    /// 파일 I/O는 코어 책임(순수 분류 레이어 selection.zig엔 stat을 두지 않는다). urlAt은 코어 락을 안 잡으므로
-    /// (copyText와 달리) 이 blocking I/O가 락 아래로 들어가지 않는다(docs/io-render-threading.md §9.1).
+    /// 정규화 → access(F_OK) 존재 검증. cwd가 비면 상대 경로는 resolve 불가(null). 단일 출처: docs/link-detection.md.
+    /// 파일 I/O는 코어 책임(순수 분류 레이어 selection.zig엔 stat을 두지 않는다). cwd(currentCwd)와 스크롤백을 읽으므로
+    /// 호출자(app_session.urlAt)가 lockCore 아래에서 부른다 — reader 스레드가 OSC 7로 cwd를 free+realloc하는 race를
+    /// 막는다(focusedTermCwd 선례). access(F_OK)는 빠른 syscall이라 락 아래 허용(docs/io-render-threading.md §9.1).
     fn resolveClickedPath(self: *const TerminalCore, allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
         // 끝의 ":<digits>(:<digits>)?"(에디터 줄/열 점프 관례)를 떼고 순수 경로만 — 1차는 파일만 연다(줄 점프는 후속).
         var path_end = raw.len;
@@ -4987,6 +4988,10 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
         .{ .in = "lib/x/terminal.zig:42:10", .want = "lib/x/terminal.zig:42:10", .kind = .file_path },
         .{ .in = "src/foo.c,baz.txt", .want = "src/foo.c", .kind = .file_path },
         .{ .in = "./Downloads:", .want = "./Downloads", .kind = .file_path },
+        // IPv6 권위부·대괄호 — 닫는 ']'는 균형이면 보존(trimUrlTail 대괄호 균형, 적대적 검증 발견).
+        .{ .in = "http://[::1]", .want = "http://[::1]", .kind = .url },
+        .{ .in = "https://[2001:db8::1]:8080/path", .want = "https://[2001:db8::1]:8080/path", .kind = .url },
+        .{ .in = "https://example.com/[foo]", .want = "https://example.com/[foo]", .kind = .url },
     };
     for (cases) |c| {
         const span = selection.linkSpanInWord(c.in, full) orelse {
@@ -5015,6 +5020,12 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
     try std.testing.expect(selection.linkSpanInWord("https://x.y", web) != null);
     // osc8-only(none): 자동 감지는 전부 꺼진다(OSC 8 명시 링크만 — 그건 호출자 cellLinkAt가 따로 처리).
     try std.testing.expect(selection.linkSpanInWord("https://x.y", selection.link_scopes_none) == null);
+
+    // scope 비트 독립성(적대적 검증 발견): web 비트만 빠지면 나머지가 다 켜져도 http(s) 미감지,
+    // 경로 비트가 전무하면 경로 미감지, extra_schemes 없으면 추가 스킴 미감지.
+    try std.testing.expect(selection.linkSpanInWord("https://x.y", .{ .extra_schemes = true, .absolute_path = true, .home_path = true, .dot_relative = true, .bare_relative = true }) == null);
+    try std.testing.expect(selection.linkSpanInWord("/abs/a.py", selection.link_scopes_web) == null);
+    try std.testing.expect(selection.linkSpanInWord("ftp://x.y", selection.link_scopes_web) == null);
 }
 
 test "extractUrlAt resolves and existence-gates file paths (absolute + OSC 7 cwd-relative)" {

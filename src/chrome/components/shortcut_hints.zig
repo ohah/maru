@@ -101,18 +101,16 @@ pub fn view(
             },
             .binding => |b| {
                 var col: u32 = 0;
-                // 키캡들: 각 캡 = 배경 quad(tab_active_bg, 모양 토큰) + 중앙 글리프 text(surface_fg). 셀 정렬(정수 칸).
+                // 키캡들: 각 캡 = 셀 배경 fill(keycap_bg) + 중앙 글리프 text(surface_fg). **fill(셀 배경)이라 글리프가
+                // 그 위에 그려져 키 배경색이 보인다**(palette 선택행과 같은 합성). rich는 keycap_bg가 패널보다 밝아 또렷한
+                // 키 박스로, tui는 keycap_bg=패널색이라 평탄(글리프만 — 기존 룩 보존). 셀 정렬(정수 칸).
+                // 베이스/결정: 둥근 GPU quad는 글리프 셀의 불투명 배경에 가려지거나(layer 1) 글리프를 덮으므로(layer 3),
+                // 셀-그리드 오버레이의 per-key 키캡은 **평탄 색 셀**이 한계다(둥근 키캡은 셀 텍스트 모델 밖 — 후속).
                 for (b.caps, 0..) |cap, ci| {
                     if (ci > 0) col += cap_gap_cols;
                     const w = capCols(cap);
                     const cx = x0 + @as(i32, @intCast(col * cw));
-                    try out.append(arena, .{ .quad = .{
-                        .rect = .{ .x = cx, .y = y, .w = w * cw, .h = ch },
-                        .fill_role = .tab_active_bg,
-                        .corner_radii = .{ bg_r, bg_r, bg_r, bg_r },
-                        .border_widths = .{ bw, bw, bw, bw },
-                        .border_role = .divider,
-                    } });
+                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = cx, .y = y, .w = w * cw, .h = ch }, .role = .keycap_bg } });
                     const cap_runs = try arena.alloc(draw.Run, 1);
                     cap_runs[0] = .{ .text = cap };
                     try out.append(arena, .{ .text = .{ .origin = .{ .x = cx, .y = y }, .runs = cap_runs, .role = .surface_fg } });
@@ -182,18 +180,18 @@ test "shortcut_hints view: 헤더 + 키캡 바인딩 → 패널 quad + 헤더 te
     try std.testing.expectEqualStrings("Workspace", out.items[1].text.runs[0].text);
     try std.testing.expect(out.items[1].text.runs[0].bold);
 
-    // 첫 캡 = quad(tab_active_bg) + 글리프 "⌘".
-    try std.testing.expect(out.items[2] == .quad);
-    try std.testing.expect(out.items[2].quad.fill_role == .tab_active_bg);
+    // 첫 캡 = 셀 배경 fill(keycap_bg) + 글리프 "⌘"(글리프가 fill 위에 그려져 키 배경색이 보인다).
+    try std.testing.expect(out.items[2] == .fill);
+    try std.testing.expect(out.items[2].fill.role == .keycap_bg);
     try std.testing.expect(out.items[3] == .text);
     try std.testing.expectEqualStrings("⌘", out.items[3].text.runs[0].text);
-    // 둘째 캡 = quad + 글리프 "T", 첫 캡보다 오른쪽(캡 간격).
-    try std.testing.expect(out.items[4] == .quad);
+    // 둘째 캡 = fill + 글리프 "T", 첫 캡보다 오른쪽(캡 간격).
+    try std.testing.expect(out.items[4] == .fill);
     try std.testing.expectEqualStrings("T", out.items[5].text.runs[0].text);
-    try std.testing.expect(out.items[4].quad.rect.x > out.items[2].quad.rect.x);
+    try std.testing.expect(out.items[4].fill.rect.x > out.items[2].fill.rect.x);
     // 제목 = 캡 묶음 뒤.
     try std.testing.expectEqualStrings("New Terminal", out.items[6].text.runs[0].text);
-    try std.testing.expect(out.items[6].text.origin.x > out.items[4].quad.rect.x);
+    try std.testing.expect(out.items[6].text.origin.x > out.items[4].fill.rect.x);
 }
 
 test "shortcut_hints view: 행이 pane 높이를 넘으면 클램프 (짧은 pane)" {

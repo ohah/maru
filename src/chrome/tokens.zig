@@ -35,6 +35,7 @@ pub const ColorRole = enum {
     selection,
     cursor,
     accent_bar, // U1(C4b 이후): maru 고유 accent — palette가 maru 앰버로 고정(theme 무관). 사이드바 활성 좌측 막대 등이 소비(U2).
+    keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널(surface_bg)보다 밝게(rich)·또렷하게. tui는 surface_bg와 같게(평탄).
 };
 
 /// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
@@ -113,6 +114,7 @@ pub const Tokens = struct {
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);
         palette.set(.accent_bar, .{ .r = 0xDD, .g = 0xA1, .b = 0x5E }); // maru 앰버(마루=전통 나무 마루) — theme 무관 고정 브랜드 accent. rich가 상속.
+        palette.set(.keycap_bg, theme.sidebar_background); // KH-5: tui 키캡 배경 = 패널과 같게(평탄 — 키 박스 없이 글리프, 기존 tui 룩 보존). rich가 분리.
         return .{ .palette = palette };
     }
 
@@ -144,6 +146,9 @@ pub const Tokens = struct {
         tk.space.tab_width_cols = 16;
         // U-tab: 탭 바 세로 패딩 6px(텍스트 위아래) — 바 높이 = cell + 12, 제목 가운데. 탭에 세로 여유.
         tk.space.tab_bar_pad_y_px = 6;
+        // KH-5: rich 키캡 — 패널(surface_bg)보다 밝은 배경 셀(또렷한 키 박스). tui는 패널색과 같아 평탄(글리프만).
+        // 셀-그리드 오버레이라 키캡은 fill(셀 배경)이고 둥근 GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).
+        tk.palette.set(.keycap_bg, lightenRgb(theme.sidebar_background, 44));
         return tk;
     }
 

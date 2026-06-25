@@ -65,6 +65,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 - **회귀 그물**: 순수 이동이라 동반 이동한 기존 test가 그대로 그물. `zig build test`·`check-boundaries`(session行 그룹 OS 타입 0)·`macos-app-build`.
 - **헤드리스**: 순수 그룹(레이아웃 기하 `layout_math`(b1·b2 완료)·workspace 변환)을 session에서 OS 없이 단위 test로 단언(이식성 증거 — b1은 `gridFromBacking`·`pointInRect`·`paneDropZone`·`halfRect`, b2는 `pxToCell` test 동반).
 - **실앱**: 매 단계 `macos-app`로 탭/split/포커스/find/IME/sidebar 동작 보존.
+- **누적 검증(b 완료 후)**: E1·b1·b2를 묶어 누적 `/code-review max`(10 finder·후보 4·verifier 통과 **0**) — 순수 이동이라 정확성 버그 0 확인. facade 위임 동등성·`layout_math` 산술 비트 동일성·accessor pub화·alias·placeholder 승격·session(L2) 경계가 모두 통과([[core-zig-decomposition-initiative]]의 "순수 이동 0버그"와 동일).
 
 ## 6. 리스크 / 한계 (정직)
 

@@ -134,7 +134,8 @@ Node = leaf(Pane)
   **mouse tracking(vim/tmux 등 앱이 휠을 받는지) 판정도 커서 아래 surface 기준**이라, 포커스 panel이 트래킹 앱이어도 옆
   비트래킹 셸 panel 위 휠은 그 셸 스크롤백을 움직이고, 반대로 커서 아래 panel이 트래킹이면 그 panel로 휠 리포트(SGR
   64/65)를 보낸다 — 리포트 좌표(`pxToCellIn`)도 그 panel의 본문 rect 기준이라 pane↔좌표가 정합한다. 라우팅 단일 출처는
-  `scrollTargetAt`(점을 담는 leaf의 활성 Term surface + 본문 rect), 사이드바/밖이면 활성 surface로 폴백. alt 화면 +
+  `scrollTargetAt`(점을 담는 leaf의 활성 Term surface + 본문 rect)이되 **커서가 사이드바 위면 그 전에 사이드바 세로 스크롤
+  (③c)이 휠을 소비**하고, 사이드바도 터미널 leaf도 아닌 영역(밖)이면 활성 surface로 폴백한다. alt 화면 +
   alternate scroll(DECSET 1007)이면 스크롤백 대신 그 surface로 화살표 키를 보낸다(less/vim). 가로(트랙패드 2-finger)
   델타는 직교 축이라 커서 아래 pane **탭 바**를 가로 스크롤한다(`scrollTabBarAt`, 탭 넘칠 때만).
 - **Term(가로 탭) 키(PR-B, pane 내 가로 탭 모델)**: 한 pane은 여러 Term(터미널)을 가로 탭으로 든다. `Cmd+T`=활성 pane에
@@ -168,6 +169,20 @@ Node = leaf(Pane)
   순서로 잡아 탭 바 클릭을 안 가로챈다. 초기 비율은 0.5(균등).
 - **사이드바 폭 조절(③a)**: 사이드바 우측 경계를 드래그해 폭을 바꾼다(폭은 pt로 저장 → DPI 생존). 경계 밴드는
   터미널 쪽만이라 사이드바 슬롯/✕와 안 겹친다. **사이드바 "+" 버튼(③b)**: 탭 목록 아래 슬롯의 "+"로 새 워크스페이스.
+- **사이드바 세로 스크롤(③c)**: 워크스페이스 카드가 **헤더 아래 뷰포트(backing 높이 − 헤더)** 를 넘으면 휠/트랙패드로
+  **픽셀 단위 스무스 스크롤**한다. 스크롤량은 `sidebar_scroll_offset_px`(backing px) 단일 출처이고 `[0, sidebarMaxScroll]`로
+  clamp한다(`sidebarMaxScrollPx`=표시 카드 전체 높이−뷰포트; 순수 함수라 헤드리스 단위). 카드 추가/삭제·검색 필터·창
+  resize로 콘텐츠/뷰포트가 바뀌면 `clampSidebarScroll`이 `rebuildSidebar`에서 stale 오프셋을 자동 정정한다(`tab_scroll_cols`
+  재clamp 선례). **베이스/결정**: ① **휠 라우팅** — 커서가 사이드바 위면 휠을 사이드바 스크롤이 **통째로 소비**한다(터미널/
+  스크롤백으로 안 흘림). 이는 "휠은 커서 아래 surface 소유"(Ghostty/Warp) 원칙을 사이드바로 확장한 것으로, 카드가 안 넘쳐도
+  소비해 뒤 터미널이 굴러가는 위화감을 막는다(`scrollWheel`의 `inSidebar` 분기, 가로 탭바 스크롤보다 먼저). ② **헤더 고정·
+  클리핑** — 헤더(검색바·아이콘)는 스크롤과 무관하게 고정이고(헤더 glyph는 터미널 셀 패스라 사이드바 셀 시프트와 분리),
+  헤더 위로 밀려 올라간 카드는 **렌더러가 사이드바 셀 draw에 `[header_h, drawable_h]` scissor**를 걸어 자른다(offset>0일 때만;
+  `MetalFrame.sidebar_scroll_offset_px`). GPU quad 밴드·tint·accent 막대는 host lowering(`sidebarScrollClipQuad`)이 **같은
+  오프셋으로 빼고 헤더 경계에서 클립**한다(상단 라운드는 죽임) — 셀(.m)과 quad(Zig)가 같은 `sidebar_scroll_offset_px`를 써
+  단일 출처. ③ **스크롤바** — 우측에 pane 스크롤바와 **동형 pill thumb**(muted 색·`computeScrollbarAlpha` fade·layer 3 over,
+  단일 트랙 `sidebar_scrollbar_idle_ticks`)를 카드가 넘칠 때만 그린다. hit-test(`slotAt`/`dragTargetSlot`)도 같은 오프셋을
+  더해 "보이는 카드 = 클릭되는 카드"를 지킨다(헤더 영역 y는 스크롤 무관하게 헤더로 판정).
 - **split 재배치 드래그(④)**: Term 탭을 다른 pane **본문**의 상/하/좌/우 절반(`paneDropZone` — X자 4등분)에 드롭하면
   그 방향으로 새 split이 생긴다(`moveTermToNewSplit`: Term을 새 pane에 담아 `replaceLeaf(target → split{...})`, 소스가
   비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. 드래그

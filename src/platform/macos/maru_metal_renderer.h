@@ -107,7 +107,11 @@ bool maru_metal_renderer_draw(
     uint32_t titlebar_strip_px,
     /* 창 배경 투명도 × 1000(0~1000, 1000=불투명). 화면 clear color alpha에 이 값/1000을 곱한다 — default 배경
        (빈 영역/기본 배경 A0 셀)만 투명, 명시적 배경색 셀은 불투명 유지. layer/창 비불투명은 host(Swift)가 별도로. */
-    uint32_t window_opacity_milli
+    uint32_t window_opacity_milli,
+    /* 사이드바 세로 스크롤량(backing px). 사이드바 셀(밴드·카드 glyph) py_top에서 빼 카드를 위로 밀고, >0이면 사이드바
+       셀 draw에 [sidebar_header_height_px, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다(헤더 glyph는 터미널
+       셀 패스라 무관). 0이면 기존 동작(scissor 없음). 끝에 추가해 기존 인자 순서 불변(ABI v86). */
+    uint32_t sidebar_scroll_offset_px
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

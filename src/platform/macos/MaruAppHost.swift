@@ -1018,7 +1018,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.live_image_id_count,
             frame.terminal_bg,            // 화면 clear color(OSC 11 배경 set 또는 theme.background; 0=기본 clear)
             frame.titlebar_strip_px,      // 상단 타이틀바 띠 높이 — 접힘 펼치기 토글(◧)을 띠 안 세로 중앙(신호등 정렬)
-            frame.window_opacity_milli    // 창 배경 투명도 ×1000 — clear color alpha(default 배경만 투명)
+            frame.window_opacity_milli,   // 창 배경 투명도 ×1000 — clear color alpha(default 배경만 투명)
+            frame.sidebar_scroll_offset_px // 사이드바 세로 스크롤량(px) — 카드를 위로 밀고 헤더 아래로 scissor 클립
         )
         if drew {
             lastDrawnGeneration = frame.generation

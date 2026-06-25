@@ -19124,7 +19124,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     const cf2 = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(command_catalog.entries.len, cf2.keybind_entries.len);
     try std.testing.expect(cf2.enums.len > 0); // input dropdown 복귀
-    try std.testing.expectEqual(@as(usize, 2), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing(F1-6) + option-as-meta(F2-2) 2개(split bool은 workspace라 검색 끝나 사라짐)
+    try std.testing.expectEqual(@as(usize, 3), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing(F1-6) + option-as-meta(F2-2) + keyhint.enabled(KH-3) 3개(split bool은 workspace라 검색 끝나 사라짐)
 }
 
 test "mouse-hide-while-typing: IME 확정(글자) 입력 시 takeMouseHide 신호(1회성), 한글·meta chord·config off 구분 (F1-6)" {

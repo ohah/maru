@@ -564,6 +564,34 @@ pub const InputConfig = struct {
     };
 };
 
+/// 단축키 힌트 HUD를 띄우는 트리거 모디파이어(이 키 **단독 홀드**). command(기본 — ⌘)·control·option.
+/// macOS Cmd 단독 홀드는 OS 기본 동작이 없어 충돌이 없다(아래 KeyHintConfig.enabled 기본 true 근거).
+pub const HintModifier = enum {
+    command,
+    control,
+    option,
+};
+
+/// 단축키 힌트 HUD 설정 — 모디파이어를 일정 시간 홀드하면 활성 pane 우상단에 현재 바인딩된 단축키를 키캡으로
+/// 보여 준다(`docs/keybind-hints.md`). namespace는 Config 필드명 `keyhint`(키 `keyhint.enabled`/`delay`/`modifier`).
+/// GUI 섹션은 `.input`(전용 섹션을 새로 만들지 않고 키보드 설정에 묶는다 — namespace와 독립).
+pub const KeyHintConfig = struct {
+    /// 모디파이어 홀드 시 단축키 힌트를 표시할지. **기본 true** — Cmd 단독 홀드는 OS 충돌이 없고 delay가 정상
+    /// 단축키 사용과 안 부딪힌다. 거슬리면 `keyhint.enabled = false`로 홀드 감지 자체를 끈다.
+    enabled: bool = true,
+    /// 힌트 표시까지 모디파이어를 누르고 있어야 하는 시간(ms). 짧으면 빠른 `Cmd+T`에도 깜빡이고, 길면 반응이
+    /// 굼뜨다. 기본 400(깜빡임 방지와 반응성의 절충). 0이면 즉시(누르자마자).
+    delay: u32 = 400,
+    /// 힌트를 띄우는 트리거 모디파이어(이 키 단독 홀드). 기본 command(⌘).
+    modifier: HintModifier = .command,
+
+    pub const schema = .{ // 키: keyhint.enabled / keyhint.delay / keyhint.modifier (namespace=Config 필드명 keyhint)
+        .enabled = Meta{ .doc = "모디파이어 홀드 시 단축키 힌트 표시", .widget = .toggle, .section = .input },
+        .delay = Meta{ .doc = "힌트 표시까지 홀드 시간(ms)", .range = .{ 0, 5000 }, .widget = .number, .section = .input },
+        .modifier = Meta{ .doc = "힌트를 띄우는 모디파이어(단독 홀드)", .widget = .dropdown, .section = .input },
+    };
+};
+
 /// quick terminal(전역 토글 오버레이 패널)을 어느 화면에 띄울지. main=주 디스플레이, mouse=마우스 포인터가
 /// 있는 화면(멀티 모니터에서 지금 보는 화면). 실제 NSScreen 선택은 플랫폼(Swift)이 한다.
 pub const QuickTerminalScreen = enum {
@@ -669,6 +697,8 @@ pub const Config = struct {
     theme_preset_dark: ThemePreset = .maru,
     /// 사이드바 카드 표시 옵션(git 브랜치·폴더). view options 메뉴(앱)와 양방향 공유. loader가 `sidebar.*` 키로 파싱.
     sidebar: SidebarConfig = .{},
+    /// 단축키 힌트 HUD(모디파이어 홀드 시 활성 pane 우상단에 현재 단축키 표시). loader가 `keyhint.*` 키로 파싱(스키마-주도).
+    keyhint: KeyHintConfig = .{},
     /// SGR 5(blink) 글자를 실제로 깜빡일지(true)·정적으로 둘지(false). **기본 false** — 깜빡이는 콘텐츠는 접근성
     /// (WCAG 발작 위험) 우려라 다수 터미널이 기본으로 끈다. loader가 `text.blink` 키로 파싱.
     blink_text: bool = false,

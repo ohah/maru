@@ -3772,6 +3772,24 @@ pub const AppSession = struct {
             s.core.write("\x1b]52;c;?\x1b\\") catch {};
             s.unlockCore(self.io);
         }
+        // MARU_FAKE_BRANCH=<절대경로> — 첫 frame에 활성 코어로 OSC 7(cwd=<경로>)을 흘려, 그 경로가 git repo면 사이드바
+        // 카드의 **브랜치 줄(octocat 0xF0009 + 브랜치명)·폴더 줄(cwd)**이 떠 헤드리스 스크린샷으로 self-verify한다. 헤드리스
+        // 첫 frame엔 셸이 아직 OSC 7을 안 보내 termGitBranch(currentCwd)가 null → 두 보조줄이 안 떠 라이브 캡처가 불가했다.
+        // OSC 7은 core.write에서 동기 파싱돼(core.zig "OSC 7 reports cwd" test와 동형) 같은 frame의 buildSidebarTitleFrame이
+        // currentCwd를 읽는다. <경로>는 절대경로(예: 이 저장소 루트)이며 percent-encoding 없이 그대로 넣는다(공백 등 특수문자
+        // 없는 dev 경로 가정). show-branch/show-folder 토글이 켜져 있어야 각 줄이 보인다(기본 on). 일반 실행엔 영향 없다(env-gate).
+        if (std.c.getenv("MARU_FAKE_BRANCH")) |dir| {
+            const d = std.mem.span(dir);
+            if (d.len > 0 and d[0] == '/') {
+                if (std.fmt.allocPrint(self.allocator, "\x1b]7;file://localhost{s}\x07", .{d})) |seq| {
+                    defer self.allocator.free(seq);
+                    const s = self.activeSurface();
+                    s.lockCore(self.io);
+                    s.core.write(seq) catch {};
+                    s.unlockCore(self.io);
+                } else |_| {}
+            }
+        }
         // MARU_FORCE_BELL=1 — 첫 frame에 BEL(0x07)을 활성 코어에 흘려 시각 벨(bell.visual) flash를 캡처(self-verify
         // debug-gate). maybeDebugOpenSettings는 tick의 dispatchBell 전에 돌아 같은 frame에 flash quad가 들어간다.
         if (std.c.getenv("MARU_FORCE_BELL") != null) {

@@ -4,7 +4,7 @@
 
 이 문서가 이 기능의 **단일 출처**다. 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules §문서와 설명](project-rules.md#문서와-설명)). 상위 경계는 [키 입력과 단축키 경계](key-input-and-shortcuts.md)·[Chrome 전략](chrome-strategy.md)을 따르고, config 키는 [config 스키마](config-schema.md)를 따른다.
 
-> **현황**: KH-0~6 구현. **KH-6에서 "활성 pane 우상단 한 박스 HUD"를 버리고 요소별 배지로 재설계**했다(사용자 요청 — 각 단축키가 그 단축키로 동작하는 요소 위에 떠야 한다). 현재 사이드바 워크스페이스 카드(`⌘1~9`)·새 워크스페이스 버튼(`⌘⇧T`)·활성 pane(`⌘D`)에 배지가 뜬다 — `MARU_SCREENSHOT`로 dark·light 검증. **§3 이하 "박스/카테고리/멀티행" 서술은 KH-1~5의 옛 모델이며, 현재 모델은 §3.0(배지 재설계)가 단일 출처다.** 홀드 타이밍 실기 확인은 사용자. 후속(KH-6 A): 탭바 `+`(`⌘T`)·활성 탭(`⌘W`)·pane 이동/포커스(`⌘]`·`⌘⌥←→↑↓`) 등 나머지 요소 배지.
+> **현황**: KH-0~6 구현. **KH-6에서 "활성 pane 우상단 한 박스 HUD"를 버리고 요소별 배지로 재설계**했다(사용자 요청 — 각 단축키가 그 단축키로 동작하는 요소 위에 떠야 한다). 현재 사이드바 워크스페이스 카드(`⌘1~9`)·새 워크스페이스 버튼(`⌘⇧T`)·활성 pane 탭바 `+`(`⌘T`)·활성 탭(`⌘W`)·활성 pane(`⌘D`)에 배지가 뜬다 — `MARU_SCREENSHOT`로 dark·light 검증. **§3 이하 "박스/카테고리/멀티행" 서술은 KH-1~5의 옛 모델이며, 현재 모델은 §3.0(배지 재설계)가 단일 출처다.** 홀드 타이밍 실기 확인은 사용자. 잔여 보류: pane 이동/포커스(`⌘]`·`⌘⌥←→↑↓`) — split일 때만 의미·대상 모호.
 
 ## 0. 왜 가능한가 (조사 결론)
 
@@ -52,8 +52,10 @@
 |---|---|---|
 | 사이드바 워크스페이스 카드 1~9 | `⌘1`~`⌘9`(select_tab) | `sidebar.slotTop(i, header_h, slot_h, scroll)` — slotAt의 역(단일 출처) |
 | 사이드바 새 워크스페이스 + 버튼 | `⌘⇧T`(new_tab) | `sidebar.headerIconCol(.new_workspace, cols)` — render와 공유 |
+| 활성 pane 탭바 + 버튼 | `⌘T`(new_term) | `paneBarForLeaf` + `barMetrics.plusZoneStart` — render·hit-test와 공유 |
+| 활성 pane 활성 탭 | `⌘W`(close_term) | `barMetrics.segOf(active_term)` |
 | 활성 pane | `⌘D`(split_horizontal) | `active_pane_rect`(find도 쓰는 미러) |
-| (KH-6 A 후속) 탭바 +·활성 탭·pane 이동 | `⌘T`·`⌘W`·`⌘]`·`⌘⌥←→↑↓` | `tabbar.Metrics`·pane rects |
+| (후속) pane 이동/포커스 | `⌘]`·`⌘⌥←→↑↓` | split이 있을 때만 의미 — 여러 pane rect, 대상 모호라 보류 |
 
 **렌더 경로 — 투명 오버레이.** 배지는 요소 위 흩어진 곳에만 칠하므로, 모달 패널처럼 bbox 전체를 `surface_bg`로 덮으면 안 된다. `rasterizeOverlayCells`에 `transparent_default` 플래그를 더해(이미 있는 `.default`=투명 처리를 패널 quad 없이도 켜) **배지 셀만 칠하고 나머지는 chrome/터미널이 비치게** 한다. 한 오버레이 frame이 창 전체(origin 0,0)를 덮되 대부분 투명, 배지 위치에만 `fill(keycap_bg) + chord glyph text`.
 
@@ -291,7 +293,8 @@ pub const KeyHintConfig = struct {
 | **KH-4** ✅ | macOS `flagsChanged` 홀드 상태머신(`handleModifierFlags`) + `NSTimer .common` + ABI v87 `set_key_hints`/`key_hints_config` + 렌더 게이트(`anyOverlayOpen or key_hints.visible`) + `keyDown`/`windowDidResignKey`서 취소 + `MARU_KEY_HINTS_FORCE`(Zig self-verify). delay/enabled/modifier를 config에서 읽음 | `zig build macos-app-build` green + `MARU_SCREENSHOT` HUD 캡처 ✅. **홀드 타이밍 실기 수동 확인은 사용자** |
 | **KH-5(키캡 대비)** ✅ | 키캡을 `quad`→`fill`(셀 배경)로 바꾸고 `keycap_bg` role = `keycapBg(surface_bg)`(패널이 어두우면 밝게·밝으면 어둡게, 명암 기준) — tui·rich·light·dark 모두 또렷. 회귀 가드(keycap_bg≠surface_bg) 테스트. 둥근 GPU 키캡은 셀-그리드 제약으로 불가(§3.6.3 결정) | 토큰 대비 테스트 + `MARU_SCREENSHOT` rich 캡처 ✅ |
 | **KH-6 재설계(B)** ✅ | **박스 HUD → 요소별 배지**(§3.0). `shortcut_hints`를 `Badge{rect,chord}` 모델로 재작성, `rasterizeOverlayCells`에 `transparent_default` 추가, `app_session.buildKeyHintBadges`(사이드바 카드 `⌘1~9`·새 워크스페이스 `⌘⇧T`·활성 pane `⌘D`). 요소 레이아웃 단일 출처 `sidebar.slotTop`/`headerIconCol`(인라인 중복 제거 — 리뷰 지적). KH-2 박스용 코드(`keyHintRows`/`chordKeycaps`/`categoryOf`) 데드코드 제거 | 컴포넌트 단위 + `MARU_SCREENSHOT` dark·light 배지 캡처 ✅ |
-| **KH-6 A(후속)** | 나머지 요소 배지 — 탭바 `+`(`⌘T` new_term)·활성 탭(`⌘W`)·다음/이전 pane(`⌘]`/`⌘[`)·pane 포커스(`⌘⌥←→↑↓`). `tabbar.Metrics`·pane rects 사용 | 컴포넌트 + 스크린샷 |
+| **KH-6 A** ✅ | 활성 pane 탭바 `+`(`⌘T` new_term)·활성 탭(`⌘W` close_term) 배지 — `paneBarForLeaf`+`barMetrics`(render·hit-test와 같은 메트릭, plusZoneStart·segOf)로 위치 단일 출처 | `MARU_SCREENSHOT` 캡처 ✅(탭 ⌘W·탭바+ ⌘T) |
+| **KH-6 A 잔여(보류)** | pane 이동/포커스(`⌘]`·`⌘⌥←→↑↓`) — split일 때만 의미·대상 모호라 보류 | — |
 | **KH-옛(후속, 선택)** | 빌트인 터미널 편집키(`⌘←` 등)·`Space`(␣)/키패드 글리프 | — |
 
 머지 규율은 [merge-only-on-green]·[run-macos-app-before-merge] 메모리를 따른다(checks green + KH-4는 실제 앱 실행 후 머지).

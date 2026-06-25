@@ -20,7 +20,6 @@
 //! *포맷 이해*용으로만 보고 코드는 복사하지 않는다.
 
 const std = @import("std");
-const width = @import("../width.zig"); // 중립 UTF-8 경계 유틸(OS·렌더 무관, std만 의존) — 미리보기 절단 단일 출처
 
 /// transcript 코어가 판정하는 상태. `none`(포그라운드가 에이전트가 아님)은 platform이 `agent_kind`로 정하므로
 /// 여기엔 없다 — 이 레이어는 "트랜스크립트가 말하는" 세 상태만 안다. platform이 `agent_kind == .none`이면
@@ -129,19 +128,41 @@ fn copyAnswerPreview(dst: []u8, content: ?std.json.Value) usize {
         const bt = asString(bo.get("type") orelse continue) orelse continue;
         if (!std.mem.eql(u8, bt, "text")) continue;
         const txt = asString(bo.get("text") orelse return 0) orelse return 0;
-        return copyFirstLineTruncated(dst, txt);
+        return copyPreviewFlattened(dst, txt);
     }
     return 0;
 }
 
-/// `src`의 첫 줄(개행/캐리지리턴 전까지)을 `dst`에 복사하되, `dst`를 넘치면 UTF-8 코드포인트 경계까지만 복사한다
-/// (continuation 바이트 0x80~0xBF 중간에서 끊지 않는다 — 깨진 글자 미리보기 방지). 쓴 바이트 수를 반환.
-fn copyFirstLineTruncated(dst: []u8, src: []const u8) usize {
-    var end: usize = 0;
-    while (end < src.len and src[end] != '\n' and src[end] != '\r') : (end += 1) {}
-    // 첫 줄을 dst 길이로 자르되 UTF-8 경계 보정(width.truncateToBoundary 단일 출처 — 깨진 글자 미리보기 방지).
-    const n = width.truncateToBoundary(src[0..end], dst.len);
-    @memcpy(dst[0..n], src[0..n]);
+/// `src`를 `dst`에 미리보기로 복사한다 — **첫 줄에 한정하지 않고 여러 줄을 한 줄로 평탄화**한다(개행·탭·CR·연속
+/// 공백 → 공백 1칸, 선두/말미 공백 제거). 알림 본문이 답변 첫 줄만이 아니라 더 많이 보이게 하기 위함이다(사용자
+/// 요청). 사이드바 상태줄은 같은 문자열을 **카드 폭으로 다시 말줄임**하므로(width 기준) 평탄화해도 한 줄로 보인다
+/// — 둘이 같은 미리보기를 공유한다(단일 출처). `dst`를 넘치면 UTF-8 코드포인트 경계까지만 복사한다(continuation
+/// 바이트 0x80~0xBF 중간에서 안 끊음 — 깨진 글자 방지). 쓴 바이트 수를 반환.
+fn copyPreviewFlattened(dst: []u8, src: []const u8) usize {
+    var n: usize = 0;
+    var pending_space = false; // 공백 run을 만남(다음 비공백 앞에 공백 1칸을 쓴다 — 선두 공백은 n==0이라 무시)
+    var i: usize = 0;
+    while (i < src.len) {
+        const cp_len = std.unicode.utf8ByteSequenceLength(src[i]) catch 1;
+        const end = @min(i + cp_len, src.len);
+        const is_ws = cp_len == 1 and (src[i] == ' ' or src[i] == '\t' or src[i] == '\n' or src[i] == '\r');
+        if (is_ws) {
+            if (n > 0) pending_space = true; // 선두 공백은 무시
+            i = end;
+            continue;
+        }
+        if (pending_space) { // 비공백 앞에서만 공백 1칸 flush → 말미 공백은 안 써진다
+            if (n + 1 > dst.len) break;
+            dst[n] = ' ';
+            n += 1;
+            pending_space = false;
+        }
+        const cplen = end - i;
+        if (n + cplen > dst.len) break; // 코드포인트가 통째로 안 들어가면 경계에서 멈춤(UTF-8 안 깨짐)
+        @memcpy(dst[n .. n + cplen], src[i..end]);
+        n += cplen;
+        i = end;
+    }
     return n;
 }
 
@@ -198,7 +219,7 @@ pub fn parseCodexTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: 
             if (std.mem.eql(u8, pt, "task_complete")) {
                 state = .idle;
                 // 최종 답변이 task_complete 엔트리에 직접 담긴다 — Value 해제 전에 buf로 복사.
-                answer_len = copyJsonStringFirstLine(answer_buf, payload.get("last_agent_message"));
+                answer_len = copyJsonStringPreview(answer_buf, payload.get("last_agent_message"));
             } else if (std.mem.eql(u8, pt, "token_count")) {
                 // 토큰 회계 — 상태 불변(무시).
             } else {
@@ -245,11 +266,11 @@ pub fn parseCodexId(scratch: std.mem.Allocator, first_line: []const u8, out: []u
     return parseCodexMetaField(scratch, first_line, "id", out);
 }
 
-/// JSON 문자열 값의 첫 줄을 `dst`에 UTF-8 경계로 말줄임 복사하고 쓴 바이트 수를 반환(문자열이 아니거나 null이면
-/// 0). codex의 last_agent_message처럼 답변이 단일 문자열일 때 쓴다.
-fn copyJsonStringFirstLine(dst: []u8, v: ?std.json.Value) usize {
+/// JSON 문자열 값을 `dst`에 평탄화 미리보기로 복사하고 쓴 바이트 수를 반환(문자열이 아니거나 null이면 0).
+/// codex의 last_agent_message처럼 답변이 단일 문자열일 때 쓴다(claude content와 같은 copyPreviewFlattened 공유).
+fn copyJsonStringPreview(dst: []u8, v: ?std.json.Value) usize {
     const s = asString(v orelse return 0) orelse return 0;
-    return copyFirstLineTruncated(dst, s);
+    return copyPreviewFlattened(dst, s);
 }
 
 // ── std.json.Value 접근 helper(태그 확인 후 안전 추출) ───────────────────────────────
@@ -298,19 +319,20 @@ test "parseClaudeTail: 마지막 assistant가 tool_use면 running (도구 실행
     try std.testing.expectEqual(@as(usize, 0), s.answer.len);
 }
 
-test "parseClaudeTail: 마지막 assistant가 end_turn이면 idle + 답변 첫 줄 (메타 꼬리 무시)" {
+test "parseClaudeTail: 마지막 assistant가 end_turn이면 idle + 답변 미리보기(여러 줄 평탄화, 메타 꼬리 무시)" {
     // 완료된 턴(end_turn) 뒤에 mode/pr-link 메타가 붙어도 idle 유지 — "물리적 마지막 줄"이 아니라 "마지막
-    // 대화 엔트리"를 본다는 핵심 불변식. 답변은 첫 text 블록의 첫 줄만(둘째 줄·이후 블록 버림).
+    // 대화 엔트리"를 본다는 핵심 불변식. 답변 미리보기는 첫 text 블록을 여러 줄→한 줄로 평탄화(개행=공백 1칸,
+    // 알림 본문이 더 많이 보이게; 사이드바는 폭으로 다시 말줄임). 이후 블록은 버린다.
     const tail =
         \\{"type":"user","message":{"role":"user","content":"PR0 머지해줘"}}
-        \\{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"PR0 머지 완료\n둘째 줄은 버림"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"PR0 머지 완료\n둘째 줄도 보임"}]}}
         \\{"type":"mode","mode":"default"}
         \\{"type":"pr-link","prNumber":654}
     ;
     var buf: [256]u8 = undefined;
     const s = parseClaudeTail(std.testing.allocator, tail, &buf);
     try std.testing.expectEqual(AgentState.idle, s.state);
-    try std.testing.expectEqualStrings("PR0 머지 완료", s.answer);
+    try std.testing.expectEqualStrings("PR0 머지 완료 둘째 줄도 보임", s.answer); // 개행 → 공백 1칸으로 평탄화
 }
 
 test "parseClaudeTail: end_turn 뒤 tool_result(user)면 다시 running" {
@@ -397,17 +419,18 @@ test "encodeClaudeProjectDir: 절대 cwd의 / 를 - 로 치환" {
 
 // ── codex 어댑터 테스트 ──────────────────────────────────────────────────────────────
 
-test "parseCodexTail: 마지막이 task_complete면 idle + last_agent_message 첫 줄" {
-    // codex 완료는 명시적(event_msg/task_complete)이고 최종 답변이 그 엔트리에 직접 담긴다 — 첫 줄만 미리보기.
+test "parseCodexTail: 마지막이 task_complete면 idle + last_agent_message 미리보기(여러 줄 평탄화)" {
+    // codex 완료는 명시적(event_msg/task_complete)이고 최종 답변이 그 엔트리에 직접 담긴다 — 여러 줄을 한 줄로
+    // 평탄화한 미리보기(개행=공백 1칸, claude와 같은 copyPreviewFlattened 공유; 알림 본문이 더 많이 보임).
     const tail =
         \\{"type":"event_msg","payload":{"type":"agent_message","message":"진행하겠습니다."}}
         \\{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"..."}]}}
-        \\{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"설치와 설정 완료했습니다.\n둘째 줄은 버림"}}
+        \\{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"설치와 설정 완료했습니다.\n둘째 줄도 보임"}}
     ;
     var buf: [256]u8 = undefined;
     const s = parseCodexTail(std.testing.allocator, tail, &buf);
     try std.testing.expectEqual(AgentState.idle, s.state);
-    try std.testing.expectEqualStrings("설치와 설정 완료했습니다.", s.answer);
+    try std.testing.expectEqualStrings("설치와 설정 완료했습니다. 둘째 줄도 보임", s.answer); // 개행 → 공백 1칸
 }
 
 test "parseCodexTail: task_complete 뒤 token_count는 무시 — idle 유지" {

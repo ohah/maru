@@ -21,8 +21,9 @@ const Surface = surface_mod.Surface;
 /// platform이 PTY proc_name 폴링(pollAgentKinds)으로 채우는 파생값이고, 모델은 라벨 표시에만 쓴다.
 pub const AgentKind = enum(u8) { none = 0, claude, codex };
 
-/// idle 에이전트 답변 첫 줄을 담는 inline 버퍼 길이(alloc 회피 — 폭에 맞춰 다시 말줄임).
-pub const agent_answer_max: usize = 192;
+/// idle 에이전트 답변 미리보기(여러 줄 평탄화 — copyPreviewFlattened)를 담는 inline 버퍼 길이(alloc 회피 —
+/// 사이드바는 폭에 맞춰 다시 말줄임, 알림 본문은 더 많이 보임). 알림 배너 ~2줄을 채우게 256으로 둔다.
+pub const agent_answer_max: usize = 256;
 
 /// 세션 모델 생성자 — 런타임 부착 타입 `Rt`로 parametrize한다(platform=`TermRuntime`).
 /// `const Model = session_model.Model(TermRuntime); const Term = Model.Term;` 식으로 platform이

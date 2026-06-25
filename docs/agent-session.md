@@ -106,7 +106,11 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
 
 ## 알림 (결정)
 
-- `running → idle`(완료 마커) 전환 시 **macOS 알림**(제목=워크스페이스, 본문=마지막 답변 일부 또는 "완료").
+- `running → idle`(완료 마커) 전환 시 **macOS 알림**. **제목 = `{심볼} {Claude|Codex} · {끝난 Term 라벨}`**
+  (심볼은 사이드바 에이전트 아이콘과 같은 ✶ claude/◆ codex — macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목
+  prefix로 종류를 구분; 라벨은 **끝난 그 Term**의 termLabel이라 background split/가로탭 완료도 그 세션을 정확히 가리킨다).
+  **본문 = 마지막 답변 미리보기(여러 줄을 한 줄로 평탄화 — `copyPreviewFlattened`, 알림 배너가 답변을 더 많이 보임;
+  사이드바 상태줄은 같은 문자열을 카드 폭으로 다시 말줄임)** 또는 답변이 없으면 "완료". 종류 없음이면 워크스페이스 라벨 폴백.
   **활성(현재 보고 있는) 탭은 알림 안 함 — 비활성 탭/창에서 끝났을 때만 알림**(사용자 결정). **구현은 기존 OSC
   9/777 알림 경로를 재사용**한다 — `pendingNotification`(Swift가 tick마다 poll)에 에이전트 완료 큐를 합류시켜
   Swift `UNUserNotificationCenter`로 띄운다. 설계 초안의 `notify(title, body)` ABI 신설 대신 이미 있는 drain ABI를
@@ -136,7 +140,8 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   (`lines:[3]→[4]`). Metal `.m` 디코더는 이미 4줄 지원(`line_count*4`)이라 무변경. temp-dir 통합 테스트(claude/codex
   최신 선택·cwd 매칭·mtime skip)는 macOS. **실 세션 육안 검증은 수동**(아래 한계).
 - **PR4**: **완료 알림** ✅ **완료** — `running → idle` 전환을 **비활성 탭/창**에서 관측하면 macOS 알림을 띄운다
-  (제목=워크스페이스 이름, 본문=마지막 답변 또는 "완료"). **기존 OSC 9/777 알림 ABI를 재사용**(`pendingNotification`
+  (제목=`{✶|◆} {Claude|Codex} · {끝난 Term 라벨}`, 본문=마지막 답변 평탄화 미리보기 또는 "완료" — 위 "알림" 절이
+  단일 출처). **기존 OSC 9/777 알림 ABI를 재사용**(`pendingNotification`
   /`maru_macos_app_session_pending_notification` v52 + Swift `UNUserNotificationCenter`) — **새 ABI/Swift 불필요**
   (설계 초안의 `notify(title,body)` 추가 대신 이미 있는 drain 경로에 합류). `pollAgentState`가 전환 edge에서
   `enqueueAgentCompletion`(owned 큐, 상한 가드), `pendingNotification`이 OSC보다 먼저 드레인. 디바운스=전환 edge

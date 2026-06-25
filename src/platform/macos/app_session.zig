@@ -9006,7 +9006,21 @@ pub const AppSession = struct {
     /// 완료 알림 한 건을 큐에 넣는다(title=워크스페이스 이름, body=마지막 답변 일부 또는 "완료"). owned dup 실패는
     /// 조용히 버린다(best-effort — 알림은 부가 기능). 큐가 상한이면 가장 오래된 걸 버려 폭주를 막는다.
     fn enqueueAgentCompletion(self: *AppSession, tab: *Tab, term: *Term) void {
-        const title = self.allocator.dupe(u8, workspaceLabel(tab)) catch return;
+        // 제목 = **에이전트 심볼 + 종류(Claude/Codex)** + **끝난 그 Term(세션) 라벨** — 어느 대화가 끝났는지 식별
+        // (사용자 요청). 심볼은 사이드바 에이전트 아이콘과 같은 글리프(✶ claude=Anthropic 선버스트 근사, ◆ codex)로
+        // 통일해 알림에서도 종류가 한눈에 구분된다(macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목 prefix로 구분).
+        // 옛 제목은 workspaceLabel(tab)=tab.activeTerm 라벨이라 background split/가로탭 Term 완료 시 활성 Term 이름이
+        // 떠 어긋났다 — 끝난 term의 termLabel을 직접 써 그 세션을 가리킨다. 종류 없음(이론상 미발생)이면 워크스페이스 폴백.
+        const agent_badge: []const u8 = switch (term.agent_kind) {
+            .claude => "\u{2736} Claude", // ✶
+            .codex => "\u{25C6} Codex", // ◆
+            .none => "",
+        };
+        const session_label = termLabel(term);
+        const title = if (agent_badge.len > 0)
+            std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ agent_badge, session_label }) catch return
+        else
+            self.allocator.dupe(u8, workspaceLabel(tab)) catch return;
         const body_src: []const u8 = if (term.agent_answer_len > 0) term.agent_answer_buf[0..term.agent_answer_len] else "완료";
         const body = self.allocator.dupe(u8, body_src) catch {
             self.allocator.free(title);

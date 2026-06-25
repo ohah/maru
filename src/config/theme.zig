@@ -503,6 +503,15 @@ pub const RightClick = enum {
     reporting,
 };
 
+/// 화면 텍스트의 링크 자동 감지 범위. osc8-only=자동 감지 끔(OSC 8 명시 하이퍼링크만), web=http(s)만(이전 동작),
+/// full=추가 스킴(file://·mailto: 등)+절대/홈/상대/bare 경로까지. 기본 full — "파일 링크 안 열림" 버그 수정이고
+/// 클릭 시 존재(stat) 게이트가 오탐을 막으므로(docs/link-detection.md). OSC 8 명시 링크는 이 값과 무관하게 항상 동작.
+pub const LinkDetection = enum {
+    osc8_only,
+    web,
+    full,
+};
+
 /// EAW Ambiguous 문자(동그란 번호 ① 등)를 한 칸으로 볼지(narrow) 두 칸으로 볼지(wide).
 /// **기본 narrow** — UAX#11 §5 권고("문맥 불명 시 narrow") + Ghostty·xterm.js와 같아 1칸 가정 프로그램
 /// (셸 readline·대부분 TUI)과 정렬·커서가 안 깨진다. wide는 CJK 로캘처럼 그 문자를 2칸으로 가정하는 환경,
@@ -551,8 +560,12 @@ pub const InputConfig = struct {
     /// 경계라 비공백 run 전체를 선택). 예: `/:.@`를 넣으면 경로/URL 컴포넌트를 잘게 선택한다. **URL 감지는 영향 없음**
     /// (`:`·`/`가 URL을 쪼개면 안 됨 — 선택만 본다). UTF-8 단일 codepoint들(예: `│`)도 가능. Ghostty `selection-word-chars` 대응.
     word_separators: []const u8 = "",
+    /// 화면 텍스트의 링크 자동 감지 범위(osc8-only|web|full). 기본 full — 파일 경로/추가 스킴까지 Cmd+클릭으로
+    /// 연다(클릭 시 존재 stat 게이트가 오탐 차단). web=http(s)만(이전 동작), osc8-only=자동 감지 끔(OSC 8 명시 링크만).
+    /// 단일 출처: docs/link-detection.md.
+    link_detection: LinkDetection = .full,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
@@ -561,6 +574,7 @@ pub const InputConfig = struct {
         .option_as_meta = Meta{ .doc = "Option을 Meta(Alt)로", .widget = .toggle, .section = .input },
         .right_click = Meta{ .doc = "터미널 우클릭 동작", .widget = .dropdown, .section = .input },
         .word_separators = Meta{ .doc = "더블클릭 단어 구분자", .widget = .text, .section = .input },
+        .link_detection = Meta{ .doc = "링크 자동 감지 범위", .widget = .dropdown, .section = .input },
     };
 };
 

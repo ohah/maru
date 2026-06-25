@@ -889,17 +889,70 @@ pub const TerminalCore = struct {
         selection.selectWordAt(self, viewport_row, col, separator_bytes);
     }
 
-    /// Cmd+hover/클릭 URL anchor 절대 좌표. 본문: selection.urlAnchorAt.
-    pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?types.SelectionPoint {
-        return selection.urlAnchorAt(self, viewport_row, col);
+    /// Cmd+hover/클릭 링크 anchor 절대 좌표. 본문: selection.urlAnchorAt. scopes=감지 범위(config).
+    pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: selection.LinkScopes) ?types.SelectionPoint {
+        return selection.urlAnchorAt(self, viewport_row, col, scopes);
     }
-    /// anchor에서 시작하는 URL의 현재 뷰포트 밑줄 범위. 본문: selection.urlSpanAtAbs.
+    /// anchor에서 시작하는 링크의 현재 뷰포트 밑줄 범위(종류 무관). 본문: selection.urlSpanAtAbs.
     pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?types.SelectionSpan {
         return selection.urlSpanAtAbs(self, anchor);
     }
-    /// Cmd+클릭 위치의 URL 추출(호출자가 free). 본문: selection.extractUrlAt.
-    pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?[]u8 {
-        return selection.extractUrlAt(self, allocator, viewport_row, col);
+    /// Cmd+클릭 위치의 링크 추출 + file_path면 cwd/$HOME resolve·존재검증(호출자가 .text를 free). url(스킴·OSC 8)은
+    /// 그대로, file_path는 존재하는 절대 경로(없으면 전체 null=일반 클릭). 분류는 selection, resolve는 resolveClickedPath.
+    pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16, scopes: selection.LinkScopes) !?selection.ExtractedLink {
+        const ext = (try selection.extractUrlAt(self, allocator, viewport_row, col, scopes)) orelse return null;
+        if (ext.kind == .url) return ext;
+        // file_path: raw 경로 텍스트를 절대 경로로 resolve하고 존재할 때만 연다(오탐·미존재 경로는 안 연다).
+        defer allocator.free(ext.text);
+        const abs = (self.resolveClickedPath(allocator, ext.text) catch null) orelse return null;
+        return .{ .text = abs, .kind = .file_path };
+    }
+
+    /// file_path 링크 raw 텍스트(`:line:col` 포함 가능)를 절대 경로로 resolve하고, 존재하면 그 경로(호출자 소유)를,
+    /// 아니면 null을 돌려준다. `:line[:col]` 분리 → `~/`를 $HOME 확장 → 상대면 currentCwd()(OSC 7)와 join →
+    /// 정규화 → accessAbsolute 존재 검증. cwd가 비면 상대 경로는 resolve 불가(null). 단일 출처: docs/link-detection.md.
+    /// 파일 I/O는 코어 책임(순수 분류 레이어 selection.zig엔 stat을 두지 않는다). urlAt은 코어 락을 안 잡으므로
+    /// (copyText와 달리) 이 blocking I/O가 락 아래로 들어가지 않는다(docs/io-render-threading.md §9.1).
+    fn resolveClickedPath(self: *const TerminalCore, allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
+        // 끝의 ":<digits>(:<digits>)?"(에디터 줄/열 점프 관례)를 떼고 순수 경로만 — 1차는 파일만 연다(줄 점프는 후속).
+        var path_end = raw.len;
+        var rounds: usize = 0;
+        while (rounds < 2) : (rounds += 1) {
+            var j = path_end;
+            while (j > 0 and std.ascii.isDigit(raw[j - 1])) j -= 1;
+            if (j < path_end and j > 0 and raw[j - 1] == ':') path_end = j - 1 else break;
+        }
+        const path_part = raw[0..path_end];
+        if (path_part.len == 0) return null;
+
+        // ~/ → $HOME/... ($HOME은 정적 getenv(libc) — 터미널 코어는 std.Io 인터페이스를 안 든다. 없으면 null).
+        var tilde_buf: ?[]u8 = null;
+        defer if (tilde_buf) |t| allocator.free(t);
+        var rel_or_abs: []const u8 = path_part;
+        if (std.mem.startsWith(u8, path_part, "~/")) {
+            const home_z = std.c.getenv("HOME") orelse return null;
+            tilde_buf = try std.fs.path.join(allocator, &.{ std.mem.span(home_z), path_part[2..] });
+            rel_or_abs = tilde_buf.?;
+        }
+
+        // 절대 경로로 정규화(상대면 OSC 7 cwd 기준 — cwd를 모르면 resolve 불가). resolve가 ../ ./ 중복/ 를 정리.
+        const abs = blk: {
+            if (std.fs.path.isAbsolute(rel_or_abs)) break :blk try std.fs.path.resolve(allocator, &.{rel_or_abs});
+            const cwd = self.currentCwd();
+            if (cwd.len == 0) return null;
+            break :blk try std.fs.path.resolve(allocator, &.{ cwd, rel_or_abs });
+        };
+        errdefer allocator.free(abs);
+
+        // 존재 검증 — 없으면 무시(오탐·미존재 경로 차단). 디렉토리도 허용(NSWorkspace가 Finder로 연다). null-terminated
+        // 경로로 C access(F_OK) — std.Io 우회(코어는 io 인터페이스를 안 든다; std.c.access 선례 pty/macos.zig).
+        const abs_z = try allocator.dupeZ(u8, abs);
+        defer allocator.free(abs_z);
+        if (std.c.access(abs_z.ptr, std.posix.F_OK) != 0) {
+            allocator.free(abs);
+            return null;
+        }
+        return abs;
     }
 
     /// 트리플클릭 줄 선택. 본문: selection.selectLineAt.
@@ -3408,7 +3461,7 @@ test "A2: 빈(trim된 len-0) 스크롤백 행에서 단어/URL 선택은 크래�
     try core.write("\r\nx"); // 빈 줄이 스크롤백으로(전부 공백 → trim len 0), x 표시
     core.scrollViewport(1); // 빈 스크롤백 행을 본다
     core.selectWordAt(0, 0, ""); // 더블클릭 — 크래시 없이(선택 없음)
-    try std.testing.expect(core.urlAnchorAt(0, 0) == null); // Cmd-hover — 크래시 없이 null
+    try std.testing.expect(core.urlAnchorAt(0, 0, selection.link_scopes_full) == null); // Cmd-hover — 크래시 없이 null
     core.scrollToBottom();
 }
 
@@ -4807,7 +4860,7 @@ test "double-click with word-separators splits at separator chars; URL detection
     try std.testing.expectEqualStrings("usr", w3);
 
     // **URL 감지는 구분자 무시**: wordBoundsAt(공백만)이라 wordIsUrl이 전체 URL을 본다(col4=h).
-    try std.testing.expect(selection.wordIsUrl(&core, 0, 4));
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 4, selection.link_scopes_full));
 }
 
 test "triple-click selects the whole logical line including wrapped rows" {
@@ -4862,14 +4915,14 @@ test "extractUrlAt finds an http(s) URL in the clicked word, across soft-wrap, t
     try std.testing.expect(core.screen.wrapped[0]);
 
     // wrap된 URL의 두 번째 행을 Cmd+클릭해도 전체 URL이 나오고, 끝 ")."는 다듬어진다.
-    const url = (try core.extractUrlAt(std.testing.allocator, 1, 3)).?;
-    defer std.testing.allocator.free(url);
-    try std.testing.expectEqualStrings("https://a.bc/dpath", url);
+    const url = (try core.extractUrlAt(std.testing.allocator, 1, 3, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(url.text);
+    try std.testing.expectEqualStrings("https://a.bc/dpath", url.text);
 
     // URL이 아닌 단어는 null.
-    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 0)) == null);
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 0, selection.link_scopes_full)) == null);
     // 공백도 null.
-    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 3)) == null);
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 3, selection.link_scopes_full)) == null);
 }
 
 test "extractUrlAt stops at a background-colored (bce) space — URL not swallowing trailing text" {
@@ -4882,33 +4935,137 @@ test "extractUrlAt stops at a background-colored (bce) space — URL not swallow
     // 공백 셀이 실제로 비기본 배경인지 확인(가드가 의미 있으려면 isBlankCell이 false여야 한다).
     try std.testing.expectEqual(types.Color{ .indexed = 4 }, core.screen.cells[core.index(0, 14)].style.background);
 
-    const url = (try core.extractUrlAt(std.testing.allocator, 0, 2)).?; // URL 안 클릭
-    defer std.testing.allocator.free(url);
-    try std.testing.expectEqualStrings("https://a.bc/d", url); // 공백에서 끊겨 foo가 안 붙는다
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 2, selection.link_scopes_full)).?; // URL 안 클릭
+    defer std.testing.allocator.free(url.text);
+    try std.testing.expectEqualStrings("https://a.bc/d", url.text); // 공백에서 끊겨 foo가 안 붙는다
     // 색칠된 공백 위 클릭은 선택/URL 없음(배경색 무관 — 일반 공백과 동일).
-    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 14)) == null);
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 14, selection.link_scopes_full)) == null);
 }
 
 test "urlAnchorAt + urlSpanAtAbs project the hovered URL word, following content and rejecting non-URLs" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 3 });
     defer core.deinit();
     try core.write("go https://a.bc/d now");
-    const anchor = core.urlAnchorAt(0, 5).?; // URL 위 → 단어 시작 절대 좌표
+    const anchor = core.urlAnchorAt(0, 5, selection.link_scopes_full).?; // URL 위 → 단어 시작 절대 좌표
     const span = core.urlSpanAtAbs(anchor).?;
     try std.testing.expectEqual(@as(u16, 0), span.start.row);
     try std.testing.expectEqual(@as(u16, 3), span.start.col); // "https://..." 단어 시작
-    try std.testing.expect(core.urlAnchorAt(0, 0) == null); // "go"
-    try std.testing.expect(selection.wordIsUrl(&core, 0, 5)); // 할당 없는 판정도 같은 결과
-    try std.testing.expect(!selection.wordIsUrl(&core, 0, 0));
+    try std.testing.expect(core.urlAnchorAt(0, 0, selection.link_scopes_full) == null); // "go"
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 5, selection.link_scopes_full)); // 할당 없는 판정도 같은 결과
+    try std.testing.expect(!selection.wordIsUrl(&core, 0, 0, selection.link_scopes_full));
 }
 
-test "urlSpanInWord keeps balanced trailing parens but trims prose punctuation" {
+test "linkSpanInWord keeps balanced trailing parens but trims prose punctuation" {
     // Wikipedia식: 끝 ')'가 열린 '('와 균형이면 URL의 일부.
-    const a = selection.urlSpanInWord("https://en.wikipedia.org/wiki/Foo_(bar)").?;
+    const a = selection.linkSpanInWord("https://en.wikipedia.org/wiki/Foo_(bar)", selection.link_scopes_web).?;
     try std.testing.expectEqualStrings("https://en.wikipedia.org/wiki/Foo_(bar)", "https://en.wikipedia.org/wiki/Foo_(bar)"[a.start..a.end]);
+    try std.testing.expectEqual(selection.LinkKind.url, a.kind);
     // 산문 속: 균형 안 맞는 끝 ')'와 '.'은 다듬는다.
-    const b = selection.urlSpanInWord("(https://a.bc/d).").?;
+    const b = selection.linkSpanInWord("(https://a.bc/d).", selection.link_scopes_web).?;
     try std.testing.expectEqualStrings("https://a.bc/d", "(https://a.bc/d)."[b.start..b.end]);
+}
+
+test "linkSpanInWord classifies extra schemes and file paths, with scope gating" {
+    const full = selection.link_scopes_full;
+    const Case = struct { in: []const u8, want: []const u8, kind: selection.LinkKind };
+    const cases = [_]Case{
+        // 추가 스킴(extra_schemes). "dot.http://x"는 스킴부터.
+        .{ .in = "dot.http://example.com", .want = "http://example.com", .kind = .url },
+        .{ .in = "ftp://example.com", .want = "ftp://example.com", .kind = .url },
+        .{ .in = "mailto:a@b.com", .want = "mailto:a@b.com", .kind = .url },
+        .{ .in = "ssh://1.2.3.4", .want = "ssh://1.2.3.4", .kind = .url },
+        .{ .in = "file:///etc/hosts", .want = "file:///etc/hosts", .kind = .url },
+        // 절대/홈/dot-relative/bare-relative 경로.
+        .{ .in = "/Users/me/a.py", .want = "/Users/me/a.py", .kind = .file_path },
+        .{ .in = "~/.config/maru/config", .want = "~/.config/maru/config", .kind = .file_path },
+        .{ .in = "./src/main.zig", .want = "./src/main.zig", .kind = .file_path },
+        .{ .in = "../lib/y.rb", .want = "../lib/y.rb", .kind = .file_path },
+        .{ .in = "src/config/url.zig", .want = "src/config/url.zig", .kind = .file_path },
+        .{ .in = ".config/maru/config", .want = ".config/maru/config", .kind = .file_path },
+        // :line:col 접미 보존, 콤마/매달린 콜론 다듬기.
+        .{ .in = "app/folder/file.rb:1", .want = "app/folder/file.rb:1", .kind = .file_path },
+        .{ .in = "lib/x/terminal.zig:42:10", .want = "lib/x/terminal.zig:42:10", .kind = .file_path },
+        .{ .in = "src/foo.c,baz.txt", .want = "src/foo.c", .kind = .file_path },
+        .{ .in = "./Downloads:", .want = "./Downloads", .kind = .file_path },
+    };
+    for (cases) |c| {
+        const span = selection.linkSpanInWord(c.in, full) orelse {
+            std.debug.print("linkSpanInWord no match for: {s}\n", .{c.in});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings(c.want, c.in[span.start..span.end]);
+        try std.testing.expectEqual(c.kind, span.kind);
+    }
+
+    // no-match: 이중슬래시·점 없는 bare·$숫자·mid-word ~·본문 없는 스킴.
+    const no_match = [_][]const u8{ "//foo", "foo/bar", "input/output", "$10/bar", "foo~/bar.txt", "https://" };
+    for (no_match) |w| {
+        if (selection.linkSpanInWord(w, full) != null) {
+            std.debug.print("linkSpanInWord unexpectedly matched: {s}\n", .{w});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // scope 게이팅: web만이면 경로·추가 스킴은 무시하고 http(s)만 잡는다(이전 동작 회귀 0).
+    const web = selection.link_scopes_web;
+    try std.testing.expect(selection.linkSpanInWord("/Users/me/a.py", web) == null);
+    try std.testing.expect(selection.linkSpanInWord("~/x.txt", web) == null);
+    try std.testing.expect(selection.linkSpanInWord("src/foo.zig", web) == null);
+    try std.testing.expect(selection.linkSpanInWord("ftp://x.y", web) == null);
+    try std.testing.expect(selection.linkSpanInWord("https://x.y", web) != null);
+    // osc8-only(none): 자동 감지는 전부 꺼진다(OSC 8 명시 링크만 — 그건 호출자 cellLinkAt가 따로 처리).
+    try std.testing.expect(selection.linkSpanInWord("https://x.y", selection.link_scopes_none) == null);
+}
+
+test "extractUrlAt resolves and existence-gates file paths (absolute + OSC 7 cwd-relative)" {
+    // file_path 링크는 실제로 존재할 때만 절대 경로로 열린다(오탐·미존재 차단). 절대 경로는 cwd 없이,
+    // bare/상대 경로는 OSC 7 cwd 기준으로 resolve. tmpDir에 실파일을 만들어 검증한다.
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/real.txt", .data = "x" });
+    // tmpDir은 .zig-cache/tmp/<sub_path>에 생긴다(다른 테스트의 tmpSubPath 관례). OSC 7 cwd엔 절대 경로가 필요하니
+    // process cwd(repo root)와 합쳐 절대 경로로 만든다(std.Io엔 realpath/getcwd가 없어 libc getcwd — 테스트 전용).
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len); // buf를 NUL-종료 절대 cwd로 채운다(테스트 환경 성공 가정)
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const tmp_abs = try std.fs.path.join(std.testing.allocator, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path });
+    defer std.testing.allocator.free(tmp_abs);
+    const abs_file = try std.fs.path.join(std.testing.allocator, &.{ tmp_abs, "sub/real.txt" });
+    defer std.testing.allocator.free(abs_file);
+
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 200, .rows = 4 });
+    defer core.deinit();
+    const full = selection.link_scopes_full;
+
+    // (1) 절대 경로(존재) — cwd 없이 감지·resolve.
+    try core.write(abs_file);
+    try core.write("\r\n");
+    {
+        const got = (try core.extractUrlAt(std.testing.allocator, 0, 0, full)).?;
+        defer std.testing.allocator.free(got.text);
+        try std.testing.expectEqual(selection.LinkKind.file_path, got.kind);
+        try std.testing.expectEqualStrings(abs_file, got.text);
+    }
+
+    // OSC 7로 셸 cwd를 tmp로 보고(file://host/<path>).
+    try core.write("\x1b]7;file://host");
+    try core.write(tmp_abs);
+    try core.write("\x1b\\");
+    try std.testing.expectEqualStrings(tmp_abs, core.currentCwd());
+
+    // (2) bare 상대 경로(존재) — cwd 기준 resolve → 같은 절대 경로.
+    try core.write("sub/real.txt\r\n"); // row 1
+    {
+        const got = (try core.extractUrlAt(std.testing.allocator, 1, 0, full)).?;
+        defer std.testing.allocator.free(got.text);
+        try std.testing.expectEqualStrings(abs_file, got.text);
+    }
+
+    // (3) 존재하지 않는 상대 경로 → null(존재 게이트).
+    try core.write("sub/nope.txt\r\n"); // row 2
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 2, 0, full)) == null);
 }
 
 test "selection is invalidated by row-relocating ops that break absolute coords" {
@@ -5078,14 +5235,14 @@ test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" 
     // "여기" 두 글자(wide)에 링크. ST(ESC \) 종료.
     try core.write("\x1b]8;;https://maru.dev/docs\x1b\\click here\x1b]8;;\x1b\\ tail");
     // 링크 텍스트 위 클릭 — 보이는 텍스트("click here")가 아니라 지정 URI가 나온다.
-    const url = (try core.extractUrlAt(std.testing.allocator, 0, 2)).?;
-    defer std.testing.allocator.free(url);
-    try std.testing.expectEqualStrings("https://maru.dev/docs", url);
-    try std.testing.expect(selection.wordIsUrl(&core, 0, 2));
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 2, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(url.text);
+    try std.testing.expectEqualStrings("https://maru.dev/docs", url.text);
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 2, selection.link_scopes_full));
     // 링크 안 공백("click here"의 ' ')도 같은 링크다.
-    try std.testing.expect(selection.wordIsUrl(&core, 0, 5));
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 5, selection.link_scopes_full));
     // 링크 밖("tail")은 아니다.
-    try std.testing.expect(!selection.wordIsUrl(&core, 0, 12));
+    try std.testing.expect(!selection.wordIsUrl(&core, 0, 12, selection.link_scopes_full));
     // 닫은 뒤 출력엔 링크가 없다.
     try std.testing.expectEqual(@as(u32, 0), core.screen.cells[12].link);
 }
@@ -5096,9 +5253,9 @@ test "OSC 8 hyperlink: BEL terminator, id= params ignored, same URI interned onc
     try core.write("\x1b]8;id=x;https://a.bc\x07one\x1b]8;;\x07 \x1b]8;;https://a.bc\x07two\x1b]8;;\x07");
     try std.testing.expectEqual(@as(usize, 1), core.link_store.items.len); // dedup
     try std.testing.expectEqual(core.screen.cells[0].link, core.screen.cells[5].link); // 같은 id 재사용
-    const url = (try core.extractUrlAt(std.testing.allocator, 0, 0)).?;
-    defer std.testing.allocator.free(url);
-    try std.testing.expectEqualStrings("https://a.bc", url);
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 0, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(url.text);
+    try std.testing.expectEqualStrings("https://a.bc", url.text);
 }
 
 test "OSC 8 hyperlink: span underlines the whole link run and survives soft-wrap" {
@@ -5106,16 +5263,16 @@ test "OSC 8 hyperlink: span underlines the whole link run and survives soft-wrap
     defer core.deinit();
     try core.write("\x1b]8;;https://a.bc/long\x1b\\abcdefgh\x1b]8;;\x1b\\"); // 6칸 wrap: abcdef|gh
     try std.testing.expect(core.screen.wrapped[0]);
-    const anchor = core.urlAnchorAt(1, 1).?; // 둘째 줄에서 클릭해도
+    const anchor = core.urlAnchorAt(1, 1, selection.link_scopes_full).?; // 둘째 줄에서 클릭해도
     try std.testing.expectEqual(@as(usize, 0), anchor.row); // run 시작은 첫 줄
     const span = core.urlSpanAtAbs(anchor).?;
     try std.testing.expectEqual(@as(u16, 0), span.start.row);
     try std.testing.expectEqual(@as(u16, 0), span.start.col);
     try std.testing.expectEqual(@as(u16, 1), span.end.row);
     try std.testing.expectEqual(@as(u16, 1), span.end.col); // "gh"까지
-    const url = (try core.extractUrlAt(std.testing.allocator, 1, 0)).?;
-    defer std.testing.allocator.free(url);
-    try std.testing.expectEqualStrings("https://a.bc/long", url);
+    const url = (try core.extractUrlAt(std.testing.allocator, 1, 0, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(url.text);
+    try std.testing.expectEqualStrings("https://a.bc/long", url.text);
 }
 
 test "OSC 8 oversized URI is ignored and plain heuristic still works" {
@@ -5131,7 +5288,7 @@ test "OSC 8 oversized URI is ignored and plain heuristic still works" {
     try std.testing.expectEqual(@as(u21, 'h'), core.screen.cells[0].codepoint);
     // 휴리스틱은 여전히 동작.
     try core.write("\r\nhttps://x.yz ");
-    try std.testing.expect(selection.wordIsUrl(&core, 1, 3));
+    try std.testing.expect(selection.wordIsUrl(&core, 1, 3, selection.link_scopes_full));
 }
 
 test "preedit composition shows the in-progress hangul at the cursor without touching the grid" {

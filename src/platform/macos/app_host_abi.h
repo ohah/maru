@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 88u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 89u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -531,15 +531,18 @@ int32_t maru_macos_app_session_hover(
     int32_t mods,
     int32_t *out_cursor_kind
 );
-/* (config 수식키)+클릭 위치의 URL. mods(hover와 같은 xterm 비트)가 url-click-modifier와 안 맞으면 *out_len=0
-   (일반 클릭으로 처리). 버퍼는 Zig 소유(다음 url_at/destroy까지). v71: mods 인자 추가(modifier 판정 Zig 단일 출처). */
+/* (config 수식키)+클릭 위치의 링크. mods(hover와 같은 xterm 비트)가 url-click-modifier와 안 맞으면 *out_len=0
+   (일반 클릭으로 처리). 버퍼는 Zig 소유(다음 url_at/destroy까지). *out_kind는 링크 종류(0=url, 1=file_path) —
+   *out_len>0일 때만 유효하고, Swift가 1이면 URL(fileURLWithPath:)·아니면 URL(string:)으로 연다(out_kind는 NULL 허용).
+   v71: mods 인자 추가(modifier 판정 Zig 단일 출처). v89: out_kind 추가(파일 경로 링크 — docs/link-detection.md). */
 int32_t maru_macos_app_session_url_at(
     MaruAppHostSession *session,
     double x_px,
     double y_px,
     int32_t mods,
     const uint8_t **out_ptr,
-    size_t *out_len
+    size_t *out_len,
+    int32_t *out_kind
 );
 int32_t maru_macos_app_session_copy_text(
     MaruAppHostSession *session,

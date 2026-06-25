@@ -42,6 +42,13 @@ pub const GlyphCacheKey = struct {
     // 크기에 영향**을 주므로 cache identity의 일부다. 빠지면 같은 glyph를 span=1로 먼저 캐시한 1칸 slot을 span=2 요청이
     // 재사용해 wide 글리프 오른쪽이 잘린다(공유 atlas에서 한 경로가 wide 폭을 안 줬을 때 — 한글 ㄱ 잘림 회귀).
     cell_width: u2 = 1,
+    // 목표 raster 크기(device px). 0이면 위 셀 메트릭에서 slot 크기를 산출한다(기존 동작). >0이면
+    // estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡아, atlas에 글리프를 **최종 크기로
+    // 직접 굽는다** — GPU slot-stretch(셀 크기로 굽고 확대)로 생기는 blur를 없애는 경로(헤더 아이콘 등).
+    // slot 크기를 바꾸므로 cache identity의 일부다: 같은 glyph라도 다른 목표 크기는 다른 bitmap이라
+    // 다른 slot이어야 한다(findSlot의 std.meta.eql이 새 필드를 자동으로 포함).
+    raster_width_px: u16 = 0,
+    raster_height_px: u16 = 0,
     style: RasterStyleFlags = .{},
     color_glyph_kind: ColorGlyphKind = .monochrome,
 };

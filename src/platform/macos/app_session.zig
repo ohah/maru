@@ -10751,6 +10751,21 @@ pub const AppSession = struct {
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
     fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
         const pane = builder.shapeOnly(self.allocator, dl) catch return;
+        // 헤더 아이콘 ◧(U+25E7)는 .m이 hscale 1.7로 quad를 키워 셀보다 ~1.7칸 넓게 그린다. 셀 크기로 굽고 GPU에서
+        // 확대하면 anti-alias가 번져 흐리므로(slot-stretch; partial-alpha 비율 ≈0.69 — coretext_smoke 측정 test), atlas
+        // slot을 목표 px(셀×1.7)로 키워 그 크기로 직접 래스터한다 — 1.7× 텍스처가 1.7× quad에 1:1로 들어가 선명(≈0.33).
+        // raster_*_px>0이면 estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡는다(.m·레이아웃 불변). 터미널
+        // 콘텐츠(.pane)의 ◧는 키우지 않도록 헤더 dest로 한정한다(펼침·접힘 토글 모두 .sidebar_header).
+        if (std.meta.activeTag(dest) == .sidebar_header and self.cell_width_px > 0 and self.cell_height_px > 0) {
+            const rw: u16 = @intCast(@min(@as(u32, self.cell_width_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
+            const rh: u16 = @intCast(@min(@as(u32, self.cell_height_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
+            for (pane.shaped.runs.glyphs) |*g| {
+                if (g.codepoint == 0x25E7) {
+                    g.cache_key.raster_width_px = rw;
+                    g.cache_key.raster_height_px = rh;
+                }
+            }
+        }
         self.collectShapedPane(collected, pane, builder, dest);
     }
 

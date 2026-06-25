@@ -11057,6 +11057,10 @@ pub const AppSession = struct {
     }
 
     /// 펼침 헤더 알림 배지(흰 숫자 cell·빨강 원 quad)가 올라갈 col — 종(2칸, bell_col·bell_col+1) **우측 한 칸**.
+    /// 종 글리프는 .m이 1.7cw×1.7ch(코너 아이콘과 동일 크기·2칸 footprint 중앙)로 그려 우상단 모서리가
+    /// ≈(bell_col+1.85)·cw인데, 배지 원 반지름이 0.41ch≈0.85cw(ch≈2cw)라 bell_col+2(중심 (bell_col+2.5)·cw)의
+    /// 배지 좌단(≈(bell_col+1.65)·cw)이 종 우측 모서리에 ~0.2cw만 겹쳐 iOS식 코너 배지가 된다(실측: 종 우측끝 95px,
+    /// 배지 93..107px). 종을 코너 크기로 줄여도 이 값이 그대로 맞다(좁아진 종 = 모서리가 안쪽으로 0.85cw 와도 반지름이 흡수).
     /// appendBellAndBadge(셀)와 appendNotificationBadge(quad)의 단일 출처라 둘이 어긋나지 않는다.
     fn notificationBadgeCol(bell_col: u16) u16 {
         return bell_col + 2;
@@ -11077,7 +11081,7 @@ pub const AppSession = struct {
         if (cols < 13) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList cols<13과 정합) — 배지도 생략
         const cw_f: f32 = @floatFromInt(cw);
         const ch_f: f32 = @floatFromInt(ch);
-        const badge_col = notificationBadgeCol(@intCast(cols - 12)); // 종(cols-12, 2칸) 우측 한 칸 = cols-10 (◧ cols-8과 cols-9 한 칸 띄움)
+        const badge_col = notificationBadgeCol(@intCast(cols - 12)); // 종(cols-12, 2칸) 우측 한 칸 = cols-10 (코너 크기 종의 우상단 모서리에 원 좌단이 ~0.2cw 겹침)
         // 배지 셀 중심(가로)·헤더 row 0 세로 중심(backing px). 흰 숫자가 원 가운데 오게 셀 중심에 맞춘다. center_y는 digit
         // 글리프 시각 중심(셀 중앙보다 약간 위)에 맞춰 0.46ch로 둔다(검증). 원이 너무 크면 옆 ◧ 아이콘에 닿으므로 0.82ch.
         const center_x: f32 = (@as(f32, @floatFromInt(badge_col)) + 0.5) * cw_f;

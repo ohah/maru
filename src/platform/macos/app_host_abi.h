@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 87u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 88u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -595,9 +595,16 @@ uint32_t maru_macos_app_session_take_mouse_hide(MaruAppHostSession *session);
    0=조합(입력기에 맡겨 특수문자 조합). Swift keyDown이 호출해 Option-단독 키를 입력기 경로(0)/meta 인코딩(1)으로
    가른다. 1회성 신호가 아니라 라이브 config read(reload로 갱신). session null=1(meta 폴백). v73. */
 uint32_t maru_macos_app_session_option_as_meta(MaruAppHostSession *session);
-/* 단축키 힌트 HUD(KH-4) 가시성 토글. Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay 경과)를 감지하면
-   visible=1로 켜고(이후 markMetalNeedsRedraw), 떼거나 다른 키·포커스 상실에 0. 패시브라 입력 라우팅 영향 없음. v87. */
-int32_t maru_macos_app_session_set_key_hints(MaruAppHostSession *session, uint32_t visible);
+/* 단축키 힌트 홀드 상태머신(keyhint_hold.zig)에 이벤트를 흘리고 Action을 돌려준다. 반환(0=none·1=arm_timer·2=cancel·
+   3=show·4=hide): Swift가 1=OS 타이머 시작·2/4=타이머 무효화·3/4=markMetalNeedsRedraw로 매핑(visible 토글은 머신 소유).
+   gesture 정책=Zig·OS clock만 Swift. mods_bits=현재 눌린 modifier 비트(shift=1·control=2·option=4·command=8). session
+   null=0(none). **루트커즈**: 옛 set_key_hints 경로는 타이머 만료 때 Swift가 NSEvent.modifierFlags(2번째 출처)를 재읽기해
+   stale/빈 값이면 미표시였다 — 이제 머신이 flagsChanged 단일 출처로 판정, 만료는 글로벌을 안 읽는다(armed=유지됨). v88. */
+int32_t maru_macos_app_session_key_hint_on_flags(MaruAppHostSession *session, uint32_t mods_bits);
+/* 타이머 만료 → 머신. armed면 show(글로벌 재읽기 없음). session null=0(none). v88. */
+int32_t maru_macos_app_session_key_hint_on_timer(MaruAppHostSession *session);
+/* keyDown(실제 단축키)·포커스 상실 → 머신 취소(표시 중이면 hide). session null=0(none). v88. */
+int32_t maru_macos_app_session_key_hint_cancel(MaruAppHostSession *session);
 /* 단축키 힌트 config — out_enabled(1/0)·out_delay_ms·out_modifier(0=command·1=control·2=option)에 채운다. Swift 홀드
    감지가 읽어 동작 결정(gesture 정책=Zig·타이머 clock=Swift). 라이브 read. out 포인터 null이면 건너뜀. session null=null_out. v87. */
 int32_t maru_macos_app_session_key_hints_config(MaruAppHostSession *session, uint32_t *out_enabled, uint32_t *out_delay_ms, uint32_t *out_modifier);

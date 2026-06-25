@@ -583,20 +583,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return false }
         return maru_macos_app_session_any_overlay_open(session) != 0
     }
-    // 단축키 힌트 HUD(KH-4) — 트리거 모디파이어 단독 홀드 감지 상태. flagsChanged가 트리거가 단독으로 눌리면
-    // keyHintTimer를 걸고, delay 경과 시 set_key_hints(1). 떼거나 다른 키·포커스 상실에 끈다. gesture 정책(enabled/
-    // delay/modifier)은 Zig(config) 단일 출처, 타이머 clock만 Swift(native 최소 — frame loop clock과 같은 규율).
+    // 단축키 힌트 HUD(KH-4) — 홀드 감지의 **OS 타이머 clock만** Swift가 쥔다(native 최소). gesture 정책(enabled·단독성·
+    // 트리거 모디파이어·표시 여부)은 전부 Zig 홀드 머신(keyhint_hold.zig)이 단일 출처로 판정한다. flagsChanged·timer
+    // fire·keyDown/blur를 머신에 흘리고 돌아온 Action으로 이 타이머와 redraw만 관리한다(visible은 머신이 chrome_host에 적용).
     private var keyHintTimer: Timer?
-    private var keyHintShown = false
-    // config keyhint.*(라이브 ABI read) — (표시 여부, 홀드 지연 ms, 트리거 모디파이어). 세션 없거나 실패면 nil.
-    private var keyHintConfig: (enabled: Bool, delayMs: UInt32, modifier: NSEvent.ModifierFlags)? {
+    // config keyhint.delay(라이브 ABI read) — 홀드 지연 ms. Swift는 타이머 간격에만 쓴다(enabled/modifier 판정은 머신).
+    // 세션 없거나 실패면 nil. enabled/modifier out-param은 ABI가 채우지만 Swift는 무시한다.
+    private var keyHintDelayMs: UInt32? {
         guard let session = appSession else { return nil }
         var enabled: UInt32 = 0
         var delayMs: UInt32 = 0
         var modifier: UInt32 = 0
         guard maru_macos_app_session_key_hints_config(session, &enabled, &delayMs, &modifier) == Self.statusOK else { return nil }
-        let mod: NSEvent.ModifierFlags = modifier == 1 ? .control : (modifier == 2 ? .option : .command)
-        return (enabled != 0, delayMs, mod)
+        return delayMs
     }
     private var tickTimer: Timer?
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
@@ -1571,6 +1570,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return m
     }
 
+    // NSEvent 수식키를 단축키 힌트 머신(key_hint_on_flags)의 mods_bits로 변환 — command_catalog.mod_*와 동일 인코딩
+    // (shift=1·control=2·option=4·command=8). urlModsBits(xterm 규약)와 인코딩이 다르므로 별도. 순수 변환만(정책=Zig).
+    static func hintModsBits(_ flags: NSEvent.ModifierFlags) -> UInt32 {
+        var m: UInt32 = 0
+        if flags.contains(.shift) { m |= 1 }
+        if flags.contains(.control) { m |= 2 }
+        if flags.contains(.option) { m |= 4 }
+        if flags.contains(.command) { m |= 8 }
+        return m
+    }
+
     func handleHover(_ event: NSEvent, in view: NSView) {
         updateHover(atWindowPoint: event.locationInWindow, mods: Self.urlModsBits(event.modifierFlags), in: view)
     }
@@ -1583,66 +1593,49 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         updateHover(atWindowPoint: point, mods: Self.urlModsBits(event.modifierFlags), in: view)
     }
 
-    // 단축키 힌트 홀드 감지(KH-4) — view.flagsChanged가 부른다. 트리거 모디파이어(config)가 **단독으로** 눌렸으면
-    // delay 타이머를 걸고, 단독이 아니거나(다른 mod 동반) 떼지면 취소·숨김. 만료 콜백이 set_key_hints(1)로 HUD를 켠다.
-    // flagsChanged는 keyCode 없이 modifierFlags만 주므로 현재 플래그가 정확히 트리거 하나인지로 판정한다.
+    // 단축키 힌트 홀드 감지(KH-4) — view.flagsChanged가 부른다. 현재 눌린 modifier 비트만 Zig 홀드 머신에 흘리고,
+    // 단독성·취소·표시 판정은 머신이 한다(단일 출처). flagsChanged는 keyCode 없이 modifierFlags만 주므로 머신은 현재
+    // 플래그가 정확히 트리거 하나인지로 arm/cancel을 정한다.
     func handleModifierFlags(_ event: NSEvent) {
-        guard let cfg = keyHintConfig, cfg.enabled else {
-            if Self.keyHintDebug, keyHintTimer != nil || keyHintShown { Self.keyHintLog("disabled/no-session → off") }
-            cancelKeyHintHold() // 비활성/세션 없음 → 확실히 끔
-            return
-        }
-        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        if flags == cfg.modifier {
-            // 트리거만 단독으로 눌림. 이미 표시 중이거나 타이머 대기 중이면 재-arm 안 함.
-            if keyHintShown || keyHintTimer != nil { return }
-            if Self.keyHintDebug { Self.keyHintLog("solo trigger → arm timer \(cfg.delayMs)ms") }
-            let delay = TimeInterval(cfg.delayMs) / 1000.0
+        guard let session = appSession else { return }
+        let action = maru_macos_app_session_key_hint_on_flags(session, Self.hintModsBits(event.modifierFlags))
+        applyKeyHintAction(action)
+    }
+
+    // 실제 키 입력(= 단축키 실행)·포커스 상실 시 호출 — 머신에 취소를 흘린다(대기 중이면 cancel, 표시 중이면 hide).
+    // 정상 ⌘+키가 HUD를 깜빡이지 않게(keyDown이 대기 타이머를 깸) + 단축키를 누르면 HUD가 사라지게 한다.
+    func cancelKeyHintHold() {
+        guard let session = appSession else { return }
+        applyKeyHintAction(maru_macos_app_session_key_hint_cancel(session))
+    }
+
+    // 머신 Action(app_host_abi v88: 0=none·1=arm_timer·2=cancel·3=show·4=hide)을 OS 부수효과로 매핑한다 — gesture 정책·
+    // visible 토글은 머신이 이미 했고, Swift는 OS 타이머 clock과 redraw만 책임진다. arm_timer는 delay 만큼 one-shot 타이머를
+    // 걸고 만료 시 머신에 on_timer를 흘린다; cancel/hide는 대기 타이머를 무효화; show/hide는 다음 프레임 redraw.
+    private func applyKeyHintAction(_ action: Int32) {
+        switch action {
+        case 1: // arm_timer
+            keyHintTimer?.invalidate() // 중복 방지(머신이 재-arm을 막지만 방어적으로)
+            let delay = TimeInterval(keyHintDelayMs ?? 500) / 1000.0
             let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self else { return }
+                    guard let self, let session = self.appSession else { return }
                     self.keyHintTimer = nil
-                    // 만료 시점에 트리거가 **여전히 눌려 있는지만** 가볍게 재확인한다(떼면 flagsChanged가 cancelKeyHintHold로
-                    // 타이머를 무효화하므로 보통 여기 도달 자체가 "유지됨"을 뜻한다). **contains로 완화** — 엄격 `==`는
-                    // NSEvent.modifierFlags의 여분/디바이스 비트로 트리거를 쥐고 있어도 간헐적으로 false가 나 "가끔 안 뜨던"
-                    // 원인이었다(다른 mod가 추가됐으면 위 else에서 이미 취소됨). 단독성은 flagsChanged 경로가 보장한다.
-                    let now = NSEvent.modifierFlags
-                    guard now.contains(cfg.modifier) else {
-                        if Self.keyHintDebug { Self.keyHintLog("timer fire but trigger released → skip (now=\(now.rawValue))") }
-                        return
-                    }
-                    if Self.keyHintDebug { Self.keyHintLog("timer fire → show") }
-                    self.setKeyHints(true)
+                    // 만료 — 글로벌 modifier를 다시 안 읽는다(루트커즈 수정). 머신이 armed면 show, 취소됐으면 none.
+                    self.applyKeyHintAction(maru_macos_app_session_key_hint_on_timer(session))
                 }
             }
             RunLoop.main.add(timer, forMode: .common) // live-resize 중에도 안 멈추게(tickTimer와 같은 .common 모드)
             keyHintTimer = timer
-        } else {
-            if Self.keyHintDebug, keyHintTimer != nil || keyHintShown { Self.keyHintLog("non-solo (flags=\(flags.rawValue)) → cancel") }
-            cancelKeyHintHold()
+        case 2, 4: // cancel, hide
+            keyHintTimer?.invalidate()
+            keyHintTimer = nil
+            if action == 4 { markMetalNeedsRedraw() } // hide → 배지 사라진 프레임
+        case 3: // show
+            markMetalNeedsRedraw() // visible은 머신이 켰음 → 배지 그린 프레임
+        default: // 0 none
+            break
         }
-    }
-
-    private static let keyHintDebug = ProcessInfo.processInfo.environment["MARU_DEBUG"] != nil
-    private static func keyHintLog(_ msg: String) {
-        FileHandle.standardError.write("key_hints: \(msg)\n".data(using: .utf8)!)
-    }
-
-    // 실제 키 입력(= 단축키 실행)·포커스 상실 시 호출 — 보류 타이머를 취소하고, 표시 중이면 숨긴다. 정상 ⌘+키가
-    // 절대 HUD를 깜빡이지 않게(keyDown이 대기 타이머를 깸) + 단축키를 누르면 HUD가 사라지게 한다.
-    func cancelKeyHintHold() {
-        keyHintTimer?.invalidate()
-        keyHintTimer = nil
-        if keyHintShown { setKeyHints(false) }
-    }
-
-    // 가시성 토글의 단일 출처 — 상태 캐시(keyHintShown)·ABI·redraw를 묶는다. 같은 값이면 무동작(중복 redraw 방지).
-    private func setKeyHints(_ visible: Bool) {
-        guard keyHintShown != visible else { return }
-        keyHintShown = visible
-        guard let session = appSession else { return }
-        _ = maru_macos_app_session_set_key_hints(session, visible ? 1 : 0)
-        markMetalNeedsRedraw()
     }
 
     private func updateHover(atWindowPoint windowPoint: NSPoint, mods: Int32, in view: NSView) {

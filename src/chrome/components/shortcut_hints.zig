@@ -18,7 +18,7 @@ const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 시각만, 입력 라우팅엔 없다).
 pub const layer = draw.Layer.modal;
 
-/// 순수 상태 — 가시성만. platform이 ABI(set_key_hints)로 토글한다.
+/// 순수 상태 — 가시성만. platform 홀드 머신(keyhint_hold)이 ABI(key_hint_on_flags/on_timer/cancel) 경유로 토글한다.
 pub const State = struct { visible: bool = false };
 
 /// 한 배지 = 요소의 backing px rect + 그 요소를 동작시키는 단축키 chord 문자열(예: 카드엔 "⌘1", 새 워크스페이스

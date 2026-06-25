@@ -11682,6 +11682,25 @@ pub const AppSession = struct {
             }
         }
 
+        // 활성 pane 탭바: + 버튼(plus zone) → ⌘T(new_term), 활성 탭(seg) → ⌘W(close_term). barMetrics(렌더·hit-test와
+        // 같은 메트릭)로 위치 단일 출처 — +/탭 seg를 인라인 재계산하지 않는다.
+        {
+            const pane = self.activePane();
+            if (self.paneBarForLeaf(pane)) |pb| {
+                const cw2 = self.cell_width_px;
+                if (barMetrics(pb.tabs, cw2, pane.terms.items.len, tokens.space.tab_width_cols, pane.tab_scroll_cols)) |m| {
+                    if (try Local.chordStr(resolver, Action.new_term, arena)) |cs| {
+                        const plus = m.plusZoneStart();
+                        if (m.cols > plus) try badges.append(arena, .{ .rect = .{ .x = @intCast(pb.tabs.x + plus * cw2), .y = @intCast(pb.tabs.y), .w = (m.cols - plus) * cw2, .h = pb.tabs.h }, .chord = cs });
+                    }
+                    if (try Local.chordStr(resolver, Action.close_term, arena)) |cs| {
+                        const seg = m.segOf(pane.active_term);
+                        if (seg.end_col > seg.start_col) try badges.append(arena, .{ .rect = .{ .x = @intCast(pb.tabs.x + seg.start_col * cw2), .y = @intCast(pb.tabs.y), .w = (seg.end_col - seg.start_col) * cw2, .h = pb.tabs.h }, .chord = cs });
+                    }
+                }
+            }
+        }
+
         try self.chrome_host.collectKeyHintsDraws(badges.items, props, tokens, arena, draws);
     }
 

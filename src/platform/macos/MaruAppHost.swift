@@ -1588,6 +1588,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // flagsChanged는 keyCode 없이 modifierFlags만 주므로 현재 플래그가 정확히 트리거 하나인지로 판정한다.
     func handleModifierFlags(_ event: NSEvent) {
         guard let cfg = keyHintConfig, cfg.enabled else {
+            if Self.keyHintDebug, keyHintTimer != nil || keyHintShown { Self.keyHintLog("disabled/no-session → off") }
             cancelKeyHintHold() // 비활성/세션 없음 → 확실히 끔
             return
         }
@@ -1595,22 +1596,36 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if flags == cfg.modifier {
             // 트리거만 단독으로 눌림. 이미 표시 중이거나 타이머 대기 중이면 재-arm 안 함.
             if keyHintShown || keyHintTimer != nil { return }
+            if Self.keyHintDebug { Self.keyHintLog("solo trigger → arm timer \(cfg.delayMs)ms") }
             let delay = TimeInterval(cfg.delayMs) / 1000.0
             let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.keyHintTimer = nil
-                    // 만료 시점에도 여전히 트리거 단독이어야 표시(떼는 flagsChanged가 늦을 수 있어 재확인 — NSEvent.modifierFlags=현재 전역 상태).
-                    let now = NSEvent.modifierFlags.intersection([.command, .control, .option, .shift])
-                    guard now == cfg.modifier else { return }
+                    // 만료 시점에 트리거가 **여전히 눌려 있는지만** 가볍게 재확인한다(떼면 flagsChanged가 cancelKeyHintHold로
+                    // 타이머를 무효화하므로 보통 여기 도달 자체가 "유지됨"을 뜻한다). **contains로 완화** — 엄격 `==`는
+                    // NSEvent.modifierFlags의 여분/디바이스 비트로 트리거를 쥐고 있어도 간헐적으로 false가 나 "가끔 안 뜨던"
+                    // 원인이었다(다른 mod가 추가됐으면 위 else에서 이미 취소됨). 단독성은 flagsChanged 경로가 보장한다.
+                    let now = NSEvent.modifierFlags
+                    guard now.contains(cfg.modifier) else {
+                        if Self.keyHintDebug { Self.keyHintLog("timer fire but trigger released → skip (now=\(now.rawValue))") }
+                        return
+                    }
+                    if Self.keyHintDebug { Self.keyHintLog("timer fire → show") }
                     self.setKeyHints(true)
                 }
             }
             RunLoop.main.add(timer, forMode: .common) // live-resize 중에도 안 멈추게(tickTimer와 같은 .common 모드)
             keyHintTimer = timer
         } else {
+            if Self.keyHintDebug, keyHintTimer != nil || keyHintShown { Self.keyHintLog("non-solo (flags=\(flags.rawValue)) → cancel") }
             cancelKeyHintHold()
         }
+    }
+
+    private static let keyHintDebug = ProcessInfo.processInfo.environment["MARU_DEBUG"] != nil
+    private static func keyHintLog(_ msg: String) {
+        FileHandle.standardError.write("key_hints: \(msg)\n".data(using: .utf8)!)
     }
 
     // 실제 키 입력(= 단축키 실행)·포커스 상실 시 호출 — 보류 타이머를 취소하고, 표시 중이면 숨긴다. 정상 ⌘+키가

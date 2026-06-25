@@ -24,6 +24,11 @@ MASTER = 48
 # 안 겹친다(isSynthesizedCodepoint가 전역이라 BMP PUA를 쓰면 터미널의 그 글리프까지 가로챈다).
 ICONS = [
     ("git_branch", 0xF0001, "assets/icons/git-branch.svg"),
+    ("gear", 0xF0002, "assets/icons/gear.svg"),
+    ("plus", 0xF0003, "assets/icons/plus.svg"),
+    ("search", 0xF0004, "assets/icons/search.svg"),
+    ("bell", 0xF0005, "assets/icons/bell.svg"),
+    ("sidebar", 0xF0006, "assets/icons/sidebar-collapse.svg"),
 ]
 
 

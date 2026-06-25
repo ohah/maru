@@ -257,7 +257,7 @@ pub const KeyHintConfig = struct {
 | **KH-0** | 이 설계 문서(doc-first). AGENTS.md 인덱스 등록 | 문서 |
 | **KH-1** ✅ | chrome 컴포넌트 `shortcut_hints.zig`(State+view, handle 없음) + `paneRegion`/`paneTopRightBox`(overlay_input, 활성 pane 우상단 멀티행) + **키캡 렌더**(per-key quad+글리프, `p.shape` 토큰, §3.6) + `host.collectKeyHintsDraws`(`anyModalOpen` 억제) + `Row` 모델. rows는 fake로 헤드리스 테스트 | 컴포넌트 단위 ✅ |
 | **KH-2** ✅ | `command_catalog`에 `HintCategory`/`categoryOf`/`keyHintRows` + **`chordKeycaps`**(chord→키별 글리프 배열, `keyGlyph` 단일 출처, §3.6.3) + `app_session.buildChromeOverlayPrep`가 `key_hints.visible`일 때 rows 빌드해 collect 호출(아직 항상 false) | 내용 단위 ✅ |
-| **KH-3** | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도 + resolve + platform 노출 | round-trip·범위 |
+| **KH-3** ✅ | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도(namespace `keyhint`, GUI 섹션 `.input`) + configuration.md 키 + full-config 파싱 테스트. platform 노출(ABI 게터)은 KH-4가 소비처와 함께 추가 | round-trip·범위 ✅ |
 | **KH-4** | macOS `flagsChanged` 홀드 상태머신 + `NSTimer` + ABI `set_key_hints` + `markMetalNeedsRedraw` + `MARU_DEBUG`/`MARU_KEY_HINTS_FORCE`. delay/enabled/modifier를 config에서 | `zig build macos-app` 수동 + 스크린샷(force) |
 | **KH-5**(후속, 선택) | 맥락 인식(포커스 pane의 터미널 매크로 바인딩 노출)·빌트인 터미널 편집키(`⌘←` 등) 행·키캡 rich depth 폴리시(§3.6.2 sharp shadow)·`Space`(␣)/키패드 글리프·GUI 폴리시 | — |
 

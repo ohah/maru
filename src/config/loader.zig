@@ -858,6 +858,9 @@ test "parse: full config sets every field" {
         \\notifications.agent-complete = false
         \\notifications.osc = false
         \\notifications.history-limit = 100
+        \\keyhint.enabled = false
+        \\keyhint.delay = 250
+        \\keyhint.modifier = control
     );
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
@@ -885,6 +888,9 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(false, p.config.notifications.agent_complete); // notifications.agent-complete 파싱(기본 true)
     try std.testing.expectEqual(false, p.config.notifications.osc); // notifications.osc 파싱(기본 true)
     try std.testing.expectEqual(@as(u32, 100), p.config.notifications.history_limit); // notifications.history-limit 파싱(기본 64)
+    try std.testing.expectEqual(false, p.config.keyhint.enabled); // keyhint.enabled 파싱(기본 true)
+    try std.testing.expectEqual(@as(u32, 250), p.config.keyhint.delay); // keyhint.delay 파싱(기본 400)
+    try std.testing.expectEqual(theme.HintModifier.control, p.config.keyhint.modifier); // keyhint.modifier 파싱(기본 command, enum 토큰)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 

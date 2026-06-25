@@ -776,9 +776,21 @@ bool maru_metal_renderer_draw(
             }
             // PUA 합성 아이콘은 fillCoverage가 슬롯(EAW width 폭) 중앙에 그리므로, 이모지 시절 종(width 2)의 슬롯 중심이
             // 셀 경계에 떨어져 1칸 아이콘과 반칸 어긋나 px_nudge(-0.5칸)로 보정하던 것이 불필요하다 — 합성 아이콘 중심이
-            // 곧 슬롯 중심이라 어느 width·col이든 정합한다(종/검색이 width 2여도 보정 0).
-            const float px_nudge = 0.0f; // PUA 합성 아이콘(◧⚙+🔔🔍)은 슬롯 중앙에 그려져 이모지 시절 2칸 중심 보정이 불필요
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale);
+            // 곧 슬롯 중심이라 어느 width·col이든 정합한다(검색이 width 2여도 보정 0).
+            if (is_bell_icon) {
+                // 종(🔔)은 width 2라 quad 폭=cw×span=2cw → 1.7×면 3.4cw인데, slot은 raster_*_px=cell_w×1.7=1.7cw×1.7ch
+                // (width 무관)라 1.7cw 텍스처가 3.4cw quad로 가로 2× 늘어나 납작해졌다(measured 28×18px). 코너 아이콘
+                // (width 1)과 같은 1.7cw×1.7ch quad로 그리면 slot과 종횡비가 일치해 왜곡 0·동일 크기다 — span을 1로 두고
+                // (가로 1cw base) origin을 +0.5cw 밀어 2칸 footprint 중앙((col+1)·cw)에 맞춘다. UV는 per-glyph
+                // baked(cell.u0..v1)라 width 복사와 무관(텍스처 불변). 배지(app_session notificationBadgeCol=bell_col+2)는
+                // 원 반지름(0.85cw)이 좁아진 종 우측 모서리에 ~0.2cw 겹쳐 그대로 코너 배지가 된다(이동 불필요).
+                MaruAppHostMetalCell bell = tc;
+                bell.width = 1; // 1칸 폭 quad(코너 아이콘과 동형) — 가로 stretch 제거
+                maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], bell, (float)tc.origin_x + cw * 0.5f, cw, py_top, ch, drawable_w, drawable_h, hscale);
+            } else {
+                const float px_nudge = 0.0f; // PUA 합성 아이콘(◧⚙+🔍)은 슬롯 중앙에 그려져 이모지 시절 2칸 중심 보정이 불필요
+                maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale);
+            }
         }
         quad_index += cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를

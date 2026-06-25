@@ -107,6 +107,7 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `workspace.restore-claude` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 claude 세션을 자동 resume(`claude --resume <id>`). **opt-in** — 위험모드(`--dangerously-skip-permissions`) 재현을 명시적으로 켠다. 아래 참조 |
 | `workspace.restore-codex` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 codex 세션을 자동 resume(`codex resume <id>`). **opt-in**, restore-claude와 같은 정책. 아래 참조 |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
+| `scrollback.sticky-command` | 불리언 | `true` | sticky command — 스크롤백을 위로 올리면 지금 보이는 출력을 만든 **명령줄을 뷰포트 최상단에 고정** 표시(✓/✗ 종료상태 포함). OSC 133 semantic prompt 마커에 의존하므로 셸 통합(현재 zsh)이 켜진 세션에서만 동작하고, 마커가 없으면 그냥 안 뜬다. `false`면 끔 |
 | `scroll.multiplier` | 실수(0.1~10.0) | `1.0` | 휠/트랙패드 **세로** 스크롤 속도 배수. `1.0`=OS 기본, `>1`=빠르게(예: `3`이면 한 틱에 3배 줄), `<1`=느리게. 가로(탭 바) 스크롤엔 적용 안 함. 배수는 maru 스크롤백뿐 아니라 **마우스 트래킹 앱(vim/tmux 등)에도 적용**된다(한 휠 틱이 더 많은 휠 이벤트로 전달 — Ghostty `mouse-scroll-multiplier`와 같은 동작). 범위 밖/비실수는 무시(기본 유지). `scrollback`(보관 줄 수)과 별개 |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
 | `bell.visual` | `true`\|`false` | `false` | BEL 수신 시 **화면을 잠깐 번쩍**이는 시각 벨. `true`면 활성 화면 위에 전경색 반투명 오버레이를 덮고 ~250ms 페이드아웃한다(소리를 못 듣는 환경 보조). `audible`과 독립이라 둘 다 켤 수 있다. 기본 `false`(현행 — 소리만) |

@@ -819,6 +819,52 @@ pub const TerminalCore = struct {
         return self.screen.sb.rowPrompt(i);
     }
 
+    /// sticky scroll 한 줄: 뷰포트 최상단 출력이 속한 명령의 **명령줄(.input) 스크롤백 행** + 종료코드.
+    pub const StickyCommand = struct {
+        row: usize, // 스크롤백 인덱스(0=가장 오래됨) — 이 행이 명령줄(.input). app이 scrollbackRow로 텍스트를 읽는다.
+        exit: ?i16, // 그 명령의 종료코드(OSC 133 D 없으면 null=실행 중). ✓(0)/✗(≠0) 색에 쓴다.
+    };
+
+    /// 스크롤백을 위로 올렸을 때(view_offset>0) 뷰포트 최상단 출력이 속한 명령의 **명령줄(.input)** 을 찾는다 —
+    /// sticky scroll 단일 출처(headless 단위 테스트 가능). 라이브 바닥(vo=0)·스크롤백 없음·명령줄이 이미 보이면
+    /// null을 준다(명령줄이 뷰포트 위로 밀려났을 때만 그 행을 돌려준다). vo>0이면 최상단과 그 위는 전부 스크롤백이라
+    /// (활성 화면은 항상 vo줄 아래) 스크롤백 인덱싱만 본다. 종료코드는 OSC 133 D가 프롬프트 시작 행에 스탬프하므로
+    /// (osc.zig stampPromptExit) 명령줄에서 프롬프트 블록(.input/.prompt)을 위로 거슬러 첫 non-null exit를 읽는다
+    /// (단일 행 프롬프트면 명령줄 자체가 exit를 든다). 명령이 실행 중(D 없음)이면 exit=null이라 ✓/✗ 없이 명령줄만.
+    pub fn stickyCommand(self: *const TerminalCore) ?StickyCommand {
+        const vo = self.view_offset;
+        if (vo == 0) return null; // 라이브 바닥 — sticky 없음
+        const count = self.screen.sb.count;
+        if (count == 0 or vo > count) return null;
+        const top = count - vo; // 뷰포트 최상단의 스크롤백 인덱스(이 위는 전부 스크롤백)
+        const top_kind = self.scrollbackRowPrompt(top).kind;
+        if (top_kind == .input or top_kind == .prompt) return null; // 명령줄/프롬프트가 이미 최상단에 보임 — 불필요
+        // 최상단이 출력(.command)/미분류(.unknown) — 위로 거슬러 가장 가까운 명령줄(.input)을 찾는다.
+        var cmd_row: ?usize = null;
+        var i = top;
+        while (i > 0) {
+            i -= 1;
+            if (self.scrollbackRowPrompt(i).kind == .input) {
+                cmd_row = i;
+                break;
+            }
+        }
+        const cr = cmd_row orelse return null; // 위에 명령줄 없음(통합 안 됨/맨 위) — sticky 없음
+        var exit: ?i16 = null;
+        var j = cr;
+        while (true) {
+            const rp = self.scrollbackRowPrompt(j);
+            if (rp.kind != .input and rp.kind != .prompt) break; // 프롬프트 블록을 벗어남
+            if (rp.exit) |e| {
+                exit = e;
+                break;
+            }
+            if (j == 0) break;
+            j -= 1;
+        }
+        return .{ .row = cr, .exit = exit };
+    }
+
     /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다(bracketed paste 래핑 + CR 정규화 + ESC 인젝션 방어).
     /// 본문: input_report.encodePaste. 호출자가 free한다.
     pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -6412,6 +6458,33 @@ test "OSC 133: a multi-row prompt propagates prompt to every line" {
     try core.write("\x1b]133;B\x1b\\"); // 현재 행(row2)만 input으로
     try std.testing.expectEqual(types.SemanticPrompt.input, core.screen.prompt_marks[2].kind);
     try std.testing.expectEqual(types.SemanticPrompt.prompt, core.screen.prompt_marks[1].kind); // 앞 행은 유지
+}
+
+test "stickyCommand: 스크롤 시 뷰포트 위 명령줄(.input)+종료코드를 찾고, 바닥/맨위에선 null" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer core.deinit();
+    // 한 명령 사이클: A(프롬프트)·B(입력)로 row0을 명령줄로 만들고 "> build"를 친 뒤, C(출력)·출력줄·D;0.
+    try core.write("\x1b]133;A\x1b\\"); // row0 prompt
+    try core.write("\x1b]133;B\x1b\\"); // row0 input(명령줄)
+    try core.write("> build"); // 명령줄 텍스트(row0)
+    try core.write("\r\n"); // → row1(input 전파)
+    try core.write("\x1b]133;C\x1b\\"); // row1 command(출력 시작)
+    try core.write("out1\r\nout2"); // row1·row2 — 아직 스크롤 안 함(3행)
+    try core.write("\x1b]133;D;0\x1b\\"); // 종료코드 0 — 화면에 있는 row0(프롬프트 시작)에 스탬프
+    try std.testing.expect(core.stickyCommand() == null); // 라이브 바닥(vo=0) — sticky 없음
+    // 출력을 더 흘려 "> build"를 스크롤백으로 밀어낸다(RowPrompt input+exit=0이 함께 carry).
+    try core.write("\r\nout3\r\nout4\r\nout5");
+    try std.testing.expectEqual(@as(usize, 3), core.scrollbackLen()); // ["> build", "out1", "out2"]
+    // vo=2 → top=1("out1", 출력) → 위로 거슬러 row0(명령줄) 찾음.
+    core.scrollViewport(2);
+    const sticky = core.stickyCommand() orelse return error.NoSticky;
+    try std.testing.expectEqual(@as(usize, 0), sticky.row);
+    try std.testing.expectEqual(@as(?i16, 0), sticky.exit);
+    var it = types.RowCodepoints{ .cells = core.scrollbackRow(sticky.row) orelse return error.NoRow };
+    try std.testing.expectEqual(@as(?u21, '>'), it.next()); // 명령줄 "> build"의 첫 글자
+    // 끝까지 스크롤(vo=3 → top=0=명령줄 자체)이면 명령줄이 이미 최상단에 보이므로 null.
+    core.scrollViewport(1); // vo=3
+    try std.testing.expect(core.stickyCommand() == null);
 }
 
 test "OSC 133: autowrap continuation keeps the tag (glyph writes do NOT reset it)" {

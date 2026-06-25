@@ -836,8 +836,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func windowDidResignKey(_ notification: Notification) {
         // 창 포커스 상실 → CSI O(focus reporting 켜졌으면). 뷰의 windowLostKey(IME 조합 커밋)와는 별개 경로/목적.
-        cancelKeyHintHold() // 단축키 힌트 HUD도 닫는다(KH-4 — 앱 전환 등으로 포커스 잃으면 떼는 flagsChanged가 안 올 수 있음)
-        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.appSession else { return }
+        let resigning = surfaceForWindow(notification.object as? NSWindow)
+        // 단축키 힌트 HUD를 닫는다(KH-4 — 앱 전환 등으로 떼는 flagsChanged가 안 올 수 있음). **떠나는 창의 surface로**
+        // 취소한다 — 활성 surface로 보내면 멀티 윈도우에서 이미 새 키 창(idle 머신)을 건드리고 떠나는 창 배지가 켜진 채
+        // 남는다(리뷰 #1063 지적). 단일 윈도우는 resigning==활성이라 동작 불변.
+        cancelKeyHintHold(for: resigning)
+        guard let surface = resigning, let session = surface.appSession else { return }
         _ = maru_macos_app_session_focus_changed(session, 0)
     }
 
@@ -1604,8 +1608,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // 실제 키 입력(= 단축키 실행)·포커스 상실 시 호출 — 머신에 취소를 흘린다(대기 중이면 cancel, 표시 중이면 hide).
     // 정상 ⌘+키가 HUD를 깜빡이지 않게(keyDown이 대기 타이머를 깸) + 단축키를 누르면 HUD가 사라지게 한다.
-    func cancelKeyHintHold() {
-        guard let session = appSession else { return }
+    //
+    // `surface`는 **어느 창의 홀드를 취소할지** 고른다. 홀드 머신·배지 visible은 surface(AppSession)별이므로, 멀티
+    // 윈도우에서 떠나는 창의 배지를 끄려면 **그 창의 surface**로 취소해야 한다 — nil이면 활성 surface(keyDown은 키
+    // 창=활성이라 기본값으로 충분, windowDidResignKey는 떠나는 창을 명시로 넘긴다). 타이머는 컨트롤러-전역(키 창만
+    // arm)이라 session 해석과 무관하게 **항상 무효화**한다(session nil인 teardown에도 댕글링 타이머가 안 남게).
+    func cancelKeyHintHold(for surface: TerminalSurface? = nil) {
+        keyHintTimer?.invalidate()
+        keyHintTimer = nil
+        guard let session = (surface ?? activeSurface)?.appSession else { return }
         applyKeyHintAction(maru_macos_app_session_key_hint_cancel(session))
     }
 
@@ -1614,9 +1625,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 걸고 만료 시 머신에 on_timer를 흘린다; cancel/hide는 대기 타이머를 무효화; show/hide는 다음 프레임 redraw.
     private func applyKeyHintAction(_ action: Int32) {
         switch action {
-        case 1: // arm_timer
-            keyHintTimer?.invalidate() // 중복 방지(머신이 재-arm을 막지만 방어적으로)
-            let delay = TimeInterval(keyHintDelayMs ?? 500) / 1000.0
+        case 1: // arm_timer (머신이 재-arm을 막으므로 keyHintTimer는 이미 nil — 추가 invalidate는 불필요)
+            // keyHintDelayMs 읽기 실패(arm 직후 session nil) 시 fallback은 config 기본값 keyhint.delay(400ms, theme.zig)와
+            // 일치시킨다 — SSOT 드리프트 방지(머신이 arm을 냈다는 건 session이 있었다는 뜻이라 실제로는 거의 안 쓰임).
+            let delay = TimeInterval(keyHintDelayMs ?? 400) / 1000.0
             let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, let session = self.appSession else { return }

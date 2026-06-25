@@ -170,10 +170,12 @@ int32_t maru_macos_app_session_key_hint_cancel(MaruAppHostSession* s);          
 `app_session`의 `keyHintOnFlags/keyHintOnTimer/keyHintCancel`이 머신을 굴리고, `show`/`hide`면 `host.key_hints.visible`를
 토글한다(focusChanged·scroll_page와 같은 chrome state + dirty 패턴). **옛 `set_key_hints`는 제거**됐다(KH-7 — 가시성을 머신이 소유).
 
-### 3.5 홀드 감지 — 순수 상태머신 `src/platform/macos/keyhint_hold.zig` (KH-7)
+### 3.5 홀드 감지 — 순수 상태머신 `src/session/keyhint_hold.zig` (KH-7)
 
 홀드 판정은 **순수 Zig 상태머신**(`KeyHintHold` — 헤드리스 테스트 가능)이 단일 출처로 한다. Swift는 OS 타이머 clock과
-modifier 비트 변환·redraw만 책임진다(native 최소). gesture 정책(enabled·단독성·트리거 모디파이어)은 전부 Zig.
+modifier 비트 변환·redraw만 책임진다(native 최소). gesture 정책(enabled·단독성·트리거 모디파이어)은 전부 Zig. OS-중립
+입력 정책이라 **L2 session 코어**(`src/session/`, `ime`·`input_math`·`layout_math`와 같은 자리)에 둔다 — platform/macos
+어댑터에 가두지 않는다(docs/layering-and-portability.md §2·§8). config(L0)만 의존하고 platform은 alias로 참조한다.
 
 ```
 onFlags(mods, enabled, trigger):   // Swift flagsChanged → 현재 눌린 modifier 비트
@@ -234,19 +236,27 @@ modifier·특수키 글리프는 Apple/macOS 표준 유니코드 기호를 쓴�
 
 **베이스/결정**: 기호=Apple HIG 표준(공개 명세 — 이미 준수), 키캡 외형=W3C `<kbd>`·웹 디자인 시스템 보편 규약(둥근+테두리+depth)을 **형태만** 따와 maru 렌더러 프리미티브(rich quad+shadow 토큰)로 독립 구현한다([document-basis-and-decision]·clean-room). 특정 라이브러리 코드/CSS를 옮기지 않는다.
 
-## 4. 상태 머신 (Swift 홀드 감지)
+## 4. 상태 머신 (순수 Zig — `src/session/keyhint_hold.zig`, KH-7)
+
+판정은 **OS-중립 순수 머신** `KeyHintHold`가 한다(§3.5). Swift는 이벤트를 흘리고 돌아온 Action(`none`/`arm_timer`/`cancel`/`show`/`hide`)으로 OS 타이머·redraw만 매핑한다. `visible` 토글은 머신이 소유한다(옛 `set_key_hints` ABI는 제거 — KH-7).
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Pending: flagsChanged — Cmd 단독 ON
-    Pending --> Idle: Cmd OFF / 다른 mod / keyDown(타이머 취소)
-    Pending --> Shown: 타이머 만료(여전히 Cmd 단독)
-    Shown --> Idle: Cmd OFF / keyDown / 포커스 상실 → set_key_hints(false)
-    Shown --> Shown: redraw(내용 불변)
+    Idle --> Armed: onFlags 트리거 단독 ON (arm_timer)
+    Armed --> Idle: onFlags 해제·다른mod (cancel)
+    Armed --> Idle: onKeyOrBlur keyDown·포커스상실 (cancel)
+    Armed --> Shown: onTimerFire armed & enabled (show)
+    Armed --> Idle: onTimerFire 늦은fire armed=false (none)
+    Armed --> Idle: onTimerFire 비활성화됨 enabled=false (cancel)
+    Shown --> Idle: onFlags 해제 (hide)
+    Shown --> Idle: onKeyOrBlur keyDown·포커스상실 (hide)
 ```
 
-핵심 불변: `Shown`은 "Cmd 단독 + delay 경과 + 그 사이 일반 키 없음"일 때만. 정상 `Cmd+T`는 keyDown이 `Pending`을 깨 절대 `Shown`에 안 간다.
+핵심 불변:
+- `Shown`은 "트리거 단독 + delay 경과 + 그 사이 취소 flagsChanged 없음"일 때만. 정상 `Cmd+T`는 keyDown이 `Armed`를 깨 절대 `Shown`에 안 간다.
+- **만료는 글로벌 modifier를 다시 안 읽는다**(루트커즈 수정 — §3.5). `Armed`가 만료까지 살아남은 것 자체가 트리거 유지의 증거다. 단, `enabled`는 같은 config(단일 출처)의 라이브 값이라 재확인한다 — arm 후 비활성화되면 만료가 배지를 깜빡이지 않는다.
+- 취소된 늦은 fire(`armed=false`)는 자연히 무시(race 안전).
 
 ## 5. config (스키마-주도)
 
@@ -302,6 +312,7 @@ pub const KeyHintConfig = struct {
 | **KH-6 A** ✅ | 활성 pane 탭바 `+`(`⌘T` new_term)·활성 탭(`⌘W` close_term) 배지 — `paneBarForLeaf`+`barMetrics`(render·hit-test와 같은 메트릭, plusZoneStart·segOf)로 위치 단일 출처 | `MARU_SCREENSHOT` 캡처 ✅(탭 ⌘W·탭바+ ⌘T) |
 | **KH-6 A 잔여(보류)** | pane 이동/포커스(`⌘]`·`⌘⌥←→↑↓`) — split일 때만 의미·대상 모호라 보류 | — |
 | **KH-7(루트커즈 — 간헐 미표시)** ✅ | "Cmd 눌렀을 때 나올 때도 있고 안 나올 때도" 수정. **원인**: 옛 KH-4 경로는 arm/cancel은 `flagsChanged.modifierFlags`로, **타이머 만료 콜백에선 `NSEvent.modifierFlags`(전역 정적 — 2번째 출처)를 재읽기**해 트리거 단독을 재확인했는데, 그 정적 읽기가 stale/빈 값이면 트리거를 쥐고 있어도 `set_key_hints(1)`을 건너뛰어 미표시. **수정**: 홀드 판정을 순수 Zig 상태머신 `keyhint_hold.zig`(`KeyHintHold`)로 이주 — 권위 출처는 flagsChanged 이벤트 스트림 하나, `onTimerFire`는 글로벌을 안 읽고 `armed`만 본다(arm 후 취소 flagsChanged가 없었다 = 트리거 유지). ABI v88 `key_hint_on_flags`/`_on_timer`/`_cancel`(←`set_key_hints` 제거), Swift는 modifier 비트 변환·OS 타이머·redraw만(native 최소). 취소된 늦은 fire는 `armed=false`라 무시(race 안전) | **루트커즈를 재현·고정하는 헤드리스 테스트 8개**(`keyhint_hold.zig` — "armed 살아남으면 글로벌 재읽기 없이 무조건 show", "해제로 취소 후 늦은 fire는 미표시" 등) + ABI/Swift-check/macos-app-build green + `MARU_SCREENSHOT` 배지 캡처 ✅. 홀드 실기 확인은 사용자 |
+| **KH-8(KH-7 `/code-review max` 후속)** ✅ | 리뷰 CONFIRMED 결함 수정: ① **멀티윈도우** — `windowDidResignKey`가 활성 surface로 cancel해 떠나는 창 배지가 남던 것을 **떠나는 surface**로 라우팅(`cancelKeyHintHold(for:)`); ② `onTimerFire(enabled)` — arm 후 config 비활성화 시 만료가 배지 깜빡이던 것 재확인으로 차단; ③ **레이어링** — `keyhint_hold.zig`를 `platform/macos`→**`src/session/`**(OS-중립 L2, layering-and-portability.md §2·§8) 이동, platform은 alias 참조; ④ 방어 코드 제거(arm_timer의 dead `keyHintTimer?.invalidate()` — no-defensive-code 규칙); ⑤ `cancelKeyHintHold` 무조건 타이머 무효화(session nil teardown 댕글링 방지); ⑥ delay fallback `500`→`400`(config SSOT 일치); ⑦ `MARU_KEY_HINTS_FORCE`도 머신 `shown` 동기; ⑧ 문서 §4 stale(Swift 귀속·`set_key_hints`) 정정 | `onTimerFire(false)` 재현 테스트 추가(테스트 9개) + `zig build test`(머신 테스트 session 코어로 이동)·swift-check·macos-app-build·boundaries green |
 | **KH-옛(후속, 선택)** | 빌트인 터미널 편집키(`⌘←` 등)·`Space`(␣)/키패드 글리프 | — |
 
 머지 규율은 [merge-only-on-green]·[run-macos-app-before-merge] 메모리를 따른다(checks green + KH-4는 실제 앱 실행 후 머지).

@@ -2,7 +2,7 @@ const std = @import("std");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
 const keycode = @import("keycode.zig");
-const keyhint_hold = @import("keyhint_hold.zig");
+const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
 
 const c = @cImport({

@@ -11066,10 +11066,12 @@ pub const AppSession = struct {
         // headerHit의 notifications zone(cols-12..cols-9)이 종 글리프(cols-12·cols-11)와 배지(cols-10)를 모두 포함한다(클릭→패널).
         // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 글리프·색·배지 규칙은 appendBellAndBadge가
         // 접힘 토글과 공유(접힘은 좌측 텍스트 배지 — round_badge=false). 1~9 숫자·10+ "9" cap은 원형 1칸 제약(docs §3).
+        // 아이콘 glyph col은 sidebar.headerIconCol 단일 출처(배지·hit-test와 공유 — 종은 2칸 이모지라 별도 cols-12).
+        const sb_icon = chrome.components.sidebar;
         try self.appendBellAndBadge(&cells, cols - 12, fg, true); // 펼침: 종(cols-12) 우상단 원형 배지(흰 숫자 cols-10 + 빨강 원 quad)
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 8, .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 5, .codepoint = 0x2699, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = cols - 2, .codepoint = '+', .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.toggle_sidebar, cols)), .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = 0x2699, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = '+', .style = .{ .foreground = fg } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
@@ -11343,6 +11345,9 @@ pub const AppSession = struct {
         tk: *const chrome.Tokens,
         cw: u32,
         ch: u32,
+        // transparent_default=true면 패널 배경(quad) 없이도 빈 surface_bg 셀을 투명(.default)으로 둔다 — 단축키 배지처럼
+        // 요소 위 흩어진 곳에만 칠하고 나머지는 chrome/터미널이 비치게(modal_bg_quad와 같은 skip을 패널 없이 켜는 플래그).
+        transparent_default: bool,
     ) !OverlayRaster {
         if (cw == 0 or ch == 0) return error.NoMetrics;
         // C4b 모달: rich 모달 배경 quad 수집(painter의 .quad가 radius>0면 append). buildChromeOverlayFrame이
@@ -11520,7 +11525,7 @@ pub const AppSession = struct {
                 // quad를 사각으로 덮는다(리뷰 #1) — 빈 셀은 skip해 quad가 비치게 한다(글자 칸만 emit).
                 // C4b 모달: 빈 셀 skip은 **기본 배경(surface_bg)인 빈 칸만** — 선택 행 강조(tab_active_bg) 등
                 // 다른 배경의 빈 칸은 emit해야 그 칸도 하이라이트된다(빈 칸까지 skip하면 글자만 강조돼 보였던 버그).
-                if (modal_bg_quad and cp[idx] == ' ' and std.meta.eql(bg[idx], surface_bg_col)) {
+                if ((modal_bg_quad or transparent_default) and cp[idx] == ' ' and std.meta.eql(bg[idx], surface_bg_col)) {
                     c += if (w == 2) @as(u16, 2) else 1;
                     continue;
                 }
@@ -11528,7 +11533,7 @@ pub const AppSession = struct {
                 // 한다 — 셀 배경 사각형이 quad와 미세하게 어긋나 '글자 뒤에만 배경색이 떠' 부자연스럽던 문제 제거
                 // (사용자 피드백). 빈 surface_bg 셀은 위에서 skip, accent/보조 버튼 등 비-surface_bg 배경은 그대로 칠해
                 // 버튼이 보인다. tui(modal_bg_quad=false)는 박스가 셀 배경이라 그대로 surface_bg를 유지한다.
-                const cell_bg: terminal.Color = if (modal_bg_quad and std.meta.eql(bg[idx], surface_bg_col)) .default else bg[idx];
+                const cell_bg: terminal.Color = if ((modal_bg_quad or transparent_default) and std.meta.eql(bg[idx], surface_bg_col)) .default else bg[idx];
                 cells.appendAssumeCapacity(.{ .row = r, .col = c, .codepoint = cp[idx], .width = w, .style = .{ .foreground = fg[idx], .background = cell_bg } });
                 c += if (w == 2) @as(u16, 2) else 1; // wide면 continuation 칸 스킵
             }
@@ -11615,6 +11620,56 @@ pub const AppSession = struct {
         return rows;
     }
 
+    /// 단축키 힌트 배지(요소 rect + chord)를 요소 레이아웃에서 빌드해 host.collectKeyHintsDraws에 넘긴다 — 모디파이어
+    /// 홀드 시 각 chrome 요소 **우상단**에 그 단축키를 띄운다. 위치가 있는 요소만(요소 없는 ⌘F/⌘K/⌘A/폰트는 생략 —
+    /// 사용자 결정). chord는 command_catalog가 사용자 리바인드/unbind를 반영(없으면 그 요소 배지 생략). chord 문자열·배지
+    /// 배열은 arena 소유(rasterize까지 유효). macOS 전용. 단일 출처: docs/keybind-hints.md.
+    fn buildKeyHintBadges(self: *AppSession, props: chrome.ChromeProps, tokens: *const chrome.Tokens, arena: std.mem.Allocator, draws: *std.ArrayList(chrome.ChromeDraw)) !void {
+        const Badge = chrome.components.shortcut_hints.Badge;
+        const Action = config_mod.Action;
+        const resolver = self.loaded_config.keyBindingResolver();
+        var badges: std.ArrayList(Badge) = .empty;
+
+        // 한 액션의 현재 chord를 표시 문자열로(arena dupe). 안 묶였으면 null(그 요소 배지 생략).
+        const Local = struct {
+            fn chordStr(res: anytype, action: Action, a: std.mem.Allocator) !?[]const u8 {
+                const chord = command_catalog.chordForAction(res, action) orelse return null;
+                var buf: [command_catalog.max_chord_display_len]u8 = undefined;
+                return try a.dupe(u8, command_catalog.formatChord(chord, &buf));
+            }
+        };
+
+        // 사이드바 워크스페이스 카드 1~9 → ⌘1~⌘9(select_tab). 접힘이면 카드가 없어 생략. 슬롯 y는 sidebar.slotTop
+        // (slotAt의 역) 단일 출처 — 인라인 중복/이름 충돌 금지.
+        const sidebar = chrome.components.sidebar;
+        if (!self.sidebar_collapsed and self.sidebar_width_px > 0 and self.sidebar_slot_height_px > 0) {
+            const header_h: i64 = @intCast(self.sidebar_header_height_px);
+            const n = @min(self.tabs.items.len, @as(usize, 9));
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const cs = (try Local.chordStr(resolver, Action{ .select_tab = i }, arena)) orelse continue;
+                const y = sidebar.slotTop(i, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px);
+                if (y + @as(i64, @intCast(self.sidebar_slot_height_px)) <= header_h) continue; // 헤더 위로 스크롤돼 안 보이는 카드 생략
+                try badges.append(arena, .{ .rect = .{ .x = 0, .y = @intCast(@max(y, header_h)), .w = self.sidebar_width_px, .h = self.sidebar_slot_height_px }, .chord = cs });
+            }
+            // 새 워크스페이스 + 버튼(헤더 줄0) → ⌘⇧T(new_tab). 아이콘 col은 sidebar.headerIconCol 단일 출처(render와 공유).
+            if (try Local.chordStr(resolver, Action.new_tab, arena)) |cs| {
+                const cw = @max(self.cell_width_px, 1);
+                const cols = self.sidebar_width_px / cw;
+                if (cols >= 3) try badges.append(arena, .{ .rect = .{ .x = @intCast(sidebar.headerIconCol(.new_workspace, cols) * cw), .y = 0, .w = cw, .h = self.cell_height_px }, .chord = cs });
+            }
+        }
+
+        // 활성 pane → ⌘D(split_horizontal). 활성 pane rect 우상단.
+        if (self.active_pane_rect.w > 0) {
+            if (try Local.chordStr(resolver, Action.split_horizontal, arena)) |cs| {
+                try badges.append(arena, .{ .rect = .{ .x = @intCast(self.active_pane_rect.x), .y = @intCast(self.active_pane_rect.y), .w = @intCast(self.active_pane_rect.w), .h = @intCast(self.active_pane_rect.h) }, .chord = cs });
+            }
+        }
+
+        try self.chrome_host.collectKeyHintsDraws(badges.items, props, tokens, arena, draws);
+    }
+
     /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find·Palette)의 ChromeDraw를 수집해(실제
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
@@ -11656,15 +11711,14 @@ pub const AppSession = struct {
             const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
             try self.chrome_host.collectSettingsDraws(labels, fields, props, &tokens, arena, &draws);
         }
-        if (self.chrome_host.key_hints.visible) {
-            // 단축키 힌트 HUD(패시브, KH-1/2) — 현재 바인딩을 카테고리별 키캡 행으로 빌드해 주입한다. collectKeyHintsDraws가
-            // 모달 열림이면 내부에서 억제한다. visible 토글(모디파이어 홀드)은 KH-4(ABI)가 연결 — 그 전엔 항상 false라 휴면.
-            const rows = try command_catalog.keyHintRows(self.loaded_config.keyBindingResolver(), arena);
-            try self.chrome_host.collectKeyHintsDraws(rows, props, &tokens, arena, &draws);
-        }
-        if (draws.items.len == 0) return null; // 열린 오버레이 없음 — prep 없음(래퍼가 error.NotOpen으로 환산)
+        // 단축키 힌트(재설계): 모달이 안 열렸고 key_hints.visible면 **각 chrome 요소 우상단에 단축키 배지**를 빌드한다
+        // (한 박스 HUD가 아니라 요소별 배지 — 사용자 요청). 모달이 열렸으면(위에서 draws 채워짐) 배지는 억제(모달 우선).
+        // 배지는 요소 위 흩어진 곳만 칠하므로 아래 rasterize를 transparent_default로 해 나머지가 chrome/터미널이 비치게 한다.
+        const key_hint_badges = draws.items.len == 0 and self.chrome_host.key_hints.visible;
+        if (key_hint_badges) try self.buildKeyHintBadges(props, &tokens, arena, &draws);
+        if (draws.items.len == 0) return null; // 열린 오버레이/배지 없음 — prep 없음(래퍼가 error.NotOpen으로 환산)
 
-        var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);
+        var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch, key_hint_badges);
         // C4b 모달-2b: 모달 배경 quad(layer=1)를 self.gpu_quads(over 패스)에 머지. renderFrame이 매 프레임
         // dropQuadsByLayer(1)로 layer1을 비운 직후라 누적되지 않는다. cells 소유권은 finishOverlayPrep이.
         self.gpu_quads.appendSlice(self.allocator, raster.gpu_quads.items) catch {};
@@ -14753,7 +14807,7 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
     };
     const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
 
-    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
+    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20, false);
     defer raster.cells.deinit(allocator);
     defer raster.gpu_quads.deinit(allocator);
     defer raster.gpu_shadows.deinit(allocator);
@@ -14795,7 +14849,7 @@ test "rasterizeOverlayCells: draw.Op.clip → OverlayRaster.clip_rect(렌더러 
         .{ .clip = .{ .x = 5, .y = 10, .w = 100, .h = 50 } },
     };
     const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
-    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
+    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20, false);
     defer raster.cells.deinit(allocator);
     defer raster.gpu_quads.deinit(allocator);
     defer raster.gpu_shadows.deinit(allocator);
@@ -14808,7 +14862,7 @@ test "rasterizeOverlayCells: draw.Op.clip → OverlayRaster.clip_rect(렌더러 
     // clip op이 없으면 null = 클리핑 없음(기존 동작 무변).
     var ops2 = [_]chrome.draw.Op{.{ .fill = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 20 }, .role = .surface_bg } }};
     const draws2 = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops2 }};
-    var raster2 = try AppSession.rasterizeOverlayCells(allocator, &draws2, &tk, 10, 20);
+    var raster2 = try AppSession.rasterizeOverlayCells(allocator, &draws2, &tk, 10, 20, false);
     defer raster2.cells.deinit(allocator);
     defer raster2.gpu_quads.deinit(allocator);
     defer raster2.gpu_shadows.deinit(allocator);
@@ -14840,7 +14894,7 @@ test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함
     };
     const draws = [_]chrome.ChromeDraw{.{ .layer = .modal, .ops = &ops }};
 
-    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20);
+    var raster = try AppSession.rasterizeOverlayCells(allocator, &draws, &tk, 10, 20, false);
     defer raster.cells.deinit(allocator);
     defer raster.gpu_quads.deinit(allocator);
     defer raster.gpu_shadows.deinit(allocator);
@@ -17778,7 +17832,7 @@ test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 �
     try session.chrome_host.collectDraws(props, &tk, arena, &draws);
     try std.testing.expect(draws.items.len > 0);
 
-    var raster = try AppSession.rasterizeOverlayCells(allocator, draws.items, &tk, session.cell_width_px, session.cell_height_px);
+    var raster = try AppSession.rasterizeOverlayCells(allocator, draws.items, &tk, session.cell_width_px, session.cell_height_px, false);
     defer {
         raster.cells.deinit(allocator);
         raster.gpu_quads.deinit(allocator);

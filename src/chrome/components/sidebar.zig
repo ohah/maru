@@ -48,6 +48,25 @@ pub fn slotAt(y_px: f64, header_height_px: u32, slot_height_px: u32, scroll_offs
     return @intFromFloat(slot_f);
 }
 
+/// 슬롯 인덱스 i의 화면 상단 y(backing px) — slotAt(y→i)의 **역**(i→y). 카드 rect·드롭 인디케이터·단축키 배지가
+/// 같은 식을 쓰게 하는 단일 출처(인라인 중복 금지). scroll로 위로 밀린 콘텐츠 좌표를 화면 y로 환산: header + i*slot_h
+/// − scroll(헤더 위로 밀리면 음수 — 호출자가 헤더 아래로 clamp하거나 보임 판정). i64라 큰 인덱스/스크롤에도 안전.
+pub fn slotTop(index: usize, header_height_px: u32, slot_height_px: u32, scroll_offset_px: u32) i64 {
+    return @as(i64, header_height_px) + @as(i64, @intCast(index)) * @as(i64, slot_height_px) - @as(i64, scroll_offset_px);
+}
+
+/// 헤더 줄0 우측 **단일-셀 아이콘**의 glyph col(우측부터 +·⚙·◧). render(buildSidebarHeaderFrame)·hit-test 영역·단축키
+/// 배지가 같은 col을 쓰게 하는 단일 출처(예전엔 cols-2/-5/-8을 곳곳에 하드코딩 — 어긋나면 그려진 위치와 안 맞는다).
+/// 알림 종(🔔)은 EAW 2칸 이모지라 별도 경로(appendBellAndBadge, 좌단 cols-12). 우측 1칸(cols-1)은 패딩.
+pub const HeaderIcon = enum { new_workspace, view_options, toggle_sidebar };
+pub fn headerIconCol(icon: HeaderIcon, cols: u32) u32 {
+    return switch (icon) {
+        .new_workspace => cols - 2,
+        .view_options => cols - 5,
+        .toggle_sidebar => cols - 8,
+    };
+}
+
 /// 헤더 줄 수(신호등 높이 흡수). render(buildSidebarHeaderFrame)·IME caret(sidebarSearchCaretRect)·hit-test(headerHit)가
 /// 같은 값을 써야 아이콘·검색 glyph·caret·클릭 영역이 같은 줄에 놓인다(§5.4 단일 레이아웃 소스 — 셋이 따로 계산하면 어긋난다).
 /// 아이콘은 줄0, 검색은 마지막 줄(headerRows-1), 사이 줄은 비운다.

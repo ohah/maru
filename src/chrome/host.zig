@@ -171,12 +171,12 @@ pub const ChromeHost = struct {
             self.notifications.open or self.find.open or self.palette.open or self.settings.open;
     }
 
-    /// 단축키 힌트 HUD draws. platform이 command_catalog로 rows를 빌드해 부른다(palette와 동형 — 중립 chrome은
-    /// catalog/액션을 모름). **입력 비소비**라 handleInput엔 없다(가시성은 ABI가 key_hints.visible로 토글).
-    /// 모달이 하나라도 열렸으면 억제한다(단일 오버레이 frame 가정 유지). 안 보이거나 억제면 무동작(빈 out).
+    /// 단축키 힌트 배지 draws. platform이 요소 레이아웃에서 badges(요소 rect + chord)를 빌드해 부른다(palette의 row
+    /// 주입과 동형 — 중립 chrome은 세션/카탈로그를 모름). **입력 비소비**라 handleInput엔 없다(가시성은 ABI가
+    /// key_hints.visible로 토글). 모달이 하나라도 열렸으면 억제한다(모달 우선). 안 보이거나 억제면 무동작(빈 out).
     pub fn collectKeyHintsDraws(
         self: *ChromeHost,
-        rows: []const shortcut_hints.Row,
+        badges: []const shortcut_hints.Badge,
         p: props.ChromeProps,
         tk: *const tokens.Tokens,
         arena: std.mem.Allocator,
@@ -184,7 +184,7 @@ pub const ChromeHost = struct {
     ) !void {
         if (self.anyModalOpen()) return;
         var ops: std.ArrayList(draw.Op) = .empty;
-        try shortcut_hints.view(&self.key_hints, rows, p, tk, arena, &ops);
+        try shortcut_hints.view(&self.key_hints, badges, p, tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{ .layer = shortcut_hints.layer, .ops = ops.items });
     }
 
@@ -470,27 +470,26 @@ test "host: 단축키 힌트 — visible면 collectKeyHintsDraws 1개(modal laye
 
     var host = ChromeHost{};
     defer host.deinit(std.testing.allocator);
-    const rows = [_]shortcut_hints.Row{
-        .{ .header = "Workspace" },
-        .{ .binding = .{ .caps = &.{ "⌘", "T" }, .title = "New Terminal" } },
+    const badges = [_]shortcut_hints.Badge{
+        .{ .rect = .{ .x = 0, .y = 48, .w = 200, .h = 70 }, .chord = "⌘1" },
     };
     var out: std.ArrayList(draw.ChromeDraw) = .empty;
 
-    // 안 보임 → 0(패시브 HUD 기본 닫힘).
-    try host.collectKeyHintsDraws(&rows, p, &tk, arena, &out);
+    // 안 보임 → 0(패시브 배지 기본 닫힘).
+    try host.collectKeyHintsDraws(&badges, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 
     // 보임 → 1(modal layer). 입력 라우팅엔 안 들어가므로 handleInput은 여전히 null(소비 안 함).
     host.key_hints.visible = true;
     out.clearRetainingCapacity();
-    try host.collectKeyHintsDraws(&rows, p, &tk, arena, &out);
+    try host.collectKeyHintsDraws(&badges, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
     try std.testing.expectEqual(draw.Layer.modal, out.items[0].layer);
     try std.testing.expect(host.handleInput(std.testing.allocator, .{ .key = .{ .key = .char, .codepoint = 'T' } }) == null);
 
-    // 모달(notice) 열림 → 억제(0): 단일 오버레이 frame 가정 유지.
+    // 모달(notice) 열림 → 억제(0): 모달 우선.
     host.notice.show("x");
     out.clearRetainingCapacity();
-    try host.collectKeyHintsDraws(&rows, p, &tk, arena, &out);
+    try host.collectKeyHintsDraws(&badges, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }

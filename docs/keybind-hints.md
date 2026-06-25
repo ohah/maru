@@ -1,10 +1,10 @@
 # 단축키 힌트 — 모디파이어 홀드 오버레이 전략·구현 계획
 
-사용자가 **모디파이어 키(기본 `Cmd`)를 일정 시간 누르고 있으면** 현재 사용 가능한 단축키를 카테고리별로 보여 주는 **패시브 힌트 오버레이**(HUD)를 추가한다. 모디파이어를 떼면 사라진다. cmux 등 일부 도구의 "키를 누르면 치트시트가 뜨는" 동작을 maru 독립 설계로 구현한다(형태만 비교, 코드 표현은 옮기지 않는다 — [project-rules](project-rules.md) clean-room).
+사용자가 **모디파이어 키(기본 `Cmd`)를 일정 시간 누르고 있으면** 각 chrome 요소(사이드바 워크스페이스 카드·새 워크스페이스 버튼·탭바·활성 pane 등)의 **우상단에 그 요소를 동작시키는 단축키 배지**를 띄운다(요소별 배지 — CSS로 치면 요소가 relative parent, 배지가 absolute right:0 top:0). 모디파이어를 떼면 사라진다. cmux 등 일부 도구의 "키를 누르면 단축키가 뜨는" 동작을 maru 독립 설계로 구현한다(형태만 비교, 코드 표현은 옮기지 않는다 — [project-rules](project-rules.md) clean-room).
 
 이 문서가 이 기능의 **단일 출처**다. 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules §문서와 설명](project-rules.md#문서와-설명)). 상위 경계는 [키 입력과 단축키 경계](key-input-and-shortcuts.md)·[Chrome 전략](chrome-strategy.md)을 따르고, config 키는 [config 스키마](config-schema.md)를 따른다.
 
-> **현황**: KH-0~5 구현 완료(머지). 모디파이어 홀드 시 활성 pane 우상단에 카테고리별 키캡 HUD가 뜨고, 키캡은 패널 대비(명암 기준 `keycapBg`)라 tui·rich·light·dark 모두 또렷하다 — `MARU_SCREENSHOT`로 렌더 검증. 홀드 타이밍 실기 확인은 사용자. 후속(선택): 맥락 인식·긴 목록 스크롤·진짜 둥근 키캡(별도 합성 경로).
+> **현황**: KH-0~6 구현. **KH-6에서 "활성 pane 우상단 한 박스 HUD"를 버리고 요소별 배지로 재설계**했다(사용자 요청 — 각 단축키가 그 단축키로 동작하는 요소 위에 떠야 한다). 현재 사이드바 워크스페이스 카드(`⌘1~9`)·새 워크스페이스 버튼(`⌘⇧T`)·활성 pane(`⌘D`)에 배지가 뜬다 — `MARU_SCREENSHOT`로 dark·light 검증. **§3 이하 "박스/카테고리/멀티행" 서술은 KH-1~5의 옛 모델이며, 현재 모델은 §3.0(배지 재설계)가 단일 출처다.** 홀드 타이밍 실기 확인은 사용자. 후속(KH-6 A): 탭바 `+`(`⌘T`)·활성 탭(`⌘W`)·pane 이동/포커스(`⌘]`·`⌘⌥←→↑↓`) 등 나머지 요소 배지.
 
 ## 0. 왜 가능한가 (조사 결론)
 
@@ -22,8 +22,8 @@
 
 - Cmd(또는 설정한 모디파이어)를 **홀드**하면 — 빠르게 `Cmd+T`를 치는 정상 단축키 사용과 구분되도록 **지연(기본 400ms) 후** — 단축키 힌트 오버레이가 뜬다.
 - 모디파이어를 떼거나, 다른 키를 누르거나(= 실제 단축키 실행), 창 포커스를 잃으면 즉시 사라진다.
-- **활성 pane(포커스된 패널)의 우상단**에 뜬다 — 단축키가 "이 패널에 적용된다"가 시각적으로 맞게. split이면 포커스된 pane에 붙고, 단일 pane이면 터미널 영역 전체 우상단으로 폴백한다(Find 오버레이와 같은 앵커).
-- 내용은 **현재 바인딩된 app 단축키**를 카테고리(워크스페이스·터미널/탭·패널/Split·검색·폰트)별로 묶어 `⌘ T  New Terminal` 형태로 보여 준다 — 각 키는 **키캡(keycap) 아이콘**으로 그린다(§3.6). 사용자가 리바인드/unbind한 결과를 그대로 반영한다.
+- **각 chrome 요소의 우상단에 그 요소를 동작시키는 단축키 배지**를 띄운다(KH-6 재설계 — §3.0). 사이드바 워크스페이스 카드엔 `⌘1`, 새 워크스페이스 버튼엔 `⌘⇧T`, 활성 pane엔 `⌘D` 등. 배지는 **전체 chord**(`⌘1`)를 보인다(모디파이어를 누른 중이지만 명확성 우선 — 사용자 결정).
+- **위치가 있는 요소만** 배지를 단다. `⌘F`(찾기)·`⌘K`(지우기)·`⌘A`(전체선택)·폰트처럼 붙일 특정 요소/아이콘이 없는 단축키는 **생략**한다(사용자 결정). chord는 `command_catalog`가 사용자 리바인드/unbind를 반영(없으면 그 요소 배지 생략).
 - config로 켜고 끄고(`keyhint.enabled`), 지연(`keyhint.delay`)·트리거 모디파이어(`keyhint.modifier`)를 조정한다.
 
 ## 2. 핵심 설계 결정 (베이스/의사결정)
@@ -40,11 +40,41 @@
 | **활성 pane 우상단(중앙 아님)** | Find가 `overlay_input.findLayout`/`p.active_pane`으로 활성 pane 우상단에 뜨는 선례 | 사용자 요청 — 단축키가 적용되는 **포커스된 패널**에 시각적으로 묶인다. split이면 그 pane 우상단, single-pane이면 터미널 영역 우상단 폴백. Find는 한 줄, 힌트는 멀티행이라 같은 앵커에서 **아래로 자라는 박스**(폭=`panelSize`/EAW 공유, 우측 정렬로 오른쪽 pane/divider 비침범) |
 | **gesture 정책=config(Zig), 타이머 clock=platform(Swift), 내용=Zig, 가시성 플래그=chrome State** | "native 최소", `zig_owns_frame_loop`는 tick 본문 소유·clock은 OS(`chrome-strategy.md` §10), `is_window_drag_region`/`jump_prompt` 선례 | 무엇을 언제 보일지(enabled/delay/modifier·어떤 단축키)는 Zig가 판정, OS 타이머 mechanics만 Swift. 기존 native-최소 경계와 일치 |
 
-**스코프가 달라도 한 박스에 모은다(분산 아님).** 단축키는 스코프가 다르다 — 워크스페이스/탭(`Cmd+1` 워크스페이스 선택, `Cmd+T` 새 터미널, `Cmd+Shift+]` 다음 워크스페이스)은 좌측 사이드바·per-pane 탭 바에, pane/split(`Cmd+D` 분할, `Cmd+Opt+←` pane 포커스)은 pane에 개념적으로 묶인다. 그러나 v1은 **이들을 스코프별 위치로 흩지 않고 활성 pane 우상단 한 박스에 카테고리로 묶어** 보여 준다. 근거: ① maru의 app 바인딩은 전부 **포커스 맥락 기준 전역**이다(`Cmd+1`은 포커스된 pane이 속한 워크스페이스를 바꾸고, `Cmd+D`는 포커스된 pane을 나눈다 — 둘 다 "지금 포커스가 있는 곳" 기준). ② 스코프별로 사이드바·탭 바·pane에 동시에 띄우면 오버레이 frame이 여럿이라 platform "단일 오버레이 frame" 가정이 깨지고(§3.2), 어느 영역이 어느 스코프인지도 maru 레이아웃에선 모호하다. 그래서 위치는 하나(포커스된 작업 영역=활성 pane 우상단)로 두되, **카테고리 헤더로 스코프를 구분**한다(Workspace / Terminal·Tab / Pane / Search / Font). 스코프별 분산 배치는 표면이 명확해지면 KH-5에서 재검토한다.
+> **⚠️ KH-6 재설계 — 위 표의 "활성 pane 우상단 한 박스 + 카테고리 그룹핑"은 폐기됐다.** KH-1~5는 모든 단축키를 활성 pane 우상단 한 박스에 카테고리로 모았으나, 사용자가 "각 단축키는 **그 단축키로 동작하는 요소** 위에 떠야 한다"고 정정했다. 현재 모델은 **요소별 배지**(§3.0)다. 아래 §3.1~3.6의 "박스/멀티행/카테고리/키캡" 서술은 KH-1~5 옛 모델의 역사 기록이고, 현재 렌더는 §3.0가 단일 출처다(트리거 감지 §3.4·3.5, config §5는 그대로 유효).
 
-레퍼런스 사용은 동작 비교만 — cmux의 치트시트 UX는 최종 동작만 참고하고 소스를 옮기지 않는다([no-external-ref-in-pr] 원칙: 산출물은 maru 용어·독립 설계).
+레퍼런스 사용은 동작 비교만 — cmux의 단축키 오버레이 UX는 최종 동작만 참고하고 소스를 옮기지 않는다([no-external-ref-in-pr] 원칙: 산출물은 maru 용어·독립 설계).
 
-## 3. 아키텍처 — 레이어와 데이터 흐름
+## 3.0 배지 재설계 (KH-6 — 현재 모델, 단일 출처)
+
+모디파이어 홀드 시 **각 chrome 요소의 우상단에 그 요소를 동작시키는 단축키 배지**를 그린다(한 박스 HUD 아님). 요소→단축키 매핑:
+
+| 요소 | 배지(chord) | rect 출처 |
+|---|---|---|
+| 사이드바 워크스페이스 카드 1~9 | `⌘1`~`⌘9`(select_tab) | `sidebar.slotTop(i, header_h, slot_h, scroll)` — slotAt의 역(단일 출처) |
+| 사이드바 새 워크스페이스 + 버튼 | `⌘⇧T`(new_tab) | `sidebar.headerIconCol(.new_workspace, cols)` — render와 공유 |
+| 활성 pane | `⌘D`(split_horizontal) | `active_pane_rect`(find도 쓰는 미러) |
+| (KH-6 A 후속) 탭바 +·활성 탭·pane 이동 | `⌘T`·`⌘W`·`⌘]`·`⌘⌥←→↑↓` | `tabbar.Metrics`·pane rects |
+
+**렌더 경로 — 투명 오버레이.** 배지는 요소 위 흩어진 곳에만 칠하므로, 모달 패널처럼 bbox 전체를 `surface_bg`로 덮으면 안 된다. `rasterizeOverlayCells`에 `transparent_default` 플래그를 더해(이미 있는 `.default`=투명 처리를 패널 quad 없이도 켜) **배지 셀만 칠하고 나머지는 chrome/터미널이 비치게** 한다. 한 오버레이 frame이 창 전체(origin 0,0)를 덮되 대부분 투명, 배지 위치에만 `fill(keycap_bg) + chord glyph text`.
+
+**배지 1개** = 요소 rect 우상단에 셀 배경 `fill`(keycap_bg, 패널 대비 색 §3.6.3) + chord glyph text(surface_fg). 요소보다 chord가 넓으면 좌단으로 clamp(밖으로 안 나감). 전체 chord(`⌘1`)를 `formatChord`로 그대로 — per-key 분리(chordKeycaps)는 안 쓴다(요소 위 작은 배지라 한 토막이 낫다).
+
+**경계.** chrome 컴포넌트 `shortcut_hints`는 `State{visible}` + `view(badges: []Badge, …)`만(handle 없음 — 입력 비소비). `Badge = { rect: draw.Rect, chord: []const u8 }`. platform(`app_session.buildKeyHintBadges`)이 요소 레이아웃에서 rect를, `command_catalog.chordForAction`+`formatChord`로 chord를 빌드해 주입한다(find/palette의 row 주입과 동형). 요소 레이아웃 수식은 **`sidebar.zig`가 단일 출처**(`slotTop`·`headerIconCol`) — platform이 인라인 중복하지 않는다(KH-6 리뷰 지적: 인라인 중복이 `scroll` 이름 충돌을 낳았고, rename이 아니라 단일 출처화가 정답).
+
+```mermaid
+flowchart TD
+  V["key_hints.visible (Swift 홀드 감지 §3.4·3.5)"] --> BB["app_session.buildKeyHintBadges"]
+  BB --> RE["요소 rect: sidebar.slotTop / headerIconCol / active_pane_rect"]
+  BB --> CH["chord: command_catalog.chordForAction + formatChord (unbind 반영)"]
+  RE --> BD["[]shortcut_hints.Badge {rect, chord}"]
+  CH --> BD
+  BD --> CK["host.collectKeyHintsDraws (모달이면 억제)"]
+  CK --> SV["shortcut_hints.view: 요소 rect 우상단마다 fill(keycap_bg)+chord glyph"]
+  SV --> RA["rasterizeOverlayCells(transparent_default=true): 배지 셀만, 나머지 투명"]
+  RA --> MF["overlay_frame → metal_frame.replace (chrome/터미널 위에 합성)"]
+```
+
+## 3. 아키텍처 — 레이어와 데이터 흐름 (KH-1~5 옛 박스 모델 — 역사 기록)
 
 기존 4층 위상([layering-and-portability.md])에 그대로 얹힌다. 새 코드는 ① platform(Swift 홀드 감지) ② ABI(가시성 토글) ③ chrome 컴포넌트(렌더) ④ platform(내용 행 주입) ⑤ config(스키마)로 나뉜다.
 
@@ -260,7 +290,9 @@ pub const KeyHintConfig = struct {
 | **KH-3** ✅ | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도(namespace `keyhint`, GUI 섹션 `.input`) + configuration.md 키 + full-config 파싱 테스트. platform 노출(ABI 게터)은 KH-4가 소비처와 함께 추가 | round-trip·범위 ✅ |
 | **KH-4** ✅ | macOS `flagsChanged` 홀드 상태머신(`handleModifierFlags`) + `NSTimer .common` + ABI v87 `set_key_hints`/`key_hints_config` + 렌더 게이트(`anyOverlayOpen or key_hints.visible`) + `keyDown`/`windowDidResignKey`서 취소 + `MARU_KEY_HINTS_FORCE`(Zig self-verify). delay/enabled/modifier를 config에서 읽음 | `zig build macos-app-build` green + `MARU_SCREENSHOT` HUD 캡처 ✅. **홀드 타이밍 실기 수동 확인은 사용자** |
 | **KH-5(키캡 대비)** ✅ | 키캡을 `quad`→`fill`(셀 배경)로 바꾸고 `keycap_bg` role = `keycapBg(surface_bg)`(패널이 어두우면 밝게·밝으면 어둡게, 명암 기준) — tui·rich·light·dark 모두 또렷. 회귀 가드(keycap_bg≠surface_bg) 테스트. 둥근 GPU 키캡은 셀-그리드 제약으로 불가(§3.6.3 결정) | 토큰 대비 테스트 + `MARU_SCREENSHOT` rich 캡처 ✅ |
-| **KH-5(후속, 선택)** | 맥락 인식(포커스 pane의 터미널 매크로 바인딩 노출)·빌트인 터미널 편집키(`⌘←` 등) 행·`Space`(␣)/키패드 글리프·긴 목록 2열/스크롤·GUI 폴리시 | — |
+| **KH-6 재설계(B)** ✅ | **박스 HUD → 요소별 배지**(§3.0). `shortcut_hints`를 `Badge{rect,chord}` 모델로 재작성, `rasterizeOverlayCells`에 `transparent_default` 추가, `app_session.buildKeyHintBadges`(사이드바 카드 `⌘1~9`·새 워크스페이스 `⌘⇧T`·활성 pane `⌘D`). 요소 레이아웃 단일 출처 `sidebar.slotTop`/`headerIconCol`(인라인 중복 제거 — 리뷰 지적). KH-2 박스용 코드(`keyHintRows`/`chordKeycaps`/`categoryOf`) 데드코드 제거 | 컴포넌트 단위 + `MARU_SCREENSHOT` dark·light 배지 캡처 ✅ |
+| **KH-6 A(후속)** | 나머지 요소 배지 — 탭바 `+`(`⌘T` new_term)·활성 탭(`⌘W`)·다음/이전 pane(`⌘]`/`⌘[`)·pane 포커스(`⌘⌥←→↑↓`). `tabbar.Metrics`·pane rects 사용 | 컴포넌트 + 스크린샷 |
+| **KH-옛(후속, 선택)** | 빌트인 터미널 편집키(`⌘←` 등)·`Space`(␣)/키패드 글리프 | — |
 
 머지 규율은 [merge-only-on-green]·[run-macos-app-before-merge] 메모리를 따른다(checks green + KH-4는 실제 앱 실행 후 머지).
 

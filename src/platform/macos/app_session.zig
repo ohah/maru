@@ -5796,12 +5796,24 @@ pub const AppSession = struct {
         return self.option_as_meta;
     }
 
-    /// 머신 Action을 적용한다 — show/hide면 chrome_host.key_hints.visible 토글(렌더 게이트가 본다). 타이머 시작/취소·
-    /// redraw는 Swift(OS clock 책임)가 반환 action으로 한다. arm/cancel/none은 가시성 불변.
+    /// 머신 Action을 적용한다 — show/hide면 chrome_host.key_hints.visible 토글(렌더 게이트가 본다). 타이머 시작/취소는
+    /// Swift(OS clock 책임)가 반환 action으로 한다. arm/cancel/none은 가시성 불변.
+    ///
+    /// **가시성을 바꿀 땐 metal_dirty도 세운다**(단일 트리거). tick의 투영·chrome 오버레이 재빌드(buildChromeOverlayPrep)는
+    /// 전부 `if (self.metal_dirty)` 게이트 안이라, visible만 바꾸고 dirty를 안 세우면 frame이 그대로다 — 배지가 blink·셸
+    /// 출력 같은 **무관한** dirty 트리거가 올 때까지 안 뜨거나(show) 안 사라진다(hide). 특히 커서 blink가 꺼진(steady)
+    /// 화면에선 Cmd를 떼도 metal_dirty가 안 서서 배지가 남는다("누르고 떼면 사라져야 하는데 유지" — 사용자 지적).
+    /// Swift의 markMetalNeedsRedraw는 Swift측 present 게이트라 Zig 재빌드(metal_dirty)와 별개다 — 둘 다 필요.
     fn applyKeyHintAction(self: *AppSession, action: keyhint_hold.Action) void {
         switch (action) {
-            .show => self.chrome_host.key_hints.visible = true,
-            .hide => self.chrome_host.key_hints.visible = false,
+            .show => {
+                self.chrome_host.key_hints.visible = true;
+                self.metal_dirty = true;
+            },
+            .hide => {
+                self.chrome_host.key_hints.visible = false;
+                self.metal_dirty = true;
+            },
             .none, .arm_timer, .cancel => {},
         }
     }

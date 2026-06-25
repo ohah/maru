@@ -48,15 +48,17 @@ pub fn slotAt(y_px: f64, header_height_px: u32, slot_height_px: u32, scroll_offs
     return @intFromFloat(slot_f);
 }
 
-/// 슬롯 인덱스 i의 화면 상단 y(backing px) — slotAt(y→i)의 **역**(i→y). 카드 rect·드롭 인디케이터·단축키 배지가
-/// 같은 식을 쓰게 하는 단일 출처(인라인 중복 금지). scroll로 위로 밀린 콘텐츠 좌표를 화면 y로 환산: header + i*slot_h
-/// − scroll(헤더 위로 밀리면 음수 — 호출자가 헤더 아래로 clamp하거나 보임 판정). i64라 큰 인덱스/스크롤에도 안전.
+/// 슬롯 인덱스 i의 화면 상단 y(backing px) — slotAt(y→i)의 **역**(i→y). 현재는 단축키 배지(buildKeyHintBadges)가
+/// 슬롯 y를 인라인 중복 없이 이 함수로 얻는다(카드 셀 render는 별도로 bandFill/slot.inset 경로 — slotAt과 짝인 역함수의
+/// 단일 출처). scroll로 위로 밀린 콘텐츠 좌표를 화면 y로 환산: header + i*slot_h − scroll(헤더 위로 밀리면 음수 —
+/// 호출자가 헤더 아래로 clamp하거나 보임 판정). i64라 큰 인덱스/스크롤에도 안전.
 pub fn slotTop(index: usize, header_height_px: u32, slot_height_px: u32, scroll_offset_px: u32) i64 {
     return @as(i64, header_height_px) + @as(i64, @intCast(index)) * @as(i64, slot_height_px) - @as(i64, scroll_offset_px);
 }
 
-/// 헤더 줄0 우측 **단일-셀 아이콘**의 glyph col(우측부터 +·⚙·◧). render(buildSidebarHeaderFrame)·hit-test 영역·단축키
-/// 배지가 같은 col을 쓰게 하는 단일 출처(예전엔 cols-2/-5/-8을 곳곳에 하드코딩 — 어긋나면 그려진 위치와 안 맞는다).
+/// 헤더 줄0 우측 **단일-셀 아이콘**의 glyph col(우측부터 +·⚙·◧). render(buildSidebarHeaderFrame)·단축키 배지가 같은
+/// col을 쓰게 하는 단일 출처(예전엔 cols-2/-5/-8을 곳곳에 하드코딩). hit-test(headerHit)는 글리프 col이 아니라 **zone
+/// 경계**(cols-3/-6/-9)를 별도로 둔다(클릭 영역은 글리프보다 넓다 — 의도적 분리).
 /// 알림 종(🔔)은 EAW 2칸 이모지라 별도 경로(appendBellAndBadge, 좌단 cols-12). 우측 1칸(cols-1)은 패딩.
 pub const HeaderIcon = enum { new_workspace, view_options, toggle_sidebar };
 pub fn headerIconCol(icon: HeaderIcon, cols: u32) u32 {

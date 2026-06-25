@@ -111,15 +111,19 @@ pub const ChromeHost = struct {
 `entries`(평면 목록)를 카테고리로 묶어 바인딩된 것만 행으로 내는 함수를 추가한다.
 
 ```zig
-pub const HintCategory = enum { workspace, terminal, pane, search, font };
-pub fn categoryOf(action: Action) HintCategory { ... }   // 액션→카테고리(데이터 매핑)
+pub const HintCategory = enum { workspace, terminal, pane, search, font, other };
+pub fn categoryOf(action: Action) HintCategory { ... }   // 액션→카테고리(데이터 매핑, exhaustive). .other는 HUD 제외
 
-/// resolver로 현재 chord를 풀어, chord가 있는 entries만 카테고리 순서로 나열한다(헤더 포함).
-/// 안 묶인/unbind된 액션은 건너뛴다. formatChord로 표시 문자열을 buf에 쓴다.
-pub fn keyHintGroups(resolver: KeyBindingResolver, out: *Builder) void { ... }
+/// chord를 키별 글리프 배열로 편다(키캡용 — formatChord의 단일 문자열과 평행). 예: Cmd+T → {"⌘","T"}.
+/// formatChord와 keyGlyph(키 글리프 단일 출처)를 공유. modifier 글리프는 정적, 키 글리프만 arena 복사.
+pub fn chordKeycaps(chord: KeyChord, arena: Allocator) ![]const []const u8 { ... }
+
+/// resolver로 현재 chord를 풀어, chord가 있는 entries만 카테고리 순서로 행(헤더 + 키캡 바인딩)으로 빌드한다.
+/// 안 묶인/unbind된 액션은 건너뛴다(chordForAction이 resolve 우선순위·unbind 반영). arena 소유.
+pub fn keyHintRows(resolver: KeyBindingResolver, arena: Allocator) ![]const shortcut_hints.Row { ... }
 ```
 
-platform(`app_session`)이 이걸로 `[]shortcut_hints.Row`를 빌드해 `collectKeyHintsDraws`에 넘긴다.
+platform(`app_session.buildChromeOverlayPrep`)이 `key_hints.visible`일 때 `keyHintRows`로 행을 빌드해 `collectKeyHintsDraws`에 넘긴다(가시성 토글은 KH-4까지 항상 false라 휴면).
 
 ### 3.4 ABI — `src/platform/macos/app_host_abi.{h,zig}`
 
@@ -252,7 +256,7 @@ pub const KeyHintConfig = struct {
 |---|---|---|
 | **KH-0** | 이 설계 문서(doc-first). AGENTS.md 인덱스 등록 | 문서 |
 | **KH-1** ✅ | chrome 컴포넌트 `shortcut_hints.zig`(State+view, handle 없음) + `paneRegion`/`paneTopRightBox`(overlay_input, 활성 pane 우상단 멀티행) + **키캡 렌더**(per-key quad+글리프, `p.shape` 토큰, §3.6) + `host.collectKeyHintsDraws`(`anyModalOpen` 억제) + `Row` 모델. rows는 fake로 헤드리스 테스트 | 컴포넌트 단위 ✅ |
-| **KH-2** | `command_catalog`에 `HintCategory`/`categoryOf`/`keyHintGroups` + **`chordKeycaps`**(chord→키별 글리프 배열, §3.6.3) + platform이 rows 빌드해 collect 호출(가시성 플래그 게이트, 아직 항상 false) | 내용 단위 |
+| **KH-2** ✅ | `command_catalog`에 `HintCategory`/`categoryOf`/`keyHintRows` + **`chordKeycaps`**(chord→키별 글리프 배열, `keyGlyph` 단일 출처, §3.6.3) + `app_session.buildChromeOverlayPrep`가 `key_hints.visible`일 때 rows 빌드해 collect 호출(아직 항상 false) | 내용 단위 ✅ |
 | **KH-3** | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도 + resolve + platform 노출 | round-trip·범위 |
 | **KH-4** | macOS `flagsChanged` 홀드 상태머신 + `NSTimer` + ABI `set_key_hints` + `markMetalNeedsRedraw` + `MARU_DEBUG`/`MARU_KEY_HINTS_FORCE`. delay/enabled/modifier를 config에서 | `zig build macos-app` 수동 + 스크린샷(force) |
 | **KH-5**(후속, 선택) | 맥락 인식(포커스 pane의 터미널 매크로 바인딩 노출)·빌트인 터미널 편집키(`⌘←` 등) 행·키캡 rich depth 폴리시(§3.6.2 sharp shadow)·`Space`(␣)/키패드 글리프·GUI 폴리시 | — |

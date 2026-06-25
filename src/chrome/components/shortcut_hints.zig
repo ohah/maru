@@ -4,8 +4,10 @@
 //! 모달과 정반대). 가시성은 platform이 ABI로 토글하고(host.key_hints.visible), 내용 rows는 platform이
 //! command_catalog로 빌드해 주입한다(palette/context_menu와 동형 — 중립 chrome은 catalog를 import 못 함).
 //!
-//! 키캡 렌더: 키 1개 = 둥근 quad(배경+테두리) + 중앙 글리프 text. tui|rich 분기 없이 p.shape 모양 토큰만 읽어
-//! (find 패널 quad 트릭과 동일) tui=평탄 셀배경, rich=둥근+테두리 키캡이 된다. 단일 출처: docs/keybind-hints.md.
+//! 키캡 렌더: 키 1개 = 셀 배경 fill(keycap_bg role) + 중앙 글리프 text. fill이라 글리프가 그 셀 배경 **위에**
+//! 그려져 키 배경색이 보인다(palette 선택행과 같은 합성). keycap_bg는 패널 대비(명암 기준 밝게/어둡게)라 tui·rich·
+//! light·dark 모두 또렷하다. 컴포넌트는 if(rich) 없이 keycap_bg role만 읽는다(토큰셋 교체). 둥근 GPU quad 키캡은
+//! 셀-그리드서 불가(글리프 셀 배경에 가리거나 글리프를 덮음) — 평탄 색 셀이 한계. 단일 출처: docs/keybind-hints.md.
 
 const std = @import("std");
 const draw = @import("../draw.zig");
@@ -128,7 +130,7 @@ pub fn view(
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 // 패시브 HUD라 입력(handle)이 없으니, (1) visible 게이트 (2) view가 활성 pane 우상단에 패널 + 카테고리 헤더 +
-// 키캡(quad+글리프) + 제목 ops를 내는지 (3) 높이 초과 시 행 클램프를 헤드리스로 증명한다 — macOS·렌더 없이.
+// 키캡(fill 셀배경+글리프) + 제목 ops를 내는지 (3) 높이 초과 시 행 클램프를 헤드리스로 증명한다 — macOS·렌더 없이.
 
 fn testTokens() tokens.Tokens {
     const Rgb = @import("../../color.zig").Rgb;
@@ -149,7 +151,7 @@ test "shortcut_hints view: visible=false면 ops 0" {
     try std.testing.expectEqual(@as(usize, 0), out.items.len); // 안 보임
 }
 
-test "shortcut_hints view: 헤더 + 키캡 바인딩 → 패널 quad + 헤더 text + 캡(quad+글리프) + 제목 text" {
+test "shortcut_hints view: 헤더 + 키캡 바인딩 → 패널 quad + 헤더 text + 캡(fill+글리프) + 제목 text" {
     const tk = testTokens();
     // 활성 pane = 창 오른쪽 절반(x=400..800, top=32) — 패널이 그 pane 우상단에 붙는다.
     const p = props.ChromeProps{
@@ -168,7 +170,7 @@ test "shortcut_hints view: 헤더 + 키캡 바인딩 → 패널 quad + 헤더 te
     var s = State{ .visible = true };
     try view(&s, &rows, p, &tk, arena, &out);
 
-    // 패널 quad(1) + 헤더 text(1) + 캡 ⌘(quad+text=2) + 캡 T(quad+text=2) + 제목 text(1) = 7.
+    // 패널 quad(1) + 헤더 text(1) + 캡 ⌘(fill+text=2) + 캡 T(fill+text=2) + 제목 text(1) = 7.
     try std.testing.expectEqual(@as(usize, 7), out.items.len);
     try std.testing.expect(out.items[0] == .quad); // 패널 배경
     try std.testing.expect(out.items[0].quad.rect.x >= 400); // 활성 pane 안(왼쪽 pane 비침범)

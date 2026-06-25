@@ -280,6 +280,14 @@ const AtlasPlacement = struct {
 };
 
 fn estimateGlyphBitmapSize(glyph: glyph_layout.GlyphRun) EstimatedGlyphBitmapSize {
+    // 목표 raster 크기가 명시되면(raster_*_px > 0) 셀 배수 대신 그 크기로 slot을 잡는다 — slot-stretch
+    // (GPU 확대)로 글리프를 키워 blur가 생기는 대신 atlas에 최종 크기로 직접 굽기 위한 경로(Ghostty식
+    // 글리프 constraint와 같은 원리). 0이면 아래 셀 배수 경로 그대로라 기존 동작이 보존된다.
+    if (glyph.cache_key.raster_width_px > 0 and glyph.cache_key.raster_height_px > 0) {
+        const w = @as(u32, glyph.cache_key.raster_width_px);
+        const h = @as(u32, glyph.cache_key.raster_height_px);
+        return .{ .width_px = w, .height_px = h, .upload_bytes = @as(usize, w) * @as(usize, h) * 4 };
+    }
     // cell 메트릭(advance 폭 × line-height)이 있으면 그 크기로 slot을 잡아 실제 모노스페이스
     // 셀에 맞게 그린다. wide glyph(cell_width=2)는 advance의 2배 폭이다. 메트릭이 없는 경로
     // (테스트/fake backend)는 font_size × scale 정사각으로 대체한다(기존 동작 보존).
@@ -622,4 +630,80 @@ test "a glyph larger than the atlas is clamped into the texture instead of overf
     }, .{}));
     try std.testing.expect(placed.slot.x_px + placed.slot.width_px <= 16);
     try std.testing.expect(placed.slot.y_px + placed.slot.height_px <= 16);
+}
+
+test "glyph atlas: raster_*_px가 지정되면 셀 배수 대신 목표 크기로 slot을 잡는다(slot-stretch 폐기 경로)" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{});
+    defer atlas.deinit();
+
+    // 헤더 아이콘을 GPU 확대(slot-stretch) 없이 atlas에 최종 크기로 직접 굽기 위한 경로:
+    // raster_width_px/raster_height_px가 >0이면 cell_width_px×span(=8) 대신 그 크기(=40)로 slot.
+    const baked = try atlas.ensureGlyph(glyphForTest(0x25E7, .{
+        .font_id = 1,
+        .glyph_id = 0x25E7,
+        .font_size_px = 14,
+        .device_scale = 2,
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .raster_width_px = 40,
+        .raster_height_px = 40,
+    }, .{}));
+
+    try std.testing.expectEqual(@as(u32, 40), baked.slot.width_px);
+    try std.testing.expectEqual(@as(u32, 40), baked.slot.height_px);
+    // upload_bytes = 40×40×4
+    try std.testing.expectEqual(@as(usize, 40 * 40 * 4), baked.slot.upload_bytes);
+}
+
+test "glyph atlas: raster 크기가 cache key의 일부라 같은 glyph라도 다른 크기는 다른 slot" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{});
+    defer atlas.deinit();
+
+    // 같은 glyph_id·메트릭이지만 목표 raster 크기만 다른 두 요청 — 다른 bitmap이므로 다른 slot이어야
+    // 한다(안 그러면 한 크기로 구운 bitmap을 다른 크기 요청이 재사용해 흐림/왜곡). raster_*가 키에
+    // 포함돼야(findSlot의 std.meta.eql) 보장된다. cell_width 충돌 방지(span)와 같은 원리.
+    const small = try atlas.ensureGlyph(glyphForTest(0x25E7, .{
+        .font_id = 1,
+        .glyph_id = 0x25E7,
+        .font_size_px = 14,
+        .device_scale = 2,
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .raster_width_px = 24,
+        .raster_height_px = 24,
+    }, .{}));
+    const large = try atlas.ensureGlyph(glyphForTest(0x25E7, .{
+        .font_id = 1,
+        .glyph_id = 0x25E7,
+        .font_size_px = 14,
+        .device_scale = 2,
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .raster_width_px = 40,
+        .raster_height_px = 40,
+    }, .{}));
+
+    try std.testing.expect(small.slot.id != large.slot.id);
+    try std.testing.expect(large.uploaded); // hit가 아니라 새 slot(miss)
+    try std.testing.expectEqual(@as(u32, 24), small.slot.width_px);
+    try std.testing.expectEqual(@as(u32, 40), large.slot.width_px);
+}
+
+test "glyph atlas: raster_*_px=0이면 기존 셀 배수 경로(동작 보존)" {
+    var atlas = GlyphAtlas.init(std.testing.allocator, .{});
+    defer atlas.deinit();
+
+    // raster_*가 기본값 0이면 estimateGlyphBitmapSize는 cell_width_px×span 경로 그대로 — 기존 동작.
+    // 한쪽(raster 미지정)만 키에 추가됐다고 기존 경로 셀 크기가 흔들리지 않음을 고정한다.
+    const cell = try atlas.ensureGlyph(glyphForTest('A', .{
+        .font_id = 1,
+        .glyph_id = 'A',
+        .font_size_px = 14,
+        .device_scale = 2,
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+    }, .{}));
+
+    try std.testing.expectEqual(@as(u32, 8), cell.slot.width_px); // cell_width_px × span(1)
+    try std.testing.expectEqual(@as(u32, 16), cell.slot.height_px);
 }

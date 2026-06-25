@@ -1097,3 +1097,201 @@ test "CoreText smoke treats requested font mismatch as a diagnostic fallback" {
     try std.testing.expect(status.font_resolved);
     try std.testing.expect(status.shaped_text);
 }
+
+// ── S2: 글리프 선명도 측정(slot-stretch 폐기 근거) ─────────────────────────────
+// anti-alias 번짐의 proxy로 "partial-alpha 픽셀 비율"(0<α<255 픽셀 / ink 픽셀)을 쓴다. 글리프가
+// 또렷할수록 solid(α=255) 픽셀이 많고 partial이 적다. 셀 크기로 굽고 GPU에서 확대하면(slot-stretch)
+// bilinear 보간이 edge를 번지게 해 partial이 늘고, 목표 px로 직접 래스터하면 native AA만 남아 적다.
+
+const InkMetrics = struct {
+    ink: usize = 0,
+    partial: usize = 0,
+    solid: usize = 0,
+    top: usize = 0,
+    bottom: usize = 0,
+    left: usize = 0,
+    right: usize = 0,
+
+    fn partialRatio(self: InkMetrics) f64 {
+        if (self.ink == 0) return 0;
+        return @as(f64, @floatFromInt(self.partial)) / @as(f64, @floatFromInt(self.ink));
+    }
+};
+
+fn measureInk(pixels: []const u8, w: u32, h: u32) InkMetrics {
+    var m: InkMetrics = .{ .top = h, .left = w };
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const a = pixels[(@as(usize, y) * w + x) * 4 + 3];
+            if (a == 0) continue;
+            m.ink += 1;
+            if (a == 255) {
+                m.solid += 1;
+            } else {
+                m.partial += 1;
+            }
+            if (y < m.top) m.top = y;
+            if (y > m.bottom) m.bottom = y;
+            if (x < m.left) m.left = x;
+            if (x > m.right) m.right = x;
+        }
+    }
+    return m;
+}
+
+fn rasterizeGlyphToBuf(
+    allocator: std.mem.Allocator,
+    rasterizer: coretext_raster.CoreTextGlyphRasterizer,
+    run: renderer.GlyphRun,
+    w: u32,
+    h: u32,
+) ![]u8 {
+    // atlas를 거치지 않고 직접 slot을 구성해 원하는 px로 래스터한다(rasterize는 slot.width/height_px만
+    // native에 넘긴다). 합성 글리프(braille 등)는 codepoint로, 폰트 글리프는 glyph_id로 그려진다.
+    const slot = renderer.AtlasSlot{
+        .id = 1,
+        .key = run.cache_key,
+        .x_px = 0,
+        .y_px = 0,
+        .width_px = w,
+        .height_px = h,
+        .upload_bytes = @as(usize, w) * @as(usize, h) * 4,
+        .generation = 0,
+    };
+    const pixels = try allocator.alloc(u8, @as(usize, w) * @as(usize, h) * 4);
+    errdefer allocator.free(pixels);
+    @memset(pixels, 0);
+    _ = try rasterizer.rasterize(.{
+        .run = run,
+        .slot = slot,
+        .pixels = pixels,
+        .bytes_per_row = @as(usize, w) * 4,
+    });
+    return pixels;
+}
+
+fn bilinearUpscaleRgba(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+) ![]u8 {
+    // 현재 GPU slot-stretch(maru_fill_cell_quad의 중앙 기준 affine scale + bilinear sampling)의 CPU
+    // 등가. dw,dh > 1 가정(고정 측정 크기). edge를 보간으로 번지게 해 partial 픽셀을 늘린다.
+    const dst = try allocator.alloc(u8, @as(usize, dw) * @as(usize, dh) * 4);
+    errdefer allocator.free(dst);
+    const xr = @as(f64, @floatFromInt(sw - 1)) / @as(f64, @floatFromInt(dw - 1));
+    const yr = @as(f64, @floatFromInt(sh - 1)) / @as(f64, @floatFromInt(dh - 1));
+    var dy: u32 = 0;
+    while (dy < dh) : (dy += 1) {
+        const fy = @as(f64, @floatFromInt(dy)) * yr;
+        const y0: u32 = @intFromFloat(fy);
+        const y1 = @min(y0 + 1, sh - 1);
+        const ty = fy - @as(f64, @floatFromInt(y0));
+        var dx: u32 = 0;
+        while (dx < dw) : (dx += 1) {
+            const fx = @as(f64, @floatFromInt(dx)) * xr;
+            const x0: u32 = @intFromFloat(fx);
+            const x1 = @min(x0 + 1, sw - 1);
+            const tx = fx - @as(f64, @floatFromInt(x0));
+            var c: usize = 0;
+            while (c < 4) : (c += 1) {
+                const p00 = @as(f64, @floatFromInt(src[(@as(usize, y0) * sw + x0) * 4 + c]));
+                const p10 = @as(f64, @floatFromInt(src[(@as(usize, y0) * sw + x1) * 4 + c]));
+                const p01 = @as(f64, @floatFromInt(src[(@as(usize, y1) * sw + x0) * 4 + c]));
+                const p11 = @as(f64, @floatFromInt(src[(@as(usize, y1) * sw + x1) * 4 + c]));
+                const top = p00 * (1 - tx) + p10 * tx;
+                const bot = p01 * (1 - tx) + p11 * tx;
+                dst[(@as(usize, dy) * dw + dx) * 4 + c] = @intFromFloat(@round(top * (1 - ty) + bot * ty));
+            }
+        }
+    }
+    return dst;
+}
+
+test "글리프 목표크기 직접 래스터가 1.7× 확대보다 선명하다(partial-alpha 비율) — slot-stretch 폐기 근거" {
+    // S2 자동 회귀 측정(방어): 헤더 아이콘 ◧(U+25E7)을 ① 목표 px로 직접 native 래스터 vs ② 셀 크기로
+    // 래스터 후 1.7× bilinear 확대(현재 GPU slot-stretch의 CPU 모사)했을 때 anti-alias 번짐(partial)
+    // 비율을 비교한다. 직접 래스터가 더 낮아야(=선명) S3(목표크기 래스터)의 효과가 증명된다. 절대값이
+    // 아니라 상대 비교라 설치 폰트에 독립적이다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+
+    // ◧을 실제 native 셰이퍼로 shape해 GlyphRun(font_id/glyph_id)을 얻는다(box-drawing 회귀와 같은 경로).
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("\u{25E7}");
+    var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
+    defer draw_list.deinit(allocator);
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+    var shaped = try shaper.shape(allocator, draw_list, &font_registry);
+    defer shaped.deinit(allocator);
+
+    var glyph_run: ?renderer.GlyphRun = null;
+    for (shaped.runs.glyphs) |g| {
+        if (g.col == 0) {
+            glyph_run = g;
+            break;
+        }
+    }
+    try std.testing.expect(glyph_run != null);
+
+    const rasterizer = coretext_raster.CoreTextGlyphRasterizer{
+        .appearance = appearance,
+        .font_registry = &font_registry,
+        .rasterize_glyph = maru_macos_coretext_smoke_rasterize_glyph,
+    };
+
+    const cell_w: u32 = 9;
+    const cell_h: u32 = 18;
+    const baked_w: u32 = 15; // ≈ cell × 1.7
+    const baked_h: u32 = 31;
+
+    // ① 목표 px로 직접 래스터(S3가 만들 것).
+    const baked = try rasterizeGlyphToBuf(allocator, rasterizer, glyph_run.?, baked_w, baked_h);
+    defer allocator.free(baked);
+    // ② 셀 크기로 래스터 후 1.7× bilinear 확대(현재 GPU slot-stretch의 CPU 모사).
+    const cell = try rasterizeGlyphToBuf(allocator, rasterizer, glyph_run.?, cell_w, cell_h);
+    defer allocator.free(cell);
+    const stretched = try bilinearUpscaleRgba(allocator, cell, cell_w, cell_h, baked_w, baked_h);
+    defer allocator.free(stretched);
+
+    const m_baked = measureInk(baked, baked_w, baked_h);
+    const m_stretched = measureInk(stretched, baked_w, baked_h);
+
+    try std.testing.expect(m_baked.ink > 0);
+    try std.testing.expect(m_stretched.ink > 0);
+    // 핵심 단언: 목표 px 직접 래스터가 1.7× 확대보다 anti-alias 번짐(partial-alpha 비율)이 뚜렷이 적다
+    // (=선명). slot-stretch 폐기의 근거. 측정 실측: 직접 ≈0.33 vs 확대 ≈0.69(JetBrains Mono/system).
+    // 폰트별로 절대값은 달라도 "직접 < 확대"는 보간 특성상 항상 성립하므로 상대 비교로 고정한다.
+    try std.testing.expect(m_baked.partialRatio() < m_stretched.partialRatio());
+
+    // 대조: grip ⠿(U+283F)는 합성 글리프(braille_glyph)라 셀 크기에 coverage로 직접 그려져 이미 선명하다.
+    // partial 비율을 참고 출력해, stretch 흐림 문제가 폰트 글리프(◧)에만 있고 합성 글리프엔 없음을 보인다.
+    const braille_run = renderer.GlyphRun{
+        .row = 0,
+        .col = 0,
+        .cell_width = 1,
+        .codepoint = 0x283F,
+        .font_id = 0,
+        .glyph_id = 0,
+        .cache_key = .{ .font_id = 0, .glyph_id = 0x283F, .font_size_px = 14, .device_scale = 1 },
+    };
+    const braille_cell = try rasterizeGlyphToBuf(allocator, rasterizer, braille_run, cell_w, cell_h);
+    defer allocator.free(braille_cell);
+    const m_braille = measureInk(braille_cell, cell_w, cell_h);
+    try std.testing.expect(m_braille.ink > 0);
+    // 합성 글리프(braille)는 셀 크기에 coverage로 직접 그려져 anti-alias 번짐이 거의 없다(실측 ratio≈0.0).
+    // 폰트 글리프 ◧의 stretch 흐림(≈0.69)과 달리 grip ⠿는 선명화가 불필요함을 못박는다(maru 코드라 폰트 독립).
+    try std.testing.expect(m_braille.partialRatio() < 0.1);
+}

@@ -494,7 +494,12 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     }
     // legacy_diagonal_glyph: 대각선 stroke/hatch — hatch(U+1FB98/99)·코너 다이아몬드(U+1FBA0~1FBAE)·cell
     // 대각(U+1FBD0~1FBDF). renderer/legacy_diagonal_glyph.zig와 동기.
-    return (cp >= 0x1FB98 && cp <= 0x1FB99) || (cp >= 0x1FBA0 && cp <= 0x1FBAE) || (cp >= 0x1FBD0 && cp <= 0x1FBDF);
+    if ((cp >= 0x1FB98 && cp <= 0x1FB99) || (cp >= 0x1FBA0 && cp <= 0x1FBAE) || (cp >= 0x1FBD0 && cp <= 0x1FBDF)) {
+        return true;
+    }
+    // icon_glyph: maru chrome 아이콘(빌드타임 SVG→coverage 합성) — Plane 15 PUA 연속 범위. renderer/icon_glyph.zig의
+    // isIcon(0xF0000~0xF00FF)과 **동일 범위**여야 한다(어긋나면 그 글리프가 blank로 빠진다). 미등록 슬롯은 빈 글리프.
+    return cp >= 0xF0000 && cp < 0xF0100;
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

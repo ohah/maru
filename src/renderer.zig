@@ -7,6 +7,7 @@ pub const legacy_mosaic_glyph = @import("renderer/legacy_mosaic_glyph.zig"); // 
 pub const legacy_wedge_glyph = @import("renderer/legacy_wedge_glyph.zig"); // Legacy Computing edge wedge 삼각형(U+1FB68~1FB6F·bowtie 1FB9A/9B) 합성. 중립.
 pub const legacy_smooth_glyph = @import("renderer/legacy_smooth_glyph.zig"); // Legacy Computing smooth mosaic(U+1FB3C~1FB67 대각 폴리곤 44개) 합성. 중립.
 pub const legacy_diagonal_glyph = @import("renderer/legacy_diagonal_glyph.zig"); // Legacy Computing 대각선 stroke(U+1FBA0~1FBAE·1FBD0~1FBDF) 합성. 중립.
+pub const icon_glyph = @import("renderer/icon_glyph.zig"); // maru chrome 아이콘(빌드타임 SVG→coverage, Plane 15 PUA 0xF0000~) 합성·다운스케일. 중립.
 pub const draw_list = @import("renderer/draw_list.zig");
 pub const frame_probe = @import("renderer/frame_probe.zig");
 pub const font_identity = @import("renderer/font_identity.zig");
@@ -105,7 +106,8 @@ pub fn isSynthesizedCodepoint(cp: u32) bool {
         legacy_wedge_glyph.isLegacyWedge(cp) or
         legacy_wedge_glyph.isCornerTriangle(cp) or
         legacy_smooth_glyph.isSmoothMosaic(cp) or
-        legacy_diagonal_glyph.isLegacyDiagonal(cp);
+        legacy_diagonal_glyph.isLegacyDiagonal(cp) or
+        icon_glyph.isIcon(cp);
 }
 
 /// cp가 합성 대상이면 슬롯에 coverage를 채우고 **non_clear 픽셀 수**를, 아니면 null을 돌려준다 — 합성 dispatch의
@@ -129,6 +131,8 @@ pub fn synthesizeGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: us
         return legacy_smooth_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
     if (legacy_diagonal_glyph.isLegacyDiagonal(cp)) // 대각선 stroke·hatch
         return legacy_diagonal_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    if (icon_glyph.isIcon(cp)) // maru chrome 아이콘(Plane 15 PUA, 빌드타임 SVG→coverage 다운스케일)
+        return icon_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
     return null;
 }
 

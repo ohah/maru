@@ -10932,7 +10932,7 @@ pub const AppSession = struct {
                 const branch = self.termGitBranch(term); // cwd 변경 시에만 .git/HEAD 재읽기(캐시) — repo 판정에도 씀
                 const show_branch = self.loaded_config.config.sidebar.show_branch;
                 const show_folder = self.loaded_config.config.sidebar.show_folder;
-                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{251C} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
+                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{F0001} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.agentStatusLine(term));
             }
@@ -13328,7 +13328,7 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
     // 사이드바 텍스트 전부 사라짐). 시프트 후 size.cols를 full_cols로 넓혀 수용하는지 고정 — 실 앱에서 못 봤던 버그.
     {
         const names = [_][]const u8{"\u{2733} maru"};
-        const branches = [_][]const u8{"\u{251C} main"};
+        const branches = [_][]const u8{"\u{F0001} main"};
         const paths = [_][]const u8{"~/documents/workspace/maru"}; // 길어 좁은 폭을 꽉 채움 → 시프트 시 overflow
         const muted: terminal.Color = .{ .rgb = session.appearance.theme.sidebar_foreground };
         const sidebar_cols: u16 = 12;

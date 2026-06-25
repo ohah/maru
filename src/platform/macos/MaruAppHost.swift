@@ -109,6 +109,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // locationInWindow가 무효이므로 controller가 창의 현재 포인터 위치를 쓴다.
     override func flagsChanged(with event: NSEvent) {
         controller?.handleModifierHover(event, in: self)
+        controller?.handleModifierFlags(event) // 단축키 힌트 HUD 홀드 감지(KH-4)
         super.flagsChanged(with: event)
     }
 
@@ -197,6 +198,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func keyDown(with event: NSEvent) {
+        controller?.cancelKeyHintHold() // 실제 키 입력 = 단축키 실행 → 보류 홀드 취소·표시 중이면 숨김(KH-4 — 깜빡임 방지)
         let m = event.modifierFlags
         let mods = "\(m.contains(.command) ? "Cmd " : "")\(m.contains(.control) ? "Ctrl " : "")\(m.contains(.option) ? "Opt " : "")\(m.contains(.shift) ? "Shift " : "")"
         imeLog("keyDown mods=[\(mods)]", event.characters, keyCode: event.keyCode)
@@ -581,6 +583,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return false }
         return maru_macos_app_session_any_overlay_open(session) != 0
     }
+    // 단축키 힌트 HUD(KH-4) — 트리거 모디파이어 단독 홀드 감지 상태. flagsChanged가 트리거가 단독으로 눌리면
+    // keyHintTimer를 걸고, delay 경과 시 set_key_hints(1). 떼거나 다른 키·포커스 상실에 끈다. gesture 정책(enabled/
+    // delay/modifier)은 Zig(config) 단일 출처, 타이머 clock만 Swift(native 최소 — frame loop clock과 같은 규율).
+    private var keyHintTimer: Timer?
+    private var keyHintShown = false
+    // config keyhint.*(라이브 ABI read) — (표시 여부, 홀드 지연 ms, 트리거 모디파이어). 세션 없거나 실패면 nil.
+    private var keyHintConfig: (enabled: Bool, delayMs: UInt32, modifier: NSEvent.ModifierFlags)? {
+        guard let session = appSession else { return nil }
+        var enabled: UInt32 = 0
+        var delayMs: UInt32 = 0
+        var modifier: UInt32 = 0
+        guard maru_macos_app_session_key_hints_config(session, &enabled, &delayMs, &modifier) == Self.statusOK else { return nil }
+        let mod: NSEvent.ModifierFlags = modifier == 1 ? .control : (modifier == 2 ? .option : .command)
+        return (enabled != 0, delayMs, mod)
+    }
     private var tickTimer: Timer?
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
@@ -820,6 +837,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func windowDidResignKey(_ notification: Notification) {
         // 창 포커스 상실 → CSI O(focus reporting 켜졌으면). 뷰의 windowLostKey(IME 조합 커밋)와는 별개 경로/목적.
+        cancelKeyHintHold() // 단축키 힌트 HUD도 닫는다(KH-4 — 앱 전환 등으로 포커스 잃으면 떼는 flagsChanged가 안 올 수 있음)
         guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.appSession else { return }
         _ = maru_macos_app_session_focus_changed(session, 0)
     }
@@ -1563,6 +1581,53 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func handleModifierHover(_ event: NSEvent, in view: NSView) {
         guard let point = view.window?.mouseLocationOutsideOfEventStream else { return }
         updateHover(atWindowPoint: point, mods: Self.urlModsBits(event.modifierFlags), in: view)
+    }
+
+    // 단축키 힌트 홀드 감지(KH-4) — view.flagsChanged가 부른다. 트리거 모디파이어(config)가 **단독으로** 눌렸으면
+    // delay 타이머를 걸고, 단독이 아니거나(다른 mod 동반) 떼지면 취소·숨김. 만료 콜백이 set_key_hints(1)로 HUD를 켠다.
+    // flagsChanged는 keyCode 없이 modifierFlags만 주므로 현재 플래그가 정확히 트리거 하나인지로 판정한다.
+    func handleModifierFlags(_ event: NSEvent) {
+        guard let cfg = keyHintConfig, cfg.enabled else {
+            cancelKeyHintHold() // 비활성/세션 없음 → 확실히 끔
+            return
+        }
+        let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if flags == cfg.modifier {
+            // 트리거만 단독으로 눌림. 이미 표시 중이거나 타이머 대기 중이면 재-arm 안 함.
+            if keyHintShown || keyHintTimer != nil { return }
+            let delay = TimeInterval(cfg.delayMs) / 1000.0
+            let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.keyHintTimer = nil
+                    // 만료 시점에도 여전히 트리거 단독이어야 표시(떼는 flagsChanged가 늦을 수 있어 재확인 — NSEvent.modifierFlags=현재 전역 상태).
+                    let now = NSEvent.modifierFlags.intersection([.command, .control, .option, .shift])
+                    guard now == cfg.modifier else { return }
+                    self.setKeyHints(true)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common) // live-resize 중에도 안 멈추게(tickTimer와 같은 .common 모드)
+            keyHintTimer = timer
+        } else {
+            cancelKeyHintHold()
+        }
+    }
+
+    // 실제 키 입력(= 단축키 실행)·포커스 상실 시 호출 — 보류 타이머를 취소하고, 표시 중이면 숨긴다. 정상 ⌘+키가
+    // 절대 HUD를 깜빡이지 않게(keyDown이 대기 타이머를 깸) + 단축키를 누르면 HUD가 사라지게 한다.
+    func cancelKeyHintHold() {
+        keyHintTimer?.invalidate()
+        keyHintTimer = nil
+        if keyHintShown { setKeyHints(false) }
+    }
+
+    // 가시성 토글의 단일 출처 — 상태 캐시(keyHintShown)·ABI·redraw를 묶는다. 같은 값이면 무동작(중복 redraw 방지).
+    private func setKeyHints(_ visible: Bool) {
+        guard keyHintShown != visible else { return }
+        keyHintShown = visible
+        guard let session = appSession else { return }
+        _ = maru_macos_app_session_set_key_hints(session, visible ? 1 : 0)
+        markMetalNeedsRedraw()
     }
 
     private func updateHover(atWindowPoint windowPoint: NSPoint, mods: Int32, in view: NSView) {

@@ -1,6 +1,8 @@
-//! 단축키 힌트 홀드 감지 — **순수 상태머신**(헤드리스 테스트 가능). gesture 정책은 Zig(이 파일), OS 타이머 clock만
-//! Swift(native 최소). Swift는 flagsChanged·timer fire·keyDown/blur를 이 머신에 그대로 흘리고, 돌아온 Action으로
-//! 타이머 시작/취소·redraw만 한다.
+//! 단축키 힌트 홀드 감지 — **순수 상태머신**(헤드리스 테스트 가능). L2 session 코어(OS-중립 입력 정책)에 둔다 —
+//! `ime`·`input_math`·`layout_math`와 같은 자리(docs/layering-and-portability.md §2·§8: gesture 정책은 OS-무관이라
+//! platform/macos 어댑터에 가두지 않는다). config(L0)만 의존하고 platform/pty/renderer/AppKit을 모른다. gesture 정책은
+//! Zig(이 파일), OS 타이머 clock만 Swift(native 최소). Swift는 flagsChanged·timer fire·keyDown/blur를 이 머신에 그대로
+//! 흘리고, 돌아온 Action으로 타이머 시작/취소·redraw만 한다.
 //!
 //! **루트커즈(간헐 미표시 — "Cmd 눌렀을 때 나올 때도 있고 안 나올 때도")**: 옛 Swift `handleModifierFlags`는 arm/cancel은
 //! flagsChanged의 `event.modifierFlags`로 결정하면서, **타이머 만료 콜백에선 `NSEvent.modifierFlags`(전역 정적 상태)를
@@ -14,9 +16,9 @@
 //! (race 안전). 이 단일-출처 계약을 아래 테스트가 재현·고정한다.
 
 const std = @import("std");
-const maru = @import("maru");
+const theme = @import("../config/theme.zig"); // config(L0) — session→config 허용(OS·상위 레이어 비의존)
 
-pub const HintModifier = maru.config.theme.HintModifier;
+pub const HintModifier = theme.HintModifier;
 
 /// 현재 눌린 modifier 집합(4개). Swift가 NSEvent.modifierFlags를 비트로 변환해 넘긴다.
 pub const Mods = struct {
@@ -68,9 +70,13 @@ pub const KeyHintHold = struct {
     /// delay 타이머 만료: **글로벌 modifier를 다시 안 읽는다**. armed면 표시한다 — 여기 도달했다는 건 그 사이 취소
     /// flagsChanged가 없었다는 뜻(있었으면 onFlags가 armed=false로 껐고 Swift가 타이머를 무효화했다). 취소된 늦은
     /// fire(armed=false)는 무시(race 안전). 이게 "두 번째 출처(NSEvent 재읽기)"를 없앤 루트커즈 수정이다.
-    pub fn onTimerFire(self: *KeyHintHold) Action {
+    /// `enabled`는 재확인한다 — arm된 뒤(타이머 대기 중) config reload로 비활성화됐는데 그 사이 재평가 flagsChanged가
+    /// 안 왔으면, 만료가 비활성 기능의 배지를 한 번 깜빡일 수 있다. 비활성이면 armed만 풀고 cancel(표시 안 함).
+    /// modifier 재읽기(두 번째 출처)와 달리 enabled는 같은 config(단일 출처)의 라이브 값이라 추가 출처가 아니다.
+    pub fn onTimerFire(self: *KeyHintHold, enabled: bool) Action {
         if (!self.armed) return .none; // 취소됨 → 늦은 fire 무시
         self.armed = false;
+        if (!enabled) return .cancel; // arm 후 비활성화 → 표시 안 함(타이머는 이미 발화, cancel→invalidate는 무해)
         if (self.shown) return .none;
         self.shown = true;
         return .show;
@@ -92,7 +98,7 @@ const none_mods = Mods{};
 test "정상: 단독 트리거 → arm, 만료 → show, 해제 → hide" {
     var h = KeyHintHold{};
     try std.testing.expectEqual(Action.arm_timer, h.onFlags(cmd, true, .command));
-    try std.testing.expectEqual(Action.show, h.onTimerFire());
+    try std.testing.expectEqual(Action.show, h.onTimerFire(true));
     try std.testing.expect(h.shown);
     try std.testing.expectEqual(Action.hide, h.onFlags(none_mods, true, .command)); // 해제 → hide
     try std.testing.expect(!h.shown);
@@ -105,14 +111,14 @@ test "루트커즈 회귀: armed가 만료까지 살아남으면(취소 flagsCha
     var h = KeyHintHold{};
     try std.testing.expectEqual(Action.arm_timer, h.onFlags(cmd, true, .command));
     // arm과 fire 사이에 어떤 이벤트도 없다(트리거 유지). 옛 코드라면 여기서 글로벌 재읽기에 의존했다.
-    try std.testing.expectEqual(Action.show, h.onTimerFire());
+    try std.testing.expectEqual(Action.show, h.onTimerFire(true));
 }
 
 test "race 안전: 해제 flagsChanged로 취소된 뒤 늦게 도착한 타이머 fire는 표시 안 함" {
     var h = KeyHintHold{};
     try std.testing.expectEqual(Action.arm_timer, h.onFlags(cmd, true, .command));
     try std.testing.expectEqual(Action.cancel, h.onFlags(none_mods, true, .command)); // 해제 → cancel(대기만이라 hide 아님)
-    try std.testing.expectEqual(Action.none, h.onTimerFire()); // 늦은 fire: armed=false라 무시
+    try std.testing.expectEqual(Action.none, h.onTimerFire(true)); // 늦은 fire: armed=false라 무시
     try std.testing.expect(!h.shown);
 }
 
@@ -120,7 +126,7 @@ test "다른 mod 추가(트리거 단독 아님) → 대기 취소" {
     var h = KeyHintHold{};
     _ = h.onFlags(cmd, true, .command); // arm
     try std.testing.expectEqual(Action.cancel, h.onFlags(cmd_shift, true, .command)); // +shift → 단독 아님 → cancel
-    try std.testing.expectEqual(Action.none, h.onTimerFire());
+    try std.testing.expectEqual(Action.none, h.onTimerFire(true));
 }
 
 test "keyDown/포커스 상실: 표시 중이면 hide, 대기만이면 cancel" {
@@ -140,11 +146,21 @@ test "비활성(enabled=false): arm 안 함, 표시 중이면 끔" {
     try std.testing.expectEqual(Action.hide, shown.onFlags(cmd, false, .command)); // 비활성이면 표시 중이어도 끔
 }
 
+test "arm 후 비활성화: 만료가 비활성 기능 배지를 깜빡이지 않음(enabled 재확인)" {
+    // arm된 뒤(타이머 대기) config reload로 enabled=false가 됐는데 재평가 flagsChanged가 안 온 경우 — 만료가
+    // armed만 보고 show하면 방금 끈 기능의 배지가 한 번 뜬다. onTimerFire가 enabled를 재확인해 cancel로 막는다.
+    var h = KeyHintHold{};
+    try std.testing.expectEqual(Action.arm_timer, h.onFlags(cmd, true, .command)); // enabled일 때 arm
+    try std.testing.expectEqual(Action.cancel, h.onTimerFire(false)); // 만료 시점 비활성 → 표시 안 함
+    try std.testing.expect(!h.shown);
+    try std.testing.expect(!h.armed);
+}
+
 test "재-arm 가드: 이미 대기/표시 중이면 추가 arm 안 함(중복 타이머 방지)" {
     var h = KeyHintHold{};
     try std.testing.expectEqual(Action.arm_timer, h.onFlags(cmd, true, .command)); // 첫 arm
     try std.testing.expectEqual(Action.none, h.onFlags(cmd, true, .command)); // 또 단독이 와도 재-arm 안 함
-    _ = h.onTimerFire(); // shown
+    _ = h.onTimerFire(true); // shown
     try std.testing.expectEqual(Action.none, h.onFlags(cmd, true, .command)); // 표시 중에도 none
 }
 

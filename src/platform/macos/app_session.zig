@@ -28,7 +28,7 @@ const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
-const keyhint_hold = @import("keyhint_hold.zig");
+const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig"); // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
@@ -3770,8 +3770,12 @@ pub const AppSession = struct {
         }
         // MARU_KEY_HINTS_FORCE=1 — 첫 frame부터 단축키 힌트(KH-4)를 강제로 켜 각 chrome 요소 우상단 단축키 배지를
         // 헤드리스 스크린샷으로 캡처(self-verify). 모디파이어 홀드(Swift flagsChanged) 없이 렌더 자체를 검증한다 —
-        // 홀드 타이밍은 실기 수동 확인. 일반 실행엔 영향 없다(env-gate).
-        if (std.c.getenv("MARU_KEY_HINTS_FORCE") != null) self.chrome_host.key_hints.visible = true;
+        // 홀드 타이밍은 실기 수동 확인. 일반 실행엔 영향 없다(env-gate). 홀드 머신도 shown=true로 맞춰(visible의 소유자)
+        // 강제-표시 후 모디파이어 해제(off)가 hide로 정상 처리되게 한다 — 직접 set만 하면 머신 shown=false라 desync.
+        if (std.c.getenv("MARU_KEY_HINTS_FORCE") != null) {
+            self.chrome_host.key_hints.visible = true;
+            self.key_hint_hold.shown = true;
+        }
         // MARU_FORCE_STYLED=1 — 첫 frame에 bold/italic/bold-italic/regular SGR 텍스트를 활성 코어에 써 넣어 폰트 face
         // 선택(font.family-bold/italic, F2-3)을 헤드리스 스크린샷으로 캡처(self-verify). italic 슬랜트·bold 굵기가 보인다.
         if (std.c.getenv("MARU_FORCE_STYLED") != null) {
@@ -5782,8 +5786,9 @@ pub const AppSession = struct {
     }
 
     /// Swift 타이머 만료 → 홀드 머신. armed면 show(글로벌 재읽기 없음). 취소된 늦은 fire는 none(race 안전).
+    /// config `keyhint.enabled`(라이브)를 넘겨, arm 후 비활성화됐으면 만료가 배지를 깜빡이지 않게 한다.
     pub fn keyHintOnTimer(self: *AppSession) keyhint_hold.Action {
-        const action = self.key_hint_hold.onTimerFire();
+        const action = self.key_hint_hold.onTimerFire(self.loaded_config.config.keyhint.enabled);
         self.applyKeyHintAction(action);
         return action;
     }

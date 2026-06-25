@@ -36,6 +36,7 @@ pub const components = struct {
     pub const dropdown = @import("chrome/components/dropdown.zig"); // 설정 폼 위젯 — enum 사이클러(CS-4-1c)
     pub const color = @import("chrome/components/color.zig"); // 설정 폼 위젯 — 색 스와치 + 16색 프리셋(CS-4-2)
     pub const settings = @import("chrome/components/settings.zig"); // schema-주도 세팅 모달(CS-4-4)
+    pub const shortcut_hints = @import("chrome/components/shortcut_hints.zig"); // 모디파이어 홀드 단축키 힌트 HUD(패시브 — 입력 비소비, KH-1)
 };
 
 test {

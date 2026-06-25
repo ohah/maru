@@ -83,7 +83,7 @@ pub fn view(state: *const State, rows: []const Row, p: ChromeProps, tk: *const T
             arena: Allocator, out: *ArrayList(draw.Op)) !void { ... }  // 안 보이면 무동작
 ```
 
-- **배치는 `find.view`를 본뜬다(중앙 modal_box 아님)**: `overlay_input`에 `paneTopRightLayout(p, content_rows)`를 추가한다 — `findLayout`과 같은 `p.active_pane` 앵커·`panelSize` 폭(우측 정렬, single-pane 폴백)을 쓰되 **한 줄이 아니라 `content_rows`만큼 아래로 자라는** 박스를 돌려준다. `findLayout`은 그 multi-row 버전의 `content_rows=1` 특수형이 되도록 폭/앵커 로직을 공유한다(복붙 금지 — overlay_input 단일 출처 원칙).
+- **배치는 `find.view`를 본뜬다(중앙 modal_box 아님)**: `overlay_input`에 `paneTopRightBox(p, content_cols, content_rows)`를 추가한다 — `findLayout`과 같은 `p.active_pane` 앵커(우측 정렬, single-pane 폴백)를 쓰되 폭은 고정 `panelSize`가 아니라 콘텐츠 폭(`content_cols`)이고 **한 줄이 아니라 `content_rows`만큼 아래로 자라는** 박스를 돌려준다. 앵커/폴백 로직은 `findLayout`과 공유 헬퍼 `paneRegion(p)`로 단일 출처화한다(복붙 금지 — overlay_input 단일 출처 원칙).
 - `view`는 그 박스로 배경 quad(find와 같은 `surface_bg` + `focus_accent` 테두리)를 깔고, 행마다 카테고리 헤더(굵게) 또는 `chord`(좌) + `title`(좌측 정렬, chord 열 뒤)를 `text` op으로 그린다. 폭/정렬은 `overlay_input.displayCols`(EAW)로 잰다(한글 제목 대비).
 - `handle`이 **없다** — 입력은 이 컴포넌트를 절대 안 거친다.
 
@@ -186,7 +186,7 @@ modifier·특수키 글리프는 Apple/macOS 표준 유니코드 기호를 쓴�
 키캡 1개 = **rounded quad(배경+테두리) + 중앙 글리프 text** op 쌍이다. 이는 find의 패널 배경 quad 트릭과 같다 — 컴포넌트는 `if(rich)`를 **절대 안 쓰고**([chrome-strategy.md §5.1]) `p.shape` 모양 토큰만 읽는다. tui면 토큰이 0이라 평탄(셀 배경 글리프), rich면 둥근 모서리+테두리+그림자로 키캡이 된다. 같은 한 경로가 두 룩을 만든다.
 
 - **per-key 분리**: `command_catalog`에 `chordKeycaps(chord, …)`를 추가해 chord를 **키별 글리프 배열**(`["⌘","T"]`)로 편다(formatChord의 단일 문자열 `⌘T`와 평행 — 키캡은 키마다 한 칸 필요). chrome `Row.binding`은 이 배열을 받는다.
-- **렌더**(`shortcut_hints.view`): 키캡마다 quad(`fill_role` = 키캡 배경 role, `corner_radii`/`border_widths` = 새 `shape.keycap_*` 토큰, `border_role` = divider) + 글리프 text(셀 중앙)를 emit하고, 캡 사이 1칸 간격을 둔다.
+- **렌더**(`shortcut_hints.view`): 키캡마다 quad(`fill_role` = `tab_active_bg`(은은한 키 배경), `corner_radii`/`border_widths` = `p.shape` 모양 토큰, `border_role` = divider) + 글리프 text(`surface_fg`, 셀 정렬)를 emit하고, 캡 사이 1칸 간격을 둔다. KH-1은 모달과 공유하는 `shape.corner_radius_px`/`border_width_px`를 재사용한다 — 키캡 전용 작은 반경 토큰(`shape.keycap_*`)·sharp depth shadow는 KH-5 폴리시.
 - **셀 정렬 필수**([tui-widgets-must-be-cell-text-not-quad] 메모리): 키캡 quad는 **셀 경계에 스냅**한다(sub-pixel 금지 — paintRectBg가 셀 단위). 그래서 키캡 = 정수 칸(글리프 1칸 + rich는 lowering ±pad로 시각 패딩만 확장, 셀 텍스트 폭은 불변 — C4b 패턴). tui는 패딩 없이 글리프 칸만, rich는 quad가 ±pad 떠 보이게.
 - **그림자/depth**: rich SDF quad/shadow(C4b로 이미 도입, [chrome-strategy.md §7])를 키캡 토큰에 연결. tui는 그림자 없음(평탄).
 
@@ -251,7 +251,7 @@ pub const KeyHintConfig = struct {
 | PR | 내용 | 검증 |
 |---|---|---|
 | **KH-0** | 이 설계 문서(doc-first). AGENTS.md 인덱스 등록 | 문서 |
-| **KH-1** | chrome 컴포넌트 `shortcut_hints.zig`(State+view, handle 없음) + `paneTopRightLayout`(overlay_input, 활성 pane 우상단 멀티행) + **키캡 렌더**(per-key quad+글리프, `shape.keycap_*` 토큰, §3.6) + `host.collectKeyHintsDraws`(모달 억제) + `Row` 모델. rows는 fake로 헤드리스 테스트 | 컴포넌트 단위 |
+| **KH-1** ✅ | chrome 컴포넌트 `shortcut_hints.zig`(State+view, handle 없음) + `paneRegion`/`paneTopRightBox`(overlay_input, 활성 pane 우상단 멀티행) + **키캡 렌더**(per-key quad+글리프, `p.shape` 토큰, §3.6) + `host.collectKeyHintsDraws`(`anyModalOpen` 억제) + `Row` 모델. rows는 fake로 헤드리스 테스트 | 컴포넌트 단위 ✅ |
 | **KH-2** | `command_catalog`에 `HintCategory`/`categoryOf`/`keyHintGroups` + **`chordKeycaps`**(chord→키별 글리프 배열, §3.6.3) + platform이 rows 빌드해 collect 호출(가시성 플래그 게이트, 아직 항상 false) | 내용 단위 |
 | **KH-3** | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도 + resolve + platform 노출 | round-trip·범위 |
 | **KH-4** | macOS `flagsChanged` 홀드 상태머신 + `NSTimer` + ABI `set_key_hints` + `markMetalNeedsRedraw` + `MARU_DEBUG`/`MARU_KEY_HINTS_FORCE`. delay/enabled/modifier를 config에서 | `zig build macos-app` 수동 + 스크린샷(force) |
@@ -264,7 +264,7 @@ pub const KeyHintConfig = struct {
 - **(중) 홀드 오발/누락**: `flagsChanged`는 modifierFlags만 줘 좌/우 Cmd 구분이 애매할 수 있다. keyCode(`event.keyCode`)로 보강하거나 modifierFlags 비교만으로 충분한지 KH-4 실측으로 확정한다("추측 말고 캡처").
 - **(중) 단일 오버레이 frame 가정**: collectDraws가 동시 1개 오버레이를 가정 → 모달 억제로 지킨다(§3.2). 향후 다중 오버레이가 필요해지면 lowering을 먼저 일반화한다.
 - **(낮) 맥락 인식 한계**: maru app 바인딩이 전역이라 v1은 카테고리 그룹만. cmux식 "현재 패널 전용"은 표면이 생기면(터미널 매크로 등) KH-5에서.
-- **(낮) 내용 길이 vs pane 높이**: 활성 pane 우상단에서 아래로 자라므로, 바인딩이 많고 pane이 짧으면 박스가 pane(또는 창) 아래로 넘칠 수 있다. v1은 `paneTopRightLayout`가 pane 높이로 행 수를 clamp하고 초과분은 framebuffer가 클립한다(상단은 안 넘침 — 위에서 아래로만 자람). 카테고리 2열 배치·폰트 축소·스크롤은 KH-5.
+- **(낮) 내용 길이 vs pane 높이**: 활성 pane 우상단에서 아래로 자라므로, 바인딩이 많고 pane이 짧으면 박스가 pane(또는 창) 아래로 넘칠 수 있다. v1은 `paneTopRightBox`가 pane 높이로 행 수를 clamp하고 초과분은 컴포넌트가 안 그린다(상단은 안 넘침 — 위에서 아래로만 자람). 카테고리 2열 배치·폰트 축소·스크롤은 KH-5.
 - **트리거 모디파이어 표시 정책**: `keyhint.modifier`를 Control/Option로 바꾸면 그 모디파이어 홀드로 뜨되, 내용은 여전히 "바인딩된 app 액션 전체"다(모디파이어별 필터 아님 — v1 단순화). 필터링이 필요하면 KH-5.
 
 ## 관련 문서

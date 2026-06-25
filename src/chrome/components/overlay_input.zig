@@ -181,6 +181,19 @@ fn panelSize(p: props.ChromeProps, region_w: u32) ?PanelSize {
     return .{ .panel_cols = panel_cols, .panel_w = panel_cols * cw, .cw = cw, .ch = ch };
 }
 
+/// 오버레이를 붙일 **활성 pane 영역**(backing px) 단일 출처. active_pane.w>0이면 그 rect, 미초기화(w==0)면
+/// 사이드바 오른쪽 터미널 영역 전체로 폴백(단일-pane·헤드리스 안전). findLayout(find 한 줄)과 paneTopRightBox
+/// (멀티행 힌트)가 같은 앵커를 쓰게 해 복붙을 막는다([keybind-hints.md] §3.1). h는 멀티행 박스가 pane 높이로
+/// 행 수를 clamp하는 데 쓴다(find는 한 줄이라 h 무시).
+pub const Region = struct { x: u32, y: u32, w: u32, h: u32 };
+pub fn paneRegion(p: props.ChromeProps) Region {
+    const m = p.metrics;
+    return if (p.active_pane.w > 0)
+        .{ .x = p.active_pane.x, .y = p.active_pane.y, .w = p.active_pane.w, .h = p.active_pane.h }
+    else
+        .{ .x = m.sidebar_width_px, .y = 0, .w = m.backing_width_px -| m.sidebar_width_px, .h = m.backing_height_px };
+}
+
 /// palette 패널 가로 레이아웃(사이드바 오른쪽, 상단-중앙) — **palette 전용**(find는 활성 pane 우상단 findLayout으로
 /// 분리). 폭은 panelSize 공유. clamp로 panel_w ≤ term_w_px라 중앙배치 뺄셈이 안전. y는 상단에서 두 줄 아래.
 pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
@@ -201,18 +214,39 @@ pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
 /// 넘을 수 있다(bounded, panelLayout과 동일 절충). y는 pane 상단 한 줄 아래 — 패널 높이는 한 칸이라 region.h는
 /// 안 본다(2칸보다 낮은 극단적 pane이면 아래로 한 칸 넘칠 수 있으나 bounded).
 pub fn findLayout(p: props.ChromeProps) ?PanelLayout {
-    const m = p.metrics;
-    // 활성 pane rect를 경계로. 미초기화(w==0)면 사이드바 오른쪽 터미널 영역 전체로 폴백(단일-pane/테스트 안전).
-    const region: struct { x: u32, y: u32, w: u32 } = if (p.active_pane.w > 0)
-        .{ .x = p.active_pane.x, .y = p.active_pane.y, .w = p.active_pane.w }
-    else
-        .{ .x = m.sidebar_width_px, .y = 0, .w = m.backing_width_px -| m.sidebar_width_px };
+    // 활성 pane 경계(paneRegion 단일 출처 — paneTopRightBox와 공유). 미초기화면 터미널 영역 전체 폴백.
+    const region = paneRegion(p);
     const sz = panelSize(p, region.w) orelse return null; // 영역 0칸 — 무동작
     const pad: u32 = p.shape.modal_padding_px;
     // 우상단: 우측 정렬(오른쪽 여백 = pad라 정상 폭이면 lowering ±pad 확장 후에도 pane 안), 상단에서 한 줄 내려.
     const x = @as(i32, @intCast(region.x)) + @as(i32, @intCast(region.w -| sz.panel_w -| pad));
     const y = @as(i32, @intCast(region.y)) + @as(i32, @intCast(sz.ch));
     return .{ .x = x, .y = y, .panel_cols = sz.panel_cols, .cw = sz.cw, .ch = sz.ch };
+}
+
+/// 멀티행 오버레이(단축키 힌트)를 **활성 pane 우상단**에 붙이는 박스 — findLayout(한 줄)의 멀티행 일반화.
+/// 같은 paneRegion 앵커·우측 정렬을 쓰되, 폭은 고정 panelSize가 아니라 `content_cols`(콘텐츠 폭, 가용 칸으로
+/// clamp)이고 높이는 `content_rows`(영역 높이−상단 한 줄로 clamp — 짧은 pane에서 넘침 방지, 초과분은
+/// framebuffer 클립). 영역 0칸/패딩이 영역보다 큼이면 null(무동작). 우측 여백 pad라 rich lowering ±pad 확장
+/// 후에도 pane 안(findLayout과 동일 절충). y는 pane 상단 한 줄 아래(탭 바·divider와 안 겹치게).
+pub const Box = struct { x: i32, y: i32, cols: u32, rows: u32, cw: u32, ch: u32 };
+pub fn paneTopRightBox(p: props.ChromeProps, content_cols: u32, content_rows: u32) ?Box {
+    const m = p.metrics;
+    const cw = @max(m.cell_width_px, 1);
+    const ch = @max(m.cell_height_px, 1);
+    const region = paneRegion(p);
+    if (region.w / cw == 0) return null; // 영역 0칸
+    const pad: u32 = p.shape.modal_padding_px;
+    const avail_cols = (region.w -| 2 * pad) / cw;
+    if (avail_cols == 0) return null; // 영역이 패딩보다 좁음(비정상)
+    const box_cols = @max(@min(content_cols, avail_cols), 1);
+    const box_w = box_cols * cw;
+    // 높이 clamp: 상단 한 줄 내려 배치하므로 가용 행 = 영역 행 − 1. 0이면 1 강제(soft-lock 방지, bounded 넘침).
+    const avail_rows = @max((region.h / ch) -| 1, 1);
+    const box_rows = @max(@min(content_rows, avail_rows), 1);
+    const x = @as(i32, @intCast(region.x)) + @as(i32, @intCast(region.w -| box_w -| pad));
+    const y = @as(i32, @intCast(region.y)) + @as(i32, @intCast(ch));
+    return .{ .x = x, .y = y, .cols = box_cols, .rows = box_rows, .cw = cw, .ch = ch };
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -336,4 +370,37 @@ test "findLayout: rich 패딩이면 우측 확장 박스가 pane 안 — 우측 
     // lowering이 ±pad 확장해도 박스가 [pane.x, pane.x+pane.w](=[400,600]) 안.
     try std.testing.expect(lay.x + @as(i32, @intCast(panel_w + pad)) <= 600);
     try std.testing.expect(lay.x - @as(i32, @intCast(pad)) >= 400);
+}
+
+test "paneTopRightBox: 활성 pane 우상단 멀티행 — 우측 정렬·콘텐츠 폭·높이 clamp" {
+    // 활성 pane = 창 오른쪽 절반(x=400..800, top=32). 10칸×4행 콘텐츠 박스가 그 pane 우상단에 붙는다.
+    const box = paneTopRightBox(.{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 },
+        .active_pane = .{ .x = 400, .y = 32, .w = 400, .h = 568 },
+    }, 10, 4) orelse return error.NoBox;
+    try std.testing.expectEqual(@as(u32, 10), box.cols); // 콘텐츠 폭(가용 50칸 안)
+    try std.testing.expectEqual(@as(u32, 4), box.rows); // 콘텐츠 행(가용 35행 안)
+    try std.testing.expectEqual(@as(i32, 720), box.x); // 400 + (400 − 80) = 720(우측 정렬)
+    try std.testing.expectEqual(@as(i32, 800), box.x + @as(i32, @intCast(box.cols * box.cw))); // 우단 = pane 우단
+    try std.testing.expectEqual(@as(i32, 48), box.y); // pane top(32) + 한 줄(16)
+    try std.testing.expect(box.x >= 400); // 왼쪽 pane 안 침범
+
+    // 미초기화(active_pane.w==0) → 터미널 영역 전체 우상단 폴백.
+    const fb = paneTopRightBox(.{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 } }, 10, 3) orelse return error.NoBox;
+    try std.testing.expectEqual(@as(i32, 800), fb.x + @as(i32, @intCast(fb.cols * fb.cw))); // 우단 = 창 우단
+    try std.testing.expect(fb.x >= 40); // 사이드바 오른쪽
+}
+
+test "paneTopRightBox: 콘텐츠가 영역보다 크면 폭·높이를 clamp (짧은 pane 넘침 방지)" {
+    // 작은 pane(폭 80px=10칸, 높이 48px=3행)에 큰 콘텐츠(20칸×10행) → 박스가 영역으로 clamp된다.
+    const box = paneTopRightBox(.{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 },
+        .active_pane = .{ .x = 100, .y = 0, .w = 80, .h = 48 },
+    }, 20, 10) orelse return error.NoBox;
+    try std.testing.expectEqual(@as(u32, 10), box.cols); // 폭 80/8=10으로 clamp
+    try std.testing.expectEqual(@as(u32, 2), box.rows); // 높이 3행 − 상단 1행 = 2로 clamp
+    try std.testing.expectEqual(@as(i32, 180), box.x + @as(i32, @intCast(box.cols * box.cw))); // 우단 = pane 우단(180)
+
+    // 영역이 0칸(폭<셀)이면 null.
+    try std.testing.expect(paneTopRightBox(.{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 4, .backing_height_px = 600 } }, 10, 3) == null);
 }

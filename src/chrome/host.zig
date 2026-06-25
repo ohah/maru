@@ -18,6 +18,7 @@ const palette = @import("components/palette.zig");
 const context_menu = @import("components/context_menu.zig");
 const notifications = @import("components/notifications.zig");
 const settings = @import("components/settings.zig");
+const shortcut_hints = @import("components/shortcut_hints.zig");
 
 /// 컴포넌트 handle이 낸 의도를 session이 디스패치할 형태로 host가 정규화한 것. chrome은 config.Action·session을
 /// 모르므로(중립) 부수효과를 직접 안 하고 이 intent만 돌려준다 — platform이 받아 재검색·스크롤·닫기를 실행한다.
@@ -65,6 +66,8 @@ pub const ChromeHost = struct {
     context_menu: context_menu.State = .{},
     notifications: notifications.State = .{},
     settings: settings.State = .{},
+    /// 단축키 힌트 HUD(패시브 — 입력 비소비). 가시성만, ABI(set_key_hints)가 토글. 다른 오버레이와 달리 handleInput 라우팅엔 없다.
+    key_hints: shortcut_hints.State = .{},
 
     /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. AppSession.deinit가 부른다.
     pub fn deinit(self: *ChromeHost, allocator: std.mem.Allocator) void {
@@ -161,6 +164,30 @@ pub const ChromeHost = struct {
         if (ops.items.len > 0) try out.append(arena, .{ .layer = settings.layer, .ops = ops.items });
     }
 
+    /// 키 입력을 가로채는 모달/오버레이가 하나라도 열렸는지. 단축키 힌트(패시브 HUD) 억제와 포인터 소비/통과 판정의
+    /// 단일 출처 — 모달이 열렸으면 거기 타이핑 중이라 Cmd-홀드 힌트는 무의미하고, 동시 오버레이 frame도 피한다.
+    pub fn anyModalOpen(self: *const ChromeHost) bool {
+        return self.confirm.open or self.notice.open or self.context_menu.open or
+            self.notifications.open or self.find.open or self.palette.open or self.settings.open;
+    }
+
+    /// 단축키 힌트 HUD draws. platform이 command_catalog로 rows를 빌드해 부른다(palette와 동형 — 중립 chrome은
+    /// catalog/액션을 모름). **입력 비소비**라 handleInput엔 없다(가시성은 ABI가 key_hints.visible로 토글).
+    /// 모달이 하나라도 열렸으면 억제한다(단일 오버레이 frame 가정 유지). 안 보이거나 억제면 무동작(빈 out).
+    pub fn collectKeyHintsDraws(
+        self: *ChromeHost,
+        rows: []const shortcut_hints.Row,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        if (self.anyModalOpen()) return;
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try shortcut_hints.view(&self.key_hints, rows, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = shortcut_hints.layer, .ops = ops.items });
+    }
+
     /// 입력을 모달 우선으로 라우팅한다. `.key`는 활성 컴포넌트의 키 handle로, `.pointer`는 handlePointer로
     /// 가른다(CS-4-0 — docs/config-gui.md §3). 열린 컴포넌트가 있으면 소비하고 의도(HostAction)를 돌려준다
     /// (session이 디스패치). 열린 게 없으면 null(소비 안 함 — 뒤 터미널로 흘림). 우선순위: Confirm > Notice >
@@ -241,9 +268,7 @@ pub const ChromeHost = struct {
     /// 위젯별 hit-test·드래그(divider `dragRatio` 패턴)는 위젯 컴포넌트가 들어오는 후속 PR에서 추가한다.
     pub fn handlePointer(self: *ChromeHost, ev: input.PointerEvent) ?HostAction {
         _ = ev; // 위젯이 좌표/버튼을 소비하는 건 CS-4-1+; 지금은 모달 열림 여부만으로 소비/통과를 가른다.
-        if (self.confirm.open or self.notice.open or self.context_menu.open or self.notifications.open or self.find.open or self.palette.open or self.settings.open) {
-            return .none;
-        }
+        if (self.anyModalOpen()) return .none;
         return null;
     }
 };
@@ -427,4 +452,45 @@ test "host: settings 키보드 섹션 네비(Tab→↓)는 .settings_section_cha
     // ↓ 섹션 이동 → host가 platform에 .settings_section_changed를 줘야 한다(.none이면 회귀).
     const action = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .down } });
     try std.testing.expectEqual(HostAction.settings_section_changed, action.?);
+}
+
+test "host: 단축키 힌트 — visible면 collectKeyHintsDraws 1개(modal layer), 모달 열리면 억제" {
+    const Rgb = @import("../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var host = ChromeHost{};
+    defer host.deinit(std.testing.allocator);
+    const rows = [_]shortcut_hints.Row{
+        .{ .header = "Workspace" },
+        .{ .binding = .{ .caps = &.{ "⌘", "T" }, .title = "New Terminal" } },
+    };
+    var out: std.ArrayList(draw.ChromeDraw) = .empty;
+
+    // 안 보임 → 0(패시브 HUD 기본 닫힘).
+    try host.collectKeyHintsDraws(&rows, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+    // 보임 → 1(modal layer). 입력 라우팅엔 안 들어가므로 handleInput은 여전히 null(소비 안 함).
+    host.key_hints.visible = true;
+    out.clearRetainingCapacity();
+    try host.collectKeyHintsDraws(&rows, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(draw.Layer.modal, out.items[0].layer);
+    try std.testing.expect(host.handleInput(std.testing.allocator, .{ .key = .{ .key = .char, .codepoint = 'T' } }) == null);
+
+    // 모달(notice) 열림 → 억제(0): 단일 오버레이 frame 가정 유지.
+    host.notice.show("x");
+    out.clearRetainingCapacity();
+    try host.collectKeyHintsDraws(&rows, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }

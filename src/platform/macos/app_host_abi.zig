@@ -1122,6 +1122,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "titlebar_strip_px"), @offsetOf(AppMetalFrame, "titlebar_strip_px"));
     // v70: 창 배경 투명도 × 1000(clear color alpha) — 끝에 추가, 위치 대조로 C↔Zig 정합 보장.
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "window_opacity_milli"), @offsetOf(AppMetalFrame, "window_opacity_milli"));
+    // v86: 사이드바 세로 스크롤량(px) — 끝에 추가, 위치 대조로 C↔Zig 정합 보장.
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "sidebar_scroll_offset_px"), @offsetOf(AppMetalFrame, "sidebar_scroll_offset_px"));
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

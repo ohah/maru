@@ -55,7 +55,7 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-pub const abi_version: u32 = 85; // 85: take_command_catalog_dirty(커맨드 카탈로그 런타임 재빌드 신호 — keybind rebind/unbind·reload·reset이 rebuildCommandCatalog로 카탈로그를 다시 빌드하며 command_catalog_dirty를 세우면 Swift가 tick마다 drain해 1이면 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다. reset은 확인 모달-확정 후 tick에서 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로 — 인앱 rebind·멀티창 활성 세션도 커버. take_global_hotkeys_dirty와 같은 1회성, 끝에 export 추가 — 구조체 offset 불변). 84: MetalFrame.modal_clip_x/y/w/h_px(모달 오버레이 px 클리핑 인프라 — chrome draw.Op.clip을 lowering이 OverlayRaster.clip_rect로 모으면 렌더러가 모달 셀 draw에 setScissorRect 적용; w==0=클리핑 없음[기존 동작]. 부분 카드 픽셀 스크롤[알림 패널 등] 재사용 인프라, 컴포넌트 적용은 후속. 끝에 4필드 추가해 구조체 offset 불변). 83: take_color_sample_request + provide_sampled_color(HSV picker `i` 스포이드 → Swift가 NSColorSampler[OS 화면 색 추출기]를 열고 사용자가 고른 화면 픽셀 RGB를 picker에 반영. Zig가 color_sample_pending을 세우고 Swift가 tick마다 take_color_sample_request로 drain해 1이면 NSColorSampler.show[비동기], 콜백에서 provide_sampled_color[r,g,b u32]로 되돌린다 → settings.setPickerRgb로 pick h/s/v 반영. file-pick take/provide 패턴이나 provide가 비동기 콜백. 끝에 export 2개 추가 — 구조체 offset 불변). 82: take_global_hotkeys_dirty(글로벌 핫키 라이브 OS 재등록 — 세팅 GUI 녹음/해제[rebind/unbind]·reload·reset이 global_hotkeys를 다시 빌드하고 dirty를 세우면 Swift가 tick마다 drain해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 descriptor를 OS에 재등록. global_hotkeys getter는 그대로 재사용. take_bell류 1회성, 끝에 export 추가 — 구조체 offset 불변). 81: take_file_pick_request + provide_picked_file(세팅 window.background-image 행 활성 → 파일 선택창. Zig가 file_pick_pending을 세우고 Swift가 tick마다 take_file_pick_request로 drain해 1이면 NSOpenPanel[PNG]을 열어 고른 절대경로를 provide_picked_file로 되돌린다 → Zig가 setText + 라이브 반영 + dirty. OSC52 read take/provide와 같은 패턴, 끝에 export 2개 추가 — 구조체 offset 불변). 80: any_overlay_open getter(세팅 등 chrome 오버레이/녹음 열림 — Swift performKeyEquivalent가 1이면 메뉴바 keyEquivalent를 양보해 ⌘조합을 keyDown→handleKeyEvent 모달/녹음 가드로 보낸다. 순수 read getter, 구조체 offset 불변). 79: window_blur_radius(config window.blur getter — 창 뒤 데스크톱 배경 블러 반경 px. window.opacity>=1이면 0[불투명 창=블러 안 보임]. 블러는 GPU 아니라 OS 창 속성이라 host가 적용: macOS=CGSSetWindowBackgroundBlurRadius[Ghostty·Terminal.app 비공개 CGS], Win=DwmSetWindowAttribute·Linux=컴포지터 속성[추후]. 게이트 정책은 Zig 단일 출처[windowBlurRadius], 순수 read getter라 구조체 offset 불변). 78: pending_notification에 surface_id_out·foreground_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. foreground_out=전면 배너 여부(에이전트 완료=1, OSC=0 전면이면 목록만) → willPresent가 자기 화면 알림 노이즈 억제. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 86; // 86: MetalFrame.sidebar_scroll_offset_px + maru_metal_renderer_draw 마지막 인자(사이드바 세로 스크롤 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘으면 휠/트랙패드로 스무스 스크롤. 렌더러가 사이드바 셀 py_top에서 빼 카드를 위로 밀고 >0이면 [header_h, drawable_h] scissor로 헤더 위로 샌 카드를 자른다; GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립. 우측에 pane 스크롤바 동형 fade thumb. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변). 85: take_command_catalog_dirty(커맨드 카탈로그 런타임 재빌드 신호 — keybind rebind/unbind·reload·reset이 rebuildCommandCatalog로 카탈로그를 다시 빌드하며 command_catalog_dirty를 세우면 Swift가 tick마다 drain해 1이면 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다. reset은 확인 모달-확정 후 tick에서 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로 — 인앱 rebind·멀티창 활성 세션도 커버. take_global_hotkeys_dirty와 같은 1회성, 끝에 export 추가 — 구조체 offset 불변). 84: MetalFrame.modal_clip_x/y/w/h_px(모달 오버레이 px 클리핑 인프라 — chrome draw.Op.clip을 lowering이 OverlayRaster.clip_rect로 모으면 렌더러가 모달 셀 draw에 setScissorRect 적용; w==0=클리핑 없음[기존 동작]. 부분 카드 픽셀 스크롤[알림 패널 등] 재사용 인프라, 컴포넌트 적용은 후속. 끝에 4필드 추가해 구조체 offset 불변). 83: take_color_sample_request + provide_sampled_color(HSV picker `i` 스포이드 → Swift가 NSColorSampler[OS 화면 색 추출기]를 열고 사용자가 고른 화면 픽셀 RGB를 picker에 반영. Zig가 color_sample_pending을 세우고 Swift가 tick마다 take_color_sample_request로 drain해 1이면 NSColorSampler.show[비동기], 콜백에서 provide_sampled_color[r,g,b u32]로 되돌린다 → settings.setPickerRgb로 pick h/s/v 반영. file-pick take/provide 패턴이나 provide가 비동기 콜백. 끝에 export 2개 추가 — 구조체 offset 불변). 82: take_global_hotkeys_dirty(글로벌 핫키 라이브 OS 재등록 — 세팅 GUI 녹음/해제[rebind/unbind]·reload·reset이 global_hotkeys를 다시 빌드하고 dirty를 세우면 Swift가 tick마다 drain해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 descriptor를 OS에 재등록. global_hotkeys getter는 그대로 재사용. take_bell류 1회성, 끝에 export 추가 — 구조체 offset 불변). 81: take_file_pick_request + provide_picked_file(세팅 window.background-image 행 활성 → 파일 선택창. Zig가 file_pick_pending을 세우고 Swift가 tick마다 take_file_pick_request로 drain해 1이면 NSOpenPanel[PNG]을 열어 고른 절대경로를 provide_picked_file로 되돌린다 → Zig가 setText + 라이브 반영 + dirty. OSC52 read take/provide와 같은 패턴, 끝에 export 2개 추가 — 구조체 offset 불변). 80: any_overlay_open getter(세팅 등 chrome 오버레이/녹음 열림 — Swift performKeyEquivalent가 1이면 메뉴바 keyEquivalent를 양보해 ⌘조합을 keyDown→handleKeyEvent 모달/녹음 가드로 보낸다. 순수 read getter, 구조체 offset 불변). 79: window_blur_radius(config window.blur getter — 창 뒤 데스크톱 배경 블러 반경 px. window.opacity>=1이면 0[불투명 창=블러 안 보임]. 블러는 GPU 아니라 OS 창 속성이라 host가 적용: macOS=CGSSetWindowBackgroundBlurRadius[Ghostty·Terminal.app 비공개 CGS], Win=DwmSetWindowAttribute·Linux=컴포지터 속성[추후]. 게이트 정책은 Zig 단일 출처[windowBlurRadius], 순수 read getter라 구조체 offset 불변). 78: pending_notification에 surface_id_out·foreground_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. foreground_out=전면 배너 여부(에이전트 완료=1, OSC=0 전면이면 목록만) → willPresent가 자기 화면 알림 노이즈 억제. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -1000,6 +1000,15 @@ pub const AppSession = struct {
     // 사이드바 상단 헤더(검색바 + 아이콘 2개) 높이(px) = cell_height × header_ratio. 0이면 헤더 없음. 밴드·카드·
     // hit-test가 이만큼 아래로 시프트되고, .m이 사이드바 셀 py_top에 더한다(chrome props.sidebar_header_height_px로 전달).
     sidebar_header_height_px: u32 = 0,
+    // 사이드바 세로 스크롤량(backing px) — 워크스페이스 카드가 헤더 아래 뷰포트 높이를 넘으면 휠/트랙패드로 스크롤한다.
+    // 카드(밴드·glyph·tint)는 이만큼 위로 밀리고, 헤더는 고정. .m이 사이드바 셀 py_top에서 빼고 헤더 아래로 scissor
+    // 클리핑하며(frame.sidebar_scroll_offset_px), GPU quad(밴드·tint·accent)는 lowering이 빼고 헤더 위는 클립한다.
+    // clampSidebarScroll이 [0, sidebarMaxScroll]로 잡고(탭 추가/삭제·검색·resize·휠마다), 0이면 기존 동작 그대로.
+    sidebar_scroll_offset_px: u32 = 0,
+    // 사이드바 스크롤바 thumb fade 타이머(pane scrollbar_idle_ticks 동형, 단일 트랙). 스크롤 활동(offset 변화)에서
+    // 0(full)로 복귀하고 매 tick 늘어 fade 창에서 흐려진다. last_offset은 변화 감지용. updateScrollbarFade가 갱신.
+    sidebar_scrollbar_idle_ticks: u32 = scrollbar_visible_ticks + scrollbar_fade_ticks, // 시작은 faint(스크롤 전엔 거의 안 보임)
+    sidebar_scrollbar_last_offset: u32 = 0,
     // backing(Retina) scale을 천분율로 보관한다(예: 2000 = 2.0×, 1500 = 1.5×). 정수 배율로
     // 반올림하지 않고 분수 그대로 들고 있어, glyph rasterize 크기와 cell 메트릭을 분수 Retina
     // 해상도에 정확히 맞춘다. resize 이벤트의 scale_milli에서 갱신한다.
@@ -5792,6 +5801,24 @@ pub const AppSession = struct {
         // tab_wheel_accum 경로는 원본 delta_x). 방향 판정(위 wheel_accum 부호)은 배수>0이라 부호 불변이라 영향 없다.
         const scaled_delta_y = delta_y * @as(f64, self.appearance.scroll_multiplier);
         const lines = wheelDeltaToLines(&self.wheel_accum, scaled_delta_y, precise, self.cell_height_px, self.scale_milli);
+        // 사이드바 위 휠 = 사이드바 세로 스크롤이 **통째로 소비**한다(커서 아래 소유 원칙을 사이드바로 확장 — 터미널/
+        // 스크롤백으로 안 흘린다). 카드가 헤더 아래 뷰포트를 안 넘으면 clamp가 no-op이라 무동작이지만, 그래도 소비해
+        // 사이드바 위 휠이 뒤 터미널을 굴리는 위화감을 막는다. 한 줄(cell 높이)을 픽셀 단위로 환산해 스무스 스크롤한다 —
+        // 위(lines>0=과거)면 콘텐츠를 아래로(offset↓), 아래면 위로(offset↑). 가로(탭 바)는 사이드바와 무관해 건너뛴다.
+        if (self.sidebar_width_px > 0 and self.inSidebar(x_px)) {
+            const max = self.sidebarMaxScroll();
+            if (lines != 0 and max > 0) { // 안 넘치면 소비만(아래 return) — 헛 rebuild 안 함
+                const step: i64 = @as(i64, lines) * @as(i64, @intCast(self.cell_height_px));
+                const next: i64 = @as(i64, self.sidebar_scroll_offset_px) - step; // lines>0(위) → offset 감소
+                const clamped: u32 = @intCast(std.math.clamp(next, 0, @as(i64, max)));
+                if (clamped != self.sidebar_scroll_offset_px) { // 실제로 움직였을 때만 재배치
+                    self.sidebar_scroll_offset_px = clamped;
+                    self.rebuildSidebar() catch {}; // 밴드·tint quad를 새 오프셋으로 재배치(셀은 .m이 frame 오프셋으로 자동, 스크롤바는 per-frame)
+                    self.metal_dirty = true;
+                }
+            }
+            return;
+        }
         // 휠은 '커서 아래' surface가 통째로 처리한다 — split에서 비활성 panel 위 스크롤이 그 panel을 스크롤하고
         // (포커스는 안 바꾼다), mouse tracking 판정·리포트 좌표도 그 surface 기준이라 정합한다. 베이스: Ghostty/
         // Warp — 휠은 포인터 아래 surface가 소유한다(포커스 무관). 그래야 포커스 pane이 트래킹 앱(vim/tmux 등)
@@ -6178,7 +6205,7 @@ pub const AppSession = struct {
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2 and self.sidebar_drag_index < self.tabs.items.len) {
-                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.tabs.items.len);
+                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px, self.tabs.items.len);
                 // moveTab이 그룹(고정/비고정)으로 clamp한 **실제 안착 인덱스**를 단일 출처로 받는다(여기서 따로
                 // pre-clamp하지 않는다 — countPinnedTabs O(n)가 drag당 1회로 줄고, 이중-clamp 일치 가정이 사라진다).
                 // sidebar_drag_index를 안착 인덱스로 갱신해 다음 delta가 *그* 탭을 재정렬한다. no-op이면 from을 그대로 반환.
@@ -9254,6 +9281,7 @@ pub const AppSession = struct {
             self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
             self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
+            self.appendSidebarScrollbar(); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
@@ -9770,9 +9798,22 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수로 판정).
+    /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수·스크롤로 판정).
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
-        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_visible_tabs.items.len);
+        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px, self.sidebar_visible_tabs.items.len);
+    }
+
+    /// 사이드바 콘텐츠(표시 카드 전체 높이)가 헤더 아래 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
+    /// 순수 산술은 sidebarMaxScrollPx에 둬(헤드리스 단위 테스트) self는 필드만 떠 넘긴다.
+    fn sidebarMaxScroll(self: *const AppSession) u32 {
+        return sidebarMaxScrollPx(self.sidebar_slot_height_px, self.sidebar_visible_tabs.items.len, self.backing_height_px, self.sidebar_header_height_px);
+    }
+
+    /// 사이드바 스크롤 오프셋을 [0, sidebarMaxScroll]로 잡는다. 탭 추가/삭제·검색 필터·resize·휠로 콘텐츠/뷰포트가
+    /// 바뀌면 stale 오프셋이 자동 정정된다(tab_scroll_cols 재clamp 선례). rebuildSidebar가 표시 탭 재계산 직후 호출.
+    fn clampSidebarScroll(self: *AppSession) void {
+        const max = self.sidebarMaxScroll();
+        if (self.sidebar_scroll_offset_px > max) self.sidebar_scroll_offset_px = max;
     }
 
     /// 호버 중인 사이드바 슬롯을 갱신한다. 바뀌면 호버 밴드를 다시 만들고(rebuildSidebar) 재드로우한다.
@@ -9913,6 +9954,7 @@ pub const AppSession = struct {
         self.sidebar_cells.clearRetainingCapacity();
         self.gpu_quads.clearRetainingCapacity();
         self.recomputeVisibleTabs(); // 검색 필터로 표시 카드(sidebar_visible_tabs) 갱신 — 아래는 전부 표시 슬롯 기준
+        self.clampSidebarScroll(); // 표시 카드 수/뷰포트가 바뀌었을 수 있으니 stale 스크롤 정정 — 아래 quad가 이 오프셋을 쓴다
         if (self.tabs.items.len == 0) return;
         // 밴드(활성/호버 슬롯·"+" 호버)는 chrome `sidebar.view`가 fill op으로 단일 출처. `lowerSidebar`가 그 fill을
         // sidebarBandCell(행=슬롯)로 lower한다(색·NativeMetalCell은 platform). host가 중립 Tab(활성)을 주입(palette Row 선례).
@@ -9984,11 +10026,13 @@ pub const AppSession = struct {
             // GpuQuad는 straight-alpha(셰이더가 rgb*=a) — premultipliedRgba를 쓰면 이중 premultiply로 틴트가
             // 흐려져 활성/호버 슬롯의 blendRgb(직접 알파) 경로보다 약했다(code-review 발견). straight로 맞춰 일치시킨다.
             const c = (@as(u32, tab_bg_tint_alpha) << 24) | (tab.background_color & 0x00FF_FFFF);
+            const abs_y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px));
+            const sr = self.sidebarScrollClipQuad(abs_y, @floatFromInt(slot_h)) orelse continue; // 스크롤+헤더 클립(직각이라 corner 무관)
             self.gpu_quads.append(self.allocator, .{
                 .x = 0,
-                .y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px)),
+                .y = sr.y,
                 .w = @floatFromInt(self.sidebar_width_px),
-                .h = @floatFromInt(slot_h),
+                .h = sr.h,
                 .corner_radii = .{ 0, 0, 0, 0 },
                 .border_widths = .{ 0, 0, 0, 0 },
                 .fill_color0 = c,
@@ -10086,6 +10130,17 @@ pub const AppSession = struct {
         }) catch {};
     }
 
+    /// 사이드바 세로 스크롤의 최대 오프셋(backing px) — 표시 카드 전체 높이가 헤더 아래 뷰포트를 넘는 양. 순수 함수라
+    /// 헤드리스 단위 테스트 가능. content = 표시 탭 수 × 슬롯 높이, viewport = backing 높이 − 헤더(카드 아래 "+"는
+    /// 헤더로 이동해 콘텐츠에 없음). content ≤ viewport(또는 슬롯 0)면 0(스크롤 불필요). u64로 계산해 곱셈 overflow 회피.
+    fn sidebarMaxScrollPx(slot_height_px: u32, visible_count: usize, backing_height_px: u32, header_height_px: u32) u32 {
+        if (slot_height_px == 0) return 0;
+        const content: u64 = @as(u64, visible_count) * @as(u64, slot_height_px);
+        const viewport: u64 = if (backing_height_px > header_height_px) backing_height_px - header_height_px else 0;
+        if (content <= viewport) return 0;
+        return @intCast(@min(content - viewport, @as(u64, std.math.maxInt(u32))));
+    }
+
     /// 스크롤바 thumb 기하(보이는 영역 내 y offset·높이, backing px) — 순수 함수라 단위 테스트 가능. sb_count==0
     /// (스크롤백 없음)·메트릭 0이면 null(안 그림). thumb 높이=보이는 비율(view/(sb+view)), 최소 높이로 clamp.
     /// y: view_offset 0(바닥)이면 view_h-thumb_h(아래), sb_count(꼭대기)면 0(위) — 위로 스크롤할수록 thumb가 올라간다.
@@ -10174,6 +10229,19 @@ pub const AppSession = struct {
             if (pane.scrollbar_idle_ticks >= scrollbar_visible_ticks + scrollbar_fade_ticks) continue; // faint 정착 — 정적
             pane.scrollbar_idle_ticks += 1;
             if (pane.scrollbar_idle_ticks > scrollbar_visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
+        }
+        // 사이드바 스크롤바 fade(단일 트랙 — pane과 동형). 스크롤 활동은 offset 변화로 감지(휠/clamp가 바꾼다).
+        // 스크롤 불필요(max 0)면 다음 등장이 full로 시작하게 타이머·last를 리셋한다.
+        if (self.sidebarMaxScroll() == 0) {
+            self.sidebar_scrollbar_idle_ticks = scrollbar_visible_ticks + scrollbar_fade_ticks; // faint 정착(안 보임)
+            self.sidebar_scrollbar_last_offset = self.sidebar_scroll_offset_px;
+        } else if (self.sidebar_scroll_offset_px != self.sidebar_scrollbar_last_offset) { // 스크롤 활동 → full 복귀
+            self.sidebar_scrollbar_last_offset = self.sidebar_scroll_offset_px;
+            if (self.sidebar_scrollbar_idle_ticks != 0) self.metal_dirty = true;
+            self.sidebar_scrollbar_idle_ticks = 0;
+        } else if (self.sidebar_scrollbar_idle_ticks < scrollbar_visible_ticks + scrollbar_fade_ticks) {
+            self.sidebar_scrollbar_idle_ticks += 1;
+            if (self.sidebar_scrollbar_idle_ticks > scrollbar_visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
         }
     }
 
@@ -10393,6 +10461,47 @@ pub const AppSession = struct {
         }) catch {};
     }
 
+    /// 사이드바 우측에 세로 스크롤바 thumb(layer 3 over)를 그린다 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘을 때만.
+    /// pane 스크롤바와 같은 pill 모양·muted 색·fade(sidebar_scrollbar_idle_ticks)를 쓰되, 단일 트랙이라 per-frame
+    /// (appendPaneScrollbars 옆에서) 호출한다. 트랙 = [헤더 하단, backing 하단], thumb 위치는 offset/maxScroll.
+    /// 접힘(폭 0)·헤더 없음·스크롤 불필요면 무동작. dropQuadsByLayer(3)가 매 프레임 비우므로 누적 안 됨.
+    fn appendSidebarScrollbar(self: *AppSession) void {
+        if (self.sidebar_width_px == 0 or self.cell_width_px == 0) return;
+        const slot_h = self.sidebar_slot_height_px;
+        if (slot_h == 0) return;
+        const header = self.sidebar_header_height_px;
+        if (self.backing_height_px <= header) return;
+        const viewport_h: u32 = self.backing_height_px - header;
+        const max_scroll = self.sidebarMaxScroll();
+        if (max_scroll == 0) return; // 안 넘침 — 스크롤바 없음
+        const view_px: f32 = @floatFromInt(viewport_h);
+        const content_px: f32 = @as(f32, @floatFromInt(self.sidebar_visible_tabs.items.len)) * @as(f32, @floatFromInt(slot_h));
+        const min_thumb: f32 = @max(view_px * 0.04, 18.0);
+        var thumb_h: f32 = if (content_px > 0) view_px * view_px / content_px else view_px;
+        if (thumb_h < min_thumb) thumb_h = min_thumb;
+        if (thumb_h > view_px) thumb_h = view_px;
+        const t: f32 = @as(f32, @floatFromInt(self.sidebar_scroll_offset_px)) / @as(f32, @floatFromInt(max_scroll)); // 0(맨 위)..1(맨 아래)
+        const thumb_y: f32 = @as(f32, @floatFromInt(header)) + (view_px - thumb_h) * t;
+        const bar_w: f32 = scrollbarBarWidthPx(self.cell_width_px, false);
+        const x: f32 = @as(f32, @floatFromInt(self.sidebar_width_px)) - bar_w - 2.0; // 사이드바 우측 가장자리에서 2px 안쪽
+        const alpha: u8 = computeScrollbarAlpha(self.sidebar_scrollbar_idle_ticks); // pane과 같은 fade 곡선
+        const color: u32 = packRgbAlpha(self.mutedForeground(), alpha); // muted 전경(비활성 탭과 같은 톤), 셰이더 rgb*=a
+        const r = bar_w * 0.5; // pill(반지름 = 폭 절반)
+        self.gpu_quads.append(self.allocator, .{
+            .x = x,
+            .y = thumb_y,
+            .w = bar_w,
+            .h = thumb_h,
+            .corner_radii = .{ r, r, r, r },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = color,
+            .fill_color1 = color,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 3, // over — 셀·밴드 위. dropQuadsByLayer(3)가 per-frame 비움(pane 스크롤바와 짝).
+        }) catch {};
+    }
+
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
     /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). tui는 셀. 둘 다 part1 제목 셀 아래(layer 2).
     fn appendBarBgQuad(self: *AppSession, bar: maru.session.SplitRect, bg: u32) void {
@@ -10423,6 +10532,26 @@ pub const AppSession = struct {
     /// chrome `sidebar.view`가 낸 밴드 fill op을 sidebar 셀(NativeMetalCell)로 lower한다 — fill rect.y / slot_h = 슬롯 행,
     /// role(tab_active_bg/tab_hover_bg) → sidebarActiveBg/HoverBg. sidebarBandCell이 폭을 cell로 floor해 한 칸 밴드로.
     /// (옛 rebuildSidebar의 밴드 emit을 view 경로로 — 색 해석·NativeMetalCell은 platform 책임, divider lowerDividerRules와 동형.)
+    /// 슬롯 콘텐츠 GpuQuad(밴드·accent 막대·배경 tint)의 절대 y(슬롯 상대 y + 헤더 시프트는 호출자가 더해 넘김)와
+    /// 높이에 사이드바 세로 스크롤을 적용하고 헤더 아래로 클립한다. 헤더 quad(검색 underline·아이콘 호버·배지)는 고정이라
+    /// 이걸 안 거친다. 반환 null = 완전히 헤더 위(스킵). clipped=true면 위쪽이 잘려(상단이 헤더 경계에 abut) 호출자가 둥근
+    /// 상단 모서리를 죽인다(라운드 quad가 헤더 경계에서 어색하지 않게). 셀(밴드 sentinel·glyph)은 .m이 frame 오프셋으로
+    /// 따로 스크롤+scissor하므로 이 경로는 GpuQuad 전용이다(둘 다 같은 sidebar_scroll_offset_px를 쓴다 — 단일 출처).
+    fn sidebarScrollClipQuad(self: *const AppSession, abs_y: f32, h: f32) ?struct { y: f32, h: f32, clipped: bool } {
+        const header: f32 = @floatFromInt(self.sidebar_header_height_px);
+        const off: f32 = @floatFromInt(self.sidebar_scroll_offset_px);
+        var y = abs_y - off;
+        var hh = h;
+        if (y + hh <= header) return null; // 헤더 위로 완전히 스크롤됨 — 안 그림
+        var clipped = false;
+        if (y < header) { // 상단 일부가 헤더에 걸침 — 헤더 경계에서 자른다
+            hh -= (header - y);
+            y = header;
+            clipped = true;
+        }
+        return .{ .y = y, .h = hh, .clipped = clipped };
+    }
+
     fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
         const slot_h = self.sidebar_slot_height_px;
         if (slot_h == 0) return;
@@ -10433,12 +10562,13 @@ pub const AppSession = struct {
             .quad => |q| {
                 if (q.fill_role == .accent_bar) {
                     // U1: 얇은 좌측 maru-accent 막대 — 셀 폭 floor를 피해 항상 GpuQuad(직각, layer 0=under). 색은 palette.accent_bar(앰버).
+                    const sr = self.sidebarScrollClipQuad(@as(f32, @floatFromInt(q.rect.y)) + header_f, @floatFromInt(q.rect.h)) orelse continue;
                     const ac = packOpaqueRgb(self.buildChromeTokens().palette.get(.accent_bar));
                     self.gpu_quads.append(self.allocator, .{
                         .x = @floatFromInt(q.rect.x),
-                        .y = @as(f32, @floatFromInt(q.rect.y)) + header_f,
+                        .y = sr.y,
                         .w = @floatFromInt(q.rect.w),
-                        .h = @floatFromInt(q.rect.h),
+                        .h = sr.h,
                         .corner_radii = .{ 0, 0, 0, 0 },
                         .border_widths = .{ 0, 0, 0, 0 },
                         .fill_color0 = ac,
@@ -10475,12 +10605,15 @@ pub const AppSession = struct {
                     }
                 } else {
                     // rich: GPU quad 프리미티브(둥근 밴드) — 셀 그리드와 별개 파이프라인으로 렌더된다.
+                    const sr = self.sidebarScrollClipQuad(@as(f32, @floatFromInt(q.rect.y)) + header_f, @floatFromInt(q.rect.h)) orelse continue;
+                    // 상단이 헤더에 걸려 잘리면 둥근 모서리를 죽인다(헤더 경계에 abut한 라운드 상단이 어색하지 않게).
+                    const radii: [4]f32 = if (sr.clipped) .{ 0, 0, 0, 0 } else .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) };
                     self.gpu_quads.append(self.allocator, .{
                         .x = @floatFromInt(q.rect.x),
-                        .y = @as(f32, @floatFromInt(q.rect.y)) + header_f,
+                        .y = sr.y,
                         .w = @floatFromInt(q.rect.w),
-                        .h = @floatFromInt(q.rect.h),
-                        .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) },
+                        .h = sr.h,
+                        .corner_radii = radii,
                         .border_widths = .{ 0, 0, 0, 0 },
                         .fill_color0 = color,
                         .fill_color1 = color,
@@ -11614,6 +11747,9 @@ pub const AppSession = struct {
         // 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 — 렌더러가 사이드바 셀(밴드·카드 glyph)을
         // 이만큼 아래로 민다(밴드 view는 슬롯 상대 좌표라 .m이 시프트 단일 책임). 헤더 glyph는 절대 좌표 별도 frame.
         frame.sidebar_header_height_px = self.sidebar_header_height_px;
+        // 사이드바 세로 스크롤량 — 렌더러가 사이드바 셀(밴드·카드 glyph) py_top에서 빼고, scroll>0이면 헤더 아래로
+        // scissor 클리핑한다(GPU quad 밴드·tint는 lowering이 이미 뺐다 — 같은 sidebar_scroll_offset_px 단일 출처).
+        frame.sidebar_scroll_offset_px = self.sidebar_scroll_offset_px;
         // 상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글(◧) 글리프를 이 띠 안에 세로 중앙 배치해 신호등과
         // 정렬시키는 데만 쓴다(펼침 헤더 아이콘은 terminal_origin_x_px>0이라 0.3ch nudge 유지). hit-test
         // (collapsedToggleRect)는 이미 이 띠 전체 높이를 클릭 영역으로 쓴다.
@@ -20145,6 +20281,21 @@ test "pendingPasteRetarget: 빈 큐는 활성 surface로 고정, 잔여 있으�
     session.pending_paste_target = other;
     session.pendingPasteRetarget();
     try std.testing.expectEqual(other, session.pending_paste_target);
+}
+
+test "sidebarMaxScrollPx: 콘텐츠가 헤더 아래 뷰포트를 넘는 양(스크롤 불필요면 0, overflow 안전)" {
+    // 슬롯 0이면 항상 0(렌더 전 degenerate).
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(0, 100, 600, 60));
+    // viewport = backing(600) − header(60) = 540. content = 5 × 80 = 400 ≤ 540 → 0(안 넘침).
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(80, 5, 600, 60));
+    // content = 10 × 80 = 800 > 540 → max = 800 − 540 = 260.
+    try std.testing.expectEqual(@as(u32, 260), AppSession.sidebarMaxScrollPx(80, 10, 600, 60));
+    // 정확히 뷰포트와 같으면 0(경계). content = 540, viewport 540.
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(54, 10, 600, 60));
+    // 헤더가 backing보다 크면 viewport 0 → content 전부가 스크롤 범위(degenerate but 안전, 음수 언더플로 없음).
+    try std.testing.expectEqual(@as(u32, 160), AppSession.sidebarMaxScrollPx(80, 2, 50, 60));
+    // 탭 0이면 content 0 → 0.
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(80, 0, 600, 60));
 }
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {

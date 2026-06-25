@@ -986,6 +986,11 @@ pub const MetalFrame = extern struct {
     modal_clip_y_px: u32 = 0,
     modal_clip_w_px: u32 = 0,
     modal_clip_h_px: u32 = 0,
+    // 사이드바 세로 스크롤량(backing px). 렌더러가 사이드바 셀(밴드·카드 glyph)의 py_top에서 이만큼 빼 카드를 위로
+    // 밀고, >0이면 사이드바 셀 draw에 헤더 아래[header_h, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다
+    // (헤더 glyph는 터미널 셀 패스라 영향 없음). GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 헤더 위를
+    // 클립한다(sidebar_scroll_offset_px 단일 출처). 0이면 기존 동작 그대로(scissor 없음). 끝에 추가해 기존 offset 불변(ABI v86).
+    sidebar_scroll_offset_px: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).

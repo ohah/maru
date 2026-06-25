@@ -646,7 +646,8 @@ bool maru_metal_renderer_draw(
     size_t live_image_id_count,
     uint32_t terminal_bg,
     uint32_t titlebar_strip_px,
-    uint32_t window_opacity_milli
+    uint32_t window_opacity_milli,
+    uint32_t sidebar_scroll_offset_px
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -791,13 +792,17 @@ bool maru_metal_renderer_draw(
         //    (coretext_frame_builder.sidebarGlyphRow: row=slot*32 + line_count*4 + line_index). line_count줄(각
         //    1×cell)을 슬롯 안 블록으로 세로 중앙 정렬하고 line_index번째 줄에 ch 높이 + 좌측 여백(cw×0.5)으로 그린다.
         const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
-        const float sidebar_header_px = (float)sidebar_header_height_px; // 상단 헤더(검색바·아이콘)만큼 셀을 아래로 민다
+        // 상단 헤더(검색바·아이콘)만큼 셀을 아래로 밀고, 사이드바 세로 스크롤만큼 위로 당긴다(카드가 헤더 아래 뷰포트를
+        // 넘으면 스크롤). 헤더 glyph는 터미널 셀 패스(origin 0,0)라 여기 안 걸려 고정된다. scroll>0이면 아래 scissor가
+        // 헤더 위로 샌 카드를 자른다(밴드/glyph 둘 다 이 패스라 함께 클립).
+        const float sidebar_header_px = (float)sidebar_header_height_px;
+        const float sidebar_scroll = (float)sidebar_scroll_offset_px;
         const float glyph_pad = cw * 0.5f; // 제목 텍스트 좌측 여백(폰트 크기에 비례)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
             float py_top, cell_h, sx_origin;
             if (sc.slot_id == 0u) { // 밴드/배경 — row=slot, 슬롯 전체, 여백 없음
-                py_top = (float)sc.row * slot_h + sidebar_header_px;
+                py_top = (float)sc.row * slot_h + sidebar_header_px - sidebar_scroll;
                 cell_h = slot_h;
                 sx_origin = 0.0f;
             } else { // 카드 glyph — row=slot*32 + line_count*4 + line_index 디코드 후 슬롯 안 블록 중앙 배치
@@ -805,7 +810,7 @@ bool maru_metal_renderer_draw(
                 const uint32_t rem = sc.row % 32u;
                 const uint32_t line_count = rem / 4u;  // 카드 줄 수(1~4)
                 const uint32_t line_index = rem % 4u;  // 그 줄 위치(0=맨 위)
-                const float slot_top = (float)slot_idx * slot_h + sidebar_header_px;
+                const float slot_top = (float)slot_idx * slot_h + sidebar_header_px - sidebar_scroll;
                 const float block_h = (float)line_count * ch;
                 const float block_top = slot_top + (slot_h - block_h) * 0.5f; // line_count줄 블록을 슬롯 세로 중앙
                 py_top = block_top + (float)line_index * ch;
@@ -1050,7 +1055,23 @@ bool maru_metal_renderer_draw(
     if (vertex_buffer != nil) MARU_DRAW_CELLS(cells_base_v, terminal_end_v);
     MARU_DRAW_IMAGES(image_above_start, gpu_image_n);                         // 1.5 kitty 이미지(텍스트 앞)
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count, under_vertex_count); // 3. under quad(사이드바 밴드)
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 4. 사이드바 cells(제목)
+    // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 [header_h, drawable_h]에 scissor
+    //    를 건다(Metal 좌하단 원점이라 [0, drawable_h-header_h] 높이로 변환). 헤더 glyph는 터미널 셀 패스(위)라 영향 없다.
+    //    바로 뒤 패스(그림자·모달)를 위해 full drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
+    const bool sidebar_scroll_clip = (sidebar_cells_n > 0 && sidebar_scroll_offset_px > 0u &&
+                                      (float)sidebar_header_height_px < drawable_h);
+    if (sidebar_scroll_clip) {
+        const NSUInteger dw = (NSUInteger)drawable_size.width;
+        const NSUInteger dh = (NSUInteger)drawable_size.height;
+        const NSUInteger keep_h = dh - (NSUInteger)sidebar_header_height_px; // [header_h, dh] 유지 → 좌하단 y=0..keep_h
+        [encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = keep_h }];
+    }
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 사이드바 cells(제목)
+    if (sidebar_scroll_clip) {
+        const NSUInteger dw = (NSUInteger)drawable_size.width;
+        const NSUInteger dh = (NSUInteger)drawable_size.height;
+        [encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }]; // full 복원(다음 패스용)
+    }
     // C4b: shadow 패스 — 터미널·사이드바 위, 모달 배경(over quad) 아래. 모달이 떠 보이게(리뷰 #1 — 맨 처음이면
     // 터미널 셀이 halo를 덮어 그림자가 깜빡/사라졌다). 모달 over quad·텍스트가 이 위에 그려진다.
     if (shadow_vertex_buffer != nil) {

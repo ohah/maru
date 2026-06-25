@@ -7577,16 +7577,25 @@ pub const AppSession = struct {
         // 스크린→셀 변환은 pxToCell 단일 출처를 쓴다(사이드바 offset 차감 포함) — 별도 변환을 두면
         // 사이드바 폭만큼 어긋난 셀에서 URL을 찾는다(직접 x/cw로 계산하던 버그를 여기로 일원화해 고침).
         const cell = self.pxToCell(x_px, y_px) orelse return &.{};
-        const core = &self.activeSurface().core;
         if (self.url_buffer.len > 0) {
             self.allocator.free(self.url_buffer);
             self.url_buffer = &.{};
         }
         // url=웹/스킴(Swift가 URL(string:)으로), file_path=resolve된 절대 경로(URL(fileURLWithPath:)). kind는 url_kind에
         // 저장해 ABI url_at이 out_kind로 Swift에 넘긴다. file_path 미존재/cwd 불명이면 extractUrlAt이 null(빈 클릭).
-        const ext = core.extractUrlAt(self.allocator, cell.row, cell.col, self.linkScopesFromConfig()) catch null orelse return &.{};
-        self.url_buffer = ext.text;
-        self.url_kind = ext.kind;
+        //
+        // **락**: extractUrlAt은 스크롤백을 읽고, file_path resolve(resolveClickedPath)는 core.cwd(currentCwd)를
+        // 읽는다 — 둘 다 reader 스레드가 core_mutex 아래 mutate한다(OSC 7로 cwd free+realloc, 스크롤백 evict). 락
+        // 없이 읽으면 torn read·use-after-free(focusedTermCwd가 같은 cwd 위험을 락으로 고친 선례 — copyText도 동일).
+        // 그래서 lockCore 아래에서 추출하고, 결과 텍스트는 owned라 unlock 후 안전. 존재검증 access(F_OK)는 빠른
+        // syscall이라 락 아래 허용한다(copyText가 무거운 extractSelection을 락 아래 하는 것과 같은 트레이드오프).
+        const s = self.activeSurface();
+        s.lockCore(self.io);
+        const ext = s.core.extractUrlAt(self.allocator, cell.row, cell.col, self.linkScopesFromConfig()) catch null;
+        s.unlockCore(self.io);
+        const e = ext orelse return &.{};
+        self.url_buffer = e.text;
+        self.url_kind = e.kind;
         return self.url_buffer;
     }
 

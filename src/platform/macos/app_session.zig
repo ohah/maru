@@ -2348,6 +2348,68 @@ pub const AppSession = struct {
         };
     }
 
+    /// sticky command 배너의 DrawList + 배치(활성 pane 터미널 영역 최상단). config 꺼짐·미스크롤·OSC133 마커 없음·
+    /// 명령줄 텍스트 없음이면 null(배너 안 그림 — graceful). **활성 pane만**(MVP) 본다 — 비활성 split pane 스크롤
+    /// sticky는 후속. core.stickyCommand(탐지 단일 출처)·명령줄 행 텍스트 추출을 모두 락 아래 하고, 락 밖에서 DrawList를
+    /// 빌드한다(io-render-threading: 코어 읽기는 락 아래). term_rect = 활성 pane 본문 rect(바 아래) — 배너는 그 최상단 한 줄.
+    fn buildStickyDrawListAndPlacement(self: *AppSession, term_rect: maru.session.SplitRect) ?struct { dl: renderer.DrawList, placement: PanePlacement } {
+        if (!self.loaded_config.config.scrollback.sticky_command) return null;
+        if (!self.surface_initialized) return null;
+        const cw = self.cell_width_px;
+        if (cw == 0 or self.cell_height_px == 0) return null;
+        const cols: u16 = @intCast(@min(term_rect.w / cw, @as(u32, std.math.maxInt(u16))));
+        if (cols == 0) return null;
+        const surface = self.activeSurface();
+        var text_buf: std.ArrayList(u8) = .empty;
+        defer text_buf.deinit(self.allocator);
+        var exit: ?i16 = null;
+        var has_sticky = false;
+        {
+            surface.lockCore(self.io); // 코어 읽기(view_offset·scrollback 행/마크)는 락 아래(§9.1)
+            defer surface.unlockCore(self.io);
+            if (surface.core.stickyCommand()) |sc| {
+                has_sticky = true;
+                exit = sc.exit;
+                if (surface.core.scrollbackRow(sc.row)) |cells| self.appendVisibleRowText(cells, &text_buf);
+            }
+        }
+        if (!has_sticky) return null;
+        const text = std.mem.trimEnd(u8, text_buf.items, " "); // 행은 폭만큼 공백 패딩 — 명령줄 뒤 빈칸 트림
+        if (text.len == 0) return null; // 빈 명령줄(프롬프트만) — 배너 생략
+        // 배너 색: 배경을 전경 쪽으로 살짝 띄운 chrome 톤(스크롤된 콘텐츠와 시각 구분), 텍스트=전경, ✓=초록/✗=빨강.
+        const bg = liftRgb(self.appearance.theme.background, self.appearance.theme.foreground, 0x1C);
+        const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
+        const ok_fg: terminal.Color = .{ .rgb = .{ .r = 0x4E, .g = 0xC9, .b = 0x6A } }; // 성공 초록
+        const err_fg: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } }; // 실패 빨강
+        const dl = coretext_frame_builder.buildStickyCommandDrawList(self.allocator, text, cols, exit, fg, .{ .rgb = bg }, ok_fg, err_fg) catch return null;
+        return .{
+            .dl = dl,
+            .placement = .{ .origin_x = term_rect.x, .origin_y = term_rect.y, .colors = .{ .default_fg = self.appearance.theme.foreground } },
+        };
+    }
+
+    /// 행 셀의 보이는 코드포인트를 UTF-8로 out에 append한다(트림은 호출자). grapheme 본체(악센트·NFD)는 base만 —
+    /// 명령줄은 거의 ASCII라 충분(MVP). RowCodepoints가 보이는 코드포인트 단일 출처(continuation 스킵).
+    fn appendVisibleRowText(self: *AppSession, cells: []const terminal.Cell, out: *std.ArrayList(u8)) void {
+        var it = terminal.RowCodepoints{ .cells = cells };
+        while (it.next()) |cp| {
+            var buf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &buf) catch continue;
+            out.appendSlice(self.allocator, buf[0..n]) catch return;
+        }
+    }
+
+    /// base를 toward 쪽으로 alpha/255만큼 선형 보간한 Rgb. 사이드바 tint(blendRgb, u32)와 같은 식이되 Rgb 도메인
+    /// (DrawList style은 terminal.Color{.rgb}를 받으므로 packed u32가 아니라 Rgb로 둔다). overflow는 u16 승격으로 회피.
+    fn liftRgb(base: maru.color.Rgb, toward: maru.color.Rgb, alpha: u8) maru.color.Rgb {
+        const inv: u16 = 255 - @as(u16, alpha);
+        return .{
+            .r = @intCast((@as(u16, base.r) * inv + @as(u16, toward.r) * @as(u16, alpha)) / 255),
+            .g = @intCast((@as(u16, base.g) * inv + @as(u16, toward.g) * @as(u16, alpha)) / 255),
+            .b = @intCast((@as(u16, base.b) * inv + @as(u16, toward.b) * @as(u16, alpha)) / 255),
+        };
+    }
+
     /// 드래그한 Term을 src pane의 src_idx에서 빼 dst pane의 dst_idx에 넣는다(cross-pane 이동). dst를 활성 pane으로,
     /// 옮긴 Term을 dst의 활성 탭으로 만들고, src가 비면 collapse한다. 그 뒤 모든 panel을 새 leaf rect grid로
     /// resize + 좌표 재계산. insert 실패는 src로 원복한다. src==dst거나 인덱스 밖이면 무동작. Term은 heap-pin
@@ -9288,6 +9350,8 @@ pub const AppSession = struct {
             defer pane_frames.deinit(self.allocator);
             // 드래그 중 floating 탭 미리보기 frame(맨 위에 둘 것). macOS 블록에서 빌드해 활성 터미널 뒤에 넣는다.
             var floating_pf: ?metal_frame.PaneFrame = null;
+            // sticky command 배너 frame(스크롤 시 명령줄 고정) — 활성 터미널 '위', floating 드래그 ghost '아래'.
+            var sticky_pf: ?metal_frame.PaneFrame = null;
             // 탭 바 제목·비활성 panel frame은 여기서 소유하고 replace 뒤에 해제한다(pane_frames의 PaneFrame은 같은
             // frame을 가리키는 view일 뿐이라 따로 deinit하지 않는다 — 이중 free 방지). 활성 frame은 macOS면 통합
             // placeMultiPane 결과라 built_frames가 소유(active_result는 view), 비-macOS면 tick_result가 소유한다.
@@ -9427,6 +9491,13 @@ pub const AppSession = struct {
                     self.collectShaped(&collected, dp.dl, pane_frame_builder, .{ .floating = dp.placement });
                 }
 
+                // 3b) sticky command 배너 — 활성 pane이 스크롤됐고(config 켜짐 + OSC133 마커) 명령줄이 뷰포트 위로
+                //     밀려났을 때만. 활성 터미널 '위'(.sticky)에 한 줄 배너로 collect한다. 배너 하단 구분선은
+                //     아래 append 직후 GpuQuad로(텍스트와 안 겹치게 배너 아래 행에).
+                if (self.buildStickyDrawListAndPlacement(active_term_rect)) |sp| {
+                    self.collectShaped(&collected, sp.dl, pane_frame_builder, .{ .sticky = sp.placement });
+                }
+
                 // 활성 panel(위에서 shapeOnly됨)을 collect(.active)로 합류 — 다른 모든 페인과 한 placeMultiPane 세대.
                 // 소유권을 collected로 넘기고 active_shaped를 비운다(바깥 defer 중복 deinit 방지). cell_colors/active_origin은
                 // 이미 준비됨. builder는 finishPane(place/raster)용이라 cursor_unfocused 없는 pane_frame_builder로 충분하다
@@ -9439,7 +9510,7 @@ pub const AppSession = struct {
                 // 수집된 모든 페인(sidebar/header/overlay/grip/label/탭바/비활성/floating + 활성)을 한 번에 placeMultiPane으로
                 // 배치+분배한다 — cross-pane 정합(한 atlas 세대). 활성은 active_result로 받아 아래에서 pane_frames 맨 뒤(커서
                 // suffix·floating 맨 위 직전)에 넣는다.
-                self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &active_result);
+                self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &sticky_pf, &active_result);
             }
             // 활성 terminal frame 성공 여부를 확정한다. macOS에서 surface가 있는데 active_result==null이면 활성
             // shapeOnly/place가 실패한 것(드문 OOM) — 기존 build-실패와 동형으로 이 frame을 통째로 포기해야 한다(chrome만
@@ -9466,6 +9537,15 @@ pub const AppSession = struct {
                     .origin_y = active_origin_y,
                     .colors = cell_colors,
                 }) catch {};
+            }
+            // sticky 배너는 활성 터미널 '위'(스크롤된 콘텐츠를 가린다)이되 floating 드래그 ghost '아래'에 둔다.
+            if (sticky_pf) |pf| {
+                pane_frames.append(self.allocator, pf) catch {};
+                // 배너 하단 구분선(스크롤된 콘텐츠와 시각 분리) — 배너 한 줄 '아래' 경계(origin_y+ch)에 그어 배너
+                // 텍스트(active_term_rect.y..+ch)와 y가 겹치지 않는다. layer 3(over)라 셀 위에 또렷이.
+                const dch = self.cell_height_px;
+                const dthick: u32 = @max(@as(u32, 1), self.buildChromeTokens().border.line_thickness_px);
+                self.appendSolidQuad(@floatFromInt(pf.origin_x), @floatFromInt(pf.origin_y + dch), @floatFromInt(active_term_rect.w), @floatFromInt(dthick), self.dividerColor(), 3);
             }
             // floating 탭은 활성 터미널·커서보다 위(맨 마지막 frame)에 그린다 — 드래그 ghost가 가장 위에 보이게.
             if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
@@ -10449,6 +10529,8 @@ pub const AppSession = struct {
         overlay: PanePlacement,
         pane: PanePlacement,
         floating: PanePlacement,
+        // sticky command 배너(스크롤 시 명령줄 고정) — floating처럼 활성 터미널 '위'(맨 위 직전)에 한 frame.
+        sticky: PanePlacement,
         // 활성은 배치(origin/colors)를 안 들고 있는다 — 호출자가 active_origin_x/y·cell_colors locals로 직접 박는다.
         active,
     };
@@ -10515,6 +10597,7 @@ pub const AppSession = struct {
         sidebar_header_frame: *?renderer.RenderFrame,
         overlay_frame: *?metal_frame.PaneFrame,
         floating_pf: *?metal_frame.PaneFrame,
+        sticky_pf: *?metal_frame.PaneFrame,
         active_out: *?ActiveResult,
     ) void {
         defer collected.clearRetainingCapacity();
@@ -10554,6 +10637,14 @@ pub const AppSession = struct {
                 .floating => |p| {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         floating_pf.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect };
+                    } else |_| {
+                        var v = rf;
+                        v.deinit(self.allocator);
+                    }
+                },
+                .sticky => |p| {
+                    if (built_frames.append(self.allocator, rf)) |_| {
+                        sticky_pf.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect };
                     } else |_| {
                         var v = rf;
                         v.deinit(self.allocator);
@@ -12872,16 +12963,18 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
     var overlay_frame: ?metal_frame.PaneFrame = null;
     defer if (overlay_frame) |*pf| pf.frame.deinit(allocator);
     var floating_pf: ?metal_frame.PaneFrame = null; // built_frames 소유(view) — 따로 deinit 안 함
+    var sticky_pf: ?metal_frame.PaneFrame = null; // built_frames 소유(view)
     var active_result: ?AppSession.ActiveResult = null; // built_frames 소유(view)
 
     const builder = session.paneFrameBuilder();
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-    // 활성 surface의 DrawList(실 CoreText shape 대상)를 dest별로 collect — sidebar/pane/active/floating 4종.
+    // 활성 surface의 DrawList(실 CoreText shape 대상)를 dest별로 collect — sidebar/pane/active/floating/sticky 5종.
     const dests = [_]AppSession.CollectDest{
         .sidebar,
         .{ .pane = .{ .origin_x = 100, .origin_y = 0, .colors = colors } },
         .active,
         .{ .floating = .{ .origin_x = 50, .origin_y = 50, .colors = colors } },
+        .{ .sticky = .{ .origin_x = 100, .origin_y = 20, .colors = colors } },
     };
     for (dests) |dest| {
         const active = session.app_window.active().?;
@@ -12891,16 +12984,17 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
         const dl = dl_or catch continue;
         session.collectShaped(&collected, dl, builder, dest);
     }
-    try std.testing.expectEqual(@as(usize, 4), collected.items.len); // 4종 전부 shapeOnly 성공
+    try std.testing.expectEqual(@as(usize, 5), collected.items.len); // 5종 전부 shapeOnly 성공
 
-    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &active_result);
+    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &sticky_pf, &active_result);
 
     // dest 분배 정확성(리뷰 #4: wrong dest routing 방지).
     try std.testing.expect(sidebar_frame != null); // .sidebar → sidebar_frame(소유)
     try std.testing.expect(active_result != null); // .active → active_result(built_frames 소유, view)
     try std.testing.expect(floating_pf != null); // .floating → floating_pf(built_frames 소유, view)
+    try std.testing.expect(sticky_pf != null); // .sticky → sticky_pf(built_frames 소유, view)
     try std.testing.expectEqual(@as(usize, 1), pane_frames.items.len); // .pane만 pane_frames(active append는 호출자 몫)
-    try std.testing.expectEqual(@as(usize, 3), built_frames.items.len); // .pane + .active + .floating 소유
+    try std.testing.expectEqual(@as(usize, 4), built_frames.items.len); // .pane + .active + .floating + .sticky 소유
     // .pane placement 보존(분배 시 origin이 안 뒤섞임).
     try std.testing.expectEqual(@as(u32, 100), pane_frames.items[0].origin_x);
     // collected는 placeAndDistribute가 clearRetainingCapacity로 소진(finishPane consume ↔ 바깥 defer double-free 차단).

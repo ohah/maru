@@ -604,6 +604,55 @@ pub fn buildFloatingTabDrawList(
     };
 }
 
+/// sticky command 배너 한 줄 DrawList — `[✓/✗ 종료상태] 명령줄 텍스트`를 불투명 배너 bg 위에 깐다(스크롤된 콘텐츠를
+/// 덮어 배너로 보이게 — buildFloatingTabDrawList의 솔리드 박스와 동형). exit==null이면(명령 실행 중) 글리프 없이 명령줄만.
+/// ok_fg=성공(초록)·err_fg=실패(빨강)로 ✓(U+2713)/✗(U+2717)만 색을 달리하고 텍스트는 fg. cols가 좁으면 텍스트는 "…"로 줄인다.
+pub fn buildStickyCommandDrawList(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    cols: u16,
+    exit: ?i16,
+    fg: terminal.Color,
+    bg: terminal.Color,
+    ok_fg: terminal.Color,
+    err_fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    const style: terminal.Style = .{ .foreground = fg, .background = bg };
+
+    var col: u16 = 0;
+    if (col < cols) { // col 0 = 좌패딩(공백, bg)
+        try cells.append(allocator, .{ .row = 0, .col = 0, .codepoint = ' ', .width = 1, .style = style });
+        col = 1;
+    }
+    if (exit) |code| { // 종료상태 글리프(있을 때만) — ✓(0)/✗(≠0), 색만 다르고 한 칸 + 뒤 간격 한 칸.
+        if (col < cols) {
+            const ok = code == 0;
+            const gstyle: terminal.Style = .{ .foreground = if (ok) ok_fg else err_fg, .background = bg };
+            try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = if (ok) 0x2713 else 0x2717, .width = 1, .style = gstyle });
+            col += 1;
+        }
+        if (col < cols) {
+            try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
+            col += 1;
+        }
+    }
+    // 명령줄 텍스트(넘치면 "…")를 col..cols에 깔고, 남은 col을 bg 공백으로 채워 솔리드 배너로 마감.
+    col = try appendEllipsizedTitle(allocator, &cells, text, 0, col, cols, style);
+    while (col < cols) : (col += 1) {
+        try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
+    }
+
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 fn emptyNativeDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
     return .{
         .cell_index = 0,

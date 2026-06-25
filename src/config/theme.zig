@@ -882,9 +882,14 @@ pub const ScrollbackConfig = struct {
     /// 가시 화면 위로 보관할 과거 줄 수(ring). 0이면 스크롤백 비활성(과거 줄 안 보관). 기본 1000.
     /// loader가 `scrollback.lines` 키로 파싱(0~100000, 상한은 메모리 폭주 가드).
     lines: u32 = 1000,
+    /// sticky command(=스크롤백을 위로 올리면 지금 보이는 출력을 만든 명령줄을 뷰포트 최상단에 고정 표시).
+    /// 기본 true(사용자 결정 2026-06-25). OSC 133 semantic prompt 마커에 의존하므로 셸 통합(현재 zsh)이 켜진
+    /// 세션에서만 동작하고, 마커가 없으면 그냥 안 뜬다(graceful no-op). loader `scrollback.sticky-command`.
+    sticky_command: bool = true,
 
-    pub const schema = .{ // 키: scrollback.lines (u32 range)
+    pub const schema = .{ // 키: scrollback.lines (u32 range) / scrollback.sticky-command (bool)
         .lines = Meta{ .doc = "스크롤백 보관 줄 수", .range = .{ 0, 100000 }, .widget = .number, .section = .terminal },
+        .sticky_command = Meta{ .doc = "스크롤 시 현재 명령줄을 최상단 고정(sticky)", .widget = .toggle, .section = .terminal },
     };
 };
 

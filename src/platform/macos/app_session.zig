@@ -10760,7 +10760,11 @@ pub const AppSession = struct {
             const rw: u16 = @intCast(@min(@as(u32, self.cell_width_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
             const rh: u16 = @intCast(@min(@as(u32, self.cell_height_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
             for (pane.shaped.runs.glyphs) |*g| {
-                if (g.codepoint == 0x25E7) {
+                // ◧(접기)·⚙(view options)는 헤더 전용 심볼이라 coretext_smoke.m의 cover-fit(center_symbol)
+                // 경로를 이미 타므로, slot만 1.7×로 키우면 1.7× quad에 1:1로 들어가 선명해진다. '+'(U+002B)는
+                // 터미널 콘텐츠에도 흔해 center_symbol에 넣으면 전역 '+'가 슬롯을 꽉 채워 굵어지는 회귀라,
+                // 헤더 전용 cover-fit 신호가 필요한 별도 작업으로 둔다.
+                if (g.codepoint == 0x25E7 or g.codepoint == 0x2699) {
                     g.cache_key.raster_width_px = rw;
                     g.cache_key.raster_height_px = rh;
                 }

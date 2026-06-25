@@ -697,10 +697,22 @@ const NotificationHistoryItem = struct {
 /// 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다. claude=✶(U+2736 6각별, 선버스트 근사),
 /// codex=◆(U+25C6 다이아). 포그라운드인 동안만 표시.
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
+    // **알림 제목용 실제 유니코드** — OS 데스크톱 알림은 시스템 폰트로 그려지므로 maru 합성 PUA(agentIconCodepoint)를
+    // 못 쓴다. 사이드바 렌더(maru)와 알림(OS)이 의미는 같되 codepoint가 갈리는 유일한 곳.
     return switch (kind) {
         .none => 0,
-        .claude => 0x2736,
-        .codex => 0x25C6,
+        .claude => 0x2736, // ✶
+        .codex => 0x25C6, // ◆
+    };
+}
+
+/// 사이드바 gutter 아이콘용 PUA codepoint — maru 합성(icon_glyph sparkle/diamond, 테마색·선명). agentSymbolCodepoint와
+/// 의미 1:1이되, 사이드바 렌더만 이 PUA를 쓰고 알림 제목은 OS 폰트라 실제 유니코드(agentSymbolCodepoint)를 쓴다.
+fn agentIconCodepoint(kind: AgentKind) u21 {
+    return switch (kind) {
+        .none => 0,
+        .claude => 0xF0007, // sparkle(✶)
+        .codex => 0xF0008, // diamond(◆)
     };
 }
 
@@ -9070,9 +9082,10 @@ pub const AppSession = struct {
     /// 가장 오래된 걸 버려 폭주를 막는다.
     fn enqueueAgentCompletion(self: *AppSession, tab: *Tab, term: *Term) void {
         // 제목 = **에이전트 심볼 + 종류(Claude/Codex)** + **끝난 그 Term(세션) 라벨** — 어느 대화가 끝났는지 식별
-        // (사용자 요청). 심볼은 사이드바 에이전트 아이콘과 같은 글리프(✶ claude=Anthropic 선버스트 근사, ◆ codex)로
-        // 통일해 알림에서도 종류가 한눈에 구분된다(macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목 prefix로 구분).
-        // 글리프는 `agentSymbolCodepoint` 단일 출처에서 파생(사이드바 아이콘과 한 곳에서 바뀌게 — 하드코딩 중복 방지).
+        // (사용자 요청). 심볼은 사이드바 에이전트 아이콘과 **의미가 같은** 종류 표시(✶ claude=선버스트, ◆ codex)로
+        // 알림에서도 종류가 한눈에 구분된다(macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목 prefix로 구분).
+        // 알림 제목은 OS 폰트라 **실제 유니코드 `agentSymbolCodepoint`**(✶◆)를 쓴다 — 사이드바는 maru 합성
+        // `agentIconCodepoint`(PUA sparkle/diamond)로, 둘은 의미 1:1이되 OS vs maru 렌더 차이로 codepoint가 갈린다.
         // 옛 제목은 workspaceLabel(tab)=tab.activeTerm 라벨이라 background split/가로탭 Term 완료 시 활성 Term 이름이
         // 떠 어긋났다 — 끝난 term의 termLabel을 직접 써 그 세션을 가리킨다. 종류 없음(이론상 미발생)이면 워크스페이스 폴백.
         const agent_name: []const u8 = switch (term.agent_kind) {
@@ -10948,7 +10961,7 @@ pub const AppSession = struct {
             const renaming = self.renamingWorkspace(tab);
             // 에이전트 아이콘은 슬롯 중앙에 독립 배치. 단 rename 중엔 숨긴다(0) — 안 그러면 편집 텍스트가 icon_cols
             // 만큼 우측으로 밀려 renameCaretRect(아이콘 오프셋 미반영)의 caret/IME 후보창과 어긋난다.
-            try agents.append(self.allocator, if (renaming) 0 else agentSymbolCodepoint(term.agent_kind));
+            try agents.append(self.allocator, if (renaming) 0 else agentIconCodepoint(term.agent_kind));
             // 이름줄 = custom_name(rename) 우선, 없으면 활성 Term 라벨. rename 중이면 편집 텍스트로 대체하고 보조줄은 숨긴다.
             if (renaming) {
                 try names.append(self.allocator, try self.renameEditText(self.allocator)); // owned → names가 소유
@@ -10985,7 +10998,7 @@ pub const AppSession = struct {
         // col 0 + 아이콘 codepoint로 좁힌다 → 워크스페이스 이름/경로(col≥3)에 ✶·◆가 들어가도 안 오염. docs/agent-session.md.
         for (draw_list.cells) |*c| {
             if (c.col != 0) continue; // 아이콘은 왼쪽 gutter col 0 — 텍스트 셀(col≥3)의 동일 글리프 오염 방지.
-            if (c.codepoint != 0x2736 and c.codepoint != 0x25C6) continue; // ✶ claude / ◆ codex
+            if (c.codepoint != 0xF0007 and c.codepoint != 0xF0008) continue; // ✶ claude / ◆ codex
             // 아이콘 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*32+…)해 그 Term을 얻는다.
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // 표시 슬롯
             const orig = self.visibleTab(slot) orelse continue; // 표시 슬롯 → 원본 탭(검색 필터)
@@ -12347,8 +12360,10 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(AgentKind.none, classifyAgent(""));
     // 아이콘 코드포인트 매핑(독립 아이콘 셀에 쓰임).
     try std.testing.expectEqual(@as(u21, 0), agentSymbolCodepoint(.none));
-    try std.testing.expectEqual(@as(u21, 0x2736), agentSymbolCodepoint(.claude));
-    try std.testing.expectEqual(@as(u21, 0x25C6), agentSymbolCodepoint(.codex));
+    try std.testing.expectEqual(@as(u21, 0x2736), agentSymbolCodepoint(.claude)); // 알림용 실제 ✶
+    try std.testing.expectEqual(@as(u21, 0x25C6), agentSymbolCodepoint(.codex)); // 알림용 실제 ◆
+    try std.testing.expectEqual(@as(u21, 0xF0007), agentIconCodepoint(.claude)); // 사이드바 PUA sparkle
+    try std.testing.expectEqual(@as(u21, 0xF0008), agentIconCodepoint(.codex)); // 사이드바 PUA diamond
 }
 
 test "dimRgb: 펄스 off 위상은 브랜드색을 45%로 낮춘다(글자 안 사라짐)" {

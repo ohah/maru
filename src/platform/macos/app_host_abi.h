@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 86u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 87u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -595,6 +595,12 @@ uint32_t maru_macos_app_session_take_mouse_hide(MaruAppHostSession *session);
    0=조합(입력기에 맡겨 특수문자 조합). Swift keyDown이 호출해 Option-단독 키를 입력기 경로(0)/meta 인코딩(1)으로
    가른다. 1회성 신호가 아니라 라이브 config read(reload로 갱신). session null=1(meta 폴백). v73. */
 uint32_t maru_macos_app_session_option_as_meta(MaruAppHostSession *session);
+/* 단축키 힌트 HUD(KH-4) 가시성 토글. Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay 경과)를 감지하면
+   visible=1로 켜고(이후 markMetalNeedsRedraw), 떼거나 다른 키·포커스 상실에 0. 패시브라 입력 라우팅 영향 없음. v87. */
+int32_t maru_macos_app_session_set_key_hints(MaruAppHostSession *session, uint32_t visible);
+/* 단축키 힌트 config — out_enabled(1/0)·out_delay_ms·out_modifier(0=command·1=control·2=option)에 채운다. Swift 홀드
+   감지가 읽어 동작 결정(gesture 정책=Zig·타이머 clock=Swift). 라이브 read. out 포인터 null이면 건너뜀. session null=null_out. v87. */
+int32_t maru_macos_app_session_key_hints_config(MaruAppHostSession *session, uint32_t *out_enabled, uint32_t *out_delay_ms, uint32_t *out_modifier);
 /* OS 클립보드 1회성 동작(input.right-click=paste·menu). 0=무동작, 1=copy, 2=paste. Zig가 우클릭/터미널 메뉴에서
    세우고 Swift가 매 tick 호출해 1=copySelectionToPasteboard·2=pastePasteboardText. take_bell과 같은 1회성(drain하면
    비움). session null=0. v74. */

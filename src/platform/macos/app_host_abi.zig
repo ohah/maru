@@ -604,6 +604,27 @@ pub export fn maru_macos_app_session_option_as_meta(session: ?*AppSession) u32 {
     return if (app_session.optionAsMeta()) 1 else 0;
 }
 
+// 단축키 힌트 HUD(KH-4) 가시성 토글. Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay 경과)를 감지하면
+// visible=1로 켜고(set 후 markMetalNeedsRedraw로 다음 프레임 빌드가 활성 pane 우상단 HUD를 그림), 떼거나 다른 키·
+// 포커스 상실에 0으로 끈다. 패시브라 입력 라우팅엔 영향 없다(anyOverlayOpen 비포함). session null=무동작. (ABI v87)
+pub export fn maru_macos_app_session_set_key_hints(session: ?*AppSession, visible: u32) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    app_session.setKeyHints(visible != 0);
+    return @intFromEnum(Status.ok);
+}
+
+// 단축키 힌트 config(Swift 홀드 감지가 읽어 동작 결정) — out_enabled(1/0)·out_delay_ms·out_modifier(0=command·
+// 1=control·2=option)에 채운다. gesture 정책은 Zig(config) 단일 출처, 타이머 clock만 Swift. 라이브 값 read
+// (reload로 갱신, 1회성 신호 아님). out 포인터는 null이면 건너뛴다. session null=null_out. (ABI v87)
+pub export fn maru_macos_app_session_key_hints_config(session: ?*AppSession, out_enabled: ?*u32, out_delay_ms: ?*u32, out_modifier: ?*u32) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const cfg = app_session.keyHintConfig();
+    if (out_enabled) |p| p.* = if (cfg.enabled) 1 else 0;
+    if (out_delay_ms) |p| p.* = cfg.delay_ms;
+    if (out_modifier) |p| p.* = cfg.modifier;
+    return @intFromEnum(Status.ok);
+}
+
 // OS 클립보드 1회성 동작(input.right-click=paste·menu). 0=무동작, 1=copy, 2=paste. Zig가 우클릭/터미널 메뉴에서
 // pending_clipboard_action을 세우고, Swift가 매 tick 호출해 1이면 copySelectionToPasteboard·2이면 pastePasteboardText를
 // 부른다(클립보드는 OS 소유). take_bell과 같은 1회성 패턴 — drain하면 비워진다. session null=0. (ABI v74)

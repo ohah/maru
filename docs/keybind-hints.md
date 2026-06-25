@@ -4,7 +4,7 @@
 
 이 문서가 이 기능의 **단일 출처**다. 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules §문서와 설명](project-rules.md#문서와-설명)). 상위 경계는 [키 입력과 단축키 경계](key-input-and-shortcuts.md)·[Chrome 전략](chrome-strategy.md)을 따르고, config 키는 [config 스키마](config-schema.md)를 따른다.
 
-> **현황**: KH-0(이 문서, doc-first) 작성 중. 코드 미착수.
+> **현황**: KH-0~4 구현 완료(머지). 모디파이어 홀드 시 활성 pane 우상단에 카테고리별 키캡 HUD가 뜬다 — `MARU_SCREENSHOT`로 렌더 검증 완료. 홀드 타이밍 실기 확인은 사용자. 후속 KH-5(맥락 인식·키캡 rich depth·스크롤)는 선택.
 
 ## 0. 왜 가능한가 (조사 결론)
 
@@ -123,7 +123,7 @@ pub fn chordKeycaps(chord: KeyChord, arena: Allocator) ![]const []const u8 { ...
 pub fn keyHintRows(resolver: KeyBindingResolver, arena: Allocator) ![]const shortcut_hints.Row { ... }
 ```
 
-platform(`app_session.buildChromeOverlayPrep`)이 `key_hints.visible`일 때 `keyHintRows`로 행을 빌드해 `collectKeyHintsDraws`에 넘긴다(가시성 토글은 KH-4까지 항상 false라 휴면).
+platform(`app_session.buildChromeOverlayPrep`)이 `key_hints.visible`일 때 `keyHintRows`로 행을 빌드해 `collectKeyHintsDraws`에 넘긴다. 렌더 빌드 게이트(`anyOverlayOpen or key_hints.visible`)가 패시브 HUD도 오버레이 frame을 그리게 하되, `anyOverlayOpen`엔 안 넣어 커서 blink·keyEquivalent 양보는 불변이다(KH-4).
 
 ### 3.4 ABI — `src/platform/macos/app_host_abi.{h,zig}`
 
@@ -258,7 +258,7 @@ pub const KeyHintConfig = struct {
 | **KH-1** ✅ | chrome 컴포넌트 `shortcut_hints.zig`(State+view, handle 없음) + `paneRegion`/`paneTopRightBox`(overlay_input, 활성 pane 우상단 멀티행) + **키캡 렌더**(per-key quad+글리프, `p.shape` 토큰, §3.6) + `host.collectKeyHintsDraws`(`anyModalOpen` 억제) + `Row` 모델. rows는 fake로 헤드리스 테스트 | 컴포넌트 단위 ✅ |
 | **KH-2** ✅ | `command_catalog`에 `HintCategory`/`categoryOf`/`keyHintRows` + **`chordKeycaps`**(chord→키별 글리프 배열, `keyGlyph` 단일 출처, §3.6.3) + `app_session.buildChromeOverlayPrep`가 `key_hints.visible`일 때 rows 빌드해 collect 호출(아직 항상 false) | 내용 단위 ✅ |
 | **KH-3** ✅ | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도(namespace `keyhint`, GUI 섹션 `.input`) + configuration.md 키 + full-config 파싱 테스트. platform 노출(ABI 게터)은 KH-4가 소비처와 함께 추가 | round-trip·범위 ✅ |
-| **KH-4** | macOS `flagsChanged` 홀드 상태머신 + `NSTimer` + ABI `set_key_hints` + `markMetalNeedsRedraw` + `MARU_DEBUG`/`MARU_KEY_HINTS_FORCE`. delay/enabled/modifier를 config에서 | `zig build macos-app` 수동 + 스크린샷(force) |
+| **KH-4** ✅ | macOS `flagsChanged` 홀드 상태머신(`handleModifierFlags`) + `NSTimer .common` + ABI v87 `set_key_hints`/`key_hints_config` + 렌더 게이트(`anyOverlayOpen or key_hints.visible`) + `keyDown`/`windowDidResignKey`서 취소 + `MARU_KEY_HINTS_FORCE`(Zig self-verify). delay/enabled/modifier를 config에서 읽음 | `zig build macos-app-build` green + `MARU_SCREENSHOT` HUD 캡처 ✅. **홀드 타이밍 실기 수동 확인은 사용자** |
 | **KH-5**(후속, 선택) | 맥락 인식(포커스 pane의 터미널 매크로 바인딩 노출)·빌트인 터미널 편집키(`⌘←` 등) 행·키캡 rich depth 폴리시(§3.6.2 sharp shadow)·`Space`(␣)/키패드 글리프·GUI 폴리시 | — |
 
 머지 규율은 [merge-only-on-green]·[run-macos-app-before-merge] 메모리를 따른다(checks green + KH-4는 실제 앱 실행 후 머지).

@@ -14,8 +14,11 @@ const Action = maru.config.Action;
 const GlobalAction = maru.config.GlobalAction;
 const GlobalBinding = maru.config.GlobalBinding;
 const KeyChord = maru.config.KeyChord;
+const KeyName = maru.config.keybinding.KeyName;
 const KeyBindingResolver = maru.config.KeyBindingResolver;
 const default_app_bindings = maru.config.keybinding.default_app_bindings;
+/// 단축키 힌트 HUD(KH-1) 행 타입 — keyHintRows가 빌드해 platform이 host.collectKeyHintsDraws에 주입한다.
+const HintRow = maru.chrome.components.shortcut_hints.Row;
 
 /// 카탈로그 한 항목(정적). action_key/title은 컴파일타임 문자열 리터럴(널 종단) — ABI에서 그대로 가리킨다.
 pub const Entry = struct {
@@ -145,16 +148,11 @@ pub fn chordForAction(resolver: KeyBindingResolver, action: Action) ?KeyChord {
     return null;
 }
 
-/// chord를 macOS 관례 표시 문자열로 만든다(modifier 순서 ⌃⌥⇧⌘ 뒤에 키 심볼). 메뉴 단축키 표시·팝업
-/// 보조 텍스트용. 글자는 대문자, 특수키는 표준 기호(↩⎋⇥⌫⌦↖↘⇞⇟ ←→↑↓), function은 F{n}. 버퍼에 쓰고
-/// 그 slice를 돌려준다(호출자가 소유 문자열로 복사). 안 묶인 액션은 호출 전에 걸러야 한다(여긴 chord 전제).
-pub fn formatChord(chord: KeyChord, buf: []u8) []const u8 {
+/// 비-modifier 키 1개의 macOS 표준 표시 글리프를 buf에 쓰고 그 slice를 돌려준다 — **formatChord와 chordKeycaps의
+/// 단일 출처**(글자는 대문자 fold, 특수키 표준 기호 ↩⎋⇥⌫⌦↖↘⇞⇟ ←→↑↓, function은 F{n}). buf는 8바이트면 충분.
+fn keyGlyph(key: KeyName, buf: []u8) []const u8 {
     var len: usize = 0;
-    if (chord.modifiers.control) appendStr(buf, &len, "⌃");
-    if (chord.modifiers.option) appendStr(buf, &len, "⌥");
-    if (chord.modifiers.shift) appendStr(buf, &len, "⇧");
-    if (chord.modifiers.command) appendStr(buf, &len, "⌘");
-    switch (chord.key) {
+    switch (key) {
         .char => |c| {
             // 표시용 대문자 fold(영문). 그 외 코드포인트는 그대로.
             const cp: u21 = if (c >= 'a' and c <= 'z') c - 32 else c;
@@ -183,6 +181,80 @@ pub fn formatChord(chord: KeyChord, buf: []u8) []const u8 {
         },
     }
     return buf[0..len];
+}
+
+/// chord를 macOS 관례 표시 문자열로 만든다(modifier 순서 ⌃⌥⇧⌘ 뒤에 키 심볼). 메뉴 단축키 표시·팝업
+/// 보조 텍스트용. 버퍼에 쓰고 그 slice를 돌려준다(호출자가 소유 문자열로 복사). 안 묶인 액션은 호출 전에 걸러야 한다.
+pub fn formatChord(chord: KeyChord, buf: []u8) []const u8 {
+    var len: usize = 0;
+    if (chord.modifiers.control) appendStr(buf, &len, "⌃");
+    if (chord.modifiers.option) appendStr(buf, &len, "⌥");
+    if (chord.modifiers.shift) appendStr(buf, &len, "⇧");
+    if (chord.modifiers.command) appendStr(buf, &len, "⌘");
+    var kbuf: [8]u8 = undefined;
+    appendStr(buf, &len, keyGlyph(chord.key, &kbuf));
+    return buf[0..len];
+}
+
+/// 단축키 힌트 HUD(키캡)용: chord를 **키별 표시 글리프 배열**로 편다(예: `Cmd+T` → `{"⌘","T"}`, `Cmd+Opt+Left`
+/// → `{"⌥","⌘","←"}`). formatChord가 한 문자열(`⌘T`)을 내는 것과 평행 — 키캡은 키마다 한 칸이라 따로 둔다.
+/// modifier는 ⌃⌥⇧⌘ 순(메뉴 표시 관례), 그 뒤 키 글리프. modifier 글리프는 정적 리터럴, 키 글리프만 arena 복사.
+/// 슬라이스는 arena 소유(호출자가 frame arena를 준다 — keyHintRows가 묶음). 안 묶인 액션은 호출 전에 걸러야 한다.
+pub fn chordKeycaps(chord: KeyChord, arena: std.mem.Allocator) ![]const []const u8 {
+    var caps: std.ArrayList([]const u8) = .empty;
+    if (chord.modifiers.control) try caps.append(arena, "⌃");
+    if (chord.modifiers.option) try caps.append(arena, "⌥");
+    if (chord.modifiers.shift) try caps.append(arena, "⇧");
+    if (chord.modifiers.command) try caps.append(arena, "⌘");
+    var kbuf: [8]u8 = undefined;
+    try caps.append(arena, try arena.dupe(u8, keyGlyph(chord.key, &kbuf))); // 키 글리프는 stack buf 소유라 arena로 복사
+    return caps.toOwnedSlice(arena);
+}
+
+/// 단축키 힌트 HUD의 카테고리(스코프 구분 — 한 박스 안에서 헤더로 묶는다). select_tab 등 payload 액션은 tag만 본다.
+pub const HintCategory = enum { workspace, terminal, pane, search, font, other };
+
+/// 액션 → 힌트 카테고리(데이터 매핑, exhaustive). `.other`는 HUD에 안 띄운다(toggle_*·install_cli·reset 등 —
+/// 대개 기본 chord도 없어 자연히 빠진다). 단일 출처: docs/keybind-hints.md §2(스코프가 달라도 한 박스, 헤더로 구분).
+pub fn categoryOf(action: Action) HintCategory {
+    return switch (action) {
+        .new_tab, .close_tab, .select_tab, .previous_tab, .next_tab, .move_pane_to_new_workspace, .move_pane_to_workspace, .rename_workspace => .workspace,
+        .new_term, .close_term, .previous_term, .next_term, .rename_term, .select_all, .clear_screen => .terminal,
+        .split_horizontal, .split_vertical, .focus_pane_left, .focus_pane_right, .focus_pane_up, .focus_pane_down, .previous_pane, .next_pane, .rename_pane => .pane,
+        .toggle_find, .find_next, .find_previous => .search,
+        .increase_font_size, .decrease_font_size, .reset_font_size, .set_font_size => .font,
+        .toggle_command_palette, .toggle_settings, .install_cli, .reset_settings => .other,
+    };
+}
+
+/// 힌트 박스의 카테고리 표시 순서·라벨(`.other` 제외 — HUD에 안 띄운다).
+const hint_category_order = [_]struct { cat: HintCategory, label: []const u8 }{
+    .{ .cat = .workspace, .label = "Workspace" },
+    .{ .cat = .terminal, .label = "Terminal" },
+    .{ .cat = .pane, .label = "Pane" },
+    .{ .cat = .search, .label = "Search" },
+    .{ .cat = .font, .label = "Font" },
+};
+
+/// 현재 바인딩된 app 단축키를 카테고리별 힌트 행(헤더 + 키캡 바인딩)으로 빌드한다 — **단축키 힌트 HUD 내용의
+/// 단일 출처**. chord가 없는(안 묶이거나 unbind된) 액션은 건너뛴다(보여 줄 키가 없으므로 — 발견은 팔레트). 사용자
+/// 리바인드는 새 chord, unbind는 빠진다(chordForAction이 resolve 우선순위·unbind를 반영). 카테고리에 묶인 항목이
+/// 하나도 없으면 그 헤더도 안 낸다. arena 소유(호출자 frame arena). docs/keybind-hints.md §3.3.
+pub fn keyHintRows(resolver: KeyBindingResolver, arena: std.mem.Allocator) ![]const HintRow {
+    var rows: std.ArrayList(HintRow) = .empty;
+    for (hint_category_order) |c| {
+        var any = false;
+        for (entries) |entry| {
+            if (categoryOf(entry.action) != c.cat) continue;
+            const chord = chordForAction(resolver, entry.action) orelse continue; // 안 묶인 액션은 제외
+            if (!any) {
+                try rows.append(arena, .{ .header = c.label });
+                any = true;
+            }
+            try rows.append(arena, .{ .binding = .{ .caps = try chordKeycaps(chord, arena), .title = entry.title } });
+        }
+    }
+    return rows.toOwnedSlice(arena);
 }
 
 /// modifier 비트마스크(NSMenuItem.keyEquivalentModifierMask로 Swift가 매핑). 안정 인코딩 — .h에 같은 값 문서화.
@@ -325,4 +397,83 @@ test "select_tab은 0..8로 펼쳐지고 ⌘1..9로 표시된다" {
     try std.testing.expectEqualStrings("⌘1", formatChord(chordForAction(resolver, .{ .select_tab = 0 }).?, &buf));
     // select_tab:8 → Cmd+9.
     try std.testing.expectEqualStrings("⌘9", formatChord(chordForAction(resolver, .{ .select_tab = 8 }).?, &buf));
+}
+
+test "chordKeycaps: chord를 키별 글리프 배열로 편다(formatChord와 같은 글리프·순서)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Cmd+T → {⌘, T}.
+    const a = try chordKeycaps(.{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, arena);
+    try std.testing.expectEqual(@as(usize, 2), a.len);
+    try std.testing.expectEqualStrings("⌘", a[0]);
+    try std.testing.expectEqualStrings("T", a[1]);
+
+    // Cmd+Opt+Left → {⌥, ⌘, ←}(modifier ⌃⌥⇧⌘ 순 + 키). 소문자는 대문자 fold.
+    const b = try chordKeycaps(.{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_left }, arena);
+    try std.testing.expectEqual(@as(usize, 3), b.len);
+    try std.testing.expectEqualStrings("⌥", b[0]);
+    try std.testing.expectEqualStrings("⌘", b[1]);
+    try std.testing.expectEqualStrings("←", b[2]);
+
+    // Cmd+Shift+T 소문자 → {⇧, ⌘, T}.
+    const c = try chordKeycaps(.{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 't' } }, arena);
+    try std.testing.expectEqual(@as(usize, 3), c.len);
+    try std.testing.expectEqualStrings("⇧", c[0]);
+    try std.testing.expectEqualStrings("⌘", c[1]);
+    try std.testing.expectEqualStrings("T", c[2]);
+}
+
+test "categoryOf: 액션을 스코프 카테고리로(exhaustive 매핑)" {
+    try std.testing.expectEqual(HintCategory.terminal, categoryOf(.new_term));
+    try std.testing.expectEqual(HintCategory.workspace, categoryOf(.new_tab));
+    try std.testing.expectEqual(HintCategory.workspace, categoryOf(.{ .select_tab = 0 }));
+    try std.testing.expectEqual(HintCategory.pane, categoryOf(.split_horizontal));
+    try std.testing.expectEqual(HintCategory.pane, categoryOf(.focus_pane_left));
+    try std.testing.expectEqual(HintCategory.search, categoryOf(.toggle_find));
+    try std.testing.expectEqual(HintCategory.font, categoryOf(.increase_font_size));
+    try std.testing.expectEqual(HintCategory.other, categoryOf(.install_cli));
+}
+
+test "keyHintRows: 바인딩된 액션만 카테고리별 헤더+키캡 행으로, 안 묶인 건 제외" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rows = try keyHintRows(.{}, arena); // 빌트인 resolver(기본 바인딩)
+
+    // 적어도 Terminal 헤더가 있고, 그 뒤에 New Terminal(⌘T) 바인딩 행이 있다.
+    var saw_terminal_header = false;
+    var saw_new_terminal = false;
+    var saw_other_header = false; // .other 카테고리는 HUD에 안 뜬다
+    var saw_install_cli = false; // 기본 chord 없는 액션은 제외
+    for (rows) |row| {
+        switch (row) {
+            .header => |h| {
+                if (std.mem.eql(u8, h, "Terminal")) saw_terminal_header = true;
+                if (std.mem.eql(u8, h, "Other")) saw_other_header = true;
+            },
+            .binding => |b| {
+                if (std.mem.eql(u8, b.title, "New Terminal")) {
+                    saw_new_terminal = true;
+                    try std.testing.expectEqualStrings("⌘", b.caps[0]);
+                    try std.testing.expectEqualStrings("T", b.caps[1]);
+                }
+                if (std.mem.eql(u8, b.title, "Install CLI")) saw_install_cli = true;
+            },
+        }
+    }
+    try std.testing.expect(saw_terminal_header);
+    try std.testing.expect(saw_new_terminal);
+    try std.testing.expect(!saw_other_header); // .other 헤더 없음
+    try std.testing.expect(!saw_install_cli); // 기본 바인딩 없는 액션 제외
+
+    // unbind면 그 행도 사라진다: new_term(Cmd+T) unbind → New Terminal 행 없음.
+    const unbind_resolver: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Cmd+T")} };
+    const rows2 = try keyHintRows(unbind_resolver, arena);
+    for (rows2) |row| switch (row) {
+        .binding => |b| try std.testing.expect(!std.mem.eql(u8, b.title, "New Terminal")),
+        .header => {},
+    };
 }

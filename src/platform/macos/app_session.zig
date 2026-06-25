@@ -11627,6 +11627,12 @@ pub const AppSession = struct {
             const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
             try self.chrome_host.collectSettingsDraws(labels, fields, props, &tokens, arena, &draws);
         }
+        if (self.chrome_host.key_hints.visible) {
+            // 단축키 힌트 HUD(패시브, KH-1/2) — 현재 바인딩을 카테고리별 키캡 행으로 빌드해 주입한다. collectKeyHintsDraws가
+            // 모달 열림이면 내부에서 억제한다. visible 토글(모디파이어 홀드)은 KH-4(ABI)가 연결 — 그 전엔 항상 false라 휴면.
+            const rows = try command_catalog.keyHintRows(self.loaded_config.keyBindingResolver(), arena);
+            try self.chrome_host.collectKeyHintsDraws(rows, props, &tokens, arena, &draws);
+        }
         if (draws.items.len == 0) return null; // 열린 오버레이 없음 — prep 없음(래퍼가 error.NotOpen으로 환산)
 
         var raster = try rasterizeOverlayCells(self.allocator, draws.items, &tokens, cw, ch);

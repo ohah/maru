@@ -66,7 +66,7 @@ pub const ChromeHost = struct {
     context_menu: context_menu.State = .{},
     notifications: notifications.State = .{},
     settings: settings.State = .{},
-    /// 단축키 힌트 HUD(패시브 — 입력 비소비). 가시성만, ABI(set_key_hints)가 토글. 다른 오버레이와 달리 handleInput 라우팅엔 없다.
+    /// 단축키 힌트 HUD(패시브 — 입력 비소비). 가시성만, 홀드 머신(keyhint_hold)이 토글. 다른 오버레이와 달리 handleInput 라우팅엔 없다.
     key_hints: shortcut_hints.State = .{},
 
     /// 컴포넌트 State 중 heap을 든 것(find/palette의 query·preedit)을 해제한다. AppSession.deinit가 부른다.

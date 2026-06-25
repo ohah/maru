@@ -2,6 +2,8 @@ const std = @import("std");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
 const keycode = @import("keycode.zig");
+const keyhint_hold = @import("keyhint_hold.zig");
+const command_catalog = @import("command_catalog.zig");
 
 const c = @cImport({
     @cInclude("app_host_abi.h");
@@ -604,13 +606,33 @@ pub export fn maru_macos_app_session_option_as_meta(session: ?*AppSession) u32 {
     return if (app_session.optionAsMeta()) 1 else 0;
 }
 
-// 단축키 힌트 HUD(KH-4) 가시성 토글. Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay 경과)를 감지하면
-// visible=1로 켜고(set 후 markMetalNeedsRedraw로 다음 프레임 빌드가 활성 pane 우상단 HUD를 그림), 떼거나 다른 키·
-// 포커스 상실에 0으로 끈다. 패시브라 입력 라우팅엔 영향 없다(anyOverlayOpen 비포함). session null=무동작. (ABI v87)
-pub export fn maru_macos_app_session_set_key_hints(session: ?*AppSession, visible: u32) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    app_session.setKeyHints(visible != 0);
-    return @intFromEnum(Status.ok);
+// 단축키 힌트 홀드 상태머신(keyhint_hold.zig)에 이벤트를 흘리고 Action을 돌려준다 — gesture 정책은 Zig, OS 타이머
+// clock만 Swift(native 최소). 반환 Action(0=none·1=arm_timer·2=cancel·3=show·4=hide): Swift가 1=타이머 시작·2/4=타이머
+// 무효화·3/4=markMetalNeedsRedraw로 매핑하고, visible 토글 자체는 머신이 chrome_host에 적용한다. mods_bits =
+// 현재 눌린 modifier 비트(shift=1·control=2·option=4·command=8 — command_catalog.mod_*와 동일 인코딩). session null=0(none).
+//
+// **루트커즈(간헐 미표시)**: 옛 set_key_hints 경로는 Swift가 타이머 만료 콜백에서 NSEvent.modifierFlags(2번째 출처)를
+// 다시 읽어 트리거 단독을 재확인했는데, 그 정적 읽기가 stale/빈 값이면 트리거를 쥐고 있어도 미표시였다. 이제 단일
+// 출처(flagsChanged 이벤트 스트림)로 머신이 판정하고 만료는 글로벌을 안 읽는다(armed로 살아남음 = 유지됨). (ABI v88)
+pub export fn maru_macos_app_session_key_hint_on_flags(session: ?*AppSession, mods_bits: u32) c_int {
+    const app_session = session orelse return @intFromEnum(keyhint_hold.Action.none);
+    const mods: keyhint_hold.Mods = .{
+        .command = (mods_bits & command_catalog.mod_command) != 0,
+        .control = (mods_bits & command_catalog.mod_control) != 0,
+        .option = (mods_bits & command_catalog.mod_option) != 0,
+        .shift = (mods_bits & command_catalog.mod_shift) != 0,
+    };
+    return @intCast(@intFromEnum(app_session.keyHintOnFlags(mods)));
+}
+// 타이머 만료 → 머신. armed면 show(글로벌 재읽기 없음 — 루트커즈 수정). session null=0(none). (ABI v88)
+pub export fn maru_macos_app_session_key_hint_on_timer(session: ?*AppSession) c_int {
+    const app_session = session orelse return @intFromEnum(keyhint_hold.Action.none);
+    return @intCast(@intFromEnum(app_session.keyHintOnTimer()));
+}
+// keyDown(실제 단축키)·포커스 상실 → 머신 취소(표시 중이면 hide). session null=0(none). (ABI v88)
+pub export fn maru_macos_app_session_key_hint_cancel(session: ?*AppSession) c_int {
+    const app_session = session orelse return @intFromEnum(keyhint_hold.Action.none);
+    return @intCast(@intFromEnum(app_session.keyHintCancel()));
 }
 
 // 단축키 힌트 config(Swift 홀드 감지가 읽어 동작 결정) — out_enabled(1/0)·out_delay_ms·out_modifier(0=command·

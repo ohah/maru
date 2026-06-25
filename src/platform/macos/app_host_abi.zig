@@ -448,8 +448,9 @@ pub export fn maru_macos_app_session_hover(
     return @intFromEnum(Status.ok);
 }
 
-// (config 수식키)+클릭 위치의 URL(backing px). mods가 url-click-modifier와 안 맞으면 len 0(일반 클릭). 버퍼는
-// Zig 소유로 다음 url_at/destroy까지 유효(v71: mods 인자 추가 — modifier 판정을 Zig 단일 출처로).
+// (config 수식키)+클릭 위치의 링크(backing px). mods가 url-click-modifier와 안 맞으면 len 0(일반 클릭). 버퍼는
+// Zig 소유로 다음 url_at/destroy까지 유효. out_kind=링크 종류(0=url, 1=file_path; len>0일 때만 유효, NULL 허용)로
+// Swift가 URL(string:) vs URL(fileURLWithPath:)를 가른다. v71: mods 인자. v89: out_kind 인자(docs/link-detection.md).
 pub export fn maru_macos_app_session_url_at(
     session: ?*AppSession,
     x_px: f64,
@@ -457,6 +458,7 @@ pub export fn maru_macos_app_session_url_at(
     mods: i32,
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
+    out_kind: ?*i32,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
@@ -464,6 +466,8 @@ pub export fn maru_macos_app_session_url_at(
     const url = app_session.urlAt(x_px, y_px, mods);
     ptr_out.* = if (url.len > 0) url.ptr else null;
     len_out.* = url.len;
+    // 링크 종류(0=url, 1=file_path) — url.len>0일 때만 의미. LinkKind 태그 순서(url=0, file_path=1)에 묶인다.
+    if (out_kind) |k| k.* = @intFromEnum(app_session.url_kind);
     return @intFromEnum(Status.ok);
 }
 

@@ -2,6 +2,7 @@ pub const core = @import("terminal/core.zig");
 pub const input = @import("terminal/input.zig");
 pub const types = @import("terminal/types.zig");
 pub const png = @import("terminal/png.zig"); // PNG 디코드(kitty f=100·window.background-image F2-1)
+pub const selection = @import("terminal/selection.zig"); // 링크 자동 감지 분류(LinkScopes/LinkKind — docs/link-detection.md)
 // Unicode 셀 폭(EAW)은 순수·레이어 무관이라 top-level 중립 유틸(src/width.zig)로 옮겼다 — terminal·platform·
 // chrome이 모두 쓴다(색=color.zig와 같은 선례). 여기선 호환 re-export만 한다(terminal.width/cellWidth 그대로).
 pub const width = @import("width.zig");
@@ -12,6 +13,13 @@ pub const Cursor = types.Cursor;
 pub const CursorShape = types.CursorShape;
 pub const SelectionPoint = types.SelectionPoint;
 pub const SelectionSpan = types.SelectionSpan;
+// 링크 자동 감지(URL·파일 경로) 타입 — platform(app_session)이 config 범위를 scopes로 빌드해 core로 넘긴다.
+pub const LinkKind = selection.LinkKind;
+pub const LinkScopes = selection.LinkScopes;
+pub const ExtractedLink = selection.ExtractedLink;
+pub const link_scopes_none = selection.link_scopes_none;
+pub const link_scopes_web = selection.link_scopes_web;
+pub const link_scopes_full = selection.link_scopes_full;
 pub const Match = types.Match;
 pub const DirtyRegion = types.DirtyRegion;
 pub const Key = input.Key;

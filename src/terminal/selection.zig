@@ -126,12 +126,80 @@ fn appendRowUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row_cell
     }
 }
 
-/// 단어 글자열에서 http(s):// URL의 [start, end) 바이트 범위를 찾는다(없으면 null). 끝의
-/// 마무리 문장 부호는 다듬되, 열린 '('가 있으면 그만큼의 닫는 ')'는 URL의 일부로 보존한다
-/// (예: Wikipedia의 ".../Foo_(bar)"). 스킴만 있고 본문이 없으면 null.
-pub fn urlSpanInWord(word: []const u8) ?struct { start: usize, end: usize } {
-    const start = std.mem.indexOf(u8, word, "https://") orelse std.mem.indexOf(u8, word, "http://") orelse return null;
-    // URL 안의 열린 괄호 수만큼 끝 ')'를 보존한다(괄호 균형).
+// ── 링크 자동 감지(URL·파일 경로) 분류 ─────────────────────────────────────────────────────────────
+// 단일 출처: docs/link-detection.md. 베이스 = Ghostty references/ghostty/src/config/url.zig의 *동작*만(무엇을
+// 링크로 보는가: 스킴 URL / 절대·dot-relative / bare-relative, 끝 문장부호·`:`·`.` 제외, 괄호 균형). maru는
+// 런타임 의존성 0 정책으로 oniguruma 정규식을 안 쓰고(코드 표현도 복사 안 함 — clean-room), 공백-경계 토큰
+// (wordBoundsAt) + 아래 순수 Zig 문자열 분류로 재구현한다. 공백 든 경로는 토큰 모델상 1차 미지원이고, bare
+// 경로 오탐은 클릭 시 core.zig의 존재(stat) 게이트가 거른다(hover 밑줄은 stat 없이 휴리스틱만).
+
+/// 링크 종류 — platform(Swift)이 여는 방식을 가른다: url=URL(string:), file_path=URL(fileURLWithPath:).
+pub const LinkKind = enum { url, file_path };
+
+/// 어떤 종류를 자동 감지할지(각 비트 독립). app_session이 config `input.link-detection`에서 채워 매 호출
+/// 넘긴다 — 코어는 토글 상태를 안 든다(word_separators 주입과 동형, reload-safe). OSC 8 명시 링크는 이 토글과
+/// 무관하게 항상 우선이다(호출자가 cellLinkAt로 먼저 처리).
+pub const LinkScopes = struct {
+    web: bool = false, // http:// https://
+    extra_schemes: bool = false, // file:// mailto: ssh:// ftp:// git:// tel: news: magnet:
+    absolute_path: bool = false, // /Users/x/a.zig
+    home_path: bool = false, // ~/.config
+    dot_relative: bool = false, // ./src ../lib
+    bare_relative: bool = false, // src/foo.zig (슬래시+점)
+};
+
+/// config 프리셋(osc8-only / web / full)과 1:1. osc8-only는 자동 감지를 끈다(OSC 8만).
+pub const link_scopes_none: LinkScopes = .{};
+pub const link_scopes_web: LinkScopes = .{ .web = true };
+pub const link_scopes_full: LinkScopes = .{ .web = true, .extra_schemes = true, .absolute_path = true, .home_path = true, .dot_relative = true, .bare_relative = true };
+
+/// 토큰(공백 없는 글자열) 안 첫 링크의 [start, end) 바이트 범위 + 종류.
+pub const LinkSpan = struct { start: usize, end: usize, kind: LinkKind };
+
+/// web 외 추가 스킴(`://` 또는 `:` 형). 가장 이른 위치가 우선이라 목록 순서는 무관하다.
+const extra_scheme_list = [_][]const u8{ "file://", "ssh://", "ftp://", "git://", "mailto:", "tel:", "news:", "magnet:" };
+
+/// 토큰 안에서 첫 링크의 범위+종류를 찾는다(없으면 null). 우선순위: 스킴 URL > 절대 > 홈 > dot-relative >
+/// bare-relative. 스킴이 경로보다 먼저라 `http://h:8080`의 `:8080`은 포트지 줄번호가 아니다.
+pub fn linkSpanInWord(word: []const u8, scopes: LinkScopes) ?LinkSpan {
+    if (schemeUrlSpan(word, scopes)) |s| return .{ .start = s.start, .end = s.end, .kind = .url };
+    if (filePathSpan(word, scopes)) |s| return .{ .start = s.start, .end = s.end, .kind = .file_path };
+    return null;
+}
+
+/// 토큰 안 가장 이른 스킴부터 끝까지를 URL로 본다("dot.http://x"도 스킴부터). 끝의 문장 부호는 다듬되 균형
+/// 잡힌 닫는 ')'는 URL 일부로 보존한다(Wikipedia ".../Foo_(bar)"). 스킴만 있고 본문이 없으면 null.
+fn schemeUrlSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, end: usize } {
+    var best: ?usize = null;
+    var best_len: usize = 0;
+    if (scopes.web) {
+        for ([_][]const u8{ "https://", "http://" }) |s| {
+            if (std.mem.indexOf(u8, word, s)) |i| {
+                if (best == null or i < best.?) {
+                    best = i;
+                    best_len = s.len;
+                }
+            }
+        }
+    }
+    if (scopes.extra_schemes) {
+        for (extra_scheme_list) |s| {
+            if (std.mem.indexOf(u8, word, s)) |i| {
+                if (best == null or i < best.?) {
+                    best = i;
+                    best_len = s.len;
+                }
+            }
+        }
+    }
+    const start = best orelse return null;
+    const end = trimUrlTail(word, start);
+    if (end <= start + best_len) return null; // 스킴만 있고 본문 없음
+    return .{ .start = start, .end = end };
+}
+
+/// URL 끝의 마무리 문장 부호를 다듬는다(균형 괄호는 보존). 반환은 [start, end)의 end.
+fn trimUrlTail(word: []const u8, start: usize) usize {
     var open_parens: usize = 0;
     for (word[start..]) |ch| {
         if (ch == '(') open_parens += 1;
@@ -146,9 +214,68 @@ pub fn urlSpanInWord(word: []const u8) ?struct { start: usize, end: usize } {
         if (ch == '.' or ch == ',' or ch == ')' or ch == ']' or ch == '>' or ch == ';' or ch == '\'' or ch == '"') continue;
         break;
     }
-    const scheme_len: usize = if (std.mem.startsWith(u8, word[start..], "https://")) "https://".len else "http://".len;
-    if (end_idx <= start + scheme_len) return null; // 스킴만 있고 본문 없음
-    return .{ .start = start, .end = end_idx };
+    return end_idx;
+}
+
+/// 토큰 시작이 파일 경로(절대/홈/dot-relative/bare-relative, 각 scope)면 그 범위. 경로는 URL과 달리 토큰
+/// 시작에서만 본다. 끝은 trimPathTail로 다듬되 `:line[:col]` 접미는 보존한다.
+fn filePathSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, end: usize } {
+    if (word.len == 0) return null;
+    const is_path =
+        (scopes.absolute_path and word[0] == '/' and !std.mem.startsWith(u8, word, "//")) or
+        (scopes.home_path and std.mem.startsWith(u8, word, "~/")) or
+        (scopes.dot_relative and (std.mem.startsWith(u8, word, "./") or std.mem.startsWith(u8, word, "../"))) or
+        (scopes.bare_relative and looksLikeBareRelative(word));
+    if (!is_path) return null;
+    const end = trimPathTail(word);
+    if (end == 0) return null;
+    return .{ .start = 0, .end = end };
+}
+
+/// dot-prefix 없는 상대 경로(src/foo.zig)인지 — 오탐 억제: 슬래시 필수 + (콤마 전) 점 필수 + 첫 글자가 글자/
+/// 숫자/밑줄/'.' + '$'·'//' 시작 금지. "foo/bar"(점 없음)·"$10/x"·"//foo"는 false. "./"·"../"는 dot_relative
+/// 분기에서 이미 잡히므로 여기 도달 시 해당 아님.
+fn looksLikeBareRelative(word: []const u8) bool {
+    if (word.len == 0) return false;
+    const c0 = word[0];
+    if (c0 == '$') return false;
+    if (std.mem.startsWith(u8, word, "//")) return false;
+    if (!(std.ascii.isAlphanumeric(c0) or c0 == '_' or c0 == '.')) return false;
+    const comma = std.mem.indexOfScalar(u8, word, ',') orelse word.len;
+    const head = word[0..comma];
+    const slash = std.mem.indexOfScalar(u8, head, '/') orelse return false; // 슬래시 필수
+    if (std.mem.indexOfScalar(u8, head, '.') == null) return false; // 점 필수(파일스러움)
+    // 첫 세그먼트(첫 '/' 전)는 글자/숫자/_/-/. 만 허용 — "foo~/x"(mid-word ~)·"a:b/x" 등 제외
+    // (Ghostty 첫 세그 [\w][\w\-.]*와 같은 취지). ~ 는 home_path(~/)에서만 의미를 갖는다.
+    for (head[0..slash]) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '-')) return false;
+    }
+    return true;
+}
+
+/// 파일 경로 끝을 다듬는다. 콤마에서 끊고(다음 토큰), 끝의 문장 부호·매달린 ':'를 제거하되 균형 잡힌 ')'와
+/// ":line[:col]" 접미(숫자)는 보존한다. 반환은 end(=다듬은 길이).
+fn trimPathTail(word: []const u8) usize {
+    var end = std.mem.indexOfScalar(u8, word, ',') orelse word.len;
+    var open_parens: usize = 0;
+    for (word[0..end]) |ch| {
+        if (ch == '(') open_parens += 1;
+    }
+    while (end > 0) {
+        const ch = word[end - 1];
+        if (ch == ')' and open_parens > 0) {
+            open_parens -= 1; // 균형 괄호 보존
+            break;
+        }
+        if (ch == '.' or ch == ')' or ch == ']' or ch == '>' or ch == ';' or ch == '\'' or ch == '"') {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    // 매달린 ':'(뒤에 숫자 없음)만 제거 — "./Downloads:" → "./Downloads". ":42:10"은 끝이 숫자라 보존.
+    while (end > 0 and word[end - 1] == ':') end -= 1;
+    return end;
 }
 
 /// 가장 오래된 n개 행이 빠져 abs 좌표가 n칸 당겨질 때 선택을 보정한다(eviction n=1, 하향 트림 n=drop).
@@ -359,18 +486,19 @@ pub fn selectionClear(self: *TerminalCore) void {
     self.dirty = core.fullDirty(self.size);
 }
 
-// ── URL 감지(Cmd+hover/클릭) ──────────────────────────────────────────────────────────────────────
-// OSC 8 명시적 링크가 항상 우선이고(보이는 텍스트와 무관), 없으면 클릭 단어의 http(s) 휴리스틱
-// (urlSpanInWord). urlAnchorAt/urlSpanAtAbs/extractUrlAt는 core.zig facade로 점-호출되고, wordIsUrl은
-// hover의 매-mouseMove 비용을 줄이는 alloc-없는 판정(내부 전용). OSC 8 URI는 self.linkUri(core 잔류 link_store).
+// ── 링크 감지(Cmd+hover/클릭) ──────────────────────────────────────────────────────────────────────
+// OSC 8 명시적 링크가 항상 우선이고(보이는 텍스트와 무관), 없으면 클릭 단어의 자동 감지 휴리스틱
+// (linkSpanInWord — scopes로 web/스킴/경로 토글). urlAnchorAt/urlSpanAtAbs/extractUrlAt는 core.zig facade로
+// 점-호출되고, wordIsUrl은 hover의 매-mouseMove 비용을 줄이는 alloc-없는 판정. OSC 8 URI는 self.linkUri(core
+// 잔류 link_store). file_path 경로의 resolve/존재검증은 core.zig가 하고, 여긴 순수 분류만 한다(파일 I/O 없음).
 
-/// Cmd+클릭/hover 위치가 URL이면 그 run의 시작 셀 절대 좌표를 돌려준다(밑줄 anchor용, 할당 없음).
-/// OSC 8 명시적 링크가 있으면 그것이 우선이고(보이는 텍스트와 무관), 없으면 화면 글자의 http(s) 휴리스틱.
-pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16) ?types.SelectionPoint {
+/// Cmd+클릭/hover 위치가 링크면 그 run의 시작 셀 절대 좌표를 돌려준다(밑줄 anchor용, 할당 없음).
+/// OSC 8 명시적 링크가 우선이고, 없으면 화면 글자의 자동 감지(scopes). 밑줄 범위는 종류(url/file)와 무관.
+pub fn urlAnchorAt(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: LinkScopes) ?types.SelectionPoint {
     const abs = screen.absRowFromViewport(self, viewport_row);
     const id = cellLinkAt(self, abs, col);
     if (id != 0) return linkBoundsAt(self, abs, col, id).start;
-    if (!wordIsUrl(self, viewport_row, col)) return null;
+    if (!wordIsUrl(self, viewport_row, col, scopes)) return null;
     const bounds = wordBoundsAt(self, viewport_row, col) orelse return null;
     return bounds.start;
 }
@@ -391,15 +519,18 @@ pub fn urlSpanAtAbs(self: *const TerminalCore, anchor: types.SelectionPoint) ?ty
     return clipAbsSpanToViewport(self, bounds.start, bounds.end, false);
 }
 
-/// Cmd+클릭 위치의 URL을 추출한다(없으면 null). 클릭 셀이 속한 비공백 run(soft-wrap 포함) 안에서
-/// http:// 또는 https:// 부터 run 끝까지를 URL로 보고, 끝에 붙은 문장 부호(괄호/마침표 등)는 다듬는다.
-/// OSC 8 명시적 링크가 있으면 그 URI를 그대로(다듬지 않고). 호출자가 free한다.
-pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16) !?[]u8 {
+/// 추출한 링크: raw 텍스트(호출자 free) + 종류. file_path는 raw 경로 텍스트(`:line:col` 포함 가능)이고
+/// resolve/존재검증은 core.zig facade(extractUrlAt)가 한다. url은 OSC 8 URI나 스킴 URL을 그대로 담는다.
+pub const ExtractedLink = struct { text: []u8, kind: LinkKind };
+
+/// Cmd+클릭 위치의 링크를 추출한다(없으면 null). 클릭 셀이 속한 비공백 run(soft-wrap 포함)을 모아
+/// linkSpanInWord(scopes)로 분류한다. OSC 8 명시적 링크가 있으면 그 URI를 그대로(kind=url). 호출자가 free.
+pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, viewport_row: u16, col: u16, scopes: LinkScopes) !?ExtractedLink {
     // OSC 8 명시적 링크가 우선 — 프로그램이 지정한 URI를 그대로 연다(보이는 텍스트와 무관).
     const link_id = cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col);
     if (link_id != 0) {
         const uri = self.linkUri(link_id) orelse return null;
-        return try allocator.dupe(u8, uri);
+        return .{ .text = try allocator.dupe(u8, uri), .kind = .url };
     }
     const bounds = wordBoundsAt(self, viewport_row, col) orelse return null;
     var out: std.ArrayList(u8) = .empty;
@@ -411,19 +542,19 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
         const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
         try appendRowUtf8(&out, allocator, row_cells, self.grapheme_store.items, from, to);
     }
-    const span = urlSpanInWord(out.items) orelse {
+    const span = linkSpanInWord(out.items, scopes) orelse {
         out.deinit(allocator);
         return null;
     };
-    const url = try allocator.dupe(u8, out.items[span.start..span.end]);
+    const text = try allocator.dupe(u8, out.items[span.start..span.end]);
     out.deinit(allocator);
-    return url;
+    return .{ .text = text, .kind = span.kind };
 }
 
-/// 클릭 셀이 속한 단어가 URL인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려
-/// extractUrlAt의 alloc 없이 같은 판정만 한다. app 호출은 없어 core facade가 없지만, core.zig 테스트가
-/// `selection.wordIsUrl(&core, ...)`로 cross-file 호출하므로 pub(foldCase·urlSpanInWord와 같은 이유).
-pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
+/// 클릭 셀이 속한 단어가 링크인지(할당 없이) 판정한다. hover의 매-mouseMove 비용을 줄이려 extractUrlAt의
+/// alloc 없이 같은 분류만 한다(존재검증 stat은 안 함 — 클릭에서만). app 호출은 없어 core facade가 없지만,
+/// core.zig 테스트가 `selection.wordIsUrl(&core, ...)`로 cross-file 호출하므로 pub(linkSpanInWord와 같은 이유).
+pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: LinkScopes) bool {
     if (cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col) != 0) return true;
     const bounds = wordBoundsAt(self, viewport_row, col) orelse return false;
     // URL은 보통 한 단어라 짧은 스택 버퍼로 충분하고, 넘치면 URL일 수 있으니 통과시킨다.
@@ -445,7 +576,7 @@ pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16) bool {
             len += n;
         }
     }
-    return urlSpanInWord(buf[0..len]) != null;
+    return linkSpanInWord(buf[0..len], scopes) != null;
 }
 
 // ── 검색(Find) + 추출(복사) + IME preedit ─────────────────────────────────────────────────────────

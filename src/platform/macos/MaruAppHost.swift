@@ -1701,10 +1701,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let mods = Self.urlModsBits(event.modifierFlags)
         var ptr: UnsafePointer<UInt8>? = nil
         var len: size_t = 0
-        guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len) == Self.statusOK,
+        var kind: Int32 = 0
+        guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len, &kind) == Self.statusOK,
               let bytes = ptr, len > 0 else { return false }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
-        guard let url = URL(string: text) else { return false }
+        // kind==1=파일 경로(Zig가 cwd/$HOME로 resolve·존재 확인한 절대 경로) → URL(fileURLWithPath:)로 공백·비ASCII
+        // 경로를 무손실 처리(URL(string:)은 그런 경로에 nil). 그 외(웹/스킴 URL)는 URL(string:). 둘 다 기본 앱/브라우저로.
+        let url: URL? = (kind == 1) ? URL(fileURLWithPath: text) : URL(string: text)
+        guard let url else { return false }
         NSWorkspace.shared.open(url)
         return true
     }

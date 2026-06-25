@@ -19,6 +19,14 @@ fn darkenRgb(rgb: Rgb, delta: u8) Rgb {
     return .{ .r = clampChannel(rgb.r, d), .g = clampChannel(rgb.g, d), .b = clampChannel(rgb.b, d) };
 }
 
+/// 단축키 힌트 키캡(KH-5) 배경 — 패널 대비 **항상 또렷**하게. 패널이 어두우면 밝게, 밝으면 어둡게 한다(루미넌스
+/// 기준). 단순 lighten은 light 테마에서 near-white로 saturate돼 밝은 패널에 묻히고(리뷰 #1), 순백 패널에선 fill이
+/// surface_bg와 같아져 사라진다. Rec.601 근사 루미넌스(정수)로 명암을 갈라 light·dark 양쪽에서 대비를 보장한다.
+fn keycapBg(panel: Rgb) Rgb {
+    const lum: u16 = (@as(u16, panel.r) * 77 + @as(u16, panel.g) * 150 + @as(u16, panel.b) * 29) >> 8;
+    return if (lum < 128) lightenRgb(panel, 40) else darkenRgb(panel, 40);
+}
+
 /// 색 역할(semantic). 컴포넌트는 역할만 알고, 실제 Rgb는 토큰이 준다. divider/focus_accent/drop_zone은
 /// 현재 sidebar_active를 공유하지만 rich에서 분리할 수 있게 별도 role로 둔다.
 pub const ColorRole = enum {
@@ -35,7 +43,7 @@ pub const ColorRole = enum {
     selection,
     cursor,
     accent_bar, // U1(C4b 이후): maru 고유 accent — palette가 maru 앰버로 고정(theme 무관). 사이드바 활성 좌측 막대 등이 소비(U2).
-    keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널(surface_bg)보다 밝게(rich)·또렷하게. tui는 surface_bg와 같게(평탄).
+    keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널 대비(명암 기준 밝게/어둡게)라 tui·rich·light·dark 모두 또렷(keycapBg).
 };
 
 /// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
@@ -88,16 +96,16 @@ pub const ThemeColors = struct {
     cursor: Rgb,
 };
 
-/// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 12개 ColorRole을 채운다(C0 구현).
+/// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 14개 ColorRole을 채운다(C0 구현).
 /// `Tokens.rich(...)`는 C4. 컴포넌트는 이 값만 소비한다.
 pub const Tokens = struct {
     palette: std.EnumArray(ColorRole, Rgb),
     space: Spacing = .{},
     border: Border = .{},
 
-    /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 12개 ColorRole을 채운다 — **역할→색 매핑의 단일
+    /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 14개 ColorRole을 채운다 — **역할→색 매핑의 단일
     /// 출처**. focus_accent/tab_*/drop_zone은 sidebar_active를 공유하고, divider만 sidebar_background에서 살짝 밝은 은은한 색이다(렌더 sidebarActiveBg와 같은
-    /// 출처), rich(C4)는 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 12역할을
+    /// 출처), rich(C4)는 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 14역할을
     /// 전부 명시 set하므로 실제로 안 쓰이지만(foreground로 채워 둠) EnumArray 초기화에 필요하다.
     pub fn tui(theme: ThemeColors) Tokens {
         var palette = std.EnumArray(ColorRole, Rgb).initFill(theme.foreground);
@@ -114,7 +122,7 @@ pub const Tokens = struct {
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);
         palette.set(.accent_bar, .{ .r = 0xDD, .g = 0xA1, .b = 0x5E }); // maru 앰버(마루=전통 나무 마루) — theme 무관 고정 브랜드 accent. rich가 상속.
-        palette.set(.keycap_bg, theme.sidebar_background); // KH-5: tui 키캡 배경 = 패널과 같게(평탄 — 키 박스 없이 글리프, 기존 tui 룩 보존). rich가 분리.
+        palette.set(.keycap_bg, keycapBg(theme.sidebar_background)); // KH-5: 키캡 배경 = 패널 대비(명암 기준 밝게/어둡게) — tui·rich 공통으로 light·dark 모두 또렷.
         return .{ .palette = palette };
     }
 
@@ -146,9 +154,9 @@ pub const Tokens = struct {
         tk.space.tab_width_cols = 16;
         // U-tab: 탭 바 세로 패딩 6px(텍스트 위아래) — 바 높이 = cell + 12, 제목 가운데. 탭에 세로 여유.
         tk.space.tab_bar_pad_y_px = 6;
-        // KH-5: rich 키캡 — 패널(surface_bg)보다 밝은 배경 셀(또렷한 키 박스). tui는 패널색과 같아 평탄(글리프만).
-        // 셀-그리드 오버레이라 키캡은 fill(셀 배경)이고 둥근 GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).
-        tk.palette.set(.keycap_bg, lightenRgb(theme.sidebar_background, 44));
+        // KH-5: rich 키캡도 tui와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. tui()가 이미 keycap_bg를 그렇게 깔았으므로
+        // rich는 override하지 않는다(별도 처리 불필요 — light·dark 모두 또렷). 셀-그리드라 키캡은 fill(셀 배경)이고 둥근
+        // GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).
         return tk;
     }
 
@@ -157,7 +165,7 @@ pub const Tokens = struct {
     }
 };
 
-test "Tokens.tui maps resolved theme colors to the 12 semantic roles" {
+test "Tokens.tui maps resolved theme colors to the semantic roles" {
     const c = struct {
         fn rgb(r: u8, g: u8, b: u8) Rgb {
             return .{ .r = r, .g = g, .b = b };
@@ -178,6 +186,29 @@ test "Tokens.tui maps resolved theme colors to the 12 semantic roles" {
     try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.focus_accent)); // sidebar_active 공유
     try std.testing.expectEqual(c.rgb(16, 16, 16), tk.get(.divider)); // sidebar_background(2) lighten 14 = 16 — 은은한 구분선(sidebar_active 공유 아님)
     try std.testing.expectEqual(c.rgb(8, 8, 8), tk.get(.cursor));
+}
+
+test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·밝으면 어둡게 (리뷰 #1/#2 회귀 가드)" {
+    // 단축키 힌트 키캡이 패널색과 같아지면(이전 KH-5의 tui=surface_bg·light 테마 near-white saturate) 키 박스가 사라진다.
+    // keycapBg가 명암으로 갈라 light·dark 양쪽, tui·rich 양쪽에서 surface_bg와 다르고 올바른 방향으로 대비함을 고정한다.
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+        fn theme(bg: Rgb) ThemeColors {
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8) };
+        }
+    };
+    // 어두운 패널 → keycap이 더 밝게(대비).
+    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(20, 20, 20))), Tokens.rich(c.theme(c.rgb(20, 20, 20))) }) |tk| {
+        try std.testing.expect(!std.meta.eql(tk.get(.keycap_bg), tk.get(.surface_bg))); // 패널과 안 같음(안 사라짐)
+        try std.testing.expect(tk.get(.keycap_bg).r > tk.get(.surface_bg).r); // 어두운 패널 → 더 밝게
+    }
+    // 밝은(near-white) 패널 → keycap이 더 어둡게(단순 lighten이면 near-white로 saturate돼 묻혔다 — 리뷰 #1).
+    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(238, 232, 213))), Tokens.rich(c.theme(c.rgb(238, 232, 213))) }) |tk| {
+        try std.testing.expect(!std.meta.eql(tk.get(.keycap_bg), tk.get(.surface_bg)));
+        try std.testing.expect(tk.get(.keycap_bg).r < tk.get(.surface_bg).r); // 밝은 패널 → 더 어둡게
+    }
 }
 
 test "Tokens.rich separates the sidebar_active-shared roles into derived colors (tui 불변)" {

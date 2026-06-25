@@ -4,7 +4,7 @@
 
 이 문서가 이 기능의 **단일 출처**다. 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules §문서와 설명](project-rules.md#문서와-설명)). 상위 경계는 [키 입력과 단축키 경계](key-input-and-shortcuts.md)·[Chrome 전략](chrome-strategy.md)을 따르고, config 키는 [config 스키마](config-schema.md)를 따른다.
 
-> **현황**: KH-0~4 구현 완료(머지). 모디파이어 홀드 시 활성 pane 우상단에 카테고리별 키캡 HUD가 뜬다 — `MARU_SCREENSHOT`로 렌더 검증 완료. 홀드 타이밍 실기 확인은 사용자. 후속 KH-5(맥락 인식·키캡 rich depth·스크롤)는 선택.
+> **현황**: KH-0~5 구현 완료(머지). 모디파이어 홀드 시 활성 pane 우상단에 카테고리별 키캡 HUD가 뜨고, 키캡은 패널 대비(명암 기준 `keycapBg`)라 tui·rich·light·dark 모두 또렷하다 — `MARU_SCREENSHOT`로 렌더 검증. 홀드 타이밍 실기 확인은 사용자. 후속(선택): 맥락 인식·긴 목록 스크롤·진짜 둥근 키캡(별도 합성 경로).
 
 ## 0. 왜 가능한가 (조사 결론)
 
@@ -187,13 +187,12 @@ modifier·특수키 글리프는 Apple/macOS 표준 유니코드 기호를 쓴�
 
 ### 3.6.3 maru 매핑 — 토큰-주도(tui|rich 분기 없음)
 
-키캡 1개 = **rounded quad(배경+테두리) + 중앙 글리프 text** op 쌍이다. 이는 find의 패널 배경 quad 트릭과 같다 — 컴포넌트는 `if(rich)`를 **절대 안 쓰고**([chrome-strategy.md §5.1]) `p.shape` 모양 토큰만 읽는다. tui면 토큰이 0이라 평탄(셀 배경 글리프), rich면 둥근 모서리+테두리+그림자로 키캡이 된다. 같은 한 경로가 두 룩을 만든다.
+키캡 1개 = **셀 배경 `fill`(keycap_bg role) + 중앙 글리프 text** op 쌍이다. `fill`이라 글리프가 그 셀 배경 **위에** 그려져 키 배경색이 보인다(palette 선택행과 같은 합성). 컴포넌트는 `if(rich)`를 **절대 안 쓰고**([chrome-strategy.md §5.1]) `keycap_bg` role만 읽는다 — 테마=토큰셋 교체.
 
 - **per-key 분리**: `command_catalog`에 `chordKeycaps(chord, …)`를 추가해 chord를 **키별 글리프 배열**(`["⌘","T"]`)로 편다(formatChord의 단일 문자열 `⌘T`와 평행 — 키캡은 키마다 한 칸 필요). chrome `Row.binding`은 이 배열을 받는다.
-- **렌더**(`shortcut_hints.view`): 키캡마다 **셀 배경 `fill`**(`role` = `keycap_bg`) + 글리프 text(`surface_fg`, 셀 정렬)를 emit하고, 캡 사이 1칸 간격을 둔다. `fill`이라 글리프가 그 셀 배경 **위에** 그려져 키 배경색이 보인다(palette 선택행과 같은 합성). `keycap_bg`는 rich에서 패널(`surface_bg`)보다 밝아(`lighten +44`) 또렷한 키 박스가 되고, tui에서는 패널색과 같아 평탄(글리프만 — 기존 tui 룩 보존). 컴포넌트는 `if(rich)` 없이 `keycap_bg` role만 읽는다(토큰셋 교체).
-- **베이스/결정(KH-5 — 셀-그리드 제약)**: 둥근 GPU quad 키캡은 **불가능**하다 — rich quad는 ① layer-1(셀 아래)이면 글리프 셀의 불투명 배경에 가려지고 ② layer-3(셀 위)이면 글리프를 덮는다(`rasterizeOverlayCells`의 modal_bg_quad 분기). 그래서 셀-그리드 오버레이의 per-key 키캡은 **평탄 색 셀**(`fill`)이 한계다 — 웹 보편 규약(§3.6.2)의 둥근+테두리+depth는 셀 텍스트 모델 밖이라 채택 못 한다. 또렷함은 색 대비(밝은 `keycap_bg`)로 낸다. 진짜 둥근 키캡은 chrome 텍스트가 GPU 글리프 위에 합성되는 별도 경로가 필요(후속).
-- **셀 정렬 필수**([tui-widgets-must-be-cell-text-not-quad] 메모리): 키캡 quad는 **셀 경계에 스냅**한다(sub-pixel 금지 — paintRectBg가 셀 단위). 그래서 키캡 = 정수 칸(글리프 1칸 + rich는 lowering ±pad로 시각 패딩만 확장, 셀 텍스트 폭은 불변 — C4b 패턴). tui는 패딩 없이 글리프 칸만, rich는 quad가 ±pad 떠 보이게.
-- **그림자/depth**: rich SDF quad/shadow(C4b로 이미 도입, [chrome-strategy.md §7])를 키캡 토큰에 연결. tui는 그림자 없음(평탄).
+- **렌더**(`shortcut_hints.view`): 키캡마다 **셀 배경 `fill`**(`role` = `keycap_bg`) + 글리프 text(`surface_fg`, 셀 정렬)를 emit하고, 캡 사이 1칸 간격을 둔다.
+- **색(`keycap_bg` = 패널 대비, 명암 기준)**: `tokens.keycapBg(surface_bg)`가 패널이 **어두우면 밝게·밝으면 어둡게**(Rec.601 루미넌스)로 칠해 **tui·rich·light·dark 모두 또렷**하다. 단순 `lighten`은 light 테마에서 near-white로 saturate돼 밝은 패널에 묻히고 순백 패널에선 `surface_bg`와 같아져 사라진다(리뷰 #1) — 그래서 명암 분기로 대비를 보장한다. tui·rich가 같은 `keycap_bg`를 쓴다(별도 override 없음). 토큰 테스트가 light·dark 양쪽에서 `keycap_bg ≠ surface_bg` + 올바른 방향을 고정한다(회귀 가드).
+- **베이스/결정(KH-5 — 셀-그리드 제약)**: 둥근 GPU quad 키캡은 **불가능**하다 — rich quad는 ① layer-1(셀 아래)이면 글리프 셀의 불투명 배경에 가려지고 ② layer-3(셀 위)이면 글리프를 덮는다(`rasterizeOverlayCells`의 modal_bg_quad 분기). 그래서 셀-그리드 오버레이의 per-key 키캡은 **평탄 색 셀**(`fill`)이 한계다 — 웹 보편 규약(§3.6.2)의 둥근+테두리+depth는 셀 텍스트 모델 밖이라 채택 못 한다. 또렷함은 **색 대비**(keycapBg)로 낸다(테두리·둥근 모서리 없음). 키 분리는 캡 사이 1칸 간격이 보조한다. 진짜 둥근 키캡은 chrome 텍스트가 GPU 글리프 위에 합성되는 별도 경로가 필요(후속).
 
 **베이스/결정**: 기호=Apple HIG 표준(공개 명세 — 이미 준수), 키캡 외형=W3C `<kbd>`·웹 디자인 시스템 보편 규약(둥근+테두리+depth)을 **형태만** 따와 maru 렌더러 프리미티브(rich quad+shadow 토큰)로 독립 구현한다([document-basis-and-decision]·clean-room). 특정 라이브러리 코드/CSS를 옮기지 않는다.
 
@@ -260,7 +259,7 @@ pub const KeyHintConfig = struct {
 | **KH-2** ✅ | `command_catalog`에 `HintCategory`/`categoryOf`/`keyHintRows` + **`chordKeycaps`**(chord→키별 글리프 배열, `keyGlyph` 단일 출처, §3.6.3) + `app_session.buildChromeOverlayPrep`가 `key_hints.visible`일 때 rows 빌드해 collect 호출(아직 항상 false) | 내용 단위 ✅ |
 | **KH-3** ✅ | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도(namespace `keyhint`, GUI 섹션 `.input`) + configuration.md 키 + full-config 파싱 테스트. platform 노출(ABI 게터)은 KH-4가 소비처와 함께 추가 | round-trip·범위 ✅ |
 | **KH-4** ✅ | macOS `flagsChanged` 홀드 상태머신(`handleModifierFlags`) + `NSTimer .common` + ABI v87 `set_key_hints`/`key_hints_config` + 렌더 게이트(`anyOverlayOpen or key_hints.visible`) + `keyDown`/`windowDidResignKey`서 취소 + `MARU_KEY_HINTS_FORCE`(Zig self-verify). delay/enabled/modifier를 config에서 읽음 | `zig build macos-app-build` green + `MARU_SCREENSHOT` HUD 캡처 ✅. **홀드 타이밍 실기 수동 확인은 사용자** |
-| **KH-5(키캡 대비)** ✅ | rich `keycap_bg` role(패널보다 `lighten +44`) + 키캡을 `quad`→`fill`(셀 배경)로 바꿔 rich에서 또렷한 키 박스(tui는 평탄 보존). 둥근 GPU 키캡은 셀-그리드 제약으로 불가(§3.6.3 결정) | `MARU_SCREENSHOT` rich 캡처 ✅ |
+| **KH-5(키캡 대비)** ✅ | 키캡을 `quad`→`fill`(셀 배경)로 바꾸고 `keycap_bg` role = `keycapBg(surface_bg)`(패널이 어두우면 밝게·밝으면 어둡게, 명암 기준) — tui·rich·light·dark 모두 또렷. 회귀 가드(keycap_bg≠surface_bg) 테스트. 둥근 GPU 키캡은 셀-그리드 제약으로 불가(§3.6.3 결정) | 토큰 대비 테스트 + `MARU_SCREENSHOT` rich 캡처 ✅ |
 | **KH-5(후속, 선택)** | 맥락 인식(포커스 pane의 터미널 매크로 바인딩 노출)·빌트인 터미널 편집키(`⌘←` 등) 행·`Space`(␣)/키패드 글리프·긴 목록 2열/스크롤·GUI 폴리시 | — |
 
 머지 규율은 [merge-only-on-green]·[run-macos-app-before-merge] 메모리를 따른다(checks green + KH-4는 실제 앱 실행 후 머지).

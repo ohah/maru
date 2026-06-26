@@ -7532,11 +7532,16 @@ pub const AppSession = struct {
         var next: ?terminal.SelectionPoint = null;
         if (self.urlModifierHeld(mods)) {
             if (self.pxToCell(x_px, y_px)) |cell| {
-                const core = &self.activeSurface().core;
+                const s = self.activeSurface();
                 // URL이면 그 시작 셀의 절대 좌표를 저장한다(뷰포트 좌표가 아님) — 스크롤/출력으로
                 // 내용이 움직여도 밑줄이 내용을 따라가고, 좁아진 폭에서도 매 frame 뷰포트로 다시
-                // 클립(아래 hoverLinkSpan)되므로 stale·OOB가 안 생긴다.
-                if (core.urlAnchorAt(cell.row, cell.col, self.linkScopesFromConfig())) |anchor| next = anchor;
+                // 클립(아래 hoverLinkSpan)되므로 stale·OOB가 안 생긴다. 분류(wordIsUrl)가 스크롤백을 읽으므로
+                // 락 아래에서 한다 — urlAt 클릭 경로와 대칭(reader의 evict/realloc race 방지). hover는 매
+                // mouse-move라 클릭보다 빈번해 노출이 더 크다(focusedTermCwd/copyText와 같은 규율).
+                s.lockCore(self.io);
+                const anchor = s.core.urlAnchorAt(cell.row, cell.col, self.linkScopesFromConfig());
+                s.unlockCore(self.io);
+                if (anchor) |a| next = a;
             }
         }
         const changed = !pointEql(self.hover_url_anchor, next);
@@ -7567,9 +7572,10 @@ pub const AppSession = struct {
         return std.meta.eql(a.?, b.?);
     }
 
-    /// Cmd+클릭 위치의 URL(없으면 빈 슬라이스). Swift가 NSWorkspace로 연다 — URL 인식(단어 경계,
-    /// soft-wrap 이어 붙임, http(s) 검사, 끝 문장부호 다듬기)은 core가 소유한다.
+    /// Cmd+클릭 위치의 링크(없으면 빈 슬라이스). Swift가 NSWorkspace로 연다 — 링크 인식(단어 경계, soft-wrap
+    /// 이어 붙임, 스킴/파일 경로 분류, 끝 문장부호 다듬기, file_path resolve+존재검증)은 core가 소유한다.
     pub fn urlAt(self: *AppSession, x_px: f64, y_px: f64, mods: i32) []const u8 {
+        self.url_kind = .url; // 빈 반환 경로에서 이전 클릭의 kind가 남지 않게 리셋(ABI out_kind는 len>0일 때만 유효하나 방어)
         if (!self.surface_initialized) return &.{};
         // config 수식키가 안 눌렸으면 URL을 안 연다(빈 슬라이스 → Swift는 일반 클릭으로 처리). hover 밑줄과 같은
         // urlModifierHeld 단일 판정이라 "밑줄 보이는 키 = 열리는 키"가 항상 일치한다.

@@ -1080,6 +1080,10 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
     try std.testing.expectEqual(@as(u32, c.MARU_MACOS_APP_HOST_ABI_VERSION), abi_version);
+    // url_at out_kind 계약: @intFromEnum(LinkKind)를 그대로 싣고 Swift handleUrlClick이 kind==1=file_path로 분기한다.
+    // LinkKind 순서를 바꾸면 분기가 silent하게 뒤집히므로(웹↔파일) 태그 값을 고정한다(C typedef 없는 enum 가드 — Status/EventKind 선례).
+    try std.testing.expectEqual(@as(i32, 0), @intFromEnum(terminal.LinkKind.url));
+    try std.testing.expectEqual(@as(i32, 1), @intFromEnum(terminal.LinkKind.file_path));
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusOk), @intFromEnum(Status.ok));

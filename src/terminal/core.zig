@@ -932,7 +932,11 @@ pub const TerminalCore = struct {
         var rel_or_abs: []const u8 = path_part;
         if (std.mem.startsWith(u8, path_part, "~/")) {
             const home_z = std.c.getenv("HOME") orelse return null;
-            tilde_buf = try std.fs.path.join(allocator, &.{ std.mem.span(home_z), path_part[2..] });
+            const home = std.mem.span(home_z);
+            // getenv는 빈 HOME("")에도 non-null을 주므로 절대 경로가 아니면 거른다 — 안 그러면 "~/foo"가 상대
+            // 경로 "foo"가 돼 cwd 기준으로 엉뚱하게 resolve된다(resolveWorkspaceRoot의 isAbsolute 가드와 같은 이유).
+            if (!std.fs.path.isAbsolute(home)) return null;
+            tilde_buf = try std.fs.path.join(allocator, &.{ home, path_part[2..] });
             rel_or_abs = tilde_buf.?;
         }
 

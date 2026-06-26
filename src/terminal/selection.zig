@@ -178,16 +178,19 @@ fn schemeUrlSpan(word: []const u8, scopes: LinkScopes) ?struct { start: usize, e
                 if (best == null or i < best.?) {
                     best = i;
                     best_len = s.len;
+                    if (i == 0) break; // 토큰 시작 매치 — 더 이른 건 불가, 남은 스캔 생략
                 }
             }
         }
     }
-    if (scopes.extra_schemes) {
+    // best가 토큰 시작(0)이면 추가 스킴 스캔(최대 8회 indexOf)을 통째로 건너뛴다 — 더 이른 매치가 없으므로.
+    if (scopes.extra_schemes and (best == null or best.? != 0)) {
         for (extra_scheme_list) |s| {
             if (std.mem.indexOf(u8, word, s)) |i| {
                 if (best == null or i < best.?) {
                     best = i;
                     best_len = s.len;
+                    if (i == 0) break;
                 }
             }
         }

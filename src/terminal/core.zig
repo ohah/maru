@@ -5333,6 +5333,35 @@ test "wordIsUrl handles a token longer than its 2048-byte scratch buffer" {
     try std.testing.expect(selection.wordIsUrl(&core, 0, 0, selection.link_scopes_full));
 }
 
+test "urlSpanAtAbs keeps a hovered link's underline within the viewport across scrolling (no OOB)" {
+    // hover 밑줄 범위(urlSpanAtAbs)는 선택 하이라이트와 같은 clipAbsSpanToViewport로 클립된다. 링크가
+    // 스크롤백으로 밀리거나 화면 경계에 걸쳐도 밑줄 좌표가 화면 범위[0, rows)를 벗어나면 안 된다(OOB/stale 방지).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 16, .rows = 3 });
+    defer core.deinit();
+    core.setMaxScrollback(20);
+    const full = selection.link_scopes_full;
+
+    try core.write("https://a.bc/xy\r\n"); // 한 행에 들어가는 URL
+    const anchor = core.urlAnchorAt(0, 0, full).?; // abs 좌표(스크롤과 무관하게 내용을 따라감)
+    // 보이는 동안: 밑줄 span은 화면 범위 안.
+    {
+        const s = core.urlSpanAtAbs(anchor).?;
+        try std.testing.expect(s.start.row < core.size.rows and s.end.row < core.size.rows);
+    }
+    // 여러 줄을 더 써서 링크를 스크롤백 위로 밀어낸다(뷰포트는 bottom).
+    try core.write("l2\r\nl3\r\nl4\r\nl5\r\nl6\r\n");
+    // 화면 밖이면 null, 일부 보이면 클립 — 어느 경우든 OOB(>= rows) 좌표는 안 나온다.
+    if (core.urlSpanAtAbs(anchor)) |s| {
+        try std.testing.expect(s.start.row < core.size.rows and s.end.row < core.size.rows);
+    }
+    // 위로 스크롤(delta_up>0)해서 링크가 화면 상단 경계에 다시 걸쳐도 클립 유지.
+    core.scrollViewport(3);
+    if (core.urlSpanAtAbs(anchor)) |s| {
+        try std.testing.expect(s.start.row < core.size.rows and s.end.row < core.size.rows);
+        try std.testing.expect(s.start.row <= s.end.row);
+    }
+}
+
 test "selection is invalidated by row-relocating ops that break absolute coords" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();

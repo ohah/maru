@@ -84,15 +84,22 @@ fn linkBoundsAt(self: *const TerminalCore, abs: usize, col: u16, id: u32) struct
         }
         if (start_row == 0) break;
         const prev = screen.absRow(self, start_row - 1) orelse break;
-        if (prev.len == 0 or prev[prev.len - 1].link != id) break;
+        // wide glyph wrap이 남긴 trailing padding 빈칸(link=0)은 경계가 아니므로 건너뛴 마지막 셀로 잇는다
+        // (wordBoundsAtImpl과 대칭 — OSC 8 링크의 wrap 밑줄이 토막나지 않게). 링크 일부인 공백(link==id)은 보존.
+        var prev_last = prev.len;
+        while (prev_last > 0 and isBoundarySpace(prev[prev_last - 1]) and prev[prev_last - 1].link != id) prev_last -= 1;
+        if (prev_last == 0 or prev[prev_last - 1].link != id) break;
         start_row -= 1;
-        start_col = @intCast(prev.len - 1);
+        start_col = @intCast(prev_last - 1);
     }
     var end_row = abs;
     var end_col: u16 = col;
     outer_right: while (true) {
         const cells_row = screen.absRow(self, end_row) orelse break;
-        while (end_col + 1 < cells_row.len) {
+        // trailing padding 빈칸(wide glyph wrap, link=0)은 건너뛴다 — link run이 끊기지 않게(왼쪽과 대칭).
+        var content_end = cells_row.len;
+        while (content_end > 0 and isBoundarySpace(cells_row[content_end - 1]) and cells_row[content_end - 1].link != id) content_end -= 1;
+        while (end_col + 1 < content_end) {
             if (cells_row[end_col + 1].link != id) break :outer_right;
             end_col += 1;
         }
@@ -438,9 +445,14 @@ fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, sepa
         }
         if (start_row == 0 or !screen.absRowWrapped(self, start_row - 1)) break;
         const prev = screen.absRow(self, start_row - 1) orelse break;
-        if (prev.len == 0 or isWordBoundaryCell(prev[prev.len - 1], separators)) break;
+        // 이전 행은 soft-wrap이다. wide glyph(CJK·와이드 이모지)가 마지막 칸에 안 들어가 다음 행으로 밀릴 때
+        // 직전 행 끝에 남는 padding 빈칸(screen.zig putCell)은 진짜 공백 경계가 아니라 wrap 패딩이므로, 그걸 건너뛴
+        // 마지막 비공백 셀부터 잇는다(구분자는 진짜 경계라 안 건너뜀). 안 그러면 한글 든 링크가 wrap 시 클릭이 끊긴다.
+        var prev_last = prev.len;
+        while (prev_last > 0 and isBoundarySpace(prev[prev_last - 1])) prev_last -= 1;
+        if (prev_last == 0 or isWordBoundaryCell(prev[prev_last - 1], separators)) break;
         start_row -= 1;
-        start_col = @intCast(prev.len - 1);
+        start_col = @intCast(prev_last - 1);
     }
 
     // 오른쪽 경계: 대칭 — 행 끝에 닿으면 이 행이 soft-wrap일 때 다음 행으로 계속.
@@ -448,11 +460,18 @@ fn wordBoundsAtImpl(self: *const TerminalCore, viewport_row: u16, col: u16, sepa
     var end_col: u16 = c;
     outer_right: while (true) {
         const cells_row = screen.absRow(self, end_row) orelse break;
-        while (end_col + 1 < cells_row.len) {
+        const row_wrapped = screen.absRowWrapped(self, end_row);
+        // wrapped 행의 trailing padding 빈칸(wide glyph가 다음 행으로 밀리며 남긴 것)은 경계가 아니라 wrap 패딩 —
+        // 행 content 끝으로 보고 다음 행과 잇는다(왼쪽 이음과 대칭).
+        var content_end = cells_row.len;
+        if (row_wrapped) {
+            while (content_end > 0 and isBoundarySpace(cells_row[content_end - 1])) content_end -= 1;
+        }
+        while (end_col + 1 < content_end) {
             if (isWordBoundaryCell(cells_row[end_col + 1], separators)) break :outer_right;
             end_col += 1;
         }
-        if (!screen.absRowWrapped(self, end_row)) break;
+        if (!row_wrapped) break;
         const next = screen.absRow(self, end_row + 1) orelse break;
         if (next.len == 0 or isWordBoundaryCell(next[0], separators)) break;
         end_row += 1;
@@ -555,7 +574,12 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
     while (abs <= bounds.end.row) : (abs += 1) {
         const row_cells = screen.absRow(self, abs) orelse break;
         const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
-        const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
+        var to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
+        // wrapped 중간 행의 trailing padding 빈칸(wide glyph가 다음 행으로 밀리며 남긴 것)은 텍스트에서 제외 —
+        // 이은 행 사이에 padding 공백이 끼지 않게(wordBoundsAt 이음과 일관). 마지막 행은 bounds.end.col로 이미 클립.
+        if (abs != bounds.end.row and screen.absRowWrapped(self, abs)) {
+            while (to > from and isBoundarySpace(row_cells[to - 1])) to -= 1;
+        }
         try appendRowUtf8(&out, allocator, row_cells, self.grapheme_store.items, from, to);
     }
     const span = linkSpanInWord(out.items, scopes) orelse {
@@ -580,7 +604,11 @@ pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes:
     outer: while (abs <= bounds.end.row) : (abs += 1) {
         const row_cells = screen.absRow(self, abs) orelse break;
         const from: usize = if (abs == bounds.start.row) bounds.start.col else 0;
-        const to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
+        var to: usize = if (abs == bounds.end.row) @min(@as(usize, bounds.end.col) + 1, row_cells.len) else row_cells.len;
+        // wrapped 중간 행의 trailing padding 빈칸은 텍스트에서 제외(extractUrlAt과 일관 — 판정 결과가 같게).
+        if (abs != bounds.end.row and screen.absRowWrapped(self, abs)) {
+            while (to > from and isBoundarySpace(row_cells[to - 1])) to -= 1;
+        }
         var c = from;
         while (c < to) : (c += 1) {
             const cell = row_cells[c];

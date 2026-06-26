@@ -5256,6 +5256,83 @@ test "wide glyph (한글) forcing a wrap keeps the link clickable across the wra
     try std.testing.expectEqual(@as(u16, 0), anchor.col);
 }
 
+test "extractUrlAt does NOT join a link split by a hard newline (only soft-wrap joins)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 40, .rows = 3 });
+    defer core.deinit();
+    // hard newline(\r\n)으로 쪼개진 경로 — 다른 논리 줄이라 이어붙이면 안 된다(soft-wrap만 잇는다).
+    try core.write("/aaa/bbb\r\nccc/ddd.txt");
+    try std.testing.expect(!core.screen.wrapped[0]); // soft-wrap 아님(hard 개행)
+    const got = (try selection.extractUrlAt(&core, std.testing.allocator, 0, 0, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(got.text);
+    try std.testing.expectEqualStrings("/aaa/bbb", got.text); // 둘째 줄(ccc/ddd.txt)은 안 붙는다
+}
+
+test "wide glyph wrap: hover (wordIsUrl) on both rows + underline span (urlSpanAtAbs) covers the wrap" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    const full = selection.link_scopes_full;
+    // 'http://'=7칸, '한'(width 2)이 col7에 안 들어가 wide-push → row0="http://"+padding, row1="한x".
+    try core.write("http://한x");
+    try std.testing.expect(core.screen.wrapped[0]);
+    // hover 판정(존재 게이트 없는 휴리스틱)이 양쪽 행 모두 링크.
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 0, full));
+    try std.testing.expect(selection.wordIsUrl(&core, 1, 0, full));
+    // 밑줄 anchor는 run 시작(첫 행), 밑줄 span은 둘째 행까지 걸친다.
+    const anchor = core.urlAnchorAt(1, 0, full).?;
+    try std.testing.expectEqual(@as(usize, 0), anchor.row);
+    const span = core.urlSpanAtAbs(anchor).?;
+    try std.testing.expectEqual(@as(u16, 0), span.start.row);
+    try std.testing.expectEqual(@as(u16, 1), span.end.row);
+}
+
+test "wide emoji (⏰) forcing a wrap keeps the path clickable across the wrap" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    // ⏰(U+23F0, Emoji_Presentation width 2)도 한글과 같은 wide-push padding을 만든다.
+    try core.write("/aaaaaa⏰bc");
+    try std.testing.expect(core.screen.wrapped[0]);
+    const got = (try selection.extractUrlAt(&core, std.testing.allocator, 1, 0, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(got.text);
+    try std.testing.expectEqualStrings("/aaaaaa⏰bc", got.text);
+}
+
+test "extractUrlAt: link wrapping three rows is fully recovered from any row" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+    const full = selection.link_scopes_full;
+    // 20칸 경로 → 8+8+4 3행 soft-wrap(ASCII, padding 없음).
+    try core.write("/aaa/bbb/ccc/ddd.zig");
+    try std.testing.expect(core.screen.wrapped[0]);
+    try std.testing.expect(core.screen.wrapped[1]);
+    // 첫·둘째·셋째 행 어디서 클릭해도 전체 경로를 회수.
+    for ([_]u16{ 0, 1, 2 }) |r| {
+        const got = (try selection.extractUrlAt(&core, std.testing.allocator, r, 0, full)).?;
+        defer std.testing.allocator.free(got.text);
+        try std.testing.expectEqualStrings("/aaa/bbb/ccc/ddd.zig", got.text);
+    }
+}
+
+test "clicking the continuation half of a wide glyph still resolves the whole link" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer core.deinit();
+    // 'https://'(col0-7), '한'(col8-9), '국'(col10-11), '.com'(col12-15). col9 = '한'의 continuation 칸.
+    try core.write("https://한국.com");
+    const got = (try selection.extractUrlAt(&core, std.testing.allocator, 0, 9, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(got.text);
+    try std.testing.expectEqualStrings("https://한국.com", got.text); // continuation 칸 클릭도 전체 URL
+}
+
+test "wordIsUrl handles a token longer than its 2048-byte scratch buffer" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 3000, .rows = 2 });
+    defer core.deinit();
+    // 2048바이트를 넘는 긴 http URL — wordIsUrl의 스택 버퍼가 넘치면 거기까지로 판정(주석: 넘치면 URL일 수
+    // 있으니 통과). 부분 버퍼에도 스킴이 들어 있어 링크로 본다.
+    try core.write("https://");
+    var i: usize = 0;
+    while (i < 2100) : (i += 1) try core.write("a");
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 0, selection.link_scopes_full));
+}
+
 test "selection is invalidated by row-relocating ops that break absolute coords" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
     defer core.deinit();

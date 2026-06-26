@@ -73,9 +73,15 @@ pub const CoreTextFrameBuilder = struct {
         const active = app_window.active() orelse return error.NoActiveSurface;
         active.lockCore(io);
         const list_or = renderer.buildDrawListWithUnfocused(allocator, active.core.renderSnapshot(), self.cursor_unfocused);
+        // renderSnapshot이 뷰포트 합성에 실제로 쓴 view_offset을 **같은 락 아래**에서 같이 읽는다 — 호출자(app_session
+        // 투영 게이트)가 "이 프레임이 그린 스크롤 위치"를 정확히 기록해, gate-read와 render-read 사이 리더 스크롤로
+        // 어긋나는 read/render TOCTOU(스크롤 stale 재발) 없이 다음 tick의 재투영 여부를 판정한다.
+        const rendered_view_offset = active.core.view_offset;
         active.unlockCore(io);
         const draw_list = try list_or;
-        return self.shapeOnly(allocator, draw_list);
+        var pane = try self.shapeOnly(allocator, draw_list);
+        pane.view_offset = rendered_view_offset;
+        return pane;
     }
 
     /// 이미 만들어진 DrawList(소유권 이전)를 같은 CoreText shaper/rasterizer/renderer_state로
@@ -169,6 +175,10 @@ pub const ShapedPane = struct {
     owned_list: renderer.DrawList,
     shaped: renderer.ShapedGlyphRunList,
     font_registry: renderer.FontIdentityRegistry,
+    // 이 페인을 그릴 때 renderSnapshot이 쓴 활성 surface view_offset(스크롤 위치). shapeOnlyBuild(활성 경로)만
+    // 락 아래에서 채우고, 그 외 생성(비활성 pane·사이드바 — shapeOnly 직접)은 0(스크롤 추적 비대상). app_session
+    // 투영 게이트가 last_rendered_view_offset에 이 값을 기록한다(render-time — read/render TOCTOU 방지).
+    view_offset: usize = 0,
 
     /// shape 결과 전체를 정리한다(owned_list 포함). finishPane이 consume에 성공한 ShapedPane엔 호출하면
     /// 안 된다(double-free) — finishPane 실패 경로/place 실패 경로에서만 부른다.

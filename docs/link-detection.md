@@ -59,14 +59,15 @@
 
 ```
 :line:col 분리 → ~/ 를 $HOME 으로 확장 → 상대면 currentCwd()(OSC 7)와 join → 정규화(.. . 정리)
-              → std.fs.accessAbsolute()로 존재 확인 → 있으면 절대 경로, 없으면 무시(null)
+              → std.c.access(F_OK)로 존재 확인 → 있으면 절대 경로, 없으면 무시(null)
 ```
 
 - **cwd가 비면**(OSC 7 미수신 셸·원격) 상대·bare 경로는 resolve 불가 → 안 연다. 절대 경로·`~/`는 cwd 없이 가능.
-- **락**: `urlAt`은 `lockCore` 아래에서 분류·resolve·존재검증을 한다 — 분류가 스크롤백을, resolve가 cwd를
-  읽는데 둘 다 reader 스레드가 OSC 7·출력으로 mutate하므로(cwd free+realloc, 스크롤백 evict) 락 없이 읽으면
-  use-after-free·torn read가 난다(`focusedTermCwd`·`copyText`가 같은 위험을 락으로 고친 선례). 존재검증
-  `access(F_OK)`는 빠른 syscall이라 락 아래 허용한다([io-render-threading](io-render-threading.md) §9.1).
+- **락**: 클릭(`urlAt`)과 hover(`hoverCursor`의 `urlAnchorAt`) 분류를 **둘 다** `lockCore` 아래에서 한다 —
+  분류(`wordIsUrl`/`urlAnchorAt`/`extractUrlAt`)가 스크롤백을, file_path resolve가 cwd를 읽는데 둘 다 reader
+  스레드가 OSC 7·출력으로 mutate하므로(cwd free+realloc, 스크롤백 evict) 락 없이 읽으면 use-after-free·torn
+  read가 난다(`focusedTermCwd`·`copyText`가 같은 위험을 락으로 고친 선례). hover는 매 mouse-move라 클릭보다
+  빈번해 노출이 더 크다. 존재검증 `access(F_OK)`는 빠른 syscall이라 락 아래 허용([io-render-threading](io-render-threading.md) §9.1).
 
 ## hover(밑줄)와 click(열림)의 의도적 불일치
 
@@ -76,6 +77,20 @@
 - 결과: 존재하지 않는 경로에도 Cmd+hover 밑줄은 뜰 수 있으나 클릭하면 열리지 않는다. "밑줄=후보, 열림=검증"
   이라는 약한 불일치를 의도적으로 허용한다(hover에 디스크 I/O를 넣지 않기 위함). 더 엄격히 하려면 hover에도
   stat을 거는 후속이 가능하다.
+
+## soft-wrap(강제개행)된 링크
+
+터미널 폭보다 긴 링크는 여러 화면 행으로 soft-wrap된다. `wordBoundsAt`(휴리스틱)·`linkBoundsAt`(OSC 8)이
+`absRowWrapped`로 wrap 경계를 넘어 run을 이어, 어느 행을 클릭/hover해도 전체 링크를 회수한다.
+
+- **hard newline 구분**: 실제 개행(`\n`)으로 쪼개진 줄은 별개 논리 행이라 이어붙이지 않는다(soft-wrap만 잇는다).
+- **wide glyph wrap padding**: wide glyph(한글·CJK·와이드 이모지)가 줄 끝 한 칸에 안 들어가 다음 행으로 밀릴 때
+  직전 행 끝에 padding 빈칸이 남는다(`screen.zig` putCell). 이 빈칸은 진짜 공백 경계가 아니라 wrap 패딩이므로
+  run 이음에서 건너뛰고(`wordBoundsAtImpl`·`linkBoundsAt`), 이은 텍스트에서도 제외한다(`extractUrlAt`·`wordIsUrl`).
+  안 그러면 **한글 든 링크가 wrap될 때 클릭이 끊긴다**(사용자 보고 버그 — 순수 ASCII wrap은 정상이라 드러나지
+  않았던 회귀). continuation 칸(wide glyph 둘째 칸) 클릭도 같은 run으로 회수된다.
+- 밑줄 범위(`urlSpanAtAbs`)는 선택 하이라이트와 같은 `clipAbsSpanToViewport`로 뷰포트에 클립돼, 스크롤·resize
+  후에도 화면 밖 OOB가 안 생긴다. 단 토큰 모델상 **진짜 공백 든 경로**는 여전히 미지원(§한계).
 
 ## config (`input.link-detection`)
 

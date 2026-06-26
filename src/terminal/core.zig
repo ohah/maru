@@ -4996,6 +4996,20 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
         .{ .in = "http://[::1]", .want = "http://[::1]", .kind = .url },
         .{ .in = "https://[2001:db8::1]:8080/path", .want = "https://[2001:db8::1]:8080/path", .kind = .url },
         .{ .in = "https://example.com/[foo]", .want = "https://example.com/[foo]", .kind = .url },
+        // 스킴 변종(전체 8종) + 쿼리/프래그먼트.
+        .{ .in = "git://example.com/repo.git", .want = "git://example.com/repo.git", .kind = .url },
+        .{ .in = "tel:+12125551234", .want = "tel:+12125551234", .kind = .url },
+        .{ .in = "news:comp.lang.c", .want = "news:comp.lang.c", .kind = .url },
+        .{ .in = "magnet:?xt=urn:btih:abc", .want = "magnet:?xt=urn:btih:abc", .kind = .url },
+        .{ .in = "https://x.y/p?a=1&b=2", .want = "https://x.y/p?a=1&b=2", .kind = .url },
+        .{ .in = "https://x.y/p#frag", .want = "https://x.y/p#frag", .kind = .url },
+        // 파일 경로 변종: 숫자 디렉토리, 점 시작 bare, 절대경로 안 균형 대괄호, 콜론 뒤 비숫자(span 보존).
+        .{ .in = "2024/report.txt", .want = "2024/report.txt", .kind = .file_path },
+        .{ .in = "..foo/bar.zig", .want = "..foo/bar.zig", .kind = .file_path },
+        .{ .in = "/var/log/[id].txt", .want = "/var/log/[id].txt", .kind = .file_path },
+        .{ .in = "src/foo.zig:abc", .want = "src/foo.zig:abc", .kind = .file_path },
+        // 산문 trailing 다듬기(경로 끝 마침표).
+        .{ .in = "see/notes.md.", .want = "see/notes.md", .kind = .file_path },
     };
     for (cases) |c| {
         const span = selection.linkSpanInWord(c.in, full) orelse {
@@ -5006,8 +5020,15 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
         try std.testing.expectEqual(c.kind, span.kind);
     }
 
-    // no-match: 이중슬래시·점 없는 bare·$숫자·mid-word ~·본문 없는 스킴.
-    const no_match = [_][]const u8{ "//foo", "foo/bar", "input/output", "$10/bar", "foo~/bar.txt", "https://" };
+    // no-match: 이중슬래시·점 없는 bare·$숫자·mid-word ~·본문 없는 스킴 + 대소문자 스킴·괄호 감싼 경로·빈/단일/비경로.
+    const no_match = [_][]const u8{
+        "//foo", "foo/bar", "input/output", "$10/bar", "foo~/bar.txt", "https://",
+        "HTTP://x.y", // 스킴 대소문자 구분(소문자만) — RFC는 무관하나 셸 출력은 사실상 소문자
+        "File://x", // 추가 스킴도 소문자만
+        "ftp://", "mailto:", // 추가 스킴 본문 없음(스킴만)
+        "(/etc/hosts)", "[/etc/hosts]", // 괄호/대괄호로 감싸 토큰 시작이 경로 prefix가 아님
+        "", "a", ".", "..", "~", "foobar", // 빈/단일/슬래시 없는 비경로
+    };
     for (no_match) |w| {
         if (selection.linkSpanInWord(w, full) != null) {
             std.debug.print("linkSpanInWord unexpectedly matched: {s}\n", .{w});
@@ -5030,6 +5051,13 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
     try std.testing.expect(selection.linkSpanInWord("https://x.y", .{ .extra_schemes = true, .absolute_path = true, .home_path = true, .dot_relative = true, .bare_relative = true }) == null);
     try std.testing.expect(selection.linkSpanInWord("/abs/a.py", selection.link_scopes_web) == null);
     try std.testing.expect(selection.linkSpanInWord("ftp://x.y", selection.link_scopes_web) == null);
+
+    // 엣지: 디렉토리 prefix만("/", "./", "~/", "../")은 현재 그 prefix로 match된다(존재하면 Finder로 열림 — 무해하나
+    // 의도된 동작은 아님; 동작 변경은 별도 결정). 현재 동작을 회귀 가드로 고정한다.
+    try std.testing.expect(selection.linkSpanInWord("/", full).?.kind == .file_path);
+    try std.testing.expect(selection.linkSpanInWord("./", full).?.kind == .file_path);
+    try std.testing.expect(selection.linkSpanInWord("~/", full).?.kind == .file_path);
+    try std.testing.expect(selection.linkSpanInWord("../", full).?.kind == .file_path);
 }
 
 test "extractUrlAt resolves and existence-gates file paths (absolute + OSC 7 cwd-relative)" {
@@ -5081,6 +5109,151 @@ test "extractUrlAt resolves and existence-gates file paths (absolute + OSC 7 cwd
     // (3) 존재하지 않는 상대 경로 → null(존재 게이트).
     try core.write("sub/nope.txt\r\n"); // row 2
     try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 2, 0, full)) == null);
+}
+
+test "resolveClickedPath: cwd-relative resolve, normalization, line:col strip, directory, existence gate" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "sub/real.txt", .data = "x" });
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const A = std.testing.allocator;
+    const tmp_abs = try std.fs.path.join(A, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path });
+    defer A.free(tmp_abs);
+    const abs_file = try std.fs.path.join(A, &.{ tmp_abs, "sub/real.txt" });
+    defer A.free(abs_file);
+    const sub_dir = try std.fs.path.join(A, &.{ tmp_abs, "sub" });
+    defer A.free(sub_dir);
+
+    var core = try TerminalCore.init(A, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("\x1b]7;file://host"); // OSC 7로 cwd = tmp_abs
+    try core.write(tmp_abs);
+    try core.write("\x1b\\");
+
+    const Check = struct {
+        fn expect(c: *const TerminalCore, a: std.mem.Allocator, raw: []const u8, want: ?[]const u8) !void {
+            const got = try c.resolveClickedPath(a, raw);
+            if (want) |w| {
+                const g = got orelse {
+                    std.debug.print("resolveClickedPath({s}) = null, want {s}\n", .{ raw, w });
+                    return error.TestUnexpectedResult;
+                };
+                defer a.free(g);
+                try std.testing.expectEqualStrings(w, g);
+            } else if (got) |g| {
+                a.free(g);
+                std.debug.print("resolveClickedPath({s}) matched, want null\n", .{raw});
+                return error.TestUnexpectedResult;
+            }
+        }
+    };
+
+    try Check.expect(&core, A, abs_file, abs_file); // 절대(존재)
+    try Check.expect(&core, A, "/no/such/file.zig", null); // 절대(미존재)
+    try Check.expect(&core, A, "sub/real.txt", abs_file); // cwd 상대(존재)
+    try Check.expect(&core, A, "sub/nope.txt", null); // cwd 상대(미존재)
+    try Check.expect(&core, A, "sub/../sub/real.txt", abs_file); // 정규화(..)
+    try Check.expect(&core, A, "./sub/real.txt", abs_file); // 정규화(./)
+    try Check.expect(&core, A, "sub", sub_dir); // 디렉토리(존재)도 허용
+    try Check.expect(&core, A, "sub/real.txt:42", abs_file); // :line 분리 후 stat
+    try Check.expect(&core, A, "sub/real.txt:42:10", abs_file); // :line:col 분리
+    try Check.expect(&core, A, "sub/real.txt:1:2:3", null); // 3단 콜론(한계) — :1 남아 미존재
+}
+
+// 테스트 전용 — Zig 0.16 std.c엔 setenv/unsetenv 바인딩이 없어 직접 extern 선언한다(pty/macos.zig 선례).
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "resolveClickedPath: ~/ expands via $HOME, empty HOME rejected" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "home.txt", .data = "x" });
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const A = std.testing.allocator;
+    const tmp_abs = try std.fs.path.join(A, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path });
+    defer A.free(tmp_abs);
+    const home_file = try std.fs.path.join(A, &.{ tmp_abs, "home.txt" });
+    defer A.free(home_file);
+
+    var core = try TerminalCore.init(A, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+
+    // 원래 HOME을 저장(복원) — getenv 포인터는 setenv 후 무효라 값을 복사한다.
+    const orig: ?[]u8 = if (std.c.getenv("HOME")) |h| try A.dupe(u8, std.mem.span(h)) else null;
+    defer {
+        if (orig) |o| {
+            if (A.dupeZ(u8, o)) |z| {
+                _ = setenv("HOME", z.ptr, 1);
+                A.free(z);
+            } else |_| {}
+            A.free(o);
+        } else _ = unsetenv("HOME");
+    }
+
+    const tmp_abs_z = try A.dupeZ(u8, tmp_abs);
+    defer A.free(tmp_abs_z);
+    _ = setenv("HOME", tmp_abs_z.ptr, 1);
+    { // ~/home.txt → $HOME/home.txt
+        const got = (try core.resolveClickedPath(A, "~/home.txt")).?;
+        defer A.free(got);
+        try std.testing.expectEqualStrings(home_file, got);
+    }
+    // 빈 HOME → "~/x"가 상대 "x"로 오인 resolve되지 않게 거부(isAbsolute 가드).
+    _ = setenv("HOME", "", 1);
+    try std.testing.expect((try core.resolveClickedPath(A, "~/home.txt")) == null);
+}
+
+test "extractUrlAt: OSC 8 file:// URI is kind=url and bypasses the existence gate (program-specified)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 40, .rows = 2 });
+    defer core.deinit();
+    // 프로그램이 OSC 8로 존재하지 않는 file:// URI를 지정 — 휴리스틱과 달리 게이트 없이 URI 그대로(kind=url).
+    try core.write("\x1b]8;;file:///nonexistent/x.txt\x1b\\link\x1b]8;;\x1b\\");
+    const got = (try core.extractUrlAt(std.testing.allocator, 0, 0, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(got.text);
+    try std.testing.expectEqual(selection.LinkKind.url, got.kind);
+    try std.testing.expectEqualStrings("file:///nonexistent/x.txt", got.text);
+}
+
+test "wide glyph (한글) forcing a wrap keeps the link clickable across the wrap (heuristic + OSC 8)" {
+    // 사용자 보고: 링크가 여러 줄로 강제개행될 때 클릭이 안 되는 경우. 루트커즈 — wide glyph가 줄 끝 한 칸에
+    // 안 들어가 다음 행으로 밀리며 직전 행 끝에 padding 빈칸을 남기고(screen.zig), 그 빈칸이 단어/링크 run
+    // 이음을 끊었다. wrapped 행의 trailing padding을 건너뛰도록 wordBoundsAtImpl·linkBoundsAt를 고쳤다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+    const full = selection.link_scopes_full;
+
+    // (휴리스틱) "/aaaaaa한bc" — '한'(width 2)이 col7에 안 들어가 다음 행으로 밀리며 row0 col7에 padding 빈칸.
+    try core.write("/aaaaaa한bc");
+    try std.testing.expect(core.screen.wrapped[0]);
+    // 둘째 행(한bc) 클릭 → wrap 너머 전체 경로 토큰(존재 게이트 전 순수 분류 selection.extractUrlAt).
+    {
+        const got = (try selection.extractUrlAt(&core, std.testing.allocator, 1, 0, full)).?;
+        defer std.testing.allocator.free(got.text);
+        try std.testing.expectEqualStrings("/aaaaaa한bc", got.text);
+        try std.testing.expectEqual(selection.LinkKind.file_path, got.kind);
+    }
+    // 첫 행(/aaaaaa) 클릭도 전체(오른쪽 이음이 padding을 넘어 둘째 행과 이어야).
+    {
+        const got = (try selection.extractUrlAt(&core, std.testing.allocator, 0, 0, full)).?;
+        defer std.testing.allocator.free(got.text);
+        try std.testing.expectEqualStrings("/aaaaaa한bc", got.text);
+    }
+
+    // (OSC 8) wide glyph wrap에서 밑줄 anchor가 토막나지 않고 run 시작(첫 행)으로 수렴.
+    var core2 = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
+    defer core2.deinit();
+    try core2.write("\x1b]8;;https://x.y/z\x1b\\aaaaaaa한bc\x1b]8;;\x1b\\");
+    try std.testing.expect(core2.screen.wrapped[0]);
+    const anchor = core2.urlAnchorAt(1, 0, full).?; // 둘째 행 hover
+    try std.testing.expectEqual(@as(usize, 0), anchor.row); // run 시작은 첫 행(밑줄 토막 안 남)
+    try std.testing.expectEqual(@as(u16, 0), anchor.col);
 }
 
 test "selection is invalidated by row-relocating ops that break absolute coords" {

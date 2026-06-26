@@ -191,6 +191,34 @@ const agent_poll_interval_ticks: u32 = 15; // ≈0.5s@30Hz — 포그라운드 �
 // SYNCHRONIZED_OUTPUT_TIMEOUT_MS=1000과 같은 1초 timeout) — 정상 ESU 흐름엔 영향 없다.
 const sync_timeout_ticks: u32 = 30;
 
+/// 이번 tick에 활성 surface frame을 (재)투영할지 결정한다 — 순수 함수라 게이트 규칙을 헤드리스로 고정한다.
+/// 베이스/결정(docs/io-render-threading.md): synchronized output(DECSET 2026)은 **라이브 화면**이 half-drawn
+/// 상태로 tearing되는 것만 막는다(BSU~ESU 사이 투영 보류, ESU 누락 freeze는 sync_timeout으로 강제 해제 — Ghostty
+/// sync_reset_ms·xterm.js와 같은 1초). 그런데 사용자의 **스크롤백 탐색(view_offset 변화)은 라이브 출력 배칭과
+/// 무관**하므로 sync hold가 막으면 안 된다 — 위로 스크롤한 채 라이브 sync-output TUI를 rapid 스크롤하면(scroll-lock으로
+/// 스크롤 상태 유지) 스크롤 리페인트가 sync에 막혀 viewport가 stale로 멈추던 버그를 수정한다. 또 스크롤은 reader에
+/// 위임(scroll→enqueueCoreCommand)이라 view_offset 적용이 build의 락-읽기보다 늦는 race에서 metal_dirty가 누락될 수
+/// 있으므로, view_offset 변화는 metal_dirty와 무관하게 투영을 강제하는 안전판이 된다(변화 없으면 idle skip 보존).
+///
+/// 알려진 트레이드오프/범위(코드리뷰 검토): (1) 부분 스크롤(0<view_offset<rows)이면 합성 뷰포트 하단은 여전히
+/// 라이브 활성 화면이라, sync 중 스크롤 투영이 그 하단 행을 half-drawn으로 한 프레임 보일 수 있다 — 그러나 스크롤이
+/// 멈추면(view_offset 안정) sync가 다시 막아 사라지고, "얼어붙은 viewport"(고치려는 버그)보다 명백히 낫다(스크롤 중엔
+/// 갱신을 기대하는 게 정상). 완전 스크롤(view_offset>=rows)이면 라이브 행이 안 보여 tearing도 없다. (2) view_offset은
+/// 활성 surface만 본다 — 비활성 split이 sync hold 중 프로그램적으로 스크롤되면 이 게이트가 강제 투영하진 못한다(활성이
+/// dirty해질 때까지). 기존 게이트도 활성 한정이라 회귀가 아닌 선존 범위 한계(드문 경로).
+fn shouldProjectFrame(
+    metal_dirty: bool,
+    sync_active: bool,
+    sync_hold_ticks: u32,
+    sync_timeout: u32,
+    view_offset: usize,
+    last_rendered_view_offset: usize,
+) bool {
+    const view_scrolled = view_offset != last_rendered_view_offset;
+    const sync_blocks = sync_active and sync_hold_ticks < sync_timeout and !view_scrolled;
+    return (metal_dirty or view_scrolled) and !sync_blocks;
+}
+
 // 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
 // 실제 grid는 복원 직후 resize/레이아웃이 창·split에 맞게 보정하므로, 이 초기값은 spawn winsize일 뿐이다.
 fn restoreSurfaceSize(sm: maru.session.workspace.Surface) terminal.Size {
@@ -1048,6 +1076,11 @@ pub const AppSession = struct {
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
     metal_dirty: bool = true,
+    // 직전에 그린 활성 surface의 view_offset(스크롤백 탐색 위치). synchronized output(2026) hold가 스크롤
+    // 리페인트를 막지 않게 하고(shouldProjectFrame), 스크롤이 reader 위임이라 metal_dirty가 누락돼도 view_offset
+    // 변화만으로 투영을 강제하는 기준이다. 투영 경로마다 그 프레임이 실제로 그린 render-time offset으로 갱신(빌드
+    // 실패면 gate-time 폴백 — view_scrolled를 풀어 OOM 매-tick 재시도 스핀을 막는다). 0=라이브 바닥(기본).
+    last_rendered_view_offset: usize = 0,
     // 테마 섹션에서 사용자가 "사용자 지정"을 명시 선택했는지(런타임 휘발 — 색은 detectThemePreset로 derive하므로 영속
     // 불요). 색이 어떤 프리셋과 우연히 일치해도 이게 true면 프리셋 잠금을 풀어 색·팔레트 행을 편집 가능하게 둔다.
     // 프리셋을 다시 고르거나 reset하면 false로 돌아간다. themePresetActive()의 판정 인자.
@@ -9296,22 +9329,25 @@ pub const AppSession = struct {
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
         // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(render skip과 동형). 단 ESU가
         // 영영 안 오면 freeze되므로 hold가 sync_timeout_ticks를 넘으면 강제 해제한다(아래 sync_blocks).
-        const sync_active = blk: {
-            // sync_output(DECSET 2026)은 리더 core.write가 set/clear — 락 아래 읽는다(docs/io-render-threading.md PR3).
+        const sync_view = blk: {
+            // sync_output(DECSET 2026)·view_offset은 리더 core.write/scroll이 set/clear — 같은 락 아래 읽는다
+            // (docs/io-render-threading.md PR3). view_offset은 스크롤 리페인트를 sync hold에서 빼는 데 쓴다.
             const s = self.activeSurface();
             s.lockCore(self.io);
             defer s.unlockCore(self.io);
-            break :blk s.core.sync_output;
+            break :blk .{ .sync = s.core.sync_output, .view_offset = s.core.view_offset };
         };
+        const sync_active = sync_view.sync;
+        const active_view_offset = sync_view.view_offset;
         if (sync_active) {
             self.sync_hold_ticks +|= 1;
         } else {
             self.sync_hold_ticks = 0;
         }
-        // sync가 켜져 있고 아직 timeout 전이면 투영을 막는다(ESU가 누적 출력을 한 frame으로 풀 때까지). timeout을
-        // 넘기면 sync_active여도 막지 않아 freeze가 풀린다.
-        const sync_blocks = sync_active and self.sync_hold_ticks < sync_timeout_ticks;
-        if (self.metal_dirty and !sync_blocks) {
+        // 투영 게이트(shouldProjectFrame): sync hold는 라이브 화면 tearing만 막고, 스크롤백 탐색(view_offset 변화)
+        // 리페인트는 막지 않는다 — rapid 스크롤 시 sync에 막혀 viewport가 stale로 멈추던 버그 수정. view_offset
+        // 변화는 metal_dirty 누락(스크롤 reader 위임 race)에도 투영을 강제한다. timeout 넘긴 sync hold는 강제 해제.
+        if (shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, sync_timeout_ticks, active_view_offset, self.last_rendered_view_offset)) {
             // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의
             // placeMultiPane(한 atlas 세대)으로 배치+분배한다 — 개별 buildFromDrawList가 invalidate로 앞 페인을
             // 무효화하는 cross-pane 깨짐을 차단한다. defer는 place 전 에러로 빠질 때만 남은 ShapedPane을 정리한다
@@ -9328,6 +9364,9 @@ pub const AppSession = struct {
             // 채우고 built_frames가 소유(view라 따로 deinit 안 함).
             var active_shaped: ?coretext_frame_builder.ShapedPane = null;
             defer if (active_shaped) |*ap| ap.deinit(self.allocator);
+            // 이번 tick에 활성 프레임이 실제로 그린 view_offset(shapeOnlyBuild가 채움). null=빌드 실패/비-macOS.
+            // 아래서 last_rendered_view_offset에 기록한다(성공=render-time, 실패=gate-time 폴백).
+            var rendered_view_offset: ?usize = null;
             var active_result: ?ActiveResult = null;
             var active_index: usize = 0;
             var tick_result: ?app.AppFrameLoopTick = null;
@@ -9348,6 +9387,8 @@ pub const AppSession = struct {
                 // (advanceFrameIndex)는 활성이 실제 그려질 때만 올린다(placeAndDistribute 후) — 실패 frame은 기존처럼
                 // frame_loop_ticks를 안 올린다.
                 active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, self.io) catch null;
+                // 이 프레임이 실제로 그린 스크롤 위치(shapeOnlyBuild가 같은 락 아래 캡처). null=빌드 실패.
+                if (active_shaped) |sp| rendered_view_offset = sp.view_offset;
             } else {
                 tick_result = try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
                 // 비-macOS(단일 leaf·fake backend)는 활성 멀티 페인 통합을 쓰지 않는다. active_*는 macOS 통합 경로
@@ -9357,6 +9398,11 @@ pub const AppSession = struct {
                 active_result = null;
                 active_index = 0;
             }
+            // 이번 tick에 투영하는 스크롤 위치를 기록한다 — 빌드 성공/실패와 무관하게 여기서 한 번(아래 replace
+            // 성공 분기가 아님). 성공이면 render-time offset(shapeOnlyBuild가 같은 락에서 캡처)이라 read/render
+            // TOCTOU로 stale이 안 생기고, shapeOnlyBuild 실패(active_failed)면 gate-time으로 폴백해 view_scrolled를
+            // 풀어 sync hold 중 매-tick 재시도(OOM 스핀)를 막는다(metal_dirty 재시도는 sync가 throttle).
+            self.last_rendered_view_offset = rendered_view_offset orelse active_view_offset;
 
             // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
             // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
@@ -9859,6 +9905,8 @@ pub const AppSession = struct {
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.metal_dirty = false;
+                    // last_rendered_view_offset은 위(os-tag 블록 직후)에서 빌드 성공/실패 무관하게 이미 기록했다
+                    // (성공=render-time, 실패=gate-time 폴백). 여기서 다시 쓰지 않는다.
                 } else |_| {}
             }
 
@@ -14233,6 +14281,57 @@ test "synchronized output(2026) hold: ESU 누락 시 sync_timeout_ticks를 넘�
     session.activeSurface().core.sync_output = false;
     _ = try session.tick();
     try std.testing.expectEqual(@as(u32, 0), session.sync_hold_ticks);
+}
+
+test "shouldProjectFrame: sync(2026) hold는 라이브 투영만 막고 스크롤 리페인트는 막지 않는다" {
+    const timeout: u32 = sync_timeout_ticks;
+    // 라이브(스크롤 안 함, view_offset==직전 렌더): sync hold 중엔 metal_dirty여도 투영 보류(half-drawn tearing 방지).
+    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0));
+    // hold가 timeout 도달 → ESU 없이 강제 투영(freeze 복구) — 기존 동작 보존.
+    try std.testing.expect(shouldProjectFrame(true, true, timeout, timeout, 0, 0));
+    // ── 버그 재현: 스크롤백을 위로 본 채(view_offset 3 ≠ 직전 렌더 0) sync hold면, 예전 게이트
+    //    (metal_dirty and !(sync and hold<timeout))는 false라 스크롤 리페인트를 막아 viewport가 stale로 멈췄다.
+    //    이제 스크롤 변화는 라이브 출력 배칭과 무관하게 투영한다(이 버그의 수정점). ──
+    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 3, 0));
+    // view_offset 변화는 metal_dirty 누락(스크롤 reader 위임이 build 락-읽기보다 늦는 race)에도 투영을 강제한다.
+    try std.testing.expect(shouldProjectFrame(false, false, 0, timeout, 3, 0));
+    // 변화 없음 + dirty 없음 → 투영 안 함(idle tick 비용 절감 보존).
+    try std.testing.expect(!shouldProjectFrame(false, false, 0, timeout, 5, 5));
+    // sync 아님 + dirty → 평소대로 투영.
+    try std.testing.expect(shouldProjectFrame(true, false, 0, timeout, 0, 0));
+}
+
+test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막지 않는다(rapid 스크롤 stale 수정)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText frame builder 경로(tick 투영)
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // controlled 출력이 멎을 때까지 tick한다 — 이후 output_events=0이라 우리가 세팅한 상태(view_offset·sync)가 유지된다.
+    var i: usize = 0;
+    while (i < 150) : (i += 1) _ = try session.tick();
+
+    // 사용자가 스크롤백을 위로 본 상태(view_offset>0)에서 직전 렌더보다 더 스크롤했고(2≠1), 활성 surface가
+    // 동기 출력(2026) hold에 들어간 상황을 모사한다(scroll-lock으로 라이브 출력 중에도 스크롤 위치 유지).
+    session.activeSurface().core.view_offset = 2;
+    session.last_rendered_view_offset = 1;
+    session.activeSurface().core.sync_output = true;
+    session.sync_hold_ticks = 0;
+    session.metal_dirty = true;
+
+    // 예전 게이트는 sync hold가 metal_dirty 투영을 막아 스크롤이 stale로 멈췄다. 이제 view_offset 변화는 sync와
+    // 무관하게 투영한다 — tick 한 번에 metal_dirty가 풀리고(투영됨) 방금 본 위치를 last_rendered_view_offset에 기록한다.
+    _ = try session.tick();
+    try std.testing.expect(!session.metal_dirty); // 투영됨(예전엔 sync hold로 막혀 metal_dirty가 true로 남았다)
+    try std.testing.expectEqual(@as(usize, 2), session.last_rendered_view_offset);
 }
 
 test "chrome_minimal session suppresses the pane tab bar and the sidebar" {

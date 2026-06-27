@@ -5693,10 +5693,28 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
-        // chrome 모달(confirm/notice/context_menu/find/palette/settings) 중 하나라도 열려 있으면 키를 chrome으로
-        // 라우팅한다 — 최상위(PTY/스크롤보다 먼저, 모달은 단일-오버레이 불변식으로 한 번에 하나). handleInput이 컴포넌트
-        // handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session 부수효과(재검색·스크롤·필터·실행·닫기)를
-        // 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
+        // notice는 비-인터랙티브 정보 토스트다(타이머 없음). 옛날엔 아래 anyOverlayOpen 라우팅이 Enter/Esc 외 **모든
+        // 키를 삼켜**, 토스트가 떠 있는 동안 터미널 타이핑·단축키가 다 막혔다(마우스가 막히던 것과 같은 회귀의 키보드
+        // 짝 — 사용자 보고). 토스트는 **어떤 키로도 닫는다**: Enter/Esc는 "닫기" 전용 키라 닫고 소비하고(셸로 newline/esc
+        // 주입 방지 — 문서상 dismiss 키), 그 외 키(평문 글자·단축키)는 닫은 뒤 **아래 정상 경로로 흘려** 타이핑/단축키가
+        // 같은 키부터 즉시 재개되게 한다. 닫고 나서 다른 오버레이가 남아 있으면(showNotice 배타성상 보통 없지만 방어적)
+        // Enter/Esc도 흘려 그 오버레이가 처리하게 한다(아래 anyOverlayOpen 분기).
+        if (self.chrome_host.notice.open) {
+            self.chrome_host.notice.dismiss();
+            self.resetCursorBlink();
+            self.metal_dirty = true;
+            if ((event.key == .enter or event.key == .escape) and !self.anyOverlayOpen()) {
+                self.total_app_key_events += 1; // 닫기 전용 키 = 앱이 소비(셸로 안 내려감)
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+            // 그 외 키(또는 다른 오버레이 공존): 아래로 흘려 정상 처리한다.
+        }
+        // chrome 모달(confirm/context_menu/find/palette/settings) 중 하나라도 열려 있으면 키를 chrome으로 라우팅한다 —
+        // 최상위(PTY/스크롤보다 먼저, 모달은 단일-오버레이 불변식으로 한 번에 하나). notice는 위에서 전용 처리(어떤 키로도
+        // 닫고 흘림)했다. handleInput이 컴포넌트 handle로 보내 의도(HostAction)를 내고, dispatchChromeAction이 session
+        // 부수효과(재검색·스크롤·필터·실행·닫기)를 실행한다. 모든 키를 소비한다(모달이라 터미널엔 안 내려간다).
         if (self.anyOverlayOpen()) {
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
@@ -6251,10 +6269,21 @@ pub const AppSession = struct {
             self.metal_dirty = true;
             return;
         }
-        // chrome 오버레이 모달(notice/find/palette)이 열려 있으면 포인터를 chrome에 주고 소비한다(CS-4-0 handlePointer
-        // 배선). confirm/context_menu는 위에서 전용 hit-test로 이미 처리·return하므로, 여기 도달하는 열린 모달은 전용 마우스
-        // 처리가 없는 오버레이뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게 막는다(키가 모달에서 소비
-        // 되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로(handlePointer)에 붙는다.
+        // notice는 차단 모달이 아니라 **비-인터랙티브 정보 토스트**다(예: reset/agent 완료, "초기화했습니다"). 타이머가
+        // 없어 Enter/Esc로만 닫히는데, 아래 handlePointer가 anyModalOpen(notice 포함)이면 좌표를 무시하고 **모든 클릭을
+        // 소비**해, 토스트가 떠 있는 동안 마우스로는 어떤 chrome 버튼도 못 누르는 회귀가 있었다("기본값 리셋 후 버튼이 다
+        // 안 눌림" — 사용자 보고). 토스트는 클릭으로 닫고(어디를 눌러도) 그 클릭을 **정상 경로로 흘린다** — 누른 버튼이
+        // 같은 클릭에 동작한다(confirm/context_menu/settings처럼 전용 포인터 처리를 두되, notice는 인터랙티브 영역이 없어
+        // consume 대신 pass-through). 누름 이벤트(down=1·더블=4·트리플=5)에서만 닫는다 — move(2)/up(3)은 아래 handlePointer가
+        // 처리(닫는 건 누를 때 한 번). find/palette는 인터랙티브 오버레이라 그대로 둔다(아래 handlePointer가 계속 소비).
+        if (self.chrome_host.notice.open and (kind == 1 or kind == 4 or kind == 5)) {
+            self.chrome_host.notice.dismiss();
+            self.metal_dirty = true;
+        }
+        // chrome 오버레이 모달(find/palette)이 열려 있으면 포인터를 chrome에 주고 소비한다(CS-4-0 handlePointer 배선).
+        // confirm/context_menu/notice는 위에서 전용 처리(notice는 닫고 흘림)하므로, 여기 도달하는 열린 모달은 전용 마우스
+        // 처리가 없는 인터랙티브 오버레이(find/palette)뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게
+        // 막는다(키가 모달에서 소비되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로에 붙는다.
         if (self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
         // 우클릭(button==2, down) → rename 대상이면 컨텍스트 메뉴("Rename")를 띄운다. 대상이 없을 때:
         //  - chrome(사이드바·탭 바) 위면 consume(우클릭이 좌클릭처럼 탭 전환·newTab 하지 않게).
@@ -15088,13 +15117,20 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
     // 회귀: Notice 열린 동안 메뉴 keyEquivalent(runAction)는 무시된다(모달 뒤 터미널 조작 차단).
     try std.testing.expect(!session.runAction("new_term"));
 
-    // 평문 키는 소비하되 모달이라 안 닫힌다.
+    // 평문 키는 토스트를 **닫고 같은 키가 터미널로 흘러간다** — notice는 비-인터랙티브 정보 토스트라 키 입력을 막지
+    // 않는다(옛날엔 소비만 하고 안 닫혀 입력이 다 막히던 회귀를 수정). 터미널로 흘러간 'a'가 입력 카운터를 올린다.
+    const ti_before = session.total_terminal_input_events;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'a' }, .modifiers = .{} });
-    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(!session.chrome_host.notice.open);
+    try std.testing.expectEqual(ti_before + 1, session.total_terminal_input_events);
 
-    // Esc로 닫힌다(chrome_host 라우팅이 notice.handle로 디스패치).
+    // Esc는 토스트만 닫는다(셸로 esc를 안 흘린다 — "닫기" 전용 키). 다시 띄워 확인.
+    session.showNotice("corrupt");
+    try std.testing.expect(session.chrome_host.notice.open);
+    const ti_before_esc = session.total_terminal_input_events;
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.notice.open);
+    try std.testing.expectEqual(ti_before_esc, session.total_terminal_input_events); // 셸로 안 흘림
 }
 
 test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상한 클램프" {
@@ -16836,6 +16872,132 @@ test "reset-confirm: 모달에서 Esc=취소(설정 유지)·Enter=확정(전체
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(!session.pending_reset);
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size); // 기본값으로
+}
+
+// 회귀: **기본값 리셋 후에도 chrome 버튼(탭 바·사이드바 헤더)이 계속 눌린다**. 사용자 보고 — "기본값으로 리셋 후에
+// 터미널 버튼이 다 안 눌린다". resetAllSettings가 confirm 모달/드래그/메트릭 상태를 잘못 남기면 이후 마우스 클릭이
+// 안 먹는다. 리셋 전 한 번, 리셋 후 한 번 같은 버튼을 눌러 둘 다 동작하는지 e2e로 증명한다(좌표는 리셋 후 갱신된
+// 메트릭에서 다시 계산 — 제품도 새 메트릭으로 다시 그린 위치를 사용자가 누른다).
+test "기본값 리셋 후에도 탭 바·사이드바 헤더 버튼이 계속 클릭된다(회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 안전 가드: 확정 시 resetAllSettings가 configPath()에 파일을 쓰므로 tmp로 박는다(실 config 보호).
+    var reset_tmp = std.testing.tmpDir(.{});
+    defer reset_tmp.cleanup();
+    var reset_path_buf: [4096]u8 = undefined;
+    const reset_cfg_path = try std.fmt.bufPrint(&reset_path_buf, ".zig-cache/tmp/{s}/config", .{reset_tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, reset_cfg_path);
+
+    // ⌘T → Term 2개(활성=1). 탭 바 클릭으로 탭 전환을 검증할 대상.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+
+    // ── 리셋 전: 탭 바 좌단(탭 0) 클릭 → 활성 0으로 전환된다(버튼이 눌린다). ──
+    {
+        const bar_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) + 1;
+        const left_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 30);
+        session.mouse(1, left_tab_x, bar_y, 0, 0);
+        try std.testing.expectEqual(@as(usize, 0), session.activePane().active_term);
+    }
+
+    // ── 통합 리셋(확인 모달 Enter 확정). ── 리셋은 끝에 "초기화했습니다" 성공 토스트(notice)를 띄운다.
+    session.requestResetAll();
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(!session.pending_reset);
+    try std.testing.expect(session.chrome_host.notice.open); // 토스트가 떴다(이게 옛 회귀에서 클릭을 다 삼키던 원인)
+
+    // ── 리셋 후 첫 클릭: 탭 바 우반(탭 1) → 토스트가 닫히고 **같은 클릭**으로 활성 1로 전환된다(pass-through). ──
+    {
+        const bar_y: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) + 1;
+        const right_tab_x: f64 = @floatFromInt(session.sidebar_width_px + 600);
+        session.mouse(1, right_tab_x, bar_y, 0, 0);
+        try std.testing.expect(!session.chrome_host.notice.open); // 클릭으로 토스트가 닫힘
+        try std.testing.expectEqual(@as(usize, 1), session.activePane().active_term); // 그리고 탭도 전환됨
+    }
+
+    // ── 리셋 후 사이드바 헤더 '+'(새 워크스페이스) 클릭 → 탭이 하나 는다(헤더 아이콘도 여전히 눌린다). ──
+    {
+        const cols: u32 = if (session.cell_width_px > 0) session.sidebar_width_px / session.cell_width_px else 0;
+        try std.testing.expect(cols >= 13); // 헤더 아이콘이 들어가는 폭이어야 의미 있는 검증
+        const before = session.tabs.items.len;
+        const plus_x: f64 = @floatFromInt(session.sidebar_width_px - 1); // 줄0 우단 = '+' zone
+        session.mouse(1, plus_x, 1, 0, 0);
+        try std.testing.expectEqual(before + 1, session.tabs.items.len);
+    }
+}
+
+// 회귀(키보드 짝): **리셋 성공 토스트(notice)가 떠 있어도 키 입력이 막히지 않는다**. 사용자 보고 — "키 입력도
+// 안되던데". 옛날엔 notice가 anyOverlayOpen에 들어가 Enter/Esc 외 모든 키를 삼켜, 토스트가 뜬 뒤 터미널 타이핑이
+// 전부 막혔다(게다가 평문 키로는 토스트도 안 닫혀 빠져나올 길이 없었다). 수정 후: ① 평문 글자는 토스트를 닫고 같은
+// 키부터 터미널로 흘러가고 ② Enter/Esc는 토스트만 닫는다(셸로 안 흘림). 토스트가 사라진 뒤 입력이 정상 복구되는지도 확인.
+test "기본값 리셋 토스트가 떠 있어도 키 입력이 막히지 않는다(회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    var reset_tmp = std.testing.tmpDir(.{});
+    defer reset_tmp.cleanup();
+    var reset_path_buf: [4096]u8 = undefined;
+    const reset_cfg_path = try std.fmt.bufPrint(&reset_path_buf, ".zig-cache/tmp/{s}/config", .{reset_tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, reset_cfg_path);
+
+    // 리셋 확정 → "초기화했습니다" 토스트(notice)가 뜬다.
+    session.requestResetAll();
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(session.chrome_host.notice.open);
+
+    // ① 토스트가 떠 있는 동안 평문 글자 타이핑 → 토스트가 닫히고 **같은 글자**가 터미널로 흘러간다(타이핑 즉시 재개).
+    //    macOS 평문 입력은 NSTextInputClient 확정 = routeCommittedText 경로다(handleKeyEvent 우회). notice focus면
+    //    sendTextAsKeys→handleKeyEvent로 위임되는데, 그 handleKeyEvent가 토스트를 닫고 글자를 터미널로 흘린다.
+    const before = session.total_terminal_input_events;
+    session.routeCommittedText("a");
+    try std.testing.expect(!session.chrome_host.notice.open); // 평문 글자로도 닫힘
+    try std.testing.expectEqual(before + 1, session.total_terminal_input_events); // 그리고 'a'가 터미널로 감
+
+    // ② 토스트가 사라진 뒤에도 계속 타이핑된다(잔존 차단 없음).
+    const before2 = session.total_terminal_input_events;
+    session.routeCommittedText("b");
+    try std.testing.expectEqual(before2 + 1, session.total_terminal_input_events);
+
+    // ③ 직접 키 경로(handleKeyEvent, 예: Option+글자 meta chord·비-IME)도 토스트를 닫고 흘린다.
+    session.showNotice("again");
+    try std.testing.expect(session.chrome_host.notice.open);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'c' } });
+    try std.testing.expect(!session.chrome_host.notice.open);
+
+    // ④ Enter/Esc는 "닫기" 전용 키 — 토스트만 닫고 셸로 newline/esc를 보내지 않는다(소비).
+    session.showNotice("again2");
+    try std.testing.expect(session.chrome_host.notice.open);
+    const before4 = session.total_terminal_input_events;
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expect(!session.chrome_host.notice.open); // Esc로 닫힘
+    try std.testing.expectEqual(before4, session.total_terminal_input_events); // 셸로는 안 흘림
 }
 
 // 닫기 확인 모달 마우스 게이트(code-review 후속): (1) **확인 버튼 바로 위**에서 우/중클릭은 버튼을 활성 안 하고

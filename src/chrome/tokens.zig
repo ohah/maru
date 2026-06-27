@@ -50,6 +50,15 @@ pub const ColorRole = enum {
 /// 토큰이라, 아직 소비처가 없어도(C2/C3 컴포넌트에서 읽음) 계획 링크와 함께 둔다(메모리 no-defensive 예외).
 /// 단 **런타임 가변값(사이드바 폭 — 사용자 드래그)은 토큰이 아니라 props**(metrics.sidebar_width_px, 동적)로 흐른다
 /// — 정적 토큰에 하드코딩하면 stale 출처가 되므로 토큰에 두지 않는다.
+/// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). chrome **중립** enum이라 platform이 config
+/// `ChromeTabStyle`을 이 값으로 매핑한다(chrome은 config를 import 안 함 — 색이 ThemeColors로 흐르는 것과 동형).
+/// 스타일은 활성 탭 *세그먼트 안의 fill*만 바꾸고 세그먼트 기하(`tabbar.segOf`)는 불변이라 hit-test/드래그/✕는 그대로(§5.4).
+/// pill은 TS2(둥근 inset quad). rich 경로에서만 의미(tui는 셀 밴드 유지).
+pub const TabActiveStyle = enum(u8) {
+    connected = 0, // U-tab2: 본문색 cutout(바 전체 높이) + 앰버/muted 언더바 — 아래 본문과 이어짐
+    underline = 1, // 배경 fill 없음 + 앰버/muted 언더바만 — 가장 미니멀
+};
+
 pub const Spacing = struct {
     modal_margin_cells: u32 = 2, // 모달 박스 좌우 안쪽 여백(셀) — Notice가 소비
     sidebar_slot_height_ratio_milli: u32 = 2500, // 사이드바 슬롯 높이 = 2.5×cell. C2/C3 사이드바 컴포넌트가 소비(계획)
@@ -78,6 +87,9 @@ pub const Spacing = struct {
     // U-tab2: 활성 탭 하단 maru-앰버 언더바(active indicator) 두께(px). 탭바 하단 하이라인(line_thickness_px)과
     // **분리**해 활성 신호를 더 굵고 또렷하게 한다. tui=0(셀 밴드 경로라 미사용), rich>0. appendActiveTabHighlight가 소비.
     tab_underbar_px: u16 = 0,
+    // TS1: 활성 탭 룩(chrome.tab-style 직교 축 — §7). platform buildChromeTokens가 appearance.chrome_tab_style→이 값으로
+    // 매핑하고 appendActiveTabHighlight가 분기(connected=cutout+언더바 / underline=언더바만). tui는 셀 밴드라 미사용.
+    tab_active_style: TabActiveStyle = .connected,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.

@@ -9569,7 +9569,7 @@ pub const AppSession = struct {
                     // 배경이 아니라 **언더바 색** — 포커스 pane=maru 앰버(active indicator), 비포커스=muted(흐린 구분만).
                     const tab_cutout_bg = packOpaqueRgb(self.appearance.theme.background);
                     const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg));
-                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, ub_accent, tk_space.tab_underbar_px);
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, ub_accent, tk_space.tab_underbar_px, tk_space.tab_active_style);
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
@@ -10341,8 +10341,10 @@ pub const AppSession = struct {
     /// 옛 "평평한 약한 배경(sidebarActiveBg)"을 본문색으로 바꿔 깊이(strip↔본문)를 만든다(U-tab2). 배경·언더바 둘 다
     /// layer 2(셀 part1 제목 아래)라 본문색 quad가 하단 하이라인(appendTabBarUnderline)을 활성 탭 구간에서 덮어 "연결"이
     /// 끊기지 않는다. segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
-    /// underline_px=tab_underbar_px(rich 3, 하이라인보다 굵게). per-frame(dropQuadsByLayer(2)가 매 프레임 비움). tui는 tabbarHighlightCell 셀 밴드.
-    fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, underline_px: u32) void {
+    /// underline_px=tab_underbar_px(rich 3, 하이라인보다 굵게). `style`(chrome.tab-style §7): connected=본문색 cutout+언더바,
+    /// underline=언더바만(bg fill 없음 — strip 그대로). 세그먼트 기하 불변이라 hit-test/✕는 두 스타일 공통. per-frame
+    /// (dropQuadsByLayer(2)가 매 프레임 비움). tui는 tabbarHighlightCell 셀 밴드.
+    fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, underline_px: u32, style: chrome.tokens.TabActiveStyle) void {
         const seg = m.segOf(tab_index);
         if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭
         const x: f32 = @floatCast(seg.start_px);
@@ -10350,8 +10352,8 @@ pub const AppSession = struct {
         const by: f32 = @floatFromInt(m.bar_y);
         const bh: f32 = @floatFromInt(m.bar_h);
         const uw: f32 = @min(@as(f32, @floatFromInt(underline_px)), bh); // 바보다 두꺼우면 바 높이로 clamp — by+bh-uw≥by라 언더바가 바 위로 안 샌다(형제 appendTabBarUnderline의 -| 가드와 동형, #496 리뷰)
-        self.appendSolidQuad(x, by, w, bh, bg, 2); // 본문색 cutout(연결형 — 직각·gradient 없음, strip 하이라인을 덮음)
-        self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active/focus indicator, 탭 폭)
+        if (style == .connected) self.appendSolidQuad(x, by, w, bh, bg, 2); // 본문색 cutout(연결형 — 직각·gradient 없음, strip 하이라인을 덮음). underline은 배경 fill 생략(strip 그대로)
+        self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active/focus indicator, 탭 폭) — 두 스타일 공통
     }
 
     /// #5a: 우측 가로 스크롤 ‹/› 버튼의 사각형 배경(GpuQuad layer 2) — col 셀(‹=tab_cols, ›=tab_cols+2) 영역을 약한
@@ -11540,10 +11542,16 @@ pub const AppSession = struct {
             .cursor = t.cursor,
         };
         // chrome theme = 토큰셋 교체(컴포넌트 불변). rich는 sidebar_active-공유 role(divider/focus_accent 등)을 분리 색으로(C4a).
-        return switch (self.appearance.chrome_theme) {
+        var tk = switch (self.appearance.chrome_theme) {
             .tui => chrome.tokens.Tokens.tui(tc),
             .rich => chrome.tokens.Tokens.rich(tc),
         };
+        // TS1: 활성 탭 룩 축(chrome.tab-style) — config enum을 chrome 중립 토큰으로 매핑(색이 ThemeColors로 흐르는 것과 동형, §7).
+        tk.space.tab_active_style = switch (self.appearance.chrome_tab_style) {
+            .connected => .connected,
+            .underline => .underline,
+        };
+        return tk;
     }
 
     /// 일반 오버레이 lowering: chrome 컴포넌트가 낸 ChromeDraw ops(fill/border/text)를 셀 그리드로 rasterize한다
@@ -16775,6 +16783,43 @@ test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber unde
     try std.testing.expect(found_cutout); // 활성 탭 본문색 cutout
     try std.testing.expect(found_amber_underbar); // 포커스 pane = maru 앰버 언더바
     try std.testing.expect(found_muted_underbar); // 비포커스 pane = muted 언더바
+}
+
+// TS1 탭 스타일 축(chrome.tab-style=underline): 활성 탭에 **본문색 cutout 배경이 없고** 앰버 언더바만 방출되는지
+// 고정한다(connected와 같은 세그먼트 기하, fill만 다름 — §7). config enum → appearance → 토큰 → 렌더 분기 전 경로 검증.
+test "TS1 chrome.tab-style=underline: no cutout bg quad, only the amber underbar" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.appearance.chrome_theme = .rich;
+    session.appearance.chrome_tab_style = .underline; // 축: 언더바만(배경 박스 없음) — resize 전에 고정
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.tick();
+
+    const tk = session.buildChromeTokens();
+    try std.testing.expectEqual(chrome.tokens.TabActiveStyle.underline, tk.space.tab_active_style); // config→토큰 매핑 확인
+    const cutout = packOpaqueRgb(session.appearance.theme.background); // connected였다면 활성 탭 배경에 떴을 색
+    const amber = packOpaqueRgb(tk.palette.get(.accent_bar)); // 포커스(단일 pane) 언더바
+
+    var found_cutout = false;
+    var found_amber_underbar = false;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer != 2) continue;
+        if (q.fill_color0 == cutout) found_cutout = true;
+        if (q.fill_color0 == amber) found_amber_underbar = true;
+    }
+    try std.testing.expect(!found_cutout); // underline은 본문색 배경 fill을 안 그린다(connected만 cutout)
+    try std.testing.expect(found_amber_underbar); // 언더바는 두 스타일 공통
 }
 
 // U-tab2: pane Term 탭 제목에서 "{n} " 번호 prefix를 제거했음을 rename in-place caret 위치로 고정한다. 단일

@@ -631,6 +631,14 @@ pub const ChromeTheme = enum {
     rich,
 };
 
+/// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). `chrome.theme`(룩)·`theme.preset`(색)과 직교.
+/// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀). pill은 TS2 후속.
+/// rich 경로에서만 의미(tui는 셀 밴드 유지). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
+pub const ChromeTabStyle = enum {
+    connected,
+    underline,
+};
+
 /// 사이드바 세션 카드에 보조 정보를 표시할지. view options 메뉴(앱)와 config가 **양방향**으로 공유한다 —
 /// 앱에서 토글하면 config 파일에 저장되고, config를 편집하면 다음 로드/Reload에 반영된다. 이름줄은 카드
 /// 식별에 필수라 항상 표시하고, git 브랜치·폴더(cwd) 경로만 토글한다. loader가 `sidebar.*` 키로 파싱.
@@ -692,6 +700,9 @@ pub const Config = struct {
     /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 rich(둥근 모서리·분리 색 팔레트 룩 — 사용자
     /// 요청으로 기본값을 tui에서 rich로 변경). cell-grid 룩을 원하면 `chrome.theme = tui`. loader가 `chrome.theme` 키로 파싱.
     chrome_theme: ChromeTheme = .rich,
+    /// 활성 탭 룩(`chrome.tab-style` = connected|underline). 기본 connected(U-tab2 본문색 cutout + 앰버 언더바). underline은
+    /// 언더바만(미니멀). `chrome.theme`·`theme.preset`과 직교. schema-driven(Config.schema)이라 loader 수동 분기 없음.
+    chrome_tab_style: ChromeTabStyle = .connected,
     /// 시스템 라이트/다크 외관을 따라 테마 색을 자동 전환할지(F2-9). 기본 false(현행 — theme.preset/개별 색 그대로).
     /// true면 macOS NSAppearance가 light면 theme_preset_light, dark면 theme_preset_dark의 색 세트로 라이브 교체한다
     /// (개별 theme.* 색 override·theme.preset은 무시되고 system이 색을 정한다). loader가 `theme.follow-system` 키로 파싱.
@@ -801,6 +812,7 @@ pub const Config = struct {
     // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
     pub const schema = .{
         .chrome_theme = Meta{ .key = "chrome.theme", .doc = "chrome 디자인 테마", .widget = .dropdown, .section = .theme },
+        .chrome_tab_style = Meta{ .key = "chrome.tab-style", .doc = "활성 탭 룩(connected|underline)", .widget = .dropdown, .section = .theme },
         .theme_follow_system = Meta{ .key = "theme.follow-system", .doc = "시스템 라이트/다크 따라 테마 전환", .widget = .toggle, .section = .theme },
         .theme_preset_light = Meta{ .key = "theme.preset-light", .doc = "라이트 외관 프리셋", .widget = .dropdown, .section = .theme },
         .theme_preset_dark = Meta{ .key = "theme.preset-dark", .doc = "다크 외관 프리셋", .widget = .dropdown, .section = .theme },

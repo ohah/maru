@@ -215,6 +215,63 @@ pub const ChromeHost = struct {
 - **C3 — TabBar·Sidebar(최대 추출).** `BarMetrics`/드래그/hit-test. 세션에서 chrome 코드가 떠나며 monolith가 얇아짐. **rich 픽셀-레이아웃 모델(§5.4)** 위에서 — view와 hitTest가 단일 레이아웃 소스를 공유해야 셀→픽셀 전환에서 클릭이 안 어긋난다. 가장 큰 위험 — UAF(S1) + 레이아웃 정합 둘 다 가드.
 - **C4 — rich 백엔드 + rich 토큰.** `chrome_rich_backend`(렌더러 프리미티브 확장: rounded rect/gradient/icon) + `Tokens.rich()`. **컴포넌트 0줄 변경**(단 §5.4 레이아웃 모델 전제 — rich가 색뿐 아니라 *레이아웃*을 바꾸면 모델이 그걸 흡수해야 컴포넌트 불변이 성립). config `chrome.theme = tui|rich` 분기.
 
+## 7. 탭 스타일 축 (`chrome.tab-style`)
+
+U-tab2의 **connected**(본문색 cutout + 앰버 언더바)를 **강한 기본 1개**로 두고, 활성 탭 룩을 사용자가 고르는 **직교 축**을 추가한다. 이 절은 그 설계의 단일 출처다(구현 시 코드와 맞춘다).
+
+> **현황(TS1 완료)**: 축 토큰(`tokens.TabActiveStyle`/`Spacing.tab_active_style`) + config(`chrome.tab-style` = connected|underline, `Config.schema` dropdown) + `appendActiveTabHighlight` 스타일 분기(connected=cutout+언더바 / underline=언더바만) + 헤드리스 테스트(스타일별 `gpu_quads`) + `configuration.md` 행 구현 완료. **pill은 TS2**(둥근 inset quad — 미구현). `chrome.preset` 번들은 TS3.
+
+### 7.1 왜 직교 축인가 (메가 enum 금지)
+
+maru에는 이미 **두 직교 축**이 있다 — `theme.preset`(색 세트)과 `chrome.theme`(룩 tui\|rich, 코드 주석이 "직교"라 명시). 탭 스타일은 **세 번째 직교 축**으로 붙는다:
+
+```
+theme.preset      = maru | gruvbox-dark | ...        (색)        — 있음
+chrome.theme      = tui | rich                       (룩)        — 있음
+chrome.tab-style  = connected | pill | underline     (탭)        — 신규 축
+```
+
+`theme = rich-pill-gruvbox` 같은 **단일 메가 enum은 금지**(색 × 룩 × 탭 = 조합 폭발). 각 축은 독립 토큰/키로 두고, 더 가면 여러 축을 한 번에 까는 `chrome.preset`(레이아웃 프리셋, `theme.preset`이 색에 쓰는 preset→토큰 패턴 동형)으로 큐레이션한다.
+
+### 7.2 토큰 (Spacing enum, neutral)
+
+chrome `Spacing`에 enum 토큰을 둔다 — 컴포넌트는 `if (style == .pill)` 같은 분기를 **읽기만** 하고(색 토큰과 동형), 값은 platform이 채운다.
+
+```zig
+pub const TabActiveStyle = enum(u8) { connected = 0, pill = 1, underline = 2 };
+// Spacing 안:
+tab_active_style: TabActiveStyle = .connected,
+```
+
+platform `buildChromeTokens`가 `appearance.chrome_tab_style`(config)→이 토큰으로 매핑한다(tui/rich 색 분리와 같은 자리). 스타일은 **색이 아니라 레이아웃 선택**이라 `Spacing`에 둔다.
+
+### 7.3 렌더 — 세그먼트 기하 불변, fill만 분기 (핵심)
+
+탭 스타일은 `appendActiveTabHighlight`(활성 탭 draw, platform 단일 출처)가 **세그먼트 *안의* fill만** 바꾼다. **탭 세그먼트 기하(`tabbar.segOf`/`tab_width_cols`)는 세 스타일 모두 불변**이므로 hit-test(`tabbar.Metrics`)·드래그·✕·‹› 가로 스크롤은 **그대로**다 — §5.4 "view와 hitTest가 단일 레이아웃 소스 공유"가 자동으로 유지된다(스타일이 클릭 영역을 안 건드림).
+
+| 스타일 | 활성 탭 배경 | 언더바 | 비고 |
+|---|---|---|---|
+| **connected**(기본) | 본문색 cutout(바 전체 높이) | 앰버(포커스)/muted(비포커스), `tab_underbar_px` | U-tab2 — 아래 본문과 이어짐 |
+| **underline** | **없음**(strip 그대로) | 앰버(포커스)/muted | 가장 미니멀 — 박스 없이 언더바만 |
+| **pill** | 둥근 inset quad(`corner_radii` + 세로 inset) | 선택(얇게 or 생략) | 떠 있는 pill — Warp/Arc식 |
+
+pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`)를 그대로 쓰고, inset 폭/반경은 토큰(`pill_inset_px`/재사용 `corner_radius_px`)으로. tui는 스타일과 무관하게 **셀 밴드(`tabbarHighlightCell`) 유지**(cutout/pill은 rich quad 개념 — tui는 `connected`를 셀 밴드로 근사하거나 스타일을 무시). 즉 tab-style은 **rich 경로(`tab_corner > 0`)에서만** 의미를 갖는다.
+
+### 7.4 config & 세팅 GUI (거의 공짜)
+
+`chrome.tab-style`은 `chrome.theme`와 같은 **최상위 스칼라 enum**이라 `Config.schema` + `Meta{ .key="chrome.tab-style", .widget=.dropdown, .section=.theme }`(CS-2b 패턴)로 등록한다 → **세팅 화면에 드롭다운이 자동**으로 뜬다(config-gui.md: enum→dropdown). `configuration.md` 키 표에 행을 추가해야 한다(**CS-3 doc-drift 가드**가 모든 스키마 키의 문서화를 컴파일타임 검증). **ABI 무변경**(스타일은 Zig 렌더가 소유 — Swift로 나가는 필드 없음).
+
+### 7.5 큐레이션·검증
+
+- **큐레이션된 2~3개만** 연다. 세그먼트 기하 공유로 hit-test 비용은 평평하지만, 각 스타일은 시각 회귀 표면(색·모양 × 포커스/비포커스 × 색테마)을 곱으로 늘린다.
+- 검증: 헤드리스 — 스타일별 `gpu_quads` 방출 단언(connected=본문색 cutout quad + 언더바 / underline=언더바 quad만·cutout 없음 / pill=`corner_radii>0` 둥근 quad). U-tab2 회귀 테스트를 스타일별로 확장.
+
+### 7.6 단계
+
+- **TS1** — 토큰(`tab_active_style`) + config(`chrome.tab-style`) + `connected`(기존)·`underline` 두 스타일 분기 + 헤드리스 테스트 + `configuration.md` 행. (connected는 이미 동작 → 축으로 선택 가능하게 + underline을 첫 신규 스타일로 증명.)
+- **TS2** — `pill`(둥근 inset quad + inset 토큰).
+- **TS3** — 세팅 GUI 드롭다운 수동 확인 + (선택) `chrome.preset` 번들 설계 착수.
+
 ## 8. 테스트 전략 (관측 가능성 우선)
 
 - **컴포넌트 단위(헤드리스)**: State 전이(현 palette/find 테스트 스타일) + `view(state,props,tokens)`가 내는 ChromeDraw를 단언(예: Notice open이면 modal layer에 text op) + `hitTest` 순수 함수(현 `sidebarBandCell`/`dividerHit`/`BarMetrics` 테스트 스타일).

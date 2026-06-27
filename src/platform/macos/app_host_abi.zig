@@ -225,6 +225,15 @@ pub export fn maru_macos_app_session_request_window_close(session: ?*AppSession)
     return if (app_session.requestWindowClose()) 1 else 0;
 }
 
+/// Cmd+Q/메뉴 "Quit maru"/Dock·로그아웃에 의한 앱 전체 종료 확인 요청(applicationShouldTerminate). 창 닫기와 달리
+/// **항상**(실행 중 명령 무관) "maru를 종료할까요?" 확인 모달을 띄운다(앱 종료=모든 창·탭 동시 소멸이라 더 파괴적, 사용자
+/// 결정 2026-06). Swift는 이 호출 뒤 .terminateLater를 돌려주고, 모달 확정/취소가 다음 tick FrameSummary.quit_decision
+/// (1=accepted·2=cancelled)에 실리면 NSApp.reply(toApplicationShouldTerminate:)로 종료를 진행/취소한다.
+pub export fn maru_macos_app_session_request_app_quit(session: ?*AppSession) void {
+    const app_session = session orelse return;
+    app_session.requestAppQuit();
+}
+
 // 휠 스크롤: Swift는 raw 델타(포인트)·정밀 델타 여부·마우스 위치(backing px)만 넘기고, 줄 수 환산(매직
 // 상수·clamp·NaN 가드)과 어느 panel로 보낼지(커서 아래 pane)는 app session이 한다. 스크롤 자체는
 // TerminalCore가 소유한다. x/y는 split에서 비활성 panel 위 휠을 그 panel로 라우팅하는 데 쓴다(단일 panel
@@ -1198,7 +1207,7 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 4), @alignOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(ResizeEvent));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(AppSessionConfig)); // 10 u32(abi/cols/rows/queue/cmd/chrome_minimal/minimal_tabs + width_px/height_px/scale_milli)
-    try std.testing.expectEqual(@as(usize, 168), @sizeOf(AppFrameSummary));
+    try std.testing.expectEqual(@as(usize, 176), @sizeOf(AppFrameSummary)); // +quit_decision(u32) + 8 정렬 패딩(168→176, ABI v90)
     try std.testing.expectEqual(@as(usize, 8), @alignOf(AppFrameSummary));
 }
 test "macOS app exported session API reports null outputs as ABI errors" {

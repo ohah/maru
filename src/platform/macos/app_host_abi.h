@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 89u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 90u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -168,6 +168,10 @@ typedef struct MaruAppHostFrameSummary {
     /* 현재 retain된 Metal frame의 generation(u32 truncate). host는 이 값이 그대로면
        maru_macos_app_session_metal_frame 호출을 건너뛰어 idle tick 비용을 줄일 수 있다. */
     uint32_t metal_generation;
+    /* Cmd+Q 종료 확인 모달의 결정을 host로 한 번 전달하는 one-shot 신호(0=대기/없음·1=accepted·2=cancelled).
+       maru_macos_app_session_request_app_quit으로 모달을 띄운 뒤 confirm 확정/취소가 다음 tick에 이 값에 실리면
+       Swift가 NSApp.reply(toApplicationShouldTerminate:)로 종료를 진행/취소한다. */
+    uint32_t quit_decision;
 } MaruAppHostFrameSummary;
 
 /* 가장 최근 tick의 RenderFrame을 Metal로 그리기 위한 DTO. cell 하나가 atlas slot 1개와 그
@@ -395,6 +399,12 @@ int32_t maru_macos_app_session_close(
    열고 1(deferred)을 돌려준다 — Swift는 false를 반환해 닫기를 보류하고, 모달 확정 시 tick의 session-ended가 실제로
    창을 닫는다. 실행 중 명령이 없으면 0 — Swift가 평소대로 닫는다(windowWillClose → terminate/teardown). */
 int32_t maru_macos_app_session_request_window_close(
+    MaruAppHostSession *session
+);
+/* 앱 전체 종료 확인 요청(Cmd+Q/메뉴 "Quit maru"/Dock·로그아웃 → applicationShouldTerminate). 창 닫기와 달리 실행 중
+   명령 유무와 무관하게 항상 "maru를 종료할까요?" 확인 모달을 띄운다. Swift는 이 호출 뒤 .terminateLater를 돌려주고,
+   모달 확정/취소가 다음 tick FrameSummary.quit_decision(1=accepted·2=cancelled)에 실리면 NSApp.reply로 진행/취소한다. */
+void maru_macos_app_session_request_app_quit(
     MaruAppHostSession *session
 );
 /* 휠 스크롤. Swift는 raw 델타(포인트, 세로 delta_y·가로 delta_x)·정밀 델타 여부(0/1)·마우스 위치(backing px)만

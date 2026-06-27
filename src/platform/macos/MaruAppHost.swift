@@ -602,6 +602,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
     private var smokeMode = false
+    // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
+    // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
+    private var quitConfirmPending = false
+    // 창 닫기로 인한 종료(마지막 창을 Cmd+W/빨간 버튼으로 닫아 windowWillClose/closeWindowOrQuit이 NSApp.terminate를
+    // 부른 경우)는 이미 자기 게이트를 거쳤으므로 applicationShouldTerminate가 종료 확인을 다시 띄우지 않게 하는 래치.
+    private var bypassQuitConfirm = false
     private var exitCode: Int32 = 0
     private var latestFrameSummary: MaruAppHostFrameSummary {
         get { activeSurface?.latestFrameSummary ?? MaruAppHostFrameSummary() }
@@ -755,6 +761,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    // Cmd+Q/메뉴 "Quit maru"/Dock·로그아웃에 의한 앱 전체 종료. AppKit terminate:는 windowShouldClose를 거치지
+    // 않으므로 여기서 가로채, 활성 창 세션에 "maru를 종료할까요?" 확인 모달을 띄우고 .terminateLater로 보류한다.
+    // 모달 결정은 다음 tick FrameSummary.quit_decision으로 와 drainQuitDecision이 NSApp.reply로 종료를 진행/취소한다.
+    // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        _ = sender
+        if smokeMode { return .terminateNow } // smoke 자동 종료는 무인이라 모달에 막히면 hang
+        if bypassQuitConfirm { return .terminateNow } // 창 닫기로 인한 종료 — 이미 처리됨, 재확인 안 함
+        if quitConfirmPending { return .terminateLater } // 이미 모달이 떠 결정 대기 중 — 중복 요청 무시
+        // frame-loop tick이 아직 안 도는 런치 초기 에러(tickTimer==nil)거나 세션이 없으면, 모달을 띄워도 결정이
+        // 돌아올 수 없으므로 즉시 종료한다.
+        guard tickTimer != nil, let session = activeSurface?.appSession else { return .terminateNow }
+        quitConfirmPending = true
+        maru_macos_app_session_request_app_quit(session) // 항상 모달(실행 중 명령 무관)
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         _ = notification
         tickTimer?.invalidate()
@@ -805,6 +828,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 보존). 마지막이 아니면 그 창 세션만 닫고 앱은 계속한다(window는 AppKit이 이미 닫는 중).
         guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
         if windows.count <= 1 {
+            bypassQuitConfirm = true // 명시적 창 닫기에 따른 종료 — applicationShouldTerminate가 재확인하지 않게
             NSApp.terminate(nil)
         } else {
             teardownWindowSurface(surface)
@@ -1262,6 +1286,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if windows.count <= 1 {
             // 마지막 창 → 앱 종료. 추가 tick이 재진입 terminate를 부르지 않게 타이머를 먼저 멈춘다(정리·요약은
             // applicationWillTerminate가 — primary가 살아 있어야 요약이 그 세션 기준. 원래 SessionEnded 경로의 안전장치).
+            bypassQuitConfirm = true // 창 닫기/세션 종료에 따른 종료 — applicationShouldTerminate가 재확인하지 않게
             tickTimer?.invalidate()
             tickTimer = nil
             smokeTimer?.invalidate()
@@ -1418,8 +1443,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
             drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
             drainMenuDirty() // 커맨드 카탈로그가 재빌드됐으면(rebind/unbind·reload·reset 확정) 메뉴바 keyEquivalent 다시 빌드.
+            drainQuitDecision(summary) // Cmd+Q 종료 확인 모달이 확정/취소됐으면 NSApp.reply로 종료를 진행/취소한다.
         }
         return status
+    }
+
+    // Cmd+Q 종료 확인 모달의 결정을 host로 한 번 전달받아 처리한다(one-shot). applicationShouldTerminate가
+    // .terminateLater로 보류한 종료를, 사용자가 모달에서 "종료"/"취소"하면 다음 tick FrameSummary.quit_decision
+    // (1=accepted·2=cancelled)으로 와 NSApp.reply(toApplicationShouldTerminate:)로 종료를 마무리한다. 종료 확인이
+    // 떠 있는 활성 세션의 tick만 비-0을 싣고(다른 세션은 0), quitConfirmPending 가드가 단 한 번만 reply하게 한다.
+    private func drainQuitDecision(_ summary: MaruAppHostFrameSummary) {
+        guard quitConfirmPending else { return }
+        switch summary.quit_decision {
+        case 1: // accepted — 종료 진행
+            quitConfirmPending = false
+            bypassQuitConfirm = true // reply(true)가 부를 후속 terminate 경로에서 재확인 방지
+            NSApp.reply(toApplicationShouldTerminate: true)
+        case 2: // cancelled — 종료 취소, 앱 유지
+            quitConfirmPending = false
+            NSApp.reply(toApplicationShouldTerminate: false)
+        default: // 0 = 아직 대기
+            break
+        }
     }
 
     func handleKeyDown(_ event: NSEvent) {

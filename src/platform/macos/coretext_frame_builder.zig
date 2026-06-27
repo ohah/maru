@@ -198,12 +198,14 @@ pub const title_ellipsis_glyph: u21 = 0x2026;
 /// title의 디스플레이 폭(칸 합) — wide glyph는 2, 나머지 1. 깨진 UTF-8 바이트는 U+FFFD(1칸). 말줄임 필요 판정용.
 /// pub: pane 라벨 세그먼트 폭(paneLabelCols)도 이 단일 출처로 폭을 잰다(렌더 ellipsize와 같은 셈법이라 라벨
 /// 칸 예약과 실제 글리프가 어긋나지 않는다).
-/// 카드/제목 텍스트에 박힌 maru 아이콘(Plane 15 PUA, icon_glyph)은 **렌더 폭 2칸**으로 친다 — advance(cellWidth)는
-/// 1이지만 1칸(=cell width ~8px)에 다운스케일하면 octocat·폴더 같은 실루엣이 뭉개져 안 보였다(사용자 피드백). 에이전트
-/// gutter 아이콘(별도 셀, width 2)과 같은 ~16px로 통일한다. 아이콘이 아니면 cellWidth 그대로(EAW 2칸·일반 1칸). 이
-/// 범위(0xF0000~0xF00FF)는 터미널 콘텐츠가 안 쓰는 PUA라(maru 합성 전용) 일반 텍스트 폭에는 영향이 없다.
+/// 카드/제목 텍스트에 박힌 maru 아이콘은 **렌더 폭 2칸**으로 친다 — advance(cellWidth)는 1이지만 1칸(=cell width
+/// ~8px)에 다운스케일하면 octocat·폴더 같은 실루엣이 뭉개져 안 보였다(사용자 피드백). 에이전트 gutter 아이콘(별도 셀,
+/// width 2)과 같은 ~16px로 통일한다. **등록된 아이콘만**(`isRegisteredIcon` — 범위 전체 `isIcon`이 아니라 실제 그릴
+/// ~10개) 대상이다: Nerd Fonts v3가 MDI를 Plane-15 PUA(U+F0001~)로 옮겨 `0xF0000~0xF00FF`와 겹치는데, 신뢰 불가한
+/// OSC 0/2 제목(아래 ':382 신뢰 불가' 참고)에 그 글리프가 와도 폭을 안 키우게(미등록은 cellWidth 그대로 1칸). 아이콘이
+/// 아니면 cellWidth 그대로(EAW 2칸·일반 1칸).
 fn titleCellWidth(cp: u21) u16 {
-    if (renderer.icon_glyph.isIcon(cp)) return 2;
+    if (renderer.icon_glyph.isRegisteredIcon(cp)) return 2;
     return @max(1, terminal.width.cellWidth(cp));
 }
 
@@ -1021,10 +1023,12 @@ test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and
     try std.testing.expect(path_text_at3);
 }
 
-// titleDisplayWidth는 maru 아이콘 PUA를 2칸으로 친다(렌더 폭과 일치해야 말줄임 예약 칸이 안 어긋난다).
-test "titleDisplayWidth counts maru icon PUA as width 2" {
-    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F0009}")); // octocat
-    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F000A}")); // folder
+// titleDisplayWidth는 **등록된** maru 아이콘 PUA만 2칸으로 친다(렌더 폭과 일치해야 말줄임 예약 칸이 안 어긋난다).
+// 미등록 범위 codepoint(Nerd Fonts v3가 Plane-15 PUA로 옮긴 MDI 등)는 신뢰 불가 OSC 0/2 제목에 와도 1칸 유지.
+test "titleDisplayWidth counts only registered maru icon PUA as width 2" {
+    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F0009}")); // octocat(등록)
+    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F000A}")); // folder(등록)
+    try std.testing.expectEqual(@as(usize, 1), titleDisplayWidth("\u{F0050}")); // 미등록 범위 — 1칸(registered-only)
     try std.testing.expectEqual(@as(usize, 6), titleDisplayWidth("\u{F0009} abc")); // 2 + 공백 + abc(3)
     try std.testing.expectEqual(@as(usize, 3), titleDisplayWidth("abc")); // 일반 텍스트 회귀
 }

@@ -3,10 +3,15 @@
 //! 유지·중앙으로 area-average 다운스케일해 그린다(헤더·카드 슬롯이 마스터보다 작아 항상 축소 = 선명).
 //! 데이터는 icon_coverage_data.zig(tools/svg_to_coverage.py가 생성·커밋, 빌드/런타임 도구 의존 0).
 //!
-//! codepoint는 **Plane 15 PUA 연속 범위(0xF0000~0xF00FF)**다. 터미널 콘텐츠·Nerd Font(BMP PUA)와 안
-//! 겹친다(synthesizeGlyph는 전역이라 BMP PUA를 쓰면 터미널의 그 글리프까지 가로챈다). isIcon은 이
-//! **범위 전체**를 합성으로 보고(coretext_smoke.m의 C 게이트 maru_is_synthesized_glyph와 동일 범위여야
-//! 한다 — 어긋나면 blank), 미등록 슬롯은 fillCoverage가 빈 글리프(0px)로 둔다.
+//! codepoint는 **Plane 15 PUA 연속 범위(0xF0000~0xF00FF)**다. **주의**: Nerd Fonts v3가 Material Design
+//! Icons를 Plane-15 PUA(U+F0001~U+F1AF0)로 옮겨 이 범위와 **겹친다**(BMP PUA만 겹친다고 본 옛 가정은 틀렸다).
+//! synthesizeGlyph가 전역이라 이 범위의 모든 codepoint를 합성으로 가로채므로, 터미널 콘텐츠가 0xF0000~0xF00FF의
+//! MDI 글리프를 내보내면 폰트 글리프 대신 maru 아이콘(등록됨) 또는 빈 글리프(미등록)가 그려진다 — 아이콘 폰트
+//! 라우팅 인프라를 안 만든 대가의 **알려진 트레이드오프**(미등록 범위를 폰트로 흘리려면 isIcon·C 게이트를 등록-전용
+//! 으로 좁혀야 하는데 C 게이트가 Zig 등록 목록을 알아야 해 별도 작업). isIcon은 이 **범위 전체**를 합성으로 보고
+//! (coretext_smoke.m의 C 게이트 maru_is_synthesized_glyph와 동일 범위여야 한다 — 어긋나면 blank), 미등록 슬롯은
+//! fillCoverage가 빈 글리프(0px)로 둔다. "이 글리프를 maru가 실제로 그리는가"(렌더 폭 등)는 isRegisteredIcon으로
+//! 물어 미등록 범위 codepoint(Nerd Fonts MDI 등)까지 휩쓸지 않게 한다.
 
 const std = @import("std");
 const gp = @import("glyph_pixels.zig");
@@ -19,6 +24,13 @@ pub const icon_end: u32 = 0xF0100; // exclusive
 /// cp가 maru 아이콘 PUA 범위인지. C 게이트와 같은 범위를 본다(데이터 등록 여부와 무관 — 미등록은 빈).
 pub fn isIcon(cp: u32) bool {
     return cp >= icon_base and cp < icon_end;
+}
+
+/// cp가 **등록된**(coverage 데이터가 있는) maru 아이콘인지. isIcon(범위 전체)과 달리 실제 그릴 글리프가 있는
+/// codepoint만 true다. "이 글리프를 maru가 직접 그리는가"를 물어야 하는 곳(카드/제목 렌더 폭을 2칸으로 등)에 써,
+/// 미등록 범위 codepoint(예: Nerd Fonts v3가 Plane-15 PUA로 옮긴 MDI)까지 휩쓸지 않는다.
+pub fn isRegisteredIcon(cp: u32) bool {
+    return coverageFor(cp) != null;
 }
 
 fn coverageFor(cp: u32) ?[]const u8 {
@@ -83,6 +95,14 @@ test "icon_glyph: isIcon은 PUA 범위(0xF0000~F00FF), 그 외 false" {
     try std.testing.expect(!isIcon(0x251C)); // box ├(아이콘 아님)
     try std.testing.expect(!isIcon(0xE0B0)); // powerline
     try std.testing.expect(!isIcon(0xF0100)); // 범위 밖(exclusive end)
+}
+
+test "icon_glyph: isRegisteredIcon은 coverage 있는 cp만 true(범위 내 미등록은 false)" {
+    try std.testing.expect(isRegisteredIcon(0xF0001)); // git_branch(등록)
+    try std.testing.expect(isRegisteredIcon(0xF0009)); // mark_github(등록)
+    try std.testing.expect(isRegisteredIcon(0xF000A)); // folder(등록)
+    try std.testing.expect(!isRegisteredIcon(0xF0050)); // 범위 내 미등록(Nerd Fonts MDI 등) — false
+    try std.testing.expect(!isRegisteredIcon(0x251C)); // 범위 밖
 }
 
 test "icon_glyph: fillCoverage가 등록 아이콘을 슬롯 안에 그린다(non-clear>0, OOB 없음)" {

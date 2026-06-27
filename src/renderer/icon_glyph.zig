@@ -22,6 +22,12 @@ pub fn isRegisteredIcon(cp: u32) bool {
     return coverageFor(cp) != null;
 }
 
+/// 등록된 아이콘 개수 — C 셰이핑 게이트(`icon_codepoints.h`)와 Zig 등록 집합이 같은지 검증하는 테스트에 쓴다
+/// (두 생성물이 같은 `ICONS` 소스에서 나왔는지 가드). 런타임 경로엔 안 쓴다.
+pub fn registeredIconCount() usize {
+    return data.icons.len;
+}
+
 fn coverageFor(cp: u32) ?[]const u8 {
     for (data.icons) |e| {
         if (e.cp == cp) return e.data;
@@ -29,15 +35,16 @@ fn coverageFor(cp: u32) ?[]const u8 {
     return null;
 }
 
-/// 정사각 마스터 coverage를 슬롯에 종횡비 유지·중앙으로 area-average 다운스케일해 채운다. 채운
-/// (coverage>0) 픽셀 수 반환. 미등록 cp는 빈 슬롯(0) — 단 게이트가 `isRegisteredIcon`이라 실제론 등록 cp만
-/// 들어온다(내부 robustness). 셰이더가 alpha를 coverage로 읽어 전경색으로 칠한다(단색 → 테마색 자동).
-pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) u32 {
+/// 정사각 마스터 coverage를 슬롯에 종횡비 유지·중앙으로 area-average 다운스케일해 채우고 채운(coverage>0) 픽셀
+/// 수를 돌려준다. **미등록 cp면 null**(폰트 경로로 폴백 — synthesizeGlyph가 그대로 반환). 등록됐지만 슬롯이
+/// 부적합/0이면 0(합성·빈 ink). 등록 멤버십 판정(coverageFor)을 **한 번만** 해 synthesizeGlyph의 isRegisteredIcon+
+/// fillCoverage 이중 스캔을 없앤다. 셰이더가 alpha를 coverage로 읽어 전경색으로 칠한다(단색 → 테마색 자동).
+pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) ?u32 {
+    const master = coverageFor(cp) orelse return null; // 미등록 → 폰트 경로(null), 단일 스캔
     const w = width_px;
     const h = height_px;
     if (!gp.slotFits(w, h, bytes_per_row, pixels)) return 0;
-    gp.clear(pixels, h, bytes_per_row); // 미등록 슬롯도 빈 글리프로 안전 degrade
-    const master = coverageFor(cp) orelse return 0;
+    gp.clear(pixels, h, bytes_per_row);
     const m: u32 = data.master_size;
     if (m == 0 or master.len < @as(usize, m) * m) return 0;
 
@@ -91,15 +98,16 @@ test "icon_glyph: fillCoverage가 등록 아이콘을 슬롯 안에 그린다(no
     const h: u32 = 36;
     const bpr: usize = w * 4;
     var pixels: [36 * 18 * 4]u8 = undefined;
-    const count = fillCoverage(0xF0001, w, h, bpr, &pixels); // git_branch
+    const count = fillCoverage(0xF0001, w, h, bpr, &pixels) orelse unreachable; // git_branch(등록) → non-null
     try std.testing.expect(count > 0); // ink가 있다
     try std.testing.expect(count <= w * h); // 슬롯 안
 }
 
-test "icon_glyph: 미등록 PUA는 빈 글리프(0px)" {
+test "icon_glyph: 미등록 PUA는 null(폰트 경로로 폴백)" {
     const w: u32 = 18;
     const h: u32 = 36;
     const bpr: usize = w * 4;
     var pixels: [36 * 18 * 4]u8 = undefined;
-    try std.testing.expectEqual(@as(u32, 0), fillCoverage(0xF0050, w, h, bpr, &pixels));
+    // 미등록 cp는 null → synthesizeGlyph가 그대로 반환 → 폰트 경로(Nerd Fonts MDI 등). 0(빈 ink)이 아니다.
+    try std.testing.expectEqual(@as(?u32, null), fillCoverage(0xF0050, w, h, bpr, &pixels));
 }

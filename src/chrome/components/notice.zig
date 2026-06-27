@@ -31,18 +31,15 @@ pub const State = struct {
 /// handle이 돌려주는 intent. host가 받아 후처리(여기선 닫기 외 부수효과 없음).
 pub const Action = enum { dismissed };
 
-/// 키 이벤트 처리. 열려 있을 때만 동작 — Enter/Esc면 닫고 `dismissed`. 그 외 키는 **소비**하되 Action
-/// 없음(모달이라 뒤(터미널)로 안 흘린다 — host가 라우팅에서 소비 처리). 닫혀 있으면 null(라우팅 안 가로챔).
-/// host가 `.key`/`.pointer`를 가르므로(CS-4-0) 이 handle은 KeyEvent만 받는다 — 포인터는 host.handlePointer.
+/// 키 이벤트 처리. 열려 있을 때만 동작 — notice는 **비-인터랙티브 정보 토스트**(자동 닫힘 타이머 없음)라 **아무 키로나
+/// 닫고** `dismissed`를 돌려준다(Enter/Esc 전용이던 것을 넓힘 — 그 외 키는 소비만 하고 안 닫혀, 토스트가 떠 있는 동안
+/// 키 입력이 막힌 것처럼 보이던 회귀를 푼다). 닫는 키는 host가 소비한다(셸로 안 흘림 — 토스트 확인 제스처). 닫혀 있으면
+/// null(라우팅 안 가로챔). host가 `.key`/`.pointer`를 가르므로(CS-4-0) 이 handle은 KeyEvent만 받는다 — 포인터는 mouse().
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
+    _ = k; // 키 종류 무관 — 모든 키가 동일하게 토스트를 닫는다(입력 대상이 아닌 정보 토스트)
     if (!state.open) return null;
-    switch (k.key) {
-        .enter, .escape => {
-            state.dismiss();
-            return .dismissed;
-        },
-        else => return null,
-    }
+    state.dismiss();
+    return .dismissed;
 }
 
 /// 메시지 한 줄을 중앙 모달 박스로 그린다 — 박스 기하·폭 clamp·soft-lock 가드·배경 quad+테두리는 modal_box.view
@@ -72,17 +69,19 @@ test "notice state: show/dismiss" {
     try std.testing.expect(!s.open);
 }
 
-test "notice handle: Enter/Esc 닫고 dismissed, 닫힘이면 null" {
+test "notice handle: 아무 키로나 닫고 dismissed, 닫힘이면 null" {
     var s = State{};
     try std.testing.expect(handle(.{ .key = .enter }, &s) == null); // 닫혀 있으면 무동작
     s.show("x");
-    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .escape }, &s).?);
+    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .escape }, &s).?); // Esc로 닫힘
     try std.testing.expect(!s.open);
     s.show("y");
-    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .enter }, &s).?);
+    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .enter }, &s).?); // Enter로 닫힘
+    try std.testing.expect(!s.open);
+    // 평문 글자도 토스트를 닫는다(비-인터랙티브 토스트 — Enter/Esc 전용이 아니다, 회귀 수정).
     s.show("z");
-    try std.testing.expect(handle(.{ .key = .char, .codepoint = 'a' }, &s) == null); // 소비하되 action 없음
-    try std.testing.expect(s.open); // 평문 키로는 안 닫힘
+    try std.testing.expectEqual(Action.dismissed, handle(.{ .key = .char, .codepoint = 'a' }, &s).?);
+    try std.testing.expect(!s.open);
 }
 
 test "notice view: 닫힘이면 ops 0, 열림이면 quad+text(modal)" {

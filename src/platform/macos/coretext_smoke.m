@@ -8,6 +8,10 @@
 #include <string.h>
 #include <math.h>
 
+// 등록된 maru 아이콘 codepoint 집합(생성 — tools/svg_to_coverage.py). maru_is_synthesized_glyph가
+// 아이콘 분기에서 이걸 써 **등록 아이콘만** 합성으로 본다(미등록 in-range는 폰트 폴백 — Nerd Fonts v3 MDI 겹침).
+#include "icon_codepoints.h"
+
 typedef struct {
     int32_t status;
     uint32_t primary_font_found;
@@ -497,9 +501,11 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     if ((cp >= 0x1FB98 && cp <= 0x1FB99) || (cp >= 0x1FBA0 && cp <= 0x1FBAE) || (cp >= 0x1FBD0 && cp <= 0x1FBDF)) {
         return true;
     }
-    // icon_glyph: maru chrome 아이콘(빌드타임 SVG→coverage 합성) — Plane 15 PUA 연속 범위. renderer/icon_glyph.zig의
-    // isIcon(0xF0000~0xF00FF)과 **동일 범위**여야 한다(어긋나면 그 글리프가 blank로 빠진다). 미등록 슬롯은 빈 글리프.
-    return cp >= 0xF0000 && cp < 0xF0100;
+    // icon_glyph: maru chrome 아이콘(빌드타임 SVG→coverage 합성) — Plane-15 PUA. **등록된 codepoint만** 합성으로
+    // 본다(maru_is_registered_icon_cp, 생성 헤더). 미등록 in-range는 폰트로 폴백한다 — Nerd Fonts v3가 Material
+    // Design Icons를 이 범위(U+F0001~)로 옮겨 겹치므로, 미등록 cp를 가로채면 그 글리프가 blank가 됐다. renderer/
+    // icon_glyph.zig의 isRegisteredIcon과 **동일 집합**이어야 한다(같은 ICONS 소스 생성 → 항상 일치). 어긋나면 blank.
+    return maru_is_registered_icon_cp(cp);
 }
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {

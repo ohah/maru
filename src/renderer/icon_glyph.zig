@@ -3,32 +3,21 @@
 //! 유지·중앙으로 area-average 다운스케일해 그린다(헤더·카드 슬롯이 마스터보다 작아 항상 축소 = 선명).
 //! 데이터는 icon_coverage_data.zig(tools/svg_to_coverage.py가 생성·커밋, 빌드/런타임 도구 의존 0).
 //!
-//! codepoint는 **Plane 15 PUA 연속 범위(0xF0000~0xF00FF)**다. **주의**: Nerd Fonts v3가 Material Design
-//! Icons를 Plane-15 PUA(U+F0001~U+F1AF0)로 옮겨 이 범위와 **겹친다**(BMP PUA만 겹친다고 본 옛 가정은 틀렸다).
-//! synthesizeGlyph가 전역이라 이 범위의 모든 codepoint를 합성으로 가로채므로, 터미널 콘텐츠가 0xF0000~0xF00FF의
-//! MDI 글리프를 내보내면 폰트 글리프 대신 maru 아이콘(등록됨) 또는 빈 글리프(미등록)가 그려진다 — 아이콘 폰트
-//! 라우팅 인프라를 안 만든 대가의 **알려진 트레이드오프**(미등록 범위를 폰트로 흘리려면 isIcon·C 게이트를 등록-전용
-//! 으로 좁혀야 하는데 C 게이트가 Zig 등록 목록을 알아야 해 별도 작업). isIcon은 이 **범위 전체**를 합성으로 보고
-//! (coretext_smoke.m의 C 게이트 maru_is_synthesized_glyph와 동일 범위여야 한다 — 어긋나면 blank), 미등록 슬롯은
-//! fillCoverage가 빈 글리프(0px)로 둔다. "이 글리프를 maru가 실제로 그리는가"(렌더 폭 등)는 isRegisteredIcon으로
-//! 물어 미등록 범위 codepoint(Nerd Fonts MDI 등)까지 휩쓸지 않게 한다.
+//! codepoint는 **Plane 15 PUA(0xF0000~)**에 둔다. **주의**: Nerd Fonts v3가 Material Design Icons를 Plane-15
+//! PUA(U+F0001~U+F1AF0)로 옮겨 이 영역과 겹친다(BMP PUA만 겹친다고 본 옛 가정은 틀렸다). 그래서 합성 게이트는
+//! **등록된 codepoint만**(`isRegisteredIcon`) 가로채고, 미등록 PUA는 폰트로 폴백한다 — 터미널 콘텐츠의 Nerd Fonts
+//! MDI 글리프가 blank가 되지 않게. C 셰이핑 게이트(coretext_smoke.m `maru_is_synthesized_glyph`)도 같은 등록 집합을
+//! 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다(어긋나면 그 글리프가 blank). 등록된
+//! ~10개(현재 0xF0001~0xF000A)가 Nerd Fonts MDI와 정확히 겹칠 때만 maru 아이콘으로 가로채진다 — 아이콘 폰트 라우팅
+//! 인프라를 안 만든 대가의 좁은(10 codepoint) 트레이드오프.
 
 const std = @import("std");
 const gp = @import("glyph_pixels.zig");
 const data = @import("icon_coverage_data.zig");
 
-/// maru 아이콘 PUA 범위(C 게이트와 **동일하게** 유지). 미등록 슬롯은 빈 글리프.
-pub const icon_base: u32 = 0xF0000;
-pub const icon_end: u32 = 0xF0100; // exclusive
-
-/// cp가 maru 아이콘 PUA 범위인지. C 게이트와 같은 범위를 본다(데이터 등록 여부와 무관 — 미등록은 빈).
-pub fn isIcon(cp: u32) bool {
-    return cp >= icon_base and cp < icon_end;
-}
-
-/// cp가 **등록된**(coverage 데이터가 있는) maru 아이콘인지. isIcon(범위 전체)과 달리 실제 그릴 글리프가 있는
-/// codepoint만 true다. "이 글리프를 maru가 직접 그리는가"를 물어야 하는 곳(카드/제목 렌더 폭을 2칸으로 등)에 써,
-/// 미등록 범위 codepoint(예: Nerd Fonts v3가 Plane-15 PUA로 옮긴 MDI)까지 휩쓸지 않는다.
+/// cp가 **등록된**(coverage 데이터가 있는) maru 아이콘인지 — 합성 게이트의 단일 술어. `synthesizeGlyph`·
+/// `renderer.isSynthesizedCodepoint`·카드/제목 렌더 폭(`titleCellWidth`)이 이걸 쓴다. 미등록 PUA(Nerd Fonts v3가
+/// Plane-15로 옮긴 MDI 등)는 false → 폰트로 폴백. C 게이트(`maru_is_registered_icon_cp`, 생성 헤더)와 동일 집합.
 pub fn isRegisteredIcon(cp: u32) bool {
     return coverageFor(cp) != null;
 }
@@ -41,8 +30,8 @@ fn coverageFor(cp: u32) ?[]const u8 {
 }
 
 /// 정사각 마스터 coverage를 슬롯에 종횡비 유지·중앙으로 area-average 다운스케일해 채운다. 채운
-/// (coverage>0) 픽셀 수 반환. 미등록 cp는 빈 슬롯(0). isIcon(cp) 가정. 셰이더가 alpha를 coverage로
-/// 읽어 전경색으로 칠한다(단색 → 테마색 자동).
+/// (coverage>0) 픽셀 수 반환. 미등록 cp는 빈 슬롯(0) — 단 게이트가 `isRegisteredIcon`이라 실제론 등록 cp만
+/// 들어온다(내부 robustness). 셰이더가 alpha를 coverage로 읽어 전경색으로 칠한다(단색 → 테마색 자동).
 pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) u32 {
     const w = width_px;
     const h = height_px;
@@ -87,14 +76,6 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
         }
     }
     return count;
-}
-
-test "icon_glyph: isIcon은 PUA 범위(0xF0000~F00FF), 그 외 false" {
-    try std.testing.expect(isIcon(0xF0001)); // git_branch(등록됨)
-    try std.testing.expect(isIcon(0xF0050)); // 범위 내 미등록 — C 게이트와 동일 범위라 true(빈 글리프)
-    try std.testing.expect(!isIcon(0x251C)); // box ├(아이콘 아님)
-    try std.testing.expect(!isIcon(0xE0B0)); // powerline
-    try std.testing.expect(!isIcon(0xF0100)); // 범위 밖(exclusive end)
 }
 
 test "icon_glyph: isRegisteredIcon은 coverage 있는 cp만 true(범위 내 미등록은 false)" {

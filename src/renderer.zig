@@ -96,7 +96,10 @@ pub const uvRectForSlot = glyph_quads.uvRectForSlot;
 /// cp가 합성 글리프(폰트 대신 rasterizer가 코드포인트로 직접 그리는)인지 — 모든 합성 모듈 술어의 합집합.
 /// **합성 여부의 단일 Zig 출처**: 네이티브 셰이퍼의 drawable 판정과 cache_key glyph_id=0 정규화가 이걸 쓴다.
 /// platform/macos/coretext_smoke.m의 `maru_is_synthesized_glyph`(C 게이트)는 이 집합을 미러해야 한다(언어가
-/// 달라 컴파일 차원 공유는 못 하므로 범위를 같게 유지 — 어긋나면 그 코드포인트가 blank로 빠진다).
+/// 달라 컴파일 차원 공유는 못 하므로 같은 집합을 유지 — 어긋나면 그 코드포인트가 blank로 빠진다). 아이콘은
+/// **등록된 것만**(`isRegisteredIcon`, 범위 전체 `isIcon` 아님): Nerd Fonts v3가 MDI를 Plane-15 PUA(U+F0001~)로
+/// 옮겨 겹치므로, 미등록 in-range를 합성으로 가로채면 그 글리프가 blank가 됐다 → 미등록은 폰트로 폴백한다.
+/// C 게이트는 같은 등록 집합을 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다.
 pub fn isSynthesizedCodepoint(cp: u32) bool {
     return block_glyph.isBlockElement(cp) or
         box_glyph.isBoxDrawing(cp) or
@@ -107,7 +110,7 @@ pub fn isSynthesizedCodepoint(cp: u32) bool {
         legacy_wedge_glyph.isCornerTriangle(cp) or
         legacy_smooth_glyph.isSmoothMosaic(cp) or
         legacy_diagonal_glyph.isLegacyDiagonal(cp) or
-        icon_glyph.isIcon(cp);
+        icon_glyph.isRegisteredIcon(cp);
 }
 
 /// cp가 합성 대상이면 슬롯에 coverage를 채우고 **non_clear 픽셀 수**를, 아니면 null을 돌려준다 — 합성 dispatch의
@@ -131,7 +134,7 @@ pub fn synthesizeGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: us
         return legacy_smooth_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
     if (legacy_diagonal_glyph.isLegacyDiagonal(cp)) // 대각선 stroke·hatch
         return legacy_diagonal_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
-    if (icon_glyph.isIcon(cp)) // maru chrome 아이콘(Plane 15 PUA, 빌드타임 SVG→coverage 다운스케일)
+    if (icon_glyph.isRegisteredIcon(cp)) // maru chrome 아이콘(등록된 cp만 — 미등록 in-range는 폰트 폴백, Nerd Fonts v3 MDI 겹침)
         return icon_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
     return null;
 }
@@ -151,6 +154,7 @@ test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {
         0x1FB68, 0x1FB6F, 0x1FB9A, 0x1FB9B, // wedge·bowtie
         0x25E2, 0x1FB9C, // corner 삼각형·음영
         0x1FB98, 0x1FBA0, 0x1FBAE, 0x1FBD0, 0x1FBDF, // 대각 hatch·stroke
+        0xF0001, 0xF0009, 0xF000A, // 등록 maru 아이콘(git_branch·octocat·folder) — 합성
     }) |cp| {
         try std.testing.expect(isSynthesizedCodepoint(cp));
     }
@@ -164,6 +168,9 @@ test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {
         0x1CCFF, // octant 직전
         0x1FB96, // wedge(…6F)와 hatch(98) 사이 갭
         0x1FBE0, // diagonal cell(…DF) 직후
+        // **미등록** maru PUA 범위(Nerd Fonts v3 MDI 등) — 합성 아님(폰트로 폴백). 등록-전용 게이트 회귀.
+        0xF0050,
+        0xF00FF,
     }) |cp| {
         try std.testing.expect(!isSynthesizedCodepoint(cp));
     }

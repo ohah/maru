@@ -163,10 +163,13 @@ const titlebar_strip_min_pt: u32 = 28;
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
 // 1~2칸으로 무너져 런타임 UX로는 부적절하다(config 파일로는 그 밖 값도 가능, 단축키·세팅 GUI 슬라이더가 이 범위).
-// ⌘+/⌘- 증분(step)은 config `font.size-step`(appearance.font.size_step, 기본 1pt)이 정한다. 아래 const는 config
 // theme.font_size_min/max(세팅 슬라이더 range)와 **같은 값** — 단축키·GUI가 한 범위를 공유한다(drift 시 둘 다 갱신).
 const font_size_min: f32 = 6.0;
 const font_size_max: f32 = 72.0;
+// ⌘+/⌘- 한 번에 바꾸는 폰트 크기 보폭(pt). Terminal.app·iTerm2·Ghostty처럼 **고정 1pt** — 설정 항목으로 두지
+// 않는다(보폭값은 화면에 즉각 반영이 안 보여 슬라이더로 노출하면 혼란만 준다). ⌘0 reset은 보폭과 무관하게
+// base_font_size로 복귀.
+const font_size_step: f32 = 1.0;
 
 // 스크롤바 thumb 폭(굵기). cell_width의 비율, 최소 px 보장. hover/드래그면 +emphasize_px로 살짝 굵게(affordance).
 const scrollbar_bar_mul: f32 = 0.5; // cell_width 대비 폭 비율(굵게 — 잡기/보기 쉽게)
@@ -3696,9 +3699,9 @@ pub const AppSession = struct {
             .find_next => self.findNavigate(true),
             .find_previous => self.findNavigate(false),
             // 런타임 폰트 크기(⌘+/⌘-/⌘0) — cell 메트릭·grid 재계산(setFontSize). 콘텐츠 reflow 없음.
-            // 증분은 config `font.size-step`(기본 1pt). ⌘0 reset은 step과 무관하게 base_font_size로 복귀.
-            .increase_font_size => self.adjustFontSize(self.appearance.font.size_step),
-            .decrease_font_size => self.adjustFontSize(-self.appearance.font.size_step),
+            // 보폭은 고정 1pt(font_size_step 상수). ⌘0 reset은 보폭과 무관하게 base_font_size로 복귀.
+            .increase_font_size => self.adjustFontSize(font_size_step),
+            .decrease_font_size => self.adjustFontSize(-font_size_step),
             .reset_font_size => self.resetFontSize(),
             .reset_settings => self.requestResetAll(), // 통합 리셋 — 확인 모달 후 전체 기본값 + config 파일 덮어쓰기
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
@@ -15185,9 +15188,9 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     const cw0 = session.cell_width_px;
     const cols0 = session.activeSurface().core.snapshot().size.cols;
 
-    // ⌘+ : 폰트 +step(config font.size-step, 기본 1pt) → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
+    // ⌘+ : 폰트 +보폭(고정 1pt, font_size_step 상수) → cell 픽셀이 커지고(메트릭) grid는 줄거나 같다(같은 backing px).
     session.dispatchAppAction(.increase_font_size);
-    try std.testing.expectEqual(base + session.appearance.font.size_step, session.appearance.font.size);
+    try std.testing.expectEqual(base + font_size_step, session.appearance.font.size);
     try std.testing.expect(session.cell_width_px > cw0);
     const cols1 = session.activeSurface().core.snapshot().size.cols;
     try std.testing.expect(cols1 <= cols0);
@@ -15196,13 +15199,6 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     session.dispatchAppAction(.reset_font_size);
     try std.testing.expectEqual(base, session.appearance.font.size);
     try std.testing.expectEqual(cw0, session.cell_width_px);
-
-    // config font.size-step을 반영: step을 4로 바꾸면 ⌘+가 한 번에 +4pt(증분이 상수 1이 아니라 config 값).
-    session.appearance.font.size_step = 4;
-    session.dispatchAppAction(.increase_font_size);
-    try std.testing.expectEqual(base + 4, session.appearance.font.size);
-    session.dispatchAppAction(.reset_font_size); // 다시 base로(아래 경계 테스트 기준 복원)
-    session.appearance.font.size_step = 1; // 기본 step으로 되돌려 경계 반복이 1pt씩 움직이게
 
     // set_font_size:N — 절대 지정(config 바인딩). 그 크기로 바로 설정, [6,72]로 클램프.
     session.dispatchAppAction(.{ .set_font_size = 24 });
@@ -15794,6 +15790,11 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    // 이 테스트는 tui 셀 밴드(sidebar_cells)를 검증한다 — 기본값 rich면 활성 탭 강조가 GPU quad라 sidebar_cells가
+    // 비어 [0] 인덱스가 깨진다. tui로 고정하고 사이드바를 다시 빌드해 셀 경로를 채운다(init은 rich로 빌드했고 tick은
+    // sidebar_cells를 재빌드하지 않으므로 명시 호출 — rich 밴드는 별도 quad 테스트가 커버).
+    session.appearance.chrome_theme = .tui;
+    try session.rebuildSidebar();
 
     // init 후: 사이드바 폭/메트릭이 채워진다. metalFrame이 노출하는 사이드바 셀은 metal_buffer가
     // 소유하므로 첫 tick의 replace가 돌아야 채워진다(밴드 + 제목 glyph). 한 번 tick한다.
@@ -16534,8 +16535,9 @@ test "tabNumberLabel formats {n} {title} with 1-based numbering" {
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
     var session: AppSession = undefined;
     // paneBarHeightPx → buildChromeTokens가 appearance(theme·chrome_theme)를 읽으므로 undefined 세션에 명시 초기화한다
-    // (chrome_theme=.tui → tab_bar_pad_y_px=3 → 바=cell+6). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
-    session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
+    // (chrome_theme=.tui → tab_bar_pad_y_px=3 → 바=cell+6). 이 테스트는 tui 셀 기하를 검증하므로 기본값(rich)과
+    // 무관하게 tui로 고정한다(rich면 pad_y=6 → 바=cell+12). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
+    session.appearance = config_mod.resolveAppearance(.{ .chrome_theme = .tui }) catch unreachable;
     session.chrome_minimal = false; // paneBarHeightPx가 읽는다(false=바 있음)
     session.cell_width_px = 12;
     session.cell_height_px = 12; // paneBarHeightPx = cell_height + 2*pad_y(tui 3) = 18
@@ -16570,6 +16572,7 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.appearance.chrome_theme = .tui; // tui 셀 바 기하 검증(기본값 rich는 tab_bar_pad_y_px·바 배경 quad가 달라짐) — resize 전에 고정
 
     // 창 크기를 잡는다(resize가 backing 보관 + 모든 panel을 바 아래 grid로 + active_pane_rect 재계산).
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -16606,6 +16609,7 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.appearance.chrome_theme = .tui; // tui 셀 바/탭 하이라이트 검증(기본값 rich는 바 배경·활성 탭이 quad) — resize 전에 고정
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
@@ -16646,6 +16650,7 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.appearance.chrome_theme = .tui; // tui 셀 바 기하 검증(기본값 rich는 바 배경 quad·pad_y가 달라짐) — resize 전에 고정
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
@@ -16748,6 +16753,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.appearance.chrome_theme = .tui; // tui 등폭 탭 기하로 ✕ zone col 검증(기본값 rich는 고정폭 탭·패딩이라 close_x가 다른 탭에 떨어짐) — resize 전에 고정
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
@@ -18414,6 +18420,7 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.appearance.chrome_theme = .tui; // tui 셀 hover 밴드(sidebar_cells) 검증(기본값 rich는 hover가 GPU quad라 셀이 빔)
     // 2번째 탭 생성 → 활성=1.
     _ = try session.createTab(
         .{ .command = "/bin/sh", .args = &.{ "-c", "true" }, .size = .{ .cols = 20, .rows = 5 } },
@@ -18469,6 +18476,7 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.appearance.chrome_theme = .tui; // tui 셀 hover 밴드(sidebar_cells) 검증(기본값 rich는 hover가 GPU quad라 셀이 빔)
     // 2번째 탭 생성 → 탭 2개, 활성=1. "+"는 row 2(y in [2*slot_h, 3*slot_h)).
     _ = try session.createTab(
         .{ .command = "/bin/sh", .args = &.{ "-c", "true" }, .size = .{ .cols = 20, .rows = 5 } },

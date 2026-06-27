@@ -109,7 +109,6 @@ v1에서 약속하지 않는 것:
 ```text
 font.family = "JetBrains Mono"
 font.size = 14
-font.size-step = 1.0
 font.line-height = 1.0
 font.letter-spacing = 0.0
 font.fallback = ""
@@ -120,7 +119,7 @@ font.family-italic = ""
 해석 규칙:
 
 - `family`는 사용자가 원하는 primary monospace family다.
-- `font.size-step`은 ⌘+/⌘-(폰트 키우기/줄이기)가 한 번에 바꾸는 크기 증분(pt)이다. 기본 1.0.
+- ⌘+/⌘-(폰트 키우기/줄이기)는 `font.size`를 **고정 1pt씩** 바꾼다(보폭은 설정 항목이 아니다 — Terminal.app·iTerm2·Ghostty 관례). ⌘0은 config 기본 크기로 복귀.
 - `font.line-height`는 행간 배수다(1.0=CoreText 자동 cell 높이 그대로). 기본 1.0.
 - `font.letter-spacing`은 자간(논리 pt, 음수 허용 — 칸 좁힘)이다. 기본 0.0.
 - `font.fallback`은 폴백 폰트 패밀리 목록(쉼표 구분)이다. primary `family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 자동 cascade(`kCTFontCascadeListAttribute`)를 뒤에 잇는다. 빈 값(기본)이면 CoreText 기본 cascade만 쓴다.

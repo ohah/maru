@@ -31,14 +31,14 @@ maru의 config 계층을 **스키마-주도**로 둔다: `Config` 구조체의 �
 // 모양 스케치(정확한 문법 아님 — 설계 의도). 단일 출처는 구현 시 src/config/schema.zig.
 pub const FontConfig = struct {
     size: f32 = 14,
-    size_step: f32 = 1.0,
+    line_height: f32 = 1.0,
     family: []const u8 = "JetBrains Mono",
 
     // 이 sub-struct 필드들의 메타(comptime). 키는 부모 경로 + 아래 규칙으로 유도, segment override 가능.
     pub const schema = .{
-        .size      = Meta{ .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number },
-        .size_step = Meta{ .key_seg = "size-step", .doc = "...", .range = .{ 0.1, 32 }, .widget = .number },
-        .family    = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text },
+        .size        = Meta{ .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number },
+        .line_height = Meta{ .doc = "행간 배수", .range = .{ 0.5, 3.0 }, .widget = .number }, // 키는 line_height→line-height 자동
+        .family      = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text },
     };
 };
 
@@ -58,13 +58,13 @@ pub const Meta = struct {
 ## 3. 키 유도 규칙
 
 키는 **중첩 경로 + segment**로 만든다. 클레버한 자동 변환은 안 한다(maru 키는 `.` 네임스페이스와 `-`를
-섞어 써 `_`→`-` 자동변환이 불안전: `size_step`→`size-step`은 맞지만 `tab_inherit_cwd`→`tab-inherit-cwd`는
+섞어 써 `_`→`-` 자동변환이 불안전: `line_height`→`line-height`은 맞지만 `tab_inherit_cwd`→`tab-inherit-cwd`는
 맞고 `ime_enter`→`ime-enter`는 맞으나, 일반화하면 깨지는 키가 생긴다).
 
 - 부모 struct 이름에서 네임스페이스를 얻는다: `FontConfig` → `font`, `ThemeConfig` → `theme`, top-level Config의
   직속 필드(`term`·`blink_text`)는 명시 `key`(`term`·`text.blink`)로 둔다.
-- leaf segment는 필드명 그대로 쓰되, `-`가 필요하면 `key_seg`로 명시(`size_step` → `key_seg="size-step"`).
-- 전체 키 = `namespace + "." + segment`. 예: `font` + `size-step` = `font.size-step`.
+- leaf segment는 필드명 그대로 쓰되, 필드명≠segment면 `key_seg`로 명시(`height_fraction` → `key_seg="height"`).
+- 전체 키 = `namespace + "." + segment`. 예: `font` + `line-height` = `font.line-height`.
 
 > **결정**: 자동화의 유혹을 누르고 segment override를 명시로 둔 건, 키가 maru와 외부 프로그램의 **공개 계약**
 > ([configuration.md])이라 우연히 바뀌면 사용자 config가 조용히 깨지기 때문이다. 명시가 안전하다.
@@ -78,7 +78,7 @@ comptime `inline for`로 `Config`(중첩 struct 재귀)를 순회하며 각 leaf
    `"<key>는 <기대> — 기본값 유지"` diagnostic을 **메타에서 자동 생성**(지금은 키마다 손으로 적는 문구).
 2. **serialize** — 같은 순회로 값→토큰. parse의 역연산이라 **대칭이 구성상 보장**된다(현재 round-trip 테스트는
    드리프트를 *잡을* 뿐 막진 못함 — 스키마-주도는 한 코드 경로라 어긋날 수가 없다).
-3. **검증** — 범위/enum 허용값이 메타에 있으니 parse가 그대로 쓴다. `font_size_step_min` 같은 흩어진 const가
+3. **검증** — 범위/enum 허용값이 메타에 있으니 parse가 그대로 쓴다. `font_size_min` 같은 흩어진 const가
    필드 선언 안으로 들어와 응집된다.
 4. **문서표** — `configuration.md`의 키 표를 메타(키·타입·기본값·doc·범위)에서 **생성**한다(손 동기화 제거 →
    doc-drift 원천 소멸). 생성물은 마커 블록 사이에 끼워 수동 산문과 공존한다.

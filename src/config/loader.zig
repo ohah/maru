@@ -837,7 +837,6 @@ test "parse: full config sets every field" {
         \\# Maru config
         \\font.family = JetBrains Mono
         \\font.size = 16
-        \\font.size-step = 2
         \\font.line-height = 1.25
         \\font.letter-spacing = 1.5
         \\theme.background = #001122
@@ -865,7 +864,6 @@ test "parse: full config sets every field" {
     defer p.deinit();
     try std.testing.expectEqualStrings("JetBrains Mono", p.config.font.family);
     try std.testing.expectEqual(@as(f32, 16), p.config.font.size);
-    try std.testing.expectEqual(@as(f32, 2), p.config.font.size_step); // font.size-step 파싱(기본 1)
     try std.testing.expectEqual(@as(f32, 1.25), p.config.font.line_height); // font.line-height 파싱(기본 1.0)
     try std.testing.expectEqual(@as(f32, 1.5), p.config.font.letter_spacing); // font.letter-spacing 파싱(기본 0.0)
     try std.testing.expectEqualStrings("#001122", p.config.theme.background);
@@ -1308,28 +1306,6 @@ test "parse: padding-x sets left+right (alias); last line wins when aliasing mix
     try std.testing.expectEqual(@as(u32, 12), y.config.window_padding_bottom);
 }
 
-test "parse: font.size-step out-of-range/non-numeric is forgiving (keeps default 1)" {
-    const defaults = theme.Config{};
-    {
-        var p = try parse(std.testing.allocator, "font.size-step = 0\n"); // 0(무동작)·음수는 거부
-        defer p.deinit();
-        try std.testing.expectEqual(defaults.font.size_step, p.config.font.size_step);
-        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
-    }
-    {
-        var p = try parse(std.testing.allocator, "font.size-step = abc\n");
-        defer p.deinit();
-        try std.testing.expectEqual(defaults.font.size_step, p.config.font.size_step);
-        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
-    }
-    {
-        var p = try parse(std.testing.allocator, "font.size-step = 4.5\n"); // 유효(소수)
-        defer p.deinit();
-        try std.testing.expectEqual(@as(f32, 4.5), p.config.font.size_step);
-        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
-    }
-}
-
 test "parse: font.line-height parses valid; out-of-range/non-numeric is forgiving (keeps default 1.0)" {
     const defaults = theme.Config{};
     {
@@ -1423,7 +1399,7 @@ test "parse: forgiving — unknown key and bad values keep defaults with diagnos
     try std.testing.expectEqual(defaults.cursor.blink, p.config.cursor.blink);
     try std.testing.expectEqual(defaults.cursor.color, p.config.cursor.color); // 틀린 색은 null 유지(미지정)
     try std.testing.expectEqualStrings(defaults.theme.background, p.config.theme.background);
-    try std.testing.expectEqual(defaults.chrome_theme, p.config.chrome_theme); // 미지값(neon) → tui 폴백(C4a)
+    try std.testing.expectEqual(defaults.chrome_theme, p.config.chrome_theme); // 미지값(neon) → 기본값(rich) 폴백(C4a)
     // 8개 문제 줄 각각 diagnostic(cursor.color=nope·chrome.theme=neon·누락 '=' 포함).
     try std.testing.expectEqual(@as(usize, 8), p.diagnostics.len);
 }

@@ -198,6 +198,15 @@ pub const title_ellipsis_glyph: u21 = 0x2026;
 /// title의 디스플레이 폭(칸 합) — wide glyph는 2, 나머지 1. 깨진 UTF-8 바이트는 U+FFFD(1칸). 말줄임 필요 판정용.
 /// pub: pane 라벨 세그먼트 폭(paneLabelCols)도 이 단일 출처로 폭을 잰다(렌더 ellipsize와 같은 셈법이라 라벨
 /// 칸 예약과 실제 글리프가 어긋나지 않는다).
+/// 카드/제목 텍스트에 박힌 maru 아이콘(Plane 15 PUA, icon_glyph)은 **렌더 폭 2칸**으로 친다 — advance(cellWidth)는
+/// 1이지만 1칸(=cell width ~8px)에 다운스케일하면 octocat·폴더 같은 실루엣이 뭉개져 안 보였다(사용자 피드백). 에이전트
+/// gutter 아이콘(별도 셀, width 2)과 같은 ~16px로 통일한다. 아이콘이 아니면 cellWidth 그대로(EAW 2칸·일반 1칸). 이
+/// 범위(0xF0000~0xF00FF)는 터미널 콘텐츠가 안 쓰는 PUA라(maru 합성 전용) 일반 텍스트 폭에는 영향이 없다.
+fn titleCellWidth(cp: u21) u16 {
+    if (renderer.icon_glyph.isIcon(cp)) return 2;
+    return @max(1, terminal.width.cellWidth(cp));
+}
+
 pub fn titleDisplayWidth(title: []const u8) usize {
     var total: usize = 0;
     var i: usize = 0;
@@ -214,7 +223,7 @@ pub fn titleDisplayWidth(title: []const u8) usize {
             }
         } else |_| {}
         i += advance;
-        total += @max(1, terminal.width.cellWidth(cp));
+        total += titleCellWidth(cp);
     }
     return total;
 }
@@ -251,7 +260,7 @@ fn appendEllipsizedTitle(
                 } else |_| {}
             }
         } else |_| {}
-        const w: u16 = @max(1, terminal.width.cellWidth(cp));
+        const w: u16 = titleCellWidth(cp); // maru 아이콘(PUA)은 2칸 렌더(octocat·폴더가 또렷하게)
         if (col + w > text_end) break; // 텍스트 한도를 넘으면(말줄임 자리 직전) 멈춘다
         try cells.append(allocator, .{ .row = row, .col = col, .codepoint = cp, .width = @intCast(@min(w, 2)), .style = style });
         col += w;
@@ -968,6 +977,56 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
         }
     }
     try std.testing.expect(name_indented);
+}
+
+// 카드 줄 안에 인라인으로 박힌 maru 아이콘(브랜치줄 octocat 0xF0009·폴더줄 0xF000A)은 **width 2(~16px)**로
+// 렌더돼 작은 셀에서도 실루엣이 또렷하다(titleCellWidth). width-1(~8px)이면 octocat이 동그란 링처럼 뭉개졌다
+// (사용자 피드백 "깃 아이콘이 너무 작다"). 아이콘이 2칸을 차지하므로 뒤따르는 텍스트가 그만큼 밀린다 — 회귀 방지.
+test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and offset following text" {
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{"maru"};
+    const branches = [_][]const u8{"\u{F0009} main"}; // octocat + 공백 + 브랜치
+    const paths = [_][]const u8{"\u{F000A} ~/dev"}; // folder + 공백 + 경로
+    var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, 20, .default, null, null, null, .default);
+    defer dl.deinit(allocator);
+
+    // 아이콘 셀은 col 0·width 2. 아이콘 폭 2 + 공백 1 = 3이므로, 브랜치 'm'·경로 '~'는 col 3에서 시작.
+    var octocat_w2 = false;
+    var folder_w2 = false;
+    var branch_text_at3 = false;
+    var path_text_at3 = false;
+    for (dl.cells) |c| {
+        if (c.codepoint == 0xF0009 and c.row == sidebarGlyphRow(0, 1, 3)) {
+            try std.testing.expectEqual(@as(u16, 0), c.col);
+            try std.testing.expectEqual(@as(u2, 2), c.width);
+            octocat_w2 = true;
+        }
+        if (c.codepoint == 0xF000A and c.row == sidebarGlyphRow(0, 2, 3)) {
+            try std.testing.expectEqual(@as(u16, 0), c.col);
+            try std.testing.expectEqual(@as(u2, 2), c.width);
+            folder_w2 = true;
+        }
+        if (c.codepoint == 'm' and c.row == sidebarGlyphRow(0, 1, 3)) {
+            try std.testing.expectEqual(@as(u16, 3), c.col); // 아이콘(2)+공백(1) 뒤
+            branch_text_at3 = true;
+        }
+        if (c.codepoint == '~' and c.row == sidebarGlyphRow(0, 2, 3)) {
+            try std.testing.expectEqual(@as(u16, 3), c.col);
+            path_text_at3 = true;
+        }
+    }
+    try std.testing.expect(octocat_w2);
+    try std.testing.expect(folder_w2);
+    try std.testing.expect(branch_text_at3);
+    try std.testing.expect(path_text_at3);
+}
+
+// titleDisplayWidth는 maru 아이콘 PUA를 2칸으로 친다(렌더 폭과 일치해야 말줄임 예약 칸이 안 어긋난다).
+test "titleDisplayWidth counts maru icon PUA as width 2" {
+    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F0009}")); // octocat
+    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F000A}")); // folder
+    try std.testing.expectEqual(@as(usize, 6), titleDisplayWidth("\u{F0009} abc")); // 2 + 공백 + abc(3)
+    try std.testing.expectEqual(@as(usize, 3), titleDisplayWidth("abc")); // 일반 텍스트 회귀
 }
 
 test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab segments" {

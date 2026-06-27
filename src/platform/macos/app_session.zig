@@ -326,16 +326,18 @@ fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) ?[]c
     return null;
 }
 
-/// 사이드바 경로줄(2줄 카드 아래줄)용 cwd 문자열(owned). $HOME 접두는 "~"로 축약한다(예: /Users/x/p → ~/p).
-/// cwd가 비면 "". 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
+/// 사이드바 경로줄(카드 폴더줄)용 cwd 문자열(owned). 앞에 폴더 아이콘(0xF000A — octicons file-directory-fill)을
+/// 붙인다 — 브랜치줄 octocat(0xF0009)과 같은 width-2 합성 아이콘이라 작은 카드 셀에서도 외곽이 살아 또렷하다
+/// (titleCellWidth가 PUA를 2칸 렌더). $HOME 접두는 "~"로 축약한다(예: /Users/x/p → 📁 ~/p). cwd가 비면 "".
+/// 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
 fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
     const cwd = term.surface.core.currentCwd();
     if (cwd.len == 0) return allocator.dupe(u8, "");
     const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
     // $HOME 정확 경계(home 자체 또는 home/ 하위)일 때만 "~"로 — "/Users/xyz"가 "/Users/x"로 잘못 잡히지 않게.
     if (home.len > 0 and std.mem.startsWith(u8, cwd, home) and (cwd.len == home.len or cwd[home.len] == '/'))
-        return std.fmt.allocPrint(allocator, "~{s}", .{cwd[home.len..]});
-    return allocator.dupe(u8, cwd);
+        return std.fmt.allocPrint(allocator, "\u{F000A} ~{s}", .{cwd[home.len..]});
+    return std.fmt.allocPrint(allocator, "\u{F000A} {s}", .{cwd});
 }
 
 // 순수 레이아웃 기하(layout_math.PaddingPx·gridFromBacking·gridFromRectPx·ptToPx)는 session/layout_math.zig로 이동(b1).
@@ -11130,6 +11132,8 @@ pub const AppSession = struct {
                 // 브랜치줄 prefix = GitHub octocat(0xF0009). 예전 git-branch(0xF0001)는 얇은 선+링 3개라 카드 셀 크기
                 // (~8~12px)로 area-average 다운스케일되면 내부 구조가 뭉개져 ├(U+251C)처럼 보였다(사용자 피드백). octocat은
                 // 꽉 찬 단색 실루엣이라 작은 크기에서도 외곽이 살아 GitHub 마크로 읽힌다(icon_glyph fillCoverage 경로 동일).
+                // 폭은 titleCellWidth가 PUA를 **2칸(~16px)** 렌더해 width-1(~8px)일 때 동그란 링처럼 뭉개지던 걸 키웠다 —
+                // 폴더줄(0xF000A)·에이전트 gutter 아이콘과 같은 크기로 통일(사용자 피드백 "깃 아이콘이 너무 작다").
                 try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{F0009} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.agentStatusLine(term));

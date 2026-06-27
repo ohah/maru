@@ -57,6 +57,7 @@ pub const ColorRole = enum {
 pub const TabActiveStyle = enum(u8) {
     connected = 0, // U-tab2: 본문색 cutout(바 전체 높이) + 앰버/muted 언더바 — 아래 본문과 이어짐
     underline = 1, // 배경 fill 없음 + 앰버/muted 언더바만 — 가장 미니멀
+    pill = 2, // 둥근 inset quad(본문색 fill) + 앰버/muted 테두리 — 떠 있는 pill(Warp/Arc식), 포커스=테두리 색
 };
 
 pub const Spacing = struct {
@@ -88,8 +89,11 @@ pub const Spacing = struct {
     // **분리**해 활성 신호를 더 굵고 또렷하게 한다. tui=0(셀 밴드 경로라 미사용), rich>0. appendActiveTabHighlight가 소비.
     tab_underbar_px: u16 = 0,
     // TS1: 활성 탭 룩(chrome.tab-style 직교 축 — §7). platform buildChromeTokens가 appearance.chrome_tab_style→이 값으로
-    // 매핑하고 appendActiveTabHighlight가 분기(connected=cutout+언더바 / underline=언더바만). tui는 셀 밴드라 미사용.
+    // 매핑하고 appendActiveTabHighlight가 분기(connected=cutout+언더바 / underline=언더바만 / pill=둥근 inset+테두리). tui는 셀 밴드라 미사용.
     tab_active_style: TabActiveStyle = .connected,
+    // TS2: pill 스타일의 세로 inset(px) — 바 위아래에서 이만큼 들여 둥근 pill이 strip 위에 떠 보인다. radius는
+    // corner_radius_px, 테두리 두께는 border.line_thickness_px 재사용. connected/underline은 미사용. rich>0.
+    tab_pill_inset_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -171,6 +175,8 @@ pub const Tokens = struct {
         tk.space.tab_bar_pad_y_px = 6;
         // U-tab2: 활성 탭 앰버 언더바 3px(하단 하이라인 1~2px보다 굵게) — "활성/포커스 탭" 신호를 또렷하게.
         tk.space.tab_underbar_px = 3;
+        // TS2: pill 스타일 세로 inset 4px(바 위아래) — 둥근 pill이 strip 위에 떠 보이게.
+        tk.space.tab_pill_inset_px = 4;
         // KH-5: rich 키캡도 tui와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. tui()가 이미 keycap_bg를 그렇게 깔았으므로
         // rich는 override하지 않는다(별도 처리 불필요 — light·dark 모두 또렷). 셀-그리드라 키캡은 fill(셀 배경)이고 둥근
         // GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).

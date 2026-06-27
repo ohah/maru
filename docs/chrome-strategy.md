@@ -219,7 +219,7 @@ pub const ChromeHost = struct {
 
 U-tab2의 **connected**(본문색 cutout + 앰버 언더바)를 **강한 기본 1개**로 두고, 활성 탭 룩을 사용자가 고르는 **직교 축**을 추가한다. 이 절은 그 설계의 단일 출처다(구현 시 코드와 맞춘다).
 
-> **현황(TS1 완료)**: 축 토큰(`tokens.TabActiveStyle`/`Spacing.tab_active_style`) + config(`chrome.tab-style` = connected|underline, `Config.schema` dropdown) + `appendActiveTabHighlight` 스타일 분기(connected=cutout+언더바 / underline=언더바만) + 헤드리스 테스트(스타일별 `gpu_quads`) + `configuration.md` 행 구현 완료. **pill은 TS2**(둥근 inset quad — 미구현). `chrome.preset` 번들은 TS3.
+> **현황(TS1·TS2 완료)**: 축 토큰(`tokens.TabActiveStyle`/`Spacing.tab_active_style`) + config(`chrome.tab-style` = connected|underline|pill, `Config.schema` dropdown) + `appendActiveTabHighlight` 스타일 분기(connected=cutout+언더바 / underline=언더바만 / **pill=둥근 inset quad(본문색 fill)+앰버 테두리** — 포커스=테두리 색, `tab_pill_inset_px`+`corner_radius_px`+`line_thickness_px` 재사용) + 헤드리스 테스트(스타일별 `gpu_quads`) + `configuration.md` 행 구현 완료. **세 스타일 다 동작**. `chrome.preset`(여러 축 묶음 번들)은 **TS3**.
 
 ### 7.1 왜 직교 축인가 (메가 enum 금지)
 
@@ -253,9 +253,9 @@ platform `buildChromeTokens`가 `appearance.chrome_tab_style`(config)→이 토�
 |---|---|---|---|
 | **connected**(기본) | 본문색 cutout(바 전체 높이) | 앰버(포커스)/muted(비포커스), `tab_underbar_px` | U-tab2 — 아래 본문과 이어짐 |
 | **underline** | **없음**(strip 그대로) | 앰버(포커스)/muted | 가장 미니멀 — 박스 없이 언더바만 |
-| **pill** | 둥근 inset quad(`corner_radii` + 세로 inset) | 선택(얇게 or 생략) | 떠 있는 pill — Warp/Arc식 |
+| **pill** | 둥근 inset quad(`corner_radii` + 세로 inset, 본문색 fill) | 없음 — **포커스=테두리 색**(앰버/muted) | 떠 있는 pill — Warp/Arc식 |
 
-pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`)를 그대로 쓰고, inset 폭/반경은 토큰(`pill_inset_px`/재사용 `corner_radius_px`)으로. tui는 스타일과 무관하게 **셀 밴드(`tabbarHighlightCell`) 유지**(cutout/pill은 rich quad 개념 — tui는 `connected`를 셀 밴드로 근사하거나 스타일을 무시). 즉 tab-style은 **rich 경로(`tab_corner > 0`)에서만** 의미를 갖는다.
+pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`border_color`)를 그대로 쓴다 — 세로 inset(`tab_pill_inset_px`)·반경(`corner_radius_px`)·테두리 두께(`line_thickness_px`) 토큰 재사용, 단일 quad라 언더바 overhang 없음. 포커스는 언더바 대신 **테두리 색**(앰버/muted)으로. tui는 스타일과 무관하게 **셀 밴드(`tabbarHighlightCell`) 유지**(cutout/pill은 rich quad 개념 — tui는 `connected`를 셀 밴드로 근사하거나 스타일을 무시). 즉 tab-style은 **rich 경로(`tab_corner > 0`)에서만** 의미를 갖는다.
 
 ### 7.4 config & 세팅 GUI (거의 공짜)
 
@@ -268,9 +268,9 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`)를 그대로 쓰
 
 ### 7.6 단계
 
-- **TS1** — 토큰(`tab_active_style`) + config(`chrome.tab-style`) + `connected`(기존)·`underline` 두 스타일 분기 + 헤드리스 테스트 + `configuration.md` 행. (connected는 이미 동작 → 축으로 선택 가능하게 + underline을 첫 신규 스타일로 증명.)
-- **TS2** — `pill`(둥근 inset quad + inset 토큰).
-- **TS3** — 세팅 GUI 드롭다운 수동 확인 + (선택) `chrome.preset` 번들 설계 착수.
+- **TS1 ✅** — 토큰(`tab_active_style`) + config(`chrome.tab-style`) + `connected`·`underline` 분기 + 헤드리스 테스트 + `configuration.md` 행.
+- **TS2 ✅** — `pill`(둥근 inset quad + 앰버 테두리, `tab_pill_inset_px` 토큰). 세 스타일 다 동작.
+- **TS3** — 세팅 GUI 드롭다운 수동 확인 + `chrome.preset`(여러 축 묶음 레이아웃 프리셋) 설계·구현.
 
 ## 8. 테스트 전략 (관측 가능성 우선)
 

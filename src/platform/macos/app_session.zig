@@ -3326,11 +3326,13 @@ pub const AppSession = struct {
     /// summary의 quit_decision을 본 Swift가 NSApp.reply(toApplicationShouldTerminate:)로 종료를 진행/취소한다. 단일
     /// 출처: docs/macos-app-host-boundary.md "닫기 확인".
     pub fn requestAppQuit(self: *AppSession) void {
-        self.pending_quit = true;
-        self.quit_decision = .none;
         self.pending_close = null; // 닫기/리셋 보류와 배타(한 번에 한 모달)
         self.pending_reset = false;
+        // showConfirmButtons가 chokepoint에서 기존 pending_quit을 supersede(취소)하므로, 자기 종료를 취소하지
+        // 않게 pending_quit/quit_decision은 모달을 연 **뒤** 세운다.
         self.showConfirmButtons("maru를 종료할까요?", .{ .confirm = "종료", .cancel = "취소" });
+        self.pending_quit = true;
+        self.quit_decision = .none;
     }
 
     /// 오버레이 모달 메시지를 세션 소유 버퍼로 UTF-8 코드포인트 경계에서 잘라 복사하고 그 슬라이스를 돌려준다 —
@@ -3365,6 +3367,16 @@ pub const AppSession = struct {
     /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 버튼 라벨은 용도별로 host가 주입한다(confirm
     /// 컴포넌트는 범용). 다음 tick이 그린다. showConfirm(닫기)·requestResetAll(리셋)이 공유.
     fn showConfirmButtons(self: *AppSession, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
+        // 종료 확인 모달(pending_quit)이 떠 있는 채로 새 모달(닫기/리셋)을 열면, 먼저 종료를 취소로 확정해
+        // host의 terminateLater 보류를 푼다 — 안 그러면 confirm_accept가 pending_quit을 최우선 분기해 사용자가
+        // 연 모달(예: "초기화")을 확정해도 엉뚱하게 앱이 종료되고, host가 reply를 못 받아 종료 보류가 안 풀린다.
+        // "한 번에 한 모달" 불변식을 UI 게이트가 아니라 이 chokepoint에서 강제한다(메뉴 마우스 클릭은 anyOverlayOpen
+        // 미게이트라 리셋이 종료 보류를 가로챌 수 있었다 — code-review medium). requestAppQuit은 이 호출 뒤에
+        // pending_quit을 세우므로 자기 종료를 취소하지 않는다.
+        if (self.pending_quit) {
+            self.pending_quit = false;
+            self.quit_decision = .cancelled; // 다음 tick에 host가 NSApp.reply(false) → 앱 유지
+        }
         self.dismissMessageOverlays();
         self.clearAllHover(); // 모달 뒤(중앙 패널 밖)에 stale 호버 강조가 얼어붙지 않게 — hoverCursor는 모달 중 호버를 안 갱신
         self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), buttons);
@@ -17100,6 +17112,55 @@ test "quit-confirm: 항상 모달 + Esc=cancelled·Enter=accepted를 quit_decisi
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(!session.pending_quit);
     try std.testing.expectEqual(QuitDecision.accepted, session.quit_decision);
+}
+
+// code-review medium 후속: 종료 확인 모달(pending_quit) 보류 중 다른 모달(리셋/닫기)이 열리면 — 메뉴 마우스
+// 클릭은 anyOverlayOpen 게이트 밖이라 reset_defaults가 종료 보류를 가로챌 수 있다 — showConfirmButtons chokepoint가
+// 먼저 종료를 .cancelled로 supersede해 host의 terminateLater를 풀고, 새 모달의 확정이 엉뚱하게 앱을 종료시키지
+// 않는다("한 번에 한 모달" 불변식). 단일 출처: docs/macos-app-host-boundary.md.
+test "quit-confirm: 보류 중 리셋 모달이 열리면 종료를 cancelled로 supersede하고 확정 시 종료 아닌 리셋" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    const factory = try config_mod.resolveAppearance(.{});
+
+    // 확정 시 resetAllSettings가 configPath()에 파일을 쓰므로 실 config 대신 tmp로 박는다(reset-confirm 테스트와 동일).
+    var reset_tmp = std.testing.tmpDir(.{});
+    defer reset_tmp.cleanup();
+    var reset_path_buf: [4096]u8 = undefined;
+    const reset_cfg_path = try std.fmt.bufPrint(&reset_path_buf, ".zig-cache/tmp/{s}/config", .{reset_tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, reset_cfg_path);
+    session.loaded_config.config.font.size = factory.font.size + 6; // 비기본값
+
+    // 종료 확인 모달이 떠 보류 중(Swift는 terminateLater 대기).
+    session.requestAppQuit();
+    try std.testing.expect(session.pending_quit);
+
+    // 보류 중 리셋 모달이 열린다(메뉴 reset_defaults 마우스 클릭 경로). chokepoint가 종료를 supersede:
+    // pending_quit 해제 + quit_decision=.cancelled(→ host가 reply(false)로 종료 취소·앱 유지).
+    session.requestResetAll();
+    try std.testing.expect(!session.pending_quit);
+    try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
+    try std.testing.expect(session.pending_reset);
+    try std.testing.expect(session.chrome_host.confirm.open);
+
+    // 리셋 모달 확정 → 앱 종료가 아니라 설정 리셋이 실행된다(quit_decision은 .cancelled 그대로, 다시 .accepted가 아님).
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(!session.pending_reset);
+    try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
+    try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size); // 기본값으로 리셋됨
 }
 
 // 회귀: **기본값 리셋 후 마우스 입력이 영구히 막히지 않는다**. 사용자 보고 — "기본값으로 리셋 후에 터미널 버튼이 다

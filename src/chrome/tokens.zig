@@ -75,6 +75,9 @@ pub const Spacing = struct {
     // U-tab: rich 탭 바 텍스트 위아래 세로 패딩(px). 바 높이 = cell_height + 2*이값, 제목은 가운데(탭 세로 여유).
     // tui=0이면 바 = cell 1칸(기존).
     tab_bar_pad_y_px: u16 = 3, // tui 기본도 세로 패딩 — grip 핸들·탭 제목이 바 세로 가운데에 오게(0이면 상단에 붙어 답답). rich는 6으로 override.
+    // U-tab2: 활성 탭 하단 maru-앰버 언더바(active indicator) 두께(px). 탭바 하단 하이라인(line_thickness_px)과
+    // **분리**해 활성 신호를 더 굵고 또렷하게 한다. tui=0(셀 밴드 경로라 미사용), rich>0. appendActiveTabHighlight가 소비.
+    tab_underbar_px: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -154,6 +157,8 @@ pub const Tokens = struct {
         tk.space.tab_width_cols = 16;
         // U-tab: 탭 바 세로 패딩 6px(텍스트 위아래) — 바 높이 = cell + 12, 제목 가운데. 탭에 세로 여유.
         tk.space.tab_bar_pad_y_px = 6;
+        // U-tab2: 활성 탭 앰버 언더바 3px(하단 하이라인 1~2px보다 굵게) — "활성/포커스 탭" 신호를 또렷하게.
+        tk.space.tab_underbar_px = 3;
         // KH-5: rich 키캡도 tui와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. tui()가 이미 keycap_bg를 그렇게 깔았으므로
         // rich는 override하지 않는다(별도 처리 불필요 — light·dark 모두 또렷). 셀-그리드라 키캡은 fill(셀 배경)이고 둥근
         // GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).

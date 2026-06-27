@@ -508,12 +508,6 @@ fn blendRgb(base: u32, tint_rgb: u32, alpha: u8) u32 {
     return (base & 0xFF00_0000) | (r << 16) | (g << 8) | b;
 }
 
-/// 탭/워크스페이스 라벨 "{n} {title}"(n=1-based 번호). 사이드바 워크스페이스·pane Term 탭이 공유해 번호 prefix
-/// 형식이 일관된다(둘 다 1부터). 호출자가 반환 버퍼를 free한다. allocPrint 래퍼.
-fn tabNumberLabel(allocator: std.mem.Allocator, index: usize, title: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{d} {s}", .{ index + 1, title });
-}
-
 /// Term(가로 탭) 표시 라벨 — 사용자 rename(surface.custom_name)이 있으면 그것, 없으면 자동 제목.
 /// 자동 제목은 **라이브 OSC 0/2 창 제목**(없으면 cwd basename)을 반영해 사이드바·탭바가 현재 실행 중인 프로그램
 /// (Claude Code 등 OSC 제목을 설정하는 TUI)의 제목을 실시간 보인다. 단 그 값(`core.windowTitle()` 반환 슬라이스 =
@@ -1695,14 +1689,6 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// "{n} " 번호 prefix(tabNumberLabel) 칸수 — 1-based n의 자릿수 + 공백 1칸. caret 컬럼 계산에 쓴다.
-    fn numberPrefixCols(index: usize) u32 {
-        var n = index + 1;
-        var digits: u32 = 1;
-        while (n >= 10) : (n /= 10) digits += 1;
-        return digits + 1; // 숫자 + 공백
-    }
-
     /// rename 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect)에 쓴다. 대상별 편집기
     /// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(커서가 조합 글자를 덮는 터미널 IME
     /// 규약 — find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
@@ -1748,10 +1734,10 @@ pub const AppSession = struct {
                 const loc = self.termBarLocation(term) orelse return null;
                 const m = barMetrics(loc.pb.tabs, cw, loc.count, self.buildChromeTokens().space.tab_width_cols, loc.scroll) orelse return null;
                 const seg = m.segOf(loc.tab_index);
-                // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) + "{n} " prefix 뒤. **그 탭 세그먼트 우경계(seg.end_col)**로
+                // 탭 텍스트: 세그먼트 start_col + 1(좌패딩) 뒤(번호 prefix 제거 — U-tab2). **그 탭 세그먼트 우경계(seg.end_col)**로
                 // clamp해 caret/후보창이 인접 탭 위로 새지 않게 한다(end_col<=start_col인 overflow 탭이면 m.cols 폴백).
                 const seg_end = if (seg.end_col > seg.start_col) seg.end_col else m.cols;
-                const caret_col = @min(seg.start_col + 1 + numberPrefixCols(loc.tab_index) + qcols, seg_end);
+                const caret_col = @min(seg.start_col + 1 + qcols, seg_end);
                 const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
                 return .{
                     .x = @intCast(loc.pb.tabs.x + caret_col * cw),
@@ -9570,14 +9556,20 @@ pub const AppSession = struct {
             for (leaf_rects.items) |lr| {
                 const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
                 const bar = pb.full; // 바 배경·언더바는 전체 바(라벨 영역도 같은 chrome 배경)
+                // tui 밴드 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). rich는 아래에서
+                // 본문색 cutout(U-tab2)으로 override하고 포커스 구분을 언더바 색으로 옮긴다 — tui 보존(이 hl_bg는 tui 셀 밴드 전용).
                 const hl_bg = if (lr.leaf == active_pane) self.sidebarActiveBg() else self.sidebarHoverBg();
                 const m_opt = barMetrics(pb.tabs, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols, lr.leaf.tab_scroll_cols); // 활성 밴드·‹›는 라벨 뺀 탭 영역
                 if (tab_corner > 0) {
-                    // rich: 바 배경(직각)·활성 탭(평평 배경 + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
+                    // rich: 바 배경(직각)·활성 탭(본문색 cutout + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
                     // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
                     self.appendBarBgQuad(bar, self.sidebarBg());
-                    self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계)
-                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, hl_bg, tab_accent, tk.border.line_thickness_px);
+                    self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 활성 탭 세그먼트는 본문색 cutout+앰버 언더바가 덮어 "연결"된다
+                    // U-tab2 연결형: rich 활성 탭 = 터미널 본문색 cutout(strip에서 도려낸 듯 아래 본문과 이어짐). 포커스 구분은
+                    // 배경이 아니라 **언더바 색** — 포커스 pane=maru 앰버(active indicator), 비포커스=muted(흐린 구분만).
+                    const tab_cutout_bg = packOpaqueRgb(self.appearance.theme.background);
+                    const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg));
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, ub_accent, tk_space.tab_underbar_px);
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
@@ -9693,23 +9685,24 @@ pub const AppSession = struct {
                     // 1b) Term 탭 제목 — 라벨 뒤 탭 영역(pb.tabs)에. 바 없을 만큼 좁으면 건너뜀.
                     const bar_cols = @min(pb.tabs.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
                     if (bar_cols == 0) continue;
-                    // Term 탭 라벨 "{n} {title}"(n=1-based 탭 번호) — 사이드바 워크스페이스 라벨과 같은 형식이라
-                    // 번호로 탭을 빠르게 식별·⌘]/⌘[ 순환 위치를 안다. allocPrint 소유 버퍼라 아래 defer로 해제한다.
+                    // Term 탭 라벨 = 제목만(번호 prefix 없음 — U-tab2; 사이드바 워크스페이스 라벨과 같은 무번호 규약).
+                    // dupe 소유 버퍼라 아래 defer로 해제한다(termLabel은 borrowed라 즉시 복사 — termLabel doc).
                     var titles: std.ArrayList([]const u8) = .empty;
                     defer {
                         for (titles.items) |l| self.allocator.free(l);
                         titles.deinit(self.allocator);
                     }
-                    for (lr.leaf.terms.items, 0..) |term, ti| {
-                        // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목. "{n} {label}".
+                    for (lr.leaf.terms.items) |term| {
+                        // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목(번호 prefix 없음 — 모던 탭은
+                        // 브라우저/VSCode/Warp처럼 제목만; Term 번호는 단축키에 매핑되지 않아 시각 군더더기였다, U-tab2).
                         // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
                         if (self.renamingTerm(term)) {
                             const edit = self.renameEditText(self.allocator) catch continue;
                             defer self.allocator.free(edit);
-                            const label = tabNumberLabel(self.allocator, ti, edit) catch continue;
+                            const label = self.allocator.dupe(u8, edit) catch continue;
                             titles.append(self.allocator, label) catch self.allocator.free(label);
                         } else {
-                            const label = tabNumberLabel(self.allocator, ti, termLabel(term)) catch continue;
+                            const label = self.allocator.dupe(u8, termLabel(term)) catch continue;
                             titles.append(self.allocator, label) catch self.allocator.free(label);
                         }
                     }
@@ -10343,10 +10336,12 @@ pub const AppSession = struct {
         }
     }
 
-    /// 활성 탭 강조(rich) — VSCode식: 평평한 약한 배경(직각·gradient 없음) + 하단 maru 앰버 언더바(active indicator,
-    /// 탭 seg 폭). 사용자 요청으로 둥근 밴드·vertical gradient(C4b-5/U3)를 평평 VSCode 탭으로 대체. 배경·언더바 둘 다
-    /// layer 2(셀 part1 제목 아래). segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
-    /// per-frame(dropQuadsByLayer(2)가 매 프레임 비움). tui는 tabbarHighlightCell 셀 밴드.
+    /// 활성 탭 강조(rich) — **연결형 cutout**: 활성 탭을 터미널 본문색(bg=theme.background)으로 채워 아래 본문과
+    /// 이어져 보이게 하고(strip에서 도려낸 듯), 하단에 굵은 maru 앰버 언더바(active/focus indicator, 탭 seg 폭)를 얹는다.
+    /// 옛 "평평한 약한 배경(sidebarActiveBg)"을 본문색으로 바꿔 깊이(strip↔본문)를 만든다(U-tab2). 배경·언더바 둘 다
+    /// layer 2(셀 part1 제목 아래)라 본문색 quad가 하단 하이라인(appendTabBarUnderline)을 활성 탭 구간에서 덮어 "연결"이
+    /// 끊기지 않는다. segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
+    /// underline_px=tab_underbar_px(rich 3, 하이라인보다 굵게). per-frame(dropQuadsByLayer(2)가 매 프레임 비움). tui는 tabbarHighlightCell 셀 밴드.
     fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, underline_px: u32) void {
         const seg = m.segOf(tab_index);
         if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭
@@ -10355,8 +10350,8 @@ pub const AppSession = struct {
         const by: f32 = @floatFromInt(m.bar_y);
         const bh: f32 = @floatFromInt(m.bar_h);
         const uw: f32 = @min(@as(f32, @floatFromInt(underline_px)), bh); // 바보다 두꺼우면 바 높이로 clamp — by+bh-uw≥by라 언더바가 바 위로 안 샌다(형제 appendTabBarUnderline의 -| 가드와 동형, #496 리뷰)
-        self.appendSolidQuad(x, by, w, bh, bg, 2); // 평평한 약한 배경(VSCode 탭 — 둥근·gradient 없음)
-        self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active indicator, 탭 폭)
+        self.appendSolidQuad(x, by, w, bh, bg, 2); // 본문색 cutout(연결형 — 직각·gradient 없음, strip 하이라인을 덮음)
+        self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active/focus indicator, 탭 폭)
     }
 
     /// #5a: 우측 가로 스크롤 ‹/› 버튼의 사각형 배경(GpuQuad layer 2) — col 셀(‹=tab_cols, ›=tab_cols+2) 영역을 약한
@@ -10899,7 +10894,7 @@ pub const AppSession = struct {
         };
     }
 
-    /// 탭 제목들을 "{n} {title}" 라벨로 모아 사이드바 제목 glyph RenderFrame을 만든다(한 줄=한 탭,
+    /// 탭 제목들을 라벨(제목만, 번호 prefix 없음 — U-tab2)로 모아 사이드바 제목 glyph RenderFrame을 만든다(한 줄=한 탭,
     /// row=탭 인덱스). `build`(터미널)와 같은 CoreTextFrameBuilder/renderer_state(atlas)를 써서 제목
     /// glyph도 터미널과 같은 slot을 재사용하고 새 glyph만 추가 업로드된다. macOS 전용(실 CoreText
     /// 브리지) — tick의 `builtin.os.tag == .macos` 가드 안에서만 호출한다. 사이드바가 꺼졌거나(폭 0)
@@ -16631,17 +16626,6 @@ test "premultipliedRgba premultiplies rgb by alpha" {
     try std.testing.expectEqual(@as(u32, 0x00_00_00_00), premultipliedRgba(0x00FF_FFFF, 0)); // alpha 0 → 전부 0
 }
 
-// 사이드바·pane 탭 라벨 "{n} {title}"(1-based) 형식 — 번호 prefix가 두 곳에서 일관되게 나오는지 고정.
-test "tabNumberLabel formats {n} {title} with 1-based numbering" {
-    const allocator = std.testing.allocator;
-    const a = try tabNumberLabel(allocator, 0, "sh");
-    defer allocator.free(a);
-    try std.testing.expectEqualStrings("1 sh", a);
-    const b = try tabNumberLabel(allocator, 4, "vim");
-    defer allocator.free(b);
-    try std.testing.expectEqualStrings("5 vim", b);
-}
-
 // paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
 // 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
 test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
@@ -16744,6 +16728,82 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
     // 하이라이트(c1)는 활성 Term(1) 세그먼트 = col tab_w(2탭이라 cols/2)에서 시작 — 바 배경(col 0)과 다르다.
     try std.testing.expect(c1.col > 0);
     try std.testing.expect(c1.width < c0.width); // 세그먼트는 바 전체보다 좁다
+}
+
+// U-tab2 rich: 활성 탭이 **본문색 cutout**(strip에서 도려낸 듯)이고, 포커스 구분은 배경이 아니라 **언더바 색**
+// (포커스 pane=maru 앰버, 비포커스=muted)이라는 새 시각 계약을 layer-2 gpu_quads로 고정한다. 세로 분할로
+// 포커스(아래)·비포커스(위) 두 pane을 만들어 cutout·앰버·muted quad가 모두 방출되는지 본다(옛 sidebarActiveBg 평평 배경 회귀 방지).
+test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber underbar, non-focus muted" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.appearance.chrome_theme = .rich; // 본문색 cutout·언더바 quad는 rich 경로(tab_corner>0)에서만 — resize 전에 고정
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try session.splitActivePane(.vertical); // 상(비활성)/하(활성·포커스) 두 pane
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+    _ = try session.tick();
+
+    const tk = session.buildChromeTokens();
+    const cutout = packOpaqueRgb(session.appearance.theme.background); // 활성 탭 = 본문색
+    const amber = packOpaqueRgb(tk.palette.get(.accent_bar)); // 포커스 pane 언더바(maru 앰버)
+    const muted = packOpaqueRgb(tk.palette.get(.muted_fg)); // 비포커스 pane 언더바
+    const old_weak = session.sidebarActiveBg(); // 옛(U-tab2 전) 활성 탭 평평 배경 — 이제 탭 cutout엔 안 씀
+    // 색이 서로 구분돼야 단언이 의미 있다(테마가 우연히 겹치면 무력) + cutout이 옛 약한 배경이 아님을 고정.
+    try std.testing.expect(cutout != amber and cutout != muted and amber != muted);
+    try std.testing.expect(cutout != old_weak);
+
+    var found_cutout = false;
+    var found_amber_underbar = false;
+    var found_muted_underbar = false;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer != 2) continue; // 탭 밴드 레이어(사이드바 accent 막대는 layer 0이라 제외)
+        if (q.fill_color0 == cutout) found_cutout = true;
+        if (q.fill_color0 == amber) found_amber_underbar = true;
+        if (q.fill_color0 == muted) found_muted_underbar = true;
+    }
+    try std.testing.expect(found_cutout); // 활성 탭 본문색 cutout
+    try std.testing.expect(found_amber_underbar); // 포커스 pane = maru 앰버 언더바
+    try std.testing.expect(found_muted_underbar); // 비포커스 pane = muted 언더바
+}
+
+// U-tab2: pane Term 탭 제목에서 "{n} " 번호 prefix를 제거했음을 rename in-place caret 위치로 고정한다. 단일
+// Term(tab_index 0, seg.start_col=0)을 rename하면 caret은 좌패딩 1칸 뒤(tabs.x + cw)여야 한다 — 번호 prefix가
+// 남아 있었다면 numberPrefixCols(0)=2칸 더 밀려 tabs.x + 3·cw였을 것이다(회귀 방지).
+test "U-tab2: pane Term tab title has no number prefix (rename caret sits right after the left pad)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.tick();
+
+    const term = session.activePane().activeTerm();
+    session.startRename(.{ .term = term }); // custom_name 없는 새 Term → 편집기 비어 qcols=0
+    const caret = session.renameCaretRect() orelse return error.TestUnexpectedResult;
+    const loc = session.termBarLocation(term) orelse return error.TestUnexpectedResult;
+    // 단일 Term이라 tab 0 = 탭 영역 좌단(seg.start_col=0). 번호 prefix 제거 → caret_col=1(좌패딩만).
+    const expected_x: i32 = @intCast(loc.pb.tabs.x + session.cell_width_px);
+    try std.testing.expectEqual(expected_x, caret.x);
 }
 
 // 세로(상하) 분할에서 '아래' pane의 탭 바가 자기 y(≈ 화면 절반)에 그려지는지 — 사용자 제보(세로 분할 시

@@ -17060,6 +17060,80 @@ test "기본값 리셋 토스트는 아무 키로나 닫히고 그 뒤 키 입�
     try std.testing.expect(!session.chrome_host.notice.open); // 휠로도 닫힘
 }
 
+// 회귀(code-review #8 해소 증명): **토스트를 닫는 키는 소비되어 그 키의 바인딩이 실행되지 않는다**. 옛 pass-through
+// 구현에선 토스트를 닫는 키가 keybind resolver로 흘러 ⌘T(새 텀) 같은 바인딩이 함께 실행됐다(닫으려고 누른 키가 부작용).
+// consume 방식에선 notice.handle이 키를 소비해 닫기만 하고, 바인딩은 안 탄다 — 토스트가 닫힌 뒤 다시 눌러야 동작한다.
+test "리셋 토스트를 닫는 키(⌘T)는 소비되어 새 텀을 만들지 않는다(회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    session.showNotice("초기화했습니다");
+    try std.testing.expect(session.chrome_host.notice.open);
+
+    // ⌘T(=새 텀 바인딩)를 토스트 위에서 누름 → 토스트만 닫히고, 텀 수는 그대로(바인딩 미실행 = 소비).
+    const terms_before = session.activePane().terms.items.len;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(!session.chrome_host.notice.open); // 닫힘
+    try std.testing.expectEqual(terms_before, session.activePane().terms.items.len); // ⌘T 미실행(소비)
+
+    // 토스트가 닫힌 뒤 다시 ⌘T → 이번엔 새 텀이 생긴다(바인딩 정상 복구).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(terms_before + 1, session.activePane().terms.items.len);
+}
+
+// 회귀(code-review #10): **알림 패널과 notice 토스트가 공존할 때, 입력은 notice를 먼저 닫고 패널은 유지된다**.
+// showNotice/openNotificationPanel은 서로를 안 닫아 (예: 패널을 본 채 백그라운드 에이전트-완료 notice가 뜨면) 둘이
+// 겹친다. 토스트는 패널 위에 그려지므로, 닫기 입력이 패널 분기보다 **먼저** notice를 닫아야 패널 뒤로 안 갇힌다
+// (mouse()/scrollWheel은 notice 블록을 notifications 분기 앞에, 키는 host.zig 우선순위 Notice>Notifications).
+test "notice 토스트와 알림 패널 공존: 입력이 notice를 먼저 닫고 패널은 유지(회귀)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 알림 패널을 연 채(카드 1개 시드) notice 토스트를 띄운다 — 둘 다 열린 상태(서로 안 닫음).
+    session.pushNotificationHistory("Maru", "에이전트 작업 완료", 0, true);
+    session.openNotificationPanel();
+    try std.testing.expect(session.chrome_host.notifications.open);
+    session.showNotice("초기화했습니다");
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(session.chrome_host.notifications.open); // 공존(showNotice가 패널을 안 닫음)
+
+    // 클릭 → notice만 닫히고 패널은 유지(입력이 notifications 분기로 새지 않음).
+    session.mouse(1, @floatFromInt(session.sidebar_width_px + 400), 150, 0, 0);
+    try std.testing.expect(!session.chrome_host.notice.open); // notice 먼저 닫힘
+    try std.testing.expect(session.chrome_host.notifications.open); // 패널은 그대로
+
+    // 키도 같은 우선순위 — notice 다시 띄우고 평문 키 → notice만 닫힘, 패널 유지.
+    session.showNotice("다시");
+    try std.testing.expect(session.chrome_host.notice.open);
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'a' } });
+    try std.testing.expect(!session.chrome_host.notice.open);
+    try std.testing.expect(session.chrome_host.notifications.open);
+}
+
 // 닫기 확인 모달 마우스 게이트(code-review 후속): (1) **확인 버튼 바로 위**에서 우/중클릭은 버튼을 활성 안 하고
 // 좌클릭만 확정한다 — 같은 좌표라 "우클릭은 무시, 좌클릭은 확정"을 정직하게 증명(버튼 중심은 view가 그린 fill에서
 // 얻음 → buttonAtPoint와 같은 buttonGeom). (2) 패널 밖 좌클릭은 취소(dismiss). (3) 모달 중 hover는 차단된다.

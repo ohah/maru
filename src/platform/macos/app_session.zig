@@ -9620,7 +9620,7 @@ pub const AppSession = struct {
                     // 배경이 아니라 **언더바 색** — 포커스 pane=maru 앰버(active indicator), 비포커스=muted(흐린 구분만).
                     const tab_cutout_bg = packOpaqueRgb(self.appearance.theme.background);
                     const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg));
-                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, ub_accent, tk_space.tab_underbar_px, tk_space.tab_active_style);
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, ub_accent, tk_space, tk.border);
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
@@ -10396,19 +10396,44 @@ pub const AppSession = struct {
     /// 옛 "평평한 약한 배경(sidebarActiveBg)"을 본문색으로 바꿔 깊이(strip↔본문)를 만든다(U-tab2). 배경·언더바 둘 다
     /// layer 2(셀 part1 제목 아래)라 본문색 quad가 하단 하이라인(appendTabBarUnderline)을 활성 탭 구간에서 덮어 "연결"이
     /// 끊기지 않는다. segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
-    /// underline_px=tab_underbar_px(rich 3, 하이라인보다 굵게). `style`(chrome.tab-style §7): connected=본문색 cutout+언더바,
-    /// underline=언더바만(bg fill 없음 — strip 그대로). 세그먼트 기하 불변이라 hit-test/✕는 두 스타일 공통. per-frame
-    /// (dropQuadsByLayer(2)가 매 프레임 비움). tui는 tabbarHighlightCell 셀 밴드.
-    fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, underline_px: u32, style: chrome.tokens.TabActiveStyle) void {
+    /// `space.tab_active_style`(chrome.tab-style §7)로 분기: **connected**=본문색 cutout(바 전체) + 언더바, **underline**=
+    /// 언더바만(bg fill 없음 — strip 그대로), **pill**=둥근 inset quad(본문색 fill + 앰버/muted 테두리, 언더바 없음 — 떠 있는
+    /// pill). bg=본문색, accent=포커스 색(앰버)/비포커스(muted). 세 스타일 모두 **세그먼트 기하 불변**이라 hit-test/✕/드래그는
+    /// 공통(스타일은 세그먼트 안 fill만 바꿈, §5.4). 모두 layer 2(per-frame, dropQuadsByLayer(2)가 비움). tui는 tabbarHighlightCell 셀 밴드.
+    fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, space: chrome.tokens.Spacing, border: chrome.tokens.Border) void {
         const seg = m.segOf(tab_index);
         if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭
         const x: f32 = @floatCast(seg.start_px);
         const w: f32 = @floatCast(seg.end_px - seg.start_px);
         const by: f32 = @floatFromInt(m.bar_y);
         const bh: f32 = @floatFromInt(m.bar_h);
-        const uw: f32 = @min(@as(f32, @floatFromInt(underline_px)), bh); // 바보다 두꺼우면 바 높이로 clamp — by+bh-uw≥by라 언더바가 바 위로 안 샌다(형제 appendTabBarUnderline의 -| 가드와 동형, #496 리뷰)
-        if (style == .connected) self.appendSolidQuad(x, by, w, bh, bg, 2); // 본문색 cutout(연결형 — 직각·gradient 없음, strip 하이라인을 덮음). underline은 배경 fill 생략(strip 그대로)
-        self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버 언더바(active/focus indicator, 탭 폭) — 두 스타일 공통
+        switch (space.tab_active_style) {
+            .connected, .underline => {
+                const uw: f32 = @min(@as(f32, @floatFromInt(space.tab_underbar_px)), bh); // 바보다 두꺼우면 바 높이로 clamp(언더바가 바 위로 안 샘 — #496 리뷰)
+                if (space.tab_active_style == .connected) self.appendSolidQuad(x, by, w, bh, bg, 2); // 본문색 cutout(strip 하이라인을 덮음). underline은 배경 fill 생략
+                self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버/muted 언더바(active/focus indicator, 탭 폭)
+            },
+            .pill => {
+                // 떠 있는 pill: 바 위아래로 inset한 둥근 quad(본문색 fill) + 앰버/muted 테두리. 포커스 구분은 테두리 색(언더바 대신).
+                const inset: f32 = @min(@as(f32, @floatFromInt(space.tab_pill_inset_px)), bh / 2.0); // inset>바높이/2면 clamp(ph≥0)
+                const radius: f32 = @floatFromInt(space.corner_radius_px);
+                const bw: f32 = @floatFromInt(border.line_thickness_px);
+                const ph: f32 = @max(bh - 2.0 * inset, 1.0);
+                self.gpu_quads.append(self.allocator, .{
+                    .x = x,
+                    .y = by + inset,
+                    .w = w,
+                    .h = ph,
+                    .corner_radii = .{ radius, radius, radius, radius },
+                    .border_widths = .{ bw, bw, bw, bw },
+                    .fill_color0 = bg,
+                    .fill_color1 = bg,
+                    .border_color = accent,
+                    .gradient_kind = 0,
+                    .layer = 2,
+                }) catch {};
+            },
+        }
     }
 
     /// #5a: 우측 가로 스크롤 ‹/› 버튼의 사각형 배경(GpuQuad layer 2) — col 셀(‹=tab_cols, ›=tab_cols+2) 영역을 약한
@@ -11605,6 +11630,7 @@ pub const AppSession = struct {
         tk.space.tab_active_style = switch (self.appearance.chrome_tab_style) {
             .connected => .connected,
             .underline => .underline,
+            .pill => .pill,
         };
         return tk;
     }
@@ -16875,6 +16901,40 @@ test "TS1 chrome.tab-style=underline: no cutout bg quad, only the amber underbar
     }
     try std.testing.expect(!found_cutout); // underline은 본문색 배경 fill을 안 그린다(connected만 cutout)
     try std.testing.expect(found_amber_underbar); // 언더바는 두 스타일 공통
+}
+
+// TS2 탭 스타일 축(chrome.tab-style=pill): 활성 탭이 **둥근 inset quad(corner_radii>0) + 앰버 테두리**로 방출되는지
+// 고정한다(포커스 구분을 언더바 색이 아니라 테두리 색으로 — §7). connected/underline과 같은 세그먼트 기하, fill만 다름.
+test "TS2 chrome.tab-style=pill: rounded inset quad with accent border" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.appearance.chrome_theme = .rich;
+    session.appearance.chrome_tab_style = .pill; // 축: 둥근 inset pill + 테두리 — resize 전에 고정
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    _ = try session.tick();
+
+    const tk = session.buildChromeTokens();
+    try std.testing.expectEqual(chrome.tokens.TabActiveStyle.pill, tk.space.tab_active_style); // config→토큰 매핑
+    const amber = packOpaqueRgb(tk.palette.get(.accent_bar)); // 포커스(단일 pane) pill 테두리 색
+
+    var found_pill = false;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer != 2) continue;
+        // pill = 유일한 둥근(corner_radii>0) + 앰버 테두리 quad(바 배경·언더바·스크롤 버튼은 직각). border_widths>0도 확인.
+        if (q.corner_radii[0] > 0 and q.border_widths[0] > 0 and q.border_color == amber) found_pill = true;
+    }
+    try std.testing.expect(found_pill); // 둥근 inset pill + 앰버 테두리(포커스)
 }
 
 // U-tab2: pane Term 탭 제목에서 "{n} " 번호 prefix를 제거했음을 rename in-place caret 위치로 고정한다. 단일

@@ -632,11 +632,12 @@ pub const ChromeTheme = enum {
 };
 
 /// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). `chrome.theme`(룩)·`theme.preset`(색)과 직교.
-/// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀). pill은 TS2 후속.
+/// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀), pill = 둥근 inset + 앰버 테두리(떠 있는 pill).
 /// rich 경로에서만 의미(tui는 셀 밴드 유지). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
 pub const ChromeTabStyle = enum {
     connected,
     underline,
+    pill,
 };
 
 /// 사이드바 세션 카드에 보조 정보를 표시할지. view options 메뉴(앱)와 config가 **양방향**으로 공유한다 —
@@ -812,7 +813,7 @@ pub const Config = struct {
     // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
     pub const schema = .{
         .chrome_theme = Meta{ .key = "chrome.theme", .doc = "chrome 디자인 테마", .widget = .dropdown, .section = .theme },
-        .chrome_tab_style = Meta{ .key = "chrome.tab-style", .doc = "활성 탭 룩(connected|underline)", .widget = .dropdown, .section = .theme },
+        .chrome_tab_style = Meta{ .key = "chrome.tab-style", .doc = "활성 탭 룩(connected|underline|pill)", .widget = .dropdown, .section = .theme },
         .theme_follow_system = Meta{ .key = "theme.follow-system", .doc = "시스템 라이트/다크 따라 테마 전환", .widget = .toggle, .section = .theme },
         .theme_preset_light = Meta{ .key = "theme.preset-light", .doc = "라이트 외관 프리셋", .widget = .dropdown, .section = .theme },
         .theme_preset_dark = Meta{ .key = "theme.preset-dark", .doc = "다크 외관 프리셋", .widget = .dropdown, .section = .theme },

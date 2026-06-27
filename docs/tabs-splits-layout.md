@@ -157,6 +157,13 @@ Node = leaf(Pane)
   터미널 셀 스트림에 origin 박힌 셀로 그려진다(`metal_frame.replace`의 `pane_chrome_cells`, 렌더러·ABI 무변경).
   **PR-C1**: 바 배경만(활성 강조색·비활성 chrome 색). **PR-C2**: Term 제목 glyph를 탭으로. **PR-D**: 호버 ✕·활성
   하이라이트·클릭. **PR-E**: 탭 드래그(pane 내/간). **PR-F**: "+" 버튼.
+  - **활성 탭 룩(rich, U-tab2 — 연결형 cutout)**: 활성 Term 탭은 **터미널 본문색(`theme.background`)** 으로 채워 strip
+    (`sidebarBg`)에서 도려낸 듯 아래 본문과 이어져 보인다(VSCode/Ghostty식 깊이). **포커스 pane 구분은 배경이 아니라 하단
+    언더바 색** — 포커스=maru 앰버(#DDA15E), 비포커스=muted(모든 활성 탭 배경은 본문색 통일). 언더바는 탭바 하단 하이라인과
+    분리한 전용 토큰 `tab_underbar_px`(rich 3px)로 더 굵게 그려 active/focus 신호를 또렷하게 한다(`appendActiveTabHighlight`
+    단일 출처; cutout quad가 활성 탭 구간 하이라인을 덮어 연결이 끊기지 않음). **탭 제목엔 번호 prefix(`N `)를 붙이지 않는다**
+    (브라우저/VSCode/Warp식 — Term 번호는 단축키 미매핑이라 군더더기였다; 사이드바 워크스페이스 라벨이 이미 번호를 안 붙이던
+    것과 일관). tui 룩은 기존 셀 밴드(`tabbarHighlightCell`). 단일 출처: [chrome-strategy.md](chrome-strategy.md) U-tab2.
 - **탭 바 "+" 버튼(PR-F)**: 바 우측에 "+"를 그려 클릭하면 그 pane에 새 Term을 띄운다(⌘T의 마우스 버전). 바를
   `paneTabAreaCols(cols)`(넓으면 `cols - 3`, 좁으면 전체)로 나눠 **탭 영역**과 우측 **"+" 영역**을 분리한다 — 탭
   렌더·hit-test(tabbar `Metrics`의 `tabIndex`/`segOf`로 탭 인덱스, `inCloseZone`으로 ✕)·"+"(`inPlusZone`)가 같은 분할을 공유해 "보이는 = 클릭되는"을

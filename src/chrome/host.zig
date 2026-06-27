@@ -204,7 +204,7 @@ pub const ChromeHost = struct {
                     };
                 }
                 if (self.notice.open) {
-                    _ = notice.handle(k, &self.notice); // Enter/Esc면 닫음. session 부수효과 없음.
+                    _ = notice.handle(k, &self.notice); // 비-인터랙티브 토스트 — 아무 키로나 닫음(소비, session 부수효과 없음).
                     return .none;
                 }
                 if (self.context_menu.open) {

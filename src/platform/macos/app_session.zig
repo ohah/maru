@@ -326,9 +326,9 @@ fn readGitBranch(io: std.Io, allocator: std.mem.Allocator, cwd: []const u8) ?[]c
     return null;
 }
 
-/// 사이드바 경로줄(카드 폴더줄)용 cwd 문자열(owned). 앞에 폴더 아이콘(0xF000A — octicons file-directory-fill)을
-/// 붙인다 — 브랜치줄 octocat(0xF0009)과 같은 width-2 합성 아이콘이라 작은 카드 셀에서도 외곽이 살아 또렷하다
-/// (titleCellWidth가 PUA를 2칸 렌더). $HOME 접두는 "~"로 축약한다(예: /Users/x/p → 📁 ~/p). cwd가 비면 "".
+/// 사이드바 경로줄(카드 폴더줄)용 **순수 cwd 문자열**(owned). $HOME 접두는 "~"로 축약한다(예: /Users/x/p → ~/p).
+/// cwd가 비면 "". 폴더 아이콘 prefix는 호출부(buildSidebarTitleFrame)가 브랜치줄 octocat과 같은 패턴으로 붙인다 —
+/// 이 함수는 경로만 파생해, copy-path·click-to-open 등 다른 소비자가 PUA 글리프 없는 깨끗한 경로를 쓸 수 있다.
 /// 파생값(영속 안 함) — 매 프레임 빌드라 owned 슬라이스를 호출부가 바로 해제한다.
 fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
     const cwd = term.surface.core.currentCwd();
@@ -336,8 +336,17 @@ fn sidebarCwdPath(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
     const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
     // $HOME 정확 경계(home 자체 또는 home/ 하위)일 때만 "~"로 — "/Users/xyz"가 "/Users/x"로 잘못 잡히지 않게.
     if (home.len > 0 and std.mem.startsWith(u8, cwd, home) and (cwd.len == home.len or cwd[home.len] == '/'))
-        return std.fmt.allocPrint(allocator, "\u{F000A} ~{s}", .{cwd[home.len..]});
-    return std.fmt.allocPrint(allocator, "\u{F000A} {s}", .{cwd});
+        return std.fmt.allocPrint(allocator, "~{s}", .{cwd[home.len..]});
+    return allocator.dupe(u8, cwd);
+}
+
+/// 카드 폴더줄(owned) = 폴더 아이콘(0xF000A) prefix + 순수 cwd(sidebarCwdPath). 브랜치줄 octocat(0xF0009)과 같은
+/// "아이콘 + 공백 + 텍스트" 조립 패턴 — 표현(아이콘)은 카드 조립부에, 경로 파생은 sidebarCwdPath에 둔다. cwd 비면 "".
+fn sidebarFolderLine(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
+    const path = try sidebarCwdPath(allocator, term);
+    defer allocator.free(path);
+    if (path.len == 0) return allocator.dupe(u8, "");
+    return std.fmt.allocPrint(allocator, "\u{F000A} {s}", .{path});
 }
 
 // 순수 레이아웃 기하(layout_math.PaddingPx·gridFromBacking·gridFromRectPx·ptToPx)는 session/layout_math.zig로 이동(b1).
@@ -1614,7 +1623,7 @@ pub const AppSession = struct {
     fn paneLabelCols(pane: *const Pane, bar_cols: u32) u32 {
         const name = app.pickLabel(pane.custom_name, "");
         if (name.len == 0) return 0;
-        return paneLabelColsForWidth(coretext_frame_builder.titleDisplayWidth(name), bar_cols);
+        return paneLabelColsForWidth(coretext_frame_builder.titleDisplayWidth(name, false), bar_cols); // pane 라벨(사용자 텍스트) — 아이콘 widen 안 함
     }
 
     /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
@@ -11135,7 +11144,7 @@ pub const AppSession = struct {
                 // 폭은 titleCellWidth가 PUA를 **2칸(~16px)** 렌더해 width-1(~8px)일 때 동그란 링처럼 뭉개지던 걸 키웠다 —
                 // 폴더줄(0xF000A)·에이전트 gutter 아이콘과 같은 크기로 통일(사용자 피드백 "깃 아이콘이 너무 작다").
                 try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{F0009} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
-                try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarCwdPath(self.allocator, term) else try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarFolderLine(self.allocator, term) else try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.agentStatusLine(term));
             }
         }

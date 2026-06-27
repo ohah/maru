@@ -198,18 +198,21 @@ pub const title_ellipsis_glyph: u21 = 0x2026;
 /// title의 디스플레이 폭(칸 합) — wide glyph는 2, 나머지 1. 깨진 UTF-8 바이트는 U+FFFD(1칸). 말줄임 필요 판정용.
 /// pub: pane 라벨 세그먼트 폭(paneLabelCols)도 이 단일 출처로 폭을 잰다(렌더 ellipsize와 같은 셈법이라 라벨
 /// 칸 예약과 실제 글리프가 어긋나지 않는다).
-/// 카드/제목 텍스트에 박힌 maru 아이콘은 **렌더 폭 2칸**으로 친다 — advance(cellWidth)는 1이지만 1칸(=cell width
-/// ~8px)에 다운스케일하면 octocat·폴더 같은 실루엣이 뭉개져 안 보였다(사용자 피드백). 에이전트 gutter 아이콘(별도 셀,
-/// width 2)과 같은 ~16px로 통일한다. **등록된 아이콘만**(`isRegisteredIcon` — 범위 전체 `isIcon`이 아니라 실제 그릴
-/// ~10개) 대상이다: Nerd Fonts v3가 MDI를 Plane-15 PUA(U+F0001~)로 옮겨 `0xF0000~0xF00FF`와 겹치는데, 신뢰 불가한
-/// OSC 0/2 제목(아래 ':382 신뢰 불가' 참고)에 그 글리프가 와도 폭을 안 키우게(미등록은 cellWidth 그대로 1칸). 아이콘이
-/// 아니면 cellWidth 그대로(EAW 2칸·일반 1칸).
-fn titleCellWidth(cp: u21) u16 {
-    if (renderer.icon_glyph.isRegisteredIcon(cp)) return 2;
+/// 카드 보조줄(branch/folder)에 maru가 의도적으로 박은 아이콘은 **렌더 폭 2칸**으로 친다 — 단 `widen_icons`=true일
+/// 때만. advance(cellWidth)는 1이지만 1칸(~8px)에 다운스케일하면 octocat·폴더 실루엣이 뭉개져 안 보였다(사용자 피드백).
+/// 에이전트 gutter 아이콘(별도 셀 width 2)과 같은 ~16px로 통일. **opt-in인 이유**: 이 폭 함수는 pane 탭 제목·pane
+/// 라벨·OSC 0/2 터미널 제목·rename 편집기까지 공유하는데, 등록 10개(0xF0001~A)가 Nerd Fonts v3 MDI(Plane-15 PUA로
+/// 이전)와 겹쳐 — 그 제목/이름에 우연히 그 글리프가 와도 폭을 2칸으로 키우면 탭 텍스트가 어긋나고 rename caret 예약
+/// (renameDisplayWidth는 1칸 셈)과 틀어진다. 그래서 maru가 아이콘을 박는 카드 보조줄만 widen=true, 나머지(터미널/
+/// 사용자 텍스트)는 false(1칸). 아이콘이 아니거나 widen=false면 cellWidth 그대로(EAW 2칸·일반 1칸).
+fn titleCellWidth(cp: u21, widen_icons: bool) u16 {
+    if (widen_icons and renderer.icon_glyph.isRegisteredIcon(cp)) return 2;
     return @max(1, terminal.width.cellWidth(cp));
 }
 
-pub fn titleDisplayWidth(title: []const u8) usize {
+/// title의 표시 칸 폭. `widen_icons`면 카드 보조줄에 박힌 등록 maru 아이콘을 2칸으로 친다(titleCellWidth 참고 —
+/// 카드만 true, 탭·OSC·라벨 제목은 false). appendEllipsizedTitle의 말줄임 예약과 렌더가 같은 폭을 봐야 한다.
+pub fn titleDisplayWidth(title: []const u8, widen_icons: bool) usize {
     var total: usize = 0;
     var i: usize = 0;
     while (i < title.len) {
@@ -225,7 +228,7 @@ pub fn titleDisplayWidth(title: []const u8) usize {
             }
         } else |_| {}
         i += advance;
-        total += titleCellWidth(cp);
+        total += titleCellWidth(cp, widen_icons);
     }
     return total;
 }
@@ -244,9 +247,10 @@ fn appendEllipsizedTitle(
     start_col: u16,
     end_col: u16,
     style: terminal.Style,
+    widen_icons: bool, // 카드 보조줄(branch/folder)만 true — 등록 maru 아이콘을 2칸 렌더(titleCellWidth)
 ) !u16 {
     if (end_col <= start_col) return start_col;
-    const fits = titleDisplayWidth(title) <= @as(usize, end_col - start_col);
+    const fits = titleDisplayWidth(title, widen_icons) <= @as(usize, end_col - start_col);
     const text_end: u16 = if (fits) end_col else end_col - 1; // 말줄임이면 마지막 1칸을 "…"에 남긴다
     var col: u16 = start_col;
     var i: usize = 0;
@@ -262,7 +266,7 @@ fn appendEllipsizedTitle(
                 } else |_| {}
             }
         } else |_| {}
-        const w: u16 = titleCellWidth(cp); // maru 아이콘(PUA)은 2칸 렌더(octocat·폴더가 또렷하게)
+        const w: u16 = titleCellWidth(cp, widen_icons); // 카드 보조줄이면 등록 maru 아이콘 2칸 렌더
         if (col + w > text_end) break; // 텍스트 한도를 넘으면(말줄임 자리 직전) 멈춘다
         try cells.append(allocator, .{ .row = row, .col = col, .codepoint = cp, .width = @intCast(@min(w, 2)), .style = style });
         col += w;
@@ -359,20 +363,28 @@ pub fn buildSidebarDrawList(
         }
         // 이 탭의 줄 모으기: 이름(항상) + 브랜치(있으면) + 경로(있으면) + 상태(에이전트면). 순서대로 line_index
         // 0,1,2,3을 부여. 빈 보조줄("")은 건너뛰어 1~4줄이 된다.
+        // widen[j]: 그 줄이 maru가 아이콘을 박는 보조줄(branch/folder)이면 true → 등록 아이콘을 2칸 렌더. 이름줄·
+        // 상태줄(사용자/에이전트 텍스트)은 false라, 거기에 우연히 등록 PUA cp(Nerd Fonts MDI 등)가 와도 폭이 안 커진다
+        // (rename caret 예약 renameDisplayWidth는 1칸 셈 — 일치 유지). branches/paths만 widen, 나머지 false.
         var lines: [4][]const u8 = undefined;
+        var line_widen: [4]bool = undefined;
         var n: u16 = 0;
         lines[n] = name;
+        line_widen[n] = false;
         n += 1;
         if (i < branches.len and branches[i].len > 0) {
             lines[n] = branches[i];
+            line_widen[n] = true; // 브랜치줄 octocat
             n += 1;
         }
         if (i < paths.len and paths[i].len > 0) {
             lines[n] = paths[i];
+            line_widen[n] = true; // 폴더줄 folder 아이콘
             n += 1;
         }
         if (i < statuses.len and statuses[i].len > 0) {
             lines[n] = statuses[i];
+            line_widen[n] = false;
             n += 1;
         }
         const active = active_row != null and active_row.? == i;
@@ -385,7 +397,7 @@ pub fn buildSidebarDrawList(
             // **우측 패딩 1칸 예약(cols-1)**: 카드 글리프는 렌더러가 glyph_pad(=cw×0.5)만큼 오른쪽으로 미는데,
             // end_col=cols면 마지막 칸이 사이드바 경계를 반 칸 넘쳐 말줄임/텍스트가 경계에 붙어 답답했다(사용자
             // 피드백). cols-1로 두면 우측에 ~0.5칸 여백이 생겨 좌측 glyph_pad와 균형이 맞는다.
-            _ = try appendEllipsizedTitle(allocator, &cells, lines[j], row, text_col, cols -| 1, row_style);
+            _ = try appendEllipsizedTitle(allocator, &cells, lines[j], row, text_col, cols -| 1, row_style, line_widen[j]);
             max_row = @max(max_row, row);
         }
     }
@@ -479,7 +491,7 @@ pub fn buildPaneLabelDrawList(
     errdefer cells.deinit(allocator);
     if (cols >= 3) {
         // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 탭과의 간격. 그 사이에 이름(말줄임).
-        _ = try appendEllipsizedTitle(allocator, &cells, label, 0, 1, cols - 1, .{ .foreground = fg });
+        _ = try appendEllipsizedTitle(allocator, &cells, label, 0, 1, cols - 1, .{ .foreground = fg }, false); // pane 라벨(터미널 텍스트) — 아이콘 widen 안 함
     }
     return .{
         .size = .{ .cols = cols, .rows = 1 },
@@ -503,7 +515,7 @@ pub fn buildPaneGripDrawList(
     errdefer cells.deinit(allocator);
     if (cols >= 1) {
         const c = cols / 2; // 글리프를 grip 영역 중앙 칸에 — 양쪽 패딩
-        _ = try appendEllipsizedTitle(allocator, &cells, "\u{283F}", 0, c, c + 1, .{ .foreground = fg });
+        _ = try appendEllipsizedTitle(allocator, &cells, "\u{283F}", 0, c, c + 1, .{ .foreground = fg }, false); // braille(아이콘 아님)
     }
     return .{
         .size = .{ .cols = cols, .rows = 1 },
@@ -551,7 +563,7 @@ pub fn buildPaneTabBarDrawList(
             // bold는 셰이퍼가 bold 폰트 face를 골라 실제 굵은 글리프를 그린다(사이드바 활성 행과 같은 규칙).
             const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg, .bold = true } else style;
             // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
-            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style);
+            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style, false); // pane 탭 제목(터미널 OSC) — widen 안 함
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
                 try cells.append(allocator, .{
                     .row = 0,
@@ -611,7 +623,7 @@ pub fn buildFloatingTabDrawList(
         col = 1;
     }
     // 제목을 col 1..cols에 깔고(넘치면 "…"), 다음 빈 col을 받아 그 뒤를 bg로 채운다.
-    col = try appendEllipsizedTitle(allocator, &cells, title, 0, col, cols, style);
+    col = try appendEllipsizedTitle(allocator, &cells, title, 0, col, cols, style, false); // 제목(터미널 텍스트) — widen 안 함
     while (col < cols) : (col += 1) { // 남은 col = bg 공백(솔리드 박스 마감)
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
@@ -660,7 +672,7 @@ pub fn buildStickyCommandDrawList(
         }
     }
     // 명령줄 텍스트(넘치면 "…")를 col..cols에 깔고, 남은 col을 bg 공백으로 채워 솔리드 배너로 마감.
-    col = try appendEllipsizedTitle(allocator, &cells, text, 0, col, cols, style);
+    col = try appendEllipsizedTitle(allocator, &cells, text, 0, col, cols, style, false); // 명령줄 텍스트 — widen 안 함
     while (col < cols) : (col += 1) {
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
@@ -1026,11 +1038,36 @@ test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and
 // titleDisplayWidth는 **등록된** maru 아이콘 PUA만 2칸으로 친다(렌더 폭과 일치해야 말줄임 예약 칸이 안 어긋난다).
 // 미등록 범위 codepoint(Nerd Fonts v3가 Plane-15 PUA로 옮긴 MDI 등)는 신뢰 불가 OSC 0/2 제목에 와도 1칸 유지.
 test "titleDisplayWidth counts only registered maru icon PUA as width 2" {
-    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F0009}")); // octocat(등록)
-    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F000A}")); // folder(등록)
-    try std.testing.expectEqual(@as(usize, 1), titleDisplayWidth("\u{F0050}")); // 미등록 범위 — 1칸(registered-only)
-    try std.testing.expectEqual(@as(usize, 6), titleDisplayWidth("\u{F0009} abc")); // 2 + 공백 + abc(3)
-    try std.testing.expectEqual(@as(usize, 3), titleDisplayWidth("abc")); // 일반 텍스트 회귀
+    // widen=true(카드 보조줄): 등록 아이콘 2칸.
+    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F0009}", true)); // octocat(등록)
+    try std.testing.expectEqual(@as(usize, 2), titleDisplayWidth("\u{F000A}", true)); // folder(등록)
+    try std.testing.expectEqual(@as(usize, 1), titleDisplayWidth("\u{F0050}", true)); // 미등록 범위 — 1칸(registered-only)
+    try std.testing.expectEqual(@as(usize, 6), titleDisplayWidth("\u{F0009} abc", true)); // 2 + 공백 + abc(3)
+    try std.testing.expectEqual(@as(usize, 3), titleDisplayWidth("abc", true)); // 일반 텍스트 회귀
+    // widen=false(탭·OSC·라벨 제목): 등록 아이콘도 1칸 — 터미널 제목이 Nerd Fonts MDI와 겹쳐도 안 어긋남.
+    try std.testing.expectEqual(@as(usize, 1), titleDisplayWidth("\u{F0009}", false)); // octocat이지만 1칸
+    try std.testing.expectEqual(@as(usize, 5), titleDisplayWidth("\u{F0009} abc", false)); // 1 + 공백 + abc(3)
+}
+
+// 두 생성물 동기 가드: C 셰이핑 게이트 icon_codepoints.h(maru_is_registered_icon_cp)와 Zig 등록 집합
+// (icon_glyph.isRegisteredIcon/coverageFor)이 같은 codepoint들을 봐야 한다 — 둘 다 svg_to_coverage.py의 ICONS에서
+// 생성되지만, 한쪽만 손편집/부분 재생성하면 드리프트해 그 아이콘이 실제 앱에서 blank가 된다(zig test는 .h를 안 봐서
+// 안 잡힘). 여기서 .h를 파싱해 (1) 각 case cp가 Zig 등록이고 (2) 개수가 같음을 확인해 set 동일성을 못박는다.
+test "icon_codepoints.h(C 게이트)와 Zig 등록 아이콘 집합이 일치한다" {
+    const header = @embedFile("icon_codepoints.h"); // 같은 디렉터리(src/platform/macos)
+    var c_count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, header, i, "case 0x")) |pos| {
+        const hex_start = pos + "case 0x".len;
+        var hex_end = hex_start;
+        while (hex_end < header.len and std.ascii.isHex(header[hex_end])) : (hex_end += 1) {}
+        const cp = try std.fmt.parseInt(u32, header[hex_start..hex_end], 16);
+        try std.testing.expect(renderer.icon_glyph.isRegisteredIcon(cp)); // C ⊆ Zig 등록
+        c_count += 1;
+        i = hex_end;
+    }
+    try std.testing.expect(c_count > 0); // 파싱이 실제로 됐다
+    try std.testing.expectEqual(renderer.icon_glyph.registeredIconCount(), c_count); // 개수 동일 → set 동일
 }
 
 test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab segments" {

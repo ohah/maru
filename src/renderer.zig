@@ -134,9 +134,9 @@ pub fn synthesizeGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: us
         return legacy_smooth_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
     if (legacy_diagonal_glyph.isLegacyDiagonal(cp)) // 대각선 stroke·hatch
         return legacy_diagonal_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
-    if (icon_glyph.isRegisteredIcon(cp)) // maru chrome 아이콘(등록된 cp만 — 미등록 in-range는 폰트 폴백, Nerd Fonts v3 MDI 겹침)
-        return icon_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
-    return null;
+    // maru chrome 아이콘(등록된 cp만 — 미등록 in-range는 폰트 폴백, Nerd Fonts v3 MDI 겹침). fillCoverage가 미등록이면
+    // null을 돌려줘 이 함수의 "합성 아님" 반환과 일치한다 — coverageFor를 한 번만 스캔(isRegisteredIcon 사전 게이트 제거).
+    return icon_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
 }
 
 test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {

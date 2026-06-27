@@ -12,8 +12,6 @@ pub const ResolveError = error{
 pub const ResolvedFontRequest = struct {
     family: []const u8,
     size: f32,
-    /// ⌘+/⌘- 폰트 조절 증분(pt). resolveFont가 [0.1, 32]로 검증(범위 밖은 InvalidFontSize).
-    size_step: f32,
     /// 행간 배수. resolveFont가 [0.5, 3.0]으로 재검증(범위 밖은 InvalidFontSize). refreshCellMetrics가 cell_height_px에 곱한다.
     line_height: f32,
     /// 자간(논리 pt, 음수 허용). resolveFont가 [-8, 32]로 재검증(범위 밖은 InvalidFontSize). refreshCellMetrics가 px로 환산해 cell_width_px에 가산.
@@ -67,7 +65,7 @@ pub const ResolvedAppearance = struct {
     font: ResolvedFontRequest,
     theme: ResolvedTheme,
     cursor: ResolvedCursor,
-    chrome_theme: theme.ChromeTheme = .tui, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a)
+    chrome_theme: theme.ChromeTheme = .rich, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a). 기본 rich(theme.Config 기본값과 일치 — 실제 값은 resolve가 config에서 채움)
     blink_text: bool = false, // SGR 5 blink 글자 점멸 여부(기본 정적 — 접근성). app이 blink 위상 wiring 게이트로 쓴다.
     // bold(SGR 1) 글자의 indexed 0~7 전경을 bright(8~15)로 — 폰트가 weight를 안 주는 환경에서 bold를 색으로도
     // 구분하려는 opt-in(xterm boldColors·Ghostty bold-is-bright와 같은 트레이드오프; 근거는 theme.Config.bold_is_bright
@@ -126,8 +124,6 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
     const family = std.mem.trim(u8, config.family, &std.ascii.whitespace);
     if (family.len == 0) return error.EmptyFontFamily;
     if (!(config.size >= 1.0 and config.size <= 512.0)) return error.InvalidFontSize;
-    // step은 1 클릭당 증분(pt). 범위는 theme가 단일 출처(loader 파싱 검증과 같은 const — drift 없음).
-    if (!(config.size_step >= theme.font_size_step_min and config.size_step <= theme.font_size_step_max)) return error.InvalidFontSize;
     // line-height(배수)·letter-spacing(논리 pt)도 theme const로 재검증(loader가 valid만 담지만, resolve 단독
     // 호출·테스트도 같은 게이트를 거치게 한다). !(>=min and <=max) 형태라 NaN도 함께 거부된다(size 가드와 동형).
     if (!(config.line_height >= theme.font_line_height_min and config.line_height <= theme.font_line_height_max)) return error.InvalidFontSize;
@@ -138,7 +134,6 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
         // 별도 allocator를 들이지 않고, 소유권을 늘려야 하는 시점은 설정 reload 구현 때로 둔다.
         .family = family,
         .size = config.size,
-        .size_step = config.size_step,
         .line_height = config.line_height,
         .letter_spacing = config.letter_spacing,
         // fallback은 raw CSV를 그대로 빌린다(빈 ""=폴백 없음). split·trim·검증은 ObjC 셰이퍼가 cascade list를 만들 때 한다
@@ -313,7 +308,7 @@ test "appearance resolver applies cursor color overrides and keeps them null by 
 
 test "appearance resolver trims font family and preserves cursor options" {
     const resolved = try resolve(.{
-        .font = .{ .family = "  Menlo  ", .size = 16, .size_step = 3, .line_height = 1.5, .letter_spacing = -2.0, .fallback = "Apple SD Gothic Neo, Apple Color Emoji" },
+        .font = .{ .family = "  Menlo  ", .size = 16, .line_height = 1.5, .letter_spacing = -2.0, .fallback = "Apple SD Gothic Neo, Apple Color Emoji" },
         .theme = .{
             .background = "#000000",
             .foreground = "#FFFFFF",
@@ -327,7 +322,6 @@ test "appearance resolver trims font family and preserves cursor options" {
     try std.testing.expectEqualStrings("Apple SD Gothic Neo, Apple Color Emoji", resolved.font.fallback); // 폴백 CSV는 raw 전파(split은 ObjC) — F1-2
     try std.testing.expectEqualStrings("", (try resolve(.{ .theme = .{ .background = "#000000", .foreground = "#FFFFFF", .cursor = "#ffffff", .selection = "#123456" } })).font.fallback); // 기본 빈 폴백
     try std.testing.expectEqual(@as(f32, 16), resolved.font.size);
-    try std.testing.expectEqual(@as(f32, 3), resolved.font.size_step); // size_step 통과(기본 1)
     try std.testing.expectEqual(@as(f32, 1.5), resolved.font.line_height); // line_height 전파(범위 내)
     try std.testing.expectEqual(@as(f32, -2.0), resolved.font.letter_spacing); // letter_spacing 전파(음수 허용)
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }, resolved.theme.foreground);
@@ -341,10 +335,6 @@ test "appearance resolver rejects invalid font values" {
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 0 } }));
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = -1 } }));
     try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 600 } }));
-    // size_step도 [0.1, 32] 밖이면 거부(0=무동작·음수=역방향·과대 방지).
-    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = 0 } }));
-    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = -2 } }));
-    try std.testing.expectError(error.InvalidFontSize, resolve(.{ .font = .{ .family = "Menlo", .size = 14, .size_step = 64 } }));
     // line-height도 [0.5, 3.0] 밖이면 거부(겹침·행 급감 가드). 경계값은 통과.
     try std.testing.expectEqual(@as(f32, 0.5), (try resolve(.{ .font = .{ .family = "Menlo", .size = 14, .line_height = 0.5 } })).font.line_height);
     try std.testing.expectEqual(@as(f32, 3.0), (try resolve(.{ .font = .{ .family = "Menlo", .size = 14, .line_height = 3.0 } })).font.line_height);

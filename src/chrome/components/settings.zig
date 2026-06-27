@@ -320,6 +320,11 @@ const palette_label_reserve: u32 = 14; // palette 행 라벨("ANSI 팔레트") �
 // control 열 최소 폭(칸) — text 값(폰트 패밀리 "JetBrains Mono"=14)·dropdown 프리셋명("catppuccin-mocha"=16)을
 // 잘리지 않고 담는 하한. slider 폭이 이보다 넓으면 그쪽을 쓴다(controlCols).
 const settings_value_cols: u32 = 24;
+// slider control 열 우측에 **현재 숫자 값**을 표시하려고 예약하는 칸 수. 막대만 그리면(이전) 값 변화가 작거나
+// 효과가 즉각 안 보이는 슬라이더(예: 커서 깜빡임 ms는 범위 100~10000이라 막대가 거의 안 움직임)에서 화살표를
+// 눌러도 변화가 안 보여 "안 먹는다"처럼 느껴졌다 — 값을 함께 보여 화살표/드래그가 즉시 반영됨을 눈으로 확인하게 한다.
+// 폭 = 최대 표시 폭("10000"=5) + 막대와의 1칸 간격. 막대는 이 칸만큼 줄어든 sliderBarRect를 쓴다(view·hit-test 공유).
+const slider_value_cols: u32 = 6;
 
 /// 좌측 네비 폭(칸) — 가장 긴 섹션 라벨 + 좌측 1칸 패딩(선택 표식 여유). 빈 목록이면 최소 5.
 fn navCols(sections: []const []const u8) u32 {
@@ -384,12 +389,32 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len, .nav_cols = nav_cols, .form_x = form_x, .form_cols = form_cols, .body_rows = @intCast(body_rows) };
 }
 
-/// 보이는 폼 행 vi(0..win_len)의 control 열 rect(폼 영역 우측, ctrl_cols 폭, 행 높이). slider는 전체, toggle은 좌측정렬.
+/// 보이는 폼 행 vi(0..win_len)의 control 열 rect(폼 영역 우측, ctrl_cols 폭, 행 높이). toggle은 좌측정렬, slider는
+/// 막대(sliderBarRect)+값 텍스트로 이 열을 나눠 쓴다.
 fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     const box = l.box;
     const row = l.first_field_row + @as(u32, @intCast(vi));
     const ctrl_x = l.form_x + @as(i32, @intCast((l.form_cols -| l.ctrl_cols) * box.cw));
     return .{ .x = ctrl_x, .y = modal_box.rowY(box, row), .w = l.ctrl_cols * box.cw, .h = box.ch };
+}
+
+/// slider 막대 rect — control 열에서 우측 slider_value_cols(값 텍스트 자리)를 뺀 왼쪽 부분. view·hit-test·드래그
+/// ratioAt이 모두 이 rect를 써야(단일 출처) 보이는 막대와 클릭 매핑이 어긋나지 않는다. 값 텍스트는 view가 control
+/// 열 우측 끝에 우측정렬로 그린다(formatSliderValue).
+fn sliderBarRect(ctrl: draw.Rect, cw: u32) draw.Rect {
+    return .{ .x = ctrl.x, .y = ctrl.y, .w = ctrl.w -| slider_value_cols * cw, .h = ctrl.h };
+}
+
+/// slider 현재 값을 control 열 우측 끝에 붙일 표시 문자열로 포맷한다. 소수 2자리로 굽고 뒤따르는 0(과 점)을 떼
+/// 정수·딱떨어지는 소수를 깔끔히 보인다(14.00→"14", 2.28→"2.28", 1.50→"1.5", -8.00→"-8"). u32 필드도 정수로 나온다
+/// (값이 whole이라 "200.00"→"200"). 별도 is_int 없이 한 경로로 처리한다.
+fn formatSliderValue(arena: std.mem.Allocator, value: f64) ![]const u8 {
+    const s = try std.fmt.allocPrint(arena, "{d:.2}", .{value});
+    if (std.mem.indexOfScalar(u8, s, '.') == null) return s;
+    var end = s.len;
+    while (end > 0 and s[end - 1] == '0') end -= 1;
+    if (end > 0 and s[end - 1] == '.') end -= 1;
+    return s[0..end];
 }
 
 /// palette_grid 행의 그리드 블록 rect(폼 우측, paletteGridCols 폭 — control 열과 무관, 우측정렬). 16 스와치 + hex.
@@ -499,7 +524,18 @@ pub fn view(
                 var ts = toggle.State{ .value = v };
                 try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), box.cw, tk, arena, out);
             },
-            .slider => |s| try slider.view(ctrl, FieldRow.sliderRatio(s), box.cw, tk, arena, out),
+            .slider => |s| {
+                // 막대는 control 열 좌측(값 자리 제외)에, 현재 값은 우측 끝에 우측정렬로 — 화살표/드래그가 값을
+                // 바로 바꾸는 게 보인다(막대만으론 변화가 작은 슬라이더에서 안 먹는 것처럼 보였음).
+                try slider.view(sliderBarRect(ctrl, box.cw), FieldRow.sliderRatio(s), box.cw, tk, arena, out);
+                const value_str = try formatSliderValue(arena, s.value);
+                const vcols = overlay_input.displayCols(value_str);
+                const vx = ctrl.x + @as(i32, @intCast(ctrl.w)) - @as(i32, @intCast(vcols * box.cw));
+                const vruns = try arena.alloc(draw.Run, 1);
+                vruns[0] = .{ .text = value_str };
+                const vrole: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
+                try out.append(arena, .{ .text = .{ .origin = .{ .x = vx, .y = ctrl.y }, .runs = vruns, .role = vrole } });
+            },
             // dropdown.view가 값 뒤에 " ▾"(2칸)를 붙이므로, chevron 자리를 빼고 truncate해 값+chevron이 control 열(=박스
             // 경계)을 넘지 않게 한다(안 그러면 ctrl_cols+2칸이 되어 우측 여백을 침범·rich quad 밖으로 삐진다).
             .dropdown => |cur| try dropdown.view(ctrl, overlay_input.truncateToCols(arena, cur, l.ctrl_cols -| 2) catch cur, tk, arena, out),
@@ -947,7 +983,8 @@ pub fn handlePointer(
         // 위치 = selected - win_start(windowStart가 selected를 창 안에 보장).
         if (!state.dragging or state.selected >= rows.len) return .consumed;
         if (rows[state.selected].kind != .slider) return .consumed;
-        state.pending_ratio = slider.ratioAt(fieldControlRect(l, state.selected -| l.win_start), ev.x_px);
+        // 막대(값 자리 제외)를 기준으로 ratio를 잡는다 — view의 sliderBarRect와 같은 rect라야 thumb 위치=클릭 위치.
+        state.pending_ratio = slider.ratioAt(sliderBarRect(fieldControlRect(l, state.selected -| l.win_start), box.cw), ev.x_px);
         return .slider_set;
     }
     // down.
@@ -989,9 +1026,11 @@ pub fn handlePointer(
             switch (r.kind) {
                 .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,
                 .slider => {
-                    if (!slider.hitTest(ctrl, ev.x_px, ev.y_px)) return .selection_changed;
+                    // 막대 영역(값 텍스트 자리 제외)에서만 드래그 시작 — view·move와 같은 sliderBarRect 단일 출처.
+                    const bar = sliderBarRect(ctrl, box.cw);
+                    if (!slider.hitTest(bar, ev.x_px, ev.y_px)) return .selection_changed;
                     state.dragging = true;
-                    state.pending_ratio = slider.ratioAt(ctrl, ev.x_px);
+                    state.pending_ratio = slider.ratioAt(bar, ev.x_px);
                     return .slider_set;
                 },
                 .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 클릭 → 변형 순환(.toggle=활성)
@@ -1078,6 +1117,19 @@ test "settings view: 행이 창보다 많으면 창만 렌더 + 제목에 위치
     try std.testing.expect(out.items[0].quad.rect.h <= 200);
 }
 
+test "settings formatSliderValue: 소수 2자리 + 뒤따르는 0/점 제거(정수·딱떨어지는 소수 깔끔히)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqualStrings("14", try formatSliderValue(arena, 14.0)); // 정수
+    try std.testing.expectEqualStrings("200", try formatSliderValue(arena, 200.0)); // u32 필드(whole)
+    try std.testing.expectEqualStrings("2.28", try formatSliderValue(arena, 2.276)); // 소수 2자리 반올림
+    try std.testing.expectEqualStrings("1.5", try formatSliderValue(arena, 1.5)); // 뒤 0 하나 제거
+    try std.testing.expectEqualStrings("-8", try formatSliderValue(arena, -8.0)); // 음수 정수
+    try std.testing.expectEqualStrings("0.1", try formatSliderValue(arena, 0.1)); // 소수 1자리
+    try std.testing.expectEqualStrings("16.64", try formatSliderValue(arena, 16.64));
+}
+
 test "settings state: show/hide/setFieldCount clamp/moveSelection wrap" {
     var s = State{};
     s.show();
@@ -1150,16 +1202,19 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     try std.testing.expect(out.items[4] == .text); // toggle 트랙(muted) — quad 아님
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[4].text.role);
     try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[5].text.role); // toggle knob on(앰버)
-    // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent).
+    // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent) + 현재 값 text(우측, surface_fg).
     try std.testing.expectEqualStrings("Font size", out.items[6].text.runs[0].text);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[7].text.role); // slider 트랙
-    // slider 채움(accent) 뒤에 하단 힌트 4조각이 본문 op 뒤로 붙는다: "⇥ "/"섹션"/" ⇄ "/"설정". 폼 모드(기본)라
+    // slider 값 text 뒤에 하단 힌트 4조각이 본문 op 뒤로 붙는다: "⇥ "/"섹션"/" ⇄ "/"설정". 폼 모드(기본)라
     // 활성 영역인 "설정"만 accent, 반대편 "섹션"·구분자는 muted.
     try std.testing.expectEqualStrings("설정", out.items[out.items.len - 1].text.runs[0].text);
     try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 1].text.role); // 활성 영역(폼)
     try std.testing.expectEqualStrings("섹션", out.items[out.items.len - 3].text.runs[0].text);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[out.items.len - 3].text.role); // 비활성(섹션)
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 5].text.role); // slider 채움 █(앰버)
+    // 본문 마지막 2개: slider 채움 █(accent, len-6) → 현재 값 "512"(surface_fg, len-5).
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 6].text.role); // slider 채움 █(앰버)
+    try std.testing.expectEqualStrings("512", out.items[out.items.len - 5].text.runs[0].text); // 현재 값 표시
+    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[out.items.len - 5].text.role);
 }
 
 test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider 드래그=.slider_set+pending_ratio, 라벨=.selection_changed" {
@@ -1182,9 +1237,11 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider �
     try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl.x + 4), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
 
-    // 행1 slider 우측 끝 근처 down → 선택=1 + 드래그 시작 + .slider_set + pending_ratio≈1.
+    // 행1 slider 막대 우측 끝 근처 down → 선택=1 + 드래그 시작 + .slider_set + pending_ratio≈1. 막대는 control 열에서
+    // 우측 값 자리(slider_value_cols)를 뺀 부분이라 그 끝(bar 우단)을 클릭한다(값 텍스트 영역이 아니라).
     const c1 = fieldControlRect(l, 1);
-    const right_x: f64 = @floatFromInt(c1.x + @as(i32, @intCast(c1.w)) - 2);
+    const bar1 = sliderBarRect(c1, test_props.metrics.cell_width_px);
+    const right_x: f64 = @floatFromInt(bar1.x + @as(i32, @intCast(bar1.w)) - 2);
     const mid_y: f64 = @floatFromInt(c1.y + 4);
     try std.testing.expectEqual(Action.slider_set, handlePointer(.{ .phase = .down, .x_px = right_x, .y_px = mid_y }, no_sections, &rows, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);

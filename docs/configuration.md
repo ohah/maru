@@ -27,7 +27,6 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 # ~/.config/maru/config — 예시
 font.family = JetBrains Mono
 font.size = 14
-font.size-step = 1
 font.line-height = 1.0
 font.letter-spacing = 0.0
 
@@ -71,8 +70,7 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `font.fallback` | 문자열(쉼표 구분) | (없음) | **폴백 폰트** 목록(예: `Apple SD Gothic Neo, Apple Color Emoji`). 주 `font.family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 기본 폴백을 뒤에 잇는다(`kCTFontCascadeListAttribute`). 각 항목은 앞뒤 공백 trim(내부 공백 보존). 잘못된 폰트명은 무시(best-effort). 비어 있으면 CoreText 기본 폴백만 |
 | `font.family-bold` | 문자열 | (없음) | **bold(SGR 1) 글자용 폰트 패밀리**. 비어 있으면(기본) 주 `font.family`의 bold variant를 쓴다(variant가 없으면 regular 폴백 — 굵기를 합성하지 않음). 설정하면 bold cell을 이 패밀리로 그려 본문과 다른 글꼴로 강조할 수 있다. `font.fallback` cascade를 상속해 bold 한글·이모지도 폴백한다. 패밀리를 못 찾으면 주 폰트 bold로 폴백(best-effort) |
 | `font.family-italic` | 문자열 | (없음) | **italic(SGR 3) 글자용 폰트 패밀리**. 비어 있으면(기본) 주 `font.family`의 italic variant를 쓴다(없으면 regular 폴백). italic 렌더는 이 기능과 함께 추가됐다(이전엔 SGR 3이 기울임으로 안 그려짐). bold+italic은 bold face(`font.family-bold` 또는 주 폰트 bold)에 italic을 더한다. 패밀리를 못 찾으면 주 폰트 italic로 폴백 |
-| `font.size` | 숫자 | `14` | 1~512 범위. 범위 밖/비숫자는 무시 |
-| `font.size-step` | 숫자 | `1` | ⌘+/⌘-(Bigger/Smaller)가 한 번에 바꾸는 증분(pt). 0.1~32 범위. ⌘0(Actual Size)은 step과 무관하게 `font.size`로 복귀 |
+| `font.size` | 숫자 | `14` | 1~512 범위. 범위 밖/비숫자는 무시. ⌘+/⌘-(Bigger/Smaller)는 이 값을 **고정 1pt씩** 바꾸고 ⌘0(Actual Size)이 복귀시킨다(보폭은 설정 불가) |
 | `font.line-height` | 숫자 | `1.0` | 행간 배수. 1.0=CoreText 자동 cell 높이, 1.5=50% 더 큰 줄 간격. 0.5~3.0 범위. 범위 밖/비숫자는 무시. 늘어난 높이는 글자를 셀 안 세로 가운데로 그려 위아래 여백이 된다 |
 | `font.letter-spacing` | 숫자 | `0.0` | 자간(논리 pt). 0=advance 그대로, 양수=칸 넓힘, 음수=칸 좁힘. -8~32 범위(음수 허용). 범위 밖/비숫자는 무시. 늘어난 폭은 글자를 셀 안 가로 가운데로 그려 좌우 여백이 된다 |
 | `theme.preset` | 프리셋 이름 | `maru` | 이름 붙은 컬러 테마 **base**. 색 세트(배경/전경/커서/선택 + ANSI 16색)를 한 번에 고른다. `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light`. 개별 `theme.*` 키를 **이 줄 뒤에** 두면 그 색만 override(순차 적용, 나중 줄 우선). 그 외 값은 무시. 아래 [컬러 테마 프리셋](#컬러-테마-프리셋-themepreset) 참조 |
@@ -118,7 +116,7 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `text.ambiguous-width` | `narrow`\|`wide` | `narrow` | EAW Ambiguous 문자(동그란 번호 ① 등)의 셀 폭. 아래 참조 |
 | `text.emoji-width` | `narrow`\|`wide` | `wide` | 이모지 표현(base+VS16·키캡 2️⃣ 등)의 셀 폭. 아래 참조 |
 | `text.blink` | `true`\|`false` | `false` | SGR 5(blink) 글자를 실제로 깜빡일지. **기본 false** — 깜빡이는 콘텐츠는 접근성(WCAG 발작) 우려라 다수 터미널이 기본으로 끈다. 그 외 값은 무시 |
-| `chrome.theme` | `tui`\|`rich` | `tui` | chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`=현행 cell-grid 룩, `rich`=분리 색 팔레트(둥근 모서리·gradient). 색 룩(theme.preset)과는 직교. 그 외 값은 무시. 자세히는 [Chrome 전략](chrome-strategy.md) |
+| `chrome.theme` | `tui`\|`rich` | `rich` | chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`=cell-grid 룩, `rich`(기본)=분리 색 팔레트(둥근 모서리·gradient). 색 룩(theme.preset)과는 직교. 그 외 값은 무시. 자세히는 [Chrome 전략](chrome-strategy.md) |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `input.shift-enter` | `newline`\|`native` | `newline` | Shift+Enter 인코딩. `newline`(기본)=Option+Enter와 같은 `\x1b\r`(멀티라인 줄바꿈). 아래 참조 |
 | `input.ime-enter` | `newline`\|`commit-only` | `newline` | IME(한글 등) 조합 중 Enter. `newline`(기본)=확정+개행 한 번에(브라우저 동작). 아래 참조 |
@@ -522,7 +520,7 @@ keybind = F4 = esc:[2J
 - **action**: 워크스페이스 `new_tab`·`close_tab`·`next_tab`·`previous_tab`·`select_tab:N`(N=0부터),
   Term `new_term`·`close_term`·`next_term`·`previous_term`, 분할 `split_horizontal`·`split_vertical`,
   pane 포커스 `focus_pane_left`·`focus_pane_right`·`focus_pane_up`·`focus_pane_down`, split 순환 `next_pane`·`previous_pane`,
-  폰트 크기 `increase_font_size`·`decrease_font_size`(증분은 `font.size-step`)·`reset_font_size`·`set_font_size:N`
+  폰트 크기 `increase_font_size`·`decrease_font_size`(보폭 고정 1pt)·`reset_font_size`·`set_font_size:N`
   (N=절대 pt, 6~72로 클램프 — 예: `Ctrl+Cmd+1 = set_font_size:14`로 크기 프리셋), 그리고 `select_all`·
   `clear_screen`(화면+스크롤백 비우기, 빌트인 ⌘K — alt 화면 무동작, 셸 프롬프트면 ^L로 재그림. 자세히는
   [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`find_next`·
@@ -567,7 +565,6 @@ keybind = F4 = esc:[2J
 - 알 수 없는 key → 무시.
 - `=` 없는 줄 → 무시.
 - `font.size`가 숫자가 아니거나 1~512 밖 → 기본 14 유지.
-- `font.size-step`이 숫자가 아니거나 0.1~32 밖 → 기본 1 유지.
 - `font.line-height`가 숫자가 아니거나 0.5~3.0 밖 → 기본 1.0 유지.
 - `font.letter-spacing`이 숫자가 아니거나 -8~32 밖 → 기본 0.0 유지(음수는 허용).
 - `cursor.shape`/`cursor.blink`가 허용 값이 아님 → 기본 유지.

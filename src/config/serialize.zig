@@ -97,7 +97,6 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     var cfg: theme.Config = .{};
     cfg.font.family = "Iosevka Term";
     cfg.font.size = 16.5;
-    cfg.font.size_step = 2;
     cfg.font.line_height = 1.25;
     cfg.font.letter_spacing = -1.5;
     cfg.theme.background = "#001122";
@@ -155,7 +154,6 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
 
     try std.testing.expectEqualStrings("Iosevka Term", got.font.family);
     try std.testing.expectEqual(@as(f32, 16.5), got.font.size);
-    try std.testing.expectEqual(@as(f32, 2), got.font.size_step);
     try std.testing.expectEqual(@as(f32, 1.25), got.font.line_height);
     try std.testing.expectEqual(@as(f32, -1.5), got.font.letter_spacing);
     try std.testing.expectEqualStrings("#001122", got.theme.background);

@@ -31,9 +31,6 @@ pub const Meta = struct {
 pub const FontConfig = struct {
     family: []const u8 = "JetBrains Mono",
     size: f32 = 14,
-    /// ⌘+/⌘-(increase/decrease_font_size)가 한 번에 바꾸는 폰트 크기 증분(pt). 기본 1.0. loader가 `font.size-step`
-    /// 키로 파싱하고, 런타임 폰트 조절이 이 값을 쓴다(⌘0 reset은 size로 복귀 — step과 무관). 범위는 아래 const.
-    size_step: f32 = 1.0,
     /// 행간 배수(line-height multiplier). 1.0=CoreText 자동 cell 높이 그대로, 1.5=50% 더 큰 줄 간격. loader가
     /// `font.line-height` 키로 파싱한다. 적용은 refreshCellMetrics 한 곳뿐 — cell_height_px에 이 배수를 곱한다.
     /// 늘어난 높이는 native 셰이퍼가 glyph를 slot 안 baseline·세로 가운데로 그려 위아래 여백이 된다(grid 자동 정합).
@@ -63,9 +60,8 @@ pub const FontConfig = struct {
     // [1,512](resolveFont)** 가 의도적으로 다르다. 슬라이더가 resolver 범위(최대 512pt)를 쓰면 한 스텝(범위의 4%)이
     // ~20pt라 "+" 한 번에 폰트가 수십 pt 뛰어 한 셀이 화면을 다 먹고 grid가 1×1로 붕괴한다 — 그래서 슬라이더·단축키는
     // 보수 범위([6,72])만 노출하고, config 파일 직접 편집만 더 넓은 [1,512]를 허용한다.
-    pub const schema = .{ // 키: font.size / font.size-step / font.line-height / font.letter-spacing / font.family / font.fallback / font.family-bold / font.family-italic (필드명 dashed)
+    pub const schema = .{ // 키: font.size / font.line-height / font.letter-spacing / font.family / font.fallback / font.family-bold / font.family-italic (필드명 dashed)
         .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ font_size_min, font_size_max }, .widget = .number, .section = .font },
-        .size_step = Meta{ .doc = "⌘+/⌘- 폰트 증분(pt)", .range = .{ font_size_step_min, font_size_step_max }, .widget = .number, .section = .font },
         .line_height = Meta{ .doc = "행간 배수", .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
         .letter_spacing = Meta{ .doc = "자간(논리 pt, 음수 허용)", .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
         .family = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text, .section = .font },
@@ -81,11 +77,6 @@ pub const FontConfig = struct {
 /// 편집은 더 넓은 [1,512](resolveFont)를 허용하지만 GUI·단축키는 이 보수 범위만 노출한다.
 pub const font_size_min: f32 = 6.0;
 pub const font_size_max: f32 = 72.0;
-
-/// font.size-step 허용 범위(단일 출처 — loader 파싱 검증과 appearance resolveFont 검증이 공유해 drift 방지).
-/// 0/음수면 ⌘+/⌘-가 무동작/역방향이 되고, 너무 크면 한 번에 범위를 튄다.
-pub const font_size_step_min: f32 = 0.1;
-pub const font_size_step_max: f32 = 32.0;
 
 /// font.line-height 허용 배수 범위(단일 출처 — loader 파싱과 appearance resolveFont가 공유). 0.5 미만이면 줄이
 /// 겹쳐 읽기 어렵고, 3.0 초과면 화면당 행 수가 급감한다(가독성 가드).
@@ -698,8 +689,9 @@ pub const Config = struct {
     cursor: CursorConfig = .{},
     input: InputConfig = .{},
     quick_terminal: QuickTerminalConfig = .{},
-    /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 tui(현행 cell-grid 룩). loader가 `chrome.theme` 키로 파싱.
-    chrome_theme: ChromeTheme = .tui,
+    /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 rich(둥근 모서리·분리 색 팔레트 룩 — 사용자
+    /// 요청으로 기본값을 tui에서 rich로 변경). cell-grid 룩을 원하면 `chrome.theme = tui`. loader가 `chrome.theme` 키로 파싱.
+    chrome_theme: ChromeTheme = .rich,
     /// 시스템 라이트/다크 외관을 따라 테마 색을 자동 전환할지(F2-9). 기본 false(현행 — theme.preset/개별 색 그대로).
     /// true면 macOS NSAppearance가 light면 theme_preset_light, dark면 theme_preset_dark의 색 세트로 라이브 교체한다
     /// (개별 theme.* 색 override·theme.preset은 무시되고 system이 색을 정한다). loader가 `theme.follow-system` 키로 파싱.

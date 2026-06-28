@@ -9620,7 +9620,7 @@ pub const AppSession = struct {
                     // 배경이 아니라 **언더바 색** — 포커스 pane=maru 앰버(active indicator), 비포커스=muted(흐린 구분만).
                     const tab_cutout_bg = packOpaqueRgb(self.appearance.theme.background);
                     const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg));
-                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, ub_accent, tk_space, tk.border);
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, hl_bg, ub_accent, tk_space, tk.border);
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
@@ -10396,11 +10396,12 @@ pub const AppSession = struct {
     /// 옛 "평평한 약한 배경(sidebarActiveBg)"을 본문색으로 바꿔 깊이(strip↔본문)를 만든다(U-tab2). 배경·언더바 둘 다
     /// layer 2(셀 part1 제목 아래)라 본문색 quad가 하단 하이라인(appendTabBarUnderline)을 활성 탭 구간에서 덮어 "연결"이
     /// 끊기지 않는다. segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
-    /// `space.tab_active_style`(chrome.tab-style §7)로 분기: **connected**=본문색 cutout(바 전체) + 언더바, **underline**=
-    /// 언더바만(bg fill 없음 — strip 그대로), **pill**=둥근 inset quad(본문색 fill + 앰버/muted 테두리, 언더바 없음 — 떠 있는
-    /// pill). bg=본문색, accent=포커스 색(앰버)/비포커스(muted). 세 스타일 모두 **세그먼트 기하 불변**이라 hit-test/✕/드래그는
-    /// 공통(스타일은 세그먼트 안 fill만 바꿈, §5.4). 모두 layer 2(per-frame, dropQuadsByLayer(2)가 비움). tui는 tabbarHighlightCell 셀 밴드.
-    fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, accent: u32, space: chrome.tokens.Spacing, border: chrome.tokens.Border) void {
+    /// `space.tab_active_style`(chrome.tab-style §7)로 분기: **connected**=본문색 cutout(바 전체) + 앰버 언더바, **underline**=
+    /// 앰버 언더바만(bg fill 없음 — strip 그대로), **pill**=둥근 inset 캡슐을 **lifted 회색(`lifted_bg`)으로 채워** 띄우고 옅은 밝은
+    /// 테두리만(실제 Warp 벤치마킹 — 밝은 fill로 올린다, 어두운 외곽선 아님). bg=본문색(connected cutout), lifted_bg=strip보다 밝은
+    /// 색(pill fill·포커스 밝기), accent=포커스 앰버/비포커스 muted(connected·underline 언더바). 세 스타일 모두 **세그먼트 기하
+    /// 불변**이라 hit-test/✕/드래그 공통(스타일은 세그먼트 안 fill만 바꿈, §5.4). 모두 layer 2(per-frame, dropQuadsByLayer(2)가 비움). tui는 tabbarHighlightCell 셀 밴드.
+    fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, lifted_bg: u32, accent: u32, space: chrome.tokens.Spacing, border: chrome.tokens.Border) void {
         const seg = m.segOf(tab_index);
         if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭
         const x: f32 = @floatCast(seg.start_px);
@@ -10414,7 +10415,9 @@ pub const AppSession = struct {
                 self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버/muted 언더바(active/focus indicator, 탭 폭)
             },
             .pill => {
-                // 떠 있는 pill: 바 위아래로 inset한 둥근 quad(본문색 fill) + 앰버/muted 테두리. 포커스 구분은 테두리 색(언더바 대신).
+                // 떠 있는 pill(실제 Warp 벤치마킹): 바 위아래로 inset한 둥근 캡슐을 **strip보다 밝은 lifted 회색**(`lifted_bg`)으로
+                // 채워 "올라온 알약"으로 보이게 하고(Warp는 어두운 외곽선이 아니라 밝은 fill로 띄운다), 옅은 더 밝은 hairline 테두리만
+                // 얹는다(Warp의 faint 테두리). 포커스 구분은 fill 밝기(focus=sidebarActiveBg / 비포커스=sidebarHoverBg) — 언더바·앰버 테두리 아님.
                 const inset: f32 = @min(@as(f32, @floatFromInt(space.tab_pill_inset_px)), bh / 2.0); // inset>바높이/2면 clamp(ph≥0)
                 const radius: f32 = @floatFromInt(space.corner_radius_px);
                 const bw: f32 = @floatFromInt(border.line_thickness_px);
@@ -10426,9 +10429,9 @@ pub const AppSession = struct {
                     .h = ph,
                     .corner_radii = .{ radius, radius, radius, radius },
                     .border_widths = .{ bw, bw, bw, bw },
-                    .fill_color0 = bg,
-                    .fill_color1 = bg,
-                    .border_color = accent,
+                    .fill_color0 = lifted_bg,
+                    .fill_color1 = lifted_bg,
+                    .border_color = blendRgb(lifted_bg, 0xFFFFFF, 0x28), // lifted_bg를 흰색으로 ~16% 블렌딩 — Warp식 옅은 밝은 테두리(가라앉은 앰버 외곽선 폐기)
                     .gradient_kind = 0,
                     .layer = 2,
                 }) catch {};
@@ -16903,9 +16906,10 @@ test "TS1 chrome.tab-style=underline: no cutout bg quad, only the amber underbar
     try std.testing.expect(found_amber_underbar); // 언더바는 두 스타일 공통
 }
 
-// TS2 탭 스타일 축(chrome.tab-style=pill): 활성 탭이 **둥근 inset quad(corner_radii>0) + 앰버 테두리**로 방출되는지
-// 고정한다(포커스 구분을 언더바 색이 아니라 테두리 색으로 — §7). connected/underline과 같은 세그먼트 기하, fill만 다름.
-test "TS2 chrome.tab-style=pill: rounded inset quad with accent border" {
+// TS2 탭 스타일 축(chrome.tab-style=pill): 활성 탭이 **둥근 inset 캡슐(corner_radii>0)을 strip보다 밝은 lifted 회색
+// (sidebarActiveBg)으로 채워** 방출되는지 고정한다(실제 Warp 벤치마킹 — 밝은 fill로 띄움, 포커스=fill 밝기). connected/
+// underline과 같은 세그먼트 기하, fill만 다름. cutout(본문색)·언더바(앰버) quad는 pill에서 안 나온다.
+test "TS2 chrome.tab-style=pill: rounded inset capsule with lifted fill (Warp benchmark)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -16926,15 +16930,20 @@ test "TS2 chrome.tab-style=pill: rounded inset quad with accent border" {
 
     const tk = session.buildChromeTokens();
     try std.testing.expectEqual(chrome.tokens.TabActiveStyle.pill, tk.space.tab_active_style); // config→토큰 매핑
-    const amber = packOpaqueRgb(tk.palette.get(.accent_bar)); // 포커스(단일 pane) pill 테두리 색
+    const lifted = session.sidebarActiveBg(); // 단일 pane=포커스 → 밝은 lifted fill(strip sidebarBg보다 밝음)
+    const cutout = packOpaqueRgb(session.appearance.theme.background); // connected였다면 떴을 본문색
 
     var found_pill = false;
+    var found_cutout = false;
     for (session.gpu_quads.items) |q| {
         if (q.layer != 2) continue;
-        // pill = 유일한 둥근(corner_radii>0) + 앰버 테두리 quad(바 배경·언더바·스크롤 버튼은 직각). border_widths>0도 확인.
-        if (q.corner_radii[0] > 0 and q.border_widths[0] > 0 and q.border_color == amber) found_pill = true;
+        // pill = 유일한 둥근(corner_radii>0) + lifted fill quad(바 배경·스크롤 버튼은 직각, 언더바는 직각·앰버).
+        if (q.corner_radii[0] > 0 and q.fill_color0 == lifted) found_pill = true;
+        if (q.fill_color0 == cutout) found_cutout = true;
     }
-    try std.testing.expect(found_pill); // 둥근 inset pill + 앰버 테두리(포커스)
+    try std.testing.expect(lifted != cutout); // lifted fill이 본문색과 다름(테스트 유의미)
+    try std.testing.expect(found_pill); // 둥근 inset 캡슐 + lifted 회색 fill(Warp식)
+    try std.testing.expect(!found_cutout); // pill은 본문색 cutout을 안 그린다(connected만)
 }
 
 // U-tab2: pane Term 탭 제목에서 "{n} " 번호 prefix를 제거했음을 rename in-place caret 위치로 고정한다. 단일

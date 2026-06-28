@@ -57,7 +57,7 @@ pub const ColorRole = enum {
 pub const TabActiveStyle = enum(u8) {
     connected = 0, // U-tab2: 본문색 cutout(바 전체 높이) + 앰버/muted 언더바 — 아래 본문과 이어짐
     underline = 1, // 배경 fill 없음 + 앰버/muted 언더바만 — 가장 미니멀
-    pill = 2, // 둥근 inset quad(본문색 fill) + 앰버/muted 테두리 — 떠 있는 pill(Warp/Arc식), 포커스=테두리 색
+    pill = 2, // 둥근 inset 캡슐을 strip보다 밝은 lifted 회색으로 채우고 옅은 밝은 테두리 — 떠 있는 pill(실제 Warp 벤치마킹), 포커스=fill 밝기
 };
 
 pub const Spacing = struct {
@@ -175,7 +175,7 @@ pub const Tokens = struct {
         tk.space.tab_bar_pad_y_px = 6;
         // U-tab2: 활성 탭 앰버 언더바 3px(하단 하이라인 1~2px보다 굵게) — "활성/포커스 탭" 신호를 또렷하게.
         tk.space.tab_underbar_px = 3;
-        // TS2: pill 스타일 세로 inset 4px(바 위아래) — 둥근 pill이 strip 위에 떠 보이게.
+        // TS2: pill 스타일 세로 inset 4px(바 위아래) — lifted 회색으로 채운 둥근 캡슐이 strip 위에 떠 보이게(Warp식).
         tk.space.tab_pill_inset_px = 4;
         // KH-5: rich 키캡도 tui와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. tui()가 이미 keycap_bg를 그렇게 깔았으므로
         // rich는 override하지 않는다(별도 처리 불필요 — light·dark 모두 또렷). 셀-그리드라 키캡은 fill(셀 배경)이고 둥근

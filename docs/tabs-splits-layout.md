@@ -27,7 +27,7 @@ cmux 같은 유연한 레이아웃:
     `assets/icons/{sparkle,diamond}.svg`→coverage)다. **claude sparkle는 두꺼운 4갈래 별로 코덱스 diamond와 잉크 mass를 맞췄다** —
     얇은 4갈래 스파클이 작은 gutter 크기에서 다이아보다 작고 흐려 보인다는 사용자 피드백 반영(SVG arms를 두껍게 → `svg_to_coverage.py` 재생성,
     잉크 ≈diamond). **색은 종류**를 따른다 —
-    claude=Anthropic 코랄 `#D9785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는 카드
+    claude=Anthropic 공식 코랄 `#CC785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는 카드
     **상태줄**(running=**`⠋ 진행중` 회전 브라유 스피너**, idle=`✓ {답변}`)이 구분한다 — running 스피너는 `agent_spin_frame`
     (`advanceBlinkPhase`가 4틱≈130ms마다 +1, 사이드바 재투영)으로 8프레임 회전하고 **브랜드색**(색칠 루프가 아이콘과 같은
     패턴으로 스피너 codepoint를 칠함)이라 "진행중"에 색 표현이 있다. **아이콘은 항상 솔리드 브랜드색**(옛 `dimRgb` 밝기 펄스는

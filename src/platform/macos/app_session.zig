@@ -11449,7 +11449,7 @@ pub const AppSession = struct {
             const orig = self.visibleTab(slot) orelse continue; // 표시 슬롯 → 원본 탭(검색 필터)
             const t = self.tabs.items[orig].activePane().activeTerm();
             const brand: maru.color.Rgb = switch (t.agent_kind) {
-                .claude => .{ .r = 0xD9, .g = 0x78, .b = 0x5C }, // Anthropic 코랄
+                .claude => .{ .r = 0xCC, .g = 0x78, .b = 0x5C }, // Anthropic 공식 코랄 #CC785C
                 .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록(#10A37F)
                 .none => continue, // 아이콘/braille codepoint인데 kind=none(이름 글자 등) — 색칠 안 함.
             };

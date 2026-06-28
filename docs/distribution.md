@@ -87,6 +87,39 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 - 릴리스 때 tap의 formula/cask version(과 cask면 sha256)만 올리면 사용자에게 업데이트가 전달된다 —
   릴리스 워크플로가 자동화한다.
 
+### 인앱 새 버전 안내 (알림만 — 업그레이드·재시작은 강제하지 않음)
+
+터미널 실행 중에 새 버전이 나오면 **UI로 안내**만 한다. 앱이 `brew upgrade`를 대신 자동 실행하지
+않는다(사용자 동의 없이 패키지 매니저를 건드리지 않는다 — `gh`/`kubectl`류 표준). 클릭 시에는
+업그레이드 명령을 입력 줄에 채워주거나 클립보드에 복사하고, 실행(Enter)은 사용자가 한다.
+
+- **현재 버전**: `build.zig.zon`의 `.version`을 빌드 타임에 앱으로 주입한다(버전 단일 출처).
+- **최신 버전 감지**: 앱 시작 시 1회 + 하루 1회, **백그라운드**(I/O–렌더 스레딩 분리, `io-render-threading.md`)로
+  `GET https://api.github.com/repos/ohah/maru/releases/latest`의 `tag_name`을 받아 현재 버전과 비교한다.
+  설치 출처와 무관하게 가볍다(인증 없이 60req/h, 하루 1회면 무관). maru에는 HTTP 클라이언트가 없으므로
+  `std.http.Client`(런타임 의존성 0)를 쓰거나 `curl` 셸아웃으로 한다.
+- **표시**: 새 버전이면 알림(🔔)/chrome 시스템(`notifications.md`·`chrome-strategy.md`)에 "vX.Y 사용 가능"
+  항목을 띄운다. 클릭 시 설치 출처를 보고(아래) 그에 맞는 업그레이드 명령을 입력 줄에 채워준다.
+- **설치 출처 감지**: 실행 경로로 판정한다 — `/opt/homebrew/...`/Cellar(brew) → `brew upgrade maru`,
+  `~/.local/bin/maru`(install-cli 소스 빌드)나 직접 빌드 → "최신 버전 안내 + 링크". brew가 아닌데
+  brew 명령을 채워주면 안 된다.
+- **설정**: `notifications.update-check = true/false`로 끌 수 있다. 버전 확인은 데이터 수집(telemetry, 정책상 금지)이
+  아니지만 외부 요청이긴 하므로 끌 수 있게 둔다.
+
+#### 적용(재시작) 모델 — 업데이트와 적용을 분리한다
+
+터미널 앱이라 안에서 셸·작업(vim·빌드 등)이 돌고 있어, 업데이트를 받았다고 즉시 종료/재시작하면 안 된다.
+
+- `brew upgrade`는 **maru 실행 중에 해도 안전**하다. macOS는 실행 중 바이너리를 디스크에서 교체해도
+  (inode 유지) 실행 프로세스가 메모리 이미지로 계속 돈다. brew는 디스크의 새 버전 + symlink만 바꾼다.
+- 따라서 새 버전은 **"다음 실행"부터** 적용된다. 재시작을 **강제하지 않고** "재시작하면 적용됩니다"만
+  안내한다(기본값: 아무것도 안 하고 다음에 사용자가 직접 닫고 열면 새 버전).
+- **매끄러운 재시작(선택)**: 사용자가 "지금 재시작"을 고르면 workspace-restore(`workspace-restore.md`)로
+  탭/split/cwd를 저장 → `execv`로 새 바이너리(`/opt/homebrew/bin/maru`) 재실행 → 복원한다.
+- **한계**: 재시작하면 실행 중이던 셸의 foreground 프로세스(빌드 중인 작업·vim 등)는 죽는다. 탭/레이아웃/cwd는
+  복원돼도 "돌고 있던 명령"은 복원되지 않는다. 그래서 재시작 전 foreground 작업이 있는 탭이 있으면
+  "N개 탭에서 작업이 실행 중 — 닫으시겠어요?"로 확인하고, 없으면 조용히 재시작한다.
+
 ### Sparkle(인앱 자동 업데이트)은 보류
 
 - 대상: brew를 쓰지 않고 `.dmg`를 직접 받는 일반 사용자가 늘어날 때.
@@ -94,12 +127,12 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
   (Developer ID와 별개). 참조 구현은 `references/ghostty/macos`에 있다.
 - **충돌 주의**: brew로 설치한 앱을 Sparkle이 자동 업데이트하면 brew 관리 경로를 덮어써 깨진다. Sparkle은
   직접 배포본에만 켜고(빌드 플래그로 구분), brew cask는 `auto_updates true`로 선언해 Sparkle을 끈다.
-- 그 전 단계의 가벼운 대안: 앱 시작 시 GitHub `releases/latest`를 1회 확인해 새 버전이면 "업데이트 있음"
-  알림만 띄우고 설치는 사용자가 brew/다운로드로 — Sparkle 프레임워크 없이 HTTP GET 한 번이다.
+- 그 전 단계의 가벼운 대안은 위 **인앱 새 버전 안내**(알림만, HTTP GET 한 번)다 — Sparkle은 그것으로
+  부족할 때(직접 다운로드 사용자에게 자동 설치가 필요할 때) 얹는다.
 
-## CI 릴리스(GitHub Actions) — 후속
+## CI 릴리스(GitHub Actions)
 
-태그 푸시(`v*`) 시:
+`.github/workflows/release.yml`로 구현돼 있다. 태그 푸시(`v*`) 또는 수동 실행(workflow_dispatch) 시:
 
 1. macOS 러너(Apple Silicon)에서 mise로 zig 0.16 준비
 2. `.p12` Secret을 임시 키체인에 import
@@ -107,7 +140,18 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 4. `gh release upload`로 universal dmg를 Release에 첨부
 5. `ohah/homebrew-maru`의 cask version/sha256 bump PR(또는 formula version bump)
 
-Secret 세팅이 선행돼야 하므로 릴리스 워크플로는 별도 PR로 추가한다.
+실제 배포는 아래 Secret이 세팅되고 태그가 푸시돼야 일어난다 — **워크플로 파일만으로는 아무 일도 하지
+않는다**(Secret이 없으면 인증서 import 단계에서 멈추는 게 의도된 가드다). 필요한 Secret:
+
+| Secret | 용도 |
+|---|---|
+| `MACOS_CERT_P12` | Developer ID Application 인증서 `.p12`를 base64 인코딩한 값 |
+| `MACOS_CERT_PASSWORD` | 위 `.p12`의 비밀번호 |
+| `KEYCHAIN_PASSWORD` | CI 임시 키체인 잠금 비번(아무 값, 잡 안에서만 씀) |
+| `APPLE_ID` · `APPLE_TEAM_ID` · `APPLE_APP_SPECIFIC_PASSWORD` | 공증 자격증명 |
+
+위 5단계의 cask version/sha256 자동 bump는 tap repo(`ohah/homebrew-maru`) write 토큰이 필요해 후속으로
+추가한다(현재 워크플로는 dmg 빌드·서명·공증·Release 첨부까지).
 
 ## 버전 정책
 

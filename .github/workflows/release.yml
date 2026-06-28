@@ -1,0 +1,94 @@
+name: Release
+
+# 배포 플로우(docs/distribution.md "CI 릴리스"). 태그 푸시(v*) 또는 수동 실행 시 universal(arm64+x86_64)
+# .dmg를 서명·공증·staple해 GitHub Release에 첨부한다. 실제 배포는 아래 Secret 세팅 + 태그 푸시가
+# 있어야 동작한다(없으면 인증서 import 단계에서 멈춘다 — 의도된 가드). workflow_dispatch는 태그 없이
+# 빌드만 확인하는 용도라 Release 업로드는 건너뛴다.
+#
+# 필요한 Secret (Settings > Secrets and variables > Actions):
+#   MACOS_CERT_P12              Developer ID Application 인증서 .p12 를 base64 인코딩한 값
+#   MACOS_CERT_PASSWORD         위 .p12 의 비밀번호
+#   KEYCHAIN_PASSWORD           CI 임시 키체인 잠금 비번(아무 값, 이 잡에서만 씀)
+#   APPLE_ID                    공증용 Apple 계정 이메일
+#   APPLE_TEAM_ID               팀 ID (예: 2MS57VWFU8)
+#   APPLE_APP_SPECIFIC_PASSWORD 공증용 앱 전용 암호
+# 비밀값은 리포에 두지 않는다 — 모두 Secret으로 주입한다(distribution.md "서명·공증").
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # GitHub Release 생성/업로드
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  universal-dmg:
+    name: universal dmg (signed + notarized)
+    runs-on: macos-14 # Apple Silicon — arm64 네이티브 + x86_64 cross
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2 # .mise.toml 의 zig 0.16
+
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/maru-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          # codesign이 키 접근 시 UI 프롬프트 없이 쓰도록 partition list 설정.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$kc"
+          # 새 키체인을 검색 목록 맨 앞에 추가(기존 목록 보존) — codesign이 인증서를 찾게 한다.
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | sed 's/"//g')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # 로컬과 동일한 프로파일 이름(maru-notary)으로 저장 → 빌드 스크립트를 그대로 재사용한다.
+          xcrun notarytool store-credentials maru-notary \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
+
+      - name: Build signed + notarized universal dmg
+        run: sh tools/build-macos-universal-dmg.sh
+
+      - name: Upload dmg to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 태그 릴리스에 dmg 첨부(릴리스 없으면 생성, 있으면 업로드).
+          gh release create "${{ github.ref_name }}" dist/Maru-*-universal.dmg \
+            --title "${{ github.ref_name }}" --generate-notes \
+          || gh release upload "${{ github.ref_name }}" dist/Maru-*-universal.dmg --clobber
+
+      - name: Upload dmg as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maru-universal-dmg
+          path: dist/Maru-*-universal.dmg
+          if-no-files-found: warn
+          retention-days: 14
+
+      # TODO(후속): Homebrew tap(ohah/homebrew-maru) cask version/sha256 자동 bump PR.
+      # tap repo write 토큰이 필요해 별도로 추가한다(distribution.md "CI 릴리스" 5단계).

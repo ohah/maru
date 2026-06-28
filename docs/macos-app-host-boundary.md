@@ -8,7 +8,7 @@
 
 판단 기준: "이 코드를 테스트하려면 window/run loop가 필요한가?" 아니라면 Zig로 간다. 예: 창 backing 픽셀 → grid(cols/rows) 계산, resize 중복 방지(같은 size+scale skip), backing scale → 폰트 device 픽셀 크기는 모두 Zig가 소유하고(app session의 `gridFromBacking`·resize dedup, `renderer.deviceFontSizeFromMilli`), Swift는 AppKit 값(backing 픽셀·scale)만 모아 ABI로 넘긴다. grid 계산은 별도 export로 빼지 않고 app session이 resize 처리 중 자기 cell 메트릭으로 내부에서 직접 한다(Swift가 부르는 grid helper export는 없다). **퀵 터미널 오버레이 패널의 보임/숨김 사각형**도 같은 원칙이다: 위치별 기하(top/bottom/left/right 가장자리 슬라이드·center 페이드·두께 비율)는 순수 모듈 `quick_terminal_geometry.zig`의 `compute`(세션·AppKit 없이 단위 테스트가 못박음)가 소유하고, Swift는 대상 화면 `visibleFrame`만 `maru_macos_app_session_quick_terminal_frames`로 넘겨 세션의 **현재** config로 계산받는다(매 토글 라이브 — 세션-불변 스냅샷 캐시 금지 → 설정 변경 즉시 반영, config-gui.md §6.10). 화면 선택(`screen=main`은 `NSScreen.screens.first`=주 디스플레이, `mouse`는 포인터 화면)만 window/screen 열거가 필요해 Swift에 남는다.
 
-**웹 패널(WKWebView) 예외(2026-06)**: "네이티브 뷰 비사용"의 예외로 리치 웹 패널(마크다운·diff·인앱 브라우저)을 둔다([docs/control-plane.md]·[implementation-plan.md] UI 렌더 전략 — 웹 콘텐츠가 크로스플랫폼이라 이식성 목적 충족). 단 **같은 최소화 원칙을 적용**한다: Swift는 WKWebView API 호출(`load`·`evaluateJavaScript`·`takeSnapshot`)만, **JSON-RPC 라우팅·디스패치·ndjson 프레이밍·신뢰 게이트 판정은 Zig**(테스트 가능성·이식성). 즉 웹 패널도 "OS 호출만 네이티브, 정책 0" 규율을 깨지 않는다.
+**웹 패널(WKWebView) 예외**: "네이티브 뷰 비사용"의 예외로 리치 웹 패널을 둔다. **예외의 닫힌 열거·근거(diff는 예외가 아니라 GPU 셀)는 [docs/control-plane.md] §1을 단일 출처로 둔다** — 여기 중복하지 않는다. 호스트 경계 관점의 규율만 여기 둔다: Swift는 WKWebView API 호출(`load`·`evaluateJavaScript`·`takeSnapshot`)만, **JSON-RPC 라우팅·디스패치·프레이밍·신뢰 게이트 판정은 Zig**(테스트 가능성·이식성). 웹 패널도 "OS 호출만 네이티브, 정책 0" 규율을 지킨다.
 
 ## 현재 결정
 

@@ -29,4 +29,7 @@ echo "선택: 동작 비교 오라클 구현(베끼는 대상 아님)"
 echo "  Ghostty (libghostty-vt): git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty"
 echo "  libvterm (system):       brew install libvterm   # 또는 배포판 패키지"
 echo
+echo "선택: 기능 동작 레퍼런스(터미널 코어 밖 — 코드 미복사, docs/references.md)"
+echo "  agent-browser (WebDriver/CDP 백엔드 참고): git clone --depth 1 https://github.com/vercel-labs/agent-browser references/agent-browser"
+echo
 echo "완료. references/ 는 gitignore된다. 자세한 내용은 docs/references.md."

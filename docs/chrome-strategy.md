@@ -270,7 +270,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 
 - **TS1 ✅** — 토큰(`tab_active_style`) + config(`chrome.tab-style`) + `connected`·`underline` 분기 + 헤드리스 테스트 + `configuration.md` 행.
 - **TS2 ✅** — `pill`(실제 Warp 벤치마킹 — lifted 회색 fill로 채운 둥근 캡슐 + 옅은 밝은 테두리, `tab_pill_inset_px` 토큰; 포커스=fill 밝기). 세 스타일 다 동작.
-- **TS3** — 세팅 GUI 드롭다운 수동 확인 + `chrome.preset`(여러 축 묶음 레이아웃 프리셋) 설계·구현.
+- **TS3 ✅(메커니즘)** — `chrome.preset`(여러 축 묶음 레이아웃 프리셋) 구현: `ChromePreset` enum(`minimal`=rich+underline / `cutout`=rich+connected / `capsule`=rich+pill / `cell`=tui) + `chromePresetValues()` 단일 출처 + loader-special 키(`theme.preset` 동형 — 두 축을 깔고 개별 `chrome.theme`/`chrome.tab-style`가 뒤에서 override) + `configuration.md` 행 + 헤드리스 테스트. **후속(선택)**: 세팅 GUI에 `chrome.preset` synthetic 드롭다운 주입(`theme.preset` 주입 패턴 미러 — config-gui.md §132)과 write-back. 현재 chrome.theme·chrome.tab-style은 이미 GUI 드롭다운이라 개별 선택은 가능.
 
 ## 8. 테스트 전략 (관측 가능성 우선)
 

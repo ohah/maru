@@ -158,6 +158,17 @@ fn applyKey(
         };
         config.theme = theme.presetColors(preset);
         // theme.background/foreground/cursor/selection은 스키마-주도로 이주(CS-1/CS-2). palette.N만 특수(인덱스).
+    } else if (std.mem.eql(u8, key, "chrome.preset")) {
+        // chrome 레이아웃 프리셋(TS3) — 여러 chrome 축(룩 chrome.theme + 탭 chrome.tab-style)을 한 번에 깐다
+        // (chromePresetValues 단일 출처). 개별 chrome.theme/chrome.tab-style 키가 이 줄 *뒤에* 오면 그 축만 override한다
+        // (loader 순차 — schema.tryParse가 그 두 키를 처리). 알 수 없는 값은 forgiving(diagnostic + 무시). theme.preset과 동형.
+        const cp = theme.parseChromePreset(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "chrome.preset은 " ++ theme.chrome_preset_names_joined ++ " — 무시" });
+            return;
+        };
+        const v = theme.chromePresetValues(cp);
+        config.chrome_theme = v.chrome_theme;
+        config.chrome_tab_style = v.chrome_tab_style;
     } else if (std.mem.startsWith(u8, key, "theme.palette.")) {
         // ANSI 16색 override: theme.palette.0~.15 = #RRGGBB. suffix를 u8로 파싱해 0~15 범위 검사. 인덱스가 비정수·
         // 범위 밖이면 forgiving(diagnostic + 무시), 색은 dupValidColor가 검증(틀린 색도 forgiving). OSC4가 없을 때의
@@ -830,6 +841,36 @@ pub fn loadDefault(io: std.Io, allocator: std.mem.Allocator) LoadError!Parsed {
     const path = (try defaultConfigPath(allocator)) orelse return emptyDefault(allocator);
     defer allocator.free(path);
     return loadFile(io, allocator, path);
+}
+
+test "chrome.preset 묶음(TS3): 두 축을 깔고 개별 키가 뒤에서 override (theme.preset 동형)" {
+    // capsule = rich + pill. 그 *뒤* chrome.tab-style = underline → tab_style만 override(룩 rich 유지).
+    var p = try parse(std.testing.allocator,
+        \\chrome.preset = capsule
+        \\chrome.tab-style = underline
+    );
+    defer p.deinit();
+    try std.testing.expectEqual(theme.ChromeTheme.rich, p.config.chrome_theme); // 프리셋이 깐 룩
+    try std.testing.expectEqual(theme.ChromeTabStyle.underline, p.config.chrome_tab_style); // 개별 키가 override(나중 줄 우선)
+
+    // 프리셋만 → 두 축 다 프리셋 값.
+    var p2 = try parse(std.testing.allocator, "chrome.preset = capsule");
+    defer p2.deinit();
+    try std.testing.expectEqual(theme.ChromeTheme.rich, p2.config.chrome_theme);
+    try std.testing.expectEqual(theme.ChromeTabStyle.pill, p2.config.chrome_tab_style);
+
+    // cell 프리셋 → tui 룩.
+    var p3 = try parse(std.testing.allocator, "chrome.preset = cell");
+    defer p3.deinit();
+    try std.testing.expectEqual(theme.ChromeTheme.tui, p3.config.chrome_theme);
+
+    // 알 수 없는 값 → forgiving(기본값 유지 + diagnostic).
+    var p4 = try parse(std.testing.allocator, "chrome.preset = bogus");
+    defer p4.deinit();
+    const d = theme.Config{};
+    try std.testing.expectEqual(d.chrome_theme, p4.config.chrome_theme);
+    try std.testing.expectEqual(d.chrome_tab_style, p4.config.chrome_tab_style);
+    try std.testing.expect(p4.diagnostics.len >= 1); // 미지값 안내
 }
 
 test "parse: full config sets every field" {

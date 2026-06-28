@@ -116,6 +116,7 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `text.ambiguous-width` | `narrow`\|`wide` | `narrow` | EAW Ambiguous 문자(동그란 번호 ① 등)의 셀 폭. 아래 참조 |
 | `text.emoji-width` | `narrow`\|`wide` | `wide` | 이모지 표현(base+VS16·키캡 2️⃣ 등)의 셀 폭. 아래 참조 |
 | `text.blink` | `true`\|`false` | `false` | SGR 5(blink) 글자를 실제로 깜빡일지. **기본 false** — 깜빡이는 콘텐츠는 접근성(WCAG 발작) 우려라 다수 터미널이 기본으로 끈다. 그 외 값은 무시 |
+| `chrome.preset` | `minimal`\|`cutout`\|`capsule`\|`cell` | (없음) | chrome **레이아웃 프리셋** — 여러 chrome 축(`chrome.theme` 룩 + `chrome.tab-style` 탭)을 한 번에 고르는 큐레이션(`theme.preset`이 색에 쓰는 패턴 동형). `minimal`=rich+underline, `cutout`=rich+connected, `capsule`=rich+pill(Warp식), `cell`=tui(셀-그리드). 개별 `chrome.theme`/`chrome.tab-style` 키를 **이 줄 뒤에** 두면 그 축만 override(순차, 나중 줄 우선). 색(`theme.preset`)과는 직교. 그 외 값은 무시 |
 | `chrome.theme` | `tui`\|`rich` | `rich` | chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`=cell-grid 룩, `rich`(기본)=분리 색 팔레트(둥근 모서리·gradient). 색 룩(theme.preset)과는 직교. 그 외 값은 무시. 자세히는 [Chrome 전략](chrome-strategy.md) |
 | `chrome.tab-style` | `connected`\|`underline`\|`pill` | `underline` | 활성 탭 룩(직교 축). `underline`(기본)=언더바만(미니멀, 배경 박스 없음), `connected`=터미널 본문색 cutout + 앰버 언더바(아래 본문과 이어짐), `pill`=lifted 회색으로 채운 둥근 캡슐 + 옅은 밝은 테두리(Warp식 떠 있는 pill, 포커스=fill 밝기). `chrome.theme`(tui\|rich)·`theme.preset`(색)과 직교. rich 경로에서만 의미(tui는 셀 밴드). 자세히는 [Chrome 전략 §7](chrome-strategy.md) |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |

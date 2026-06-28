@@ -210,9 +210,12 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
 넘기는 **워크스페이스 간** 이동이다. 모델상 워크스페이스 = SplitTree 루트, Pane = leaf라 "leaf를 한 트리에서 떼
 다른 트리에 심기"라는 트리 연산으로 깔끔히 떨어진다 — Term을 옮기지 않고 `*Pane` 포인터를 통째로 재부모화한다.
 
-- **드래그 손잡이(베이스/결정)**: pane 탭바 **좌측 grip 핸들**(항상 보이는 ⠿ 글리프, `pane_grip_cols`=3칸 예약 —
-  좌패딩 + 글리프 중앙(`cols/2`) + 우패딩으로 글리프가 좌단·divider에 안 붙게)을 잡으면 Pane 통째 드래그, **Term 탭**을
-  잡으면 기존대로 Term 1개 드래그(④)로 갈린다. **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
+- **드래그 손잡이(베이스/결정)**: pane 탭바 **좌측 grip 핸들**(⠿ 글리프, `pane_grip_cols`=3칸 예약 — 좌패딩 + 글리프
+  중앙(`cols/2`) + 우패딩으로 글리프가 좌단·divider에 안 붙게)을 잡으면 Pane 통째 드래그, **Term 탭**을 잡으면 기존대로
+  Term 1개 드래그(④)로 갈린다. **⠿ 글리프는 hover-only**(상단 탭바 Warp 폴리시) — 마우스가 그 pane 바 위(`pointInRect(last_mouse,
+  pb.full)`, `updateHoveredTab`이 갱신하는 `last_mouse_x/y`)일 때만 그려 평소 바를 깔끔히 둔다(cols는 항상 예약이라 레이아웃
+  시프트 없음·비호버 시 좌측 빈 패딩; 드래그 영역·openHand 커서는 그대로라 발견성 유지). 마우스 좌표는 plain float이라 *Pane
+  stale 포인터 함정이 없다. 바 세로 패딩(`tab_bar_pad_y_px`)은 rich에서 8px(Warp식 넉넉한 바 높이). **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
   0이라 잡을 자리가 없다 — `paneLabelCols`) → grip을 **이름 유무와 무관하게 항상 예약**해 모든 pane이 끌리게 한다(사용자
   결정). custom_name이 있으면 grip 뒤에 이름이 붙는다(`paneBar`가 `grip_cols`+`label_cols`로 탭 영역을 우측 offset). 같은
   탭바에서 "잡는 자리"로만 단위를 구분하므로 새 chrome가 필요 없다(`tab_drag_*`와 분리된 `pane_drag_*` arm; 좁은 바는 탭

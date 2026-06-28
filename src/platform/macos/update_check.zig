@@ -59,33 +59,90 @@ pub fn isNewer(current: []const u8, latest_tag: []const u8) bool {
     return l[2] > c[2];
 }
 
-/// curl로 GitHub `releases/latest`를 받아 tag_name을 복사해 반환한다(호출측이 free). 네트워크 없음·실패·
-/// 형식 깨짐이면 null — brew 배포라 앱이 업그레이드하지 않고 안내만 하므로, 실패는 **조용히 무시**한다
+/// `curl`로 GitHub `releases/latest`를 받아 tag_name을 복사해 반환한다(호출측이 free). 네트워크 없음·
+/// 실패·형식 깨짐이면 null — brew 배포라 앱이 업그레이드하지 않고 안내만 하므로 실패는 **조용히 무시**한다
 /// (에러를 표면화해 사용자 작업을 방해하지 않는다). `curl -fsS -m`로 타임아웃을 짧게 둬 백그라운드
-/// 스레드가 오래 매달리지 않게 한다. 외부 프로세스(curl) 호출은 terminfo_cache가 `tic`을 부르는 선례와
-/// 같은 방식이다(maru에 HTTP 클라이언트가 없어 curl 셸아웃을 택함 — distribution.md).
+/// 스레드가 오래 매달리지 않게 한다.
+///
+/// **posix fork+exec+pipe**로 curl을 띄운다(ssh_upload.zig와 동일한 결). `std.process.Child`는 0.16에서
+/// io 기반이라 io 없이 도는 백그라운드 스레드에서 못 쓰므로 피한다. 0.16 std엔 execvp(PATH 검색)가 없어
+/// `/usr/bin/env`를 execve해 env(1)가 PATH에서 curl을 찾게 한다(현재 env 상속). maru에 HTTP 클라이언트가
+/// 없어 curl 셸아웃을 택한다(distribution.md). 순수 로직(parseTagName/isNewer)과 달리 부수효과라 단위
+/// 테스트 대신 통합 빌드로만 검증한다.
 pub fn fetchLatestTagAlloc(allocator: std.mem.Allocator, repo: []const u8) ?[]u8 {
-    const url = std.fmt.allocPrint(
+    const url = std.fmt.allocPrintSentinel(
         allocator,
         "https://api.github.com/repos/{s}/releases/latest",
         .{repo},
+        0,
     ) catch return null;
     defer allocator.free(url);
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "curl", "-fsS", "-m", "8", "-H", "Accept: application/vnd.github+json", url },
-        .max_output_bytes = 1 << 20, // 1MB 상한(릴리스 JSON은 작다 — 폭주 가드)
-    }) catch return null;
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    // null-term C argv: env curl -fsS -m 8 -H "Accept: ..." <url>. 문자열 리터럴은 정적이라 fork/exec까지
+    // 유효하고, url은 parent(여기)에서 살아 있다(child는 fork 시점 주소공간 복사).
+    const argv = [_:null]?[*:0]const u8{
+        "env",                                 "curl", "-fsS", "-m", "8",
+        "-H",                                  "Accept: application/vnd.github+json",
+        url.ptr,
+    };
 
-    switch (result.term) {
-        .Exited => |code| if (code != 0) return null,
-        else => return null,
+    // stdout 파이프만 필요(stdin 없음). [0]=read, [1]=write.
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return null;
+
+    const pid = std.c.fork();
+    if (pid < 0) {
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+        return null;
     }
-    const tag = parseTagName(result.stdout) orelse return null;
+    if (pid == 0) {
+        // child: stdout←out_pipe[1]. dup2/close/execve만(async-signal-safe).
+        _ = std.c.dup2(out_pipe[1], 1);
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127); // execve 실패
+    }
+
+    // parent: write 끝을 닫고 stdout에서 응답을 읽은 뒤 자식을 reap한다.
+    _ = std.c.close(out_pipe[1]);
+    const body = readAllFd(allocator, out_pipe[0]) catch {
+        _ = std.c.close(out_pipe[0]);
+        _ = reapPid(pid);
+        return null;
+    };
+    defer allocator.free(body);
+    _ = std.c.close(out_pipe[0]);
+
+    if (reapPid(pid) != 0) return null; // curl 비정상 종료(네트워크 없음·HTTP 에러 등)
+    const tag = parseTagName(body) orelse return null;
     return allocator.dupe(u8, tag) catch null;
+}
+
+/// fd에서 EOF까지 읽어 돌려준다(호출자 소유). 릴리스 JSON은 작으므로 방어 상한(1MB)을 둔다.
+/// ssh_upload.zig의 같은 헬퍼와 동형(그쪽은 maru 모듈 private이라 여기 자체 보유).
+fn readAllFd(allocator: std.mem.Allocator, fd: c_int) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &tmp, tmp.len);
+        if (n < 0) return error.ReadFailed;
+        if (n == 0) break; // EOF
+        try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
+        if (buf.items.len > 1024 * 1024) break;
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+/// 자식을 reap하고 exit code를 돌려준다(정상 종료가 아니면 -1).
+fn reapPid(pid: std.c.pid_t) c_int {
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    const us: u32 = @bitCast(status);
+    if (std.c.W.IFEXITED(us)) return @intCast(std.c.W.EXITSTATUS(us));
+    return -1;
 }
 
 test "parseTagName: releases/latest JSON에서 tag_name 추출" {

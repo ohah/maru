@@ -517,6 +517,16 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_frame_builder_tests = b.addRunArtifact(macos_coretext_frame_builder_tests);
 
+    // 앱 버전(build.zig.zon .version)을 build_options로 노출 — app host(app_session)가
+    // @import("build_options").version으로 읽어 인앱 새 버전 안내에 쓴다(distribution.md). app host lib과
+    // 그 계약 테스트 모듈 양쪽에 같은 모듈을 주입한다. core(VT)는 빌드 시스템 비결합 원칙이라 app host
+    // 경로에만 쓴다(core.zig의 terminal_version 상수는 별개).
+    const build_options_mod = blk: {
+        const opts = b.addOptions();
+        opts.addOption([]const u8, "version", build_zig_zon.version);
+        break :blk opts.createModule();
+    };
+
     const macos_app_host_abi_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/app_host_abi.zig"),
@@ -525,6 +535,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
+                .{ .name = "build_options", .module = build_options_mod },
             },
         }),
     });
@@ -558,12 +569,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
-    // 앱이 자기 버전을 알도록 build.zig.zon의 .version을 build_options로 주입한다. app_session이
-    // @import("build_options").version으로 읽어 인앱 새 버전 안내에 쓴다. core(VT)는 빌드 시스템
-    // 비결합 원칙이라 여기(app host 모듈)에만 주입한다(core.zig의 terminal_version 상수는 별개).
-    const app_version_options = b.addOptions();
-    app_version_options.addOption([]const u8, "version", build_zig_zon.version);
-    macos_app_host_abi_lib.root_module.addImport("build_options", app_version_options.createModule());
+    // build_options 모듈(위에서 생성)을 app host lib에도 주입 — 계약 테스트 모듈과 같은 모듈을 공유한다.
+    macos_app_host_abi_lib.root_module.addImport("build_options", build_options_mod);
     if (target.result.os.tag == .macos) {
         // CoreText 브리지 object를 정적 라이브러리에 함께 담아, Swift 최종 링크가 .a 하나로
         // app session의 glyph rasterize 심볼을 모두 얻게 한다. CoreText/CoreGraphics

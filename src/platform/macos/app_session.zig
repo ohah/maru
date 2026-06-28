@@ -28,6 +28,9 @@ const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
 const command_catalog = @import("command_catalog.zig");
+const update_check = @import("update_check.zig"); // 인앱 새 버전 안내(distribution.md): tag 파싱·semver 비교·curl 조회
+const build_options = @import("build_options"); // build.zig가 주입한 .version(build.zig.zon 단일 출처)
+const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig"); // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
@@ -1368,6 +1371,17 @@ pub const AppSession = struct {
     upload_results: std.ArrayList([]u8) = .empty,
     upload_inflight: usize = 0,
     upload_counter: usize = 0, // 클립보드 이미지 paste 파일명(pasted-<pid>-N.png) 세션 내 고유화 카운터(메인 스레드 전용)
+    // 인앱 새 버전 안내(distribution.md "인앱 새 버전 안내") 백그라운드 체크 ↔ 메인 tick 통신. upload 패턴과
+    // 동일하다 — 첫 tick에서 별도 스레드가 GitHub releases/latest를 curl로 받아(UI 안 멈춤) 현재 버전과
+    // 비교하고, 새 버전이면 mutex 하에 태그를 update_tag_buf에 담는다. 메인 tick(drainUpdateCheck)이 빼서
+    // 알림으로 띄운다 — core/알림 접근은 메인 전용이라 스레드가 직접 push 못 한다. update_inflight는 deinit이
+    // 0까지 기다려 detach 스레드의 self use-after-free를 막는다(upload_inflight와 같은 가드).
+    update_mutex: std.Io.Mutex = .init,
+    update_tag_buf: [64]u8 = undefined,
+    update_tag_len: usize = 0,
+    update_inflight: usize = 0,
+    update_started: bool = false, // 첫 tick에서 체크 스레드를 1회만 띄우는 가드(메인 전용)
+    update_notified: bool = false, // 알림을 1회만 띄우는 가드(메인 전용)
     // IME 키 트랜잭션 상태(Ghostty의 keyTextAccumulator 패턴과 같은 구조). Swift keyDown이
     // imeBegin으로 열고 입력기 콜백(imeInsert/imeMarked)이 쌓은 것을 imeEnd가 일괄 판정한다 —
     // 콜백마다 즉석 판단하면 입력기의 비동기/다중 호출에서 이중 전송·유실이 생긴다(라이브에서
@@ -7677,6 +7691,63 @@ pub const AppSession = struct {
         }
     }
 
+    /// 첫 tick에서 1회: 인앱 새 버전 안내 백그라운드 체크를 띄운다(config notifications.update-check로 끔).
+    /// UI를 안 멈추게 별도 스레드에서 GitHub releases/latest를 받는다. upload 패턴과 동일하게 inflight를
+    /// 올리고 detach하며, deinit이 0까지 기다린다(self use-after-free 가드).
+    fn startUpdateCheck(self: *AppSession) void {
+        if (builtin.is_test) return; // 계약 테스트(tick 구동)가 네트워크(curl)를 타지 않게 한다 — 순수 로직은 update_check.zig 단위 테스트가 검증
+        if (!self.loaded_config.config.notifications.update_check) return;
+        self.update_mutex.lockUncancelable(self.io);
+        self.update_inflight += 1;
+        self.update_mutex.unlock(self.io);
+        const thread = std.Thread.spawn(.{}, updateCheckWorker, .{self}) catch {
+            self.update_mutex.lockUncancelable(self.io);
+            self.update_inflight -= 1;
+            self.update_mutex.unlock(self.io);
+            return;
+        };
+        thread.detach();
+    }
+
+    /// 백그라운드 스레드: latest tag를 받아 현재 버전(build_options.version)보다 높으면 mutex 하에 태그를
+    /// 슬롯에 담는다. self.allocator는 메인과 경합하므로 쓰지 않고 page_allocator(thread-safe)로 받는다.
+    /// core/알림은 건드리지 않는다(메인 전용) — 결과 전달은 메인 tick의 drainUpdateCheck가 한다.
+    fn updateCheckWorker(self: *AppSession) void {
+        const a = std.heap.page_allocator;
+        const tag = update_check.fetchLatestTagAlloc(a, update_repo) orelse {
+            self.update_mutex.lockUncancelable(self.io);
+            self.update_inflight -= 1;
+            self.update_mutex.unlock(self.io);
+            return;
+        };
+        defer a.free(tag);
+        const newer = update_check.isNewer(build_options.version, tag);
+        self.update_mutex.lockUncancelable(self.io);
+        if (newer) {
+            const n = @min(tag.len, self.update_tag_buf.len);
+            @memcpy(self.update_tag_buf[0..n], tag[0..n]);
+            self.update_tag_len = n;
+        }
+        self.update_inflight -= 1;
+        self.update_mutex.unlock(self.io);
+    }
+
+    /// 메인 tick: 새 버전 태그가 잡혔으면(백그라운드가 채움) 1회 알림을 띄운다. brew 배포라 업그레이드는
+    /// 자동 실행하지 않고 안내만 한다(distribution.md). pushNotificationHistory는 메인 전용이라 여기서 호출.
+    fn drainUpdateCheck(self: *AppSession) void {
+        if (self.update_notified) return;
+        self.update_mutex.lockUncancelable(self.io);
+        const len = self.update_tag_len;
+        var tag_buf: [64]u8 = undefined;
+        if (len > 0) @memcpy(tag_buf[0..len], self.update_tag_buf[0..len]);
+        self.update_mutex.unlock(self.io);
+        if (len == 0) return;
+        self.update_notified = true;
+        var title_buf: [128]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buf, "새 버전 {s} 사용 가능", .{tag_buf[0..len]}) catch "새 버전 사용 가능";
+        self.pushNotificationHistory(title, "brew upgrade maru 로 업데이트하세요", 0, false);
+    }
+
     /// pending_paste가 다 빠진 뒤 새로 쌓기 시작할 때만 대상 surface를 현재 활성으로 다시 고정한다.
     /// 잔여가 남아 있으면 대상을 바꾸지 않아, 이미 어떤 surface로 가던 paste/IME 확정 바이트가 탭/pane
     /// 전환으로 다른 surface에 섞여 들어가지 않는다(원래 대상 우선; flushPendingPaste가 이 대상으로 쓴다).
@@ -9545,9 +9616,14 @@ pub const AppSession = struct {
         // 싸다. 생명주기 회계(이벤트 합산, 종료 reap)도 build 여부와 무관하게 매 tick 한다 —
         // Metal 투영이나 비싼 build가 실패/생략돼도 drained 이벤트나 finishAfterTermination
         // (reader join/child reap)을 건너뛰지 않게 한다.
+        if (!self.update_started) { // 첫 tick에서 인앱 새 버전 안내 백그라운드 체크를 1회 띄운다(config로 끔)
+            self.update_started = true;
+            self.startUpdateCheck();
+        }
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 30Hz로 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
+        self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
@@ -12498,6 +12574,14 @@ pub const AppSession = struct {
         }
         for (self.upload_results.items) |p| self.allocator.free(p);
         self.upload_results.deinit(self.allocator);
+        // 인앱 업데이트 체크 스레드 완료 대기(detach 스레드가 self.update_*를 건드리므로 self 해제 전 0까지).
+        while (true) {
+            self.update_mutex.lockUncancelable(self.io);
+            const n = self.update_inflight;
+            self.update_mutex.unlock(self.io);
+            if (n == 0) break;
+            std.atomic.spinLoopHint();
+        }
         self.ime_inserted.deinit(self.allocator);
 
         self.metal_buffer.deinit(self.allocator);

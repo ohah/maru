@@ -745,6 +745,18 @@ const NotificationHistoryItem = struct {
 /// fallback 폰트로 넘기는데 그 폰트에서 글리프가 한글 '정' 등으로 어긋나 간헐적으로 깨졌다(근본 원인). 폰트가 가진
 /// 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다. claude=✶(U+2736 6각별, 선버스트 근사),
 /// codex=◆(U+25C6 다이아). 포그라운드인 동안만 표시.
+/// running 스피너 8프레임(브라유 ⠋⠙⠹⠸⠼⠴⠦⠧ — 회전 dot, JetBrains Mono 보유 + 셀 합성 경로라 안전). 상태줄이 현재
+/// `agent_spin_frame`의 글리프를 그리고, 색칠 루프가 이 codepoint를 브랜드색으로 칠한다(아이콘과 같은 패턴).
+const agent_spinner_frames = [_]u21{ 0x280B, 0x2819, 0x2839, 0x2838, 0x283C, 0x2834, 0x2826, 0x2827 };
+
+/// codepoint가 스피너 프레임 중 하나인가(색칠 루프 게이트 — 이름/경로에 braille는 드물고, 게다가 agent_kind!=none만 칠함).
+fn isAgentSpinnerCp(cp: u21) bool {
+    for (agent_spinner_frames) |f| {
+        if (f == cp) return true;
+    }
+    return false;
+}
+
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
     // **알림 제목용 실제 유니코드** — OS 데스크톱 알림은 시스템 폰트로 그려지므로 maru 합성 PUA(agentIconCodepoint)를
     // 못 쓴다. 사이드바 렌더(maru)와 알림(OS)이 의미는 같되 codepoint가 갈리는 유일한 곳.
@@ -1374,6 +1386,10 @@ pub const AppSession = struct {
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
+    // 에이전트 running 스피너(상태줄 "⠋ 진행중" 회전). agent_spin_ticks가 4틱(≈130ms)마다 agent_spin_frame을 +1(mod 8)
+    // 진행하고 사이드바를 재투영한다 — 펄스(blink_visible 500ms 2위상)와 별개의 빠른 위상. anyAgentRunning일 때만 돈다.
+    agent_spin_frame: u8 = 0,
+    agent_spin_ticks: u32 = 0,
     // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
     // 포그라운드 프로세스명을 polling해 agent_kind를 갱신한다(claude/codex/none).
     agent_poll_ticks: u32 = 0,
@@ -6841,6 +6857,15 @@ pub const AppSession = struct {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
+        // running 스피너: blink(500ms)보다 빠른 별도 위상 — 4틱(≈130ms)마다 프레임 진행 + 사이드바 재투영(회전 보임).
+        if (agent_pulsing) {
+            self.agent_spin_ticks += 1;
+            if (self.agent_spin_ticks >= 4) {
+                self.agent_spin_ticks = 0;
+                self.agent_spin_frame +%= 1;
+                self.metal_dirty = true;
+            }
+        }
         self.blink_ticks += 1;
         if (self.blink_ticks >= self.blinkIntervalTicks()) {
             self.blink_ticks = 0;
@@ -10972,7 +10997,11 @@ pub const AppSession = struct {
     fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
         if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
         return switch (term.agent_state) {
-            .running => self.allocator.dupe(u8, "\u{25CF} 진행중"), // ● 진행중
+            .running => blk: { // 회전 브라유 스피너 + 진행중(스피너는 색칠 루프가 브랜드색으로). 정적 ● 대신.
+                var sp: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(agent_spinner_frames[self.agent_spin_frame % agent_spinner_frames.len], &sp) catch 0;
+                break :blk std.fmt.allocPrint(self.allocator, "{s} 진행중", .{sp[0..n]});
+            },
             .idle => if (term.agent_answer_len > 0)
                 std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{term.agent_answer_buf[0..term.agent_answer_len]}) // ✓ {답변}
             else
@@ -11246,19 +11275,22 @@ pub const AppSession = struct {
         // 출처로 고르고(codepoint 역매핑 아님 — agentSymbolCodepoint와 짝 유지), 아이콘은 gutter col 0에만 있어
         // col 0 + 아이콘 codepoint로 좁힌다 → 워크스페이스 이름/경로(col≥3)에 ✶·◆가 들어가도 안 오염. docs/agent-session.md.
         for (draw_list.cells) |*c| {
-            if (c.col != 0) continue; // 아이콘은 왼쪽 gutter col 0 — 텍스트 셀(col≥3)의 동일 글리프 오염 방지.
-            if (c.codepoint != 0xF0007 and c.codepoint != 0xF0008) continue; // ✶ claude / ◆ codex
-            // 아이콘 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*32+…)해 그 Term을 얻는다.
+            // ① gutter 아이콘(col 0 + 합성 sparkle/diamond) ② 상태줄 running 스피너(브라유). 둘 다 브랜드색으로 칠한다.
+            const is_icon = c.col == 0 and (c.codepoint == 0xF0007 or c.codepoint == 0xF0008); // ✶ claude / ◆ codex
+            const is_spinner = isAgentSpinnerCp(c.codepoint); // 회전 브라유(상태줄, col≥indent)
+            if (!is_icon and !is_spinner) continue;
+            // 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*sidebar_line_base+줄offset, 줄offset<base라 아이콘/스피너 같은 슬롯)해 그 Term을 얻는다.
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // 표시 슬롯
             const orig = self.visibleTab(slot) orelse continue; // 표시 슬롯 → 원본 탭(검색 필터)
             const t = self.tabs.items[orig].activePane().activeTerm();
             const brand: maru.color.Rgb = switch (t.agent_kind) {
                 .claude => .{ .r = 0xD9, .g = 0x78, .b = 0x5C }, // Anthropic 코랄
                 .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록(#10A37F)
-                .none => continue, // 아이콘 codepoint인데 kind=none(이름 글자가 ✶·◆ 등) — 색칠 안 함.
+                .none => continue, // 아이콘/braille codepoint인데 kind=none(이름 글자 등) — 색칠 안 함.
             };
-            // running이면 펄스(blink off 위상 어둡게), idle/unknown은 정적 full 브랜드색.
-            c.style.foreground = .{ .rgb = if (t.agent_state == .running and !self.blink_visible) dimRgb(brand) else brand };
+            // 아이콘·스피너 모두 **솔리드 브랜드색**(running 펄스 폐기 — 작은 밝기 변조가 안 보인다는 피드백). 작업 중
+            // 애니메이션은 상태줄 스피너 회전이 담당하고, 아이콘은 큰 솔리드 색으로 종류/presence를 또렷이 보인다.
+            c.style.foreground = .{ .rgb = brand };
         }
         // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
         if (indent_cols > 0) {

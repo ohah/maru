@@ -670,6 +670,15 @@ pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, ac
 /// chord에 하나).
 pub const TerminalMacroWrite = struct { chord: []const u8, rhs: []const u8 };
 
+/// 두 chord 표기가 **같은 chord**인가 — 파일에 손으로 쓴 비정규 표기(소문자 `ctrl+g`·수식키 순서 다름·`Alt`/`Option`
+/// 별칭)도 정규 표기(toConfigString)와 매칭되게 **파싱 후 KeyChord.eql**로 비교한다(raw 바이트 eql은 비정규 표기를
+/// 놓쳐 편집이 줄을 교체 못 하고 중복을 남긴다 — code-review max). 둘 중 하나라도 파싱 실패면 raw eql로 폴백.
+fn chordStrEql(left: []const u8, want: []const u8) bool {
+    const lc = keybinding.KeyChord.parse(left) catch return std.mem.eql(u8, left, want);
+    const wc = keybinding.KeyChord.parse(want) catch return std.mem.eql(u8, left, want);
+    return lc.eql(wc);
+}
+
 /// `keybind = <chord> = <rhs>`(rhs=매크로) 줄을 **chord 기준**으로 upsert한다 — updateKeybindLines(action 기준)의 짝.
 /// 매크로는 한 chord에 하나라 좌측 chord로 매칭하고, 매칭 줄의 rhs가 매크로(`isMacroRhs`)일 때만 교체해 app action 줄을
 /// 안 건드린다(액션 줄은 updateKeybindLines가 담당 — 두 패스가 같은 chord를 두고 안 싸운다). `global:` chord는 스킵
@@ -698,7 +707,7 @@ pub fn updateTerminalMacroLines(allocator: std.mem.Allocator, original: []const 
                         const rhs = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
                         if (!std.mem.startsWith(u8, left_chord, "global:") and isMacroRhs(rhs)) {
                             for (macros, 0..) |m, i| {
-                                if (std.mem.eql(u8, m.chord, left_chord)) {
+                                if (chordStrEql(left_chord, m.chord)) {
                                     try out.appendSlice(allocator, "keybind = ");
                                     try out.appendSlice(allocator, m.chord);
                                     try out.appendSlice(allocator, " = ");
@@ -747,7 +756,7 @@ pub fn removeTerminalMacroLines(allocator: std.mem.Allocator, original: []const 
                         const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
                         const rhs = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
                         if (!std.mem.startsWith(u8, left_chord, "global:") and isMacroRhs(rhs)) {
-                            for (chords) |c| if (std.mem.eql(u8, c, left_chord)) {
+                            for (chords) |c| if (chordStrEql(left_chord, c)) {
                                 drop = true;
                                 break;
                             };
@@ -1327,6 +1336,27 @@ test "updateTerminalMacroLines/removeTerminalMacroLines: chord 기준 매크로 
     try std.testing.expect(std.mem.indexOf(u8, removed, "Ctrl+G") == null);
     try std.testing.expect(std.mem.indexOf(u8, removed, "Ctrl+H = esc:[2J") != null); // 다른 매크로 보존
     try std.testing.expect(std.mem.indexOf(u8, removed, "Cmd+T = new_term") != null); // action 보존
+}
+
+test "updateTerminalMacroLines/removeTerminalMacroLines: 비정규 표기 chord도 KeyChord.eql로 매칭(중복 줄·미삭제 방지)" {
+    const a = std.testing.allocator;
+    // 손으로 쓴 비정규 표기(소문자·수식키 순서 다름). GUI는 정규 표기(Ctrl+G·Ctrl+Shift+H)로 예약한다.
+    const original =
+        "keybind = ctrl+g = text:hello\n" ++ // 소문자
+        "keybind = shift+ctrl+h = text:world\n"; // 수식키 순서 뒤바뀜
+    const macros = [_]TerminalMacroWrite{.{ .chord = "Ctrl+G", .rhs = "text:bye" }};
+    const out = try updateTerminalMacroLines(a, original, &macros);
+    defer a.free(out);
+    // 비정규 줄을 **교체**(append 아님) — text:hello 사라지고 text:bye만, 줄 1개.
+    try std.testing.expect(std.mem.indexOf(u8, out, "text:bye") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "text:hello") == null);
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfPos(u8, out, (std.mem.indexOf(u8, out, "text:bye").?) + 1, "text:bye")); // 중복 줄 없음
+
+    // 삭제도 비정규 표기 매칭 — shift+ctrl+h 줄을 정규 "Ctrl+Shift+H"로 제거.
+    const chords = [_][]const u8{"Ctrl+Shift+H"};
+    const removed = try removeTerminalMacroLines(a, out, &chords);
+    defer a.free(removed);
+    try std.testing.expect(std.mem.indexOf(u8, removed, "text:world") == null); // 비정규 줄도 삭제됨
 }
 
 test "parseMacroRhs: text/esc/ctrl 파싱, 비매크로·빈 payload는 null" {

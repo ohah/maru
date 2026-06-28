@@ -55,6 +55,14 @@ renderer, storage, platform interop는 VT 명세처럼 하나의 공개 표준�
 | Alacritty `alacritty_terminal` | Apache-2.0 | `tests/oracle/alacritty-dumper`에서 `cargo build --release` (Rust 툴체인) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-alacritty`) |
 | xterm.js | MIT | `git clone --depth 1 https://github.com/xtermjs/xterm.js.git references/xterm.js` | 📖 동작/코드 레퍼런스(headless oracle 아님). resize reflow에서 **커서가 있는 줄을 건드리지 않는**(`reflowCursorLine=false`) 방식을 참고했다(셸이 SIGWINCH로 그 줄을 다시 그림). 동작 비교만 — 코드 미복사 |
 
+## 기능 동작 레퍼런스 (터미널 코어 밖 — clean-room, 코드 미복사)
+
+터미널 코어가 아닌 기능(웹뷰 패널·세션 컨트롤 플레인·브라우저 자동화)을 설계할 때 **동작과 아키텍처만** 참고하는 레퍼런스다. 위 오라클과 같은 규칙을 따른다 — 공개 코드라도 자료구조 레이아웃/함수 분해/control-flow를 옮기지 않고, 동작·계약·설계 패턴만 유도한다([필수 프로젝트 규칙](project-rules.md) clean-room). PR은 "동작 비교만 reference 사용" 또는 "Maru 독립 설계" 근거를 남긴다.
+
+| 레퍼런스 | 라이선스 | 받는 법 | 무엇을 참고 |
+| --- | --- | --- | --- |
+| vercel-labs/agent-browser | Apache-2.0 | `git clone --depth 1 https://github.com/vercel-labs/agent-browser references/agent-browser` | 브라우저 자동화 CLI의 **백엔드 추상화**(CDP=Chrome / **W3C WebDriver**=Safari·iOS — `cli/src/native/webdriver/`, `backend.rs`의 `BrowserBackend` trait)와 **명령 표면**(navigate/evaluate/screenshot/click/find_element 등 ~15개). maru가 WKWebView를 **WebDriver 어댑터**로 노출해 외부 자동화 도구와 호환시키는 설계의 동작 베이스로만 참고(코드 미복사). 단일 출처: [세션 컨트롤 플레인](control-plane.md) §browser |
+
 오라클이 **아닌** 것:
 
 - `tmux`, `vim`, `less`, `htop`, `ssh`는 Maru **안에서 돌리는 workload**다(PTY/E2E smoke 대상). 이들은 Maru의 파서를 압박하는 대상이지, 정답 화면을 대신 계산해 주는 오라클이 아니다. 특히 tmux는 내부에 VT 엔진이 있긴 하지만, 외부에서 raw byte를 직접 먹일 수 없고(팬 안 프로세스가 출력해야 함) `capture-pane`이 trailing space를 다듬고 타이밍 레이스가 있어, in-process 라이브러리(libvterm/libghostty-vt)보다 오라클로서 떨어진다.

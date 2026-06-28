@@ -1241,6 +1241,12 @@ pub const AppSession = struct {
     // 남으므로(파일 위생; resolver는 사용자 바인딩 우선이라 동작은 정상) 그 chord 표기를 여기에 둔다. serializeConfig가
     // removeKeybindUnbindLines로 unbind-append 패스 뒤에 체이닝. takeConfigDirty가 봄. loaded_config.arena 소유.
     config_keybind_unbind_removed: std.ArrayList([]const u8) = .empty,
+    // 터미널 매크로 upsert 예약 — `keybind = <chord> = text:/esc:/ctrl:` 줄(rhs 편집·추가). chord 기준 전용 패스
+    // (updateTerminalMacroLines). chord·rhs 모두 loaded_config.arena 소유. serializeConfig가 체이닝, takeConfigDirty가 봄.
+    config_terminal_macros: std.ArrayList(config_mod.TerminalMacroWrite) = .empty,
+    // 터미널 매크로 삭제 예약 — `keybind = <chord> = <매크로 rhs>` 줄을 chord 기준 제거(removeTerminalMacroLines). chord는
+    // loaded_config.arena 소유. serializeConfig가 갱신 패스 뒤 체이닝(제거 우선), takeConfigDirty가 봄.
+    config_terminal_macro_removes: std.ArrayList([]const u8) = .empty,
     // 전역(OS) 단축키 재바인딩 — `keybind = global:<chord> = <action>` 줄이라 전용 패스(updateGlobalKeybindLines). action은
     // command_catalog 글로벌 정적 키, chord는 loaded_config.arena 소유(toConfigString). serializeConfig가 체이닝, takeConfigDirty가 봄. (PR1)
     config_global_rebinds: std.ArrayList(config_mod.GlobalKeybindRebind) = .empty,
@@ -4207,6 +4213,21 @@ pub const AppSession = struct {
             if (settingsRowMatches("환경 변수 추가 (KEY=VALUE)", "env", q))
                 try texts.append(arena, .{ .key = "env.", .doc = "환경 변수 추가 (KEY=VALUE)", .value = "", .section = .terminal }); // 추가 행(빈 KEY = sentinel)
         }
+        // 입력 섹션엔 사용자 터미널 매크로(keybind = chord = text:/esc:/ctrl:)를 rhs 편집 text 행으로 노출한다(env 특수 행
+        // 선례). 라벨=chord 표시(formatChord), 값=rhs config 문자열(macroRhsString, 예 "text:hello"). 키="macro.<chord
+        // config>"로 커밋/삭제 시 chord를 식별한다(toConfigString). 마지막에 "추가" 행(빈 sentinel "macro.").
+        if (cross or sel_sec == .input) {
+            for (self.loaded_config.terminal_bindings) |b| {
+                var chord_buf: [64]u8 = undefined;
+                const chord_cfg = b.chord.toConfigString(&chord_buf);
+                var disp_buf: [command_catalog.max_chord_display_len]u8 = undefined;
+                const disp = command_catalog.formatChord(b.chord, &disp_buf);
+                if (settingsRowMatches(disp, "macro", q))
+                    try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "macro.{s}", .{chord_cfg}), .doc = try arena.dupe(u8, disp), .value = try macroRhsString(arena, b.input), .section = .input });
+            }
+            if (settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
+                try texts.append(arena, .{ .key = "macro.", .doc = "터미널 매크로 추가 (chord = text:...)", .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
+        }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
         for (colors_all.items) |c| if ((cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
         // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
@@ -4474,6 +4495,10 @@ pub const AppSession = struct {
                 self.addEnvVar(editor); // 추가 행 — "KEY=VALUE" 파싱
             } else if (std.mem.startsWith(u8, tkey, "env.")) {
                 self.setEnvVar(tkey["env.".len..], editor); // 기존 env 값 편집
+            } else if (std.mem.eql(u8, tkey, "macro.")) {
+                self.addTerminalMacro(editor); // 추가 행 — "chord = text:..." 파싱
+            } else if (std.mem.startsWith(u8, tkey, "macro.")) {
+                self.setTerminalMacro(tkey["macro.".len..], editor); // 기존 매크로 rhs 편집
             } else {
                 // schema 텍스트(.text) — config arena dupe 후 검증·적용.
                 const owned = self.loaded_config.arena.allocator().dupe(u8, editor) catch return;
@@ -4570,6 +4595,115 @@ pub const AppSession = struct {
         self.setEnvVar(name, text[eq + 1 ..]);
     }
 
+    /// 터미널 매크로를 config rhs 표기로 되돌린다(행 값 표시·편집 시드). text:/esc:/ctrl: — esc는 앞 ESC(0x1b)를 떼고,
+    /// ctrl은 codepoint를 UTF-8로. parseMacroRhs(loader)의 역. arena 소유(이 프레임만). 단일 출처: loader.parseTerminalMacro.
+    fn macroRhsString(arena: std.mem.Allocator, macro: config_mod.TerminalInputMacro) ![]const u8 {
+        return switch (macro) {
+            .send_text => |t| try std.fmt.allocPrint(arena, "text:{s}", .{t}),
+            .send_escape_sequence => |s| try std.fmt.allocPrint(arena, "esc:{s}", .{if (s.len > 0) s[1..] else s}), // 저장 바이트는 ESC+payload — 앞 ESC 제거
+            .send_control => |cp| blk: {
+                var ub: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(cp, &ub) catch break :blk try arena.dupe(u8, "ctrl:");
+                break :blk try std.fmt.allocPrint(arena, "ctrl:{s}", .{ub[0..n]});
+            },
+        };
+    }
+
+    /// 같은 chord의 대기 중 매크로 write-back 예약(추가·삭제 양쪽)을 비운다 — 재추가가 옛 삭제를, 삭제가 옛 추가를
+    /// 상쇄하고, 같은 chord를 여러 번 편집해도 예약이 중복돼 줄이 두 번 써지지 않게 한다(serialize 전 dedup·cross-cancel).
+    fn cancelPendingMacro(self: *AppSession, chord_str: []const u8) void {
+        var i: usize = 0;
+        while (i < self.config_terminal_macros.items.len) {
+            if (std.mem.eql(u8, self.config_terminal_macros.items[i].chord, chord_str)) {
+                _ = self.config_terminal_macros.orderedRemove(i);
+            } else i += 1;
+        }
+        i = 0;
+        while (i < self.config_terminal_macro_removes.items.len) {
+            if (std.mem.eql(u8, self.config_terminal_macro_removes.items[i], chord_str)) {
+                _ = self.config_terminal_macro_removes.orderedRemove(i);
+            } else i += 1;
+        }
+    }
+
+    /// 터미널 매크로 upsert(rhs 편집·추가 공유) — chord_str(config 표기)에 rhs(text:/esc:/ctrl:)를 묶는다. rhs 파싱 실패·
+    /// chord 표기 오류·충돌이면 notice(미적용). 성공 시 loaded_config.terminal_bindings를 라이브 교체(resolver가 즉시 반영)
+    /// + write-back 예약(config_terminal_macros). config-gui §6.7.
+    fn setTerminalMacro(self: *AppSession, chord_str: []const u8, rhs_str: []const u8) void {
+        const a = self.loaded_config.arena.allocator();
+        const rhs_trim = std.mem.trim(u8, rhs_str, &std.ascii.whitespace);
+        const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch {
+            self.showNotice("단축키 표기를 읽지 못했습니다");
+            return;
+        };
+        const macro = config_mod.parseMacroRhs(a, rhs_trim) orelse {
+            self.showNotice("매크로는 text:/esc:/ctrl: 형식이어야 합니다");
+            return;
+        };
+        // 같은 chord면 교체, 없으면 추가(한 chord=한 매크로).
+        var list: std.ArrayList(config_mod.keybinding.TerminalBinding) = .empty;
+        var found = false;
+        for (self.loaded_config.terminal_bindings) |b| {
+            if (b.chord.eql(chord)) {
+                list.append(a, .{ .chord = chord, .input = macro }) catch return;
+                found = true;
+            } else list.append(a, b) catch return;
+        }
+        if (!found) list.append(a, .{ .chord = chord, .input = macro }) catch return;
+        const new_binds = list.toOwnedSlice(a) catch return;
+        // 충돌 검증(app↔terminal·중복 chord) — 새 셋으로 resolver를 만들어 validate. 실패면 적용 안 함(best-effort 경고).
+        var probe = self.loaded_config.keyBindingResolver();
+        probe.terminal_bindings = new_binds;
+        probe.validate() catch {
+            self.showNotice("다른 단축키와 충돌해 적용하지 못했습니다");
+            return;
+        };
+        self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
+        // write-back 예약 — 같은 chord 대기 예약(추가/삭제)을 먼저 비워 중복·모순을 막고 새로 단다. chord·rhs는
+        // loaded_config.arena 소유(serialize drain까지 유효).
+        self.cancelPendingMacro(chord_str);
+        const chord_owned = a.dupe(u8, chord_str) catch return;
+        const rhs_owned = a.dupe(u8, rhs_trim) catch return;
+        self.config_terminal_macros.append(self.allocator, .{ .chord = chord_owned, .rhs = rhs_owned }) catch return;
+        self.metal_dirty = true;
+    }
+
+    /// 매크로 추가 행 커밋 — "chord = text:..." 텍스트를 파싱(첫 `=`로 chord/rhs 분리, chord 정규화)해 setTerminalMacro로
+    /// upsert. `=` 없거나 chord가 비면 notice.
+    fn addTerminalMacro(self: *AppSession, text: []const u8) void {
+        const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
+            self.showNotice("매크로는 'chord = text:...' 형식이어야 합니다");
+            return;
+        };
+        const chord_part = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
+        if (chord_part.len == 0) {
+            self.showNotice("단축키가 비어 있습니다");
+            return;
+        }
+        // chord 정규화(파싱 → toConfigString) — 행 키·write-back 줄이 표준 표기를 쓰게.
+        const chord = config_mod.keybinding.KeyChord.parse(chord_part) catch {
+            self.showNotice("단축키 표기를 읽지 못했습니다");
+            return;
+        };
+        var chord_buf: [64]u8 = undefined;
+        self.setTerminalMacro(chord.toConfigString(&chord_buf), text[eq + 1 ..]);
+    }
+
+    /// 터미널 매크로 삭제(Backspace) — chord_str의 binding을 라이브 제거 + write-back 줄 제거 예약.
+    fn removeTerminalMacro(self: *AppSession, chord_str: []const u8) void {
+        const a = self.loaded_config.arena.allocator();
+        const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch return;
+        var list: std.ArrayList(config_mod.keybinding.TerminalBinding) = .empty;
+        for (self.loaded_config.terminal_bindings) |b| {
+            if (!b.chord.eql(chord)) list.append(a, b) catch return;
+        }
+        self.loaded_config.terminal_bindings = list.toOwnedSlice(a) catch return;
+        self.cancelPendingMacro(chord_str); // 같은 chord 대기 추가 예약 상쇄 + 중복 삭제 예약 방지
+        const chord_owned = a.dupe(u8, chord_str) catch return;
+        self.config_terminal_macro_removes.append(self.allocator, chord_owned) catch return;
+        self.metal_dirty = true;
+    }
+
     /// 선택 행을 삭제한다(Backspace). **env.<KEY> 행** → env 변수 삭제, **keybind 행** → 사용자 지정 단축키 해제(unbind).
     /// 그 외(schema·shell.args·env 추가 sentinel·palette)는 무동작. 둘 다 spawn/입력 시점이라 appearance 재적용 없음.
     fn deleteSelectedSettingRow(self: *AppSession) void {
@@ -4585,6 +4719,10 @@ pub const AppSession = struct {
             if (std.mem.startsWith(u8, t.key, "env.") and t.key.len > "env.".len) {
                 self.removeEnvVar(t.key["env.".len..]);
                 self.refreshSettingsFieldCount(); // 행이 줄어듦 → setFieldCount가 selected clamp
+                self.metal_dirty = true;
+            } else if (std.mem.startsWith(u8, t.key, "macro.") and t.key.len > "macro.".len) {
+                self.removeTerminalMacro(t.key["macro.".len..]); // 터미널 매크로 행 → 매크로 제거
+                self.refreshSettingsFieldCount();
                 self.metal_dirty = true;
             } else if (std.mem.eql(u8, t.key, "window.background-image")) {
                 // 배경 이미지 행 Backspace = 빈 값(배경 없음)으로 — 파일 선택창의 짝(지우기). schema.setText는 빈 값을
@@ -5573,6 +5711,8 @@ pub const AppSession = struct {
         self.config_keybind_unbinds.clearRetainingCapacity();
         self.config_keybind_unbind_removed.clearRetainingCapacity();
         self.theme_preset_persist = null; // 테마 프리셋 영속 예약도 폐기(다른 대기열과 같은 집합)
+        self.config_terminal_macros.clearRetainingCapacity();
+        self.config_terminal_macro_removes.clearRetainingCapacity();
         self.config_global_rebinds.clearRetainingCapacity();
         self.config_global_removed.clearRetainingCapacity();
     }
@@ -8123,6 +8263,7 @@ pub const AppSession = struct {
             self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0 or
             self.config_keybind_unbinds.items.len > 0 or self.config_keybind_unbind_removed.items.len > 0 or
             self.theme_preset_persist != null or
+            self.config_terminal_macros.items.len > 0 or self.config_terminal_macro_removes.items.len > 0 or
             self.config_global_rebinds.items.len > 0 or self.config_global_removed.items.len > 0;
     }
 
@@ -8773,6 +8914,20 @@ pub const AppSession = struct {
             self.allocator.free(text);
             text = chained;
             self.config_keybind_removed.clearRetainingCapacity();
+        }
+        // 터미널 매크로 upsert — `keybind = <chord> = text:/esc:/ctrl:` 줄을 chord 기준 갱신/추가(전용 패스).
+        if (self.config_terminal_macros.items.len > 0) {
+            const chained = try config_mod.updateTerminalMacroLines(self.allocator, text, self.config_terminal_macros.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_terminal_macros.clearRetainingCapacity();
+        }
+        // 터미널 매크로 삭제 — `keybind = <chord> = <매크로 rhs>` 줄을 chord 기준 제거(갱신 패스 뒤, 제거 우선).
+        if (self.config_terminal_macro_removes.items.len > 0) {
+            const chained = try config_mod.removeTerminalMacroLines(self.allocator, text, self.config_terminal_macro_removes.items);
+            self.allocator.free(text);
+            text = chained;
+            self.config_terminal_macro_removes.clearRetainingCapacity();
         }
         // 빌트인 죽이기 — `keybind = chord = unbind` 지시어 append(사용자 줄 제거 뒤, 마지막).
         if (self.config_keybind_unbinds.items.len > 0) {
@@ -12345,6 +12500,8 @@ pub const AppSession = struct {
         self.config_keybind_removed.deinit(self.allocator);
         self.config_keybind_unbinds.deinit(self.allocator);
         self.config_keybind_unbind_removed.deinit(self.allocator);
+        self.config_terminal_macros.deinit(self.allocator);
+        self.config_terminal_macro_removes.deinit(self.allocator);
         self.config_global_rebinds.deinit(self.allocator);
         self.config_global_removed.deinit(self.allocator);
         self.hover_leaf_scratch.deinit(self.allocator);
@@ -17427,6 +17584,48 @@ test "settingsRowLabel: cross일 때만 섹션명 접두(<섹션> › <라벨>)"
     const prefix = AppSession.settingsSectionLabel(.font);
     try std.testing.expect(std.mem.startsWith(u8, got, prefix));
     try std.testing.expect(got.len > "폰트 크기".len); // 섹션명이 실제로 앞에 붙음
+}
+
+// 터미널 매크로 rhs GUI 편집(config-gui §6.7) — setTerminalMacro(추가·편집)·removeTerminalMacro(삭제)가 라이브
+// terminal_bindings를 갱신하고 write-back을 예약(dedup·cross-cancel)하는지, macroRhsString round-trip이 맞는지.
+test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 예약(dedup/cross-cancel)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    var arena_inst = std.heap.ArenaAllocator.init(allocator);
+    defer arena_inst.deinit();
+    const ar = arena_inst.allocator();
+
+    // 추가: 라이브 binding 1개 + write-back 예약 1개. rhs round-trip.
+    session.setTerminalMacro("Ctrl+G", "text:hello");
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len);
+    try std.testing.expectEqual(@as(usize, 1), session.config_terminal_macros.items.len);
+    try std.testing.expectEqualStrings("text:hello", try AppSession.macroRhsString(ar, session.loaded_config.terminal_bindings[0].input));
+
+    // 같은 chord 편집: 교체(추가 아님) — binding 여전히 1개, 예약도 dedup돼 1개, rhs 갱신.
+    session.setTerminalMacro("Ctrl+G", "text:bye");
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len);
+    try std.testing.expectEqual(@as(usize, 1), session.config_terminal_macros.items.len); // dedup
+    try std.testing.expectEqualStrings("text:bye", try AppSession.macroRhsString(ar, session.loaded_config.terminal_bindings[0].input));
+
+    // 삭제: 라이브 binding 0개, 추가 예약은 상쇄(cross-cancel)되고 삭제 예약 1개.
+    session.removeTerminalMacro("Ctrl+G");
+    try std.testing.expectEqual(@as(usize, 0), session.loaded_config.terminal_bindings.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_terminal_macros.items.len); // 추가 예약 상쇄
+    try std.testing.expectEqual(@as(usize, 1), session.config_terminal_macro_removes.items.len);
+
+    // 잘못된 rhs는 거부(라이브 미반영) — 비매크로 접두사.
+    session.setTerminalMacro("Ctrl+J", "not_a_macro");
+    try std.testing.expectEqual(@as(usize, 0), session.loaded_config.terminal_bindings.len);
 }
 
 // 회귀: **기본값 리셋 후 마우스 입력이 영구히 막히지 않는다**. 사용자 보고 — "기본값으로 리셋 후에 터미널 버튼이 다

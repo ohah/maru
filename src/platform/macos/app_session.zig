@@ -5725,18 +5725,24 @@ pub const AppSession = struct {
     /// serializeConfig가 소비하는 config write-back 대기열 전부를 비운다(takeConfigDirty가 OR로 보는 것과 동일 집합).
     /// reset처럼 "대기 중인 모든 변경을 폐기"해야 하는 경로에서 쓴다 — 일부만 비우면 남은 keybind/env/전역 변경이 다음 tick
     /// serializeConfig를 통해 되살아난다. serializeConfig와 같은 clearRetainingCapacity 패턴(항목 메모리는 비소유).
+    // config write-back pending 리스트 **단일 registry**(#2 — code-review max). 새 write-back 카테고리를 추가하면 필드
+    // 선언 + 직렬화 패스(serializeConfig) + **여기 한 줄**만 등록하면 clearConfigDirty(취소/리셋 시 비우기)·takeConfigDirty
+    // (dirty 집계)·deinit(해제) 셋이 inline for로 자동 처리된다 — 예전엔 그 셋을 따로 손으로 나열해 하나 빠뜨리면 "버린
+    // 편집이 저장됨/리스트 누수"가 조용히 났다(code-review max #2). theme_preset_persist는 리스트가 아닌 optional이라
+    // registry 밖에서 명시적으로 다룬다. 아래 comptime 가드가 이름 오타를 빌드 시 잡는다.
+    const pending_writeback_lists = [_][]const u8{
+        "config_dirty_keys",      "config_keybind_rebinds",        "config_removed_keys",
+        "config_keybind_removed", "config_keybind_unbinds",        "config_keybind_unbind_removed",
+        "config_terminal_macros", "config_terminal_macro_removes", "config_global_rebinds",
+        "config_global_removed",
+    };
+    comptime {
+        for (pending_writeback_lists) |n| if (!@hasField(AppSession, n)) @compileError("pending_writeback_lists: 알 수 없는 필드 " ++ n);
+    }
+
     fn clearConfigDirty(self: *AppSession) void {
-        self.config_dirty_keys.clearRetainingCapacity();
-        self.config_keybind_rebinds.clearRetainingCapacity();
-        self.config_removed_keys.clearRetainingCapacity();
-        self.config_keybind_removed.clearRetainingCapacity();
-        self.config_keybind_unbinds.clearRetainingCapacity();
-        self.config_keybind_unbind_removed.clearRetainingCapacity();
-        self.theme_preset_persist = null; // 테마 프리셋 영속 예약도 폐기(다른 대기열과 같은 집합)
-        self.config_terminal_macros.clearRetainingCapacity();
-        self.config_terminal_macro_removes.clearRetainingCapacity();
-        self.config_global_rebinds.clearRetainingCapacity();
-        self.config_global_removed.clearRetainingCapacity();
+        inline for (pending_writeback_lists) |n| @field(self, n).clearRetainingCapacity();
+        self.theme_preset_persist = null; // 리스트가 아닌 optional이라 registry 밖 — 같은 집합으로 폐기
     }
 
     /// config.theme의 주 색 4개가 어느 named 프리셋과 일치하는지(없으면 null = "사용자 지정"). 테마 프리셋 dropdown
@@ -8284,12 +8290,8 @@ pub const AppSession = struct {
     /// 않는다 — serializeConfig가 성공적으로 직렬화한 뒤 비운다(실패 시 키 유지→다음 tick 재시도). Swift가 매 tick
     /// take_sidebar_config_dirty(ABI 이름 유지)로 drain해 1이면 serialize→atomic write한다.
     pub fn takeConfigDirty(self: *AppSession) bool {
-        return self.config_dirty_keys.items.len > 0 or self.config_keybind_rebinds.items.len > 0 or
-            self.config_removed_keys.items.len > 0 or self.config_keybind_removed.items.len > 0 or
-            self.config_keybind_unbinds.items.len > 0 or self.config_keybind_unbind_removed.items.len > 0 or
-            self.theme_preset_persist != null or
-            self.config_terminal_macros.items.len > 0 or self.config_terminal_macro_removes.items.len > 0 or
-            self.config_global_rebinds.items.len > 0 or self.config_global_removed.items.len > 0;
+        inline for (pending_writeback_lists) |n| if (@field(self, n).items.len > 0) return true;
+        return self.theme_preset_persist != null; // 리스트가 아닌 optional이라 registry 밖 — 따로 본다
     }
 
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
@@ -12522,16 +12524,7 @@ pub const AppSession = struct {
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
         if (self.sidebar_config_buffer) |b| self.allocator.free(b);
-        self.config_dirty_keys.deinit(self.allocator);
-        self.config_keybind_rebinds.deinit(self.allocator);
-        self.config_removed_keys.deinit(self.allocator);
-        self.config_keybind_removed.deinit(self.allocator);
-        self.config_keybind_unbinds.deinit(self.allocator);
-        self.config_keybind_unbind_removed.deinit(self.allocator);
-        self.config_terminal_macros.deinit(self.allocator);
-        self.config_terminal_macro_removes.deinit(self.allocator);
-        self.config_global_rebinds.deinit(self.allocator);
-        self.config_global_removed.deinit(self.allocator);
+        inline for (pending_writeback_lists) |n| @field(self, n).deinit(self.allocator); // config write-back pending registry(단일 출처)
         self.hover_leaf_scratch.deinit(self.allocator);
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
@@ -17695,6 +17688,57 @@ test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 
     session.setTerminalMacro("Cmd+T", "text:hi");
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len); // 적용됨(차단 아님)
     try std.testing.expect(session.chrome_host.notice.open); // 덮어쓰기 경고 표시
+}
+
+// config write-back pending registry characterization(#2 리팩터 그물) — takeConfigDirty/clearConfigDirty가 **모든**
+// pending 카테고리(10개 리스트 + theme_preset_persist)를 덮는지 고정한다. registry(inline for) 도입이 한 카테고리라도
+// 빠뜨리면 이 테스트가 잡는다(빠진 카테고리는 clear 후에도 dirty로 남거나, dirty 집계에서 누락).
+test "config pending: takeConfigDirty/clearConfigDirty가 모든 카테고리를 덮는다(registry 그물)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const A = session.allocator;
+
+    try std.testing.expect(!session.takeConfigDirty()); // 시작은 깨끗
+
+    // 모든 pending 카테고리에 한 건씩 — 하나라도 집계/clear에서 빠지면 아래 단언이 깨진다.
+    try session.config_dirty_keys.append(A, "font.size");
+    try session.config_keybind_rebinds.append(A, .{ .action = "new_term", .chord = "Cmd+E" });
+    try session.config_removed_keys.append(A, "env.FOO");
+    try session.config_keybind_removed.append(A, "new_tab");
+    try session.config_keybind_unbinds.append(A, "Cmd+T");
+    try session.config_keybind_unbind_removed.append(A, "Cmd+W");
+    try session.config_terminal_macros.append(A, .{ .chord = "Ctrl+G", .rhs = "text:hi" });
+    try session.config_terminal_macro_removes.append(A, "Ctrl+H");
+    try session.config_global_rebinds.append(A, .{ .action = "toggle_window", .chord = "Cmd+Space" });
+    try session.config_global_removed.append(A, "toggle_window");
+    session.theme_preset_persist = "dracula";
+
+    try std.testing.expect(session.takeConfigDirty()); // 무엇이든 차 있으면 dirty
+
+    // clearConfigDirty가 **전부** 비워야 — 빠진 카테고리가 있으면 takeConfigDirty가 여전히 true(또는 그 리스트가 stale로 남아 다음 저장에 샘).
+    session.clearConfigDirty();
+    try std.testing.expectEqual(@as(usize, 0), session.config_dirty_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_keybind_rebinds.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_removed_keys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_keybind_removed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_keybind_unbinds.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_keybind_unbind_removed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_terminal_macros.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_terminal_macro_removes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_global_rebinds.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.config_global_removed.items.len);
+    try std.testing.expect(session.theme_preset_persist == null);
+    try std.testing.expect(!session.takeConfigDirty()); // clear 후 깨끗
 }
 
 // 회귀: **기본값 리셋 후 마우스 입력이 영구히 막히지 않는다**. 사용자 보고 — "기본값으로 리셋 후에 터미널 버튼이 다

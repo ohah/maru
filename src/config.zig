@@ -45,6 +45,10 @@ pub const configValueForKey = serialize.valueForKey;
 pub const updateConfigForKeys = serialize.updateForKeys;
 pub const updateKeybindLines = loader.updateKeybindLines; // keybind recorder write-back(CS-4-3)
 pub const KeybindRebind = loader.KeybindRebind;
+pub const TerminalMacroWrite = loader.TerminalMacroWrite; // 터미널 매크로 write-back(chord 기준)
+pub const updateTerminalMacroLines = loader.updateTerminalMacroLines; // keybind = chord = text:/esc:/ctrl: upsert
+pub const removeTerminalMacroLines = loader.removeTerminalMacroLines; // 매크로 줄 chord 기준 삭제
+pub const parseMacroRhs = loader.parseMacroRhs; // 매크로 rhs 파싱(GUI 커밋·검증)
 pub const removeConfigLines = loader.removeConfigLines; // 키 줄 삭제(env 변수 삭제 등)
 pub const removeKeybindLines = loader.removeKeybindLines; // keybind 줄 action 기준 삭제(unbind)
 pub const appendKeybindUnbinds = loader.appendKeybindUnbinds; // keybind = chord = unbind 지시어(빌트인 죽이기)

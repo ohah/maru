@@ -357,6 +357,24 @@ fn chordAlreadyBound(
     return false;
 }
 
+/// rhs가 터미널 매크로 접두사(`text:`/`esc:`/`ctrl:`)로 시작하나 — write-back 패스가 매크로 줄만 골라 app action 줄을
+/// 안 건드리게 한다(단일 출처: 접두사 목록은 parseTerminalMacro와 여기 둘 뿐, 같은 3개로 동기).
+pub fn isMacroRhs(rhs: []const u8) bool {
+    return std.mem.startsWith(u8, rhs, "text:") or std.mem.startsWith(u8, rhs, "esc:") or std.mem.startsWith(u8, rhs, "ctrl:");
+}
+
+/// 세팅 GUI 매크로 행 커밋용 — rhs(`text:`/`esc:`/`ctrl:`)를 파싱해 `TerminalInputMacro`로(diags 없이; 접두사 아님·
+/// payload 오류면 null). payload(text/esc)는 arena `a`가 소유한다(parseTerminalMacro와 동일). 단일 출처: parseTerminalMacro.
+pub fn parseMacroRhs(a: std.mem.Allocator, rhs: []const u8) ?keybinding.TerminalInputMacro {
+    var diags: std.ArrayList(Diagnostic) = .empty;
+    defer diags.deinit(a);
+    const parsed = parseTerminalMacro(a, &diags, 0, rhs) catch return null;
+    return switch (parsed) {
+        .macro => |m| m,
+        else => null,
+    };
+}
+
 /// parseTerminalMacro의 3-상태 결과 — 접두사 여부와 파싱 성공을 한 번에 표현해 호출자가 매크로 접두사
 /// 목록을 다시 안 봐도 되게 한다(접두사 목록은 parseTerminalMacro 한 곳이 단일 출처).
 const MacroParse = union(enum) {
@@ -631,6 +649,105 @@ pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, ac
                         if (!std.mem.startsWith(u8, left_chord, "global:")) {
                             const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
                             for (actions) |a| if (std.mem.eql(u8, a, action)) {
+                                drop = true;
+                                break;
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        if (drop) continue;
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendSlice(allocator, raw_line);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// 터미널 매크로 write-back 한 건 — `chord`(KeyChord.toConfigString 결과, 예 `"Ctrl+G"`)에 `rhs`(매크로 표기,
+/// 예 `"text:hello"`)를 묶는다. updateKeybindLines의 KeybindRebind(action 기준)와 달리 **chord 기준**(매크로는 한
+/// chord에 하나).
+pub const TerminalMacroWrite = struct { chord: []const u8, rhs: []const u8 };
+
+/// `keybind = <chord> = <rhs>`(rhs=매크로) 줄을 **chord 기준**으로 upsert한다 — updateKeybindLines(action 기준)의 짝.
+/// 매크로는 한 chord에 하나라 좌측 chord로 매칭하고, 매칭 줄의 rhs가 매크로(`isMacroRhs`)일 때만 교체해 app action 줄을
+/// 안 건드린다(액션 줄은 updateKeybindLines가 담당 — 두 패스가 같은 chord를 두고 안 싸운다). `global:` chord는 스킵
+/// (전역은 별도). 원본에 그 chord 매크로 줄이 없으면 끝에 append. 주석·다른 줄 보존. 반환 owned(`allocator`).
+pub fn updateTerminalMacroLines(allocator: std.mem.Allocator, original: []const u8, macros: []const TerminalMacroWrite) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const applied = try allocator.alloc(bool, macros.len);
+    defer allocator.free(applied);
+    @memset(applied, false);
+
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        var replaced = false;
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
+                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
+                if (std.mem.eql(u8, k, "keybind")) {
+                    const rest = trimmed[eq1 + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
+                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
+                        const rhs = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
+                        if (!std.mem.startsWith(u8, left_chord, "global:") and isMacroRhs(rhs)) {
+                            for (macros, 0..) |m, i| {
+                                if (std.mem.eql(u8, m.chord, left_chord)) {
+                                    try out.appendSlice(allocator, "keybind = ");
+                                    try out.appendSlice(allocator, m.chord);
+                                    try out.appendSlice(allocator, " = ");
+                                    try out.appendSlice(allocator, m.rhs);
+                                    applied[i] = true; // 같은 chord 매크로 줄이 여럿이면 모두 교체(last-wins stale 방지)
+                                    replaced = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!replaced) try out.appendSlice(allocator, raw_line);
+    }
+    for (macros, 0..) |m, i| {
+        if (applied[i]) continue;
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(allocator, '\n');
+        try out.appendSlice(allocator, "keybind = ");
+        try out.appendSlice(allocator, m.chord);
+        try out.appendSlice(allocator, " = ");
+        try out.appendSlice(allocator, m.rhs);
+        try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// `keybind = <chord> = <매크로 rhs>` 줄을 **chord 기준**으로 삭제한다(매크로 제거). 좌측 chord가 `chords`에 있고 rhs가
+/// 매크로(`isMacroRhs`)인 줄만 드롭해 app action 줄(rhs=action 키)은 보존한다. `global:`·주석·다른 줄 보존.
+/// removeKeybindLines(action 기준)의 chord-기준 짝. serializeConfig가 갱신 패스 뒤에 체이닝(제거 우선). 반환 owned.
+pub fn removeTerminalMacroLines(allocator: std.mem.Allocator, original: []const u8, chords: []const []const u8) LoadError![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, original, '\n');
+    var first = true;
+    while (it.next()) |raw_line| {
+        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
+        var drop = false;
+        if (trimmed.len > 0 and trimmed[0] != '#') {
+            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
+                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
+                if (std.mem.eql(u8, k, "keybind")) {
+                    const rest = trimmed[eq1 + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
+                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
+                        const rhs = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
+                        if (!std.mem.startsWith(u8, left_chord, "global:") and isMacroRhs(rhs)) {
+                            for (chords) |c| if (std.mem.eql(u8, c, left_chord)) {
                                 drop = true;
                                 break;
                             };
@@ -1178,6 +1295,50 @@ test "updateKeybindLines: action 기준 교체, 없으면 append, 매크로·다
     try std.testing.expect(std.mem.indexOf(u8, out, "font.size = 14") != null);
     // 옛 Cmd+T = new_term 줄은 사라짐(교체됨).
     try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+T = new_term") == null);
+}
+
+test "updateTerminalMacroLines/removeTerminalMacroLines: chord 기준 매크로 upsert·삭제, action 줄·주석 보존" {
+    const a = std.testing.allocator;
+    const original =
+        "# 주석\n" ++
+        "keybind = Ctrl+G = text:hello\n" ++ // 교체 대상(매크로, chord=Ctrl+G)
+        "keybind = Cmd+T = new_term\n" ++ // app action 줄 — chord-기준 매크로 패스가 안 건드림
+        "font.size = 14\n";
+    const macros = [_]TerminalMacroWrite{
+        .{ .chord = "Ctrl+G", .rhs = "text:goodbye" }, // 기존 매크로 rhs 교체
+        .{ .chord = "Ctrl+H", .rhs = "esc:[2J" }, // 원본에 없음 → append
+    };
+    const out = try updateTerminalMacroLines(a, original, &macros);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Ctrl+G = text:goodbye") != null); // 교체
+    try std.testing.expect(std.mem.indexOf(u8, out, "text:hello") == null); // 옛 rhs 사라짐
+    try std.testing.expect(std.mem.indexOf(u8, out, "Ctrl+H = esc:[2J") != null); // append
+    try std.testing.expect(std.mem.indexOf(u8, out, "Cmd+T = new_term") != null); // action 줄 보존(chord 패스 무영향)
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 주석") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "font.size = 14") != null);
+    var p = try parse(a, out);
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 2), p.terminal_bindings.len); // 매크로 2개
+
+    // 삭제 — Ctrl+G 매크로 줄만 제거(다른 매크로·action 보존).
+    const chords = [_][]const u8{"Ctrl+G"};
+    const removed = try removeTerminalMacroLines(a, out, &chords);
+    defer a.free(removed);
+    try std.testing.expect(std.mem.indexOf(u8, removed, "Ctrl+G") == null);
+    try std.testing.expect(std.mem.indexOf(u8, removed, "Ctrl+H = esc:[2J") != null); // 다른 매크로 보존
+    try std.testing.expect(std.mem.indexOf(u8, removed, "Cmd+T = new_term") != null); // action 보존
+}
+
+test "parseMacroRhs: text/esc/ctrl 파싱, 비매크로·빈 payload는 null" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    try std.testing.expect(parseMacroRhs(ar, "text:hi") != null);
+    try std.testing.expect(parseMacroRhs(ar, "esc:[2J") != null);
+    try std.testing.expect(parseMacroRhs(ar, "ctrl:G") != null);
+    try std.testing.expect(parseMacroRhs(ar, "new_tab") == null); // 비매크로 접두사
+    try std.testing.expect(parseMacroRhs(ar, "text:") == null); // 빈 payload
 }
 
 fn findBind(binds: []const keybinding.AppBinding, want: action_mod.Action) usize {

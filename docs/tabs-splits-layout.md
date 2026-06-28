@@ -22,7 +22,11 @@ cmux 같은 유연한 레이아웃:
     codex=`◆`(U+25C6 다이아)로 **종류**를 구분한다(`agentSymbolCodepoint`). 글리프는 **터미널 폰트(JetBrains Mono)가
     보유한 것만** 고른다 — 미보유 코드포인트(예전 `✳` U+2733)는 CoreText fallback 폰트로 넘어가 한글 '정' 등으로 글리프가
     어긋나 간헐 깨짐이 났다(근본 수정: 폰트가 가진 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다). 아이콘은 카드 왼쪽 독립 gutter에
-    **2칸(width 2)**으로 또렷이 그린다(`icon_cols=3`; `.m` gscale 1.1× 보조 확대). **색은 종류**를 따른다 —
+    **2칸(width 2)**으로 또렷이 그린다(`icon_cols=3`; `.m` gscale 1.1× 보조 확대). 단 ✶/◆는 **OS 폰트로 그리는 알림 제목용 심볼**
+    (`agentSymbolCodepoint`)이고, **사이드바 gutter는 maru 합성 PUA**(`agentIconCodepoint` — sparkle `0xF0007`/diamond `0xF0008`,
+    `assets/icons/{sparkle,diamond}.svg`→coverage)다. **claude sparkle는 두꺼운 4갈래 별로 코덱스 diamond와 잉크 mass를 맞췄다** —
+    얇은 4갈래 스파클이 작은 gutter 크기에서 다이아보다 작고 흐려 보인다는 사용자 피드백 반영(SVG arms를 두껍게 → `svg_to_coverage.py` 재생성,
+    잉크 ≈diamond). **색은 종류**를 따른다 —
     claude=Anthropic 코랄 `#D9785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는
     색이 아니라 **펄스**(running일 때 `dimRgb` 밝기 변조)와 카드 **상태줄**(running=`● 진행중`, idle=`✓ {답변}`)이
     구분한다. 근거: 종류 글리프는 폰트 미보유 시 fallback에서 깨지므로 보유 글리프(✶·◆)로 한정. 상태색(앰버/회색)이 어두운 사이드바 배경에서

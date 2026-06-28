@@ -61,7 +61,8 @@ renderer, storage, platform interop는 VT 명세처럼 하나의 공개 표준�
 
 | 레퍼런스 | 라이선스 | 받는 법 | 무엇을 참고 |
 | --- | --- | --- | --- |
-| vercel-labs/agent-browser | Apache-2.0 | `git clone --depth 1 https://github.com/vercel-labs/agent-browser references/agent-browser` | 브라우저 자동화 CLI의 **백엔드 추상화**(CDP=Chrome / **W3C WebDriver**=Safari·iOS — `cli/src/native/webdriver/`, `backend.rs`의 `BrowserBackend` trait)와 **명령 표면**(navigate/evaluate/screenshot/click/find_element 등 ~15개). maru가 WKWebView를 **WebDriver 어댑터**로 노출해 외부 자동화 도구와 호환시키는 설계의 동작 베이스로만 참고(코드 미복사). 단일 출처: [세션 컨트롤 플레인](control-plane.md) §browser |
+| vercel-labs/agent-browser | Apache-2.0 | `git clone --depth 1 https://github.com/vercel-labs/agent-browser references/agent-browser` | 브라우저 자동화 CLI의 **백엔드 추상화**(CDP=Chrome / **W3C WebDriver**=Safari·iOS — `cli/src/native/webdriver/`, `backend.rs`의 `BrowserBackend` trait)와 **명령 표면**(navigate/evaluate/screenshot/click/find_element 등 ~15개). maru가 WKWebView를 **WebDriver 어댑터**로 노출해 외부 자동화 도구와 호환시키는 설계의 동작 베이스로만 참고(코드 미복사). 단일 출처: [세션 컨트롤 플레인](control-plane.md) §9(`browser.*`) |
+| ohah/agent-devtools | MIT | `git clone --depth 1 https://github.com/ohah/agent-devtools references/agent-devtools` | 브라우저 DevTools CLI(Zig)의 **테스트 전략** — 프로토콜·파싱·변환을 순수 함수로 분리해 단위 테스트(websocket·CDP roundtrip·discovery·daemon). maru 컨트롤 플레인 테스트 패턴의 동작 베이스로만 참고(코드 미복사). 단일 출처: [세션 컨트롤 플레인](control-plane.md) §12 |
 
 오라클이 **아닌** 것:
 

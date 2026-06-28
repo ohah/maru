@@ -138,8 +138,8 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   세션 파일 찾기·디렉터리 나열·tail read; claude=enc(cwd) 디렉터리 최신 .jsonl을 `readTailScan`(끝 256KB→8MB 지수
   확장)으로 마지막 대화 턴까지 읽음, codex=연·월·day를 최신순 평탄 순회(자정 넘김 대응)해 첫 줄 cwd 일치 최신
   rollout을 끝 64KB tail로 읽음; mtime 안 바뀌면 재파싱 skip). `pollAgentKinds`가 활성 Term의
-  `agent_state`를 갱신(cwd=OSC7 `currentCwd()`, 세션 코어로 판정). 사이드바 카드 4번째 **상태줄**(running=`● 진행중`,
-  idle=`✓ {답변}`) + 아이콘 **펄스**(running일 때 blink 위상으로 밝기 변조, `dimRgb`) + 슬롯 높이 3.8×→**4.6×**
+  `agent_state`를 갱신(cwd=OSC7 `currentCwd()`, 세션 코어로 판정). 사이드바 카드 4번째 **상태줄**(running=`⠋ 진행중`
+  회전 브라유 스피너[브랜드색], idle=`✓ {답변}`) + 아이콘은 **솔리드 브랜드색**(옛 밝기 펄스 폐기 — 위 "running 스피너" 절) + 슬롯 높이 3.8×→**4.6×**
   (`lines:[3]→[4]`). Metal `.m` 디코더는 이미 4줄 지원(`line_count*4`)이라 무변경. temp-dir 통합 테스트(claude/codex
   최신 선택·cwd 매칭·mtime skip)는 macOS. **실 세션 육안 검증은 수동**(아래 한계).
 - **PR4**: **완료 알림** ✅ **완료** — `running → idle` 전환을 **비활성 탭/창**에서 관측하면 macOS 알림을 띄운다
@@ -173,6 +173,6 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
 
 ## 결정된 UX (사용자 확정)
 
-1. **상태 표시**: 아이콘 펄스(running) **+** 4번째 상태줄, 둘 다.
+1. **상태 표시**: 솔리드 브랜드색 아이콘(종류·presence) **+** 4번째 상태줄의 running 회전 스피너(`⠋ 진행중`, 브랜드색). (옛 "아이콘 밝기 펄스"는 작아서 안 보인다는 사용자 피드백으로 스피너로 대체.)
 2. **답변 미리보기**: 카드 상태줄에 idle 시 마지막 답변 첫 줄 1줄(말줄임).
 3. **알림**: 비활성 탭에서 완료될 때만(활성 탭은 안 함).

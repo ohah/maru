@@ -117,12 +117,12 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 **text(widget `.text` = 폰트 패밀리)**: 인라인 편집. 행을 클릭/Enter하면 편집 모드(현재값 시드) — 글자/Backspace로 고치고 Enter 커밋, Esc 취소. 편집 버퍼는 컴포넌트 State의 **고정 버퍼**(`edit_buf[128]`)라 별도 allocator가 없다. 커밋 시 platform이 `editText()`를 **config arena에 dupe**해 `schema.setText`로 적용(라이브 재resolve + write-back, 검증 포함) — 라이브/직렬화가 슬라이스를 계속 읽으므로 config arena가 소유한다.
 
-**color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). 인터랙션 세 zone:
+**color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). **스와치 렌더는 `Swatch.corner_radii`로 분기**(C4b `Op.quad` 동형) — 컴포넌트가 `props.shape.corner_radius_px`(스와치 높이의 절반으로 cap)를 실어, lowering이 0이면 셀 bg(tui 직각), >0이면 **둥근 GPU quad 칩**(rich, layer 3 — 셀·선택 하이라이트 위, literal RGB)으로 그린다. 인터랙션 세 zone:
 - **스와치 클릭 / Enter** → **HSV picker 열기**(현재 색으로 시드 — §6.9). 임의 색을 그리드로 고른다(2차 색 선택, CS-4-6).
 - **←→** → 16색 프리셋(`schema.color_presets`, 중립+dracula+maru 앰버) 순환(`cycleColor`). 정적 리터럴이라 dupe 없이 대입(빠른 선택 — picker 없이 한 손).
 - **hex 클릭** → 인라인 편집(text 위젯 재사용 — `editText`→`setText`, hex 검증).
 
-- **미구현(후속)**: 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, color 스와치의 rich(둥근 quad) 렌더(현재 셀 bg), picker의 연속(non-discrete) 해상도·alpha.
+- **미구현(후속)**: 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, picker의 연속(non-discrete) 해상도·alpha. (color 스와치 rich 둥근 quad 렌더는 구현됨 — 위 참조.)
 
 ### 6.3 테마 프리셋(named 테마) — 특수 행
 

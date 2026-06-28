@@ -169,8 +169,8 @@ pub const Tokens = struct {
         tk.space.modal_padding_px = 12;
         // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 3px(앰버). tui=0(막대 없음).
         tk.space.accent_bar_width_px = 3;
-        // U2: 카드 사이 여백 4px(슬롯 안쪽 사방 패딩) — 워크스페이스가 카드처럼 떨어져 보임.
-        tk.space.card_gap_px = 4;
+        // U2: 카드 사이 여백 8px(슬롯 안쪽 사방 패딩) — 워크스페이스가 "떠 있는 카드"로 또렷이 분리(Warp식 넉넉한 행 여백). 4→8(사이드바 폴리시).
+        tk.space.card_gap_px = 8;
         // U-tab: rich 탭 고정 폭 16칸(제목 ~14 + ✕ 2) — 균등 stretch 대신(적으면 빈 영역, 넘치면 가로 스크롤 대상).
         tk.space.tab_width_cols = 16;
         // U-tab: 탭 바 세로 패딩 8px(텍스트 위아래) — 바 높이 = cell + 16, 제목 가운데. Warp식 넉넉한 탭 바(상단 탭바 폴리시).

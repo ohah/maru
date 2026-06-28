@@ -474,6 +474,14 @@ pub fn view(
         else
             title_text;
         try modal_box.text(box, box.inner_x, 0, title, .surface_fg, arena, out);
+        // 검색 진입점 힌트 — 제목 행 우측에 muted로 `/ 검색`을 두어 클릭(또는 `/`)으로 검색됨을 알린다.
+        // handlePointer가 제목 행(row 0) 클릭을 startSearch로 받는다(키 `/`와 같은 경로). config-gui §6.8.
+        const search_hint = "/ 검색";
+        const hint_cols = overlay_input.displayCols(search_hint);
+        if (box.inner_cols > hint_cols) { // 좁아 제목과 겹칠 땐 생략(제목 우선)
+            const hint_x = box.inner_x + @as(i32, @intCast((box.inner_cols - hint_cols) * box.cw));
+            try modal_box.text(box, hint_x, 0, search_hint, .muted_fg, arena, out);
+        }
     }
 
     // 좌측 네비: 섹션 라벨. inner_x 칸은 활성 영역 세로 바 자리로 비우고, 선택 강조(tab_active_bg)·라벨은 그 우측
@@ -1000,6 +1008,15 @@ pub fn handlePointer(
     // 누르면 아래에서 .toggle → platform이 현재값으로 재시드한다(커밋은 Enter 전용).
     if (state.editing) state.cancelEdit();
     if (state.recording) state.recording = false; // 녹음 중 다른 곳 클릭 → 녹음 취소(아래에서 같은 keybind 재클릭 시 다시 켜짐)
+    // 제목 행(row 0) 클릭 → 검색 시작(클릭 진입점, 키 `/`와 같은 경로). 검색 중이면 그대로(제목=검색창이라 무동작).
+    // 필드 행은 first_field_row(=title_rows=2)부터라 이 hit-test는 nav/form과 충돌하지 않는다. config-gui §6.8.
+    if (!state.searching) {
+        const ty: f64 = @floatFromInt(modal_box.rowY(box, 0));
+        if (ev.y_px >= ty and ev.y_px < ty + @as(f64, @floatFromInt(box.ch))) {
+            state.startSearch();
+            return .search_changed;
+        }
+    }
     // 좌측 네비 영역(x < form_x) 클릭 → 섹션 행 선택(y로 판정). 비-행이면 소비.
     const form_x_f: f64 = @floatFromInt(l.form_x);
     if (ev.x_px < form_x_f) {
@@ -1197,14 +1214,15 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     // 제목=1. 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + slider 트랙 text + 채움 text)=3.
     try std.testing.expect(out.items[0] == .quad); // 박스 bg(외곽선 별도 op 없음)
     try std.testing.expect(out.items[1] == .text); // 제목
-    try std.testing.expect(out.items[2] == .fill); // 행0 선택 하이라이트(셀 bg)
-    try std.testing.expectEqualStrings("Cursor blink", out.items[3].text.runs[0].text);
-    try std.testing.expect(out.items[4] == .text); // toggle 트랙(muted) — quad 아님
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[4].text.role);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[5].text.role); // toggle knob on(앰버)
+    try std.testing.expectEqualStrings("/ 검색", out.items[2].text.runs[0].text); // 검색 진입점 힌트(제목 우측, muted)
+    try std.testing.expect(out.items[3] == .fill); // 행0 선택 하이라이트(셀 bg)
+    try std.testing.expectEqualStrings("Cursor blink", out.items[4].text.runs[0].text);
+    try std.testing.expect(out.items[5] == .text); // toggle 트랙(muted) — quad 아님
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[5].text.role);
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[6].text.role); // toggle knob on(앰버)
     // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent) + 현재 값 text(우측, surface_fg).
-    try std.testing.expectEqualStrings("Font size", out.items[6].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[7].text.role); // slider 트랙
+    try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[8].text.role); // slider 트랙
     // slider 값 text 뒤에 하단 힌트 4조각이 본문 op 뒤로 붙는다: "⇥ "/"섹션"/" ⇄ "/"설정". 폼 모드(기본)라
     // 활성 영역인 "설정"만 accent, 반대편 "섹션"·구분자는 muted.
     try std.testing.expectEqualStrings("설정", out.items[out.items.len - 1].text.runs[0].text);
@@ -1260,6 +1278,26 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider �
     const c0 = fieldControlRect(l, 0);
     try std.testing.expectEqual(Action.selection_changed, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c0.y + 4) }, no_sections, &rows, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
+}
+
+test "settings handlePointer: 제목 행 클릭 → 검색 시작(.search_changed), 검색 중엔 무동작" {
+    const tk = testTokens();
+    var s = State{};
+    s.show();
+    const rows = [_]FieldRow{.{ .label = "A", .kind = .{ .toggle = false } }};
+    const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
+    const box = l.box;
+    const ty: f64 = @floatFromInt(modal_box.rowY(box, 0)); // 제목 행(row 0)
+    const tx: f64 = @floatFromInt(box.inner_x + 2);
+
+    // 검색이 아닐 때 제목 행 클릭 → 검색 시작(키 `/`와 같은 경로).
+    try std.testing.expect(!s.searching);
+    try std.testing.expectEqual(Action.search_changed, handlePointer(.{ .phase = .down, .x_px = tx, .y_px = ty + 2 }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expect(s.searching);
+
+    // 검색 중 제목(검색창) 재클릭 → 검색 재시작 안 함(제목 클릭 게이트가 !searching이라 통과 → nav/form hit-test = .consumed).
+    try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .down, .x_px = tx, .y_px = ty + 2 }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expect(s.searching);
 }
 
 test "settings nav 키보드: Tab 폼↔네비 토글 + ↑↓ 섹션 + Enter 폼 복귀" {

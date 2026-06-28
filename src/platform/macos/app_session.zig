@@ -4228,27 +4228,37 @@ pub const AppSession = struct {
 
     /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
     /// (없으면 키), 값=현재 raw config. buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
+    /// 교차 검색(cross)일 때 행 라벨 앞에 섹션명을 붙인다(`<섹션> › <라벨>`) — 결과가 어느 섹션 설정인지 보이게.
+    /// 빈 쿼리(현재 섹션만)면 라벨 그대로. 모든 행 종류(scalar=필드 .section, palette=.theme·keybind=.input·global=
+    /// .global_hotkey)가 이 단일 헬퍼를 거쳐 접두 규칙이 한 곳. 단일 출처: docs/config-gui.md §6.8.
+    fn settingsRowLabel(arena: std.mem.Allocator, cross: bool, section: ?config_mod.Section, label: []const u8) ![]const u8 {
+        if (!cross) return label;
+        return std.fmt.allocPrint(arena, "{s} › {s}", .{ settingsSectionLabel(section), label });
+    }
+
     fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
         const Row = chrome.components.settings.FieldRow;
         const cf = try self.currentSectionFields(arena);
+        // 교차 검색(쿼리 있음)이면 행 라벨에 섹션명 접두 — currentSectionFields의 cross 게이트와 같은 조건(단일 출처).
+        const cross = self.chrome_host.settings.searchQuery().len > 0;
         // 결합 순서: bool(toggle) → number(slider) → enum(dropdown) → text(편집) → color(스와치). selected/handler
         // 인덱싱이 이 순서를 공유한다(toggle/adjust/commitSelectedText가 같은 currentSectionFields 빌드로 구간 매핑).
         const rows = try arena.alloc(Row, cf.total());
         var i: usize = 0;
         for (cf.bools) |b| {
-            rows[i] = .{ .label = if (b.doc.len > 0) b.doc else b.key, .kind = .{ .toggle = b.value } };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, b.section, if (b.doc.len > 0) b.doc else b.key), .kind = .{ .toggle = b.value } };
             i += 1;
         }
         for (cf.nums) |n| {
-            rows[i] = .{ .label = if (n.doc.len > 0) n.doc else n.key, .kind = .{ .slider = .{ .value = n.value, .min = n.min, .max = n.max } } };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, n.section, if (n.doc.len > 0) n.doc else n.key), .kind = .{ .slider = .{ .value = n.value, .min = n.min, .max = n.max } } };
             i += 1;
         }
         for (cf.enums) |e| {
-            rows[i] = .{ .label = if (e.doc.len > 0) e.doc else e.key, .kind = .{ .dropdown = e.current } };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, e.section, if (e.doc.len > 0) e.doc else e.key), .kind = .{ .dropdown = e.current } };
             i += 1;
         }
         for (cf.texts) |t| {
-            rows[i] = .{ .label = if (t.doc.len > 0) t.doc else t.key, .kind = .{ .text = t.value } };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, t.section, if (t.doc.len > 0) t.doc else t.key), .kind = .{ .text = t.value } };
             i += 1;
         }
         // 테마 프리셋이 활성이면 색·팔레트 행을 잠근다(프리셋이 색을 정하므로) — 회색 표시 + 입력은 핸들러가 전환/차단.
@@ -4257,7 +4267,7 @@ pub const AppSession = struct {
             // 현재 hex를 RGB로 파싱해 스와치에. 저장 config는 검증돼 유효하지만 방어적으로 회색 폴백(상수 hex로 — 타입을
             // parseHexColor 반환과 일치시켜 별도 color import 불요; #808080은 항상 유효).
             const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
-            rows[i] = .{ .label = if (c.doc.len > 0) c.doc else c.key, .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } }, .disabled = preset_active };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, c.section, if (c.doc.len > 0) c.doc else c.key), .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } }, .disabled = preset_active };
             i += 1;
         }
         if (cf.has_palette) {
@@ -4275,7 +4285,7 @@ pub const AppSession = struct {
                 }
             }
             const sel = @min(self.chrome_host.settings.grid_cell, cells.len - 1);
-            rows[i] = .{ .label = "ANSI 팔레트", .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, .theme, "ANSI 팔레트"), .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active };
             i += 1;
         }
         if (cf.keybind_entries.len > 0) {
@@ -4286,7 +4296,7 @@ pub const AppSession = struct {
                 const chord = command_catalog.chordForAction(resolver, entry.action);
                 var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
                 const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
-                rows[i] = .{ .label = entry.title, .kind = .{ .keybind = try arena.dupe(u8, display) } };
+                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .input, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) } };
                 i += 1;
             }
         }
@@ -4297,7 +4307,7 @@ pub const AppSession = struct {
                 const chord = command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action);
                 var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
                 const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
-                rows[i] = .{ .label = entry.title, .kind = .{ .keybind = try arena.dupe(u8, display) } };
+                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .global_hotkey, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) } };
                 i += 1;
             }
         }
@@ -17376,6 +17386,25 @@ test "quit-confirm: 보류 중 리셋 모달이 열리면 종료를 cancelled로
     try std.testing.expect(!session.pending_reset);
     try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size); // 기본값으로 리셋됨
+}
+
+// 교차 섹션 검색 결과의 섹션 라벨 접두 — buildSettingsFields가 settingsRowLabel로 모든 행 종류에 같은 규칙을 적용한다.
+// 빈 쿼리(현재 섹션만)면 라벨 그대로, 교차(cross)면 "<섹션> › <라벨>". docs/config-gui.md §6.8.
+test "settingsRowLabel: cross일 때만 섹션명 접두(<섹션> › <라벨>)" {
+    const allocator = std.testing.allocator;
+    var arena_inst = std.heap.ArenaAllocator.init(allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // 비-cross(빈 쿼리=현재 섹션만): 라벨 그대로.
+    try std.testing.expectEqualStrings("폰트 크기", try AppSession.settingsRowLabel(arena, false, .font, "폰트 크기"));
+
+    // cross: 섹션명 + " › " + 라벨.
+    const got = try AppSession.settingsRowLabel(arena, true, .font, "폰트 크기");
+    try std.testing.expect(std.mem.endsWith(u8, got, " › 폰트 크기"));
+    const prefix = AppSession.settingsSectionLabel(.font);
+    try std.testing.expect(std.mem.startsWith(u8, got, prefix));
+    try std.testing.expect(got.len > "폰트 크기".len); // 섹션명이 실제로 앞에 붙음
 }
 
 // 회귀: **기본값 리셋 후 마우스 입력이 영구히 막히지 않는다**. 사용자 보고 — "기본값으로 리셋 후에 터미널 버튼이 다

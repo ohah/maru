@@ -1055,6 +1055,12 @@ pub const AppSession = struct {
     // 사이드바 우측 경계 드래그로 폭을 조절하는 중인가. down이 경계 밴드에서 시작하면 true, drag(2)가
     // setSidebarWidthPx로 live 갱신, up(3)이 끝낸다(divider 드래그와 같은 패턴).
     sidebar_resize_active: bool = false,
+    // 이번 드래그 시작(down) 시점의 폭(pt). up에서 이 값과 비교해 "실제로 폭이 바뀐 드래그"에서만 config write-back을
+    // 한다. config 미러와 비교하지 않는 이유: init seed 직후 refreshCellMetrics가 동적 하한(sidebarMinPt)으로 clamp하면
+    // 런타임 폭이 config 미러와 달라질 수 있어(예: 파일 130 < 큰 폰트 하한 200), 그 비교로는 경계를 눌렀다 안 움직이고
+    // 뗀 무동작 클릭에서도 가드가 발화해 사용자가 정한 폭을 stray write로 덮어쓴다(code-review). 시작값 대비 비교는 kind 2가
+    // 한 번도 없으면 시작값 그대로라 발화하지 않아 그 결함이 없다.
+    sidebar_resize_start_pt: u32 = 0,
     // 사이드바 접힘(사용자 토글). true면 effective 폭이 0(카드·검색 숨김, 터미널이 그 자리까지 확장)이고, 좌상단에
     // 펼치기 버튼만 남는다. 폭(pt)은 sidebar_width_pt에 보존돼 펼치면 복원된다. chrome_minimal(quick terminal)과
     // 달리 메인 창 전용 토글이라 별도 플래그 — refreshCellMetrics가 둘 다 0으로 환산한다.
@@ -1508,6 +1514,9 @@ pub const AppSession = struct {
         for (self.loaded_config.diagnostics) |d| {
             std.log.scoped(.config).warn("config line {d}: {s}", .{ d.line, d.message });
         }
+        // 저장된 사이드바 폭(sidebar.width, pt)을 런타임 폭으로 seed한다 — 아래 refreshCellMetrics가 동적 하한으로
+        // clamp하고 backing px로 환산한다(단일 출처). config 키가 없으면 기본 180이라 struct 기본값과 같아 현 동작 그대로다.
+        self.sidebar_width_pt = self.loaded_config.config.sidebar.width_pt;
         self.refreshCellMetrics();
 
         // 첫 spawn 크기 = 창 backing px가 오면 cell 메트릭으로 grid 계산(실제 창 크기), 아니면 cols/rows(헤드리스
@@ -4892,6 +4901,11 @@ pub const AppSession = struct {
     /// 변경이면 그 값이 사용자 의도라 줌을 안 얹는다), false면(통합 리셋) 줌까지 config 기본 크기로 되돌린다.
     fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
         const new_appearance = config_mod.resolveAppearance(self.loaded_config.config) catch return;
+        // 사이드바 폭(sidebar.width, pt)을 메모리 config에서 되읽는다 — 세팅 GUI number 위젯·통합 리셋이 바꿨을 수 있다.
+        // 아래 applyAppearance→applyMetricsPipeline→refreshCellMetrics 전에 세워야 clamp·px 환산·grid 재배치가 새 폭을
+        // 따라간다. 드래그 write-back이 이 미러(loaded_config)도 갱신하므로 런타임↔config가 일치 → 되읽어도 사용자가
+        // 끈 폭을 보존한다(reapply가 런타임 전용 override를 날리는 부류의 회피 — loaded_config 미러 경로).
+        self.sidebar_width_pt = self.loaded_config.config.sidebar.width_pt;
         if (preserve_zoom)
             self.applyAppearancePreservingZoom(new_appearance)
         else
@@ -5630,6 +5644,11 @@ pub const AppSession = struct {
             new_parsed.deinit();
             return;
         };
+        // 파일의 새 사이드바 폭(sidebar.width, pt)을 메트릭 파이프라인 전에 세운다 — 바로 아래 applyAppearancePreservingZoom이
+        // 부르는 refreshCellMetrics가 동적 하한으로 clamp·px 환산하고, 이어지는 grid 재배치가 새 폭을 반영한다(파일→앱
+        // 양방향). loaded_config 교체 전이라 new_parsed에서 읽는다. reload는 "파일에서 다시 읽기"라 미저장 드래그 편집을
+        // 덮는 게 맞다(아래 clearConfigDirty가 write-back 대기열을 비우는 것과 일관).
+        self.sidebar_width_pt = new_parsed.config.sidebar.width_pt;
         // appearance 통째 교체 — 옛 family를 더는 안 읽는다. 줌 보존(GUI 토글과 일치 — code-review high #2)은
         // 옛 appearance.font.size·base_font_size(둘 다 스칼라 f32)만 읽으므로 옛 arena family slice를 deref하지 않아 UAF 없음.
         self.applyAppearancePreservingZoom(new_appearance);
@@ -6703,6 +6722,15 @@ pub const AppSession = struct {
         if (self.sidebar_resize_active and (kind == 2 or kind == 3)) {
             if (kind == 2) self.setSidebarWidthPx(x_px) else {
                 self.sidebar_resize_active = false;
+                // 드래그 종료 — 최종 폭(setSidebarWidthPx가 [동적 min, max]로 clamp해 둔 sidebar_width_pt)을 config에
+                // 영속한다. 매 move(kind 2)가 아니라 up에서 한 번만 해 디스크 write thrash를 막는다(divider·탭 드래그가
+                // up에서 마무리하는 패턴과 동일). 이번 드래그 시작값(down에서 캡처) 대비 폭이 실제로 바뀐 경우에만 미러
+                // 갱신+write-back 예약 — 경계를 눌렀다 안 움직이고 뗀 무동작 클릭(kind 2 없음 → 시작값 그대로)에선 발화하지
+                // 않는다. config 미러 대신 시작값과 비교하는 이유는 sidebar_resize_start_pt 주석 참고(init clamp 불일치 회피).
+                if (self.sidebar_width_pt != self.sidebar_resize_start_pt) {
+                    self.loaded_config.config.sidebar.width_pt = self.sidebar_width_pt;
+                    self.markConfigKeyDirty("sidebar.width");
+                }
             }
             return;
         }
@@ -6743,6 +6771,7 @@ pub const AppSession = struct {
         // 사이드바가 없어(폭 0) 경계 드래그 비활성(onResizeEdge가 x=0 근처를 잡아 의도치 않게 트리거되는 것 방지).
         if (kind == 1 and !self.sidebar_collapsed and chrome.components.sidebar.onResizeEdge(x_px, self.sidebar_width_px, if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px)) {
             self.sidebar_resize_active = true;
+            self.sidebar_resize_start_pt = self.sidebar_width_pt; // up에서 실제 변화 여부 판정 기준(write-back 가드)
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
             return;
@@ -19589,6 +19618,15 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     session.mouse(3, edge + 60, 100, 0, 0);
     try std.testing.expect(!session.sidebar_resize_active);
 
+    // 드래그 종료(up)가 최종 폭을 config(sidebar.width)에 영속한다 — 재시작/재로드 복원의 근거. 미러가 런타임 폭과
+    // 일치하고 "sidebar.width"가 write-back 대기열(config_dirty_keys)에 올라야 Swift가 다음 tick에 파일로 flush한다.
+    try std.testing.expectEqual(session.sidebar_width_pt, session.loaded_config.config.sidebar.width_pt);
+    var width_dirty = false;
+    for (session.config_dirty_keys.items) |k| {
+        if (std.mem.eql(u8, k, "sidebar.width")) width_dirty = true;
+    }
+    try std.testing.expect(width_dirty);
+
     // 극단값 clamp(직접 호출): 아주 넓게 → max_pt, 아주 좁게 → min_pt.
     session.setSidebarWidthPx(1_000_000);
     try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
@@ -19604,6 +19642,77 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
     try std.testing.expectEqual(sidebar_max_pt, session.sidebar_width_pt);
     session.cell_width_px = saved_cw;
     _ = try session.tick(); // 폭 변경 후 다음 tick 크래시 없음
+}
+
+// ③a-2: config의 sidebar.width(pt)를 바꾸고 재적용하면 런타임 사이드바 폭이 따라오는지 — 파일 재로드(reloadConfig)·
+// 세팅 GUI 재적용(applyLoadedConfig)이 공유하는 read seed 경로. 이게 곧 "재시작/재로드 후 저장된 폭 복원"의 증거다
+// (init도 같은 seed 한 줄). 실 init/메트릭 파이프라인이라 macOS 게이트.
+test "③a-2: applying config sidebar.width drives the runtime sidebar width (config→app read path)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expect(session.sidebar_width_px > 0);
+
+    // 메모리 config의 폭을 동적 하한 위·max 아래의 값으로 바꾸고 재적용 → 런타임 폭이 그대로 따라온다(clamp 무영향 구간).
+    const want: u32 = std.math.clamp(@as(u32, 300), session.sidebarMinPt(), sidebar_max_pt);
+    session.loaded_config.config.sidebar.width_pt = want;
+    session.reapplyLoadedConfig();
+    try std.testing.expectEqual(want, session.sidebar_width_pt);
+    try std.testing.expectEqual(layout_math.ptToPx(want, session.scale_milli), session.sidebar_width_px);
+    _ = try session.tick(); // 폭 재적용 후 다음 tick 크래시 없음
+}
+
+// ③a-3: 사이드바 경계를 눌렀다 안 움직이고 떼는 무동작 클릭(kind 1→3, kind 2 없음)은 config를 write-back하지 않아야
+// 한다 — config 미러와 런타임 폭이 어긋난 상태(init seed 후 동적 하한 clamp로 갈릴 수 있는 상황)에서도. write-back
+// 가드를 config 미러 비교에서 "드래그 시작값 대비 변화"로 바꾼 회귀 테스트(code-review): 미러 비교였다면 무동작
+// 클릭에서 stray write가 나 사용자가 정한 폭을 덮었다. 실 init/spawn이라 macOS 게이트.
+test "③a-3: a no-drag click on the sidebar edge does not write back to config" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try std.testing.expect(session.sidebar_width_px > 0);
+
+    // init seed 후 refreshCellMetrics가 런타임 폭을 동적 하한으로 clamp하면 config 미러와 갈릴 수 있는 상황을 흉내낸다 —
+    // 미러를 런타임 폭과 일부러 다른 값으로 둔다(미러 비교 가드였다면 무동작 클릭에서 발화했을 조건).
+    const mirror_before: u32 = session.sidebar_width_pt + 13;
+    session.loaded_config.config.sidebar.width_pt = mirror_before;
+    const width_before = session.sidebar_width_pt;
+
+    // 경계 down(리사이즈 시작) → 움직임 없이 같은 자리에서 up(종료). kind 2가 없어 폭은 그대로다.
+    const edge: f64 = @floatFromInt(session.sidebar_width_px);
+    session.mouse(1, edge, 100, 0, 0);
+    try std.testing.expect(session.sidebar_resize_active);
+    session.mouse(3, edge, 100, 0, 0);
+    try std.testing.expect(!session.sidebar_resize_active);
+
+    // 폭 불변 + config 미러 불변 + "sidebar.width" write-back 미예약(무동작 클릭은 디스크에 손대지 않는다).
+    try std.testing.expectEqual(width_before, session.sidebar_width_pt);
+    try std.testing.expectEqual(mirror_before, session.loaded_config.config.sidebar.width_pt);
+    for (session.config_dirty_keys.items) |k| {
+        try std.testing.expect(!std.mem.eql(u8, k, "sidebar.width"));
+    }
 }
 
 // ③b: 사이드바 하단 "+" 버튼을 클릭하면 새 워크스페이스가 열리는지(⌘⇧T의 마우스 버전) — 호버 시 pointingHand.

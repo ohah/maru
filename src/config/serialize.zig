@@ -131,6 +131,7 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.shell_integration.ssh = true;
     cfg.sidebar.show_branch = false;
     cfg.sidebar.show_folder = false;
+    cfg.sidebar.width_pt = 250; // 기본 180과 다른 값 — u32 키(sidebar.width) round-trip 대칭 강제(기본값 누수 가짜 green 방지)
     cfg.workspace.root = "~/projects";
     cfg.workspace.tab_inherit_cwd = false;
     cfg.workspace.split_inherit_cwd = false;
@@ -193,6 +194,7 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(true, got.shell_integration.ssh);
     try std.testing.expectEqual(false, got.sidebar.show_branch);
     try std.testing.expectEqual(false, got.sidebar.show_folder);
+    try std.testing.expectEqual(@as(u32, 250), got.sidebar.width_pt);
     try std.testing.expectEqualStrings("~/projects", got.workspace.root);
     try std.testing.expectEqual(false, got.workspace.tab_inherit_cwd);
     try std.testing.expectEqual(false, got.workspace.split_inherit_cwd);

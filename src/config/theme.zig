@@ -640,6 +640,37 @@ pub const ChromeTabStyle = enum {
     pill,
 };
 
+/// chrome 레이아웃 프리셋(`chrome.preset` — TS3, chrome-strategy.md §7). **여러 chrome 축**(룩 `chrome.theme` + 탭
+/// `chrome.tab-style`)을 한 노브로 묶은 큐레이션 — `theme.preset`이 색 세트를 한 번에 까는 패턴과 동형. loader가 `chrome.preset`
+/// 키로 파싱해 `chromePresetValues()`로 두 축을 깔고, 개별 `chrome.theme`/`chrome.tab-style` 키가 그 *뒤에서* override한다
+/// (loader 순차 — 나중 줄 우선). 메가 enum이 아니라 **묶음**이라 직교 축은 그대로(색=theme.preset과도 직교).
+pub const ChromePreset = enum {
+    minimal, // rich + underline — 박스 없이 언더바만(가장 미니멀, 현 기본과 동일 조합)
+    cutout, // rich + connected — 본문색 cutout 탭(아래 본문과 이어짐)
+    capsule, // rich + pill — Warp식 lifted 둥근 캡슐 탭
+    cell, // tui — cell-grid 룩(탭은 셀 밴드, tab-style 무관)
+};
+
+pub const ChromePresetValues = struct { chrome_theme: ChromeTheme, chrome_tab_style: ChromeTabStyle };
+
+/// 프리셋 → (룩, 탭 스타일) 묶음 단일 출처. 프리셋 추가 시 enum + 이 switch만 늘리면 된다.
+pub fn chromePresetValues(preset: ChromePreset) ChromePresetValues {
+    return switch (preset) {
+        .minimal => .{ .chrome_theme = .rich, .chrome_tab_style = .underline },
+        .cutout => .{ .chrome_theme = .rich, .chrome_tab_style = .connected },
+        .capsule => .{ .chrome_theme = .rich, .chrome_tab_style = .pill },
+        .cell => .{ .chrome_theme = .tui, .chrome_tab_style = .underline }, // tui는 셀 밴드라 tab_style 무관(중립값)
+    };
+}
+
+/// dashed config 토큰("minimal")을 ChromePreset로(parseDashedEnum 특수화). loader chrome.preset 핸들러가 쓴다.
+pub fn parseChromePreset(value: []const u8) ?ChromePreset {
+    return parseDashedEnum(ChromePreset, value);
+}
+
+/// 모든 chrome 프리셋 이름을 dashed로 `|` 결합(loader diagnostic용 — 프리셋 추가 시 자동 동기화).
+pub const chrome_preset_names_joined = enumNamesJoined(ChromePreset);
+
 /// 사이드바 세션 카드에 보조 정보를 표시할지. view options 메뉴(앱)와 config가 **양방향**으로 공유한다 —
 /// 앱에서 토글하면 config 파일에 저장되고, config를 편집하면 다음 로드/Reload에 반영된다. 이름줄은 카드
 /// 식별에 필수라 항상 표시하고, git 브랜치·폴더(cwd) 경로만 토글한다. loader가 `sidebar.*` 키로 파싱.

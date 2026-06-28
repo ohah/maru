@@ -183,7 +183,9 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **keybind 필터의 인덱스 정합**: keybind 행은 검색으로 부분집합이 되므로 `SettingsSectionFields`가 `has_keybinds`(bool) 대신 **`keybind_entries`(필터된 목록)**를 들고, `total`/`keybindRowStart`/`buildSettingsFields`/`captureKeybindRecording`가 모두 이 목록을 쓴다. 그래서 "split"로 필터한 뒤 첫 행을 녹음하면 **필터된 첫 액션**(Split Right)이 정확히 rebind된다(단위 테스트가 못박음).
 - **흐름**: 컴포넌트가 `search_changed` Action을 내면 platform이 `refreshSettingsFieldCount`로 필터된 행 수를 다시 주입(`setFieldCount`가 `selected`를 clamp)하고 재렌더.
 - **교차 섹션 검색**: 쿼리가 있으면(`cross = q.len>0`) 섹션 게이트(`x.section==sel_sec`)를 무시해 **전 섹션**의 매칭 행을 보여준다(설정이 어느 섹션인지 몰라도 찾는다). 빈 쿼리면 현재 섹션만. 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 `keybindRowStart`가 palette 한 행 오프셋을 더해 인덱스 충돌을 막는다(필터·인덱싱 단일 출처는 `currentSectionFields`).
-- **한계(후속)**: 검색 활성화는 `/` 키(클릭 진입점은 후속), 교차 결과에 섹션 라벨 접두는 후속.
+- **클릭 진입점**: `/` 키 외에, 검색이 아닐 때 **제목 행(row 0)을 클릭**해도 검색이 시작된다 — 제목 우측에 `/ 검색` 힌트(muted)를 두어 클릭 가능함을 알린다. 컴포넌트 `handlePointer`가 제목 행 밴드 hit-test 시 `startSearch()` + `search_changed` Action을 낸다(키 `/` 경로와 동일 → platform이 `refreshSettingsFieldCount`). 필드 행은 `first_field_row`(=`title_rows`=2)부터라 제목 행 클릭은 nav/form hit-test와 충돌하지 않는다.
+- **교차 결과 섹션 라벨 접두**: 교차 검색(`cross`)에서는 각 행 라벨 앞에 그 설정이 속한 섹션명을 붙여(`<섹션> › <라벨>`, 예: `외관 › 폰트 크기`) 어느 섹션 설정인지 한눈에 보인다. `buildSettingsFields`가 `settingsRowLabel(cross, section, label)` **단일 헬퍼**로 모든 행 종류(scalar는 필드의 `.section`, palette=`.theme`·keybind=`.input`·global=`.global_hotkey`)에 같은 규칙을 적용한다. 빈 쿼리(현재 섹션만)면 접두 없음. 긴 라벨은 폼 라벨 폭으로 truncate된다(고정 폭 유지).
+- **한계(후속)**: 없음(검색 트랙 완결 — `/`·클릭 진입, 섹션 내·교차 필터, 섹션 라벨 접두 모두 구현).
 
 ### 6.9 HSV 색 picker(임의 색 선택) — color 위젯 모드 (CS-4-6)
 

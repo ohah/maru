@@ -171,8 +171,8 @@ pub const Tokens = struct {
         tk.space.card_gap_px = 4;
         // U-tab: rich 탭 고정 폭 16칸(제목 ~14 + ✕ 2) — 균등 stretch 대신(적으면 빈 영역, 넘치면 가로 스크롤 대상).
         tk.space.tab_width_cols = 16;
-        // U-tab: 탭 바 세로 패딩 6px(텍스트 위아래) — 바 높이 = cell + 12, 제목 가운데. 탭에 세로 여유.
-        tk.space.tab_bar_pad_y_px = 6;
+        // U-tab: 탭 바 세로 패딩 8px(텍스트 위아래) — 바 높이 = cell + 16, 제목 가운데. Warp식 넉넉한 탭 바(상단 탭바 폴리시).
+        tk.space.tab_bar_pad_y_px = 8;
         // U-tab2: 활성 탭 앰버 언더바 3px(하단 하이라인 1~2px보다 굵게) — "활성/포커스 탭" 신호를 또렷하게.
         tk.space.tab_underbar_px = 3;
         // TS2: pill 스타일 세로 inset 4px(바 위아래) — lifted 회색으로 채운 둥근 캡슐이 strip 위에 떠 보이게(Warp식).

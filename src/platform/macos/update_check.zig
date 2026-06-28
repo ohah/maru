@@ -81,9 +81,8 @@ pub fn fetchLatestTagAlloc(allocator: std.mem.Allocator, repo: []const u8) ?[]u8
     // null-term C argv: env curl -fsS -m 8 -H "Accept: ..." <url>. 문자열 리터럴은 정적이라 fork/exec까지
     // 유효하고, url은 parent(여기)에서 살아 있다(child는 fork 시점 주소공간 복사).
     const argv = [_:null]?[*:0]const u8{
-        "env",                                 "curl", "-fsS", "-m", "8",
-        "-H",                                  "Accept: application/vnd.github+json",
-        url.ptr,
+        "env", "curl",                                "-fsS",  "-m", "8",
+        "-H",  "Accept: application/vnd.github+json", url.ptr,
     };
 
     // stdout 파이프만 필요(stdin 없음). [0]=read, [1]=write.

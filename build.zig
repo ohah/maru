@@ -1,5 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
+// build.zig.zon의 .version을 버전 단일 출처로 읽는다(인앱 새 버전 안내가 이 값과 GitHub
+// releases/latest tag를 비교 — distribution.md). 릴리스 시 .version만 올리면 앱 버전도 따라간다.
+const build_zig_zon = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     // macOS 배포 하한을 11.0(Big Sur, Apple Silicon 시작 버전)으로 고정해 구형 macOS에서도
@@ -555,6 +558,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
+    // 앱이 자기 버전을 알도록 build.zig.zon의 .version을 build_options로 주입한다. app_session이
+    // @import("build_options").version으로 읽어 인앱 새 버전 안내에 쓴다. core(VT)는 빌드 시스템
+    // 비결합 원칙이라 여기(app host 모듈)에만 주입한다(core.zig의 terminal_version 상수는 별개).
+    const app_version_options = b.addOptions();
+    app_version_options.addOption([]const u8, "version", build_zig_zon.version);
+    macos_app_host_abi_lib.root_module.addImport("build_options", app_version_options.createModule());
     if (target.result.os.tag == .macos) {
         // CoreText 브리지 object를 정적 라이브러리에 함께 담아, Swift 최종 링크가 .a 하나로
         // app session의 glyph rasterize 심볼을 모두 얻게 한다. CoreText/CoreGraphics
@@ -764,6 +773,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    // update_check.zig는 std만 의존하는 순수 로직(tag 파싱·semver 비교)이라 macOS smoke가 아니라
+    // 기본 Zig test에서 어느 플랫폼에서든 돌린다(인앱 새 버전 안내의 판정 동작 고정).
+    const update_check_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/update_check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_update_check_tests = b.addRunArtifact(update_check_tests);
+    test_step.dependOn(&run_update_check_tests.step);
     // coretext_font.zig는 Objective-C/CoreText runtime을 직접 호출하지 않는 제품 후보
     // adapter다. 그래서 macOS smoke opt-in에 숨기지 말고 기본 Zig test에서 돌린다.
     test_step.dependOn(&run_macos_coretext_font_tests.step);

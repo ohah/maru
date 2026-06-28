@@ -701,9 +701,9 @@ pub const Config = struct {
     /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 rich(둥근 모서리·분리 색 팔레트 룩 — 사용자
     /// 요청으로 기본값을 tui에서 rich로 변경). cell-grid 룩을 원하면 `chrome.theme = tui`. loader가 `chrome.theme` 키로 파싱.
     chrome_theme: ChromeTheme = .rich,
-    /// 활성 탭 룩(`chrome.tab-style` = connected|underline). 기본 connected(U-tab2 본문색 cutout + 앰버 언더바). underline은
-    /// 언더바만(미니멀). `chrome.theme`·`theme.preset`과 직교. schema-driven(Config.schema)이라 loader 수동 분기 없음.
-    chrome_tab_style: ChromeTabStyle = .connected,
+    /// 활성 탭 룩(`chrome.tab-style` = connected|underline|pill). 기본 **underline**(미니멀 — 언더바만, 사용자 요청). connected는
+    /// 본문색 cutout + 앰버 언더바, pill은 Warp식 lifted 캡슐. `chrome.theme`·`theme.preset`과 직교. schema-driven(Config.schema).
+    chrome_tab_style: ChromeTabStyle = .underline,
     /// 시스템 라이트/다크 외관을 따라 테마 색을 자동 전환할지(F2-9). 기본 false(현행 — theme.preset/개별 색 그대로).
     /// true면 macOS NSAppearance가 light면 theme_preset_light, dark면 theme_preset_dark의 색 세트로 라이브 교체한다
     /// (개별 theme.* 색 override·theme.preset은 무시되고 system이 색을 정한다). loader가 `theme.follow-system` 키로 파싱.

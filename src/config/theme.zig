@@ -682,10 +682,18 @@ pub const SidebarConfig = struct {
     show_branch: bool = true,
     /// 카드에 폴더(cwd) 경로를 표시할지(기본 true). loader `sidebar.show-folder`.
     show_folder: bool = true,
+    /// 세로 사이드바 폭(논리 pt). 우측 경계를 드래그하면 이 키에 양방향 반영된다(드래그 종료 시 앱→config 파일).
+    /// loader `sidebar.width`. 기본 180·범위 120~480은 플랫폼(macOS app_session)의 default_sidebar_width_pt·
+    /// sidebar_min_pt·sidebar_max_pt와 값이 같다 — 레이어가 달라(이 파일=이식 가능한 config 계약, app_session=
+    /// macOS 어댑터) 상수를 직접 공유하진 못하고 값만 맞춘다. 여기 range는 거친 저장 검증 하한일 뿐이고, 런타임은
+    /// 헤더 아이콘 겹침을 막는 **동적** 하한(sidebarMinPt — cell 폭 비례)으로 다시 clamp한다.
+    width_pt: u32 = 180,
 
-    pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder
+    pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width
         .show_branch = Meta{ .doc = "사이드바 카드에 git 브랜치 표시", .widget = .toggle, .section = .sidebar },
         .show_folder = Meta{ .doc = "사이드바 카드에 폴더 경로 표시", .widget = .toggle, .section = .sidebar },
+        // 필드명은 width_pt지만 키는 `sidebar.width`(key_seg). u32라 range 메타 필수(파서 검증 + GUI number 위젯 공유).
+        .width_pt = Meta{ .key_seg = "width", .doc = "사이드바 폭(pt)", .range = .{ 120, 480 }, .widget = .number, .section = .sidebar },
     };
 };
 

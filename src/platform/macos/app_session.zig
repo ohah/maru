@@ -1376,12 +1376,12 @@ pub const AppSession = struct {
     // 비교하고, 새 버전이면 mutex 하에 태그를 update_tag_buf에 담는다. 메인 tick(drainUpdateCheck)이 빼서
     // 알림으로 띄운다 — core/알림 접근은 메인 전용이라 스레드가 직접 push 못 한다. update_inflight는 deinit이
     // 0까지 기다려 detach 스레드의 self use-after-free를 막는다(upload_inflight와 같은 가드).
-    update_mutex: std.Io.Mutex = .init,
-    update_tag_buf: [64]u8 = undefined,
+    update_thread: ?std.Thread = null, // 백그라운드 체크 스레드 handle. deinit이 join한다(busy-spin 대신). 단일 스레드라 inflight 카운터 불필요.
+    update_tag_buf: [64]u8 = undefined, // worker가 update_ready를 세우기 전에 채운다(release/acquire로 publish — mutex 불필요).
     update_tag_len: usize = 0,
-    update_inflight: usize = 0,
+    update_ready: std.atomic.Value(bool) = .init(false), // worker가 결과를 채운 뒤 release store; 메인 tick은 acquire load로 빠르게 확인(매 tick mutex lock 회피).
     update_started: bool = false, // 첫 tick에서 체크 스레드를 1회만 띄우는 가드(메인 전용)
-    update_notified: bool = false, // 알림을 1회만 띄우는 가드(메인 전용)
+    update_notified: bool = false, // 결과를 1회만 처리하는 가드(메인 전용)
     // IME 키 트랜잭션 상태(Ghostty의 keyTextAccumulator 패턴과 같은 구조). Swift keyDown이
     // imeBegin으로 열고 입력기 콜백(imeInsert/imeMarked)이 쌓은 것을 imeEnd가 일괄 판정한다 —
     // 콜백마다 즉석 판단하면 입력기의 비동기/다중 호출에서 이중 전송·유실이 생긴다(라이브에서
@@ -3938,7 +3938,7 @@ pub const AppSession = struct {
             var seed: usize = std.fmt.parseInt(usize, std.mem.span(cv), 10) catch 3;
             if (seed == 0) seed = 3;
             var i: usize = 0;
-            while (i < seed) : (i += 1) self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
+            while (i < seed) : (i += 1) _ = self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
             if (!self.sidebar_collapsed) self.toggleSidebarCollapsed();
         }
         // MARU_OPEN_NOTIFICATIONS=N — 첫 frame에 테스트 알림 N개(미설정/0→2)를 시드하고 알림 패널을 연다(헤더 밴드·
@@ -3947,7 +3947,7 @@ pub const AppSession = struct {
             var seed: usize = std.fmt.parseInt(usize, std.mem.span(nv), 10) catch 2;
             if (seed == 0) seed = 2;
             var i: usize = 0;
-            while (i < seed) : (i += 1) self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
+            while (i < seed) : (i += 1) _ = self.pushNotificationHistory("Maru", "에이전트 작업 완료 — 빌드 통과", 0, true);
             self.openNotificationPanel();
             // MARU_NOTIF_HOVER=K — 위에서 시드한 카드 K에 마우스 호버 강조(tab_hover_bg)를 건 채로 연다. 호버는 마우스
             // 이동(hoverCursor→hitTest)으로만 갱신돼 헤드리스 스크린샷 하니스로는 재현이 안 되므로, 호버 카드 색을 self-verify
@@ -7691,55 +7691,59 @@ pub const AppSession = struct {
     fn startUpdateCheck(self: *AppSession) void {
         if (builtin.is_test) return; // 계약 테스트(tick 구동)가 네트워크(curl)를 타지 않게 한다 — 순수 로직은 update_check.zig 단위 테스트가 검증
         if (!self.loaded_config.config.notifications.update_check) return;
-        self.update_mutex.lockUncancelable(self.io);
-        self.update_inflight += 1;
-        self.update_mutex.unlock(self.io);
-        const thread = std.Thread.spawn(.{}, updateCheckWorker, .{self}) catch {
-            self.update_mutex.lockUncancelable(self.io);
-            self.update_inflight -= 1;
-            self.update_mutex.unlock(self.io);
-            return;
-        };
-        thread.detach();
+        // build.zig.zon .version이 0.0.0 placeholder인 빌드는 모든 실제 release보다 낮아 매 실행 거짓 알림을
+        // 낸다(isNewer("0.0.0", any real tag)=true). 버전이 박힌 릴리스 빌드에서만 체크한다(distribution.md 버전 정책).
+        if (std.mem.eql(u8, build_options.version, "0.0.0")) return;
+        // handle을 보관해 deinit이 join한다(busy-spin 제거 — CPU 0, OS 대기). spawn 실패면 null로 둔다.
+        self.update_thread = std.Thread.spawn(.{}, updateCheckWorker, .{self}) catch null;
     }
 
     /// 백그라운드 스레드: latest tag를 받아 현재 버전(build_options.version)보다 높으면 mutex 하에 태그를
     /// 슬롯에 담는다. self.allocator는 메인과 경합하므로 쓰지 않고 page_allocator(thread-safe)로 받는다.
     /// core/알림은 건드리지 않는다(메인 전용) — 결과 전달은 메인 tick의 drainUpdateCheck가 한다.
     fn updateCheckWorker(self: *AppSession) void {
-        const a = std.heap.page_allocator;
-        const tag = update_check.fetchLatestTagAlloc(a, update_repo) orelse {
-            self.update_mutex.lockUncancelable(self.io);
-            self.update_inflight -= 1;
-            self.update_mutex.unlock(self.io);
+        // self.allocator는 smp_allocator(thread-safe, app_host_abi.zig)라 백그라운드에서 그대로 쓴다
+        // — uploadWorker도 동일. (이전 page_allocator 특수화는 "self.allocator가 메인과 경합"이라는 잘못된 전제였다.)
+        const tag = update_check.fetchLatestTagAlloc(self.allocator, update_repo) orelse {
+            self.update_ready.store(true, .release); // 결과 없음(네트워크 실패 등)도 '처리 완료' 신호 — 메인이 무동작 판정
             return;
         };
-        defer a.free(tag);
-        const newer = update_check.isNewer(build_options.version, tag);
-        self.update_mutex.lockUncancelable(self.io);
-        if (newer) {
+        defer self.allocator.free(tag);
+        if (update_check.isNewer(build_options.version, tag)) {
             const n = @min(tag.len, self.update_tag_buf.len);
-            @memcpy(self.update_tag_buf[0..n], tag[0..n]);
+            @memcpy(self.update_tag_buf[0..n], tag[0..n]); // ready store(release) 전에 채워 publish
             self.update_tag_len = n;
         }
-        self.update_inflight -= 1;
-        self.update_mutex.unlock(self.io);
+        self.update_ready.store(true, .release); // 메인 tick의 acquire load와 happens-before — 슬롯을 락 없이 안전 공개
     }
 
     /// 메인 tick: 새 버전 태그가 잡혔으면(백그라운드가 채움) 1회 알림을 띄운다. brew 배포라 업그레이드는
     /// 자동 실행하지 않고 안내만 한다(distribution.md). pushNotificationHistory는 메인 전용이라 여기서 호출.
     fn drainUpdateCheck(self: *AppSession) void {
         if (self.update_notified) return;
-        self.update_mutex.lockUncancelable(self.io);
+        if (!self.update_ready.load(.acquire)) return; // 결과 전엔 atomic load만 — 매 tick mutex lock 회피
+        // ready(release) 이후라 worker가 채운 슬롯을 락 없이 안전하게 읽는다(happens-before; worker는 store 후 수렴).
         const len = self.update_tag_len;
-        var tag_buf: [64]u8 = undefined;
-        if (len > 0) @memcpy(tag_buf[0..len], self.update_tag_buf[0..len]);
-        self.update_mutex.unlock(self.io);
-        if (len == 0) return;
-        self.update_notified = true;
-        var title_buf: [128]u8 = undefined;
-        const title = std.fmt.bufPrint(&title_buf, "새 버전 {s} 사용 가능", .{tag_buf[0..len]}) catch "새 버전 사용 가능";
-        self.pushNotificationHistory(title, "brew upgrade maru 로 업데이트하세요", 0, false);
+        if (len == 0) { // 새 버전 없음/체크 실패 — 한 번만 처리하고 끝낸다
+            self.update_notified = true;
+            return;
+        }
+        var title_buf: [160]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buf, "새 버전 {s} 사용 가능", .{self.update_tag_buf[0..len]}) catch "새 버전 사용 가능";
+        // push가 성공했을 때만 처리 완료로 표시한다 — 일시적 할당 실패면 update_notified를 남겨 다음 tick에
+        // 재시도(알림 유실 방지). 안내 문구는 설치 출처에 맞춘다(아래 updateUpgradeHint).
+        if (self.pushNotificationHistory(title, self.updateUpgradeHint(), 0, false)) self.update_notified = true;
+    }
+
+    /// 설치 출처별 업그레이드 안내 문구(distribution.md). 실행 파일 경로가 brew(Cellar/homebrew)면 brew
+    /// 명령을, 그 외(소스 빌드·~/.local/bin·직접 다운로드)면 일반 안내를 준다 — 비-brew 설치에 brew 명령을
+    /// 보이지 않는다(distribution.md "brew가 아닌데 brew 명령을 채워주면 안 된다"). 경로 해석 실패면 일반 안내.
+    fn updateUpgradeHint(self: *AppSession) []const u8 {
+        const path = std.process.executablePathAlloc(self.io, self.allocator) catch return "GitHub 릴리스에서 최신 버전을 받으세요";
+        defer self.allocator.free(path);
+        if (std.mem.indexOf(u8, path, "/Cellar/") != null or std.mem.indexOf(u8, path, "/homebrew/") != null)
+            return "brew upgrade maru 로 업데이트하세요";
+        return "GitHub 릴리스에서 최신 버전을 받으세요";
     }
 
     /// pending_paste가 다 빠진 뒤 새로 쌓기 시작할 때만 대상 surface를 현재 활성으로 다시 고정한다.
@@ -8109,7 +8113,7 @@ pub const AppSession = struct {
             self.notification_title_out = n.title;
             self.notification_body_out = n.body;
             // 인앱 히스토리에도 보관(dupe — 위 버퍼는 OS 배너용으로 move됐다). 에이전트 완료라 is_agent=true.
-            self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, n.surface_id, true);
+            _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, n.surface_id, true);
             return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = n.surface_id, .foreground_banner = true };
         }
         if (!self.surface_initialized) return null;
@@ -8172,18 +8176,20 @@ pub const AppSession = struct {
         // 발신 Term이 지금 보고 있는 그 Term이면 전면 배너 억제(목록만), 그 외(background pane/가로탭/비활성 탭)면 배너.
         const fg_banner = !(focused_term != null and term == focused_term.?);
         // 코어 락을 든 채지만 pushNotificationHistory는 코어를 안 만져(히스토리 ring + alloc) 데드락이 없다.
-        self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id, false);
+        _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, osc_surface_id, false);
         return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = fg_banner };
     }
 
     /// 인앱 알림 센터 히스토리에 한 건 보관한다(title/body dupe — pendingNotification이 드레인하는 owned 버퍼와
     /// 소유권이 겹치지 않게 복사한다). 상한(config notifications.history-limit) 초과면 가장 오래된 걸 버리고, 그게 안
     /// 읽음이면 unread를 보정한다. dupe/append 실패는 best-effort로 버린다(알림 보관은 부가 기능 — enqueueAgentCompletion 규율).
-    fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []const u8, surface_id: u64, is_agent: bool) void {
-        const title_dup = self.allocator.dupe(u8, title) catch return;
+    /// 알림을 인앱 센터에 추가하고 성공하면 true. 할당 실패(title/body dup·append)면 false를 돌려준다 —
+    /// drainUpdateCheck가 이 결과로 "성공했을 때만" 1회 가드를 닫아 일시적 실패 시 재시도하게 한다.
+    fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []const u8, surface_id: u64, is_agent: bool) bool {
+        const title_dup = self.allocator.dupe(u8, title) catch return false;
         const body_dup = self.allocator.dupe(u8, body) catch {
             self.allocator.free(title_dup);
-            return;
+            return false;
         };
         if (self.notification_history.items.len >= @as(usize, self.loaded_config.config.notifications.history_limit)) {
             const dropped = self.notification_history.orderedRemove(0);
@@ -8201,10 +8207,11 @@ pub const AppSession = struct {
         }) catch {
             self.allocator.free(title_dup);
             self.allocator.free(body_dup);
-            return;
+            return false;
         };
         self.notification_unread += 1;
         self.metal_dirty = true; // 배지 갱신 재렌더
+        return true;
     }
 
     /// 히스토리 항목 index를 읽음 처리한다(안 읽음이었으면 unread 1 감소). 범위 밖/이미 읽음이면 무동작.
@@ -12572,14 +12579,10 @@ pub const AppSession = struct {
         }
         for (self.upload_results.items) |p| self.allocator.free(p);
         self.upload_results.deinit(self.allocator);
-        // 인앱 업데이트 체크 스레드 완료 대기(detach 스레드가 self.update_*를 건드리므로 self 해제 전 0까지).
-        while (true) {
-            self.update_mutex.lockUncancelable(self.io);
-            const n = self.update_inflight;
-            self.update_mutex.unlock(self.io);
-            if (n == 0) break;
-            std.atomic.spinLoopHint();
-        }
+        // 인앱 업데이트 체크 스레드를 join한다(이전 busy-spin 대신 — CPU를 안 쓰고 OS가 대기). 이 스레드가
+        // self.update_*·self.allocator를 건드리므로 self 해제 전에 반드시 끝나야 한다. CLOEXEC으로 curl pipe가
+        // 다른 fork에 새지 않아 readAllFd가 매달리지 않으므로, join은 curl -m 타임아웃 안에 수렴한다.
+        if (self.update_thread) |t| t.join();
         self.ime_inserted.deinit(self.allocator);
 
         self.metal_buffer.deinit(self.allocator);
@@ -13161,8 +13164,8 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
     defer session.deinit();
 
     // push 2건(에이전트/OSC) → len 2, unread 2, owned dupe.
-    session.pushNotificationHistory("ws1", "done", 1, true);
-    session.pushNotificationHistory("ws2", "fail", 2, false);
+    _ = session.pushNotificationHistory("ws1", "done", 1, true);
+    _ = session.pushNotificationHistory("ws2", "fail", 2, false);
     try std.testing.expectEqual(@as(usize, 2), session.notification_history.items.len);
     try std.testing.expectEqual(@as(usize, 2), session.notification_unread);
     try std.testing.expect(session.notification_history.items[0].is_agent);
@@ -13180,7 +13183,7 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
     // 상한 초과: cap+5건 더 push → len은 cap(config notifications.history-limit) 유지(ring), 누수 없이 오래된 것 free.
     const cap: usize = @intCast(session.loaded_config.config.notifications.history_limit);
     var i: usize = 0;
-    while (i < cap + 5) : (i += 1) session.pushNotificationHistory("x", "y", 100, false);
+    while (i < cap + 5) : (i += 1) _ = session.pushNotificationHistory("x", "y", 100, false);
     try std.testing.expectEqual(cap, session.notification_history.items.len);
 
     // formatRelativeTime 경계(arena).
@@ -13211,9 +13214,9 @@ test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 surface 전체
     });
     defer session.deinit();
 
-    session.pushNotificationHistory("old-A", "1", 11, true); // history 0: surface 11
-    session.pushNotificationHistory("other", "2", 22, true); // history 1: surface 22(다른 터미널)
-    session.pushNotificationHistory("new-A", "3", 11, false); // history 2(최신): surface 11(또 한 번)
+    _ = session.pushNotificationHistory("old-A", "1", 11, true); // history 0: surface 11
+    _ = session.pushNotificationHistory("other", "2", 22, true); // history 1: surface 22(다른 터미널)
+    _ = session.pushNotificationHistory("new-A", "3", 11, false); // history 2(최신): surface 11(또 한 번)
     session.chrome_host.notifications.show(0, 0, 3);
     session.chrome_host.notifications.selected = 0; // 목록 0 = 최신("new-A") = surface 11
     try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
@@ -13241,9 +13244,9 @@ test "알림 액션: deleteNotification(역순) + markAllNotificationsRead + cle
     });
     defer session.deinit();
 
-    session.pushNotificationHistory("a", "1", 11, true); // 히스토리 idx 0(가장 오래됨)
-    session.pushNotificationHistory("b", "2", 22, true); // idx 1
-    session.pushNotificationHistory("c", "3", 33, false); // idx 2(최신) — 목록 역순 [c, b, a]
+    _ = session.pushNotificationHistory("a", "1", 11, true); // 히스토리 idx 0(가장 오래됨)
+    _ = session.pushNotificationHistory("b", "2", 22, true); // idx 1
+    _ = session.pushNotificationHistory("c", "3", 33, false); // idx 2(최신) — 목록 역순 [c, b, a]
     try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
 
     // 목록 list_index 0 = 최신("c") = 히스토리 끝. 삭제 → "c" 제거, unread 1 감소.
@@ -13277,9 +13280,9 @@ test "markNotificationsReadBySurface: 배너 클릭→그 surface 안읽음 모�
     });
     defer session.deinit();
 
-    session.pushNotificationHistory("a", "1", 11, true); // surface 11
-    session.pushNotificationHistory("b", "2", 22, true); // surface 22
-    session.pushNotificationHistory("c", "3", 11, false); // surface 11 (또 한 번)
+    _ = session.pushNotificationHistory("a", "1", 11, true); // surface 11
+    _ = session.pushNotificationHistory("b", "2", 22, true); // surface 22
+    _ = session.pushNotificationHistory("c", "3", 11, false); // surface 11 (또 한 번)
     try std.testing.expectEqual(@as(usize, 3), session.notification_unread);
 
     // surface 11 배너 클릭 → surface 11의 안읽음(a·c) 모두 읽음, surface 22(b)는 유지.
@@ -17989,7 +17992,7 @@ test "notice 토스트와 알림 패널 공존: 입력이 notice를 먼저 닫�
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     // 알림 패널을 연 채(카드 1개 시드) notice 토스트를 띄운다 — 둘 다 열린 상태(서로 안 닫음).
-    session.pushNotificationHistory("Maru", "에이전트 작업 완료", 0, true);
+    _ = session.pushNotificationHistory("Maru", "에이전트 작업 완료", 0, true);
     session.openNotificationPanel();
     try std.testing.expect(session.chrome_host.notifications.open);
     session.showNotice("초기화했습니다");
@@ -21029,7 +21032,7 @@ test "collapsed notification bell: hit-test rect is concentric with the glyph, c
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
     try std.testing.expect(session.collapsedNotificationRect() == null); // 펼침일 땐 종 rect 없음(접힘 전제)
-    session.pushNotificationHistory("t", "b", 0, true); // 안읽음 1 → 배지 표시(종 좌측)
+    _ = session.pushNotificationHistory("t", "b", 0, true); // 안읽음 1 → 배지 표시(종 좌측)
     session.toggleSidebarCollapsed();
     try std.testing.expect(session.sidebar_collapsed);
 

@@ -112,7 +112,7 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `bell.dock-badge` | `true`\|`false` | `false` | BEL 수신 시 **창이 포커스 없을 때만** Dock 아이콘에 `●` 배지를 띄울지. `true`면 백그라운드에서 벨이 울리면 Dock에 배지가 뜨고 앱으로 돌아오면 사라진다(놓친 알림 표시 — Terminal.app/iTerm2 관례). 포커스 중이면 안 띄운다. 기본 `false` |
 | `notifications.agent-complete` | `true`\|`false` | `true` | 터미널에서 도는 에이전트(claude/codex) 세션이 **비활성 탭/창**에서 완료(running→idle)될 때 macOS 알림을 띄울지. 활성 탭은 화면으로 이미 보이므로 안 띄운다. 그 외 값은 무시 |
 | `notifications.osc` | `true`\|`false` | `true` | 셸/TUI가 보낸 OSC 9(iTerm2)/777(rxvt) 데스크톱 알림을 띄울지. `false`면 OSC 알림을 무시한다(데스크톱 배너·인앱 알림 센터 둘 다). 그 외 값은 무시 |
-| `notifications.update-check` | `true`\|`false` | `true` | 새 버전이 나왔는지 시작 시 1회 + 하루 1회 백그라운드로 확인해 인앱 알림으로 안내할지. 업그레이드를 자동 실행하지 않고 안내만 한다([배포·업데이트 전략](distribution.md)). 외부 요청(GitHub releases API)이라 끌 수 있다. 그 외 값은 무시 |
+| `notifications.update-check` | `true`\|`false` | `true` | 새 버전이 나왔는지 앱 시작 시 1회 백그라운드로 확인해 인앱 알림으로 안내할지. 업그레이드를 자동 실행하지 않고 안내만 한다([배포·업데이트 전략](distribution.md)). 외부 요청(GitHub releases API)이라 끌 수 있다. 그 외 값은 무시 |
 | `notifications.history-limit` | `8`~`512` | `64` | 인앱 알림 센터(종 아이콘 패널)에 보관할 최대 알림 수. 초과하면 가장 오래된 것부터 버린다. 범위 밖은 무시 |
 | `text.ambiguous-width` | `narrow`\|`wide` | `narrow` | EAW Ambiguous 문자(동그란 번호 ① 등)의 셀 폭. 아래 참조 |
 | `text.emoji-width` | `narrow`\|`wide` | `wide` | 이모지 표현(base+VS16·키캡 2️⃣ 등)의 셀 폭. 아래 참조 |

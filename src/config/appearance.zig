@@ -66,7 +66,7 @@ pub const ResolvedAppearance = struct {
     theme: ResolvedTheme,
     cursor: ResolvedCursor,
     chrome_theme: theme.ChromeTheme = .rich, // tui|rich — platform buildChromeTokens가 tui()/rich() 분기에 읽는다(C4a). 기본 rich(theme.Config 기본값과 일치 — 실제 값은 resolve가 config에서 채움)
-    chrome_tab_style: theme.ChromeTabStyle = .connected, // connected|underline — buildChromeTokens가 chrome 중립 tokens.TabActiveStyle로 매핑(§7 탭 스타일 축). 기본 connected(U-tab2)
+    chrome_tab_style: theme.ChromeTabStyle = .underline, // connected|underline|pill — buildChromeTokens가 chrome 중립 tokens.TabActiveStyle로 매핑(§7). 기본 underline(미니멀, 사용자 요청)
 
     blink_text: bool = false, // SGR 5 blink 글자 점멸 여부(기본 정적 — 접근성). app이 blink 위상 wiring 게이트로 쓴다.
     // bold(SGR 1) 글자의 indexed 0~7 전경을 bright(8~15)로 — 폰트가 weight를 안 주는 환경에서 bold를 색으로도

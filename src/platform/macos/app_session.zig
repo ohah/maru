@@ -1157,11 +1157,6 @@ pub const AppSession = struct {
     // 갱신하고, 탭 바 렌더가 이 탭에 호버 ✕(닫기 아이콘)를 그린다. mouse down이 이 탭의 ✕ zone이면 그 Term을
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
-    // 마지막 마우스 위치(backing px). pane 탭 바 grip을 **hover-only**로 그리려고 렌더가 `pointInRect(last_mouse, pb.full)`로
-    // "이 pane 바 위인가"를 판정한다(Warp식 — grip ⠿를 평소엔 숨김, 호버 시에만). plain float이라 포인터 수명 문제 없음
-    // (hovered_tab의 *Pane stale 함정 회피). updateHoveredTab이 매 이동마다 갱신. 음수=창 밖(아무 바도 호버 아님).
-    last_mouse_x: f64 = -1,
-    last_mouse_y: f64 = -1,
     hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
     // 호버 중인 헤더 아이콘 영역(◧ toggle·⚙ view_options·+ new_workspace). 마우스가 그 아이콘 위면 rebuildSidebar가
     // 아이콘 뒤에 둥근 호버 배경(웹 버튼 hover처럼)을 그린다. 검색·빈 영역·아이콘 밖이면 null. 바뀔 때만 재빌드.
@@ -9711,12 +9706,11 @@ pub const AppSession = struct {
                     // 제목/라벨을 위 패딩만큼 내려 바 가운데에. tui(pad=0)면 바 상단(full.y).
                     const text_origin_y = pb.full.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
 
-                    // 1a-grip) pane grip 핸들(좌측, 항상 예약) — [full.x, full.x+grip_cols*cw)에 grip 글리프. pane
+                    // 1a-grip) pane grip 핸들(좌측, 항상 예약·항상 표시) — [full.x, full.x+grip_cols*cw)에 grip 글리프. pane
                     //     통째 드래그 손잡이(아래 마우스 arm과 같은 영역). 라벨·탭은 grip 뒤로 밀려 안 겹친다. muted 색.
-                    //     **hover-only(Warp식)**: 평소엔 ⠿를 숨겨 바를 깔끔히 두고, 마우스가 이 pane 바 위일 때만 그린다(cols는
-                    //     항상 예약이라 레이아웃 시프트 없음 — 비호버 시 좌측 빈 패딩). 드래그 영역·openHand 커서는 그대로라 발견성 유지.
-                    const grip_hovered = layout_math.pointInRect(self.last_mouse_x, self.last_mouse_y, pb.full);
-                    if (pb.grip_cols > 0 and grip_hovered) {
+                    //     **항상 보인다**(사용자 피드백): pane→워크스페이스 분리 드래그는 Warp에 없는 maru 기능이라, 손잡이를 늘
+                    //     보여야 발견성이 유지된다(hover-only로 숨겼다가 되돌림 — Warp 벤치마킹은 grip 없는 모델이라 부적합).
+                    if (pb.grip_cols > 0) {
                         const grip_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
                         if (coretext_frame_builder.buildPaneGripDrawList(self.allocator, @intCast(pb.grip_cols), grip_fg)) |gdl| {
                             self.collectShaped(&collected, gdl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
@@ -10208,8 +10202,6 @@ pub const AppSession = struct {
     /// 마우스가 어느 pane의 탭 바 위면 (그 pane, 탭 index)으로 호버 탭을 갱신하고, 아니면 null로 비운다. 좌측
     /// grip+라벨 세그먼트면 grip(grab 커서). 활성 탭 leaf rect를 펴 각 pane 바를 hit-test한다. hoverCursor이 호출한다.
     fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) BarHover {
-        self.last_mouse_x = x_px; // grip hover-only 렌더 게이트용(pointInRect(last_mouse, pb.full)). 매 이동 갱신.
-        self.last_mouse_y = y_px;
         var next: ?TabRef = null;
         var next_scroll: ?ScrollRef = null;
         var on_bar = false; // 탭 바 위 여부(탭 영역) — hoverCursor가 pointingHand(클릭 가능) 판정에 쓴다
@@ -16832,45 +16824,6 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
     try std.testing.expect(c1.width < c0.width); // 세그먼트는 바 전체보다 좁다
 }
 
-// 상단 탭바 Warp 폴리시: pane grip ⠿를 **hover-only**로 그린다(평소 숨김). 렌더 게이트는 `pointInRect(last_mouse, pb.full)`
-// 이고, `updateHoveredTab`이 매 이동마다 last_mouse를 갱신한다. 바 위 호버=게이트 true(grip 그림)·바 밖=false(숨김)를 고정.
-test "grip hover-only: updateHoveredTab stores last mouse so the render gate matches bar hover" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-    session.window_padding_px = .{};
-    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-
-    var lrs: std.ArrayList(PaneTree.LeafRect) = .empty;
-    defer lrs.deinit(allocator);
-    try session.activeTabLeafRects(allocator, session.termRect(), &lrs);
-    try std.testing.expect(lrs.items.len >= 1);
-    const pb = session.paneBar(lrs.items[0].rect, lrs.items[0].leaf) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(pb.grip_cols > 0); // 넓은 바라 grip 예약(hover-only로 그릴 대상)
-
-    // 바 위 호버 → last_mouse가 바 위 → 렌더 게이트(pointInRect)가 grip을 그린다.
-    const bx: f64 = @floatFromInt(pb.full.x + 1);
-    const by: f64 = @floatFromInt(pb.full.y + pb.full.h / 2);
-    _ = session.updateHoveredTab(bx, by);
-    try std.testing.expectEqual(bx, session.last_mouse_x);
-    try std.testing.expectEqual(by, session.last_mouse_y);
-    try std.testing.expect(layout_math.pointInRect(session.last_mouse_x, session.last_mouse_y, pb.full)); // grip 그려짐
-
-    // 바 밖(아래 터미널 본문) 호버 → 게이트 false → grip 숨김.
-    const ay: f64 = @floatFromInt(pb.full.y + pb.full.h + 200);
-    _ = session.updateHoveredTab(bx, ay);
-    try std.testing.expect(!layout_math.pointInRect(session.last_mouse_x, session.last_mouse_y, pb.full)); // grip 숨김
-}
-
 // U-tab2 rich: 활성 탭이 **본문색 cutout**(strip에서 도려낸 듯)이고, 포커스 구분은 배경이 아니라 **언더바 색**
 // (포커스 pane=maru 앰버, 비포커스=muted)이라는 새 시각 계약을 layer-2 gpu_quads로 고정한다. 세로 분할로
 // 포커스(아래)·비포커스(위) 두 pane을 만들어 cutout·앰버·muted quad가 모두 방출되는지 본다(옛 sidebarActiveBg 평평 배경 회귀 방지).
@@ -16888,6 +16841,7 @@ test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber unde
     });
     defer session.deinit();
     session.appearance.chrome_theme = .rich; // 본문색 cutout·언더바 quad는 rich 경로(tab_corner>0)에서만 — resize 전에 고정
+    session.appearance.chrome_tab_style = .connected; // cutout은 connected 스타일만(기본은 이제 underline이라 명시) — resize 전에 고정
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 

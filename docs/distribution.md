@@ -94,9 +94,10 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 업그레이드 명령을 입력 줄에 채워주거나 클립보드에 복사하고, 실행(Enter)은 사용자가 한다.
 
 - **현재 버전**: `build.zig.zon`의 `.version`을 빌드 타임에 앱으로 주입한다(버전 단일 출처).
-- **최신 버전 감지**: 앱 시작 시 1회 + 하루 1회, **백그라운드**(I/O–렌더 스레딩 분리, `io-render-threading.md`)로
+- **최신 버전 감지**: 앱 시작 시 1회, **백그라운드**(I/O–렌더 스레딩 분리, `io-render-threading.md`)로
   `GET https://api.github.com/repos/ohah/maru/releases/latest`의 `tag_name`을 받아 현재 버전과 비교한다.
-  설치 출처와 무관하게 가볍다(인증 없이 60req/h, 하루 1회면 무관). maru에는 HTTP 클라이언트가 없으므로
+  (장시간 실행 중 주기적 재확인은 후속 — 현재는 실행 시마다 1회.) 설치 출처와 무관하게 가볍다(인증 없이
+  60req/h, 실행당 1회라 무관). maru에는 HTTP 클라이언트가 없으므로
   `std.http.Client`(런타임 의존성 0)를 쓰거나 `curl` 셸아웃으로 한다.
 - **표시**: 새 버전이면 알림(🔔)/chrome 시스템(`notifications.md`·`chrome-strategy.md`)에 "vX.Y 사용 가능"
   항목을 띄운다. 클릭 시 설치 출처를 보고(아래) 그에 맞는 업그레이드 명령을 입력 줄에 채워준다.

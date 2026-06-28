@@ -949,7 +949,7 @@ pub const NotificationConfig = struct {
     /// (데스크톱 배너·인앱 센터 둘 다 — 코어 pending만 비운다). loader가 `notifications.osc` 키로 파싱.
     osc: bool = true,
 
-    /// 새 버전이 나왔는지 시작 시 1회 + 하루 1회 백그라운드로 확인해 인앱 알림으로 안내할지. 기본 true.
+    /// 새 버전이 나왔는지 앱 시작 시 1회 백그라운드로 확인해 인앱 알림으로 안내할지. 기본 true.
     /// 업그레이드를 자동 실행하지 않는다(안내만 — distribution.md "인앱 새 버전 안내"). 외부 요청
     /// (GitHub releases API)이라 끌 수 있게 둔다(데이터 수집 telemetry는 아니다). loader가
     /// `notifications.update-check` 키로 파싱.

@@ -42,7 +42,9 @@ fn parseTriple(s: []const u8) [3]u32 {
         var n: u32 = 0;
         for (part) |c| {
             if (c < '0' or c > '9') break;
-            n = n * 10 + (c - '0');
+            // 네트워크가 준 태그라 비정상적으로 긴 숫자도 올 수 있다. unchecked `n*10+d`는 Debug/ReleaseSafe
+            // 에서 panic(백그라운드 스레드 크래시), ReleaseFast에서 wrap(오비교)이므로 maxInt로 포화시킨다.
+            n = std.math.add(u32, std.math.mul(u32, n, 10) catch std.math.maxInt(u32), c - '0') catch std.math.maxInt(u32);
         }
         out[idx] = n;
     }
@@ -88,6 +90,11 @@ pub fn fetchLatestTagAlloc(allocator: std.mem.Allocator, repo: []const u8) ?[]u8
     // stdout 파이프만 필요(stdin 없음). [0]=read, [1]=write.
     var out_pipe: [2]c_int = undefined;
     if (std.c.pipe(&out_pipe) != 0) return null;
+    // pipe fd가 동시에 도는 다른 fork(첫 tick의 셸 PTY spawn)에 새지 않게 CLOEXEC을 건다. 누수되면 그
+    // 자식이 write 끝을 붙들어 readAllFd가 EOF를 못 보고 영원히 블록한다(pty/macos.zig·ssh_upload와 같은
+    // 가드). 아래 child는 out_pipe[1]을 fd 1로 dup2하는데, dup2 대상은 CLOEXEC이 클리어돼 curl이 정상 출력한다.
+    _ = std.c.fcntl(out_pipe[0], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+    _ = std.c.fcntl(out_pipe[1], std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
 
     const pid = std.c.fork();
     if (pid < 0) {
@@ -126,19 +133,20 @@ fn readAllFd(allocator: std.mem.Allocator, fd: c_int) ![]u8 {
     errdefer buf.deinit(allocator);
     var tmp: [4096]u8 = undefined;
     while (true) {
-        const n = std.c.read(fd, &tmp, tmp.len);
-        if (n < 0) return error.ReadFailed;
+        const n = std.posix.read(fd, &tmp) catch return error.ReadFailed; // EINTR는 std.posix.read가 재시도
         if (n == 0) break; // EOF
-        try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
+        try buf.appendSlice(allocator, tmp[0..n]);
         if (buf.items.len > 1024 * 1024) break;
     }
     return buf.toOwnedSlice(allocator);
 }
 
-/// 자식을 reap하고 exit code를 돌려준다(정상 종료가 아니면 -1).
+/// 자식을 reap하고 exit code를 돌려준다(정상 종료가 아니면 -1). waitpid의 반환값을 확인해 -1(EINTR·ECHILD
+/// 등)이면 status를 신뢰하지 않고 실패로 처리한다 — 반환값을 버리면 EINTR 시 status가 0으로 남아 "exit 0"
+/// (성공)으로 오판되어 검증 안 된 출력을 알림에 쓸 수 있다(거짓 성공 방지; 실패 시 이번 체크는 조용히 스킵).
 fn reapPid(pid: std.c.pid_t) c_int {
     var status: c_int = 0;
-    _ = std.c.waitpid(pid, &status, 0);
+    if (std.c.waitpid(pid, &status, 0) < 0) return -1;
     const us: u32 = @bitCast(status);
     if (std.c.W.IFEXITED(us)) return @intCast(std.c.W.EXITSTATUS(us));
     return -1;

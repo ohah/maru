@@ -168,7 +168,8 @@ fn applyKey(
         };
         const v = theme.chromePresetValues(cp);
         config.chrome_theme = v.chrome_theme;
-        config.chrome_tab_style = v.chrome_tab_style;
+        // tab_style은 프리셋이 제어할 때만 깐다(null=무관, 예: cell/tui) — 기존 chrome.tab-style을 임의값으로 안 덮음(code-review high).
+        if (v.chrome_tab_style) |ts| config.chrome_tab_style = ts;
     } else if (std.mem.startsWith(u8, key, "theme.palette.")) {
         // ANSI 16색 override: theme.palette.0~.15 = #RRGGBB. suffix를 u8로 파싱해 0~15 범위 검사. 인덱스가 비정수·
         // 범위 밖이면 forgiving(diagnostic + 무시), 색은 dupValidColor가 검증(틀린 색도 forgiving). OSC4가 없을 때의
@@ -246,7 +247,7 @@ fn applyKey(
 
 // enum/bool 파싱 헬퍼(parseCursorShape·parsePageKeys·parseShiftEnter·parseImeEnter·parseQuickTerminal*·
 // parseAmbiguousWidth·parseBool)는 스키마-주도 이주(CS-1/CS-2/CS-2b)로 schema의 타입 분기 파싱이 대신한다 — 전부 제거.
-// loader 명시 핸들러에 남은 파싱은 parseThemePreset(preset)·parseUintMax(padding alias)·dupValidColor(palette)뿐.
+// loader 명시 핸들러에 남은 파싱은 parseThemePreset(theme.preset)·parseChromePreset(chrome.preset)·parseUintMax(padding alias)·dupValidColor(palette)뿐.
 
 /// `keybind = <chord> = <rhs>` 한 줄을 처리한다. chord에 `global:` 접두사가 있으면 전역(OS) 단축키이고
 /// rhs는 GlobalAction(toggle_window/show_window)이다(별도 네임스페이스 — 자기들끼리만 dedup). 접두사가
@@ -859,10 +860,14 @@ test "chrome.preset 묶음(TS3): 두 축을 깔고 개별 키가 뒤에서 overr
     try std.testing.expectEqual(theme.ChromeTheme.rich, p2.config.chrome_theme);
     try std.testing.expectEqual(theme.ChromeTabStyle.pill, p2.config.chrome_tab_style);
 
-    // cell 프리셋 → tui 룩.
-    var p3 = try parse(std.testing.allocator, "chrome.preset = cell");
+    // cell 프리셋 → tui 룩이되, tab_style 축은 **안 건드린다**(tui라 무관 — 앞서 둔 pill을 보존, code-review high).
+    var p3 = try parse(std.testing.allocator,
+        \\chrome.tab-style = pill
+        \\chrome.preset = cell
+    );
     defer p3.deinit();
     try std.testing.expectEqual(theme.ChromeTheme.tui, p3.config.chrome_theme);
+    try std.testing.expectEqual(theme.ChromeTabStyle.pill, p3.config.chrome_tab_style); // cell이 underline로 안 덮음(보존)
 
     // 알 수 없는 값 → forgiving(기본값 유지 + diagnostic).
     var p4 = try parse(std.testing.allocator, "chrome.preset = bogus");

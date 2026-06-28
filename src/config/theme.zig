@@ -651,15 +651,18 @@ pub const ChromePreset = enum {
     cell, // tui — cell-grid 룩(탭은 셀 밴드, tab-style 무관)
 };
 
-pub const ChromePresetValues = struct { chrome_theme: ChromeTheme, chrome_tab_style: ChromeTabStyle };
+/// 프리셋이 *제어하는* 축만 담는다. `chrome_tab_style = null`이면 그 프리셋은 탭 스타일 축을 **건드리지 않는다**
+/// (loader가 기존 값 보존) — cell(tui)은 셀 밴드라 tab_style이 무관해, 임의값(underline)으로 덮으면 사용자가 앞서 둔
+/// `chrome.tab-style = pill`을 조용히 리셋한다(code-review high 지적). 그래서 cell은 null로 둔다.
+pub const ChromePresetValues = struct { chrome_theme: ChromeTheme, chrome_tab_style: ?ChromeTabStyle };
 
-/// 프리셋 → (룩, 탭 스타일) 묶음 단일 출처. 프리셋 추가 시 enum + 이 switch만 늘리면 된다.
+/// 프리셋 → (룩, 탭 스타일?) 묶음 단일 출처. 프리셋 추가 시 enum + 이 switch만 늘리면 된다.
 pub fn chromePresetValues(preset: ChromePreset) ChromePresetValues {
     return switch (preset) {
         .minimal => .{ .chrome_theme = .rich, .chrome_tab_style = .underline },
         .cutout => .{ .chrome_theme = .rich, .chrome_tab_style = .connected },
         .capsule => .{ .chrome_theme = .rich, .chrome_tab_style = .pill },
-        .cell => .{ .chrome_theme = .tui, .chrome_tab_style = .underline }, // tui는 셀 밴드라 tab_style 무관(중립값)
+        .cell => .{ .chrome_theme = .tui, .chrome_tab_style = null }, // tui는 셀 밴드라 tab_style 무관 → 축을 안 건드린다(기존 값 보존)
     };
 }
 

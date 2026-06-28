@@ -749,12 +749,9 @@ const NotificationHistoryItem = struct {
 /// `agent_spin_frame`의 글리프를 그리고, 색칠 루프가 이 codepoint를 브랜드색으로 칠한다(아이콘과 같은 패턴).
 const agent_spinner_frames = [_]u21{ 0x280B, 0x2819, 0x2839, 0x2838, 0x283C, 0x2834, 0x2826, 0x2827 };
 
-/// codepoint가 스피너 프레임 중 하나인가(색칠 루프 게이트 — 이름/경로에 braille는 드물고, 게다가 agent_kind!=none만 칠함).
+/// codepoint가 스피너 프레임 중 하나인가(색칠 루프 게이트 — 상태줄 row로 좁힌 뒤 이 체크). 파일 관용 std.mem.indexOfScalar 재사용.
 fn isAgentSpinnerCp(cp: u21) bool {
-    for (agent_spinner_frames) |f| {
-        if (f == cp) return true;
-    }
-    return false;
+    return std.mem.indexOfScalar(u21, &agent_spinner_frames, cp) != null;
 }
 
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
@@ -6992,9 +6989,9 @@ pub const AppSession = struct {
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
-        // 에이전트 아이콘 펄스: 사이드바 카드 중 running인 에이전트가 있으면 위상을 진행해야 아이콘이 맥동한다.
-        // 사이드바 아이콘은 suffix-trim으로 못 숨기는 별도 frame이라 text-blink/rename처럼 full rebuild(dirty)가 필요.
-        const agent_pulsing = self.anyAgentRunning();
+        // running 스피너: 사이드바에 **실제로 보이는** 카드(접힘 아님 + 검색 필터 통과) 중 running 에이전트가 있을 때만
+        // 위상을 진행한다 — 접힘·필터아웃이면 스피너가 화면에 없으니 매 틱 full-grid 재셰이프는 낭비다(code-review high #1).
+        const spinner_visible = self.anyAgentRunning();
         // 사이드바 검색 caret도 깜빡인다 — 헤더 frame의 '|' 글자라(rename과 동형) full rebuild가 필요하다.
         // 검색 caret이 '실제로 그려질' 때만 blink로 재투영한다(buildSidebarHeaderDrawList이 caret을 그리는 조건과 동일:
         // 활성 + 접힘 아님 + cols≥10). 안 그러면 활성인 채 사이드바를 10칸 미만으로 드래그하면 안 보이는 caret 때문에 매
@@ -7003,12 +7000,12 @@ pub const AppSession = struct {
             self.cell_width_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // core.preedit로 이미 막지만, 오버레이/rename/검색은 imeComposingActive로 막아야 한다(단일 출처).
-        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !agent_pulsing and !sidebar_search) or self.imeComposingActive()) {
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !spinner_visible and !sidebar_search) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
         // running 스피너: blink(500ms)보다 빠른 별도 위상 — 4틱(≈130ms)마다 프레임 진행 + 사이드바 재투영(회전 보임).
-        if (agent_pulsing) {
+        if (spinner_visible) {
             self.agent_spin_ticks += 1;
             if (self.agent_spin_ticks >= 4) {
                 self.agent_spin_ticks = 0;
@@ -7023,17 +7020,20 @@ pub const AppSession = struct {
             // suffix-trim 토글(재빌드 없음). 오버레이가 열렸으면 suffix=오버레이 caret이라 caret을, 닫혔으면 suffix=
             // 터미널 커서라 커서를 깜빡인다 — 같은 코드(generation↑만, idle에 full-grid reshape 안 함).
             self.metal_buffer.setCursorVisible(self.blink_visible);
-            // 텍스트 blink·rename caret·에이전트 아이콘 펄스는 셀/사이드바 glyph라 full rebuild가 필요하다
-            // (suffix-trim으로 못 숨김) — dirty 표시해 사이드바를 위상마다 재투영(아이콘 dimRgb 적용/해제).
-            if (text_blinks or rename_active or agent_pulsing or sidebar_search) self.metal_dirty = true;
+            // 텍스트 blink·rename caret·검색 caret은 셀/사이드바 glyph라 full rebuild가 필요하다(suffix-trim으로 못 숨김).
+            // 에이전트 스피너는 위 자기 위상(4틱)에서 따로 dirty하므로 여기엔 안 넣는다(옛 펄스 폐기 후 500ms 재투영은 byte-identical 낭비, #3).
+            if (text_blinks or rename_active or sidebar_search) self.metal_dirty = true;
         }
     }
 
-    /// 사이드바에 보이는 워크스페이스 카드(탭별 활성 Term) 중 하나라도 에이전트가 running이면 true. 아이콘 펄스
-    /// 위상을 진행할지 결정한다(running이 있어야 blink_visible을 토글하고 사이드바를 재투영한다).
+    /// 사이드바에 **실제로 보이는** 워크스페이스 카드 중 running 에이전트가 있으면 true — 스피너 위상을 진행할지/사이드바를
+    /// 재투영할지 결정한다. 접힘이면 스피너가 안 보이고(false), 검색 필터로 숨은 탭은 카드가 없으므로(스피너 미표시) 제외해야
+    /// 한다 — 그래서 `tabs` 전체가 아니라 `sidebar_visible_tabs`(필터 통과 = 표시 카드)만 본다(code-review high #1: 옛 전체-스캔이
+    /// 접힘·필터아웃에도 130ms 재투영을 돌리던 회귀). 빈 검색이면 visible_tabs=전체라 평소와 동일.
     fn anyAgentRunning(self: *AppSession) bool {
-        for (self.tabs.items) |tab| {
-            if (tab.activePane().activeTerm().agent_state == .running) return true;
+        if (self.sidebar_collapsed) return false; // 접힘 = 스피너 화면에 없음
+        for (self.sidebar_visible_tabs.items) |i| {
+            if (i < self.tabs.items.len and self.tabs.items[i].activePane().activeTerm().agent_state == .running) return true;
         }
         return false;
     }
@@ -11434,15 +11434,18 @@ pub const AppSession = struct {
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
         var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, null, self.displaySlotOf(self.app_window.active_tab), active_fg);
-        // 에이전트 아이콘(✶ claude / ◆ codex)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄, codex=OpenAI 청록.
-        // 종류를 색으로 구분하고, 진행/완료는 색이 아니라 **펄스**(running 밝기 변조) + 상태줄(● 진행중 / ✓ 완료)이
-        // 담당한다(상태색은 어두운 배경에서 흐려 가독성이 나빴다 — 사용자 피드백). 색은 `term.agent_kind` 단일
-        // 출처로 고르고(codepoint 역매핑 아님 — agentSymbolCodepoint와 짝 유지), 아이콘은 gutter col 0에만 있어
-        // col 0 + 아이콘 codepoint로 좁힌다 → 워크스페이스 이름/경로(col≥3)에 ✶·◆가 들어가도 안 오염. docs/agent-session.md.
+        // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(브라유)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
+        // codex=OpenAI 청록. 종류를 색으로 구분하고, **진행/완료는 상태줄**(running=⠋ 회전 스피너[브랜드색]·idle=✓)이 담당한다
+        // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
+        // **오염 방지**: 아이콘은 gutter `col 0` + 합성 codepoint로 좁히고, 스피너는 **상태줄(카드 마지막 줄)**에만 색칠한다 —
+        // 워크스페이스 이름/브랜치/경로 줄(line_index<line_count-1)에 braille 글자가 들어가도 안 오염(code-review high #2).
         for (draw_list.cells) |*c| {
-            // ① gutter 아이콘(col 0 + 합성 sparkle/diamond) ② 상태줄 running 스피너(브라유). 둘 다 브랜드색으로 칠한다.
             const is_icon = c.col == 0 and (c.codepoint == 0xF0007 or c.codepoint == 0xF0008); // ✶ claude / ◆ codex
-            const is_spinner = isAgentSpinnerCp(c.codepoint); // 회전 브라유(상태줄, col≥indent)
+            // 상태줄(카드 마지막 줄)의 회전 브라유만 스피너로 본다. row=slot*base + line_count*4 + line_index라
+            // within=row%base, line_count=within/4, line_index=within%4; 상태줄=line_index==line_count-1(에이전트 카드의 마지막 줄).
+            const within = c.row % coretext_frame_builder.sidebar_line_base;
+            const on_status_line = (within / 4) >= 1 and (within % 4) == (within / 4) - 1;
+            const is_spinner = on_status_line and isAgentSpinnerCp(c.codepoint);
             if (!is_icon and !is_spinner) continue;
             // 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*sidebar_line_base+줄offset, 줄offset<base라 아이콘/스피너 같은 슬롯)해 그 Term을 얻는다.
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // 표시 슬롯
@@ -12847,10 +12850,41 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(@as(u21, 0xF0008), agentIconCodepoint(.codex)); // 사이드바 PUA diamond
 }
 
-test "dimRgb: 펄스 off 위상은 브랜드색을 45%로 낮춘다(글자 안 사라짐)" {
-    // 밝기 변조라 0이 아니다(깜빡임 아님). 200×45/100=90.
+test "dimRgb: 색을 45%로 낮춘다(0 아님 — 글자 안 사라짐; 현재 pane grip muted에 쓰임)" {
+    // 밝기 변조라 0이 아니다(깜빡임 아님). 200×45/100=90. (옛 에이전트 아이콘 펄스는 폐기 — 스피너로 대체.)
     try std.testing.expectEqual(maru.color.Rgb{ .r = 90, .g = 90, .b = 90 }, dimRgb(.{ .r = 200, .g = 200, .b = 200 }));
     try std.testing.expectEqual(maru.color.Rgb{ .r = 0, .g = 0, .b = 0 }, dimRgb(.{ .r = 0, .g = 0, .b = 0 }));
+}
+
+// anyAgentRunning(스피너 위상 게이트)은 **사이드바에 실제로 보이는** running 에이전트만 본다 — 접힘·필터아웃이면 스피너가
+// 화면에 없어 false(매 130ms full-grid 재투영 낭비 회피, code-review high #1). 검색 없으면 visible_tabs=전체라 평소 동작.
+test "anyAgentRunning: 접힘·필터아웃이면 false (보이는 running만 — 재투영 게이트)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.activeTab().activePane().activeTerm().agent_state = .running; // 활성 Term을 running으로
+    session.recomputeVisibleTabs(); // 검색 없음 → visible_tabs = 전체(1개)
+    try std.testing.expect(session.sidebar_visible_tabs.items.len >= 1);
+
+    session.sidebar_collapsed = false;
+    try std.testing.expect(session.anyAgentRunning()); // 펼침 + 보이는 running → true
+
+    session.sidebar_collapsed = true;
+    try std.testing.expect(!session.anyAgentRunning()); // 접힘 → 스피너 안 보임 → false
+
+    session.sidebar_collapsed = false;
+    session.sidebar_visible_tabs.clearRetainingCapacity(); // 검색 필터로 그 카드가 숨음(표시 목록 비움)
+    try std.testing.expect(!session.anyAgentRunning()); // 필터아웃 → false (running이어도 카드 없음)
 }
 
 test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 먼저 큐를 드레인" {
@@ -13615,7 +13649,9 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.blink_ticks = 0;
     session.chrome_host = .{}; // updateCursorBlink이 find/palette.open을 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus/updateCursorBlink가 rename을 읽음(undefined면 garbage가 .rename 분기)
-    session.tabs = .empty; // updateCursorBlink→anyAgentRunning이 tabs를 순회 — undefined면 UB(같은 함정). 빈 목록=펄스 없음
+    session.tabs = .empty;
+    session.sidebar_visible_tabs = .empty; // updateCursorBlink→anyAgentRunning이 sidebar_visible_tabs를 순회(code-review high #1) — undefined면 UB(같은 함정). 빈 목록=스피너 없음
+    session.sidebar_collapsed = false; // anyAgentRunning이 먼저 읽음(접힘이면 false 조기반환) — undefined면 garbage 분기
     session.appearance.cursor.blink_interval_ms = 500; // blinkIntervalTicks가 읽음(F1-4b) — undefined면 *30 overflow([[devsession-undefined-test-field-trap]])
 
     // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 generation만(suffix 토글).

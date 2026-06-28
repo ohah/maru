@@ -357,10 +357,22 @@ fn chordAlreadyBound(
     return false;
 }
 
-/// rhs가 터미널 매크로 접두사(`text:`/`esc:`/`ctrl:`)로 시작하나 — write-back 패스가 매크로 줄만 골라 app action 줄을
-/// 안 건드리게 한다(단일 출처: 접두사 목록은 parseTerminalMacro와 여기 둘 뿐, 같은 3개로 동기).
+/// 터미널 매크로 접두사 종류. 접두사 리터럴의 단일 출처는 macroPrefix.
+const MacroKind = enum { text, esc, ctrl };
+
+/// rhs의 매크로 접두사를 판정해 종류 + payload(접두사 뒤)를 돌려준다 — **접두사 목록의 단일 출처**. isMacroRhs(접두사
+/// 여부)와 parseTerminalMacro(payload 파싱)가 둘 다 이걸 거쳐 접두사 리터럴(text:/esc:/ctrl:)이 한 곳에만 있다.
+fn macroPrefix(rhs: []const u8) ?struct { kind: MacroKind, payload: []const u8 } {
+    if (std.mem.startsWith(u8, rhs, "text:")) return .{ .kind = .text, .payload = rhs["text:".len..] };
+    if (std.mem.startsWith(u8, rhs, "esc:")) return .{ .kind = .esc, .payload = rhs["esc:".len..] };
+    if (std.mem.startsWith(u8, rhs, "ctrl:")) return .{ .kind = .ctrl, .payload = rhs["ctrl:".len..] };
+    return null;
+}
+
+/// rhs가 터미널 매크로 접두사로 시작하나 — write-back 패스가 매크로 줄만 골라 app action 줄을 안 건드리게 한다.
+/// macroPrefix(단일 출처)에서 파생.
 pub fn isMacroRhs(rhs: []const u8) bool {
-    return std.mem.startsWith(u8, rhs, "text:") or std.mem.startsWith(u8, rhs, "esc:") or std.mem.startsWith(u8, rhs, "ctrl:");
+    return macroPrefix(rhs) != null;
 }
 
 /// 세팅 GUI 매크로 행 커밋용 — rhs(`text:`/`esc:`/`ctrl:`)를 파싱해 `TerminalInputMacro`로(diags 없이; 접두사 아님·
@@ -395,47 +407,47 @@ fn parseTerminalMacro(
     line_no: usize,
     rhs: []const u8,
 ) LoadError!MacroParse {
-    if (std.mem.startsWith(u8, rhs, "text:")) {
-        const payload = rhs["text:".len..];
-        if (payload.len == 0) {
-            try diags.append(a, .{ .line = line_no, .message = "text: 뒤 내용이 비어 있음 — 무시" });
-            return .invalid;
-        }
-        return .{ .macro = .{ .send_text = try a.dupe(u8, payload) } };
+    const mp = macroPrefix(rhs) orelse return .not_macro;
+    switch (mp.kind) {
+        .text => {
+            if (mp.payload.len == 0) {
+                try diags.append(a, .{ .line = line_no, .message = "text: 뒤 내용이 비어 있음 — 무시" });
+                return .invalid;
+            }
+            return .{ .macro = .{ .send_text = try a.dupe(u8, mp.payload) } };
+        },
+        .esc => {
+            if (mp.payload.len == 0) {
+                try diags.append(a, .{ .line = line_no, .message = "esc: 뒤 내용이 비어 있음 — 무시" });
+                return .invalid;
+            }
+            // ESC(0x1b)를 앞에 붙인 시퀀스. 예 `esc:[2J` → "\x1b[2J"(화면 지우기).
+            const seq = try std.fmt.allocPrint(a, "\x1b{s}", .{mp.payload});
+            return .{ .macro = .{ .send_escape_sequence = seq } };
+        },
+        .ctrl => {
+            const payload = mp.payload;
+            // 정확히 한 codepoint여야 한다(Ctrl+<글자>). UTF-8 한 글자 길이와 payload 길이가 같아야 통과.
+            const seq_len = std.unicode.utf8ByteSequenceLength(if (payload.len > 0) payload[0] else 0) catch {
+                try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
+                return .invalid;
+            };
+            if (payload.len != seq_len) {
+                try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
+                return .invalid;
+            }
+            const cp = std.unicode.utf8Decode(payload) catch {
+                try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자를 못 읽음 — 무시" });
+                return .invalid;
+            };
+            // C0 컨트롤로 매핑되는 글자만(@A-Z[\]^_ space ?). 로드 시 걸러야 키 누를 때 resolve가 안 터진다.
+            _ = terminal.input.controlByte(cp) catch {
+                try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자가 컨트롤 문자로 매핑 안 됨(@,A~Z,[,\\,],^,_,Space,? 가능) — 무시" });
+                return .invalid;
+            };
+            return .{ .macro = .{ .send_control = cp } };
+        },
     }
-    if (std.mem.startsWith(u8, rhs, "esc:")) {
-        const payload = rhs["esc:".len..];
-        if (payload.len == 0) {
-            try diags.append(a, .{ .line = line_no, .message = "esc: 뒤 내용이 비어 있음 — 무시" });
-            return .invalid;
-        }
-        // ESC(0x1b)를 앞에 붙인 시퀀스. 예 `esc:[2J` → "\x1b[2J"(화면 지우기).
-        const seq = try std.fmt.allocPrint(a, "\x1b{s}", .{payload});
-        return .{ .macro = .{ .send_escape_sequence = seq } };
-    }
-    if (std.mem.startsWith(u8, rhs, "ctrl:")) {
-        const payload = rhs["ctrl:".len..];
-        // 정확히 한 codepoint여야 한다(Ctrl+<글자>). UTF-8 한 글자 길이와 payload 길이가 같아야 통과.
-        const seq_len = std.unicode.utf8ByteSequenceLength(if (payload.len > 0) payload[0] else 0) catch {
-            try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
-            return .invalid;
-        };
-        if (payload.len != seq_len) {
-            try diags.append(a, .{ .line = line_no, .message = "ctrl: 뒤는 글자 한 자여야 함 — 무시" });
-            return .invalid;
-        }
-        const cp = std.unicode.utf8Decode(payload) catch {
-            try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자를 못 읽음 — 무시" });
-            return .invalid;
-        };
-        // C0 컨트롤로 매핑되는 글자만(@A-Z[\]^_ space ?). 로드 시 걸러야 키 누를 때 resolve가 안 터진다.
-        _ = terminal.input.controlByte(cp) catch {
-            try diags.append(a, .{ .line = line_no, .message = "ctrl: 글자가 컨트롤 문자로 매핑 안 됨(@,A~Z,[,\\,],^,_,Space,? 가능) — 무시" });
-            return .invalid;
-        };
-        return .{ .macro = .{ .send_control = cp } };
-    }
-    return .not_macro;
 }
 
 /// 색 문자열을 appearance.parseHexColor로 검증(값 의미 단일 출처)한 뒤 arena에 복사해 돌려준다.
@@ -532,6 +544,26 @@ pub fn updateConfigText(allocator: std.mem.Allocator, original: []const u8, upda
 /// 리터럴, 예: `"new_term"`), chord는 `KeyChord.toConfigString` 결과(예: `"Cmd+E"`).
 pub const KeybindRebind = struct { action: []const u8, chord: []const u8 };
 
+/// 파싱된 keybind 줄 — chord(좌측)·rhs(둘째 `=` 뒤 끝까지). `global:` 접두는 떼지 않는다(호출자가 chord로 판단·표기).
+const KeybindLine = struct { chord: []const u8, rhs: []const u8 };
+
+/// `keybind = <chord> = <rhs>` 줄을 파싱한다 — keybind write-back 패스 7개의 **공유 토크나이저(단일 출처)**. 입력은
+/// 이미 trim된 줄(`std.mem.trim`된 raw_line). 비어 있거나 주석(`#`)·key가 `keybind`가 아니거나 둘째 `=`가 없으면 null.
+/// chord/rhs는 각각 trim하고, rhs는 **끝까지**(매크로 `text:a=b`의 내부 `=`도 통째 rhs). 각 패스는 이 결과로 자기
+/// 매칭(action/chord/`global:`/`isMacroRhs`)과 교체/삭제/append만 한다 — 줄 문법은 여기 한 곳. 같은 prologue를 7번
+/// 복붙하던 것을 단일 출처로(project-rules "포맷별로 따로 두지 말고 한 출처 참조", [prefer-policy-over-codebase-mimicry]).
+fn parseKeybindLine(trimmed: []const u8) ?KeybindLine {
+    if (trimmed.len == 0 or trimmed[0] == '#') return null;
+    const eq1 = std.mem.indexOfScalar(u8, trimmed, '=') orelse return null;
+    if (!std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) return null;
+    const rest = trimmed[eq1 + 1 ..];
+    const eq2 = std.mem.indexOfScalar(u8, rest, '=') orelse return null;
+    return .{
+        .chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace),
+        .rhs = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace),
+    };
+}
+
 /// keybind 줄(`keybind = <chord> = <action>`)을 **action 기준**으로 in-place 갱신한다 — updateConfigText의 keybind 짝.
 /// keybind는 `key = value`가 아니라 줄마다 같은 `keybind` 키 + 두 번째 `=`로 chord와 action을 나눠서, key 기준
 /// updateConfigText로는 다룰 수 없다(모든 keybind 줄이 한 키로 충돌). 그래서 전용 패스를 둔다: rhs(두 번째 `=` 뒤,
@@ -552,32 +584,19 @@ pub fn updateKeybindLines(allocator: std.mem.Allocator, original: []const u8, re
         if (!first) try out.append(allocator, '\n');
         first = false;
         var replaced = false;
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
-                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
-                if (std.mem.eql(u8, k, "keybind")) {
-                    const rest = trimmed[eq1 + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        // 좌측 chord가 `global:`로 시작하면 전역 줄이라 in-app 패스가 안 건드린다(섞임 방지 — 전역은
-                        // updateGlobalKeybindLines가 담당). chord(첫·둘째 = 사이)를 trim해 접두사를 본다.
-                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
-                        if (std.mem.startsWith(u8, left_chord, "global:")) {
-                            // global 줄 — in-app 갱신 대상 아님. 그대로 보존.
-                        } else {
-                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace); // 두 번째 = 뒤 끝까지(매크로 = 포함)
-                            for (rebinds, 0..) |rb, i| {
-                                if (std.mem.eql(u8, rb.action, action)) {
-                                    try out.appendSlice(allocator, "keybind = ");
-                                    try out.appendSlice(allocator, rb.chord);
-                                    try out.appendSlice(allocator, " = ");
-                                    try out.appendSlice(allocator, action);
-                                    applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
-                                    replaced = true;
-                                    break;
-                                }
-                            }
-                        }
+        // 좌측 chord가 `global:`면 전역 줄이라 in-app 패스가 안 건드린다(섞임 방지 — 전역은 updateGlobalKeybindLines).
+        // 매크로 줄(rhs `text:`/`esc:`/`ctrl:`)은 action 키와 안 겹쳐 자연히 스킵(rhs를 끝까지 잡아 비교).
+        if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
+            if (!std.mem.startsWith(u8, kl.chord, "global:")) {
+                for (rebinds, 0..) |rb, i| {
+                    if (std.mem.eql(u8, rb.action, kl.rhs)) {
+                        try out.appendSlice(allocator, "keybind = ");
+                        try out.appendSlice(allocator, rb.chord);
+                        try out.appendSlice(allocator, " = ");
+                        try out.appendSlice(allocator, kl.rhs);
+                        applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
+                        replaced = true;
+                        break;
                     }
                 }
             }
@@ -637,24 +656,14 @@ pub fn removeKeybindLines(allocator: std.mem.Allocator, original: []const u8, ac
     var it = std.mem.splitScalar(u8, original, '\n');
     var first = true;
     while (it.next()) |raw_line| {
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
         var drop = false;
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
-                if (std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) {
-                    const rest = trimmed[eq1 + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        // 좌측 chord가 `global:`면 전역 줄 — in-app 제거 패스가 안 건드린다(섞임 방지, removeGlobalKeybindLines가 담당).
-                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
-                        if (!std.mem.startsWith(u8, left_chord, "global:")) {
-                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
-                            for (actions) |a| if (std.mem.eql(u8, a, action)) {
-                                drop = true;
-                                break;
-                            };
-                        }
-                    }
-                }
+        // 좌측 chord가 `global:`면 전역 줄 — in-app 제거 패스가 안 건드린다(removeGlobalKeybindLines가 담당).
+        if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
+            if (!std.mem.startsWith(u8, kl.chord, "global:")) {
+                for (actions) |a| if (std.mem.eql(u8, a, kl.rhs)) {
+                    drop = true;
+                    break;
+                };
             }
         }
         if (drop) continue;
@@ -696,28 +705,17 @@ pub fn updateTerminalMacroLines(allocator: std.mem.Allocator, original: []const 
         if (!first) try out.append(allocator, '\n');
         first = false;
         var replaced = false;
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
-                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
-                if (std.mem.eql(u8, k, "keybind")) {
-                    const rest = trimmed[eq1 + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
-                        const rhs = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
-                        if (!std.mem.startsWith(u8, left_chord, "global:") and isMacroRhs(rhs)) {
-                            for (macros, 0..) |m, i| {
-                                if (chordStrEql(left_chord, m.chord)) {
-                                    try out.appendSlice(allocator, "keybind = ");
-                                    try out.appendSlice(allocator, m.chord);
-                                    try out.appendSlice(allocator, " = ");
-                                    try out.appendSlice(allocator, m.rhs);
-                                    applied[i] = true; // 같은 chord 매크로 줄이 여럿이면 모두 교체(last-wins stale 방지)
-                                    replaced = true;
-                                    break;
-                                }
-                            }
-                        }
+        if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
+            if (!std.mem.startsWith(u8, kl.chord, "global:") and isMacroRhs(kl.rhs)) {
+                for (macros, 0..) |m, i| {
+                    if (chordStrEql(kl.chord, m.chord)) {
+                        try out.appendSlice(allocator, "keybind = ");
+                        try out.appendSlice(allocator, m.chord);
+                        try out.appendSlice(allocator, " = ");
+                        try out.appendSlice(allocator, m.rhs);
+                        applied[i] = true; // 같은 chord 매크로 줄이 여럿이면 모두 교체(last-wins stale 방지)
+                        replaced = true;
+                        break;
                     }
                 }
             }
@@ -745,24 +743,13 @@ pub fn removeTerminalMacroLines(allocator: std.mem.Allocator, original: []const 
     var it = std.mem.splitScalar(u8, original, '\n');
     var first = true;
     while (it.next()) |raw_line| {
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
         var drop = false;
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
-                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
-                if (std.mem.eql(u8, k, "keybind")) {
-                    const rest = trimmed[eq1 + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
-                        const rhs = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
-                        if (!std.mem.startsWith(u8, left_chord, "global:") and isMacroRhs(rhs)) {
-                            for (chords) |c| if (chordStrEql(left_chord, c)) {
-                                drop = true;
-                                break;
-                            };
-                        }
-                    }
-                }
+        if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
+            if (!std.mem.startsWith(u8, kl.chord, "global:") and isMacroRhs(kl.rhs)) {
+                for (chords) |c| if (chordStrEql(kl.chord, c)) {
+                    drop = true;
+                    break;
+                };
             }
         }
         if (drop) continue;
@@ -783,23 +770,13 @@ pub fn removeKeybindUnbindLines(allocator: std.mem.Allocator, original: []const 
     var it = std.mem.splitScalar(u8, original, '\n');
     var first = true;
     while (it.next()) |raw_line| {
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
         var drop = false;
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
-                if (std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) {
-                    const rest = trimmed[eq1 + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
-                        const right = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
-                        if (std.mem.eql(u8, right, "unbind")) {
-                            for (chords) |c| if (std.mem.eql(u8, c, left_chord)) {
-                                drop = true;
-                                break;
-                            };
-                        }
-                    }
-                }
+        if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
+            if (std.mem.eql(u8, kl.rhs, "unbind")) {
+                for (chords) |c| if (std.mem.eql(u8, c, kl.chord)) {
+                    drop = true;
+                    break;
+                };
             }
         }
         if (drop) continue;
@@ -830,29 +807,18 @@ pub fn updateGlobalKeybindLines(allocator: std.mem.Allocator, original: []const 
         if (!first) try out.append(allocator, '\n');
         first = false;
         var replaced = false;
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
-                const k = std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace);
-                if (std.mem.eql(u8, k, "keybind")) {
-                    const rest = trimmed[eq1 + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
-                        // **전역 줄만** — 좌측 chord가 `global:`로 시작해야 갱신 대상이다(in-app keybind 줄은 안 건드린다).
-                        if (std.mem.startsWith(u8, left_chord, "global:")) {
-                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
-                            for (rebinds, 0..) |rb, i| {
-                                if (std.mem.eql(u8, rb.action, action)) {
-                                    try out.appendSlice(allocator, "keybind = global:");
-                                    try out.appendSlice(allocator, rb.chord);
-                                    try out.appendSlice(allocator, " = ");
-                                    try out.appendSlice(allocator, action);
-                                    applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
-                                    replaced = true;
-                                    break;
-                                }
-                            }
-                        }
+        if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
+            // **전역 줄만** — 좌측 chord가 `global:`로 시작해야 갱신 대상(in-app keybind 줄은 안 건드린다).
+            if (std.mem.startsWith(u8, kl.chord, "global:")) {
+                for (rebinds, 0..) |rb, i| {
+                    if (std.mem.eql(u8, rb.action, kl.rhs)) {
+                        try out.appendSlice(allocator, "keybind = global:");
+                        try out.appendSlice(allocator, rb.chord);
+                        try out.appendSlice(allocator, " = ");
+                        try out.appendSlice(allocator, kl.rhs);
+                        applied[i] = true; // 같은 action 줄이 여러 개면 모두 교체(parse last-wins라 stale 방지)
+                        replaced = true;
+                        break;
                     }
                 }
             }
@@ -880,23 +846,13 @@ pub fn removeGlobalKeybindLines(allocator: std.mem.Allocator, original: []const 
     var it = std.mem.splitScalar(u8, original, '\n');
     var first = true;
     while (it.next()) |raw_line| {
-        const trimmed = std.mem.trim(u8, raw_line, &std.ascii.whitespace);
         var drop = false;
-        if (trimmed.len > 0 and trimmed[0] != '#') {
-            if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq1| {
-                if (std.mem.eql(u8, std.mem.trim(u8, trimmed[0..eq1], &std.ascii.whitespace), "keybind")) {
-                    const rest = trimmed[eq1 + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rest, '=')) |eq2| {
-                        const left_chord = std.mem.trim(u8, rest[0..eq2], &std.ascii.whitespace);
-                        if (std.mem.startsWith(u8, left_chord, "global:")) {
-                            const action = std.mem.trim(u8, rest[eq2 + 1 ..], &std.ascii.whitespace);
-                            for (actions) |a| if (std.mem.eql(u8, a, action)) {
-                                drop = true;
-                                break;
-                            };
-                        }
-                    }
-                }
+        if (parseKeybindLine(std.mem.trim(u8, raw_line, &std.ascii.whitespace))) |kl| {
+            if (std.mem.startsWith(u8, kl.chord, "global:")) {
+                for (actions) |a| if (std.mem.eql(u8, a, kl.rhs)) {
+                    drop = true;
+                    break;
+                };
             }
         }
         if (drop) continue;
@@ -1460,6 +1416,44 @@ test "updateKeybindLines: in-app 패스는 global: 줄을 안 건드린다(섞�
     defer a.free(out);
     // 전역 줄은 그대로 — 교체 안 됨. (in-app append로 끝에 toggle_window가 한 줄 더 붙긴 하지만 global 줄은 보존.)
     try std.testing.expect(std.mem.indexOf(u8, out, "global:Cmd+Alt+Space = toggle_window") != null);
+}
+
+// keybind 줄 토크나이저(parseKeybindLine 공유 추출) characterization — 공백 변형도 정상 줄과 동일하게 파싱됨을
+// 고정한다(추출이 trim 동작을 깨면 안 됨). action 매칭(update) + chord 매칭(remove) 두 경로로 본다.
+test "keybind 줄 파싱: 무공백·과공백 줄도 trim해 동일 매칭(토크나이저 불변식)" {
+    const a = std.testing.allocator;
+    const original =
+        "keybind=Cmd+T=new_term\n" ++ // 무공백
+        "keybind   =   Cmd+G   =   text:hi\n"; // 과공백 매크로
+    // action 매칭(updateKeybindLines)이 무공백 줄을 정규 표기로 교체.
+    const rb = [_]KeybindRebind{.{ .action = "new_term", .chord = "Cmd+E" }};
+    const out1 = try updateKeybindLines(a, original, &rb);
+    defer a.free(out1);
+    try std.testing.expect(std.mem.indexOf(u8, out1, "keybind = Cmd+E = new_term") != null); // 무공백 줄 교체됨
+    // chord 매칭(removeTerminalMacroLines)이 과공백 매크로 줄을 삭제.
+    const chords = [_][]const u8{"Cmd+G"};
+    const out2 = try removeTerminalMacroLines(a, original, &chords);
+    defer a.free(out2);
+    try std.testing.expect(std.mem.indexOf(u8, out2, "text:hi") == null); // 과공백 매크로 줄 삭제됨
+}
+
+test "appendKeybindUnbinds: chord별 unbind 지시어 추가, 정확-줄 중복 스킵, 주석 보존" {
+    const a = std.testing.allocator;
+    const original =
+        "# 주석\n" ++
+        "keybind = Cmd+T = unbind\n" ++ // 이미 있음 — 중복 스킵
+        "font.size = 14\n";
+    const chords = [_][]const u8{ "Cmd+T", "Cmd+W" }; // Cmd+T=중복, Cmd+W=신규
+    const out = try appendKeybindUnbinds(a, original, &chords);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "# 주석") != null); // 주석 보존
+    try std.testing.expect(std.mem.indexOf(u8, out, "keybind = Cmd+W = unbind") != null); // 신규 추가
+    var cnt: usize = 0; // Cmd+T unbind 줄은 정확히 1개(중복 누적 안 됨)
+    var it = std.mem.splitScalar(u8, out, '\n');
+    while (it.next()) |ln| if (std.mem.eql(u8, std.mem.trim(u8, ln, &std.ascii.whitespace), "keybind = Cmd+T = unbind")) {
+        cnt += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), cnt);
 }
 
 test "parse: window padding defaults to left/right=8, top/bottom=4; bad/out-of-range values are forgiving" {

@@ -27,10 +27,12 @@ cmux 같은 유연한 레이아웃:
     `assets/icons/{sparkle,diamond}.svg`→coverage)다. **claude sparkle는 두꺼운 4갈래 별로 코덱스 diamond와 잉크 mass를 맞췄다** —
     얇은 4갈래 스파클이 작은 gutter 크기에서 다이아보다 작고 흐려 보인다는 사용자 피드백 반영(SVG arms를 두껍게 → `svg_to_coverage.py` 재생성,
     잉크 ≈diamond). **색은 종류**를 따른다 —
-    claude=Anthropic 코랄 `#D9785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는
-    색이 아니라 **펄스**(running일 때 `dimRgb` 밝기 변조)와 카드 **상태줄**(running=`● 진행중`, idle=`✓ {답변}`)이
-    구분한다. 근거: 종류 글리프는 폰트 미보유 시 fallback에서 깨지므로 보유 글리프(✶·◆)로 한정. 상태색(앰버/회색)이 어두운 사이드바 배경에서
-    흐려 가독성이 나빴다 — 종류는 색, 상태는 펄스+상태줄로 분리해 둘 다 또렷하게 한다(브랜드색 복귀).
+    claude=Anthropic 코랄 `#D9785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는 카드
+    **상태줄**(running=**`⠋ 진행중` 회전 브라유 스피너**, idle=`✓ {답변}`)이 구분한다 — running 스피너는 `agent_spin_frame`
+    (`advanceBlinkPhase`가 4틱≈130ms마다 +1, 사이드바 재투영)으로 8프레임 회전하고 **브랜드색**(색칠 루프가 아이콘과 같은
+    패턴으로 스피너 codepoint를 칠함)이라 "진행중"에 색 표현이 있다. **아이콘은 항상 솔리드 브랜드색**(옛 `dimRgb` 밝기 펄스는
+    작은 아이콘에서 작업 중인지 안 보인다는 **사용자 피드백**으로 폐기 — 애니메이션은 상태줄 스피너가 담당, 아이콘은 종류·presence를
+    솔리드로 또렷이). 근거: 종류 글리프는 폰트 미보유 시 fallback에서 깨지므로 보유/합성 글리프로 한정.
 - **탭마다 split(panel)** — 각 탭은 surface 1개가 아니라 가로/세로로 나눌 수 있는 surface 트리.
 - **드래그 재배치** — panel을 끌어 split을 재배열, 탭을 끌어 순서 변경.
 

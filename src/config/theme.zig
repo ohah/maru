@@ -632,7 +632,7 @@ pub const ChromeTheme = enum {
 };
 
 /// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). `chrome.theme`(룩)·`theme.preset`(색)과 직교.
-/// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀), pill = 둥근 inset + 앰버 테두리(떠 있는 pill).
+/// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀), pill = lifted 회색으로 채운 둥근 캡슐(Warp식 떠 있는 pill).
 /// rich 경로에서만 의미(tui는 셀 밴드 유지). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
 pub const ChromeTabStyle = enum {
     connected,

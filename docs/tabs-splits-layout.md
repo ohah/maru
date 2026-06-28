@@ -165,8 +165,9 @@ Node = leaf(Pane)
     (브라우저/VSCode/Warp식 — Term 번호는 단축키 미매핑이라 군더더기였다; 사이드바 워크스페이스 라벨이 이미 번호를 안 붙이던
     것과 일관). tui 룩은 기존 셀 밴드(`tabbarHighlightCell`). 단일 출처: [chrome-strategy.md](chrome-strategy.md) U-tab2.
   - **탭 스타일 축(`chrome.tab-style`, TS1·TS2)**: 위 connected(본문색 cutout + 앰버 언더바)를 강한 기본으로 두고, `chrome.tab-style
-    = connected|underline|pill` 직교 축으로 활성 탭 룩을 고른다 — `underline`=언더바만(배경 박스 없음), `pill`=둥근 inset quad(본문색
-    fill) + 앰버 테두리(떠 있는 pill, 포커스=테두리 색). 스타일은 `appendActiveTabHighlight`의 **세그먼트 안 fill만** 바꾸고 탭
+    = connected|underline|pill` 직교 축으로 활성 탭 룩을 고른다 — `underline`=언더바만(배경 박스 없음), `pill`=strip보다 밝은
+    lifted 회색으로 채운 둥근 캡슐 + 옅은 밝은 테두리(실제 Warp 벤치마킹 — 밝은 fill로 띄움, 포커스=fill 밝기). 스타일은
+    `appendActiveTabHighlight`의 **세그먼트 안 fill만** 바꾸고 탭
     세그먼트 기하(`tabbar.segOf`)는 불변이라 hit-test/드래그/✕/‹›는 그대로다. `chrome.theme`(tui\|rich)·`theme.preset`(색)과
     직교. 단일 출처: [chrome-strategy.md §7](chrome-strategy.md).
 - **탭 바 "+" 버튼(PR-F)**: 바 우측에 "+"를 그려 클릭하면 그 pane에 새 Term을 띄운다(⌘T의 마우스 버전). 바를

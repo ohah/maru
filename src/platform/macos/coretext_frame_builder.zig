@@ -587,8 +587,11 @@ pub fn buildPaneTabBarDrawList(
         try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols), .codepoint = '<', .width = 1, .style = left_style });
         try cells.append(allocator, .{ .row = 0, .col = @intCast(tab_cols + 2), .codepoint = '>', .width = 1, .style = right_style }); // gap tab_cols+1 건너뜀
     }
-    // "+"(새 Term) 버튼 — ‹› 오른쪽(has_scroll) 또는 tab_cols(아니면). plus_start+1 col에 '+'.
-    const plus_start: u16 = tab_cols + (if (layout.has_scroll) @as(u16, 2) else 0);
+    // "+"(새 Term) 버튼 — **상단탭 Warp 폴리시: 인라인**(마지막 탭 바로 뒤). 넘쳐서 ‹›가 있으면 옛대로 far-right
+    // (tab_cols+2 뒤, ‹·gap·› 다음). plus_start+1 col에 '+'. hit-test(tabbar.Metrics.plusZoneStart)와 단일 정합 —
+    // 인라인 plus_start = min(titles.len*tab_w, tab_cols) = plusZoneStart의 tabsEndCol과 같다(barMetrics가 tab_count로 채움).
+    const tabs_end: u16 = @min(@as(u16, @intCast(titles.len)) * tab_w, tab_cols);
+    const plus_start: u16 = if (layout.has_scroll) tab_cols + 2 else tabs_end;
     if (plus_start < cols and plus_start + 1 < cols) {
         try cells.append(allocator, .{ .row = 0, .col = plus_start + 1, .codepoint = '+', .width = 1, .style = style });
     }
@@ -1113,7 +1116,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
         }
         if (c.codepoint == '+') {
             found_plus3 = true;
-            try std.testing.expectEqual(@as(u16, 18), c.col); // tab_cols(17) + 1
+            try std.testing.expectEqual(@as(u16, 17), c.col); // 인라인: tabs_end(2탭*tab_w8=16) + 1 — 마지막 탭(끝 16) 바로 뒤(상단탭 Warp 폴리시)
         }
     }
     try std.testing.expect(found_close);

@@ -72,6 +72,7 @@
 - [Workspace Restore 전략](docs/workspace-restore.md)
 - [터미널 호환성/보안 정책](docs/terminal-compatibility-policy.md)
 - [SSH 통합 전략](docs/ssh-integration.md)
+- [배포·업데이트 전략](docs/distribution.md)
 - [메모리 전략](docs/architecture.md#메모리-전략)
 - [터미널 전략](terminal-strategy.md)
 - [디버깅/로그/리플레이 전략](terminal-strategy.md#12-디버깅로그리플레이-전략)

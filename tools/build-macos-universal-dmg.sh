@@ -1,0 +1,84 @@
+#!/bin/sh
+# Maru universal(arm64 + x86_64) .app을 빌드해 서명·공증·staple한 배포용 .dmg를 만든다.
+#
+# 왜 스크립트인가: build.zig의 macos-dmg 스텝은 단일 아키텍처(host)만 만든다. universal은
+# 같은 앱을 두 아키텍처로 따로 빌드한 뒤 lipo로 실행파일을 합쳐야 하는데, 이는 한 번의
+# `zig build` 호출(전역 target 하나)로 표현하기 어렵다. 그래서 두 번의 macos-app-bundle
+# 빌드를 오케스트레이션하는 별도 스크립트로 둔다. x86_64를 arm64 호스트에서 cross 빌드하는
+# SDK 통합(sysroot 등)은 build.zig가 처리한다(거기 주석 참고).
+#
+# 사전조건(둘 다 로컬에만 두고 리포엔 없음):
+#   1) 키체인에 Developer ID Application 인증서 (서명 이름은 MARU_SIGN_IDENTITY로 덮어쓰기)
+#   2) notarytool 키체인 프로파일 (기본 maru-notary, MARU_NOTARY_PROFILE로 덮어쓰기):
+#        xcrun notarytool store-credentials maru-notary \
+#          --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+#          --password "$APPLE_APP_SPECIFIC_PASSWORD"
+#
+# 산출물: dist/Maru-<버전>-universal.dmg (dist/는 git에 커밋하지 않는다)
+set -eu
+
+SIGN_ID="${MARU_SIGN_IDENTITY:-Developer ID Application: Payhere Inc. (2MS57VWFU8)}"
+PROFILE="${MARU_NOTARY_PROFILE:-maru-notary}"
+ZIG="${ZIG:-zig}"
+# 배포 하한(11.0)은 build.zig의 default_target과 맞춘다. arm64는 Apple Silicon 시작 버전이라
+# 이 값이 하한이고, x86_64도 같은 값으로 맞춰 한 dmg가 두 아키텍처에서 동일 하한을 갖게 한다.
+MIN="11.0"
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo_root"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+echo "==> build arm64 (aarch64-macos.$MIN)"
+"$ZIG" build macos-app-bundle -Doptimize=ReleaseFast -Dtarget="aarch64-macos.$MIN"
+cp -R zig-out/Maru.app "$work/arm.app"
+
+echo "==> build x86_64 (x86_64-macos.$MIN)"
+"$ZIG" build macos-app-bundle -Doptimize=ReleaseFast -Dtarget="x86_64-macos.$MIN"
+cp -R zig-out/Maru.app "$work/x86.app"
+
+echo "==> lipo merge -> universal .app"
+# arm64 빌드를 베이스로 쓰고(Info.plist·Resources 동일), 실행파일만 두 아키텍처로 합친다.
+cp -R "$work/arm.app" "$work/Maru.app"
+app="$work/Maru.app"
+for bin in maru-macos-app maru; do
+    lipo -create \
+        "$work/arm.app/Contents/MacOS/$bin" \
+        "$work/x86.app/Contents/MacOS/$bin" \
+        -output "$app/Contents/MacOS/$bin"
+done
+version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")
+echo "    universal archs: $(lipo -archs "$app/Contents/MacOS/maru-macos-app")"
+
+echo "==> codesign (Developer ID, hardened runtime, timestamp)"
+# 중첩 실행파일을 먼저 서명하고 마지막에 번들을 서명한다.
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru"
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app"
+codesign --verify --strict "$app"
+
+echo "==> notarize .app + staple (티켓을 .app에 부착 — dmg에서 꺼내 복사해도 Gatekeeper 통과)"
+ditto -c -k --keepParent "$app" "$work/app.zip"
+xcrun notarytool submit "$work/app.zip" --keychain-profile "$PROFILE" --wait
+xcrun stapler staple "$app"
+xcrun stapler validate "$app"
+
+echo "==> create dmg + sign"
+mkdir -p "$work/stage"
+ditto "$app" "$work/stage/Maru.app"
+ln -s /Applications "$work/stage/Applications"
+dmg="$work/Maru-${version}-universal.dmg"
+hdiutil create -volname Maru -srcfolder "$work/stage" -ov -format UDZO "$dmg"
+codesign --force --timestamp --sign "$SIGN_ID" "$dmg"
+
+echo "==> notarize dmg + staple"
+xcrun notarytool submit "$dmg" --keychain-profile "$PROFILE" --wait
+xcrun stapler staple "$dmg"
+
+mkdir -p dist
+out="dist/Maru-${version}-universal.dmg"
+cp "$dmg" "$out"
+echo "==> verify"
+spctl -a -t open --context context:primary-signature -v "$out"
+echo "==> done: $out ($(lipo -archs "$app/Contents/MacOS/maru-macos-app"))"

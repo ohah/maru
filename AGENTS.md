@@ -39,6 +39,7 @@
 - [세팅 페이지 전략과 구현 계획](docs/settings-page.md)
 - [config 스키마(메타 1급 필드)](docs/config-schema.md)
 - [config GUI(스키마-주도 세팅 화면)](docs/config-gui.md)
+- [세션 컨트롤 플레인(CLI·웹뷰 IPC)](docs/control-plane.md)
 
 ## 설계 문서
 
@@ -76,6 +77,7 @@
 - [SSH 통합 전략](docs/ssh-integration.md)
 - [배포·업데이트 전략](docs/distribution.md)
 - [Third-party 라이선스와 Attribution](docs/third-party-licenses.md)
+- [세션 컨트롤 플레인(CLI·웹뷰 IPC)](docs/control-plane.md)
 - [메모리 전략](docs/architecture.md#메모리-전략)
 - [터미널 전략](terminal-strategy.md)
 - [디버깅/로그/리플레이 전략](terminal-strategy.md#12-디버깅로그리플레이-전략)

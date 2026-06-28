@@ -19,17 +19,21 @@ pub fn hexX(rect: draw.Rect, cw: u32) i32 {
 
 /// control rect에 스와치(2칸 literal RGB) + 텍스트(hex 또는 편집 버퍼)를 그린다. role=비편집 surface_fg/편집 accent.
 /// caret(편집 중)은 셸이 hexX + 표시폭에 그린다(text 위젯과 동형). 순수: rect·rgb·text만. out/op은 셸 arena 소유.
+/// corner_radius=props.shape.corner_radius_px(tui=0 직각 셀 bg, rich>0 둥근 칩) — 스와치 높이의 절반으로 cap해
+/// 과도한 라운딩(pill화)을 막는다. lowering(.swatch)이 0이면 셀 bg, >0이면 둥근 GPU quad로 분기한다(C4b 동형).
 pub fn view(
     rect: draw.Rect,
     rgb: Rgb,
     text: []const u8,
     role: tokens.ColorRole,
     cw: u32,
+    corner_radius: u16,
     arena: std.mem.Allocator,
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (rect.w == 0 or rect.h == 0) return;
-    try out.append(arena, .{ .swatch = .{ .rect = .{ .x = rect.x, .y = rect.y, .w = swatch_cells * cw, .h = rect.h }, .rgb = rgb } });
+    const r: u16 = @min(corner_radius, @as(u16, @intCast(rect.h / 2))); // 칩 라운딩 — 높이 절반 초과 방지
+    try out.append(arena, .{ .swatch = .{ .rect = .{ .x = rect.x, .y = rect.y, .w = swatch_cells * cw, .h = rect.h }, .rgb = rgb, .corner_radii = .{ r, r, r, r } } });
     if (text.len > 0) {
         const runs = try arena.alloc(draw.Run, 1);
         runs[0] = .{ .text = text };
@@ -66,19 +70,31 @@ test "color view: 스와치(literal RGB, 2칸) + hex 텍스트(hexX에서)" {
     const cw: u32 = 8;
     var out: std.ArrayList(draw.Op) = .empty;
 
-    try view(test_rect, .{ .r = 255, .g = 0, .b = 0 }, "#ff0000", .surface_fg, cw, arena, &out);
+    // rich(corner_radius=8): 스와치에 둥근 모서리(8 < h/2=10이라 8 그대로).
+    try view(test_rect, .{ .r = 255, .g = 0, .b = 0 }, "#ff0000", .surface_fg, cw, 8, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[0] == .swatch);
     try std.testing.expectEqual(@as(u8, 255), out.items[0].swatch.rgb.r); // literal RGB
     try std.testing.expectEqual(@as(i32, 100), out.items[0].swatch.rect.x); // 스와치 좌단
     try std.testing.expectEqual(@as(u32, 16), out.items[0].swatch.rect.w); // 2칸=16px
+    try std.testing.expectEqual(@as(u16, 8), out.items[0].swatch.corner_radii[0]); // rich 둥근 칩
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqualStrings("#ff0000", out.items[1].text.runs[0].text);
     try std.testing.expectEqual(@as(i32, 100 + 24), out.items[1].text.origin.x); // hexX=(2+1)*8
 
+    // tui(corner_radius=0): 직각 → corner_radii 0(셀 bg lowering).
+    out.clearRetainingCapacity();
+    try view(test_rect, .{ .r = 1, .g = 2, .b = 3 }, "#010203", .surface_fg, cw, 0, arena, &out);
+    try std.testing.expectEqual(@as(u16, 0), out.items[0].swatch.corner_radii[0]);
+
+    // 라운딩은 스와치 높이의 절반으로 cap(과도한 pill화 방지) — h=20 → 최대 10.
+    out.clearRetainingCapacity();
+    try view(test_rect, .{ .r = 0, .g = 0, .b = 0 }, "x", .surface_fg, cw, 99, arena, &out);
+    try std.testing.expectEqual(@as(u16, 10), out.items[0].swatch.corner_radii[0]);
+
     // 0폭 → 무동작.
     out.clearRetainingCapacity();
-    try view(.{ .x = 0, .y = 0, .w = 0, .h = 20 }, .{ .r = 1, .g = 2, .b = 3 }, "x", .surface_fg, cw, arena, &out);
+    try view(.{ .x = 0, .y = 0, .w = 0, .h = 20 }, .{ .r = 1, .g = 2, .b = 3 }, "x", .surface_fg, cw, 8, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 

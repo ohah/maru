@@ -73,8 +73,9 @@ pub const Op = union(enum) {
     pub const Fill = struct { rect: Rect, role: tokens.ColorRole, alpha: u8 = 0xFF };
     /// **literal RGB** 색 견본(color picker 스와치). 다른 op은 색을 ColorRole(테마 토큰)로 두지만, 스와치는 "이
     /// 색이 무엇인지"를 그대로 보여주는 값 미리보기라 role이 아니라 원색을 싣는다(의도적 예외 — config-gui §6.2 결정).
-    /// 백엔드가 셀 bg/quad에 이 RGB를 그대로 칠한다.
-    pub const Swatch = struct { rect: Rect, rgb: Rgb };
+    /// 백엔드가 셀 bg/quad에 이 RGB를 그대로 칠한다. corner_radii(Quad와 동형)가 0이면 셀 bg(tui), >0이면 둥근
+    /// GPU quad(rich) — 컴포넌트가 props.shape에서 읽어 채운다(tui=0 직각, rich>0 둥근 칩, C4b 분기 동형).
+    pub const Swatch = struct { rect: Rect, rgb: Rgb, corner_radii: [4]u16 = .{ 0, 0, 0, 0 } };
     /// 사각형의 일부 변에 선(focus 테두리). tui는 reserved-kind 띠, rich는 실제 테두리/radius로 lowering.
     pub const Border = struct { rect: Rect, sides: Sides, role: tokens.ColorRole };
     /// 한 줄(divider). 수평/수직은 from/to로 결정.

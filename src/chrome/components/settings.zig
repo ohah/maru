@@ -569,7 +569,7 @@ pub fn view(
                 const editing_this = state.editing and actual == state.selected;
                 const shown: []const u8 = if (editing_this) state.editText() else c.hex;
                 const text_role: tokens.ColorRole = if (editing_this) .accent_bar else if (r.disabled) .muted_fg else .surface_fg;
-                try color.view(ctrl, c.rgb, shown, text_role, box.cw, arena, out);
+                try color.view(ctrl, c.rgb, shown, text_role, box.cw, p.shape.corner_radius_px, arena, out);
                 if (editing_this) {
                     const caret_x = color.hexX(ctrl, box.cw) + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
                     try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = ctrl.y, .w = box.cw, .h = box.ch }, .role = .cursor } });

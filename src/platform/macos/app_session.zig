@@ -11796,7 +11796,29 @@ pub const AppSession = struct {
                 if (!modal_bg_quad) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides);
             },
             .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
-            .swatch => |sw| paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null), // color picker 견본 — literal RGB 셀 bg(role 아님)
+            .swatch => |sw| {
+                // color 스와치 — corner_radii 0이면 셀 bg(tui, 직각), >0이면 둥근 GPU quad(rich 칩). .quad의 위젯 분기와
+                // 동형이되 색은 **literal RGB**(role 아님). 위젯이라 layer=3(셀·선택 하이라이트 위), 테두리/그림자 없음.
+                const sw_radius = sw.corner_radii[0] != 0 or sw.corner_radii[1] != 0 or sw.corner_radii[2] != 0 or sw.corner_radii[3] != 0;
+                if (!sw_radius) {
+                    paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null); // color picker 견본 — literal RGB 셀 bg
+                } else {
+                    const fill: u32 = 0xFF000000 | (@as(u32, sw.rgb.r) << 16) | (@as(u32, sw.rgb.g) << 8) | @as(u32, sw.rgb.b);
+                    gpu_quads.append(allocator, .{
+                        .x = @floatFromInt(sw.rect.x),
+                        .y = @floatFromInt(sw.rect.y),
+                        .w = @floatFromInt(sw.rect.w),
+                        .h = @floatFromInt(sw.rect.h),
+                        .corner_radii = .{ @floatFromInt(sw.corner_radii[0]), @floatFromInt(sw.corner_radii[1]), @floatFromInt(sw.corner_radii[2]), @floatFromInt(sw.corner_radii[3]) },
+                        .border_widths = .{ 0, 0, 0, 0 },
+                        .fill_color0 = fill,
+                        .fill_color1 = fill,
+                        .border_color = 0,
+                        .gradient_kind = 0,
+                        .layer = 3,
+                    }) catch {};
+                }
+            },
             .rule => {}, // 컴포넌트가 아직 안 냄 — 필요해질 때(C2 divider) 셀 라인으로 lower
             .clip => |r| overlay_clip = r, // 모달 클리핑 px 영역 — OverlayRaster.clip_rect로 전달(렌더러가 scissor). 안 그림
             .quad => |q| {

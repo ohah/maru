@@ -93,6 +93,10 @@ run = "zig build macos-app-smoke"
 description = "Sign+notarize+staple a distributable .dmg (needs keychain cert + notarytool profile)"
 run = "zig build macos-dmg -Doptimize=ReleaseFast"
 
+[tasks.macos-dmg-universal]
+description = "Build a signed+notarized universal (arm64+x86_64) .dmg for release"
+run = "sh tools/build-macos-universal-dmg.sh"
+
 [tasks.macos-coretext-smoke]
 description = "Run macOS CoreText font shaping/raster smoke"
 run = "zig build macos-coretext-smoke"

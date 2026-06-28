@@ -46,9 +46,17 @@ pub fn build(b: *std.Build) void {
     // SDK 프레임워크/라이브러리/헤더 경로를 공유 모듈에 명시 — cross 처리로 꺼진 자동 탐지를 메운다.
     // maru를 import하는 Compile(코어 테스트, app host, .m 브리지 링크 포함)의 link에 합쳐진다.
     if (macos_sdk) |sdk| {
+        // cross-compile(예: arm64 호스트에서 x86_64 빌드) macOS 빌드의 SDK 통합:
+        //  (1) framework 검색 경로는 명시한다 — Zig는 cross에서 sysroot가 있어도 -iframework를
+        //      자동 추가하지 않아 CoreText.h/Metal.h를 못 찾는다.
+        //  (2) SDK를 sysroot로 넘긴다 — framework path만으로는 clang이 SDK를 sysroot로 인식하지
+        //      못해 Security.framework가 의존하는 usr/include/libDER/* 헤더를 못 찾고("file not found")
+        //      availability 메타데이터(예: CGToneMapping macOS 15.0)도 어긋난다.
+        //  (3) usr/include·usr/lib는 절대경로로 추가하지 않는다 — sysroot가 자동 해석하며, 절대로
+        //      또 주면 sysroot prefix와 이중 결합돼(…/SDK/…/SDK/usr/lib) 깨진다.
+        // universal 빌드(arm64 + x86_64 lipo)에 필요하고, native에도 무해하다.
         maru_mod.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
-        maru_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
-        maru_mod.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk}) });
+        if (b.sysroot == null) b.sysroot = sdk;
     }
     const test_support_mod = b.addModule("test_support", .{
         .root_source_file = b.path("tests/support/artifacts.zig"),
@@ -551,18 +559,27 @@ pub fn build(b: *std.Build) void {
         // CoreText 브리지 object를 정적 라이브러리에 함께 담아, Swift 최종 링크가 .a 하나로
         // app session의 glyph rasterize 심볼을 모두 얻게 한다. CoreText/CoreGraphics
         // framework는 Swift 링크 단계에서 제공한다.
+        // -iframeworkwithsysroot: framework를 sysroot 기준으로 검색해 cross-compile에서도
+        // framework 헤더 내부의 angle include(Security.framework → <libDER/...>)와 availability
+        // 메타데이터가 SDK 컨텍스트로 정상 해석된다. 절대 -iframework만 주면 그 헤더의 내부
+        // include가 sysroot usr/include를 못 봐 'libDER/DERItem.h not found'·CGToneMapping
+        // availability 에러가 난다(x86_64 cross 실측). universal(arm64+x86_64) 빌드에 필요.
+        // -iwithsysroot /usr/include: framework 헤더 내부의 angle include(<libDER/DERItem.h>)가
+        // sysroot의 usr/include를 검색하게 한다. cross-compile에서 Zig는 usr/include를 default
+        // system include로 자동 추가하지 않아 이 명시가 필요하다.
+        const objc_macos_flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" };
         macos_app_host_abi_lib.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             // UBSan 계측을 끈다. 이 .a는 Zig가 아니라 swiftc가 최종 링크하므로 Zig의
             // compiler-rt(__ubsan_handle_*)가 들어오지 않아, 계측을 켜 두면 undefined
             // symbol로 링크가 실패한다.
-            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            .flags = objc_macos_flags,
         });
         // 제품 Metal renderer(Swift Metal view가 호출)를 같은 .a에 담는다. Metal/QuartzCore
         // framework는 Swift 최종 링크에서 제공한다. 같은 이유로 UBSan을 끈다.
         macos_app_host_abi_lib.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/maru_metal_renderer.m"),
-            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            .flags = objc_macos_flags,
         });
     }
     const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});

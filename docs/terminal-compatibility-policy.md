@@ -254,7 +254,7 @@ crash_report_upload = off
 - crash/log/trace는 로컬 전용으로 둔다.
 - crash report나 trace fixture를 git에 넣을 때는 [필수 프로젝트 규칙](project-rules.md)의 redaction 기준을 따른다.
 
-배포 단계에서 macOS signing, notarization, update feed가 필요해지면 별도 PR에서 논의한다.
+배포·서명·공증·업데이트(update feed) 전략은 [배포·업데이트 전략](distribution.md)을 단일 출처로 둔다.
 
 ## Global Shortcut
 

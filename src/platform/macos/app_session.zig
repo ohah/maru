@@ -4215,12 +4215,13 @@ pub const AppSession = struct {
         // config>"로 커밋/삭제 시 chord를 식별한다(toConfigString). 마지막에 "추가" 행(빈 sentinel "macro.").
         if (cross or sel_sec == .input) {
             for (self.loaded_config.terminal_bindings) |b| {
-                var chord_buf: [64]u8 = undefined;
-                const chord_cfg = b.chord.toConfigString(&chord_buf);
                 var disp_buf: [command_catalog.max_chord_display_len]u8 = undefined;
                 const disp = command_catalog.formatChord(b.chord, &disp_buf);
-                if (settingsRowMatches(disp, "macro", q))
+                if (settingsRowMatches(disp, "macro", q)) {
+                    var chord_buf: [64]u8 = undefined; // 매치된 행만 chord config 표기 계산(필터된 행 낭비 제거)
+                    const chord_cfg = b.chord.toConfigString(&chord_buf);
                     try texts.append(arena, .{ .key = try std.fmt.allocPrint(arena, "macro.{s}", .{chord_cfg}), .doc = try arena.dupe(u8, disp), .value = try macroRhsString(arena, b.input), .section = .input });
+                }
             }
             if (settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
                 try texts.append(arena, .{ .key = "macro.", .doc = "터미널 매크로 추가 (chord = text:...)", .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
@@ -4490,10 +4491,12 @@ pub const AppSession = struct {
                 self.setShellArgs(editor); // 공백-토큰 분리
             } else if (std.mem.eql(u8, tkey, "env.")) {
                 self.addEnvVar(editor); // 추가 행 — "KEY=VALUE" 파싱
+                self.refreshSettingsFieldCount(); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
             } else if (std.mem.startsWith(u8, tkey, "env.")) {
                 self.setEnvVar(tkey["env.".len..], editor); // 기존 env 값 편집
             } else if (std.mem.eql(u8, tkey, "macro.")) {
                 self.addTerminalMacro(editor); // 추가 행 — "chord = text:..." 파싱
+                self.refreshSettingsFieldCount(); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
             } else if (std.mem.startsWith(u8, tkey, "macro.")) {
                 self.setTerminalMacro(tkey["macro.".len..], editor); // 기존 매크로 rhs 편집
             } else {
@@ -4606,6 +4609,20 @@ pub const AppSession = struct {
         };
     }
 
+    /// chord가 빌트인 단축키(default_app_bindings·default_terminal_bindings)에 묶여 있나 — 매크로가 빌트인을 덮는지 경고용
+    /// (KeyBindingResolver.validate는 사용자 바인딩만 보므로 빌트인 충돌은 여기서 별도로 본다).
+    fn chordShadowsBuiltin(chord: config_mod.keybinding.KeyChord) bool {
+        for (config_mod.keybinding.default_app_bindings) |db| if (db.chord.eql(chord)) return true;
+        for (config_mod.keybinding.default_terminal_bindings) |db| if (db.chord.eql(chord)) return true;
+        return false;
+    }
+
+    /// chord가 unbinds(사용자가 죽인 chord)에 들어 있나 — 죽인 chord는 더는 빌트인으로 동작 안 하니 shadow 경고 제외.
+    fn resolverUnbinds(unbinds: []const config_mod.keybinding.KeyChord, chord: config_mod.keybinding.KeyChord) bool {
+        for (unbinds) |u| if (u.eql(chord)) return true;
+        return false;
+    }
+
     /// 같은 chord의 대기 중 매크로 write-back 예약(추가·삭제 양쪽)을 비운다 — 재추가가 옛 삭제를, 삭제가 옛 추가를
     /// 상쇄하고, 같은 chord를 여러 번 편집해도 예약이 중복돼 줄이 두 번 써지지 않게 한다(serialize 전 dedup·cross-cancel).
     fn cancelPendingMacro(self: *AppSession, chord_str: []const u8) void {
@@ -4655,7 +4672,15 @@ pub const AppSession = struct {
             self.showNotice("다른 단축키와 충돌해 적용하지 못했습니다");
             return;
         };
+        // validate는 **사용자** 바인딩만 본다(loaded_config.keybindings엔 빌트인 없음, default_*는 resolve 내부에만).
+        // 그래서 빌트인 chord(Cmd+T 등)는 위 검증을 통과해 매크로가 조용히 빌트인을 가린다 — 차단은 아니고(오버라이드는
+        // 사용자 의도, rebind 충돌 경고와 동일 last-wins) **경고**로 알린다(code-review max). unbinds로 죽인 chord는 제외.
+        if (!resolverUnbinds(self.loaded_config.unbinds, chord) and chordShadowsBuiltin(chord))
+            self.showNotice("기본 단축키를 매크로가 덮어씁니다");
         self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
+        // 이 chord를 죽인 옛 `keybind = <chord> = unbind` 지시어가 남아 있으면 정리(rebind 경로와 동일) — 안 그러면
+        // 나중에 이 매크로를 지웠을 때 stale unbind가 빌트인을 영영 비활성으로 둔다(code-review max).
+        self.clearStaleUnbind(chord);
         // write-back 예약 — 같은 chord 대기 예약(추가/삭제)을 먼저 비워 중복·모순을 막고 새로 단다. chord·rhs는
         // loaded_config.arena 소유(serialize drain까지 유효).
         self.cancelPendingMacro(chord_str);
@@ -6520,7 +6545,7 @@ pub const AppSession = struct {
                 .section_changed => .settings_section_changed,
                 .text_commit => .none, // 포인터 경로엔 안 옴(인라인 편집 Enter는 키 전용) — exhaustiveness
                 .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
-                .search_changed => .none, // 포인터 경로엔 안 옴(검색은 '/'·타이핑 키 전용) — exhaustiveness
+                .search_changed => .settings_search_changed, // 제목 행 클릭으로 검색 시작(PR1) — 키 '/' 경로와 같이 필터 재적용
                 .delete_row => .none, // 포인터 경로엔 안 옴(삭제는 Backspace 키 전용) — exhaustiveness
                 .color_picked => .none, // 포인터 경로엔 안 옴(picker 확정은 Enter 키 전용; 클릭은 selection_changed) — exhaustiveness
                 .eyedropper => .none, // 포인터 경로엔 안 옴(스포이드는 `i` 키 전용) — exhaustiveness
@@ -11961,7 +11986,7 @@ pub const AppSession = struct {
                 if (!sw_radius) {
                     paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null); // color picker 견본 — literal RGB 셀 bg
                 } else {
-                    const fill: u32 = 0xFF000000 | (@as(u32, sw.rgb.r) << 16) | (@as(u32, sw.rgb.g) << 8) | @as(u32, sw.rgb.b);
+                    const fill = packOpaqueRgb(sw.rgb); // 불투명 색 패킹 단일 출처(0xFFRRGGBB)
                     gpu_quads.append(allocator, .{
                         .x = @floatFromInt(sw.rect.x),
                         .y = @floatFromInt(sw.rect.y),
@@ -17662,6 +17687,14 @@ test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 
     // 잘못된 rhs는 거부(라이브 미반영) — 비매크로 접두사.
     session.setTerminalMacro("Ctrl+J", "not_a_macro");
     try std.testing.expectEqual(@as(usize, 0), session.loaded_config.terminal_bindings.len);
+
+    // code-review max #3: 빌트인 chord(Cmd+T=new_term)에 매크로를 묶으면 **차단이 아니라 경고**하고 적용한다
+    // (validate는 user 바인딩만 보므로 chordShadowsBuiltin가 별도로 경고). 라이브 반영 + notice 표시.
+    session.chrome_host.notice.dismiss();
+    try std.testing.expect(AppSession.chordShadowsBuiltin(try config_mod.keybinding.KeyChord.parse("Cmd+T"))); // Cmd+T는 빌트인
+    session.setTerminalMacro("Cmd+T", "text:hi");
+    try std.testing.expectEqual(@as(usize, 1), session.loaded_config.terminal_bindings.len); // 적용됨(차단 아님)
+    try std.testing.expect(session.chrome_host.notice.open); // 덮어쓰기 경고 표시
 }
 
 // 회귀: **기본값 리셋 후 마우스 입력이 영구히 막히지 않는다**. 사용자 보고 — "기본값으로 리셋 후에 터미널 버튼이 다

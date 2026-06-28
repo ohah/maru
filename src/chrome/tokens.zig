@@ -160,9 +160,11 @@ pub const Tokens = struct {
         // 이 값을 Op.quad에 실어 GPU quad 프리미티브로 lowering된다(같은 코드, 토큰만 다름).
         tk.space.corner_radius_px = 8;
         tk.space.border_width_px = 1;
-        tk.space.shadow_blur_px = 14;
-        tk.space.shadow_offset_y_px = 6;
-        tk.space.shadow_alpha = 0x70;
+        // 모달 그림자: 작고 옅게(사용자 피드백 "너무 크고 짙어요") — blur 14→9, offset 6→4, alpha 0x70(≈44%)→0x38(≈22%).
+        // 은은히 떠 보이되 무겁지 않게.
+        tk.space.shadow_blur_px = 9;
+        tk.space.shadow_offset_y_px = 4;
+        tk.space.shadow_alpha = 0x38;
         // C4b 모달 패딩: 배경 박스를 텍스트보다 사방 12px 크게 — 팝업 텍스트 주변에 여백(사용자 피드백 "여유").
         tk.space.modal_padding_px = 12;
         // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 3px(앰버). tui=0(막대 없음).

@@ -20,7 +20,7 @@ tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux(멀티 에이전트 조율)�
 - **보안 = uid 단일 축이 아니라 "같은 uid 내부 신뢰 차등"까지.** 웹 패널 브리지는 **신뢰 콘텐츠에만** 노출(임의 웹페이지엔 미주입), 외부 소켓은 **peer-cred 검증 + 0700 디렉터리 + 0600 소켓**, write는 **per-surface capability**로 좁힌다(§7).
 - **`browser.*` = WKWebView 직접 제어(코어) + W3C WebDriver 어댑터(외부, 인증 필수) — 둘 다 1급.** CDP가 아니라 WebDriver다(§8).
 - **웹 패널 콘텐츠 빌드 = zntc(`@zntc/core`).** Zig 기반 자작 트랜스파일러/번들러(외부 npm 패키지, MIT, WASM 빌드 지원). 빌드 편입 경로·clean-room·사용자 논의는 §11·§16에 둔다.
-- **리치 패널 렌더 = WKWebView (네이티브 뷰 비사용 원칙의 *명시적 예외* — 사용자 승인 선결).** "네이티브 뷰 비사용"은 `implementation-plan.md`·`macos-app-host-boundary.md`·`settings-page.md`·`config-gui.md`에 **"(사용자 결정)"**으로 박힌 전역 원칙이다(§16). 인앱 브라우저 비전을 위해 이를 예외로 두되, **그 전략 문서들의 갱신은 별도 PR로 사용자 최종 승인이 필요**하다(§15-A2, §16).
+- **리치 패널 렌더 = WKWebView (네이티브 뷰 비사용 원칙의 *명시적 예외* — 사용자 승인 완료, 2026-06).** 원칙의 근거는 이식성(SwiftUI 등 OS 전용 UI 코드는 Win/Linux 재사용 불가)인데, **웹 콘텐츠(HTML/JS/CSS, zntc 빌드)는 WKWebView/WebKitGTK/WebView2 어디서나 그대로 돌아 그 목적을 충족**한다(SwiftUI와 결정적 차이 — UI 코드가 Apple 전용이 아님). 따라서 `implementation-plan.md` UI 렌더 전략의 예외 조항을 "별도 OS 창"에서 "+ GPU 셀로 표현 불가능한 리치 웹 패널"로 확장한다(이 PR에서 `implementation-plan.md`·`macos-app-host-boundary.md` 갱신). 단 macOS=시스템 WebKit(의존 0)이나 Linux=WebKitGTK(외부 C++ 의존)라 이식 시 의존성 0은 깨진다(GPU 경로 WebGPU와 대칭 — [layering-and-portability.md] §4).
 
 ## 2. 목표 위상
 
@@ -181,13 +181,35 @@ flowchart TD
 - **SSH 원격(미래)**: 원격 데이터는 로컬 웹뷰 렌더, 원격 웹앱은 `ssh -L`, 원격 상태는 원격 컨트롤 플레인. transport 추상으로 자리만.
 - **zntc 미검증 의존**: repo/references에 아직 없음(외부 npm). 존재·라이선스·편입은 §16.
 
-## 13. 검증 경로 (계획)
+## 13. 테스트·검증 전략
 
-- 코어(L2): 헤드리스 단위 — fake DTO 주입으로 `sessions.list` 직렬화·디스패치·에러·이벤트 방출을 PTY/웹뷰 없이 단언. `check-boundaries`(코어에 app/pty/platform import 0).
-- collector(L4): 실제 트리/락 통합 테스트(여기가 OS·크로스레이어라 헤드리스 불가 — §15-A1).
-- 프로토콜: ndjson 부분읽기·max frame 초과·백프레셔·blocking 소비자 단위 테스트.
-- 보안: peer-cred 거부, 웹 브리지 미주입(browser 패널), cross-surface write 거부, WebDriver 토큰/Origin 검사 테스트.
-- E2E·수동: `maru sessions/send`, 웹 콘솔 브리지, 자동 불가 영역(z-order)은 완료 전 수동 검증 보고([project-rules.md] §테스트).
+### 13.1 철학 (선례: agent-devtools)
+
+사용자 자작 `agent-devtools`(Chrome을 CDP로 제어하는 Zig CLI, **576 test 블록**)가 실증한 패턴을 따른다: **브라우저 제어 도구라도 real-browser E2E가 아니라 프로토콜·파싱·변환을 순수 함수로 분리해 Zig 단위 테스트**한다(websocket 프레이밍 106·CDP roundtrip 68·discovery 54·daemon 26). maru 컨트롤 플레인에 1:1 대응: ndjson↔websocket, JSON-RPC 디스패치↔CDP roundtrip, 소켓 발견↔discovery, 소켓 서버↔daemon.
+
+테스트 가능성 4층:
+- **순수 로직**(프로토콜·디스패치·제어 명령·보안 판정): Zig 단위(TDD). 대부분 여기.
+- **소켓·collector**: 실제 unix socket bind/connect 통합 E2E + fake `Rt` 유닛(`session_model` 선례).
+- **웹 콘텐츠**(마크다운/diff UI): JS 테스트 + 엔진 독립이라 **Chrome+agent-devtools로 E2E**(WKWebView 불요).
+- **WKWebView 임베드**(브리지 주입·z-order·frame): 네이티브라 단위 불가 → smoke + 수동. **이 한 조각만 예외**([project-rules.md] §테스트 — 자동 불가는 이유+수동 방법 보고).
+
+매 단계 `check-boundaries`(코어 L2에 app/pty/platform import 0).
+
+### 13.2 Phase별 검증 (green 기준)
+
+| Phase | 단위(Zig, TDD) | 통합/E2E | smoke/수동 |
+|---|---|---|---|
+| 1 read-only | 스키마·`sessions.list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame | 실제 unix socket 왕복, peer-cred 거부, CLI 클라이언트, collector(fake Rt) | — |
+| 2 write | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드 | 소켓→실제 PTY 입력 확인(통합 PTY) | — |
+| 3 이벤트 | outbound 백프레셔·coalesce/drop, 느린 소비자 | subscribe→상태 push, background 게이트 | — |
+| 4 웹 껍데기 | pane→px rect 계산, leaf kind 라우팅 | — | 오버레이 뜸·리사이즈/split 추종·z-order |
+| 5 제어+브리지 | `browser.*` 디스패치, 신뢰 게이트 판정 | WebDriver 클라이언트로 `browser.*`(agent-devtools 패턴) | evaluateJavaScript 왕복·isolated world·browser 패널 미주입 |
+| 6 WebDriver | HTTP 라우팅, 토큰/Origin 검사 | 표준 WebDriver 클라이언트(agent-browser/Selenium) | — |
+| 7 콘텐츠 | md 클릭 라우팅, `panel.bindSession` cwd | 웹 콘텐츠 JS 테스트 + Chrome+agent-devtools E2E | 실제 WKWebView 렌더 |
+
+### 13.3 관측 가능성
+
+[project-rules.md] §관측 — 디버그 이벤트·로그·스냅샷·trace가 같은 도메인 데이터를 소비. **컨트롤 플레인 JSON-RPC 메시지를 trace 포맷으로 재사용**(요청/응답/이벤트 기록→replay). 실패 artifact는 redaction(§7.4) 후 저장.
 
 ## 14. 코드 위치 (구현 시 채움)
 
@@ -201,7 +223,7 @@ flowchart TD
 
 구현 전 적대적 검증에서 확인한 결함. 위 본문이 흡수했고, 미해결은 §12·§16.
 
-- **A(원칙)**: A1 L2 코어가 `check-boundaries` 통과 못 함(런타임 자산 직접 참조) → collector seam(§2). A2 "네이티브 뷰 비사용(사용자 결정)" 절차 없이 역전 → §16 승인 선결. A3 layering §4 "호스트=타깃별" 범주 오용·이식성 자기모순 → 예외로 정직 프레이밍. M1 HTTP 모순, M2 Zig/Swift 분담 미매핑, M3 tabs-splits/web-panel 단일출처·z-order 선결, M4 redaction 모순 → 본문 반영.
+- **A(원칙)**: A1 L2 코어가 `check-boundaries` 통과 못 함(런타임 자산 직접 참조) → collector seam(§2). A2 "네이티브 뷰 비사용(사용자 결정)" 절차 없이 역전 → **해소**(웹 콘텐츠 크로스플랫폼이라 이식성 목적 충족, 사용자 승인 + 이 PR에서 `implementation-plan.md`·`macos-app-host-boundary.md` 갱신 — §1·§16-1). A3 layering §4 "호스트=타깃별" 범주 오용·이식성 자기모순 → 예외로 정직 프레이밍. M1 HTTP 모순, M2 Zig/Swift 분담 미매핑, M3 tabs-splits/web-panel 단일출처·z-order 선결, M4 redaction 모순 → 본문 반영.
 - **B(프로토콜·동시성)**: H1 스레드 모델 미정·라우팅 표 락 없음, H2 코어 read `core_mutex` 부재(UAF), H3 구독/in-flight가 세션 종료 가로지름(dangling), H4 max frame 없음·대형 단일라인 OOM, H5 blocking write 디스패처 정지 → §4.3/§4.4. M1 다중 인스턴스 소켓, M3 에러 모델 → 반영.
 - **C(보안)**: V1 웹 브리지 무차별 노출(CRITICAL), V2 인증 없는 WebDriver HTTP(CRITICAL), V3 0600/peer-cred 미강제, V4 uid 신뢰 오류, V5 redaction, V7 SSH 터널 authz → §7.
 - **D(구현)**: "직렬화만"·"rect 흐름"·"각 단계 독립 green" 거짓 → Phase 1/4 정직화(§10). 빠진 기능(실시간 출력 스트림·생애주기 명령·패널↔cwd 연동) → §5 추가. encodePaste bracketed paste 부적합 → raw 경로(§5). 이벤트 background 폴링 한계(§6).
@@ -210,7 +232,7 @@ flowchart TD
 
 이 항목들은 [project-rules.md] §전략 유지("기존 전략 수정은 임의 금지, 사용자 논의")에 따라 **사용자 결정·후속 PR이 선결**이다:
 
-1. **"네이티브 뷰 비사용" 원칙의 명시적 예외 승인** + `implementation-plan.md`·`macos-app-host-boundary.md`·`settings-page.md`·`config-gui.md` 갱신(별도 PR).
+1. ~~"네이티브 뷰 비사용" 원칙의 명시적 예외 승인~~ **완료(2026-06, 사용자 승인)** — 근거: 웹 콘텐츠는 크로스플랫폼이라 이식성 목적 충족(§1). 이 PR에서 `implementation-plan.md` UI 렌더 전략 예외 조항 + `macos-app-host-boundary.md` 갱신. (`settings-page.md`·`config-gui.md`는 GPU 셀 chrome 유지라 직접 충돌 없음 — 영향 시 후속.)
 2. **`web-panel.md` 작성**(WKWebView 합성·z-order·rect ABI) — Phase 4 선결.
 3. **zntc 빌드 편입 방식**(build 의존성 절차·라이선스·clean-room) 확인.
 4. **redaction allowlist**에 `MARU_SESSION` 포함 여부(§7.4).

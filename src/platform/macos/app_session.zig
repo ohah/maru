@@ -541,7 +541,7 @@ fn barMetrics(bar: maru.session.SplitRect, cell_width_px: u32, term_count: usize
     // scroll_cols는 tabLayout이 [0,max] clamp한 eff_scroll로 정규화(#1: stale 방지). hit-test·렌더가 같은 eff를 쓴다.
     const layout = coretext_frame_builder.tabLayout(@intCast(cols), term_count, tab_width_fixed, scroll_cols);
     if (layout.tab_w == 0) return null;
-    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = layout.tab_cols, .tab_w = layout.tab_w, .scroll_cols = layout.eff_scroll, .has_scroll = layout.has_scroll };
+    return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = layout.tab_cols, .tab_w = layout.tab_w, .scroll_cols = layout.eff_scroll, .has_scroll = layout.has_scroll, .tab_count = @intCast(term_count) };
 }
 
 /// 활성 Term 탭 세그먼트를 강조 배경 셀로 칠한다(옛 BarMetrics.highlightCell). chrome tabbar hit-test와 **같은
@@ -17704,6 +17704,10 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    // tui로 고정: 인라인 "+"(상단탭 Warp 폴리시)는 탭 폭에 의존하는데, tui(tab_width_cols=0)는 탭이 영역을 균등하게 꽉 채워
+    // 인라인 "+"가 tab_cols에 떨어진다(아래 barMetrics(…,0,0)와 실제 핸들러 tokens.tab_width_cols=0이 일치). rich(16 고정폭)면
+    // 탭이 영역을 안 채워 "+"가 마지막 탭 옆(far-left)이라 이 테스트의 tab_cols 기준 plus_x가 어긋난다.
+    session.appearance.chrome_theme = .tui;
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
@@ -17741,6 +17745,7 @@ test "hovering the '+' button does not mark the last tab for close" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.appearance.chrome_theme = .tui; // 인라인 "+"가 tab_cols에 떨어지게(탭이 영역 꽉 채움) — 위 "+" 클릭 테스트와 같은 이유.
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개

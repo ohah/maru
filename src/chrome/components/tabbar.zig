@@ -35,6 +35,7 @@ pub const Metrics = struct {
     tab_w: u32, // 탭 하나의 폭(컬럼)
     scroll_cols: u32 = 0, // Step 2: 가로 스크롤 offset(컬럼). segCols/segOf가 화면 좌표를 이만큼 왼쪽으로 민다. 0=기본(barMetrics가 Pane.tab_scroll_cols로 채움).
     has_scroll: bool = false, // Step 2a-2: 탭이 넘쳐 우측 "+" 왼쪽에 ‹›(2칸) 스크롤 버튼 zone이 예약됐는가. barMetrics가 판정(tab_cols는 이미 2칸 축소됨).
+    tab_count: u32 = 0, // 상단탭 Warp 폴리시: Term 탭 수(인라인 "+" 위치 계산용 — 마지막 탭 바로 뒤). barMetrics가 채운다.
 
     /// 바 좌단 기준 col의 픽셀 경계. tab_index 세그먼트는 [col*cw, segEnd*cw).
     fn colPx(self: Metrics, col: u32) f64 {
@@ -114,17 +115,28 @@ pub const Metrics = struct {
         return self.tab_cols < self.cols;
     }
 
-    /// 우측 스크롤 버튼 zone 시작 컬럼 — has_scroll이면 [tab_cols, tab_cols+2)에 ‹›, 그 뒤 [+2, cols)가 "+".
-    /// has_scroll 아니면 "+"가 tab_cols부터(‹› 없음). 렌더(‹›/+ glyph)·hit-test 단일 소스.
-    pub fn plusZoneStart(self: Metrics) u32 {
-        return self.tab_cols + (if (self.has_scroll) @as(u32, 3) else 0); // ‹·gap·› 3칸(버튼 사이 공백)
+    /// 마지막 보이는 탭의 끝 컬럼(인라인 "+" 위치) — 탭이 바를 안 채우면 그 자리(Warp식 인라인), 꽉 차면 tab_cols로 clamp.
+    /// 넘쳐서 has_scroll이면 의미 없음(plusZoneStart가 far-right 분기). tab_count=0이면 0(barMetrics가 항상 채움).
+    pub fn tabsEndCol(self: Metrics) u32 {
+        return @min(self.tab_count * self.tab_w, self.tab_cols);
     }
 
-    /// x_px가 "+" zone([plusZoneStart, cols)) 안인가. ‹›가 있으면 그 오른쪽. "+" glyph(col=plusZoneStart+1)와 같은 영역.
+    /// "+"(새 Term) 버튼 시작 컬럼 — **상단탭 Warp 폴리시: 인라인**(마지막 탭 바로 뒤). 넘쳐서 ‹›가 있으면(has_scroll)
+    /// 옛대로 far-right(tab_cols + ‹·gap·› 3칸 뒤). "+" glyph는 plusZoneStart+1에 그린다(렌더 plus_start와 단일 정합).
+    pub fn plusZoneStart(self: Metrics) u32 {
+        return if (self.has_scroll) self.tab_cols + 3 else self.tabsEndCol(); // 오버플로우=far-right, 아니면 인라인
+    }
+
+    /// "+" 버튼 클릭 폭(컬럼) — 빈 영역이 통째로 +가 되지 않도록 버튼만(2칸: gap+glyph). 인라인 + 오른쪽 빈 바는 무동작(사용자 결정 ①).
+    const plus_button_cols: u32 = 2;
+
+    /// x_px가 "+" 버튼([plusZoneStart, +plus_button_cols)) 안인가. **인라인이라 cols까지가 아니라 버튼 폭으로 한정** —
+    /// 마지막 탭 오른쪽 빈 영역을 클릭해도 새 Term이 안 생긴다(①). "+" glyph(plusZoneStart+1)를 포함하는 영역.
     pub fn inPlusZone(self: Metrics, x_px: f64) bool {
         if (!self.hasPlusZone() or !std.math.isFinite(x_px)) return false;
         const ps = self.plusZoneStart();
-        return x_px >= self.colPx(ps) and x_px < self.colPx(self.cols);
+        const end = @min(ps + plus_button_cols, self.cols);
+        return x_px >= self.colPx(ps) and x_px < self.colPx(end);
     }
 
     /// x_px가 ‹(왼쪽 스크롤) 버튼([tab_cols, tab_cols+1)) 안인가 — has_scroll일 때만. ‹ glyph(col=tab_cols)와 같은 영역.
@@ -143,8 +155,10 @@ pub const Metrics = struct {
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 
 fn testMetrics() Metrics {
-    // bar [x=100, w=80], cell 8 → cols=10. 4 탭, tab_cols=8("+" zone [8,10)), tab_w=2(탭 영역 8칸/4).
-    return .{ .bar_x = 100, .bar_y = 16, .bar_w = 80, .bar_h = 16, .cell_width_px = 8, .cols = 10, .tab_cols = 8, .tab_w = 2 };
+    // bar [x=100, w=80], cell 8 → cols=10. 4 탭, tab_cols=8, tab_w=2(탭 영역 8칸/4) — 탭이 영역을 꽉 채워(4*2=8=tab_cols)
+    // 인라인 "+"가 tab_cols(8)에 떨어진다(옛 far-right와 같은 자리 → 기존 경계 테스트 불변). 인라인이 빈 영역에 떨어지는
+    // 케이스(탭<영역)는 아래 별도 테스트가 덮는다.
+    return .{ .bar_x = 100, .bar_y = 16, .bar_w = 80, .bar_h = 16, .cell_width_px = 8, .cols = 10, .tab_cols = 8, .tab_w = 2, .tab_count = 4 };
 }
 
 test "tabbar hit-test: tabIndex·inCloseZone·hasPlusZone·inPlusZone 경계" {
@@ -180,6 +194,29 @@ test "tabbar hit-test: tabIndex·inCloseZone·hasPlusZone·inPlusZone 경계" {
     var thin = m;
     thin.tab_w = 1;
     try std.testing.expect(!thin.inCloseZone(0, 100));
+}
+
+test "tabbar 인라인 +: 탭이 영역을 안 채우면 마지막 탭 바로 뒤에 + (빈 영역은 무동작), 넘치면 far-right" {
+    // 탭 2개만(tab_w=2 → tabsEnd=4 < tab_cols=8). 인라인 + = col 4부터. 빈 영역 [6,8)·far-right [8,10)은 +가 아니다.
+    var m = testMetrics();
+    m.tab_count = 2;
+    try std.testing.expectEqual(@as(u32, 4), m.tabsEndCol()); // 마지막 탭(탭1) 끝 = 2*2
+    try std.testing.expectEqual(@as(u32, 4), m.plusZoneStart()); // 인라인(far-right tab_cols=8 아님)
+    // + 버튼 = [4,6)칸 = colPx [132,148). glyph는 plusZoneStart+1=5(=140px)에 그려져 이 안.
+    try std.testing.expect(m.inPlusZone(132)); // + 좌단
+    try std.testing.expect(m.inPlusZone(140)); // glyph
+    try std.testing.expect(m.inPlusZone(147)); // + 우단 직전
+    try std.testing.expect(!m.inPlusZone(148)); // + 버튼 밖(빈 영역 시작) — 새 Term 안 만듦(①)
+    try std.testing.expect(!m.inPlusZone(160)); // 마지막 탭 오른쪽 빈 바 — 무동작
+    try std.testing.expect(!m.inPlusZone(170)); // 옛 far-right 자리도 이제 +가 아니다
+    // 넘쳐서 has_scroll이면 far-right 유지(인라인 아님): plusZoneStart = tab_cols(6) + 3 = 9.
+    var ov = testMetrics();
+    ov.has_scroll = true;
+    ov.tab_cols = 6;
+    ov.tab_count = 8; // 넘침
+    try std.testing.expectEqual(@as(u32, 9), ov.plusZoneStart()); // ‹·gap·› 뒤 far-right
+    try std.testing.expect(ov.inPlusZone(172)); // colPx(9)=172 — + 버튼
+    try std.testing.expect(!ov.inPlusZone(160)); // ‹›/gap 영역은 + 아님
 }
 
 test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-열 정렬, 패딩 0)" {

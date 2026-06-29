@@ -189,6 +189,8 @@ flowchart TD
 
 **TDD micro-slice gate**: 아래 Phase는 제품 milestone일 뿐, 구현 PR의 기본 단위가 아니다. 구현 PR은 가능한 한 하나의 관찰 가능한 동작 또는 하나의 보안 불변식만 열어야 한다. 새 동작은 먼저 실패하는 단위/통합/fixture 테스트를 추가한 뒤 green으로 만들고, 마지막에 refactor와 문서/PR 본문을 맞춘다. 테스트로 먼저 표현하기 어려운 AppKit/WKWebView/GUI 동작은 "spike → 수동/자동 artifact → 최소 자동 회귀 테스트" 순서로 닫고, spike 결과 없이 제품 코드를 넓히지 않는다. 한 PR이 여러 micro-slice를 묶으려면 같은 테스트 harness를 공유해 리뷰·rollback이 더 작아진다는 근거를 PR 본문에 적는다.
 
+**안정성·성능 gate**: 각 micro-slice 시작 설명에는 이 slice가 건드리는 hot path, lock, queue, allocation/copy, thread hop, I/O, app frame tick 영향을 함께 적는다. 종료 조건에는 그 영향이 bounded임을 증명하는 테스트·artifact·측정 또는 "영향 없음" 근거가 있어야 한다. 특히 main/frame tick으로 marshal되는 작업은 per-tick 처리량을 제한하고 다음 tick으로 쪼갤 수 있어야 하며, stream·capture·subscribeOutput은 bounded queue, drop/coalesce 또는 slow-subscriber disconnect 정책이 먼저 있어야 한다. 새 반복 경로·대량 복사·렌더/PTY hot path를 건드리면 `mise run perf` 또는 해당 opt-in stress/soak를 전후 비교하고, 아직 측정 항목이 없으면 먼저 lightweight counter/artifact를 추가한다. GUI/IME/WebView처럼 시간 숫자가 흔들리는 영역은 frame/NSView 계층 값, 이벤트 순서, queue 길이, dropped/coalesced count처럼 결정적인 안정성 지표를 우선 남긴다.
+
 시작 gate의 최소 규칙:
 - Phase 1은 Phase 0 문서 계약이 최신인지(`control-plane.md`·`verification-matrix.md`·PR 본문)와 `git diff --check`/`check-boundaries`를 확인한 뒤 시작한다.
 - Phase 2는 Phase 1의 read-only socket/collector/capability/self-origin/capture gate를 재실행한 뒤 write를 연다.
@@ -247,6 +249,8 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 브라우저 제어 도구라도 real-browser 의존 E2E만으로 닫지 않는다. Maru 컨트롤 플레인은 ndjson 프레이밍, JSON-RPC 디스패치, capability/scope 권한 판정, 소켓 발견, 소켓 서버를 순수 로직 또는 작은 통합 E2E로 분리해 검증한다.
 
 기본은 TDD다. 각 micro-slice는 가능한 한 다음 순서를 따른다: (1) 실패하는 가장 작은 테스트/fixture를 만든다, (2) 해당 테스트만 통과하는 최소 구현을 한다, (3) 관련 broader gate(`check-boundaries`, CLI help snapshot, socket/PTY/WKWebView smoke 등)를 추가로 돌린다, (4) 문서와 PR 본문에 새로 열린 capability·transport·artifact를 반영한다. 자동화가 불가능한 GUI/IME/공증류는 먼저 spike로 사실을 캡처하고, 그 결과에서 자동화 가능한 계약(frame 값, 계층 값, sanitizer 결과, 권한 판정)을 최소 테스트로 고정한다.
+
+성능은 마지막에 따로 보는 항목이 아니다. slice가 다음 중 하나를 건드리면 시작 전에 예산/관측 항목을 정한다: frame tick, PTY reader/runtime pump, renderer state, socket dispatch, capture chunking, subscribe queue, WebView frame sync, JS bridge, zntc build/watch pipeline. 기존 [성능 예산](performance-budget.md)에 항목이 있으면 그 항목을 전후 비교하고, 없으면 PR에서 "아직 숫자 예산 없음"을 한계로 적되 queue length, copy byte, chunk count, dispatch latency 같은 최소 artifact를 남긴다.
 
 테스트 가능성:
 - **순수 로직**(프로토콜·디스패치·제어 명령·보안 판정): Zig 단위(TDD).

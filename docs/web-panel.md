@@ -93,7 +93,38 @@ subview 순서가 z-order다. 맨 위 오버레이는 평소 투명이라 아래
 - per-pane rect ABI 신규 배선.
 - 투명 `CAMetalLayer` 오버레이는 maru 렌더러가 `isOpaque=true` 가정이라 오버레이용 별도 설정이 필요(spike로 가능 확인, 통합 시 재확인).
 
-## 13. 코드 위치 (구현 시 채움)
+## 13. 미래: 웹뷰 백엔드 추상화 + CEF opt-in 플러그인 (이번 범위 밖)
+
+WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 **Chromium 호환·CDP 생태계 검증이 제약**된다. 미래에 CEF(Chromium Embedded Framework)를 대안 백엔드로 두되, **기본 번들에 넣지 않고 opt-in 플러그인으로** 한다 — 기본 maru는 WKWebView만 써 의존성 0을 유지하고, CEF를 원하는 사용자만 설치한다. maru `plugin.zig`(현재 스텁)가 토대.
+
+**플러그인 설치 모델:**
+1. 설정/명령에서 "CEF 웹뷰 설치" → CEF "minimal" 바이너리 + helper를 다운로드(suji 선례: Spotify CDN) → `~/.cache/maru/cef/<platform>/`.
+2. maru는 빌드 타임 정적 링크가 아니라 **런타임에 발견한** CEF를 백엔드로 활성화한다.
+3. 웹 패널이 백엔드 인터페이스 뒤에 있어, 백엔드를 WKWebView(기본)↔CEF(설치 시)로 바꿔도 콘텐츠·`browser.*`는 그대로다.
+
+**백엔드 인터페이스(추상화 대상):** `mount`(pane rect에 붙이기)·`navigate`·`eval`·`snapshot`·`frameSync`·`bridge`(메시지 in/out)·`teardown`. WKWebView·CEF가 각자 구현.
+
+**WKWebView vs CEF (suji 선례 기반):**
+
+| 축 | WKWebView (기본) | CEF (플러그인) |
+|---|---|---|
+| 엔진 | WebKit(Safari) | Chromium(Chrome) |
+| 번들 | 시스템(추가 0) | 150~200MB + helper 5개 — **별도 다운로드** |
+| Chrome 호환·검증 | 제약 | 완전 |
+| CDP | 없음(WebDriver 어댑터 직접 — [control-plane.md] §9) | 네이티브(`send_dev_tools_message`) — agent-browser·Selenium 직접 호환 |
+| 합성 모델 | contentView **subview**(실측 확정) | **CEF Views child window attach**(suji 17-A NSView 직접 합성→멀티뷰 강종→17-B) |
+| 이식성 | OS별 API 상이 | 3-OS 통일 C API(`@cImport`) |
+| 의존성 정신 | 부합 | 플러그인이라 **기본 0 유지**, 설치 시에만 |
+
+**플러그인 모델의 함정(정직):**
+- **"즉시 삽입"보다 재시작이 현실적.** CEF는 프로세스 시작 초기에 `CefInitialize` + helper 프로세스(같은 exe 재실행 또는 별도 helper 번들)를 요구한다. 실행 중 `dlopen`으로 끼우는 건 프로세스 모델상 어려울 수 있어 **"설치 → 재시작 → CEF 백엔드 활성"**이 안전한 1차 모델이다(런타임 즉시 로드는 별도 검증).
+- **helper 프로세스**: maru가 CEF helper(렌더/GPU 등 5개)를 띄워야 한다. macOS는 helper가 별도 `.app`이라 서명 대상.
+- **서명/공증**: 다운로드한 CEF dylib·helper를 maru가 로드/실행 → Gatekeeper. 서명 검증 또는 사용자 승인 흐름이 필요.
+- **버전 호환**: CEF 버전 ↔ maru `@cImport` 헤더 호환. 플러그인 버전 핀·체크.
+
+**결정 미정**: 도입 여부·시점은 사용자가 정한다. 지금은 백엔드 인터페이스 경계만 의식해 WKWebView 구현이 CEF 플러그인을 막지 않게 한다.
+
+## 14. 코드 위치 (구현 시 채움)
 
 - 합성·WKWebView·브리지: `platform/macos/web_panel.{zig,swift}`
 - per-pane rect ABI: `platform/macos/app_host_abi.{zig,h}`

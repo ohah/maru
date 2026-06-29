@@ -160,6 +160,13 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 - 릴리스 시 `.version`을 올리고 태그(`v<버전>`)를 만든다. dmg 산출물 이름의 버전은 빌드 시
   `Info.plist`(`CFBundleShortVersionString`)에서 읽는다.
 
+## 라이선스와 attribution
+
+- Maru 자체는 MIT다([LICENSE](../LICENSE)).
+- 배포물(`.app`/`.dmg`)에 **번들되는 제3자 자산**(현재: 폰트 4종)의 라이선스·버전·저작권·재배포 의무는 [third-party-licenses.md](third-party-licenses.md)를 단일 출처로 둔다.
+- 폰트는 모두 재배포·임베드가 허용된 라이선스(OFL 1.1 / MIT)이며, 의무인 라이선스 파일은 `Resources/Fonts/`에 함께 번들된다(`build.zig` 번들 단계). 새 자산을 동봉하면 그 문서의 추가 규칙을 따른다.
+- About 화면 attribution 노출은 권장(후속) — 위 문서의 "About 화면 attribution" 참고.
+
 ## 산출물·비밀 취급
 
 - 빌드 산출물 `dist/`는 git에 커밋하지 않는다(`.gitignore`).

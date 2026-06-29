@@ -131,6 +131,32 @@ font.family-italic = ""
 
 이 정책의 의도는 설정 실수 때문에 shell이 열리지 않는 일을 막는 것이다. 터미널은 설정이 조금 틀려도 최소한 사용자가 수정할 수 있는 화면을 보여줘야 한다.
 
+## 번들 폰트(self-contained)
+
+앱은 개발자들이 즐겨 쓰는 monospace 폰트 몇 종을 **번들에 동봉**한다. 시스템에 따로 설치하지 않아도 `font.family`에 패밀리명만 적으면 바로 쓸 수 있다(self-contained). 동봉 목록:
+
+| 패밀리명(`font.family`에 그대로) | 변종 | 라이선스 | 특징 |
+| --- | --- | --- | --- |
+| `JetBrains Mono` | Regular/Bold/Italic/BoldItalic | OFL 1.1 | **기본값**. 모던·고가독성 |
+| `Fira Code` | Regular/Bold | OFL 1.1 | 합자(ligature) 매니아층 — 단, maru는 합자 렌더 보류라 모양만 쓰임(아래 "Ligature" 참고) |
+| `Cascadia Code` | Regular/Bold/Italic/BoldItalic | OFL 1.1 | Windows Terminal 출신, 크로스플랫폼 친화 |
+| `Hack` | Regular/Bold/Italic/BoldItalic | MIT(+DejaVu/Bitstream Vera) | 합자 없는 순수 가독성, `0/O`·`1/l/I` 구분 명확 |
+
+동봉/등록 메커니즘:
+
+- 자산은 `assets/fonts/<Family>/`에 둔다(`.ttf` + 라이선스 파일 `OFL.txt`/`LICENSE.md`). **재배포 의무상 라이선스 동봉은 필수.**
+- `build.zig`의 `macos-app-bundle` 단계가 모든 `assets/fonts/*/*.ttf`를 `Maru.app/Contents/Resources/Fonts/`에 평평하게 복사하고, 라이선스는 패밀리명 프리픽스로 충돌 없이 함께 넣는다.
+- `MaruAppHost-Info.plist`의 `ATSApplicationFontsPath = Fonts`가 그 디렉터리를 스캔해 **앱 실행 시 자동 등록**한다. 그래서 폰트 추가에는 Zig/Swift 코드 변경이 필요 없다.
+- **새 패밀리 추가** = `assets/fonts/<NewFamily>/`에 `.ttf` + 라이선스를 넣기만 하면 된다(빌드가 자동 포함). 이 표와 [third-party 라이선스](third-party-licenses.md)를 갱신한다.
+
+각 폰트의 라이선스·버전·저작권과 **재배포 의무(라이선스 동봉·단독판매 금지·RFN 등)·동봉 자산 추가 규칙**은 [third-party-licenses.md](third-party-licenses.md)를 단일 출처로 둔다. 모두 재배포·임베드가 허용된 라이선스(OFL 1.1 / MIT)이고, 의무인 라이선스 파일 동봉은 위 메커니즘으로 충족한다.
+
+결정과 근거(`document-basis-and-decision`):
+
+- **Nerd Font 미동봉**: 풀 패치 Nerd Font는 패밀리당 ~8.7MB(아이콘이 본문의 ~7배)로 5종이면 ~40MB까지 부푼다. maru의 chrome 아이콘은 SVG 합성(`icon_glyph`)으로 폰트와 무관하게 그리고, 터미널 콘텐츠의 Nerd Font 아이콘은 Powerline separator를 합성(`powerline_glyph`)으로 커버한다. 그 밖의 심볼은 향후 "Symbols-Only Nerd Font" 폴백(단일 ~2MB) 한 개로 모든 폰트가 공유하게 두는 방향이 효율적이다(풀 패치 중복 동봉 대비 ~1/15). 현재는 미동봉 — 본문 폰트 4종 합계 ~4.9MB로 가볍게 유지.
+- **Iosevka 미동봉**: 후보였으나 글리프 커버리지가 방대해 변종당 ~10.5MB(4변종 ~43MB)로 "용량 절감" 의도와 충돌해 제외했다. compact 니치가 필요하면 Latin 서브셋(비라틴은 폴백) 또는 더 가벼운 대안을 별도 검토.
+- **변종 범위**: SGR 1(bold)/3(italic) 지원을 위해 가능한 한 R/B/I/BI 4종을 넣는다. Fira Code는 italic face가 존재하지 않아 R/B만 동봉(italic 요청 시 regular 대체 — 위 해석 규칙).
+
 ## Cell Width와 Font Metric
 
 터미널의 cursor 위치는 font advance가 아니라 terminal cell width 정책이 결정한다.

@@ -31,6 +31,5 @@ echo "  libvterm (system):       brew install libvterm   # 또는 배포판 패�
 echo
 echo "선택: 기능 동작 레퍼런스(터미널 코어 밖 — 코드 미복사, docs/references.md)"
 echo "  agent-browser (WebDriver/CDP 백엔드 참고): git clone --depth 1 https://github.com/vercel-labs/agent-browser references/agent-browser"
-echo "  agent-devtools (테스트 전략 참고): git clone --depth 1 https://github.com/ohah/agent-devtools references/agent-devtools"
 echo
 echo "완료. references/ 는 gitignore된다. 자세한 내용은 docs/references.md."

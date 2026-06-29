@@ -211,7 +211,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 ## 12. 테스트·검증 전략
 
-브라우저 제어 도구라도 real-browser 의존 E2E가 아니라 프로토콜·파싱·변환을 순수 함수로 분리해 단위 테스트한다(선례: agent-devtools — wire 프레이밍·메시지 roundtrip·discovery·daemon을 순수 Zig 테스트). maru 컨트롤 플레인에 대응: ndjson 프레이밍, JSON-RPC 디스패치, 소켓 발견, 소켓 서버.
+브라우저 제어 도구라도 real-browser 의존 E2E만으로 닫지 않는다. Maru 컨트롤 플레인은 ndjson 프레이밍, JSON-RPC 디스패치, capability/scope 권한 판정, 소켓 발견, 소켓 서버를 순수 로직 또는 작은 통합 E2E로 분리해 검증한다.
 
 테스트 가능성:
 - **순수 로직**(프로토콜·디스패치·제어 명령·보안 판정): Zig 단위(TDD).

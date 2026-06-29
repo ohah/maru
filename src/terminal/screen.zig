@@ -2140,6 +2140,13 @@ fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.Ren
     // 가려지고, 확정되면 셸/앱이 다시 그린다. draw_col은 조합 끝으로 전진해 커서 표시 위치가 된다.
     var draw_col = cursor_col;
     drawPreeditCells(self.screen.pen, preedit_bytes, row_cells, &draw_col, self.ambiguous_wide);
+    // 오버레이가 wide glyph를 절반만 덮으면 base/continuation 짝이 깨진다. 짝 잃은 칸을 비워 렌더가
+    // 반쪽 glyph(base 없는 continuation, 또는 continuation 없는 wide base)를 그리지 않게 한다. 한글은
+    // 항상 wide 음절이라 무관 — 좁은 조합 글자나 커서가 continuation 칸(CUF/CHA)에 있을 때만 발생.
+    if (cursor_col > 0 and row_cells[cursor_col - 1].width == 2)
+        row_cells[cursor_col - 1] = .{}; // 좌측: 짝(cursor_col)을 preedit이 덮어 잘린 wide base
+    if (draw_col < cols and row_cells[draw_col].continuation)
+        row_cells[draw_col] = .{}; // 우측: base를 preedit이 덮어 짝 잃은 orphan continuation
     clearTruncatedWideBase(row_cells); // 끝칸에 wide base만 남으면(조합/원본 잘림) 정리
 
     return .{

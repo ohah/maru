@@ -91,6 +91,16 @@ GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/a
 
 호환성/보안 기본값(`TERM`, OSC52, bracketed paste, shell integration, command restore, plugin permission, update/telemetry, global shortcut)은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md)의 검증 계획을 따른다. 새 구현 PR이 이 기본값을 바꾸려면 사용자와 먼저 논의하고, 이 매트릭스의 자동/수동 검증 경로도 함께 갱신한다.
 
+## 구현 전 TDD 절단 원칙
+
+세션 컨트롤 플레인과 웹 패널은 [control-plane.md](control-plane.md) §11의 micro-slice를 기본 구현 단위로 삼는다. Phase 1~7은 제품 milestone이고, 구현 PR 하나가 통째로 한 Phase를 끝내는 것을 기본값으로 보지 않는다.
+
+- 각 micro-slice는 먼저 실패하는 단위/fixture/통합 테스트 또는 spike artifact를 만든 뒤 구현한다.
+- 새 capability, transport, CLI 명령, WebView bridge, sanitizer, WebDriver endpoint는 parser/authz/help/docs가 같은 micro-slice 안에서 닫혀야 한다.
+- 자동화가 어려운 GUI/IME/z-order/공증류는 spike 결과를 artifact로 남기고, 그중 자동화 가능한 계약(frame/NSView 계층 값, 권한 판정, 경로 정규화, sanitizer 결과 등)을 최소 회귀 테스트로 고정한다.
+- 여러 micro-slice를 한 PR에 묶을 수는 있지만, 같은 harness를 공유해 더 작게 리뷰·rollback된다는 근거와 각 slice의 red→green 결과를 PR 본문에 남긴다.
+- 이전 micro-slice의 종료 gate가 깨지면 다음 slice를 진행하지 않는다.
+
 ## PR마다 확인할 질문
 
 - 새 기능이 이 표의 어느 검증 경로에 연결되는가?

@@ -103,7 +103,10 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
                 .glyph_id = if (record.glyph_id == 0) @as(glyph_layout.GlyphId, record.codepoint) else record.glyph_id,
                 .font_size_px = config.font_size_px,
                 .device_scale = config.device_scale,
-                .cell_width_px = config.cell_width_px,
+                // slot 폭 기준 cell 폭: 합성/notdef(record.glyph_id==0)은 grid advance(셀폭·타일링), 폰트 글리프는 자연폭
+                // (자간 무관) — 음수 자간이 폰트 글리프 slot을 좁혀 세로 흔들림/찌그러짐을 내던 버그 차단(code-review). 합성
+                // 판정은 위 glyph_id 재키잉과 같은 record.glyph_id==0(원본) 기준.
+                .cell_width_px = config.slotCellWidthPx(record.glyph_id),
                 .cell_height_px = config.cell_height_px,
                 .cell_width = record.cell_width, // span — slot 폭 = cell_width_px × span이라 키에 포함(span 충돌 방지)
                 .style = flags,

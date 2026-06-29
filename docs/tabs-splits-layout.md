@@ -268,6 +268,16 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   베이스 명시 규칙). 검증은 트리 detach/insert·no-op 가드·드롭 타겟 하이라이트 슬롯·grip 드래그 end-to-end·두 액션
   dispatch를 헤드리스 단위로, grip 글리프 렌더는 제품 스크린샷으로 고정한다.
 
+### Cross-window detach/reattach (선행 foundation)
+
+같은 window 안의 Term/Pane/Workspace 이동은 위 절과 ④가 이미 다룬다. 브라우저·마크다운 웹 패널이 들어오면 같은 surface를 별도 모니터의 OS window로 빼고 다시 합치는 UX가 필요하므로, cross-window 이동은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다.
+
+- **지원 단위**: surface tab(terminal/web 1개), Pane grip, Workspace card, Window 전체 merge.
+- **드래그 UX**: surface tab·Pane grip·Workspace card를 다른 Maru window의 pane/sidebar/drop-zone으로 드롭하면 attach/merge하고, 창 밖 빈 공간에 드롭하면 새 OS window를 만든다.
+- **Window 전체 merge**: OS 타이틀바 드래그가 아니라 command/menu/palette action(`merge_window_into_active_window`, `merge_all_windows`)으로 먼저 제공한다.
+- **브라우저 정책**: Maru-owned browser surface는 기본적으로 다시 합칠 수 있다. 합쳐지지 않는 단독 브라우저는 외부 Safari/Chrome으로 여는 별도 앱 경로다.
+- **구현 순서**: full drag UX보다 `WindowGraph` 순수 move/merge TDD, AppRuntime live surface registry, command 기반 이동을 먼저 구현한다.
+
 ### 사용자 지정 이름(rename)
 
 워크스페이스(사이드바 탭)·Pane(분할 영역)·Term(가로 탭) 세 계층 모두 사용자가 직접 이름을 붙일 수 있다. 자동

@@ -672,8 +672,10 @@ pub fn build(b: *std.Build) void {
             // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
             // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
             // 에러를 낸다. 번들은 매 실행 새로 만들어지므로 stale resource는 생기지 않는다.
-            "ttfs=$(ls assets/fonts/JetBrainsMono/*.ttf 2>/dev/null) || true; " ++
-                "[ -n \"$ttfs\" ] || { echo 'error: no .ttf in assets/fonts/JetBrainsMono (font assets missing)' >&2; exit 1; }; " ++
+            "ttfs=$(ls assets/fonts/*/*.ttf 2>/dev/null) || true; " ++
+                "[ -n \"$ttfs\" ] || { echo 'error: no .ttf under assets/fonts/*/ (font assets missing)' >&2; exit 1; }; " ++
+                // 기본 폰트(JetBrains Mono)는 항상 있어야 한다(config 기본값 theme.zig). 누락이면 self-contained 보장이 깨진다.
+                "[ -f assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf ] || { echo 'error: default font assets/fonts/JetBrainsMono missing' >&2; exit 1; }; " ++
                 "rm -rf zig-out/Maru.app; " ++
                 "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Resources/Fonts; " ++
                 "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
@@ -681,7 +683,15 @@ pub fn build(b: *std.Build) void {
                 // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
                 "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
                 "cp src/platform/macos/MaruAppHost-Info.plist zig-out/Maru.app/Contents/Info.plist; " ++
-                "cp assets/fonts/JetBrainsMono/*.ttf assets/fonts/JetBrainsMono/OFL.txt zig-out/Maru.app/Contents/Resources/Fonts/; " ++
+                // 모든 폰트 패밀리(assets/fonts/<Family>/)의 .ttf를 Fonts/에 평평하게 복사한다 — ATSApplicationFontsPath가
+                // 그 디렉터리를 스캔해 전부 자동 등록하므로 사용자는 config의 font.family에 패밀리명만 적으면 된다.
+                // 라이선스(OFL.txt·LICENSE.*)는 평평화 시 충돌하지 않게 패밀리명 프리픽스로 동봉한다(재배포 의무).
+                // 새 패밀리는 디렉터리만 추가하면 자동 포함된다(이 build.zig 수정 불필요).
+                "for d in assets/fonts/*/; do fam=$(basename \"$d\"); " ++
+                "cp \"$d\"*.ttf zig-out/Maru.app/Contents/Resources/Fonts/ 2>/dev/null || true; " ++
+                "for lic in \"$d\"OFL.txt \"$d\"LICENSE.md \"$d\"LICENSE.txt; do " ++
+                "if [ -f \"$lic\" ]; then cp \"$lic\" \"zig-out/Maru.app/Contents/Resources/Fonts/$fam-$(basename \"$lic\")\"; fi; " ++
+                "done; done; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
         macos_app_bundle.setCwd(b.path("."));

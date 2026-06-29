@@ -4,7 +4,7 @@
 
 tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루되, maru는 **하나의 wire 프로토콜을 CLI와 웹뷰가 공유**하게 해서 두 번 설계하지 않는다.
 
-레이어 경계는 [레이어링과 이식성 전략](layering-and-portability.md), macOS 호스트 경계·Zig↔Swift 분담은 [macOS 앱 호스트 경계](macos-app-host-boundary.md), I/O–렌더 스레딩·락 모델은 [I/O–렌더 스레딩 분리](io-render-threading.md), 탭/split 모델은 [탭·split·레이아웃](tabs-splits-layout.md), 링크 클릭 라우팅(md→패널)은 [링크 감지](link-detection.md)를 단일 출처로 둔다. 웹 패널의 표시·합성(WKWebView 오버레이·z-order·per-pane rect ABI)은 [웹 패널 인프라](web-panel.md)(미작성, Phase 4 선결)로 분리한다.
+레이어 경계는 [레이어링과 이식성 전략](layering-and-portability.md), macOS 호스트 경계·Zig↔Swift 분담은 [macOS 앱 호스트 경계](macos-app-host-boundary.md), I/O–렌더 스레딩·락 모델은 [I/O–렌더 스레딩 분리](io-render-threading.md), 탭/split 모델은 [탭·split·레이아웃](tabs-splits-layout.md), 링크 클릭 라우팅(md→패널)은 [링크 감지](link-detection.md)를 단일 출처로 둔다. 웹 패널의 표시·합성(WKWebView 오버레이·z-order·per-pane rect ABI)은 [웹 패널 인프라](web-panel.md)(Phase 4 선결 상세)로 분리한다.
 
 ## 1. 확정 결정
 
@@ -112,12 +112,12 @@ flowchart TD
 
 ### 8.1 웹 브리지 노출 게이트
 - `window.maru.*`는 신뢰 콘텐츠에만 주입한다. maru가 빌드해 `maru-app://` 커스텀 스킴으로 서빙하는 콘텐츠(마크다운 등)만 브리지를 받고, `panel_kind=browser`(임의 URL)에는 주입하지 않는다.
-- isolated `WKContentWorld` + `forMainFrameOnly`로 페이지/서브프레임 JS가 핸들러에 닿지 못하게 한다.
+- isolated `WKContentWorld` + `forMainFrameOnly`로 페이지/서브프레임 JS가 핸들러에 닿지 못하게 한다. (spike 실측: 임의 페이지 page-world에서 `window.maru` 접근 불가, isolated world에서만 가능.)
 - 신뢰 콘텐츠도 자기 surface(또는 명시 위임)만 제어한다.
 
 ### 8.2 소켓 권한·peer-cred
 - 0700 전용 디렉터리 + bind 후 `fchmod 0600`. `O_NOFOLLOW`/lstat로 심볼릭 링크·소유자 검증.
-- accept마다 peer uid 검증(`LOCAL_PEERCRED`/`SO_PEERCRED`), 불일치 시 종료. 파일 권한에만 의존하지 않는다.
+- accept마다 peer uid 검증(`LOCAL_PEERCRED`/`SO_PEERCRED`), 불일치 시 종료(spike 실측 확정). 소켓 권한은 `fchmod(fd)`가 아니라 `chmod(path)`/`umask`로 0600(spike에서 `fchmod(fd)`는 -1 확인). 파일 권한에만 의존하지 않는다.
 
 ### 8.3 write 인가
 - 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. write(`send*`/생애주기/`browser.*`)는 per-surface capability로 좁힌다 — 자식이 받은 토큰은 자기 surface만, cross-surface는 거부 또는 사용자 확인. 기본 deny.
@@ -205,7 +205,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 ## 15. 선결 사항 (구현 직전 결정)
 
-- `web-panel.md` 작성(WKWebView 합성·z-order·per-pane rect ABI·합성 스크린샷) — Phase 4 전.
+- ~~`web-panel.md` 작성~~ **완료** — WKWebView 합성·z-order·per-pane rect ABI는 [웹 패널 인프라](web-panel.md)가 단일 출처. ABI·모달 레이어 분리 구현은 Phase 4.
 - zntc 빌드 편입 방식(dev-only 빌드 도구로, 런타임 의존성 0 유지)·라이선스 확인 — Phase 7 전.
 - `MARU_SESSION` redaction 처리(값 마스킹) — Phase 1.
 

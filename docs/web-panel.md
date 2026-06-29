@@ -88,11 +88,11 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 ## 10. 구현 ([control-plane.md] Phase 4~5와 연계)
 
 - **Phase 4(껍데기)**: 컨테이너 contentView + 입력 responder 재편(§4) + 모달 레이어 분리 두 리팩터(§2) + surface 생애주기 ABI(§6) + per-pane rect(§3) + 빈 WKWebView가 본문 rect 추종. → [control-plane.md] §11 Phase 4가 이 규모(특히 모달 분리·입력 재편)를 포함하도록 정합.
-- **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane.md] `browser.*`·§8.1 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane.md] Phase 7와 함께 — §11.)
+- **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane.md] `browser.*`·§8.1 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane.md] Phase 7와 함께 — §11. WebDriver 어댑터는 첫 콘텐츠의 필수 선행이 아니며, 기본 E2E는 `evaluateJavaScript` 하니스로 먼저 닫는다.)
 
 ## 11. 테스트·검증
 
-- **자동(headless)**: 브리지 격리(`evaluateJavaScript`로 page-world `window.maru === undefined`), per-pane rect 계산(px↔pt·y-flip) 단위, surface diff 로직, WKWebView frame·NSView 계층 값 단언, CSP·경로 정규화(traversal 거부) 단위. Phase 7 웹 콘텐츠의 순수 JS/TS 로직은 Bun 내장 test runner(`bun test`, `web:test`)로 검증한다.
+- **자동(headless)**: 브리지 격리(`evaluateJavaScript`로 page-world `window.maru === undefined`), per-pane rect 계산(px↔pt·y-flip) 단위, surface diff 로직, WKWebView frame·NSView 계층 값 단언, CSP·경로 정규화(traversal 거부) 단위. Phase 7 웹 콘텐츠의 순수 JS/TS 로직은 Bun 내장 test runner(`bun test`, `web:test`)로 검증한다. Phase 6 WebDriver 어댑터가 아직 없으면 WKWebView 통합 E2E는 `evaluateJavaScript` 하니스로 먼저 검증하고, WebDriver가 붙은 뒤 같은 subset을 표준 WebDriver smoke로 반복한다.
 - **Phase 7 markdown sanitizer adversarial fixture**: `.md` 입력은 비신뢰 데이터이므로 raw HTML/script 제거를 단위+웹 콘텐츠 테스트로 고정한다. 최소 red fixture: `<script>`, `onerror`/`onclick`, `javascript:` URL, `<iframe>`/`srcdoc`, 외부 `http(s)` 리소스. 기대값은 "DOM에 실행 가능한 sink가 남지 않고, CSP 위반 없이 안전한 텍스트/허용 태그만 렌더"다.
 - **수동/시각**: z-order 픽셀 합성(실제 셀 모달 × 투명 오버레이 × 실콘텐츠 WKWebView)은 **CI 자동 불가**(`CGWindowListCreateImage` macOS 15+ 제거, ScreenCaptureKit은 TCC 권한·GUI 필요) → **GUI 골든 1 frame을 Phase 4 종료 게이트**로 둔다.
 - **입력 라우팅**(§4)·**드래그 통과**(§5)는 실기 수동 검증(자동 어려움).

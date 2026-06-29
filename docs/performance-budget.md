@@ -59,6 +59,17 @@ CI에서는 이 파일을 `maru-performance-artifacts` artifact로 업로드한�
 | RSS/memory baseline | platform별 측정 API가 필요하다. | cold start RSS, one tab RSS, scrollback RSS |
 | PTY backpressure | opt-in correctness stress는 있지만 대량 stdout 성능 예산은 아직 없다. | large stdout producer -> queue drain latency, UI responsiveness |
 
+## Micro-slice 성능 운영
+
+세션 컨트롤 플레인과 웹 패널 구현은 [control-plane.md](control-plane.md) §11의 micro-slice 단위로 진행한다. 각 slice가 hot path를 건드리면 PR 본문에 다음을 남긴다.
+
+- 어떤 경로가 새로 반복 호출되는가(frame tick, PTY pump, socket dispatch, WebView bridge, zntc watch 등).
+- 새 allocation/copy/lock/thread hop/I/O가 bounded인지, 어떤 테스트나 artifact로 확인했는가.
+- 기존 `mise run perf` 항목과 연결되는지. 연결되면 전후 비교를 남기고, 연결되지 않으면 위 "아직 예산이 없는 영역"에 어떤 metric을 추가할지 적는다.
+- queue/backpressure가 있으면 max size, drop/coalesce, slow-consumer disconnect, cleanup/rollback 조건을 함께 검증한다.
+
+PR required check로 숫자 perf를 강제하지 않는 원칙은 유지한다. 대신 성능 영향을 만든 slice가 아무 artifact 없이 "나중에 측정"으로 넘어가는 것은 허용하지 않는다.
+
 ## 향후 목표 초안
 
 이 값은 구현이 붙은 뒤 검증하며 조정한다.

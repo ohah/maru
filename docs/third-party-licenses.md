@@ -32,8 +32,12 @@ OFL은 폰트 전용 자유 라이선스로, **앱에 임베드·번들·재배�
 
 ### MIT + Bitstream Vera — Hack
 
-OFL보다 느슨하다. Hack 본체는 MIT(Source Foundry), DejaVu에서 온 부분은 Bitstream Vera 라이선스다. 의무는 **저작권·라이선스 고지 유지**뿐. 단독 판매·이름·임베드 제약 없음.
-- 충족: `assets/fonts/Hack/LICENSE.md`(MIT+Bitstream Vera 전문)를 두고 번들에 동봉한다.
+Hack는 두 부분으로 나뉜다:
+- **Hack 본체(MIT, Source Foundry)**: 저작권·라이선스 고지만 유지하면 단독 판매·이름·임베드 제약이 없다.
+- **DejaVu 유래 부분(Bitstream Vera License)**: 저작권 고지 유지에 더해 **Reserved Font Name "Bitstream"·"Vera"**가 걸려 있다 — 수정본(파생)에 이 이름을 쓸 수 없다(Cascadia의 RFN과 동형). 우리는 **무수정 원본**을 재배포하므로 현재는 무관하지만, Hack을 서브셋·패치하려면 "Bitstream"/"Vera"를 패밀리명에 쓰면 안 된다.
+
+의무 요약: 저작권·라이선스 고지 유지 + (수정 시) Bitstream Vera RFN 회피. 임베드·번들 자체는 제약 없음.
+- 충족: `assets/fonts/Hack/LICENSE.md`(MIT + Bitstream Vera 전문, RFN 조항 포함)를 두고 번들에 동봉한다.
 
 ## About 화면 attribution(권장)
 

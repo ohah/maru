@@ -40,7 +40,9 @@ pub const FieldRow = struct {
         toggle: bool, // 현재 on/off
         slider: Slider, // 현재 값 + 범위(f32/u32; value/min/max는 f64로 통일)
         dropdown: []const u8, // enum 현재 변형 표시 토큰(클릭/←→로 순환 — platform이 schema.cycleEnum)
-        text: []const u8, // 문자열 현재값(폰트 패밀리). 클릭/Enter로 인라인 편집(platform이 schema.setText)
+        font: []const u8, // 폰트 패밀리 현재값 — dropdown처럼 보이지만 옵션이 enum이 아니라 번들 폰트 목록. ←→로 순환
+        // (platform이 schema.cycleFontFamily), Enter로 인라인 편집(목록 밖 시스템/직접입력 폰트 — text와 같은 편집 경로).
+        text: []const u8, // 문자열 현재값. 클릭/Enter로 인라인 편집(platform이 schema.setText)
         color: Color, // 색 #RRGGBB — 스와치 + hex. 스와치/←→로 프리셋 순환, hex 클릭으로 편집(platform)
         palette_grid: PaletteGrid, // ANSI 16색 그리드(theme.palette.0~15) — 스와치 줄 + 선택 셀 hex 편집(CS-4-5)
         keybind: []const u8, // 현재 단축키 표시(⌘T 또는 빈=미지정). Enter/클릭 → 녹음 모드(platform이 raw 키 캡처→rebind, CS-4-3)
@@ -445,6 +447,18 @@ fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
 
 const title_text = "Settings";
 
+/// 인라인 편집 중인 행의 편집 버퍼 텍스트(accent 강조) + 끝 셀 caret을 그린다 — `.font`/`.text` 편집 경로가 공유한다
+/// (중복 제거, code-review). control 좌단(ctrl.x) 좌측정렬, caret은 표시폭 끝 셀에 cursor fill 1칸(palette 입력 caret 패턴).
+fn drawInlineEdit(box: modal_box.Box, ctrl: draw.Rect, shown: []const u8, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    if (shown.len > 0) {
+        const runs = try arena.alloc(draw.Run, 1);
+        runs[0] = .{ .text = shown };
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = ctrl.x, .y = ctrl.y }, .runs = runs, .role = .accent_bar } });
+    }
+    const caret_x = ctrl.x + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
+    try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = ctrl.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
+}
+
 /// 모달 박스 + 제목 + 좌측 Section 네비(선택 강조) + 우측 폼(선택 섹션 필드 행 — 선택 하이라이트 → 라벨 → 위젯)을
 /// 그린다(config-gui §4). 빈 rows여도 박스는 띄운다. 순수: state·sections·rows·props·tokens만 읽는다. out/op은 호출자
 /// (platform) frame arena 소유. sections=네비 라벨, rows=선택 섹션의 필드(platform이 settings.section으로 필터해 주입).
@@ -547,21 +561,27 @@ pub fn view(
             // dropdown.view가 값 뒤에 " ▾"(2칸)를 붙이므로, chevron 자리를 빼고 truncate해 값+chevron이 control 열(=박스
             // 경계)을 넘지 않게 한다(안 그러면 ctrl_cols+2칸이 되어 우측 여백을 침범·rich quad 밖으로 삐진다).
             .dropdown => |cur| try dropdown.view(ctrl, overlay_input.truncateToCols(arena, cur, l.ctrl_cols -| 2) catch cur, tk, arena, out),
-            .text => |cur| {
-                // 편집 중인 선택 행이면 편집 버퍼 + caret, 아니면 현재값. control 좌단(ctrl.x) 좌측정렬 text.
-                // 비편집 값은 control 폭으로 truncate해 박스 밖으로 삐지지 않게 한다(긴 폰트 패밀리 등 — rich quad 밖 비침 방지).
-                const editing_this = state.editing and actual == state.selected;
-                const shown: []const u8 = if (editing_this) state.editText() else (overlay_input.truncateToCols(arena, cur, l.ctrl_cols) catch cur);
-                const text_role: tokens.ColorRole = if (editing_this) .accent_bar else .surface_fg;
-                if (shown.len > 0) {
-                    const runs = try arena.alloc(draw.Run, 1);
-                    runs[0] = .{ .text = shown };
-                    try out.append(arena, .{ .text = .{ .origin = .{ .x = ctrl.x, .y = ctrl.y }, .runs = runs, .role = text_role } });
+            .font => |cur| {
+                // dropdown처럼 보이되(번들 폰트 ←→ 순환), Enter 편집 중이면 편집 버퍼 + caret(목록 밖 시스템/직접입력 폰트).
+                // 비편집 = 현재값 + " ▾"(dropdown.view — chevron 자리 빼고 truncate). 편집 렌더는 .text와 drawInlineEdit 공유.
+                if (state.editing and actual == state.selected) {
+                    try drawInlineEdit(box, ctrl, state.editText(), arena, out);
+                } else {
+                    try dropdown.view(ctrl, overlay_input.truncateToCols(arena, cur, l.ctrl_cols -| 2) catch cur, tk, arena, out);
                 }
-                if (editing_this) {
-                    // caret = 편집 텍스트 끝 셀에 cursor fill 1칸(palette 입력 caret 패턴).
-                    const caret_x = ctrl.x + @as(i32, @intCast(overlay_input.displayCols(shown) * box.cw));
-                    try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = ctrl.y, .w = box.cw, .h = box.ch }, .role = .cursor } });
+            },
+            .text => |cur| {
+                // 편집 중인 선택 행이면 편집 버퍼 + caret(.font와 drawInlineEdit 공유), 아니면 현재값을 control 좌단
+                // (ctrl.x) 좌측정렬. 비편집 값은 control 폭으로 truncate해 박스 밖으로 삐지지 않게 한다(긴 값 — rich quad 밖 비침 방지).
+                if (state.editing and actual == state.selected) {
+                    try drawInlineEdit(box, ctrl, state.editText(), arena, out);
+                } else {
+                    const shown = overlay_input.truncateToCols(arena, cur, l.ctrl_cols) catch cur;
+                    if (shown.len > 0) {
+                        const runs = try arena.alloc(draw.Run, 1);
+                        runs[0] = .{ .text = shown };
+                        try out.append(arena, .{ .text = .{ .origin = .{ .x = ctrl.x, .y = ctrl.y }, .runs = runs, .role = .surface_fg } });
+                    }
                 }
             },
             .color => |c| {
@@ -1052,6 +1072,7 @@ pub fn handlePointer(
                 },
                 .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 클릭 → 변형 순환(.toggle=활성)
                 .text => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 인라인 편집(.toggle=활성), 라벨은 선택만
+                .font => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 클릭 → 직접입력 편집(text와 동형, texts 범위라 platform이 enterEdit); 번들 순환은 키보드 ←→
                 .color => |c| {
                     // 비활성(프리셋 잠금)이면 swatch/hex 어디를 눌러도 인라인 편집을 직접 시작하지 않고 .toggle을 올린다 —
                     // platform이 "사용자 지정"으로 전환한 뒤 picker를 연다(클릭 시 자동 전환 후 편집).

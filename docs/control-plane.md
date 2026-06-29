@@ -191,6 +191,8 @@ flowchart TD
 
 **안정성·성능 gate**: 각 micro-slice 시작 설명에는 이 slice가 건드리는 hot path, lock, queue, allocation/copy, thread hop, I/O, app frame tick 영향을 함께 적는다. 종료 조건에는 그 영향이 bounded임을 증명하는 테스트·artifact·측정 또는 "영향 없음" 근거가 있어야 한다. 특히 main/frame tick으로 marshal되는 작업은 per-tick 처리량을 제한하고 다음 tick으로 쪼갤 수 있어야 하며, stream·capture·subscribeOutput은 bounded queue, drop/coalesce 또는 slow-subscriber disconnect 정책이 먼저 있어야 한다. 새 반복 경로·대량 복사·렌더/PTY hot path를 건드리면 `mise run perf` 또는 해당 opt-in stress/soak를 전후 비교하고, 아직 측정 항목이 없으면 먼저 lightweight counter/artifact를 추가한다. GUI/IME/WebView처럼 시간 숫자가 흔들리는 영역은 frame/NSView 계층 값, 이벤트 순서, queue 길이, dropped/coalesced count처럼 결정적인 안정성 지표를 우선 남긴다.
 
+**코드 배치·컨벤션 gate**: 각 micro-slice 시작 설명에는 실제 파일 후보와 책임 경계를 [파일/폴더 구조](project-structure.md)·[레이어링과 이식성 전략](layering-and-portability.md)에 맞춰 적는다. 순수 스키마·프로토콜·에러 모델·권한 판정·DTO 변환은 L2 중립 코드(`src/session/` 또는 시작 gate에서 합의한 중립 모듈)에 두고 `app`/`pty`/`platform` import 0을 `check-boundaries`로 고정한다. 소켓 bind·peer-cred·capability fd 상속·WKWebView 브리지는 L4 어댑터(`src/platform/macos/`)에 둔다. CLI parser/client/help는 `src/cli/` 하위에 두고 `main.zig`는 얇은 dispatcher로 유지한다. Swift는 AppKit/WebKit API 호출과 fixed-width ABI marshaling만 맡고, JSON-RPC 라우팅·trust/capability 정책·경로 allowlist·sanitizer 판정은 테스트 가능한 Zig 또는 `web/` 패키지 코드가 소유한다. 새 public entrypoint를 만들면 facade barrel/refAllDecls, `build.zig`·`.mise.toml` 연결, boundary rule을 같은 PR에서 갱신한다. Swift/Zig ABI가 바뀌면 ABI version과 layout test를 같이 갱신한다. `app_session.zig`나 Swift에 새 정책 로직을 넣어야 한다면, 코드를 쓰기 전에 왜 책임 분리가 불가능한지 문서와 사용자 설명에 먼저 남긴다.
+
 시작 gate의 최소 규칙:
 - Phase 1은 Phase 0 문서 계약이 최신인지(`control-plane.md`·`verification-matrix.md`·PR 본문)와 `git diff --check`/`check-boundaries`를 확인한 뒤 시작한다.
 - Phase 2는 Phase 1의 read-only socket/collector/capability/self-origin/capture gate를 재실행한 뒤 write를 연다.

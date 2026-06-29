@@ -183,9 +183,11 @@ flowchart TD
 
 > 선행(공통): 외부 ID 모델(§3), collector seam(§2), 소켓 부트스트랩(서버 bind가 첫 spawn 선행)을 Phase 1 안에서 먼저 확정. 기본 제품 세로 슬라이스는 "1~3 ∥ 4 → 5(합류) → 7(첫 콘텐츠)"가 빠르다. Phase 6(WebDriver)은 외부 자동화/agent-browser 호환이 목표가 되는 시점에 Phase 5 이후 독립으로 붙인다.
 
-**Phase 시작 gate(모든 구현 PR 공통)**: 각 Phase 또는 subphase(7a/7b/7c 등)를 시작하기 전에 작업자는 사용자에게 이번 단계에서 무엇을 구현·검증할지 다시 설명한다. 설명에는 scope, 건드릴 책임 영역/파일 후보, 새로 여는 capability·transport·의존성, 자동/수동 gate, 아직 미결정인 사용자 결정 항목을 포함한다. 그 다음 새 코드를 쓰기 전에 **직전 완료 Phase의 종료 gate를 다시 실행하거나, 현재 환경에서 재현 가능한 동등 regression gate를 실행**해 이전 Phase가 무너지지 않았음을 확인한다. 실패하면 새 Phase를 진행하지 않고 먼저 원인·영향·수정 계획을 보고한다.
+**Phase 시작 gate(모든 구현 PR 공통)**: 각 Phase 또는 micro-slice(1a/1b/7a 등)를 시작하기 전에 작업자는 사용자에게 이번 단계에서 무엇을 구현·검증할지 다시 설명한다. 설명에는 scope, 건드릴 책임 영역/파일 후보, 새로 여는 capability·transport·의존성, 자동/수동 gate, 아직 미결정인 사용자 결정 항목을 포함한다. 그 다음 새 코드를 쓰기 전에 **직전 완료 Phase의 종료 gate를 다시 실행하거나, 현재 환경에서 재현 가능한 동등 regression gate를 실행**해 이전 Phase가 무너지지 않았음을 확인한다. 실패하면 새 Phase를 진행하지 않고 먼저 원인·영향·수정 계획을 보고한다.
 
 **CLI help gate**: CLI에 새 subcommand/option/enum 값을 노출하는 Phase는 parser와 `--help`를 같은 PR에서 갱신한다. help에는 현재 Phase에서 실제 동작하는 명령만 공개하고, 다음 Phase 계획 명령을 미리 싣지 않는다. 완료 조건에는 `maru --help`와 해당 subcommand `--help` fixture 또는 스냅샷을 포함해 "구현됐는데 help에 없음"과 "help에는 있는데 parser/권한/실행 경로가 없음"을 모두 잡는다.
+
+**TDD micro-slice gate**: 아래 Phase는 제품 milestone일 뿐, 구현 PR의 기본 단위가 아니다. 구현 PR은 가능한 한 하나의 관찰 가능한 동작 또는 하나의 보안 불변식만 열어야 한다. 새 동작은 먼저 실패하는 단위/통합/fixture 테스트를 추가한 뒤 green으로 만들고, 마지막에 refactor와 문서/PR 본문을 맞춘다. 테스트로 먼저 표현하기 어려운 AppKit/WKWebView/GUI 동작은 "spike → 수동/자동 artifact → 최소 자동 회귀 테스트" 순서로 닫고, spike 결과 없이 제품 코드를 넓히지 않는다. 한 PR이 여러 micro-slice를 묶으려면 같은 테스트 harness를 공유해 리뷰·rollback이 더 작아진다는 근거를 PR 본문에 적는다.
 
 시작 gate의 최소 규칙:
 - Phase 1은 Phase 0 문서 계약이 최신인지(`control-plane.md`·`verification-matrix.md`·PR 본문)와 `git diff --check`/`check-boundaries`를 확인한 뒤 시작한다.
@@ -194,7 +196,7 @@ flowchart TD
 - Phase 4는 1~3과 병행 가능하지만, 시작 전에 공통 외부 ID·collector seam·socket bootstrap 계약이 바뀌지 않았는지 확인하고 웹뷰 껍데기용 별도 plan을 사용자에게 설명한다.
 - Phase 5는 Phase 1과 Phase 4의 합류 지점이므로, bridge 구현 전에 control-plane authz gate와 WKWebView frame/z-order/input gate를 모두 재검증한다.
 - Phase 6은 외부 자동화가 목표가 되는 시점에만 시작하고, Phase 5의 `browser.*`/bridge 신뢰 gate가 유지되는지 확인한다.
-- Phase 7은 7a/7b/7c로 나눠 각각 시작 gate를 둔다. 특히 7a는 toolchain/lockfile/CI cache 계획을, 7b는 sanitizer red fixture를, 7c는 `bind` capability와 링크 라우팅 권한 경계를 사용자에게 먼저 설명한다.
+- Phase 7은 7a/7b/7c/7d로 나눠 각각 시작 gate를 둔다. 특히 7a는 toolchain/lockfile/CI cache 계획을, 7b는 sanitizer red fixture를, 7c는 viewer/editor harness를, 7d는 `bind` capability와 링크 라우팅 권한 경계를 사용자에게 먼저 설명한다.
 
 | Phase | 내용 | 서드파티 |
 |---|---|---|
@@ -207,11 +209,44 @@ flowchart TD
 | **6. WebDriver 어댑터** | 외부 자동화가 필요할 때 제어 코어 위 ~15 명령 + 인증(§8.6). CLI에서 외부 자동화 endpoint를 노출하면 `--help` fixture 포함. 첫 마크다운 콘텐츠의 필수 선행은 아님 | 0 |
 | **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc dev/build/bundle) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 + CLI `--help`(`panel open --kind markdown`, `panel bind-session`) | §13 |
 
-Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다. Phase 7은 한 PR로 묶지 않는다: 7a `web/` Bun workspace+zntc hello bundle+`oxlint`/`oxfmt`/`web:test` scripts, 7b markdown sanitizer+viewer/source editor, 7c `panel.bindSession`+md 링크 라우팅 순서로 자른다.
+Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다. Phase 7은 한 PR로 묶지 않는다. 아래 micro-slice는 권장 PR 절단선이며, 더 잘게 쪼개도 된다.
+
+| Slice | 먼저 실패시킬 테스트/산출물 | 열 수 있는 동작 |
+|---|---|---|
+| 1a protocol | ndjson 부분읽기·max frame·JSON-RPC error·`hello` schema 단위 | socket 없이 schema/parser만 |
+| 1b socket bootstrap | bind/chmod/path owner/peer-cred 거부 통합 | local socket accept + hello |
+| 1c surface DTO | fake collector DTO, 2-window+quick ID 비충돌, generation 직렬화 | read-only DTO 모델 |
+| 1d CLI read-only metadata | `sessions list`/`session get` parser+`--help` fixture, scope 필터 단위 | metadata-only list/get |
+| 1e capability fd | fd 정상/누락/invalid/revoked, `FD_CLOEXEC`, redaction 단위+smoke | non-login trusted profile capability auth |
+| 1f capture | chunk generation, revocation, `capture-invalidated`, `session capture --help` fixture | `capture` read-output |
+| 1g self-origin product gate | primary 창 2개+quick+외부 shell 복사 selector 거부 artifact | 일반 shell `metadata:self` |
+| 2a write authz | `write`/`lifecycle` scope 거부와 error model 단위 | write dispatcher skeleton |
+| 2b sendText | PTY 통합 red test, raw byte fixture, `send-text --help` | `sendText` |
+| 2c sendKeys | key DSL/encoding fixture, `send-keys --help` | `sendKeys` |
+| 3a event model | event envelope, coalesce/drop/backpressure 단위 | event queue |
+| 3b session events | background source 포함 통합 | `events.subscribe` |
+| 3c output stream | `read-output` scope, I/O 직송 backpressure, revoke-on-chunk | `subscribeOutput` |
+| 4a host rect ABI | px↔pt/y-flip, surface lifecycle diff 단위 | web surface kind + rect data |
+| 4b modal split | renderer 2-pass와 overlay layer 단위/contract | terminal modal overlay 분리 |
+| 4c empty WKWebView | NSView frame/계층 단언, GUI z-order artifact | 빈 `kind=web` panel |
+| 4d input routing | responder/IME/drag spike artifact + 최소 회귀 | WKWebView focus/input routing |
+| 5a browser core | `browser.*` schema/dispatch/authz 단위 | WKWebView control core skeleton |
+| 5b trusted bridge | isolated world 주입/미주입 자동 E2E | trusted `window.maru.*` bridge |
+| 5c app scheme security | CSP, realpath/symlink/traversal 거부 단위 | `maru-app://` loader |
+| 5d minimal browser ops | navigate/evaluate/screenshot fixture | minimal `browser.*` |
+| 6a WebDriver shell | token/Origin/session HTTP routing 단위 | authenticated endpoint skeleton |
+| 6b WebDriver subset | navigate/evaluate/screenshot standard client smoke | read-only automation subset |
+| 6c element/input subset | find/click/send_keys/cookies/download smoke | agent-browser subset compatibility |
+| 7a web toolchain | Bun workspace scripts, zntc hello bundle, `web:test`/`web:lint`/`web:fmt-check` | frontend toolchain only |
+| 7b markdown sanitizer | adversarial red fixtures in Bun test | sanitizer package |
+| 7c viewer/editor | renderer/source editor unit + WKWebView harness | markdown viewer/source editor |
+| 7d bind/link routing | `bind` capability allow/deny, md click routing, CLI help fixture | `panel.bindSession` + links |
 
 ## 12. 테스트·검증 전략
 
 브라우저 제어 도구라도 real-browser 의존 E2E만으로 닫지 않는다. Maru 컨트롤 플레인은 ndjson 프레이밍, JSON-RPC 디스패치, capability/scope 권한 판정, 소켓 발견, 소켓 서버를 순수 로직 또는 작은 통합 E2E로 분리해 검증한다.
+
+기본은 TDD다. 각 micro-slice는 가능한 한 다음 순서를 따른다: (1) 실패하는 가장 작은 테스트/fixture를 만든다, (2) 해당 테스트만 통과하는 최소 구현을 한다, (3) 관련 broader gate(`check-boundaries`, CLI help snapshot, socket/PTY/WKWebView smoke 등)를 추가로 돌린다, (4) 문서와 PR 본문에 새로 열린 capability·transport·artifact를 반영한다. 자동화가 불가능한 GUI/IME/공증류는 먼저 spike로 사실을 캡처하고, 그 결과에서 자동화 가능한 계약(frame 값, 계층 값, sanitizer 결과, 권한 판정)을 최소 테스트로 고정한다.
 
 테스트 가능성:
 - **순수 로직**(프로토콜·디스패치·제어 명령·보안 판정): Zig 단위(TDD).
@@ -230,7 +265,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |
 | 5 | `browser.*` 디스패치, 신뢰 게이트 판정 | `evaluateJavaScript`로 브리지 호출·미주입 단언, isolated world | — |
 | 6 | WebDriver HTTP 라우팅, 토큰/Origin 검사 | 표준 WebDriver 클라이언트 제어 | — |
-| 7 | 7a: `web:test`/`web:lint`/`web:fmt-check` script 계약, zntc hello bundle. 7b: markdown sanitizer adversarial fixture. 7c: md 클릭 라우팅, `panel.bindSession` cwd, `bind` capability 허용·거부, CLI `--help` fixture(`panel open --kind markdown`/`panel bind-session`) | WKWebView 기반 웹 콘텐츠 E2E. WebDriver 어댑터가 아직 없으면 `evaluateJavaScript` 브리지 하니스로 먼저 검증하고, Phase 6 뒤 표준 WebDriver smoke를 추가 | 실제 렌더(눈 확인) |
+| 7 | 7a: `web:test`/`web:lint`/`web:fmt-check` script 계약, zntc hello bundle. 7b: markdown sanitizer adversarial fixture. 7c: viewer/source editor 단위 + WKWebView harness. 7d: md 클릭 라우팅, `panel.bindSession` cwd, `bind` capability 허용·거부, CLI `--help` fixture(`panel open --kind markdown`/`panel bind-session`) | WKWebView 기반 웹 콘텐츠 E2E. WebDriver 어댑터가 아직 없으면 `evaluateJavaScript` 브리지 하니스로 먼저 검증하고, Phase 6 뒤 표준 WebDriver smoke를 추가 | 실제 렌더(눈 확인) |
 
 ## 13. 열린 질문
 

@@ -18,7 +18,7 @@ tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루�
 - **동시성 = 단일 디스패치 지점(메인으로 marshal) + 출력 스트림은 I/O 스레드 직송.** 제어·조회는 메인 frame loop로 marshal해 코어/레지스트리/트리에 안전 접근하고, 고처리량 출력(`subscribeOutput`)은 메인을 거치지 않고 I/O 스레드에서 per-subscriber 큐로 직송한다(§5).
 - **보안 = 같은 uid 안의 신뢰 차등까지.** 웹 브리지는 신뢰 콘텐츠에만 노출, 외부 소켓은 peer-cred + 0700/0600, write는 per-surface capability(§8).
 - **`browser.*` = WKWebView 직접 제어(코어) + W3C WebDriver 어댑터(외부, 인증 필수).** CDP가 아니라 WebDriver다(§9).
-- **웹 패널 콘텐츠 번들러 = zntc(`@zntc/core`)로 확정.** zntc는 dev-only 빌드 도구로 두어 런타임 의존성 0을 유지한다. 웹 빌드 환경은 `web/` 하위 Bun workspace를 기본 방향으로 둔다(`bun.lock` 고정, install/scripts/test 실행). VoidZero 계열은 번들러 대안이 아니며, Vite+ 같은 통합 CLI는 zntc와 역할이 겹치므로 Phase 7 기본값으로 두지 않는다. 필요 시 Vitest/Oxc 같은 개별 도구만 테스트/보조 도구로 별도 검토한다. lockfile·vendoring·CI 캐시·라이선스·supply-chain 고정 방식은 Phase 7 착수 전 재확인한다(§15).
+- **웹 패널 프론트엔드 개발환경 = zntc로 확정.** `@zntc/core`(+ 프론트엔드 앱에는 필요 시 `@zntc/web`)가 dev server/preview/build/bundle을 맡고, dev-only 빌드 도구로 두어 런타임 의존성 0을 유지한다. `web/` 하위 Bun workspace는 패키지 설치·`bun.lock`·workspace script 실행만 맡는다. JS/TS 품질 게이트는 VoidZero/Oxc 계열의 `oxlint`·`oxfmt`를 쓴다. Vite+에는 root config override, workspace task runner, package-manager wrapper 같은 모노레포 기능이 있지만, 통합 CLI가 zntc의 dev/build와 Bun의 package-manager 책임까지 함께 가져오므로 Phase 7 기본값으로 두지 않는다. 필요 시 `vitest`/`tsgo` 같은 개별 도구 또는 Vite Task만 별도 검토한다. lockfile·vendoring·CI 캐시·라이선스·supply-chain 고정 방식은 Phase 7 착수 전 재확인한다(§15).
 - **리치 패널 렌더 = WKWebView (네이티브 뷰 비사용 원칙의 명시적 예외).** 원칙의 근거는 이식성인데, 웹 콘텐츠(HTML/JS/CSS)는 WKWebView/WebKitGTK/WebView2 어디서나 그대로 돌아 목적을 충족한다(SwiftUI와 달리 UI 코드가 Apple 전용이 아님). 예외는 **닫힌 열거**다: 마크다운 WYSIWYG 편집, 인앱 브라우저(임의 웹이라 진짜 엔진 필요). **diff 뷰어는 GPU 셀로 그리고 예외에 넣지 않는다**(색입힌 등폭 텍스트라 셀로 충분). 새 종류 추가는 사용자 승인이 필요하다. macOS=시스템 WebKit(의존 0)이나 이식 타깃은 WebKitGTK/WebView2로 의존 0이 깨진다(GPU 경로 WebGPU와 대칭).
 
 ## 2. 목표 위상
@@ -172,7 +172,7 @@ flowchart TD
 | **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님) | 0 |
 | **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). 1·4 합류 | 0 |
 | **6. WebDriver 어댑터** | 제어 코어 위 ~15 명령 + 인증(§8.5) | 0 |
-| **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc 번들) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 | §13 |
+| **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc dev/build/bundle) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 | §13 |
 
 Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다.
 
@@ -200,7 +200,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 ## 13. 열린 질문
 
-- 웹 asset repo/tooling 구성: 번들러는 zntc로 확정. 기본 방향은 `web/` 하위 Bun workspace(`package.json`+`bun.lock`)로 패키지 설치·script 실행·테스트를 고정하는 것이다. VoidZero 계열은 zntc 대체가 아니라 필요 시 Vitest/Oxc 등 개별 보조 도구로만 검토하고, Vite+ 전체 도입은 기본값에서 제외한다. Phase 7 착수 시 lockfile·CI cache·라이선스·offline/reproducible build를 함께 결정한다([project-rules.md] §의존성, 사용자 논의).
+- 웹 asset repo/tooling 구성: 프론트엔드 dev server/preview/build/bundle은 zntc로 확정. 기본 방향은 `web/` 하위 Bun workspace(`package.json`+`bun.lock`)로 패키지 설치·script 실행만 고정하는 것이다. JS/TS lint·format은 `oxlint`·`oxfmt`로 확정한다. Vite+는 모노레포 config·task runner를 제공하지만 전체 도입은 zntc의 프론트엔드 개발환경과 역할이 겹치므로 기본값에서 제외한다. Phase 7 착수 시 lockfile·CI cache·라이선스·offline/reproducible build와 함께 `web:dev`/`web:build`(zntc), `web:lint`/`web:fmt`/`web:fmt-check`(Oxc), `oxlint` rule set, `oxfmt` 적용 범위, Vite Task만 도입할 필요가 있는지를 결정한다([project-rules.md] §의존성, 사용자 논의).
 - 서드파티 JS 라이브러리(마크다운/편집: TipTap 등 vs 자체). Phase 7 착수 시 결정([project-rules.md] §의존성, 사용자 논의).
 - 비-자식 CLI의 인스턴스 선택 어휘(§4.2).
 - 비-자식 CLI에 read-output 권한을 주는 UX(일회성 GUI 확인, 짧은 TTL grant, 설정 allowlist 중 선택).
@@ -217,12 +217,12 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - 이벤트 background 소스(폴링 게이트 확장/진짜 소스)가 Phase 3 선결.
 - WebDriver 외부 도구 통합(agent-browser endpoint 연결)은 코어+서버 후속.
 - capability fd는 shell 환경에 민감하다. 현재 login wrapper는 fd를 닫는 것으로 실측됐으므로 일반 login shell에 `read-output` fd grant를 붙이면 동작하지 않는다. startup file은 fd를 닫을 수 있고, background child는 fd를 오래 붙잡을 수 있다. tmux/screen pane은 로컬 smoke에서 fd가 닫혔지만, 버전·설정 차이를 고려해 regression gate로 유지한다. Phase 1의 `read-output`은 non-login trusted profile부터 열고, TTL/revocation 테스트 없이는 기본 grant로 열지 않는다.
-- zntc는 외부 npm이라 dev-only라도 supply-chain 고정이 필요하다. 2026-06 현재 `@zntc/core` 존재·MIT 라이선스는 확인했지만, Phase 7 전에 lockfile·CI cache·license·offline/reproducible build를 재확인한다(§15).
+- zntc는 외부 npm이라 dev-only라도 supply-chain 고정이 필요하다. 2026-06 현재 `@zntc/core` 존재·MIT 라이선스는 확인했지만, Phase 7 전에 프론트엔드 앱에 필요한 `@zntc/web` 포함 여부, lockfile·CI cache·license·offline/reproducible build를 재확인한다(§15).
 
 ## 15. 선결 사항 (구현 직전 결정)
 
 - ~~`web-panel.md` 작성~~ **완료** — WKWebView 합성·z-order·per-pane rect ABI는 [웹 패널 인프라](web-panel.md)가 단일 출처. ABI·모달 레이어 분리 구현은 Phase 4.
-- zntc 번들 편입 방식(dev-only 빌드 도구로, 런타임 의존성 0 유지)·lockfile/캐시/라이선스 재확인 — Phase 7 전. 기본 환경은 `web/` Bun workspace이며, VoidZero 계열은 번들러가 아니라 테스트/보조 도구 후보로만 검토한다.
+- zntc 프론트엔드 dev/build/bundle 편입 방식(dev-only 빌드 도구로, 런타임 의존성 0 유지)·lockfile/캐시/라이선스 재확인 — Phase 7 전. `web/` Bun workspace는 패키지 설치·락파일·script 실행만 맡고, JS/TS 품질 게이트는 `oxlint`·`oxfmt`를 사용한다. Vite+ 모노레포 기능은 존재하지만, 전체 도입은 zntc 개발환경과 중복되는 통합 CLI 도입이므로 기본값에서 제외한다.
 - `MARU_SESSION` redaction 및 capability nonce redaction 처리 — Phase 1.
 
 ## 16. 코드 위치 (구현 시 채움)

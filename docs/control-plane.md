@@ -132,7 +132,10 @@ flowchart TD
 
 ### 8.4 환경변수 노출·redaction·capability fd
 - `$MARU_SESSION`은 키名에 `SESSION` 토큰을 포함하므로 [project-rules.md] §redaction의 deny-by-default 대상이다. trace/artifact에서 값을 마스킹한다. env는 보안 경계가 아니라 편의 채널이다(소켓 경로는 결정론적이라 env 없이도 발견됨). capability fd 번호를 담는 `MARU_CONTROL_CAP_FD`는 비밀이 아니지만, 그 fd에서 읽은 nonce는 절대 로그·trace·artifact에 쓰지 않는다.
-- capability 발급: server가 256-bit random nonce를 만들고 server-side에는 `hash(nonce) -> {surface_id, generation, scopes, expires_at?, revoked}`만 저장한다. nonce는 0600 임시 파일에 쓴 뒤 즉시 unlink하고, 그 열린 fd만 child spawn에 상속한다(다른 fd는 `CLOEXEC`, capability fd만 의도적으로 상속). CLI는 `MARU_CONTROL_CAP_FD`의 fd에서 nonce를 읽어 control socket의 첫 auth frame에 보낸다. server는 hash를 constant-time 비교하고 surface generation·scope·TTL·revocation을 확인한다.
+- capability 발급: server가 256-bit random nonce를 만들고 server-side에는 `hash(nonce) -> {surface_id, generation, scopes, expires_at?, revoked}`만 저장한다. nonce는 0600 임시 파일에 쓴 뒤 read-only fd로 다시 열고 즉시 unlink한다. child spawn에는 그 read-only fd만 상속한다(다른 fd는 `CLOEXEC`, capability fd만 의도적으로 상속). CLI는 `MARU_CONTROL_CAP_FD`의 fd에서 offset 0 `pread`로 payload를 읽어 control socket의 첫 auth frame에 보낸다(여러 CLI 호출이 공유 file offset에 의존하지 않게). server는 hash를 constant-time 비교하고 surface generation·scope·TTL·revocation을 확인한다.
+- fd payload는 magic/version/header를 포함한다. shell startup script가 같은 fd 번호를 닫거나 재사용하면 CLI는 임의 데이터를 nonce로 오해하지 말고 `capability-fd-invalid`로 실패한다.
+- shell 호환성 gate: 현재 macOS PTY는 login shell을 `/usr/bin/login -flp ... /bin/bash --noprofile --norc -c "exec -l <shell> ..."`로 감싼다. zsh/bash/fish 자체는 보통 env와 non-`CLOEXEC` fd를 자식에게 상속하지만, `login(1)`·중간 bash·사용자 startup file이 fd/env를 닫거나 바꿀 수 있다. Phase 1의 첫 spike는 zsh/bash/fish(설치된 경우) 기본 셸에서 `MARU_CONTROL_CAP_FD`와 fd payload가 최종 shell 및 `maru` CLI 자식까지 보존되는지 검증한다. 실패하면 env bearer token으로 후퇴하지 않고, trusted agent/control profile을 non-login 직접 exec로 제한하거나 별도 one-shot grant UX를 설계한다.
+- fd 전파 범위: shell에서 시작한 tmux/screen/background daemon은 capability fd를 오래 보유할 수 있다. 그래서 long-lived 기본 grant는 `metadata:self`로 제한하고, `read-output:self`는 명시 허용+짧은 TTL/즉시 revocation을 기본으로 둔다. sudo/su처럼 uid가 바뀌는 경로는 peer-cred 불일치 또는 fd close로 실패해야 하며, `sudo -E` 같은 env 보존 옵션도 nonce fd 없이는 권한이 없다.
 - revocation: surface close, generation 변경, grant 취소, TTL 만료 시 capability는 즉시 무효다. in-flight 요청은 `process-exited` 또는 `capability-revoked`로 실패한다. 같은 uid의 외부 프로세스가 결정적 socket path만 알아도 nonce fd를 상속하지 않았으면 `capture`/`subscribeOutput`을 호출할 수 없다.
 
 ### 8.5 WebDriver 어댑터
@@ -187,7 +190,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 | Phase | 단위(Zig) | 통합/E2E | 수동 |
 |---|---|---|---|
-| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-윈도우 ID 비충돌, capability fd auth(정상/누락/잘못된 surface/generation/revoked), `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), `capture` 권한 거부·허용, capability fd 상속 smoke | — |
+| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-윈도우 ID 비충돌, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), `capture` 권한 거부·허용, capability fd 상속 smoke, login shell matrix(zsh/bash/fish 설치분), tmux/background fd persistence+TTL/revocation | — |
 | 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드 | 소켓→실제 PTY 입력(통합 PTY) | — |
 | 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부 | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
 | 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |
@@ -200,6 +203,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - 서드파티 JS 라이브러리(마크다운/편집: TipTap 등 vs 자체). zntc는 빌드 도구라 별개. Phase 7 착수 시 결정([project-rules.md] §의존성, 사용자 논의).
 - 비-자식 CLI의 인스턴스 선택 어휘(§4.2).
 - 비-자식 CLI에 read-output 권한을 주는 UX(일회성 GUI 확인, 짧은 TTL grant, 설정 allowlist 중 선택).
+- login wrapper가 capability fd/env를 보존하지 않는 쉘·사용자 startup file 조합의 fallback UX(§8.4 gate 실패 시).
 - `sendKeys` 키 표기법(tmux 호환 이름) 세부.
 - `events.subscribe {filter?}` 필터 스키마.
 - 세션 이름/별칭, 영속/재연결(전역 UUID 도입 여부).
@@ -211,6 +215,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - per-pane rect-export ABI는 현재 없어 신규(web-panel.md).
 - 이벤트 background 소스(폴링 게이트 확장/진짜 소스)가 Phase 3 선결.
 - WebDriver 외부 도구 통합(agent-browser endpoint 연결)은 코어+서버 후속.
+- capability fd는 shell 환경에 민감하다. login wrapper나 startup file이 fd/env를 닫으면 사용성이 깨지고, tmux/screen/background daemon은 fd를 오래 붙잡아 권한 수명을 늘릴 수 있다. Phase 1 spike와 TTL/revocation 테스트 없이는 `read-output`을 기본 grant로 열지 않는다.
 - zntc는 외부 npm이라 supply-chain 고정이 필요하다 — 2026-06 현재 `@zntc/core` 존재·MIT 라이선스는 확인했지만, dev-only 편입 방식은 Phase 7 선결(§15).
 
 ## 15. 선결 사항 (구현 직전 결정)

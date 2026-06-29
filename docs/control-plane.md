@@ -71,11 +71,11 @@ flowchart TD
 ### 4.2 다중 인스턴스·발견
 - 소켓 경로 키 = 인스턴스(pid/부팅 nonce). `~/.cache/maru/control/`(0700)에 살아있는 인스턴스 인덱스 + `flock`.
 - bind 전 stale 소켓은 `flock`으로 살아있는지 판별 후 unlink-then-bind(살아있는 소켓은 unlink 금지).
-- 자식 셸은 `$MARU_SESSION`+소켓 경로로 자기 인스턴스를 안다. maru 밖 일반 셸의 CLI는 단일 인스턴스면 자동, 복수면 명시 인자(어휘 미정 — §13).
+- 자식 셸은 `$MARU_SESSION`+소켓 경로로 자기 인스턴스를 안다. 단, 이 둘은 발견 힌트일 뿐 권한 증명이 아니다. 실제 surface 권한은 spawn 시 상속한 capability fd(§8.4)가 증명한다. maru 밖 일반 셸의 CLI는 단일 인스턴스면 자동 발견까지만 가능하고, 비밀 출력 열람은 별도 grant가 필요하다(어휘 미정 — §13).
 
 ### 4.3 프레이밍 견고성
 - max frame size(≈ 1 MiB) 정의. 초과 시 `payload-too-large` + 연결 종료. 부분 읽기는 누적 버퍼.
-- 대형 응답(`capture` 전체 스크롤백 등)은 단일 ndjson 라인 금지 — chunk notification(예: 64 KiB/chunk)+완료 마커. **JSON 문자열은 valid UTF-8만 담으므로 임의 바이트(이스케이프 시퀀스·깨진 UTF-8)는 base64로 인코딩**한다. **일관성: chunk를 락 아래 복사하는 동안만 evict를 막아 torn read를 피한다** — 전체를 한 락에 잡으면 큰 할당+긴 락, chunk마다 락을 놓으면 reader의 evict/free와 경합하므로, chunk 경계에서 스냅샷 버전(generation)을 확인해 중간 행 소실을 검출한다.
+- 대형 응답(`capture` 전체 스크롤백 등)은 단일 ndjson 라인 금지 — chunk notification(예: 64 KiB/chunk)+완료 마커. **JSON 문자열은 valid UTF-8만 담으므로 임의 바이트(이스케이프 시퀀스·깨진 UTF-8)는 base64로 인코딩**한다. **일관성: capture 시작 시 `capture_id`+스냅샷 generation을 고정하고, 각 chunk는 `{capture_id, seq, generation, encoding}`을 싣는다.** chunk 복사는 surface `core_mutex` 아래에서만 수행하되 직렬화는 락 밖에서 한다. chunk 경계에서 generation이 바뀌면 server는 성공 완료 마커를 보내지 않고 `capture-invalidated` 오류/notification으로 스트림을 종료한다. client는 처음부터 재시도한다.
 - per-connection bounded outbound 큐 + non-blocking write. 응답을 안 읽는 클라이언트가 디스패처를 막지 않게 한다. 이벤트는 느린 구독자에 대해 coalesce/drop(상태 스냅샷이라 손실 허용), 한계 초과 시 구독 강제 해제.
 
 ## 5. 동시성·생명주기
@@ -98,11 +98,11 @@ flowchart TD
 | `session.subscribeOutput` | `{id}` | 스트림 | 실시간 출력. I/O 직송(§5). capture와 동일 권한(§8.3) |
 | `session.resize`/`focus`/`close`/`spawn` | `{id, ...}` | `{ok}` | 생애주기. 기존 자산(`closeActive`·`createTab` 등) 노출 |
 | `panel.open` | `{kind, args, trust}` | `{id}` | web 패널. `kind=browser`는 `trust=untrusted`(§8.1) |
-| `panel.bindSession` | `{panel_id, session_id}` | `{ok}` | 패널↔세션 cwd 연동 |
+| `panel.bindSession` | `{panel_id, session_id}` | `{ok}` | 패널↔세션 cwd 연동. `bind` capability(§8.3) |
 | `events.subscribe` | `{filter?}` | 스트림 | §7 |
 | `browser.*` | (§9) | — | web surface 제어. trust·capability 검사 |
 
-메서드별 필요 capability는 §8.3을 단일 출처로 따른다 — `list`/`get`/`bindSession`/`subscribe`=`metadata`, `capture`/`subscribeOutput`=`read-output`, `send*`=`write`, `resize`/`focus`/`close`/`spawn`/`panel.open`=`lifecycle`, `browser.*`=`browser`.
+메서드별 필요 capability는 §8.3을 단일 출처로 따른다 — `list`/`get`/`subscribe`=`metadata`, `panel.bindSession`=`bind`, `capture`/`subscribeOutput`=`read-output`, `send*`=`write`, `resize`/`focus`/`close`/`spawn`/`panel.open`=`lifecycle`, `browser.*`=`browser`.
 
 ## 7. 이벤트
 
@@ -124,13 +124,16 @@ flowchart TD
 - accept마다 peer uid 검증(`LOCAL_PEERCRED`/`SO_PEERCRED`), 불일치 시 종료(spike 실측 확정). 파일 권한에만 의존하지 않는다.
 
 ### 8.3 capability 인가
-- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 `metadata`(열거/조회 — `sessions.list`/`get`/`panel.bindSession`/`events.subscribe`), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`/`panel.open`), `browser`(`browser.*`)로 나눈다(§6 매핑의 단일 출처).
-- 자식이 받은 토큰은 기본적으로 자기 surface의 `metadata`+`read-output`(+필요 시 `write`)만 가진다. cross-surface·quick terminal·lifecycle·browser 권한은 거부 또는 사용자 확인이 기본이다. **`events.subscribe`는 전역 스트림이라 `metadata`만으로 다른 surface 상태(cwd·생성/종료)가 누설될 수 있다 — filter를 self-surface로 스코프**하고 cross-surface 구독은 추가 권한으로 둔다(filter 스키마 §13).
-- `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. 이 게이트는 `capture`가 처음 노출되는 Phase 1 안에서 먼저 구현한다. 단 **Phase 1은 peer-cred(같은 uid) + coarse `metadata`/`read-output` 거부 게이트까지**만 닫고 **per-surface 토큰 발급·자식 위임은 `write`가 들어오는 Phase 2로** 미룬다(read-only 첫 슬라이스에 토큰 머신 전체를 묶지 않는다).
+- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 `metadata`(열거/조회 — `sessions.list`/`get`/`events.subscribe`), `bind`(`panel.bindSession`), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`/`panel.open`), `browser`(`browser.*`)로 나눈다(§6 매핑의 단일 출처).
+- unix socket path와 peer-cred는 "같은 사용자"와 "같은 인스턴스 발견"만 증명한다. 특정 surface 권한은 capability fd(§8.4)로 받은 nonce를 첫 auth frame에 제시해야 생긴다. fd가 없거나 scope/generation/surface가 맞지 않으면 `unauthorized`다.
+- spawn profile의 기본 grant는 보수적으로 둔다. 일반 터미널 자식은 `metadata:self`만 기본이고, `read-output:self`는 Maru가 신뢰한 agent/control profile 또는 사용자가 명시적으로 허용한 세션에만 붙인다. `write`·`lifecycle`·`browser`·cross-surface 권한은 기본 거부 또는 사용자 확인이다. 이 모델은 fd를 상속한 그 터미널의 자식 프로세스가 자기 권한을 사용할 수 있음을 인정하고, scope를 self+최소 권한으로 줄여 피해 범위를 제한한다.
+- **`events.subscribe`는 전역 스트림이라 `metadata`만으로 다른 surface 상태(cwd·생성/종료)가 누설될 수 있다 — filter를 self-surface로 스코프**하고 cross-surface 구독은 추가 권한으로 둔다(filter 스키마 §13).
+- `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. `capture`가 처음 노출되는 Phase 1 안에서 capability fd 발급·auth·거부 테스트까지 함께 구현한다. "read-only라 토큰은 나중"으로 미루지 않는다.
 
-### 8.4 환경변수 노출·redaction·토큰 채널
-- `$MARU_SESSION`은 키名에 `SESSION` 토큰을 포함하므로 [project-rules.md] §redaction의 deny-by-default 대상이다. trace/artifact에서 값을 마스킹한다. env는 보안 경계가 아니라 편의 채널이다(소켓 경로는 결정론적이라 env 없이도 발견됨).
-- **미해결: 연결을 특정 surface+권한에 묶는 토큰 채널.** same-uid 위협을 capability로 막으려면 토큰이 필요한데, env는 같은 uid가 `sysctl KERN_PROCARGS2`로 읽고·소켓 경로는 결정론적이며·peer-cred는 uid만 증명한다 — 이 셋으로는 "이 연결 = 이 surface의 이 권한"을 묶지 못한다. Phase 2(토큰 위임) 착수 전 토큰 발급·바인딩 채널을 설계한다(현재 미해결).
+### 8.4 환경변수 노출·redaction·capability fd
+- `$MARU_SESSION`은 키名에 `SESSION` 토큰을 포함하므로 [project-rules.md] §redaction의 deny-by-default 대상이다. trace/artifact에서 값을 마스킹한다. env는 보안 경계가 아니라 편의 채널이다(소켓 경로는 결정론적이라 env 없이도 발견됨). capability fd 번호를 담는 `MARU_CONTROL_CAP_FD`는 비밀이 아니지만, 그 fd에서 읽은 nonce는 절대 로그·trace·artifact에 쓰지 않는다.
+- capability 발급: server가 256-bit random nonce를 만들고 server-side에는 `hash(nonce) -> {surface_id, generation, scopes, expires_at?, revoked}`만 저장한다. nonce는 0600 임시 파일에 쓴 뒤 즉시 unlink하고, 그 열린 fd만 child spawn에 상속한다(다른 fd는 `CLOEXEC`, capability fd만 의도적으로 상속). CLI는 `MARU_CONTROL_CAP_FD`의 fd에서 nonce를 읽어 control socket의 첫 auth frame에 보낸다. server는 hash를 constant-time 비교하고 surface generation·scope·TTL·revocation을 확인한다.
+- revocation: surface close, generation 변경, grant 취소, TTL 만료 시 capability는 즉시 무효다. in-flight 요청은 `process-exited` 또는 `capability-revoked`로 실패한다. 같은 uid의 외부 프로세스가 결정적 socket path만 알아도 nonce fd를 상속하지 않았으면 `capture`/`subscribeOutput`을 호출할 수 없다.
 
 ### 8.5 WebDriver 어댑터
 - TCP가 아니라 unix 소켓 위 HTTP(또는 loopback + 무작위 bearer 토큰 0600 파일) + Origin/Host 화이트리스트 + 기본 off. 인증 없는 localhost TCP는 cross-uid·CSRF로 `execute_script`/`get_cookies`를 노출하므로 금지한다.
@@ -160,13 +163,13 @@ flowchart TD
 | Phase | 내용 | 서드파티 |
 |---|---|---|
 | **0. 계약** | 본 문서 | 0 |
-| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + **collector(Swift 열거 + Zig 세션내 2층)** + 외부 ID + `$MARU_SESSION` 주입 + CLI 클라이언트 + **peer-cred + coarse `metadata`/`read-output` 거부 게이트**(토큰 위임은 Phase 2) + **`control.*` trace schema 확장** + `sessions.list`/`get`/`capture` | 0 |
+| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + **collector(Swift 열거 + Zig 세션내 2층)** + 외부 ID + `$MARU_SESSION` 주입 + capability fd 발급·auth + CLI 클라이언트 + **`metadata`/`read-output` scope 인가** + **`control.*` trace schema 확장** + `sessions.list`/`get`/`capture` | 0 |
 | **2. write** | `sendText`(raw)/`sendKeys` + `write`/`lifecycle` capability 인가(§8.3) + 에러 모델 | 0 |
 | **3. 이벤트** | `events.subscribe`(background 소스 포함) + outbound 백프레셔 + `subscribeOutput`(I/O 직송) | 0 |
 | **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님) | 0 |
 | **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). 1·4 합류 | 0 |
 | **6. WebDriver 어댑터** | 제어 코어 위 ~15 명령 + 인증(§8.5) | 0 |
-| **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc 빌드) + md 링크 라우팅 + `panel.bindSession` | §13 |
+| **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc 빌드) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 | §13 |
 
 Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다.
 
@@ -184,18 +187,19 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 | Phase | 단위(Zig) | 통합/E2E | 수동 |
 |---|---|---|---|
-| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-윈도우 ID 비충돌, `metadata`/`read-output` capability 허용·거부, `$MARU_SESSION` redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), `capture` 권한 거부 | — |
+| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-윈도우 ID 비충돌, capability fd auth(정상/누락/잘못된 surface/generation/revoked), `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), `capture` 권한 거부·허용, capability fd 상속 smoke | — |
 | 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드 | 소켓→실제 PTY 입력(통합 PTY) | — |
 | 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부 | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
 | 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |
 | 5 | `browser.*` 디스패치, 신뢰 게이트 판정 | `evaluateJavaScript`로 브리지 호출·미주입 단언, isolated world | — |
 | 6 | WebDriver HTTP 라우팅, 토큰/Origin 검사 | 표준 WebDriver 클라이언트 제어 | — |
-| 7 | md 클릭 라우팅, `panel.bindSession` cwd | 웹 콘텐츠 JS 테스트 + Chrome E2E | 실제 렌더(눈 확인) |
+| 7 | md 클릭 라우팅, `panel.bindSession` cwd, `bind` capability 허용·거부 | 웹 콘텐츠 JS 테스트 + Chrome E2E | 실제 렌더(눈 확인) |
 
 ## 13. 열린 질문
 
 - 서드파티 JS 라이브러리(마크다운/편집: TipTap 등 vs 자체). zntc는 빌드 도구라 별개. Phase 7 착수 시 결정([project-rules.md] §의존성, 사용자 논의).
 - 비-자식 CLI의 인스턴스 선택 어휘(§4.2).
+- 비-자식 CLI에 read-output 권한을 주는 UX(일회성 GUI 확인, 짧은 TTL grant, 설정 allowlist 중 선택).
 - `sendKeys` 키 표기법(tmux 호환 이름) 세부.
 - `events.subscribe {filter?}` 필터 스키마.
 - 세션 이름/별칭, 영속/재연결(전역 UUID 도입 여부).
@@ -213,12 +217,12 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 - ~~`web-panel.md` 작성~~ **완료** — WKWebView 합성·z-order·per-pane rect ABI는 [웹 패널 인프라](web-panel.md)가 단일 출처. ABI·모달 레이어 분리 구현은 Phase 4.
 - zntc 빌드 편입 방식(dev-only 빌드 도구로, 런타임 의존성 0 유지)·lockfile/캐시/라이선스 재확인 — Phase 7 전.
-- `MARU_SESSION` redaction 처리(값 마스킹) — Phase 1.
+- `MARU_SESSION` redaction 및 capability nonce redaction 처리 — Phase 1.
 
 ## 16. 코드 위치 (구현 시 채움)
 
 - 코어(L2): `src/session/control_plane.zig`
-- collector·소켓·디스패처(L4): `src/platform/macos/control_{collector,socket}.{zig,m}`, `src/platform/macos/app_host_abi.{zig,h}`
+- collector·소켓·디스패처(L4): `src/platform/macos/MaruAppHost.swift`, `src/platform/macos/control_{collector,socket}.{zig,m}`, `src/platform/macos/app_host_abi.{zig,h}`
 - 세션 신원: `src/pty/types.zig`(`SpawnRequest`)·`pty/macos.zig`(env)
 - CLI: `src/cli.zig`(`sessions`/`session` 서브커맨드)
 - WKWebView·WebDriver: `src/platform/macos/web_panel.{zig,swift}`

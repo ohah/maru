@@ -3634,9 +3634,10 @@ pub const AppSession = struct {
         _ = self.moveTab(idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
         // 무조건 rebuildSidebar: moveTab은 from==to(이미 그룹 경계 — 단일 탭/경계 탭 토글)면 early-return해 사이드바
         // 밴드/슬롯 상태(rebuildSidebar 산출)를 다시 짓지 않는다. 토글이 reorder 없이도 사이드바 모델을 새 pin 상태로
-        // 일관되게 두려고 여기서 무조건 다시 짓는다(토글은 핫패스가 아니라 중복 호출 무해). 📌 prefix 자체는 매 frame
-        // buildSidebarTitleFrame이 tab.pinned를 라이브로 읽어 그리므로 metal_dirty=true만으로도 즉시 갱신된다 —
-        // 핀 아이콘은 metal_dirty가 단일 트리거다(원래 "from==to 안전망"이 metal_dirty라던 주석을 정정).
+        // 일관되게 두려고 여기서 무조건 다시 짓는다(토글은 핫패스가 아니라 중복 호출 무해). 📌 글리프 자체는 매 frame
+        // buildSidebarTitleFrame이 tab.pinned를 라이브로 읽어 pins[]로 buildSidebarDrawList에 넘겨 이름줄 **우측 끝**에
+        // 그리므로(prefix 아님) metal_dirty=true만으로도 즉시 갱신된다 — 핀 아이콘은 metal_dirty가 단일 트리거다(원래
+        // "from==to 안전망"이 metal_dirty라던 주석을 정정).
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -11505,9 +11506,10 @@ pub const AppSession = struct {
         const sidebar_cols: u16 = @intCast(@min(@min(text_area.w / cw, full_cols -| indent_cols), @as(u32, std.math.maxInt(u16))));
         if (sidebar_cols == 0) return error.NoSidebar;
 
-        // 탭 카드를 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드): names=이름줄(📌 포함, 번호 없음),
-        // branch_lines=octocat() 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄). agents=에이전트
-        // 아이콘 코드포인트(0=없음) — 이름과 분리해 슬롯 세로 중앙에 독립 배치(buildSidebarDrawList).
+        // 탭 카드를 소유 버퍼로 모은다(buildSidebarDrawList가 코드포인트로 디코드): names=이름줄(동작/활성 마커 ·/* prefix,
+        // 번호 없음), branch_lines=octocat() 브랜치줄, path_lines=경로줄, status_lines=상태줄(빈 보조줄은 생략 → 1~4줄).
+        // agents=에이전트 아이콘 코드포인트(0=없음) — 이름과 분리해 슬롯 세로 중앙에 독립 배치. pins=고정 핀(📌) 표시 여부
+        // (buildSidebarDrawList가 이름줄 **우측 끝**에 그림 — 선두가 아니라, 마커가 가려지지 않게).
         var names: std.ArrayList([]const u8) = .empty;
         defer {
             for (names.items) |l| self.allocator.free(l);
@@ -11532,6 +11534,8 @@ pub const AppSession = struct {
         }
         var agents: std.ArrayList(u21) = .empty;
         defer agents.deinit(self.allocator);
+        var pins: std.ArrayList(bool) = .empty;
+        defer pins.deinit(self.allocator);
         for (self.sidebar_visible_tabs.items) |orig| {
             const tab = self.tabs.items[orig]; // 표시 슬롯 순서 → 원본 탭(검색 필터)
             const term = tab.activePane().activeTerm();
@@ -11541,15 +11545,21 @@ pub const AppSession = struct {
             try agents.append(self.allocator, if (renaming) 0 else agentIconCodepoint(term.agent_kind));
             // 이름줄 = custom_name(rename) 우선, 없으면 활성 Term 라벨. rename 중이면 편집 텍스트로 대체하고 보조줄은 숨긴다.
             if (renaming) {
+                // rename 중엔 마커·핀을 안 붙인다 — 마커 prefix를 붙이면 편집 텍스트가 2칸 밀려 renameCaretRect(이름줄
+                // 좌단=indent 가정)의 caret/IME 후보창과 어긋나고, 핀은 편집 폭을 잡아먹는다. 편집 동안만 전체 폭 사용.
                 try names.append(self.allocator, try self.renameEditText(self.allocator)); // owned → names가 소유
                 try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try status_lines.append(self.allocator, try self.allocator.dupe(u8, "")); // rename 중엔 상태줄 숨김
+                try pins.append(self.allocator, false);
             } else {
                 const base = workspaceLabel(tab);
-                const pin: []const u8 = if (tab.pinned) "\u{1F4CC} " else "";
-                // 이름줄 = [📌] + 이름 (에이전트 심볼·번호 없음 — 심볼은 독립 아이콘으로 분리).
-                try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ pin, base }));
+                // 이름줄 선두 = 동작/활성 마커: 활성 워크스페이스='*', 그 외='·'(U+00B7). 핀(📌)은 옛 설계처럼 선두에 박지
+                // 않고 buildSidebarDrawList가 이름줄 우측 끝에 따로 그린다 — 선두 칼럼을 마커 전용으로 비워 핀이 "동작/활성"
+                // 표시를 가리지 않게 한다(사용자 요청). 마커는 이름줄(line 0) 색을 따라간다(활성=강조, 그 외=흐림).
+                const marker: []const u8 = if (orig == self.app_window.active_tab) "* " else "\u{00B7} ";
+                try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ marker, base }));
+                try pins.append(self.allocator, tab.pinned);
                 // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null) + view options 토글로 표시 여부 결정.
                 // 이름줄은 항상 표시(사용자 요청). show-branch=false면 브랜치줄 생략, show-folder=false면 경로줄 생략.
                 // 토글은 독립적이다 — 둘 다 "git repo 안"을 전제로 하되(maru는 repo 밖 cwd 줄을 안 그림) 서로 안 묶인다.
@@ -11572,7 +11582,7 @@ pub const AppSession = struct {
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, sidebar_cols, fg, self.hovered_slot, null, self.displaySlotOf(self.app_window.active_tab), active_fg);
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, self.hovered_slot, null, self.displaySlotOf(self.app_window.active_tab), active_fg);
         // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(브라유)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
         // codex=OpenAI 청록. 종류를 색으로 구분하고, **진행/완료는 상태줄**(running=⠋ 회전 스피너[브랜드색]·idle=✓)이 담당한다
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
@@ -14045,13 +14055,13 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
         // (1) 시프트만 하고 size.cols를 안 넓히면 ShapedRecordOutsideSurface로 실패함을 고정(버그 재현 — buildFromDrawList가
         //     실패 시 draw_list를 정리하므로 별도 free 안 함).
         {
-            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
+            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted);
             for (dl.cells) |*c| c.col += indent_cols;
             try std.testing.expectError(error.ShapedRecordOutsideSurface, fb.buildFromDrawList(allocator, dl, &session.renderer_state));
         }
         // (2) 시프트 후 size.cols=full_cols로 넓히면(수정) 정상 빌드 + row 보존(이름 idx0·경로 idx2, count=3).
         {
-            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, sidebar_cols, muted, null, 1, 0, muted);
+            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted);
             for (dl.cells) |*c| c.col += indent_cols;
             dl.size.cols = full_cols;
             var f = try fb.buildFromDrawList(allocator, dl, &session.renderer_state);
@@ -14348,8 +14358,9 @@ fn assertPinnedPrefix(session: *AppSession) !void {
     }
 }
 
-/// 사이드바 제목 프레임에 📌(U+1F4CC) 핀 prefix 글리프 셀이 있는가 — buildSidebarTitleFrame이 names줄에
-/// "📌 "를 붙였을 때만 나타난다. 프레임은 매 frame 재-shape(tab.pinned 라이브)되므로 토글 직후 빌드하면 새 상태가 보인다.
+/// 사이드바 제목 프레임에 📌(U+1F4CC) 핀 글리프 셀이 있는가 — buildSidebarTitleFrame이 pins[]로 tab.pinned를
+/// 넘겨 buildSidebarDrawList가 이름줄 **우측 끝**에 그렸을 때만 나타난다(옛 설계의 이름 prefix "📌 "는 폐기). 프레임은
+/// 매 frame 재-shape(tab.pinned 라이브)되므로 토글 직후 빌드하면 새 상태가 보인다.
 fn frameHasPinGlyph(session: *AppSession) !bool {
     var f = try testBuildSidebarTitleFrame(session);
     defer f.deinit(session.allocator);
@@ -14385,6 +14396,45 @@ test "togglePin: 경계 탭(from==to)도 토글 즉시 📌 라벨이 갱신된�
     try std.testing.expect(!t0.pinned);
     try std.testing.expect(!(try frameHasPinGlyph(session))); // 📌가 즉시 사라져야 한다
     try assertPinnedPrefix(session);
+}
+
+test "사이드바 이름줄 선두에 활성 마커('*')가 붙는다 — 핀과 위치 분리" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText shaper 경로
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000); // 사이드바 grid 확보
+
+    // 단일 탭 = 활성 워크스페이스. 이름줄 선두에 동작/활성 마커 '*'(U+002A)가 붙는다(비활성이면 '·' U+00B7).
+    var f = try testBuildSidebarTitleFrame(session);
+    defer f.deinit(session.allocator);
+    // '*' 마커를 찾아 **위치까지** 검증한다(단순 존재 X — 엉뚱한 칸의 '*'나 이름 속 '*'를 통과시키지 않게):
+    // ① 활성 슬롯(0)의 이름줄(line_index 0)에 있고, ② 그 줄(row)에서 최좌단(선두) 글리프여야 한다.
+    var found = false;
+    var mrow: u16 = 0;
+    var mcol: u16 = 0;
+    for (f.draw_list.cells) |c| if (c.codepoint == '*') {
+        found = true;
+        mrow = c.row;
+        mcol = c.col;
+    };
+    try std.testing.expect(found); // 활성 탭 선두 '*'
+    const base = coretext_frame_builder.sidebar_line_base;
+    try std.testing.expectEqual(@as(u16, 0), mrow / base); // 슬롯 0 = 활성 워크스페이스
+    try std.testing.expectEqual(@as(u16, 0), (mrow % base) % 4); // line_index 0 = 이름줄
+    for (f.draw_list.cells) |c| {
+        if (c.row == mrow) try std.testing.expect(c.col >= mcol); // '*'가 이름줄 최좌단(선두)
+    }
+    // 핀(📌)은 안 붙었으니 핀 글리프는 없어야 한다 — 마커와 핀이 독립임을 고정.
+    try std.testing.expect(!(try frameHasPinGlyph(session)));
 }
 
 test "applyWorkspaceWindow: 섞인 [P,u,P,u] 복원을 고정-prefix로 stable-partition한다" {

@@ -8,7 +8,8 @@
 cmux 같은 유연한 레이아웃:
 
 - **세로 탭 사이드바**(왼쪽) — 워크스페이스마다 **1~3줄 카드**로 보여준다. line0=이름(워크스페이스 번호 prefix는
-  안 붙임 — 사용자 요청), git repo 안이면 line1=`├ {branch}`, line2=cwd 경로(`$HOME`→`~` 축약). 보조줄(브랜치·경로)은
+  안 붙임 — 사용자 요청). **이름줄 선두**엔 동작/활성 마커를 1칸 붙인다: 활성 워크스페이스=`*`(강조), 그 외=`·`(U+00B7,
+  흐림). git repo 안이면 line1=`├ {branch}`, line2=cwd 경로(`$HOME`→`~` 축약). 보조줄(브랜치·경로)은
   git repo일 때만 추가되고 흐린 색, 줄들은 슬롯 안에 세로 중앙 정렬한다. 세로 위치는 row에 `slot*32 + line_count*4 +
   line_index`로 인코딩(`sidebarGlyphRow` 단일 출처)하고 렌더러(.m)가 디코드 — 인코딩은 향후 4번째 줄(상태)까지 여유,
   현재 구현은 3줄. 카드 높이는 cell의 3.8×. **베이스/결정**: git 브랜치는 OSC 7 cwd에서 `.git/HEAD` walk-up(cwd 변경
@@ -287,7 +288,8 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
 - **우클릭 메뉴 — 워크스페이스 추가 항목**: 사이드바 워크스페이스를 우클릭하면 "Rename" 외에 **위치 고정(Pin/Unpin)**과
   **배경색 프리셋**(없음·앰버·파랑·초록·빨강·보라; 앰버=maru accent #DDA15E)이 뜬다(pane/Term은 "Rename"만). 메뉴 항목은
   chrome 중립이라 platform이 대상 타입에 맞게 동적 주입하고(`buildContextMenuItems`), accept는 selected 인덱스로 분기
-  (`acceptContextMenu`). 위치 고정은 드래그 재정렬에서 그 탭을 안 움직이고(`moveTab` no-op) 사이드바에 📌, 배경색은
+  (`acceptContextMenu`). 위치 고정은 드래그 재정렬에서 그 탭을 안 움직이고(`moveTab` no-op) 사이드바 카드 이름줄
+  **우측 끝**에 📌(선두가 아니라 — 선두 칼럼은 위 동작/활성 마커 전용; 핀이 그 표시를 가리지 않게), 배경색은
   카드에 반투명 tint(chrome draw op은 role 기반이라 임의 RGB는 platform이 명시-색 GpuQuad로 직접 lower). 둘 다
   workspace.v1에 영속(`pinned`/`background-color` — docs/workspace-restore.md).
 - **기본 키바인딩 없음(베이스)**: rename 기본 단축키는 macOS 단일 관례가 없어(Terminal.app은 탭 rename 기본키 없음,

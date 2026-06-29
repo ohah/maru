@@ -99,6 +99,8 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
 
 각 slice는 안정성·성능 영향을 같이 닫는다. WKWebView frame sync는 pane rect diff가 있을 때만 수행하고, 매 frame 무조건 `evaluateJavaScript`/snapshot/navigation을 호출하지 않는다. bridge는 bounded message size와 dispatch backpressure를 갖고, `browser.*` 호출은 main tick을 오래 점유하면 chunk/yield 또는 비동기 완료로 분리한다. z-order/IME처럼 wall-clock 성능 숫자가 흔들리는 영역은 frame 값, responder 전이 순서, message count, dropped/coalesced count 같은 결정적 artifact를 남긴다.
 
+코드 배치는 [control-plane.md](control-plane.md) §11의 코드 배치·컨벤션 gate를 따른다. 특히 Swift의 `WKURLSchemeHandler`/`WKWebView` 코드는 WebKit API 어댑터로만 두고, 어떤 URL·파일·origin·capability를 허용할지의 정책 판정은 테스트 가능한 Zig 또는 `web/` 패키지 코드에 둔다. 마크다운 sanitizer는 Phase 7의 웹 콘텐츠 패키지가 Bun test로 소유하며, Swift에 HTML sanitizer나 bridge trust 정책을 넣지 않는다.
+
 ## 11. 테스트·검증
 
 - **자동(headless/TDD)**: 브리지 격리(`evaluateJavaScript`로 page-world `window.maru === undefined`), per-pane rect 계산(px↔pt·y-flip) 단위, surface diff 로직, WKWebView frame·NSView 계층 값 단언, CSP·경로 정규화(traversal 거부) 단위를 먼저 실패시키고 구현한다. Phase 7 웹 콘텐츠의 순수 JS/TS 로직은 Bun 내장 test runner(`bun test`, `web:test`)로 검증한다. Phase 6 WebDriver 어댑터가 아직 없으면 WKWebView 통합 E2E는 `evaluateJavaScript` 하니스로 먼저 검증하고, WebDriver가 붙은 뒤 같은 subset을 표준 WebDriver smoke로 반복한다.
@@ -157,4 +159,6 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 - 합성·WKWebView·입력: `src/platform/macos/web_panel.{zig,swift}`
 - surface 생애주기·per-pane rect ABI: `src/platform/macos/app_host_abi.{zig,h}`
 - 모달 레이어 분리: `src/platform/macos/maru_metal_renderer.{h,m}`(별도 오버레이 layer·2패스), `src/renderer/metal_frame.zig`
-- web 보안(스킴·CSP·새니타이즈): `src/platform/macos/web_panel.swift`(WKURLSchemeHandler), 콘텐츠 번들(zntc)
+- `maru-app://` OS 어댑터: `src/platform/macos/web_panel.swift`(WKURLSchemeHandler·WKWebView API 호출·ABI marshaling만)
+- `maru-app://` 보안 정책: 테스트 가능한 Zig 모듈(구현 PR에서 `src/platform/macos/web_panel_security.zig` 같은 가장 가까운 책임 파일로 확정). CSP 상수, realpath/symlink/traversal 거부, origin/frame allowlist 판정은 여기가 단일 출처다.
+- markdown sanitizer·웹 콘텐츠 보안: `web/` 패키지(zntc build, Bun `web:test`). sanitizer fixture와 렌더러 순수 로직은 Swift가 아니라 웹 패키지가 소유한다.

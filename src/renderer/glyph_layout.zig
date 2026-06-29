@@ -22,20 +22,43 @@ pub const RasterStyleFlags = struct {
 pub const TextLayoutConfig = struct {
     font_size_px: u16 = 14,
     device_scale: u16 = 1,
-    // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 폰트 메트릭에서 채운다.
-    // 0이면 메트릭이 없는 경로(테스트/fake backend)라 font_size_px × device_scale 정사각으로
-    // 대체한다(기존 동작).
+    // **cell_width_px = grid advance**(셀 배치 간격, 자간 반영) — 합성 글리프(box/block/Powerline) slot·셀 배경·hit-test에
+    // 쓴다. **glyph_cell_width_px = 폰트 글리프 비트맵 폭(자연폭, 자간 무관)** — 폰트 글리프 atlas slot에 쓴다. 0이면
+    // 메트릭이 없는 경로(테스트/fake backend)라 cell_width_px로 폴백(기존 동작 보존). slot 폭 선택은 slotCellWidthPx.
     cell_width_px: u16 = 0,
+    glyph_cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
+
+    /// glyph의 atlas slot 폭 기준이 되는 cell 폭(glyph_id별). **합성 글리프(box/block/Powerline)·notdef는 glyph_id==0**
+    /// (셰이퍼가 0으로 정규화 — shaped_records 주석)이고 셀에 꽉 차 이음매 없이 타일링돼야 하므로 grid advance(cell_width_px)
+    /// 그대로. **실제 폰트 글리프(id!=0)는 자간과 무관한 자연폭(glyph_cell_width_px)**으로 그려, 음수 자간이 폰트 글리프 slot을
+    /// 좁혀 "셀보다 넓다" 오판→축소+ink세로중앙(세로 흔들림)·찌그러짐을 내던 버그를 끊는다(code-review). glyph_cell_width_px
+    /// 미설정(0)이면 cell_width_px로 폴백(메트릭 없는 fake/테스트 경로 — 기존 동작).
+    pub fn slotCellWidthPx(self: TextLayoutConfig, glyph_id: GlyphId) u16 {
+        if (glyph_id == 0) return self.cell_width_px;
+        return if (self.glyph_cell_width_px != 0) self.glyph_cell_width_px else self.cell_width_px;
+    }
 };
+
+test "TextLayoutConfig.slotCellWidthPx: 합성/notdef=grid advance, 폰트 글리프=자연폭(슬롯 분리)" {
+    // advance 10(자간으로 좁힘) vs 자연폭 16.
+    const c = TextLayoutConfig{ .cell_width_px = 10, .glyph_cell_width_px = 16 };
+    try std.testing.expectEqual(@as(u16, 10), c.slotCellWidthPx(0)); // 합성/notdef → grid advance(셀폭 — 타일링)
+    try std.testing.expectEqual(@as(u16, 16), c.slotCellWidthPx(42)); // 폰트 글리프 → 자연폭(자간 무관)
+    // glyph_cell_width_px 미설정(0, fake/테스트) → cell_width_px 폴백(기존 동작).
+    const c2 = TextLayoutConfig{ .cell_width_px = 10 };
+    try std.testing.expectEqual(@as(u16, 10), c2.slotCellWidthPx(42));
+    try std.testing.expectEqual(@as(u16, 10), c2.slotCellWidthPx(0));
+}
 
 pub const GlyphCacheKey = struct {
     font_id: FontId,
     glyph_id: GlyphId,
     font_size_px: u16,
     device_scale: u16,
-    // atlas slot 크기의 단일 출처(advance×line-height). 0이면 정사각 대체. cell 크기가 바뀌면
-    // 같은 glyph라도 새 slot이어야 하므로 cache identity의 일부다.
+    // atlas slot 폭의 단일 출처. **TextLayoutConfig.slotCellWidthPx의 결과**가 들어온다 — 폰트 글리프는 자연폭(자간
+    // 무관), 합성/notdef(glyph_id==0)은 grid advance(셀폭). 0이면 정사각 대체. slot 폭이 바뀌면 같은 glyph라도 새 slot이라
+    // cache identity의 일부다. (높이는 advance×line-height의 cell_height_px.)
     cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
     // 셀 span(EAW 폭: wide=2, 그 외 1). atlas slot 폭 = cell_width_px × cell_width(estimateGlyphBitmapSize)라 **slot
@@ -167,7 +190,8 @@ pub fn buildGlyphRunList(
                 .glyph_id = shaped.glyph_id,
                 .font_size_px = config.font_size_px,
                 .device_scale = config.device_scale,
-                .cell_width_px = config.cell_width_px,
+                // slot 폭 기준 cell 폭: 합성/notdef(glyph_id==0)은 grid advance(셀폭·타일링), 폰트 글리프는 자연폭(자간 무관).
+                .cell_width_px = config.slotCellWidthPx(shaped.glyph_id),
                 .cell_height_px = config.cell_height_px,
                 .cell_width = cell.width, // span — slot 폭 = cell_width_px × span이라 키에 포함(span 충돌 방지)
                 .style = flags,

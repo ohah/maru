@@ -369,14 +369,18 @@ fn applyFontSpacing(
     line_height: f32,
     letter_spacing_pt: f32,
     scale_milli: u32,
-) struct { width_px: u32, height_px: u32 } {
+) struct { advance_width_px: u32, glyph_width_px: u32, height_px: u32 } {
     const height_px: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(base_height_px)) * line_height));
     // 논리 pt → backing px(분수 scale 그대로). padding px 환산(× scale_milli / 1000)과 같은 방식.
     const spacing_px: f32 = letter_spacing_pt * @as(f32, @floatFromInt(scale_milli)) / 1000.0;
     // i64로 가산해(음수 spacing) 1px 미만이면 1로 saturate — 0폭이면 grid가 div-by-cell에서 폭주한다.
     const width_i: i64 = @as(i64, base_width_px) + @as(i64, @intFromFloat(@round(spacing_px)));
-    const width_px: u32 = @intCast(@max(@as(i64, 1), width_i));
-    return .{ .width_px = width_px, .height_px = height_px };
+    const advance_width_px: u32 = @intCast(@max(@as(i64, 1), width_i));
+    // **자간은 grid advance(셀 간격)만 바꾸고, 글리프 비트맵 폭은 자연폭(base) 그대로 둔다.** 음수 자간이 slot을
+    // 좁혀 일반 글자가 "셀보다 넓다"로 오판→축소+ink세로중앙(글자마다 세로 흔들림)되던 버그를 끊는다(code-review).
+    // 즉 글리프 래스터·atlas slot·화면 quad 폭 = glyph_width_px(자연), 셀 배치 step = advance_width_px(자간 반영).
+    // Ghostty도 일반 텍스트를 자연 bearing으로 두고 셀폭 조정은 배치에만 적용한다(face.zig "left-aligned within the cell").
+    return .{ .advance_width_px = advance_width_px, .glyph_width_px = base_width_px, .height_px = height_px };
 }
 
 /// 창 뒤 배경 블러(window.blur, F3-1)의 **유효 반경**(px). config 반경을 그대로 주되, 창이 불투명(opacity>=1)이면
@@ -1027,10 +1031,13 @@ pub const AppSession = struct {
     /// ESC-prefix 여부를 정하고, Swift keyDown이 maru_macos_app_session_option_as_meta로 읽어 Option-단독 키를 입력기
     /// 조합 경로로 보낼지(meta 우회) 가른다. 기본 true(현행 — 항상 meta). [[option-as-meta]]
     option_as_meta: bool = true,
-    // 한 cell의 device 픽셀 크기(advance 폭 × line-height). 실제 CoreText 메트릭에서 뽑아
-    // shaper(atlas slot 크기)·rasterizer·renderer fixed-cell layout·host resize가 모두 같은 값을
-    // 쓰게 한다. 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다.
+    // 한 cell의 device 픽셀 크기. **cell_width_px = grid advance(셀 배치 간격, 자간 반영)** — renderer fixed-cell
+    // layout·hit-test·cursor·selection·cols 계산이 모두 이 값을 쓴다. **glyph_cell_width_px = 글리프 비트맵 폭(자연폭,
+    // 자간 무관)** — atlas slot 크기·화면 글리프 quad 폭에 쓴다. 자간 0이면 둘이 같다. 둘을 분리해야 음수 자간이
+    // 글리프 slot을 좁혀 세로 흔들림/찌그러짐을 내던 버그가 사라진다(applyFontSpacing·refreshCellMetrics 단일 출처).
+    // 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다(둘 다).
     cell_width_px: u32 = 0,
+    glyph_cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
     // chrome 최소화 세션인가(quick terminal minimal). true면 paneBarHeightPx가 0(탭 바 끔)이고 refreshCellMetrics가
     // 사이드바 폭을 0으로 강제 — 터미널 그리드만 그린다. 사이드바 폭 0이면 사이드바 가장자리 hit-test(xOnSidebarEdge)도
@@ -5529,11 +5536,12 @@ pub const AppSession = struct {
                 self.cell_height_px = metrics.cell_height_px;
             }
         }
-        // line-height(행간)·letter-spacing(자간) config를 cell 두 px에 단일 적용한다 — native/fallback이 base
-        // cell 크기를 정한 '직후', grid·atlas·hit-test·IME가 파생되기 '전'. line-height는 cell_height_px에 곱하고,
-        // letter-spacing은 논리 pt를 backing px로 환산(× scale_milli/1000, padding px 환산과 동일 방식)해 cell_width_px에
-        // 가산한다. 늘어난 cell은 native 셰이퍼가 glyph를 slot 안 가운데로 그려 자동 여백이 된다 — 셰이퍼엔 안 넘긴다
-        // (넘기면 Zig grid 계산과 native slot이 어긋난다). 기본값(1.0/0.0)이면 곱 1.0·가산 0이라 현 동작과 동일.
+        // line-height(행간)·letter-spacing(자간) config를 적용한다 — native/fallback이 base cell 크기를 정한 '직후',
+        // grid·atlas·hit-test·IME가 파생되기 '전'. **자간은 cell_width_px(grid advance=셀 배치 간격)에만 가산하고,
+        // 글리프 비트맵 폭(glyph_cell_width_px=atlas slot·화면 quad 폭)은 자연폭(base) 그대로 둔다**(applyFontSpacing
+        // 단일 출처). 이렇게 분리해야 음수 자간이 slot을 좁혀 일반 글자를 "셀보다 넓다"로 오판→축소+ink세로중앙(글자마다
+        // 세로 흔들림)시키던 버그가 사라진다 — 글리프는 자연폭 slot에 온전히 그려지고, 좁힘은 셀 배치 step에만 반영돼
+        // 이웃 글자와 겹친다(Ghostty식). line-height는 cell_height_px에 곱한다. 기본값(1.0/0.0)이면 둘 다 base.
         const spaced = applyFontSpacing(
             self.cell_width_px,
             self.cell_height_px,
@@ -5541,7 +5549,8 @@ pub const AppSession = struct {
             self.appearance.font.letter_spacing,
             self.scale_milli,
         );
-        self.cell_width_px = spaced.width_px;
+        self.cell_width_px = spaced.advance_width_px;
+        self.glyph_cell_width_px = spaced.glyph_width_px;
         self.cell_height_px = spaced.height_px;
         // 세로 사이드바 폭도 분수 scale에 맞춰 backing 픽셀로 환산한다(메트릭과 같은 단일 출처). 폭은 현재
         // 논리 폭(sidebar_width_pt — 사용자 드래그로 바뀔 수 있음)에서 파생하므로 DPI 변경에도 유지된다.
@@ -9775,6 +9784,7 @@ pub const AppSession = struct {
                     .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
                     .scale_milli = self.scale_milli,
                     .cell_width_px = @intCast(self.cell_width_px),
+                    .glyph_cell_width_px = @intCast(self.glyph_cell_width_px),
                     .cell_height_px = @intCast(self.cell_height_px),
                     // 활성 surface 커서: 창이 포커스를 잃었으면 cursor.unfocused(block/hollow/hidden) 적용(F1-4b-2).
                     .cursor_unfocused = self.unfocusedCursorMode(),
@@ -11384,6 +11394,7 @@ pub const AppSession = struct {
             .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
             .scale_milli = self.scale_milli,
             .cell_width_px = @intCast(self.cell_width_px),
+            .glyph_cell_width_px = @intCast(self.glyph_cell_width_px),
             .cell_height_px = @intCast(self.cell_height_px),
         };
     }
@@ -11920,6 +11931,10 @@ pub const AppSession = struct {
             .rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
             .scale_milli = self.scale_milli,
             .cell_width_px = @intCast(cell_w),
+            // 오버레이(커맨드 팔레트·Find·IME preedit)도 터미널과 같은 1× 셀(cell_w==self.cell_width_px)을 쓰므로 폰트
+            // 글리프 자연폭도 self.glyph_cell_width_px로 넘긴다 — 안 넘기면 음수 자간에서 오버레이 텍스트만 좁은 slot으로
+            // 세로 흔들림 버그가 남는다(code-review). 합성 글리프는 slotCellWidthPx가 glyph_id==0으로 셀폭 유지.
+            .glyph_cell_width_px = @intCast(self.glyph_cell_width_px),
             .cell_height_px = @intCast(cell_h),
         };
         // caret이 있으면 cursor 색을 싣는다 — 컴포지터(metal_frame)가 colors.cursor가 있을 때만 반전 블록을 그린다.
@@ -12928,45 +12943,54 @@ test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs 
 
 // refreshCellMetrics의 단일 적용점이 호출하는 line-height·letter-spacing 산술을 못박는다(OS·CoreText 없이 곱/가산
 // 검증 — 비-macOS CI에서도 돈다). 이 두 px가 grid·atlas·hit-test의 진실 소스라, 여기 곱/가산이 맞으면 나머지가 자동 정합.
-test "applyFontSpacing: line-height multiplies height, letter-spacing adds to width (scaled, saturating)" {
-    // 기본값(1.0/0.0)은 base 그대로 — 회귀 최소(현 동작과 동일).
+test "applyFontSpacing: line-height multiplies height, letter-spacing adds to advance (scaled, saturating)" {
+    // 기본값(1.0/0.0)은 base 그대로 — advance·glyph 폭 모두 base.
     {
         const r = applyFontSpacing(8, 18, 1.0, 0.0, 1000);
-        try std.testing.expectEqual(@as(u32, 8), r.width_px);
+        try std.testing.expectEqual(@as(u32, 8), r.advance_width_px);
+        try std.testing.expectEqual(@as(u32, 8), r.glyph_width_px);
         try std.testing.expectEqual(@as(u32, 18), r.height_px);
     }
     // line-height 2.0 → 높이 2배(18→36), 폭은 letter-spacing 0이라 불변.
     {
         const r = applyFontSpacing(8, 18, 2.0, 0.0, 1000);
-        try std.testing.expectEqual(@as(u32, 8), r.width_px);
+        try std.testing.expectEqual(@as(u32, 8), r.advance_width_px);
         try std.testing.expectEqual(@as(u32, 36), r.height_px);
     }
-    // line-height 1.5 → 18×1.5=27(round). letter-spacing 4pt @1x → +4px(8→12).
+    // line-height 1.5 → 18×1.5=27(round). letter-spacing 4pt @1x → advance +4px(8→12).
     {
         const r = applyFontSpacing(8, 18, 1.5, 4.0, 1000);
-        try std.testing.expectEqual(@as(u32, 12), r.width_px);
+        try std.testing.expectEqual(@as(u32, 12), r.advance_width_px);
         try std.testing.expectEqual(@as(u32, 27), r.height_px);
     }
-    // letter-spacing은 논리 pt × 분수 scale로 환산 — 2x(scale 2000)에서 4pt는 +8px(8→16). 높이는 1.0이라 불변.
+    // letter-spacing은 논리 pt × 분수 scale로 환산 — 2x(scale 2000)에서 4pt는 advance +8px(8→16). 높이는 1.0이라 불변.
     {
         const r = applyFontSpacing(8, 18, 1.0, 4.0, 2000);
-        try std.testing.expectEqual(@as(u32, 16), r.width_px);
+        try std.testing.expectEqual(@as(u32, 16), r.advance_width_px);
         try std.testing.expectEqual(@as(u32, 18), r.height_px);
     }
-    // 음수 letter-spacing → 폭 좁힘(8 + (-3) = 5). round 동작 확인(-2.5pt → -3px? round(-2.5)= -2 in zig? half-away: -3).
+    // 음수 letter-spacing → advance 좁힘(8 + (-3) = 5). round(half-away): -3.
     {
         const r = applyFontSpacing(8, 18, 1.0, -3.0, 1000);
-        try std.testing.expectEqual(@as(u32, 5), r.width_px);
+        try std.testing.expectEqual(@as(u32, 5), r.advance_width_px);
     }
-    // 큰 음수 letter-spacing이 폭을 1 미만으로 끌어내려도 1px로 saturate(0폭 grid div 폭주 방지).
+    // 큰 음수 letter-spacing이 advance를 1 미만으로 끌어내려도 1px로 saturate(0폭 grid div 폭주 방지).
     {
         const r = applyFontSpacing(8, 18, 1.0, -100.0, 1000);
-        try std.testing.expectEqual(@as(u32, 1), r.width_px);
+        try std.testing.expectEqual(@as(u32, 1), r.advance_width_px);
     }
     // 정확히 base를 0으로 만드는 음수도 1로 saturate(8 + (-8) = 0 → 1).
     {
         const r = applyFontSpacing(8, 18, 1.0, -8.0, 1000);
-        try std.testing.expectEqual(@as(u32, 1), r.width_px);
+        try std.testing.expectEqual(@as(u32, 1), r.advance_width_px);
+    }
+    // **핵심(슬롯 분리)**: 자간은 advance만 바꾸고 **글리프 비트맵 폭(glyph_width_px)은 자연폭 base 불변**이다 —
+    // 음수든 양수든 큰 음수든. 이 불변식이 깨지면 음수 자간에서 slot이 좁아져 글자가 세로로 흔들리는 버그가 재발한다.
+    {
+        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 1.0, -3.0, 1000).glyph_width_px);
+        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 1.0, 4.0, 1000).glyph_width_px);
+        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 1.0, -100.0, 1000).glyph_width_px); // saturate 무관: 자연폭 유지
+        try std.testing.expectEqual(@as(u32, 8), applyFontSpacing(8, 18, 2.0, 4.0, 2000).glyph_width_px); // line-height·scale 무관
     }
 }
 

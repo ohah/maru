@@ -122,6 +122,8 @@ font.family-italic = ""
 - ⌘+/⌘-(폰트 키우기/줄이기)는 `font.size`를 **고정 1pt씩** 바꾼다(보폭은 설정 항목이 아니다 — Terminal.app·iTerm2·Ghostty 관례). ⌘0은 config 기본 크기로 복귀.
 - `font.line-height`는 행간 배수다(1.0=CoreText 자동 cell 높이 그대로). 기본 1.0.
 - `font.letter-spacing`은 자간(논리 pt, 음수 허용 — 칸 좁힘)이다. 기본 0.0.
+  - **렌더 모델(자간 적용)**: 자간은 **grid advance(셀 배치 간격)에만** 반영하고, **폰트 글리프 비트맵 폭은 자연폭(자간 무관)**으로 둔다 — `applyFontSpacing`이 `advance_width_px`(spaced, 배치·hit-test·커서)와 `glyph_cell_width_px`(natural, atlas slot·글리프 quad)를 분리 반환하고, `TextLayoutConfig.slotCellWidthPx`가 글리프별로 slot 폭을 고른다. **합성 글리프(box/block/Powerline·notdef = `glyph_id==0`)는 셀에 꽉 차 이음매 없이 타일링돼야 하므로 advance(셀폭) 그대로** 쓴다. 근거: 음수 자간이 폰트 글리프 slot을 좁히면 글리프가 "셀보다 넓다"로 오판→축소+ink세로중앙 경로로 빠져 **글자마다 세로로 흔들리고/찌그러지던** 버그가 났다(code-review). Ghostty도 일반 텍스트를 자연 bearing 좌측정렬로 두고 셀폭 조정은 배치에만 적용한다(`face.zig` "left-aligned within the cell"). 좁힘 시 글리프는 자연폭으로 온전히 그려지고 배치 step만 줄어 이웃과 겹친다.
+  - **후속(A — 미완)**: 화면 글리프 quad의 가로 폭이 아직 grid advance(`maru_fill_cell_quad` `px_right=cw×span`)라, 음수 자간에서 자연폭 비트맵이 좁은 dest로 샘플돼 **가로 squish**가 남는다. 글리프 quad를 배경 quad와 분리해 자연폭(`cell.atlas_width_px`)으로 그리면(+배경 run-batching 검토) squish 없이 깔끔히 겹친다 — 세로 흔들림(이번 수정)과 별개의 렌더러 quad 작업.
 - `font.fallback`은 폴백 폰트 패밀리 목록(쉼표 구분)이다. primary `family`에 없는 글리프(한글·이모지·기호 등)를 그릴 때 이 목록을 앞에 두고 CoreText 자동 cascade(`kCTFontCascadeListAttribute`)를 뒤에 잇는다. 빈 값(기본)이면 CoreText 기본 cascade만 쓴다.
 - `font.family-bold`/`font.family-italic`은 bold(SGR 1)/italic(SGR 3) 글자에 쓸 별도 패밀리다. 빈 값(기본)이면 primary `family`의 bold/italic variant를 쓰고, variant가 없으면 regular로 대체한다(합성/faux 안 함).
 - raw `FontConfig`는 `ResolvedFontRequest`로 먼저 검증한다. 빈 family와 1px 미만 또는 512px 초과 font size는 renderer로 보내지 않는다.

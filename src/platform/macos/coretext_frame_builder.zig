@@ -17,9 +17,11 @@ pub const CoreTextFrameBuilder = struct {
     // 폰트 크기를 device 픽셀에 정확히 맞추고, shaper config의 정수 device_scale은 여기서
     // 반올림해 파생한다(atlas 정사각 fallback/cache key 보조용).
     scale_milli: u32 = 1000,
-    // 실제 폰트 메트릭에서 온 cell 픽셀 크기(advance 폭 × line-height, device px). shaper config로
-    // 흘러 atlas slot이 정사각이 아니라 실제 모노스페이스 격자 크기가 된다.
+    // 실제 폰트 메트릭에서 온 cell 픽셀 크기(device px). cell_width_px = grid advance(자간 반영 — 합성 글리프 slot·배경),
+    // glyph_cell_width_px = 폰트 글리프 자연폭(자간 무관 — 폰트 글리프 slot). shaper config로 흘러 atlas slot 폭이
+    // glyph_id별로 갈린다(slotCellWidthPx). 0이면 폴백. 음수 자간 세로흔들림/squish 차단의 핵심 분리.
     cell_width_px: u16 = 0,
+    glyph_cell_width_px: u16 = 0,
     cell_height_px: u16 = 0,
     // 창이 포커스를 잃었을 때 활성 surface 커서를 어떻게 그릴지(config.cursor.unfocused). app_session이 매 frame
     // window_focused로 산출해 주입한다 — .normal이면 현행(반전 블록), .hollow/.hidden이면 renderer가 cursor
@@ -136,6 +138,7 @@ pub const CoreTextFrameBuilder = struct {
             // 실제 화면 경로는 아래 cell_width_px/cell_height_px(분수 메트릭)로 정밀 식별한다.
             .device_scale = renderer.deviceScaleFromMilli(self.scale_milli),
             .cell_width_px = self.cell_width_px,
+            .glyph_cell_width_px = self.glyph_cell_width_px,
             .cell_height_px = self.cell_height_px,
         };
         const shaped = try shaper.shape(allocator, owned_list, &font_registry);

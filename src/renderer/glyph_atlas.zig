@@ -288,9 +288,9 @@ fn estimateGlyphBitmapSize(glyph: glyph_layout.GlyphRun) EstimatedGlyphBitmapSiz
         const h = @as(u32, glyph.cache_key.raster_height_px);
         return .{ .width_px = w, .height_px = h, .upload_bytes = @as(usize, w) * @as(usize, h) * 4 };
     }
-    // cell 메트릭(advance 폭 × line-height)이 있으면 그 크기로 slot을 잡아 실제 모노스페이스
-    // 셀에 맞게 그린다. wide glyph(cell_width=2)는 advance의 2배 폭이다. 메트릭이 없는 경로
-    // (테스트/fake backend)는 font_size × scale 정사각으로 대체한다(기존 동작 보존).
+    // cache_key.cell_width_px(= slotCellWidthPx 결과: 폰트 글리프=자연폭, 합성/notdef=grid advance) × span으로 slot을
+    // 잡는다. wide glyph(cell_width=2)는 2배 폭이다. 메트릭이 없는 경로(테스트/fake backend)는 0이라 font_size × scale
+    // 정사각으로 대체한다(기존 동작 보존). 높이는 advance×line-height의 cell_height_px.
     const cell_w = @as(u32, glyph.cache_key.cell_width_px);
     const cell_h = @as(u32, glyph.cache_key.cell_height_px);
     var width_px: u32 = undefined;

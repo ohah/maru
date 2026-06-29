@@ -5623,7 +5623,7 @@ test "preedit clips at the row end instead of wrapping" {
     try std.testing.expect(!snap.cursor.visible);
 }
 
-test "preedit inserts mid-line, shifting trailing glyphs (가나다 + 나앞 조합 → 가[라]나다)" {
+test "preedit overlays mid-line, covering the next glyph (가나다 + 나앞 조합 → 가[라]다)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
     try core.write("\xea\xb0\x80\xeb\x82\x98\xeb\x8b\xa4"); // "가나다": 가=0,나=2,다=4 (각 wide)
@@ -5632,14 +5632,13 @@ test "preedit inserts mid-line, shifting trailing glyphs (가나다 + 나앞 조
 
     try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
     const snap = core.renderSnapshot();
-    // 삽입형: '나'/'다'가 오른쪽으로 밀리고 그 자리에 '라'가 들어가 "가[라]나다"로 보인다.
+    // 오버레이: '라'가 '나'를 덮고 '다'는 제자리(col4)에 남는다("가[라]다" — '나'는 가려짐).
     try std.testing.expectEqual(@as(u21, 0xAC00), snap.cells[0].codepoint); // 가(그대로)
     try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[2].codepoint); // 라(조합, 반전)
     try std.testing.expect(snap.cells[2].style.reverse);
     try std.testing.expectEqual(@as(u2, 2), snap.cells[2].width);
     try std.testing.expect(snap.cells[3].continuation);
-    try std.testing.expectEqual(@as(u21, 0xB098), snap.cells[4].codepoint); // 나(2칸 밀림)
-    try std.testing.expectEqual(@as(u21, 0xB2E4), snap.cells[6].codepoint); // 다(2칸 밀림)
+    try std.testing.expectEqual(@as(u21, 0xB2E4), snap.cells[4].codepoint); // 다(안 밀림 — 제자리)
     try std.testing.expect(!snap.cursor.visible);
     try std.testing.expectEqual(@as(u16, 4), snap.cursor.col); // 커서는 조합 끝
     // 실제 그리드는 불변 — 확정 전까지 셸 상태는 "가나다" 그대로다.
@@ -5647,41 +5646,45 @@ test "preedit inserts mid-line, shifting trailing glyphs (가나다 + 나앞 조
     try std.testing.expectEqual(@as(u21, 0xB2E4), core.screen.cells[4].codepoint); // grid의 '다'는 col4
 }
 
-test "preedit ambiguous-width=wide: circled number drawn 2 cells matches the insert shift (no gap)" {
-    // 코드리뷰 결함: preedit_width(snapshotWithPreedit)는 cellWidthAmbiguous로 2칸 시프트하는데 drawPreeditCells가
-    // cellWidth(1칸)로 그리면, wide 모드에서 동그란 번호 뒤에 빈 칸/잔상이 남고 커서가 1칸 모자랐다. 두 출처를 일치시킴.
+test "preedit ambiguous-width=wide: circled number drawn 2 cells (width consistent with cursor advance)" {
+    // 코드리뷰 결함 회귀: drawPreeditCells가 cellWidthAmbiguous(2칸)가 아니라 cellWidth(1칸)로 그리면,
+    // wide 모드에서 동그란 번호의 continuation이 안 그려지고 커서가 1칸 모자랐다. 폭 출처를 일치시킴.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
     core.ambiguous_wide = true;
     try core.write("ab"); // 커서 col 2
-    try core.write("\x1b[2D"); // 커서를 col 0으로(mid-line insert)
+    try core.write("\x1b[2D"); // 커서를 col 0으로(뒤 글자 위에서 조합)
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
-    try core.setPreedit("③"); // U+2462 — wide면 2칸. 시프트(2)와 그리기(2)가 일치해야 빈 칸/잔상이 없다.
+    try core.setPreedit("③"); // U+2462 — wide면 2칸
     const snap = core.renderSnapshot();
     try std.testing.expectEqual(@as(u21, 0x2462), snap.cells[0].codepoint); // ③(조합)
-    try std.testing.expectEqual(@as(u2, 2), snap.cells[0].width); // drawPreeditCells도 ambiguous-aware → 2칸
+    try std.testing.expectEqual(@as(u2, 2), snap.cells[0].width); // ambiguous-aware → 2칸
     try std.testing.expect(snap.cells[1].continuation); // continuation(잔상 'b'가 아님)
-    try std.testing.expectEqual(@as(u21, 'a'), snap.cells[2].codepoint); // 2칸 밀림
-    try std.testing.expectEqual(@as(u21, 'b'), snap.cells[3].codepoint);
     try std.testing.expectEqual(@as(u16, 2), snap.cursor.col); // 조합 끝 = preedit_width(2)와 일치
+    // 오버레이라 'a'/'b'는 ③에 덮여 안 보인다(영문과 동일 — 뒤 글자 가림).
+    try std.testing.expectEqual(@as(u21, ' '), snap.cells[2].codepoint);
 }
 
-test "preedit falls back to overlay when shifting would clip trailing content" {
-    // cols=7: "가나다"가 col0~5를 채우고 col6만 빈다. 조합 폭 2칸을 밀 자리가 없어('다'가
-    // 행 밖으로 잘림) 삽입형 대신 오버레이로 폴백한다.
-    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 7, .rows = 2 });
+test "preedit overlay covers a trailing autosuggest ghost (영문처럼 가림 — 옆으로 안 밀림)" {
+    // 회귀: 앱이 커서 뒤에 그린 자동완성 고스트가 한글 조합 중 옆으로 밀려 잔존하던 버그. 영문은
+    // 키 즉시 commit으로 앱이 고스트를 지우는데, 한글은 조합 미전송이라 maru가 삽입형으로 고스트를
+    // 보존해 버렸다. 오버레이 전환 → 조합 글자가 고스트를 덮어 가린다(영문과 동일한 결과).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
-    try core.write("\xea\xb0\x80\xeb\x82\x98\xeb\x8b\xa4"); // "가나다"
-    try core.write("\x1b[4D"); // 커서를 '나' base(col2)로
-    try std.testing.expectEqual(@as(u16, 2), core.screen.cursor.col);
+    try core.write("\xec\x9d\x91"); // 앱이 커서 뒤에 그린 고스트 "응"(wide, col0-1)
+    try core.write("\x1b[2D"); // 커서를 col0(고스트 위)으로
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 
-    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) — 밀면 '다'가 행 밖으로 잘린다
+    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
     const snap = core.renderSnapshot();
-    // 폴백(오버레이): '나' 자리에 '라'가 덮이고 '다'는 제자리(col4)에 남는다("가[라]다").
-    try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[2].codepoint); // 라(덮어씀)
-    try std.testing.expect(snap.cells[2].style.reverse);
-    try std.testing.expectEqual(@as(u21, 0xB2E4), snap.cells[4].codepoint); // 다(안 밀림)
+    // '라'가 '응'을 덮는다 — '응'은 화면에서 사라진다(영문 입력과 동일).
+    try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[0].codepoint); // 라(덮음)
+    try std.testing.expect(snap.cells[0].style.reverse);
+    try std.testing.expect(snap.cells[1].continuation);
+    try std.testing.expectEqual(@as(u16, 2), snap.cursor.col); // 커서는 조합 끝
     try std.testing.expect(!snap.cursor.visible);
+    // 실제 그리드의 고스트는 불변 — 확정 시 앱이 알아서 정리한다.
+    try std.testing.expectEqual(@as(u21, 0xC751), core.screen.cells[0].codepoint); // grid엔 '응' 그대로
 }
 
 test "zsh wide-glyph erase sequence (BS BS SP SP BS BS) cleans the hangul cell pair" {

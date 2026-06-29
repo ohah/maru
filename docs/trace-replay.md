@@ -68,6 +68,12 @@ event 4 shell.command-end surface=1 row=2 exit=0
 
 **아직 없는 것**(후속): (1) live 레코딩 — 실제 세션에서 이 라인을 파일로 append하는 `MARU_TRACE` 게이트, (2) replay용 `output`/`input`/`resize`/`process-exit` 이벤트(위 base kind), (3) reader/ReplayRunner. reader/replay PR은 위 라인을 같은 escape 규칙으로 되읽어 facade로 재생하고, metadata가 surface/workspace에 어떻게 반영되는지 테스트한다.
 
+### Control-plane event (미정)
+
+[세션 컨트롤 플레인](control-plane.md)의 JSON-RPC 요청/응답/notification은 현재 `maru.trace.v1` event kind가 아니다. 따라서 구현 PR은 기존 trace 포맷을 그대로 "재사용"한다고 주장하면 안 된다. 컨트롤 플레인 기록이 필요해지는 PR은 먼저 [Facade 계약](facade-contracts.md)의 `Trace/Event` 대응표와 이 문서를 함께 갱신해 `control.request`/`control.response`/`control.notification` 같은 어휘, id 매칭, 실패 응답, replay 의미를 확정한다.
+
+이 event에는 cwd, scrollback, command output, capability token, WebDriver script/cookie 같은 민감 데이터가 섞일 수 있다. 저장 전 redaction은 [프로젝트 규칙](project-rules.md)의 기준을 따르고, capability/token 값은 fixture에 남기지 않는다.
+
 초기에는 wall-clock timestamp를 replay 의미에 쓰지 않는다. 시간은 디버깅 보조 정보일 수 있지만, replay의 정답은 event 순서다.
 
 ## replay가 하는 일

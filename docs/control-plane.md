@@ -18,7 +18,7 @@ tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루�
 - **동시성 = 단일 디스패치 지점(메인으로 marshal) + 출력 스트림은 I/O 스레드 직송.** 제어·조회는 메인 frame loop로 marshal해 코어/레지스트리/트리에 안전 접근하고, 고처리량 출력(`subscribeOutput`)은 메인을 거치지 않고 I/O 스레드에서 per-subscriber 큐로 직송한다(§5).
 - **보안 = 같은 uid 안의 신뢰 차등까지.** 웹 브리지는 신뢰 콘텐츠에만 노출, 외부 소켓은 peer-cred + 0700/0600, write는 per-surface capability(§8).
 - **`browser.*` = WKWebView 직접 제어(코어) + W3C WebDriver 어댑터(외부, 인증 필수).** CDP가 아니라 WebDriver다(§9).
-- **웹 패널 콘텐츠 빌드 = zntc(`@zntc/core`).** Zig 기반 트랜스파일러/번들러(외부 npm, WASM 빌드). dev-only 빌드 도구로 두어 런타임 의존성 0을 유지한다(§15).
+- **웹 패널 콘텐츠 빌드 = zntc(`@zntc/core`).** Zig 기반 트랜스파일러/번들러(외부 npm, WASM 빌드). dev-only 빌드 도구로 두어 런타임 의존성 0을 유지한다. 존재·MIT 라이선스는 2026-06 기준 확인했지만, lockfile·vendoring·CI 캐시·supply-chain 고정 방식은 Phase 7 착수 전 재확인한다(§15).
 - **리치 패널 렌더 = WKWebView (네이티브 뷰 비사용 원칙의 명시적 예외).** 원칙의 근거는 이식성인데, 웹 콘텐츠(HTML/JS/CSS)는 WKWebView/WebKitGTK/WebView2 어디서나 그대로 돌아 목적을 충족한다(SwiftUI와 달리 UI 코드가 Apple 전용이 아님). 예외는 **닫힌 열거**다: 마크다운 WYSIWYG 편집, 인앱 브라우저(임의 웹이라 진짜 엔진 필요). **diff 뷰어는 GPU 셀로 그리고 예외에 넣지 않는다**(색입힌 등폭 텍스트라 셀로 충분). 새 종류 추가는 사용자 승인이 필요하다. macOS=시스템 WebKit(의존 0)이나 이식 타깃은 WebKitGTK/WebView2로 의존 0이 깨진다(GPU 경로 WebGPU와 대칭).
 
 ## 2. 목표 위상
@@ -40,9 +40,9 @@ flowchart TD
 | 층 | 위치 | 책임 | 이식 시 |
 |---|---|---|---|
 | **L2 코어** | `src/session/` | 메시지 스키마, JSON-RPC 디스패치, 에러 모델, 순수 변환. OS/런타임 타입 0 | 재사용 |
-| **L4 collector** | `platform/macos/` | 4개 레이어·OS에서 상태 수집 → 중립 DTO로 주입 | 타깃별 |
-| **L4 소켓/브리지 서버 + 디스패처** | `platform/macos/` | accept, peer-cred, ndjson 프레이밍, 메인 marshal, 웹뷰 메시지 핸들러 | 타깃별 |
-| **L4 WKWebView 제어 + WebDriver 어댑터** | `platform/macos/` | WKWebView API 호출(Swift). 라우팅·디스패치·프레이밍은 Zig | 타깃별 |
+| **L4 collector** | `src/platform/macos/` | 4개 레이어·OS에서 상태 수집 → 중립 DTO로 주입 | 타깃별 |
+| **L4 소켓/브리지 서버 + 디스패처** | `src/platform/macos/` | accept, peer-cred, ndjson 프레이밍, 메인 marshal, 웹뷰 메시지 핸들러 | 타깃별 |
+| **L4 WKWebView 제어 + WebDriver 어댑터** | `src/platform/macos/` | WKWebView API 호출(Swift). 라우팅·디스패치·프레이밍은 Zig | 타깃별 |
 
 코어(L2)는 상태를 **collector가 주입하는 중립 DTO seam으로만** 받는다([layering-and-portability.md] §3.1 `PtyIo` vtable 선례).
 
@@ -116,12 +116,13 @@ flowchart TD
 - 신뢰 콘텐츠도 자기 surface(또는 명시 위임)만 제어한다.
 
 ### 8.2 소켓 권한·peer-cred
-- 0700 전용 디렉터리 + bind 후 `fchmod 0600`. `O_NOFOLLOW`/lstat로 심볼릭 링크·소유자 검증.
-- accept마다 peer uid 검증(`LOCAL_PEERCRED`/`SO_PEERCRED`), 불일치 시 종료(spike 실측 확정). 소켓 권한은 `fchmod(fd)`가 아니라 `chmod(path)`/`umask`로 0600(spike에서 `fchmod(fd)`는 -1 확인). 파일 권한에만 의존하지 않는다.
+- 0700 전용 디렉터리 + bind 시 `umask` 또는 bind 후 `chmod(path)`로 socket path를 0600에 고정한다. `fchmod(fd)`는 쓰지 않는다(spike에서 -1 확인). `O_NOFOLLOW`/lstat로 심볼릭 링크·소유자 검증.
+- accept마다 peer uid 검증(`LOCAL_PEERCRED`/`SO_PEERCRED`), 불일치 시 종료(spike 실측 확정). 파일 권한에만 의존하지 않는다.
 
-### 8.3 write 인가
-- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. write(`send*`/생애주기/`browser.*`)는 per-surface capability로 좁힌다 — 자식이 받은 토큰은 자기 surface만, cross-surface는 거부 또는 사용자 확인. 기본 deny.
-- `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 동일한 비밀-노출 권한 게이트를 둔다.
+### 8.3 capability 인가
+- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 최소한 `metadata`(열거/조회), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`), `browser`로 나눈다.
+- 자식이 받은 토큰은 기본적으로 자기 surface의 `metadata`+`read-output`(+필요 시 `write`)만 가진다. cross-surface·quick terminal·lifecycle·browser 권한은 거부 또는 사용자 확인이 기본이다.
+- `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. 이 게이트는 `capture`가 처음 노출되는 Phase 1 안에서 먼저 구현한다.
 
 ### 8.4 capability 핸들·redaction
 - `$MARU_SESSION`은 키名에 `SESSION` 토큰을 포함하므로 [project-rules.md] §redaction의 deny-by-default 대상이다. trace/artifact에서 값을 마스킹한다. env는 보안 경계가 아니라 편의 채널이다(소켓 경로는 결정론적이라 env 없이도 발견됨).
@@ -154,8 +155,8 @@ flowchart TD
 | Phase | 내용 | 서드파티 |
 |---|---|---|
 | **0. 계약** | 본 문서 | 0 |
-| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + collector + 외부 ID + `$MARU_SESSION` 주입 + CLI 클라이언트 + `sessions.list`/`get`/`capture` | 0 |
-| **2. write** | `sendText`(raw)/`sendKeys` + capability 인가(§8.3) + 에러 모델 | 0 |
+| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + collector + 외부 ID + `$MARU_SESSION` 주입 + CLI 클라이언트 + `metadata`/`read-output` capability 인가 + `sessions.list`/`get`/`capture` | 0 |
+| **2. write** | `sendText`(raw)/`sendKeys` + `write`/`lifecycle` capability 인가(§8.3) + 에러 모델 | 0 |
 | **3. 이벤트** | `events.subscribe`(background 소스 포함) + outbound 백프레셔 + `subscribeOutput`(I/O 직송) | 0 |
 | **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님) | 0 |
 | **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). 1·4 합류 | 0 |
@@ -172,15 +173,15 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - **순수 로직**(프로토콜·디스패치·제어 명령·보안 판정): Zig 단위(TDD).
 - **소켓·collector**: 실제 unix socket bind/connect 통합 E2E + fake `Rt` 유닛.
 - **웹 패널**(콘텐츠·`browser.*`·브리지·신뢰 게이트): `evaluateJavaScript`/WebDriver 어댑터로 **자동 E2E**. 예: untrusted 패널에서 `typeof window.webkit.messageHandlers.maru === 'undefined'` 단언으로 브리지 미주입을 자동 검증. frame 값·NSView 계층(z-order)은 코드 단언.
-- **픽셀 시각 정합**(z-order·frame이 눈에 맞는가): 창 전체 스크린샷(`CGWindowList`로 Metal+WKWebView 합성)으로 부분 자동, 최종 확인은 수동. (기존 `MARU_SCREENSHOT`은 Metal만 잡아 WKWebView가 안 들어오므로 web-panel.md에서 합성 캡처를 정한다.)
+- **픽셀 시각 정합**(z-order·frame이 눈에 맞는가): web-panel.md §11을 단일 출처로 둔다. 현재 CI 자동화는 불가(`CGWindowListCreateImage` 제거, ScreenCaptureKit은 TCC/GUI 필요)라 Phase 4 종료 게이트는 GUI 골든 1 frame 수동 확인이다.
 
-매 단계 `check-boundaries`(코어 L2에 app/pty/platform import 0). 관측 가능성: 컨트롤 플레인 JSON-RPC 메시지를 trace 포맷으로 재사용(요청/응답/이벤트 기록→replay), 실패 artifact는 redaction(§8.4) 후.
+매 단계 `check-boundaries`(코어 L2에 app/pty/platform import 0). 관측 가능성: 컨트롤 플레인 JSON-RPC 메시지를 기록하려면 먼저 [Trace와 Replay](trace-replay.md)·[Facade 계약](facade-contracts.md)의 `Trace/Event` schema를 `control.*` event로 확장한다. 그 전에는 "기존 trace 포맷을 그대로 재사용"한다고 주장하지 않는다. 실패 artifact는 redaction(§8.4) 후.
 
 | Phase | 단위(Zig) | 통합/E2E | 수동 |
 |---|---|---|---|
-| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-윈도우 ID 비충돌 | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt) | — |
+| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-윈도우 ID 비충돌, `metadata`/`read-output` capability 허용·거부, `$MARU_SESSION` redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), `capture` 권한 거부 | — |
 | 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드 | 소켓→실제 PTY 입력(통합 PTY) | — |
-| 3 | outbound 백프레셔·coalesce/drop | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
+| 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부 | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
 | 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |
 | 5 | `browser.*` 디스패치, 신뢰 게이트 판정 | `evaluateJavaScript`로 브리지 호출·미주입 단언, isolated world | — |
 | 6 | WebDriver HTTP 라우팅, 토큰/Origin 검사 | 표준 WebDriver 클라이언트 제어 | — |
@@ -201,18 +202,18 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - per-pane rect-export ABI는 현재 없어 신규(web-panel.md).
 - 이벤트 background 소스(폴링 게이트 확장/진짜 소스)가 Phase 3 선결.
 - WebDriver 외부 도구 통합(agent-browser endpoint 연결)은 코어+서버 후속.
-- zntc는 외부 npm으로 아직 미검증 — 존재·라이선스·dev-only 편입 확인(§15).
+- zntc는 외부 npm이라 supply-chain 고정이 필요하다 — 2026-06 현재 `@zntc/core` 존재·MIT 라이선스는 확인했지만, dev-only 편입 방식은 Phase 7 선결(§15).
 
 ## 15. 선결 사항 (구현 직전 결정)
 
 - ~~`web-panel.md` 작성~~ **완료** — WKWebView 합성·z-order·per-pane rect ABI는 [웹 패널 인프라](web-panel.md)가 단일 출처. ABI·모달 레이어 분리 구현은 Phase 4.
-- zntc 빌드 편입 방식(dev-only 빌드 도구로, 런타임 의존성 0 유지)·라이선스 확인 — Phase 7 전.
+- zntc 빌드 편입 방식(dev-only 빌드 도구로, 런타임 의존성 0 유지)·lockfile/캐시/라이선스 재확인 — Phase 7 전.
 - `MARU_SESSION` redaction 처리(값 마스킹) — Phase 1.
 
 ## 16. 코드 위치 (구현 시 채움)
 
 - 코어(L2): `src/session/control_plane.zig`
-- collector·소켓·디스패처(L4): `platform/macos/control_{collector,socket}.{zig,m}`, `app_host_abi.{zig,h}`
+- collector·소켓·디스패처(L4): `src/platform/macos/control_{collector,socket}.{zig,m}`, `src/platform/macos/app_host_abi.{zig,h}`
 - 세션 신원: `src/pty/types.zig`(`SpawnRequest`)·`pty/macos.zig`(env)
 - CLI: `src/cli.zig`(`sessions`/`session` 서브커맨드)
-- WKWebView·WebDriver: `platform/macos/web_panel.{zig,swift}`
+- WKWebView·WebDriver: `src/platform/macos/web_panel.{zig,swift}`

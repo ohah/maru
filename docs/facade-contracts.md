@@ -270,6 +270,8 @@ trace schema와 replay 동작은 [Trace와 Replay](trace-replay.md)를 따른다
 
 Shell integration event(`shell.cwd-changed`, `shell.prompt-start`, `shell.prompt-end`, `shell.command-start`, `shell.command-end`)는 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#shell-integration)의 어휘를 따른다. 이 event를 `maru.trace.v1`에 저장하는 구현 PR은 먼저 이 표와 [Trace와 Replay](trace-replay.md)의 schema를 함께 갱신해야 한다. raw OSC bytes를 각 기능이 임시로 파싱하지 않는다.
 
+Control-plane JSON-RPC 요청/응답/notification도 아직 이 표의 정식 event가 아니다. 세션 컨트롤 플레인 구현에서 이를 trace/replay에 남기려면 `control.request`/`control.response`/`control.notification` 같은 trace kind, id 매칭, 실패 응답, redaction 범위, replay 의미를 이 표와 [Trace와 Replay](trace-replay.md)에 먼저 추가한다. 기존 `output`/`input`/`resize` event에 임시 payload로 끼워 넣지 않는다.
+
 몰라야 하는 것:
 
 - private parser storage.

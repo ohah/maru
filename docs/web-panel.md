@@ -42,6 +42,7 @@
 - **maru 키바인딩 가로채기**: ⌘T·⌘W·⌘1.. 등 앱 액션은 WKWebView 포커스 중에도 먼저 잡아야 한다. WKWebView 서브클래스의 `performKeyEquivalent` override 또는 local event monitor로 — 메커니즘을 하나 택해 명시(현 코드는 오버레이 중 메뉴 keyEquivalent를 일부러 우회하므로 그 경로와 정합 필요).
 - **`anyOverlayOpen` 게이트**: 웹 패널 포커스 시 "활성 세션"이 무엇인지 정의해 게이트가 올바른 surface를 읽게 한다.
 - **마우스(hitTest)**: 모달 오버레이는 평소 `hitTest=nil`(아래로 통과), 모달 열림 시 `self`(잡음).
+- **Phase 4 코딩 전 입력 responder spike 선행**(가장 깨지기 쉬운 IME 코드를 건드리므로): WKWebView 포커스 중 모달 열림 → responder 전이 → IME preedit → 복귀를 실측해 메커니즘(`performKeyEquivalent` override vs local event monitor)을 **착수 전에 확정**한다. 자동 테스트가 어려워 spike+수동이 유일 안전망이다.
 
 ## 5. WKWebView가 막는 터미널-chrome 인터랙션
 
@@ -64,7 +65,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 브리지 신뢰 게이트(isolated world·per-surface capability·forMainFrameOnly)는 **[control-plane.md] §8.1이 단일 출처**다. 여기서는 web 레이어에서만 발생하는 위협을 다룬다:
 
 - **`.md`는 신뢰 콘텐츠가 아니라 "신뢰 렌더러가 그리는 비신뢰 데이터"**다. raw HTML/script 비활성 새니타이즈(`<script>`·`on*`·`javascript:` 제거)가 기본. maru가 빌드해 번들하는 렌더러 JS는 해시 핀(SRI)·락파일로 공급망 고정.
-- **`maru-app://` 스킴**: 엄격 CSP 응답 헤더(`default-src 'none'; script-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'`)로 외부 네트워크·iframe 차단(exfil 방지). 스킴 핸들러는 **경로 정규화 후 허용 루트 prefix 검증**(realpath·symlink 거부·`..` 차단 — `sanitizeDropFilename` 선례 재사용), `.md`마다 고유 origin(uuid 호스트)로 신뢰 UI와 분리.
+- **`maru-app://` 스킴**: 엄격 CSP 응답 헤더(`default-src 'none'; script-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'`)로 외부 네트워크·iframe 차단(exfil 방지). 스킴 핸들러는 **경로 정규화 후 허용 루트 prefix 검증**(realpath·symlink 거부·`..` 차단). 단 기존 `sanitizeDropFilename`(`cli/ssh.zig`)은 basename+문자 필터만 하고 realpath/symlink 거부는 **하지 않으므로 이 경로 샌드박스는 신규 코드**다(선례는 부분 참고). `.md`마다 고유 origin(uuid 호스트)로 신뢰 UI와 분리.
 - **브리지 호출부 프레임 검증**: 메시지 핸들러 등록은 world-scope(frame 무관)라, 핸들러 진입에서 `frameInfo.isMainFrame` + `securityOrigin == maru-app://`를 검사한다(서브프레임·clickjacking 방지).
 - **untrusted 패널 격리**: `browser` 패널은 신뢰 콘텐츠와 **별도 `WKProcessPool` + `WKWebsiteDataStore`(per-surface ephemeral)** 강제 — content process·쿠키 jar 분리(렌더러 침해가 신뢰 브리지 힙에 못 닿게, 쿠키 공유 차단).
 - **링크 라우팅**: 웹 패널 링크 클릭은 `decidePolicyForNavigationAction`에서 인터셉트해 [링크 감지](link-detection.md)의 존재검증·스킴 화이트리스트·명시 제스처 정책을 재사용한다(`file:///X.app` 실행 등 차단).
@@ -87,7 +88,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 ## 10. 구현 ([control-plane.md] Phase 4~5와 연계)
 
 - **Phase 4(껍데기)**: 컨테이너 contentView + 입력 responder 재편(§4) + 모달 레이어 분리 두 리팩터(§2) + surface 생애주기 ABI(§6) + per-pane rect(§3) + 빈 WKWebView가 본문 rect 추종. → [control-plane.md] §11 Phase 4가 이 규모(특히 모달 분리·입력 재편)를 포함하도록 정합.
-- **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP·새니타이즈 + [control-plane.md] `browser.*`·§8.1 게이트 연결.
+- **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane.md] `browser.*`·§8.1 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane.md] Phase 7와 함께 — §11.)
 
 ## 11. 테스트·검증
 

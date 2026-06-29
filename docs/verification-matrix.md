@@ -116,5 +116,6 @@ GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/a
 - 새 기능이 이 표의 어느 검증 경로에 연결되는가?
 - 자동 검증이 불가능하다면 어떤 수동 검증 산출물을 남기는가?
 - 새 산출물이 기존 snapshot, trace, replay, future inspector와 같은 도메인 데이터를 쓰는가?
+- 새 코드가 `project-structure.md`의 facade/책임 폴더 규칙과 `layering-and-portability.md`의 L2/L4 경계를 지키는가? `main.zig`, Swift, `app_session.zig`에 새 정책·순수 로직을 넣지 않았는가?
 - hot path, queue, lock, allocation/copy, thread hop, I/O, frame tick에 새 부담을 만들었는가? 만들었다면 어떤 예산·stress·artifact로 확인했는가?
 - 한계가 새로 드러났다면 PR 설명과 사용자 보고에 적었는가?

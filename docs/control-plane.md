@@ -185,6 +185,8 @@ flowchart TD
 
 **Phase 시작 gate(모든 구현 PR 공통)**: 각 Phase 또는 subphase(7a/7b/7c 등)를 시작하기 전에 작업자는 사용자에게 이번 단계에서 무엇을 구현·검증할지 다시 설명한다. 설명에는 scope, 건드릴 책임 영역/파일 후보, 새로 여는 capability·transport·의존성, 자동/수동 gate, 아직 미결정인 사용자 결정 항목을 포함한다. 그 다음 새 코드를 쓰기 전에 **직전 완료 Phase의 종료 gate를 다시 실행하거나, 현재 환경에서 재현 가능한 동등 regression gate를 실행**해 이전 Phase가 무너지지 않았음을 확인한다. 실패하면 새 Phase를 진행하지 않고 먼저 원인·영향·수정 계획을 보고한다.
 
+**CLI help gate**: CLI에 새 subcommand/option/enum 값을 노출하는 Phase는 parser와 `--help`를 같은 PR에서 갱신한다. help에는 현재 Phase에서 실제 동작하는 명령만 공개하고, 다음 Phase 계획 명령을 미리 싣지 않는다. 완료 조건에는 `maru --help`와 해당 subcommand `--help` fixture 또는 스냅샷을 포함해 "구현됐는데 help에 없음"과 "help에는 있는데 parser/권한/실행 경로가 없음"을 모두 잡는다.
+
 시작 gate의 최소 규칙:
 - Phase 1은 Phase 0 문서 계약이 최신인지(`control-plane.md`·`verification-matrix.md`·PR 본문)와 `git diff --check`/`check-boundaries`를 확인한 뒤 시작한다.
 - Phase 2는 Phase 1의 read-only socket/collector/capability/self-origin/capture gate를 재실행한 뒤 write를 연다.
@@ -197,13 +199,13 @@ flowchart TD
 | Phase | 내용 | 서드파티 |
 |---|---|---|
 | **0. 계약** | 본 문서 | 0 |
-| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + **collector(Swift 열거 + Zig 세션내 2층)** + 외부 ID + `$MARU_SESSION` 주입 + capability fd 발급·auth(**non-login trusted profile 우선**) + CLI 클라이언트 + **`metadata`/`read-output` scope 인가** + **`control.*` trace schema 확장** + `sessions.list`/`get`/`capture` | 0 |
-| **2. write** | `sendText`(raw)/`sendKeys` + `write`/`lifecycle` capability 인가(§8.3) + 에러 모델 | 0 |
-| **3. 이벤트** | `events.subscribe`(background 소스 포함) + outbound 백프레셔 + `subscribeOutput`(I/O 직송) | 0 |
+| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + **collector(Swift 열거 + Zig 세션내 2층)** + 외부 ID + `$MARU_SESSION` 주입 + capability fd 발급·auth(**non-login trusted profile 우선**) + CLI 클라이언트 + CLI `--help`(`sessions list`, `session get`, `session capture`) + **`metadata`/`read-output` scope 인가** + **`control.*` trace schema 확장** + `sessions.list`/`get`/`capture` | 0 |
+| **2. write** | `sendText`(raw)/`sendKeys` + CLI `--help`(`send-text`, `send-keys`) + `write`/`lifecycle` capability 인가(§8.3) + 에러 모델 | 0 |
+| **3. 이벤트** | `events.subscribe`(background 소스 포함) + outbound 백프레셔 + `subscribeOutput`(I/O 직송) + CLI `--help`(`events subscribe`, `session subscribe-output`) | 0 |
 | **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님) | 0 |
-| **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). 1·4 합류 | 0 |
-| **6. WebDriver 어댑터** | 외부 자동화가 필요할 때 제어 코어 위 ~15 명령 + 인증(§8.6). 첫 마크다운 콘텐츠의 필수 선행은 아님 | 0 |
-| **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc dev/build/bundle) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 | §13 |
+| **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). CLI에서 노출하는 `panel`/`browser` 명령이 있으면 같은 PR에서 `--help`까지 갱신. 1·4 합류 | 0 |
+| **6. WebDriver 어댑터** | 외부 자동화가 필요할 때 제어 코어 위 ~15 명령 + 인증(§8.6). CLI에서 외부 자동화 endpoint를 노출하면 `--help` fixture 포함. 첫 마크다운 콘텐츠의 필수 선행은 아님 | 0 |
+| **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc dev/build/bundle) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 + CLI `--help`(`panel open --kind markdown`, `panel bind-session`) | §13 |
 
 Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다. Phase 7은 한 PR로 묶지 않는다: 7a `web/` Bun workspace+zntc hello bundle+`oxlint`/`oxfmt`/`web:test` scripts, 7b markdown sanitizer+viewer/source editor, 7c `panel.bindSession`+md 링크 라우팅 순서로 자른다.
 
@@ -222,13 +224,13 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 | Phase | 단위(Zig) | 통합/E2E | 수동 |
 |---|---|---|---|
-| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-window+quick ID 비충돌, `metadata:self` 응답 필터, `metadata:window`/`metadata:all` scope 필터, self-origin auth 정상/변조 selector/다른 window_token/quick 교차 접근 거부, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, CLI fd close/`FD_CLOEXEC` 후 helper 누수 방지, dispatch·chunk 경계 revocation, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), primary 창 2개+quick terminal self-origin 제품 실측 artifact(`tests/artifacts/control-plane/self-origin.summary.txt`), maru 밖 shell 복사 selector 거부, `capture` 권한 거부·허용, capability fd 상속 smoke(**login wrapper 실패, non-login zsh/bash/sh 성공**), zsh startup fd-close 실패, background fd persistence+TTL/revocation, tmux/screen pane fd-close 및 self-origin 결과 기록 | sudo/su controlled gate |
-| 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드 | 소켓→실제 PTY 입력(통합 PTY) | — |
-| 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부 | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
+| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-window+quick ID 비충돌, `metadata:self` 응답 필터, `metadata:window`/`metadata:all` scope 필터, self-origin auth 정상/변조 selector/다른 window_token/quick 교차 접근 거부, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, CLI fd close/`FD_CLOEXEC` 후 helper 누수 방지, CLI `--help` fixture(`sessions list`/`session get`/`session capture`만 노출), dispatch·chunk 경계 revocation, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), primary 창 2개+quick terminal self-origin 제품 실측 artifact(`tests/artifacts/control-plane/self-origin.summary.txt`), maru 밖 shell 복사 selector 거부, `capture` 권한 거부·허용, capability fd 상속 smoke(**login wrapper 실패, non-login zsh/bash/sh 성공**), zsh startup fd-close 실패, background fd persistence+TTL/revocation, tmux/screen pane fd-close 및 self-origin 결과 기록 | sudo/su controlled gate |
+| 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드, CLI `--help` fixture(`send-text`/`send-keys`) | 소켓→실제 PTY 입력(통합 PTY) | — |
+| 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부, CLI `--help` fixture(`events subscribe`/`session subscribe-output`) | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
 | 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |
 | 5 | `browser.*` 디스패치, 신뢰 게이트 판정 | `evaluateJavaScript`로 브리지 호출·미주입 단언, isolated world | — |
 | 6 | WebDriver HTTP 라우팅, 토큰/Origin 검사 | 표준 WebDriver 클라이언트 제어 | — |
-| 7 | 7a: `web:test`/`web:lint`/`web:fmt-check` script 계약, zntc hello bundle. 7b: markdown sanitizer adversarial fixture. 7c: md 클릭 라우팅, `panel.bindSession` cwd, `bind` capability 허용·거부 | WKWebView 기반 웹 콘텐츠 E2E. WebDriver 어댑터가 아직 없으면 `evaluateJavaScript` 브리지 하니스로 먼저 검증하고, Phase 6 뒤 표준 WebDriver smoke를 추가 | 실제 렌더(눈 확인) |
+| 7 | 7a: `web:test`/`web:lint`/`web:fmt-check` script 계약, zntc hello bundle. 7b: markdown sanitizer adversarial fixture. 7c: md 클릭 라우팅, `panel.bindSession` cwd, `bind` capability 허용·거부, CLI `--help` fixture(`panel open --kind markdown`/`panel bind-session`) | WKWebView 기반 웹 콘텐츠 E2E. WebDriver 어댑터가 아직 없으면 `evaluateJavaScript` 브리지 하니스로 먼저 검증하고, Phase 6 뒤 표준 WebDriver smoke를 추가 | 실제 렌더(눈 확인) |
 
 ## 13. 열린 질문
 

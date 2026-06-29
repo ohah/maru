@@ -46,6 +46,8 @@ flowchart TD
 
 코어(L2)는 상태를 **collector가 주입하는 중립 DTO seam으로만** 받는다([layering-and-portability.md] §3.1 `PtyIo` vtable 선례).
 
+**collector 2층(정직)**: Zig에 전역 AppSession 레지스트리가 없다 — collector는 단일 Zig 컴포넌트가 아니라 2층이다. Swift가 살아있는 세션(`windows`+`quick`)을 순회하며 per-session collect ABI를 호출하고, Zig는 한 세션 안의 tabs→panes→terms 트리만 중립 DTO로 평탄화한다. 즉 cross-session 열거는 Swift 경계에 있다(boundary 가드가 L2 코어의 AppSession 접근을 막으므로 불가피).
+
 ## 3. 엔티티 모델
 
 기존 계층 `Window → Tab → Pane → Term(surface)`에 종류를 더한다: `surface.kind = terminal | web`.
@@ -73,7 +75,7 @@ flowchart TD
 
 ### 4.3 프레이밍 견고성
 - max frame size(≈ 1 MiB) 정의. 초과 시 `payload-too-large` + 연결 종료. 부분 읽기는 누적 버퍼.
-- 대형 응답(`capture` 전체 스크롤백 등)은 단일 ndjson 라인 금지 — chunk notification(예: 64 KiB/chunk)+완료 마커. under-lock 복사도 행/페이지 단위로 끊는다.
+- 대형 응답(`capture` 전체 스크롤백 등)은 단일 ndjson 라인 금지 — chunk notification(예: 64 KiB/chunk)+완료 마커. **JSON 문자열은 valid UTF-8만 담으므로 임의 바이트(이스케이프 시퀀스·깨진 UTF-8)는 base64로 인코딩**한다. **일관성: chunk를 락 아래 복사하는 동안만 evict를 막아 torn read를 피한다** — 전체를 한 락에 잡으면 큰 할당+긴 락, chunk마다 락을 놓으면 reader의 evict/free와 경합하므로, chunk 경계에서 스냅샷 버전(generation)을 확인해 중간 행 소실을 검출한다.
 - per-connection bounded outbound 큐 + non-blocking write. 응답을 안 읽는 클라이언트가 디스패처를 막지 않게 한다. 이벤트는 느린 구독자에 대해 coalesce/drop(상태 스냅샷이라 손실 허용), 한계 초과 시 구독 강제 해제.
 
 ## 5. 동시성·생명주기
@@ -100,13 +102,13 @@ flowchart TD
 | `events.subscribe` | `{filter?}` | 스트림 | §7 |
 | `browser.*` | (§9) | — | web surface 제어. trust·capability 검사 |
 
-메서드별 필요 capability는 §8.3을 단일 출처로 따른다 — `list`/`get`/`subscribe`=`metadata`, `capture`/`subscribeOutput`=`read-output`, `send*`=`write`, `resize`/`focus`/`close`/`spawn`/`panel.*`=`lifecycle`, `browser.*`=`browser`.
+메서드별 필요 capability는 §8.3을 단일 출처로 따른다 — `list`/`get`/`bindSession`/`subscribe`=`metadata`, `capture`/`subscribeOutput`=`read-output`, `send*`=`write`, `resize`/`focus`/`close`/`spawn`/`panel.open`=`lifecycle`, `browser.*`=`browser`.
 
 ## 7. 이벤트
 
 `events.subscribe` 후 server가 notification을 push한다: `session.stateChanged`(agent running↔idle)·`cwdChanged`·`created`/`closed`, `panel.navigated`.
 
-초기 소스는 기존 agent 폴링이다. 이 폴링은 보이는 Term에만 동작하고 ~0.5s 창이라 짧은 전이를 병합한다. cmux의 핵심인 **background 세션 완료 신호**를 보려면 폴링 게이트를 background Term까지 확장하거나(최소) 진짜 push 소스(PTY/agent 훅)를 두어야 한다 — Phase 3 선결.
+초기 소스는 기존 agent 폴링이다(`pollAgentKinds`/`pollAgentState`). 이 폴링은 **모든 pane×Term을 돌고 시각화(metal dirty)만 보이는 Term에 게이트**한다 — 즉 background Term 커버리지는 이미 있다. 진짜 잔여 갭은 (1) ~0.5s 병합으로 짧은 전이가 손실되는 것의 **전이-엣지 이벤트화**, (2) background **세션**(별도 AppSession, quick 등) 커버리지다 — Phase 3 선결.
 
 ## 8. 보안
 
@@ -114,7 +116,7 @@ flowchart TD
 
 ### 8.1 웹 브리지 노출 게이트
 - `window.maru.*`는 신뢰 콘텐츠에만 주입한다. maru가 빌드해 `maru-app://` 커스텀 스킴으로 서빙하는 콘텐츠(마크다운 등)만 브리지를 받고, `panel_kind=browser`(임의 URL)에는 주입하지 않는다.
-- isolated `WKContentWorld` + `forMainFrameOnly`로 페이지/서브프레임 JS가 핸들러에 닿지 못하게 한다. (spike 실측: 임의 페이지 page-world에서 `window.maru` 접근 불가, isolated world에서만 가능.)
+- 브리지를 isolated `WKContentWorld`에만 등록한다(spike 실측: 임의 페이지 page-world에서 `window.maru` 접근 불가, isolated world에서만 가능). 단 **`forMainFrameOnly`는 주입 user script에만 적용**되고 메시지 핸들러 등록은 world-scope라 프레임을 안 가린다 — 따라서 **핸들러 진입에서 `frameInfo.isMainFrame`+`securityOrigin`을 검사**해 서브프레임·clickjacking을 막는다(enforcement 디테일은 [web-panel.md] §7).
 - 신뢰 콘텐츠도 자기 surface(또는 명시 위임)만 제어한다.
 
 ### 8.2 소켓 권한·peer-cred
@@ -122,12 +124,13 @@ flowchart TD
 - accept마다 peer uid 검증(`LOCAL_PEERCRED`/`SO_PEERCRED`), 불일치 시 종료(spike 실측 확정). 파일 권한에만 의존하지 않는다.
 
 ### 8.3 capability 인가
-- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 최소한 `metadata`(열거/조회), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`), `browser`로 나눈다.
-- 자식이 받은 토큰은 기본적으로 자기 surface의 `metadata`+`read-output`(+필요 시 `write`)만 가진다. cross-surface·quick terminal·lifecycle·browser 권한은 거부 또는 사용자 확인이 기본이다.
-- `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. 이 게이트는 `capture`가 처음 노출되는 Phase 1 안에서 먼저 구현한다.
+- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 `metadata`(열거/조회 — `sessions.list`/`get`/`panel.bindSession`/`events.subscribe`), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`/`panel.open`), `browser`(`browser.*`)로 나눈다(§6 매핑의 단일 출처).
+- 자식이 받은 토큰은 기본적으로 자기 surface의 `metadata`+`read-output`(+필요 시 `write`)만 가진다. cross-surface·quick terminal·lifecycle·browser 권한은 거부 또는 사용자 확인이 기본이다. **`events.subscribe`는 전역 스트림이라 `metadata`만으로 다른 surface 상태(cwd·생성/종료)가 누설될 수 있다 — filter를 self-surface로 스코프**하고 cross-surface 구독은 추가 권한으로 둔다(filter 스키마 §13).
+- `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. 이 게이트는 `capture`가 처음 노출되는 Phase 1 안에서 먼저 구현한다. 단 **Phase 1은 peer-cred(같은 uid) + coarse `metadata`/`read-output` 거부 게이트까지**만 닫고 **per-surface 토큰 발급·자식 위임은 `write`가 들어오는 Phase 2로** 미룬다(read-only 첫 슬라이스에 토큰 머신 전체를 묶지 않는다).
 
-### 8.4 환경변수 노출·redaction
+### 8.4 환경변수 노출·redaction·토큰 채널
 - `$MARU_SESSION`은 키名에 `SESSION` 토큰을 포함하므로 [project-rules.md] §redaction의 deny-by-default 대상이다. trace/artifact에서 값을 마스킹한다. env는 보안 경계가 아니라 편의 채널이다(소켓 경로는 결정론적이라 env 없이도 발견됨).
+- **미해결: 연결을 특정 surface+권한에 묶는 토큰 채널.** same-uid 위협을 capability로 막으려면 토큰이 필요한데, env는 같은 uid가 `sysctl KERN_PROCARGS2`로 읽고·소켓 경로는 결정론적이며·peer-cred는 uid만 증명한다 — 이 셋으로는 "이 연결 = 이 surface의 이 권한"을 묶지 못한다. Phase 2(토큰 위임) 착수 전 토큰 발급·바인딩 채널을 설계한다(현재 미해결).
 
 ### 8.5 WebDriver 어댑터
 - TCP가 아니라 unix 소켓 위 HTTP(또는 loopback + 무작위 bearer 토큰 0600 파일) + Origin/Host 화이트리스트 + 기본 off. 인증 없는 localhost TCP는 cross-uid·CSRF로 `execute_script`/`get_cookies`를 노출하므로 금지한다.
@@ -157,7 +160,7 @@ flowchart TD
 | Phase | 내용 | 서드파티 |
 |---|---|---|
 | **0. 계약** | 본 문서 | 0 |
-| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + collector + 외부 ID + `$MARU_SESSION` 주입 + CLI 클라이언트 + `metadata`/`read-output` capability 인가 + `sessions.list`/`get`/`capture` | 0 |
+| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + **collector(Swift 열거 + Zig 세션내 2층)** + 외부 ID + `$MARU_SESSION` 주입 + CLI 클라이언트 + **peer-cred + coarse `metadata`/`read-output` 거부 게이트**(토큰 위임은 Phase 2) + **`control.*` trace schema 확장** + `sessions.list`/`get`/`capture` | 0 |
 | **2. write** | `sendText`(raw)/`sendKeys` + `write`/`lifecycle` capability 인가(§8.3) + 에러 모델 | 0 |
 | **3. 이벤트** | `events.subscribe`(background 소스 포함) + outbound 백프레셔 + `subscribeOutput`(I/O 직송) | 0 |
 | **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님) | 0 |

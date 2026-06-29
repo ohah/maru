@@ -4,7 +4,7 @@
 
 tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루되, maru는 **하나의 wire 프로토콜을 CLI와 웹뷰가 공유**하게 해서 두 번 설계하지 않는다.
 
-레이어 경계는 [레이어링과 이식성 전략](layering-and-portability.md), macOS 호스트 경계·Zig↔Swift 분담은 [macOS 앱 호스트 경계](macos-app-host-boundary.md), I/O–렌더 스레딩·락 모델은 [I/O–렌더 스레딩 분리](io-render-threading.md), 탭/split 모델은 [탭·split·레이아웃](tabs-splits-layout.md), 링크 클릭 라우팅(md→패널)은 [링크 감지](link-detection.md)를 단일 출처로 둔다. 웹 패널의 표시·합성(WKWebView 오버레이·z-order·per-pane rect ABI)은 [웹 패널 인프라](web-panel.md)(Phase 4 선결 상세)로 분리한다.
+레이어 경계는 [레이어링과 이식성 전략](layering-and-portability.md), macOS 호스트 경계·Zig↔Swift 분담은 [macOS 앱 호스트 경계](macos-app-host-boundary.md), I/O–렌더 스레딩·락 모델은 [I/O–렌더 스레딩 분리](io-render-threading.md), 탭/split 모델은 [탭·split·레이아웃](tabs-splits-layout.md), 윈도우 간 detach/reattach와 전역 surface 소유권은 [윈도우와 Surface 이동성](window-surface-mobility.md), 링크 클릭 라우팅(md→패널)은 [링크 감지](link-detection.md)를 단일 출처로 둔다. 웹 패널의 표시·합성(WKWebView 오버레이·z-order·per-pane rect ABI)은 [웹 패널 인프라](web-panel.md)(Phase 4 선결 상세)로 분리한다.
 
 ## 1. 확정 결정
 
@@ -13,7 +13,7 @@ tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루�
 - **노출은 CLI 토대, MCP는 구현 계획 미정.** 주 사용처는 maru 안에서 도는 에이전트이고, `maru` CLI(+`SKILL.md`)가 셸로 직접 호출한다. 외부 MCP 클라이언트용 어댑터는 같은 wire 위에 얇게 얹을 수 있으나 **구현 계획은 미정**이라 막지 않을 seam(버전·네임스페이스)만 둔다(§4.1).
 - **메서드 어휘 = tmux식.** `sessions.list`/`session.sendKeys`/`session.capture`.
 - **이벤트 = 스트림(push) 1급.** `events.subscribe` notification 스트림. 초기 구현은 기존 agent 폴링 결과를 흘리되, background 세션 이벤트는 폴링 게이트 확장 또는 진짜 이벤트 소스가 필요하다(§7).
-- **엔티티 = surface 일반화 + 안정 외부 ID.** terminal/web surface를 같은 ID 공간에 두고, 외부 ID는 `(window_token, surface_id)` 복합키다. surface_id는 AppSession(창)마다 1부터 발급되므로 단독으론 멀티윈도우에서 충돌한다(§3).
+- **엔티티 = surface 일반화 + 앱 전역 외부 ID.** terminal/web surface를 같은 ID 공간에 두고, 외부 ID는 `surface_id + generation`이다. 하위 호환은 고려하지 않고, `window_token`은 현재 위치 메타데이터로 내린다. 이유와 선행 refactor는 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다.
 - **코어(L2) = 스키마 + 프로토콜 + 순수 디스패치만.** 라이브 상태 수집은 platform collector(L4)가 모아 중립 스냅샷 DTO로 코어에 주입한다. 코어는 런타임/OS 타입을 직접 참조하지 않는다(`check-boundaries`가 `session→app/pty/platform`을 막는다 — §2).
 - **동시성 = 단일 디스패치 지점(메인으로 marshal) + 출력 스트림은 I/O 스레드 직송.** 제어·조회는 메인 frame loop로 marshal해 코어/레지스트리/트리에 안전 접근하고, 고처리량 출력(`subscribeOutput`)은 메인을 거치지 않고 I/O 스레드에서 per-subscriber 큐로 직송한다(§5).
 - **보안 = 같은 uid 안의 신뢰 차등까지.** 웹 브리지는 신뢰 콘텐츠에만 노출, 외부 소켓은 peer-cred + 0700/0600, write는 per-surface capability(§8).
@@ -46,16 +46,16 @@ flowchart TD
 
 코어(L2)는 상태를 **collector가 주입하는 중립 DTO seam으로만** 받는다([layering-and-portability.md] §3.1 `PtyIo` vtable 선례).
 
-**collector 2층(정직)**: Zig에 전역 AppSession 레지스트리가 없다 — collector는 단일 Zig 컴포넌트가 아니라 2층이다. Swift가 살아있는 세션(`windows`+`quick`)을 순회하며 per-session collect ABI를 호출하고, Zig는 한 세션 안의 tabs→panes→terms 트리만 중립 DTO로 평탄화한다. 즉 cross-session 열거는 Swift 경계에 있다(boundary 가드가 L2 코어의 AppSession 접근을 막으므로 불가피).
+**collector 2층(현재 코드 기준 정직)**: 지금은 Zig에 전역 AppSession 레지스트리가 없어, Swift가 살아있는 세션(`windows`+`quick`)을 순회하며 per-session collect ABI를 호출하고 Zig는 한 세션 안의 tabs→panes→terms 트리만 중립 DTO로 평탄화한다. 그러나 cross-window detach/reattach와 web panel reparent를 위해 Phase 4 전에 `AppRuntime` + `LiveSurfaceRegistry` + `WindowGraph`로 소유권을 올린다([window-surface-mobility.md](window-surface-mobility.md)). 그 이후 collector는 AppRuntime graph를 단일 출처로 읽는다.
 
 ## 3. 엔티티 모델
 
 기존 계층 `Window → Tab → Pane → Term(surface)`에 종류를 더한다: `surface.kind = terminal | web`.
 
-- **외부 ID = `(window_token, surface_id)` 복합키.** `surface_id`는 AppSession마다 1부터 발급되고 재시작 시 재생성된다. `window_token`은 AppSession lifetime 동안 유효한 무작위 식별자이고, 일반 창과 quick terminal 모두 별도 값을 갖는다. 외부 자동화가 저장한 ID는 재시작 후 무효일 수 있음을 계약에 명시한다.
+- **외부 ID = `{surface_id, generation}`.** `surface_id`는 앱 인스턴스 전역 unique이고, surface 재생성 시 generation이 바뀐다. `window_token`은 AppSession-local ID 충돌을 막기 위한 복합키가 아니라 현재 어느 window에 배치돼 있는지 알려주는 위치 메타데이터다. 외부 자동화가 저장한 ID는 재시작 후 무효일 수 있음을 계약에 명시한다.
 - **재시작 영속 상관키.** workspace restore는 surface를 새 ID로 복원하지만 에이전트 대화(claude/codex `session_id`)는 영속한다. 재시작을 건너 재연결하려면 컨트롤 플레인 ID를 workspace stable-id·트리 좌표·에이전트 `session_id`에 묶는 상관키를 함께 노출한다.
-- **멀티윈도우는 현재형이다.** quick terminal은 두 번째 AppSession(독립 셸·자체 트리)이라 primary와 surface_id가 충돌한다. collector는 **살아있는 모든 AppSession(primary + quick)을 열거**하고, window_token이 이를 구분한다.
-- **quick terminal 정책.** quick terminal도 일반 창과 같은 surface 모델이지만 별도 `window_token`과 `window_kind=quick`을 가진다. `metadata:self`로 quick 안에서 호출한 CLI는 quick 자신의 surface만 볼 수 있고, 일반 창 CLI는 quick을 기본으로 볼 수 없다. quick을 포함한 전체 열거는 `metadata:all` 같은 명시 grant가 있을 때만 허용한다. write(`send*`/생애주기)는 capability 게이트(§8.3)로 보수적으로 막는다.
+- **멀티윈도우는 현재형이고, 이동성 foundation을 Phase 4 전에 선행한다.** quick terminal은 별도 window_kind를 가진 window로 취급하되, surface ID 충돌을 window_token으로 숨기지 않는다. 살아있는 모든 일반 창과 quick terminal은 AppRuntime WindowGraph에 나타난다.
+- **quick terminal 정책.** quick terminal도 일반 창과 같은 surface 모델이지만 `window_kind=quick`인 별도 window 위치 메타데이터를 가진다. `metadata:self`로 quick 안에서 호출한 CLI는 quick 자신의 surface만 볼 수 있고, 일반 창 CLI는 quick을 기본으로 볼 수 없다. quick을 포함한 전체 열거는 `metadata:all` 같은 명시 grant가 있을 때만 허용한다. write(`send*`/생애주기)는 capability 게이트(§8.3)로 보수적으로 막는다.
 - 공통 메타: `id`, `kind`, `title`, `window`/`tab`/`pane` 좌표, `focused`.
 - terminal 전용: `cwd`(OSC 7), `git_branch`, `agent`(kind/state), `has_foreground_job`.
 - web 전용: `url`, `panel_kind`(markdown|browser|...), `loading`, `trust`(trusted|untrusted — §8.1).
@@ -71,7 +71,7 @@ flowchart TD
 ### 4.2 다중 인스턴스·발견
 - 소켓 경로 키 = 인스턴스(pid/부팅 nonce). `~/.cache/maru/control/`(0700)에 살아있는 인스턴스 인덱스 + `flock`.
 - bind 전 stale 소켓은 `flock`으로 살아있는지 판별 후 unlink-then-bind(살아있는 소켓은 unlink 금지).
-- 자식 셸은 `$MARU_SESSION`+소켓 경로로 자기 인스턴스를 안다. `$MARU_SESSION`은 `{instance_nonce, window_token, surface_id, generation}`을 담은 **selector**일 뿐이고 비밀 bearer token이 아니다. `metadata:self`는 이 selector가 가리키는 surface와 peer process의 OS 관측 출처가 일치할 때만 열린다(§8.4). `read-output` 이상은 spawn 시 상속한 capability fd(§8.5)가 증명한다. maru 밖 일반 셸의 CLI는 단일 인스턴스면 자동 발견까지만 가능하고, 비밀 출력 열람은 별도 grant가 필요하다(어휘 미정 — §13).
+- 자식 셸은 `$MARU_SESSION`+소켓 경로로 자기 인스턴스를 안다. `$MARU_SESSION`은 `{instance_nonce, surface_id, generation}`을 담은 **selector**일 뿐이고 비밀 bearer token이 아니다. `window_id`/`window_token`/`window_kind`는 응답 메타데이터로만 노출되는 현재 위치 정보다. `metadata:self`는 이 selector가 가리키는 surface와 peer process의 OS 관측 출처가 일치할 때만 열린다(§8.4). `read-output` 이상은 spawn 시 상속한 capability fd(§8.5)가 증명한다. maru 밖 일반 셸의 CLI는 단일 인스턴스면 자동 발견까지만 가능하고, 비밀 출력 열람은 별도 grant가 필요하다(어휘 미정 — §13).
 
 ### 4.3 프레이밍 견고성
 - max frame size(≈ 1 MiB) 정의. 초과 시 `payload-too-large` + 연결 종료. 부분 읽기는 누적 버퍼.
@@ -91,7 +91,7 @@ flowchart TD
 | 메서드 | 인자 | 반환 | 비고 |
 |---|---|---|---|
 | `sessions.list` | `{window?}` | `[Surface]` | collector는 모든 AppSession을 수집하지만 응답은 metadata scope로 필터링한다(`self`/`window`/`all`) |
-| `session.get` | `{id}` | `Surface` | core_mutex read. `metadata:self`는 자기 `(window_token, surface_id, generation)`만 허용 |
+| `session.get` | `{id}` | `Surface` | core_mutex read. `metadata:self`는 자기 `(surface_id, generation)`만 허용 |
 | `session.sendText` | `{id, text}` | `{ok}` | **raw 쓰기 경로**(bracketed paste 미적용). capability 게이트 |
 | `session.sendKeys` | `{id, keys}` | `{ok}` | `input_report.encodeKey` 재사용. 키 표기법은 tmux 호환(§13) |
 | `session.capture` | `{id, scrollback?}` | streaming | 생략 시 가시 화면. 대형은 §4.3 chunk. capture 권한(§8.3) |
@@ -124,10 +124,10 @@ flowchart TD
 - accept마다 peer uid 검증(`LOCAL_PEERCRED`/`SO_PEERCRED`), 불일치 시 종료(spike 실측 확정). 파일 권한에만 의존하지 않는다.
 
 ### 8.3 capability 인가
-- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 `metadata:self`(자기 surface 열거/조회), `metadata:window`(같은 window_token 안의 surface 열거/조회), `metadata:all`(primary+quick 포함 전체 열거/조회), `bind`(`panel.bindSession`), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`/`panel.open`), `browser`(`browser.*`)로 나눈다(§6 매핑의 단일 출처).
+- 같은 uid의 임의 프로세스가 모든 surface를 제어·열람하면 sudo 세션·다른 보안등급 탭에 대한 권한 상승이 된다. capability는 `metadata:self`(자기 surface 열거/조회), `metadata:window`(호출 surface가 현재 속한 window 안의 surface 열거/조회), `metadata:all`(primary+quick 포함 전체 열거/조회), `bind`(`panel.bindSession`), `read-output`(`capture`/`subscribeOutput`), `write`(`send*`), `lifecycle`(`spawn`/`close`/`resize`/`focus`/`panel.open`), `browser`(`browser.*`)로 나눈다(§6 매핑의 단일 출처).
 - unix socket path와 peer-cred는 "같은 사용자"와 "같은 인스턴스 발견"만 증명한다. 특정 surface 권한은 (a) capability fd(§8.5)로 받은 nonce, 또는 (b) `metadata:self`에 한정된 self-origin 증명(§8.4)으로만 생긴다. fd가 없거나 scope/generation/surface가 맞지 않으면 `unauthorized`다.
 - spawn profile의 기본 grant는 보수적으로 둔다. 일반 login shell 자식은 `$MARU_SESSION` 기반 발견과 self-origin 증명을 통과한 `metadata:self`까지만 기본으로 둔다. self-origin 증명이 구현·실측되지 않았거나 실패하면 일반 login shell CLI도 metadata를 열지 않는다. `read-output:self`는 capability fd 보존이 실측된 non-login trusted agent/control profile 또는 별도 one-shot grant UX에만 붙인다. `write`·`lifecycle`·`browser`·cross-surface 권한은 기본 거부 또는 사용자 확인이다.
-- **`sessions.list`와 `events.subscribe`는 전역 표면이라 `metadata:self`만으로 다른 surface 상태(cwd·생성/종료)가 누설되면 안 된다.** `metadata:self`는 응답을 자기 `(window_token, surface_id, generation)` 하나로 필터링하고, `events.subscribe` filter도 self-surface로 강제한다. 같은 창 전체는 `metadata:window`, quick 포함 전체는 `metadata:all`이 필요하다(filter 스키마 §13).
+- **`sessions.list`와 `events.subscribe`는 전역 표면이라 `metadata:self`만으로 다른 surface 상태(cwd·생성/종료)가 누설되면 안 된다.** `metadata:self`는 응답을 자기 `(surface_id, generation)` 하나로 필터링하고, `events.subscribe` filter도 self-surface로 강제한다. 같은 창 전체는 현재 WindowGraph membership에 대한 `metadata:window`, quick 포함 전체는 `metadata:all`이 필요하다(filter 스키마 §13).
 - `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. `capture`가 처음 노출되는 Phase 1 안에서 capability fd 발급·auth·거부 테스트까지 함께 구현한다. "read-only라 토큰은 나중"으로 미루지 않는다.
 
 ### 8.4 self-origin metadata 증명(일반 login shell)
@@ -136,16 +136,16 @@ flowchart TD
 
 인증 순서:
 
-1. CLI가 `$MARU_SESSION` selector(`instance_nonce`, `window_token`, `surface_id`, `generation`)를 auth frame에 보낸다.
-2. server는 selector가 현재 registry의 live surface를 가리키는지 확인한다. `window_token`이 다르면 같은 `surface_id`여도 다른 창/quick surface로 보지 않는다.
+1. CLI가 `$MARU_SESSION` selector(`instance_nonce`, `surface_id`, `generation`)를 auth frame에 보낸다.
+2. server는 selector가 현재 registry의 live surface를 가리키는지 확인한다. `surface_id`는 앱 인스턴스 전역 unique라 window별 충돌을 허용하지 않는다.
 3. server는 unix socket peer uid/pid를 OS에서 읽고 same-uid를 확인한다.
 4. server는 peer pid의 controlling tty identity와 foreground process group을 읽어, 후보 surface가 spawn할 때 기록한 PTY slave identity 및 현재 foreground process group과 비교한다. 둘 중 하나라도 불일치하면 `unauthorized`다.
 5. 통과하면 해당 연결/request에만 `metadata:self`를 부여한다. 응답은 항상 자기 surface 하나로 필터링한다.
 
 멀티윈도우와 quick terminal 처리:
 
-- 일반 창 A/B가 모두 `surface_id=1`을 가져도 `window_token`이 다르므로 충돌하지 않는다. 창 A의 CLI가 창 B의 selector를 복사해 보내면 PTY identity/foreground pgrp가 B와 맞지 않아 거부되어야 한다.
-- quick terminal은 별도 AppSession으로 `window_kind=quick`과 고유 `window_token`을 가진다. quick 안의 CLI는 quick 자기 surface의 `metadata:self`만 얻는다. 일반 창의 CLI는 quick을 기본으로 보지 못하고, quick CLI도 primary 창을 기본으로 보지 못한다.
+- 일반 창 A/B와 quick terminal은 모두 앱 전역 `surface_id` 공간을 공유하므로 ID 충돌을 만들지 않는다. 창 A의 CLI가 창 B의 selector를 복사해 보내면 PTY identity/foreground pgrp가 B와 맞지 않아 거부되어야 한다.
+- quick terminal은 `window_kind=quick`인 window에 속한 surface다. quick 안의 CLI는 quick 자기 surface의 `metadata:self`만 얻는다. 일반 창의 CLI는 quick을 기본으로 보지 못하고, quick CLI도 primary 창을 기본으로 보지 못한다.
 - quick이 숨겨져 있어도 PTY/session이 살아 있으면 selector는 live일 수 있다. 단, lifecycle/write는 기본 거부이고 quick 제어는 별도 explicit grant가 필요하다.
 
 **실측 필수 gate**: 이 모델은 구현 PR에서 제품 경로로 측정하기 전까지 완료 처리하지 않는다. 최소 실측 행렬은 primary 창 2개 + quick terminal 1개를 띄우고, 각 shell 안에서 `sessions.list`가 자기 surface 하나만 반환하는지, 다른 창/quick의 selector로 변조하면 거부되는지, maru 밖 일반 shell에서 복사한 selector가 거부되는지 확인한다. zsh/bash login shell, background child, tmux/screen pane, sudo/su는 별도 행으로 기록한다. tmux/screen처럼 nested PTY가 original Maru PTY와 다르면 기본 허용하지 말고 실제 결과를 `tests/artifacts/control-plane/self-origin.summary.txt`에 남긴다.
@@ -219,7 +219,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 |---|---|---|
 | 1a protocol | ndjson 부분읽기·max frame·JSON-RPC error·`hello` schema 단위 | socket 없이 schema/parser만 |
 | 1b socket bootstrap | bind/chmod/path owner/peer-cred 거부 통합 | local socket accept + hello |
-| 1c surface DTO | fake collector DTO, 2-window+quick ID 비충돌, generation 직렬화 | read-only DTO 모델 |
+| 1c surface DTO | fake collector DTO, 2-window+quick 전역 ID 비충돌, generation 직렬화 | read-only DTO 모델 |
 | 1d CLI read-only metadata | `sessions list`/`session get` parser+`--help` fixture, scope 필터 단위 | metadata-only list/get |
 | 1e capability fd | fd 정상/누락/invalid/revoked, `FD_CLOEXEC`, redaction 단위+smoke | non-login trusted profile capability auth |
 | 1f capture | chunk generation, revocation, `capture-invalidated`, `session capture --help` fixture | `capture` read-output |
@@ -265,7 +265,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 | Phase | 단위(Zig) | 통합/E2E | 수동 |
 |---|---|---|---|
-| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-window+quick ID 비충돌, `metadata:self` 응답 필터, `metadata:window`/`metadata:all` scope 필터, self-origin auth 정상/변조 selector/다른 window_token/quick 교차 접근 거부, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, CLI fd close/`FD_CLOEXEC` 후 helper 누수 방지, CLI `--help` fixture(`sessions list`/`session get`/`session capture`만 노출), dispatch·chunk 경계 revocation, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), primary 창 2개+quick terminal self-origin 제품 실측 artifact(`tests/artifacts/control-plane/self-origin.summary.txt`), maru 밖 shell 복사 selector 거부, `capture` 권한 거부·허용, capability fd 상속 smoke(**login wrapper 실패, non-login zsh/bash/sh 성공**), zsh startup fd-close 실패, background fd persistence+TTL/revocation, tmux/screen pane fd-close 및 self-origin 결과 기록 | sudo/su controlled gate |
+| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-window+quick 전역 ID 비충돌, `metadata:self` 응답 필터, `metadata:window`/`metadata:all` scope 필터, self-origin auth 정상/변조 selector/다른 surface_id·generation·quick 교차 접근 거부, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, CLI fd close/`FD_CLOEXEC` 후 helper 누수 방지, CLI `--help` fixture(`sessions list`/`session get`/`session capture`만 노출), dispatch·chunk 경계 revocation, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), primary 창 2개+quick terminal self-origin 제품 실측 artifact(`tests/artifacts/control-plane/self-origin.summary.txt`), maru 밖 shell 복사 selector 거부, `capture` 권한 거부·허용, capability fd 상속 smoke(**login wrapper 실패, non-login zsh/bash/sh 성공**), zsh startup fd-close 실패, background fd persistence+TTL/revocation, tmux/screen pane fd-close 및 self-origin 결과 기록 | sudo/su controlled gate |
 | 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드, CLI `--help` fixture(`send-text`/`send-keys`) | 소켓→실제 PTY 입력(통합 PTY) | — |
 | 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부, CLI `--help` fixture(`events subscribe`/`session subscribe-output`) | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
 | 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |

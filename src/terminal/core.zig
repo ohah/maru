@@ -5687,6 +5687,45 @@ test "preedit overlay covers a trailing autosuggest ghost (영문처럼 가림 �
     try std.testing.expectEqual(@as(u21, 0xC751), core.screen.cells[0].codepoint); // grid엔 '응' 그대로
 }
 
+test "preedit overlay clears the orphan continuation when a narrow glyph covers a wide ghost" {
+    // 좁은 조합 글자(폭1)가 wide 고스트(폭2)의 base만 덮으면 다음 칸 continuation이 짝을 잃는다.
+    // 한글은 항상 wide라 안 생기지만 폭1 marked text를 보내는 입력기에서 발생 — 짝 잃은 continuation을
+    // 비워 렌더가 base 없는 반쪽을 안 그리게 한다(리뷰 발견).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    try core.write("\xec\x9d\x91"); // 고스트 "응"(wide, col0 base + col1 continuation)
+    try core.write("\x1b[2D"); // 커서를 col0으로
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
+
+    try core.setPreedit("a"); // 폭1 조합 글자
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 'a'), snap.cells[0].codepoint); // 'a'(조합, 폭1)
+    try std.testing.expectEqual(@as(u2, 1), snap.cells[0].width);
+    try std.testing.expect(!snap.cells[1].continuation); // 짝 잃은 continuation 정리됨(잔상 없음)
+    try std.testing.expectEqual(@as(u21, ' '), snap.cells[1].codepoint);
+    try std.testing.expectEqual(@as(u16, 1), snap.cursor.col); // 커서는 조합 끝
+    try std.testing.expectEqual(@as(u21, 0xC751), core.screen.cells[0].codepoint); // grid의 '응' 불변
+}
+
+test "preedit overlay clears the truncated wide base when the cursor sits on a continuation cell" {
+    // 커서가 wide glyph의 continuation 칸(CUF/CHA로 가능)에 있을 때 조합하면, preedit이 그 칸을 덮어
+    // 좌측 base가 짝 잃은 잘린 wide가 된다 — 비워서 base와 preedit이 겹쳐 그려지지 않게 한다(리뷰 발견).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer core.deinit();
+    try core.write("\xec\x9d\x91"); // "응"(wide, col0 base + col1 continuation)
+    try core.write("\x1b[2G"); // CHA col2(1-based) = col1(continuation 칸)
+    try std.testing.expectEqual(@as(u16, 1), core.screen.cursor.col);
+
+    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
+    const snap = core.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, ' '), snap.cells[0].codepoint); // 잘린 '응' base 정리됨
+    try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[1].codepoint); // 라(조합, col1)
+    try std.testing.expectEqual(@as(u2, 2), snap.cells[1].width);
+    try std.testing.expect(snap.cells[2].continuation);
+    try std.testing.expectEqual(@as(u16, 3), snap.cursor.col); // 조합 끝
+    try std.testing.expectEqual(@as(u21, 0xC751), core.screen.cells[0].codepoint); // grid의 '응' 불변
+}
+
 test "zsh wide-glyph erase sequence (BS BS SP SP BS BS) cleans the hangul cell pair" {
     // 실제 zsh 캡처: "ls 안"에서 Backspace 1회에 zsh가 보내는 시퀀스는 "\x08\x08  \x08\x08".
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });

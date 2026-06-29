@@ -101,9 +101,20 @@ GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/a
 - 여러 micro-slice를 한 PR에 묶을 수는 있지만, 같은 harness를 공유해 더 작게 리뷰·rollback된다는 근거와 각 slice의 red→green 결과를 PR 본문에 남긴다.
 - 이전 micro-slice의 종료 gate가 깨지면 다음 slice를 진행하지 않는다.
 
+## 안정성·성능 진행 원칙
+
+각 구현 PR은 기능 검증과 별도로 안정성·성능 영향을 분류해야 한다. 분류는 PR 본문에 남긴다.
+
+- **hot path 영향 있음**: frame tick, PTY pump, renderer, socket dispatch, queue/backpressure, capture/stream, WebView bridge, build/watch loop를 건드리면 `performance-budget.md`의 관련 항목 또는 새 lightweight artifact를 연결한다.
+- **bounded 증명 필요**: 새 queue, buffer, chunk, cache, background task는 size limit, TTL/revocation, drop/coalesce, slow-consumer 처리, cleanup/rollback 경로를 테스트한다.
+- **전후 비교 필요**: 기존 perf/stress 항목이 있으면 변경 전후를 비교한다. 숫자가 흔들리는 GUI 영역은 wall-clock 대신 결정적 artifact(frame 값, event count, dropped count, queue depth, copy bytes)를 남긴다.
+- **예산 부재 시**: "성능 영향 없음"으로 쓰지 않는다. 아직 예산이 없다고 적고, 어떤 metric을 다음에 추가할지 [성능 예산](performance-budget.md)에 연결한다.
+- **퇴행 시 중단**: 기능 테스트가 통과해도 안정성·성능 gate가 깨지면 다음 micro-slice를 진행하지 않는다.
+
 ## PR마다 확인할 질문
 
 - 새 기능이 이 표의 어느 검증 경로에 연결되는가?
 - 자동 검증이 불가능하다면 어떤 수동 검증 산출물을 남기는가?
 - 새 산출물이 기존 snapshot, trace, replay, future inspector와 같은 도메인 데이터를 쓰는가?
+- hot path, queue, lock, allocation/copy, thread hop, I/O, frame tick에 새 부담을 만들었는가? 만들었다면 어떤 예산·stress·artifact로 확인했는가?
 - 한계가 새로 드러났다면 PR 설명과 사용자 보고에 적었는가?

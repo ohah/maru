@@ -97,6 +97,8 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
 - 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다.
 - 5a~5d: `browser.*` schema/authz, isolated bridge, `maru-app://` security, minimal browser ops를 각각 별도 red test로 시작한다.
 
+각 slice는 안정성·성능 영향을 같이 닫는다. WKWebView frame sync는 pane rect diff가 있을 때만 수행하고, 매 frame 무조건 `evaluateJavaScript`/snapshot/navigation을 호출하지 않는다. bridge는 bounded message size와 dispatch backpressure를 갖고, `browser.*` 호출은 main tick을 오래 점유하면 chunk/yield 또는 비동기 완료로 분리한다. z-order/IME처럼 wall-clock 성능 숫자가 흔들리는 영역은 frame 값, responder 전이 순서, message count, dropped/coalesced count 같은 결정적 artifact를 남긴다.
+
 ## 11. 테스트·검증
 
 - **자동(headless/TDD)**: 브리지 격리(`evaluateJavaScript`로 page-world `window.maru === undefined`), per-pane rect 계산(px↔pt·y-flip) 단위, surface diff 로직, WKWebView frame·NSView 계층 값 단언, CSP·경로 정규화(traversal 거부) 단위를 먼저 실패시키고 구현한다. Phase 7 웹 콘텐츠의 순수 JS/TS 로직은 Bun 내장 test runner(`bun test`, `web:test`)로 검증한다. Phase 6 WebDriver 어댑터가 아직 없으면 WKWebView 통합 E2E는 `evaluateJavaScript` 하니스로 먼저 검증하고, WebDriver가 붙은 뒤 같은 subset을 표준 WebDriver smoke로 반복한다.

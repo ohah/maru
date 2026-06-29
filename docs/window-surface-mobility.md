@@ -1,0 +1,135 @@
+# 윈도우와 Surface 이동성(detach/reattach)
+
+이 문서는 Maru의 terminal/web surface, Pane, Workspace를 OS 윈도우 사이에서 분리(detach)하고 다시 합치는(reattach/merge) 기능의 단일 출처다. 브라우저 탭 분리 UX를 위한 전용 기능이 아니라, 멀티윈도우 workspace restore, control-plane ID, 권한 scope, 알림 라우팅, WKWebView reparent의 공통 토대다.
+
+하위 버전 호환은 고려하지 않는다. 기존 저장 파일이나 외부 ID 계약을 유지하려고 복잡도를 늘리지 않고, 새 모델에 맞지 않는 옛 상태는 조용히 기본 창으로 시작한다.
+
+## 1. 확정 결정
+
+- **이 foundation은 웹 패널 Phase 4보다 먼저 한다.** WKWebView를 붙인 뒤 창 소유권을 바꾸면 재작업이 커지므로, `AppRuntime`/`WindowGraph`/전역 `surface_id`부터 확정한다.
+- **live surface의 소유자는 창이 아니라 AppRuntime이다.** OS 창은 surface를 소유하지 않고, `WindowGraph`가 가리키는 surface를 표시·배치한다.
+- **`surface_id`는 앱 인스턴스 전역 unique + generation이다.** `window_id`/`window_token`은 현재 위치 메타데이터다. surface가 창을 이동해도 surface capability와 trace 상관키가 흔들리지 않는다.
+- **부분 이동과 전체 윈도우 merge를 둘 다 지원한다.** 기본 primitive는 surface/pane/workspace 이동이고, 전체 window merge는 source window의 workspace들을 target window로 반복 이동한 뒤 빈 source window를 닫는 bulk operation이다.
+- **Maru-owned browser/web panel은 기본적으로 다시 합칠 수 있어야 한다.** "단독 브라우저 창"은 합쳐지지 않는 별도 타입이 아니라 browser surface 하나만 들어 있는 Maru window다. 외부 Safari/Chrome으로 여는 `Open in External Browser`만 Maru로 reattach할 수 없는 별도 앱 경로다.
+- **OS 타이틀바 드래그로 merge하지 않는다.** 창 이동 gesture와 충돌하므로, cross-window 이동은 Maru 내부 요소(surface tab, pane grip, workspace card)를 드래그하는 UX로 제공한다. 전체 window merge는 우선 command/menu/palette로 제공한다.
+- **native drag는 운반만, 정책은 Zig가 소유한다.** AppKit은 cross-window drag lifecycle, 좌표 변환, NSWindow 생성/focus, WKWebView reparent만 맡는다. drop 가능 여부, target 계산, WindowGraph 변경, capability 재평가는 Zig/AppRuntime이 결정한다.
+
+## 2. 현재 코드 기준 영향
+
+현재 macOS host의 `TerminalSurface`는 `window + appSession + metalRenderer`를 함께 들고, `New Window`는 새 `AppSession`을 만든다. 즉 실제 코드는 "한 OS 창 = 한 AppSession = live surface 소유자" 구조다. 같은 창 안에서 Pane을 새 워크스페이스로 분리하거나 기존 워크스페이스에 합치는 기능은 이미 있지만, 그 수술은 한 `AppSession` 내부 트리에서만 일어난다.
+
+따라서 cross-window detach/reattach는 단순 UX 추가가 아니라 소유권 refactor다. 새 코드는 per-window `AppSession`에 live PTY/WKWebView를 가두지 않고, 앱 인스턴스 전역 `AppRuntime`이 live surface를 소유하게 해야 한다.
+
+## 3. 목표 구조
+
+```text
+AppRuntime
+  LiveSurfaceRegistry
+    surface_id + generation -> terminal runtime | web panel runtime
+
+  WindowGraph
+    window_id -> workspace list -> pane tree -> surface refs
+
+macOS Host
+  NSWindow / Metal view / WKWebView
+  AppRuntime diff를 받아 생성, 닫기, reparent, resize, focus만 수행
+```
+
+역할:
+
+- `LiveSurfaceRegistry`: PTY reader/pump, TerminalCore, web panel state, WKWebView handle의 생명주기를 소유한다. surface는 창 이동 중에도 재시작하지 않는다.
+- `WindowGraph`: 어떤 window/workspace/pane/tab 위치에 어떤 surface ref가 보이는지의 순수 모델이다.
+- `AppRuntime`: registry와 graph를 함께 갱신하는 단일 정책 소유자다. 빈 source window 처리, active focus, capability scope 재평가를 여기서 결정한다.
+- macOS host: NSWindow, responder, native drag session, WKWebView subview reparent, Metal renderer 연결을 수행한다.
+
+## 4. 이동 단위와 UX
+
+지원 단위:
+
+| 단위 | 시작 affordance | drop 대상 | 동작 |
+|---|---|---|---|
+| Surface | Term/web surface tab | 같은/다른 pane tabbar | surface를 그 pane으로 이동 |
+| Surface | Term/web surface tab | pane 본문 drop-zone | target pane을 split하고 surface를 새 pane에 배치 |
+| Surface | Term/web surface tab | 창 밖 빈 공간 | 새 OS window 생성 후 surface 배치 |
+| Pane | pane tabbar 좌측 grip | 같은/다른 window sidebar 또는 workspace | pane 통째 이동/merge |
+| Pane | pane tabbar 좌측 grip | 창 밖 빈 공간 | 새 OS window 생성 후 pane 단독 배치 |
+| Workspace | sidebar workspace card | 같은 sidebar | reorder |
+| Workspace | sidebar workspace card | 다른 window sidebar | workspace를 target window로 이동 |
+| Workspace | sidebar workspace card | 창 밖 빈 공간 | 새 OS window 생성 후 workspace 단독 배치 |
+| Window all | menu/palette/action | target window | 모든 workspace를 target window로 이동 후 source window close |
+
+전체 window merge는 우선 다음 action으로 제공한다.
+
+```text
+merge_window_into_active_window
+merge_all_windows
+move_all_workspaces_to_window:N
+```
+
+기본 단축키는 두지 않는다. 단일 macOS 관례가 없고, 실수 시 큰 레이아웃 변형이므로 command palette, window menu, context menu로 노출한다.
+
+## 5. Native 이벤트 사용 범위
+
+같은 window 내부 이동은 기존 Zig mouse/hit-test 경로를 유지한다. 다른 OS window로 넘어가거나 창 밖 빈 공간에 drop하는 순간부터 AppKit drag-and-drop lifecycle을 사용한다.
+
+AppKit이 맡는 것:
+
+- `NSDraggingSession` 시작/종료.
+- 각 Maru window의 `NSDraggingDestination` enter/update/drop.
+- drag image 또는 floating preview를 OS window 밖에서도 보이게 하는 native transport.
+- screen/window/backing px 좌표 변환.
+- 새 NSWindow 생성·focus.
+- WKWebView subview reparent와 frame 적용.
+
+Zig/AppRuntime이 맡는 것:
+
+- drag payload가 surface/pane/workspace/window_all 중 무엇인지 판정.
+- drop target이 유효한지 계산.
+- same-window/cross-window highlight와 drop-zone 의미 결정.
+- WindowGraph 변경.
+- source window가 비었을 때 닫을지 정책.
+- `metadata:window` 같은 권한 scope 재평가.
+- trace/event 기록과 replay 가능한 domain event 생성.
+
+## 6. 권한과 ID
+
+`surface_id`는 이동해도 유지된다. 따라서 surface 기준 capability(`read-output:self`, `write:self` 등)는 generation이 유지되는 한 그대로 유효할 수 있다. 반면 window 기준 capability(`metadata:window`)는 이동 후 현재 window membership을 기준으로 다시 평가한다.
+
+`window_token`은 bearer token이 아니며 현재 위치를 설명하는 메타데이터다. control-plane selector는 최소 `{instance_nonce, surface_id, generation}`을 핵심으로 하고, 응답 메타데이터에 현재 `{window_id, window_token, window_kind}`를 싣는다.
+
+## 7. Workspace restore
+
+하위 호환이 없으므로 restore 포맷은 `WindowGraph` 기준으로 다시 정의한다.
+
+- 저장 대상: windows, active window, workspace order, pane tree, surface refs, surface restorable metadata.
+- 저장하지 않는 대상: live PTY fd, child pid, WKWebView process handle, JS heap snapshot.
+- 복원 시 live surface는 새 generation으로 생성된다. agent session resume처럼 별도 영속 상관키가 있는 항목만 재연결을 시도한다.
+
+## 8. 구현 순서
+
+이 기능은 full drag UX부터 만들지 않는다. 먼저 command path와 순수 모델을 고정한다.
+
+1. **M0 문서/ID 모델 정리**: `surface_id` 앱 전역 unique, `window_token` 위치 메타데이터, control-plane/restore 문서 갱신.
+2. **M1 WindowGraph TDD**: `moveSurface`, `movePane`, `moveWorkspace`, `mergeWindow`, no-op/empty-source/focus 보정 단위 테스트.
+3. **M2 LiveSurfaceRegistry 분리**: terminal live runtime을 window 밖 owner로 이동. surface 이동 시 PTY/TerminalCore를 재시작하지 않음을 테스트.
+4. **M3 command 기반 이동**: palette/menu action으로 surface/pane/workspace/window_all 이동. Swift는 window create/focus만 수행.
+5. **M4 same-window drag 재연결**: 기존 drag 경로가 WindowGraph move API를 쓰게 정리.
+6. **M5 cross-window native drag**: AppKit drag session/destination을 붙이고 Zig drop target API에 연결.
+7. **M6 web surface reparent**: WKWebView를 destroy/recreate하지 않고 target window/container로 reparent. focus/IME/z-order artifact로 검증.
+
+각 단계는 [세션 컨트롤 플레인](control-plane.md) §11의 Phase 시작 gate와 같은 방식으로, 시작 전에 사용자에게 scope·파일 후보·권한 변화·검증 gate를 설명하고 직전 단계 regression gate를 재실행한다.
+
+## 9. 검증
+
+- `WindowGraph` 순수 단위: 모든 move/merge/no-op/focus/empty-source 정책.
+- registry 수명: 이동 전후 `surface_id`/generation, PTY reader/pump, TerminalCore scrollback이 유지되는지.
+- control-plane: 이동 후 `sessions.list`, `metadata:self`, `metadata:window`, 알림 클릭 라우팅, capability revoke/re-eval.
+- workspace restore: multi-window graph round-trip, 하위 포맷 조용한 fallback.
+- macOS integration: 새 window 생성, cross-window drop target, source window auto-close, focus/firstResponder.
+- web panel: WKWebView reparent, bridge trust 유지, untrusted browser panel에 `window.maru` 미주입, IME/focus 복귀.
+
+성능 gate:
+
+- 이동은 surface runtime을 재시작하지 않는다.
+- bulk window merge는 workspace 단위로 bounded하게 처리하고, frame tick을 오래 점유하면 chunk/yield한다.
+- drag hover는 매 frame 대량 capture/evaluate/snapshot을 호출하지 않고, target 변경 시에만 highlight를 갱신한다.

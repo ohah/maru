@@ -372,6 +372,52 @@ fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, 
     return true;
 }
 
+/// 번들 폰트 패밀리 GUI 피커의 순회기 — `font.family`를 `theme.bundled_font_families`에서 dir(+1 다음/-1 이전, wrap)만큼
+/// 옮긴다. `cycleEnum`의 **문자열 짝**이다(font.family는 enum이 아니라 자유 문자열이라 ordinal 순회를 못 쓴다). 현재값이
+/// 목록 밖(시스템·직접입력 폰트)이면 dir>=0은 첫 항목, dir<0은 마지막 항목으로 **진입**한다(커스텀 값 복귀는 피커에서
+/// Enter 직접입력 — docs/config-gui.md). 값이 바뀌면 true. 정적 리터럴 슬라이스를 대입하므로 arena dupe가 불요하다
+/// (setText 계약: 호출자 소유 슬라이스 — 리터럴은 'static 수명).
+pub fn cycleFontFamily(config: *theme.Config, dir: i8) bool {
+    const list = theme.bundled_font_families;
+    if (list.len == 0) return false;
+    const cur = config.font.family;
+    var idx: ?usize = null;
+    for (list, 0..) |fam, k| {
+        if (std.mem.eql(u8, fam, cur)) {
+            idx = k;
+            break;
+        }
+    }
+    // 현재값이 목록 밖(시스템·직접입력 폰트)이면 ←→로 **덮어쓰지 않는다**(무동작). 사용자가 의도적으로 입력한
+    // 커스텀 폰트를 한 번의 화살표 키로 날리고 영속까지 시키는 데이터 손실을 막는다(code-review). 번들 폰트로
+    // 바꾸려면 Enter 직접입력으로 — 번들 폰트끼리만 ←→ 순환한다.
+    const k = idx orelse return false;
+    const n: i64 = @intCast(list.len);
+    const next: usize = @intCast(@mod(@as(i64, @intCast(k)) + dir + n, n));
+    return setText(config, "font.family", list[next]);
+}
+
+test "schema cycleFontFamily: 번들 목록 순환 + 목록 밖 진입" {
+    var config = theme.Config{};
+    // 기본값 = 목록 첫 항목.
+    try std.testing.expectEqualStrings("JetBrains Mono", config.font.family);
+    // +1 → 다음 항목.
+    try std.testing.expect(cycleFontFamily(&config, 1));
+    try std.testing.expectEqualStrings("Fira Code", config.font.family);
+    // -1 → 이전(첫 항목 복귀).
+    try std.testing.expect(cycleFontFamily(&config, -1));
+    try std.testing.expectEqualStrings("JetBrains Mono", config.font.family);
+    // 첫 항목에서 -1 → 마지막으로 wrap.
+    try std.testing.expect(cycleFontFamily(&config, -1));
+    try std.testing.expectEqualStrings("Hack", config.font.family);
+    // 목록 밖(직접입력/시스템 폰트)이면 ←→ **무동작**(데이터 손실 방지) — 값 유지 + false 반환.
+    config.font.family = "SF Mono";
+    try std.testing.expect(!cycleFontFamily(&config, 1));
+    try std.testing.expectEqualStrings("SF Mono", config.font.family);
+    try std.testing.expect(!cycleFontFamily(&config, -1));
+    try std.testing.expectEqualStrings("SF Mono", config.font.family);
+}
+
 /// 한 문자열(widget .text 또는 .color, 타입 []const u8) 스키마 필드의 GUI 인라인 편집 행 기술자. text=폰트 패밀리,
 /// color=#RRGGBB(1차는 hex 텍스트 편집). value=현재값(빌림 — config arena 소유). key/doc는 comptime 리터럴.
 pub const TextField = struct { key: []const u8, doc: []const u8, value: []const u8, section: ?theme.Section = null };

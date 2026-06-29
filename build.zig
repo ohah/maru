@@ -688,10 +688,17 @@ pub fn build(b: *std.Build) void {
                 // 라이선스(OFL.txt·LICENSE.*)는 평평화 시 충돌하지 않게 패밀리명 프리픽스로 동봉한다(재배포 의무).
                 // 새 패밀리는 디렉터리만 추가하면 자동 포함된다(이 build.zig 수정 불필요).
                 "for d in assets/fonts/*/; do fam=$(basename \"$d\"); " ++
-                "cp \"$d\"*.ttf zig-out/Maru.app/Contents/Resources/Fonts/ 2>/dev/null || true; " ++
-                "for lic in \"$d\"OFL.txt \"$d\"LICENSE.md \"$d\"LICENSE.txt; do " ++
-                "if [ -f \"$lic\" ]; then cp \"$lic\" \"zig-out/Maru.app/Contents/Resources/Fonts/$fam-$(basename \"$lic\")\"; fi; " ++
-                "done; done; " ++
+                // .ttf 없는 디렉터리는 폰트 패밀리가 아니므로 건너뛴다(폰트 자산만 처리). glob 미매치면 $1=리터럴 패턴.
+                "set -- \"$d\"*.ttf; [ -e \"$1\" ] || continue; " ++
+                // .ttf 복사 — 실패(권한/IO)하면 set -e로 빌드 중단(빈/불완전 Fonts 번들로 조용히 출하 방지, code-review).
+                "cp \"$d\"*.ttf zig-out/Maru.app/Contents/Resources/Fonts/; " ++
+                // 라이선스(재배포 의무)는 패밀리명 프리픽스로 동봉하고, .ttf가 있는데 라이선스가 하나도 없으면 빌드를
+                // 실패시킨다 — '번들 폰트는 라이선스 동봉' 보장(code-review: best-effort로 새 폰트가 무-라이선스 출하되던 구멍).
+                "lic_found=0; for lic in \"$d\"OFL.txt \"$d\"LICENSE.md \"$d\"LICENSE.txt; do " ++
+                "if [ -f \"$lic\" ]; then cp \"$lic\" \"zig-out/Maru.app/Contents/Resources/Fonts/$fam-$(basename \"$lic\")\"; lic_found=1; fi; " ++
+                "done; " ++
+                "[ \"$lic_found\" = 1 ] || { echo \"error: font family $fam has .ttf but no license (OFL.txt/LICENSE.md/LICENSE.txt) — 재배포 의무\" >&2; exit 1; }; " ++
+                "done; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
         macos_app_bundle.setCwd(b.path("."));

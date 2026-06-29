@@ -34,6 +34,15 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | `f32`/`u32` + `range` | slider (+ 숫자 입력) | min/max=range, step, 현재값 |
 | `[]const u8` (widget=`.text`) | text input | 현재값(IME) |
 | `[]const u8` (widget=`.color`) | color input | 현재 #RRGGBB |
+| `font.family` (특수) | font picker (dropdown 스타일 `.font` 행) | 옵션=`theme.bundled_font_families`(번들 폰트). ←→로 순환 + Enter/클릭으로 직접입력 |
+
+> **폰트 피커(`font.family`)**: `font.family`는 자유 문자열(어떤 설치 폰트든 가능)이라 닫힌 enum dropdown을 못 쓴다. 그래서
+> 일반 `.text` 인라인 편집 대신 **번들 폰트 목록(`theme.bundled_font_families` — 단일 출처) 위의 dropdown 스타일 피커**(`.font`
+> 행 종류)로 emit한다: ←→가 번들 폰트를 순환(`schema.cycleFontFamily`)하고, Enter/클릭은 목록 밖 시스템·직접입력 폰트를
+> 위한 인라인 편집을 연다(text 편집 경로 재사용 — `font.family`는 texts 범위라 platform이 enterEdit). 현재값이 목록 밖
+> (시스템·직접입력 폰트)이면 **←→는 무동작**이다 — 한 번의 화살표 키로 사용자가 입력한 커스텀 폰트를 덮어쓰는 데이터
+> 손실을 막는다(번들 폰트로 바꾸려면 Enter 직접입력). 새 번들 폰트는 `theme.bundled_font_families` + [font-strategy.md]
+> 갱신만으로 자동 노출(GUI 코드 0줄).
 
 - **섹션**: `Meta.section`(font/theme/cursor/window/input/terminal/workspace/quick_terminal/sidebar/global_hotkey)이 좌측
   네비 그룹이 된다. 같은 section 필드가 한 패널에 모인다. `global_hotkey`는 schema 필드가 없는 특수 섹션이라

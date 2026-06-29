@@ -4301,7 +4301,10 @@ pub const AppSession = struct {
             i += 1;
         }
         for (cf.texts) |t| {
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, t.section, if (t.doc.len > 0) t.doc else t.key), .kind = .{ .text = t.value } };
+            const label = try settingsRowLabel(arena, cross, t.section, if (t.doc.len > 0) t.doc else t.key);
+            // font.family는 dropdown 스타일 폰트 피커(←→로 번들 폰트 순환, Enter로 직접입력) — 나머지 텍스트 필드는 인라인 편집.
+            const kind: chrome.components.settings.FieldRow.Kind = if (std.mem.eql(u8, t.key, "font.family")) .{ .font = t.value } else .{ .text = t.value };
+            rows[i] = .{ .label = label, .kind = kind };
             i += 1;
         }
         // 테마 프리셋이 활성이면 색·팔레트 행을 잠근다(프리셋이 색을 정하므로) — 회색 표시 + 입력은 핸들러가 전환/차단.
@@ -4865,6 +4868,19 @@ pub const AppSession = struct {
         }
         const after_texts = after_enums + cf.texts.len;
         const after_colors = after_texts + cf.colors.len;
+        if (sel < after_texts) {
+            // text 행 — font.family만 ←/→로 번들 폰트(theme.bundled_font_families) 순환(테마 프리셋처럼 키보드 선택).
+            // 나머지 텍스트 필드는 ←/→ 무동작(편집은 Enter/클릭). 목록 밖 시스템·직접입력 폰트는 첫/마지막 항목으로
+            // 진입한다(cycleFontFamily) — 커스텀 폰트 복귀는 Enter 직접입력.
+            const t = cf.texts[sel - after_enums];
+            if (std.mem.eql(u8, t.key, "font.family")) {
+                if (config_mod.schema.cycleFontFamily(&self.loaded_config.config, dir)) {
+                    self.reapplyLoadedConfig();
+                    self.markConfigKeyDirty("font.family");
+                }
+            }
+            return;
+        }
         if (sel >= after_texts and sel < after_colors) {
             // color 행 — ←/→ = 이전/다음 16색 프리셋 순환. 단 테마 프리셋 잠금이면 막는다(색을 풀려면 클릭으로
             // "사용자 지정" 전환해야 — ←/→로 슬쩍 바뀌는 혼란 방지).
@@ -4884,7 +4900,7 @@ pub const AppSession = struct {
             self.chrome_host.settings.moveGridCell(dir);
             return;
         };
-        // text 행(after_enums..after_texts)은 ←/→ 무동작(편집은 hex 클릭).
+        // keybind/global 행은 ←/→ 무동작(녹음은 Enter/클릭). text 행은 위 after_texts 분기에서 처리(font.family만 순환).
     }
 
     /// 세팅 GUI 라이브 재적용(토글·슬라이더·enum·색·배경 이미지·테마)의 공통 진입점. **런타임 ⌘+/− 줌을 보존한다** —

@@ -100,6 +100,8 @@ flowchart TD
 | `events.subscribe` | `{filter?}` | 스트림 | §7 |
 | `browser.*` | (§9) | — | web surface 제어. trust·capability 검사 |
 
+메서드별 필요 capability는 §8.3을 단일 출처로 따른다 — `list`/`get`/`subscribe`=`metadata`, `capture`/`subscribeOutput`=`read-output`, `send*`=`write`, `resize`/`focus`/`close`/`spawn`/`panel.*`=`lifecycle`, `browser.*`=`browser`.
+
 ## 7. 이벤트
 
 `events.subscribe` 후 server가 notification을 push한다: `session.stateChanged`(agent running↔idle)·`cwdChanged`·`created`/`closed`, `panel.navigated`.
@@ -124,7 +126,7 @@ flowchart TD
 - 자식이 받은 토큰은 기본적으로 자기 surface의 `metadata`+`read-output`(+필요 시 `write`)만 가진다. cross-surface·quick terminal·lifecycle·browser 권한은 거부 또는 사용자 확인이 기본이다.
 - `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. 이 게이트는 `capture`가 처음 노출되는 Phase 1 안에서 먼저 구현한다.
 
-### 8.4 capability 핸들·redaction
+### 8.4 환경변수 노출·redaction
 - `$MARU_SESSION`은 키名에 `SESSION` 토큰을 포함하므로 [project-rules.md] §redaction의 deny-by-default 대상이다. trace/artifact에서 값을 마스킹한다. env는 보안 경계가 아니라 편의 채널이다(소켓 경로는 결정론적이라 env 없이도 발견됨).
 
 ### 8.5 WebDriver 어댑터

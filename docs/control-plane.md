@@ -157,7 +157,7 @@ flowchart TD
 | **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + collector + 외부 ID + `$MARU_SESSION` 주입 + CLI 클라이언트 + `sessions.list`/`get`/`capture` | 0 |
 | **2. write** | `sendText`(raw)/`sendKeys` + capability 인가(§8.3) + 에러 모델 | 0 |
 | **3. 이벤트** | `events.subscribe`(background 소스 포함) + outbound 백프레셔 + `subscribeOutput`(I/O 직송) | 0 |
-| **4. 웹 패널 껍데기** | NSView 합성 + per-pane rect-export ABI + `kind=web` + z-order(web-panel.md 선결) | 0 |
+| **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님) | 0 |
 | **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). 1·4 합류 | 0 |
 | **6. WebDriver 어댑터** | 제어 코어 위 ~15 명령 + 인증(§8.5) | 0 |
 | **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc 빌드) + md 링크 라우팅 + `panel.bindSession` | §13 |

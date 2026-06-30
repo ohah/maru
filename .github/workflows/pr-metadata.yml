@@ -10,13 +10,18 @@ on:
   pull_request:
     types: [opened, reopened, synchronize, labeled, unlabeled, assigned, unassigned]
 
-# PR 생성 시 opened + labeled(라벨 개수만큼) + assigned 이벤트가 거의 동시에 터져
-# 같은 PR에 대해 run이 여러 개 쌓인다. 무료 러너 동시 슬롯이 막히면 큐가 적체되고,
-# 필수 체크가 queued로 멈춰 머지가 막힌다. 같은 PR의 run은 최신 1개만 남겨
-# 중복 run이 러너 큐를 점유하지 않게 한다.
-concurrency:
-  group: pr-metadata-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# concurrency(취소)는 의도적으로 두지 않는다. 이 job은 branch protection의 **required 체크**
+# (`require label and assignee=ohah`)다. PR 생성 시 opened + labeled(라벨 수만큼) + assigned가 같은
+# head SHA에서 거의 동시에 터져 run이 여러 개 생기는데, concurrency로 묶으면 — cancel-in-progress가
+# true든 false든 — GitHub이 형제/중간 pending run을 **취소**하고, 취소된 run은 required 컨텍스트를
+# head SHA에 conclusion=CANCELLED로 남긴다. branch protection은 required 체크의 최신 결과가 CANCELLED면
+# 형제 run이 SUCCESS여도 머지를 BLOCKED 처리한다 → "체크 전부 green인데 머지 안 됨"이 반복됐다.
+# 그래서 묶지 않고 모든 run을 끝까지 돌린다: 이 job은 현재 PR 상태를 읽는 5초 read-only·idempotent라
+# 중복 실행이 싸고 전부 SUCCESS로 끝난다. 러너가 포화면 중복 run은 queued(=pending)로 대기할 뿐이고
+# auto-merge는 pending을 기다렸다 머지하므로 잠깐 지연될 뿐 영구 BLOCK이 아니다(취소보다 안전).
+# 참고: ci.yml·performance.yml은 concurrency를 쓰지만 group이 ref 기준이라 취소가 항상 "이전 커밋"
+# (cross-SHA) 대상 → 최종 head SHA엔 취소 체크를 안 남겨 이 위험이 없다. labeled/assigned로 같은 SHA
+# 버스트가 나는 이 워크플로만 해당된다.
 
 permissions:
   pull-requests: read

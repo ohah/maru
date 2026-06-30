@@ -20,6 +20,8 @@ gh pr edit <번호> --add-assignee ohah --add-label <label>
 
 이 규칙은 `.github/workflows/pr-metadata.yml`가 확인한다. 체크 실패가 실제로 머지를 막으려면 GitHub branch protection에서 `PR metadata / require label and assignee=ohah`를 required check로 지정한다(저장소 설정이라 코드에는 없다).
 
+이 워크플로에는 **concurrency(취소)를 두지 않는다.** PR 생성 시 `opened`+`labeled`(라벨 수만큼)+`assigned`가 같은 head SHA에서 거의 동시에 터지는데, concurrency로 묶으면 GitHub이 형제/중간 run을 취소하고 — 그 취소된 run이 required 컨텍스트를 **CANCELLED**로 남겨 — 형제 run이 SUCCESS여도 머지가 BLOCKED된다("체크 전부 green인데 머지 안 됨"의 원인). 묶지 않으면 모든 run이 SUCCESS로 끝나 이 문제가 사라진다(이 job은 5초 read-only라 중복 실행이 싸다). 자세한 근거는 워크플로 주석 참고. ci.yml·performance.yml은 ref 기준 group이라 취소가 항상 이전 커밋(cross-SHA) 대상이라 안전하다.
+
 ## 전략 영향 평가
 
 PR 설명에는 다음 질문에 대한 답이 있어야 한다.

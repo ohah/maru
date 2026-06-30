@@ -14,7 +14,7 @@
 - **입력 라우팅은 합성과 별개의 1급 문제다**(§4) — "layer만 분리"가 아니다. 모달이 그려지는 것과 키 입력이 모달에 가는 것은 다르다.
 - **web 특유 보안**(§7): `maru-app://` 콘텐츠에 엄격 CSP + 스킴 핸들러 경로 샌드박스, `.md`는 "신뢰 렌더러가 그리는 **비신뢰 데이터**"(새니타이즈), untrusted 패널은 데이터스토어·프로세스 격리. **브리지 신뢰 게이트 자체는 [control-plane.md] §8.1 단일 출처.**
 - **프론트엔드 개발환경 = zntc** (dev server/preview/build/bundle, dev-only, 확정). `web/` 하위 Bun workspace는 패키지 설치·락파일·script 실행·프론트엔드 단위 테스트(`bun test`)를 맡는다. JS/TS 품질 게이트는 VoidZero/Oxc 계열의 `oxlint`·`oxfmt`를 쓴다. Vite+에는 모노레포 config·task runner가 있지만, 전체 도입은 zntc 개발환경과 Bun test runner와 역할이 겹치므로 기본값에서 제외하고 필요 시 Vite Task만 별도 검토한다. **CEF는 미래 native webview-backend plugin 후보**(일반 Wasm/action plugin 아님 — §13).
-- **웹 패널 전에 이동성 foundation을 먼저 잡는다.** Maru-owned browser/markdown surface는 별도 창으로 detach된 뒤 다시 합쳐질 수 있어야 하므로, Phase 4 WKWebView 합성 전에 AppRuntime/WindowGraph/전역 surface ID를 확정한다([window-surface-mobility.md](window-surface-mobility.md)). 합쳐지지 않는 브라우저는 Maru surface가 아니라 `Open in External Browser` 경로다.
+- **웹 패널 전에 필요한 이동성 foundation만 먼저 잡는다.** Maru-owned browser/markdown surface는 별도 창으로 detach된 뒤 다시 합쳐질 수 있어야 한다. 따라서 Phase 1 live collector 전에는 `SurfaceIdAllocator`/`WindowMembershipSnapshot`을 확정하고, Phase 4 WKWebView hosting 전에는 그 M0 완료를 확인한 뒤 `WindowGraph`/`LiveSurfaceRegistry`를 확정한다([window-surface-mobility.md](window-surface-mobility.md)). command 이동/drag/reparent UX는 Phase 4 이후에 따라와도 된다. 합쳐지지 않는 브라우저는 Maru surface가 아니라 `Open in External Browser` 경로다.
 
 ## 2. 합성 계층
 
@@ -88,7 +88,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 
 ## 10. 구현 ([control-plane.md] Phase 4~5와 연계)
 
-- **Phase 4(껍데기)**: 컨테이너 contentView + 입력 responder 재편(§4) + 모달 레이어 분리 두 리팩터(§2) + surface 생애주기 ABI(§6) + per-pane rect(§3) + 빈 WKWebView가 본문 rect 추종. → [control-plane.md] §11 Phase 4가 이 규모(특히 모달 분리·입력 재편)를 포함하도록 정합.
+- **Phase 4(껍데기)**: 컨테이너 contentView + 입력 responder 재편(§4) + 모달 레이어 분리 두 리팩터(§2) + surface 생애주기 ABI(§6) + per-pane rect(§3) + 빈 WKWebView가 본문 rect 추종. 착수 전 M0 ID/scope foundation이 완료됐고 `WindowGraph`/`LiveSurfaceRegistry`가 surface 생애주기 단일 출처인지 확인한다. → [control-plane.md] §11 Phase 4가 이 규모(특히 모달 분리·입력 재편)를 포함하도록 정합.
 - **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane.md] `browser.*`·§8.1 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane.md] Phase 7와 함께 — §11. WebDriver 어댑터는 첫 콘텐츠의 필수 선행이 아니며, 기본 E2E는 `evaluateJavaScript` 하니스로 먼저 닫는다.)
 
 Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro-slice를 따른다:

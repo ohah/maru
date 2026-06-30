@@ -50,7 +50,7 @@ RuntimeEventPump
 > 흐름은 controlled_smoke·테스트(직접 코어 구동)와 headless에 그대로 유효하다. 그러나 **interactive 세션**
 > (`attachSurface(process_in_reader=true)`)은 reader thread가 `runProcessing`의 한 poll 루프(`waitIo`[read+write+wake])에서
 > 출력을 `core.write`(`Surface.core_mutex` 락 아래)하고 코어가 만든 query 응답(OSC 10/11·CPR·DA)을 자기 PTY로
-> 되쓴다. 응답이 30Hz 렌더 tick에 안 묶여, 출력 폭주(예: codex startup) 중에도 짧은 OSC 11 데드라인 안에
+> 되쓴다. 응답이 렌더 frame-loop tick에 안 묶여, 출력 폭주(예: codex startup) 중에도 짧은 OSC 11 데드라인 안에
 > 도착한다. 메인 tick은 그 코어를 락 아래 snapshot만 읽어 렌더한다(코어 읽기는 락 안, shaping/GPU는 락 밖).
 >
 > Phase 2(§8)에서 이 reader가 **유일한 PTY writer**가 됐다: 응답은 reader-로컬 outbound 버퍼에서 `POLLOUT`일 때

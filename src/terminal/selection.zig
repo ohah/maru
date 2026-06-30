@@ -166,9 +166,17 @@ pub const LinkSpan = struct { start: usize, end: usize, kind: LinkKind };
 /// web 외 추가 스킴(`://` 또는 `:` 형). 가장 이른 위치가 우선이라 목록 순서는 무관하다.
 const extra_scheme_list = [_][]const u8{ "file://", "ssh://", "ftp://", "git://", "mailto:", "tel:", "news:", "magnet:" };
 
+const utf8_ellipsis = "\xE2\x80\xA6";
+
+fn containsEllipsis(word: []const u8) bool {
+    return std.mem.indexOf(u8, word, utf8_ellipsis) != null;
+}
+
 /// 토큰 안에서 첫 링크의 범위+종류를 찾는다(없으면 null). 우선순위: 스킴 URL > 절대 > 홈 > dot-relative >
-/// bare-relative. 스킴이 경로보다 먼저라 `http://h:8080`의 `:8080`은 포트지 줄번호가 아니다.
+/// bare-relative. 스킴이 경로보다 먼저라 `http://h:8080`의 `:8080`은 포트지 줄번호가 아니다. U+2026이 들어간
+/// 토큰은 원본이 화면 밖에서 잘린 것으로 보고 자동 감지하지 않는다 — 원본 URI가 있는 경우는 OSC 8이 우선 처리한다.
 pub fn linkSpanInWord(word: []const u8, scopes: LinkScopes) ?LinkSpan {
+    if (containsEllipsis(word)) return null;
     if (schemeUrlSpan(word, scopes)) |s| return .{ .start = s.start, .end = s.end, .kind = .url };
     if (filePathSpan(word, scopes)) |s| return .{ .start = s.start, .end = s.end, .kind = .file_path };
     return null;

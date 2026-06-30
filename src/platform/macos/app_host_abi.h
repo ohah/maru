@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 91u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 92u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -593,6 +593,10 @@ uint32_t maru_macos_app_session_take_bell(MaruAppHostSession *session);
 /* Dock 배지 1회성 신호(config bell.dock-badge). BEL이 창 포커스 없을 때 울리면 1, 아니면 0. Swift가 매 tick 호출해
    1이면 NSApp.dockTile.badgeLabel을 ●로 세운다(포커스 복귀 시 Swift가 지움). take_bell과 같은 1회성. session null=0. v76. */
 uint32_t maru_macos_app_session_take_bell_badge(MaruAppHostSession *session);
+/* 세팅 GUI에서 데스크톱 알림 토글(notifications.agent-complete/osc)을 켠 경우 macOS 알림 권한 요청을 Swift에 맡기는
+   1회성 신호. pending이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면 UNUserNotificationCenter 권한 요청을
+   시도한다. session null=0. v92. */
+uint32_t maru_macos_app_session_take_notification_authorization_request(MaruAppHostSession *session);
 /* macOS 시스템 외관(NSAppearance)이 다크(is_dark!=0)/라이트(0)인지 Swift가 알려준다(생성 직후·외관 변경마다). config
    theme.follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색으로 라이브 교체(꺼져 있으면 무시). session null=무동작. v77. */
 int32_t maru_macos_app_session_set_system_appearance(MaruAppHostSession *session, int32_t is_dark);

@@ -242,7 +242,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 3b session events | background source 포함 통합 | `events.subscribe` |
 | 3c output stream | `read-output` scope, I/O 직송 backpressure, revoke-on-chunk | `subscribeOutput` |
 | 4a host rect ABI | px↔pt/y-flip, surface lifecycle diff 단위 | web surface kind + rect data |
-| 4b modal split | renderer 2-pass와 overlay layer 단위/contract | terminal modal overlay 분리 |
+| 4b modal split | renderer 2-pass와 overlay layer 단위/contract + 2-quad 자연폭 셀 순서(배경 quad→전경 quad) 보존 + role 기반 cover-fit 회귀 fixture | terminal modal overlay 분리 |
 | 4c empty WKWebView | NSView frame/계층 단언, GUI z-order artifact | 빈 `kind=web` panel |
 | 4d input routing | responder/IME/drag spike artifact + 최소 회귀 | WKWebView focus/input routing |
 | 5a browser core | `browser.*` schema/dispatch/authz 단위 | WKWebView control core skeleton |
@@ -270,7 +270,8 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - **소켓·collector**: 실제 unix socket bind/connect 통합 E2E + fake `Rt` 유닛.
 - **웹 콘텐츠(JS/TS)**: Phase 7의 렌더러·sanitizer·라우팅 순수 로직은 Bun 내장 test runner(`bun test`)로 검증하고 `web:test` script에 고정한다. Vitest를 기본 테스트 러너로 두지 않는다.
 - **웹 패널**(콘텐츠·`browser.*`·브리지·신뢰 게이트): Phase 5~7 기본 자동 E2E는 `evaluateJavaScript` 브리지 하니스로 돌리고, Phase 6 WebDriver 어댑터가 붙으면 같은 명령 subset을 표준 WebDriver 클라이언트로 다시 검증한다. 예: untrusted 패널에서 `typeof window.webkit.messageHandlers.maru === 'undefined'` 단언으로 브리지 미주입을 자동 검증. frame 값·NSView 계층(z-order)은 코드 단언.
-- **픽셀 시각 정합**(z-order·frame이 눈에 맞는가): web-panel.md §11을 단일 출처로 둔다. 현재 CI 자동화는 불가(`CGWindowListCreateImage` 제거, ScreenCaptureKit은 TCC/GUI 필요)라 Phase 4 종료 게이트는 GUI 골든 1 frame 수동 확인이다.
+- **렌더 사전 회귀 gate**: Phase 4가 모달 2-pass/overlay layer를 건드리기 전 `mise run test`, `mise run check-boundaries`, `mise run test-macos-coretext-smoke`, `mise run test-macos-metal-smoke`를 먼저 재실행한다. display가 있는 macOS 환경이면 `mise run macos-coretext-smoke`와 `mise run macos-metal-smoke`도 실행해 `renderer_frame_prepared=true`, `drawlist_frame_prepared=true`, `product_atlas_uploaded=true`, `product_atlas_sampled=true`, `atlas_sample_missing_cells=0`, `screenshot_artifact=true`를 확인한다. 이 gate는 현재 렌더러 계약(자연폭/2-quad/role 기반 cover-fit/atlas sampling)이 시작 전 깨져 있지 않은지 보는 사전조건이며, WKWebView 합성 자체를 증명하지는 않는다.
+- **픽셀 시각 정합**(z-order·frame이 눈에 맞는가): web-panel.md §11을 단일 출처로 둔다. 현재 CI 자동화는 불가(`CGWindowListCreateImage` 제거, ScreenCaptureKit은 TCC/GUI 필요)라 Phase 4 종료 게이트는 GUI 골든 1 frame 수동 확인이다. 이 골든은 단순 z-order뿐 아니라 최근 렌더 계약도 같이 깨본다: Hack `workspace` baseline, `①②③` role-based fit, 음수 `font.letter-spacing`, SGR48/selection/block cursor 아래 2-quad 자연폭 글리프, split divider 경계 bleed.
 
 매 단계 `check-boundaries`(코어 L2에 app/pty/platform import 0). 각 Phase 시작 PR에는 §11의 Phase 시작 gate 결과를 PR 본문에 남긴다: 사용자에게 설명한 scope, 재실행한 이전 Phase regression gate, 실패/skip한 수동 gate와 대체 확인 경로. 관측 가능성: 컨트롤 플레인 JSON-RPC 메시지를 기록하려면 먼저 [Trace와 Replay](trace-replay.md)·[Facade 계약](facade-contracts.md)의 `Trace/Event` schema를 `control.*` event로 확장한다. 그 전에는 "기존 trace 포맷을 그대로 재사용"한다고 주장하지 않는다. 실패 artifact는 redaction(§8.5) 후.
 
@@ -279,7 +280,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, `SurfaceIdAllocator` 단조·비재사용·opaque ID, `WindowMembershipSnapshot`, 2-window+quick 전역 ID 비충돌, `metadata:self` 응답 필터, `metadata:window`/`metadata:all` scope 필터, self-origin auth 정상/변조 selector/다른 surface_id·generation·quick 교차 접근 거부, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, CLI fd close/`FD_CLOEXEC` 후 helper 누수 방지, CLI `--help` fixture(`sessions list`/`session get`/`session capture`만 노출), dispatch·chunk 경계 revocation, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), primary 창 2개+quick terminal self-origin 제품 실측 artifact(`tests/artifacts/control-plane/self-origin.summary.txt`), maru 밖 shell 복사 selector 거부, `capture` 권한 거부·허용, capability fd 상속 smoke(**login wrapper 실패, non-login zsh/bash/sh 성공**), zsh startup fd-close 실패, background fd persistence+TTL/revocation, tmux/screen pane fd-close 및 self-origin 결과 기록 | sudo/su controlled gate |
 | 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드, CLI `--help` fixture(`send-text`/`send-keys`) | 소켓→실제 PTY 입력(통합 PTY) | — |
 | 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부, CLI `--help` fixture(`events subscribe`/`session subscribe-output`) | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
-| 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |
+| 4 | pane→px rect 계산, leaf kind 라우팅, 2-quad 자연폭 셀 순서/role gate fixture 유지 | renderer preflight(`test`/`check-boundaries`/CoreText·Metal smoke 계약), NSView frame/계층 단언 | 픽셀 정합(스크린샷), WKWebView 위 모달 + 자간/role/cursor/selection 수동 골든 |
 | 5 | `browser.*` 디스패치, 신뢰 게이트 판정 | `evaluateJavaScript`로 브리지 호출·미주입 단언, isolated world | — |
 | 6 | WebDriver HTTP 라우팅, 토큰/Origin 검사 | 표준 WebDriver 클라이언트 제어 | — |
 | 7 | 7a: `web:test`/`web:lint`/`web:fmt-check` script 계약, zntc hello bundle. 7b: markdown sanitizer adversarial fixture. 7c: viewer/source editor 단위 + WKWebView harness. 7d: md 클릭 라우팅, `panel.bindSession` cwd, `bind` capability 허용·거부, CLI `--help` fixture(`panel open --kind markdown`/`panel bind-session`) | WKWebView 기반 웹 콘텐츠 E2E. WebDriver 어댑터가 아직 없으면 `evaluateJavaScript` 브리지 하니스로 먼저 검증하고, Phase 6 뒤 표준 WebDriver smoke를 추가 | 실제 렌더(눈 확인) |

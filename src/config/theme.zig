@@ -28,6 +28,13 @@ pub const Meta = struct {
     section: ?Section = null,
 };
 
+/// macOS app host frame-loop timer cadence. 60Hz is the default interactive cadence;
+/// 30Hz remains a low-power option and 120Hz covers high-refresh displays until a
+/// future vsync/display-link clock replaces the timer.
+pub const render_frame_rate_min: u32 = 30;
+pub const render_frame_rate_default: u32 = 60;
+pub const render_frame_rate_max: u32 = 120;
+
 /// GUI 폰트 피커가 키보드(←→)로 순회하는 **번들 폰트 패밀리 목록**(docs/font-strategy.md §번들 폰트). 앱에 동봉돼
 /// 항상 선택 가능한 패밀리만 둔다 — `assets/fonts/<Family>/`·docs/third-party-licenses.md와 **수동 동기화**한다(comptime이
 /// TTF name 테이블을 못 읽어 디렉터리명에서 패밀리명을 자동 도출할 수 없다). 사용자는 이 목록 밖 시스템/직접입력 폰트도
@@ -437,8 +444,8 @@ pub const CursorConfig = struct {
     shape: CursorShape = .block,
     blink: bool = true,
     /// 커서 깜빡임 **반주기**(ms) — on/off 각 단계의 길이. 기본 500ms(on 500 / off 500, 일반 터미널 관례).
-    /// 렌더 tick이 30Hz 고정이라 app이 ms를 틱으로 환산한다(round, 최소 1틱). `blink = false`면 이 값과 무관하게
-    /// 깜빡이지 않는다. loader가 `cursor.blink-interval-ms` 파싱. (Ghostty `cursor-blink-interval` 대응)
+    /// app이 `render.frame-rate` 기준 tick으로 환산한다(round, 최소 1틱). `blink = false`면 이 값과 무관하게 깜빡이지
+    /// 않는다. loader가 `cursor.blink-interval-ms` 파싱. (Ghostty `cursor-blink-interval` 대응)
     blink_interval_ms: u32 = 500,
     // 커서 색(선택, #RRGGBB). 둘 다 테마와 독립적으로 커서만 칠하는 opt-in override다 — null이면 테마 동작을
     // 그대로 따른다(기존 호환). color=커서 칸 배경(null이면 theme.cursor). text=반전 블록 커서 위 glyph 색
@@ -810,6 +817,10 @@ pub const Config = struct {
     /// 렌더러가 **clear color의 alpha에만** 이 값을 곱한다(셰이더·셀 불변). metal layer/NSWindow도 opacity<1이면 비불투명.
     /// (docs/configuration.md·settings-page.md F1-1)
     window_opacity: f32 = 1.0,
+    /// macOS 앱 frame-loop 주사율(Hz). 기본 60Hz — 30Hz보다 hover/scroll 최대 지연을 줄이면서 idle 비용은 아직
+    /// 보수적이다. 120Hz는 ProMotion/고주사율 테스트용 상한이고, 그 이상은 NSTimer 기반이라 vsync 정렬·전력 이점이
+    /// 없어 CVDisplayLink/CADisplayLink 전환 전에는 열지 않는다. loader가 `render.frame-rate`로 파싱한다.
+    render_frame_rate: u32 = render_frame_rate_default,
     /// 터미널 배경 이미지 파일 경로(PNG). 비면(기본) 배경 이미지 없음(현행). 설정하면 그 PNG를 디코드해 창 전체를
     /// 덮는 배경으로 셀 뒤에 그린다(aspect-fill — 종횡비 유지 cover). default 배경 셀(빈 영역)이 투명이라 이미지가
     /// 비치고, 명시 배경색 셀·텍스트는 그 위에 그려진다. **PNG 8-bit truecolor만**(maru 내장 디코더 — JPEG 등은 후속).
@@ -880,6 +891,7 @@ pub const Config = struct {
         .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = "아래 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_left = Meta{ .key = "window.padding-left", .doc = "왼쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_opacity = Meta{ .key = "window.opacity", .doc = "창 배경 투명도(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
+        .render_frame_rate = Meta{ .key = "render.frame-rate", .doc = "앱 주사율(Hz)", .range = .{ render_frame_rate_min, render_frame_rate_max }, .widget = .number, .section = .window },
         .window_background_image = Meta{ .key = "window.background-image", .doc = "배경 이미지 PNG 경로", .widget = .text, .section = .window },
         .window_blur = Meta{ .key = "window.blur", .doc = "창 뒤 배경 블러 반경(px, 0=끔, opacity<1일 때만)", .range = .{ 0, 100 }, .widget = .slider, .section = .window },
         .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = "비활성 split pane 디밍(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },

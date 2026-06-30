@@ -732,6 +732,8 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expectEqual(true, cfg.blink_text);
     try std.testing.expect(try tryParse(a, &cfg, "window.padding-top", "12", &diags, 2)); // u32 range
     try std.testing.expectEqual(@as(u32, 12), cfg.window_padding_top);
+    try std.testing.expect(try tryParse(a, &cfg, "render.frame-rate", "120", &diags, 2)); // 최상위 u32 range
+    try std.testing.expectEqual(@as(u32, 120), cfg.render_frame_rate);
     try std.testing.expect(try tryParse(a, &cfg, "text.ambiguous-width", "wide", &diags, 3)); // enum
     try std.testing.expectEqual(theme.AmbiguousWidth.wide, cfg.ambiguous_width);
     try std.testing.expect(try tryParse(a, &cfg, "term", "xterm-256color", &diags, 4)); // text
@@ -790,6 +792,11 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expect(try tryParse(a, &cfg, "window.opacity", "1.5", &diags, 7));
     try std.testing.expectApproxEqAbs(@as(f32, 0.7), cfg.window_opacity, 0.001); // reject → 직전값 유지
     try std.testing.expectEqual(@as(usize, 2), diags.items.len);
+
+    // 범위 밖 frame-rate(>120) → diagnostic + 직전 유효값(120) 유지
+    try std.testing.expect(try tryParse(a, &cfg, "render.frame-rate", "144", &diags, 7));
+    try std.testing.expectEqual(@as(u32, 120), cfg.render_frame_rate);
+    try std.testing.expectEqual(@as(usize, 3), diags.items.len);
 }
 
 test "schema tryParse: 잘못된 값은 diagnostic + 기본값 유지 + true(폴백 안 함)" {

@@ -602,6 +602,24 @@ pub export fn maru_macos_app_session_window_blur_radius(session: ?*AppSession) u
     return app_session.windowBlurRadius();
 }
 
+// macOS app host frame-loop cadence(config render.frame-rate). Swift가 NSTimer 간격을 정할 때 읽는다.
+// tick 본문은 계속 Zig가 소유하고, host는 clock만 제공한다. session null=기본 60Hz. (ABI v91)
+pub export fn maru_macos_app_session_frame_rate_hz(session: ?*AppSession) u32 {
+    const app_session = session orelse return maru.config.theme.render_frame_rate_default;
+    return app_session.frameRateHz();
+}
+
+test "frame_rate_hz ABI getter: null default and session config clamp" {
+    try std.testing.expectEqual(maru.config.theme.render_frame_rate_default, maru_macos_app_session_frame_rate_hz(null));
+    var session: AppSession = undefined;
+    session.loaded_config.config = .{};
+    try std.testing.expectEqual(@as(u32, 60), maru_macos_app_session_frame_rate_hz(&session));
+    session.loaded_config.config.render_frame_rate = 120;
+    try std.testing.expectEqual(@as(u32, 120), maru_macos_app_session_frame_rate_hz(&session));
+    session.loaded_config.config.render_frame_rate = 999;
+    try std.testing.expectEqual(@as(u32, 120), maru_macos_app_session_frame_rate_hz(&session));
+}
+
 // 타이핑(글자 입력) 중 마우스 숨김 1회성 신호(config input.mouse-hide-while-typing). pending이면 1(플래그 비움),
 // 없으면 0. Swift가 tick마다 호출해 1이면 NSCursor.setHiddenUntilMouseMoves(true)(다음 마우스 이동에서 자동 복원).
 // take_bell과 같은 1회성 패턴 — 한 tick에 여러 글자를 쳐도 hide 호출은 한 번. session null=0. (ABI v72)

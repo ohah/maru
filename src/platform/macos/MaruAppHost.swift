@@ -598,6 +598,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return delayMs
     }
     private var tickTimer: Timer?
+    private var frameLoopRateHz: UInt32 = 0
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
@@ -1300,13 +1301,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    private func configuredFrameLoopRateHz() -> UInt32 {
+        guard let session = (activeSurface ?? primary)?.appSession else { return 60 }
+        return max(1, maru_macos_app_session_frame_rate_hz(session))
+    }
+
+    private func restartFrameLoopTicksIfNeeded() {
+        let hz = configuredFrameLoopRateHz()
+        guard tickTimer != nil else {
+            frameLoopRateHz = hz
+            return
+        }
+        guard hz != frameLoopRateHz else { return }
+        startFrameLoopTicks()
+    }
+
     private func startFrameLoopTicks() {
         tickTimer?.invalidate()
+        let hz = configuredFrameLoopRateHz()
+        frameLoopRateHz = hz
         // Swift는 frame pacing만 정한다. PTY queue drain, SurfaceRuntime 적용,
         // RenderFrame 준비는 모두 Zig FrameLoop.tick이 소유한다.
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1.0 / Double(hz), repeats: true) { [weak self] _ in
             // Timer 콜백은 main run loop(main thread)에서 실행되고 이 controller는 @MainActor다.
-            // Task로 감싸면 매 tick(30/sec)마다 async hop과 할당이 생기므로 main에서 바로 호출한다.
+            // Task로 감싸면 매 tick마다 async hop과 할당이 생기므로 main에서 바로 호출한다.
             MainActor.assumeIsolated {
                 self?.tickAppSession()
             }
@@ -1397,6 +1415,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 tearDownQuickTerminal()
             }
         }
+        restartFrameLoopTicksIfNeeded()
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가

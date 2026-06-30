@@ -51,7 +51,7 @@ pub const ResolvedTheme = struct {
 pub const ResolvedCursor = struct {
     shape: theme.CursorShape,
     blink: bool,
-    // 커서 깜빡임 반주기(ms). app이 30Hz tick으로 환산(근거는 theme.CursorConfig.blink_interval_ms 단일 출처).
+    // 커서 깜빡임 반주기(ms). app이 render.frame-rate tick으로 환산(근거는 theme.CursorConfig.blink_interval_ms 단일 출처).
     blink_interval_ms: u32 = 500,
     // 창 포커스 잃을 때 커서 처리(block 유지/hollow 외곽선/hidden). app이 window_focused와 함께 cursor overlay에 wiring.
     unfocused: theme.UnfocusedCursor = .block,

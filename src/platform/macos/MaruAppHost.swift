@@ -1451,6 +1451,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 drawMetalFrame()
             }
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
+            drainNotificationAuthorizationRequest() // 세팅에서 데스크톱 알림 토글을 켰으면 macOS 알림 권한을 요청한다.
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
             drainBellBadge() // BEL이 언포커스 시 울렸으면 Dock 배지를 띄운다(config bell.dock-badge).
@@ -1951,15 +1952,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         pasteboard.setString(text, forType: .string)
     }
 
-    // OSC 9/777: 알림 권한을 한 번만 요청한다(번들 ID가 있을 때만 — bare 실행 파일은 UNUserNotificationCenter가
-    // 못 떠서 graceful skip). 권한이 거부돼도 add는 무해히 무시되므로 결과는 안 본다.
+    // OSC 9/777·세팅 GUI: 알림 권한을 요청한다(번들 ID가 있을 때만 — bare 실행 파일은 UNUserNotificationCenter가
+    // 못 떠서 graceful skip). 기본은 앱 실행 중 한 번만 요청하고, 사용자가 데스크톱 알림 설정을 켜는 명시 동작은
+    // force=true로 다시 시도한다. 이미 허용돼 있으면 requestAuthorization은 무해하고, 거부 상태면 OS 정책상 재팝업 대신
+    // false를 돌려준다.
     private var notificationAuthRequested = false
-    private func ensureNotificationAuthorization() {
+    private func ensureNotificationAuthorization(force: Bool = false) {
+        if force { notificationAuthRequested = false }
         guard !notificationAuthRequested, Bundle.main.bundleIdentifier != nil else { return }
         notificationAuthRequested = true
         // delegate는 applicationDidFinishLaunching에서 launch 완료 전에 이미 등록했다(콜드 런치 클릭 누락 방지) —
         // 여기선 권한만 요청한다(거부돼도 add는 무해히 무시되므로 결과는 안 본다).
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    // 세팅 GUI에서 notifications.agent-complete/osc를 켠 경우, 사용자가 지금 데스크톱 알림을 원한다고 명시한 것이므로
+    // macOS 권한 요청을 다시 시도한다. 어떤 config 키가 대상인지는 Zig가 정하고, Swift는 OS 권한 API만 호출한다.
+    private func drainNotificationAuthorizationRequest() {
+        guard let session = appSession else { return }
+        if maru_macos_app_session_take_notification_authorization_request(session) != 0 {
+            ensureNotificationAuthorization(force: true)
+        }
     }
 
     // OSC 9/777·에이전트 완료: 코어가 모은 데스크톱 알림(title/body/surface_id)을 활성 세션에서 drain해 네이티브

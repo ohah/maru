@@ -6,7 +6,7 @@
 
 ## 1. 확정 결정
 
-- **이 foundation은 웹 패널 Phase 4보다 먼저 한다.** WKWebView를 붙인 뒤 창 소유권을 바꾸면 재작업이 커지므로, `AppRuntime`/`WindowGraph`/전역 `surface_id`부터 확정한다.
+- **ID·소유권 foundation(M0–M2)은 웹 패널 Phase 4가 WKWebView hosting을 짓기 전에 끝낸다.** 전역 `surface_id`·`WindowGraph`·`LiveSurfaceRegistry`가 여기 해당한다. 전체 드래그 UX와 cross-window·web reparent(M3–M6)는 Phase 4 이후에 따라와도 된다. 단일 창 web panel·markdown 뷰어는 이 refactor 없이도 동작하지만, WKWebView를 붙인 뒤 창 소유권을 바꾸면 hosting 코드 재작업이 커지므로 foundation을 먼저 둔다.
 - **live surface의 소유자는 창이 아니라 AppRuntime이다.** OS 창은 surface를 소유하지 않고, `WindowGraph`가 가리키는 surface를 표시·배치한다.
 - **`surface_id`는 앱 인스턴스 전역 unique + generation이다.** `window_id`/`window_token`은 현재 위치 메타데이터다. surface가 창을 이동해도 surface capability와 trace 상관키가 흔들리지 않는다.
 - **부분 이동과 전체 윈도우 merge를 둘 다 지원한다.** 기본 primitive는 surface/pane/workspace 이동이고, 전체 window merge는 source window의 workspace들을 target window로 반복 이동한 뒤 빈 source window를 닫는 bulk operation이다.
@@ -19,6 +19,8 @@
 현재 macOS host의 `TerminalSurface`는 `window + appSession + metalRenderer`를 함께 들고, `New Window`는 새 `AppSession`을 만든다. 즉 실제 코드는 "한 OS 창 = 한 AppSession = live surface 소유자" 구조다. 같은 창 안에서 Pane을 새 워크스페이스로 분리하거나 기존 워크스페이스에 합치는 기능은 이미 있지만, 그 수술은 한 `AppSession` 내부 트리에서만 일어난다.
 
 따라서 cross-window detach/reattach는 단순 UX 추가가 아니라 소유권 refactor다. 새 코드는 per-window `AppSession`에 live PTY/WKWebView를 가두지 않고, 앱 인스턴스 전역 `AppRuntime`이 live surface를 소유하게 해야 한다.
+
+용어 주의: 이 문서의 "surface"(=`surface_id` 단위)는 pane 안의 terminal/web view **하나**다. 현재 코드의 Swift `TerminalSurface`(창 1개의 per-session 상태)나 기존 ABI `FrameSummary.surface_id`(활성 표면 1개)와 이름이 겹치지만 더 잘은 단위이며 같은 것이 아니다. `surface_id`는 그 view마다 앱 전역으로 채번한다.
 
 ## 3. 목표 구조
 
@@ -41,6 +43,8 @@ macOS Host
 - `WindowGraph`: 어떤 window/workspace/pane/tab 위치에 어떤 surface ref가 보이는지의 순수 모델이다.
 - `AppRuntime`: registry와 graph를 함께 갱신하는 단일 정책 소유자다. 빈 source window 처리, active focus, capability scope 재평가를 여기서 결정한다.
 - macOS host: NSWindow, responder, native drag session, WKWebView subview reparent, Metal renderer 연결을 수행한다.
+
+레이어 배치([세션 컨트롤 플레인](control-plane.md) §11 코드 배치 게이트와 일치): `WindowGraph`와 move/merge·capability 재평가 **정책 판정**은 L2 중립 코드(`src/session/`)에 두고 `app`/`pty`/`platform` import 0을 유지한다. `LiveSurfaceRegistry`는 PTY/WKWebView 핸들을 들므로 L4 플랫폼(`src/platform/macos/`)이다. `AppRuntime`은 L4 coordinator로, 핸들 수명은 직접 들되 이동 가부·drop target·capability scope 같은 정책은 L2 함수를 호출해 결정한다 — 정책과 플랫폼 핸들을 한 god object에 섞지 않는다.
 
 ## 4. 이동 단위와 UX
 
@@ -67,6 +71,8 @@ move_all_workspaces_to_window:N
 ```
 
 기본 단축키는 두지 않는다. 단일 macOS 관례가 없고, 실수 시 큰 레이아웃 변형이므로 command palette, window menu, context menu로 노출한다.
+
+quick terminal은 이동 단위·대상에서 제외한다 — 싱글톤 dropdown이라 detach/reattach·merge·split drop의 출발지도 도착지도 아니다. quick 안의 surface를 일반 창으로 빼내는 별도 UX가 필요하면 추후 명시 결정한다.
 
 ## 5. Native 이벤트 사용 범위
 
@@ -99,11 +105,12 @@ Zig/AppRuntime이 맡는 것:
 
 ## 7. Workspace restore
 
-하위 호환이 없으므로 restore 포맷은 `WindowGraph` 기준으로 다시 정의한다.
+restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이다. 이 절은 그 문서에 중복 정의하지 않고, 이동성 모델이 요구하는 변경만 적는다(상세 저장/미저장 목록은 거기서 갱신).
 
-- 저장 대상: windows, active window, workspace order, pane tree, surface refs, surface restorable metadata.
-- 저장하지 않는 대상: live PTY fd, child pid, WKWebView process handle, JS heap snapshot.
+- 저장 모델을 단일 창 기준에서 `WindowGraph` 기준(windows, active window, workspace order, pane tree, surface refs)으로 확장한다.
+- live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 계속 저장하지 않는다(기존 정책 유지).
 - 복원 시 live surface는 새 generation으로 생성된다. agent session resume처럼 별도 영속 상관키가 있는 항목만 재연결을 시도한다.
+- 하위 호환은 없으므로 옛 저장 파일은 workspace-restore.md의 "조용한 기본 창 폴백"을 따른다.
 
 ## 8. 구현 순서
 

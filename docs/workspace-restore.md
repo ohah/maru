@@ -134,6 +134,8 @@ layout
 
 실제 직렬화는 나중에 정한다. 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로 bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
 
+멀티윈도우와 live surface 소유권(AppRuntime/WindowGraph) 모델은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다. 그 모델이 도입되면 저장 대상은 단일 창에서 `WindowGraph` 기준(windows, active window, workspace order, pane tree, surface refs)으로 확장되고, 각 surface는 복원 시 새 generation으로 생성된다. live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 여전히 저장하지 않는다.
+
 ## 사용자 지정 이름(custom_name)과 자동 제목
 
 워크스페이스(사이드바 탭)·Pane(분할 영역)·Term(가로 탭)에는 두 종류의 라벨 출처가 있다.

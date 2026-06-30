@@ -166,19 +166,30 @@ pub const LinkSpan = struct { start: usize, end: usize, kind: LinkKind };
 /// web 외 추가 스킴(`://` 또는 `:` 형). 가장 이른 위치가 우선이라 목록 순서는 무관하다.
 const extra_scheme_list = [_][]const u8{ "file://", "ssh://", "ftp://", "git://", "mailto:", "tel:", "news:", "magnet:" };
 
-const utf8_ellipsis = "\xE2\x80\xA6";
+const utf8_ellipsis = "\xE2\x80\xA6"; // U+2026 HORIZONTAL ELLIPSIS
+const ellipsis_codepoint: u21 = 0x2026;
 
-fn containsEllipsis(word: []const u8) bool {
-    return std.mem.indexOf(u8, word, utf8_ellipsis) != null;
+/// 매치된 링크 span [start, end) 자체에 U+2026(`…`)이 있으면 원본이 화면 밖에서 잘린 것이다(터미널 폭·UI
+/// 말줄임). span 밖의 말줄임표 — 스킴 앞(`…https://example.com/page`)이나 콤마 다음(`src/a.zig,…`) — 는 링크
+/// 본문과 무관하므로 보지 않는다. 그래야 뒤따르는 온전한 URL/경로를 계속 감지한다(토큰 어딘가에 `…`가 있다는
+/// 이유만으로 거부하면 회귀).
+fn spanIsTruncated(word: []const u8, start: usize, end: usize) bool {
+    return std.mem.indexOf(u8, word[start..end], utf8_ellipsis) != null;
 }
 
 /// 토큰 안에서 첫 링크의 범위+종류를 찾는다(없으면 null). 우선순위: 스킴 URL > 절대 > 홈 > dot-relative >
-/// bare-relative. 스킴이 경로보다 먼저라 `http://h:8080`의 `:8080`은 포트지 줄번호가 아니다. U+2026이 들어간
-/// 토큰은 원본이 화면 밖에서 잘린 것으로 보고 자동 감지하지 않는다 — 원본 URI가 있는 경우는 OSC 8이 우선 처리한다.
+/// bare-relative. 스킴이 경로보다 먼저라 `http://h:8080`의 `:8080`은 포트지 줄번호가 아니다. 매치된 span이
+/// U+2026으로 잘렸으면(spanIsTruncated) 원본 복원이 불가하므로 감지하지 않는다 — 원본 URI가 따로 있으면 OSC 8
+/// 명시 링크가 우선 처리한다.
 pub fn linkSpanInWord(word: []const u8, scopes: LinkScopes) ?LinkSpan {
-    if (containsEllipsis(word)) return null;
-    if (schemeUrlSpan(word, scopes)) |s| return .{ .start = s.start, .end = s.end, .kind = .url };
-    if (filePathSpan(word, scopes)) |s| return .{ .start = s.start, .end = s.end, .kind = .file_path };
+    if (schemeUrlSpan(word, scopes)) |s| {
+        if (spanIsTruncated(word, s.start, s.end)) return null;
+        return .{ .start = s.start, .end = s.end, .kind = .url };
+    }
+    if (filePathSpan(word, scopes)) |s| {
+        if (spanIsTruncated(word, s.start, s.end)) return null;
+        return .{ .start = s.start, .end = s.end, .kind = .file_path };
+    }
     return null;
 }
 
@@ -605,9 +616,11 @@ pub fn extractUrlAt(self: *const TerminalCore, allocator: std.mem.Allocator, vie
 pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes: LinkScopes) bool {
     if (cellLinkAt(self, screen.absRowFromViewport(self, viewport_row), col) != 0) return true;
     const bounds = wordBoundsAt(self, viewport_row, col) orelse return false;
-    // URL은 보통 한 단어라 짧은 스택 버퍼로 충분하고, 넘치면 URL일 수 있으니 통과시킨다.
+    // URL은 보통 한 단어라 짧은 스택 버퍼로 분류한다(스킴/경로 prefix는 토큰 앞이라 버퍼 안에 들어온다).
     var buf: [2048]u8 = undefined;
     var len: usize = 0;
+    var overflowed = false;
+    var overflow_ellipsis = false; // 버퍼에 못 담은 토큰 뒷부분(>2048B)에서 U+2026을 봤다
     var abs = bounds.start.row;
     outer: while (abs <= bounds.end.row) : (abs += 1) {
         const row_cells = screen.absRow(self, abs) orelse break;
@@ -621,14 +634,34 @@ pub fn wordIsUrl(self: *const TerminalCore, viewport_row: u16, col: u16, scopes:
         while (c < to) : (c += 1) {
             const cell = row_cells[c];
             if (cell.continuation) continue;
+            // 버퍼가 찬 뒤에는 더 담지 않되, span 잘림 판정에 필요한 U+2026만 끝까지 살핀다(아래 주석).
+            if (overflowed) {
+                if (cell.codepoint == ellipsis_codepoint) {
+                    overflow_ellipsis = true;
+                    break :outer;
+                }
+                continue;
+            }
             var enc: [4]u8 = undefined;
             const n = std.unicode.utf8Encode(cell.codepoint, &enc) catch continue;
-            if (len + n > buf.len) break :outer; // 너무 긴 단어 — 판정 보류, 통과
+            if (len + n > buf.len) {
+                overflowed = true;
+                if (cell.codepoint == ellipsis_codepoint) {
+                    overflow_ellipsis = true;
+                    break :outer;
+                }
+                continue;
+            }
             @memcpy(buf[len .. len + n], enc[0..n]);
             len += n;
         }
     }
-    return linkSpanInWord(buf[0..len], scopes) != null;
+    if (linkSpanInWord(buf[0..len], scopes) == null) return false;
+    // 2048B를 넘긴 토큰 뒷부분에 U+2026이 있으면 click 경로(extractUrlAt)는 전체 토큰을 보고 잘린 링크로
+    // 거부한다(span이 토큰 끝까지 이어지므로 그 U+2026은 span 안). hover도 같게 거부해 "밑줄은 떠도 클릭하면
+    // 안 열리는" 불일치를 막는다. 공백 없는 2048B 초과 토큰은 사실상 URL뿐이라 이 보수적 판정이 안전하다.
+    if (overflow_ellipsis) return false;
+    return true;
 }
 
 // ── 검색(Find) + 추출(복사) + IME preedit ─────────────────────────────────────────────────────────

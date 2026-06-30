@@ -5010,6 +5010,9 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
         .{ .in = "src/foo.zig:abc", .want = "src/foo.zig:abc", .kind = .file_path },
         // 산문 trailing 다듬기(경로 끝 마침표).
         .{ .in = "see/notes.md.", .want = "see/notes.md", .kind = .file_path },
+        // span 밖 U+2026: 스킴 앞(앞 텍스트만 잘림)·콤마 다음(다음 토큰)은 링크 본문과 무관 — 온전한 링크는 그대로.
+        .{ .in = "…https://example.com/page", .want = "https://example.com/page", .kind = .url },
+        .{ .in = "src/a.zig,…", .want = "src/a.zig", .kind = .file_path },
     };
     for (cases) |c| {
         const span = selection.linkSpanInWord(c.in, full) orelse {
@@ -5327,12 +5330,25 @@ test "clicking the continuation half of a wide glyph still resolves the whole li
 test "wordIsUrl handles a token longer than its 2048-byte scratch buffer" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 3000, .rows = 2 });
     defer core.deinit();
-    // 2048바이트를 넘는 긴 http URL — wordIsUrl의 스택 버퍼가 넘치면 거기까지로 판정(주석: 넘치면 URL일 수
-    // 있으니 통과). 부분 버퍼에도 스킴이 들어 있어 링크로 본다.
+    // 2048바이트를 넘는 긴 http URL — wordIsUrl의 스택 버퍼가 넘쳐도 앞쪽 prefix에 스킴이 있고 잘림(`…`)이
+    // 없으므로 링크로 본다.
     try core.write("https://");
     var i: usize = 0;
     while (i < 2100) : (i += 1) try core.write("a");
     try std.testing.expect(selection.wordIsUrl(&core, 0, 0, selection.link_scopes_full));
+}
+
+test "ellipsis past the 2048-byte scratch buffer: hover and click agree (both reject)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 3000, .rows = 2 });
+    defer core.deinit();
+    // 잘림 마커 `…`가 hover의 2048B 스크래치 버퍼 너머에 오는 긴 URL. hover(wordIsUrl)는 버퍼만, click
+    // (extractUrlAt)은 전체 토큰을 본다 — 어긋나면 "밑줄은 떠도 클릭하면 안 열림". 둘 다 거부로 일치해야 한다.
+    try core.write("https://");
+    var i: usize = 0;
+    while (i < 2100) : (i += 1) try core.write("a");
+    try core.write("…");
+    try std.testing.expect(!selection.wordIsUrl(&core, 0, 0, selection.link_scopes_full));
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 0, selection.link_scopes_full)) == null);
 }
 
 test "urlSpanAtAbs keeps a hovered link's underline within the viewport across scrolling (no OOB)" {
@@ -5606,6 +5622,19 @@ test "heuristic link detection rejects ellipsized visible URLs" {
     try core.write("https://example.com/full/…");
     try std.testing.expect(!selection.wordIsUrl(&core, 0, 2, selection.link_scopes_full));
     try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 2, selection.link_scopes_full)) == null);
+}
+
+test "heuristic link detection keeps a complete link when the ellipsis is outside its span" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 48, .rows = 2 });
+    defer core.deinit();
+    // `…`가 스킴 앞에 있으면 잘린 건 앞쪽 텍스트지 URL이 아니다 — 뒤따르는 온전한 URL은 hover·click 모두
+    // 감지하고 원본을 그대로 연다(토큰에 `…`가 있다는 이유만으로 거부하던 회귀의 가드).
+    try core.write("…https://example.com/page"); // `…`=col0, URL은 col1부터
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 4, selection.link_scopes_full));
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 4, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(url.text);
+    try std.testing.expectEqual(selection.LinkKind.url, url.kind);
+    try std.testing.expectEqualStrings("https://example.com/page", url.text);
 }
 
 test "preedit composition shows the in-progress hangul at the cursor without touching the grid" {

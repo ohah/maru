@@ -247,7 +247,7 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 
 호버/스크롤 반응이 "FPS 낮은 느낌"이라는 사용자 관찰이 있었다. 원인은 **메인 스레드 `NSTimer` present cadence**(`src/platform/macos/MaruAppHost.swift` `startFrameLoopTicks`)다 — 호버 상태 변경은 이미 `metal_generation`을 bump해 그려지지만, 다음 timer tick까지 대기한다. 기본값은 `render.frame-rate = 60`이라 최대 대기 시간은 약 16ms다(기존 30Hz 고정은 약 33ms).
 
-**현재 상태**: `render.frame-rate` config로 30~120Hz를 선택한다(기본 60Hz). Cmd+, 세팅 화면의 창 섹션에도 같은 스키마 필드가 노출된다. Swift host는 ABI `frame_rate_hz`를 읽어 `NSTimer` 간격을 정하고, 설정 변경은 다음 tick에 timer를 재시작한다. Zig 내부의 blink/fade/poll/sync timeout은 ms→tick 환산이라 주사율 변경으로 실제 시간이 달라지지 않는다.
+**현재 상태**: `render.frame-rate` config로 30~120Hz를 선택한다(기본 60Hz). Cmd+, 세팅 화면의 창 섹션에도 같은 스키마 필드가 노출된다. Swift host는 ABI `frame_rate_hz`로 config의 희망값을 읽어 **앱 전역 단일 `NSTimer`** 간격을 정하고, 설정 변경은 다음 tick에 timer를 재시작한다. `maru_macos_app_session_tick(session, frame_loop_rate_hz, ...)`는 Swift가 실제로 쓰는 전역 timer cadence를 매 tick 각 Zig 세션에 넘긴다. Zig 내부의 blink/fade/poll/sync timeout은 이 host cadence로 ms→tick 환산하므로, 여러 창/quick 세션의 `loaded_config`가 일시적으로 달라도 실제 시간이 active 세션 rate에 끌려 과속/저속으로 흐르지 않는다.
 
 **중요(범위)**: 이는 comfort 수준 폴리시다. §1의 4.2초 질의-응답 지연이나 #700 데드락 같은 측정된 결함과 다르다. 키 이벤트 자체는 AppKit→Zig→PTY 경로로 즉시 전달되고, 이번 변경은 주로 **입력/출력 후 화면에 보이는 다음 frame 갱신 대기 시간**을 줄인다. shell/프로그램 처리 시간이나 PTY 출력 지연을 해결하는 변경은 아니다.
 

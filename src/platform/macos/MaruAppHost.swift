@@ -1306,6 +1306,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return max(1, maru_macos_app_session_frame_rate_hz(session))
     }
 
+    private func currentFrameLoopRateHz() -> UInt32 {
+        if frameLoopRateHz > 0 { return frameLoopRateHz }
+        return configuredFrameLoopRateHz()
+    }
+
     private func restartFrameLoopTicksIfNeeded() {
         let hz = configuredFrameLoopRateHz()
         guard tickTimer != nil else {
@@ -1441,7 +1446,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         var summary = MaruAppHostFrameSummary()
-        let status = maru_macos_app_session_tick(appSession, &summary)
+        let status = maru_macos_app_session_tick(appSession, currentFrameLoopRateHz(), &summary)
         appSessionStatus = status
         if status == Self.statusOK {
             latestFrameSummary = summary

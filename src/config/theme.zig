@@ -444,7 +444,7 @@ pub const CursorConfig = struct {
     shape: CursorShape = .block,
     blink: bool = true,
     /// 커서 깜빡임 **반주기**(ms) — on/off 각 단계의 길이. 기본 500ms(on 500 / off 500, 일반 터미널 관례).
-    /// app이 `render.frame-rate` 기준 tick으로 환산한다(round, 최소 1틱). `blink = false`면 이 값과 무관하게 깜빡이지
+    /// app이 host frame-loop 기준 tick으로 환산한다(round, 최소 1틱). `blink = false`면 이 값과 무관하게 깜빡이지
     /// 않는다. loader가 `cursor.blink-interval-ms` 파싱. (Ghostty `cursor-blink-interval` 대응)
     blink_interval_ms: u32 = 500,
     // 커서 색(선택, #RRGGBB). 둘 다 테마와 독립적으로 커서만 칠하는 opt-in override다 — null이면 테마 동작을

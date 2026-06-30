@@ -86,7 +86,7 @@ window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클�
 | `theme.bold-is-bright` | `true`\|`false` | `false` | bold(SGR 1) 글자의 ANSI **indexed 전경(0~7)** 을 그 bright 짝(8~15)으로 올린다. `.default` 전경·`.rgb`·256색 cube(8~255)는 안 바꾼다(정의가 분명한 부분집합만). reverse(7)/conceal/blink-off 경로엔 적용 안 함(그 경로는 배경색을 그림). render-only(코어 셀·SGR 상태 불변). 베이스: xterm `boldColors`·Ghostty `bold-is-bright`와 같은 opt-in 트레이드오프 |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
-| `cursor.blink-interval-ms` | 정수(100~10000) | `500` | 커서 깜빡임 **반주기**(밀리초) — on/off 각 단계 길이(500이면 0.5초 켜짐·0.5초 꺼짐). `render.frame-rate` tick으로 환산(반올림, 최소 1틱)하므로 주사율을 바꿔도 실제 깜빡임 시간은 유지된다. `cursor.blink = false`면 이 값과 무관하게 안 깜빡인다. 범위 밖/비정수는 무시(기본 유지). Ghostty `cursor-blink-interval` 대응 |
+| `cursor.blink-interval-ms` | 정수(100~10000) | `500` | 커서 깜빡임 **반주기**(밀리초) — on/off 각 단계 길이(500이면 0.5초 켜짐·0.5초 꺼짐). host frame-loop tick으로 환산(반올림, 최소 1틱)하므로 주사율을 바꿔도 실제 깜빡임 시간은 유지된다. `cursor.blink = false`면 이 값과 무관하게 안 깜빡인다. 범위 밖/비정수는 무시(기본 유지). Ghostty `cursor-blink-interval` 대응 |
 | `cursor.color` | `#RRGGBB` | (없음) | 커서 칸 배경색을 테마와 **독립적으로** override(opt-in). 미지정이면 `theme.cursor`를 따른다. 형식 오류는 무시(미지정 유지) |
 | `cursor.text` | `#RRGGBB` | (없음) | 반전 블록 커서 **위 glyph 색** override(opt-in). 미지정이면 기존 동작(메인 터미널은 배경색, 사이드바 caret은 사이드바 배경색)을 따른다. 형식 오류는 무시 |
 | `cursor.unfocused` | `block`\|`hollow`\|`hidden` | `block` | 창이 **포커스를 잃었을 때** 커서. `block`(기본)=현행대로 채운 커서 유지, `hollow`=빈 사각형 테두리(외곽선 — 비활성 창임을 시각적으로, iTerm2/Terminal.app 관례), `hidden`=안 그림. 포커스 있으면 항상 `cursor.shape`대로. 그 외 값은 무시(기본 유지) |

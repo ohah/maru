@@ -270,10 +270,10 @@ emoji는 v1에서 "완벽한 typography"가 아니라 "grid를 깨지 않는 표
 
 ### 슬롯 안 세로 정렬(텍스트 baseline vs 이모지 ink-center)
 
-글리프를 atlas 슬롯(`cell_width_px × span` 폭 × `cell_height_px` 높이) 안에 **세로로 어디에 앉히는지**는 글리프 종류에 따라 두 갈래다. 구현은 `coretext_smoke.m`의 `maru_macos_coretext_smoke_rasterize_glyph`가 단일 출처다.
+글리프를 atlas 슬롯(`cell_width_px × span` 폭 × `cell_height_px` 높이) 안에 **세로로 어디에 앉히는지**는 글리프의 **역할(role)** 로 정한다(런타임 픽셀 측정이 아니라 — 자세한 정책·레퍼런스 조사·SSOT는 [글리프 역할 렌더 모델](glyph-role-render-model.md)). 구현은 `coretext_smoke.m`의 `maru_macos_coretext_smoke_rasterize_glyph`가 단일 출처다.
 
-- **일반 텍스트(한글/CJK 포함)**: 모든 글리프를 **공통 baseline**에 앉힌다(baseline = descent + 위아래 여백/2, 정수 픽셀로 스냅). 글자마다 ink 위치가 달라도 같은 줄에 정렬돼야 `m`·`a`가 위아래로 흔들리지 않는다. 수평은 advance 폭 기준 가운데(ink 폭이 아니라 — 폰트가 의도한 칸 위치).
-- **이모지·슬롯을 넘는 기호·헤더 심볼(◧/⚙)**: **cover-fit**(종횡비 유지하며 슬롯을 꽉 채우게 확대/축소) 후 **보이는 ink를 슬롯 세로 중앙에 앉힌다**. 심볼은 글리프마다 baseline 대비 ink 위치가 달라 공통 baseline이면 서로 어긋나 보이므로 ink-center가 자연스럽다.
+- **일반 텍스트(한글/CJK 포함)**: 모든 글리프를 **공통 baseline**에 앉힌다(baseline = descent + 위아래 여백/2, 정수 픽셀로 스냅). 글자마다 ink 위치가 달라도 같은 줄에 정렬돼야 `m`·`a`가 위아래로 흔들리지 않는다. 수평은 advance 폭 기준 가운데(ink 폭이 아니라 — 폰트가 의도한 칸 위치). **ink가 advance를 미세하게 넘어도(타이트한 폰트의 `w` 등) 스케일·ink-center하지 않는다** — 안 그러면 descender 없는 `w`가 위로 떴다(Hack `w`, ink폭==advance).
+- **emoji·wide-render-symbol(`width.isWideRenderSymbol` — ①②③)·헤더 심볼(◧/⚙)**: **cover-fit**(종횡비 유지하며 슬롯을 꽉 채우게 확대/축소) 후 **보이는 ink를 슬롯 세로 중앙에 앉힌다**. 심볼은 글리프마다 baseline 대비 ink 위치가 달라 공통 baseline이면 서로 어긋나 보이므로 ink-center가 자연스럽다. 게이트는 역할로 한정한다(`is_emoji ‖ center_symbol ‖ is_wide_render_symbol && ink>slot`) — 일반 텍스트는 이 셋에 안 들어 baseline 경로로 간다.
 
 여기서 "ink 중앙"은 **`CTFontGetBoundingRectsForGlyphs`가 주는 design bbox 중앙이 아니라, 실제로 색이 칠해진 픽셀(alpha>0)의 중앙**이다. 컬러 이모지(sbix/COLR — 예: 알림 종 🔔)는 폰트가 design bbox 안에 비대칭 여백을 두고 artwork를 얹어, design bbox 중앙과 보이는 artwork 중앙이 다르다. design bbox만 중앙에 맞추면 종이 위로 떠 보였고, 예전에는 렌더러가 종에만 별도 보정 상수(`py_nudge` 0.40ch vs 단색 0.30ch)를 손으로 맞춰야 했다 — 폰트/DPI마다 다시 틀어지는 근사다. 그래서 cover-fit으로 그린 **뒤** 실제 픽셀의 세로 범위를 측정해 슬롯 중앙으로 옮긴다(`maru_center_ink_vertically`, 정수-행 이동). 단색 윤곽 글리프(◧/⚙)는 design bbox가 곧 ink라 이동량이 0에 가까워 안전하다.
 

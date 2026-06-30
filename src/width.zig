@@ -12,6 +12,12 @@ pub fn cellWidth(codepoint: u21) u2 {
 /// 거의 다 폰트에서 ~2칸 폭이라 1칸에 욱여넣으면 작아진다(사용자 피드백 "③가 너무 작다"). 베이스: UAX#11이
 /// 이들을 Ambiguous=narrow(1)로 두므로 advance는 1 유지(셸 wcwidth와 커서 정합), 렌더만 2칸 허용(Ghostty 동일).
 /// 셀 폭 자체(cellWidth)는 바꾸지 않는다 — 이건 draw-list가 "다음 셀이 비었을 때만" 그릴 폭을 키우는 판정용이다.
+///
+/// **이 집합은 래스터 cover-fit 게이트의 단일 출처이기도 하다**(docs/glyph-role-render-model.md). 폰트가 셀보다
+/// 넓게 그린 글리프를 종횡비 유지 축소(cover-fit)하는 대상은 이 wide-render-symbol뿐이다 — 일반 텍스트는 ink가
+/// advance를 미세하게 넘어도 자연 메트릭+baseline으로 둔다(스케일/ink-center 안 함). `coretext_smoke.m`의
+/// `maru_is_wide_render_symbol`이 이 범위를 주석-동기로 미러한다(그 `.m`은 풀 코어 비링크 smoke 하니스 공유라
+/// zig 직접 호출 불가). 범위를 바꾸면 거기도 동기.
 pub fn isWideRenderSymbol(codepoint: u21) bool {
     return codepoint >= 0x2460 and codepoint <= 0x24FF;
 }
@@ -159,6 +165,24 @@ test "cellWidthAmbiguous: ambiguous symbols widen only when ambiguous_wide is se
     try std.testing.expectEqual(@as(u2, 2), cellWidthAmbiguous('한', true)); // 이미 2
     try std.testing.expectEqual(@as(u2, 0), cellWidthAmbiguous(0x0301, true)); // combining(0 유지)
     try std.testing.expectEqual(@as(u2, 1), cellWidthAmbiguous(0x2500, true)); // box-drawing은 isWideRenderSymbol 밖 → 1 유지
+}
+
+test "isWideRenderSymbol: cover-fit 게이트 정책 — 텍스트 제외, enclosed alnum만" {
+    // 래스터 cover-fit(종횡비 축소 + ink-center)은 이 집합에만 적용된다(docs/glyph-role-render-model.md).
+    // 일반 텍스트는 ink가 advance를 미세하게 넘어도(Hack 'w'=ink폭==advance) cover-fit 대상이 아니라
+    // 자연 메트릭+baseline으로 둔다 — 안 그러면 descender 없는 'w'가 ink-center로 위로 떴다.
+    try std.testing.expect(!isWideRenderSymbol('w')); // 회귀의 핵심: 'w'는 절대 cover-fit 안 됨
+    try std.testing.expect(!isWideRenderSymbol('m'));
+    try std.testing.expect(!isWideRenderSymbol('A'));
+    try std.testing.expect(!isWideRenderSymbol('0'));
+    try std.testing.expect(!isWideRenderSymbol('@'));
+    try std.testing.expect(!isWideRenderSymbol('한')); // CJK/한글도 텍스트(자연+baseline)
+    try std.testing.expect(!isWideRenderSymbol(0x2500)); // box-drawing은 합성 경로(glyph_id==0)
+    try std.testing.expect(!isWideRenderSymbol(0x25C6)); // ◆ geometric — wide-render-symbol 밖(자연/클립)
+    // Enclosed Alphanumerics(폰트가 ~2칸으로 그림)는 cover-fit 대상.
+    try std.testing.expect(isWideRenderSymbol(0x2460)); // ①
+    try std.testing.expect(isWideRenderSymbol(0x2462)); // ③
+    try std.testing.expect(isWideRenderSymbol(0x24FF)); // 범위 끝
 }
 
 test "cellWidth treats Hangul and CJK as double-cell" {

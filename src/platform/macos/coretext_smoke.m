@@ -508,6 +508,15 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     return maru_is_registered_icon_cp(cp);
 }
 
+/* 폰트가 셀보다 넓게 그려 cover-fit(종횡비 축소)할 wide-render-symbol인지 — **src/width.zig의
+   isWideRenderSymbol과 동기**(Enclosed Alphanumerics U+2460~24FF: ①②③ 등). 래스터 cover-fit 게이트의
+   단일 출처는 width.zig이고 여기는 주석-동기 미러다(이 .m은 풀 코어 비링크 smoke 하니스 공유라 zig 직접
+   호출 불가 — maru_is_synthesized_glyph·maru_category_for_codepoint와 동일 이유). 일반 텍스트는 ink가
+   advance를 미세하게 넘어도 이 집합 밖이라 자연 메트릭+baseline으로 둔다(docs/glyph-role-render-model.md). */
+static bool maru_is_wide_render_symbol(uint32_t cp) {
+    return cp >= 0x2460 && cp <= 0x24FF;
+}
+
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {
     if (buffer == NULL || len == NULL) {
         return false;
@@ -1369,15 +1378,24 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         const CGFloat avail_w = (CGFloat)width_px;
         const CGFloat avail_h = (CGFloat)height_px;
 
-        // 축소-맞춤은 (1) 이모지(컬러 글리프) (2) ink가 슬롯 폭을 넘는 글리프에 적용한다. 일반
-        // 텍스트(한글/CJK 포함)는 ink가 슬롯에 맞아(slot=cell×span) 이 분기에 안 들어가므로,
-        // 축소+가운데정렬로 baseline이 흔들리던 회귀가 재발하지 않는다 — 아래 공통-baseline/advance
-        // 정렬을 그대로 쓴다. overflow 분기는 EAW Ambiguous 기호(동그란 번호 ③ U+2460대 등)를 폰트가
-        // 셀보다 넓게 그려 오른쪽이 잘리던 것을 종횡비 유지 축소로 온전히 그리게 한다. 폭은 UAX#11
-        // 권고대로 width 1로 두고(Ghostty/xterm.js 동일), 렌더에서만 셀에 맞춘다 — Ghostty도 symbol을
-        // constraintWidth로 셀에 맞춘다(renderer/cell.zig: 다음 셀이 비면 2칸 허용, 아니면 1칸 축소).
+        // 축소-맞춤(cover-fit: 종횡비 유지 축소)은 **역할(role)** 로 게이트한다 — 런타임 ink 측정을
+        // **모든** 글리프에 적용하지 않는다(docs/glyph-role-render-model.md). 대상은 (1) 이모지(컬러
+        // 글리프) (2) 헤더 아이콘 심볼(◧⚙) (3) **wide-render-symbol**(width.isWideRenderSymbol —
+        // Enclosed Alphanumerics ①②③ U+2460대, 폰트가 셀보다 넓게 그리는 EAW Ambiguous 기호)이다.
+        // overflow 분기는 (3)이 1칸에 욱여넣어져 오른쪽이 잘리던 것을 종횡비 축소로 온전히 그린다(폭은
+        // UAX#11대로 width 1, 렌더만 셀에 맞춤 — Ghostty constraintWidth와 동일, renderer/cell.zig).
+        //
+        // **일반 텍스트(한글/CJK 포함)는 역할에 안 들어 cover-fit 대상이 아니다** — ink가 advance를
+        // 미세하게 넘어도(예: Hack 'w'는 ink폭==advance라 slot=round(advance) 내림 시 ~0.5px 초과)
+        // 자연 메트릭+공통 baseline으로 둔다. 이전의 bare `ink>slot`은 폭 레이어가 narrow라 한 텍스트
+        // 'w'까지 ink-center해 descender 없는 'w'가 위로 떴다(Hack에서만; JBM 'w'는 ink<advance라
+        // 여유 있어 안 걸림). 텍스트=.none, 기호만 fit인 Ghostty와 동일 모델 — wide-render-symbol 밖의
+        // 비합성 기호가 폰트에서 셀보다 넓으면 fit 대신 자연/우측 클립(xterm.js/Alacritty와 동일, maru
+        // 폭 정책과 일관). box/block/powerline/braille/legacy·chrome 아이콘은 합성(glyph_id==0)이라 이
+        // 경로에 안 와 영향 없다. 특정 기호가 fit이 필요하면 width.isWideRenderSymbol에 한 곳만 추가.
         const bool is_emoji = maru_font_is_color(draw_font);
-        const bool overflows_slot = bounds.size.width > avail_w;
+        const bool is_wide_render_symbol = maru_is_wide_render_symbol(codepoint);
+        const bool overflows_slot = is_wide_render_symbol && (bounds.size.width > avail_w);
         // 헤더 아이콘 심볼(◧ U+25E7·⚙ U+2699)은 글리프마다 baseline 대비 ink 위치가 달라, 공통-baseline
         // 정렬이면 같은 줄에 그려도 서로 세로로 어긋나 보인다(사용자 피드백 "3개 아이콘 수평이 안 맞음").
         // 심볼은 ink-center가 자연스럽고(baseline 흔들림 우려는 글자에만 해당 — 심볼은 텍스트 줄과 안 섞임)

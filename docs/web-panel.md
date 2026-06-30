@@ -9,7 +9,7 @@
 ## 1. 확정 결정
 
 - **웹 패널 = WKWebView subview, 모달 = 별도 Metal 오버레이 레이어.** 단일 contentView를 컨테이너로 바꾸고 3겹으로 합성한다(§2).
-- **z-order(WKWebView subview 모델 전용)**: 터미널 Metal layer(아래) < WKWebView(중간) < 투명 Metal 오버레이(모달, 위). **spike로 순서 합성만 확인**. 실제 셀 모달(텍스트·둥근 모서리·그림자·테마)을 투명 layer에 그린 합성은 Phase 4 종료 게이트에서 GUI 골든으로 1회 확정한다(§11).
+- **z-order(WKWebView subview 모델 전용)**: 터미널 Metal layer(아래) < WKWebView(중간) < 투명 Metal 오버레이(모달, 위). **spike로 순서 합성만 확인**. 실제 셀 모달(텍스트·둥근 모서리·그림자·테마)을 투명 layer에 그린 합성은 Phase 4 종료 게이트에서 GUI 골든으로 1회 확정한다(§11). 이 골든은 렌더러의 자연폭/2-quad/role 기반 글리프 계약도 함께 확인한다.
 - **모달은 NSView가 아니라 Metal 오버레이 레이어** — GPU chrome 철학(셀 렌더 재사용) 일관성 때문이다. **"이식성" 때문이 아니다**: "네이티브 웹뷰 위 GPU surface 합성"은 OS별 컴포지터 문제(macOS=CALayer subview, Windows WebView2=별도 HWND, Linux=Wayland subsurface)라 다른 OS에선 합성 모델을 타깃 시점에 재결정한다([layering-and-portability.md] §4 "호스트는 타깃별 신규").
 - **입력 라우팅은 합성과 별개의 1급 문제다**(§4) — "layer만 분리"가 아니다. 모달이 그려지는 것과 키 입력이 모달에 가는 것은 다르다.
 - **web 특유 보안**(§7): `maru-app://` 콘텐츠에 엄격 CSP + 스킴 핸들러 경로 샌드박스, `.md`는 "신뢰 렌더러가 그리는 **비신뢰 데이터**"(새니타이즈), untrusted 패널은 데이터스토어·프로세스 격리. **브리지 신뢰 게이트 자체는 [control-plane.md] §8.1 단일 출처.**
@@ -105,8 +105,9 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
 ## 11. 테스트·검증
 
 - **자동(headless/TDD)**: 브리지 격리(`evaluateJavaScript`로 page-world `window.maru === undefined`), per-pane rect 계산(px↔pt·y-flip) 단위, surface diff 로직, WKWebView frame·NSView 계층 값 단언, CSP·경로 정규화(traversal 거부) 단위를 먼저 실패시키고 구현한다. Phase 7 웹 콘텐츠의 순수 JS/TS 로직은 Bun 내장 test runner(`bun test`, `web:test`)로 검증한다. Phase 6 WebDriver 어댑터가 아직 없으면 WKWebView 통합 E2E는 `evaluateJavaScript` 하니스로 먼저 검증하고, WebDriver가 붙은 뒤 같은 subset을 표준 WebDriver smoke로 반복한다.
+- **Phase 4 렌더 사전 gate**: 모달 레이어 분리·overlay layer를 건드리기 전 현재 렌더러 계약이 green인지 먼저 확인한다. 최소 자동 명령은 `mise run test`, `mise run check-boundaries`, `mise run test-macos-coretext-smoke`, `mise run test-macos-metal-smoke`다. display가 있는 macOS에서는 `mise run macos-coretext-smoke`와 `mise run macos-metal-smoke`도 실행해 CoreText draw-list shaper/raster 준비(`renderer_frame_prepared=true`, `drawlist_frame_prepared=true`, `drawlist_glyph_raster_ready=true`)와 제품 Metal atlas path(`product_atlas_uploaded=true`, `product_atlas_sampled=true`, `atlas_sample_missing_cells=0`, `atlas_readback_mismatched_bytes=0`, `screenshot_artifact=true`)를 확인한다. 이 preflight는 자연폭/2-quad/role 기반 cover-fit/atlas sampling의 기존 green 상태를 확인하는 것이고, WKWebView 위 실제 합성·입력은 아래 수동/시각 gate가 별도로 닫는다.
 - **Phase 7 markdown sanitizer adversarial fixture**: `.md` 입력은 비신뢰 데이터이므로 raw HTML/script 제거를 단위+웹 콘텐츠 테스트로 고정한다. 최소 red fixture: `<script>`, `onerror`/`onclick`, `javascript:` URL, `<iframe>`/`srcdoc`, 외부 `http(s)` 리소스. 기대값은 "DOM에 실행 가능한 sink가 남지 않고, CSP 위반 없이 안전한 텍스트/허용 태그만 렌더"다.
-- **수동/시각**: z-order 픽셀 합성(실제 셀 모달 × 투명 오버레이 × 실콘텐츠 WKWebView)은 **CI 자동 불가**(`CGWindowListCreateImage` macOS 15+ 제거, ScreenCaptureKit은 TCC 권한·GUI 필요) → **GUI 골든 1 frame을 Phase 4 종료 게이트**로 둔다.
+- **수동/시각**: z-order 픽셀 합성(실제 셀 모달 × 투명 오버레이 × 실콘텐츠 WKWebView)은 **CI 자동 불가**(`CGWindowListCreateImage` macOS 15+ 제거, ScreenCaptureKit은 TCC 권한·GUI 필요) → **GUI 골든 1 frame을 Phase 4 종료 게이트**로 둔다. 골든 시나리오는 WKWebView 본문 위에 모달 오버레이를 띄운 상태에서 Hack `workspace` baseline(텍스트는 fit/center 금지), `①②③` cover-fit, 음수 자간, SGR48/선택/블록 커서 밑 자연폭 글리프, split divider 경계 bleed를 함께 담는다. 이 항목은 [glyph-role-render-model.md](glyph-role-render-model.md)와 [font-strategy.md](font-strategy.md)의 렌더 계약을 Phase 4 합성 리팩터가 깨지지 않았는지 보는 수동 gate다.
 - **입력 라우팅**(§4)·**드래그 통과**(§5)는 실기 수동 검증(자동 어려움).
 
 ## 12. 리스크

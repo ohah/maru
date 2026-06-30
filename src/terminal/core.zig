@@ -5025,6 +5025,8 @@ test "linkSpanInWord classifies extra schemes and file paths, with scope gating"
         "//foo", "foo/bar", "input/output", "$10/bar", "foo~/bar.txt", "https://",
         "HTTP://x.y", // 스킴 대소문자 구분(소문자만) — RFC는 무관하나 셸 출력은 사실상 소문자
         "File://x", // 추가 스킴도 소문자만
+        "https://example.com/full/…", // 말줄임된 휴리스틱 URL은 원본 복원 불가 — OSC 8이 있으면 그 경로가 우선
+        "src/config/very….zig", // 말줄임된 휴리스틱 파일 경로도 열지 않는다
         "ftp://", "mailto:", // 추가 스킴 본문 없음(스킴만)
         "(/etc/hosts)", "[/etc/hosts]", // 괄호/대괄호로 감싸 토큰 시작이 경로 prefix가 아님
         "", "a", ".", "..", "~", "foobar", // 빈/단일/슬래시 없는 비경로
@@ -5541,6 +5543,18 @@ test "OSC 8 hyperlink: click returns the stored URI regardless of visible text" 
     try std.testing.expectEqual(@as(u32, 0), core.screen.cells[12].link);
 }
 
+test "OSC 8 hyperlink: ellipsized visible text still opens the stored URI" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 40, .rows = 3 });
+    defer core.deinit();
+    // 화면 텍스트가 말줄임되어도 OSC 8 셀 메타데이터가 원본 URI를 들고 있으면 그 원본을 연다.
+    try core.write("\x1b]8;;https://example.com/full/path/to/report\x1b\\https://example.com/full/…\x1b]8;;\x1b\\");
+    const url = (try core.extractUrlAt(std.testing.allocator, 0, 25, selection.link_scopes_full)).?;
+    defer std.testing.allocator.free(url.text);
+    try std.testing.expectEqual(selection.LinkKind.url, url.kind);
+    try std.testing.expectEqualStrings("https://example.com/full/path/to/report", url.text);
+    try std.testing.expect(selection.wordIsUrl(&core, 0, 25, selection.link_scopes_full));
+}
+
 test "OSC 8 hyperlink: BEL terminator, id= params ignored, same URI interned once" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 30, .rows = 3 });
     defer core.deinit();
@@ -5583,6 +5597,15 @@ test "OSC 8 oversized URI is ignored and plain heuristic still works" {
     // 휴리스틱은 여전히 동작.
     try core.write("\r\nhttps://x.yz ");
     try std.testing.expect(selection.wordIsUrl(&core, 1, 3, selection.link_scopes_full));
+}
+
+test "heuristic link detection rejects ellipsized visible URLs" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 48, .rows = 2 });
+    defer core.deinit();
+    // OSC 8 없이 화면 텍스트 자체가 `…`로 잘렸으면 원본을 복원할 방법이 없으므로 링크 후보로 보지 않는다.
+    try core.write("https://example.com/full/…");
+    try std.testing.expect(!selection.wordIsUrl(&core, 0, 2, selection.link_scopes_full));
+    try std.testing.expect((try core.extractUrlAt(std.testing.allocator, 0, 2, selection.link_scopes_full)) == null);
 }
 
 test "preedit composition shows the in-progress hangul at the cursor without touching the grid" {

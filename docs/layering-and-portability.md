@@ -154,7 +154,7 @@ flowchart TD
 ## 7. 리스크 & 미해결 (정직)
 
 - **chrome 3위험**: ① UAF 결합(→§6 S1 계약), ② 추출 necessary-not-sufficient(→2차 추출), ③ rich-layout(→§6 레이아웃 모델). 셋 다 본 문서가 흡수.
-- **atlas 1024² 고정·성장 미구현**(renderer TODO): grid-per-size로 키운다([[multi-window-atlas-ownership]]와 합류). WebGPU에선 재업로드×256정렬 비용이 곱해져 더 시급.
+- **atlas 공유/좌표 회수는 보류**: atlas는 현재 1024²에서 시작해 max 8192²까지 grow한다([font-strategy.md](font-strategy.md) growable atlas). 남은 것은 per-window atlas를 grid-per-size/ref-count `GridSet`으로 공유할지, 그리고 free-list 좌표 회수 packer를 켤지의 문제다([[multi-window-atlas-ownership]]와 합류). WebGPU에선 재업로드×256정렬 비용이 곱해져 더 시급.
 - **`zig_owns_frame_loop`는 라벨 과장**: Zig는 tick **본문**을 소유, 클럭은 OS(macOS `NSTimer` `.common` 모드 — drag-resize 우회)다. 타깃별 클럭/vsync 필요.
 - **정점확장→instancing 부채**: 현재 셀당 6정점(264B)은 Ghostty/Alacritty/kitty의 instancing 대비 ~10× 대역폭. 계약 불변이라 백엔드에서 교체 가능.
 - **renderer-strategy.md 자기모순 정정**: WebGPU-통일 표 vs Ghostty 3-backend 인용 — §4의 백엔드/호스트 2층 구분으로 정리.

@@ -13,7 +13,7 @@ tmux(`list-panes`/`send-keys`/`capture-pane`)·cmux가 푸는 문제를 다루�
 - **노출은 CLI 토대, MCP는 구현 계획 미정.** 주 사용처는 maru 안에서 도는 에이전트이고, `maru` CLI(+`SKILL.md`)가 셸로 직접 호출한다. 외부 MCP 클라이언트용 어댑터는 같은 wire 위에 얇게 얹을 수 있으나 **구현 계획은 미정**이라 막지 않을 seam(버전·네임스페이스)만 둔다(§4.1).
 - **메서드 어휘 = tmux식.** `sessions.list`/`session.sendKeys`/`session.capture`.
 - **이벤트 = 스트림(push) 1급.** `events.subscribe` notification 스트림. 초기 구현은 기존 agent 폴링 결과를 흘리되, background 세션 이벤트는 폴링 게이트 확장 또는 진짜 이벤트 소스가 필요하다(§7).
-- **엔티티 = surface 일반화 + 앱 전역 외부 ID.** terminal/web surface를 같은 ID 공간에 두고, 외부 ID는 `surface_id + generation`이다. 하위 호환은 고려하지 않고, `window_token`은 현재 위치 메타데이터로 내린다. 이유와 선행 refactor는 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다.
+- **엔티티 = surface 일반화 + 앱 전역 외부 ID.** terminal/web surface를 같은 ID 공간에 두고, 외부 ID는 `surface_id + generation`이다. 하위 호환은 고려하지 않고, `surface_id`는 앱 프로세스 전역 `SurfaceIdAllocator`가 발급하는 opaque u64로 고정한다. ID 비트에 window/session/local counter 의미를 넣지 않는다. `window_token`은 현재 위치 메타데이터로 내린다. 이유와 선행 refactor는 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다.
 - **코어(L2) = 스키마 + 프로토콜 + 순수 디스패치만.** 라이브 상태 수집은 platform collector(L4)가 모아 중립 스냅샷 DTO로 코어에 주입한다. 코어는 런타임/OS 타입을 직접 참조하지 않는다(`check-boundaries`가 `session→app/pty/platform`을 막는다 — §2).
 - **동시성 = 단일 디스패치 지점(메인으로 marshal) + 출력 스트림은 I/O 스레드 직송.** 제어·조회는 메인 frame loop로 marshal해 코어/레지스트리/트리에 안전 접근하고, 고처리량 출력(`subscribeOutput`)은 메인을 거치지 않고 I/O 스레드에서 per-subscriber 큐로 직송한다(§5).
 - **보안 = 같은 uid 안의 신뢰 차등까지.** 웹 브리지는 신뢰 콘텐츠에만 노출, 외부 소켓은 peer-cred + 0700/0600, write는 per-surface capability(§8).
@@ -46,15 +46,17 @@ flowchart TD
 
 코어(L2)는 상태를 **collector가 주입하는 중립 DTO seam으로만** 받는다([layering-and-portability.md] §3.1 `PtyIo` vtable 선례).
 
-**collector 2층(현재 코드 기준 정직)**: 지금은 Zig에 전역 AppSession 레지스트리가 없어, Swift가 살아있는 세션(`windows`+`quick`)을 순회하며 per-session collect ABI를 호출하고 Zig는 한 세션 안의 tabs→panes→terms 트리만 중립 DTO로 평탄화한다. 그러나 cross-window detach/reattach와 web panel reparent를 위해 Phase 4 전에 `AppRuntime` + `LiveSurfaceRegistry` + `WindowGraph`로 소유권을 올린다([window-surface-mobility.md](window-surface-mobility.md)). 그 이후 collector는 AppRuntime graph를 단일 출처로 읽는다. AppRuntime이 생기기 전 Phase 1에서도 `surface_id`는 Swift 호스트가 알림 라우팅 토큰(`makeTerminalSurface`)과 같은 패턴으로 앱 전역 단조 채번하고, Zig 세션내 평탄화는 그 ID를 실어 나르기만 한다 — 그래야 Phase 1 라이브 외부 ID가 per-session이 아니라 앱 전역 unique다(1c는 fake DTO라 이 채번 주체를 대신 증명하지 못한다).
+**collector 2층(현재 코드 기준 정직)**: 지금은 Zig에 전역 AppSession 레지스트리가 없어, Swift가 살아있는 세션(`windows`+`quick`)을 순회하며 per-session collect ABI를 호출하고 Zig는 한 세션 안의 tabs→panes→terms 트리만 중립 DTO로 평탄화한다. 그러나 cross-window detach/reattach와 web panel reparent를 위해 Phase 4 hosting 전에 `AppRuntime` + `LiveSurfaceRegistry` + `WindowGraph`로 소유권을 올린다([window-surface-mobility.md](window-surface-mobility.md)). 그 이후 collector는 AppRuntime graph를 단일 출처로 읽는다.
+
+Phase 1 live collector 전에는 full AppRuntime을 기다리지 않고 **앱 프로세스 전역 `SurfaceIdAllocator` + `WindowMembershipSnapshot`**을 먼저 넣는다. `SurfaceIdAllocator`는 process-local opaque u64를 단조 발급하고, `AppSession.createTerm`은 per-session `next_id` 대신 이 allocator에서 ID를 받는다. Swift의 `makeTerminalSurface` token은 창/세션 라우팅 메타데이터일 뿐 surface ID allocator가 아니다. `WindowMembershipSnapshot`은 현재 `{window_id, window_kind, [surface_id]}`만 담아 `metadata:window` scope를 검증하고, Phase 4 전 `WindowGraph`가 들어오면 같은 DTO를 graph에서 읽게 바꾼다.
 
 ## 3. 엔티티 모델
 
 기존 계층 `Window → Tab → Pane → Term(surface)`에 종류를 더한다: `surface.kind = terminal | web`.
 
-- **외부 ID = `{surface_id, generation}`.** `surface_id`는 앱 인스턴스 전역 unique이고, surface 재생성 시 generation이 바뀐다. `window_token`은 AppSession-local ID 충돌을 막기 위한 복합키가 아니라 현재 어느 window에 배치돼 있는지 알려주는 위치 메타데이터다. 외부 자동화가 저장한 ID는 재시작 후 무효일 수 있음을 계약에 명시한다.
+- **외부 ID = `{surface_id, generation}`.** `surface_id`는 앱 인스턴스 전역 unique opaque u64이고, surface 재생성 시 generation이 바뀐다. `surface_id` 값 자체에는 window/session/local index 의미가 없다. `window_token`은 AppSession-local ID 충돌을 막기 위한 복합키가 아니라 현재 어느 window에 배치돼 있는지 알려주는 위치 메타데이터다. 외부 자동화가 저장한 ID는 재시작 후 무효일 수 있음을 계약에 명시한다.
 - **재시작 영속 상관키.** workspace restore는 surface를 새 ID로 복원하지만 에이전트 대화(claude/codex `session_id`)는 영속한다. 재시작을 건너 재연결하려면 컨트롤 플레인 ID를 workspace stable-id·트리 좌표·에이전트 `session_id`에 묶는 상관키를 함께 노출한다.
-- **멀티윈도우는 현재형이고, 이동성 foundation(M0–M2)을 Phase 4 hosting 전에 선행한다.** quick terminal은 별도 window_kind를 가진 window로 취급하되, surface ID 충돌을 window_token으로 숨기지 않는다. 살아있는 모든 일반 창과 quick terminal은 AppRuntime WindowGraph에 나타난다.
+- **멀티윈도우는 현재형이다.** quick terminal은 별도 window_kind를 가진 window로 취급하되, surface ID 충돌을 window_token으로 숨기지 않는다. Phase 1 전에는 `SurfaceIdAllocator`와 `WindowMembershipSnapshot`으로 ID/scope foundation을 닫고, Phase 4 hosting 전에는 살아있는 모든 일반 창과 quick terminal이 `WindowGraph`에 나타나게 한다.
 - **quick terminal 정책.** quick terminal도 일반 창과 같은 surface 모델이지만 `window_kind=quick`인 별도 window 위치 메타데이터를 가진다. `metadata:self`로 quick 안에서 호출한 CLI는 quick 자신의 surface만 볼 수 있고, 일반 창 CLI는 quick을 기본으로 볼 수 없다. quick을 포함한 전체 열거는 `metadata:all` 같은 명시 grant가 있을 때만 허용한다. write(`send*`/생애주기)는 capability 게이트(§8.3)로 보수적으로 막는다.
 - 공통 메타: `id`, `kind`, `title`, `window`/`tab`/`pane` 좌표, `focused`.
 - terminal 전용: `cwd`(OSC 7), `git_branch`, `agent`(kind/state), `has_foreground_job`.
@@ -193,11 +195,20 @@ flowchart TD
 
 **코드 배치·컨벤션 gate**: 각 micro-slice 시작 설명에는 실제 파일 후보와 책임 경계를 [파일/폴더 구조](project-structure.md)·[레이어링과 이식성 전략](layering-and-portability.md)에 맞춰 적는다. 순수 스키마·프로토콜·에러 모델·권한 판정·DTO 변환은 L2 중립 코드(`src/session/` 또는 시작 gate에서 합의한 중립 모듈)에 두고 `app`/`pty`/`platform` import 0을 `check-boundaries`로 고정한다. 소켓 bind·peer-cred·capability fd 상속·WKWebView 브리지는 L4 어댑터(`src/platform/macos/`)에 둔다. CLI parser/client/help는 `src/cli/` 하위에 두고 `main.zig`는 얇은 dispatcher로 유지한다. Swift는 AppKit/WebKit API 호출과 fixed-width ABI marshaling만 맡고, JSON-RPC 라우팅·trust/capability 정책·경로 allowlist·sanitizer 판정은 테스트 가능한 Zig 또는 `web/` 패키지 코드가 소유한다. 새 public entrypoint를 만들면 facade barrel/refAllDecls, `build.zig`·`.mise.toml` 연결, boundary rule을 같은 PR에서 갱신한다. Swift/Zig ABI가 바뀌면 ABI version과 layout test를 같이 갱신한다. `app_session.zig`나 Swift에 새 정책 로직을 넣어야 한다면, 코드를 쓰기 전에 왜 책임 분리가 불가능한지 문서와 사용자 설명에 먼저 남긴다.
 
+**하위호환 미고려 설계 원칙**: 이 계획은 기존 외부 ID, 저장 포맷, 아직 공개되지 않은 CLI/API 호환을 보존하지 않는다. 따라서 구현 전 단계에서는 compatibility adapter보다 최종 모델을 먼저 세운다.
+
+- Phase 1: `SurfaceIdAllocator`를 먼저 도입해 per-session `next_id`를 외부 ID로 노출하지 않는다. `metadata:window`는 임시 window token 복합키가 아니라 `WindowMembershipSnapshot`으로 판정한다.
+- Phase 4: 단일 창 WKWebView를 먼저 붙인 뒤 나중에 소유권을 갈아엎는 경로를 피한다. `WindowGraph` + `LiveSurfaceRegistry`를 먼저 두고, web surface 생애주기 ABI는 그 모델을 직접 따른다.
+- Phase 5: 브리지는 신뢰 콘텐츠 전용 계약으로 시작한다. untrusted browser에 제한 bridge를 열어주는 호환 모드는 만들지 않는다.
+- Phase 6: WebDriver는 외부 자동화 adapter다. 내부 JSON-RPC wire를 Selenium/CDP 모양에 맞춰 굽히지 않고, adapter가 표준 WebDriver 표면으로 번역한다.
+- Phase 7: 웹 프론트엔드는 greenfield로 둔다. zntc + Bun test + Oxc 품질 게이트를 기본으로 하고, Vite/Vitest 호환 레이어나 마이그레이션 스크립트는 만들지 않는다.
+- Workspace restore: 옛 저장 파일은 조용한 기본 창 폴백으로 처리하고, 새 포맷에 구버전 필드 해석기를 넣지 않는다.
+
 시작 gate의 최소 규칙:
-- Phase 1은 Phase 0 문서 계약이 최신인지(`control-plane.md`·`verification-matrix.md`·PR 본문)와 `git diff --check`/`check-boundaries`를 확인한 뒤 시작한다.
+- Phase 1은 Phase 0 문서 계약이 최신인지(`control-plane.md`·`verification-matrix.md`·PR 본문)와 `git diff --check`/`check-boundaries`를 확인한 뒤 시작한다. live collector를 열기 전 `SurfaceIdAllocator`와 `WindowMembershipSnapshot`의 red test를 먼저 둔다.
 - Phase 2는 Phase 1의 read-only socket/collector/capability/self-origin/capture gate를 재실행한 뒤 write를 연다.
 - Phase 3은 Phase 1~2의 read/write authz와 PTY write 회귀를 확인한 뒤 event/stream을 연다.
-- Phase 4는 1~3과 병행 가능하지만, WKWebView hosting을 짓기 전에 이동성 foundation(M0–M2: 전역 surface_id·WindowGraph·LiveSurfaceRegistry, [window-surface-mobility.md](window-surface-mobility.md))이 완료됐는지 먼저 확인한다. 그다음 공통 외부 ID·collector seam·socket bootstrap 계약이 바뀌지 않았는지 확인하고 웹뷰 껍데기용 별도 plan을 사용자에게 설명한다.
+- Phase 4는 1~3과 병행 가능하지만, WKWebView hosting을 짓기 전에 M0a/M0b(`SurfaceIdAllocator`·`WindowMembershipSnapshot`)가 이미 완료됐는지 확인한다. Phase 1보다 먼저 Phase 4를 착수하면 M0a/M0b를 먼저 끝낸 뒤, 이동성 foundation(M1–M2: `WindowGraph`·`LiveSurfaceRegistry`, [window-surface-mobility.md](window-surface-mobility.md))이 완료됐는지 확인한다. 그다음 공통 외부 ID·collector seam·socket bootstrap 계약이 바뀌지 않았는지 확인하고 웹뷰 껍데기용 별도 plan을 사용자에게 설명한다.
 - Phase 5는 Phase 1과 Phase 4의 합류 지점이므로, bridge 구현 전에 control-plane authz gate와 WKWebView frame/z-order/input gate를 모두 재검증한다.
 - Phase 6은 외부 자동화가 목표가 되는 시점에만 시작하고, Phase 5의 `browser.*`/bridge 신뢰 gate가 유지되는지 확인한다.
 - Phase 7은 7a/7b/7c/7d로 나눠 각각 시작 gate를 둔다. 특히 7a는 toolchain/lockfile/CI cache 계획을, 7b는 sanitizer red fixture를, 7c는 viewer/editor harness를, 7d는 `bind` capability와 링크 라우팅 권한 경계를 사용자에게 먼저 설명한다.
@@ -205,21 +216,21 @@ flowchart TD
 | Phase | 내용 | 서드파티 |
 |---|---|---|
 | **0. 계약** | 본 문서 | 0 |
-| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + **collector(Swift 열거 + Zig 세션내 2층)** + 외부 ID + `$MARU_SESSION` 주입 + capability fd 발급·auth(**non-login trusted profile 우선**) + CLI 클라이언트 + CLI `--help`(`sessions list`, `session get`, `session capture`) + **`metadata`/`read-output` scope 인가** + **`control.*` trace schema 확장** + `sessions.list`/`get`/`capture` | 0 |
+| **1. read-only** | unix socket 서버(accept/ndjson/peer-cred/hello) + 메인 디스패처 + **SurfaceIdAllocator + WindowMembershipSnapshot** + **collector(Swift 열거 + Zig 세션내 2층)** + 외부 ID + `$MARU_SESSION` 주입 + capability fd 발급·auth(**non-login trusted profile 우선**) + CLI 클라이언트 + CLI `--help`(`sessions list`, `session get`, `session capture`) + **`metadata`/`read-output` scope 인가** + **`control.*` trace schema 확장** + `sessions.list`/`get`/`capture` | 0 |
 | **2. write** | `sendText`(raw)/`sendKeys` + CLI `--help`(`send-text`, `send-keys`) + `write`/`lifecycle` capability 인가(§8.3) + 에러 모델 | 0 |
 | **3. 이벤트** | `events.subscribe`(background 소스 포함) + outbound 백프레셔 + `subscribeOutput`(I/O 직송) + CLI `--help`(`events subscribe`, `session subscribe-output`) | 0 |
-| **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님). **선행: 이동성 M0–M2**([window-surface-mobility.md]) | 0 |
+| **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님). **선행: M0 완료 확인 + 이동성 M1–M2**([window-surface-mobility.md]) | 0 |
 | **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). CLI에서 노출하는 `panel`/`browser` 명령이 있으면 같은 PR에서 `--help`까지 갱신. 1·4 합류 | 0 |
 | **6. WebDriver 어댑터** | 외부 자동화가 필요할 때 제어 코어 위 ~15 명령 + 인증(§8.6). CLI에서 외부 자동화 endpoint를 노출하면 `--help` fixture 포함. 첫 마크다운 콘텐츠의 필수 선행은 아님 | 0 |
 | **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc dev/build/bundle) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 + CLI `--help`(`panel open --kind markdown`, `panel bind-session`) | §13 |
 
-Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다. Phase 7은 한 PR로 묶지 않는다. 아래 micro-slice는 권장 PR 절단선이며, 더 잘게 쪼개도 된다.
+Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다. 단 M0a/M0b ID/scope foundation은 Phase 1 live collector와 Phase 4 hosting의 공통 선행조건이므로, 어느 축을 먼저 시작하든 먼저 닫는다. Phase 7은 한 PR로 묶지 않는다. 아래 micro-slice는 권장 PR 절단선이며, 더 잘게 쪼개도 된다.
 
 | Slice | 먼저 실패시킬 테스트/산출물 | 열 수 있는 동작 |
 |---|---|---|
 | 1a protocol | ndjson 부분읽기·max frame·JSON-RPC error·`hello` schema 단위 | socket 없이 schema/parser만 |
 | 1b socket bootstrap | bind/chmod/path owner/peer-cred 거부 통합 | local socket accept + hello |
-| 1c surface DTO | fake collector DTO, 2-window+quick 전역 ID 비충돌, generation 직렬화 | read-only DTO 모델 |
+| 1c surface identity/scope DTO | `SurfaceIdAllocator` 단조·비재사용·opaque ID, fake collector DTO, `WindowMembershipSnapshot`, 2-window+quick 전역 ID 비충돌, generation 직렬화 | read-only DTO 모델 |
 | 1d CLI read-only metadata | `sessions list`/`session get` parser+`--help` fixture, scope 필터 단위 | metadata-only list/get |
 | 1e capability fd | fd 정상/누락/invalid/revoked, `FD_CLOEXEC`, redaction 단위+smoke | non-login trusted profile capability auth |
 | 1f capture | chunk generation, revocation, `capture-invalidated`, `session capture --help` fixture | `capture` read-output |
@@ -265,7 +276,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 | Phase | 단위(Zig) | 통합/E2E | 수동 |
 |---|---|---|---|
-| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, 2-window+quick 전역 ID 비충돌, `metadata:self` 응답 필터, `metadata:window`/`metadata:all` scope 필터, self-origin auth 정상/변조 selector/다른 surface_id·generation·quick 교차 접근 거부, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, CLI fd close/`FD_CLOEXEC` 후 helper 누수 방지, CLI `--help` fixture(`sessions list`/`session get`/`session capture`만 노출), dispatch·chunk 경계 revocation, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), primary 창 2개+quick terminal self-origin 제품 실측 artifact(`tests/artifacts/control-plane/self-origin.summary.txt`), maru 밖 shell 복사 selector 거부, `capture` 권한 거부·허용, capability fd 상속 smoke(**login wrapper 실패, non-login zsh/bash/sh 성공**), zsh startup fd-close 실패, background fd persistence+TTL/revocation, tmux/screen pane fd-close 및 self-origin 결과 기록 | sudo/su controlled gate |
+| 1 | 스키마·`list`/`get` 직렬화(fake DTO), ndjson 부분읽기·max frame, `SurfaceIdAllocator` 단조·비재사용·opaque ID, `WindowMembershipSnapshot`, 2-window+quick 전역 ID 비충돌, `metadata:self` 응답 필터, `metadata:window`/`metadata:all` scope 필터, self-origin auth 정상/변조 selector/다른 surface_id·generation·quick 교차 접근 거부, capability fd auth(정상/누락/잘못된 surface/generation/revoked/invalid payload), read-only fd·`pread` 재호출, CLI fd close/`FD_CLOEXEC` 후 helper 누수 방지, CLI `--help` fixture(`sessions list`/`session get`/`session capture`만 노출), dispatch·chunk 경계 revocation, `metadata`/`read-output` capability 허용·거부, `capture-invalidated` generation mismatch, `$MARU_SESSION`·nonce redaction | unix socket 왕복, peer-cred 거부, CLI, collector(fake Rt), primary 창 2개+quick terminal self-origin 제품 실측 artifact(`tests/artifacts/control-plane/self-origin.summary.txt`), maru 밖 shell 복사 selector 거부, `capture` 권한 거부·허용, capability fd 상속 smoke(**login wrapper 실패, non-login zsh/bash/sh 성공**), zsh startup fd-close 실패, background fd persistence+TTL/revocation, tmux/screen pane fd-close 및 self-origin 결과 기록 | sudo/su controlled gate |
 | 2 | `sendText` raw(bracketed 미적용), capability 거부, 에러 코드, CLI `--help` fixture(`send-text`/`send-keys`) | 소켓→실제 PTY 입력(통합 PTY) | — |
 | 3 | outbound 백프레셔·coalesce/drop, `subscribeOutput` 권한 거부, CLI `--help` fixture(`events subscribe`/`session subscribe-output`) | subscribe→상태 push(background 포함), `subscribeOutput` 직송 | — |
 | 4 | pane→px rect 계산, leaf kind 라우팅 | NSView frame/계층 단언 | 픽셀 정합(스크린샷) |

@@ -127,6 +127,10 @@ const background_image_id: u32 = 0xFFFF_FFFF;
 const bell_flash_total_ms: u32 = 250;
 // 시각 벨 flash 최대 alpha(천분율) — 전경색 반투명 오버레이의 시작 불투명도. 너무 세지 않게(가독성·자극 균형) 0.35(F2-4).
 const bell_flash_peak_milli: u32 = 350;
+// 드래그 자동 스크롤이 한 줄 더 스크롤하기까지의 간격(ms) — frame rate와 무관하게 일정 속도(≈30줄/s)를 유지하려고
+// tick 수가 아니라 경과 ms로 게이트한다. 옛 30Hz 1틱/줄(≈33ms/줄)과 같은 체감 속도를 기준으로 잡았다. msPerTick
+// 누적이 이 값을 넘을 때마다 한 줄 스크롤한다(render.frame-rate_min=30이라 msPerTick≤이 값 → tick당 최대 한 줄).
+const drag_autoscroll_step_ms: u32 = 33;
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
@@ -1381,8 +1385,12 @@ pub const AppSession = struct {
     // "이동 없는 클릭 -> 해제" 판정을 타면 안 되므로 이 플래그로 구분한다.
     mouse_drag_selecting: bool = false,
     // 드래그 자동 스크롤 방향(+1=위/과거, -1=아래, 0=없음). 드래그 좌표가 grid 위/아래 밖으로
-    // 나가면 세워지고, frame-loop tick마다 한 줄 스크롤하며 선택을 가장자리 행으로 확장한다.
+    // 나가면 세워지고, 경과 ms가 drag_autoscroll_step_ms를 넘을 때 한 줄 스크롤하며 선택을 가장자리 행으로 확장한다.
     drag_autoscroll: i8 = 0,
+    // 드래그 자동 스크롤의 경과 시간 누적(ms). drag_autoscroll이 서 있는 동안 tick마다 msPerTick을 더하고,
+    // step_ms를 넘으면 한 줄 스크롤 후 그만큼 빼 잔여를 보존한다(반올림 누적 오차 없이 ≈30줄/s 유지). drag_autoscroll
+    // 이 0이면(드래그가 grid 안으로 복귀) 0으로 리셋해 다음 진입이 새로 누적한다.
+    drag_autoscroll_accum_ms: u32 = 0,
     // 스크롤바 thumb 드래그 중일 때, 잡은 지점의 thumb_top 기준 y 오프셋(px). null=드래그 안 함.
     // down(1)이 스크롤바 영역을 hit하면 세워지고, drag(2)가 마우스 y를 view_offset으로 매핑, up(3)이 푼다.
     scrollbar_drag_grab: ?f32 = null,
@@ -7114,6 +7122,14 @@ pub const AppSession = struct {
         return ticksForMsAtRate(ms, self.frameRateHz());
     }
 
+    // 한 tick의 실제 경과 시간(ms) = round(1000 / 실제 cadence). frameRateHz는 #1117에서 Swift가 주입한
+    // frame_loop_rate_hz(실제 NSTimer cadence)를 반환하므로, 이 값은 호스트 타이머 기준 tick 간격이다. 드래그
+    // 자동 스크롤이 tick당 경과 ms를 누적해 frame rate 무관 속도를 내는 데 쓴다(ticksForMs의 역방향).
+    fn msPerTick(self: *const AppSession) u32 {
+        const hz = self.frameRateHz();
+        return @max(1, (1000 + hz / 2) / hz);
+    }
+
     fn bellFlashTotalTicks(self: *const AppSession) u32 {
         return self.ticksForMs(bell_flash_total_ms);
     }
@@ -7232,7 +7248,16 @@ pub const AppSession = struct {
     /// 드래그 자동 스크롤 한 스텝(frame-loop tick마다). 드래그가 grid 밖에 머무는 동안 한 줄씩
     /// 스크롤하며 선택을 가장자리 행으로 확장한다 — 화면보다 긴 내용을 드래그로 선택하는 표준 UX.
     fn applyDragAutoscroll(self: *AppSession) void {
-        if (self.drag_autoscroll == 0) return;
+        if (self.drag_autoscroll == 0) {
+            self.drag_autoscroll_accum_ms = 0; // 드래그가 grid 안으로 돌아옴 — 다음 진입이 새로 누적 시작
+            return;
+        }
+        // **frame rate 무관 속도**: 옛날엔 tick마다 한 줄이라 기본이 30→60Hz로 오르며 자동 스크롤이 2배(120Hz면
+        // 4배) 빨라졌다. tick 수가 아니라 경과 ms로 게이트해 항상 ≈30줄/s를 유지한다 — msPerTick 누적이 step_ms를
+        // 넘을 때만 한 줄. frame-rate_min=30이라 msPerTick≤step_ms → tick당 최대 한 줄(저rate에서도 과속 없음).
+        self.drag_autoscroll_accum_ms += self.msPerTick();
+        if (self.drag_autoscroll_accum_ms < drag_autoscroll_step_ms) return;
+        self.drag_autoscroll_accum_ms -= drag_autoscroll_step_ms;
         const surface = self.activeSurface();
         const core = &surface.core;
         // selection_anchor/view_offset/selection_head 읽기 + scrollViewport/selectionExtend(코어 변경)는 리더
@@ -13876,7 +13901,11 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
     session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)
     session.scrollbar_drag_grab = null; // mouse()의 스크롤바 드래그 캡처가 읽는다(undefined ?f32도 garbage non-null)
+    // 자동 스크롤은 frame rate 무관 ≈30줄/s(경과 ms 게이트). frame_loop_rate_hz=30이면 msPerTick=33=step_ms라 tick
+    // 마다 한 줄 — 이 테스트의 "tick당 한 줄" 가정과 맞는 cadence를 명시한다(undefined frame_loop_rate_hz 트랩도 회피).
+    session.frame_loop_rate_hz = 30;
     session.drag_autoscroll = 0;
+    session.drag_autoscroll_accum_ms = 0;
     session.last_drag_col = 1;
     session.cell_width_px = 8;
     session.cell_height_px = 16;
@@ -13906,6 +13935,36 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
 }
 
+test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 게이트)" {
+    // 옛날엔 tick마다 한 줄이라 기본이 30→60Hz로 오르며 자동 스크롤이 2배(120Hz면 4배) 빨라졌다. 이제 경과 ms로
+    // 게이트해, 같은 호출 횟수라도 고프레임일수록 호출당 적게 스크롤한다(120Hz: msPerTick=8, step=33 → ~4콜당 한 줄).
+    // 8콜이면 옛 모델은 8줄(과속)이지만 ms 게이트는 1~2줄에 그친다.
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+    try attachTestRuntime(&session, &tab_surface);
+    defer session.runtime.deinit();
+    session.chrome_host = .{};
+    session.frame_loop_rate_hz = 120; // host cadence 120Hz → msPerTick=8
+    session.drag_autoscroll = 1; // grid 위 밖 — 위(과거)로 스크롤
+    session.drag_autoscroll_accum_ms = 0;
+    session.last_drag_col = 0;
+
+    const core = &tab_surface.core;
+    var i: usize = 0;
+    while (i < 20) : (i += 1) try core.write("x\r\n"); // 넉넉한 스크롤백(8콜로 한도에 안 막히게)
+    core.selectionStart(1, 0); // 화면 행1에서 드래그 시작(autoscroll이 선택을 위로 확장)
+
+    var calls: usize = 0;
+    while (calls < 8) : (calls += 1) session.applyDragAutoscroll();
+    try std.testing.expect(core.view_offset >= 1); // 스크롤은 일어난다(게이트가 영영 막지 않음)
+    try std.testing.expect(core.view_offset <= 2); // 그러나 8콜에 8줄이 아니다 — 고프레임 과속 회귀 방어
+}
+
 test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tick 환산" {
     var session: AppSession = undefined;
     session.loaded_config.config = .{};
@@ -13918,6 +13977,7 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 100), session.scrollbarVisibleTicks()); // 1.667s@60Hz
     try std.testing.expectEqual(@as(u32, 27), session.scrollbarFadeTicks()); // 450ms@60Hz
     try std.testing.expectEqual(@as(u32, 15), session.bellFlashTotalTicks()); // 250ms@60Hz
+    try std.testing.expectEqual(@as(u32, 17), session.msPerTick()); // round(1000/60) — 드래그 자동 스크롤 누적용
 
     session.loaded_config.config.render_frame_rate = 30;
     try std.testing.expectEqual(@as(u32, 30), session.configuredFrameRateHz()); // Swift timer 재시작 판단용 희망값
@@ -13931,6 +13991,7 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 50), session.scrollbarVisibleTicks());
     try std.testing.expectEqual(@as(u32, 14), session.scrollbarFadeTicks());
     try std.testing.expectEqual(@as(u32, 8), session.bellFlashTotalTicks());
+    try std.testing.expectEqual(@as(u32, 33), session.msPerTick()); // round(1000/30) = drag_autoscroll_step_ms
 
     session.loaded_config.config.render_frame_rate = 120;
     try std.testing.expectEqual(@as(u32, 120), session.configuredFrameRateHz());
@@ -13942,6 +14003,7 @@ test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tic
     try std.testing.expectEqual(@as(u32, 200), session.scrollbarVisibleTicks());
     try std.testing.expectEqual(@as(u32, 54), session.scrollbarFadeTicks());
     try std.testing.expectEqual(@as(u32, 30), session.bellFlashTotalTicks());
+    try std.testing.expectEqual(@as(u32, 8), session.msPerTick()); // round(1000/120)
 
     session.loaded_config.config.render_frame_rate = 1; // 파일 파서는 막지만 getter도 방어적으로 clamp
     try std.testing.expectEqual(@as(u32, 30), session.configuredFrameRateHz());
@@ -21864,7 +21926,9 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.divider_drag = null; // mouse()의 divider 드래그 캡처가 읽는다(undefined 옵셔널 포인터는 garbage non-null)
     session.sidebar_resize_active = false; // mouse()의 사이드바 폭 조절 캡처가 읽는다(undefined bool도 garbage)
     session.scrollbar_drag_grab = null; // mouse()의 스크롤바 드래그 캡처가 읽는다(undefined ?f32도 garbage non-null)
+    session.frame_loop_rate_hz = 30; // msPerTick=33=step_ms → 호출(tick)마다 한 줄(아래 "한 줄/호출" 가정과 맞춤)
     session.drag_autoscroll = 0;
+    session.drag_autoscroll_accum_ms = 0;
     session.last_drag_col = 0;
     session.cell_width_px = 8;
     session.cell_height_px = 16;

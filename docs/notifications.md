@@ -34,10 +34,14 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 건너뛴다 — **배너는 `.app` 번들에서만 뜬다**.
 
 세팅 GUI에서 `notifications.agent-complete` 또는 `notifications.osc`를 켜면 Zig가
-`take_notification_authorization_request` 1회성 신호를 세우고, Swift가 다음 tick에 drain해
-`UNUserNotificationCenter.requestAuthorization`을 다시 시도한다. 사용자가 지금 데스크톱 알림을 원한다고 명시한
-동작이므로, 앱 실행 중 lazy 요청을 이미 한 적이 있어도 Swift의 내부 1회 가드를 force로 우회한다. macOS가 이미 거부
-상태라면 OS 정책상 시스템 팝업은 다시 뜨지 않고 false만 반환될 수 있다.
+`take_notification_authorization_request` 1회성 신호를 세우고, Swift가 다음 tick에 drain해 **현재 권한 상태를 보고
+분기**한다(`getNotificationSettings`) — 단순히 `requestAuthorization`을 재호출하면 안 되기 때문이다. 아직 결정 전
+(`notDetermined`)이면 `requestAuthorization`으로 macOS 권한 팝업을 띄우고, 이미 허용된 상태면 무동작이다. **거부 상태
+(`denied`)면 `requestAuthorization` 재호출이 무력하다** — macOS는 설치당 권한 팝업을 한 번만 띄우고, 게다가 시작 시
+`drainNotification`이 매 tick `ensureNotificationAuthorization`로 그 1회성 팝업을 이미 소비하므로(프로그램이 OSC를 한
+번도 안 보내도 팝업이 뜨게 하려는 선요청) 토글 시점엔 재팝업이 **절대** 안 뜬다. 그래서 거부 상태에선 시스템 알림 설정
+창(`x-apple.systempreferences:com.apple.Notification-Settings.extension`)을 `NSWorkspace`로 열어, 거부했던 사용자가
+직접 알림을 다시 켤 **유일한 경로**를 준다(이 분기가 없으면 한 번 거부한 사용자는 앱 안에서 영영 알림을 못 켠다).
 
 ### 클릭 → 발신 터미널 자동 활성화
 
@@ -165,8 +169,9 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 
 - **Zig**: 알림 파싱·합류(`pendingNotification`), 전면 배너 여부(`foreground_banner`), surface 역조회·활성화 순서
   (`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷, chrome 컴포넌트(state·hit-test·draw ops), 헤더 zone.
-- **Swift**: `UNUserNotificationCenter` 표시/권한/delegate, 창 키 활성화(`makeKeyAndOrderFront`/`NSApp.activate`),
-  알림 `userInfo`에 정수 2개(`wt`/`sid`) 싣기·꺼내기, 전면 표시 스타일 적용(`willPresent`). 정책 결정은 안 한다.
+- **Swift**: `UNUserNotificationCenter` 표시/권한/delegate(거부 상태에선 `NSWorkspace`로 시스템 알림 설정 열기), 창 키
+  활성화(`makeKeyAndOrderFront`/`NSApp.activate`), 알림 `userInfo`에 정수 2개(`wt`/`sid`) 싣기·꺼내기, 전면 표시 스타일
+  적용(`willPresent`). 정책 결정은 안 한다.
 - **ABI**: `app_host_abi.h`의 `MARU_MACOS_APP_HOST_ABI_VERSION` 매크로(+ `app_session.zig` `abi_version` 상수, Zig
   크로스체크가 동기 강제)가 ABI 버전의 단일 출처다. 알림 함수는 **v78에서 도입**됐다 — `pending_notification`
   (`surface_id`/`foreground` out) + `activate_surface(session, surface_id) → found`. **v92**에서 세팅 GUI 알림 토글을

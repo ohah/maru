@@ -1952,13 +1952,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         pasteboard.setString(text, forType: .string)
     }
 
-    // OSC 9/777·세팅 GUI: 알림 권한을 요청한다(번들 ID가 있을 때만 — bare 실행 파일은 UNUserNotificationCenter가
-    // 못 떠서 graceful skip). 기본은 앱 실행 중 한 번만 요청하고, 사용자가 데스크톱 알림 설정을 켜는 명시 동작은
-    // force=true로 다시 시도한다. 이미 허용돼 있으면 requestAuthorization은 무해하고, 거부 상태면 OS 정책상 재팝업 대신
-    // false를 돌려준다.
+    // OSC 9/777·앱 시작: 알림 권한을 앱 실행 중 한 번만 선요청한다(번들 ID가 있을 때만 — bare 실행 파일은
+    // UNUserNotificationCenter가 못 떠서 graceful skip). 아직 결정 전이면 macOS 권한 팝업이 뜨고, 이미 결정됐으면
+    // (허용/거부) requestAuthorization은 UI 없이 즉시 반환한다. 거부 상태에서 사용자가 세팅으로 다시 켜려는 명시 동작은
+    // requestNotificationAuthorizationFromSettings가 따로 처리한다(시작 요청이 1회성 팝업을 이미 소비했으므로 재요청은
+    // 무력 — 시스템 설정 창을 연다).
     private var notificationAuthRequested = false
-    private func ensureNotificationAuthorization(force: Bool = false) {
-        if force { notificationAuthRequested = false }
+    private func ensureNotificationAuthorization() {
         guard !notificationAuthRequested, Bundle.main.bundleIdentifier != nil else { return }
         notificationAuthRequested = true
         // delegate는 applicationDidFinishLaunching에서 launch 완료 전에 이미 등록했다(콜드 런치 클릭 누락 방지) —
@@ -1966,13 +1966,39 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    // 세팅 GUI에서 notifications.agent-complete/osc를 켠 경우, 사용자가 지금 데스크톱 알림을 원한다고 명시한 것이므로
-    // macOS 권한 요청을 다시 시도한다. 어떤 config 키가 대상인지는 Zig가 정하고, Swift는 OS 권한 API만 호출한다.
+    // 세팅 GUI에서 notifications.agent-complete/osc를 켠 경우, 사용자가 지금 데스크톱 알림을 원한다고 명시한 것이다.
+    // 단순히 requestAuthorization를 다시 부르면 안 된다 — 시작 시 ensureNotificationAuthorization이 매 tick 선요청하며
+    // OS의 1회성 권한 팝업을 이미 소비했으므로, 거부 상태의 사용자에겐 UI 없이 false만 돌아와 무력하다. 그래서 현재
+    // 권한 상태를 먼저 보고(getNotificationSettings) 분기한다: notDetermined면 요청(팝업), denied면 macOS가 재팝업을
+    // 안 띄우므로 시스템 알림 설정 창을 열어 직접 켤 경로를 주고, 이미 허용됐으면 무동작. 어떤 config 키가 대상인지는
+    // Zig가 정하고 Swift는 OS 권한 API만 호출한다(경계: 정책=Zig, OS 표시/설정 열기=Swift).
     private func drainNotificationAuthorizationRequest() {
         guard let session = appSession else { return }
-        if maru_macos_app_session_take_notification_authorization_request(session) != 0 {
-            ensureNotificationAuthorization(force: true)
+        guard maru_macos_app_session_take_notification_authorization_request(session) != 0 else { return }
+        guard Bundle.main.bundleIdentifier != nil else { return } // bare 실행 파일은 알림 API 사용 불가 — skip
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            // 완료 콜백은 백그라운드 큐로 온다 — UI성 호출(requestAuthorization 팝업·NSWorkspace)은 main으로 hop한다.
+            let status = settings.authorizationStatus
+            DispatchQueue.main.async {
+                switch status {
+                case .notDetermined:
+                    // 아직 OS 결정 전(시작 요청이 안 돌았거나 사용자가 팝업을 안 닫음) — 권한 팝업을 띄운다.
+                    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+                case .denied:
+                    // 거부됨 — requestAuthorization 재호출은 macOS가 UI 없이 무시한다. 시스템 알림 설정 창으로 안내한다.
+                    Self.openSystemNotificationSettings()
+                default:
+                    break // authorized/provisional/ephemeral — 이미 켜져 있어 무동작.
+                }
+            }
         }
+    }
+
+    // macOS 시스템 설정의 '알림' 창을 연다(Ventura+ 패널 ID). 거부된 알림 권한을 사용자가 직접 다시 켤 유일한 경로다 —
+    // macOS는 설치당 권한 팝업을 한 번만 띄우므로 앱이 재요청해도 UI가 안 뜬다. NSWorkspace는 OS 소유 경계(URL 열기와 동형).
+    private nonisolated static func openSystemNotificationSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Notification-Settings.extension") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // OSC 9/777·에이전트 완료: 코어가 모은 데스크톱 알림(title/body/surface_id)을 활성 세션에서 drain해 네이티브

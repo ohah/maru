@@ -6,8 +6,8 @@
 
 ## 1. 확정 결정
 
-- **ID foundation(M0)은 control-plane Phase 1 live collector 전에 끝낸다.** `SurfaceIdAllocator`가 앱 프로세스 전역 opaque u64를 단조 발급하고, `WindowMembershipSnapshot`이 `metadata:window` scope를 임시 window token 복합키 없이 판정한다.
-- **소유권 foundation(M1–M2)은 웹 패널 Phase 4가 WKWebView hosting을 짓기 전에 끝낸다.** `WindowGraph`·`LiveSurfaceRegistry`가 여기 해당한다. Phase 4를 Phase 1보다 먼저 착수하면 M0a/M0b도 먼저 끝낸다. 전체 드래그 UX와 cross-window·web reparent(M3–M6)는 Phase 4 이후에 따라와도 된다. 단일 창 web panel·markdown 뷰어는 이 refactor 없이도 동작하지만, WKWebView를 붙인 뒤 창 소유권을 바꾸면 hosting 코드 재작업이 커지므로 foundation을 먼저 둔다.
+- **ID foundation(M0 = M0a/M0b)은 control-plane Phase 1 live collector 전에 끝낸다.** `SurfaceIdAllocator`가 앱 인스턴스 전역 opaque u64를 단조 발급하고, `WindowMembershipSnapshot`이 `metadata:window` scope를 임시 window token 복합키 없이 판정한다.
+- **소유권 foundation(M1–M2)은 웹 패널 Phase 4가 WKWebView hosting을 짓기 전에 끝낸다.** `WindowGraph`·`LiveSurfaceRegistry`가 여기 해당한다. Phase 4를 Phase 1보다 먼저 착수하면 M0a/M0b도 먼저 끝낸다. command·드래그 이동 UX와 cross-window·web reparent(M3–M6)는 Phase 4 이후에 따라와도 된다. 단일 창 web panel·markdown 뷰어는 이 refactor 없이도 동작하지만, WKWebView를 붙인 뒤 창 소유권을 바꾸면 hosting 코드 재작업이 커지므로 foundation을 먼저 둔다.
 - **live surface의 소유자는 창이 아니라 AppRuntime이다.** OS 창은 surface를 소유하지 않고, `WindowGraph`가 가리키는 surface를 표시·배치한다.
 - **`surface_id`는 앱 인스턴스 전역 unique opaque u64 + generation이다.** ID 값에는 window/session/local index 의미를 넣지 않는다. `window_id`/`window_token`은 현재 위치 메타데이터다. surface가 창을 이동해도 surface capability와 trace 상관키가 흔들리지 않는다.
 - **부분 이동과 전체 윈도우 merge를 둘 다 지원한다.** 기본 primitive는 surface/pane/workspace 이동이고, 전체 window merge는 source window의 workspace들을 target window로 반복 이동한 뒤 빈 source window를 닫는 bulk operation이다.
@@ -28,7 +28,7 @@
 ```text
 Identity/scope foundation (M0)
   SurfaceIdAllocator
-    next opaque u64, app-process global, no encoded window/session bits
+    next opaque u64, app-instance global, no encoded window/session bits
   WindowMembershipSnapshot
     window_id/window_kind -> surface_id list
 
@@ -125,10 +125,10 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 
 이 기능은 full drag UX부터 만들지 않는다. 먼저 command path와 순수 모델을 고정한다.
 
-1. **M0a SurfaceIdAllocator**: 앱 프로세스 전역 opaque u64 발급, 비재사용, generation mismatch 단위 테스트. 기존 per-session `next_id`는 외부 ID로 노출하지 않는다.
+1. **M0a SurfaceIdAllocator**: 앱 인스턴스 전역 opaque u64 발급, 비재사용, generation mismatch 단위 테스트. 기존 per-session `next_id`는 외부 ID로 노출하지 않는다.
 2. **M0b WindowMembershipSnapshot**: full `WindowGraph` 전 2-window+quick membership DTO, `metadata:self/window/all` scope 필터 테스트.
 3. **M1 WindowGraph TDD**: `moveSurface`, `movePane`, `moveWorkspace`, `mergeWindow`, no-op/empty-source/focus 보정 단위 테스트.
-4. **M2 LiveSurfaceRegistry 분리**: terminal live runtime을 window 밖 owner로 이동. surface 이동 시 PTY/TerminalCore를 재시작하지 않음을 테스트.
+4. **M2 LiveSurfaceRegistry 분리**: terminal live runtime을 window 밖 owner로 이동. surface 이동 시 PTY/TerminalCore를 재시작하지 않음을 테스트. web panel state/WKWebView handle은 이 시점에 아직 없으므로 terminal runtime만 옮기고, web surface runtime은 Phase 4 이후 같은 registry에 합류한다.
 5. **M3 command 기반 이동**: palette/menu action으로 surface/pane/workspace/window_all 이동. Swift는 window create/focus만 수행.
 6. **M4 same-window drag 재연결**: 기존 drag 경로가 WindowGraph move API를 쓰게 정리.
 7. **M5 cross-window native drag**: AppKit drag session/destination을 붙이고 Zig drop target API에 연결.

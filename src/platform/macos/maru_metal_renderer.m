@@ -403,6 +403,41 @@ static void maru_fill_cell_quad(
     memcpy(out, quad, sizeof(quad));
 }
 
+/* A(자간 분리): 폰트 글리프를 **자연폭**(atlas slot 폭, device px)으로 px_left에서 **좌측정렬** 그린다. 셀 배경은
+   별도 bg quad(셀폭)가 그리므로, 이 글리프 quad는 **투명 bg(0,0,0,0)**로 그 위에 over-blend된다 — 셰이더가
+   premultiplied(rgb=mix(bg,fg,cov), a=max(bg.a,cov))라 bg.a=0이면 (fg*cov, cov)로 환원돼 아래 bg quad에 정확히
+   합성된다. 그래서 자간이 셀 advance를 좁혀도(음수=이웃과 겹침)·넓혀도(양수=우측 여백) 글리프가 찌그러지지 않고
+   자연 비율로 그려진다. reserved 장식·확대(glyph_scale) 없는 일반 텍스트 글리프 전용(호출처가 게이트). */
+static void maru_fill_glyph_quad(
+    MaruRendererVertex *out,
+    const MaruAppHostMetalCell cell,
+    float px_left,
+    float glyph_w,
+    float py_top,
+    float cell_h,
+    float drawable_w,
+    float drawable_h
+) {
+    const float px_right = px_left + glyph_w;
+    const float px_bottom = py_top + cell_h;
+    const float left = (px_left / drawable_w) * 2.0f - 1.0f;
+    const float right = (px_right / drawable_w) * 2.0f - 1.0f;
+    const float top = 1.0f - (py_top / drawable_h) * 2.0f;
+    const float bottom = 1.0f - (px_bottom / drawable_h) * 2.0f;
+    const float fr = (float)((cell.foreground >> 16) & 0xff) / 255.0f;
+    const float fg = (float)((cell.foreground >> 8) & 0xff) / 255.0f;
+    const float fb = (float)(cell.foreground & 0xff) / 255.0f;
+    const MaruRendererVertex quad[6] = {
+        {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{left, bottom}, {cell.u0, cell.v1}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{left, top}, {cell.u0, cell.v0}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{right, bottom}, {cell.u1, cell.v1}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{right, top}, {cell.u1, cell.v0}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+    };
+    memcpy(out, quad, sizeof(quad));
+}
+
 /* C4b: 한 GpuQuad를 6정점 quad로 채운다(out에 6개). 픽셀 bounds를 NDC로 투영하고(셀과 같은 좌상단
    원점 방식) local 픽셀 좌표·half size·radii·border·색을 각 정점에 싣는다. 색 0xAARRGGBB를 rgba(0..1)로
    언팩한다(셰이더가 sRGB로 받아 linear blend). 모양/SDF는 셰이더가 — 여기선 순수 산술뿐(렌더 백엔드
@@ -683,9 +718,10 @@ bool maru_metal_renderer_draw(
     const size_t sidebar_bg_quads = draw_sidebar ? 1u : 0u;
     const size_t sidebar_cells_n =
         (terminal_origin_x_px > 0u && sidebar_cells != NULL) ? sidebar_cell_count : 0u;
-    // quad 순서: [터미널 cells][사이드바 배경 quad][사이드바 cells]. 사이드바 cells가 배경 quad
-    // 뒤라 그 위에 블렌딩된다(밴드/제목이 사이드바 배경 위에 보인다).
-    const size_t quad_count = cell_count + sidebar_bg_quads + sidebar_cells_n;
+    // quad 순서: [사이드바 배경 quad][터미널 cells(셀당 2 quad: 배경+전경, 인접)][사이드바 cells(1 quad)]. A(자간
+    // 자연폭)로 터미널 셀이 배경+전경 2 quad라 vertex가 셀당 ×2 — 인접 배치라 cell 순서·painter·모달/scissor는 불변,
+    // 아래 오프셋만 터미널은 ×12(=2×6)로 잡는다. 사이드바 cells는 1 quad(투명 카드 글리프만 자연폭).
+    const size_t quad_count = 2 * cell_count + sidebar_bg_quads + sidebar_cells_n;
     if (quad_count > 0) {
         const size_t vertices_per_cell = 6;
         // total_vertices와 byte length 곱셈 overflow를 막는다(손상된 cell_count 방어).
@@ -718,6 +754,7 @@ bool maru_metal_renderer_draw(
         //    glyph 등 origin_x=0)가 배경 '위'에 보이게(painter 순서). UV(-1) sentinel로 배경만(셰이더 u<0 → coverage 0 → bg.rgb).
         //    터미널 cells는 origin_x≥사이드바 폭이라 배경(x<origin_x)과 안 겹친다. quad_index 누적은 [배경][cells]
         //    [사이드바 cells] 순서이지만 사이드바 cells의 시작 인덱스(=배경+cell_count)는 옛 순서와 같다(영향 없음).
+        //    A(자간 분리)는 셀당 1 quad 유지 — 투명 bg 일반 글자만 그 quad를 자연폭 글리프로 그려 레이아웃 불변.
         size_t quad_index = 0;
         if (draw_sidebar) {
             const float sl = -1.0f;                                  // x=0 → NDC 좌
@@ -777,22 +814,41 @@ bool maru_metal_renderer_draw(
             // PUA 합성 아이콘은 fillCoverage가 슬롯(EAW width 폭) 중앙에 그리므로, 이모지 시절 종(width 2)의 슬롯 중심이
             // 셀 경계에 떨어져 1칸 아이콘과 반칸 어긋나 px_nudge(-0.5칸)로 보정하던 것이 불필요하다 — 합성 아이콘 중심이
             // 곧 슬롯 중심이라 어느 width·col이든 정합한다(검색이 width 2여도 보정 0).
-            if (is_bell_icon) {
-                // 종(🔔)은 width 2라 quad 폭=cw×span=2cw → 1.7×면 3.4cw인데, slot은 raster_*_px=cell_w×1.7=1.7cw×1.7ch
-                // (width 무관)라 1.7cw 텍스처가 3.4cw quad로 가로 2× 늘어나 납작해졌다(measured 28×18px). 코너 아이콘
-                // (width 1)과 같은 1.7cw×1.7ch quad로 그리면 slot과 종횡비가 일치해 왜곡 0·동일 크기다 — span을 1로 두고
-                // (가로 1cw base) origin을 +0.5cw 밀어 2칸 footprint 중앙((col+1)·cw)에 맞춘다. UV는 per-glyph
-                // baked(cell.u0..v1)라 width 복사와 무관(텍스처 불변). 배지(app_session notificationBadgeCol=bell_col+2)는
-                // 원 반지름(0.85cw)이 좁아진 종 우측 모서리에 ~0.2cw 겹쳐 그대로 코너 배지가 된다(이동 불필요).
+            // A(자간 자연폭): 셀당 **2 quad**(인접: 배경 quad + 전경 quad)로 그린다. 같은 cell 인덱스에 인접 배치하므로
+            // **cell 순서가 보존**돼(장식 셀=글리프 셀보다 뒤=위, 커서 셀의 불투명 배경이 원래 글자를 덮음) 모달/scissor/
+            // 이미지 z·페인터 순서가 불변이다 — draw-pass 구조는 그대로 두고 셀당 vertex만 ×2(오프셋 ×12). **모든 글리프
+            // (불투명 bg 포함)를 자연폭**으로 그려, 선택영역·SGR48 색배경·블록 커서 밑 글자의 자간 왜곡/breathing이 사라진다
+            // (배경은 별도 배경 quad가 셀폭으로 그림). box-drawing은 glyph_id==0로 slot=셀폭이라 자연폭=셀폭으로 타일링 보존.
+            MaruRendererVertex *bg_p = &vertices[(quad_index + i * 2) * vertices_per_cell];
+            MaruRendererVertex *fg_p = &vertices[(quad_index + i * 2 + 1) * vertices_per_cell];
+            // 배경 quad: 셀 전체(reserved 무시) 배경색, UV=-1(글리프 안 샘플 → 셰이더가 배경만). 투명 bg면 no-op.
+            MaruAppHostMetalCell bgc = tc;
+            bgc.reserved = 0;
+            bgc.u0 = -1.0f;
+            bgc.u1 = -1.0f;
+            maru_fill_cell_quad(bg_p, bgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f);
+            // 전경 quad(투명 bg — 배경은 위 배경 quad가 담당).
+            if (tc.reserved == 0u && tc.u0 >= 0.0f && hscale == 1.0f) {
+                // 일반 텍스트 글리프 → 자연폭(atlas_width_px, 좌측정렬). 셀 좌단 = panel origin + col×cw.
+                const uint32_t span_u = (tc.width == 0u) ? 1u : tc.width;
+                const float gw = (tc.atlas_width_px > 0u) ? (float)tc.atlas_width_px : cw * (float)span_u;
+                maru_fill_glyph_quad(fg_p, tc, (float)tc.origin_x + (float)tc.col * cw, gw, py_top, ch, drawable_w, drawable_h);
+            } else if (tc.reserved == 0u && tc.u0 < 0.0f) {
+                memset(fg_p, 0, sizeof(MaruRendererVertex) * vertices_per_cell); // 빈 셀 — 전경 없음(배경 quad만)
+            } else if (is_bell_icon) {
+                // 종(🔔)은 width 2 stretch를 피해 1칸 quad(코너 아이콘 동형)·origin +0.5cw로 2칸 중앙. 전경만(투명 bg).
                 MaruAppHostMetalCell bell = tc;
-                bell.width = 1; // 1칸 폭 quad(코너 아이콘과 동형) — 가로 stretch 제거
-                maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], bell, (float)tc.origin_x + cw * 0.5f, cw, py_top, ch, drawable_w, drawable_h, hscale);
+                bell.width = 1;
+                bell.background = 0u;
+                maru_fill_cell_quad(fg_p, bell, (float)tc.origin_x + cw * 0.5f, cw, py_top, ch, drawable_w, drawable_h, hscale);
             } else {
-                const float px_nudge = 0.0f; // PUA 합성 아이콘(◧⚙+🔍)은 슬롯 중앙에 그려져 이모지 시절 2칸 중심 보정이 불필요
-                maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], tc, (float)tc.origin_x + px_nudge, cw, py_top, ch, drawable_w, drawable_h, hscale);
+                // 장식/커서 바(reserved!=0) 또는 헤더아이콘(hscale!=1): 그 띠/글리프를 전경으로(투명 bg).
+                MaruAppHostMetalCell fgc = tc;
+                fgc.background = 0u;
+                maru_fill_cell_quad(fg_p, fgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, hscale);
             }
         }
-        quad_index += cell_count;
+        quad_index += 2 * cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를
         //    slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 row=slot으로 슬롯 전체를 채우고(py=row×slot_h,
         //    높이 slot_h). 카드 glyph(slot_id≠0)는 row에 슬롯+(줄 수,줄 위치)가 인코딩돼 있다
@@ -829,7 +885,17 @@ bool maru_metal_renderer_draw(
             // 이름/경로 텍스트에 같은 글리프가 들어가도 그 텍스트 셀(slot_id≠0·동일 codepoint)까지 1.1×로 안 늘어난다
             // (app_session.zig 색칠 루프의 col 0 가드와 짝). 색은 agent 브랜드색(claude 코랄·codex 청록)을 foreground로.
             const float gscale = (sc.slot_id != 0u && sc.col == 0u && (sc.codepoint == 0xF0007u || sc.codepoint == 0xF0008u)) ? 1.1f : 1.0f;
-            maru_fill_cell_quad(&vertices[(quad_index + i) * vertices_per_cell], sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale);
+            // A(자간 분리): 사이드바 카드 글리프(slot_id≠0)도 투명 bg·확대 없는 일반 글자면 자연폭으로 — 터미널과 동일
+            // 이유(자간 squish 제거). 밴드(slot_id==0, sentinel UV)·에이전트 심볼(gscale 1.1)·불투명 bg는 combined 유지.
+            MaruRendererVertex *sp = &vertices[(quad_index + i) * vertices_per_cell];
+            const bool sc_natural = (sc.slot_id != 0u && sc.u0 >= 0.0f && gscale == 1.0f && ((sc.background >> 24) & 0xffu) == 0u);
+            if (sc_natural) {
+                const uint32_t sspan = (sc.width == 0u) ? 1u : sc.width;
+                const float sgw = (sc.atlas_width_px > 0u) ? (float)sc.atlas_width_px : cw * (float)sspan;
+                maru_fill_glyph_quad(sp, sc, sx_origin + (float)sc.col * cw, sgw, py_top, cell_h, drawable_w, drawable_h);
+            } else {
+                maru_fill_cell_quad(sp, sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale);
+            }
         }
     }
 
@@ -1002,11 +1068,14 @@ bool maru_metal_renderer_draw(
     // 그 위에 보이고 (b)rich 밴드 quad가 strip 위에 보인다(strip을 셀 패스 전체 뒤에 두면 밴드를 덮어 안 보였다).
     // 그래서 셀 패스를 [배경 strip(1a)] · [터미널(1b)] · [사이드바 제목(4)] 셋으로 쪼개고, 밴드 quad(under)를
     // 터미널 '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
-    const size_t cell_count_v = cell_count * 6;
-    const size_t pre_sidebar_vertices = (cell_count + sidebar_bg_quads) * 6;
-    // 버퍼 레이아웃은 [사이드바 bg quad][터미널 cells][사이드바 cells]다(채우기 순서). bg quad가 '맨 앞'이므로
-    // 터미널 cell i의 정점은 cells_base_v + i*6에서 시작한다(0이 아님). 셀 패스 오프셋은 전부 이 base를 더해야
-    // 한다 — 안 그러면 모달 분할(terminal_end/modal_cells_start)이 한 셀씩 밀린다.
+    // A(자간 자연폭): 터미널 셀은 배경+전경 2 quad = 셀당 12 vertex라, 셀 인덱스→vertex는 ×12다. 인접 배치라
+    // 한 셀의 두 quad가 연속이므로, 연속 vertex 구간 draw가 [배경,전경]을 cell 순서대로 함께 그린다(패스 분할 불요).
+    const size_t cell_count_v = cell_count * 12;
+    // 사이드바 cells 시작 = 사이드바 bg quad(6) + 터미널 cells(cc×12). 사이드바는 1 quad/셀이라 그 뒤 sc×6.
+    const size_t pre_sidebar_vertices = sidebar_bg_quads * 6 + cell_count * 12;
+    // 버퍼 레이아웃은 [사이드바 bg quad][터미널 cells(셀당 2 quad)][사이드바 cells]다(채우기 순서). bg quad가 '맨 앞'
+    // 이므로 터미널 cell i의 정점은 cells_base_v + i*12에서 시작한다(0이 아님). 셀 패스 오프셋은 전부 이 base를 더해야
+    // 한다 — 안 그러면 모달 분할(terminal_end/modal_cells_start)이 어긋난다.
     const size_t cells_base_v = sidebar_bg_quads * 6;
     const size_t bottom_vertex_count = bottom_quad_n * 6; // C4b-5: 탭 밴드(part1 앞 패스)
     const size_t under_vertex_count = under_quad_n * 6;
@@ -1015,7 +1084,7 @@ bool maru_metal_renderer_draw(
     // 텍스트 '앞'에 끼운다 → 터미널(모달 제외) → 배경 → under quad(사이드바 밴드) → 사이드바 → over quad
     // (모달 배경) → 모달 텍스트. 모달 없으면(0) terminal_end=cell_count라 1·6이 합쳐져 기존과 같다.
     const bool has_modal = (modal_cells_start > 0 && modal_cells_start < cell_count);
-    const size_t terminal_end_v = (has_modal ? modal_cells_start : cell_count) * 6;
+    const size_t terminal_end_v = (has_modal ? modal_cells_start : cell_count) * 12; // 셀당 2 quad(자간 자연폭) — ×12
 #define MARU_DRAW_CELLS(sv, cv)                                       \
     do {                                                             \
         if ((cv) > 0) {                                              \
@@ -1102,7 +1171,7 @@ bool maru_metal_renderer_draw(
             const NSUInteger ch2 = (cy + (NSUInteger)modal_clip_h_px <= dh) ? (NSUInteger)modal_clip_h_px : (dh - cy);
             [encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
         }
-        MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 6, cell_count_v - modal_cells_start * 6);
+        MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 12, cell_count_v - modal_cells_start * 12); // 셀당 2 quad — ×12
     }
 #undef MARU_DRAW_CELLS
 #undef MARU_DRAW_QUADS

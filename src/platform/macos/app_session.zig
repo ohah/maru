@@ -59,10 +59,12 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
+// 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
+// 멀티 창/quick 세션이 같은 wall-clock 기준으로 blink/fade/poll/sync timeout을 계산하게 한다.
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
-// 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz). Swift frame-loop NSTimer가
-// config를 읽어 cadence를 정하고, Zig 내부 blink/fade/poll/sync timeout은 ms→tick 환산으로 실제 시간을 유지한다.
-pub const abi_version: u32 = 92;
+// 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz).
+// Swift frame-loop NSTimer가 config를 읽어 cadence를 정한다.
+pub const abi_version: u32 = 93;
 // 90: request_app_quit + FrameSummary.quit_decision(끝에 1필드 추가 — 기존 offset 불변). Cmd+Q/메뉴/Dock 종료가 windowShouldClose를 안 거치므로 applicationShouldTerminate에서 request_app_quit으로 "maru를 종료할까요?" 확인 모달을 항상(실행 중 명령 무관) 띄우고 .terminateLater 반환; confirm 확정/취소가 quit_decision(0=대기·1=accepted·2=cancelled)에 latch되면 Swift가 NSApp.reply로 종료 진행/취소. 빨간 버튼 ended latch와 같은 tick 폴 패턴. docs/macos-app-host-boundary.md "닫기 확인". 89: url_at에 out_kind(0=url,1=file_path) 추가 — 파일 경로 링크를 Swift가 URL(fileURLWithPath:)로 열게(docs/link-detection.md). 88: key_hint_on_flags/on_timer/cancel(단축키 힌트 홀드 **상태머신**을 keyhint_hold.zig 순수 Zig로 이주 — 간헐 미표시 루트커즈[옛 Swift가 타이머 만료 시 NSEvent.modifierFlags라는 2번째 출처를 재읽기해 stale/빈 값에 트리거 유지여도 미표시] 수정. Swift는 flagsChanged·timer·keyDown/blur를 머신에 흘리고 반환 Action으로 타이머·redraw만; visible은 머신이 소유. set_key_hints 제거[머신이 toggle]. key_hints_config는 delay만 Swift가 씀). 87: set_key_hints + key_hints_config(단축키 힌트 HUD — KH-4). Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay ms)를 감지하면 set_key_hints(1)로 각 chrome 요소 우상단에 단축키 배지를 켜고(markMetalNeedsRedraw 후 buildChromeOverlayPrep이 buildKeyHintBadges로 그림), 떼거나 다른 키·포커스 상실에 set_key_hints(0). key_hints_config는 enabled/delay/modifier(0=cmd,1=ctrl,2=opt)를 config에서 읽어 Swift에 준다(gesture 정책=Zig·타이머 clock=Swift). 패시브라 anyOverlayOpen 비포함(커서 blink·keyEquivalent 불변), 빌드 게이트에만 더함. export 2개 추가 — 구조체 offset 불변. 86: MetalFrame.sidebar_scroll_offset_px + maru_metal_renderer_draw 마지막 인자(사이드바 세로 스크롤 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘으면 휠/트랙패드로 스무스 스크롤. 렌더러가 사이드바 셀 py_top에서 빼 카드를 위로 밀고 >0이면 [header_h, drawable_h] scissor로 헤더 위로 샌 카드를 자른다; GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립. 우측에 pane 스크롤바 동형 fade thumb. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변). 85: take_command_catalog_dirty(커맨드 카탈로그 런타임 재빌드 신호 — keybind rebind/unbind·reload·reset이 rebuildCommandCatalog로 카탈로그를 다시 빌드하며 command_catalog_dirty를 세우면 Swift가 tick마다 drain해 1이면 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다. reset은 확인 모달-확정 후 tick에서 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로 — 인앱 rebind·멀티창 활성 세션도 커버. take_global_hotkeys_dirty와 같은 1회성, 끝에 export 추가 — 구조체 offset 불변). 84: MetalFrame.modal_clip_x/y/w/h_px(모달 오버레이 px 클리핑 인프라 — chrome draw.Op.clip을 lowering이 OverlayRaster.clip_rect로 모으면 렌더러가 모달 셀 draw에 setScissorRect 적용; w==0=클리핑 없음[기존 동작]. 부분 카드 픽셀 스크롤[알림 패널 등] 재사용 인프라, 컴포넌트 적용은 후속. 끝에 4필드 추가해 구조체 offset 불변). 83: take_color_sample_request + provide_sampled_color(HSV picker `i` 스포이드 → Swift가 NSColorSampler[OS 화면 색 추출기]를 열고 사용자가 고른 화면 픽셀 RGB를 picker에 반영. Zig가 color_sample_pending을 세우고 Swift가 tick마다 take_color_sample_request로 drain해 1이면 NSColorSampler.show[비동기], 콜백에서 provide_sampled_color[r,g,b u32]로 되돌린다 → settings.setPickerRgb로 pick h/s/v 반영. file-pick take/provide 패턴이나 provide가 비동기 콜백. 끝에 export 2개 추가 — 구조체 offset 불변). 82: take_global_hotkeys_dirty(글로벌 핫키 라이브 OS 재등록 — 세팅 GUI 녹음/해제[rebind/unbind]·reload·reset이 global_hotkeys를 다시 빌드하고 dirty를 세우면 Swift가 tick마다 drain해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 descriptor를 OS에 재등록. global_hotkeys getter는 그대로 재사용. take_bell류 1회성, 끝에 export 추가 — 구조체 offset 불변). 81: take_file_pick_request + provide_picked_file(세팅 window.background-image 행 활성 → 파일 선택창. Zig가 file_pick_pending을 세우고 Swift가 tick마다 take_file_pick_request로 drain해 1이면 NSOpenPanel[PNG]을 열어 고른 절대경로를 provide_picked_file로 되돌린다 → Zig가 setText + 라이브 반영 + dirty. OSC52 read take/provide와 같은 패턴, 끝에 export 2개 추가 — 구조체 offset 불변). 80: any_overlay_open getter(세팅 등 chrome 오버레이/녹음 열림 — Swift performKeyEquivalent가 1이면 메뉴바 keyEquivalent를 양보해 ⌘조합을 keyDown→handleKeyEvent 모달/녹음 가드로 보낸다. 순수 read getter, 구조체 offset 불변). 79: window_blur_radius(config window.blur getter — 창 뒤 데스크톱 배경 블러 반경 px. window.opacity>=1이면 0[불투명 창=블러 안 보임]. 블러는 GPU 아니라 OS 창 속성이라 host가 적용: macOS=CGSSetWindowBackgroundBlurRadius[Ghostty·Terminal.app 비공개 CGS], Win=DwmSetWindowAttribute·Linux=컴포지터 속성[추후]. 게이트 정책은 Zig 단일 출처[windowBlurRadius], 순수 read getter라 구조체 offset 불변). 78: pending_notification에 surface_id_out·foreground_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. foreground_out=전면 배너 여부(에이전트 완료=1, OSC=0 전면이면 목록만) → willPresent가 자기 화면 알림 노이즈 억제. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
@@ -190,7 +192,7 @@ const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
 const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 
 // 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — blinkIntervalTicks()가
-// `render.frame-rate`에 맞춰 tick으로 환산한다(F1-4b). 일반 터미널 관례(on 500ms / off 500ms)가 기본값.
+// Swift host의 실제 frame-loop cadence에 맞춰 tick으로 환산한다(F1-4b). 일반 터미널 관례(on 500ms / off 500ms)가 기본값.
 const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
 const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
 // 에이전트 마지막 답변 미리보기를 담는 Term inline 버퍼 크기(바이트). 한 줄 미리보기라 충분하고, 사이드바가
@@ -206,6 +208,10 @@ fn ticksForMsAtRate(ms: u32, hz: u32) u32 {
     const safe_hz = @max(1, hz);
     const ticks = (@as(u64, ms) * @as(u64, safe_hz) + 500) / 1000;
     return @max(1, @as(u32, @intCast(ticks)));
+}
+
+fn clampFrameRateHz(hz: u32) u32 {
+    return @min(config_mod.theme.render_frame_rate_max, @max(config_mod.theme.render_frame_rate_min, hz));
 }
 
 const default_scrollbar_visible_ticks: u32 = ticksForMsAtRate(scrollbar_visible_ms, config_mod.theme.render_frame_rate_default);
@@ -925,6 +931,10 @@ pub const AppSession = struct {
     // loaded_config가 실제로 초기화됐는지. init 초반(live/surface 생성)이 실패하면 deinit이 아직
     // undefined인 arena를 free하지 않도록, 다른 자원과 같은 *_initialized 가드 패턴을 쓴다.
     config_loaded: bool = false,
+    // Swift host의 단일 frame-loop NSTimer가 실제로 쓰는 전역 cadence(Hz). `render.frame-rate`는 config 희망값이지만,
+    // tickTimer는 앱당 하나라 모든 창/quick 세션이 같은 cadence로 tick된다. Zig의 blink/fade/poll/sync timeout 환산도
+    // 이 host cadence를 공통 출처로 써야 비활성 세션이 active 세션 rate에 끌려 과속/저속으로 흐르지 않는다.
+    frame_loop_rate_hz: u32 = config_mod.theme.render_frame_rate_default,
     // config의 전역(OS) 단축키를 OS 등록용 기술자(가상 키코드 + Carbon modifier + action)로 변환해 담는다.
     // init에서 loaded_config.global_bindings를 global_hotkey.descriptorFor로 매핑(매핑 불가 chord는 제외).
     // Swift가 `maru_macos_app_session_global_hotkeys`로 읽어 RegisterEventHotKey로 등록한다(a2). owned.
@@ -1427,8 +1437,8 @@ pub const AppSession = struct {
     // 이번 트랜잭션에서 imeInsert가 OOM으로 일부를 못 담았는지. 그러면 imeEnd는 잘린 텍스트를
     // 보내지 않고 통째로 버린다(fail-closed — 반쪽 문자열이 PTY에 들어가지 않게).
     ime_insert_failed: bool = false,
-    // 커서/오버레이 caret 깜빡임 위상. render.frame-rate에 맞춘 tick 수(기본 60Hz 30틱=500ms)마다 토글하고, 입력/출력이 있으면 보이는 상태로
-    // 리셋한다(타이핑 중 안 사라짐). 터미널 커서(DECSCUSR blink)와 오버레이 caret(find·palette)이 **같은 위상·같은
+    // 커서/오버레이 caret 깜빡임 위상. host frame-loop cadence에 맞춘 tick 수(기본 60Hz 30틱=500ms)마다 토글하고,
+    // 입력/출력이 있으면 보이는 상태로 리셋한다(타이핑 중 안 사라짐). 터미널 커서(DECSCUSR blink)와 오버레이 caret(find·palette)이 **같은 위상·같은
     // 메커니즘**을 공유한다 — 커서는 blink 켜졌을 때만, caret은 열린 동안 늘. 렌더도 공유: caret이 오버레이
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
@@ -1479,6 +1489,7 @@ pub const AppSession = struct {
         else
             try config_mod.loadConfigDefault(io, allocator);
         self.config_loaded = true;
+        self.frame_loop_rate_hz = self.configuredFrameRateHz();
         self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
         self.audible_bell = self.loaded_config.config.bell.audible;
         self.bell_visual = self.loaded_config.config.bell.visual;
@@ -7087,9 +7098,16 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    pub fn configuredFrameRateHz(self: *const AppSession) u32 {
+        return clampFrameRateHz(self.loaded_config.config.render_frame_rate);
+    }
+
+    pub fn setFrameLoopRateHz(self: *AppSession, hz: u32) void {
+        self.frame_loop_rate_hz = clampFrameRateHz(hz);
+    }
+
     pub fn frameRateHz(self: *const AppSession) u32 {
-        const hz = self.loaded_config.config.render_frame_rate;
-        return @min(config_mod.theme.render_frame_rate_max, @max(config_mod.theme.render_frame_rate_min, hz));
+        return clampFrameRateHz(self.frame_loop_rate_hz);
     }
 
     fn ticksForMs(self: *const AppSession, ms: u32) u32 {
@@ -7124,8 +7142,8 @@ pub const AppSession = struct {
         return self.ticksForMs(sync_timeout_ms);
     }
 
-    /// 커서 깜빡임 반주기를 현재 frame rate tick으로 환산한다(config `cursor.blink-interval-ms` → 틱).
-    /// ticks = round(ms × render.frame-rate / 1000)이고, 최소 1틱(0틱이면 토글이 멈춰 영구 visible로 굳음).
+    /// 커서 깜빡임 반주기를 현재 host frame-loop cadence tick으로 환산한다(config `cursor.blink-interval-ms` → 틱).
+    /// ticks = round(ms × frame_loop_rate_hz / 1000)이고, 최소 1틱(0틱이면 토글이 멈춰 영구 visible로 굳음).
     /// 한 반주기 = on 또는 off 한 단계라 사용자가 적은 ms가 곧 깜빡임 속도다. blink=false는 updateCursorBlink
     /// 가드가 호출 전에 걸러낸다.
     fn blinkIntervalTicks(self: *const AppSession) u32 {
@@ -13888,10 +13906,12 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     try std.testing.expectEqual(@as(i8, 0), session.drag_autoscroll);
 }
 
-test "frame-rate helpers: render.frame-rate 기본·clamp·ms→tick 환산" {
+test "frame-rate helpers: config 희망값과 host cadence를 분리해 ms→tick 환산" {
     var session: AppSession = undefined;
     session.loaded_config.config = .{};
+    session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
 
+    try std.testing.expectEqual(config_mod.theme.render_frame_rate_default, session.configuredFrameRateHz());
     try std.testing.expectEqual(config_mod.theme.render_frame_rate_default, session.frameRateHz());
     try std.testing.expectEqual(@as(u32, 30), session.ticksForMs(500)); // 500ms@60Hz
     try std.testing.expectEqual(@as(u32, 60), session.syncTimeoutTicks()); // 1s@60Hz
@@ -13900,6 +13920,11 @@ test "frame-rate helpers: render.frame-rate 기본·clamp·ms→tick 환산" {
     try std.testing.expectEqual(@as(u32, 15), session.bellFlashTotalTicks()); // 250ms@60Hz
 
     session.loaded_config.config.render_frame_rate = 30;
+    try std.testing.expectEqual(@as(u32, 30), session.configuredFrameRateHz()); // Swift timer 재시작 판단용 희망값
+    try std.testing.expectEqual(@as(u32, 60), session.frameRateHz()); // host timer가 아직 60Hz면 내부 환산도 60Hz
+    try std.testing.expectEqual(@as(u32, 30), session.ticksForMs(500));
+
+    session.setFrameLoopRateHz(30);
     try std.testing.expectEqual(@as(u32, 30), session.frameRateHz());
     try std.testing.expectEqual(@as(u32, 15), session.ticksForMs(500));
     try std.testing.expectEqual(@as(u32, 30), session.syncTimeoutTicks());
@@ -13908,6 +13933,9 @@ test "frame-rate helpers: render.frame-rate 기본·clamp·ms→tick 환산" {
     try std.testing.expectEqual(@as(u32, 8), session.bellFlashTotalTicks());
 
     session.loaded_config.config.render_frame_rate = 120;
+    try std.testing.expectEqual(@as(u32, 120), session.configuredFrameRateHz());
+    try std.testing.expectEqual(@as(u32, 30), session.frameRateHz()); // host cadence는 tick 입력이 바꾸기 전까지 독립
+    session.setFrameLoopRateHz(120);
     try std.testing.expectEqual(@as(u32, 120), session.frameRateHz());
     try std.testing.expectEqual(@as(u32, 60), session.ticksForMs(500));
     try std.testing.expectEqual(@as(u32, 120), session.syncTimeoutTicks());
@@ -13916,16 +13944,21 @@ test "frame-rate helpers: render.frame-rate 기본·clamp·ms→tick 환산" {
     try std.testing.expectEqual(@as(u32, 30), session.bellFlashTotalTicks());
 
     session.loaded_config.config.render_frame_rate = 1; // 파일 파서는 막지만 getter도 방어적으로 clamp
+    try std.testing.expectEqual(@as(u32, 30), session.configuredFrameRateHz());
+    session.setFrameLoopRateHz(1);
     try std.testing.expectEqual(@as(u32, 30), session.frameRateHz());
     session.loaded_config.config.render_frame_rate = 999;
+    try std.testing.expectEqual(@as(u32, 120), session.configuredFrameRateHz());
+    session.setFrameLoopRateHz(999);
     try std.testing.expectEqual(@as(u32, 120), session.frameRateHz());
     try std.testing.expectEqual(@as(u32, 1), ticksForMsAtRate(10, 60)); // 극단값도 최소 1틱
 }
 
-test "blinkIntervalTicks: cursor.blink-interval-ms를 render.frame-rate 틱으로 환산(round, 최소 1) (F1-4b)" {
+test "blinkIntervalTicks: cursor.blink-interval-ms를 host frame-loop 틱으로 환산(round, 최소 1) (F1-4b)" {
     var session: AppSession = undefined;
-    // blinkIntervalTicks는 cursor interval과 render.frame-rate를 읽는다 — 그 필드만 명시 초기화(undefined 트랩 회피).
+    // blinkIntervalTicks는 cursor interval과 host frame-loop cadence를 읽는다 — 그 필드만 명시 초기화(undefined 트랩 회피).
     session.loaded_config.config = .{};
+    session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
     session.appearance.cursor.blink_interval_ms = 500;
     try std.testing.expectEqual(@as(u32, 30), session.blinkIntervalTicks()); // 500ms@60Hz=30틱(기본)
     session.appearance.cursor.blink_interval_ms = 1000;
@@ -13933,9 +13966,11 @@ test "blinkIntervalTicks: cursor.blink-interval-ms를 render.frame-rate 틱으�
     session.appearance.cursor.blink_interval_ms = 100;
     try std.testing.expectEqual(@as(u32, 6), session.blinkIntervalTicks()); // round(100×60/1000)=6
     session.loaded_config.config.render_frame_rate = 30;
+    session.setFrameLoopRateHz(30);
     session.appearance.cursor.blink_interval_ms = 500;
     try std.testing.expectEqual(@as(u32, 15), session.blinkIntervalTicks()); // 500ms@30Hz=15틱
     session.loaded_config.config.render_frame_rate = 120;
+    session.setFrameLoopRateHz(120);
     try std.testing.expectEqual(@as(u32, 60), session.blinkIntervalTicks()); // 500ms@120Hz=60틱
     session.appearance.cursor.blink_interval_ms = 10; // 극단값도 0틱이 되지 않게 최소 1틱(토글 멈춤 방지)
     try std.testing.expectEqual(@as(u32, 1), session.blinkIntervalTicks());
@@ -13958,7 +13993,8 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.tabs = .empty;
     session.sidebar_visible_tabs = .empty; // updateCursorBlink→anyAgentRunning이 sidebar_visible_tabs를 순회(code-review high #1) — undefined면 UB(같은 함정). 빈 목록=스피너 없음
     session.sidebar_collapsed = false; // anyAgentRunning이 먼저 읽음(접힘이면 false 조기반환) — undefined면 garbage 분기
-    session.loaded_config.config = .{}; // blinkIntervalTicks가 render.frame-rate를 읽음
+    session.loaded_config.config = .{}; // configured frame-rate 기본값
+    session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
     session.appearance.cursor.blink_interval_ms = 500; // blinkIntervalTicks가 읽음(F1-4b) — undefined면 overflow([[devsession-undefined-test-field-trap]])
 
     // 기본(DECSCUSR 1 = 깜빡 block): interval 틱마다 토글. rebuild(metal_dirty) 없이 generation만(suffix 토글).
@@ -22221,9 +22257,10 @@ test "computeScrollbarAlpha: full→idle 감쇠(visible 유지·fade 후 faint·
     }
 }
 
-test "scrollbarAlpha: render.frame-rate에 따라 fade tick 수만 바뀌고 alpha 곡선은 유지" {
+test "scrollbarAlpha: host frame-loop cadence에 따라 fade tick 수만 바뀌고 alpha 곡선은 유지" {
     var session: AppSession = undefined;
     session.loaded_config.config = .{};
+    session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
 
     try std.testing.expectEqual(@as(u32, 100), session.scrollbarVisibleTicks());
     try std.testing.expectEqual(@as(u32, 27), session.scrollbarFadeTicks());
@@ -22231,12 +22268,14 @@ test "scrollbarAlpha: render.frame-rate에 따라 fade tick 수만 바뀌고 alp
     try std.testing.expectEqual(scrollbar_alpha_idle, session.scrollbarAlpha(session.scrollbarFadeCompleteTicks()));
 
     session.loaded_config.config.render_frame_rate = 30;
+    session.setFrameLoopRateHz(30);
     try std.testing.expectEqual(@as(u32, 50), session.scrollbarVisibleTicks());
     try std.testing.expectEqual(@as(u32, 14), session.scrollbarFadeTicks());
     try std.testing.expectEqual(scrollbar_alpha_full, session.scrollbarAlpha(session.scrollbarVisibleTicks()));
     try std.testing.expectEqual(scrollbar_alpha_idle, session.scrollbarAlpha(session.scrollbarFadeCompleteTicks()));
 
     session.loaded_config.config.render_frame_rate = 120;
+    session.setFrameLoopRateHz(120);
     try std.testing.expectEqual(@as(u32, 200), session.scrollbarVisibleTicks());
     try std.testing.expectEqual(@as(u32, 54), session.scrollbarFadeTicks());
     try std.testing.expectEqual(scrollbar_alpha_full, session.scrollbarAlpha(session.scrollbarVisibleTicks()));

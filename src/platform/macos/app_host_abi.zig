@@ -164,10 +164,12 @@ pub export fn maru_macos_app_session_create(
 
 pub export fn maru_macos_app_session_tick(
     session: ?*AppSession,
+    frame_loop_rate_hz: u32,
     out_summary: ?*AppFrameSummary,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const out = out_summary orelse return @intFromEnum(Status.null_out);
+    app_session.setFrameLoopRateHz(frame_loop_rate_hz);
     app_session.maybeDebugOpenSettings(); // MARU_OPEN_SETTINGS 시각 확인 훅 — tick(렌더) 전에 열어야 이 frame에 모달이 든다(env 미설정이면 무동작)
     out.* = app_session.tick() catch return @intFromEnum(Status.tick_failed);
     // PTY 세션이 종료되면 ok가 아니라 session_ended를 올려, host가 죽은 세션을 무한 tick하지
@@ -609,22 +611,27 @@ pub export fn maru_macos_app_session_window_blur_radius(session: ?*AppSession) u
     return app_session.windowBlurRadius();
 }
 
-// macOS app host frame-loop cadence(config render.frame-rate). Swift가 NSTimer 간격을 정할 때 읽는다.
-// tick 본문은 계속 Zig가 소유하고, host는 clock만 제공한다. session null=기본 60Hz. (ABI v91)
+// macOS app host frame-loop cadence(config render.frame-rate). Swift가 NSTimer 간격을 정할 때 읽는 config 희망값이다.
+// 실제 tick 시간 환산은 maru_macos_app_session_tick의 frame_loop_rate_hz 인자로 받은 host 전역 cadence를 쓴다. (ABI v91/v93)
 pub export fn maru_macos_app_session_frame_rate_hz(session: ?*AppSession) u32 {
     const app_session = session orelse return maru.config.theme.render_frame_rate_default;
-    return app_session.frameRateHz();
+    return app_session.configuredFrameRateHz();
 }
 
 test "frame_rate_hz ABI getter: null default and session config clamp" {
     try std.testing.expectEqual(maru.config.theme.render_frame_rate_default, maru_macos_app_session_frame_rate_hz(null));
     var session: AppSession = undefined;
     session.loaded_config.config = .{};
+    session.frame_loop_rate_hz = maru.config.theme.render_frame_rate_default;
     try std.testing.expectEqual(@as(u32, 60), maru_macos_app_session_frame_rate_hz(&session));
     session.loaded_config.config.render_frame_rate = 120;
     try std.testing.expectEqual(@as(u32, 120), maru_macos_app_session_frame_rate_hz(&session));
     session.loaded_config.config.render_frame_rate = 999;
     try std.testing.expectEqual(@as(u32, 120), maru_macos_app_session_frame_rate_hz(&session));
+
+    session.setFrameLoopRateHz(30);
+    try std.testing.expectEqual(@as(u32, 120), maru_macos_app_session_frame_rate_hz(&session)); // getter는 config 희망값
+    try std.testing.expectEqual(@as(u32, 30), session.frameRateHz()); // 내부 시간 환산은 host cadence
 }
 
 // 타이핑(글자 입력) 중 마우스 숨김 1회성 신호(config input.mouse-hide-while-typing). pending이면 1(플래그 비움),
@@ -1249,7 +1256,7 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     );
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.null_out)),
-        maru_macos_app_session_tick(null, null),
+        maru_macos_app_session_tick(null, maru.config.theme.render_frame_rate_default, null),
     );
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.null_out)),

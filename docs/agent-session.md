@@ -122,9 +122,15 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
       running Term이 다른**(다른 repo이거나 같은 repo의 다른 하위 디렉터리·브랜치) 경우에만 repo/경로(활성)와 스피너(다른 Term)가
       시각적으로 어긋난다 — 개요 가치를 위해 수용.
       (대안 B[스피너도 활성 Term으로 통일]는 카드 내부는 일관되나 백그라운드 에이전트가 사이드바 목록에서 사라져 개요가 약해져 기각.)
-  - **상단 탭바에도 파형**(사용자 요청 "여기도"): pane 라벨(`buildPaneLabelDrawList`)과 **running Term 탭**(`buildPaneTabBarDrawList`)
-    앞에 같은 `▁▅▇▃ ` prefix를 붙이고(`spinnerPrefixedLabel`) 바 셀을 브랜드색으로(`recolorSpinnerCells`, pane 대표 kind).
-    사이드바 카드의 색칠 루프와 달리 탭바는 그 draw list 셀을 직접 재색칠한다. 편집(rename) 중인 라벨/탭엔 prefix를 안 붙인다.
+  - **상단 탭바 running 표시 = 1칸 정적 플래그 ●**(사용자 요청 "여기도"): 사이드바 카드는 전용 상태줄이 있어 애니메이션 파형을
+    쓰지만, **탭 바(pane 라벨·Term 탭)는 등폭이라 폭이 귀하다** — 4칸 파형을 붙이면 식별용 이름이 잘린다(code-review max #1).
+    그래서 **tmux/screen 창-목록 활동 플래그(1글자)·zellij/iTerm2 탭 활동 점 관례**를 따라, running pane 라벨과 running Term 탭 앞에
+    `● `(U+25CF + 공백, `flagPrefixedLabel`) **정적 1칸 플래그**를 붙이고 ● 셀을 브랜드색으로 칠한다(`recolorAgentFlagCells`, pane
+    대표 kind). **정적이라 매 프레임 재투영이 필요 없고**(상태 변화 시에만 `pollAgentKinds`가 dirty), 종류색(코랄/청록)으로 종류도
+    드러난다. 편집(rename) 중인 라벨/탭엔 붙이지 않는다. (혼재 claude+codex pane의 플래그 색은 pane 대표 kind로 통일 — 드문 트레이드오프.)
+  - **재렌더 게이트 확장**(`agentDisplayVisible`): 정적 플래그·워크스페이스 단위 카드가 생기며, 상태/종류 변화 시 `metal_dirty`를
+    올리는 게이트를 "활성 Term만"에서 **탭 단위**(보이는 사이드바 카드 or 활성 탭의 탭 바)로 넓혔다 — 백그라운드 Term이 running으로
+    바뀌어도 그 탭 카드/탭바 플래그가 제때 갱신된다. 사이드바 파형 애니메이션(`anyAgentRunning`, 130ms)은 카드 전용이라 그대로.
 - 인코딩은 4줄 수용(`sidebar_line_base=32`, `line_index` 0~3 → 4줄). 구현: `lines: [3]`→`[4]`, 슬롯 높이
   3.8×→~4.6×(4줄+여백). 비-git·비-에이전트 탭은 줄이 적어 같은 슬롯에 블록 세로 중앙 정렬(빈 줄 없음).
 

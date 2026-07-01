@@ -804,6 +804,12 @@ fn isAgentSpinnerCp(cp: u21) bool {
     return cp > spinner_block_base and cp <= spinner_block_base + @as(u21, max_h);
 }
 
+/// 상단 탭 바 running 표시 = **1칸 정적 플래그** ●(U+25CF). 사이드바 카드는 전용 상태줄이 있어 애니메이션 파형을
+/// 쓰지만, 탭 바(pane 라벨·Term 탭)는 등폭이라 폭이 귀하다 — tmux/screen의 창-목록 활동 플래그(1글자)·zellij/iTerm2
+/// 탭 활동 점 관례를 따라 **애니메이션 없는 1칸 플래그**를 이름 앞에 붙인다. 정적이라 매 프레임 재투영이 필요 없고
+/// (상태 변화 시에만 dirty), running Term의 종류색(코랄/청록)으로 칠해 종류도 드러난다.
+const agent_running_flag: u21 = 0x25CF; // ●
+
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
     // **알림 제목용 실제 유니코드** — OS 데스크톱 알림은 시스템 폰트로 그려지므로 maru 합성 PUA(agentIconCodepoint)를
     // 못 쓴다. 사이드바 렌더(maru)와 알림(OS)이 의미는 같되 codepoint가 갈리는 유일한 곳.
@@ -3351,6 +3357,19 @@ pub const AppSession = struct {
     fn paneAgentKind(pane: *Pane) AgentKind {
         for (pane.terms.items) |t| if (t.agent_state == .running and t.agent_kind != .none) return t.agent_kind;
         return pane.activeTerm().agent_kind;
+    }
+
+    /// 이 탭(tab_index)의 에이전트 상태/종류 변화가 **화면에 보이는 running 표시**에 영향을 주는가 — pollAgentKinds/State의
+    /// metal_dirty 게이트. 옛 "활성 Term만 보이면 재렌더"에서 확장한다: (1) 사이드바 카드 스피너·아이콘·색은 이제 **워크스페이스
+    /// 단위**(tabHasRunningAgent/tabAgentKind)라 그 탭의 **어느 Term** 상태가 바뀌어도 카드가 바뀐다 → 카드가 보이면 재렌더.
+    /// (2) 탭 바는 **활성 탭의 모든 Term**에 정적 플래그(●)를 그리므로 활성 탭의 어느 Term 변화든 반영해야 한다. 둘 다 안 보이면
+    /// (접힘/최소 + 비활성 탭) 진짜로 화면에 없으니 재렌더 안 함(안 보이는 background Term churn으로 헛 재렌더 방지 — 옛 게이트 취지 유지).
+    fn agentDisplayVisible(self: *AppSession, tab_index: usize) bool {
+        if (!self.sidebar_collapsed and !self.chrome_minimal) { // (1) 사이드바 카드가 보이고 이 탭이 필터 통과면
+            for (self.sidebar_visible_tabs.items) |i| if (i == tab_index) return true;
+        }
+        // (2) 탭 바가 그려지고(chrome_minimal이면 paneBarHeightPx==0) 이 탭이 활성이면 이 탭의 Term들이 탭으로 보인다.
+        return self.paneBarHeightPx() > 0 and self.app_window.active_tab == tab_index;
     }
 
     fn sessionHasRunningJob(self: *AppSession) bool {
@@ -7286,15 +7305,12 @@ pub const AppSession = struct {
     /// 한다 — 그래서 `tabs` 전체가 아니라 `sidebar_visible_tabs`(필터 통과 = 표시 카드)만 본다(code-review high #1: 옛 전체-스캔이
     /// 접힘·필터아웃에도 130ms 재투영을 돌리던 회귀). 빈 검색이면 visible_tabs=전체라 평소와 동일.
     fn anyAgentRunning(self: *AppSession) bool {
-        // 탭바 스피너는 **접힘과 무관하게** 활성 워크스페이스 상단에 보인다 — 활성 탭의 어느 pane/Term이든 running이면
-        // 위상을 진행/재투영해야 파형이 움직인다(사이드바만 보던 옛 게이트 확장). **단 탭 바가 실제로 그려질 때만** —
-        // chrome_minimal(quick terminal)이면 `paneBarHeightPx()==0`이라 탭 바 스피너가 없으니 재투영을 돌리면 안 된다
-        // (code-review max: 표시면이 없는데 130ms 재셰이프하던 회귀 = high #1 재발 방지). 활성 탭은 늘 화면에 있으므로 먼저 검사한다.
-        if (self.paneBarHeightPx() > 0 and self.app_window.active_tab < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[self.app_window.active_tab])) return true;
-        // 사이드바 카드 스피너: 접힘·chrome_minimal이면 사이드바가 없어(sidebar_width_px=0) 카드 스피너도 없다(false).
-        // 검색 필터로 숨은 탭은 카드가 없으므로 `sidebar_visible_tabs`만 본다(code-review high #1). 이제 활성 Term만이 아니라
-        // **어느 pane/Term이든** running이면 카드 스피너가 뜬다(범위 확장).
-        if (self.sidebar_collapsed or self.chrome_minimal) return false; // 사이드바 카드 스피너 화면에 없음(탭바는 위에서 처리)
+        // **사이드바 카드의 애니메이션 파형만** 이 위상 게이트에 걸린다 — 탭바 running 표시는 **정적 1칸 플래그(●)**라
+        // 매 프레임 재투영이 필요 없다(상태 변화 시에만 pollAgentKinds가 dirty; 게이트는 agentDisplayVisible이 탭바까지 커버).
+        // 접힘·chrome_minimal이면 사이드바가 없어(sidebar_width_px=0) 카드 파형도 없으니 false(표시면 없는데 130ms 재셰이프
+        // 방지, code-review high #1 + max). 검색 필터로 숨은 탭은 카드가 없으므로 `sidebar_visible_tabs`만 본다. running 판정은
+        // 활성 Term만이 아니라 **어느 pane/Term이든**(tabHasRunningAgent) — 백그라운드 Term도 카드 파형을 돌린다(범위 확장).
+        if (self.sidebar_collapsed or self.chrome_minimal) return false;
         for (self.sidebar_visible_tabs.items) |i| {
             if (i < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[i])) return true;
         }
@@ -9707,20 +9723,20 @@ pub const AppSession = struct {
         // 탭당 활성 pane의 활성 Term 하나만 poll해(사이드바가 그 Term만 보여줘서), 비활성 pane/Term에서 끝난 에이전트는
         // 완료 알림 자체가 안 났고 docs/notifications.md "split panel+가로탭까지 포커스" 능력이 사실상 트리거되지 않았다.
         // 비용 가드: foregroundProcessName syscall은 agent_poll_interval_ms(≈0.5s)로 throttle되고, metal_dirty(재렌더)는
-        // **사이드바에 보이는** Term(워크스페이스별 활성 pane의 활성 Term)의 변화에만 올린다 — 안 보이는 Term의 agent_kind/
-        // 상태 변화로 동일 프레임을 헛 재렌더하지 않게(예전 code-review 지적 보존; 안 보이는 Term은 표시될 때 switch가 dirty).
+        // **화면에 running 표시가 실제로 보이는 탭**의 변화에만 올린다(agentDisplayVisible: 보이는 사이드바 카드 or 활성 탭의
+        // 탭 바). 카드 스피너·아이콘이 워크스페이스 단위가 되고 탭 바에 Term 플래그(●)가 생겨, 옛 "활성 Term만" 게이트에서
+        // **탭 단위**로 확장했다(백그라운드 pane/Term 상태 변화도 그 탭 카드/탭바에 반영되므로). 둘 다 안 보이면 재렌더 안 함.
         // is_current(완료 알림 억제 게이트)는 **Term 단위**다 — 사용자가 지금 실제로 그 안에 있는 Term 하나(포커스 창의
         // 활성 탭·활성 pane·활성 Term)뿐 억제하고, 그 외 모든 Term(비활성 탭·활성 탭의 background split·background 가로탭)은
         // 완료 시 알림한다. 탭 단위로 묶으면 같은 탭의 다른 pane에서 끝난 에이전트를 알림으로 열람·점프할 길이 막혀 직관에
         // 어긋난다(사용자 피드백). 창이 비포커스면 어떤 Term도 "지금 보는" 게 아니라(null) 전부 알림한다.
         var buf: [256]u8 = undefined;
         const focused_term: ?*Term = if (self.window_focused) self.activeTab().activePane().activeTerm() else null;
-        for (self.tabs.items) |tab| {
-            const shown_term = tab.activePane().activeTerm(); // 이 워크스페이스 사이드바 행이 보여주는 Term
+        for (self.tabs.items, 0..) |tab, ti| {
+            const displayed = self.agentDisplayVisible(ti); // 탭 단위 재렌더 게이트(카드 or 활성 탭 탭바) — 탭 내 모든 Term 공유
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                    const displayed = term == shown_term; // 사이드바에 이 Term이 보이는가(재렌더 게이트)
                     const prev = term.agent_kind;
                     term.agent_kind = classifyAgent(term.rt.live_pty.session.foregroundProcessName(&buf));
                     if (term.agent_kind != prev) {
@@ -9745,8 +9761,9 @@ pub const AppSession = struct {
     /// 잘못된 cwd로 엉뚱한 세션을 읽지 않게. mtime이 직전과 같으면 agent_session.poll이 재파싱을 건너뛴다.
     /// `is_current`=사용자가 지금 그 안에 있는 그 Term(포커스 창의 활성 탭·활성 pane·활성 Term) — 그게 아닌데(비활성 탭·
     /// background split·background 가로탭) running→idle로 끝나면 완료 알림을 큐에 넣는다(Term 단위 — 같은 탭 다른 pane도 알림).
-    /// `displayed`=이 Term이 사이드바에 보이는가(워크스페이스별 활성 pane의 활성 Term) — 상태/답변 변화 시 metal_dirty는
-    /// 보이는 Term에만 올린다(안 보이는 background Term까지 poll하면서 헛 재렌더하지 않게 — pollAgentKinds 게이트와 짝).
+    /// `displayed`=이 Term의 running 표시가 화면에 보이는가(agentDisplayVisible: 보이는 사이드바 카드 or 활성 탭의 탭 바) —
+    /// 상태/답변 변화 시 metal_dirty를 여기에만 올린다(안 보이는 background Term까지 poll하며 헛 재렌더하지 않게 — pollAgentKinds
+    /// 게이트와 짝). 옛 "활성 Term만"에서 탭 단위로 확장(카드 스피너=워크스페이스 단위 + 탭바 Term 플래그, code-review max).
     fn pollAgentState(self: *AppSession, term: *Term, tab: *Tab, is_current: bool, displayed: bool) void {
         const kind: agent_session.Kind = switch (term.agent_kind) {
             .none => return,
@@ -10274,20 +10291,20 @@ pub const AppSession = struct {
                         var name_buf: ?[]const u8 = null;
                         defer if (name_buf) |b| self.allocator.free(b);
                         const renaming_pane = self.renamingPane(lr.leaf);
-                        // running이면(편집 중 아님) 이름 앞에 codex식 파형 prefix(owned) — 바 셀은 아래 recolor로 브랜드색.
+                        // running이면(편집 중 아님) 이름 앞에 1칸 정적 플래그 "● " prefix(owned) — ● 셀은 아래 recolor로 브랜드색.
                         const pane_running = !renaming_pane and paneHasRunningAgent(lr.leaf);
                         const name = if (renaming_pane) blk: {
                             const e = self.renameEditText(self.allocator) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
                             name_buf = e;
                             break :blk e;
                         } else if (pane_running) blk: {
-                            const pref = self.spinnerPrefixedLabel(self.allocator, app.pickLabel(lr.leaf.custom_name, ""), true) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
+                            const pref = flagPrefixedLabel(self.allocator, app.pickLabel(lr.leaf.custom_name, ""), true) catch break :blk app.pickLabel(lr.leaf.custom_name, "");
                             name_buf = pref;
                             break :blk pref;
                         } else app.pickLabel(lr.leaf.custom_name, "");
                         const label_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground }; // 밝은 전경(muted 비활성 탭과 구분)
                         if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg)) |ldl| {
-                            if (pane_running) recolorSpinnerCells(ldl.cells, paneAgentKind(lr.leaf)); // 파형 바 → 브랜드색
+                            if (pane_running) recolorAgentFlagCells(ldl.cells, paneAgentKind(lr.leaf)); // ● → 브랜드색(pane 단일 kind)
                             self.collectShaped(&collected, ldl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, .origin_y = text_origin_y, .colors = tabbar_colors } });
                         } else |_| {}
                     }
@@ -10312,8 +10329,8 @@ pub const AppSession = struct {
                             const label = self.allocator.dupe(u8, edit) catch continue;
                             titles.append(self.allocator, label) catch self.allocator.free(label);
                         } else {
-                            // running Term 탭은 라벨 앞에 codex식 파형 prefix(owned) — 에이전트가 도는 바로 그 탭을 가리킨다.
-                            const label = self.spinnerPrefixedLabel(self.allocator, termLabel(term), term.agent_state == .running) catch continue;
+                            // running Term 탭은 라벨 앞에 1칸 정적 플래그 "● " prefix(owned) — 에이전트가 도는 바로 그 탭을 가리킨다.
+                            const label = flagPrefixedLabel(self.allocator, termLabel(term), term.agent_state == .running) catch continue;
                             titles.append(self.allocator, label) catch self.allocator.free(label);
                         }
                     }
@@ -10323,8 +10340,8 @@ pub const AppSession = struct {
                     // 이 pane의 탭이 호버 중이면 그 탭에 ✕를 그린다(다른 pane이면 null).
                     const close_tab: ?usize = if (self.hovered_tab) |h| (if (h.pane == lr.leaf) h.tab else null) else null;
                     const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) catch continue;
-                    // Term 탭 파형 바 → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
-                    if (paneHasRunningAgent(lr.leaf)) recolorSpinnerCells(dl.cells, paneAgentKind(lr.leaf));
+                    // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
+                    if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                 }
 
@@ -11546,13 +11563,14 @@ pub const AppSession = struct {
         return allocator.dupe(u8, bars[0..used]);
     }
 
-    /// 이름 앞에 running이면 "▁▅▇▃ "(현재 프레임 파형)를 붙인 owned 라벨을 만든다(아니면 base 복제). 탭바 pane 라벨·Term
-    /// 탭이 공유 — 바 셀은 recolorSpinnerCells가 브랜드색으로 칠한다. base는 borrowed 가능(여기서 복제해 소유권 반환).
-    fn spinnerPrefixedLabel(self: *AppSession, allocator: std.mem.Allocator, base: []const u8, running: bool) ![]u8 {
+    /// 이름 앞에 running이면 "● "(1칸 정적 플래그 + 공백)를 붙인 owned 라벨을 만든다(아니면 base 복제). 탭바 pane 라벨·Term
+    /// 탭이 공유 — ● 셀은 recolorAgentFlagCells가 브랜드색으로 칠한다. base는 borrowed 가능(여기서 복제해 소유권 반환).
+    /// 파형(5칸)이 아니라 1칸이라 등폭 탭에서 이름을 거의 안 갉아먹는다(tmux 창-플래그 관례, code-review max #1).
+    fn flagPrefixedLabel(allocator: std.mem.Allocator, base: []const u8, running: bool) ![]u8 {
         if (!running) return allocator.dupe(u8, base);
-        const bars = try self.spinnerBarsUtf8(allocator);
-        defer allocator.free(bars);
-        return std.fmt.allocPrint(allocator, "{s} {s}", .{ bars, base });
+        var flag: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(agent_running_flag, &flag) catch 0;
+        return std.fmt.allocPrint(allocator, "{s} {s}", .{ flag[0..n], base });
     }
 
     /// 에이전트 종류 브랜드색(claude=Anthropic 코랄 #CC785C, codex=OpenAI 청록 #10A37F). none이면 null. 아이콘·상태줄
@@ -11573,13 +11591,13 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars});
     }
 
-    /// DrawList 셀 중 스피너 바 글리프(블록 ▁~█)를 종류 브랜드색으로 칠한다 — 탭바 pane 라벨·Term 탭의 파형 prefix용
-    /// (사이드바 색칠 루프와 같은 브랜드색이되, 여기선 그 draw list 단위로). none이면 무동작. 라벨 텍스트에 블록 글자가
-    /// 섞일 여지는 거의 없고(이름), 있어도 색만 바뀌는 사소한 오탐이라 상태줄 row 게이트 같은 좁힘은 불필요.
-    fn recolorSpinnerCells(cells: anytype, kind: AgentKind) void {
+    /// DrawList 셀 중 running 플래그 ●를 종류 브랜드색으로 칠한다 — 탭바 pane 라벨·Term 탭의 flagPrefixedLabel prefix용
+    /// (그 draw list 단위로). none이면 무동작. ●가 라벨 텍스트에 섞일 여지는 드물고, 있어도 색만 바뀌는 사소한 오탐이라
+    /// per-tab 셀 범위 게이트까진 불필요(혼재 kind는 pane 대표색으로 통일 — 드문 트레이드오프, code-review max #4·#5).
+    fn recolorAgentFlagCells(cells: anytype, kind: AgentKind) void {
         const brand = agentBrandColor(kind) orelse return;
         for (cells) |*c| {
-            if (isAgentSpinnerCp(c.codepoint)) c.style.foreground = .{ .rgb = brand };
+            if (c.codepoint == agent_running_flag) c.style.foreground = .{ .rgb = brand };
         }
     }
 
@@ -13433,11 +13451,61 @@ test "workspaceStatusLine: running=파형 스피너 prefix, idle=✓, none=빈 �
     try std.testing.expectEqual(AgentKind.none, AppSession.tabAgentKind(tab));
 }
 
-// anyAgentRunning(스피너 위상 게이트)은 스피너가 **실제로 화면에 보일 때만** true여야 한다(매 130ms full-grid 재투영
-// 낭비 회피, code-review high #1). 두 출처: (1) **탭바** 스피너는 활성 워크스페이스 상단이라 **접힘·필터와 무관하게** 보인다
-// → 활성 탭이 running이면 늘 true. (2) **사이드바 카드** 스피너는 접힘이면 안 보이고, 검색 필터로 숨은 탭은 카드가 없다
-// → 비활성 running 탭은 visible_tabs에 있고 펼침일 때만 true. 이 테스트는 활성 탭 하나로 (1)과 게이트를 고정한다.
-test "anyAgentRunning: 활성 탭 running은 접힘·필터와 무관히 true(탭바), 미running이면 게이트로 false" {
+// 상단 탭 바 running 표시는 파형(5칸)이 아니라 **정적 1칸 플래그 ●**(U+25CF) — tmux 창-플래그 관례로 이름 폭을 거의 안
+// 먹는다(code-review max #1). flagPrefixedLabel이 running이면 "● {이름}", 아니면 이름만 돌려준다.
+test "flagPrefixedLabel: running=●+이름, 아니면 이름만" {
+    const allocator = std.testing.allocator;
+    const run = try AppSession.flagPrefixedLabel(allocator, "svc", true);
+    defer allocator.free(run);
+    var flag: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(agent_running_flag, &flag) catch 0;
+    try std.testing.expect(std.mem.startsWith(u8, run, flag[0..n])); // 선두가 ●
+    try std.testing.expect(std.mem.endsWith(u8, run, "svc"));
+    const off = try AppSession.flagPrefixedLabel(allocator, "svc", false);
+    defer allocator.free(off);
+    try std.testing.expectEqualStrings("svc", off); // 아니면 이름만(플래그 없음)
+}
+
+// agentDisplayVisible(pollAgentKinds/State의 metal_dirty 게이트)은 **화면에 running 표시가 보이는 탭**만 true —
+// 접힘/최소크롬 + 비활성 탭이면 진짜 안 보여 false(백그라운드 Term churn으로 헛 재렌더 방지). 여기선 단일 탭이라
+// (탭0=활성) 탭바(paneBarHeightPx>0)만으로도 true이고, 접힘+비활성으로 만들면 false가 되는 걸 고정한다.
+test "agentDisplayVisible: 카드·탭바 안 보이면 false (재렌더 게이트)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.recomputeVisibleTabs();
+    session.cell_height_px = 20; // paneBarHeightPx()>0 되게(탭 바 분기 검증용) — 0이면 바 없음 취급
+
+    session.sidebar_collapsed = false;
+    try std.testing.expect(session.agentDisplayVisible(0)); // 펼침 → 카드 보임 → true
+
+    // 카드도 없고(접힘) 탭바도 없게(chrome_minimal → paneBarHeightPx=0) 만들면 false.
+    session.sidebar_collapsed = true;
+    session.chrome_minimal = true;
+    try std.testing.expect(!session.agentDisplayVisible(0)); // 카드·탭바 둘 다 없음 → false
+
+    // 접힘이어도 활성 탭(0)의 탭 바가 있으면 true(탭바 플래그 갱신 필요).
+    session.chrome_minimal = false;
+    try std.testing.expect(session.agentDisplayVisible(0)); // 접힘이지만 활성 탭 탭바 → true
+
+    // 활성 탭이 아니고(idx 99) 접힘이면 카드·탭바 둘 다 없음 → false.
+    try std.testing.expect(!session.agentDisplayVisible(99));
+}
+
+// anyAgentRunning은 **사이드바 카드의 애니메이션 파형**이 실제로 보일 때만 true여야 한다(매 130ms full-grid 재투영 낭비
+// 회피, code-review high #1). 탭 바 running 표시는 **정적 플래그(●)**라 이 위상 게이트와 무관하다(상태 변화 시에만 dirty).
+// 따라서: 펼침 + 보이는 running 탭 → true; 접힘·chrome_minimal → false(사이드바 없음); 검색 필터아웃 → false(카드 없음).
+// running 판정은 **어느 pane/Term이든**(tabHasRunningAgent)이라 활성 Term을 running으로 두면 그 탭이 running으로 잡힌다.
+test "anyAgentRunning: 펼침+보이는 running=true, 접힘·필터아웃=false (사이드바 파형 게이트)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -13451,23 +13519,19 @@ test "anyAgentRunning: 활성 탭 running은 접힘·필터와 무관히 true(�
     });
     defer session.deinit();
 
-    session.activeTab().activePane().activeTerm().agent_state = .running; // 활성 워크스페이스가 running
+    session.activeTab().activePane().activeTerm().agent_state = .running; // 이 워크스페이스가 running(어느 Term이든)
     session.recomputeVisibleTabs(); // 검색 없음 → visible_tabs = 전체(1개)
     try std.testing.expect(session.sidebar_visible_tabs.items.len >= 1);
 
     session.sidebar_collapsed = false;
-    try std.testing.expect(session.anyAgentRunning()); // 펼침 + running → true
+    try std.testing.expect(session.anyAgentRunning()); // 펼침 + 보이는 running → true
 
     session.sidebar_collapsed = true;
-    try std.testing.expect(session.anyAgentRunning()); // 접힘이어도 **탭바** 스피너는 보임 → true(동작 변경: 옛 false)
+    try std.testing.expect(!session.anyAgentRunning()); // 접힘 → 카드 파형 안 보임 → false(탭바 플래그는 정적이라 무관)
 
     session.sidebar_collapsed = false;
     session.sidebar_visible_tabs.clearRetainingCapacity(); // 검색 필터로 카드 숨김
-    try std.testing.expect(session.anyAgentRunning()); // 카드는 없어도 활성 탭 **탭바** 스피너 → true
-
-    // 활성 탭이 더는 running이 아니면(에이전트 아님) 탭바 스피너가 없고, 필터아웃이라 카드도 없다 → false(게이트 동작).
-    session.activeTab().activePane().activeTerm().agent_state = .idle;
-    try std.testing.expect(!session.anyAgentRunning()); // 미running + 카드 없음 → false
+    try std.testing.expect(!session.anyAgentRunning()); // 필터아웃 → 카드 없음 → false
 }
 
 test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 먼저 큐를 드레인" {

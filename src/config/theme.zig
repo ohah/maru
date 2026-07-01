@@ -447,6 +447,13 @@ pub const CursorConfig = struct {
     /// app이 host frame-loop 기준 tick으로 환산한다(round, 최소 1틱). `blink = false`면 이 값과 무관하게 깜빡이지
     /// 않는다. loader가 `cursor.blink-interval-ms` 파싱. (Ghostty `cursor-blink-interval` 대응)
     blink_interval_ms: u32 = 500,
+    /// 커서 깜빡임 **페이드**(ms) — on↔off 전환을 이 시간에 걸쳐 부드럽게(알파 램프) 잇는다. 각 반주기 끝
+    /// (다음 위상 직전)에서 이 시간만큼 커서 알파가 1→0(사라짐)·0→1(나타남)로 선형 보간된다. 0이면 페이드
+    /// 없이 즉각 on/off(하위 호환). 반주기(blink_interval_ms)를 넘지 못하게 app이 clamp한다 —
+    /// blink_interval_ms와 같으면 hold 없는 삼각파(호흡). host frame-loop 기준 tick으로 환산(round)하므로
+    /// 주사율(render.frame-rate)과 무관하게 같은 속도로 페이드한다. `blink = false`면 무관(안 깜빡임).
+    /// loader가 `cursor.blink-fade-ms` 파싱.
+    blink_fade_ms: u32 = 120,
     // 커서 색(선택, #RRGGBB). 둘 다 테마와 독립적으로 커서만 칠하는 opt-in override다 — null이면 테마 동작을
     // 그대로 따른다(기존 호환). color=커서 칸 배경(null이면 theme.cursor). text=반전 블록 커서 위 glyph 색
     // (null이면 경로별 기존값 — 메인 터미널은 theme.background, chrome caret은 sidebar_background). nullable이라
@@ -461,6 +468,7 @@ pub const CursorConfig = struct {
         .shape = Meta{ .doc = "커서 모양", .widget = .dropdown, .section = .cursor },
         .blink = Meta{ .doc = "커서 깜빡임", .widget = .toggle, .section = .cursor },
         .blink_interval_ms = Meta{ .doc = "커서 깜빡임 반주기(ms)", .range = .{ 100, 10000 }, .widget = .number, .section = .cursor },
+        .blink_fade_ms = Meta{ .doc = "커서 깜빡임 페이드(ms, 0=즉각)", .range = .{ 0, 1000 }, .widget = .number, .section = .cursor },
         .unfocused = Meta{ .doc = "포커스 잃을 때 커서", .widget = .dropdown, .section = .cursor },
     };
 };

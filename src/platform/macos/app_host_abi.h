@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 94u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 95u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -374,6 +374,14 @@ typedef struct MaruAppHostMetalFrame {
        scale로 환산. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다(커서·focus 테두리 reserved 2~5의 셀 15%와
        분리). 0=안 그림. 끝에 추가해 기존 offset 불변(ABI v94). */
     uint32_t divider_thickness_px;
+    /* 커서 overlay(터미널 블록/bar/underline·오버레이 caret)가 차지하는 cells suffix 길이 —
+       cells[cell_count - cursor_cells .. cell_count]가 커서다. 렌더러가 이 suffix를 본문 draw에서 제외하고
+       아래 cursor_fade_milli 불투명도로 별도 pass로 그려 blink를 부드럽게 페이드한다. 0=커서 없음. 끝에 추가(ABI v95). */
+    size_t cursor_cells;
+    /* 커서 overlay 불투명도 × 1000(0~1000, 1000=완전 표시). blink 페이드 위상 — app이 반주기 끝에서 1000↔0으로 램프
+       (cursor.blink-fade-ms). 렌더러가 커서 suffix pass의 fragment opacity로 /1000해 곱한다(premultiplied 출력 전체에
+       곱 — 반투명 커서가 아래 본문 셀에 정확히 합성). 0=커서 pass 생략(blink off 위상). 끝에 추가(ABI v95). */
+    uint32_t cursor_fade_milli;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

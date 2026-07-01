@@ -22,8 +22,13 @@ static NSString *const MARU_METAL_CELL_SHADER_SOURCE =
      "  out.bg = float4(vertices[vid].bg);\n"
      "  return out;\n"
      "}\n"
-     "fragment float4 maru_cell_fragment(VertexOut in [[stage_in]], texture2d<float> atlas_texture [[texture(0)]]) {\n"
+     // opacity(buffer 1): 이 draw의 불투명도 배수(0~1). 커서 blink 페이드 pass가 커서 suffix 셀을 반투명으로
+     // 그릴 때만 <1이고, 본문/사이드바 등 나머지 셀 draw는 host가 항상 1.0을 바인딩한다(무동작). premultiplied
+     // 출력(rgb·a) 전체에 곱하므로 over-블렌딩에 정확히 반투명으로 합성된다 — a=max(bg.a,cov)의 강제 alpha까지
+     // 함께 낮춰 블록 커서의 반전 글리프도 같이 페이드한다(host가 색을 낮추면 max() 때문에 못 하던 것).
+     "fragment float4 maru_cell_fragment(VertexOut in [[stage_in]], texture2d<float> atlas_texture [[texture(0)]], constant float &opacity [[buffer(1)]]) {\n"
      "  constexpr sampler atlas_sampler(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
+     "  float4 result;\n"
      // UV 규약: u<0 = 배경 전용(atlas 미샘플), u in [0,1] = 일반 글리프(흰색 coverage x 전경색),
      // u in [2,3] = 컬러 글리프(이모지). 컬러는 atlas의 premultiplied RGBA를 그대로 쓰고(전경색
      // 무시), 셀 배경 위에 합성한다. host가 컬러 글리프 UV에 +2.0 sentinel을 더해 보낸다.
@@ -31,14 +36,16 @@ static NSString *const MARU_METAL_CELL_SHADER_SOURCE =
      "    float4 c = atlas_texture.sample(atlas_sampler, float2(in.uv.x - 2.0, in.uv.y));\n"
      "    float3 rgb = c.rgb + in.bg.rgb * (1.0 - c.a);\n"
      "    float a = max(in.bg.a, c.a);\n"
-     "    return float4(rgb, a);\n"
-     "  }\n"
+     "    result = float4(rgb, a);\n"
+     "  } else {\n"
      // 일반 글리프: premultiplied 출력. mix(bg.rgb, fg, cov)는 bg.a=0일 때 fg*cov로 환원되고,
      // bg.a=1이면 alpha 1이라 mix 색이 그대로 premultiplied가 된다.
-     "  float coverage = (in.uv.x < 0.0) ? 0.0 : atlas_texture.sample(atlas_sampler, in.uv).a;\n"
-     "  float3 rgb = mix(in.bg.rgb, in.color, coverage);\n"
-     "  float a = max(in.bg.a, coverage);\n"
-     "  return float4(rgb, a);\n"
+     "    float coverage = (in.uv.x < 0.0) ? 0.0 : atlas_texture.sample(atlas_sampler, in.uv).a;\n"
+     "    float3 rgb = mix(in.bg.rgb, in.color, coverage);\n"
+     "    float a = max(in.bg.a, coverage);\n"
+     "    result = float4(rgb, a);\n"
+     "  }\n"
+     "  return result * opacity;\n" // opacity=1이면 무동작, <1이면 premultiplied 전체를 낮춰 반투명 합성(커서 페이드)
      "}\n";
 
 /* C4b: chrome rich GPU 프리미티브 — 둥근 사각형(per-corner radius + 변별 border + solid/gradient

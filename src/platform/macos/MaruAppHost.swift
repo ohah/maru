@@ -1066,7 +1066,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.titlebar_strip_px,      // 상단 타이틀바 띠 높이 — 접힘 펼치기 토글(◧)을 띠 안 세로 중앙(신호등 정렬)
             frame.window_opacity_milli,   // 창 배경 투명도 ×1000 — clear color alpha(default 배경만 투명)
             frame.sidebar_scroll_offset_px, // 사이드바 세로 스크롤량(px) — 카드를 위로 밀고 헤더 아래로 scissor 클립
-            frame.divider_thickness_px    // pane divider(reserved 30/31) 두께(px) — config split.divider-thickness(패스스루)
+            frame.divider_thickness_px,   // pane divider(reserved 30/31) 두께(px) — config split.divider-thickness(패스스루)
+            frame.cursor_cells,           // 커서 blink 페이드: 커서 overlay suffix 길이(본문서 제외·별도 pass; 패스스루)
+            frame.cursor_fade_milli       // 커서 overlay 불투명도 ×1000 — blink 페이드 위상(cursor.blink-fade-ms; 패스스루)
         )
         if drew {
             lastDrawnGeneration = frame.generation

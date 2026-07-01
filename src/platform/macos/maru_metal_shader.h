@@ -77,21 +77,33 @@ static NSString *const MARU_METAL_QUAD_SHADER_SOURCE =
      "fragment float4 maru_quad_fragment(QuadOut in [[stage_in]]) {\n"
      // gradient_kind==3: 위로 뾰족한 삼각형(말풍선 caret). rect에 내접하는 삼각형(apex=상단 중앙, base=하단)을
      // 3변 half-plane 거리의 max(convex SDF)로 그리고 fwidth 기반 edge AA를 준다 — 둥근-박스 경로보다 먼저 분기.
-     // fill0(straight-alpha) 단색, premultiplied 출력(셀·quad와 같은 over 블렌딩). corner/border는 안 쓴다.
+     // fill0(straight-alpha) 단색, premultiplied 출력(셀·quad와 같은 over 블렌딩). corner는 안 쓴다.
+     // border.x>0이면 두 **빗변**(td0 좌·td2 우)에만 border.x 폭으로 border_color 테두리를 얹어 말풍선 꼭지 외곽선을
+     // 만든다 — 밑변(td1)은 아래 패널 본문으로 열려 테두리 없음(패널 상단 테두리와 이어지는 open bubble). border.x==0이면
+     // 무동작(기존 단색 삼각형).
      "  if (in.gradient_kind > 2.5) {\n"
      "    float2 P = in.local;\n"
      "    float tw = in.half_size.x * 2.0; float th = in.half_size.y * 2.0;\n"
      "    if (tw < 0.5 || th < 0.5) { discard_fragment(); }\n" // degenerate(폭/높이 0) — normalize(0)=NaN 방지
      "    float2 A = float2(tw * 0.5, 0.0); float2 BL = float2(0.0, th); float2 BR = float2(tw, th);\n" // apex(상단 중앙)·하단 좌·우
-     "    float2 e0 = BL - A; float td0 = dot(P - A, normalize(float2(-e0.y, e0.x)));\n"
-     "    float2 e1 = BR - BL; float td1 = dot(P - BL, normalize(float2(-e1.y, e1.x)));\n"
-     "    float2 e2 = A - BR; float td2 = dot(P - BR, normalize(float2(-e2.y, e2.x)));\n"
+     "    float2 e0 = BL - A; float td0 = dot(P - A, normalize(float2(-e0.y, e0.x)));\n" // 좌 빗변
+     "    float2 e1 = BR - BL; float td1 = dot(P - BL, normalize(float2(-e1.y, e1.x)));\n" // 밑변
+     "    float2 e2 = A - BR; float td2 = dot(P - BR, normalize(float2(-e2.y, e2.x)));\n" // 우 빗변
      "    float td = max(max(td0, td1), td2);\n" // 내부 음수·외부 양수(convex SDF)
      "    float taa = max(fwidth(td), 1e-4);\n"
      "    float tcov = 1.0 - smoothstep(-taa, taa, td);\n"
      "    if (tcov <= 0.0) { discard_fragment(); }\n"
+     // 빗변 테두리: ds=가장 가까운 빗변까지 거리(내부 음수), -ds=빗변에서 안쪽 깊이. [0, bw]면 border_color로 섞는다.
+     // 밑변은 td0/td2에 안 들어가 -ds가 커져 bmix=0 → 테두리 없음(open bubble).
+     "    float bw = in.border.x;\n"
+     "    float3 trgb = in.fill0.rgb;\n"
+     "    if (bw > 0.0) {\n"
+     "      float ds = max(td0, td2);\n"
+     "      float bmix = 1.0 - smoothstep(bw - taa, bw + taa, -ds);\n"
+     "      trgb = mix(in.fill0.rgb, in.border_color.rgb, clamp(bmix, 0.0, 1.0));\n"
+     "    }\n"
      "    float ta = in.fill0.a * tcov;\n"
-     "    return float4(in.fill0.rgb * ta, ta);\n"
+     "    return float4(trgb * ta, ta);\n"
      "  }\n"
      // 중심 원점 좌표. 모서리별 radius 선택: p.x<0=좌, p.y<0=상 → tl/tr/br/bl = corner.x/y/z/w.
      "  float2 p = in.local - in.half_size;\n"

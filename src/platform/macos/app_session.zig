@@ -12974,26 +12974,28 @@ pub const AppSession = struct {
         const caret_h: f32 = ch_f * 0.5; // ~반 줄 높이
         const overlap: f32 = 2.0; // 밑변을 패널 안으로 — 상단 테두리 seam 덮기
         const fill = packRgbAlpha(tk.get(.surface_bg), 0xFF); // 채움=패널 배경색(텍스트 박스와 동일)
-        // 말풍선 caret = 패널 배경(surface_bg)으로 꽉 찬 **단일** 삼각형. 예전엔 accent 삼각형 위에 더 작은 채움 삼각형을
-        // 얹었는데, 작은 삼각형의 fwidth edge-AA가 내부까지 부분 커버리지를 줘 아래 accent와 블렌딩돼 내부가 패널색이
-        // 아닌 중간톤으로 떠 보였다(사용자 피드백 "채우기가 텍스트 박스랑 동일하게"). 외곽선 없이 surface_bg로만 채워 패널
-        // 상단과 이음새 없이 잇는다(패널 배경 quad '뒤'에 그려 상단 테두리를 caret 폭만큼 덮어 bubble을 연다).
-        self.gpu_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2, panel_top - caret_h, caret_w, caret_h + overlap, fill)) catch {};
+        const border_col = packRgbAlpha(tk.get(.focus_accent), 0xFF); // 빗변 테두리=패널과 같은 색(패널 border_role=.focus_accent)
+        const border_w: f32 = @floatFromInt(tk.space.border_width_px); // 빗변 테두리 두께=패널과 동일(같은 tokens 공유)
+        // 말풍선 caret = 패널 배경(surface_bg) 채움 + 두 빗변에 패널과 같은 테두리(border_col). 밑변은 테두리 없이 패널
+        // 본문으로 열려, 채움이 패널 상단 테두리를 caret 폭만큼 덮어(overlap) bubble을 연다 → 빗변 테두리가 패널 상단
+        // 테두리와 이어져 하나의 말풍선 외곽선이 된다. 채움 삼각형 하나로만 그려 예전 이중 삼각형의 edge-AA 중간톤 뜸을 피한다.
+        self.gpu_quads.append(self.allocator, triangleQuad(bell_cx - caret_w / 2, panel_top - caret_h, caret_w, caret_h + overlap, fill, border_w, border_col)) catch {};
     }
 
     /// gradient_kind=3(위 삼각형) GpuQuad 한 개(말풍선 caret 헬퍼). 좌상단 (x,y)·크기 (w,h) backing px,
-    /// fill_color0=color(0xAARRGGBB), corner/border 0(셰이더가 삼각형 경로에서 무시), layer 1(모달 over).
-    fn triangleQuad(x: f32, y: f32, w: f32, h: f32, color: u32) metal_frame.GpuQuad {
+    /// fill_color0=color(0xAARRGGBB), layer 1(모달 over). border_w>0이면 border_widths.x에 실어 셰이더가 두 빗변에만
+    /// border_color 테두리를 얹는다(밑변은 열림 — open bubble). border_w==0이면 단색 삼각형(corner는 삼각형 경로서 무시).
+    fn triangleQuad(x: f32, y: f32, w: f32, h: f32, color: u32, border_w: f32, border_color: u32) metal_frame.GpuQuad {
         return .{
             .x = x,
             .y = y,
             .w = w,
             .h = h,
             .corner_radii = .{ 0, 0, 0, 0 },
-            .border_widths = .{ 0, 0, 0, 0 },
+            .border_widths = .{ border_w, 0, 0, 0 }, // x=빗변 테두리 폭(gradient_kind==3 셰이더), 나머지 미사용
             .fill_color0 = color,
             .fill_color1 = color,
-            .border_color = 0,
+            .border_color = border_color,
             .gradient_kind = 3, // 위로 뾰족한 삼각형(셰이더 분기)
             .layer = 1, // 모달 over(패널 배경과 같은 패스)
         };

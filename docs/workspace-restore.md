@@ -59,8 +59,10 @@ codex `resume <id>`는 그 도구가 설계한 정상 재개 경로다.
 ### 무엇을 저장하나
 
 - `agent_kind`: `claude` | `codex`(그 외는 일반 셸 복원).
-- `session_id`: 트랜스크립트에서 발견한 세션 식별자. **새로 만들지 않고 이미 디스크에 있는 값을 읽는다** —
-  claude는 `~/.claude/projects/<enc(cwd)>/<uuid>.jsonl`의 파일명, codex는 rollout 첫 줄 `session_meta.payload.id`.
+- `session_id`: 그 페인 에이전트의 세션 식별자. **새로 만들지 않고 이미 디스크에 있는 값을 읽는다** — 종료 시점에
+  **훅 매핑**(`readMapping(surface.id)` → 정확한 `transcript_path`)에서 뽑는다(`sessionIdFromTranscript`): claude는
+  파일명 `<uuid>.jsonl`, codex는 첫 줄 `session_meta.payload.id`. 훅이 팬별 경로를 정확히 주므로 cwd+mtime 추측이 없다
+  (docs/agent-session.md "세션 파일 찾기 = 훅 매핑"). 매핑이 없으면 빈 값 → 아래 폴백.
 - 보존 `argv`: 종료 시점 에이전트의 전체 argv. `--resume`이 권한 모드를 복원하지 않으므로(아래), 직전 플래그를
   재현하려면 argv가 필요하다.
 
@@ -68,8 +70,10 @@ codex `resume <id>`는 그 도구가 설계한 정상 재개 경로다.
 
 같은 cwd에 세션이 여럿이면 claude `--continue`·codex `resume --last`는 "가장 최근 1개"만 잡는다. 그 페인들을 모두
 `--continue`로 복원하면 여러 프로세스가 한 transcript에 동시에 써서 대화가 뒤섞인다. 그래서 **session_id 단위로
-정확히** 복원한다(`--resume <id>` / `resume <id>`). session_id를 못 찾으면 `--continue` / `resume --last`로 graceful
-degrade한다(가장 최근 1개 — 다중 세션이면 부정확하나 세션을 잃지는 않는다).
+정확히** 복원한다(`--resume <id>` / `resume <id>`). **훅 매핑이 페인마다 정확한 세션 경로를 주므로**, 옛 cwd+mtime
+추측(가장 최근 파일을 골라 다중 세션에서 엉뚱한 세션을 잡던 문제)이 사라졌다 — 각 페인이 자기 session_id로 복원된다.
+매핑을 못 얻으면(훅 미발화·미설정) session_id가 빈 값이 되어 `--continue` / `resume --last`로 graceful degrade한다
+(가장 최근 1개 — 다중 세션이면 부정확하나 세션을 잃지는 않는다).
 
 ### 위험모드(권한 플래그) 재현
 

@@ -9211,7 +9211,8 @@ pub const AppSession = struct {
 
     /// 이 Term이 claude/codex이고 해당 토글이 켜졌으면, 종료 시점에 세션을 자동 resume하기 위한 정보(agent_kind·
     /// session_id·보존 argv)를 캡처한다(아니면 빈값=일반 셸 복원). exec_path+argv는 KERN_PROCARGS2(captureAgentArgv —
-    /// **틱이 멈춘 종료 시점 호출이라 정적 procargs_buf 공유 안전**), session_id는 트랜스크립트 파일(resolveSessionId).
+    /// **틱이 멈춘 종료 시점 호출이라 정적 procargs_buf 공유 안전**), session_id는 훅 매핑의 트랜스크립트 경로에서 뽑는다
+    /// (captureAgentSessionId → readMapping → sessionIdFromTranscript; cwd+mtime 추측 없이 팬별 정확).
     /// argv[0]은 exec_path 절대경로로 교체하고 민감 인라인 토큰은 redact한다. 결과는 arena 소유. 단일 출처:
     /// docs/workspace-restore.md "에이전트 세션 자동 resume".
     fn captureAgentForRestore(self: *AppSession, arena: std.mem.Allocator, term: *Term) AgentRestoreInfo {
@@ -9257,29 +9258,15 @@ pub const AppSession = struct {
         };
     }
 
-    /// captureAgentForRestore의 session id 부분 — cwd(OSC 7, 락 아래 복사) + HOME으로 트랜스크립트 루트를 만들어
-    /// resolveSessionId. 못 구하면 ""(폴백 resume). pollAgentState의 root/cwd 구성과 같은 패턴.
+    /// captureAgentForRestore의 session id 부분 — 종료 시점에 이 팬의 **정확한 세션 트랜스크립트 경로**(훅 매핑)를 읽어
+    /// 그 세션 id를 뽑는다(claude=파일명 uuid, codex=첫 줄 session_meta.id). cwd+mtime 추측이 없어 **같은 폴더 다중 세션도
+    /// 팬별 정확 resume**. 매핑이 없으면(훅 미발화·미설정) ""(폴백 resume). 매핑은 종료 시점에 그대로 있다(clearMappings는
+    /// 시작 시에만). agent_session.Kind는 app.agent_resume.Kind와 같은 타입이라(#6 통합) 변환 없이 넘긴다.
     fn captureAgentSessionId(self: *AppSession, arena: std.mem.Allocator, term: *Term, kind: app.agent_resume.Kind) []const u8 {
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = blk: {
-            term.surface.lockCore(self.io);
-            defer term.surface.unlockCore(self.io);
-            const live = term.surface.core.currentCwd();
-            if (live.len == 0 or live.len > cwd_buf.len) break :blk "";
-            @memcpy(cwd_buf[0..live.len], live);
-            break :blk cwd_buf[0..live.len];
-        };
-        if (cwd.len == 0) return "";
-        const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else return "";
-        const subdir: []const u8 = switch (kind) {
-            .claude => ".claude/projects",
-            .codex => ".codex/sessions",
-        };
-        var root_buf: [4096]u8 = undefined;
-        const root = std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ home, subdir }) catch return "";
-        // agent_session.Kind는 app.agent_resume.Kind와 같은 타입이라(#6 통합) 변환 없이 그대로 넘긴다.
+        var tp_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const transcript_path = agent_hooks.readMapping(self.io, self.allocator, term.surface.id, &tp_buf) orelse return "";
         var id_buf: [256]u8 = undefined;
-        const id = agent_session.resolveSessionId(self.io, self.allocator, kind, root, cwd, &id_buf) orelse return "";
+        const id = agent_session.sessionIdFromTranscript(self.io, self.allocator, kind, transcript_path, &id_buf) orelse return "";
         return arena.dupe(u8, id) catch "";
     }
 

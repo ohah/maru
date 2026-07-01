@@ -32,9 +32,10 @@
 Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hooks.reregister` — **force 재등록, 매핑은 안 지움**;
 시작 시 `agent_hooks.setup`은 매핑 dir까지 정리하므로 복구엔 안 쓴다). 전역 config에서 떼려면 **Unregister**(`agent_hooks.unregister`).
 
-**restore는 별개**: 종료 시점 resume 대상 **session id** 캡처(`resolveSessionId` — claude=cwd 디렉터리 mtime 최신
-파일명 uuid, codex=`session_meta.payload.id`)는 그대로 cwd+mtime을 쓴다. 라이브 poll은 이제 훅 경로만 쓰므로
-`resolveClaude`/`resolveCodex`는 **restore 전용**이다([workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 resume").
+**restore도 훅 경로**: workspace restore가 종료 시점에 resume 대상 **session id**를 캡처하는 것도 이제 **훅 매핑**을 쓴다
+(`captureAgentSessionId` → `readMapping(surface.id)` → `sessionIdFromTranscript` — claude=파일명 uuid, codex=첫 줄
+`session_meta.payload.id`). cwd+mtime 추측이 없어 **같은 폴더 다중 세션도 팬별 정확히 resume**한다. 옛 cwd+mtime/날짜-스캔
+탐색(`resolveClaude`/`resolveCodex`/`resolveSessionId`)은 훅으로 대체돼 **제거**됐다([workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 resume").
 
 **안전·한계(코드리뷰 반영)**:
 - **config 편집 안전**: 첫 등록만 재정렬(백업 `<config>.maru-backup`), 이후 마커로 skip해 무접촉. **읽기 오류**(EACCES·>4MB)와 파일 없음을 구분해 — 읽을 수 없으면 손대지 않는다(minimal로 덮어쓰지 않음). 파싱 실패·최상위 비-object도 무접촉.
@@ -59,8 +60,8 @@ Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hook
 
 ### claude
 - 경로: `~/.claude/projects/<cwd-인코딩>/<session-uuid>.jsonl`. **cwd 인코딩** = 절대경로의 `/`→`-`
-  (예: `/Users/x/Documents/workspace/maru` → `-Users-x-Documents-workspace-maru`). 라이브 poll은 이 경로를 **훅
-  매핑**(위 Context)이 정확히 주고, restore의 `resolveClaude`는 그 디렉터리에서 **mtime 최신 `.jsonl`**을 고른다.
+  (예: `/Users/x/Documents/workspace/maru` → `-Users-x-Documents-workspace-maru`). 라이브 poll·restore **둘 다** 이 경로를
+  **훅 매핑**(위 Context)이 정확히 준다 — cwd 인코딩은 훅 payload의 경로 안에 이미 들어 있어 maru가 인코딩할 일이 없다.
 - 엔트리(줄): `{type, message?, timestamp, ...}`. `type` ∈ `user`/`assistant`/`system`/`attachment`/
   `file-history-snapshot`/`queue-operation`/`mode`/`permission-mode`/`pr-link`/…. **대화** 엔트리는
   `user`/`assistant`(나머지는 메타 — 무시). 단 `isMeta:true`인 `user`(local-command caveat·hook 주입)는

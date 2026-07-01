@@ -1226,6 +1226,10 @@ pub const AppSession = struct {
     // 건너뛰고 바로 호버 해제한다. content rect는 hitTest의 bounds와 같은 출처라 "밖이면 hitTest=null"과 동치다.
     // buildChromeOverlayFrame이 매 프레임 갱신하고, openNotificationPanel이 null로 리셋한다(재오픈 시 stale 게이트 방지).
     notif_panel_rect: ?chrome.draw.Rect = null,
+    // 세팅 검색줄 caret의 셀 rect(검색 중일 때만, 아니면 null) — imeCursorRect가 IME 후보창을 검색줄 옆에 띄우는 데
+    // 쓴다. buildChromeOverlayPrep이 세팅 오버레이를 그릴 때(sections/rows/props가 이미 있는 자리) settings.searchCaretRect로
+    // 채운다 — imeCursorRect가 매 IME 갱신마다 필드 목록을 다시 빌드하지 않게 캐시한다(notif_panel_rect 선례).
+    settings_search_caret: ?chrome.draw.Rect = null,
     // 인라인 rename 상태(없으면 null=비활성). 활성이면 키/IME가 rename_input으로 라우팅되고(모달), 렌더가 대상
     // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 find/palette와 같은 OverlayInput(IME preedit·EAW·
     // UTF-8 경계 공유). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
@@ -4541,6 +4545,7 @@ pub const AppSession = struct {
     /// 인라인 편집 커밋(text 행 Enter) — settings.editText()를 config arena에 dupe해 schema.setText로 적용하고 라이브
     /// 재resolve + write-back 예약. 편집 종료. 라이브/직렬화가 계속 슬라이스를 읽으므로 loaded_config.arena가 소유한다.
     fn commitSelectedText(self: *AppSession) void {
+        self.chrome_host.settings.clearMessage(); // 새 커밋 시도 — 직전 안내 배너 정리(아래 env/macro 검증이 실패 시 다시 세운다)
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
@@ -4663,12 +4668,12 @@ pub const AppSession = struct {
     /// env 추가 행 커밋 — "KEY=VALUE" 텍스트를 파싱해 setEnvVar로 upsert. '=' 없거나 KEY(양끝 trim)가 비면 notice.
     fn addEnvVar(self: *AppSession, text: []const u8) void {
         const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-            self.showNotice("환경 변수는 KEY=VALUE 형식이어야 합니다");
+            self.settingsMessageOrNotice("환경 변수는 KEY=VALUE 형식이어야 합니다");
             return;
         };
         const name = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
         if (name.len == 0) {
-            self.showNotice("환경 변수 KEY가 비어 있습니다");
+            self.settingsMessageOrNotice("환경 변수 KEY가 비어 있습니다");
             return;
         }
         self.setEnvVar(name, text[eq + 1 ..]);
@@ -4726,11 +4731,11 @@ pub const AppSession = struct {
         const a = self.loaded_config.arena.allocator();
         const rhs_trim = std.mem.trim(u8, rhs_str, &std.ascii.whitespace);
         const chord = config_mod.keybinding.KeyChord.parse(chord_str) catch {
-            self.showNotice("단축키 표기를 읽지 못했습니다");
+            self.settingsMessageOrNotice("단축키 표기를 읽지 못했습니다");
             return;
         };
         const macro = config_mod.parseMacroRhs(a, rhs_trim) orelse {
-            self.showNotice("매크로는 text:/esc:/ctrl: 형식이어야 합니다");
+            self.settingsMessageOrNotice("매크로는 text:/esc:/ctrl: 형식이어야 합니다");
             return;
         };
         // 같은 chord면 교체, 없으면 추가(한 chord=한 매크로).
@@ -4748,14 +4753,14 @@ pub const AppSession = struct {
         var probe = self.loaded_config.keyBindingResolver();
         probe.terminal_bindings = new_binds;
         probe.validate() catch {
-            self.showNotice("다른 단축키와 충돌해 적용하지 못했습니다");
+            self.settingsMessageOrNotice("다른 단축키와 충돌해 적용하지 못했습니다");
             return;
         };
         // validate는 **사용자** 바인딩만 본다(loaded_config.keybindings엔 빌트인 없음, default_*는 resolve 내부에만).
         // 그래서 빌트인 chord(Cmd+T 등)는 위 검증을 통과해 매크로가 조용히 빌트인을 가린다 — 차단은 아니고(오버라이드는
         // 사용자 의도, rebind 충돌 경고와 동일 last-wins) **경고**로 알린다(code-review max). unbinds로 죽인 chord는 제외.
         if (!resolverUnbinds(self.loaded_config.unbinds, chord) and chordShadowsBuiltin(chord))
-            self.showNotice("기본 단축키를 매크로가 덮어씁니다");
+            self.settingsMessageOrNotice("기본 단축키를 매크로가 덮어씁니다");
         self.loaded_config.terminal_bindings = new_binds; // 라이브 반영(다음 keyBindingResolver가 본다)
         // 이 chord를 죽인 옛 `keybind = <chord> = unbind` 지시어가 남아 있으면 정리(rebind 경로와 동일) — 안 그러면
         // 나중에 이 매크로를 지웠을 때 stale unbind가 빌트인을 영영 비활성으로 둔다(code-review max).
@@ -4773,17 +4778,17 @@ pub const AppSession = struct {
     /// upsert. `=` 없거나 chord가 비면 notice.
     fn addTerminalMacro(self: *AppSession, text: []const u8) void {
         const eq = std.mem.indexOfScalar(u8, text, '=') orelse {
-            self.showNotice("매크로는 'chord = text:...' 형식이어야 합니다");
+            self.settingsMessageOrNotice("매크로는 'chord = text:...' 형식이어야 합니다");
             return;
         };
         const chord_part = std.mem.trim(u8, text[0..eq], &std.ascii.whitespace);
         if (chord_part.len == 0) {
-            self.showNotice("단축키가 비어 있습니다");
+            self.settingsMessageOrNotice("단축키가 비어 있습니다");
             return;
         }
         // chord 정규화(파싱 → toConfigString) — 행 키·write-back 줄이 표준 표기를 쓰게.
         const chord = config_mod.keybinding.KeyChord.parse(chord_part) catch {
-            self.showNotice("단축키 표기를 읽지 못했습니다");
+            self.settingsMessageOrNotice("단축키 표기를 읽지 못했습니다");
             return;
         };
         var chord_buf: [64]u8 = undefined;
@@ -7283,10 +7288,14 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, confirm, notice, rename, sidebar_search, find, palette };
+    const InputFocus = enum { terminal, confirm, notice, settings, rename, sidebar_search, find, palette };
     fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
+        // 세팅 모달(전체 화면 오버레이) — 열려 있으면 그 안 검색줄이 IME/확정 텍스트를 받는다. macOS는 평범한 글자
+        // 입력을 IME(NSTextInputClient) 확정 텍스트로 처리하므로, 여기 없으면 검색어가 뒤의 터미널로 새 검색이 안 됐다
+        // (find/palette가 되던 것과 달리 settings만 누락돼 있던 버그). 검색 중이 아니어도 모달이라 뒤 터미널로 안 흘린다.
+        if (self.chrome_host.settings.open) return .settings;
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
         if (self.chrome_host.find.open) return .find;
@@ -7299,6 +7308,7 @@ pub const AppSession = struct {
     fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         switch (self.inputFocus()) {
             .confirm, .notice => {}, // 확인/notice 모달은 조합을 표시하지 않는다(텍스트 입력 대상 아님)
+            .settings => self.chrome_host.settings.setSearchPreedit(bytes), // 세팅 검색줄 조합(고정 버퍼 — OverlayInput과 별개)
             .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
@@ -7319,6 +7329,7 @@ pub const AppSession = struct {
     fn imeComposingActive(self: *const AppSession) bool {
         return switch (self.inputFocus()) {
             .confirm, .notice => false, // 확인/notice 모달은 조합 상태가 없다
+            .settings => self.chrome_host.settings.searchPreedit().len > 0,
             .rename => self.rename_input.preedit.items.len > 0,
             .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
@@ -7476,6 +7487,8 @@ pub const AppSession = struct {
             // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
             // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
             .rename => self.renameCaretRect(),
+            // 세팅 검색줄 caret — buildChromeOverlayPrep이 캐시한 rect(검색 중이 아니면 null → 터미널 커서 폴백).
+            .settings => self.settings_search_caret,
             .sidebar_search => self.sidebarSearchCaretRect(),
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
@@ -7503,6 +7516,10 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         switch (self.inputFocus()) {
             .confirm, .notice => {}, // 확인/notice 모달은 확정할 조합이 없다
+            .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
+                self.refreshSettingsFieldCount(); // 확정 글자로 검색 필터 재적용(setFieldCount가 selected clamp)
+                self.metal_dirty = true;
+            },
             .rename => if (self.rename_input.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자가 편집 텍스트로 확정됨(렌더 갱신)
             },
@@ -8758,7 +8775,7 @@ pub const AppSession = struct {
             if (oc.eql(chord)) {
                 var msg_buf: [160]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "이 단축키는 '{s}'에 이미 묶여 있습니다 — 덮어씁니다", .{other.title}) catch "이 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다";
-                self.showNotice(msg);
+                self.settingsMessageOrNotice(msg); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
                 break;
             }
         }
@@ -8802,7 +8819,7 @@ pub const AppSession = struct {
         const a = self.loaded_config.arena.allocator();
         const resolver = self.loaded_config.keyBindingResolver();
         if (command_catalog.chordForAction(resolver, entry.action) == null) {
-            self.showNotice("이미 지정된 단축키가 없습니다");
+            self.settingsMessageOrNotice("이미 지정된 단축키가 없습니다");
             return;
         }
         // ① 사용자 바인딩 제거(사용자 chord는 제거만으로 죽는다 — config 줄 제거 + 라이브 슬라이스에서 드롭).
@@ -8838,14 +8855,14 @@ pub const AppSession = struct {
         const a = self.loaded_config.arena.allocator();
         // 전역 등록 가능한 chord인지 먼저 확인(가상 키코드 매핑) — 안 되면 파일에 못 쓸 chord라 거부.
         if (global_hotkey.descriptorFor(.{ .chord = chord, .action = entry.action }) == null) {
-            self.showNotice("이 키는 전역 단축키로 등록할 수 없습니다");
+            self.settingsMessageOrNotice("이 키는 전역 단축키로 등록할 수 없습니다"); // 세팅 열림이면 배너(모달 유지), 아니면 토스트
             return;
         }
         // 충돌 경고(선택): 이 chord가 **다른 전역 액션**에 이미 묶여 있으면 알린다(rebind는 진행 — last-wins).
         for (self.loaded_config.global_bindings) |other| {
             if (other.action == entry.action) continue;
             if (other.chord.eql(chord)) {
-                self.showNotice("이 전역 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다");
+                self.settingsMessageOrNotice("이 전역 단축키는 이미 다른 동작에 묶여 있습니다 — 덮어씁니다");
                 break;
             }
         }
@@ -8878,7 +8895,7 @@ pub const AppSession = struct {
     fn unbindGlobalEntry(self: *AppSession, entry: command_catalog.GlobalEntry) void {
         const a = self.loaded_config.arena.allocator();
         if (command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action) == null) {
-            self.showNotice("이미 지정된 전역 단축키가 없습니다");
+            self.settingsMessageOrNotice("이미 지정된 전역 단축키가 없습니다");
             return;
         }
         var list: std.ArrayList(config_mod.GlobalBinding) = .empty;
@@ -8939,6 +8956,7 @@ pub const AppSession = struct {
     /// 안 함 — 흔한 recorder 관례). 그 외 키는 KeyChord로 만들어 선택된 keybind 행의 액션에 묶는다. 녹음은 한 키로 끝난다.
     fn captureKeybindRecording(self: *AppSession, event: terminal.KeyEvent) void {
         self.chrome_host.settings.recording = false; // 취소든 캡처든 한 키로 종료
+        self.chrome_host.settings.clearMessage(); // 새 녹음 시도 — 직전 안내 배너 정리(아래에서 실패/충돌 시 다시 세운다)
         const m = event.modifiers;
         if (event.key == .escape and !m.shift and !m.control and !m.option and !m.command) return; // 취소
         const chord = config_mod.KeyChord.fromKeyEvent(event) orelse return; // 매핑 불가 키는 무시(녹음만 끝남)
@@ -12585,10 +12603,14 @@ pub const AppSession = struct {
             self.notif_panel_rect = chrome.components.notifications.panelRect(&self.chrome_host.notifications, notif_items, props);
             try self.chrome_host.collectNotificationsDraws(notif_items, props, &tokens, arena, &draws);
         }
+        self.settings_search_caret = null; // 세팅 안 열림/검색 아님이면 없음(imeCursorRect가 터미널 커서로 폴백)
         if (self.chrome_host.settings.open) {
             const labels = try self.buildSettingsSectionLabels(arena); // 좌측 네비 라벨(platform 소유)
             const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
             try self.chrome_host.collectSettingsDraws(labels, fields, props, &tokens, arena, &draws);
+            // 검색줄 caret을 캐시한다(sections/rows/props가 여기 있으니 추가 비용 없음) — imeCursorRect가 IME 후보창을
+            // 검색줄 옆에 띄우는 데 쓴다(검색 중이 아니면 searchCaretRect가 null). notif_panel_rect 캐시 선례.
+            self.settings_search_caret = chrome.components.settings.searchCaretRect(&self.chrome_host.settings, labels, fields, props, &tokens);
         }
         // 단축키 힌트(재설계): 모달이 안 열렸고 key_hints.visible면 **각 chrome 요소 우상단에 단축키 배지**를 빌드한다
         // (한 박스 HUD가 아니라 요소별 배지 — 사용자 요청). 모달이 열렸으면(위에서 draws 채워짐) 배지는 억제(모달 우선).
@@ -12708,6 +12730,19 @@ pub const AppSession = struct {
         self.cancelPendingClose(); // confirm 모달 + 보류 닫기 취소(열려 있을 때만 의미; 닫혀 있으면 무해)
         self.chrome_host.notice.show(copyOverlayMessage(&self.notice_message_buf, message));
         self.metal_dirty = true;
+    }
+
+    /// 안내 메시지를 **세팅 모달이 열려 있으면 폼 상단 인라인 배너**(§6.9)로, 아니면 일반 notice 토스트로 보인다.
+    /// keybind 녹음(세팅 안)의 검증 실패("등록 불가 키")·충돌 경고가 showNotice로 가면 dismissMessageOverlays가 세팅
+    /// 모달까지 닫아(단일-오버레이 불변식) 사용자가 녹음하던 화면이 사라지던 문제를 고친다 — 배너는 세팅 자체 그리드
+    /// 안 텍스트라 모달을 닫지 않고 위에 얹힌다. 세팅 밖(메뉴 rebind 등)에서 온 같은 메시지는 기존대로 토스트.
+    fn settingsMessageOrNotice(self: *AppSession, message: []const u8) void {
+        if (self.chrome_host.settings.open) {
+            self.chrome_host.settings.setMessage(message);
+            self.metal_dirty = true;
+        } else {
+            self.showNotice(message);
+        }
     }
 
     pub fn metalFrame(self: *const AppSession) MetalFrame {
@@ -15740,6 +15775,40 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     try std.testing.expect(!session.chrome_host.notice.open); // #2
     try std.testing.expect(session.chrome_host.palette.open);
     try std.testing.expectEqual(AppSession.InputFocus.palette, session.inputFocus());
+}
+
+test "IME 라우팅: 세팅 모달 열림이면 inputFocus=.settings이라 조합/확정 텍스트가 검색줄로(터미널로 안 샘)" {
+    // 경량 — inputFocus/IME preedit·compose만 탄다(CoreText/PTY 불필요). undefined 세션은 이들이 읽는 필드만 초기화.
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.chrome_host = .{}; // inputFocus가 settings/notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
+    session.rename = null; // inputFocus가 rename을 읽음
+    session.sidebar_search_active = false; // inputFocus가 읽음(설정 안 하면 UB로 .sidebar_search 오판)
+    session.find_matches = .empty;
+    session.palette_filtered = .empty;
+    session.metal_dirty = false;
+    defer {
+        session.chrome_host.deinit(std.testing.allocator);
+        session.find_matches.deinit(std.testing.allocator);
+        session.palette_filtered.deinit(std.testing.allocator);
+    }
+
+    // 세팅 안 열림 → terminal.
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+
+    // 세팅 모달 열림 → .settings. 이게 핵심 — 예전엔 inputFocus에 settings가 없어 macOS 확정 텍스트가 .terminal로
+    // 라우팅돼 검색어가 뒤 터미널로 샜다(검색 입력이 안 되던 근본 원인). 회귀 가드.
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.startSearch();
+    try std.testing.expectEqual(AppSession.InputFocus.settings, session.inputFocus());
+
+    // IME 조합(marked)이 세팅 검색 preedit로 들어간다(뒤 터미널/find로 안 샘) — imeComposingActive도 반영.
+    session.imeSetPreedit("\xea\xb0\x80"); // "가"
+    try std.testing.expect(session.imeComposingActive());
+    try std.testing.expectEqualStrings("\xea\xb0\x80", session.chrome_host.settings.searchPreedit());
+    // 조합 해제(빈 bytes) → 조합 없음.
+    session.imeSetPreedit("");
+    try std.testing.expect(!session.imeComposingActive());
 }
 
 test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 뒤 터미널 스크롤백을 보존(#4)" {
@@ -20822,7 +20891,7 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
     try std.testing.expectEqual(len_before, session.loaded_config.keybindings.len); // 불변(이미 미지정)
 }
 
-test "settings keybind 충돌: 이미 다른 액션에 묶인 chord로 rebind → 경고 notice (rebind는 진행)" {
+test "settings keybind 충돌: 이미 다른 액션에 묶인 chord로 rebind → 폼 상단 배너(세팅 유지, rebind는 진행)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -20848,13 +20917,55 @@ test "settings keybind 충돌: 이미 다른 액션에 묶인 chord로 rebind �
     const cf = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf.keybindRowStart().?; // entries[0]=new_term
 
-    // new_term을 close_term의 빌트인 Cmd+W로 rebind → 충돌(다른 액션에 이미 묶임) → 경고 notice.
+    // new_term을 close_term의 빌트인 Cmd+W로 rebind → 충돌(다른 액션에 이미 묶임) → 폼 상단 배너 경고(세팅 유지).
     session.chrome_host.settings.recording = true;
     session.captureKeybindRecording(.{ .key = .{ .char = 'W' }, .modifiers = .{ .command = true } });
-    try std.testing.expect(session.chrome_host.notice.open); // 충돌 경고 표시
+    try std.testing.expect(session.chrome_host.settings.message().len > 0); // 배너 경고 표시(세팅 자체 그리드)
+    try std.testing.expect(!session.chrome_host.notice.open); // notice 토스트가 아님(세팅을 안 닫는다)
+    try std.testing.expect(session.chrome_host.settings.open); // 세팅 모달 유지(회귀 가드 — 예전엔 showNotice가 닫았다)
     // rebind는 진행됨 — new_term이 Cmd+W로(사용자 바인딩 우선, last-wins).
     const chord = command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .new_term).?;
     try std.testing.expect((try config_mod.KeyChord.parse("Cmd+W")).eql(chord));
+}
+
+test "settings 전역 단축키 등록 불가 키: 폼 상단 배너(세팅 유지) — 사용자 제보 '설정창이 꺼짐' 회귀 가드" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var global_idx: usize = 0;
+    for (sections, 0..) |s, i| if (s.section == .global_hotkey) {
+        global_idx = i;
+    };
+    session.chrome_host.settings.show();
+    session.chrome_host.settings.section = global_idx;
+    const cf = try session.currentSectionFields(scratch.allocator());
+    session.chrome_host.settings.selected = cf.globalKeybindRowStart().?; // 첫 전역 액션 행
+
+    // Cmd+Plus는 가상 키코드 매핑이 없어 전역 등록 불가(global_hotkey.descriptorFor=null) → 폼 상단 배너 거부(세팅 유지).
+    session.chrome_host.settings.recording = true;
+    session.captureKeybindRecording(.{ .key = .{ .char = '+' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(session.chrome_host.settings.message().len > 0); // "등록할 수 없습니다" 배너
+    try std.testing.expect(!session.chrome_host.notice.open); // notice 토스트가 아님
+    try std.testing.expect(session.chrome_host.settings.open); // 세팅 모달 유지(핵심 — 예전엔 showNotice가 닫아 '설정창이 꺼짐')
+
+    // 새 녹음 시도(등록 가능 키)는 배너를 정리하고 진행한다.
+    session.chrome_host.settings.recording = true;
+    session.captureKeybindRecording(.{ .key = .{ .char = 'K' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.settings.message().len); // 배너 정리됨
+    try std.testing.expect(session.chrome_host.settings.open);
 }
 
 test "settings keybind unbind 다중-chord: 빌트인 chord가 2개인 액션도 모두 해제 (리뷰 #840)" {

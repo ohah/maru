@@ -10251,7 +10251,11 @@ pub const AppSession = struct {
                     self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 활성 탭 세그먼트는 본문색 cutout+앰버 언더바가 덮어 "연결"된다
                     // U-tab2 연결형: rich 활성 탭 = 터미널 본문색 cutout(strip에서 도려낸 듯 아래 본문과 이어짐). 포커스 구분은
                     // 배경이 아니라 **언더바 색** — 포커스 pane=maru 앰버(active indicator), 비포커스=muted(흐린 구분만).
-                    // cutout은 아래 터미널 본문색이라 window.opacity를 같이 걸어 본문과 같은 투명도로 "연결"된 채 데스크톱이 비친다.
+                    // cutout은 아래 터미널 본문색이라 window.opacity를 같이 걸어 반투명(데스크톱 비침)으로 둔다 — 불투명으로 두면
+                    // 반투명 본문 위에 솔리드 패치로 떠 "연결"이 더 깨진다. 단 이 cutout은 위 바 배경 quad(sidebarBg, 같은
+                    // window.opacity) '위에' 겹쳐 그려지므로(둘 다 premultiplied-over) 유효 알파가 op·(2−op)로 본문(단일 op
+                    // 레이어)보다 약간 더 불투명·sidebarBg틴트가 된다 — 픽셀-정확 "연결"은 활성 세그먼트 아래 바 배경을 도려내야
+                    // 하는 systemic 변경(사이드바 이중레이어 한계와 동류, 보류). 현 반투명 cutout이 두 근사 중 본문에 더 가깝다.
                     const tab_cutout_bg = self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.background));
                     const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg)); // 언더바=focus indicator(배경 아님) — 불투명 유지
                     if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
@@ -11616,7 +11620,10 @@ pub const AppSession = struct {
                     const row_i = @divTrunc(q.rect.y, @as(i32, @intCast(slot_h)));
                     if (row_i < 0) continue;
                     const row: u16 = @intCast(@min(@as(usize, @intCast(row_i)), @as(usize, std.math.maxInt(u16))));
-                    if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, self.chromeCellBg(color))) |cell| { // window.opacity(셀 premultiply)
+                    // 드롭 타겟(.drop_zone)은 드래그 중 "어디 떨어질지" 단서라 window.opacity 미적용 — focus 테두리·accent와 동급(불투명 유지).
+                    // 나머지 밴드(활성/호버)만 셀 경로 premultiply. drop_zone은 α=1이라 premult==straight로 어느 경로든 안전.
+                    const band_bg = if (q.fill_role == .drop_zone) color else self.chromeCellBg(color);
+                    if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, band_bg)) |cell| {
                         self.sidebar_cells.append(self.allocator, cell) catch {};
                     }
                 } else {
@@ -11624,6 +11631,8 @@ pub const AppSession = struct {
                     const sr = self.sidebarScrollClipQuad(@as(f32, @floatFromInt(q.rect.y)) + header_f, @floatFromInt(q.rect.h)) orelse continue;
                     // 상단이 헤더에 걸려 잘리면 둥근 모서리를 죽인다(헤더 경계에 abut한 라운드 상단이 어색하지 않게).
                     const radii: [4]f32 = if (sr.clipped) .{ 0, 0, 0, 0 } else .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) };
+                    // 드롭 타겟은 불투명 유지(tui 분기와 동일 이유), 나머지 밴드만 window.opacity(quad straight-alpha). 한 번만 계산해 두 fill에 공유.
+                    const band_bg = if (q.fill_role == .drop_zone) color else self.chromeQuadBg(color);
                     self.gpu_quads.append(self.allocator, .{
                         .x = @floatFromInt(q.rect.x),
                         .y = sr.y,
@@ -11631,8 +11640,8 @@ pub const AppSession = struct {
                         .h = sr.h,
                         .corner_radii = radii,
                         .border_widths = .{ 0, 0, 0, 0 },
-                        .fill_color0 = self.chromeQuadBg(color), // window.opacity(quad straight-alpha)
-                        .fill_color1 = self.chromeQuadBg(color),
+                        .fill_color0 = band_bg,
+                        .fill_color1 = band_bg,
                         .border_color = 0,
                         .gradient_kind = 0,
                         .layer = 0, // under — 사이드바 밴드(셀 위·제목 아래)

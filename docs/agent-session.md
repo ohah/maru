@@ -28,8 +28,9 @@
 상시라 취약하며 codex는 세션 id를 env로 아예 안 낸다(전부 실측 확인). Anthropic·OpenAI 문서 모두 "트랜스크립트
 포맷은 internal, 버전마다 바뀐다"고 경고 → 직접 추측은 근본적으로 취약. 훅은 에이전트가 `transcript_path`를 **공식
 채널로** 알려주고 maru가 자기 키(`MARU_PANE_ID`)로 정확히 잇는다(읽기→쓰기). 토큰·오염 0. cmux·Claude Squad가
-쓰는 "런치 제어/워크트리 격리"의 passive-터미널 판본. 자동등록이 실패하면 커맨드 팔레트 **Re-register Agent
-Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hooks.setup`).
+쓰는 "런치 제어/워크트리 격리"의 passive-터미널 판본. 자동등록이 실패하거나 훅이 stale하면 커맨드 팔레트 **Re-register Agent
+Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hooks.reregister` — **force 재등록, 매핑은 안 지움**;
+시작 시 `agent_hooks.setup`은 매핑 dir까지 정리하므로 복구엔 안 쓴다). 전역 config에서 떼려면 **Unregister**(`agent_hooks.unregister`).
 
 **restore는 별개**: 종료 시점 resume 대상 **session id** 캡처(`resolveSessionId` — claude=cwd 디렉터리 mtime 최신
 파일명 uuid, codex=`session_meta.payload.id`)는 그대로 cwd+mtime을 쓴다. 라이브 poll은 이제 훅 경로만 쓰므로

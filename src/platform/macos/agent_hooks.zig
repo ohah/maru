@@ -317,6 +317,56 @@ test "extractTranscriptPath: payload JSON에서 transcript_path 추출" {
     try std.testing.expectEqual(@as(?[]const u8, null), extractTranscriptPath(a, "{\"transcript_path\":\"/a/../../etc/x.jsonl\"}", &out)); // `..` 조작
 }
 
+// applyToConfig의 파일 I/O 경로를 temp dir 실파일로 고정한다 — 특히 **읽기 오류(>4MB)를 사용자 config 손상 없이
+// abort**하는지(리뷰 최우선 지적)와, 없는 파일 생성·기존 파일 백업 생성을 검증한다.
+test "applyToConfig: 없음→생성, 있음→백업+병합, 읽기오류(>4MB)→무접촉" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var pbuf: [4096]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, ".zig-cache/tmp/{s}/settings.json", .{tmp.sub_path});
+    const cmd = "echo x # " ++ marker;
+
+    // 1) 없는 파일 → 훅 추가(마커 포함), 백업은 없음(had_file=false).
+    applyToConfig(io, a, path, cmd, .add_if_absent);
+    {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+        defer a.free(data);
+        try std.testing.expect(std.mem.indexOf(u8, data, marker) != null);
+    }
+
+    // 2) 기존 유효 config(마커 없음) → 훅 병합 + 원본 백업 생성. (마커 있는 위 결과를 사용자 config로 대체)
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "{\"model\":\"keepme\"}" });
+    applyToConfig(io, a, path, cmd, .add_if_absent);
+    {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+        defer a.free(data);
+        try std.testing.expect(std.mem.indexOf(u8, data, marker) != null); // 훅 추가
+        try std.testing.expect(std.mem.indexOf(u8, data, "keepme") != null); // 기존 키 보존
+    }
+    {
+        var bbuf: [4096]u8 = undefined;
+        const bpath = try std.fmt.bufPrint(&bbuf, "{s}.maru-backup", .{path});
+        const bak = try std.Io.Dir.cwd().readFileAlloc(io, bpath, a, .limited(1 << 20));
+        defer a.free(bak);
+        try std.testing.expectEqualStrings("{\"model\":\"keepme\"}", bak); // 백업 = 원본
+    }
+
+    // 3) **읽기 오류(>4MB)** → readFileAlloc이 StreamTooLong로 실패 → abort(무접촉). 5MB 파일이 그대로 남아야 한다
+    //    (minimal config로 덮어쓰지 않음 — 리뷰 최우선 버그 회귀 방지).
+    const big = try a.alloc(u8, 5 << 20);
+    defer a.free(big);
+    @memset(big, 'x');
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = big });
+    applyToConfig(io, a, path, cmd, .add_if_absent);
+    {
+        const data = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(8 << 20));
+        defer a.free(data);
+        try std.testing.expectEqual(@as(usize, 5 << 20), data.len); // 그대로 — 덮어쓰지 않음
+    }
+}
+
 test "computeMergedJson add: 빈 config에서 hooks 3이벤트 등록" {
     const a = std.testing.allocator;
     const cmd = "echo hi # " ++ marker;

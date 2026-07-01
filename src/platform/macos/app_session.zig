@@ -781,22 +781,27 @@ const NotificationHistoryItem = struct {
 /// 블록 문자 ▁▂▃▄▅▆▇█(U+2581~2588)은 renderer/block_glyph.zig가 절차 합성 → 폰트 의존 없이 또렷(braille와 같은 합성 경로).
 /// 각 바의 높이는 삼각 파형(spinner_wave)을 서로 다른 위상(spinner_bar_phase)으로 읽어 파도처럼 흐른다. 상태줄이 현재
 /// `agent_spin_frame`의 바 글리프들을 그리고, 색칠 루프가 이 codepoint들을 브랜드색으로 칠한다(아이콘과 같은 패턴).
-const spinner_bar_count: usize = 4;
 /// 바 높이 삼각 파형(1~8, 8칸 오름 + 6칸 내림 = 끝점 중복 없는 주기 14). `agent_spin_frame`도 이 길이로 wrap한다(아래 advance).
 const spinner_wave = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2 };
-/// 4개 바의 위상 offset — 파형 길이 14에 고르게 분산해 바들이 시차를 두고 오르내리게(뚜렷한 파도). 인접 바가 같은 높이로 뭉치지 않는다.
+/// 각 바의 위상 offset(파형 길이 14 위, 간격 4·4·4·2) — 바마다 파형을 다른 지점에서 읽어 시차를 두고 오르내린다. 삼각 파형이라
+/// 프레임에 따라 인접 두 바가 같은 높이로 겹치는 순간도 있지만(자연스러운 마루/골) 전체적으로 파도처럼 흐른다. 바 개수는 이 길이가 단일 출처.
 const spinner_bar_phase = [_]u8{ 0, 4, 8, 12 };
+/// 이퀄라이저 바 개수 = 위상 테이블 길이(단일 출처 — 둘이 어긋나 spinnerBarCp가 OOB 나지 않게 파생, code-review high 후속).
+const spinner_bar_count: usize = spinner_bar_phase.len;
+/// 블록 글리프 베이스 codepoint(U+2580). 높이 h(1~8)를 더하면 ▁(U+2581)~█(U+2588). emit(spinnerBarCp)·색칠 게이트(isAgentSpinnerCp)의 단일 출처.
+const spinner_block_base: u21 = 0x2580;
 
-/// 프레임 f, 바 c의 블록 codepoint(▁~█). 높이 h(1~8) → U+2580+h(▁=U+2581 … █=U+2588). frame은 이미 wave 길이로 wrap됨.
+/// 프레임 f, 바 c의 블록 codepoint(▁~█). 높이 h(1~8) → base+h(▁=U+2581 … █=U+2588). frame은 이미 wave 길이로 wrap됨.
 fn spinnerBarCp(frame: u8, bar: usize) u21 {
     const h = spinner_wave[(@as(usize, frame) + spinner_bar_phase[bar]) % spinner_wave.len];
-    return 0x2580 + @as(u21, h);
+    return spinner_block_base + @as(u21, h);
 }
 
-/// codepoint가 스피너 바 글리프(블록 ▁~█, U+2581~2588)인가 — 색칠 루프 게이트(상태줄 row로 좁힌 뒤 이 체크).
-/// 상태줄엔 이 밖에 블록 문자가 없어(running="바들 진행중", idle="✓ …") 오탐 없음.
+/// codepoint가 스피너 바 글리프(블록 ▁~█)인가 — 색칠 루프 게이트(상태줄 row로 좁힌 뒤 이 체크). 범위는 emit(spinnerBarCp)이
+/// 내는 [base+1, base+max(wave)]와 **자동으로** 일치한다(wave 높이가 바뀌어도 게이트가 따라감 — 단일 출처, code-review high 후속).
 fn isAgentSpinnerCp(cp: u21) bool {
-    return cp >= 0x2581 and cp <= 0x2588;
+    const max_h = comptime std.mem.max(u8, &spinner_wave);
+    return cp > spinner_block_base and cp <= spinner_block_base + @as(u21, max_h);
 }
 
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
@@ -7223,7 +7228,7 @@ pub const AppSession = struct {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
-        // running 스피너: blink(500ms)보다 빠른 별도 위상 — 약 133ms마다 프레임 진행 + 사이드바 재투영(회전 보임).
+        // running 스피너: blink(500ms)보다 빠른 별도 위상 — 약 133ms마다 프레임 진행 + 사이드바 재투영(파형 진행 보임).
         if (spinner_visible) {
             self.agent_spin_ticks += 1;
             if (self.agent_spin_ticks >= self.agentSpinIntervalTicks()) {
@@ -11791,13 +11796,17 @@ pub const AppSession = struct {
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // 표시 슬롯
             const orig = self.visibleTab(slot) orelse continue; // 표시 슬롯 → 원본 탭(검색 필터)
             const t = self.tabs.items[orig].activePane().activeTerm();
+            // 스피너 색칠은 **running일 때만** — idle 카드의 답변 미리보기('✓ {답변}')가 같은 상태줄 row에 블록/막대 글자
+            // (스파크라인·progress bar 등, 에이전트 출력에 흔함)를 담아도 브랜드색 오염 안 되게(넓힌 블록 게이트의 부작용 차단,
+            // code-review high). 아이콘은 상태 무관 솔리드(idle에도 종류·presence 표시).
+            if (is_spinner and t.agent_state != .running) continue;
             const brand: maru.color.Rgb = switch (t.agent_kind) {
                 .claude => .{ .r = 0xCC, .g = 0x78, .b = 0x5C }, // Anthropic 공식 코랄 #CC785C
                 .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록(#10A37F)
-                .none => continue, // 아이콘/braille codepoint인데 kind=none(이름 글자 등) — 색칠 안 함.
+                .none => continue, // 아이콘/스피너 블록 codepoint인데 kind=none(이름 글자 등) — 색칠 안 함.
             };
             // 아이콘·스피너 모두 **솔리드 브랜드색**(running 펄스 폐기 — 작은 밝기 변조가 안 보인다는 피드백). 작업 중
-            // 애니메이션은 상태줄 스피너 회전이 담당하고, 아이콘은 큰 솔리드 색으로 종류/presence를 또렷이 보인다.
+            // 애니메이션은 상태줄 스피너(이퀄라이저 파형)가 담당하고, 아이콘은 큰 솔리드 색으로 종류/presence를 또렷이 보인다.
             c.style.foreground = .{ .rgb = brand };
         }
         // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
@@ -13255,6 +13264,7 @@ test "spinner: 4칸 이퀄라이저 바가 전부 블록 글리프이고 위상�
     try std.testing.expect(any_varied); // 획일적이지 않다(파형)
     // 브라유(U+280B 등)는 더 이상 스피너로 취급되지 않는다 — 게이트가 블록 전용.
     try std.testing.expect(!isAgentSpinnerCp(0x280B));
+    try std.testing.expect(!isAgentSpinnerCp(spinner_block_base)); // base(U+2580, 높이 0=바 없음)는 게이트 밖 — emit 최소가 base+1이라 일치.
     // 프레임 0 = 사용자가 승인한 모양 "▁▅▇▃"(wave[0,4,8,12]=1,5,7,3). 시각 계약을 고정한다.
     try std.testing.expectEqual(@as(u21, 0x2581), spinnerBarCp(0, 0)); // ▁
     try std.testing.expectEqual(@as(u21, 0x2585), spinnerBarCp(0, 1)); // ▅

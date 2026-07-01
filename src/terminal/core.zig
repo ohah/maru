@@ -696,6 +696,20 @@ pub const TerminalCore = struct {
         return t == .prompt or t == .input;
     }
 
+    /// 닫기 확인(실행 중 명령 보호)의 **OS-중립 술어** — "커서가 셸 프롬프트에 idle하게 있는가"를 셸 통합
+    /// (OSC 133 semantic prompt)과 alt 화면 상태만으로 판정한다(프로세스/pgid syscall 없음 → Linux·Windows·web에
+    /// 그대로 이식된다). Ghostty `Terminal.cursorIsAtPrompt`와 같은 모델:
+    ///   1. alt 화면이면(vim·claude 등 풀스크린 TUI) 프롬프트가 아니다 → 실행 중으로 본다(셸 통합 없어도 잡힘).
+    ///   2. 그 외엔 semantic_state로: prompt(A~B)·input(B~C)=프롬프트, command(C~D)·unknown=프롬프트 아님.
+    /// unknown(통합 없는 셸 또는 명령 종료 D 직후·RIS)은 **프롬프트 아님**으로 보수적 판정한다 — 통합이 있으면
+    /// 정착한 idle 프롬프트는 항상 input이라 오확인이 없고, 통합이 없으면 안전하게 확인을 띄운다(데이터 손실
+    /// 방지 우선 = Ghostty의 "통합 없으면 확인" 정책과 동일). 호출자(닫기 확인)는 `!cursorIsAtPrompt()`를 "실행 중
+    /// 명령 있음"으로 쓴다. 단일 출처: docs/macos-app-host-boundary.md "닫기 확인".
+    pub fn cursorIsAtPrompt(self: *const TerminalCore) bool {
+        if (self.alt_active) return false;
+        return isPromptish(self.semantic_state);
+    }
+
     /// 절대 행 abs가 "프롬프트 블록의 시작"인지(점프 네비게이션·거터 타깃). 프롬프트/입력 run의 첫
     /// 행 — 직전 행이 프롬프트/입력이 아닌 곳. 명령 출력(.command)·미분류가 블록을 가른다.
     fn isPromptStart(self: *const TerminalCore, abs: usize) bool {
@@ -6974,6 +6988,42 @@ test "OSC 133: A/B/C tag the cursor row and update state (ST + BEL terminators)"
     try std.testing.expectEqual(types.SemanticPrompt.input, core.semantic_state);
     try core.write("\x1b]133;C\x1b\\");
     try std.testing.expectEqual(types.SemanticPrompt.command, core.screen.prompt_marks[0].kind);
+}
+
+test "cursorIsAtPrompt: 셸 통합 없음(unknown, primary 화면)은 프롬프트 아님(보수적 확인)" {
+    // OSC 133을 한 번도 못 봄 → semantic_state=unknown, alt 아님. Ghostty와 동일하게 "모르면 프롬프트 아님"
+    // 으로 보수적 판정한다(닫기 확인이 뜸 = 데이터 손실 방지 우선). 통합 없는 셸의 기본 상태.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try std.testing.expect(!core.cursorIsAtPrompt());
+}
+
+test "cursorIsAtPrompt: OSC 133 A/B=프롬프트, C/D=실행 중" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b]133;A\x07"); // 프롬프트 시작
+    try std.testing.expect(core.cursorIsAtPrompt());
+    try core.write("\x1b]133;B\x07"); // 입력 대기 = 정착한 idle 프롬프트(통합 셸이 닫힐 때의 상태)
+    try std.testing.expect(core.cursorIsAtPrompt());
+    try core.write("\x1b]133;C\x07"); // 명령 출력 시작 = 실행 중
+    try std.testing.expect(!core.cursorIsAtPrompt());
+    try core.write("\x1b]133;D;0\x07"); // 명령 끝 → unknown(다음 A까지) = 프롬프트 아님
+    try std.testing.expect(!core.cursorIsAtPrompt());
+}
+
+test "cursorIsAtPrompt: alt 화면(풀스크린 TUI)은 semantic 상태와 무관하게 프롬프트 아님" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer core.deinit();
+    try core.write("\x1b]133;B\x07"); // 입력 프롬프트 상태
+    try std.testing.expect(core.cursorIsAtPrompt());
+    try core.write("\x1b[?1049h"); // alt 화면 진입(vim 등) — 통합이 input이라 해도 실행 중으로 본다
+    try std.testing.expect(!core.cursorIsAtPrompt());
+    // 코어는 alt 진입/이탈에 semantic_state를 unknown으로 되돌린다(alt는 프롬프트 의미가 없음). 그래서 TUI를
+    // 빠져나온 직후, 셸이 새 프롬프트를 재마킹하기 전까진 프롬프트 아님(보수적) — precmd가 A/B를 다시 쏘면 복귀.
+    try core.write("\x1b[?1049l");
+    try std.testing.expect(!core.cursorIsAtPrompt());
+    try core.write("\x1b]133;B\x07"); // 셸이 프롬프트 재마킹 → 프롬프트 복귀
+    try std.testing.expect(core.cursorIsAtPrompt());
 }
 
 test "OSC 133: regions tag distinct rows via line-feed propagation" {

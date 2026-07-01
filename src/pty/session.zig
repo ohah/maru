@@ -83,13 +83,6 @@ const UnsupportedPtySession = struct {
         return null;
     }
 
-    /// 비-macOS 스텁 — macOS 백엔드의 hasForegroundJob(닫기 확인의 실행 중 명령 판정)과 구조 동기(이식성 목표).
-    /// 백엔드 없어 항상 false(실행 중 명령 없음으로 봐 닫기를 막지 않는다).
-    pub fn hasForegroundJob(self: *UnsupportedPtySession) bool {
-        _ = self;
-        return false;
-    }
-
     /// 비-macOS 스텁 — macOS 백엔드의 captureAgentArgv(workspace restore의 에이전트 argv 캡처)와 구조 동기.
     /// 백엔드 없어 항상 null(에이전트 정보 없음 → 일반 셸 복원).
     pub fn captureAgentArgv(self: *UnsupportedPtySession, str_buf: []u8, argv_out: [][]const u8) ?types.ProcArgs {

@@ -11861,6 +11861,11 @@ pub const AppSession = struct {
         defer pins.deinit(self.allocator);
         for (self.sidebar_visible_tabs.items) |orig| {
             const tab = self.tabs.items[orig]; // 표시 슬롯 순서 → 원본 탭(검색 필터)
+            // **의도된 기준 분리(사용자 결정 A)**: 카드의 이름·브랜치(저장소)·경로는 **활성 Term**(아래 `term`) 기준이고,
+            // 스피너·gutter 아이콘·브랜드색은 **워크스페이스(탭) 전체**(tabHasRunningAgent/tabAgentKind, 아무 pane/Term) 기준이다.
+            // 이유: 사이드바는 **비활성 워크스페이스의 상태까지 한눈에** 보여주는 유일한 곳이라(탭바는 활성 워크스페이스만),
+            // 백그라운드 Term의 에이전트도 "이 워크스페이스가 바쁨"으로 떠야 개요가 산다. 한 워크스페이스에 **서로 다른 repo의
+            // Term을 섞은** 드문 경우에만 repo/경로(활성)와 스피너(다른 Term)가 시각적으로 어긋난다 — 개요 가치를 위해 수용.
             const term = tab.activePane().activeTerm();
             const renaming = self.renamingWorkspace(tab);
             // 에이전트 아이콘은 슬롯 중앙에 독립 배치. 단 rename 중엔 숨긴다(0) — 안 그러면 편집 텍스트가 icon_cols

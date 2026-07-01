@@ -116,6 +116,11 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
     running이면 표시한다(`tabHasRunningAgent`/`tabAgentKind` — running Term 우선, 없으면 활성 Term 폴백). 에이전트를 백그라운드
     pane/split·비활성 가로탭에서 돌려도 카드에 파형이 뜬다(옛 "활성 Term만" 한계 해소 — `pollAgentKinds`가 모든 pane×Term을 갱신).
     running Term의 kind로 아이콘/색을 고르므로 활성 Term이 셸(none)이어도 백그라운드 claude/codex가 카드에 종류색으로 보인다.
+    - **의도된 기준 분리(수용됨, 사용자 결정 A)**: 같은 카드에서 **이름·브랜치(저장소)·경로는 활성 Term** 기준, **스피너·아이콘·색은
+      워크스페이스 전체**(아무 pane/Term) 기준으로 **갈린다**. 근거: 사이드바는 **비활성 워크스페이스의 상태까지 한눈에** 보는 유일한
+      곳이라(탭바는 활성 워크스페이스만) 백그라운드 Term 에이전트도 "이 워크스페이스가 바쁨"으로 떠야 개요가 산다. 한 워크스페이스에
+      **서로 다른 repo의 Term을 섞은** 드문 경우에만 repo/경로(활성)와 스피너(다른 Term)가 시각적으로 어긋난다 — 개요 가치를 위해 수용.
+      (대안 B[스피너도 활성 Term으로 통일]는 카드 내부는 일관되나 백그라운드 에이전트가 사이드바 목록에서 사라져 개요가 약해져 기각.)
   - **상단 탭바에도 파형**(사용자 요청 "여기도"): pane 라벨(`buildPaneLabelDrawList`)과 **running Term 탭**(`buildPaneTabBarDrawList`)
     앞에 같은 `▁▅▇▃ ` prefix를 붙이고(`spinnerPrefixedLabel`) 바 셀을 브랜드색으로(`recolorSpinnerCells`, pane 대표 kind).
     사이드바 카드의 색칠 루프와 달리 탭바는 그 draw list 셀을 직접 재색칠한다. 편집(rename) 중인 라벨/탭엔 prefix를 안 붙인다.

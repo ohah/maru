@@ -71,6 +71,11 @@ pub const FieldRow = struct {
 const edit_cap: usize = 128;
 /// 검색 쿼리 버퍼 용량(바이트) — 짧은 키워드면 충분(고정 버퍼).
 const search_cap: usize = 64;
+/// 검색 IME 조합(preedit) 버퍼 용량(바이트) — 조합 중 한글 몇 자면 충분(고정 버퍼).
+const search_preedit_cap: usize = 32;
+/// 인라인 안내 배너 버퍼 용량(바이트) — keybind 녹음 검증 실패/충돌 메시지(§6.9). notice와 달리 세팅 모달을
+/// 닫지 않고 폼 상단에 얹는다(단일-오버레이 불변식과 무관 — 세팅 자체 그리드 안 텍스트).
+const message_cap: usize = 256;
 
 // HSV 색 picker 기하 — SV 그리드(채도 col × 명도 row) + hue 스트립. 셀-그리드 tui라 이산 해상도(셀 단위 샘플).
 const pick_sv_cols: u32 = 16; // 채도 0~100
@@ -146,6 +151,16 @@ pub const State = struct {
     searching: bool = false,
     search_buf: [search_cap]u8 = undefined,
     search_len: usize = 0,
+    /// 검색어의 IME 조합(marked) 텍스트 — macOS는 평범한 글자 입력을 NSTextInputClient(IME)로 처리하므로, 조합 중
+    /// 한글이 이 버퍼에 담겨 검색 입력줄에서 query 뒤에 보인다(find/palette의 OverlayInput.preedit와 같은 모델이되
+    /// 고정 버퍼). platform이 imeSetPreedit로 채우고 commit/취소 시 비운다. query와 독립(확정 글자는 search_buf).
+    search_preedit_buf: [search_preedit_cap]u8 = undefined,
+    search_preedit_len: usize = 0,
+    /// 폼 상단 인라인 안내 배너(§6.9) — keybind 녹음 검증 실패("등록 불가 키")·충돌 경고를 세팅 모달을 닫지 않고
+    /// 보인다(notice 토스트는 dismissMessageOverlays로 세팅을 닫으므로 녹음 중 부적절). platform이 setMessage로 채우고
+    /// 녹음 재시작·섹션 전환·닫기에서 비운다. 비면(len 0) 배너 없음(기존 힌트 줄 유지).
+    message_buf: [message_cap]u8 = undefined,
+    message_len: usize = 0,
     /// HSV 색 picker 모드(color 행 활성 시 platform이 openPicker로 켬). 켜지면 폼 대신 SV 그리드 + hue 스트립을 그리고
     /// ←→(채도)·↑↓(명도)·`[`/`]`(색상)·포인터로 h/s/v를 고른다. Enter 확정(platform이 hex→setText), Esc 취소. h 0~359·s/v 0~100.
     picking: bool = false,
@@ -167,6 +182,8 @@ pub const State = struct {
         self.recording = false;
         self.searching = false;
         self.search_len = 0;
+        self.search_preedit_len = 0;
+        self.message_len = 0;
         self.picking = false;
         self.nav_focused = false; // 모달 열 때는 폼 모드로 시작
     }
@@ -206,6 +223,8 @@ pub const State = struct {
         self.recording = false;
         self.searching = false; // 섹션 바꾸면 검색 초기화(필터는 섹션 내라)
         self.search_len = 0;
+        self.search_preedit_len = 0;
+        self.message_len = 0; // 섹션 전환 = 새 맥락 → 안내 배너 정리
         self.picking = false;
     }
     /// 검색 쿼리(현재 버퍼). platform이 currentSectionFields에서 읽어 행을 필터한다.
@@ -216,11 +235,13 @@ pub const State = struct {
     pub fn startSearch(self: *State) void {
         self.searching = true;
         self.search_len = 0;
+        self.search_preedit_len = 0;
     }
-    /// 검색 종료(Esc) — 쿼리 비우고 모드 해제(필터 풀려 전체 행 복귀).
+    /// 검색 종료(Esc) — 쿼리·조합 비우고 모드 해제(필터 풀려 전체 행 복귀).
     pub fn endSearch(self: *State) void {
         self.searching = false;
         self.search_len = 0;
+        self.search_preedit_len = 0;
     }
     /// 검색 쿼리에 코드포인트 추가(UTF-8, 넘치면 무시 — 고정 버퍼).
     pub fn appendSearchCp(self: *State, cp: u21) void {
@@ -233,6 +254,52 @@ pub const State = struct {
     /// 검색 쿼리 마지막 코드포인트 제거(UTF-8 경계).
     pub fn backspaceSearch(self: *State) void {
         self.search_len = width.dropLastCodepoint(&self.search_buf, self.search_len);
+    }
+    /// 검색어 IME 조합(marked) 텍스트를 교체한다(빈 bytes = 조합 해제). **검색 중일 때만** 검색 버퍼에 담는다 —
+    /// 세팅 모달은 검색 안 할 때도 IME 대상(inputFocus=.settings)이라, 유휴/인라인 편집 중 조합이 그대로 흘러오면
+    /// 검색 버퍼를 오염시킨다(안 보이는 검색어로 폼이 필터되거나, 편집 조합이 엉뚱한 버퍼로 확정됨 — code-review high).
+    /// 검색이 아니면 무시하고 비운다(편집 조합은 확정 텍스트가 handle(.char)→appendEditCp로 이미 편집 버퍼에 들어간다).
+    /// 넘치면 **UTF-8 코드포인트 경계**로 자른다(setMessage와 같은 규율 — raw 바이트 자름은 멀티바이트 조합을 깨 손상 UTF-8을 남긴다).
+    pub fn setSearchPreedit(self: *State, bytes: []const u8) void {
+        if (!self.searching) {
+            self.search_preedit_len = 0;
+            return;
+        }
+        const n = width.truncateToBoundary(bytes, search_preedit_cap);
+        @memcpy(self.search_preedit_buf[0..n], bytes[0..n]);
+        self.search_preedit_len = n;
+    }
+    /// 검색어 조합(현재 버퍼). 검색 입력줄이 query 뒤에 보인다(view). platform imeComposingActive가 len으로 조합 판정.
+    pub fn searchPreedit(self: *const State) []const u8 {
+        return self.search_preedit_buf[0..self.search_preedit_len];
+    }
+    /// 조합 중 텍스트를 검색어로 확정한다(query 뒤에 코드포인트별로 붙이고 조합 비움) — 포커스 상실 등에서 조합을
+    /// 잃지 않게(OverlayInput.commitPreedit의 고정 버퍼판). 확정한 게 있으면 true(platform이 재필터). 빈 조합이면 false.
+    pub fn commitSearchPreedit(self: *State) bool {
+        if (self.search_preedit_len == 0) return false;
+        const utf8 = std.unicode.Utf8View.init(self.search_preedit_buf[0..self.search_preedit_len]) catch {
+            self.search_preedit_len = 0; // 손상 UTF-8은 버린다(반쪽 안 남김)
+            return false;
+        };
+        var it = utf8.iterator();
+        while (it.nextCodepoint()) |cp| self.appendSearchCp(cp);
+        self.search_preedit_len = 0;
+        return true;
+    }
+    /// 폼 상단 안내 배너 메시지를 세운다(§6.9). bytes는 호출자(platform)가 소유 — 고정 버퍼로 복사한다. 넘치면 잘라
+    /// 담되 UTF-8 코드포인트 경계로 back-up해 손상 바이트를 안 남긴다(enterEdit와 같은 규율).
+    pub fn setMessage(self: *State, bytes: []const u8) void {
+        const n = width.truncateToBoundary(bytes, message_cap);
+        @memcpy(self.message_buf[0..n], bytes[0..n]);
+        self.message_len = n;
+    }
+    /// 안내 배너 메시지(현재 버퍼). 비면 "" — view가 배너 대신 기존 힌트 줄을 그린다.
+    pub fn message(self: *const State) []const u8 {
+        return self.message_buf[0..self.message_len];
+    }
+    /// 안내 배너를 지운다(녹음 재시작·성공 등 새 맥락). platform이 부른다.
+    pub fn clearMessage(self: *State) void {
+        self.message_len = 0;
     }
     /// palette_grid 선택 셀을 delta만큼 옮긴다(wrap, 0..15). platform이 ←→(adjust)에서 호출(선택 행이 palette_grid일 때).
     pub fn moveGridCell(self: *State, delta: i32) void {
@@ -273,6 +340,8 @@ pub const State = struct {
         self.recording = false;
         self.searching = false;
         self.search_len = 0;
+        self.search_preedit_len = 0;
+        self.message_len = 0;
         self.picking = false;
     }
     pub fn setFieldCount(self: *State, n: usize) void {
@@ -446,6 +515,8 @@ fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
 }
 
 const title_text = "Settings";
+/// 검색 입력줄 프롬프트 접두 — view의 제목 렌더와 searchCaretRect(IME 후보창 위치)가 같은 폭을 쓰게 하는 단일 출처.
+const search_prompt = "검색: ";
 
 /// 인라인 편집 중인 행의 편집 버퍼 텍스트(accent 강조) + 끝 셀 caret을 그린다 — `.font`/`.text` 편집 경로가 공유한다
 /// (중복 제거, code-review). control 좌단(ctrl.x) 좌측정렬, caret은 표시폭 끝 셀에 cursor fill 1칸(palette 입력 caret 패턴).
@@ -476,11 +547,21 @@ pub fn view(
     const l = computeLayout(sections, rows, state.selected, p, tk) orelse return;
     const box = l.box;
     try modal_box.frame(box, p, arena, out);
-    // 제목 — 검색 중이면 "검색: <쿼리>▏"(accent + caret), 아니면 "Settings" + 폼이 창보다 많으면 sel/total 위치 표식.
+    // 제목 — 검색 중이면 "검색: <쿼리><조합중>▏"(accent + caret), 아니면 "Settings" + 폼이 창보다 많으면 sel/total 위치 표식.
     if (state.searching) {
-        const title = try std.fmt.allocPrint(arena, "검색: {s}", .{state.searchQuery()});
-        try modal_box.text(box, box.inner_x, 0, title, .accent_bar, arena, out);
-        const caret_x = box.inner_x + @as(i32, @intCast(overlay_input.displayCols(title) * box.cw));
+        // 확정 쿼리("검색: " + query)와 IME 조합(preedit)을 나눠 그린다 — 조합 글자는 query 뒤에 같은 accent로 붙여
+        // 입력 가시성을 준다(find의 3-run 모델과 동형). caret은 query 끝(=조합 시작)에 둬 조합 글자를 덮는다(터미널 IME
+        // 커서와 동일 — preedit는 caret 위치에 안 더한다). macOS는 평범한 글자 입력을 IME로 처리하므로 이 조합 표시가 필요하다.
+        const committed = try std.fmt.allocPrint(arena, "{s}{s}", .{ search_prompt, state.searchQuery() });
+        try modal_box.text(box, box.inner_x, 0, committed, .accent_bar, arena, out);
+        const committed_cols = overlay_input.displayCols(committed);
+        const caret_x = box.inner_x + @as(i32, @intCast(committed_cols * box.cw));
+        const preedit = state.searchPreedit();
+        // 조합 글자는 남은 칸으로 truncate — 좁은 모달에서 긴 조합이 박스 우단을 넘지 않게(다른 폼 값 truncate와 같은 규율).
+        if (preedit.len > 0) {
+            const shown_pre = try overlay_input.truncateToCols(arena, preedit, box.inner_cols -| committed_cols);
+            if (shown_pre.len > 0) try modal_box.text(box, caret_x, 0, shown_pre, .accent_bar, arena, out);
+        }
         try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = modal_box.rowY(box, 0), .w = box.cw, .h = box.ch }, .role = .cursor } });
     } else {
         const title = if (rows.len > l.win_len)
@@ -639,10 +720,21 @@ pub fn view(
         }
     }
 
+    const hint_row = l.first_field_row - 1; // 제목(0) 아래 줄 — title_rows 영역 안(본문은 first_field_row부터 시작)
+
+    // 안내 배너(§6.9) — keybind 녹음 검증 실패/충돌 메시지가 있으면 힌트 줄 대신 **폼 상단에 얹어** 보인다(세팅 모달을
+    // 닫는 notice 토스트 대신 — 녹음 중 부적절). accent(⚠ 접두)로 도드라지게, 좌우 여백을 truncate로 박스 안에 가둔다.
+    // 배너는 한 줄만 차지하므로 레이아웃 불변(힌트 자리를 대체) — 조합/검색 캡션과 겹치지 않는다(배너는 message 있을 때만).
+    if (state.message().len > 0) {
+        const banner = try std.fmt.allocPrint(arena, "⚠ {s}", .{state.message()});
+        const shown = try overlay_input.truncateToCols(arena, banner, box.inner_cols);
+        try modal_box.text(box, box.inner_x, hint_row, shown, .accent_bar, arena, out);
+        return; // 배너가 힌트 줄을 대체(같은 행)
+    }
+
     // 활성 영역(Tab 포커스) 좌단 세로 강조 바 — 섹션 모드는 네비 좌단(inner_x), 폼 모드는 폼 좌단 직전(form_x-cw).
     // 힌트: "⇥ 섹션 ⇄ 설정"을 **제목 바로 아래(상단)** 중앙에 두되, **현재 활성 영역만 accent**로(반대편·구분자는
     // muted) 칠해 "지금 어느 영역 + Tab으로 전환"을 한 줄로 보인다(세로 바 없이 — 본문 dim과 이 강조가 활성 영역을 알린다).
-    const hint_row = l.first_field_row - 1; // 제목(0) 아래 줄 — title_rows 영역 안(본문은 first_field_row부터 시작)
     const seg_tab = "⇥ ";
     const seg_sec = "섹션";
     const seg_mid = " ⇄ ";
@@ -658,6 +750,22 @@ pub fn view(
     try modal_box.text(box, hx, hint_row, seg_mid, .muted_fg, arena, out);
     hx += @as(i32, @intCast(overlay_input.displayCols(seg_mid) * box.cw));
     try modal_box.text(box, hx, hint_row, seg_form, form_role, arena, out);
+}
+
+/// 검색 입력줄 caret의 셀 rect(backing px) — IME 후보창 위치(platform imeCursorRect)에 쓴다. 검색 중이 아니거나
+/// 레이아웃 불가면 null(platform이 터미널 커서로 폴백). 위치 = 제목 행(0)의 "검색: " + query **끝**(= 조합 시작) —
+/// view의 caret_x와 같은 폭 규약(search_prompt + queryCols, EAW). preedit는 안 더한다(커서가 조합 글자를 덮음).
+pub fn searchCaretRect(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?draw.Rect {
+    if (!state.open or state.picking or !state.searching) return null;
+    const l = computeLayout(sections, rows, state.selected, p, tk) orelse return null;
+    const box = l.box;
+    const caret_cols = overlay_input.displayCols(search_prompt) + overlay_input.displayCols(state.searchQuery());
+    return .{
+        .x = box.inner_x + @as(i32, @intCast(caret_cols * box.cw)),
+        .y = modal_box.rowY(box, 0),
+        .w = box.cw,
+        .h = box.ch,
+    };
 }
 
 /// 선택 마커 ▾를 (x, row) 셀 위에 accent text로 얹는다(palette와 같은 이유 — Op.border는 tui lowering이 셀 전체를
@@ -1783,6 +1891,108 @@ test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Ent
         saw_search = true;
     };
     try std.testing.expect(saw_search);
+}
+
+test "settings 검색 IME 조합(preedit): query 뒤에 조합 글자 표시 + caret은 query 끝(조합 덮음) (§6.8 macOS IME)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    var s = State{};
+    s.show();
+    s.setFieldCount(1);
+    s.startSearch();
+    s.appendSearchCp('a'); // 확정 "a"
+    s.setSearchPreedit("\xea\xb0\x80"); // 조합 중 "가"(3바이트 1코드포인트)
+    try std.testing.expectEqualStrings("\xea\xb0\x80", s.searchPreedit());
+
+    const rows = [_]FieldRow{.{ .label = "appearance", .kind = .{ .toggle = true } }};
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    // "검색: a"(확정) + "가"(조합) 두 text op이 accent로 뜬다.
+    var saw_committed = false;
+    var saw_preedit = false;
+    for (out.items) |op| if (op == .text and op.text.role == .accent_bar) {
+        if (std.mem.indexOf(u8, op.text.runs[0].text, "검색: a") != null) saw_committed = true;
+        if (std.mem.eql(u8, op.text.runs[0].text, "\xea\xb0\x80")) saw_preedit = true;
+    };
+    try std.testing.expect(saw_committed);
+    try std.testing.expect(saw_preedit);
+
+    // caret은 "검색: a" 끝(=조합 시작)에 있어 조합 글자 "가"를 덮는다 — searchCaretRect가 preedit를 안 더한다.
+    const cr = searchCaretRect(&s, no_sections, &rows, test_props, &tk).?;
+    const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
+    const expect_cols = overlay_input.displayCols("검색: ") + overlay_input.displayCols("a");
+    try std.testing.expectEqual(l.box.inner_x + @as(i32, @intCast(expect_cols * l.box.cw)), cr.x);
+
+    // commitSearchPreedit: 조합을 query로 확정(query="a가", 조합 비움).
+    try std.testing.expect(s.commitSearchPreedit());
+    try std.testing.expectEqualStrings("a\xea\xb0\x80", s.searchQuery());
+    try std.testing.expectEqual(@as(usize, 0), s.searchPreedit().len);
+    try std.testing.expect(!s.commitSearchPreedit()); // 빈 조합이면 false
+
+    // 검색 종료면 caret 없음(IME 후보창 폴백).
+    s.endSearch();
+    try std.testing.expect(searchCaretRect(&s, no_sections, &rows, test_props, &tk) == null);
+
+    // 검색 중이 아니면(유휴/편집) 조합은 **검색 버퍼에 안 담긴다** — 안 보이는 검색어로 폼이 오염되던 회귀 가드
+    // (code-review high). endSearch로 검색 종료(query·preedit 비움)된 상태에서 setSearchPreedit는 무시하고 비운다.
+    try std.testing.expect(!s.searching);
+    try std.testing.expectEqualStrings("", s.searchQuery()); // endSearch가 query 비움
+    s.setSearchPreedit("\xeb\x82\x98"); // "나" — 검색 아님이라 드롭
+    try std.testing.expectEqual(@as(usize, 0), s.searchPreedit().len);
+    try std.testing.expect(!s.commitSearchPreedit()); // 확정할 조합 없음 → 검색 버퍼에 안 들어감
+    try std.testing.expectEqualStrings("", s.searchQuery()); // 여전히 빔(조합이 query로 안 샘)
+
+    // 조합이 preedit 버퍼(32B)를 넘겨도 UTF-8 코드포인트 경계로 잘라 손상 UTF-8을 안 남긴다(finding 2).
+    s.startSearch();
+    s.setSearchPreedit("\xea\xb0\x80" ** 20); // "가"×20 = 60B > 32B cap
+    try std.testing.expect(std.unicode.utf8ValidateSlice(s.searchPreedit())); // 멀티바이트 중간에서 안 잘림
+    try std.testing.expect(s.searchPreedit().len <= 32);
+}
+
+test "settings 안내 배너(§6.9): message가 있으면 힌트 줄 대신 폼 상단에 얹힌다·정리로 사라짐" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    var s = State{};
+    s.show();
+    s.setFieldCount(1);
+    const rows = [_]FieldRow{.{ .label = "appearance", .kind = .{ .toggle = true } }};
+
+    // 배너 없음: 힌트 "⇥ 섹션 ⇄ 설정"이 보인다.
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var saw_hint = false;
+    for (out.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "섹션") != null) {
+        saw_hint = true;
+    };
+    try std.testing.expect(saw_hint);
+
+    // 배너 설정: ⚠ 접두 + 메시지가 보이고 힌트는 안 보인다(같은 줄 대체).
+    s.setMessage("이 키는 전역 단축키로 등록할 수 없습니다");
+    try std.testing.expectEqualStrings("이 키는 전역 단축키로 등록할 수 없습니다", s.message());
+    out.clearRetainingCapacity();
+    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    var saw_banner = false;
+    var saw_hint2 = false;
+    for (out.items) |op| if (op == .text) {
+        if (std.mem.indexOf(u8, op.text.runs[0].text, "⚠") != null) saw_banner = true;
+        if (std.mem.indexOf(u8, op.text.runs[0].text, "⇄") != null) saw_hint2 = true;
+    };
+    try std.testing.expect(saw_banner);
+    try std.testing.expect(!saw_hint2); // 힌트 줄은 배너로 대체됨
+
+    // 정리: clearMessage/섹션 전환/닫기가 배너를 없앤다.
+    s.clearMessage();
+    try std.testing.expectEqual(@as(usize, 0), s.message().len);
+    s.setMessage("x");
+    s.selectSection(1);
+    try std.testing.expectEqual(@as(usize, 0), s.message().len);
+    s.setMessage("x");
+    s.hide();
+    try std.testing.expectEqual(@as(usize, 0), s.message().len);
 }
 
 test "settings keybind: chord 표시·녹음 시 '키 입력 대기'·control 클릭→toggle(녹음 시작) (CS-4-3)" {

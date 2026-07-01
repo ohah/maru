@@ -99,6 +99,14 @@ const UnsupportedPtySession = struct {
         return null;
     }
 
+    /// 비-macOS 스텁 — macOS 백엔드의 foregroundClaudeSessionId(claude 팬별 세션 정확 매칭용 env 읽기)와 구조 동기.
+    /// 백엔드 없어 항상 null(세션ID 없음 → agent_session.poll이 cwd별 mtime 폴백).
+    pub fn foregroundClaudeSessionId(self: *UnsupportedPtySession, out: []u8) ?[]const u8 {
+        _ = self;
+        _ = out;
+        return null;
+    }
+
     pub fn currentSize(self: *UnsupportedPtySession) !terminal.Size {
         _ = self;
         return error.UnsupportedPlatform;

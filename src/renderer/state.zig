@@ -1,5 +1,6 @@
 const std = @import("std");
 const draw_list = @import("draw_list.zig");
+const font_identity = @import("font_identity.zig");
 const glyph_atlas = @import("glyph_atlas.zig");
 const glyph_frame = @import("glyph_frame.zig");
 const glyph_layout = @import("glyph_layout.zig");
@@ -19,20 +20,31 @@ pub const RendererState = struct {
     backend: types.Backend,
     text_config: glyph_layout.TextLayoutConfig,
     atlas: glyph_atlas.GlyphAtlas,
+    // glyph atlas의 cache key는 face 정체성을 `FontId`로 담는다(같은 glyph id라도 face가 다르면 다른 모양).
+    // 그런데 `FontId`는 registry에 face가 **처음 등장한 순서**로 매기는 지역 순번이라, registry가 frame·pane마다
+    // 새로 만들어지면 같은 순번이 frame마다 다른 face를 가리킨다. atlas는 frame 사이에 살아남으므로, 그러면
+    // 어제 emoji face용으로 구운 slot을 오늘 한글 face가 같은 (FontId,glyph_id)로 HIT해 엉뚱한 글리프(예: 조합 중
+    // '놔'에 번개)가 그려진다. 그래서 이 registry를 **atlas와 같은 수명**으로 여기 두어, 같은 PostScript name이 앱
+    // 수명 내내 같은 `FontId`를 받게 한다(원 설계 의도 — renderer/README.md). 모든 shape/rasterize가 렌더 스레드
+    // 단일 실행(docs/io-render-threading.md §3 — shaping은 락 밖 단일 렌더 스레드)이라 락은 불필요하다.
+    font_registry: font_identity.FontIdentityRegistry,
 
     pub fn init(allocator: std.mem.Allocator, config: RendererStateConfig) RendererState {
         // RendererState는 frame 사이에 살아남는 renderer 소유 상태다. 특히 GlyphAtlas를
         // 매 frame 새로 만들면 cache hit/miss, upload byte, eviction 진단이 모두
-        // 의미 없어지므로 여기서 오래 들고 간다.
+        // 의미 없어지므로 여기서 오래 들고 간다. font_registry도 같은 이유로 여기서 오래 들고 가
+        // atlas cache key의 FontId를 frame 간 안정시킨다(위 필드 주석).
         return .{
             .backend = config.backend,
             .text_config = config.text,
             .atlas = glyph_atlas.GlyphAtlas.init(allocator, config.atlas),
+            .font_registry = font_identity.FontIdentityRegistry.init(allocator),
         };
     }
 
     pub fn deinit(self: *RendererState) void {
         self.atlas.deinit();
+        self.font_registry.deinit();
         self.* = undefined;
     }
 

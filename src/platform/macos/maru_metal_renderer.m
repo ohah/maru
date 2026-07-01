@@ -309,7 +309,8 @@ static void maru_fill_cell_quad(
     float cell_h,
     float drawable_w,
     float drawable_h,
-    float glyph_scale // 글리프 확대 배율(1.0=무확대). 헤더 줄0 아이콘(1.7×)·사이드바 에이전트 심볼(1.1×)이 >1.
+    float glyph_scale, // 글리프 확대 배율(1.0=무확대). 헤더 줄0 아이콘(1.7×)·사이드바 에이전트 심볼(1.1×)이 >1.
+    uint32_t divider_thickness_px // pane divider(reserved 30 세로·31 가로)의 device px 두께(config split.divider-thickness → app_session). seam 중앙정렬·셀 clamp. 0=안 보임.
 ) {
     const float span = (float)(cell.width == 0 ? 1 : cell.width);
     float px_left = origin_x + (float)cell.col * cw;
@@ -317,8 +318,10 @@ static void maru_fill_cell_quad(
     float px_top = py_top;
     float px_bottom = py_top + cell_h;
     // 커서·테두리·장식선 부분 사각형(reserved). 셀의 한 변 또는 중앙에 가는 띠를 그린다.
-    //   강조선(셀 높이/폭 ~15%): 2=underline 커서·pane/divider 하단선, 3=bar 커서·세로 divider 좌측,
-    //   4=pane/divider 상단선, 5=pane 우측선, 8=OSC 133 거터 바(셀 왼쪽 바깥). block(0)은 전체 cell.
+    //   강조선(셀 높이/폭 ~15%): 2=underline 커서·hollow 하단, 3=bar 커서·hollow 좌측,
+    //   4=hollow 상단, 5=hollow 우측, 8=OSC 133 거터 바(셀 왼쪽 바깥). block(0)은 전체 cell.
+    //   pane divider(config 두께 divider_thickness_px, seam 중앙정렬·셀 clamp): 30=세로선·31=가로선. 커서 강조선(2~5, 15%)과
+    //   분리해 divider만 config로 두께 조절(split.divider-thickness). 활성 pane focus 테두리는 divider와 분리돼 2~5(셀 15%)를 쓴다.
     //   텍스트 장식선(SGR)은 글자에 붙는 가는 선이라 강조선(15%)의 절반인 ~7.5%로 가늘게 그린다 —
     //   9=밑줄(SGR 4)·링크 hover 하단, 10=윗줄(SGR 53) 상단, 6=취소선(SGR 9) 중앙, 7=2중밑줄(SGR 21) 둘째 선.
     //   베이스: Ghostty는 폰트 메트릭 underline_thickness(=max(1,ceil(face.underlineThickness)))를 쓰지만,
@@ -367,6 +370,19 @@ static void maru_fill_cell_quad(
         // 글자 침범보다 낫다.
         px_left = fmaxf(px_left, 0.0f);
         px_right = fmaxf(px_right, px_left);
+    } else if (cell.reserved == 30) {
+        // pane divider 세로선: 셀 origin이 경계(seam=px_left)라, 그 seam에 config 두께를 **중앙 정렬**하고 셀폭으로
+        // clamp한다(두꺼운 값이 인접 pane 내용 위로 번지지 않게 — 최대 1셀, 좌/우 pane에 반씩). 커서 강조선 15%와 분리.
+        const float t = fminf((float)divider_thickness_px, cw);
+        const float seam = px_left;
+        px_left = seam - t * 0.5f;
+        px_right = seam + t * 0.5f;
+    } else if (cell.reserved == 31) {
+        // pane divider 가로선: 셀 origin이 경계(seam=px_top)라, 그 seam에 config 두께를 중앙 정렬하고 셀 높이로 clamp.
+        const float t = fminf((float)divider_thickness_px, cell_h);
+        const float seam = px_top;
+        px_top = seam - t * 0.5f;
+        px_bottom = seam + t * 0.5f;
     }
     // 글리프 확대: 셀 quad를 중앙 기준으로 키운다. 헤더 줄0 아이콘(1.7×)은 slot도 목표 px(raster_*_px)라 큰
     // 텍스처를 큰 quad에 1:1로 그려 선명; 사이드바 에이전트 심볼(1.1×)은 slot이 셀 크기라 stretch한다(약간
@@ -683,7 +699,9 @@ bool maru_metal_renderer_draw(
     uint32_t terminal_bg,
     uint32_t titlebar_strip_px,
     uint32_t window_opacity_milli,
-    uint32_t sidebar_scroll_offset_px
+    uint32_t sidebar_scroll_offset_px,
+    /* pane divider(reserved 30 세로·31 가로)의 device px 두께(config split.divider-thickness → app_session가 pt×scale). seam 중앙정렬·셀 clamp. 0=안 그림. */
+    uint32_t divider_thickness_px
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -821,31 +839,40 @@ bool maru_metal_renderer_draw(
             // (배경은 별도 배경 quad가 셀폭으로 그림). box-drawing은 glyph_id==0로 slot=셀폭이라 자연폭=셀폭으로 타일링 보존.
             MaruRendererVertex *bg_p = &vertices[(quad_index + i * 2) * vertices_per_cell];
             MaruRendererVertex *fg_p = &vertices[(quad_index + i * 2 + 1) * vertices_per_cell];
-            // 배경 quad: 셀 전체(reserved 무시) 배경색, UV=-1(글리프 안 샘플 → 셰이더가 배경만). 투명 bg면 no-op.
-            MaruAppHostMetalCell bgc = tc;
-            bgc.reserved = 0;
-            bgc.u0 = -1.0f;
-            bgc.u1 = -1.0f;
-            maru_fill_cell_quad(bg_p, bgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f);
-            // 전경 quad(투명 bg — 배경은 위 배경 quad가 담당).
-            if (tc.reserved == 0u && tc.u0 >= 0.0f && hscale == 1.0f) {
-                // 일반 텍스트 글리프 → 자연폭(atlas_width_px, 좌측정렬). 셀 좌단 = panel origin + col×cw.
-                const uint32_t span_u = (tc.width == 0u) ? 1u : tc.width;
-                const float gw = (tc.atlas_width_px > 0u) ? (float)tc.atlas_width_px : cw * (float)span_u;
-                maru_fill_glyph_quad(fg_p, tc, (float)tc.origin_x + (float)tc.col * cw, gw, py_top, ch, drawable_w, drawable_h);
-            } else if (tc.reserved == 0u && tc.u0 < 0.0f) {
-                memset(fg_p, 0, sizeof(MaruRendererVertex) * vertices_per_cell); // 빈 셀 — 전경 없음(배경 quad만)
-            } else if (is_bell_icon) {
-                // 종(🔔)은 width 2 stretch를 피해 1칸 quad(코너 아이콘 동형)·origin +0.5cw로 2칸 중앙. 전경만(투명 bg).
-                MaruAppHostMetalCell bell = tc;
-                bell.width = 1;
-                bell.background = 0u;
-                maru_fill_cell_quad(fg_p, bell, (float)tc.origin_x + cw * 0.5f, cw, py_top, ch, drawable_w, drawable_h, hscale);
+            if (tc.reserved != 0u) {
+                // reserved 부분-사각형 셀(커서 bar/underline·hollow 변·SGR 장식선·OSC 거터·pane divider/테두리): 색을
+                // background에 담은 sentinel(uv<0) 셀이라 글리프가 없다. A(자간 자연폭)의 2-quad 분리는 **글리프 셀 전용** —
+                // 여기서 배경 quad가 reserved를 무시하면(옛 bgc.reserved=0) strip이 셀 전체로 번져 divider·커서 바·밑줄이
+                // 셀폭 블록으로 굵어진다(c351a19 회귀). 그래서 reserved 셀은 셀당 **1 quad**로 그 reserved strip만 bg_p에
+                // 그리고 fg_p는 비운다 — painter 순서·오프셋(셀당 ×2)은 불변. reserved!=0 셀은 hscale==1(확대는 아이콘=reserved 0뿐).
+                maru_fill_cell_quad(bg_p, tc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f, divider_thickness_px);
+                memset(fg_p, 0, sizeof(MaruRendererVertex) * vertices_per_cell);
             } else {
-                // 장식/커서 바(reserved!=0) 또는 헤더아이콘(hscale!=1): 그 띠/글리프를 전경으로(투명 bg).
-                MaruAppHostMetalCell fgc = tc;
-                fgc.background = 0u;
-                maru_fill_cell_quad(fg_p, fgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, hscale);
+                // 배경 quad: 셀 전체 배경색, UV=-1(글리프 안 샘플 → 셰이더가 배경만). 투명 bg면 no-op.
+                MaruAppHostMetalCell bgc = tc;
+                bgc.u0 = -1.0f;
+                bgc.u1 = -1.0f;
+                maru_fill_cell_quad(bg_p, bgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f, divider_thickness_px);
+                // 전경 quad(투명 bg — 배경은 위 배경 quad가 담당).
+                if (tc.u0 >= 0.0f && hscale == 1.0f) {
+                    // 일반 텍스트 글리프 → 자연폭(atlas_width_px, 좌측정렬). 셀 좌단 = panel origin + col×cw.
+                    const uint32_t span_u = (tc.width == 0u) ? 1u : tc.width;
+                    const float gw = (tc.atlas_width_px > 0u) ? (float)tc.atlas_width_px : cw * (float)span_u;
+                    maru_fill_glyph_quad(fg_p, tc, (float)tc.origin_x + (float)tc.col * cw, gw, py_top, ch, drawable_w, drawable_h);
+                } else if (tc.u0 < 0.0f) {
+                    memset(fg_p, 0, sizeof(MaruRendererVertex) * vertices_per_cell); // 빈 셀 — 전경 없음(배경 quad만)
+                } else if (is_bell_icon) {
+                    // 종(🔔)은 width 2 stretch를 피해 1칸 quad(코너 아이콘 동형)·origin +0.5cw로 2칸 중앙. 전경만(투명 bg).
+                    MaruAppHostMetalCell bell = tc;
+                    bell.width = 1;
+                    bell.background = 0u;
+                    maru_fill_cell_quad(fg_p, bell, (float)tc.origin_x + cw * 0.5f, cw, py_top, ch, drawable_w, drawable_h, hscale, divider_thickness_px);
+                } else {
+                    // 헤더 아이콘(◧⚙+ hscale=1.7 glyph): 그 글리프를 전경으로(투명 bg).
+                    MaruAppHostMetalCell fgc = tc;
+                    fgc.background = 0u;
+                    maru_fill_cell_quad(fg_p, fgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, hscale, divider_thickness_px);
+                }
             }
         }
         quad_index += 2 * cell_count;
@@ -894,7 +921,7 @@ bool maru_metal_renderer_draw(
                 const float sgw = (sc.atlas_width_px > 0u) ? (float)sc.atlas_width_px : cw * (float)sspan;
                 maru_fill_glyph_quad(sp, sc, sx_origin + (float)sc.col * cw, sgw, py_top, cell_h, drawable_w, drawable_h);
             } else {
-                maru_fill_cell_quad(sp, sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale);
+                maru_fill_cell_quad(sp, sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale, divider_thickness_px);
             }
         }
     }

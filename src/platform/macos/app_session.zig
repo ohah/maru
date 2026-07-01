@@ -776,13 +776,27 @@ const NotificationHistoryItem = struct {
 /// fallback 폰트로 넘기는데 그 폰트에서 글리프가 한글 '정' 등으로 어긋나 간헐적으로 깨졌다(근본 원인). 폰트가 가진
 /// 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다. claude=✶(U+2736 6각별, 선버스트 근사),
 /// codex=◆(U+25C6 다이아). 포그라운드인 동안만 표시.
-/// running 스피너 8프레임(브라유 ⠋⠙⠹⠸⠼⠴⠦⠧ — 회전 dot, JetBrains Mono 보유 + 셀 합성 경로라 안전). 상태줄이 현재
-/// `agent_spin_frame`의 글리프를 그리고, 색칠 루프가 이 codepoint를 브랜드색으로 칠한다(아이콘과 같은 패턴).
-const agent_spinner_frames = [_]u21{ 0x280B, 0x2819, 0x2839, 0x2838, 0x283C, 0x2834, 0x2826, 0x2827 };
+/// running 스피너 = **codex "working" 파형(이퀄라이저)의 축소판** — 4칸 바운싱 바다(사용자 피드백: 옛 브라유
+/// 회전 dot["작은 점 왔다갔다"] 대신 codex 스피너처럼). codex 원본은 폭 20칸+ 파형이라 좁은 사이드바 카드엔 4칸으로 줄였다.
+/// 블록 문자 ▁▂▃▄▅▆▇█(U+2581~2588)은 renderer/block_glyph.zig가 절차 합성 → 폰트 의존 없이 또렷(braille와 같은 합성 경로).
+/// 각 바의 높이는 삼각 파형(spinner_wave)을 서로 다른 위상(spinner_bar_phase)으로 읽어 파도처럼 흐른다. 상태줄이 현재
+/// `agent_spin_frame`의 바 글리프들을 그리고, 색칠 루프가 이 codepoint들을 브랜드색으로 칠한다(아이콘과 같은 패턴).
+const spinner_bar_count: usize = 4;
+/// 바 높이 삼각 파형(1~8, 8칸 오름 + 6칸 내림 = 끝점 중복 없는 주기 14). `agent_spin_frame`도 이 길이로 wrap한다(아래 advance).
+const spinner_wave = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 7, 6, 5, 4, 3, 2 };
+/// 4개 바의 위상 offset — 파형 길이 14에 고르게 분산해 바들이 시차를 두고 오르내리게(뚜렷한 파도). 인접 바가 같은 높이로 뭉치지 않는다.
+const spinner_bar_phase = [_]u8{ 0, 4, 8, 12 };
 
-/// codepoint가 스피너 프레임 중 하나인가(색칠 루프 게이트 — 상태줄 row로 좁힌 뒤 이 체크). 파일 관용 std.mem.indexOfScalar 재사용.
+/// 프레임 f, 바 c의 블록 codepoint(▁~█). 높이 h(1~8) → U+2580+h(▁=U+2581 … █=U+2588). frame은 이미 wave 길이로 wrap됨.
+fn spinnerBarCp(frame: u8, bar: usize) u21 {
+    const h = spinner_wave[(@as(usize, frame) + spinner_bar_phase[bar]) % spinner_wave.len];
+    return 0x2580 + @as(u21, h);
+}
+
+/// codepoint가 스피너 바 글리프(블록 ▁~█, U+2581~2588)인가 — 색칠 루프 게이트(상태줄 row로 좁힌 뒤 이 체크).
+/// 상태줄엔 이 밖에 블록 문자가 없어(running="바들 진행중", idle="✓ …") 오탐 없음.
 fn isAgentSpinnerCp(cp: u21) bool {
-    return std.mem.indexOfScalar(u21, &agent_spinner_frames, cp) != null;
+    return cp >= 0x2581 and cp <= 0x2588;
 }
 
 fn agentSymbolCodepoint(kind: AgentKind) u21 {
@@ -1455,8 +1469,9 @@ pub const AppSession = struct {
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
-    // 에이전트 running 스피너(상태줄 "⠋ 진행중" 회전). agent_spin_ticks가 약 133ms마다 agent_spin_frame을 +1(mod 8)
-    // 진행하고 사이드바를 재투영한다 — 펄스(blink_visible 500ms 2위상)와 별개의 빠른 위상. anyAgentRunning일 때만 돈다.
+    // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). agent_spin_ticks가 약 133ms마다
+    // agent_spin_frame을 +1(mod spinner_wave.len=14) 진행하고 사이드바를 재투영한다 — 펄스(blink_visible 500ms 2위상)와
+    // 별개의 빠른 위상. anyAgentRunning일 때만 돈다.
     agent_spin_frame: u8 = 0,
     agent_spin_ticks: u32 = 0,
     // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
@@ -7213,7 +7228,8 @@ pub const AppSession = struct {
             self.agent_spin_ticks += 1;
             if (self.agent_spin_ticks >= self.agentSpinIntervalTicks()) {
                 self.agent_spin_ticks = 0;
-                self.agent_spin_frame +%= 1;
+                // 파형 길이로 wrap — u8 자연 wrap(256%14≠0)이면 255→0 경계에서 파형이 튀므로 주기 안에서 순환한다.
+                self.agent_spin_frame = (self.agent_spin_frame + 1) % @as(u8, @intCast(spinner_wave.len));
                 self.metal_dirty = true;
             }
         }
@@ -11472,10 +11488,14 @@ pub const AppSession = struct {
     fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
         if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
         return switch (term.agent_state) {
-            .running => blk: { // 회전 브라유 스피너 + 진행중(스피너는 색칠 루프가 브랜드색으로). 정적 ● 대신.
-                var sp: [4]u8 = undefined;
-                const n = std.unicode.utf8Encode(agent_spinner_frames[self.agent_spin_frame % agent_spinner_frames.len], &sp) catch 0;
-                break :blk std.fmt.allocPrint(self.allocator, "{s} 진행중", .{sp[0..n]});
+            .running => blk: { // codex식 4칸 이퀄라이저 파형 + 진행중(바는 색칠 루프가 브랜드색으로). 정적 ● 대신.
+                // 각 바 = 현재 프레임 높이의 블록 글리프(최대 3바이트). 4칸을 이어 붙여 파형 한 줄을 만든다.
+                var bars: [spinner_bar_count * 3]u8 = undefined;
+                var used: usize = 0;
+                for (0..spinner_bar_count) |bar| {
+                    used += std.unicode.utf8Encode(spinnerBarCp(self.agent_spin_frame, bar), bars[used..]) catch 0;
+                }
+                break :blk std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars[0..used]});
             },
             .idle => if (term.agent_answer_len > 0)
                 std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{term.agent_answer_buf[0..term.agent_answer_len]}) // ✓ {답변}
@@ -11754,14 +11774,14 @@ pub const AppSession = struct {
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
         var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, self.hovered_slot, null, self.displaySlotOf(self.app_window.active_tab), active_fg);
-        // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(브라유)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
-        // codex=OpenAI 청록. 종류를 색으로 구분하고, **진행/완료는 상태줄**(running=⠋ 회전 스피너[브랜드색]·idle=✓)이 담당한다
+        // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
+        // codex=OpenAI 청록. 종류를 색으로 구분하고, **진행/완료는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓)이 담당한다
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
         // **오염 방지**: 아이콘은 gutter `col 0` + 합성 codepoint로 좁히고, 스피너는 **상태줄(카드 마지막 줄)**에만 색칠한다 —
-        // 워크스페이스 이름/브랜치/경로 줄(line_index<line_count-1)에 braille 글자가 들어가도 안 오염(code-review high #2).
+        // 워크스페이스 이름/브랜치/경로 줄(line_index<line_count-1)에 블록 글자가 들어가도 안 오염(code-review high #2).
         for (draw_list.cells) |*c| {
             const is_icon = c.col == 0 and (c.codepoint == 0xF0007 or c.codepoint == 0xF0008); // ✶ claude / ◆ codex
-            // 상태줄(카드 마지막 줄)의 회전 브라유만 스피너로 본다. row=slot*base + line_count*4 + line_index라
+            // 상태줄(카드 마지막 줄)의 이퀄라이저 바(블록 ▁~█)만 스피너로 본다. row=slot*base + line_count*4 + line_index라
             // within=row%base, line_count=within/4, line_index=within%4; 상태줄=line_index==line_count-1(에이전트 카드의 마지막 줄).
             const within = c.row % coretext_frame_builder.sidebar_line_base;
             const on_status_line = (within / 4) >= 1 and (within % 4) == (within / 4) - 1;
@@ -13211,6 +13231,35 @@ test "dimRgb: 색을 45%로 낮춘다(0 아님 — 글자 안 사라짐; 현재 
     // 밝기 변조라 0이 아니다(깜빡임 아님). 200×45/100=90. (옛 에이전트 아이콘 펄스는 폐기 — 스피너로 대체.)
     try std.testing.expectEqual(maru.color.Rgb{ .r = 90, .g = 90, .b = 90 }, dimRgb(.{ .r = 200, .g = 200, .b = 200 }));
     try std.testing.expectEqual(maru.color.Rgb{ .r = 0, .g = 0, .b = 0 }, dimRgb(.{ .r = 0, .g = 0, .b = 0 }));
+}
+
+// running 스피너 = codex식 4칸 이퀄라이저 파형(옛 브라유 회전 dot 대체). 이 테스트가 증명하는 것:
+// (1) 모든 프레임의 모든 바가 블록 글리프(▁~█)라 색칠 게이트(isAgentSpinnerCp)에 잡히고 renderer/block_glyph 합성 경로로 또렷하게 그려진다.
+// (2) 위상 offset 덕에 한 프레임 안에서 바 높이가 획일적이지 않다(파도처럼 보이는 근거) — 최소 한 프레임은 서로 다른 높이를 갖는다.
+// (3) advance가 파형 길이(14)로 wrap하므로 프레임이 그 범위를 넘지 않는다(u8 자연 wrap 시 파형 튐 회피).
+test "spinner: 4칸 이퀄라이저 바가 전부 블록 글리프이고 위상차로 파도친다" {
+    var any_varied = false;
+    for (0..spinner_wave.len) |f| {
+        const frame: u8 = @intCast(f);
+        var prev: ?u21 = null;
+        for (0..spinner_bar_count) |bar| {
+            const cp = spinnerBarCp(frame, bar);
+            try std.testing.expect(cp >= 0x2581 and cp <= 0x2588); // ▁~█ 범위
+            try std.testing.expect(isAgentSpinnerCp(cp)); // 색칠 게이트가 잡는다
+            if (prev) |p| {
+                if (p != cp) any_varied = true;
+            }
+            prev = cp;
+        }
+    }
+    try std.testing.expect(any_varied); // 획일적이지 않다(파형)
+    // 브라유(U+280B 등)는 더 이상 스피너로 취급되지 않는다 — 게이트가 블록 전용.
+    try std.testing.expect(!isAgentSpinnerCp(0x280B));
+    // 프레임 0 = 사용자가 승인한 모양 "▁▅▇▃"(wave[0,4,8,12]=1,5,7,3). 시각 계약을 고정한다.
+    try std.testing.expectEqual(@as(u21, 0x2581), spinnerBarCp(0, 0)); // ▁
+    try std.testing.expectEqual(@as(u21, 0x2585), spinnerBarCp(0, 1)); // ▅
+    try std.testing.expectEqual(@as(u21, 0x2587), spinnerBarCp(0, 2)); // ▇
+    try std.testing.expectEqual(@as(u21, 0x2583), spinnerBarCp(0, 3)); // ▃
 }
 
 // anyAgentRunning(스피너 위상 게이트)은 **사이드바에 실제로 보이는** running 에이전트만 본다 — 접힘·필터아웃이면 스피너가

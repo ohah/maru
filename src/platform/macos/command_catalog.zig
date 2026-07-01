@@ -91,6 +91,8 @@ pub const entries = [_]Entry{
     .{ .action = .reset_settings, .key = "reset_settings", .title = "Reset All Settings to Defaults" },
     // 에이전트 세션 훅 재등록(자동등록 실패·훅 삭제 복구). 기본 키바인딩 없음 — 팝업이 발견 경로.
     .{ .action = .reregister_agent_hooks, .key = "reregister_agent_hooks", .title = "Re-register Agent Session Hooks" },
+    // 에이전트 세션 훅 언인스톨(전역 config에서 maru 훅 제거). 기본 키바인딩 없음 — 팝업이 발견 경로.
+    .{ .action = .unregister_agent_hooks, .key = "unregister_agent_hooks", .title = "Unregister Agent Session Hooks" },
 };
 
 /// 전역(OS) 단축키 카탈로그 한 항목(정적). in-app `Entry`와 평행하되 action이 GlobalAction이다. action_key는

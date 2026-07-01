@@ -2136,14 +2136,14 @@ pub const AppSession = struct {
         out.append(self.allocator, sentinelBgCell(
             @intCast(@min(band_start, u16_max)),
             @intCast(@min(band_width, u16_max)),
-            self.sidebarBg(),
+            self.chromeCellBg(self.sidebarBg()), // window.opacity(셀 premultiply)
             term_rect.x,
             term_rect.y,
         )) catch return;
         var i: u32 = 0;
         while (i < count) : (i += 1) {
             const col = band_start + pad + i * 2;
-            const color = if (i == active) self.sidebarActiveBg() else self.sidebarHoverBg();
+            const color = self.chromeCellBg(if (i == active) self.sidebarActiveBg() else self.sidebarHoverBg()); // window.opacity(셀 premultiply)
             out.append(self.allocator, sentinelBgCell(@intCast(@min(col, u16_max)), 1, color, term_rect.x, term_rect.y)) catch return;
         }
     }
@@ -10247,24 +10247,25 @@ pub const AppSession = struct {
                 if (tab_corner > 0) {
                     // rich: 바 배경(직각)·활성 탭(본문색 cutout + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
                     // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
-                    self.appendBarBgQuad(bar, self.sidebarBg());
+                    self.appendBarBgQuad(bar, self.chromeQuadBg(self.sidebarBg())); // window.opacity 반영(quad straight-alpha)
                     self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 활성 탭 세그먼트는 본문색 cutout+앰버 언더바가 덮어 "연결"된다
                     // U-tab2 연결형: rich 활성 탭 = 터미널 본문색 cutout(strip에서 도려낸 듯 아래 본문과 이어짐). 포커스 구분은
                     // 배경이 아니라 **언더바 색** — 포커스 pane=maru 앰버(active indicator), 비포커스=muted(흐린 구분만).
-                    const tab_cutout_bg = packOpaqueRgb(self.appearance.theme.background);
-                    const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg));
-                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, hl_bg, ub_accent, tk_space, tk.border);
+                    // cutout은 아래 터미널 본문색이라 window.opacity를 같이 걸어 본문과 같은 투명도로 "연결"된 채 데스크톱이 비친다.
+                    const tab_cutout_bg = self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.background));
+                    const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg)); // 언더바=focus indicator(배경 아님) — 불투명 유지
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
-                        self.appendScrollButtonQuad(m, m.tab_cols, if (lh) self.sidebarActiveBg() else self.sidebarHoverBg());
-                        self.appendScrollButtonQuad(m, m.tab_cols + 2, if (rh) self.sidebarActiveBg() else self.sidebarHoverBg());
+                        self.appendScrollButtonQuad(m, m.tab_cols, self.chromeQuadBg(if (lh) self.sidebarActiveBg() else self.sidebarHoverBg()));
+                        self.appendScrollButtonQuad(m, m.tab_cols + 2, self.chromeQuadBg(if (rh) self.sidebarActiveBg() else self.sidebarHoverBg()));
                     };
                 } else {
-                    // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위).
-                    if (paneBarBgCell(bar, self.cell_width_px, self.sidebarBg())) |cell| pane_chrome.append(self.allocator, cell) catch {};
+                    // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
+                    if (paneBarBgCell(bar, self.cell_width_px, self.chromeCellBg(self.sidebarBg()))) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     if (m_opt) |m| {
-                        if (tabbarHighlightCell(m, lr.leaf.active_term, hl_bg)) |cell| pane_chrome.append(self.allocator, cell) catch {};
+                        if (tabbarHighlightCell(m, lr.leaf.active_term, self.chromeCellBg(hl_bg))) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     }
                 }
                 // 활성 pane 강조는 활성 탭 하단 앰버 언더바(appendActiveTabHighlight)로 일원화한다(사용자 요청) — 옛
@@ -10695,6 +10696,29 @@ pub const AppSession = struct {
         const g: u32 = (@as(u32, a.g) + b.g) / 2;
         const bch: u32 = (@as(u32, a.b) + b.b) / 2;
         return 0xFF00_0000 | (r << 16) | (g << 8) | bch;
+    }
+
+    /// `window.opacity`(0~1)를 chrome **배경** alpha 바이트(0~255)로 환산한다 — 1.0이면 0xFF(불투명, 회귀 없음).
+    /// 터미널 기본 배경만 투명해지던 iTerm2/Ghostty `background-opacity` 모델을 사이드바·탭 바 **배경**까지 확장하는
+    /// 단일 출처다(사용자 요청 "사이드 탭까지 투명"). 전경 텍스트·아이콘·accent 막대·divider·focus 테두리는 배경이
+    /// 아니므로 이 경로를 안 거치고 `packOpaqueRgb`로 불투명 유지한다 — 텍스트 가독성과 포커스 단서를 보존한다.
+    fn windowOpacityByte(self: *const AppSession) u8 {
+        return @intFromFloat(@round(std.math.clamp(self.appearance.window_opacity, 0.0, 1.0) * 255.0));
+    }
+
+    /// 불투명 chrome 배경색(0xAARRGGBB)에 `window.opacity`를 적용한 **셀 경로** 색. 셀 배경은 렌더러
+    /// (maru_fill_cell_quad)가 straight로 실어 셰이더가 premultiplied-over로 합성하므로, 반투명은 소스에서 미리 곱해
+    /// 넘겨야 색이 뜨지 않는다(drop-target 하이라이트 등 기존 반투명 셀과 같은 규약 — `premultipliedRgba`).
+    /// opacity=1이면 `premultipliedRgba(c, 255)`가 원 불투명색과 동일이라 무동작.
+    fn chromeCellBg(self: *const AppSession, opaque_color: u32) u32 {
+        return premultipliedRgba(opaque_color, self.windowOpacityByte());
+    }
+
+    /// 불투명 chrome 배경색(0xAARRGGBB)에 `window.opacity`를 적용한 **quad 경로** 색 — straight-alpha(alpha 바이트만
+    /// 교체, RGB 유지). SDF quad 셰이더(maru_quad_fragment)가 `rgb*=a`로 직접 premultiply하므로 straight로 넘긴다
+    /// (hover_fill 등 기존 GpuQuad와 같은 규약 — `packRgbAlpha`). opacity=1이면 0xFF라 원 불투명색과 동일.
+    fn chromeQuadBg(self: *const AppSession, opaque_color: u32) u32 {
+        return (@as(u32, self.windowOpacityByte()) << 24) | (opaque_color & 0x00FF_FFFF);
     }
 
     /// 비활성 탭 제목용 흐린 전경색 — sidebar_foreground(테마화된 사이드바 글자색, 기본=foreground)를 background
@@ -11592,7 +11616,7 @@ pub const AppSession = struct {
                     const row_i = @divTrunc(q.rect.y, @as(i32, @intCast(slot_h)));
                     if (row_i < 0) continue;
                     const row: u16 = @intCast(@min(@as(usize, @intCast(row_i)), @as(usize, std.math.maxInt(u16))));
-                    if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, color)) |cell| {
+                    if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, self.chromeCellBg(color))) |cell| { // window.opacity(셀 premultiply)
                         self.sidebar_cells.append(self.allocator, cell) catch {};
                     }
                 } else {
@@ -11607,8 +11631,8 @@ pub const AppSession = struct {
                         .h = sr.h,
                         .corner_radii = radii,
                         .border_widths = .{ 0, 0, 0, 0 },
-                        .fill_color0 = color,
-                        .fill_color1 = color,
+                        .fill_color0 = self.chromeQuadBg(color), // window.opacity(quad straight-alpha)
+                        .fill_color1 = self.chromeQuadBg(color),
                         .border_color = 0,
                         .gradient_kind = 0,
                         .layer = 0, // under — 사이드바 밴드(셀 위·제목 아래)
@@ -12989,7 +13013,7 @@ pub const AppSession = struct {
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
         frame.terminal_origin_x_px = self.sidebar_width_px;
-        frame.sidebar_bg = self.sidebarBg();
+        frame.sidebar_bg = self.chromeCellBg(self.sidebarBg()); // window.opacity 반영(strip=렌더러 premultiplied-over 셀 경로)
         // 화면 clear color(빈 영역/기본 배경 셀이 비치는 색): OSC 11(배경 set)이 있으면 그 색, 없으면
         // theme.background. DECSCNM(?5, G9) 화면 반전이면 전경색으로 스왑한다(빈 영역도 반전돼야 함). 활성
         // surface 기준(렌더 pass clearColor — 셀이 default 배경=A0일 때 드러남). surface_initialized 가드는

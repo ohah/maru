@@ -111,7 +111,11 @@ bool maru_metal_renderer_draw(
     /* 사이드바 세로 스크롤량(backing px). 사이드바 셀(밴드·카드 glyph) py_top에서 빼 카드를 위로 밀고, >0이면 사이드바
        셀 draw에 [sidebar_header_height_px, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다(헤더 glyph는 터미널
        셀 패스라 무관). 0이면 기존 동작(scissor 없음). 끝에 추가해 기존 인자 순서 불변(ABI v86). */
-    uint32_t sidebar_scroll_offset_px
+    uint32_t sidebar_scroll_offset_px,
+    /* pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
+       scale로 환산해 넘긴다. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다. 커서 강조선·활성 pane focus
+       테두리(reserved 2~5, 셀 15%)와 분리돼 divider만 이 값으로 두께가 정해진다. 0=안 그림. 끝에 추가해 인자 순서 불변(ABI v94). */
+    uint32_t divider_thickness_px
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

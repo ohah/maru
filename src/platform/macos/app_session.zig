@@ -64,8 +64,8 @@ pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
 // 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz).
 // Swift frame-loop NSTimer가 config를 읽어 cadence를 정한다.
-pub const abi_version: u32 = 93;
-// 90: request_app_quit + FrameSummary.quit_decision(끝에 1필드 추가 — 기존 offset 불변). Cmd+Q/메뉴/Dock 종료가 windowShouldClose를 안 거치므로 applicationShouldTerminate에서 request_app_quit으로 "maru를 종료할까요?" 확인 모달을 항상(실행 중 명령 무관) 띄우고 .terminateLater 반환; confirm 확정/취소가 quit_decision(0=대기·1=accepted·2=cancelled)에 latch되면 Swift가 NSApp.reply로 종료 진행/취소. 빨간 버튼 ended latch와 같은 tick 폴 패턴. docs/macos-app-host-boundary.md "닫기 확인". 89: url_at에 out_kind(0=url,1=file_path) 추가 — 파일 경로 링크를 Swift가 URL(fileURLWithPath:)로 열게(docs/link-detection.md). 88: key_hint_on_flags/on_timer/cancel(단축키 힌트 홀드 **상태머신**을 keyhint_hold.zig 순수 Zig로 이주 — 간헐 미표시 루트커즈[옛 Swift가 타이머 만료 시 NSEvent.modifierFlags라는 2번째 출처를 재읽기해 stale/빈 값에 트리거 유지여도 미표시] 수정. Swift는 flagsChanged·timer·keyDown/blur를 머신에 흘리고 반환 Action으로 타이머·redraw만; visible은 머신이 소유. set_key_hints 제거[머신이 toggle]. key_hints_config는 delay만 Swift가 씀). 87: set_key_hints + key_hints_config(단축키 힌트 HUD — KH-4). Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay ms)를 감지하면 set_key_hints(1)로 각 chrome 요소 우상단에 단축키 배지를 켜고(markMetalNeedsRedraw 후 buildChromeOverlayPrep이 buildKeyHintBadges로 그림), 떼거나 다른 키·포커스 상실에 set_key_hints(0). key_hints_config는 enabled/delay/modifier(0=cmd,1=ctrl,2=opt)를 config에서 읽어 Swift에 준다(gesture 정책=Zig·타이머 clock=Swift). 패시브라 anyOverlayOpen 비포함(커서 blink·keyEquivalent 불변), 빌드 게이트에만 더함. export 2개 추가 — 구조체 offset 불변. 86: MetalFrame.sidebar_scroll_offset_px + maru_metal_renderer_draw 마지막 인자(사이드바 세로 스크롤 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘으면 휠/트랙패드로 스무스 스크롤. 렌더러가 사이드바 셀 py_top에서 빼 카드를 위로 밀고 >0이면 [header_h, drawable_h] scissor로 헤더 위로 샌 카드를 자른다; GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립. 우측에 pane 스크롤바 동형 fade thumb. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변). 85: take_command_catalog_dirty(커맨드 카탈로그 런타임 재빌드 신호 — keybind rebind/unbind·reload·reset이 rebuildCommandCatalog로 카탈로그를 다시 빌드하며 command_catalog_dirty를 세우면 Swift가 tick마다 drain해 1이면 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다. reset은 확인 모달-확정 후 tick에서 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로 — 인앱 rebind·멀티창 활성 세션도 커버. take_global_hotkeys_dirty와 같은 1회성, 끝에 export 추가 — 구조체 offset 불변). 84: MetalFrame.modal_clip_x/y/w/h_px(모달 오버레이 px 클리핑 인프라 — chrome draw.Op.clip을 lowering이 OverlayRaster.clip_rect로 모으면 렌더러가 모달 셀 draw에 setScissorRect 적용; w==0=클리핑 없음[기존 동작]. 부분 카드 픽셀 스크롤[알림 패널 등] 재사용 인프라, 컴포넌트 적용은 후속. 끝에 4필드 추가해 구조체 offset 불변). 83: take_color_sample_request + provide_sampled_color(HSV picker `i` 스포이드 → Swift가 NSColorSampler[OS 화면 색 추출기]를 열고 사용자가 고른 화면 픽셀 RGB를 picker에 반영. Zig가 color_sample_pending을 세우고 Swift가 tick마다 take_color_sample_request로 drain해 1이면 NSColorSampler.show[비동기], 콜백에서 provide_sampled_color[r,g,b u32]로 되돌린다 → settings.setPickerRgb로 pick h/s/v 반영. file-pick take/provide 패턴이나 provide가 비동기 콜백. 끝에 export 2개 추가 — 구조체 offset 불변). 82: take_global_hotkeys_dirty(글로벌 핫키 라이브 OS 재등록 — 세팅 GUI 녹음/해제[rebind/unbind]·reload·reset이 global_hotkeys를 다시 빌드하고 dirty를 세우면 Swift가 tick마다 drain해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 descriptor를 OS에 재등록. global_hotkeys getter는 그대로 재사용. take_bell류 1회성, 끝에 export 추가 — 구조체 offset 불변). 81: take_file_pick_request + provide_picked_file(세팅 window.background-image 행 활성 → 파일 선택창. Zig가 file_pick_pending을 세우고 Swift가 tick마다 take_file_pick_request로 drain해 1이면 NSOpenPanel[PNG]을 열어 고른 절대경로를 provide_picked_file로 되돌린다 → Zig가 setText + 라이브 반영 + dirty. OSC52 read take/provide와 같은 패턴, 끝에 export 2개 추가 — 구조체 offset 불변). 80: any_overlay_open getter(세팅 등 chrome 오버레이/녹음 열림 — Swift performKeyEquivalent가 1이면 메뉴바 keyEquivalent를 양보해 ⌘조합을 keyDown→handleKeyEvent 모달/녹음 가드로 보낸다. 순수 read getter, 구조체 offset 불변). 79: window_blur_radius(config window.blur getter — 창 뒤 데스크톱 배경 블러 반경 px. window.opacity>=1이면 0[불투명 창=블러 안 보임]. 블러는 GPU 아니라 OS 창 속성이라 host가 적용: macOS=CGSSetWindowBackgroundBlurRadius[Ghostty·Terminal.app 비공개 CGS], Win=DwmSetWindowAttribute·Linux=컴포지터 속성[추후]. 게이트 정책은 Zig 단일 출처[windowBlurRadius], 순수 read getter라 구조체 offset 불변). 78: pending_notification에 surface_id_out·foreground_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. foreground_out=전면 배너 여부(에이전트 완료=1, OSC=0 전면이면 목록만) → willPresent가 자기 화면 알림 노이즈 억제. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
+pub const abi_version: u32 = 94;
+// 94: MetalFrame.divider_thickness_px + maru_metal_renderer_draw 마지막 인자(pane divider 두께 — config split.divider-thickness pt를 scale_milli로 환산해 스탬프; renderer가 reserved 30 세로·31 가로 strip을 seam 중앙정렬·셀 clamp로 이 값 두께로 그린다. 활성 pane focus 테두리는 divider와 분리돼 reserved 2~5 셀 15% 유지). 겸사로 c351a19(자간 자연폭 셀당 2 quad) 회귀 수정: 배경 quad가 reserved=0으로 강제돼 divider·커서 bar/underline·SGR 밑줄(색을 background에 담은 sentinel strip)이 셀폭 블록으로 번지던 것을 reserved!=0 셀은 셀당 1 quad strip으로 되돌림. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변. 90: request_app_quit + FrameSummary.quit_decision(끝에 1필드 추가 — 기존 offset 불변). Cmd+Q/메뉴/Dock 종료가 windowShouldClose를 안 거치므로 applicationShouldTerminate에서 request_app_quit으로 "maru를 종료할까요?" 확인 모달을 항상(실행 중 명령 무관) 띄우고 .terminateLater 반환; confirm 확정/취소가 quit_decision(0=대기·1=accepted·2=cancelled)에 latch되면 Swift가 NSApp.reply로 종료 진행/취소. 빨간 버튼 ended latch와 같은 tick 폴 패턴. docs/macos-app-host-boundary.md "닫기 확인". 89: url_at에 out_kind(0=url,1=file_path) 추가 — 파일 경로 링크를 Swift가 URL(fileURLWithPath:)로 열게(docs/link-detection.md). 88: key_hint_on_flags/on_timer/cancel(단축키 힌트 홀드 **상태머신**을 keyhint_hold.zig 순수 Zig로 이주 — 간헐 미표시 루트커즈[옛 Swift가 타이머 만료 시 NSEvent.modifierFlags라는 2번째 출처를 재읽기해 stale/빈 값에 트리거 유지여도 미표시] 수정. Swift는 flagsChanged·timer·keyDown/blur를 머신에 흘리고 반환 Action으로 타이머·redraw만; visible은 머신이 소유. set_key_hints 제거[머신이 toggle]. key_hints_config는 delay만 Swift가 씀). 87: set_key_hints + key_hints_config(단축키 힌트 HUD — KH-4). Swift flagsChanged가 트리거 모디파이어 단독 홀드(delay ms)를 감지하면 set_key_hints(1)로 각 chrome 요소 우상단에 단축키 배지를 켜고(markMetalNeedsRedraw 후 buildChromeOverlayPrep이 buildKeyHintBadges로 그림), 떼거나 다른 키·포커스 상실에 set_key_hints(0). key_hints_config는 enabled/delay/modifier(0=cmd,1=ctrl,2=opt)를 config에서 읽어 Swift에 준다(gesture 정책=Zig·타이머 clock=Swift). 패시브라 anyOverlayOpen 비포함(커서 blink·keyEquivalent 불변), 빌드 게이트에만 더함. export 2개 추가 — 구조체 offset 불변. 86: MetalFrame.sidebar_scroll_offset_px + maru_metal_renderer_draw 마지막 인자(사이드바 세로 스크롤 — 워크스페이스 카드가 헤더 아래 뷰포트를 넘으면 휠/트랙패드로 스무스 스크롤. 렌더러가 사이드바 셀 py_top에서 빼 카드를 위로 밀고 >0이면 [header_h, drawable_h] scissor로 헤더 위로 샌 카드를 자른다; GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립. 우측에 pane 스크롤바 동형 fade thumb. 끝에 1필드/1인자 추가해 기존 offset·인자 순서 불변). 85: take_command_catalog_dirty(커맨드 카탈로그 런타임 재빌드 신호 — keybind rebind/unbind·reload·reset이 rebuildCommandCatalog로 카탈로그를 다시 빌드하며 command_catalog_dirty를 세우면 Swift가 tick마다 drain해 1이면 buildMainMenu로 메뉴바 keyEquivalent를 다시 깐다. reset은 확인 모달-확정 후 tick에서 갱신되므로 동기 호출이 아니라 이 신호가 단일 경로 — 인앱 rebind·멀티창 활성 세션도 커버. take_global_hotkeys_dirty와 같은 1회성, 끝에 export 추가 — 구조체 offset 불변). 84: MetalFrame.modal_clip_x/y/w/h_px(모달 오버레이 px 클리핑 인프라 — chrome draw.Op.clip을 lowering이 OverlayRaster.clip_rect로 모으면 렌더러가 모달 셀 draw에 setScissorRect 적용; w==0=클리핑 없음[기존 동작]. 부분 카드 픽셀 스크롤[알림 패널 등] 재사용 인프라, 컴포넌트 적용은 후속. 끝에 4필드 추가해 구조체 offset 불변). 83: take_color_sample_request + provide_sampled_color(HSV picker `i` 스포이드 → Swift가 NSColorSampler[OS 화면 색 추출기]를 열고 사용자가 고른 화면 픽셀 RGB를 picker에 반영. Zig가 color_sample_pending을 세우고 Swift가 tick마다 take_color_sample_request로 drain해 1이면 NSColorSampler.show[비동기], 콜백에서 provide_sampled_color[r,g,b u32]로 되돌린다 → settings.setPickerRgb로 pick h/s/v 반영. file-pick take/provide 패턴이나 provide가 비동기 콜백. 끝에 export 2개 추가 — 구조체 offset 불변). 82: take_global_hotkeys_dirty(글로벌 핫키 라이브 OS 재등록 — 세팅 GUI 녹음/해제[rebind/unbind]·reload·reset이 global_hotkeys를 다시 빌드하고 dirty를 세우면 Swift가 tick마다 drain해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 descriptor를 OS에 재등록. global_hotkeys getter는 그대로 재사용. take_bell류 1회성, 끝에 export 추가 — 구조체 offset 불변). 81: take_file_pick_request + provide_picked_file(세팅 window.background-image 행 활성 → 파일 선택창. Zig가 file_pick_pending을 세우고 Swift가 tick마다 take_file_pick_request로 drain해 1이면 NSOpenPanel[PNG]을 열어 고른 절대경로를 provide_picked_file로 되돌린다 → Zig가 setText + 라이브 반영 + dirty. OSC52 read take/provide와 같은 패턴, 끝에 export 2개 추가 — 구조체 offset 불변). 80: any_overlay_open getter(세팅 등 chrome 오버레이/녹음 열림 — Swift performKeyEquivalent가 1이면 메뉴바 keyEquivalent를 양보해 ⌘조합을 keyDown→handleKeyEvent 모달/녹음 가드로 보낸다. 순수 read getter, 구조체 offset 불변). 79: window_blur_radius(config window.blur getter — 창 뒤 데스크톱 배경 블러 반경 px. window.opacity>=1이면 0[불투명 창=블러 안 보임]. 블러는 GPU 아니라 OS 창 속성이라 host가 적용: macOS=CGSSetWindowBackgroundBlurRadius[Ghostty·Terminal.app 비공개 CGS], Win=DwmSetWindowAttribute·Linux=컴포지터 속성[추후]. 게이트 정책은 Zig 단일 출처[windowBlurRadius], 순수 read getter라 구조체 offset 불변). 78: pending_notification에 surface_id_out·foreground_out 추가 + activate_surface(u32 found) export — 데스크톱 알림(OSC 9/777·에이전트 완료) 클릭 시 발신 surface로 점프. Swift가 알림 userInfo에 (창 토큰, surface_id)를 실어, 클릭 시 토큰으로 창/세션을 고르고 surface_id를 activate_surface로 넘기면 Zig가 activateSurfaceById(switchTab→focusPaneByPtr→focusTerm 순서 단일 출처)로 활성화. id는 세션-로컬·재사용 안 함이라 stale 안전. foreground_out=전면 배너 여부(에이전트 완료=1, OSC=0 전면이면 목록만) → willPresent가 자기 화면 알림 노이즈 억제. 끝에 export 1개 추가 + pending_notification 시그니처 확장 — 구조체 offset 불변. 77: set_system_appearance(theme.follow-system — Swift가 macOS NSAppearance light/dark를 생성 직후·변경마다 알려주고, follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체(write-back 없음). 끝에 export 추가, 구조체 offset 불변). 76: take_bell_badge(bell.dock-badge — dispatchBell이 BEL+언포커스 시 bell_badge_pending을 세우고 Swift가 tick마다 drain해 NSApp.dockTile.badgeLabel ● 표시, 포커스 복귀 시 Swift가 지움. take_bell과 같은 1회성 export 추가. 시각 벨 bell.visual은 GpuQuad라 ABI 무변). 75: OSC 52 read(input.osc52.read=allow|deny — take_clipboard_read_request[정책 게이트, allow면 1]·provide_clipboard_read[Swift가 읽은 클립보드 바이트 → base64 OSC 52 응답을 요청 surface PTY로]. 코어는 `?` 쿼리 파싱만, 정책·실제 클립보드 읽기는 platform. deny 기본=탈취 방지. 끝에 export 2개 추가 — 구조체 offset 불변). 74: take_clipboard_action(input.right-click=paste·menu의 OS 클립보드 1회성 동작 — Zig가 우클릭/터미널 메뉴에서 pending_clipboard_action을 세우고 Swift가 tick마다 take_clipboard_action으로 drain해 0=무동작/1=copy(copySelectionToPasteboard)/2=paste(pastePasteboardText) 실행. 클립보드는 OS 소유라 Swift 실행, "언제"는 Zig 결정. take_bell과 같은 1회성 패턴, 끝에 export 추가 — 구조체 offset 불변). 73: option_as_meta(config input.option-as-meta getter — Swift keyDown이 읽어 Option-단독 키를 입력기 조합 경로로 보낼지[false] meta 인코딩 경로로 보낼지[true=현행] 가른다. 순수 read getter, 구조체 offset 불변). 72: take_mouse_hide(타이핑 중 마우스 숨김 — config input.mouse-hide-while-typing. handleKeyEvent가 .terminal_input 글자 입력 시 mouse_hide_pending을 켜고, Swift가 tick마다 take_mouse_hide로 drain해 NSCursor.setHiddenUntilMouseMoves(true) 호출. 복원은 다음 마우스 이동에서 AppKit 자동. take_bell과 같은 1회성 export 추가 — 기존 구조 불변). 71: hover/url_at의 cmd_held(bool) → mods(i32 xterm 비트: shift=4·alt=8·ctrl=16·cmd=32) — URL 클릭/hover 수식키를 config input.url-click-modifier로(기본 command=현행 Cmd). modifier 판정을 Zig 단일 출처(urlModifierHeld)로 이주 — Swift는 NSEvent 수식키를 비트로 변환만(네이티브 최소·이식성). url_at에 mods 인자 추가(안 맞으면 len 0=일반 클릭). 70: MetalFrame.window_opacity_milli(window.opacity 배경 투명도 × 1000 → 화면 clear color alpha; default 배경/기본 배경 셀만 투명, 명시적 배경색 셀은 불투명 유지 — iTerm2/Ghostty background-opacity 모델. Swift가 metal layer/NSWindow도 opacity<1이면 비불투명으로. 셰이더·셀 불변. 끝에 추가해 기존 offset 불변). 69: drop_image(클립보드 이미지 Cmd+V → maru ssh 원격이면 control socket 업로드 후 원격 경로 paste[1], 로컬이면 무처리[0]; 바이트 직접+pasted-<pid>-N.png 이름 — 스크린샷 over SSH). 68: drop_files(드래그앤드롭 파일 경로 NUL 구분 → maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드 업로드 후 원격 절대경로 paste, 로컬이면 경로 셸 이스케이프 paste; 분기는 Zig handleDroppedFiles. Swift는 fileURL 드롭일 때만 호출, 웹 URL·텍스트는 paste_text 유지 — 이미지 드롭 over SSH 3단계, docs/ssh-integration.md §4). 67: paste_text.escape_each(드래그/붙여넣기 파일 경로·URL의 셸 이스케이프 메커니즘을 Swift host에서 Zig로 이주 — escape_each!=0이면 bytes를 NUL 구분 토큰으로 보고 각 토큰을 셸 이스케이프 후 공백 join; 평문·Cmd+V 웹 URL은 0=raw. "무엇을 이스케이프할지"는 pasteboard 타입에 묶여 host가 정하고, 메커니즘은 Zig가 단일 출처 — 네이티브 레이어 최소화 정책). 66: MetalFrame.titlebar_strip_px(상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글 ◧ 글리프를 이 띠 [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬; 펼침 헤더 아이콘은 terminal_origin_x_px>0이라 영향 없음. 끝에 추가해 기존 offset 불변). 65: request_window_close(빨간 닫기 버튼/창 단위 닫기에 실행 중 명령이 있으면 Zig가 확인 모달을 열고 deferred(1) 반환 — Swift windowShouldClose가 false로 보류; 확정 시 tick session-ended가 창을 닫음. iTerm2/Terminal.app/Ghostty의 "running process 닫기 확인" 관례. in-app 닫기(close_tab/close_term 액션·사이드바/탭바 ✕)는 ABI 없이 requestClose가 같은 모달을 띄움). 64: is_window_drag_region(사이드바 헤더 빈 영역 hit-test — Swift가 1이면 네이티브 타이틀바처럼 창 이동 performDrag·더블클릭 확대 zoom; MaruMetalTerminalView.mouseDownCanMoveWindow=false로 콘텐츠 자동 드래그를 끈 뒤 이 영역만 드래그). 63: take_sidebar_config_dirty(view options ⚙ 메뉴에서 사이드바 표시 토글 show-branch/show-folder를 바꾸면 dirty 신호 — Swift가 tick마다 drain해 serialize_sidebar_config를 config 파일에 atomic write; take_bell과 같은 1회성 신호). 62: MetalFrame.sidebar_header_height_px(사이드바 상단 헤더 — 검색바·view options·새 워크스페이스 아이콘 — 높이; 렌더러가 사이드바 셀 밴드·카드 glyph를 이만큼 아래로 민다). 61: serialize_sidebar_config(view options 사이드바 토글 show-branch/show-folder → config 파일 부분 갱신 저장, 주석 보존; 앱↔config 양방향). 60: reset_input_modes(Reset 메뉴 ⌘⇧R — ssh 비정상 종료 후 잔류 입력 모드 focus 1004·mouse·kitty keyboard만 끄는 비파괴 리셋; 셸 통합 precmd 자동 리셋의 수동 백업 경로). 59: mouse_moved(버튼 없는 hover 이동 → mouse reporting; DECSET 1003 any-event일 때만 Zig가 SGR/x10 motion 리포트, click/wheel과 같은 reportMouse 경로). 58: send_text 제거 — 드래그 삽입을 paste 경로(pasteText→encodePaste; DECSET 2004 켜졌을 때만 bracketed)로 되돌림. Ghostty도 드래그를 completeClipboardPaste로 보내 TUI가 2004를 켜면 bracketed paste라 경로를 한-덩어리([Image])로 인식한다 — v57에서 직접 입력으로 바꾼 게 Ghostty와 어긋나 그 인식이 깨졌던 것을 정정. 57: send_text 도입(드래그 직접 입력 — v58에서 되돌림). 56: reload_config/reset_defaults(Reload Config·Reset to Defaults 메뉴 — 재시작 없이 config 파일 재로드 / 통합 리셋 확인 모달 후 전체 기본값+config 파일 덮어쓰기). 55: SessionConfig.width_px/height_px/scale_milli(셸을 처음부터 실제 창 크기로 spawn — 80×24→resize 핸드셰이크/zsh PROMPT_EOL_MARK % 잔상 제거). 54: config_path(Open Config 메뉴 — config 파일 경로 노출, Swift가 열기). 53: take_bell(G12 BEL → 시스템 벨 NSSound.beep). 52: pending_notification(OSC 9/777 데스크톱 알림 drain — VT 갭 G2e platform wiring). 51: MetalFrame.terminal_bg(OSC 11 배경 set → 화면 clear color — VT 갭 G2d). 50: pending_clipboard(OSC 52 클립보드 쓰기 drain — VT 갭 G2b platform wiring). 49: MetalFrame.live_image_ids(kitty graphics K4c 텍스처 eviction). 48: MetalFrame.gpu_images/image_uploads/image_pixels(kitty graphics K2 이미지 렌더 채널). 47: KeyEvent.base_codepoint(kitty CSI u base-layout key). 46: mouse.button/mods(mouse reporting — 8b). 45: focus_changed(DECSET 1004 focus reporting → CSI I/O). 44: scroll_wheel.delta_x(트랙패드 가로 → 탭 바 스크롤). 43: MetalFrame.modal_cells_start(모달 over quad 경계 — C4b 모달). 42: GpuQuad.layer. 41: gpu_quads/gpu_shadows. 40: show_notice
 pub const default_queue_capacity: u32 = 16;
 
 /// 전역(OS) 단축키 한 개의 OS 등록 기술자(C ABI). Swift가 `maru_macos_app_session_global_hotkeys`로
@@ -1963,7 +1963,7 @@ pub const AppSession = struct {
     }
 
     /// 얇은 **세로선**을 overlay 셀로 그린다 — [y_start, y_end) 범위에 행마다(cell 높이 step) origin_x에 sentinel
-    /// 셀 1개씩, reserved로 cell의 한 변 ~2px만 칠한다(3=좌측, 5=우측). divider 세로선과 pane 테두리 좌/우가 공유.
+    /// 셀 1개씩, reserved로 cell의 한 변만 칠한다(divider=30 seam중앙 config두께 / pane 테두리 3=좌·5=우 셀15%).
     fn appendVerticalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, y_start: u32, y_end: u32, reserved: u16, color: u32) void {
         const ch = self.cell_height_px;
         if (ch == 0) return;
@@ -1976,7 +1976,7 @@ pub const AppSession = struct {
     }
 
     /// 얇은 **가로선**을 overlay 셀로 그린다 — origin_y에 폭(width_px→floor cols, 최소 1)만큼 sentinel 셀 1개,
-    /// reserved로 cell의 한 변 ~2px만 칠한다(2=하단, 4=상단). divider 가로선과 pane 테두리 상/하가 공유.
+    /// reserved로 cell의 한 변만 칠한다(divider=31 seam중앙 config두께 / pane 테두리 4=상·2=하 셀15%).
     fn appendHorizontalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, origin_y: u32, width_px: u32, reserved: u16, color: u32) void {
         const cw = self.cell_width_px;
         if (cw == 0) return;
@@ -2005,6 +2005,7 @@ pub const AppSession = struct {
     /// 출처(C2). 단일 panel이면 빈 채. 셀 0이면 무동작. layout과 같은 좌표계(termRect)라 경계에 정확히 얹힌다.
     fn appendActiveTabDividers(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
         if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+        if (self.dividerThicknessPx() == 0) return; // split.divider-thickness=0(숨김)이면 0-area 셀을 아예 안 낸다(낭비 방지)
         var app_segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
         defer app_segs.deinit(self.allocator);
         self.layoutActiveTabDividers(&app_segs) catch return;
@@ -2020,26 +2021,24 @@ pub const AppSession = struct {
     }
 
     /// chrome `divider.view`가 낸 Rule op(선)을 렌더러 부분 사각형 NativeMetalCell로 lower한다 — 세로선(from.x==to.x)은
-    /// 경계 x에 ~2px 센터(−1 offset) reserved=3을 행마다, 가로선은 경계 y에 ~2px(하단 reserved=2, y+1−ch offset) bounds
-    /// 폭 한 칸. 색은 `dividerColor()`(tui 토큰 .divider=sidebar_active). divider는 overlay(rasterizeOverlayCells)가
-    /// 아니라 pane chrome 셀이라, full-cell이 아닌 이 얇은-선 lowering을 platform이 따로 가진다(옛 appendActiveTabDividers의 offset 보존).
+    /// 경계 x에 셀 1개씩(reserved=30) 행마다, 가로선(from.y==to.y)은 경계 y에 bounds 폭 한 칸(reserved=31). **셀 origin을
+    /// 경계(seam) 자체에 두고**, 렌더러(reserved 30/31)가 config 두께(divider_thickness_px)를 그 seam에 **중앙 정렬**하고
+    /// 셀 크기로 clamp한다 — 옛 −1/+1−ch offset은 ~2px 고정 가정이라 두꺼운 값이 한쪽으로 쏠렸다(code-review). 색은
+    /// `dividerColor()`(tui 토큰 .divider=sidebar_active). divider는 overlay가 아니라 pane chrome 셀이라 이 얇은-선 lowering을 platform이 갖는다.
     fn lowerDividerRules(self: *AppSession, ops: []const chrome.draw.Op, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
-        const ch = self.cell_height_px;
         const color = self.dividerColor();
         for (ops) |op| switch (op) {
             .rule => |r| {
-                if (r.from.x == r.to.x) { // 세로선: 경계 x −1 offset, y0..y1 행마다
-                    const x: u32 = if (r.from.x >= 1) @intCast(r.from.x - 1) else 0;
+                if (r.from.x == r.to.x) { // 세로선: 경계 x(seam)에 셀 origin, y0..y1 행마다 (렌더러가 seam 중앙정렬)
+                    const x: u32 = @intCast(@max(r.from.x, 0));
                     const y0: u32 = @intCast(@max(@min(r.from.y, r.to.y), 0));
                     const y1: u32 = @intCast(@max(@max(r.from.y, r.to.y), 0));
-                    self.appendVerticalLine(out, x, y0, y1, 3, color);
-                } else { // 가로선(from.y == to.y): 경계 y+1−ch offset, bounds 폭 한 칸
-                    const y_pos = r.from.y;
-                    const ch_i: i32 = @intCast(ch);
-                    const oy: u32 = if (y_pos + 1 >= ch_i) @intCast(y_pos + 1 - ch_i) else 0;
+                    self.appendVerticalLine(out, x, y0, y1, 30, color); // reserved 30=divider 세로선(seam 중앙정렬 config 두께, 커서 15%와 분리)
+                } else { // 가로선(from.y == to.y): 경계 y(seam)에 셀 origin, bounds 폭 한 칸 (렌더러가 seam 중앙정렬)
+                    const oy: u32 = @intCast(@max(r.from.y, 0));
                     const x0: u32 = @intCast(@max(@min(r.from.x, r.to.x), 0));
                     const x1: u32 = @intCast(@max(@max(r.from.x, r.to.x), 0));
-                    self.appendHorizontalLine(out, x0, oy, x1 - x0, 2, color);
+                    self.appendHorizontalLine(out, x0, oy, x1 - x0, 31, color); // reserved 31=divider 가로선(seam 중앙정렬 config 두께)
                 }
             },
             else => {},
@@ -2103,8 +2102,10 @@ pub const AppSession = struct {
 
     /// minimal 세션에서 split이면 **활성 pane 둘레에 얇은 테두리**(focus accent)를 overlay 셀로 그린다 — 사이드바·탭
     /// 바가 없는 minimal에선 커서 말고는 어느 pane이 입력을 받는지 단서가 없으므로(full은 탭 바 하이라이트가 보여줌).
-    /// 4변을 reserved 부분 사각형(3=좌·5=우·4=상·2=하, 각 ~2px 안쪽 띠)으로 그린다 — 좌/우는 행마다, 상/하는 폭 전체
-    /// 한 칸. 색은 divider와 같은 sidebarActiveBg. chrome_minimal이 아니거나 단일 pane(테두리 불필요)이면 무동작.
+    /// 4변을 reserved 부분 사각형(커서 hollow와 같은 셀 ~15% 강조 띠: 3=좌·5=우·4=상·2=하)으로 그린다 — 좌/우는 행마다,
+    /// 상/하는 폭 전체 한 칸. 색은 divider와 같은 sidebarActiveBg. **focus accent는 divider 두께(split.divider-thickness)와
+    /// 분리** — divider를 0(숨김)으로 둬도 minimal 모드엔 탭 바·사이드바가 없어 이 테두리가 유일한 포커스 단서라 항상 그린다
+    /// (code-review: divider config와 결합하면 divider=0에서 focus 단서가 사라짐). chrome_minimal이 아니거나 단일 pane이면 무동작.
     fn appendActivePaneBorder(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), rect: maru.session.SplitRect, pane_count: usize) void {
         if (!self.chrome_minimal) return; // full은 활성 pane을 탭 바 하이라이트로 구분한다
         if (pane_count <= 1) return; // split 아니면 전체가 활성 pane이라 테두리 불필요
@@ -2113,8 +2114,8 @@ pub const AppSession = struct {
         if (cw == 0 or ch == 0 or rect.w == 0 or rect.h == 0) return;
         const color = self.sidebarActiveBg();
         const y_end = rect.y + rect.h;
-        // 4변 thin 테두리(divider와 같은 reserved 부분-사각형 헬퍼 공유). 우측은 cell 우측 ~2px(reserved=5)라
-        // origin_x를 rect 우변 한 칸 안쪽에, 하단은 cell 하단 ~2px(reserved=2)라 origin_y를 한 칸 안쪽에 둔다.
+        // 4변 thin 테두리(커서 hollow와 같은 reserved 2~5 셀 15% 강조 띠 — divider config 두께와 분리, 항상 보임). 우측은
+        // cell 우측 띠(reserved=5)라 origin_x를 rect 우변 한 칸 안쪽에, 하단은 cell 하단 띠(reserved=2)라 origin_y를 한 칸 안쪽에.
         self.appendVerticalLine(out, rect.x, rect.y, y_end, 3, color); // 좌
         self.appendVerticalLine(out, rect.x + rect.w -| cw, rect.y, y_end, 5, color); // 우
         self.appendHorizontalLine(out, rect.x, rect.y, rect.w, 4, color); // 상
@@ -12778,7 +12779,19 @@ pub const AppSession = struct {
         frame.titlebar_strip_px = self.titlebar_strip_px;
         // 창 배경 투명도 → clear color alpha(렌더러가 /1000). opacity는 loader가 0~1로 검증하므로 *1000은 0~1000.
         frame.window_opacity_milli = @intFromFloat(@round(self.appearance.window_opacity * 1000.0));
+        // pane divider(reserved 30/31) device px 두께 — config split.divider-thickness(논리 pt) 단일 출처.
+        frame.divider_thickness_px = self.dividerThicknessPx();
         return frame;
+    }
+
+    /// config split.divider-thickness(논리 pt)를 divider strip의 backing px 두께로 환산한다(× scale_milli/1000 —
+    /// letter-spacing·window padding과 같은 분수 scale). **0(이하)=숨김, 양수는 최소 1px 보장** — round가 0.5px 미만을
+    /// 0으로 없애 양수 config인데 divider가 통째 사라지는 걸 막는다(code-review: 1x에서 0.4pt 등). @intFromFloat 음수 UB도
+    /// 이 게이트가 막는다. metalFrame(렌더 값)·appendActiveTabDividers(0이면 셀 emit 스킵)의 단일 출처. 커서 강조선(15%)과 무관.
+    fn dividerThicknessPx(self: *const AppSession) u32 {
+        if (self.scale_milli == 0 or self.appearance.split_divider_thickness <= 0.0) return 0;
+        const px_f = self.appearance.split_divider_thickness * @as(f32, @floatFromInt(self.scale_milli)) / 1000.0;
+        return @max(@as(u32, 1), @as(u32, @intFromFloat(@round(px_f))));
     }
 
     pub fn deinit(self: *AppSession) void {
@@ -15333,7 +15346,7 @@ test "minimal active pane border: 4 edges only in minimal split" {
     defer out.deinit(allocator);
     const rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
 
-    // ① minimal: 단일 pane이면 무동작, split(>1)이면 4변 테두리(reserved 2/3/4/5)·색=sidebarActiveBg.
+    // ① minimal: 단일 pane이면 무동작, split(>1)이면 4변 테두리(reserved 2/3/4/5 셀 15% — divider config와 분리)·색=sidebarActiveBg.
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
@@ -15355,7 +15368,7 @@ test "minimal active pane border: 4 edges only in minimal split" {
         out.clearRetainingCapacity();
         session.appendActivePaneBorder(&out, rect, 2); // split
         try std.testing.expect(out.items.len >= 6); // 좌/우(행마다 2) + 상/하 2
-        // 4변이 모두 그려졌는지(reserved 2=하·3=좌·4=상·5=우 전부 등장) + 색은 focus accent.
+        // 4변이 모두 그려졌는지(reserved 3=좌·5=우·4=상·2=하 셀 15% 강조 띠 — divider config 두께와 분리, 항상 보임) + 색=focus accent.
         var seen = [_]bool{false} ** 6;
         for (out.items) |c| {
             try std.testing.expectEqual(session.sidebarActiveBg(), c.background);
@@ -19311,9 +19324,11 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
     _ = try session.tick();
 }
 
-// divider가 full-cell이 아니라 얇은 선(렌더러 부분 사각형 reserved=3 bar / 2 underline)으로 그려지는지 — 너무
-// 굵어 터미널을 가리던 문제 수정. 좌우 split=세로선(reserved=3, 행마다·경계 x 센터), 상하 split=가로선(reserved=2).
-test "split dividers render as thin lines (reserved bar/underline), not full cells" {
+// divider가 full-cell이 아니라 얇은 선(렌더러 부분 사각형 reserved 30 세로선 / 31 가로선 — seam 중앙정렬 config 두께,
+// 커서 강조선 2~5와 분리)으로 그려지는지. 좌우 split=세로선(reserved=30, 행마다·경계 x), 상하 split=가로선(reserved=31).
+// 주: 이 테스트는 셀의 reserved 코드만 검증한다 — 렌더러 .m가 그 strip을 실제 얇게(seam 중앙정렬·셀 clamp) 그리는지는
+// 별개(c351a19의 셀당 2 quad A-path가 배경 quad를 reserved=0으로 강제해 셀폭 블록으로 번지던 회귀는 .m 수정으로 잡았고 여긴 셀 코드만).
+test "split dividers render as thin lines (reserved 30/31 divider strips), not full cells" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -19329,7 +19344,7 @@ test "split dividers render as thin lines (reserved bar/underline), not full cel
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    // 좌우 split → 세로 divider. 모든 divider 셀이 reserved=3(bar=얇은 세로선), 경계 x 근처(±cw)에 센터.
+    // 좌우 split → 세로 divider. 모든 divider 셀이 reserved=30(좌 세로선=config 두께), 경계 x 근처(±cw)에 센터.
     try session.splitActivePane(.horizontal);
     var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
     defer segs.deinit(allocator);
@@ -19340,18 +19355,18 @@ test "split dividers render as thin lines (reserved bar/underline), not full cel
     session.appendActiveTabDividers(&cells);
     try std.testing.expect(cells.items.len > 1); // 행마다 한 셀 → 여러 개
     for (cells.items) |c| {
-        try std.testing.expectEqual(@as(u16, 3), c.reserved); // bar
-        try std.testing.expectEqual(@as(u16, 1), c.width); // 한 칸(부분 사각형이 ~2px만 칠함)
+        try std.testing.expectEqual(@as(u16, 30), c.reserved); // divider 세로선(seam 중앙정렬, 커서 15%와 분리)
+        try std.testing.expectEqual(@as(u16, 1), c.width); // 한 칸(부분 사각형이 config 두께만 칠함)
         try std.testing.expect(c.origin_x + 1 >= seam_x and c.origin_x <= seam_x + 1); // 경계 x 센터
     }
 
-    // 상하 split → 가로 divider는 reserved=2(셀 하단 가로선) 한 칸(폭=cols).
+    // 상하 split → 가로 divider는 reserved=31(seam 중앙정렬 가로선) 한 칸(폭=cols).
     try session.splitActivePane(.vertical);
     cells.clearRetainingCapacity();
     session.appendActiveTabDividers(&cells);
     var saw_underline = false;
     for (cells.items) |c| {
-        if (c.reserved == 2) {
+        if (c.reserved == 31) {
             saw_underline = true;
             try std.testing.expect(c.width > 1); // 가로선은 bounds 폭만큼
         }

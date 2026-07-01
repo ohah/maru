@@ -991,6 +991,11 @@ pub const MetalFrame = extern struct {
     // (헤더 glyph는 터미널 셀 패스라 영향 없음). GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 헤더 위를
     // 클립한다(sidebar_scroll_offset_px 단일 출처). 0이면 기존 동작 그대로(scissor 없음). 끝에 추가해 기존 offset 불변(ABI v86).
     sidebar_scroll_offset_px: u32 = 0,
+    // pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
+    // scale_milli로 환산(metalFrame가 스탬프). renderer가 divider strip 폭을 이 값으로 정하되 seam 중앙정렬·셀 clamp한다
+    // (커서 강조선·활성 pane focus 테두리 reserved 2~5의 셀 15%와 분리라 divider만 config로 조절). 0이면 divider 안 그림(숨김).
+    // 끝에 추가해 기존 offset 불변(ABI v94).
+    divider_thickness_px: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).

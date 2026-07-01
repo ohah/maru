@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 93u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 94u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -180,9 +180,10 @@ typedef struct MaruAppHostMetalCell {
     uint16_t row;
     uint16_t col;
     uint16_t width;
-    /* overlay 종류: 0=일반 cell, 2=커서 underline(하단 바), 3=커서 bar(좌측 세로 바) — DECSCUSR.
-       4=상단선/overline(SGR 53), 5=우측선(active pane 테두리), 6=strikethrough(SGR 9 — 셀 중앙 가로선).
-       renderer는 2~6에서 cell의 한 변/중앙 ~2px 띠만 칠한다(글리프를 안 가림). */
+    /* overlay 종류: 0=일반 cell, 2=커서 underline/hollow 하단, 3=커서 bar/hollow 좌측, 4=hollow 상단,
+       5=hollow 우측(커서 강조선 — 셀 ~15%). 6=strikethrough·7=2중밑줄 둘째·9=밑줄·10=윗줄(SGR 텍스트 장식선 ~7.5%).
+       8=OSC 133 거터(셀 왼쪽 바깥). 30=pane divider 세로선·31=divider 가로선(seam 중앙정렬 config 두께 divider_thickness_px, 커서와 분리).
+       renderer는 reserved에서 cell의 한 변/중앙 가는 띠만 칠한다(글리프를 안 가림). */
     uint16_t reserved;
     uint32_t codepoint;
     uint32_t slot_id;
@@ -369,6 +370,10 @@ typedef struct MaruAppHostMetalFrame {
        터미널 셀 패스라 영향 없음). GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립한다(단일 출처).
        0이면 기존 동작(scissor 없음). 끝에 추가해 기존 offset 불변(ABI v86). */
     uint32_t sidebar_scroll_offset_px;
+    /* pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
+       scale로 환산. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다(커서·focus 테두리 reserved 2~5의 셀 15%와
+       분리). 0=안 그림. 끝에 추가해 기존 offset 불변(ABI v94). */
+    uint32_t divider_thickness_px;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

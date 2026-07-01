@@ -18583,20 +18583,9 @@ test "close-confirm: 셸 통합 없음(unknown, primary 화면)이면 보수적�
 test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한 닫기 실행)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
+    const session = try initSmokeSessionTwoTerms(allocator);
     defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
     defer session.deinit();
-    session.window_padding_px = .{};
-    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
-    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
 
     // 모달이 뜨고 active_term 닫기가 보류된 상태를 직접 구성(requestClose의 모달-오픈 분기와 같은 상태).
     session.pending_close = .active_term;

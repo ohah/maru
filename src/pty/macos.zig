@@ -69,6 +69,55 @@ fn parseArgv1Basename(data: []const u8) ?[]const u8 {
     return if (base.len == 0) null else base; // 끝-슬래시뿐인 비정상 경로면 null
 }
 
+/// KERN_PROCARGS2 바이트에서 **argv[0]** basename 추출 — parseArgv1Basename과 같되 argv[1]이 아니라 argv[0]에서 멈춘다.
+/// comm이 버전으로 바뀐 에이전트(claude "2.1.197")를 argv[0]="claude"로 되짚는 폴백용. argc>=1이면 argv[0]이 존재한다.
+fn parseArgv0Basename(data: []const u8) ?[]const u8 {
+    if (data.len <= @sizeOf(c_int)) return null;
+    const argc: u32 = @as(u32, data[0]) | (@as(u32, data[1]) << 8) | (@as(u32, data[2]) << 16) | (@as(u32, data[3]) << 24);
+    if (argc < 1) return null;
+    var off: usize = @sizeOf(c_int); // argc(int) 건너뜀
+    while (off < data.len and data[off] != 0) off += 1; // exec_path 문자열
+    while (off < data.len and data[off] == 0) off += 1; // null 패딩
+    const start = off; // argv[0] 시작
+    while (off < data.len and data[off] != 0) off += 1;
+    if (off <= start) return null; // argv[0] 없음
+    const base = lastPathComponent(data[start..off]);
+    return if (base.len == 0) null else base;
+}
+
+// Claude Code(v2.1.197+)는 실행 중 process.title(=comm)을 **버전 문자열**("2.1.197")로 바꿔, foregroundProcessName의
+// comm 기반 감지가 comm="claude"가 아니라 "2.1.197"을 읽어 실패했다(실측). 이 테스트는 그 폴백 파서(argv[0] basename)가
+// claude를 되짚는지 고정한다 — comm이 숫자로 시작하면 foregroundProcessName이 이 결과를 쓴다. (KERN_PROCARGS2 실 sysctl은
+// 프로세스 필요라, 순수 파서만 검증.)
+test "parseArgv0Basename: comm이 버전으로 바뀐 claude를 argv[0]으로 되짚는다" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a, &[_]u8{ 2, 0, 0, 0 }); // argc=2 (LE int)
+    try buf.appendSlice(a, "/Users/x/.local/share/mise/installs/node/24/bin/claude"); // exec_path
+    try buf.append(a, 0);
+    try buf.appendSlice(a, &[_]u8{ 0, 0, 0 }); // null 패딩
+    try buf.appendSlice(a, "claude"); // argv[0] = "claude"(버전으로 안 바뀐 원본)
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "--dangerously-skip-permissions"); // argv[1]
+    try buf.append(a, 0);
+    try std.testing.expectEqualStrings("claude", parseArgv0Basename(buf.items) orelse return error.TestUnexpectedNull);
+
+    // 경로 포함 argv[0]도 basename만.
+    var buf2: std.ArrayList(u8) = .empty;
+    defer buf2.deinit(a);
+    try buf2.appendSlice(a, &[_]u8{ 1, 0, 0, 0 }); // argc=1
+    try buf2.appendSlice(a, "/opt/x/codex"); // exec_path
+    try buf2.append(a, 0);
+    try buf2.append(a, 0); // 패딩
+    try buf2.appendSlice(a, "/opt/x/codex"); // argv[0] = 경로
+    try buf2.append(a, 0);
+    try std.testing.expectEqualStrings("codex", parseArgv0Basename(buf2.items) orelse return error.TestUnexpectedNull);
+
+    // argc=0(비정상)이면 null.
+    try std.testing.expectEqual(@as(?[]const u8, null), parseArgv0Basename(&[_]u8{ 0, 0, 0, 0 }));
+}
+
 /// captureAgentArgv 캡처 결과 타입 — 비-macOS 스텁(session.zig)과 공유하려고 types.zig에 둔다.
 const ProcArgs = types.ProcArgs;
 
@@ -144,6 +193,15 @@ fn foregroundScriptBasename(pgid: c_int) ?[]const u8 {
     var size: usize = procargs_buf.len;
     if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
     return parseArgv1Basename(procargs_buf[0..size]);
+}
+
+/// 포그라운드 pgid의 **argv[0] basename**(정적 procargs_buf 슬라이스). comm이 버전 문자열로 바뀐 에이전트(Claude Code가
+/// process.title을 "2.1.197"로 설정)를 argv[0]="claude"로 되짚는 용도 — foregroundScriptBasename(argv[1])과 같은 규약.
+fn foregroundArgv0Basename(pgid: c_int) ?[]const u8 {
+    var mib = [_]c_int{ ctl_kern, kern_procargs2, pgid };
+    var size: usize = procargs_buf.len;
+    if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
+    return parseArgv0Basename(procargs_buf[0..size]);
 }
 
 test "parseArgv1Basename: node 래퍼의 argv[1] 스크립트 basename 추출(codex 감지)" {
@@ -527,6 +585,17 @@ pub const PtySession = struct {
                 const m = @min(script.len, out.len);
                 if (m > 0) {
                     std.mem.copyForwards(u8, out[0..m], script[0..m]);
+                    return out[0..m];
+                }
+            }
+        } else if (comm.len > 0 and std.ascii.isDigit(comm[0])) {
+            // comm이 **버전 문자열처럼**(숫자로 시작, 예 "2.1.197") 보이면 argv[0] basename으로 교체 — Claude Code(v2.1.197+)
+            // 처럼 에이전트가 실행 중 자기 process.title(=comm)을 버전으로 바꾸면 comm="claude"가 아니라 "2.1.197"로 읽혀
+            // 감지가 실패한다(실측). argv[0]은 그대로 "claude"라 그걸 쓴다(node 인터프리터 폴백과 같은 패턴, argv[0] 인덱스만 다름).
+            if (foregroundArgv0Basename(pgid)) |a0| {
+                const m = @min(a0.len, out.len);
+                if (m > 0) {
+                    std.mem.copyForwards(u8, out[0..m], a0[0..m]);
                     return out[0..m];
                 }
             }

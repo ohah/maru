@@ -16,6 +16,10 @@
 //! degrade — 훅 없으면 그 세션이 안 뜰 뿐, maru는 정상).
 
 const std = @import("std");
+const maru = @import("maru");
+
+/// 매핑이 어느 에이전트 것인지 검증할 때 쓰는 종류(claude/codex 세션 루트 구분). agent_session/agent_resume와 같은 타입.
+pub const Kind = maru.app.agent_resume.Kind;
 
 /// 훅을 걸 이벤트(claude·codex 공통 이름, 실측/문서 확인). SessionStart=세션 시작/resume, UserPromptSubmit·Stop=매 턴.
 /// 매 턴 이벤트 덕에 등록 전부터 돌던 세션도 다음 프롬프트/응답완료에 매핑된다(cwd+mtime 폴백 없이 커버).
@@ -261,9 +265,12 @@ fn atomicWrite(io: std.Io, path: []const u8, data: []const u8) !void {
     try af.replace(io);
 }
 
-/// `term.surface.id`(pane_id)로 매핑 파일을 읽어 JSON에서 `transcript_path`를 뽑아 out에 복사해 돌려준다.
-/// 파일 없음/파싱 실패/필드 없음이면 null(호출자는 그 팬 상태를 unknown으로). tick 스레드에서 poll마다 호출.
-pub fn readMapping(io: std.Io, allocator: std.mem.Allocator, pane_id: u64, out: []u8) ?[]const u8 {
+/// `pane_id`로 매핑 파일을 읽어 JSON `transcript_path`를 뽑아 out에 복사해 돌려준다 — 단 **stale 매핑을 걸러낸다**:
+/// (1) 경로가 `kind`의 세션 루트 아래인가(claude=`.claude/projects`, codex=`.codex/sessions`) — 매핑은 pane_id로만
+/// 키잉되므로, 같은 팬에서 codex→claude로 바뀌고 claude 훅 발화 전이면 codex 경로를 claude로 오파싱하는 걸 막는다.
+/// (2) `pane_cwd`가 주어지면 payload `cwd`가 그 팬 cwd와 같은가 — 다른 폴더 세션의 stale 매핑을 막는다(restore에서 씀;
+/// 라이브 poll은 null로 넘겨 cwd 체크 생략—self-heal). 파일 없음/파싱 실패/검증 실패면 null(호출자는 unknown/폴백).
+pub fn readMapping(io: std.Io, allocator: std.mem.Allocator, pane_id: u64, kind: Kind, pane_cwd: ?[]const u8, out: []u8) ?[]const u8 {
     var dir_buf: [max_path]u8 = undefined;
     const dir = mappingsDir(&dir_buf) orelse return null;
     var path_buf: [max_path]u8 = undefined;
@@ -271,7 +278,46 @@ pub fn readMapping(io: std.Io, allocator: std.mem.Allocator, pane_id: u64, out: 
 
     const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256 << 10)) catch return null;
     defer allocator.free(data);
-    return extractTranscriptPath(allocator, data, out);
+
+    const tp = extractTranscriptPath(allocator, data, out) orelse return null;
+    // (1) kind 세션 루트 아래인지 — 교차-에이전트 stale 매핑 차단.
+    var root_buf: [max_path]u8 = undefined;
+    const root = agentSessionRoot(kind, &root_buf) orelse return null;
+    if (!std.mem.startsWith(u8, tp, root)) return null;
+    // (2) cwd 일치(restore에서만) — 교차-cwd stale 매핑 차단.
+    if (pane_cwd) |pcwd| {
+        var cwd_buf: [max_path]u8 = undefined;
+        const mcwd = extractCwd(allocator, data, &cwd_buf) orelse return null;
+        if (!std.mem.eql(u8, mcwd, pcwd)) return null;
+    }
+    return tp;
+}
+
+/// `kind`의 세션 루트(끝 `/` 포함) — claude=`<CLAUDE_CONFIG_DIR|~/.claude>/projects/`, codex=`<CODEX_HOME|~/.codex>/sessions/`.
+/// readMapping이 transcript_path가 이 아래인지 확인해 교차-에이전트 stale 매핑을 거른다. 끝 `/`로 `projects-evil` 오매칭 방지.
+fn agentSessionRoot(kind: Kind, out: []u8) ?[]const u8 {
+    return switch (kind) {
+        .claude => agentConfigPath(out, "CLAUDE_CONFIG_DIR", ".claude", "projects/"),
+        .codex => agentConfigPath(out, "CODEX_HOME", ".codex", "sessions/"),
+    };
+}
+
+/// 매핑 payload JSON에서 `cwd` 문자열을 뽑아 out에 복사(순수). 없으면 null.
+fn extractCwd(allocator: std.mem.Allocator, data: []const u8, out: []u8) ?[]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return null,
+    };
+    const c = obj.get("cwd") orelse return null;
+    const s = switch (c) {
+        .string => |x| x,
+        else => return null,
+    };
+    if (s.len == 0 or s.len > out.len) return null;
+    @memcpy(out[0..s.len], s);
+    return out[0..s.len];
 }
 
 /// 훅이 덤프한 payload JSON에서 `transcript_path` 문자열을 뽑아 out에 복사(순수 — 테스트 가능). 없으면 null.
@@ -315,6 +361,22 @@ test "extractTranscriptPath: payload JSON에서 transcript_path 추출" {
     try std.testing.expectEqual(@as(?[]const u8, null), extractTranscriptPath(a, "{\"transcript_path\":\"relative/x.jsonl\"}", &out)); // 상대경로
     try std.testing.expectEqual(@as(?[]const u8, null), extractTranscriptPath(a, "{\"transcript_path\":\"/etc/passwd\"}", &out)); // 비-.jsonl
     try std.testing.expectEqual(@as(?[]const u8, null), extractTranscriptPath(a, "{\"transcript_path\":\"/a/../../etc/x.jsonl\"}", &out)); // `..` 조작
+}
+
+test "extractCwd: payload JSON에서 cwd 추출(restore의 stale 매핑 cwd 대조용)" {
+    const a = std.testing.allocator;
+    var out: [max_path]u8 = undefined;
+    try std.testing.expectEqualStrings("/Users/x/ws", extractCwd(a, "{\"cwd\":\"/Users/x/ws\",\"transcript_path\":\"/y.jsonl\"}", &out).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), extractCwd(a, "{\"transcript_path\":\"/y.jsonl\"}", &out)); // cwd 없음
+    try std.testing.expectEqual(@as(?[]const u8, null), extractCwd(a, "not json", &out));
+}
+
+test "agentSessionRoot: kind별 세션 루트가 끝 / 로 끝난다(교차-에이전트 경로 판별의 prefix)" {
+    var out: [max_path]u8 = undefined;
+    // claude=…/projects/, codex=…/sessions/ (env 유무와 무관하게 마지막 세그먼트 고정). readMapping이 이 prefix로
+    // transcript_path를 startsWith 검사해 codex 경로를 claude로(또는 반대) 오파싱하는 stale 매핑을 거른다.
+    try std.testing.expect(std.mem.endsWith(u8, agentSessionRoot(.claude, &out).?, "/projects/"));
+    try std.testing.expect(std.mem.endsWith(u8, agentSessionRoot(.codex, &out).?, "/sessions/"));
 }
 
 // applyToConfig의 파일 I/O 경로를 temp dir 실파일로 고정한다 — 특히 **읽기 오류(>4MB)를 사용자 config 손상 없이

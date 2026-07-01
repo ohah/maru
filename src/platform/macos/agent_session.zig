@@ -95,19 +95,20 @@ pub fn sessionIdFromTranscript(io: std.Io, gpa: std.mem.Allocator, kind: Kind, t
         .claude => {
             const base = std.fs.path.basename(transcript_path); // "<uuid>.jsonl"
             if (!std.mem.endsWith(u8, base, ".jsonl")) return null;
+            // 파일이 실제로 있어야 resume 가능(삭제·회전된 매핑이면 non-resumable id를 저장하지 않게 — codex는 아래에서
+            // 첫 줄을 읽어 자연히 걸러지지만 claude는 파일명만 쓰므로 명시 stat).
+            _ = std.Io.Dir.cwd().statFile(io, transcript_path, .{}) catch return null;
             const id = base[0 .. base.len - ".jsonl".len];
             if (id.len == 0 or id.len > out.len) return null;
             @memcpy(out[0..id.len], id);
             return out[0..id.len];
         },
         .codex => {
-            // codex resume id = 첫 줄 session_meta.payload.id. transcript_path를 dir/name으로 쪼개 readFirstLine 재사용.
-            const dir_path = std.fs.path.dirname(transcript_path) orelse return null;
-            var pdir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return null;
-            defer pdir.close(io);
+            // codex resume id = 첫 줄 session_meta.payload.id. readFirstLine이 full path로 직접 열어 첫 줄을 읽는다
+            // (파일 없으면 null → 삭제·회전 매핑 자연 차단). 옛 dir/name 쪼개기+openDir 제거.
             const scratch = gpa.alloc(u8, tail_window) catch return null;
             defer gpa.free(scratch);
-            const first = readFirstLine(io, scratch, pdir, std.fs.path.basename(transcript_path)) orelse return null;
+            const first = readFirstLine(io, scratch, transcript_path) orelse return null;
             var id_buf: [256]u8 = undefined;
             const id = transcript.parseCodexId(gpa, first, &id_buf) orelse return null;
             if (id.len == 0 or id.len > out.len) return null;
@@ -163,10 +164,10 @@ fn readTailScan(io: std.Io, gpa: std.mem.Allocator, path: []const u8, answer_buf
     }
 }
 
-/// `dir`/`name` 파일의 첫 줄(개행 전까지)을 `buf`로 읽어 돌려준다. 첫 줄이 `buf`보다 길어 개행을 못 찾으면 null
-/// (거대 첫 줄은 건너뜀). codex 세션 매핑용 session_meta 첫 줄(~22KB)을 읽는다.
-fn readFirstLine(io: std.Io, buf: []u8, dir: std.Io.Dir, name: []const u8) ?[]const u8 {
-    const file = dir.openFile(io, name, .{}) catch return null;
+/// `path` 파일의 첫 줄(개행 전까지)을 `buf`로 읽어 돌려준다. 첫 줄이 `buf`보다 길어 개행을 못 찾으면 null(거대 첫 줄은
+/// 건너뜀). codex resume id용 session_meta 첫 줄(~22KB)을 읽는다. readTail처럼 full path로 직접 연다(호출자 dir 쪼개기 불요).
+fn readFirstLine(io: std.Io, buf: []u8, path: []const u8) ?[]const u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
     var rbuf: [512]u8 = undefined;
     var reader = file.reader(io, &rbuf);
@@ -266,11 +267,19 @@ test "poll claude: 대화 엔트리 없이 메타만이면 unknown(스캔 무한
     try std.testing.expectEqual(State.unknown, r.state.?);
 }
 
-test "sessionIdFromTranscript claude: 파일명 <uuid>.jsonl에서 세션 id(확장자 제거)" {
+test "sessionIdFromTranscript claude: 파일명 <uuid>.jsonl에서 세션 id, 없는 파일/비-.jsonl은 null" {
     const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "projects/-a-b");
+    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/23cb4875-83e6-4e9e-b37f-6e1112d5fff9.jsonl", .data = "{}" });
+    var pbuf: [4096]u8 = undefined;
+    const path = try tmpSubPath(&pbuf, tmp, "projects/-a-b/23cb4875-83e6-4e9e-b37f-6e1112d5fff9.jsonl");
     var out: [256]u8 = undefined;
-    const id = sessionIdFromTranscript(io, std.testing.allocator, .claude, "/Users/x/.claude/projects/-a-b/23cb4875-83e6-4e9e-b37f-6e1112d5fff9.jsonl", &out).?;
+    const id = sessionIdFromTranscript(io, std.testing.allocator, .claude, path, &out).?;
     try std.testing.expectEqualStrings("23cb4875-83e6-4e9e-b37f-6e1112d5fff9", id);
+    // 파일이 없으면 null(삭제·회전 매핑 → non-resumable id 저장 방지, stat 검사).
+    try std.testing.expectEqual(@as(?[]const u8, null), sessionIdFromTranscript(io, std.testing.allocator, .claude, "/no/such/23cb4875.jsonl", &out));
     // 비-.jsonl 경로 → null.
     try std.testing.expectEqual(@as(?[]const u8, null), sessionIdFromTranscript(io, std.testing.allocator, .claude, "/x/notjsonl", &out));
 }

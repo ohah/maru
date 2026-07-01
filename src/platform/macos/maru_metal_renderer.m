@@ -1177,16 +1177,22 @@ bool maru_metal_renderer_draw(
         MARU_DRAW_CELLS(cells_base_v + cursor_start * 12, cursor_cells * 12, cursor_opacity);
     MARU_DRAW_IMAGES(image_above_start, gpu_image_n);                         // 1.5 kitty 이미지(텍스트 앞)
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count, under_vertex_count); // 3. under quad(사이드바 밴드)
-    // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 [header_h, drawable_h]에 scissor
-    //    를 건다(Metal 좌하단 원점이라 [0, drawable_h-header_h] 높이로 변환). 헤더 glyph는 터미널 셀 패스(위)라 영향 없다.
-    //    바로 뒤 패스(그림자·모달)를 위해 full drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
+    // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 헤더 영역 [0, header_h)를
+    //    scissor 밖으로 둬 [header_h, drawable_h]만 그린다. **MTLScissorRect는 좌상단 원점**(Apple 문서 — framebuffer
+    //    픽셀 좌표, y가 아래로 증가; NDC 좌하단 원점과 다르다). 이 렌더러는 커스텀 viewport가 없고 정점 셰이더가
+    //    py_top(좌상단 px)→NDC로 매핑(maru_fill_glyph_quad)해 framebuffer가 표준 방향이라, 상단 헤더를 자르려면
+    //    y=header_h부터 남긴다(이전엔 y=0·height=dh-header로 둬 좌하단 원점으로 착각 — 정반대로 **하단** header_h가
+    //    잘리고 스크롤된 카드 텍스트가 고정 검색 헤더를 덮었다). GPU-quad 밴드/tint는 sidebarScrollClipQuad가 좌상단
+    //    px 공간에서 기하 클립하는 별개 경로라 영향 없었다(그래서 밴드는 안 새고 카드 '글리프'만 헤더로 샜다).
+    //    헤더 glyph는 터미널 셀 패스(위)라 이 scissor에 안 걸려 고정된다. 바로 뒤 패스(그림자·모달)를 위해 full
+    //    drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
     const bool sidebar_scroll_clip = (sidebar_cells_n > 0 && sidebar_scroll_offset_px > 0u &&
                                       (float)sidebar_header_height_px < drawable_h);
     if (sidebar_scroll_clip) {
         const NSUInteger dw = (NSUInteger)drawable_size.width;
         const NSUInteger dh = (NSUInteger)drawable_size.height;
-        const NSUInteger keep_h = dh - (NSUInteger)sidebar_header_height_px; // [header_h, dh] 유지 → 좌하단 y=0..keep_h
-        [encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = keep_h }];
+        const NSUInteger header_h = (NSUInteger)sidebar_header_height_px; // 좌상단 원점 → 상단 header_h를 잘라내고 [header_h, dh] 유지
+        [encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = header_h, .width = dw, .height = dh - header_h }];
     }
     if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices, 1.0f); // 사이드바 cells(제목)
     if (sidebar_scroll_clip) {
@@ -1203,8 +1209,12 @@ bool maru_metal_renderer_draw(
     }
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count + header_vertex_count, quad_vertex_total - bottom_vertex_count - under_vertex_count - header_vertex_count); // 5. over quad(모달 배경)
     // 6. 모달 텍스트(cells_base_v 오프셋) — clip 영역이 있으면 모달 셀만 scissor로 자른다(부분 카드 픽셀 스크롤
-    //    인프라). Metal scissor는 좌하단 원점이라 y = drawable_h - (y+h)로 뒤집고, drawable 안으로 clamp(범위 밖이면
-    //    Metal이 크래시). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 draw라 복원 불필요.
+    //    인프라). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 draw라 복원 불필요.
+    //    ⚠️ 알려진 이슈: 아래 y-flip(cy = dh - (y+h))은 MTLScissorRect를 **좌하단 원점**으로 가정하지만, Metal의
+    //    실제 규약은 **좌상단 원점**이다(위 사이드바 scissor 참고 — 같은 착오로 카드가 헤더를 덮던 걸 y=header로
+    //    정정). 이 modal_clip 경로는 아직 어떤 컴포넌트도 draw.Op.clip을 emit하지 않는 미사용 인프라(metal_frame.zig
+    //    "적용 후속")라 이 버그가 런타임에 드러나지 않았다. 부분 픽셀 스크롤을 실제 컴포넌트에 연결할 때 좌상단
+    //    원점으로 정정(cy = modal_clip_y_px)하고 함께 검증할 것 — 지금 고치면 검증 경로가 없어 보류한다.
     if (vertex_buffer != nil && has_modal) {
         if (modal_clip_w_px > 0) {
             const NSUInteger dw = (NSUInteger)drawable_size.width;

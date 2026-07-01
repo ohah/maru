@@ -35,6 +35,13 @@ Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hook
 파일명 uuid, codex=`session_meta.payload.id`)는 그대로 cwd+mtime을 쓴다. 라이브 poll은 이제 훅 경로만 쓰므로
 `resolveClaude`/`resolveCodex`는 **restore 전용**이다([workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 resume").
 
+**안전·한계(코드리뷰 반영)**:
+- **config 편집 안전**: 첫 등록만 재정렬(백업 `<config>.maru-backup`), 이후 마커로 skip해 무접촉. **읽기 오류**(EACCES·>4MB)와 파일 없음을 구분해 — 읽을 수 없으면 손대지 않는다(minimal로 덮어쓰지 않음). 파싱 실패·최상위 비-object도 무접촉.
+- **복구/제거**: 자동등록 실패·**경로가 바뀐 stale 훅**은 팔릿 **Re-register**(force — 기존 maru 훅 제거 후 재추가, **매핑은 안 지움**)로 고친다. 전역 config에서 떼려면 **Unregister**(maru 훅만 제거). 훅은 전역 `~/.claude`·`~/.codex`에 남아 maru 밖에서도 발화하나, `MARU_PANE_ID` 없으면 stdin만 소비(`/dev/null`)해 무해.
+- **경로 방어**: `transcript_path`는 매핑 파일(팬 셸 아무 프로세스나 쓸 수 있음)에서 오므로 **절대경로+`.jsonl`+`..` 없음**만 허용(traversal 방지, 옛 `isBasenameSafe` 대체).
+- **중첩 에이전트 한계**: 한 팬 안에서 claude 안 claude(중첩)를 띄우면 자식이 `MARU_PANE_ID`를 상속해 그 팬 매핑을 자기 트랜스크립트로 덮는다. 바깥 에이전트의 다음 활동(UserPromptSubmit/Stop)에 매핑이 다시 올바르게 쓰이므로 **일시적**이지만, 중첩이 도는 동안엔 카드가 중첩 세션 상태를 보일 수 있다(드문 엣지).
+- **훅-only 창**: 팬 spawn 직후 첫 훅 발화 전, 또는 훅 미발화 세션은 state=unknown(cwd 추측 폴백 없음 — 훅-only 결정). 매 턴 이벤트로 곧 채워진다.
+
 ## 왜 JSONL인가 (방식 결정)
 
 | 방식 | running/idle | 마지막 답변 | 알림 | 백그라운드 | UX |

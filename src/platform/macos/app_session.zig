@@ -3966,12 +3966,19 @@ pub const AppSession = struct {
             .decrease_font_size => self.adjustFontSize(-font_size_step),
             .reset_font_size => self.resetFontSize(),
             .reset_settings => self.requestResetAll(), // 통합 리셋 — 확인 모달 후 전체 기본값 + config 파일 덮어쓰기
-            // 에이전트 세션 훅 재등록(자동등록 실패·훅 삭제 복구). idempotent — 이미 등록됐으면 무동작. 훅은 세션
-            // 이벤트(SessionStart/UserPromptSubmit/Stop)에 발화하므로, 재등록 후 에이전트를 새로 시작하거나 프롬프트를
-            // 한 번 보내야 매핑이 생긴다(그 점을 notice로 안내).
+            // 에이전트 세션 훅 **강제 재등록**(자동등록 실패·경로 바뀜·훅 삭제 복구). agent_hooks.reregister는 기존 maru
+            // 훅을 제거하고 현재 command로 다시 넣는다(stale 복구) — **매핑은 안 지운다**(돌고 있는 팬 상태 보존). 훅은 세션
+            // 이벤트(SessionStart/UserPromptSubmit/Stop)에 발화하므로, 재등록 후 에이전트를 새로 시작하거나 프롬프트를 한 번
+            // 보내야 매핑이 생긴다(notice로 안내).
             .reregister_agent_hooks => {
-                agent_hooks.setup(self.io, self.allocator);
+                agent_hooks.reregister(self.io, self.allocator);
                 self.showNotice("에이전트 세션 훅을 재등록했습니다(claude·codex). 에이전트를 새로 시작하거나 프롬프트를 한 번 보내면 반영됩니다.");
+            },
+            // 에이전트 세션 훅 **언인스톨**(claude/codex config에서 maru 훅만 제거, 다른 훅·키는 보존). 훅이 전역 config에
+            // 영구 잔존하는 게 싫을 때 수동으로 뗀다.
+            .unregister_agent_hooks => {
+                agent_hooks.unregister(self.io, self.allocator);
+                self.showNotice("에이전트 세션 훅을 제거했습니다(claude·codex). 이후 팬별 상태 매핑은 안 되고 cwd 추측도 없으니 사이드바 상태가 안 뜰 수 있습니다.");
             },
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
             .set_font_size => |size| self.setFontSize(size),

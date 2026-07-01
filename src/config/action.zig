@@ -86,6 +86,10 @@ pub const Action = union(enum) {
     // 훅이 지워졌을 때 수동 복구용. dispatchAppAction이 agent_hooks.setup을 재실행한다(idempotent — 이미 등록됐으면
     // 무동작). 커맨드 팝업(Cmd+Shift+P)에 노출, 기본 키바인딩 없음(발견 경로는 팔릿). 단일 출처: docs/agent-session.md "훅 매핑".
     reregister_agent_hooks,
+    // 에이전트 세션 훅을 **제거**한다(언인스톨) — claude/codex config에서 maru 훅(마커)만 떼고 다른 훅·키는 보존.
+    // 훅이 전역 config에 영구 잔존하는 게 싫을 때 수동으로 뗀다. dispatchAppAction이 agent_hooks.unregister로 넘긴다.
+    // 커맨드 팝업에 노출, 기본 키바인딩 없음.
+    unregister_agent_hooks,
     // 런타임 폰트 크기를 절대값(pt)으로 지정한다. config 바인딩 전용(`set_font_size:18`처럼) — 절대값이라
     // 메뉴/팝업엔 안 넣는다(어느 크기인지 고정 못 함). dispatchAppAction이 setFontSize로 넘겨 [6,72]pt로 클램프.
     // 키 프리셋(예: ⌘⌥1=14, ⌘⌥2=18)을 사용자가 직접 묶을 수 있다.
@@ -128,6 +132,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "reset_font_size")) return .reset_font_size;
     if (std.mem.eql(u8, value, "reset_settings")) return .reset_settings;
     if (std.mem.eql(u8, value, "reregister_agent_hooks")) return .reregister_agent_hooks;
+    if (std.mem.eql(u8, value, "unregister_agent_hooks")) return .unregister_agent_hooks;
 
     const prefix = "select_tab:";
     if (std.mem.startsWith(u8, value, prefix)) {
@@ -194,6 +199,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.decrease_font_size, parseAction("decrease_font_size").?);
     try std.testing.expectEqual(Action.reset_font_size, parseAction("reset_font_size").?);
     try std.testing.expectEqual(Action.reregister_agent_hooks, parseAction("reregister_agent_hooks").?);
+    try std.testing.expectEqual(Action.unregister_agent_hooks, parseAction("unregister_agent_hooks").?);
 
     const action = parseAction("select_tab:3").?;
     try std.testing.expectEqual(@as(usize, 3), action.select_tab);

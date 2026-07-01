@@ -24,6 +24,7 @@ const imeDecide = maru.session.ime.decide;
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const agent_session = @import("agent_session.zig"); // L4 — 에이전트 세션 트랜스크립트 파일 찾기 + tail read
+const agent_hooks = @import("agent_hooks.zig"); // 에이전트 SessionStart 훅으로 팬↔세션 트랜스크립트 경로 매핑
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -1567,6 +1568,9 @@ pub const AppSession = struct {
         // init 끝에 free하지 않고 보관한다(새 탭 Cmd+T spawn에도 필요) — deinit에서 푼다. 바로 store해
         // 이후 init 실패도 errdefer self.deinit()가 정리하게 한다.
         self.new_tab_zdotdir = integ_dir;
+        // 에이전트 세션 훅 등록 + 매핑 dir 정리(best-effort, 실패해도 무해). 첫 팬 spawn 전에 해 훅이 준비되게 한다 —
+        // claude/codex SessionStart 훅이 MARU_PANE_ID로 세션 트랜스크립트 경로를 남기고, pollAgentState가 그걸 읽는다.
+        agent_hooks.setup(io, allocator);
         // opt-in ssh 라우팅(`shell-integration.ssh`): 통합 .zshenv가 로드될 때(integ_dir != null = zsh 통합)만
         // ssh() 함수가 정의되므로 그때만 의미가 있다. 켜졌으면 현재 maru 실행 파일 경로를 잡아 두고 spawn 때
         // MARU_BIN/MARU_SSH_INTEGRATION으로 주입한다(같은 바이너리가 `maru ssh`를 처리 — main.zig). 경로
@@ -3037,7 +3041,9 @@ pub const AppSession = struct {
         term.* = .{};
 
         const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
-        try term.rt.live_pty.init(self.io, self.allocator, id, request, queue_capacity);
+        var req = request;
+        req.pane_id = id; // 이 팬 셸에 MARU_PANE_ID=<id> 주입 — 에이전트(claude/codex) 훅이 이 id로 세션 트랜스크립트 경로를 남긴다
+        try term.rt.live_pty.init(self.io, self.allocator, id, req, queue_capacity);
         errdefer term.rt.live_pty.deinit();
         term.rt.live_initialized = true;
 
@@ -3960,6 +3966,13 @@ pub const AppSession = struct {
             .decrease_font_size => self.adjustFontSize(-font_size_step),
             .reset_font_size => self.resetFontSize(),
             .reset_settings => self.requestResetAll(), // 통합 리셋 — 확인 모달 후 전체 기본값 + config 파일 덮어쓰기
+            // 에이전트 세션 훅 재등록(자동등록 실패·훅 삭제 복구). idempotent — 이미 등록됐으면 무동작. 훅은 세션
+            // 이벤트(SessionStart/UserPromptSubmit/Stop)에 발화하므로, 재등록 후 에이전트를 새로 시작하거나 프롬프트를
+            // 한 번 보내야 매핑이 생긴다(그 점을 notice로 안내).
+            .reregister_agent_hooks => {
+                agent_hooks.setup(self.io, self.allocator);
+                self.showNotice("에이전트 세션 훅을 재등록했습니다(claude·codex). 에이전트를 새로 시작하거나 프롬프트를 한 번 보내면 반영됩니다.");
+            },
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
             .set_font_size => |size| self.setFontSize(size),
         }
@@ -9833,34 +9846,13 @@ pub const AppSession = struct {
             .claude => .claude,
             .codex => .codex,
         };
-        // cwd는 reader 스레드가 core_mutex 아래 OSC 7로 free·재할당하므로(dispatchOscCwd), 락 없이 들고 있으면
-        // use-after-free/torn read가 난다(focusedTermCwd와 같은 함정). 락 아래에서 읽어 즉시 로컬 버퍼로 복사해 끊는다 —
-        // 이후 세션 파일 I/O는 코어 수명과 무관한 cwd_buf 슬라이스로 한다(background Term까지 poll하며 노출이 늘어 필수).
-        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = blk: {
-            term.surface.lockCore(self.io);
-            defer term.surface.unlockCore(self.io);
-            const live = term.surface.core.currentCwd();
-            if (live.len == 0 or live.len > cwd_buf.len) break :blk "";
-            @memcpy(cwd_buf[0..live.len], live);
-            break :blk cwd_buf[0..live.len];
-        };
-        if (cwd.len == 0) return; // OSC 7 cwd 아직 없음 — 다음 poll에.
-        const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else return;
-        const subdir: []const u8 = switch (kind) {
-            .claude => ".claude/projects",
-            .codex => ".codex/sessions",
-        };
-        var root_buf: [4096]u8 = undefined;
-        const root = std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ home, subdir }) catch return;
-
         const prev_state = term.agent_state;
-        // 팬의 claude 자기 세션 ID(env CLAUDE_CODE_SESSION_ID)를 읽어 넘긴다 — 같은 cwd에 여러 claude가 있어도 각 팬이
-        // 자기 세션 파일을 정확히 매칭한다(mtime 최신 파일 오독 방지, 사용자 요청). 상속 세션(CHILD_SESSION)·codex·미설정이면
-        // null → poll이 cwd별 mtime 폴백. env는 프로세스 정적이라 매 poll 읽어도 안전(값 불변).
-        var sid_buf: [64]u8 = undefined;
-        const session_id: ?[]const u8 = if (kind == .claude) term.rt.live_pty.session.foregroundClaudeSessionId(&sid_buf) else null;
-        const r = agent_session.poll(self.io, self.allocator, kind, root, cwd, term.agent_session_mtime, &term.agent_answer_buf, session_id);
+        // 이 팬 에이전트의 세션 트랜스크립트 **경로** — claude/codex SessionStart 훅이 `MARU_PANE_ID`(=surface.id)로
+        // 남긴 정확한 경로다(agent_hooks.readMapping). 같은 cwd 다중 세션도 팬별 정확 매칭(cwd 추측·mtime 최신 오독 없음).
+        // 매핑이 아직 없으면(훅 미발화·미설정) null → poll이 unknown(cwd 폴백 없음 — docs/agent-session.md "훅 매핑").
+        var tp_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const transcript_path = agent_hooks.readMapping(self.io, self.allocator, term.surface.id, &tp_buf);
+        const r = agent_session.poll(self.io, self.allocator, kind, term.agent_session_mtime, &term.agent_answer_buf, transcript_path);
         const new_state = r.state orelse {
             term.agent_session_mtime = r.mtime; // null = mtime 동일 — 갱신 무해, 직전 상태 유지(재파싱 skip)
             return;

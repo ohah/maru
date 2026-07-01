@@ -112,6 +112,13 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
     `▁▅▇▃ 진행중`이 카드 폭을 넘어 **끝에서 말줄임**되어 막대+`…`만 남고 "진행중" 라벨이 잘릴 수 있다(옛 1칸 스피너는 그 폭에서도
     라벨이 붙었다). 기본 사이드바 폭에선 문제없고 사이드바를 매우 좁게 드래그한 경우에만 해당하는 엣지라 **4칸을 그대로 수용**한다
     (사용자 결정 — 좁은 폭 우선순위보다 codex식 파형 표현을 택함). 필요하면 후속으로 폭 적응(좁으면 바 수 축소·라벨 우선)을 검토.
+  - **범위 = 워크스페이스(탭) 단위**(사용자 요청): 상태줄·gutter 아이콘·브랜드색은 활성 Term만이 아니라 **탭 안 어느 pane/Term이든**
+    running이면 표시한다(`tabHasRunningAgent`/`tabAgentKind` — running Term 우선, 없으면 활성 Term 폴백). 에이전트를 백그라운드
+    pane/split·비활성 가로탭에서 돌려도 카드에 파형이 뜬다(옛 "활성 Term만" 한계 해소 — `pollAgentKinds`가 모든 pane×Term을 갱신).
+    running Term의 kind로 아이콘/색을 고르므로 활성 Term이 셸(none)이어도 백그라운드 claude/codex가 카드에 종류색으로 보인다.
+  - **상단 탭바에도 파형**(사용자 요청 "여기도"): pane 라벨(`buildPaneLabelDrawList`)과 **running Term 탭**(`buildPaneTabBarDrawList`)
+    앞에 같은 `▁▅▇▃ ` prefix를 붙이고(`spinnerPrefixedLabel`) 바 셀을 브랜드색으로(`recolorSpinnerCells`, pane 대표 kind).
+    사이드바 카드의 색칠 루프와 달리 탭바는 그 draw list 셀을 직접 재색칠한다. 편집(rename) 중인 라벨/탭엔 prefix를 안 붙인다.
 - 인코딩은 4줄 수용(`sidebar_line_base=32`, `line_index` 0~3 → 4줄). 구현: `lines: [3]`→`[4]`, 슬롯 높이
   3.8×→~4.6×(4줄+여백). 비-git·비-에이전트 탭은 줄이 적어 같은 슬롯에 블록 세로 중앙 정렬(빈 줄 없음).
 

@@ -146,11 +146,12 @@ const default_sidebar_width_pt: u32 = 180;
 const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보임
 const sidebar_max_pt: u32 = 480; // 너무 넓으면 터미널이 좁아짐
 
-// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 4600 = 4.6× — 최대 4줄 카드(이름·브랜치·
+// 사이드바 탭 슬롯 한 칸의 높이를 cell 높이의 몇 배로 할지(천분율). 5200 = 5.2× — 최대 4줄 카드(이름·브랜치·
 // 경로·상태, 각 1×cell = 4×cell)를 위아래 여백 두고 담을 큰 슬롯. 1~3줄 탭도 같은 슬롯에 블록 세로 중앙(빈 줄
-// 없음). 에이전트 상태줄(4번째)을 추가하며 3.8×→4.6×로 키웠다. refreshCellMetrics가 cell_height_px × 이
-// 비율로 backing 픽셀 슬롯 높이를 구한다.
-const sidebar_slot_height_ratio_milli: u32 = 4600;
+// 없음). 에이전트 상태줄(4번째)을 추가하며 3.8×→4.6×로 키웠고, 4줄 카드 하단 여백이 빡빡하다는 피드백으로 4.6×→5.2×
+// 로 더 키웠다(4줄 상·하 여백 각 0.3×→0.6×cell로 배증; 균일 슬롯이라 1~3줄 카드도 함께 여유가 는다). refreshCellMetrics가
+// cell_height_px × 이 비율로 backing 픽셀 슬롯 높이를 구한다.
+const sidebar_slot_height_ratio_milli: u32 = 5200;
 // 사이드바 상단 헤더(검색바 + 사이드바 접기·view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 3.0(아이콘 줄 +
 // 검색 줄 + 패딩). 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
 const sidebar_header_height_ratio_milli: u32 = 3000;

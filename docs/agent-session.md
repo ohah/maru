@@ -11,9 +11,29 @@
 판정해 사이드바에 아이콘 표시(`pollAgentKinds`/`classifyAgent`/`Term.agent_kind`). 이 문서는 그 위에 **진행
 상태·마지막 답변·알림**을 얹는다. 신호원은 에이전트의 세션 JSONL이다.
 
-이 세션 파일 탐색 인프라(`resolveClaude`/`resolveCodex`)는 **workspace restore**가 종료 시점에 resume 대상
-**session id**를 캡처하는 데도 재사용된다(`resolveSessionId` — claude=파일명 uuid, codex=`session_meta.payload.id`;
-[workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 resume").
+### 세션 파일 찾기 = **훅 매핑**(팬별 정확)
+
+라이브 상태 poll이 "이 팬의 세션 트랜스크립트가 어느 파일인가"를 아는 방법은 **에이전트 공식 훅**이다
+(`src/platform/macos/agent_hooks.zig`):
+
+1. maru가 각 팬 셸에 `MARU_PANE_ID=<surface.id>`를 주입한다(`pty/macos.zig` `appendParentEnv`, `MARU_BIN`과 동형).
+2. maru가 시작 시 claude(`~/.claude/settings.json`)·codex(`~/.codex/hooks.json`)의 `hooks`에 **SessionStart·
+   UserPromptSubmit·Stop** 훅을 등록한다(원자적·idempotent·백업; 파싱 실패 시 무접촉). 훅 command는 인라인 셸
+   한 줄 — stdin(JSON payload = `transcript_path` 포함)을 `<config>/maru/agent-sessions/$MARU_PANE_ID`로 덤프한다
+   (jq 등 의존성 0). **매 턴 이벤트(UserPromptSubmit/Stop)** 덕에 등록 이전부터 돌던 세션도 다음 활동에 매핑된다.
+3. `pollAgentState`가 `term.surface.id`로 그 파일을 읽어(`readMapping`) `transcript_path`를 뽑아 `poll`이 **그 파일을
+   직접** tail-read한다. 매핑이 없으면 state=unknown(**cwd 추측·mtime 폴백 없음** — 훅-only 결정).
+
+**왜 훅인가**: cwd+mtime 추측은 같은 폴더 다중 세션에서 섞이고, `CLAUDE_CODE_SESSION_ID` env는 상속·`CHILD_SESSION`
+상시라 취약하며 codex는 세션 id를 env로 아예 안 낸다(전부 실측 확인). Anthropic·OpenAI 문서 모두 "트랜스크립트
+포맷은 internal, 버전마다 바뀐다"고 경고 → 직접 추측은 근본적으로 취약. 훅은 에이전트가 `transcript_path`를 **공식
+채널로** 알려주고 maru가 자기 키(`MARU_PANE_ID`)로 정확히 잇는다(읽기→쓰기). 토큰·오염 0. cmux·Claude Squad가
+쓰는 "런치 제어/워크트리 격리"의 passive-터미널 판본. 자동등록이 실패하면 커맨드 팔레트 **Re-register Agent
+Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hooks.setup`).
+
+**restore는 별개**: 종료 시점 resume 대상 **session id** 캡처(`resolveSessionId` — claude=cwd 디렉터리 mtime 최신
+파일명 uuid, codex=`session_meta.payload.id`)는 그대로 cwd+mtime을 쓴다. 라이브 poll은 이제 훅 경로만 쓰므로
+`resolveClaude`/`resolveCodex`는 **restore 전용**이다([workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 resume").
 
 ## 왜 JSONL인가 (방식 결정)
 
@@ -31,8 +51,8 @@
 
 ### claude
 - 경로: `~/.claude/projects/<cwd-인코딩>/<session-uuid>.jsonl`. **cwd 인코딩** = 절대경로의 `/`→`-`
-  (예: `/Users/x/Documents/workspace/maru` → `-Users-x-Documents-workspace-maru`). 그 디렉터리에서 **mtime 최신
-  `.jsonl`** = 그 cwd의 활성 세션.
+  (예: `/Users/x/Documents/workspace/maru` → `-Users-x-Documents-workspace-maru`). 라이브 poll은 이 경로를 **훅
+  매핑**(위 Context)이 정확히 주고, restore의 `resolveClaude`는 그 디렉터리에서 **mtime 최신 `.jsonl`**을 고른다.
 - 엔트리(줄): `{type, message?, timestamp, ...}`. `type` ∈ `user`/`assistant`/`system`/`attachment`/
   `file-history-snapshot`/`queue-operation`/`mode`/`permission-mode`/`pr-link`/…. **대화** 엔트리는
   `user`/`assistant`(나머지는 메타 — 무시). 단 `isMeta:true`인 `user`(local-command caveat·hook 주입)는

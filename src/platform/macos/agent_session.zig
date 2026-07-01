@@ -58,36 +58,20 @@ fn unknownPoll() Poll {
     return .{ .state = .unknown, .answer_len = 0, .mtime = 0 };
 }
 
-/// 에이전트 종류·cwd로 세션 파일을 찾아 tail을 읽고 상태·마지막 답변을 계산한다. `root_path`는 그 에이전트의
-/// 세션 루트(claude=`<home>/.claude/projects`, codex=`<home>/.codex/sessions`) — 테스트가 temp dir를 주입할 수
-/// 있게 인자로 받는다. `gpa`는 tail 버퍼·줄 파싱용 임시 할당(즉시 해제). `answer_buf`엔 idle일 때 답변을 쓴다.
-/// 세션을 못 찾으면 state=unknown.
+/// 에이전트 세션 트랜스크립트 파일(`transcript_path`)의 tail을 읽어 상태·마지막 답변을 계산한다. 경로는
+/// **agent_hooks.readMapping**이 준다 — 에이전트 SessionStart 훅이 `MARU_PANE_ID`로 남긴 정확한 경로라, 같은
+/// cwd 다중 세션도 팬별 정확 매칭이다(cwd 추측·mtime 폴백 없음 — docs/agent-session.md "훅 매핑"). `gpa`는 tail
+/// 버퍼·줄 파싱용 임시 할당(즉시 해제), `answer_buf`엔 idle일 때 답변을 쓴다. `transcript_path`가 null(훅 매핑 없음)
+/// 이거나 파일이 없으면 state=unknown.
 pub fn poll(
     io: std.Io,
     gpa: std.mem.Allocator,
     kind: Kind,
-    root_path: []const u8,
-    cwd: []const u8,
     prev_mtime: i128,
     answer_buf: []u8,
-    /// claude 팬의 자기 세션 ID(CLAUDE_CODE_SESSION_ID). 주면 그 `<id>.jsonl`을 **직접** 읽는다 — 같은 cwd에 여러 claude
-    /// 세션이 있어도 각 팬이 자기 세션을 정확히 매칭한다(mtime 최신 파일 오독 방지). null이면 cwd별 mtime 최신 폴백.
-    session_id: ?[]const u8,
+    transcript_path: ?[]const u8,
 ) Poll {
-    // codex 첫 줄(session_meta ~22KB) + codex tail read용 임시 버퍼(tick 주기마다 alloc/free — 0.5s 간격이라 무시
-    // 가능). claude는 readTailScan이 청크 크기에 맞춰 자체 alloc하므로 codex일 때만 잡는다.
-    var scratch_buf: ?[]u8 = null;
-    defer if (scratch_buf) |s| gpa.free(s);
-
-    var path_buf: [4096]u8 = undefined;
-    const path = switch (kind) {
-        .claude => resolveClaude(io, &path_buf, root_path, cwd, session_id),
-        .codex => blk: {
-            const sc = gpa.alloc(u8, tail_window) catch return unknownPoll();
-            scratch_buf = sc;
-            break :blk resolveCodex(io, gpa, &path_buf, sc, root_path, cwd);
-        },
-    } orelse return unknownPoll();
+    const path = transcript_path orelse return unknownPoll();
 
     const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return unknownPoll();
     const mtime: i128 = st.mtime.nanoseconds;
@@ -97,9 +81,11 @@ pub fn poll(
     const status = switch (kind) {
         // claude는 마지막 assistant 턴이 대량 메타 엔트리에 밀릴 수 있어 끝에서부터 지수 확장 스캔한다.
         .claude => readTailScan(io, gpa, path, answer_buf) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime },
-        // codex는 마지막이 task_complete라 끝 tail_window로 충분.
+        // codex는 마지막이 task_complete라 끝 tail_window로 충분(tick마다 alloc/free — 0.5s 간격이라 무시 가능).
         .codex => brk: {
-            const tail = readTail(io, scratch_buf.?, path) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
+            const sc = gpa.alloc(u8, tail_window) catch return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
+            defer gpa.free(sc);
+            const tail = readTail(io, sc, path) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
             break :brk transcript.parseCodexTail(gpa, tail, answer_buf);
         },
     };
@@ -115,7 +101,7 @@ pub fn resolveSessionId(io: std.Io, gpa: std.mem.Allocator, kind: Kind, root_pat
     var path_buf: [4096]u8 = undefined;
     switch (kind) {
         .claude => {
-            const path = resolveClaude(io, &path_buf, root_path, cwd, null) orelse return null; // restore는 세션ID를 지금 찾는 중이라 mtime 폴백
+            const path = resolveClaude(io, &path_buf, root_path, cwd) orelse return null;
             const base = std.fs.path.basename(path); // "<uuid>.jsonl"
             if (!std.mem.endsWith(u8, base, ".jsonl")) return null;
             const id = base[0 .. base.len - ".jsonl".len];
@@ -142,32 +128,14 @@ pub fn resolveSessionId(io: std.Io, gpa: std.mem.Allocator, kind: Kind, root_pat
     }
 }
 
-// ── claude: 세션 ID로 정확 매칭, 없으면 cwd 인코딩 디렉터리에서 최신 .jsonl ─────────────────────
+// ── claude: cwd 인코딩 디렉터리에서 최신 .jsonl (워크스페이스 restore 전용) ─────────────────────
 
-/// 세션 ID가 파일명으로 안전한가 — claude 세션 ID는 UUID([0-9a-fA-F-])라 영숫자·`-`만 허용해 `/`·`.`·`..` 경로 조작을 차단한다.
-fn isBasenameSafe(s: []const u8) bool {
-    for (s) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-') return false;
-    }
-    return true;
-}
-
-/// claude 세션 파일 경로를 `path_buf`에 써서 돌려준다. `session_id`(팬의 CLAUDE_CODE_SESSION_ID)가 있고 그 `<id>.jsonl`이
-/// 있으면 그걸 직접(팬별 정확 매칭), 없으면 `<root>/<enc(cwd)>/` 안 mtime이 가장 최신인 `.jsonl`. 디렉터리가 없거나 `.jsonl`이 없으면 null.
-fn resolveClaude(io: std.Io, path_buf: []u8, root_path: []const u8, cwd: []const u8, session_id: ?[]const u8) ?[]const u8 {
+/// claude 세션 파일 경로를 `path_buf`에 써서 돌려준다 — `<root>/<enc(cwd)>/` 안 mtime이 가장 최신인 `.jsonl`.
+/// **라이브 상태 poll은 이제 훅 매핑(정확한 경로)을 쓰므로 이 함수는 `resolveSessionId`(워크스페이스 restore의 종료
+/// 시점 resume 대상 캡처) 전용이다.** 디렉터리가 없거나 `.jsonl`이 없으면 null.
+fn resolveClaude(io: std.Io, path_buf: []u8, root_path: []const u8, cwd: []const u8) ?[]const u8 {
     var name_buf: [4096]u8 = undefined;
     const enc = transcript.encodeClaudeProjectDir(&name_buf, cwd) orelse return null;
-
-    // 세션 ID가 있으면(팬의 CLAUDE_CODE_SESSION_ID) 그 파일을 **직접** 쓴다 — 같은 cwd 다중 claude에서도 팬별 정확 매칭.
-    // basename-safe한 값만 허용(경로 조작 방지: `/`·`..`·빈 값 거절)하고, 그 파일이 실제로 있을 때만. 없으면(막 시작 등)
-    // 아래 mtime 폴백. 세션 ID가 stale(예: 세션 중 /clear로 새 파일 생성, env는 그대로)해도 그 옛 파일을 읽는 한계는 있다.
-    if (session_id) |sid| {
-        if (sid.len > 0 and sid.len < 128 and isBasenameSafe(sid)) {
-            if (std.fmt.bufPrint(path_buf, "{s}/{s}/{s}.jsonl", .{ root_path, enc, sid })) |p| {
-                if (std.Io.Dir.cwd().statFile(io, p, .{})) |_| return p else |_| {}
-            } else |_| {}
-        }
-    }
 
     var dir_path_buf: [4096]u8 = undefined;
     const dir_path = std.fmt.bufPrint(&dir_path_buf, "{s}/{s}", .{ root_path, enc }) catch return null;
@@ -367,104 +335,48 @@ fn readFirstLine(io: std.Io, buf: []u8, dir: std.Io.Dir, name: []const u8) ?[]co
 // session core 순수 파싱은 agent_transcript.zig가 fixture로 검증한다. 여기선 platform I/O 글루(디렉터리 나열·
 // 최신 파일 선택·tail seek read·codex 날짜 walk + cwd 매칭)를 temp dir에 실제 파일을 만들어 검증한다.
 
-test "poll claude: enc(cwd) 디렉터리의 최신 .jsonl을 tail-read해 idle + 답변" {
+test "poll claude: transcript_path의 세션을 tail-read해 idle + 답변, mtime 같으면 skip" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-
-    // <tmp>/projects/-a-b/ 에 두 세션. 최신(running 마커) vs 옛것. 최신이 골라져야 한다.
     try tmp.dir.createDirPath(io, "projects/-a-b");
-    // 옛 세션: end_turn(idle) — 하지만 mtime이 더 옛것.
-    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/old.jsonl", .data =
-        \\{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"옛 답변"}]}}
+    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/s.jsonl", .data =
+        \\{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"내 답변"}]}}
     });
-    // 최신 세션: 마지막이 user → running. mtime을 확실히 더 늦게(세션 코어는 mtime 안 보지만 selector가 본다).
-    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/new.jsonl", .data =
-        \\{"type":"user","message":{"role":"user","content":"q"}}
-        \\{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"새 답변"}]}}
-    });
-    setMtime(io, tmp.dir, "projects/-a-b/old.jsonl", 1_000);
-    setMtime(io, tmp.dir, "projects/-a-b/new.jsonl", 2_000);
-
-    var root_buf: [4096]u8 = undefined;
-    const root = try tmpSubPath(&root_buf, tmp, "projects");
+    setMtime(io, tmp.dir, "projects/-a-b/s.jsonl", 2_000);
+    var path_buf: [4096]u8 = undefined;
+    const path = try tmpSubPath(&path_buf, tmp, "projects/-a-b/s.jsonl");
     var answer: [192]u8 = undefined;
-    const r = poll(io, std.testing.allocator, .claude, root, "/a/b", 0, &answer, null);
+    const r = poll(io, std.testing.allocator, .claude, 0, &answer, path);
     try std.testing.expectEqual(State.idle, r.state.?);
-    try std.testing.expectEqualStrings("새 답변", answer[0..r.answer_len]);
-    // mtime을 그대로 다시 넘기면 재파싱 skip(state=null).
-    const again = poll(io, std.testing.allocator, .claude, root, "/a/b", r.mtime, &answer, null);
+    try std.testing.expectEqualStrings("내 답변", answer[0..r.answer_len]);
+    // mtime 같으면 재파싱 skip(state=null).
+    const again = poll(io, std.testing.allocator, .claude, r.mtime, &answer, path);
     try std.testing.expectEqual(@as(?State, null), again.state);
 }
 
-// 같은 cwd에 여러 claude 세션이 있으면 mtime 최신 파일만 읽어 팬끼리 상태가 섞였다(사용자 리포트). session_id(팬의
-// CLAUDE_CODE_SESSION_ID)를 주면 그 `<id>.jsonl`을 **직접** 읽어 팬별로 정확히 매칭한다. 이 테스트가 증명하는 것:
-// (1) session_id가 있으면 mtime 최신(running)이 아니라 그 세션(idle)을 읽는다, (2) 없는 id면 mtime 폴백, (3) 경로 조작
-// 시도(`../..`)는 isBasenameSafe로 거절돼 폴백(traversal·크래시 없음).
-test "poll claude: session_id 주면 그 세션 파일 직접(같은 cwd 다중 세션 정확 매칭)" {
+test "poll: transcript_path가 null이거나 없는 파일이면 unknown(훅 매핑 없음)" {
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "projects/-a-b");
-    // "sess-old": idle(end_turn) + 답변. "sess-new": running(마지막 user). new가 mtime 최신.
-    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/sess-old.jsonl", .data =
-        \\{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"내 세션 답변"}]}}
-    });
-    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/sess-new.jsonl", .data =
-        \\{"type":"user","message":{"role":"user","content":"q"}}
-    });
-    setMtime(io, tmp.dir, "projects/-a-b/sess-old.jsonl", 1_000);
-    setMtime(io, tmp.dir, "projects/-a-b/sess-new.jsonl", 2_000);
-
-    var root_buf: [4096]u8 = undefined;
-    const root = try tmpSubPath(&root_buf, tmp, "projects");
     var answer: [192]u8 = undefined;
-    // session_id="sess-old" → mtime 최신(new=running)이 아니라 old(idle)를 읽어야 한다.
-    const r = poll(io, std.testing.allocator, .claude, root, "/a/b", 0, &answer, "sess-old");
-    try std.testing.expectEqual(State.idle, r.state.?);
-    try std.testing.expectEqualStrings("내 세션 답변", answer[0..r.answer_len]);
-    // 없는 session_id → mtime 폴백(new=running).
-    const fb = poll(io, std.testing.allocator, .claude, root, "/a/b", 0, &answer, "nope-missing");
-    try std.testing.expectEqual(State.running, fb.state.?);
-    // 경로 조작 session_id → isBasenameSafe 거절 → mtime 폴백(running). traversal/크래시 없음.
-    const unsafe = poll(io, std.testing.allocator, .claude, root, "/a/b", 0, &answer, "../../etc/passwd");
-    try std.testing.expectEqual(State.running, unsafe.state.?);
+    try std.testing.expectEqual(State.unknown, poll(io, std.testing.allocator, .claude, 0, &answer, null).state.?);
+    try std.testing.expectEqual(State.unknown, poll(io, std.testing.allocator, .claude, 0, &answer, "/no/such/s.jsonl").state.?);
+    try std.testing.expectEqual(State.unknown, poll(io, std.testing.allocator, .codex, 0, &answer, null).state.?);
 }
 
-test "poll claude: 디렉터리 없으면 unknown" {
+test "poll codex: transcript_path의 rollout을 tail-read해 idle + 답변" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "projects");
-    var root_buf: [4096]u8 = undefined;
-    const root = try tmpSubPath(&root_buf, tmp, "projects");
-    var answer: [192]u8 = undefined;
-    const r = poll(io, std.testing.allocator, .claude, root, "/no/such", 0, &answer, null);
-    try std.testing.expectEqual(State.unknown, r.state.?);
-}
-
-test "poll codex: 최신 날짜 디렉터리에서 cwd 일치 최신 rollout을 tail-read" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    // <tmp>/sessions/2026/06/18/ 에 두 rollout. 하나는 다른 cwd(무시), 하나는 우리 cwd(idle).
     try tmp.dir.createDirPath(io, "sessions/2026/06/18");
-    try tmp.dir.writeFile(io, .{ .sub_path = "sessions/2026/06/18/rollout-other.jsonl", .data =
-        \\{"type":"session_meta","payload":{"id":"o","cwd":"/other"}}
-        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"남의 답변"}}
-    });
     try tmp.dir.writeFile(io, .{ .sub_path = "sessions/2026/06/18/rollout-mine.jsonl", .data =
         \\{"type":"session_meta","payload":{"id":"m","cwd":"/Users/me/ws"}}
         \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"내 답변 완료"}}
     });
-    setMtime(io, tmp.dir, "sessions/2026/06/18/rollout-other.jsonl", 3_000);
-    setMtime(io, tmp.dir, "sessions/2026/06/18/rollout-mine.jsonl", 2_000);
-
-    var root_buf: [4096]u8 = undefined;
-    const root = try tmpSubPath(&root_buf, tmp, "sessions");
+    var path_buf: [4096]u8 = undefined;
+    const path = try tmpSubPath(&path_buf, tmp, "sessions/2026/06/18/rollout-mine.jsonl");
     var answer: [192]u8 = undefined;
-    const r = poll(io, std.testing.allocator, .codex, root, "/Users/me/ws", 0, &answer, null);
-    try std.testing.expectEqual(State.idle, r.state.?); // 남의 세션이 더 최신이어도 cwd 매칭으로 내 세션 선택
+    const r = poll(io, std.testing.allocator, .codex, 0, &answer, path);
+    try std.testing.expectEqual(State.idle, r.state.?);
     try std.testing.expectEqualStrings("내 답변 완료", answer[0..r.answer_len]);
 }
 
@@ -485,11 +397,10 @@ test "poll claude: 마지막 assistant가 첫 청크보다 멀어도 readTailSca
     const filler = "{\"type\":\"file-history-snapshot\",\"snapshot\":\"" ++ ("x" ** 4096) ++ "\"}\n"; // 무시되는 메타 줄
     while (buf.items.len < 300 * 1024) try buf.appendSlice(a, filler);
     try tmp.dir.writeFile(io, .{ .sub_path = "projects/-a-b/s.jsonl", .data = buf.items });
-
-    var root_buf: [4096]u8 = undefined;
-    const root = try tmpSubPath(&root_buf, tmp, "projects");
+    var path_buf: [4096]u8 = undefined;
+    const path = try tmpSubPath(&path_buf, tmp, "projects/-a-b/s.jsonl");
     var answer: [192]u8 = undefined;
-    const r = poll(io, a, .claude, root, "/a/b", 0, &answer, null);
+    const r = poll(io, a, .claude, 0, &answer, path);
     try std.testing.expectEqual(State.idle, r.state.?);
     try std.testing.expectEqualStrings("스캔 답변", answer[0..r.answer_len]);
 }
@@ -503,14 +414,14 @@ test "poll claude: 대화 엔트리 없이 메타만이면 unknown(스캔 무한
         \\{"type":"file-history-snapshot","x":1}
         \\{"type":"system","x":2}
     });
-    var root_buf: [4096]u8 = undefined;
-    const root = try tmpSubPath(&root_buf, tmp, "projects");
+    var path_buf: [4096]u8 = undefined;
+    const path = try tmpSubPath(&path_buf, tmp, "projects/-a-b/s.jsonl");
     var answer: [192]u8 = undefined;
-    const r = poll(io, std.testing.allocator, .claude, root, "/a/b", 0, &answer, null);
+    const r = poll(io, std.testing.allocator, .claude, 0, &answer, path);
     try std.testing.expectEqual(State.unknown, r.state.?);
 }
 
-test "poll codex: 자정 넘긴 과거 날짜 세션을 다중 day 스캔으로 찾는다" {
+test "resolveSessionId codex: 자정 넘긴 과거 날짜 세션을 다중 day 스캔으로 찾는다(restore)" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -518,19 +429,18 @@ test "poll codex: 자정 넘긴 과거 날짜 세션을 다중 day 스캔으로 
     try tmp.dir.createDirPath(io, "sessions/2026/06/20");
     try tmp.dir.createDirPath(io, "sessions/2026/06/13");
     try tmp.dir.writeFile(io, .{ .sub_path = "sessions/2026/06/20/rollout-other.jsonl", .data =
-        \\{"type":"session_meta","payload":{"id":"o","cwd":"/other"}}
-        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"남의 답변"}}
+        \\{"type":"session_meta","payload":{"id":"019e8298-f7bf-7b63-b9a4-46626868c0ff","cwd":"/other"}}
+        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"남"}}
     });
     try tmp.dir.writeFile(io, .{ .sub_path = "sessions/2026/06/13/rollout-mine.jsonl", .data =
-        \\{"type":"session_meta","payload":{"id":"m","cwd":"/Users/me/ws"}}
-        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"과거날 답변"}}
+        \\{"type":"session_meta","payload":{"id":"019e8298-f7bf-7b63-b9a4-46626868c072","cwd":"/Users/me/ws"}}
+        \\{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"내"}}
     });
     var root_buf: [4096]u8 = undefined;
     const root = try tmpSubPath(&root_buf, tmp, "sessions");
-    var answer: [192]u8 = undefined;
-    const r = poll(io, std.testing.allocator, .codex, root, "/Users/me/ws", 0, &answer, null);
-    try std.testing.expectEqual(State.idle, r.state.?);
-    try std.testing.expectEqualStrings("과거날 답변", answer[0..r.answer_len]);
+    var id_buf: [256]u8 = undefined;
+    const id = resolveSessionId(io, std.testing.allocator, .codex, root, "/Users/me/ws", &id_buf).?;
+    try std.testing.expectEqualStrings("019e8298-f7bf-7b63-b9a4-46626868c072", id);
 }
 
 test "resolveSessionId claude: 최신 .jsonl 파일명에서 세션 id(확장자 제거)" {

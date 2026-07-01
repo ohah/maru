@@ -89,6 +89,8 @@ pub const entries = [_]Entry{
     .{ .action = .install_cli, .key = "install_cli", .title = "Install CLI" },
     // 모든 설정을 내장 기본값으로 초기화(통합 리셋). 기본 키바인딩 없음 — 팝업이 발견 경로.
     .{ .action = .reset_settings, .key = "reset_settings", .title = "Reset All Settings to Defaults" },
+    // 에이전트 세션 훅 재등록(자동등록 실패·훅 삭제 복구). 기본 키바인딩 없음 — 팝업이 발견 경로.
+    .{ .action = .reregister_agent_hooks, .key = "reregister_agent_hooks", .title = "Re-register Agent Session Hooks" },
 };
 
 /// 전역(OS) 단축키 카탈로그 한 항목(정적). in-app `Entry`와 평행하되 action이 GlobalAction이다. action_key는

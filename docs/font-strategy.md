@@ -227,7 +227,7 @@ color_glyph_kind
 
 `style_flags`는 rasterize(glyph bitmap)를 바꾸는 style만 포함한다(bold/italic). underline·strikethrough와 fg/bg 색은 glyph가 아니라 draw-time 오버레이/tint로 처리하므로 cache key에 넣지 않는다(밑줄 유무로 같은 glyph를 중복 캐시하지 않기 위해서다). 코드에서는 `RasterStyleFlags`가 이 경계를 표현하고, `DrawList`는 underline을 glyph cell과 별도 overlay command로 내보낸다.
 
-`font_id`는 임의 증가 숫자가 아니라 `FontIdentityRegistry`가 소유한 face identity를 뜻한다. 이 구분이 필요한 이유는 CoreText의 `CGGlyph` 값이 전역 glyph 번호가 아니라 해당 `CTFont` 안에서만 유효한 번호이기 때문이다. 예를 들어 primary font와 CJK fallback font가 둘 다 glyph id `42`를 낼 수 있지만, 두 bitmap은 서로 다른 atlas entry여야 한다.
+`font_id`는 임의 증가 숫자가 아니라 `FontIdentityRegistry`가 소유한 face identity를 뜻한다. 이 구분이 필요한 이유는 CoreText의 `CGGlyph` 값이 전역 glyph 번호가 아니라 해당 `CTFont` 안에서만 유효한 번호이기 때문이다. 예를 들어 primary font와 CJK fallback font가 둘 다 glyph id `42`를 낼 수 있지만, 두 bitmap은 서로 다른 atlas entry여야 한다. 단, `FontId`는 face가 registry에 처음 등장한 순서로 매기는 **지역 순번**이라 registry가 atlas보다 짧게 살면 이 보장이 깨진다: registry를 frame·pane마다 새로 만들면 같은 순번(예: `42`가 아니라 `font_id` 쪽)이 frame마다 다른 face를 가리켜, frame 간 살아남는 atlas가 이전 face의 slot을 다음 face에 오인 HIT한다(순번 뒤집힘에만 터져 간헐적 — 조합 중 '놔'에 번개). 그래서 registry는 **atlas와 같은 수명**으로 `RendererState`가 소유하는 단일 공유 registry여야 하고, 모든 pane의 shape가 여기 intern한다(상세: `src/renderer/README.md`의 `FontIdentityRegistry` 절).
 
 이 중 하나라도 빠지면 다음 버그가 난다.
 

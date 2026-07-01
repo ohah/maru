@@ -65,11 +65,14 @@ pub const CoreTextFrameBuilder = struct {
 
     /// 활성 surface를 **shape까지만** 한다(build과 달리 place/raster·RenderFrame 없음 — atlas 무접촉). 멀티 페인
     /// 통합이 활성 panel을 다른 페인과 한 placeMultiPane(한 atlas 세대)에 합류시키려고 쓴다. 코어 lock은 build과
-    /// 동형(읽기 락 아래 DrawList 복사, shape는 락 밖). renderer_state는 불필요(place를 안 한다).
+    /// 동형(읽기 락 아래 DrawList 복사, shape는 락 밖). place는 안 하지만 shape가 face를 intern하므로 공유
+    /// `font_registry`(RendererState 소유)는 넘겨받는다 — atlas cache key의 FontId 안정성을 위해 다른 페인과 같은
+    /// registry를 써야 한다(RendererState.font_registry 주석).
     pub fn shapeOnlyBuild(
         self: CoreTextFrameBuilder,
         allocator: std.mem.Allocator,
         app_window: *maru.session.AppWindow,
+        font_registry: *renderer.FontIdentityRegistry,
         io: std.Io,
     ) !ShapedPane {
         const active = app_window.active() orelse return error.NoActiveSurface;
@@ -81,7 +84,7 @@ pub const CoreTextFrameBuilder = struct {
         const rendered_view_offset = active.core.view_offset;
         active.unlockCore(io);
         const draw_list = try list_or;
-        var pane = try self.shapeOnly(allocator, draw_list);
+        var pane = try self.shapeOnly(allocator, draw_list, font_registry);
         pane.view_offset = rendered_view_offset;
         return pane;
     }
@@ -100,7 +103,7 @@ pub const CoreTextFrameBuilder = struct {
         // 단일 페인 경로는 멀티 페인 통합 빌드의 lists.len==1 특수화다: shapeOnly → placeMultiPane([1]) →
         // finishPane. 멀티 페인(app_session)은 여러 ShapedPane을 모아 한 번에 placeMultiPane해 cross-pane
         // 정합을 얻는다. 기존 호출자는 이 wrapper로 동작이 보존된다.
-        var pane = try self.shapeOnly(allocator, draw_list);
+        var pane = try self.shapeOnly(allocator, draw_list, &renderer_state.font_registry);
         const frames = renderer_state.placeMultiPane(allocator, &.{pane.shaped.runs}) catch |e| {
             pane.deinit(allocator);
             return e;
@@ -114,22 +117,21 @@ pub const CoreTextFrameBuilder = struct {
         };
     }
 
-    /// DrawList(소유권 이전)를 **shape까지만** 한다 — atlas는 안 건드린다. 결과 ShapedPane이 owned_list·
-    /// shaped·font_registry를 소유한다. 멀티 페인은 이걸 모아 한 번에 `placeMultiPane`(통합 배치)한 뒤
-    /// `finishPane`으로 per-pane RenderFrame을 만든다. font_registry는 rasterize까지 살아야 하므로
-    /// ShapedPane이 소유한다 — interned PostScript registry라 페인별 독립이다(멀티 페인이 동시에 서로 다른
-    /// registry를 들 수 있어 RendererState 단일 필드로 승격 불가).
+    /// DrawList(소유권 이전)를 **shape까지만** 한다 — atlas는 안 건드린다. 결과 ShapedPane이 owned_list·shaped를
+    /// 소유한다. 멀티 페인은 이걸 모아 한 번에 `placeMultiPane`(통합 배치)한 뒤 `finishPane`으로 per-pane RenderFrame을
+    /// 만든다. `font_registry`는 **호출자(RendererState)가 소유하는 공유 registry**를 빌려 intern한다 — atlas와 같은
+    /// 수명이라 같은 PostScript name이 frame·pane을 넘어 같은 `FontId`를 받고, 그래야 frame 간 살아남는 atlas의
+    /// cache key가 안정된다(RendererState.font_registry 주석 참고). 예전엔 shapeOnly가 registry를 per-pane으로
+    /// 새로 만들어 순번이 frame마다 흔들렸고, 그게 조합 중 '놔'에 번개가 뜨던 atlas slot 오인 HIT의 루트커즈였다.
     pub fn shapeOnly(
         self: CoreTextFrameBuilder,
         allocator: std.mem.Allocator,
         draw_list: renderer.DrawList,
+        font_registry: *renderer.FontIdentityRegistry,
     ) !ShapedPane {
         var owned_list = draw_list;
         var draw_list_owned = true;
         errdefer if (draw_list_owned) owned_list.deinit(allocator);
-
-        var font_registry = renderer.FontIdentityRegistry.init(allocator);
-        errdefer font_registry.deinit();
 
         const shaper = coretext_shaper.CoreTextDrawListShaper{
             .appearance = self.appearance,
@@ -141,16 +143,16 @@ pub const CoreTextFrameBuilder = struct {
             .glyph_cell_width_px = self.glyph_cell_width_px,
             .cell_height_px = self.cell_height_px,
         };
-        const shaped = try shaper.shape(allocator, owned_list, &font_registry);
+        const shaped = try shaper.shape(allocator, owned_list, font_registry);
         draw_list_owned = false;
-        return .{ .owned_list = owned_list, .shaped = shaped, .font_registry = font_registry };
+        return .{ .owned_list = owned_list, .shaped = shaped };
     }
 
     /// 통합 place로 만든 GlyphFrame과 ShapedPane을 합쳐 per-pane RenderFrame을 만든다(rasterizer가
-    /// pane.font_registry를 참조해 비트맵 생성). **ShapedPane을 consume한다**: 성공 시 owned_list가
-    /// RenderFrame으로 이동하고 shaped/font_registry는 정리되므로, caller는 성공한 pane에 deinit을 부르면
-    /// 안 된다. 실패 시 frame은 buildQuadRasterFromGlyphFrame이 정리하고, ShapedPane은 consume되지 않아
-    /// caller가 pane.deinit으로 정리한다.
+    /// `renderer_state.font_registry`를 참조해 비트맵 생성 — shape 때 intern한 그 공유 registry라 FontId가 일관).
+    /// **ShapedPane을 consume한다**: 성공 시 owned_list가 RenderFrame으로 이동하고 shaped는 정리되므로, caller는
+    /// 성공한 pane에 deinit을 부르면 안 된다. 실패 시 frame은 buildQuadRasterFromGlyphFrame이 정리하고, ShapedPane은
+    /// consume되지 않아 caller가 pane.deinit으로 정리한다. font_registry는 공유(RendererState 소유)라 여기서 안 만진다.
     pub fn finishPane(
         self: CoreTextFrameBuilder,
         allocator: std.mem.Allocator,
@@ -160,34 +162,32 @@ pub const CoreTextFrameBuilder = struct {
     ) !renderer.RenderFrame {
         const rasterizer = coretext_raster.CoreTextGlyphRasterizer{
             .appearance = self.appearance,
-            .font_registry = &pane.font_registry,
+            .font_registry = &renderer_state.font_registry,
             .rasterize_glyph = self.rasterize_glyph,
             .scale_milli = self.scale_milli,
         };
         const render_frame = try renderer_state.buildQuadRasterFromGlyphFrame(allocator, pane.owned_list, frame, rasterizer);
-        // 성공: owned_list가 render_frame으로 이동했다. shaped/font_registry는 더 불필요 → 정리.
+        // 성공: owned_list가 render_frame으로 이동했다. shaped는 더 불필요 → 정리. font_registry는 공유라 유지.
         pane.shaped.deinit(allocator);
-        pane.font_registry.deinit();
         return render_frame;
     }
 };
 
-/// shape만 끝낸 한 페인의 소유 상태(owned_list·shaped·font_registry). 멀티 페인 통합 빌드의 중간 단위:
-/// 여러 ShapedPane을 모아 한 번에 `placeMultiPane`한 뒤 `finishPane`으로 per-pane RenderFrame을 만든다.
+/// shape만 끝낸 한 페인의 소유 상태(owned_list·shaped). 멀티 페인 통합 빌드의 중간 단위: 여러 ShapedPane을 모아
+/// 한 번에 `placeMultiPane`한 뒤 `finishPane`으로 per-pane RenderFrame을 만든다. font_registry는 소유하지 않는다 —
+/// shape 때 RendererState의 공유 registry에 intern했고 그건 atlas 수명이라 여기서 관리할 필요가 없다.
 pub const ShapedPane = struct {
     owned_list: renderer.DrawList,
     shaped: renderer.ShapedGlyphRunList,
-    font_registry: renderer.FontIdentityRegistry,
     // 이 페인을 그릴 때 renderSnapshot이 쓴 활성 surface view_offset(스크롤 위치). shapeOnlyBuild(활성 경로)만
     // 락 아래에서 채우고, 그 외 생성(비활성 pane·사이드바 — shapeOnly 직접)은 0(스크롤 추적 비대상). app_session
     // 투영 게이트가 last_rendered_view_offset에 이 값을 기록한다(render-time — read/render TOCTOU 방지).
     view_offset: usize = 0,
 
     /// shape 결과 전체를 정리한다(owned_list 포함). finishPane이 consume에 성공한 ShapedPane엔 호출하면
-    /// 안 된다(double-free) — finishPane 실패 경로/place 실패 경로에서만 부른다.
+    /// 안 된다(double-free) — finishPane 실패 경로/place 실패 경로에서만 부른다. font_registry는 공유라 안 만진다.
     pub fn deinit(self: *ShapedPane, allocator: std.mem.Allocator) void {
         self.shaped.deinit(allocator);
-        self.font_registry.deinit();
         self.owned_list.deinit(allocator);
     }
 };
@@ -1589,4 +1589,51 @@ test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells 
     const stats = renderer.renderFrameStats(render_frame, renderer_state.atlas.entryCount());
     try std.testing.expect(stats.prepared());
     try std.testing.expectEqual(@as(usize, 2), stats.glyph_count);
+}
+
+test "buildFromDrawList interns faces into the shared RendererState registry (FontId stable across frames)" {
+    // 루트커즈 회귀 가드 — 조합 중 '놔'에 번개가 뜨던 atlas slot 오인 HIT.
+    //
+    // atlas는 frame 사이에 살아남는다(RendererState 소유). 그런데 예전엔 shapeOnly가 FontIdentityRegistry를
+    // **frame·pane마다 새로** 만들었다. FontId는 face가 처음 등장한 순서로 매기는 지역 순번이라, registry가
+    // frame마다 새로 만들어지면 같은 순번(예: 2)이 frame마다 다른 face(어제 emoji, 오늘 한글)를 가리킨다.
+    // atlas cache key는 그 FontId+glyph_id로 slot을 재사용하므로, 이전 frame이 심볼 face용으로 구운 slot을
+    // 이번 frame의 한글 face가 오인 HIT해 엉뚱한(번개) 비트맵을 그렸다. 순번이 뒤집힐 때만 터져 간헐적이었다.
+    //
+    // 수정: registry를 RendererState가 소유(atlas와 같은 수명)해, 같은 PostScript name이 frame·pane을 넘어
+    // 같은 FontId를 받게 한다. 이 테스트는 build가 그 **공유** registry에 intern하고(per-frame throwaway 아님)
+    // face가 frame 간 안정됨을 고정한다 — shapeOnly를 per-frame registry로 되돌리면 renderer_state.font_registry가
+    // 계속 비어 count 단언에서 실패한다.
+    const allocator = std.testing.allocator;
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    const builder = CoreTextFrameBuilder{
+        .appearance = try config.resolveAppearance(.{}),
+        .shape_draw_list = testShapeDrawList,
+        .rasterize_glyph = testRasterizeGlyph,
+    };
+
+    // Frame 1: ASCII 제목 → fake shaper가 "Menlo-Regular"를 공유 registry에 intern.
+    {
+        const titles = [_][]const u8{"a"};
+        const dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+        var f = try builder.buildFromDrawList(allocator, dl, &renderer_state);
+        defer f.deinit(allocator);
+    }
+    // build가 per-frame throwaway가 아니라 **공유** registry에 intern했다(throwaway였다면 count=0).
+    try std.testing.expectEqual(@as(usize, 1), renderer_state.font_registry.count());
+    const menlo_id = try renderer_state.font_registry.intern(.{ .postscript_name = "Menlo-Regular" });
+
+    // Frame 2: CJK 제목 → "AppleSDGothicNeo-Regular"를 **같은** registry에 intern. Menlo는 frame1에서
+    // 등록된 채 그대로 남아(count가 1→2로 누적, 리셋 아님) registry가 frame을 넘어 살아있음을 증명한다.
+    {
+        const titles = [_][]const u8{"가"};
+        const dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+        var f = try builder.buildFromDrawList(allocator, dl, &renderer_state);
+        defer f.deinit(allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 2), renderer_state.font_registry.count());
+    // Menlo의 FontId가 frame 간 불변 = atlas cache key 안정(루트커즈 봉인). 뒤집힌 등장 순서로 다시 intern해도
+    // idempotent라 새 순번을 안 받는다.
+    try std.testing.expectEqual(menlo_id, try renderer_state.font_registry.intern(.{ .postscript_name = "Menlo-Regular" }));
 }

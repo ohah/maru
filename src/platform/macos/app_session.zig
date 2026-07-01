@@ -9926,7 +9926,7 @@ pub const AppSession = struct {
                 // (chrome만 그려 blank/stale terminal을 합성하지 않게 — 기존 build-실패 동형). frame 카운터
                 // (advanceFrameIndex)는 활성이 실제 그려질 때만 올린다(placeAndDistribute 후) — 실패 frame은 기존처럼
                 // frame_loop_ticks를 안 올린다.
-                active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, self.io) catch null;
+                active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, &self.renderer_state.font_registry, self.io) catch null;
                 // 이 프레임이 실제로 그린 스크롤 위치(shapeOnlyBuild가 같은 락 아래 캡처). null=빌드 실패.
                 if (active_shaped) |sp| rendered_view_offset = sp.view_offset;
             } else {
@@ -11545,7 +11545,7 @@ pub const AppSession = struct {
     /// DrawList(소유권 이전)를 shapeOnly로 만들어 collected에 추가한다. shapeOnly 실패면 dl은 shapeOnly가 정리하고
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
     fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
-        const pane = builder.shapeOnly(self.allocator, dl) catch return;
+        const pane = builder.shapeOnly(self.allocator, dl, &self.renderer_state.font_registry) catch return;
         // 헤더 아이콘 ◧(U+25E7)는 .m이 hscale 1.7로 quad를 키워 셀보다 ~1.7칸 넓게 그린다. 셀 크기로 굽고 GPU에서
         // 확대하면 anti-alias가 번져 흐리므로(slot-stretch; partial-alpha 비율 ≈0.69 — coretext_smoke 측정 test), atlas
         // slot을 목표 px(셀×1.7)로 키워 그 크기로 직접 래스터한다 — 1.7× 텍스처가 1.7× quad에 1:1로 들어가 선명(≈0.33).

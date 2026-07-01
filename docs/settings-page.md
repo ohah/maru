@@ -43,7 +43,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 |---|---|---|
 | **Appearance › Font** | `font.*` | family, size, line-height, letter-spacing, (신규) family-bold/italic, fallback |
 | **Appearance › Theme** | `theme.*`, `chrome.theme` | preset(최상단·활성 시 개별 색·palette 잠금→클릭 시 "사용자 지정" 전환), 개별 색, palette 16, bold-is-bright, follow-system (search_match\*/sidebar_\*는 config 키가 없어 preset에서 파생 — 직접 편집/노출 안 함, theme.zig 상단 주석) |
-| **Appearance › Cursor** | `cursor.*` | shape, blink, color/text, (신규) blink-interval, unfocused |
+| **Appearance › Cursor** | `cursor.*` | shape, blink, color/text, (신규) blink-interval, blink-fade, unfocused |
 | **Appearance › Window** | `window.*` | padding, (신규) opacity, blur, background-image, unfocused-dim |
 | **Input › Keys** | `input.*` | page-keys, shift-enter, ime-enter, (신규) option-as-meta |
 | **Input › Mouse** | `input.*` | (신규) url-click-modifier, right-click, mouse-hide-while-typing, word-separators, scroll.* |

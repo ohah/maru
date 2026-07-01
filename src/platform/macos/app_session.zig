@@ -11911,9 +11911,10 @@ pub const AppSession = struct {
             // 어긋난다 — 개요 가치를 위해 수용(code-review max 확인).
             const term = tab.activePane().activeTerm();
             const renaming = self.renamingWorkspace(tab);
-            // 카드당 1회 스캔: 대표 kind + running(색칠 루프와 공유). rename 중엔 아이콘/색을 안 쓰므로 none/false.
-            const card_kind: AgentKind = if (renaming) .none else tabAgentKind(tab);
-            const running = !renaming and tabHasRunningAgent(tab);
+            // 카드당 1회 스캔: 대표 kind + running(색칠 루프·상태줄과 공유). **rename 중에도** 실제 값을 계산한다 —
+            // 편집 중에도 running 파형(상태줄)을 보여야 하기 때문(사용자 요청). 아이콘만 rename 중 숨긴다(캐럿 정렬).
+            const card_kind: AgentKind = tabAgentKind(tab);
+            const running = tabHasRunningAgent(tab);
             try card_kinds.append(self.allocator, card_kind);
             try card_running.append(self.allocator, running);
             // 에이전트 아이콘은 슬롯 중앙에 독립 배치. 단 rename 중엔 숨긴다(0) — 안 그러면 편집 텍스트가 icon_cols
@@ -11927,7 +11928,10 @@ pub const AppSession = struct {
                 try names.append(self.allocator, try self.renameEditText(self.allocator)); // owned → names가 소유
                 try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
-                try status_lines.append(self.allocator, try self.allocator.dupe(u8, "")); // rename 중엔 상태줄 숨김
+                // **상태줄은 rename 중에도 표시** — 편집하는 워크스페이스가 running이면 파형 스피너를 보여준다(사용자 요청:
+                // "리네임하면 애니메이션이 안 보인다"). 캐럿은 이름줄에만 있어 간섭 없고, "편집 이름 + 상태줄" 레이아웃은
+                // non-git 에이전트 워크스페이스(브랜치/경로 없이 상태줄만)와 동형이라 안전하다. 브랜치/경로는 편집 집중 위해 계속 숨김.
+                try status_lines.append(self.allocator, try self.workspaceStatusLine(tab, running));
                 try pins.append(self.allocator, false);
             } else {
                 const base = workspaceLabel(tab);

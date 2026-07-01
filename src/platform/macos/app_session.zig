@@ -1855,9 +1855,19 @@ pub const AppSession = struct {
                 // 세로 중앙 정렬하므로, 상태줄이 생기면 이름줄이 위로 (ch/2) 올라간다 — caret y도 같은 n을 써야 IME
                 // 후보창이 이름 caret 아래에 오고 파형 상태줄과 안 겹친다(buildSidebarDrawList의 line_count 인코딩과 동형).
                 const line_count: u32 = if (workspaceHasStatusLine(tab)) 2 else 1;
+                // 카드 이름줄(line 0)의 view 절대 y — Swift firstRect가 backing px 좌상단 원점을 view 좌표로 변환만
+                // 하므로(사이드바 origin 보정 없음), 렌더러(maru_metal_renderer.m: slot_idx*slot_h + header − scroll +
+                // 블록중앙)와 같은 절대 y를 줘야 한다. 예전엔 idx*slot_h만 써서 헤더 높이만큼 위·스크롤만큼 아래로
+                // 어긋났다(검색 caret sidebarSearchCaretRect가 search_row*ch로 헤더 영역 절대 y를 쓰는 것과 같은 규약).
+                // slotTop이 header 더하고 scroll 뺀 슬롯 상단(단일 출처, i64), 거기에 n줄 블록 세로 중앙 오프셋을 더한다.
+                // 헤더 위로 스크롤돼 음수면 헤더 아래로 clamp — IME 후보창이 고정 검색 헤더 위로 뜨지 않게(scissor가 편집
+                // 텍스트를 헤더에서 자르는 것과 짝, slotAt이 헤더 영역을 슬롯에서 제외하는 것과 일관).
+                const slot_top = chrome.components.sidebar.slotTop(idx, self.sidebar_header_height_px, slot_h, self.sidebar_scroll_offset_px);
+                const block_off: i64 = @intCast((slot_h -| line_count * ch) / 2);
+                const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{
                     .x = @intCast(caret_col * cw),
-                    .y = @intCast(@as(u32, @intCast(idx)) * slot_h + (slot_h -| line_count * ch) / 2), // n줄 블록 세로 중앙(이름줄=line 0)
+                    .y = @intCast(caret_y),
                     .w = @intCast(cw),
                     .h = @intCast(ch),
                 };
@@ -15502,7 +15512,9 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
 // renameCaretRect도 같은 line_count로 caret y를 올려야 IME 후보창이 이름 caret 아래(파형 상태줄과 겹치지 않게)에 온다.
 // non-agent 워크스페이스는 상태줄이 없어 1줄이라 슬롯 중앙 그대로. buildSidebarDrawList의 line_count 인코딩(빈 보조줄
 // skip)과 caret 정렬을 묶는다 — 상태줄이 이름줄 아래에 늘 붙던 회귀(커밋 8c4c969)에서 캐럿만 1줄 기준으로 남던 것을 고정.
-test "F1: workspace rename caret y follows card line count (agent status line shifts name row up)" {
+// 겸해서 caret y가 view 절대 좌표 규약(사이드바 header 더하고 scroll 뺌 — Swift firstRect가 origin 보정 없이 변환만)을
+// 지키는지도 고정한다(케이스 3: scroll offset 반영). 예전엔 idx*slot_h만 써서 header만큼 위·scroll만큼 아래로 어긋났다.
+test "F1: workspace rename caret y follows card line count + sidebar header/scroll offset" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -15522,25 +15534,38 @@ test "F1: workspace rename caret y follows card line count (agent status line sh
     const term = tab.activeTerm();
     const ch: u32 = session.cell_height_px;
     const slot_h: u32 = session.sidebar_slot_height_px;
+    const header: u32 = session.sidebar_header_height_px;
     try std.testing.expect(slot_h > 2 * ch); // 슬롯이 2줄을 담는다는 전제(ratio 4600)
+    try std.testing.expect(header > 0); // 헤더(검색바·아이콘)가 있다는 전제 — caret y가 그만큼 내려가야 렌더러와 정합
 
-    // 1) non-agent 워크스페이스: 카드 1줄(이름만) → caret = 슬롯 세로 중앙(1줄 블록).
+    // 1) non-agent 워크스페이스(scroll 0): 카드 1줄(이름만) → caret = header + 슬롯 세로 중앙(1줄 블록).
     term.agent_kind = .none;
     session.startRename(.{ .workspace = tab });
     const cr1 = session.renameCaretRect() orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast((slot_h -| ch) / 2)), cr1.y);
+    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| ch) / 2)), cr1.y);
     session.closeRename();
 
-    // 2) idle 에이전트 워크스페이스: 상태줄(✓)이 붙어 카드 2줄 → 이름줄(line 0)이 2줄 블록 상단(ch/2 위).
+    // 2) idle 에이전트 워크스페이스(scroll 0): 상태줄(✓)이 붙어 카드 2줄 → 이름줄(line 0)이 2줄 블록 상단(ch/2 위).
     term.agent_kind = .claude;
     term.agent_state = .idle;
     session.startRename(.{ .workspace = tab });
     const cr2 = session.renameCaretRect() orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast((slot_h -| 2 * ch) / 2)), cr2.y);
+    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| 2 * ch) / 2)), cr2.y);
     session.closeRename();
 
     // 상태줄 유무로 caret이 실제로 위로 올라가야 한다(겹침 방지의 본질) — 안 그러면 후보창이 파형 상태줄에 겹친다.
     try std.testing.expect(cr2.y < cr1.y);
+
+    // 3) scroll offset 반영: 콘텐츠가 offset만큼 위로 밀리면 caret도 따라 올라간다(slotTop이 scroll을 뺌). idx 0,
+    // 작은 offset(블록중앙 (slot_h−ch)/2 보다 작아 헤더 clamp 전)이라 caret = header + block_off − offset.
+    term.agent_kind = .none;
+    const offset: u32 = ch / 2; // (slot_h−ch)/2 > ch/2 (slot_h>2ch) 이므로 clamp(@max header) 안 걸림
+    session.sidebar_scroll_offset_px = offset;
+    session.startRename(.{ .workspace = tab });
+    const cr3 = session.renameCaretRect() orelse return error.NoCaret;
+    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| ch) / 2 - offset)), cr3.y);
+    session.closeRename();
+    session.sidebar_scroll_offset_px = 0; // 복원
 }
 
 // 코드리뷰 수정 고정: (#7) 포커스 상실 시 rename 확정, (#2) 터미널 본문 우클릭은 consume 안 하고 mouse-reporting으로

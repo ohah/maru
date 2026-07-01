@@ -118,6 +118,36 @@ test "parseArgv0Basename: comm이 버전으로 바뀐 claude를 argv[0]으로 �
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgv0Basename(&[_]u8{ 0, 0, 0, 0 }));
 }
 
+// 같은 cwd에 여러 claude가 있어도 팬별로 정확히 매칭하려면, 팬 claude의 env `CLAUDE_CODE_SESSION_ID`(= <id>.jsonl 파일명)를
+// 읽어야 한다. 이 테스트는 KERN_PROCARGS2 바이트(argc·exec_path·argv·envp)에서 그 env 값을 파싱하는지 고정한다
+// (실 sysctl은 프로세스 필요라 순수 파서만). CLAUDE_CODE_CHILD_SESSION 존재 판정도 확인(상속 세션 게이트).
+test "parseEnvValue: KERN_PROCARGS2 envp에서 CLAUDE_CODE_SESSION_ID/CHILD_SESSION 파싱" {
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a, &[_]u8{ 1, 0, 0, 0 }); // argc=1
+    try buf.appendSlice(a, "/x/claude"); // exec_path
+    try buf.append(a, 0);
+    try buf.append(a, 0); // 패딩
+    try buf.appendSlice(a, "claude"); // argv[0]
+    try buf.append(a, 0);
+    // envp
+    try buf.appendSlice(a, "PATH=/usr/bin");
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "CLAUDE_CODE_SESSION_ID=5fffca55-048d-48c6-ac1b-2ff05c3c5452");
+    try buf.append(a, 0);
+    try buf.appendSlice(a, "CLAUDECODE=1");
+    try buf.append(a, 0);
+
+    try std.testing.expectEqualStrings("5fffca55-048d-48c6-ac1b-2ff05c3c5452", parseEnvValue(buf.items, "CLAUDE_CODE_SESSION_ID") orelse return error.TestUnexpectedNull);
+    // prefix가 겹치는 다른 키를 오독하지 않는다(CLAUDECODE vs CLAUDE_CODE_SESSION_ID).
+    try std.testing.expectEqualStrings("1", parseEnvValue(buf.items, "CLAUDECODE") orelse return error.TestUnexpectedNull);
+    // 없는 키(상속 세션 게이트용 CHILD_SESSION 미설정) → null.
+    try std.testing.expectEqual(@as(?[]const u8, null), parseEnvValue(buf.items, "CLAUDE_CODE_CHILD_SESSION"));
+    // argv를 env로 오독하지 않는다(argv[0]="claude"는 '='가 없어 매칭 안 됨).
+    try std.testing.expectEqual(@as(?[]const u8, null), parseEnvValue(buf.items, "claude"));
+}
+
 /// captureAgentArgv 캡처 결과 타입 — 비-macOS 스텁(session.zig)과 공유하려고 types.zig에 둔다.
 const ProcArgs = types.ProcArgs;
 
@@ -202,6 +232,33 @@ fn foregroundArgv0Basename(pgid: c_int) ?[]const u8 {
     var size: usize = procargs_buf.len;
     if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
     return parseArgv0Basename(procargs_buf[0..size]);
+}
+
+/// KERN_PROCARGS2 바이트에서 envp의 `key=value`를 찾아 value 슬라이스(data 내부)를 돌려준다. argc·exec_path·argv[0..argc]를
+/// 건너뛴 뒤(그 경계 계산은 parseArgv1Basename과 동형) env 문자열들을 순회한다. 못 찾으면 null.
+fn parseEnvValue(data: []const u8, key: []const u8) ?[]const u8 {
+    if (data.len <= @sizeOf(c_int)) return null;
+    const argc: u32 = @as(u32, data[0]) | (@as(u32, data[1]) << 8) | (@as(u32, data[2]) << 16) | (@as(u32, data[3]) << 24);
+    var off: usize = @sizeOf(c_int);
+    while (off < data.len and data[off] != 0) off += 1; // exec_path
+    while (off < data.len and data[off] == 0) off += 1; // null 패딩
+    var i: usize = 0;
+    while (i < argc and off < data.len) : (i += 1) { // argv[0..argc] 건너뜀
+        while (off < data.len and data[off] != 0) off += 1;
+        if (off < data.len) off += 1; // 토큰 구분 null
+    }
+    // envp: "KEY=VALUE\0" 반복. 빈 문자열이면 env 목록 끝.
+    while (off < data.len) {
+        const s = off;
+        while (off < data.len and data[off] != 0) off += 1;
+        const entry = data[s..off];
+        if (off < data.len) off += 1; // null 건너뜀
+        if (entry.len == 0) break;
+        if (entry.len > key.len and entry[key.len] == '=' and std.mem.eql(u8, entry[0..key.len], key)) {
+            return entry[key.len + 1 ..];
+        }
+    }
+    return null;
 }
 
 test "parseArgv1Basename: node 래퍼의 argv[1] 스크립트 basename 추출(codex 감지)" {
@@ -618,6 +675,28 @@ pub const PtySession = struct {
         var size: usize = procargs_buf.len;
         if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
         return parseProcArgs(procargs_buf[0..size], str_buf, argv_out);
+    }
+
+    /// 포그라운드 프로세스의 **자기 claude 세션 ID**(env `CLAUDE_CODE_SESSION_ID`)를 out으로 복사해 돌려준다 — 세션 파일명
+    /// (`<id>.jsonl`)과 같아 **같은 cwd 다중 claude에서 팬별 정확 매칭**에 쓴다(agent_session.poll). 단 `CLAUDE_CODE_CHILD_SESSION`
+    /// 이 설정돼 있으면 그 값은 **부모에서 상속**된 것(이 프로세스 고유 세션이 아님)이라 null → 호출자는 cwd별 mtime 폴백.
+    /// **틱 스레드 전용**(procargs_buf 공유 — foregroundProcessName과 같은 규약). 닫힘·fd음수·pgid≤0·sysctl실패·미설정이면 null.
+    pub fn foregroundClaudeSessionId(self: *PtySession, out: []u8) ?[]const u8 {
+        if (self.closing.load(.acquire)) return null;
+        const fd = self.master_fd.load(.acquire);
+        if (fd < 0) return null;
+        const pgid = tcgetpgrp(fd);
+        if (pgid <= 0) return null;
+        var mib = [_]c_int{ ctl_kern, kern_procargs2, pgid };
+        var size: usize = procargs_buf.len;
+        if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
+        const data = procargs_buf[0..size];
+        if (parseEnvValue(data, "CLAUDE_CODE_CHILD_SESSION") != null) return null; // 상속된 세션 — 이 프로세스 고유가 아니라 신뢰 불가
+        const sid = parseEnvValue(data, "CLAUDE_CODE_SESSION_ID") orelse return null;
+        const m = @min(sid.len, out.len);
+        if (m == 0) return null;
+        std.mem.copyForwards(u8, out[0..m], sid[0..m]);
+        return out[0..m];
     }
 
     /// 이 PTY에 **셸 자신이 아닌 포그라운드 작업(명령)이 돌고 있는지**를 반환한다. child(셸)는 spawn 때 setsid로

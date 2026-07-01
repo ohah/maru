@@ -9854,7 +9854,12 @@ pub const AppSession = struct {
         const root = std.fmt.bufPrint(&root_buf, "{s}/{s}", .{ home, subdir }) catch return;
 
         const prev_state = term.agent_state;
-        const r = agent_session.poll(self.io, self.allocator, kind, root, cwd, term.agent_session_mtime, &term.agent_answer_buf);
+        // 팬의 claude 자기 세션 ID(env CLAUDE_CODE_SESSION_ID)를 읽어 넘긴다 — 같은 cwd에 여러 claude가 있어도 각 팬이
+        // 자기 세션 파일을 정확히 매칭한다(mtime 최신 파일 오독 방지, 사용자 요청). 상속 세션(CHILD_SESSION)·codex·미설정이면
+        // null → poll이 cwd별 mtime 폴백. env는 프로세스 정적이라 매 poll 읽어도 안전(값 불변).
+        var sid_buf: [64]u8 = undefined;
+        const session_id: ?[]const u8 = if (kind == .claude) term.rt.live_pty.session.foregroundClaudeSessionId(&sid_buf) else null;
+        const r = agent_session.poll(self.io, self.allocator, kind, root, cwd, term.agent_session_mtime, &term.agent_answer_buf, session_id);
         const new_state = r.state orelse {
             term.agent_session_mtime = r.mtime; // null = mtime 동일 — 갱신 무해, 직전 상태 유지(재파싱 skip)
             return;

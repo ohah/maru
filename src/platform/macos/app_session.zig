@@ -9263,8 +9263,20 @@ pub const AppSession = struct {
     /// 팬별 정확 resume**. 매핑이 없으면(훅 미발화·미설정) ""(폴백 resume). 매핑은 종료 시점에 그대로 있다(clearMappings는
     /// 시작 시에만). agent_session.Kind는 app.agent_resume.Kind와 같은 타입이라(#6 통합) 변환 없이 넘긴다.
     fn captureAgentSessionId(self: *AppSession, arena: std.mem.Allocator, term: *Term, kind: app.agent_resume.Kind) []const u8 {
+        // restore는 stale 매핑이 잘못된 세션을 resume하면 지속 피해라, readMapping에 pane cwd를 넘겨 payload cwd와 대조
+        // 시킨다(교차-cwd stale 차단). cwd는 OSC7이라 락 아래 복사(pollAgentState와 같은 함정 방지). 못 읽으면 "" 폴백.
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = blk: {
+            term.surface.lockCore(self.io);
+            defer term.surface.unlockCore(self.io);
+            const live = term.surface.core.currentCwd();
+            if (live.len == 0 or live.len > cwd_buf.len) break :blk "";
+            @memcpy(cwd_buf[0..live.len], live);
+            break :blk cwd_buf[0..live.len];
+        };
+        if (cwd.len == 0) return "";
         var tp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const transcript_path = agent_hooks.readMapping(self.io, self.allocator, term.surface.id, &tp_buf) orelse return "";
+        const transcript_path = agent_hooks.readMapping(self.io, self.allocator, term.surface.id, kind, cwd, &tp_buf) orelse return "";
         var id_buf: [256]u8 = undefined;
         const id = agent_session.sessionIdFromTranscript(self.io, self.allocator, kind, transcript_path, &id_buf) orelse return "";
         return arena.dupe(u8, id) catch "";
@@ -9845,7 +9857,9 @@ pub const AppSession = struct {
         // 남긴 정확한 경로다(agent_hooks.readMapping). 같은 cwd 다중 세션도 팬별 정확 매칭(cwd 추측·mtime 최신 오독 없음).
         // 매핑이 아직 없으면(훅 미발화·미설정) null → poll이 unknown(cwd 폴백 없음 — docs/agent-session.md "훅 매핑").
         var tp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const transcript_path = agent_hooks.readMapping(self.io, self.allocator, term.surface.id, &tp_buf);
+        // 라이브 poll은 pane_cwd=null로 cwd 체크 생략(stale는 다음 훅 발화에 self-heal). kind 루트 체크는 유지 —
+        // 교차-에이전트 매핑(codex 경로를 claude 파서로)을 걸러 unknown으로.
+        const transcript_path = agent_hooks.readMapping(self.io, self.allocator, term.surface.id, kind, null, &tp_buf);
         const r = agent_session.poll(self.io, self.allocator, kind, term.agent_session_mtime, &term.agent_answer_buf, transcript_path);
         const new_state = r.state orelse {
             term.agent_session_mtime = r.mtime; // null = mtime 동일 — 갱신 무해, 직전 상태 유지(재파싱 skip)

@@ -170,19 +170,6 @@ fn copyPreviewFlattened(dst: []u8, src: []const u8) usize {
     return n;
 }
 
-/// claude project 디렉터리 이름 = 절대 cwd의 `/`를 `-`로 치환(예: `/Users/x/ws/maru` → `-Users-x-ws-maru`).
-/// `out`에 써서 슬라이스를 돌려준다. `out`이 작으면 null. 순수 함수.
-///
-/// 베이스: 실 세션 디렉터리로 검증한 규칙 — `/`→`-`은 하이픈을 포함한 경로(`.../agent-devtools`)에서도 디렉터리
-/// 이름과 정확히 일치했다. claude는 경로에 `.`/`_` 등이 있으면 추가 치환할 수 있으나(미검증) 로컬에 그런 경로의
-/// 세션이 없어 확인하지 못했다 — 그런 cwd는 디렉터리 not-found로 빠지고 platform이 "에이전트 상태 없음"으로
-/// graceful 폴백한다(docs/agent-session.md PR1 한계). 치환 문자 집합을 한 곳에 둬서 추후 정정하기 쉽게 한다.
-pub fn encodeClaudeProjectDir(out: []u8, cwd: []const u8) ?[]const u8 {
-    if (cwd.len > out.len) return null;
-    for (cwd, 0..) |ch, i| out[i] = if (ch == '/') '-' else ch;
-    return out[0..cwd.len];
-}
-
 // ── codex 어댑터 ────────────────────────────────────────────────────────────────────
 // 베이스: openai/codex(Apache-2.0) rollout 포맷 + 실 세션 파일 검증. claude와 달리 완료가 **명시적**이라
 // (event_msg/task_complete) 추론이 필요 없다.
@@ -241,7 +228,7 @@ pub fn parseCodexTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: 
 }
 
 /// codex rollout 첫 줄(`session_meta`)의 `payload.<field>` 문자열을 `out`으로 복사해 돌려준다. session_meta가
-/// 아니거나 필드가 없거나 버퍼가 작으면 null. parseCodexCwd/parseCodexId의 공통 구현(순수 — 줄 파싱만).
+/// 아니거나 필드가 없거나 버퍼가 작으면 null. parseCodexId의 구현(순수 — 줄 파싱만).
 fn parseCodexMetaField(scratch: std.mem.Allocator, first_line: []const u8, field: []const u8, out: []u8) ?[]const u8 {
     const line = std.mem.trim(u8, first_line, " \t\r\n");
     const parsed = std.json.parseFromSlice(std.json.Value, scratch, line, .{}) catch return null;
@@ -258,14 +245,8 @@ fn parseCodexMetaField(scratch: std.mem.Allocator, first_line: []const u8, field
     return out[0..val.len];
 }
 
-/// codex rollout 첫 줄(`session_meta`)에서 `payload.cwd`를 뽑는다. codex는 날짜 분할(`<YYYY>/<MM>/<DD>/`)이라
-/// cwd로 디렉터리를 못 찾으므로, platform이 최근 rollout들의 첫 줄을 읽어 cwd 일치하는 최신 세션을 고른다.
-pub fn parseCodexCwd(scratch: std.mem.Allocator, first_line: []const u8, out: []u8) ?[]const u8 {
-    return parseCodexMetaField(scratch, first_line, "cwd", out);
-}
-
 /// codex rollout 첫 줄(`session_meta`)에서 `payload.id`(세션 UUID)를 뽑는다. `codex resume <id>`의 대상 식별자다
-/// (UUIDv7 — docs/workspace-restore.md "에이전트 세션 자동 resume"). 규칙은 parseCodexCwd와 동일.
+/// (UUIDv7 — docs/workspace-restore.md "에이전트 세션 자동 resume"). session_meta가 아니면 null(회전/잘못된 첫 줄 보호).
 pub fn parseCodexId(scratch: std.mem.Allocator, first_line: []const u8, out: []u8) ?[]const u8 {
     return parseCodexMetaField(scratch, first_line, "id", out);
 }
@@ -429,22 +410,6 @@ test "parseClaudeTail: 빈 입력/공백 줄은 unknown(크래시 없음)" {
     try std.testing.expectEqual(AgentState.unknown, parseClaudeTail(std.testing.allocator, "\n  \n\t\n", &buf).state);
 }
 
-test "encodeClaudeProjectDir: 절대 cwd의 / 를 - 로 치환" {
-    var buf: [128]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "-Users-x-Documents-workspace-maru",
-        encodeClaudeProjectDir(&buf, "/Users/x/Documents/workspace/maru").?,
-    );
-    // 하이픈 포함 경로도 그대로(실 세션으로 검증한 케이스).
-    try std.testing.expectEqualStrings(
-        "-Users-x-ws-agent-devtools",
-        encodeClaudeProjectDir(&buf, "/Users/x/ws/agent-devtools").?,
-    );
-    // 버퍼가 작으면 null.
-    var tiny: [4]u8 = undefined;
-    try std.testing.expectEqual(@as(?[]const u8, null), encodeClaudeProjectDir(&tiny, "/Users/x"));
-}
-
 // ── codex 어댑터 테스트 ──────────────────────────────────────────────────────────────
 
 test "parseCodexTail: 마지막이 task_complete면 idle + last_agent_message 미리보기(여러 줄 평탄화)" {
@@ -509,27 +474,6 @@ test "parseCodexTail: 메타(session_meta/turn_context)뿐이면 unknown, 잘린
     const s = parseCodexTail(std.testing.allocator, partial, &buf);
     try std.testing.expectEqual(AgentState.idle, s.state);
     try std.testing.expectEqualStrings("온전", s.answer);
-}
-
-test "parseCodexCwd: session_meta 첫 줄에서 payload.cwd 추출" {
-    var scratch_buf: [256]u8 = undefined;
-    const meta =
-        \\{"timestamp":"2026-06-01T18:52:03Z","type":"session_meta","payload":{"id":"u","cwd":"/Users/yoonhb/Documents/workspace/maru","cli_version":"1.0"}}
-    ;
-    try std.testing.expectEqualStrings(
-        "/Users/yoonhb/Documents/workspace/maru",
-        parseCodexCwd(std.testing.allocator, meta, &scratch_buf).?,
-    );
-    // session_meta가 아니면 null(잘못된 첫 줄/회전된 파일 보호).
-    const not_meta =
-        \\{"type":"response_item","payload":{"type":"message"}}
-    ;
-    try std.testing.expectEqual(@as(?[]const u8, null), parseCodexCwd(std.testing.allocator, not_meta, &scratch_buf));
-    // cwd 누락도 null.
-    const no_cwd =
-        \\{"type":"session_meta","payload":{"id":"u"}}
-    ;
-    try std.testing.expectEqual(@as(?[]const u8, null), parseCodexCwd(std.testing.allocator, no_cwd, &scratch_buf));
 }
 
 test "parseCodexId: session_meta 첫 줄에서 payload.id(세션 UUID) 추출" {

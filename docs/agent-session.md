@@ -184,15 +184,14 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
 - **PR0(이 문서)**: 설계 단일 출처(doc-first). ✅ 완료.
 - **PR1**: session core 순수 파싱 + **claude 어댑터** ✅ **완료** — `src/session/agent_transcript.zig`
   (`session.zig` 파사드 노출). `parseClaudeTail`(tail 바이트→`AgentState{unknown,running,idle}`+답변 미리보기),
-  `encodeClaudeProjectDir`(cwd→디렉터리)는 OS-중립 순수 함수(std만 의존, `tests/boundary/imports.zig` 가드).
-  최신 세션 선택은 platform(L4)이 디렉터리 스트리밍 나열에서 인라인으로 한다(순수 헬퍼는 둘 다 안 맞아 미사용). 고정 JSONL fixture로 헤드리스 테스트(running=user/tool_use, idle=end_turn,
+  는 OS-중립 순수 함수(std만 의존, `tests/boundary/imports.zig` 가드). **⚠️ 세션 파일 위치는 이후 훅 매핑(위 Context)으로
+  대체돼, cwd→디렉터리 인코딩(`encodeClaudeProjectDir`)·mtime 최신 인라인 선택은 제거됐다** — 이 항목은 히스토리 보존용. 고정 JSONL fixture로 헤드리스 테스트(running=user/tool_use, idle=end_turn,
   느린 API 갭, end_turn 뒤 tool_result/메타 꼬리/isMeta user, 잘린 선두 줄 skip, UTF-8 경계 말줄임, cwd→디렉터리).
   파일 I/O(세션 찾기·tail read·디렉터리 나열)와 사이드바 배선은 PR3(platform).
 - **PR2**: **codex 어댑터** ✅ **완료** — 같은 `src/session/agent_transcript.zig`에 `parseCodexTail`(완료=명시적
   `event_msg`/`task_complete`, 답변=`last_agent_message`, `token_count` 무시, 그 밖 turn 엔트리=running),
-  `parseCodexCwd`(첫 줄 `session_meta.payload.cwd` 추출 — 날짜 분할이라 cwd로 디렉터리를 못 찾아 첫 줄로 매핑).
-  claude와 `AgentState`/`Status`·tail 규약·헬퍼 공유. fixture 테스트(idle/token_count 무시/진행 신호/메타뿐/잘린
-  선두 줄/cwd 추출).
+  `parseCodexId`(첫 줄 `session_meta.payload.id` — resume 대상). **⚠️ cwd로 세션을 찾던 `parseCodexCwd`/날짜-스캔은 훅
+  매핑으로 대체돼 제거됨**(위 Context). claude와 `AgentState`/`Status`·tail 규약·헬퍼 공유. fixture 테스트(idle/token_count 무시/진행 신호/메타뿐/잘린 선두 줄).
 - **PR3**: platform tail-read + 사이드바 **상태 표시** ✅ **완료** — `src/platform/macos/agent_session.zig`(L4:
   세션 파일 찾기·디렉터리 나열·tail read; claude=enc(cwd) 디렉터리 최신 .jsonl을 `readTailScan`(끝 256KB→8MB 지수
   확장)으로 마지막 대화 턴까지 읽음, codex=연·월·day를 최신순 평탄 순회(자정 넘김 대응)해 첫 줄 cwd 일치 최신

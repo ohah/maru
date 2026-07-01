@@ -3340,21 +3340,27 @@ pub const AppSession = struct {
     // 단일 출처: docs/macos-app-host-boundary.md "닫기 확인".
 
     /// 이 Term에 셸이 아닌 포그라운드 명령이 실행 중인가 — 닫기 확인의 단위 판정. live_pty 미초기화(attach 전)나
-    /// 이미 종료(exited)면 false(명령 없음). PtySession.hasForegroundJob이 tcgetpgrp≠셸 pid로 판정한다(틱 스레드
-    /// 전용 — 닫기 경로는 메인/틱 스레드라 안전). 단일 출처: src/pty/macos.zig hasForegroundJob 주석.
-    fn termHasRunningJob(term: *Term) bool {
+    /// 이미 종료(exited)면 false(명령 없음). 실행 여부는 코어의 `cursorIsAtPrompt`(셸 통합 OSC 133 + alt 화면,
+    /// OS-중립)로 판정한다 — 프롬프트에 idle하게 있으면 실행 중 아님. pgid syscall을 안 쓰므로 login(1) fork
+    /// (child_pid=login이라 셸 pgid와 영영 불일치) 오판이 없고 Linux·Windows·web에 그대로 이식된다.
+    /// `cursorIsAtPrompt`가 읽는 코어 필드(semantic_state·alt_active)는 reader 스레드가 `core.write`로 갱신하므로,
+    /// 메인 스레드 읽기는 **lockCore 아래**에서 한다(surface.zig 불변식·torn read 방지 — cwd/scrollback 형제와 동일).
+    /// 단일 출처: docs/macos-app-host-boundary.md "닫기 확인", src/terminal/core.zig cursorIsAtPrompt.
+    fn termHasRunningJob(term: *Term, io: std.Io) bool {
         if (!term.rt.live_initialized) return false;
         if (term.surface.process_state == .exited) return false;
-        return term.rt.live_pty.session.hasForegroundJob();
+        term.surface.lockCore(io);
+        defer term.surface.unlockCore(io);
+        return !term.surface.core.cursorIsAtPrompt();
     }
 
-    fn paneHasRunningJob(pane: *Pane) bool {
-        for (pane.terms.items) |t| if (termHasRunningJob(t)) return true;
+    fn paneHasRunningJob(pane: *Pane, io: std.Io) bool {
+        for (pane.terms.items) |t| if (termHasRunningJob(t, io)) return true;
         return false;
     }
 
-    fn tabHasRunningJob(tab: *Tab) bool {
-        for (tab.panes.items) |p| if (paneHasRunningJob(p)) return true;
+    fn tabHasRunningJob(tab: *Tab, io: std.Io) bool {
+        for (tab.panes.items) |p| if (paneHasRunningJob(p, io)) return true;
         return false;
     }
 
@@ -3401,7 +3407,7 @@ pub const AppSession = struct {
     }
 
     fn sessionHasRunningJob(self: *AppSession) bool {
-        for (self.tabs.items) |t| if (tabHasRunningJob(t)) return true;
+        for (self.tabs.items) |t| if (tabHasRunningJob(t, self.io)) return true;
         return false;
     }
 
@@ -3435,9 +3441,9 @@ pub const AppSession = struct {
     fn scopeHasRunningJob(self: *AppSession, scope: CloseScope) bool {
         return switch (scope) {
             .none => false,
-            .term => termHasRunningJob(self.activePane().activeTerm()),
-            .pane => paneHasRunningJob(self.activePane()),
-            .tab => |idx| tabHasRunningJob(self.tabs.items[idx]),
+            .term => termHasRunningJob(self.activePane().activeTerm(), self.io),
+            .pane => paneHasRunningJob(self.activePane(), self.io),
+            .tab => |idx| tabHasRunningJob(self.tabs.items[idx], self.io),
             .session => self.sessionHasRunningJob(),
         };
     }
@@ -18447,6 +18453,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
+    markAllTermsAtPrompt(session); // idle 셸 흉내 — ✕ 닫기가 확인 모달 없이 즉시 진행되게
 
     // 활성 pane의 바 rect를 구해 탭 1의 ✕ zone x를 계산한다.
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
@@ -18471,15 +18478,13 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
     try std.testing.expect(!session.ended_seen); // 아직 Term 남음 — 세션 유지
 }
 
-// 닫기 확인(실행 중 명령 보호): controlled_smoke child는 setsid로 포그라운드 그룹 리더라 hasForegroundJob=false
-// (셸이 명령을 새 pgrp로 띄운 상태가 아님). 그래서 닫을 때 확인 모달이 뜨지 않고 **즉시** 닫혀야 한다 — requestClose가
-// closeTargetHasRunningJob=false면 바로 executeClose하는 경로를 증명한다. (running job→모달 트리거는 실제 포그라운드
-// 작업이 필요해 tests/integration/pty의 hasForegroundJob 테스트와 수동 E2E가 커버 — 단위 PTY엔 job-control 셸이 없음.)
-test "close-confirm: 실행 중 명령이 없으면(idle) 확인 모달 없이 즉시 닫는다" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
+// 닫기 확인(실행 중 명령 보호)의 트리거 판정은 코어의 cursorIsAtPrompt(셸 통합 OSC 133 + alt 화면)로 결정된다.
+// 아래 테스트들은 활성 Term 코어의 semantic_state/alt_active를 직접 세팅해 각 경우를 **결정론적**으로 증명한다
+// (controlled_smoke는 `/bin/sh -c "printf; read"`라 OSC 133·alt를 안 쏘므로 코어 상태는 세팅한 값 그대로 유지).
+// 프로세스/pgid를 안 쓰므로 job-control 셸이 필요 없다.
+fn initSmokeSessionTwoTerms(allocator: std.mem.Allocator) !*AppSession {
     const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
+    errdefer allocator.destroy(session);
     try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
         .abi_version = abi_version,
         .cols = 20,
@@ -18487,15 +18492,36 @@ test "close-confirm: 실행 중 명령이 없으면(idle) 확인 모달 없이 �
         .queue_capacity = 16,
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
-    defer session.deinit();
+    errdefer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-
-    // ⌘T → Term 2개(활성 pane).
+    // ⌘T → Term 2개(활성 pane). .term_or_pane 닫기는 활성 Term 하나만 teardown한다.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    return session;
+}
 
-    // 전제: idle(포그라운드 그룹 리더가 곧 child)이라 실행 중 명령 없음.
+/// 테스트 유틸 — 세션의 모든 Term 코어를 "프롬프트에 idle"(OSC 133 input) 상태로 표시한다. controlled_smoke는
+/// OSC 133을 안 쏘므로 코어가 unknown이라 닫기 확인이 보수적으로 뜬다(cursorIsAtPrompt=false). 닫기를 **메커니즘**
+/// 으로만 쓰는(닫기 확인 자체가 검증 대상이 아닌) 탭/pane/Term 수명 테스트가, 프로덕션의 통합 셸 idle 상태를 흉내 내
+/// 즉시 닫히게 한다. 새 Term을 만든 뒤 닫기 직전에 부른다.
+fn markAllTermsAtPrompt(session: *AppSession) void {
+    for (session.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |t| t.surface.core.semantic_state = .input;
+        }
+    }
+}
+
+test "close-confirm: 셸이 프롬프트(OSC 133 input)면 확인 모달 없이 즉시 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 정착한 idle 프롬프트 = 셸 통합이 입력 대기(B)를 마킹한 상태 → 실행 중 명령 없음.
+    session.activePane().activeTerm().surface.core.semantic_state = .input;
     try std.testing.expect(!session.closeTargetHasRunningJob(.term_or_pane));
 
     // requestClose → 즉시 닫힘(모달 안 뜸, 보류 없음).
@@ -18505,10 +18531,55 @@ test "close-confirm: 실행 중 명령이 없으면(idle) 확인 모달 없이 �
     try std.testing.expect(session.pending_close == null);
 }
 
+test "close-confirm: 명령 실행 중(OSC 133 command)이면 확인 모달을 띄우고 닫기를 보류한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 셸이 명령 출력 시작(C)을 마킹 = 포그라운드 명령 실행 중.
+    session.activePane().activeTerm().surface.core.semantic_state = .command;
+    try std.testing.expect(session.closeTargetHasRunningJob(.term_or_pane));
+
+    // requestClose → 모달 열고 보류(안 닫음).
+    session.requestClose(.term_or_pane);
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_close != null);
+}
+
+test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인 모달을 띄운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // semantic_state가 프롬프트여도 alt 화면(vim·claude 등)이면 실행 중으로 본다.
+    const t = session.activePane().activeTerm();
+    t.surface.core.semantic_state = .input;
+    t.surface.core.alt_active = true;
+    try std.testing.expect(session.closeTargetHasRunningJob(.term_or_pane));
+}
+
+test "close-confirm: 셸 통합 없음(unknown, primary 화면)이면 보수적으로 확인 모달" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // OSC 133을 안 쏘는 셸(semantic_state=unknown) + primary 화면 → 프롬프트인지 모름 → 보수적으로 확인(Ghostty
+    // 정책). 데이터 손실 방지 우선. maru 기본 zsh는 통합을 주입하므로 대부분 세션은 이 경로가 아님.
+    session.activePane().activeTerm().surface.core.semantic_state = .unknown;
+    try std.testing.expect(session.closeTargetHasRunningJob(.term_or_pane));
+}
+
 // 닫기 확인의 모달 흐름(실제 키 경로): 확인 모달이 떠 있고 닫기가 보류된 상태에서 Esc면 보류를 버리고(안 닫음),
-// Enter면 보류한 닫기를 실행한다. predicate(hasForegroundJob)는 단위 PTY에서 강제하기 어려워, 모달이 뜬 **이후**의
-// 분기(confirm_accept/confirm_cancel → executeClose/버림)를 handleKeyEvent → chrome 라우팅 → dispatchChromeAction
-// 전 경로로 증명한다. requestClose의 트리거 자체는 위 idle 테스트 + 통합 PTY가 커버한다.
+// Enter면 보류한 닫기를 실행한다. 모달이 뜬 **이후**의 분기(confirm_accept/confirm_cancel → executeClose/버림)를
+// handleKeyEvent → chrome 라우팅 → dispatchChromeAction 전 경로로 증명한다. requestClose의 트리거 자체
+// (cursorIsAtPrompt 판정)는 위 OSC 133/alt 테스트가 커버한다.
 test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한 닫기 실행)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -19809,6 +19880,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
     try session.splitActivePane(.horizontal); // 좌우 — 오른쪽(새) panel 활성, 2 panes
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
     try std.testing.expect(session.activeTabHasSplit());
+    markAllTermsAtPrompt(session); // idle 셸 흉내 — Cmd+W가 확인 모달 없이 즉시 pane을 닫게
 
     // Cmd+W → 활성(오른쪽) panel 닫힘 → 트리가 형제(왼쪽)로 collapse → 1 panel만 남고 그게 활성.
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } });
@@ -20426,6 +20498,7 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
         "sh",
     );
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    markAllTermsAtPrompt(session); // idle 셸 흉내 — 슬롯 ✕ 닫기가 확인 모달 없이 즉시 탭을 닫게
 
     const w: f64 = @floatFromInt(session.sidebar_width_px);
     const cw: f64 = @floatFromInt(session.cell_width_px);
@@ -22463,6 +22536,7 @@ test "Term lifecycle: Cmd+T adds, Cmd+Opt+]/[ cycle, Cmd+W cascades Term to work
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
     try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
     try std.testing.expectEqual(@as(usize, 2), session.activePane().active_term);
+    markAllTermsAtPrompt(session); // idle 셸 흉내 — 이후 ⌘W cascade가 확인 모달 없이 즉시 진행되게(닫힌 뒤 남는 Term도 유지)
 
     // ⌘⌥] → 다음(wrap): 2→0. ⌘⌥[ → 이전(wrap): 0→2. (⌘[]는 이제 split 순환이라 Term 순환은 ⌘⌥[]로 옮겼다.)
     const cmd_opt: terminal.ModifierSet = .{ .command = true, .option = true };

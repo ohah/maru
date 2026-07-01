@@ -853,8 +853,9 @@ fn startsWithCi(haystack: []const u8, prefix: []const u8) bool {
     return haystack.len >= prefix.len and std.ascii.eqlIgnoreCase(haystack[0..prefix.len], prefix);
 }
 
-/// 포그라운드 프로세스 이름을 에이전트 종류로 분류한다(대소문자 무시 prefix 일치). claude/codex가 node 등 인터프리터
-/// 이름으로 뜨거나(v1 한계 — 네이티브/래퍼 바이너리명이 claude/codex일 때 동작) 파이프라인 비-리더 단계면 감지 못 함.
+/// 포그라운드 프로세스 이름을 에이전트 종류로 분류한다(대소문자 무시 prefix 일치). 이름은 pty의 foregroundProcessName이
+/// 준다 — comm이 인터프리터(node)면 argv[1] 스크립트, comm이 **버전 문자열**(Claude Code v2.1.197+가 실행 중 process.title을
+/// "2.1.197"로 바꿈)이면 argv[0]("claude")로 되짚어 준다(src/pty/macos.zig). 그래도 파이프라인 비-리더 단계면 감지 못 함.
 fn classifyAgent(name: ?[]const u8) AgentKind {
     const n = name orelse return .none;
     if (startsWithCi(n, "claude")) return .claude;

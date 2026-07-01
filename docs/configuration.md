@@ -47,6 +47,7 @@ theme.palette.1  = #d35f5f
 cursor.shape = block
 cursor.blink = true
 cursor.blink-interval-ms = 500   # 깜빡임 반주기(ms) — cursor.blink=true일 때
+cursor.blink-fade-ms = 120        # 깜빡임 전환 페이드(ms) — 0=즉각 on/off
 # 커서 색 override(선택). 적으면 테마와 무관하게 커서만 그 색으로 칠한다. 안 적으면 테마를 따른다.
 # cursor.color = #ff5555   # 커서 칸 배경(미지정 시 theme.cursor)
 # cursor.text  = #101010   # 커서 위 반전 글자색(미지정 시 배경색)
@@ -88,6 +89,7 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
 | `cursor.blink-interval-ms` | 정수(100~10000) | `500` | 커서 깜빡임 **반주기**(밀리초) — on/off 각 단계 길이(500이면 0.5초 켜짐·0.5초 꺼짐). host frame-loop tick으로 환산(반올림, 최소 1틱)하므로 주사율을 바꿔도 실제 깜빡임 시간은 유지된다. `cursor.blink = false`면 이 값과 무관하게 안 깜빡인다. 범위 밖/비정수는 무시(기본 유지). Ghostty `cursor-blink-interval` 대응 |
+| `cursor.blink-fade-ms` | 정수(0~1000) | `120` | 커서 깜빡임 **전환 페이드**(밀리초) — on↔off를 이 시간에 걸쳐 알파 램프로 부드럽게 잇는다(각 반주기 끝에서 커서가 서서히 사라지고 나타남). `0`이면 페이드 없이 즉각 on/off(하위 호환). 반주기(`blink-interval-ms`)를 넘으면 반주기로 clamp된다(같으면 hold 없는 삼각파). host frame-loop tick으로 환산하므로 주사율(`render.frame-rate`)과 무관하게 같은 속도로 페이드한다. `cursor.blink = false`면 무관. |
 | `cursor.color` | `#RRGGBB` | (없음) | 커서 칸 배경색을 테마와 **독립적으로** override(opt-in). 미지정이면 `theme.cursor`를 따른다. 형식 오류는 무시(미지정 유지) |
 | `cursor.text` | `#RRGGBB` | (없음) | 반전 블록 커서 **위 glyph 색** override(opt-in). 미지정이면 기존 동작(메인 터미널은 배경색, 사이드바 caret은 사이드바 배경색)을 따른다. 형식 오류는 무시 |
 | `cursor.unfocused` | `block`\|`hollow`\|`hidden` | `block` | 창이 **포커스를 잃었을 때** 커서. `block`(기본)=현행대로 채운 커서 유지, `hollow`=빈 사각형 테두리(외곽선 — 비활성 창임을 시각적으로, iTerm2/Terminal.app 관례), `hidden`=안 그림. 포커스 있으면 항상 `cursor.shape`대로. 그 외 값은 무시(기본 유지) |

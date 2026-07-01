@@ -701,7 +701,11 @@ bool maru_metal_renderer_draw(
     uint32_t window_opacity_milli,
     uint32_t sidebar_scroll_offset_px,
     /* pane divider(reserved 30 세로·31 가로)의 device px 두께(config split.divider-thickness → app_session가 pt×scale). seam 중앙정렬·셀 clamp. 0=안 그림. */
-    uint32_t divider_thickness_px
+    uint32_t divider_thickness_px,
+    /* 커서 blink 페이드: 커서 overlay가 차지하는 cells suffix 길이(cells[cell_count-cursor_cells..])와 그 불투명도×1000.
+       본문 셀 draw에서 이 suffix를 제외하고, cursor_fade_milli>0이면 별도 pass로 opacity=cursor_fade_milli/1000에 그린다. */
+    size_t cursor_cells,
+    uint32_t cursor_fade_milli
 ) {
     if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -1111,12 +1115,22 @@ bool maru_metal_renderer_draw(
     // 텍스트 '앞'에 끼운다 → 터미널(모달 제외) → 배경 → under quad(사이드바 밴드) → 사이드바 → over quad
     // (모달 배경) → 모달 텍스트. 모달 없으면(0) terminal_end=cell_count라 1·6이 합쳐져 기존과 같다.
     const bool has_modal = (modal_cells_start > 0 && modal_cells_start < cell_count);
-    const size_t terminal_end_v = (has_modal ? modal_cells_start : cell_count) * 12; // 셀당 2 quad(자간 자연폭) — ×12
-#define MARU_DRAW_CELLS(sv, cv)                                       \
+    // 커서 blink 페이드: 커서 overlay는 항상 cells의 맨 끝(cursor_cells개)이다. 본문(터미널·모달) draw에서 이 suffix를
+    // 제외하고, 아래에서 opacity=cursor_opacity로 **별도 pass**로 그린다 — blink가 하드 on/off 대신 부드럽게 페이드한다.
+    // fade_milli==0이면 커서 pass를 생략해 옛 chop(안 그림)과 같다. 커서는 모달이 열렸으면 모달 뒤 suffix(오버레이 caret),
+    // 닫혔으면 터미널 뒤 suffix라 어느 세그먼트든 [cursor_start, cell_count)에 온다(app view()가 그렇게 emit).
+    const size_t cursor_start = (cursor_cells <= cell_count) ? (cell_count - cursor_cells) : cell_count; // 커서 suffix 시작(셀)
+    const float cursor_opacity = (float)cursor_fade_milli / 1000.0f;
+    const bool draw_cursor = (cursor_cells > 0 && cursor_fade_milli > 0);
+    // 본문 터미널(모달 제외)은 모달 시작(모달 있음) 또는 커서 시작(모달 없음=커서가 터미널 suffix)에서 끝난다.
+    const size_t terminal_end_v = (has_modal ? modal_cells_start : cursor_start) * 12; // 셀당 2 quad(자간 자연폭) — ×12
+#define MARU_DRAW_CELLS(sv, cv, op)                                   \
     do {                                                             \
         if ((cv) > 0) {                                              \
+            float _op = (op);                                        \
             [encoder setRenderPipelineState:impl.pipeline];          \
             [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0]; \
+            [encoder setFragmentBytes:&_op length:sizeof(float) atIndex:1]; /* 셀 fragment opacity(커서 페이드 pass만 <1) */ \
             [encoder setFragmentTexture:impl.atlas atIndex:0];       \
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
         }                                                            \
@@ -1151,12 +1165,16 @@ bool maru_metal_renderer_draw(
     MARU_DRAW_IMAGES(0, image_above_start);                                   // 0.5 kitty 이미지(텍스트 뒤 — 투명 셀로 비침)
     // 1a. 사이드바 배경 strip(bg quad, 버퍼 맨 앞 [0, cells_base_v)) — 터미널 cells '앞'에 그려 사이드바 헤더
     //     glyph(origin_x=0, 셀 패스)·밴드·제목이 배경 '위'에 보이게 한다(painter — 헤더 glyph 가림 회귀 fix).
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(0, cells_base_v);
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(0, cells_base_v, 1.0f);
     // 1a+. 헤더 quad(layer 4, 알림 종 배지 빨강 원) — 사이드바 bg strip '뒤' / 터미널·헤더 글리프 '앞'에 끼운다(흰 숫자
     //      글리프가 원 위에 보이게). 버퍼 구간 [bottom+under, +header). 배지 없으면 0이라 no-op(기존 경로 불변).
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count, header_vertex_count);
-    // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터.
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(cells_base_v, terminal_end_v);
+    // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터. opacity 1.0(커서 suffix는 위 terminal_end_v가 제외).
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(cells_base_v, terminal_end_v, 1.0f);
+    // 1b+. 터미널 커서 페이드 pass(모달 없을 때 — 커서=터미널 suffix). 본문 '뒤'·kitty 텍스트-앞 이미지 '앞'에 그려 기존
+    //      커서 레이어(1b 안이던 위치)를 보존한다. cursor_fade_milli<1이면 반투명으로 아래 본문 셀에 합성돼 blink가 페이드.
+    if (vertex_buffer != nil && draw_cursor && !has_modal)
+        MARU_DRAW_CELLS(cells_base_v + cursor_start * 12, cursor_cells * 12, cursor_opacity);
     MARU_DRAW_IMAGES(image_above_start, gpu_image_n);                         // 1.5 kitty 이미지(텍스트 앞)
     if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count, under_vertex_count); // 3. under quad(사이드바 밴드)
     // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 [header_h, drawable_h]에 scissor
@@ -1170,7 +1188,7 @@ bool maru_metal_renderer_draw(
         const NSUInteger keep_h = dh - (NSUInteger)sidebar_header_height_px; // [header_h, dh] 유지 → 좌하단 y=0..keep_h
         [encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = keep_h }];
     }
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices); // 사이드바 cells(제목)
+    if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices, 1.0f); // 사이드바 cells(제목)
     if (sidebar_scroll_clip) {
         const NSUInteger dw = (NSUInteger)drawable_size.width;
         const NSUInteger dh = (NSUInteger)drawable_size.height;
@@ -1198,8 +1216,14 @@ bool maru_metal_renderer_draw(
             const NSUInteger ch2 = (cy + (NSUInteger)modal_clip_h_px <= dh) ? (NSUInteger)modal_clip_h_px : (dh - cy);
             [encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
         }
-        MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 12, cell_count_v - modal_cells_start * 12); // 셀당 2 quad — ×12
+        // 모달 본문(모달 셀 중 커서 suffix 제외 — 커서=모달 뒤 오버레이 caret). cursor_start는 모달 없음 땐 cell_count와
+        // 같아 이 분기(has_modal)를 안 타므로 여기선 항상 modal_cells_start ≤ cursor_start ≤ cell_count.
+        MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 12, (cursor_start - modal_cells_start) * 12, 1.0f); // 셀당 2 quad — ×12
     }
+    // 6+. 오버레이 caret 페이드 pass(모달 열림 — 커서=모달 뒤 suffix). 모달 텍스트 '위'(마지막 draw)에 opacity로 그린다.
+    //     modal_clip scissor가 위에서 걸렸으면 그대로 이어져 caret도 같은 영역에 클립된다(모달 셀의 일부라 의도된 동작).
+    if (vertex_buffer != nil && draw_cursor && has_modal)
+        MARU_DRAW_CELLS(cells_base_v + cursor_start * 12, cursor_cells * 12, cursor_opacity);
 #undef MARU_DRAW_CELLS
 #undef MARU_DRAW_QUADS
 #undef MARU_DRAW_IMAGES

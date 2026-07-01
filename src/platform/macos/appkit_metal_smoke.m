@@ -1194,6 +1194,10 @@ static BOOL maru_draw_cell_frame(
 
     [encoder setRenderPipelineState:cell_pipeline];
     [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+    // 셀 fragment의 opacity uniform(buffer 1) — 커서 페이드 pass에서만 <1이고 smoke는 커서가 없어 항상 1.0으로
+    // 바인딩한다(공유 셰이더 계약: 이 uniform을 안 바인딩하면 UB). 제품 렌더러 MARU_DRAW_CELLS와 같은 index.
+    float smoke_cell_opacity = 1.0f;
+    [encoder setFragmentBytes:&smoke_cell_opacity length:sizeof(float) atIndex:1];
     [encoder setFragmentTexture:atlas_texture atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0

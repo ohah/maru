@@ -115,7 +115,12 @@ bool maru_metal_renderer_draw(
     /* pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
        scale로 환산해 넘긴다. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다. 커서 강조선·활성 pane focus
        테두리(reserved 2~5, 셀 15%)와 분리돼 divider만 이 값으로 두께가 정해진다. 0=안 그림. 끝에 추가해 인자 순서 불변(ABI v94). */
-    uint32_t divider_thickness_px
+    uint32_t divider_thickness_px,
+    /* 커서 blink 페이드(ABI v95): 커서 overlay가 차지하는 cells suffix 길이(cells[cell_count-cursor_cells..])와
+       그 불투명도×1000. 렌더러가 본문 셀 draw에서 이 suffix를 제외하고, cursor_fade_milli>0이면 별도 pass로
+       opacity=cursor_fade_milli/1000에 그린다(셀 fragment의 opacity uniform). 끝에 2인자 추가해 인자 순서 불변. */
+    size_t cursor_cells,
+    uint32_t cursor_fade_milli
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

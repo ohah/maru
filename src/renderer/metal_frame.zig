@@ -996,6 +996,16 @@ pub const MetalFrame = extern struct {
     // (커서 강조선·활성 pane focus 테두리 reserved 2~5의 셀 15%와 분리라 divider만 config로 조절). 0이면 divider 안 그림(숨김).
     // 끝에 추가해 기존 offset 불변(ABI v94).
     divider_thickness_px: u32 = 0,
+    // 커서 overlay(터미널 블록/bar/underline 또는 오버레이 caret)가 차지하는 cells **suffix** 길이 —
+    // cells[cell_count - cursor_cells .. cell_count]가 커서다(buildNativeCellsSplit이 커서를 항상 맨 끝에 emit).
+    // 렌더러가 이 suffix를 본문 draw에서 제외하고, 아래 cursor_fade_milli 불투명도로 **별도 pass**로 그려 blink를
+    // 부드럽게 페이드한다(본문 셀은 항상 1.0). 0이면 커서 없음(hidden·조합 중 등). 끝에 추가해 기존 offset 불변(ABI v95).
+    cursor_cells: usize = 0,
+    // 커서 overlay 불투명도 × 1000(0~1000, 1000=완전 표시). blink 페이드 위상 — app이 반주기 끝에서 1000→0(사라짐)·
+    // 0→1000(나타남)로 램프하고(cursor.blink-fade-ms), 렌더러가 커서 suffix pass의 fragment opacity로 /1000해 곱한다
+    // (premultiplied 출력 전체에 곱 — 반투명 커서가 아래 본문 셀에 정확히 합성). 0이면 커서 pass 생략(= blink off 위상).
+    // float 대신 milli u32로 실어 extern ABI를 정수 유지(window_opacity_milli 선례). 끝에 추가해 기존 offset 불변(ABI v95).
+    cursor_fade_milli: u32 = 1000,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -1117,10 +1127,14 @@ pub const MetalFrameBuffer = struct {
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
     generation: u64 = 0,
-    // cells의 suffix를 차지하는 커서 overlay cell 수(buildNativeCellsSplit). show_cursor가
-    // 꺼지면 view()가 이 길이만큼 잘라 노출한다 — 커서 blink가 frame rebuild 없이 동작한다.
+    // cells의 suffix를 차지하는 커서 overlay cell 수(buildNativeCellsSplit). view()가 이 길이를 MetalFrame으로
+    // 넘겨 렌더러가 커서 suffix를 본문에서 분리해 cursor_fade_milli 불투명도로 별도 pass로 그린다 — blink 페이드가
+    // frame rebuild 없이(generation만 올려) 동작한다.
     cursor_cells: usize = 0,
-    show_cursor: bool = true,
+    // 커서 overlay 불투명도 × 1000(0~1000). blink 페이드 위상 — app updateCursorBlink가 setCursorFadeMilli로 램프한다.
+    // 0=완전히 사라짐(blink off 위상, 렌더러가 커서 pass 생략), 1000=완전 표시. 옛 show_cursor(bool)를 대체 —
+    // 이진 on/off는 0/1000의 특수 경우다.
+    cursor_fade_milli: u32 = 1000,
     // C4b 모달: 모달(overlay) 셀이 cells 배열에서 시작하는 인덱스. draw가 over quad(모달 배경)를 이 경계
     // '앞'에 끼워 모달 텍스트 셀 아래·터미널 위에 둔다. 0 = 모달 없음(분할 안 함).
     modal_cells_start: usize = 0,
@@ -1289,19 +1303,27 @@ pub const MetalFrameBuffer = struct {
         self.generation += 1;
     }
 
-    /// 커서 blink 위상을 반영한다(rebuild 없음). 바뀌면 generation을 올려 Swift가 다시 그린다 —
-    /// 같은 cells에서 커서 suffix만 노출/숨김이 달라진다.
-    pub fn setCursorVisible(self: *MetalFrameBuffer, visible: bool) void {
-        if (self.show_cursor == visible) return;
-        self.show_cursor = visible;
+    /// 커서 blink 페이드 위상을 반영한다(rebuild 없음, milli는 0~1000으로 clamp). 바뀌면 generation을 올려
+    /// Swift가 다시 그린다 — 같은 cells에서 커서 suffix pass의 불투명도만 달라진다(램프 중 매 tick 재present).
+    pub fn setCursorFadeMilli(self: *MetalFrameBuffer, milli: u32) void {
+        const clamped = @min(milli, @as(u32, 1000));
+        if (self.cursor_fade_milli == clamped) return;
+        self.cursor_fade_milli = clamped;
         self.generation += 1;
     }
 
+    /// 이진 on/off 편의 래퍼(테스트·비페이드 호출자). 페이드는 0/1000의 특수 경우로 setCursorFadeMilli에 위임한다.
+    pub fn setCursorVisible(self: *MetalFrameBuffer, visible: bool) void {
+        self.setCursorFadeMilli(if (visible) 1000 else 0);
+    }
+
     pub fn view(self: *const MetalFrameBuffer) MetalFrame {
-        const exposed = if (self.show_cursor) self.cells.len else self.cells.len - self.cursor_cells;
+        // 커서 suffix는 항상 전부 노출한다 — 렌더러가 cursor_cells/cursor_fade_milli로 본문과 분리해 페이드 pass로
+        // 그린다(옛 show_cursor chop 대체). fade_milli==0이면 렌더러가 커서 pass를 생략해 이전 chop과 같은 결과.
+        const exposed = self.cells.len;
         // C4b 모달 over quad 분할의 안전 불변(리뷰가 짚은 latent trap 가드): 모달 셀 시작은 노출 길이 안.
-        // cursor_cells(blink chop)는 모달 caret(맨 끝 suffix)이라 modal_cells_start보다 항상 뒤다 — 이게 깨지면
-        // 렌더러의 6-세그먼트 분할(modal_start*6..cell_count_v)이 underflow하므로 여기서 일찍 잡는다.
+        // cursor_cells(커서 suffix)는 모달 caret(맨 끝 suffix)이라 modal_cells_start보다 항상 뒤다 — 이게 깨지면
+        // 렌더러의 세그먼트 분할이 underflow하므로 여기서 일찍 잡는다.
         std.debug.assert(self.modal_cells_start <= exposed);
         return .{
             .cols = @intCast(self.size.cols),
@@ -1313,6 +1335,9 @@ pub const MetalFrameBuffer = struct {
             .generation = self.generation,
             .cells = if (exposed > 0) self.cells.ptr else null,
             .cell_count = exposed,
+            // 커서 페이드 pass: 렌더러가 cells[cell_count - cursor_cells ..]를 cursor_fade_milli 불투명도로 별도 그린다.
+            .cursor_cells = self.cursor_cells,
+            .cursor_fade_milli = self.cursor_fade_milli,
             .raster_uploads = if (self.uploads.len > 0) self.uploads.ptr else null,
             .raster_upload_count = self.uploads.len,
             .raster_pixels = if (self.pixels.len > 0) self.pixels.ptr else null,
@@ -2025,7 +2050,7 @@ test "hover link span projects underline-kind cells across its rows" {
     try std.testing.expectEqual(@as(u16, 1), cells[3].row);
 }
 
-test "cursor cells are a suffix and setCursorVisible toggles exposure without rebuild" {
+test "cursor cells are a suffix surfaced via cursor_cells; fade toggles opacity without rebuild" {
     const allocator = std.testing.allocator;
     var overlays = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 1 } }};
     const frame = renderer.GlyphQuadFrame{
@@ -2048,14 +2073,23 @@ test "cursor cells are a suffix and setCursorVisible toggles exposure without re
     defer {
         buffer.cells = &.{}; // built.cells는 위 defer가 해제
     }
+    // cell_count는 커서와 무관하게 항상 전부 노출한다(chop 폐기) — 렌더러가 cursor_cells/cursor_fade_milli로 분리.
     try std.testing.expectEqual(built.cells.len, buffer.view().cell_count);
+    try std.testing.expectEqual(built.cursor_cells, buffer.view().cursor_cells);
+    try std.testing.expectEqual(@as(u32, 1000), buffer.view().cursor_fade_milli);
+    // blink off 위상: fade 0(렌더러가 커서 pass 생략). cell_count는 불변, generation만 오른다(재present).
     buffer.setCursorVisible(false);
-    try std.testing.expectEqual(@as(usize, 0), buffer.view().cell_count);
+    try std.testing.expectEqual(built.cells.len, buffer.view().cell_count);
+    try std.testing.expectEqual(@as(u32, 0), buffer.view().cursor_fade_milli);
     try std.testing.expectEqual(@as(u64, 1), buffer.generation);
     buffer.setCursorVisible(false); // 같은 값 — generation 불변
     try std.testing.expectEqual(@as(u64, 1), buffer.generation);
-    buffer.setCursorVisible(true);
-    try std.testing.expectEqual(built.cells.len, buffer.view().cell_count);
+    // 중간 페이드 값도 clamp·generation 규율 동일.
+    buffer.setCursorFadeMilli(400);
+    try std.testing.expectEqual(@as(u32, 400), buffer.view().cursor_fade_milli);
+    try std.testing.expectEqual(@as(u64, 2), buffer.generation);
+    buffer.setCursorFadeMilli(5000); // 1000으로 clamp
+    try std.testing.expectEqual(@as(u32, 1000), buffer.view().cursor_fade_milli);
 }
 
 test "SGR underline overlays project a foreground-colored underline cell (kind 9), cursor-independent" {

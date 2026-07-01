@@ -1849,9 +1849,14 @@ pub const AppSession = struct {
                 const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
                 const caret_col = indent_cols + qcols;
                 const slot_h = self.sidebar_slot_height_px;
+                // 리네임 카드 줄 수: 이름줄(항상) + 상태줄(running·idle 에이전트면). 리네임 중 branch/path 보조줄은
+                // buildSidebarTitleDrawList가 항상 숨겨 줄 수에 안 든다. 렌더러(maru_metal_renderer.m)가 n줄 블록을 슬롯
+                // 세로 중앙 정렬하므로, 상태줄이 생기면 이름줄이 위로 (ch/2) 올라간다 — caret y도 같은 n을 써야 IME
+                // 후보창이 이름 caret 아래에 오고 파형 상태줄과 안 겹친다(buildSidebarDrawList의 line_count 인코딩과 동형).
+                const line_count: u32 = if (workspaceHasStatusLine(tab)) 2 else 1;
                 return .{
                     .x = @intCast(caret_col * cw),
-                    .y = @intCast(@as(u32, @intCast(idx)) * slot_h + (slot_h -| ch) / 2), // 슬롯 세로 중앙 근사
+                    .y = @intCast(@as(u32, @intCast(idx)) * slot_h + (slot_h -| line_count * ch) / 2), // n줄 블록 세로 중앙(이름줄=line 0)
                     .w = @intCast(cw),
                     .h = @intCast(ch),
                 };
@@ -9780,7 +9785,9 @@ pub const AppSession = struct {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
                     const prev = term.agent_kind;
-                    term.agent_kind = classifyAgent(term.rt.live_pty.session.foregroundProcessName(&buf));
+                    const raw_fg = term.rt.live_pty.session.foregroundProcessName(&buf);
+                    term.agent_kind = classifyAgent(raw_fg);
+                    if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("fg='{s}' kind={s} live={} term=0x{x}", .{ raw_fg orelse "(null)", @tagName(term.agent_kind), term.rt.live_initialized, @intFromPtr(term) });
                     if (term.agent_kind != prev) {
                         if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
@@ -11656,6 +11663,16 @@ pub const AppSession = struct {
     fn workspaceStatusLine(self: *AppSession, tab: *Tab, running: bool) ![]const u8 {
         if (running) return self.runningStatusLine(); // 어느 Term이든 running(호출부가 tabHasRunningAgent로 1회 계산해 전달)
         return self.agentStatusLine(tab.activeTerm());
+    }
+
+    /// 리네임 caret 줄 수 계산용 — workspaceStatusLine이 non-empty 상태줄을 낼지 텍스트 생성 없이 순수 판정한다(caret은
+    /// 파형 문자열이 필요 없고, runningStatusLine 할당·spinner 조회를 피한다). running이면 항상 파형, 아니면 활성 Term이
+    /// 에이전트(kind≠none)이고 상태를 읽었으면(state≠unknown) 상태줄이 생긴다. **위 workspaceStatusLine/agentStatusLine의
+    /// non-empty 조건과 반드시 동기** — 저 로직(none·unknown만 "")이 바뀌면 여기도 바꾼다(카드 줄 수↔caret 정렬 결합).
+    fn workspaceHasStatusLine(tab: *Tab) bool {
+        if (tabHasRunningAgent(tab)) return true;
+        const term = tab.activeTerm();
+        return term.agent_kind != .none and term.agent_state != .unknown;
     }
 
     /// 한 Term의 상태줄 텍스트(owned). 에이전트 아니면(none) "" — 그 줄은 생략된다. running이면 "▁▅▇▃ 진행중"(파형),
@@ -15477,6 +15494,52 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
     const ime = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, @floatFromInt(cr.y)), ime.y); // imeCursorRect가 rename caret을 씀
     session.closeRename();
+}
+
+// F1 회귀 가드(코드리뷰 high CONFIRMED): 워크스페이스 리네임 중 상태줄(running 파형·idle ✓)이 붙어 카드가 2줄이 되면
+// 렌더러(maru_metal_renderer.m)가 2줄 블록을 슬롯 세로 중앙 정렬해 이름줄(line 0)이 위로 (ch/2) 밀린다 —
+// renameCaretRect도 같은 line_count로 caret y를 올려야 IME 후보창이 이름 caret 아래(파형 상태줄과 겹치지 않게)에 온다.
+// non-agent 워크스페이스는 상태줄이 없어 1줄이라 슬롯 중앙 그대로. buildSidebarDrawList의 line_count 인코딩(빈 보조줄
+// skip)과 caret 정렬을 묶는다 — 상태줄이 이름줄 아래에 늘 붙던 회귀(커밋 8c4c969)에서 캐럿만 1줄 기준으로 남던 것을 고정.
+test "F1: workspace rename caret y follows card line count (agent status line shifts name row up)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const tab = session.tabs.items[0];
+    const term = tab.activeTerm();
+    const ch: u32 = session.cell_height_px;
+    const slot_h: u32 = session.sidebar_slot_height_px;
+    try std.testing.expect(slot_h > 2 * ch); // 슬롯이 2줄을 담는다는 전제(ratio 4600)
+
+    // 1) non-agent 워크스페이스: 카드 1줄(이름만) → caret = 슬롯 세로 중앙(1줄 블록).
+    term.agent_kind = .none;
+    session.startRename(.{ .workspace = tab });
+    const cr1 = session.renameCaretRect() orelse return error.NoCaret;
+    try std.testing.expectEqual(@as(i32, @intCast((slot_h -| ch) / 2)), cr1.y);
+    session.closeRename();
+
+    // 2) idle 에이전트 워크스페이스: 상태줄(✓)이 붙어 카드 2줄 → 이름줄(line 0)이 2줄 블록 상단(ch/2 위).
+    term.agent_kind = .claude;
+    term.agent_state = .idle;
+    session.startRename(.{ .workspace = tab });
+    const cr2 = session.renameCaretRect() orelse return error.NoCaret;
+    try std.testing.expectEqual(@as(i32, @intCast((slot_h -| 2 * ch) / 2)), cr2.y);
+    session.closeRename();
+
+    // 상태줄 유무로 caret이 실제로 위로 올라가야 한다(겹침 방지의 본질) — 안 그러면 후보창이 파형 상태줄에 겹친다.
+    try std.testing.expect(cr2.y < cr1.y);
 }
 
 // 코드리뷰 수정 고정: (#7) 포커스 상실 시 rename 확정, (#2) 터미널 본문 우클릭은 consume 안 하고 mouse-reporting으로

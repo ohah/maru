@@ -7327,11 +7327,14 @@ pub const AppSession = struct {
     /// 접힘·필터아웃에도 130ms 재투영을 돌리던 회귀). 빈 검색이면 visible_tabs=전체라 평소와 동일.
     fn anyAgentRunning(self: *AppSession) bool {
         // 탭바 스피너는 **접힘과 무관하게** 활성 워크스페이스 상단에 보인다 — 활성 탭의 어느 pane/Term이든 running이면
-        // 위상을 진행/재투영해야 파형이 움직인다(사이드바만 보던 옛 게이트 확장). 활성 탭은 늘 화면에 있으므로 먼저 검사한다.
-        if (self.app_window.active_tab < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[self.app_window.active_tab])) return true;
-        // 사이드바 카드 스피너: 접힘이면 안 보이고(false), 검색 필터로 숨은 탭은 카드가 없으므로 `sidebar_visible_tabs`만 본다
-        // (code-review high #1). 이제 활성 Term만이 아니라 **어느 pane/Term이든** running이면 카드 스피너가 뜬다(범위 확장).
-        if (self.sidebar_collapsed) return false; // 접힘 = 사이드바 카드 스피너 화면에 없음(탭바는 위에서 처리)
+        // 위상을 진행/재투영해야 파형이 움직인다(사이드바만 보던 옛 게이트 확장). **단 탭 바가 실제로 그려질 때만** —
+        // chrome_minimal(quick terminal)이면 `paneBarHeightPx()==0`이라 탭 바 스피너가 없으니 재투영을 돌리면 안 된다
+        // (code-review max: 표시면이 없는데 130ms 재셰이프하던 회귀 = high #1 재발 방지). 활성 탭은 늘 화면에 있으므로 먼저 검사한다.
+        if (self.paneBarHeightPx() > 0 and self.app_window.active_tab < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[self.app_window.active_tab])) return true;
+        // 사이드바 카드 스피너: 접힘·chrome_minimal이면 사이드바가 없어(sidebar_width_px=0) 카드 스피너도 없다(false).
+        // 검색 필터로 숨은 탭은 카드가 없으므로 `sidebar_visible_tabs`만 본다(code-review high #1). 이제 활성 Term만이 아니라
+        // **어느 pane/Term이든** running이면 카드 스피너가 뜬다(범위 확장).
+        if (self.sidebar_collapsed or self.chrome_minimal) return false; // 사이드바 카드 스피너 화면에 없음(탭바는 위에서 처리)
         for (self.sidebar_visible_tabs.items) |i| {
             if (i < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[i])) return true;
         }
@@ -11592,15 +11595,29 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(allocator, "{s} {s}", .{ bars, base });
     }
 
+    /// 에이전트 종류 브랜드색(claude=Anthropic 코랄 #CC785C, codex=OpenAI 청록 #10A37F). none이면 null. 아이콘·상태줄
+    /// 스피너·탭바 파형이 **모두 이 단일 출처**를 쓴다(색이 갈리지 않게 — code-review max, 옛 두 곳 하드코딩 통합).
+    fn agentBrandColor(kind: AgentKind) ?maru.color.Rgb {
+        return switch (kind) {
+            .claude => .{ .r = 0xCC, .g = 0x78, .b = 0x5C }, // Anthropic 공식 코랄 #CC785C
+            .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록 #10A37F
+            .none => null,
+        };
+    }
+
+    /// running 상태줄/라벨 파형 문자열 "▁▅▇▃ 진행중"(owned). 사이드바 카드(workspaceStatusLine)와 단일 Term
+    /// 폴백(agentStatusLine)이 **같은 문자열**을 쓰도록 단일화(code-review max — 옛 두 곳 중복 방지).
+    fn runningStatusLine(self: *AppSession) ![]const u8 {
+        const bars = try self.spinnerBarsUtf8(self.allocator);
+        defer self.allocator.free(bars);
+        return std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars});
+    }
+
     /// DrawList 셀 중 스피너 바 글리프(블록 ▁~█)를 종류 브랜드색으로 칠한다 — 탭바 pane 라벨·Term 탭의 파형 prefix용
     /// (사이드바 색칠 루프와 같은 브랜드색이되, 여기선 그 draw list 단위로). none이면 무동작. 라벨 텍스트에 블록 글자가
     /// 섞일 여지는 거의 없고(이름), 있어도 색만 바뀌는 사소한 오탐이라 상태줄 row 게이트 같은 좁힘은 불필요.
     fn recolorSpinnerCells(cells: anytype, kind: AgentKind) void {
-        const brand: maru.color.Rgb = switch (kind) {
-            .claude => .{ .r = 0xCC, .g = 0x78, .b = 0x5C }, // Anthropic 코랄
-            .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록
-            .none => return,
-        };
+        const brand = agentBrandColor(kind) orelse return;
         for (cells) |*c| {
             if (isAgentSpinnerCp(c.codepoint)) c.style.foreground = .{ .rgb = brand };
         }
@@ -11610,11 +11627,7 @@ pub const AppSession = struct {
     /// running이면 "▁▅▇▃ 진행중"(codex식 파형, 백그라운드 Term 포함). 아니면 활성 Term의 상태(idle "✓ {답변}"·none "")로
     /// 폴백한다. running 판정을 활성 Term에 국한하지 않는 게 agentStatusLine과의 차이(사용자 요청).
     fn workspaceStatusLine(self: *AppSession, tab: *Tab) ![]const u8 {
-        if (tabHasRunningAgent(tab)) {
-            const bars = try self.spinnerBarsUtf8(self.allocator);
-            defer self.allocator.free(bars);
-            return std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars});
-        }
+        if (tabHasRunningAgent(tab)) return self.runningStatusLine();
         return self.agentStatusLine(tab.activeTerm());
     }
 
@@ -11624,11 +11637,7 @@ pub const AppSession = struct {
     fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
         if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
         return switch (term.agent_state) {
-            .running => blk: { // codex식 4칸 이퀄라이저 파형 + 진행중(바는 색칠 루프가 브랜드색으로). 정적 ● 대신.
-                const bars = try self.spinnerBarsUtf8(self.allocator);
-                defer self.allocator.free(bars);
-                break :blk std.fmt.allocPrint(self.allocator, "{s} 진행중", .{bars});
-            },
+            .running => self.runningStatusLine(), // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처)
             .idle => if (term.agent_answer_len > 0)
                 std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{term.agent_answer_buf[0..term.agent_answer_len]}) // ✓ {답변}
             else
@@ -11864,8 +11873,9 @@ pub const AppSession = struct {
             // **의도된 기준 분리(사용자 결정 A)**: 카드의 이름·브랜치(저장소)·경로는 **활성 Term**(아래 `term`) 기준이고,
             // 스피너·gutter 아이콘·브랜드색은 **워크스페이스(탭) 전체**(tabHasRunningAgent/tabAgentKind, 아무 pane/Term) 기준이다.
             // 이유: 사이드바는 **비활성 워크스페이스의 상태까지 한눈에** 보여주는 유일한 곳이라(탭바는 활성 워크스페이스만),
-            // 백그라운드 Term의 에이전트도 "이 워크스페이스가 바쁨"으로 떠야 개요가 산다. 한 워크스페이스에 **서로 다른 repo의
-            // Term을 섞은** 드문 경우에만 repo/경로(활성)와 스피너(다른 Term)가 시각적으로 어긋난다 — 개요 가치를 위해 수용.
+            // 백그라운드 Term의 에이전트도 "이 워크스페이스가 바쁨"으로 떠야 개요가 산다. **활성 Term과 running Term이 다른**
+            // (다른 repo이거나 같은 repo 다른 하위 디렉터리·브랜치) 경우에만 repo/경로(활성)와 스피너(다른 Term)가 시각적으로
+            // 어긋난다 — 개요 가치를 위해 수용(code-review max 확인).
             const term = tab.activePane().activeTerm();
             const renaming = self.renamingWorkspace(tab);
             // 에이전트 아이콘은 슬롯 중앙에 독립 배치. 단 rename 중엔 숨긴다(0) — 안 그러면 편집 텍스트가 icon_cols
@@ -11918,6 +11928,11 @@ pub const AppSession = struct {
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
         // **오염 방지**: 아이콘은 gutter `col 0` + 합성 codepoint로 좁히고, 스피너는 **상태줄(카드 마지막 줄)**에만 색칠한다 —
         // 워크스페이스 이름/브랜치/경로 줄(line_index<line_count-1)에 블록 글자가 들어가도 안 오염(code-review high #2).
+        // 슬롯(탭)별 kind·running은 **셀마다가 아니라 슬롯 바뀔 때만** 계산한다 — tabAgentKind/tabHasRunningAgent는
+        // O(panes×terms) 스캔이라 셀당 호출하면 카드마다 ~9회 재스캔(code-review max). 셀은 row 순서라 같은 슬롯이 연속이다.
+        var cur_orig: ?usize = null;
+        var slot_running = false;
+        var slot_brand: ?maru.color.Rgb = null;
         for (draw_list.cells) |*c| {
             const is_icon = c.col == 0 and (c.codepoint == 0xF0007 or c.codepoint == 0xF0008); // ✶ claude / ◆ codex
             // 상태줄(카드 마지막 줄)의 이퀄라이저 바(블록 ▁~█)만 스피너로 본다. row=slot*base + line_count*4 + line_index라
@@ -11929,19 +11944,18 @@ pub const AppSession = struct {
             // 셀 row에서 슬롯(탭) 인덱스를 디코드(row=slot*sidebar_line_base+줄offset, 줄offset<base라 아이콘/스피너 같은 슬롯)해 그 Term을 얻는다.
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // 표시 슬롯
             const orig = self.visibleTab(slot) orelse continue; // 표시 슬롯 → 원본 탭(검색 필터)
-            const tab = self.tabs.items[orig];
-            // 색·running은 **탭 대표**(running Term 우선) — 백그라운드 Term의 에이전트도 아이콘·스피너를 그 종류 브랜드색으로.
-            // 스피너 색칠은 **어느 Term이든 running일 때만** — idle 카드의 답변 미리보기('✓ {답변}')가 같은 상태줄 row에 블록/
-            // 막대 글자(스파크라인·progress bar 등, 에이전트 출력에 흔함)를 담아도 브랜드색 오염 안 되게(넓힌 블록 게이트의 부작용
-            // 차단, code-review high). 아이콘은 상태 무관 솔리드(idle에도 종류·presence 표시).
-            if (is_spinner and !tabHasRunningAgent(tab)) continue;
-            const brand: maru.color.Rgb = switch (tabAgentKind(tab)) {
-                .claude => .{ .r = 0xCC, .g = 0x78, .b = 0x5C }, // Anthropic 공식 코랄 #CC785C
-                .codex => .{ .r = 0x10, .g = 0xA3, .b = 0x7F }, // OpenAI 청록(#10A37F)
-                .none => continue, // 아이콘/스피너 블록 codepoint인데 kind=none(이름 글자 등) — 색칠 안 함.
-            };
-            // 아이콘·스피너 모두 **솔리드 브랜드색**(running 펄스 폐기 — 작은 밝기 변조가 안 보인다는 피드백). 작업 중
-            // 애니메이션은 상태줄 스피너(이퀄라이저 파형)가 담당하고, 아이콘은 큰 솔리드 색으로 종류/presence를 또렷이 보인다.
+            if (cur_orig != orig) { // 슬롯이 바뀔 때만 탭 스캔(색·running은 슬롯당 상수)
+                cur_orig = orig;
+                const tab = self.tabs.items[orig];
+                // 색·running은 **탭 대표**(running Term 우선) — 백그라운드 Term의 에이전트도 아이콘·스피너를 그 종류 브랜드색으로.
+                slot_running = tabHasRunningAgent(tab);
+                slot_brand = agentBrandColor(tabAgentKind(tab));
+            }
+            // 스피너 색칠은 **어느 Term이든 running일 때만** — idle 카드의 답변 미리보기('✓ {답변}')가 같은 상태줄 row에 블록/막대
+            // 글자(스파크라인·progress bar 등)를 담아도 브랜드색 오염 안 되게(넓힌 블록 게이트 부작용 차단, code-review high). 아이콘은 상태 무관 솔리드.
+            if (is_spinner and !slot_running) continue;
+            const brand = slot_brand orelse continue; // kind=none(이름 글자 등) — 색칠 안 함.
+            // 아이콘·스피너 모두 **솔리드 브랜드색**(running 펄스 폐기). 작업 중 애니메이션은 상태줄 파형이 담당, 아이콘은 종류/presence.
             c.style.foreground = .{ .rgb = brand };
         }
         // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).

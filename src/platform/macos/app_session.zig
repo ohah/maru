@@ -586,6 +586,25 @@ fn workspaceLabel(tab: *Tab) []const u8 {
     return app.pickLabel(tab.custom_name, termLabel(tab.activeTerm()));
 }
 
+/// 데스크톱 알림 제목에 붙일 **위치 라벨** — 알림이 온 워크스페이스(탭)와 Term(surface/pane)을 `탭 › 팬`으로 조립한다
+/// (사용자 요청: 배너엔 앱 아이콘만 떠 소스 구분이 안 되니 어느 탭·어느 팬에서 왔는지 제목에서 바로 식별). 단일 출처는
+/// 여기다 — 에이전트 완료(enqueueAgentCompletion)·OSC 9/777(drainOscNotificationFrom) 두 발화 지점이 공유한다.
+/// workspaceLabel(탭)과 termLabel(Term)이 **같으면**(단일 Term 탭·custom_name 없음 등 workspaceLabel이 그 Term 라벨로
+/// 폴백) 중복이라 **하나만** 쓴다 — 단일 워크스페이스·단일 Term 사용자는 예전 제목과 동일하게 보인다. `›`(U+203A)는
+/// 계층(탭⊃팬) 구분, `·`(U+00B7)는 상위 구분자로 알림 전체에서 일관되게 쓴다. 두 라벨은 borrowed(auto_title=메인
+/// 스레드 캐시·custom_name=세션 소유·surface.title=정적, reader 미접근)라 즉시 buf로 복사한다 — 반환 슬라이스는
+/// buf(호출자 스택) 또는 borrowed pane 라벨을 가리켜 호출자의 즉시 소비(allocPrint/dupe)까지 유효(수명 의존 없음).
+/// buf가 모자라면(NoSpaceLeft) 팬 라벨만 돌려준다(알림 제목은 어차피 OS가 말줄임 — 위치보다 팬이 더 구체적).
+/// 호출자 스택 버퍼 크기 단일 출처(두 발화 지점이 같은 상한을 쓰게) — 512는 대다수 라벨을 담고도 남으며,
+/// 넘치면 위 fallback으로 팬 라벨만 담긴다.
+const notification_location_buf_len = 512;
+fn notificationLocation(buf: []u8, tab: *Tab, term: *const Term) []const u8 {
+    const tab_label = workspaceLabel(tab);
+    const pane_label = termLabel(term);
+    if (std.mem.eql(u8, tab_label, pane_label)) return pane_label;
+    return std.fmt.bufPrint(buf, "{s} › {s}", .{ tab_label, pane_label }) catch pane_label;
+}
+
 /// pane 탭 바 컬럼 분할 메트릭(중립 `tabbar.Metrics`)을 만든다(옛 BarMetrics.init). 렌더(buildPaneTabBarDrawList·활성
 /// 밴드)와 hit-test(chrome `tabbar.tabIndex/inCloseZone/inPlusZone`)가 같은 메트릭을 공유해 "보이는 탭/✕/+ == 클릭되는
 /// 것". coretext의 paneTabAreaCols/paneTabWidth(렌더가 쓰는 같은 공식)로 바를 [탭 영역 | "+" zone]으로 나눈다. cell·바·
@@ -8540,7 +8559,7 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                    if (self.drainOscNotificationFrom(term, focused_term)) |n| return n;
+                    if (self.drainOscNotificationFrom(tab, term, focused_term)) |n| return n;
                 }
             }
         }
@@ -8556,7 +8575,8 @@ pub const AppSession = struct {
     /// dupe 실패도 pending을 비우고 null(best-effort). 인앱 히스토리에도 dupe 보관한다(OSC라 is_agent=false).
     /// `focused_term`=지금 보고 있는 그 Term(없으면 null=창 비포커스) — 발신 Term이 이것이면 foreground_banner=false
     /// (전면에서 자기 화면 노이즈 억제, 목록만), 그 외면 true(전면이어도 배너). 에이전트 완료 is_current 게이트와 대칭.
-    fn drainOscNotificationFrom(self: *AppSession, term: *Term, focused_term: ?*Term) ?PendingNotification {
+    /// `tab`=발신 Term이 속한 워크스페이스(호출부 pendingNotification의 tabs 루프에서 넘김) — 제목 위치 접두용.
+    fn drainOscNotificationFrom(self: *AppSession, tab: *Tab, term: *Term, focused_term: ?*Term) ?PendingNotification {
         term.surface.lockCore(self.io);
         defer term.surface.unlockCore(self.io);
         const pending = term.surface.core.pendingNotification() orelse return null;
@@ -8572,8 +8592,16 @@ pub const AppSession = struct {
             self.allocator.free(self.notification_body_out);
             self.notification_body_out = &.{};
         }
-        // title은 빈 문자열일 수 있다(OSC 9). dupe가 실패하면 그 알림은 버린다(best-effort, 코어 pending은 비운다).
-        self.notification_title_out = self.allocator.dupe(u8, pending.title) catch {
+        // 제목에 **위치(탭 › 팬)**를 접두해 어느 터미널에서 온 알림인지 보인다(에이전트 완료와 대칭). OSC가 준 title이
+        // 있으면 `위치 · title`, OSC 9처럼 title이 없으면 위치만. body는 앱 메시지 그대로. 포맷/dupe 실패면 그 알림은
+        // 버린다(best-effort, 코어 pending은 비운다). 위치 라벨은 lockCore 밖 메인 스레드 상태(auto_title/custom_name/
+        // surface.title)만 읽어 코어 락과 무관하다(pending.title/body만 코어 메모리 — 락 아래에서 소비).
+        var loc_buf: [notification_location_buf_len]u8 = undefined;
+        const location = notificationLocation(&loc_buf, tab, term);
+        self.notification_title_out = (if (pending.title.len > 0)
+            std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ location, pending.title })
+        else
+            self.allocator.dupe(u8, location)) catch {
             term.surface.core.clearNotification();
             return null;
         };
@@ -9966,26 +9994,28 @@ pub const AppSession = struct {
         }
     }
 
-    /// 완료 알림 한 건을 큐에 넣는다 — title=`{✶|◆} {Claude|Codex} · {끝난 Term 라벨}`(아래), body=마지막 답변
+    /// 완료 알림 한 건을 큐에 넣는다 — title=`{✶|◆} {Claude|Codex} · {위치=탭 › 팬}`(아래), body=마지막 답변
     /// 평탄화 미리보기 또는 "완료". owned dup 실패는 조용히 버린다(best-effort — 알림은 부가 기능). 큐가 상한이면
     /// 가장 오래된 걸 버려 폭주를 막는다.
     fn enqueueAgentCompletion(self: *AppSession, tab: *Tab, term: *Term) void {
-        // 제목 = **에이전트 심볼 + 종류(Claude/Codex)** + **끝난 그 Term(세션) 라벨** — 어느 대화가 끝났는지 식별
+        // 제목 = **에이전트 심볼 + 종류(Claude/Codex)** + **위치(탭 › 팬)** — 어느 대화가 어느 터미널에서 끝났는지 식별
         // (사용자 요청). 심볼은 사이드바 에이전트 아이콘과 **의미가 같은** 종류 표시(✶ claude=선버스트, ◆ codex)로
         // 알림에서도 종류가 한눈에 구분된다(macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목 prefix로 구분).
         // 알림 제목은 OS 폰트라 **실제 유니코드 `agentSymbolCodepoint`**(✶◆)를 쓴다 — 사이드바는 maru 합성
         // `agentIconCodepoint`(PUA sparkle/diamond)로, 둘은 의미 1:1이되 OS vs maru 렌더 차이로 codepoint가 갈린다.
-        // 옛 제목은 workspaceLabel(tab)=tab.activeTerm 라벨이라 background split/가로탭 Term 완료 시 활성 Term 이름이
-        // 떠 어긋났다 — 끝난 term의 termLabel을 직접 써 그 세션을 가리킨다. 종류 없음(이론상 미발생)이면 워크스페이스 폴백.
+        // 위치는 workspaceLabel(탭)과 termLabel(끝난 term)을 `notificationLocation`이 `탭 › 팬`으로 조립한다(둘이 같으면
+        // 하나만 — 단일 Term 탭이면 예전 `· {Term 라벨}` 제목과 동일). background split/가로탭 Term 완료도 그 세션을
+        // 정확히 가리킨다. 종류 없음(이론상 미발생)이면 워크스페이스 폴백.
         const agent_name: []const u8 = switch (term.agent_kind) {
             .claude => "Claude",
             .codex => "Codex",
             .none => "",
         };
-        const session_label = termLabel(term);
+        var loc_buf: [notification_location_buf_len]u8 = undefined;
+        const location = notificationLocation(&loc_buf, tab, term);
         const title = if (agent_name.len > 0)
-            // {u}=심볼 codepoint를 UTF-8로(agentSymbolCodepoint 단일 출처) + 종류명 + 세션 라벨.
-            std.fmt.allocPrint(self.allocator, "{u} {s} · {s}", .{ agentSymbolCodepoint(term.agent_kind), agent_name, session_label }) catch return
+            // {u}=심볼 codepoint를 UTF-8로(agentSymbolCodepoint 단일 출처) + 종류명 + 위치(탭 › 팬).
+            std.fmt.allocPrint(self.allocator, "{u} {s} · {s}", .{ agentSymbolCodepoint(term.agent_kind), agent_name, location }) catch return
         else
             self.allocator.dupe(u8, workspaceLabel(tab)) catch return;
         const body_src: []const u8 = if (term.agent_answer_len > 0) term.agent_answer_buf[0..term.agent_answer_len] else "완료";
@@ -13888,6 +13918,9 @@ test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 �
     const tab = session.tabs.items[0];
     const term = tab.activePane().activeTerm();
     term.agent_kind = .claude; // 배지 제목 경로(✶ Claude · …)를 실제로 검증
+    // 탭·Term 라벨을 rename으로 명시해 제목 위치(탭 › 팬)를 결정적으로 검증한다(deinit이 custom_name을 free).
+    tab.custom_name = try allocator.dupe(u8, "배포");
+    term.surface.custom_name = try allocator.dupe(u8, "작업1");
     // 완료 답변을 채우고 비활성 탭 완료를 모사해 enqueue(실제 경로 함수 사용).
     const ans = "PR 머지 완료";
     @memcpy(term.agent_answer_buf[0..ans.len], ans);
@@ -13898,9 +13931,8 @@ test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 �
     // pendingNotification이 OSC 9/777보다 먼저 에이전트 큐를 드레인하고, body=답변. 큐가 비워진다.
     const n = session.pendingNotification() orelse return error.TestExpectedNotification;
     try std.testing.expectEqualStrings(ans, n.body);
-    // title = "{✶ agentSymbolCodepoint} Claude · {끝난 Term 세션 라벨}" — 배지 글리프·종류·세션 식별.
-    try std.testing.expect(std.mem.startsWith(u8, n.title, "\u{2736} Claude")); // ✶ + 종류
-    try std.testing.expect(std.mem.indexOf(u8, n.title, "\u{B7}") != null); // " · " 구분자 + 세션 라벨이 붙음
+    // title = "{✶ agentSymbolCodepoint} Claude · {탭 › 팬}" — 배지 글리프·종류·위치(어느 탭·어느 팬) 식별.
+    try std.testing.expectEqualStrings("\u{2736} Claude · 배포 › 작업1", n.title); // ✶ + 종류 + 위치(탭 › 팬)
     try std.testing.expectEqual(@as(usize, 0), session.agent_notifications.items.len);
     // 큐가 비면 OSC 경로로 떨어지고, controlled_smoke엔 OSC 알림이 없어 null.
     try std.testing.expect(session.pendingNotification() == null);
@@ -13995,6 +14027,10 @@ test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id
     const bg_id = bg_term.surface.id;
     const active_id = session.activeSurface().id; // 활성 p1의 Term(지금 보는 Term)
     try std.testing.expect(bg_id != active_id); // 활성과 다른 surface여야 의미 있음
+    // 라벨을 rename으로 명시해 제목 위치 접두를 결정적으로 검증한다(탭 custom_name 없음 → workspaceLabel은 활성 p1
+    // Term 라벨로 폴백). deinit이 surface.custom_name을 free.
+    bg_term.surface.custom_name = try allocator.dupe(u8, "빌드");
+    session.activeSurface().custom_name = try allocator.dupe(u8, "활성작업");
 
     // 두 Term 모두 OSC 9(iTerm2: ESC ] 9 ; <body> BEL)를 먹인다 — title 없음, body=메시지.
     try bg_term.surface.core.write("\x1b]9;배경 pane 빌드 완료\x07");
@@ -14005,11 +14041,21 @@ test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id
     try std.testing.expectEqualStrings("배경 pane 빌드 완료", n1.body);
     try std.testing.expectEqual(bg_id, n1.surface_id);
     try std.testing.expect(n1.foreground_banner); // 배경 pane OSC → 전면에서도 배너(사용자가 안 보는 곳)
+    // OSC 9은 title 없음 → 제목=위치만. 탭 라벨(=활성 p1 폴백 "활성작업") ≠ 팬 라벨("빌드")이라 `탭 › 팬`.
+    try std.testing.expectEqualStrings("활성작업 › 빌드", n1.title);
 
     // 둘째 drain = 활성(지금 보는) Term: 자기 화면 노이즈라 전면 배너 억제(=0, 목록만).
     const n2 = session.pendingNotification() orelse return error.TestExpectedNotification;
     try std.testing.expectEqual(active_id, n2.surface_id);
     try std.testing.expect(!n2.foreground_banner); // 지금 보는 Term OSC → 전면 배너 억제
+    // 활성 Term은 탭 라벨(활성 Term 폴백)==팬 라벨이라 dedup — 위치가 "활성작업" 하나만(중복 억제).
+    try std.testing.expectEqualStrings("활성작업", n2.title);
+
+    // OSC 777(title 있음)은 위치를 **접두**하고 앱 title을 보존한다 — `위치 · 앱 title`, body도 앱 그대로.
+    try bg_term.surface.core.write("\x1b]777;notify;Build finished;42개 컴파일\x07");
+    const n3 = session.pendingNotification() orelse return error.TestExpectedNotification;
+    try std.testing.expectEqualStrings("활성작업 › 빌드 · Build finished", n3.title);
+    try std.testing.expectEqualStrings("42개 컴파일", n3.body);
 
     // 모두 소비됐으니 다음 호출은 null(clearNotification으로 코어 pending 비움 — 다음 tick 재발화 방지).
     try std.testing.expect(session.pendingNotification() == null);

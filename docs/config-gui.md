@@ -170,6 +170,14 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **영속은 공짜**: write-back이 `shell.args`·set된 `env.<KEY>`를 이미 직렬화(serialize.zig, round-trip 테스트 보장)하므로 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다.
 - **한계(후속)**: env **KEY 변경**(기존 KEY를 다른 이름으로)은 삭제+추가로 해야 한다(인라인 KEY 편집은 후속). shell.args 토큰 따옴표(공백 포함 인자)도 후속.
 
+### 6.6a 시작 디렉터리(`workspace.root`) — 특수 행
+
+**Workspace 섹션**에 시작 디렉터리(첫 창·새 탭이 열리는 경로)를 한 줄짜리 text 행으로 노출한다. `workspace.root`도 schema 필드가 아니라 loader 명시 핸들러(경로 형식 검증) 특수 키라, `shell.args`/`env`와 같이 `.text` 위젯을 재사용해 합성 주입한다 — platform이 `currentSectionFields`의 workspace 분기에서 행을 더하고(값=현재 `config.workspace.root`), `commitSelectedText`가 키로 라우팅해 `setWorkspaceRoot`로 커밋한다.
+
+- **검증은 loader와 공유**: 형식 규칙(절대경로 또는 `~`/`~/…`, 상대경로·`~user` 거부)을 `loader.isValidWorkspaceRoot` **단일 헬퍼**로 뽑아 loader 파싱과 GUI 커밋이 같이 쓴다 — GUI·파일 드리프트 방지(§1). `~` 확장·존재 검증은 형식이 아니라 env/FS라 **spawn 시점**(`resolveWorkspaceRoot`)이 하고, 여기선 형식만 본다.
+- **빈 값 = 상속 cwd**: 값을 비우면(클리어) `workspace.root=""`로 되돌려 "maru를 띄운 cwd 상속"(기본) 동작이 된다. 비-빈 값이 형식에 안 맞으면 저장하지 않고 notice로 안내한다.
+- **영속·라이브**: write-back은 `serialize.configKeyValues`가 이미 `workspace.root`를 emit하므로 `markConfigKeyDirty("workspace.root")`만 찍으면 파일에 써진다. `root`는 셸 spawn 시점에만 쓰이므로 라이브 재적용(reapplyLoadedConfig)은 다음 새 Term부터 반영된다(env·shell.args와 같은 결).
+
 ### 6.7 keybind recorder(단축키 재바인딩) — 특수 행 (CS-4-3)
 
 입력 섹션에 `command_catalog`의 모든 액션을 한 행씩(라벨=title, 우측=현재 단축키 표시 또는 "(미지정)") 주입한다(`has_keybinds`). 행을 Enter/클릭하면 **녹음 모드**(`State.recording`)로 들어가 "키 입력 대기..."를 보이고, 다음 키 한 번을 그 액션의 새 단축키로 묶는다. keybind는 `keybind = <chord> = <action>` 줄이라 다른 특수 키와 또 다른 영속 패스가 필요하다.

@@ -1222,6 +1222,10 @@ pub const AppSession = struct {
     total_resize_events: u64 = 0,
     total_close_events: u64 = 0,
     ended_seen: bool = false,
+    // 비정상 시작 사망으로 창을 **유지**한 상태(세션 종료 latch 대신). true면 그 latch를 재평가하지 않아 매 tick
+    // notice 재표시·재판정이 없다. 새 surface가 spawn되면(createPane) false로 re-arm돼, 새 세션이 정상 종료하면
+    // 다시 판정한다(held→새 셸→쓰다 종료→정상 앱 종료). 단일 출처: macos-app-host-boundary.md "세션 자동 종료".
+    startup_held: bool = false,
     last_summary: FrameSummary = .{},
     // 가장 최근 RenderFrame의 Metal 투영을 retain하는 owned 버퍼. metalFrame()이 이걸 가리키는
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
@@ -3098,6 +3102,9 @@ pub const AppSession = struct {
         try term.rt.live_pty.init(self.io, self.allocator, id, req, queue_capacity);
         errdefer term.rt.live_pty.deinit();
         term.rt.live_initialized = true;
+        // 비정상 시작 사망으로 held된 창에 새 셸이 뜨면 held를 풀어(re-arm), 이 새 세션이 정상 종료할 때 세션 종료
+        // latch가 다시 판정하게 한다(held→⌘T 새 셸→쓰다 exit→정상 앱 종료). 모든 surface spawn의 단일 chokepoint.
+        self.startup_held = false;
 
         term.surface = try maru.session.Surface.init(self.allocator, id, size);
         errdefer term.surface.deinit();
@@ -3540,6 +3547,26 @@ pub const AppSession = struct {
         self.ended_seen = true;
         self.activeSurface().process_state = .exited;
         self.metal_dirty = true;
+    }
+
+    /// live 탭이 전부 terminated일 때 **세션 종료(창 닫기/앱 종료) vs 비정상 시작 사망(창 유지)**을 가른다 — tick이
+    /// drain 뒤 호출한다. 창이 수명 동안 한 번도 PTY 출력이 없었으면(usable 세션 미도달) + 퀵/미니멀 스크래치가
+    /// 아니면(holdOnStartupExit) 종료 대신 창을 유지하고 notice로 원인·복구를 안내한다(startup_held로 latch — 재판정·
+    /// notice 재표시 없음; createTerm이 새 surface에서 re-arm). 그 외(usable였음)는 기존대로 ended_seen을 세운다.
+    /// `ended`는 notice에 exit code/시그널을 싣는 용도(없으면 일반 문구). 잘못된 shell.command/shell.args로 첫 셸이
+    /// 즉시 죽어 앱이 시작하자마자 종료되던 루트커즈 수정 — 단일 출처: macos-app-host-boundary.md "세션 자동 종료".
+    fn latchSessionEndOrHold(self: *AppSession, ended: ?app.RuntimePumpTermination) void {
+        if (self.termination_finished or self.startup_held or !self.allTabsTerminated()) return;
+        if (holdOnStartupExit(self.total_output_events, self.chrome_minimal)) {
+            self.startup_held = true;
+            var notice_buf: [320]u8 = undefined;
+            var detail_buf: [48]u8 = undefined;
+            const msg = std.fmt.bufPrint(&notice_buf, "셸이 출력 없이 바로 종료됐습니다 ({s}). 설정(⌘,)에서 shell.command·shell.args를 확인하고 새 셸(⌘T)을 여세요.", .{startupExitDetail(&detail_buf, ended)}) catch "셸이 시작 직후 종료됐습니다 — 설정(⌘,)을 확인하고 새 셸(⌘T)을 여세요.";
+            self.showNotice(msg);
+        } else {
+            self.ended_seen = true;
+            self.termination_finished = true;
+        }
     }
 
     /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
@@ -10073,11 +10100,8 @@ pub const AppSession = struct {
         // PR5b). 이번 tick에 새 종료가 관측됐을 때만 — 살아있는 Term이 있으면 같은 tick에 reap되고, 전부 죽으면
         // 아래 세션 종료 latch가 마지막을 맡는다(그래서 reap이 빈 세션을 만들지 않는다).
         if (drain_summary.ended != null) self.reapTerminatedTerms();
-        // 세션(창) 종료: live 탭이 전부 terminated면. 단일 탭이면 그 탭이 끝나는 즉시(기존 동작 보존).
-        if (!self.termination_finished and self.allTabsTerminated()) {
-            self.ended_seen = true;
-            self.termination_finished = true;
-        }
+        // 세션(창) 종료 vs 비정상 시작 사망(창 유지) 판정 — 단일 출처는 latchSessionEndOrHold(테스트가 직접 구동).
+        self.latchSessionEndOrHold(drain_summary.ended);
 
         // 새 output이 있을 때만 frame이 바뀐다(resize는 resize()가 dirty를 세운다). idle tick은
         // 비싼 부분(buildDrawList + 전체 grid CoreText shape + atlas/raster 준비)을 통째로
@@ -13482,6 +13506,27 @@ fn resolveConfiguredShell(command: []const u8) []const u8 {
     if (isExecutablePath(command)) return command;
     const fallback = maru.pty.resolveInteractiveShell();
     return if (isExecutablePath(fallback)) fallback else "/bin/sh";
+}
+
+/// 비정상 시작 사망 판정(순수·시계 비의존이라 결정론적·테스트 가능): 창이 수명 동안 **한 번도 PTY 출력이 없었고**
+/// (프롬프트·에러 텍스트 등 usable 세션의 흔적이 전혀 없음) 퀵/미니멀 스크래치가 아니면 true — 그 창은 세션 종료
+/// 대신 유지한다. 문제의 트리거(exec 실패·`/usr/bin/false`·조용한 `exit N`)는 전부 출력이 0이고, 정상 세션은
+/// 프롬프트만으로도 출력이 생겨 자연히 종료 경로를 탄다. 단일 출처: macos-app-host-boundary.md "세션 자동 종료".
+fn holdOnStartupExit(total_output_events: u64, chrome_minimal: bool) bool {
+    return total_output_events == 0 and !chrome_minimal;
+}
+
+/// 종료 원인을 notice용 짧은 문구로. exit code/시그널은 `buf`에 포맷하고, 정보가 없거나 실패하면 정적 문구.
+fn startupExitDetail(buf: []u8, ended: ?app.RuntimePumpTermination) []const u8 {
+    const t = ended orelse return "즉시 종료";
+    return switch (t) {
+        .exited => |es| switch (es) {
+            .exited => |code| std.fmt.bufPrint(buf, "종료 코드 {d}", .{code}) catch "종료",
+            .signaled => |sig| std.fmt.bufPrint(buf, "시그널 {d}", .{sig}) catch "종료",
+            .unknown => "비정상 종료",
+        },
+        .read_error => "읽기 오류",
+    };
 }
 
 fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.ShellConfig, env_overrides: []const []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
@@ -17459,6 +17504,60 @@ test "spawnRequest: interactive_shell이 잘못된 shell.command를 기본 셸�
     // 빈 값(자동)도 기본 셸(현행 동작 유지).
     const auto = spawnRequest(norm, "xterm-256color", .{ .command = "" }, &.{}, null, null);
     try std.testing.expectEqualStrings(fallback, auto.command);
+}
+
+test "holdOnStartupExit/startupExitDetail: 출력 0 + !minimal이면 창 유지, notice 문구 포맷(순수)" {
+    // 순수 판정(시계 비의존): 창이 한 번도 출력이 없었고(usable 미도달) 퀵/미니멀 스크래치가 아니면 창 유지(true).
+    try std.testing.expect(holdOnStartupExit(0, false)); // 출력 0, 일반 창 → 유지
+    try std.testing.expect(!holdOnStartupExit(1, false)); // 출력 있었음(usable) → 종료
+    try std.testing.expect(!holdOnStartupExit(0, true)); // 퀵/미니멀 스크래치 → 유지 안 함(그대로 닫힘)
+    try std.testing.expect(!holdOnStartupExit(9, true));
+
+    // notice 상세 문구: exit code / 시그널 / unknown / read_error / 없음.
+    var buf: [48]u8 = undefined;
+    try std.testing.expectEqualStrings("종료 코드 127", startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .exited = 127 } }));
+    try std.testing.expectEqualStrings("시그널 9", startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .signaled = 9 } }));
+    try std.testing.expectEqualStrings("비정상 종료", startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .unknown = -1 } }));
+    try std.testing.expectEqualStrings("읽기 오류", startupExitDetail(&buf, app.RuntimePumpTermination{ .read_error = "boom" }));
+    try std.testing.expectEqualStrings("즉시 종료", startupExitDetail(&buf, null));
+}
+
+test "latchSessionEndOrHold: 출력 없는 시작 사망은 창 유지(held), 출력 있었으면 종료, 새 셸이 re-arm" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(controlled smoke)
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const pane = session.activePane();
+    pane.terms.items[0].rt.terminated = true; // 유일 Term 종료 → allTabsTerminated true
+
+    // (A) 출력 0 → 비정상 시작 사망: 창 유지(held), ended_seen 안 섬(앱이 시작 시 종료되지 않음).
+    session.total_output_events = 0;
+    session.latchSessionEndOrHold(app.RuntimePumpTermination{ .exited = .{ .exited = 127 } });
+    try std.testing.expect(session.startup_held);
+    try std.testing.expect(!session.ended_seen);
+
+    // held는 latch — 다시 불러도 재판정·재알림 없음(ended_seen 여전히 false).
+    session.latchSessionEndOrHold(null);
+    try std.testing.expect(!session.ended_seen);
+
+    // (B) 새 셸(new_term = ⌘T)이 뜨면 held를 re-arm(createTerm chokepoint에서 startup_held=false).
+    session.dispatchAppAction(.new_term);
+    try std.testing.expect(!session.startup_held);
+
+    // (C) 그 새 세션이 출력을 낸 뒤(usable) 전부 종료하면 기존대로 세션 종료(ended_seen) — held는 시작 한정.
+    for (session.activePane().terms.items) |term| term.rt.terminated = true;
+    session.total_output_events = 5; // usable였음
+    session.latchSessionEndOrHold(null);
+    try std.testing.expect(session.ended_seen);
 }
 
 test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inherit 토글 폴백" {

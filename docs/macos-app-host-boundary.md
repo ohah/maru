@@ -37,6 +37,23 @@
 - **종료 보류 중 다른 모달이 열리면 종료를 supersede한다**: 종료 확인(`pending_quit`)이 떠 있는 채로 리셋/닫기 모달이 열릴 수 있다 — 메뉴 마우스 클릭(`reset_defaults` 등)은 `any_overlay_open` 키/휠 게이트 밖이라 종료 보류를 가로챌 수 있다. 이때 `confirm_accept`가 `pending_quit`을 최우선 분기하므로, 그대로 두면 사용자가 연 모달("초기화")을 확정해도 엉뚱하게 앱이 종료되고 host가 `reply`를 못 받아 종료 보류가 안 풀린다. 그래서 모든 confirm 모달의 단일 chokepoint인 `showConfirmButtons`가 새 모달을 열기 전 **기존 `pending_quit`을 먼저 `.cancelled`로 supersede**(→ 다음 tick에 host가 `NSApp.reply(false)`로 종료 취소·앱 유지)한다 — "한 번에 한 모달" 불변식을 UI 게이트가 아니라 상태머신에서 강제(code-review medium 후속). `requestAppQuit`은 이 chokepoint 뒤에 `pending_quit`을 세워 자기 종료를 취소하지 않는다.
 - **검증**: 술어(`cursorIsAtPrompt`)는 `src/terminal/core.zig` 단위 테스트가 각 `semantic_state`(prompt/input/command/unknown)와 alt 화면 진입/이탈을 OSC 133 시퀀스 write로 **결정론적**으로 증명한다. 닫기 라우팅(`termHasRunningJob`→모달/즉시)은 `app_session.zig` 단위 테스트가 활성 Term 코어의 `semantic_state`/`alt_active`를 직접 세팅해 네 경우(input=즉시 닫힘, command=모달+보류, alt=모달, unknown=보수적 모달)로 증명한다 — 프로세스/pgid를 안 쓰므로 job-control 셸이 필요 없다(닫기를 메커니즘으로만 쓰는 탭/pane/Term 수명 테스트는 `markAllTermsAtPrompt`로 idle 셸을 흉내 낸다). 모달 흐름(accept/cancel→실행/버림)은 `app_session.zig`가 키 경로로 증명한다. 컴포넌트(`confirm.zig`)·라우팅(`host.zig`)은 헤드리스 테스트. 빨간 버튼 defer 핸드셰이크의 실제 창-닫힘은 수동 E2E(실행 중 명령이 있는 창을 빨간 버튼으로 닫아 모달→확정 시 닫힘, 취소 시 유지 확인).
 
+## 세션 자동 종료: 정상 종료 vs 비정상 시작 사망(창 유지)
+
+셸이 종료되면 `app_session.zig` tick이 `allTabsTerminated()`(live 탭 전부 `terminated`)를 보고 세션 종료를 latch한다: `ended_seen = true` → `writeSummaryFromState`가 `FrameSummary.ended = 1` → ABI가 `Status.session_ended`를 올리면(`app_host_abi.zig`) Swift `tickAppSession`이 `closeWindowOrQuit`으로 그 창을 닫고, **마지막 창이면 `NSApp.terminate`로 앱을 종료**한다. 정상적으로 쓰던 셸을 `exit`하면 이게 맞는 동작이다(창이 닫히고, 마지막 창이면 앱 종료).
+
+문제는 `allTabsTerminated`가 **"쓰다가 종료"와 "시작하자마자 사망"을 구분하지 못한다**는 점이다. config가 잘못돼 첫(유일) 셸이 spawn 직후 죽으면(예: `shell.command = /usr/bin/false`, `shell.args = -c "exit 1"`, exec 실패) 세션이 **애초에 성립한 적이 없는데도** 위 경로가 앱을 종료시켜, 창이 깜빡하고 사라진다 — 사용자는 원인을 볼 수도, 설정 화면에 갈 수도 없다(매 실행 반복). `resolveConfiguredShell`(실행 불가 셸 *경로* 폴백)은 이 중 "경로가 틀린" 하나만 막고, 실행은 되지만 즉시 종료하는 셸/args는 여전히 이 lifecycle로 앱을 종료시킨다. 즉 루트커즈는 셸-경로 계층이 아니라 **"usable 세션에 도달한 적 없는 창의 자동 종료"를 정상 종료와 동일 취급**하는 lifecycle 계층이다.
+
+**정책(창 유지)**: 세션 종료 latch 지점에서, 그 창이 수명 동안 **한 번도 PTY 출력을 낸 적이 없으면**(`total_output_events == 0` — 프롬프트·에러 텍스트 등 사용자가 볼 무엇도 없었음 = usable 세션 미도달) `ended_seen`을 세우지 **않고** 창을 유지한다(`termination_finished`만 세워 매 tick 재평가를 막고, `ended_seen=0`이라 ABI status는 `ok`로 남아 host가 창을 안 닫는다). 대신 `showNotice`로 종료 사실·exit code·복구 방법을 띄운다. 출력이 한 번이라도 있었으면(=usable였음) 기존대로 종료한다.
+
+- **신호로 "출력 유무"를 쓰는 이유**: 시계에 의존하지 않아 **결정론적**이고(테스트 가능), 셸 통합(OSC 133) 유무와 무관하며, 문제의 트리거(exec 실패·`/usr/bin/false`·조용한 `exit N`)는 전부 출력이 0이다. 정상 세션은 프롬프트만으로도 출력이 생겨 자연히 종료 경로를 탄다. `pty-operating-model.md`("종료된 surface의 마지막 화면을 볼 수 있어야 한다")의 원칙을 **창의 마지막 surface까지** 확장한 것이다.
+- **복구**: 창이 살아 있으므로 사용자가 설정(⌘,)에서 `shell.command`/`shell.args`를 고치고 `Reload Config` 후 새 셸(⌘T/⌘N)을 열면 정상 실행된다. notice가 이 경로를 안내한다.
+- **범위/한계**:
+  - **usable였던 창은 유지하지 않는다** — 출력이 있었던 창의 마지막 셸이 죽으면 기존대로 종료(사용자가 쓰던 세션을 정상 종료한 것).
+  - **퀵 터미널·미니멀 스크래치(`chrome_minimal`)는 제외** — 수명이 짧은 표면이라 종료 시 그대로 닫힌다(창 유지 안 함).
+  - **출력을 낸 뒤 즉시 죽는 오설정**(에러 한 줄 찍고 exit)은 유지 대상이 아니다(출력>0). 드문 케이스로, 별도 신호가 필요하면 후속.
+  - 사용자가 **명시적으로 닫는 경로**(Cmd+W/빨간 버튼/Cmd+Q)는 이 정책과 무관하다 — 위 "닫기 확인"이 관할한다.
+- **검증**: `app_session.zig` 단위 테스트가 `allTabsTerminated`를 흉내 낸 상태에서 (1) `total_output_events==0` → `ended_seen`이 안 서고 창 유지, (2) `total_output_events>0` → 기존대로 `ended_seen` latch를 결정론적으로 증명한다(실 PTY·시계 불요).
+
 ## 현재 app shell 범위
 
 현재 app shell PR은 다음만 목표로 한다.

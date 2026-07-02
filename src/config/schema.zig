@@ -110,6 +110,15 @@ fn parseAndSet(
                 try diags.append(a, .{ .line = line_no, .message = full_key ++ "가 비어 있음 — 기본값 유지" });
                 return;
             }
+            // 절대경로 요구 필드(meta.abs_path, 예: shell.command)는 비절대(`~`·상대) 값을 거른다 — GUI 안내와 같은
+            // "절대경로" 규칙을 파일 로드에도 적용해 드리프트를 막는다(config-gui.md §1). execve는 tilde 확장을 안 하고
+            // 상대경로는 자식 cwd에 의존하므로 절대경로만 유효하다. forgiving: diagnostic + 기본값 유지(빈 값=자동 셸).
+            if (comptime meta.abs_path) {
+                if (!std.fs.path.isAbsolute(trimmed)) {
+                    try diags.append(a, .{ .line = line_no, .message = full_key ++ "는 실행 파일 절대경로여야 함(~·상대경로 무시 — 기본 셸 사용)" });
+                    return;
+                }
+            }
             ptr.* = try a.dupe(u8, trimmed);
         }
     } else {

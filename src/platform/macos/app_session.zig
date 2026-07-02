@@ -4701,6 +4701,16 @@ pub const AppSession = struct {
                 if (config_mod.schema.setText(&self.loaded_config.config, tkey, owned)) {
                     self.reapplyLoadedConfig();
                     self.markConfigKeyDirty(tkey);
+                    // 셸 경로가 실행 불가능하면(없는 경로·`~`·상대경로·디렉터리·비실행 파일) spawn 시 기본 셸로
+                    // 폴백된다(resolveConfiguredShell). 저장은 그대로 두되 즉시 안내해, 예전처럼 다음 실행에 앱이 조용히
+                    // 종료되지 않음을 알린다. `~`/시작 디렉터리는 이 필드가 아니라 config workspace.root임을 함께 안내.
+                    if (std.mem.eql(u8, tkey, "shell.command")) {
+                        // setText는 validatedText로 **trim해 저장**하므로(schema.zig) 안내는 저장된 값을 검사한다 —
+                        // owned(untrimmed)를 쓰면 "/bin/zsh "처럼 공백이 섞인 유효 경로를 실행 불가로 오탐한다.
+                        const stored = self.loaded_config.config.shell.command;
+                        if (stored.len > 0 and !isExecutablePath(stored))
+                            self.chrome_host.settings.setMessage("셸 실행 파일을 찾을 수 없어 기본 셸로 실행됩니다 (실행 파일 절대경로 필요 · 시작 위치는 이 필드가 아님)");
+                    }
                 }
             }
             return;
@@ -13272,6 +13282,44 @@ pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     };
 }
 
+/// 경로가 **실행 가능한 정규 파일의 절대경로**인지 검사한다. 절대경로 아님(빈 값·`~`(execve는 tilde 확장을 안
+/// 함)·상대경로)·없는 경로·실행권 없음·디렉터리는 false. platform I/O(access)라 순수 파서(loader)가 아니라
+/// 여기(플랫폼 계층)서 한다 — 선례 pty/macos.zig의 .hushlogin access. `command`는 owned 슬라이스가 아니어도 된다.
+/// **절대경로 게이트가 먼저인 이유**: access는 앱 프로세스 CWD 기준으로 판정하지만 execve는 자식(applySpawnCwd로
+/// 다른 cwd에 chdir됨)에서 돌아, 상대경로는 판정("앱 cwd에 있음")과 실행("자식 cwd엔 없음")이 어긋난다 — 절대경로만
+/// 신뢰한다. **디렉터리 배제**: `access(X_OK)`는 디렉터리(검색권 비트)도 통과시키지만 홈/작업 디렉터리를 셸에
+/// 넣으면 execve가 실패한다(EACCES). 경로 끝에 `/`를 붙여 access하면 정규 파일은 ENOTDIR로 실패하므로(예:
+/// `/bin/sh/`) 이 실패를 정규 파일 신호로 쓴다(stat 불필요 — std.c.access 단일 의존). 심링크는 access가 따라간다.
+fn isExecutablePath(path: []const u8) bool {
+    // 절대경로만 신뢰(빈 값·`~`·상대경로를 access 이전에 차단 — 위 docstring의 CWD 불일치 회피).
+    if (!std.fs.path.isAbsolute(path)) return false;
+    // buf는 `<path>/` + NUL까지 담아야 하므로 max_path_bytes+1(디렉터리 판정용 뒤 `/` 여유) — 길이 max_path_bytes-1
+    // 인 유효 경로도 슬래시 판정이 넘치지 않게. bufPrintZ는 안 맞으면 error(조용한 절단 없음)라 과길이는 catch로
+    // false(폴백). 같은 버퍼를 두 번 재사용한다 — 첫 결과 z는 아래 access가 소비한 뒤에야 두 번째 bufPrintZ가 덮는다.
+    var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    if (std.c.access(z.ptr, std.posix.X_OK) != 0) return false; // 없는 경로·실행권 없음
+    const dz = std.fmt.bufPrintZ(&buf, "{s}/", .{path}) catch return false;
+    return std.c.access(dz.ptr, std.posix.F_OK) != 0; // 디렉터리면 성공 → false; 정규 파일이면 ENOTDIR → true
+}
+
+/// config `shell.command`를 검증해 spawn에 쓸 최종 셸 경로를 돌려준다. 설정돼 있고 실행 가능한 파일이면 그
+/// 경로를, 아니면(빈 값·`~`·상대경로·없는 경로·실행 불가) `resolveInteractiveShell()` 기본 셸로 폴백한다.
+/// **이유**: 잘못된 셸 경로를 그대로 execve하면 자식이 즉시 _exit(127)로 죽고, 첫(유일) 창이면
+/// allTabsTerminated → app_should_terminate로 앱이 시작하자마자 종료된다. 여기서 미리 걸러 세션을 잃지 않는다
+/// (workspace.root의 chdir 실패 시 $HOME graceful 폴백과 같은 forgiving 정책). 폴백(resolveInteractiveShell =
+/// $MARU_INTERACTIVE_SHELL→$SHELL→/bin/sh)도 실행 불가일 수 있어($SHELL가 삭제된 셸을 가리킴) 한 번 더 검사하고,
+/// 그것마저 실패하면 최후로 `/bin/sh`로 떨어진다 — 폴백까지 exec 실패해 첫 창이 종료되는 것을 막는다.
+/// **범위(부분 방어)**: 이 함수는 *실행 불가한 셸 경로*만 막는다. 실행은 되지만 즉시 종료하는 셸(예: /usr/bin/false)
+/// 이나 셸을 종료시키는 shell.args는 못 막아, 그 경우 여전히 세션이 끝나 유일 창이면 앱이 종료된다 — 그건 별개의
+/// 루트커즈("시작 시 유일 surface 즉시 사망 → 앱 종료" lifecycle)로, 후속 과제다(project-rules.md §루트커즈). 반환
+/// 슬라이스는 `command`(config arena) 또는 environ/정적 리터럴을 가리켜 caller가 소유/해제하지 않는다(spawn 시 dupeZ 복사).
+fn resolveConfiguredShell(command: []const u8) []const u8 {
+    if (isExecutablePath(command)) return command;
+    const fallback = maru.pty.resolveInteractiveShell();
+    return if (isExecutablePath(fallback)) fallback else "/bin/sh";
+}
+
 fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.ShellConfig, env_overrides: []const []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
     var request: maru.pty.SpawnRequest = switch (config.command_kind) {
         .controlled_smoke => .{
@@ -13283,9 +13331,11 @@ fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.Sh
             .size = config.size,
         },
         .interactive_shell => .{
-            // 사용자 config shell.command가 있으면 그 셸을, 없으면 resolveInteractiveShell 폴백(현행).
+            // 사용자 config shell.command가 실행 가능한 파일이면 그 셸을, 아니면(빈 값·`~`·없는 경로·실행 불가)
+            // resolveInteractiveShell 폴백. resolveConfiguredShell이 판정 — 잘못된 셸 *경로*가 첫 창을 exec 실패로
+            // 즉시 종료시켜 앱이 시작하자마자 꺼지던 것을 막는다(실행 불가 경로 한정 방어 — 상세·범위는 그 함수 주석).
             // args도 config shell.args(기본 -i). login 래퍼는 이 command/args를 `exec -l`로 감싼다(변경 없음).
-            .command = if (shell.command.len > 0) shell.command else maru.pty.resolveInteractiveShell(),
+            .command = resolveConfiguredShell(shell.command),
             .args = shell.args,
             // login shell로 띄운다(macOS backend가 login(1)으로 감싼다 — Terminal.app·Ghostty와
             // 동일하게 전체 로그인 세션 셋업). PATH·EDITOR·키바인딩 등 사용자 환경이 완전히 잡힌다.
@@ -17161,6 +17211,63 @@ test "homeForRootCwd: launch cwd가 `/`(.app)면 home으로, 정상 cwd면 상�
     try std.testing.expect(homeForRootCwd(&buf, true, null) == null);
     try std.testing.expect(homeForRootCwd(&buf, true, "relative") == null);
     try std.testing.expect(homeForRootCwd(&buf, true, "") == null); // HOME="" → 폴백 안 함
+}
+
+test "resolveConfiguredShell: 실행 가능한 셸만 그대로, 빈값·`~`·상대·없는 경로·디렉터리는 기본 셸로 폴백" {
+    // 파일의 다른 테스트와 같은 관용 — 이 테스트는 호스트 FS(/bin/sh)·env(SHELL)에 의존하므로 macOS에서만 돈다
+    // (일반 `zig build test`가 app_host_abi 경유로 Linux CI에서도 이 파일을 도는데, 거기선 hermetic 샌드박스 등에서
+    // 불안정). 실 PTY spawn은 안 하지만 access 판정이 실 파일시스템을 읽는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 실행 가능한 절대경로(/bin/sh는 macOS 상존)는 그대로 쓴다.
+    try std.testing.expect(isExecutablePath("/bin/sh"));
+    try std.testing.expectEqualStrings("/bin/sh", resolveConfiguredShell("/bin/sh"));
+    // 절대경로 아님(빈 값·`~`·상대경로)·없는 경로·실행 불가는 실행 파일이 아니다 → 기본 셸로 폴백. isAbsolute 게이트가
+    // 상대경로를 CWD와 무관하게 확정적으로 거른다(access의 CWD 의존 제거). 폴백은 env(SHELL) 의존이라 값 비교는
+    // 기본 셸(=resolveInteractiveShell, macOS에선 실행 가능)로만 한다.
+    const fallback = maru.pty.resolveInteractiveShell();
+    try std.testing.expect(!isExecutablePath(""));
+    try std.testing.expect(!isExecutablePath("~")); // 절대경로 아님 → access 이전에 false(CWD 무관)
+    try std.testing.expect(!isExecutablePath("bin/sh")); // 상대경로 → 절대경로 게이트로 false(CWD 무관)
+    try std.testing.expect(!isExecutablePath("/no/such/maru-shell-xyz"));
+    // 디렉터리는 access(X_OK)를 통과(검색권 비트)하지만 정규 파일이 아니라 false — 사용자가 "홈 디렉토리" 경로를
+    // 셸 필드에 넣던 바로 그 회귀를 고정한다(`/`는 모든 유닉스에서 디렉터리).
+    try std.testing.expect(std.c.access("/", std.posix.X_OK) == 0); // 전제: 디렉터리도 X_OK 통과
+    try std.testing.expect(!isExecutablePath("/"));
+    try std.testing.expectEqualStrings(fallback, resolveConfiguredShell(""));
+    try std.testing.expectEqualStrings(fallback, resolveConfiguredShell("~"));
+    try std.testing.expectEqualStrings(fallback, resolveConfiguredShell("/no/such/maru-shell-xyz"));
+    try std.testing.expectEqualStrings(fallback, resolveConfiguredShell("/")); // 디렉터리 → 폴백
+}
+
+test "spawnRequest: interactive_shell이 잘못된 shell.command를 기본 셸로 폴백해 req.command에 싣는다(앱 종료 회귀 차단)" {
+    // access 판정이 호스트 FS(/bin/sh)를 읽으므로 다른 테스트와 같이 macOS에서만 돈다(Z1 — Linux CI 불안정 회피).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // spawnRequest는 첫 창·새 탭·분할·복원 모든 spawn 진입점의 단일 funnel이라, 여기서 req.command가 폴백됨을
+    // 검증하면 실제 앱이 잘못된 셸 경로를 execve하지 않음이 보장된다(제품 코드 경로 그대로 — 실 spawn 불필요).
+    const norm = NormalizedConfig{
+        .size = terminal.Size.default,
+        .queue_capacity = 16,
+        .command_kind = .interactive_shell,
+        .chrome_minimal = false,
+        .minimal_tabs = false,
+        .width_px = 0,
+        .height_px = 0,
+        .scale_milli = 0,
+    };
+    const fallback = maru.pty.resolveInteractiveShell();
+    // 없는 경로·`~`·디렉터리 shell.command → req.command가 기본 셸(폴백). 예전엔 이 값이 그대로 execve돼 자식이
+    // _exit(127) → 첫(유일) 창이면 앱이 시작하자마자 종료됐다. login 래퍼는 유지된다(req.login==true).
+    inline for (.{ "/no/such/maru-shell-xyz", "~", "/" }) |bad| {
+        const req = spawnRequest(norm, "xterm-256color", .{ .command = bad }, &.{}, null, null);
+        try std.testing.expectEqualStrings(fallback, req.command);
+        try std.testing.expect(req.login);
+    }
+    // 실행 가능한 절대경로(/bin/sh)는 그대로 쓴다(정상 커스텀 셸 보존) — 폴백이 과잉 적용되지 않음.
+    const ok = spawnRequest(norm, "xterm-256color", .{ .command = "/bin/sh" }, &.{}, null, null);
+    try std.testing.expectEqualStrings("/bin/sh", ok.command);
+    // 빈 값(자동)도 기본 셸(현행 동작 유지).
+    const auto = spawnRequest(norm, "xterm-256color", .{ .command = "" }, &.{}, null, null);
+    try std.testing.expectEqualStrings(fallback, auto.command);
 }
 
 test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inherit 토글 폴백" {

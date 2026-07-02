@@ -26,6 +26,10 @@ pub const Meta = struct {
     /// GUI 위젯(.auto면 타입에서 유추: bool→toggle, enum→dropdown, f32→number, color→color, []const u8→text).
     widget: Widget = .auto,
     section: ?Section = null,
+    /// text 필드가 **절대경로**를 요구하는지(예: shell.command). true면 파일 파싱(parseAndSet)이 비절대(`~`·상대)
+    /// 값을 diagnostic + 기본값 유지로 거른다 — GUI·파일이 같은 "절대경로" 규칙을 쓰게 한다(config-gui.md §1
+    /// 드리프트 방지). GUI(commitSelectedText)는 저장된 값에 access(X_OK) 안내를 별도로 띄운다.
+    abs_path: bool = false,
 };
 
 /// macOS app host frame-loop timer cadence. 60Hz is the default interactive cadence;
@@ -927,7 +931,7 @@ pub const ShellConfig = struct {
 
     // command(text)만 스키마-주도. args는 공백-토큰 리스트라 loader 명시 핸들러 유지(특수).
     pub const schema = .{
-        .command = Meta{ .doc = "셸 실행 파일 경로(절대경로, 빈 값=자동)", .widget = .text, .section = .terminal },
+        .command = Meta{ .doc = "셸 실행 파일 경로(절대경로, 빈 값=자동)", .widget = .text, .section = .terminal, .abs_path = true },
     };
 };
 

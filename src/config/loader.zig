@@ -1128,6 +1128,20 @@ test "parse: shell.command/shell.args — 경로 + 공백 분리 argv, 빈 값 �
     try std.testing.expectEqualStrings("", q.config.shell.command); // 빈 값 무시 → 기본 유지
     try std.testing.expectEqual(@as(usize, 0), q.config.shell.args.len); // 빈 값 → 인자 없음
     try std.testing.expectEqual(@as(usize, 1), q.diagnostics.len); // shell.command 빈 값 한 건
+
+    // abs_path(A3): 비절대 shell.command(`~`·상대경로)는 파일 로드에서도 diagnostic + 기본값 유지 — GUI 안내와 같은
+    // "절대경로" 규칙을 파일에도 적용해 드리프트 방지(config-gui.md §1). 저장 안 되므로 spawn 시 기본 셸로 폴백된다.
+    for ([_][]const u8{ "shell.command = ~", "shell.command = ~/bin/zsh", "shell.command = bin/sh" }) |line| {
+        var r = try parse(std.testing.allocator, line);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("", r.config.shell.command); // 비절대 → 거부(기본 유지)
+        try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len); // "절대경로여야 함" 한 건
+    }
+    // 절대경로는 (존재 여부와 무관하게) 형식 통과 — 존재·실행 검사는 spawn 시점(resolveConfiguredShell) 책임.
+    var s = try parse(std.testing.allocator, "shell.command = /usr/local/bin/xonsh");
+    defer s.deinit();
+    try std.testing.expectEqualStrings("/usr/local/bin/xonsh", s.config.shell.command);
+    try std.testing.expectEqual(@as(usize, 0), s.diagnostics.len);
 }
 
 test "updateConfigText: in-place 키 교체로 주석·다른 줄 보존, 없는 키는 append, round-trip" {

@@ -1317,6 +1317,43 @@ pub const MetalFrameBuffer = struct {
         self.setCursorFadeMilli(if (visible) 1000 else 0);
     }
 
+    /// [A: chrome 독립 present] 사이드바 셀만 교체해 재present한다 — `self.cells`(터미널+chrome+헤더+오버레이)와
+    /// 커서 suffix(`cursor_cells`)·`modal_cells_start`는 그대로 둔다. synchronized output(2026) hold가 grid 본문
+    /// 투영을 막는 동안에도 에이전트 스피너(사이드바 카드)를 진행시키는 부분 swap이다(전체 `replace`의 사이드바
+    /// 부분만 미러링). **전제**: 이 tick에 atlas가 grow/repack되지 **않았어야** 한다 — 그렇지 않으면 retained
+    /// `self.cells`의 UV가 stale이 된다. 호출자가 사이드바 place 전후 `atlas.generation` 변화를 감지해 변했으면
+    /// 이 경로를 쓰지 않고 전체 재투영으로 폴백한다(docs/io-render-threading.md §11). 사이드바 raster를 uploads로
+    /// 실어 새 스피너 글리프가 아직 atlas에 없으면 업로드하고(터미널 글리프는 persistent atlas에 resident라 재업로드
+    /// 불필요), generation++로 whole-frame 재draw를 트리거하되 `self.cells`는 byte-identical로 다시 그려져 tearing이 없다.
+    pub fn replaceSidebar(
+        self: *MetalFrameBuffer,
+        allocator: std.mem.Allocator,
+        sidebar_band_cells: []const NativeMetalCell,
+        sidebar_frame: ?renderer.RenderFrame,
+        sidebar_colors: CellColors,
+        atlas_config: renderer.GlyphAtlasConfig,
+    ) !void {
+        const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
+        errdefer allocator.free(new_sidebar_cells);
+        // atlas가 grow 안 했다는 전제(호출자 폴백)이므로 현재 dims는 self.cells가 정규화된 dims와 같다 —
+        // 사이드바 셀만 같은 dims로 정규화하면 UV가 self.cells와 일관한다(atlas px는 grow 불변, replace와 동일 규율).
+        renormalizeGlyphCellUvs(new_sidebar_cells, atlas_config.atlas_width_px, atlas_config.atlas_height_px);
+        // 사이드바 raster만 실어 새 글리프(warm-up/eviction 후 파형 높이)를 업로드한다 — pane_frames는 비어(터미널
+        // 글리프는 persistent atlas에 이미 resident). base offset 0부터라 self.pixels/uploads가 사이드바 delta만 담는다.
+        const merged = try buildMergedUploadsN(allocator, &.{}, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, null, null);
+        errdefer {
+            allocator.free(merged.uploads);
+            allocator.free(merged.pixels);
+        }
+        allocator.free(self.sidebar_cells);
+        allocator.free(self.uploads);
+        allocator.free(self.pixels);
+        self.sidebar_cells = new_sidebar_cells;
+        self.uploads = merged.uploads;
+        self.pixels = merged.pixels;
+        self.generation += 1;
+    }
+
     pub fn view(self: *const MetalFrameBuffer) MetalFrame {
         // 커서 suffix는 항상 전부 노출한다 — 렌더러가 cursor_cells/cursor_fade_milli로 본문과 분리해 페이드 pass로
         // 그린다(옛 show_cursor chop 대체). fade_milli==0이면 렌더러가 커서 pass를 생략해 이전 chop과 같은 결과.
@@ -2463,4 +2500,29 @@ test "renormalizeGlyphCellUvs rescales glyph UVs to final atlas dims, preserves 
     };
     renormalizeGlyphCellUvs(&zero, 0, 0);
     try std.testing.expectEqual(@as(f32, 0.5), zero[0].u0); // baked 유지
+}
+
+test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid cells untouched (A)" {
+    const allocator = std.testing.allocator;
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+    // grid cells에 sentinel 표식(atlas_width_px=0이라 renorm skip). replaceSidebar가 이걸 안 건드려야 한다
+    // (sync hold 중 사이드바 스피너만 바꿔도 터미널 본문 = self.cells는 그대로 = tearing 없음).
+    const grid_marker = NativeMetalCell{ .row = 3, .col = 7, .width = 1, .codepoint = 'X', .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0 };
+    buf.cells = try allocator.dupe(NativeMetalCell, &.{grid_marker});
+    const cells_ptr = buf.cells.ptr;
+    buf.generation = 7;
+
+    const band = [_]NativeMetalCell{.{ .row = 0, .col = 0, .width = 1, .codepoint = 0, .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0, .background = 0xFF223344 }};
+    try buf.replaceSidebar(allocator, &band, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, .{});
+
+    try std.testing.expectEqual(@as(u64, 8), buf.generation); // generation++
+    // grid cells 불변(포인터·길이·내용).
+    try std.testing.expectEqual(cells_ptr, buf.cells.ptr);
+    try std.testing.expectEqual(@as(usize, 1), buf.cells.len);
+    try std.testing.expectEqual(@as(u16, 3), buf.cells[0].row);
+    try std.testing.expectEqual(@as(u32, 'X'), buf.cells[0].codepoint);
+    // sidebar_cells는 새 band로 교체.
+    try std.testing.expectEqual(@as(usize, 1), buf.sidebar_cells.len);
+    try std.testing.expectEqual(@as(u32, 0xFF223344), buf.sidebar_cells[0].background);
 }

@@ -649,6 +649,12 @@ const screen_diag = std.log.scoped(.screen);
 // 이벤트를 구조화 한 줄씩 찍는다 — 같은 도메인 데이터를 테스트·후속 trace writer도 이 자리에서
 // drain한다(관측 가능성 원칙). 게이트는 diag.zig 단일 출처.
 const shell_diag = std.log.scoped(.shell);
+// synchronized output(DECSET 2026) 게이트 진단 logger. MARU_DEBUG일 때 tick마다 sync hold/투영 결정
+// (활성 sync·hold tick·grid/chrome 투영·ESU 누적·view_offset)을 구조화 한 줄씩 찍어, 폴링 렌더 루프가
+// 라이브 프레임을 언제 붙잡고 언제 flush하는지 실환경에서 관측한다(shouldProjectFrame 게이트의 각 안전판—
+// 스크롤·ESU edge·timeout—이 실제로 발동하는지). 같은 도메인 데이터를 테스트·후속 trace writer도 이 자리에서
+// drain한다(관측 가능성 원칙). 게이트는 diag.zig 단일 출처.
+const sync_diag = std.log.scoped(.sync);
 const diag_gate = @import("diag.zig");
 
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
@@ -1586,6 +1592,12 @@ pub const AppSession = struct {
     // synchronized output(2026) hold가 이어진 tick 수(활성 surface 기준). sync_timeout_ms에 해당하는 tick 수를 넘으면 ESU
     // 유실로 보고 강제 투영해 freeze를 푼다. sync가 꺼지면 0으로 리셋한다.
     sync_hold_ticks: u32 = 0,
+    // sync_diag(logSyncGateDiag) 노이즈 억제용 직전 tick 상태(MARU_DEBUG 관측 전용) — 매 tick 찍지 않고 sync 에피소드
+    // 중이거나 ESU/active가 바뀐 tick만 emit하게 직전 값을 기억한다. release에선 logSyncGateDiag가 게이트에서 즉시
+    // return해 이 필드는 안 쓰인다(초기값 유지).
+    sync_diag_tick: u64 = 0,
+    sync_diag_last_esu: u64 = 0,
+    sync_diag_last_active: bool = false,
 
     /// 단축키 힌트 홀드 상태머신(순수 — keyhint_hold.zig, 헤드리스 테스트). 단일 출처: flagsChanged 이벤트 스트림이
     /// arm/cancel을, 만료가 show를 결정한다(글로벌 modifier 재읽기 같은 2번째 출처 없음 — 간헐 미표시 루트커즈 수정).
@@ -10173,6 +10185,36 @@ pub const AppSession = struct {
         }
     }
 
+    /// synchronized output(2026) 게이트의 tick별 상태를 sync_diag(.sync)로 한 줄 찍는다(MARU_DEBUG 관측 전용, release는
+    /// 첫 게이트에서 즉시 return). 노이즈를 줄이려 **sync 에피소드 중이거나 ESU가 바뀐 tick 또는 사이드바 전용 투영(cproj)
+    /// tick만** emit한다(idle 정적 화면은 안 찍음). 필드: active=활성 surface sync_output, hold=sync_hold_ticks/timeout,
+    /// gproj=grid 전체 투영(will_project), cproj=사이드바 전용 투영(project_chrome), force=force_reproject(atlas repack
+    /// 폴백), dirty/chrome=metal/chrome_dirty, voff=view_offset(스크롤), esu=리더 ESU 누적(완성 프레임 수), out=이 tick
+    /// output_events. shouldProjectFrame 게이트의 각 안전판(스크롤·ESU edge·timeout)이 실환경에서 언제 발동하는지 관측한다.
+    fn logSyncGateDiag(self: *AppSession, out_events: usize, sync_active: bool, gproj: bool, cproj: bool, esu: u64, view_offset: usize) void {
+        if (!diag_gate.maruDebugEnabled()) return;
+        self.sync_diag_tick +%= 1;
+        const changed = esu != self.sync_diag_last_esu;
+        const relevant = sync_active or self.sync_diag_last_active or changed or cproj;
+        self.sync_diag_last_esu = esu;
+        self.sync_diag_last_active = sync_active;
+        if (!relevant) return;
+        sync_diag.info("tick={d} active={d} hold={d}/{d} gproj={d} cproj={d} force={d} dirty={d} chrome={d} voff={d} esu={d} out={d}", .{
+            self.sync_diag_tick,
+            @intFromBool(sync_active),
+            self.sync_hold_ticks,
+            self.syncTimeoutTicks(),
+            @intFromBool(gproj),
+            @intFromBool(cproj),
+            @intFromBool(self.force_reproject),
+            @intFromBool(self.metal_dirty),
+            @intFromBool(self.chrome_dirty),
+            view_offset,
+            esu,
+            out_events,
+        });
+    }
+
     pub fn tick(self: *AppSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -10288,6 +10330,8 @@ pub const AppSession = struct {
         const will_project = shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset, esu_advanced, self.force_reproject);
         // [A: chrome 독립 present] grid는 hold됐지만 chrome(사이드바 스피너)만 dirty면 사이드바만 부분 투영한다(아래 else if).
         const project_chrome = self.chrome_dirty and !will_project;
+        // 투영 결정 직후 sync 게이트 상태를 관측 로그로 남긴다(MARU_DEBUG 전용, 아니면 즉시 return).
+        self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, sync_view.esu, active_view_offset);
         if (will_project) {
             self.chrome_dirty = false; // 전체 투영이 사이드바까지 그리므로 chrome dirty 소진
             // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의

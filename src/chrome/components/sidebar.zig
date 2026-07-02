@@ -148,14 +148,10 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, drop_slot: ?usize, p: props
     };
     if (active_idx) |ai| {
         try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape)); // 카드 배경 밴드
-        // U1: 활성 슬롯 좌측 maru-accent 막대(accent_bar_width>0 — rich). 밴드 뒤에 append → 카드 배경 위에 그려진다.
-        // U2: 막대도 카드 content rect(슬롯에서 card_gap inset) 좌단 가장자리에 카드 높이로 붙인다.
-        if (p.shape.accent_bar_width_px > 0) {
-            const g = p.shape.card_gap_px;
-            const slot = draw.Rect{ .x = 0, .y = @intCast(ai * @as(usize, slot_h)), .w = w, .h = slot_h };
-            const card = slot.inset(.{ .left = g, .right = g, .top = g, .bottom = g });
-            try out.append(arena, .{ .quad = .{ .rect = .{ .x = card.x, .y = card.y, .w = p.shape.accent_bar_width_px, .h = card.h }, .fill_role = .accent_bar, .corner_radii = .{ 0, 0, 0, 0 } } });
-        }
+        // 좌측 accent 막대는 여기서 내지 않는다 — 막대색이 카드별(우클릭 "바: …", tab.accent_color)이라 role 기반
+        // chrome op으로 임의 RGB를 실을 수 없어, 배경 tint와 같은 이유로 **platform이 카드별 GpuQuad로 직접 그린다**
+        // (app_session rebuildSidebar의 per-tab accent 루프 — 활성=기본 앰버/지정색, 비활성=지정 시에만). 카드 폭 inset과
+        // 텍스트 좌측 여백은 여전히 tokens.space.accent_bar_width_px(=막대 폭)로 예약된다(밴드 위 정합·단일 출처).
     }
 
     // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선).
@@ -323,29 +319,16 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expectEqual(@as(u16, 8), out.items[0].quad.corner_radii[0]);
 
-    // U1: accent_bar_width>0이면 활성 슬롯 밴드 뒤에 좌측 막대 op(폭=accent_bar_width, role accent_bar, x=0).
-    out.clearRetainingCapacity();
-    var bar_p = p;
-    bar_p.shape = .{ .accent_bar_width_px = 3 };
-    try view(&tabs, null, null, bar_p, arena, &out);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 밴드(idx 1) + 좌측 막대
-    try std.testing.expect(out.items[1].quad.fill_role == .accent_bar);
-    try std.testing.expectEqual(@as(u32, 3), out.items[1].quad.rect.w); // 막대 폭 3px
-    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.x); // 좌측 가장자리
-    try std.testing.expectEqual(@as(i32, 40), out.items[1].quad.rect.y); // 활성 슬롯(idx 1) y = 1×slot_h(40)
-
-    // U2: card_gap>0이면 카드(밴드)·막대가 슬롯 안쪽 사방 패딩으로 — 카드 사이 여백. slot_h=40, gap=4.
+    // 좌측 accent 막대는 chrome이 내지 않는다(카드별 색이라 platform이 GpuQuad로 직접 — app_session per-tab accent 루프).
+    // card_gap>0이면 카드(밴드)만 슬롯 안쪽 사방 패딩으로 낸다 — 카드 사이 여백. slot_h=40, gap=4.
     out.clearRetainingCapacity();
     var card_p = p;
-    card_p.shape = .{ .corner_radius_px = 8, .accent_bar_width_px = 3, .card_gap_px = 4 };
+    card_p.shape = .{ .corner_radius_px = 8, .card_gap_px = 4 };
     try view(&tabs, null, null, card_p, arena, &out);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 카드 밴드 + 좌측 막대
+    try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(막대 op 없음)
     const card = out.items[0].quad.rect;
     try std.testing.expectEqual(@as(i32, 4), card.x); // 좌 패딩(gap)
     try std.testing.expectEqual(@as(u32, 120 - 8), card.w); // w - 2×gap
     try std.testing.expectEqual(@as(i32, 40 + 4), card.y); // 슬롯1 y(40) + gap
     try std.testing.expectEqual(@as(u32, 40 - 8), card.h); // slot_h - 2×gap
-    const bar = out.items[1].quad.rect;
-    try std.testing.expectEqual(@as(i32, 4), bar.x); // 막대도 카드 좌단(gap)
-    try std.testing.expectEqual(@as(u32, 40 - 8), bar.h); // 카드 높이
 }

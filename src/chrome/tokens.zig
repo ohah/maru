@@ -74,7 +74,9 @@ pub const Spacing = struct {
     // C4b 모달: 배경 quad가 텍스트 영역보다 큰 안쪽 여백(px). tui=0(딱 맞는 셀 배경), rich>0(텍스트 주변 여백).
     // platform lowering이 모달 quad/shadow rect를 이 값만큼 사방 확장(텍스트 셀은 그대로) — 텍스트가 박스 안쪽에 든다.
     modal_padding_px: u16 = 0,
-    // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 폭(px). tui=0(막대 없음), rich>0(앰버 막대).
+    // U1: 사이드바 카드 좌측 accent 막대 폭(px). tui=0(막대 없음), rich>0. 막대색은 카드별(우클릭 "바: …", tab.accent_color)
+    // 이라 chrome이 아니라 platform(app_session rebuildSidebar per-tab accent 루프)이 이 폭으로 직접 GpuQuad를 그린다.
+    // chrome은 이 값으로 카드 텍스트 좌측 여백만 예약한다(buildSidebarTitleDrawList indent — 막대 위 정합·단일 출처).
     accent_bar_width_px: u16 = 0,
     // U2: 사이드바 카드 사이 여백(px). 밴드/막대를 슬롯 안쪽 사방으로 이만큼 줄여 워크스페이스가 카드처럼 떨어져 보인다.
     // tui=0(슬롯 꽉 — 기존과 동일), rich>0.
@@ -167,7 +169,8 @@ pub const Tokens = struct {
         tk.space.shadow_alpha = 0x38;
         // C4b 모달 패딩: 배경 박스를 텍스트보다 사방 12px 크게 — 팝업 텍스트 주변에 여백(사용자 피드백 "여유").
         tk.space.modal_padding_px = 12;
-        // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 3px(앰버). tui=0(막대 없음).
+        // U1: 사이드바 카드 좌측 accent 막대 3px. tui=0(막대 없음). 막대색은 카드별(우클릭 "바: …")이라 platform이
+        // 이 폭으로 직접 그리고(활성=기본 앰버·지정 카드=지정색), chrome은 카드 텍스트 좌측 여백만 이 폭으로 예약한다.
         tk.space.accent_bar_width_px = 3;
         // U2: 카드 사이 여백 8px(슬롯 안쪽 사방 패딩) — 워크스페이스가 "떠 있는 카드"로 또렷이 분리(Warp식 넉넉한 행 여백). 4→8(사이드바 폴리시).
         tk.space.card_gap_px = 8;

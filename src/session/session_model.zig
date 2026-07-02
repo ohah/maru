@@ -84,6 +84,9 @@ pub fn Model(comptime Rt: type) type {
             pinned: bool = false,
             /// 사이드바 카드 배경 tint(0xRRGGBB, 0=기본 테마색). workspace.v1 영속.
             background_color: u32 = 0,
+            /// 사이드바 카드 좌측 accent 막대색(0xRRGGBB, 0=기본 — 활성 카드는 테마 앰버, 비활성은 막대 없음).
+            /// 지정하면 활성·비활성 카드 모두 그 색으로 막대 표시(배경 tint와 직교). workspace.v1 영속.
+            accent_color: u32 = 0,
 
             /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
             pub fn activePane(self: *Tab) *Pane {

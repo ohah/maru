@@ -292,13 +292,21 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   기준). ② **더블클릭** — 사이드바 엔트리·Term 탭·pane 라벨 세그먼트. ③ **Zig 오버레이 우클릭 메뉴** — 네이티브 메뉴가
   아니라 Zig로 그린 컨텍스트 메뉴의 "Rename" 항목(chrome을 Zig로 그리는 전략과 일치). 키보드/팔릿은 활성 대상,
   더블클릭/우클릭은 클릭된 대상으로 해석한다.
-- **우클릭 메뉴 — 워크스페이스 추가 항목**: 사이드바 워크스페이스를 우클릭하면 "Rename" 외에 **위치 고정(Pin/Unpin)**과
-  **배경색 프리셋**(없음·앰버·파랑·초록·빨강·보라; 앰버=maru accent #DDA15E)이 뜬다(pane/Term은 "Rename"만). 메뉴 항목은
-  chrome 중립이라 platform이 대상 타입에 맞게 동적 주입하고(`buildContextMenuItems`), accept는 selected 인덱스로 분기
-  (`acceptContextMenu`). 위치 고정은 드래그 재정렬에서 그 탭을 안 움직이고(`moveTab` no-op) 사이드바 카드 이름줄
-  **우측 끝**에 📌(선두가 아니라 — 선두 칼럼은 위 동작/활성 마커 전용; 핀이 그 표시를 가리지 않게), 배경색은
-  카드에 반투명 tint(chrome draw op은 role 기반이라 임의 RGB는 platform이 명시-색 GpuQuad로 직접 lower). 둘 다
-  workspace.v1에 영속(`pinned`/`background-color` — docs/workspace-restore.md).
+- **우클릭 메뉴 — 워크스페이스 추가 항목**: 사이드바 워크스페이스를 우클릭하면 "Rename" 외에 **위치 고정(Pin/Unpin)**,
+  **배경색 프리셋**("배경: …" 없음·앰버·파랑·초록·빨강·보라; 앰버=maru accent #DDA15E), **좌측 막대색 프리셋**("바: …"
+  같은 6색)이 뜬다(pane/Term은 "Rename"만). **배경색과 막대색은 직교한 별도 설정**이다(사용자 요청: "왼쪽 바 색·배경색
+  두 개 따로") — 색 팔레트만 공유하고 각각 `tab.background_color`/`tab.accent_color`에 담긴다. 메뉴 항목은 chrome 중립이라
+  platform이 대상 타입에 맞게 동적 주입하고(`buildContextMenuItems`), accept는 selected 인덱스 구간으로 분기
+  (`acceptContextMenu`; `ctx_menu_bg_first`/`ctx_menu_accent_first`). 위치 고정은 드래그 재정렬에서 그 탭을 안 움직이고
+  (`moveTab` no-op) 사이드바 카드 이름줄 **우측 끝**에 📌(선두가 아니라 — 선두 칼럼은 위 동작/활성 마커 전용; 핀이 그
+  표시를 가리지 않게).
+- **카드별 색 렌더(배경 tint·좌측 accent 막대)**: chrome draw op은 role 기반이라 임의 RGB를 못 실어, **둘 다 platform이
+  명시-색 GpuQuad로 직접 그린다**(`rebuildSidebar`의 per-tab tint 루프·per-tab accent 루프 — 일관된 경로). 배경색은 카드에
+  반투명 tint, 좌측 막대는 카드 좌단(폭=`tokens.space.accent_bar_width_px`, 카드 텍스트는 이 폭만큼 좌측 여백 예약)에
+  불투명 막대다. **막대색 기본(`accent_color`=0)은 활성 카드=테마 앰버(`.accent_bar` role)·비활성 카드=막대 없음**이고,
+  프리셋으로 색을 지정하면 **활성·비활성 카드 모두** 그 색 막대를 표시한다("바: …"를 지정하면 비활성에서도 보인다).
+  chrome `sidebar.view`는 카드 밴드(role 기반)만 내고 막대는 내지 않는다. 셋 다 workspace.v1에 영속
+  (`pinned`/`background-color`/`accent-color` — docs/workspace-restore.md).
 - **기본 키바인딩 없음(베이스)**: rename 기본 단축키는 macOS 단일 관례가 없어(Terminal.app은 탭 rename 기본키 없음,
   iTerm2는 더블클릭/⌘I 등 제각각) 임의로 고르지 않는다 — 액션은 정의해 bindable로 두고, 발견성은 커맨드 팔릿·더블클릭·
   우클릭으로 확보한다. 이 결정은 `config/action.zig` 주석에도 남긴다([필수 프로젝트 규칙](project-rules.md)의 베이스 명시

@@ -27,6 +27,25 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 `osc`(OSC 9/777, `pendingNotification`)를 끄면 데스크톱 배너·인앱 센터 둘 다 안 만든다. 인앱 센터 보관 개수는
 `history-limit`(8~512, 기본 64). 단일 출처는 [config 스키마](configuration.md)다(스키마-주도라 세팅 화면에도 자동 노출).
 
+### 제목 구성 — 위치(`탭 › 팬`) 접두
+
+두 소스 모두 알림 제목에 **발신 위치**(워크스페이스=탭, Term=surface/pane)를 실어, 여러 탭·split·가로탭을 띄운 채
+받은 알림이 **어느 터미널에서 왔는지** 제목에서 바로 식별된다(사용자 요청 — 배너엔 앱 아이콘만 떠 소스 구분이 안 됐다).
+
+- **위치 라벨(단일 출처: `app_session.zig` `notificationLocation`)**: `workspaceLabel(탭) › termLabel(Term)`.
+  두 라벨이 **같으면**(단일 Term 탭·custom_name 없음 등 `workspaceLabel`이 그 Term 라벨로 폴백) 중복이라 **하나만**
+  쓴다 — 단일 워크스페이스·단일 Term 사용자는 예전 제목과 동일하게 보인다. `›`(U+203A)는 계층(탭⊃팬), `·`(U+00B7)는
+  상위 구분자로 알림 전체에서 일관되게 쓴다. 라벨은 borrowed(auto_title=메인 스레드 캐시·custom_name=세션 소유·
+  surface.title=정적, reader 미접근)라 즉시 소비하고, OSC 경로는 `lockCore` 밖 메인 스레드 상태만 읽어 코어 락과 무관하다.
+- **에이전트 완료**: `{✶|◆} {Claude|Codex} · {위치}`(예: `✶ Claude · 배포 › 작업1`). 심볼·종류 뒤에 위치를 붙인다.
+- **OSC 9/777**: `{위치} · {앱 title}`(앱이 준 title이 있을 때, 예: `배포 › 작업1 · Build finished`), title이 없으면
+  (OSC 9은 title 없음) `{위치}`만. body는 앱이 보낸 메시지 그대로 둔다. 위치를 **접두**해 앱 제목/메시지를 보존한다.
+
+**베이스/결정**: macOS 알림은 왼쪽 큰 아이콘이 앱 아이콘 고정이라(iTerm2/Terminal.app도 동일) 소스 구분을 못 하므로,
+탭·Term 라벨을 **제목 접두**로 실어 구분한다(macOS `UNMutableNotificationContent`의 subtitle을 쓸 수도 있으나 ABI에
+셋째 문자열 추가가 필요해, 기존 title/body funnel 안에서 접두로 해결). 라벨 해석은 사이드바·탭바와 같은 `app.pickLabel`
+단일 규칙(custom_name 우선·없으면 자동 제목)을 재사용해 제목이 화면 라벨과 어긋나지 않는다.
+
 ## 2. 데스크톱 배너 (OS, 1단계)
 
 `pendingNotification()` → Swift `drainNotification()` → `UNUserNotificationCenter`. 배너는 OS 리소스라 native(Swift)만
@@ -167,8 +186,9 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 
 ## 4. 경계 분담 (단일 출처)
 
-- **Zig**: 알림 파싱·합류(`pendingNotification`), 전면 배너 여부(`foreground_banner`), surface 역조회·활성화 순서
-  (`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷, chrome 컴포넌트(state·hit-test·draw ops), 헤더 zone.
+- **Zig**: 알림 파싱·합류(`pendingNotification`), **제목 위치 접두**(`notificationLocation` — `탭 › 팬`), 전면 배너 여부
+  (`foreground_banner`), surface 역조회·활성화 순서(`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷, chrome
+  컴포넌트(state·hit-test·draw ops), 헤더 zone.
 - **Swift**: `UNUserNotificationCenter` 표시/권한/delegate(거부 상태에선 `NSWorkspace`로 시스템 알림 설정 열기), 창 키
   활성화(`makeKeyAndOrderFront`/`NSApp.activate`), 알림 `userInfo`에 정수 2개(`wt`/`sid`) 싣기·꺼내기, 전면 표시 스타일
   적용(`willPresent`). 정책 결정은 안 한다.
@@ -182,6 +202,8 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 
 - **단위(Zig 헤드리스)**: `notifications.zig`(state·handle·itemAt 2행·view ops·panelRect clamp), 히스토리 ring buffer
   (push 상한·unread 증감·markRead·formatRelativeTime), `acceptNotification` 역순 매핑, `activateSurfaceById` 역조회,
+  **제목 위치 접두**(custom_name 세팅 시 에이전트 완료 title=`{✶|◆} {종류} · {탭 › 팬}`, OSC title=`{탭 › 팬} · {앱 title}`;
+  탭 라벨==Term 라벨이면 dedup으로 하나만),
   **비활성 pane/Term OSC drain**(`pendingNotification`이 background split pane Term에 먹인 OSC 9를 그 surface_id로 돌려주고
   그 id로 점프가 비활성 pane을 포커스 — 모든 surface를 훑는지),
   `headerHit` 4-아이콘 zone, **접힘 종 hit-test**(`collapsedNotificationRect` 종 글리프 동심·◧ rect 비겹침·클릭→패널 열림).

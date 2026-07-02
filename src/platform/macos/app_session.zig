@@ -4508,6 +4508,12 @@ pub const AppSession = struct {
             if (settingsRowMatches("터미널 매크로 추가 (chord = text:...)", "macro", q))
                 try texts.append(arena, .{ .key = "macro.", .doc = "터미널 매크로 추가 (chord = text:...)", .value = "", .section = .input }); // 추가 행(빈 chord = sentinel)
         }
+        // Workspace 섹션엔 시작 디렉터리(workspace.root)를 합성 text 행으로 노출한다(schema 필드 아님 — loader 명시
+        // 핸들러 특수 키, shell.args 선례). 값=현재 root(빈 값=상속 cwd). 커밋은 setWorkspaceRoot(loader와 형식 검증 공유).
+        if (cross or sel_sec == .workspace) {
+            if (settingsRowMatches("시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", "workspace.root", q))
+                try texts.append(arena, .{ .key = "workspace.root", .doc = "시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", .value = self.loaded_config.config.workspace.root, .section = .workspace });
+        }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
         for (colors_all.items) |c| if ((cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
         // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
@@ -4784,6 +4790,8 @@ pub const AppSession = struct {
             const tkey = cf.texts[ti].key;
             if (std.mem.eql(u8, tkey, "shell.args")) {
                 self.setShellArgs(editor); // 공백-토큰 분리
+            } else if (std.mem.eql(u8, tkey, "workspace.root")) {
+                self.setWorkspaceRoot(editor); // 시작 디렉터리 — loader와 형식 검증 공유
             } else if (std.mem.eql(u8, tkey, "env.")) {
                 self.addEnvVar(editor); // 추가 행 — "KEY=VALUE" 파싱
                 self.refreshSettingsFieldCount(); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)
@@ -4860,6 +4868,26 @@ pub const AppSession = struct {
         while (it.next()) |tok| list.append(a, a.dupe(u8, tok) catch return) catch return;
         self.loaded_config.config.shell.args = list.toOwnedSlice(a) catch return;
         self.markConfigKeyDirty("shell.args");
+    }
+
+    /// 세팅 GUI에서 시작 디렉터리(workspace.root) 커밋 — loader와 같은 형식 규칙(`loader.isValidWorkspaceRoot`)으로
+    /// 검증해 드리프트를 막는다(config-gui.md §1·§6.6a). 빈 값=상속 cwd로 클리어, 절대경로/`~`는 저장(arena dupe),
+    /// 상대경로·`~user`는 무시+안내. `~` 확장·존재 검증은 spawn 시점(resolveWorkspaceRoot)이 하므로 여기선 형식만 본다.
+    /// root는 셸 spawn 시점에만 쓰이므로 라이브 재적용 없이 dirty만 찍는다(다음 새 Term부터 — shell.args/env와 같은 결).
+    fn setWorkspaceRoot(self: *AppSession, text: []const u8) void {
+        const trimmed = std.mem.trim(u8, text, &std.ascii.whitespace);
+        if (trimmed.len == 0) {
+            self.loaded_config.config.workspace.root = ""; // 클리어 → 상속 cwd(기본)
+            self.markConfigKeyDirty("workspace.root");
+            return;
+        }
+        if (!config_mod.loader.isValidWorkspaceRoot(trimmed)) {
+            self.chrome_host.settings.setMessage("시작 디렉터리는 절대경로 또는 ~/… 여야 합니다 (상대경로·~user 무시)");
+            return;
+        }
+        const owned = self.loaded_config.arena.allocator().dupe(u8, trimmed) catch return;
+        self.loaded_config.config.workspace.root = owned;
+        self.markConfigKeyDirty("workspace.root");
     }
 
     /// env.<name>을 value로 upsert한다(있으면 교체, 없으면 추가 — config.env는 "KEY=VALUE" 리스트). value는 양끝 trim
@@ -17650,6 +17678,36 @@ test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 
     try std.testing.expect(session.total_ignored_key_events > before);
     try std.testing.expect(!session.ended_seen);
     try std.testing.expect(session.startup_held); // 여전히 held(입력이 상태를 안 바꿈)
+}
+
+test "setWorkspaceRoot(세팅 GUI 시작 디렉터리): 절대/~ 저장·빈 값 클리어·상대 무시+안내(loader 형식 공유)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(controlled smoke)
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 절대경로 저장.
+    session.setWorkspaceRoot("/tmp/proj");
+    try std.testing.expectEqualStrings("/tmp/proj", session.loaded_config.config.workspace.root);
+    // `~/…` 저장(양끝 trim; `~` 확장은 spawn 시점).
+    session.setWorkspaceRoot("  ~/work  ");
+    try std.testing.expectEqualStrings("~/work", session.loaded_config.config.workspace.root);
+    // 빈 값 = 상속 cwd로 클리어.
+    session.setWorkspaceRoot("");
+    try std.testing.expectEqualStrings("", session.loaded_config.config.workspace.root);
+    // 상대경로 = 형식 불량 → 기존 값 유지 + 안내 배너(저장 안 함).
+    session.setWorkspaceRoot("/keep/me");
+    session.setWorkspaceRoot("relative/path");
+    try std.testing.expectEqualStrings("/keep/me", session.loaded_config.config.workspace.root);
+    try std.testing.expect(session.chrome_host.settings.message().len > 0);
 }
 
 test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inherit 토글 폴백" {

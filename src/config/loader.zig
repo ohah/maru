@@ -107,6 +107,15 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed 
     };
 }
 
+/// `workspace.root` **형식** 검증(순수·env 비의존): 절대경로 또는 `~`/`~/…`면 true. 상대경로·`~user`(다른 사용자)·
+/// 빈 값은 false. 파일 파싱(applyKey)과 세팅 GUI 커밋(app_session `setWorkspaceRoot`)이 공유해 GUI·파일 드리프트를
+/// 막는다(docs/config-gui.md §1·§6.6a). `~` 확장·존재 검증은 형식이 아니라 env/FS라 spawn 시점이 한다.
+pub fn isValidWorkspaceRoot(trimmed: []const u8) bool {
+    if (trimmed.len == 0) return false;
+    const is_tilde = std.mem.eql(u8, trimmed, "~") or std.mem.startsWith(u8, trimmed, "~/");
+    return is_tilde or std.fs.path.isAbsolute(trimmed);
+}
+
 fn applyKey(
     a: std.mem.Allocator,
     config: *theme.Config,
@@ -218,10 +227,9 @@ fn applyKey(
             return;
         }
         // 절대경로 또는 `~`/`~/…`만 받는다 — 상대경로·`~user`(다른 사용자)는 spawn 시 어차피 무시되므로 여기서
-        // 미리 거른다(forgiving+diagnostic, 다른 키와 동일하게 "설정은 통과했는데 조용히 무동작"을 막는다). $HOME
-        // 확장은 platform layer가 하므로 loader는 형식만 본다(순수 파서 — env 비의존).
-        const is_tilde = std.mem.eql(u8, trimmed, "~") or std.mem.startsWith(u8, trimmed, "~/");
-        if (!is_tilde and !std.fs.path.isAbsolute(trimmed)) {
+        // 미리 거른다(forgiving+diagnostic). 형식 규칙은 GUI 커밋과 공유하는 isValidWorkspaceRoot 단일 헬퍼로 — 드리프트
+        // 방지. $HOME 확장은 platform layer가 하므로 loader는 형식만 본다(순수 파서 — env 비의존).
+        if (!isValidWorkspaceRoot(trimmed)) {
             try diags.append(a, .{ .line = line_no, .message = "workspace.root는 절대경로 또는 ~/… — 무시(기본값 유지)" });
             return;
         }
@@ -2291,6 +2299,19 @@ test "parse: workspace.root default empty, override, empty is forgiving" {
         try std.testing.expectEqualStrings("", p.config.workspace.root);
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
+}
+
+test "isValidWorkspaceRoot: 절대경로·~/…만 통과 (loader·GUI 공유 형식 규칙)" {
+    // 통과: 절대경로, `~` 단독, `~/…`.
+    try std.testing.expect(isValidWorkspaceRoot("/Users/me/work"));
+    try std.testing.expect(isValidWorkspaceRoot("~"));
+    try std.testing.expect(isValidWorkspaceRoot("~/projects"));
+    try std.testing.expect(isValidWorkspaceRoot("/")); // 루트도 절대경로
+    // 거부: 빈 값·상대경로·`~user`(다른 사용자).
+    try std.testing.expect(!isValidWorkspaceRoot(""));
+    try std.testing.expect(!isValidWorkspaceRoot("projects"));
+    try std.testing.expect(!isValidWorkspaceRoot("./rel"));
+    try std.testing.expect(!isValidWorkspaceRoot("~bob/work"));
 }
 
 test "parse: workspace.tab/split-inherit-cwd 기본 true, override, forgiving" {

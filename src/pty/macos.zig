@@ -729,7 +729,7 @@ const ArgvStorage = struct {
 // hushlogin)을 셋업한 뒤 셸을 login shell로 exec한다. 단순히 argv[0]에 `-`만 붙이면 .zprofile은
 // 읽지만 getlogin()/SHELL/세션 env가 안 잡혀, 그에 의존하는 셸 설정(예: $TERM_PROGRAM별 키바인딩)이
 // 어긋난다(실측: Cmd+Left는 되는데 Cmd+Right는 안 됨). 형태(Ghostty가 Apple login.c를 읽고 찾은):
-//   /usr/bin/login [-q] -flp <user> /bin/bash --noprofile --norc -c "exec -l <shell> <args>"
+//   /usr/bin/login [-q] -flp <user> /bin/bash --noprofile --norc -c "exec -l '<shell>' '<args>'"
 //   -f 인증 생략, -l login(1)이 cwd를 home으로 안 바꾸게, -p env 보존, -q hushlogin(.hushlogin 있을 때).
 //   설정 무로드 bash가 `exec -l`로 최종 셸을 login shell로 교체한다(bash가 zsh보다 exec ~2배 빠름).
 const MacosLogin = struct {
@@ -749,14 +749,17 @@ const MacosLogin = struct {
             break :blk std.c.access(path.ptr, std.posix.F_OK) == 0;
         } else false;
 
-        // "exec -l <command> <arg1> ..." — bash가 실행해 최종 셸을 login shell로 교체한다.
+        // "exec -l '<command>' '<arg1>' ..." — bash가 실행해 최종 셸을 login shell로 교체한다. command·args를 각각
+        // 작은따옴표로 감싼다(appendSingleQuoted) — 경로/인자에 공백·셸 메타문자가 있어도(예: `/Applications/My App/sh`)
+        // bash가 word-split·해석하지 않게 한다. command는 resolveConfiguredShell이 절대경로만 통과시키므로 `exec`가 PATH
+        // 검색 없이 그 경로를 실행한다.
         var cmd_buf: std.ArrayList(u8) = .empty;
         defer cmd_buf.deinit(allocator);
         try cmd_buf.appendSlice(allocator, "exec -l ");
-        try cmd_buf.appendSlice(allocator, request.command);
+        try appendSingleQuoted(allocator, &cmd_buf, request.command);
         for (request.args) |a| {
             try cmd_buf.append(allocator, ' ');
-            try cmd_buf.appendSlice(allocator, a);
+            try appendSingleQuoted(allocator, &cmd_buf, a);
         }
         const exec_cmd = try cmd_buf.toOwnedSlice(allocator);
         errdefer allocator.free(exec_cmd);
@@ -791,6 +794,21 @@ const MacosLogin = struct {
         allocator.free(self.args);
     }
 };
+
+/// bash `-c "exec -l ..."`에 토큰 하나를 **작은따옴표로 감싸** 붙인다 — 셸 경로/인자에 공백·셸 메타문자(`$`·`;`·`&`·
+/// 따옴표 등)가 있어도 bash가 word-split·해석하지 않고 문자 그대로 넘기게 한다. POSIX 규칙: 토큰을 `'...'`로 감싸고
+/// 내부의 `'`는 `'\''`(따옴표 닫기 → 이스케이프된 `'` → 다시 열기)로 끊는다. 빈 토큰은 `''`가 돼 안전하다.
+fn appendSingleQuoted(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), token: []const u8) !void {
+    try buf.append(allocator, '\'');
+    for (token) |c| {
+        if (c == '\'') {
+            try buf.appendSlice(allocator, "'\\''");
+        } else {
+            try buf.append(allocator, c);
+        }
+    }
+    try buf.append(allocator, '\'');
+}
 
 // `/bin/sh -c <cmd>`를 돌려 기다린다(POSIX). std.c에 노출이 없어 직접 선언한다(setenv/unsetenv와 같은 결).
 extern "c" fn system(command: [*:0]const u8) c_int;
@@ -1391,11 +1409,23 @@ test "MacosLogin wraps the shell in login(1) -flp <user> bash exec -l" {
     for (lw.args) |a| {
         if (std.mem.eql(u8, a, "-flp")) saw_flp = true;
         if (std.mem.eql(u8, a, "/bin/bash")) saw_bash = true;
-        if (std.mem.eql(u8, a, "exec -l /bin/zsh -i")) saw_exec = true;
+        if (std.mem.eql(u8, a, "exec -l '/bin/zsh' '-i'")) saw_exec = true; // command·args는 작은따옴표로 감싼다
     }
     try std.testing.expect(saw_flp);
     try std.testing.expect(saw_bash);
     try std.testing.expect(saw_exec); // 최종 셸을 login shell로 교체하는 exec 명령
+}
+
+test "MacosLogin.build: 셸 경로·인자를 작은따옴표로 감싸 공백·따옴표 word-split 방지" {
+    // 공백 있는 셸 경로 + 인자에 작은따옴표 포함 → exec_cmd(owned[0])가 각 토큰을 '…'로 감싸고 내부 '는 '\''로 끊는다.
+    var lw = try MacosLogin.build(std.testing.allocator, .{
+        .command = "/Applications/My Shell/bin/sh",
+        .args = &.{ "-i", "a'b" },
+        .login = true,
+        .size = .{ .cols = 80, .rows = 24 },
+    });
+    defer lw.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("exec -l '/Applications/My Shell/bin/sh' '-i' 'a'\\''b'", lw.owned[0]);
 }
 
 test "EnvStorage empty env uses the supplied TERM (configurable)" {

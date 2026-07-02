@@ -3571,16 +3571,34 @@ pub const AppSession = struct {
     /// 즉시 죽어 앱이 시작하자마자 종료되던 루트커즈 수정 — 단일 출처: macos-app-host-boundary.md "세션 자동 종료".
     fn latchSessionEndOrHold(self: *AppSession, ended: ?app.RuntimePumpTermination, uptime_ms: i64) void {
         if (self.termination_finished or self.startup_held or !self.allTabsTerminated()) return;
-        if (holdOnStartupExit(uptime_ms, self.total_output_events, exitAbnormal(ended), self.chrome_minimal)) {
+        // config workspace.hold-on-startup-failure(기본 true)로 끌 수 있다 — false면 유지하지 않고 기존처럼 종료.
+        if (self.loaded_config.config.workspace.hold_on_startup_failure and
+            holdOnStartupExit(uptime_ms, self.total_output_events, exitAbnormal(ended), self.chrome_minimal))
+        {
             self.startup_held = true;
-            var notice_buf: [320]u8 = undefined;
             var detail_buf: [48]u8 = undefined;
-            const msg = std.fmt.bufPrint(&notice_buf, "셸이 시작 직후 비정상 종료됐습니다 ({s}). 설정(⌘,)에서 shell.command·shell.args를 확인하고 새 셸(⌘T)을 여세요.", .{startupExitDetail(&detail_buf, ended)}) catch "셸이 시작 직후 종료됐습니다 — 설정(⌘,)을 확인하고 새 셸(⌘T)을 여세요.";
+            const detail = startupExitDetail(&detail_buf, ended);
+            // 초기 알림(토스트) + 죽은 surface 터미널 화면에 지속 안내(notice를 닫아도 남는다 — #5 지속성).
+            var notice_buf: [320]u8 = undefined;
+            const msg = std.fmt.bufPrint(&notice_buf, "셸이 시작 직후 비정상 종료됐습니다 ({s}). ⏎ 다시 시도 · ⌘, 설정에서 shell.command·shell.args 확인.", .{detail}) catch "셸이 시작 직후 종료됐습니다 — ⏎ 다시 시도 · ⌘, 설정.";
             self.showNotice(msg);
+            self.writeHeldGuidance(detail);
         } else {
             self.ended_seen = true;
             self.termination_finished = true;
         }
+    }
+
+    /// 비정상 시작 사망으로 유지한 창의 **죽은 surface 터미널 화면**에 dim 안내를 쓴다(#5 지속성) — notice 토스트는
+    /// 아무 키에나 닫히지만 이건 화면 콘텐츠라 남아, 복구 방법이 계속 보인다. 리더가 이미 멈춘(finishAfterTermination)
+    /// 죽은 surface라 락 아래 안전하게 쓴다. `~` 확장·에스케이프는 core가 파싱(평범한 텍스트 + SGR dim).
+    fn writeHeldGuidance(self: *AppSession, detail: []const u8) void {
+        const surface = &self.activePane().activeTerm().surface;
+        var buf: [320]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "\r\n\x1b[2m  ▸ 셸이 시작 직후 종료됐습니다 ({s}).\r\n    ⏎ 다시 시도    ⌘, 설정에서 shell.command·shell.args 확인\x1b[0m\r\n", .{detail}) catch return;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        surface.core.write(line) catch {};
     }
 
     /// 빨간 닫기 버튼/창 단위 닫기 ABI(maru_macos_app_session_request_window_close)가 부른다. 실행 중 명령이 있으면
@@ -6305,6 +6323,21 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // held 창(비정상 시작 사망 유지): **⏎(Enter)** 는 그 자리에서 셸을 재시작한다(in-place respawn). chrome 모달
+        // 라우팅보다 **먼저** 가로채 notice가 열려 있어도 즉시 동작하되, 다른 모달(설정·팔레트·확인 등)이 열려 있으면
+        // 양보한다(그 모달의 Enter를 안 뺏는다). notice가 떠 있으면 닫고 재시작한다. macos-app-host-boundary.md "세션 자동 종료".
+        if (self.startup_held and event.key == .enter and
+            !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
+            !self.anyModalOverlayOpen())
+        {
+            self.chrome_host.notice.dismiss();
+            self.newTermInActivePane() catch {}; // createTerm이 startup_held re-arm + 좀비 reap 예약
+            self.metal_dirty = true;
+            self.total_app_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
         // 인라인 rename이 활성이면 키를 rename 편집기로 라우팅한다 — chrome 모달과 같은 최상위 규율(배타적: startRename이
         // find/palette를 닫음). Enter=확정·Esc=취소·Backspace·평문 글자를 handleRenameKey가 처리하고 모든 키를 소비한다
         // (텍스트 필드라 터미널/단축키로 안 흘린다). IME 조합은 imeSetPreedit/imeEnd가 rename_input에 직접 넣는다.
@@ -6650,6 +6683,13 @@ pub const AppSession = struct {
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
         return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
+    }
+
+    /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
+    /// 열려 있는지. held 창의 ⏎ 재시도 개입이 이런 모달의 Enter를 뺏지 않도록 게이트로 쓴다(notice는 어차피 닫고 재시작).
+    fn anyModalOverlayOpen(self: *const AppSession) bool {
+        const h = &self.chrome_host;
+        return h.confirm.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
     }
 
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
@@ -17651,6 +17691,16 @@ test "latchSessionEndOrHold: 비정상 시작 사망은 창 유지(held)+re-arm+
     session.total_output_events = 5; // usable였음
     session.latchSessionEndOrHold(app.RuntimePumpTermination{ .exited = .{ .exited = 0 } }, 999_999);
     try std.testing.expect(session.ended_seen);
+
+    // (D) #6 config knob: workspace.hold-on-startup-failure=false면 비정상 시작 사망도 유지하지 않고 종료한다.
+    session.ended_seen = false;
+    session.termination_finished = false;
+    session.startup_held = false;
+    session.loaded_config.config.workspace.hold_on_startup_failure = false;
+    session.total_output_events = 0; // 원래 유지 조건(비정상+무출력)인데도
+    session.latchSessionEndOrHold(app.RuntimePumpTermination{ .exited = .{ .exited = 127 } }, 50);
+    try std.testing.expect(session.ended_seen); // knob off → 종료
+    try std.testing.expect(!session.startup_held);
 }
 
 test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 ignored, ended_seen 안 섬" {
@@ -17678,6 +17728,13 @@ test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 
     try std.testing.expect(session.total_ignored_key_events > before);
     try std.testing.expect(!session.ended_seen);
     try std.testing.expect(session.startup_held); // 여전히 held(입력이 상태를 안 바꿈)
+
+    // #4 held 창에서 ⏎(Enter, 모디파이어·모달 없음)는 그 자리에서 셸을 재시작(in-place respawn) — 새 Term 추가 + re-arm.
+    const terms_before = session.activePane().terms.items.len;
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.activePane().terms.items.len > terms_before); // 새 셸 추가
+    try std.testing.expect(!session.startup_held); // createTerm이 re-arm
+    try std.testing.expect(session.pending_zombie_reap); // 죽은 Term reap 예약
 }
 
 test "setWorkspaceRoot(세팅 GUI 시작 디렉터리): 절대/~ 저장·빈 값 클리어·상대 무시+안내(loader 형식 공유)" {

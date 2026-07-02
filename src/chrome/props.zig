@@ -27,10 +27,8 @@ pub const ShapeTokens = struct {
     // C4b 모달: 배경 박스가 텍스트보다 큰 안쪽 여백(px). view가 폭 상한을 이 값의 2배만큼 줄여(텍스트 폭 양보)
     // platform lowering의 ±pad 확장 후에도 박스가 터미널 영역 안에 들도록 한다(box geometry 단일 출처=view).
     modal_padding_px: u16 = 0,
-    // U1: 사이드바 활성 워크스페이스 좌측 maru-accent 막대 폭(px). view가 활성 슬롯 좌측에 이 폭의 막대 op을 emit하고,
-    // lowering이 (얇아서 셀 floor 불가하므로) 항상 GpuQuad로 그린다. tui=0(막대 없음).
-    accent_bar_width_px: u16 = 0,
-    // U2: 사이드바 카드 사이 여백(px). bandFill/막대가 슬롯 안쪽 사방으로 이만큼 줄여 카드처럼 그린다. tui=0(슬롯 꽉).
+    // U2: 사이드바 카드 사이 여백(px). bandFill이 슬롯 안쪽 사방으로 이만큼 줄여 카드처럼 그린다. tui=0(슬롯 꽉).
+    // (좌측 accent 막대 폭은 카드별 색이라 chrome이 아니라 platform이 tokens.space.accent_bar_width_px로 직접 그린다 — props에 없음.)
     card_gap_px: u16 = 0,
 };
 

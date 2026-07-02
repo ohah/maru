@@ -449,6 +449,12 @@ fn packOpaqueRgb(rgb: maru.color.Rgb) u32 {
     return packRgbAlpha(rgb, 0xFF);
 }
 
+/// 0xRRGGBB(카드별 프리셋 색 등) + alpha를 GpuQuad 색 워드(0xAARRGGBB, straight-alpha — 셰이더가 rgb*=a)로 패킹.
+/// packRgbAlpha(Rgb)의 u32-입력 버전 — 사이드바 배경 tint·좌측 막대가 임의 프리셋 RGB를 담을 때 공유(0x00FF_FFFF 마스크 단일 출처).
+fn packStraightRgbU32(rgb: u32, alpha: u8) u32 {
+    return (@as(u32, alpha) << 24) | (rgb & 0x00FF_FFFF);
+}
+
 /// 활성 탭 하이라이트 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
 /// (sidebar_cols)를 구하고 — 밴드가 origin_x를 넘어 터미널 영역을 침범하지 않게 floor한다(우측에 한 칸
 /// 미만 여백이 살짝 inset처럼 남는다) — 그 폭만큼 한 칸(col 0, width=sidebar_cols)으로 사이드바를 채우는
@@ -893,14 +899,30 @@ const ClipboardAction = enum(u8) {
     paste = 2,
 };
 
-/// 워크스페이스 배경 tint 프리셋(0=없음, 그 외 0xRRGGBB) — 컨텍스트 메뉴 "배경: …" 항목 순서·tab_bg_labels와 1:1.
+/// 워크스페이스 카드 색 프리셋(0=없음, 그 외 0xRRGGBB) — 컨텍스트 메뉴 색 항목 순서·이름과 1:1.
 /// 베이스/결정: 색 팔레트는 단일 표준이 없어 maru가 택한 기본 셋이다 — 앰버(#DDA15E)는 maru accent(마루=나무 마루),
 /// 나머지는 서로·앰버와 명확히 구분되는 중간 채도 색조(파랑/초록/빨강/보라)로 골라 여러 워크스페이스를 한눈에 가르게 했다.
-/// 0(없음)에 순수 검정 프리셋이 없으므로 "0=tint 없음"과 충돌하지 않는다. 적용 알파(≈40%, 0x66)는 카드 위 글자 가독성 기준.
-const tab_bg_presets = [_]u32{ 0, 0xDDA15E, 0x4A7BC4, 0x5BA85B, 0xC4544A, 0x9B6BC4 };
-const tab_bg_labels = [_][]const u8{ "배경: 없음", "배경: 앰버", "배경: 파랑", "배경: 초록", "배경: 빨강", "배경: 보라" };
-const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, ctx_menu_bg_first..=배경(buildContextMenuItems 순서와 단일 출처).
+/// 0(없음)에 순수 검정 프리셋이 없으므로 "0=색 없음"과 충돌하지 않는다. 배경 tint·좌측 막대 **둘 다** 이 팔레트를
+/// 프리셋으로 쓴다(직교한 별도 설정, 색만 공유). 적용 알파는 용도별로 다르다 — 배경=반투명 tint(tab_bg_tint_alpha), 막대=불투명.
+const tab_color_presets = [_]u32{ 0, 0xDDA15E, 0x4A7BC4, 0x5BA85B, 0xC4544A, 0x9B6BC4 };
+/// 프리셋 색 이름(배경 "배경: …"·막대 "바: …" 라벨이 공유). tab_color_presets와 index-align — 개수가 어긋나면 comptime 실패.
+const tab_color_names = [_][]const u8{ "없음", "앰버", "파랑", "초록", "빨강", "보라" };
+comptime {
+    if (tab_color_names.len != tab_color_presets.len) @compileError("tab_color_names must index-align with tab_color_presets");
+}
+/// 프리셋 라벨을 prefix + 공유 이름으로 comptime 생성 — 라벨 배열이 프리셋 순서/개수와 어긋나 drift하지 않게(단일 출처).
+fn tabColorLabels(comptime prefix: []const u8) [tab_color_presets.len][]const u8 {
+    var out: [tab_color_presets.len][]const u8 = undefined;
+    for (tab_color_names, 0..) |name, i| out[i] = prefix ++ name;
+    return out;
+}
+const tab_bg_labels = tabColorLabels("배경: "); // 배경 tint 프리셋 라벨
+// 좌측 accent 막대색 라벨 — 배경 tint와 직교한 별도 설정(사용자 요청: "왼쪽 바 색·배경색 두 개 따로"). "바: 없음"(0)=기본
+// (활성 카드=테마 앰버·비활성=막대 없음), 그 외=활성·비활성 카드 모두 그 색 막대. 값은 acceptContextMenu가 tab_color_presets에서 꺼낸다.
+const tab_accent_labels = tabColorLabels("바: ");
+const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, bg_first..=배경, accent_first..=바(buildContextMenuItems 순서와 단일 출처).
 const ctx_menu_bg_first: usize = 2;
+const ctx_menu_accent_first: usize = ctx_menu_bg_first + tab_bg_labels.len; // 배경 프리셋 다음(=8)부터 accent 막대 프리셋
 
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
@@ -1341,7 +1363,7 @@ pub const AppSession = struct {
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경 프리셋)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
-    context_menu_items_buf: [ctx_menu_bg_first + tab_bg_labels.len][]const u8 = undefined,
+    context_menu_items_buf: [ctx_menu_accent_first + tab_accent_labels.len][]const u8 = undefined,
     context_menu_items_len: usize = 0,
     // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고,
     // 이후 drag(kind 2)는 타겟 슬롯으로 live 재정렬(moveTab), up(kind 3)이 끝낸다. index는 드래그 중인
@@ -5450,6 +5472,10 @@ pub const AppSession = struct {
                 self.context_menu_items_buf[n] = lbl;
                 n += 1;
             }
+            for (tab_accent_labels) |lbl| { // 좌측 accent 막대색(배경과 직교) — ctx_menu_accent_first부터
+                self.context_menu_items_buf[n] = lbl;
+                n += 1;
+            }
         };
         self.context_menu_items_len = n;
         return self.context_menu_items_buf[0..n];
@@ -5504,7 +5530,7 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·2..=배경 tint 프리셋.
+    /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·bg_first..=배경 tint 프리셋·accent_first..=좌측 막대색 프리셋.
     /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
     fn acceptContextMenu(self: *AppSession) void {
         // 터미널 본문 우클릭 메뉴(input.right-click=menu): 0=복사·1=붙여넣기 → pending_clipboard_action을 세워 Swift가
@@ -5549,8 +5575,10 @@ pub const AppSession = struct {
             const tab = t.workspace;
             if (sel == ctx_menu_pin) {
                 self.togglePin(tab); // 위치 고정 토글 + 불변식 유지(고정은 앞쪽 영역으로 정렬)
-            } else if (sel >= ctx_menu_bg_first and sel < ctx_menu_bg_first + tab_bg_presets.len) {
-                tab.background_color = tab_bg_presets[sel - ctx_menu_bg_first]; // 배경 tint 프리셋
+            } else if (sel >= ctx_menu_bg_first and sel < ctx_menu_bg_first + tab_color_presets.len) {
+                tab.background_color = tab_color_presets[sel - ctx_menu_bg_first]; // 배경 tint 프리셋
+            } else if (sel >= ctx_menu_accent_first and sel < ctx_menu_accent_first + tab_color_presets.len) {
+                tab.accent_color = tab_color_presets[sel - ctx_menu_accent_first]; // 좌측 accent 막대색 프리셋(bound·index 모두 tab_color_presets — 공유 팔레트)
             }
         }
     }
@@ -9203,6 +9231,7 @@ pub const AppSession = struct {
             .custom_name = try arena.dupe(u8, tab.custom_name orelse ""),
             .pinned = tab.pinned,
             .background_color = tab.background_color,
+            .accent_color = tab.accent_color,
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -9536,6 +9565,7 @@ pub const AppSession = struct {
         tab.custom_name = try self.dupeCustomName(m.custom_name);
         tab.pinned = m.pinned; // 위치 고정 복원
         tab.background_color = m.background_color; // 카드 배경 tint 복원
+        tab.accent_color = m.accent_color; // 카드 좌측 accent 막대색 복원
         return tab;
     }
 
@@ -11005,32 +11035,61 @@ pub const AppSession = struct {
                 }) catch {};
             }
         }
-        // per-tab 배경 tint(우클릭 메뉴 "배경: …") — background_color 설정된 워크스페이스 슬롯(밴드 없는 idle 슬롯)에
-        // 반투명(≈40%) 색 quad를 텍스트 셀 아래(layer 0)에 얹는다. 활성/호버 슬롯은 위 lowerSidebar가 밴드 색에
-        // tint를 블렌딩해 보이게 한다(tui 불투명 밴드가 이 quad를 덮으므로). chrome draw op은 role 기반이라 임의 RGB를
-        // 못 실어, platform이 명시 색 GpuQuad로 직접 lower(사이드바 명시-색 경로). y는 f32 도메인으로 곱해 i32 overflow 회피.
+        // per-tab 카드별 색(우클릭 메뉴 "배경: …"·"바: …") — chrome draw op은 role 기반이라 임의 RGB를 못 실어, 배경 tint와
+        // 좌측 accent 막대 **둘 다** platform이 명시-색 GpuQuad로 직접 lower한다(같은 카드를 한 번에 처리하는 단일 패스).
+        // 한 카드에서 tint(전폭 반투명)를 먼저, 막대(좌단 불투명)를 뒤에 append해 막대가 tint 위에 또렷이 얹힌다(텍스트 셀은
+        // 그 위 패스). 배경은 밴드 없는 idle 슬롯에서 특히 필요하고(활성/호버는 lowerSidebar가 밴드 색에 blend), 막대는 활성
+        // 카드=지정색 or 기본 테마 앰버·비활성 카드=지정 시에만. y는 f32 도메인으로 곱해 i32 overflow 회피.
         const slot_h = self.sidebar_slot_height_px;
+        const card_tk = self.buildChromeTokens();
+        const bar_w = card_tk.space.accent_bar_width_px;
+        const gap: f32 = @floatFromInt(card_tk.space.card_gap_px);
+        const default_accent = packOpaqueRgb(card_tk.palette.get(.accent_bar)); // 기본(지정 없음) 활성 카드 앰버
         if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
-            if (tab.background_color == 0) continue;
-            // GpuQuad는 straight-alpha(셰이더가 rgb*=a) — premultipliedRgba를 쓰면 이중 premultiply로 틴트가
-            // 흐려져 활성/호버 슬롯의 blendRgb(직접 알파) 경로보다 약했다(code-review 발견). straight로 맞춰 일치시킨다.
-            const c = (@as(u32, tab_bg_tint_alpha) << 24) | (tab.background_color & 0x00FF_FFFF);
-            const abs_y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px));
-            const sr = self.sidebarScrollClipQuad(abs_y, @floatFromInt(slot_h)) orelse continue; // 스크롤+헤더 클립(직각이라 corner 무관)
-            self.gpu_quads.append(self.allocator, .{
-                .x = 0,
-                .y = sr.y,
-                .w = @floatFromInt(self.sidebar_width_px),
-                .h = sr.h,
-                .corner_radii = .{ 0, 0, 0, 0 },
-                .border_widths = .{ 0, 0, 0, 0 },
-                .fill_color0 = c,
-                .fill_color1 = c,
-                .border_color = 0,
-                .gradient_kind = 0,
-                .layer = 0,
-            }) catch {};
+            const slot_abs_y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px));
+            // ① 배경 tint(전폭 반투명). straight-alpha(셰이더 rgb*=a) — premultipliedRgba면 이중 premultiply로 흐려져
+            // 활성/호버 슬롯의 blendRgb(직접 알파) 경로보다 약해진다(code-review 발견). straight로 맞춰 일치시킨다.
+            if (tab.background_color != 0) {
+                if (self.sidebarScrollClipQuad(slot_abs_y, @floatFromInt(slot_h))) |sr| { // 스크롤+헤더 클립(직각이라 corner 무관)
+                    const c = packStraightRgbU32(tab.background_color, tab_bg_tint_alpha);
+                    self.gpu_quads.append(self.allocator, .{
+                        .x = 0,
+                        .y = sr.y,
+                        .w = @floatFromInt(self.sidebar_width_px),
+                        .h = sr.h,
+                        .corner_radii = .{ 0, 0, 0, 0 },
+                        .border_widths = .{ 0, 0, 0, 0 },
+                        .fill_color0 = c,
+                        .fill_color1 = c,
+                        .border_color = 0,
+                        .gradient_kind = 0,
+                        .layer = 0,
+                    }) catch {};
+                }
+            }
+            // ② 좌측 accent 막대(불투명). 색: 지정색(0xRRGGBB) 우선 → 없으면 활성만 기본 앰버, 비활성은 막대 없음.
+            // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일). 막대는 그 좌단(x=gap)·카드 높이(slot_h−2·gap).
+            if (bar_w > 0) {
+                const word: u32 = if (tab.accent_color != 0)
+                    packStraightRgbU32(tab.accent_color, 0xFF)
+                else if (orig == self.app_window.active_tab) default_accent else continue;
+                if (self.sidebarScrollClipQuad(slot_abs_y + gap, @as(f32, @floatFromInt(slot_h)) - 2.0 * gap)) |sr| {
+                    self.gpu_quads.append(self.allocator, .{
+                        .x = gap,
+                        .y = sr.y,
+                        .w = @floatFromInt(bar_w),
+                        .h = sr.h,
+                        .corner_radii = .{ 0, 0, 0, 0 },
+                        .border_widths = .{ 0, 0, 0, 0 },
+                        .fill_color0 = word,
+                        .fill_color1 = word,
+                        .border_color = 0,
+                        .gradient_kind = 0,
+                        .layer = 0,
+                    }) catch {};
+                }
+            }
         };
         // 접힘 펼치기 토글(◧) 호버 배경 — 접힘 시 위 헤더-아이콘 호버 경로(sidebar_width_px>0 가드)가 안 타므로 여기서
         // 별도로 그린다. 토글 글리프는 .m이 titlebar_strip 안 세로 중앙 + 1.7×로 그리므로(metalFrame.titlebar_strip_px),
@@ -11587,30 +11646,12 @@ pub const AppSession = struct {
     fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
         const slot_h = self.sidebar_slot_height_px;
         if (slot_h == 0) return;
-        // gpu_quad(accent bar·rich 밴드)는 슬롯 상대 y를 절대 좌표로 박으므로 상단 헤더만큼 내려야 한다 — .m이
-        // header_h 시프트하는 건 sidebar_cells(텍스트·tui 밴드)뿐이라 gpu_quad는 여기서 header_h를 더한다(위치 정합).
+        // gpu_quad(rich 밴드)는 슬롯 상대 y를 절대 좌표로 박으므로 상단 헤더만큼 내려야 한다 — .m이 header_h 시프트하는
+        // 건 sidebar_cells(텍스트·tui 밴드)뿐이라 gpu_quad는 여기서 header_h를 더한다(위치 정합). 좌측 accent 막대는
+        // chrome op이 아니라 카드별 색으로 rebuildSidebar의 per-tab accent 루프가 직접 그린다(배경 tint와 같은 경로).
         const header_f: f32 = @floatFromInt(self.sidebar_header_height_px);
         for (ops) |op| switch (op) {
             .quad => |q| {
-                if (q.fill_role == .accent_bar) {
-                    // U1: 얇은 좌측 maru-accent 막대 — 셀 폭 floor를 피해 항상 GpuQuad(직각, layer 0=under). 색은 palette.accent_bar(앰버).
-                    const sr = self.sidebarScrollClipQuad(@as(f32, @floatFromInt(q.rect.y)) + header_f, @floatFromInt(q.rect.h)) orelse continue;
-                    const ac = packOpaqueRgb(self.buildChromeTokens().palette.get(.accent_bar));
-                    self.gpu_quads.append(self.allocator, .{
-                        .x = @floatFromInt(q.rect.x),
-                        .y = sr.y,
-                        .w = @floatFromInt(q.rect.w),
-                        .h = sr.h,
-                        .corner_radii = .{ 0, 0, 0, 0 },
-                        .border_widths = .{ 0, 0, 0, 0 },
-                        .fill_color0 = ac,
-                        .fill_color1 = ac,
-                        .border_color = 0,
-                        .gradient_kind = 0,
-                        .layer = 0,
-                    }) catch {};
-                    continue;
-                }
                 var color = switch (q.fill_role) {
                     .tab_active_bg => self.sidebarActiveBg(),
                     .drop_zone => packOpaqueRgb(self.buildChromeTokens().palette.get(.drop_zone)), // pane 드롭 타겟(rich=밝게)
@@ -12411,7 +12452,7 @@ pub const AppSession = struct {
         return .{
             .metrics = self.buildCellMetrics(),
             // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
-            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .accent_bar_width_px = tk.space.accent_bar_width_px, .card_gap_px = tk.space.card_gap_px },
+            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px, .card_gap_px = tk.space.card_gap_px },
             // 활성 pane rect(셀 그리드 영역) — find 오버레이가 활성 pane 우상단에 붙도록(findLayout 단일 출처).
             // palette는 안 쓴다(창 중앙 유지). active_pane_rect는 recomputeActivePaneRect가 포커스·resize마다 갱신.
             .active_pane = .{ .x = self.active_pane_rect.x, .y = self.active_pane_rect.y, .w = self.active_pane_rect.w, .h = self.active_pane_rect.h },
@@ -14944,12 +14985,14 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     defer session.deinit();
     const tab = session.activeTab();
 
-    // workspace 대상: Rename + Pin + 배경 프리셋(없음·앰버·파랑·초록·빨강·보라).
+    // workspace 대상: Rename + Pin + 배경 프리셋(없음·앰버·파랑·초록·빨강·보라) + 바 프리셋(같은 6색).
     session.context_menu_target = .{ .workspace = tab };
     const items = session.buildContextMenuItems();
-    try std.testing.expectEqual(@as(usize, 2 + tab_bg_presets.len), items.len);
+    try std.testing.expectEqual(@as(usize, 2 + tab_color_presets.len + tab_accent_labels.len), items.len);
     try std.testing.expectEqualStrings("Rename", items[0]);
     try std.testing.expectEqualStrings("위치 고정", items[1]); // 미고정 → "위치 고정"
+    try std.testing.expectEqualStrings("배경: 없음", items[ctx_menu_bg_first]);
+    try std.testing.expectEqualStrings("바: 없음", items[ctx_menu_accent_first]);
 
     // accept selected=1 → pin 토글(true). acceptContextMenu가 target을 null화하므로 매번 재설정.
     session.context_menu_target = .{ .workspace = tab };
@@ -14972,6 +15015,19 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.chrome_host.context_menu.selected = ctx_menu_bg_first;
     session.acceptContextMenu();
     try std.testing.expectEqual(@as(u32, 0), tab.background_color);
+
+    // 바: 파랑(accent_first + 2, 프리셋 0=없음·1=앰버·2=파랑) → accent_color = 0x4A7BC4(배경과 직교, 별도 필드).
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_accent_first + 2;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0x4A7BC4), tab.accent_color);
+    try std.testing.expectEqual(@as(u32, 0), tab.background_color); // 배경은 안 건드림(직교 확인)
+
+    // 바: 없음(accent_first) → 0으로 해제.
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_accent_first;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0), tab.accent_color);
 
     // pane/term 대상은 Rename만(색·고정 없음).
     session.context_menu_target = .{ .pane = session.activePane() };
@@ -17056,7 +17112,7 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     const text =
         "maru.workspace.v1\n" ++
         "window tabs=1 active-tab=0\n" ++
-        "tab panes=2 active-pane=1 custom-name=\"my work\" pinned=0 background-color=0\n" ++
+        "tab panes=2 active-pane=1 custom-name=\"my work\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node split vertical ratio=300\n" ++
         "tree-node leaf pane=0\n" ++
         "tree-node leaf pane=1\n" ++

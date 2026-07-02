@@ -1596,6 +1596,7 @@ pub const AppSession = struct {
     // 중이거나 ESU/active가 바뀐 tick만 emit하게 직전 값을 기억한다. release에선 logSyncGateDiag가 게이트에서 즉시
     // return해 이 필드는 안 쓰인다(초기값 유지).
     sync_diag_tick: u64 = 0,
+    sync_diag_last_bsu: u64 = 0,
     sync_diag_last_esu: u64 = 0,
     sync_diag_last_active: bool = false,
 
@@ -10198,17 +10199,20 @@ pub const AppSession = struct {
     /// 첫 게이트에서 즉시 return). 노이즈를 줄이려 **sync 에피소드 중이거나 ESU가 바뀐 tick 또는 사이드바 전용 투영(cproj)
     /// tick만** emit한다(idle 정적 화면은 안 찍음). 필드: active=활성 surface sync_output, hold=sync_hold_ticks/timeout,
     /// gproj=grid 전체 투영(will_project), cproj=사이드바 전용 투영(project_chrome), force=force_reproject(atlas repack
-    /// 폴백), dirty/chrome=metal/chrome_dirty, voff=view_offset(스크롤), esu=리더 ESU 누적(완성 프레임 수), out=이 tick
-    /// output_events. shouldProjectFrame 게이트의 각 안전판(스크롤·ESU edge·timeout)이 실환경에서 언제 발동하는지 관측한다.
-    fn logSyncGateDiag(self: *AppSession, out_events: usize, sync_active: bool, gproj: bool, cproj: bool, esu: u64, view_offset: usize) void {
+    /// 폴백), dirty/chrome=metal/chrome_dirty, voff=view_offset(스크롤), bsu/esu=리더(parser.feed)가 처리한 BSU(hold
+    /// 시작)/ESU(완성 프레임) 누적, out=이 tick output_events. shouldProjectFrame 게이트의 각 안전판(스크롤·ESU edge·
+    /// timeout)이 실환경에서 언제 발동하는지 관측한다. **bsu/esu vs active**: 리더 BSU/ESU 누적이 메인이 본 active 횟수보다
+    /// 훨씬 많으면 → per-tick 샘플링이 transition을 놓치는 것(maru ssh SSH fragmentation 어긋남 추적, core.sync_bsu_count).
+    fn logSyncGateDiag(self: *AppSession, out_events: usize, sync_active: bool, gproj: bool, cproj: bool, bsu: u64, esu: u64, view_offset: usize) void {
         if (!diag_gate.maruDebugEnabled()) return;
         self.sync_diag_tick +%= 1;
-        const changed = esu != self.sync_diag_last_esu;
+        const changed = bsu != self.sync_diag_last_bsu or esu != self.sync_diag_last_esu;
         const relevant = sync_active or self.sync_diag_last_active or changed or cproj;
+        self.sync_diag_last_bsu = bsu;
         self.sync_diag_last_esu = esu;
         self.sync_diag_last_active = sync_active;
         if (!relevant) return;
-        sync_diag.info("tick={d} active={d} hold={d}/{d} gproj={d} cproj={d} force={d} dirty={d} chrome={d} voff={d} esu={d} out={d}", .{
+        sync_diag.info("tick={d} active={d} hold={d}/{d} gproj={d} cproj={d} force={d} dirty={d} chrome={d} voff={d} bsu={d} esu={d} out={d}", .{
             self.sync_diag_tick,
             @intFromBool(sync_active),
             self.sync_hold_ticks,
@@ -10219,6 +10223,7 @@ pub const AppSession = struct {
             @intFromBool(self.metal_dirty),
             @intFromBool(self.chrome_dirty),
             view_offset,
+            bsu,
             esu,
             out_events,
         });
@@ -10318,7 +10323,7 @@ pub const AppSession = struct {
             const s = self.activeSurface();
             s.lockCore(self.io);
             defer s.unlockCore(self.io);
-            break :blk .{ .sync = s.core.sync_output, .view_offset = s.core.view_offset, .esu = s.core.sync_esu_count };
+            break :blk .{ .sync = s.core.sync_output, .view_offset = s.core.view_offset, .bsu = s.core.sync_bsu_count, .esu = s.core.sync_esu_count };
         };
         const sync_active = sync_view.sync;
         const active_view_offset = sync_view.view_offset;
@@ -10340,7 +10345,7 @@ pub const AppSession = struct {
         // [A: chrome 독립 present] grid는 hold됐지만 chrome(사이드바 스피너)만 dirty면 사이드바만 부분 투영한다(아래 else if).
         const project_chrome = self.chrome_dirty and !will_project;
         // 투영 결정 직후 sync 게이트 상태를 관측 로그로 남긴다(MARU_DEBUG 전용, 아니면 즉시 return).
-        self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, sync_view.esu, active_view_offset);
+        self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, sync_view.bsu, sync_view.esu, active_view_offset);
         if (will_project) {
             self.chrome_dirty = false; // 전체 투영이 사이드바까지 그리므로 chrome dirty 소진
             // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의

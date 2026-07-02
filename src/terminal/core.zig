@@ -205,6 +205,11 @@ pub const TerminalCore = struct {
     // 놓쳐 완성 프레임을 timeout까지 막던 MISS 수정. always-on 증분(단순 +%=). 베이스: Ghostty는 리더가 ESU에서
     // 렌더를 트리거해 회피하지만, maru는 tick 폴링이라 ESU 누적 카운트를 edge로 소비해 같은 효과를 낸다.
     sync_esu_count: u64 = 0,
+    // synchronized output(2026): 리더가 처리한 BSU(set=hold 시작) 누적 횟수. ESU 짝(sync_esu_count)과 함께 .sync
+    // 관측 로거가 노출해 "리더가 처리한 transition vs 메인 per-tick 샘플링(sync_output)"의 갭을 본다 — maru ssh에서
+    // SSH 바이트 fragmentation으로 sync 투영이 어긋나는(원격 bubbletea 깨짐, docs/io-render-threading.md §11.6·§sync)
+    // 미해결 이슈 추적용. always-on 증분(단순 +%=, 분기 비용 0).
+    sync_bsu_count: u64 = 0,
     /// kitty keyboard protocol flag 스택(CSI > flags u=push / < n u=pop / = flags;mode u=set로 앱이 제어).
     /// 기본 비어 있음(current=disabled) → encodeKey가 legacy 인코딩. 베이스: kitty keyboard protocol spec.
     kitty_flags: KittyFlagStack = .{},
@@ -6009,10 +6014,16 @@ test "synchronized output (DECSET 2026): set/reset + DECRQM 지원 감지" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
     try std.testing.expect(!core.sync_output); // 기본 off
+    try std.testing.expectEqual(@as(u64, 0), core.sync_bsu_count); // 리더 transition 카운터 기본 0
+    try std.testing.expectEqual(@as(u64, 0), core.sync_esu_count);
     try core.write("\x1b[?2026h"); // BSU
     try std.testing.expect(core.sync_output);
+    try std.testing.expectEqual(@as(u64, 1), core.sync_bsu_count); // BSU(set)에서 bsu만 증가
+    try std.testing.expectEqual(@as(u64, 0), core.sync_esu_count);
     try core.write("\x1b[?2026l"); // ESU
     try std.testing.expect(!core.sync_output);
+    try std.testing.expectEqual(@as(u64, 1), core.sync_bsu_count); // ESU(reset)에서 esu만 증가(.sync 로거가 짝으로 노출)
+    try std.testing.expectEqual(@as(u64, 1), core.sync_esu_count);
     // DECRQM: 미설정=reset(2, 인식 — 앱이 지원 감지), 켜면 set(1).
     try core.write("\x1b[?2026$p");
     try std.testing.expectEqualStrings("\x1b[?2026;2$y", core.pendingResponse());

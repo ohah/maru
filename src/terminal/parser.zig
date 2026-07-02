@@ -363,7 +363,8 @@ pub fn setPrivateModes(self: *TerminalCore, set: bool) void {
             2026 => {
                 self.sync_output = set; // synchronized output(set=BSU hold 시작, reset=ESU flush)
                 // ESU(reset=프레임 완성)마다 카운트 — shouldProjectFrame의 esu_advanced가 tick 폴링이 놓친 완성 프레임을 flush.
-                if (!set) self.sync_esu_count +%= 1;
+                // BSU(set=hold 시작)도 카운트 — .sync 로거가 BSU/ESU 짝을 노출해 메인 per-tick 샘플링 누락(ssh sync 어긋남)을 추적.
+                if (set) self.sync_bsu_count +%= 1 else self.sync_esu_count +%= 1;
             },
             47, 1047, 1049 => if (set) screen.enterAltScreen(self) else screen.leaveAltScreen(self), // 커서가 화면 귀속이라 셋 다 동일(§10.8)
             1048 => if (set) screen.saveCursorState(self) else screen.restoreCursorState(self),

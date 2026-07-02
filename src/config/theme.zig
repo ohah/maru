@@ -964,13 +964,19 @@ pub const WorkspaceConfig = struct {
     /// 종료 시 각 페인에서 돌던 codex 세션을 재시작 때 자동으로 다시 연다(`codex resume <id>`). **기본 false(opt-in)**,
     /// restore_claude와 같은 정책. loader가 `workspace.restore-codex` 키로 파싱.
     restore_codex: bool = false,
+    /// 첫(유일) 셸이 spawn 직후 **비정상 종료**해 usable 세션에 도달하지 못하면 앱을 종료하지 않고 **창을 유지**할지
+    /// (원인·복구를 보여주고 ⏎로 재시작). **기본 true** — 잘못된 shell.command/shell.args로 앱이 시작하자마자 조용히
+    /// 꺼지던 것을 막는다(단일 출처: macos-app-host-boundary.md "세션 자동 종료"). false면 기존처럼 종료한다
+    /// (Terminal.app "shell 종료 시 창 닫기" 취향). loader가 `workspace.hold-on-startup-failure` 키로 파싱.
+    hold_on_startup_failure: bool = true,
 
-    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·restore 토글은 스키마-주도.
-    pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / restore-claude / restore-codex
+    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·restore·hold 토글은 스키마-주도.
+    pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / restore-claude / restore-codex / hold-on-startup-failure
         .tab_inherit_cwd = Meta{ .doc = "새 탭/Term이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
         .split_inherit_cwd = Meta{ .doc = "새 분할이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
         .restore_claude = Meta{ .doc = "종료 후 claude 세션 자동 resume 복원", .widget = .toggle, .section = .workspace },
         .restore_codex = Meta{ .doc = "종료 후 codex 세션 자동 resume 복원", .widget = .toggle, .section = .workspace },
+        .hold_on_startup_failure = Meta{ .doc = "셸이 시작 직후 비정상 종료 시 창 유지(닫지 않음)", .widget = .toggle, .section = .workspace },
     };
 };
 

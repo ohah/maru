@@ -271,3 +271,40 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 ### 10.4 결정 자세 (현재)
 
 **기본/권장값은 60Hz.** 30Hz는 저전력/낮은 wakeup 우선 옵션, 120Hz는 ProMotion/고주사율에서 체감 반응성을 우선할 때의 opt-in 상한이다. 144/240Hz는 현재 `NSTimer` 구조에서 vsync 정렬 없이 wakeup만 늘 가능성이 커 열지 않는다. ProMotion 수준 진짜 매끄러움과 모니터별 자동 적응을 원하면 **B(CVDisplayLink)를 doc-first 설계 후** 착수 — C(렌더 스레드)는 *대량 출력 중 메인 응답성*까지 필요해질 때.
+
+## 11. chrome(사이드바 스피너) 독립 present — sync(2026) 게이트에서 분리 (구현)
+
+### 11.1 동기
+
+`shouldProjectFrame`(`src/platform/macos/app_session.zig`)의 sync(2026) hold는 **터미널 grid 본문의 tearing만** 막아야 하는데, present가 창 전체를 한 프레임으로 묶으므로 **maru 자체 chrome(사이드바 에이전트 스피너 `agent_spin_frame`)까지 함께 멈춘다.** 그 결과 활성 pane이 DECSET 2026을 쓰는 동안(Claude/mux 등) 스피너 애니메이션이 hold에 걸린다. ESU edge(§sync, `sync_esu_count`)로 "완성 프레임 flush"는 이미 해결했지만, **프레임 미완성(BSU 진행 중)의 정당한 hold** 동안에는 스피너도 여전히 멈춘다 — 이 남은 절반을 chrome을 sync 게이트에서 분리해 해소한다.
+
+### 11.2 조사 사실 (코드 확인)
+
+- **사이드바 셀은 이미 grid와 물리적으로 별개 배열**이다: `MetalFrameBuffer.sidebar_cells`(`src/renderer/metal_frame.zig`)는 grid `cells`와 다른 슬라이스. 렌더러(`maru_metal_renderer.m`)도 `pre_sidebar_vertices` 이후를 **별도 `MARU_DRAW_CELLS` 구간**으로 그린다 — grid 본문/커서 페이드와 분리된 draw pass.
+- **retained grid cells + persistent atlas → 부분 present 인프라 불필요.** 사이드바만 교체해 `generation++`로 whole-frame을 재present해도, grid `cells`는 마지막 non-hold 투영의 **완성 스냅샷**이라 half-drawn tearing이 없다. atlas 텍스처는 dims가 바뀔 때만 재생성되고 글리프 slot은 프레임 간 유지된다. → **Swift(`MaruAppHost.swift` generation 게이트)·Metal 렌더러 변경 불필요.**
+- **커서 페이드의 스칼라++ 패턴은 확장 불가**: `setCursorFadeMilli`는 opacity 스칼라 하나만 바꾸지만, 스피너는 위상(`agent_spin_frame`)마다 글리프 codepoint 자체(▁~█)가 바뀌어 `sidebar_cells` 배열 교체가 필요하다.
+- **upload 분리는 새 채널이 불필요**(재조사로 정정): `buildMergedUploadsN`이 만드는 `uploads`는 "이번 프레임의 **신규 glyph delta**"(atlas miss만)이고 atlas 텍스처는 persistent다. 따라서 `replaceSidebar`가 기존 `raster_uploads`/`pixels` 채널을 **사이드바 자체 delta로만** 채우면 된다(사이드바 빌드에서 공짜로 나옴). 별도 `sidebar_uploads` 슬라이스·ABI 추가 불필요. 단 delta를 비워 두면 warm-up/eviction 후 새 파형 글리프가 깨지므로 반드시 채운다.
+- **최소 dirty 접근으로 충분**: `metal_dirty`(전체 dirty)를 유지하고 `chrome_dirty`를 **신규 추가**해 스피너 tick(`agent_spin_frame` 진행) 한 곳만 재배선한다 — 135개 `metal_dirty` 사이트 전면 재분류는 불필요. 스피너는 유일한 "연속 애니메이션 chrome × sync hold 무한 겹침"이고, 나머지 chrome(hover·모달·drop 등)은 discrete라 hold와 겹쳐도 ≤1초(sync timeout, 기존 트레이드오프)로 반영된다.
+- **atlas는 공유(per-size)**: 사이드바를 grid와 독립 place하면 `atlas.grow()`뿐 아니라 **clean-repack invalidate**(dims 불변이나 전 slot 이동)도 retained grid UV를 stale로 만든다 → **dims가 아니라 `GlyphAtlas.generation` 변화**를 감지해 폴백해야 한다(둘 다 generation을 bump). 스피너 글리프(블록 8종)는 실무상 resident라 grow/repack이 드물다.
+
+### 11.3 설계 (구현: chrome_dirty 최소 접근 + atlas.generation 폴백)
+
+1. **`chrome_dirty` 신규 필드**(`AppSession`). 스피너 tick(`updateCursorBlink`의 `agent_spin_frame` 진행)이 `metal_dirty` 대신 이걸 세운다 — 부수 효과로 sync 여부와 무관하게 매 ~133ms full-grid 재셰이프를 안 하고 사이드바만 재빌드한다(에이전트 실행 중 CPU 절감).
+2. **게이트**: `shouldProjectFrame`은 **무변경**. tick에서 `project_chrome = chrome_dirty and !will_project`로 별도 분기한다 — `will_project`(grid)면 기존 전체 투영이 사이드바까지 그려 `chrome_dirty`를 소진, 아니고 `project_chrome`면 사이드바 전용 경로.
+3. **`replaceSidebar()`**(`metal_frame.zig`): `sidebar_cells` + `uploads`/`pixels`(사이드바 delta)만 build-then-swap하고 `generation++`. `self.cells`(터미널+chrome+헤더+오버레이)와 `cursor_cells`/`modal_cells_start` 인덱스는 **불변** — 헤드리스 테스트로 고정.
+4. **사이드바 전용 빌드 분기**: `buildSidebarTitleDrawList` → `collectShaped(.sidebar)` → `placeAndDistribute`(사이드바만, 나머지 out은 throwaway) → `replaceSidebar`. grid shapeOnly/core 재읽기는 건너뛴다.
+5. **atlas.generation 폴백**: 사이드바 place 전후 `renderer_state.atlas.generation` 변화(grow **또는** clean-repack)를 감지해 변했으면 부분 swap을 버리고 `metal_dirty=true`로 다음 tick 전체 재투영(모든 pane+사이드바를 한 세대로 재정규화). 스피너 글리프 resident라 드묾.
+
+렌더러(`maru_metal_renderer.m`)·Swift(`MaruAppHost.swift`)·ABI **무변경**(whole-frame 재draw + generation 게이트가 그대로 동작, retained `self.cells`가 byte-identical로 다시 그려져 tearing 없음).
+
+**대안 옵션 B(사이드바 전용 atlas)**는 grow/repack 간섭을 원천 차단하나 침습이 크다(UV 재정규화 완전 분리). 스피너 글리프가 소수라 generation 폴백으로 충분 — B는 chrome이 대량 글리프를 쓰게 되면 재검토.
+
+### 11.4 구현 규모
+
+단일 변경으로 충분(재조사로 확정): `chrome_dirty` 필드 + 스피너 tick 1곳 재배선 + tick의 `project_chrome` 분기(~50줄, 기존 `buildSidebarTitleDrawList`/`collectShaped`/`placeAndDistribute` 재사용) + `MetalFrameBuffer.replaceSidebar`(~40줄) + 불변식 헤드리스 테스트. **2개 Zig 파일, 렌더러 .m/Swift/ABI 0줄, ABI bump 없음.**
+
+### 11.5 트레이드오프 / 한계
+
+- **whole-frame 재present**: 사이드바 갱신마다 grid도 GPU re-draw된다(비용 있음). 단 grid는 재셰이프·atlas 재업로드가 없고(generation만 상승, Swift가 newFrame일 때만 atlas 처리) 스피너 cadence가 ~133ms라 sync hold(최대 1초) 중 최대 ~7회/초 재draw. **idle 셸에는 무영향**(`chrome_dirty`가 running 카드 있을 때만).
+- **범위**: 이 설계는 사이드바 스피너에 한정. 탭바 tui 셀·모달 caret은 메인 `cells` 버퍼에 인터리브돼 커서 suffix bookkeeping과 얽혀 있어 별도 레이어 추출이 필요(더 큰 작업, 후속).
+- **베이스/결정**: Ghostty·xterm.js는 GPU chrome이 없어 이 문제가 없다(선례 없음) — **Maru 독립 설계**. sync는 "리더가 완성한 grid 프레임 경계"의 문제이고 chrome은 그 대상이 아니라는 원칙에서 유도.

@@ -259,12 +259,15 @@ fn shouldProjectFrame(
     view_offset: usize,
     last_rendered_view_offset: usize,
     esu_advanced: bool,
+    force_reproject: bool,
 ) bool {
     const view_scrolled = view_offset != last_rendered_view_offset;
     // esu_advanced(직전 투영 이후 리더가 ESU=프레임 완성 처리)는 호출자가 계산해 넘긴다 — 게이트 해제와
     // freeze-timeout(sync_hold_ticks) 리셋이 같은 값을 써야 하기 때문(호출부 참조, code-review [3]).
-    const sync_blocks = sync_active and sync_hold_ticks < sync_timeout and !view_scrolled and !esu_advanced;
-    return (metal_dirty or view_scrolled or esu_advanced) and !sync_blocks;
+    // force_reproject: 사이드바 전용 투영이 atlas를 repack한 뒤 GPU 정합을 위해 sync hold를 우회해 강제 full
+    // 투영해야 하는 경우(code-review [0]) — view_offset/esu와 동형의 강제 항.
+    const sync_blocks = sync_active and sync_hold_ticks < sync_timeout and !view_scrolled and !esu_advanced and !force_reproject;
+    return (metal_dirty or view_scrolled or esu_advanced or force_reproject) and !sync_blocks;
 }
 
 // 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
@@ -1224,6 +1227,16 @@ pub const AppSession = struct {
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
     metal_dirty: bool = true,
+    // [A: chrome 독립 present] 사이드바 스피너 등 "sync(2026) hold 중에도 갱신돼야 하는 chrome-only 변화" 플래그.
+    // metal_dirty(전체 dirty)와 별개다 — grid가 hold로 막힌 tick에도 chrome_dirty면 사이드바만 부분 투영한다
+    // (tick의 project_chrome 분기 → replaceSidebar). 전체 투영(will_project) 시엔 사이드바도 함께 그려 소진된다.
+    // 부수 효과: 스피너 tick이 metal_dirty 대신 이걸 세우므로, sync가 없어도 매 ~133ms full-grid 재셰이프를 안 하고
+    // 사이드바만 재빌드한다(에이전트 실행 중 CPU 절감).
+    chrome_dirty: bool = false,
+    // [A: code-review 0] 사이드바 전용 투영이 shared atlas를 grow/repack하면 retained self.cells UV가 stale이 되고
+    // repack 좌표가 GPU 텍스처에 미반영된다. 이 플래그는 shouldProjectFrame이 sync hold를 우회해 다음 tick에 반드시
+    // full 투영(atlas 정합)하도록 강제한다 — full replace 성공 시 해제. metal_dirty만으론 sync hold가 막아 부족하다.
+    force_reproject: bool = false,
     // 직전에 그린 활성 surface의 view_offset(스크롤백 탐색 위치). synchronized output(2026) hold가 스크롤
     // 리페인트를 막지 않게 하고(shouldProjectFrame), 스크롤이 reader 위임이라 metal_dirty가 누락돼도 view_offset
     // 변화만으로 투영을 강제하는 기준이다. 투영 경로마다 그 프레임이 실제로 그린 render-time offset으로 갱신(빌드
@@ -7416,7 +7429,8 @@ pub const AppSession = struct {
                 self.agent_spin_ticks = 0;
                 // 파형 길이로 wrap — u8 자연 wrap(256%14≠0)이면 255→0 경계에서 파형이 튀므로 주기 안에서 순환한다.
                 self.agent_spin_frame = (self.agent_spin_frame + 1) % @as(u8, @intCast(spinner_wave.len));
-                self.metal_dirty = true;
+                self.chrome_dirty = true; // [A] 사이드바만 부분 투영(sync hold 중에도 진행 + full-grid 재셰이프 회피)
+
             }
         }
         const interval = self.blinkIntervalTicks();
@@ -10116,8 +10130,11 @@ pub const AppSession = struct {
         // 투영 게이트(shouldProjectFrame): sync hold는 라이브 화면 tearing만 막고, 스크롤백 탐색(view_offset 변화)
         // 리페인트는 막지 않는다 — rapid 스크롤 시 sync에 막혀 viewport가 stale로 멈추던 버그 수정. view_offset
         // 변화는 metal_dirty 누락(스크롤 reader 위임 race)에도 투영을 강제한다. timeout 넘긴 sync hold는 강제 해제.
-        const will_project = shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset, esu_advanced);
+        const will_project = shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset, esu_advanced, self.force_reproject);
+        // [A: chrome 독립 present] grid는 hold됐지만 chrome(사이드바 스피너)만 dirty면 사이드바만 부분 투영한다(아래 else if).
+        const project_chrome = self.chrome_dirty and !will_project;
         if (will_project) {
+            self.chrome_dirty = false; // 전체 투영이 사이드바까지 그리므로 chrome dirty 소진
             // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의
             // placeMultiPane(한 atlas 세대)으로 배치+분배한다 — 개별 buildFromDrawList가 invalidate로 앞 페인을
             // 무효화하는 cross-pane 깨짐을 차단한다. defer는 place 전 에러로 빠질 때만 남은 ShapedPane을 정리한다
@@ -10706,6 +10723,7 @@ pub const AppSession = struct {
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.metal_dirty = false;
+                    self.force_reproject = false; // [A] full 투영이 atlas를 GPU에 정합했으므로 강제 재투영 요구 해제(code-review [0])
                     // last_rendered_view_offset은 위(os-tag 블록 직후)에서 빌드 성공/실패 무관하게 이미 기록했다
                     // (성공=render-time, 실패=gate-time 폴백). 여기서 다시 쓰지 않는다.
                 } else |_| {}
@@ -10726,6 +10744,70 @@ pub const AppSession = struct {
             }
             self.logScreenIfDebug();
             self.drainShellEventsForFrame();
+        } else if (project_chrome) {
+            // [A: chrome 독립 present] sync hold가 grid 본문 투영을 막는 동안 사이드바 스피너(chrome_dirty)만 진행한다.
+            // 활성 grid는 마지막 완성 프레임(self.cells)을 유지하고, 사이드바 셀만 재-shape→place→replaceSidebar로
+            // 교체한다. 사이드바 place가 atlas를 grow/repack하면 retained self.cells의 UV가 stale이 되므로, place
+            // 전후 atlas.generation 변화를 감지해 변했으면 부분 swap을 버리고 metal_dirty로 다음 tick 전체 재투영을
+            // 예약한다(모든 pane+사이드바를 한 세대로 다시 정규화 — docs/io-render-threading.md §11).
+            if (builtin.os.tag == .macos) {
+                var collected: std.ArrayList(CollectedPane) = .empty;
+                defer {
+                    for (collected.items) |*c| c.pane.deinit(self.allocator);
+                    collected.deinit(self.allocator);
+                }
+                if (self.buildSidebarTitleDrawList()) |dl| {
+                    self.collectShaped(&collected, dl, self.paneFrameBuilder(), .sidebar);
+                } else |_| {}
+                if (collected.items.len > 0) {
+                    const gen_before = self.renderer_state.atlas.generation;
+                    // placeAndDistribute는 out 파라미터가 많지만 .sidebar만 collect했으므로 sidebar_frame만 채워지고
+                    // 나머지는 비어 있다(각각 defer로 정리 — 대부분 null/빈이라 no-op).
+                    var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+                    defer pane_frames.deinit(self.allocator);
+                    var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
+                    defer {
+                        for (built_frames.items) |*rf| rf.deinit(self.allocator);
+                        built_frames.deinit(self.allocator);
+                    }
+                    var sidebar_frame: ?renderer.RenderFrame = null;
+                    defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
+                    var throwaway_header: ?renderer.RenderFrame = null;
+                    defer if (throwaway_header) |*hf| hf.deinit(self.allocator);
+                    var throwaway_overlay: ?metal_frame.PaneFrame = null;
+                    defer if (throwaway_overlay) |*pf| pf.frame.deinit(self.allocator);
+                    var throwaway_floating: ?metal_frame.PaneFrame = null;
+                    defer if (throwaway_floating) |*pf| pf.frame.deinit(self.allocator);
+                    var throwaway_sticky: ?metal_frame.PaneFrame = null;
+                    defer if (throwaway_sticky) |*pf| pf.frame.deinit(self.allocator);
+                    var throwaway_active: ?ActiveResult = null;
+                    self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &throwaway_header, &throwaway_overlay, &throwaway_floating, &throwaway_sticky, &throwaway_active);
+                    if (self.renderer_state.atlas.generation != gen_before) {
+                        // 사이드바 place가 shared atlas를 grow/repack했다(code-review [0]): retained self.cells의 UV가
+                        // stale이 됐고 repack된 좌표는 GPU 텍스처에 아직 안 쓰였다. 부분 swap을 버리고 전체 재투영을
+                        // 예약하되 — sync hold가 metal_dirty를 막으므로 그것만으론 timeout(1초)까지 stale이 지속된다 —
+                        // force_reproject로 sync 게이트를 우회해 다음 tick에 반드시 full 투영(모든 글리프 재등록 + upload로
+                        // GPU 정합 + self.cells UV 재정규화)하게 한다. hold 중 full 투영이라 한 프레임 tearing 가능하나
+                        // atlas 손상(수백 ms stale)보다 낫다(view_offset/esu 강제 투영과 동형). repack은 스피너 글리프
+                        // (블록 8종) resident라 드물다.
+                        self.metal_dirty = true;
+                        self.force_reproject = true;
+                        self.chrome_dirty = false;
+                    } else if (sidebar_frame) |_| {
+                        const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+                        self.metal_buffer.replaceSidebar(self.allocator, self.sidebar_cells.items, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config) catch {};
+                        self.chrome_dirty = false;
+                    }
+                    // else: sidebar_frame이 null(placeMultiPane/finishPane alloc 실패)이면 replaceSidebar를 건너뛴다 —
+                    // band-only(제목 없는) 사이드바로 붕괴시키지 않고 마지막 완성 프레임을 유지하고(full 경로 active_failed
+                    // 가드와 동형, code-review [1]), chrome_dirty를 유지해 다음 tick에 재시도한다.
+                } else {
+                    self.chrome_dirty = false; // 그릴 사이드바 없음(빌드 실패) — 소진(다음 스피너 tick이 다시 세움)
+                }
+            } else {
+                self.chrome_dirty = false; // 비-macOS: 사이드바 chrome 없음
+            }
+            self.writeSummaryFromState();
         } else {
             // idle: build/project를 건너뛰므로 summary는 마지막 frame render 통계를 그대로 둔다.
             self.writeSummaryFromState();
@@ -15845,27 +15927,32 @@ test "synchronized output(2026) hold: ESU 누락 시 sync timeout을 넘으면 �
 
 test "shouldProjectFrame: sync(2026) hold는 라이브 투영만 막고 스크롤 리페인트는 막지 않는다" {
     const timeout: u32 = ticksForMsAtRate(sync_timeout_ms, config_mod.theme.render_frame_rate_default);
-    // 라이브(스크롤 안 함, view_offset==직전 렌더, esu_advanced=false): sync hold 중엔 metal_dirty여도 투영 보류(half-drawn tearing 방지).
-    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0, false));
+    // 라이브(스크롤 안 함, view_offset==직전 렌더, esu_advanced=false, force_reproject=false): sync hold 중엔 metal_dirty여도 투영 보류.
+    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0, false, false));
     // hold가 timeout 도달 → ESU 없이 강제 투영(freeze 복구) — 기존 동작 보존.
-    try std.testing.expect(shouldProjectFrame(true, true, timeout, timeout, 0, 0, false));
+    try std.testing.expect(shouldProjectFrame(true, true, timeout, timeout, 0, 0, false, false));
     // ── 버그 재현: 스크롤백을 위로 본 채(view_offset 3 ≠ 직전 렌더 0) sync hold면, 예전 게이트
     //    (metal_dirty and !(sync and hold<timeout))는 false라 스크롤 리페인트를 막아 viewport가 stale로 멈췄다.
     //    이제 스크롤 변화는 라이브 출력 배칭과 무관하게 투영한다(이 버그의 수정점). ──
-    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 3, 0, false));
+    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 3, 0, false, false));
     // view_offset 변화는 metal_dirty 누락(스크롤 reader 위임이 build 락-읽기보다 늦는 race)에도 투영을 강제한다.
-    try std.testing.expect(shouldProjectFrame(false, false, 0, timeout, 3, 0, false));
+    try std.testing.expect(shouldProjectFrame(false, false, 0, timeout, 3, 0, false, false));
     // 변화 없음 + dirty 없음 → 투영 안 함(idle tick 비용 절감 보존).
-    try std.testing.expect(!shouldProjectFrame(false, false, 0, timeout, 5, 5, false));
+    try std.testing.expect(!shouldProjectFrame(false, false, 0, timeout, 5, 5, false, false));
     // sync 아님 + dirty → 평소대로 투영.
-    try std.testing.expect(shouldProjectFrame(true, false, 0, timeout, 0, 0, false));
+    try std.testing.expect(shouldProjectFrame(true, false, 0, timeout, 0, 0, false, false));
     // ── [B] ESU edge: sync hold 중(sync_active, hold<timeout, 스크롤 없음)이라도 직전 투영 이후 리더가 ESU를
     //    처리했으면(esu_advanced=true) 완성 프레임을 flush한다 — 폴링이 다음 BSU만 관측해 완성 프레임을 놓치던 MISS 수정. ──
-    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 0, 0, true));
+    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 0, 0, true, false));
     // esu_advanced=false면 여전히 hold가 막는다(진행 중 프레임 tearing 방지 — 정당한 막힘 보존).
-    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0, false));
+    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0, false, false));
     // esu advanced면 metal_dirty가 누락돼도(reader race) 투영을 강제한다(view_offset 안전판과 동형).
-    try std.testing.expect(shouldProjectFrame(false, true, 0, timeout, 0, 0, true));
+    try std.testing.expect(shouldProjectFrame(false, true, 0, timeout, 0, 0, true, false));
+    // ── [A: code-review 0] force_reproject: sync hold 중(hold<timeout)이라도 사이드바 전용 place가 atlas를 repack한 뒤
+    //    GPU 정합을 위해 강제 full 투영한다 — metal_dirty 없이도(reader race) 투영, sync hold 우회. ──
+    try std.testing.expect(shouldProjectFrame(false, true, 0, timeout, 0, 0, false, true));
+    // force_reproject=false면 위와 동일 상황에서 hold가 막는다(대조).
+    try std.testing.expect(!shouldProjectFrame(false, true, 0, timeout, 0, 0, false, false));
 }
 
 test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막지 않는다(rapid 스크롤 stale 수정)" {

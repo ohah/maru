@@ -200,6 +200,11 @@ pub const TerminalCore = struct {
     // synchronized output(DECSET 2026): 켜지면 frame 투영을 멈춰(hold) ESU(2026 reset)까지 출력을 한 frame으로
     // 묶는다 — nvim 화면 갱신 tearing/깜빡임 방지. 베이스: Ghostty(synchronized_output이면 render skip)·DEC 2026.
     sync_output: bool = false,
+    // synchronized output(2026): 리더(parser.feed)가 처리한 ESU(reset=프레임 완성) 누적 횟수. shouldProjectFrame이
+    // 직전 투영 이후 이 값이 늘었으면(esu_advanced) 완성 프레임을 flush한다 — per-tick 폴링이 flush 창(<tick)을
+    // 놓쳐 완성 프레임을 timeout까지 막던 MISS 수정. always-on 증분(단순 +%=). 베이스: Ghostty는 리더가 ESU에서
+    // 렌더를 트리거해 회피하지만, maru는 tick 폴링이라 ESU 누적 카운트를 edge로 소비해 같은 효과를 낸다.
+    sync_esu_count: u64 = 0,
     /// kitty keyboard protocol flag 스택(CSI > flags u=push / < n u=pop / = flags;mode u=set로 앱이 제어).
     /// 기본 비어 있음(current=disabled) → encodeKey가 legacy 인코딩. 베이스: kitty keyboard protocol spec.
     kitty_flags: KittyFlagStack = .{},

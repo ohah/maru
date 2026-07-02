@@ -238,6 +238,13 @@ const default_scrollbar_fade_ticks: u32 = ticksForMsAtRate(scrollbar_fade_ms, co
 /// 위임(scroll→enqueueCoreCommand)이라 view_offset 적용이 build의 락-읽기보다 늦는 race에서 metal_dirty가 누락될 수
 /// 있으므로, view_offset 변화는 metal_dirty와 무관하게 투영을 강제하는 안전판이 된다(변화 없으면 idle skip 보존).
 ///
+/// 셋째 안전판(sync_esu_count edge): 직전 투영 이후 리더가 ESU(프레임 완성)를 처리했으면 hold를 해제하고 투영한다.
+/// per-tick 폴링이 sync_output을 샘플하는 순간 이미 다음 BSU가 시작돼 있으면(flush 창<tick), 메인은 완성 프레임(ESU)을
+/// 못 보고 계속 막는 MISS가 생긴다 — Ghostty는 리더가 ESU에서 렌더를 트리거해 이를 피하지만, maru는 tick 폴링이라
+/// ESU 누적 카운트를 edge로 소비해 같은 효과를 낸다(MARU_DEBUG 계측 실측: 연속 프레임 워크로드에서 sync 막힘의 약
+/// 절반이 이 MISS였다). view_offset과 동형 트레이드오프: esu_advanced 투영 시점이 다음 BSU 직후면 그 프레임 하단이
+/// half-drawn으로 한 번 보일 수 있으나 다음 ESU에서 교정되고, timeout(1초) stall보다 명백히 낫다.
+///
 /// 알려진 트레이드오프/범위(코드리뷰 검토): (1) 부분 스크롤(0<view_offset<rows)이면 합성 뷰포트 하단은 여전히
 /// 라이브 활성 화면이라, sync 중 스크롤 투영이 그 하단 행을 half-drawn으로 한 프레임 보일 수 있다 — 그러나 스크롤이
 /// 멈추면(view_offset 안정) sync가 다시 막아 사라지고, "얼어붙은 viewport"(고치려는 버그)보다 명백히 낫다(스크롤 중엔
@@ -251,10 +258,13 @@ fn shouldProjectFrame(
     sync_timeout: u32,
     view_offset: usize,
     last_rendered_view_offset: usize,
+    esu_advanced: bool,
 ) bool {
     const view_scrolled = view_offset != last_rendered_view_offset;
-    const sync_blocks = sync_active and sync_hold_ticks < sync_timeout and !view_scrolled;
-    return (metal_dirty or view_scrolled) and !sync_blocks;
+    // esu_advanced(직전 투영 이후 리더가 ESU=프레임 완성 처리)는 호출자가 계산해 넘긴다 — 게이트 해제와
+    // freeze-timeout(sync_hold_ticks) 리셋이 같은 값을 써야 하기 때문(호출부 참조, code-review [3]).
+    const sync_blocks = sync_active and sync_hold_ticks < sync_timeout and !view_scrolled and !esu_advanced;
+    return (metal_dirty or view_scrolled or esu_advanced) and !sync_blocks;
 }
 
 // 복원(R4)에서 모델 surface의 저장된 cols/rows를 spawn 초기 grid로 쓴다(0이면 terminal.Size.default 기본).
@@ -1219,6 +1229,13 @@ pub const AppSession = struct {
     // 변화만으로 투영을 강제하는 기준이다. 투영 경로마다 그 프레임이 실제로 그린 render-time offset으로 갱신(빌드
     // 실패면 gate-time 폴백 — view_scrolled를 풀어 OOM 매-tick 재시도 스핀을 막는다). 0=라이브 바닥(기본).
     last_rendered_view_offset: usize = 0,
+    // [B: sync-2026 ESU edge] 직전 투영이 반영한 ESU 누적(core.sync_esu_count의 그 시점 값). 다음 tick에 리더가
+    // ESU를 더 처리했으면(이 값과 달라지면) shouldProjectFrame의 esu_advanced가 sync hold를 해제해 완성 프레임을
+    // flush한다 — 폴링이 flush 창을 놓쳐 완성 프레임을 막던 MISS를 없앤다. 투영 성공 시 gate-time esu로 갱신.
+    last_rendered_esu: u64 = 0,
+    // [code-review 2] 직전 tick의 활성 surface 포인터. 활성 surface가 바뀌면 last_rendered_esu(단일 필드)가 다른
+    // surface의 sync_esu_count(per-surface)와 비교돼 esu_advanced가 오판되므로, 전환을 감지해 esu 기준을 무효화한다.
+    last_ticked_surface_ptr: usize = 0,
     // 테마 섹션에서 사용자가 "사용자 지정"을 명시 선택했는지(런타임 휘발 — 색은 detectThemePreset로 derive하므로 영속
     // 불요). 색이 어떤 프리셋과 우연히 일치해도 이게 true면 프리셋 잠금을 풀어 색·팔레트 행을 편집 가능하게 둔다.
     // 프리셋을 다시 고르거나 reset하면 false로 돌아간다. themePresetActive()의 판정 인자.
@@ -10051,6 +10068,17 @@ pub const AppSession = struct {
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
+        // 활성 surface가 직전 tick과 바뀌었으면 last_rendered_esu 기준이 다른 surface 것이라 esu 비교가 무의미하다
+        // (last_rendered_esu는 단일 AppSession 필드인데 sync_esu_count는 per-surface — code-review [2]). 전환 직후엔
+        // esu 기준을 무효화(0)해 새 surface 기준으로 재시작한다 — 새 surface가 sync를 쓴 적 있으면 esu_advanced가
+        // 참이 돼 전환 직후 완성 프레임을 강제 투영(stale 방지)하고, 안 썼으면 sync_active=false라 metal_dirty로 투영된다.
+        {
+            const active_ptr = @intFromPtr(self.activeSurface());
+            if (active_ptr != self.last_ticked_surface_ptr) {
+                self.last_rendered_esu = 0;
+                self.last_ticked_surface_ptr = active_ptr;
+            }
+        }
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
         // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(render skip과 동형). 단 ESU가
         // 영영 안 오면 freeze되므로 hold가 sync_timeout_ms를 넘으면 강제 해제한다(아래 sync_blocks).
@@ -10060,11 +10088,17 @@ pub const AppSession = struct {
             const s = self.activeSurface();
             s.lockCore(self.io);
             defer s.unlockCore(self.io);
-            break :blk .{ .sync = s.core.sync_output, .view_offset = s.core.view_offset };
+            break :blk .{ .sync = s.core.sync_output, .view_offset = s.core.view_offset, .esu = s.core.sync_esu_count };
         };
         const sync_active = sync_view.sync;
         const active_view_offset = sync_view.view_offset;
-        if (sync_active) {
+        // esu_advanced: 직전 투영 이후 리더가 ESU(프레임 완성)를 처리했는가. sync hold를 해제하는 edge이자
+        // freeze-timeout(sync_hold_ticks) 리셋 조건이다 — 완성 ESU는 스트림이 건강하다는 증거이므로 hold를
+        // 리셋해, 지속적 2026 애니메이션에서 hold가 계속 쌓여 timeout 도달 시 sync_blocks가 영구 해제되며
+        // tearing guard가 무력화되는 걸 막는다(code-review [3]). ESU가 영영 안 오는 진짜 freeze는 esu가 안 늘어
+        // 리셋되지 않으므로 timeout 강제 해제(freeze 복구)가 그대로 유지된다.
+        const esu_advanced = sync_view.esu != self.last_rendered_esu;
+        if (sync_active and !esu_advanced) {
             self.sync_hold_ticks +|= 1;
         } else {
             self.sync_hold_ticks = 0;
@@ -10072,7 +10106,8 @@ pub const AppSession = struct {
         // 투영 게이트(shouldProjectFrame): sync hold는 라이브 화면 tearing만 막고, 스크롤백 탐색(view_offset 변화)
         // 리페인트는 막지 않는다 — rapid 스크롤 시 sync에 막혀 viewport가 stale로 멈추던 버그 수정. view_offset
         // 변화는 metal_dirty 누락(스크롤 reader 위임 race)에도 투영을 강제한다. timeout 넘긴 sync hold는 강제 해제.
-        if (shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset)) {
+        const will_project = shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset, esu_advanced);
+        if (will_project) {
             // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의
             // placeMultiPane(한 atlas 세대)으로 배치+분배한다 — 개별 buildFromDrawList가 invalidate로 앞 페인을
             // 무효화하는 cross-pane 깨짐을 차단한다. defer는 place 전 에러로 빠질 때만 남은 ShapedPane을 정리한다
@@ -10129,6 +10164,11 @@ pub const AppSession = struct {
             // TOCTOU로 stale이 안 생기고, shapeOnlyBuild 실패(active_failed)면 gate-time으로 폴백해 view_scrolled를
             // 풀어 sync hold 중 매-tick 재시도(OOM 스핀)를 막는다(metal_dirty 재시도는 sync가 throttle).
             self.last_rendered_view_offset = rendered_view_offset orelse active_view_offset;
+            // esu는 프레임을 실제 그린 tick에만 갱신한다(code-review [4]): macOS shapeOnlyBuild 실패(rendered_view_offset
+            // ==null)면 완성 프레임을 안 그렸으니 last_rendered_esu를 올리지 않아, 다음 tick에 esu_advanced로 재시도해
+            // 완성 프레임을 drop하지 않는다. 비-macOS(fake backend)는 tickAfterDrain이 프레임을 만드므로 갱신한다.
+            // (view_offset은 gate-time 폴백이 OOM retry spin 방지라 성공/실패 무관하게 갱신 — 정당한 차이.)
+            if (builtin.os.tag != .macos or rendered_view_offset != null) self.last_rendered_esu = sync_view.esu;
 
             // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
             // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
@@ -15755,20 +15795,27 @@ test "synchronized output(2026) hold: ESU 누락 시 sync timeout을 넘으면 �
 
 test "shouldProjectFrame: sync(2026) hold는 라이브 투영만 막고 스크롤 리페인트는 막지 않는다" {
     const timeout: u32 = ticksForMsAtRate(sync_timeout_ms, config_mod.theme.render_frame_rate_default);
-    // 라이브(스크롤 안 함, view_offset==직전 렌더): sync hold 중엔 metal_dirty여도 투영 보류(half-drawn tearing 방지).
-    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0));
+    // 라이브(스크롤 안 함, view_offset==직전 렌더, esu_advanced=false): sync hold 중엔 metal_dirty여도 투영 보류(half-drawn tearing 방지).
+    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0, false));
     // hold가 timeout 도달 → ESU 없이 강제 투영(freeze 복구) — 기존 동작 보존.
-    try std.testing.expect(shouldProjectFrame(true, true, timeout, timeout, 0, 0));
+    try std.testing.expect(shouldProjectFrame(true, true, timeout, timeout, 0, 0, false));
     // ── 버그 재현: 스크롤백을 위로 본 채(view_offset 3 ≠ 직전 렌더 0) sync hold면, 예전 게이트
     //    (metal_dirty and !(sync and hold<timeout))는 false라 스크롤 리페인트를 막아 viewport가 stale로 멈췄다.
     //    이제 스크롤 변화는 라이브 출력 배칭과 무관하게 투영한다(이 버그의 수정점). ──
-    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 3, 0));
+    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 3, 0, false));
     // view_offset 변화는 metal_dirty 누락(스크롤 reader 위임이 build 락-읽기보다 늦는 race)에도 투영을 강제한다.
-    try std.testing.expect(shouldProjectFrame(false, false, 0, timeout, 3, 0));
+    try std.testing.expect(shouldProjectFrame(false, false, 0, timeout, 3, 0, false));
     // 변화 없음 + dirty 없음 → 투영 안 함(idle tick 비용 절감 보존).
-    try std.testing.expect(!shouldProjectFrame(false, false, 0, timeout, 5, 5));
+    try std.testing.expect(!shouldProjectFrame(false, false, 0, timeout, 5, 5, false));
     // sync 아님 + dirty → 평소대로 투영.
-    try std.testing.expect(shouldProjectFrame(true, false, 0, timeout, 0, 0));
+    try std.testing.expect(shouldProjectFrame(true, false, 0, timeout, 0, 0, false));
+    // ── [B] ESU edge: sync hold 중(sync_active, hold<timeout, 스크롤 없음)이라도 직전 투영 이후 리더가 ESU를
+    //    처리했으면(esu_advanced=true) 완성 프레임을 flush한다 — 폴링이 다음 BSU만 관측해 완성 프레임을 놓치던 MISS 수정. ──
+    try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 0, 0, true));
+    // esu_advanced=false면 여전히 hold가 막는다(진행 중 프레임 tearing 방지 — 정당한 막힘 보존).
+    try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0, false));
+    // esu advanced면 metal_dirty가 누락돼도(reader race) 투영을 강제한다(view_offset 안전판과 동형).
+    try std.testing.expect(shouldProjectFrame(false, true, 0, timeout, 0, 0, true));
 }
 
 test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막지 않는다(rapid 스크롤 stale 수정)" {

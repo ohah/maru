@@ -360,7 +360,11 @@ pub fn setPrivateModes(self: *TerminalCore, set: bool) void {
             1015 => self.mouse_format = if (set) .urxvt else .x10, // urxvt 인코딩(G13 — 거의 1006으로 대체)
             7 => self.autowrap = set, // DECAWM(G8): autowrap on/off — off면 마지막 칸에서 덮어쓴다
             2027 => self.grapheme_cluster_mode = set, // grapheme cluster 너비(이모지 풀사이즈 합의)
-            2026 => self.sync_output = set, // synchronized output(set=BSU hold 시작, reset=ESU flush)
+            2026 => {
+                self.sync_output = set; // synchronized output(set=BSU hold 시작, reset=ESU flush)
+                // ESU(reset=프레임 완성)마다 카운트 — shouldProjectFrame의 esu_advanced가 tick 폴링이 놓친 완성 프레임을 flush.
+                if (!set) self.sync_esu_count +%= 1;
+            },
             47, 1047, 1049 => if (set) screen.enterAltScreen(self) else screen.leaveAltScreen(self), // 커서가 화면 귀속이라 셋 다 동일(§10.8)
             1048 => if (set) screen.saveCursorState(self) else screen.restoreCursorState(self),
             else => {}, // 그 외 private 모드(25 커서 표시 등)는 아직 소비만 한다.

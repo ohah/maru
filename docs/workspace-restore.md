@@ -165,51 +165,47 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 세 계층의 사용자 이름은 모두 `custom-name=` 키로 통일한다(Surface만 추가로 auto `title=`를 둔다). 워크스페이스(tab)는
 우클릭 컨텍스트 메뉴로 정하는 **위치 고정(`pinned`)·카드 배경색(`background-color`)·좌측 막대색(`accent-color`)**도 사용자
-의도라 영속한다(custom_name과 같은 자리; 배경색·막대색은 직교한 별도 값 — docs/tabs-splits-layout.md). 직렬화 파서는
-positional이라 키 순서·개수가 writer와 정확히 맞아야 한다(필드 추가는 포맷 변경 — 아래 "하위 호환은 고려하지 않는다"·
-"저장 파일을 통째로 파싱 못 할 때" 정책에 따라, 옛 저장 파일은 시작 시 조용히 기본 창으로 폴백하고 다음 정상 종료 때 self-heal).
+의도라 영속한다(custom_name과 같은 자리; 배경색·막대색은 직교한 별도 값 — docs/tabs-splits-layout.md). 직렬화 리더는 각
+라인의 **스칼라 `key=value` 필드를 순서 무관·이름으로 조회**한다(key-addressed — 아래 "[직렬화 전략: key-addressed
+파싱](#직렬화-전략-스칼라-필드-key-addressed-파싱)"). 구조 키(개수)만 필수, 스칼라 속성은 없으면 기본값이라 **줄 끝에 스칼라 필드를
+추가해도 옛 파일이 안 깨진다**(additive 하위호환). 구조 변경(블록/카운트/tree)은 여전히 포맷 변경 사건이다.
 
 - custom_name은 트리 내 위치(인덱스)로 round-trip한다(cwd/title과 같은 식별).
 - 자동 제목(surface `title`)은 복원 직후 셸이 OSC를 다시 보내기 전까지의 폴백 표시용으로만 저장·소비한다. custom_name이 있으면 표시 규칙상 자동 제목보다 우선한다.
-- 하위 호환은 고려하지 않는다 — 필드는 `maru.workspace.v1`에 직접 추가한다(구버전 파일 읽기 보장 없음). 이는 **현재** 동작이며,
-  per-tab 스칼라 필드가 계속 늘어남에 따라 아래 "[직렬화 진화 계획](#직렬화-진화-계획-스칼라-필드-key-addressed-파싱-미구현)"으로 이 정책을 좁힐 예정이다(additive 스칼라만 하위호환).
+- **하위 호환**: additive 스칼라 필드는 key-addressed로 하위호환된다(옛 파일이 그 키의 기본값으로 복원 — 폴백 없음). 단
+  **구조 변경**(새 블록 타입·tree 인코딩·카운트 의미 변경)은 하위호환 없이 스키마 버전을 올리거나 통째 폴백+self-heal한다(아래 참조).
 
-## 직렬화 진화 계획: 스칼라 필드 key-addressed 파싱 (미구현)
+## 직렬화 전략: 스칼라 필드 key-addressed 파싱
 
-> 상태: **미구현 계획**. 현재 파서는 여전히 strict positional + 통째 폴백/self-heal(위 정책). 이 절은 언제·왜·어떻게 전환할지의 단일 출처다.
+> 상태: **구현됨**(`src/session/workspace.zig`의 `LineFields`). 이 절은 파서의 실패 모델과 하위호환 경계를 정의하는 단일 출처다.
 
-**동기.** per-tab 스칼라 속성(현재 `custom_name`·`pinned`·`background_color`·`accent_color`; 앞으로 아이콘·정렬·메모 등 계속 추가 예정)이 늘 때마다,
-현재 strict positional 파서는 그 키가 없는 옛 저장 파일을 **통째 파싱 실패**로 떨궈 **업데이트마다 워크스페이스 배치가 1회 리셋**된다
-(다음 정상 종료의 self-heal 전까지). 필드 하나면 감수할 만하지만, 지속적으로 늘어나는 방향이라 누적 UX 비용이 커진다.
+**동기.** per-tab 스칼라 속성(현재 `custom_name`·`pinned`·`background_color`·`accent_color`; 앞으로 아이콘·정렬·메모 등 계속 추가 예정)이
+늘 때, strict positional 파서라면 그 키가 없는 옛 파일을 **통째 파싱 실패**로 떨궈 **업데이트마다 워크스페이스 배치가 1회 리셋**된다
+(self-heal 전까지). 필드가 지속적으로 느는 방향이라 그 누적 UX 비용을 없애려 스칼라 필드를 key-addressed로 읽는다.
 
-**목표.** 줄 안의 **스칼라 `key=value` 필드**를 **순서 무관·이름 조회 + 기본값**으로 읽어, additive 스칼라 필드 추가가 옛 파일을 안 깨게 한다(무손실
-하위호환). 구조 골격(라인 타입 토큰·self-delimiting 카운트·tree preorder)은 그대로 둔다 — 스칼라가 아니라 구조라, 바뀌면 여전히 버전/self-heal 사건이다.
+**방식.** 각 스칼라 라인(`window`/`tab`/`pane`/`surface`)의 `key=value` 꼬리를 순서 무관 필드로 토큰화하고(`LineFields.parse`), 이름으로
+조회한다. 따옴표 값은 escape(`\"`)를 존중해 경계를 잡으므로 값 안의 `key=` 흉내·공백이 토큰을 안 깬다. 구조 골격(라인 타입
+토큰·self-delimiting 카운트·`tree-node` preorder)은 그대로 **positional**로 둔다 — 스칼라가 아니라 구조라 별개다(`FieldReader`, tree-node 전용).
 
-**핵심 결정 — required vs optional 분류(실패 모델 보존).** key-addressed는 "없는 키=기본값"이라, 손상 파일이 조용히 그럴듯한-틀린 상태로 파싱될
-위험이 있다(현재 strict의 loud-fail이 주는 손상 탐지를 잃음). 이를 막으려 키를 둘로 나눈다:
+**실패 모델 — required vs optional.** "없는 키=기본값"이 손상 파일을 조용히 그럴듯한-틀린 상태로 만들지 않게, 키를 둘로 나눈다:
 
-- **required(구조 키)** — 없으면 블록 파싱 자체가 불가능한 키(`tabs=`·`panes=`·`surfaces=`·`agent-argc=` 등 뒤 블록 개수를 결정). 없으면
-  `BadLine → 파일 통째 폴백`(현행 loud-fail 유지 = 손상 탐지 보존). 기본값으로 못 때운다.
-- **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·`title`="" 및 앞으로의
-  per-tab/surface 스칼라 전부). 없으면 기본값, 실패 없음.
+- **required(구조 키)** — 없으면 블록 파싱이 불가능한 개수 키(`window.tabs`·`tab.panes`·`pane.surfaces`·`surface.agent-argc`).
+  없으면 `BadLine → 통째 폴백`(loud-fail, 손상 탐지 유지). `requireUint`. 값이 비숫자·거대값이어도 BadLine.
+- **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·`title`=""·
+  `cols`=80·`rows`=24 및 앞으로의 per-tab/surface 스칼라). 없으면 기본값. **단 키가 있는데 값이 깨졌으면 조용히 기본값으로
+  때우지 않고 BadLine**(존재하는 손상은 숨기지 않는다). `getUint`/`getQuoted`.
 
-**미지 키 정책.** 옛 바이너리가 새 파일의 모르는 스칼라 키를 만나면 **조용히 skip(artifact 로그 남김)** — 앞뒤 버전 호환. 오타 키도 조용히 무시되는
-트레이드오프는 optional 속성이라 감수하고, 구조 이상은 위 required 규칙이 잡는다.
+**미지 키.** 조회하지 않는 키는 자연히 skip된다(forward-compat — 옛 바이너리가 새 파일의 모르는 스칼라 키를 무시). 오타 키가
+조용히 무시되는 트레이드오프는 optional 속성이라 감수하고, 구조 이상은 required 규칙이 잡는다(미지 키 진단 로그는 후속).
 
-**범위 밖(이 계획이 해결하지 않는 것).** 새 블록 타입 추가·tree 인코딩 변경·카운트 의미 변경 = 구조 파괴 변경이라 여전히 스키마 버전 bump
-(`maru.workspace.v1`→`.v2`) 또는 self-heal 폴백 대상이다("[저장 파일을 통째로 파싱 못 할 때](#저장-파일을-통째로-파싱-못-할-때)"). additive 스칼라 필드는 버전을 올리지 않는다.
+**반복 키.** `surface`의 `agent-arg`는 반복 키라 필드를 나온 순서대로 순회해 수집하고, 개수는 구조 키 `agent-argc`와 일치해야
+한다(불일치=손상=BadLine — self-delimiting 정합).
 
-**마이그레이션 경로(증분·저위험).**
+**범위 밖(하위호환 안 되는 변경).** 새 블록 타입 추가·`tree-node` 인코딩 변경·카운트 의미 변경은 구조 파괴라 스키마 버전
+bump(`maru.workspace.v1`→`.v2`) 또는 통째 폴백+self-heal 대상이다("[저장 파일을 통째로 파싱 못 할 때](#저장-파일을-통째로-파싱-못-할-때)"). additive 스칼라 필드는 버전을 안 올린다.
 
-1. 라인-tail 파서 도입: 타입 토큰 뒤 나머지 토큰을 (key,value)로 훑어 `getUint(key, default)`/`getQuoted(key, default)`/`getEnum(...)` +
-   구조 키용 `requireUint(key)`를 제공(`FieldReader` 확장 또는 대체).
-2. `parseTab`/`parsePane`/`parseSurface`를 positional read에서 key-addressed read로 전환(구조 키만 require).
-3. writer 불변(이미 `key=value`를 씀) → round-trip 고정점 유지. reader만 바뀌어 옛 파일이 기본값으로 복원 → **이후 additive 업데이트의 리셋 UX 소멸**.
-4. 이 문서의 "하위 호환"·"실패 처리" 문구 갱신: "additive 스칼라 = 하위호환(key-addressed+기본값), 구조/버전 변경 = 폴백+self-heal".
-5. 테스트: 옛 포맷 fixture(새 키 없음)가 기본값으로 복원 / 구조 키 손상이 여전히 BadLine / 미지 키 skip / round-trip 고정점.
-
-**트리거(언제).** 지금(색 필드 하나) 하지 않는다 — self-heal로 충분하고 YAGNI. **다음 per-tab 필드 묶음이 들어오기 직전에 별도 PR로** 전환해,
-그 필드들이 처음부터 key-addressed reader 위에 안착하고 리셋을 유발하지 않게 한다. 전환 자체가 전략 수정이므로 [PR 체크리스트](pr-checklist.md)의 "전략 수정 규칙"에 따라 진행한다.
+**writer.** writer는 항상 전체 키를 `key=value`로 쓴다(불변) → round-trip 고정점 유지. reader만 순서 무관·기본값이라, writer가 낸
+최신 포맷은 정확히, 옛 파일은 관대하게 읽는다.
 
 ## env 저장 정책
 
@@ -266,7 +262,7 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 
 ### 저장 파일을 통째로 파싱 못 할 때
 
-헤더 불일치·직렬화 포맷 변경(하위호환 미고려)·손상으로 저장 파일을 **통째로** 파싱 못 하면, **알림(notice) 없이 조용히 기본 단일 창으로 시작**한다. 복원 불가는 사용자 잘못이 아니고, 특히 포맷이 바뀌면 이전 버전 저장 파일이 모두 여기로 떨어지는데 이를 "손상" 모달로 알리면 업데이트 후 첫 실행마다 키를 막는 중앙 팝업이 떠 UX가 나쁘다. 저장본은 다음 정상 종료 때 새 포맷으로 덮어써져 자연히 해소된다(self-heal). 빈 workspace(저장 없음)와 같은 조용한 기본 창 동작이다. 일부만 복원 실패(파싱은 됐으나 일부 창 적용 실패)는 이와 별개로 안내할 수 있다.
+헤더 불일치·**구조 파괴 포맷 변경**(새 블록·tree 인코딩·카운트 의미 — 위 "직렬화 전략"의 하위호환 범위 밖)·손상으로 저장 파일을 **통째로** 파싱 못 하면, **알림(notice) 없이 조용히 기본 단일 창으로 시작**한다. 복원 불가는 사용자 잘못이 아니고, 특히 구조가 바뀌면 이전 버전 저장 파일이 모두 여기로 떨어지는데 이를 "손상" 모달로 알리면 업데이트 후 첫 실행마다 키를 막는 중앙 팝업이 떠 UX가 나쁘다. 저장본은 다음 정상 종료 때 새 포맷으로 덮어써져 자연히 해소된다(self-heal). 빈 workspace(저장 없음)와 같은 조용한 기본 창 동작이다. **additive 스칼라 필드 추가는 key-addressed 하위호환이라 여기로 안 떨어진다**(옛 파일이 기본값으로 정상 복원). 일부만 복원 실패(파싱은 됐으나 일부 창 적용 실패)는 이와 별개로 안내할 수 있다.
 
 ## 초기 테스트
 

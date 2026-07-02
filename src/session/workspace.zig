@@ -25,6 +25,12 @@ pub const max_panes_per_tab = 1024;
 /// 돌지 않게 parseSurface가 먼저 가둔다. 현실 에이전트 argv는 한 자릿수~수십 개라 256은 어떤 정상 호출보다 크다.
 pub const max_agent_argv = 256;
 
+/// 한 라인의 key=value 필드 수 sanity 상한 — key-addressed 리더(LineFields)는 라인을 통째 토큰화하므로, 손상/변조
+/// 파일이 한 줄에 토큰을 무한정 채우면(예: agent-argc는 작은데 agent-arg를 수백만 개) 토큰화 작업·메모리가 라인
+/// 길이만큼 부풀 수 있다. max_agent_argv가 argc *값*만 가두던 방어를 라인 *토큰 수*로도 유지한다. 정상 최대 라인은
+/// surface(기본 키 ~9 + agent-argv ≤max_agent_argv)라, +64 여유면 어떤 정상·forward-compat 라인보다 크다(손상만 거른다).
+pub const max_line_fields = max_agent_argv + 64;
+
 pub const SplitDirection = split_tree.SplitDirection;
 
 /// split 트리 한 노드(preorder). leaf는 pane 섹션 인덱스를 가리키고, split은 방향 + a의 비율(천분율 0..1000)을
@@ -146,8 +152,8 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
 }
 
 fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
-    // custom-name(사용자 지정 이름)을 auto title 앞에 둔다 — 둘을 인접 배치해 사람이 읽기 쉽게(parser는 positional이라
-    // 이 키 순서·개수가 parseSurface와 정확히 맞아야 한다).
+    // custom-name(사용자 지정 이름)을 auto title 앞에 둔다 — 둘을 인접 배치해 사람이 읽기 쉽게. 리더(parseSurface)는
+    // key-addressed(순서 무관·이름 조회, LineFields)라 이 순서는 가독성용일 뿐이고, 구조 키 agent-argc만 필수다.
     try w.writeAll("surface custom-name=\"");
     try writeEscaped(w, s.custom_name);
     try w.writeAll("\" title=\"");
@@ -205,12 +211,10 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) ParseError!ParsedWo
 }
 
 fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
-    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
-    if (!std.mem.eql(u8, try r.word(), "window")) return error.BadLine;
-    try r.key("tabs=");
-    const tab_count = try r.uint(usize);
-    try r.key("active-tab=");
-    const active_tab = try r.uint(usize);
+    const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
+    if (!std.mem.eql(u8, f.kind, "window")) return error.BadLine;
+    const tab_count = try f.requireUint("tabs", usize); // 구조 키(탭 개수) — 없으면 BadLine
+    const active_tab = try f.getUint("active-tab", usize, 0); // 스칼라(기본 0=첫 탭)
 
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
@@ -219,24 +223,21 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
 }
 
 fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
-    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
-    if (!std.mem.eql(u8, try r.word(), "tab")) return error.BadLine;
-    try r.key("panes=");
-    const pane_count = try r.uint(usize);
-    try r.key("active-pane=");
-    const active_pane = try r.uint(usize);
-    try r.key("custom-name=");
-    const custom_name = try r.quoted(a);
-    try r.key("pinned=");
-    const pinned = (try r.uint(u8)) != 0;
-    try r.key("background-color=");
-    const background_color = try r.uint(u32);
-    try r.key("accent-color=");
-    const accent_color = try r.uint(u32);
+    const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
+    if (!std.mem.eql(u8, f.kind, "tab")) return error.BadLine;
+    const pane_count = try f.requireUint("panes", usize); // 구조 키(트리·pane 개수 결정) — 없으면 BadLine
 
     // 손상/변조 파일 방어(R6 graceful). 0개 탭은 빌드 단계에서 무효이고, 부풀린 pane_count는 아래 트리 노드
     // 상한을 거대화해 깊은 재귀를 부르므로 sane 상한으로 먼저 가둔다 — 위반 시 BadLine→그 창은 기본 창으로.
     if (pane_count == 0 or pane_count > max_panes_per_tab) return error.BadLine;
+
+    // 스칼라 속성(순서 무관·없으면 기본값 = additive 하위호환). background-color·accent-color는 나중 추가돼도
+    // 옛 파일이 안 깨지고 0(없음)으로 복원된다(docs/workspace-restore.md "직렬화 진화 계획").
+    const active_pane = try f.getUint("active-pane", usize, 0);
+    const custom_name = try f.getQuoted(a, "custom-name", "");
+    const pinned = (try f.getUint("pinned", u8, 0)) != 0;
+    const background_color = try f.getUint("background-color", u32, 0);
+    const accent_color = try f.getUint("accent-color", u32, 0);
 
     var tree: std.ArrayList(TreeNode) = .empty;
     // 구조 불변식: pane P개 탭의 split 트리는 leaf P + split (P−1) = 정확히 2P−1 노드다. 그보다 많이 읽히면
@@ -276,14 +277,11 @@ fn parseTree(a: std.mem.Allocator, lines: *LineIter, out: *std.ArrayList(TreeNod
 }
 
 fn parsePane(a: std.mem.Allocator, lines: *LineIter) ParseError!Pane {
-    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
-    if (!std.mem.eql(u8, try r.word(), "pane")) return error.BadLine;
-    try r.key("surfaces=");
-    const surface_count = try r.uint(usize);
-    try r.key("active-term=");
-    const active_term = try r.uint(usize);
-    try r.key("custom-name=");
-    const custom_name = try r.quoted(a);
+    const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
+    if (!std.mem.eql(u8, f.kind, "pane")) return error.BadLine;
+    const surface_count = try f.requireUint("surfaces", usize); // 구조 키(surface 개수) — 없으면 BadLine
+    const active_term = try f.getUint("active-term", usize, 0); // 스칼라(기본 0)
+    const custom_name = try f.getQuoted(a, "custom-name", "");
 
     var surfaces: std.ArrayList(Surface) = .empty;
     var i: usize = 0;
@@ -292,33 +290,28 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter) ParseError!Pane {
 }
 
 fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
-    var r = FieldReader{ .line = lines.next() orelse return error.Truncated };
-    if (!std.mem.eql(u8, try r.word(), "surface")) return error.BadLine;
-    try r.key("custom-name=");
-    const custom_name = try r.quoted(a);
-    try r.key("title=");
-    const title = try r.quoted(a);
-    try r.key("cwd=");
-    const cwd = try r.quoted(a);
-    try r.key("command=");
-    const command = try r.quoted(a);
-    try r.key("cols=");
-    const cols = try r.uint(u16);
-    try r.key("rows=");
-    const rows = try r.uint(u16);
-    try r.key("agent-kind=");
-    const agent_kind = try r.quoted(a);
-    try r.key("agent-session=");
-    const agent_session = try r.quoted(a);
-    try r.key("agent-argc=");
-    const argc = try r.uint(usize);
+    const f = try LineFields.parse(a, lines.next() orelse return error.Truncated);
+    if (!std.mem.eql(u8, f.kind, "surface")) return error.BadLine;
+    // 스칼라 속성(순서 무관·없으면 기본값). cols/rows는 복원 시 실제 pane 크기로 resize되므로 누락 시 sane 터미널
+    // 기본(80×24)으로 graceful — 실 파일엔 항상 있고, 이 기본은 손상/축약 파일에서만 쓰인다.
+    const custom_name = try f.getQuoted(a, "custom-name", "");
+    const title = try f.getQuoted(a, "title", "");
+    const cwd = try f.getQuoted(a, "cwd", "");
+    const command = try f.getQuoted(a, "command", "");
+    const cols = try f.getUint("cols", u16, 80);
+    const rows = try f.getUint("rows", u16, 24);
+    const agent_kind = try f.getQuoted(a, "agent-kind", "");
+    const agent_session = try f.getQuoted(a, "agent-session", "");
+    // agent-argc는 구조 키(반복 agent-arg 개수의 self-delimiting 기준) — 없으면 BadLine, 거대값은 방어 차단.
+    const argc = try f.requireUint("agent-argc", usize);
     if (argc > max_agent_argv) return error.BadLine; // 손상/변조 방어(거대 루프 차단)
     var argv: std.ArrayList([]const u8) = .empty;
-    var ai: usize = 0;
-    while (ai < argc) : (ai += 1) {
-        try r.key("agent-arg=");
-        try argv.append(a, try r.quoted(a));
+    for (f.fields) |field| { // 반복 키 agent-arg를 나온 순서대로 수집(key-addressed find는 첫 매치만이라 직접 순회)
+        if (!std.mem.eql(u8, field.key, "agent-arg")) continue;
+        if (!field.is_quoted) return error.BadLine;
+        try argv.append(a, try unescapeQuoted(a, field.raw));
     }
+    if (argv.items.len != argc) return error.BadLine; // self-delimiting 정합: agent-argc == 실제 agent-arg 개수(불일치=손상)
     return .{
         .custom_name = custom_name,
         .title = title,
@@ -351,8 +344,9 @@ const LineIter = struct {
     }
 };
 
-/// 한 라인을 `<kind> key=val ...` 토큰으로 순차 파싱한다(앞에서부터 소비 — 따옴표 값이 다른 key 토큰을 흉내내도
-/// 안전하게 sequential read). word=공백까지 한 토큰, key=`name` 정확 매치, uint=숫자, quoted=`"..."` escape 해제.
+/// `tree-node` 구조 라인 전용 순차(positional) 파서 — leaf/split 판별 word + pane=/ratio= 정수. 스칼라 속성 라인
+/// (window/tab/pane/surface)은 순서 무관 key-addressed(LineFields)로 읽는다(docs/workspace-restore.md "직렬화 진화
+/// 계획"). tree-node는 구조(라인 타입·판별 word)라 key=value가 아니어서 positional 유지. word=공백까지 한 토큰, key=`name` 정확 매치, uint=숫자.
 const FieldReader = struct {
     line: []const u8,
     i: usize = 0,
@@ -381,37 +375,108 @@ const FieldReader = struct {
         if (self.i == start) return error.BadLine;
         return std.fmt.parseInt(T, self.line[start..self.i], 10) catch error.BadLine;
     }
+};
 
-    /// `"` 부터 닫는 unescaped `"` 까지를 escape 해제해 arena에 dup(writer.writeEscaped의 역연산).
-    fn quoted(self: *FieldReader, a: std.mem.Allocator) ParseError![]const u8 {
-        if (self.i >= self.line.len or self.line[self.i] != '"') return error.BadLine;
-        self.i += 1;
-        var out: std.ArrayList(u8) = .empty;
-        while (self.i < self.line.len) {
-            const c = self.line[self.i];
-            if (c == '"') {
-                self.i += 1;
-                return out.toOwnedSlice(a);
-            }
-            if (c == '\\') {
-                self.i += 1;
-                if (self.i >= self.line.len) return error.BadLine;
-                const mapped: u8 = switch (self.line[self.i]) {
-                    '\\' => '\\',
-                    '"' => '"',
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    else => return error.BadLine,
-                };
-                try out.append(a, mapped);
-                self.i += 1;
+/// 따옴표 값의 escape(`\\` `\"` `\n` `\r` `\t`)를 해제해 arena에 dup한다(writer.writeEscaped의 역연산).
+/// LineFields가 조회 시점에 호출한다(원바이트는 토큰화 때 span만 잡아두고, 실제 읽는 키만 여기서 해제).
+fn unescapeQuoted(a: std.mem.Allocator, raw: []const u8) ParseError![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < raw.len) {
+        const c = raw[i];
+        if (c == '\\') {
+            i += 1;
+            if (i >= raw.len) return error.BadLine;
+            try out.append(a, switch (raw[i]) {
+                '\\' => '\\',
+                '"' => '"',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                else => return error.BadLine,
+            });
+            i += 1;
+        } else {
+            try out.append(a, c);
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// 스칼라 속성 라인(`<kind> key=val key="quoted" ...`)을 **순서 무관** key=value 필드로 토큰화한다(key-addressed —
+/// docs/workspace-restore.md "직렬화 진화 계획"). 구조 키(개수: `tabs`/`panes`/`surfaces`/`agent-argc`)는 `requireUint`으로
+/// 없으면 BadLine(손상 탐지 loud-fail 유지), 스칼라 속성은 `getUint`/`getQuoted`로 없으면 기본값(additive 하위호환 —
+/// 옛 파일이 안 깨짐). 미지 키는 조회 안 되어 자연히 skip(forward-compat). 값은 조회 시점에 파싱(quoted는 그때
+/// escape 해제 → arena). 반복 키(`agent-arg`)는 `fields`를 직접 순회해 순서대로 수집한다.
+const LineFields = struct {
+    const Field = struct { key: []const u8, raw: []const u8, is_quoted: bool }; // raw: uint=숫자 슬라이스 / quoted=따옴표 안 원바이트(escape 미해제)
+
+    kind: []const u8,
+    fields: []const Field,
+
+    /// 라인을 `kind` + (key,value) 필드로 훑는다. 따옴표 값은 escape(`\"`)를 존중해 닫는 따옴표를 찾으므로, 값 안의
+    /// `key=` 흉내나 공백이 토큰 경계를 깨지 않는다. key에 `=`가 없으면 BadLine, 닫는 따옴표가 없으면 BadLine.
+    fn parse(a: std.mem.Allocator, line: []const u8) ParseError!LineFields {
+        var i: usize = 0;
+        while (i < line.len and line[i] == ' ') i += 1;
+        const ks = i;
+        while (i < line.len and line[i] != ' ') i += 1;
+        if (i == ks) return error.BadLine; // 라인 타입 토큰 없음
+        const kind = line[ks..i];
+
+        var list: std.ArrayList(Field) = .empty;
+        while (true) {
+            while (i < line.len and line[i] == ' ') i += 1;
+            if (i >= line.len) break;
+            if (list.items.len >= max_line_fields) return error.BadLine; // 손상/변조 방어: 한 줄 토큰 폭주 차단(작업·메모리 경계)
+            const key_start = i;
+            while (i < line.len and line[i] != '=' and line[i] != ' ') i += 1;
+            if (i >= line.len or line[i] != '=' or i == key_start) return error.BadLine; // key= 형식 아님
+            const key = line[key_start..i];
+            i += 1; // '=' 소비
+            if (i < line.len and line[i] == '"') {
+                i += 1;
+                const vs = i;
+                while (i < line.len and line[i] != '"') {
+                    i += if (line[i] == '\\') 2 else 1; // escape 다음 1바이트 건너뜀(닫는 따옴표가 \" 를 안 오인하게)
+                }
+                if (i >= line.len) return error.BadLine; // 닫는 따옴표 없음(escape가 끝을 넘어가도 여기서 걸림)
+                try list.append(a, .{ .key = key, .raw = line[vs..i], .is_quoted = true });
+                i += 1; // 닫는 따옴표 소비
             } else {
-                try out.append(a, c);
-                self.i += 1;
+                const vs = i;
+                while (i < line.len and line[i] != ' ') i += 1;
+                try list.append(a, .{ .key = key, .raw = line[vs..i], .is_quoted = false });
             }
         }
-        return error.BadLine; // 닫는 따옴표 없음
+        return .{ .kind = kind, .fields = try list.toOwnedSlice(a) };
+    }
+
+    fn find(self: LineFields, key: []const u8) ?Field {
+        for (self.fields) |f| if (std.mem.eql(u8, f.key, key)) return f;
+        return null;
+    }
+
+    /// 스칼라 정수 속성: 있으면 파싱(quoted면 BadLine·garbage면 BadLine — 있는데 깨졌으면 조용히 기본값 금지), 없으면 default.
+    fn getUint(self: LineFields, key: []const u8, comptime T: type, default: T) ParseError!T {
+        const f = self.find(key) orelse return default;
+        if (f.is_quoted) return error.BadLine;
+        return std.fmt.parseInt(T, f.raw, 10) catch error.BadLine;
+    }
+
+    /// 구조 정수 키(개수 등): 없으면 BadLine(loud-fail — 기본값으로 못 때움).
+    fn requireUint(self: LineFields, key: []const u8, comptime T: type) ParseError!T {
+        const f = self.find(key) orelse return error.BadLine;
+        if (f.is_quoted) return error.BadLine;
+        return std.fmt.parseInt(T, f.raw, 10) catch error.BadLine;
+    }
+
+    /// 스칼라 따옴표 속성: 있으면 escape 해제해 arena dup, 없으면 default(호출자 리터럴 — arena가 통째 소유하므로 정적 슬라이스도 안전).
+    fn getQuoted(self: LineFields, a: std.mem.Allocator, key: []const u8, default: []const u8) ParseError![]const u8 {
+        const f = self.find(key) orelse return default;
+        if (!f.is_quoted) return error.BadLine;
+        return unescapeQuoted(a, f.raw);
     }
 };
 
@@ -579,6 +644,50 @@ test "workspace parse: 구조·escape 해제·forgiving" {
     try std.testing.expectEqualStrings("/bin/bash", tab.panes[1].surfaces[0].command);
 }
 
+test "workspace parse: key-addressed 하위호환·순서무관·미지키 skip·구조키 필수" {
+    // ① 하위호환: background-color·accent-color가 없는 옛 tab 라인도 파싱되고 각각 0(기본)이 된다(폴백 없음).
+    //    active-pane·pinned도 없이 panes=만 있어도 스칼라는 전부 기본값으로 복원 — additive 필드가 옛 파일을 안 깬다.
+    const old =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 custom-name=\"legacy\"\n" ++ // background-color·accent-color·active-pane·pinned 없음(구버전)
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++ // active-term 없음
+        "surface custom-name=\"\" title=\"\" cwd=\"/w\" command=\"/bin/zsh\" cols=100 rows=30 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    var op = try parse(std.testing.allocator, old);
+    defer op.deinit();
+    const ot = op.workspace.windows[0].tabs[0];
+    try std.testing.expectEqualStrings("legacy", ot.custom_name);
+    try std.testing.expectEqual(@as(u32, 0), ot.background_color); // 없음 → 기본 0
+    try std.testing.expectEqual(@as(u32, 0), ot.accent_color); // 없음 → 기본 0
+    try std.testing.expectEqual(false, ot.pinned); // 없음 → 기본 false
+    try std.testing.expectEqual(@as(usize, 0), ot.active_pane); // 없음 → 기본 0
+    try std.testing.expectEqual(@as(usize, 0), ot.panes[0].active_term); // 없음 → 기본 0
+
+    // ② 순서 무관 + ③ 미지 키 skip: 스칼라 키 순서를 뒤섞고 모르는 future-key를 끼워도 정확히 파싱된다(forward-compat).
+    const reordered =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab accent-color=100 panes=1 future-key=\"ignored\" pinned=1 custom-name=\"x\" background-color=200 active-pane=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    var rp = try parse(std.testing.allocator, reordered);
+    defer rp.deinit();
+    const rt = rp.workspace.windows[0].tabs[0];
+    try std.testing.expectEqual(@as(u32, 200), rt.background_color); // 순서 뒤섞여도 이름으로 정확히
+    try std.testing.expectEqual(@as(u32, 100), rt.accent_color);
+    try std.testing.expectEqual(true, rt.pinned);
+    try std.testing.expectEqualStrings("x", rt.custom_name); // future-key는 조용히 skip, 값 흉내가 경계 안 깸
+
+    // ④ 구조 키(panes=)가 없으면 loud-fail(BadLine) — 손상 탐지는 유지(스칼라만 기본값, 개수 키는 required).
+    const no_panes =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab active-pane=0 custom-name=\"\"\n"; // panes= 없음 → 블록 파싱 불가
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, no_panes));
+}
+
 test "workspace parse: 잘못된 헤더는 에러" {
     try std.testing.expectError(error.BadHeader, parse(std.testing.allocator, "not.a.workspace\nwindow tabs=0 active-tab=0\n"));
 }
@@ -694,4 +803,22 @@ test "workspace parse: agent-argc 과대값은 graceful 차단(BadLine)" {
         "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
         "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"claude\" agent-session=\"\" agent-argc=999999\n";
     try std.testing.expectError(error.BadLine, parse(std.testing.allocator, huge));
+}
+
+test "workspace parse: 라인 필드 수 상한 초과는 BadLine(key-addressed 토큰 폭주 방어)" {
+    // agent-argc는 작지만(2) agent-arg 토큰을 max_line_fields 넘게 채운 라인 — count 불일치 이전에 LineFields.parse의
+    // 필드 상한에서 먼저 BadLine. max_agent_argv가 argc 값만 가두던 방어를 key-addressed 리더의 라인 토큰 수로도 유지함을 고정.
+    const a = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a, header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=2");
+    var k: usize = 0;
+    while (k < max_line_fields + 8) : (k += 1) try buf.appendSlice(a, " agent-arg=\"x\""); // 기본 9키 + 이만큼 → 상한 초과
+    try buf.appendSlice(a, "\n");
+    try std.testing.expectError(error.BadLine, parse(a, buf.items));
 }

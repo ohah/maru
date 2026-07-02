@@ -171,7 +171,45 @@ positional이라 키 순서·개수가 writer와 정확히 맞아야 한다(필�
 
 - custom_name은 트리 내 위치(인덱스)로 round-trip한다(cwd/title과 같은 식별).
 - 자동 제목(surface `title`)은 복원 직후 셸이 OSC를 다시 보내기 전까지의 폴백 표시용으로만 저장·소비한다. custom_name이 있으면 표시 규칙상 자동 제목보다 우선한다.
-- 하위 호환은 고려하지 않는다 — 필드는 `maru.workspace.v1`에 직접 추가한다(구버전 파일 읽기 보장 없음).
+- 하위 호환은 고려하지 않는다 — 필드는 `maru.workspace.v1`에 직접 추가한다(구버전 파일 읽기 보장 없음). 이는 **현재** 동작이며,
+  per-tab 스칼라 필드가 계속 늘어남에 따라 아래 "[직렬화 진화 계획](#직렬화-진화-계획-스칼라-필드-key-addressed-파싱-미구현)"으로 이 정책을 좁힐 예정이다(additive 스칼라만 하위호환).
+
+## 직렬화 진화 계획: 스칼라 필드 key-addressed 파싱 (미구현)
+
+> 상태: **미구현 계획**. 현재 파서는 여전히 strict positional + 통째 폴백/self-heal(위 정책). 이 절은 언제·왜·어떻게 전환할지의 단일 출처다.
+
+**동기.** per-tab 스칼라 속성(현재 `custom_name`·`pinned`·`background_color`·`accent_color`; 앞으로 아이콘·정렬·메모 등 계속 추가 예정)이 늘 때마다,
+현재 strict positional 파서는 그 키가 없는 옛 저장 파일을 **통째 파싱 실패**로 떨궈 **업데이트마다 워크스페이스 배치가 1회 리셋**된다
+(다음 정상 종료의 self-heal 전까지). 필드 하나면 감수할 만하지만, 지속적으로 늘어나는 방향이라 누적 UX 비용이 커진다.
+
+**목표.** 줄 안의 **스칼라 `key=value` 필드**를 **순서 무관·이름 조회 + 기본값**으로 읽어, additive 스칼라 필드 추가가 옛 파일을 안 깨게 한다(무손실
+하위호환). 구조 골격(라인 타입 토큰·self-delimiting 카운트·tree preorder)은 그대로 둔다 — 스칼라가 아니라 구조라, 바뀌면 여전히 버전/self-heal 사건이다.
+
+**핵심 결정 — required vs optional 분류(실패 모델 보존).** key-addressed는 "없는 키=기본값"이라, 손상 파일이 조용히 그럴듯한-틀린 상태로 파싱될
+위험이 있다(현재 strict의 loud-fail이 주는 손상 탐지를 잃음). 이를 막으려 키를 둘로 나눈다:
+
+- **required(구조 키)** — 없으면 블록 파싱 자체가 불가능한 키(`tabs=`·`panes=`·`surfaces=`·`agent-argc=` 등 뒤 블록 개수를 결정). 없으면
+  `BadLine → 파일 통째 폴백`(현행 loud-fail 유지 = 손상 탐지 보존). 기본값으로 못 때운다.
+- **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·`title`="" 및 앞으로의
+  per-tab/surface 스칼라 전부). 없으면 기본값, 실패 없음.
+
+**미지 키 정책.** 옛 바이너리가 새 파일의 모르는 스칼라 키를 만나면 **조용히 skip(artifact 로그 남김)** — 앞뒤 버전 호환. 오타 키도 조용히 무시되는
+트레이드오프는 optional 속성이라 감수하고, 구조 이상은 위 required 규칙이 잡는다.
+
+**범위 밖(이 계획이 해결하지 않는 것).** 새 블록 타입 추가·tree 인코딩 변경·카운트 의미 변경 = 구조 파괴 변경이라 여전히 스키마 버전 bump
+(`maru.workspace.v1`→`.v2`) 또는 self-heal 폴백 대상이다("[저장 파일을 통째로 파싱 못 할 때](#저장-파일을-통째로-파싱-못-할-때)"). additive 스칼라 필드는 버전을 올리지 않는다.
+
+**마이그레이션 경로(증분·저위험).**
+
+1. 라인-tail 파서 도입: 타입 토큰 뒤 나머지 토큰을 (key,value)로 훑어 `getUint(key, default)`/`getQuoted(key, default)`/`getEnum(...)` +
+   구조 키용 `requireUint(key)`를 제공(`FieldReader` 확장 또는 대체).
+2. `parseTab`/`parsePane`/`parseSurface`를 positional read에서 key-addressed read로 전환(구조 키만 require).
+3. writer 불변(이미 `key=value`를 씀) → round-trip 고정점 유지. reader만 바뀌어 옛 파일이 기본값으로 복원 → **이후 additive 업데이트의 리셋 UX 소멸**.
+4. 이 문서의 "하위 호환"·"실패 처리" 문구 갱신: "additive 스칼라 = 하위호환(key-addressed+기본값), 구조/버전 변경 = 폴백+self-heal".
+5. 테스트: 옛 포맷 fixture(새 키 없음)가 기본값으로 복원 / 구조 키 손상이 여전히 BadLine / 미지 키 skip / round-trip 고정점.
+
+**트리거(언제).** 지금(색 필드 하나) 하지 않는다 — self-heal로 충분하고 YAGNI. **다음 per-tab 필드 묶음이 들어오기 직전에 별도 PR로** 전환해,
+그 필드들이 처음부터 key-addressed reader 위에 안착하고 리셋을 유발하지 않게 한다. 전환 자체가 전략 수정이므로 [PR 체크리스트](pr-checklist.md)의 "전략 수정 규칙"에 따라 진행한다.
 
 ## env 저장 정책
 

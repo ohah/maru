@@ -43,16 +43,17 @@
 
 문제는 `allTabsTerminated`가 **"쓰다가 종료"와 "시작하자마자 사망"을 구분하지 못한다**는 점이다. config가 잘못돼 첫(유일) 셸이 spawn 직후 죽으면(예: `shell.command = /usr/bin/false`, `shell.args = -c "exit 1"`, exec 실패) 세션이 **애초에 성립한 적이 없는데도** 위 경로가 앱을 종료시켜, 창이 깜빡하고 사라진다 — 사용자는 원인을 볼 수도, 설정 화면에 갈 수도 없다(매 실행 반복). `resolveConfiguredShell`(실행 불가 셸 *경로* 폴백)은 이 중 "경로가 틀린" 하나만 막고, 실행은 되지만 즉시 종료하는 셸/args는 여전히 이 lifecycle로 앱을 종료시킨다. 즉 루트커즈는 셸-경로 계층이 아니라 **"usable 세션에 도달한 적 없는 창의 자동 종료"를 정상 종료와 동일 취급**하는 lifecycle 계층이다.
 
-**정책(창 유지)**: 세션 종료 latch 지점에서, 그 창이 수명 동안 **한 번도 PTY 출력을 낸 적이 없으면**(`total_output_events == 0` — 프롬프트·에러 텍스트 등 사용자가 볼 무엇도 없었음 = usable 세션 미도달) `ended_seen`을 세우지 **않고** 창을 유지한다(`termination_finished`만 세워 매 tick 재평가를 막고, `ended_seen=0`이라 ABI status는 `ok`로 남아 host가 창을 안 닫는다). 대신 `showNotice`로 종료 사실·exit code·복구 방법을 띄운다. 출력이 한 번이라도 있었으면(=usable였음) 기존대로 종료한다.
+**정책(창 유지)**: 세션 종료 latch(`latchSessionEndOrHold`)에서, 종료가 **비정상**(exit code≠0·시그널·exec 실패·read error — 정상 `exit 0`은 제외)이고 그 창이 **usable 세션에 도달하지 못했으면** `ended_seen`을 세우지 **않고** 창을 유지한다. 유지 상태는 `startup_held` 플래그로 latch한다 — `termination_finished`는 세우지 **않는다**(그래야 새 셸을 열면 re-arm돼 새 세션이 정상 종료 판정을 다시 받는다). `ended_seen=0`이라 ABI status는 `ok`로 남아 host가 창을 안 닫는다. `showNotice`로 원인(exit code)·복구를 안내한다. 정상 종료(exit 0)이거나 usable였던 창은 기존대로 종료한다.
 
-- **신호로 "출력 유무"를 쓰는 이유**: 시계에 의존하지 않아 **결정론적**이고(테스트 가능), 셸 통합(OSC 133) 유무와 무관하며, 문제의 트리거(exec 실패·`/usr/bin/false`·조용한 `exit N`)는 전부 출력이 0이다. 정상 세션은 프롬프트만으로도 출력이 생겨 자연히 종료 경로를 탄다. `pty-operating-model.md`("종료된 surface의 마지막 화면을 볼 수 있어야 한다")의 원칙을 **창의 마지막 surface까지** 확장한 것이다.
-- **복구**: 창이 살아 있으므로 사용자가 설정(⌘,)에서 `shell.command`/`shell.args`를 고치고 `Reload Config` 후 새 셸(⌘T/⌘N)을 열면 정상 실행된다. notice가 이 경로를 안내한다.
+- **usable 미도달 신호**: (a) 창이 수명 동안 한 번도 PTY 출력이 없었거나(`total_output_events==0`), (b) 셸이 spawn 후 **grace window(`startup_grace_ms`, 기본 2000ms) 안에** 죽었으면 usable 미도달로 본다. (a)는 조용한 실패(exec 실패·`/usr/bin/false`·`exit N`), (b)는 에러를 한 줄 찍고 곧장 죽는 오설정을 잡는다. 둘 다 **비정상 종료 게이트 아래에서만** 판정한다.
+- **exit-code 게이트가 필수인 이유**: 출력 유무만 보면 `/usr/bin/true`처럼 **조용히 성공(exit 0·무출력)**한 one-shot 명령까지 held돼 창이 영영 안 닫히고 실패 문구가 뜬다(성공을 실패로 오판). 그래서 `exit 0`은 항상 정상 종료로 취급해 유지하지 않는다. 신호 판정은 순수 함수 `holdOnStartupExit(uptime_ms, output_events, exit_abnormal, chrome_minimal)`로, 시계는 uptime을 주입해 결정론적으로 테스트한다. `pty-operating-model.md`("종료된 surface의 마지막 화면을 볼 수 있어야 한다")의 원칙을 **창의 마지막 surface까지** 확장한 것이다.
+- **죽은 surface 입력 가드**: held 창의 활성 surface는 죽은 PTY(`process_state=.exited`)다. 터미널 입력은 `writeInput`이 `ProcessExited`/`WriteFailed`로 실패하는데, `ended_seen` 가드만으론 held(`ended_seen=0`)에서 안 걸린다. 그래서 `handleKeyEvent`는 `frame_loop.handleKeyEvent`의 그 에러를 **catch해 ignored로 회계**(late-input, 치명적 fault 아님)한다. ⌘,·⌘T 같은 앱 단축키는 host가 `.app_action`으로 resolve해 **write 없이** 처리하므로 이 catch에 안 걸려 계속 동작한다 → held 창에서도 복구가 가능하다.
+- **복구 + 좀비 reap**: 설정(⌘,)에서 `shell.command`/`shell.args`를 고치고 새 셸(⌘T/⌘N)을 열면 `createTerm`이 `startup_held`를 re-arm(false)하고, 새 live Term이 붙은 뒤 held로 남아 있던 죽은 Term을 reap한다(좀비 탭 방지 — `allTabsTerminated`가 true인 동안 `reapTerminatedTerms`가 early-return하므로 명시 reap). 새 세션이 정상 종료하면 기존대로 앱이 종료된다.
 - **범위/한계**:
-  - **usable였던 창은 유지하지 않는다** — 출력이 있었던 창의 마지막 셸이 죽으면 기존대로 종료(사용자가 쓰던 세션을 정상 종료한 것).
-  - **퀵 터미널·미니멀 스크래치(`chrome_minimal`)는 제외** — 수명이 짧은 표면이라 종료 시 그대로 닫힌다(창 유지 안 함).
-  - **출력을 낸 뒤 즉시 죽는 오설정**(에러 한 줄 찍고 exit)은 유지 대상이 아니다(출력>0). 드문 케이스로, 별도 신호가 필요하면 후속.
+  - 정상 종료(exit 0)·usable였던 창·출력을 낸 뒤 grace 밖에서 죽은 셸은 유지하지 않는다(기존대로 종료).
+  - 퀵 터미널·미니멀 스크래치(`chrome_minimal`)는 제외.
   - 사용자가 **명시적으로 닫는 경로**(Cmd+W/빨간 버튼/Cmd+Q)는 이 정책과 무관하다 — 위 "닫기 확인"이 관할한다.
-- **검증**: `app_session.zig` 단위 테스트가 `allTabsTerminated`를 흉내 낸 상태에서 (1) `total_output_events==0` → `ended_seen`이 안 서고 창 유지, (2) `total_output_events>0` → 기존대로 `ended_seen` latch를 결정론적으로 증명한다(실 PTY·시계 불요).
+- **검증**: 순수 `holdOnStartupExit`가 (비정상+무출력)·(비정상+grace내)→유지, (정상 exit0)·(usable였음)·(grace밖)→종료를 결정론적으로 증명(uptime 주입). `latchSessionEndOrHold`는 실 PTY 종료 상태로 held/정상 종료/re-arm+reap을, `handleKeyEvent`는 terminated 활성 surface의 터미널 입력 무시를 증명한다.
 
 ## 현재 app shell 범위
 

@@ -149,7 +149,7 @@ resize는 두 곳에 반영되어야 한다.
 
 현재 `readEvent`가 EOF를 보거나 child process 종료를 감지하면 `PtyEvent.exited`를 반환한다. SurfaceRuntime 단계에서는 reader thread가 같은 event를 queue에 넣는다.
 
-`SurfaceRuntime`은 이 event를 받아 surface metadata를 갱신한다. 이때 surface 자체를 바로 삭제하지 않는다. 사용자는 종료된 surface의 마지막 화면을 볼 수 있어야 하기 때문이다.
+`SurfaceRuntime`은 이 event를 받아 surface metadata를 갱신한다. 이때 surface 자체를 바로 삭제하지 않는다. 사용자는 종료된 surface의 마지막 화면을 볼 수 있어야 하기 때문이다. 이 "마지막 화면 유지" 원칙은 app host에서 **창의 마지막 surface**까지 확장된다 — 첫 셸이 usable 세션에 도달하지 못하고(출력 0) 죽으면 앱을 종료하지 않고 창을 유지해 사용자가 원인을 보고 설정을 고치게 한다(단일 출처: `macos-app-host-boundary.md` "세션 자동 종료: 정상 종료 vs 비정상 시작 사망").
 
 ## session close
 

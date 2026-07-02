@@ -3136,7 +3136,12 @@ pub const AppSession = struct {
         // 비정상 시작 사망으로 held된 창에 새 셸이 뜨면 held를 풀어(re-arm), 이 새 세션이 정상 종료할 때 세션 종료
         // latch가 다시 판정하게 한다(held→⌘T 새 셸→쓰다 exit→정상 앱 종료). 모든 surface spawn의 단일 chokepoint.
         // held였다면 pending_zombie_reap을 세워, 이 live Term이 붙은 뒤 tick이 남은 죽은 Term을 reap한다(좀비 탭 방지).
-        if (self.startup_held) self.pending_zombie_reap = true;
+        // 또한 total_output_events를 리셋한다 — holdOnStartupExit의 "usable 미도달=무출력" 신호는 세션 누적 카운터라,
+        // 리셋 안 하면 1차 시도의 출력이 남아 재시도가 조용히 실패해도 "usable"로 오판돼 창이 닫힌다(재시도는 새 시도).
+        if (self.startup_held) {
+            self.pending_zombie_reap = true;
+            self.total_output_events = 0;
+        }
         self.startup_held = false;
 
         term.surface = try maru.session.Surface.init(self.allocator, id, size);
@@ -6342,21 +6347,6 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
-        // held 창(비정상 시작 사망 유지): **⏎(Enter)** 는 그 자리에서 셸을 재시작한다(in-place respawn). chrome 모달
-        // 라우팅보다 **먼저** 가로채 notice가 열려 있어도 즉시 동작하되, 다른 모달(설정·팔레트·확인 등)이 열려 있으면
-        // 양보한다(그 모달의 Enter를 안 뺏는다). notice가 떠 있으면 닫고 재시작한다. macos-app-host-boundary.md "세션 자동 종료".
-        if (self.startup_held and event.key == .enter and
-            !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
-            !self.anyModalOverlayOpen())
-        {
-            self.chrome_host.notice.dismiss();
-            self.newTermInActivePane() catch {}; // createTerm이 startup_held re-arm + 좀비 reap 예약
-            self.metal_dirty = true;
-            self.total_app_key_events += 1;
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
-        }
         // 인라인 rename이 활성이면 키를 rename 편집기로 라우팅한다 — chrome 모달과 같은 최상위 규율(배타적: startRename이
         // find/palette를 닫음). Enter=확정·Esc=취소·Backspace·평문 글자를 handleRenameKey가 처리하고 모든 키를 소비한다
         // (텍스트 필드라 터미널/단축키로 안 흘린다). IME 조합은 imeSetPreedit/imeEnd가 rename_input에 직접 넣는다.
@@ -6384,6 +6374,25 @@ pub const AppSession = struct {
         if (self.chrome_host.settings.open and self.chrome_host.settings.recording) {
             self.captureKeybindRecording(event);
             self.resetCursorBlink();
+            self.metal_dirty = true;
+            self.total_app_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
+        // held 창(비정상 시작 사망 유지): **⏎(Enter)** 는 그 자리에서 셸을 재시작한다(in-place respawn). 위의 rename·
+        // 사이드바 검색·keybind 녹음이 이미 처리·소비해 그들의 Enter를 뺏지 않는다. 입력받는 모달(설정·팔레트·확인 등)이
+        // 열려 있으면 양보하고(anyModalOverlayOpen — notice만 제외), notice 토스트만 열려 있으면 닫고 재시작한다 — 바로 아래
+        // chrome-modal 라우팅이 아무 키로나 notice를 닫아 이 재시작 키를 삼키기 전에 가로챈다. macos-app-host-boundary.md "세션 자동 종료".
+        if (self.startup_held and event.key == .enter and
+            !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
+            !self.anyModalOverlayOpen())
+        {
+            self.chrome_host.notice.dismiss();
+            self.newTermInActivePane() catch {
+                // 재시작 실패(spawn 실패·OOM 등)는 조용히 삼키지 않는다 — held 유지된 채 안내를 다시 띄운다.
+                self.showNotice("셸 재시작에 실패했습니다 — 설정(⌘,)을 확인하세요.");
+            };
             self.metal_dirty = true;
             self.total_app_key_events += 1;
             self.writeSummaryFromState();
@@ -17775,12 +17784,23 @@ test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 
     try std.testing.expect(!session.ended_seen);
     try std.testing.expect(session.startup_held); // 여전히 held(입력이 상태를 안 바꿈)
 
-    // #4 held 창에서 ⏎(Enter, 모디파이어·모달 없음)는 그 자리에서 셸을 재시작(in-place respawn) — 새 Term 추가 + re-arm.
+    // 회귀 가드(#1151 리뷰): held 창에서 **rename 중** Enter는 rename 확정으로 가야지 respawn을 뺏으면 안 된다
+    // (held-Enter 개입이 rename 핸들러 뒤에 있어야 함). rename을 시작하고 Enter → rename 확정, 새 Term 안 생김.
+    session.startRename(.{ .term = session.activePane().activeTerm() });
+    const terms_before_rename = session.activePane().terms.items.len;
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.rename == null); // rename이 Enter를 소비·확정(respawn이 안 뺏음)
+    try std.testing.expectEqual(terms_before_rename, session.activePane().terms.items.len); // respawn 안 함
+    try std.testing.expect(session.startup_held); // 여전히 held
+
+    // #4 held 창에서 ⏎(Enter, 모디파이어·모달·rename 없음)는 그 자리에서 셸을 재시작(in-place respawn) — 새 Term + re-arm.
+    session.total_output_events = 7; // #3 리셋 검증용(1차 시도 출력 흉내)
     const terms_before = session.activePane().terms.items.len;
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
     try std.testing.expect(session.activePane().terms.items.len > terms_before); // 새 셸 추가
     try std.testing.expect(!session.startup_held); // createTerm이 re-arm
     try std.testing.expect(session.pending_zombie_reap); // 죽은 Term reap 예약
+    try std.testing.expectEqual(@as(u64, 0), session.total_output_events); // #3 재시도 세션 usable 신호 리셋
 }
 
 test "setWorkspaceRoot(세팅 GUI 시작 디렉터리): 절대/~ 저장·빈 값 클리어·상대 무시+안내(loader 형식 공유)" {

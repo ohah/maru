@@ -11037,9 +11037,8 @@ pub const AppSession = struct {
         }
         // per-tab 카드별 색(우클릭 메뉴 "배경: …"·"바: …") — chrome draw op은 role 기반이라 임의 RGB를 못 실어, 배경 tint와
         // 좌측 accent 막대 **둘 다** platform이 명시-색 GpuQuad로 직접 lower한다(같은 카드를 한 번에 처리하는 단일 패스).
-        // 한 카드에서 tint(전폭 반투명)를 먼저, 막대(좌단 불투명)를 뒤에 append해 막대가 tint 위에 또렷이 얹힌다(텍스트 셀은
-        // 그 위 패스). 배경은 밴드 없는 idle 슬롯에서 특히 필요하고(활성/호버는 lowerSidebar가 밴드 색에 blend), 막대는 활성
-        // 카드=지정색 or 기본 테마 앰버·비활성 카드=지정 시에만. y는 f32 도메인으로 곱해 i32 overflow 회피.
+        // 한 카드에서 tint를 먼저, 막대(좌단 불투명)를 뒤에 append해 막대가 tint 위에 또렷이 얹힌다(텍스트 셀은 그 위 패스).
+        // 막대는 활성 카드=지정색 or 기본 테마 앰버·비활성 카드=지정 시에만. y는 f32 도메인으로 곱해 i32 overflow 회피.
         const slot_h = self.sidebar_slot_height_px;
         const card_tk = self.buildChromeTokens();
         const bar_w = card_tk.space.accent_bar_width_px;
@@ -11048,17 +11047,25 @@ pub const AppSession = struct {
         if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
             const slot_abs_y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px));
-            // ① 배경 tint(전폭 반투명). straight-alpha(셰이더 rgb*=a) — premultipliedRgba면 이중 premultiply로 흐려져
-            // 활성/호버 슬롯의 blendRgb(직접 알파) 경로보다 약해진다(code-review 발견). straight로 맞춰 일치시킨다.
-            if (tab.background_color != 0) {
-                if (self.sidebarScrollClipQuad(slot_abs_y, @floatFromInt(slot_h))) |sr| { // 스크롤+헤더 클립(직각이라 corner 무관)
+            const card_top = slot_abs_y + gap; // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일)
+            const card_h = @as(f32, @floatFromInt(slot_h)) - 2.0 * gap;
+            // ① 배경 tint — **밴드 없는 idle 슬롯에만** 오버레이 quad. 활성/호버/드롭 슬롯은 lowerSidebar가 밴드 색에
+            // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(gap inset)·둥근 모서리를 밴드와 맞춰
+            // rich에서 카드 모양대로 보이게(전폭 직사각 bleed 방지) — tui(gap=0·radius=0)면 전폭·직각(기존 동일).
+            // straight-alpha(셰이더 rgb*=a) — premultipliedRgba면 이중 premultiply로 밴드 blend 경로보다 흐려진다.
+            const is_hovered = if (self.hovered_slot) |hs| hs == i else false;
+            const is_drop = if (self.pane_drop_slot) |ds| ds == i else false;
+            const has_band = orig == self.app_window.active_tab or is_hovered or is_drop;
+            if (tab.background_color != 0 and !has_band) {
+                if (self.sidebarScrollClipQuad(card_top, card_h)) |sr| {
                     const c = packStraightRgbU32(tab.background_color, tab_bg_tint_alpha);
+                    const r: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px); // 헤더에 걸려 잘리면 라운드 죽임(밴드와 동일)
                     self.gpu_quads.append(self.allocator, .{
-                        .x = 0,
+                        .x = gap,
                         .y = sr.y,
-                        .w = @floatFromInt(self.sidebar_width_px),
+                        .w = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap,
                         .h = sr.h,
-                        .corner_radii = .{ 0, 0, 0, 0 },
+                        .corner_radii = .{ r, r, r, r },
                         .border_widths = .{ 0, 0, 0, 0 },
                         .fill_color0 = c,
                         .fill_color1 = c,
@@ -11068,26 +11075,14 @@ pub const AppSession = struct {
                     }) catch {};
                 }
             }
-            // ② 좌측 accent 막대(불투명). 색: 지정색(0xRRGGBB) 우선 → 없으면 활성만 기본 앰버, 비활성은 막대 없음.
-            // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일). 막대는 그 좌단(x=gap)·카드 높이(slot_h−2·gap).
+            // ② 좌측 accent 막대(불투명, 직각 strip). 색: 지정색(0xRRGGBB) 우선 → 없으면 활성만 기본 앰버, 비활성은 막대 없음.
+            // 막대는 카드 좌단(x=gap)·카드 높이. solid 직각 quad라 appendSolidQuad 재사용(divider 등과 동일 헬퍼).
             if (bar_w > 0) {
                 const word: u32 = if (tab.accent_color != 0)
                     packStraightRgbU32(tab.accent_color, 0xFF)
                 else if (orig == self.app_window.active_tab) default_accent else continue;
-                if (self.sidebarScrollClipQuad(slot_abs_y + gap, @as(f32, @floatFromInt(slot_h)) - 2.0 * gap)) |sr| {
-                    self.gpu_quads.append(self.allocator, .{
-                        .x = gap,
-                        .y = sr.y,
-                        .w = @floatFromInt(bar_w),
-                        .h = sr.h,
-                        .corner_radii = .{ 0, 0, 0, 0 },
-                        .border_widths = .{ 0, 0, 0, 0 },
-                        .fill_color0 = word,
-                        .fill_color1 = word,
-                        .border_color = 0,
-                        .gradient_kind = 0,
-                        .layer = 0,
-                    }) catch {};
+                if (self.sidebarScrollClipQuad(card_top, card_h)) |sr| {
+                    self.appendSolidQuad(gap, sr.y, @floatFromInt(bar_w), sr.h, word, 0);
                 }
             }
         };

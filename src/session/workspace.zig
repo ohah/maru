@@ -27,9 +27,11 @@ pub const max_agent_argv = 256;
 
 /// 한 라인의 key=value 필드 수 sanity 상한 — key-addressed 리더(LineFields)는 라인을 통째 토큰화하므로, 손상/변조
 /// 파일이 한 줄에 토큰을 무한정 채우면(예: agent-argc는 작은데 agent-arg를 수백만 개) 토큰화 작업·메모리가 라인
-/// 길이만큼 부풀 수 있다. max_agent_argv가 argc *값*만 가두던 방어를 라인 *토큰 수*로도 유지한다. 정상 최대 라인은
-/// surface(기본 키 ~9 + agent-argv ≤max_agent_argv)라, +64 여유면 어떤 정상·forward-compat 라인보다 크다(손상만 거른다).
-pub const max_line_fields = max_agent_argv + 64;
+/// 길이만큼 부풀 수 있다. max_agent_argv가 argc *값*만 가두던 방어를 라인 *토큰 수*로도 유지한다. 상한은 정상·forward-compat
+/// 라인을 절대 거부하지 않게 넉넉히 잡는다(DoS는 어떤 작은 상수로도 막히므로): 정상 최대 라인 = surface의 스칼라 키
+/// + agent-argv(≤max_agent_argv). scalar 키가 미래에 늘어도 한 라인에 256개(=max_agent_argv 여유)를 넘길 일은 없으므로,
+/// 이 여유면 순수 손상만 거르고 정상 확장은 통과한다(code-review high: 여유가 좁으면 미래 포맷을 통째 폴백시킬 수 있음).
+pub const max_line_fields = max_agent_argv + 256;
 
 pub const SplitDirection = split_tree.SplitDirection;
 

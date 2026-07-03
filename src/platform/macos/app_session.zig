@@ -1598,11 +1598,12 @@ pub const AppSession = struct {
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
-    // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). agent_spin_ticks가 약 133ms마다
-    // agent_spin_frame을 +1(mod spinner_wave.len=14) 진행하고 사이드바를 재투영한다 — 펄스(blink_visible 500ms 2위상)와
-    // 별개의 빠른 위상. anyAgentRunning일 때만 돈다.
+    // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). advanceAgentSpinner가 **wall-clock 경과**
+    // (agent_spin_last_ns 이후 실경과 ms)로 agent_spin_frame을 진행한다(mod spinner_wave.len=14) — tick 카운트가 아니라
+    // 실시간 기준이라 tick rate가 떨어져도(무거운 tick) 위상이 실시간을 따라가 부드럽고, stall 후엔 여러 프레임 catch-up
+    // 한다(§10.5 secondary). anyAgentRunning일 때만 돌고, 아니면 last_ns=0으로 baseline을 리셋한다.
     agent_spin_frame: u8 = 0,
-    agent_spin_ticks: u32 = 0,
+    agent_spin_last_ns: i128 = 0, // 직전 위상 진행 시각(ns, awake clock). 0=미초기화(다음 running tick이 baseline 설정).
     // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
     // 포그라운드 프로세스명을 polling해 agent_kind를 갱신한다(claude/codex/none).
     agent_poll_ticks: u32 = 0,
@@ -7526,10 +7527,6 @@ pub const AppSession = struct {
         return self.ticksForMs(agent_poll_interval_ms);
     }
 
-    fn agentSpinIntervalTicks(self: *const AppSession) u32 {
-        return self.ticksForMs(agent_spin_interval_ms);
-    }
-
     fn syncTimeoutTicks(self: *const AppSession) u32 {
         return self.ticksForMs(sync_timeout_ms);
     }
@@ -7578,14 +7575,26 @@ pub const AppSession = struct {
     /// **실제로 보이는** 카드(접힘 아님 + 검색 필터 통과) 중 running 에이전트가 있을 때만 위상을 진행하고 사이드바만 부분
     /// 투영(chrome_dirty) — 접힘·필터아웃·에이전트 없음이면 무동작(idle 재투영 없음). blink(500ms)보다 빠른 별도 위상(≈133ms).
     fn advanceAgentSpinner(self: *AppSession) void {
-        if (!self.anyAgentRunning()) return; // 보이는 running 에이전트 없음 — 무동작(chrome_dirty 안 세움)
-        self.agent_spin_ticks += 1;
-        if (self.agent_spin_ticks >= self.agentSpinIntervalTicks()) {
-            self.agent_spin_ticks = 0;
-            // 파형 길이로 wrap — u8 자연 wrap(256%14≠0)이면 255→0 경계에서 파형이 튀므로 주기 안에서 순환한다.
-            self.agent_spin_frame = (self.agent_spin_frame + 1) % @as(u8, @intCast(spinner_wave.len));
-            self.chrome_dirty = true; // [A] 사이드바만 부분 투영(sync hold 중에도 진행 + full-grid 재셰이프 회피)
+        if (!self.anyAgentRunning()) {
+            self.agent_spin_last_ns = 0; // running 없음 — 무동작 + baseline 리셋(다음 running이 새 위상으로 시작)
+            return;
         }
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (self.agent_spin_last_ns == 0) {
+            self.agent_spin_last_ns = now; // 첫 running tick — baseline만 세팅, 위상 불변
+            return;
+        }
+        const interval_ns: i128 = @as(i128, agent_spin_interval_ms) * std.time.ns_per_ms;
+        const elapsed = now - self.agent_spin_last_ns;
+        if (elapsed < interval_ns) return; // 한 주기 안 지남 — 아직 진행 안 함
+        // **wall-clock 경과분**만큼 위상 진행(tick 카운트 아님). tick이 느리거나 stall 후 재개돼도 실시간을 따라가
+        // 부드럽고, 큰 gap이면 여러 프레임을 한 번에 catch-up한다(§10.5 secondary). 소비한 interval의 나머지는 남겨
+        // (last_ns를 정확히 소비분만큼 전진) 위상을 실시간에 drift 없이 고정한다. 파형 길이(14)로 wrap.
+        const steps = @divTrunc(elapsed, interval_ns);
+        const wrap: u8 = @intCast(@mod(steps, @as(i128, spinner_wave.len)));
+        self.agent_spin_frame = (self.agent_spin_frame + wrap) % @as(u8, @intCast(spinner_wave.len));
+        self.agent_spin_last_ns += steps * interval_ns;
+        self.chrome_dirty = true; // [A] 사이드바만 부분 투영(sync hold 중에도 진행 + full-grid 재셰이프 회피)
     }
 
     /// 커서/오버레이 caret 깜빡임 한 스텝(frame-loop tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
@@ -14228,11 +14237,11 @@ test "anyAgentRunning: 펼침+보이는 running=true, 접힘·필터아웃=false
     try std.testing.expect(!session.anyAgentRunning()); // 필터아웃 → 카드 없음 → false
 }
 
-test "advanceAgentSpinner: running 에이전트면 출력과 무관하게 위상 진행(출력 게이트 굶김 회귀)" {
-    // 버그(§10.5 primary): 스피너 advance가 updateCursorBlink(출력 없는 tick에만 호출)에 있어, 연속 출력(SSH
-    // firehose 등)이 매 tick 스피너를 굶겨 다른 탭 running 에이전트 스피너가 멈췄다. 픽스로 advanceAgentSpinner를
-    // tick()에서 **출력 게이트 밖**에서 매 tick 돌린다. 이 테스트는 그 함수가 running 에이전트에서 위상을 진행하고
-    // (출력 인자 없음 = 출력 독립), 에이전트/사이드바 없음이면 무동작(idle 재투영 없음)임을 고정한다.
+test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진행(굶김·cadence 회귀)" {
+    // primary(§10.5): 스피너 advance가 updateCursorBlink(출력 없는 tick에만 호출)에 있어 연속 출력이 굶겨 멈췄다 →
+    // advanceAgentSpinner를 출력 게이트 밖에서 호출(출력 인자 없음 = 출력 독립). secondary(§10.5): 위상 진행을 tick
+    // 카운트가 아니라 **wall-clock 경과**로 → tick rate가 떨어져도 실시간을 따라가고 stall 후 여러 프레임 catch-up.
+    // 이 테스트는 baseline(agent_spin_last_ns)을 과거로 밀어 경과분만큼 위상이 진행되는지 결정적으로 고정한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -14245,27 +14254,40 @@ test "advanceAgentSpinner: running 에이전트면 출력과 무관하게 위상
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    const interval = session.agentSpinIntervalTicks();
     const term = session.tabs.items[0].activePane().activeTerm();
+    const interval_ns: i128 = @as(i128, agent_spin_interval_ms) * std.time.ns_per_ms;
+    const wave_len: u8 = @intCast(spinner_wave.len);
 
-    // 에이전트 없음 → interval+1번 돌려도 위상 불변 + chrome_dirty 안 세움(idle 재투영 없음).
+    // 에이전트 없음 → 여러 번 돌려도 위상 불변 + chrome_dirty 안 세움 + baseline 0 유지(idle 재투영 없음).
     session.chrome_dirty = false;
     const f0 = session.agent_spin_frame;
-    var i: u32 = 0;
-    while (i < interval + 1) : (i += 1) session.advanceAgentSpinner();
+    for (0..5) |_| session.advanceAgentSpinner();
     try std.testing.expectEqual(f0, session.agent_spin_frame);
     try std.testing.expect(!session.chrome_dirty);
+    try std.testing.expectEqual(@as(i128, 0), session.agent_spin_last_ns);
 
-    // running 에이전트 + 사이드바에 그 탭 보임 → interval번이면 위상 +1 + chrome_dirty(사이드바 부분 투영 요청).
-    // 출력은 일절 주지 않는다 — advanceAgentSpinner는 출력과 무관하게 진행해야 한다(버그의 핵심).
+    // running 에이전트 + 사이드바에 그 탭 보임. 첫 호출은 baseline만 세팅(위상 불변) — 이후 wall-clock 경과로 진행.
     term.agent_state = .running;
     term.agent_kind = .claude;
     try session.sidebar_visible_tabs.append(allocator, 0); // 사이드바에 탭0 카드 보임(collapsed/minimal 기본 false)
     session.chrome_dirty = false;
-    i = 0;
-    while (i < interval) : (i += 1) session.advanceAgentSpinner();
-    try std.testing.expectEqual(@as(u8, (f0 + 1) % @as(u8, @intCast(spinner_wave.len))), session.agent_spin_frame);
+    session.advanceAgentSpinner(); // baseline 설정
+    try std.testing.expectEqual(f0, session.agent_spin_frame); // 아직 경과 0 → 불변
+    try std.testing.expect(!session.chrome_dirty);
+    try std.testing.expect(session.agent_spin_last_ns != 0);
+
+    // baseline을 2 interval 과거로 밀어 2프레임 경과를 모사 → 한 번 호출에 위상 +2(tick 카운트 아님) + chrome_dirty.
+    session.agent_spin_last_ns = std.Io.Clock.awake.now(session.io).nanoseconds - 2 * interval_ns;
+    session.chrome_dirty = false;
+    session.advanceAgentSpinner();
+    try std.testing.expectEqual(@as(u8, (f0 + 2) % wave_len), session.agent_spin_frame); // catch-up 2프레임
     try std.testing.expect(session.chrome_dirty);
+
+    // 방금 진행해 baseline이 ~현재라, 곧바로 다시 불러도 한 주기 안 지나 위상 불변(경과 기반 정확).
+    session.chrome_dirty = false;
+    session.advanceAgentSpinner();
+    try std.testing.expectEqual(@as(u8, (f0 + 2) % wave_len), session.agent_spin_frame);
+    try std.testing.expect(!session.chrome_dirty);
 }
 
 test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 먼저 큐를 드레인" {

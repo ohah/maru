@@ -5430,7 +5430,12 @@ pub const AppSession = struct {
         self.config_removed_keys.append(self.allocator, key) catch {};
     }
 
-    /// 선택 행이 slider면 한 스텝(dir=-1/+1) 조절한다(←/→ 키). 스텝=범위의 4%(정수는 최소 1). bool 행이면 무동작.
+    /// **[보류된 dead code — 프로덕션 호출 없음]** 옛 ←→ 값 조절 라우터: 선택 행 종류에 따라 number 스텝(범위 4%)·
+    /// enum 순환·폰트 순환·색 프리셋 순환·팔레트 셀 이동·theme 프리셋 순환(dir=-1/+1)을 했다. **재설계로 ←→가 "영역
+    /// 포커스 이동"(←네비·→폼)이 되면서 `handle`이 더는 adjust를 방출하지 않아 죽었다**(테스트만 호출). 지우지 않은 건
+    /// "숫자·드롭다운도 ←→로 조절하면 일관적일까?" 결정이 **보류 중**이라 — ←→ adjust를 다시 넣기로 하면 이게 그 구현이다.
+    /// 현재 모델을 영구 확정하면 이 함수 + `applyThemePreset(dir)` + deprecated Action(slider_set/adjust_left/right)을 함께
+    /// 제거한다. (docs/config-gui.md §4 "←→ adjust 보류" 참조.)
     fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
@@ -6413,6 +6418,8 @@ pub const AppSession = struct {
         return null;
     }
 
+    /// **[보류된 dead code — `adjustSelectedSetting`(옛 ←→ adjust)에서만 호출되어 프로덕션 미사용]** 테마 드롭다운 팝업은
+    /// 절대-인덱스 `applyThemePresetIndex`가 대체했다. 이 dir-순환은 ←→ adjust 보류 결정과 함께 유지한다(재도입 시 재활용).
     /// 테마 프리셋을 dir(+1 다음/-1 이전)으로 순환한다(테마 섹션 dropdown). 순환 슬롯 = [프리셋 0..n-1] + ["사용자 지정"=n].
     /// 현재 위치는 theme_user_custom이거나 detect=null이면 "사용자 지정"(n), 아니면 그 프리셋. "사용자 지정"으로 가면 색을
     /// 그대로 두고 잠금만 해제(theme_user_custom=true — 색·팔레트 행 편집 허용), 프리셋으로 가면 그 색 세트를 통째로 깔고

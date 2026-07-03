@@ -16212,6 +16212,10 @@ test "shouldProjectFrame: sync(2026) hold는 라이브 투영만 막고 스크�
     try std.testing.expect(shouldProjectFrame(true, false, 0, timeout, 0, 0, false, false));
     // ── [B] ESU edge: sync hold 중(sync_active, hold<timeout, 스크롤 없음)이라도 직전 투영 이후 리더가 ESU를
     //    처리했으면(esu_advanced=true) 완성 프레임을 flush한다 — 폴링이 다음 BSU만 관측해 완성 프레임을 놓치던 MISS 수정. ──
+    //    **SSH 트레이드오프(docs/io-render-threading.md §11.6 esu_edge)**: 이 case에서 sync_active=true는 "리더가 이미
+    //    **다음** 프레임 BSU를 시작"했다는 뜻일 수 있다(연속 조각 프레임). 그러면 flush가 그 진행 중 next 프레임을
+    //    half-drawn으로 투영한다 — 로컬은 곧 다음 ESU가 교정하지만 bubbletea diff는 그 셀을 다시 안 보내 영구 stale.
+    //    `.sync` 로거의 `active=1 gproj=1`(esu_edge)로 관측되는 maru ssh desync 유력 원인.
     try std.testing.expect(shouldProjectFrame(true, true, 0, timeout, 0, 0, true, false));
     // esu_advanced=false면 여전히 hold가 막는다(진행 중 프레임 tearing 방지 — 정당한 막힘 보존).
     try std.testing.expect(!shouldProjectFrame(true, true, 0, timeout, 0, 0, false, false));

@@ -1401,10 +1401,11 @@ pub const AppSession = struct {
     /// 필터링한다(visible_slots). Esc로 종료, Enter로 첫 매칭 세션 이동. P3.
     sidebar_search_input: chrome.components.overlay_input.OverlayInput = .{},
     sidebar_search_active: bool = false,
-    /// 검색 필터로 좁힌 표시 카드 → 원본 tab 인덱스(표시 슬롯 순서). 검색 비활성/빈 검색어면 전체(0..tabs.len).
-    /// rebuildSidebar가 recomputeVisibleTabs로 채우고, sidebarTabs/buildSidebarTitleFrame이 순회, slotAt/click/hover가
-    /// 표시 슬롯→원본 탭 역매핑(visibleTab)에 쓴다(P3 필터). 슬롯↔탭 단일 출처(인덱스 어긋남 방지).
-    sidebar_visible_tabs: std.ArrayList(usize) = .empty,
+    /// 표시 행(sidebar.Row: 카드/헤더) 리스트 — 검색 필터·그룹 접힘을 self.tabs에 투영한 결과(SG3a 격상 — 옛
+    /// sidebar_visible_tabs[usize]를 Row 배열로. docs/sidebar-groups.md §2.2). rebuildSidebar가 recomputeVisibleTabs로
+    /// 채우고, buildSidebarDrawList가 순회, slotAt/click/hover가 표시 슬롯(row 인덱스)→원본 탭 역매핑(visibleTab =
+    /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
+    sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
     // 우클릭 컨텍스트 메뉴의 대상(어느 워크스페이스/pane/Term을 우클릭했나). 메뉴 상태(open·anchor·selected)는
     // chrome_host.context_menu(중립)에, 라이브 포인터 대상은 여기에 둔다(rename과 같은 분리). 메뉴 "Rename" 선택
     // 시 이 대상으로 startRename. 대상 teardown 시 null로 비운다(stale 포인터 방지, rename과 같은 funnel).
@@ -2973,7 +2974,7 @@ pub const AppSession = struct {
     /// merge면 그 카드의 표시 슬롯(displaySlotOf), new_workspace면 카드 아래 행(표시 카드 수). 드롭 아님(밖/자기)이면 null.
     fn paneDropHighlightSlot(self: *AppSession, x_px: f64, y_px: f64) ?usize {
         return switch (self.computePaneDropDest(x_px, y_px) orelse return null) {
-            .new_workspace => self.sidebar_visible_tabs.items.len, // 카드 목록 아래 행
+            .new_workspace => self.sidebar_rows.items.len, // 카드 목록 아래 행
             .merge => |tab_idx| self.displaySlotOf(tab_idx), // 합칠 카드의 표시 슬롯(검색 필터로 숨겨졌으면 null)
         };
     }
@@ -5765,25 +5766,38 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 검색 필터로 좁힌 표시 카드 목록(sidebar_visible_tabs)을 다시 계산한다 — 검색 활성 + 검색어 있으면 매칭 탭만,
+    /// 검색 필터로 좁힌 표시 카드 목록(sidebar_rows)을 다시 계산한다 — 검색 활성 + 검색어 있으면 매칭 탭만,
     /// 아니면 전체. rebuildSidebar/검색 입력 변경 시 호출. 빈 검색어/비활성이면 전체라 필터 없음과 동일하게 동작한다.
     fn recomputeVisibleTabs(self: *AppSession) void {
-        self.sidebar_visible_tabs.clearRetainingCapacity();
+        self.sidebar_rows.clearRetainingCapacity();
         const q: []const u8 = if (self.sidebar_search_active) self.sidebar_search_input.query.items else "";
         for (self.tabs.items, 0..) |tab, i| {
-            if (self.tabMatchesSearch(tab, q)) self.sidebar_visible_tabs.append(self.allocator, i) catch {};
+            if (self.tabMatchesSearch(tab, q)) self.sidebar_rows.append(self.allocator, .{
+                .card = .{
+                    .tab = i,
+                    .active = (i == self.app_window.active_tab),
+                    .label = "", // chrome view는 아직 label 미사용(buildSidebarDrawList가 tab에서 직접 뽑음) — borrowed 저장 회피
+                    .depth = 0, // SG3a: 그룹 없음(헤더·depth 들여쓰기는 SG3b projectRows)
+                },
+            }) catch {};
         }
     }
 
     /// 표시 슬롯 → 원본 tab 인덱스(검색 필터 역매핑). 범위 밖이면 null. slotAt/click/hover가 표시 슬롯을 실제 탭으로.
     fn visibleTab(self: *const AppSession, display_slot: usize) ?usize {
-        if (display_slot < self.sidebar_visible_tabs.items.len) return self.sidebar_visible_tabs.items[display_slot];
-        return null;
+        if (display_slot >= self.sidebar_rows.items.len) return null;
+        return switch (self.sidebar_rows.items[display_slot]) {
+            .card => |c| c.tab,
+            .group_header => null, // 헤더 row는 탭이 아님 — 클릭 시 선택 아니라 접기 토글(SG3c)
+        };
     }
 
-    /// 원본 tab 인덱스 → 표시 슬롯(검색 필터 정방향). 필터로 숨겨졌으면 null. 활성 밴드를 표시 슬롯에 그릴 때 쓴다.
+    /// 원본 tab 인덱스 → 표시 슬롯(row 인덱스; 검색 필터 정방향). 필터로 숨겨졌으면 null. 활성 밴드를 표시 슬롯에 그릴 때 쓴다.
     fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
-        for (self.sidebar_visible_tabs.items, 0..) |orig, slot| if (orig == tab_index) return slot;
+        for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
+            .card => |c| if (c.tab == tab_index) return slot,
+            .group_header => {},
+        };
         return null;
     }
 
@@ -7917,18 +7931,19 @@ pub const AppSession = struct {
 
     /// 사이드바에 **실제로 보이는** 워크스페이스 카드 중 running 에이전트가 있으면 true — 스피너 위상을 진행할지/사이드바를
     /// 재투영할지 결정한다. 접힘이면 스피너가 안 보이고(false), 검색 필터로 숨은 탭은 카드가 없으므로(스피너 미표시) 제외해야
-    /// 한다 — 그래서 `tabs` 전체가 아니라 `sidebar_visible_tabs`(필터 통과 = 표시 카드)만 본다(code-review high #1: 옛 전체-스캔이
+    /// 한다 — 그래서 `tabs` 전체가 아니라 `sidebar_rows`(필터 통과 = 표시 카드)만 본다(code-review high #1: 옛 전체-스캔이
     /// 접힘·필터아웃에도 130ms 재투영을 돌리던 회귀). 빈 검색이면 visible_tabs=전체라 평소와 동일.
     fn anyAgentRunning(self: *AppSession) bool {
         // **사이드바 카드의 애니메이션 파형만** 이 위상 게이트에 걸린다 — 탭바 running 표시는 **정적 1칸 플래그(●)**라
         // 매 프레임 재투영이 필요 없다(상태 변화 시에만 pollAgentKinds가 dirty; 게이트는 agentDisplayVisible이 탭바까지 커버).
         // 접힘·chrome_minimal이면 사이드바가 없어(sidebar_width_px=0) 카드 파형도 없으니 false(표시면 없는데 130ms 재셰이프
-        // 방지, code-review high #1 + max). 검색 필터로 숨은 탭은 카드가 없으므로 `sidebar_visible_tabs`만 본다. running 판정은
+        // 방지, code-review high #1 + max). 검색 필터로 숨은 탭은 카드가 없으므로 `sidebar_rows`만 본다. running 판정은
         // 활성 Term만이 아니라 **어느 pane/Term이든**(tabHasRunningAgent) — 백그라운드 Term도 카드 파형을 돌린다(범위 확장).
         if (self.sidebar_collapsed or self.chrome_minimal) return false;
-        for (self.sidebar_visible_tabs.items) |i| {
-            if (i < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[i])) return true;
-        }
+        for (self.sidebar_rows.items) |row| switch (row) {
+            .card => |c| if (c.tab < self.tabs.items.len and tabHasRunningAgent(self.tabs.items[c.tab])) return true,
+            .group_header => {}, // 헤더 row엔 에이전트가 없다
+        };
         return false;
     }
 
@@ -11631,13 +11646,13 @@ pub const AppSession = struct {
 
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수·스크롤로 판정).
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
-        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px, self.sidebar_visible_tabs.items.len);
+        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px, self.sidebar_rows.items.len);
     }
 
     /// 사이드바 콘텐츠(표시 카드 전체 높이)가 헤더 아래 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
     /// 순수 산술은 sidebarMaxScrollPx에 둬(헤드리스 단위 테스트) self는 필드만 떠 넘긴다.
     fn sidebarMaxScroll(self: *const AppSession) u32 {
-        return sidebarMaxScrollPx(self.sidebar_slot_height_px, self.sidebar_visible_tabs.items.len, self.backing_height_px, self.sidebar_header_height_px);
+        return sidebarMaxScrollPx(self.sidebar_slot_height_px, self.sidebar_rows.items.len, self.backing_height_px, self.sidebar_header_height_px);
     }
 
     /// 사이드바 스크롤 오프셋을 [0, sidebarMaxScroll]로 잡는다. 탭 추가/삭제·검색 필터·resize·휠로 콘텐츠/뷰포트가
@@ -11784,7 +11799,7 @@ pub const AppSession = struct {
     fn rebuildSidebar(self: *AppSession) !void {
         self.sidebar_cells.clearRetainingCapacity();
         self.gpu_quads.clearRetainingCapacity();
-        self.recomputeVisibleTabs(); // 검색 필터로 표시 카드(sidebar_visible_tabs) 갱신 — 아래는 전부 표시 슬롯 기준
+        self.recomputeVisibleTabs(); // 검색 필터로 표시 카드(sidebar_rows) 갱신 — 아래는 전부 표시 슬롯 기준
         self.clampSidebarScroll(); // 표시 카드 수/뷰포트가 바뀌었을 수 있으니 stale 스크롤 정정 — 아래 quad가 이 오프셋을 쓴다
         if (self.tabs.items.len == 0) return;
         // 밴드(활성/호버 슬롯·"+" 호버)는 chrome `sidebar.view`가 fill op으로 단일 출처. `lowerSidebar`가 그 fill을
@@ -11792,7 +11807,7 @@ pub const AppSession = struct {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const rows = self.sidebarRows(arena) catch return;
+        const rows = self.sidebar_rows.items; // recomputeVisibleTabs(위)가 이미 채운 표시 행 — 별도 arena 빌드 불필요
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
         chrome.components.sidebar.view(rows, self.hovered_slot, self.pane_drop_slot, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
@@ -11860,7 +11875,11 @@ pub const AppSession = struct {
         const bar_w = card_tk.space.accent_bar_width_px;
         const gap: f32 = @floatFromInt(card_tk.space.card_gap_px);
         const default_accent = packOpaqueRgb(card_tk.palette.get(.accent_bar)); // 기본(지정 없음) 활성 카드 accent(테마-구동)
-        if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
+        if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_rows.items, 0..) |row, i| {
+            const orig = switch (row) {
+                .card => |c| c.tab,
+                .group_header => continue, // 헤더 row는 카드 색(tint/accent) 대상 아님(헤더 밴드는 SG3b에서 별도)
+            };
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
             const slot_abs_y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px));
             const card_top = slot_abs_y + gap; // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일)
@@ -12377,7 +12396,7 @@ pub const AppSession = struct {
         const max_scroll = self.sidebarMaxScroll();
         if (max_scroll == 0) return; // 안 넘침 — 스크롤바 없음
         const view_px: f32 = @floatFromInt(viewport_h);
-        const content_px: f32 = @as(f32, @floatFromInt(self.sidebar_visible_tabs.items.len)) * @as(f32, @floatFromInt(slot_h));
+        const content_px: f32 = @as(f32, @floatFromInt(self.sidebar_rows.items.len)) * @as(f32, @floatFromInt(slot_h));
         const min_thumb: f32 = @max(view_px * 0.04, 18.0);
         var thumb_h: f32 = if (content_px > 0) view_px * view_px / content_px else view_px;
         if (thumb_h < min_thumb) thumb_h = min_thumb;
@@ -12418,18 +12437,6 @@ pub const AppSession = struct {
     /// 이유로 토큰 두께(≥2px)면 중심 행이 cov≈1로 선명하다. 두께만큼 바 하단 안쪽에 둔다(바 위로 안 새게).
     fn appendTabBarUnderline(self: *AppSession, bar: maru.session.SplitRect, thickness: u32) void {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y + bar.h -| thickness), @floatFromInt(bar.w), @floatFromInt(thickness), self.dividerColor(), 2);
-    }
-
-    /// app `*Tab`에서 chrome 중립 `sidebar.Row`(표시 행)를 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다
-    /// (palette Row 선례). SG1은 card row만 낸다(그룹 없음 — 동작 보존): 표시 슬롯 i = 원본 탭 orig의 카드. group_header
-    /// row는 SG3에서 projectRows가 삽입한다. 라벨 = 활성 panel surface 제목(제목 glyph는 buildSidebarDrawList가 이 라벨로).
-    fn sidebarRows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.sidebar.Row {
-        const out = try arena.alloc(chrome.components.sidebar.Row, self.sidebar_visible_tabs.items.len);
-        for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
-            const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
-            out[i] = .{ .card = .{ .tab = orig, .label = workspaceLabel(tab), .active = (orig == self.app_window.active_tab) } };
-        }
-        return out;
     }
 
     /// chrome `sidebar.view`가 낸 밴드 fill op을 sidebar 셀(NativeMetalCell)로 lower한다 — fill rect.y / slot_h = 슬롯 행,
@@ -12827,7 +12834,13 @@ pub const AppSession = struct {
         defer card_kinds.deinit(self.allocator);
         var card_running: std.ArrayList(bool) = .empty;
         defer card_running.deinit(self.allocator);
-        for (self.sidebar_visible_tabs.items) |orig| {
+        for (self.sidebar_rows.items) |disp_row| {
+            // SG3a는 card row만이라 continue가 안 탄다(그룹 없음 → 아래 배열이 곧 슬롯 순서). SG3b에서 group_header가
+            // 섞이면 이 카드-정보 배열(card_kinds/names 등)의 인덱스가 슬롯과 어긋나므로, 그때 배열 인덱싱을 재검토한다.
+            const orig = switch (disp_row) {
+                .card => |c| c.tab,
+                .group_header => continue, // 헤더 glyph(삼각+이름)는 SG3b에서 별도 조립
+            };
             const tab = self.tabs.items[orig]; // 표시 슬롯 순서 → 원본 탭(검색 필터)
             // **의도된 기준 분리(사용자 결정 A)**: 카드의 이름·브랜치(저장소)·경로는 **활성 Term**(아래 `term`) 기준이고,
             // 스피너·gutter 아이콘·브랜드색은 **워크스페이스(탭) 전체**(tabHasRunningAgent/tabAgentKind, 아무 pane/Term) 기준이다.
@@ -13649,14 +13662,18 @@ pub const AppSession = struct {
         };
 
         // 사이드바 워크스페이스 카드 → ⌘1~⌘9(select_tab). 접힘이면 카드가 없어 생략. 카드는 **검색-필터된 표시 목록**
-        // (sidebar_visible_tabs) 순으로 그려지므로, 배지도 **표시 슬롯 s**(slotTop, slotAt의 역) 기준에 두고 chord는 그
+        // (sidebar_rows) 순으로 그려지므로, 배지도 **표시 슬롯 s**(slotTop, slotAt의 역) 기준에 두고 chord는 그
         // 슬롯이 가리키는 **절대 워크스페이스 abs**의 ⌘(abs+1)을 쓴다 — 필터 활성 시 표시/절대 인덱스가 갈라지는 버그 방지.
         const sidebar = chrome.components.sidebar;
         if (!self.sidebar_collapsed and self.sidebar_width_px > 0 and self.sidebar_slot_height_px > 0) {
             const header_h: i64 = @intCast(self.sidebar_header_height_px);
             const slot_h: i64 = @intCast(self.sidebar_slot_height_px);
             const vp_bottom: i64 = @intCast(self.backing_height_px);
-            for (self.sidebar_visible_tabs.items, 0..) |abs, s| {
+            for (self.sidebar_rows.items, 0..) |row, s| {
+                const abs = switch (row) {
+                    .card => |c| c.tab,
+                    .group_header => continue, // 헤더 row엔 ⌘숫자(select_tab) 배지가 없다
+                };
                 if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다
                 const cs = (try Local.chordStr(resolver, Action{ .select_tab = abs }, arena)) orelse continue;
                 const y = sidebar.slotTop(s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px);
@@ -13989,7 +14006,7 @@ pub const AppSession = struct {
         self.chrome_host.deinit(self.allocator); // chrome 컴포넌트 heap(find.query) 해제
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
-        self.sidebar_visible_tabs.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
+        self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
@@ -14631,7 +14648,7 @@ test "anyAgentRunning: 펼침+보이는 running=true, 접힘·필터아웃=false
 
     session.activeTab().activePane().activeTerm().agent_state = .running; // 이 워크스페이스가 running(어느 Term이든)
     session.recomputeVisibleTabs(); // 검색 없음 → visible_tabs = 전체(1개)
-    try std.testing.expect(session.sidebar_visible_tabs.items.len >= 1);
+    try std.testing.expect(session.sidebar_rows.items.len >= 1);
 
     session.sidebar_collapsed = false;
     try std.testing.expect(session.anyAgentRunning()); // 펼침 + 보이는 running → true
@@ -14640,7 +14657,7 @@ test "anyAgentRunning: 펼침+보이는 running=true, 접힘·필터아웃=false
     try std.testing.expect(!session.anyAgentRunning()); // 접힘 → 카드 파형 안 보임 → false(탭바 플래그는 정적이라 무관)
 
     session.sidebar_collapsed = false;
-    session.sidebar_visible_tabs.clearRetainingCapacity(); // 검색 필터로 카드 숨김
+    session.sidebar_rows.clearRetainingCapacity(); // 검색 필터로 카드 숨김
     try std.testing.expect(!session.anyAgentRunning()); // 필터아웃 → 카드 없음 → false
 }
 
@@ -14676,7 +14693,7 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
     // running 에이전트 + 사이드바에 그 탭 보임. 첫 호출은 baseline만 세팅(위상 불변) — 이후 wall-clock 경과로 진행.
     term.agent_state = .running;
     term.agent_kind = .claude;
-    try session.sidebar_visible_tabs.append(allocator, 0); // 사이드바에 탭0 카드 보임(collapsed/minimal 기본 false)
+    try session.sidebar_rows.append(allocator, .{ .card = .{ .tab = 0, .active = true, .label = "", .depth = 0 } }); // 사이드바에 탭0 카드 보임(collapsed/minimal 기본 false)
     session.chrome_dirty = false;
     session.advanceAgentSpinner(); // baseline 설정
     try std.testing.expectEqual(f0, session.agent_spin_frame); // 아직 경과 0 → 불변
@@ -15574,7 +15591,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.chrome_host = .{}; // updateCursorBlink이 find/palette.open을 읽음 — undefined면 UB([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus/updateCursorBlink가 rename을 읽음(undefined면 garbage가 .rename 분기)
     session.tabs = .empty;
-    session.sidebar_visible_tabs = .empty; // updateCursorBlink→anyAgentRunning이 sidebar_visible_tabs를 순회(code-review high #1) — undefined면 UB(같은 함정). 빈 목록=스피너 없음
+    session.sidebar_rows = .empty; // updateCursorBlink→anyAgentRunning이 sidebar_rows를 순회(code-review high #1) — undefined면 UB(같은 함정). 빈 목록=스피너 없음
     session.sidebar_collapsed = false; // anyAgentRunning이 먼저 읽음(접힘이면 false 조기반환) — undefined면 garbage 분기
     session.loaded_config.config = .{}; // configured frame-rate 기본값
     session.frame_loop_rate_hz = config_mod.theme.render_frame_rate_default;
@@ -15668,7 +15685,7 @@ test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투�
     session.chrome_host = .{};
     session.rename = null;
     session.tabs = .empty;
-    session.sidebar_visible_tabs = .empty;
+    session.sidebar_rows = .empty;
     session.sidebar_collapsed = false;
     session.loaded_config.config = .{};
     session.frame_loop_rate_hz = 60; // 500ms@60Hz=30틱 반주기
@@ -19197,7 +19214,7 @@ test "grip 드래그: 드래그 중 드롭 타겟 하이라이트 슬롯 추적(
     // ② 빈 영역(카드 아래) → 하이라이트 슬롯 = 표시 카드 수(새 워크스페이스 행).
     const empty_y: f64 = @floatFromInt(session.sidebar_header_height_px + session.sidebar_slot_height_px * 5 + 10);
     session.mouse(2, sx, empty_y, 0, 0);
-    try std.testing.expectEqual(@as(?usize, session.sidebar_visible_tabs.items.len), session.pane_drop_slot);
+    try std.testing.expectEqual(@as(?usize, session.sidebar_rows.items.len), session.pane_drop_slot);
     // ③ 사이드바 밖(터미널) → 하이라이트 없음.
     session.mouse(2, @floatFromInt(pb.full.x + 20), @floatFromInt(pb.full.y + 1), 0, 0);
     try std.testing.expect(session.pane_drop_slot == null);

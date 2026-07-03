@@ -4757,6 +4757,7 @@ pub const AppSession = struct {
         const after_texts = after_enums + cf.texts.len;
         if (sel >= after_nums and sel < after_enums) {
             const e = cf.enums[sel - after_nums];
+            if (std.mem.eql(u8, e.key, "theme.preset")) return self.themePresetVariants(arena);
             return (try config_mod.schema.enumVariants(arena, self.loaded_config.config, e.key)) orelse &.{};
         }
         if (sel >= after_enums and sel < after_texts) {
@@ -4781,6 +4782,10 @@ pub const AppSession = struct {
         const after_texts = after_enums + cf.texts.len;
         if (sel >= after_nums and sel < after_enums) {
             const e = cf.enums[sel - after_nums];
+            if (std.mem.eql(u8, e.key, "theme.preset")) {
+                self.applyThemePresetIndex(idx); // synthetic 프리셋 — 절대 인덱스로 적용
+                return;
+            }
             if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, idx)) {
                 // follow-system preset-light/dark는 라이브 색도 새 프리셋으로 재해석해야 한다(cycle 경로와 동일 특수 처리).
                 if (self.loaded_config.config.theme_follow_system and
@@ -4859,7 +4864,10 @@ pub const AppSession = struct {
             // dropdown_accept → applyDropdownSelection. theme.preset은 synthetic(스키마 enum 아님)이라 팝업 대신 프리셋 순환(특수).
             const e = cf.enums[sel - after_nums];
             if (std.mem.eql(u8, e.key, "theme.preset")) {
-                self.applyThemePreset(1);
+                // theme.preset은 synthetic이지만 명백한 선택 목록이라 드롭다운 팝업으로(16 프리셋 + "사용자 지정").
+                const variants = self.themePresetVariants(scratch.allocator()) catch return;
+                self.chrome_host.settings.dropdown.show(variants.len, self.themePresetCurrentIndex());
+                self.metal_dirty = true;
                 return;
             }
             const variants = (config_mod.schema.enumVariants(scratch.allocator(), self.loaded_config.config, e.key) catch null) orelse return;
@@ -6335,6 +6343,38 @@ pub const AppSession = struct {
         }
         self.theme_user_custom = false;
         const preset: config_mod.theme.ThemePreset = @enumFromInt(@as(usize, @intCast(next)));
+        self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
+        self.reapplyLoadedConfig();
+        self.persistThemePreset(preset);
+    }
+
+    /// 테마 프리셋 드롭다운의 변형 라벨 — 16 프리셋 @tagName(underscore, viewPopup이 dash 변환) + "사용자 지정"(마지막 슬롯).
+    fn themePresetVariants(_: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
+        const fields = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields;
+        const out = try arena.alloc([]const u8, fields.len + 1);
+        inline for (fields, 0..) |f, i| out[i] = f.name;
+        out[fields.len] = "사용자 지정";
+        return out;
+    }
+
+    /// 테마 프리셋 드롭다운의 현재 선택 인덱스 — 활성 프리셋의 ordinal, 아니면 "사용자 지정" 슬롯(=프리셋 수).
+    fn themePresetCurrentIndex(self: *AppSession) usize {
+        const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
+        const detected = detectThemePreset(self.loaded_config.config.theme);
+        return if (self.theme_user_custom or detected == null) n else @intFromEnum(detected.?);
+    }
+
+    /// 테마 프리셋을 **절대 인덱스**로 적용한다(드롭다운 팝업 선택 — applyThemePreset의 dir-순환 짝). idx가 프리셋 수 이상
+    /// (="사용자 지정")이면 색은 그대로 두고 잠금만 해제, 아니면 그 프리셋 색 세트를 통째로 깔고 라이브 적용 + 영속.
+    fn applyThemePresetIndex(self: *AppSession, idx: usize) void {
+        const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
+        if (idx >= n) {
+            self.theme_user_custom = true; // "사용자 지정" — 색 유지, 잠금 해제
+            self.metal_dirty = true;
+            return;
+        }
+        self.theme_user_custom = false;
+        const preset: config_mod.theme.ThemePreset = @enumFromInt(idx);
         self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
         self.reapplyLoadedConfig();
         self.persistThemePreset(preset);

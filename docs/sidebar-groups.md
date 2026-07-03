@@ -193,11 +193,25 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | 동작 | 단계 | UX | 구현 경로(베이스) |
 |---|---|---|---|
 | **그룹 접기/펴기** | **우선** | 헤더 줄 클릭(삼각 ▾/▸) | `onGroupHeader` → 그 그룹 시작 탭의 `group_collapsed` 토글 → `projectRows` 재투영 + 영속(§4) |
-| **그룹 만들기** | **우선** | 우클릭 "새 그룹으로 묶기"(이름 입력) | `buildContextMenuItems`(이미 pin·색 동적 주입)에 항목 추가 → 그 탭에 `group_start` 세팅. 그 아래 연속 카드가 자동 소속(위치 파생) |
+| **그룹 만들기** | **우선** | 우클릭 "새 그룹으로 묶기"(이름 입력) · **단축키 `Cmd+Opt+G`** · 팔레트 "New Group" | `create_group` 액션 → 활성 탭에 `group_start` 세팅(우클릭·팔레트·키가 같은 세션 메서드 호출 — rename 패턴). 그 아래 연속 카드가 자동 소속(위치 파생) |
 | **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename) |
-| **그룹 해제** | **우선** | 우클릭 "그룹 풀기" | 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
+| **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
 | 카드 드래그로 넣기/빼기 | 후속 | 카드를 마커 위/아래로 드래그 | `moveTab`(3967) 확장 — 드롭 위치가 소속을 정함(위치 파생이라 별도 소속 편집 없음) |
 | 그룹 통째 드래그·색 | 후속 | 헤더 잡아 재정렬 / 그룹 색 | `sidebar_drag_*` 확장, `group_indent`/색 토큰 |
+
+**단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
+세 경로에 **자동으로** 뜬다 — (1) 커맨드 팔레트, (2) 설정 화면(⌘,) Input 섹션의 **키바인딩 리바인더**(행 클릭 → 녹음
+모드로 지정/수정, `CS-4-3` 이미 구현), (3) config `keybind = <조합> = create_group`. 새 GUI 코드는 0이다(스키마 스칼라가
+아니라 카탈로그 기반 bespoke 리바인더가 이미 존재 — [config-gui.md §6.7](config-gui.md)). 우클릭·팔레트·키·컨텍스트
+메뉴가 **같은 세션 메서드**를 부른다(rename이 세 트리거를 `startRename`으로 모으는 패턴 — tabs-splits-layout.md).
+
+**기본 단축키 = `Cmd+Opt+G`** (create_group만). `Cmd+Shift+G`는 **Find Previous가 선점**(keybinding.zig `default_app_bindings`,
+macOS Find Next/Previous 관례)이라 못 쓰고, `Cmd+Opt+G`는 비어 있으면서 `G`로 그룹을 직관적으로 표현한다(`Cmd+Opt`는 이미
+pane/Term 이동 modifier 그룹이나 `G` 키는 미사용 — 충돌 없음). maru 규율은 "macOS 단일 관례가 없는 기능은 기본 키를
+비우고 bindable만"([key-input-and-shortcuts.md](key-input-and-shortcuts.md); rename·move_pane이 그 예)이지만, **사용자
+요청으로 create_group에 기본 키를 부여**한다(사용자 결정이 베이스 — 브라우저/VSCode에도 표준 그룹 단축키는 없다).
+`ungroup`은 저빈도라 기본 키 없이 팔레트/우클릭/설정 리바인더로 지정한다. 액션 추가는 4곳: `action.zig`의 `Action`
+union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c에서 구현).
 
 **접기 우선의 이유**: 접기·만들기·이름·해제만으로 "묶어서 접는" 핵심 가치가 완성된다. 카드 이동은 드래그 재정렬(`moveTab`)과
 드롭 좌표→그룹 경계 매핑이라 표면이 크므로 별도 단계로 뺀다. 위치 파생이라 후속에서 카드 이동을 붙여도 **소속 편집 코드가
@@ -238,8 +252,10 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
    - **SG3b — 헤더 row + glyph 가변 인코딩**: `projectRows`가 group_header row 삽입(카드 depth 들여쓰기), `view`가 헤더
      밴드+삼각(▾/▸), `buildSidebarDrawList`+`.m`이 헤더 glyph(삼각+이름)와 **row별 누적 y**로 세로 위치를 그린다
      (§5 파급 — `sidebarGlyphRow` 균일 곱셈을 누적으로, `.m` 디코드 동반 수정). macOS 제품 스크린샷 검증.
-   - **SG3c — 접기 + 만들기/이름/해제**: 헤더 클릭 → `group_collapsed` 토글 → 재투영·영속. 우클릭 "새 그룹으로 묶기"/
-     "그룹 풀기" + 헤더 더블클릭 rename + closeTab 마커 승계. **여기까지가 "접기 우선" 완료.**
+   - **SG3c — 접기 + 만들기/이름/해제 + 액션·단축키**: 헤더 클릭 → `group_collapsed` 토글 → 재투영·영속.
+     `create_group`(기본 키 `Cmd+Opt+G`)·`ungroup` 액션 추가(action.zig `Action`+`parseAction`+`dispatchAppAction` arm+
+     `command_catalog` entry) → 팔레트·설정 Input 리바인더·config `keybind` 자동 노출(§7). 우클릭 "새 그룹으로 묶기"/
+     "그룹 풀기"(같은 세션 메서드) + 헤더 더블클릭 rename + closeTab 마커 승계. **여기까지가 "접기 우선" 완료.**
 4. **SG4(후속) — 카드 드래그 넣기/빼기**: `moveTab` 확장 + 드롭 좌표→그룹 경계.
 5. **SG5(후속) — 그룹 통째 드래그·색·(선택)중첩**.
 

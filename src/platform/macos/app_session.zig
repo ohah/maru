@@ -4785,11 +4785,11 @@ pub const AppSession = struct {
         return &.{};
     }
 
-    /// 드롭다운 팝업의 **선택 행 변형을 절대 인덱스(idx)로 config에 set + 라이브 적용 + 영속**한다(팝업은 안 닫음).
-    /// enum=setEnumIndex, font.family=그 폰트 setText, theme.preset=applyThemePresetIndex. 라이브 프리뷰(↑↓)·확정·취소가
-    /// 공유하는 코어 — 프리뷰는 selected로, 취소는 original로 부른다. 영속(markDirty)은 매번 찍되 실제 파일 쓰기는 Swift가
-    /// tick에서 coalesce하므로 ↑↓ 연타여도 write 폭주 없음. (프리셋의 persistThemePreset도 dirty만 예약.)
-    fn applyDropdownIndex(self: *AppSession, idx: usize) void {
+    /// 드롭다운 팝업의 **선택 행 변형을 절대 인덱스(idx)로 config에 set + 라이브 적용**한다(팝업은 안 닫음). enum=setEnumIndex,
+    /// font.family=그 폰트 setText, theme.preset=applyThemePresetIndex. **persist=false면 파일 영속을 예약하지 않는다(인메모리
+    /// 라이브만)** — 라이브 프리뷰(↑↓)는 persist=false로, 확정만 persist=true로 부른다. **미리보기가 영속까지 하면 취소해도
+    /// 파일엔 미리본 값이 써져 커스텀이 사라지는 데이터 손실**이 났기에(code-review high) 영속은 확정에서만 한다.
+    fn applyDropdownIndex(self: *AppSession, idx: usize, persist: bool) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
@@ -4800,7 +4800,7 @@ pub const AppSession = struct {
         if (sel >= after_nums and sel < after_enums) {
             const e = cf.enums[sel - after_nums];
             if (std.mem.eql(u8, e.key, "theme.preset")) {
-                self.applyThemePresetIndex(idx); // synthetic 프리셋 — 절대 인덱스로 적용
+                self.applyThemePresetIndex(idx, persist); // synthetic 프리셋 — 절대 인덱스로 적용
                 return;
             }
             if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, idx)) {
@@ -4813,7 +4813,7 @@ pub const AppSession = struct {
                 } else {
                     self.reapplyLoadedConfig();
                 }
-                self.markConfigKeyDirty(e.key);
+                if (persist) self.markConfigKeyDirty(e.key);
             }
             return;
         }
@@ -4821,46 +4821,44 @@ pub const AppSession = struct {
             const ti = sel - after_enums;
             if (ti < cf.texts.len and std.mem.eql(u8, cf.texts[ti].key, "font.family")) {
                 const fonts = config_mod.theme.bundled_font_families;
-                // idx >= fonts.len = "직접 입력…" 슬롯 — 프리뷰/복원에선 무동작(폰트 안 바꿈). 확정은 applyDropdownSelection이 편집을 연다.
-                if (idx < fonts.len) {
-                    // 번들 폰트는 **정적 문자열**이라 그대로 setText(dupe 불요 — code-review: 키당 arena dupe 누수 수정).
-                    if (config_mod.schema.setText(&self.loaded_config.config, "font.family", fonts[idx])) {
-                        self.reapplyLoadedConfig();
-                        self.markConfigKeyDirty("font.family");
-                    }
+                // idx < fonts.len = 번들 폰트(정적 문자열이라 dupe 불요), idx >= fonts.len = "직접 입력…" 슬롯 → 프리뷰는 원본
+                // 폰트(스냅샷)를 다시 보여준다(선택 표시용, 안 바꿈). "직접 입력" 확정은 applyDropdownSelection이 편집을 연다.
+                const value: []const u8 = if (idx < fonts.len) fonts[idx] else self.dropdown_snapshot_font;
+                if (config_mod.schema.setText(&self.loaded_config.config, "font.family", value)) {
+                    self.reapplyLoadedConfig();
+                    if (persist and idx < fonts.len) self.markConfigKeyDirty("font.family");
                 }
             }
             return;
         }
     }
 
-    /// 드롭다운 ↑↓ — highlighted 변형을 **라이브 적용**한다(팝업 유지, 바로 반영). 파일 쓰기는 Swift coalesce.
+    /// 드롭다운 ↑↓ — highlighted 변형을 **라이브 적용(인메모리만, 영속 안 함)**한다(팝업 유지, 바로 반영). 영속을 안 하는 게
+    /// 핵심 — 미리보기가 영속하면 취소해도 파일에 미리본 값이 남아 커스텀이 사라진다(code-review high 데이터 손실 수정).
     fn applyDropdownPreview(self: *AppSession) void {
-        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected);
+        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected, false); // persist=false
         self.metal_dirty = true;
     }
 
-    /// 드롭다운 확정(Enter/항목 클릭) — 현재 selected 변형을 적용하고 팝업을 닫는다(프리뷰로 이미 적용됐어도 재적용은 무해).
-    /// 예외: font.family의 "직접 입력…" 슬롯을 고르면 적용 대신 **인라인 편집을 연다**(목록 밖 임의 폰트 타이핑 — code-review
-    /// 회귀 수정). 편집 시드는 프리뷰 취소로 복원된 원본 폰트(스냅샷).
+    /// 드롭다운 확정(Enter/항목 클릭) — 현재 selected 변형을 적용 + **영속**하고 팝업을 닫는다. 예외: font.family의 "직접 입력…"
+    /// 슬롯을 고르면 적용 대신 원본 폰트(스냅샷)로 되돌린 뒤 **인라인 편집을 연다**(목록 밖 임의 폰트 타이핑 — 편집 커밋이 영속).
     fn applyDropdownSelection(self: *AppSession) void {
         if (self.dropdownDirectInputSelected()) {
-            // 프리뷰로 바뀐 폰트를 원본으로 되돌린 뒤(스냅샷) 그 값으로 인라인 편집을 연다.
-            self.restoreDropdownSnapshot();
+            self.restoreDropdownSnapshot(); // 프리뷰로 바뀐 폰트를 원본으로(인메모리), 그 값으로 편집 시작
             self.chrome_host.settings.dropdown.hide();
             self.chrome_host.settings.enterEdit(self.loaded_config.config.font.family);
             self.dropdown_snapshot_kind = .none;
             self.metal_dirty = true;
             return;
         }
-        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected);
+        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected, true); // persist=true — 확정에서만 파일 영속
         self.chrome_host.settings.dropdown.hide();
         self.dropdown_snapshot_kind = .none;
         self.metal_dirty = true;
     }
 
-    /// 드롭다운 취소(Esc/바깥 클릭) — **열 때의 원본으로 복원**하고 팝업을 닫는다(↑↓ 프리뷰 되돌리기). enum은 인덱스
-    /// (original)로, font/theme.preset은 스냅샷으로 복원한다(인덱스로는 커스텀 값을 못 되살림 — code-review 데이터 손실 수정).
+    /// 드롭다운 취소(Esc/바깥 클릭) — **열 때의 원본으로 인메모리 복원**하고 팝업을 닫는다(↑↓ 프리뷰 되돌리기). 미리보기가
+    /// 영속을 안 했으므로 파일은 이미 원본 상태라, 여기선 인메모리 복원만 하면 파일도 정합(영속·markDirty 없음).
     fn cancelDropdownSelection(self: *AppSession) void {
         self.restoreDropdownSnapshot();
         self.chrome_host.settings.dropdown.hide();
@@ -4874,22 +4872,20 @@ pub const AppSession = struct {
             self.chrome_host.settings.dropdown.selected >= config_mod.theme.bundled_font_families.len;
     }
 
-    /// 드롭다운 프리뷰를 **열 때 값으로 복원**한다 — font/theme.preset은 스냅샷으로, enum은 original 인덱스로. 취소·직접입력
-    /// 진입이 공유한다(인덱스로 못 되살리는 커스텀 폰트·테마를 스냅샷이 정확히 복원).
+    /// 드롭다운 프리뷰를 **열 때 값으로 인메모리 복원**한다(영속 안 함 — 미리보기가 영속을 안 했으니 파일은 원본 그대로).
+    /// font/theme.preset은 스냅샷으로, enum은 original 인덱스로 되돌린다(인덱스로 못 되살리는 커스텀 폰트·테마는 스냅샷이 정확히 복원).
     fn restoreDropdownSnapshot(self: *AppSession) void {
         switch (self.dropdown_snapshot_kind) {
             .font => {
-                if (config_mod.schema.setText(&self.loaded_config.config, "font.family", self.dropdown_snapshot_font)) {
-                    self.reapplyLoadedConfig();
-                    self.markConfigKeyDirty("font.family");
-                }
+                if (config_mod.schema.setText(&self.loaded_config.config, "font.family", self.dropdown_snapshot_font))
+                    self.reapplyLoadedConfig(); // 인메모리만 — markDirty 없음(파일은 원본 폰트 그대로)
             },
             .preset => {
                 self.loaded_config.config.theme = self.dropdown_snapshot_theme;
                 self.theme_user_custom = self.dropdown_snapshot_user_custom;
                 self.reapplyLoadedConfig();
             },
-            .none => self.applyDropdownIndex(self.chrome_host.settings.dropdown.original), // enum — 인덱스 복원으로 충분
+            .none => self.applyDropdownIndex(self.chrome_host.settings.dropdown.original, false), // enum — 인덱스 복원(persist=false, 안 바뀐 값 영속 안 함)
         }
     }
 
@@ -5432,24 +5428,6 @@ pub const AppSession = struct {
     fn markConfigKeyRemoved(self: *AppSession, key: []const u8) void {
         for (self.config_removed_keys.items) |k| if (std.mem.eql(u8, k, key)) return;
         self.config_removed_keys.append(self.allocator, key) catch {};
-    }
-
-    /// 슬라이더 드래그/클릭(settings.pending_ratio)을 선택 행의 number config 값으로 매핑해 적용한다(라이브 + 영속
-    /// 예약). 결합 순서(bool 먼저)라 selected<bool_count면 slider 아님 → 무동작. number 리스트는 selected-bool_count.
-    fn applySelectedSlider(self: *AppSession) void {
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const cf = self.currentSectionFields(scratch.allocator()) catch return;
-        const sel = self.chrome_host.settings.selected;
-        if (sel < cf.bools.len) return; // bool 행 — slider 아님
-        const ni = sel - cf.bools.len;
-        if (ni >= cf.nums.len) return;
-        const n = cf.nums[ni];
-        const value = n.min + @as(f64, self.chrome_host.settings.pending_ratio) * (n.max - n.min);
-        if (config_mod.schema.setNumber(&self.loaded_config.config, n.key, value)) {
-            self.reapplyLoadedConfig();
-            self.markConfigKeyDirty(n.key);
-        }
     }
 
     /// 선택 행이 slider면 한 스텝(dir=-1/+1) 조절한다(←/→ 키). 스텝=범위의 4%(정수는 최소 1). bool 행이면 무동작.
@@ -6477,20 +6455,24 @@ pub const AppSession = struct {
         return if (self.theme_user_custom or detected == null) n else @intFromEnum(detected.?);
     }
 
-    /// 테마 프리셋을 **절대 인덱스**로 적용한다(드롭다운 팝업 선택 — applyThemePreset의 dir-순환 짝). idx가 프리셋 수 이상
-    /// (="사용자 지정")이면 색은 그대로 두고 잠금만 해제, 아니면 그 프리셋 색 세트를 통째로 깔고 라이브 적용 + 영속.
-    fn applyThemePresetIndex(self: *AppSession, idx: usize) void {
+    /// 테마 프리셋을 **절대 인덱스**로 적용한다(드롭다운 팝업 — applyThemePreset의 dir-순환 짝). idx가 프리셋 수 이상
+    /// (="사용자 지정")이면 **열 때 스냅샷한 원본 커스텀 색으로 복원** + 잠금 해제(예전엔 잠금만 풀어 미리본 프리셋 색이
+    /// 남던 데이터 손실 — code-review high 수정). idx<n이면 그 프리셋 색을 깔고 라이브 적용, persist=true일 때만 파일 영속.
+    fn applyThemePresetIndex(self: *AppSession, idx: usize, persist: bool) void {
         const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
         if (idx >= n) {
-            self.theme_user_custom = true; // "사용자 지정" — 색 유지, 잠금 해제
-            self.metal_dirty = true;
+            // "사용자 지정" — 원본 커스텀 색(스냅샷)으로 되돌리고 잠금 해제. 커스텀은 theme.preset 줄을 안 남기므로 별도 영속 없음
+            // (미리보기가 persist를 안 했으니 파일의 커스텀 색 줄이 그대로라, 여기선 인메모리 복원만 하면 파일도 정합).
+            self.loaded_config.config.theme = self.dropdown_snapshot_theme;
+            self.theme_user_custom = true;
+            self.reapplyLoadedConfig();
             return;
         }
         self.theme_user_custom = false;
         const preset: config_mod.theme.ThemePreset = @enumFromInt(idx);
         self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
         self.reapplyLoadedConfig();
-        self.persistThemePreset(preset);
+        if (persist) self.persistThemePreset(preset); // 확정에서만 파일에 theme.preset 예약(미리보기는 인메모리만)
     }
 
     /// 프리셋을 **통째로 영속**한다(4색만 쓰던 옛 한계 해소 — ANSI 16색 팔레트·파생색 포함, 리뷰). `theme.preset = <name>`
@@ -22482,11 +22464,111 @@ test "settings 테마 프리셋 드롭다운 취소: 커스텀 테마 색·잠�
     session.applyDropdownPreview();
     try std.testing.expect(!std.mem.eql(u8, session.loaded_config.config.theme.background, orig_bg)); // 프리뷰로 바뀜
     try std.testing.expect(!session.theme_user_custom); // 프리셋 적용이 잠금
+    // **핵심 회귀 가드(code-review high)**: 미리보기는 인메모리만 — 파일 영속을 예약하면 안 된다(theme_preset_persist·dirty 없음).
+    try std.testing.expect(session.theme_preset_persist == null);
+    try std.testing.expect(!session.takeConfigDirty());
 
-    // 취소 → 원본 커스텀 색·user_custom 복원.
+    // 취소 → 원본 커스텀 색·user_custom 복원 + **파일 영속도 없음**(미리본 프리셋이 disk에 안 써짐).
     session.cancelDropdownSelection();
     try std.testing.expectEqualStrings(orig_bg, session.loaded_config.config.theme.background);
     try std.testing.expect(session.theme_user_custom);
+    try std.testing.expect(session.theme_preset_persist == null); // theme.preset 줄 예약 없음
+    try std.testing.expect(!session.takeConfigDirty()); // 커스텀 색 줄이 disk에서 안 지워짐
+}
+
+test "settings 테마 프리셋 '사용자 지정' 확정: 미리본 프리셋 색이 아니라 원본 커스텀 복원 (데이터 손실 회귀 가드)" {
+    // 이 테스트가 증명하는 것: 커스텀 테마에서 프리셋을 미리본 뒤 "사용자 지정"을 **확정(Enter)**하면, 미리본 프리셋
+    // 색이 아니라 **열 때 스냅샷한 원본 커스텀 색**이 남는다(applyThemePresetIndex(n)이 잠금만 풀고 색을 안 되돌려 미리본
+    // 색이 커스텀으로 굳던 code-review high 수정). 그리고 커스텀 확정은 theme.preset 줄을 파일에 안 남긴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.loaded_config.config.theme_follow_system = false;
+    session.theme_user_custom = true;
+    session.loaded_config.config.theme.background = "#070b0d";
+    const orig_bg = session.loaded_config.config.theme.background;
+    session.toggleSettings();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var preset_row: ?usize = null;
+    for (sections, 0..) |_, si| {
+        session.chrome_host.settings.section = si;
+        const cf = try session.currentSectionFields(scratch.allocator());
+        for (cf.enums, 0..) |e, ei| if (std.mem.eql(u8, e.key, "theme.preset")) {
+            preset_row = cf.bools.len + cf.nums.len + ei;
+        };
+        if (preset_row != null) break;
+    }
+    try std.testing.expect(preset_row != null);
+    session.refreshSettingsFieldCount();
+    session.chrome_host.settings.selected = preset_row.?;
+
+    // 열기(현재=사용자 지정 슬롯). 프리셋 프리뷰 → 색 바뀜. 다시 "사용자 지정" 슬롯 선택 후 확정.
+    session.toggleSelectedSetting();
+    const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
+    session.chrome_host.settings.dropdown.selected = 0; // 첫 프리셋 미리보기
+    session.applyDropdownPreview();
+    try std.testing.expect(!std.mem.eql(u8, session.loaded_config.config.theme.background, orig_bg));
+    session.chrome_host.settings.dropdown.selected = n; // "사용자 지정" 슬롯
+    session.applyDropdownSelection(); // 확정
+    // 미리본 프리셋 색이 아니라 원본 커스텀 색이 남고, 잠금 해제 + theme.preset 파일 예약 없음.
+    try std.testing.expectEqualStrings(orig_bg, session.loaded_config.config.theme.background);
+    try std.testing.expect(session.theme_user_custom);
+    try std.testing.expect(session.theme_preset_persist == null);
+}
+
+test "settings enum 드롭다운 취소: 안 바뀐 값은 dirty로 영속 안 함 (browsed 기본값 pin 방지)" {
+    // 이 테스트가 증명하는 것: enum 드롭다운을 열어 구경만 하고 취소하면, 값이 안 바뀌었으니 config 파일에 그 키를
+    // 영속(markDirty)하지 않는다(취소가 안 바뀐 기본값을 명시 줄로 pin하던 code-review 수정 — 미리보기·취소 무영속).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.toggleSettings();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var enum_row: ?usize = null;
+    for (sections, 0..) |_, si| {
+        session.chrome_host.settings.section = si;
+        const cf = try session.currentSectionFields(scratch.allocator());
+        for (cf.enums, 0..) |e, ei| {
+            if (std.mem.eql(u8, e.key, "theme.preset")) continue;
+            enum_row = cf.bools.len + cf.nums.len + ei;
+            break;
+        }
+        if (enum_row != null) break;
+    }
+    try std.testing.expect(enum_row != null);
+    session.refreshSettingsFieldCount();
+    session.chrome_host.settings.selected = enum_row.?;
+
+    // 열고 → 취소(선택 안 바꿈). 값 불변 + dirty 없음(안 바뀐 값 영속 안 함).
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.chrome_host.settings.dropdown.open);
+    session.cancelDropdownSelection();
+    try std.testing.expect(!session.chrome_host.settings.dropdown.open);
+    try std.testing.expect(!session.takeConfigDirty()); // 구경만 한 값은 파일에 안 pin
 }
 
 test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist 예약 (CS-4-4c)" {

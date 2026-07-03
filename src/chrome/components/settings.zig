@@ -57,17 +57,11 @@ pub const FieldRow = struct {
         selected: usize,
         pub const Cell = struct { rgb: @import("../../color.zig").Rgb, hex: []const u8 };
     };
-
-    /// 슬라이더 값의 정규화 위치(0..1). min==max면 0(0분모 가드).
-    fn sliderRatio(s: Slider) f32 {
-        if (s.max <= s.min) return 0;
-        return @floatCast(std.math.clamp((s.value - s.min) / (s.max - s.min), 0, 1));
-    }
 };
 
-/// 순수 상태 — 열림 + 포커스된 행 + 슬라이더 드래그 상태. 행 데이터(rows)는 State에 두지 않고 매 프레임 platform이
-/// 주입한다(config 단일 출처 — palette 선례). 값도 config가 소유하므로 handle은 의도(toggle/slider_set/adjust)만
-/// 내고 실제 변경+write-back은 platform이 한다. slider 드래그 중엔 pending_ratio에 최신 ratio를 담아 platform이 읽는다.
+/// 순수 상태 — 열림 + 포커스된 행 + color 피커 드래그 상태. 행 데이터(rows)는 State에 두지 않고 매 프레임 platform이
+/// 주입한다(config 단일 출처 — palette 선례). 값도 config가 소유하므로 handle은 의도(toggle/dropdown/text_commit 등)만
+/// 내고 실제 변경+write-back은 platform이 한다(숫자는 입력 박스 편집→text_commit, enum/폰트는 드롭다운 팝업).
 /// 인라인 편집 버퍼 용량(바이트) — 폰트 패밀리·#RRGGBB는 짧아 고정 버퍼면 충분(별도 allocator 불요).
 const edit_cap: usize = 128;
 /// 검색 쿼리 버퍼 용량(바이트) — 짧은 키워드면 충분(고정 버퍼).
@@ -132,10 +126,8 @@ pub const State = struct {
     /// 현재 행 수 — platform이 매 프레임 setFieldCount로 주입(palette.setResultCount 선례). host 키 라우팅이 행 목록
     /// 없이 handle(k,&state)를 부를 수 있게(wrap 가드).
     count: usize = 0,
-    /// 슬라이더 드래그 진행 중(down이 슬라이더에서 시작해 up까지). move를 그 행에 캡처한다(divider 드래그 패턴).
+    /// color 피커 SV 그리드 드래그 진행 중(down이 그리드에서 시작해 up까지). move를 그 행에 캡처한다(divider 드래그 패턴).
     dragging: bool = false,
-    /// 드래그/클릭이 만든 최신 슬라이더 ratio(0..1). platform이 .slider_set에서 읽어 rows[selected]의 값으로 매핑한다.
-    pending_ratio: f32 = 0,
     /// text 행 인라인 편집 중. 켜지면 키가 편집 버퍼로 라우팅된다(Enter=커밋, Esc=취소). platform이 enterEdit로 켜고
     /// (현재값 시드) .text_commit에서 editText()를 읽어 config arena에 dupe→setText. 별도 allocator 없이 고정 버퍼.
     editing: bool = false,
@@ -401,11 +393,6 @@ const palette_label_reserve: u32 = 14; // palette 행 라벨("ANSI 팔레트") �
 // control 열 최소 폭(칸) — text 값(폰트 패밀리 "JetBrains Mono"=14)·dropdown 프리셋명("catppuccin-mocha"=16)을
 // 잘리지 않고 담는 하한. slider 폭이 이보다 넓으면 그쪽을 쓴다(controlCols).
 const settings_value_cols: u32 = 24;
-// slider control 열 우측에 **현재 숫자 값**을 표시하려고 예약하는 칸 수. 막대만 그리면(이전) 값 변화가 작거나
-// 효과가 즉각 안 보이는 슬라이더(예: 커서 깜빡임 ms는 범위 100~10000이라 막대가 거의 안 움직임)에서 화살표를
-// 눌러도 변화가 안 보여 "안 먹는다"처럼 느껴졌다 — 값을 함께 보여 화살표/드래그가 즉시 반영됨을 눈으로 확인하게 한다.
-// 폭 = 최대 표시 폭("10000"=5) + 막대와의 1칸 간격. 막대는 이 칸만큼 줄어든 sliderBarRect를 쓴다(view·hit-test 공유).
-const slider_value_cols: u32 = 6;
 
 /// 좌측 네비 폭(칸) — 가장 긴 섹션 라벨 + 좌측 1칸 패딩(선택 표식 여유). 빈 목록이면 최소 5.
 fn navCols(sections: []const []const u8) u32 {
@@ -470,20 +457,13 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len, .nav_cols = nav_cols, .form_x = form_x, .form_cols = form_cols, .body_rows = @intCast(body_rows) };
 }
 
-/// 보이는 폼 행 vi(0..win_len)의 control 열 rect(폼 영역 우측, ctrl_cols 폭, 행 높이). toggle은 좌측정렬, slider는
-/// 막대(sliderBarRect)+값 텍스트로 이 열을 나눠 쓴다.
+/// 보이는 폼 행 vi(0..win_len)의 control 열 rect(폼 영역 우측, ctrl_cols 폭, 행 높이). toggle은 좌측정렬, number는
+/// 입력 박스(input_box)가 이 열을 채운다.
 fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     const box = l.box;
     const row = l.first_field_row + @as(u32, @intCast(vi));
     const ctrl_x = l.form_x + @as(i32, @intCast((l.form_cols -| l.ctrl_cols) * box.cw));
     return .{ .x = ctrl_x, .y = modal_box.rowY(box, row), .w = l.ctrl_cols * box.cw, .h = box.ch };
-}
-
-/// slider 막대 rect — control 열에서 우측 slider_value_cols(값 텍스트 자리)를 뺀 왼쪽 부분. view·hit-test·드래그
-/// ratioAt이 모두 이 rect를 써야(단일 출처) 보이는 막대와 클릭 매핑이 어긋나지 않는다. 값 텍스트는 view가 control
-/// 열 우측 끝에 우측정렬로 그린다(formatSliderValue).
-fn sliderBarRect(ctrl: draw.Rect, cw: u32) draw.Rect {
-    return .{ .x = ctrl.x, .y = ctrl.y, .w = ctrl.w -| slider_value_cols * cw, .h = ctrl.h };
 }
 
 /// slider 현재 값을 control 열 우측 끝에 붙일 표시 문자열로 포맷한다. 소수 2자리로 굽고 뒤따르는 0(과 점)을 떼

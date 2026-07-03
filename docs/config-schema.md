@@ -48,8 +48,9 @@ pub const Meta = struct {
     doc: []const u8,
     /// 숫자 범위(min,max). enum/bool/문자열엔 무의미(null). 파서 검증과 GUI 숫자 입력 박스 clamp가 공유.
     range: ?[2]f64 = null,
-    /// GUI 위젯 종류(타입에서 기본 유추, 명시로 override). toggle|number|slider|dropdown|text|color|...
-    /// (`slider`는 range 숫자 필드의 위젯 값 — 이름은 남아 있으나 GUI는 슬라이더 막대가 아니라 **숫자 입력 박스**로 렌더한다.)
+    /// GUI 위젯 종류(타입에서 기본 유추, 명시로 override). toggle|number|dropdown|text|color|...
+    /// (range 숫자 필드는 `.number`(입력 박스로 렌더). 옛 `.slider` 값은 제거됐다 — 숫자 필드 분류는 위젯이 아니라
+    /// 타입(f32/u32+range)으로 하므로 위젯 값은 안 읽혔고, 슬라이더 막대는 입력 박스로 대체됐다.)
     widget: Widget = .auto,
     /// 세팅 페이지 좌측 섹션. 없으면 부모 struct 이름에서 유추.
     section: ?Section = null,

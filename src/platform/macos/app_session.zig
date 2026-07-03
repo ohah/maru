@@ -2012,7 +2012,11 @@ pub const AppSession = struct {
                 // slotTop이 header 더하고 scroll 뺀 슬롯 상단(단일 출처, i64), 거기에 n줄 블록 세로 중앙 오프셋을 더한다.
                 // 헤더 위로 스크롤돼 음수면 헤더 아래로 clamp — IME 후보창이 고정 검색 헤더 위로 뜨지 않게(scissor가 편집
                 // 텍스트를 헤더에서 자르는 것과 짝, slotAt이 헤더 영역을 슬롯에서 제외하는 것과 일관).
-                const slot_top = chrome.components.sidebar.slotTop(idx, self.sidebar_header_height_px, slot_h, self.sidebar_scroll_offset_px);
+                // 옛 버그(조사 확인): idx는 원본 탭 인덱스인데 slotTop에 슬롯으로 넣어 검색 필터 활성 시 표시 슬롯과
+                // 어긋났다. displaySlotOf로 원본 탭→표시 row로 바꿔 교정하고, 가변 높이 rowTop을 쓴다. 필터로 숨었으면
+                // (rename 중엔 드묾) null → 터미널 커서 폴백.
+                const slot_row = self.displaySlotOf(idx) orelse return null;
+                const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, slot_row, self.sidebar_header_height_px, slot_h, self.cell_height_px, self.sidebar_scroll_offset_px);
                 const block_off: i64 = @intCast((slot_h -| line_count * ch) / 2);
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{
@@ -7386,7 +7390,10 @@ pub const AppSession = struct {
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2 and self.sidebar_drag_index < self.tabs.items.len) {
-                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px, self.tabs.items.len);
+                // 가변 높이 dragTargetSlot → row 인덱스. 드래그는 검색 비활성일 때만 arm되므로(아래 down 처리) sidebar_rows가
+                // 전체 탭과 1:1(카드만)이라 row 인덱스 = 원본 탭 = moveTab 인자로 그대로 유효하다. 헤더가 섞이는 SG4(드래그
+                // 넣기/빼기)에서 row→tab 변환(visibleTab)과 그룹 경계 clamp를 넣는다.
+                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.cell_height_px, self.sidebar_scroll_offset_px);
                 // moveTab이 그룹(고정/비고정)으로 clamp한 **실제 안착 인덱스**를 단일 출처로 받는다(여기서 따로
                 // pre-clamp하지 않는다 — countPinnedTabs O(n)가 drag당 1회로 줄고, 이중-clamp 일치 가정이 사라진다).
                 // sidebar_drag_index를 안착 인덱스로 갱신해 다음 delta가 *그* 탭을 재정렬한다. no-op이면 from을 그대로 반환.
@@ -11646,7 +11653,9 @@ pub const AppSession = struct {
 
     /// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수·스크롤로 판정).
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
-        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px, self.sidebar_rows.items.len);
+        // 가변 높이(카드=slot_h·헤더=cell_h). 반환은 row 인덱스(호출처 visibleTab이 row→tab). header_row_h는 SG3b-2에서
+        // 헤더 row가 실제로 생길 때 의미를 갖고, 지금(카드만)은 안 쓰인다 — cell_height_px를 근사로 넘긴다.
+        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.cell_height_px, self.sidebar_scroll_offset_px);
     }
 
     /// 사이드바 콘텐츠(표시 카드 전체 높이)가 헤더 아래 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
@@ -13676,7 +13685,7 @@ pub const AppSession = struct {
                 };
                 if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다
                 const cs = (try Local.chordStr(resolver, Action{ .select_tab = abs }, arena)) orelse continue;
-                const y = sidebar.slotTop(s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_scroll_offset_px);
+                const y = sidebar.rowTop(self.sidebar_rows.items, s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.cell_height_px, self.sidebar_scroll_offset_px);
                 if (y + slot_h <= header_h or y >= vp_bottom) continue; // 헤더 위로 스크롤·뷰포트 아래로 벗어난 카드 생략(render scissor와 정합)
                 try badges.append(arena, .{ .rect = .{ .x = 0, .y = @intCast(@max(y, header_h)), .w = self.sidebar_width_px, .h = self.sidebar_slot_height_px }, .chord = cs });
             }

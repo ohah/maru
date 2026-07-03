@@ -4890,12 +4890,14 @@ pub const AppSession = struct {
     }
 
     /// 설정 팔레트 그리드 행의 폼-포커스 ←→를 16색 셀 이동으로 가로챈다(host가 rows를 모르는 특수 행 — platform 전용).
-    /// 처리하면 true(키 소비). 조건: 설정 열림·폼 포커스·다른 모드(팝업/picker/편집/검색/녹음) 아님·선택 행=팔레트
-    /// 그리드·평범한 ←/→. ← 셀0·→ 셀15(끝)에선 false를 돌려(intercept 안 함) 컴포넌트가 영역 포커스 이동으로 처리한다
-    /// (팔레트 밖으로 나가는 방향키가 살아난다).
+    /// 처리하면 true(키 소비). 조건: 설정 열림·폼 포커스·다른 모드(팝업/picker/편집/녹음) 아님·선택 행=팔레트 그리드·
+    /// 평범한 ←/→. **검색 중에도 동작한다** — `currentSectionFields`가 검색 필터를 적용해 `paletteRowIndex`와 `selected`가
+    /// 같은 필터-인덱스라 정합하고, 검색의 ←→는 원래 소비만 되던 미사용 키라 셀 이동으로 재활용해도 충돌 없다(↑↓·글자는
+    /// 여전히 검색 나비·쿼리 편집). ← 셀0·→ 셀15(끝)에선 false를 돌려(intercept 안 함) 컴포넌트가 처리한다(검색 중엔 그 방향
+    /// 키가 소비돼 no-op, 비-검색이면 영역 포커스 이동으로 이어진다).
     fn settingsPaletteArrowIntercept(self: *AppSession, event: terminal.KeyEvent) bool {
         const s = &self.chrome_host.settings;
-        if (!s.open or s.nav_focused or s.dropdown.open or s.picking or s.editing or s.searching or s.recording) return false;
+        if (!s.open or s.nav_focused or s.dropdown.open or s.picking or s.editing or s.recording) return false;
         const dir: i32 = switch (chromeInputFromKeyEvent(event)) {
             .key => |k| switch (k.key) {
                 .left => -1,
@@ -22376,6 +22378,49 @@ test "settingsPaletteArrowIntercept: 팔레트 행 폼-포커스 ←→=셀 이�
     session.chrome_host.settings.nav_focused = true;
     session.chrome_host.settings.grid_cell = 5;
     try std.testing.expect(!session.settingsPaletteArrowIntercept(right));
+}
+
+test "settingsPaletteArrowIntercept: 검색 중에도 팔레트 ←→ 셀 이동 살아있음(검색 필터 인덱스 정합)" {
+    // 이 테스트가 증명하는 것: 검색 상태에서도 팔레트 행 ←→가 셀을 움직인다(사용자 요청). currentSectionFields가 검색
+    // 필터를 적용해 paletteRowIndex와 selected가 같은 필터-인덱스라 정합하고, 검색의 ←→는 원래 소비만 되던 미사용 키다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.toggleSettings();
+
+    // "palette"로 검색(theme.palette 키 부분일치) → 교차 검색으로 팔레트 행이 나온다.
+    const s = &session.chrome_host.settings;
+    s.startSearch();
+    for ("palette") |c| s.appendSearchCp(c);
+    try std.testing.expect(s.searching);
+    session.refreshSettingsFieldCount();
+
+    // 필터된 필드에서 팔레트 행 인덱스를 찾아 selected로(검색 필터가 적용된 인덱스라 intercept와 정합).
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const cf = try session.currentSectionFields(scratch.allocator());
+    const pi = cf.paletteRowIndex() orelse return error.TestUnexpectedResult;
+    s.selected = pi;
+    s.nav_focused = false;
+    s.grid_cell = 5;
+
+    const right = terminal.KeyEvent{ .key = .arrow_right, .modifiers = .{} };
+    const left = terminal.KeyEvent{ .key = .arrow_left, .modifiers = .{} };
+    // 검색 중이어도 → 셀 이동(가로챔) grid_cell→6, ← → 5.
+    try std.testing.expect(session.settingsPaletteArrowIntercept(right));
+    try std.testing.expectEqual(@as(usize, 6), s.grid_cell);
+    try std.testing.expect(session.settingsPaletteArrowIntercept(left));
+    try std.testing.expectEqual(@as(usize, 5), s.grid_cell);
+    try std.testing.expect(s.searching); // 검색은 그대로 유지
 }
 
 test "settings 폰트 드롭다운 취소: 커스텀(번들 밖) 폰트 복원 (데이터 손실 회귀 가드)" {

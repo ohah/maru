@@ -9758,6 +9758,10 @@ pub const AppSession = struct {
             .pinned = tab.pinned,
             .background_color = tab.background_color,
             .accent_color = tab.accent_color,
+            // 사이드바 그룹 시작 마커(위치 파생 — docs/sidebar-groups.md). null=그룹 아님(arena라 부분 실패 누수
+            // 걱정 없음 — 캡처 arena가 통째 정리). group_collapsed는 그룹 시작 탭에만 의미.
+            .group_start = if (tab.group_start) |g| try arena.dupe(u8, g) else null,
+            .group_collapsed = tab.group_collapsed,
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -10043,6 +10047,7 @@ pub const AppSession = struct {
             if (PaneTree.containsSplit(tab.tree, dd)) self.divider_drag = null;
         }
         if (tab.custom_name) |n| self.allocator.free(n); // 워크스페이스 사용자 rename(owned) 해제
+        if (tab.group_start) |g| self.allocator.free(g); // 사이드바 그룹 시작 마커(owned) 해제
         PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(leaf surface는 destroyPane가 이미)
         tab.panes.deinit(self.allocator);
         self.allocator.destroy(tab);
@@ -10086,8 +10091,14 @@ pub const AppSession = struct {
         for (used) |u| if (!u) return error.MalformedTree; // 트리가 참조 안 한 고아 pane(보이지 않는 라이브 셸) 차단
         tab.tree = root;
         tab.active_pane = @min(m.active_pane, tab.panes.items.len - 1);
-        // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계로 둬, OOM 시 위 errdefer(panes·tab)가 정리하고
-        // custom_name은 아직 미할당이라 누수가 없다.
+        // 그룹 시작 마커(owned) 복원 — fallible dupe라 errdefer로 보호한다. destroyTabStandalone의 errdefer는
+        // custom_name/group_start 같은 스칼라 owned 문자열을 정리하지 않으므로(위 errdefer는 panes·tab 구조만),
+        // 이어지는 custom_name dupe가 OOM으로 실패해도 이 마커가 누수되지 않게 여기서 명시 errdefer를 건다.
+        // group_collapsed는 non-fallible 대입. null=그룹 아님(빈 문자열도 유효한 "이름 없는 그룹").
+        tab.group_start = if (m.group_start) |g| try self.allocator.dupe(u8, g) else null;
+        errdefer if (tab.group_start) |g| self.allocator.free(g);
+        tab.group_collapsed = m.group_collapsed;
+        // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계. OOM 시 위 errdefer(panes·tab·group_start)가 정리한다.
         tab.custom_name = try self.dupeCustomName(m.custom_name);
         tab.pinned = m.pinned; // 위치 고정 복원
         tab.background_color = m.background_color; // 카드 배경 tint 복원
@@ -11781,9 +11792,9 @@ pub const AppSession = struct {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const tabs = self.sidebarTabs(arena) catch return;
+        const rows = self.sidebarRows(arena) catch return;
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        chrome.components.sidebar.view(tabs, self.hovered_slot, self.pane_drop_slot, self.buildChromeProps(), arena, &ops) catch return;
+        chrome.components.sidebar.view(rows, self.hovered_slot, self.pane_drop_slot, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
         // 헤더(검색바) 하단 구분선 — 검색 줄과 카드 목록 사이 경계를 명확히(사용자 요청 "Searchbar에 언더바"). divider
         // 색·border 두께로 사이드바 폭 전체에 가로선(layer 0=사이드바 retained). 검색 줄 바로 아래(=header_h 하단)에 둔다.
@@ -12409,13 +12420,14 @@ pub const AppSession = struct {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y + bar.h -| thickness), @floatFromInt(bar.w), @floatFromInt(thickness), self.dividerColor(), 2);
     }
 
-    /// app `*Tab`에서 chrome 중립 `sidebar.Tab`(라벨·활성)을 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다
-    /// (palette Row 선례). 라벨 = 활성 panel surface 제목(제목 glyph는 buildSidebarTitleFrame이 이 라벨로 그린다).
-    fn sidebarTabs(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.sidebar.Tab {
-        const out = try arena.alloc(chrome.components.sidebar.Tab, self.sidebar_visible_tabs.items.len);
+    /// app `*Tab`에서 chrome 중립 `sidebar.Row`(표시 행)를 빌드한다 — chrome은 app 트리를 모르므로 host가 떼어 준다
+    /// (palette Row 선례). SG1은 card row만 낸다(그룹 없음 — 동작 보존): 표시 슬롯 i = 원본 탭 orig의 카드. group_header
+    /// row는 SG3에서 projectRows가 삽입한다. 라벨 = 활성 panel surface 제목(제목 glyph는 buildSidebarDrawList가 이 라벨로).
+    fn sidebarRows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.sidebar.Row {
+        const out = try arena.alloc(chrome.components.sidebar.Row, self.sidebar_visible_tabs.items.len);
         for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
-            out[i] = .{ .label = workspaceLabel(tab), .active = (orig == self.app_window.active_tab) };
+            out[i] = .{ .card = .{ .tab = orig, .label = workspaceLabel(tab), .active = (orig == self.app_window.active_tab) } };
         }
         return out;
     }
@@ -14029,6 +14041,7 @@ pub const AppSession = struct {
                 self.allocator.destroy(pane);
             }
             if (tab.custom_name) |n| self.allocator.free(n);
+            if (tab.group_start) |g| self.allocator.free(g); // 사이드바 그룹 시작 마커(owned) — destroyTabStandalone과 동기 유지
             PaneTree.deinit(self.allocator, tab.tree); // heap split 노드 해제(split.deinit은 leaf 미접근)
             tab.panes.deinit(self.allocator);
             self.allocator.destroy(tab);
@@ -18087,11 +18100,17 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     const sc = [_]maru.session.workspace.Surface{ .{ .cwd = "/tmp", .cols = 40, .rows = 24 }, .{ .cwd = "/tmp", .cols = 40, .rows = 24 } };
     const panes1 = [_]maru.session.workspace.Pane{.{ .active_term = 1, .surfaces = &sc }};
     const tree1 = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    // 탭0에 그룹 시작 마커(위치 파생 — docs/sidebar-groups.md): "frontend" 그룹 시작·접힘. 탭1은 마커 없음(null).
     const tabs = [_]maru.session.workspace.Tab{
-        .{ .active_pane = 1, .tree = &tree0, .panes = &panes0 },
+        .{ .active_pane = 1, .group_start = "frontend", .group_collapsed = true, .tree = &tree0, .panes = &panes0 },
         .{ .active_pane = 0, .tree = &tree1, .panes = &panes1 },
     };
     try session.applyWorkspaceWindow(.{ .active_tab = 1, .tabs = &tabs });
+
+    // 라이브 복원 확인: buildWorkspaceTab이 group_start를 owned로 dup했고(캡처가 재차 읽음), 탭1은 null.
+    try std.testing.expectEqualStrings("frontend", session.tabs.items[0].group_start.?);
+    try std.testing.expectEqual(true, session.tabs.items[0].group_collapsed);
+    try std.testing.expectEqual(@as(?[]const u8, null), session.tabs.items[1].group_start);
 
     // 캡처해 구조·active 인덱스가 모델과 일치하는지(cwd는 OSC-side라 round-trip 안 함 — 구조만).
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -18110,6 +18129,11 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     try std.testing.expectEqual(@as(usize, 1), cap.tabs[1].panes.len);
     try std.testing.expectEqual(@as(usize, 2), cap.tabs[1].panes[0].surfaces.len);
     try std.testing.expectEqual(@as(usize, 1), cap.tabs[1].panes[0].active_term);
+    // 그룹 시작 마커 캡처 round-trip(라이브 → 모델). 탭0="frontend"·접힘, 탭1=null.
+    try std.testing.expect(cap.tabs[0].group_start != null);
+    try std.testing.expectEqualStrings("frontend", cap.tabs[0].group_start.?);
+    try std.testing.expectEqual(true, cap.tabs[0].group_collapsed);
+    try std.testing.expectEqual(@as(?[]const u8, null), cap.tabs[1].group_start);
 }
 
 test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)" {

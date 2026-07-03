@@ -13,9 +13,17 @@ const tokens = @import("../tokens.zig");
 /// 이 컴포넌트가 그리는 레이어 — 사이드바(가장 아래 Z, 터미널 strip 왼쪽). platform이 밴드 fill을 lower해 sidebar 셀 슬롯에.
 pub const layer = draw.Layer.sidebar;
 
-/// host가 주입하는 중립 워크스페이스 탭(라벨·활성). 라벨 glyph 렌더는 platform(`buildSidebarTitleFrame`)이 맡고
-/// (CoreText 경계), chrome은 밴드(fill)·hit-test만 — label은 제목 glyph 완전 이주(후속) 시 view가 text op으로 쓸 자리다.
-pub const Tab = struct { label: []const u8, active: bool };
+/// host(projectRows)가 주입하는 사이드바 화면 **한 줄(row)**. 카드일 수도 그룹 헤더일 수도 있다 — hit-test/view는
+/// row가 어느 종류인지만 보고 균일하게 처리해 "슬롯=카드=탭 인덱스" 1:1 가정을 없앤다(docs/sidebar-groups.md §2.2).
+/// SG1에선 card만 생성해 동작을 보존하고(그룹 없음), group_header는 SG3에서 채운다. 라벨 glyph 렌더는 platform
+/// (`buildSidebarDrawList`)이 맡고(CoreText 경계), chrome은 밴드(fill)·hit-test만 든다.
+pub const Row = union(enum) {
+    /// 워크스페이스 카드. tab=원본 self.tabs 인덱스(옛 visibleTab 값), active=활성 워크스페이스,
+    /// depth=그룹 안이면 1(들여쓰기 — SG3). label은 제목 glyph 완전 이주(후속) 시 view가 text op으로 쓸 자리다.
+    card: struct { tab: usize, label: []const u8, active: bool, depth: u8 = 0 },
+    /// 그룹 헤더(SG3) — 접기 토글 줄(카드 아님). collapsed=접힘, member_count=접힘 시 "▸ name (N)" 표시용.
+    group_header: struct { collapsed: bool, label: []const u8, member_count: u16 },
+};
 
 // ── hit-test (옛 app_session 순수 함수 이전, 같은 수학) ────────────────────────
 
@@ -39,12 +47,12 @@ pub fn onResizeEdge(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
 /// header_height_px=0이면 헤더 없음(기존 동작 — 슬롯이 y=0부터).
 /// scroll_offset_px는 사이드바 세로 스크롤량 — 카드가 그만큼 위로 밀려 있으므로 화면 y의 슬롯은 콘텐츠 좌표
 /// (y-header+scroll)로 역산한다. 헤더는 스크롤과 무관하게 고정이라 y<header 판정엔 scroll을 안 더한다("보이는=클릭되는").
-pub fn slotAt(y_px: f64, header_height_px: u32, slot_height_px: u32, scroll_offset_px: u32, tab_count: usize) ?usize {
-    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px)) return null;
+pub fn slotAt(y_px: f64, header_height_px: u32, slot_height_px: u32, scroll_offset_px: u32, row_count: usize) ?usize {
+    if (slot_height_px == 0 or row_count == 0 or !std.math.isFinite(y_px)) return null;
     const h: f64 = @floatFromInt(header_height_px);
     if (y_px < h) return null; // 헤더(검색바·아이콘) 영역 — 슬롯 아님(스크롤 무관, 고정)
     const slot_f = (y_px - h + @as(f64, @floatFromInt(scroll_offset_px))) / @as(f64, @floatFromInt(slot_height_px));
-    if (slot_f >= @as(f64, @floatFromInt(tab_count))) return null;
+    if (slot_f >= @as(f64, @floatFromInt(row_count))) return null;
     return @intFromFloat(slot_f);
 }
 
@@ -115,10 +123,10 @@ pub fn closeButton(x_px: f64, sidebar_width_px: u32, cell_width_px: u32) bool {
 /// 드래그 중 사이드바 y → 타겟 슬롯(항상 valid 인덱스로 clamp — slotAt과 달리 슬롯 아래 빈 영역도 마지막 슬롯으로
 /// 본다, 드래그를 끝까지 끌 수 있게). 슬롯 높이/탭 0이면 0. scroll_offset_px는 slotAt과 같은 의미(콘텐츠가 위로
 /// 밀린 양) — 콘텐츠 좌표 rel=(y-header+scroll)로 슬롯을 역산하고, rel<=0(헤더/그 위)이면 첫 슬롯으로 본다.
-pub fn dragTargetSlot(y_px: f64, header_height_px: u32, slot_height_px: u32, scroll_offset_px: u32, tab_count: usize) usize {
-    if (slot_height_px == 0 or tab_count == 0 or !std.math.isFinite(y_px)) return 0;
+pub fn dragTargetSlot(y_px: f64, header_height_px: u32, slot_height_px: u32, scroll_offset_px: u32, row_count: usize) usize {
+    if (slot_height_px == 0 or row_count == 0 or !std.math.isFinite(y_px)) return 0;
     const h: f64 = @floatFromInt(header_height_px);
-    const last = tab_count - 1;
+    const last = row_count - 1;
     const rel = y_px - h + @as(f64, @floatFromInt(scroll_offset_px));
     if (rel <= 0) return 0;
     const slot_f = rel / @as(f64, @floatFromInt(slot_height_px));
@@ -132,19 +140,22 @@ pub fn dragTargetSlot(y_px: f64, header_height_px: u32, slot_height_px: u32, scr
 /// slot_h). **slot_height_px는 cell 높이가 아니다**(= cell_h × ratio, 더 크다) — platform이 `sidebar_slot_height_px`를
 /// 넘긴다. strip 배경·제목 glyph는 platform이 따로(밴드만 chrome). 활성 우선(활성 슬롯은 호버여도 활성 색). tabs
 /// 빈(사이드바 꺼짐)이거나 메트릭 0이면 무동작. 순수: tabs·hover 상태만 읽는다. out·op은 호출자 frame arena 소유.
-pub fn view(tabs: []const Tab, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const w = p.metrics.sidebar_width_px;
     const slot_h = p.metrics.sidebar_slot_height_px;
-    if (w == 0 or slot_h == 0 or tabs.len == 0) return;
-    // 밴드는 슬롯 **상대** 좌표(row*slot_h)로 낸다 — platform lowerSidebar가 rect.y/slot_h로 슬롯 행을 역산하므로
+    if (w == 0 or slot_h == 0 or rows.len == 0) return;
+    // 밴드는 슬롯(row) **상대** 좌표(row*slot_h)로 낸다 — platform lowerSidebar가 rect.y/slot_h로 슬롯 행을 역산하므로
     // 헤더 높이를 더하면 그 역산이 깨진다. 헤더(검색바·아이콘)만큼의 시프트는 .m이 사이드바 셀 py_top에 더하고
     // (sidebar_header_height_px), 헤더 높이는 hit-test(slotAt/headerHit)만 안다. 하단 "+" 밴드는 헤더 아이콘으로 이동해 폐기.
 
-    // 활성 슬롯 밴드(첫 active=true 탭).
+    // 활성 슬롯 밴드(첫 active=true 카드 row). group_header row는 활성 대상이 아니다.
     var active_idx: ?usize = null;
-    for (tabs, 0..) |t, i| if (t.active) {
-        active_idx = i;
-        break;
+    for (rows, 0..) |r, i| switch (r) {
+        .card => |c| if (c.active) {
+            active_idx = i;
+            break;
+        },
+        .group_header => {}, // SG3: 헤더 밴드는 이 단계에서 안 그린다(카드만 동작 보존)
     };
     if (active_idx) |ai| {
         try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape)); // 카드 배경 밴드
@@ -154,15 +165,15 @@ pub fn view(tabs: []const Tab, hovered_slot: ?usize, drop_slot: ?usize, p: props
         // 텍스트 좌측 여백은 여전히 tokens.space.accent_bar_width_px(=막대 폭)로 예약된다(밴드 위 정합·단일 출처).
     }
 
-    // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선).
+    // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선). 슬롯은 row 인덱스라 헤더/카드 무관하게 칠한다.
     if (hovered_slot) |hs| {
-        if (hs < tabs.len and (active_idx == null or hs != active_idx.?)) {
+        if (hs < rows.len and (active_idx == null or hs != active_idx.?)) {
             try out.append(arena, bandFill(hs, w, slot_h, .tab_hover_bg, p.shape));
         }
     }
 
     // 드롭 타겟 하이라이트 밴드(pane grip 드래그 중에만 platform이 슬롯을 준다) — 활성/호버 위에 .drop_zone 색으로
-    // 그린다. drop_slot < tabs.len이면 합칠 카드, == tabs.len이면 카드 목록 아래 행('새 워크스페이스'). 범위 검사 없이
+    // 그린다. drop_slot < rows.len이면 합칠 카드, == rows.len이면 카드 목록 아래 행('새 워크스페이스'). 범위 검사 없이
     // 그 행에 밴드를 낸다(카드 아래 행도 유효 — platform이 드래그 중에만, 그리고 자기 카드는 제외해 넘긴다).
     if (drop_slot) |ds| {
         try out.append(arena, bandFill(ds, w, slot_h, .drop_zone, p.shape));
@@ -260,15 +271,15 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
             .backing_height_px = 600,
         },
     };
-    const tabs = [_]Tab{
-        .{ .label = "1 sh", .active = false },
-        .{ .label = "2 vim", .active = true },
-        .{ .label = "3 top", .active = false },
+    const rows = [_]Row{
+        .{ .card = .{ .tab = 0, .label = "1 sh", .active = false } },
+        .{ .card = .{ .tab = 1, .label = "2 vim", .active = true } },
+        .{ .card = .{ .tab = 2, .label = "3 top", .active = false } },
     };
 
     // 활성(idx 1) + 호버(idx 0) → 밴드 2개(header_h=0, 하단 "+" 밴드는 헤더 아이콘으로 이동해 폐기).
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&tabs, 0, null, p, arena, &out);
+    try view(&rows, 0, null, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     // 활성: row 1 → y=40, role tab_active_bg, 전체 폭.
     try std.testing.expect(out.items[0] == .quad);
@@ -284,38 +295,38 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
 
     // 호버 슬롯 == 활성이면 호버 밴드 생략(활성 색 우선).
     out.clearRetainingCapacity();
-    try view(&tabs, 1, null, p, arena, &out);
+    try view(&rows, 1, null, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성만
 
     // 드롭 타겟 하이라이트: drop_slot 주면 활성/호버 위에 .drop_zone 밴드 추가(pane grip 드래그 중 platform이 준다).
     out.clearRetainingCapacity();
-    try view(&tabs, null, 0, p, arena, &out); // 활성(idx1) + 드롭(slot 0)
+    try view(&rows, null, 0, p, arena, &out); // 활성(idx1) + 드롭(slot 0)
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[1].quad.fill_role == .drop_zone);
     try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y); // slot 0
-    // drop_slot == tabs.len이면 카드 목록 아래 행(새 워크스페이스) — 범위 밖 행도 밴드를 낸다.
+    // drop_slot == rows.len이면 카드 목록 아래 행(새 워크스페이스) — 범위 밖 행도 밴드를 낸다.
     out.clearRetainingCapacity();
-    try view(&tabs, null, tabs.len, p, arena, &out);
+    try view(&rows, null, rows.len, p, arena, &out);
     const last = out.items[out.items.len - 1].quad;
     try std.testing.expect(last.fill_role == .drop_zone);
-    try std.testing.expectEqual(@as(i32, 3 * 40), last.rect.y); // row 3(카드 아래) = tabs.len × slot_h
+    try std.testing.expectEqual(@as(i32, 3 * 40), last.rect.y); // row 3(카드 아래) = rows.len × slot_h
 
     // 사이드바 꺼짐(폭 0)·slot_h 0·탭 없음이면 무동작.
     out.clearRetainingCapacity();
     var off = p;
     off.metrics.sidebar_width_px = 0;
-    try view(&tabs, null, null, off, arena, &out);
+    try view(&rows, null, null, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
     off = p;
     off.metrics.sidebar_slot_height_px = 0;
-    try view(&tabs, 0, null, off, arena, &out);
+    try view(&rows, 0, null, off, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 
     // rich shape(corner_radius>0): 같은 밴드가 둥근 quad로(radii 실림 → lowering이 GPU quad). tui와 같은 view 코드.
     out.clearRetainingCapacity();
     var rich_p = p;
     rich_p.shape = .{ .corner_radius_px = 8, .border_width_px = 1 };
-    try view(&tabs, null, null, rich_p, arena, &out);
+    try view(&rows, null, null, rich_p, arena, &out);
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expectEqual(@as(u16, 8), out.items[0].quad.corner_radii[0]);
 
@@ -324,11 +335,46 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     out.clearRetainingCapacity();
     var card_p = p;
     card_p.shape = .{ .corner_radius_px = 8, .card_gap_px = 4 };
-    try view(&tabs, null, null, card_p, arena, &out);
+    try view(&rows, null, null, card_p, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(막대 op 없음)
     const card = out.items[0].quad.rect;
     try std.testing.expectEqual(@as(i32, 4), card.x); // 좌 패딩(gap)
     try std.testing.expectEqual(@as(u32, 120 - 8), card.w); // w - 2×gap
     try std.testing.expectEqual(@as(i32, 40 + 4), card.y); // 슬롯1 y(40) + gap
     try std.testing.expectEqual(@as(u32, 40 - 8), card.h); // slot_h - 2×gap
+}
+
+test "sidebar view: group_header row 섞여도 카드 밴드만(SG1 동작 보존·Row union 안전)" {
+    // Row union에 group_header가 섞여도 SG1 view는 카드 active/hover 밴드만 낸다(헤더 밴드는 SG3에서 추가). 슬롯 격자는
+    // 카드/헤더 무관하게 균일(1행=slot_h)이라, 헤더 아래 카드의 밴드 y가 그 row 인덱스로 정확히 나오는지 고정한다 —
+    // "슬롯=row 인덱스"가 헤더가 끼어도 유지됨을 증명(docs/sidebar-groups.md §5 slot 격자 불변).
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 120,
+        .sidebar_slot_height_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    // row0=그룹 헤더, row1=활성 카드, row2=비활성 카드.
+    const rows = [_]Row{
+        .{ .group_header = .{ .collapsed = false, .label = "frontend", .member_count = 2 } },
+        .{ .card = .{ .tab = 0, .label = "web", .active = true } },
+        .{ .card = .{ .tab = 1, .label = "docs", .active = false } },
+    };
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&rows, null, null, p, arena, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(헤더 밴드는 SG1에서 안 냄)
+    try std.testing.expect(out.items[0].quad.fill_role == .tab_active_bg);
+    try std.testing.expectEqual(@as(i32, 40), out.items[0].quad.rect.y); // row 1(헤더 아래) = 1×slot_h
+
+    // 호버가 헤더 row(0)를 가리켜도 밴드는 그 행에 정상적으로 난다(슬롯=row라 카드/헤더 무관하게 칠함).
+    out.clearRetainingCapacity();
+    try view(&rows, 0, null, p, arena, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성(row1) + 호버(row0)
+    try std.testing.expect(out.items[1].quad.fill_role == .tab_hover_bg);
+    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y); // row 0
 }

@@ -30,18 +30,17 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | 필드 타입 | 위젯(`.auto`) | prop(메타에서) |
 |---|---|---|
 | `bool` | toggle | 현재값, label=doc |
-| `enum` | dropdown | 옵션=enum 토큰(`_`↔`-`), 현재값 |
-| `f32`/`u32` + `range` | slider (+ 숫자 입력) | min/max=range, step, 현재값 |
+| `enum` | dropdown(**열리는 팝업 목록**) | 옵션=enum 토큰(`_`↔`-`), 현재값. Enter/클릭으로 목록을 열어 ↑↓ 선택·Enter 확정 |
+| `f32`/`u32` + `range` | **숫자 입력 박스**(`input_box`) | min/max=range로 커밋 시 clamp, 현재값. Enter/클릭으로 편집 진입해 직접 타이핑(슬라이더/프로그레스바 대체) |
 | `[]const u8` (widget=`.text`) | text input | 현재값(IME) |
 | `[]const u8` (widget=`.color`) | color input | 현재 #RRGGBB |
-| `font.family` (특수) | font picker (dropdown 스타일 `.font` 행) | 옵션=`theme.bundled_font_families`(번들 폰트). ←→로 순환 + Enter/클릭으로 직접입력 |
+| `font.family` (특수) | **번들 폰트 드롭다운 팝업**(`.font` 행) | 옵션=`theme.bundled_font_families`(번들 폰트). Enter/클릭으로 목록을 열어 선택 |
 
-> **폰트 피커(`font.family`)**: `font.family`는 자유 문자열(어떤 설치 폰트든 가능)이라 닫힌 enum dropdown을 못 쓴다. 그래서
-> 일반 `.text` 인라인 편집 대신 **번들 폰트 목록(`theme.bundled_font_families` — 단일 출처) 위의 dropdown 스타일 피커**(`.font`
-> 행 종류)로 emit한다: ←→가 번들 폰트를 순환(`schema.cycleFontFamily`)하고, Enter/클릭은 목록 밖 시스템·직접입력 폰트를
-> 위한 인라인 편집을 연다(text 편집 경로 재사용 — `font.family`는 texts 범위라 platform이 enterEdit). 현재값이 목록 밖
-> (시스템·직접입력 폰트)이면 **←→는 무동작**이다 — 한 번의 화살표 키로 사용자가 입력한 커스텀 폰트를 덮어쓰는 데이터
-> 손실을 막는다(번들 폰트로 바꾸려면 Enter 직접입력). 새 번들 폰트는 `theme.bundled_font_families` + [font-strategy.md]
+> **폰트 피커(`font.family`)**: `font.family`는 자유 문자열이지만, 사용자 요청으로 **번들 폰트 목록
+> (`theme.bundled_font_families` — 단일 출처) 위의 열리는 드롭다운 팝업**(`.font` 행 종류)으로 emit한다: Enter/클릭이
+> 목록을 열고 ↑↓로 골라 Enter로 확정한다(platform이 `openDropdown`→`applyDropdownSelection`으로 `setText`). 현재값이
+> 목록 안이면 그 항목에서 선택이 시작되고, 목록 밖(시스템·직접입력 폰트)이면 첫 항목에서 시작한다. 목록 밖 임의 폰트를
+> 직접 지정하는 인라인 편집은 후속 과제로 둔다.) 새 번들 폰트는 `theme.bundled_font_families` + [font-strategy.md]
 > 갱신만으로 자동 노출(GUI 코드 0줄).
 
 - **섹션**: `Meta.section`(font/theme/cursor/window/input/terminal/workspace/quick_terminal/sidebar/global_hotkey)이 좌측
@@ -77,7 +76,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
   section의 FieldRow 위젯들). 모달 오버레이 레이어(팔레트/Find와 같은 `ChromeHost` 모달, 우선순위 §host).
 - **열기**: 빌트인 키(예: `⌘,` — §10 결정) 또는 메뉴 "Settings…" / 커맨드 팔릿. `toggle_settings` app action.
 - **검색·blur**: 사이드바 검색바와 같은 규율(검색 영역 밖 클릭/Esc로 blur → 키 포커스 터미널 복귀).
-- **키보드 네비**: 폼에선 ↑↓=행 이동·←→=값 조절·Enter=토글/편집. **Tab/Shift+Tab으로 좌측 섹션 네비↔폼 전환**(`State.nav_focused`) — 네비 포커스면 ↑↓=섹션 이동·Enter/→=폼 복귀이고, 선택 섹션 좌측에 **▸ 마커**로 키 포커스 위치를 보인다. slider/색 행의 ←→ 값 조절과 겹치지 않게 영역 전환은 Tab 전용(`input.Key`에 `tab` 추가 — `chromeInputFromKeyEvent`가 매핑). 컴포넌트는 섹션 수를 모르므로 네비 ↓의 상한은 platform `refreshSettingsFieldCount`가 clamp한다.
+- **키보드 네비(화살표 전용)**: **←→=섹션 전환**(좌측 네비, 컴포넌트가 `selectSection`±1 — 상한은 platform `refreshSettingsFieldCount`가 clamp, ←는 첫 섹션에서 정지), **↑↓=행 이동**, **Enter/Space=행 활성**(bool flip·number 입력 박스 편집 진입·enum/font 드롭다운 팝업 열기·text 편집·color HSV picker·keybind 녹음), Esc=닫기. 현재 섹션만 accent, 나머지는 muted로 늘 보인다. **예전 Tab 폼↔네비 토글(`nav_focused`)은 제거**됐다(사용자 요청 — "탭으로 왔다갔다"·"화살표로 전부 이동"). Tab은 무동작. ←→가 섹션 전환으로 통일되며 슬라이더 ←→ 값조절·색 ←→ 프리셋 순환은 없어졌다(값은 입력 박스·드롭다운·picker로). 드롭다운 팝업이 열려 있으면 모든 키를 팝업이 잡는다(↑↓ 선택·Enter 확정·Esc 취소·←→/잡키 무시).
 - **저장**: 변경된 키를 override로 config 파일에 write-back(S0-1b) + atomic write(주석 보존 — sidebar.* 토글이
   쓰던 `take_*_dirty`→serialize→atomic write 패턴 일반화, [configuration.md] 구현 경계).
 
@@ -102,11 +101,11 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 |---|---|---|
 | 텍스트 입력 + caret | `overlay_input`(Find/팔레트) | — |
 | 토글 | `context_menu` 체크박스(✓) | State+Action 얇게 |
-| 드롭다운/리스트 | `palette`(선택·네비·윈도잉) | 검색 없는 정적 변형 |
+| 드롭다운/리스트 | `dropdown`(축소 표시 + **열리는 팝업 목록**, `context_menu` 오버레이 규율) | enum/font 변형 선택 |
 | hit-test/드래그 | `divider`/`sidebar`/`tabbar` `hitTest`·`dragRatio` | pointer 이벤트(§3) |
 | GPU quad/rounded/shadow | `ChromeDraw.quad` + 토큰 | — |
 | 입력 라우팅 | `ChromeHost`(모달 우선순위) | pointer + 위젯 State |
-| **슬라이더** | divider `dragRatio` 참고 | bar+thumb view + 드래그 |
+| **숫자 입력 박스**(`input_box`) | 테두리 박스 + 값/편집버퍼 + caret | Enter/클릭 편집 → 파싱+clamp+setNumber (슬라이더 대체) |
 | **color input** | quad + 토큰 | 1차 ✅ 16색 프리셋 + hex 입력(text 재사용); 2차 ✅ HSV picker(§6.9) |
 | **keybind recorder** | `input.InputEvent` 그대로 | 녹음 State(키 캡처) |
 
@@ -118,7 +117,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 위젯 view는 `tokens.space.corner_radius_px`로 두 룩을 분기한다(테마는 위젯 불변, [chrome-strategy.md] §5.4):
 
 - **rich(>0)**: GPU `ChromeDraw.quad`(SDF) — 둥근 pill·원형 knob·얇은 트랙·그림자 등 sub-pixel.
-- **tui(0)**: **셀 정렬 text**(`Op.text`). 토글 `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌), 슬라이더 `[███   ]`(채움=`█`×ratio accent_bar, 트랙=muted_fg), dropdown `값 ▾`. control 열 좌단 정렬(세 위젯 같은 시작 x).
+- **tui(0)**: **셀 정렬 text**(`Op.text`). 토글 `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌), **숫자 입력 박스=값 text만**(border 0이라 테두리 quad 생략), dropdown 축소=`값 ▾`. 드롭다운 팝업·rich 입력 박스 테두리는 `context_menu`와 같은 quad 오버레이(modal layer). control 열 좌단 정렬.
 
   **결정 근거**: tui lowering은 quad를 `paintRectBg`로 **셀 단위** 배경에 칠한다. 위젯을 quad로 두면 (1) 얇은 트랙(높이 h/4)이 `@divTrunc`로 r0==r1이 돼 사라지고, (2) 행 높이 채움이 셀 경계에서 위아래로 번지며, (3) 선택 하이라이트(셀 bg)와 같은 레이어라 서로 덮어 거칠게 겹쳤다(겹침·가림 회귀). text는 placeText가 셀 정렬로 놓고 **text 레이어**(셀 bg 위)라 선택 하이라이트 위에 또렷하다(dropdown·palette 행과 동형). `█`(U+2588)는 합성 글리프라 폰트 무관 렌더. 위젯 view에 `cw`(셀 폭)를 넘겨 tui text 칸/오프셋을 계산한다.
 
@@ -128,14 +127,14 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 **color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). **스와치 렌더는 `Swatch.corner_radii`로 분기**(C4b `Op.quad` 동형) — 컴포넌트가 `props.shape.corner_radius_px`(스와치 높이의 절반으로 cap)를 실어, lowering이 0이면 셀 bg(tui 직각), >0이면 **둥근 GPU quad 칩**(rich, layer 3 — 셀·선택 하이라이트 위, literal RGB)으로 그린다. 인터랙션 세 zone:
 - **스와치 클릭 / Enter** → **HSV picker 열기**(현재 색으로 시드 — §6.9). 임의 색을 그리드로 고른다(2차 색 선택, CS-4-6).
-- **←→** → 16색 프리셋(`schema.color_presets`, 중립+dracula+maru 앰버) 순환(`cycleColor`). 정적 리터럴이라 dupe 없이 대입(빠른 선택 — picker 없이 한 손).
 - **hex 클릭** → 인라인 편집(text 위젯 재사용 — `editText`→`setText`, hex 검증).
+- (예전 `←→` 16색 프리셋 순환은 제거 — ←→가 전역 섹션 전환으로 통일됨(사용자 요청). 색은 HSV picker·hex로 고른다.)
 
 - **미구현(후속)**: 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, picker의 연속(non-discrete) 해상도·alpha. (color 스와치 rich 둥근 quad 렌더는 구현됨 — 위 참조.)
 
 ### 6.3 테마 프리셋(named 테마) — 특수 행
 
-테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`dark-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light` 16종 + **"사용자 지정"**을 클릭/←→로 순환한다(프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 현재 색을 둔 채 잠금만 푼다). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
+테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`dark-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light` 16종 + **"사용자 지정"**을 클릭/Enter로 순환한다(프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 현재 색을 둔 채 잠금만 푼다). `theme.preset`은 synthetic 특수 행이라 일반 enum 팝업이 아니라 Enter 순환을 유지한다(←→는 섹션 전환). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
 
 - **표시값은 색에서 derive**: `detectThemePreset`이 config.theme의 주 색 4개(bg/fg/cursor/selection)를 16종 `presetColors`와 매칭 → 일치하면 그 이름, 없으면 "사용자 지정". 저장 안 해도 현재 프리셋을 안다.
 - **주입·배치**: platform이 theme 섹션 `currentSectionFields.enums`에 **synthetic `EnumField`**(`key="theme.preset"`)를 **맨 앞에 `insert`**한다 → 색·팔레트보다 위(테마 섹션 최상단)에 도드라지게, 기존 dropdown/enum 경로 재사용(새 Kind·index 수술 없음).

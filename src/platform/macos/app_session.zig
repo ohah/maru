@@ -2138,7 +2138,15 @@ pub const AppSession = struct {
 
     /// panel 사이 divider 선 색(0xAARRGGBB) — 활성 하이라이트 색을 써서 두 panel 사이 경계가 또렷하게 보이게.
     fn dividerColor(self: *const AppSession) u32 {
-        return self.sidebarActiveBg();
+        // divider(검색바 하단 언더바·pane split 선)는 **중립 패널색(sidebar_background)**에서 파생한다 — 예전엔 sidebar_active를
+        // 직접 썼는데, dark_pink처럼 sidebar_active에 **채도 높은 accent(로즈)**를 준 테마에선 그 라인이 중립 크롬 위에서 튄다
+        // (사용자 피드백 "Search 언더바 색이 따로 논다"). 배경보다 살짝 밝게(+24)로 둔다 — sidebar_*를 파생으로 두는 테마에선
+        // sidebar_background(=배경+24)에 +24가 곧 sidebar_active(=배경+48)라 **기존과 동일**(회귀 없음), 명시-active 테마만 중립화.
+        const b = self.appearance.theme.sidebar_background;
+        const r: u32 = @min(@as(u32, b.r) + 24, 255);
+        const g: u32 = @min(@as(u32, b.g) + 24, 255);
+        const bch: u32 = @min(@as(u32, b.b) + 24, 255);
+        return 0xFF00_0000 | (r << 16) | (g << 8) | bch;
     }
 
     /// 얇은 **세로선**을 overlay 셀로 그린다 — [y_start, y_end) 범위에 행마다(cell 높이 step) origin_x에 sentinel
@@ -10737,11 +10745,11 @@ pub const AppSession = struct {
             // (세로 분할 등에서 "활성 탭 UI가 안 바뀐다"는 제보 대응). 제목 glyph는 아래 pane_frames에(C2).
             var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_chrome.deinit(self.allocator);
-            // rich(corner>0)면 활성 탭을 VSCode식(평평 약한 배경 + 하단 maru 앰버 언더바) layer 2 quad로, tui(0)면 셀 밴드로.
+            // rich(corner>0)면 활성 탭을 VSCode식(평평 약한 배경 + 하단 테마 accent 언더바) layer 2 quad로, tui(0)면 셀 밴드로.
             const tk = self.buildChromeTokens();
             const tk_space = tk.space;
             const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad, 0이면 tui 셀)
-            const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(maru 앰버 — 포커스 surface 표시)
+            const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(테마 accent — 포커스 surface 표시)
             for (leaf_rects.items) |lr| {
                 const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
                 const bar = pb.full; // 바 배경·언더바는 전체 바(라벨 영역도 같은 chrome 배경)
@@ -10755,7 +10763,7 @@ pub const AppSession = struct {
                     self.appendBarBgQuad(bar, self.chromeQuadBg(self.sidebarBg())); // window.opacity 반영(quad straight-alpha)
                     self.appendTabBarUnderline(bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 활성 탭 세그먼트는 본문색 cutout+앰버 언더바가 덮어 "연결"된다
                     // U-tab2 연결형: rich 활성 탭 = 터미널 본문색 cutout(strip에서 도려낸 듯 아래 본문과 이어짐). 포커스 구분은
-                    // 배경이 아니라 **언더바 색** — 포커스 pane=maru 앰버(active indicator), 비포커스=muted(흐린 구분만).
+                    // 배경이 아니라 **언더바 색** — 포커스 pane=테마 accent(active indicator), 비포커스=muted(흐린 구분만).
                     // cutout은 아래 터미널 본문색이라 window.opacity를 같이 걸어 반투명(데스크톱 비침)으로 둔다 — 불투명으로 두면
                     // 반투명 본문 위에 솔리드 패치로 떠 "연결"이 더 깨진다. 단 이 cutout은 위 바 배경 quad(sidebarBg, 같은
                     // window.opacity) '위에' 겹쳐 그려지므로(둘 다 premultiplied-over) 유효 알파가 op·(2−op)로 본문(단일 op
@@ -11566,12 +11574,12 @@ pub const AppSession = struct {
         // per-tab 카드별 색(우클릭 메뉴 "배경: …"·"바: …") — chrome draw op은 role 기반이라 임의 RGB를 못 실어, 배경 tint와
         // 좌측 accent 막대 **둘 다** platform이 명시-색 GpuQuad로 직접 lower한다(같은 카드를 한 번에 처리하는 단일 패스).
         // 한 카드에서 tint를 먼저, 막대(좌단 불투명)를 뒤에 append해 막대가 tint 위에 또렷이 얹힌다(텍스트 셀은 그 위 패스).
-        // 막대는 활성 카드=지정색 or 기본 테마 앰버·비활성 카드=지정 시에만. y는 f32 도메인으로 곱해 i32 overflow 회피.
+        // 막대는 활성 카드=지정색 or 기본 테마 accent·비활성 카드=지정 시에만. y는 f32 도메인으로 곱해 i32 overflow 회피.
         const slot_h = self.sidebar_slot_height_px;
         const card_tk = self.buildChromeTokens();
         const bar_w = card_tk.space.accent_bar_width_px;
         const gap: f32 = @floatFromInt(card_tk.space.card_gap_px);
-        const default_accent = packOpaqueRgb(card_tk.palette.get(.accent_bar)); // 기본(지정 없음) 활성 카드 앰버
+        const default_accent = packOpaqueRgb(card_tk.palette.get(.accent_bar)); // 기본(지정 없음) 활성 카드 accent(테마-구동)
         if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_visible_tabs.items, 0..) |orig, i| {
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
             const slot_abs_y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px));
@@ -11603,7 +11611,7 @@ pub const AppSession = struct {
                     }) catch {};
                 }
             }
-            // ② 좌측 accent 막대(불투명, 직각 strip). 색: 지정색(0xRRGGBB) 우선 → 없으면 활성만 기본 앰버, 비활성은 막대 없음.
+            // ② 좌측 accent 막대(불투명, 직각 strip). 색: 지정색(0xRRGGBB) 우선 → 없으면 활성만 기본 accent(테마-구동), 비활성은 막대 없음.
             // 막대는 카드 좌단(x=gap)·카드 높이. solid 직각 quad라 appendSolidQuad 재사용(divider 등과 동일 헬퍼).
             if (bar_w > 0) {
                 const word: u32 = if (tab.accent_color != 0)
@@ -11660,7 +11668,7 @@ pub const AppSession = struct {
     }
 
     /// 활성 탭 강조(rich) — **연결형 cutout**: 활성 탭을 터미널 본문색(bg=theme.background)으로 채워 아래 본문과
-    /// 이어져 보이게 하고(strip에서 도려낸 듯), 하단에 굵은 maru 앰버 언더바(active/focus indicator, 탭 seg 폭)를 얹는다.
+    /// 이어져 보이게 하고(strip에서 도려낸 듯), 하단에 굵은 테마 accent 언더바(active/focus indicator, 탭 seg 폭)를 얹는다.
     /// 옛 "평평한 약한 배경(sidebarActiveBg)"을 본문색으로 바꿔 깊이(strip↔본문)를 만든다(U-tab2). 배경·언더바 둘 다
     /// layer 2(셀 part1 제목 아래)라 본문색 quad가 하단 하이라인(appendTabBarUnderline)을 활성 탭 구간에서 덮어 "연결"이
     /// 끊기지 않는다. segOf 픽셀 경계로 hit-test·제목 glyph와 정합(§6 단일 소스). overflow 탭이면 무동작.
@@ -11680,7 +11688,7 @@ pub const AppSession = struct {
             .connected, .underline => {
                 const uw: f32 = @min(@as(f32, @floatFromInt(space.tab_underbar_px)), bh); // 바보다 두꺼우면 바 높이로 clamp(언더바가 바 위로 안 샘 — #496 리뷰)
                 if (space.tab_active_style == .connected) self.appendSolidQuad(x, by, w, bh, bg, 2); // 본문색 cutout(strip 하이라인을 덮음). underline은 배경 fill 생략
-                self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 maru 앰버/muted 언더바(active/focus indicator, 탭 폭)
+                self.appendSolidQuad(x, by + bh - uw, w, uw, accent, 2); // 하단 테마 accent/muted 언더바(active/focus indicator, 탭 폭)
             },
             .pill => {
                 // 떠 있는 pill(실제 Warp 벤치마킹): 바 위아래로 inset한 둥근 캡슐을 **strip보다 밝은 lifted 회색**(`lifted_bg`)으로
@@ -12996,6 +13004,7 @@ pub const AppSession = struct {
             .search_match_current = t.search_match_current,
             .selection = t.selection,
             .cursor = t.cursor,
+            .accent = t.accent, // 테마-구동 accent(탭/포커스 언더바·활성 카드 막대·세팅 강조) — 프리셋별 시그니처 색
         };
         // chrome theme = 토큰셋 교체(컴포넌트 불변). rich는 sidebar_active-공유 role(divider/focus_accent 등)을 분리 색으로(C4a).
         var tk = switch (self.appearance.chrome_theme) {
@@ -17297,6 +17306,7 @@ test "rasterizeOverlayCells: 다중 fill(painter order) + 다중 행 text → �
         .search_match_current = c.rgb(6, 6, 6),
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
+        .accent = c.rgb(9, 9, 9),
     });
     // cw=10, ch=20. 패널 2칸×2행(0,0,20,40). row1만 selection으로 덮고(painter order), 각 행에 텍스트.
     const run_ab = [_]chrome.draw.Run{.{ .text = "ab" }};
@@ -17344,6 +17354,7 @@ test "rasterizeOverlayCells: draw.Op.clip → OverlayRaster.clip_rect(렌더러 
         .search_match_current = cc.rgb(6, 6, 6),
         .selection = cc.rgb(7, 7, 7),
         .cursor = cc.rgb(8, 8, 8),
+        .accent = cc.rgb(9, 9, 9),
     });
     // clip op은 그리지 않고(셀·bounding-box 무영향) OverlayRaster.clip_rect로만 모인다 — 렌더러가 모달 셀 draw에 scissor.
     var ops = [_]chrome.draw.Op{
@@ -17387,6 +17398,7 @@ test "rasterizeOverlayCells: wide 글리프 뒤 continuation 칸은 emit 안 함
         .search_match_current = cc.rgb(6, 6, 6),
         .selection = cc.rgb(7, 7, 7),
         .cursor = cc.rgb(8, 8, 8),
+        .accent = cc.rgb(9, 9, 9),
     });
     // cw=10, ch=20. 패널 4칸×1행. "가b" — '가'(wide=2칸) col0, 'b' col2. continuation 칸(col1)은 emit 안 돼야 한다.
     const run = [_]chrome.draw.Run{.{ .text = "가b" }};
@@ -19131,7 +19143,7 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
 }
 
 // U-tab2 rich: 활성 탭이 **본문색 cutout**(strip에서 도려낸 듯)이고, 포커스 구분은 배경이 아니라 **언더바 색**
-// (포커스 pane=maru 앰버, 비포커스=muted)이라는 새 시각 계약을 layer-2 gpu_quads로 고정한다. 세로 분할로
+// (포커스 pane=테마 accent, 비포커스=muted)이라는 새 시각 계약을 layer-2 gpu_quads로 고정한다. 세로 분할로
 // 포커스(아래)·비포커스(위) 두 pane을 만들어 cutout·앰버·muted quad가 모두 방출되는지 본다(옛 sidebarActiveBg 평평 배경 회귀 방지).
 test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber underbar, non-focus muted" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -19157,7 +19169,7 @@ test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber unde
 
     const tk = session.buildChromeTokens();
     const cutout = packOpaqueRgb(session.appearance.theme.background); // 활성 탭 = 본문색
-    const amber = packOpaqueRgb(tk.palette.get(.accent_bar)); // 포커스 pane 언더바(maru 앰버)
+    const amber = packOpaqueRgb(tk.palette.get(.accent_bar)); // 포커스 pane 언더바(테마 accent)
     const muted = packOpaqueRgb(tk.palette.get(.muted_fg)); // 비포커스 pane 언더바
     const old_weak = session.sidebarActiveBg(); // 옛(U-tab2 전) 활성 탭 평평 배경 — 이제 탭 cutout엔 안 씀
     // 색이 서로 구분돼야 단언이 의미 있다(테마가 우연히 겹치면 무력) + cutout이 옛 약한 배경이 아님을 고정.
@@ -19174,7 +19186,7 @@ test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber unde
         if (q.fill_color0 == muted) found_muted_underbar = true;
     }
     try std.testing.expect(found_cutout); // 활성 탭 본문색 cutout
-    try std.testing.expect(found_amber_underbar); // 포커스 pane = maru 앰버 언더바
+    try std.testing.expect(found_amber_underbar); // 포커스 pane = 테마 accent 언더바
     try std.testing.expect(found_muted_underbar); // 비포커스 pane = muted 언더바
 }
 

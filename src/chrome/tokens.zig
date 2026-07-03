@@ -42,7 +42,7 @@ pub const ColorRole = enum {
     search_match_current,
     selection,
     cursor,
-    accent_bar, // U1(C4b 이후): maru 고유 accent — palette가 maru 앰버로 고정(theme 무관). 사이드바 활성 좌측 막대 등이 소비(U2).
+    accent_bar, // U1(C4b 이후): maru accent — **테마-구동**(ThemeColors.accent). 프리셋별 시그니처 색(null이면 브랜드 앰버 폴백). 탭/포커스 언더바·사이드바 활성 좌측 막대·세팅 강조가 소비(U2).
     keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널 대비(명암 기준 밝게/어둡게)라 tui·rich·light·dark 모두 또렷(keycapBg).
 };
 
@@ -115,6 +115,7 @@ pub const ThemeColors = struct {
     search_match_current: Rgb,
     selection: Rgb,
     cursor: Rgb,
+    accent: Rgb, // maru accent(테마-구동) — accent_bar 역할이 소비. 호출자가 ResolvedTheme.accent를 넘긴다(null은 resolve가 앰버로 폴백).
 };
 
 /// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 14개 ColorRole을 채운다(C0 구현).
@@ -142,7 +143,7 @@ pub const Tokens = struct {
         palette.set(.search_match_current, theme.search_match_current);
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);
-        palette.set(.accent_bar, .{ .r = 0xDD, .g = 0xA1, .b = 0x5E }); // maru 앰버(마루=전통 나무 마루) — theme 무관 고정 브랜드 accent. rich가 상속.
+        palette.set(.accent_bar, theme.accent); // maru accent(테마-구동) — 프리셋별 시그니처 색. config.accent null이면 resolve가 브랜드 앰버(#dda15e)로 폴백. rich가 상속.
         palette.set(.keycap_bg, keycapBg(theme.sidebar_background)); // KH-5: 키캡 배경 = 패널 대비(명암 기준 밝게/어둡게) — tui·rich 공통으로 light·dark 모두 또렷.
         return .{ .palette = palette };
     }
@@ -208,6 +209,7 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
         .search_match_current = c.rgb(6, 6, 6),
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
+        .accent = c.rgb(9, 9, 9),
     });
     try std.testing.expectEqual(c.rgb(2, 2, 2), tk.get(.surface_bg));
     try std.testing.expectEqual(c.rgb(3, 3, 3), tk.get(.surface_fg));
@@ -224,7 +226,7 @@ test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·
             return .{ .r = r, .g = g, .b = b };
         }
         fn theme(bg: Rgb) ThemeColors {
-            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8) };
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .accent = rgb(9, 9, 9) };
         }
     };
     // 어두운 패널 → keycap이 더 밝게(대비).
@@ -254,6 +256,7 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
         .search_match_current = c.rgb(6, 6, 6),
         .selection = c.rgb(7, 7, 7),
         .cursor = c.rgb(8, 8, 8),
+        .accent = c.rgb(9, 9, 9),
     };
     const t = Tokens.tui(theme);
     const r = Tokens.rich(theme);
@@ -283,6 +286,7 @@ test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
         .search_match_current = .{ .r = 6, .g = 6, .b = 6 },
         .selection = .{ .r = 7, .g = 7, .b = 7 },
         .cursor = .{ .r = 8, .g = 8, .b = 8 },
+        .accent = .{ .r = 9, .g = 9, .b = 9 },
     };
     const t = Tokens.tui(theme);
     const r = Tokens.rich(theme);

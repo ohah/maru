@@ -42,6 +42,9 @@ pub const ResolvedTheme = struct {
     // 사이드바·pane 탭 바 제목 글자색. 명시 안 하면 foreground(터미널 글자색). 활성 탭은 이 색, 비활성 탭은
     // 렌더가 background 쪽으로 흐리게 한 muted를 쓴다(mutedForeground). 색 출처를 여기 둔다.
     sidebar_foreground: color.Rgb,
+    // maru accent 색(chrome `accent_bar` 역할 — 탭/포커스 언더바·활성 카드 좌측 막대·세팅 강조). config.accent가 null이면
+    // maru 브랜드 앰버(accent_default)로 폴백한다. 프리셋마다 시그니처 색을 줘 탭 색이 테마별로 달라진다(예전엔 고정 앰버).
+    accent: color.Rgb,
     // ANSI 16색(0~15) config override. null=그 인덱스는 기본 xterm 표준색(color.ansi16/xterm256). 렌더(metal_frame)가
     // `.indexed` 색을 풀 때 OSC4 override → 이 config base → xterm256 순으로 폴백한다(OSC4가 없을 때만 이 값이 보인다).
     // 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
@@ -180,9 +183,16 @@ fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
         .sidebar_active = if (config.sidebar_active) |s| try parseHexColor(s) else lighten(background, 48),
         // 사이드바 글자색: 명시하면 그 색, null이면 foreground(터미널 글자색)와 같게 — 기본은 기존 동작 보존.
         .sidebar_foreground = if (config.sidebar_foreground) |s| try parseHexColor(s) else foreground,
+        // accent: 명시하면 그 색, null이면 maru 브랜드 앰버(accent_default) — 프리셋 없는/사용자 지정 테마는 기존 앰버 유지.
+        .accent = if (config.accent) |a| try parseHexColor(a) else accent_default,
         .palette = palette,
     };
 }
+
+/// maru 브랜드 accent 기본색(앰버 — "마루=전통 나무 마루"). config.accent가 null일 때 폴백한다. 프리셋은 각자
+/// 시그니처 accent를 주지만(테마별 탭 색), maru 프리셋·사용자 지정 테마는 이 앰버를 그대로 쓴다. 예전 chrome
+/// tokens.zig가 하드코딩하던 값(#dda15e)을 resolve 단일 출처로 옮긴 것 — chrome은 이제 resolved accent를 받는다.
+pub const accent_default = color.Rgb{ .r = 0xdd, .g = 0xa1, .b = 0x5e };
 
 /// 각 채널을 delta만큼 더해 255로 saturate한다(테마 배경에서 사이드바 톤을 파생할 때 기본값 계산).
 /// 같은 톤을 유지하며 단계적으로 밝게 — 미묘한 사이드바 배경(+24)·활성 하이라이트(+48).
@@ -242,6 +252,8 @@ test "default appearance resolves to renderer-friendly values" {
     try std.testing.expectEqual(color.Rgb{ .r = 0x40, .g = 0x40, .b = 0x40 }, resolved.theme.sidebar_active);
     // 사이드바 글자색은 명시 안 하면 foreground(#e8e8e8)와 같다.
     try std.testing.expectEqual(color.Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 }, resolved.theme.sidebar_foreground);
+    // accent는 명시 안 하면 maru 브랜드 앰버(accent_default = #dda15e)로 폴백(프리셋 없는/사용자 지정 테마는 기존 앰버 유지).
+    try std.testing.expectEqual(color.Rgb{ .r = 0xdd, .g = 0xa1, .b = 0x5e }, resolved.theme.accent);
     try std.testing.expectEqual(theme.CursorShape.block, resolved.cursor.shape);
     try std.testing.expect(resolved.cursor.blink);
     // 커서 색 override는 기본 미지정 — 렌더가 theme.cursor/배경색으로 폴백(기존 동작 보존).
@@ -267,6 +279,11 @@ test "appearance resolver derives sidebar colors from background and honors expl
     const fg_custom = try resolve(.{ .theme = .{ .foreground = "#e8e8e8", .sidebar_foreground = "#88aaff" } });
     try std.testing.expectEqual(color.Rgb{ .r = 0x88, .g = 0xaa, .b = 0xff }, fg_custom.theme.sidebar_foreground);
     try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .sidebar_foreground = "#zzzzzz" } }));
+
+    // accent 명시 override: config.accent가 있으면 그 색(프리셋 시그니처 — 탭/포커스 언더바 등), 없으면 위 앰버 폴백.
+    const acc = try resolve(.{ .theme = .{ .accent = "#ff9ec9" } });
+    try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0x9e, .b = 0xc9 }, acc.theme.accent);
+    try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .accent = "#zzzzzz" } }));
 
     // 명시 사이드바 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .sidebar_background = "bad" } }));

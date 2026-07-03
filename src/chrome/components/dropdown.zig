@@ -50,24 +50,17 @@ pub fn hitTest(rect: draw.Rect, x_px: f64, y_px: f64) bool {
 // context_menu와 같은 최상위 modal 레이어(열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
 
-/// 팝업 순수 UI 상태 — open + 축소 control rect(팝업은 그 아래에 뜬다) + selected(강조 항목) + item_count(키 nav
-/// clamp/​wrap용). 항목 라벨·선택 적용 대상은 platform이 든다(chrome 중립 — config.Action·라이브 config 모름).
-/// heap 없음(deinit 불필요). settings.State가 한 개 품어 enum/font 행 활성 시 연다(HSV picker 모드 선례).
+/// 팝업 순수 UI 상태 — open + selected(강조 항목) + item_count(키 nav clamp/wrap용). **기하(앵커 rect)는 저장하지
+/// 않는다** — 팝업은 '선택된 행의 축소 control 아래'에 뜨므로, 셸(settings.view/handlePointer)이 렌더/hit-test 시점에
+/// 그 control rect를 anchor로 넘긴다(플랫폼 rect 배선 불요). 항목 라벨·선택 적용 대상은 platform이 든다(chrome 중립).
+/// heap 없음. settings.State가 한 개 품어 enum/font 행 활성 시 연다(HSV picker 모드 선례).
 pub const State = struct {
     open: bool = false,
-    ctrl_x: i32 = 0, // 축소 control 좌상단(px) — 팝업은 ctrl_y+ctrl_h 아래에 뜨고 최소폭 ctrl_w
-    ctrl_y: i32 = 0,
-    ctrl_w: i32 = 0,
-    ctrl_h: i32 = 0,
     selected: usize = 0,
     item_count: usize = 0,
 
-    /// 축소 control rect·항목 수·현재 변형 인덱스로 연다 — 선택은 현재값에서 시작(사용자가 지금 값을 바로 본다).
-    pub fn show(self: *State, ctrl: draw.Rect, item_count: usize, current: usize) void {
-        self.ctrl_x = ctrl.x;
-        self.ctrl_y = ctrl.y;
-        self.ctrl_w = @intCast(ctrl.w);
-        self.ctrl_h = @intCast(ctrl.h);
+    /// 항목 수·현재 변형 인덱스로 연다 — 선택은 현재값에서 시작(사용자가 지금 값을 바로 본다).
+    pub fn show(self: *State, item_count: usize, current: usize) void {
         self.item_count = item_count;
         self.selected = if (item_count == 0) 0 else @min(current, item_count - 1);
         self.open = true;
@@ -117,10 +110,10 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
     }
 }
 
-/// 팝업 박스 rect(px) — 축소 control **바로 아래**(ctrl_y+ctrl_h)에서 시작하되 화면(backing) 우/하단을 넘으면 당겨
-/// 안에 들게 clamp한다. 폭 = max(최대 항목 표시폭+좌우 1칸, 축소 control 폭). **viewPopup·itemAt 단일 출처**라
-/// "보이는 항목 == 클릭되는 항목". 항목 0이거나 cell 0이면 null.
-fn popupRect(state: *const State, items: []const []const u8, p: props.ChromeProps) ?draw.Rect {
+/// 팝업 박스 rect(px) — 앵커(선택 행의 축소 control) **바로 아래**(anchor.y+anchor.h)에서 시작하되 화면(backing)
+/// 우/하단을 넘으면 당겨 안에 들게 clamp한다. 폭 = max(최대 항목 표시폭+좌우 1칸, 앵커 control 폭). **viewPopup·itemAt
+/// 단일 출처**라 "보이는 항목 == 클릭되는 항목". 항목 0이거나 cell 0이면 null.
+fn popupRect(anchor: draw.Rect, items: []const []const u8, p: props.ChromeProps) ?draw.Rect {
     if (items.len == 0) return null;
     const m = p.metrics;
     const cw = @max(m.cell_width_px, 1);
@@ -130,10 +123,10 @@ fn popupRect(state: *const State, items: []const []const u8, p: props.ChromeProp
         const w = overlay_input.displayCols(it);
         if (w > max_cols) max_cols = w;
     }
-    const box_w = @max((max_cols + 2) * cw, @as(u32, @intCast(@max(state.ctrl_w, 0)))); // 최소 control 폭
+    const box_w = @max((max_cols + 2) * cw, anchor.w); // 최소 앵커 control 폭
     const box_h = @as(u32, @intCast(items.len)) * ch;
-    var x = state.ctrl_x;
-    var y = state.ctrl_y + state.ctrl_h; // control 아래로 드롭
+    var x = anchor.x;
+    var y = anchor.y + @as(i32, @intCast(anchor.h)); // control 아래로 드롭
     const bw_px: i32 = @intCast(m.backing_width_px);
     const bh_px: i32 = @intCast(m.backing_height_px);
     if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
@@ -145,10 +138,10 @@ fn popupRect(state: *const State, items: []const []const u8, p: props.ChromeProp
 }
 
 /// 마우스 px가 팝업 박스 안의 어느 항목 행인지([0, item_count)). 박스 밖이면 null(호출자가 close). viewPopup과 같은
-/// popupRect를 써 "보이는 == 클릭되는". 안 열렸거나 비유한 좌표는 null.
-pub fn itemAt(state: *const State, items: []const []const u8, p: props.ChromeProps, x_px: f64, y_px: f64) ?usize {
+/// popupRect(같은 anchor)를 써 "보이는 == 클릭되는". 안 열렸거나 비유한 좌표는 null.
+pub fn itemAt(state: *const State, anchor: draw.Rect, items: []const []const u8, p: props.ChromeProps, x_px: f64, y_px: f64) ?usize {
     if (!state.open or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
-    const rect = popupRect(state, items, p) orelse return null;
+    const rect = popupRect(anchor, items, p) orelse return null;
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);
     if (x_px < x0 or x_px >= x0 + @as(f64, @floatFromInt(rect.w))) return null;
@@ -163,6 +156,7 @@ pub fn itemAt(state: *const State, items: []const []const u8, p: props.ChromePro
 /// (surface_bg 박스·surface_fg 글자·tab_active_bg 선택행·focus_accent 테두리).
 pub fn viewPopup(
     state: *const State,
+    anchor: draw.Rect,
     items: []const []const u8,
     p: props.ChromeProps,
     tk: *const tokens.Tokens,
@@ -171,7 +165,7 @@ pub fn viewPopup(
 ) !void {
     _ = tk;
     if (!state.open) return;
-    const rect = popupRect(state, items, p) orelse return;
+    const rect = popupRect(anchor, items, p) orelse return;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
     const bg_r = p.shape.corner_radius_px;
@@ -259,7 +253,7 @@ test "dropdown popup State: show(현재값 시작)·hide·moveSelection wrap" {
     // 마지막↓→처음)하며, current가 범위를 넘으면 clamp된다. 설정에서 enum 값을 목록으로 고르는 핵심 상태.
     var s: State = .{};
     try std.testing.expect(!s.open);
-    s.show(.{ .x = 100, .y = 50, .w = 120, .h = 20 }, 3, 1); // 항목 3, 현재=1
+    s.show(3, 1); // 항목 3, 현재=1
     try std.testing.expect(s.open);
     try std.testing.expectEqual(@as(usize, 1), s.selected); // 현재값에서 시작
     s.moveSelection(1);
@@ -270,7 +264,7 @@ test "dropdown popup State: show(현재값 시작)·hide·moveSelection wrap" {
     try std.testing.expectEqual(@as(usize, 2), s.selected);
     s.hide();
     try std.testing.expect(!s.open);
-    s.show(.{ .x = 0, .y = 0, .w = 10, .h = 10 }, 2, 9); // current 범위 밖 → clamp
+    s.show(2, 9); // current 범위 밖 → clamp
     try std.testing.expectEqual(@as(usize, 1), s.selected);
 }
 
@@ -278,7 +272,7 @@ test "dropdown popup handle: ↑↓ 이동·Enter=accept·Esc=close·←→/글�
     // 증명: 모달 캡처 전략 — 열려 있으면 ↑↓만 이동, Enter만 확정(accept, 컴포넌트는 안 닫음 — host가 hide),
     // Esc만 취소(close), ←→·글자는 consumed로 팝업 유지(섹션 전환 누수·실수 dismiss 방지). ←→가 닫지 '않는' 게 회귀 가드.
     var s: State = .{};
-    s.show(.{ .x = 0, .y = 0, .w = 10, .h = 10 }, 3, 0);
+    s.show(3, 0);
     try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);
     try std.testing.expectEqual(Action.accept, handle(.{ .key = .enter }, &s));
@@ -307,22 +301,23 @@ test "dropdown popup popupRect/itemAt/viewPopup: control 아래 박스·항목 �
     } };
     var s: State = .{};
     const items = [_][]const u8{ "top", "bottom", "center" };
-    s.show(.{ .x = 200, .y = 100, .w = 160, .h = 16 }, items.len, 0); // 팝업 y=116부터, 폭>=160
+    const anchor = draw.Rect{ .x = 200, .y = 100, .w = 160, .h = 16 }; // 선택 행의 축소 control — 팝업 y=116부터, 폭>=160
+    s.show(items.len, 0);
 
-    try std.testing.expectEqual(@as(usize, 0), itemAt(&s, &items, p, 210, 120).?); // 첫 행
-    try std.testing.expectEqual(@as(usize, 2), itemAt(&s, &items, p, 210, 116 + 16 * 2 + 2).?); // 세 번째 행
-    try std.testing.expect(itemAt(&s, &items, p, 210, 116 - 4) == null); // 박스 위 → null
-    try std.testing.expect(itemAt(&s, &items, p, 210, 116 + 16 * 3 + 4) == null); // 박스 아래 → null
+    try std.testing.expectEqual(@as(usize, 0), itemAt(&s, anchor, &items, p, 210, 120).?); // 첫 행
+    try std.testing.expectEqual(@as(usize, 2), itemAt(&s, anchor, &items, p, 210, 116 + 16 * 2 + 2).?); // 세 번째 행
+    try std.testing.expect(itemAt(&s, anchor, &items, p, 210, 116 - 4) == null); // 박스 위 → null
+    try std.testing.expect(itemAt(&s, anchor, &items, p, 210, 116 + 16 * 3 + 4) == null); // 박스 아래 → null
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var out: std.ArrayList(draw.Op) = .empty;
-    try viewPopup(&s, &items, p, &tk, arena_state.allocator(), &out);
+    try viewPopup(&s, anchor, &items, p, &tk, arena_state.allocator(), &out);
     try std.testing.expect(out.items.len >= 4); // 박스 quad 1 + 항목 텍스트 3 (+ 선택행 fill)
     try std.testing.expect(out.items[0] == .quad);
 
     s.hide();
     out.clearRetainingCapacity();
-    try viewPopup(&s, &items, p, &tk, arena_state.allocator(), &out);
+    try viewPopup(&s, anchor, &items, p, &tk, arena_state.allocator(), &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len); // 닫히면 무동작
 }

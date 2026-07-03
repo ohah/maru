@@ -44,8 +44,9 @@ pub const HostAction = union(enum) {
     confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
     settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
-    settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected](bool) flip + 적용
-    settings_slider_set, // 세팅 슬라이더 드래그/클릭 — platform이 settings.pending_ratio→값 매핑 + 적용
+    settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected] 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color picker·keybind 녹음)
+    settings_dropdown_accept, // 세팅 드롭다운 팝업 Enter/항목 클릭 — platform이 settings.dropdown.selected 변형을 set + 팝업 닫기 + 적용
+    settings_slider_set, // (deprecated) 세팅 슬라이더 — 입력 박스 전환으로 미방출. exhaustiveness 유지용
     settings_adjust_left, // 세팅 행 ← — platform이 rows[selected](slider) 한 스텝 감소(toggle이면 무시)
     settings_adjust_right, // 세팅 행 → — platform이 한 스텝 증가
     settings_selection_changed, // 세팅 행 ↑↓/행 클릭 — platform이 재렌더(부수효과 없음)
@@ -154,13 +155,14 @@ pub const ChromeHost = struct {
         self: *ChromeHost,
         sections: []const []const u8,
         fields: []const settings.FieldRow,
+        dropdown_items: []const []const u8, // enum/font 드롭다운 팝업이 열렸을 때 변형 라벨(platform 주입; 닫혔으면 빈 슬라이스)
         p: props.ChromeProps,
         tk: *const tokens.Tokens,
         arena: std.mem.Allocator,
         out: *std.ArrayList(draw.ChromeDraw),
     ) !void {
         var ops: std.ArrayList(draw.Op) = .empty;
-        try settings.view(&self.settings, sections, fields, p, tk, arena, &ops);
+        try settings.view(&self.settings, sections, fields, dropdown_items, p, tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{ .layer = settings.layer, .ops = ops.items });
     }
 
@@ -241,9 +243,8 @@ pub const ChromeHost = struct {
                     return switch (settings.handle(k, &self.settings)) {
                         .close => .settings_close,
                         .toggle => .settings_toggle,
-                        .adjust_left => .settings_adjust_left,
-                        .adjust_right => .settings_adjust_right,
-                        .slider_set => .none, // 키 경로엔 안 옴(슬라이더 ratio 설정은 포인터 드래그 전용) — exhaustiveness
+                        .dropdown_accept => .settings_dropdown_accept, // 드롭다운 팝업 Enter — 선택 변형 적용
+                        .adjust_left, .adjust_right, .slider_set => .none, // (deprecated) 슬라이더 제거로 미방출 — exhaustiveness 유지
                         .selection_changed => .settings_selection_changed,
                         .section_changed => .settings_section_changed, // 키보드 네비(Tab→↑↓ 섹션 이동)도 platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)·섹션 상한 clamp를 타게 한다 — 포인터(클릭) 경로와 동일. 안 그러면 count가 직전 섹션 값으로 고정돼 ↓가 입력 섹션 중간(right-click 부근)에서 wrap한다
                         .text_commit => .settings_text_commit, // 인라인 편집 Enter
@@ -440,17 +441,16 @@ test "host: handlePointer — 모달 열리면 소비(.none), 닫히면 null(통
     try std.testing.expect(host.notice.open);
 }
 
-test "host: settings 키보드 섹션 네비(Tab→↓)는 .settings_section_changed (count 재주입 — 회귀 방지)" {
-    // 회귀 가드: 키 경로(handleInput)가 settings .section_changed를 .none으로 버리면, 키보드로 섹션을 바꿀 때
-    // platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)를 안 타 입력 섹션에서 ↓가 직전 섹션 행 수
-    // 범위로만 wrap한다(right-click 부근에서 멈춤). 포인터(클릭) 경로(app_session)와 동일하게 .settings_section_changed로 살린다.
+test "host: settings 키보드 섹션 네비(→)는 .settings_section_changed (count 재주입 — 회귀 방지)" {
+    // 회귀 가드: 키 경로(handleInput)가 settings .section_changed를 .none으로 버리면, ←→로 섹션을 바꿀 때
+    // platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)를 안 타 새 섹션 행이 직전 섹션 행 수로만 clamp된다.
+    // 포인터(클릭) 경로(app_session)와 동일하게 .settings_section_changed로 살린다. (Tab 폼↔네비 토글은 제거됨.)
     var host = ChromeHost{};
     defer host.deinit(std.testing.allocator);
     host.settings.show();
-    // Tab으로 네비 모드 진입(폼↔네비 토글) → 네비 모드의 ↑↓가 좌측 섹션을 바꾼다.
-    _ = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .tab } });
-    // ↓ 섹션 이동 → host가 platform에 .settings_section_changed를 줘야 한다(.none이면 회귀).
-    const action = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .down } });
+    host.settings.setFieldCount(2);
+    // → 섹션 전환(section 0 → 1) → host가 platform에 .settings_section_changed를 줘야 한다(.none이면 회귀).
+    const action = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .right } });
     try std.testing.expectEqual(HostAction.settings_section_changed, action.?);
 }
 

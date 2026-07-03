@@ -381,6 +381,93 @@ fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, 
     return true;
 }
 
+/// 키로 enum 스키마 필드의 **전체 변형 토큰 목록**(선언 순, `@tagName` = underscore 원형 — '_'→'-' 표시 변환은
+/// 드롭다운 view가 함)을 arena 슬라이스로 돌려준다. 매칭 enum이 없으면 null. 드롭다운 팝업이 목록을 깔 때 쓴다
+/// (cycleEnum의 열거 짝). 토큰은 정적 문자열이라 dupe 불요.
+pub fn enumVariants(arena: std.mem.Allocator, config: theme.Config, key: []const u8) !?[]const []const u8 {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (try enumVariantsField(arena, @field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key)) |v| return v;
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (try enumVariantsField(arena, @field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key)) |v| return v;
+            }
+        }
+    }
+    return null;
+}
+
+fn enumVariantsField(arena: std.mem.Allocator, value: anytype, comptime full_key: []const u8, key: []const u8) !?[]const []const u8 {
+    const T = @TypeOf(value);
+    if (@typeInfo(T) != .@"enum") return null;
+    if (!std.mem.eql(u8, key, full_key)) return null;
+    const fields = @typeInfo(T).@"enum".fields;
+    const out = try arena.alloc([]const u8, fields.len);
+    inline for (fields, 0..) |f, i| out[i] = f.name; // 정적 문자열(comptime) — 슬롯만 arena
+    return out;
+}
+
+/// 키로 enum 스키마 필드의 **현재 변형 ordinal**(0..n-1)을 돌려준다. 매칭 enum이 없으면 null. 드롭다운을 열 때
+/// 현재값에서 선택을 시작하는 데 쓴다.
+pub fn enumIndex(config: theme.Config, key: []const u8) ?usize {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (enumIndexField(@field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key)) |v| return v;
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (enumIndexField(@field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key)) |v| return v;
+            }
+        }
+    }
+    return null;
+}
+
+fn enumIndexField(value: anytype, comptime full_key: []const u8, key: []const u8) ?usize {
+    const T = @TypeOf(value);
+    if (@typeInfo(T) != .@"enum") return null;
+    if (!std.mem.eql(u8, key, full_key)) return null;
+    return @intCast(@intFromEnum(value));
+}
+
+/// 키로 enum 스키마 필드를 **특정 ordinal(index)로 set**한다(드롭다운 팝업 선택 확정 — cycleEnum의 절대-set 짝).
+/// 매칭 enum이 있고 index가 범위 안이면 set하고 true. 범위 밖이거나 비-enum이면 false(무동작).
+pub fn setEnumIndex(config: *theme.Config, key: []const u8, index: usize) bool {
+    if (@hasDecl(theme.Config, "schema")) {
+        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+            if (setEnumIndexField(&@field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, index)) return true;
+        }
+    }
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            const sch = Container.schema;
+            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+                if (setEnumIndexField(&@field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, index)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn setEnumIndexField(ptr: anytype, comptime full_key: []const u8, key: []const u8, index: usize) bool {
+    const T = @TypeOf(ptr.*);
+    if (@typeInfo(T) != .@"enum") return false;
+    if (!std.mem.eql(u8, key, full_key)) return false;
+    if (index >= @typeInfo(T).@"enum".fields.len) return false;
+    ptr.* = @enumFromInt(index);
+    return true;
+}
+
 /// 번들 폰트 패밀리 GUI 피커의 순회기 — `font.family`를 `theme.bundled_font_families`에서 dir(+1 다음/-1 이전, wrap)만큼
 /// 옮긴다. `cycleEnum`의 **문자열 짝**이다(font.family는 enum이 아니라 자유 문자열이라 ordinal 순회를 못 쓴다). 현재값이
 /// 목록 밖(시스템·직접입력 폰트)이면 dir>=0은 첫 항목, dir<0은 마지막 항목으로 **진입**한다(커스텀 값 복귀는 피커에서

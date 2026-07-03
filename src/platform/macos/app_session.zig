@@ -4838,6 +4838,33 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 설정 팔레트 그리드 행의 폼-포커스 ←→를 16색 셀 이동으로 가로챈다(host가 rows를 모르는 특수 행 — platform 전용).
+    /// 처리하면 true(키 소비). 조건: 설정 열림·폼 포커스·다른 모드(팝업/picker/편집/검색/녹음) 아님·선택 행=팔레트
+    /// 그리드·평범한 ←/→. ← 셀0·→ 셀15(끝)에선 false를 돌려(intercept 안 함) 컴포넌트가 영역 포커스 이동으로 처리한다
+    /// (팔레트 밖으로 나가는 방향키가 살아난다).
+    fn settingsPaletteArrowIntercept(self: *AppSession, event: terminal.KeyEvent) bool {
+        const s = &self.chrome_host.settings;
+        if (!s.open or s.nav_focused or s.dropdown.open or s.picking or s.editing or s.searching or s.recording) return false;
+        const dir: i32 = switch (chromeInputFromKeyEvent(event)) {
+            .key => |k| switch (k.key) {
+                .left => -1,
+                .right => 1,
+                else => return false,
+            },
+            else => return false,
+        };
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const cf = self.currentSectionFields(scratch.allocator()) catch return false;
+        const pi = cf.paletteRowIndex() orelse return false;
+        if (pi != s.selected) return false;
+        const gc = @min(s.grid_cell, 15);
+        if (dir < 0 and gc == 0) return false; // ← 셀0 → 영역 이동(nav)으로 넘김
+        if (dir > 0 and gc == 15) return false; // → 셀15(끝) → 컴포넌트로(폼이라 no-op)
+        s.moveGridCell(dir);
+        return true;
+    }
+
     fn toggleSelectedSetting(self: *AppSession) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
@@ -6621,6 +6648,16 @@ pub const AppSession = struct {
         // 규율로 닫는다). 닫는 키는 소비한다(셸로 안 흘림 — 토스트 확인 제스처라 confirm과 같은 게이트, pass-through 시 키
         // 바인딩·newline이 의도치 않게 실행되던 문제 방지).
         if (self.anyOverlayOpen()) {
+            // 설정 팔레트 그리드 행(폼 포커스)의 ←→ = 16색 셀 이동. host는 rows를 몰라 이 특수 행을 못 가르므로 platform이
+            // pre-intercept한다(그 행에서만). ← 셀0·→ 셀15(끝)에선 intercept 안 해 컴포넌트의 영역 포커스 이동으로 이어진다.
+            if (self.settingsPaletteArrowIntercept(event)) {
+                self.resetCursorBlink();
+                self.metal_dirty = true;
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
             if (self.chrome_host.handleInput(self.allocator, chromeInputFromKeyEvent(event))) |action| {
                 self.dispatchChromeAction(action);
             }

@@ -6032,6 +6032,41 @@ test "synchronized output (DECSET 2026): set/reset + DECRQM 지원 감지" {
     try std.testing.expectEqualStrings("\x1b[?2026;1$y", core.pendingResponse());
 }
 
+test "synchronized output (2026): 조각난 write에도 재조립 (SSH fragmentation 가설 검증)" {
+    // maru ssh 원격에서 SSH가 바이트 스트림을 임의 경계로 쪼개 전달하므로, ESC[?2026h/l가 write 중간에
+    // 잘려 도착할 수 있다. 파서 상태(self.parser)가 TerminalCore에 persist하는 resumable 상태머신이라
+    // **모든 split 경계에서 재조립**돼 sync 토글·리더 카운터가 정확해야 한다 — 안 그러면 sync_output이
+    // stuck돼 원격 화면이 영구 desync(§11.6 미해결 이슈의 "파싱 fragmentation" 가설). 이 테스트가 통과하면
+    // 파싱은 무죄이고 desync는 리더↔메인 타이밍(투영 게이트) 문제로 좁혀진다.
+    const bsu = "\x1b[?2026h";
+    const esu = "\x1b[?2026l"; // esu.len == bsu.len(8) — 같은 split 재사용
+    // 2조각 split: 모든 경계 1..len-1에서 앞/뒤를 별도 write로 쪼갠다.
+    var split: usize = 1;
+    while (split < bsu.len) : (split += 1) {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+        defer core.deinit();
+        try core.write(bsu[0..split]);
+        try core.write(bsu[split..]);
+        try std.testing.expect(core.sync_output); // BSU 재조립 → hold on
+        try std.testing.expectEqual(@as(u64, 1), core.sync_bsu_count);
+        try core.write(esu[0..split]);
+        try core.write(esu[split..]);
+        try std.testing.expect(!core.sync_output); // ESU 재조립 → hold off
+        try std.testing.expectEqual(@as(u64, 1), core.sync_esu_count);
+    }
+    // 극단: 바이트-단위 write(한 write=1바이트) — SSH가 최소 조각으로 흘려도 재조립돼야 한다.
+    {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+        defer core.deinit();
+        for (bsu) |b| try core.write(&[_]u8{b});
+        try std.testing.expect(core.sync_output);
+        try std.testing.expectEqual(@as(u64, 1), core.sync_bsu_count);
+        for (esu) |b| try core.write(&[_]u8{b});
+        try std.testing.expect(!core.sync_output);
+        try std.testing.expectEqual(@as(u64, 1), core.sync_esu_count);
+    }
+}
+
 test "kitty FlagStack: push/pop/set/overflow (audit 4/5)" {
     var stack: KittyFlagStack = .{};
     try std.testing.expectEqual(KittyFlags{}, stack.current()); // 기본 disabled

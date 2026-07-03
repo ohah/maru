@@ -272,6 +272,16 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 
 **기본/권장값은 60Hz.** 30Hz는 저전력/낮은 wakeup 우선 옵션, 120Hz는 ProMotion/고주사율에서 체감 반응성을 우선할 때의 opt-in 상한이다. 144/240Hz는 현재 `NSTimer` 구조에서 vsync 정렬 없이 wakeup만 늘 가능성이 커 열지 않는다. ProMotion 수준 진짜 매끄러움과 모니터별 자동 적응을 원하면 **B(CVDisplayLink)를 doc-first 설계 후** 착수 — C(렌더 스레드)는 *대량 출력 중 메인 응답성*까지 필요해질 때.
 
+### 10.5 애니메이션 cadence가 tick throughput에 묶임 (스피너 지연 진단)
+
+**증상(사용자 관찰)**: 원격(SSH) 쉘에 포커스하거나 **탭을 전환하면** 다른 탭/카드의 에이전트 스피너 애니메이션이 느려지거나 멈춘다.
+
+**근본 원인(코드 확인)**: 스피너·커서 blink는 **tick 카운트**로 진행한다 — `advanceCursorBlink`가 매 `tick()`마다 `agent_spin_ticks += 1`, `agentSpinIntervalTicks()`(= `ticksForMs(133)`, **고정 tick 수, wall-clock 보정 없음**)마다 프레임을 넘긴다. cadence는 §10.2의 **단일 전역 `NSTimer`**가 목표 Hz로 tick을 발사한다는 전제에 의존한다. 그런데 `NSTimer`는 이전 핸들러가 도는 동안 다음 발사가 밀리므로, **한 tick 핸들러가 무거우면 실효 tick rate가 목표 Hz 아래로 떨어진다** → tick-카운트 기반 애니메이션이 그만큼 느려지거나(핸들러가 오래 블록하면) 멈춘다. §11의 스피너 "독립 present"는 present를 sync 게이트에서 뗐지만 **cadence를 tick throughput에서 떼진 못했다**(present 층 ≠ cadence 층). 무겁게 만드는 것: **탭 전환**(새 활성 surface의 전체 grid CoreText reshape), **SSH 포커스**(활성 surface 매 tick 재빌드 + `syncAutoTitles`가 매 tick **모든 코어** lock + `sync_view` 활성 코어 lock이 바쁜 리더 스레드와 `core_mutex` 경합).
+
+**실측 계측(`.frametime` 스코프)**: `MARU_DEBUG=1`이면 `logFrameTime`이 tick의 wall-clock을 단계별(pre·**titles**=syncAutoTitles 전체 코어 lock·**drain**=리더 PTY pump·mid·**project**=활성 surface build+투영)로 분해해, 느린 tick(총>8ms)은 즉시 `SLOW` 한 줄, 약 1초 창마다 **실효 rate·mean/max·단계 비중**을 요약한다. 이로써 지배 요인(탭 전환 reshape=project vs SSH lock 경합=titles/drain)을 데이터로 가른다. 게이트는 `diag.zig` 단일 출처(`.sync`와 동형, release 비용 0). **초기 실측(controlled smoke, 단일 surface)**: 전체 grid build tick ≈ **13ms, `project` 단계가 지배**(12.9/13.0) — 탭 전환이 유발하는 reshape 비용이 곧 한 프레임 hiccup임을 확인. SSH 포커스의 지속적 지배 요인은 실기기 캡처(§ 아래 development-commands)로 확정한다.
+
+**픽스 방향(실측 후)**: (A) 애니메이션 진행을 tick 카운트가 아니라 **wall-clock 경과(ms)** 기반으로 — tick이 불규칙/느려도 위상은 실시간을 따라가 부드럽게 유지(단 tick 완전 정지 시엔 present 기회가 없어 아래와 병행). (B) tick당 비용 축소 — `syncAutoTitles`를 매 tick 전체 코어 lock 대신 사이드바에 보이는 Term/변화 시만, 리더 lock 보유 축소, 탭 전환 reshape 결과 캐시. (C) 근본은 §10.2 옵션 B(CVDisplayLink)/C(렌더 스레드 present)로 cadence를 tick throughput에서 분리.
+
 ## 11. chrome(사이드바 스피너) 독립 present — sync(2026) 게이트에서 분리 (구현)
 
 ### 11.1 동기

@@ -92,6 +92,11 @@ pub const Tab = struct {
     // 사이드바 카드 좌측 accent 막대색(0xRRGGBB, 0=기본 — 활성=테마 앰버·비활성=막대 없음). 우클릭 메뉴
     // 프리셋으로 설정. 지정하면 활성·비활성 카드 모두 그 색으로 막대 표시. 배경 tint와 직교. 기본 0.
     accent_color: u32 = 0,
+    // 사이드바 그룹 시작 마커(위치 파생 소속 — docs/sidebar-groups.md §2.1·§4). null=그룹 시작 아님. 순수
+    // additive 스칼라(새 블록·count 키 없음)라 옛 파일은 null로, 다운그레이드해도 옛 리더가 미지 키로 skip해
+    // flat 정상 복원(forward·backward 양쪽 호환). group_collapsed는 group_start!=null일 때만 의미. 기본 null/false.
+    group_start: ?[]const u8 = null,
+    group_collapsed: bool = false,
     tree: []const TreeNode, // preorder; leaf의 pane 인덱스가 panes를 가리킨다
     panes: []const Pane,
 };
@@ -134,7 +139,16 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
 fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
     try w.print("tab panes={d} active-pane={d} custom-name=\"", .{ tab.panes.len, tab.active_pane });
     try writeEscaped(w, tab.custom_name);
-    try w.print("\" pinned={d} background-color={d} accent-color={d}\n", .{ @intFromBool(tab.pinned), tab.background_color, tab.accent_color });
+    try w.print("\" pinned={d} background-color={d} accent-color={d}", .{ @intFromBool(tab.pinned), tab.background_color, tab.accent_color });
+    // 그룹 시작 마커(docs/sidebar-groups.md §4). null이면 키 자체를 생략한다 — 빈 문자열("")은 "이름 없는 그룹
+    // 시작"과 구분해야 하므로 null을 빈 값으로 인코딩하지 않고 키 부재로 표현한다. reader는 group-start 키가 없으면
+    // null(그룹 아님)로 읽어 round-trip이 고정된다. group-collapsed는 그룹 시작 탭에만 의미라 함께 쓴다.
+    if (tab.group_start) |name| {
+        try w.writeAll(" group-start=\"");
+        try writeEscaped(w, name);
+        try w.print("\" group-collapsed={d}", .{@intFromBool(tab.group_collapsed)});
+    }
+    try w.writeByte('\n');
     for (tab.tree) |node| try writeTreeNode(w, node);
     for (tab.panes) |pane| try writePane(w, pane);
 }
@@ -240,6 +254,11 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     const pinned = (try f.getUint("pinned", u8, 0)) != 0;
     const background_color = try f.getUint("background-color", u32, 0);
     const accent_color = try f.getUint("accent-color", u32, 0);
+    // 그룹 시작 마커(additive — docs/sidebar-groups.md §4). group-start 키가 **있을 때만** 그룹 시작이다:
+    // 없으면 null(그룹 아님), 있으면 그 이름(빈 문자열도 유효한 "이름 없는 그룹"). 그래서 getQuoted 기본값이
+    // 아니라 find로 존재를 먼저 확인한다(키 부재 ↔ 빈 값을 구분 — writer가 null을 키 생략으로 인코딩한 것과 짝).
+    const group_start: ?[]const u8 = if (f.find("group-start") != null) try f.getQuoted(a, "group-start", "") else null;
+    const group_collapsed = (try f.getUint("group-collapsed", u8, 0)) != 0;
 
     var tree: std.ArrayList(TreeNode) = .empty;
     // 구조 불변식: pane P개 탭의 split 트리는 leaf P + split (P−1) = 정확히 2P−1 노드다. 그보다 많이 읽히면
@@ -249,7 +268,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
-    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -607,6 +626,42 @@ test "workspace round-trip: tab pinned·background_color·accent_color 보존" {
     try std.testing.expectEqual(@as(u32, 0x4A7BC4), tab.accent_color);
 }
 
+test "workspace round-trip: tab group_start·group_collapsed 보존(위치 파생 그룹 마커)" {
+    // 위치 파생 그룹(docs/sidebar-groups.md §2.1): 탭0이 "frontend" 그룹을 시작(접힘)하고, 탭1은 마커가 없어
+    // 소속을 순서에서 파생한다(frontend에 속함). writer는 **그룹 시작 탭만** group-start=/group-collapsed=를
+    // 내고, 마커 없는 탭은 키를 생략한다(null=그룹 아님). round-trip이 이 인코딩(null↔키부재)을 고정하는지 검증.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{
+        .{ .custom_name = "web", .group_start = "frontend", .group_collapsed = true, .tree = &tree, .panes = &panes },
+        .{ .custom_name = "docs", .tree = &tree, .panes = &panes }, // 마커 없음 → null(위치 파생 소속)
+    };
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 그룹 시작 탭(web)만 group-start/group-collapsed를 낸다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"web\" pinned=0 background-color=0 accent-color=0 group-start=\"frontend\" group-collapsed=1\n") != null);
+    // 마커 없는 탭(docs)은 accent-color=0 바로 뒤 개행 — group-start 키가 안 붙는다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const t0 = parsed.workspace.windows[0].tabs[0];
+    const t1 = parsed.workspace.windows[0].tabs[1];
+    try std.testing.expect(t0.group_start != null);
+    try std.testing.expectEqualStrings("frontend", t0.group_start.?);
+    try std.testing.expectEqual(true, t0.group_collapsed);
+    try std.testing.expectEqual(@as(?[]const u8, null), t1.group_start); // 마커 없는 탭 = null
+    try std.testing.expectEqual(false, t1.group_collapsed);
+
+    // round-trip 고정점: 다시 직렬화하면 동일(null↔키부재 인코딩이 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
 test "workspace parse: 구조·escape 해제·forgiving" {
     const text =
         "maru.workspace.v1\n" ++
@@ -663,6 +718,8 @@ test "workspace parse: key-addressed 하위호환·순서무관·미지키 skip�
     try std.testing.expectEqual(@as(u32, 0), ot.background_color); // 없음 → 기본 0
     try std.testing.expectEqual(@as(u32, 0), ot.accent_color); // 없음 → 기본 0
     try std.testing.expectEqual(false, ot.pinned); // 없음 → 기본 false
+    try std.testing.expectEqual(@as(?[]const u8, null), ot.group_start); // group-start 없음 → null(그룹 아님)
+    try std.testing.expectEqual(false, ot.group_collapsed); // 없음 → 기본 false
     try std.testing.expectEqual(@as(usize, 0), ot.active_pane); // 없음 → 기본 0
     try std.testing.expectEqual(@as(usize, 0), ot.panes[0].active_term); // 없음 → 기본 0
 

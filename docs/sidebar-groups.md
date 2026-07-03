@@ -264,14 +264,17 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
    `group-start`/`group-collapsed` 스칼라(순수 additive) + 캡처/복원 변환(owned dup·errdefer·deinit free) +
    round-trip·하위호환·leak 테스트. 렌더는 아직 안 붙임(모델만).
 3. **SG3 — sidebar_rows 격상 + 가변 높이 + 헤더 렌더 + 접기 + 만들기/이름/해제** (가변 높이라 커서 하위 분할):
-   - **SG3a — sidebar_rows 격상 + 가변 높이 hit-test(그룹 없이 동작 보존)**: app_session `sidebar_visible_tabs` →
-     `sidebar_rows: []Row` 완전 격상(`recomputeVisibleTabs` → `projectRows`; `visibleTab`/`displaySlotOf`·rebuildSidebar
-     tint/accent 루프를 row 기반으로 — 조사 맵의 "표시 슬롯 도메인" 전부). `sidebar.zig` hit-test를 **가변 높이 누적**
-     (`rowTop`/`slotAt`/`contentHeight`)으로 바꾸되 아직 헤더 row는 없어 전부 카드(누적=균일과 동일 → 동작 보존, 스냅샷 회귀).
-     두 latent 버그 교정(rename caret `rowTop`, 드래그 `dragTargetSlot`).
-   - **SG3b — 헤더 row + glyph 가변 인코딩**: `projectRows`가 group_header row 삽입(카드 depth 들여쓰기), `view`가 헤더
-     밴드+삼각(▾/▸), `buildSidebarDrawList`+`.m`이 헤더 glyph(삼각+이름)와 **row별 누적 y**로 세로 위치를 그린다
-     (§5 파급 — `sidebarGlyphRow` 균일 곱셈을 누적으로, `.m` 디코드 동반 수정). macOS 제품 스크린샷 검증.
+   - **SG3a — sidebar_rows 격상 + 가변 프리미티브(그룹 없이 동작 보존) ✅**: app_session `sidebar_visible_tabs` →
+     `sidebar_rows: []Row` 완전 격상(`recomputeVisibleTabs`가 `Row.card` 채움; `visibleTab`/`displaySlotOf`·rebuild
+     tint/accent·glyph 조립·⌘숫자 배지·`anyAgentRunning`을 row switch로 — 조사 맵의 "표시 슬롯 도메인" 전부). `sidebar.zig`에
+     가변 누적 프리미티브(`rowHeight`/`rowTop`/`contentHeight`) 추가 + 헤드리스 테스트(**카드만이면 `rowTop`==옛 `slotTop`**로
+     동작 보존 증명). **`slotAt`/`dragTargetSlot`의 가변 교체·`slotTop`→`rowTop` 전환·두 latent 버그(rename caret·드래그)
+     교정은 헤더가 실제로 가변을 요구하는 SG3b로 미룬다**(헤더 없는 SG3a는 고정 hit-test로 카드만 처리 = 균일이라 동작 보존).
+   - **SG3b — 헤더 row + 가변 hit-test 교체 + glyph 가변 인코딩**: `projectRows`가 group_header row 삽입(카드 depth 들여쓰기),
+     `sidebar.zig` `slotAt`/`dragTargetSlot`을 **rows+누적(가변 높이)**으로 교체 + `slotTop`→`rowTop` 전환(app_session 호출처·
+     rename caret·드래그 버그 교정)·고정 함수 제거, `view`가 헤더 밴드+삼각(▾/▸), `buildSidebarDrawList`+`.m`이 헤더 glyph
+     (삼각+이름)와 **row별 누적 y**로 세로 위치를 그린다(§5 파급 — `sidebarGlyphRow` 균일 곱셈을 누적으로, `.m` 디코드 동반
+     수정). macOS 제품 스크린샷 검증.
    - **SG3c — 접기 + 만들기/이름/해제 + 액션·단축키**: 헤더 클릭 → `group_collapsed` 토글 → 재투영·영속.
      `create_group`(기본 키 `Cmd+Opt+G`)·`ungroup` 액션 추가(action.zig `Action`+`parseAction`+`dispatchAppAction` arm+
      `command_catalog` entry) → 팔레트·설정 Input 리바인더·config `keybind` 자동 노출(§7). 우클릭 "새 그룹으로 묶기"/

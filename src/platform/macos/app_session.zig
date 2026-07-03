@@ -10199,11 +10199,13 @@ pub const AppSession = struct {
     /// 첫 게이트에서 즉시 return). 노이즈를 줄이려 **sync 에피소드 중이거나 ESU가 바뀐 tick 또는 사이드바 전용 투영(cproj)
     /// tick만** emit한다(idle 정적 화면은 안 찍음). 필드: active=활성 surface sync_output, hold=sync_hold_ticks/timeout,
     /// gproj=grid 전체 투영(will_project), cproj=사이드바 전용 투영(project_chrome), force=force_reproject(atlas repack
-    /// 폴백), dirty/chrome=metal/chrome_dirty, voff=view_offset(스크롤), bsu/esu=리더(parser.feed)가 처리한 BSU(hold
-    /// 시작)/ESU(완성 프레임) 누적, out=이 tick output_events. shouldProjectFrame 게이트의 각 안전판(스크롤·ESU edge·
-    /// timeout)이 실환경에서 언제 발동하는지 관측한다. **bsu/esu vs active**: 리더 BSU/ESU 누적이 메인이 본 active 횟수보다
-    /// 훨씬 많으면 → per-tick 샘플링이 transition을 놓치는 것(maru ssh SSH fragmentation 어긋남 추적, core.sync_bsu_count).
-    fn logSyncGateDiag(self: *AppSession, out_events: usize, sync_active: bool, gproj: bool, cproj: bool, bsu: u64, esu: u64, view_offset: usize) void {
+    /// 폴백), dirty/chrome=metal/chrome_dirty, voff=view_offset(스크롤), esuadv/scr=이 tick 투영을 unblock한 **실제
+    /// 게이트 이유**(esu_advanced=완성 프레임 flush / view_scrolled=스크롤 리페인트 — 호출부 shouldProjectFrame 입력을
+    /// 그대로 실어, 분석기가 active 중 투영을 esu_edge vs scroll로 추론 없이 정확히 가른다), bsu/esu=리더(parser.feed)가
+    /// 처리한 BSU(hold 시작)/ESU(완성 프레임) 누적, out=이 tick output_events. shouldProjectFrame 게이트의 각 안전판
+    /// (스크롤·ESU edge·timeout)이 실환경에서 언제 발동하는지 관측한다. **bsu/esu vs active**: 리더 BSU/ESU 누적이 메인이
+    /// 본 active 횟수보다 훨씬 많으면 → per-tick 샘플링이 transition을 놓치는 것(maru ssh 어긋남 추적, core.sync_bsu_count).
+    fn logSyncGateDiag(self: *AppSession, out_events: usize, sync_active: bool, gproj: bool, cproj: bool, esu_advanced: bool, view_scrolled: bool, bsu: u64, esu: u64, view_offset: usize) void {
         if (!diag_gate.maruDebugEnabled()) return;
         self.sync_diag_tick +%= 1;
         const changed = bsu != self.sync_diag_last_bsu or esu != self.sync_diag_last_esu;
@@ -10212,7 +10214,7 @@ pub const AppSession = struct {
         self.sync_diag_last_esu = esu;
         self.sync_diag_last_active = sync_active;
         if (!relevant) return;
-        sync_diag.info("tick={d} active={d} hold={d}/{d} gproj={d} cproj={d} force={d} dirty={d} chrome={d} voff={d} bsu={d} esu={d} out={d}", .{
+        sync_diag.info("tick={d} active={d} hold={d}/{d} gproj={d} cproj={d} force={d} dirty={d} chrome={d} voff={d} esuadv={d} scr={d} bsu={d} esu={d} out={d}", .{
             self.sync_diag_tick,
             @intFromBool(sync_active),
             self.sync_hold_ticks,
@@ -10223,6 +10225,8 @@ pub const AppSession = struct {
             @intFromBool(self.metal_dirty),
             @intFromBool(self.chrome_dirty),
             view_offset,
+            @intFromBool(esu_advanced),
+            @intFromBool(view_scrolled),
             bsu,
             esu,
             out_events,
@@ -10344,8 +10348,10 @@ pub const AppSession = struct {
         const will_project = shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset, esu_advanced, self.force_reproject);
         // [A: chrome 독립 present] grid는 hold됐지만 chrome(사이드바 스피너)만 dirty면 사이드바만 부분 투영한다(아래 else if).
         const project_chrome = self.chrome_dirty and !will_project;
-        // 투영 결정 직후 sync 게이트 상태를 관측 로그로 남긴다(MARU_DEBUG 전용, 아니면 즉시 return).
-        self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, sync_view.bsu, sync_view.esu, active_view_offset);
+        // 투영 결정 직후 sync 게이트 상태를 관측 로그로 남긴다(MARU_DEBUG 전용, 아니면 즉시 return). esu_advanced·
+        // view_scrolled(shouldProjectFrame이 본 것과 동일 입력)를 실어, 분석기가 active 중 투영을 esu_edge vs scroll로
+        // 추론 없이 가른다(로그만으론 재구성 불가한 게이트 baseline을 진실로 대체 — 리뷰 반영).
+        self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, esu_advanced, active_view_offset != self.last_rendered_view_offset, sync_view.bsu, sync_view.esu, active_view_offset);
         if (will_project) {
             self.chrome_dirty = false; // 전체 투영이 사이드바까지 그리므로 chrome dirty 소진
             // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의

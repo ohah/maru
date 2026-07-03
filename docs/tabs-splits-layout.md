@@ -304,7 +304,8 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   platform이 대상 타입에 맞게 동적 주입하고(`buildContextMenuItems`), accept는 selected 인덱스 구간으로 분기
   (`acceptContextMenu`; `ctx_menu_bg_first`/`ctx_menu_accent_first`). 위치 고정은 드래그 재정렬에서 그 탭을 안 움직이고
   (`moveTab` no-op) 사이드바 카드 이름줄 **우측 끝**에 📌(선두가 아니라 — 선두 칼럼은 위 동작/활성 마커 전용; 핀이 그
-  표시를 가리지 않게).
+  표시를 가리지 않게). **그룹 만들기·풀기("새 그룹으로 묶기"/"그룹 풀기")도 여기 동적 주입되어 위치 파생 그룹 마커
+  (`group_start`)를 세팅·제거한다(단축키 `Cmd+Opt+G`·팔레트 공유) — 단일 출처 [사이드바 그룹 전략](sidebar-groups.md).**
 - **카드별 색 렌더(배경 tint·좌측 accent 막대)**: chrome draw op은 role 기반이라 임의 RGB를 못 실어, **둘 다 platform이
   명시-색 GpuQuad로 직접 그린다**(`rebuildSidebar`의 per-tab tint 루프·per-tab accent 루프 — 일관된 경로). 배경색은 카드에
   반투명 tint, 좌측 막대는 카드 좌단(폭=`tokens.space.accent_bar_width_px`, 카드 텍스트는 이 폭만큼 좌측 여백 예약)에

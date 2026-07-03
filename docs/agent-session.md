@@ -43,6 +43,8 @@ Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hook
 - **경로 방어**: `transcript_path`는 매핑 파일(팬 셸 아무 프로세스나 쓸 수 있음)에서 오므로 **절대경로+`.jsonl`+`..` 없음**만 허용(traversal 방지, 옛 `isBasenameSafe` 대체).
 - **중첩 에이전트 한계**: 한 팬 안에서 claude 안 claude(중첩)를 띄우면 자식이 `MARU_PANE_ID`를 상속해 그 팬 매핑을 자기 트랜스크립트로 덮는다. 바깥 에이전트의 다음 활동(UserPromptSubmit/Stop)에 매핑이 다시 올바르게 쓰이므로 **일시적**이지만, 중첩이 도는 동안엔 카드가 중첩 세션 상태를 보일 수 있다(드문 엣지).
 - **훅-only 창**: 팬 spawn 직후 첫 훅 발화 전, 또는 훅 미발화 세션은 state=unknown(cwd 추측 폴백 없음 — 훅-only 결정). 매 턴 이벤트로 곧 채워진다.
+- **매핑된 트랜스크립트 부재 = 세션 gone(stale 매핑 자가정리)**: `transcript_path`는 **세션 내내 고정**이다(claude 확인: auto-compaction·`/compact`·`--continue`/`--resume` 모두 같은 파일에 append; 새 파일은 **새 세션·`/clear`**만). 따라서 매핑이 가리키는 파일이 **없어졌다(`FileNotFound`)**는 건 회전이 아니라 **그 세션이 사라진 것**(수동 삭제·30일 retention·`/clear`로 옛 UUID 유기 등)이다. `poll`은 이 경우를 일반 unknown(불완전 tail — 일시적, 직전 상태 보존)과 **구분**해 `missing`으로 신호하고, `pollAgentState`는 직전이 running/idle이었으면 그 팬의 **stale 매핑 파일을 파기**(`removeMapping`)하고 상태를 unknown으로 **리셋**한다 — 안 그러면 unknown의 "직전 상태 보존" 계약 때문에 삭제된 running 세션이 **스피너가 영영 안 풀린다**. 새 세션은 SessionStart 훅이 새 UUID로 매핑을 다시 쓰므로 자가회복. running→unknown 리셋이라 **완료 알림은 안 뜬다**(사라진 세션은 완료가 아님).
+  - **SessionEnd 훅은 안 쓴다(결정)**: 세션 종료 시 매핑을 훅으로 지우는 대안도 있으나, 깨끗한 종료는 **포그라운드=셸 감지(kind=none)** 로 이미 카드가 안 뜨고, 시작 시 `clearMappings`가 옛 매핑을 비우며, 위 `missing` 자가정리가 파일 삭제까지 덮는다. per-event 삭제 command를 위해 `buildCommand`를 event별로 나눠 사용자 `settings.json` 접촉면을 넓히는 비용 대비 이득이 없어 **maru-side 자가정리로 일원화**한다.
 
 ## 왜 JSONL인가 (방식 결정)
 

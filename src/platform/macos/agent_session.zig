@@ -33,6 +33,10 @@ pub const Poll = struct {
     answer_len: usize,
     /// 찾은 세션 파일의 mtime(나노초). 못 찾으면 0. 호출자가 캐시해 다음 poll에 `prev_mtime`으로 넘긴다.
     mtime: i128,
+    /// 매핑된 트랜스크립트 **파일 자체가 없음**(`FileNotFound`) = 그 세션이 사라짐(경로는 세션 내내 고정이라 회전 아님 —
+    /// docs/agent-session.md "매핑된 트랜스크립트 부재"). 일반 unknown(불완전 tail=일시적, 직전 상태 보존)과 구분해,
+    /// 호출자가 stale 매핑을 파기하고 stuck 상태(삭제된 running이 스피너 안 풀림)를 리셋하게 한다.
+    missing: bool = false,
 };
 
 /// codex tail/첫 줄 읽기용 창 크기. codex는 마지막 엔트리가 task_complete(명시적 완료)라 끝부분만으로 충분하다.
@@ -50,6 +54,11 @@ fn unknownPoll() Poll {
     return .{ .state = .unknown, .answer_len = 0, .mtime = 0 };
 }
 
+/// 매핑된 트랜스크립트 파일이 없음(`FileNotFound`) — 세션 gone. 호출자가 stale 매핑 파기 + 상태 리셋에 쓴다.
+fn missingPoll() Poll {
+    return .{ .state = .unknown, .answer_len = 0, .mtime = 0, .missing = true };
+}
+
 /// 에이전트 세션 트랜스크립트 파일(`transcript_path`)의 tail을 읽어 상태·마지막 답변을 계산한다. 경로는
 /// **agent_hooks.readMapping**이 준다 — 에이전트 SessionStart 훅이 `MARU_PANE_ID`로 남긴 정확한 경로라, 같은
 /// cwd 다중 세션도 팬별 정확 매칭이다(cwd 추측·mtime 폴백 없음 — docs/agent-session.md "훅 매핑"). `gpa`는 tail
@@ -65,7 +74,12 @@ pub fn poll(
 ) Poll {
     const path = transcript_path orelse return unknownPoll();
 
-    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return unknownPoll();
+    // 파일 자체가 없음(FileNotFound) = 세션 gone → missing(호출자가 stale 매핑 파기 + 상태 리셋). 그 외 stat 오류
+    // (EACCES 등)는 일시적일 수 있어 unknown(직전 상태 보존). 경로는 세션 내내 고정이라 부재=삭제, 회전이 아니다.
+    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return missingPoll(),
+        else => return unknownPoll(),
+    };
     const mtime: i128 = st.mtime.nanoseconds;
     // mtime 안 바뀌었으면 tail read·재파싱을 건너뛴다(느린 API 중 잦은 헛 재파싱 회피).
     if (prev_mtime != 0 and mtime == prev_mtime) return .{ .state = null, .answer_len = 0, .mtime = mtime };
@@ -201,12 +215,20 @@ test "poll claude: transcript_path의 세션을 tail-read해 idle + 답변, mtim
     try std.testing.expectEqual(@as(?State, null), again.state);
 }
 
-test "poll: transcript_path가 null이거나 없는 파일이면 unknown(훅 매핑 없음)" {
+test "poll: null 매핑=unknown(missing 아님), 삭제된 파일=missing(세션 gone)" {
     const io = std.testing.io;
     var answer: [192]u8 = undefined;
-    try std.testing.expectEqual(State.unknown, poll(io, std.testing.allocator, .claude, 0, &answer, null).state.?);
-    try std.testing.expectEqual(State.unknown, poll(io, std.testing.allocator, .claude, 0, &answer, "/no/such/s.jsonl").state.?);
-    try std.testing.expectEqual(State.unknown, poll(io, std.testing.allocator, .codex, 0, &answer, null).state.?);
+    // 매핑 자체가 없음(null) = 훅 미발화 창 → unknown, missing=false(직전 상태 보존, 파기 안 함).
+    const none = poll(io, std.testing.allocator, .claude, 0, &answer, null);
+    try std.testing.expectEqual(State.unknown, none.state.?);
+    try std.testing.expect(!none.missing);
+    // 매핑은 있는데 가리키는 트랜스크립트 파일이 없음(FileNotFound) = 세션 gone → missing=true(호출자가 매핑 파기·리셋).
+    const gone = poll(io, std.testing.allocator, .claude, 0, &answer, "/no/such/s.jsonl");
+    try std.testing.expectEqual(State.unknown, gone.state.?);
+    try std.testing.expect(gone.missing);
+    // codex도 동일 — null=unknown/미parse, 없는 파일=missing.
+    try std.testing.expect(!poll(io, std.testing.allocator, .codex, 0, &answer, null).missing);
+    try std.testing.expect(poll(io, std.testing.allocator, .codex, 0, &answer, "/no/such/r.jsonl").missing);
 }
 
 test "poll codex: transcript_path의 rollout을 tail-read해 idle + 답변" {

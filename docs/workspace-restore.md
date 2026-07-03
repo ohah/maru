@@ -156,16 +156,19 @@ layout
 저장 모델(앞 절 직렬화 모델에 필드 추가, 빈 문자열 = 이름 없음):
 
 ```text
-tab ... custom-name="<workspace custom_name>" pinned=<0|1> background-color=<0xRRGGBB 10진> accent-color=<0xRRGGBB 10진>
+tab ... custom-name="<workspace custom_name>" pinned=<0|1> background-color=<0xRRGGBB 10진> accent-color=<0xRRGGBB 10진> group-start="<그룹 이름>" group-collapsed=<0|1>
                                                  # 워크스페이스 custom_name + 위치 고정(pinned) + 카드 배경 tint + 좌측 accent 막대색
+                                                 # + 사이드바 그룹 시작 마커(group-start=이 탭부터 그 이름의 그룹 시작·위치 파생 소속,
+                                                 #   null이면 키 생략=그룹 아님) + 접힘 상태(group-collapsed) — docs/sidebar-groups.md
 pane ... custom-name="<pane custom_name>"        # pane custom_name (자동 출처 없음)
 surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
                                                  # surface는 custom_name(사용자)과 title(자동) 둘 다 저장
 ```
 
 세 계층의 사용자 이름은 모두 `custom-name=` 키로 통일한다(Surface만 추가로 auto `title=`를 둔다). 워크스페이스(tab)는
-우클릭 컨텍스트 메뉴로 정하는 **위치 고정(`pinned`)·카드 배경색(`background-color`)·좌측 막대색(`accent-color`)**도 사용자
-의도라 영속한다(custom_name과 같은 자리; 배경색·막대색은 직교한 별도 값 — docs/tabs-splits-layout.md). 직렬화 리더는 각
+우클릭 컨텍스트 메뉴로 정하는 **위치 고정(`pinned`)·카드 배경색(`background-color`)·좌측 막대색(`accent-color`)**과 **사이드바
+그룹 시작 마커(`group-start`/`group-collapsed`)**도 사용자 의도라 영속한다(custom_name과 같은 자리; 배경색·막대색은 직교한
+별도 값 — docs/tabs-splits-layout.md, 그룹은 docs/sidebar-groups.md). 직렬화 리더는 각
 라인의 **스칼라 `key=value` 필드를 순서 무관·이름으로 조회**한다(key-addressed — 아래 "[직렬화 전략: key-addressed
 파싱](#직렬화-전략-스칼라-필드-key-addressed-파싱)"). 구조 키(개수)만 필수, 스칼라 속성은 없으면 기본값이라 **줄 끝에 스칼라 필드를
 추가해도 옛 파일이 안 깨진다**(additive 하위호환). 구조 변경(블록/카운트/tree)은 여전히 포맷 변경 사건이다.
@@ -191,9 +194,11 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 - **required(구조 키)** — 없으면 블록 파싱이 불가능한 개수 키(`window.tabs`·`tab.panes`·`pane.surfaces`·`surface.agent-argc`).
   없으면 `BadLine → 통째 폴백`(loud-fail, 손상 탐지 유지). `requireUint`. 값이 비숫자·거대값이어도 BadLine.
-- **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·`title`=""·
-  `cols`=80·`rows`=24 및 앞으로의 per-tab/surface 스칼라). 없으면 기본값. **단 키가 있는데 값이 깨졌으면 조용히 기본값으로
-  때우지 않고 BadLine**(존재하는 손상은 숨기지 않는다). `getUint`/`getQuoted`.
+- **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·
+  `group-collapsed`=0·`title`=""·`cols`=80·`rows`=24 및 앞으로의 per-tab/surface 스칼라). 없으면 기본값. **단 키가 있는데 값이
+  깨졌으면 조용히 기본값으로 때우지 않고 BadLine**(존재하는 손상은 숨기지 않는다). `getUint`/`getQuoted`. **예외 —
+  `group-start`(사이드바 그룹 시작 마커)**: 값이 아니라 **키 존재 자체가 그룹 시작**을 뜻하므로(없으면 그룹 아님=null, 빈
+  문자열도 유효한 '이름 없는 그룹') `find`로 키 유무를 먼저 본 뒤 `getQuoted`한다(위치 파생 — docs/sidebar-groups.md §4).
 
 **미지 키.** 조회하지 않는 키는 자연히 skip된다(forward-compat — 옛 바이너리가 새 파일의 모르는 스칼라 키를 무시). 오타 키가
 조용히 무시되는 트레이드오프는 optional 속성이라 감수하고, 구조 이상은 required 규칙이 잡는다(미지 키 진단 로그는 후속).

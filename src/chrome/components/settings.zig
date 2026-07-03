@@ -941,6 +941,17 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             else => return .consumed,
         }
     }
+    // enum/font 드롭다운 팝업이 열려 있으면 모든 키를 팝업이 잡는다(모달 캡처). **검색보다 먼저** 본다 — 검색 중 열린
+    // 드롭다운도 ↑↓가 팝업 선택을 움직여야지 뒤의 필터된 행으로 새면 안 된다. ↑↓ 선택·Enter 확정·Esc 취소(팝업만 닫고
+    // 검색 유지)·그 외 소비. accept는 platform이 selected 변형을 set(dropdown_accept)한 뒤 host가 닫는다.
+    if (state.dropdown.open) {
+        return switch (dropdown.handle(k, &state.dropdown)) {
+            .accept => .dropdown_accept, // Enter — 현재 selected 확정(적용 + 팝업 닫기)
+            .close => .dropdown_cancel, // Esc — dropdown.handle이 이미 hide, platform이 original로 복원(프리뷰 되돌림)
+            .selection_changed => .dropdown_preview, // ↑↓ — platform이 highlighted를 **라이브 적용**(팝업 유지, 바로 반영)
+            .consumed => .consumed,
+        };
+    }
     // 검색 중이면 char가 쿼리로(필터), ↑↓=필터된 행 나비, Enter=활성, Esc=검색 종료, Backspace=쿼리 편집. 그 외 소비.
     if (state.searching) {
         switch (k.key) {
@@ -967,16 +978,6 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             },
             else => return .consumed,
         }
-    }
-    // enum/font 드롭다운 팝업이 열려 있으면 모든 키를 팝업이 잡는다(모달 캡처). ↑↓ 선택·Enter 확정·Esc 취소·그 외
-    // 소비 — 폼(섹션 전환·행 이동)엔 안 샌다. accept는 platform이 selected 변형을 set(dropdown_accept)한 뒤 host가 닫는다.
-    if (state.dropdown.open) {
-        return switch (dropdown.handle(k, &state.dropdown)) {
-            .accept => .dropdown_accept, // Enter — 현재 selected 확정(적용 + 팝업 닫기)
-            .close => .dropdown_cancel, // Esc — dropdown.handle이 이미 hide, platform이 original로 복원(프리뷰 되돌림)
-            .selection_changed => .dropdown_preview, // ↑↓ — platform이 highlighted를 **라이브 적용**(팝업 유지, 바로 반영)
-            .consumed => .consumed,
-        };
     }
     // **방향키 영역 모델**: `←`=섹션 네비로 포커스, `→`=폼으로 포커스, `↑↓`=포커스 영역 안에서 이동(네비=섹션·폼=행),
     // Enter/Space=폼 행 활성(네비에선 Enter=폼 진입), Esc=닫기. Tab 무동작. (팔레트 그리드 행의 ←→ 셀 이동은 platform이
@@ -1348,6 +1349,28 @@ test "settings handle: 드롭다운 팝업 열림 라우팅(↑↓=preview·Ente
     // Esc → cancel + 닫힘(dropdown.handle이 hide).
     try std.testing.expectEqual(Action.dropdown_cancel, handle(.{ .key = .escape }, &s));
     try std.testing.expect(!s.dropdown.open);
+}
+
+test "settings handle: 검색 중 열린 드롭다운이 ↑↓를 먼저 잡는다(필터된 행으로 안 샘 — 회귀 가드)" {
+    // 버그: 검색 상태에서 드롭다운을 열면 handle이 searching 분기를 먼저 봐 ↑↓가 뒤의 필터된 행을 이동시켰다.
+    // 드롭다운 팝업은 모달이라 **검색보다 먼저** 캡처해야 한다 — ↑↓=팝업 선택, Esc=팝업만 닫고 검색 유지.
+    var s = State{};
+    s.show();
+    s.setFieldCount(3);
+    s.startSearch(); // 검색 상태
+    try std.testing.expect(s.searching);
+    s.dropdown.show(3, 0); // 검색 중 드롭다운 열림
+    try std.testing.expect(s.dropdown.open);
+
+    // ↓↑ → 드롭다운 프리뷰(행 이동 아님). selected가 팝업 안에서 움직인다.
+    try std.testing.expectEqual(Action.dropdown_preview, handle(.{ .key = .down }, &s));
+    try std.testing.expectEqual(@as(usize, 1), s.dropdown.selected);
+    try std.testing.expectEqual(Action.dropdown_preview, handle(.{ .key = .up }, &s));
+    try std.testing.expectEqual(@as(usize, 0), s.dropdown.selected);
+    // Esc → 드롭다운만 취소(dropdown_cancel), 검색은 유지.
+    try std.testing.expectEqual(Action.dropdown_cancel, handle(.{ .key = .escape }, &s));
+    try std.testing.expect(!s.dropdown.open);
+    try std.testing.expect(s.searching); // 검색 유지(드롭다운만 닫힘)
 }
 
 test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob text)+number 행(입력 박스 값 text)" {

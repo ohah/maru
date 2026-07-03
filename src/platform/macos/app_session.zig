@@ -655,7 +655,24 @@ const shell_diag = std.log.scoped(.shell);
 // 스크롤·ESU edge·timeout—이 실제로 발동하는지). 같은 도메인 데이터를 테스트·후속 trace writer도 이 자리에서
 // drain한다(관측 가능성 원칙). 게이트는 diag.zig 단일 출처.
 const sync_diag = std.log.scoped(.sync);
+// 프레임 타이밍 진단 logger. MARU_DEBUG일 때 tick의 wall-clock 소요를 단계별(pre/titles/drain/mid/project)로
+// 분해해, sync 스피너/blink cadence가 tick 카운트에 묶여 있어 무거운 tick이 실효 tick rate를 떨어뜨리는(탭 전환
+// CoreText reshape=project vs SSH firehose·lock 경합=titles/drain) 지배 요인을 데이터로 가른다. 60Hz 노이즈를
+// 줄이려 느린 tick(총>frametime_slow_ns)은 즉시 한 줄, 약 1초 창마다 실효 rate·mean/max·단계 비중을 요약한다.
+// 게이트는 diag.zig 단일 출처(관측 가능성 원칙, sync_diag와 동형).
+const frametime_diag = std.log.scoped(.frametime);
+// 느린 tick 즉시 로그 임계 — 8ms(60Hz 프레임 16.6ms의 절반). 이보다 오래 걸린 tick은 다음 NSTimer 발사를 밀어 rate를 떨군다.
+const frametime_slow_ns: i128 = 8 * std.time.ns_per_ms;
 const diag_gate = @import("diag.zig");
+
+fn nsToMs(ns: i128) f64 {
+    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
+}
+
+fn nsPct(part: i128, whole: i128) f64 {
+    if (whole <= 0) return 0;
+    return @as(f64, @floatFromInt(part)) * 100.0 / @as(f64, @floatFromInt(whole));
+}
 
 // app_host_abi.zig가 이 파일을 import하므로 EventKind는 여기서 정의하고 거기서 re-export한다
 // (순환 import 회피). FrameSummary.last_event_kind가 이 값을 그대로 싣는다.
@@ -1599,6 +1616,15 @@ pub const AppSession = struct {
     sync_diag_last_bsu: u64 = 0,
     sync_diag_last_esu: u64 = 0,
     sync_diag_last_active: bool = false,
+    // frametime_diag(logFrameTime) 1초 창 누적(MARU_DEBUG 관측 전용) — 실효 rate·mean/max·단계 비중 요약용.
+    // release에선 logFrameTime을 호출부 ft_on 게이트로 아예 진입 안 해 이 필드는 안 쓰인다(초기값 유지).
+    ft_window_start: i128 = 0,
+    ft_ticks: u32 = 0,
+    ft_sum_total: i128 = 0,
+    ft_sum_titles: i128 = 0,
+    ft_sum_drain: i128 = 0,
+    ft_sum_project: i128 = 0,
+    ft_max_total: i128 = 0,
 
     /// 단축키 힌트 홀드 상태머신(순수 — keyhint_hold.zig, 헤드리스 테스트). 단일 출처: flagsChanged 이벤트 스트림이
     /// arm/cancel을, 만료가 show를 결정한다(글로벌 modifier 재읽기 같은 2번째 출처 없음 — 간헐 미표시 루트커즈 수정).
@@ -10233,6 +10259,55 @@ pub const AppSession = struct {
         });
     }
 
+    /// [계측: 프레임 타이밍 실측] tick의 wall-clock 소요를 단계별로 분해해 sync 스피너/blink cadence(tick 카운트 기반)를
+    /// 떨어뜨리는 지배 요인을 데이터로 가른다. 단계: pre(housekeeping)·titles(syncAutoTitles=전체 코어 lock)·drain(리더
+    /// PTY pump)·mid(bookkeeping+sync_view lock)·project(활성 surface CoreText build+투영). tick당 5회 clock read(debug만).
+    /// (a) 느린 tick(총>frametime_slow_ns)은 즉시 SLOW 한 줄, (b) 약 1초 창마다 실효 rate·mean/max·단계 비중을 요약한다.
+    /// 호출부가 ft_on(maruDebugEnabled)으로 게이트하므로 release는 진입 안 함(비용 0).
+    fn logFrameTime(self: *AppSession, t_start: i128, t_pre: i128, t_titles: i128, t_drain: i128, t_project: i128) void {
+        const t_end = std.Io.Clock.awake.now(self.io).nanoseconds;
+        const total = t_end - t_start;
+        const d_titles = t_titles - t_pre;
+        const d_drain = t_drain - t_titles;
+        const d_project = t_end - t_project;
+        // (a) 느린 tick 즉시 로그 — 어느 단계가 지배했는지 한눈에.
+        if (total > frametime_slow_ns) {
+            frametime_diag.info("SLOW total={d:.1}ms pre={d:.1} titles={d:.1} drain={d:.1} mid={d:.1} project={d:.1}", .{
+                nsToMs(total),   nsToMs(t_pre - t_start),     nsToMs(d_titles),
+                nsToMs(d_drain), nsToMs(t_project - t_drain), nsToMs(d_project),
+            });
+        }
+        // (b) 1초 창 누적 — 실효 rate와 단계 비중(지속적 지배 요인).
+        if (self.ft_window_start == 0) self.ft_window_start = t_start;
+        self.ft_ticks += 1;
+        self.ft_sum_total += total;
+        self.ft_sum_titles += d_titles;
+        self.ft_sum_drain += d_drain;
+        self.ft_sum_project += d_project;
+        if (total > self.ft_max_total) self.ft_max_total = total;
+        const window = t_end - self.ft_window_start;
+        if (window >= std.time.ns_per_s) {
+            const rate = @as(f64, @floatFromInt(self.ft_ticks)) * @as(f64, @floatFromInt(std.time.ns_per_s)) / @as(f64, @floatFromInt(window));
+            frametime_diag.info("window={d:.2}s ticks={d} rate={d:.1}Hz total(ms) mean={d:.2} max={d:.1} | titles={d:.0}% drain={d:.0}% project={d:.0}%", .{
+                @as(f64, @floatFromInt(window)) / @as(f64, @floatFromInt(std.time.ns_per_s)),
+                self.ft_ticks,
+                rate,
+                nsToMs(@divTrunc(self.ft_sum_total, self.ft_ticks)),
+                nsToMs(self.ft_max_total),
+                nsPct(self.ft_sum_titles, self.ft_sum_total),
+                nsPct(self.ft_sum_drain, self.ft_sum_total),
+                nsPct(self.ft_sum_project, self.ft_sum_total),
+            });
+            self.ft_window_start = 0;
+            self.ft_ticks = 0;
+            self.ft_sum_total = 0;
+            self.ft_sum_titles = 0;
+            self.ft_sum_drain = 0;
+            self.ft_sum_project = 0;
+            self.ft_max_total = 0;
+        }
+    }
+
     pub fn tick(self: *AppSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -10246,6 +10321,15 @@ pub const AppSession = struct {
         // 싸다. 생명주기 회계(이벤트 합산, 종료 reap)도 build 여부와 무관하게 매 tick 한다 —
         // Metal 투영이나 비싼 build가 실패/생략돼도 drained 이벤트나 finishAfterTermination
         // (reader join/child reap)을 건너뛰지 않게 한다.
+        // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
+        // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
+        const ft_on = diag_gate.maruDebugEnabled();
+        const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+        var ft_pre: i128 = ft_start;
+        var ft_titles: i128 = ft_start;
+        var ft_drain: i128 = ft_start;
+        var ft_project: i128 = ft_start;
+        defer if (ft_on) self.logFrameTime(ft_start, ft_pre, ft_titles, ft_drain, ft_project);
         if (!self.update_started) { // 첫 tick에서 인앱 새 버전 안내 백그라운드 체크를 1회 띄운다(config로 끔)
             self.update_started = true;
             self.startUpdateCheck();
@@ -10255,7 +10339,9 @@ pub const AppSession = struct {
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
+        if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
+        if (ft_on) ft_titles = std.Io.Clock.awake.now(self.io).nanoseconds; // titles(syncAutoTitles=전체 코어 lock) 끝
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
@@ -10279,6 +10365,7 @@ pub const AppSession = struct {
                 }
             }
         }
+        if (ft_on) ft_drain = std.Io.Clock.awake.now(self.io).nanoseconds; // drain(모든 Term PTY pump) 끝
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
         // 개별 Term이 exit하면(전부는 아닌) 그 Term을 자동으로 닫는다(계층 cascade: Term→pane→워크스페이스,
@@ -10352,6 +10439,7 @@ pub const AppSession = struct {
         // view_scrolled(shouldProjectFrame이 본 것과 동일 입력)를 실어, 분석기가 active 중 투영을 esu_edge vs scroll로
         // 추론 없이 가른다(로그만으론 재구성 불가한 게이트 baseline을 진실로 대체 — 리뷰 반영).
         self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, esu_advanced, active_view_offset != self.last_rendered_view_offset, sync_view.bsu, sync_view.esu, active_view_offset);
+        if (ft_on) ft_project = std.Io.Clock.awake.now(self.io).nanoseconds; // mid(bookkeeping+sync_view lock) 끝 = project 시작
         if (will_project) {
             self.chrome_dirty = false; // 전체 투영이 사이드바까지 그리므로 chrome dirty 소진
             // 멀티 페인 통합 수집: atlas-쓰는 빌드를 shapeOnly로 모아, replace 전 placeAndDistribute가 한 번의

@@ -129,6 +129,11 @@ tab panes=1 ... group-start="infra" group-collapsed=1
 컴포넌트는 여전히 **무상태 순수 함수**(hit-test + view)다. `Tab`(라벨·활성)을 **`Row`(union)로 대체**하고, 모든 함수가
 `tab_count: usize` 대신 `rows: []const Row`를 받게 일반화한다. host(platform)가 `projectRows`로 Row 배열을 채운다.
 
+> **이 절은 SG3까지의 목표 계약이다(현재 코드와 다름).** SG1(✅)은 `Row` union(card+group_header)과 `view`를 넣되
+> hit-test는 아직 **고정 높이·count 기반**(`slotAt(y, header, slot_height_px, scroll, row_count)`·`slotTop`·`dragTargetSlot`)을
+> 유지한다(헤더가 없어 충분 — 카드만이면 누적=균일). 아래 **가변 높이 시그니처**(`rowHeight`/`rowTop`/`contentHeight`, `slotAt`이
+> `rows`+두 높이를 받는 형태)와 `onGroupHeader`는 **SG3a/b/c에서** 이 계약으로 이주한다. 즉 아래 코드 스케치는 SG3 완료 시점의 모습이다.
+
 ```zig
 /// 사이드바 화면 한 줄. host가 projectRows로 tabs+마커+search를 이 리스트로 투영한다.
 pub const Row = union(enum) {
@@ -167,6 +172,11 @@ pub fn onGroupHeader(rows: []const Row, row_index: usize) bool;
 한 레이아웃 소스 공유). **베이스/결정**: 브라우저 탭 그룹·VSCode 폴더가 헤더를 얇은 한 줄로 둬 촘촘한 게 접이식 그룹의
 핵심 가치라, 균일 격자(구현 단순)보다 **가변 높이(시각 우선)**를 택했다.
 
+**메트릭 출처(SG3b에서 확정)**: `card_slot_h` = 기존 `props.metrics.sidebar_slot_height_px`(그대로 재사용). `header_row_h` =
+**신규 메트릭** — 헤더 한 줄이므로 `≈ cell_height_px`(+세로 패딩 약간)로 두고 `CellMetrics`에 추가한다(platform이 채움).
+`group_indent_px`(card.depth 들여쓰기 폭) = **신규 spacing 토큰**(`tokens.space`), rich에서 ≈1ch. 셋 다 hit-test·view가
+공유하는 단일 값이라, 값이 흩어지지 않게 한 곳(props/tokens)에서만 정의한다(§5.4 레이아웃 단일 소스).
+
 **파급 — glyph 세로 위치 인코딩(§10 리스크)**: 현재 `coretext_frame_builder.sidebarGlyphRow`의 `slot*32` 인코딩은 `.m`
 렌더러가 `slot*slot_h`로 디코드해 **균일 높이를 가정**한다(단일 출처). 가변 높이면 이 곱셈이 깨지므로 SG3에서 `.m`이
 row별 누적 y(또는 각 row 높이/누적 오프셋 배열)를 받도록 인코딩·디코드를 함께 고쳐야 한다 — 이게 가변 높이의 실제
@@ -180,13 +190,22 @@ row별 누적 y(또는 각 row 높이/누적 오프셋 배열)를 받도록 인�
 ```zig
 /// tabs + 그룹 마커 + 검색 → 표시 행 리스트. recomputeVisibleTabs의 일반화(단일 투영점).
 /// 규칙: self.tabs를 순회하며 (1) group_start 탭에서 group_header row 삽입, (2) 접힌 그룹의 카드는 skip
-///       (단 검색 활성 시 매치 카드는 접힘 무시하고 냄), (3) 검색 미매치 카드는 skip(기존 tabMatchesSearch).
+///       (단 검색 활성 시 매치 카드는 접힘 무시하고 냄), (3) 검색 미매치 카드는 skip(기존 tabMatchesSearch),
+///       (4) 표시 카드가 0개가 된 그룹의 헤더는 아래 "빈 그룹" 규칙, (5) member_count = 표시 카드 수(검색 중=매치 수).
 fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 ```
 
 - `visibleTab`/`displaySlotOf`는 **row↔tab 매핑**으로 흡수(`rows[i].card.tab`). 헤더 row는 tab이 없어 클릭 시 선택이 아니라 **접기 토글**로 분기.
 - `rebuildSidebar`(11773)·per-tab tint/accent 루프는 `self.tabs` 순회 대신 **`sidebar_rows` 순회**로(카드 row만 tint).
 - 세로 스크롤은 **거의 공짜로 흡수** — `sidebar_scroll_offset_px`·`clampSidebarScroll`(11634)이 콘텐츠 높이(row 수 × slot_h)만 보므로 접기로 row 수가 줄면 자동 재clamp(tabs-splits-layout.md ③c). 접힘 토글 시 `rebuildSidebar`가 이 재clamp를 부른다.
+
+**빈 그룹 헤더 규칙(엣지 — §8 검증)**: 그룹의 표시 카드가 0개가 될 때 헤더를 낼지가 두 경우로 갈린다.
+- **접힘으로 카드가 없는 건 정상** → 헤더를 **남긴다**(`▸ name (N)`). 그게 접힘의 목적이다.
+- **검색 매치가 0인 그룹**(그 그룹 어느 카드도 질의에 안 맞음) → 헤더까지 **skip**한다. 그 그룹은 질의와 무관하니 통째 숨겨야
+  "매치만 보인다"가 성립한다(빈 헤더만 덩그러니 뜨는 걸 막음).
+- 정리: **평소** = 접힌 그룹은 헤더만·펼친 그룹은 헤더+카드. **검색 중** = 매치 있는 그룹만 헤더+매치카드로 뜨고, 매치 없는
+  그룹은 헤더째 사라진다. `member_count`는 접힘 배지(`(N)`)용이라 평소엔 **그룹 전체 카드 수**, 검색 중엔 그 그룹이 매치로
+  떠 있을 때의 **매치 수**로 채운다.
 
 ## 7. 인터랙션 (접기 우선)
 
@@ -223,8 +242,9 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
 스냅샷·테스트가 모두 `projectRows` 결과를 본다.
 
 - **컴포넌트 단위(헤드리스)**: `projectRows`가 순수 함수라(입력 tabs/마커/search → Row[]) **헤드리스 단언**이 1급이다:
-  접힘 시 카드 row 제외·헤더 member_count·검색 시 접힘 무시·소속 파생(위 마커)·depth. `slotAt`/`slotTop`을 헤더 섞인
-  row 배열로 확장(기존 `sidebar.zig` 테스트 스타일).
+  접힘 시 카드 row 제외·헤더 member_count·검색 시 접힘 무시·소속 파생(위 마커)·depth·**빈 그룹 규칙**(접힘=헤더만 뜸 /
+  검색 매치 0=헤더째 사라짐). 가변 높이 hit-test(`slotAt`/`rowTop`/`contentHeight`)를 **헤더 섞인 row 배열 + 서로 다른
+  card_slot_h/header_row_h**로 확장해 **누적 y ↔ row** 정합을 단언(카드만이면 누적=균일이라 SG3a 동작 보존도 같은 테스트로).
 - **직렬화 round-trip**: `group-start`·`group-collapsed`가 serialize→parse→serialize 고정점(workspace.zig 기존 테스트 확장).
   하위호환: 두 키 없는 옛 파일이 flat으로 정상 복원(기존 "key-addressed 하위호환" 테스트 확장).
 - **E2E/스냅샷**: 접힌/펼친 사이드바 셀 스냅샷. 헤더 glyph(삼각+이름)·들여쓰기는 macOS 제품 스크린샷으로 고정

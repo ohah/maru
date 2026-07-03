@@ -7571,6 +7571,23 @@ pub const AppSession = struct {
         }
     }
 
+    /// running 에이전트 스피너(사이드바 이퀄라이저 파형) 위상을 한 스텝 진행한다 — **tick()에서 출력과 무관하게 매 tick**
+    /// 호출된다. 커서 blink(updateCursorBlink)와 달리 스피너는 활성 surface의 출력과 무관한 애니메이션이라, 출력 게이트
+    /// (`output>0`이면 resetCursorBlink, else updateCursorBlink)에 얹으면 안 된다 — 연속 출력(SSH firehose·바쁜 원격 TUI)이
+    /// 매 tick 스피너 advance를 굶겨 **다른 탭의 running 에이전트 스피너가 멈추던** 버그의 근본 수정(§10.5 primary). 사이드바에
+    /// **실제로 보이는** 카드(접힘 아님 + 검색 필터 통과) 중 running 에이전트가 있을 때만 위상을 진행하고 사이드바만 부분
+    /// 투영(chrome_dirty) — 접힘·필터아웃·에이전트 없음이면 무동작(idle 재투영 없음). blink(500ms)보다 빠른 별도 위상(≈133ms).
+    fn advanceAgentSpinner(self: *AppSession) void {
+        if (!self.anyAgentRunning()) return; // 보이는 running 에이전트 없음 — 무동작(chrome_dirty 안 세움)
+        self.agent_spin_ticks += 1;
+        if (self.agent_spin_ticks >= self.agentSpinIntervalTicks()) {
+            self.agent_spin_ticks = 0;
+            // 파형 길이로 wrap — u8 자연 wrap(256%14≠0)이면 255→0 경계에서 파형이 튀므로 주기 안에서 순환한다.
+            self.agent_spin_frame = (self.agent_spin_frame + 1) % @as(u8, @intCast(spinner_wave.len));
+            self.chrome_dirty = true; // [A] 사이드바만 부분 투영(sync hold 중에도 진행 + full-grid 재셰이프 회피)
+        }
+    }
+
     /// 커서/오버레이 caret 깜빡임 한 스텝(frame-loop tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
     /// 위상으로 고정한다 — 토글 없으니 idle 재투영도 없다. 오버레이(find·palette)가 열렸으면 커서 blink 설정과 무관
     /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
@@ -7592,9 +7609,9 @@ pub const AppSession = struct {
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
-        // running 스피너: 사이드바에 **실제로 보이는** 카드(접힘 아님 + 검색 필터 통과) 중 running 에이전트가 있을 때만
-        // 위상을 진행한다 — 접힘·필터아웃이면 스피너가 화면에 없으니 매 틱 full-grid 재셰이프는 낭비다(code-review high #1).
-        const spinner_visible = self.anyAgentRunning();
+        // running 스피너 진행은 여기서 하지 않는다 — advanceAgentSpinner가 tick()에서 **출력과 무관하게 매 tick** 돌린다.
+        // 이 함수(updateCursorBlink)는 출력 없는 tick에만 호출되므로(출력 tick은 resetCursorBlink), 스피너를 여기 두면
+        // 연속 출력(SSH firehose 등)이 매 tick 스피너 advance를 굶겨 다른 탭 스피너가 멈추던 버그였다(§10.5 primary).
         // 사이드바 검색 caret도 깜빡인다 — 헤더 frame의 '|' 글자라(rename과 동형) full rebuild가 필요하다.
         // 검색 caret이 '실제로 그려질' 때만 blink로 재투영한다(buildSidebarHeaderDrawList이 caret을 그리는 조건과 동일:
         // 활성 + 접힘 아님 + cols≥10). 안 그러면 활성인 채 사이드바를 10칸 미만으로 드래그하면 안 보이는 caret 때문에 매
@@ -7603,20 +7620,10 @@ pub const AppSession = struct {
             self.cell_width_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // core.preedit로 이미 막지만, 오버레이/rename/검색은 imeComposingActive로 막아야 한다(단일 출처).
-        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !spinner_visible and !sidebar_search) or self.imeComposingActive()) {
+        // 스피너는 이 조건에서 제외한다(advanceAgentSpinner가 별도로 진행) — 커서/텍스트/rename/검색 caret blink만 본다.
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
-        }
-        // running 스피너: blink(500ms)보다 빠른 별도 위상 — 약 133ms마다 프레임 진행 + 사이드바 재투영(파형 진행 보임).
-        if (spinner_visible) {
-            self.agent_spin_ticks += 1;
-            if (self.agent_spin_ticks >= self.agentSpinIntervalTicks()) {
-                self.agent_spin_ticks = 0;
-                // 파형 길이로 wrap — u8 자연 wrap(256%14≠0)이면 255→0 경계에서 파형이 튀므로 주기 안에서 순환한다.
-                self.agent_spin_frame = (self.agent_spin_frame + 1) % @as(u8, @intCast(spinner_wave.len));
-                self.chrome_dirty = true; // [A] 사이드바만 부분 투영(sync hold 중에도 진행 + full-grid 재셰이프 회피)
-
-            }
         }
         const interval = self.blinkIntervalTicks();
         self.blink_ticks += 1;
@@ -10391,6 +10398,9 @@ pub const AppSession = struct {
         // 깜빡임: 출력이 흐르면 보이는 위상으로 리셋(커서가 움직이는 동안 항상 보이게), idle이면 500ms마다 토글.
         // steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다. 오버레이 caret도 같은 위상으로
         // 깜빡이고, suffix-trim(setCursorVisible)이라 재빌드 없이 토글된다(터미널 커서와 같은 메커니즘 재활용).
+        // 스피너는 출력과 무관하게 매 tick 진행한다(출력 게이트 밖) — 연속 출력이 스피너를 굶기던 버그 수정(§10.5).
+        // 커서/텍스트 blink는 출력 시 보이는 위상으로 리셋(resetCursorBlink), idle이면 위상 진행(updateCursorBlink).
+        self.advanceAgentSpinner();
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
@@ -14216,6 +14226,46 @@ test "anyAgentRunning: 펼침+보이는 running=true, 접힘·필터아웃=false
     session.sidebar_collapsed = false;
     session.sidebar_visible_tabs.clearRetainingCapacity(); // 검색 필터로 카드 숨김
     try std.testing.expect(!session.anyAgentRunning()); // 필터아웃 → 카드 없음 → false
+}
+
+test "advanceAgentSpinner: running 에이전트면 출력과 무관하게 위상 진행(출력 게이트 굶김 회귀)" {
+    // 버그(§10.5 primary): 스피너 advance가 updateCursorBlink(출력 없는 tick에만 호출)에 있어, 연속 출력(SSH
+    // firehose 등)이 매 tick 스피너를 굶겨 다른 탭 running 에이전트 스피너가 멈췄다. 픽스로 advanceAgentSpinner를
+    // tick()에서 **출력 게이트 밖**에서 매 tick 돌린다. 이 테스트는 그 함수가 running 에이전트에서 위상을 진행하고
+    // (출력 인자 없음 = 출력 독립), 에이전트/사이드바 없음이면 무동작(idle 재투영 없음)임을 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const interval = session.agentSpinIntervalTicks();
+    const term = session.tabs.items[0].activePane().activeTerm();
+
+    // 에이전트 없음 → interval+1번 돌려도 위상 불변 + chrome_dirty 안 세움(idle 재투영 없음).
+    session.chrome_dirty = false;
+    const f0 = session.agent_spin_frame;
+    var i: u32 = 0;
+    while (i < interval + 1) : (i += 1) session.advanceAgentSpinner();
+    try std.testing.expectEqual(f0, session.agent_spin_frame);
+    try std.testing.expect(!session.chrome_dirty);
+
+    // running 에이전트 + 사이드바에 그 탭 보임 → interval번이면 위상 +1 + chrome_dirty(사이드바 부분 투영 요청).
+    // 출력은 일절 주지 않는다 — advanceAgentSpinner는 출력과 무관하게 진행해야 한다(버그의 핵심).
+    term.agent_state = .running;
+    term.agent_kind = .claude;
+    try session.sidebar_visible_tabs.append(allocator, 0); // 사이드바에 탭0 카드 보임(collapsed/minimal 기본 false)
+    session.chrome_dirty = false;
+    i = 0;
+    while (i < interval) : (i += 1) session.advanceAgentSpinner();
+    try std.testing.expectEqual(@as(u8, (f0 + 1) % @as(u8, @intCast(spinner_wave.len))), session.agent_spin_frame);
+    try std.testing.expect(session.chrome_dirty);
 }
 
 test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 먼저 큐를 드레인" {

@@ -411,9 +411,9 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 
 ### 12.6 시퀀싱 (각 PR green, doc-first)
 
-- **P4-1 — title-generation**: `core.title_generation` atomic + `setTitle`/`dispatchCwd` bump + `syncAutoTitles` 조건부 lock. **독립적·측정 가능**(`.frametime` `titles%` 전후). A의 N-lock 제거.
-- **P4-2 — CoreSnapshot + 활성 state 통합**: `readCoreSnapshot` + B·D·F·J를 단일 이른 lock으로. 게이트·blink·label·색이 스냅샷 소비.
-- **P4-3 — DrawList lock 정리 + imeCursorRect 캐시**: render-prep write(I·E)를 build lock 단일 스코프로 명시 정리 + imeCursorRect를 스냅샷 캐시로(무락 race 정정).
+- **P4-1 — title-generation** ✅(구현): `core.title_generation` atomic + `setWindowTitle`/`dispatchCwd`/RIS bump + `syncAutoTitles` 조건부 lock. **독립적·측정 가능**(`.frametime` `titles%` 전후). A의 N-lock 제거.
+- **P4-2 — CoreSnapshot(활성 state D·B 통합) + imeCursorRect 캐시** ✅(구현): `readActiveSnapshot`이 활성 코어를 한 lock 아래 값 스냅샷으로 복사(sync D + 커서/blink B + 커서 위치). tick의 옛 `sync_view` blk와 `updateCursorBlink`의 자체 lock을 이 단일 lock으로 통합(idle tick 2 lock→1). 커서 위치 캐시(`ime_cursor_row/col`)로 **imeCursorRect의 무락 `core.screen.cursor` 직접 읽기(torn read 잠재 race)를 정정**(P4-3의 imeCursorRect 항을 여기로 합침 — 같은 스냅샷을 공유해 dangling 캐시 회피). **구현 정정**: 원래 P4-2에 넣으려던 F(cell_colors)·J(sticky)는 **project 블록**(투영 tick만)이라 매-tick B·D와 빈도가 달라 함께 접으면 비투영 tick에 헛 read라, 아래 P4-3으로 이동.
+- **P4-3 — project 블록 lock 통합(F·G·I·J)**: `cell_colors`(F)·활성 build renderSnapshot(G)·kitty images+메트릭 주입(I write)·sticky(J)를 **투영 tick의 단일 lock 스코프**로 수렴. **higher-risk**: G(build)는 `coretext_frame_builder`의 per-pane 락 기계와 얽혀 있고, 활성 render 경로 변경은 헤드리스로 완전 검증 불가([[active-surface-render-path-trap]]) — **실기기 스크린샷/실행 검증 필수**라 별개 트랙으로 신중히 착수한다. E(findMatches write)는 이미 그 lock에 있으므로 명시만.
 - 각 PR: `.frametime`으로 활성 코어 tick당 lock 수·`titles`/대기 비중 전후 실측.
 
 ### 12.7 테스트 전략 (§6 선례)

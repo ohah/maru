@@ -1598,6 +1598,11 @@ pub const AppSession = struct {
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
+    // [P4-2/P4-3, §12] 마지막 tick 스냅샷의 터미널 커서 위치(row/col). imeCursorRect가 **무락**으로 이 캐시를 읽어
+    // 후보창 위치(터미널 커서 폴백)를 낸다 — 예전 activeSurfaceConst().core.screen.cursor 무락 직접 읽기의 torn read
+    // 잠재 race를 스냅샷(readActiveSnapshot 단일 lock 아래 복사)으로 대체. 최대 한 프레임 stale(후보창 위치라 무해).
+    ime_cursor_row: u16 = 0,
+    ime_cursor_col: u16 = 0,
     // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). advanceAgentSpinner가 **wall-clock 경과**
     // (agent_spin_last_ns 이후 실경과 ms)로 agent_spin_frame을 진행한다(mod spinner_wave.len=14) — tick 카운트가 아니라
     // 실시간 기준이라 tick rate가 떨어져도(무거운 tick) 위상이 실시간을 따라가 부드럽고, stall 후엔 여러 프레임 catch-up
@@ -7600,20 +7605,15 @@ pub const AppSession = struct {
     /// 커서/오버레이 caret 깜빡임 한 스텝(frame-loop tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
     /// 위상으로 고정한다 — 토글 없으니 idle 재투영도 없다. 오버레이(find·palette)가 열렸으면 커서 blink 설정과 무관
     /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
-    fn updateCursorBlink(self: *AppSession) void {
-        const surface = self.activeSurface();
-        const core = &surface.core;
-        // 코어 읽기(cursor 상태 + viewportHasBlink는 셀 스캔)는 락 아래(docs/io-render-threading.md PR3 —
-        // 리더 core.write와 경합 방지). 커서/blink 조건을 먼저 다 읽고 락을 푼다.
-        surface.lockCore(self.io);
-        // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님).
-        // 모달(anyOverlayOpen)이 열리면 터미널 커서 blink를 멈춘다 — 포커스를 잃은 터미널 커서가 모달 뒤에서 계속
-        // 깜빡이지 않게(find/palette의 입력 caret은 아래 overlay_open이 따로 진행한다). 커서 모양은 unfocusedCursorMode가 hollow로.
-        const cursor_blinks = core.cursor_blink and core.cursor_visible and core.preedit == null and !self.anyOverlayOpen();
-        // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상을 진행한다
-        // (없으면 idle 재투영 없음). blink 글자는 커서/caret과 달리 suffix-trim으로 못 숨겨 full rebuild가 필요하다.
-        const text_blinks = self.appearance.blink_text and core.viewportHasBlink();
-        surface.unlockCore(self.io);
+    fn updateCursorBlink(self: *AppSession, snap: CoreSnapshot) void {
+        // [P4-2, §12] 코어 읽기(cursor 상태 + viewportHasBlink 셀 스캔)는 tick의 readActiveSnapshot이 이미 단일 lock으로
+        // 복사했다 — 여기선 스냅샷 값만 읽어 별도 lock을 안 잡는다(sync 게이트와 lock 통합, 리더 경합 접점 축소).
+        // 커서 자체가 깜빡이는 조건(DECSCUSR blink·표시·조합 아님). 모달(anyOverlayOpen)이 열리면 터미널 커서 blink를
+        // 멈춘다 — 포커스를 잃은 터미널 커서가 모달 뒤에서 계속 깜빡이지 않게. 커서 모양은 unfocusedCursorMode가 hollow로.
+        const cursor_blinks = snap.cursor_blink and snap.cursor_visible and !snap.preedit_present and !self.anyOverlayOpen();
+        // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
+        // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
+        const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;
         const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
@@ -7925,13 +7925,17 @@ pub const AppSession = struct {
         if (overlay_caret) |r| {
             return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
         }
-        const cursor = self.activeSurfaceConst().core.screen.cursor;
+        // [P4-3, §12] 터미널 커서 위치는 tick의 readActiveSnapshot이 단일 lock 아래 복사한 캐시(ime_cursor_row/col)를
+        // **무락**으로 읽는다 — 예전 activeSurfaceConst().core.screen.cursor 무락 직접 읽기는 리더 write와 torn read
+        // 잠재 race였다(값 struct라 크래시는 아니나 한 프레임 잘못된 위치 가능). 캐시는 최대 한 프레임 stale(후보창 위치라 무해).
+        const cur_row = self.ime_cursor_row;
+        const cur_col = self.ime_cursor_col;
         return .{
             // 활성 panel은 자기 rect origin(active_pane_rect.x/y)에서 그려지므로 커서의 스크린 좌표도 그 origin을
             // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 origin만큼 왼쪽/위에 뜬다(pxToCell의 역변환:
             // pxToCell은 빼고, 셀→스크린인 여기선 더한다). 단일 panel이면 origin = (사이드바 폭+padding_x, padding_y).
-            .x = @as(f64, @floatFromInt(self.active_pane_rect.x)) + @as(f64, @floatFromInt(cursor.col)) * cw,
-            .y = @as(f64, @floatFromInt(self.active_pane_rect.y)) + @as(f64, @floatFromInt(cursor.row)) * ch,
+            .x = @as(f64, @floatFromInt(self.active_pane_rect.x)) + @as(f64, @floatFromInt(cur_col)) * cw,
+            .y = @as(f64, @floatFromInt(self.active_pane_rect.y)) + @as(f64, @floatFromInt(cur_row)) * ch,
             .w = cw,
             .h = ch,
         };
@@ -10333,6 +10337,46 @@ pub const AppSession = struct {
         }
     }
 
+    /// [P4-2, §12] 활성 surface의 per-tick 코어 read를 tick당 **단일 lock**으로 통합한 값 스냅샷. sync 게이트(D)와 idle
+    /// 커서 blink(B)가 각자 잡던 lock을 하나로 합친다. 전부 POD 값 복사(alias 없음)라 lock 밖에서 안전하게 소비한다.
+    /// 필드 기본값은 테스트가 부분 리터럴로 구성하기 위한 것(런타임은 readActiveSnapshot이 전부 채운다).
+    const CoreSnapshot = struct {
+        // sync 게이트(D): shouldProjectFrame·logSyncGateDiag가 소비.
+        sync_output: bool = false,
+        view_offset: usize = 0,
+        bsu: u64 = 0,
+        esu: u64 = 0,
+        // 커서/blink(B): idle tick의 updateCursorBlink가 소비. viewport_has_blink는 need_blink_scan일 때만 실제 셀 스캔.
+        cursor_blink: bool = false,
+        cursor_visible: bool = false,
+        preedit_present: bool = false,
+        viewport_has_blink: bool = false,
+        // 커서 위치: imeCursorRect(P4-3)가 무락 캐시로 소비(터미널 커서 폴백 후보창 위치).
+        cursor_row: u16 = 0,
+        cursor_col: u16 = 0,
+    };
+
+    /// 활성 surface 코어를 한 번 lock해 per-tick read를 CoreSnapshot으로 복사한다(§12 P4-2). `need_blink_scan`이 true일
+    /// 때만 viewportHasBlink(셀 스캔)를 수행한다 — 출력 tick이나 blink_text off면 스캔 불요(updateCursorBlink 미호출).
+    fn readActiveSnapshot(self: *AppSession, need_blink_scan: bool) CoreSnapshot {
+        const s = self.activeSurface();
+        s.lockCore(self.io);
+        defer s.unlockCore(self.io);
+        const core = &s.core;
+        return .{
+            .sync_output = core.sync_output,
+            .view_offset = core.view_offset,
+            .bsu = core.sync_bsu_count,
+            .esu = core.sync_esu_count,
+            .cursor_blink = core.cursor_blink,
+            .cursor_visible = core.cursor_visible,
+            .preedit_present = core.preedit != null,
+            .viewport_has_blink = need_blink_scan and core.viewportHasBlink(),
+            .cursor_row = core.screen.cursor.row,
+            .cursor_col = core.screen.cursor.col,
+        };
+    }
+
     pub fn tick(self: *AppSession) !FrameSummary {
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -10419,7 +10463,12 @@ pub const AppSession = struct {
         // 스피너는 출력과 무관하게 매 tick 진행한다(출력 게이트 밖) — 연속 출력이 스피너를 굶기던 버그 수정(§10.5).
         // 커서/텍스트 blink는 출력 시 보이는 위상으로 리셋(resetCursorBlink), idle이면 위상 진행(updateCursorBlink).
         self.advanceAgentSpinner();
-        if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink();
+        // [P4-2, §12] 활성 surface per-tick read를 단일 lock 스냅샷으로 통합 — sync 게이트(D)·idle blink(B)·imeCursorRect(P4-3)
+        // 커서 캐시가 모두 이 한 lock을 공유한다. viewportHasBlink 셀 스캔은 idle+blink_text일 때만(출력 tick은 updateCursorBlink 미호출).
+        const core_snap = self.readActiveSnapshot(drain_summary.output_events == 0 and self.appearance.blink_text);
+        self.ime_cursor_row = core_snap.cursor_row; // imeCursorRect(P4-3)가 무락 소비하는 마지막 알려진 터미널 커서 위치(한 프레임 stale 허용)
+        self.ime_cursor_col = core_snap.cursor_col;
+        if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
         // 활성 surface가 직전 tick과 바뀌었으면 last_rendered_esu 기준이 다른 surface 것이라 esu 비교가 무의미하다
@@ -10436,22 +10485,16 @@ pub const AppSession = struct {
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
         // reset)로 sync가 꺼지면 다음 tick에 누적 출력을 한 frame으로 투영한다(render skip과 동형). 단 ESU가
         // 영영 안 오면 freeze되므로 hold가 sync_timeout_ms를 넘으면 강제 해제한다(아래 sync_blocks).
-        const sync_view = blk: {
-            // sync_output(DECSET 2026)·view_offset은 리더 core.write/scroll이 set/clear — 같은 락 아래 읽는다
-            // (docs/io-render-threading.md PR3). view_offset은 스크롤 리페인트를 sync hold에서 빼는 데 쓴다.
-            const s = self.activeSurface();
-            s.lockCore(self.io);
-            defer s.unlockCore(self.io);
-            break :blk .{ .sync = s.core.sync_output, .view_offset = s.core.view_offset, .bsu = s.core.sync_bsu_count, .esu = s.core.sync_esu_count };
-        };
-        const sync_active = sync_view.sync;
-        const active_view_offset = sync_view.view_offset;
+        // [P4-2, §12] sync 게이트 read는 위 readActiveSnapshot이 이미 단일 lock으로 복사했다(옛 별도 sync_view blk 제거).
+        // sync_output(DECSET 2026)·view_offset은 리더가 set/clear하지만 스냅샷이 그 lock 아래 값을 떠 왔다.
+        const sync_active = core_snap.sync_output;
+        const active_view_offset = core_snap.view_offset;
         // esu_advanced: 직전 투영 이후 리더가 ESU(프레임 완성)를 처리했는가. sync hold를 해제하는 edge이자
         // freeze-timeout(sync_hold_ticks) 리셋 조건이다 — 완성 ESU는 스트림이 건강하다는 증거이므로 hold를
         // 리셋해, 지속적 2026 애니메이션에서 hold가 계속 쌓여 timeout 도달 시 sync_blocks가 영구 해제되며
         // tearing guard가 무력화되는 걸 막는다(code-review [3]). ESU가 영영 안 오는 진짜 freeze는 esu가 안 늘어
         // 리셋되지 않으므로 timeout 강제 해제(freeze 복구)가 그대로 유지된다.
-        const esu_advanced = sync_view.esu != self.last_rendered_esu;
+        const esu_advanced = core_snap.esu != self.last_rendered_esu;
         if (sync_active and !esu_advanced) {
             self.sync_hold_ticks +|= 1;
         } else {
@@ -10466,7 +10509,7 @@ pub const AppSession = struct {
         // 투영 결정 직후 sync 게이트 상태를 관측 로그로 남긴다(MARU_DEBUG 전용, 아니면 즉시 return). esu_advanced·
         // view_scrolled(shouldProjectFrame이 본 것과 동일 입력)를 실어, 분석기가 active 중 투영을 esu_edge vs scroll로
         // 추론 없이 가른다(로그만으론 재구성 불가한 게이트 baseline을 진실로 대체 — 리뷰 반영).
-        self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, esu_advanced, active_view_offset != self.last_rendered_view_offset, sync_view.bsu, sync_view.esu, active_view_offset);
+        self.logSyncGateDiag(drain_summary.output_events, sync_active, will_project, project_chrome, esu_advanced, active_view_offset != self.last_rendered_view_offset, core_snap.bsu, core_snap.esu, active_view_offset);
         if (ft_on) ft_project = std.Io.Clock.awake.now(self.io).nanoseconds; // mid(bookkeeping+sync_view lock) 끝 = project 시작
         if (will_project) {
             self.chrome_dirty = false; // 전체 투영이 사이드바까지 그리므로 chrome dirty 소진
@@ -10530,7 +10573,7 @@ pub const AppSession = struct {
             // ==null)면 완성 프레임을 안 그렸으니 last_rendered_esu를 올리지 않아, 다음 tick에 esu_advanced로 재시도해
             // 완성 프레임을 drop하지 않는다. 비-macOS(fake backend)는 tickAfterDrain이 프레임을 만드므로 갱신한다.
             // (view_offset은 gate-time 폴백이 OOM retry spin 방지라 성공/실패 무관하게 갱신 — 정당한 차이.)
-            if (builtin.os.tag != .macos or rendered_view_offset != null) self.last_rendered_esu = sync_view.esu;
+            if (builtin.os.tag != .macos or rendered_view_offset != null) self.last_rendered_esu = core_snap.esu;
 
             // Find 열린 채(또는 ⌘G 닫힘-네비 중) 새 출력이 들어오면 매치 절대 좌표가 어긋날 수 있다(스크롤백
             // eviction). 재검색해 하이라이트를 최신으로 유지하되 현재 인덱스만 clamp하고 스크롤은 하지 않는다.
@@ -15181,12 +15224,12 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
 
     // 기본(DECSCUSR 1 = 깜빡 block, 페이드 끔): interval 틱마다 즉각 토글. rebuild(metal_dirty) 없이 generation만(suffix 불투명도).
     var i: u32 = 0;
-    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(!session.blink_visible);
     try std.testing.expect(!session.metal_dirty);
     try std.testing.expectEqual(@as(u64, 1), session.metal_buffer.generation);
     try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli); // off 위상 = 완전히 사라짐(페이드 끔이라 즉각)
-    while (i < session.blinkIntervalTicks() * 2) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks() * 2) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible);
 
     // 활동(입력/출력) 리셋: off 위상이어도 즉시 보이게.
@@ -15200,7 +15243,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     try tab_surface.core.write("\x1b[2 q");
     session.blink_visible = true;
     i = 0;
-    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible);
 
     // 오버레이(find) 열림: steady 커서여도 caret은 깜빡인다(overlay_open이라 토글 — suffix=오버레이 caret). 회귀:
@@ -15209,7 +15252,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     session.blink_visible = true;
     session.blink_ticks = 0;
     i = 0;
-    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks()) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(!session.blink_visible); // caret이 off 위상으로 토글됨
     session.chrome_host.find.open = false;
 
@@ -15218,7 +15261,7 @@ test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오�
     try tab_surface.core.setPreedit("\xec\x95\x88");
     session.blink_visible = true;
     i = 0;
-    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink();
+    while (i < session.blinkIntervalTicks() * 3) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expect(session.blink_visible);
     try tab_surface.core.setPreedit("");
 }
@@ -15277,18 +15320,18 @@ test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투�
 
     // hold 구간(첫 19틱, blink_ticks 1..19 < hold 20): 완전 표시 유지 — 값 불변이라 generation 안 오름(idle 절전).
     var i: u32 = 0;
-    while (i < 19) : (i += 1) session.updateCursorBlink();
+    while (i < 19) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false));
     try std.testing.expectEqual(@as(u32, 1000), session.metal_buffer.cursor_fade_milli);
     try std.testing.expectEqual(@as(u64, 0), session.metal_buffer.generation);
 
     // 램프 첫 틱(blink_ticks 20 = hold 경계): 1000→900으로 내려가 중간값이 생기고(하드 토글 아님) generation이 오른다.
-    session.updateCursorBlink();
+    session.updateCursorBlink(session.readActiveSnapshot(false));
     i += 1;
     const mid = session.metal_buffer.cursor_fade_milli;
     try std.testing.expect(mid > 0 and mid < 1000); // 중간 불투명도 = 부드러운 페이드 증거
     try std.testing.expectEqual(@as(u32, 900), mid);
     try std.testing.expectEqual(@as(u64, 1), session.metal_buffer.generation);
-    while (i < 30) : (i += 1) session.updateCursorBlink(); // 반주기 끝까지(blink_ticks 21..30, 마지막에 flip)
+    while (i < 30) : (i += 1) session.updateCursorBlink(session.readActiveSnapshot(false)); // 반주기 끝까지(blink_ticks 21..30, 마지막에 flip)
     try std.testing.expect(!session.blink_visible); // off 위상으로 토글
     try std.testing.expectEqual(@as(u32, 0), session.metal_buffer.cursor_fade_milli); // 완전히 사라짐
     // 램프 10틱(blink_ticks 20..29) 동안 매 틱 값이 바뀌어 generation이 10 올랐다(하드 토글이면 1). 재빌드(metal_dirty)는
@@ -24106,7 +24149,17 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
 
     const core = &tab_surface.core;
+    // [P4-3] imeCursorRect는 tick의 스냅샷이 캐시한 ime_cursor_row/col을 읽는다(무락 race 정정) — 테스트도 tick처럼
+    // core write 후 readActiveSnapshot으로 캐시를 갱신한 뒤 imeCursorRect를 호출한다(작은 헬퍼로 반복 축약).
+    const refreshImeCursor = struct {
+        fn f(s: *AppSession) void {
+            const snap = s.readActiveSnapshot(false);
+            s.ime_cursor_row = snap.cursor_row;
+            s.ime_cursor_col = snap.cursor_col;
+        }
+    }.f;
     try core.write("ab"); // 커서가 (0,2)로
+    refreshImeCursor(&session);
     const r = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 16), r.x); // col 2 * 8
     try std.testing.expectEqual(@as(f64, 0), r.y); // row 0 * 16
@@ -24114,6 +24167,7 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     try std.testing.expectEqual(@as(f64, 16), r.h);
 
     try core.write("\r\nXY"); // 둘째 줄로
+    refreshImeCursor(&session);
     const r2 = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 16), r2.x); // col 2
     try std.testing.expectEqual(@as(f64, 16), r2.y); // row 1 * 16
@@ -24124,6 +24178,38 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     const r3 = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 24 + 16), r3.x); // origin_x(24) + col 2 * 8
     try std.testing.expectEqual(@as(f64, 32 + 16), r3.y); // origin_y(32) + row 1 * 16
+}
+
+test "readActiveSnapshot: 활성 코어 sync/커서/위치를 단일 lock 값 스냅샷으로(P4-2)" {
+    // §12 P4-2: tick당 흩어진 활성 코어 read(sync 게이트 D·커서 blink B·커서 위치)를 한 lock으로 통합한 값 스냅샷.
+    // 이 테스트는 그 스냅샷이 코어 상태(sync_output·bsu/esu·커서 row/col)를 정확히 뜨는지, need_blink_scan 게이트로
+    // viewportHasBlink 스캔을 조건화하는지 고정한다.
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io();
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
+    defer tab_surface.deinit();
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+    const core = &tab_surface.core;
+
+    // sync(2026) BSU + 커서 이동 → sync_output=true, bsu=1, 커서 (0,3).
+    try core.write("\x1b[?2026h");
+    try core.write("abc");
+    const s1 = session.readActiveSnapshot(true);
+    try std.testing.expect(s1.sync_output);
+    try std.testing.expectEqual(@as(u64, 1), s1.bsu);
+    try std.testing.expectEqual(@as(u16, 0), s1.cursor_row);
+    try std.testing.expectEqual(@as(u16, 3), s1.cursor_col);
+    try std.testing.expect(!s1.viewport_has_blink); // 이 화면엔 SGR 5 blink 셀 없음
+
+    // ESU → sync off, esu=1. 커서 위치·visible도 반영.
+    try core.write("\x1b[?2026l");
+    const s2 = session.readActiveSnapshot(false);
+    try std.testing.expect(!s2.sync_output);
+    try std.testing.expectEqual(@as(u64, 1), s2.esu);
+    try std.testing.expect(s2.cursor_visible);
+    try std.testing.expect(!s2.viewport_has_blink); // need_blink_scan=false → 스캔 자체를 안 함
 }
 
 test "pxToCell subtracts the active pane origin so clicks map to that pane's columns and rows" {

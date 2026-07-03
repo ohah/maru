@@ -193,9 +193,12 @@ pub fn dispatchCwd(self: *TerminalCore, body: []const u8) void {
     const raw_path = authority_and_path[slash..];
     if (raw_path.len == 0) return;
     const decoded = percentDecodeAlloc(self, raw_path) catch return; // OOM/실패면 기존 cwd 유지
+    // cwd가 **실제로 바뀔 때만** title_generation을 올린다 — 셸 통합(VTE/iTerm precmd)은 cd 안 해도 매 프롬프트 OSC 7을
+    // 동일 경로로 재보고하므로, 무조건 bump하면 매 프롬프트 syncAutoTitles가 헛 lock+복사해 P4-1을 무력화한다(code-review [0]).
+    const cwd_changed = if (self.cwd) |old| !std.mem.eql(u8, old, decoded) else true;
     if (self.cwd) |old| self.allocator.free(old);
     self.cwd = decoded;
-    self.bumpTitleGeneration(); // cwd 변경 — title이 null이면 windowTitle(cwd basename)이 바뀌므로 라벨 재sync 유도(P4-1, §12)
+    if (cwd_changed) self.bumpTitleGeneration(); // title이 null이면 windowTitle(cwd basename)이 바뀌므로 라벨 재sync 유도(P4-1, §12)
     self.recordShellEvent(.cwd_changed); // 값은 currentCwd()가 권위 — 이벤트는 경계만 표시(recordShellEvent: core, pub)
 }
 

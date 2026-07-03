@@ -1598,11 +1598,6 @@ pub const AppSession = struct {
     // PaneFrame.cursor라 setCursorVisible(suffix-trim)이 재빌드 없이 토글한다(터미널 커서와 동일 경로 재활용).
     blink_visible: bool = true,
     blink_ticks: u32 = 0,
-    // [P4-2/P4-3, §12] 마지막 tick 스냅샷의 터미널 커서 위치(row/col). imeCursorRect가 **무락**으로 이 캐시를 읽어
-    // 후보창 위치(터미널 커서 폴백)를 낸다 — 예전 activeSurfaceConst().core.screen.cursor 무락 직접 읽기의 torn read
-    // 잠재 race를 스냅샷(readActiveSnapshot 단일 lock 아래 복사)으로 대체. 최대 한 프레임 stale(후보창 위치라 무해).
-    ime_cursor_row: u16 = 0,
-    ime_cursor_col: u16 = 0,
     // 에이전트 running 스피너(상태줄 "▁▅▇▃ 진행중" codex식 이퀄라이저 파형). advanceAgentSpinner가 **wall-clock 경과**
     // (agent_spin_last_ns 이후 실경과 ms)로 agent_spin_frame을 진행한다(mod spinner_wave.len=14) — tick 카운트가 아니라
     // 실시간 기준이라 tick rate가 떨어져도(무거운 tick) 위상이 실시간을 따라가 부드럽고, stall 후엔 여러 프레임 catch-up
@@ -7925,11 +7920,19 @@ pub const AppSession = struct {
         if (overlay_caret) |r| {
             return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
         }
-        // [P4-3, §12] 터미널 커서 위치는 tick의 readActiveSnapshot이 단일 lock 아래 복사한 캐시(ime_cursor_row/col)를
-        // **무락**으로 읽는다 — 예전 activeSurfaceConst().core.screen.cursor 무락 직접 읽기는 리더 write와 torn read
-        // 잠재 race였다(값 struct라 크래시는 아니나 한 프레임 잘못된 위치 가능). 캐시는 최대 한 프레임 stale(후보창 위치라 무해).
-        const cur_row = self.ime_cursor_row;
-        const cur_col = self.ime_cursor_col;
+        // [P4-3, §12] 터미널 커서 위치를 **활성 surface 코어에서 lockCore 아래** 읽는다 — 예전 무락 직접
+        // (core.screen.cursor) 읽기는 리더 write와 torn read 잠재 race였다(값 struct라 크래시는 아니나 한 프레임 잘못된
+        // 위치 가능). imeCursorRect는 IME 후보창 질의 시에만(조합 중) 불리는 event-driven 경로라 per-tick 아님 — 여기 lock은
+        // 경합/비용 무관하고, **같은 활성 surface**에서 origin(active_pane_rect)과 커서를 함께 잡아 팬 전환 시점 차도 없다
+        // (스냅샷 캐시는 active_pane_rect가 동기 갱신인데 캐시는 per-tick이라 전환 한 프레임 오위치를 냈다 — code-review [2]).
+        const cursor = blk: {
+            const s = self.activeSurface();
+            s.lockCore(self.io);
+            defer s.unlockCore(self.io);
+            break :blk s.core.screen.cursor;
+        };
+        const cur_row = cursor.row;
+        const cur_col = cursor.col;
         return .{
             // 활성 panel은 자기 rect origin(active_pane_rect.x/y)에서 그려지므로 커서의 스크린 좌표도 그 origin을
             // 더해야 한다 — 안 더하면 후보창이 실제 커서보다 origin만큼 왼쪽/위에 뜬다(pxToCell의 역변환:
@@ -10236,15 +10239,21 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized) continue;
-                    const gen = term.surface.core.title_generation.load(.acquire);
+                    const gen = term.surface.core.title_generation.load(.monotonic);
                     if (gen == term.last_title_gen) continue; // 제목/cwd 미변경 — lock·복사 skip
                     term.surface.lockCore(self.io);
                     defer term.surface.unlockCore(self.io);
                     const live = term.surface.core.windowTitle();
                     term.auto_title.clearRetainingCapacity();
-                    if (live.len > 0) term.auto_title.appendSlice(self.allocator, live) catch {};
+                    // 복사 성공(빈 제목=성공적 폴백 포함)일 때만 last_title_gen을 올린다 — OOM으로 append가 실패하면
+                    // 세대를 안 올려 **다음 tick 재시도**한다(예전 매-tick 복사의 self-heal 보존; code-review [1]). 안 그러면
+                    // 한 번의 transient OOM으로 라벨이 영구 stuck(같은 gen이라 skip)돼 static surface.title로 고정된다.
+                    const copied = if (live.len > 0) blk: {
+                        term.auto_title.appendSlice(self.allocator, live) catch break :blk false;
+                        break :blk true;
+                    } else true;
                     // lock hold 중엔 리더가 못 bump(같은 lock 대기) → 이 값이 방금 복사한 제목의 세대. 다음 tick 비교 기준.
-                    term.last_title_gen = term.surface.core.title_generation.load(.acquire);
+                    if (copied) term.last_title_gen = term.surface.core.title_generation.load(.monotonic);
                 }
             }
         }
@@ -10339,7 +10348,8 @@ pub const AppSession = struct {
 
     /// [P4-2, §12] 활성 surface의 per-tick 코어 read를 tick당 **단일 lock**으로 통합한 값 스냅샷. sync 게이트(D)와 idle
     /// 커서 blink(B)가 각자 잡던 lock을 하나로 합친다. 전부 POD 값 복사(alias 없음)라 lock 밖에서 안전하게 소비한다.
-    /// 필드 기본값은 테스트가 부분 리터럴로 구성하기 위한 것(런타임은 readActiveSnapshot이 전부 채운다).
+    /// 필드 기본값(=0/false)은 값 타입의 zero-init 편의일 뿐이다 — 런타임 생성은 readActiveSnapshot 한 곳뿐이고 모든
+    /// 필드를 채운다(부분 리터럴 생성처는 없음). 새 필드를 추가하면 readActiveSnapshot에도 반드시 채워라(기본값이 미설정을 가릴 수 있음).
     const CoreSnapshot = struct {
         // sync 게이트(D): shouldProjectFrame·logSyncGateDiag가 소비.
         sync_output: bool = false,
@@ -10351,9 +10361,6 @@ pub const AppSession = struct {
         cursor_visible: bool = false,
         preedit_present: bool = false,
         viewport_has_blink: bool = false,
-        // 커서 위치: imeCursorRect(P4-3)가 무락 캐시로 소비(터미널 커서 폴백 후보창 위치).
-        cursor_row: u16 = 0,
-        cursor_col: u16 = 0,
     };
 
     /// 활성 surface 코어를 한 번 lock해 per-tick read를 CoreSnapshot으로 복사한다(§12 P4-2). `need_blink_scan`이 true일
@@ -10372,8 +10379,6 @@ pub const AppSession = struct {
             .cursor_visible = core.cursor_visible,
             .preedit_present = core.preedit != null,
             .viewport_has_blink = need_blink_scan and core.viewportHasBlink(),
-            .cursor_row = core.screen.cursor.row,
-            .cursor_col = core.screen.cursor.col,
         };
     }
 
@@ -10463,11 +10468,9 @@ pub const AppSession = struct {
         // 스피너는 출력과 무관하게 매 tick 진행한다(출력 게이트 밖) — 연속 출력이 스피너를 굶기던 버그 수정(§10.5).
         // 커서/텍스트 blink는 출력 시 보이는 위상으로 리셋(resetCursorBlink), idle이면 위상 진행(updateCursorBlink).
         self.advanceAgentSpinner();
-        // [P4-2, §12] 활성 surface per-tick read를 단일 lock 스냅샷으로 통합 — sync 게이트(D)·idle blink(B)·imeCursorRect(P4-3)
-        // 커서 캐시가 모두 이 한 lock을 공유한다. viewportHasBlink 셀 스캔은 idle+blink_text일 때만(출력 tick은 updateCursorBlink 미호출).
+        // [P4-2, §12] 활성 surface per-tick read를 단일 lock 스냅샷으로 통합 — sync 게이트(D)와 idle blink(B)가 이 한
+        // lock을 공유한다. viewportHasBlink 셀 스캔은 idle+blink_text일 때만(출력 tick은 updateCursorBlink 미호출).
         const core_snap = self.readActiveSnapshot(drain_summary.output_events == 0 and self.appearance.blink_text);
-        self.ime_cursor_row = core_snap.cursor_row; // imeCursorRect(P4-3)가 무락 소비하는 마지막 알려진 터미널 커서 위치(한 프레임 stale 허용)
-        self.ime_cursor_col = core_snap.cursor_col;
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
@@ -15014,6 +15017,7 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘다 (audit MEDIUM)" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -15049,6 +15053,7 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -15103,6 +15108,7 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     // 8콜이면 옛 모델은 8줄(과속)이지만 ms 게이트는 1~2줄에 그친다.
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -15203,6 +15209,7 @@ test "blinkIntervalTicks: cursor.blink-interval-ms를 host frame-loop 틱으로 
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -15296,6 +15303,7 @@ test "cursorFadeMilliForPhase: 반주기 끝에서 대칭 램프(사라짐 1000�
 test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투명도를 램프(중간값 존재)·램프 중 매 틱 generation↑·재빌드 없음" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -21553,9 +21561,12 @@ test "P4-1 title-generation: syncAutoTitles가 제목 미변경 tick에서 lock/
     defer session.deinit();
     const term = session.tabs.items[0].activePane().activeTerm();
 
-    // 초기: generation 0 == last_title_gen 0 → skip(windowTitle 빈, auto_title 빈).
+    // 초기 상태 확인(gen 0 == last 0). 주의: auto_title가 빈 것만으론 skip을 **증명하지 못한다** — skip이 없어도
+    // windowTitle()이 빈값(title/cwd 미설정)이라 복사 결과가 똑같이 빈 것이라서다(code-review [4]). 진짜 skip 증명은
+    // 아래 SENTINEL 단계(제목 있는 상태에서 미변경 tick이 재복사 안 함)가 한다. 여기선 초기 세대만 기록해 둔다.
     session.syncAutoTitles();
     try std.testing.expectEqual(@as(usize, 0), term.auto_title.items.len);
+    try std.testing.expectEqual(@as(u32, 0), term.last_title_gen); // 아직 아무 제목도 안 붙음
 
     // 제목 설정 → generation bump → 복사.
     try term.surface.core.write("\x1b]2;claude\x1b\\");
@@ -23631,6 +23642,7 @@ test "closeTab tears down a tab and reselects, last tab closes the session" {
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -24132,6 +24144,7 @@ test "configPath caches the resolved config path (single alloc, freed in deinit)
 test "imeCursorRect returns the cursor cell rect in backing px for IME candidate placement" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io(); // imeCursorRect가 커서를 lockCore 아래 읽음(P4-3)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 10, .rows = 5 });
     defer tab_surface.deinit();
     session.surface_initialized = true;
@@ -24149,17 +24162,9 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
 
     const core = &tab_surface.core;
-    // [P4-3] imeCursorRect는 tick의 스냅샷이 캐시한 ime_cursor_row/col을 읽는다(무락 race 정정) — 테스트도 tick처럼
-    // core write 후 readActiveSnapshot으로 캐시를 갱신한 뒤 imeCursorRect를 호출한다(작은 헬퍼로 반복 축약).
-    const refreshImeCursor = struct {
-        fn f(s: *AppSession) void {
-            const snap = s.readActiveSnapshot(false);
-            s.ime_cursor_row = snap.cursor_row;
-            s.ime_cursor_col = snap.cursor_col;
-        }
-    }.f;
+    // [P4-3] imeCursorRect는 활성 surface 커서를 lockCore 아래 live로 읽는다(무락 torn read race 정정) — core write가
+    // 즉시 반영된다(캐시 없음).
     try core.write("ab"); // 커서가 (0,2)로
-    refreshImeCursor(&session);
     const r = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 16), r.x); // col 2 * 8
     try std.testing.expectEqual(@as(f64, 0), r.y); // row 0 * 16
@@ -24167,7 +24172,6 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     try std.testing.expectEqual(@as(f64, 16), r.h);
 
     try core.write("\r\nXY"); // 둘째 줄로
-    refreshImeCursor(&session);
     const r2 = session.imeCursorRect();
     try std.testing.expectEqual(@as(f64, 16), r2.x); // col 2
     try std.testing.expectEqual(@as(f64, 16), r2.y); // row 1 * 16
@@ -24199,11 +24203,9 @@ test "readActiveSnapshot: 활성 코어 sync/커서/위치를 단일 lock 값 �
     const s1 = session.readActiveSnapshot(true);
     try std.testing.expect(s1.sync_output);
     try std.testing.expectEqual(@as(u64, 1), s1.bsu);
-    try std.testing.expectEqual(@as(u16, 0), s1.cursor_row);
-    try std.testing.expectEqual(@as(u16, 3), s1.cursor_col);
     try std.testing.expect(!s1.viewport_has_blink); // 이 화면엔 SGR 5 blink 셀 없음
 
-    // ESU → sync off, esu=1. 커서 위치·visible도 반영.
+    // ESU → sync off, esu=1. 커서 visible도 반영.
     try core.write("\x1b[?2026l");
     const s2 = session.readActiveSnapshot(false);
     try std.testing.expect(!s2.sync_output);

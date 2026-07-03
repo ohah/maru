@@ -42,7 +42,7 @@ pub const render_frame_rate_max: u32 = 120;
 /// GUI 폰트 피커가 키보드(←→)로 순회하는 **번들 폰트 패밀리 목록**(docs/font-strategy.md §번들 폰트). 앱에 동봉돼
 /// 항상 선택 가능한 패밀리만 둔다 — `assets/fonts/<Family>/`·docs/third-party-licenses.md와 **수동 동기화**한다(comptime이
 /// TTF name 테이블을 못 읽어 디렉터리명에서 패밀리명을 자동 도출할 수 없다). 사용자는 이 목록 밖 시스템/직접입력 폰트도
-/// `font.family`에 그대로 쓸 수 있다(피커에서 Enter로 직접 입력 — docs/config-gui.md). 새 번들 폰트를 추가하면 이 목록 +
+/// `font.family`에 그대로 쓸 수 있다(폰트 드롭다운 팝업의 **"직접 입력…"** 항목을 고르면 인라인 편집이 열려 임의 폰트명을 타이핑 — docs/config-gui.md). 새 번들 폰트를 추가하면 이 목록 +
 /// 위 두 문서를 함께 갱신한다. 첫 항목은 config 기본값(FontConfig.family)과 일치시킨다.
 pub const bundled_font_families = [_][]const u8{
     "JetBrains Mono",

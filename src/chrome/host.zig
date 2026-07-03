@@ -48,9 +48,9 @@ pub const HostAction = union(enum) {
     settings_dropdown_accept, // 세팅 드롭다운 팝업 Enter/항목 클릭 — platform이 settings.dropdown.selected 변형을 set + 팝업 닫기
     settings_dropdown_preview, // 세팅 드롭다운 팝업 ↑↓ — platform이 highlighted 변형을 **라이브 적용**(팝업 유지 — 바로 반영)
     settings_dropdown_cancel, // 세팅 드롭다운 팝업 Esc/바깥 클릭 — platform이 settings.dropdown.original 변형으로 복원(프리뷰 되돌림) + 적용
-    settings_slider_set, // (deprecated) 세팅 슬라이더 — 입력 박스 전환으로 미방출. exhaustiveness 유지용
-    settings_adjust_left, // 세팅 행 ← — platform이 rows[selected](slider) 한 스텝 감소(toggle이면 무시)
-    settings_adjust_right, // 세팅 행 → — platform이 한 스텝 증가
+    settings_slider_set, // (deprecated) 슬라이더 제거로 미방출 — dispatch exhaustiveness 유지용(dead)
+    settings_adjust_left, // (deprecated) 슬라이더 ← 스텝 제거로 미방출 — 숫자는 입력 박스, ←는 영역 포커스 이동(dead)
+    settings_adjust_right, // (deprecated) 슬라이더 → 스텝 제거로 미방출 — 숫자는 입력 박스, →는 영역 포커스 이동(dead)
     settings_selection_changed, // 세팅 행 ↑↓/행 클릭 — platform이 재렌더(부수효과 없음)
     settings_section_changed, // 세팅 좌측 네비 클릭 — platform이 새 섹션 필드 수 주입(refreshSettingsFieldCount) + 재렌더
     settings_text_commit, // 세팅 text 행 인라인 편집 Enter — platform이 editText()→config arena dupe→setText + 적용

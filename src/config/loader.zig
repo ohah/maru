@@ -1787,23 +1787,29 @@ test "parse: theme.preset supports all named presets with correct palettes; ligh
     try std.testing.expectEqual(terminal.Rgb{ .r = 0xef, .g = 0xf1, .b = 0xf5 }, ra.theme.background);
     try std.testing.expectEqual(terminal.Rgb{ .r = 0xe6, .g = 0xe9, .b = 0xef }, ra.theme.sidebar_background);
 
-    // dark_pink: light-pink-theme의 다크 변형. **다크 프리셋 관례를 지킨다** — sidebar_*=null(배경 파생),
-    // search_match*=미명시(maru 다크 앰버 유지). 팔레트는 구문·브래킷 색에서 파생(clean-room). 라이트 sibling(light_pink)과
-    // 대비되는 규율(사이드바 명시 안 함·검색 앰버 유지)을 회귀 가드로 못박는다.
+    // dark_pink: light-pink-theme의 다크 변형. **은은한 다크 로즈**(사용자 피드백으로 톤다운 — 진한 다크 로즈에서 옅은 모브로).
+    // 배경/전경 로즈 캐스트 + 커서·선택·사이드바·accent를 소프트 핑크로. accent(탭/포커스 언더바)가 테마색(#ff9ec9)임을 가드 —
+    // maru 앰버 고정이 아니라 프리셋별 시그니처. search_match*만 미명시(maru 다크 앰버 — find는 핑크 크롬과 대비). 회귀 가드.
     var dp = try parse(std.testing.allocator, "theme.preset = dark-pink");
     defer dp.deinit();
-    try std.testing.expectEqualStrings("#1e1e1e", dp.config.theme.background); // editor.background
-    try std.testing.expectEqualStrings("#d4d4d4", dp.config.theme.foreground); // editor.foreground
-    try std.testing.expectEqualStrings("#444242", dp.config.theme.selection); // editor.selectionBackground
-    try std.testing.expect(dp.config.theme.sidebar_background == null); // 다크 → 사이드바 파생(명시 안 함)
-    try std.testing.expectEqualStrings("#554a1a", dp.config.theme.search_match); // 다크 → maru 기본 앰버 유지(override 안 함)
+    try std.testing.expectEqualStrings("#282c34", dp.config.theme.background); // 고스티 실제 배경색(로즈 틴트 없이)
+    try std.testing.expectEqualStrings("#ecdce4", dp.config.theme.foreground); // 로즈-화이트
+    try std.testing.expectEqualStrings("#f4a8c9", dp.config.theme.cursor); // 파스텔 핑크 커서(accent와 통일)
+    try std.testing.expectEqualStrings("#46333f", dp.config.theme.selection); // 다크 로즈 선택
+    try std.testing.expect(dp.config.theme.sidebar_background == null); // 사이드바 미명시 → 배경 파생(고스티와 동일 중립 톤, 사용자 요청)
+    try std.testing.expectEqualStrings("#8a5369", dp.config.theme.sidebar_active.?); // 활성 카드만 더스티 로즈-핑크(자줏빛 아님·밝은 글자 가독)
+    try std.testing.expectEqualStrings("#f4a8c9", dp.config.theme.accent.?); // accent=파스텔 핑크(탭 언더바·커서와 통일 — 앰버 아님)
+    try std.testing.expectEqualStrings("#554a1a", dp.config.theme.search_match); // search만 maru 기본 앰버 유지(override 안 함)
     try std.testing.expectEqualStrings("#e83c92", dp.config.theme.palette[1].?); // red = invalid(핫 핑크-레드)
     try std.testing.expectEqualStrings("#f695c6", dp.config.theme.palette[13].?); // bright-magenta = 시그니처 핑크(tag/storage)
-    // 다크라 반전 없음: black(0)=배경보다 밝은 웜 다크, bright-white(15)=핑크빛 화이트(≠ foreground).
+    // 다크라 반전 없음: black(0)=배경보다 밝은 웜 다크, bright-white(15)=핑크빛 화이트.
     try std.testing.expectEqualStrings("#3a3436", dp.config.theme.palette[0].?);
     try std.testing.expectEqualStrings("#f6eef2", dp.config.theme.palette[15].?);
+    // 명시 사이드바·accent가 파생/기본 아닌 그 값으로 ResolvedTheme까지 전파.
     const rdp = try appearance.resolve(dp.config);
-    try std.testing.expectEqual(terminal.Rgb{ .r = 0x1e, .g = 0x1e, .b = 0x1e }, rdp.theme.background);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0x28, .g = 0x2c, .b = 0x34 }, rdp.theme.background);
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0x40, .g = 0x44, .b = 0x4c }, rdp.theme.sidebar_background); // 배경 파생(+24) = 고스티와 동일
+    try std.testing.expectEqual(terminal.Rgb{ .r = 0xf4, .g = 0xa8, .b = 0xc9 }, rdp.theme.accent); // 테마 accent 전파(앰버 아님)
 }
 
 test "parse: theme.preset 신규 프리셋(rose-pine·tokyo-night·nord·one-dark/light) + 라이트 override" {

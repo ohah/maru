@@ -126,7 +126,7 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 | `text.blink` | `true`\|`false` | `false` | SGR 5(blink) 글자를 실제로 깜빡일지. **기본 false** — 깜빡이는 콘텐츠는 접근성(WCAG 발작) 우려라 다수 터미널이 기본으로 끈다. 그 외 값은 무시 |
 | `chrome.preset` | `minimal`\|`cutout`\|`capsule`\|`cell` | (없음) | chrome **레이아웃 프리셋** — 여러 chrome 축(`chrome.theme` 룩 + `chrome.tab-style` 탭)을 한 번에 고르는 큐레이션(`theme.preset`이 색에 쓰는 패턴 동형). `minimal`=rich+underline, `cutout`=rich+connected, `capsule`=rich+pill(Warp식), `cell`=tui(셀-그리드 — tab-style 축은 무관이라 **안 건드림**, 기존 값 보존). 개별 `chrome.theme`/`chrome.tab-style` 키를 **이 줄 뒤에** 두면 그 축만 override(순차, 나중 줄 우선). 색(`theme.preset`)과는 직교. 그 외 값은 무시 |
 | `chrome.theme` | `tui`\|`rich` | `rich` | chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`=cell-grid 룩, `rich`(기본)=분리 색 팔레트(둥근 모서리·gradient). 색 룩(theme.preset)과는 직교. 그 외 값은 무시. 자세히는 [Chrome 전략](chrome-strategy.md) |
-| `chrome.tab-style` | `connected`\|`underline`\|`pill` | `underline` | 활성 탭 룩(직교 축). `underline`(기본)=언더바만(미니멀, 배경 박스 없음), `connected`=터미널 본문색 cutout + 앰버 언더바(아래 본문과 이어짐), `pill`=lifted 회색으로 채운 둥근 캡슐 + 옅은 밝은 테두리(Warp식 떠 있는 pill, 포커스=fill 밝기). `chrome.theme`(tui\|rich)·`theme.preset`(색)과 직교. rich 경로에서만 의미(tui는 셀 밴드). 자세히는 [Chrome 전략 §7](chrome-strategy.md) |
+| `chrome.tab-style` | `connected`\|`underline`\|`pill` | `underline` | 활성 탭 룩(직교 축). `underline`(기본)=언더바만(미니멀, 배경 박스 없음), `connected`=터미널 본문색 cutout + 테마 accent 언더바(아래 본문과 이어짐), `pill`=lifted 회색으로 채운 둥근 캡슐 + 옅은 밝은 테두리(Warp식 떠 있는 pill, 포커스=fill 밝기). `chrome.theme`(tui\|rich)·`theme.preset`(색)과 직교. rich 경로에서만 의미(tui는 셀 밴드). 자세히는 [Chrome 전략 §7](chrome-strategy.md) |
 | `input.page-keys` | `passthrough`\|`scroll` | `scroll` | 메인 화면 PageUp/Down 동작. 아래 참조 |
 | `input.shift-enter` | `newline`\|`native` | `newline` | Shift+Enter 인코딩. `newline`(기본)=Option+Enter와 같은 `\x1b\r`(멀티라인 줄바꿈). 아래 참조 |
 | `input.ime-enter` | `newline`\|`commit-only` | `newline` | IME(한글 등) 조합 중 Enter. `newline`(기본)=확정+개행 한 번에(브라우저 동작). 아래 참조 |
@@ -176,7 +176,7 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 | `catppuccin-mocha` | Catppuccin Mocha(파스텔 다크) | `#1e1e2e` |
 | `catppuccin-latte` | Catppuccin Latte(**라이트** — 파스텔) | `#eff1f5` |
 | `light-pink` | Light Pink(**라이트** — 로즈·골드·틸 핑크) | `#f5f5f5` |
-| `dark-pink` | Dark Pink(**다크** — 핑크·로즈·라벤더) | `#1e1e1e` |
+| `dark-pink` | Dark Pink(**다크** — 로즈·핑크·라벤더, 고스티 배경) | `#282c34` |
 | `rose-pine` | Rosé Pine(뮤트한 로즈·파인 다크) | `#191724` |
 | `rose-pine-dawn` | Rosé Pine Dawn(**라이트** — 크림) | `#faf4ed` |
 | `tokyo-night` | Tokyo Night(블루·퍼플 네온 다크) | `#1a1b26` |
@@ -193,13 +193,21 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 > 가져오되, 이 테마가 **터미널 ANSI 색을 정의하지 않으므로** ANSI 16색은 테마의 **구문 색**(`light-pink`: 키워드 로즈·숫자
 > 골드·문자열 틸·타입 퍼플 / `dark-pink`: invalid 핫핑크·브래킷 하이라이트의 골드·블루·퍼플·틸 + tag/storage 시그니처 핑크)에서
 > 의미 매핑으로 파생했다(역시 색 의도만 — clean-room). 라이트인 `light-pink`는 `catppuccin-latte`처럼 black↔white를 반전해
-> 본문 가독성을 지키고, 다크인 `dark-pink`는 반전 없이 다크 관례를 따른다(사이드바=배경 파생·검색 매치=Maru 다크 앰버 유지 —
-> VS Code Dark Pink도 크롬은 default dark고 구문만 핑크라 이 번역이 충실하다).
+> 본문 가독성을 지킨다. 다크인 `dark-pink`는 VS Code 원본이 *default dark*(`#1e1e1e`/`#d4d4d4`)라 그대로 옮기면 회색으로만
+> 보여 핑크가 안 드러나므로, **배경·사이드바·탭 영역은 고스티와 동일한 중립 톤**(배경 `#282c34` = 고스티 실제 배경, 사이드바는
+> 그 배경에서 파생 `#40444c` — 사용자 요청)으로 두고, 핑크 정체성은 전경(`#ecdce4` 로즈-화이트)·커서·탭 accent(`#f4a8c9` 파스텔
+> 핑크 — 커서·언더바·활성 카드 좌측 막대 통일)와 **활성 카드**가 담당한다. 활성 카드 fill(`sidebar_active #644655`)은 파스텔로
+> 밝히지 않고 **더스티 다크 로즈**로 둔다 — `sidebar_active`는 카드뿐 아니라 컨텍스트 메뉴·알림 선택행·탭 밴드 배경으로도 쓰이고
+> 그 위 글자가 모두 밝은 `sidebar_foreground`라 카드만 밝히면 그 밝은 글자들이 묻히므로(밝은 글자 읽히는 어둡기 유지, 채도만
+> 낮춰 순화). 검색 매치색만 Maru 다크 앰버를 유지해 대비되게 한다.
 >
 > - **검색 매치색**(스크롤백 Find 하이라이트)은 Maru 고유라 **다크 프리셋**에선 Maru 기본(다크 앰버)을 유지한다. **예외:
 >   라이트 프리셋**(`light-pink`·`rose-pine-dawn`·`one-light`)은 라이트 배경에서 다크 앰버가 안 보여 테마의 따뜻한 골드/피치
->   톤으로 검색 매치색을 덮는다(`solarized-light`·`catppuccin-latte`는 이 정책 도입 전이라 Maru 기본 유지). 사이드바 활성
->   좌측 앰버 막대(rich 룩)는 Maru 브랜드 고정이라 프리셋과 무관하다.
+>   톤으로 검색 매치색을 덮는다(`solarized-light`·`catppuccin-latte`는 이 정책 도입 전이라 Maru 기본 유지).
+> - **accent 색**(chrome `accent_bar` 역할 — 활성 탭/포커스 pane 하단 언더바, 사이드바 활성 카드 좌측 막대, 세팅 UI 강조)은
+>   **프리셋마다 시그니처 색**을 준다: 예전엔 Maru 브랜드 앰버(`#dda15e`)로 테마와 무관하게 고정이었으나, 이제 `theme.accent`가
+>   테마-구동이라 탭 언더바 색이 프리셋별로 달라진다(예: `dark-pink`=파스텔 핑크 `#f4a8c9`, `gruvbox-dark`=오렌지 `#fe8019`,
+>   `nord`=frost `#88c0d0`, `dracula`=퍼플 `#bd93f9`). `maru`·프리셋 없는 사용자 지정 테마는 브랜드 앰버로 폴백한다.
 > - **라이트 테마**(`solarized-light`·`catppuccin-latte`·`light-pink`·`rose-pine-dawn`·`one-light`)는 사이드바 색을 명시한다 —
 >   사이드바 기본 파생은 배경을 *밝게* 하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라지므로 배경보다 *어두운*(또는 더
 >   짙은 톤) 표면색을 직접 준다.

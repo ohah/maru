@@ -70,8 +70,10 @@ pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std
     const bw = p.shape.border_width_px;
     // 외곽선(별도 .border op)은 두지 않는다 — tui에서 박스보다 밝은 외곽선이 색이 튀어 어색했다(사용자 피드백).
     // tui(bw=0)는 외곽선 없는 박스 배경(surface_bg)만이고 화면과는 배경 밝기 차이로 구분된다. rich(bw>0)는 quad가
-    // 둥근 모서리 + 얇은 divider 테두리 + 그림자로 떠 보이게 한다(rich 외곽선은 quad의 border_widths가 그린다).
-    try out.append(arena, .{ .quad = .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .divider } });
+    // 둥근 모서리 + 얇은 **focus_accent 테두리** + 그림자로 떠 보이게 한다(rich 외곽선은 quad의 border_widths가 그린다).
+    // 테두리 role = focus_accent(모달 버튼 [확인]과 같은 톤 — 사용자 요청 "모달 테두리를 닫기 버튼 색 톤으로"). 중립 테마는
+    // focus_accent가 옅은 중립이라 은은한 외곽선, accent를 준 테마(dark_pink 등)는 그 accent 톤 외곽선으로 버튼과 코히어런트.
+    try out.append(arena, .{ .quad = .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
 }
 
 /// 콘텐츠 row(0-based) 상단 y(px). 콘텐츠 영역 inner_y에서 row행 아래.

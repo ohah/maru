@@ -128,6 +128,11 @@ pub const ThemeConfig = struct {
     // 사이드바·pane 탭 바 제목 글자색(선택, #RRGGBB). null이면 foreground(터미널 글자색)를 그대로 쓴다.
     // 활성 탭은 이 색(full), 비활성 탭은 이 색을 background 쪽으로 흐리게 한 muted(렌더가 파생).
     sidebar_foreground: ?[]const u8 = null,
+    // maru accent 색(선택, #RRGGBB). chrome의 `accent_bar` 역할 — 활성 탭/포커스 pane 하단 언더바, 사이드바 활성 카드
+    // 좌측 막대(기본), 세팅 UI 강조(섹션 헤더·토글 knob·슬라이더 채움 등)가 소비한다. null이면 maru 브랜드 앰버(#dda15e)로
+    // 폴백한다(resolveTheme). 예전엔 이 accent가 **테마 무관 고정 앰버**였으나, 프리셋마다 시그니처 색을 주도록 테마-구동으로
+    // 바꿨다(sidebar_*처럼 preset 전용 — config 키 없음, schema 제외). 각 프리셋의 값은 presetColors 케이스에 있다.
+    accent: ?[]const u8 = null,
     // ANSI 16색(0~15) config override(선택, 각 #RRGGBB). null=그 인덱스는 기본 xterm 표준색(color.ansi16). loader가
     // `theme.palette.0`~`.15` 키로 파싱한다. 이 값은 OSC 4 동적 override가 *없을 때*의 base다 — 렌더 폴백 우선순위는
     // OSC4 override → config palette → xterm256(color.zig)이라, OSC4/OSC104/RIS는 OSC4 레이어만 건드리고 config base는
@@ -248,7 +253,7 @@ const light_pink_palette: [16]?[]const u8 = .{
 // 파생했다(light_pink 선례 — clean-room, 색 의도만). 매핑: red=invalid #e83c92(핫 핑크-레드), green=bracket5 #97c26c(모스 —
 // 테마 구문엔 green이 없어 브래킷에서 보강, 핑크와 안 부딪음), yellow=bracket1 #dfb976(골드 — constant.numeric #cec4a8와 근사),
 // blue=bracket2 #5caeef, magenta=bracket3 #c172d9(퍼플; bright는 tag/storage/constant 시그니처 핑크 #f695c6로 승격), cyan=
-// bracket4 #4fb1bc(틸). **다크 배경(#1e1e1e)이라 반전 없음**(catppuccin_mocha류 다크 관례): black(0)=배경보다 살짝 밝은 웜
+// bracket4 #4fb1bc(틸). **다크 배경(#282c34 고스티)이라 반전 없음**(catppuccin_mocha류 다크 관례): black(0)=배경보다 살짝 밝은 웜
 // 다크(#3a3436), white(7)=foreground(#d4d4d4)보다 옅은 로즈-그레이(#c8bcc0, bright-white와 구분), bright(8~15)는 각 normal을
 // 한 단계 밝게(bright-magenta 13만 퍼플→시그니처 핑크로 색상 이동). bright-white(15)=핑크빛 화이트(#f6eef2).
 const dark_pink_palette: [16]?[]const u8 = .{
@@ -301,7 +306,9 @@ const one_light_palette: [16]?[]const u8 = .{
 /// - **라이트 테마**(solarized_light/catppuccin_latte/light_pink/rose_pine_dawn/one_light)는 sidebar_*를 명시한다: resolveTheme의
 ///   사이드바 파생은 배경을 lighten(+24/+48)하는데, 라이트 배경에선 거의 흰색이 돼 구분이 사라진다. 그래서 배경보다 **어두운**
 ///   (또는 더 짙은 톤) 표면색을 직접 준다(Solarized base2 / Catppuccin mantle·surface0 / light_pink는 VS Code activityBar·titleBar
-///   핑크 / Rosé Pine Dawn overlay·highlightHigh / One Light는 한 단계 어두운 그레이).
+///   핑크 / Rosé Pine Dawn overlay·highlightHigh / One Light는 한 단계 어두운 그레이). **다크 예외: dark_pink**는 sidebar_background은
+///   미명시(배경 #282c34에서 파생 → 고스티와 동일한 중립 사이드바/탭 톤, 사용자 요청)하고 **sidebar_active(활성 카드)만** 명시해
+///   핑크 강조를 준다 — 카드는 밝은 글자(카드·메뉴 공유)가 읽히는 더스티 다크 로즈, 핑크 정체성은 accent(좌측 막대·언더바)가 담당.
 /// - selection 가독성: maru는 selection 글자색을 안 바꾸고 배경만 칠하므로, 스킴 원값이 **밝은색**(catppuccin rosewater,
 ///   nord snow-storm #eceff4)이면 밝은 글자가 묻힌다 — catppuccin은 어두운 surface(surface2/surface1), nord는 polar night
 ///   nord2(#434c5e)로 바꾼다. one_light cursor도 스킴 원값(#bbbbbb)이 라이트 배경에서 안 보여 foreground로 둔다.
@@ -315,6 +322,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .cursor = "#ffffff",
             .selection = "#334455",
             // sidebar_*는 null 유지 → resolveTheme이 background(#282c34)에서 파생(+24/+48).
+            .accent = "#81a2be", // Tomorrow Night 블루(ghostty 톤)
             .palette = ghostty_palette,
         },
         .gruvbox_dark => .{
@@ -322,6 +330,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .foreground = "#ebdbb2",
             .cursor = "#ebdbb2",
             .selection = "#665c54",
+            .accent = "#fe8019", // Gruvbox 시그니처 오렌지
             .palette = gruvbox_dark_palette,
         },
         .solarized_dark => .{
@@ -329,6 +338,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .foreground = "#839496",
             .cursor = "#839496",
             .selection = "#073642",
+            .accent = "#268bd2", // Solarized 시그니처 블루
             .palette = solarized_dark_palette,
         },
         .solarized_light => .{
@@ -339,6 +349,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             // 라이트 배경: 사이드바를 배경(#fdf6e3)보다 어둡게 명시(Solarized base2 + 한 단계 더). 파생 lighten 회피.
             .sidebar_background = "#eee8d5",
             .sidebar_active = "#ded8c5",
+            .accent = "#268bd2", // Solarized 시그니처 블루(라이트 배경에서도 가독)
             .palette = solarized_light_palette,
         },
         .dracula => .{
@@ -346,6 +357,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .foreground = "#f8f8f2",
             .cursor = "#f8f8f2",
             .selection = "#44475a",
+            .accent = "#bd93f9", // Dracula 시그니처 퍼플
             .palette = dracula_palette,
         },
         .catppuccin_mocha => .{
@@ -354,6 +366,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .cursor = "#f5e0dc",
             // selection: 스킴 원값 rosewater(#f5e0dc) 대신 어두운 surface2 — maru는 selection 글자색을 안 바꾼다(가독성).
             .selection = "#585b70",
+            .accent = "#cba6f7", // Catppuccin mauve(Mocha 강조색)
             .palette = catppuccin_mocha_palette,
         },
         .catppuccin_latte => .{
@@ -364,6 +377,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             // 라이트 배경: 사이드바를 배경보다 어둡게 명시(Catppuccin mantle·surface0). 파생 lighten 회피.
             .sidebar_background = "#e6e9ef",
             .sidebar_active = "#ccd0da",
+            .accent = "#8839ef", // Catppuccin mauve(Latte — 라이트 배경 가독)
             .palette = catppuccin_latte_palette,
         },
         .light_pink => .{
@@ -378,18 +392,25 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             // VS Code 크롬 색을 차용 — activityBar.background(옅은 핑크) / titleBar.activeBackground(활성 강조 핑크).
             .sidebar_background = "#f2e7ed",
             .sidebar_active = "#f5bedb",
+            .accent = "#d1478f", // 진한 로즈(라이트 배경·사이드바에서 또렷한 핑크 강조)
             .palette = light_pink_palette,
         },
-        .dark_pink => .{ // light-pink-theme의 다크 변형("Dark Pink" — default dark 편집기 기반 + 핑크 구문)
-            .background = "#1e1e1e", // editor.background(VS Code default dark 기반 — 크롬은 중립, 핑크는 구문에)
-            .foreground = "#d4d4d4", // editor.foreground
-            // 테마가 editorCursor를 안 정함 → foreground(다크 프리셋 관례: cursor=fg). 반전 블록 커서라 밝은 커서 가독.
-            .cursor = "#d4d4d4",
-            .selection = "#444242", // editor.selectionBackground(따뜻한 다크 그레이 — 밝은 글자 그대로 읽힘)
-            // sidebar_*·search_match*는 **다크 프리셋 관례대로 미명시**한다(sidebar=배경 #1e1e1e 파생, search=maru 다크 앰버).
-            // 라이트 변형(light_pink)이 sidebar를 명시한 건 라이트 배경에서 파생 lighten이 흰색으로 무너지는 함정 회피였을 뿐,
-            // 다크에선 그 함정이 없다. 핑크 정체성은 ANSI 팔레트(구문·브래킷 파생)가 담는다 — VS Code Dark Pink도 크롬은
-            // default dark고 구문만 핑크다(충실 번역).
+        .dark_pink => .{ // light-pink-theme의 다크 변형("Dark Pink") — **고스티 중립 배경/사이드바 + 핑크 accent·활성 카드**
+            // 최종 디자인(사용자 피드백 다회 수렴): 배경·사이드바·탭 영역은 **고스티와 동일한 중립 톤**으로 두고, 핑크 정체성은
+            // 밝은 파스텔 핑크 accent(탭 언더바·카드 좌측 막대·커서)와 더스티 로즈 활성 카드 + 핑크 팔레트가 담당한다. 조정 이력:
+            // 순수 #1e1e1e 안 보임 → 진한 다크 로즈(#241c21/#5e2c47) 너무 진함 → 옅은 모브(#2a2228) 너무 어두움 → 로즈-틴트 배경
+            // (#322b32)도 → **고스티 실제 배경(#282c34)로 확정**(사용자: 배경·사이드바·탭 영역 고스티와 동일하게).
+            .background = "#282c34", // 고스티 실제 배경색(사용자 요청)
+            .foreground = "#ecdce4", // 로즈-화이트 본문(중립 배경에서도 은은한 핑크기 + 대비 충분)
+            .cursor = "#f4a8c9", // 파스텔 핑크 커서(accent와 동일 톤)
+            .selection = "#46333f", // 다크 로즈 선택(로즈-화이트 글자 그대로 읽힘)
+            // sidebar_background 미명시 → 배경(#282c34)에서 파생(+24=#40444c) = **고스티와 동일한 중립 사이드바/탭 영역 톤**
+            // (사용자 요청). sidebar_active(활성 카드)만 핑크로 둔다.
+            // sidebar_active는 카드 fill뿐 아니라 컨텍스트 메뉴·알림 선택행·탭 밴드 배경으로도 쓰이고 그 위 글자가 전부 밝은
+            // sidebar_foreground라, **파스텔로 밝히면 그 밝은 글자들이 묻힌다** → 카드 글자(제목+보조줄)·메뉴 글자가 다 읽히는
+            // 어둡기를 유지하되 채도만 낮춘 **더스티 다크 로즈**로 둔다(사용자 "너무 진한 플럼" 반영). 핑크 강조는 좌측 accent 막대.
+            .sidebar_active = "#8a5369", // 더스티 로즈-핑크(활성 카드 — 자줏빛 플럼보다 핑크로, 한 톤 밝게; 밝은 카드 글자 읽히는 어둡기 유지)
+            .accent = "#f4a8c9", // 파스텔 핑크 — 탭/포커스 언더바·활성 카드 좌측 막대·세팅 강조(커서와 통일)
             .palette = dark_pink_palette,
         },
         // ── 아래 6개: iTerm2-Color-Schemes Ghostty 포맷 표준값(파일명 주석). 다크는 sidebar_* null(배경 파생),
@@ -399,6 +420,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .foreground = "#e0def4",
             .cursor = "#e0def4",
             .selection = "#403d52",
+            .accent = "#eb6f92", // Rosé Pine "love"(로즈 핑크)
             .palette = rose_pine_palette,
         },
         .rose_pine_dawn => .{ // ghostty/"Rose Pine Dawn"(라이트)
@@ -412,6 +434,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             // 라이트 배경: 사이드바를 배경(#faf4ed)보다 어둡게(Rosé Pine Dawn overlay·highlightHigh). 파생 lighten 회피.
             .sidebar_background = "#f2e9e1",
             .sidebar_active = "#cecacd",
+            .accent = "#b4637a", // Rosé Pine Dawn "love"(라이트 배경 가독 로즈)
             .palette = rose_pine_dawn_palette,
         },
         .tokyo_night => .{ // ghostty/"TokyoNight"
@@ -419,6 +442,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .foreground = "#c0caf5",
             .cursor = "#c0caf5",
             .selection = "#33467c",
+            .accent = "#7aa2f7", // Tokyo Night 시그니처 블루
             .palette = tokyo_night_palette,
         },
         .nord => .{ // ghostty/"Nord"
@@ -428,6 +452,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             // 스킴 selection 원값(#eceff4 = snow storm)은 너무 밝아 maru(글자색 불변·배경만 칠함)에선 밝은 글자가 묻힌다.
             // 그래서 어두운 Nord polar night(nord2 #434c5e)로 둔다(catppuccin selection override와 같은 결정).
             .selection = "#434c5e",
+            .accent = "#88c0d0", // Nord frost(아틱 시안)
             .palette = nord_palette,
         },
         .one_dark => .{ // ghostty/"Atom One Dark"
@@ -435,6 +460,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .foreground = "#abb2bf",
             .cursor = "#abb2bf",
             .selection = "#323844",
+            .accent = "#61afef", // Atom One Dark 시그니처 블루
             .palette = one_dark_palette,
         },
         .one_light => .{ // ghostty/"Atom One Light"(라이트)
@@ -449,6 +475,7 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             // 라이트 배경: 사이드바를 배경(#f9f9f9)보다 어둡게 명시. 파생 lighten 회피.
             .sidebar_background = "#eaeaeb",
             .sidebar_active = "#dbdbdc",
+            .accent = "#4078f2", // Atom One Light 시그니처 블루(라이트 배경 가독)
             .palette = one_light_palette,
         },
     };

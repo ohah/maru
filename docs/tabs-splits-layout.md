@@ -174,7 +174,7 @@ Node = leaf(Pane)
   하이라이트·클릭. **PR-E**: 탭 드래그(pane 내/간). **PR-F**: "+" 버튼.
   - **활성 탭 룩(rich, U-tab2 — 연결형 cutout)**: 활성 Term 탭은 **터미널 본문색(`theme.background`)** 으로 채워 strip
     (`sidebarBg`)에서 도려낸 듯 아래 본문과 이어져 보인다(VSCode/Ghostty식 깊이). **포커스 pane 구분은 배경이 아니라 하단
-    언더바 색** — 포커스=maru 앰버(#DDA15E), 비포커스=muted(모든 활성 탭 배경은 본문색 통일). 언더바는 탭바 하단 하이라인과
+    언더바 색** — 포커스=테마 accent(프리셋별 시그니처, `maru`=앰버 #DDA15E), 비포커스=muted(모든 활성 탭 배경은 본문색 통일). 언더바는 탭바 하단 하이라인과
     분리한 전용 토큰 `tab_underbar_px`(rich 3px)로 더 굵게 그려 active/focus 신호를 또렷하게 한다(`appendActiveTabHighlight`
     단일 출처; cutout quad가 활성 탭 구간 하이라인을 덮어 연결이 끊기지 않음). **탭 제목엔 번호 prefix(`N `)를 붙이지 않는다**
     (브라우저/VSCode/Warp식 — Term 번호는 단축키 미매핑이라 군더더기였다; 사이드바 워크스페이스 라벨이 이미 번호를 안 붙이던
@@ -303,7 +303,7 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
 - **카드별 색 렌더(배경 tint·좌측 accent 막대)**: chrome draw op은 role 기반이라 임의 RGB를 못 실어, **둘 다 platform이
   명시-색 GpuQuad로 직접 그린다**(`rebuildSidebar`의 per-tab tint 루프·per-tab accent 루프 — 일관된 경로). 배경색은 카드에
   반투명 tint, 좌측 막대는 카드 좌단(폭=`tokens.space.accent_bar_width_px`, 카드 텍스트는 이 폭만큼 좌측 여백 예약)에
-  불투명 막대다. **막대색 기본(`accent_color`=0)은 활성 카드=테마 앰버(`.accent_bar` role)·비활성 카드=막대 없음**이고,
+  불투명 막대다. **막대색 기본(`accent_color`=0)은 활성 카드=테마 accent(`.accent_bar` role — 프리셋별 시그니처, 기본 앰버)·비활성 카드=막대 없음**이고,
   프리셋으로 색을 지정하면 **활성·비활성 카드 모두** 그 색 막대를 표시한다("바: …"를 지정하면 비활성에서도 보인다).
   chrome `sidebar.view`는 카드 밴드(role 기반)만 내고 막대는 내지 않는다. 셋 다 workspace.v1에 영속
   (`pinned`/`background-color`/`accent-color` — docs/workspace-restore.md).

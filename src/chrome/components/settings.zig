@@ -20,6 +20,7 @@ const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭
 const width = @import("../../width.zig"); // UTF-8 경계 절단/백스페이스 단일 출처(truncateToBoundary·dropLastCodepoint)
 const toggle = @import("toggle.zig");
 const slider = @import("slider.zig");
+const input_box = @import("input_box.zig"); // 숫자 입력 박스(슬라이더 대체 — 프로그레스바 대신 직접 타이핑)
 const dropdown = @import("dropdown.zig");
 const color_mod = @import("../../color.zig"); // HSV picker — hsvToRgb/rgbToHsv/Hsv
 const color = @import("color.zig");
@@ -167,10 +168,11 @@ pub const State = struct {
     pick_h: u16 = 0,
     pick_s: u8 = 0,
     pick_v: u8 = 0,
-    /// 좌측 섹션 네비에 키보드 포커스가 있는가(Tab으로 폼↔네비 전환). true면 ↑↓=섹션 이동·Enter/→=폼 복귀, false(기본)면
-    /// 폼 모드(↑↓=행·←→=값 — 기존). show에서 false(폼으로 시작), 네비 클릭도 폼 작업이라 false. nav 모드 ↑↓는
-    /// selectSection만 호출해 이 플래그를 보존한다(selectSection은 nav_focused를 안 건드린다).
-    nav_focused: bool = false,
+    /// enum/font 행의 열리는 드롭다운 팝업 상태(모달 오버레이). platform이 행 활성 시 변형 목록·현재 인덱스로 열고
+    /// (openDropdown), 열려 있으면 handle이 키를 dropdown.handle로 라우팅한다(↑↓ 선택·Enter 확정·Esc 취소). 팝업이
+    /// 열린 동안엔 폼 키(섹션 전환·행 이동)를 잡지 않는다. 값 적용(변형 set)은 platform이 selected로 한다.
+    /// 참고: 예전 Tab 기반 폼↔네비 포커스 토글(nav_focused)은 제거됐다 — 내비는 ←→(섹션)·↑↓(행)·Enter(활성)뿐이다.
+    dropdown: dropdown.State = .{},
 
     pub fn show(self: *State) void {
         self.open = true;
@@ -185,7 +187,7 @@ pub const State = struct {
         self.search_preedit_len = 0;
         self.message_len = 0;
         self.picking = false;
-        self.nav_focused = false; // 모달 열 때는 폼 모드로 시작
+        self.dropdown.hide(); // 모달 열 때 드롭다운 팝업 닫힘 상태로 시작
     }
     /// HSV picker 열기(platform이 color 행 활성 시 호출 — 현재 색 rgb로 초기 h/s/v 시드). 폼 키/포인터가 picker로 라우팅된다.
     pub fn openPicker(self: *State, rgb: color_mod.Rgb) void {
@@ -226,6 +228,7 @@ pub const State = struct {
         self.search_preedit_len = 0;
         self.message_len = 0; // 섹션 전환 = 새 맥락 → 안내 배너 정리
         self.picking = false;
+        self.dropdown.hide();
     }
     /// 검색 쿼리(현재 버퍼). platform이 currentSectionFields에서 읽어 행을 필터한다.
     pub fn searchQuery(self: *const State) []const u8 {
@@ -358,9 +361,12 @@ pub const State = struct {
 };
 
 /// handle/handlePointer가 돌려주는 intent. platform이 rows[selected] 기준으로 처리:
-///   toggle=bool flip, slider_set=pending_ratio→값 매핑, adjust_left/right=slider 한 스텝, selection_changed=재렌더,
-///   close=hide, consumed=소비만(모달 뒤로 안 샘). 값 종류 판정(toggle인지 slider인지)은 platform이 rows로 한다.
-pub const Action = enum { close, toggle, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, eyedropper, consumed };
+///   toggle=행 활성(bool flip·number 편집 진입·enum/font 드롭다운 팝업 열기·text 편집·color picker·keybind 녹음),
+///   dropdown_accept=열린 팝업에서 Enter — platform이 state.dropdown.selected 변형을 set + 팝업 닫기,
+///   section_changed=←→ 섹션 전환, selection_changed=재렌더, close=hide, consumed=소비만(모달 뒤로 안 샘).
+///   값 종류 판정은 platform이 rows[selected].kind로 한다. (slider_set/adjust_left/right는 슬라이더 제거로 더는
+///   방출하지 않는 deprecated 잔재 — 슬라이더→입력 박스 전환. 정리 예정, 지금은 dispatch exhaustiveness 유지용.)
+pub const Action = enum { close, toggle, dropdown_accept, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, eyedropper, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -478,8 +484,9 @@ fn sliderBarRect(ctrl: draw.Rect, cw: u32) draw.Rect {
 
 /// slider 현재 값을 control 열 우측 끝에 붙일 표시 문자열로 포맷한다. 소수 2자리로 굽고 뒤따르는 0(과 점)을 떼
 /// 정수·딱떨어지는 소수를 깔끔히 보인다(14.00→"14", 2.28→"2.28", 1.50→"1.5", -8.00→"-8"). u32 필드도 정수로 나온다
-/// (값이 whole이라 "200.00"→"200"). 별도 is_int 없이 한 경로로 처리한다.
-fn formatSliderValue(arena: std.mem.Allocator, value: f64) ![]const u8 {
+/// (값이 whole이라 "200.00"→"200"). 별도 is_int 없이 한 경로로 처리한다. pub — platform이 숫자 입력 박스 편집
+/// 진입 시 현재값 시드(enterEdit)에 같은 포맷을 써 표시값=편집시드가 되게 한다(입력 박스와 일관).
+pub fn formatSliderValue(arena: std.mem.Allocator, value: f64) ![]const u8 {
     const s = try std.fmt.allocPrint(arena, "{d:.2}", .{value});
     if (std.mem.indexOfScalar(u8, s, '.') == null) return s;
     var end = s.len;
@@ -533,10 +540,12 @@ fn drawInlineEdit(box: modal_box.Box, ctrl: draw.Rect, shown: []const u8, arena:
 /// 모달 박스 + 제목 + 좌측 Section 네비(선택 강조) + 우측 폼(선택 섹션 필드 행 — 선택 하이라이트 → 라벨 → 위젯)을
 /// 그린다(config-gui §4). 빈 rows여도 박스는 띄운다. 순수: state·sections·rows·props·tokens만 읽는다. out/op은 호출자
 /// (platform) frame arena 소유. sections=네비 라벨, rows=선택 섹션의 필드(platform이 settings.section으로 필터해 주입).
+/// dropdown_items=드롭다운 팝업이 열렸을 때 그 변형 라벨(platform 주입; 닫혔으면 빈 슬라이스 — 폼 위 오버레이로 그림).
 pub fn view(
     state: *const State,
     sections: []const []const u8,
     rows: []const FieldRow,
+    dropdown_items: []const []const u8,
     p: props.ChromeProps,
     tk: *const tokens.Tokens,
     arena: std.mem.Allocator,
@@ -579,16 +588,16 @@ pub fn view(
         }
     }
 
-    // 좌측 네비: 섹션 라벨. inner_x 칸은 활성 영역 세로 바 자리로 비우고, 선택 강조(tab_active_bg)·라벨은 그 우측
-    // (inner_x+cw)부터 둔다. Tab 포커스가 폼에 있으면(!nav_focused) 비선택 섹션 라벨을 muted로 흐려, 지금 키 입력이
-    // 가는 영역이 폼임을 보인다(선택 섹션은 어느 섹션인지 알게 accent 유지).
+    // 좌측 네비: 섹션 라벨. inner_x 칸은 좌단 여백으로 비우고, 현재 섹션 강조(tab_active_bg)·라벨은 그 우측
+    // (inner_x+cw)부터 둔다. **현재 섹션=accent, 나머지=muted**로 어느 섹션인지 늘 보인다(←→로 전환). Tab 포커스
+    // 토글은 제거돼 폼/네비 영역 구분(dim)이 없다 — 키는 항상 ←→=섹션·↑↓=행.
     const cw_i: i32 = @intCast(box.cw);
     for (sections, 0..) |label, i| {
         const row = l.first_field_row + @as(u32, @intCast(i));
         if (i == state.section) {
             try modal_box.fillCells(box, box.inner_x + cw_i, row, l.nav_cols -| 1, .tab_active_bg, arena, out);
         }
-        const role: tokens.ColorRole = if (i == state.section) .accent_bar else if (!state.nav_focused) .muted_fg else .surface_fg;
+        const role: tokens.ColorRole = if (i == state.section) .accent_bar else .muted_fg;
         try modal_box.text(box, box.inner_x + cw_i, row, label, role, arena, out);
     }
 
@@ -616,8 +625,8 @@ pub fn view(
             const hl_cols = if (quad_widget) l.form_cols -| row_right_cols else l.form_cols;
             try modal_box.fillCells(box, l.form_x, content_row, hl_cols, .tab_hover_bg, arena, out);
         }
-        // 비활성 행(프리셋 잠금)이거나 Tab 포커스가 네비에 있을 때(nav_focused)는 라벨을 muted로 — 폼이 비활성 영역임을 흐림으로 보인다.
-        const label_role: tokens.ColorRole = if (r.disabled or state.nav_focused) .muted_fg else .surface_fg;
+        // 비활성 행(프리셋 잠금)은 라벨을 muted로. (Tab 포커스 영역 dim은 제거 — nav_focused 없음.)
+        const label_role: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
         // 라벨도 control/palette 열을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
         const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| label_gap_cols) catch r.label;
         try modal_box.text(box, l.form_x, content_row, label_shown, label_role, arena, out);
@@ -628,16 +637,11 @@ pub fn view(
                 try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), box.cw, tk, arena, out);
             },
             .slider => |s| {
-                // 막대는 control 열 좌측(값 자리 제외)에, 현재 값은 우측 끝에 우측정렬로 — 화살표/드래그가 값을
-                // 바로 바꾸는 게 보인다(막대만으론 변화가 작은 슬라이더에서 안 먹는 것처럼 보였음).
-                try slider.view(sliderBarRect(ctrl, box.cw), FieldRow.sliderRatio(s), box.cw, tk, arena, out);
-                const value_str = try formatSliderValue(arena, s.value);
-                const vcols = overlay_input.displayCols(value_str);
-                const vx = ctrl.x + @as(i32, @intCast(ctrl.w)) - @as(i32, @intCast(vcols * box.cw));
-                const vruns = try arena.alloc(draw.Run, 1);
-                vruns[0] = .{ .text = value_str };
-                const vrole: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
-                try out.append(arena, .{ .text = .{ .origin = .{ .x = vx, .y = ctrl.y }, .runs = vruns, .role = vrole } });
+                // 숫자 입력 박스(슬라이더/프로그레스바 대체 — 사용자 요청). 편집 중인 선택 행이면 편집 버퍼 + caret,
+                // 아니면 현재 값을 박스 안에 좌측정렬. Enter로 편집 진입, 커밋 시 파싱·범위 clamp는 platform(setNumber).
+                const editing_this = state.editing and actual == state.selected;
+                const shown: []const u8 = if (editing_this) state.editText() else (formatSliderValue(arena, s.value) catch "");
+                try input_box.view(ctrl, shown, editing_this, r.disabled, box.cw, box.ch, p.shape.corner_radius_px, p.shape.border_width_px, arena, out);
             },
             // dropdown.view가 값 뒤에 " ▾"(2칸)를 붙이므로, chevron 자리를 빼고 truncate해 값+chevron이 control 열(=박스
             // 경계)을 넘지 않게 한다(안 그러면 ctrl_cols+2칸이 되어 우측 여백을 침범·rich quad 밖으로 삐진다).
@@ -732,24 +736,19 @@ pub fn view(
         return; // 배너가 힌트 줄을 대체(같은 행)
     }
 
-    // 활성 영역(Tab 포커스) 좌단 세로 강조 바 — 섹션 모드는 네비 좌단(inner_x), 폼 모드는 폼 좌단 직전(form_x-cw).
-    // 힌트: "⇥ 섹션 ⇄ 설정"을 **제목 바로 아래(상단)** 중앙에 두되, **현재 활성 영역만 accent**로(반대편·구분자는
-    // muted) 칠해 "지금 어느 영역 + Tab으로 전환"을 한 줄로 보인다(세로 바 없이 — 본문 dim과 이 강조가 활성 영역을 알린다).
-    const seg_tab = "⇥ ";
-    const seg_sec = "섹션";
-    const seg_mid = " ⇄ ";
-    const seg_form = "설정";
-    const hint_w = overlay_input.displayCols(seg_tab) + overlay_input.displayCols(seg_sec) + overlay_input.displayCols(seg_mid) + overlay_input.displayCols(seg_form);
-    var hx = box.inner_x + @as(i32, @intCast((box.inner_cols -| hint_w) / 2 * box.cw)); // 중앙 정렬
-    const sec_role: tokens.ColorRole = if (state.nav_focused) .accent_bar else .muted_fg;
-    const form_role: tokens.ColorRole = if (state.nav_focused) .muted_fg else .accent_bar;
-    try modal_box.text(box, hx, hint_row, seg_tab, .muted_fg, arena, out);
-    hx += @as(i32, @intCast(overlay_input.displayCols(seg_tab) * box.cw));
-    try modal_box.text(box, hx, hint_row, seg_sec, sec_role, arena, out);
-    hx += @as(i32, @intCast(overlay_input.displayCols(seg_sec) * box.cw));
-    try modal_box.text(box, hx, hint_row, seg_mid, .muted_fg, arena, out);
-    hx += @as(i32, @intCast(overlay_input.displayCols(seg_mid) * box.cw));
-    try modal_box.text(box, hx, hint_row, seg_form, form_role, arena, out);
+    // 내비 힌트 — 제목 바로 아래 중앙에 한 줄(muted). Tab 폼↔네비 토글이 제거돼 활성 영역 강조 바가 없다 —
+    // 키는 항상 ←→=섹션·↑↓=행·Enter=활성이라 이 한 줄로 충분하다(사용자 요청: 화살표로 전부 이동).
+    const nav_hint = "←→ 섹션 · ↑↓ 행 · ⏎ 선택";
+    const hint_w = overlay_input.displayCols(nav_hint);
+    const hx = box.inner_x + @as(i32, @intCast((box.inner_cols -| hint_w) / 2 * box.cw)); // 중앙 정렬
+    try modal_box.text(box, hx, hint_row, nav_hint, .muted_fg, arena, out);
+
+    // enum/font 드롭다운 팝업(열려 있으면) — 폼 위 최상위 오버레이. 앵커=선택 행의 축소 control rect(그 아래에 목록이
+    // 뜬다). 항목 라벨은 platform이 dropdown_items로 주입(빈 슬라이스면 무동작). 선택 행이 보이는 창 안일 때만.
+    if (state.dropdown.open and state.selected >= l.win_start and state.selected < l.win_start + l.win_len) {
+        const anchor = fieldControlRect(l, state.selected - l.win_start);
+        try dropdown.viewPopup(&state.dropdown, anchor, dropdown_items, p, tk, arena, out);
+    }
 }
 
 /// 검색 입력줄 caret의 셀 rect(backing px) — IME 후보창 위치(platform imeCursorRect)에 쓴다. 검색 중이 아니거나
@@ -986,42 +985,31 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             else => return .consumed,
         }
     }
-    // 좌측 섹션 네비에 키보드 포커스(Tab으로 진입/이탈) — ↑↓=섹션 이동, Enter/→=폼 복귀, Esc=닫기. slider/색의 ←→ 값
-    // 조절과 충돌하지 않게 진입은 Tab으로만 한다(영역 전환 = Tab/Shift+Tab, 둘 다 토글이라 mods.shift는 안 본다).
-    if (state.nav_focused) {
-        switch (k.key) {
-            .escape => {
-                state.hide();
-                return .close;
-            },
-            .tab => {
-                state.nav_focused = false; // 폼으로 복귀
-                return .selection_changed;
-            },
-            .up => {
-                if (state.section == 0) return .consumed; // 첫 섹션에서 위 = 정지
-                state.selectSection(state.section - 1); // selectSection은 nav_focused를 안 건드려 네비 모드 유지
-                return .section_changed;
-            },
-            .down => {
-                state.selectSection(state.section + 1); // 상한은 platform이 clamp(섹션 수를 컴포넌트는 모른다)
-                return .section_changed;
-            },
-            .enter, .right => {
-                state.nav_focused = false; // 현재 섹션 확정 → 폼으로
-                return .selection_changed;
-            },
-            else => return .consumed,
-        }
+    // enum/font 드롭다운 팝업이 열려 있으면 모든 키를 팝업이 잡는다(모달 캡처). ↑↓ 선택·Enter 확정·Esc 취소·그 외
+    // 소비 — 폼(섹션 전환·행 이동)엔 안 샌다. accept는 platform이 selected 변형을 set(dropdown_accept)한 뒤 host가 닫는다.
+    if (state.dropdown.open) {
+        return switch (dropdown.handle(k, &state.dropdown)) {
+            .accept => .dropdown_accept, // Enter — platform이 selected 변형 적용 + 팝업 닫기
+            .close => .selection_changed, // Esc — dropdown.handle이 이미 hide, 재렌더만
+            .selection_changed => .selection_changed,
+            .consumed => .consumed,
+        };
     }
+    // 폼(기본) — **화살표 내비**: ←→=섹션 전환, ↑↓=행 이동, Enter/Space=행 활성, Esc=닫기. Tab 기반 폼↔네비 토글은
+    // 제거했다(사용자 요청 — "탭으로 왔다갔다" 불편). Tab은 무동작. ←→ 슬라이더 값조절도 제거(값은 입력 박스·드롭다운).
     switch (k.key) {
         .escape => {
             state.hide();
             return .close;
         },
-        .tab => {
-            state.nav_focused = true; // 좌측 네비로 포커스 진입(폼↔네비 토글)
-            return .selection_changed;
+        .left => {
+            if (state.section == 0) return .consumed; // 첫 섹션에서 ← = 정지
+            state.selectSection(state.section - 1);
+            return .section_changed;
+        },
+        .right => {
+            state.selectSection(state.section + 1); // 상한은 platform이 clamp(섹션 수를 컴포넌트는 모른다)
+            return .section_changed;
         },
         .up => {
             state.moveSelection(-1);
@@ -1031,8 +1019,6 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             state.moveSelection(1);
             return .selection_changed;
         },
-        .left => return if (state.count == 0) .consumed else .adjust_left,
-        .right => return if (state.count == 0) .consumed else .adjust_right,
         .enter => return if (state.count == 0) .consumed else .toggle,
         .backspace => return if (state.count == 0) .consumed else .delete_row, // 선택 행 삭제(platform이 env 행만 처리)
         .char => {
@@ -1042,7 +1028,7 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             }
             return if (k.codepoint == ' ' and state.count > 0) .toggle else .consumed;
         },
-        else => return .consumed,
+        else => return .consumed, // Tab 포함 — 무동작(폼↔네비 토글 제거)
     }
 }
 
@@ -1093,13 +1079,15 @@ fn pickerPointer(ev: input.PointerEvent, p: props.ChromeProps, tk: *const tokens
     return .consumed;
 }
 
-/// 포인터 처리(열려 있을 때만). up=드래그 종료(소비). down=박스 밖이면 닫기, 안이면 행 선택 후 위젯별:
-///   slider 위→드래그 시작 + pending_ratio + .slider_set, toggle 위→.toggle, 그 외(라벨)→.selection_changed.
-///   move=드래그 중이고 선택 행이 slider면 pending_ratio 갱신 + .slider_set, 아니면 소비. 우클릭=소비.
+/// 포인터 처리(열려 있을 때만). up=소비. down=박스 밖이면 닫기, 안이면 행 선택 후 위젯별: toggle 위→.toggle, number
+/// (control)→.toggle(편집 진입), dropdown/font→.toggle(팝업 열기), text/color/keybind→.toggle/편집, 그 외(라벨)→
+/// .selection_changed. 드롭다운 팝업이 열려 있으면 항목 클릭=.dropdown_accept·밖 클릭=닫기. 우클릭=소비.
+/// dropdown_items=팝업 변형 라벨(itemAt hit-test용 — view와 같은 platform 주입).
 pub fn handlePointer(
     ev: input.PointerEvent,
     sections: []const []const u8,
     rows: []const FieldRow,
+    dropdown_items: []const []const u8,
     p: props.ChromeProps,
     tk: *const tokens.Tokens,
     state: *State,
@@ -1109,20 +1097,26 @@ pub fn handlePointer(
     if (state.picking) return pickerPointer(ev, p, tk, state);
     const l = computeLayout(sections, rows, state.selected, p, tk) orelse return .consumed;
     const box = l.box;
+    // 드롭다운 팝업이 열려 있으면(모달) 폼 hit-test 대신 팝업만: down이 항목 위면 그 변형 선택+적용, 밖이면 닫기.
+    // 앵커=선택 행의 축소 control rect(view와 같은 계산 — "보이는 == 클릭되는").
+    if (state.dropdown.open) {
+        if (ev.phase != .down) return .consumed;
+        if (state.selected >= l.win_start and state.selected < l.win_start + l.win_len) {
+            const anchor = fieldControlRect(l, state.selected - l.win_start);
+            if (dropdown.itemAt(&state.dropdown, anchor, dropdown_items, p, ev.x_px, ev.y_px)) |idx| {
+                state.dropdown.selected = idx;
+                return .dropdown_accept; // 항목 클릭 → platform이 그 변형 set + 닫기
+            }
+        }
+        state.dropdown.hide(); // 밖 클릭 → 취소
+        return .selection_changed;
+    }
 
     if (ev.phase == .up) {
         state.dragging = false;
         return .consumed;
     }
-    if (ev.phase == .move) {
-        // 드래그 중이고 선택 행이 slider면 x→ratio로 추적(divider 라이브 드래그 패턴). 아니면 소비. 선택 행의 화면
-        // 위치 = selected - win_start(windowStart가 selected를 창 안에 보장).
-        if (!state.dragging or state.selected >= rows.len) return .consumed;
-        if (rows[state.selected].kind != .slider) return .consumed;
-        // 막대(값 자리 제외)를 기준으로 ratio를 잡는다 — view의 sliderBarRect와 같은 rect라야 thumb 위치=클릭 위치.
-        state.pending_ratio = slider.ratioAt(sliderBarRect(fieldControlRect(l, state.selected -| l.win_start), box.cw), ev.x_px);
-        return .slider_set;
-    }
+    if (ev.phase == .move) return .consumed; // 슬라이더 드래그 제거 — 숫자는 클릭→입력 박스 편집이라 move는 무동작
     // down.
     const bx: f64 = @floatFromInt(box.rect.x);
     const by: f64 = @floatFromInt(box.rect.y);
@@ -1151,7 +1145,6 @@ pub fn handlePointer(
         for (sections, 0..) |_, i| {
             const ny: f64 = @floatFromInt(modal_box.rowY(box, l.first_field_row + @as(u32, @intCast(i))));
             if (ev.y_px >= ny and ev.y_px < ny + @as(f64, @floatFromInt(box.ch))) {
-                state.nav_focused = false; // 클릭 선택은 폼 작업 — 좌측 네비 키 포커스 해제
                 if (i == state.section) return .selection_changed; // 같은 섹션 재클릭 — 부수효과 없음
                 state.selectSection(i);
                 return .section_changed;
@@ -1170,17 +1163,10 @@ pub fn handlePointer(
             state.selected = actual;
             switch (r.kind) {
                 .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,
-                .slider => {
-                    // 막대 영역(값 텍스트 자리 제외)에서만 드래그 시작 — view·move와 같은 sliderBarRect 단일 출처.
-                    const bar = sliderBarRect(ctrl, box.cw);
-                    if (!slider.hitTest(bar, ev.x_px, ev.y_px)) return .selection_changed;
-                    state.dragging = true;
-                    state.pending_ratio = slider.ratioAt(bar, ev.x_px);
-                    return .slider_set;
-                },
-                .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 클릭 → 변형 순환(.toggle=활성)
+                .slider => return if (input_box.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 입력 박스 클릭 → 편집 진입(.toggle=활성, platform이 현재값 시드), 라벨은 선택만
+                .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 축소 control 클릭 → 팝업 열기(.toggle=활성, platform이 openDropdown)
                 .text => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 인라인 편집(.toggle=활성), 라벨은 선택만
-                .font => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 클릭 → 직접입력 편집(text와 동형, texts 범위라 platform이 enterEdit); 번들 순환은 키보드 ←→
+                .font => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 축소 control 클릭 → 팝업 열기(번들 폰트 목록, platform이 openDropdown)
                 .color => |c| {
                     // 비활성(프리셋 잠금)이면 swatch/hex 어디를 눌러도 인라인 편집을 직접 시작하지 않고 .toggle을 올린다 —
                     // platform이 "사용자 지정"으로 전환한 뒤 picker를 연다(클릭 시 자동 전환 후 편집).
@@ -1233,6 +1219,7 @@ const test_props = props.ChromeProps{ .metrics = .{
 
 // 섹션 없는 폼(네비 ops 0 — 폼 동작만 보는 테스트용). 폼은 빈 네비 폭만큼 우로 밀린다(form_x).
 const no_sections: []const []const u8 = &.{};
+const no_items: []const []const u8 = &.{}; // 드롭다운 팝업 닫힘 — view/handlePointer의 dropdown_items 빈 슬라이스
 const test_sections = [_][]const u8{ "Font", "Cursor", "Window" };
 
 fn testTokens() tokens.Tokens {
@@ -1254,7 +1241,7 @@ test "settings view: 행이 창보다 많으면 창만 렌더 + 제목에 위치
     s.setFieldCount(rows.len);
     s.selected = 18; // 끝 근처 — 창이 끝으로 스크롤되고 selected가 보여야 한다
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, small, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, small, &tk, arena, &out);
     const mv = maxVisible(small);
     try std.testing.expect(mv < rows.len); // 윈도잉 발생(작은 뷰포트)
     // 제목에 "Settings   19/20" 위치 표식(rows.len > win_len).
@@ -1301,22 +1288,26 @@ test "settings state: show/hide/setFieldCount clamp/moveSelection wrap" {
     try std.testing.expect(!s.open);
 }
 
-test "settings handle: ↑↓ 네비·←→ 조절·Space/Enter 토글·Esc 닫기·그 외 소비" {
+test "settings handle: ↑↓ 행·←→ 섹션·Space/Enter 토글·Esc 닫기·Tab 무동작" {
+    // 새 화살표 내비: ←→=섹션 전환(값 조절 아님), ↑↓=행 이동, Enter/Space=행 활성, Tab=무동작(폼↔네비 토글 제거).
     var s = State{};
     s.show();
     s.setFieldCount(3);
     try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);
     try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .up }, &s));
-    try std.testing.expectEqual(Action.adjust_left, handle(.{ .key = .left }, &s)); // slider 스텝 다운(platform 판정)
-    try std.testing.expectEqual(Action.adjust_right, handle(.{ .key = .right }, &s));
+    // ←→ = 섹션 전환. section 0에서 ←=정지(consumed), →=다음 섹션(section_changed, selected 리셋).
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .left }, &s));
+    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .right }, &s));
+    try std.testing.expectEqual(@as(usize, 1), s.section);
+    s.setFieldCount(3); // 새 섹션 필드 수(platform이 실제로 주입 — 단위테스트는 흉내)
     try std.testing.expectEqual(Action.toggle, handle(.{ .key = .enter }, &s));
     try std.testing.expectEqual(Action.toggle, handle(.{ .key = .char, .codepoint = ' ' }, &s));
     try std.testing.expectEqual(Action.consumed, handle(.{ .key = .char, .codepoint = 'a' }, &s));
-    // count 0 → enter/space/←→ 대상 없음 → consumed.
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .tab }, &s)); // Tab 무동작
+    // count 0 → enter/space 대상 없음 → consumed.
     s.setFieldCount(0);
     try std.testing.expectEqual(Action.consumed, handle(.{ .key = .enter }, &s));
-    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .left }, &s));
     // Esc → close + hide.
     try std.testing.expectEqual(Action.close, handle(.{ .key = .escape }, &s));
     try std.testing.expect(!s.open);
@@ -1330,7 +1321,7 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     var out: std.ArrayList(draw.Op) = .empty;
 
     var s = State{};
-    try view(&s, no_sections, &.{}, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &.{}, no_items, test_props, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len); // 닫힘
 
     s.show();
@@ -1338,10 +1329,10 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
         .{ .label = "Cursor blink", .kind = .{ .toggle = true } },
         .{ .label = "Font size", .kind = .{ .slider = .{ .value = 512, .min = 1, .max = 512 } } }, // ratio=1 → 채움 op
     };
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
-    // tui: 위젯이 모두 셀 정렬 text(quad 아님 — paintRectBg 셀 번짐·선택 하이라이트 가림 회피). frame(quad)=1,
-    // 제목=1. 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + slider 트랙 text + 채움 text)=3.
-    try std.testing.expect(out.items[0] == .quad); // 박스 bg(외곽선 별도 op 없음)
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
+    // tui(border 0): 위젯이 모두 셀 정렬 text(quad 아님). frame(quad)=1, 제목=1, 검색힌트=1.
+    // 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + 입력 박스 값 text)=2. 마지막=내비 힌트 1줄.
+    try std.testing.expect(out.items[0] == .quad); // 박스 bg
     try std.testing.expect(out.items[1] == .text); // 제목
     try std.testing.expectEqualStrings("/ 검색", out.items[2].text.runs[0].text); // 검색 진입점 힌트(제목 우측, muted)
     try std.testing.expect(out.items[3] == .fill); // 행0 선택 하이라이트(셀 bg)
@@ -1349,63 +1340,52 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     try std.testing.expect(out.items[5] == .text); // toggle 트랙(muted) — quad 아님
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[5].text.role);
     try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[6].text.role); // toggle knob on(앰버)
-    // 행1: 라벨 + slider 트랙 text(muted) + 채움 text(accent) + 현재 값 text(우측, surface_fg).
+    // 행1(number 입력 박스, tui=border 0 → 값 text만): 라벨 + 현재 값 "512"(surface_fg). 슬라이더 트랙/채움 없음.
     try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[8].text.role); // slider 트랙
-    // slider 값 text 뒤에 하단 힌트 4조각이 본문 op 뒤로 붙는다: "⇥ "/"섹션"/" ⇄ "/"설정". 폼 모드(기본)라
-    // 활성 영역인 "설정"만 accent, 반대편 "섹션"·구분자는 muted.
-    try std.testing.expectEqualStrings("설정", out.items[out.items.len - 1].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 1].text.role); // 활성 영역(폼)
-    try std.testing.expectEqualStrings("섹션", out.items[out.items.len - 3].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[out.items.len - 3].text.role); // 비활성(섹션)
-    // 본문 마지막 2개: slider 채움 █(accent, len-6) → 현재 값 "512"(surface_fg, len-5).
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[out.items.len - 6].text.role); // slider 채움 █(앰버)
-    try std.testing.expectEqualStrings("512", out.items[out.items.len - 5].text.runs[0].text); // 현재 값 표시
-    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[out.items.len - 5].text.role);
+    try std.testing.expectEqualStrings("512", out.items[8].text.runs[0].text); // 입력 박스 안 현재 값
+    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[8].text.role);
+    // 마지막: 화살표 내비 힌트 한 줄(muted) — 옛 "⇥ 섹션 ⇄ 설정" Tab 힌트 대체.
+    const hint = out.items[out.items.len - 1];
+    try std.testing.expect(hint == .text);
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, hint.text.role);
+    try std.testing.expect(std.mem.indexOf(u8, hint.text.runs[0].text, "섹션") != null);
 }
 
-test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, slider 드래그=.slider_set+pending_ratio, 라벨=.selection_changed" {
+test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, number(입력박스) 클릭=.toggle(편집 진입), 라벨=.selection_changed" {
     const tk = testTokens();
     var s = State{};
     s.show();
     const rows = [_]FieldRow{
         .{ .label = "A", .kind = .{ .toggle = false } },
-        .{ .label = "Size", .kind = .{ .slider = .{ .value = 1, .min = 1, .max = 100 } } },
+        .{ .label = "Size", .kind = .{ .slider = .{ .value = 1, .min = 1, .max = 100 } } }, // 숫자 = 입력 박스 렌더
     };
     const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
 
     // 박스 밖(0,0) 좌클릭 → 닫기.
-    try std.testing.expectEqual(Action.close, handlePointer(.{ .phase = .down, .x_px = 0, .y_px = 0 }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expectEqual(Action.close, handlePointer(.{ .phase = .down, .x_px = 0, .y_px = 0 }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expect(!s.open);
 
     // 행0 toggle 중앙 클릭 → 선택=0 + .toggle.
     s.show();
     const tgl = toggleRectIn(fieldControlRect(l, 0), test_props.metrics.cell_height_px, test_props.metrics.cell_width_px);
-    try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl.x + 4), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl.x + 4), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
 
-    // 행1 slider 막대 우측 끝 근처 down → 선택=1 + 드래그 시작 + .slider_set + pending_ratio≈1. 막대는 control 열에서
-    // 우측 값 자리(slider_value_cols)를 뺀 부분이라 그 끝(bar 우단)을 클릭한다(값 텍스트 영역이 아니라).
+    // 행1 숫자 입력 박스(control 열) 클릭 → 선택=1 + .toggle(platform이 현재값으로 편집 진입). 슬라이더 드래그 없음.
     const c1 = fieldControlRect(l, 1);
-    const bar1 = sliderBarRect(c1, test_props.metrics.cell_width_px);
-    const right_x: f64 = @floatFromInt(bar1.x + @as(i32, @intCast(bar1.w)) - 2);
     const mid_y: f64 = @floatFromInt(c1.y + 4);
-    try std.testing.expectEqual(Action.slider_set, handlePointer(.{ .phase = .down, .x_px = right_x, .y_px = mid_y }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(c1.x + 4), .y_px = mid_y }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);
-    try std.testing.expect(s.dragging);
-    try std.testing.expect(s.pending_ratio > 0.9);
+    try std.testing.expect(!s.dragging); // 드래그 상태 안 생김(슬라이더 제거)
 
-    // 드래그 move(왼쪽으로) → .slider_set + pending_ratio 작아짐.
-    try std.testing.expectEqual(Action.slider_set, handlePointer(.{ .phase = .move, .x_px = @floatFromInt(c1.x + 2), .y_px = mid_y }, no_sections, &rows, test_props, &tk, &s));
-    try std.testing.expect(s.pending_ratio < 0.1);
-
-    // up → 드래그 종료(소비).
-    try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .up, .x_px = right_x, .y_px = mid_y }, no_sections, &rows, test_props, &tk, &s));
-    try std.testing.expect(!s.dragging);
+    // move → 소비(드래그 추적 없음).
+    try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .move, .x_px = @floatFromInt(c1.x + 2), .y_px = mid_y }, no_sections, &rows, no_items, test_props, &tk, &s));
+    // up → 소비.
+    try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .up, .x_px = @floatFromInt(c1.x + 2), .y_px = mid_y }, no_sections, &rows, no_items, test_props, &tk, &s));
 
     // 행0 폼 라벨 영역 클릭(form_x — control 왼쪽, 위젯 밖) → .selection_changed.
     const c0 = fieldControlRect(l, 0);
-    try std.testing.expectEqual(Action.selection_changed, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c0.y + 4) }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expectEqual(Action.selection_changed, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c0.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
 }
 
@@ -1421,48 +1401,46 @@ test "settings handlePointer: 제목 행 클릭 → 검색 시작(.search_change
 
     // 검색이 아닐 때 제목 행 클릭 → 검색 시작(키 `/`와 같은 경로).
     try std.testing.expect(!s.searching);
-    try std.testing.expectEqual(Action.search_changed, handlePointer(.{ .phase = .down, .x_px = tx, .y_px = ty + 2 }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expectEqual(Action.search_changed, handlePointer(.{ .phase = .down, .x_px = tx, .y_px = ty + 2 }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expect(s.searching);
 
     // 검색 중 제목(검색창) 재클릭 → 검색 재시작 안 함(제목 클릭 게이트가 !searching이라 통과 → nav/form hit-test = .consumed).
-    try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .down, .x_px = tx, .y_px = ty + 2 }, no_sections, &rows, test_props, &tk, &s));
+    try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .down, .x_px = tx, .y_px = ty + 2 }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expect(s.searching);
 }
 
-test "settings nav 키보드: Tab 폼↔네비 토글 + ↑↓ 섹션 + Enter 폼 복귀" {
+test "settings nav 키보드: ←→ 섹션 전환(정지/전진) + ↑↓ 행 + Tab 무동작" {
+    // 새 모델: ←→=섹션 전환(Tab 폼↔네비 토글 제거), ↑↓=행 이동. 섹션 전환은 selected를 리셋한다.
     var s = State{};
     s.show();
     s.section = 1;
     s.count = 3;
-    try std.testing.expect(!s.nav_focused); // 폼 모드로 시작
+    s.selected = 2;
 
-    // 폼 모드 Tab → 좌측 네비 진입
-    _ = handle(.{ .key = .tab }, &s);
-    try std.testing.expect(s.nav_focused);
-
-    // 네비 ↓ → 섹션 +1, 네비 모드 유지(selectSection이 nav_focused를 안 건드림)
-    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .down }, &s));
+    // → → 섹션 +1(전진) + selected 리셋.
+    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .right }, &s));
     try std.testing.expectEqual(@as(usize, 2), s.section);
-    try std.testing.expect(s.nav_focused);
+    try std.testing.expectEqual(@as(usize, 0), s.selected);
 
-    // 네비 ↑ → 섹션 -1
-    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .up }, &s));
+    // ← → 섹션 -1.
+    s.count = 3;
+    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .left }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.section);
 
-    // 첫 섹션에서 ↑ → 정지(consumed, 섹션 불변)
+    // 첫 섹션에서 ← → 정지(consumed, 섹션 불변).
     s.section = 0;
-    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .up }, &s));
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .left }, &s));
     try std.testing.expectEqual(@as(usize, 0), s.section);
 
-    // Enter → 폼 복귀
-    _ = handle(.{ .key = .enter }, &s);
-    try std.testing.expect(!s.nav_focused);
+    // ↑↓ = 행 이동(섹션 불변).
+    s.count = 3;
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
+    try std.testing.expectEqual(@as(usize, 1), s.selected);
+    try std.testing.expectEqual(@as(usize, 0), s.section);
 
-    // Tab 토글: 폼 → 네비 → 폼
-    _ = handle(.{ .key = .tab }, &s);
-    try std.testing.expect(s.nav_focused);
-    _ = handle(.{ .key = .tab }, &s);
-    try std.testing.expect(!s.nav_focused);
+    // Tab = 무동작(폼↔네비 토글 제거).
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .tab }, &s));
+    try std.testing.expectEqual(@as(usize, 0), s.section);
 }
 
 test "settings nav: 섹션 라벨 렌더(선택 강조) + 네비 클릭 → section_changed·section 전환·selected 리셋" {
@@ -1474,7 +1452,7 @@ test "settings nav: 섹션 라벨 렌더(선택 강조) + 네비 클릭 → sect
     s.show();
     const rows = [_]FieldRow{.{ .label = "A", .kind = .{ .toggle = false } }};
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, &test_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, &test_sections, &rows, no_items, test_props, &tk, arena, &out);
     // 좌측 네비 섹션 라벨이 ops에 그려진다(선택 섹션 0은 accent_bar, 나머지 surface_fg).
     var found_font = false;
     var found_cursor = false;
@@ -1490,13 +1468,13 @@ test "settings nav: 섹션 라벨 렌더(선택 강조) + 네비 클릭 → sect
     const l = computeLayout(&test_sections, &rows, s.selected, test_props, &tk).?;
     const ny: f64 = @floatFromInt(modal_box.rowY(l.box, l.first_field_row + 1));
     s.selected = 0;
-    const act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 4), .y_px = ny + 4 }, &test_sections, &rows, test_props, &tk, &s);
+    const act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 4), .y_px = ny + 4 }, &test_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.section_changed, act);
     try std.testing.expectEqual(@as(usize, 1), s.section);
     try std.testing.expectEqual(@as(usize, 0), s.selected);
 
     // 같은 섹션(1) 재클릭 → selection_changed(부수효과 없음).
-    const act2 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 4), .y_px = ny + 4 }, &test_sections, &rows, test_props, &tk, &s);
+    const act2 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 4), .y_px = ny + 4 }, &test_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, act2);
     try std.testing.expectEqual(@as(usize, 1), s.section);
 }
@@ -1553,7 +1531,7 @@ test "settings 좁은 창 → 렌더 안 함(겹침 회피), 편집 중 다른 �
     // [1][3] 좁은 창: form_cols <= ctrl_cols면 computeLayout=null → view 무동작(위젯이 라벨 위로 겹쳐 그려지지 않게).
     const narrow = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 160, .backing_height_px = 600 } };
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, &test_sections, &rows, narrow, &tk, arena, &out);
+    try view(&s, &test_sections, &rows, no_items, narrow, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len); // 너무 좁아 안 그림
 
     // [11] 편집 bleed: text 행 편집 중 다른 행(toggle) 클릭 → 편집 종료(버퍼가 안 샘).
@@ -1563,7 +1541,7 @@ test "settings 좁은 창 → 렌더 안 함(겹침 회피), 편집 중 다른 �
     try std.testing.expect(s.editing);
     const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
     const c1 = fieldControlRect(l, 1); // 행1(toggle)
-    _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c1.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c1.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expect(!s.editing); // 다른 행 클릭 → 편집 종료
 }
 
@@ -1579,7 +1557,7 @@ test "settings color: 스와치+hex 렌더, 스와치 클릭→toggle(프리셋 
 
     // view: 스와치(literal RGB) + hex 텍스트.
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var has_swatch = false;
     var has_hex = false;
     for (out.items) |op| {
@@ -1591,13 +1569,13 @@ test "settings color: 스와치+hex 렌더, 스와치 클릭→toggle(프리셋 
     // handlePointer: 스와치 영역 클릭 → .toggle(platform이 cycleColor).
     const l = computeLayout(no_sections, &rows, 0, test_props, &tk).?;
     const ctrl = fieldControlRect(l, 0);
-    const sw_act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(ctrl.x + 2), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    const sw_act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(ctrl.x + 2), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.toggle, sw_act);
     try std.testing.expect(!s.editing); // 스와치 클릭은 편집 아님
 
     // hex 영역 클릭 → 인라인 편집 시작(현재 hex 시드).
     const hx = color.hexX(ctrl, test_props.metrics.cell_width_px) + 4;
-    const hex_act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(hx), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    const hex_act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(hx), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, hex_act);
     try std.testing.expect(s.editing);
     try std.testing.expectEqualStrings("#ff0000", s.editText());
@@ -1618,7 +1596,7 @@ test "settings palette_grid: 16 스와치 + 선택 셀 테두리·hex 렌더, �
 
     // view: 16 스와치(색은 안 가림 — 선택 셀 위에 fill/border 안 얹음) + "2  #abcdef"(선택 인덱스 + hex) 텍스트.
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var swatch_count: usize = 0;
     var has_sel_label = false;
     for (out.items) |op| {
@@ -1644,14 +1622,14 @@ test "settings palette_grid: 16 스와치 + 선택 셀 테두리·hex 렌더, �
     const l = computeLayout(no_sections, &rows, 0, test_props, &tk).?;
     const grid = paletteGridRect(l, 0);
     const sw5 = paletteSwatchRect(grid, 5, test_props.metrics.cell_width_px, test_props.metrics.cell_height_px);
-    const a1 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(sw5.x + 2), .y_px = @floatFromInt(sw5.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    const a1 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(sw5.x + 2), .y_px = @floatFromInt(sw5.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, a1);
     try std.testing.expectEqual(@as(usize, 5), s.grid_cell);
     try std.testing.expect(!s.editing);
 
     // hex 영역 클릭 → 선택 셀(5) 인라인 편집 시드(cells[5].hex="#000000").
     const hx = paletteHexX(grid, test_props.metrics.cell_width_px) + 4;
-    const a2 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(hx), .y_px = @floatFromInt(grid.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    const a2 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(hx), .y_px = @floatFromInt(grid.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, a2);
     try std.testing.expect(s.editing);
     try std.testing.expectEqualStrings("#000000", s.editText());
@@ -1689,7 +1667,7 @@ test "settings HSV picker: openPicker 시드·SV/hue 스와치 렌더·←→↑
 
     // view(picking): SV 그리드(16×8) + hue(16) + 미리보기(1) 스와치 + 마커 ▾ 2개 + 도움말 텍스트.
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var swatch_count: usize = 0;
     var marker_count: usize = 0;
     var has_help = false;
@@ -1727,18 +1705,18 @@ test "settings HSV picker: openPicker 시드·SV/hue 스와치 렌더·←→↑
     s.openPicker(.{ .r = 255, .g = 0, .b = 0 });
     const box = pickerLayout(test_props, &tk).?;
     const sw_px: i32 = @intCast(pick_swatch_w * box.cw);
-    const pa = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x), .y_px = @floatFromInt(modal_box.rowY(box, 1)) }, no_sections, &rows, test_props, &tk, &s);
+    const pa = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x), .y_px = @floatFromInt(modal_box.rowY(box, 1)) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, pa);
     try std.testing.expectEqual(@as(u8, 0), s.pick_s); // 좌단 = 채도 0
     try std.testing.expectEqual(@as(u8, 100), s.pick_v); // 상단 = 명도 100
 
     // hue 스트립 col 8 클릭 → h = hueForCol(8).
-    const ha = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x + 8 * sw_px + 1), .y_px = @floatFromInt(modal_box.rowY(box, pick_hue_row) + 2) }, no_sections, &rows, test_props, &tk, &s);
+    const ha = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(box.inner_x + 8 * sw_px + 1), .y_px = @floatFromInt(modal_box.rowY(box, pick_hue_row) + 2) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, ha);
     try std.testing.expectEqual(hueForCol(8), s.pick_h);
 
     // 박스 밖 클릭 → picker 취소(폼 복귀).
-    const oa = handlePointer(.{ .phase = .down, .x_px = -10, .y_px = -10 }, no_sections, &rows, test_props, &tk, &s);
+    const oa = handlePointer(.{ .phase = .down, .x_px = -10, .y_px = -10 }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, oa);
     try std.testing.expect(!s.picking);
 }
@@ -1787,13 +1765,13 @@ test "settings HSV picker 포인터 sub-cell: SV 그리드 중앙 클릭 → s�
     // SV 그리드 **중앙** 클릭 → 좌→우 채도 0~100의 중앙=50, 위→아래 명도 100~0의 중앙=50. 셀 경계와 무관(연속).
     const cx: f64 = @as(f64, @floatFromInt(box.inner_x)) + sw_px * @as(f64, @floatFromInt(pick_sv_cols)) / 2.0;
     const cy: f64 = @as(f64, @floatFromInt(modal_box.rowY(box, 1))) + ch_px * @as(f64, @floatFromInt(pick_sv_rows)) / 2.0;
-    const pa = handlePointer(.{ .phase = .down, .x_px = cx, .y_px = cy }, no_sections, &rows, test_props, &tk, &s);
+    const pa = handlePointer(.{ .phase = .down, .x_px = cx, .y_px = cy }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, pa);
     try std.testing.expectEqual(@as(u8, 50), s.pick_s);
     try std.testing.expectEqual(@as(u8, 50), s.pick_v);
     // SV 그리드 우측 끝 안쪽(박스 내) 드래그 → 채도≈100(연속 추적). down이 dragging을 켰으므로 move가 값 추적.
     const right_x: f64 = @as(f64, @floatFromInt(box.inner_x)) + sw_px * @as(f64, @floatFromInt(pick_sv_cols)) - 1.0;
-    const pb = handlePointer(.{ .phase = .move, .x_px = right_x, .y_px = cy }, no_sections, &rows, test_props, &tk, &s);
+    const pb = handlePointer(.{ .phase = .move, .x_px = right_x, .y_px = cy }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, pb);
     try std.testing.expect(s.pick_s >= 99); // 우측 끝 ≈ 100
 }
@@ -1885,7 +1863,7 @@ test "settings 검색: '/'로 시작·char 쿼리·Backspace·↑↓ 나비·Ent
     s.appendSearchCp('o');
     const rows2 = [_]FieldRow{.{ .label = "Font size", .kind = .{ .toggle = true } }};
     var out2: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows2, test_props, &tk2, arena, &out2);
+    try view(&s, no_sections, &rows2, no_items, test_props, &tk2, arena, &out2);
     var saw_search = false;
     for (out2.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "검색: fo") != null and op.text.role == .accent_bar) {
         saw_search = true;
@@ -1908,7 +1886,7 @@ test "settings 검색 IME 조합(preedit): query 뒤에 조합 글자 표시 + c
 
     const rows = [_]FieldRow{.{ .label = "appearance", .kind = .{ .toggle = true } }};
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     // "검색: a"(확정) + "가"(조합) 두 text op이 accent로 뜬다.
     var saw_committed = false;
     var saw_preedit = false;
@@ -1963,7 +1941,7 @@ test "settings 안내 배너(§6.9): message가 있으면 힌트 줄 대신 폼 
 
     // 배너 없음: 힌트 "⇥ 섹션 ⇄ 설정"이 보인다.
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var saw_hint = false;
     for (out.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "섹션") != null) {
         saw_hint = true;
@@ -1974,7 +1952,7 @@ test "settings 안내 배너(§6.9): message가 있으면 힌트 줄 대신 폼 
     s.setMessage("이 키는 전역 단축키로 등록할 수 없습니다");
     try std.testing.expectEqualStrings("이 키는 전역 단축키로 등록할 수 없습니다", s.message());
     out.clearRetainingCapacity();
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var saw_banner = false;
     var saw_hint2 = false;
     for (out.items) |op| if (op == .text) {
@@ -2007,7 +1985,7 @@ test "settings keybind: chord 표시·녹음 시 '키 입력 대기'·control �
 
     // 비녹음: 현재 chord "⌘T" 표시.
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var has_chord = false;
     for (out.items) |op| if (op == .text and std.mem.eql(u8, op.text.runs[0].text, "⌘T")) {
         has_chord = true;
@@ -2017,7 +1995,7 @@ test "settings keybind: chord 표시·녹음 시 '키 입력 대기'·control �
     // 녹음 중(선택 행): "키 입력 대기..."를 accent로.
     out.clearRetainingCapacity();
     s.recording = true;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var has_prompt = false;
     for (out.items) |op| if (op == .text and std.mem.indexOf(u8, op.text.runs[0].text, "키 입력 대기") != null and op.text.role == .accent_bar) {
         has_prompt = true;
@@ -2028,12 +2006,12 @@ test "settings keybind: chord 표시·녹음 시 '키 입력 대기'·control �
     // handlePointer: control 영역 클릭 → .toggle(platform이 recording 켬).
     const l = computeLayout(no_sections, &rows, 0, test_props, &tk).?;
     const ctrl = fieldControlRect(l, 0);
-    const act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(ctrl.x + 2), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    const act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(ctrl.x + 2), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.toggle, act);
 
     // 녹음 중 다른 곳(라벨) 클릭 → 녹음 취소.
     s.recording = true;
-    _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 1), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, test_props, &tk, &s);
+    _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 1), .y_px = @floatFromInt(ctrl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expect(!s.recording);
 }
 
@@ -2048,7 +2026,7 @@ test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor f
 
     // 비편집: 현재값 text op(surface_fg), caret 없음.
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var has_value = false;
     var has_caret = false;
     for (out.items) |op| {
@@ -2060,7 +2038,7 @@ test "settings text view: 행 값 렌더, 편집 중이면 버퍼+caret(cursor f
     // 편집 중: 버퍼 text(accent_bar) + caret(cursor fill).
     out.clearRetainingCapacity();
     s.enterEdit("Menlo");
-    try view(&s, no_sections, &rows, test_props, &tk, arena, &out);
+    try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     var has_buf = false;
     has_caret = false;
     for (out.items) |op| {

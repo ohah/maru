@@ -4746,6 +4746,72 @@ pub const AppSession = struct {
     /// flip한 뒤 reapplyLoadedConfig가 appearance를 다시 resolve해 화면에 적용한다. **파일 영속(write-back)은 CS-4-4c**
     /// (updateConfigForKeys + dirty/Swift atomic write) — 지금은 세션 내 라이브 적용까지. 행 목록은 schema 순서라
     /// 컴포넌트 selected 인덱스와 일치한다(buildSettingsFields와 같은 appendBoolFields 순회).
+    /// 드롭다운 팝업이 열렸을 때 그 변형 라벨 목록(enum 변형 또는 번들 폰트). 팝업이 닫혔거나 선택 행이 enum/font가
+    /// 아니면 빈 슬라이스. settings.view/handlePointer에 dropdown_items로 주입해 팝업 목록·hit-test를 그린다.
+    fn buildSettingsDropdownItems(self: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
+        if (!self.chrome_host.settings.dropdown.open) return &.{};
+        const cf = try self.currentSectionFields(arena);
+        const sel = self.chrome_host.settings.selected;
+        const after_nums = cf.bools.len + cf.nums.len;
+        const after_enums = after_nums + cf.enums.len;
+        const after_texts = after_enums + cf.texts.len;
+        if (sel >= after_nums and sel < after_enums) {
+            const e = cf.enums[sel - after_nums];
+            return (try config_mod.schema.enumVariants(arena, self.loaded_config.config, e.key)) orelse &.{};
+        }
+        if (sel >= after_enums and sel < after_texts) {
+            const ti = sel - after_enums;
+            if (ti < cf.texts.len and std.mem.eql(u8, cf.texts[ti].key, "font.family"))
+                return &config_mod.theme.bundled_font_families;
+        }
+        return &.{};
+    }
+
+    /// 드롭다운 팝업 선택 확정(Enter/항목 클릭) — settings.dropdown.selected 변형을 config에 set + 라이브 적용 + 영속 +
+    /// 팝업 닫기. enum은 setEnumIndex, font.family는 그 폰트로 setText. 그 외 행이면 닫기만.
+    fn applyDropdownSelection(self: *AppSession) void {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        defer self.chrome_host.settings.dropdown.hide(); // 성공/실패 무관 팝업 닫기
+        const cf = self.currentSectionFields(scratch.allocator()) catch return;
+        const sel = self.chrome_host.settings.selected;
+        const idx = self.chrome_host.settings.dropdown.selected;
+        const after_nums = cf.bools.len + cf.nums.len;
+        const after_enums = after_nums + cf.enums.len;
+        const after_texts = after_enums + cf.texts.len;
+        if (sel >= after_nums and sel < after_enums) {
+            const e = cf.enums[sel - after_nums];
+            if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, idx)) {
+                // follow-system preset-light/dark는 라이브 색도 새 프리셋으로 재해석해야 한다(cycle 경로와 동일 특수 처리).
+                if (self.loaded_config.config.theme_follow_system and
+                    (std.mem.eql(u8, e.key, "theme.preset-dark") or std.mem.eql(u8, e.key, "theme.preset-light")))
+                {
+                    self.follow_applied_dark = null;
+                    self.applyFollowSystemTheme();
+                } else {
+                    self.reapplyLoadedConfig();
+                }
+                self.markConfigKeyDirty(e.key);
+            }
+            return;
+        }
+        if (sel >= after_enums and sel < after_texts) {
+            const ti = sel - after_enums;
+            if (ti < cf.texts.len and std.mem.eql(u8, cf.texts[ti].key, "font.family")) {
+                const fonts = config_mod.theme.bundled_font_families;
+                if (idx < fonts.len) {
+                    // 선택 폰트를 config arena에 dupe해 setText(라이브/직렬화가 슬라이스를 계속 읽으므로 arena 소유 — 인라인 편집 커밋과 동일).
+                    const owned = self.loaded_config.arena.allocator().dupe(u8, fonts[idx]) catch return;
+                    if (config_mod.schema.setText(&self.loaded_config.config, "font.family", owned)) {
+                        self.reapplyLoadedConfig();
+                        self.markConfigKeyDirty("font.family");
+                    }
+                }
+            }
+            return;
+        }
+    }
+
     fn toggleSelectedSetting(self: *AppSession) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
@@ -4777,39 +4843,52 @@ pub const AppSession = struct {
             return;
         }
         const after_nums = cf.bools.len + cf.nums.len;
+        if (sel >= cf.bools.len and sel < after_nums) {
+            // number 행 — 활성(클릭/Enter) = 인라인 수치 편집 시작(입력 박스, 현재값 시드). 커밋 Enter→commitSelectedText가
+            // 파싱+범위 clamp+setNumber. (프로그레스바 슬라이더 대체 — 사용자가 값을 직접 타이핑.) 시드는 표시값과 같은 포맷.
+            const ni = sel - cf.bools.len;
+            if (ni < cf.nums.len) {
+                const seed = chrome.components.settings.formatSliderValue(scratch.allocator(), cf.nums[ni].value) catch return;
+                self.chrome_host.settings.enterEdit(seed);
+            }
+            return;
+        }
         const after_enums = after_nums + cf.enums.len;
         if (sel >= after_nums and sel < after_enums) {
-            // enum(dropdown) 행 — 활성(클릭/Enter/Space) = 다음 변형 순환. theme.preset은 synthetic(특수)이라 별도 적용.
+            // enum 행 — 활성(클릭/Enter/Space) = **드롭다운 팝업 열기**(변형 목록 + 현재 인덱스에서 선택 시작). 선택 확정은
+            // dropdown_accept → applyDropdownSelection. theme.preset은 synthetic(스키마 enum 아님)이라 팝업 대신 프리셋 순환(특수).
             const e = cf.enums[sel - after_nums];
             if (std.mem.eql(u8, e.key, "theme.preset")) {
                 self.applyThemePreset(1);
-            } else if (config_mod.schema.cycleEnum(&self.loaded_config.config, e.key, 1)) {
-                // follow-system이 켜져 있을 때 그 프리셋 선택(theme.preset-light/dark)을 바꾸면 라이브 색도 새 프리셋으로
-                // 다시 적용해야 한다 — reapplyLoadedConfig만으론 config.theme가 옛 프리셋 색이라 안 바뀐다(F2-9 리뷰 라운드2).
-                // 게이트를 열고(follow_applied_dark=null) applyFollowSystemTheme로 현재 외관 프리셋을 재해석한다. 그 외 enum은 일반 경로.
-                if (self.loaded_config.config.theme_follow_system and
-                    (std.mem.eql(u8, e.key, "theme.preset-dark") or std.mem.eql(u8, e.key, "theme.preset-light")))
-                {
-                    self.follow_applied_dark = null;
-                    self.applyFollowSystemTheme();
-                } else {
-                    self.reapplyLoadedConfig();
-                }
-                self.markConfigKeyDirty(e.key);
+                return;
             }
+            const variants = (config_mod.schema.enumVariants(scratch.allocator(), self.loaded_config.config, e.key) catch null) orelse return;
+            const cur_idx = config_mod.schema.enumIndex(self.loaded_config.config, e.key) orelse 0;
+            self.chrome_host.settings.dropdown.show(variants.len, cur_idx);
+            self.metal_dirty = true;
             return;
         }
         const after_texts = after_enums + cf.texts.len;
         if (sel >= after_enums and sel < after_texts) {
-            // text 행 — 활성(클릭/Enter) = 인라인 편집 시작(현재값으로 시드). 커밋은 Enter→commitSelectedText.
-            // 예외: window.background-image는 절대경로 타이핑이 불편하므로 활성 시 파일 선택창을 연다(Swift NSOpenPanel,
-            // PNG). 고른 경로는 providePickedFile로 적용된다. 지우기는 그 행 Backspace(deleteSelectedSettingRow). (사용자 요청)
+            // text 행 — 활성(클릭/Enter). font.family는 **번들 폰트 드롭다운 팝업**(선택 목록), window.background-image는
+            // 파일 선택창, 나머지는 인라인 편집 시작(현재값 시드). 커밋은 Enter→commitSelectedText.
             const ti = sel - after_enums;
             if (ti < cf.texts.len) {
-                if (std.mem.eql(u8, cf.texts[ti].key, "window.background-image"))
-                    self.file_pick_pending = true
-                else
+                const tkey = cf.texts[ti].key;
+                if (std.mem.eql(u8, tkey, "font.family")) {
+                    const fonts = config_mod.theme.bundled_font_families;
+                    var cur_idx: usize = 0; // 현재값이 목록 안이면 그 인덱스, 밖(커스텀 폰트)이면 0에서 시작
+                    for (fonts, 0..) |fam, i| if (std.mem.eql(u8, fam, cf.texts[ti].value)) {
+                        cur_idx = i;
+                        break;
+                    };
+                    self.chrome_host.settings.dropdown.show(fonts.len, cur_idx);
+                    self.metal_dirty = true;
+                } else if (std.mem.eql(u8, tkey, "window.background-image")) {
+                    self.file_pick_pending = true;
+                } else {
                     self.chrome_host.settings.enterEdit(cf.texts[ti].value);
+                }
             }
             return;
         }
@@ -4882,6 +4961,20 @@ pub const AppSession = struct {
             }
             return;
         };
+        // number 행(bools.len..after_nums): 입력 박스 편집 버퍼를 f64로 파싱해 setNumber(범위 clamp) + 라이브 적용 + 영속.
+        // 파싱 실패면 값 유지(편집만 종료 — defer cancelEdit). 슬라이더 대체 경로.
+        const after_nums = cf.bools.len + cf.nums.len;
+        if (sel >= cf.bools.len and sel < after_nums) {
+            const ni = sel - cf.bools.len;
+            if (ni >= cf.nums.len) return;
+            const nkey = cf.nums[ni].key;
+            const parsed = std.fmt.parseFloat(f64, std.mem.trim(u8, self.chrome_host.settings.editText(), " ")) catch return;
+            if (config_mod.schema.setNumber(&self.loaded_config.config, nkey, parsed)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyDirty(nkey);
+            }
+            return;
+        }
         const editor = self.chrome_host.settings.editText();
         // text 행(after_enums..after_texts): shell.args·env.*는 특수 setter, 나머지 schema 텍스트(폰트 패밀리·term 등)는 setText.
         if (sel >= after_enums and sel < after_texts) {
@@ -5853,10 +5946,9 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
-            .settings_toggle => self.toggleSelectedSetting(), // 선택 행 bool flip + 라이브 적용 + 영속 예약
-            .settings_slider_set => self.applySelectedSlider(), // 슬라이더 드래그/클릭 → 값 매핑 + 적용 + 영속
-            .settings_adjust_left => self.adjustSelectedSetting(-1), // ← 한 스텝 감소(slider)
-            .settings_adjust_right => self.adjustSelectedSetting(1), // → 한 스텝 증가(slider)
+            .settings_toggle => self.toggleSelectedSetting(), // 선택 행 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color·keybind)
+            .settings_dropdown_accept => self.applyDropdownSelection(), // 드롭다운 팝업 Enter/클릭 — 선택 변형 set + 팝업 닫기 + 적용/영속
+            .settings_slider_set, .settings_adjust_left, .settings_adjust_right => {}, // (deprecated) 슬라이더 제거로 미방출
             .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더
             .settings_section_changed => {
                 // 좌측 네비 클릭 — 컴포넌트가 section·selected 갱신, platform은 새 섹션 필드 수 주입 + 재렌더.
@@ -7039,12 +7131,14 @@ pub const AppSession = struct {
             defer arena_state.deinit();
             const fields = self.buildSettingsFields(arena_state.allocator()) catch return;
             const labels = self.buildSettingsSectionLabels(arena_state.allocator()) catch return;
+            const items = self.buildSettingsDropdownItems(arena_state.allocator()) catch return; // 드롭다운 팝업 열림 시 변형 목록(itemAt hit-test)
             const tk = self.buildChromeTokens();
             const ev = chromePointerFromMouse(kind, x_px, y_px, button, mods);
-            const act = chrome.components.settings.handlePointer(ev, labels, fields, self.buildChromeProps(), &tk, &self.chrome_host.settings);
+            const act = chrome.components.settings.handlePointer(ev, labels, fields, items, self.buildChromeProps(), &tk, &self.chrome_host.settings);
             self.dispatchChromeAction(switch (act) {
                 .close => .settings_close,
                 .toggle => .settings_toggle,
+                .dropdown_accept => .settings_dropdown_accept, // 팝업 항목 클릭 → 변형 적용
                 .slider_set => .settings_slider_set,
                 .selection_changed => .settings_selection_changed,
                 .section_changed => .settings_section_changed,
@@ -13483,7 +13577,8 @@ pub const AppSession = struct {
         if (self.chrome_host.settings.open) {
             const labels = try self.buildSettingsSectionLabels(arena); // 좌측 네비 라벨(platform 소유)
             const fields = try self.buildSettingsFields(arena); // 현재 섹션의 필드 행 주입(platform 소유)
-            try self.chrome_host.collectSettingsDraws(labels, fields, props, &tokens, arena, &draws);
+            const items = try self.buildSettingsDropdownItems(arena); // 드롭다운 팝업 열림 시 변형 목록(닫혔으면 빈)
+            try self.chrome_host.collectSettingsDraws(labels, fields, items, props, &tokens, arena, &draws);
             // 검색줄 caret을 캐시한다(sections/rows/props가 여기 있으니 추가 비용 없음) — imeCursorRect가 IME 후보창을
             // 검색줄 옆에 띄우는 데 쓴다(검색 중이 아니면 searchCaretRect가 null). notif_panel_rect 캐시 선례.
             self.settings_search_caret = chrome.components.settings.searchCaretRect(&self.chrome_host.settings, labels, fields, props, &tokens);

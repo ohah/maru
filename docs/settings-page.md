@@ -138,7 +138,7 @@ GPU rounded quad, 입력 라우팅(ChromeHost). **신규 리스크는 ① color 
 | **G2** | `dropdown.zig` 위젯(정적 목록) | 중간 | 팔레트 선택/네비 구조에서 검색 제거 |
 | **G3** | `text_input`/`number_input` 위젯 | 중간 | `overlay_input.zig`(IME·caret) 재사용 + 숫자 검증 |
 | **G4** | `keybind_input.zig`(키 캡처 recorder) | 중간 | `input.InputEvent`(OS 무관) 그대로 |
-| **G5** | `slider.zig` 위젯 | 중간 | divider `dragRatio` 패턴 + G0 pointer |
+| **G5** | ~~`slider.zig` 위젯~~ → **`input_box.zig`(숫자 직접 입력)로 대체·slider.zig 제거** | 중간 | divider `dragRatio` 패턴 + G0 pointer |
 | **G6** | 색 입력 — **1차: 16색 프리셋 + hex 텍스트(G3 재사용)**, 2차: HSV picker(RGB↔HSV + 2D 그리드) | 1차 중간 / 2차 높음 | tokens·Op.Quad 재사용. 2차는 색공간 수학 신규(§8 결정) |
 | **G7** | **세팅 페이지 셸** — 좌측 섹션 네비 + 검색 + 우측 폼 라우팅. 각 섹션을 위 위젯으로 조립, write-back(S0-1) 연결 | 중간 | modal/팔레트 레이아웃·검색 필터 재사용 |
 | **G8** | **Keybindings 섹션** — `command_catalog` 행 목록 + 인라인 리바인드 → `keybind` 직렬화(unbind·매크로 포함) | 중간 | 카탈로그가 이미 단일 출처(`command_catalog.zig`) — 행 목록 공짜 |

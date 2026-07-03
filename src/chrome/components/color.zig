@@ -1,7 +1,7 @@
 //! Color — 색 값 위젯(설정 폼의 color 행). **스와치 + hex**: 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여주고
 //! (다른 위젯은 ColorRole만 쓰지만 스와치는 값 미리보기라 원색 — config-gui §6.2 결정), 옆에 `#RRGGBB` 텍스트.
 //! 셸이 클릭/←→로 16색 프리셋을 순환하고(schema.cycleColor) hex 영역 클릭으로 인라인 편집(text 위젯 재사용)한다.
-//! State 없는 순수 함수 모듈(dropdown/slider 선례) — 값·편집 버퍼는 셸이 들고 rect+rgb+text만 받아 그린다.
+//! State 없는 순수 함수 모듈(dropdown/input_box 선례) — 값·편집 버퍼는 셸이 들고 rect+rgb+text만 받아 그린다.
 //! 단일 출처: docs/config-gui.md §6.2, docs/chrome-strategy.md §5.4.
 
 const std = @import("std");

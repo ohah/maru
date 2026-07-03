@@ -6,7 +6,7 @@
 const std = @import("std");
 
 /// 세팅 GUI 위젯 종류(타입에서 유추하되 명시 override). CS-4+ 제너릭 렌더러가 소비.
-pub const Widget = enum { auto, toggle, number, slider, dropdown, text, color };
+pub const Widget = enum { auto, toggle, number, dropdown, text, color };
 
 /// 세팅 페이지 좌측 섹션(GUI 그룹). 단일 출처는 settings-page.md §1. `.global_hotkey`는 schema 필드가 없는
 /// 특수 섹션(전역 OS 단축키 녹음 행만 — app_session이 강제로 목록에 넣고 라벨을 준다).
@@ -804,11 +804,11 @@ pub const QuickTerminalConfig = struct {
     minimal_tabs: bool = false,
 
     pub const schema = .{ // namespace quick-terminal(dashed). height_fraction/width_fraction은 키가 height/width라 key_seg 명시.
-        .height_fraction = Meta{ .key_seg = "height", .doc = "두께 비율(화면 대비)", .range = .{ 0.1, 1.0 }, .widget = .slider, .section = .quick_terminal },
+        .height_fraction = Meta{ .key_seg = "height", .doc = "두께 비율(화면 대비)", .range = .{ 0.1, 1.0 }, .widget = .number, .section = .quick_terminal },
         // width 기본 0은 "center 가로를 height와 같게(정사각)"라는 **유효 sentinel**이라 range 하한을 0으로 둔다
         // (0.1로 두면 기본 0을 직렬화→재파싱할 때 spurious diagnostic이 난다 — code-review 후속). height는 sentinel이
         // 없어 0.1~1.0 그대로. 0<x<0.1(아주 좁은 폭)도 forgiving하게 허용(padding 0 허용과 같은 결).
-        .width_fraction = Meta{ .key_seg = "width", .doc = "center 가로 비율(0=height 따라감)", .range = .{ 0, 1.0 }, .widget = .slider, .section = .quick_terminal },
+        .width_fraction = Meta{ .key_seg = "width", .doc = "center 가로 비율(0=height 따라감)", .range = .{ 0, 1.0 }, .widget = .number, .section = .quick_terminal },
         .auto_hide = Meta{ .doc = "포커스 잃으면 자동 숨김", .widget = .toggle, .section = .quick_terminal },
         .screen = Meta{ .doc = "어느 화면에 띄울지", .widget = .dropdown, .section = .quick_terminal },
         .position = Meta{ .doc = "어느 가장자리에서 나올지", .widget = .dropdown, .section = .quick_terminal },
@@ -960,11 +960,11 @@ pub const Config = struct {
         .window_padding_right = Meta{ .key = "window.padding-right", .doc = "오른쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = "아래 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_left = Meta{ .key = "window.padding-left", .doc = "왼쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
-        .window_opacity = Meta{ .key = "window.opacity", .doc = "창 배경 투명도(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
+        .window_opacity = Meta{ .key = "window.opacity", .doc = "창 배경 투명도(0~1)", .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
         .render_frame_rate = Meta{ .key = "render.frame-rate", .doc = "앱 주사율(Hz)", .range = .{ render_frame_rate_min, render_frame_rate_max }, .widget = .number, .section = .window },
         .window_background_image = Meta{ .key = "window.background-image", .doc = "배경 이미지 PNG 경로", .widget = .text, .section = .window },
-        .window_blur = Meta{ .key = "window.blur", .doc = "창 뒤 배경 블러 반경(px, 0=끔, opacity<1일 때만)", .range = .{ 0, 100 }, .widget = .slider, .section = .window },
-        .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = "비활성 split pane 디밍(0~1)", .range = .{ 0.0, 1.0 }, .widget = .slider, .section = .window },
+        .window_blur = Meta{ .key = "window.blur", .doc = "창 뒤 배경 블러 반경(px, 0=끔, opacity<1일 때만)", .range = .{ 0, 100 }, .widget = .number, .section = .window },
+        .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = "비활성 split pane 디밍(0~1)", .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
         .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = "split 경계선 두께(pt, 0=숨김)", .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },
         .term = Meta{ .key = "term", .doc = "$TERM 값", .widget = .text, .section = .terminal },
     };
@@ -1103,7 +1103,7 @@ pub const ScrollConfig = struct {
     multiplier: f32 = 1.0,
 
     pub const schema = .{ // 키: scroll.multiplier (f32 range)
-        .multiplier = Meta{ .doc = "휠 스크롤 배수", .range = .{ 0.1, 10.0 }, .widget = .slider, .section = .input },
+        .multiplier = Meta{ .doc = "휠 스크롤 배수", .range = .{ 0.1, 10.0 }, .widget = .number, .section = .input },
     };
 };
 

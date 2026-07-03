@@ -10222,16 +10222,25 @@ pub const AppSession = struct {
     /// core.title/cwd free(OSC 0/2/7)와 경합하지 않게 owned 복사본을 만든다(io-render-threading PR3). 매 tick 호출.
     /// 라이브 windowTitle(OSC 제목 > cwd basename)이 비면 캐시를 비워 termLabel이 정적 surface.title로 폴백한다.
     /// OOM이면 append만 무시(라벨이 잠깐 비어 surface.title 폴백 — 안전). live_pty 미초기화 Term은 건너뛴다.
+    ///
+    /// **P4-1(§12)**: 매 tick 전-Term lock(가장 넓은 팬아웃)을 없앤다 — 리더가 title/cwd 바꿀 때만 올리는
+    /// `core.title_generation`을 **lock 없이** 읽어(atomic acquire-load), 직전 반영값(`term.last_title_gen`)과 **다를 때만**
+    /// lock+복사한다. 제목은 드물게 바뀌므로 대부분 tick은 N atomic load(수 ns)만·lock 0회. lock 아래에서 generation을 다시
+    /// 읽어(리더는 같은 lock 아래 bump하므로 hold 중 안정) 방금 복사한 제목의 정확한 세대를 last_title_gen에 기록한다.
     fn syncAutoTitles(self: *AppSession) void {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized) continue;
+                    const gen = term.surface.core.title_generation.load(.acquire);
+                    if (gen == term.last_title_gen) continue; // 제목/cwd 미변경 — lock·복사 skip
                     term.surface.lockCore(self.io);
                     defer term.surface.unlockCore(self.io);
                     const live = term.surface.core.windowTitle();
                     term.auto_title.clearRetainingCapacity();
                     if (live.len > 0) term.auto_title.appendSlice(self.allocator, live) catch {};
+                    // lock hold 중엔 리더가 못 bump(같은 lock 대기) → 이 값이 방금 복사한 제목의 세대. 다음 tick 비교 기준.
+                    term.last_title_gen = term.surface.core.title_generation.load(.acquire);
                 }
             }
         }
@@ -21481,6 +21490,45 @@ test "사이드바·탭 라벨이 라이브 OSC 제목을 반영한다(복원된
     session.syncAutoTitles();
     term.surface.custom_name = try allocator.dupe(u8, "myproj"); // destroyTerm(session.deinit)이 해제
     try std.testing.expectEqualStrings("myproj", workspaceLabel(tab));
+}
+
+test "P4-1 title-generation: syncAutoTitles가 제목 미변경 tick에서 lock/복사를 건너뛴다" {
+    // §12 스냅샷 통합 P4-1: 매 tick 전-Term lock을 없애고, core.title_generation이 바뀐 term만 재복사한다.
+    // 이 테스트는 (1) 제목 변경 시 복사, (2) **미변경 tick 스킵**(auto_title에 심은 sentinel이 재복사로 안 덮임),
+    // (3) 재변경 시 다시 복사를 결정론으로 고정한다. (기존 라벨 테스트가 "변경→반영"을, 이건 "미변경→skip"을 잠금.)
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = session.tabs.items[0].activePane().activeTerm();
+
+    // 초기: generation 0 == last_title_gen 0 → skip(windowTitle 빈, auto_title 빈).
+    session.syncAutoTitles();
+    try std.testing.expectEqual(@as(usize, 0), term.auto_title.items.len);
+
+    // 제목 설정 → generation bump → 복사.
+    try term.surface.core.write("\x1b]2;claude\x1b\\");
+    session.syncAutoTitles();
+    try std.testing.expectEqualStrings("claude", term.auto_title.items);
+
+    // **미변경 tick 스킵 증명**: auto_title에 sentinel을 심고 syncAutoTitles → gen 미변경이라 재복사 안 함(sentinel 유지).
+    term.auto_title.clearRetainingCapacity();
+    try term.auto_title.appendSlice(allocator, "SENTINEL");
+    session.syncAutoTitles();
+    try std.testing.expectEqualStrings("SENTINEL", term.auto_title.items); // 재복사됐다면 "claude"였을 것
+
+    // 제목 재변경 → generation bump → 다시 복사(sentinel 덮어씀).
+    try term.surface.core.write("\x1b]2;vim\x1b\\");
+    session.syncAutoTitles();
+    try std.testing.expectEqualStrings("vim", term.auto_title.items);
 }
 
 // ③a: 사이드바 우측 경계를 드래그하면 폭이 바뀌는지 — 경계 호버=resize_h, down=리사이즈 시작, drag=폭 갱신,

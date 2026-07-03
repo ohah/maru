@@ -195,6 +195,7 @@ pub fn dispatchCwd(self: *TerminalCore, body: []const u8) void {
     const decoded = percentDecodeAlloc(self, raw_path) catch return; // OOM/실패면 기존 cwd 유지
     if (self.cwd) |old| self.allocator.free(old);
     self.cwd = decoded;
+    self.bumpTitleGeneration(); // cwd 변경 — title이 null이면 windowTitle(cwd basename)이 바뀌므로 라벨 재sync 유도(P4-1, §12)
     self.recordShellEvent(.cwd_changed); // 값은 currentCwd()가 권위 — 이벤트는 경계만 표시(recordShellEvent: core, pub)
 }
 

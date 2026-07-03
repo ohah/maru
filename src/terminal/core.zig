@@ -410,6 +410,12 @@ pub const TerminalCore = struct {
     // 무시). core가 소유한다. 셸/앱이 지정하면 창 제목에 우선 쓰고, 없으면 cwd basename으로 폴백한다
     // (windowTitle). 빈 제목(OSC 2 ; ST)은 해제(null)로 본다. RIS에서 공장 초기화. 그리드엔 안 보인다.
     title: ?[]u8 = null,
+    // windowTitle() 결과가 바뀔 때(title 또는 cwd 변경)마다 리더가 +1하는 generation(P4-1, docs/io-render-threading.md §12).
+    // 메인의 syncAutoTitles가 **lock 없이** 이 값을 읽어 직전 반영 값과 다를 때만 lock+windowTitle 복사한다 — 매 tick 전-Term
+    // lock을 제목이 실제 바뀐 term에만 국한(대부분 tick lock 0회). 리더는 이미 core_mutex 아래에서 bump하지만 atomic이라
+    // 메인이 무락 load 가능(fetchAdd/.release ↔ load/.acquire). windowTitle이 title??cwd_basename이므로 title/cwd 둘 중
+    // 하나만 바뀌어도 bump한다(cwd만 바뀌고 title이 있으면 결과 불변이라 한 번 헛 sync — 무해).
+    title_generation: std.atomic.Value(u32) = .init(0),
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
@@ -504,6 +510,7 @@ pub const TerminalCore = struct {
             self.allocator.free(t);
             self.title = null;
         }
+        self.bumpTitleGeneration(); // RIS가 title/cwd를 지워 windowTitle 결과가 바뀌므로 라벨 재sync 유도(P4-1)
         self.screen.cursor = .{};
         self.screen.pen = .{};
         self.screen.pending_wrap = false;
@@ -1210,8 +1217,19 @@ pub const TerminalCore = struct {
     pub fn setWindowTitle(self: *TerminalCore, text: []const u8) void {
         if (self.title) |old| self.allocator.free(old);
         self.title = null;
-        if (text.len == 0) return; // 빈 제목 = 해제
+        if (text.len == 0) {
+            self.bumpTitleGeneration(); // 빈 제목 = 해제 — windowTitle 결과가 바뀌므로 여기서도 bump
+            return;
+        }
         self.title = self.allocator.dupe(u8, text) catch null;
+        self.bumpTitleGeneration();
+    }
+
+    /// windowTitle() 결과(title 또는 cwd)가 바뀌었음을 알린다 — title_generation을 +1해 메인 syncAutoTitles가 그 term만
+    /// lock+재복사하게 한다(P4-1, §12). 리더가 core_mutex 아래 title/cwd를 바꾼 뒤 호출하지만 atomic이라 메인이 무락 load
+    /// 가능(.release ↔ .acquire). 단일 스레드(테스트·미부착)에서도 atomic add라 무해.
+    pub fn bumpTitleGeneration(self: *TerminalCore) void {
+        _ = self.title_generation.fetchAdd(1, .release);
     }
 
     /// 창 제목으로 보여줄 문자열(native 최소 — 우선순위 로직을 Zig가 소유한다). OSC 0/2로 앱이
@@ -2272,26 +2290,36 @@ test "window title: OSC 2 sets it, OSC 1 ignored, empty clears to cwd basename" 
     defer core.deinit();
 
     try std.testing.expectEqualStrings("", core.windowTitle()); // 아무것도 없으면 빈값
+    try std.testing.expectEqual(@as(u32, 0), core.title_generation.load(.monotonic)); // 초기 0(P4-1)
 
-    // cwd만 있으면 basename으로 폴백.
+    // cwd만 있으면 basename으로 폴백. windowTitle 결과가 바뀌므로 title_generation +1.
+    const g0 = core.title_generation.load(.monotonic);
     try core.write("\x1b]7;file://h/Users/me/proj\x07");
     try std.testing.expectEqualStrings("proj", core.windowTitle());
+    try std.testing.expect(core.title_generation.load(.monotonic) > g0);
 
-    // OSC 2 제목이 있으면 그게 우선(cwd basename보다).
+    // OSC 2 제목이 있으면 그게 우선(cwd basename보다). +1.
+    const g1 = core.title_generation.load(.monotonic);
     try core.write("\x1b]2;my app\x1b\\");
     try std.testing.expectEqualStrings("my app", core.windowTitle());
+    try std.testing.expect(core.title_generation.load(.monotonic) > g1);
 
-    // OSC 1(아이콘만)은 창 제목을 안 바꾼다.
+    // OSC 1(아이콘만)은 창 제목을 안 바꾼다 → generation 불변(P4-1: 헛 sync 방지).
+    const g2 = core.title_generation.load(.monotonic);
     try core.write("\x1b]1;iconname\x07");
     try std.testing.expectEqualStrings("my app", core.windowTitle());
+    try std.testing.expectEqual(g2, core.title_generation.load(.monotonic));
 
-    // 빈 OSC 2는 제목 해제 → 다시 cwd basename 폴백.
+    // 빈 OSC 2는 제목 해제 → 다시 cwd basename 폴백. +1.
     try core.write("\x1b]2;\x07");
     try std.testing.expectEqualStrings("proj", core.windowTitle());
+    try std.testing.expect(core.title_generation.load(.monotonic) > g2);
 
-    // RIS는 제목과 cwd를 모두 공장 초기화 → 빈값.
+    // RIS는 제목과 cwd를 모두 공장 초기화 → 빈값. +1.
+    const g3 = core.title_generation.load(.monotonic);
     try core.write("\x1bc");
     try std.testing.expectEqualStrings("", core.windowTitle());
+    try std.testing.expect(core.title_generation.load(.monotonic) > g3);
 }
 
 // OSC 7(VTE 사실상 표준)은 셸이 cwd를 보고하는 채널이다 — 터미널은 PTY 너머라 cwd를 모르므로

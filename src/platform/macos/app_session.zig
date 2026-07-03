@@ -35,6 +35,7 @@ const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인
 const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig"); // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
+const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
 const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
 // chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
@@ -65,7 +66,11 @@ pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
 // 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz).
 // Swift frame-loop NSTimer가 config를 읽어 cadence를 정한다.
-pub const abi_version: u32 = 95;
+pub const abi_version: u32 = 96;
+// 96: maru_macos_app_session_quick_terminal_frames + QuickTerminalFrames(extern struct, quick_terminal_geometry.zig로 분리) —
+// quick 패널 보임/숨김 사각형을 세션의 **현재** config로 매 호출 라이브 계산(위치별 가장자리 슬라이드·center 페이드, 순수
+// quick_terminal_geometry.compute + 단위 테스트). quick_terminal_config(세션-불변 스냅샷)와 달리 매 토글 재조회라 설정 GUI 변경이
+// 즉시 반영된다(퀵 터미널 위치·두께 라이브 반영, docs/config-gui.md §6.10). 새 export 1개 + 새 struct 추가 — 기존 struct offset·인자 순서 불변.
 // 95: MetalFrame.cursor_cells + cursor_fade_milli + maru_metal_renderer_draw 마지막 2인자(커서 blink **페이드**).
 // 옛 show_cursor(bool) suffix chop을 폐기하고, view()가 커서 suffix를 항상 노출한 뒤 렌더러가 cells[cell_count-cursor_cells..]를
 // 별도 pass로 cursor_fade_milli(/1000) 불투명도에 그린다(cell 셰이더 fragment에 opacity uniform buffer(1) 추가 — premultiplied
@@ -97,6 +102,11 @@ pub const QuickTerminalConfig = extern struct {
     minimal_tabs: u32, // 0/1 — minimal에서 탭 허용 여부. Swift가 quick 세션 생성 시 SessionConfig.minimal_tabs로 넘긴다.
     width_milli: u32, // center 가로 비율 × 1000. 0이면 미설정 → Swift가 height로 폴백(정사각). center 외 위치는 무시.
 };
+
+/// quick 패널 보임/숨김 사각형(C ABI). 순수 기하·정의는 quick_terminal_geometry.zig가 소유하고(세션·AppKit
+/// 없이 단위 테스트), 여기선 ABI 표면으로 re-export만 한다 — app_host_abi가 `session_mod.QuickTerminalFrames`로
+/// 참조하고 ABI 크기 대조 테스트가 C 구조체와 맞춘다.
+pub const QuickTerminalFrames = quick_terminal_geometry.Frames;
 
 /// 커맨드 카탈로그 한 항목(C ABI) — 메뉴바·커맨드 팝업이 그릴 액션. 모든 문자열은 app session 소유(arena,
 /// destroy까지 유효). `action_key`는 Swift가 선택 시 `run_action`으로 되돌려보내는 식별자(= parseAction 문자열),
@@ -9922,7 +9932,9 @@ pub const AppSession = struct {
         return term;
     }
 
-    /// quick terminal 표시 옵션(config에서 파싱). Swift가 패널 크기·화면·자동 숨김에 쓴다. 세션 동안 불변.
+    /// quick terminal 표시 옵션(config에서 파싱). Swift가 auto_hide/screen/chrome·재생성 판정에 쓴다. 이 세션의
+    /// **현재** config를 읽는 라이브 스냅샷 — Swift가 매 토글마다 다시 불러 설정 변경을 반영한다(세션-불변 아님).
+    /// 패널 사각형은 quickTerminalFrames(위치 기하)가 따로 계산한다.
     pub fn quickTerminalConfig(self: *const AppSession) QuickTerminalConfig {
         const qt = self.loaded_config.config.quick_terminal;
         return .{
@@ -9934,6 +9946,13 @@ pub const AppSession = struct {
             .minimal_tabs = if (qt.minimal_tabs) 1 else 0,
             .width_milli = @intFromFloat(@round(qt.width_fraction * 1000.0)),
         };
+    }
+
+    /// quick 패널 보임/숨김 사각형을 이 세션의 **현재** config로 계산한다(스냅샷 캐시 없음 — 매 호출 라이브).
+    /// Swift가 대상 화면 visibleFrame을 넘겨 매 토글마다 받아, 설정 GUI에서 위치·두께를 바꾸면 다음 표시에서
+    /// 바로 반영된다(quickTerminalConfig의 세션-불변과 대비). 순수 계산은 quick_terminal_geometry.compute가 담당.
+    pub fn quickTerminalFrames(self: *const AppSession, vf_x: f64, vf_y: f64, vf_w: f64, vf_h: f64) QuickTerminalFrames {
+        return quick_terminal_geometry.compute(self.loaded_config.config.quick_terminal, vf_x, vf_y, vf_w, vf_h);
     }
 
     /// 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면은 rows-1줄(한 줄 겹침)이고,
@@ -14048,6 +14067,51 @@ test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs 
     });
     try std.testing.expectEqual(true, minimal.chrome_minimal);
     try std.testing.expectEqual(true, minimal.minimal_tabs);
+}
+
+test "quickTerminalFrames/quickTerminalConfig: 설정 변경을 라이브로 반영(세션-불변 스냅샷 아님)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 이 테스트가 증명하는 것: 세션의 config를 (설정 GUI가 하듯 schema setter로) 바꾸면 quickTerminalFrames·
+    // quickTerminalConfig가 **세션 재생성 없이** 새 값을 돌려준다. Swift가 매 토글마다 이 API를 다시 불러 퀵
+    // 터미널 위치·두께·동작을 라이브로 반영하는 계약의 근거다 — 예전엔 Swift가 첫 생성 때 스냅샷을 캐시해 이미
+    // 연 퀵 터미널엔 설정 변경이 재시작 전까지 안 먹던 버그의 회귀 가드(코어 API가 라이브임을 못박아 둔다).
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 기본(top, 두께 0.45): 상단에 붙음.
+    session.loaded_config.config.quick_terminal.position = .top;
+    session.loaded_config.config.quick_terminal.height_fraction = 0.45;
+    {
+        const f = session.quickTerminalFrames(0, 0, 1000, 800);
+        try std.testing.expectEqual(@as(f64, 440), f.shown_y); // top: vf_h - h = 800-360
+        try std.testing.expectEqual(@as(u32, 0), f.is_centered);
+    }
+    // 설정 GUI가 하듯 같은 세션에서 position을 순환(top→bottom)하고 두께를 바꾼다.
+    try std.testing.expect(config_mod.schema.cycleEnum(&session.loaded_config.config, "quick-terminal.position", 1));
+    try std.testing.expect(config_mod.schema.setNumber(&session.loaded_config.config, "quick-terminal.height", 0.6));
+    {
+        // 재생성 없이 새 위치·두께가 바로 반영된다(라이브).
+        const f = session.quickTerminalFrames(0, 0, 1000, 800);
+        try std.testing.expectEqual(@as(f64, 0), f.shown_y); // bottom: 하단에 붙음
+        try std.testing.expectEqual(@as(f64, 480), f.shown_h); // 800 * 0.6
+        try std.testing.expectEqual(@as(f64, -480), f.hidden_y); // 아래로 빠짐
+    }
+    // config 스칼라(auto_hide/chrome/position)도 라이브: 바꾸면 다음 조회에 그대로 반영.
+    session.loaded_config.config.quick_terminal.auto_hide = false;
+    session.loaded_config.config.quick_terminal.chrome = .minimal;
+    const cfg = session.quickTerminalConfig();
+    try std.testing.expectEqual(@as(u32, 0), cfg.auto_hide);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(config_mod.theme.QuickTerminalChrome.minimal)), cfg.chrome);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(config_mod.theme.QuickTerminalPosition.bottom)), cfg.position);
 }
 
 // gridFromBacking·pointInRect·paneDropZone·halfRect 단위 test는 session/layout_math.zig로 이동(b1, 순수 기하).

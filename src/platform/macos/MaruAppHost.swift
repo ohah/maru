@@ -502,16 +502,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // quick 패널의 슬라이드 인/아웃 애니메이션이 진행 중인지. 포커스 잃음 자동 숨김이 애니메이션 도중·직후
     // (orderOut 시 resignKey)에 재진입해 이중 숨김하지 않게 가드한다.
     private var quickAnimating = false
-    // quick terminal 표시 옵션(config에서). ensureQuickTerminal이 채운다. screen은 'mouse'면 show마다
-    // 현재 마우스가 있는 화면으로 해석하므로 모드만 저장한다.
+    // quick terminal 표시/동작 옵션. **표시 직전 토글마다 config를 라이브로 다시 읽어**(quickPanelFrames는 Zig
+    // ABI가 매 호출 현재 config로 사각형을 계산) 설정 GUI 변경을 즉시 반영한다 — 예전처럼 첫 생성 때 스냅샷을
+    // 캐시하지 않는다. auto_hide/screen만 Swift가 들고 있으면 되고(패널 크기·위치·center 여부는 ABI가 계산),
+    // screen은 'mouse'면 show마다 현재 마우스가 있는 화면으로 해석하므로 모드만 저장한다.
     private var quickAutoHide = true
-    private var quickHeightFraction: CGFloat = 0.45
-    // center 가로 비율. 0이면 미설정 → quickHeightFraction을 따라간다(정사각). center 외 위치는 안 쓴다.
-    private var quickWidthFraction: CGFloat = 0
     private var quickScreenMode: UInt32 = UInt32(MaruAppHostQuickTerminalScreenMain.rawValue)
-    private var quickPosition: UInt32 = UInt32(MaruAppHostQuickTerminalPositionTop.rawValue)
-    // center 위치인가 — 가장자리가 없어 슬라이드(setFrame) 대신 알파 페이드로 보임/숨김을 애니메이션한다.
-    private var quickIsCentered: Bool { quickPosition == UInt32(MaruAppHostQuickTerminalPositionCenter.rawValue) }
+    // quick 세션 생성 시점의 chrome/minimal_tabs — 이 둘은 세션 생성 인자로 박혀 라이브로 못 바꾼다. 토글에서
+    // 현재 config와 비교해 달라졌으면 기존 quick 세션을 내려 새 chrome으로 재생성한다(라이브 반영의 유일한 예외).
+    private var quickCreatedChrome: UInt32 = UInt32(MaruAppHostQuickTerminalChromeFull.rawValue)
+    private var quickCreatedMinimalTabs: UInt32 = 0
+    // 표시 시점에 계산한 (숨김 사각형, center 여부). 숨김 애니메이션이 이 값을 써, 표시 이후 마우스/화면/설정이
+    // 바뀌어도 패널이 있던 화면·위치 그대로 되빠지게 한다(재계산 겨냥 오류 방지). teardown에서 nil로.
+    private var quickHideFrame: (rect: NSRect, centered: Bool)?
     // tick이 특정 surface를 명시적으로 대상 지정할 때 쓴다(이벤트가 아니라 타이머 구동이라 key 창으로 못 고름).
     // nil이면 입력 이벤트는 key 창 기준으로 surface를 고른다(이벤트는 key 창의 first responder로 전달되므로).
     private var explicitSurface: TerminalSurface?
@@ -2905,14 +2908,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if let panel = quick.window { hideQuickTerminalAnimated(panel) }
             return
         }
-        ensureQuickTerminal()
+        // 표시 직전 config를 라이브로 **한 번** 읽어 설정 변경을 반영한다(auto_hide/screen; 사각형은 quickPanelFrames가
+        // 매번 ABI로 계산). chrome/minimal_tabs는 세션 생성 시 박히므로, 바뀌었으면 기존 quick 세션을 내려
+        // ensureQuickTerminal이 새 chrome으로 재생성하게 한다(스크래치 셸은 초기화됨 — 라이브 반영의 유일한 예외).
+        // 읽은 cfg를 그대로 ensureQuickTerminal에 넘겨 생성 경로가 config를 다시 읽지 않게 한다(단일 로드).
+        let cfg = loadQuickTerminalConfig()
+        if let cfg {
+            quickAutoHide = cfg.auto_hide != 0
+            quickScreenMode = cfg.screen
+            if quick != nil, cfg.chrome != quickCreatedChrome || cfg.minimal_tabs != quickCreatedMinimalTabs {
+                tearDownQuickTerminal()
+            }
+        }
+        ensureQuickTerminal(cfg)
         guard let panel = quick?.window else { return }
         showQuickTerminalAnimated(panel)
     }
 
     /// quick terminal surface를 lazy 생성한다(첫 토글). 두 번째 app session(대화형 셸) + borderless 패널 +
-    /// Metal 뷰/렌더러를 만든다. 세션 생성 실패면 quick은 nil로 남고 토글은 무동작(앱은 정상).
-    private func ensureQuickTerminal() {
+    /// Metal 뷰/렌더러를 만든다. 세션 생성 실패면 quick은 nil로 남고 토글은 무동작(앱은 정상). config(cfg)는
+    /// 유일한 호출자 toggleQuickTerminal이 이미 로드해 넘긴다 — 여기서 다시 읽지 않는다(토글당 config 로드 1회).
+    private func ensureQuickTerminal(_ cfg: MaruAppHostQuickTerminalConfig?) {
         guard quick == nil else { return }
         let surface = makeTerminalSurface()
 
@@ -2943,20 +2959,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.metalRendererCreated = surface.metalRenderer != nil
         }
 
-        // config 옵션(높이·자동 숨김·화면·가장자리·chrome)을 먼저 읽어 둔다. 세션 동안 불변이라 생성 시 한 번.
-        // primary 세션이 같은 config 파일을 로드하므로 거기서 읽는다(primary는 시작 시 항상 존재). screen은
-        // 모드만 저장하고(mouse면 show마다 현재 마우스 화면으로 해석), 높이는 0.1~1.0으로 클램프(방어적 — Zig도
-        // 검증). chrome은 세션 생성 시 chrome_minimal로 넘겨야 하므로 create '전에' 읽는다.
+        // chrome/minimal_tabs는 세션 생성 인자로 박히므로 create '전에' 정한다. 토글이 넘긴 cfg를 그대로 쓴다
+        // (auto_hide/screen은 토글이 이미 세팅 — 여기선 재조회·재대입 없음, 중복 출처 제거). 패널 크기·위치·center
+        // 여부도 캐시하지 않는다 — quickPanelFrames가 매 표시마다 Zig ABI로 현재 config에서 계산해 라이브 반영한다.
         var chromeMinimal: UInt32 = 0
         var minimalTabs: UInt32 = 0
-        if let cfg = loadQuickTerminalConfig() {
-            quickHeightFraction = max(0.1, min(1.0, CGFloat(cfg.height_milli) / 1000.0))
-            quickWidthFraction = CGFloat(cfg.width_milli) / 1000.0 // 0이면 미설정(center에서 height로 폴백). Zig가 0.1~1.0 검증.
-            quickAutoHide = cfg.auto_hide != 0
-            quickScreenMode = cfg.screen
-            quickPosition = cfg.position
+        if let cfg {
             chromeMinimal = (cfg.chrome == UInt32(MaruAppHostQuickTerminalChromeMinimal.rawValue)) ? 1 : 0
             minimalTabs = cfg.minimal_tabs // minimal에서 탭 허용 여부(Zig가 dispatch에서 게이트)
+            // 생성 시점 스냅샷 — 다음 토글에서 chrome/tabs가 바뀌면 재생성 판정에 쓴다.
+            quickCreatedChrome = cfg.chrome
+            quickCreatedMinimalTabs = cfg.minimal_tabs
         }
 
         // 두 번째 app session(대화형 셸) — 메인과 독립된 PTY. minimal이면 chrome_minimal=1로 사이드바·탭 바를 끄고,
@@ -3006,62 +3019,53 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return cfg
     }
 
-    /// quick 패널을 띄울 화면. screen=mouse면 현재 마우스 포인터가 있는 화면(없으면 main 폴백), 아니면 주 디스플레이.
+    /// quick 패널을 띄울 화면. screen=mouse면 현재 마우스 포인터가 있는 화면(없으면 주 디스플레이 폴백), 아니면
+    /// 주 디스플레이. **주 디스플레이는 메뉴 막대가 있는 원점(0,0) 화면 = NSScreen.screens.first**다 — NSScreen.main은
+    /// '키보드 포커스를 가진 창의 화면'이라 멀티 모니터에서 주 디스플레이와 다를 수 있어 쓰지 않는다(퀵터미널은 글로벌
+    /// 핫키라 다른 앱이 전면일 때 뜨는 경우가 많아 NSScreen.main이면 그 앱이 있는 화면으로 새어 config `screen=main`의
+    /// '주 디스플레이' 의도와 어긋난다).
     private func quickTargetScreen() -> NSScreen? {
+        let primaryScreen = NSScreen.screens.first ?? NSScreen.main
         if quickScreenMode == UInt32(MaruAppHostQuickTerminalScreenMouse.rawValue) {
             let loc = NSEvent.mouseLocation
-            return NSScreen.screens.first { $0.frame.contains(loc) } ?? NSScreen.main
+            return NSScreen.screens.first { $0.frame.contains(loc) } ?? primaryScreen
         }
-        return NSScreen.main
+        return primaryScreen
     }
 
-    /// quick 패널의 "보임"(설정 가장자리에 붙은 위치)과 "숨김"(같은 크기로 그 가장자리 바깥으로 빠진 위치)
-    /// 사각형. top/bottom은 전폭 + height_fraction 높이, left/right는 전고 + height_fraction 폭이다. 보임/숨김은
-    /// **슬라이드 축(top/bottom=y, left/right=x)만 다르고** 폭·높이가 같다 — 슬라이드 중 콘텐츠 크기가 안 바뀌어
-    /// drawable/grid 재계산이 필요 없다. center는 가장자리가 없어 화면 중앙에 width·height 둘 다 height_fraction
-    /// 비율로 띄우고 **보임=숨김**(같은 사각형) — 슬라이드 대신 알파 페이드를 쓰므로 위치 차이가 없다.
-    private func quickPanelFrames() -> (shown: NSRect, hidden: NSRect)? {
-        guard let screen = quickTargetScreen() else { return nil }
+    /// quick 패널의 보임/숨김 사각형 + center 여부. 대상 화면 visibleFrame을 Zig ABI에 넘겨 세션의 **현재** config로
+    /// 계산받는다(quick_terminal_frames는 매 호출 라이브 — 설정 GUI에서 위치·두께를 바꾸면 세션-불변 캐시 없이 다음
+    /// 표시에서 바로 반영). 위치별 기하(가장자리 슬라이드 방향·center 페이드, 보임/숨김이 슬라이드 축만 다르고 크기
+    /// 동일)는 Zig quick_terminal_geometry.compute가 단일 출처. config는 primary 세션에서 읽는다(설정 GUI 라이브 적용
+    /// 대상이자 항상 존재). 세션/화면 정보를 못 구하면 nil(호출자가 애니메이션 없이 폴백).
+    private func quickPanelFrames() -> (shown: NSRect, hidden: NSRect, centered: Bool)? {
+        guard let screen = quickTargetScreen(), let session = primary?.appSession else { return nil }
         let vf = screen.visibleFrame
-        switch quickPosition {
-        case UInt32(MaruAppHostQuickTerminalPositionBottom.rawValue):
-            let h = (vf.height * quickHeightFraction).rounded()
-            return (NSRect(x: vf.minX, y: vf.minY, width: vf.width, height: h),
-                    NSRect(x: vf.minX, y: vf.minY - h, width: vf.width, height: h)) // 아래로 빠짐
-        case UInt32(MaruAppHostQuickTerminalPositionLeft.rawValue):
-            let w = (vf.width * quickHeightFraction).rounded()
-            return (NSRect(x: vf.minX, y: vf.minY, width: w, height: vf.height),
-                    NSRect(x: vf.minX - w, y: vf.minY, width: w, height: vf.height)) // 왼쪽으로 빠짐
-        case UInt32(MaruAppHostQuickTerminalPositionRight.rawValue):
-            let w = (vf.width * quickHeightFraction).rounded()
-            return (NSRect(x: vf.maxX - w, y: vf.minY, width: w, height: vf.height),
-                    NSRect(x: vf.maxX, y: vf.minY, width: w, height: vf.height)) // 오른쪽으로 빠짐
-        case UInt32(MaruAppHostQuickTerminalPositionCenter.rawValue):
-            // 중앙: 세로=height_fraction, 가로=width_fraction(미설정 0이면 height로 폴백 → 정사각). 가장자리가 없어
-            // 보임=숨김(페이드로 처리).
-            let wfrac = quickWidthFraction > 0 ? quickWidthFraction : quickHeightFraction
-            let w = (vf.width * wfrac).rounded()
-            let h = (vf.height * quickHeightFraction).rounded()
-            let r = NSRect(x: (vf.midX - w / 2).rounded(), y: (vf.midY - h / 2).rounded(), width: w, height: h)
-            return (r, r)
-        default: // top
-            let h = (vf.height * quickHeightFraction).rounded()
-            return (NSRect(x: vf.minX, y: vf.maxY - h, width: vf.width, height: h),
-                    NSRect(x: vf.minX, y: vf.maxY, width: vf.width, height: h)) // 위로 빠짐
-        }
+        var out = MaruAppHostQuickTerminalFrames()
+        guard maru_macos_app_session_quick_terminal_frames(
+            session, Double(vf.minX), Double(vf.minY), Double(vf.width), Double(vf.height), &out
+        ) == Self.statusOK else { return nil }
+        return (NSRect(x: out.shown_x, y: out.shown_y, width: out.shown_w, height: out.shown_h),
+                NSRect(x: out.hidden_x, y: out.hidden_y, width: out.hidden_w, height: out.hidden_h),
+                out.is_centered != 0)
     }
 
     /// quick 패널을 숨김 위치(가장자리 바깥)에서 보임 위치(가장자리에 붙음)로 슬라이드한다. 크기는 처음부터
     /// 최종값이라(숨김/보임이 슬라이드 축만 다름) makeKey 직후 세션 grid를 한 번 맞추고 위치만 애니메이션한다.
     private func showQuickTerminalAnimated(_ panel: NSWindow) {
         guard let frames = quickPanelFrames() else {
-            // 화면 정보를 못 구하면 애니메이션 없이 그냥 띄운다(폴백).
+            // 화면 정보를 못 구하면 애니메이션 없이 그냥 띄운다(폴백). 이 위치엔 대응하는 숨김 사각형이 없으므로
+            // stale 캐시를 비운다 — 안 그러면 다음 hide가 직전 show의 다른 화면 사각형으로 엉뚱하게 빠진다.
+            quickHideFrame = nil
             panel.makeKeyAndOrderFront(nil)
             panel.makeFirstResponder(panel.contentView)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let centered = quickIsCentered
+        let centered = frames.centered
+        // 숨김 애니메이션이 같은 화면/위치로 되빠지도록 지금 사각형을 캐시한다 — 표시 이후 마우스/화면/설정이
+        // 바뀌어도(mouse 모드 멀티 모니터, 라이브 위치 변경) 패널이 있던 그대로 슬라이드 아웃한다(재계산 겨냥 오류 방지).
+        quickHideFrame = (frames.hidden, centered)
         panel.setFrame(frames.hidden, display: false)
         if centered { panel.alphaValue = 0 } // 중앙은 투명에서 시작해 페이드 인(가장자리 슬라이드가 없음)
         panel.makeKeyAndOrderFront(nil)
@@ -3086,13 +3090,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         })
     }
 
-    /// quick 패널을 보임 위치에서 숨김 위치(가장자리 바깥)로 슬라이드한 뒤 orderOut으로 숨긴다(완료 시).
+    /// quick 패널을 보임 위치에서 숨김 위치(가장자리 바깥)로 슬라이드한 뒤 orderOut으로 숨긴다(완료 시). 표시
+    /// 시점에 캐시한 숨김 사각형(quickHideFrame)을 써 패널이 있던 화면/위치 그대로 되빠진다 — 재계산으로 다른
+    /// 화면을 겨냥하지 않는다(mouse 모드 멀티 모니터·라이브 위치 변경 안전). 캐시가 없으면(방어) 그냥 내린다.
     private func hideQuickTerminalAnimated(_ panel: NSWindow) {
-        guard let frames = quickPanelFrames() else {
+        guard let hide = quickHideFrame else {
             panel.orderOut(nil)
             return
         }
-        let centered = quickIsCentered
+        let centered = hide.centered
         quickAnimating = true
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.12
@@ -3100,7 +3106,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if centered {
                 panel.animator().alphaValue = 0
             } else {
-                panel.animator().setFrame(frames.hidden, display: true)
+                panel.animator().setFrame(hide.rect, display: true)
             }
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
@@ -3124,6 +3130,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let surface = quick else { return }
         self.quick = nil
         quickAnimating = false
+        quickHideFrame = nil // 재생성 시 stale 숨김 사각형이 새 패널에 새지 않게
         if let panel = surface.window {
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: panel)
         }

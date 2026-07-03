@@ -91,6 +91,12 @@ pub fn Model(comptime Rt: type) type {
             /// 사이드바 카드 좌측 accent 막대색(0xRRGGBB, 0=기본 — 활성 카드는 테마 앰버, 비활성은 막대 없음).
             /// 지정하면 활성·비활성 카드 모두 그 색으로 막대 표시(배경 tint와 직교). workspace.v1 영속.
             accent_color: u32 = 0,
+            /// 사이드바 그룹 **시작 마커**(위치 파생 소속 — docs/sidebar-groups.md §2.1). null=그룹 시작 아님
+            /// (자기 위 가장 가까운 마커에 소속되거나, 위에 마커가 없으면 최상위). 소속 자체는 저장하지 않고
+            /// self.tabs 순서에서 파생한다 — 이 필드는 "이 탭부터 이 이름의 그룹 시작"만 든다. owned(destroyTab 해제).
+            group_start: ?[]const u8 = null,
+            /// group_start!=null일 때만 의미 — 그 그룹이 접혔는지(영속). 검색 활성 동안은 projectRows가 일시 무시.
+            group_collapsed: bool = false,
 
             /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
             pub fn activePane(self: *Tab) *Pane {

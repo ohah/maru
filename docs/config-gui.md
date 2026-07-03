@@ -61,7 +61,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 ## 3. ChromeHost 마우스 pointer 이벤트 (CS-4-0, 선결)
 
-현재 `ChromeHost`는 **키 이벤트만** 라우팅한다([chrome-strategy.md] C1 host). 슬라이더 드래그·색 그리드·토글
+현재 `ChromeHost`는 **키 이벤트만** 라우팅한다([chrome-strategy.md] C1 host). 색 그리드 드래그·토글·드롭다운·입력 박스
 클릭엔 **마우스 pointer**가 필요하다.
 
 - `input.InputEvent`에 pointer 변형(down/move/up + backing-px 좌표 + 버튼) 추가. 좌표·hit-test는 Zig
@@ -130,18 +130,18 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 **color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). **스와치 렌더는 `Swatch.corner_radii`로 분기**(C4b `Op.quad` 동형) — 컴포넌트가 `props.shape.corner_radius_px`(스와치 높이의 절반으로 cap)를 실어, lowering이 0이면 셀 bg(tui 직각), >0이면 **둥근 GPU quad 칩**(rich, layer 3 — 셀·선택 하이라이트 위, literal RGB)으로 그린다. 인터랙션 세 zone:
 - **스와치 클릭 / Enter** → **HSV picker 열기**(현재 색으로 시드 — §6.9). 임의 색을 그리드로 고른다(2차 색 선택, CS-4-6).
 - **hex 클릭** → 인라인 편집(text 위젯 재사용 — `editText`→`setText`, hex 검증).
-- (예전 `←→` 16색 프리셋 순환은 제거 — ←→가 전역 섹션 전환으로 통일됨(사용자 요청). 색은 HSV picker·hex로 고른다.)
+- (예전 `←→` 16색 프리셋 순환은 제거 — `←→`는 방향키 영역 포커스 이동(←=네비·→=폼, §4)에 쓰이지 색을 조절하지 않는다. 색은 HSV picker·hex로 고른다.)
 
 - **미구현(후속)**: 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, picker의 연속(non-discrete) 해상도·alpha. (color 스와치 rich 둥근 quad 렌더는 구현됨 — 위 참조.)
 
 ### 6.3 테마 프리셋(named 테마) — 특수 행
 
-테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`dark-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light` 16종 + **"사용자 지정"**을 **열리는 드롭다운 팝업**에서 고른다(Enter/클릭으로 열고 ↑↓로 넘기면 테마가 **라이브 미리보기**로 바로 바뀜, Enter 확정·Esc 원복). 프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 현재 색을 둔 채 잠금만 푼다. `theme.preset`은 synthetic(스키마 enum 아님)이라 일반 enum 드롭다운과 달리 platform이 변형 목록·적용을 특수 배선한다(`themePresetVariants`·`applyThemePresetIndex`). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
+테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`dark-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light` 16종 + **"사용자 지정"**을 **열리는 드롭다운 팝업**에서 고른다(Enter/클릭으로 열고 ↑↓로 넘기면 테마가 **라이브 미리보기**로 바로 바뀜, Enter 확정·Esc 원복). 프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 열 때 스냅샷한 **원본 커스텀 색을 복원**하며 잠금만 푼다(미리보기로 프리셋을 봤어도 원본 커스텀으로 되돌린다). `theme.preset`은 synthetic(스키마 enum 아님)이라 일반 enum 드롭다운과 달리 platform이 변형 목록·적용을 특수 배선한다(`themePresetVariants`·`applyThemePresetIndex`). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
 
 - **표시값은 색에서 derive**: `detectThemePreset`이 config.theme의 주 색 4개(bg/fg/cursor/selection)를 16종 `presetColors`와 매칭 → 일치하면 그 이름, 없으면 "사용자 지정". 저장 안 해도 현재 프리셋을 안다.
 - **주입·배치**: platform이 theme 섹션 `currentSectionFields.enums`에 **synthetic `EnumField`**(`key="theme.preset"`)를 **맨 앞에 `insert`**한다 → 색·팔레트보다 위(테마 섹션 최상단)에 도드라지게, 기존 dropdown/enum 경로 재사용(새 Kind·index 수술 없음).
-- **적용**: 드롭다운 팝업의 ↑↓/확정이 `key=="theme.preset"`을 특수 처리 → `applyThemePresetIndex(idx)`가 `config.theme = presetColors(idx)`(정적 리터럴, idx=="사용자 지정" 슬롯이면 색 유지·잠금만 해제) + 라이브 재resolve + `persistThemePreset`으로 영속. ↑↓ 프리뷰는 매번 이 코어(`applyDropdownIndex`)를 selected로, 취소는 `original`로 부른다(라이브 미리보기·되돌리기 단일 출처). (옛 `applyThemePreset(dir)` 순환은 남겨두되 드롭다운이 대체.)
-- **프리셋 활성 시 색 잠금(옵션 A)**: `themePresetActive`(=색이 프리셋과 일치 ∧ `theme_user_custom`=false)면 색·팔레트 행을 `FieldRow.disabled`로 회색·잠금 표시한다(프리셋이 색을 정하므로 직접 편집은 혼란). 비활성 색을 **클릭하면**(swatch/hex 무관) 핸들러가 `theme_user_custom=true`로 "사용자 지정" 전환 후 바로 편집(picker/인라인)을 연다 — ←/→ 색 순환은 잠금 중 막힌다. `theme_user_custom`은 런타임 휘발(색은 derive하므로 영속 불요); 프리셋 재선택·reload·reset 시 false로 돌아간다(색이 프리셋과 같으면 자동으로 다시 잠금).
+- **적용**: 드롭다운 팝업의 ↑↓/확정이 `key=="theme.preset"`을 특수 처리 → `applyThemePresetIndex(idx, persist)`가 `config.theme = presetColors(idx)`(정적 리터럴) + 라이브 재resolve, `persist=true`(확정)일 때만 `persistThemePreset`으로 파일 영속. **idx=="사용자 지정" 슬롯이면 열 때 스냅샷한 원본 커스텀 색을 복원** + 잠금 해제(예전엔 잠금만 풀어 미리본 프리셋 색이 커스텀으로 굳던 데이터 손실 — code-review high). **↑↓ 프리뷰는 `persist=false`(인메모리만)**, 확정만 `persist=true` — 미리보기가 영속하면 취소해도 파일에 미리본 프리셋이 써져 커스텀이 사라졌기에 영속은 확정에서만 한다. 취소는 스냅샷(`dropdown_snapshot_*`)으로 인메모리 복원(파일은 미리보기가 안 건드려 원본 그대로). (옛 `applyThemePreset(dir)` 순환은 남겨두되 드롭다운이 대체.)
+- **프리셋 활성 시 색 잠금(옵션 A)**: `themePresetActive`(=색이 프리셋과 일치 ∧ `theme_user_custom`=false)면 색·팔레트 행을 `FieldRow.disabled`로 회색·잠금 표시한다(프리셋이 색을 정하므로 직접 편집은 혼란). 비활성 색을 **클릭하면**(swatch/hex 무관) 핸들러가 `theme_user_custom=true`로 "사용자 지정" 전환 후 바로 편집(picker/인라인)을 연다. `theme_user_custom`은 런타임 휘발(색은 derive하므로 영속 불요); 프리셋 재선택·reload·reset 시 false로 돌아간다(색이 프리셋과 같으면 자동으로 다시 잠금).
 - **영속(해결)**: 프리셋을 고르면 `persistThemePreset`이 **`theme.preset = <name>` 한 줄**을 쓰고(serializeConfig 전용 패스 — configKeyValues는 round-trip 대칭 유지 위해 derive 키를 안 emit), 충돌할 개별 `theme.*` 색·`theme.palette.N` override 줄은 제거한다. 로더가 `theme.preset`을 통째 프리셋 색(**16색 팔레트 포함**)으로 펼치므로 reload·재시작 후에도 **팔레트까지 그대로** 복원된다(search/sidebar 색은 그 테마에서 derive돼 자동). 옛 "주 색 4개만 영속" 한계 해소(팔레트 영속 리뷰). (옛 "후속: 팝업 그리드"는 열리는 드롭다운 팝업으로 해소됨 — 위 참조.)
 
 ### 6.4 통합 리셋(Reset All Settings to Defaults)

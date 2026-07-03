@@ -46,9 +46,10 @@ pub const Meta = struct {
     /// 키 segment override. 없으면 필드명을 그대로 쓴다(`_`는 유지 — `-` 변환은 안전하지 않아 명시).
     key_seg: ?[]const u8 = null,
     doc: []const u8,
-    /// 숫자 범위(min,max). enum/bool/문자열엔 무의미(null). 파서 검증과 GUI 슬라이더가 공유.
+    /// 숫자 범위(min,max). enum/bool/문자열엔 무의미(null). 파서 검증과 GUI 숫자 입력 박스 clamp가 공유.
     range: ?[2]f64 = null,
     /// GUI 위젯 종류(타입에서 기본 유추, 명시로 override). toggle|number|slider|dropdown|text|color|...
+    /// (`slider`는 range 숫자 필드의 위젯 값 — 이름은 남아 있으나 GUI는 슬라이더 막대가 아니라 **숫자 입력 박스**로 렌더한다.)
     widget: Widget = .auto,
     /// 세팅 페이지 좌측 섹션. 없으면 부모 struct 이름에서 유추.
     section: ?Section = null,
@@ -82,7 +83,7 @@ comptime `inline for`로 `Config`(중첩 struct 재귀)를 순회하며 각 leaf
    필드 선언 안으로 들어와 응집된다.
 4. **문서표** — `configuration.md`의 키 표를 메타(키·타입·기본값·doc·범위)에서 **생성**한다(손 동기화 제거 →
    doc-drift 원천 소멸). 생성물은 마커 블록 사이에 끼워 수동 산문과 공존한다.
-5. **GUI 위젯** — 세팅 페이지가 각 필드를 `widget`에 따라 렌더한다(bool→토글, enum→드롭다운, float+range→슬라이더,
+5. **GUI 위젯** — 세팅 페이지가 각 필드를 `widget`에 따라 렌더한다(bool→토글, enum→드롭다운 팝업, 숫자+range→숫자 입력 박스,
    문자열→입력, 색→색입력). **이게 핵심 레버리지**: G0~G8(손 위젯 9 PR)이 "위젯 N종 + 제너릭 렌더러" 하나로
    붕괴하고, 이후 새 키는 GUI 코드 0줄로 화면에 뜬다(섹션은 `section` 메타로 좌측 네비에 자동 배치).
 

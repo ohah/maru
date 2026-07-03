@@ -142,7 +142,7 @@ GPU rounded quad, 입력 라우팅(ChromeHost). **신규 리스크는 ① color 
 | **G6** | 색 입력 — **1차: 16색 프리셋 + hex 텍스트(G3 재사용)**, 2차: HSV picker(RGB↔HSV + 2D 그리드) | 1차 중간 / 2차 높음 | tokens·Op.Quad 재사용. 2차는 색공간 수학 신규(§8 결정) |
 | **G7** | **세팅 페이지 셸** — 좌측 섹션 네비 + 검색 + 우측 폼 라우팅. 각 섹션을 위 위젯으로 조립, write-back(S0-1) 연결 | 중간 | modal/팔레트 레이아웃·검색 필터 재사용 |
 | **G8** | **Keybindings 섹션** — `command_catalog` 행 목록 + 인라인 리바인드 → `keybind` 직렬화(unbind·매크로 포함) | 중간 | 카탈로그가 이미 단일 출처(`command_catalog.zig`) — 행 목록 공짜 |
-| **G9** ✅ | **폰트 피커** — `font.family`를 번들 폰트(`theme.bundled_font_families`) dropdown 스타일 피커로(키보드 ←→ 순환 + Enter/클릭 직접입력). 자유 문자열이라 enum dropdown을 못 써 `.font` 행 종류 + `schema.cycleFontFamily` 신규(config-gui.md §폰트 피커) | 낮음 | ✅ 머지. `dropdown.view` 렌더 + text 편집 경로 재사용, GUI 코드 최소. `cycleFontFamily` 단위 테스트 + macos-app 빌드 |
+| **G9** ✅ | **폰트 피커** — `font.family`를 번들 폰트(`theme.bundled_font_families`) **열리는 드롭다운 팝업**으로(↑↓ 라이브 미리보기·Enter 확정·Esc 원복; 목록 끝 "직접 입력…"으로 목록 밖 폰트 인라인 타이핑). 자유 문자열이라 enum dropdown을 못 써 `.font` 행 종류 신규(config-gui.md §폰트 피커) | 낮음 | ✅ 머지(이후 ←→ 순환 → 열리는 팝업으로 업그레이드). `dropdown` 팝업 + text 편집 경로 재사용, GUI 코드 최소 |
 
 ## 7. 검증 매트릭스
 

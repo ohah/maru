@@ -436,7 +436,12 @@ fn enumIndexField(value: anytype, comptime full_key: []const u8, key: []const u8
     const T = @TypeOf(value);
     if (@typeInfo(T) != .@"enum") return null;
     if (!std.mem.eql(u8, key, full_key)) return null;
-    return @intCast(@intFromEnum(value));
+    // **선언 순 위치**(enumVariants와 일치) — tag 값이 아니라 필드 index를 돌려준다. 명시/비순차 tag 값이어도
+    // 드롭다운 목록·set 인덱스가 어긋나지 않는다(code-review: tag/index 불일치 방지 — 셋이 선언 순으로 일관).
+    inline for (@typeInfo(T).@"enum".fields, 0..) |f, i| {
+        if (@intFromEnum(value) == f.value) return i;
+    }
+    return 0;
 }
 
 /// 키로 enum 스키마 필드를 **특정 ordinal(index)로 set**한다(드롭다운 팝업 선택 확정 — cycleEnum의 절대-set 짝).
@@ -463,9 +468,16 @@ fn setEnumIndexField(ptr: anytype, comptime full_key: []const u8, key: []const u
     const T = @TypeOf(ptr.*);
     if (@typeInfo(T) != .@"enum") return false;
     if (!std.mem.eql(u8, key, full_key)) return false;
-    if (index >= @typeInfo(T).@"enum".fields.len) return false;
-    ptr.* = @enumFromInt(index);
-    return true;
+    const fields = @typeInfo(T).@"enum".fields;
+    if (index >= fields.len) return false;
+    // index는 **선언 순 위치**(enumVariants/enumIndex와 일치)라 그 필드의 실제 tag 값으로 set한다 — 비순차 tag여도 정확.
+    inline for (fields, 0..) |f, i| {
+        if (i == index) {
+            ptr.* = @enumFromInt(f.value);
+            return true;
+        }
+    }
+    return false;
 }
 
 /// 번들 폰트 패밀리 GUI 피커의 순회기 — `font.family`를 `theme.bundled_font_families`에서 dir(+1 다음/-1 이전, wrap)만큼

@@ -1,4 +1,4 @@
-//! InputBox — 숫자(수치) 입력 박스 위젯. slider/dropdown-축소와 같은 **State 없는 순수 함수 모듈**: 값·편집 버퍼는
+//! InputBox — 숫자(수치) 입력 박스 위젯. dropdown/color와 같은 **State 없는 순수 함수 모듈**: 값·편집 버퍼는
 //! 셸(settings.State)이 소유하고, 컴포넌트는 control rect + 표시 문자열 + 편집 여부만 받아 **테두리 박스 + 텍스트 +
 //! (편집 중) 끝 caret**을 그린다. 슬라이더(진행 막대)를 대체해 사용자가 수치를 직접 타이핑한다(사용자 요청 —
 //! 프로그레스바 대신 인풋박스). 커밋 시 파싱·범위 clamp는 platform이 한다(schema.setNumber). 테두리는 dropdown 팝업·
@@ -9,6 +9,12 @@ const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW) — caret 위치 단일 출처(한글/CJK 2칸)
+
+/// 입력 박스 control 영역 폭(px) — 셸이 행 control 열 예약에 쓴다. 숫자값 여러 자리 + 여유를 갖게 행 높이의 5배
+/// (옛 슬라이더 폭 규율을 계승 — 슬라이더 막대는 제거됐지만 숫자 입력 열은 같은 폭이면 충분).
+pub fn width(row_height_px: u32) u32 {
+    return row_height_px * 5;
+}
 
 /// 입력 박스를 그린다. rect=control 열(박스 경계), text=표시 문자열(비편집=현재값, 편집=편집 버퍼), editing=편집 중,
 /// disabled=회색(프리셋 잠금 등). cw/ch=셀 픽셀(caret 크기·좌패딩). corner_radius/border_width>0이면 quad 테두리
@@ -125,6 +131,10 @@ test "input_box view: 빈 값 편집 = 박스 + caret만(텍스트 op 없음), b
     out.clearRetainingCapacity();
     try view(.{ .x = 0, .y = 0, .w = 0, .h = 20 }, "1", false, false, 8, 16, 4, 1, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "input_box width: 행 높이 × 5(control 열 폭)" {
+    try std.testing.expectEqual(@as(u32, 100), width(20));
 }
 
 test "input_box hitTest: 박스 안=true, 밖/비유한/0폭=false" {

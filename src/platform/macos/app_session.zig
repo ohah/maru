@@ -4656,7 +4656,7 @@ pub const AppSession = struct {
         const cf = try self.currentSectionFields(arena);
         // 교차 검색(쿼리 있음)이면 행 라벨에 섹션명 접두 — currentSectionFields의 cross 게이트와 같은 조건(단일 출처).
         const cross = self.chrome_host.settings.searchQuery().len > 0;
-        // 결합 순서: bool(toggle) → number(slider) → enum(dropdown) → text(편집) → color(스와치). selected/handler
+        // 결합 순서: bool(toggle) → number(입력 박스) → enum(dropdown) → text(편집) → color(스와치). selected/handler
         // 인덱싱이 이 순서를 공유한다(toggle/adjust/commitSelectedText가 같은 currentSectionFields 빌드로 구간 매핑).
         const rows = try arena.alloc(Row, cf.total());
         var i: usize = 0;
@@ -4665,7 +4665,7 @@ pub const AppSession = struct {
             i += 1;
         }
         for (cf.nums) |n| {
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, n.section, if (n.doc.len > 0) n.doc else n.key), .kind = .{ .slider = .{ .value = n.value, .min = n.min, .max = n.max } } };
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, n.section, if (n.doc.len > 0) n.doc else n.key), .kind = .{ .number = .{ .value = n.value, .min = n.min, .max = n.max } } };
             i += 1;
         }
         for (cf.enums) |e| {
@@ -4952,7 +4952,7 @@ pub const AppSession = struct {
             // 파싱+범위 clamp+setNumber. (프로그레스바 슬라이더 대체 — 사용자가 값을 직접 타이핑.) 시드는 표시값과 같은 포맷.
             const ni = sel - cf.bools.len;
             if (ni < cf.nums.len) {
-                const seed = chrome.components.settings.formatSliderValue(scratch.allocator(), cf.nums[ni].value) catch return;
+                const seed = chrome.components.settings.formatNumberValue(scratch.allocator(), cf.nums[ni].value) catch return;
                 self.chrome_host.settings.enterEdit(seed);
             }
             return;
@@ -5042,7 +5042,7 @@ pub const AppSession = struct {
             self.metal_dirty = true;
             return;
         };
-        // slider 행(bool..after_nums)은 toggle/Enter 무동작(드래그/←→로 조절).
+        // number 행(bool..after_nums)은 위 number 분기에서 입력 박스 편집을 이미 열었다 — 여기 fall-through 대상 아님.
     }
 
     /// 팔레트 셀 idx의 효과색 hex(arena 소유) — config override 있으면 그 hex(빌림), 없으면 xterm256 기본을 #rrggbb로.
@@ -13425,7 +13425,7 @@ pub const AppSession = struct {
                     // tui: 직각 → 셀 배경(기존 fill 경로와 동일).
                     paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
                 } else if (modal_bg_quad) {
-                    // 모달 배경 **다음**의 rich quad = 위젯(slider track/filled/thumb·toggle pill/knob 등). 이걸 배경처럼
+                    // 모달 배경 **다음**의 rich quad = 위젯(입력 박스 테두리·toggle pill/knob·드롭다운 등). 이걸 배경처럼
                     // outset(pad)+shadow+layer=1로 처리하면 (a) pad만큼 커지고 (b) layer 1이 셀 그리드(선택 행 하이라이트
                     // bg)보다 아래라 하이라이트에 가려진다(활성 행 위젯 가림 버그). 위젯은 q.rect 그대로 + **layer 3**(셀 위)으로
                     // 올려 하이라이트 위에 보이게 한다. shadow 없음(위젯은 그림자 불필요). tui(직각)는 위 분기라 영향 없음.

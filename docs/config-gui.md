@@ -249,7 +249,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 |---|---|---|
 | **S0-1b** ✅ | per-key write-back(`updateForKeys` — 변경 키만, override-only) + 사이드바 write-back 경로(`serialize_sidebar_config` ABI export) 재구현 | ✅ 머지(순수 단위) |
 | **CS-4-0** ✅ | `ChromeHost` pointer 이벤트(InputEvent + 라우팅 + drag) | ✅ 머지(헤드리스 + 실기) |
-| **CS-4-1** ✅ | 위젯 컴포넌트 toggle·dropdown·text/number·slider(neutral State+view+handle) | ✅ 머지(헤드리스 + 실기) |
+| **CS-4-1** ✅ | 위젯 컴포넌트 toggle·dropdown·text/number·~~slider~~(neutral State+view+handle) | ✅ 머지(헤드리스 + 실기). ※ slider는 이후 **`input_box`(숫자 직접 입력)로 대체·`slider.zig` 제거** |
 | **CS-4-2** ✅ | color input(16색 프리셋 + hex 입력) | ✅ 머지(헤드리스 + 실기) |
 | **CS-4-3** ✅ | keybind recorder(`command_catalog` 행 + 키 캡처 + `keybind` 줄 write-back) — §6.7. unbind·충돌 UI는 후속 | 헤드리스 + 실기 |
 | **CS-4-4** ✅ | **세팅 페이지 셸** — Section 네비 + 제너릭 폼(schema 메타 소비) + 폼 스크롤 + `toggle_settings`(⌘,) 키/메뉴 + **폼 검색**(`/` 필터 — 빈 쿼리=현재 섹션, 쿼리 입력 시 교차 섹션 — §6.8) | ✅ 머지(헤드리스 + 실기) |

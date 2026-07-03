@@ -4,7 +4,7 @@
 //! 프리미티브, control 위젯은 toggle 등 leaf 컴포넌트를 재사용한다. State(open·selected) + view(rows→박스+행) +
 //! handle(키 네비/토글/닫기) + handlePointer(행/위젯 hit-test). 단일 출처: docs/config-gui.md §2·§4.
 //!
-//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(slider)·enum(dropdown)·text(인라인 편집)·color(스와치+hex)
+//! 위젯은 FieldRow.kind union으로 가른다 — bool(toggle)·number(입력 박스)·enum(dropdown)·text(인라인 편집)·color(스와치+hex)
 //! ·palette_grid(ANSI 16색 한 줄 그리드). text/color는 고정 버퍼로 hex/문자열을 편집한다(Enter 커밋, Esc 취소 —
 //! State.editing/edit_buf). palette_grid는 16칸이라 control 열을 안 쓰고 폼 우측에 스와치 줄을 펼친다(←→로 셀 선택,
 //! Enter/hex 클릭으로 그 칸 편집 — State.grid_cell). 레이아웃은 좌측 Section 네비(섹션 목록, platform이 settings.section
@@ -19,7 +19,6 @@ const modal_box = @import("modal_box.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) — 라벨 폭 측정(modal_box와 같은 규약)
 const width = @import("../../width.zig"); // UTF-8 경계 절단/백스페이스 단일 출처(truncateToBoundary·dropLastCodepoint)
 const toggle = @import("toggle.zig");
-const slider = @import("slider.zig");
 const input_box = @import("input_box.zig"); // 숫자 입력 박스(슬라이더 대체 — 프로그레스바 대신 직접 타이핑)
 const dropdown = @import("dropdown.zig");
 const color_mod = @import("../../color.zig"); // HSV picker — hsvToRgb/rgbToHsv/Hsv
@@ -29,7 +28,7 @@ const color = @import("color.zig");
 pub const layer = modal_box.layer;
 
 /// 한 설정 행(platform이 config 스키마에서 빌드해 주입). kind union으로 위젯 종류를 가른다 — bool(toggle, CS-4-1a)·
-/// number(slider, CS-4-1b)·enum(dropdown, CS-4-1c)·text(CS-4-1d)·color(CS-4-2)를 모두 지원한다. 값은 config가 소유(주입만).
+/// number(입력 박스, CS-4-1b)·enum(dropdown, CS-4-1c)·text(CS-4-1d)·color(CS-4-2)를 모두 지원한다. 값은 config가 소유(주입만).
 pub const FieldRow = struct {
     label: []const u8, // 행 라벨(meta.doc 또는 키)
     kind: Kind,
@@ -39,16 +38,16 @@ pub const FieldRow = struct {
 
     pub const Kind = union(enum) {
         toggle: bool, // 현재 on/off
-        slider: Slider, // 현재 값 + 범위(f32/u32; value/min/max는 f64로 통일)
-        dropdown: []const u8, // enum 현재 변형 표시 토큰(클릭/←→로 순환 — platform이 schema.cycleEnum)
-        font: []const u8, // 폰트 패밀리 현재값 — dropdown처럼 보이지만 옵션이 enum이 아니라 번들 폰트 목록. ←→로 순환
-        // (platform이 schema.cycleFontFamily), Enter로 인라인 편집(목록 밖 시스템/직접입력 폰트 — text와 같은 편집 경로).
+        number: Number, // 현재 값 + 범위(f32/u32; value/min/max는 f64로 통일) — 입력 박스로 렌더(옛 slider 대체)
+        dropdown: []const u8, // enum 현재 변형 표시 토큰(클릭/Enter로 열리는 드롭다운 팝업 — platform이 setEnumIndex)
+        font: []const u8, // 폰트 패밀리 현재값 — enum이 아니라 번들 폰트 목록 드롭다운 팝업. 목록 끝 "직접 입력…"으로
+        // 인라인 편집(목록 밖 시스템/직접입력 폰트 — text와 같은 편집 경로).
         text: []const u8, // 문자열 현재값. 클릭/Enter로 인라인 편집(platform이 schema.setText)
-        color: Color, // 색 #RRGGBB — 스와치 + hex. 스와치/←→로 프리셋 순환, hex 클릭으로 편집(platform)
+        color: Color, // 색 #RRGGBB — 스와치 + hex. 스와치/Enter로 HSV picker, hex 클릭으로 편집(platform)
         palette_grid: PaletteGrid, // ANSI 16색 그리드(theme.palette.0~15) — 스와치 줄 + 선택 셀 hex 편집(CS-4-5)
         keybind: []const u8, // 현재 단축키 표시(⌘T 또는 빈=미지정). Enter/클릭 → 녹음 모드(platform이 raw 키 캡처→rebind, CS-4-3)
     };
-    pub const Slider = struct { value: f64, min: f64, max: f64 };
+    pub const Number = struct { value: f64, min: f64, max: f64 };
     pub const Color = struct { hex: []const u8, rgb: @import("../../color.zig").Rgb }; // 현재 hex + platform이 파싱한 RGB(스와치)
     /// ANSI 16색 팔레트 그리드. cells[i]=효과색(platform이 config override 또는 xterm256 기본을 resolve), selected=선택 셀
     /// (=State.grid_cell 주입). 색은 ColorRole이 아니라 원색 — 스와치(Op.swatch)로 그린다(color 위젯과 같은 의도적 예외).
@@ -134,7 +133,7 @@ pub const State = struct {
     edit_buf: [edit_cap]u8 = undefined,
     edit_len: usize = 0,
     /// palette_grid 행에서 선택된 셀(0~15). ←→가 이 값을 옮기고(platform이 moveGridCell), Enter/hex 클릭이 이 셀을
-    /// 편집한다. 행 1개에 16칸이라 폼의 1D selected와 별도로 둔다(slider 드래그 상태가 별도인 것과 동형).
+    /// 편집한다. 행 1개에 16칸이라 폼의 1D selected와 별도로 둔다(color 피커 드래그 상태가 별도인 것과 동형).
     grid_cell: usize = 0,
     /// keybind 행 녹음 중(Enter/클릭으로 켜짐) — 다음 raw 키를 platform이 가로채 chord로 캡처한다(컴포넌트 handle을
     /// 안 거침). 켜지면 그 행이 "키 입력 대기..."로 보인다. platform이 캡처/취소 후 끈다(text editing과 별개 상태).
@@ -366,12 +365,12 @@ pub const Action = enum { close, toggle, dropdown_accept, dropdown_preview, drop
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
-/// control 열 폭(칸) — 모든 행이 같은 우측 열을 공유한다(가장 넓은 위젯=slider 기준). 픽셀 폭을 cw로 ceil. view/
-/// hitTest 단일 출처. toggle은 이 열 안에서 좌측정렬(slider·dropdown과 같은 시작 x). text/dropdown 값(폰트 패밀리·
-/// 테마 프리셋명 등)이 slider 폭보다 길 수 있어 settings_value_cols로 하한을 둬 값이 박스 안에서 충분히 보이게 한다
+/// control 열 폭(칸) — 모든 행이 같은 우측 열을 공유한다(숫자 입력 박스 폭 기준). 픽셀 폭을 cw로 ceil. view/hitTest
+/// 단일 출처. toggle은 이 열 안에서 좌측정렬(입력 박스·dropdown과 같은 시작 x). text/dropdown 값(폰트 패밀리·테마
+/// 프리셋명 등)이 입력 박스 폭보다 길 수 있어 settings_value_cols로 하한을 둬 값이 박스 안에서 충분히 보이게 한다
 /// (그래도 넘치는 값은 view에서 truncate). 열이 곧 박스 우측 경계라(fieldControlRect 우측정렬) 값이 박스를 안 넘는다.
 fn controlCols(ch: u32, cw: u32) u32 {
-    return @max((slider.width(ch) + cw - 1) / @max(cw, 1), settings_value_cols);
+    return @max((input_box.width(ch) + cw - 1) / @max(cw, 1), settings_value_cols);
 }
 
 // ── palette_grid 기하(control 열을 공유하지 않는 특수 행 — 16칸은 control 열에 안 들어간다) ───────────────
@@ -391,7 +390,7 @@ const nav_gap_cols: u32 = 2; // 좌측 네비와 폼 사이 간격(칸) — 구�
 const form_label_reserve: u32 = 38;
 const palette_label_reserve: u32 = 14; // palette 행 라벨("ANSI 팔레트") 예약 폭
 // control 열 최소 폭(칸) — text 값(폰트 패밀리 "JetBrains Mono"=14)·dropdown 프리셋명("catppuccin-mocha"=16)을
-// 잘리지 않고 담는 하한. slider 폭이 이보다 넓으면 그쪽을 쓴다(controlCols).
+// 잘리지 않고 담는 하한. 입력 박스 폭이 이보다 넓으면 그쪽을 쓴다(controlCols).
 const settings_value_cols: u32 = 24;
 
 /// 좌측 네비 폭(칸) — 가장 긴 섹션 라벨 + 좌측 1칸 패딩(선택 표식 여유). 빈 목록이면 최소 5.
@@ -466,11 +465,11 @@ fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     return .{ .x = ctrl_x, .y = modal_box.rowY(box, row), .w = l.ctrl_cols * box.cw, .h = box.ch };
 }
 
-/// slider 현재 값을 control 열 우측 끝에 붙일 표시 문자열로 포맷한다. 소수 2자리로 굽고 뒤따르는 0(과 점)을 떼
+/// 숫자 현재 값을 입력 박스에 표시할 문자열로 포맷한다. 소수 2자리로 굽고 뒤따르는 0(과 점)을 떼
 /// 정수·딱떨어지는 소수를 깔끔히 보인다(14.00→"14", 2.28→"2.28", 1.50→"1.5", -8.00→"-8"). u32 필드도 정수로 나온다
 /// (값이 whole이라 "200.00"→"200"). 별도 is_int 없이 한 경로로 처리한다. pub — platform이 숫자 입력 박스 편집
 /// 진입 시 현재값 시드(enterEdit)에 같은 포맷을 써 표시값=편집시드가 되게 한다(입력 박스와 일관).
-pub fn formatSliderValue(arena: std.mem.Allocator, value: f64) ![]const u8 {
+pub fn formatNumberValue(arena: std.mem.Allocator, value: f64) ![]const u8 {
     const s = try std.fmt.allocPrint(arena, "{d:.2}", .{value});
     if (std.mem.indexOfScalar(u8, s, '.') == null) return s;
     var end = s.len;
@@ -498,7 +497,7 @@ fn paletteHexX(grid: draw.Rect, cw: u32) i32 {
     return grid.x + @as(i32, @intCast((palette_count * palette_swatch_w + 1) * cw));
 }
 
-/// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). slider(전체)·dropdown(좌단 text)과 같은 시작 x라
+/// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). 입력 박스(전체)·dropdown(좌단 text)과 같은 시작 x라
 /// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유. 폭은 그려지는 위젯
 /// 전체 — tui 트랙 `[  ]`(4*cw)이 pill(width(ch))보다 넓을 수 있어 둘 중 큰 쪽(클릭=보이는 위젯, 리뷰 #823).
 fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
@@ -596,14 +595,14 @@ pub fn view(
             .palette_grid => paletteGridCols(),
             else => l.ctrl_cols,
         };
-        // 선택 행 하이라이트. rich 테마에서 **GPU quad 위젯(slider/toggle)** 만 모달 셀(이 하이라이트가 사는 곳)보다 아래
+        // 선택 행 하이라이트. rich 테마에서 **GPU quad 위젯(입력 박스/toggle)** 만 모달 셀(이 하이라이트가 사는 곳)보다 아래
         // 레이어(layer 3 quad)라, 행 전체를 칠하면 하이라이트 셀이 그 위젯을 덮어 가린다 → 그 행만 **control 칸을 비워**
         // (라벨 영역만 칠해) 위젯이 빈 surface 셀로 비쳐 보이게 한다. color·palette의 swatch는 `Op.swatch`→`paintRectBg`로
         // **셀 bg 레이어**에 이 하이라이트 뒤에 그려져(painter order) 덮이지 않고, dropdown/text/keybind 값도 text 셀이라
         // 안 가려지므로 — 이들은 행 전체를 칠한다(불필요한 하이라이트 손실 방지).
         if (actual == state.selected) {
             const quad_widget = switch (r.kind) {
-                .toggle, .slider => true,
+                .toggle, .number => true,
                 else => false,
             };
             const hl_cols = if (quad_widget) l.form_cols -| row_right_cols else l.form_cols;
@@ -620,11 +619,11 @@ pub fn view(
                 var ts = toggle.State{ .value = v };
                 try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), box.cw, tk, arena, out);
             },
-            .slider => |s| {
+            .number => |s| {
                 // 숫자 입력 박스(슬라이더/프로그레스바 대체 — 사용자 요청). 편집 중인 선택 행이면 편집 버퍼 + caret,
                 // 아니면 현재 값을 박스 안에 좌측정렬. Enter로 편집 진입, 커밋 시 파싱·범위 clamp는 platform(setNumber).
                 const editing_this = state.editing and actual == state.selected;
-                const shown: []const u8 = if (editing_this) state.editText() else (formatSliderValue(arena, s.value) catch "");
+                const shown: []const u8 = if (editing_this) state.editText() else (formatNumberValue(arena, s.value) catch "");
                 try input_box.view(ctrl, shown, editing_this, r.disabled, box.cw, box.ch, p.shape.corner_radius_px, p.shape.border_width_px, arena, out);
             },
             // dropdown.view가 값 뒤에 " ▾"(2칸)를 붙이므로, chevron 자리를 빼고 truncate해 값+chevron이 control 열(=박스
@@ -812,8 +811,9 @@ fn renderPicker(
     try modal_box.text(box, box.inner_x, pick_help_row, pick_help, .surface_fg, arena, out);
 }
 
-/// 키 처리(열려 있을 때만 host 호출). ↑↓=행 이동, ←→=선택 행 조절(slider 스텝; toggle은 platform이 무시), Space/Enter=
-/// 선택 행 활성(toggle flip; slider는 무시), Esc=닫기, 그 외=소비. 값 종류 판정은 platform이 rows[selected]로 한다.
+/// 키 처리(열려 있을 때만 host 호출). 방향키 영역 모델: ←=네비 포커스·→=폼 포커스, ↑↓=포커스 영역 내 이동(네비=섹션·
+/// 폼=행), Space/Enter=폼 행 활성(toggle flip·숫자 입력 박스 편집·enum/폰트 드롭다운 팝업 등), Esc=닫기, 그 외=소비.
+/// 드롭다운 팝업이 열려 있으면 모든 키를 팝업이 잡는다(↑↓ 프리뷰·Enter 확정·Esc 취소). 값 종류 판정은 platform이 rows[selected]로 한다.
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
     // HSV picker 모드 — ←→ 채도, ↑↓ 명도, `[`/`]` 색상, Enter 확정(.color_picked → platform이 hex 커밋), Esc 취소. 그 외 소비.
     if (state.picking) {
@@ -1167,7 +1167,7 @@ pub fn handlePointer(
             state.nav_focused = false; // 폼 행 클릭 → 폼 포커스(↑↓가 행 이동)
             switch (r.kind) {
                 .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,
-                .slider => return if (input_box.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 입력 박스 클릭 → 편집 진입(.toggle=활성, platform이 현재값 시드), 라벨은 선택만
+                .number => return if (input_box.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 입력 박스 클릭 → 편집 진입(.toggle=활성, platform이 현재값 시드), 라벨은 선택만
                 .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 축소 control 클릭 → 팝업 열기(.toggle=활성, platform이 openDropdown)
                 .text => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 인라인 편집(.toggle=활성), 라벨은 선택만
                 .font => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 축소 control 클릭 → 팝업 열기(번들 폰트 목록, platform이 openDropdown)
@@ -1254,17 +1254,17 @@ test "settings view: 행이 창보다 많으면 창만 렌더 + 제목에 위치
     try std.testing.expect(out.items[0].quad.rect.h <= 200);
 }
 
-test "settings formatSliderValue: 소수 2자리 + 뒤따르는 0/점 제거(정수·딱떨어지는 소수 깔끔히)" {
+test "settings formatNumberValue: 소수 2자리 + 뒤따르는 0/점 제거(정수·딱떨어지는 소수 깔끔히)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    try std.testing.expectEqualStrings("14", try formatSliderValue(arena, 14.0)); // 정수
-    try std.testing.expectEqualStrings("200", try formatSliderValue(arena, 200.0)); // u32 필드(whole)
-    try std.testing.expectEqualStrings("2.28", try formatSliderValue(arena, 2.276)); // 소수 2자리 반올림
-    try std.testing.expectEqualStrings("1.5", try formatSliderValue(arena, 1.5)); // 뒤 0 하나 제거
-    try std.testing.expectEqualStrings("-8", try formatSliderValue(arena, -8.0)); // 음수 정수
-    try std.testing.expectEqualStrings("0.1", try formatSliderValue(arena, 0.1)); // 소수 1자리
-    try std.testing.expectEqualStrings("16.64", try formatSliderValue(arena, 16.64));
+    try std.testing.expectEqualStrings("14", try formatNumberValue(arena, 14.0)); // 정수
+    try std.testing.expectEqualStrings("200", try formatNumberValue(arena, 200.0)); // u32 필드(whole)
+    try std.testing.expectEqualStrings("2.28", try formatNumberValue(arena, 2.276)); // 소수 2자리 반올림
+    try std.testing.expectEqualStrings("1.5", try formatNumberValue(arena, 1.5)); // 뒤 0 하나 제거
+    try std.testing.expectEqualStrings("-8", try formatNumberValue(arena, -8.0)); // 음수 정수
+    try std.testing.expectEqualStrings("0.1", try formatNumberValue(arena, 0.1)); // 소수 1자리
+    try std.testing.expectEqualStrings("16.64", try formatNumberValue(arena, 16.64));
 }
 
 test "settings state: show/hide/setFieldCount clamp/moveSelection wrap" {
@@ -1350,7 +1350,7 @@ test "settings handle: 드롭다운 팝업 열림 라우팅(↑↓=preview·Ente
     try std.testing.expect(!s.dropdown.open);
 }
 
-test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob text)+slider 행(트랙+채움 text)" {
+test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob text)+number 행(입력 박스 값 text)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1364,7 +1364,7 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     s.show();
     const rows = [_]FieldRow{
         .{ .label = "Cursor blink", .kind = .{ .toggle = true } },
-        .{ .label = "Font size", .kind = .{ .slider = .{ .value = 512, .min = 1, .max = 512 } } }, // ratio=1 → 채움 op
+        .{ .label = "Font size", .kind = .{ .number = .{ .value = 512, .min = 1, .max = 512 } } }, // 입력 박스 렌더
     };
     try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
     // tui(border 0): 위젯이 모두 셀 정렬 text(quad 아님). frame(quad)=1, 제목=1, 검색힌트=1.
@@ -1394,7 +1394,7 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, number(�
     s.show();
     const rows = [_]FieldRow{
         .{ .label = "A", .kind = .{ .toggle = false } },
-        .{ .label = "Size", .kind = .{ .slider = .{ .value = 1, .min = 1, .max = 100 } } }, // 숫자 = 입력 박스 렌더
+        .{ .label = "Size", .kind = .{ .number = .{ .value = 1, .min = 1, .max = 100 } } }, // 숫자 = 입력 박스 렌더
     };
     const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
 

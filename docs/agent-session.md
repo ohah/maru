@@ -220,6 +220,14 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   (마지막=user/미완료 → running), tail 큰 파일(끝 N KB만), cwd→세션 매핑(claude 인코딩·codex session_meta),
   마지막 답변 추출, 완료 감지. 파싱은 순수 함수라 OS 무관.
 - **수동(macOS)**: 실 claude/codex로 상태 전환·알림 육안.
+- **⚠️ maru를 Claude Code **자식 세션** 안에서 띄우지 말 것**: maru 앱을 Claude Code 세션의 subprocess로
+  실행하면(예: 이 저장소를 Claude Code로 작업하다 `zig build macos-app`으로 띄움), 그 maru의 팬 셸과 그 안에서
+  실행하는 claude가 **`CLAUDE_CODE_CHILD_SESSION=1`·`CLAUDE_CODE_SESSION_ID`를 상속**한다. 자식 세션 claude는
+  **트랜스크립트를 `projects/`에 persist하지 않아**(소스: `transcript_path = sessionFile ?? 계산경로`, 자식 세션은
+  `sessionFile=null` → 존재하지 않는 계산 경로 반환), 훅 매핑이 **phantom 경로**(파일 없음)를 가리켜 사이드바 카드의
+  에이전트 상태줄이 안 뜬다. 이는 **환경 오염이지 기능 결함이 아니다**. 반드시 **일반 터미널**(Claude Code 밖)에서
+  띄워 검증하거나, 부득이 자식 맥락이면 `env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID …`로 벗기고
+  실행한다. 확인: `ps eww -p <claude-pid> | grep CLAUDE_CODE_CHILD_SESSION`(정상 세션이면 없음).
 
 ## 규칙 / 베이스
 

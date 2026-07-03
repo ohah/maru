@@ -8,7 +8,7 @@
 PR 분해를 단일 출처로 둔다. config 키·메타는 [config-schema.md], chrome 컴포넌트 구조는 [Chrome 전략](chrome-strategy.md)이 단일 출처다.
 
 > 상태(2026-06): **CS-4 구현 진행**. 스키마 토대(CS-1·CS-2·CS-2b·CS-3)에 더해 CS-4-0(pointer)·CS-4-1(toggle·
-> slider·dropdown·text)·CS-4-2(color)·CS-4-4(세팅 페이지 셸 — Section 네비·폼 스크롤·즉시 write-back)가 머지됐다.
+> slider[→ 이후 `input_box`로 대체·`slider.zig` 제거]·dropdown·text)·CS-4-2(color)·CS-4-4(세팅 페이지 셸 — Section 네비·폼 스크롤·즉시 write-back)가 머지됐다.
 > CS-4-3(keybind recorder)·CS-4-5 bespoke 에디터(palette·env·shell.args)·CS-4-6(HSV picker)도 머지됐다. 후속은 picker 연속 해상도·alpha 등 고급화.
 > **CS-4는 시각/상호작용이라** 각 PR을 머지 전 `zig build macos-app`로 실기 확인한다(스키마 PR처럼 헤드리스
 > 단위만으로 blind 머지하지 않는다 — [run-macos-app-before-merge] 규율).
@@ -239,7 +239,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
   맞춤; override-only by construction — 기본값 40개를 안 쏟는다). 사이드바 write-back 경로(`serialize_sidebar_config`
   ABI export, snake_case 이름은 호환 유지 — `AppSession.serializeConfig`가 래핑)도 이 `updateForKeys`를 쓴다. GUI도
   같은 경로(바뀐 필드의 키를 넘김). (full-config diff·dirty 비트마스크는 불필요 — 즉시-저장은 키 단위.)
-- **CS-4-0**(ChromeHost pointer) — 슬라이더·색 그리드 선결.
+- **CS-4-0**(ChromeHost pointer) — 슬라이더·색 그리드 선결. ※ 슬라이더는 이후 `input_box`로 대체됨(slider.zig 제거).
 - **S0-2**(자동 reload) — 외부 편집 즉시 반영(선택, GUI와 직교).
 - 위젯 컴포넌트(CS-4-1~3).
 

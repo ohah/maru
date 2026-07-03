@@ -84,7 +84,7 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 
 | PR | 기능 / 키 | 핵심 변경 | 근거(현황) |
 |---|---|---|---|
-| **F1-1** ✅ | 배경 투명도 `window.opacity` | schema f32 slider + `MetalFrame.window_opacity_milli`(ABI v70) → 렌더러가 **화면 clear color alpha**에 곱(default 배경만 투명, 명시 cell bg 불투명 — iTerm2/Ghostty 모델). Swift가 opacity<1이면 metal layer/NSWindow 비불투명 | ✅ 머지. schema 파싱/range·resolve·frame milli 단위 테스트 + 실기(크래시 없음). 셰이더·셀 불변(clear alpha만) |
+| **F1-1** ✅ | 배경 투명도 `window.opacity` | schema f32 slider[→ 이후 숫자 입력 박스로 렌더] + `MetalFrame.window_opacity_milli`(ABI v70) → 렌더러가 **화면 clear color alpha**에 곱(default 배경만 투명, 명시 cell bg 불투명 — iTerm2/Ghostty 모델). Swift가 opacity<1이면 metal layer/NSWindow 비불투명 | ✅ 머지. schema 파싱/range·resolve·frame milli 단위 테스트 + 실기(크래시 없음). 셰이더·셀 불변(clear alpha만) |
 | **F1-1b** ✅ | 앱 주사율 `render.frame-rate` | Config 최상위 scalar schema(u32 number, 30~120, 기본 60) → Cmd+, **창** 섹션에 자동 노출. Swift host가 ABI `frame_rate_hz`로 config 희망값을 읽어 앱 전역 단일 `NSTimer` interval을 정하고, 설정 변경 시 다음 tick에 timer 재시작. 실제 tick에서는 `maru_macos_app_session_tick(session, frame_loop_rate_hz, ...)`로 host 전역 cadence를 각 Zig session에 주입해 blink/fade/poll/sync timeout의 ms→tick 환산 기준을 통일 | ✅ schema parse/range + AppSession helper + ABI getter/tick cadence 단위 테스트. 실제 모니터 주사율 자동 추적/vsync는 아님(CVDisplayLink 후속) |
 | **F1-2** ✅ | 폴백 폰트 `font.fallback` | 쉼표 구분 CSV(`FontConfig.fallback`) → `ResolvedFontRequest.fallback` → 셰이퍼가 `shape_draw_list` ABI로 ObjC에 전달 → 주 폰트에 **사용자 폴백 + CoreText 기본 cascade**를 `kCTFontCascadeListAttribute`로 박은 새 CTFont(매 cell 변경 불요). 빈=현행(자동 cascade만) | ✅ 머지. config 파싱·resolve 전파 단위 테스트 + 실기 정상 렌더(크래시 없음). 실제 한글/이모지 폴백 글리프는 실기 수동(한글 출력 필요) |
 | **F1-3** ✅ | bold-is-bright `theme.bold-is-bright` | `packForeground`에 `brightenIfBold`(bold+indexed 0~7→+8) | ✅ 머지. render-only, packForeground 순수 단위 테스트 |
@@ -129,11 +129,11 @@ config 키 추가 + 기존 경로에 분기 한 줄. GUI 없이 config 파일로
 기능이 config로 다 들어간 뒤, 그 위에 GUI를 얹는다. **거의 모든 토대가 chrome에 이미 있다** — 텍스트
 입력+caret(Find/팔레트), 토글(context_menu 체크박스), 드롭다운(팔레트), 스크롤 리스트, hit-test 패턴,
 GPU rounded quad, 입력 라우팅(ChromeHost). **신규 리스크는 ① color picker(가장 무거움) ② ChromeHost에
-마우스 pointer 이벤트가 아직 없음(슬라이더·색 그리드 선결)** 둘이다.
+마우스 pointer 이벤트가 아직 없음(슬라이더·색 그리드 선결)** 둘이다. ※ 슬라이더는 이후 `input_box`(숫자 직접 입력)로 대체·`slider.zig` 제거됨.
 
 | PR | 내용 | 난이도 | 재사용/근거 |
 |---|---|---|---|
-| **G0** | **ChromeHost pointer 이벤트** — 마우스 down/move/up을 `InputEvent`로 확장(슬라이더 드래그·색 그리드 선결) | 중간 | divider/sidebar hit-test 패턴 존재, host 입력 라우팅 확장 |
+| **G0** | **ChromeHost pointer 이벤트** — 마우스 down/move/up을 `InputEvent`로 확장(슬라이더 드래그[→ 슬라이더는 이후 input_box로 대체]·색 그리드 선결) | 중간 | divider/sidebar hit-test 패턴 존재, host 입력 라우팅 확장 |
 | **G1** | `toggle.zig` 위젯 | 낮음 | context_menu 체크박스(✓) 기반 |
 | **G2** | `dropdown.zig` 위젯(정적 목록) | 중간 | 팔레트 선택/네비 구조에서 검색 제거 |
 | **G3** | `text_input`/`number_input` 위젯 | 중간 | `overlay_input.zig`(IME·caret) 재사용 + 숫자 검증 |

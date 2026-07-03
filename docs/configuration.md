@@ -32,7 +32,7 @@ font.letter-spacing = 0.0
 
 # 컬러 테마 프리셋(선택). 한 줄로 색 세트를 고른다.
 # maru(기본)·ghostty·gruvbox-dark·solarized-dark·solarized-light·dracula·catppuccin-mocha·catppuccin-latte·light-pink·
-# rose-pine·rose-pine-dawn·tokyo-night·nord·one-dark·one-light.
+# dark-pink·rose-pine·rose-pine-dawn·tokyo-night·nord·one-dark·one-light.
 # 프리셋은 base다 — 아래 개별 theme.* 키를 프리셋 줄 *뒤에* 두면 그 색만 덮어쓴다.
 theme.preset = maru
 
@@ -76,10 +76,10 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 | `font.size` | 숫자 | `14` | 1~512 범위. 범위 밖/비숫자는 무시. ⌘+/⌘-(Bigger/Smaller)는 이 값을 **고정 1pt씩** 바꾸고 ⌘0(Actual Size)이 복귀시킨다(보폭은 설정 불가) |
 | `font.line-height` | 숫자 | `1.0` | 행간 배수. 1.0=CoreText 자동 cell 높이, 1.5=50% 더 큰 줄 간격. 0.5~3.0 범위. 범위 밖/비숫자는 무시. 늘어난 높이는 글자를 셀 안 세로 가운데로 그려 위아래 여백이 된다 |
 | `font.letter-spacing` | 숫자 | `0.0` | 자간(논리 pt). 0=advance 그대로, 양수=칸 넓힘, 음수=칸 좁힘. -8~32 범위(음수 허용). 범위 밖/비숫자는 무시. 늘어난 폭은 글자를 셀 안 가로 가운데로 그려 좌우 여백이 된다 |
-| `theme.preset` | 프리셋 이름 | `maru` | 이름 붙은 컬러 테마 **base**. 색 세트(배경/전경/커서/선택 + ANSI 16색)를 한 번에 고른다. `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light`. 개별 `theme.*` 키를 **이 줄 뒤에** 두면 그 색만 override(순차 적용, 나중 줄 우선). 그 외 값은 무시. 아래 [컬러 테마 프리셋](#컬러-테마-프리셋-themepreset) 참조 |
+| `theme.preset` | 프리셋 이름 | `maru` | 이름 붙은 컬러 테마 **base**. 색 세트(배경/전경/커서/선택 + ANSI 16색)를 한 번에 고른다. `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`dark-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light`. 개별 `theme.*` 키를 **이 줄 뒤에** 두면 그 색만 override(순차 적용, 나중 줄 우선). 그 외 값은 무시. 아래 [컬러 테마 프리셋](#컬러-테마-프리셋-themepreset) 참조 |
 | `theme.follow-system` | `true`\|`false` | `false` | **시스템 라이트/다크 외관을 따라 테마 색을 자동 전환**한다. `true`면 macOS가 라이트면 `theme.preset-light`, 다크면 `theme.preset-dark` 색 세트로 라이브 교체하고 외관이 바뀌면 즉시 따라간다. **켜져 있는 동안 `theme.preset`·개별 `theme.*` 색은 무시**되고 시스템이 색을 정한다(끄면 파일의 그 값으로 복귀). 시스템 외관 교체는 config 파일에 영속하지 않는다. 기본 `false`(현행 — 수동 테마) |
 | `theme.preset-light` | 프리셋 이름 | `solarized-light` | `theme.follow-system`이 켜졌을 때 **라이트** 외관에 쓸 프리셋(위 `theme.preset`과 같은 이름 집합). 라이트 테마(`solarized-light`·`catppuccin-latte`·`light-pink`·`rose-pine-dawn`·`one-light`)를 권장 |
-| `theme.preset-dark` | 프리셋 이름 | `maru` | `theme.follow-system`이 켜졌을 때 **다크** 외관에 쓸 프리셋. 다크 테마(`maru`·`gruvbox-dark`·`dracula`·`tokyo-night`·`nord`·`one-dark`·`rose-pine` 등)를 권장 |
+| `theme.preset-dark` | 프리셋 이름 | `maru` | `theme.follow-system`이 켜졌을 때 **다크** 외관에 쓸 프리셋. 다크 테마(`maru`·`gruvbox-dark`·`dracula`·`tokyo-night`·`nord`·`one-dark`·`rose-pine`·`dark-pink` 등)를 권장 |
 | `theme.background` | `#RRGGBB` | `#101010` | 16진 색. 형식 오류는 무시 |
 | `theme.foreground` | `#RRGGBB` | `#e8e8e8` | |
 | `theme.cursor` | `#RRGGBB` | `#ffffff` | |
@@ -176,6 +176,7 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 | `catppuccin-mocha` | Catppuccin Mocha(파스텔 다크) | `#1e1e2e` |
 | `catppuccin-latte` | Catppuccin Latte(**라이트** — 파스텔) | `#eff1f5` |
 | `light-pink` | Light Pink(**라이트** — 로즈·골드·틸 핑크) | `#f5f5f5` |
+| `dark-pink` | Dark Pink(**다크** — 핑크·로즈·라벤더) | `#1e1e1e` |
 | `rose-pine` | Rosé Pine(뮤트한 로즈·파인 다크) | `#191724` |
 | `rose-pine-dawn` | Rosé Pine Dawn(**라이트** — 크림) | `#faf4ed` |
 | `tokyo-night` | Tokyo Night(블루·퍼플 네온 다크) | `#1a1b26` |
@@ -188,9 +189,12 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 > 나머지(`gruvbox-dark`·`solarized-*`·`dracula`·`catppuccin-*`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·
 > `one-light`)는 **iTerm2-Color-Schemes**의 표준 색 값(배경/전경/커서/선택/팔레트)을 그대로 가져왔다 — 색 **값만** 인용했고
 > 코드 표현은 옮기지 않았다(clean-room). 정확한 팔레트 16색은 `src/config/theme.zig`의 프리셋 상수가 단일 출처다.
-> `light-pink`만 예외로 mgwg **light-pink-theme**(VS Code)에서 배경/커서/선택/검색 매치 값을 가져오되, 이 테마가 **터미널
-> ANSI 색을 정의하지 않으므로** ANSI 16색은 테마의 **구문 색**(키워드 로즈·숫자 골드·문자열 틸·타입 퍼플)에서 의미 매핑으로
-> 파생했다(역시 색 의도만 — clean-room). 라이트 배경이라 `catppuccin-latte`처럼 black↔white를 반전해 본문 가독성을 지킨다.
+> `light-pink`·`dark-pink`만 예외로 mgwg **light-pink-theme**(VS Code)의 라이트/다크 두 변형에서 배경/전경/커서/선택 값을
+> 가져오되, 이 테마가 **터미널 ANSI 색을 정의하지 않으므로** ANSI 16색은 테마의 **구문 색**(`light-pink`: 키워드 로즈·숫자
+> 골드·문자열 틸·타입 퍼플 / `dark-pink`: invalid 핫핑크·브래킷 하이라이트의 골드·블루·퍼플·틸 + tag/storage 시그니처 핑크)에서
+> 의미 매핑으로 파생했다(역시 색 의도만 — clean-room). 라이트인 `light-pink`는 `catppuccin-latte`처럼 black↔white를 반전해
+> 본문 가독성을 지키고, 다크인 `dark-pink`는 반전 없이 다크 관례를 따른다(사이드바=배경 파생·검색 매치=Maru 다크 앰버 유지 —
+> VS Code Dark Pink도 크롬은 default dark고 구문만 핑크라 이 번역이 충실하다).
 >
 > - **검색 매치색**(스크롤백 Find 하이라이트)은 Maru 고유라 **다크 프리셋**에선 Maru 기본(다크 앰버)을 유지한다. **예외:
 >   라이트 프리셋**(`light-pink`·`rose-pine-dawn`·`one-light`)은 라이트 배경에서 다크 앰버가 안 보여 테마의 따뜻한 골드/피치

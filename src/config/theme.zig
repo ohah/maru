@@ -157,6 +157,7 @@ pub const ThemePreset = enum {
     catppuccin_mocha, // Catppuccin Mocha(파스텔 다크).
     catppuccin_latte, // Catppuccin Latte(파스텔 라이트).
     light_pink, // Light Pink(mgwg light-pink-theme — 로즈·골드·틸 라이트).
+    dark_pink, // Dark Pink(mgwg light-pink-theme의 다크 변형 — 핑크·로즈·라벤더 다크).
     rose_pine, // Rosé Pine(뮤트한 로즈·파인 다크).
     rose_pine_dawn, // Rosé Pine Dawn(Rosé Pine 라이트 — 크림 배경).
     tokyo_night, // Tokyo Night(블루·퍼플 네온 다크).
@@ -241,6 +242,18 @@ const catppuccin_latte_palette: [16]?[]const u8 = .{
 const light_pink_palette: [16]?[]const u8 = .{
     "#c7b9c1", "#d2304b", "#5b9a6e", "#b08b35", "#6688c0", "#9466aa", "#1f6e89", "#6e6569",
     "#b3a5ad", "#e0506c", "#66a878", "#c19a40", "#7896cc", "#a878be", "#2e7e98", "#3a3034",
+};
+// Dark Pink도 light-pink-theme와 같이 **터미널 ANSI 색을 정의하지 않아**(UI·구문 색만) iTerm2 표준값을 가져올 소스가 없다.
+// 그래서 16색은 테마 **구문 색**(tokenColors)과 **브래킷 하이라이트**(editorBracketHighlight.foreground1~6)에서 의미 매핑으로
+// 파생했다(light_pink 선례 — clean-room, 색 의도만). 매핑: red=invalid #e83c92(핫 핑크-레드), green=bracket5 #97c26c(모스 —
+// 테마 구문엔 green이 없어 브래킷에서 보강, 핑크와 안 부딪음), yellow=bracket1 #dfb976(골드 — constant.numeric #cec4a8와 근사),
+// blue=bracket2 #5caeef, magenta=bracket3 #c172d9(퍼플; bright는 tag/storage/constant 시그니처 핑크 #f695c6로 승격), cyan=
+// bracket4 #4fb1bc(틸). **다크 배경(#1e1e1e)이라 반전 없음**(catppuccin_mocha류 다크 관례): black(0)=배경보다 살짝 밝은 웜
+// 다크(#3a3436), white(7)=foreground(#d4d4d4)보다 옅은 로즈-그레이(#c8bcc0, bright-white와 구분), bright(8~15)는 각 normal을
+// 한 단계 밝게(bright-magenta 13만 퍼플→시그니처 핑크로 색상 이동). bright-white(15)=핑크빛 화이트(#f6eef2).
+const dark_pink_palette: [16]?[]const u8 = .{
+    "#3a3436", "#e83c92", "#97c26c", "#dfb976", "#5caeef", "#c172d9", "#4fb1bc", "#c8bcc0",
+    "#6e5f67", "#f45c9e", "#a9d17e", "#ecca8b", "#7cc1f5", "#f695c6", "#6cc6d1", "#f6eef2",
 };
 // 아래 6개(rose-pine·tokyo-night·nord·one-dark/light)는 iTerm2-Color-Schemes Ghostty 포맷의 표준 색 **값만** 가져왔다
 // (코드 표현 미복사 — gruvbox/solarized/dracula/catppuccin과 같은 clean-room). 출처 파일명은 각 presetColors 케이스 주석.
@@ -366,6 +379,18 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .sidebar_background = "#f2e7ed",
             .sidebar_active = "#f5bedb",
             .palette = light_pink_palette,
+        },
+        .dark_pink => .{ // light-pink-theme의 다크 변형("Dark Pink" — default dark 편집기 기반 + 핑크 구문)
+            .background = "#1e1e1e", // editor.background(VS Code default dark 기반 — 크롬은 중립, 핑크는 구문에)
+            .foreground = "#d4d4d4", // editor.foreground
+            // 테마가 editorCursor를 안 정함 → foreground(다크 프리셋 관례: cursor=fg). 반전 블록 커서라 밝은 커서 가독.
+            .cursor = "#d4d4d4",
+            .selection = "#444242", // editor.selectionBackground(따뜻한 다크 그레이 — 밝은 글자 그대로 읽힘)
+            // sidebar_*·search_match*는 **다크 프리셋 관례대로 미명시**한다(sidebar=배경 #1e1e1e 파생, search=maru 다크 앰버).
+            // 라이트 변형(light_pink)이 sidebar를 명시한 건 라이트 배경에서 파생 lighten이 흰색으로 무너지는 함정 회피였을 뿐,
+            // 다크에선 그 함정이 없다. 핑크 정체성은 ANSI 팔레트(구문·브래킷 파생)가 담는다 — VS Code Dark Pink도 크롬은
+            // default dark고 구문만 핑크다(충실 번역).
+            .palette = dark_pink_palette,
         },
         // ── 아래 6개: iTerm2-Color-Schemes Ghostty 포맷 표준값(파일명 주석). 다크는 sidebar_* null(배경 파생),
         //    라이트(rose_pine_dawn/one_light)만 sidebar_*·search_match*를 명시(라이트 함정 회피 — light_pink와 같은 규율).

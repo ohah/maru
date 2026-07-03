@@ -1344,6 +1344,32 @@ test "settings handle: 방향키 영역 모델(←네비·→폼·↑↓ 영역 
     try std.testing.expect(!s.open);
 }
 
+test "settings handle: 드롭다운 팝업 열림 라우팅(↑↓=preview·Enter=accept·Esc=cancel·←→/글자=consumed)" {
+    // 팝업이 열려 있으면 handle이 dropdown.handle로 라우팅해 settings.Action으로 매핑한다 — ↑↓는 라이브 프리뷰
+    // (dropdown_preview), Enter는 확정(dropdown_accept), Esc는 취소(dropdown_cancel, 원복). ←→/글자가 섹션·영역으로
+    // 새지 않고 consumed되어 팝업이 유지되는 게 회귀 가드(모달 캡처).
+    var s = State{};
+    s.show();
+    s.dropdown.show(3, 0); // 항목 3, 현재 인덱스 0
+    try std.testing.expect(s.dropdown.open);
+    try std.testing.expectEqual(@as(usize, 0), s.dropdown.original); // show가 original=현재로
+
+    // ↓ → 라이브 프리뷰 + selected 이동.
+    try std.testing.expectEqual(Action.dropdown_preview, handle(.{ .key = .down }, &s));
+    try std.testing.expectEqual(@as(usize, 1), s.dropdown.selected);
+    // ←→/글자 → consumed(팝업 유지 — 섹션/영역으로 안 샘).
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .left }, &s));
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .right }, &s));
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .char, .codepoint = 'x' }, &s));
+    try std.testing.expect(s.dropdown.open);
+    // Enter → accept(컴포넌트는 안 닫음 — platform이 닫는다).
+    try std.testing.expectEqual(Action.dropdown_accept, handle(.{ .key = .enter }, &s));
+    try std.testing.expect(s.dropdown.open);
+    // Esc → cancel + 닫힘(dropdown.handle이 hide).
+    try std.testing.expectEqual(Action.dropdown_cancel, handle(.{ .key = .escape }, &s));
+    try std.testing.expect(!s.dropdown.open);
+}
+
 test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob text)+slider 행(트랙+채움 text)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

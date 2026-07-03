@@ -10155,6 +10155,21 @@ pub const AppSession = struct {
         // 교차-에이전트 매핑(codex 경로를 claude 파서로)을 걸러 unknown으로.
         const transcript_path = agent_hooks.readMapping(self.io, self.allocator, term.surface.id, kind, null, &tp_buf);
         const r = agent_session.poll(self.io, self.allocator, kind, term.agent_session_mtime, &term.agent_answer_buf, transcript_path);
+        if (r.missing) {
+            // 매핑된 트랜스크립트가 삭제됨 = 세션 gone(경로는 세션 내내 고정이라 회전 아님 — docs/agent-session.md).
+            // 직전이 running/idle이었으면(살아있던 세션) stale 매핑을 파기하고 상태를 unknown으로 리셋한다 — 안 그러면
+            // unknown의 "직전 상태 보존" 계약 때문에 삭제된 running이 스피너가 영영 안 풀린다. 새 세션은 SessionStart 훅이
+            // 새 매핑을 쓰므로 자가회복. running→unknown이라 완료 알림은 안 뜬다(사라진 세션은 완료가 아님).
+            if (prev_state == .running or prev_state == .idle) {
+                agent_hooks.removeMapping(self.io, term.surface.id);
+                if (spinner_visible) self.metal_dirty = true; // 스피너/아이콘 표시 중이었으면 재렌더로 걷어냄
+                if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent transcript gone → 매핑 파기·상태 리셋", .{});
+            }
+            term.agent_state = .unknown;
+            term.agent_answer_len = 0;
+            term.agent_session_mtime = 0;
+            return;
+        }
         const new_state = r.state orelse {
             term.agent_session_mtime = r.mtime; // null = mtime 동일 — 갱신 무해, 직전 상태 유지(재파싱 skip)
             return;

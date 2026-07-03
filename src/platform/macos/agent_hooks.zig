@@ -270,6 +270,17 @@ fn atomicWrite(io: std.Io, path: []const u8, data: []const u8) !void {
 /// 키잉되므로, 같은 팬에서 codex→claude로 바뀌고 claude 훅 발화 전이면 codex 경로를 claude로 오파싱하는 걸 막는다.
 /// (2) `pane_cwd`가 주어지면 payload `cwd`가 그 팬 cwd와 같은가 — 다른 폴더 세션의 stale 매핑을 막는다(restore에서 씀;
 /// 라이브 poll은 null로 넘겨 cwd 체크 생략—self-heal). 파일 없음/파싱 실패/검증 실패면 null(호출자는 unknown/폴백).
+/// 팬의 세션 매핑 파일(`<dir>/<pane_id>`)을 지운다 — 매핑된 트랜스크립트가 사라진(세션 gone) 걸 pollAgentState가
+/// 감지했을 때 stale 매핑을 정리한다(docs/agent-session.md "매핑된 트랜스크립트 부재"). 새 세션은 SessionStart 훅이
+/// 새 매핑을 쓰므로 무해. best-effort(없으면 무시). setup 시 clearMappings가 dir 전체를 비우는 것과 달리 이건 팬 1개만.
+pub fn removeMapping(io: std.Io, pane_id: u64) void {
+    var dir_buf: [max_path]u8 = undefined;
+    const dir = mappingsDir(&dir_buf) orelse return;
+    var path_buf: [max_path]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ dir, pane_id }) catch return;
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
 pub fn readMapping(io: std.Io, allocator: std.mem.Allocator, pane_id: u64, kind: Kind, pane_cwd: ?[]const u8, out: []u8) ?[]const u8 {
     var dir_buf: [max_path]u8 = undefined;
     const dir = mappingsDir(&dir_buf) orelse return null;

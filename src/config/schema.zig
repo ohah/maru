@@ -1035,6 +1035,38 @@ test "schema appendEnumFields/cycleEnum: enum 열거·순환(dropdown 사이클�
     try std.testing.expect(!cycleEnum(&cfg, "no.such.key", 1));
 }
 
+test "schema enumVariants/enumIndex/setEnumIndex: 변형 목록·현재 ordinal·절대 인덱스 set(드롭다운 팝업)" {
+    // 이 테스트가 증명하는 것: 드롭다운 팝업이 쓰는 세 함수 — 열 때 전체 변형 목록(enumVariants)·현재 선택
+    // (enumIndex)·확정 시 절대 인덱스로 적용(setEnumIndex). 사이클러 순환(cycleEnum)의 목록/절대-set 짝이라,
+    // 팝업이 올바른 항목을 깔고 고른 항목을 정확히 적용하는지 보장한다(설정 enum 선택의 코어).
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var cfg: theme.Config = .{};
+
+    // enumVariants: cursor.shape 전체 변형(@tagName, 선언 순 — '_'→'-' 표시 변환은 viewPopup이 함). 비-enum·모르는 키 → null.
+    const variants = (try enumVariants(arena.allocator(), cfg, "cursor.shape")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(variants.len >= 2);
+    try std.testing.expectEqualStrings(@tagName(theme.CursorShape.block), variants[0]); // ordinal 0 = 기본 block
+    try std.testing.expect((try enumVariants(arena.allocator(), cfg, "cursor.blink")) == null); // bool(비-enum)
+    try std.testing.expect((try enumVariants(arena.allocator(), cfg, "no.such.key")) == null);
+
+    // enumIndex: 기본 cursor.shape=block → 0. 비-enum → null.
+    try std.testing.expectEqual(@as(?usize, 0), enumIndex(cfg, "cursor.shape"));
+    try std.testing.expect(enumIndex(cfg, "no.such.key") == null);
+
+    // setEnumIndex: 마지막 변형으로 set → enumIndex가 그 값. 범위 밖·비-enum → false(무변).
+    const last = variants.len - 1;
+    try std.testing.expect(setEnumIndex(&cfg, "cursor.shape", last));
+    try std.testing.expectEqual(@as(?usize, last), enumIndex(cfg, "cursor.shape"));
+    try std.testing.expect(!setEnumIndex(&cfg, "cursor.shape", variants.len)); // 범위 밖 → false
+    try std.testing.expectEqual(@as(?usize, last), enumIndex(cfg, "cursor.shape")); // 불변 확인
+    try std.testing.expect(!setEnumIndex(&cfg, "no.such.key", 0));
+    // round-trip: 0으로 set → block.
+    try std.testing.expect(setEnumIndex(&cfg, "cursor.shape", 0));
+    try std.testing.expectEqual(theme.CursorShape.block, cfg.cursor.shape);
+}
+
 test "schema appendTextFields/setText: 문자열(widget .text/.color) 열거·설정(인라인 편집)" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);

@@ -22149,6 +22149,183 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
 
 // 세팅 화면 토글 → 선택 행 bool config flip(라이브) + config_dirty_keys persist 예약(CS-4-4c). 실제 파일 write는
 // Swift atomic write(사이드바와 같은 경로 — 일반화)라 여기선 메모리 flip + dirty 예약까지 헤드리스로 고정한다.
+test "settings 드롭다운 통합: enum 행 활성→팝업 열림·변형 목록·applyDropdownSelection로 config 변경+영속" {
+    // 이 테스트가 증명하는 것: enum 행 활성이 드롭다운 팝업을 현재값에서 열고(toggleSelectedSetting), buildSettingsDropdownItems가
+    // 그 enum의 변형 목록을 주며(enumVariants), 다른 인덱스를 확정하면 applyDropdownSelection이 config enum을 그 값으로 바꾸고
+    // (setEnumIndex) 팝업을 닫고 영속을 예약한다 — 설정 enum 선택의 플랫폼 전 경로(라이브 프리뷰·확정의 코어).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.toggleSettings();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    // 실제 스키마 enum(theme.preset synthetic 제외)이 있는 섹션·행을 찾는다(bool→num→enum 순 인덱싱).
+    var enum_row: ?usize = null;
+    var enum_key: []const u8 = "";
+    for (sections, 0..) |_, si| {
+        session.chrome_host.settings.section = si;
+        const cf = try session.currentSectionFields(scratch.allocator());
+        for (cf.enums, 0..) |e, ei| {
+            if (std.mem.eql(u8, e.key, "theme.preset")) continue; // synthetic — 별도 경로
+            enum_row = cf.bools.len + cf.nums.len + ei;
+            enum_key = e.key;
+            break;
+        }
+        if (enum_row != null) break;
+    }
+    try std.testing.expect(enum_row != null); // 스키마 enum 행이 존재
+    session.refreshSettingsFieldCount();
+    session.chrome_host.settings.selected = enum_row.?;
+    _ = session.takeConfigDirty(); // 이전 dirty 비우기
+
+    // 활성 → 드롭다운 팝업 열림 + 현재 인덱스에서 시작.
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.chrome_host.settings.dropdown.open);
+    const cur = config_mod.schema.enumIndex(session.loaded_config.config, enum_key).?;
+    try std.testing.expectEqual(cur, session.chrome_host.settings.dropdown.selected);
+
+    // buildSettingsDropdownItems가 그 enum의 변형 목록을 준다.
+    const items = try session.buildSettingsDropdownItems(scratch.allocator());
+    const variants = (try config_mod.schema.enumVariants(scratch.allocator(), session.loaded_config.config, enum_key)).?;
+    try std.testing.expectEqual(variants.len, items.len);
+
+    // 다른 인덱스 확정 → config enum 변경 + 팝업 닫힘 + dirty 예약.
+    const target = (cur + 1) % variants.len;
+    session.chrome_host.settings.dropdown.selected = target;
+    session.applyDropdownSelection();
+    try std.testing.expect(!session.chrome_host.settings.dropdown.open);
+    try std.testing.expectEqual(@as(?usize, target), config_mod.schema.enumIndex(session.loaded_config.config, enum_key));
+    try std.testing.expect(session.takeConfigDirty()); // 영속 예약됨
+}
+
+test "settings 숫자 입력 박스 커밋: 편집→파싱→범위 clamp로 config 변경 (슬라이더 대체)" {
+    // 이 테스트가 증명하는 것: number 행 활성이 입력 박스 편집을 열고(현재값 시드), 범위 초과 값을 타이핑해 커밋하면
+    // commitSelectedText가 파싱→setNumber(범위 clamp)로 config를 max로 고정하고 영속을 예약한다 — 프로그레스바를
+    // 대체한 숫자 직접 입력의 핵심(잘못된 값이 range 밖으로 새지 않음).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.toggleSettings();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var num_row: ?usize = null;
+    var num_key: []const u8 = "";
+    var num_max: f64 = 0;
+    for (sections, 0..) |_, si| {
+        session.chrome_host.settings.section = si;
+        const cf = try session.currentSectionFields(scratch.allocator());
+        if (cf.nums.len > 0) {
+            num_row = cf.bools.len; // 첫 number(bool 다음)
+            num_key = cf.nums[0].key;
+            num_max = cf.nums[0].max;
+            break;
+        }
+    }
+    try std.testing.expect(num_row != null); // number 행이 존재
+    session.refreshSettingsFieldCount();
+    session.chrome_host.settings.selected = num_row.?;
+    _ = session.takeConfigDirty();
+
+    // 활성 → 편집 진입(입력 박스, 현재값 시드). 편집 버퍼를 범위 초과 값으로 덮고 커밋 → clamp.
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.chrome_host.settings.editing);
+    session.chrome_host.settings.enterEdit("999999"); // 범위 초과
+    session.commitSelectedText();
+    try std.testing.expect(!session.chrome_host.settings.editing); // 커밋 후 편집 종료
+    try std.testing.expect(session.takeConfigDirty()); // 영속 예약
+
+    // config number가 max로 clamp됐는지 — 재빌드해 그 키의 값 확인(f32 저장 반올림 허용).
+    session.chrome_host.settings.selected = num_row.?;
+    const cf2 = try session.currentSectionFields(scratch.allocator());
+    var found = false;
+    for (cf2.nums) |n| {
+        if (std.mem.eql(u8, n.key, num_key)) {
+            found = true;
+            try std.testing.expectApproxEqAbs(num_max, n.value, 0.01); // 999999 → max로 clamp
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "settingsPaletteArrowIntercept: 팔레트 행 폼-포커스 ←→=셀 이동, 셀0(←)·셀15(→) 끝은 미가로채기(영역 이동)" {
+    // 이 테스트가 증명하는 것: 팔레트 그리드 행(폼 포커스)의 ←→가 16색 셀을 이동하되, ← 셀0·→ 셀15(끝)에선 가로채지
+    // 않아(false) 컴포넌트의 영역 포커스 이동으로 이어진다는 엣지-이탈 규칙. 네비 포커스면 가로채지 않는다(폼 전용).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.toggleSettings();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var pal_row: ?usize = null;
+    for (sections, 0..) |_, si| {
+        session.chrome_host.settings.section = si;
+        const cf = try session.currentSectionFields(scratch.allocator());
+        if (cf.paletteRowIndex()) |pi| {
+            pal_row = pi;
+            break;
+        }
+    }
+    try std.testing.expect(pal_row != null); // 팔레트 그리드 행 존재(테마 섹션)
+    session.refreshSettingsFieldCount();
+    session.chrome_host.settings.selected = pal_row.?;
+    session.chrome_host.settings.nav_focused = false; // 폼 포커스
+    session.chrome_host.settings.grid_cell = 0;
+
+    const left = terminal.KeyEvent{ .key = .arrow_left, .modifiers = .{} };
+    const right = terminal.KeyEvent{ .key = .arrow_right, .modifiers = .{} };
+
+    // ← 셀0 → 미가로채기(false — 컴포넌트 영역 이동으로), grid_cell 불변.
+    try std.testing.expect(!session.settingsPaletteArrowIntercept(left));
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.settings.grid_cell);
+    // → 셀0 → 가로채기(셀 이동) grid_cell→1.
+    try std.testing.expect(session.settingsPaletteArrowIntercept(right));
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.settings.grid_cell);
+    // 셀15에서 → → 미가로채기(끝).
+    session.chrome_host.settings.grid_cell = 15;
+    try std.testing.expect(!session.settingsPaletteArrowIntercept(right));
+    // 셀5에서 ← → 가로채기 grid_cell→4.
+    session.chrome_host.settings.grid_cell = 5;
+    try std.testing.expect(session.settingsPaletteArrowIntercept(left));
+    try std.testing.expectEqual(@as(usize, 4), session.chrome_host.settings.grid_cell);
+    // 네비 포커스면 미가로채기(폼 전용).
+    session.chrome_host.settings.nav_focused = true;
+    session.chrome_host.settings.grid_cell = 5;
+    try std.testing.expect(!session.settingsPaletteArrowIntercept(right));
+}
+
 test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist 예약 (CS-4-4c)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

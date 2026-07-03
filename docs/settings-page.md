@@ -51,7 +51,7 @@ dirty region에 박혀 있어 렌더 파이프라인 재설계가 필요하고, 
 | **Global Hotkey** | (전역 OS 단축키) | schema 필드 없는 특수 섹션 — 전역 OS 단축키 녹음 행만(global action별 한 행, app_session이 강제 포함·라벨 "글로벌 핫키"). 매크로 rhs는 config 파일 직접 편집(후속) |
 | **Terminal** | `term`, `scrollback.*`, `bell.*`, `notifications.*`, `osc52.*`, `shell.*`, `env.*` | TERM, 스크롤백, 벨(audible/visual/badge), 알림, OSC52 read, 셸/인자, env |
 | **Workspace** | `workspace.*` | root, tab/split inherit-cwd |
-| **Quick Terminal** | `quick-terminal.*` | height/width/position/screen/auto-hide/chrome/minimal-tabs |
+| **Quick Terminal** | `quick-terminal.*` | height/width/position/screen/auto-hide/chrome/minimal-tabs (라이브 반영 — 매 토글 재조회, config-gui.md §6.10; chrome/minimal-tabs만 세션 재생성) |
 | **Sidebar** | `sidebar.*` | show-branch, show-folder (이미 ⚙ 양방향 — 첫 선례) |
 | **Behavior** | (앱 동작) | 탭/창 닫기 확인, config 자동 reload 토글 |
 

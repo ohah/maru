@@ -932,8 +932,9 @@ pub export fn maru_macos_app_session_global_hotkeys(
     return @intFromEnum(Status.ok);
 }
 
-// quick terminal 표시 옵션(config에서 파싱, 세션 동안 불변). Swift가 시작/토글 시 읽어 패널 크기·화면·
-// 자동 숨김에 쓴다. POD 복사라 소유권 문제 없음.
+// quick terminal 표시 옵션(config에서 파싱). Swift가 매 토글마다 읽어 auto_hide·화면 모드·chrome 재생성 판정에
+// 쓴다(세션의 현재 config 라이브 스냅샷 — 세션-불변 아님, 설정 변경 반영). 패널 사각형은 quick_terminal_frames가
+// 따로 계산한다. POD 복사라 소유권 문제 없음.
 pub export fn maru_macos_app_session_quick_terminal_config(
     session: ?*AppSession,
     out_config: ?*session_mod.QuickTerminalConfig,
@@ -941,6 +942,23 @@ pub export fn maru_macos_app_session_quick_terminal_config(
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const config_out = out_config orelse return @intFromEnum(Status.null_out);
     config_out.* = app_session.quickTerminalConfig();
+    return @intFromEnum(Status.ok);
+}
+
+// quick 패널 보임/숨김 사각형 — Swift가 대상 화면 visibleFrame(vf_*, macOS 좌표 minX/minY/width/height)을 넘기면
+// 세션의 **현재** config(위치·두께·center 폭)로 계산해 돌려준다. quick_terminal_config와 달리 세션-불변 스냅샷이
+// 아니라 매 호출 라이브라 설정 GUI 변경이 다음 토글에서 바로 반영된다. 순수 계산 + POD 복사.
+pub export fn maru_macos_app_session_quick_terminal_frames(
+    session: ?*AppSession,
+    vf_x: f64,
+    vf_y: f64,
+    vf_w: f64,
+    vf_h: f64,
+    out_frames: ?*session_mod.QuickTerminalFrames,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const frames_out = out_frames orelse return @intFromEnum(Status.null_out);
+    frames_out.* = app_session.quickTerminalFrames(vf_x, vf_y, vf_w, vf_h);
     return @intFromEnum(Status.ok);
 }
 
@@ -1148,6 +1166,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostSessionConfig), @alignOf(AppSessionConfig));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostQuickTerminalConfig), @sizeOf(session_mod.QuickTerminalConfig));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostQuickTerminalConfig), @alignOf(session_mod.QuickTerminalConfig));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostQuickTerminalFrames), @sizeOf(session_mod.QuickTerminalFrames));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostQuickTerminalFrames), @alignOf(session_mod.QuickTerminalFrames));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalChromeMinimal), @intFromEnum(maru.config.theme.QuickTerminalChrome.minimal));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalPositionCenter), @intFromEnum(maru.config.theme.QuickTerminalPosition.center));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostCommand), @sizeOf(session_mod.CommandEntry));

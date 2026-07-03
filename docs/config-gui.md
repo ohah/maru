@@ -221,6 +221,17 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **eyedropper(스포이드)**: picker에서 **`i`** 키 → platform이 OS 화면 색 추출기(`NSColorSampler`, 돋보기로 화면 픽셀 클릭)를 연다(ABI v83 `take_color_sample_request`/`provide_sampled_color`, 비동기 콜백 — "언제"는 Zig·OS 추출기는 Swift host). 고른 색(sRGB→0~255 RGB)을 `setPickerRgb`로 picker에 반영(picking·non-editing 가드).
 - **한계(후속)**: alpha(터미널 색은 #RRGGBB라 범위 밖에 가까움 — 보류). picker 고급화 사실상 완료(연속 해상도·sub-cell·hex 인라인·eyedropper).
 
+### 6.10 퀵 터미널(`quick-terminal.*`) 라이브 반영
+
+퀵 터미널 옵션(`height`/`width`/`position`/`screen`/`auto-hide`/`chrome`/`minimal-tabs`)은 전부 **schema-주도 스칼라**라 세팅 폼이 자동으로 위젯을 그리고, 커밋은 다른 스칼라와 똑같이 `setNumber`/`cycleEnum`/`setBool` + write-back으로 처리한다(특수 행 아님). 다만 이 값들은 Zig 코어가 아니라 **macOS 플랫폼(Swift `MaruAppHost`)이 오버레이 패널을 그릴 때** 쓰므로, "라이브 반영"의 배선이 다른 렌더 설정과 다르다.
+
+- **세션-불변 스냅샷 제거**: 예전에는 Swift가 첫 토글(`ensureQuickTerminal`)에서 config를 한 번 읽어 캐시했고 이후엔 다시 안 읽어, 설정을 바꿔도 **이미 연 퀵 터미널엔 재시작 전까지 반영되지 않았다**(루트커즈). 지금은 매 토글마다 config를 라이브로 다시 읽는다.
+- **패널 사각형은 ABI가 매 호출 계산**: 위치별 보임/숨김 사각형(가장자리 슬라이드 방향·center 페이드)은 Swift가 아니라 **Zig 순수 모듈 `quick_terminal_geometry.zig`의 `compute`**(세션·AppKit 없이 단위 테스트가 top/bottom/left/right/center·width 폴백·오프셋 원점 화면을 못박음)가 단일 출처다. Swift는 대상 화면 `visibleFrame`을 `maru_macos_app_session_quick_terminal_frames`(ABI)로 넘겨 세션의 **현재** config로 계산받는다(`quick_terminal_config`의 세션-불변 스냅샷과 대비 — frames는 매 호출 라이브). 그래서 `height`/`width`/`position` 변경은 다음 표시에서 바로 반영된다. config는 primary 세션에서 읽는다(설정 GUI 라이브 적용 대상이자 항상 존재).
+- **`auto-hide`/`screen`**: 표시 직전 토글에서 Swift가 라이브로 다시 읽어 즉시 적용(포커스 잃음 자동 숨김 여부·대상 화면 모드).
+- **`chrome`/`minimal-tabs`만 예외(재생성)**: 이 둘은 퀵 세션 **생성 인자**로 박혀 라이브로 못 바꾼다. 토글에서 현재 config와 생성 시점 스냅샷을 비교해 달라졌으면 기존 퀵 세션을 내리고(`tearDownQuickTerminal`) 새 chrome으로 재생성한다 — **그 스크래치 셸 상태는 초기화**된다(퀵 터미널은 transient라 허용, 라이브 반영의 유일한 트레이드오프).
+- **멀티 모니터**: `screen=main`은 **주 디스플레이(메뉴 막대가 있는 원점 화면 = `NSScreen.screens.first`)**에 띄운다. `NSScreen.main`(키보드 포커스 창의 화면)은 글로벌 핫키 특성상 다른 앱이 전면일 때 그 화면으로 새므로 쓰지 않는다. 숨김 애니메이션은 **표시 시점에 캐시한 사각형**으로 되빠져, 표시 이후 마우스가 다른 모니터로 넘어가도(mouse 모드) 패널이 있던 화면 그대로 슬라이드 아웃한다.
+- **한계(후속)**: config를 primary 세션에서 읽으므로, **멀티 창에서 primary가 아닌 창의 세팅으로 바꾸면** 파일엔 써지지만 primary 메모리 config는 stale이라 다음 재시작·해당 창 reload 전까지 퀵 터미널에 안 보일 수 있다(세션 간 config 브로드캐스트는 별도 과제). 단일 창(주 사용 흐름)에선 완전 반영된다.
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에

@@ -30,7 +30,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | 필드 타입 | 위젯(`.auto`) | prop(메타에서) |
 |---|---|---|
 | `bool` | toggle | 현재값, label=doc |
-| `enum` | dropdown(**열리는 팝업 목록**) | 옵션=enum 토큰(`_`↔`-`), 현재값. Enter/클릭으로 목록을 열어 ↑↓ 선택·Enter 확정 |
+| `enum` | dropdown(**열리는 팝업 목록**) | 옵션=enum 토큰(`_`↔`-`), 현재값. Enter/클릭으로 목록을 열어 **↑↓로 넘기면 라이브 미리보기(바로 반영)**·Enter 확정·Esc는 열 때 값으로 원복 |
 | `f32`/`u32` + `range` | **숫자 입력 박스**(`input_box`) | min/max=range로 커밋 시 clamp, 현재값. Enter/클릭으로 편집 진입해 직접 타이핑(슬라이더/프로그레스바 대체) |
 | `[]const u8` (widget=`.text`) | text input | 현재값(IME) |
 | `[]const u8` (widget=`.color`) | color input | 현재 #RRGGBB |
@@ -76,7 +76,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
   section의 FieldRow 위젯들). 모달 오버레이 레이어(팔레트/Find와 같은 `ChromeHost` 모달, 우선순위 §host).
 - **열기**: 빌트인 키(예: `⌘,` — §10 결정) 또는 메뉴 "Settings…" / 커맨드 팔릿. `toggle_settings` app action.
 - **검색·blur**: 사이드바 검색바와 같은 규율(검색 영역 밖 클릭/Esc로 blur → 키 포커스 터미널 복귀).
-- **키보드 네비(화살표 전용)**: **←→=섹션 전환**(좌측 네비, 컴포넌트가 `selectSection`±1 — 상한은 platform `refreshSettingsFieldCount`가 clamp, ←는 첫 섹션에서 정지), **↑↓=행 이동**, **Enter/Space=행 활성**(bool flip·number 입력 박스 편집 진입·enum/font 드롭다운 팝업 열기·text 편집·color HSV picker·keybind 녹음), Esc=닫기. 현재 섹션만 accent, 나머지는 muted로 늘 보인다. **예전 Tab 폼↔네비 토글(`nav_focused`)은 제거**됐다(사용자 요청 — "탭으로 왔다갔다"·"화살표로 전부 이동"). Tab은 무동작. ←→가 섹션 전환으로 통일되며 슬라이더 ←→ 값조절·색 ←→ 프리셋 순환은 없어졌다(값은 입력 박스·드롭다운·picker로). 드롭다운 팝업이 열려 있으면 모든 키를 팝업이 잡는다(↑↓ 선택·Enter 확정·Esc 취소·←→/잡키 무시).
+- **키보드 네비(화살표 전용)**: **←→=섹션 전환**(좌측 네비, 컴포넌트가 `selectSection`±1 — 상한은 platform `refreshSettingsFieldCount`가 clamp, ←는 첫 섹션에서 정지), **↑↓=행 이동**, **Enter/Space=행 활성**(bool flip·number 입력 박스 편집 진입·enum/font 드롭다운 팝업 열기·text 편집·color HSV picker·keybind 녹음), Esc=닫기. 현재 섹션만 accent, 나머지는 muted로 늘 보인다. **예전 Tab 폼↔네비 토글(`nav_focused`)은 제거**됐다(사용자 요청 — "탭으로 왔다갔다"·"화살표로 전부 이동"). Tab은 무동작. ←→가 섹션 전환으로 통일되며 슬라이더 ←→ 값조절·색 ←→ 프리셋 순환은 없어졌다(값은 입력 박스·드롭다운·picker로). 드롭다운 팝업이 열려 있으면 모든 키를 팝업이 잡는다 — **↑↓로 넘길 때마다 highlighted 변형을 라이브 적용**(바로 반영, 팝업 유지), **Enter=확정**(그 값 유지 + 닫기), **Esc/바깥 클릭=취소**(열 때 값으로 원복 + 닫기), ←→/잡키는 무시. 라이브 적용은 `dropdown.State.original`(열 때 인덱스)을 기억해 취소 시 되돌리고, 파일 쓰기는 Swift가 tick에서 coalesce하므로 ↑↓ 연타여도 write 폭주가 없다.
 - **저장**: 변경된 키를 override로 config 파일에 write-back(S0-1b) + atomic write(주석 보존 — sidebar.* 토글이
   쓰던 `take_*_dirty`→serialize→atomic write 패턴 일반화, [configuration.md] 구현 경계).
 
@@ -117,7 +117,9 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 위젯 view는 `tokens.space.corner_radius_px`로 두 룩을 분기한다(테마는 위젯 불변, [chrome-strategy.md] §5.4):
 
 - **rich(>0)**: GPU `ChromeDraw.quad`(SDF) — 둥근 pill·원형 knob·얇은 트랙·그림자 등 sub-pixel.
-- **tui(0)**: **셀 정렬 text**(`Op.text`). 토글 `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌), **숫자 입력 박스=값 text만**(border 0이라 테두리 quad 생략), dropdown 축소=`값 ▾`. 드롭다운 팝업·rich 입력 박스 테두리는 `context_menu`와 같은 quad 오버레이(modal layer). control 열 좌단 정렬.
+- **tui(0)**: **셀 정렬 text**(`Op.text`). 토글 `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌), **숫자 입력 박스=값 text만**(border 0이라 테두리 quad 생략), dropdown 축소=`값 ▾`. control 열 좌단 정렬.
+
+  **드롭다운 팝업의 불투명 렌더(중요)**: 팝업은 설정 폼과 **같은 modal 레이어**의 셀 그리드라, `context_menu`(다른 레이어=터미널 위)처럼 그냥 quad로 덮으면 안 된다 — 모달 셀 lowering은 `.fill`이 셀 **배경만** 칠하고 **글리프는 안 지우며**, rich는 배경이 `surface_bg`인 셀을 투명화한다. 그래서 뒤 폼 텍스트가 팝업 뒤로 비친다. 해결: 팝업 각 행을 (1) `surface_bg`가 **아닌** 배경(`tab_hover_bg`/선택=`tab_active_bg`)으로 칠해 투명화 pass를 피하고, (2) 항목 텍스트를 **박스 폭까지 공백 패딩**해 그 행 모든 셀에 글리프를 놓아 뒤 폼 글리프를 덮는다(`dropdown.viewPopup`).
 
   **결정 근거**: tui lowering은 quad를 `paintRectBg`로 **셀 단위** 배경에 칠한다. 위젯을 quad로 두면 (1) 얇은 트랙(높이 h/4)이 `@divTrunc`로 r0==r1이 돼 사라지고, (2) 행 높이 채움이 셀 경계에서 위아래로 번지며, (3) 선택 하이라이트(셀 bg)와 같은 레이어라 서로 덮어 거칠게 겹쳤다(겹침·가림 회귀). text는 placeText가 셀 정렬로 놓고 **text 레이어**(셀 bg 위)라 선택 하이라이트 위에 또렷하다(dropdown·palette 행과 동형). `█`(U+2588)는 합성 글리프라 폰트 무관 렌더. 위젯 view에 `cw`(셀 폭)를 넘겨 tui text 칸/오프셋을 계산한다.
 
@@ -134,13 +136,13 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 ### 6.3 테마 프리셋(named 테마) — 특수 행
 
-테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`dark-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light` 16종 + **"사용자 지정"**을 클릭/Enter로 순환한다(프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 현재 색을 둔 채 잠금만 푼다). `theme.preset`은 synthetic 특수 행이라 일반 enum 팝업이 아니라 Enter 순환을 유지한다(←→는 섹션 전환). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
+테마 섹션 **최상단** dropdown **"테마 프리셋"** — `maru`·`ghostty`·`gruvbox-dark`·`solarized-dark`·`solarized-light`·`dracula`·`catppuccin-mocha`·`catppuccin-latte`·`light-pink`·`dark-pink`·`rose-pine`·`rose-pine-dawn`·`tokyo-night`·`nord`·`one-dark`·`one-light` 16종 + **"사용자 지정"**을 **열리는 드롭다운 팝업**에서 고른다(Enter/클릭으로 열고 ↑↓로 넘기면 테마가 **라이브 미리보기**로 바로 바뀜, Enter 확정·Esc 원복). 프리셋은 색 세트를 통째로 깔고, "사용자 지정"은 현재 색을 둔 채 잠금만 푼다. `theme.preset`은 synthetic(스키마 enum 아님)이라 일반 enum 드롭다운과 달리 platform이 변형 목록·적용을 특수 배선한다(`themePresetVariants`·`applyThemePresetIndex`). `theme.preset`은 **schema 필드가 아니라 특수 지시어**(loader가 색 세트를 통째로 까는 명령, 저장 필드 없음)라 자동 노출되지 않으므로:
 
 - **표시값은 색에서 derive**: `detectThemePreset`이 config.theme의 주 색 4개(bg/fg/cursor/selection)를 16종 `presetColors`와 매칭 → 일치하면 그 이름, 없으면 "사용자 지정". 저장 안 해도 현재 프리셋을 안다.
 - **주입·배치**: platform이 theme 섹션 `currentSectionFields.enums`에 **synthetic `EnumField`**(`key="theme.preset"`)를 **맨 앞에 `insert`**한다 → 색·팔레트보다 위(테마 섹션 최상단)에 도드라지게, 기존 dropdown/enum 경로 재사용(새 Kind·index 수술 없음).
-- **적용**: 핸들러가 `key=="theme.preset"`만 특수 처리 → `applyThemePreset`이 `config.theme = presetColors(next)`(정적 리터럴) + 라이브 재resolve + **주 색 4개(bg/fg/cursor/selection)만** write-back(`detectThemePreset`이 그 4개로 식별하므로 재시작 후에도 같은 프리셋으로 표시됨).
+- **적용**: 드롭다운 팝업의 ↑↓/확정이 `key=="theme.preset"`을 특수 처리 → `applyThemePresetIndex(idx)`가 `config.theme = presetColors(idx)`(정적 리터럴, idx=="사용자 지정" 슬롯이면 색 유지·잠금만 해제) + 라이브 재resolve + `persistThemePreset`으로 영속. ↑↓ 프리뷰는 매번 이 코어(`applyDropdownIndex`)를 selected로, 취소는 `original`로 부른다(라이브 미리보기·되돌리기 단일 출처). (옛 `applyThemePreset(dir)` 순환은 남겨두되 드롭다운이 대체.)
 - **프리셋 활성 시 색 잠금(옵션 A)**: `themePresetActive`(=색이 프리셋과 일치 ∧ `theme_user_custom`=false)면 색·팔레트 행을 `FieldRow.disabled`로 회색·잠금 표시한다(프리셋이 색을 정하므로 직접 편집은 혼란). 비활성 색을 **클릭하면**(swatch/hex 무관) 핸들러가 `theme_user_custom=true`로 "사용자 지정" 전환 후 바로 편집(picker/인라인)을 연다 — ←/→ 색 순환은 잠금 중 막힌다. `theme_user_custom`은 런타임 휘발(색은 derive하므로 영속 불요); 프리셋 재선택·reload·reset 시 false로 돌아간다(색이 프리셋과 같으면 자동으로 다시 잠금).
-- **영속(해결)**: 프리셋을 고르면 `persistThemePreset`이 **`theme.preset = <name>` 한 줄**을 쓰고(serializeConfig 전용 패스 — configKeyValues는 round-trip 대칭 유지 위해 derive 키를 안 emit), 충돌할 개별 `theme.*` 색·`theme.palette.N` override 줄은 제거한다. 로더가 `theme.preset`을 통째 프리셋 색(**16색 팔레트 포함**)으로 펼치므로 reload·재시작 후에도 **팔레트까지 그대로** 복원된다(search/sidebar 색은 그 테마에서 derive돼 자동). 옛 "주 색 4개만 영속" 한계 해소(팔레트 영속 리뷰). **한계(후속)**: 팝업 그리드.
+- **영속(해결)**: 프리셋을 고르면 `persistThemePreset`이 **`theme.preset = <name>` 한 줄**을 쓰고(serializeConfig 전용 패스 — configKeyValues는 round-trip 대칭 유지 위해 derive 키를 안 emit), 충돌할 개별 `theme.*` 색·`theme.palette.N` override 줄은 제거한다. 로더가 `theme.preset`을 통째 프리셋 색(**16색 팔레트 포함**)으로 펼치므로 reload·재시작 후에도 **팔레트까지 그대로** 복원된다(search/sidebar 색은 그 테마에서 derive돼 자동). 옛 "주 색 4개만 영속" 한계 해소(팔레트 영속 리뷰). (옛 "후속: 팝업 그리드"는 열리는 드롭다운 팝업으로 해소됨 — 위 참조.)
 
 ### 6.4 통합 리셋(Reset All Settings to Defaults)
 

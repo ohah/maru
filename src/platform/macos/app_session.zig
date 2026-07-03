@@ -4768,15 +4768,15 @@ pub const AppSession = struct {
         return &.{};
     }
 
-    /// 드롭다운 팝업 선택 확정(Enter/항목 클릭) — settings.dropdown.selected 변형을 config에 set + 라이브 적용 + 영속 +
-    /// 팝업 닫기. enum은 setEnumIndex, font.family는 그 폰트로 setText. 그 외 행이면 닫기만.
-    fn applyDropdownSelection(self: *AppSession) void {
+    /// 드롭다운 팝업의 **선택 행 변형을 절대 인덱스(idx)로 config에 set + 라이브 적용 + 영속**한다(팝업은 안 닫음).
+    /// enum=setEnumIndex, font.family=그 폰트 setText, theme.preset=applyThemePresetIndex. 라이브 프리뷰(↑↓)·확정·취소가
+    /// 공유하는 코어 — 프리뷰는 selected로, 취소는 original로 부른다. 영속(markDirty)은 매번 찍되 실제 파일 쓰기는 Swift가
+    /// tick에서 coalesce하므로 ↑↓ 연타여도 write 폭주 없음. (프리셋의 persistThemePreset도 dirty만 예약.)
+    fn applyDropdownIndex(self: *AppSession, idx: usize) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
-        defer self.chrome_host.settings.dropdown.hide(); // 성공/실패 무관 팝업 닫기
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
         const sel = self.chrome_host.settings.selected;
-        const idx = self.chrome_host.settings.dropdown.selected;
         const after_nums = cf.bools.len + cf.nums.len;
         const after_enums = after_nums + cf.enums.len;
         const after_texts = after_enums + cf.texts.len;
@@ -4815,6 +4815,27 @@ pub const AppSession = struct {
             }
             return;
         }
+    }
+
+    /// 드롭다운 ↑↓ — highlighted 변형을 **라이브 적용**한다(팝업 유지, 바로 반영). 파일 쓰기는 Swift coalesce.
+    fn applyDropdownPreview(self: *AppSession) void {
+        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected);
+        self.metal_dirty = true;
+    }
+
+    /// 드롭다운 확정(Enter/항목 클릭) — 현재 selected 변형을 적용하고 팝업을 닫는다(프리뷰로 이미 적용됐어도 재적용은 무해).
+    fn applyDropdownSelection(self: *AppSession) void {
+        self.applyDropdownIndex(self.chrome_host.settings.dropdown.selected);
+        self.chrome_host.settings.dropdown.hide();
+        self.metal_dirty = true;
+    }
+
+    /// 드롭다운 취소(Esc/바깥 클릭) — 열 때의 original 변형으로 **복원**하고 팝업을 닫는다(↑↓ 프리뷰 되돌리기). 컴포넌트가
+    /// 이미 hide했어도 idempotent. 프리뷰가 없었으면 original==selected==현재라 무해(no-op에 가깝다).
+    fn cancelDropdownSelection(self: *AppSession) void {
+        self.applyDropdownIndex(self.chrome_host.settings.dropdown.original);
+        self.chrome_host.settings.dropdown.hide();
+        self.metal_dirty = true;
     }
 
     fn toggleSelectedSetting(self: *AppSession) void {
@@ -5955,7 +5976,9 @@ pub const AppSession = struct {
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
             .settings_toggle => self.toggleSelectedSetting(), // 선택 행 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color·keybind)
-            .settings_dropdown_accept => self.applyDropdownSelection(), // 드롭다운 팝업 Enter/클릭 — 선택 변형 set + 팝업 닫기 + 적용/영속
+            .settings_dropdown_accept => self.applyDropdownSelection(), // 드롭다운 팝업 Enter/클릭 — 선택 변형 확정 + 팝업 닫기
+            .settings_dropdown_preview => self.applyDropdownPreview(), // 드롭다운 ↑↓ — highlighted 라이브 적용(팝업 유지 — 바로 반영)
+            .settings_dropdown_cancel => self.cancelDropdownSelection(), // 드롭다운 Esc/바깥 클릭 — original로 복원(프리뷰 되돌림)
             .settings_slider_set, .settings_adjust_left, .settings_adjust_right => {}, // (deprecated) 슬라이더 제거로 미방출
             .settings_selection_changed => self.metal_dirty = true, // ↑↓/행 클릭 — 재렌더
             .settings_section_changed => {
@@ -7178,7 +7201,9 @@ pub const AppSession = struct {
             self.dispatchChromeAction(switch (act) {
                 .close => .settings_close,
                 .toggle => .settings_toggle,
-                .dropdown_accept => .settings_dropdown_accept, // 팝업 항목 클릭 → 변형 적용
+                .dropdown_accept => .settings_dropdown_accept, // 팝업 항목 클릭 → 변형 확정
+                .dropdown_cancel => .settings_dropdown_cancel, // 팝업 바깥 클릭 → original 복원
+                .dropdown_preview => .none, // 포인터 경로엔 안 옴(hover 프리뷰 없음 — ↑↓ 키 전용) — exhaustiveness
                 .slider_set => .settings_slider_set,
                 .selection_changed => .settings_selection_changed,
                 .section_changed => .settings_section_changed,

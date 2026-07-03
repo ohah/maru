@@ -57,12 +57,15 @@ pub const layer = draw.Layer.modal;
 pub const State = struct {
     open: bool = false,
     selected: usize = 0,
+    /// 열 때의 현재 인덱스 — Esc/바깥 클릭 취소 시 platform이 이 변형으로 **복원**한다(↑↓ 라이브 프리뷰를 되돌린다).
+    original: usize = 0,
     item_count: usize = 0,
 
-    /// 항목 수·현재 변형 인덱스로 연다 — 선택은 현재값에서 시작(사용자가 지금 값을 바로 본다).
+    /// 항목 수·현재 변형 인덱스로 연다 — 선택은 현재값에서 시작(사용자가 지금 값을 바로 본다). original도 현재값으로.
     pub fn show(self: *State, item_count: usize, current: usize) void {
         self.item_count = item_count;
         self.selected = if (item_count == 0) 0 else @min(current, item_count - 1);
+        self.original = self.selected;
         self.open = true;
     }
 

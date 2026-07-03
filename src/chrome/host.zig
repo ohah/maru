@@ -45,7 +45,9 @@ pub const HostAction = union(enum) {
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
     settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
     settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected] 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color picker·keybind 녹음)
-    settings_dropdown_accept, // 세팅 드롭다운 팝업 Enter/항목 클릭 — platform이 settings.dropdown.selected 변형을 set + 팝업 닫기 + 적용
+    settings_dropdown_accept, // 세팅 드롭다운 팝업 Enter/항목 클릭 — platform이 settings.dropdown.selected 변형을 set + 팝업 닫기
+    settings_dropdown_preview, // 세팅 드롭다운 팝업 ↑↓ — platform이 highlighted 변형을 **라이브 적용**(팝업 유지 — 바로 반영)
+    settings_dropdown_cancel, // 세팅 드롭다운 팝업 Esc/바깥 클릭 — platform이 settings.dropdown.original 변형으로 복원(프리뷰 되돌림) + 적용
     settings_slider_set, // (deprecated) 세팅 슬라이더 — 입력 박스 전환으로 미방출. exhaustiveness 유지용
     settings_adjust_left, // 세팅 행 ← — platform이 rows[selected](slider) 한 스텝 감소(toggle이면 무시)
     settings_adjust_right, // 세팅 행 → — platform이 한 스텝 증가
@@ -243,7 +245,9 @@ pub const ChromeHost = struct {
                     return switch (settings.handle(k, &self.settings)) {
                         .close => .settings_close,
                         .toggle => .settings_toggle,
-                        .dropdown_accept => .settings_dropdown_accept, // 드롭다운 팝업 Enter — 선택 변형 적용
+                        .dropdown_accept => .settings_dropdown_accept, // 드롭다운 팝업 Enter — 선택 변형 확정
+                        .dropdown_preview => .settings_dropdown_preview, // 드롭다운 ↑↓ — highlighted 라이브 적용
+                        .dropdown_cancel => .settings_dropdown_cancel, // 드롭다운 Esc — original 복원
                         .adjust_left, .adjust_right, .slider_set => .none, // (deprecated) 슬라이더 제거로 미방출 — exhaustiveness 유지
                         .selection_changed => .settings_selection_changed,
                         .section_changed => .settings_section_changed, // 키보드 네비(Tab→↑↓ 섹션 이동)도 platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)·섹션 상한 clamp를 타게 한다 — 포인터(클릭) 경로와 동일. 안 그러면 count가 직전 섹션 값으로 고정돼 ↓가 입력 섹션 중간(right-click 부근)에서 wrap한다

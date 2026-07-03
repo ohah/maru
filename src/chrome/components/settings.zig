@@ -366,7 +366,7 @@ pub const State = struct {
 ///   section_changed=←→ 섹션 전환, selection_changed=재렌더, close=hide, consumed=소비만(모달 뒤로 안 샘).
 ///   값 종류 판정은 platform이 rows[selected].kind로 한다. (slider_set/adjust_left/right는 슬라이더 제거로 더는
 ///   방출하지 않는 deprecated 잔재 — 슬라이더→입력 박스 전환. 정리 예정, 지금은 dispatch exhaustiveness 유지용.)
-pub const Action = enum { close, toggle, dropdown_accept, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, eyedropper, consumed };
+pub const Action = enum { close, toggle, dropdown_accept, dropdown_preview, dropdown_cancel, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, eyedropper, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -989,9 +989,9 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
     // 소비 — 폼(섹션 전환·행 이동)엔 안 샌다. accept는 platform이 selected 변형을 set(dropdown_accept)한 뒤 host가 닫는다.
     if (state.dropdown.open) {
         return switch (dropdown.handle(k, &state.dropdown)) {
-            .accept => .dropdown_accept, // Enter — platform이 selected 변형 적용 + 팝업 닫기
-            .close => .selection_changed, // Esc — dropdown.handle이 이미 hide, 재렌더만
-            .selection_changed => .selection_changed,
+            .accept => .dropdown_accept, // Enter — 현재 selected 확정(적용 + 팝업 닫기)
+            .close => .dropdown_cancel, // Esc — dropdown.handle이 이미 hide, platform이 original로 복원(프리뷰 되돌림)
+            .selection_changed => .dropdown_preview, // ↑↓ — platform이 highlighted를 **라이브 적용**(팝업 유지, 바로 반영)
             .consumed => .consumed,
         };
     }
@@ -1108,8 +1108,8 @@ pub fn handlePointer(
                 return .dropdown_accept; // 항목 클릭 → platform이 그 변형 set + 닫기
             }
         }
-        state.dropdown.hide(); // 밖 클릭 → 취소
-        return .selection_changed;
+        state.dropdown.hide(); // 밖 클릭 → 취소(platform이 original로 복원)
+        return .dropdown_cancel;
     }
 
     if (ev.phase == .up) {

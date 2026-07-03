@@ -412,9 +412,9 @@ pub const TerminalCore = struct {
     title: ?[]u8 = null,
     // windowTitle() 결과가 바뀔 때(title 또는 cwd 변경)마다 리더가 +1하는 generation(P4-1, docs/io-render-threading.md §12).
     // 메인의 syncAutoTitles가 **lock 없이** 이 값을 읽어 직전 반영 값과 다를 때만 lock+windowTitle 복사한다 — 매 tick 전-Term
-    // lock을 제목이 실제 바뀐 term에만 국한(대부분 tick lock 0회). 리더는 이미 core_mutex 아래에서 bump하지만 atomic이라
-    // 메인이 무락 load 가능(fetchAdd/.release ↔ load/.acquire). windowTitle이 title??cwd_basename이므로 title/cwd 둘 중
-    // 하나만 바뀌어도 bump한다(cwd만 바뀌고 title이 있으면 결과 불변이라 한 번 헛 sync — 무해).
+    // lock을 제목이 실제 바뀐 term에만 국한(대부분 tick lock 0회). ordering은 `.monotonic`으로 충분(변경-감지 카운터일 뿐;
+    // title/cwd 버퍼는 core_mutex 아래에서만 읽어 mutex가 가시성 보장 — bumpTitleGeneration 참조, code-review [7]).
+    // windowTitle이 title??cwd_basename이라 title/cwd 중 하나만 바뀌어도 bump하되, 각 setter가 값 동일 시 bump를 생략한다(P4-1).
     title_generation: std.atomic.Value(u32) = .init(0),
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
@@ -502,6 +502,7 @@ pub const TerminalCore = struct {
         screen.clearScrollback(self); // sb 비우기 + 선택 해제
         self.clearLinkStore();
         self.clearGraphemeStore(); // 화면·스크롤백이 모두 비워져 grapheme_id가 가리킬 셀이 없다
+        const had_title_or_cwd = self.cwd != null or self.title != null; // 지울 게 있었을 때만 bump(code-review [0])
         if (self.cwd) |c| { // OSC 7 cwd도 공장 초기화(셸이 다음 프롬프트에 다시 보고)
             self.allocator.free(c);
             self.cwd = null;
@@ -510,7 +511,7 @@ pub const TerminalCore = struct {
             self.allocator.free(t);
             self.title = null;
         }
-        self.bumpTitleGeneration(); // RIS가 title/cwd를 지워 windowTitle 결과가 바뀌므로 라벨 재sync 유도(P4-1)
+        if (had_title_or_cwd) self.bumpTitleGeneration(); // 지운 게 있어 windowTitle 결과가 바뀔 때만 재sync 유도(P4-1)
         self.screen.cursor = .{};
         self.screen.pen = .{};
         self.screen.pending_wrap = false;
@@ -1215,21 +1216,22 @@ pub const TerminalCore = struct {
     /// 앱이 제목을 지우면 cwd basename 폴백으로 돌아간다. OOM이면 제목 없이 둔다(텍스트는 어차피
     /// 그리드에 안 나오므로 손실 없음). parser.dispatchOsc(OSC 라우터)가 cross-file로 호출하므로 pub.
     pub fn setWindowTitle(self: *TerminalCore, text: []const u8) void {
+        // 결과가 **실제로 바뀔 때만** free/realloc/bump한다 — 앱이 같은 제목을 매 프롬프트 재emit해도 헛 sync를 안 하게
+        // (title_generation 무조건 bump는 P4-1의 "바뀐 term만 sync"를 무력화, code-review [0]). same=(옛 제목==새 텍스트,
+        // 둘 다 null/빈이면 같음).
+        const same = if (self.title) |old| std.mem.eql(u8, old, text) else text.len == 0;
+        if (same) return;
         if (self.title) |old| self.allocator.free(old);
-        self.title = null;
-        if (text.len == 0) {
-            self.bumpTitleGeneration(); // 빈 제목 = 해제 — windowTitle 결과가 바뀌므로 여기서도 bump
-            return;
-        }
-        self.title = self.allocator.dupe(u8, text) catch null;
+        self.title = if (text.len == 0) null else (self.allocator.dupe(u8, text) catch null); // 빈 텍스트=해제
         self.bumpTitleGeneration();
     }
 
     /// windowTitle() 결과(title 또는 cwd)가 바뀌었음을 알린다 — title_generation을 +1해 메인 syncAutoTitles가 그 term만
-    /// lock+재복사하게 한다(P4-1, §12). 리더가 core_mutex 아래 title/cwd를 바꾼 뒤 호출하지만 atomic이라 메인이 무락 load
-    /// 가능(.release ↔ .acquire). 단일 스레드(테스트·미부착)에서도 atomic add라 무해.
+    /// lock+재복사하게 한다(P4-1, §12). **순서(ordering)**: `.monotonic`으로 충분하다 — 메인은 이 카운터를 오직 변경-감지
+    /// (gen != last)로만 쓰고 title/cwd **버퍼 자체는 core_mutex 아래에서만** 읽으므로, 버퍼 가시성은 atomic이 아니라
+    /// mutex가 보장한다(acquire/release는 load-bearing이 아님; code-review [7]). 최악은 한 tick 늦은 관측=benign.
     pub fn bumpTitleGeneration(self: *TerminalCore) void {
-        _ = self.title_generation.fetchAdd(1, .release);
+        _ = self.title_generation.fetchAdd(1, .monotonic);
     }
 
     /// 창 제목으로 보여줄 문자열(native 최소 — 우선순위 로직을 Zig가 소유한다). OSC 0/2로 앱이

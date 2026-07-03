@@ -177,6 +177,7 @@ Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 
   - **구현 중 발견한 세분(P3-3)**: `reportFocus`는 P3-3(드묾, latency 무관). **`reportMouse`는 P3-4로 이동** — 마우스마다 PTY 응답을 만드는 빈번한 경로라 위임 지연이 §1 원결함(질의-응답 지연)과 **같은 latency 클래스**다. 그래서 §9.4 측정 대상(scroll·선택과 함께)으로 둔다. config(palette/scrollback/font-metrics)는 P3-3(infrequent).
   - **위임 안 하는 mutate 예외(직접 유지)**: ① **`createTerm` 초기화**의 `setConfigPalette`/`max_scrollback`은 surface가 아직 runtime/reader에 **attach 전**이라 단일 스레드 — 위임 경로(링크)가 없고 경합도 없어 직접. ② **per-tick 렌더 경로**의 `setCellMetrics`/`setDefaultColors`(buildFrame이 `renderSnapshot` 직전 매 tick 적용)는 **렌더 read 준비**라 즉시 동기 필요 — `renderSnapshot`(아래)과 같은 부류로 메인 동기 유지. 폰트 변경 핸들러의 `setCellMetrics`는 위임하되 이 per-tick 안전망이 지연을 덮는다.
 - **메인 락-아래 유지(동기 읽기 — 위임 불가)**: `renderSnapshot`(매 frame-loop tick, DrawList 복사), `imeCursorRect`(IME 후보창 위치 — **즉시 동기 반환** 필수), `alt_active`(PageUp 분기 판정), `cursor_blink`/`viewportHasBlink`/`scrollbackLen`/`viewOffset`(틱 상태). 이들은 즉시 값이 필요해 명령 큐로 못 옮긴다 → `core_mutex`는 사라지지 않고 **렌더 읽기 ↔ reader/위임 write**를 계속 보호한다("완전 무락"은 이 렌더 구조상 불가).
+  - **정정(코드 실측 2026-07, [[roadmap-docs-stale-verify-with-code]])**: 이 목록은 개념 요약이고 **실제 tick 락 인벤토리는 §12.2가 단일 출처**다 — 팬아웃이 더 넓다(`syncAutoTitles` 전-Term 순회·`cell_colors` 별도 lock·비활성 pane 루프·kitty 등 활성 코어 tick당 ~7회, 배경 Term N회). 그리고 **`imeCursorRect`는 실제로 `lockCore`를 안 잡고** `core.screen.cursor`를 무락 직접 읽어 리더 write와 torn read 잠재 race다 — §12(Phase 4)가 이 다중 lock을 tick당 단일 스냅샷으로 통합하며 imeCursorRect race도 함께 정정한다.
 
 ### 9.2 CoreCommandQueue
 
@@ -331,3 +332,100 @@ sync(2026) 게이트는 폴링 렌더 루프의 미묘한 부분이라(hold가 �
 - **파싱 fragmentation 가설 = 기각.** "SSH가 `ESC[?2026h`/`l`를 write 중간에 쪼개 파서가 오파싱한다"는 가설은 헤드리스 회귀 테스트(`core.zig` "조각난 write에도 재조립" — 파서 리팩터가 fragmentation을 깨는 것도 막는 영구 가드)로 반증됐다. 파서(`self.parser` 상태 persist하는 resumable 상태머신)가 **모든 split 경계·바이트 단위**에서 재조립해 `sync_output`·카운터가 정확하다. desync는 파서가 아니라 **리더↔메인 타이밍/투영 게이트** 문제로 좁혀졌다.
 - **유력 가설 = active 중 half-drawn 투영.** `shouldProjectFrame`이 `sync_active=1`(리더 기준 프레임 미완성)인데 grid를 투영하는 두 경로가 half-drawn을 만든다 — bubbletea는 diff 렌더라 그 stale 셀을 이후 안 고쳐(변경분만 보냄) 색·셀렉터가 깨지고 `Ctrl+L`도 무효다. (a) **esu_edge(SSH 빈발, 유력)**: `esu_advanced` flush가 "리더가 이미 **다음** 프레임 BSU를 시작"한 시점에 떨어지면 진행 중 next 프레임을 half-drawn으로 투영한다(로컬은 다음 ESU가 곧 교정하지만 SSH diff는 안 함) — `shouldProjectFrame` 테스트 [B] case 주석 참고. (b) **timeout(드묾)**: 조각 전달이 `sync_timeout_ms`(1초)를 넘겨 hold를 강제 해제. `.sync` 로그의 `active=1 gproj=1`로 잡히고 원인은 아래 분석기가 분해한다.
 - **분석 도구(영구)**: `tools/sync/analyze_sync_log.py`가 캡처한 `.sync` 로그를 파싱해 half-frame(active 중 투영)을 원인별(esu_edge/timeout/scroll/force)로, 샘플링 누락(리더 BSU/ESU ≫ 메인 active)을 자동으로 짚는다 — `.sync` 로거(영구 관측)의 동반 도구(`tools/perf` 선례). 사용: `MARU_DEBUG=1 ./maru-macos-app 2> log` → `python3 tools/sync/analyze_sync_log.py log`.
+
+## 12. Phase 4 — 렌더 read 스냅샷 통합 (tick당 활성 surface 단일 lock, 설계)
+
+> 단일 출처(design). §3의 이상(**"렌더는 락 아래 스냅샷만 읽는다"**, tick당 코어 접근 1회)을 **글자 그대로 실현**한다. §9(Phase 3)가 메인의 코어 *mutate*를 리더로 위임했다면, Phase 4는 메인의 코어 *read*를 tick당 흩어진 다중 lock에서 **단일 스냅샷**으로 통합한다. 미구현 — doc-first 설계.
+
+### 12.1 동기 (측정된 결함, §10.5 SECONDARY의 근본)
+
+§10.5는 스피너 지연의 SECONDARY 원인을 "무거운 tick이 단일 NSTimer 실효 rate를 떨군다"로 짚고, 스피너 자체는 wall-clock으로 면역화했다. 그 "무거운 tick"의 큰 몫이 **메인이 tick당 `core_mutex`를 여러 번 잡아 바쁜 리더(firehose 중 청크마다 고빈도 lock/unlock, `pty_reader.zig:637-644`)와 경합**하는 것이다. §3의 이상은 "tick당 1 lock"인데, 실제 tick은 활성 코어를 최대 **7회**, 배경 Term을 **N회** 별도로 잡는다(§12.2). §10.5 (B)의 `syncAutoTitles`만 줄이는 건 부분 완화다 — `sync_view`·build·cell_colors가 여전히 매 tick 활성 코어를 잡아 **근본이 아니다**([[roadmap-docs-stale-verify-with-code]]로 코드 실측). Phase 4가 근본 통합이다.
+
+### 12.2 현재 인벤토리 (코드 실측 2026-07, `app_session.zig`)
+
+`tick()`이 tick당 잡는 `core_mutex` 지점(실행 순서). **§9.1의 "메인 락-아래 유지" 요약보다 팬아웃이 넓다** — 설계는 이 실인벤토리를 기준으로 삼는다.
+
+| 지점 | 함수/단계 | 읽음(코어) | surface | 빈도 | write? |
+|---|---|---|---|---|---|
+| **A** | `syncAutoTitles` | `windowTitle()`→`auto_title` 복사 | **모든 Term**(N개) | 매 tick | read |
+| **B** | `updateCursorBlink` | `cursor_blink`·`cursor_visible`·`preedit`·`viewportHasBlink()` | 활성 | idle tick만 | read |
+| **D** | sync 게이트 `blk` | `sync_output`·`view_offset`·`sync_bsu/esu_count` | 활성 | 매 tick | read |
+| **E** | Find 재검색·`matchViewportSpan` | `alt_active`·`matchViewportSpan`; **`findMatches`가 스크롤백 rewrap** | 활성 | find 활성 시 | **write** |
+| **F** | `cell_colors` | `paletteOverride().*`(복사)·`defaultFg/BgOverride`·`reverseScreen`·`selectionViewportSpan` | 활성 | 투영 tick | read |
+| **G** | 활성 build(`shapeOnlyBuild`) | `renderSnapshot()`→DrawList 딥카피·`view_offset` | 활성 | 투영 tick | read(단 rewrap) |
+| **H** | 비활성 pane 루프 | `renderSnapshot()`→DrawList·palette·reverse·fg/bg | 각 비활성 pane | 투영+split tick | read |
+| **I** | kitty 이미지·메트릭 주입 | `renderSnapshot().images/placements`; **`setCellMetrics`·`setDefaultColors`** | 활성 | 투영 tick | **write** |
+| **J** | sticky command 배너 | `stickyCommand()`·`scrollbackRow()` | 활성 | 조건부 | read |
+
+- **C(`dispatchBell`)**: `takeBell()`을 **무락**으로 읽고 clear(단일 writer=리더의 benign racy bool). lock 지점 아님 — 통합 시 그 재트리거-방지 clear 시맨틱만 보존.
+- **`imeCursorRect`(tick 밖, IME 온디맨드)**: `core.screen.cursor`를 **무락**으로 직접 읽는다(`:7928`). ⚠️ **§9.1이 "락-아래 유지"로 적었으나 코드는 무락 — 리더 write와 torn read 잠재 race**. Phase 4가 함께 정정한다(§12.4).
+- **기존 스냅샷 메커니즘**: `TerminalCore.renderSnapshot()`(`core.zig:1375`)은 `cells`/`graphemes`/`prompt_marks`/`images`를 **zero-copy alias**로 반환(바닥) 또는 소유 `viewport_cells`에 합성(스크롤) → **반드시 lock 아래에서 `buildDrawListWithUnfocused`(`draw_list.zig:93`)로 즉시 owned DrawList 딥카피**. 통합 후에도 이 규율 유지. 단일 통합 스냅샷은 **없다** — A·D·F·J가 DrawList 밖에서 별도 lock으로 읽는 게 통합 대상.
+
+### 12.3 목표
+
+- **활성 surface: tick당 최대 2 lock** — (1) **이른 state 스냅샷**(B·D·F·J·A-active의 스칼라/작은 값을 한 lock으로 owned 복사; 게이트·blink·label·색 구동), (2) **DrawList 스냅샷**(투영 tick만; `renderSnapshot`→DrawList + kitty + render-prep write I·E를 한 lock 스코프). 비투영/idle tick은 (1) 하나뿐.
+- **배경 Term title: lock 0회**(제목 변경 시만) — title-generation(atomic)으로 A의 N-lock 제거.
+- **비활성 pane(H)**: pane당 1 lock 유지(각 코어가 별개 → 통합 불가; 이미 pane당 state+DrawList 1 lock이라 최적).
+- 순효과: 활성 코어 tick당 **~7 lock → ≤2**, 배경 Term **N → ~0**. 바쁜 리더와의 경합 지점을 최소화(§3 이상 실현).
+
+### 12.4 설계
+
+**(1) `CoreSnapshot` 값 struct(owned, POD)** — 이른 state 스냅샷이 한 lock 아래 채운다:
+```text
+CoreSnapshot = struct {
+    // sync 게이트(D)
+    sync_output: bool, view_offset: usize, bsu: u64, esu: u64,
+    // 커서/blink(B) + imeCursorRect
+    cursor_row: u16, cursor_col: u16, cursor_blink: bool, cursor_visible: bool,
+    preedit_present: bool, viewport_has_blink: bool,
+    // 색/선택(F)
+    palette: [256]Rgb, default_fg: ?Rgb, default_bg: ?Rgb,
+    reverse_screen: bool, selection_span: ?ViewportSpan,
+    // 게이트 보조
+    alt_active: bool,
+    // sticky(J): 조건부라 row 텍스트는 owned 버퍼(스냅샷이 소유) 또는 별도 처리
+    title_gen: u32,   // 활성 term title-generation(아래)
+};
+```
+전부 **값 복사**(alias 없음) — palette는 현재도 `active_palette_copy`로 소유 복사하므로 그대로 담는다. `tick()`은:
+```text
+const st = blk: { active.lockCore(io); defer unlock; break :blk readCoreSnapshot(active.core); };
+// 이하 lock-free: 게이트·blink·label·chrome collect가 st를 소비
+const will_project = shouldProjectFrame(st.sync_output, ..., st.view_offset, ...);
+if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = buildDrawList(active.core.renderSnapshot()); kitty(...); if (find) findMatches(...); }
+```
+게이트와 DrawList 사이의 chrome collect·find span·페인 배치는 **st(및 DrawList)만 보고 lock 없이** 한다.
+
+**(2) title-generation(A 제거)** — `TerminalCore`에 `title_generation: std.atomic.Value(u32) = .init(0)`. **리더**가 제목/cwd를 바꿀 때 bump: `setTitle`(`core.zig:1212-1214`)·`dispatchCwd`(`osc.zig:196-197`)에서 `title_generation.fetchAdd(1, .release)`(리더는 이미 lock 아래지만 atomic이라 메인이 lock 없이 load 가능). `syncAutoTitles`는 term별 `last_title_gen`과 **lock 없이 acquire-load** 비교 → **다를 때만** lock+`windowTitle` 복사+`last_title_gen` 갱신. 활성 term의 title은 (1) state 스냅샷에 접어 그 lock에서 함께 읽으므로 별도 순회 불요. 대부분 tick: N atomic load(수 ns)만, lock 0회.
+
+**(3) imeCursorRect 정정** — (1) state 스냅샷이 `cursor_row/col`을 담아 `AppSession`에 캐시(`ime_cursor_cache`). `imeCursorRect`는 **오버레이 caret 없을 때 그 캐시를 반환**(무락, 최대 한 프레임 stale — 후보창 위치라 허용). 현재의 무락 직접 `core.screen.cursor` 읽기(torn read 잠재 race)를 **정확한 스냅샷 값으로 대체**한다. (오버레이 caret 경로는 코어 미접근이라 불변.)
+
+**(4) render-prep write(E·I)는 DrawList lock에 유지** — `setCellMetrics`·`setDefaultColors`(I)·`findMatches`(E)는 이 frame 렌더를 위해 **즉시** 코어를 바꿔야 해 명령 위임(§9.2, 다음 reader 턴 지연)으로 못 옮긴다. 이미 build lock 스코프에 있으므로 그대로 두되, "read 스냅샷으로 못 접는 render-prep write"로 **명시**한다 — 이게 §3의 "완전 무락 불가" 잔재의 정체다(팬아웃은 tick당 1 write-lock으로 수렴).
+
+### 12.5 불변식 / thread-safety
+
+- **리더가 유일 mutator 유지**(§9.3): Phase 4는 메인의 *read*만 재배치. 리더 write 경로(`core.write`·`core_command.apply`)·`core_mutex` 공유 불변.
+- **alias 없음**: state 스냅샷은 POD 값 복사. DrawList는 기존대로 lock 아래 딥카피(renderSnapshot zero-copy alias를 즉시 소비). 락 밖에서 코어 메모리 슬라이스를 안 든다(§3 zero-copy race 해소 규율 유지).
+- **title-generation happens-before**: 리더 `fetchAdd(.release)`(lock 아래 title 버퍼 write 뒤) ↔ 메인 `load(.acquire)` → generation이 새 값이면 title 버퍼 write가 가시(그때만 lock+복사). generation 안 바뀌면 title 버퍼 미접근(옛 owned 캐시 사용).
+- **한 프레임 staleness**: state 스냅샷은 게이트~build 사이 시점 차로 build가 스냅샷 시점 상태를 본다(현재도 D와 G가 별도 lock이라 미세 차 존재 — 통합이 **오히려 일관성 상향**). imeCursorRect 캐시도 최대 1프레임 — 후보창 위치라 허용(사용자 결정 불요, 시각 무영향).
+
+### 12.6 시퀀싱 (각 PR green, doc-first)
+
+- **P4-1 — title-generation**: `core.title_generation` atomic + `setTitle`/`dispatchCwd` bump + `syncAutoTitles` 조건부 lock. **독립적·측정 가능**(`.frametime` `titles%` 전후). A의 N-lock 제거.
+- **P4-2 — CoreSnapshot + 활성 state 통합**: `readCoreSnapshot` + B·D·F·J를 단일 이른 lock으로. 게이트·blink·label·색이 스냅샷 소비.
+- **P4-3 — DrawList lock 정리 + imeCursorRect 캐시**: render-prep write(I·E)를 build lock 단일 스코프로 명시 정리 + imeCursorRect를 스냅샷 캐시로(무락 race 정정).
+- 각 PR: `.frametime`으로 활성 코어 tick당 lock 수·`titles`/대기 비중 전후 실측.
+
+### 12.7 테스트 전략 (§6 선례)
+
+- **동시성 hammer**(§6-3 확장): 리더 write ↔ `readCoreSnapshot` 동시 N회, grid/색/커서 일관성·손상 0(가능 시 TSan).
+- **title-generation 결정론**: 제목 변경 → generation++ → **다음 syncAutoTitles만** lock+복사, 미변경 tick은 lock 0회(카운터/mock로 검증). generation 안 바뀌면 옛 auto_title 유지.
+- **imeCursorRect 캐시 정확성**: state 스냅샷 커서 값이 캐시에 반영되고 imeCursorRect가 그 값을 무락 반환(오버레이 caret 우선순위 불변).
+- **스냅샷=lock-밖 소비 안전**: state 스냅샷이 POD라 lock 밖 소비에 alias 없음(경계 테스트).
+
+### 12.8 리스크 / 트레이드오프 / 범위 밖
+
+- **완전 무락 불가 잔재**: render-prep write(E·I) + DrawList lock은 남는다(§3 표현대로). Phase 4는 활성 코어를 tick당 ≤2 lock으로 **수렴**하는 것이지 0으로 만드는 게 아니다.
+- **CoreSnapshot 크기**: `[256]Rgb` palette(1KB)를 매 tick 값 복사 — 현재도 `active_palette_copy`로 복사하므로 순증 없음. 나머지 스칼라는 무시 가능.
+- **atomic 추가**: `title_generation` 필드 하나(core). release 비용 무시 가능.
+- **범위 밖**: (C) **present 분리**(§10.2 B CVDisplayLink/C 렌더 스레드) — 그건 **cadence 층**(무거운 tick이 present를 미는 것)이고, Phase 4는 **contention 층**(tick이 무거워지는 원인)이다. 둘은 상보적이며 Phase 4가 tick을 가볍게 한 뒤 present 분리가 남은 cadence를 잡는 순서가 자연스럽다. sticky row 텍스트 owned 처리(J)의 세부는 P4-2 구현 시 확정.

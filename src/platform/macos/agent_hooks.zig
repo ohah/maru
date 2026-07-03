@@ -72,15 +72,16 @@ fn agentConfigPath(out: []u8, home_env: [:0]const u8, home_sub: []const u8, file
 /// (경로/포맷이 바뀐 stale 훅 복구). `remove`=maru 훅 제거만(언인스톨).
 const Mode = enum { add_if_absent, force, remove };
 
-/// 시작 시 1회: **매핑 dir 정리** + claude/codex 훅 등록(idempotent). best-effort(실패해도 무해 — 훅 없으면 그 세션만
-/// 안 뜸). clearMappings는 이전 실행의 stale 매핑을 비운다(surface.id는 재시작마다 1부터라 재사용) — **시작 전용**.
+/// 시작 시 1회: **stale 매핑 정리** + claude/codex 훅 등록(idempotent). best-effort(실패해도 무해 — 훅 없으면 그 세션만
+/// 안 뜸). pruneStaleMappings는 트랜스크립트가 사라진 매핑만 지우고 **살아있는 매핑은 보존**한다 — 매핑 dir이 모든
+/// maru 인스턴스 공유라, 옛 clearMappings의 통째 wipe는 다른 창의 라이브 세션을 파괴했다(multi-instance 안전). **시작 전용**.
 pub fn setup(io: std.Io, allocator: std.mem.Allocator) void {
-    clearMappings(io);
+    pruneStaleMappings(io, allocator);
     applyToConfigs(io, allocator, .add_if_absent);
 }
 
 /// 수동 복구(커맨드 팔레트 "Re-register"): 훅을 **강제 재등록**한다 — 기존 maru 훅(마커)을 제거하고 현재 command로
-/// 다시 넣어, 경로가 바뀌었거나(다른 XDG/HOME) command 포맷이 갱신된 stale 훅을 고친다. **clearMappings는 안 한다** —
+/// 다시 넣어, 경로가 바뀌었거나(다른 XDG/HOME) command 포맷이 갱신된 stale 훅을 고친다. **매핑 정리는 안 한다** —
 /// 돌고 있는 팬들의 매핑을 날리지 않게(리뷰: setup 재사용이 매핑을 지우던 버그 수정).
 pub fn reregister(io: std.Io, allocator: std.mem.Allocator) void {
     applyToConfigs(io, allocator, .force);
@@ -109,13 +110,57 @@ fn applyToConfigs(io: std.Io, allocator: std.mem.Allocator, mode: Mode) void {
     }
 }
 
-/// 매핑 dir을 비우고 새로 만든다(stale 방지 — **시작 시에만**, reregister는 안 부름). 실패는 무시(훅 command가 mkdir -p
-/// 로 자체 생성하므로).
-fn clearMappings(io: std.Io) void {
+/// 시작 시: 매핑 dir을 순회해 **가리킨 트랜스크립트가 없어진(세션 gone)** 매핑만 지운다. 트랜스크립트가 살아있는
+/// 매핑은 **보존**한다 — 매핑 dir(`<config>/maru/agent-sessions`)은 **모든 maru 인스턴스가 공유**하므로, 통째 삭제
+/// (옛 clearMappings)는 **다른 창에서 도는 라이브 세션의 매핑을 파괴**한다(multi-instance 안전). 트랜스크립트가 사라진
+/// stale 매핑은 [[missing self-heal]]과 별개로 시작 시 선제 정리(surface.id 재사용 시 옛 세션 오독 방지).
+fn pruneStaleMappings(io: std.Io, allocator: std.mem.Allocator) void {
     var dir_buf: [max_path]u8 = undefined;
     const dir = mappingsDir(&dir_buf) orelse return;
-    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+    pruneStaleMappingsIn(io, allocator, dir);
+}
+
+/// `dir_path` 안의 매핑을 순회해 stale(트랜스크립트 부재/손상)만 삭제 — 순수 I/O(테스트가 tmp dir로 검증). 삭제-도중-순회
+/// 문제를 피하려 stale 이름을 먼저 모은 뒤 순회 종료 후 지운다.
+fn pruneStaleMappingsIn(io: std.Io, allocator: std.mem.Allocator, dir_path: []const u8) void {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var stale: std.ArrayList([]u8) = .empty;
+    defer {
+        for (stale.items) |s| allocator.free(s);
+        stale.deinit(allocator);
+    }
+
+    var it = dir.iterate();
+    while (it.next(io) catch return) |entry| {
+        if (entry.kind != .file) continue;
+        var path_buf: [max_path]u8 = undefined;
+        const fpath = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+        const keep = blk: {
+            const data = std.Io.Dir.cwd().readFileAlloc(io, fpath, allocator, .limited(256 << 10)) catch break :blk false;
+            defer allocator.free(data);
+            var tp_buf: [max_path]u8 = undefined;
+            const tp = extractTranscriptPath(allocator, data, &tp_buf) orelse break :blk false; // transcript_path 없음(손상) → 삭제
+            _ = std.Io.Dir.cwd().statFile(io, tp, .{}) catch break :blk false; // 트랜스크립트 부재(세션 gone) → 삭제
+            break :blk true; // 트랜스크립트 존재 → 보존(다른 인스턴스 라이브 세션 보호)
+        };
+        if (!keep) {
+            const name = allocator.dupe(u8, entry.name) catch continue; // entry.name은 iterator 버퍼(transient) → 복사
+            stale.append(allocator, name) catch {
+                allocator.free(name);
+                continue;
+            };
+        }
+    }
+
+    // 순회 종료 후 삭제(삭제-도중-순회 UB 회피).
+    for (stale.items) |name| {
+        var path_buf: [max_path]u8 = undefined;
+        const fpath = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
+        std.Io.Dir.cwd().deleteFile(io, fpath) catch {};
+    }
 }
 
 /// config_path에 모드를 적용한다. **읽기 오류(EACCES·>4MB)와 파일 없음을 구분**한다 — 없으면(`FileNotFound`) `{}`에서
@@ -272,7 +317,7 @@ fn atomicWrite(io: std.Io, path: []const u8, data: []const u8) !void {
 /// 라이브 poll은 null로 넘겨 cwd 체크 생략—self-heal). 파일 없음/파싱 실패/검증 실패면 null(호출자는 unknown/폴백).
 /// 팬의 세션 매핑 파일(`<dir>/<pane_id>`)을 지운다 — 매핑된 트랜스크립트가 사라진(세션 gone) 걸 pollAgentState가
 /// 감지했을 때 stale 매핑을 정리한다(docs/agent-session.md "매핑된 트랜스크립트 부재"). 새 세션은 SessionStart 훅이
-/// 새 매핑을 쓰므로 무해. best-effort(없으면 무시). setup 시 clearMappings가 dir 전체를 비우는 것과 달리 이건 팬 1개만.
+/// 새 매핑을 쓰므로 무해. best-effort(없으면 무시). setup 시 pruneStaleMappings가 stale 매핑만 훑는 것과 달리 이건 팬 1개만.
 pub fn removeMapping(io: std.Io, pane_id: u64) void {
     var dir_buf: [max_path]u8 = undefined;
     const dir = mappingsDir(&dir_buf) orelse return;
@@ -532,4 +577,50 @@ test "buildCommand: 마커 + dir 임베드 + stdin 소비 분기" {
     try std.testing.expect(std.mem.indexOf(u8, cmd, "$MARU_PANE_ID") != null); // 팬 키
     try std.testing.expect(std.mem.indexOf(u8, cmd, "/home/u/.config/maru/agent-sessions/$MARU_PANE_ID") != null); // 절대경로 임베드
     try std.testing.expect(std.mem.indexOf(u8, cmd, "cat >/dev/null") != null); // 키 없을 때 stdin 소비(에이전트 블록 방지)
+}
+
+test "pruneStaleMappingsIn: 트랜스크립트 없는 매핑만 지우고 살아있는 건 보존(multi-instance 안전)" {
+    // 공유 매핑 dir을 통째 wipe하던 옛 clearMappings의 destructive 동작을 대체 — 다른 인스턴스의 라이브 세션(트랜스크립트
+    // 존재)은 살리고, 트랜스크립트가 사라진(세션 gone)·손상된 매핑만 정리한다.
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const ar = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const rel_base = try std.fmt.allocPrint(ar, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    // extractTranscriptPath는 **절대경로 + .jsonl**만 허용(traversal 방어)하므로, JSON 안 transcript_path는 절대경로로 둔다.
+    var cwd_buf: [max_path]u8 = undefined;
+    if (std.c.getcwd(&cwd_buf, cwd_buf.len) == null) unreachable;
+    const cwd_abs = std.mem.sliceTo(&cwd_buf, 0);
+    const abs_base = try std.fmt.allocPrint(ar, "{s}/{s}", .{ cwd_abs, rel_base });
+
+    // 살아있는 트랜스크립트 파일(존재) — 이걸 가리키는 매핑은 보존돼야. 파일은 상대경로로 쓰고(같은 위치), JSON엔 절대경로.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(ar, "{s}/live-transcript.jsonl", .{rel_base}), .data = "{}" });
+    const live_tp = try std.fmt.allocPrint(ar, "{s}/live-transcript.jsonl", .{abs_base});
+    const gone_tp = try std.fmt.allocPrint(ar, "{s}/gone-transcript.jsonl", .{abs_base}); // 안 만듦 = 세션 gone
+
+    const base = rel_base; // 매핑 dir/파일은 cwd-상대로 만든다(pruneStaleMappingsIn이 dir_path/name으로 접근).
+
+    const map_dir = try std.fmt.allocPrint(ar, "{s}/agent-sessions", .{base});
+    try std.Io.Dir.cwd().createDirPath(io, map_dir);
+    const live_map = try std.fmt.allocPrint(ar, "{s}/2", .{map_dir}); // pane 2 = 라이브(보존)
+    const gone_map = try std.fmt.allocPrint(ar, "{s}/3", .{map_dir}); // pane 3 = gone(삭제)
+    const broken_map = try std.fmt.allocPrint(ar, "{s}/4", .{map_dir}); // pane 4 = transcript_path 없음(삭제)
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = live_map, .data = try std.fmt.allocPrint(ar, "{{\"transcript_path\":\"{s}\"}}", .{live_tp}) });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = gone_map, .data = try std.fmt.allocPrint(ar, "{{\"transcript_path\":\"{s}\"}}", .{gone_tp}) });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = broken_map, .data = "{\"nope\":1}" });
+
+    pruneStaleMappingsIn(io, a, map_dir);
+
+    const exists = struct {
+        fn f(i: std.Io, p: []const u8) bool {
+            _ = std.Io.Dir.cwd().statFile(i, p, .{}) catch return false;
+            return true;
+        }
+    }.f;
+    try std.testing.expect(exists(io, live_map)); // 라이브 세션 매핑 보존(다른 인스턴스 보호)
+    try std.testing.expect(!exists(io, gone_map)); // 세션 gone → 삭제
+    try std.testing.expect(!exists(io, broken_map)); // 손상(transcript_path 없음) → 삭제
 }

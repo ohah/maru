@@ -445,16 +445,17 @@ test "host: handlePointer — 모달 열리면 소비(.none), 닫히면 null(통
     try std.testing.expect(host.notice.open);
 }
 
-test "host: settings 키보드 섹션 네비(→)는 .settings_section_changed (count 재주입 — 회귀 방지)" {
-    // 회귀 가드: 키 경로(handleInput)가 settings .section_changed를 .none으로 버리면, ←→로 섹션을 바꿀 때
-    // platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)를 안 타 새 섹션 행이 직전 섹션 행 수로만 clamp된다.
-    // 포인터(클릭) 경로(app_session)와 동일하게 .settings_section_changed로 살린다. (Tab 폼↔네비 토글은 제거됨.)
+test "host: settings 키보드 섹션 네비(←네비→↓)는 .settings_section_changed (count 재주입 — 회귀 방지)" {
+    // 회귀 가드: 키 경로(handleInput)가 settings .section_changed를 .none으로 버리면, 섹션을 바꿀 때 platform이
+    // refreshSettingsFieldCount(새 섹션 행 수 재주입)를 안 타 새 섹션 행이 직전 섹션 행 수로만 clamp된다. 포인터
+    // (클릭) 경로(app_session)와 동일하게 .settings_section_changed로 살린다. 방향키 영역 모델: ← 네비 포커스 → ↓ 섹션.
     var host = ChromeHost{};
     defer host.deinit(std.testing.allocator);
     host.settings.show();
     host.settings.setFieldCount(2);
-    // → 섹션 전환(section 0 → 1) → host가 platform에 .settings_section_changed를 줘야 한다(.none이면 회귀).
-    const action = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .right } });
+    _ = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .left } }); // ← 네비 포커스
+    // 네비에서 ↓ 섹션 전환 → host가 platform에 .settings_section_changed를 줘야 한다(.none이면 회귀).
+    const action = host.handleInput(std.testing.allocator, .{ .key = .{ .key = .down } });
     try std.testing.expectEqual(HostAction.settings_section_changed, action.?);
 }
 

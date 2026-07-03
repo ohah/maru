@@ -170,9 +170,12 @@ pub const State = struct {
     pick_v: u8 = 0,
     /// enum/font 행의 열리는 드롭다운 팝업 상태(모달 오버레이). platform이 행 활성 시 변형 목록·현재 인덱스로 열고
     /// (openDropdown), 열려 있으면 handle이 키를 dropdown.handle로 라우팅한다(↑↓ 선택·Enter 확정·Esc 취소). 팝업이
-    /// 열린 동안엔 폼 키(섹션 전환·행 이동)를 잡지 않는다. 값 적용(변형 set)은 platform이 selected로 한다.
-    /// 참고: 예전 Tab 기반 폼↔네비 포커스 토글(nav_focused)은 제거됐다 — 내비는 ←→(섹션)·↑↓(행)·Enter(활성)뿐이다.
+    /// 열린 동안엔 폼 키(행 이동·영역 전환)를 잡지 않는다. 값 적용(변형 set)은 platform이 selected로 한다.
     dropdown: dropdown.State = .{},
+    /// 키보드 포커스가 좌측 섹션 네비에 있는가. **방향키 영역 모델**: `←`=네비로 포커스, `→`=폼으로 포커스, 각 영역
+    /// 안에서 `↑↓`가 이동한다(네비=섹션, 폼=행). Tab 토글이 아니라 방향으로 이동(직관적 — 왼쪽 열=네비, 오른쪽=폼).
+    /// show에서 폼으로 시작(false). 팔레트 그리드 행에서의 `←→` 셀 이동은 platform이 pre-intercept(그 행만 특수).
+    nav_focused: bool = false,
 
     pub fn show(self: *State) void {
         self.open = true;
@@ -188,6 +191,7 @@ pub const State = struct {
         self.message_len = 0;
         self.picking = false;
         self.dropdown.hide(); // 모달 열 때 드롭다운 팝업 닫힘 상태로 시작
+        self.nav_focused = false; // 폼 포커스로 시작(← 눌러 섹션 네비로 이동)
     }
     /// HSV picker 열기(platform이 color 행 활성 시 호출 — 현재 색 rgb로 초기 h/s/v 시드). 폼 키/포인터가 picker로 라우팅된다.
     pub fn openPicker(self: *State, rgb: color_mod.Rgb) void {
@@ -589,15 +593,15 @@ pub fn view(
     }
 
     // 좌측 네비: 섹션 라벨. inner_x 칸은 좌단 여백으로 비우고, 현재 섹션 강조(tab_active_bg)·라벨은 그 우측
-    // (inner_x+cw)부터 둔다. **현재 섹션=accent, 나머지=muted**로 어느 섹션인지 늘 보인다(←→로 전환). Tab 포커스
-    // 토글은 제거돼 폼/네비 영역 구분(dim)이 없다 — 키는 항상 ←→=섹션·↑↓=행.
+    // (inner_x+cw)부터 둔다. 현재 섹션=accent. **네비 포커스면** 나머지 섹션도 surface_fg(선명 — 지금 ↑↓가 여기),
+    // **폼 포커스면** 나머지는 muted_fg(흐림 — 지금 키가 폼에)로 어느 영역이 활성인지 보인다(방향키 영역 모델).
     const cw_i: i32 = @intCast(box.cw);
     for (sections, 0..) |label, i| {
         const row = l.first_field_row + @as(u32, @intCast(i));
         if (i == state.section) {
             try modal_box.fillCells(box, box.inner_x + cw_i, row, l.nav_cols -| 1, .tab_active_bg, arena, out);
         }
-        const role: tokens.ColorRole = if (i == state.section) .accent_bar else .muted_fg;
+        const role: tokens.ColorRole = if (i == state.section) .accent_bar else if (state.nav_focused) .surface_fg else .muted_fg;
         try modal_box.text(box, box.inner_x + cw_i, row, label, role, arena, out);
     }
 
@@ -625,8 +629,8 @@ pub fn view(
             const hl_cols = if (quad_widget) l.form_cols -| row_right_cols else l.form_cols;
             try modal_box.fillCells(box, l.form_x, content_row, hl_cols, .tab_hover_bg, arena, out);
         }
-        // 비활성 행(프리셋 잠금)은 라벨을 muted로. (Tab 포커스 영역 dim은 제거 — nav_focused 없음.)
-        const label_role: tokens.ColorRole = if (r.disabled) .muted_fg else .surface_fg;
+        // 비활성 행(프리셋 잠금)이거나 **네비 포커스**(폼이 비활성 영역)면 라벨을 muted로 — 지금 키가 폼에 없음을 흐림으로 보인다.
+        const label_role: tokens.ColorRole = if (r.disabled or state.nav_focused) .muted_fg else .surface_fg;
         // 라벨도 control/palette 열을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
         const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| label_gap_cols) catch r.label;
         try modal_box.text(box, l.form_x, content_row, label_shown, label_role, arena, out);
@@ -736,9 +740,8 @@ pub fn view(
         return; // 배너가 힌트 줄을 대체(같은 행)
     }
 
-    // 내비 힌트 — 제목 바로 아래 중앙에 한 줄(muted). Tab 폼↔네비 토글이 제거돼 활성 영역 강조 바가 없다 —
-    // 키는 항상 ←→=섹션·↑↓=행·Enter=활성이라 이 한 줄로 충분하다(사용자 요청: 화살표로 전부 이동).
-    const nav_hint = "←→ 섹션 · ↑↓ 행 · ⏎ 선택";
+    // 내비 힌트 — 제목 바로 아래 중앙에 한 줄(muted). 방향키 영역 모델: ← 네비 · → 설정으로 포커스, ↑↓로 그 영역 이동.
+    const nav_hint = "← 섹션 · → 설정 · ↑↓ 이동 · ⏎ 선택";
     const hint_w = overlay_input.displayCols(nav_hint);
     const hx = box.inner_x + @as(i32, @intCast((box.inner_cols -| hint_w) / 2 * box.cw)); // 중앙 정렬
     try modal_box.text(box, hx, hint_row, nav_hint, .muted_fg, arena, out);
@@ -995,40 +998,59 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
             .consumed => .consumed,
         };
     }
-    // 폼(기본) — **화살표 내비**: ←→=섹션 전환, ↑↓=행 이동, Enter/Space=행 활성, Esc=닫기. Tab 기반 폼↔네비 토글은
-    // 제거했다(사용자 요청 — "탭으로 왔다갔다" 불편). Tab은 무동작. ←→ 슬라이더 값조절도 제거(값은 입력 박스·드롭다운).
+    // **방향키 영역 모델**: `←`=섹션 네비로 포커스, `→`=폼으로 포커스, `↑↓`=포커스 영역 안에서 이동(네비=섹션·폼=행),
+    // Enter/Space=폼 행 활성(네비에선 Enter=폼 진입), Esc=닫기. Tab 무동작. (팔레트 그리드 행의 ←→ 셀 이동은 platform이
+    // pre-intercept — 그 행에선 ←→가 여기 안 온다. ←가 셀 0에서·→가 마지막 셀에서만 여기로 와 영역 이동으로 이어진다.)
     switch (k.key) {
         .escape => {
             state.hide();
             return .close;
         },
         .left => {
-            if (state.section == 0) return .consumed; // 첫 섹션에서 ← = 정지
-            state.selectSection(state.section - 1);
-            return .section_changed;
+            if (state.nav_focused) return .consumed; // 이미 좌측(네비) — 더 왼쪽 없음
+            state.nav_focused = true; // 폼 → 네비로 포커스
+            return .selection_changed;
         },
         .right => {
-            state.selectSection(state.section + 1); // 상한은 platform이 clamp(섹션 수를 컴포넌트는 모른다)
-            return .section_changed;
+            if (state.nav_focused) {
+                state.nav_focused = false; // 네비 → 폼으로 포커스
+                return .selection_changed;
+            }
+            return .consumed; // 이미 우측(폼) — 더 오른쪽 없음
         },
         .up => {
+            if (state.nav_focused) {
+                if (state.section == 0) return .consumed; // 첫 섹션에서 정지
+                state.selectSection(state.section - 1); // selectSection은 nav_focused 보존
+                return .section_changed;
+            }
             state.moveSelection(-1);
             return .selection_changed;
         },
         .down => {
+            if (state.nav_focused) {
+                state.selectSection(state.section + 1); // 상한은 platform이 clamp(섹션 수를 컴포넌트는 모른다)
+                return .section_changed;
+            }
             state.moveSelection(1);
             return .selection_changed;
         },
-        .enter => return if (state.count == 0) .consumed else .toggle,
-        .backspace => return if (state.count == 0) .consumed else .delete_row, // 선택 행 삭제(platform이 env 행만 처리)
+        .enter => {
+            if (state.nav_focused) {
+                state.nav_focused = false; // 네비에서 Enter → 폼으로 진입(그 섹션 확정)
+                return .selection_changed;
+            }
+            return if (state.count == 0) .consumed else .toggle;
+        },
+        .backspace => return if (state.nav_focused or state.count == 0) .consumed else .delete_row, // 폼 선택 행 삭제(env 행만)
         .char => {
             if (k.codepoint == '/') { // '/'로 검색 시작(현재 섹션 필터)
                 state.startSearch();
                 return .search_changed;
             }
-            return if (k.codepoint == ' ' and state.count > 0) .toggle else .consumed;
+            return if (!state.nav_focused and k.codepoint == ' ' and state.count > 0) .toggle else .consumed;
         },
-        else => return .consumed, // Tab 포함 — 무동작(폼↔네비 토글 제거)
+        else => return .consumed, // Tab 포함 — 무동작
     }
 }
 
@@ -1145,6 +1167,7 @@ pub fn handlePointer(
         for (sections, 0..) |_, i| {
             const ny: f64 = @floatFromInt(modal_box.rowY(box, l.first_field_row + @as(u32, @intCast(i))));
             if (ev.y_px >= ny and ev.y_px < ny + @as(f64, @floatFromInt(box.ch))) {
+                state.nav_focused = true; // 네비 클릭 → 네비 포커스(↑↓가 섹션 이동)
                 if (i == state.section) return .selection_changed; // 같은 섹션 재클릭 — 부수효과 없음
                 state.selectSection(i);
                 return .section_changed;
@@ -1161,6 +1184,7 @@ pub fn handlePointer(
         const ry: f64 = @floatFromInt(ctrl.y);
         if (ev.y_px >= ry and ev.y_px < ry + @as(f64, @floatFromInt(ctrl.h))) {
             state.selected = actual;
+            state.nav_focused = false; // 폼 행 클릭 → 폼 포커스(↑↓가 행 이동)
             switch (r.kind) {
                 .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,
                 .slider => return if (input_box.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 입력 박스 클릭 → 편집 진입(.toggle=활성, platform이 현재값 시드), 라벨은 선택만
@@ -1288,26 +1312,33 @@ test "settings state: show/hide/setFieldCount clamp/moveSelection wrap" {
     try std.testing.expect(!s.open);
 }
 
-test "settings handle: ↑↓ 행·←→ 섹션·Space/Enter 토글·Esc 닫기·Tab 무동작" {
-    // 새 화살표 내비: ←→=섹션 전환(값 조절 아님), ↑↓=행 이동, Enter/Space=행 활성, Tab=무동작(폼↔네비 토글 제거).
+test "settings handle: 방향키 영역 모델(←네비·→폼·↑↓ 영역 내 이동)·Enter 활성·Tab 무동작" {
+    // ← = 네비 포커스, → = 폼 포커스, ↑↓ = 그 영역 안에서 이동(네비=섹션·폼=행), Enter/Space=폼 행 활성.
     var s = State{};
-    s.show();
+    s.show(); // 폼 포커스로 시작(nav_focused=false)
     s.setFieldCount(3);
+    try std.testing.expect(!s.nav_focused);
+    // 폼에서 ↑↓ = 행 이동.
     try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);
-    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .up }, &s));
-    // ←→ = 섹션 전환. section 0에서 ←=정지(consumed), →=다음 섹션(section_changed, selected 리셋).
-    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .left }, &s));
-    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .right }, &s));
+    // → (이미 폼) = consumed. ← = 네비로 포커스.
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .right }, &s));
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .left }, &s));
+    try std.testing.expect(s.nav_focused);
+    // 네비에서 ↓ = 섹션 +1(selected 리셋). ← (이미 네비) = consumed.
+    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.section);
-    s.setFieldCount(3); // 새 섹션 필드 수(platform이 실제로 주입 — 단위테스트는 흉내)
+    try std.testing.expect(s.nav_focused); // selectSection이 nav_focused 보존
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .left }, &s));
+    // 네비에서 → = 폼으로 복귀. 첫 섹션에서 ↑ = 정지.
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .right }, &s));
+    try std.testing.expect(!s.nav_focused);
+    // 폼에서 Enter/Space = 행 활성(toggle).
+    s.setFieldCount(3);
     try std.testing.expectEqual(Action.toggle, handle(.{ .key = .enter }, &s));
     try std.testing.expectEqual(Action.toggle, handle(.{ .key = .char, .codepoint = ' ' }, &s));
     try std.testing.expectEqual(Action.consumed, handle(.{ .key = .char, .codepoint = 'a' }, &s));
     try std.testing.expectEqual(Action.consumed, handle(.{ .key = .tab }, &s)); // Tab 무동작
-    // count 0 → enter/space 대상 없음 → consumed.
-    s.setFieldCount(0);
-    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .enter }, &s));
     // Esc → close + hide.
     try std.testing.expectEqual(Action.close, handle(.{ .key = .escape }, &s));
     try std.testing.expect(!s.open);
@@ -1409,38 +1440,43 @@ test "settings handlePointer: 제목 행 클릭 → 검색 시작(.search_change
     try std.testing.expect(s.searching);
 }
 
-test "settings nav 키보드: ←→ 섹션 전환(정지/전진) + ↑↓ 행 + Tab 무동작" {
-    // 새 모델: ←→=섹션 전환(Tab 폼↔네비 토글 제거), ↑↓=행 이동. 섹션 전환은 selected를 리셋한다.
+test "settings nav 키보드: 방향키 영역 포커스(←네비·→폼) + 각 영역 ↑↓" {
+    // 방향키 영역 모델: ←=네비 포커스, →=폼 포커스. 네비에서 ↑↓=섹션(selected 리셋, nav_focused 보존), 폼에서 ↑↓=행.
     var s = State{};
     s.show();
     s.section = 1;
     s.count = 3;
     s.selected = 2;
+    try std.testing.expect(!s.nav_focused); // 폼 시작
 
-    // → → 섹션 +1(전진) + selected 리셋.
-    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .right }, &s));
-    try std.testing.expectEqual(@as(usize, 2), s.section);
-    try std.testing.expectEqual(@as(usize, 0), s.selected);
-
-    // ← → 섹션 -1.
-    s.count = 3;
-    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .left }, &s));
+    // ← → 네비 포커스(섹션 불변).
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .left }, &s));
+    try std.testing.expect(s.nav_focused);
     try std.testing.expectEqual(@as(usize, 1), s.section);
 
-    // 첫 섹션에서 ← → 정지(consumed, 섹션 불변).
+    // 네비 ↓ → 섹션 +1 + selected 리셋, nav_focused 유지.
+    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .down }, &s));
+    try std.testing.expectEqual(@as(usize, 2), s.section);
+    try std.testing.expectEqual(@as(usize, 0), s.selected);
+    try std.testing.expect(s.nav_focused);
+
+    // 네비 ↑ → 섹션 -1. 첫 섹션에서 ↑ = 정지.
+    try std.testing.expectEqual(Action.section_changed, handle(.{ .key = .up }, &s));
+    try std.testing.expectEqual(@as(usize, 1), s.section);
     s.section = 0;
-    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .left }, &s));
+    try std.testing.expectEqual(Action.consumed, handle(.{ .key = .up }, &s));
     try std.testing.expectEqual(@as(usize, 0), s.section);
 
-    // ↑↓ = 행 이동(섹션 불변).
+    // 네비 → → 폼 포커스. 폼 ↑↓ = 행 이동(섹션 불변).
+    try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .right }, &s));
+    try std.testing.expect(!s.nav_focused);
     s.count = 3;
     try std.testing.expectEqual(Action.selection_changed, handle(.{ .key = .down }, &s));
     try std.testing.expectEqual(@as(usize, 1), s.selected);
     try std.testing.expectEqual(@as(usize, 0), s.section);
 
-    // Tab = 무동작(폼↔네비 토글 제거).
+    // Tab = 무동작.
     try std.testing.expectEqual(Action.consumed, handle(.{ .key = .tab }, &s));
-    try std.testing.expectEqual(@as(usize, 0), s.section);
 }
 
 test "settings nav: 섹션 라벨 렌더(선택 강조) + 네비 클릭 → section_changed·section 전환·selected 리셋" {

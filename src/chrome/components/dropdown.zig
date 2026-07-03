@@ -151,9 +151,14 @@ pub fn itemAt(state: *const State, anchor: draw.Rect, items: []const []const u8,
     return @min(row, items.len - 1);
 }
 
-/// 팝업 박스(배경 quad + 테두리 + 항목 텍스트, selected 행 강조)를 `out`에 append한다. 안 열렸거나 항목 0이면
-/// 무동작. 순수: state·items·props·tokens만 읽는다. ops·runs는 호출자 frame arena 소유. 색은 context_menu와 동일
-/// (surface_bg 박스·surface_fg 글자·tab_active_bg 선택행·focus_accent 테두리).
+/// 팝업 목록(행별 **불투명 배경** + 항목 텍스트, selected 행 강조)을 `out`에 append한다. 안 열렸거나 항목 0이면
+/// 무동작. 순수: state·items·props·tokens만 읽는다. ops·runs는 호출자 frame arena 소유.
+///
+/// **불투명 렌더링(뒤 폼 텍스트를 덮는다)**: 모달은 셀 그리드라 `.fill`이 셀 **배경만** 칠하고 **글리프는 안 지운다** —
+/// 배경만 덮으면 팝업 뒤 폼 행 글리프가 비친다. 또 rich 모달은 배경이 surface_bg인 셀을 투명화해 뒤가 비친다. 그래서
+/// (1) 각 행 배경을 surface_bg가 **아닌** 색(tab_hover_bg/선택=tab_active_bg)으로 칠해 투명화 pass에 안 지워지게 하고,
+/// (2) 항목 텍스트를 **박스 폭까지 공백 패딩**해 그 행의 **모든 셀에 글리프**를 놓아 뒤 폼 글리프를 지운다. context_menu는
+/// 터미널 위(다른 레이어)라 불투명하지만, 이 팝업은 설정 폼과 같은 modal 레이어라 이 방식으로 직접 덮는다.
 pub fn viewPopup(
     state: *const State,
     anchor: draw.Rect,
@@ -168,22 +173,21 @@ pub fn viewPopup(
     const rect = popupRect(anchor, items, p) orelse return;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    const box_cols: u32 = rect.w / cw; // 박스 폭(칸) — 항목 패딩 기준
     for (items, 0..) |it, i| {
         const row_y = rect.y + @as(i32, @intCast(i)) * @as(i32, @intCast(ch));
-        if (i == state.selected) {
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = row_y, .w = rect.w, .h = ch }, .role = .tab_active_bg } });
-        }
-        // 표시 토큰의 '_'→'-'(config dashed 규약 — 축소 view와 같은 변환). frame arena에서 변환.
-        const disp = try arena.dupe(u8, it);
-        for (disp) |*c| {
-            if (c.* == '_') c.* = '-';
-        }
+        // 행 배경(불투명) — 선택 행은 강조, 나머지는 elevated 패널색. surface_bg가 아니라 rich 투명화 pass를 피한다.
+        const bg_role: tokens.ColorRole = if (i == state.selected) .tab_active_bg else .tab_hover_bg;
+        try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = row_y, .w = rect.w, .h = ch }, .role = bg_role } });
+        // " " + 항목('_'→'-') + (박스 폭까지 채우는 공백) — 행 전체 셀에 글리프를 깔아 뒤 폼 글리프를 지운다.
+        var line: std.ArrayList(u8) = .empty;
+        try line.append(arena, ' '); // 좌패딩 1칸
+        for (it) |c| try line.append(arena, if (c == '_') '-' else c);
+        var pad: u32 = box_cols -| (1 + overlay_input.displayCols(it)); // 좌패딩 + 항목 표시폭을 뺀 우측 채움
+        while (pad > 0) : (pad -= 1) try line.append(arena, ' ');
         const runs = try arena.alloc(draw.Run, 1);
-        runs[0] = .{ .text = disp };
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(cw)), .y = row_y }, .runs = runs, .role = .surface_fg } }); // 좌패딩 1칸
+        runs[0] = .{ .text = line.items };
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x, .y = row_y }, .runs = runs, .role = .surface_fg } });
     }
 }
 
@@ -313,8 +317,12 @@ test "dropdown popup popupRect/itemAt/viewPopup: control 아래 박스·항목 �
     defer arena_state.deinit();
     var out: std.ArrayList(draw.Op) = .empty;
     try viewPopup(&s, anchor, &items, p, &tk, arena_state.allocator(), &out);
-    try std.testing.expect(out.items.len >= 4); // 박스 quad 1 + 항목 텍스트 3 (+ 선택행 fill)
-    try std.testing.expect(out.items[0] == .quad);
+    // 항목마다 불투명 배경 fill + 패딩 텍스트 = 2 op. 3항목 = 6 op. 첫 op은 행0 배경 fill(불투명 — 뒤 폼 텍스트를 덮음).
+    try std.testing.expectEqual(@as(usize, 6), out.items.len);
+    try std.testing.expect(out.items[0] == .fill);
+    try std.testing.expectEqual(tokens.ColorRole.tab_active_bg, out.items[0].fill.role); // 행0=선택 → 강조 배경
+    try std.testing.expect(out.items[1] == .text); // 행0 항목(패딩된 전체 폭 텍스트)
+    try std.testing.expectEqual(tokens.ColorRole.tab_hover_bg, out.items[2].fill.role); // 행1=비선택 → 패널 배경
 
     s.hide();
     out.clearRetainingCapacity();

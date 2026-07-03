@@ -64,6 +64,36 @@ pub fn slotTop(index: usize, header_height_px: u32, slot_height_px: u32, scroll_
     return @as(i64, header_height_px) + @as(i64, @intCast(index)) * @as(i64, slot_height_px) - @as(i64, scroll_offset_px);
 }
 
+// ── 가변 높이 프리미티브(SG3a — 헤더=얇은 한 줄, 카드=slot_h; docs/sidebar-groups.md §5) ──────────────
+// 헤더 row가 카드보다 낮으므로 y↔row를 고정 나눗셈(slot_height 배수)이 아니라 **각 row 높이를 누적**해 환산한다.
+// 아래 3함수가 그 누적 프리미티브다. slotAt/dragTargetSlot의 가변 교체와 app_session의 slotTop→rowTop 전환은
+// SG3a-2에서 이어지며, 그때 위 고정 slotAt/slotTop/dragTargetSlot을 제거한다(임시 공존).
+
+/// row 하나의 세로 높이(px). 카드=card_slot_h, 그룹 헤더=header_row_h(얇은 한 줄). 가변 누적의 단위.
+pub fn rowHeight(row: Row, card_slot_h: u32, header_row_h: u32) u32 {
+    return switch (row) {
+        .card => card_slot_h,
+        .group_header => header_row_h,
+    };
+}
+
+/// row 인덱스의 화면 상단 y(backing px) — 옛 slotTop의 가변판(고정 `index*slot_h` 대신 앞 row 높이 누적).
+/// header + Σ(rows[0..index] 높이) − scroll. index≥rows.len이면 전체 콘텐츠 하단(모든 row 합) 기준. i64라 음수(위로 밀림) 안전.
+pub fn rowTop(rows: []const Row, index: usize, header_height_px: u32, card_slot_h: u32, header_row_h: u32, scroll_offset_px: u32) i64 {
+    var off: i64 = 0;
+    const n = @min(index, rows.len);
+    for (rows[0..n]) |r| off += @as(i64, rowHeight(r, card_slot_h, header_row_h));
+    return @as(i64, header_height_px) + off - @as(i64, scroll_offset_px);
+}
+
+/// 표시 콘텐츠 전체 높이(px) — 모든 row 높이 합(옛 `rows.len*slot_h`의 가변판). 세로 스크롤 clamp(sidebarMaxScroll)용.
+/// u32 포화(비현실적으로 많은 row에서도 trap 없이 상한)로 clamp 계산이 degenerate하지 않게 한다.
+pub fn contentHeight(rows: []const Row, card_slot_h: u32, header_row_h: u32) u32 {
+    var acc: u64 = 0;
+    for (rows) |r| acc += rowHeight(r, card_slot_h, header_row_h);
+    return @intCast(@min(acc, @as(u64, std.math.maxInt(u32))));
+}
+
 /// 헤더 줄0 우측 **단일-셀 아이콘**의 glyph col(우측부터 +·⚙·◧). render(buildSidebarHeaderFrame)·단축키 배지가 같은
 /// col을 쓰게 하는 단일 출처(예전엔 cols-2/-5/-8을 곳곳에 하드코딩). hit-test(headerHit)는 글리프 col이 아니라 **zone
 /// 경계**(cols-3/-6/-9)를 별도로 둔다(클릭 영역은 글리프보다 넓다 — 의도적 분리).
@@ -377,4 +407,37 @@ test "sidebar view: group_header row 섞여도 카드 밴드만(SG1 동작 보�
     try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성(row1) + 호버(row0)
     try std.testing.expect(out.items[1].quad.fill_role == .tab_hover_bg);
     try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y); // row 0
+}
+
+test "sidebar 가변 높이: rowHeight·rowTop·contentHeight(혼합 누적 + 카드만=균일 동작 보존)" {
+    // 가변 높이(§5): 헤더=header_row_h(얇은 한 줄), 카드=card_slot_h. y↔row를 고정 나눗셈이 아니라 누적으로 환산한다.
+    // 핵심: **카드만이면 가변 rowTop이 옛 고정 slotTop과 정확히 같다** — SG3a 이주가 그룹 없는 현재 동작을 보존함을 증명.
+    const card = Row{ .card = .{ .tab = 0, .label = "c", .active = false } };
+    const hdr = Row{ .group_header = .{ .collapsed = false, .label = "g", .member_count = 0 } };
+    // rowHeight: 종류별 높이(card=40, header=16).
+    try std.testing.expectEqual(@as(u32, 40), rowHeight(card, 40, 16));
+    try std.testing.expectEqual(@as(u32, 16), rowHeight(hdr, 40, 16));
+
+    // 혼합 [헤더(16), 카드(40), 카드(40)], header_px=0, scroll=0: 누적 상단 y.
+    const mixed = [_]Row{ hdr, card, card };
+    try std.testing.expectEqual(@as(i64, 0), rowTop(&mixed, 0, 0, 40, 16, 0)); // 헤더 상단
+    try std.testing.expectEqual(@as(i64, 16), rowTop(&mixed, 1, 0, 40, 16, 0)); // 헤더(16) 뒤
+    try std.testing.expectEqual(@as(i64, 56), rowTop(&mixed, 2, 0, 40, 16, 0)); // 16+40
+    try std.testing.expectEqual(@as(i64, 96), rowTop(&mixed, 3, 0, 40, 16, 0)); // 16+40+40 = 콘텐츠 하단
+    try std.testing.expectEqual(@as(u32, 96), contentHeight(&mixed, 40, 16));
+
+    // header_height_px·scroll 반영: header=20, scroll=10.
+    try std.testing.expectEqual(@as(i64, 10), rowTop(&mixed, 0, 20, 40, 16, 10)); // 20-10
+    try std.testing.expectEqual(@as(i64, 26), rowTop(&mixed, 1, 20, 40, 16, 10)); // 20+16-10
+
+    // 카드만 → 가변 rowTop == 옛 고정 slotTop(동작 보존). header=20, slot_h=40, scroll=5, index=2 → 20+2*40-5=95.
+    const cards = [_]Row{ card, card, card };
+    try std.testing.expectEqual(slotTop(2, 20, 40, 5), rowTop(&cards, 2, 20, 40, 16, 5));
+    try std.testing.expectEqual(slotTop(0, 20, 40, 5), rowTop(&cards, 0, 20, 40, 16, 5));
+    try std.testing.expectEqual(@as(u32, 120), contentHeight(&cards, 40, 16)); // 3*40(카드만이라 header_row_h 무관)
+
+    // 빈 rows: rowTop=header-scroll, contentHeight=0.
+    const empty = [_]Row{};
+    try std.testing.expectEqual(@as(i64, 20), rowTop(&empty, 0, 20, 40, 16, 0));
+    try std.testing.expectEqual(@as(u32, 0), contentHeight(&empty, 40, 16));
 }

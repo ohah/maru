@@ -7,7 +7,7 @@
 chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다. 이 문서는 그 위에 **그룹**을 얹는 설계만 다룬다.
 
 > **현황**: **SG1~SG4 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
-> 드래그로 넣기/빼기(SG4). **그룹 통째 드래그·색·(선택)중첩(SG5)** 만 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
+> 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1). **그룹 색(SG5-2)·(선택)중첩** 만 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
 > ([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
@@ -217,7 +217,8 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename) |
 | **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
 | **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그 | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음. 마커 탭 드래그=그룹 통째=SG5 |
-| 그룹 통째 드래그·색 | 후속 | 헤더 잡아 재정렬 / 그룹 색 | `sidebar_drag_*` 확장, `group_indent`/색 토큰 |
+| **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
+| 그룹 색 | 후속 SG5-2 | 우클릭 프리셋 / 헤더·막대 색 | `group_start` 탭에 색 저장·색 토큰 |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
 세 경로에 **자동으로** 뜬다 — (1) 커맨드 팔레트, (2) 설정 화면(⌘,) Input 섹션의 **키바인딩 리바인더**(행 클릭 → 녹음
@@ -297,7 +298,13 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
    처리(옛 visibleTab null-skip 대체), `sidebar_drop_slot` 드롭 하이라이트. **마커 탭 드래그는 가드로 무동작**(그룹
    통째=SG5). 연속 파티션은 마커 없는 카드만 재정렬해 사실상 공짜. 헤드리스 2테스트(넣기/빼기·펼친/접힌 헤더·마커
    가드·재투영 depth). 한계: 핀+그룹 조합·카드→마커카드 위-드롭은 헤더 드롭이 신뢰 경로.
-5. **SG5(후속) — 그룹 통째 드래그·색·(선택)중첩**.
+5. **SG5 — 그룹 통째 드래그·색·(선택)중첩**:
+   - **SG5-1 ✅ — 그룹 통째 드래그**: 헤더를 잡아 드래그하면 그룹 구간 `[M,j)`(마커 탭 + 소속 카드)가 통째 이동.
+     `moveGroupRange`(구간을 블록으로 그룹 경계에만 삽입 — 파티션 위반 불가능)·`sidebarGroupDropBoundary`(드롭 row→그룹
+     경계, 항상 경계 clamp)·헤더 클릭 vs 드래그 threshold 구분(mouseDown arm→미달=접기·초과=이동). SG4의 마커 탭 가드를
+     실제 이동으로 대체. 헤드리스 3테스트. 한계: 핀+그룹 조합·floating 미리보기(선택) 미구현.
+   - **SG5-2(후속) — 그룹 색**: 헤더·소속 카드 공통 색(브라우저 탭 그룹식). `group_start` 탭에 색 저장·우클릭 프리셋.
+   - **SG5-3(선택) — 중첩 그룹**: `depth>1`(그룹 안 그룹). 위치 파생 다단계 확장, 실수요 확인 전 보류(YAGNI).
 
 ## 10. 리스크 & 미해결
 

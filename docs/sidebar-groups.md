@@ -270,11 +270,17 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
      가변 누적 프리미티브(`rowHeight`/`rowTop`/`contentHeight`) 추가 + 헤드리스 테스트(**카드만이면 `rowTop`==옛 `slotTop`**로
      동작 보존 증명). **`slotAt`/`dragTargetSlot`의 가변 교체·`slotTop`→`rowTop` 전환·두 latent 버그(rename caret·드래그)
      교정은 헤더가 실제로 가변을 요구하는 SG3b로 미룬다**(헤더 없는 SG3a는 고정 hit-test로 카드만 처리 = 균일이라 동작 보존).
-   - **SG3b — 헤더 row + 가변 hit-test 교체 + glyph 가변 인코딩**: `projectRows`가 group_header row 삽입(카드 depth 들여쓰기),
-     `sidebar.zig` `slotAt`/`dragTargetSlot`을 **rows+누적(가변 높이)**으로 교체 + `slotTop`→`rowTop` 전환(app_session 호출처·
-     rename caret·드래그 버그 교정)·고정 함수 제거, `view`가 헤더 밴드+삼각(▾/▸), `buildSidebarDrawList`+`.m`이 헤더 glyph
-     (삼각+이름)와 **row별 누적 y**로 세로 위치를 그린다(§5 파급 — `sidebarGlyphRow` 균일 곱셈을 누적으로, `.m` 디코드 동반
-     수정). macOS 제품 스크린샷 검증.
+   - **SG3b — 헤더 row + 가변 hit-test + glyph 가변 인코딩** (2 PR 머지 완료 + 렌더 남음):
+     - **SG3b-1 ✅**(머지 #1174): `slotAt`/`dragTargetSlot` 가변 교체 + `slotTop`→`rowTop` + rename caret 버그 교정.
+     - **SG3b-2-i ✅**(머지 #1174): `projectRows`가 group_header row 삽입·카드 depth·접힘·빈 그룹 규칙·member_count.
+     - **SG3b-2-ii**(남음 — 실제 헤더 픽셀, 조사로 세부 확정): (a) `header_row_h` 메트릭 배선 — `props.CellMetrics` +
+       `AppSession` 필드 + `refreshCellMetrics` 계산 + `slotAt`/`dragTargetSlot`/`rowTop`(caret·배지) **4곳의 `cell_height_px`
+       alias를 신규 메트릭으로 교체**. (b) **인덱스 도메인 통일** — glyph 인코딩 slot을 "압축 카드 인덱스"에서 **row 인덱스**로
+       (§10 함정). (c) 렌더 y 가변화 — `bandFill`·`lowerSidebar`·`rebuild` tint/accent를 `rowTop` 누적으로, 스크롤 메트릭을
+       `contentHeight`로. (d) `.m` 디코드 — **옵션 2 채택**(py_top을 Zig `rowTop`+블록중앙으로 완전 계산해 per-cell 넘겨 `.m`
+       기하를 제거 — `renameCaretRect`·배지가 이미 쓰는 수식이라 정합 단일 출처가 Zig 한 곳으로, 회귀 표면 최소). (e) `view`
+       헤더 밴드+삼각(▾/▸) + `buildSidebarDrawList` 헤더 glyph + `card.depth` 들여쓰기. (f) **macOS 제품 스크린샷 검증**(세로
+       위치는 headless로 안 잡힘).
    - **SG3c — 접기 + 만들기/이름/해제 + 액션·단축키**: 헤더 클릭 → `group_collapsed` 토글 → 재투영·영속.
      `create_group`(기본 키 `Cmd+Opt+G`)·`ungroup` 액션 추가(action.zig `Action`+`parseAction`+`dispatchAppAction` arm+
      `command_catalog` entry) → 팔레트·설정 Input 리바인더·config `keybind` 자동 노출(§7). 우클릭 "새 그룹으로 묶기"/
@@ -286,10 +292,16 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
 
 - **(중) 이주 표면(SG3a)**: `sidebar_visible_tabs` → `sidebar_rows` 격상이 `app_session` 오케스트레이션(조사 맵의 표시-슬롯
   도메인 12+곳)을 건드린다. 동작 보존 리팩터라 **스냅샷 회귀가 안전망**이다 — 착수 전 현재 사이드바 스냅샷을 고정해 두고 이주 후 동일 확인.
-- **(높음) 가변 높이 glyph 인코딩(Zig↔`.m` FFI, SG3b)**: §5 파급 — `sidebarGlyphRow`의 `slot*32` 균일 인코딩과 `.m`의
-  `slot*slot_h` 디코드가 균일 높이를 가정한다. 가변 높이면 이를 **row별 누적 y**로 함께 고쳐야 한다. hit-test(Zig 순수)는
-  누적이 쉽지만 glyph는 FFI 경계라 양쪽 정합이 필요하고, 세로 위치는 headless로 안 잡혀 **macOS 제품 스크린샷 검증 필수**.
-  가변 높이의 실제 비용이 여기 몰린다(사용자가 시각 품질을 위해 택한 트레이드오프).
+- **(높음) 인덱스 도메인 불일치 — SG3b-2-ii의 진짜 핵심 함정(조사 발견)**: glyph 인코딩 slot(`sidebarGlyphRow`)은
+  `buildSidebarTitleDrawList`가 헤더를 skip해 만든 **압축 카드 인덱스**인데, 밴드(`bandFill`)·hit-test(`slotAt`)·tint 루프·
+  caret·배지는 **row 인덱스**(헤더 포함)다. 헤더 0개인 SG3a까진 둘이 같아 동작 보존이지만, **헤더가 생기는 순간 glyph slot ≠
+  밴드/hit-test slot**이 되어 카드 glyph가 헤더 높이만큼 위로 어긋나고, `active_row`/`close_row`(row 인덱스)가 압축 `i`와 비교돼
+  활성 강조·✕가 엉뚱한 카드에 간다. → SG3b-2-ii에서 glyph 경로 slot 도메인을 **row 인덱스로 통일**하고 색 디코드(`row/32`)도 동반 수정한다.
+- **(높음) 가변 높이 glyph 인코딩(Zig↔`.m` FFI, SG3b-2-ii)**: §5 파급 — `.m`(`maru_metal_renderer.m`)이 `slot_idx*slot_h`
+  (glyph)·`sc.row*slot_h`(밴드)·블록중앙 `(slot_h-block_h)/2`로 균일을 가정한다. **결정: 옵션 2** — py_top을 Zig에서 `rowTop`+
+  블록중앙으로 완전 계산해 per-cell로 넘겨 `.m` 기하를 없앤다(옵션 1의 per-row 누적/높이 배열 FFI보다, 정합 단일 출처가 Zig
+  한 곳으로 모여 회귀 표면이 작다 — caret·배지·색 디코드가 같은 수식 공유). 부수: `bandFill`이 누적 y를 emit하면 `lowerSidebar`의
+  `@divTrunc(rect.y, slot_h)` row 역산이 비가역이 되므로, chrome op에 row 인덱스를 실어 넘긴다. 세로 위치는 headless로 안 잡혀 **macOS 스크린샷 검증 필수**.
 - **(낮) 위치 파생의 경계 제약**: 최상위 카드는 첫 그룹 시작 이전 구간에만 온다(§2.1) — 그룹들 사이에 최상위 카드를 끼울 수
   없다. 브라우저 탭 그룹도 사실상 이 모델이라 실용상 충분. 정말 필요하면 후속에서 "그룹 끝" sentinel 마커로 열 여지만 둔다.
 - **(낮) 접힌 그룹에 넣기**: 카드 드래그(SG4)에서 접힌 헤더에 드롭하면 그 그룹 끝에 추가로 처리(브라우저 관례). 접기 우선

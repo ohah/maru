@@ -6,10 +6,11 @@
 사이드바 자체(카드 레이아웃·헤더·검색·드래그·스크롤)의 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)이고,
 chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다. 이 문서는 그 위에 **그룹**을 얹는 설계만 다룬다.
 
-> **현황**: **SG1~SG5-3 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
+> **현황**: **SG1~SG5-4 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
 > 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋) +
-> **중첩 그룹(SG5-3, 폴더 트리처럼 그룹 안 그룹 — 위치 파생을 다단계 depth로 일반화)**. 구현이 진행되면 이 문서를 코드와
-> 맞춘다([project-rules](project-rules.md#문서와-설명)).
+> **중첩 그룹(SG5-3, 폴더 트리처럼 그룹 안 그룹 — 위치 파생을 다단계 depth로 일반화)** +
+> **드래그로 중첩 넣기/빼기(SG5-4 — 드롭 컨텍스트 depth로 group_depth 조정: 헤더에 드롭=자식으로 중첩·최상위로 드롭=빼기)**.
+> 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
 
@@ -227,8 +228,9 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **형제 그룹으로 분리** | ✅ SG5-3 | 우클릭 "형제 그룹으로 분리" · **단축키 `Cmd+Opt+Shift+G`** · 팔레트 "New Sibling Group" | `create_sibling_group` 액션 → 그 카드에 `group_start` 세팅 + `group_depth=현재 그룹과 같은 depth`(형제, 중첩 아님). 최상위면 depth 1(create_group과 결과 동일). create_group의 미러 — depth 계산만 다르다(§10 tension 해소) |
 | **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename) |
 | **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
-| **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그 | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음. 마커 탭 드래그=그룹 통째=SG5 |
+| **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그(중첩 자식 그룹 안 포함) | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음 — 드롭 위치의 depth가 곧 카드 depth(자식 그룹 안=자식 depth·최상위=0). 마커 탭 드래그=그룹 통째=SG5 |
 | **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
+| **드래그로 중첩 넣기/빼기** | ✅ SG5-4 | 그룹 헤더를 **다른 그룹 헤더에 드롭=자식으로 중첩**, **카드/최상위에 드롭=형제 재정렬(+얕으면 빼기)** | `groupNestPlan`(헤더 드롭→중첩 계획: target_depth=타겟 depth+1·insert=타겟 subtree 끝)·`moveGroupNesting`(이동+`relevelBlock`으로 subtree 상대 depth 유지)·`moveGroupSibling`(형제 이동+자연 eff releveel로 빼기). 카드 드롭=형제(SG5-1 보존)·헤더 드롭=넣기의 명시적 분리 |
 | 그룹 색 | ✅ SG5-2 | 우클릭 "그룹 색: …" 프리셋(카드 색과 같은 팔레트) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략) |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
@@ -347,13 +349,29 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
        얕아짐). 부모 ungroup → 부모 직접 카드는 최상위로, 남은 자식 그룹은 부모가 사라져 projectRows의 **gap 클램프로 depth 1
        (최상위 그룹)로 자동 승격**(저장 group_depth는 그대로 두고 투영이 정규화 — 위치 파생 철학과 동형).
      - **직렬화**: workspace.v1 `group-depth` 스칼라(additive·기본 1=키 생략→round-trip 고정·옛 리더 미지 키 skip으로 양쪽 호환).
-     - **드래그(최소 안전 동작)**: 그룹 통째 이동(`moveGroupRange`)·드롭 경계(`sidebarGroupDropBoundary`)·접힌 헤더 드롭이
-       "다음 마커" 대신 **subtree 끝**(`groupSubtreeEnd`=같거나 낮은 depth 마커 전까지)을 쓰게 확장 — 부모+자식이 함께 이동해
-       무결성 유지(비중첩이면 "다음 마커"와 동일이라 SG4/SG5-1 동작 보존). **한계**: 완전한 "드래그로 중첩 넣기/빼기"(드롭 위치로
-       depth 변경)는 미구현 — 중첩 그룹을 다른 그룹 경계로 끌면 projectRows가 depth를 재정규화해 예기치 않게 재중첩될 수 있다
-       (크래시·파티션 손상은 없음 — 삽입이 항상 마커 경계라 연속 파티션 유지). 핀+그룹 조합도 SG4/SG5-1과 같이 범위 밖.
+     - **드래그(subtree 통째 이동)**: 그룹 통째 이동(`moveGroupRange`)·드롭 경계(`sidebarGroupDropBoundary`)·접힌 헤더 드롭이
+       "다음 마커" 대신 **subtree 끝**(`groupSubtreeEnd`=같거나 낮은 depth 마커 전까지)을 쓴다 — 부모+자식이 함께 이동해 무결성
+       유지(비중첩이면 "다음 마커"와 동일이라 SG4/SG5-1 동작 보존). **드롭 위치로 depth 변경(넣기/빼기)은 SG5-4에서 구현**한다.
      - **헤드리스 검증**: 2단계 중첩(A>B) depth 0/1/2·헤더 depth·member_count·부모 직접카드가 자식 앞·다단계 접기(부모/자식)·
        ungroup 재소속/승격·workspace.v1 group-depth round-trip. **스크린샷 훅** `MARU_FORCE_GROUP_NESTED`(+`_COLLAPSED`/`_COLOR`).
+   - **SG5-4 ✅ — 드래그로 중첩 넣기/빼기(드롭 컨텍스트 depth로 group_depth 조정)**: SG5-3의 subtree 통째 이동에, **드롭 위치가
+     가리키는 depth로 명시적으로 넣고/뺀다**. 그룹 드래그의 드롭 해석을 **헤더 드롭 vs 카드 드롭**으로 나눠(`groupDragFrame` 분기):
+     - **다른 그룹 헤더에 드롭 = 그 그룹의 자식으로 중첩**(`groupNestPlan`→`moveGroupNesting`). target_depth=타겟 그룹 eff+1,
+       insert_before=타겟 subtree 끝(=마지막 자식 자리라 "부모 직접 카드가 자식 앞" §2.1 유지). 이동만으로는 dragged 마커가 부모를
+       pop해 형제가 되므로, `relevelBlock`이 subtree 마커들의 `group_depth`를 target 기준으로 **상대 유지**(dragged=target·자식은
+       상대 offset 유지)로 다시 쓴다 — 이동+depth 조정을 함께 해야 진짜 자식이 된다.
+     - **카드/최상위에 드롭 = 형제 경계 이동**(기존 `sidebarGroupDropBoundary`) + **빼기(un-nest)**: `moveGroupSibling`이 새 위치의
+       자연 eff(gap-clamp된)로 relevel한다 — 같은 레벨이면 no-op(SG5-1 보존), 얕은 곳(최상위 등)이면 저장 depth를 eff로 낮춰 빼기가
+       저장에도 반영(gap 제거). **카드 드롭=형제·헤더 드롭=넣기의 명시적 분리**라 SG5-1(카드 드롭에 형제 이동) 헤드리스가 그대로 통과.
+     - **카드 드래그**: 위치 파생이 이미 드롭 위치의 depth를 흡수한다(자식 그룹 카드 위=자식 depth·최상위=0). 접힌 자식 헤더 드롭도
+       `groupSubtreeEnd`로 그 자식 subtree 끝을 타겟(SG5-3에서 배선). 별도 depth 편집 없음.
+     - **트리 연속·연속 파티션 유지**: 삽입은 항상 마커 경계(moveGroupRange), depth relevel은 블록을 고립 subtree로 정규화(1,2,3…
+       연속)해 target 기준으로 remap하므로 gap·역전이 없다. projectRows 스택 워크가 재투영 시 유효 트리를 보장(gap-clamp).
+     - **드롭 하이라이트**: `sidebar_drop_slot`이 드롭 row(넣기면 타겟 그룹 헤더)를 `.drop_zone` 밴드로 표시 — 헤더 밴드가 켜지면
+       "이 그룹 안으로 넣기"를 뜻한다. **한계**: 목표 depth를 미리 들여쓰기로 보여주는 live 프리뷰는 미구현(드롭 후 재투영으로 확정).
+     - **헤드리스 검증**: ①그룹을 다른 그룹 헤더에 드롭→중첩(depth+1, subtree 상대 depth C:1→2·2→3 유지) ②중첩 그룹을 최상위 카드에
+       드롭→빼기(depth1, 저장 relevel) ③카드를 자식 그룹 안→자식 depth·최상위→0 ④mouse 통합(헤더→헤더 중첩). 매 케이스 depth·연속
+       파티션·트리 연속 단언. **스크린샷 훅** `MARU_FORCE_GROUP_DRAGNEST`(A를 B 헤더에 드롭한 결과 = A가 B 자식으로 들여쓰기, 검증 완료).
 
 ## 10. 리스크 & 미해결
 
@@ -380,9 +398,14 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   팔레트 "New Sibling Group"·config). 두 세션 메서드는 `beginGroupForTab(kind)` 공유이고 depth 계산만 다르다(중첩=현재+1·형제=현재,
   최상위 카드는 둘 다 1로 동일). 기존 SG5-1 헤드리스 테스트(형제 그룹 통째 드래그 검증)는 setup에서 `group_depth=1`을 명시해
   형제로 구성하도록만 조정했다(드래그 assertion·기능 불변 — 회귀 아님; 이제 `createSiblingGroupForTab`으로도 같은 형제 구성 가능).
-- **(낮, SG5-3) 드래그로 중첩 넣기/빼기 미구현**: 그룹 통째 드래그는 subtree를 함께 옮기지만(무결성), 드롭 위치로 depth를
-  바꾸는 완전한 재중첩은 미구현 — 중첩 그룹을 다른 그룹 경계로 끌면 projectRows가 depth를 재정규화해 예기치 않게 재중첩될
-  수 있다(크래시·파티션 손상 없음 — 삽입이 항상 마커 경계). 카드 드래그(SG4)는 드롭 위치의 depth를 위치 파생으로 자연 흡수한다.
+- **(해소됨, SG5-4) 드래그로 중첩 넣기/빼기**: 이제 그룹 드래그의 **드롭 컨텍스트 depth**로 명시 넣기/빼기를 한다 — 다른 그룹
+  **헤더에 드롭=자식으로 중첩**(depth+1, `moveGroupNesting`+`relevelBlock`으로 subtree 상대 depth 유지), **카드/최상위에 드롭=형제
+  이동+빼기**(`moveGroupSibling`이 자연 eff로 relevel). **택한 규칙(모호성 해소·문서화)**: 그룹 드래그는 y-only라 "형제 재정렬"과
+  "자식으로 넣기"가 같은 드롭 y에서 겹칠 수 있어, **헤더 드롭=넣기·카드 드롭=형제**로 분리했다(폴더 라벨에 떨구면 안에·본문에
+  떨구면 옆). 이 규칙이 SG5-1 헤드리스(모두 카드에 드롭)를 그대로 통과시키면서 넣기 제스처를 새로 연다. **남은 한계**: (a) **새
+  중첩 레벨을 카드 드롭으로는 못 만든다**(카드 드롭은 형제 전용 — 넣기는 헤더 드롭이 유일 경로). (b) 넣기 시 목표 depth **live
+  들여쓰기 프리뷰 미구현**(드롭 row 헤더 밴드 하이라이트로만 "이 그룹 안"을 표시, 드롭 후 재투영으로 확정). (c) 핀+그룹 조합은
+  SG4/SG5-1과 같이 범위 밖. 카드 드래그(SG4)는 드롭 위치의 depth를 위치 파생으로 자연 흡수한다(자식 그룹 안=자식 depth).
 - **(낮) 접힌 그룹에 넣기**: 카드 드래그(SG4)에서 접힌 헤더에 드롭하면 그 그룹 끝에 추가로 처리(브라우저 관례). 접기 우선
   단계(SG1~3)에는 드래그가 없어 무관.
 - **(낮) 접힘 상태 위치**: `group_collapsed`를 workspace.v1에 둔다(세션 넘어 유지). config가 아니라 workspace인 이유 — 그룹은

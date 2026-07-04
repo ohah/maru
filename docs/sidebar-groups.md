@@ -6,10 +6,10 @@
 사이드바 자체(카드 레이아웃·헤더·검색·드래그·스크롤)의 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)이고,
 chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다. 이 문서는 그 위에 **그룹**을 얹는 설계만 다룬다.
 
-> **현황**: **SG1~SG5-2 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
-> 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋).
-> **(선택)중첩(SG5-3)** 만 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
-> ([project-rules](project-rules.md#문서와-설명)).
+> **현황**: **SG1~SG5-3 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
+> 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋) +
+> **중첩 그룹(SG5-3, 폴더 트리처럼 그룹 안 그룹 — 위치 파생을 다단계 depth로 일반화)**. 구현이 진행되면 이 문서를 코드와
+> 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
 
@@ -49,6 +49,14 @@ self.tabs:  t0    t1          t2   t3          t4   t5    t6
 - **불변식(연속 파티션)**: 그룹은 다음 그룹 시작 마커 전까지 이어진다. 최상위 카드는 **첫 그룹 시작 이전 구간에만** 온다
   (한 번 그룹이 시작되면 리스트 끝까지 그룹 안 — 중간에 최상위로 "복귀"하는 경계는 두지 않는다). pinned의 `[고정][비고정]`
   파티션(session_model.zig:88, `moveTab` 3967)을 N-구간으로 일반화한 것이다.
+- **다단계(중첩) 불변식(SG5-3)**: 중첩은 위 규칙을 **depth로 일반화**한다. `Tab.group_depth`(1=최상위 그룹·2=중첩·…)로
+  각 마커의 깊이를 두고, projectRows가 `self.tabs`를 스택으로 훑어 **각 카드의 depth = 자기 위에서 유효한 가장 가까운
+  마커(스택 top)의 depth**로 파생한다. 핵심 제약: **부모 그룹의 직접 카드는 자식 그룹보다 앞에 온다** —
+  `[부모마커, 부모직접카드들…, 자식마커, 자식카드들…]` 순이고, 자식 그룹이 끝나고 부모의 직접 카드로 "복귀"하는 경계는
+  두지 않는다(SG1의 "중간 최상위 복귀 없음"을 다단계로 일반화 — 카드에 마커가 없으면 스택 top depth를 그대로 받으므로,
+  자식으로 들어간 뒤 같은 depth의 부모 직접 카드를 다시 낼 방법이 위치상 없다). 마커의 정규화 depth는 항상 `부모depth+1`로
+  **gap을 클램프**한다(선언 depth가 부모+1을 넘어도 한 칸씩만 깊어짐 → 트리가 항상 연속·구멍 없음). 형제 그룹은 같은 depth
+  마커가 앞 그룹을 스택에서 pop하며 시작한다(`[부모][형제]`처럼 `[자식A][자식B]`도 같은 depth로 나란히).
 
 이 결정으로 초안에 있던 **`group` 필드·넣기/빼기 메뉴·최상위 null 상태·그룹-탭 정합 검사가 전부 사라진다.** 저장할 것은
 "어느 탭에서 그룹이 시작하고, 그 그룹이 접혔는가" 둘뿐이다(§3·§4).
@@ -142,7 +150,8 @@ pub const Row = union(enum) {
         tab: usize,          // 소스 group-start 탭 인덱스 — 헤더 glyph가 self.tabs[tab].group_start를 **live** 읽어(borrowed UAF #8 해소), 접기 토글·rename 타깃 겸용
         collapsed: bool,
         label: []const u8,   // 레거시(이제 tab에서 live 읽어 load-bearing 아님)
-        member_count: u16,   // 접힘 시 "▸ name (N)" 표시용
+        member_count: u16,   // 접힘 시 "▸ name (N)" 표시용 — 이 그룹 **직접 카드 수**(중첩 자식 그룹 안 카드는 제외, SG5-3)
+        depth: u8 = 0,       // 정규화 중첩 깊이(SG5-3, 1=최상위·2=중첩·…). 헤더 삼각/이름 glyph를 (depth-1)*group_indent 들여씀(카드는 depth*group_indent). 밴드(view)는 depth 무관 전폭
     },
     card: struct {
         tab: usize,          // 원본 self.tabs 인덱스(visibleTab의 일반화)
@@ -214,7 +223,8 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | 동작 | 단계 | UX | 구현 경로(베이스) |
 |---|---|---|---|
 | **그룹 접기/펴기** | **우선** | 헤더 줄 클릭(삼각 ▾/▸) | `onGroupHeader` → 그 그룹 시작 탭의 `group_collapsed` 토글 → `projectRows` 재투영 + 영속(§4) |
-| **그룹 만들기** | **우선** | 우클릭 "새 그룹으로 묶기"(이름 입력) · **단축키 `Cmd+Opt+G`** · 팔레트 "New Group" | `create_group` 액션 → 활성 탭에 `group_start` 세팅(우클릭·팔레트·키가 같은 세션 메서드 호출 — rename 패턴). 그 아래 연속 카드가 자동 소속(위치 파생) |
+| **그룹 만들기(중첩)** | **우선** | 우클릭 "새 그룹으로 묶기" · **단축키 `Cmd+Opt+G`** · 팔레트 "New Group" | `create_group` 액션 → 활성/클릭 탭에 `group_start` 세팅. **그룹 안 카드면 depth+1 중첩**(§9), 최상위면 depth 1. 아래 연속 카드가 자동 소속(위치 파생) |
+| **형제 그룹으로 분리** | ✅ SG5-3 | 우클릭 "형제 그룹으로 분리" · **단축키 `Cmd+Opt+Shift+G`** · 팔레트 "New Sibling Group" | `create_sibling_group` 액션 → 그 카드에 `group_start` 세팅 + `group_depth=현재 그룹과 같은 depth`(형제, 중첩 아님). 최상위면 depth 1(create_group과 결과 동일). create_group의 미러 — depth 계산만 다르다(§10 tension 해소) |
 | **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename) |
 | **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
 | **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그 | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음. 마커 탭 드래그=그룹 통째=SG5 |
@@ -227,13 +237,17 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 아니라 카탈로그 기반 bespoke 리바인더가 이미 존재 — [config-gui.md §6.7](config-gui.md)). 우클릭·팔레트·키·컨텍스트
 메뉴가 **같은 세션 메서드**를 부른다(rename이 세 트리거를 `startRename`으로 모으는 패턴 — tabs-splits-layout.md).
 
-**기본 단축키 = `Cmd+Opt+G`** (create_group만). `Cmd+Shift+G`는 **Find Previous가 선점**(keybinding.zig `default_app_bindings`,
-macOS Find Next/Previous 관례)이라 못 쓰고, `Cmd+Opt+G`는 비어 있으면서 `G`로 그룹을 직관적으로 표현한다(`Cmd+Opt`는 이미
-pane/Term 이동 modifier 그룹이나 `G` 키는 미사용 — 충돌 없음). maru 규율은 "macOS 단일 관례가 없는 기능은 기본 키를
-비우고 bindable만"([key-input-and-shortcuts.md](key-input-and-shortcuts.md); rename·move_pane이 그 예)이지만, **사용자
-요청으로 create_group에 기본 키를 부여**한다(사용자 결정이 베이스 — 브라우저/VSCode에도 표준 그룹 단축키는 없다).
-`ungroup`은 저빈도라 기본 키 없이 팔레트/우클릭/설정 리바인더로 지정한다. 액션 추가는 4곳: `action.zig`의 `Action`
-union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c에서 구현).
+**기본 단축키 = `Cmd+Opt+G`**(create_group=중첩) · **`Cmd+Opt+Shift+G`**(create_sibling_group=형제, SG5-3). `Cmd+Shift+G`는
+**Find Previous가 선점**(keybinding.zig `default_app_bindings`, macOS Find Next/Previous 관례)이라 못 쓰고, `Cmd+Opt+G`는
+비어 있으면서 `G`로 그룹을 직관적으로 표현한다(`Cmd+Opt`는 이미 pane/Term 이동 modifier 그룹이나 `G` 키는 미사용 — 충돌
+없음). `create_sibling_group`은 `Cmd+Opt+Shift+G`로 create_group과 **Shift만 다르게** 둔다(Cmd+Opt+Shift+G는 미사용 — 선점
+확인). maru 규율은 "macOS 단일 관례가 없는 기능은 기본 키를 비우고 bindable만"([key-input-and-shortcuts.md](key-input-and-shortcuts.md);
+rename·move_pane이 그 예)이지만, **사용자 요청으로 create_group·create_sibling_group에 기본 키를 부여**한다(사용자 결정이
+베이스 — 브라우저/VSCode에도 표준 그룹 단축키는 없다). `ungroup`은 저빈도라 기본 키 없이 팔레트/우클릭/설정 리바인더로
+지정한다. 액션 추가는 4곳: `action.zig`의 `Action` union + `parseAction` + `dispatchAppAction` arm + `command_catalog`
+entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling_group 추가). 세 그룹-생성/해제 액션과 우클릭·
+팔레트·키·컨텍스트 메뉴가 **같은 세션 메서드**를 부른다(create_group→`createGroupForTab`·create_sibling_group→`createSiblingGroupForTab`,
+둘 다 `beginGroupForTab`(kind) 공유 — depth 계산만 다름).
 
 **접기 우선의 이유**: 접기·만들기·이름·해제만으로 "묶어서 접는" 핵심 가치가 완성된다. 카드 이동은 드래그 재정렬(`moveTab`)과
 드롭 좌표→그룹 경계 매핑이라 표면이 크므로 별도 단계로 뺀다. 위치 파생이라 후속에서 카드 이동을 붙여도 **소속 편집 코드가
@@ -314,7 +328,32 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
      `group-color` 스칼라(비영만 group-start 블록에 쓰고 0=키 생략 — additive·round-trip 고정, 옛 리더 미지 키 skip으로 양쪽 호환).
      헤드리스: projectRows/렌더가 헤더 밴드·카드 막대에 그 색을 싣는지 gpu_quad 단언 + workspace.v1 round-trip + 색 없는 그룹
      기본 폴백. **제품 스크린샷 검증 완료**(`MARU_FORCE_GROUP_COLOR=1` — 헤더 밴드 파란 tint + 소속 카드 파란 막대·최상위 카드 무색).
-   - **SG5-3(선택) — 중첩 그룹**: `depth>1`(그룹 안 그룹). 위치 파생 다단계 확장, 실수요 확인 전 보류(YAGNI).
+   - **SG5-3 ✅ — 중첩 그룹(그룹 안 그룹, 폴더 트리)**: 위치 파생을 **다단계 depth로 일반화**한다. `Tab.group_depth: u8`
+     (마커에만 의미, 1=최상위·2=중첩·…, 기본 1) 추가. `projectRows`를 **스택 기반 2패스**로 재작성 — pass1이 `self.tabs`를
+     스택으로 훑어 각 탭의 **정규화 eff_depth**(마커 pop→`부모+1` gap 클램프, 카드=스택 top)와 검색 매치를 계산하고, pass2가
+     마커 스택(접힘 조상 추적)으로 row를 순서대로 방출한다(자식 헤더가 부모 직접 카드 뒤·자식 카드 앞에 자연 삽입 = §2.1
+     다단계 제약). 렌더: 카드·헤더 `depth`×/(`depth-1`)×`group_indent` 다단계 들여쓰기(`card.depth`·신규 `group_header.depth`).
+     **member_count = 그 그룹 직접 카드 수**(중첩 자식 그룹 안 카드 제외 — 접힘 배지 `(N)`은 "이 그룹에 직접 든 워크스페이스 수").
+     - **접기(다단계)**: 마커를 접으면 그 subtree(같거나 낮은 depth 마커 전까지의 깊은 카드·자식 헤더)를 전부 숨긴다. **부모
+       접기 = 자식 그룹 통째 숨김**(조상 접힘이 헤더까지 가림), **자식만 접기 = 자식 카드만 숨김**(자식 헤더는 `▸ name (N)`로 남음).
+     - **create_group 중첩 생성 + create_sibling_group 형제 생성(명시적 2액션)**: `create_group`은 그룹 **안** 카드에서 실행하면
+       그 카드의 현재 depth+1로 자식 그룹 마커(중첩), 최상위에서는 depth 1. 위치 파생상 마커 뒤 형제 카드들은 새 그룹으로 흡수된다.
+       첫 그룹이 리스트 끝까지 뻗는 연속 파티션이라 첫 그룹 뒤 카드는 모두 "그룹 안"이므로 create_group은 **항상 중첩**한다 —
+       그래서 **`create_sibling_group`**(SG5-3)을 create_group과 **명시적으로 분리**해 둔다: 그 카드의 **현재 그룹과 같은 depth**로
+       마커를 얹어(그 카드부터 현재 그룹에서 분할돼 형제로 시작) 형제 그룹을 만든다(최상위 카드면 depth 1 = create_group과 동일).
+       둘은 `beginGroupForTab(kind)` 공유 미러이고 depth 계산만 다르다(중첩=현재+1, 형제=현재). 이로써 §10의 "형제 못 만듦"
+       tension이 해소된다(중첩/형제를 사용자가 액션으로 명시 선택).
+     - **ungroup(중첩)**: 그 탭의 **가장 가까운(innermost) 마커**를 해제한다. 자식 ungroup → 자식 카드가 부모로 재소속(한 단계
+       얕아짐). 부모 ungroup → 부모 직접 카드는 최상위로, 남은 자식 그룹은 부모가 사라져 projectRows의 **gap 클램프로 depth 1
+       (최상위 그룹)로 자동 승격**(저장 group_depth는 그대로 두고 투영이 정규화 — 위치 파생 철학과 동형).
+     - **직렬화**: workspace.v1 `group-depth` 스칼라(additive·기본 1=키 생략→round-trip 고정·옛 리더 미지 키 skip으로 양쪽 호환).
+     - **드래그(최소 안전 동작)**: 그룹 통째 이동(`moveGroupRange`)·드롭 경계(`sidebarGroupDropBoundary`)·접힌 헤더 드롭이
+       "다음 마커" 대신 **subtree 끝**(`groupSubtreeEnd`=같거나 낮은 depth 마커 전까지)을 쓰게 확장 — 부모+자식이 함께 이동해
+       무결성 유지(비중첩이면 "다음 마커"와 동일이라 SG4/SG5-1 동작 보존). **한계**: 완전한 "드래그로 중첩 넣기/빼기"(드롭 위치로
+       depth 변경)는 미구현 — 중첩 그룹을 다른 그룹 경계로 끌면 projectRows가 depth를 재정규화해 예기치 않게 재중첩될 수 있다
+       (크래시·파티션 손상은 없음 — 삽입이 항상 마커 경계라 연속 파티션 유지). 핀+그룹 조합도 SG4/SG5-1과 같이 범위 밖.
+     - **헤드리스 검증**: 2단계 중첩(A>B) depth 0/1/2·헤더 depth·member_count·부모 직접카드가 자식 앞·다단계 접기(부모/자식)·
+       ungroup 재소속/승격·workspace.v1 group-depth round-trip. **스크린샷 훅** `MARU_FORCE_GROUP_NESTED`(+`_COLLAPSED`/`_COLOR`).
 
 ## 10. 리스크 & 미해결
 
@@ -332,6 +371,18 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
   `@divTrunc(rect.y, slot_h)` row 역산이 비가역이 되므로, chrome op에 row 인덱스를 실어 넘긴다. 세로 위치는 headless로 안 잡혀 **macOS 스크린샷 검증 필수**.
 - **(낮) 위치 파생의 경계 제약**: 최상위 카드는 첫 그룹 시작 이전 구간에만 온다(§2.1) — 그룹들 사이에 최상위 카드를 끼울 수
   없다. 브라우저 탭 그룹도 사실상 이 모델이라 실용상 충분. 정말 필요하면 후속에서 "그룹 끝" sentinel 마커로 열 여지만 둔다.
+- **(해소됨, SG5-3 핵심 판단) create_group vs create_sibling_group — 중첩/형제를 명시적 2액션으로 분리**: §2.1 연속
+  파티션상 첫 그룹은 리스트 끝까지 뻗으므로 첫 그룹 뒤의 모든 카드는 "그룹 안"이다. create_group은 "그룹 안 카드 → depth+1
+  중첩"(§9)이라, 그것만으론 첫 그룹 뒤에 **형제 최상위 그룹을 못 만든다**(flat 모델(SG1~5-2)에선 create_group이 항상 depth 1이라
+  형제가 됐다 — 여기서 동작이 바뀐다). 이는 "소속을 위치에서 파생"이 다단계로 갈 때 **의미가 겹치는 지점**(같은 카드에 대해
+  "부모를 세분(중첩)"과 "부모를 쪼개 형제 시작"이 둘 다 타당)이다. **해소**: `create_sibling_group`(같은 depth 마커) 액션을
+  create_group(depth+1 중첩)과 **명시적으로 분리**해 사용자가 중첩/형제를 골라 만든다(우클릭 "형제 그룹으로 분리"·`Cmd+Opt+Shift+G`·
+  팔레트 "New Sibling Group"·config). 두 세션 메서드는 `beginGroupForTab(kind)` 공유이고 depth 계산만 다르다(중첩=현재+1·형제=현재,
+  최상위 카드는 둘 다 1로 동일). 기존 SG5-1 헤드리스 테스트(형제 그룹 통째 드래그 검증)는 setup에서 `group_depth=1`을 명시해
+  형제로 구성하도록만 조정했다(드래그 assertion·기능 불변 — 회귀 아님; 이제 `createSiblingGroupForTab`으로도 같은 형제 구성 가능).
+- **(낮, SG5-3) 드래그로 중첩 넣기/빼기 미구현**: 그룹 통째 드래그는 subtree를 함께 옮기지만(무결성), 드롭 위치로 depth를
+  바꾸는 완전한 재중첩은 미구현 — 중첩 그룹을 다른 그룹 경계로 끌면 projectRows가 depth를 재정규화해 예기치 않게 재중첩될
+  수 있다(크래시·파티션 손상 없음 — 삽입이 항상 마커 경계). 카드 드래그(SG4)는 드롭 위치의 depth를 위치 파생으로 자연 흡수한다.
 - **(낮) 접힌 그룹에 넣기**: 카드 드래그(SG4)에서 접힌 헤더에 드롭하면 그 그룹 끝에 추가로 처리(브라우저 관례). 접기 우선
   단계(SG1~3)에는 드래그가 없어 무관.
 - **(낮) 접힘 상태 위치**: `group_collapsed`를 workspace.v1에 둔다(세션 넘어 유지). config가 아니라 workspace인 이유 — 그룹은

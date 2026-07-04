@@ -54,6 +54,7 @@ pub const entries = [_]Entry{
     // 사이드바 그룹(접이식 워크스페이스 묶음) — create_group만 기본 키 Cmd+Opt+G(catalogMenuItem이 chord 표시),
     // ungroup·rename_group은 기본 키 없이 팝업/우클릭이 발견 경로. 단일 출처: docs/sidebar-groups.md §7.
     .{ .action = .create_group, .key = "create_group", .title = "New Group" },
+    .{ .action = .create_sibling_group, .key = "create_sibling_group", .title = "New Sibling Group" },
     .{ .action = .ungroup, .key = "ungroup", .title = "Ungroup" },
     .{ .action = .rename_group, .key = "rename_group", .title = "Rename Group" },
     .{ .action = .select_all, .key = "select_all", .title = "Select All" },

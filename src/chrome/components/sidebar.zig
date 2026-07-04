@@ -25,7 +25,9 @@ pub const Row = union(enum) {
     /// tab=이 그룹을 **시작하는 원본 self.tabs 인덱스**(group_start 마커를 든 탭). 헤더 클릭 시 그 탭의 group_collapsed를
     /// 토글하고(onGroupHeader), platform이 라벨 glyph를 그 탭의 `group_start`에서 **직접 라이브로** 뽑는다(label은
     /// borrowed라 destroyTab 후 dangling 위험 — code-review #8 UAF 해소: 소스 tab 인덱스를 실어 live 재조회).
-    group_header: struct { collapsed: bool, label: []const u8, member_count: u16, tab: usize },
+    /// depth=이 그룹의 정규화 깊이(SG5-3 중첩 — 1=최상위, 2=중첩, …). 헤더 삼각/이름 glyph는 platform이 (depth-1)*group_indent
+    /// 만큼 들여쓴다(소속 카드는 depth*group_indent). 밴드(view)는 depth 무관 전폭(카드 밴드와 동형).
+    group_header: struct { collapsed: bool, label: []const u8, member_count: u16, tab: usize, depth: u8 = 0 },
 };
 
 /// row_index가 그룹 헤더 row인가(클릭 시 선택이 아니라 접기 토글 대상). closeButton과 같은 결의 순수 hit-test

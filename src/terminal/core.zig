@@ -5729,7 +5729,7 @@ test "preedit clips at the row end instead of wrapping" {
     try std.testing.expect(!snap.cursor.visible);
 }
 
-test "preedit overlays mid-line, covering the next glyph (가나다 + 나앞 조합 → 가[라]다)" {
+test "preedit inserts mid-line, pushing the next glyphs right (가나다 + 나앞 조합 → 가[라]나다)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
     try core.write("\xea\xb0\x80\xeb\x82\x98\xeb\x8b\xa4"); // "가나다": 가=0,나=2,다=4 (각 wide)
@@ -5738,15 +5738,18 @@ test "preedit overlays mid-line, covering the next glyph (가나다 + 나앞 조
 
     try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
     const snap = core.renderSnapshot();
-    // 오버레이: '라'가 '나'를 덮고 '다'는 제자리(col4)에 남는다("가[라]다" — '나'는 가려짐).
+    // 삽입형: '라'가 커서 자리(col2)에 들어가고 '나'(col2)·'다'(col4)는 조합 폭(2)만큼 오른쪽으로
+    // 밀린다("가[라]나다"). 뒤 텍스트는 일반 intensity(dim 아님)라 고스트가 아니어서 밀린다.
     try std.testing.expectEqual(@as(u21, 0xAC00), snap.cells[0].codepoint); // 가(그대로)
     try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[2].codepoint); // 라(조합, 반전)
     try std.testing.expect(snap.cells[2].style.reverse);
     try std.testing.expectEqual(@as(u2, 2), snap.cells[2].width);
     try std.testing.expect(snap.cells[3].continuation);
-    try std.testing.expectEqual(@as(u21, 0xB2E4), snap.cells[4].codepoint); // 다(안 밀림 — 제자리)
+    try std.testing.expectEqual(@as(u21, 0xB098), snap.cells[4].codepoint); // 나(오른쪽으로 밀림 col4)
+    try std.testing.expect(snap.cells[5].continuation);
+    try std.testing.expectEqual(@as(u21, 0xB2E4), snap.cells[6].codepoint); // 다(밀림 col6)
     try std.testing.expect(!snap.cursor.visible);
-    try std.testing.expectEqual(@as(u16, 4), snap.cursor.col); // 커서는 조합 끝
+    try std.testing.expectEqual(@as(u16, 4), snap.cursor.col); // 커서는 조합 끝(col2+폭2)
     // 실제 그리드는 불변 — 확정 전까지 셸 상태는 "가나다" 그대로다.
     try std.testing.expectEqual(@as(u21, 0xB098), core.screen.cells[2].codepoint); // grid의 '나'는 col2
     try std.testing.expectEqual(@as(u21, 0xB2E4), core.screen.cells[4].codepoint); // grid의 '다'는 col4
@@ -5767,23 +5770,24 @@ test "preedit ambiguous-width=wide: circled number drawn 2 cells (width consiste
     try std.testing.expectEqual(@as(u2, 2), snap.cells[0].width); // ambiguous-aware → 2칸
     try std.testing.expect(snap.cells[1].continuation); // continuation(잔상 'b'가 아님)
     try std.testing.expectEqual(@as(u16, 2), snap.cursor.col); // 조합 끝 = preedit_width(2)와 일치
-    // 오버레이라 'a'/'b'는 ③에 덮여 안 보인다(영문과 동일 — 뒤 글자 가림).
-    try std.testing.expectEqual(@as(u21, ' '), snap.cells[2].codepoint);
+    // 삽입형이라 'a'/'b'(일반 텍스트, dim 아님)는 ③ 뒤로 밀린다(col2/col3).
+    try std.testing.expectEqual(@as(u21, 'a'), snap.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), snap.cells[3].codepoint);
 }
 
-test "preedit overlay covers a trailing autosuggest ghost (영문처럼 가림 — 옆으로 안 밀림)" {
-    // 회귀: 앱이 커서 뒤에 그린 자동완성 고스트가 한글 조합 중 옆으로 밀려 잔존하던 버그. 영문은
-    // 키 즉시 commit으로 앱이 고스트를 지우는데, 한글은 조합 미전송이라 maru가 삽입형으로 고스트를
-    // 보존해 버렸다. 오버레이 전환 → 조합 글자가 고스트를 덮어 가린다(영문과 동일한 결과).
+test "preedit overlays a trailing DIM autosuggest ghost (딱 고스트만 가림 — 옆으로 안 밀림)" {
+    // Claude Code 등이 커서 뒤에 그린 인라인 자동완성 고스트는 faint(SGR 2)로 온다. 조합 중 이걸
+    // 삽입형으로 밀면 잔상이 남으므로(앱 미전송이라 안 지워짐) dim 후행 run은 오버레이로 덮는다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
     defer core.deinit();
-    try core.write("\xec\x9d\x91"); // 앱이 커서 뒤에 그린 고스트 "응"(wide, col0-1)
+    try core.write("\x1b[2m\xec\x9d\x91\x1b[0m"); // faint(SGR 2)로 그린 고스트 "응"(wide, col0-1)
+    try std.testing.expect(core.screen.cells[0].style.dim); // 고스트 base는 dim
     try core.write("\x1b[2D"); // 커서를 col0(고스트 위)으로
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 
     try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
     const snap = core.renderSnapshot();
-    // '라'가 '응'을 덮는다 — '응'은 화면에서 사라진다(영문 입력과 동일).
+    // '라'가 '응'을 덮는다(안 밀림) — dim 고스트라 예외.
     try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[0].codepoint); // 라(덮음)
     try std.testing.expect(snap.cells[0].style.reverse);
     try std.testing.expect(snap.cells[1].continuation);
@@ -5793,13 +5797,32 @@ test "preedit overlay covers a trailing autosuggest ghost (영문처럼 가림 �
     try std.testing.expectEqual(@as(u21, 0xC751), core.screen.cells[0].codepoint); // grid엔 '응' 그대로
 }
 
-test "preedit overlay clears the orphan continuation when a narrow glyph covers a wide ghost" {
-    // 좁은 조합 글자(폭1)가 wide 고스트(폭2)의 base만 덮으면 다음 칸 continuation이 짝을 잃는다.
-    // 한글은 항상 wide라 안 생기지만 폭1 marked text를 보내는 입력기에서 발생 — 짝 잃은 continuation을
-    // 비워 렌더가 base 없는 반쪽을 안 그리게 한다(리뷰 발견).
+test "preedit inserts before NON-dim trailing text (일반 텍스트는 고스트 아님 — 밀린다)" {
+    // 위 테스트의 대칭: 같은 후행 wide '응'이 dim이 아니면(일반 편집 텍스트) 고스트가 아니라 실
+    // 텍스트로 보고 삽입형으로 민다. dim 한 플래그가 오버레이(고스트) vs 삽입(실 텍스트)을 가른다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 2 });
+    defer core.deinit();
+    try core.write("\xec\x9d\x91"); // 일반 intensity 텍스트 "응"(wide, col0-1) — dim 아님
+    try std.testing.expect(!core.screen.cells[0].style.dim);
+    try core.write("\x1b[2D"); // 커서를 col0으로
+    try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
+
+    try core.setPreedit("\xeb\x9d\xbc"); // "라"(wide) 조합 중
+    const snap = core.renderSnapshot();
+    // '라'가 col0에 삽입되고 '응'은 col2로 밀린다(안 가려짐).
+    try std.testing.expectEqual(@as(u21, 0xB77C), snap.cells[0].codepoint); // 라(조합)
+    try std.testing.expect(snap.cells[1].continuation);
+    try std.testing.expectEqual(@as(u21, 0xC751), snap.cells[2].codepoint); // 응(밀림 col2)
+    try std.testing.expect(snap.cells[3].continuation);
+    try std.testing.expectEqual(@as(u16, 2), snap.cursor.col); // 조합 끝
+}
+
+test "preedit overlay clears the orphan continuation when a narrow glyph covers a DIM wide ghost" {
+    // 좁은 조합 글자(폭1)가 wide 고스트(폭2, faint)의 base만 덮으면 다음 칸 continuation이 짝을 잃는다.
+    // dim 고스트라 오버레이 경로 — 짝 잃은 continuation을 비워 렌더가 base 없는 반쪽을 안 그리게 한다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
-    try core.write("\xec\x9d\x91"); // 고스트 "응"(wide, col0 base + col1 continuation)
+    try core.write("\x1b[2m\xec\x9d\x91\x1b[0m"); // faint 고스트 "응"(wide, col0 base + col1 continuation)
     try core.write("\x1b[2D"); // 커서를 col0으로
     try std.testing.expectEqual(@as(u16, 0), core.screen.cursor.col);
 
@@ -5813,9 +5836,10 @@ test "preedit overlay clears the orphan continuation when a narrow glyph covers 
     try std.testing.expectEqual(@as(u21, 0xC751), core.screen.cells[0].codepoint); // grid의 '응' 불변
 }
 
-test "preedit overlay clears the truncated wide base when the cursor sits on a continuation cell" {
-    // 커서가 wide glyph의 continuation 칸(CUF/CHA로 가능)에 있을 때 조합하면, preedit이 그 칸을 덮어
+test "preedit clears the truncated wide base when the cursor sits on a continuation cell" {
+    // 커서가 wide glyph의 continuation 칸(CUF/CHA로 가능)에 있을 때 조합하면, 그 칸만 밀리거나 덮여
     // 좌측 base가 짝 잃은 잘린 wide가 된다 — 비워서 base와 preedit이 겹쳐 그려지지 않게 한다(리뷰 발견).
+    // 후행이 continuation 한 칸뿐이라 고스트 판정에 안 걸리고 삽입 경로를 타지만 정리는 동일하게 필요.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
     try core.write("\xec\x9d\x91"); // "응"(wide, col0 base + col1 continuation)

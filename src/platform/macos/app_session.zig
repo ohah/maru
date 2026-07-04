@@ -5770,21 +5770,64 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 검색 필터로 좁힌 표시 카드 목록(sidebar_rows)을 다시 계산한다 — 검색 활성 + 검색어 있으면 매칭 탭만,
-    /// 아니면 전체. rebuildSidebar/검색 입력 변경 시 호출. 빈 검색어/비활성이면 전체라 필터 없음과 동일하게 동작한다.
+    /// 검색 필터·그룹 마커·접힘을 self.tabs에 투영해 sidebar_rows(표시 행)를 채운다(옛 recomputeVisibleTabs의 그룹 확장 —
+    /// docs/sidebar-groups.md §6 projectRows). 규칙: (1) group_start 탭에서 group_header row 삽입 + 그 그룹 카드는 depth 1,
+    /// (2) 접힘(검색 없음)이면 카드 skip(헤더만), (3) 검색 미매치 카드 skip, (4) 표시 카드가 0인 그룹은 **검색 중이면 헤더째
+    /// skip**(빈 그룹 규칙 — 접힘으로 0인 건 헤더 남김), (5) member_count = 표시 카드 수(검색 중=매치 수). 최상위 카드(첫
+    /// group_start 이전, §2.1 연속 파티션)는 depth 0. group_start 없는 SG3a까지는 전부 최상위 카드라 옛 flat 동작과 동일.
     fn recomputeVisibleTabs(self: *AppSession) void {
         self.sidebar_rows.clearRetainingCapacity();
-        const q: []const u8 = if (self.sidebar_search_active) self.sidebar_search_input.query.items else "";
-        for (self.tabs.items, 0..) |tab, i| {
-            if (self.tabMatchesSearch(tab, q)) self.sidebar_rows.append(self.allocator, .{
-                .card = .{
-                    .tab = i,
-                    .active = (i == self.app_window.active_tab),
-                    .label = "", // chrome view는 아직 label 미사용(buildSidebarDrawList가 tab에서 직접 뽑음) — borrowed 저장 회피
-                    .depth = 0, // SG3a: 그룹 없음(헤더·depth 들여쓰기는 SG3b projectRows)
-                },
-            }) catch {};
+        const searching = self.sidebar_search_active and self.sidebar_search_input.query.items.len > 0;
+        const q: []const u8 = if (searching) self.sidebar_search_input.query.items else "";
+        var i: usize = 0;
+        while (i < self.tabs.items.len) {
+            const tab = self.tabs.items[i];
+            const group_name = tab.group_start orelse {
+                // 그룹 시작 아님 = 최상위 카드(§2.1 불변식상 첫 group_start 이전 구간). depth 0.
+                if (self.tabMatchesSearch(tab, q)) self.appendCardRow(i, 0);
+                i += 1;
+                continue;
+            };
+            // 그룹 구간 [i, j) — j는 다음 group_start 또는 끝(연속 파티션). 그 사이 group_start 없는 탭은 이 그룹 소속.
+            var j = i + 1;
+            while (j < self.tabs.items.len and self.tabs.items[j].group_start == null) j += 1;
+            // 그룹의 전체/표시 카드 수(빈 그룹 규칙·member_count 배지).
+            var member_count: u16 = 0;
+            var shown: u16 = 0;
+            for (self.tabs.items[i..j]) |gt| {
+                member_count +|= 1;
+                if (self.tabMatchesSearch(gt, q)) shown +|= 1;
+            }
+            // 헤더: 검색 중이면 표시 카드가 있을 때만(빈 그룹 skip), 아니면 항상(접힘이어도 헤더는 남긴다).
+            if (!searching or shown > 0) {
+                self.sidebar_rows.append(self.allocator, .{
+                    .group_header = .{
+                        .collapsed = tab.group_collapsed,
+                        .label = group_name, // borrowed(tab 소유 group_start) — rebuild마다 갱신. view 밴드/glyph는 SG3b-2-ii에서 사용
+                        .member_count = if (searching) shown else member_count,
+                    },
+                }) catch {};
+            }
+            // 카드: 접힘(검색 없음)이면 skip(헤더만 보임), 아니면 매치 카드를 depth 1로.
+            if (!(tab.group_collapsed and !searching)) {
+                var gi = i;
+                while (gi < j) : (gi += 1) {
+                    if (self.tabMatchesSearch(self.tabs.items[gi], q)) self.appendCardRow(gi, 1);
+                }
+            }
+            i = j;
         }
+    }
+
+    /// sidebar_rows에 카드 row 하나 append(projectRows 공통 — depth만 다름). label은 chrome view 미사용이라 ""(borrowed 회피 —
+    /// buildSidebarDrawList가 tab에서 직접 라벨을 뽑는다). append 실패(OOM)는 무시(다음 rebuild가 복구) — 옛 동작 승계.
+    fn appendCardRow(self: *AppSession, tab_index: usize, depth: u8) void {
+        self.sidebar_rows.append(self.allocator, .{ .card = .{
+            .tab = tab_index,
+            .active = (tab_index == self.app_window.active_tab),
+            .label = "",
+            .depth = depth,
+        } }) catch {};
     }
 
     /// 표시 슬롯 → 원본 tab 인덱스(검색 필터 역매핑). 범위 밖이면 null. slotAt/click/hover가 표시 슬롯을 실제 탭으로.
@@ -14538,6 +14581,41 @@ test "spinner: 4칸 이퀄라이저 바가 전부 블록 글리프이고 위상�
 // workspaceStatusLine(탭 단위 상태줄)과 tabAgentKind(대표 종류)의 상태별 문자열/폴백을 고정한다. 1-Term 탭이라
 // tabHasRunningAgent==활성 Term running이지만, running=파형 prefix / idle=✓ / none="" 폴백 규칙은 그대로 증명된다.
 // (다중 pane/Term에서 백그라운드 Term이 running인 경로는 Term 생성이 무거워 앱 수동 검증 — anyAgentRunning 통합 테스트가 게이트를 커버.)
+test "projectRows: group_start가 group_header row를 삽입하고 카드는 depth 1·접힘은 헤더만 (SG3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 탭0에 그룹 시작 마커. group_start는 owned(destroyTab/deinit이 free) — dupe로 세팅.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "frontend");
+
+    // 펼침: [group_header{frontend, member=1}, card{tab0, depth1}].
+    session.recomputeVisibleTabs();
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[0] == .group_header);
+    try std.testing.expectEqualStrings("frontend", session.sidebar_rows.items[0].group_header.label);
+    try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[0].group_header.member_count);
+    try std.testing.expect(session.sidebar_rows.items[1] == .card);
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items[1].card.tab);
+    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[1].card.depth); // 그룹 안 = 들여쓰기
+
+    // 접힘: 헤더만(카드 skip). member_count는 전체(1) 유지.
+    session.tabs.items[0].group_collapsed = true;
+    session.recomputeVisibleTabs();
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[0].group_header.collapsed);
+    try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[0].group_header.member_count);
+}
+
 test "workspaceStatusLine: running=파형 스피너 prefix, idle=✓, none=빈 문자열; tabAgentKind 폴백" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

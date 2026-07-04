@@ -11478,6 +11478,7 @@ pub const AppSession = struct {
                 }
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                    self.applySidebarGlyphPyTop(); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
                     self.metal_dirty = false;
                     self.force_reproject = false; // [A] full 투영이 atlas를 GPU에 정합했으므로 강제 재투영 요구 해제(code-review [0])
                     // last_rendered_view_offset은 위(os-tag 블록 직후)에서 빌드 성공/실패 무관하게 이미 기록했다
@@ -11552,6 +11553,7 @@ pub const AppSession = struct {
                     } else if (sidebar_frame) |_| {
                         const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
                         self.metal_buffer.replaceSidebar(self.allocator, self.sidebar_cells.items, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config) catch {};
+                        self.applySidebarGlyphPyTop(); // chrome-only 부분 경로도 카드 glyph py_top 정합(가변 높이 — SG3b-2-ii)
                         self.chrome_dirty = false;
                     }
                     // else: sidebar_frame이 null(placeMultiPane/finishPane alloc 실패)이면 replaceSidebar를 건너뛴다 —
@@ -12897,13 +12899,26 @@ pub const AppSession = struct {
         defer card_kinds.deinit(self.allocator);
         var card_running: std.ArrayList(bool) = .empty;
         defer card_running.deinit(self.allocator);
-        for (self.sidebar_rows.items) |disp_row| {
-            // SG3a는 card row만이라 continue가 안 탄다(그룹 없음 → 아래 배열이 곧 슬롯 순서). SG3b에서 group_header가
-            // 섞이면 이 카드-정보 배열(card_kinds/names 등)의 인덱스가 슬롯과 어긋나므로, 그때 배열 인덱싱을 재검토한다.
-            const orig = switch (disp_row) {
-                .card => |c| c.tab,
-                .group_header => continue, // 헤더 glyph(삼각+이름)는 SG3b에서 별도 조립
+        // 인덱스 도메인 통일(SG3b-2-ii, code-review #3): 아래 카드-정보 배열(names/card_kinds…)은 **헤더를 건너뛴
+        // 압축 카드 서수**로 색인된다(group_header는 continue). buildSidebarDrawList도 이 압축 서수 i로 슬롯을 인코딩
+        // (sidebarGlyphRow)·active/close를 비교한다. 그런데 활성/닫기 강조를 host가 **row 인덱스**(displaySlotOf·
+        // hovered_slot)로 넘기면 헤더가 섞일 때 두 도메인이 어긋나 엉뚱한 카드에 강조가 붙는다. 그래서 여기서 활성/호버를
+        // **압축 카드 서수**로 변환해(active_card_ord/close_card_ord) i와 같은 도메인에 맞춘다. glyph 세로 위치는 이 압축
+        // 서수 slot을 그대로 인코딩하되, .m의 균일 slot*slot_h 대신 Zig가 rowTop 기반 py_top을 origin_y에 실어 헤더
+        // 높이를 반영한다(applySidebarGlyphPyTop — code-review #1·#5·#6). 카드만이면 서수=row라 동작 보존.
+        var active_card_ord: ?usize = null;
+        var close_card_ord: ?usize = null;
+        for (self.sidebar_rows.items, 0..) |disp_row, row_i| {
+            const card = switch (disp_row) {
+                .card => |c| c,
+                .group_header => continue, // 헤더 glyph(삼각+이름)는 SG3b-2-ii-e에서 별도 조립
             };
+            const orig = card.tab;
+            const card_ord = names.items.len; // 이 카드의 압축 서수(이 반복의 append 전 = 앞선 카드 수)
+            if (orig == self.app_window.active_tab) active_card_ord = card_ord;
+            if (self.hovered_slot) |h| {
+                if (h == row_i) close_card_ord = card_ord; // 호버가 이 카드 row면 ✕를 이 서수에(헤더 row 호버면 null 유지)
+            }
             const tab = self.tabs.items[orig]; // 표시 슬롯 순서 → 원본 탭(검색 필터)
             // **의도된 기준 분리(사용자 결정 A)**: 카드의 이름·브랜치(저장소)·경로는 **활성 Term**(아래 `term`) 기준이고,
             // 스피너·gutter 아이콘·브랜드색은 **워크스페이스(탭) 전체**(tabHasRunningAgent/tabAgentKind, 아무 pane/Term) 기준이다.
@@ -12966,7 +12981,9 @@ pub const AppSession = struct {
         const active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
         // 호버 슬롯엔 닫기 ✕(없으면 null). plus_row = 탭 개수 → 목록 아래 행에 "+"(새 워크스페이스) 버튼.
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, self.hovered_slot, null, self.displaySlotOf(self.app_window.active_tab), active_fg);
+        // close_row/active_row는 **압축 카드 서수**(위 루프에서 row→서수 변환) — buildSidebarDrawList가 압축 인덱스 i와
+        // 비교하므로 도메인이 일치한다(code-review #3). 헤더가 없으면 서수=row라 옛 hovered_slot/displaySlotOf 값과 동일.
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_card_ord, null, active_card_ord, active_fg);
         // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
         // codex=OpenAI 청록. 종류를 색으로 구분하고, **진행/완료는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓)이 담당한다
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
@@ -13001,6 +13018,46 @@ pub const AppSession = struct {
             draw_list.size.cols = @intCast(@min(full_cols, @as(u32, std.math.maxInt(u16))));
         }
         return draw_list;
+    }
+
+    /// 사이드바 **카드 glyph 셀**의 세로 위치(py_top)를 Zig에서 `rowTop` 기반으로 완전 계산해 각 셀 `origin_y`에 싣는다
+    /// (docs/sidebar-groups.md §10 옵션2 — SG3b-2-ii-(b)+(d)). .m 렌더러는 옛 `slot_idx*slot_h + 블록중앙` 균일 기하 대신
+    /// 이 origin_y에 헤더 시프트·스크롤만 더한다(maru_metal_renderer.m 사이드바 카드 glyph 분기). 그룹 헤더(높이
+    /// header_row_h<slot_h)가 앞서면 카드 glyph가 헤더 높이만큼 위로 어긋나던 버그(code-review #1·#5·#6)를 닫고,
+    /// renameCaretRect의 `(slot_h -| line*ch)/2` 정수 블록중앙과 자동 정합한다(caret·⌘배지 정합). origin_y는 **content
+    /// 상대**(헤더·스크롤 제외, ≥0)라 스크롤만 바뀌는 프레임엔 재계산이 필요 없다(.m이 live로 header−scroll 적용 — 밴드와
+    /// 같은 단일 스크롤 소스). slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 밴드/배경 셀(slot_id==0)은
+    /// 손대지 않는다(그 경로는 row 인덱스·별도 기하). replace/replaceSidebar 직후 metal_buffer.sidebar_cells에 in-place 적용.
+    fn applySidebarGlyphPyTop(self: *AppSession) void {
+        fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.cell_height_px);
+    }
+
+    /// (순수) 사이드바 카드 glyph 셀들의 origin_y를 **content-상대 rowTop py**로 채운다 — applySidebarGlyphPyTop의
+    /// headless-테스트 가능한 코어(self 없이 rows·메트릭만). slot=압축 카드 서수(sidebarGlyphRow 인코딩). 밴드 셀
+    /// (slot_id==0)은 건너뛴다. content_top = Σ(앞선 row 높이; 카드=slot_h·헤더=header_row_h) — rowTop의 헤더·스크롤 제외분.
+    fn fillSidebarGlyphPyTop(allocator: std.mem.Allocator, cells: []metal_frame.NativeMetalCell, rows: []const chrome.components.sidebar.Row, slot_h: u32, header_row_h: u32, ch: u32) void {
+        if (cells.len == 0 or slot_h == 0 or ch == 0) return;
+        const base = coretext_frame_builder.sidebar_line_base; // 32 — sidebarGlyphRow 인코딩 단일 출처
+        var content_tops: std.ArrayList(u32) = .empty;
+        defer content_tops.deinit(allocator);
+        var acc: u32 = 0;
+        for (rows) |row| switch (row) {
+            .card => {
+                content_tops.append(allocator, acc) catch return; // OOM: 이 프레임 glyph 시프트 생략(다음 rebuild가 복구)
+                acc +|= slot_h;
+            },
+            .group_header => acc +|= header_row_h,
+        };
+        for (cells) |*c| {
+            if (c.slot_id == 0) continue; // 밴드/배경 셀 — 자체 경로(row 인덱스)
+            const slot: usize = c.row / base;
+            if (slot >= content_tops.items.len) continue; // 방어 — 매핑 밖(비정상)이면 건너뜀
+            const rem = c.row % base;
+            const line_count: u32 = rem / 4;
+            const line_index: u32 = rem % 4;
+            const block_off: u32 = (slot_h -| line_count * ch) / 2; // renameCaretRect와 같은 정수 블록중앙(정합)
+            c.origin_y = content_tops.items[slot] +| block_off +| line_index * ch;
+        }
     }
 
     /// 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) frame을 만든다.
@@ -14626,6 +14683,48 @@ test "projectRows: group_start가 group_header row를 삽입하고 카드는 dep
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items.len);
     try std.testing.expect(session.sidebar_rows.items[0].group_header.collapsed);
     try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[0].group_header.member_count);
+}
+
+test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 rowTop(가변 높이)로 밀린다 (SG3b-2-ii #1·#5·#6)" {
+    const sb = chrome.components.sidebar;
+    const slot_h: u32 = 100;
+    const header_row_h: u32 = 24;
+    const ch: u32 = 20;
+    // glyph 셀 하나 만들기(슬롯=압축 카드 서수, line_index/line_count는 sidebarGlyphRow로 인코딩). slot_id≠0=카드 glyph.
+    const glyphCell = struct {
+        fn make(ord: usize, li: u16, lc: u16) metal_frame.NativeMetalCell {
+            return .{ .row = coretext_frame_builder.sidebarGlyphRow(ord, li, lc), .col = 0, .width = 1, .codepoint = 'x', .slot_id = 7, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0 };
+        }
+    }.make;
+    // 밴드 셀(slot_id==0, row=표시 row 인덱스) — 손대지 않아야 한다.
+    const bandCell: metal_frame.NativeMetalCell = .{ .row = 1, .col = 0, .width = 1, .codepoint = 0, .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = -1, .v0 = -1, .u1 = -1, .v1 = -1 };
+
+    // (A) 가변 높이: [헤더, 카드(서수0), 카드(서수1)]. block_off=(100-1*20)/2=40.
+    const rows = [_]sb.Row{
+        .{ .group_header = .{ .collapsed = false, .label = "g", .member_count = 2 } },
+        .{ .card = .{ .tab = 0, .label = "", .active = false, .depth = 1 } },
+        .{ .card = .{ .tab = 1, .label = "", .active = false, .depth = 1 } },
+    };
+    var cells = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1), bandCell };
+    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells, &rows, slot_h, header_row_h, ch);
+    try std.testing.expectEqual(@as(u32, 24 + 40), cells[0].origin_y); // 카드0 content top = 헤더(24); +block_off
+    try std.testing.expectEqual(@as(u32, 24 + 100 + 40), cells[1].origin_y); // 카드1 content top = 24+100
+    try std.testing.expectEqual(@as(u32, 0), cells[2].origin_y); // 밴드 셀은 그대로
+
+    // (B) 동작 보존: 헤더 없이 카드만이면 content top = 서수*slot_h(균일 — 옛 slot_idx*slot_h와 동일).
+    const rows_flat = [_]sb.Row{
+        .{ .card = .{ .tab = 0, .label = "", .active = false } },
+        .{ .card = .{ .tab = 1, .label = "", .active = false } },
+    };
+    var cells2 = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1) };
+    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells2, &rows_flat, slot_h, header_row_h, ch);
+    try std.testing.expectEqual(@as(u32, 0 * 100 + 40), cells2[0].origin_y);
+    try std.testing.expectEqual(@as(u32, 1 * 100 + 40), cells2[1].origin_y);
+
+    // (C) 다줄 카드: line_count=3 → block_off=(100-60)/2=20, line_index 2줄째는 +2*ch. 헤더 앞선 카드0 기준.
+    var cells3 = [_]metal_frame.NativeMetalCell{glyphCell(0, 2, 3)};
+    AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells3, &rows, slot_h, header_row_h, ch);
+    try std.testing.expectEqual(@as(u32, 24 + 20 + 2 * 20), cells3[0].origin_y); // 헤더24 + block_off20 + 2줄*ch
 }
 
 test "workspaceStatusLine: running=파형 스피너 prefix, idle=✓, none=빈 문자열; tabAgentKind 폴백" {

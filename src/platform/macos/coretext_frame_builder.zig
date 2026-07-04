@@ -297,22 +297,23 @@ pub fn paneTabAreaCols(bar_cols: u16) u16 {
     return if (bar_cols > pane_tab_plus_cols + 1) bar_cols - pane_tab_plus_cols else bar_cols;
 }
 
-/// 사이드바 카드 row 인코딩 — 한 슬롯(탭) 안에서 (line_index, line_count)를 row에 싣는다. 렌더러(.m 사이드바
-/// 루프)가 slot=row/32, line_count=(row%32)/4, line_index=(row%32)%4로 디코드해 line_count줄(각 1×cell)을 슬롯
-/// 안 블록으로 세로 중앙 정렬하고 line_index번째 줄에 그린다. line_count=1이면 단일행 중앙. 최대 4줄(이름·브랜치·
-/// 경로·상태) 지원(base 32 — slot≤2047). 밴드 셀(slot_id=0)은 이 인코딩과 무관하게 row=slot 그대로(렌더러가
-/// slot_id로 분기) — 여기를 인코딩 단일 출처로 고정한다. buildSidebarDrawList가 4줄(이름·브랜치·경로·상태,
-/// `lines: [4]`)까지 쓰고, 슬롯 높이도 4줄을 담게 키웠다(sidebar_slot_height_ratio_milli=4600).
-/// .m 디코더가 base 32·×4를 하드코딩하므로(FFI 경계), 이 값을 바꾸면 아래 "인코딩 값 고정" 테스트가 깨져 .m 동기 수정을 강제한다.
+/// 사이드바 카드 row 인코딩 — 한 슬롯(**압축 카드 서수**) 안에서 (line_index, line_count)를 row에 싣는다. **디코드는
+/// Zig**가 한다(SG3b-2-ii 옵션2): app_session.applySidebarGlyphPyTop이 slot=row/32, line_count=(row%32)/4,
+/// line_index=(row%32)%4로 풀어 **rowTop 기반 py_top**(가변 높이 — 그룹 헤더 반영)을 셀 origin_y에 싣고, .m은 그 origin_y로
+/// 세로 위치를 잡는다(옛 .m의 slot×slot_h 균일 기하 폐기 — code-review #1·#5·#6). 색칠 루프도 slot=row/32로 슬롯을 디코드한다.
+/// line_count=1이면 단일행 중앙. 최대 4줄(이름·브랜치·경로·상태) 지원(base 32 — slot≤2047). 밴드 셀(slot_id=0)은 이 인코딩과
+/// 무관하게 row=표시 row 인덱스 그대로(렌더러가 slot_id로 분기) — 여기를 인코딩 단일 출처로 고정한다. buildSidebarDrawList가
+/// 4줄(이름·브랜치·경로·상태, `lines: [4]`)까지 쓰고, 슬롯 높이도 4줄을 담게 키웠다(sidebar_slot_height_ratio_milli=4600).
+/// applySidebarGlyphPyTop이 base 32·×4를 decode에 쓰므로, 이 값을 바꾸면 아래 "인코딩 값 고정" 테스트가 깨져 동기 수정을 강제한다.
 pub const sidebar_line_base: u16 = 32;
 pub fn sidebarGlyphRow(slot: usize, line_index: u16, line_count: u16) u16 {
     return @as(u16, @intCast(slot)) *| sidebar_line_base +| line_count *| 4 +| line_index;
 }
 
-test "sidebarGlyphRow 인코딩 값 고정 (slot*32 + line_count*4 + line_index ↔ .m 디코더 결합)" {
-    // maru_metal_renderer.m이 slot=row/32, line_count=(row%32)/4, line_index=(row%32)%4로 디코드한다(FFI 경계라
-    // 하드코딩). 아래 row 리터럴이 바뀌면 .m도 동기 수정해야 하므로 값으로 고정 — 인코딩만 바꾸고 .m을 안 고치면
-    // 카드 glyph가 엉뚱한 슬롯/줄에 그려진다. 디코더 역산도 같이 검증한다.
+test "sidebarGlyphRow 인코딩 값 고정 (slot*32 + line_count*4 + line_index ↔ Zig applySidebarGlyphPyTop 디코더 결합)" {
+    // app_session.applySidebarGlyphPyTop이 slot=row/32, line_count=(row%32)/4, line_index=(row%32)%4로 디코드해
+    // rowTop 기반 py_top(origin_y)을 만든다(색칠 루프도 slot=row/32 사용). 아래 row 리터럴이 바뀌면 그 디코더도 동기
+    // 수정해야 하므로 값으로 고정 — 인코딩만 바꾸고 디코더를 안 고치면 카드 glyph가 엉뚱한 슬롯/줄에 그려진다. 역산도 같이 검증한다.
     const cases = [_]struct { slot: u16, idx: u16, count: u16, row: u16 }{
         .{ .slot = 0, .idx = 0, .count = 1, .row = 4 }, // 1줄 중앙
         .{ .slot = 0, .idx = 0, .count = 3, .row = 12 }, // 3줄 위(이름)

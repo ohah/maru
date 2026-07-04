@@ -881,10 +881,11 @@ bool maru_metal_renderer_draw(
         }
         quad_index += 2 * cell_count;
         // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를
-        //    slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 row=slot으로 슬롯 전체를 채우고(py=row×slot_h,
-        //    높이 slot_h). 카드 glyph(slot_id≠0)는 row에 슬롯+(줄 수,줄 위치)가 인코딩돼 있다
-        //    (coretext_frame_builder.sidebarGlyphRow: row=slot*32 + line_count*4 + line_index). line_count줄(각
-        //    1×cell)을 슬롯 안 블록으로 세로 중앙 정렬하고 line_index번째 줄에 ch 높이 + 좌측 여백(cw×0.5)으로 그린다.
+        //    slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 row=slot(=표시 row 인덱스)으로 슬롯 전체를 채운다
+        //    (py=row×slot_h, 높이 slot_h). 카드 glyph(slot_id≠0)는 **세로 위치를 Zig가 origin_y에 실어 준다**
+        //    (app_session.applySidebarGlyphPyTop: rowTop 기반 content-상대 py = Σ앞선 row 높이 + 블록중앙 + 줄오프셋).
+        //    옛 균일 인코딩(row=slot*32… → slot×slot_h + 블록중앙)은 그룹 헤더가 slot보다 낮아 카드가 위로 어긋나
+        //    폐기했다(SG3b-2-ii, code-review #1·#5·#6). 여기선 origin_y에 헤더 시프트·스크롤만 더한다. 좌측 여백 cw×0.5.
         const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
         // 상단 헤더(검색바·아이콘)만큼 셀을 아래로 밀고, 사이드바 세로 스크롤만큼 위로 당긴다(카드가 헤더 아래 뷰포트를
         // 넘으면 스크롤). 헤더 glyph는 터미널 셀 패스(origin 0,0)라 여기 안 걸려 고정된다. scroll>0이면 아래 scissor가
@@ -899,15 +900,11 @@ bool maru_metal_renderer_draw(
                 py_top = (float)sc.row * slot_h + sidebar_header_px - sidebar_scroll;
                 cell_h = slot_h;
                 sx_origin = 0.0f;
-            } else { // 카드 glyph — row=slot*32 + line_count*4 + line_index 디코드 후 슬롯 안 블록 중앙 배치
-                const uint32_t slot_idx = sc.row / 32u;
-                const uint32_t rem = sc.row % 32u;
-                const uint32_t line_count = rem / 4u;  // 카드 줄 수(1~4)
-                const uint32_t line_index = rem % 4u;  // 그 줄 위치(0=맨 위)
-                const float slot_top = (float)slot_idx * slot_h + sidebar_header_px - sidebar_scroll;
-                const float block_h = (float)line_count * ch;
-                const float block_top = slot_top + (slot_h - block_h) * 0.5f; // line_count줄 블록을 슬롯 세로 중앙
-                py_top = block_top + (float)line_index * ch;
+            } else { // 카드 glyph — 세로 위치(블록중앙 포함 content-상대 py)는 Zig가 origin_y에 실어 준다(가변 높이, SG3b-2-ii)
+                // 옛 균일 기하(slot_idx*slot_h + 블록중앙)를 폐기: 그룹 헤더(header_row_h<slot_h)가 앞서면 카드가 헤더
+                // 높이만큼 위로 어긋났다(code-review #1·#5·#6). 이제 applySidebarGlyphPyTop이 rowTop 기반 py를 origin_y에
+                // 넣고(헤더·스크롤 제외 content 상대), 여기선 헤더 시프트·세로 스크롤만 더한다 — 밴드와 같은 단일 스크롤 소스.
+                py_top = (float)sc.origin_y + sidebar_header_px - sidebar_scroll;
                 cell_h = ch;
                 sx_origin = glyph_pad;
             }

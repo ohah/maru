@@ -4159,25 +4159,126 @@ pub const AppSession = struct {
     }
 
     /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 잡아 하이라이트
-    /// (sidebar_drop_slot)를 갱신하고, 그룹 경계로 번역해(sidebarGroupDropBoundary) moveGroupRange로 그룹 구간을 옮긴다.
-    /// 이동을 따라간 **새 마커 인덱스**를 반환한다(호출자가 드래그 기준 인덱스를 갱신). 이동이 없고 하이라이트만 바뀌면
-    /// 밴드만 재빌드(SG4 카드 드래그와 같은 규율).
+    /// (sidebar_drop_slot)를 갱신하고, 드롭 컨텍스트에 따라 **중첩(넣기)** 또는 **형제 경계 이동(재정렬)**으로 옮긴다.
+    /// 이동을 따라간 **새 마커 인덱스**를 반환한다(호출자가 드래그 기준 인덱스를 갱신). 이동/depth 변경이 없고 하이라이트만
+    /// 바뀌면 밴드만 재빌드(SG4 카드 드래그와 같은 규율).
+    ///
+    /// **SG5-4 넣기/빼기(docs/sidebar-groups.md §9 SG5-4)**: 드롭 row가 **다른 그룹의 헤더**면 그 그룹의 자식으로 **중첩**한다
+    /// (`groupNestPlan` → `moveGroupNesting`, dragged 마커 depth = 타겟 그룹 depth+1, subtree 상대 depth 유지 = "폴더 안에 넣기").
+    /// 그 외(카드·최상위 드롭)는 기존 **형제 경계 이동**(`sidebarGroupDropBoundary`+`moveGroupSibling`)으로 처리한다 — 이때 얕은
+    /// 위치로 가면 자연 eff depth로 **빼기(un-nest)**가 gap-clamp+releveel로 자동 반영된다. 헤더 드롭=넣기·카드 드롭=형제
+    /// 재정렬의 명시적 분리라 SG5-1(카드 드롭에 형제 이동)이 그대로 보존된다.
     fn groupDragFrame(self: *AppSession, marker: usize, y_px: f64) usize {
         const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
         const new_drop: ?usize = if (raw_row < self.sidebar_rows.items.len) raw_row else null;
         const drop_changed = !usizeOptEql(self.sidebar_drop_slot, new_drop);
         self.sidebar_drop_slot = new_drop;
         var new_marker = marker;
-        var reordered = false;
-        if (self.sidebarGroupDropBoundary(raw_row, marker)) |boundary| {
-            new_marker = self.moveGroupRange(marker, boundary); // 재정렬 시 rebuildSidebar 내부 호출
-            reordered = new_marker != marker;
+        var changed = false;
+        if (self.groupNestPlan(raw_row, marker)) |plan| {
+            // SG5-4 넣기: 타겟 그룹의 자식으로 중첩(depth+1). insert_before=타겟 subtree 끝(마지막 자식 자리 = 부모 직접 카드 뒤).
+            const r = self.moveGroupNesting(marker, plan.insert_before, plan.target_depth);
+            new_marker = r.marker;
+            changed = r.changed;
+        } else if (self.sidebarGroupDropBoundary(raw_row, marker)) |boundary| {
+            // 형제 경계 이동(SG5-1) + 얕은 곳이면 자연 eff로 빼기(SG5-4 un-nest).
+            const r = self.moveGroupSibling(marker, boundary);
+            new_marker = r.marker;
+            changed = r.changed;
         }
-        if (drop_changed and !reordered) {
+        if (drop_changed and !changed) {
             self.rebuildSidebar() catch {};
             self.metal_dirty = true;
         }
         return new_marker;
+    }
+
+    // ── SG5-4: 드래그로 중첩 넣기/빼기 — 드롭 컨텍스트의 depth로 group_depth를 조정한다 ─────────────────────────
+    // docs/sidebar-groups.md §9 SG5-4. 그룹 드래그는 (1)다른 그룹 헤더에 드롭=그 그룹의 자식으로 중첩(depth+1),
+    // (2)카드/최상위 드롭=형제 경계 이동(+얕으면 빼기)로 나뉜다. 중첩은 **위치 이동 + subtree 마커들의 group_depth
+    // relevel**을 함께 한다(이동만으로는 dragged 마커가 부모를 pop해 형제가 되므로 depth를 명시 조정해야 자식이 된다).
+    // 빼기는 gap-clamp로 eff가 자동으로 얕아지고, releveel이 저장 depth도 자연 eff로 맞춰 gap을 없앤다.
+
+    const GroupNestPlan = struct { insert_before: usize, target_depth: u8 };
+    const GroupMoveResult = struct { marker: usize, changed: bool };
+
+    /// SG5-4: 드롭 row가 **다른 그룹의 헤더**면 그 그룹(G)의 자식으로 중첩할 계획을 낸다 — insert_before=G의 subtree 끝
+    /// (마지막 자식 자리라 "부모 직접 카드가 자식 앞" §2.1 유지), target_depth=G의 eff_depth+1. 그 외(카드 드롭·자기 헤더·
+    /// 자기 subtree·과깊이 max_group_nesting)는 null → groupDragFrame이 형제 경계 이동으로 처리(헤더=넣기·카드=형제 분리).
+    fn groupNestPlan(self: *AppSession, raw_row: usize, m: usize) ?GroupNestPlan {
+        if (raw_row >= self.sidebar_rows.items.len) return null;
+        const gh = switch (self.sidebar_rows.items[raw_row]) {
+            .group_header => |h| h,
+            .card => return null, // 카드 드롭 = 형제 경계(SG5-1 보존)
+        };
+        const g = gh.tab;
+        const len = self.tabs.items.len;
+        if (g >= len or m >= len) return null;
+        if (g == m) return null; // 자기 그룹 헤더 — 무동작
+        // 타겟 g가 드래그 subtree [m, my_end) 안이면(자기 자손) 자기 안으로 넣기 불가 — null(형제 경로도 self-guard로 no-op).
+        const my_end = self.groupSubtreeEnd(m);
+        if (g >= m and g < my_end) return null;
+        const g_depth = self.effectiveDepthAt(g);
+        if (@as(usize, g_depth) + 1 > max_group_nesting) return null; // 과깊이 방지
+        return .{ .insert_before = self.groupSubtreeEnd(g), .target_depth = g_depth + 1 };
+    }
+
+    /// SG5-4 중첩 이동: 그룹 subtree를 insert_before로 옮기고(moveGroupRange 재사용), subtree 마커들의 group_depth를
+    /// target_depth 기준으로 **상대 유지 relevel**한다(dragged 마커=target_depth, 자식들은 상대 offset 유지). 이동+relevel
+    /// 어느 쪽이든 바뀌면 changed=true. 연속 파티션·subtree 무결성은 moveGroupRange가, 트리 연속은 relevel+projectRows가 보장.
+    fn moveGroupNesting(self: *AppSession, m: usize, insert_before: usize, target_depth: u8) GroupMoveResult {
+        const range_len = self.groupSubtreeEnd(m) - m;
+        const nm = self.moveGroupRange(m, insert_before); // 이동 시 rebuildSidebar 내부 호출(옛 depth로 1회 — 같은 프레임에 아래서 교정)
+        const depth_changed = self.relevelBlock(nm, range_len, target_depth);
+        if (depth_changed) {
+            self.rebuildSidebar() catch {};
+            self.metal_dirty = true;
+        }
+        return .{ .marker = nm, .changed = (nm != m) or depth_changed };
+    }
+
+    /// SG5-1 형제 경계 이동 + SG5-4 빼기(un-nest): 그룹을 insert_before로 옮기고(moveGroupRange), 새 위치의 **자연 eff
+    /// depth**로 relevel한다. 같은 레벨 이동이면 relevel이 no-op(저장 depth==eff)이라 기존 SG5-1 동작이 그대로 보존되고,
+    /// 얕은 곳(최상위 등)으로 가면 gap-clamp된 eff(≤ 저장값)로 낮춰 빼기가 저장 depth에도 반영된다(gap 제거).
+    fn moveGroupSibling(self: *AppSession, m: usize, insert_before: usize) GroupMoveResult {
+        const range_len = self.groupSubtreeEnd(m) - m;
+        const nm = self.moveGroupRange(m, insert_before);
+        const natural = self.effectiveDepthAt(nm); // 새 위치의 gap-clamp eff(빼기면 저장값보다 얕다)
+        const depth_changed = self.relevelBlock(nm, range_len, natural);
+        if (depth_changed) {
+            self.rebuildSidebar() catch {};
+            self.metal_dirty = true;
+        }
+        return .{ .marker = nm, .changed = (nm != m) or depth_changed };
+    }
+
+    /// 블록 [start, start+count)의 그룹 마커들 group_depth를 target_depth 기준으로 다시 쓴다 — 블록을 고립 subtree로 보고
+    /// (projectRows pass1과 같은 스택 정규화로) 각 마커의 **블록-상대 eff**(첫 마커=1·자식=2·…)를 매긴 뒤 `target_depth +
+    /// (블록eff-1)`로 remap한다(첫 마커=target_depth, 자식들은 상대 offset 유지). max_group_nesting 클램프. 실제로 바뀐
+    /// depth가 있으면 true. 스택 pop 판정은 **옛 declared**(현재 group_depth)로 하고 현재 마커는 판정 후에만 덮어써 순서 안전.
+    fn relevelBlock(self: *AppSession, start: usize, count: usize, target_depth: u8) bool {
+        const end = @min(start + count, self.tabs.items.len);
+        var stack: [max_group_nesting]u8 = undefined; // 블록-상대 eff(정규화)
+        var top: usize = 0;
+        var changed = false;
+        var p = start;
+        while (p < end) : (p += 1) {
+            if (self.tabs.items[p].group_start == null) continue;
+            const dd: u8 = @max(@as(u8, 1), self.tabs.items[p].group_depth); // 옛 declared로 pop 판정(projectRows와 동형)
+            while (top > 0 and stack[top - 1] >= dd) top -= 1;
+            const parent_rel: u8 = if (top > 0) stack[top - 1] else 0;
+            const block_eff: u8 = parent_rel + 1; // 첫 마커=1, 자식=2…
+            if (top < stack.len) {
+                stack[top] = block_eff;
+                top += 1;
+            }
+            const nd: usize = @min(@as(usize, target_depth) + @as(usize, block_eff) - 1, max_group_nesting);
+            if (self.tabs.items[p].group_depth != @as(u8, @intCast(nd))) {
+                self.tabs.items[p].group_depth = @intCast(nd);
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     /// 고정 탭을 앞쪽으로 stable-partition한다(고정끼리·비고정끼리 상대 순서 유지). tabs와 surface_ptrs를 **함께**
@@ -4668,6 +4769,31 @@ pub const AppSession = struct {
                 if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
                     self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
                     self.tabs.items[3].group_color = 0xC44A7B; // B 자홍(중첩 색 구분)
+                }
+                self.rebuildSidebar() catch {};
+            }
+        }
+        // MARU_FORCE_GROUP_DRAGNEST=1 — 두 형제 그룹 A·B를 만든 뒤 **A를 B의 헤더에 드롭한 결과**(중첩 넣기, SG5-4)를
+        // 재투영으로 고정해 헤드리스 스크린샷으로 시각 확인한다(드래그 라이브 대신 드롭 결과 상태). 결과: B가 최상위,
+        // A가 B의 자식(depth2)으로 들어가 A 카드가 한 단계 더 들여쓰인다. env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_GROUP_DRAGNEST") != null) {
+            var made: usize = 0;
+            while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
+            if (self.tabs.items.len >= 5) {
+                // 두 형제 최상위 그룹: A=[t1,t2](depth1), B=[t3,t4](depth1). t0는 최상위 카드.
+                self.createGroupForTab(self.tabs.items[1]); // A
+                self.createSiblingGroupForTab(self.tabs.items[3]); // B(형제, depth1)
+                // A(마커 index1)를 B 헤더에 드롭 = 중첩. B 헤더 row를 찾아 groupNestPlan→moveGroupNesting(드롭 결과 재현).
+                self.recomputeVisibleTabs();
+                var b_row: usize = 0;
+                for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                    .group_header => |gh| if (gh.tab == 3) {
+                        b_row = s;
+                    },
+                    .card => {},
+                };
+                if (self.groupNestPlan(b_row, 1)) |plan| {
+                    _ = self.moveGroupNesting(1, plan.insert_before, plan.target_depth);
                 }
                 self.rebuildSidebar() catch {};
             }
@@ -16030,6 +16156,210 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
     session.mouse(3, x, headerB2_y + 1, 0, 0); // up → 접기 토글(threshold 미달이라 클릭 취급)
     try std.testing.expect(!session.tabs.items[0].group_collapsed); // B 다시 펼침(토글)
     try std.testing.expect(!session.sidebar_group_drag_armed);
+}
+
+/// SG5-4 테스트 헬퍼 — 탭 idx에 그룹 시작 마커(owned dup) + depth를 세팅한다. 위치 파생 구조를 정밀하게 짜기 위해
+/// create_group의 위치 의존 depth 계산 대신 직접 마커를 얹는다(session.deinit이 group_start를 free).
+fn setGroupMarker(session: *AppSession, idx: usize, name: []const u8, depth: u8) !void {
+    session.tabs.items[idx].group_start = try session.allocator.dupe(u8, name);
+    session.tabs.items[idx].group_depth = depth;
+}
+
+test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subtree 상대 depth 유지 (moveGroupNesting)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    const t0 = session.tabs.items[0];
+    const t2 = session.tabs.items[2];
+    const t4 = session.tabs.items[4];
+    const t5 = session.tabs.items[5];
+
+    // A=[t0,t1] 직접 + C 중첩=[t2,t3](depth2, A 안), B=[t4,t5](depth1, A 형제). 위치 파생 정밀 구성(마커 직접).
+    try setGroupMarker(session, 0, "A", 1);
+    try setGroupMarker(session, 2, "C", 2); // A 안 중첩
+    try setGroupMarker(session, 4, "B", 1); // A 형제(최상위)
+    // 초기 depth 확인.
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // A 마커 카드
+    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t2)); // C(A 자식)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B(최상위)
+
+    // ── 드래그: A(마커 index0)를 B 헤더에 드롭 → B의 자식으로 중첩. projectRows로 B 헤더 row를 찾아 groupNestPlan에 넘긴다.
+    session.recomputeVisibleTabs();
+    var b_header_row: usize = 0;
+    for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .group_header => |gh| if (gh.tab == 4) {
+            b_header_row = s;
+        },
+        .card => {},
+    };
+    const plan = session.groupNestPlan(b_header_row, 0).?; // B 헤더 → 중첩 계획
+    try std.testing.expectEqual(@as(u8, 2), plan.target_depth); // B eff1 + 1
+    const r = session.moveGroupNesting(0, plan.insert_before, plan.target_depth);
+    try std.testing.expect(r.changed);
+
+    // 결과: A가 B의 자식(depth2), C는 A의 자식(depth3) — **상대 depth 유지**(C는 A보다 1 깊음 유지).
+    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // A → B 자식(depth2)
+    try std.testing.expectEqual(@as(?u8, 3), sidebarCardDepth(session, t2)); // C → A 자식(depth3, 상대 유지)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B 최상위 유지
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t5)); // B 직접 카드
+
+    // 트리 연속(gap 없음)·연속 파티션: projectRows가 유효 트리를 낸다(부모 직접 카드가 자식 헤더 앞). 헤더 depth로 확인.
+    session.recomputeVisibleTabs();
+    var depths: [3]u8 = undefined;
+    var hc: usize = 0;
+    var prev_marker_ok = true;
+    for (session.sidebar_rows.items) |row| switch (row) {
+        .group_header => |gh| {
+            if (hc < depths.len) depths[hc] = gh.depth;
+            hc += 1;
+            if (gh.depth > 2 and hc == 1) prev_marker_ok = false; // 첫 헤더가 갑자기 깊으면 gap
+        },
+        .card => {},
+    };
+    try std.testing.expectEqual(@as(usize, 3), hc); // B·A·C 세 헤더
+    try std.testing.expectEqual(@as(u8, 1), depths[0]); // B 최상위
+    try std.testing.expectEqual(@as(u8, 2), depths[1]); // A(B 자식)
+    try std.testing.expectEqual(@as(u8, 3), depths[2]); // C(A 자식) — 1,2,3 연속(gap 없음)
+}
+
+test "SG5-4: 중첩 그룹을 최상위 카드에 드롭 → 빼기(depth 1) (moveGroupSibling + gap-clamp)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4] 5개
+    const t3 = session.tabs.items[3];
+    const t4 = session.tabs.items[4];
+
+    // t0 최상위, A=[t1,t2](depth1), B 중첩=[t3,t4](depth2, A 안).
+    try setGroupMarker(session, 1, "A", 1);
+    try setGroupMarker(session, 3, "B", 2); // A 안 중첩
+    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t3)); // B 중첩(depth2)
+
+    // ── 드래그: B(마커 index3)를 최상위 카드 t0(row0)에 드롭 → 빼기(최상위 depth1로). 카드 드롭이라 형제 경로.
+    session.recomputeVisibleTabs(); // [c t0(0), hA(1), c t1(2), c t2(3), hB(4), c t3(5), c t4(6)]
+    try std.testing.expect(session.groupNestPlan(0, 3) == null); // row0=카드 → 중첩 아님(형제 경로)
+    const boundary = session.sidebarGroupDropBoundary(0, 3).?; // 최상위 카드 → 첫 그룹 앞
+    const r = session.moveGroupSibling(3, boundary);
+    try std.testing.expect(r.changed);
+
+    // B가 최상위(depth1)로 빠짐. 저장 group_depth도 gap-clamp eff(1)로 맞춰진다(gap 제거).
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // 빼기 성공(depth1)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B 직접 카드
+    // B 마커 탭의 저장 depth가 1로 정규화됐는지(releveel).
+    var b_stored: ?u8 = null;
+    for (session.tabs.items) |t| if (t.group_start != null and std.mem.eql(u8, t.group_start.?, "B")) {
+        b_stored = t.group_depth;
+    };
+    try std.testing.expectEqual(@as(?u8, 1), b_stored); // releveel로 저장 depth도 1
+}
+
+test "SG5-4: 카드 드래그 — 중첩 자식 그룹 안(자식 depth)·최상위(depth0)로 depth 파생 (sidebarGroupDropTargetTab)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+    const t0 = session.tabs.items[0];
+
+    // t0 최상위, A=[t1,t2](depth1), B 중첩=[t3,t4](depth2). t0를 B 안으로 / 최상위로 옮겨 depth 파생 확인.
+    try setGroupMarker(session, 1, "A", 1);
+    try setGroupMarker(session, 3, "B", 2);
+    session.recomputeVisibleTabs(); // [c t0(0), hA(1), c t1(2), c t2(3), hB(4), c t3(5), c t4(6)]
+
+    // ── ① t0를 B의 카드(t4, row6)에 드롭 → B 소속(depth2, 중첩 자식). 카드 row → 그 위치로 위치 파생.
+    {
+        const target = session.sidebarGroupDropTargetTab(6, 0).?; // B 카드 t4(index4)
+        _ = session.moveTab(0, target);
+    }
+    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // 자식 B 안 = depth2
+
+    // ── ② 다시 t0(현재 B 안)를 최상위로 — 재정렬로 첫 그룹 앞으로 빼기. moveTab(현 index → 0)로 최상위 앞.
+    var t0_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == t0) {
+        t0_idx = i;
+    };
+    _ = session.moveTab(t0_idx, 0); // 맨 앞(첫 마커 이전 = 최상위)
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위 = depth0
+}
+
+test "SG5-4: 그룹 헤더를 다른 그룹 헤더에 드롭하면 중첩 (mouse 시뮬레이션 — 통합)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    const t0 = session.tabs.items[0];
+    const t2 = session.tabs.items[2];
+
+    // 두 형제 그룹 A=[t0,t1](depth1), B=[t2,t3](depth1).
+    try setGroupMarker(session, 0, "A", 1);
+    try setGroupMarker(session, 2, "B", 1);
+    session.recomputeVisibleTabs(); // [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
+
+    const sb = chrome.components.sidebar;
+    const header_h = session.sidebar_header_height_px;
+    const header_row_h = session.sidebar_header_row_h_px;
+    const slot_h = session.sidebar_slot_height_px;
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const rowCenterY = struct {
+        fn f(s: *AppSession, row: usize, hh: u32, shh: u32, hrh: u32) f64 {
+            const top = sb.rowTop(s.sidebar_rows.items, row, hh, shh, hrh, 0);
+            const rh = sb.rowHeight(s.sidebar_rows.items[row], shh, hrh);
+            return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
+        }
+    }.f;
+
+    // 헤더 A(row0)를 잡아 헤더 B(row3) 위로 드래그 → A가 B의 자식으로 중첩.
+    const headerA_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    session.mouse(1, x, headerA_y, 0, 0); // down on 헤더 A → arm
+    try std.testing.expect(session.sidebar_group_drag_armed);
+    const headerB_y = rowCenterY(session, 3, header_h, slot_h, header_row_h);
+    session.mouse(2, x, headerB_y, 0, 0); // drag → threshold 초과 → 그룹 이동(헤더 드롭=중첩)
+    try std.testing.expect(session.sidebar_group_drag_active);
+
+    // 결과: A가 B의 자식(depth2). B는 최상위(depth1). t0(A 카드)=depth2.
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // B 최상위
+    try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // A → B 자식(중첩)
+    session.mouse(3, x, headerB_y, 0, 0); // up
+    try std.testing.expect(!session.sidebar_group_drag_armed);
+    try std.testing.expect(session.sidebar_drop_slot == null);
 }
 
 test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 rowTop(가변 높이)로 밀린다 (SG3b-2-ii #1·#5·#6)" {

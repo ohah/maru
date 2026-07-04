@@ -283,6 +283,11 @@ pub const default_app_bindings = [_]AppBinding{
     // 동안엔 모달 라우팅이 ⌘+글자를 가로채 닫으므로(Enter로 네비) 이 바인딩은 닫힌 경우를 위한 것이다.
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'G' } }, .action = .find_next },
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'G' } }, .action = .find_previous },
+    // Cmd+Option+G: 사이드바 그룹 만들기(create_group) — 활성 워크스페이스에 그룹 시작 마커를 얹어 그 아래 연속
+    // 카드를 접이식 그룹으로 묶는다. Cmd+Shift+G는 find_previous가 선점하고, Cmd+Opt는 pane/Term 이동 modifier
+    // 그룹이나 'G' 키는 미사용이라 충돌이 없다(사용자 결정 — docs/sidebar-groups.md §7). 'g'→'G' fold, 정확 비교.
+    // ungroup/rename_group은 저빈도라 기본 키 없이 팔레트·우클릭·설정 리바인더로만 노출한다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'G' } }, .action = .create_group },
     // 런타임 폰트 크기(macOS/브라우저/Ghostty 관례). ⌘=(또는 ⌘+)=키우기, ⌘-(또는 ⌘_)=줄이기, ⌘0=리셋.
     // '=' 키를 Shift와 함께 누르면 '+'가, '-'는 '_'가 오므로 양쪽을 다 묶어 키캡 표기(+/-)와 실제 글자(=/-)를
     // 모두 잡는다(모디파이어 정확 비교). 숫자/기호라 normalizeEventChar가 그대로 통과시킨다. 셸 입력과 안 겹친다.

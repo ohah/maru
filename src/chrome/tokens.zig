@@ -81,6 +81,10 @@ pub const Spacing = struct {
     // U2: 사이드바 카드 사이 여백(px). 밴드/막대를 슬롯 안쪽 사방으로 이만큼 줄여 워크스페이스가 카드처럼 떨어져 보인다.
     // tui=0(슬롯 꽉 — 기존과 동일), rich>0.
     card_gap_px: u16 = 0,
+    // SG3: 사이드바 그룹 안 카드(depth 1)의 좌측 들여쓰기(px) — 그룹 헤더 아래 카드가 소속을 시각적으로 보이게 살짝
+    // 안으로. hit-test·view가 공유하는 단일 값(§5.4)이라 여기 한 곳에서만 정의한다. platform buildSidebarTitleDrawList가
+    // ceil(이 값/cw)만큼 grouped 카드 이름 앞에 공백을 넣어 들여쓴다. tui=0(들여쓰기 없음), rich≈1~2ch. docs/sidebar-groups.md §5.
+    group_indent_px: u16 = 0,
     // U-tab: rich 탭 하나의 고정 폭(컬럼). 0이면 균등분할(tui — 바를 탭 수로 나눠 stretch). >0이면 고정폭 — 탭이
     // 내용과 무관히 이 폭, 적으면 왼쪽정렬+빈 영역, 많으면 넘쳐(가로 스크롤 대상) 잘린다. 제목 ~N자 + ✕ 2칸 기준.
     tab_width_cols: u16 = 0,
@@ -175,6 +179,8 @@ pub const Tokens = struct {
         tk.space.accent_bar_width_px = 3;
         // U2: 카드 사이 여백 8px(슬롯 안쪽 사방 패딩) — 워크스페이스가 "떠 있는 카드"로 또렷이 분리(Warp식 넉넉한 행 여백). 4→8(사이드바 폴리시).
         tk.space.card_gap_px = 8;
+        // SG3: 그룹 안 카드 들여쓰기 16px(≈2ch) — 헤더 아래 카드가 소속을 시각적으로 보이게(브라우저 탭 그룹/VSCode 폴더 관례). docs/sidebar-groups.md §5.
+        tk.space.group_indent_px = 16;
         // U-tab: rich 탭 고정 폭 16칸(제목 ~14 + ✕ 2) — 균등 stretch 대신(적으면 빈 영역, 넘치면 가로 스크롤 대상).
         tk.space.tab_width_cols = 16;
         // U-tab: 탭 바 세로 패딩 8px(텍스트 위아래) — 바 높이 = cell + 16, 제목 가운데. Warp식 넉넉한 탭 바(상단 탭바 폴리시).

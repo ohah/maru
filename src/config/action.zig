@@ -44,6 +44,15 @@ pub const Action = union(enum) {
     rename_workspace,
     rename_pane,
     rename_term,
+    // 사이드바 그룹(접이식 워크스페이스 묶음) — 위치 파생 그룹 마커(`Tab.group_start`)를 세팅/제거한다(소속은 저장하지
+    // 않고 self.tabs 순서에서 파생한다). create_group=활성/클릭 워크스페이스에 그룹 시작 마커를 얹어 그 아래 연속 카드를
+    // 한 그룹으로 묶는다(dispatchAppAction→createGroupForTab). ungroup=그 워크스페이스가 속한 그룹의 시작 마커를 제거해
+    // 아래 카드를 상위/최상위로 되돌린다(ungroupTab). rename_group=그룹 이름 인라인 편집(헤더 더블클릭과 동형). **기본
+    // 단축키는 create_group만 `Cmd+Opt+G`**(Cmd+Shift+G는 find_previous 선점 — 사용자 결정, docs/sidebar-groups.md §7),
+    // ungroup/rename_group은 팔레트·우클릭·설정 리바인더로만. 단일 출처: docs/sidebar-groups.md.
+    create_group,
+    ungroup,
+    rename_group,
     // 활성 터미널의 전체 내용(스크롤백 + 화면)을 선택한다(Select All, 관례상 ⌘A). 코어 selection 상태라
     // dispatchAppAction이 core.selectAll로 넘긴다. clipboard 쓰기(copy)는 NSPasteboard(OS) 소유라 Action이
     // 아니다(경계: Zig는 selection, Swift는 clipboard).
@@ -115,6 +124,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "rename_workspace")) return .rename_workspace;
     if (std.mem.eql(u8, value, "rename_pane")) return .rename_pane;
     if (std.mem.eql(u8, value, "rename_term")) return .rename_term;
+    if (std.mem.eql(u8, value, "create_group")) return .create_group;
+    if (std.mem.eql(u8, value, "ungroup")) return .ungroup;
+    if (std.mem.eql(u8, value, "rename_group")) return .rename_group;
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
@@ -185,6 +197,9 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.rename_workspace, parseAction("rename_workspace").?);
     try std.testing.expectEqual(Action.rename_pane, parseAction("rename_pane").?);
     try std.testing.expectEqual(Action.rename_term, parseAction("rename_term").?);
+    try std.testing.expectEqual(Action.create_group, parseAction("create_group").?);
+    try std.testing.expectEqual(Action.ungroup, parseAction("ungroup").?);
+    try std.testing.expectEqual(Action.rename_group, parseAction("rename_group").?);
     try std.testing.expectEqual(Action.new_term, parseAction("new_term").?);
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);

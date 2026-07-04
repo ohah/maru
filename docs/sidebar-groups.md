@@ -6,8 +6,8 @@
 사이드바 자체(카드 레이아웃·헤더·검색·드래그·스크롤)의 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)이고,
 chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다. 이 문서는 그 위에 **그룹**을 얹는 설계만 다룬다.
 
-> **현황**: 설계 단계(구현 착수). **접기 우선** — 그룹 만들기·헤더 접기까지 먼저 구현하고, 카드 드래그
-> 이동(넣기/빼기)·그룹 통째 재정렬·색은 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
+> **현황**: **접기 우선 완료** — SG1~SG3c 구현·머지(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증).
+> 카드 드래그 이동(넣기/빼기, SG4)·그룹 통째 재정렬·색은 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
 > ([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
@@ -138,8 +138,9 @@ tab panes=1 ... group-start="infra" group-collapsed=1
 /// 사이드바 화면 한 줄. host가 projectRows로 tabs+마커+search를 이 리스트로 투영한다.
 pub const Row = union(enum) {
     group_header: struct {
+        tab: usize,          // 소스 group-start 탭 인덱스 — 헤더 glyph가 self.tabs[tab].group_start를 **live** 읽어(borrowed UAF #8 해소), 접기 토글·rename 타깃 겸용
         collapsed: bool,
-        label: []const u8,   // 그룹 이름(빈 문자열이면 platform이 "그룹 N" 폴백해 주입)
+        label: []const u8,   // 레거시(이제 tab에서 live 읽어 load-bearing 아님)
         member_count: u16,   // 접힘 시 "▸ name (N)" 표시용
     },
     card: struct {
@@ -282,10 +283,15 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
        `card.depth` 들여쓰기 + **헤더 label borrowed 해소**(`group_header`에 소스 tab 인덱스/dupe — 현재 `tab.group_start` borrow해
        destroyTab 후 dangling, **code-review #8 UAF 잠복**). (f)(SG3c) **macOS 제품 스크린샷 검증**(create_group으로 헤더가 실제 떠야 가능).
      **참고: `/code-review max`가 SG3b-2-ii 계획을 findings #1~7의 정확한 해소 경로로 confirmed 검증했고, #1~7은 (a)~(d)에서 전부 닫혔다.**
-   - **SG3c — 접기 + 만들기/이름/해제 + 액션·단축키**: 헤더 클릭 → `group_collapsed` 토글 → 재투영·영속.
-     `create_group`(기본 키 `Cmd+Opt+G`)·`ungroup` 액션 추가(action.zig `Action`+`parseAction`+`dispatchAppAction` arm+
-     `command_catalog` entry) → 팔레트·설정 Input 리바인더·config `keybind` 자동 노출(§7). 우클릭 "새 그룹으로 묶기"/
-     "그룹 풀기"(같은 세션 메서드) + 헤더 더블클릭 rename + closeTab 마커 승계. **여기까지가 "접기 우선" 완료.**
+   - **SG3c ✅ — 접기 + 만들기/이름/해제 + 헤더 실제 렌더(SG3b-2-ii-(e)(f) 흡수)**: `sidebar.view`가 group_header 밴드를
+     내고 **모든 밴드 y를 `rowTop` 누적**으로(`bandFill`이 rows+header_row_h 수령, `sidebarBandRow`가 가변 y→row 역산 —
+     옛 `@divTrunc(y,slot_h)` 대체). `buildSidebarTitleDrawList`가 헤더 삼각(▾/▸)+이름(접힘 시 `(N)`)+카드 `group_indent`
+     들여쓰기를 그리고 `fillSidebarGlyphPyTop`이 row별 높이로 블록중앙(glyph 도메인=표시 row 인덱스). 헤더 클릭 →
+     `toggleGroupCollapsedAt`·헤더 더블클릭 rename. `create_group`(`Cmd+Opt+G`)·`ungroup`·`rename_group` 액션
+     (action.zig+keybinding+command_catalog+dispatch) → 팔레트·설정 리바인더·config·우클릭 노출. closeTab 마커 승계.
+     **code-review #8 해소**: `Row.group_header.tab`(소스 탭 인덱스)로 헤더 glyph가 `tab.group_start`를 **live** 읽어
+     borrowed dangling 제거(접기 토글·rename 타깃 겸용). **제품 스크린샷 검증 완료**(펼침 `▾ 그룹 1`+얇은 밴드+들여쓴 활성
+     카드·접힘 `▸ 그룹 1 (2)`, 가변 높이 정확 — `MARU_FORCE_GROUP` 헤드리스 훅). **여기까지가 "접기 우선" 완료.**
 4. **SG4(후속) — 카드 드래그 넣기/빼기**: `moveTab` 확장 + 드롭 좌표→그룹 경계.
 5. **SG5(후속) — 그룹 통째 드래그·색·(선택)중첩**.
 

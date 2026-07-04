@@ -11943,9 +11943,12 @@ pub const AppSession = struct {
                 .group_header => continue, // 헤더 row는 카드 색(tint/accent) 대상 아님(헤더 밴드는 SG3b에서 별도)
             };
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
-            const slot_abs_y = @as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(slot_h)) + @as(f32, @floatFromInt(self.sidebar_header_height_px));
+            // 가변 높이(code-review #4): 카드 절대 y를 i*slot_h 대신 rowTop 누적으로(앞선 그룹 헤더는 header_row_h만
+            // 차지). scroll=0으로 넘겨 sidebarScrollClipQuad가 뺀다(이중 차감 방지). 헤더 row는 위에서 continue라 여긴
+            // 카드만 — 카드만이면 rowTop==i*slot_h+header라 동작 보존. card_h도 rowHeight로(카드=slot_h).
+            const slot_abs_y: f32 = @floatFromInt(chrome.components.sidebar.rowTop(self.sidebar_rows.items, i, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
             const card_top = slot_abs_y + gap; // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일)
-            const card_h = @as(f32, @floatFromInt(slot_h)) - 2.0 * gap;
+            const card_h = @as(f32, @floatFromInt(chrome.components.sidebar.rowHeight(self.sidebar_rows.items[i], slot_h, self.sidebar_header_row_h_px))) - 2.0 * gap;
             // ① 배경 tint — **밴드 없는 idle 슬롯에만** 오버레이 quad. 활성/호버/드롭 슬롯은 lowerSidebar가 밴드 색에
             // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(gap inset)·둥근 모서리를 밴드와 맞춰
             // rich에서 카드 모양대로 보이게(전폭 직사각 bleed 방지) — tui(gap=0·radius=0)면 전폭·직각(기존 동일).

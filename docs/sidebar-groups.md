@@ -6,8 +6,8 @@
 사이드바 자체(카드 레이아웃·헤더·검색·드래그·스크롤)의 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)이고,
 chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다. 이 문서는 그 위에 **그룹**을 얹는 설계만 다룬다.
 
-> **현황**: **접기 우선 완료** — SG1~SG3c 구현·머지(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증).
-> 카드 드래그 이동(넣기/빼기, SG4)·그룹 통째 재정렬·색은 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
+> **현황**: **SG1~SG4 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
+> 드래그로 넣기/빼기(SG4). **그룹 통째 드래그·색·(선택)중첩(SG5)** 만 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
 > ([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
@@ -216,7 +216,7 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **그룹 만들기** | **우선** | 우클릭 "새 그룹으로 묶기"(이름 입력) · **단축키 `Cmd+Opt+G`** · 팔레트 "New Group" | `create_group` 액션 → 활성 탭에 `group_start` 세팅(우클릭·팔레트·키가 같은 세션 메서드 호출 — rename 패턴). 그 아래 연속 카드가 자동 소속(위치 파생) |
 | **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename) |
 | **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
-| 카드 드래그로 넣기/빼기 | 후속 | 카드를 마커 위/아래로 드래그 | `moveTab`(3967) 확장 — 드롭 위치가 소속을 정함(위치 파생이라 별도 소속 편집 없음) |
+| **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그 | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음. 마커 탭 드래그=그룹 통째=SG5 |
 | 그룹 통째 드래그·색 | 후속 | 헤더 잡아 재정렬 / 그룹 색 | `sidebar_drag_*` 확장, `group_indent`/색 토큰 |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
@@ -292,7 +292,11 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
      **code-review #8 해소**: `Row.group_header.tab`(소스 탭 인덱스)로 헤더 glyph가 `tab.group_start`를 **live** 읽어
      borrowed dangling 제거(접기 토글·rename 타깃 겸용). **제품 스크린샷 검증 완료**(펼침 `▾ 그룹 1`+얇은 밴드+들여쓴 활성
      카드·접힘 `▸ 그룹 1 (2)`, 가변 높이 정확 — `MARU_FORCE_GROUP` 헤드리스 훅). **여기까지가 "접기 우선" 완료.**
-4. **SG4(후속) — 카드 드래그 넣기/빼기**: `moveTab` 확장 + 드롭 좌표→그룹 경계.
+4. **SG4 ✅ — 카드 드래그 넣기/빼기**: `sidebarGroupDropTargetTab`(드롭 row→moveTab 목표 탭 매핑 단일 출처 —
+   카드=그 위치, 펼친 헤더=그룹 최상단(방향 보정), 접힌 헤더=그룹 끝 `[M,j)` §10). 드래그 핸들러가 헤더 드롭도
+   처리(옛 visibleTab null-skip 대체), `sidebar_drop_slot` 드롭 하이라이트. **마커 탭 드래그는 가드로 무동작**(그룹
+   통째=SG5). 연속 파티션은 마커 없는 카드만 재정렬해 사실상 공짜. 헤드리스 2테스트(넣기/빼기·펼친/접힌 헤더·마커
+   가드·재투영 depth). 한계: 핀+그룹 조합·카드→마커카드 위-드롭은 헤더 드롭이 신뢰 경로.
 5. **SG5(후속) — 그룹 통째 드래그·색·(선택)중첩**.
 
 ## 10. 리스크 & 미해결

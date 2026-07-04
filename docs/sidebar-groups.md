@@ -270,17 +270,18 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
      가변 누적 프리미티브(`rowHeight`/`rowTop`/`contentHeight`) 추가 + 헤드리스 테스트(**카드만이면 `rowTop`==옛 `slotTop`**로
      동작 보존 증명). **`slotAt`/`dragTargetSlot`의 가변 교체·`slotTop`→`rowTop` 전환·두 latent 버그(rename caret·드래그)
      교정은 헤더가 실제로 가변을 요구하는 SG3b로 미룬다**(헤더 없는 SG3a는 고정 hit-test로 카드만 처리 = 균일이라 동작 보존).
-   - **SG3b — 헤더 row + 가변 hit-test + glyph 가변 인코딩** (2 PR 머지 완료 + 렌더 남음):
+   - **SG3b — 헤더 row + 가변 hit-test + glyph 가변 인코딩** (완료 + SG3c로 묶인 잔여):
      - **SG3b-1 ✅**(머지 #1174): `slotAt`/`dragTargetSlot` 가변 교체 + `slotTop`→`rowTop` + rename caret 버그 교정.
      - **SG3b-2-i ✅**(머지 #1174): `projectRows`가 group_header row 삽입·카드 depth·접힘·빈 그룹 규칙·member_count.
-     - **SG3b-2-ii**(남음 — 실제 헤더 픽셀, 조사로 세부 확정): (a) `header_row_h` 메트릭 배선 — `props.CellMetrics` +
-       `AppSession` 필드 + `refreshCellMetrics` 계산 + `slotAt`/`dragTargetSlot`/`rowTop`(caret·배지) **4곳의 `cell_height_px`
-       alias를 신규 메트릭으로 교체**. (b) **인덱스 도메인 통일** — glyph 인코딩 slot을 "압축 카드 인덱스"에서 **row 인덱스**로
-       (§10 함정). (c) 렌더 y 가변화 — `bandFill`·`lowerSidebar`·`rebuild` tint/accent를 `rowTop` 누적으로, 스크롤 메트릭을
-       `contentHeight`로. (d) `.m` 디코드 — **옵션 2 채택**(py_top을 Zig `rowTop`+블록중앙으로 완전 계산해 per-cell 넘겨 `.m`
-       기하를 제거 — `renameCaretRect`·배지가 이미 쓰는 수식이라 정합 단일 출처가 Zig 한 곳으로, 회귀 표면 최소). (e) `view`
-       헤더 밴드+삼각(▾/▸) + `buildSidebarDrawList` 헤더 glyph + `card.depth` 들여쓰기. (f) **macOS 제품 스크린샷 검증**(세로
-       위치는 headless로 안 잡힘).
+     - **SG3b-2-ii**(카드 glyph 완료, 헤더 실제 렌더는 SG3c): (a) `header_row_h` 메트릭 배선 ✅ — `props.CellMetrics` +
+       `AppSession` 필드 + `refreshCellMetrics` 계산 + `slotAt`/`dragTargetSlot`/`rowTop`(caret·배지) 4곳 alias 교체. (b) **인덱스
+       도메인 통일** ✅ — glyph slot을 압축 카드 서수(`active_card_ord`/`close_card_ord`)로 일치(§10 함정). (c) 렌더 y 가변 ✅ —
+       tint/accent를 `rowTop`, 스크롤을 `contentHeight`로(#4·#7), 드래그 row→tab 변환(#2). (d) `.m` 디코드 **옵션 2** ✅ —
+       `applySidebarGlyphPyTop`이 py_top을 Zig `rowTop`+블록중앙으로 계산해 셀 `origin_y`에 싣고 `.m`은 `origin_y+header-scroll`만
+       (code-review #1·3·5·6 해소). (e)(SG3c) `view` 헤더 밴드 `rowTop` + `buildSidebarDrawList` 헤더 삼각(▾/▸)+이름 glyph +
+       `card.depth` 들여쓰기 + **헤더 label borrowed 해소**(`group_header`에 소스 tab 인덱스/dupe — 현재 `tab.group_start` borrow해
+       destroyTab 후 dangling, **code-review #8 UAF 잠복**). (f)(SG3c) **macOS 제품 스크린샷 검증**(create_group으로 헤더가 실제 떠야 가능).
+     **참고: `/code-review max`가 SG3b-2-ii 계획을 findings #1~7의 정확한 해소 경로로 confirmed 검증했고, #1~7은 (a)~(d)에서 전부 닫혔다.**
    - **SG3c — 접기 + 만들기/이름/해제 + 액션·단축키**: 헤더 클릭 → `group_collapsed` 토글 → 재투영·영속.
      `create_group`(기본 키 `Cmd+Opt+G`)·`ungroup` 액션 추가(action.zig `Action`+`parseAction`+`dispatchAppAction` arm+
      `command_catalog` entry) → 팔레트·설정 Input 리바인더·config `keybind` 자동 노출(§7). 우클릭 "새 그룹으로 묶기"/

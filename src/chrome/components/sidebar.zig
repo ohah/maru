@@ -27,7 +27,12 @@ pub const Row = union(enum) {
     /// borrowed라 destroyTab 후 dangling 위험 — code-review #8 UAF 해소: 소스 tab 인덱스를 실어 live 재조회).
     /// depth=이 그룹의 정규화 깊이(SG5-3 중첩 — 1=최상위, 2=중첩, …). 헤더 삼각/이름 glyph는 platform이 (depth-1)*group_indent
     /// 만큼 들여쓴다(소속 카드는 depth*group_indent). 밴드(view)는 depth 무관 전폭(카드 밴드와 동형).
-    group_header: struct { collapsed: bool, label: []const u8, member_count: u16, tab: usize, depth: u8 = 0 },
+    /// has_color=이 그룹에 그룹 색(SG5-2)이 지정됐는가. **기본(무색) 헤더는 밴드(보더라인) 없이 화살표+이름만** 남기고
+    /// (사용자 결정 — docs/sidebar-groups.md §5), 색이 지정된 그룹만 view가 헤더 밴드를 내 lowerSidebar가 그 색으로
+    /// tint한다(색 구분 유지). host(projectRows)가 tab.group_color!=0로 채운다 — chrome은 role 기반이라 RGB를 못 실어
+    /// "밴드를 낼지"만 판단하고, 실제 색 blend는 platform이 tab.group_color로 한다(층 분리). hover/active 밴드는 has_color와
+    /// 무관하게 그대로(상호작용 하이라이트는 보더라인이 아니라 피드백이라 카드와 같은 경로로 유지).
+    group_header: struct { collapsed: bool, label: []const u8, member_count: u16, tab: usize, depth: u8 = 0, has_color: bool = false },
 };
 
 /// row_index가 그룹 헤더 row인가(클릭 시 선택이 아니라 접기 토글 대상). closeButton과 같은 결의 순수 hit-test
@@ -193,10 +198,12 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     // (SG3b-2-ii-e — code-review 잔여). platform lowerSidebar는 이 상대 y로 row를 역산할 때 같은 누적을 쓰고(rowTop 역),
     // 헤더(검색바·아이콘)만큼의 절대 시프트는 .m이 사이드바 셀 py_top에 더한다(sidebar_header_height_px 단일 책임).
 
-    // 그룹 헤더 밴드(SG3): 헤더 row는 얇은 한 줄(header_row_h)의 은은한 배경 밴드로 카드와 구분한다. 접힘/펼침 무관하게
-    // 헤더가 있으면 항상 그린다(삼각+이름 glyph는 platform buildSidebarDrawList가 그 위에 올린다).
+    // 그룹 헤더 밴드(SG3·SG5-2 — 색 있을 때만): 기본(무색) 헤더는 **밴드 없이 화살표+이름만** 남긴다(보더라인 제거 —
+    // 사용자 결정, docs/sidebar-groups.md §5). 그룹 색이 지정된 헤더(has_color)만 얇은 한 줄(header_row_h) 밴드를 내고
+    // lowerSidebar가 그 밴드 색에 그룹 색을 tint해 색 구분을 유지한다(삼각+이름 glyph는 platform이 그 위에 올린다).
+    // hover/active 밴드(아래)는 has_color 무관하게 그대로 — 상호작용 피드백은 보더라인이 아니라 카드와 같은 하이라이트다.
     for (rows, 0..) |r, i| switch (r) {
-        .group_header => try out.append(arena, bandFill(rows, i, w, slot_h, header_row_h, .tab_hover_bg, p.shape)),
+        .group_header => |h| if (h.has_color) try out.append(arena, bandFill(rows, i, w, slot_h, header_row_h, .tab_hover_bg, p.shape)),
         .card => {},
     };
 
@@ -405,9 +412,10 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try std.testing.expectEqual(@as(u32, 40 - 8), card.h); // slot_h - 2×gap
 }
 
-test "sidebar view: group_header 밴드 + 가변 높이 카드 밴드 y(SG3 헤더 밴드·rowTop 누적)" {
-    // SG3: group_header row는 얇은 헤더 밴드(header_row_h)로 그려지고, 그 아래 카드 밴드 y는 **가변 높이 누적**
-    // (rowTop)으로 나온다 — 고정 row*slot_h가 아니라 헤더의 낮은 높이(header_row_h)를 반영(docs/sidebar-groups.md §5).
+test "sidebar view: group_header 밴드 정책 — 무색=밴드 없음(화살표만)·색 있음=tint 밴드·hover 유지(SG5-2/보더라인 제거)" {
+    // 헤더 정책(사용자 결정, docs/sidebar-groups.md §5): **기본(무색) 헤더는 밴드(보더라인) 없이** 화살표+이름만 남기고
+    // (view가 헤더 row에 아무 밴드 op도 안 냄), 그룹 색이 지정된 헤더(has_color)만 얇은 한 줄(header_row_h) 밴드를 낸다
+    // (lowerSidebar가 그 색으로 tint). **hover/active 밴드는 has_color 무관하게 유지** — 상호작용 피드백은 카드와 같은 경로.
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -422,30 +430,45 @@ test "sidebar view: group_header 밴드 + 가변 높이 카드 밴드 y(SG3 헤�
             .backing_height_px = 600,
         },
     };
-    // row0=그룹 헤더(높이 20), row1=활성 카드(40), row2=비활성 카드(40).
-    const rows = [_]Row{
+    // row0=무색 그룹 헤더(has_color=false), row1=활성 카드(40), row2=비활성 카드(40).
+    const rows_nocolor = [_]Row{
         .{ .group_header = .{ .collapsed = false, .label = "frontend", .member_count = 2, .tab = 0 } },
         .{ .card = .{ .tab = 0, .label = "web", .active = true } },
         .{ .card = .{ .tab = 1, .label = "docs", .active = false } },
     };
     var out: std.ArrayList(draw.Op) = .empty;
-    try view(&rows, null, null, p, arena, &out);
+    // 무색·비호버: 헤더 밴드 없음 → 활성 카드 밴드(row1)만. 헤더 y=0에는 아무 밴드도 안 난다(보더라인 제거).
+    try view(&rows_nocolor, null, null, p, arena, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(헤더 기본 밴드 없음)
+    try std.testing.expect(out.items[0].quad.fill_role == .tab_active_bg);
+    try std.testing.expectEqual(@as(i32, 20), out.items[0].quad.rect.y); // row1 y=header_row_h(20) 가변 누적
+    try std.testing.expectEqual(@as(u32, 40), out.items[0].quad.rect.h);
+
+    // 색 지정 헤더(has_color=true): 헤더 밴드(row0, y=0, h=20, tab_hover_bg) + 활성 카드 밴드(row1). lowerSidebar가 tint.
+    const rows_color = [_]Row{
+        .{ .group_header = .{ .collapsed = false, .label = "frontend", .member_count = 2, .tab = 0, .has_color = true } },
+        .{ .card = .{ .tab = 0, .label = "web", .active = true } },
+        .{ .card = .{ .tab = 1, .label = "docs", .active = false } },
+    };
+    out.clearRetainingCapacity();
+    try view(&rows_color, null, null, p, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len); // 헤더 밴드(row0) + 활성 카드 밴드(row1)
-    // 헤더 밴드: row0 → y=0, 높이 header_row_h(20), role tab_hover_bg.
     try std.testing.expect(out.items[0].quad.fill_role == .tab_hover_bg);
     try std.testing.expectEqual(@as(i32, 0), out.items[0].quad.rect.y);
-    try std.testing.expectEqual(@as(u32, 20), out.items[0].quad.rect.h);
-    // 활성 카드 밴드: row1 → y=header_row_h(20)(고정 1×40=40이 아님 — 가변 누적), 높이 40, role tab_active_bg.
+    try std.testing.expectEqual(@as(u32, 20), out.items[0].quad.rect.h); // 헤더 높이(header_row_h)
     try std.testing.expect(out.items[1].quad.fill_role == .tab_active_bg);
     try std.testing.expectEqual(@as(i32, 20), out.items[1].quad.rect.y);
-    try std.testing.expectEqual(@as(u32, 40), out.items[1].quad.rect.h);
 
-    // 호버가 헤더 row(0)를 가리키면 헤더 밴드에 더해 호버 밴드도 그 행(y=0)에 난다.
+    // 무색 헤더 hover(row0): 기본 밴드가 없어도 호버 밴드는 그대로 난다(카드와 같은 하이라이트 피드백 유지).
     out.clearRetainingCapacity();
-    try view(&rows, 0, null, p, arena, &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len); // 헤더(row0) + 활성(row1) + 호버(row0)
-    try std.testing.expect(out.items[2].quad.fill_role == .tab_hover_bg);
-    try std.testing.expectEqual(@as(i32, 0), out.items[2].quad.rect.y); // row 0
+    try view(&rows_nocolor, 0, null, p, arena, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성 카드 밴드(row1) + 헤더 호버 밴드(row0)
+    // 호버 밴드는 헤더 row0(y=0)에 tab_hover_bg로 난다 — 그중 하나가 그 조건을 만족해야 한다.
+    var saw_header_hover = false;
+    for (out.items) |op| {
+        if (op.quad.fill_role == .tab_hover_bg and op.quad.rect.y == 0 and op.quad.rect.h == 20) saw_header_hover = true;
+    }
+    try std.testing.expect(saw_header_hover);
 }
 
 test "sidebar onGroupHeader: 헤더 row만 true(카드·범위 밖 false)" {

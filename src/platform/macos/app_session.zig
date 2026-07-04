@@ -166,9 +166,9 @@ const sidebar_slot_height_ratio_milli: u32 = 5200;
 // 사이드바 상단 헤더(검색바 + 사이드바 접기·view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 3.0(아이콘 줄 +
 // 검색 줄 + 패딩). 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
 const sidebar_header_height_ratio_milli: u32 = 3000;
-// 그룹 헤더 row 높이 = cell 높이 × 1.5(얇은 한 줄 + 세로 패딩; 카드 슬롯 5.2×보다 훨씬 얇다). 가변 높이의 헤더
-// 높이(SG3b-2-ii, docs/sidebar-groups.md §5). 실제 값은 헤더 렌더(SG3b-2-ii-e) macOS 스크린샷으로 조정한다.
-const sidebar_header_row_h_ratio_milli: u32 = 1500;
+// 그룹 헤더 row 높이 = cell 높이 × 3.0(위아래 여백 넉넉히; 카드 슬롯 5.2×보다는 얇다). 가변 높이의 헤더
+// 높이(SG3b-2-ii, docs/sidebar-groups.md §5). 사용자 요청으로 1.5→3.0(위아래 높이 2배, 텍스트 크기는 불변 — glyph는 밴드 중앙).
+const sidebar_header_row_h_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = 0xF0006; // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
@@ -1014,7 +1014,10 @@ const ctx_menu_group_create: usize = ctx_menu_accent_first + tab_accent_labels.l
 const ctx_menu_group_sibling: usize = ctx_menu_group_create + 1; // "형제 그룹으로 분리"(create_sibling_group=같은 depth 형제, SG5-3)
 const ctx_menu_group_ungroup: usize = ctx_menu_group_sibling + 1; // "그룹 풀기"(ungroup) — SG3c 우클릭(단축키/팔레트 공유)
 const ctx_menu_group_color_first: usize = ctx_menu_group_ungroup + 1; // ungroup 다음: "그룹 색: …" 프리셋(SG5-2)
-const ctx_menu_count: usize = ctx_menu_group_color_first + tab_group_color_labels.len; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처)
+// "그룹에서 빼기"(remove_from_group) — **그룹 소속 카드에만** 조건부로 맨 끝에 붙인다(최상위 카드엔 안 뜸). 맨 끝이라
+// 항상 present일 때만 이 인덱스를 차지하고(shorter 메뉴에선 sel이 여기 도달 못 함) 앞 고정 인덱스를 안 흔든다.
+const ctx_menu_group_remove: usize = ctx_menu_group_color_first + tab_group_color_labels.len;
+const ctx_menu_count: usize = ctx_menu_group_remove + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기 슬롯 포함)
 
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
@@ -4438,6 +4441,69 @@ pub const AppSession = struct {
         // 위에 group_start가 없음 = 최상위 카드 — no-op.
     }
 
+    /// 첫 group_start 마커의 tab 인덱스(§2.1: 최상위 = 이 인덱스 **이전** 구간). 마커가 하나도 없으면 null(그룹 전무 =
+    /// 전부 최상위). 연속 파티션이라 한 번 그룹이 시작되면 리스트 끝까지 그룹 안이므로 이 하나로 "최상위 경계"가 정해진다.
+    /// removeFromGroupForTab(빼기 목표 위치)과 우클릭 "그룹에서 빼기" 주입 조건(tabIsInGroup)이 공유한다.
+    fn firstGroupStartIndex(self: *const AppSession) ?usize {
+        for (self.tabs.items, 0..) |t, i| if (t.group_start != null) return i;
+        return null;
+    }
+
+    /// tab이 어느 그룹에 속하는가(§2.1 연속 파티션: 첫 마커 이후 인덱스 = 그룹 안, 마커 카드 자신 포함). 우클릭
+    /// "그룹에서 빼기"를 **그룹 소속 카드에만** 주입하는 조건이자 removeFromGroupForTab no-op 판정과 같은 단일 출처.
+    /// 최상위(첫 마커 이전·그룹 전무)면 false → 메뉴에 항목이 안 뜨고 액션도 no-op.
+    fn tabIsInGroup(self: *const AppSession, tab: *const Tab) bool {
+        const fm = self.firstGroupStartIndex() orelse return false;
+        for (self.tabs.items, 0..) |t, i| if (t == tab) return i >= fm;
+        return false;
+    }
+
+    /// 워크스페이스 **하나만** 자기 그룹에서 빼 완전 최상위(어느 그룹에도 안 속함)로 옮긴다(remove_from_group — 우클릭
+    /// "그룹에서 빼기"·팔레트·config). §2.1: 최상위 = 첫 group_start 마커 **이전** 구간이라, 그 카드를 첫 마커 직전으로
+    /// moveTab한다(중첩 깊이 무관 완전 최상위). ungroup이 그룹 시작 마커를 지워 그룹을 통째 해제하는 반면, 이건 카드 하나만
+    /// 뽑고 그룹은 살린다. 이미 최상위(첫 마커 이전·그룹 전무)면 no-op. 이 카드가 **그룹 시작 마커**면 먼저 그 마커를 다음
+    /// 소속 카드로 **승계**(closeTab 마커 승계와 동형 — group_collapsed/group_depth/group_color 함께)해 그룹을 살린 뒤
+    /// 자기 마커를 떼고 최상위로 옮긴다(다음이 없거나 이미 다른 마커면 승계 불가 → 그룹 소멸, 마커 free). moveTab이 없으면
+    /// (마커 뗀 뒤 이미 최상위 구간이거나 남은 마커 없음) 재투영만 한다.
+    fn removeFromGroupForTab(self: *AppSession, tab: *Tab) void {
+        var idx: ?usize = null;
+        for (self.tabs.items, 0..) |t, i| if (t == tab) {
+            idx = i;
+            break;
+        };
+        const ix = idx orelse return;
+        const fm0 = self.firstGroupStartIndex() orelse return; // 그룹 전무 → no-op
+        if (ix < fm0) return; // 이미 최상위(첫 마커 이전) → no-op(중첩 깊이 무관, tabIsInGroup=false와 동치)
+
+        // 이 카드가 그룹 시작 마커면 그룹이 사라지지 않게 마커를 다음 소속 카드로 승계(closeTab 마커 승계와 동형).
+        // 다음 탭이 이미 자기 group_start(그룹이 이 카드뿐)이거나 마지막 탭이면 승계 대상이 없어 그룹 소멸(마커 free).
+        if (tab.group_start) |marker| {
+            if (ix + 1 < self.tabs.items.len and self.tabs.items[ix + 1].group_start == null) {
+                self.tabs.items[ix + 1].group_start = marker; // 소유권 이전 — tab은 아래서 null화(double-free 방지)
+                self.tabs.items[ix + 1].group_collapsed = tab.group_collapsed;
+                self.tabs.items[ix + 1].group_depth = tab.group_depth; // 중첩 depth 승계(자식은 위치 파생 유지)
+                self.tabs.items[ix + 1].group_color = tab.group_color; // 그룹 색 승계(색은 마커 탭에 산다)
+            } else {
+                self.allocator.free(marker); // 승계 대상 없음 → 그룹 소멸
+            }
+            tab.group_start = null;
+            tab.group_collapsed = false;
+            tab.group_color = 0;
+            tab.group_depth = 1; // 마커 아님으로 복귀(기본값)
+        }
+
+        // 승계 후(또는 마커 아니었으면) 남은 첫 마커 직전으로 옮긴다. 이 카드가 첫 마커였다면 승계로 마커가 ix+1로 내려가
+        // 이미 그 앞(최상위)이 되므로 moveTab 불필요 — 재투영만. moveTab이 tabs/surface/active/rebuild를 처리한다.
+        if (self.firstGroupStartIndex()) |fm| {
+            if (ix > fm) {
+                _ = self.moveTab(ix, fm);
+                return;
+            }
+        }
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
     /// 워크스페이스가 속한 그룹에 공통 색을 지정한다(SG5-2 — 우클릭 "그룹 색: …"). 그 탭 위(자기 포함)에서 가장 가까운
     /// group_start 마커 탭을 찾아 group_color를 세팅한다(ungroupTab과 같은 상향 탐색). 그룹 색은 마커 탭 **하나에만**
     /// 저장하고 소속 카드는 위치 파생으로 그 색을 따른다(별도 저장 없음 — §2.1 위치 파생과 동형). color=0이면 색 해제
@@ -4617,6 +4683,8 @@ pub const AppSession = struct {
             .create_sibling_group => self.createSiblingGroupForTab(self.activeTab()), // SG5-3: 그룹 안 → 같은 depth 형제
             .ungroup => self.ungroupTab(self.activeTab()),
             .rename_group => self.startRenameGroupForTab(self.activeTab()),
+            .remove_from_group => self.removeFromGroupForTab(self.activeTab()), // 이 카드 하나만 최상위로(그룹은 유지)
+
             // Term(가로 탭) 단위: ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
             // cascade), ⌘]/⌘[=다음/이전 Term. 생성 실패는 무시(newTermInActivePane이 errdefer로 원복).
             .new_term => if (!self.tabsBlocked()) {
@@ -6388,6 +6456,9 @@ pub const AppSession = struct {
                             .member_count = self.directCardCount(i, d, depth, matches, searching),
                             .tab = i, // 그룹 시작 원본 탭 인덱스 — 클릭 토글·glyph 라벨 live 재조회의 단일 출처(#8)
                             .depth = d, // 정규화 깊이 — 헤더 삼각 들여쓰기 (depth-1)*group_indent
+                            // 그룹 색(SG5-2)이 있으면 view가 헤더 밴드를 내 색 구분을 유지하고, 없으면 밴드 없이 화살표+이름만
+                            // (보더라인 제거 — 사용자 결정 §5). 실제 색 blend는 lowerSidebar가 tab.group_color로(chrome은 판단만).
+                            .has_color = tab.group_color != 0,
                         },
                     }) catch {};
                 }
@@ -6625,6 +6696,12 @@ pub const AppSession = struct {
                 self.context_menu_items_buf[n] = lbl;
                 n += 1;
             }
+            // "그룹에서 빼기"(remove_from_group) — **그룹 소속 카드에만** 맨 끝에 붙인다(최상위 카드엔 안 뜸 — tabIsInGroup).
+            // ungroup(그룹 통째 해제)과 달리 이 카드 하나만 최상위로 뺀다. 맨 끝 조건부라 앞 고정 인덱스를 안 흔든다(sel==ctx_menu_group_remove).
+            if (self.tabIsInGroup(t.workspace)) {
+                self.context_menu_items_buf[n] = "그룹에서 빼기"; // ctx_menu_group_remove
+                n += 1;
+            }
         };
         self.context_menu_items_len = n;
         return self.context_menu_items_buf[0..n];
@@ -6730,6 +6807,8 @@ pub const AppSession = struct {
                 self.createSiblingGroupForTab(tab); // 형제 그룹으로 분리=같은 depth 형제(단축키 Cmd+Opt+Shift+G·팔레트 공유, SG5-3)
             } else if (sel == ctx_menu_group_ungroup) {
                 self.ungroupTab(tab); // 그룹 풀기(클릭 대상이 속한 그룹의 시작 마커 제거)
+            } else if (sel == ctx_menu_group_remove) {
+                self.removeFromGroupForTab(tab); // 그룹에서 빼기(이 카드 하나만 최상위로 — 그룹 유지). 그룹 소속 카드에만 뜨는 항목
             } else if (sel >= ctx_menu_bg_first and sel < ctx_menu_bg_first + tab_color_presets.len) {
                 tab.background_color = tab_color_presets[sel - ctx_menu_bg_first]; // 배경 tint 프리셋
             } else if (sel >= ctx_menu_accent_first and sel < ctx_menu_accent_first + tab_color_presets.len) {
@@ -15581,6 +15660,65 @@ test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 
     try std.testing.expect(session.tabs.items[0].group_start == null);
 }
 
+test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞)·최상위 no-op·마커 카드 승계·마지막 멤버 소멸(주입 조건)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0, t1, t2, t3] 4개
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+
+    // t1에 그룹 시작 → 연속 파티션으로 group=[t1,t2,t3], t0=최상위.
+    session.createGroupForTab(t1);
+    try std.testing.expect(t1.group_start != null);
+
+    // 주입 조건(tabIsInGroup): 최상위 t0=false, 그룹 소속 t1/t2/t3=true(마커 카드 t1 포함).
+    try std.testing.expect(!session.tabIsInGroup(t0));
+    try std.testing.expect(session.tabIsInGroup(t1));
+    try std.testing.expect(session.tabIsInGroup(t2));
+    try std.testing.expect(session.tabIsInGroup(t3));
+
+    // (A) 최상위 카드 no-op: t0에 빼기 → 순서·그룹 불변.
+    session.removeFromGroupForTab(t0);
+    try std.testing.expectEqual(t0, session.tabs.items[0]); // 제자리
+    try std.testing.expect(t1.group_start != null); // 그룹 그대로
+
+    // (B) 그룹 소속 **멤버** 카드 t2 빼기 → 첫 마커(t1) 직전으로 이동 = 최상위(depth 0). 그룹은 [t1,t3]로 유지.
+    session.removeFromGroupForTab(t2);
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t2)); // 완전 최상위
+    try std.testing.expect(t1.group_start != null); // 그룹 유지(멤버 하나만 빠짐)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t1)); // t1 여전히 그룹 안
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // t3 여전히 그룹 안
+    // t2는 첫 마커(t1)보다 앞: tabs 순서 [t0, t2, t1, t3].
+    try std.testing.expect(!session.tabIsInGroup(t2));
+
+    // (C) 그룹 **시작 마커** 카드 t1 빼기 → 마커를 다음 소속 카드(t3)로 승계해 그룹 유지, t1은 최상위.
+    session.removeFromGroupForTab(t1);
+    try std.testing.expect(t1.group_start == null); // 마커 뗐다
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1)); // t1 최상위
+    try std.testing.expect(t3.group_start != null); // t3이 마커 승계 → 그룹 유지
+    try std.testing.expectEqualStrings("그룹 1", t3.group_start.?); // 이름 승계(소유권 이전, 누수 없음)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // t3 그룹 시작 카드
+
+    // (D) 마지막 멤버(=마커) t3 빼기 → 승계 대상 없어 그룹 소멸(마커 free — testing allocator 누수 감시). 전부 최상위.
+    session.removeFromGroupForTab(t3);
+    try std.testing.expect(t3.group_start == null);
+    try std.testing.expect(session.firstGroupStartIndex() == null); // 그룹 전무
+    try std.testing.expect(!session.tabIsInGroup(t3));
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t3));
+}
+
 test "SG5-3: 2단계 중첩(A>B) — projectRows depth 0/1/2·헤더 depth·member_count·부모 직접카드가 자식 앞 제약" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -17893,11 +18031,12 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     defer session.deinit();
     const tab = session.activeTab();
 
-    // workspace 대상: Rename + Pin + 배경 프리셋(없음·앰버·파랑·초록·빨강·보라) + 바 프리셋(같은 6색) + 그룹(묶기·분리·풀기).
+    // workspace 대상: Rename + Pin + 배경 프리셋(없음·앰버·파랑·초록·빨강·보라) + 바 프리셋(같은 6색) + 그룹(묶기·분리·풀기·색).
+    // "그룹에서 빼기"는 **그룹 소속 카드에만** 뜨므로 미그룹 활성 카드엔 안 나온다(아래 그룹 생성 후 등장 확인).
     session.context_menu_target = .{ .workspace = tab };
     const items = session.buildContextMenuItems();
     try std.testing.expectEqual(@as(usize, 2 + tab_color_presets.len + tab_accent_labels.len + 3 + tab_group_color_labels.len), items.len);
-    try std.testing.expectEqual(ctx_menu_count, items.len); // 버퍼 크기 단일 출처와 일치
+    try std.testing.expectEqual(ctx_menu_group_remove, items.len); // 최상위 카드 → 빼기 미포함(버퍼 최대 ctx_menu_count보다 1 적다)
     try std.testing.expectEqualStrings("Rename", items[0]);
     try std.testing.expectEqualStrings("위치 고정", items[1]); // 미고정 → "위치 고정"
     try std.testing.expectEqualStrings("배경: 없음", items[ctx_menu_bg_first]);
@@ -17913,6 +18052,11 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.chrome_host.context_menu.selected = ctx_menu_group_create;
     session.acceptContextMenu();
     try std.testing.expect(tab.group_start != null);
+    // 그룹 소속이 되면 메뉴 맨 끝에 "그룹에서 빼기"가 뜬다(ctx_menu_group_remove = 버퍼 최대 ctx_menu_count).
+    session.context_menu_target = .{ .workspace = tab };
+    const grouped_items = session.buildContextMenuItems();
+    try std.testing.expectEqual(ctx_menu_count, grouped_items.len);
+    try std.testing.expectEqualStrings("그룹에서 빼기", grouped_items[ctx_menu_group_remove]);
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_ungroup;
     session.acceptContextMenu();

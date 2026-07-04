@@ -9,7 +9,8 @@ chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다
 > **현황**: **SG1~SG5-4 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
 > 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋) +
 > **중첩 그룹(SG5-3, 폴더 트리처럼 그룹 안 그룹 — 위치 파생을 다단계 depth로 일반화)** +
-> **드래그로 중첩 넣기/빼기(SG5-4 — 드롭 컨텍스트 depth로 group_depth 조정: 헤더에 드롭=자식으로 중첩·최상위로 드롭=빼기)**.
+> **드래그로 중첩 넣기/빼기(SG5-4 — 드롭 컨텍스트 depth로 group_depth 조정: 헤더에 드롭=자식으로 중첩·최상위로 드롭=빼기)** +
+> **UX 조정(SG6 — 우클릭 "그룹에서 빼기"(카드 하나만 최상위로)·헤더 기본 밴드 제거(화살표+이름만, 색·hover만 밴드 유지))**.
 > 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
@@ -153,6 +154,7 @@ pub const Row = union(enum) {
         label: []const u8,   // 레거시(이제 tab에서 live 읽어 load-bearing 아님)
         member_count: u16,   // 접힘 시 "▸ name (N)" 표시용 — 이 그룹 **직접 카드 수**(중첩 자식 그룹 안 카드는 제외, SG5-3)
         depth: u8 = 0,       // 정규화 중첩 깊이(SG5-3, 1=최상위·2=중첩·…). 헤더 삼각/이름 glyph를 (depth-1)*group_indent 들여씀(카드는 depth*group_indent). 밴드(view)는 depth 무관 전폭
+        has_color: bool = false, // 그룹 색(SG5-2)이 지정됐는가 — **헤더 밴드를 낼지의 유일 스위치**(아래 헤더 밴드 정책). host가 tab.group_color!=0로 채운다
     },
     card: struct {
         tab: usize,          // 원본 self.tabs 인덱스(visibleTab의 일반화)
@@ -183,6 +185,17 @@ pub fn onGroupHeader(rows: []const Row, row_index: usize) bool;
 테스트 가능). view도 **같은 누적 레이아웃 함수**(`rowTop`)로 밴드 y를 내야 정합이 유지된다(§5.4 — view와 hit-test가
 한 레이아웃 소스 공유). **베이스/결정**: 브라우저 탭 그룹·VSCode 폴더가 헤더를 얇은 한 줄로 둬 촘촘한 게 접이식 그룹의
 핵심 가치라, 균일 격자(구현 단순)보다 **가변 높이(시각 우선)**를 택했다.
+
+**헤더 밴드 정책(사용자 결정 — 기본 보더라인 제거, 색·상호작용은 유지)**: 그룹 헤더는 **기본(무색) 상태에서 밴드(전폭
+회색 배경 = 보더라인)를 그리지 않는다** — 삼각(▾/▸)+이름 텍스트만 배경 없는 줄로 남긴다("보더라인 굳이 필요 없다, 화살표만
+있어도 직관적"). `view`의 헤더 밴드 루프는 **`group_header.has_color`일 때만** 헤더 밴드(`.tab_hover_bg`)를 내고, `lowerSidebar`가
+그 밴드 색에 `tab.group_color`를 tint한다(SG5-2 색 구분은 그대로 유지 — 색 있는 그룹만 밴드가 보이고 그 색을 띤다). `has_color`는
+host(projectRows)가 `tab.group_color!=0`로 채운다(chrome은 role 기반이라 RGB를 못 실어 "밴드를 낼지"만 판단, 실제 blend는 platform).
+**단 hover·active 밴드는 has_color와 무관하게 그대로** — 그건 보더라인이 아니라 **상호작용 피드백**이라 카드와 **같은 경로**로
+유지한다(hover=`hovered_slot`이 헤더 row를 가리키면 view의 호버 루프가 카드와 동일한 `bandFill(.tab_hover_bg)`; 헤더 row는 활성
+탭이 될 수 없어 active 밴드는 카드 전용). 정리: **무색·비호버=밴드 없음(화살표+이름만), 색 지정=그 색 밴드, hover=카드와 같은
+하이라이트.** (헤드리스로 무색·비호버 헤더=밴드 op 0, 색 헤더=밴드 op 1, 호버 헤더=호버 밴드 op 있음을 단언; 색 유지는
+`MARU_FORCE_GROUP`(무색: 밴드 없는 깔끔한 헤더)·`MARU_FORCE_GROUP_COLOR`(파랑 밴드 tint 유지) 제품 스크린샷으로 확인.)
 
 **메트릭 출처(SG3b에서 확정)**: `card_slot_h` = 기존 `props.metrics.sidebar_slot_height_px`(그대로 재사용). `header_row_h` =
 **신규 메트릭** — 헤더 한 줄이므로 `≈ cell_height_px`(+세로 패딩 약간)로 두고 `CellMetrics`에 추가한다(platform이 채움).
@@ -228,6 +241,7 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **형제 그룹으로 분리** | ✅ SG5-3 | 우클릭 "형제 그룹으로 분리" · **단축키 `Cmd+Opt+Shift+G`** · 팔레트 "New Sibling Group" | `create_sibling_group` 액션 → 그 카드에 `group_start` 세팅 + `group_depth=현재 그룹과 같은 depth`(형제, 중첩 아님). 최상위면 depth 1(create_group과 결과 동일). create_group의 미러 — depth 계산만 다르다(§10 tension 해소) |
 | **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename) |
 | **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
+| **그룹에서 빼기** | ✅ | 우클릭 "그룹에서 빼기"(**그룹 소속 카드에만** 노출·최상위 카드엔 안 보임) · 팔레트 "Remove from Group"(기본 키 없음) | `remove_from_group` 액션 → `removeFromGroupForTab`: 그 카드를 **첫 `group_start` 마커 직전**(§2.1 최상위 구간)으로 `moveTab`(중첩 깊이 무관 완전 최상위). ungroup(그룹 통째 해제)과 달리 **이 카드 하나만** 뺀다 — 그룹은 유지(마커 카드면 다음 소속 카드로 마커 **승계** = closeTab과 동형, 마지막 멤버면 그룹 소멸). 이미 최상위면 no-op. 주입 조건 = `tabIsInGroup`(첫 마커 이후 = 그룹 안). 위치 파생이라 별도 소속 편집 없음 |
 | **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그(중첩 자식 그룹 안 포함) | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음 — 드롭 위치의 depth가 곧 카드 depth(자식 그룹 안=자식 depth·최상위=0). 마커 탭 드래그=그룹 통째=SG5 |
 | **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
 | **드래그로 중첩 넣기/빼기** | ✅ SG5-4 | 그룹 헤더를 **다른 그룹 헤더에 드롭=자식으로 중첩**, **카드/최상위에 드롭=형제 재정렬(+얕으면 빼기)** | `groupNestPlan`(헤더 드롭→중첩 계획: target_depth=타겟 depth+1·insert=타겟 subtree 끝)·`moveGroupNesting`(이동+`relevelBlock`으로 subtree 상대 depth 유지)·`moveGroupSibling`(형제 이동+자연 eff releveel로 빼기). 카드 드롭=형제(SG5-1 보존)·헤더 드롭=넣기의 명시적 분리 |
@@ -372,6 +386,15 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
      - **헤드리스 검증**: ①그룹을 다른 그룹 헤더에 드롭→중첩(depth+1, subtree 상대 depth C:1→2·2→3 유지) ②중첩 그룹을 최상위 카드에
        드롭→빼기(depth1, 저장 relevel) ③카드를 자식 그룹 안→자식 depth·최상위→0 ④mouse 통합(헤더→헤더 중첩). 매 케이스 depth·연속
        파티션·트리 연속 단언. **스크린샷 훅** `MARU_FORCE_GROUP_DRAGNEST`(A를 B 헤더에 드롭한 결과 = A가 B 자식으로 들여쓰기, 검증 완료).
+6. **SG6 — 그룹 UX 조정(그룹에서 빼기 + 헤더 밴드 정책) ✅**: 사용자 요청 2건.
+   - **그룹에서 빼기(remove_from_group)**: 카드 하나만 자기 그룹에서 빼 완전 최상위로 옮긴다(§7 표 "그룹에서 빼기" 행).
+     `removeFromGroupForTab`이 그 카드를 첫 `group_start` 마커 직전(최상위 구간)으로 `moveTab`하고, 카드가 마커면 다음 소속
+     카드로 마커를 승계(closeTab 동형)해 그룹을 살린다(마지막 멤버면 소멸). 이미 최상위면 no-op. `action.zig`(Action+parseAction)·
+     `dispatchAppAction`·`command_catalog`("Remove from Group")·우클릭("그룹에서 빼기", `tabIsInGroup`으로 그룹 소속 카드에만
+     주입)에 배선(ungroup의 미러 — ungroup=그룹 통째 해제 vs remove=카드 하나만). 기본 키 없음(저빈도, ungroup과 동일 결).
+   - **헤더 밴드 정책(기본 보더라인 제거)**: §5 "헤더 밴드 정책" — 무색 헤더는 밴드 없이 화살표+이름만, 색 지정 헤더만 밴드
+     (그 색 tint), hover/active는 카드와 같은 경로로 유지(`Row.group_header.has_color` 스위치, `view` 헤더 밴드 루프가 그 값 게이트).
+     헤드리스로 무색=밴드 op 0·색=1·호버=호버 밴드 있음을 단언, `MARU_FORCE_GROUP`(무색 깔끔)·`_COLOR`(색 유지) 스크린샷 검증.
 
 ## 10. 리스크 & 미해결
 

@@ -542,8 +542,9 @@ pub fn view(
     // 제목 — 검색 중이면 "검색: <쿼리><조합중>▏"(accent + caret), 아니면 "Settings" + 폼이 창보다 많으면 sel/total 위치 표식.
     if (state.searching) {
         // 확정 쿼리("검색: " + query)와 IME 조합(preedit)을 나눠 그린다 — 조합 글자는 query 뒤에 같은 accent로 붙여
-        // 입력 가시성을 준다(find의 3-run 모델과 동형). caret은 query 끝(=조합 시작)에 둬 조합 글자를 덮는다(터미널 IME
-        // 커서와 동일 — preedit는 caret 위치에 안 더한다). macOS는 평범한 글자 입력을 IME로 처리하므로 이 조합 표시가 필요하다.
+        // 입력 가시성을 준다(find의 3-run 모델과 동형). caret은 query 끝(=조합 시작)에 둬 조합 글자 위에 겹친다(preedit는
+        // caret 위치에 안 더함 — 단일 줄 append라 뒤 텍스트가 없어 터미널 grid의 삽입/오버레이 구분과 무관, find와 동일).
+        // macOS는 평범한 글자 입력을 IME로 처리하므로 이 조합 표시가 필요하다.
         const committed = try std.fmt.allocPrint(arena, "{s}{s}", .{ search_prompt, state.searchQuery() });
         try modal_box.text(box, box.inner_x, 0, committed, .accent_bar, arena, out);
         const committed_cols = overlay_input.displayCols(committed);
@@ -735,7 +736,7 @@ pub fn view(
 
 /// 검색 입력줄 caret의 셀 rect(backing px) — IME 후보창 위치(platform imeCursorRect)에 쓴다. 검색 중이 아니거나
 /// 레이아웃 불가면 null(platform이 터미널 커서로 폴백). 위치 = 제목 행(0)의 "검색: " + query **끝**(= 조합 시작) —
-/// view의 caret_x와 같은 폭 규약(search_prompt + queryCols, EAW). preedit는 안 더한다(커서가 조합 글자를 덮음).
+/// view의 caret_x와 같은 폭 규약(search_prompt + queryCols, EAW). preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐 그려짐 — 단일 줄 append라 뒤 텍스트 없음).
 pub fn searchCaretRect(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?draw.Rect {
     if (!state.open or state.picking or !state.searching) return null;
     const l = computeLayout(sections, rows, state.selected, p, tk) orelse return null;

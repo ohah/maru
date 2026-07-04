@@ -166,6 +166,9 @@ const sidebar_slot_height_ratio_milli: u32 = 5200;
 // 사이드바 상단 헤더(검색바 + 사이드바 접기·view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 3.0(아이콘 줄 +
 // 검색 줄 + 패딩). 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
 const sidebar_header_height_ratio_milli: u32 = 3000;
+// 그룹 헤더 row 높이 = cell 높이 × 1.5(얇은 한 줄 + 세로 패딩; 카드 슬롯 5.2×보다 훨씬 얇다). 가변 높이의 헤더
+// 높이(SG3b-2-ii, docs/sidebar-groups.md §5). 실제 값은 헤더 렌더(SG3b-2-ii-e) macOS 스크린샷으로 조정한다.
+const sidebar_header_row_h_ratio_milli: u32 = 1500;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = 0xF0006; // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
@@ -1248,6 +1251,9 @@ pub const AppSession = struct {
     // 사이드바 상단 헤더(검색바 + 아이콘 2개) 높이(px) = cell_height × header_ratio. 0이면 헤더 없음. 밴드·카드·
     // hit-test가 이만큼 아래로 시프트되고, .m이 사이드바 셀 py_top에 더한다(chrome props.sidebar_header_height_px로 전달).
     sidebar_header_height_px: u32 = 0,
+    // 그룹 헤더 row 높이(px) = cell_height × header_row_h_ratio(얇은 한 줄). 가변 높이라 카드(slot_h)와 다르다 —
+    // hit-test(slotAt/rowTop/dragTargetSlot의 rowHeight 누적)·렌더가 이 값으로 헤더 행을 짧게 센다. 0=헤더 없음(SG3b-2-ii 전 하위호환).
+    sidebar_header_row_h_px: u32 = 0,
     // 사이드바 세로 스크롤량(backing px) — 워크스페이스 카드가 헤더 아래 뷰포트 높이를 넘으면 휠/트랙패드로 스크롤한다.
     // 카드(밴드·glyph·tint)는 이만큼 위로 밀리고, 헤더는 고정. .m이 사이드바 셀 py_top에서 빼고 헤더 아래로 scissor
     // 클리핑하며(frame.sidebar_scroll_offset_px), GPU quad(밴드·tint·accent)는 lowering이 빼고 헤더 위는 클립한다.
@@ -2016,7 +2022,7 @@ pub const AppSession = struct {
                 // 어긋났다. displaySlotOf로 원본 탭→표시 row로 바꿔 교정하고, 가변 높이 rowTop을 쓴다. 필터로 숨었으면
                 // (rename 중엔 드묾) null → 터미널 커서 폴백.
                 const slot_row = self.displaySlotOf(idx) orelse return null;
-                const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, slot_row, self.sidebar_header_height_px, slot_h, self.cell_height_px, self.sidebar_scroll_offset_px);
+                const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, slot_row, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                 const block_off: i64 = @intCast((slot_h -| line_count * ch) / 2);
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{
@@ -6237,6 +6243,7 @@ pub const AppSession = struct {
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
         self.sidebar_header_height_px = self.cell_height_px * sidebar_header_height_ratio_milli / 1000;
+        self.sidebar_header_row_h_px = self.cell_height_px * sidebar_header_row_h_ratio_milli / 1000; // 그룹 헤더 row(얇은 한 줄; SG3b-2-ii)
         // 상단 타이틀바 띠(신호등·헤더 아이콘 줄, 탭 바는 그 아래). 펼침=한 줄, 접힘=신호등 높이 확보(computeTitlebarStripPx).
         self.titlebar_strip_px = self.computeTitlebarStripPx();
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
@@ -7436,7 +7443,7 @@ pub const AppSession = struct {
                 // 가변 높이 dragTargetSlot → row 인덱스. 드래그는 검색 비활성일 때만 arm되므로(아래 down 처리) sidebar_rows가
                 // 전체 탭과 1:1(카드만)이라 row 인덱스 = 원본 탭 = moveTab 인자로 그대로 유효하다. 헤더가 섞이는 SG4(드래그
                 // 넣기/빼기)에서 row→tab 변환(visibleTab)과 그룹 경계 clamp를 넣는다.
-                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.cell_height_px, self.sidebar_scroll_offset_px);
+                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                 // moveTab이 그룹(고정/비고정)으로 clamp한 **실제 안착 인덱스**를 단일 출처로 받는다(여기서 따로
                 // pre-clamp하지 않는다 — countPinnedTabs O(n)가 drag당 1회로 줄고, 이중-clamp 일치 가정이 사라진다).
                 // sidebar_drag_index를 안착 인덱스로 갱신해 다음 delta가 *그* 탭을 재정렬한다. no-op이면 from을 그대로 반환.
@@ -11698,7 +11705,7 @@ pub const AppSession = struct {
     fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
         // 가변 높이(카드=slot_h·헤더=cell_h). 반환은 row 인덱스(호출처 visibleTab이 row→tab). header_row_h는 SG3b-2에서
         // 헤더 row가 실제로 생길 때 의미를 갖고, 지금(카드만)은 안 쓰인다 — cell_height_px를 근사로 넘긴다.
-        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.cell_height_px, self.sidebar_scroll_offset_px);
+        return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
     }
 
     /// 사이드바 콘텐츠(표시 카드 전체 높이)가 헤더 아래 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
@@ -13318,6 +13325,7 @@ pub const AppSession = struct {
             .cell_height_px = self.cell_height_px,
             .sidebar_width_px = self.sidebar_width_px,
             .sidebar_slot_height_px = self.sidebar_slot_height_px,
+            .sidebar_header_row_h_px = self.sidebar_header_row_h_px,
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
             .chrome_minimal = self.chrome_minimal,
@@ -13728,7 +13736,7 @@ pub const AppSession = struct {
                 };
                 if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다
                 const cs = (try Local.chordStr(resolver, Action{ .select_tab = abs }, arena)) orelse continue;
-                const y = sidebar.rowTop(self.sidebar_rows.items, s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.cell_height_px, self.sidebar_scroll_offset_px);
+                const y = sidebar.rowTop(self.sidebar_rows.items, s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                 if (y + slot_h <= header_h or y >= vp_bottom) continue; // 헤더 위로 스크롤·뷰포트 아래로 벗어난 카드 생략(render scissor와 정합)
                 try badges.append(arena, .{ .rect = .{ .x = 0, .y = @intCast(@max(y, header_h)), .w = self.sidebar_width_px, .h = self.sidebar_slot_height_px }, .chord = cs });
             }

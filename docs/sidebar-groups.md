@@ -6,8 +6,9 @@
 사이드바 자체(카드 레이아웃·헤더·검색·드래그·스크롤)의 단일 출처는 [탭·split·레이아웃 전략](tabs-splits-layout.md)이고,
 chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다. 이 문서는 그 위에 **그룹**을 얹는 설계만 다룬다.
 
-> **현황**: **SG1~SG4 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
-> 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1). **그룹 색(SG5-2)·(선택)중첩** 만 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
+> **현황**: **SG1~SG5-2 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
+> 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋).
+> **(선택)중첩(SG5-3)** 만 후속(§9)이다. 구현이 진행되면 이 문서를 코드와 맞춘다
 > ([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
@@ -218,7 +219,7 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
 | **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그 | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음. 마커 탭 드래그=그룹 통째=SG5 |
 | **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
-| 그룹 색 | 후속 SG5-2 | 우클릭 프리셋 / 헤더·막대 색 | `group_start` 탭에 색 저장·색 토큰 |
+| 그룹 색 | ✅ SG5-2 | 우클릭 "그룹 색: …" 프리셋(카드 색과 같은 팔레트) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략) |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
 세 경로에 **자동으로** 뜬다 — (1) 커맨드 팔레트, (2) 설정 화면(⌘,) Input 섹션의 **키바인딩 리바인더**(행 클릭 → 녹음
@@ -303,7 +304,16 @@ union + `parseAction` + `dispatchAppAction` arm + `command_catalog` entry(SG3c�
      `moveGroupRange`(구간을 블록으로 그룹 경계에만 삽입 — 파티션 위반 불가능)·`sidebarGroupDropBoundary`(드롭 row→그룹
      경계, 항상 경계 clamp)·헤더 클릭 vs 드래그 threshold 구분(mouseDown arm→미달=접기·초과=이동). SG4의 마커 탭 가드를
      실제 이동으로 대체. 헤드리스 3테스트. 한계: 핀+그룹 조합·floating 미리보기(선택) 미구현.
-   - **SG5-2(후속) — 그룹 색**: 헤더·소속 카드 공통 색(브라우저 탭 그룹식). `group_start` 탭에 색 저장·우클릭 프리셋.
+   - **SG5-2 ✅ — 그룹 색**: 헤더·소속 카드 공통 색(브라우저 탭 그룹식). `Tab.group_color`(?u32→u32, 0=색 없음)를
+     **그룹 시작 마커 탭 하나에만** 저장하고 소속 카드는 위치 파생으로 그 색을 따른다(별도 저장 없음, §2.1 동형). 나타나는 곳:
+     (a) **헤더 밴드 tint** — `lowerSidebar`가 group_header 밴드(.tab_hover_bg) 색에 그룹 색을 **카드 배경 tint와 같은 blend
+     경로·같은 알파**로 섞는다(층 분리 — 개별 카드 background_color와 다른 row라 안 겹침). (b) **소속 카드 좌측 accent 막대** —
+     `rebuildSidebar` per-tab 루프가 순회 중 위 헤더의 색을 기억해 카드 막대에 싣는다. 막대 색 우선순위 = 개별 `accent_color` >
+     그룹 색 > 활성 기본 accent > 없음(개별 지정이 그룹 색보다 명시적). 설정 = 우클릭 "그룹 색: …" 프리셋(카드 색과 같은
+     `tab_color_presets` 팔레트·`setGroupColorForTab`이 소속 그룹 마커에 세팅, 그룹 밖이면 no-op). 직렬화 = workspace.v1
+     `group-color` 스칼라(비영만 group-start 블록에 쓰고 0=키 생략 — additive·round-trip 고정, 옛 리더 미지 키 skip으로 양쪽 호환).
+     헤드리스: projectRows/렌더가 헤더 밴드·카드 막대에 그 색을 싣는지 gpu_quad 단언 + workspace.v1 round-trip + 색 없는 그룹
+     기본 폴백. **제품 스크린샷 검증 완료**(`MARU_FORCE_GROUP_COLOR=1` — 헤더 밴드 파란 tint + 소속 카드 파란 막대·최상위 카드 무색).
    - **SG5-3(선택) — 중첩 그룹**: `depth>1`(그룹 안 그룹). 위치 파생 다단계 확장, 실수요 확인 전 보류(YAGNI).
 
 ## 10. 리스크 & 미해결

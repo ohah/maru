@@ -2098,17 +2098,22 @@ fn drawPreeditCells(pen: types.Style, preedit_bytes: []const u8, row_cells: []ty
 /// 두고 합성 버퍼(viewport_cells 재사용)에만 그린다. 커서는 조합 끝으로 옮겨 보여(다음 글자
 /// 위치) 입력기 사용감을 따른다.
 ///
-/// 동작(오버레이): 조합 글자를 커서 칸부터 덮어쓴다 — 커서 뒤에 있던 내용(앱이 그린 자동완성
-/// 고스트 등)은 가려진다. 합성 버퍼에만 그리는 것이라 실제 셀 그리드·셸 상태는 불변이고,
-/// 확정 순간 셸/앱이 다시 그려 화면이 자연스럽게 이어진다.
+/// 동작(삽입형 미리보기 + 고스트 예외): 줄 가운데에서 조합하면 커서 뒤 글자들을 조합 폭만큼
+/// 오른쪽으로 밀고 그 자리에 조합 글자를 넣어, 확정 후 셸이 그릴 모습("가나다"의 '나' 앞에서
+/// 조합 → "가[라]나다")을 조합 중에도 미리 보여준다. 단 커서 뒤 콘텐츠가 앱이 그린 인라인 자동완성
+/// 고스트(faint/SGR 2)면 밀지 않고 오버레이로 덮는다. 합성 버퍼에만 그리는 것이라 실제 셀 그리드·
+/// 셸 상태는 불변이고, 확정 순간 셸/앱이 다시 그려 화면이 자연스럽게 이어진다.
 ///
-/// 베이스/결정: 사실상 표준(Ghostty·iTerm2·Terminal.app)과 동일한 오버레이이며, 영문 입력과도
-/// 일관된다 — 영문은 키마다 즉시 commit돼 앱이 자기 고스트를 지우고, 한글은 조합 글자가 같은
-/// 자리를 덮어 시각적으로 같은 결과("덮여 사라진 듯")가 된다. 과거 Maru는 '삽입형 미리보기'
-/// (커서 뒤 글자를 조합 폭만큼 오른쪽으로 밀어 "가[라]나다")를 택했으나, 조합 중 텍스트는 앱에
-/// 미전송이라 앱이 그린 자동완성 고스트까지 '보존할 뒤 글자'로 오인해 옆으로 밀어 남기는
-/// 부작용이 있었다(영문은 즉시 사라지는데 한글만 잔존). 사용자 요청으로 표준 오버레이로 전환해
-/// 영문과 동작을 맞춘다.
+/// 베이스/결정: 삽입형 미리보기는 셸 insert-mode 편집 결과와 시각적으로 일치한다(줄 중간 삽입을
+/// 조합 중에도 그대로 보여준다 — 사용자 요청). 과거 순수 삽입형은 앱이 커서 뒤에 그린 인라인 자동완성
+/// 고스트까지 '보존할 뒤 글자'로 오인해 옆으로 밀어 잔상을 남겼다 — 조합 중 텍스트는 확정 전까지
+/// 앱에 미전송이라 앱이 고스트를 안 지우기 때문이다(영문은 키 즉시 commit으로 앱이 고스트를 지워
+/// 잔상이 없다). 그래서 한때 통째 오버레이로 뒀으나, 그러면 줄 중간 삽입이 "덮어쓰기"처럼 보였다.
+/// 정공법: **딱 고스트 케이스만** 예외로 오버레이한다. Claude Code 등은 인라인 고스트를 Ink
+/// dimColor(=chalk dim=SGR 2 faint)로 그리므로(바이너리 확인), 커서에서 시작하는 후행 콘텐츠 run이
+/// 전부 faint(`style.dim`)면 고스트로 보고 덮는다. 진짜 편집 텍스트는 일반 intensity라 dim이 아니어서
+/// 삽입형으로 밀린다 — 둘을 dim 한 플래그로 정확히 가른다(고스트를 색으로 그리는 셸 자동완성은
+/// 이 예외에 안 걸려 밀리며, 그건 의도된 범위다). 근거: [key-input-and-shortcuts.md] IME/preedit 절.
 fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.RenderSnapshot {
     const needed = core.cellCount(self.size);
     if (self.viewport_cells.len != needed) {
@@ -2136,18 +2141,68 @@ fn snapshotWithPreedit(self: *TerminalCore, preedit_bytes: []const u8) types.Ren
 
     const row_cells = self.viewport_cells[@as(usize, row) * cols ..][0..cols];
 
-    // 오버레이: 조합 글자를 커서 칸부터 덮어쓴다. 커서 뒤 내용(앱이 그린 자동완성 고스트 등)은
-    // 가려지고, 확정되면 셸/앱이 다시 그린다. draw_col은 조합 끝으로 전진해 커서 표시 위치가 된다.
+    // 커서 뒤(포함)의 마지막 콘텐츠 칸. 빈 칸은 codepoint==' ' & 비-continuation이고, wide의
+    // 뒤칸(continuation)도 콘텐츠로 친다(앞 base와 한 쌍이라 같이 밀려야 한다).
+    const last_content: ?u16 = blk: {
+        var found: ?u16 = null;
+        var i: u16 = cursor_col;
+        while (i < cols) : (i += 1) {
+            if (row_cells[i].codepoint != ' ' or row_cells[i].continuation) found = i;
+        }
+        break :blk found;
+    };
+
+    // 앱이 커서 뒤에 그린 인라인 자동완성 고스트 감지 — 딱 이 케이스만 삽입형 예외로 오버레이한다.
+    // 커서에서 시작하는 후행 콘텐츠 run이 전부 faint(SGR 2 → style.dim)면 앱 고스트로 본다. Claude
+    // Code는 인라인 고스트를 Ink dimColor(=chalk dim=SGR 2 faint)로 그린다(바이너리 확인). continuation
+    // 칸은 base 스타일을 따르므로 건너뛰고, 고스트 내부 공백도 무시한다. dim 아닌 실 콘텐츠를 하나라도
+    // 만나면(=진짜 편집 텍스트) 고스트가 아니고, 후행에 dim 콘텐츠가 아예 없어도 고스트가 아니다.
+    const trailing_is_ghost: bool = blk: {
+        const lc = last_content orelse break :blk false;
+        var saw_dim_content = false;
+        var i: u16 = cursor_col;
+        while (i <= lc) : (i += 1) {
+            const c = row_cells[i];
+            if (c.continuation) continue;
+            if (c.codepoint == ' ') continue;
+            if (!c.style.dim) break :blk false; // dim 아닌 실 콘텐츠 → 고스트 아님
+            saw_dim_content = true;
+        }
+        break :blk saw_dim_content;
+    };
+
+    // 삽입형으로 그릴 수 있는 조건(고스트가 아닐 때만): 조합 글자가 행에 들어가고(커서+폭 ≤ cols),
+    // 뒤 콘텐츠를 밀어도 행 밖으로 잘리지 않는다(마지막 콘텐츠+폭 < cols). 아니면 오버레이로 폴백한다
+    // — 잘려 사라지는 것보다 가리는 편이 덜 혼란스럽다.
+    const insert_ok = !trailing_is_ghost and
+        cursor_col < cols and
+        @as(u32, cursor_col) + @as(u32, preedit_width) <= @as(u32, cols) and
+        (last_content == null or @as(u32, last_content.?) + @as(u32, preedit_width) < @as(u32, cols));
+
+    if (insert_ok) {
+        // 커서 뒤 콘텐츠 [cursor_col, lc]를 preedit_width칸 오른쪽으로 민다. @memmove가 겹침을
+        // 안전하게 처리한다(insert_ok가 lc+preedit_width < cols를 보장 — 목적지가 행 안).
+        if (last_content) |lc| {
+            @memmove(
+                row_cells[cursor_col + preedit_width .. lc + 1 + preedit_width],
+                row_cells[cursor_col .. lc + 1],
+            );
+        }
+    }
+
+    // 조합 글자를 커서 칸부터 그린다. 삽입형이면 위에서 민 빈자리에, 고스트/폴백이면 덮어쓴다.
+    // draw_col은 조합 끝으로 전진해 커서 표시 위치가 된다.
     var draw_col = cursor_col;
     drawPreeditCells(self.screen.pen, preedit_bytes, row_cells, &draw_col, self.ambiguous_wide);
-    // 오버레이가 wide glyph를 절반만 덮으면 base/continuation 짝이 깨진다. 짝 잃은 칸을 비워 렌더가
-    // 반쪽 glyph(base 없는 continuation, 또는 continuation 없는 wide base)를 그리지 않게 한다. 한글은
-    // 항상 wide 음절이라 무관 — 좁은 조합 글자나 커서가 continuation 칸(CUF/CHA)에 있을 때만 발생.
+    // 삽입/오버레이가 wide glyph를 절반만 밀거나 덮으면 base/continuation 짝이 깨진다. 짝 잃은 칸을
+    // 비워 렌더가 반쪽 glyph(base 없는 continuation, 또는 continuation 없는 wide base)를 그리지 않게
+    // 한다. 한글은 항상 wide 음절이라 삽입형 정상 경로에선 무관 — 좁은 조합 글자·커서가 continuation
+    // 칸(CUF/CHA)에 걸칠 때·고스트 오버레이에서만 발생.
     if (cursor_col > 0 and row_cells[cursor_col - 1].width == 2)
-        row_cells[cursor_col - 1] = .{}; // 좌측: 짝(cursor_col)을 preedit이 덮어 잘린 wide base
+        row_cells[cursor_col - 1] = .{}; // 좌측: 짝(cursor_col)이 밀리거나 덮여 잘린 wide base
     if (draw_col < cols and row_cells[draw_col].continuation)
-        row_cells[draw_col] = .{}; // 우측: base를 preedit이 덮어 짝 잃은 orphan continuation
-    clearTruncatedWideBase(row_cells); // 끝칸에 wide base만 남으면(조합/원본 잘림) 정리
+        row_cells[draw_col] = .{}; // 우측: base가 밀리거나 덮여 짝 잃은 orphan continuation
+    clearTruncatedWideBase(row_cells); // 끝칸에 wide base만 남으면(삽입/조합/원본 잘림) 정리
 
     return .{
         .size = self.size,

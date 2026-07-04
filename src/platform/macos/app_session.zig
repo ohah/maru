@@ -7440,14 +7440,14 @@ pub const AppSession = struct {
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2 and self.sidebar_drag_index < self.tabs.items.len) {
-                // 가변 높이 dragTargetSlot → row 인덱스. 드래그는 검색 비활성일 때만 arm되므로(아래 down 처리) sidebar_rows가
-                // 전체 탭과 1:1(카드만)이라 row 인덱스 = 원본 탭 = moveTab 인자로 그대로 유효하다. 헤더가 섞이는 SG4(드래그
-                // 넣기/빼기)에서 row→tab 변환(visibleTab)과 그룹 경계 clamp를 넣는다.
-                const raw_target = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-                // moveTab이 그룹(고정/비고정)으로 clamp한 **실제 안착 인덱스**를 단일 출처로 받는다(여기서 따로
-                // pre-clamp하지 않는다 — countPinnedTabs O(n)가 drag당 1회로 줄고, 이중-clamp 일치 가정이 사라진다).
-                // sidebar_drag_index를 안착 인덱스로 갱신해 다음 delta가 *그* 탭을 재정렬한다. no-op이면 from을 그대로 반환.
-                self.sidebar_drag_index = self.moveTab(self.sidebar_drag_index, raw_target);
+                // dragTargetSlot은 **row 인덱스**(그룹 헤더 포함 가능)를 돌려주므로 visibleTab으로 원본 탭 인덱스로 변환한다
+                // (code-review #2 — 옛 코드는 row 인덱스를 moveTab에 tab으로 직접 넣어, 헤더가 섞이면 헤더 수만큼 어긋난 엉뚱한
+                // 탭을 옮겼다). 헤더 row에 드롭하면 visibleTab=null → 재정렬 skip(그 프레임 유지). 그룹 경계 삽입(넣기/빼기)의
+                // 정식 처리는 SG4. moveTab이 그룹(고정/비고정)으로 clamp한 실제 안착 인덱스를 단일 출처로 돌려준다.
+                const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+                if (self.visibleTab(raw_row)) |target_tab| {
+                    self.sidebar_drag_index = self.moveTab(self.sidebar_drag_index, target_tab);
+                }
             } else if (kind == 3) {
                 self.sidebar_drag_active = false; // up: 드래그 종료
             }
@@ -11711,7 +11711,10 @@ pub const AppSession = struct {
     /// 사이드바 콘텐츠(표시 카드 전체 높이)가 헤더 아래 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.
     /// 순수 산술은 sidebarMaxScrollPx에 둬(헤드리스 단위 테스트) self는 필드만 떠 넘긴다.
     fn sidebarMaxScroll(self: *const AppSession) u32 {
-        return sidebarMaxScrollPx(self.sidebar_slot_height_px, self.sidebar_rows.items.len, self.backing_height_px, self.sidebar_header_height_px);
+        // 가변 높이(카드=slot_h·헤더=header_row_h): 콘텐츠 높이를 rows.len*slot_h 대신 contentHeight 누적으로 구한다
+        // (code-review #7 — 헤더를 slot_h로 세면 over-travel). 카드만이면 rows.len*slot_h와 같아 동작 보존.
+        const content_h = chrome.components.sidebar.contentHeight(self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px);
+        return sidebarMaxScrollPx(content_h, self.backing_height_px, self.sidebar_header_height_px);
     }
 
     /// 사이드바 스크롤 오프셋을 [0, sidebarMaxScroll]로 잡는다. 탭 추가/삭제·검색 필터·resize·휠로 콘텐츠/뷰포트가
@@ -12103,12 +12106,10 @@ pub const AppSession = struct {
     /// 사이드바 세로 스크롤의 최대 오프셋(backing px) — 표시 카드 전체 높이가 헤더 아래 뷰포트를 넘는 양. 순수 함수라
     /// 헤드리스 단위 테스트 가능. content = 표시 탭 수 × 슬롯 높이, viewport = backing 높이 − 헤더(카드 아래 "+"는
     /// 헤더로 이동해 콘텐츠에 없음). content ≤ viewport(또는 슬롯 0)면 0(스크롤 불필요). u64로 계산해 곱셈 overflow 회피.
-    fn sidebarMaxScrollPx(slot_height_px: u32, visible_count: usize, backing_height_px: u32, header_height_px: u32) u32 {
-        if (slot_height_px == 0) return 0;
-        const content: u64 = @as(u64, visible_count) * @as(u64, slot_height_px);
+    fn sidebarMaxScrollPx(content_height_px: u32, backing_height_px: u32, header_height_px: u32) u32 {
         const viewport: u64 = if (backing_height_px > header_height_px) backing_height_px - header_height_px else 0;
-        if (content <= viewport) return 0;
-        return @intCast(@min(content - viewport, @as(u64, std.math.maxInt(u32))));
+        if (content_height_px <= viewport) return 0;
+        return @intCast(@min(@as(u64, content_height_px) - viewport, @as(u64, std.math.maxInt(u32))));
     }
 
     /// 스크롤바 thumb 기하(보이는 영역 내 y offset·높이, backing px) — 순수 함수라 단위 테스트 가능. sb_count==0
@@ -12455,7 +12456,7 @@ pub const AppSession = struct {
         const max_scroll = self.sidebarMaxScroll();
         if (max_scroll == 0) return; // 안 넘침 — 스크롤바 없음
         const view_px: f32 = @floatFromInt(viewport_h);
-        const content_px: f32 = @as(f32, @floatFromInt(self.sidebar_rows.items.len)) * @as(f32, @floatFromInt(slot_h));
+        const content_px: f32 = @floatFromInt(chrome.components.sidebar.contentHeight(self.sidebar_rows.items, slot_h, self.sidebar_header_row_h_px)); // 가변 높이(code-review #7)
         const min_thumb: f32 = @max(view_px * 0.04, 18.0);
         var thumb_h: f32 = if (content_px > 0) view_px * view_px / content_px else view_px;
         if (thumb_h < min_thumb) thumb_h = min_thumb;
@@ -24864,18 +24865,18 @@ test "pendingPasteRetarget: 빈 큐는 활성 surface로 고정, 잔여 있으�
 }
 
 test "sidebarMaxScrollPx: 콘텐츠가 헤더 아래 뷰포트를 넘는 양(스크롤 불필요면 0, overflow 안전)" {
-    // 슬롯 0이면 항상 0(렌더 전 degenerate).
-    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(0, 100, 600, 60));
-    // viewport = backing(600) − header(60) = 540. content = 5 × 80 = 400 ≤ 540 → 0(안 넘침).
-    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(80, 5, 600, 60));
-    // content = 10 × 80 = 800 > 540 → max = 800 − 540 = 260.
-    try std.testing.expectEqual(@as(u32, 260), AppSession.sidebarMaxScrollPx(80, 10, 600, 60));
-    // 정확히 뷰포트와 같으면 0(경계). content = 540, viewport 540.
-    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(54, 10, 600, 60));
+    // content 0이면 항상 0(빈 사이드바). 이제 content_height_px를 직접 받는다(가변 높이라 count*slot_h 대신 contentHeight 누적).
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(0, 600, 60));
+    // viewport = backing(600) − header(60) = 540. content 400 ≤ 540 → 0(안 넘침).
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(400, 600, 60));
+    // content 800 > 540 → max = 800 − 540 = 260.
+    try std.testing.expectEqual(@as(u32, 260), AppSession.sidebarMaxScrollPx(800, 600, 60));
+    // 정확히 뷰포트와 같으면 0(경계). content 540, viewport 540.
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(540, 600, 60));
     // 헤더가 backing보다 크면 viewport 0 → content 전부가 스크롤 범위(degenerate but 안전, 음수 언더플로 없음).
-    try std.testing.expectEqual(@as(u32, 160), AppSession.sidebarMaxScrollPx(80, 2, 50, 60));
-    // 탭 0이면 content 0 → 0.
-    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(80, 0, 600, 60));
+    try std.testing.expectEqual(@as(u32, 160), AppSession.sidebarMaxScrollPx(160, 50, 60));
+    // content 0이면 0.
+    try std.testing.expectEqual(@as(u32, 0), AppSession.sidebarMaxScrollPx(0, 600, 60));
 }
 
 test "scrollbarThumbGeom: null without scrollback, thumb size/position track view_offset" {

@@ -1491,6 +1491,16 @@ pub const AppSession = struct {
     // 커서 아래 row로 갱신하고, 바뀌면 rebuildSidebar가 그 row에 .drop_zone 밴드를 그린다(접힌 그룹 헤더에 드롭할 때
     // "이 그룹에 들어간다"를 헤더 밴드로 미리 보인다 — pane grip 드래그의 pane_drop_slot과 동형). up/취소면 null.
     sidebar_drop_slot: ?usize = null,
+    // 사이드바 그룹 헤더 드래그(SG5-1) — 헤더를 잡아 그 그룹(마커 탭 + 소속 카드) 전체를 하나의 연속 구간으로 재정렬.
+    // 헤더 mouseDown은 접기 토글이므로 **클릭 vs 드래그를 threshold로 구분**한다: down에서 후보로 arm(armed=true)만 하고
+    // (down y 저장), 이어지는 drag가 threshold를 넘으면 active=true로 승격해 그룹 통째 이동, up까지 threshold 미달이면
+    // 접기 토글(현 동작 보존). marker=드래그 중 그룹의 마커(시작) 탭 인덱스(moveGroupRange가 이동을 따라 갱신), slot=arm
+    // 시점 헤더 row(threshold 미달 up에서 이 slot을 토글). 카드 드래그(sidebar_drag_*)·pane grip 드래그와 시작 위치로 구분.
+    sidebar_group_drag_armed: bool = false,
+    sidebar_group_drag_active: bool = false,
+    sidebar_group_drag_marker: usize = 0,
+    sidebar_group_drag_slot: usize = 0,
+    sidebar_group_drag_down_y: f64 = 0,
     // per-pane Term 탭 드래그 재정렬 상태(PR-E). down이 탭(✕ 아님)에서 시작하면 active=true가 되고, drag(kind 2)
     // 가 같은 pane 바 안에서 타겟 탭으로 live 재정렬(pane.terms rotateMove), up(kind 3)이 끝낸다. drag_pane은
     // 소스 pane(heap-pin이라 드래그 동안 안정), drag_index는 드래그 탭의 현재 인덱스(이동을 따라간다).
@@ -4020,6 +4030,131 @@ pub const AppSession = struct {
                 return @min(m + 1, len - 1);
             },
         }
+    }
+
+    // ── SG5-1: 그룹 통째 드래그(헤더/마커 카드를 잡아 그룹 전체를 재정렬) ─────────────────────────────────────
+    // docs/sidebar-groups.md §9 SG5·§2.1 연속 파티션. 그룹은 self.tabs 순서 위의 "[마커, 다음 마커) 연속 구간"이므로
+    // 그룹 이동 = 그 구간을 **하나의 블록으로** 다른 그룹 경계(다른 group_start 인덱스·최상위 다음·끝)에 끼우는 것이다.
+    // 삽입 위치를 항상 그룹 경계로 clamp하면(sidebarGroupDropBoundary) 어떤 이동이든 그룹이 다른 그룹을 관통해 쪼개지지
+    // 않아 연속 파티션 불변식이 유지된다(그룹 중간엔 다른 group_start가 안 들어간다).
+
+    /// 마커 탭 m에서 시작하는 그룹 구간 [m, j)(j=다음 group_start 또는 끝, §2.1 연속 파티션)를 **하나의 블록으로**
+    /// insert_before 경계(다른 그룹 시작 인덱스 또는 len)에 옮긴다. 구간 내부 순서(마커+소속 카드)는 유지되고, 삽입
+    /// 위치가 항상 그룹 경계라 옮긴 뒤에도 모든 그룹이 [마커, 다음 마커) 연속 구간으로 남는다(파티션 위반 불가). insert_before
+    /// 가 구간 [m, j] 안이면 제자리라 no-op. tabs/surface_ptrs를 함께 재배열하고(stablePartitionPinned와 같은 임시 버퍼),
+    /// active_tab은 가리키던 *Tab을 추적해 새 인덱스로 보정한다(surface_ptrs.items는 app_window.tabs와 같은 backing이라
+    /// in-place memcpy면 재바인딩 불요 — moveTab과 동형). 성공 시 옮긴 그룹의 **새 마커 인덱스**를 반환(드래그 라이브-
+    /// 팔로우가 다음 프레임 기준을 갱신), no-op이면 m 그대로. **주의(§10 한계)**: pin+그룹 조합은 SG4처럼 범위 밖 —
+    /// 그룹이 고정/비고정 파티션을 가로지르면 고정 프리픽스 불변식은 보장하지 않는다(그룹 이동은 그룹 경계만 본다).
+    fn moveGroupRange(self: *AppSession, m: usize, insert_before: usize) usize {
+        const len = self.tabs.items.len;
+        if (m >= len or self.tabs.items[m].group_start == null) return m; // m은 그룹 시작 마커여야 한다
+        var j = m + 1;
+        while (j < len and self.tabs.items[j].group_start == null) j += 1; // 구간 [m, j)
+        const range_len = j - m;
+        if (insert_before > len) return m;
+        if (insert_before >= m and insert_before <= j) return m; // 제자리(자기 구간·경계) — no-op
+        // 구간 제거 후 Rest에서의 삽입 위치: 구간 위(≤m)면 그대로, 구간 아래(≥j)면 range_len만큼 앞당김.
+        const rest_insert: usize = if (insert_before <= m) insert_before else insert_before - range_len;
+
+        const active_ptr: ?*Tab = if (self.app_window.active_tab < len) self.tabs.items[self.app_window.active_tab] else null;
+        var new_tabs = self.allocator.alloc(*Tab, len) catch return m; // 실패 시 이동 생략(순서 불변)
+        defer self.allocator.free(new_tabs);
+        var new_surfaces = self.allocator.alloc(*maru.session.Surface, len) catch return m;
+        defer self.allocator.free(new_surfaces);
+        // Rest = tabs[0..m] ++ tabs[j..]를 순서대로 훑되, Rest 논리 인덱스가 rest_insert에 닿으면 구간 [m,j)를 끼운다(insert-before).
+        var w: usize = 0;
+        var new_marker: usize = 0;
+        var rest_idx: usize = 0;
+        var src: usize = 0;
+        while (src < len) : (src += 1) {
+            if (src >= m and src < j) continue; // 구간은 건너뛴다(따로 삽입)
+            if (rest_idx == rest_insert) { // 이 Rest 원소 앞에 구간 삽입
+                new_marker = w;
+                var k: usize = m;
+                while (k < j) : (k += 1) {
+                    new_tabs[w] = self.tabs.items[k];
+                    new_surfaces[w] = self.surface_ptrs.items[k];
+                    w += 1;
+                }
+            }
+            new_tabs[w] = self.tabs.items[src];
+            new_surfaces[w] = self.surface_ptrs.items[src];
+            w += 1;
+            rest_idx += 1;
+        }
+        if (rest_idx == rest_insert) { // Rest 끝에 삽입(rest_insert == rest_len)
+            new_marker = w;
+            var k: usize = m;
+            while (k < j) : (k += 1) {
+                new_tabs[w] = self.tabs.items[k];
+                new_surfaces[w] = self.surface_ptrs.items[k];
+                w += 1;
+            }
+        }
+        @memcpy(self.tabs.items, new_tabs);
+        @memcpy(self.surface_ptrs.items, new_surfaces);
+        if (active_ptr) |ap| for (self.tabs.items, 0..) |t, i| if (t == ap) {
+            self.app_window.active_tab = i;
+            break;
+        };
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+        return new_marker;
+    }
+
+    /// 그룹 통째 드래그의 드롭 타겟 해석. 드롭 표시 row(raw_row)와 드래그 중인 그룹 마커 m을 받아 moveGroupRange에 넘길
+    /// **삽입 경계**(다른 그룹 시작 인덱스 또는 len)를 계산한다. 규칙(방향 기반 — sidebarGroupDropTargetTab의 from<M/from>M
+    /// 결과 patterns 동형): raw_row가 가리키는 탭이 속한 대상 그룹 g_i를 찾아, g_i가 드래그 그룹보다 **위면 그 앞(g_i)**,
+    /// **아래면 그 뒤(다음 마커/끝)**에 끼운다 — 항상 그룹 경계라 연속 파티션 유지. 최상위(첫 그룹 이전) row에 드롭하면 첫
+    /// 그룹 앞(그룹들 최상단). 자기 그룹이면 null(무동작). 라이브-팔로우로 매 프레임 인접 그룹을 한 칸씩 지나가며 자연스럽게 옮겨간다.
+    fn sidebarGroupDropBoundary(self: *AppSession, raw_row: usize, m: usize) ?usize {
+        const len = self.tabs.items.len;
+        if (m >= len or raw_row >= self.sidebar_rows.items.len) return null;
+        const target_tab: usize = switch (self.sidebar_rows.items[raw_row]) {
+            .card => |c| c.tab,
+            .group_header => |h| h.tab,
+        };
+        if (target_tab >= len) return null;
+        // 첫 그룹 시작 = 최상위 구간의 끝(§2.1: 최상위 카드는 첫 마커 이전에만).
+        var first_group: usize = 0;
+        while (first_group < len and self.tabs.items[first_group].group_start == null) first_group += 1;
+        if (target_tab < first_group) {
+            // 최상위 카드에 드롭 → 그룹들 최상단(첫 그룹 앞). 자기가 이미 첫 그룹이면 no-op.
+            if (m == first_group) return null;
+            return first_group;
+        }
+        // target_tab이 속한 그룹의 마커 g_i(자기 위에서 가장 가까운 group_start).
+        var gi: usize = target_tab;
+        while (gi > 0 and self.tabs.items[gi].group_start == null) gi -= 1;
+        if (gi == m) return null; // 자기 그룹 — no-op(jitter 방지)
+        if (gi < m) return gi; // 대상 그룹이 위 → 그 앞에 삽입(위로 이동)
+        // 대상 그룹이 아래(gi > m) → 그 그룹 뒤(다음 마커 또는 끝)에 삽입.
+        var next: usize = gi + 1;
+        while (next < len and self.tabs.items[next].group_start == null) next += 1;
+        return next;
+    }
+
+    /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 잡아 하이라이트
+    /// (sidebar_drop_slot)를 갱신하고, 그룹 경계로 번역해(sidebarGroupDropBoundary) moveGroupRange로 그룹 구간을 옮긴다.
+    /// 이동을 따라간 **새 마커 인덱스**를 반환한다(호출자가 드래그 기준 인덱스를 갱신). 이동이 없고 하이라이트만 바뀌면
+    /// 밴드만 재빌드(SG4 카드 드래그와 같은 규율).
+    fn groupDragFrame(self: *AppSession, marker: usize, y_px: f64) usize {
+        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+        const new_drop: ?usize = if (raw_row < self.sidebar_rows.items.len) raw_row else null;
+        const drop_changed = !usizeOptEql(self.sidebar_drop_slot, new_drop);
+        self.sidebar_drop_slot = new_drop;
+        var new_marker = marker;
+        var reordered = false;
+        if (self.sidebarGroupDropBoundary(raw_row, marker)) |boundary| {
+            new_marker = self.moveGroupRange(marker, boundary); // 재정렬 시 rebuildSidebar 내부 호출
+            reordered = new_marker != marker;
+        }
+        if (drop_changed and !reordered) {
+            self.rebuildSidebar() catch {};
+            self.metal_dirty = true;
+        }
+        return new_marker;
     }
 
     /// 고정 탭을 앞쪽으로 stable-partition한다(고정끼리·비고정끼리 상대 순서 유지). tabs와 surface_ptrs를 **함께**
@@ -7639,6 +7774,8 @@ pub const AppSession = struct {
         if (kind == 4) {
             if (self.renameTargetAt(x_px, y_px)) |target| {
                 self.sidebar_drag_active = false;
+                self.sidebar_group_drag_armed = false; // 그룹 헤더 드래그 후보도 무장 해제(SG5-1 — 더블클릭 rename은 드래그 아님)
+                self.sidebar_group_drag_active = false;
                 self.sidebar_drop_slot = null; // 사이드바 카드 드래그 하이라이트도 무장 해제(SG4)
                 self.tab_drag_active = false;
                 self.pane_drag_active = false; // pane grip 드래그도 무장 해제(잃은 up 이벤트로 잔류 방지 — 형제 드래그와 동일)
@@ -7652,12 +7789,10 @@ pub const AppSession = struct {
         // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2 and self.sidebar_drag_index < self.tabs.items.len) {
-                // 마커 탭(group_start!=null) 드래그는 **그룹 통째 이동(SG5)**이라 SG4 범위 밖 — 무동작으로 둔다(마커 없는
-                // 카드만 넣기/빼기 대상). 마커를 카드처럼 재정렬하면 그룹 경계가 뒤엉키므로 여기서 일찍 배제한다.
                 if (self.tabs.items[self.sidebar_drag_index].group_start == null) {
-                    // dragTargetSlot은 **표시 row 인덱스**(그룹 헤더 포함 가능)를 돌려준다. sidebarGroupDropTargetTab이
-                    // 그 row를 moveTab 목표 탭으로 번역한다(SG4 — 카드 row는 그 자리, 펼친 헤더는 그룹 최상단, 접힌 헤더는
-                    // 그룹 끝; docs/sidebar-groups.md §10). 위치 파생이라 옮긴 뒤 소속은 projectRows 재투영이 자동 계산한다.
+                    // 마커 없는 카드 = SG4 넣기/빼기. dragTargetSlot은 **표시 row 인덱스**(그룹 헤더 포함 가능)를 돌려준다.
+                    // sidebarGroupDropTargetTab이 그 row를 moveTab 목표 탭으로 번역한다(카드 row는 그 자리, 펼친 헤더는 그룹
+                    // 최상단, 접힌 헤더는 그룹 끝; docs/sidebar-groups.md §10). 위치 파생이라 옮긴 뒤 소속은 재투영이 자동 계산.
                     const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                     // 드롭 타겟 하이라이트(어느 그룹/위치에 들어갈지) — 커서 아래 row. 아래 moveTab의 rebuildSidebar가
                     // 이 값으로 .drop_zone 밴드를 그리도록 **먼저** 세팅한다.
@@ -7676,9 +7811,45 @@ pub const AppSession = struct {
                         self.rebuildSidebar() catch {};
                         self.metal_dirty = true;
                     }
+                } else {
+                    // 마커 탭(group_start!=null) 카드 드래그 = **그룹 통째 이동(SG5-1)**. 마커는 group_start를 든 그 탭이라
+                    // 단독으로 못 옮긴다(옮기면 그룹이 딸려 온다) — 그룹 구간 [M,j)를 하나의 블록으로 재정렬한다(groupDragFrame).
+                    // 헤더 드래그(threshold 게이트)와 같은 프리미티브를 공유하며, 카드 드래그는 arm 시 이미 down에서 시작이라 별도 threshold 없음.
+                    self.sidebar_drag_index = self.groupDragFrame(self.sidebar_drag_index, y_px);
                 }
             } else if (kind == 3) {
                 self.sidebar_drag_active = false; // up: 드래그 종료
+                if (self.sidebar_drop_slot != null) {
+                    self.sidebar_drop_slot = null; // 드롭 타겟 하이라이트 해제
+                    self.rebuildSidebar() catch {}; // .drop_zone 밴드 제거
+                    self.metal_dirty = true;
+                }
+            }
+            return;
+        }
+        // 그룹 헤더 드래그(SG5-1)가 arm됐으면 drag(2)/up(3)을 캡처한다 — down에선 접기 토글 후보로만 arm하고(현 동작 보존),
+        // 여기서 클릭 vs 드래그를 threshold로 가른다: drag y 이동이 threshold(헤더 한 줄 절반)를 넘으면 active로 승격해 그룹
+        // 통째 이동, up까지 threshold 미달이면 접기 토글. 카드 드래그(sidebar_drag_*)와 배타 상태라 순서 무관하게 여기서 갈린다.
+        if (self.sidebar_group_drag_armed and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                if (!self.sidebar_group_drag_active) {
+                    // threshold: 헤더 한 줄 절반(최소 4px). 넘으면 클릭 아님 = 그룹 통째 드래그 시작.
+                    const thr: f64 = @floatFromInt(@max(self.sidebar_header_row_h_px / 2, 4));
+                    if (@abs(y_px - self.sidebar_group_drag_down_y) > thr) self.sidebar_group_drag_active = true;
+                }
+                if (self.sidebar_group_drag_active and self.sidebar_group_drag_marker < self.tabs.items.len) {
+                    // 마커 탭이어야 유효(승계·재정렬로 사라졌으면 무동작). groupDragFrame이 하이라이트+구간 이동.
+                    if (self.tabs.items[self.sidebar_group_drag_marker].group_start != null) {
+                        self.sidebar_group_drag_marker = self.groupDragFrame(self.sidebar_group_drag_marker, y_px);
+                    }
+                }
+            } else { // kind == 3 (up)
+                if (!self.sidebar_group_drag_active) {
+                    // threshold 미달 = 클릭 → 접기 토글(현 동작 보존). arm 이후 재정렬이 없었으므로 slot은 여전히 유효.
+                    self.toggleGroupCollapsedAt(self.sidebar_group_drag_slot);
+                }
+                self.sidebar_group_drag_armed = false;
+                self.sidebar_group_drag_active = false;
                 if (self.sidebar_drop_slot != null) {
                     self.sidebar_drop_slot = null; // 드롭 타겟 하이라이트 해제
                     self.rebuildSidebar() catch {}; // .drop_zone 밴드 제거
@@ -7827,9 +7998,20 @@ pub const AppSession = struct {
                     },
                     .notifications => self.openNotificationPanel(), // 종 클릭 → 인앱 알림 센터 패널(앵커는 단일 출처 헬퍼)
                     .none => if (self.sidebarSlotAt(y_px)) |slot| {
-                        // 그룹 헤더 row 클릭 → 접기 토글(선택 아님). onGroupHeader가 헤더/카드를 가른다(§7).
+                        // 그룹 헤더 row: 클릭=접기 토글 / 드래그=그룹 통째 이동(SG5-1)을 threshold로 구분한다(§7·§9 SG5).
+                        // onGroupHeader가 헤더/카드를 가른다. down에선 접기 토글 후보로 **arm만** 하고(현 동작 보존), 이어지는
+                        // drag가 threshold를 넘으면 위 캡처 가드가 그룹 통째 드래그로 승격한다. 검색 중엔 재정렬이 모호하므로
+                        // (부분 목록) 카드 드래그와 같은 규율로 arm 없이 즉시 토글한다.
                         if (chrome.components.sidebar.onGroupHeader(self.sidebar_rows.items, slot)) {
-                            self.toggleGroupCollapsedAt(slot);
+                            if (self.sidebar_search_active) {
+                                self.toggleGroupCollapsedAt(slot); // 검색 중 = 즉시 토글(그룹 통째 드래그 비활성)
+                            } else {
+                                self.sidebar_group_drag_armed = true;
+                                self.sidebar_group_drag_active = false;
+                                self.sidebar_group_drag_marker = self.sidebar_rows.items[slot].group_header.tab;
+                                self.sidebar_group_drag_slot = slot;
+                                self.sidebar_group_drag_down_y = y_px;
+                            }
                         } else if (self.visibleTab(slot)) |tab_idx| {
                             // slot=표시 슬롯, tab_idx=원본 탭(검색 필터 역매핑). 닫기/전환/드래그는 원본 인덱스로 한다.
                             const on_close = chrome.components.sidebar.closeButton(x_px, self.sidebar_width_px, self.cell_width_px) and
@@ -15128,7 +15310,7 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
     try std.testing.expectEqual(@as(usize, 1), marker_count);
 }
 
-test "SG4: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 드래그 no-op + 드롭 하이라이트 (mouse 시뮬레이션)" {
+test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카드 드래그=그룹 통째 이동 + 드롭 하이라이트 (mouse 시뮬레이션)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -15168,41 +15350,243 @@ test "SG4: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 드래그
     try std.testing.expectEqual(t2, session.tabs.items[3]);
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // A로 넣기 성공
 
-    // ── 마커 탭 드래그 = SG5(그룹 통째)라 SG4 범위 밖 → 무동작. mouse로 t0(마커 A) 카드를 잡아 끌어도 순서 불변.
-    session.recomputeVisibleTabs(); // rows: [header A(tab0), card t0(d1), card t3(d1), card t1(d1), header B(tab3), card t2(d1)]
+    // ── SG5-1: 마커 탭 카드 드래그 = **그룹 통째 이동**(옛 SG4 no-op을 대체). mouse로 t0(마커 A) 카드를 잡아 그룹 B
+    //    카드(row 5) 위로 끌면 그룹 A 구간 전체가 B 뒤로 옮겨간다(연속 파티션 유지).
+    session.recomputeVisibleTabs(); // rows: [header A(0), card t0(1), card t3(2), card t1(3), header B(4), card t2(5)]
     const sb = chrome.components.sidebar;
     const header_h = session.sidebar_header_height_px;
     const header_row_h = session.sidebar_header_row_h_px;
     const slot_h = session.sidebar_slot_height_px;
     const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
-    // t0(마커 A) 카드 = row 1. row 상단 y = rowTop(rows,1,...). 그 중앙을 클릭.
+    // t0(마커 A) 카드 = row 1. row 상단 y = rowTop(rows,1,...). 그 중앙을 클릭해 드래그 arm.
     const marker_card_top = sb.rowTop(session.sidebar_rows.items, 1, header_h, slot_h, header_row_h, 0);
     const marker_card_y: f64 = @floatFromInt(marker_card_top + @as(i64, @intCast(slot_h / 2)));
     session.mouse(1, x, marker_card_y, 0, 0); // down → 마커 카드에서 드래그 arm
     try std.testing.expect(session.sidebar_drag_active);
-    try std.testing.expectEqual(@as(usize, 0), session.sidebar_drag_index); // t0(마커) 잡음
-    const order_before = [_]*Tab{ session.tabs.items[0], session.tabs.items[1], session.tabs.items[2], session.tabs.items[3] };
-    // drag: 아래쪽(그룹 B 근처)으로 끌어도 마커 가드로 무동작 + 하이라이트도 안 생김.
-    session.mouse(2, x, @floatFromInt(header_h + slot_h * 4), 0, 0);
-    try std.testing.expect(session.sidebar_drop_slot == null); // 마커 드래그는 하이라이트도 없음(가드 skip)
-    for (order_before, 0..) |p, i| try std.testing.expectEqual(p, session.tabs.items[i]); // 순서 불변
-    session.mouse(3, x, @floatFromInt(header_h + slot_h * 4), 0, 0); // up
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_drag_index); // t0(마커 A) 잡음
+    // 그룹 B 카드(row 5) 위로 드래그 → 그룹 A 통째가 B 뒤로. 하이라이트도 뜬다(옛 no-op이 아님).
+    const groupb_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, slot_h, header_row_h, 0);
+    const groupb_card_y: f64 = @floatFromInt(groupb_card_top + @as(i64, @intCast(slot_h / 2)));
+    session.mouse(2, x, groupb_card_y, 0, 0);
+    try std.testing.expect(session.sidebar_drop_slot != null); // 그룹 통째 드래그도 드롭 하이라이트 표시
+    // 결과 [t2(mk B), t0(mk A), t3, t1] — 그룹 A 구간 전체가 B 뒤로. B=[t2], A=[t0,t3,t1].
+    try std.testing.expectEqual(t2, session.tabs.items[0]);
+    try std.testing.expectEqual(t0, session.tabs.items[1]);
+    try std.testing.expectEqual(t3, session.tabs.items[2]);
+    try std.testing.expectEqual(t1, session.tabs.items[3]);
+    try std.testing.expect(session.tabs.items[0].group_start != null); // B 마커(연속 파티션 유지)
+    try std.testing.expect(session.tabs.items[1].group_start != null); // A 마커
+    try std.testing.expect(session.tabs.items[2].group_start == null); // A 몸통
+    session.mouse(3, x, groupb_card_y, 0, 0); // up
     try std.testing.expect(!session.sidebar_drag_active);
+    try std.testing.expect(session.sidebar_drop_slot == null); // up에 하이라이트 해제
 
     // ── 드롭 하이라이트: 마커 없는 카드(t1, A 몸통)를 잡아 끌면 sidebar_drop_slot이 커서 아래 row를 추적하고 up에 해제.
-    // t1 카드 = row 3. 그 중앙을 down.
+    // 현재 [t2(mk B), t0(mk A), t3, t1] → rows: [header B(0), card t2(1), header A(2), card t0(3), card t3(4), card t1(5)].
+    // t1 카드 = row 5. 그 중앙을 down.
     session.recomputeVisibleTabs();
-    const t1_card_top = sb.rowTop(session.sidebar_rows.items, 3, header_h, slot_h, header_row_h, 0);
+    const t1_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, slot_h, header_row_h, 0);
     const t1_card_y: f64 = @floatFromInt(t1_card_top + @as(i64, @intCast(slot_h / 2)));
     session.mouse(1, x, t1_card_y, 0, 0);
     try std.testing.expect(session.sidebar_drag_active);
-    try std.testing.expect(session.tabs.items[session.sidebar_drag_index].group_start == null); // 마커 아님
+    try std.testing.expect(session.tabs.items[session.sidebar_drag_index].group_start == null); // 마커 아님(t1)
     // drag to some row → 하이라이트 non-null(어느 그룹/위치에 들어갈지 미리보기).
     session.mouse(2, x, @floatFromInt(header_h + slot_h + slot_h / 2), 0, 0);
     try std.testing.expect(session.sidebar_drop_slot != null);
     session.mouse(3, x, @floatFromInt(header_h + slot_h + slot_h / 2), 0, 0); // up
     try std.testing.expect(session.sidebar_drop_slot == null); // 해제
     try std.testing.expect(!session.sidebar_drag_active);
+}
+
+test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) — 위/아래·최상위·끝 + 자기그룹 no-op + 연속 파티션" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+    const t4 = session.tabs.items[4];
+    const t5 = session.tabs.items[5];
+
+    // 최상위 카드 t0·t1 + 두 그룹 A=[t2,t3], B=[t4,t5](§2.1: 최상위는 첫 마커 이전 구간에만).
+    session.createGroupForTab(t2); // A(마커 index2)
+    session.createGroupForTab(t4); // B(마커 index4)
+    // 마커 수·초기 순서 확인.
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1)); // 최상위
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // A 마커 카드
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t4)); // B 마커 카드
+
+    const markerCount = struct {
+        fn f(s: *AppSession) usize {
+            var n: usize = 0;
+            for (s.tabs.items) |t| if (t.group_start != null) {
+                n += 1;
+            };
+            return n;
+        }
+    }.f;
+    try std.testing.expectEqual(@as(usize, 2), markerCount(session)); // 항상 마커 2개(그룹 2개)
+
+    // ── ① 그룹 B를 **최상위 카드에 드롭** → 그룹들 최상단(첫 그룹 앞, 최상위 뒤). row0=최상위 카드 t0.
+    session.recomputeVisibleTabs(); // [c t0(0), c t1(1), hA(2), c t2(3), c t3(4), hB(5), c t4(6), c t5(7)]
+    {
+        const m: usize = 4; // 그룹 B 마커(t4)
+        const boundary = session.sidebarGroupDropBoundary(0, m).?; // 최상위 카드 row0 → 첫 그룹 앞 = 2
+        try std.testing.expectEqual(@as(usize, 2), boundary);
+        const nm = session.moveGroupRange(m, boundary);
+        try std.testing.expectEqual(@as(usize, 2), nm); // 새 마커 인덱스(t4가 index2로)
+    }
+    // 결과 [t0, t1, t4(B), t5, t2(A), t3] — B가 그룹들 최상단, 최상위 t0·t1는 앞에 그대로.
+    try std.testing.expectEqual(t0, session.tabs.items[0]);
+    try std.testing.expectEqual(t1, session.tabs.items[1]);
+    try std.testing.expectEqual(t4, session.tabs.items[2]);
+    try std.testing.expectEqual(t5, session.tabs.items[3]);
+    try std.testing.expectEqual(t2, session.tabs.items[4]);
+    try std.testing.expectEqual(t3, session.tabs.items[5]);
+    try std.testing.expectEqual(@as(usize, 2), markerCount(session)); // 여전히 그룹 2개(쪼개짐 없음)
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위 보존
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1)); // 최상위 보존
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t5)); // B 몸통(연속)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // A 몸통(연속)
+
+    // ── ② 그룹 A(마커 index4)를 **다른 그룹 헤더(B) 위에 드롭** → 그 그룹 앞으로(위로 이동). rows: [c t0, c t1, hB(2), c t4, c t5, hA(5), c t2, c t3].
+    session.recomputeVisibleTabs();
+    {
+        const m: usize = 4; // 그룹 A 마커(t2)
+        const boundary = session.sidebarGroupDropBoundary(2, m).?; // B 헤더 row2, gi=2<m=4 → B 앞(2)
+        try std.testing.expectEqual(@as(usize, 2), boundary);
+        _ = session.moveGroupRange(m, boundary);
+    }
+    // 결과 [t0, t1, t2(A), t3, t4(B), t5] — A가 B 앞으로(원래 순서 복귀).
+    try std.testing.expectEqual(t2, session.tabs.items[2]);
+    try std.testing.expectEqual(t4, session.tabs.items[4]);
+    try std.testing.expectEqual(@as(usize, 2), markerCount(session));
+
+    // ── ③ 그룹 A(마커 index2)를 **다른 그룹(B)의 카드에 드롭** → 그 그룹 뒤(끝)로(아래로 이동). rows: [c t0, c t1, hA(2), c t2, c t3, hB(5), c t4, c t5].
+    session.recomputeVisibleTabs();
+    {
+        const m: usize = 2; // 그룹 A 마커(t2)
+        const boundary = session.sidebarGroupDropBoundary(7, m).?; // B 카드 t5(row7), gi=4>m=2 → B 뒤(끝)=6
+        try std.testing.expectEqual(@as(usize, 6), boundary);
+        const nm = session.moveGroupRange(m, boundary);
+        try std.testing.expectEqual(@as(usize, 4), nm); // A가 끝(index4)으로
+    }
+    // 결과 [t0, t1, t4(B), t5, t2(A), t3] — A가 리스트 끝 그룹.
+    try std.testing.expectEqual(t4, session.tabs.items[2]);
+    try std.testing.expectEqual(t2, session.tabs.items[4]);
+    try std.testing.expectEqual(t3, session.tabs.items[5]);
+    try std.testing.expectEqual(@as(usize, 2), markerCount(session));
+
+    // ── ④ 자기 그룹에 드롭 = no-op(boundary null). A(마커 index4)의 자기 카드(t3, row?)에 드롭. rows: [c t0, c t1, hB(2), c t4, c t5, hA(5), c t2, c t3].
+    session.recomputeVisibleTabs();
+    try std.testing.expect(session.sidebarGroupDropBoundary(5, 4) == null); // A 헤더(자기) → null
+    try std.testing.expect(session.sidebarGroupDropBoundary(7, 4) == null); // A 몸통 카드(자기) → null
+    // moveGroupRange도 자기 자리 boundary(구간 안)면 no-op으로 m을 그대로 돌려준다.
+    try std.testing.expectEqual(@as(usize, 4), session.moveGroupRange(4, 4)); // insert_before==m → no-op
+    try std.testing.expectEqual(@as(usize, 4), session.moveGroupRange(4, 6)); // insert_before==j(=len) → no-op(이미 끝)
+    // 비-마커 인덱스로 moveGroupRange 호출 방어(가드). t5(index3)는 마커 아님 → m 그대로.
+    try std.testing.expectEqual(@as(usize, 3), session.moveGroupRange(3, 0));
+}
+
+test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이동)를 threshold로 구분 (mouse 시뮬레이션)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    inline for (0..3) |_| _ = try session.newTab(); // [t0, t1, t2, t3]
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+
+    // 두 그룹: A=t0에서 시작(t0,t1), B=t2에서 시작(t2,t3). 연속 파티션 [A][B], 최상위 없음.
+    session.createGroupForTab(t0); // A(마커 index0)
+    session.createGroupForTab(t2); // B(마커 index2)
+
+    const sb = chrome.components.sidebar;
+    const header_h = session.sidebar_header_height_px;
+    const header_row_h = session.sidebar_header_row_h_px;
+    const slot_h = session.sidebar_slot_height_px;
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const rowCenterY = struct {
+        fn f(s: *AppSession, row: usize, hh: u32, sh: u32, hrh: u32) f64 {
+            const top = sb.rowTop(s.sidebar_rows.items, row, hh, sh, hrh, 0);
+            const rh = sb.rowHeight(s.sidebar_rows.items[row], sh, hrh);
+            return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
+        }
+    }.f;
+
+    // ── ① 헤더 드래그(threshold 초과) = 그룹 통째 이동. 헤더 A(row0)를 잡아 그룹 B 카드(row4) 위로 끈다.
+    session.recomputeVisibleTabs(); // [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
+    const headerA_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    session.mouse(1, x, headerA_y, 0, 0); // down on 헤더 A → 접기 토글 후보로 arm(즉시 토글 아님)
+    try std.testing.expect(session.sidebar_group_drag_armed);
+    try std.testing.expect(!session.sidebar_group_drag_active); // 아직 threshold 전
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_group_drag_marker); // 마커 A(t0, index0)
+    try std.testing.expect(!session.tabs.items[0].group_collapsed); // 아직 토글 안 됨(down만으론)
+    const groupB_card_y = rowCenterY(session, 4, header_h, slot_h, header_row_h);
+    session.mouse(2, x, groupB_card_y, 0, 0); // drag 멀리 → threshold 초과 → 그룹 통째 이동
+    try std.testing.expect(session.sidebar_group_drag_active); // 승격됨
+    try std.testing.expect(session.sidebar_drop_slot != null); // 드롭 하이라이트
+    // 결과 [t2(B), t3, t0(A), t1] — A 그룹 통째가 B 뒤로. 연속 파티션 유지.
+    try std.testing.expectEqual(t2, session.tabs.items[0]);
+    try std.testing.expectEqual(t3, session.tabs.items[1]);
+    try std.testing.expectEqual(t0, session.tabs.items[2]);
+    try std.testing.expectEqual(t1, session.tabs.items[3]);
+    try std.testing.expect(session.tabs.items[0].group_start != null); // B 마커
+    try std.testing.expect(session.tabs.items[2].group_start != null); // A 마커
+    try std.testing.expect(!session.tabs.items[0].group_collapsed); // 드래그는 접기 토글 아님
+    session.mouse(3, x, groupB_card_y, 0, 0); // up
+    try std.testing.expect(!session.sidebar_group_drag_armed);
+    try std.testing.expect(!session.sidebar_group_drag_active);
+    try std.testing.expect(session.sidebar_drop_slot == null); // 하이라이트 해제
+
+    // ── ② 헤더 클릭(threshold 미달 = move 없음) = 접기 토글. 헤더 B(현 row0)를 down→up(움직임 없음).
+    session.recomputeVisibleTabs(); // [hB(0), c t2(1), c t3(2), hA(3), c t0(4), c t1(5)]
+    const headerB_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    const order_before = [_]*Tab{ session.tabs.items[0], session.tabs.items[1], session.tabs.items[2], session.tabs.items[3] };
+    try std.testing.expect(!session.tabs.items[0].group_collapsed); // B(index0) 펼침
+    session.mouse(1, x, headerB_y, 0, 0); // down → arm
+    try std.testing.expect(session.sidebar_group_drag_armed);
+    session.mouse(3, x, headerB_y, 0, 0); // up(움직임 없음) → 접기 토글
+    try std.testing.expect(session.tabs.items[0].group_collapsed); // B 접힘(클릭=토글)
+    try std.testing.expect(!session.sidebar_group_drag_armed);
+    for (order_before, 0..) |p, i| try std.testing.expectEqual(p, session.tabs.items[i]); // 순서 불변(이동 없음)
+
+    // ── ③ 헤더 살짝만 움직이고 up(threshold 미달) = 여전히 접기 토글(그룹 이동 아님). B는 접힘 상태 → 펼치기 토글.
+    session.recomputeVisibleTabs(); // [hB(0,collapsed), hA(1), c t0(2), c t1(3)]
+    const headerB2_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
+    const order_before2 = [_]*Tab{ session.tabs.items[0], session.tabs.items[1], session.tabs.items[2], session.tabs.items[3] };
+    session.mouse(1, x, headerB2_y, 0, 0); // down → arm
+    session.mouse(2, x, headerB2_y + 1, 0, 0); // 아주 살짝(dy=1 < threshold) → active 승격 안 됨
+    try std.testing.expect(!session.sidebar_group_drag_active); // threshold 미달
+    try std.testing.expect(session.sidebar_drop_slot == null); // 이동/하이라이트 없음
+    for (order_before2, 0..) |p, i| try std.testing.expectEqual(p, session.tabs.items[i]); // 순서 불변
+    session.mouse(3, x, headerB2_y + 1, 0, 0); // up → 접기 토글(threshold 미달이라 클릭 취급)
+    try std.testing.expect(!session.tabs.items[0].group_collapsed); // B 다시 펼침(토글)
+    try std.testing.expect(!session.sidebar_group_drag_armed);
 }
 
 test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 rowTop(가변 높이)로 밀린다 (SG3b-2-ii #1·#5·#6)" {

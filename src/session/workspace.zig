@@ -97,6 +97,10 @@ pub const Tab = struct {
     // flat 정상 복원(forward·backward 양쪽 호환). group_collapsed는 group_start!=null일 때만 의미. 기본 null/false.
     group_start: ?[]const u8 = null,
     group_collapsed: bool = false,
+    // 중첩 그룹 깊이(SG5-3 — docs/sidebar-groups.md §9·§4). group_start!=null일 때만 의미(1=최상위 그룹, 2=중첩, …).
+    // 순수 additive 스칼라. 기본 1이면 writer가 키를 **생략**해(round-trip 고정점·옛 파일 flat 정상) 옛 리더가 미지
+    // 키로 skip하는 forward-compat도 유지한다. reader는 없으면 1(최상위 그룹)로 폴백. 소속·정규화는 위치 파생이 정한다.
+    group_depth: u8 = 1,
     // 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음 — docs/sidebar-groups.md §9 SG5-2·§4). group_start!=null일 때만 의미.
     // 순수 additive 스칼라(그룹 시작 탭에만 저장 — 소속은 위치 파생). null=색 없음=키 생략(옛 리더가 미지 키로 skip해
     // flat 정상 복원, 양쪽 호환). 그룹 색은 헤더 밴드·소속 카드 막대 층이라 개별 카드 background-color와 안 겹친다. 기본 0.
@@ -151,6 +155,9 @@ fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
         try w.writeAll(" group-start=\"");
         try writeEscaped(w, name);
         try w.print("\" group-collapsed={d}", .{@intFromBool(tab.group_collapsed)});
+        // 중첩 그룹 깊이(SG5-3, §4). 기본 1(최상위 그룹)이면 키 생략 — 옛 파일/비중첩 그룹의 라인 문자열을 안 바꿔
+        // round-trip 고정점을 유지하고(옛 리더 미지 키 skip으로 양쪽 호환), >1일 때만 group-depth 스칼라로 쓴다.
+        if (tab.group_depth > 1) try w.print(" group-depth={d}", .{tab.group_depth});
         // 그룹 공통 색(SG5-2, §4). 0=색 없음이면 키 생략(additive·key-addressed — 옛 파일/무색 그룹의 라인 문자열을
         // 안 바꿔 round-trip 고정점). 비영이면 group-color 스칼라로 쓴다(reader는 없으면 getUint 기본 0으로 폴백).
         if (tab.group_color != 0) try w.print(" group-color={d}", .{tab.group_color});
@@ -266,6 +273,9 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     // 아니라 find로 존재를 먼저 확인한다(키 부재 ↔ 빈 값을 구분 — writer가 null을 키 생략으로 인코딩한 것과 짝).
     const group_start: ?[]const u8 = if (f.find("group-start") != null) try f.getQuoted(a, "group-start", "") else null;
     const group_collapsed = (try f.getUint("group-collapsed", u8, 0)) != 0;
+    // 중첩 그룹 깊이(SG5-3, §4·§9). additive 스칼라라 없으면 1(최상위 그룹). group_start=null인 탭에서 읽혀도 무의미
+    // (렌더가 group_start로 게이트). 정규화(gap 클램프)는 projectRows가 위치 파생 스택으로 재계산한다.
+    const group_depth = try f.getUint("group-depth", u8, 1);
     // 그룹 공통 색(SG5-2, §4·§9). additive 스칼라라 없으면 0(색 없음). 그룹 시작 탭에만 의미(writer가 group-start
     // 있을 때만 비영 group-color를 쓴다) — group_start=null인 탭에서 0으로 읽혀도 무해(렌더가 group_start로 게이트).
     const group_color = try f.getUint("group-color", u32, 0);
@@ -278,7 +288,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
-    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_color = group_color, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -708,6 +718,45 @@ test "workspace round-trip: tab group_color 보존(SG5-2 — 비영은 group-col
     try std.testing.expectEqual(@as(u32, 0), t2.group_color); // 색 없는 그룹 = 0(키 생략 → 기본)
 
     // round-trip 고정점: 다시 직렬화하면 동일(0↔키부재·비영↔키존재 인코딩 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace round-trip: tab group_depth 보존(SG5-3 중첩 — >1은 group-depth 키, 1은 키 생략)" {
+    // 중첩 그룹 깊이(docs/sidebar-groups.md §9 SG5-3): 마커 탭에만 group_depth를 저장하고(1=최상위 그룹, 2=중첩, …),
+    // 소속은 위치 파생이 정한다. writer는 >1일 때만 group-depth 키를 쓰고(1=키 생략, additive), 옛 파일/비중첩 그룹의
+    // 라인을 안 바꾼다. round-trip이 이 인코딩(1↔키부재·>1↔키존재)을 고정하는지 + 하위호환(없으면 1)을 검증.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{
+        // 부모 그룹 A(depth 1) — group-depth 키 생략(기본 1).
+        .{ .custom_name = "A", .group_start = "parent", .group_collapsed = false, .tree = &tree, .panes = &panes },
+        // 중첩 자식 그룹 B(depth 2) — group-depth=2 키가 group-collapsed 뒤에 붙는다.
+        .{ .custom_name = "B", .group_start = "child", .group_collapsed = false, .group_depth = 2, .tree = &tree, .panes = &panes },
+        // 소속 카드(마커 없음) — group_depth 미저장(위치 파생).
+        .{ .custom_name = "c", .tree = &tree, .panes = &panes },
+    };
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 부모(depth 1): group-collapsed=0 바로 뒤 개행(group-depth 키 없음).
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"parent\" group-collapsed=0\n") != null);
+    // 자식(depth 2): group-collapsed 뒤에 group-depth=2.
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"child\" group-collapsed=0 group-depth=2\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const t0 = parsed.workspace.windows[0].tabs[0];
+    const t1 = parsed.workspace.windows[0].tabs[1];
+    const t2 = parsed.workspace.windows[0].tabs[2];
+    try std.testing.expectEqual(@as(u8, 1), t0.group_depth); // 부모 = 1(키 생략 → 기본)
+    try std.testing.expectEqual(@as(u8, 2), t1.group_depth); // 자식 중첩 = 2 복원
+    try std.testing.expectEqual(@as(u8, 1), t2.group_depth); // 소속 카드 = 1(무의미·기본)
+
+    // round-trip 고정점: 다시 직렬화하면 동일(1↔키부재·>1↔키존재 인코딩 안정).
     const text2 = try serialize(std.testing.allocator, parsed.workspace);
     defer std.testing.allocator.free(text2);
     try std.testing.expectEqualStrings(text, text2);

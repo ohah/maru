@@ -97,6 +97,11 @@ pub fn Model(comptime Rt: type) type {
             group_start: ?[]const u8 = null,
             /// group_start!=null일 때만 의미 — 그 그룹이 접혔는지(영속). 검색 활성 동안은 projectRows가 일시 무시.
             group_collapsed: bool = false,
+            /// 중첩 그룹 깊이 레벨(SG5-3 — docs/sidebar-groups.md §9). group_start!=null일 때만 의미: 1=최상위 그룹,
+            /// 2=그 안 중첩, … 소속과 마찬가지로 **정규화 depth는 위치에서 파생**(projectRows가 스택으로 재계산·클램프)하고
+            /// 이 필드는 "이 마커가 얼마나 깊이 들어가려는가"의 힌트다. 최상위에서 create_group=1, 그룹 안에서=그 카드
+            /// depth+1. workspace.v1 영속(group-depth, 기본 1=키 생략). 기본 1(비마커 탭에선 무의미).
+            group_depth: u8 = 1,
             /// 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음/기본 폴백 — docs/sidebar-groups.md §9 SG5-2). group_start!=null일
             /// 때만 의미 — 그룹 시작 마커 **하나에만** 저장하고, 소속 카드는 위치 파생으로 그 색을 따른다(별도 저장 없음,
             /// §2.1 위치 파생과 동형). 헤더 밴드 tint·소속 카드 좌측 accent 막대에 실린다. 개별 카드 background_color와는

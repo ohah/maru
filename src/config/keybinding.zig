@@ -288,6 +288,10 @@ pub const default_app_bindings = [_]AppBinding{
     // 그룹이나 'G' 키는 미사용이라 충돌이 없다(사용자 결정 — docs/sidebar-groups.md §7). 'g'→'G' fold, 정확 비교.
     // ungroup/rename_group은 저빈도라 기본 키 없이 팔레트·우클릭·설정 리바인더로만 노출한다.
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'G' } }, .action = .create_group },
+    // Cmd+Option+Shift+G: 형제 그룹으로 분리(create_sibling_group, SG5-3) — create_group(Cmd+Opt+G, depth+1 중첩)과
+    // **Shift로 구분**한다. Cmd+Shift+G는 find_previous, Cmd+Opt+G는 create_group이 선점하나 Cmd+Opt+Shift+G는 미사용이라
+    // 충돌이 없다(그룹 안 카드 → 같은 depth 형제, 최상위 → depth 1). docs/sidebar-groups.md §7·§10.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true, .shift = true }, .key = .{ .char = 'G' } }, .action = .create_sibling_group },
     // 런타임 폰트 크기(macOS/브라우저/Ghostty 관례). ⌘=(또는 ⌘+)=키우기, ⌘-(또는 ⌘_)=줄이기, ⌘0=리셋.
     // '=' 키를 Shift와 함께 누르면 '+'가, '-'는 '_'가 오므로 양쪽을 다 묶어 키캡 표기(+/-)와 실제 글자(=/-)를
     // 모두 잡는다(모디파이어 정확 비교). 숫자/기호라 normalizeEventChar가 그대로 통과시킨다. 셸 입력과 안 겹친다.

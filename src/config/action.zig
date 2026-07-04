@@ -51,6 +51,11 @@ pub const Action = union(enum) {
     // 단축키는 create_group만 `Cmd+Opt+G`**(Cmd+Shift+G는 find_previous 선점 — 사용자 결정, docs/sidebar-groups.md §7),
     // ungroup/rename_group은 팔레트·우클릭·설정 리바인더로만. 단일 출처: docs/sidebar-groups.md.
     create_group,
+    // create_sibling_group=SG5-3 중첩과 **명시적 분리** — 그룹 안 카드에서 실행하면 그 카드의 현재 그룹과 **같은 depth**의
+    // 형제 그룹을 시작한다(create_group은 depth+1 중첩). 최상위 카드면 depth 1(create_group과 결과 동일). 위치 파생 연속
+    // 파티션상 첫 그룹이 끝까지 뻗어 create_group만으론 형제 최상위 그룹을 못 만드는 tension(§10)을 해소한다. 기본 키
+    // `Cmd+Opt+Shift+G`(create_group Cmd+Opt+G와 modifier로 구분, docs/sidebar-groups.md §7·§10).
+    create_sibling_group,
     ungroup,
     rename_group,
     // 활성 터미널의 전체 내용(스크롤백 + 화면)을 선택한다(Select All, 관례상 ⌘A). 코어 selection 상태라
@@ -125,6 +130,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "rename_pane")) return .rename_pane;
     if (std.mem.eql(u8, value, "rename_term")) return .rename_term;
     if (std.mem.eql(u8, value, "create_group")) return .create_group;
+    if (std.mem.eql(u8, value, "create_sibling_group")) return .create_sibling_group;
     if (std.mem.eql(u8, value, "ungroup")) return .ungroup;
     if (std.mem.eql(u8, value, "rename_group")) return .rename_group;
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
@@ -198,6 +204,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.rename_pane, parseAction("rename_pane").?);
     try std.testing.expectEqual(Action.rename_term, parseAction("rename_term").?);
     try std.testing.expectEqual(Action.create_group, parseAction("create_group").?);
+    try std.testing.expectEqual(Action.create_sibling_group, parseAction("create_sibling_group").?);
     try std.testing.expectEqual(Action.ungroup, parseAction("ungroup").?);
     try std.testing.expectEqual(Action.rename_group, parseAction("rename_group").?);
     try std.testing.expectEqual(Action.new_term, parseAction("new_term").?);

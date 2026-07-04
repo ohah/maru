@@ -8,10 +8,13 @@ pub const CellMetrics = struct {
     cell_width_px: u32,
     cell_height_px: u32,
     sidebar_width_px: u32, // 런타임 가변(사용자 드래그) — session 실측값이 권위
-    sidebar_slot_height_px: u32 = 0, // 사이드바 워크스페이스 한 슬롯의 높이(= cell_height × ratio, cell 높이가 아님).
+    sidebar_slot_height_px: u32 = 0, // 사이드바 워크스페이스 **카드** 한 슬롯의 높이(= cell_height × ratio, cell 높이가 아님).
     // sidebar 컴포넌트의 밴드 view·hit-test가 슬롯↔px 변환에 쓴다(C3a). 기본 0 = 사이드바 꺼짐/미설정(view 무동작).
-    // 헤더(검색바·아이콘) 높이는 platform이 hit-test(slotAt/headerHit)에 직접 넘기고 .m이 사이드바 셀 py_top에
-    // 더한다 — 밴드 view는 슬롯 상대 좌표라 헤더를 모른다(lowerSidebar의 rect.y/slot_h 행 역산과 일치).
+    sidebar_header_row_h_px: u32 = 0, // **그룹 헤더 row**의 높이(가변 높이 — 카드=slot·헤더=이 값, 얇은 한 줄; SG3b-2-ii,
+    // docs/sidebar-groups.md §5). hit-test(slotAt/rowTop/dragTargetSlot의 rowHeight 누적)·렌더가 카드와 다른 높이로 쓴다.
+    // 기본 0. 위 sidebar_slot_height_px와 이름이 비슷한 상단 사이드바 헤더(검색바·아이콘, 아래 문단)와는 다른 값이다.
+    // 상단 헤더(검색바·아이콘) 높이는 platform이 hit-test(slotAt/headerHit)에 직접 넘기고 .m이 사이드바 셀 py_top에
+    // 더한다 — 밴드 view는 슬롯 상대 좌표라 상단 헤더를 모른다(lowerSidebar의 rect.y/slot_h 행 역산과 일치).
     backing_width_px: u32,
     backing_height_px: u32,
     // minimal 세션(사이드바·pane 탭 바 숨김)인지. C2/C3 사이드바·탭바 컴포넌트가 렌더 게이트로 읽는다

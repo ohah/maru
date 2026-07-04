@@ -22,8 +22,18 @@ pub const Row = union(enum) {
     /// depth=그룹 안이면 1(들여쓰기 — SG3). label은 제목 glyph 완전 이주(후속) 시 view가 text op으로 쓸 자리다.
     card: struct { tab: usize, label: []const u8, active: bool, depth: u8 = 0 },
     /// 그룹 헤더(SG3) — 접기 토글 줄(카드 아님). collapsed=접힘, member_count=접힘 시 "▸ name (N)" 표시용.
-    group_header: struct { collapsed: bool, label: []const u8, member_count: u16 },
+    /// tab=이 그룹을 **시작하는 원본 self.tabs 인덱스**(group_start 마커를 든 탭). 헤더 클릭 시 그 탭의 group_collapsed를
+    /// 토글하고(onGroupHeader), platform이 라벨 glyph를 그 탭의 `group_start`에서 **직접 라이브로** 뽑는다(label은
+    /// borrowed라 destroyTab 후 dangling 위험 — code-review #8 UAF 해소: 소스 tab 인덱스를 실어 live 재조회).
+    group_header: struct { collapsed: bool, label: []const u8, member_count: u16, tab: usize },
 };
+
+/// row_index가 그룹 헤더 row인가(클릭 시 선택이 아니라 접기 토글 대상). closeButton과 같은 결의 순수 hit-test
+/// 헬퍼 — host(mouseDown)가 slotAt로 얻은 row가 헤더면 group_collapsed 토글로 분기한다(docs/sidebar-groups.md §5·§7).
+pub fn onGroupHeader(rows: []const Row, row_index: usize) bool {
+    if (row_index >= rows.len) return false;
+    return rows[row_index] == .group_header;
+}
 
 // ── hit-test (옛 app_session 순수 함수 이전, 같은 수학) ────────────────────────
 
@@ -174,10 +184,19 @@ pub fn dragTargetSlot(y_px: f64, header_height_px: u32, rows: []const Row, card_
 pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const w = p.metrics.sidebar_width_px;
     const slot_h = p.metrics.sidebar_slot_height_px;
+    const header_row_h = p.metrics.sidebar_header_row_h_px;
     if (w == 0 or slot_h == 0 or rows.len == 0) return;
-    // 밴드는 슬롯(row) **상대** 좌표(row*slot_h)로 낸다 — platform lowerSidebar가 rect.y/slot_h로 슬롯 행을 역산하므로
-    // 헤더 높이를 더하면 그 역산이 깨진다. 헤더(검색바·아이콘)만큼의 시프트는 .m이 사이드바 셀 py_top에 더하고
-    // (sidebar_header_height_px), 헤더 높이는 hit-test(slotAt/headerHit)만 안다. 하단 "+" 밴드는 헤더 아이콘으로 이동해 폐기.
+    // 밴드는 슬롯(row) **상대** 좌표(= 앞선 row 높이 누적 rowTop, 헤더·스크롤 제외)로 낸다 — **가변 높이**라 고정
+    // row*slot_h가 아니라 각 row 높이(카드=slot_h·그룹 헤더=header_row_h)를 누적해야 그룹 헤더가 낮은 높이를 반영한다
+    // (SG3b-2-ii-e — code-review 잔여). platform lowerSidebar는 이 상대 y로 row를 역산할 때 같은 누적을 쓰고(rowTop 역),
+    // 헤더(검색바·아이콘)만큼의 절대 시프트는 .m이 사이드바 셀 py_top에 더한다(sidebar_header_height_px 단일 책임).
+
+    // 그룹 헤더 밴드(SG3): 헤더 row는 얇은 한 줄(header_row_h)의 은은한 배경 밴드로 카드와 구분한다. 접힘/펼침 무관하게
+    // 헤더가 있으면 항상 그린다(삼각+이름 glyph는 platform buildSidebarDrawList가 그 위에 올린다).
+    for (rows, 0..) |r, i| switch (r) {
+        .group_header => try out.append(arena, bandFill(rows, i, w, slot_h, header_row_h, .tab_hover_bg, p.shape)),
+        .card => {},
+    };
 
     // 활성 슬롯 밴드(첫 active=true 카드 row). group_header row는 활성 대상이 아니다.
     var active_idx: ?usize = null;
@@ -186,10 +205,10 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
             active_idx = i;
             break;
         },
-        .group_header => {}, // SG3: 헤더 밴드는 이 단계에서 안 그린다(카드만 동작 보존)
+        .group_header => {},
     };
     if (active_idx) |ai| {
-        try out.append(arena, bandFill(ai, w, slot_h, .tab_active_bg, p.shape)); // 카드 배경 밴드
+        try out.append(arena, bandFill(rows, ai, w, slot_h, header_row_h, .tab_active_bg, p.shape)); // 카드 배경 밴드
         // 좌측 accent 막대는 여기서 내지 않는다 — 막대색이 카드별(우클릭 "바: …", tab.accent_color)이라 role 기반
         // chrome op으로 임의 RGB를 실을 수 없어, 배경 tint와 같은 이유로 **platform이 카드별 GpuQuad로 직접 그린다**
         // (app_session rebuildSidebar의 per-tab accent 루프 — 활성=기본 앰버/지정색, 비활성=지정 시에만). 카드 폭 inset과
@@ -199,7 +218,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선). 슬롯은 row 인덱스라 헤더/카드 무관하게 칠한다.
     if (hovered_slot) |hs| {
         if (hs < rows.len and (active_idx == null or hs != active_idx.?)) {
-            try out.append(arena, bandFill(hs, w, slot_h, .tab_hover_bg, p.shape));
+            try out.append(arena, bandFill(rows, hs, w, slot_h, header_row_h, .tab_hover_bg, p.shape));
         }
     }
 
@@ -207,16 +226,20 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     // 그린다. drop_slot < rows.len이면 합칠 카드, == rows.len이면 카드 목록 아래 행('새 워크스페이스'). 범위 검사 없이
     // 그 행에 밴드를 낸다(카드 아래 행도 유효 — platform이 드래그 중에만, 그리고 자기 카드는 제외해 넘긴다).
     if (drop_slot) |ds| {
-        try out.append(arena, bandFill(ds, w, slot_h, .drop_zone, p.shape));
+        try out.append(arena, bandFill(rows, ds, w, slot_h, header_row_h, .drop_zone, p.shape));
     }
 }
 
-/// 슬롯 r의 전체-폭 밴드 fill op. row→y는 slot_h 배수(한 탭=한 슬롯, 슬롯 상대). platform lowerSidebar가
-/// sidebarBandCell로 lower하고(.m이 header_h를 더해 절대 y를 맞춘다 — 헤더 시프트는 .m 단일 책임).
-fn bandFill(row: usize, w: u32, slot_h: u32, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
+/// row의 전체-폭 밴드 fill op. row→y는 **앞선 row 높이 누적**(rowTop의 헤더·스크롤 제외분 = 슬롯 상대) — 가변
+/// 높이(카드=slot_h·헤더=header_row_h)라 고정 row*slot_h가 아니다. row==rows.len(카드 목록 아래 새 워크스페이스 행)이면
+/// 콘텐츠 하단·카드 높이로 둔다. platform lowerSidebar가 같은 누적으로 row를 역산해 tint를 얹고(.m이 header_h를 더해 절대
+/// y를 맞춘다 — 헤더 시프트는 .m 단일 책임).
+fn bandFill(rows: []const Row, row: usize, w: u32, slot_h: u32, header_row_h: u32, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
+    const top: i64 = rowTop(rows, row, 0, slot_h, header_row_h, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
+    const rh: u32 = if (row < rows.len) rowHeight(rows[row], slot_h, header_row_h) else slot_h; // 목록 아래 행=카드 높이
     // U2: 슬롯 rect에서 사방 card_gap을 inset(content rect)으로 빼 카드 사이 여백을 둔다(선언적 패딩 — 좌표 산술 대신).
     // tui(gap=0)면 inset 0이라 슬롯 꽉(기존과 동일).
-    const slot = draw.Rect{ .x = 0, .y = @intCast(row * @as(usize, slot_h)), .w = w, .h = slot_h };
+    const slot = draw.Rect{ .x = 0, .y = @intCast(top), .w = w, .h = rh };
     const g = shape.card_gap_px;
     const card = slot.inset(.{ .left = g, .right = g, .top = g, .bottom = g });
     const r = shape.corner_radius_px;
@@ -380,46 +403,64 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try std.testing.expectEqual(@as(u32, 40 - 8), card.h); // slot_h - 2×gap
 }
 
-test "sidebar view: group_header row 섞여도 카드 밴드만(SG1 동작 보존·Row union 안전)" {
-    // Row union에 group_header가 섞여도 SG1 view는 카드 active/hover 밴드만 낸다(헤더 밴드는 SG3에서 추가). 슬롯 격자는
-    // 카드/헤더 무관하게 균일(1행=slot_h)이라, 헤더 아래 카드의 밴드 y가 그 row 인덱스로 정확히 나오는지 고정한다 —
-    // "슬롯=row 인덱스"가 헤더가 끼어도 유지됨을 증명(docs/sidebar-groups.md §5 slot 격자 불변).
+test "sidebar view: group_header 밴드 + 가변 높이 카드 밴드 y(SG3 헤더 밴드·rowTop 누적)" {
+    // SG3: group_header row는 얇은 헤더 밴드(header_row_h)로 그려지고, 그 아래 카드 밴드 y는 **가변 높이 누적**
+    // (rowTop)으로 나온다 — 고정 row*slot_h가 아니라 헤더의 낮은 높이(header_row_h)를 반영(docs/sidebar-groups.md §5).
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const p = props.ChromeProps{ .metrics = .{
-        .cell_width_px = 8,
-        .cell_height_px = 16,
-        .sidebar_width_px = 120,
-        .sidebar_slot_height_px = 40,
-        .backing_width_px = 800,
-        .backing_height_px = 600,
-    } };
-    // row0=그룹 헤더, row1=활성 카드, row2=비활성 카드.
+    const p = props.ChromeProps{
+        .metrics = .{
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .sidebar_width_px = 120,
+            .sidebar_slot_height_px = 40,
+            .sidebar_header_row_h_px = 20, // 그룹 헤더 얇은 한 줄(카드 40보다 낮다)
+            .backing_width_px = 800,
+            .backing_height_px = 600,
+        },
+    };
+    // row0=그룹 헤더(높이 20), row1=활성 카드(40), row2=비활성 카드(40).
     const rows = [_]Row{
-        .{ .group_header = .{ .collapsed = false, .label = "frontend", .member_count = 2 } },
+        .{ .group_header = .{ .collapsed = false, .label = "frontend", .member_count = 2, .tab = 0 } },
         .{ .card = .{ .tab = 0, .label = "web", .active = true } },
         .{ .card = .{ .tab = 1, .label = "docs", .active = false } },
     };
     var out: std.ArrayList(draw.Op) = .empty;
     try view(&rows, null, null, p, arena, &out);
-    try std.testing.expectEqual(@as(usize, 1), out.items.len); // 활성 카드 밴드만(헤더 밴드는 SG1에서 안 냄)
-    try std.testing.expect(out.items[0].quad.fill_role == .tab_active_bg);
-    try std.testing.expectEqual(@as(i32, 40), out.items[0].quad.rect.y); // row 1(헤더 아래) = 1×slot_h
+    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 헤더 밴드(row0) + 활성 카드 밴드(row1)
+    // 헤더 밴드: row0 → y=0, 높이 header_row_h(20), role tab_hover_bg.
+    try std.testing.expect(out.items[0].quad.fill_role == .tab_hover_bg);
+    try std.testing.expectEqual(@as(i32, 0), out.items[0].quad.rect.y);
+    try std.testing.expectEqual(@as(u32, 20), out.items[0].quad.rect.h);
+    // 활성 카드 밴드: row1 → y=header_row_h(20)(고정 1×40=40이 아님 — 가변 누적), 높이 40, role tab_active_bg.
+    try std.testing.expect(out.items[1].quad.fill_role == .tab_active_bg);
+    try std.testing.expectEqual(@as(i32, 20), out.items[1].quad.rect.y);
+    try std.testing.expectEqual(@as(u32, 40), out.items[1].quad.rect.h);
 
-    // 호버가 헤더 row(0)를 가리켜도 밴드는 그 행에 정상적으로 난다(슬롯=row라 카드/헤더 무관하게 칠함).
+    // 호버가 헤더 row(0)를 가리키면 헤더 밴드에 더해 호버 밴드도 그 행(y=0)에 난다.
     out.clearRetainingCapacity();
     try view(&rows, 0, null, p, arena, &out);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 활성(row1) + 호버(row0)
-    try std.testing.expect(out.items[1].quad.fill_role == .tab_hover_bg);
-    try std.testing.expectEqual(@as(i32, 0), out.items[1].quad.rect.y); // row 0
+    try std.testing.expectEqual(@as(usize, 3), out.items.len); // 헤더(row0) + 활성(row1) + 호버(row0)
+    try std.testing.expect(out.items[2].quad.fill_role == .tab_hover_bg);
+    try std.testing.expectEqual(@as(i32, 0), out.items[2].quad.rect.y); // row 0
+}
+
+test "sidebar onGroupHeader: 헤더 row만 true(카드·범위 밖 false)" {
+    const rows = [_]Row{
+        .{ .group_header = .{ .collapsed = false, .label = "g", .member_count = 1, .tab = 0 } },
+        .{ .card = .{ .tab = 0, .label = "web", .active = true } },
+    };
+    try std.testing.expect(onGroupHeader(&rows, 0)); // 헤더 row
+    try std.testing.expect(!onGroupHeader(&rows, 1)); // 카드 row
+    try std.testing.expect(!onGroupHeader(&rows, 2)); // 범위 밖
 }
 
 test "sidebar 가변 높이: rowHeight·rowTop·contentHeight(혼합 누적 + 카드만=균일 동작 보존)" {
     // 가변 높이(§5): 헤더=header_row_h(얇은 한 줄), 카드=card_slot_h. y↔row를 고정 나눗셈이 아니라 누적으로 환산한다.
     // 핵심: **카드만이면 가변 rowTop이 옛 고정 slotTop과 정확히 같다** — SG3a 이주가 그룹 없는 현재 동작을 보존함을 증명.
     const card = Row{ .card = .{ .tab = 0, .label = "c", .active = false } };
-    const hdr = Row{ .group_header = .{ .collapsed = false, .label = "g", .member_count = 0 } };
+    const hdr = Row{ .group_header = .{ .collapsed = false, .label = "g", .member_count = 0, .tab = 0 } };
     // rowHeight: 종류별 높이(card=40, header=16).
     try std.testing.expectEqual(@as(u32, 40), rowHeight(card, 40, 16));
     try std.testing.expectEqual(@as(u32, 16), rowHeight(hdr, 40, 16));

@@ -57,6 +57,8 @@ pub const entries = [_]Entry{
     .{ .action = .create_sibling_group, .key = "create_sibling_group", .title = "New Sibling Group" },
     .{ .action = .ungroup, .key = "ungroup", .title = "Ungroup" },
     .{ .action = .rename_group, .key = "rename_group", .title = "Rename Group" },
+    // remove_from_group=이 워크스페이스 하나만 그룹에서 빼 최상위로(ungroup=그룹 통째 해제와 다름). 기본 키 없이 팝업/우클릭 발견.
+    .{ .action = .remove_from_group, .key = "remove_from_group", .title = "Remove from Group" },
     .{ .action = .select_all, .key = "select_all", .title = "Select All" },
     // 화면+스크롤백 비우기(⌘K). select_all과 같은 일반 코어 액션 — 메뉴/팝업에 노출, 메뉴는 ⌘K chord를 표시한다.
     .{ .action = .clear_screen, .key = "clear_screen", .title = "Clear" },

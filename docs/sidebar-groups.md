@@ -26,6 +26,8 @@ chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다
 - **검색과 그룹의 상호작용**: 검색 중에는 매치된 카드가 어느 그룹에 있든 보여야 찾기 쉽다 → 검색 활성 동안은 **그룹
   접힘을 일시 무시**(매치 카드를 그 그룹 헤더 아래 펼쳐 보임). 검색을 지우면 원래 접힘 상태로 돌아온다. 접힘은 사용자
   의도(영속)지만 검색은 일시 질의라 검색이 우선한다(베이스: VSCode 탐색기 검색이 접힌 폴더를 임시로 펼치는 동작).
+  **헤더 표시도 검색을 따른다** — 검색 중 강제로 펼친 카드 위에 접힘 표시(▸·(N) 배지)가 뜨면 모순이라, projectRows가
+  검색 활성 동안 헤더 row를 `collapsed=false`(▾, 배지 없음)로 낸다(저장 `group_collapsed`은 불변 — 검색 종료 시 복귀).
 
 **베이스/결정**: 접이식 그룹은 브라우저 탭 그룹(Chrome/Arc)·VSCode 탐색기 폴더·에디터 사이드바의 collapsible section을
 공통 관례로 삼는다. 특히 **소속을 위치에서 파생**(아래 §2·§3)하는 것은 브라우저 탭 그룹 동작을 베이스로 한다 — 탭을
@@ -186,16 +188,27 @@ pub fn onGroupHeader(rows: []const Row, row_index: usize) bool;
 한 레이아웃 소스 공유). **베이스/결정**: 브라우저 탭 그룹·VSCode 폴더가 헤더를 얇은 한 줄로 둬 촘촘한 게 접이식 그룹의
 핵심 가치라, 균일 격자(구현 단순)보다 **가변 높이(시각 우선)**를 택했다.
 
+**pane grip 드롭이 헤더 row에 떨어질 때(code-review #3 — 결정·문서화)**: pane grip 드래그의 드롭 판정(`computePaneDropDest`)은
+카드 위=그 워크스페이스에 **merge**, 리스트 아래 빈 영역=**새 워크스페이스**다. **그룹 헤더 row는 워크스페이스가 아니라 묶음**이라
+"어느 워크스페이스에 merge"가 정의되지 않고 새 워크스페이스도 아니므로, **헤더 드롭 = no-op**(무동작)로 둔다(상단 검색 헤더 드롭이
+no-op인 것과 같은 결). 옛 코드는 헤더 slot에서 `visibleTab=null`이라 `.new_workspace`로 falls through해 헤더에 떨궈도 원치 않는 새
+워크스페이스가 생겼다 — `visibleTab(slot) orelse return null`로 헤더를 걸러 최소 안전 동작을 택했다. (past-end=리스트 아래 빈
+영역은 `sidebarSlotAt`이 null이라 이 가드를 건너뛰어 자연스러운 "빈 영역=새 워크스페이스"를 유지한다.)
+
 **헤더 밴드 정책(사용자 결정 — 기본 보더라인 제거, 색·상호작용은 유지)**: 그룹 헤더는 **기본(무색) 상태에서 밴드(전폭
 회색 배경 = 보더라인)를 그리지 않는다** — 삼각(▾/▸)+이름 텍스트만 배경 없는 줄로 남긴다("보더라인 굳이 필요 없다, 화살표만
 있어도 직관적"). `view`의 헤더 밴드 루프는 **`group_header.has_color`일 때만** 헤더 밴드(`.tab_hover_bg`)를 내고, `lowerSidebar`가
 그 밴드 색에 `tab.group_color`를 tint한다(SG5-2 색 구분은 그대로 유지 — 색 있는 그룹만 밴드가 보이고 그 색을 띤다). `has_color`는
 host(projectRows)가 `tab.group_color!=0`로 채운다(chrome은 role 기반이라 RGB를 못 실어 "밴드를 낼지"만 판단, 실제 blend는 platform).
 **단 hover·active 밴드는 has_color와 무관하게 그대로** — 그건 보더라인이 아니라 **상호작용 피드백**이라 카드와 **같은 경로**로
-유지한다(hover=`hovered_slot`이 헤더 row를 가리키면 view의 호버 루프가 카드와 동일한 `bandFill(.tab_hover_bg)`; 헤더 row는 활성
-탭이 될 수 없어 active 밴드는 카드 전용). 정리: **무색·비호버=밴드 없음(화살표+이름만), 색 지정=그 색 밴드, hover=카드와 같은
-하이라이트.** (헤드리스로 무색·비호버 헤더=밴드 op 0, 색 헤더=밴드 op 1, 호버 헤더=호버 밴드 op 있음을 단언; 색 유지는
-`MARU_FORCE_GROUP`(무색: 밴드 없는 깔끔한 헤더)·`MARU_FORCE_GROUP_COLOR`(파랑 밴드 tint 유지) 제품 스크린샷으로 확인.)
+유지한다(hover=`hovered_slot`이 헤더 row를 가리키면 view의 호버 루프가 밴드를 낸다; 헤더 row는 활성 탭이 될 수 없어 active 밴드는
+카드 전용). **호버 role 분기(code-review #4)**: 무색 헤더·카드는 `bandFill(.tab_hover_bg)`(카드와 동일). 하지만 **색 지정
+헤더**는 이미 위 has_color 밴드가 `.tab_hover_bg`(+그룹색 tint)를 깔아, 같은 role 호버 밴드를 겹치면 byte-identical이라 호버가
+안 보인다 → 색 헤더 호버는 한 단계 밝은 **`.tab_active_bg`로 오버레이**해(lowerSidebar가 같은 그룹색을 tint하되 더 밝은 base)
+카드처럼 시각 변화가 나게 한다. 정리: **무색·비호버=밴드 없음(화살표+이름만), 색 지정=그 색 밴드, hover=카드와 같은 하이라이트
+(색 헤더는 밝은 role로 색 위 오버레이).** (헤드리스로 무색·비호버 헤더=밴드 op 0, 색 헤더=밴드 op 1, 무색 호버 헤더=호버 밴드
+op 있음, **색 호버 헤더=색 밴드(.tab_hover_bg)와 다른 role(.tab_active_bg) 밴드가 겹침**을 단언; 색 유지는 `MARU_FORCE_GROUP`
+(무색: 밴드 없는 깔끔한 헤더)·`MARU_FORCE_GROUP_COLOR`(파랑 밴드 tint 유지) 제품 스크린샷으로 확인.)
 
 **메트릭 출처(SG3b에서 확정)**: `card_slot_h` = 기존 `props.metrics.sidebar_slot_height_px`(그대로 재사용). `header_row_h` =
 **신규 메트릭** — 헤더 한 줄이므로 `≈ cell_height_px`(+세로 패딩 약간)로 두고 `CellMetrics`에 추가한다(platform이 채움).
@@ -207,6 +220,15 @@ host(projectRows)가 `tab.group_color!=0`로 채운다(chrome은 role 기반이�
 row별 누적 y(또는 각 row 높이/누적 오프셋 배열)를 받도록 인코딩·디코드를 함께 고쳐야 한다 — 이게 가변 높이의 실제
 비용이다(hit-test는 Zig 순수라 누적이 쉽지만, glyph는 Zig↔`.m` FFI 경계라 양쪽을 맞춰야 함). 세로 스크롤 클리핑도
 같은 누적 y를 쓴다. 헤더 glyph(삼각+이름)는 카드 제목과 같은 `buildSidebarDrawList` 경로에 row 종류만 분기한다.
+
+**밴드 셀도 같은 옵션2로(code-review #7·#8)**: 위 glyph 옵션2(`.m`이 Zig가 실은 `origin_y`만 씀)를 **tui 셀 밴드**(`slot_id==0`
+sentinel)에도 적용한다 — 옛 밴드 분기는 `sc.row*slot_h`·높이 `slot_h`로 균일을 가정해, 그룹 헤더(header_row_h<slot_h)가 앞서면
+밴드가 격자에서 어긋났다. 이제 `sidebarBandCell`이 chrome이 준 content-상대 rowTop(`q.rect.y`)을 `origin_y`로, 실제 row 높이
+(`q.rect.h` — 카드=slot_h·색 헤더=header_row_h)를 `atlas_height_px`(sentinel이라 미사용 필드 재활용)로 실어 주고, `.m`은
+`origin_y+header−scroll`·그 높이로 그린다(glyph와 단일 스크롤 소스). 또 **리스트 아래 새-워크스페이스 드롭 하이라이트**(drop_slot
+==rows.len)는 bandFill이 `q.rect.y=contentHeight`로 내므로, 옛 `sidebarBandRow(y) orelse continue`(past-end null)가 삼키던 셀을
+이제 `q.rect.y`를 직접 origin_y로 써서 방출한다(#8). tui 밴드 정합은 `MARU_FORCE_GROUP_COLOR` + `chrome.theme=tui` 스크린샷으로
+확인(색 헤더 밴드=얇은 header_row_h·카드 밴드=slot_h가 각자 텍스트와 정렬).
 
 ## 6. platform 오케스트레이션 — `src/platform/macos/app_session.zig`
 
@@ -329,6 +351,10 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
    처리(옛 visibleTab null-skip 대체), `sidebar_drop_slot` 드롭 하이라이트. **마커 탭 드래그는 가드로 무동작**(그룹
    통째=SG5). 연속 파티션은 마커 없는 카드만 재정렬해 사실상 공짜. 헤드리스 2테스트(넣기/빼기·펼친/접힌 헤더·마커
    가드·재투영 depth). 한계: 핀+그룹 조합·카드→마커카드 위-드롭은 헤더 드롭이 신뢰 경로.
+   - **접힌 헤더 드롭도 drag-direction 보정(code-review #2)**: 접힌 브랜치는 `from<m`이면 마지막 멤버 자리 `j-1`, `from>m`이면
+     마커 뒤 마지막 자리 `min(j, len-1)`을 쓴다(펼친 헤더의 `from<m`→`m`/`from>m`→`m+1`과 같은 결). 옛 코드는 항상 `j-1`이라
+     **marker-only 그룹**(`j==m+1` → `j-1==m`)에 `from>m` 드롭이 `moveTab(from, m)`으로 카드를 마커 **앞**에 떨궈 그룹 밖으로
+     샜다 — 이제 두 방향 모두 마커 뒤(그룹 안)에 안착한다.
 5. **SG5 — 그룹 통째 드래그·색·(선택)중첩**:
    - **SG5-1 ✅ — 그룹 통째 드래그**: 헤더를 잡아 드래그하면 그룹 구간 `[M,j)`(마커 탭 + 소속 카드)가 통째 이동.
      `moveGroupRange`(구간을 블록으로 그룹 경계에만 삽입 — 파티션 위반 불가능)·`sidebarGroupDropBoundary`(드롭 row→그룹

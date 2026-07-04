@@ -896,9 +896,13 @@ bool maru_metal_renderer_draw(
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
             float py_top, cell_h, sx_origin;
-            if (sc.slot_id == 0u) { // 밴드/배경 — row=slot, 슬롯 전체, 여백 없음
-                py_top = (float)sc.row * slot_h + sidebar_header_px - sidebar_scroll;
-                cell_h = slot_h;
+            if (sc.slot_id == 0u) { // 밴드/배경 — 세로 위치(origin_y)·높이(atlas_height_px)를 Zig가 실어 준다(가변 높이 #7·#8)
+                // 옛 균일 기하(row*slot_h·높이 slot_h)를 폐기: 그룹 헤더(header_row_h<slot_h)가 앞서면 밴드가 slot_h
+                // 격자로 어긋났다(code-review #7). 이제 lowerSidebar가 chrome content-상대 rowTop을 origin_y로, 실제 row
+                // 높이를 atlas_height_px로 실어 준다(glyph 옵션2와 동형). 여기선 헤더 시프트·스크롤만 더한다 — 밴드/glyph
+                // 단일 스크롤 소스. past-end(리스트 아래 새 워크스페이스 드롭 행)도 origin_y=contentHeight로 정상 방출(#8).
+                py_top = (float)sc.origin_y + sidebar_header_px - sidebar_scroll;
+                cell_h = (sc.atlas_height_px > 0u) ? (float)sc.atlas_height_px : slot_h;
                 sx_origin = 0.0f;
             } else { // 카드 glyph — 세로 위치(블록중앙 포함 content-상대 py)는 Zig가 origin_y에 실어 준다(가변 높이, SG3b-2-ii)
                 // 옛 균일 기하(slot_idx*slot_h + 블록중앙)를 폐기: 그룹 헤더(header_row_h<slot_h)가 앞서면 카드가 헤더

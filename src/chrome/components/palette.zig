@@ -120,11 +120,12 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
 
 /// 입력 커서의 셀 rect(backing px). **레이아웃 단일 출처** — view가 커서(반전 블록)에, host가 IME 후보창 위치
 /// (imeCursorRect)에 공유한다. 닫혔거나 터미널 0칸/패널 밖이면 null. 위치 = "> " + query **시작점**(= 조합중 시작).
-/// 조합 중에는 커서가 그 자리에서 조합 글자를 **덮는다**(터미널 IME 커서와 동일 — find와 같은 규약). 표시 폭은 EAW.
+/// 조합 중에는 반전 블록 커서가 그 자리(query 끝)에서 조합 글자 위에 겹친다(find와 같은 규약 — 단일 줄 append라
+/// caret 뒤 텍스트가 없어 터미널 grid의 삽입/오버레이 구분과 무관). 표시 폭은 EAW.
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open) return null;
     const lay = overlay_input.panelLayout(p) orelse return null;
-    // preedit은 더하지 않는다 — 커서가 조합 글자를 덮도록 그 시작점(query 끝)에 둔다(터미널과 동일).
+    // preedit은 더하지 않는다 — 조합 글자는 query 끝 caret에 그려진다(단일 줄 append라 뒤 텍스트 없음, find와 동일).
     const caret_col = prompt_cols + state.input.queryCols();
     if (caret_col >= lay.panel_cols) return null; // 패널 밖
     return .{ .x = lay.x + @as(i32, @intCast(caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
@@ -353,8 +354,8 @@ test "palette view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조�
     try std.testing.expect(out.items[1] == .text); // (행 없음: panel fill, prompt text, caret)
     try std.testing.expectEqualStrings("a", out.items[1].text.runs[1].text);
     try std.testing.expectEqualStrings("\xea\xb0\x80", out.items[1].text.runs[2].text);
-    // 커서는 query "a"(1칸) 끝 = col 3(=2 prompt + 1)에서 조합 글자 "가"를 **덮는다**(터미널 IME 커서와 동일 —
-    // preedit는 caret 위치에 안 더한다). find와 같은 규약.
+    // 커서는 query "a"(1칸) 끝 = col 3(=2 prompt + 1)에서 조합 글자 "가" 위에 겹친다(preedit는 caret 위치에
+    // 안 더함 — 단일 줄 append라 뒤 텍스트 없음). find와 같은 규약.
     const caret = out.items[out.items.len - 1];
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
     try std.testing.expectEqual(out.items[0].quad.rect.x + 3 * 8, caret.fill.rect.x);

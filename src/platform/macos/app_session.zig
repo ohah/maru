@@ -2030,8 +2030,8 @@ pub const AppSession = struct {
     }
 
     /// rename 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect)에 쓴다. 대상별 편집기
-    /// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(커서가 조합 글자를 덮는 터미널 IME
-    /// 규약 — find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
+    /// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐
+    /// 그려짐 — 단일 줄 append라 뒤 텍스트 없음, find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
     /// 구하면 null(터미널 커서로 폴백). 렌더 geometry(paneBar·barMetrics·segOf, 사이드바 indent/slot)와 같은 셈법.
     fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
         const target = self.rename orelse return null;

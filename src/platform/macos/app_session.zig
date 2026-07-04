@@ -481,18 +481,22 @@ fn packStraightRgbU32(rgb: u32, alpha: u8) u32 {
     return (@as(u32, alpha) << 24) | (rgb & 0x00FF_FFFF);
 }
 
-/// 활성 탭 하이라이트 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
+/// 사이드바 하이라이트/색 밴드 셀 1개를 만든다(못 만들면 null). 사이드바 폭을 cell 폭으로 floor해 칸 수
 /// (sidebar_cols)를 구하고 — 밴드가 origin_x를 넘어 터미널 영역을 침범하지 않게 floor한다(우측에 한 칸
 /// 미만 여백이 살짝 inset처럼 남는다) — 그 폭만큼 한 칸(col 0, width=sidebar_cols)으로 사이드바를 채우는
-/// sentinel-UV(-1) 배경 셀을 active_row에 둔다. u16 width 상한도 같이 막는다. 순수 함수라 OS와 무관하게
-/// 단위 테스트한다(rebuildSidebar가 호출). 사이드바가 꺼졌거나(폭 0) cell 폭 미상이면 null.
-fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, active_row: u16, active_bg: u32) ?metal_frame.NativeMetalCell {
+/// sentinel-UV(-1) 배경 셀을 만든다. u16 width 상한도 같이 막는다. **가변 높이(code-review #7)**: 세로 위치는
+/// `origin_y`(content-상대 rowTop = 헤더·스크롤 제외)로, 높이는 `height`(카드=slot_h·그룹 헤더=header_row_h)로
+/// 실어 준다 — .m 렌더러가 옛 균일 `row*slot_h`/`slot_h` 대신 이 둘을 써 그룹 헤더(얇은 한 줄)와 정합한다(glyph 옵션2와
+/// 동형). height는 glyph 없는 sentinel 셀이라 미사용인 `atlas_height_px` 필드로 나른다(atlas 미참조라 안전). `row`는
+/// tint 역매핑·디버그용 표시 row(세로 위치는 origin_y가 단일 출처). 순수 함수라 OS와 무관하게 단위 테스트한다
+/// (lowerSidebar가 호출). 사이드바가 꺼졌거나(폭 0) cell 폭 미상이면 null.
+fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, row: u16, origin_y: u32, height: u32, active_bg: u32) ?metal_frame.NativeMetalCell {
     if (sidebar_width_px == 0 or cell_width_px == 0) return null;
     const cols_u32 = @min(sidebar_width_px / cell_width_px, @as(u32, std.math.maxInt(u16)));
     const sidebar_cols: u16 = @intCast(cols_u32);
     if (sidebar_cols == 0) return null;
     return .{
-        .row = active_row,
+        .row = row,
         .col = 0,
         .width = sidebar_cols,
         .codepoint = ' ',
@@ -500,13 +504,14 @@ fn sidebarBandCell(sidebar_width_px: u32, cell_width_px: u32, active_row: u16, a
         .atlas_x_px = 0,
         .atlas_y_px = 0,
         .atlas_width_px = 0,
-        .atlas_height_px = 0,
+        .atlas_height_px = height, // 밴드 행 높이(가변 — 카드=slot_h·헤더=header_row_h)를 .m cell_h로 나른다(#7)
         .u0 = -1.0,
         .v0 = -1.0,
         .u1 = -1.0,
         .v1 = -1.0,
         .foreground = 0,
         .background = active_bg,
+        .origin_y = origin_y, // content-상대 rowTop(헤더·스크롤 제외). .m이 header 시프트·scroll을 더한다(glyph 옵션2 동형, #7)
     };
 }
 
@@ -2127,12 +2132,17 @@ pub const AppSession = struct {
                 const sr = slot_row orelse return null;
                 const slot_h = self.sidebar_slot_height_px;
                 const hdr_h = self.sidebar_header_row_h_px;
-                // 중첩 헤더(SG5-3)는 (depth-1)*group_indent 만큼 들여써 있으므로 caret도 그만큼 우측으로. 최상위(depth 1)=0이라
+                // buildSidebarTitleDrawList는 모든 사이드바 glyph(헤더 삼각/이름 포함)를 indent_cols(=ceil((card_gap+
+                // accent_bar)/cw))만큼 우측으로 민다(13936). .workspace caret(2053)이 그 항을 더하듯 헤더 caret도 더해야
+                // 삼각/이름과 정렬된다 — 옛 코드는 이 항이 없어 캐럿·IME 후보창이 indent_cols만큼 왼쪽으로 어긋났다(code-review #5).
+                const sp = self.buildChromeTokens().space;
+                const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
+                // 중첩 헤더(SG5-3)는 (depth-1)*group_indent 만큼 더 들여써 있으므로 caret도 그만큼 우측으로. 최상위(depth 1)=0이라
                 // 비중첩 caret은 그대로. group_indent_cols = ceil(group_indent_px / cw)(buildSidebarTitleDrawList와 단일 출처).
-                const gindent_px = self.buildChromeTokens().space.group_indent_px;
+                const gindent_px = sp.group_indent_px;
                 const gindent_cols: u32 = if (gindent_px > 0) (@as(u32, gindent_px) + cw - 1) / cw else 0;
                 const hindent_cols: u32 = (if (hdr_depth > 0) hdr_depth - 1 else 0) * gindent_cols;
-                const caret_col: u32 = hindent_cols + 2 + qcols; // 들여쓰기 + 삼각 + 공백 + 편집 폭
+                const caret_col: u32 = indent_cols + hindent_cols + 2 + qcols; // 사이드바 indent + 중첩 들여쓰기 + 삼각 + 공백 + 편집 폭
                 const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, sr, self.sidebar_header_height_px, slot_h, hdr_h, self.sidebar_scroll_offset_px);
                 const block_off: i64 = @intCast((hdr_h -| ch) / 2); // 헤더 1줄 세로 중앙
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
@@ -3049,10 +3059,14 @@ pub const AppSession = struct {
         // 떨어져 '검색바에 떨어뜨려도 새 워크스페이스가 생기는' 오동작이 된다(하이라이트도 카드 아래 행에 잘못 켜진다).
         if (y_px < @as(f64, @floatFromInt(self.sidebar_header_height_px))) return null;
         if (self.sidebarSlotAt(y_px)) |slot| {
-            if (self.visibleTab(slot)) |tab_idx| {
-                if (tab_idx == self.app_window.active_tab) return null; // 자기 워크스페이스 — 무의미
-                return .{ .merge = tab_idx };
-            }
+            // 유효 row 위. 카드면 그 워크스페이스에 merge. **그룹 헤더 row(visibleTab=null)면 no-op** — pane을
+            // "그룹"에 넣는 개념이 없고(그룹은 워크스페이스가 아니라 묶음), 새 워크스페이스도 아니므로(옛 코드는 여기서
+            // new_workspace로 falls through해 헤더에 떨어뜨려도 원치 않는 새 워크스페이스가 생겼다, code-review #3)
+            // 최소 안전 동작으로 드롭을 무시한다(상단 검색 헤더 가드와 같은 결). past-end(리스트 아래)는 sidebarSlotAt이
+            // null이라 이 블록을 건너뛰어 아래 new_workspace로 간다(자연스러운 "빈 영역=새 워크스페이스" 유지).
+            const tab_idx = self.visibleTab(slot) orelse return null; // 그룹 헤더 row → 드롭 무동작(no-op)
+            if (tab_idx == self.app_window.active_tab) return null; // 자기 워크스페이스 — 무의미
+            return .{ .merge = tab_idx };
         }
         return .new_workspace; // 사이드바 빈 영역(카드 목록 아래) — 새 워크스페이스
     }
@@ -3903,20 +3917,9 @@ pub const AppSession = struct {
         }
 
         // 사이드바 그룹 마커 승계(SG3c §2.1·§10) — 그룹 시작 탭이 닫히면 그 group_start 마커를 **다음 탭**으로 넘겨
-        // 그룹이 안 사라지게 한다(그룹 첫 카드를 닫아도 나머지가 그룹에 남게). 다음 탭이 이미 자기 group_start면(그룹이
-        // 이 탭 하나뿐) 승계 없이 그룹 소멸(destroyTab이 마커 free). 마지막 탭이면 다음이 없어 소멸. 소유권만 이전한다.
-        {
-            const closing = self.tabs.items[index];
-            if (closing.group_start) |marker| {
-                if (index + 1 < self.tabs.items.len and self.tabs.items[index + 1].group_start == null) {
-                    self.tabs.items[index + 1].group_start = marker; // 소유권 이전 — closing은 아래서 null화해 double-free 방지
-                    self.tabs.items[index + 1].group_collapsed = closing.group_collapsed;
-                    self.tabs.items[index + 1].group_depth = closing.group_depth; // 중첩 depth도 승계(SG5-3 — 마커 따라 이동, 자식은 위치 파생 유지)
-                    self.tabs.items[index + 1].group_color = closing.group_color; // 그룹 색도 승계(SG5-2 — 색은 마커 탭에 사니 마커 따라 이동)
-                    closing.group_start = null; // destroyTab이 free 안 하게(다음 탭이 소유)
-                }
-            }
-        }
+        // 그룹이 안 사라지게 한다(그룹 첫 카드를 닫아도 나머지가 그룹에 남게). 승계 실패(다음 없음·이미 마커)면 승계
+        // 없이 closing.group_start가 남아 아래 destroyTabStandalone이 free한다(그룹 소멸). inheritGroupMarker 공유(#11).
+        _ = self.inheritGroupMarker(index);
 
         const tab = self.tabs.orderedRemove(index);
         _ = self.surface_ptrs.orderedRemove(index);
@@ -4048,9 +4051,14 @@ pub const AppSession = struct {
                 const m = h.tab; // 그룹 시작(마커) 탭 인덱스
                 if (m >= len) return null;
                 if (h.collapsed) {
-                    // 접힘 → 그룹 끝. subtree [m, j)(자식 그룹 포함, SG5-3): 접힌 그룹 마지막 탭 위치로 드롭.
+                    // 접힘 → 그룹 끝(subtree [m, j), 자식 그룹 포함 SG5-3). 펼친 헤더 브랜치와 같은 **drag-direction 보정**:
+                    // from<m이면 dragged 제거로 subtree가 한 칸 당겨져 마지막 멤버 자리 = j-1, from>m이면 subtree가 안
+                    // 밀리니 마커 뒤 마지막 자리 = j. 옛 코드는 항상 j-1이라 marker-only(j==m+1 → j-1==m)에 from>m 드롭이
+                    // moveTab(from>m, m)으로 카드를 마커 **앞**에 떨궈 그룹 밖으로 샜다(code-review #2). 이제 두 방향 모두
+                    // 마커 뒤(그룹 안)로 떨어진다. from==m(마커 탭)은 호출 전 제외(그룹 통째=SG5).
                     const j = self.groupSubtreeEnd(m);
-                    return j - 1; // 그룹 마지막 탭 위치(그 뒤 = 다음 그룹/끝이므로 여기까지가 이 그룹)
+                    if (from < m) return j - 1;
+                    return @min(j, len - 1);
                 }
                 // 펼침 → 그룹 첫 몸통 카드 자리(마커 직후). from==m은 마커 탭이라 이 경로 호출 전 제외됨(무동작 가드).
                 if (from < m) return m;
@@ -4065,6 +4073,37 @@ pub const AppSession = struct {
     // 삽입 위치를 항상 그룹 경계로 clamp하면(sidebarGroupDropBoundary) 어떤 이동이든 그룹이 다른 그룹을 관통해 쪼개지지
     // 않아 연속 파티션 불변식이 유지된다(그룹 중간엔 다른 group_start가 안 들어간다).
 
+    /// moveGroupRange의 블록-이동 fill 파라미터(reorderTabs context, code-review #10). [m,j)=이동 구간, rest_insert=Rest에서의 삽입 위치.
+    const TabReorderBlock = struct { m: usize, j: usize, rest_insert: usize };
+
+    /// tabs/surface_ptrs를 새 순서로 재배열하는 공통 스캐폴딩(code-review #10) — 활성 *Tab을 캡처해 재배열 후 새 인덱스로
+    /// 보정하고, 임시 버퍼 2개를 alloc/free한다. `fill`(comptime)이 context와 self로 새 순서를 채운다(정확히 1:1 순열;
+    /// 반환값은 caller가 해석 — moveGroupRange는 새 마커 인덱스, stablePartitionPinned는 미사용). tabs가 비었거나 alloc
+    /// 실패면 null(재배열 생략, 순서 불변). moveGroupRange(블록 이동)·stablePartitionPinned(고정 파티션)가 공유 —
+    /// 옛 두 곳의 active 캡처/임시 버퍼/memcpy/active 재find 중복을 한 곳으로 모은다. Tab은 heap-pin이라 포인터만 셔플되고
+    /// surface_ptrs.items는 app_window.tabs와 같은 backing이라 in-place memcpy면 재바인딩 불요(moveTab과 동형).
+    fn reorderTabs(
+        self: *AppSession,
+        context: anytype,
+        comptime fill: fn (@TypeOf(context), *AppSession, []*Tab, []*maru.session.Surface) usize,
+    ) ?usize {
+        const len = self.tabs.items.len;
+        if (len == 0) return null;
+        const active_ptr: ?*Tab = if (self.app_window.active_tab < len) self.tabs.items[self.app_window.active_tab] else null;
+        const new_tabs = self.allocator.alloc(*Tab, len) catch return null;
+        defer self.allocator.free(new_tabs);
+        const new_surfaces = self.allocator.alloc(*maru.session.Surface, len) catch return null;
+        defer self.allocator.free(new_surfaces);
+        const result = fill(context, self, new_tabs, new_surfaces);
+        @memcpy(self.tabs.items, new_tabs);
+        @memcpy(self.surface_ptrs.items, new_surfaces);
+        if (active_ptr) |ap| for (self.tabs.items, 0..) |t, i| if (t == ap) { // active *Tab의 새 인덱스로 보정
+            self.app_window.active_tab = i;
+            break;
+        };
+        return result;
+    }
+
     /// 마커 탭 m에서 시작하는 그룹 구간 [m, j)(j=다음 group_start 또는 끝, §2.1 연속 파티션)를 **하나의 블록으로**
     /// insert_before 경계(다른 그룹 시작 인덱스 또는 len)에 옮긴다. 구간 내부 순서(마커+소속 카드)는 유지되고, 삽입
     /// 위치가 항상 그룹 경계라 옮긴 뒤에도 모든 그룹이 [마커, 다음 마커) 연속 구간으로 남는다(파티션 위반 불가). insert_before
@@ -4073,7 +4112,10 @@ pub const AppSession = struct {
     /// in-place memcpy면 재바인딩 불요 — moveTab과 동형). 성공 시 옮긴 그룹의 **새 마커 인덱스**를 반환(드래그 라이브-
     /// 팔로우가 다음 프레임 기준을 갱신), no-op이면 m 그대로. **주의(§10 한계)**: pin+그룹 조합은 SG4처럼 범위 밖 —
     /// 그룹이 고정/비고정 파티션을 가로지르면 고정 프리픽스 불변식은 보장하지 않는다(그룹 이동은 그룹 경계만 본다).
-    fn moveGroupRange(self: *AppSession, m: usize, insert_before: usize) usize {
+    /// `defer_rebuild=true`면 성공 이동 후 rebuildSidebar/metal_dirty를 **건너뛴다** — moveGroupNesting/Sibling이 곧이어
+    /// relevelBlock으로 depth를 다시 쓴 뒤 **한 번만** rebuild하게 해 드래그 프레임당 2회 rebuild를 없앤다(code-review #9).
+    /// no-op 경로는 어느 값이든 원래 rebuild를 안 한다(순서 불변이라 재빌드 불요).
+    fn moveGroupRange(self: *AppSession, m: usize, insert_before: usize, defer_rebuild: bool) usize {
         const len = self.tabs.items.len;
         if (m >= len or self.tabs.items[m].group_start == null) return m; // m은 그룹 시작 마커여야 한다
         // 구간 [m, j) = 그룹 **subtree**(마커 + 소속 카드 + 자식 그룹 통째, SG5-3). 비중첩이면 "다음 마커"와 동일이라
@@ -4085,49 +4127,47 @@ pub const AppSession = struct {
         // 구간 제거 후 Rest에서의 삽입 위치: 구간 위(≤m)면 그대로, 구간 아래(≥j)면 range_len만큼 앞당김.
         const rest_insert: usize = if (insert_before <= m) insert_before else insert_before - range_len;
 
-        const active_ptr: ?*Tab = if (self.app_window.active_tab < len) self.tabs.items[self.app_window.active_tab] else null;
-        var new_tabs = self.allocator.alloc(*Tab, len) catch return m; // 실패 시 이동 생략(순서 불변)
-        defer self.allocator.free(new_tabs);
-        var new_surfaces = self.allocator.alloc(*maru.session.Surface, len) catch return m;
-        defer self.allocator.free(new_surfaces);
-        // Rest = tabs[0..m] ++ tabs[j..]를 순서대로 훑되, Rest 논리 인덱스가 rest_insert에 닿으면 구간 [m,j)를 끼운다(insert-before).
-        var w: usize = 0;
-        var new_marker: usize = 0;
-        var rest_idx: usize = 0;
-        var src: usize = 0;
-        while (src < len) : (src += 1) {
-            if (src >= m and src < j) continue; // 구간은 건너뛴다(따로 삽입)
-            if (rest_idx == rest_insert) { // 이 Rest 원소 앞에 구간 삽입
-                new_marker = w;
-                var k: usize = m;
-                while (k < j) : (k += 1) {
-                    new_tabs[w] = self.tabs.items[k];
-                    new_surfaces[w] = self.surface_ptrs.items[k];
+        // 임시 버퍼 재배열 + 활성 *Tab 재find는 reorderTabs 공유(code-review #10). fill이 Rest(=tabs[0..m]++tabs[j..])를
+        // 훑다 rest_insert에 닿으면 구간 [m,j)를 끼워 넣고(insert-before) 새 마커 인덱스를 반환한다. alloc 실패면 null → 이동 생략.
+        const new_marker = self.reorderTabs(TabReorderBlock{ .m = m, .j = j, .rest_insert = rest_insert }, struct {
+            fn fill(bm: TabReorderBlock, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
+                const n = s.tabs.items.len;
+                var w: usize = 0;
+                var new_marker: usize = 0;
+                var rest_idx: usize = 0;
+                var src: usize = 0;
+                while (src < n) : (src += 1) {
+                    if (src >= bm.m and src < bm.j) continue; // 구간은 건너뛴다(따로 삽입)
+                    if (rest_idx == bm.rest_insert) { // 이 Rest 원소 앞에 구간 삽입
+                        new_marker = w;
+                        var k: usize = bm.m;
+                        while (k < bm.j) : (k += 1) {
+                            new_tabs[w] = s.tabs.items[k];
+                            new_surfaces[w] = s.surface_ptrs.items[k];
+                            w += 1;
+                        }
+                    }
+                    new_tabs[w] = s.tabs.items[src];
+                    new_surfaces[w] = s.surface_ptrs.items[src];
                     w += 1;
+                    rest_idx += 1;
                 }
+                if (rest_idx == bm.rest_insert) { // Rest 끝에 삽입(rest_insert == rest_len)
+                    new_marker = w;
+                    var k: usize = bm.m;
+                    while (k < bm.j) : (k += 1) {
+                        new_tabs[w] = s.tabs.items[k];
+                        new_surfaces[w] = s.surface_ptrs.items[k];
+                        w += 1;
+                    }
+                }
+                return new_marker;
             }
-            new_tabs[w] = self.tabs.items[src];
-            new_surfaces[w] = self.surface_ptrs.items[src];
-            w += 1;
-            rest_idx += 1;
+        }.fill) orelse return m; // alloc 실패 → 순서 불변
+        if (!defer_rebuild) { // caller가 relevel 후 1회 rebuild하려면 여기선 생략(code-review #9)
+            self.rebuildSidebar() catch {};
+            self.metal_dirty = true;
         }
-        if (rest_idx == rest_insert) { // Rest 끝에 삽입(rest_insert == rest_len)
-            new_marker = w;
-            var k: usize = m;
-            while (k < j) : (k += 1) {
-                new_tabs[w] = self.tabs.items[k];
-                new_surfaces[w] = self.surface_ptrs.items[k];
-                w += 1;
-            }
-        }
-        @memcpy(self.tabs.items, new_tabs);
-        @memcpy(self.surface_ptrs.items, new_surfaces);
-        if (active_ptr) |ap| for (self.tabs.items, 0..) |t, i| if (t == ap) {
-            self.app_window.active_tab = i;
-            break;
-        };
-        self.rebuildSidebar() catch {};
-        self.metal_dirty = true;
         return new_marker;
     }
 
@@ -4144,9 +4184,9 @@ pub const AppSession = struct {
             .group_header => |h| h.tab,
         };
         if (target_tab >= len) return null;
-        // 첫 그룹 시작 = 최상위 구간의 끝(§2.1: 최상위 카드는 첫 마커 이전에만).
-        var first_group: usize = 0;
-        while (first_group < len and self.tabs.items[first_group].group_start == null) first_group += 1;
+        // 첫 그룹 시작 = 최상위 구간의 끝(§2.1: 최상위 카드는 첫 마커 이전에만). firstGroupStartIndex 공유(code-review #14 —
+        // 옛 인라인 스캔 재구현 제거). 마커가 하나도 없으면 len(전부 최상위 = 옛 인라인이 len에서 멈추던 것과 동치).
+        const first_group = self.firstGroupStartIndex() orelse len;
         if (target_tab < first_group) {
             // 최상위 카드에 드롭 → 그룹들 최상단(첫 그룹 앞). 자기가 이미 첫 그룹이면 no-op.
             if (m == first_group) return null;
@@ -4231,13 +4271,14 @@ pub const AppSession = struct {
     /// 어느 쪽이든 바뀌면 changed=true. 연속 파티션·subtree 무결성은 moveGroupRange가, 트리 연속은 relevel+projectRows가 보장.
     fn moveGroupNesting(self: *AppSession, m: usize, insert_before: usize, target_depth: u8) GroupMoveResult {
         const range_len = self.groupSubtreeEnd(m) - m;
-        const nm = self.moveGroupRange(m, insert_before); // 이동 시 rebuildSidebar 내부 호출(옛 depth로 1회 — 같은 프레임에 아래서 교정)
+        const nm = self.moveGroupRange(m, insert_before, true); // defer rebuild — relevel 후 아래서 1회만(code-review #9)
         const depth_changed = self.relevelBlock(nm, range_len, target_depth);
-        if (depth_changed) {
+        const changed = (nm != m) or depth_changed;
+        if (changed) { // 이동 or depth 변경 → 프레임당 정확히 1회 rebuild
             self.rebuildSidebar() catch {};
             self.metal_dirty = true;
         }
-        return .{ .marker = nm, .changed = (nm != m) or depth_changed };
+        return .{ .marker = nm, .changed = changed };
     }
 
     /// SG5-1 형제 경계 이동 + SG5-4 빼기(un-nest): 그룹을 insert_before로 옮기고(moveGroupRange), 새 위치의 **자연 eff
@@ -4245,14 +4286,15 @@ pub const AppSession = struct {
     /// 얕은 곳(최상위 등)으로 가면 gap-clamp된 eff(≤ 저장값)로 낮춰 빼기가 저장 depth에도 반영된다(gap 제거).
     fn moveGroupSibling(self: *AppSession, m: usize, insert_before: usize) GroupMoveResult {
         const range_len = self.groupSubtreeEnd(m) - m;
-        const nm = self.moveGroupRange(m, insert_before);
+        const nm = self.moveGroupRange(m, insert_before, true); // defer rebuild — relevel 후 아래서 1회만(code-review #9)
         const natural = self.effectiveDepthAt(nm); // 새 위치의 gap-clamp eff(빼기면 저장값보다 얕다)
         const depth_changed = self.relevelBlock(nm, range_len, natural);
-        if (depth_changed) {
+        const changed = (nm != m) or depth_changed;
+        if (changed) { // 이동 or depth 변경 → 프레임당 정확히 1회 rebuild
             self.rebuildSidebar() catch {};
             self.metal_dirty = true;
         }
-        return .{ .marker = nm, .changed = (nm != m) or depth_changed };
+        return .{ .marker = nm, .changed = changed };
     }
 
     /// 블록 [start, start+count)의 그룹 마커들 group_depth를 target_depth 기준으로 다시 쓴다 — 블록을 고립 subtree로 보고
@@ -4285,34 +4327,26 @@ pub const AppSession = struct {
     }
 
     /// 고정 탭을 앞쪽으로 stable-partition한다(고정끼리·비고정끼리 상대 순서 유지). tabs와 surface_ptrs를 **함께**
-    /// 재배열하고 active_tab도 가리키던 *Tab을 추적해 새 인덱스로 보정한다. 복원(applyWorkspaceWindow)이 저장 순서를
-    /// 그대로 깔아 고정/비고정이 섞였을 때 불변식([0, pinned_count)에 고정 연속)을 복구한다. two-pass(고정 먼저, 비고정
-    /// 뒤)라 안정적이고 무할당이 아닌 임시 버퍼를 쓴다(탭 수는 적다). active *Tab은 재배열 전 캡처해 새 위치를 찾는다.
+    /// 재배열하고 active_tab도 가리키던 *Tab을 추적해 새 인덱스로 보정한다(reorderTabs 공유, code-review #10). 복원
+    /// (applyWorkspaceWindow)이 저장 순서를 그대로 깔아 고정/비고정이 섞였을 때 불변식([0, pinned_count)에 고정 연속)을
+    /// 복구한다. two-pass(고정 먼저, 비고정 뒤)라 안정적이다. alloc 실패면 재배열 생략(복원은 진행, 불변식만 미보장).
     fn stablePartitionPinned(self: *AppSession) void {
-        const len = self.tabs.items.len;
-        if (len == 0) return;
-        const active_ptr: ?*Tab = if (self.app_window.active_tab < len) self.tabs.items[self.app_window.active_tab] else null;
-        var new_tabs = self.allocator.alloc(*Tab, len) catch return; // 실패 시 재배열 생략(복원은 진행, 불변식만 미보장)
-        defer self.allocator.free(new_tabs);
-        var new_surfaces = self.allocator.alloc(*maru.session.Surface, len) catch return;
-        defer self.allocator.free(new_surfaces);
-        var w: usize = 0;
-        for (self.tabs.items, self.surface_ptrs.items) |t, s| if (t.pinned) { // pass 1: 고정(상대 순서 유지)
-            new_tabs[w] = t;
-            new_surfaces[w] = s;
-            w += 1;
-        };
-        for (self.tabs.items, self.surface_ptrs.items) |t, s| if (!t.pinned) { // pass 2: 비고정(상대 순서 유지)
-            new_tabs[w] = t;
-            new_surfaces[w] = s;
-            w += 1;
-        };
-        @memcpy(self.tabs.items, new_tabs);
-        @memcpy(self.surface_ptrs.items, new_surfaces);
-        if (active_ptr) |ap| for (self.tabs.items, 0..) |t, i| if (t == ap) { // active *Tab의 새 인덱스로 보정
-            self.app_window.active_tab = i;
-            break;
-        };
+        _ = self.reorderTabs({}, struct {
+            fn fill(_: void, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
+                var w: usize = 0;
+                for (s.tabs.items, s.surface_ptrs.items) |t, sf| if (t.pinned) { // pass 1: 고정(상대 순서 유지)
+                    new_tabs[w] = t;
+                    new_surfaces[w] = sf;
+                    w += 1;
+                };
+                for (s.tabs.items, s.surface_ptrs.items) |t, sf| if (!t.pinned) { // pass 2: 비고정(상대 순서 유지)
+                    new_tabs[w] = t;
+                    new_surfaces[w] = sf;
+                    w += 1;
+                };
+                return 0; // stablePartitionPinned은 반환값 미사용
+            }
+        }.fill);
     }
 
     /// 디버그 불변식 확인(런타임 — assertPinnedPrefix는 테스트 전용 std.testing이라 별도). 고정 탭이 앞쪽
@@ -4397,13 +4431,31 @@ pub const AppSession = struct {
     /// 그래야 effectiveDepthAt이 이 탭을 아직 마커가 아닌 "소속 카드"로 보고 현재(소속) depth를 돌려준다(최상위=0).
     fn beginGroupForTab(self: *AppSession, tab: *Tab, kind: GroupCreateKind) void {
         if (tab.group_start != null) return;
+        // 단일 패스로 (1) 전체 마커 수(group_count — 기본 이름 "그룹 N"용)와 (2) tab 위치의 enclosing depth(위치 파생 스택,
+        // effectiveDepthAt과 동형)를 함께 구한다 — 옛 코드는 count 루프 후 effectiveDepthAt이 0부터 스택을 다시 훑었다
+        // (code-review #15). tab은 아직 마커가 아니므로(위 가드) 카드 = 자기 앞 마커들의 스택 top depth(최상위=0). depth는
+        // tab 도달 시점에 캡처하고(이후 마커는 depth 무관), group_count는 tab 이후 마커도 세야 하므로 루프를 끝까지 돈다.
         var group_count: usize = 0;
-        var idx: ?usize = null;
-        for (self.tabs.items, 0..) |t, i| {
-            if (t.group_start != null) group_count += 1;
-            if (t == tab) idx = i;
+        var enclosing_depth: u8 = 0;
+        var found_depth = false;
+        var stack: [max_group_nesting]u8 = undefined; // 위치 파생 정규화 depth 스택(projectRows pass1과 동형)
+        var top: usize = 0;
+        for (self.tabs.items) |t| {
+            if (!found_depth and t == tab) { // 이 카드 위치의 소속 그룹 depth = 스택 top(없으면 최상위 0)
+                enclosing_depth = if (top > 0) stack[top - 1] else 0;
+                found_depth = true;
+            }
+            if (t.group_start != null) {
+                group_count += 1;
+                const dd: u8 = @max(@as(u8, 1), t.group_depth); // declared로 pop 판정(gap 클램프 정규화)
+                while (top > 0 and stack[top - 1] >= dd) top -= 1;
+                const parent: u8 = if (top > 0) stack[top - 1] else 0;
+                if (top < stack.len) {
+                    stack[top] = parent + 1;
+                    top += 1;
+                }
+            }
         }
-        const enclosing_depth: u8 = if (idx) |ix| self.effectiveDepthAt(ix) else 0;
         // 중첩 = 현재 그룹 depth+1(max_group_nesting 클램프로 무한 들여쓰기/u8 오버플로 방지). 형제 = 현재 그룹과 같은
         // depth(최상위 카드는 0→1이라 두 kind가 동일). projectRows가 저장 depth로 gap을 다시 클램프하지만 저장값도 합리적으로.
         const new_depth: u8 = switch (kind) {
@@ -4418,6 +4470,17 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// from(자기 포함)에서 **위로** 가장 가까운 group_start 마커의 인덱스 — §2.1 소속 파생(각 카드의 소속 = 자기 위에서
+    /// 가장 가까운 그룹 시작 마커). 위에 마커가 없으면 null(최상위 카드). ungroupTab·setGroupColorForTab·
+    /// startRenameGroupForTab이 공유한다(code-review #13 — 옛 세 곳의 상향 스캔 중복 통합). from은 유효 인덱스라 가정.
+    fn enclosingGroupMarkerIndex(self: *const AppSession, from: usize) ?usize {
+        var i = from;
+        while (true) : (i -= 1) {
+            if (self.tabs.items[i].group_start != null) return i;
+            if (i == 0) return null;
+        }
+    }
+
     /// 워크스페이스가 속한 그룹을 푼다(ungroup) — 그 탭 위(자기 포함)에서 가장 가까운 group_start 마커를 제거한다
     /// (§2.1 소속 파생). 아래 카드는 위 마커/최상위로 자동 재소속. 그룹에 안 속하면 no-op.
     fn ungroupTab(self: *AppSession, tab: *Tab) void {
@@ -4426,19 +4489,32 @@ pub const AppSession = struct {
             idx = i;
             break;
         };
-        var i: usize = idx orelse return;
-        while (true) : (i -= 1) {
-            if (self.tabs.items[i].group_start) |g| {
-                self.allocator.free(g); // owned 마커 해제
-                self.tabs.items[i].group_start = null;
-                self.tabs.items[i].group_collapsed = false;
-                self.rebuildSidebar() catch {};
-                self.metal_dirty = true;
-                return;
-            }
-            if (i == 0) break;
+        const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 최상위 카드 → no-op
+        self.allocator.free(self.tabs.items[mi].group_start.?); // owned 마커 해제
+        self.tabs.items[mi].group_start = null;
+        self.tabs.items[mi].group_collapsed = false;
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 그룹 시작 마커 탭(from)의 마커(group_start/collapsed/depth/color)를 **다음 탭**으로 승계한다 — closeTab(닫힘)·
+    /// removeFromGroupForTab(빼기) 공유(code-review #11). 다음 탭이 존재하고 자기 group_start가 없을 때만(연속 파티션상
+    /// "그룹 안 다음 카드") 소유권을 이전하고 true를 반환한다(from.group_start는 null화 — double-free 방지). 승계 불가
+    /// (다음 없음·이미 마커 = 그룹이 이 탭 하나뿐/마지막)면 false를 반환하고 from.group_start는 그대로 둔다(호출자가 free
+    /// 또는 destroyTab에 위임 — 그룹 소멸). 소속 카드는 위치 파생이라 별도 이전 없음(§2.1). from은 유효 인덱스라 가정.
+    fn inheritGroupMarker(self: *AppSession, from: usize) bool {
+        const src = self.tabs.items[from];
+        const marker = src.group_start orelse return false;
+        if (from + 1 < self.tabs.items.len and self.tabs.items[from + 1].group_start == null) {
+            const next = self.tabs.items[from + 1];
+            next.group_start = marker; // 소유권 이전(SG5-2 색·SG5-3 depth도 마커 따라 이동, 자식은 위치 파생 유지)
+            next.group_collapsed = src.group_collapsed;
+            next.group_depth = src.group_depth;
+            next.group_color = src.group_color;
+            src.group_start = null; // double-free 방지(다음 탭이 소유)
+            return true;
         }
-        // 위에 group_start가 없음 = 최상위 카드 — no-op.
+        return false;
     }
 
     /// 첫 group_start 마커의 tab 인덱스(§2.1: 최상위 = 이 인덱스 **이전** 구간). 마커가 하나도 없으면 null(그룹 전무 =
@@ -4475,21 +4551,17 @@ pub const AppSession = struct {
         const fm0 = self.firstGroupStartIndex() orelse return; // 그룹 전무 → no-op
         if (ix < fm0) return; // 이미 최상위(첫 마커 이전) → no-op(중첩 깊이 무관, tabIsInGroup=false와 동치)
 
-        // 이 카드가 그룹 시작 마커면 그룹이 사라지지 않게 마커를 다음 소속 카드로 승계(closeTab 마커 승계와 동형).
-        // 다음 탭이 이미 자기 group_start(그룹이 이 카드뿐)이거나 마지막 탭이면 승계 대상이 없어 그룹 소멸(마커 free).
-        if (tab.group_start) |marker| {
-            if (ix + 1 < self.tabs.items.len and self.tabs.items[ix + 1].group_start == null) {
-                self.tabs.items[ix + 1].group_start = marker; // 소유권 이전 — tab은 아래서 null화(double-free 방지)
-                self.tabs.items[ix + 1].group_collapsed = tab.group_collapsed;
-                self.tabs.items[ix + 1].group_depth = tab.group_depth; // 중첩 depth 승계(자식은 위치 파생 유지)
-                self.tabs.items[ix + 1].group_color = tab.group_color; // 그룹 색 승계(색은 마커 탭에 산다)
-            } else {
-                self.allocator.free(marker); // 승계 대상 없음 → 그룹 소멸
+        // 이 카드가 그룹 시작 마커면 그룹이 사라지지 않게 마커를 다음 소속 카드로 승계(inheritGroupMarker 공유, #11).
+        // 승계 불가(그룹이 이 카드뿐·마지막 탭)면 마커를 free해 그룹 소멸. 이 탭은 살아남으므로 그룹 필드를 기본값 복귀.
+        if (tab.group_start != null) {
+            if (!self.inheritGroupMarker(ix)) {
+                self.allocator.free(tab.group_start.?); // 승계 대상 없음 → 그룹 소멸
+                tab.group_start = null;
             }
-            tab.group_start = null;
+            // 승계됐으면 inheritGroupMarker가 이미 tab.group_start=null. 나머지 그룹 필드는 마커 아님으로 복귀(기본값).
             tab.group_collapsed = false;
             tab.group_color = 0;
-            tab.group_depth = 1; // 마커 아님으로 복귀(기본값)
+            tab.group_depth = 1;
         }
 
         // 승계 후(또는 마커 아니었으면) 남은 첫 마커 직전으로 옮긴다. 이 카드가 첫 마커였다면 승계로 마커가 ix+1로 내려가
@@ -4514,17 +4586,10 @@ pub const AppSession = struct {
             idx = i;
             break;
         };
-        var i: usize = idx orelse return;
-        while (true) : (i -= 1) {
-            if (self.tabs.items[i].group_start != null) {
-                self.tabs.items[i].group_color = color; // 그룹 시작 마커에만 색 저장(소속 카드는 위치 파생)
-                self.rebuildSidebar() catch {}; // 헤더 밴드 tint·소속 카드 막대 즉시 반영
-                self.metal_dirty = true;
-                return;
-            }
-            if (i == 0) break;
-        }
-        // 위에 group_start가 없음 = 최상위 카드 — no-op(색 얹을 그룹 없음).
+        const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 최상위 카드 → no-op(색 얹을 그룹 없음)
+        self.tabs.items[mi].group_color = color; // 그룹 시작 마커에만 색 저장(소속 카드는 위치 파생)
+        self.rebuildSidebar() catch {}; // 헤더 밴드 tint·소속 카드 막대 즉시 반영
+        self.metal_dirty = true;
     }
 
     /// 워크스페이스가 속한 그룹의 이름을 인라인 편집한다(rename_group — 헤더 더블클릭·팔레트·우클릭). 그 탭 위(자기 포함)
@@ -4535,14 +4600,8 @@ pub const AppSession = struct {
             idx = i;
             break;
         };
-        var i: usize = idx orelse return;
-        while (true) : (i -= 1) {
-            if (self.tabs.items[i].group_start != null) {
-                self.startRename(.{ .group = self.tabs.items[i] });
-                return;
-            }
-            if (i == 0) break;
-        }
+        const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 그룹에 안 속함 → no-op
+        self.startRename(.{ .group = self.tabs.items[mi] });
     }
 
     /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
@@ -6449,7 +6508,10 @@ pub const AppSession = struct {
                 if (header_visible) {
                     self.sidebar_rows.append(self.allocator, .{
                         .group_header = .{
-                            .collapsed = tab.group_collapsed,
+                            // 검색 중에는 매치 카드가 접힘을 무시하고 펼쳐 보이므로(아래 card_visible=matches[i], docs §1)
+                            // 헤더도 **펼침(false)** 으로 표시한다 — 안 그러면 삼각 ▸·(N) 배지가 펼친 카드 위에서 모순
+                            // (접힘 표시인데 카드가 보임)이 된다(code-review #6). 검색을 지우면 tab.group_collapsed로 복귀.
+                            .collapsed = if (searching) false else tab.group_collapsed,
                             // label은 borrowed(tab 소유 group_start)라 destroyTab 후 dangling 위험(code-review #8 UAF). glyph는
                             // 소스 tab 인덱스(.tab=i)로 live 재조회하므로 label은 안전값으로만 둔다(회귀 방지 겸 borrowed 유지).
                             .label = group_name,
@@ -10942,18 +11004,27 @@ pub const AppSession = struct {
     fn destroyTabStandalone(self: *AppSession, tab: *Tab) void {
         // rename 대상이 이 워크스페이스(또는 그 안 pane/Term)·이 탭이 시작하는 그룹이면 비운다 — pane/Term은 아래
         // destroyPane/destroyTerm 가드가 처리하지만, 워크스페이스·그룹 rename은 여기서. teardown 중이라 직접 null.
-        // (그룹 마커 승계가 일어났으면 이 탭엔 group_start가 없어 renamingGroup=false — dangling 없음. 승계 안 됐으면
-        //  이 탭이 그룹 시작 탭이었고 이제 파괴되므로 편집을 취소해야 dangling *Tab을 안 남긴다.)
+        // (renamingGroup은 `r.group == tab`의 **포인터 비교**(1984)라 group_start 유무와 무관하다 — 마커 승계로 group_start가
+        //  다음 탭으로 넘어갔어도, 이 *Tab이 편집 대상이면 true다. 이 탭이 지금 파괴되므로 편집을 취소해 dangling *Tab을 안 남긴다.)
         if (self.renamingWorkspace(tab) or self.renamingGroup(tab)) {
             self.rename = null;
             self.rename_input.clear();
         }
-        // 컨텍스트 메뉴 대상이 이 워크스페이스면 메뉴를 닫고 대상을 비운다(stale 포인터 방지). pane/Term은 아래
-        // destroyPane/destroyTerm가 처리.
-        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .workspace and t.workspace == tab) {
-            self.context_menu_target = null;
-            self.chrome_host.context_menu.hide();
-        };
+        // 컨텍스트 메뉴 대상이 이 워크스페이스**나 이 탭이 시작하는 그룹**이면 메뉴를 닫고 대상을 비운다(stale 포인터
+        // 방지). 둘 다 *Tab을 들므로 이 탭이 파괴되면 dangling → 메뉴 accept 시 startRename UAF(code-review #1). 위
+        // renamingGroup 가드와 같은 방식으로 .group 대상도 클리어한다(마커 승계로 group_start가 넘어갔어도 *Tab 자체가
+        // 파괴되므로 대상 포인터를 반드시 비운다). pane/Term은 아래 destroyPane/destroyTerm가 처리.
+        if (self.context_menu_target) |t| {
+            const hit = switch (t) {
+                .workspace => |w| w == tab,
+                .group => |g| g == tab,
+                else => false,
+            };
+            if (hit) {
+                self.context_menu_target = null;
+                self.chrome_host.context_menu.hide();
+            }
+        }
         for (tab.panes.items) |pane| self.destroyPane(pane);
         // 트리를 통째 해제하기 전에, divider_drag가 이 트리 소속 split이면 표적 null(다른 탭 트리를 가리키면 유지 —
         // 무관한 탭 close가 진행 중 divider 드래그를 안 끊는다). collapse 경로의 invalidateForFreedSplit과 같은 규율.
@@ -13436,13 +13507,19 @@ pub const AppSession = struct {
                 };
                 const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
                 if (!has_radius) {
-                    // tui: 직각 → 셀 밴드(기존 경로). 가변 높이라 rowTop 누적 역산으로 슬롯 행을 구한다(sidebarBandRow).
-                    const ri = self.sidebarBandRow(q.rect.y) orelse continue;
+                    // tui: 직각 → 셀 밴드. 세로 위치·높이를 chrome이 준 **content-상대 rowTop(q.rect.y)·row 높이(q.rect.h)**로
+                    // 그대로 셀에 실어(.m이 균일 row*slot_h 대신 그걸 씀) 그룹 헤더(얇은 한 줄)와 정합한다(code-review #7).
+                    // past-end(리스트 아래 새 워크스페이스 드롭 행)도 bandFill이 q.rect.y=contentHeight로 내므로, 옛
+                    // `sidebarBandRow(q.rect.y) orelse continue`가 null로 삼키던 드롭 하이라이트 셀이 이제 방출된다(#8).
+                    if (q.rect.y < 0) continue; // 이 경로 y는 항상 ≥0(방어)
+                    const origin_y: u32 = @intCast(q.rect.y);
+                    // .row는 tint 역매핑·디버그용 표시 row(past-end면 rows.len — .m 세로 위치는 origin_y가 단일 출처).
+                    const ri = self.sidebarBandRow(q.rect.y) orelse self.sidebar_rows.items.len;
                     const row: u16 = @intCast(@min(ri, @as(usize, std.math.maxInt(u16))));
                     // 드롭 타겟(.drop_zone)은 드래그 중 "어디 떨어질지" 단서라 window.opacity 미적용 — focus 테두리·accent와 동급(불투명 유지).
                     // 나머지 밴드(활성/호버)만 셀 경로 premultiply. drop_zone은 α=1이라 premult==straight로 어느 경로든 안전.
                     const band_bg = if (q.fill_role == .drop_zone) color else self.chromeCellBg(color);
-                    if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, band_bg)) |cell| {
+                    if (sidebarBandCell(self.sidebar_width_px, self.cell_width_px, row, origin_y, q.rect.h, band_bg)) |cell| {
                         self.sidebar_cells.append(self.allocator, cell) catch {};
                     }
                 } else {
@@ -15047,6 +15124,11 @@ pub const AppSession = struct {
         self.command_entries.deinit(self.allocator);
         self.palette_filtered.deinit(self.allocator);
         self.chrome_host.deinit(self.allocator); // chrome 컴포넌트 heap(find.query) 해제
+        // rename/컨텍스트 메뉴 대상은 *Tab/*Pane/*Term을 들 수 있다 — 아래 인라인 teardown이 그 탭들을 통째 free하므로,
+        // destroyTabStandalone(.group 대상 클리어, code-review #1)과 대칭으로 여기서도 대상 포인터를 먼저 비운다(세션
+        // 파괴 경로라 이후 참조는 없지만, 두 teardown 경로가 dangling *Tab을 남기지 않게 하는 단일 규율 — 방어적).
+        self.rename = null;
+        self.context_menu_target = null;
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
@@ -15607,6 +15689,48 @@ test "projectRows: group_start가 group_header row를 삽입하고 카드는 dep
     try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[0].group_header.member_count);
 }
 
+test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collapsed=false) — 강제 펼친 카드와 정합" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
+    session.createGroupForTab(session.tabs.items[0]); // 전부 한 그룹(연속 파티션)
+    session.tabs.items[0].group_collapsed = true; // 그룹 접힘(영속 의도)
+    session.tabs.items[1].custom_name = try allocator.dupe(u8, "findme"); // 그룹 안 카드 하나에 매치용 이름
+
+    // 검색 활성 + 매치 쿼리 → 접힘을 일시 무시하고 매치 카드를 펼쳐 보여야 하고(docs §1), 헤더도 펼침 표시(collapsed=false).
+    session.sidebar_search_active = true;
+    try session.sidebar_search_input.query.appendSlice(allocator, "findme");
+    session.recomputeVisibleTabs();
+    try std.testing.expect(session.sidebar_rows.items[0] == .group_header);
+    try std.testing.expect(!session.sidebar_rows.items[0].group_header.collapsed); // 검색 중 = 펼침 표시(삼각 ▾·배지 없음)
+    // 매치 카드(t1)가 접힘 무시하고 펼쳐 보인다.
+    var saw_t1_card = false;
+    for (session.sidebar_rows.items) |row| switch (row) {
+        .card => |c| if (c.tab == 1) {
+            saw_t1_card = true;
+        },
+        .group_header => {},
+    };
+    try std.testing.expect(saw_t1_card);
+
+    // 검색을 지우면 원래 접힘 상태로 복귀(헤더 collapsed=true, 카드 숨김).
+    session.sidebar_search_active = false;
+    session.sidebar_search_input.clear();
+    session.recomputeVisibleTabs();
+    try std.testing.expect(session.sidebar_rows.items[0].group_header.collapsed); // 영속 접힘 복원
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items.len); // 헤더만(카드 접힘)
+}
+
 test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 승계 (세션)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -15658,6 +15782,68 @@ test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 
     // ungroup(t2, 그룹 소속) → 그 위 시작 마커(t1) 제거 → 그룹 소멸.
     session.ungroupTab(session.tabs.items[1]);
     try std.testing.expect(session.tabs.items[0].group_start == null);
+}
+
+test "code-review #1: 그룹 헤더 우클릭(context_menu_target=.group) 중 마커 탭 destroy → 대상 클리어(UAF 방지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // std.testing.allocator는 leak/UAF 검출 allocator라, teardown 후 dangling *Tab을 남기면 후속 접근이 잡힌다.
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
+    const marker_tab = session.tabs.items[0];
+    session.createGroupForTab(marker_tab); // t0=그룹 시작 마커
+
+    // 그룹 헤더 우클릭 시뮬레이션 — context_menu_target을 마커 탭으로 잡는다(renameTargetAt/8154 경로).
+    session.context_menu_target = .{ .group = marker_tab };
+
+    // 마커 탭 destroy: closeTab(0)은 group_start를 t1로 승계하고 marker_tab(*Tab)을 통째 free한다. 옛 코드는
+    // .workspace 대상만 클리어해 .group 대상이 dangling으로 남았다(메뉴 accept 시 startRename UAF).
+    session.closeTab(0);
+    try std.testing.expect(session.context_menu_target == null); // .group 대상이 클리어돼 dangling 없음
+
+    // 메뉴 accept 경로가 stale 대상을 안 건드리는지(null이면 no-op) 확인 — 여기서 UAF면 leak-check가 잡는다.
+    session.acceptContextMenu();
+    try std.testing.expect(session.context_menu_target == null);
+}
+
+test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영(헤더 삼각/이름과 정렬)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.newTab(); // [t0, t1]
+    const marker = session.tabs.items[0];
+    session.createGroupForTab(marker); // t0 그룹 시작(depth1, 기본 이름 "그룹 1")
+    session.startRename(.{ .group = marker }); // 그룹 이름 편집 시작(query=group_start 시드)
+    session.recomputeVisibleTabs();
+
+    const cw = session.cell_width_px;
+    try std.testing.expect(cw > 0);
+    const sp = session.buildChromeTokens().space;
+    const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
+    try std.testing.expect(indent_cols > 0); // rich = accent_bar+card_gap>0 — 0이면 이 회귀를 못 잡으므로 전제 확인
+    const qcols: u32 = session.rename_input.queryCols();
+    const rect = session.renameCaretRect() orelse return error.NoCaret;
+    // depth1(hindent=0): caret_col = indent_cols + 2(삼각+공백) + qcols. 옛 코드는 indent_cols가 빠져(=2+qcols)
+    // 캐럿·IME 후보창이 indent_cols칸 왼쪽으로 어긋났다(code-review #5). buildSidebarTitleDrawList의 전역 shift와 정합.
+    try std.testing.expectEqual(@as(i32, @intCast((indent_cols + 2 + qcols) * cw)), rect.x);
 }
 
 test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞)·최상위 no-op·마커 카드 승계·마지막 멤버 소멸(주입 조건)" {
@@ -16007,6 +16193,93 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
     try std.testing.expectEqual(@as(usize, 1), marker_count);
 }
 
+test "code-review #2: 접힌 marker-only 그룹에 아래 카드 드롭(from>m) → 그룹 안(마커 뒤)에 들어간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0, t1, t2, t3]
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+
+    // A=t1(그룹 시작), B=t2(형제 그룹 시작 같은 depth) → A는 marker-only([1,2))·B=[2,4)(t2,t3). A를 접는다.
+    session.createGroupForTab(t1); // A depth1, 연속상 [1,4)
+    session.createSiblingGroupForTab(t2); // t2 형제 마커(depth1) → A=[1,2) marker-only, B=[2,4)
+    t1.group_collapsed = true;
+    session.recomputeVisibleTabs();
+    // rows: [card t0, header A(tab1,collapsed), header B(tab2), card t2(d1), card t3(d1)]
+    try std.testing.expect(session.sidebar_rows.items[1].group_header.collapsed);
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items[1].group_header.tab); // A 마커=t1
+
+    // 아래 카드 t3(index 3, from>m=1)을 접힌 A 헤더(row1)에 드롭. 옛 코드는 j-1=1=m → moveTab(3,1)로 마커 앞에
+    // 떨궈 t3가 최상위로 샜다. 수정 후 to=@min(j=2,len-1)=2 → 마커(t1@1) 뒤로.
+    const from: usize = 3;
+    const target = session.sidebarGroupDropTargetTab(1, from).?;
+    try std.testing.expectEqual(@as(usize, 2), target);
+    _ = session.moveTab(from, target);
+
+    // 결과 [t0, t1(A), t3, t2(B)] — t3가 마커 A 바로 뒤(그룹 안). A=[1,3)=(t1,t3), B=[3,4)=(t2).
+    try std.testing.expectEqual(t0, session.tabs.items[0]);
+    try std.testing.expectEqual(t1, session.tabs.items[1]);
+    try std.testing.expectEqual(t3, session.tabs.items[2]);
+    try std.testing.expectEqual(t2, session.tabs.items[3]);
+    // t3는 그룹 A 안(depth1) — 펼쳐서 확인(접힌 상태론 숨겨져 null).
+    t1.group_collapsed = false;
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // 밖으로 안 샘 = 그룹 안
+}
+
+test "code-review #3: pane grip을 그룹 헤더에 드롭 → 새 워크스페이스 안 생김(no-op)·카드=merge·빈 영역=new_workspace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2], 활성=t2(마지막 생성)
+    session.createGroupForTab(session.tabs.items[1]); // t1=그룹 시작 → rows: [card t0, header(t1), card t1, card t2]
+    session.recomputeVisibleTabs();
+    try std.testing.expect(session.sidebar_rows.items[1] == .group_header);
+
+    const sb = chrome.components.sidebar;
+    const header_h = session.sidebar_header_height_px;
+    const header_row_h = session.sidebar_header_row_h_px;
+    const slot_h = session.sidebar_slot_height_px;
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+
+    // 그룹 헤더 row(index 1) 중앙 y에 pane grip 드롭 → **null(no-op)**. 옛 코드는 new_workspace로 falls through했다.
+    const hdr_top = sb.rowTop(session.sidebar_rows.items, 1, header_h, slot_h, header_row_h, 0);
+    const hdr_y: f64 = @floatFromInt(hdr_top + @as(i64, @intCast(header_row_h / 2)));
+    try std.testing.expect(session.computePaneDropDest(x, hdr_y) == null); // 헤더 드롭 = 무동작
+
+    // 비활성 카드 row(index 0 = t0) → merge(그 워크스페이스에 합치기).
+    const card_top = sb.rowTop(session.sidebar_rows.items, 0, header_h, slot_h, header_row_h, 0);
+    const card_y: f64 = @floatFromInt(card_top + @as(i64, @intCast(slot_h / 2)));
+    const dest = session.computePaneDropDest(x, card_y);
+    try std.testing.expect(dest != null and dest.? == .merge);
+
+    // 리스트 아래 빈 영역(past-end) → new_workspace(자연스러운 "빈 영역=새 워크스페이스" 보존).
+    const past_end = sb.rowTop(session.sidebar_rows.items, session.sidebar_rows.items.len, header_h, slot_h, header_row_h, 0);
+    const below_y: f64 = @floatFromInt(past_end + @as(i64, @intCast(slot_h)));
+    const dest2 = session.computePaneDropDest(x, below_y);
+    try std.testing.expect(dest2 != null and dest2.? == .new_workspace);
+}
+
 test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카드 드래그=그룹 통째 이동 + 드롭 하이라이트 (mouse 시뮬레이션)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -16149,7 +16422,7 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
         const m: usize = 4; // 그룹 B 마커(t4)
         const boundary = session.sidebarGroupDropBoundary(0, m).?; // 최상위 카드 row0 → 첫 그룹 앞 = 2
         try std.testing.expectEqual(@as(usize, 2), boundary);
-        const nm = session.moveGroupRange(m, boundary);
+        const nm = session.moveGroupRange(m, boundary, false);
         try std.testing.expectEqual(@as(usize, 2), nm); // 새 마커 인덱스(t4가 index2로)
     }
     // 결과 [t0, t1, t4(B), t5, t2(A), t3] — B가 그룹들 최상단, 최상위 t0·t1는 앞에 그대로.
@@ -16171,7 +16444,7 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
         const m: usize = 4; // 그룹 A 마커(t2)
         const boundary = session.sidebarGroupDropBoundary(2, m).?; // B 헤더 row2, gi=2<m=4 → B 앞(2)
         try std.testing.expectEqual(@as(usize, 2), boundary);
-        _ = session.moveGroupRange(m, boundary);
+        _ = session.moveGroupRange(m, boundary, false);
     }
     // 결과 [t0, t1, t2(A), t3, t4(B), t5] — A가 B 앞으로(원래 순서 복귀).
     try std.testing.expectEqual(t2, session.tabs.items[2]);
@@ -16184,7 +16457,7 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
         const m: usize = 2; // 그룹 A 마커(t2)
         const boundary = session.sidebarGroupDropBoundary(7, m).?; // B 카드 t5(row7), gi=4>m=2 → B 뒤(끝)=6
         try std.testing.expectEqual(@as(usize, 6), boundary);
-        const nm = session.moveGroupRange(m, boundary);
+        const nm = session.moveGroupRange(m, boundary, false);
         try std.testing.expectEqual(@as(usize, 4), nm); // A가 끝(index4)으로
     }
     // 결과 [t0, t1, t4(B), t5, t2(A), t3] — A가 리스트 끝 그룹.
@@ -16198,10 +16471,10 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
     try std.testing.expect(session.sidebarGroupDropBoundary(5, 4) == null); // A 헤더(자기) → null
     try std.testing.expect(session.sidebarGroupDropBoundary(7, 4) == null); // A 몸통 카드(자기) → null
     // moveGroupRange도 자기 자리 boundary(구간 안)면 no-op으로 m을 그대로 돌려준다.
-    try std.testing.expectEqual(@as(usize, 4), session.moveGroupRange(4, 4)); // insert_before==m → no-op
-    try std.testing.expectEqual(@as(usize, 4), session.moveGroupRange(4, 6)); // insert_before==j(=len) → no-op(이미 끝)
+    try std.testing.expectEqual(@as(usize, 4), session.moveGroupRange(4, 4, false)); // insert_before==m → no-op
+    try std.testing.expectEqual(@as(usize, 4), session.moveGroupRange(4, 6, false)); // insert_before==j(=len) → no-op(이미 끝)
     // 비-마커 인덱스로 moveGroupRange 호출 방어(가드). t5(index3)는 마커 아님 → m 그대로.
-    try std.testing.expectEqual(@as(usize, 3), session.moveGroupRange(3, 0));
+    try std.testing.expectEqual(@as(usize, 3), session.moveGroupRange(3, 0, false));
 }
 
 test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이동)를 threshold로 구분 (mouse 시뮬레이션)" {
@@ -20763,26 +21036,29 @@ test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree�
 }
 
 test "sidebarBandCell sizes the active band to the sidebar width and emits a sentinel-UV bg cell" {
-    // 순수 함수: 사이드바 폭/cell 폭/활성 행/색만으로 활성 탭 하이라이트 밴드 셀을 만든다(OS 무관).
-    // 사이드바 꺼짐(폭 0)이나 cell 폭 0이면 null.
-    try std.testing.expect(sidebarBandCell(0, 8, 0, 0xFF112233) == null);
-    try std.testing.expect(sidebarBandCell(180, 0, 0, 0xFF112233) == null);
+    // 순수 함수: 폭/cell 폭/표시 행/origin_y/높이/색만으로 밴드 셀을 만든다(OS 무관). 사이드바 꺼짐(폭 0)·cell 폭 0이면 null.
+    try std.testing.expect(sidebarBandCell(0, 8, 0, 0, 40, 0xFF112233) == null);
+    try std.testing.expect(sidebarBandCell(180, 0, 0, 0, 40, 0xFF112233) == null);
 
-    // 180px 폭, cell 폭 9px → floor(180/9)=20칸. 밴드는 col 0, width 20, 활성 행, sentinel UV, 배경=색.
-    const cell = sidebarBandCell(180, 9, 0, 0xFF112233).?;
+    // 180px 폭, cell 폭 9px → floor(180/9)=20칸. col 0, width 20, sentinel UV, 배경=색. origin_y/height는 가변 높이 소스(#7).
+    const cell = sidebarBandCell(180, 9, 0, 100, 40, 0xFF112233).?;
     try std.testing.expectEqual(@as(u16, 0), cell.col);
     try std.testing.expectEqual(@as(u16, 20), cell.width);
     try std.testing.expectEqual(@as(u16, 0), cell.row);
+    try std.testing.expectEqual(@as(u32, 100), cell.origin_y); // content-상대 rowTop(.m이 header+scroll 더함, #7)
+    try std.testing.expectEqual(@as(u32, 40), cell.atlas_height_px); // 밴드 행 높이(가변) — .m cell_h 소스(#7)
     try std.testing.expectEqual(@as(f32, -1.0), cell.u0); // sentinel UV: 셰이더가 atlas 샘플 없이 배경만
     try std.testing.expectEqual(@as(u32, 0xFF112233), cell.background);
     try std.testing.expectEqual(@as(u32, 0), cell.foreground);
 
     // 밴드 폭은 floor라 origin_x를 넘지 않는다: 17px 폭/8px cell → 2칸(2*8=16<=17). ceil(=3,24px)이면 침범.
-    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(17, 8, 0, 0xFF000000).?.width);
-    // 활성 행은 인자대로(탭 i = 행 i): 3번째 탭이면 row 2.
-    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(180, 9, 2, 0xFF000000).?.row);
+    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(17, 8, 0, 0, 40, 0xFF000000).?.width);
+    // 표시 행은 인자대로(탭 i = 행 i): 3번째 탭이면 row 2.
+    try std.testing.expectEqual(@as(u16, 2), sidebarBandCell(180, 9, 2, 0, 40, 0xFF000000).?.row);
+    // 그룹 헤더 밴드는 얇은 높이(header_row_h)를 그대로 나른다(카드 slot_h와 다름) — .m이 이 값으로 얇게 그린다.
+    try std.testing.expectEqual(@as(u32, 18), sidebarBandCell(180, 9, 0, 0, 18, 0xFF000000).?.atlas_height_px);
     // cell 폭이 사이드바 폭보다 크면 0칸 → null(밴드 없음).
-    try std.testing.expect(sidebarBandCell(8, 16, 0, 0xFF000000) == null);
+    try std.testing.expect(sidebarBandCell(8, 16, 0, 0, 40, 0xFF000000) == null);
 }
 
 // 사이드바 활성 하이라이트 밴드가 실제 세션에서 채워지고 탭 생성/전환을 따라 행을 옮기는지 — 실 init이
@@ -20841,6 +21117,38 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
     try std.testing.expect(session.switchTab(0));
     try std.testing.expectEqual(@as(u16, 1), session.sidebar_cells.items.len);
     try std.testing.expectEqual(@as(u16, 0), session.sidebar_cells.items[0].row);
+}
+
+test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 하이라이트가 tui 밴드 셀로 방출된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.newTab(); // [t0, t1]
+    session.appearance.chrome_theme = .tui; // tui = 셀 밴드 경로(rich는 GPU quad라 sidebar_cells가 아님)
+    try session.rebuildSidebar();
+    const sb = chrome.components.sidebar;
+    const rows_len = session.sidebar_rows.items.len;
+    const content_h = sb.contentHeight(session.sidebar_rows.items, session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+
+    // pane grip을 리스트 아래(past-end = rows.len)에 드롭 → 새 워크스페이스 하이라이트. 옛 코드는 sidebarBandRow(null)로
+    // 이 셀을 삼켜(orelse continue) 하이라이트가 안 떴다(code-review #8). 이제 origin_y=contentHeight로 셀이 방출된다.
+    session.pane_drop_slot = rows_len;
+    try session.rebuildSidebar();
+    var saw_past_end_band = false;
+    for (session.sidebar_cells.items) |c| {
+        if (c.slot_id == 0 and c.origin_y == content_h) saw_past_end_band = true; // past-end 드롭 밴드(콘텐츠 하단)
+    }
+    try std.testing.expect(saw_past_end_band);
+    session.pane_drop_slot = null;
 }
 
 // 활성 탭이 단일 leaf SplitTree로 만들어지고, activeTabLeafRects가 그 leaf를 터미널 영역 전체에 펴는지

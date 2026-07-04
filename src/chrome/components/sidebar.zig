@@ -227,7 +227,15 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     // 호버 슬롯 밴드(활성과 다르고 범위 안일 때만 — 활성이면 활성 색 우선). 슬롯은 row 인덱스라 헤더/카드 무관하게 칠한다.
     if (hovered_slot) |hs| {
         if (hs < rows.len and (active_idx == null or hs != active_idx.?)) {
-            try out.append(arena, bandFill(rows, hs, w, slot_h, header_row_h, .tab_hover_bg, p.shape));
+            // 카드·무색 헤더는 .tab_hover_bg 호버 밴드. **색 지정 그룹 헤더**는 위 색 밴드 루프가 이미 .tab_hover_bg
+            // 밴드를 깔아, 같은 role 호버 밴드를 겹치면 lowerSidebar가 둘 다 같은 그룹색으로 tint해 byte-identical →
+            // 호버 피드백이 안 보인다(code-review #4). 한 단계 밝은 .tab_active_bg로 오버레이해 카드처럼 하이라이트가
+            // 나게 한다(docs/sidebar-groups.md §5 "hover=카드와 같은 하이라이트"; 무색 헤더·카드는 .tab_hover_bg 유지 = 회귀 없음).
+            const hover_role: tokens.ColorRole = switch (rows[hs]) {
+                .group_header => |gh| if (gh.has_color) .tab_active_bg else .tab_hover_bg,
+                .card => .tab_hover_bg,
+            };
+            try out.append(arena, bandFill(rows, hs, w, slot_h, header_row_h, hover_role, p.shape));
         }
     }
 
@@ -469,6 +477,21 @@ test "sidebar view: group_header 밴드 정책 — 무색=밴드 없음(화살�
         if (op.quad.fill_role == .tab_hover_bg and op.quad.rect.y == 0 and op.quad.rect.h == 20) saw_header_hover = true;
     }
     try std.testing.expect(saw_header_hover);
+
+    // 색 지정 헤더 hover(row0, code-review #4): 기본 색 밴드(.tab_hover_bg, row0)와 **다른** role(.tab_active_bg, 한 단계
+    // 밝음)의 호버 밴드가 같은 헤더 row에 겹쳐 나야 한다 — 옛 코드는 둘 다 .tab_hover_bg라 byte-identical(호버 무피드백).
+    out.clearRetainingCapacity();
+    try view(&rows_color, 0, null, p, arena, &out); // 색 헤더(row0) hover, 활성 카드=row1
+    var saw_base_color_band = false; // 기본 색 밴드(.tab_hover_bg @ row0)
+    var saw_header_hover_active = false; // 호버 밴드(.tab_active_bg @ row0) — 색 위 오버레이로 시각 변화
+    for (out.items) |op| {
+        if (op.quad.rect.y == 0 and op.quad.rect.h == 20) {
+            if (op.quad.fill_role == .tab_hover_bg) saw_base_color_band = true;
+            if (op.quad.fill_role == .tab_active_bg) saw_header_hover_active = true;
+        }
+    }
+    try std.testing.expect(saw_base_color_band); // 색 밴드 유지(색 구분)
+    try std.testing.expect(saw_header_hover_active); // 호버가 색과 다른 role로 나 시각 변화가 생긴다
 }
 
 test "sidebar onGroupHeader: 헤더 row만 true(카드·범위 밖 false)" {

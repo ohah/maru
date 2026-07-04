@@ -994,11 +994,16 @@ const tab_bg_labels = tabColorLabels("배경: "); // 배경 tint 프리셋 라�
 // 좌측 accent 막대색 라벨 — 배경 tint와 직교한 별도 설정(사용자 요청: "왼쪽 바 색·배경색 두 개 따로"). "바: 없음"(0)=기본
 // (활성 카드=테마 앰버·비활성=막대 없음), 그 외=활성·비활성 카드 모두 그 색 막대. 값은 acceptContextMenu가 tab_color_presets에서 꺼낸다.
 const tab_accent_labels = tabColorLabels("바: ");
+// 그룹 공통 색 프리셋 라벨(SG5-2) — 카드 색과 같은 팔레트(tab_color_presets) 재사용. 그룹 헤더 밴드·소속 카드 막대에
+// 실리는 그룹 색을 우클릭에서 바꾼다("그룹 색: 없음"(0)=색 없음/기본 폴백). 그룹에 안 속하면 setGroupColorForTab no-op.
+const tab_group_color_labels = tabColorLabels("그룹 색: ");
 const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, bg_first..=배경, accent_first..=바(buildContextMenuItems 순서와 단일 출처).
 const ctx_menu_bg_first: usize = 2;
 const ctx_menu_accent_first: usize = ctx_menu_bg_first + tab_bg_labels.len; // 배경 프리셋 다음(=8)부터 accent 막대 프리셋
 const ctx_menu_group_create: usize = ctx_menu_accent_first + tab_accent_labels.len; // accent 다음: "새 그룹으로 묶기"(create_group)
 const ctx_menu_group_ungroup: usize = ctx_menu_group_create + 1; // "그룹 풀기"(ungroup) — SG3c 우클릭(단축키/팔레트 공유)
+const ctx_menu_group_color_first: usize = ctx_menu_group_ungroup + 1; // ungroup 다음: "그룹 색: …" 프리셋(SG5-2)
+const ctx_menu_count: usize = ctx_menu_group_color_first + tab_group_color_labels.len; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처)
 
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
@@ -1479,8 +1484,8 @@ pub const AppSession = struct {
     debug_settings_opened: bool = false,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
-    // 크기 = 최대 항목 수(Rename + Pin + 배경 프리셋)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
-    context_menu_items_buf: [ctx_menu_group_ungroup + 1][]const u8 = undefined,
+    // 크기 = 최대 항목 수(Rename + Pin + 배경·바·그룹 색 프리셋 + 그룹 묶기/풀기 = ctx_menu_count)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
+    context_menu_items_buf: [ctx_menu_count][]const u8 = undefined,
     context_menu_items_len: usize = 0,
     // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고,
     // 이후 drag(kind 2)는 타겟 슬롯으로 live 재정렬(moveTab), up(kind 3)이 끝낸다. index는 드래그 중인
@@ -3885,6 +3890,7 @@ pub const AppSession = struct {
                 if (index + 1 < self.tabs.items.len and self.tabs.items[index + 1].group_start == null) {
                     self.tabs.items[index + 1].group_start = marker; // 소유권 이전 — closing은 아래서 null화해 double-free 방지
                     self.tabs.items[index + 1].group_collapsed = closing.group_collapsed;
+                    self.tabs.items[index + 1].group_color = closing.group_color; // 그룹 색도 승계(SG5-2 — 색은 마커 탭에 사니 마커 따라 이동)
                     closing.group_start = null; // destroyTab이 free 안 하게(다음 탭이 소유)
                 }
             }
@@ -4287,6 +4293,29 @@ pub const AppSession = struct {
         // 위에 group_start가 없음 = 최상위 카드 — no-op.
     }
 
+    /// 워크스페이스가 속한 그룹에 공통 색을 지정한다(SG5-2 — 우클릭 "그룹 색: …"). 그 탭 위(자기 포함)에서 가장 가까운
+    /// group_start 마커 탭을 찾아 group_color를 세팅한다(ungroupTab과 같은 상향 탐색). 그룹 색은 마커 탭 **하나에만**
+    /// 저장하고 소속 카드는 위치 파생으로 그 색을 따른다(별도 저장 없음 — §2.1 위치 파생과 동형). color=0이면 색 해제
+    /// (기본 폴백). 그룹에 안 속하면 no-op(색을 얹을 마커가 없음 — ungroup 무동작과 같은 결).
+    fn setGroupColorForTab(self: *AppSession, tab: *Tab, color: u32) void {
+        var idx: ?usize = null;
+        for (self.tabs.items, 0..) |t, i| if (t == tab) {
+            idx = i;
+            break;
+        };
+        var i: usize = idx orelse return;
+        while (true) : (i -= 1) {
+            if (self.tabs.items[i].group_start != null) {
+                self.tabs.items[i].group_color = color; // 그룹 시작 마커에만 색 저장(소속 카드는 위치 파생)
+                self.rebuildSidebar() catch {}; // 헤더 밴드 tint·소속 카드 막대 즉시 반영
+                self.metal_dirty = true;
+                return;
+            }
+            if (i == 0) break;
+        }
+        // 위에 group_start가 없음 = 최상위 카드 — no-op(색 얹을 그룹 없음).
+    }
+
     /// 워크스페이스가 속한 그룹의 이름을 인라인 편집한다(rename_group — 헤더 더블클릭·팔레트·우클릭). 그 탭 위(자기 포함)
     /// 에서 가장 가까운 group_start 탭을 찾아 startRename(.group). 그룹에 안 속하면 no-op(편집할 이름이 없음).
     fn startRenameGroupForTab(self: *AppSession, tab: *Tab) void {
@@ -4574,6 +4603,9 @@ pub const AppSession = struct {
             if (self.tabs.items.len >= 2) {
                 self.createGroupForTab(self.tabs.items[1]); // t0=최상위, t1·t2=그룹
                 if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[1].group_collapsed = true;
+                // SG5-2: MARU_FORCE_GROUP_COLOR=1이면 그 그룹에 파랑(0x4A7BC4)을 얹어 헤더 밴드 tint·소속 카드 좌측
+                // accent 막대에 그룹 색이 뜨는지 헤드리스 스크린샷으로 self-verify(브라우저 탭 그룹식 색 구분).
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[1].group_color = 0x4A7BC4;
                 self.rebuildSidebar() catch {};
             }
         }
@@ -6291,6 +6323,10 @@ pub const AppSession = struct {
             n += 1;
             self.context_menu_items_buf[n] = "그룹 풀기"; // ctx_menu_group_ungroup
             n += 1;
+            for (tab_group_color_labels) |lbl| { // 그룹 공통 색(SG5-2) — ctx_menu_group_color_first부터. 소속 그룹 마커에 색 세팅
+                self.context_menu_items_buf[n] = lbl;
+                n += 1;
+            }
         };
         self.context_menu_items_len = n;
         return self.context_menu_items_buf[0..n];
@@ -6398,6 +6434,8 @@ pub const AppSession = struct {
                 tab.background_color = tab_color_presets[sel - ctx_menu_bg_first]; // 배경 tint 프리셋
             } else if (sel >= ctx_menu_accent_first and sel < ctx_menu_accent_first + tab_color_presets.len) {
                 tab.accent_color = tab_color_presets[sel - ctx_menu_accent_first]; // 좌측 accent 막대색 프리셋(bound·index 모두 tab_color_presets — 공유 팔레트)
+            } else if (sel >= ctx_menu_group_color_first and sel < ctx_menu_group_color_first + tab_color_presets.len) {
+                self.setGroupColorForTab(tab, tab_color_presets[sel - ctx_menu_group_color_first]); // 그룹 공통 색(SG5-2) — 소속 그룹 마커에 세팅(카드 색과 같은 팔레트)
             }
         }
     }
@@ -10255,6 +10293,7 @@ pub const AppSession = struct {
             // 걱정 없음 — 캡처 arena가 통째 정리). group_collapsed는 그룹 시작 탭에만 의미.
             .group_start = if (tab.group_start) |g| try arena.dupe(u8, g) else null,
             .group_collapsed = tab.group_collapsed,
+            .group_color = tab.group_color, // 그룹 공통 색(SG5-2) — 그룹 시작 탭에만 의미(무색=0)
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -10593,6 +10632,7 @@ pub const AppSession = struct {
         tab.group_start = if (m.group_start) |g| try self.allocator.dupe(u8, g) else null;
         errdefer if (tab.group_start) |g| self.allocator.free(g);
         tab.group_collapsed = m.group_collapsed;
+        tab.group_color = m.group_color; // 그룹 공통 색 복원(SG5-2) — 무색=0 폴백
         // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계. OOM 시 위 errdefer(panes·tab·group_start)가 정리한다.
         tab.custom_name = try self.dupeCustomName(m.custom_name);
         tab.pinned = m.pinned; // 위치 고정 복원
@@ -12365,10 +12405,19 @@ pub const AppSession = struct {
         const bar_w = card_tk.space.accent_bar_width_px;
         const gap: f32 = @floatFromInt(card_tk.space.card_gap_px);
         const default_accent = packOpaqueRgb(card_tk.palette.get(.accent_bar)); // 기본(지정 없음) 활성 카드 accent(테마-구동)
+        // SG5-2: 지금 순회 중인 카드가 속한 그룹의 공통 색(위 그룹 헤더에서 얻음). projectRows가 헤더를 소속 카드보다
+        // 먼저 내므로(§6·연속 파티션), 헤더 row를 지날 때 갱신해 두면 이후 카드 막대에 그 색을 실을 수 있다(위치 파생
+        // 동형 — 카드에 색을 저장하지 않고 순회 중 "위 마커의 색"을 따른다). 최상위 카드는 첫 헤더 이전이라 0으로 유지된다.
+        var current_group_color: u32 = 0;
         if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_rows.items, 0..) |row, i| {
             const orig = switch (row) {
                 .card => |c| c.tab,
-                .group_header => continue, // 헤더 row는 카드 색(tint/accent) 대상 아님(헤더 밴드는 SG3b에서 별도)
+                .group_header => |h| {
+                    // 헤더 row는 카드 tint/accent 대상 아님(헤더 밴드의 그룹 색 tint는 lowerSidebar가 밴드 색에 블렌드 —
+                    // 카드 배경 tint와 같은 경로). 여기선 이후 소속 카드 막대에 실을 그룹 색만 기억하고 넘어간다.
+                    current_group_color = if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].group_color else 0;
+                    continue;
+                },
             };
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
             // 가변 높이(code-review #4): 카드 절대 y를 i*slot_h 대신 rowTop 누적으로(앞선 그룹 헤더는 header_row_h만
@@ -12403,11 +12452,15 @@ pub const AppSession = struct {
                     }) catch {};
                 }
             }
-            // ② 좌측 accent 막대(불투명, 직각 strip). 색: 지정색(0xRRGGBB) 우선 → 없으면 활성만 기본 accent(테마-구동), 비활성은 막대 없음.
-            // 막대는 카드 좌단(x=gap)·카드 높이. solid 직각 quad라 appendSolidQuad 재사용(divider 등과 동일 헬퍼).
+            // ② 좌측 accent 막대(불투명, 직각 strip). 색 층 우선순위: 개별 지정색(tab.accent_color) > 그룹 공통 색
+            // (current_group_color, SG5-2 — 소속 카드 공통 막대, 브라우저 탭 그룹식으로 활성·비활성 모두) > 활성만 기본
+            // accent(테마-구동) > 없음(비활성 무색 카드는 막대 없음). 개별 accent가 그룹 색보다 위 = 개별 지정이 더 명시적
+            // (design 지침). 막대는 카드 좌단(x=gap)·카드 높이. solid 직각 quad라 appendSolidQuad 재사용(divider 등과 동일 헬퍼).
             if (bar_w > 0) {
                 const word: u32 = if (tab.accent_color != 0)
                     packStraightRgbU32(tab.accent_color, 0xFF)
+                else if (current_group_color != 0)
+                    packStraightRgbU32(current_group_color, 0xFF)
                 else if (orig == self.app_window.active_tab) default_accent else continue;
                 if (self.sidebarScrollClipQuad(card_top, card_h)) |sr| {
                     self.appendSolidQuad(gap, sr.y, @floatFromInt(bar_w), sr.h, word, 0);
@@ -12988,12 +13041,18 @@ pub const AppSession = struct {
                 // 이 슬롯 탭에 배경 tint가 있으면 밴드 색에 섞는다 — tui 활성/호버 슬롯은 불투명 밴드(셀)가 tint quad를
                 // 덮으므로, 밴드 색 자체를 tint로 당겨 활성/호버 슬롯에서도 색이 보이게 한다(idle 슬롯은 밴드가 없어 quad가 그대로).
                 // 가변 높이(SG3c): 밴드 y는 rowTop 누적이라 고정 y/slot_h로 row를 못 역산한다 — sidebarBandRow가 누적으로 역산한다.
-                if (self.sidebarBandRow(q.rect.y)) |ri| { // 표시 슬롯 ri
-                    if (self.visibleTab(ri)) |orig| { // 표시 슬롯 ri → 원본(검색 필터)
-                        if (self.tabs.items[orig].background_color != 0)
-                            color = blendRgb(color, self.tabs.items[orig].background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
-                    }
-                }
+                if (self.sidebarBandRow(q.rect.y)) |ri| switch (self.sidebar_rows.items[ri]) { // 표시 슬롯 ri — 밴드가 카드/헤더냐로 tint 소스가 갈린다
+                    .card => |c| {
+                        if (self.tabs.items[c.tab].background_color != 0) // 카드 배경 tint(개별 background_color)
+                            color = blendRgb(color, self.tabs.items[c.tab].background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
+                    },
+                    .group_header => |h| {
+                        // SG5-2: 그룹 헤더 밴드에 그룹 공통 색을 블렌드(카드 배경 tint와 **같은** blend 경로·같은 알파). 층
+                        // 분리 — 그룹 색은 헤더 밴드·소속 카드 막대에만 실리고 개별 카드 background_color와 안 겹친다(서로 다른 row).
+                        if (h.tab < self.tabs.items.len and self.tabs.items[h.tab].group_color != 0)
+                            color = blendRgb(color, self.tabs.items[h.tab].group_color & 0x00FF_FFFF, tab_bg_tint_alpha);
+                    },
+                };
                 const has_radius = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
                 if (!has_radius) {
                     // tui: 직각 → 셀 밴드(기존 경로). 가변 높이라 rowTop 누적 역산으로 슬롯 행을 구한다(sidebarBandRow).
@@ -15199,11 +15258,13 @@ test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 
     session.toggleGroupCollapsedAt(0); // 다시 → 펼침
     try std.testing.expect(!session.tabs.items[0].group_collapsed);
 
-    // closeTab(0): 그룹 시작 탭이 닫히면 마커·접힘이 다음 탭(t1)으로 승계 → 그룹 유지.
+    // closeTab(0): 그룹 시작 탭이 닫히면 마커·접힘·그룹 색이 다음 탭(t1)으로 승계 → 그룹 유지.
     session.tabs.items[0].group_collapsed = true;
+    session.tabs.items[0].group_color = 0x4A7BC4; // SG5-2: 그룹 색도 마커 따라 승계돼야 한다
     session.closeTab(0); // [t1, t2]
     try std.testing.expect(session.tabs.items[0].group_start != null); // t1이 마커 승계
     try std.testing.expect(session.tabs.items[0].group_collapsed); // 접힘도 승계
+    try std.testing.expectEqual(@as(u32, 0x4A7BC4), session.tabs.items[0].group_color); // 그룹 색 승계(SG5-2)
     try std.testing.expectEqualStrings("그룹 1", session.tabs.items[0].group_start.?);
 
     // ungroup(t2, 그룹 소속) → 그 위 시작 마커(t1) 제거 → 그룹 소멸.
@@ -17123,13 +17184,16 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     // workspace 대상: Rename + Pin + 배경 프리셋(없음·앰버·파랑·초록·빨강·보라) + 바 프리셋(같은 6색) + 그룹(묶기·풀기).
     session.context_menu_target = .{ .workspace = tab };
     const items = session.buildContextMenuItems();
-    try std.testing.expectEqual(@as(usize, 2 + tab_color_presets.len + tab_accent_labels.len + 2), items.len);
+    try std.testing.expectEqual(@as(usize, 2 + tab_color_presets.len + tab_accent_labels.len + 2 + tab_group_color_labels.len), items.len);
+    try std.testing.expectEqual(ctx_menu_count, items.len); // 버퍼 크기 단일 출처와 일치
     try std.testing.expectEqualStrings("Rename", items[0]);
     try std.testing.expectEqualStrings("위치 고정", items[1]); // 미고정 → "위치 고정"
     try std.testing.expectEqualStrings("배경: 없음", items[ctx_menu_bg_first]);
     try std.testing.expectEqualStrings("바: 없음", items[ctx_menu_accent_first]);
     try std.testing.expectEqualStrings("새 그룹으로 묶기", items[ctx_menu_group_create]);
     try std.testing.expectEqualStrings("그룹 풀기", items[ctx_menu_group_ungroup]);
+    try std.testing.expectEqualStrings("그룹 색: 없음", items[ctx_menu_group_color_first]); // SG5-2 그룹 색 프리셋(카드 색과 같은 팔레트)
+    try std.testing.expectEqualStrings("그룹 색: 파랑", items[ctx_menu_group_color_first + 2]);
 
     // 그룹으로 묶기(selected=create) → 활성 워크스페이스에 group_start 마커. 풀기(selected=ungroup) → 제거.
     session.context_menu_target = .{ .workspace = tab };
@@ -17176,10 +17240,92 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.acceptContextMenu();
     try std.testing.expectEqual(@as(u32, 0), tab.accent_color);
 
+    // 그룹 색(SG5-2): 그룹에 안 속하면 no-op(색 얹을 마커 없음). tab은 앞서 ungroup되어 group_start==null.
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_group_color_first + 2; // 파랑
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0), tab.group_color); // 그룹 아님 → no-op
+
+    // 그룹으로 묶은 뒤 그룹 색: 파랑 → 마커 탭(=자기)에 group_color. 개별 background/accent는 안 건드림(층 분리 — 직교).
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_group_create;
+    session.acceptContextMenu();
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_group_color_first + 2; // 파랑(프리셋 0=없음·1=앰버·2=파랑)
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0x4A7BC4), tab.group_color);
+    try std.testing.expectEqual(@as(u32, 0), tab.background_color); // 그룹 색은 카드 배경 tint와 직교(다른 층)
+    try std.testing.expectEqual(@as(u32, 0), tab.accent_color); // 그룹 색은 개별 accent 막대와도 별도 저장
+
+    // 그룹 색: 없음(group_color_first) → 0으로 해제.
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_group_color_first;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0), tab.group_color);
+    // 정리: 다음 pane/term 검증 전에 그룹 마커 해제(단일 탭 그룹).
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_group_ungroup;
+    session.acceptContextMenu();
+
     // pane/term 대상은 Rename만(색·고정 없음).
     session.context_menu_target = .{ .pane = session.activePane() };
     try std.testing.expectEqual(@as(usize, 1), session.buildContextMenuItems().len);
     session.context_menu_target = null;
+}
+
+test "sidebar group color(SG5-2): 그룹 색 → 헤더 밴드 tint·소속 카드 막대 gpu_quad(층 분리)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli); // rich 메트릭(둥근 밴드=gpu_quad·막대 폭>0)
+
+    // 워크스페이스 3개 [t0, t1, t2], t1에 그룹 시작 마커 → t0=최상위, t1·t2=그룹 소속(위치 파생).
+    _ = try session.newTab();
+    _ = try session.newTab();
+    try std.testing.expect(session.tabs.items.len >= 3);
+    session.createGroupForTab(session.tabs.items[1]);
+
+    const hasQuad = struct {
+        fn run(s: *const AppSession, fill: u32) bool {
+            for (s.gpu_quads.items) |q| if (q.fill_color0 == fill) return true;
+            return false;
+        }
+    }.run;
+    const group_bar = packStraightRgbU32(0x4A7BC4, 0xFF); // 그룹 색 막대(불투명) = 0xFF4A7BC4
+
+    // 색 지정 전: 소속 카드가 무색이라 그룹 색 막대는 없다(활성만 기본 accent, 비활성은 막대 없음).
+    session.rebuildSidebar() catch {};
+    try std.testing.expect(!hasQuad(session, group_bar));
+
+    // 그룹 색(파랑) 지정 → 마커 탭(t1)에만 group_color. rebuildSidebar가 소속 카드(t1·t2) 좌측 막대에 그룹 색을 싣는다.
+    session.setGroupColorForTab(session.tabs.items[1], 0x4A7BC4);
+    try std.testing.expectEqual(@as(u32, 0x4A7BC4), session.tabs.items[1].group_color);
+    try std.testing.expect(hasQuad(session, group_bar)); // 소속 카드 막대 = 그룹 색
+
+    // 헤더 밴드 그룹 색 tint: lowerSidebar가 헤더 밴드(.tab_hover_bg) 색에 그룹 색을 **카드 배경 tint와 같은 blend
+    // 경로·같은 알파**로 섞는다. 렌더가 쓰는 것과 동일한 헬퍼로 기대값을 계산해 정확히 일치하는 quad가 있는지 본다.
+    const expected_header = session.chromeQuadBg(blendRgb(session.sidebarHoverBg(), 0x4A7BC4, tab_bg_tint_alpha));
+    try std.testing.expect(hasQuad(session, expected_header));
+
+    // 층 분리: 그룹 색은 마커 탭의 group_color에만 실리고 개별 카드 background_color/accent_color는 0(안 겹침).
+    try std.testing.expectEqual(@as(u32, 0), session.tabs.items[1].background_color);
+    try std.testing.expectEqual(@as(u32, 0), session.tabs.items[1].accent_color);
+    try std.testing.expectEqual(@as(u32, 0), session.tabs.items[2].group_color); // 소속 카드는 group_color 저장 안 함(위치 파생)
+
+    // 색 없는 그룹 폴백: 그룹 색을 0으로 해제하면 그룹 색 막대가 사라진다(기본 폴백 — 활성만 기본 accent).
+    session.setGroupColorForTab(session.tabs.items[1], 0);
+    try std.testing.expectEqual(@as(u32, 0), session.tabs.items[1].group_color);
+    try std.testing.expect(!hasQuad(session, group_bar));
 }
 
 test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 → pending_clipboard_action, takeClipboardAction 1회성" {

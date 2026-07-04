@@ -97,6 +97,10 @@ pub const Tab = struct {
     // flat 정상 복원(forward·backward 양쪽 호환). group_collapsed는 group_start!=null일 때만 의미. 기본 null/false.
     group_start: ?[]const u8 = null,
     group_collapsed: bool = false,
+    // 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음 — docs/sidebar-groups.md §9 SG5-2·§4). group_start!=null일 때만 의미.
+    // 순수 additive 스칼라(그룹 시작 탭에만 저장 — 소속은 위치 파생). null=색 없음=키 생략(옛 리더가 미지 키로 skip해
+    // flat 정상 복원, 양쪽 호환). 그룹 색은 헤더 밴드·소속 카드 막대 층이라 개별 카드 background-color와 안 겹친다. 기본 0.
+    group_color: u32 = 0,
     tree: []const TreeNode, // preorder; leaf의 pane 인덱스가 panes를 가리킨다
     panes: []const Pane,
 };
@@ -147,6 +151,9 @@ fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
         try w.writeAll(" group-start=\"");
         try writeEscaped(w, name);
         try w.print("\" group-collapsed={d}", .{@intFromBool(tab.group_collapsed)});
+        // 그룹 공통 색(SG5-2, §4). 0=색 없음이면 키 생략(additive·key-addressed — 옛 파일/무색 그룹의 라인 문자열을
+        // 안 바꿔 round-trip 고정점). 비영이면 group-color 스칼라로 쓴다(reader는 없으면 getUint 기본 0으로 폴백).
+        if (tab.group_color != 0) try w.print(" group-color={d}", .{tab.group_color});
     }
     try w.writeByte('\n');
     for (tab.tree) |node| try writeTreeNode(w, node);
@@ -259,6 +266,9 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     // 아니라 find로 존재를 먼저 확인한다(키 부재 ↔ 빈 값을 구분 — writer가 null을 키 생략으로 인코딩한 것과 짝).
     const group_start: ?[]const u8 = if (f.find("group-start") != null) try f.getQuoted(a, "group-start", "") else null;
     const group_collapsed = (try f.getUint("group-collapsed", u8, 0)) != 0;
+    // 그룹 공통 색(SG5-2, §4·§9). additive 스칼라라 없으면 0(색 없음). 그룹 시작 탭에만 의미(writer가 group-start
+    // 있을 때만 비영 group-color를 쓴다) — group_start=null인 탭에서 0으로 읽혀도 무해(렌더가 group_start로 게이트).
+    const group_color = try f.getUint("group-color", u32, 0);
 
     var tree: std.ArrayList(TreeNode) = .empty;
     // 구조 불변식: pane P개 탭의 split 트리는 leaf P + split (P−1) = 정확히 2P−1 노드다. 그보다 많이 읽히면
@@ -268,7 +278,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
-    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_color = group_color, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -657,6 +667,47 @@ test "workspace round-trip: tab group_start·group_collapsed 보존(위치 파�
     try std.testing.expectEqual(false, t1.group_collapsed);
 
     // round-trip 고정점: 다시 직렬화하면 동일(null↔키부재 인코딩이 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace round-trip: tab group_color 보존(SG5-2 — 비영은 group-color 키, 0은 키 생략)" {
+    // 그룹 공통 색(docs/sidebar-groups.md §9 SG5-2): 그룹 시작 탭에만 group_color를 저장하고, 소속 카드는 위치
+    // 파생으로 그 색을 따른다(별도 저장 없음). writer는 비영 group-color만 쓰고(0=키 생략, additive), 색 없는
+    // 그룹/무색 탭 라인은 안 바꾼다. round-trip이 이 인코딩(0↔키부재·비영↔키존재)을 고정하는지 검증.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{
+        // 색 있는 그룹(파랑 0x4A7BC4=4881348) — group-color 키가 group-collapsed 뒤에 붙는다.
+        .{ .custom_name = "web", .group_start = "frontend", .group_collapsed = false, .group_color = 0x4A7BC4, .tree = &tree, .panes = &panes },
+        // 소속 카드(마커 없음) — group_color를 저장하지 않는다(위치 파생). 무색이라 group-color 키 없음.
+        .{ .custom_name = "docs", .tree = &tree, .panes = &panes },
+        // 색 없는 그룹(group_color=0) — group-color 키 생략(round-trip 고정점, 라인 안 바뀜).
+        .{ .custom_name = "infra", .group_start = "backend", .group_collapsed = false, .tree = &tree, .panes = &panes },
+    };
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 색 있는 그룹: group-collapsed 뒤에 group-color=4881348.
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"frontend\" group-collapsed=0 group-color=4881348\n") != null);
+    // 색 없는 그룹: group-collapsed=0 바로 뒤 개행(group-color 키 없음).
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"backend\" group-collapsed=0\n") != null);
+    // 소속 카드(docs)에는 group-color가 안 붙는다(그룹 시작 아님).
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const t0 = parsed.workspace.windows[0].tabs[0];
+    const t1 = parsed.workspace.windows[0].tabs[1];
+    const t2 = parsed.workspace.windows[0].tabs[2];
+    try std.testing.expectEqual(@as(u32, 0x4A7BC4), t0.group_color); // 색 복원
+    try std.testing.expectEqual(@as(u32, 0), t1.group_color); // 소속 카드 = 0(위치 파생, 저장 안 함)
+    try std.testing.expectEqual(@as(u32, 0), t2.group_color); // 색 없는 그룹 = 0(키 생략 → 기본)
+
+    // round-trip 고정점: 다시 직렬화하면 동일(0↔키부재·비영↔키존재 인코딩 안정).
     const text2 = try serialize(std.testing.allocator, parsed.workspace);
     defer std.testing.allocator.free(text2);
     try std.testing.expectEqualStrings(text, text2);

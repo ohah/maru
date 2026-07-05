@@ -4040,6 +4040,9 @@ pub const AppSession = struct {
         self.recomputeActivePaneRect(); // 새 활성 탭의 활성 panel rect로 좌표 origin 갱신
         // 이 탭의 Pane/split 노드가 해제됐으니 stale 호버·divider 포인터를 비워야 하는데, 위 destroyTabStandalone의
         // destroyPane 루프가 invalidateForFreedPane(S1 chokepoint)으로 이미 처리했다(다음 이동이 재설정).
+        // 그룹 고정 C2(§12.5 GP2): 위 inheritGroupMarker 마커 승계 뒤 멤버 pinned 캐시를 마커 기준으로 재동기(비프리뷰
+        // 경로 — 탭 닫기라 드래그 게이트는 normalize 내부가 처리). 승계로 그룹 구성이 바뀌었을 수 있어 shred 방지.
+        self.normalizePinnedFromGroups();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -4585,6 +4588,47 @@ pub const AppSession = struct {
         }
     }
 
+    /// 그룹 멤버 카드의 `pinned`를 **enclosing 그룹 마커의 pinned로 재기록**한다(그룹 고정 C2, docs/sidebar-groups.md §12.5 GP2).
+    /// 모델(§12.2): **마커 탭 pinned = 그룹 고정 권위**(group_color/group_depth와 같은 층), **멤버 카드 pinned = 파생 캐시**.
+    /// countPinnedTabs·stablePartitionPinned·clampMoveToGroup이 per-tab pinned를 읽으므로, 마커만 토글하고 멤버를 안 맞추면
+    /// stablePartition이 마커만 앞으로 옮겨 그룹을 **shred**한다. 이 함수가 멤버를 마커 값으로 동기해 기존 per-tab 핀 머신을
+    /// 무변경 재사용한다(§12.2 "왜 캐시 미러인가").
+    ///
+    /// **스택워크(projectRows pass1 동형)**: self.tabs를 순회하며 group_start 마커에서 정규화 depth 스택을 pop/push하고
+    /// (중첩 SG5-3와 같은 gap-클램프), 각 카드는 스택 top(= enclosing 마커)의 pinned로 재기록한다. **top-level 카드**(첫
+    /// 마커 이전 = 스택이 빈 구간)는 개별 pin이라 자기 값을 유지한다(§12.2). 마커 탭 자신은 권위라 pinned를 안 건드린다.
+    /// **핀 리전 정합(§12 GP1)**: 마커의 pinned가 부모(스택 top) 마커와 다르면 pin ⊃ group 계층상 조상 소속이 아니라 새
+    /// 최상위 리전이므로 스택을 리셋한다(중첩이 핀 경계를 넘는 손상 배치를 리전 국소화). 이 재기록은 **enclosing 마커 →
+    /// 멤버 하향 전파**라, 멤버의 (손상됐을 수 있는) 기존 pinned와 무관하게 항상 마커 값으로 canonical화한다 — 손상/레거시
+    /// 혼합 파일(멤버 pinned=1·마커=0, 또는 마커 pinned=1·멤버=0 desync)을 마커 기준으로 흡수한다(§12.9).
+    ///
+    /// **SG8 드래그 게이트(필수)**: self.tabs를 mutate하므로 `sidebar_drag_preview != null`(드래그 프리뷰 활성)이면 **절대
+    /// 안 돈다** — SG8은 "드래그 내내 self.tabs 불변"을 보존한다(프리뷰는 sidebar_preview_rows 위 가상 배치, 확정=commit
+    /// 후에만 self.tabs 변경). 이 단일 게이트로 모든 호출처가 안전하다(commit 경로는 clearSidebarDragPreview 후라 통과).
+    fn normalizePinnedFromGroups(self: *AppSession) void {
+        if (self.sidebar_drag_preview != null) return; // SG8: 프리뷰 중 self.tabs.pinned 불변(드래그 종료 후에만 정규화)
+        const StackEntry = struct { depth: u8, pinned: bool };
+        var stack: [max_group_nesting]StackEntry = undefined;
+        var top: usize = 0;
+        for (self.tabs.items) |tab| {
+            if (tab.group_start != null) {
+                const dd: u8 = @max(@as(u8, 1), tab.group_depth); // declared depth로 조상 pop(gap 클램프 정규화)
+                while (top > 0 and stack[top - 1].depth >= dd) top -= 1; // 같거나 깊은 조상 마커 닫기(pass1 동형)
+                // 핀 리전 경계(§12 GP1): pop 후 남은 부모 마커와 pinned가 다르면 pin ⊃ group상 조상 소속 불가 → 새 최상위
+                // 리전이라 스택을 비운다(중첩이 핀 경계를 넘는 손상 배치를 리전 국소화; 정상 형제/중첩은 pinned 동일이라 no-op).
+                if (top > 0 and stack[top - 1].pinned != tab.pinned) top = 0;
+                const parent: u8 = if (top > 0) stack[top - 1].depth else 0;
+                if (top < stack.len) {
+                    stack[top] = .{ .depth = parent + 1, .pinned = tab.pinned }; // 마커 pinned = 권위(불변, 카드 전파원)
+                    top += 1;
+                }
+            } else if (top > 0) {
+                tab.pinned = stack[top - 1].pinned; // 멤버 카드 = enclosing 마커 pinned(파생 캐시 동기)
+            }
+            // top-level 카드(top==0): 개별 pin이라 자기 값 유지(재기록 없음).
+        }
+    }
+
     /// 워크스페이스 탭의 위치 고정을 토글하고 불변식(고정 탭은 배열 앞쪽 `[0, pinned_count)`에 연속)을 유지한다.
     /// pin(false→true): 그 탭을 고정 영역 끝(새 pinned_count-1)으로 옮긴다. unpin(true→false): 비고정 영역 시작
     /// (새 pinned_count)으로 옮긴다. moveTab이 tabs/surface_ptrs를 같이 회전하고 active_tab을 보정하므로(이미 새
@@ -4691,6 +4735,10 @@ pub const AppSession = struct {
         tab.group_start = name; // owned
         tab.group_collapsed = false;
         tab.group_depth = new_depth;
+        // 그룹 고정 C2(§12.5 GP2): 새 마커 밑으로 흡수된 멤버 카드의 pinned 캐시를 마커 기준으로 재동기(비프리뷰 경로).
+        // 보통은 새 마커 pinned=0(create는 pin을 안 건드림)이라 멤버도 0(무변화)이지만, 고정 top-level 카드를 마커로 만든
+        // 경우엔 흡수 멤버가 마커 pinned를 따르게 canonical화한다(마커 = 그룹 고정 권위, §12.2).
+        self.normalizePinnedFromGroups();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -4724,15 +4772,22 @@ pub const AppSession = struct {
         self.allocator.free(self.tabs.items[mi].group_start.?); // owned 마커 해제
         self.tabs.items[mi].group_start = null;
         self.tabs.items[mi].group_collapsed = false;
+        // 그룹 고정 C2(§12.5 GP2): 마커가 사라져 아래 카드가 위 마커/최상위로 재소속됐으니 pinned 캐시를 새 enclosing 기준
+        // 으로 재동기(비프리뷰 경로). 옛 멤버가 최상위가 되면 자기 값 유지, 상위 그룹으로 재소속되면 그 마커 pinned를 따른다.
+        self.normalizePinnedFromGroups();
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
 
-    /// 그룹 시작 마커 탭(from)의 마커(group_start/collapsed/depth/color)를 **다음 탭**으로 승계한다 — closeTab(닫힘)·
+    /// 그룹 시작 마커 탭(from)의 마커(group_start/collapsed/depth/color/**pinned**)를 **다음 탭**으로 승계한다 — closeTab(닫힘)·
     /// removeFromGroupForTab(빼기) 공유(code-review #11). 다음 탭이 존재하고 자기 group_start가 없을 때만(연속 파티션상
     /// "그룹 안 다음 카드") 소유권을 이전하고 true를 반환한다(from.group_start는 null화 — double-free 방지). 승계 불가
     /// (다음 없음·이미 마커 = 그룹이 이 탭 하나뿐/마지막)면 false를 반환하고 from.group_start는 그대로 둔다(호출자가 free
     /// 또는 destroyTab에 위임 — 그룹 소멸). 소속 카드는 위치 파생이라 별도 이전 없음(§2.1). from은 유효 인덱스라 가정.
+    /// **pinned 승계(그룹 고정 C2, docs/sidebar-groups.md §12.7 보강 6)**: 마커 pinned = 그룹 고정 권위(§12.2)라, 마커 카드가
+    /// 닫혀/빠져 다음 카드로 마커가 넘어갈 때 pinned도 함께 승계해야 승계 과정에서 그룹 고정이 소실되지 않는다(고정 그룹의
+    /// 첫 카드를 닫아도 승계 마커가 pinned=1을 유지 → 남은 그룹이 고정 리전에 그대로). next는 소속 멤버라 정규화 후엔
+    /// pinned가 이미 src와 같지만, desync 상태(승계 시점 정규화 전)에서도 권위값을 명시 이전해 안전하게 둔다.
     fn inheritGroupMarker(self: *AppSession, from: usize) bool {
         const src = self.tabs.items[from];
         const marker = src.group_start orelse return false;
@@ -4742,6 +4797,7 @@ pub const AppSession = struct {
             next.group_collapsed = src.group_collapsed;
             next.group_depth = src.group_depth;
             next.group_color = src.group_color;
+            next.pinned = src.pinned; // 그룹 고정 권위 승계(§12.7 보강 6 — 승계로 고정 소실 방지)
             src.group_start = null; // double-free 방지(다음 탭이 소유)
             return true;
         }
@@ -4829,6 +4885,11 @@ pub const AppSession = struct {
             tab.group_color = 0;
             tab.group_depth = 1;
         }
+
+        // 그룹 고정 C2(§12.5 GP2): 마커 승계/제거로 남은 그룹 구성이 바뀌었으니 멤버 pinned 캐시를 재동기(비프리뷰 경로).
+        // 아래 moveTab/rebuild 두 종료 경로 모두 앞서 한 번 정규화하면 충분하다(빼낸 카드는 최상위로 이동해 자기 값 유지,
+        // 남은 그룹은 마커 기준 canonical). GP3의 "빼기=고정 상실"(§12.7 보강 4)은 후속 — GP2는 shred 방지 동기만.
+        self.normalizePinnedFromGroups();
 
         // 승계 후(또는 마커 아니었으면) 남은 첫 마커(이 핀 리전 안) 직전으로 옮긴다. 이 카드가 첫 마커였다면 승계로 마커가
         // ix+1로 내려가 이미 그 앞(최상위)이 되므로 moveTab 불필요 — 재투영만. moveTab이 tabs/surface/active/rebuild를 처리한다.
@@ -11494,6 +11555,12 @@ pub const AppSession = struct {
         // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
         // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부
         // 앞으로 모은다(고정끼리·비고정끼리 상대 순서 유지). 불변식을 모든 진입 경로(토글·드래그·복원)에서 성립시킨다.
+        // 복원 순서(그룹 고정 C2, docs/sidebar-groups.md §12.5·§12.9 GP2): **(1)탭 설치→(2)normalize→(3)stablePartition**.
+        // stablePartition 앞에 normalizePinnedFromGroups를 명시 호출해, 손상/레거시 혼합 파일(멤버 pinned=1·마커=0, 또는 마커
+        // pinned=1·멤버=0 desync)을 **마커 기준 canonical**로 흡수한 뒤(멤버 pinned := enclosing 마커 pinned) stablePartition이
+        // 고정 그룹을 **통째** 프리픽스로 모은다(정규화 누락 시 마커만 앞으로 가 그룹 shred가 실패 모드). 여긴 드래그 없는
+        // 시작/재적용 경로라 게이트(sidebar_drag_preview==null)는 자명히 통과한다.
+        self.normalizePinnedFromGroups();
         self.stablePartitionPinned();
         // 트리·탭을 통째로 교체했으니 해제된 옛 트리를 가리키던 상호작용 포인터를 비워야 하는데, 위 destroyTabStandalone
         // 루프의 destroyPane이 invalidateForFreedPane(S1 chokepoint)으로 옛 Pane을 가리키던 호버·드래그 포인터를 이미
@@ -13328,6 +13395,10 @@ pub const AppSession = struct {
             .group_nest => |g| _ = self.moveGroupNesting(origin, g.insert_before, g.target_depth), // SG5-4 넣기
             .none => {}, // 제자리 — 고스트만 제거(아래 rebuild가 원본 복귀)
         }
+        // 그룹 고정 C2(§12.5 GP2): 드래그 확정으로 카드/그룹이 재배치됐으니 멤버 pinned 캐시를 새 위치의 enclosing 마커
+        // 기준으로 재동기. 위 clearSidebarDragPreview로 sidebar_drag_preview=null이 된 **커밋 후**라 normalize 게이트를
+        // 통과한다(프리뷰 중엔 안 돌던 것이 여기서 처음 도는 정직한 지점 — SG8 "드래그 내내 self.tabs 불변" 보존).
+        self.normalizePinnedFromGroups();
         self.rebuildSidebar() catch {}; // 고스트 제거 + 확정 레이아웃(move 내부 rebuild와 idempotent — no-op/none도 정리)
         self.metal_dirty = true;
     }
@@ -16531,6 +16602,155 @@ test "GP1: pin-region 경계가 7개 subtree-스캔을 리전에서 멈춘다(�
     try std.testing.expect(session.sidebar_rows.items[1] == .card);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items[1].card.tab); // t2 안 사라짐(shred 방지)
     try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[1].card.depth);
+}
+
+// GP2(그룹 고정 C2 — normalizePinnedFromGroups + 복원 순서 + 마커 승계, docs/sidebar-groups.md §12.5·§12.7·§12.9).
+// 마커 pinned = 그룹 고정 권위, 멤버 카드 pinned = 파생 캐시. normalize가 멤버를 마커 값으로 재기록해 stablePartition이
+// 그룹을 통째 옮기게 한다(정규화 누락 = shred). 아래 (a)shred방지·(b)복원순서·(c)마커승계·(d)드래그불변 4케이스.
+test "GP2: normalizePinnedFromGroups가 멤버 pinned를 마커 기준 canonical화한다(desync→shred 방지) + stablePartition 통째 프리픽스" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+
+    // 고정 그룹 PG(마커 pinned=1)에 멤버 t1이 **desync pinned=0**로 손상, t2는 정상 pinned=1. 마커 권위(§12.2)상 t1도 1이어야.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true; // 마커 = 그룹 고정 권위
+    session.tabs.items[1].pinned = false; // 멤버 DESYNC(0 — 정규화가 1로 고쳐야)
+    session.tabs.items[2].pinned = true; // 멤버 정상
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+
+    // normalize 전 stablePartition을 돌리면 [1,0,1] → 고정 [t0,t2]·비고정 [t1] 순열로 t1이 뒤로 새 그룹이 찢긴다(대조 —
+    // 여기선 안 돌린다). normalize를 먼저 부르면 멤버가 마커 값으로 동기돼 그런 shred가 원천 차단된다.
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(t1.pinned); // desync 멤버 t1: 0→1(마커 권위로 canonical) — shred 방지 핵심
+    try std.testing.expect(t0.pinned and t2.pinned); // 나머지 불변
+    try std.testing.expect(t0.group_start != null); // 마커 pinned는 권위라 불변(재기록 대상 아님)
+
+    // 이제 stablePartition은 전부 pinned=1이라 재배열 없음 → 그룹이 순서 그대로 통째 프리픽스로 남는다(안 찢김).
+    session.stablePartitionPinned();
+    try std.testing.expectEqual(t0, session.tabs.items[0]);
+    try std.testing.expectEqual(t1, session.tabs.items[1]);
+    try std.testing.expectEqual(t2, session.tabs.items[2]);
+    try std.testing.expectEqual(@as(usize, 3), session.groupSubtreeEnd(0, null, null)); // PG subtree=[0,3) 통째 고정
+    session.recomputeVisibleTabs();
+    try std.testing.expectEqual(@as(u16, 3), session.sidebar_rows.items[0].group_header.member_count); // t0·t1·t2 통째
+}
+
+test "GP2: 복원 순서 — 혼합 파일(멤버 pinned=1·마커=0)을 normalize→stablePartition으로 canonical화(그룹 안 찢김)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+
+    // 손상/레거시 혼합 파일 시뮬(§12.9): 비고정 그룹 UG(마커 pinned=0)인데 멤버 t1이 pinned=1로 저장됨. 마커 권위상 t1=0이어야.
+    // 정규화를 안 하고 stablePartition만 돌리면(옛 복원 = 오직 (3)) [0,1,0] → t1이 프리픽스로 새 앞으로, 마커 t0는 뒤로 밀려 그룹이 찢긴다.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "UG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = false; // 마커 = 비고정 권위
+    session.tabs.items[1].pinned = true; // 멤버 DESYNC(1 — 정규화가 0으로 고쳐야)
+    session.tabs.items[2].pinned = false; // 멤버 정상
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+
+    // 복원 특례 순서(applyWorkspaceWindow 삽입과 동일): (2) normalize → (3) stablePartition.
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(!t1.pinned); // 멤버 t1: 1→0(마커 권위) — 그룹이 안 찢기게 canonical
+    try std.testing.expect(!t0.pinned and !t2.pinned);
+    session.stablePartitionPinned();
+    // 전부 pinned=0이라 재배열 없음 → 마커·멤버 순서 그대로(그룹 무결).
+    try std.testing.expectEqual(t0, session.tabs.items[0]);
+    try std.testing.expectEqual(t1, session.tabs.items[1]);
+    try std.testing.expectEqual(t2, session.tabs.items[2]);
+    try std.testing.expectEqual(@as(usize, 3), session.groupSubtreeEnd(0, null, null)); // UG subtree=[0,3) 무결
+}
+
+test "GP2: inheritGroupMarker pinned 승계 — 고정 그룹 마커 카드 closeTab → 승계 마커가 pinned=1 유지(그룹 고정 보존)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+
+    // 고정 그룹 PG = [t0(마커) t1 t2] 전부 pinned=1(그룹이 리스트 전체 = 승계 뒤 흡수될 후행 top-level 카드 없음).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true;
+    session.tabs.items[2].pinned = true;
+
+    // 마커 카드 t0를 닫는다 → inheritGroupMarker가 마커(group_start/depth/**pinned**)를 다음 카드(옛 t1)로 승계.
+    session.closeTab(0);
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    // 새 index0(옛 t1)이 승계 마커 — group_start 존재 + pinned=1(고정 소실 방지, §12.7 보강 6).
+    try std.testing.expect(session.tabs.items[0].group_start != null);
+    try std.testing.expect(session.tabs.items[0].pinned); // 그룹 고정 유지
+    try std.testing.expect(session.tabs.items[1].pinned); // 남은 멤버(옛 t2)도 고정 캐시 유지
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG=[0,2) 통째 고정
+}
+
+test "GP2: 드래그 중 불변 — sidebar_drag_preview!=null이면 normalizePinnedFromGroups가 self.tabs.pinned를 안 건드린다(SG8 게이트)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+
+    // 고정 그룹 + desync 멤버(정규화하면 바뀔 상태) — 드래그 게이트가 없으면 normalize가 t1을 바꿀 것.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = false; // desync
+    session.tabs.items[2].pinned = true;
+    const t1 = session.tabs.items[1];
+
+    // 드래그 프리뷰 활성(비커밋) — self.tabs는 드래그 내내 불변이어야 한다(SG8). normalize는 이 게이트에서 즉시 return.
+    session.sidebar_drag_preview = .{ .origin = 0, .origin_len = 1, .plan = .none, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(!t1.pinned); // 게이트로 안 돎 → desync 그대로(self.tabs.pinned 불변 단언)
+
+    // 프리뷰 종료 후엔 정상 정규화(게이트가 유일한 억제 원인이었음을 확인).
+    session.sidebar_drag_preview = null;
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(t1.pinned); // 이제 마커 권위로 canonical(0→1)
 }
 
 /// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와

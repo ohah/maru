@@ -6657,6 +6657,37 @@ pub const AppSession = struct {
             std.ascii.indexOfIgnoreCase(folder, query) != null;
     }
 
+    /// 사이드바 검색 입력줄의 tail 창 배치 — 렌더(buildSidebarHeaderDrawList)와 caret(sidebarSearchCaretRect)가 **공유**하는
+    /// 단일 출처. content(query+preedit)가 [text_col, max_col) 텍스트 영역보다 길면 선두 "…" + 뒤쪽만 그려(오른쪽 정렬)
+    /// caret('|', 보이는 내용 끝)이 우측 아이콘 영역으로 잘려 안 보이던 문제를 없앤다(find·palette와 같은 tail 규칙, 단
+    /// 사이드바는 '|' 글리프라 내용 **뒤**에 둔다). max_col은 우측 아이콘 침범 방지 경계(cols-4). 무 alloc(tailWindow 슬라이스).
+    const SidebarSearchLine = struct { truncated: bool, query: []const u8, preedit: []const u8, caret_col: u16 };
+    fn sidebarSearchLine(self: *const AppSession, max_col: u16) SidebarSearchLine {
+        const ov = chrome.components.overlay_input;
+        const q = self.sidebar_search_input.query.items;
+        const pre = self.sidebar_search_input.preedit.items;
+        const start: u16 = sidebar_search_text_col;
+        const avail: u32 = (@as(u32, max_col) -| start) -| 1; // caret('|') 1칸 예약
+        const q_cols = ov.displayCols(q);
+        const pre_cols = ov.displayCols(pre);
+        if (q_cols + pre_cols <= avail) {
+            const caret: u16 = @intCast(@min(@as(u32, start) + q_cols + pre_cols, @as(u32, max_col)));
+            return .{ .truncated = false, .query = q, .preedit = pre, .caret_col = caret };
+        }
+        // 넘침: 선두 "…"(1칸) + query tail + preedit(활성 조합은 우선 통째 보존; 극단적으로 조합이 예산을 넘으면 조합도 tail).
+        const budget = avail -| 1; // "…" 1칸
+        var dq: []const u8 = "";
+        var dpre: []const u8 = pre;
+        if (pre_cols >= budget) {
+            dpre = ov.tailWindow(pre, budget).text;
+        } else {
+            dq = ov.tailWindow(q, budget - pre_cols).text;
+        }
+        const shown: u32 = 1 + ov.displayCols(dq) + ov.displayCols(dpre); // "…" + tail
+        const caret: u16 = @intCast(@min(@as(u32, start) + shown, @as(u32, max_col)));
+        return .{ .truncated = true, .query = dq, .preedit = dpre, .caret_col = caret };
+    }
+
     /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 검색 줄(마지막
     /// 줄)의 y. 줄 수는 headerRows 단일 소스(headerHit·buildSidebarHeaderDrawList과 동일 — 따로 계산하면 어긋난다).
     fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
@@ -6665,13 +6696,13 @@ pub const AppSession = struct {
         const ch = self.cell_height_px;
         const cols = self.sidebar_width_px / cw;
         const search_row = chrome.components.sidebar.headerRows(self.sidebar_header_height_px, ch) - 1;
-        const prompt_cols: u32 = sidebar_search_text_col; // 🔍 좌측 패딩 + 🔍(2칸) + 공백(1) — 렌더와 단일 출처
-        const caret_col = prompt_cols + self.sidebar_search_input.queryCols();
-        // 검색어가 입력 영역(col 3..cols-4, 우측은 아이콘)을 넘으면 caret를 숨긴다 — buildSidebarHeaderDrawList이 col
-        // cols-4에서 query를 자르는 것과 동일. 안 그러면 IME 후보창이 사이드바 밖 터미널 pane 위로 떠 텍스트와 분리된다
-        // (find.caretRect의 panel_cols 가드와 동형). cols<10이면 헤더 frame이 null이라 검색이 활성될 수 없으므로 cols≥10 전제.
-        if (caret_col >= cols -| 4) return null;
-        return .{ .x = @intCast(caret_col * cw), .y = @intCast(search_row * ch), .w = cw, .h = ch };
+        // caret 위치는 렌더(buildSidebarHeaderDrawList)의 tail 창 배치와 **같은 단일 출처**(sidebarSearchLine)에서 얻는다 —
+        // 긴 검색어가 넘치면 caret은 tail 창 오른쪽 끝으로 오고, 안 넘치면 text_col+content 폭(기존과 동일). 이렇게 IME
+        // 후보창이 잘린 caret을 따라와 사이드바 밖 터미널 pane 위로 뜨지 않는다(find.caretRect의 panel_cols 가드와 동형).
+        const max_col: u16 = @intCast(cols -| 4);
+        const caret_col = self.sidebarSearchLine(max_col).caret_col;
+        if (caret_col >= max_col) return null; // 극단 좁음
+        return .{ .x = @intCast(@as(u32, caret_col) * cw), .y = @intCast(search_row * ch), .w = cw, .h = ch };
     }
 
     /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
@@ -12155,7 +12186,9 @@ pub const AppSession = struct {
                             break :blk pref;
                         } else app.pickLabel(lr.leaf.custom_name, "");
                         const label_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground }; // 밝은 전경(muted 비활성 탭과 구분)
-                        if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg)) |ldl| {
+                        // rename 중이면 tail 앵커 — 긴 이름을 칠 때 라벨 세그먼트가 caret(문자열 끝)를 따라가 방금 친 글자가 안 잘린다.
+                        const label_anchor: coretext_frame_builder.TitleAnchor = if (renaming_pane) .tail else .head;
+                        if (coretext_frame_builder.buildPaneLabelDrawList(self.allocator, name, @intCast(pb.label_cols), label_fg, label_anchor)) |ldl| {
                             if (pane_running) recolorAgentFlagCells(ldl.cells, paneAgentKind(lr.leaf)); // ● → 브랜드색(pane 단일 kind)
                             self.collectShaped(&collected, ldl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x + pb.grip_cols * self.cell_width_px, .origin_y = text_origin_y, .colors = tabbar_colors } });
                         } else |_| {}
@@ -12171,11 +12204,14 @@ pub const AppSession = struct {
                         for (titles.items) |l| self.allocator.free(l);
                         titles.deinit(self.allocator);
                     }
-                    for (lr.leaf.terms.items) |term| {
+                    // rename 중인 Term 탭 인덱스(있으면) — 그 탭만 tail 앵커로 그려 편집 텍스트의 caret(문자열 끝)를 세그먼트 안에 유지한다.
+                    var editing_tab: ?usize = null;
+                    for (lr.leaf.terms.items, 0..) |term, tab_i| {
                         // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목(번호 prefix 없음 — 모던 탭은
                         // 브라우저/VSCode/Warp처럼 제목만; Term 번호는 단축키에 매핑되지 않아 시각 군더더기였다, U-tab2).
                         // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
                         if (self.renamingTerm(term)) {
+                            editing_tab = tab_i;
                             const edit = self.renameEditText(self.allocator) catch continue;
                             defer self.allocator.free(edit);
                             const label = self.allocator.dupe(u8, edit) catch continue;
@@ -12191,7 +12227,7 @@ pub const AppSession = struct {
                     const active_tab_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                     // 이 pane의 탭이 호버 중이면 그 탭에 ✕를 그린다(다른 pane이면 null).
                     const close_tab: ?usize = if (self.hovered_tab) |h| (if (h.pane == lr.leaf) h.tab else null) else null;
-                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) catch continue;
+                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, editing_tab) catch continue;
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
                     if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
@@ -13871,6 +13907,7 @@ pub const AppSession = struct {
         const indent_buf = [_]u8{' '} ** 24;
         var active_row: ?usize = null;
         var close_row: ?usize = null;
+        var editing_row: ?usize = null; // rename 중인 표시 슬롯(카드 또는 그룹 헤더) — buildSidebarDrawList가 그 이름줄을 tail 앵커로.
         for (self.sidebar_rows.items, 0..) |disp_row, row_i| {
             const card = switch (disp_row) {
                 .card => |c| c,
@@ -13886,6 +13923,7 @@ pub const AppSession = struct {
                     const hindent = indent_buf[0..hindent_n];
                     const header_text = if (gtab != null and self.renamingGroup(gtab.?)) blk: {
                         // 이 그룹 이름 rename 중 → 삼각 뒤에 편집 텍스트(+caret). 접힘 배지는 편집 집중 위해 숨긴다.
+                        editing_row = row_i; // 이 헤더 이름줄을 tail 앵커로(긴 이름 caret 유지)
                         const edit = try self.renameEditText(self.allocator);
                         defer self.allocator.free(edit);
                         break :blk try std.fmt.allocPrint(self.allocator, "{s}{s} {s}", .{ hindent, tri, edit });
@@ -13922,6 +13960,7 @@ pub const AppSession = struct {
             // 어긋난다 — 개요 가치를 위해 수용(code-review max 확인).
             const term = tab.activePane().activeTerm();
             const renaming = self.renamingWorkspace(tab);
+            if (renaming) editing_row = row_i; // 이 카드 이름줄을 tail 앵커로(긴 이름 caret 유지)
             // 카드당 1회 스캔: 대표 kind + running(색칠 루프·상태줄과 공유). **rename 중에도** 실제 값을 계산한다 —
             // 편집 중에도 running 파형(상태줄)을 보여야 하기 때문(사용자 요청). 아이콘만 rename 중 숨긴다(캐럿 정렬).
             const card_kind: AgentKind = tabAgentKind(tab);
@@ -13982,7 +14021,7 @@ pub const AppSession = struct {
         // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
         // close_row/active_row는 **표시 row 인덱스**(위 padding 루프가 헤더도 slot을 차지하게 해 i==row) — buildSidebarDrawList가
         // 이 i로 슬롯을 인코딩·비교하므로 도메인이 일치한다(SG3c). 헤더 row는 위 루프가 close_row를 안 세워 ✕가 안 붙는다.
-        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_row, null, active_row, active_fg);
+        var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, pins.items, sidebar_cols, fg, close_row, null, active_row, active_fg, editing_row);
         // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
         // codex=OpenAI 청록. 종류를 색으로 구분하고, **진행/완료는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓)이 담당한다
         // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.
@@ -14185,9 +14224,18 @@ pub const AppSession = struct {
         try cells.append(self.allocator, .{ .row = search_row, .col = sidebar_search_icon_col, .codepoint = 0xF0004, .width = 2, .style = .{ .foreground = muted } });
         const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
         const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
-        var col: u16 = sidebar_search_text_col;
+        var caret_col: u16 = sidebar_search_text_col; // 빈 검색이면 입력 시작점에 caret
         if (has_text) {
-            const texts = [_][]const u8{ self.sidebar_search_input.query.items, self.sidebar_search_input.preedit.items };
+            // 검색어가 입력 영역을 넘치면 tail 창(선두 "…")으로 오른쪽 정렬 — 방금 친 글자·caret이 잘려 안 보이던 문제를
+            // 없앤다(find·palette와 같은 규칙). 렌더와 caret 위치는 sidebarSearchLine 단일 출처(sidebarSearchCaretRect와 공유).
+            const line = self.sidebarSearchLine(max_col);
+            caret_col = line.caret_col;
+            var col: u16 = sidebar_search_text_col;
+            if (line.truncated) { // 앞이 잘렸음 — 선두 "…"(1칸)
+                try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = '…', .style = .{ .foreground = fg } });
+                col += 1;
+            }
+            const texts = [_][]const u8{ line.query, line.preedit };
             for (texts) |text| {
                 var view = std.unicode.Utf8View.init(text) catch continue;
                 var iter = view.iterator();
@@ -14207,10 +14255,10 @@ pub const AppSession = struct {
                 try cells.append(self.allocator, .{ .row = search_row, .col = c, .codepoint = ch, .style = .{ .foreground = muted } });
             }
         }
-        // 검색 caret — 활성일 때 입력 텍스트 끝(빈 검색은 col 3)에 깜빡이는 '|'(rename in-place caret과 동형, Find/팔레트
-        // 처럼 커서 표시). blink_visible로 토글(off 위상엔 생략). IME 조합 중엔 blink 핸들러가 위상을 고정해 항상 보인다.
-        if (self.sidebar_search_active and self.blink_visible and col < max_col) {
-            try cells.append(self.allocator, .{ .row = search_row, .col = col, .codepoint = '|', .style = .{ .foreground = fg } });
+        // 검색 caret — 활성일 때 보이는 입력 텍스트 끝(빈 검색은 col 3)에 깜빡이는 '|'(rename in-place caret과 동형, Find/
+        // 팔레트처럼 커서 표시). blink_visible로 토글(off 위상엔 생략). IME 조합 중엔 blink 핸들러가 위상을 고정해 항상 보인다.
+        if (self.sidebar_search_active and self.blink_visible and caret_col < max_col) {
+            try cells.append(self.allocator, .{ .row = search_row, .col = caret_col, .codepoint = '|', .style = .{ .foreground = fg } });
         }
 
         return renderer.DrawList{
@@ -17638,6 +17686,34 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     try std.testing.expect(!session.metal_dirty); // 보낼 게 없으니 다시 그릴 것도 없다
 }
 
+test "sidebarSearchLine: 넘치면 tail 창(선두 …)으로 caret을 입력 영역 안에 유지한다" {
+    // 사이드바 검색바도 긴 검색어면 head 정렬은 앞부분만 보이고 caret('|')이 우측 아이콘 영역으로 잘려 안 보였다.
+    // sidebarSearchLine이 넘침 시 선두 "…" + 뒤쪽으로 오른쪽 정렬해 caret을 max_col 안에 둔다(find·palette와 같은 규칙).
+    // sidebarSearchLine은 self.sidebar_search_input만 읽으므로([[devsession-undefined-test-field-trap]]) 그 필드만 초기화한다.
+    var session: AppSession = undefined;
+    session.sidebar_search_input = .{};
+    defer session.sidebar_search_input.deinit(std.testing.allocator);
+
+    // 비넘침: 짧은 검색어 → 잘림 없음, caret = text_col + content 폭.
+    for ("abc") |c| try session.sidebar_search_input.appendChar(std.testing.allocator, c);
+    {
+        const line = session.sidebarSearchLine(30); // 넉넉한 max_col
+        try std.testing.expect(!line.truncated);
+        try std.testing.expectEqual(sidebar_search_text_col + @as(u16, 3), line.caret_col);
+    }
+
+    // 넘침: 좁은 max_col → tail 창 + caret이 max_col 안 + 뒤쪽(방금 친 'j')이 보인다.
+    session.sidebar_search_input.clear();
+    for ("abcdefghij") |c| try session.sidebar_search_input.appendChar(std.testing.allocator, c); // 10칸
+    {
+        const max_col: u16 = sidebar_search_text_col + 6; // 입력 영역 6칸
+        const line = session.sidebarSearchLine(max_col);
+        try std.testing.expect(line.truncated);
+        try std.testing.expect(line.caret_col < max_col); // caret이 잘려 숨지 않음
+        try std.testing.expect(line.query.len > 0 and line.query[line.query.len - 1] == 'j'); // caret 쪽(방금 친 글자)이 보임
+    }
+}
+
 // (P3-4) 위임 핸들러(scroll/선택/reportMouse)를 호출하는 단위 테스트용 헬퍼. 메인 mutate가 runtime을 거쳐
 // reader로 가므로, 테스트는 surface를 빈 runtime에 attach해 **non-interactive 폴백(직접 적용)**으로 동기 검증한다
 // (enqueue_command=null → enqueueCoreCommand가 코어 락 아래 즉시 apply). io도 세워 폴백의 lockCore에 넘긴다.
@@ -18226,13 +18302,13 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
         // (1) 시프트만 하고 size.cols를 안 넓히면 ShapedRecordOutsideSurface로 실패함을 고정(버그 재현 — buildFromDrawList가
         //     실패 시 draw_list를 정리하므로 별도 free 안 함).
         {
-            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted);
+            const dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             try std.testing.expectError(error.ShapedRecordOutsideSurface, fb.buildFromDrawList(allocator, dl, &session.renderer_state));
         }
         // (2) 시프트 후 size.cols=full_cols로 넓히면(수정) 정상 빌드 + row 보존(이름 idx0·경로 idx2, count=3).
         {
-            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted);
+            var dl = try coretext_frame_builder.buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, sidebar_cols, muted, null, 1, 0, muted, null);
             for (dl.cells) |*c| c.col += indent_cols;
             dl.size.cols = full_cols;
             var f = try fb.buildFromDrawList(allocator, dl, &session.renderer_state);

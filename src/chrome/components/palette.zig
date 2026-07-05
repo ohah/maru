@@ -125,10 +125,12 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open) return null;
     const lay = overlay_input.panelLayout(p) orelse return null;
-    // preedit은 더하지 않는다 — 조합 글자는 query 끝 caret에 그려진다(단일 줄 append라 뒤 텍스트 없음, find와 동일).
-    const caret_col = prompt_cols + state.input.queryCols();
-    if (caret_col >= lay.panel_cols) return null; // 패널 밖
-    return .{ .x = lay.x + @as(i32, @intCast(caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
+    // caret 위치는 view의 tail 창 배치와 **같은 단일 출처**(inputLineView)에서 얻는다 — 긴 검색어가 패널을 넘치면
+    // caret은 창 오른쪽 끝(= query 끝)으로 오고, 넘치지 않으면 prompt_cols+queryCols(기존과 동일). row0엔 우측 요소가
+    // 없어 텍스트 영역은 패널 폭 전체(find와 달리 카운터 예약 없음).
+    const line = overlay_input.inputLineView(&state.input, prompt_cols, lay.panel_cols);
+    if (line.caret_col >= lay.panel_cols) return null; // 패널 밖(극단 좁음)
+    return .{ .x = lay.x + @as(i32, @intCast(line.caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
 }
 
 /// 상단-중앙 패널을 `out`에 append한다: 배경 fill + row0 프롬프트("> <query><조합중>" + 커서) + 결과 행 N개(선택행
@@ -166,12 +168,23 @@ pub fn view(
         try out.append(arena, .{ .fill = .{ .rect = .{ .x = x, .y = row_y, .w = panel_w, .h = ch }, .role = .tab_active_bg } });
     }
 
-    // row0: "> " + query + preedit(조합 중) (한 text op, 3 runs). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는 query
-    // 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합이 팝업에 즉시 보인다 — 레거시 팝업엔 없던 동작).
-    const prompt_runs = try arena.alloc(draw.Run, 3);
-    prompt_runs[0] = .{ .text = "> " };
-    prompt_runs[1] = .{ .text = state.input.query.items };
-    prompt_runs[2] = .{ .text = state.input.preedit.items };
+    // row0: "> " + (…?) + query(창) + preedit(조합 중) (한 text op). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는 query
+    // 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합이 팝업에 즉시 보인다). 긴 검색어가 패널을 넘치면 inputLineView가
+    // tail 창(선두 "…")으로 오른쪽 정렬해 방금 친 글자·caret이 잘려 안 보이던 문제를 없앤다(find와 같은 규칙).
+    const line = overlay_input.inputLineView(&state.input, prompt_cols, lay.panel_cols);
+    var runs_buf: [4]draw.Run = undefined;
+    var nr: usize = 0;
+    runs_buf[nr] = .{ .text = "> " };
+    nr += 1;
+    if (line.truncated) { // 앞이 잘렸음 — 프롬프트 뒤 "…"
+        runs_buf[nr] = .{ .text = "…" };
+        nr += 1;
+    }
+    runs_buf[nr] = .{ .text = line.query };
+    nr += 1;
+    runs_buf[nr] = .{ .text = line.preedit };
+    nr += 1;
+    const prompt_runs = try arena.dupe(draw.Run, runs_buf[0..nr]);
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 
     // 결과 행: 제목(col 2부터) + 우측 정렬 바인딩 표시. 폭은 EAW(displayCols)로 — 한글 제목/바인딩도 안 잘린다.
@@ -359,4 +372,47 @@ test "palette view: IME 조합(preedit)이 query 뒤에 보이고 커서가 조�
     const caret = out.items[out.items.len - 1];
     try std.testing.expect(caret == .fill and caret.fill.role == .cursor);
     try std.testing.expectEqual(out.items[0].quad.rect.x + 3 * 8, caret.fill.rect.x);
+}
+
+test "palette view/caret: 긴 검색어는 tail 창(선두 …)으로 오른쪽 정렬 + caret 계속 보임" {
+    // find와 같은 회귀 고정: 패널(≤60칸)보다 긴 검색어면 예전엔 앞부분만 보이고 caret이 패널 밖으로 나가 숨었다.
+    // tail 창은 선두 "…" + 뒤쪽(방금 친 글자) + caret을 패널 안에 유지한다.
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(draw.Op) = .empty;
+
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    for (0..79) |_| try s.input.appendChar(std.testing.allocator, 'a'); // 79 'a'
+    try s.input.appendChar(std.testing.allocator, 'Z'); // 끝 글자 'Z'(방금 친 것) — 80칸 > 60
+    try view(&s, &.{}, p, &tk, arena, &out);
+
+    // 프롬프트 text op = "> " + "…"(잘림) + tail. "…" run 존재 + tail이 방금 친 'Z'로 끝난다.
+    var found_ellipsis = false;
+    var tail_ends_with_z = false;
+    for (out.items) |op| {
+        if (op == .text) for (op.text.runs) |r| {
+            if (std.mem.eql(u8, r.text, "…")) found_ellipsis = true;
+            if (r.text.len > 0 and r.text[r.text.len - 1] == 'Z') tail_ends_with_z = true;
+        };
+    }
+    try std.testing.expect(found_ellipsis);
+    try std.testing.expect(tail_ends_with_z);
+
+    // caret이 계속 보인다(패널 안).
+    const lay = overlay_input.panelLayout(p).?;
+    const cr = caretRect(&s, p) orelse return error.CaretHidden;
+    try std.testing.expect(cr.x >= lay.x);
+    try std.testing.expect(cr.x < lay.x + @as(i32, @intCast(lay.panel_cols * lay.cw)));
 }

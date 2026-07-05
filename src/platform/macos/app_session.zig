@@ -1476,6 +1476,17 @@ pub const AppSession = struct {
     /// 채우고, buildSidebarDrawList가 순회, slotAt/click/hover가 표시 슬롯(row 인덱스)→원본 탭 역매핑(visibleTab =
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
+    /// SG8c 드래그 프리뷰 — 드래그 중 `sidebar_rows`(원본, 불변, hit-test·plan 계산이 봄)와 분리된 **렌더 전용 투영**
+    /// (고스트 포함, docs/sidebar-groups.md §9 SG8). 라이브 재배치(매 프레임 self.tabs 커밋) 대신 비커밋 프리뷰:
+    /// simulateDrop이 낸 가상 order/group_depth를 projectRowsCore(프리뷰 모드)로 투영한다. 고스트 [lo,hi) 구간은 접힘
+    /// 게이트 예외로 강제 방출돼 "접힌 그룹 드롭 시 드래그 중 사라짐"을 없앤다. **렌더 소비자 배선은 SG8d**(지금은
+    /// 채우기·헤드리스 검증만 — sidebar_rows가 여전히 렌더 소스). move(순열) 모델이라 preview_rows.len == sidebar_rows.len
+    /// (접힘으로 빠질 행을 프리뷰가 되메움 → 스크롤 높이 불변).
+    sidebar_preview_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
+    /// SG8c 드래그 프리뷰 상태(비커밋). null=드래그 프리뷰 없음. refreshDragPreview가 origin(옮길 subtree 시작)·plan(원본
+    /// hit-test 산출 드롭 계획, up 확정에 재사용)·cursor_y·고스트 range를 갱신한다. self.tabs는 드래그 중 불변이라
+    /// origin/origin_len가 안정하다(포인터 셔플은 확정 경로 전용). ghost_lo/hi는 preview_rows 표시 위치 도메인의 고스트 구간.
+    sidebar_drag_preview: ?SidebarDragPreview = null,
     // 우클릭 컨텍스트 메뉴의 대상(어느 워크스페이스/pane/Term을 우클릭했나). 메뉴 상태(open·anchor·selected)는
     // chrome_host.context_menu(중립)에, 라이브 포인터 대상은 여기에 둔다(rename과 같은 분리). 메뉴 "Rename" 선택
     // 시 이 대상으로 startRename. 대상 teardown 시 null로 비운다(stale 포인터 방지, rename과 같은 funnel).
@@ -4405,6 +4416,19 @@ pub const AppSession = struct {
     /// subtree(카드=1행·그룹=N행)가 앉는 가상 위치 구간(SG8c 고스트 태깅). lo==hi면 고스트 없음(none). arena 소유.
     const VirtualLayout = struct { order: []usize, group_depth: []u8, ghost_lo: usize, ghost_hi: usize };
 
+    /// SG8c 드래그 프리뷰 상태(docs/sidebar-groups.md §9 SG8). self.tabs 불변이라 origin/origin_len가 드래그 내내
+    /// 안정하다(포인터 셔플은 확정 경로 전용). plan은 매 프레임 원본 sidebar_rows hit-test로 재계산되고 마지막 값이
+    /// up 확정(정확히 1회 move)에 재사용된다. ghost_lo/hi는 preview_rows 표시 위치 도메인의 고스트 연속 구간 — 상태
+    /// mask 배열(길이 정합 함정)이 아니라 **range 파생**이라(SG8 결정 ⑤), 렌더(SG8d)가 `ghost_lo<=row<ghost_hi`로 판정한다.
+    const SidebarDragPreview = struct {
+        origin: usize, // 원본 subtree 시작(카드=tab 인덱스, 그룹=마커 탭 인덱스)
+        origin_len: usize, // subtree 길이(카드=1, 그룹=groupSubtreeEnd(origin)-origin)
+        plan: DropPlan, // 드롭 계획(마지막 값이 확정에 재사용)
+        cursor_y: f64, // 마지막 커서 y(backing px) — 삽입선·오토스크롤(후속) 기준
+        ghost_lo: usize, // 고스트 구간 시작(preview_rows 표시 위치)
+        ghost_hi: usize, // 고스트 구간 끝(배타) — lo==hi면 고스트 없음(none)
+    };
+
     /// plan을 `self.tabs`에 **커밋하지 않고** 이동 후 가상 순열/depth를 arena에 낸다(docs/sidebar-groups.md §9 SG8b). 프리뷰는
     /// `simulateDrop(origin, plan)` → `projectRowsFrom(vl.order, vl.group_depth)`로 렌더 rows를 만들고(SG8c), 확정은 마지막
     /// plan으로 기존 move를 1회 부른다 — 둘이 같은 순수 코어를 써 divergence가 없다. **clampMoveToGroup을 카드 경로에 포함**해
@@ -4471,6 +4495,34 @@ pub const AppSession = struct {
         const td: u8 = target_depth orelse self.effectiveDepthAt(new_marker, new_order, new_gd);
         _ = self.relevelBlockCore(new_marker, range_len, td, new_order, new_gd);
         return .{ .order = new_order, .group_depth = new_gd, .ghost_lo = new_marker, .ghost_hi = new_marker + range_len };
+    }
+
+    /// SG8c 프리뷰 재투영 진입점(docs/sidebar-groups.md §9) — plan을 simulateDrop으로 **비커밋 가상 배치**(self.tabs 불변)
+    /// 하고, 그 order/group_depth를 projectRowsCore(프리뷰 모드)로 sidebar_preview_rows에 투영한다. 고스트 [lo,hi) 구간은
+    /// 접힘 게이트 예외로 강제 방출되고(사라짐 방지), 그 고스트를 담은 접힌 그룹 헤더는 collapsed=false로 flip된다.
+    /// member_count는 가상 order 위에서 order-aware directCardCount로 계산돼 고스트를 반영한다(self.tabs 직접 스캔 안 함 —
+    /// 드래그 중 self.tabs가 불변이라 직접 스캔하면 고스트가 안 보인다). ghost range는 sidebar_drag_preview에 함께 보관해
+    /// 렌더(SG8d)가 파생한다. **실제 드래그 핸들러 호출은 SG8d** — 지금은 함수만 두고 헤드리스로 검증한다(렌더 미배선).
+    /// arena=simulateDrop 중간 버퍼(order/group_depth/perm) 정리용(호출자 소유 — 프레임 스크래치).
+    fn refreshDragPreview(self: *AppSession, origin: usize, plan: DropPlan, cursor_y: f64, arena: std.mem.Allocator) !void {
+        const vl = try self.simulateDrop(origin, plan, arena);
+        // 가상 order/depth를 프리뷰 모드로 투영 — 고스트 [lo,hi)는 접힘 게이트 예외로 강제 방출(사라짐 방지)·헤더 flip.
+        // 반환 range는 vl.ghost(order 위치 도메인)를 방출 후 **표시-row 도메인**으로 옮긴 것(렌더가 그대로 씀).
+        const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi });
+        // subtree 길이(카드=1·그룹=groupSubtreeEnd-origin·none=0). 프리뷰 상태 메타(확정·origin 안정성 문서화용).
+        const origin_len: usize = switch (plan) {
+            .none => 0,
+            .card => 1,
+            .group_sibling, .group_nest => if (origin < self.tabs.items.len) self.groupSubtreeEnd(origin, null, null) - origin else 0,
+        };
+        self.sidebar_drag_preview = .{
+            .origin = origin,
+            .origin_len = origin_len,
+            .plan = plan,
+            .cursor_y = cursor_y,
+            .ghost_lo = rng.lo,
+            .ghost_hi = rng.hi,
+        };
     }
 
     /// 고정 탭을 앞쪽으로 stable-partition한다(고정끼리·비고정끼리 상대 순서 유지). tabs와 surface_ptrs를 **함께**
@@ -6606,9 +6658,9 @@ pub const AppSession = struct {
         const searching = self.sidebar_search_active and self.sidebar_search_input.query.items.len > 0;
         const q: []const u8 = if (searching) self.sidebar_search_input.query.items else "";
         // identity 순열 + 라이브 group_depth. OOM(극단)이면 그룹 무시 flat(projectFlatFallback이 clear까지 함께).
-        const order = self.allocator.alloc(usize, n) catch return self.projectFlatFallback(q);
+        const order = self.allocator.alloc(usize, n) catch return self.projectFlatFallback(&self.sidebar_rows, q);
         defer self.allocator.free(order);
-        const group_depth = self.allocator.alloc(u8, n) catch return self.projectFlatFallback(q);
+        const group_depth = self.allocator.alloc(u8, n) catch return self.projectFlatFallback(&self.sidebar_rows, q);
         defer self.allocator.free(group_depth);
         for (self.tabs.items, 0..) |tab, i| {
             order[i] = i;
@@ -6617,26 +6669,52 @@ pub const AppSession = struct {
         self.projectRowsFrom(order, group_depth);
     }
 
+    /// SG8a 순수 투영 코어를 **라이브 sidebar_rows**에 얇게 위임하는 래퍼(preview=null). recomputeVisibleTabs·SG8a/b
+    /// 테스트가 이 시그니처(order/group_depth)를 그대로 부른다 — identity면 옛 flat 동작과 byte-identical.
+    fn projectRowsFrom(self: *AppSession, order: []const usize, group_depth: []const u8) void {
+        _ = self.projectRowsCore(&self.sidebar_rows, order, group_depth, null); // 라이브는 고스트 range 미사용
+    }
+
+    /// SG8c 프리뷰 투영 컨텍스트 — projectRowsCore가 프리뷰 모드일 때 [ghost_lo, ghost_hi) **표시 위치**를 접힘 게이트
+    /// 예외로 강제 방출하고(옮겨진 subtree가 접힌 그룹에 들어가도 사라지지 않음), 그 고스트를 담은 접힌 그룹 헤더를
+    /// collapsed=false로 flip한다(code-review #6 류 "접힘 표시인데 카드 보임" 모순 재발 방지). null=라이브(게이트 유지).
+    const PreviewCtx = struct { ghost_lo: usize, ghost_hi: usize };
+
+    /// projectRowsCore가 프리뷰 모드에서 낸 고스트의 **표시-row 도메인** 구간(preview_rows 인덱스). simulateDrop이 준
+    /// PreviewCtx.ghost_lo/hi는 **order 위치 도메인**(마커=1 위치)이라 렌더가 못 쓴다 — 마커가 header+card 2 row를 내므로
+    /// order 위치≠row 인덱스다. 코어가 방출하며 고스트 row가 앉은 연속 구간 [lo,hi)를 추적해 돌려주고, 렌더(SG8d)는
+    /// `lo<=display_row<hi`로 판정한다(range 파생, mask 배열 아님 — SG8 결정 ⑤). 라이브(preview=null)면 항상 {0,0}.
+    const PreviewRange = struct { lo: usize, hi: usize };
+
     /// 순열/depth 순수 투영 코어(SG8a — docs/sidebar-groups.md §9). `order`(표시 위치 i → 원본 tab 인덱스 순열)와
-    /// `group_depth`(order 위치별 마커 선언 depth)를 self.tabs에 투영해 sidebar_rows를 채운다. 프리뷰(비커밋 가상 배치)와
+    /// `group_depth`(order 위치별 마커 선언 depth)를 self.tabs에 투영해 `out`(라이브=sidebar_rows·프리뷰=sidebar_preview_rows)를
+    /// 채운다. 프리뷰(비커밋 가상 배치)와
     /// 라이브 확정이 이 한 코어를 공유한다(등가 안전화). 규칙: (1) group_start 탭에서 group_header row 삽입 + 그 그룹 카드는
     /// depth 1, (2) 접힘(검색 없음)이면 카드 skip(헤더만), (3) 검색 미매치 카드 skip, (4) 표시 카드가 0인 그룹은 **검색
     /// 중이면 헤더째 skip**(빈 그룹 규칙 — 접힘으로 0인 건 헤더 남김), (5) member_count = 표시 카드 수(검색 중=매치 수).
     /// 최상위 카드(첫 group_start 이전, §2.1 연속 파티션)는 depth 0. pass1/pass2는 self.tabs.items[order[i]]로 원본을 거치고
-    /// depth 파생은 group_depth[i]를 선언값으로 쓴다(order/group_depth가 identity+라이브면 옛 flat 동작과 byte-identical).
-    fn projectRowsFrom(self: *AppSession, order: []const usize, group_depth: []const u8) void {
-        self.sidebar_rows.clearRetainingCapacity();
+    /// depth 파생은 group_depth[i]를 선언값으로 쓴다(order/group_depth가 identity+라이브·preview=null이면 옛 flat 동작과
+    /// byte-identical). **preview!=null**(SG8c)이면 [ghost_lo,hi) 표시 위치 카드를 접힘 게이트 예외로 강제 방출하고, 그
+    /// 구간을 담은 접힌 헤더를 펼침 flip한다 — member_count는 가상 order 위 directCardCount라 고스트를 반영(self.tabs 미스캔).
+    fn projectRowsCore(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), order: []const usize, group_depth: []const u8, preview: ?PreviewCtx) PreviewRange {
+        out.clearRetainingCapacity();
         const searching = self.sidebar_search_active and self.sidebar_search_input.query.items.len > 0;
         const q: []const u8 = if (searching) self.sidebar_search_input.query.items else "";
         const n = order.len;
-        if (n == 0) return;
+        if (n == 0) return .{ .lo = 0, .hi = 0 };
 
         // 중첩(SG5-3)은 위치 파생을 **다단계**로 일반화한다(docs/sidebar-groups.md §2.1·§9). subtree 경계·member_count·
         // 검색 헤더 가시성이 앞을 내다봐야(lookahead) 하므로 한 번 계산해 둔다: depth[i]=정규화 eff_depth(마커=자기
         // 깊이, 카드=소속 그룹 깊이, 0=최상위), matches[i]=검색 매치(비검색이면 전부 true). OOM(극단)이면 그룹 무시 flat.
-        const depth = self.allocator.alloc(u8, n) catch return self.projectFlatFallback(q);
+        const depth = self.allocator.alloc(u8, n) catch {
+            self.projectFlatFallback(out, q);
+            return .{ .lo = 0, .hi = 0 }; // OOM 폴백은 고스트 없이 flat 복원(다음 rebuild 정상화)
+        };
         defer self.allocator.free(depth);
-        const matches = self.allocator.alloc(bool, n) catch return self.projectFlatFallback(q);
+        const matches = self.allocator.alloc(bool, n) catch {
+            self.projectFlatFallback(out, q);
+            return .{ .lo = 0, .hi = 0 };
+        };
         defer self.allocator.free(matches);
 
         // Pass 1 — 위치 파생 depth 스택. group_start 마커에서 declared depth(=group_depth[i], 최소 1)로 스택을 pop하고
@@ -6667,25 +6745,49 @@ pub const AppSession = struct {
         // 자식 그룹 헤더가 부모 카드 뒤·자식 카드 앞에 자연 삽입된다(§2.1 "부모 직접 카드는 자식 그룹보다 앞").
         var cstack: [max_group_nesting]GroupStackEntry = undefined;
         var ctop: usize = 0;
+        // SG8c: 고스트가 실제로 방출된 **표시-row 도메인** 구간을 추적한다(PreviewRange로 반환). PreviewCtx.ghost_lo/hi는
+        // order 위치 도메인이라(마커=1 위치) row 인덱스와 다르다 — 방출하며 out.items.len으로 실제 row 시작/끝을 잡는다.
+        // 고스트 order 위치는 [lo,hi) 연속이고 각 위치가 ≥1 row를 내므로 방출 row도 연속이다.
+        var ghost_row_lo: usize = 0;
+        var ghost_row_hi: usize = 0;
+        var ghost_row_seen: bool = false;
         for (order, 0..) |tab_idx, i| {
             const tab = self.tabs.items[tab_idx];
+            // SG8c: 이 표시 위치가 고스트 구간 [lo,hi)면 접힘 게이트를 무시하고 강제 방출한다(옮겨진 subtree가 접힌
+            // 그룹에 들어가도 카드가 순간 사라지지 않게 — 사라짐의 원인이 pass2 가시성 게이트라 투영이 예외한다). 라이브
+            // (preview=null)면 항상 false라 게이트 유지(byte-identical).
+            const ghost_here = if (preview) |p| (i >= p.ghost_lo and i < p.ghost_hi) else false;
+            if (ghost_here and !ghost_row_seen) { // 첫 고스트 위치의 첫 row 인덱스(방출 직전 길이)
+                ghost_row_lo = out.items.len;
+                ghost_row_seen = true;
+            }
             if (tab.group_start) |group_name| {
                 const d = depth[i];
                 while (ctop > 0 and cstack[ctop - 1].depth >= d) ctop -= 1;
                 // 헤더 가시성: 검색 중이면 subtree에 매치가 있을 때만(빈 그룹 헤더째 숨김), 아니면 조상이 접혔으면 숨김
                 // (부모 접기 = 자식 그룹 통째 숨김). 자기 접힘은 헤더 자신을 숨기지 않는다(▸ name (N)로 남김).
                 const ancestor_collapsed = anyCollapsedInStack(cstack[0..ctop]);
-                const header_visible = if (searching) self.subtreeHasMatch(order, i, d, depth, matches) else !ancestor_collapsed;
+                // SG8c 프리뷰: 고스트가 이 그룹 subtree에 들어오면 (1) 헤더 collapsed를 펼침으로 flip(아래)하고 (2) 접힌
+                // 조상에 가려 헤더가 숨을 때도 강제로 보인다(force-show) — 고스트 카드가 헤더 없이 떠다니지 않게.
+                const ghost_in_subtree = if (preview) |p| self.ghostOverlapsSubtree(order, depth, i, d, p) else false;
+                const header_visible = if (searching)
+                    self.subtreeHasMatch(order, i, d, depth, matches)
+                else
+                    (!ancestor_collapsed or ghost_in_subtree);
                 if (header_visible) {
-                    self.sidebar_rows.append(self.allocator, .{
+                    out.append(self.allocator, .{
                         .group_header = .{
                             // 검색 중에는 매치 카드가 접힘을 무시하고 펼쳐 보이므로(아래 card_visible=matches[i], docs §1)
                             // 헤더도 **펼침(false)** 으로 표시한다 — 안 그러면 삼각 ▸·(N) 배지가 펼친 카드 위에서 모순
                             // (접힘 표시인데 카드가 보임)이 된다(code-review #6). 검색을 지우면 tab.group_collapsed로 복귀.
-                            .collapsed = if (searching) false else tab.group_collapsed,
+                            // SG8c도 같은 결: 프리뷰 고스트가 접힌 그룹 G 안에 방출되면 G 헤더를 펼침으로 flip(ghost_in_subtree)해
+                            // 같은 모순을 막는다(6514 검색 케이스 선례와 동형). 원본 투영(preview=null)은 tab.group_collapsed 그대로.
+                            .collapsed = if (searching) false else (tab.group_collapsed and !ghost_in_subtree),
                             // label은 borrowed(tab 소유 group_start)라 destroyTab 후 dangling 위험(code-review #8 UAF). glyph는
                             // 소스 tab 인덱스(.tab=tab_idx)로 live 재조회하므로 label은 안전값으로만 둔다(회귀 방지 겸 borrowed 유지).
                             .label = group_name,
+                            // member_count는 가상 order 위 order-aware directCardCount라 고스트를 반영한다(self.tabs 직접
+                            // 스캔 금지 — 드래그 중 self.tabs가 불변이라 직접 스캔하면 고스트가 (N)에 안 잡힌다, SG8a 완료).
                             .member_count = self.directCardCount(order, i, d, depth, matches, searching),
                             .tab = tab_idx, // 그룹 시작 **원본** 탭 인덱스(=order[i]) — 클릭 토글·glyph 라벨 live 재조회의 단일 출처(#8)
                             .depth = d, // 정규화 깊이 — 헤더 삼각 들여쓰기 (depth-1)*group_indent
@@ -6700,24 +6802,42 @@ pub const AppSession = struct {
                     ctop += 1;
                 }
                 // 마커 탭의 **자기 카드**(그룹 첫 몸통 카드). 자기 그룹 접힘(또는 조상 접힘)이면 숨긴다(헤더만 남음).
+                // SG8c: 이 위치가 고스트 구간이면(그룹 통째 드래그가 접힌 곳으로) 접힘 게이트를 무시하고 강제 방출.
                 const self_collapsed = anyCollapsedInStack(cstack[0..ctop]);
-                const card_visible = if (searching) matches[i] else !self_collapsed;
-                if (card_visible) self.appendCardRow(tab_idx, d);
+                const card_visible = (if (searching) matches[i] else !self_collapsed) or ghost_here;
+                if (card_visible) self.appendCardRow(out, tab_idx, d);
             } else {
                 const d = depth[i];
                 const parent_collapsed = anyCollapsedInStack(cstack[0..ctop]);
-                const card_visible = if (searching) matches[i] else !parent_collapsed;
-                if (card_visible) self.appendCardRow(tab_idx, d);
+                // SG8c: 고스트 구간 카드는 접힘 게이트 예외로 강제 방출(옮겨진 카드가 접힌 그룹에 들어가도 안 사라짐).
+                const card_visible = (if (searching) matches[i] else !parent_collapsed) or ghost_here;
+                if (card_visible) self.appendCardRow(out, tab_idx, d);
             }
+            if (ghost_here) ghost_row_hi = out.items.len; // 이 고스트 위치가 낸 마지막 row까지 확장(연속)
         }
+        return .{ .lo = ghost_row_lo, .hi = ghost_row_hi };
+    }
+
+    /// SG8c 프리뷰 — 마커 위치 i(정규화 depth d)의 subtree [i, e) 위치 구간에 고스트 [lo,hi)가 겹치는가. subtree 끝 e =
+    /// 다음 "같거나 낮은 depth 마커" 위치(projectRows pass2 pop 경계와 동형) 또는 n. 헤더 flip·force-show 판정에 쓴다
+    /// (고스트가 담긴 접힌 그룹만 펼침 표시). 위치 도메인 순수 함수(order/depth는 pass1 산출, self.tabs는 마커 판별만).
+    fn ghostOverlapsSubtree(self: *AppSession, order: []const usize, depth: []const u8, i: usize, d: u8, p: PreviewCtx) bool {
+        if (p.ghost_lo >= p.ghost_hi) return false; // 고스트 없음(none)
+        const n = order.len;
+        var e = i + 1;
+        while (e < n) : (e += 1) {
+            if (self.tabs.items[order[e]].group_start != null and depth[e] <= d) break; // subtree 경계(형제/조상 마커)
+        }
+        return p.ghost_lo < e and p.ghost_hi > i; // [lo,hi) ∩ [i,e) ≠ ∅
     }
 
     /// projectRows의 OOM 폴백 — identity order/group_depth 또는 임시 depth/matches 배열 alloc이 실패한 극단 상황에서
     /// 그룹을 무시하고 모든 탭을 최상위 카드(depth 0)로 방출한다(검색 필터는 유지). 다음 rebuild가 정상 복구. 안전
-    /// degradation(§6). 래퍼(recomputeVisibleTabs)·코어(projectRowsFrom) 어느 OOM 경로에서 불려도 되게 **여기서 clear**한다.
-    fn projectFlatFallback(self: *AppSession, q: []const u8) void {
-        self.sidebar_rows.clearRetainingCapacity();
-        for (self.tabs.items, 0..) |tab, i| if (self.tabMatchesSearch(tab, q)) self.appendCardRow(i, 0);
+    /// degradation(§6). 래퍼(recomputeVisibleTabs)·코어(projectRowsCore) 어느 OOM 경로에서 불려도 되게 **여기서 clear**한다.
+    /// `out`=대상 리스트(라이브=sidebar_rows·프리뷰=sidebar_preview_rows) — 프리뷰 OOM도 고스트만 잃고 flat 복원(다음 rebuild가 정상화).
+    fn projectFlatFallback(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), q: []const u8) void {
+        out.clearRetainingCapacity();
+        for (self.tabs.items, 0..) |tab, i| if (self.tabMatchesSearch(tab, q)) self.appendCardRow(out, i, 0);
     }
 
     /// 마커 위치 i(정규화 depth d)의 subtree [i, k)에 검색 매치가 하나라도 있는가(§6 빈 그룹 규칙 — 중첩 확장). subtree는
@@ -6803,10 +6923,11 @@ pub const AppSession = struct {
         return k;
     }
 
-    /// sidebar_rows에 카드 row 하나 append(projectRows 공통 — depth만 다름). label은 chrome view 미사용이라 ""(borrowed 회피 —
-    /// buildSidebarDrawList가 tab에서 직접 라벨을 뽑는다). append 실패(OOM)는 무시(다음 rebuild가 복구) — 옛 동작 승계.
-    fn appendCardRow(self: *AppSession, tab_index: usize, depth: u8) void {
-        self.sidebar_rows.append(self.allocator, .{ .card = .{
+    /// `out`(라이브=sidebar_rows·프리뷰=sidebar_preview_rows)에 카드 row 하나 append(projectRows 공통 — depth만 다름). label은
+    /// chrome view 미사용이라 ""(borrowed 회피 — buildSidebarDrawList가 tab에서 직접 라벨을 뽑는다). active는 라이브 active_tab을
+    /// 그대로 읽는다(프리뷰도 같은 탭이 활성 표시 — 순서만 가상). append 실패(OOM)는 무시(다음 rebuild가 복구) — 옛 동작 승계.
+    fn appendCardRow(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), tab_index: usize, depth: u8) void {
+        out.append(self.allocator, .{ .card = .{
             .tab = tab_index,
             .active = (tab_index == self.app_window.active_tab),
             .label = "",
@@ -15389,6 +15510,7 @@ pub const AppSession = struct {
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
+        self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         if (self.workspace_buffer) |b| self.allocator.free(b);
@@ -16286,6 +16408,193 @@ test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불�
 
     // 자기 subtree 안으로의 형제 이동(insert_before∈[m,j]) → moveGroupRange no-op와 등가(제자리·depth 무변).
     try expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 2 } });
+}
+
+/// SG8c 테스트 헬퍼 — rows에 그 **원본 tab 인덱스**의 카드 row가 있으면 그 depth를 돌려준다(없으면 null). "고스트 존재/사라짐"
+/// (원본 tab이 카드 row로 방출됐는가)과 depth 정확성을 함께 본다(카드 .tab=원본 인덱스, 프리뷰 가상순서도 동일).
+fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u8 {
+    for (rows) |row| switch (row) {
+        .card => |c| if (c.tab == tab) return c.depth,
+        .group_header => {},
+    };
+    return null;
+}
+
+/// SG8c 테스트 헬퍼 — rows에서 그 **원본 마커 tab 인덱스**의 group_header row를 돌려준다(없으면 null). collapsed flip·
+/// member_count·depth 단언용(헤더 .tab=마커 원본 인덱스).
+fn sg8cFindHeader(rows: []const chrome.components.sidebar.Row, tab: usize) ?chrome.components.sidebar.Row {
+    for (rows) |row| switch (row) {
+        .group_header => |h| if (h.tab == tab) return row,
+        .card => {},
+    };
+    return null;
+}
+
+// SG8c 1급 헤드리스(docs/sidebar-groups.md §9 SG8c): 카드를 **접힌 그룹**에 드롭하는 plan을 프리뷰 투영하면 그 카드
+// 고스트가 sidebar_preview_rows에 **강제 방출**된다(원본=커밋 레이아웃 투영에선 접힘 게이트로 사라짐 = SG8이 없애려는
+// 증상). 또 타겟 헤더가 collapsed=false로 flip되고(▸ 삼각 아래 카드 보임 모순 방지), member_count가 고스트를 반영하며
+// (order-aware), self.tabs는 불변이고, move(순열) 모델이라 preview_rows.len == 원본 rows.len(접힘으로 빠질 행 되메움).
+test "SG8c: 카드를 접힌 그룹에 드롭 → preview 고스트 존재(원본은 사라짐)·헤더 flip·member_count 반영·길이 동일·self.tabs 불변" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
+    // t0 최상위, A=[t1,t2](마커 t1, depth1) 접힘(§2.1 연속 파티션: 최상위 카드는 첫 마커 이전만).
+    try setGroupMarker(session, 1, "A", 1);
+    session.tabs.items[1].group_collapsed = true;
+
+    // 라이브(원본) 투영 — t0는 최상위 카드로 보이고(존재), A 헤더는 접힘(t2 숨김). 길이 비교의 기준(move 모델).
+    session.recomputeVisibleTabs();
+    const live_len = session.sidebar_rows.items.len;
+    try std.testing.expect(sg8cFindCardDepth(session.sidebar_rows.items, 0) != null);
+
+    // self.tabs 불변 스냅샷(포인터·순서).
+    const n = session.tabs.items.len;
+    var before: [8]*Tab = undefined;
+    for (session.tabs.items, 0..) |t, i| before[i] = t;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    // plan: t0(index0)를 A 안(t2 자리 index2)으로 = 접힌 그룹 안 드롭.
+    const plan = AppSession.DropPlan{ .card = .{ .target_tab = 2 } };
+    const vl = try session.simulateDrop(0, plan, arena.allocator());
+
+    // (원본=커밋 레이아웃) 프리뷰 예외 없이 가상 order를 그대로 투영하면 t0가 접힘 게이트로 **사라진다**(라이브 확정 시 증상).
+    session.projectRowsFrom(vl.order, vl.group_depth);
+    try std.testing.expect(sg8cFindCardDepth(session.sidebar_rows.items, 0) == null); // 고스트 예외 없으면 사라짐
+    try std.testing.expect(sg8cFindHeader(session.sidebar_rows.items, 1).?.group_header.collapsed); // flip 없음(접힘 그대로)
+
+    // (프리뷰) 고스트 강제 방출 + 헤더 flip + order-aware member_count.
+    try session.refreshDragPreview(0, plan, 0, arena.allocator());
+    const prows = session.sidebar_preview_rows.items;
+    try std.testing.expectEqual(@as(?u8, 1), sg8cFindCardDepth(prows, 0)); // (a) 고스트 존재 + depth 정확(A 안=depth 1)
+    const phdr = sg8cFindHeader(prows, 1).?.group_header;
+    try std.testing.expect(!phdr.collapsed); // 타겟 헤더 collapsed=false(flip)
+    try std.testing.expectEqual(@as(u16, 3), phdr.member_count); // 고스트 반영(t1·t2·t0 = 3, 라이브는 2였음)
+    try std.testing.expectEqual(live_len, prows.len); // (d) move(순열) 모델 — 길이 동일
+
+    // 고스트 range(표시-row 도메인)가 실제 고스트 카드 row를 가리킨다(order 위치가 아니라 방출 row 인덱스).
+    const dp = session.sidebar_drag_preview.?;
+    try std.testing.expect(dp.ghost_lo < dp.ghost_hi);
+    try std.testing.expect(prows[dp.ghost_lo] == .card);
+    try std.testing.expectEqual(@as(usize, 0), prows[dp.ghost_lo].card.tab);
+
+    // (e) self.tabs 불변(순서·포인터).
+    try std.testing.expectEqual(n, session.tabs.items.len);
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t);
+}
+
+// SG8c 케이스 (b): 펼친 그룹을 다른 펼친 그룹 헤더에 드롭(중첩)하는 plan을 프리뷰 투영하면 옮겨진 subtree 전체가
+// 고스트로 방출되고 **상대 depth**가 유지된다(A→B 자식=depth2, A의 자식 C=depth3). 접힘 없음이라 강제 방출은 없지만
+// 순열/depth 재투영과 표시-row 고스트 range·길이 동일(move 모델)을 함께 고정한다.
+test "SG8c: 펼친 그룹 nest 프리뷰 → subtree 고스트 상대 depth(A=2·C=3)·길이 동일·range" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    // A=[t0,t1] 직접 + C 중첩=[t2,t3](depth2, A 안), B=[t4,t5](depth1, A 형제). (SG8b nest 테스트와 동형 배치)
+    try setGroupMarker(session, 0, "A", 1);
+    try setGroupMarker(session, 2, "C", 2);
+    try setGroupMarker(session, 4, "B", 1);
+
+    session.recomputeVisibleTabs();
+    const live_len = session.sidebar_rows.items.len;
+    const n = session.tabs.items.len;
+    var before: [8]*Tab = undefined;
+    for (session.tabs.items, 0..) |t, i| before[i] = t;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    // A(m=0)를 B 헤더에 드롭 → B 자식으로 중첩(target_depth=B eff1+1=2, insert_before=groupSubtreeEnd(B)=6).
+    const plan = AppSession.DropPlan{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } };
+    try session.refreshDragPreview(0, plan, 0, arena.allocator());
+    const prows = session.sidebar_preview_rows.items;
+
+    // 상대 depth 유지: A(마커 tab0)=2(B 자식), C(마커 tab2)=3(A 자식). 헤더·카드 모두.
+    try std.testing.expectEqual(@as(u8, 2), sg8cFindHeader(prows, 0).?.group_header.depth);
+    try std.testing.expectEqual(@as(?u8, 2), sg8cFindCardDepth(prows, 0));
+    try std.testing.expectEqual(@as(u8, 3), sg8cFindHeader(prows, 2).?.group_header.depth);
+    try std.testing.expectEqual(@as(?u8, 3), sg8cFindCardDepth(prows, 2));
+    // B(마커 tab4)는 부모라 depth1 불변.
+    try std.testing.expectEqual(@as(u8, 1), sg8cFindHeader(prows, 4).?.group_header.depth);
+    try std.testing.expectEqual(live_len, prows.len); // move 모델 — 길이 동일(접힘 없어 순열만)
+
+    // 고스트 range: subtree(A·A직접카드·C) 전체가 표시-row 연속 구간으로 방출됐다(비어있지 않음).
+    const dp = session.sidebar_drag_preview.?;
+    try std.testing.expect(dp.ghost_lo < dp.ghost_hi);
+    try std.testing.expect(sg8cFindHeader(prows[dp.ghost_lo..dp.ghost_hi], 0) != null); // A 헤더가 고스트 구간 안
+
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t); // self.tabs 불변
+    try std.testing.expectEqual(n, session.tabs.items.len);
+}
+
+// SG8c 케이스 (c): none plan(제자리·무효)은 고스트가 없다 — preview_rows가 라이브 sidebar_rows와 byte-identical하고
+// 프리뷰 ghost range가 비어있다(lo==hi). 프리뷰가 "아무것도 안 옮김"을 정직하게 표시함을 고정한다.
+test "SG8c: none plan 프리뷰 → preview_rows == 원본 rows·ghost range 비어있음" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2]
+    try setGroupMarker(session, 0, "A", 1); // A=[t0,t1,t2] 전부 한 그룹(펼침)
+
+    session.recomputeVisibleTabs();
+    var live: [16]chrome.components.sidebar.Row = undefined;
+    const live_len = session.sidebar_rows.items.len;
+    try std.testing.expect(live_len > 0 and live_len <= live.len);
+    for (session.sidebar_rows.items, 0..) |row, i| live[i] = row;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    try session.refreshDragPreview(0, .none, 0, arena.allocator());
+    const prows = session.sidebar_preview_rows.items;
+
+    // preview == 라이브(byte-identical) — 태그·핵심 필드.
+    try std.testing.expectEqual(live_len, prows.len);
+    for (prows, 0..) |got, i| {
+        const want = live[i];
+        try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
+        switch (want) {
+            .card => |wc| {
+                try std.testing.expectEqual(wc.tab, got.card.tab);
+                try std.testing.expectEqual(wc.depth, got.card.depth);
+            },
+            .group_header => |wh| {
+                try std.testing.expectEqual(wh.tab, got.group_header.tab);
+                try std.testing.expectEqual(wh.collapsed, got.group_header.collapsed);
+                try std.testing.expectEqual(wh.member_count, got.group_header.member_count);
+                try std.testing.expectEqual(wh.depth, got.group_header.depth);
+            },
+        }
+    }
+    const dp = session.sidebar_drag_preview.?;
+    try std.testing.expectEqual(dp.ghost_lo, dp.ghost_hi); // 고스트 없음(range 비어있음)
 }
 
 test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collapsed=false) — 강제 펼친 카드와 정합" {

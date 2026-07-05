@@ -4732,9 +4732,15 @@ pub const AppSession = struct {
             return;
         };
         tab.pinned = !tab.pinned; // 토글 먼저 — moveTab의 그룹 clamp가 새 pin 상태를 본다.
-        // 새 pinned_count 기준 목적 인덱스: pin이면 고정 영역 끝(count-1), unpin이면 비고정 영역 시작(count).
+        // 새 pinned_count 기준 목적 인덱스: pin이면 고정 리전의 **첫 그룹 마커 앞**(= [고정 top카드][고정 그룹] 순서 유지 —
+        // 끝 count-1에 두면 고정 그룹 subtree 뒤라 위치 파생(§2.1)이 그 카드를 그룹 멤버로 흡수한다; 고정 그룹이 없으면
+        // 종전대로 끝 count-1이라 고정 top카드끼리는 위치만 바뀐다). unpin이면 비고정 영역 시작(count = 비고정 리전 첫
+        // 위치라 비고정 그룹이 있어도 그 마커 **앞** = top카드로 안착, 흡수 없음 — pin의 "끝"과 달리 "시작"이라 대칭 안전).
         const pinned_count = self.countPinnedTabs();
-        const to: usize = if (tab.pinned) pinned_count - 1 else pinned_count;
+        const to: usize = if (tab.pinned)
+            (self.firstGroupStartInRegion(0, pinned_count) orelse (pinned_count - 1))
+        else
+            pinned_count;
         _ = self.moveTab(idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
         // 무조건 rebuildSidebar: moveTab은 from==to(이미 그룹 경계 — 단일 탭/경계 탭 토글)면 early-return해 사이드바
         // 밴드/슬롯 상태(rebuildSidebar 산출)를 다시 짓지 않는다. 토글이 reorder 없이도 사이드바 모델을 새 pin 상태로
@@ -17666,6 +17672,119 @@ test "그룹핀 리뷰 #8: 그룹 헤더 드래그 시작이 hovered_slot을 클
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot); // ★ 드래그 시작이 stale 호버 클리어
     session.mouse(3, x, rowY(session, 4, header_h, slot_h, header_row_h), 0, 0); // up → 커밋(정리)
     try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
+}
+
+// 그룹핀 리뷰 #9: **그룹 먼저 고정 → 그 다음 독립 top카드 개별 고정**(togglePin) = 실제 사용자 경로이자 버그 지점(§12 GP1).
+// togglePin의 pin 목적지가 고정 리전 **끝**(pinned_count-1)이면 새로 고정한 top카드가 고정 그룹 subtree **뒤**에 놓여
+// 위치 파생(§2.1)이 그 카드를 그룹 멤버로 **흡수**했다. 목적지를 firstGroupStartInRegion(0, pinned_count)(고정 리전 첫
+// 그룹 마커 **앞**)로 바꿔 `[고정 top카드][고정 그룹]` 순서를 유지한다. 기존 GP3(c)/GP4(a)는 top카드를 **먼저** pin
+// 세팅 후 그룹을 고정해 이 경로를 미검증으로 남겼다. 각 단언은 옛 목적지(count-1)면 fail하도록 골랐다(수정 회귀 시 red).
+test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고정이 고정 그룹 subtree 앞에 안착(흡수 방지, §12 GP1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+
+    // 배치: 독립 top카드 둘(X1=t0·X2=t1) + 그룹 A=[t2(마커,depth1),t3,t4](멤버는 위치 파생). t0·t1은 마커 앞이라 최상위.
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[2].group_depth = 1;
+    const x1 = session.tabs.items[0];
+    const x2 = session.tabs.items[1];
+    const a_marker = session.tabs.items[2];
+    const a_m1 = session.tabs.items[3];
+    const a_m2 = session.tabs.items[4];
+
+    // 현재 인덱스 파생 헬퍼(heap-pin *Tab 일치 검색 — 이동 후 위치를 다시 찾는다).
+    const idxOf = struct {
+        fn f(s: *AppSession, t: *Tab) usize {
+            for (s.tabs.items, 0..) |it, i| if (it == t) return i;
+            unreachable;
+        }
+    }.f;
+    // projectRowsCore 투영 row(카드)를 tab 인덱스로 찾는다 — 라이브는 identity order라 card.tab = self.tabs 인덱스.
+    const findCard = struct {
+        fn f(s: *AppSession, tab_index: usize) chrome.components.sidebar.Row {
+            for (s.sidebar_rows.items) |r| switch (r) {
+                .card => |c| if (c.tab == tab_index) return r,
+                .group_header => {},
+            };
+            unreachable;
+        }
+    }.f;
+
+    // ── 1) 그룹 A를 **먼저** 통째 고정(toggleGroupPin) → 프리픽스로 안착([A마커,멤버,멤버] + 비고정 [t0,t1]) ──
+    session.toggleGroupPin(a_marker);
+    try std.testing.expect(a_marker.pinned and a_m1.pinned and a_m2.pinned); // 그룹째 고정(멤버 pin 동기)
+    try std.testing.expect(!x1.pinned and !x2.pinned); // 독립 top카드는 아직 비고정(그룹 토글과 직교)
+    // tabs = [A마커, m1, m2, t0(X1), t1(X2)] — X1은 지금 고정 그룹 subtree **뒤**(비고정 리전).
+    try std.testing.expectEqual(a_marker, session.tabs.items[0]);
+    try std.testing.expectEqual(x1, session.tabs.items[3]);
+
+    // ── 2) 그룹 밖 독립 top카드 X1을 **개별** 고정(togglePin) → 고정 그룹 A **앞**으로 안착해야(흡수 방지) ──
+    session.togglePin(x1);
+    session.recomputeVisibleTabs();
+
+    const x1_idx = idxOf(session, x1);
+    const am_idx = idxOf(session, a_marker);
+
+    // (a) X1이 고정 그룹 A subtree **앞**에 안착 — X1 인덱스 < A 마커 인덱스(옛 count-1이면 A subtree 뒤라 fail).
+    try std.testing.expect(x1.pinned);
+    try std.testing.expect(x1_idx < am_idx);
+    try std.testing.expectEqual(@as(usize, 0), x1_idx); // 고정 리전 첫 자리(top카드)
+    try std.testing.expectEqual(@as(usize, 1), am_idx); // A 마커는 그 뒤 = subtree 시작
+    try std.testing.expectEqual(@as(usize, 4), session.groupSubtreeEnd(am_idx, null, null)); // A=[1,4) — X1(0)은 밖
+
+    // (b) X1은 그룹 소속이 아니다 — group_start 없음 + enclosing 마커 없음 + tabIsInGroup=false(흡수 안 됨).
+    try std.testing.expect(x1.group_start == null);
+    try std.testing.expect(session.enclosingGroupMarkerIndex(x1_idx) == null);
+    try std.testing.expect(!session.tabIsInGroup(x1));
+
+    // (c) X1 렌더 depth 0(들여쓰기 없음) — 라이브 파생·projectRowsCore 투영 둘 다. 옛 버그면 그룹 멤버라 depth 1.
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(x1_idx, null, null));
+    const x1_row = findCard(session, x1_idx);
+    try std.testing.expectEqual(@as(u8, 0), x1_row.card.depth);
+    try std.testing.expect(!x1_row.card.pin_derived); // 개별 pin(그룹 파생 캐시 아님)
+
+    // (d) 사이드바 카드에 📌 — 개별 최상위 pin(pin_derived=false·tab.pinned=1)이라 sidebarRowShowsPin=true(멤버면 억제됐을 것).
+    try std.testing.expect(session.sidebarRowShowsPin(x1_row));
+
+    // ── 추가: 고정 top카드가 여러 개여도 전부 그룹 **앞** 유지(고정된 것끼리는 위치만 바뀐다) ──
+    session.togglePin(x2); // 두 번째 독립 top카드도 개별 고정
+    session.recomputeVisibleTabs();
+    const x1_idx2 = idxOf(session, x1);
+    const x2_idx2 = idxOf(session, x2);
+    const am_idx2 = idxOf(session, a_marker);
+    try std.testing.expect(x1.pinned and x2.pinned);
+    // 둘 다 A 마커 앞(그룹 흡수 없음), 서로는 위치만 정렬(X1 먼저·X2 그 뒤·그 다음 A) — tabs=[X1,X2,A마커,m1,m2].
+    try std.testing.expect(x1_idx2 < am_idx2 and x2_idx2 < am_idx2);
+    try std.testing.expectEqual(@as(usize, 0), x1_idx2);
+    try std.testing.expectEqual(@as(usize, 1), x2_idx2);
+    try std.testing.expectEqual(@as(usize, 2), am_idx2);
+    // 둘 다 여전히 그룹 밖·depth 0.
+    try std.testing.expect(session.enclosingGroupMarkerIndex(x1_idx2) == null);
+    try std.testing.expect(session.enclosingGroupMarkerIndex(x2_idx2) == null);
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(x2_idx2, null, null));
+    // 그룹 A subtree 무결(마커+멤버 통째 고정, 흡수/찢김 없음).
+    try std.testing.expectEqual(@as(usize, 5), session.groupSubtreeEnd(am_idx2, null, null)); // A=[2,5)
+    try std.testing.expect(a_marker.pinned and a_m1.pinned and a_m2.pinned);
+    // 카드 📌는 두 최상위 개별 pin(X1·X2)뿐 — 그룹 멤버/마커 카드 📌 노이즈 0(헤더 인디케이터는 별도 도메인).
+    var card_pins: usize = 0;
+    for (session.sidebar_rows.items) |r| switch (r) {
+        .card => if (session.sidebarRowShowsPin(r)) {
+            card_pins += 1;
+        },
+        .group_header => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), card_pins); // X1·X2만
 }
 
 /// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와

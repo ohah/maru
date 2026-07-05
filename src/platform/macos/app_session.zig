@@ -17710,6 +17710,87 @@ test "sidebarSearchLine: 넘치면 tail 창(선두 …)으로 caret을 입력 �
     }
 }
 
+// renameCaretRect는 셀·사이드바 픽셀 메트릭과 tabs/sidebar_rows가 필요해 실제 session.init로 세션을 만든 뒤(비-undefined,
+// UB 없음) headless라 0인 메트릭만 채워 호출한다. 검증 대상은 code-review high finding 1·2 수정: 워크스페이스/그룹 이름이
+// 사이드바 폭을 넘치면 렌더가 tail 앵커로 caret을 이름영역 우경계에 두므로, caret rect의 x도 거기로 clamp돼야 IME
+// 후보창이 사이드바 밖 터미널 위로 안 뜬다(head-anchored·unclamped 회귀 고정).
+fn initRenameCaretTestSession(allocator: std.mem.Allocator) !*AppSession {
+    const session = try allocator.create(AppSession);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    // headless init은 셀·사이드바 픽셀 메트릭이 0이라 renameCaretRect가 조기 null → 테스트용으로 채운다.
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+    session.sidebar_width_px = 80; // full_cols = 80/8 = 10 → 우경계 clamp = full_cols-2 = 8칸(x=64)
+    session.sidebar_slot_height_px = 32;
+    session.sidebar_header_height_px = 0;
+    session.sidebar_header_row_h_px = 16;
+    return session;
+}
+
+test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret x를 우경계로 clamp(넘침 아니면 head)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initRenameCaretTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.recomputeVisibleTabs(); // sidebar_rows 채움(displaySlotOf/rowTop이 읽음)
+
+    const tab = session.tabs.items[0];
+    session.rename = .{ .workspace = tab };
+
+    const cw = session.cell_width_px;
+    const full_cols = session.sidebar_width_px / cw; // 10
+    const clamp_x: i32 = @intCast((full_cols - 2) * cw); // 8*8 = 64 (이름영역 우경계)
+
+    // 넘침: 긴 이름(20칸) → head(indent+20) > 우경계 → x는 clamp(64)로 잘려 사이드바 안에 머문다.
+    for (0..20) |_| try session.rename_input.appendChar(allocator, 'a');
+    {
+        const r = session.renameCaretRect() orelse return error.NoCaret;
+        try std.testing.expectEqual(clamp_x, r.x);
+    }
+
+    // 비넘침: 짧은 이름 → clamp 안 하고 head 위치(indent + qcols). (clamp 회귀가 짧은 이름까지 당기지 않음을 확인.)
+    session.rename_input.clear();
+    for ("ab") |c| try session.rename_input.appendChar(allocator, c);
+    {
+        const sp = session.buildChromeTokens().space;
+        const indent_cols = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
+        const head_x: i32 = @intCast((indent_cols + 2) * cw);
+        try std.testing.expect(head_x < clamp_x); // 이 셋업에선 head가 우경계보다 왼쪽(=비넘침 케이스 성립)
+        const r = session.renameCaretRect() orelse return error.NoCaret;
+        try std.testing.expectEqual(head_x, r.x);
+    }
+}
+
+test "renameCaretRect(.group): 헤더 이름이 넘치면 caret x를 사이드바 우경계로 clamp" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initRenameCaretTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 탭0을 그룹 시작으로(헤더 row 생성). group_start는 owned(deinit이 free).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "g");
+    session.recomputeVisibleTabs(); // [group_header{tab0}, card{tab0}]
+    const tab = session.tabs.items[0];
+    session.rename = .{ .group = tab };
+
+    const cw = session.cell_width_px;
+    const full_cols = session.sidebar_width_px / cw;
+    const clamp_x: i32 = @intCast((full_cols - 2) * cw); // 64
+
+    // 넘침: 긴 헤더 이름 → x clamp(우경계).
+    for (0..20) |_| try session.rename_input.appendChar(allocator, 'a');
+    const r = session.renameCaretRect() orelse return error.NoCaret;
+    try std.testing.expectEqual(clamp_x, r.x);
+}
+
 // (P3-4) 위임 핸들러(scroll/선택/reportMouse)를 호출하는 단위 테스트용 헬퍼. 메인 mutate가 runtime을 거쳐
 // reader로 가므로, 테스트는 surface를 빈 runtime에 attach해 **non-interactive 폴백(직접 적용)**으로 동기 검증한다
 // (enqueue_command=null → enqueueCoreCommand가 코어 락 아래 즉시 apply). io도 세워 폴백의 lockCore에 넘긴다.

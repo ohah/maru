@@ -105,6 +105,11 @@ pub const Tab = struct {
     // 순수 additive 스칼라(그룹 시작 탭에만 저장 — 소속은 위치 파생). null=색 없음=키 생략(옛 리더가 미지 키로 skip해
     // flat 정상 복원, 양쪽 호환). 그룹 색은 헤더 밴드·소속 카드 막대 층이라 개별 카드 background-color와 안 겹친다. 기본 0.
     group_color: u32 = 0,
+    // 그룹-로컬 pin(GL — docs/sidebar-groups.md §13). 그룹 안 leaf 멤버가 자기 subtree 안에서 위로 고정됐는가. 전역
+    // 핀(pinned = [고정][비고정] 리전)과 직교하는 별개 축이라 전역 파티션이 안 읽는다. 순수 additive 스칼라 —
+    // false(기본)면 writer가 키를 **생략**해(round-trip 고정점·옛 파일 flat 정상) 옛 리더가 미지 키로 skip하는
+    // forward-compat도 유지한다. reader는 없으면 false. 마커·top-level 카드에선 무의미(멤버 카드에만 실린다). 기본 false.
+    local_pinned: bool = false,
     tree: []const TreeNode, // preorder; leaf의 pane 인덱스가 panes를 가리킨다
     panes: []const Pane,
 };
@@ -162,6 +167,9 @@ fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
         // 안 바꿔 round-trip 고정점). 비영이면 group-color 스칼라로 쓴다(reader는 없으면 getUint 기본 0으로 폴백).
         if (tab.group_color != 0) try w.print(" group-color={d}", .{tab.group_color});
     }
+    // 그룹-로컬 pin(GL, §13). group_start와 **무관**하게(멤버 카드 = group_start==null) 밖에서 쓴다. false면 키
+    // 생략(additive·key-addressed — 옛 파일/비-로컬-pin 카드의 라인 문자열을 안 바꿔 round-trip 고정점). true면 스칼라.
+    if (tab.local_pinned) try w.writeAll(" local-pinned=1");
     try w.writeByte('\n');
     for (tab.tree) |node| try writeTreeNode(w, node);
     for (tab.panes) |pane| try writePane(w, pane);
@@ -279,6 +287,9 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     // 그룹 공통 색(SG5-2, §4·§9). additive 스칼라라 없으면 0(색 없음). 그룹 시작 탭에만 의미(writer가 group-start
     // 있을 때만 비영 group-color를 쓴다) — group_start=null인 탭에서 0으로 읽혀도 무해(렌더가 group_start로 게이트).
     const group_color = try f.getUint("group-color", u32, 0);
+    // 그룹-로컬 pin(GL, §13). additive 스칼라라 없으면 false. 멤버 카드에만 의미(마커·top카드에선 무시) — 렌더/파티션이
+    // 위치·group_start로 게이트하므로 그 밖 탭에서 true로 읽혀도 무해(전역 파티션은 이 필드를 안 읽는다).
+    const local_pinned = (try f.getUint("local-pinned", u8, 0)) != 0;
 
     var tree: std.ArrayList(TreeNode) = .empty;
     // 구조 불변식: pane P개 탭의 split 트리는 leaf P + split (P−1) = 정확히 2P−1 노드다. 그보다 많이 읽히면
@@ -288,7 +299,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
-    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .local_pinned = local_pinned, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -757,6 +768,45 @@ test "workspace round-trip: tab group_depth 보존(SG5-3 중첩 — >1은 group-
     try std.testing.expectEqual(@as(u8, 1), t2.group_depth); // 소속 카드 = 1(무의미·기본)
 
     // round-trip 고정점: 다시 직렬화하면 동일(1↔키부재·>1↔키존재 인코딩 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace round-trip: tab local_pinned 보존(GL §13 — true는 local-pinned 키, false는 키 생략)" {
+    // 그룹-로컬 pin(docs/sidebar-groups.md §13): 그룹 안 leaf 멤버가 subtree 안에서 위로 고정됐는가. 전역 pinned와
+    // 직교하는 별개 축이라 group_start와 무관하게(멤버 카드에) 실린다. writer는 true만 쓰고(false=키 생략, additive),
+    // 옛 파일/비-로컬-pin 카드 라인은 안 바꾼다. round-trip이 이 인코딩(false↔키부재·true↔키존재)을 고정하는지 검증.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{
+        // 그룹 마커(frontend) — 마커 자신은 로컬 pin 무의미(멤버 전용). local_pinned=false라 키 없음.
+        .{ .custom_name = "web", .group_start = "frontend", .group_collapsed = false, .tree = &tree, .panes = &panes },
+        // 로컬 pin된 소속 멤버 카드 — local-pinned=1 키가 accent-color 뒤(그룹 블록 밖)에 붙는다.
+        .{ .custom_name = "docs", .local_pinned = true, .tree = &tree, .panes = &panes },
+        // 비-로컬-pin 멤버 카드 — local-pinned 키 생략(round-trip 고정점, 라인 안 바뀜).
+        .{ .custom_name = "api", .tree = &tree, .panes = &panes },
+    };
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 로컬 pin 멤버(docs): accent-color=0 바로 뒤에 local-pinned=1(그룹 마커가 아니라 group-* 키가 안 붙는다).
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0 local-pinned=1\n") != null);
+    // 비-로컬-pin 멤버(api): accent-color=0 바로 뒤 개행(local-pinned 키 없음).
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"api\" pinned=0 background-color=0 accent-color=0\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const t0 = parsed.workspace.windows[0].tabs[0];
+    const t1 = parsed.workspace.windows[0].tabs[1];
+    const t2 = parsed.workspace.windows[0].tabs[2];
+    try std.testing.expectEqual(false, t0.local_pinned); // 마커 = false(키 생략 → 기본)
+    try std.testing.expectEqual(true, t1.local_pinned); // 로컬 pin 멤버 복원
+    try std.testing.expectEqual(false, t2.local_pinned); // 비-pin 멤버 = false(키 생략 → 기본)
+
+    // round-trip 고정점: 다시 직렬화하면 동일(false↔키부재·true↔키존재 인코딩 안정).
     const text2 = try serialize(std.testing.allocator, parsed.workspace);
     defer std.testing.allocator.free(text2);
     try std.testing.expectEqualStrings(text, text2);

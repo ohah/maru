@@ -270,6 +270,25 @@ test "inputLineView: 비넘침은 기존 배치 유지, 넘치면 tail 창 + car
     }
 }
 
+/// find·palette 프롬프트 입력줄 text op의 run 배열(arena 소유)을 만드는 **공유 헬퍼** — `inputLineView` 결과로
+/// `[프롬프트, (…?), query, preedit]`를 만든다(넘침이면 프롬프트 뒤 "…"). 두 컴포넌트의 view가 이 한 곳을 써서
+/// run 구성(예: preedit에 별도 role 부여)이 한쪽만 바뀌는 드리프트를 막는다. `prompt`는 각 컴포넌트 접두("Find: "/"> ").
+pub fn promptRuns(arena: std.mem.Allocator, prompt: []const u8, line: InputLineView) ![]draw.Run {
+    var buf: [4]draw.Run = undefined;
+    var n: usize = 0;
+    buf[n] = .{ .text = prompt };
+    n += 1;
+    if (line.truncated) { // 앞이 잘렸음 — 프롬프트 뒤 "…"
+        buf[n] = .{ .text = "…" };
+        n += 1;
+    }
+    buf[n] = .{ .text = line.query };
+    n += 1;
+    buf[n] = .{ .text = line.preedit };
+    n += 1;
+    return arena.dupe(draw.Run, buf[0..n]);
+}
+
 pub const PanelLayout = struct { x: i32, y: i32, panel_cols: u32, cw: u32, ch: u32 };
 
 /// 패널 **폭 산출 공유 코어** — panelLayout(palette 창-중앙)·findLayout(find pane 우상단)이 정렬만 달리하고 이걸

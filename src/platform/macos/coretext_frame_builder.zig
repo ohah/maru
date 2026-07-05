@@ -287,6 +287,9 @@ fn appendEllipsizedTitle(
         const lead: u16 = if (avail >= 2) 1 else 0; // "…" 자리 — 폭이 1칸뿐이면 생략하고 tail만 그린다(최소한 caret은 보이게)
         const tail_cols: usize = avail - lead;
         // 앞에서부터 codepoint를 버려 남은(=뒤쪽) 표시폭이 tail_cols 이하가 되게 한다(EAW 폭 반영, titleDisplayWidth와 같은 셈법).
+        // 참고: chrome-neutral `overlay_input.tailWindow`가 같은 "앞을 버려 tail을 폭 안에" 알고리즘의 text-op 판이다. 둘은
+        // 계층(platform coretext ↔ chrome neutral)과 폭 함수(titleCellWidth[widen_icons] ↔ width.cellWidth)가 달라 코드를
+        // 공유하지 않는다 — EAW/경계 규칙을 고칠 땐 두 곳을 함께 본다(의도적 분리, 단일 함수화는 계층 침범).
         var drop_i: usize = 0;
         var rem: usize = total;
         while (drop_i < title.len and rem > tail_cols) {

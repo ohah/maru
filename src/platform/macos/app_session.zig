@@ -5738,6 +5738,31 @@ pub const AppSession = struct {
                 self.rebuildSidebar() catch {};
             }
         }
+        // MARU_FORCE_GROUP_LOCALPIN_NESTED=1 — 그룹-로컬 pin **중첩 배치**(GL §13.6.1·§13.8 GL4)를 헤드리스 스크린샷으로
+        // self-verify한다. 2단계 중첩 [t0(최상위), A=[t1(마커 d1), t2(A 직접), B=[t3(마커 d2), t4, t5]]]에서 **A 직접 멤버
+        // t2**와 **자식 subgroup B 안 leaf 멤버 t5**를 각각 로컬 pin해 한 화면에서:
+        //   (a) t2가 A subtree 상단(A 마커 카드 위)으로 float·📌, (b) t5가 **B subtree 상단**(B 마커 카드 위)으로 float·📌
+        //   (자식 그룹서도 마커 위 배치가 성립 — §13.6.1 재귀 동형), (c) 자식 float이 부모 밖으로 안 새고 I3 중첩 depth(A d1·
+        //   B d2 들여쓰기)가 보존된다. floatLocalPinsAllGroups가 부모(A)→자식(B) 순차 스캔으로 둘 다 float(§13.4). GL2 실경로
+        //   (createGroup 중첩·toggleLocalPin)로 canonical 상태를 만든다. MARU_FORCE_GROUP_COLOR=1이면 A 파랑·B 자홍(중첩 색 +
+        //   로컬 pin 공존). env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_GROUP_LOCALPIN_NESTED") != null) {
+            var made: usize = 0;
+            while (made < 5) : (made += 1) _ = self.newTab() catch {}; // [t0..t5]
+            if (self.tabs.items.len >= 6) {
+                self.createGroupForTab(self.tabs.items[1]); // A = [t1(마커 d1), t2, t3, t4, t5] — t0 최상위
+                self.createGroupForTab(self.tabs.items[3]); // t3은 A 안(d1 카드) → 자식 B(d2) = [t3, t4, t5], A 직접 = t2
+                const t2 = self.tabs.items[2]; // A 직접 멤버(heap-pin — float 재배치 후에도 안정)
+                const t5 = self.tabs.items[5]; // 자식 B leaf 멤버
+                self.toggleLocalPin(t2); // A 직접 로컬 pin → A 마커 직후로 float, 📌
+                self.toggleLocalPin(t5); // B leaf 로컬 pin → B 마커 직후로 float(자식 subtree 안), 📌
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
+                    self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
+                    self.tabs.items[3].group_color = 0xC44A7B; // B 자홍(중첩 색 구분)
+                }
+                self.rebuildSidebar() catch {};
+            }
+        }
         // MARU_FORCE_RIGHT_CLICK=1 — 첫 frame에 터미널 본문 우클릭을 시뮬레이트해 input.right-click=menu의 복사/붙여넣기
         // 컨텍스트 메뉴 렌더를 헤드리스 스크린샷으로 캡처(self-verify debug-gate). 트래킹 .none(빈 셸)이라 config 분기를 탄다.
         // 좌표는 사이드바 우측 터미널 본문(x=400, y=150 backing px). menu가 아니면(paste/reporting) 메뉴 안 뜸 — 그것도 검증.
@@ -19846,6 +19871,316 @@ test "GL3(c): 드래그 엣지 — 로컬 pin 멤버를 마커 자기 카드 위
     try std.testing.expect(t2.local_pinned); // 로컬 pin 유지(그룹 안 이동은 해제 아님)
     try std.testing.expect(session.tabIsInGroup(t2));
     try std.testing.expectEqual(@as(usize, 5), session.groupSubtreeEnd(1, null, null)); // 그룹 A=[1,5) 연속 유지
+}
+
+// GL4(a) — 공존(그룹째 고정 C2 × 그룹-로컬 pin GL)의 keystone 보조정리 실증(docs/sidebar-groups.md §13.1·§13.4). 그룹째
+// 고정은 그룹 subtree를 **전역 [고정][비고정] 프리픽스**로 통째 옮기고(stablePartitionPinned), 그 안 로컬 pin float는
+// **마커 직후**를 유지해야 한다. keystone: stablePartitionPinned는 pin-uniform 블록의 **내부 상대순서를 보존**(stable)하므로
+// subtree 축 위에서 무연산 → 로컬 float가 살아남는다. 배선 순서(§13.4): (1)normalize→(2)stablePartitionPinned→(3)float가
+// 항상 이 순서라, 전역 프리픽스 안착과 subtree float가 서로를 안 흩뜨린다. 비고정 최상위 카드 t0를 둬 **전역 partition이
+// 실제로 그룹을 옮기게**(t0가 뒤로 밀림) 만들어 keystone을 눈에 보이게 검증한다.
+test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전역 프리픽스로 옮겨도 subtree 로컬 float 보존·배선 순서·재토글·idempotent·렌더" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+    const t4 = session.tabs.items[4];
+    const t5 = session.tabs.items[5];
+
+    session.createGroupForTab(t1); // A = [t1(마커 d1), t2, t3, t4, t5] — t0는 **비고정 최상위 카드**(전역 partition의 대조)
+    // 두 멤버(t4·t5)를 로컬 pin → 마커 직후로 float(상대순서 t4,t5 유지). 그룹 안 상단 프리픽스 [1,3) = t4·t5.
+    session.toggleLocalPin(t4);
+    session.toggleLocalPin(t5);
+    try std.testing.expectEqual(t4, session.tabs.items[2]); // t4 = 마커 직후
+    try std.testing.expectEqual(t5, session.tabs.items[3]); // t5 = 그 다음(로컬 float 상대순서)
+
+    // ── ★ keystone: A를 그룹째 고정. stablePartitionPinned가 pinned 블록[t1,t4,t5,t2,t3]을 프리픽스로 옮기고 t0(비고정)를
+    //    뒤로 민다. 블록 **내부 순서 보존**이라 t4·t5가 여전히 마커 직후. float((3)단계)는 이미 그 자리라 no-op.
+    session.toggleGroupPin(t1);
+    try std.testing.expectEqual(t1, session.tabs.items[0]); // 그룹 마커 = 전역 프리픽스 선두(그룹이 앞으로 이동)
+    try std.testing.expectEqual(t4, session.tabs.items[1]); // ★ 로컬 pin float 보존(마커 직후) — keystone
+    try std.testing.expectEqual(t5, session.tabs.items[2]); // ★ 로컬 pin float 상대순서 보존
+    try std.testing.expectEqual(t2, session.tabs.items[3]); // 비-로컬-pin 멤버
+    try std.testing.expectEqual(t3, session.tabs.items[4]);
+    try std.testing.expectEqual(t0, session.tabs.items[5]); // ★ 비고정 최상위 카드 = 뒤로 밀림(전역 partition이 실제로 옮김)
+    // 축 직교: 그룹째 고정(마커 pinned)과 로컬 pin(local_pinned)이 **다른 비트**로 공존.
+    try std.testing.expect(t1.pinned); // 그룹째 고정 = 마커 pinned(권위)
+    try std.testing.expect(t4.pinned and t4.local_pinned); // 멤버 = 파생 pinned 캐시 + 로컬 pin(둘 다)
+    try std.testing.expect(t5.pinned and t5.local_pinned);
+    try std.testing.expect(!t0.pinned); // 비고정 카드
+    try std.testing.expectEqual(@as(usize, 5), session.groupSubtreeEnd(0, null, null)); // A=[0,5) 통째 고정 프리픽스
+
+    // ── idempotent(배선 표준 순서 재실행이 안정): normalize→partition→float를 한 번 더 돌려도 순서 불변.
+    var snap: [6]*Tab = undefined;
+    for (session.tabs.items, 0..) |t, i| snap[i] = t;
+    session.normalizePinnedFromGroups();
+    session.stablePartitionPinned();
+    session.floatLocalPinsAllGroups();
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(snap[i], t); // ★ idempotent(공존 canonical 고정점)
+
+    // ── 렌더(§13.6): 헤더 그룹📌 + 로컬 pin 멤버 카드 📌(마커 카드 위). 위치로 구별(단일 글리프 U+1F4CC 수용).
+    session.recomputeVisibleTabs();
+    const rows = session.sidebar_rows.items;
+    // rows: [header A(📌), card t4(lp,📌), card t5(lp,📌), card t1(마커카드), card t2, card t3, card t0]
+    try std.testing.expectEqual(@as(usize, 7), rows.len);
+    try std.testing.expect(rows[0] == .group_header);
+    try std.testing.expectEqual(@as(usize, 1), rows[1].card.tab); // t4 = self.tabs index1(마커 직후)
+    try std.testing.expectEqual(@as(usize, 2), rows[2].card.tab); // t5
+    try std.testing.expectEqual(@as(usize, 0), rows[3].card.tab); // ★ A 마커 자기 카드(index0) = 로컬 pin **뒤**
+    try std.testing.expect(session.sidebarRowShowsPin(rows[0])); // ★ 그룹째 고정 헤더 인디케이터 📌
+    try std.testing.expect(session.sidebarRowShowsPin(rows[1])); // ★ 로컬 pin 멤버 t4 📌
+    try std.testing.expect(session.sidebarRowShowsPin(rows[2])); // ★ 로컬 pin 멤버 t5 📌
+    try std.testing.expect(!session.sidebarRowShowsPin(rows[3])); // 마커 카드 억제(헤더가 인디케이터)
+    var header_pins: usize = 0;
+    var member_pins: usize = 0;
+    for (rows) |r| switch (r) {
+        .group_header => if (session.sidebarRowShowsPin(r)) {
+            header_pins += 1;
+        },
+        .card => |c| if (session.sidebarRowShowsPin(r)) {
+            if (c.local_pinned) member_pins += 1;
+        },
+    };
+    try std.testing.expectEqual(@as(usize, 1), header_pins); // 그룹째 고정 헤더 하나
+    try std.testing.expectEqual(@as(usize, 2), member_pins); // 로컬 pin 멤버 둘
+
+    // ── 재토글(그룹째 고정 해제): 로컬 pin은 **직교**라 유지된다(그룹만 비고정으로 돌아가고 float는 안 풀림).
+    session.toggleGroupPin(t1);
+    try std.testing.expect(!t1.pinned); // 그룹째 고정 해제
+    try std.testing.expect(!t4.pinned and !t5.pinned); // 멤버 파생 캐시도 해제
+    try std.testing.expect(t4.local_pinned and t5.local_pinned); // ★ 로컬 pin은 직교 → 보존
+    try std.testing.expectEqual(t4, session.tabs.items[1]); // ★ 여전히 마커 직후(subtree float 유지 — GL 축)
+    try std.testing.expectEqual(t5, session.tabs.items[2]);
+    // C2 그룹째 고정/해제는 top-card 위치의 완전 round-trip이 **아니다**(GL과 직교): 고정 때 프리픽스로 옮기며 비고정 t0를
+    // 뒤로 밀었고(위), 해제하면 t0가 그룹 A 꼬리에 남아 위치 파생상 A로 흡수된다(A=[0,6)). 이는 C2(§12) 성질이지 GL 로컬
+    // pin 회귀가 아니다 — 로컬 float(t4·t5 마커 직후)는 위에서 보인 대로 정확히 보존된다. 로컬 pin 멤버는 여전히 A 소속.
+    try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(1).?); // t4의 enclosing 마커 = t1(index0)
+    try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(2).?); // t5의 enclosing 마커 = t1
+}
+
+// GL4(b) — 중첩(자식 subgroup 안 leaf 멤버 로컬 pin)의 하드닝(docs/sidebar-groups.md §13.3·§13.6.1·§13.8). `floatLocalPinsAllGroups`
+// 가 부모→자식 **순차 스캔**(= 포인터 재탐색 동형, §13.4)으로 부모 A·자식 B 두 subtree를 각자 float하고, 마커 위 배치가
+// 자식 그룹서도 성립(자식 마커 카드 위로 자식 로컬 pin)하며 I3(중첩 depth)이 보존됨을 검증한다. **subgroup-as-member는 범위
+// 밖(GL5)** — 여기선 leaf 멤버만.
+test "GL4(b): 중첩 — 자식 subgroup 안 leaf 로컬 pin float(부모→자식 순차)·자식 마커 카드 위 배치·I3 depth 보존" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+    const t4 = session.tabs.items[4];
+    const t5 = session.tabs.items[5];
+
+    // 2단계 중첩: A(마커 t1, d1) ⊃ [t2(A 직접), B(마커 t3, d2) ⊃ [t4, t5]]. t0는 최상위 카드.
+    session.createGroupForTab(t1); // A = [t1, t2, t3, t4, t5]
+    session.createGroupForTab(t3); // t3은 A 안 카드(d1) → 자식 B(d2) 흡수 t4·t5. A 직접 = t2.
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(1, null, null)); // A=[1,6)
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(1, null, null)); // A d1
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(3, null, null)); // B d2(중첩)
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(3, null, null)); // B=[3,6)
+
+    // A 직접 멤버 t2·자식 B leaf 멤버 t5를 로컬 pin(직접 필드 세팅 후 **floatLocalPinsAllGroups 한 번**으로 순차 스캔 검증).
+    t2.local_pinned = true;
+    t5.local_pinned = true;
+    session.floatLocalPinsAllGroups(); // i=1(A)→A subtree float(t2 이미 마커 직후=no-op), i=3(B)→B subtree float(t5→B 마커 직후)
+    // 기대 물리 순서: [t0, t1(A마커), t2(A lp), t3(B마커), t5(B lp), t4] — 부모·자식 둘 다 각자 마커 직후로 float.
+    try std.testing.expectEqual(t0, session.tabs.items[0]); // 최상위 카드
+    try std.testing.expectEqual(t1, session.tabs.items[1]); // A 마커 앵커
+    try std.testing.expectEqual(t2, session.tabs.items[2]); // ★ A 직접 로컬 pin = A 마커 직후
+    try std.testing.expectEqual(t3, session.tabs.items[3]); // B 마커(자식 subgroup 통째 — 부모 float서 안 쪼개짐)
+    try std.testing.expectEqual(t5, session.tabs.items[4]); // ★ 자식 B leaf 로컬 pin = B 마커 직후(자식 subtree 안 float)
+    try std.testing.expectEqual(t4, session.tabs.items[5]); // B 비-pin 멤버 → 뒤로
+    // ── I3 보존: 자식 float이 부모 밖으로 안 새고 중첩 depth·subtree 경계 불변 ──
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(1, null, null)); // A=[1,6) 유지
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(3, null, null)); // B=[3,6) 유지
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(1, null, null)); // A d1
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(3, null, null)); // B d2
+
+    // ── 렌더(§13.6.1 재귀 동형): 각 마커 카드가 **자기 그룹의 로컬 pin 뒤**. 부모 A 카드·자식 B 카드 모두 로컬 pin 아래 ──
+    session.recomputeVisibleTabs();
+    const rows = session.sidebar_rows.items;
+    // rows: [card t0, header A, card t2(A lp), card t1(A마커카드), header B, card t5(B lp), card t3(B마커카드), card t4]
+    try std.testing.expectEqual(@as(usize, 8), rows.len);
+    try std.testing.expectEqual(@as(usize, 0), rows[0].card.tab); // t0 최상위(d0)
+    try std.testing.expect(rows[1] == .group_header); // A 헤더(d1)
+    try std.testing.expectEqual(@as(u8, 1), rows[1].group_header.depth);
+    try std.testing.expectEqual(@as(usize, 2), rows[2].card.tab); // ★ A 직접 로컬 pin t2(마커 카드 위)
+    try std.testing.expect(rows[2].card.local_pinned);
+    try std.testing.expectEqual(@as(u8, 1), rows[2].card.depth); // A depth
+    try std.testing.expectEqual(@as(usize, 1), rows[3].card.tab); // A 마커 자기 카드(로컬 pin 뒤)
+    try std.testing.expect(!rows[3].card.local_pinned);
+    try std.testing.expect(rows[4] == .group_header); // B 헤더(§2.1 부모 직접 카드 뒤·자식 그룹)
+    try std.testing.expectEqual(@as(u8, 2), rows[4].group_header.depth); // ★ I3: B 중첩 depth2
+    try std.testing.expectEqual(@as(usize, 4), rows[5].card.tab); // ★ 자식 B 로컬 pin t5(B 마커 카드 위 — 자식서도 성립)
+    try std.testing.expect(rows[5].card.local_pinned);
+    try std.testing.expectEqual(@as(u8, 2), rows[5].card.depth); // ★ I3: B 멤버 depth2
+    try std.testing.expectEqual(@as(usize, 3), rows[6].card.tab); // B 마커 자기 카드(자식 로컬 pin 뒤)
+    try std.testing.expect(!rows[6].card.local_pinned);
+    try std.testing.expectEqual(@as(usize, 5), rows[7].card.tab); // B 비-pin 멤버 t4
+    // 로컬 pin 📌: A 직접(t2)·자식 B(t5) 둘. 마커 카드·최상위·헤더는 억제.
+    var member_pins: usize = 0;
+    for (rows) |r| switch (r) {
+        .card => |c| if (session.sidebarRowShowsPin(r)) {
+            if (c.local_pinned) member_pins += 1;
+        },
+        .group_header => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), member_pins); // 부모·자식 각 1개
+}
+
+// GL4(c) — 회귀 매트릭스: 로컬 pin이 기존 기능 전부와 공존(안 부딪힘)함을 독립 블록으로 검증한다. 그룹 색(setGroupColor)·
+// rename(startRenameGroup)·검색(sidebar_search)·pane 분리(promotePaneToNewWorkspace) 각각에서 로컬 pin float/플래그가
+// 보존되는지 확인한다(그룹째 고정·드래그 프리뷰=확정·ungroup/removeFromGroup 위생은 GL3(a2)·GL3(d)·GL3(b*)가 이미 커버).
+test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·pane 분리와 공존(float/플래그 보존)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const init_opts = SessionConfig{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    };
+
+    // ── (1) 그룹 색 + 로컬 pin: setGroupColorForTab이 색만 얹고 float·local_pinned를 안 건드린다 ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, init_opts);
+        defer session.deinit();
+        inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+        const t1 = session.tabs.items[1];
+        const t3 = session.tabs.items[3];
+        session.createGroupForTab(t1); // A = [t1(마커), t2, t3]
+        session.toggleLocalPin(t3); // t3 → 마커 직후(index2)
+        try std.testing.expectEqual(t3, session.tabs.items[2]);
+        session.setGroupColorForTab(t3, 0x4A7BC4); // 색은 enclosing 마커(t1)에 저장
+        try std.testing.expectEqual(@as(u32, 0x4A7BC4), t1.group_color); // ★ 색 얹힘
+        try std.testing.expect(t3.local_pinned); // ★ 로컬 pin 보존
+        try std.testing.expectEqual(t3, session.tabs.items[2]); // ★ float 순서 보존
+    }
+
+    // ── (2) rename + 로컬 pin: startRenameGroupForTab이 편집 상태만 세우고 순서·local_pinned를 안 건드린다 ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, init_opts);
+        defer session.deinit();
+        inline for (0..3) |_| _ = try session.newTab();
+        const t1 = session.tabs.items[1];
+        const t3 = session.tabs.items[3];
+        session.createGroupForTab(t1);
+        session.toggleLocalPin(t3);
+        var snap: [4]*Tab = undefined;
+        for (session.tabs.items, 0..) |t, i| snap[i] = t;
+        session.startRenameGroupForTab(t3); // 그룹 A 이름 인라인 편집 시작(마커 t1)
+        for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(snap[i], t); // ★ 순서 불변
+        try std.testing.expect(t3.local_pinned); // ★ 로컬 pin 보존
+        session.rename = null; // 편집 상태 teardown(escape 경로와 동형)
+        session.rename_input.clear();
+    }
+
+    // ── (3) 검색 + 로컬 pin: 매치되는 로컬 pin 멤버가 검색 중에도 float 위치·📌 유지(검색은 가시성 필터일 뿐 순서·플래그 무변) ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, init_opts);
+        defer session.deinit();
+        inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+        const t1 = session.tabs.items[1];
+        const t3 = session.tabs.items[3];
+        session.createGroupForTab(t1); // A = [t1(마커), t2, t3]
+        session.toggleLocalPin(t3); // t3 → 마커 직후(index2)
+        t3.custom_name = try allocator.dupe(u8, "findlp"); // 검색 매치용 이름(session.deinit이 free)
+        session.sidebar_search_active = true;
+        try session.sidebar_search_input.query.appendSlice(allocator, "findlp");
+        session.recomputeVisibleTabs();
+        // 매치 카드 t3(로컬 pin)이 접힘 무시하고 보이며, local_pinned 힌트·📌 유지.
+        var saw_lp = false;
+        for (session.sidebar_rows.items) |row| switch (row) {
+            .card => |c| if (c.tab == 2) { // t3 = float 후 self.tabs index2
+                saw_lp = true;
+                try std.testing.expect(c.local_pinned); // ★ 검색 중에도 로컬 pin 힌트
+                try std.testing.expect(session.sidebarRowShowsPin(row)); // ★ 📌 유지
+            },
+            .group_header => {},
+        };
+        try std.testing.expect(saw_lp);
+        try std.testing.expect(t3.local_pinned); // ★ 검색이 플래그·순서 무변
+        try std.testing.expectEqual(t3, session.tabs.items[2]);
+        session.sidebar_search_active = false;
+        session.sidebar_search_input.clear();
+    }
+
+    // ── (4) pane 분리 + 로컬 pin: promotePaneToNewWorkspace가 새 비고정 top-level 탭을 첫 마커 앞에 끼워도 그룹 안 로컬 pin
+    //    float가 보존된다(새 카드=그룹 밖, local_pinned=false; 기존 그룹 내부 순서 불변). ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, init_opts);
+        defer session.deinit();
+        // split은 backing이 잡혀야 의미 있음(termRect 입력) — resized 창을 흉내.
+        session.backing_width_px = session.sidebar_width_px + 800;
+        session.backing_height_px = 600;
+        session.window_padding_px = .{};
+        inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
+        const t1 = session.tabs.items[1];
+        const t2 = session.tabs.items[2];
+        session.createGroupForTab(t1); // A = [t1(마커), t2] — t0 최상위(분리 소스로 쓴다)
+        session.toggleLocalPin(t2); // t2 로컬 pin → 마커 직후(index2, 이미 그 자리)
+        try std.testing.expect(t2.local_pinned);
+        // 최상위 t0(index0)을 활성으로 만들고 split → 2 pane → 그 새 pane을 새 워크스페이스로 분리.
+        session.app_window.active_tab = 0;
+        try session.splitActivePane(.horizontal); // t0 = [p0, p1], 활성 p1
+        try std.testing.expectEqual(@as(usize, 2), session.tabs.items[0].panes.items.len);
+        const before_len = session.tabs.items.len;
+        session.promotePaneToNewWorkspace(session.activePane()); // p1 → 새 비고정 top-level 탭(첫 마커 앞 삽입)
+        try std.testing.expectEqual(before_len + 1, session.tabs.items.len); // 새 탭 삽입됨
+        // ★ 기존 그룹 A의 로컬 pin 보존: t2가 여전히 그룹 안·로컬 pin·마커 직후(index 이동은 됐어도 상대순서 불변).
+        try std.testing.expect(t2.local_pinned); // ★ 로컬 pin 플래그 보존
+        try std.testing.expect(session.tabIsInGroup(t2)); // 여전히 그룹 안
+        const mi = session.enclosingGroupMarkerIndex(blk: {
+            var idx: usize = 0;
+            for (session.tabs.items, 0..) |t, i| if (t == t2) {
+                idx = i;
+                break;
+            };
+            break :blk idx;
+        }).?;
+        try std.testing.expectEqual(t1, session.tabs.items[mi]); // enclosing 마커 = t1(그룹 A 무결)
+        // t2가 마커 직후(로컬 float 유지) — 삽입이 그룹 앞이라 subtree 내부 순서 불변.
+        var t2_idx: usize = 0;
+        for (session.tabs.items, 0..) |t, i| if (t == t2) {
+            t2_idx = i;
+            break;
+        };
+        try std.testing.expectEqual(mi + 1, t2_idx); // ★ 마커 직후(subtree-로컬 float 보존)
+    }
 }
 
 test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) — 위/아래·최상위·끝 + 자기그룹 no-op + 연속 파티션" {

@@ -20,7 +20,12 @@ pub const layer = draw.Layer.sidebar;
 pub const Row = union(enum) {
     /// 워크스페이스 카드. tab=원본 self.tabs 인덱스(옛 visibleTab 값), active=활성 워크스페이스,
     /// depth=그룹 안이면 1(들여쓰기 — SG3). label은 제목 glyph 완전 이주(후속) 시 view가 text op으로 쓸 자리다.
-    card: struct { tab: usize, label: []const u8, active: bool, depth: u8 = 0 },
+    /// pin_derived=이 카드의 `tab.pinned`가 **그룹 고정에서 파생된 캐시**(멤버)인가(그룹 고정 C2 — docs/sidebar-groups.md §12.8).
+    /// 멤버 카드 pinned는 enclosing 마커의 권위를 미러한 값이라(§12.2), 그대로 렌더하면 모든 멤버에 📌 노이즈가 뜬다.
+    /// projectRowsCore가 order-aware로(depth/member_count와 동형) 채운다 — **비마커 그룹 멤버=true**(파생 억제 대상),
+    /// **그룹 마커 카드·최상위 개별 pin 카드=false**(마커는 권위·헤더가 인디케이터, 최상위는 자기 pin). buildSidebarDrawList가
+    /// live `tab.pinned` 대신 이 힌트를 읽어 멤버 📌를 억제한다. depth와 달리 "마커 카드 vs 멤버 카드"를 구별한다(둘 다 depth>0).
+    card: struct { tab: usize, label: []const u8, active: bool, depth: u8 = 0, pin_derived: bool = false },
     /// 그룹 헤더(SG3) — 접기 토글 줄(카드 아님). collapsed=접힘, member_count=접힘 시 "▸ name (N)" 표시용.
     /// tab=이 그룹을 **시작하는 원본 self.tabs 인덱스**(group_start 마커를 든 탭). 헤더 클릭 시 그 탭의 group_collapsed를
     /// 토글하고(onGroupHeader), platform이 라벨 glyph를 그 탭의 `group_start`에서 **직접 라이브로** 뽑는다(label은

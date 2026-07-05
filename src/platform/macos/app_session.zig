@@ -4598,15 +4598,58 @@ pub const AppSession = struct {
         }.fill);
     }
 
-    /// 디버그 불변식 확인(런타임 — assertPinnedPrefix는 테스트 전용 std.testing이라 별도). 고정 탭이 앞쪽
-    /// [0, pinned_count)에 연속이고 그 뒤는 전부 비고정인지 assert. 위반은 정렬 로직 버그를 디버그에서 노출한다.
-    fn assertPinnedPrefixRuntime(self: *const AppSession) void {
+    /// 디버그 불변식 확인(런타임 — assertPinnedPrefix는 테스트 전용 std.testing이라 별도). 그룹 고정 C2(§12.11 보강9)로
+    /// **두 층**을 assert한다: (1) 고정 프리픽스 연속(고정 탭이 [0, pinned_count)에 연속·그 뒤 전부 비고정), (2) **핀 경계 =
+    /// 그룹 경계 정렬**(핀 경계가 그룹 subtree 중간을 자르지 않음 = I3 안전 전제). GP1~3 경로(toggleGroupPin·normalize·복원·
+    /// removeFromGroup·clamp)가 이 확장 불변식을 지키는지 디버그에서 노출한다. 판정은 pinBoundariesAlignGroups(순수)에 위임해
+    /// 헤드리스 테스트가 "정렬 통과·어긋남 검출"을 assert 없이(panic 없이) 확인할 수 있게 한다.
+    fn assertPinnedPrefixRuntime(self: *AppSession) void {
+        // (1) 고정 프리픽스 연속 — 비고정 뒤에 고정이 나오면 정렬 로직 버그(I1).
         var seen_unpinned = false;
         for (self.tabs.items) |t| {
             if (t.pinned) {
-                std.debug.assert(!seen_unpinned); // 비고정 뒤에 고정이 나오면 불변식 위반
+                std.debug.assert(!seen_unpinned);
             } else seen_unpinned = true;
         }
+        // (2) 핀 경계 = 그룹(최상위 단위) 경계 정렬(§12.11 보강9 확장) — pinned_count가 그룹 subtree 중간을 안 가리킴.
+        std.debug.assert(self.pinBoundariesAlignGroups());
+    }
+
+    /// 핀 경계가 그룹 subtree **중간**을 자르지 않는가(그룹 고정 C2 — docs/sidebar-groups.md §12.11 보강9). 판정 구조는
+    /// normalizePinnedFromGroups와 **동형**(suffix-exclusion): 각 최상위 그룹의 구조 subtree [i, e)(pin 무시)에서 마커 pin이
+    /// **마지막으로 일치**하는 위치 last_match까지가 진짜 멤버 범위이고, 그 뒤 [last_match+1, e)는 다음 핀 리전의 최상위 카드
+    /// 꼬리(§12.1 "고정 그룹 + 비고정 top카드")라 **정상**이다. 위반 = 진짜 멤버 범위 [i+1, last_match] 안에 마커 pin과 다른
+    /// 카드가 끼는 것(desync 샌드위치 = 핀 경계가 그룹 subtree 중간을 자름, I3 안전 전제 붕괴). canonical(normalize 후) 상태는
+    /// 항상 통과하고, 손상(멤버 desync 주입) 상태는 false. **순수 판정** — assertPinnedPrefixRuntime(런타임 assert)와 헤드리스
+    /// 테스트(정렬 통과·어긋남 검출)가 공유한다. 중첩 자식은 부모 구조 subtree [i,e) 안이라 같은 검사로 통째 커버된다.
+    fn pinBoundariesAlignGroups(self: *AppSession) bool {
+        const n = self.tabs.items.len;
+        var i: usize = 0;
+        while (i < n) {
+            const marker = self.tabs.items[i];
+            if (marker.group_start == null) {
+                i += 1; // 최상위 카드 — 그룹 경계 아님
+                continue;
+            }
+            const eff = self.effectiveDepthAt(i, null, null);
+            const pin = marker.pinned; // 마커 = 그룹 고정 권위(§12.2)
+            var e = i + 1;
+            while (e < n) : (e += 1) {
+                const t = self.tabs.items[e];
+                if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff) break; // 형제/얕은 마커 = 구조 경계
+            }
+            // 마커 pin이 마지막으로 일치하는 위치(진짜 멤버 범위 끝). 그 뒤는 다음 리전 top카드 꼬리라 배제(normalize와 동일).
+            var last_match = i;
+            var k = i + 1;
+            while (k < e) : (k += 1) if (self.tabs.items[k].pinned == pin) {
+                last_match = k;
+            };
+            // 진짜 멤버 범위에 마커 pin과 다른 카드가 끼면 핀 경계가 그룹 subtree 중간을 자름 → I3 안전 전제 위반.
+            k = i + 1;
+            while (k <= last_match) : (k += 1) if (self.tabs.items[k].pinned != pin) return false;
+            i = e; // 구조 subtree 통째 처리 — 꼬리 top카드는 다음 마커/리전이 다룬다
+        }
+        return true;
     }
 
     /// 그룹 멤버 카드의 `pinned`를 **enclosing 그룹 마커의 pinned로 재기록**한다(그룹 고정 C2, docs/sidebar-groups.md §12.5 GP2).
@@ -5299,6 +5342,33 @@ pub const AppSession = struct {
                 // SG5-2: MARU_FORCE_GROUP_COLOR=1이면 그 그룹에 파랑(0x4A7BC4)을 얹어 헤더 밴드 tint·소속 카드 좌측
                 // accent 막대에 그룹 색이 뜨는지 헤드리스 스크린샷으로 self-verify(브라우저 탭 그룹식 색 구분).
                 if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[1].group_color = 0x4A7BC4;
+                self.rebuildSidebar() catch {};
+            }
+        }
+        // MARU_FORCE_GROUP_PIN=1 — 그룹 고정 C2(§12.8·§12.10 GP4)를 헤드리스 스크린샷으로 self-verify한다. 최상위 카드 t0을
+        // **개별 고정**하고 두 형제 그룹 A=[t1,t2]·B=[t3,t4]를 만든 뒤 **A만 그룹째 고정**(toggleGroupPin)해 한 화면에서:
+        //   (a) 고정 그룹 A가 **상단 프리픽스**(t0 뒤)로 이동(stablePartitionPinned), (b) A 멤버 카드에 **📌 노이즈 없음**
+        //   (pin_derived 억제·마커 카드 억제), (c) A 헤더에 **고정 인디케이터 📌**(sidebarRowShowsPin)을 낸다. 대조로 **개별
+        //   고정 t0 카드는 📌 유지**(그룹 멤버 억제와 구별), **비고정 그룹 B**는 헤더 인디케이터 없음·멤버 📌 없음이다.
+        //   GP1~3 실제 경로(createGroup·createSiblingGroup·개별 pin·toggleGroupPin)로 canonical 상태를 만들어 정규화·프리픽스
+        //   정렬도 함께 검증된다(GP4(a) 헤드리스 테스트와 동형 배치). MARU_FORCE_GROUP_COLLAPSED=1이면 A를 접어 헤더만(멤버
+        //   숨김), MARU_FORCE_GROUP_COLOR=1이면 A·B에 색을 얹는다. env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_GROUP_PIN") != null) {
+            var made: usize = 0;
+            while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
+            if (self.tabs.items.len >= 5) {
+                // 두 형제 최상위 그룹: A=[t1,t2](마커 t1, depth1), B=[t3,t4](마커 t3, depth1). t0는 고정 최상위 카드(개별 pin 대조).
+                self.createGroupForTab(self.tabs.items[1]); // A
+                self.createSiblingGroupForTab(self.tabs.items[3]); // B(형제, depth1)
+                if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[1].group_collapsed = true; // A 접힘 → 헤더만
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
+                    self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
+                    self.tabs.items[3].group_color = 0xC44A7B; // B 자홍(대조)
+                }
+                self.tabs.items[0].pinned = true; // t0 = 고정 최상위 카드(개별 pin — 그룹 고정과 직교, 📌 유지 대조)
+                // A 마커 포인터는 heap-pin이라 toggleGroupPin의 stablePartition 재배치 후에도 안정 — 토글 전에 잡는다.
+                const a_marker = self.tabs.items[1];
+                self.toggleGroupPin(a_marker); // A를 그룹째 고정 → 프리픽스로 안착·멤버 pin 동기(§12.10 GP3)
                 self.rebuildSidebar() catch {};
             }
         }
@@ -7104,13 +7174,17 @@ pub const AppSession = struct {
                 // SG8c: 이 위치가 고스트 구간이면(그룹 통째 드래그가 접힌 곳으로) 접힘 게이트를 무시하고 강제 방출.
                 const self_collapsed = anyCollapsedInStack(cstack[0..ctop]);
                 const card_visible = (if (searching) matches[i] else !self_collapsed) or ghost_here;
-                if (card_visible) self.appendCardRow(out, tab_idx, d);
+                // 마커 탭의 자기 카드 = 그룹 고정 **권위**(§12.2)라 pin_derived=false(파생 아님). 카드 📌는 렌더가 마커
+                // (group_start!=null)를 따로 억제하고 그룹 고정은 헤더 인디케이터가 든다(§12.8). 멤버 파생과 구별(둘 다 depth>0).
+                if (card_visible) self.appendCardRow(out, tab_idx, d, false);
             } else {
                 const d = depth[i];
                 const parent_collapsed = anyCollapsedInStack(cstack[0..ctop]);
                 // SG8c: 고스트 구간 카드는 접힘 게이트 예외로 강제 방출(옮겨진 카드가 접힌 그룹에 들어가도 안 사라짐).
                 const card_visible = (if (searching) matches[i] else !parent_collapsed) or ghost_here;
-                if (card_visible) self.appendCardRow(out, tab_idx, d);
+                // pin_derived(§12.8): depth>0 = 그룹 멤버(비마커) 카드 → pinned가 마커 파생 캐시라 렌더가 📌 억제. depth==0 =
+                // 최상위 개별 pin 카드 → false(자기 pin, 📌 유지). order-aware(가상 order 위 depth라 드래그 프리뷰도 일관, SG8 도메인).
+                if (card_visible) self.appendCardRow(out, tab_idx, d, d > 0);
             }
             if (ghost_here) ghost_row_hi = out.items.len; // 이 고스트 위치가 낸 마지막 row까지 확장(연속)
         }
@@ -7138,7 +7212,8 @@ pub const AppSession = struct {
     /// `out`=대상 리스트(라이브=sidebar_rows·프리뷰=sidebar_preview_rows) — 프리뷰 OOM도 고스트만 잃고 flat 복원(다음 rebuild가 정상화).
     fn projectFlatFallback(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), q: []const u8) void {
         out.clearRetainingCapacity();
-        for (self.tabs.items, 0..) |tab, i| if (self.tabMatchesSearch(tab, q)) self.appendCardRow(out, i, 0);
+        // OOM 폴백은 그룹을 무시한 flat 최상위 카드라 pin_derived=false(모든 카드가 depth 0 개별 pin, §12.8).
+        for (self.tabs.items, 0..) |tab, i| if (self.tabMatchesSearch(tab, q)) self.appendCardRow(out, i, 0, false);
     }
 
     /// 마커 위치 i(정규화 depth d)의 subtree [i, k)에 검색 매치가 하나라도 있는가(§6 빈 그룹 규칙 — 중첩 확장). subtree는
@@ -7243,12 +7318,14 @@ pub const AppSession = struct {
     /// `out`(라이브=sidebar_rows·프리뷰=sidebar_preview_rows)에 카드 row 하나 append(projectRows 공통 — depth만 다름). label은
     /// chrome view 미사용이라 ""(borrowed 회피 — buildSidebarDrawList가 tab에서 직접 라벨을 뽑는다). active는 라이브 active_tab을
     /// 그대로 읽는다(프리뷰도 같은 탭이 활성 표시 — 순서만 가상). append 실패(OOM)는 무시(다음 rebuild가 복구) — 옛 동작 승계.
-    fn appendCardRow(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), tab_index: usize, depth: u8) void {
+    /// pin_derived(그룹 고정 C2 §12.8): 이 카드 pinned가 그룹 마커에서 파생된 멤버 캐시인가 — 렌더가 멤버 📌를 억제하는 힌트.
+    fn appendCardRow(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), tab_index: usize, depth: u8, pin_derived: bool) void {
         out.append(self.allocator, .{ .card = .{
             .tab = tab_index,
             .active = (tab_index == self.app_window.active_tab),
             .label = "",
             .depth = depth,
+            .pin_derived = pin_derived,
         } }) catch {};
     }
 
@@ -13477,6 +13554,26 @@ pub const AppSession = struct {
         return if (self.sidebar_drag_preview != null) self.sidebar_preview_rows.items else self.sidebar_rows.items;
     }
 
+    /// 사이드바 표시 row가 고정 핀(📌)을 그리는가(그룹 고정 C2 — docs/sidebar-groups.md §12.8 GP4). buildSidebarTitleFrame이
+    /// `pins[]`를 채울 때와 헤드리스 테스트가 공유하는 **단일 출처**(rename 억제는 호출처 몫 — 편집 폭 보존). 규칙:
+    ///  · **group_header row = 그룹 고정 인디케이터**: 마커 탭(gh.tab) pinned이면 📌(헤더 이름줄 우측 끝). "이 그룹 고정됨"을
+    ///    헤더 하나에만 표시한다(멤버 카드마다 뜨는 노이즈 대신). 마커 = 그룹 고정 권위(§12.2)라 라이브 pinned가 곧 그룹 고정.
+    ///  · **card row = 개별 최상위 pin만**: (1) pin_derived(멤버 파생 캐시)면 억제 — 그룹 고정은 헤더가 든다. (2) 그룹 마커
+    ///    카드(group_start!=null)면 억제 — 마커의 자기 카드도 그룹 소속이라 헤더 인디케이터로 대체(pin_derived=false지만 억제).
+    ///    (3) 그 외 최상위 카드만 live `tab.pinned` 그대로 📌(개별 위치 고정). 도메인은 sidebarRenderRows()(드래그 중 preview_rows).
+    fn sidebarRowShowsPin(self: *const AppSession, row: chrome.components.sidebar.Row) bool {
+        return switch (row) {
+            .group_header => |gh| gh.tab < self.tabs.items.len and self.tabs.items[gh.tab].pinned,
+            .card => |c| blk: {
+                if (c.pin_derived) break :blk false; // 멤버 파생 pin 억제(§12.8) — 그룹 헤더가 인디케이터
+                if (c.tab >= self.tabs.items.len) break :blk false;
+                const tab = self.tabs.items[c.tab];
+                if (tab.group_start != null) break :blk false; // 그룹 마커 카드 — 헤더로 인디케이터(자기 카드 📌 억제)
+                break :blk tab.pinned; // 최상위 개별 pin만 📌 유지
+            },
+        };
+    }
+
     /// 카드 드래그 프리뷰 정리(up 확정·드래그 취소·teardown 공통) — 고스트 상태와 투영 버퍼를 비운다. 이후 rebuild가
     /// sidebarRenderRows()로 원본 sidebar_rows 렌더에 복귀한다(preview=null이면 원본을 돌려줌).
     fn clearSidebarDragPreview(self: *AppSession) void {
@@ -14695,7 +14792,10 @@ pub const AppSession = struct {
                     try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                     try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                     try agents.append(self.allocator, 0); // 헤더엔 에이전트 아이콘 없음
-                    try pins.append(self.allocator, false); // 헤더엔 핀 없음
+                    // 그룹 고정 인디케이터(§12.8 GP4): 마커 pinned면 헤더 이름줄 우측 끝에 📌 — "이 그룹 고정됨"을 헤더 하나에
+                    // (멤버 카드 📌 노이즈 대신). rename 중엔 억제(편집 폭 보존 — 카드 pin과 같은 규칙). sidebarRowShowsPin이 단일 출처.
+                    const header_renaming = gtab != null and self.renamingGroup(gtab.?);
+                    try pins.append(self.allocator, if (header_renaming) false else self.sidebarRowShowsPin(disp_row));
                     try card_kinds.append(self.allocator, .none); // 색칠 루프 인덱스 정합(헤더=none → 무색)
                     try card_running.append(self.allocator, false);
                     continue; // 헤더 row 엔트리 1개 append 완료 — 다음 row로(i==row 인덱스 유지)
@@ -14752,7 +14852,10 @@ pub const AppSession = struct {
                 const indent_n = @min(@as(usize, card.depth) * @as(usize, group_indent_cols), indent_buf.len);
                 const indent = indent_buf[0..indent_n];
                 try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ indent, marker, base }));
-                try pins.append(self.allocator, tab.pinned);
+                // 그룹 고정 C2(§12.8 GP4): live tab.pinned 대신 sidebarRowShowsPin(pin_derived 힌트)을 읽어 **멤버 파생 pin·
+                // 그룹 마커 카드의 📌를 억제**한다(그룹 고정은 헤더 인디케이터가 든다). 최상위 개별 pin만 📌 유지. 옛 `tab.pinned`
+                // 직접 읽기는 그룹 멤버 캐시 pinned=1을 그대로 그려 모든 멤버에 📌 노이즈를 냈다(§12.8 루트커즈).
+                try pins.append(self.allocator, self.sidebarRowShowsPin(disp_row));
                 // 브랜치줄·경로줄: cwd가 git repo 안일 때만(branch != null) + view options 토글로 표시 여부 결정.
                 // 이름줄은 항상 표시(사용자 요청). show-branch=false면 브랜치줄 생략, show-folder=false면 경로줄 생략.
                 // 토글은 독립적이다 — 둘 다 "git repo 안"을 전제로 하되(maru는 repo 밖 cwd 줄을 안 그림) 서로 안 묶인다.
@@ -17082,6 +17185,100 @@ test "GP3(e): removeFromGroup 고정 멤버 — unpin 선행 후 비고정 top�
     try std.testing.expect(!session.tabIsInGroup(a)); // 그룹 밖(비고정 최상위)
     try std.testing.expect(session.tabIsInGroup(b)); // b는 여전히 PG 소속
     try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG=[0,2) 통째 고정
+}
+
+// GP4(그룹 고정 C2 — pin_derived 렌더 힌트·멤버 📌 억제·헤더 인디케이터·assert 확장, §12.8·§12.11 보강7·9). 이 훅 없이
+// 스크린샷만으로는 회귀를 못 잡으므로(op 방출 도메인), pin_derived 세팅과 sidebarRowShowsPin(렌더가 pins[]로 쓰는 단일
+// 출처)을 헤드리스로 단언한다. 스크린샷(MARU_FORCE_GROUP_PIN)은 시각 마감 1급 검증으로 별도.
+
+test "GP4(a): pin_derived·sidebarRowShowsPin — 멤버 📌 억제·헤더 인디케이터·최상위 개별 pin 유지(§12.8)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+
+    // MARU_FORCE_GROUP_PIN 훅과 동형: t0=고정 최상위 카드(개별 pin), A=[t1,t2] 고정 그룹, B=[t3,t4] 비고정 그룹(대조).
+    session.createGroupForTab(session.tabs.items[1]); // A
+    session.createSiblingGroupForTab(session.tabs.items[3]); // B(형제, depth1)
+    session.tabs.items[0].pinned = true; // 고정 최상위 카드(개별 pin — 그룹과 직교)
+    session.toggleGroupPin(session.tabs.items[1]); // A 그룹째 고정 → 프리픽스로·멤버 pin 동기(§12.10 GP3)
+    session.recomputeVisibleTabs();
+
+    // 표시 rows: [card t0, header A, card A마커, card A멤버, header B, card B마커, card B멤버]
+    const rows = session.sidebar_rows.items;
+    try std.testing.expectEqual(@as(usize, 7), rows.len);
+
+    // ── pin_derived(§12.2): 비마커 멤버=true(파생 캐시)·최상위=false(개별)·마커 자기 카드=false(권위, 파생 아님) ──
+    try std.testing.expect(!rows[0].card.pin_derived); // t0 최상위 개별 pin
+    try std.testing.expect(!rows[2].card.pin_derived); // A 마커 자기 카드 = 그룹 고정 권위
+    try std.testing.expect(rows[3].card.pin_derived); // A 멤버 = 파생 캐시(억제 대상)
+    try std.testing.expect(!rows[5].card.pin_derived); // B 마커 자기 카드
+    try std.testing.expect(rows[6].card.pin_derived); // B 멤버 = 파생 캐시
+
+    // ── sidebarRowShowsPin(§12.8): 렌더가 pins[]로 쓰는 단일 출처. 헤더 인디케이터·멤버 억제·마커 카드 억제·최상위 유지 ──
+    try std.testing.expect(session.sidebarRowShowsPin(rows[0])); // 고정 최상위 카드 → 📌 유지
+    try std.testing.expect(session.sidebarRowShowsPin(rows[1])); // 고정 그룹 A 헤더 → 인디케이터 📌("이 그룹 고정됨")
+    try std.testing.expect(!session.sidebarRowShowsPin(rows[2])); // A 마커 카드 → 억제(헤더가 인디케이터)
+    try std.testing.expect(!session.sidebarRowShowsPin(rows[3])); // A 멤버 → 억제(멤버 📌 노이즈 제거)
+    try std.testing.expect(!session.sidebarRowShowsPin(rows[4])); // B 헤더(비고정) → 인디케이터 없음
+    try std.testing.expect(!session.sidebarRowShowsPin(rows[5])); // B 마커 카드
+    try std.testing.expect(!session.sidebarRowShowsPin(rows[6])); // B 멤버
+
+    // 종합(§12.8 게이트): 카드 row에 뜨는 📌는 최상위 개별 pin(t0) 하나뿐 — 그룹 멤버/마커 카드 📌 노이즈 0. 고정 인디케이터는
+    // 고정 그룹 헤더(A) 하나뿐 — "멤버 📌 op 없음 + 헤더 인디케이터 op 있음"(태스크 헤드리스 요구)을 draw 소스 도메인에서 고정.
+    var card_pins: usize = 0;
+    var header_pins: usize = 0;
+    for (rows) |r| switch (r) {
+        .card => if (session.sidebarRowShowsPin(r)) {
+            card_pins += 1;
+        },
+        .group_header => if (session.sidebarRowShowsPin(r)) {
+            header_pins += 1;
+        },
+    };
+    try std.testing.expectEqual(@as(usize, 1), card_pins); // 최상위 개별 pin(t0)만
+    try std.testing.expectEqual(@as(usize, 1), header_pins); // 고정 그룹 A 헤더 인디케이터만
+}
+
+test "GP4(b): assert 확장 pinBoundariesAlignGroups — canonical 정렬 통과·멤버 desync 검출·normalize 흡수(§12.11 보강9)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 고정 그룹 G=[t0(마커),t1,t2] 전부 pin1 + 비고정 top카드 t3. 핀 경계(3)가 그룹 subtree 밖 = 정렬(canonical).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "G");
+    session.tabs.items[0].group_depth = 1;
+    for (0..3) |i| session.tabs.items[i].pinned = true;
+    try std.testing.expect(session.pinBoundariesAlignGroups()); // canonical → 핀 경계 = 그룹 경계 정렬(통과)
+
+    // 멤버 desync 주입: **중간** 멤버 t1을 비고정으로(마커=1·t1=0·t2=1). 핀 경계가 그룹 subtree **중간**(t1)을 자름 = I3 위반.
+    // (마지막 멤버 t2는 마커 pin과 일치하므로 t1이 "다음 리전 top카드 꼬리"가 아니라 샌드위치 desync임이 확정된다.)
+    session.tabs.items[1].pinned = false;
+    try std.testing.expect(!session.pinBoundariesAlignGroups()); // ★ 어긋남 검출(확장 assert가 잡는 위반)
+
+    // normalize가 마커 기준 canonical로 흡수(멤버 t1을 마커 pin1로 재기록, GP2 suffix-exclusion) → 다시 정렬 통과.
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(session.tabs.items[1].pinned); // desync 흡수
+    try std.testing.expect(session.pinBoundariesAlignGroups()); // 흡수 후 정렬 복귀
 }
 
 /// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와

@@ -4265,39 +4265,35 @@ pub const AppSession = struct {
         return self.groupSubtreeEnd(gi, null, null);
     }
 
-    /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 잡아 하이라이트
-    /// (sidebar_drop_slot)를 갱신하고, 드롭 컨텍스트에 따라 **중첩(넣기)** 또는 **형제 경계 이동(재정렬)**으로 옮긴다.
-    /// 이동을 따라간 **새 마커 인덱스**를 반환한다(호출자가 드래그 기준 인덱스를 갱신). 이동/depth 변경이 없고 하이라이트만
-    /// 바뀌면 밴드만 재빌드(SG4 카드 드래그와 같은 규율).
+    /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 **원본 sidebar_rows(불변)**로
+    /// hit-test하고, 라이브 moveGroupNesting/Sibling 커밋을 **제거**한 **비커밋 프리뷰**(SG8e — docs/sidebar-groups.md §9)를
+    /// 재투영한다: 드롭 컨텍스트로 plan만 계산해(헤더 드롭=`.group_nest`·카드/최상위 드롭=`.group_sibling`·무효=`.none`)
+    /// refreshDragPreview로 subtree 고스트를 sidebar_preview_rows에 투영한다(self.tabs 불변이라 yo-yo 원천 차단). up이 이
+    /// 마지막 plan을 실제 move로 **정확히 1회** 커밋한다(commitSidebarDragPreview). self.tabs가 불변이라 마커 인덱스가 드래그
+    /// 내내 안정해 **marker를 그대로 반환**한다(옛 라이브 팔로우의 새-마커 추적이 불필요 — 호출자 대입은 no-op).
     ///
-    /// **SG5-4 넣기/빼기(docs/sidebar-groups.md §9 SG5-4)**: 드롭 row가 **다른 그룹의 헤더**면 그 그룹의 자식으로 **중첩**한다
-    /// (`groupNestPlan` → `moveGroupNesting`, dragged 마커 depth = 타겟 그룹 depth+1, subtree 상대 depth 유지 = "폴더 안에 넣기").
-    /// 그 외(카드·최상위 드롭)는 기존 **형제 경계 이동**(`sidebarGroupDropBoundary`+`moveGroupSibling`)으로 처리한다 — 이때 얕은
-    /// 위치로 가면 자연 eff depth로 **빼기(un-nest)**가 gap-clamp+releveel로 자동 반영된다. 헤더 드롭=넣기·카드 드롭=형제
-    /// 재정렬의 명시적 분리라 SG5-1(카드 드롭에 형제 이동)이 그대로 보존된다.
+    /// **SG5-4 넣기/빼기 plan 분기(docs/sidebar-groups.md §9 SG5-4)**: 드롭 row가 **다른 그룹의 헤더**면 그 그룹의 자식으로
+    /// **중첩**(`groupNestPlan` → `.group_nest{insert_before, target_depth}`, dragged 마커 depth=타겟 그룹 depth+1, subtree
+    /// 상대 depth 유지 = "폴더 안에 넣기"). 그 외(카드·최상위 드롭)는 **형제 경계 이동**(`sidebarGroupDropBoundary` →
+    /// `.group_sibling{insert_before}`)으로, 얕은 위치면 자연 eff depth로 **빼기(un-nest)**가 확정 시 gap-clamp+relevel로
+    /// 반영된다. 헤더 드롭=넣기·카드 드롭=형제 재정렬의 명시적 분리는 그대로다(확정 경로 moveGroupNesting/Sibling과 동일 plan).
     fn groupDragFrame(self: *AppSession, marker: usize, y_px: f64) usize {
         const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-        const new_drop: ?usize = if (raw_row < self.sidebar_rows.items.len) raw_row else null;
-        const drop_changed = !usizeOptEql(self.sidebar_drop_slot, new_drop);
-        self.sidebar_drop_slot = new_drop;
-        var new_marker = marker;
-        var changed = false;
-        if (self.groupNestPlan(raw_row, marker)) |plan| {
-            // SG5-4 넣기: 타겟 그룹의 자식으로 중첩(depth+1). insert_before=타겟 subtree 끝(마지막 자식 자리 = 부모 직접 카드 뒤).
-            const r = self.moveGroupNesting(marker, plan.insert_before, plan.target_depth);
-            new_marker = r.marker;
-            changed = r.changed;
-        } else if (self.sidebarGroupDropBoundary(raw_row, marker)) |boundary| {
-            // 형제 경계 이동(SG5-1) + 얕은 곳이면 자연 eff로 빼기(SG5-4 un-nest).
-            const r = self.moveGroupSibling(marker, boundary);
-            new_marker = r.marker;
-            changed = r.changed;
-        }
-        if (drop_changed and !changed) {
-            self.rebuildSidebar() catch {};
-            self.metal_dirty = true;
-        }
-        return new_marker;
+        // plan: 헤더 드롭=중첩(nest)·카드/최상위 드롭=형제(sibling)·무효=none. hit-test는 원본 sidebar_rows(불변)로.
+        const plan: DropPlan = if (self.groupNestPlan(raw_row, marker)) |np|
+            .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
+        else if (self.sidebarGroupDropBoundary(raw_row, marker)) |boundary|
+            .{ .group_sibling = .{ .insert_before = boundary } }
+        else
+            .none;
+        // 비커밋 프리뷰 재투영(self.tabs 불변). 카드 드래그(SG8d)와 동형 — 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를
+        // 주므로 세팅하지 않는다(subtree 고스트+삽입선이 하이라이트를 대체). 매 프레임 재투영이라 rebuild + dirty.
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        self.refreshDragPreview(marker, plan, y_px, arena_state.allocator()) catch {};
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+        return marker; // self.tabs 불변 → 마커 인덱스 안정(옛 새-마커 추적 불필요)
     }
 
     // ── SG5-4: 드래그로 중첩 넣기/빼기 — 드롭 컨텍스트의 depth로 group_depth를 조정한다 ─────────────────────────
@@ -5158,6 +5154,46 @@ pub const AppSession = struct {
                     self.refreshDragPreview(1, .{ .card = .{ .target_tab = target_tab } }, 0, arena_state.allocator()) catch {};
                 }
                 self.rebuildSidebar() catch {}; // 렌더가 preview_rows로 고스트+삽입선을 그린다
+            }
+        }
+        // MARU_FORCE_GROUP_DRAGGHOST_GROUP=1 — **그룹 A를 다른 그룹 B의 헤더에 드래그 중인 프리뷰 상태**(SG8e subtree 고스트)를
+        // 강제한다: A subtree(헤더 t1 + 카드 t2)가 반투명 고스트로 **B 자식 depth**(한 단계 더 들여쓰기)에 떠 "폴더 안에 넣기"를
+        // 보인다(카드 1행 고스트와 달리 그룹은 헤더+카드 연속 N행). MARU_FORCE_GROUP_COLLAPSED=1이면 B를 접어도 프리뷰 투영이
+        // 타겟 헤더를 collapsed=false로 flip해 고스트가 보인다(§9 SG8 접힌 그룹 드롭 UX). 라이브 커밋 대신 refreshDragPreview로
+        // 프리뷰만 세우고 놔둬(up 없음) 첫 frame을 캡처한다(self.tabs 불변). MARU_FORCE_GROUP_COLOR=1이면 A·B에 색을 얹어
+        // 고스트+헤더 밴드 색을 함께 확인. env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_GROUP_DRAGGHOST_GROUP") != null) {
+            var made: usize = 0;
+            while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
+            if (self.tabs.items.len >= 5) {
+                // 두 형제 최상위 그룹: A=[t1,t2](마커 index1, depth1), B=[t3,t4](마커 index3, depth1). t0는 최상위 카드.
+                self.createGroupForTab(self.tabs.items[1]); // A
+                self.createSiblingGroupForTab(self.tabs.items[3]); // B(형제, depth1)
+                if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[3].group_collapsed = true; // B 접힘 → 고스트도 보임(flip)
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
+                    self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
+                    self.tabs.items[3].group_color = 0xC44A7B; // B 자홍(중첩 색 구분)
+                }
+                self.recomputeVisibleTabs(); // rows에서 B 헤더 표시 row를 찾는다
+                var b_row: usize = 0;
+                for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                    .group_header => |gh| if (gh.tab == 3) {
+                        b_row = s;
+                    },
+                    .card => {},
+                };
+                // A(마커 index1)를 B 헤더(b_row)에 드롭 = 중첩. groupNestPlan→group_nest plan을 **프리뷰만**(커밋 안 함).
+                const plan: DropPlan = if (self.groupNestPlan(b_row, 1)) |np|
+                    .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
+                else
+                    .none;
+                var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena_state.deinit();
+                self.sidebar_group_drag_armed = true;
+                self.sidebar_group_drag_active = true;
+                self.sidebar_group_drag_marker = 1;
+                self.refreshDragPreview(1, plan, 0, arena_state.allocator()) catch {};
+                self.rebuildSidebar() catch {}; // 렌더가 preview_rows로 A subtree 고스트+삽입선을 그린다
             }
         }
         // MARU_FORCE_RIGHT_CLICK=1 — 첫 frame에 터미널 본문 우클릭을 시뮬레이트해 input.right-click=menu의 복사/붙여넣기
@@ -8653,27 +8689,19 @@ pub const AppSession = struct {
                     self.metal_dirty = true;
                 } else {
                     // 마커 탭(group_start!=null) 카드 드래그 = **그룹 통째 이동(SG5-1)**. 마커는 group_start를 든 그 탭이라
-                    // 단독으로 못 옮긴다(옮기면 그룹이 딸려 온다) — 그룹 구간 [M,j)를 하나의 블록으로 재정렬한다(groupDragFrame).
+                    // 단독으로 못 옮긴다(옮기면 그룹이 딸려 온다) — 그룹 subtree [M,j)를 하나의 블록으로 재정렬한다(groupDragFrame).
                     // 헤더 드래그(threshold 게이트)와 같은 프리미티브를 공유하며, 카드 드래그는 arm 시 이미 down에서 시작이라 별도 threshold 없음.
-                    // **SG8d 범위 밖**: 그룹 드래그 고스트는 SG8e — 여기선 SG5-1 라이브 재배치 그대로(카드 드래그만 고스트 전환).
+                    // **SG8e 고스트 프리뷰**: groupDragFrame이 라이브 재배치 대신 plan+refreshDragPreview로 subtree 고스트를
+                    // 투영한다(self.tabs 불변). up이 마지막 plan(group_sibling/group_nest)을 1회 커밋한다(commitSidebarDragPreview).
+                    // self.tabs 불변이라 groupDragFrame이 marker를 그대로 반환 → drag_index도 origin으로 안정(옛 팔로우 불필요).
                     self.sidebar_drag_index = self.groupDragFrame(self.sidebar_drag_index, y_px);
                 }
             } else if (kind == 3) {
                 self.sidebar_drag_active = false; // up: 드래그 종료
-                // SG8d 확정 — 카드 드래그 프리뷰가 있으면 **마지막 plan**을 실제 move로 정확히 1회 커밋한다(재계산 금지 —
-                // up-시점 재계산은 타이밍 divergence). 프리뷰를 먼저 비워 moveTab 내부 rebuild가 원본(preview=null) 레이아웃으로
-                // 복귀하고, 그 위에 확정된 순서가 반영된다. plan==none이면 제자리(고스트만 제거).
-                if (self.sidebar_drag_preview) |dp| {
-                    const plan = dp.plan;
-                    const origin = dp.origin;
-                    self.clearSidebarDragPreview();
-                    switch (plan) {
-                        .card => |c| _ = self.moveTab(origin, c.target_tab), // rebuildSidebar 내부 호출(고스트 제거 + 확정 순서)
-                        else => self.rebuildSidebar() catch {}, // none: 제자리 — 고스트만 제거(원본 복귀). group_*는 SG8e(카드 경로엔 안 옴)
-                    }
-                    self.metal_dirty = true;
-                }
-                // 그룹 드래그(SG5-1 라이브, 마커 카드 경로)의 드롭 하이라이트 해제 — 카드 드래그는 drop_slot을 안 써 no-op.
+                // SG8d 카드 + SG8e 그룹(마커 카드 = 그룹 통째) 확정 — 프리뷰가 있으면 마지막 plan을 실제 move로 정확히 1회
+                // 커밋하고(재계산 금지 — up-시점 재계산은 타이밍 divergence) 고스트를 정리한다. plan==none이면 제자리(고스트만 제거).
+                self.commitSidebarDragPreview();
+                // 잔류 드롭 하이라이트 해제(SG8은 고스트+삽입선을 써 drop_slot을 안 세팅 — 방어로만 유지, 대개 no-op).
                 if (self.sidebar_drop_slot != null) {
                     self.sidebar_drop_slot = null; // 드롭 타겟 하이라이트 해제
                     self.rebuildSidebar() catch {}; // .drop_zone 밴드 제거
@@ -8701,12 +8729,17 @@ pub const AppSession = struct {
             } else { // kind == 3 (up)
                 if (!self.sidebar_group_drag_active) {
                     // threshold 미달 = 클릭 → 접기 토글(현 동작 보존). arm 이후 재정렬이 없었으므로 slot은 여전히 유효.
+                    // active로 승격되지 않았으면 드래그 프리뷰도 세워지지 않았다(groupDragFrame은 active일 때만 호출).
                     self.toggleGroupCollapsedAt(self.sidebar_group_drag_slot);
+                } else {
+                    // SG8e 확정 — 그룹 통째 드래그(subtree)의 마지막 plan(group_sibling/group_nest)을 실제 move로 정확히
+                    // 1회 커밋하고 고스트를 정리한다(commitSidebarDragPreview, 카드 드래그 확정과 동형). 재계산 없음.
+                    self.commitSidebarDragPreview();
                 }
                 self.sidebar_group_drag_armed = false;
                 self.sidebar_group_drag_active = false;
                 if (self.sidebar_drop_slot != null) {
-                    self.sidebar_drop_slot = null; // 드롭 타겟 하이라이트 해제
+                    self.sidebar_drop_slot = null; // 잔류 드롭 타겟 하이라이트 해제(SG8은 고스트+삽입선 사용, 대개 no-op)
                     self.rebuildSidebar() catch {}; // .drop_zone 밴드 제거
                     self.metal_dirty = true;
                 }
@@ -13175,6 +13208,27 @@ pub const AppSession = struct {
         self.sidebar_preview_rows.clearRetainingCapacity();
     }
 
+    /// SG8d/e 드래그 프리뷰 확정(docs/sidebar-groups.md §9 SG8) — 마지막 plan을 실제 move로 **정확히 1회** 커밋하고 프리뷰를
+    /// 정리한다(재계산 금지 = up-시점 재계산은 프리뷰-확정 타이밍 divergence). 카드(moveTab)·그룹 형제(moveGroupSibling)·
+    /// 중첩(moveGroupNesting)·none(제자리) 모두 처리한다 — simulateDrop이 이 함수들과 등가임을 SG8b 헤드리스가 고정해
+    /// 프리뷰(고스트)와 확정이 갈리지 않는다. 프리뷰를 **먼저** 비워 move 내부 rebuild가 원본(preview=null) 레이아웃 위에
+    /// 확정 순서를 반영하고, move가 no-op(변화 없음)이거나 none이어도 고스트가 남지 않게 끝에서 rebuild+dirty를 보장한다
+    /// (up 경로라 중복 rebuild 비용 무시 가능). 프리뷰가 없으면 no-op(드래그 중 이동 프레임이 없던 up).
+    fn commitSidebarDragPreview(self: *AppSession) void {
+        const dp = self.sidebar_drag_preview orelse return;
+        const plan = dp.plan;
+        const origin = dp.origin;
+        self.clearSidebarDragPreview();
+        switch (plan) {
+            .card => |c| _ = self.moveTab(origin, c.target_tab), // SG8d 카드
+            .group_sibling => |g| _ = self.moveGroupSibling(origin, g.insert_before), // SG5-1 형제 + SG5-4 빼기
+            .group_nest => |g| _ = self.moveGroupNesting(origin, g.insert_before, g.target_depth), // SG5-4 넣기
+            .none => {}, // 제자리 — 고스트만 제거(아래 rebuild가 원본 복귀)
+        }
+        self.rebuildSidebar() catch {}; // 고스트 제거 + 확정 레이아웃(move 내부 rebuild와 idempotent — no-op/none도 정리)
+        self.metal_dirty = true;
+    }
+
     /// 세로 사이드바 셀(탭 엔트리 밴드)을 다시 만든다 — 활성 탭 행에 하이라이트 밴드, 그리고 호버 슬롯이
     /// 활성과 다르면 그 행에 (더 약한) 호버 밴드를 emit한다. 탭 i는 행 i에 대응한다(한 탭=한 슬롯). 제목
     /// glyph는 여기서 안 만든다(tick의 제목 패스가 따로 더해 metal_buffer가 밴드와 머지). 사이드바가
@@ -17387,12 +17441,18 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     session.mouse(1, x, marker_card_y, 0, 0); // down → 마커 카드에서 드래그 arm
     try std.testing.expect(session.sidebar_drag_active);
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_drag_index); // t0(마커 A) 잡음
-    // 그룹 B 카드(row 5) 위로 드래그 → 그룹 A 통째가 B 뒤로. 하이라이트도 뜬다(옛 no-op이 아님).
+    // 그룹 B 카드(row 5) 위로 드래그 → **SG8e 비커밋 프리뷰**(self.tabs 불변, subtree 고스트). 옛 라이브 재배치 대신
+    // up이 마지막 plan(group_sibling)을 1회 커밋한다. 드롭 하이라이트(drop_slot)는 고스트+삽입선이 대체하므로 null.
     const groupb_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, slot_h, header_row_h, 0);
     const groupb_card_y: f64 = @floatFromInt(groupb_card_top + @as(i64, @intCast(slot_h / 2)));
+    var pre_grp: [8]*Tab = undefined; // 드래그 전 스냅샷(드래그 중 self.tabs 불변 확인)
+    for (session.tabs.items, 0..) |t, i| pre_grp[i] = t;
     session.mouse(2, x, groupb_card_y, 0, 0);
-    try std.testing.expect(session.sidebar_drop_slot != null); // 그룹 통째 드래그도 드롭 하이라이트 표시
-    // 결과 [t2(mk B), t0(mk A), t3, t1] — 그룹 A 구간 전체가 B 뒤로. B=[t2], A=[t0,t3,t1].
+    try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰 활성(subtree 고스트)
+    try std.testing.expect(session.sidebar_drop_slot == null); // 고스트+삽입선이 하이라이트 대체
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(pre_grp[i], t); // 드래그 중 self.tabs 불변
+    session.mouse(3, x, groupb_card_y, 0, 0); // up → 마지막 plan(group_sibling) 1회 커밋
+    // 결과 [t2(mk B), t0(mk A), t3, t1] — 그룹 A 구간 전체가 B 뒤로. B=[t2], A=[t0,t3,t1](라이브 시절과 동일 = 등가).
     try std.testing.expectEqual(t2, session.tabs.items[0]);
     try std.testing.expectEqual(t0, session.tabs.items[1]);
     try std.testing.expectEqual(t3, session.tabs.items[2]);
@@ -17400,8 +17460,8 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     try std.testing.expect(session.tabs.items[0].group_start != null); // B 마커(연속 파티션 유지)
     try std.testing.expect(session.tabs.items[1].group_start != null); // A 마커
     try std.testing.expect(session.tabs.items[2].group_start == null); // A 몸통
-    session.mouse(3, x, groupb_card_y, 0, 0); // up
     try std.testing.expect(!session.sidebar_drag_active);
+    try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨(원본 복귀)
     try std.testing.expect(session.sidebar_drop_slot == null); // up에 하이라이트 해제
 
     // ── SG8d 카드 드래그 고스트 프리뷰: 마커 없는 카드(t1, A 몸통)를 잡아 끌면 라이브 moveTab 대신 **비커밋 프리뷰**가
@@ -17584,20 +17644,27 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_group_drag_marker); // 마커 A(t0, index0)
     try std.testing.expect(!session.tabs.items[0].group_collapsed); // 아직 토글 안 됨(down만으론)
     const groupB_card_y = rowCenterY(session, 4, header_h, slot_h, header_row_h);
-    session.mouse(2, x, groupB_card_y, 0, 0); // drag 멀리 → threshold 초과 → 그룹 통째 이동
+    session.mouse(2, x, groupB_card_y, 0, 0); // drag 멀리 → threshold 초과 → 그룹 통째 드래그(SG8e 비커밋 프리뷰)
     try std.testing.expect(session.sidebar_group_drag_active); // 승격됨
-    try std.testing.expect(session.sidebar_drop_slot != null); // 드롭 하이라이트
-    // 결과 [t2(B), t3, t0(A), t1] — A 그룹 통째가 B 뒤로. 연속 파티션 유지.
+    try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰(subtree 고스트)
+    try std.testing.expect(session.sidebar_drop_slot == null); // 고스트+삽입선이 하이라이트 대체
+    // self.tabs는 드래그 중 불변 — 확정은 up. 원래 순서 [t0(A),t1,t2(B),t3] 유지.
+    try std.testing.expectEqual(t0, session.tabs.items[0]);
+    try std.testing.expectEqual(t1, session.tabs.items[1]);
+    try std.testing.expectEqual(t2, session.tabs.items[2]);
+    try std.testing.expectEqual(t3, session.tabs.items[3]);
+    try std.testing.expect(!session.tabs.items[0].group_collapsed); // 드래그는 접기 토글 아님
+    session.mouse(3, x, groupB_card_y, 0, 0); // up → 마지막 plan(group_sibling) 1회 커밋
+    // 결과 [t2(B), t3, t0(A), t1] — A 그룹 통째가 B 뒤로. 연속 파티션 유지(라이브 시절과 동일 = 등가).
     try std.testing.expectEqual(t2, session.tabs.items[0]);
     try std.testing.expectEqual(t3, session.tabs.items[1]);
     try std.testing.expectEqual(t0, session.tabs.items[2]);
     try std.testing.expectEqual(t1, session.tabs.items[3]);
     try std.testing.expect(session.tabs.items[0].group_start != null); // B 마커
     try std.testing.expect(session.tabs.items[2].group_start != null); // A 마커
-    try std.testing.expect(!session.tabs.items[0].group_collapsed); // 드래그는 접기 토글 아님
-    session.mouse(3, x, groupB_card_y, 0, 0); // up
     try std.testing.expect(!session.sidebar_group_drag_armed);
     try std.testing.expect(!session.sidebar_group_drag_active);
+    try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨
     try std.testing.expect(session.sidebar_drop_slot == null); // 하이라이트 해제
 
     // ── ② 헤더 클릭(threshold 미달 = move 없음) = 접기 토글. 헤더 B(현 row0)를 down→up(움직임 없음).
@@ -17819,14 +17886,19 @@ test "SG5-4: 그룹 헤더를 다른 그룹 헤더에 드롭하면 중첩 (mouse
     session.mouse(1, x, headerA_y, 0, 0); // down on 헤더 A → arm
     try std.testing.expect(session.sidebar_group_drag_armed);
     const headerB_y = rowCenterY(session, 3, header_h, slot_h, header_row_h);
-    session.mouse(2, x, headerB_y, 0, 0); // drag → threshold 초과 → 그룹 이동(헤더 드롭=중첩)
+    session.mouse(2, x, headerB_y, 0, 0); // drag → threshold 초과 → 헤더 드롭=중첩 plan의 **비커밋 프리뷰**(SG8e)
     try std.testing.expect(session.sidebar_group_drag_active);
+    try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰(subtree 고스트, B 자식 depth로 들여쓰기)
 
-    // 결과: A가 B의 자식(depth2). B는 최상위(depth1). t0(A 카드)=depth2.
+    // 드래그 중 self.tabs 불변 — sidebar_rows(hit-test 도메인)는 아직 중첩 전(원본 depth). 확정은 up.
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // B 최상위(불변)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // A 아직 최상위(프리뷰만 중첩)
+    session.mouse(3, x, headerB_y, 0, 0); // up → 마지막 plan(group_nest) 1회 커밋
+    // 결과: A가 B의 자식(depth2). B는 최상위(depth1). t0(A 카드)=depth2(라이브 시절과 동일 = 등가).
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // B 최상위
     try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // A → B 자식(중첩)
-    session.mouse(3, x, headerB_y, 0, 0); // up
     try std.testing.expect(!session.sidebar_group_drag_armed);
+    try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨
     try std.testing.expect(session.sidebar_drop_slot == null);
 }
 

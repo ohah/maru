@@ -2056,7 +2056,11 @@ pub const AppSession = struct {
                 // 번호 prefix는 제거됐으므로(이름줄에 번호 없음) caret = indent + query 폭.
                 const sp = self.buildChromeTokens().space;
                 const indent_cols: u32 = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
-                const caret_col = indent_cols + qcols;
+                // 이름줄이 사이드바 폭을 넘치면 렌더(buildSidebarDrawList editing_row)가 tail 앵커로 caret을 이름영역 **우경계**에
+                // 두므로, caret_col도 거기로 clamp해야 IME 후보창이 잘린 caret 아래(사이드바 안)에 온다 — 안 그러면 head-anchored
+                // 열이 사이드바 밖 터미널 위로 떠 조합창이 caret과 분리된다(.pane/.term의 세그먼트 우경계 clamp와 같은 규율).
+                const full_cols: u32 = self.sidebar_width_px / cw;
+                const caret_col = @min(indent_cols + qcols, full_cols -| 2);
                 const slot_h = self.sidebar_slot_height_px;
                 // 리네임 카드 줄 수: 이름줄(항상) + 상태줄(running·idle 에이전트면). 리네임 중 branch/path 보조줄은
                 // buildSidebarTitleDrawList가 항상 숨겨 줄 수에 안 든다. 렌더러(maru_metal_renderer.m)가 n줄 블록을 슬롯
@@ -2142,7 +2146,11 @@ pub const AppSession = struct {
                 const gindent_px = sp.group_indent_px;
                 const gindent_cols: u32 = if (gindent_px > 0) (@as(u32, gindent_px) + cw - 1) / cw else 0;
                 const hindent_cols: u32 = (if (hdr_depth > 0) hdr_depth - 1 else 0) * gindent_cols;
-                const caret_col: u32 = indent_cols + hindent_cols + 2 + qcols; // 사이드바 indent + 중첩 들여쓰기 + 삼각 + 공백 + 편집 폭
+                // head 위치 = 사이드바 indent + 중첩 들여쓰기 + 삼각 + 공백 + 편집 폭. 헤더 이름이 사이드바 폭을 넘치면
+                // 렌더가 tail 앵커(editing_row)로 caret을 이름영역 우경계에 두므로, 여기도 full_cols-2로 clamp해 IME 후보창이
+                // 사이드바 밖 터미널 위로 안 뜨게 한다(.workspace와 같은 규율 + main #5의 indent_cols 항 보존).
+                const full_cols: u32 = self.sidebar_width_px / cw;
+                const caret_col: u32 = @min(indent_cols + hindent_cols + 2 + qcols, full_cols -| 2);
                 const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, sr, self.sidebar_header_height_px, slot_h, hdr_h, self.sidebar_scroll_offset_px);
                 const block_off: i64 = @intCast((hdr_h -| ch) / 2); // 헤더 1줄 세로 중앙
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
@@ -6664,28 +6672,14 @@ pub const AppSession = struct {
     const SidebarSearchLine = struct { truncated: bool, query: []const u8, preedit: []const u8, caret_col: u16 };
     fn sidebarSearchLine(self: *const AppSession, max_col: u16) SidebarSearchLine {
         const ov = chrome.components.overlay_input;
-        const q = self.sidebar_search_input.query.items;
-        const pre = self.sidebar_search_input.preedit.items;
-        const start: u16 = sidebar_search_text_col;
-        const avail: u32 = (@as(u32, max_col) -| start) -| 1; // caret('|') 1칸 예약
-        const q_cols = ov.displayCols(q);
-        const pre_cols = ov.displayCols(pre);
-        if (q_cols + pre_cols <= avail) {
-            const caret: u16 = @intCast(@min(@as(u32, start) + q_cols + pre_cols, @as(u32, max_col)));
-            return .{ .truncated = false, .query = q, .preedit = pre, .caret_col = caret };
-        }
-        // 넘침: 선두 "…"(1칸) + query tail + preedit(활성 조합은 우선 통째 보존; 극단적으로 조합이 예산을 넘으면 조합도 tail).
-        const budget = avail -| 1; // "…" 1칸
-        var dq: []const u8 = "";
-        var dpre: []const u8 = pre;
-        if (pre_cols >= budget) {
-            dpre = ov.tailWindow(pre, budget).text;
-        } else {
-            dq = ov.tailWindow(q, budget - pre_cols).text;
-        }
-        const shown: u32 = 1 + ov.displayCols(dq) + ov.displayCols(dpre); // "…" + tail
-        const caret: u16 = @intCast(@min(@as(u32, start) + shown, @as(u32, max_col)));
-        return .{ .truncated = true, .query = dq, .preedit = dpre, .caret_col = caret };
+        // 창(truncated/query/preedit) 계산은 find·palette와 **같은 단일 출처**(inputLineView)를 재사용한다 — 오버플로 규칙이
+        // 한쪽만 바뀌어 드리프트하지 않게. 사이드바만 다른 건 caret 규약: '|' 글리프라 내용 **뒤**(query 끝+preedit)에 두므로,
+        // inputLineView가 주는 query-끝 caret 대신 보이는 내용 폭(선두 "…"+query+preedit)으로 caret을 따로 계산한다.
+        const line = ov.inputLineView(&self.sidebar_search_input, sidebar_search_text_col, max_col);
+        const lead: u32 = if (line.truncated) 1 else 0; // 선두 "…" 1칸
+        const shown: u32 = lead + ov.displayCols(line.query) + ov.displayCols(line.preedit);
+        const caret: u16 = @intCast(@min(@as(u32, sidebar_search_text_col) + shown, @as(u32, max_col)));
+        return .{ .truncated = line.truncated, .query = line.query, .preedit = line.preedit, .caret_col = caret };
     }
 
     /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 검색 줄(마지막
@@ -12206,15 +12200,17 @@ pub const AppSession = struct {
                     }
                     // rename 중인 Term 탭 인덱스(있으면) — 그 탭만 tail 앵커로 그려 편집 텍스트의 caret(문자열 끝)를 세그먼트 안에 유지한다.
                     var editing_tab: ?usize = null;
-                    for (lr.leaf.terms.items, 0..) |term, tab_i| {
+                    for (lr.leaf.terms.items) |term| {
                         // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목(번호 prefix 없음 — 모던 탭은
                         // 브라우저/VSCode/Warp처럼 제목만; Term 번호는 단축키에 매핑되지 않아 시각 군더더기였다, U-tab2).
                         // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
                         if (self.renamingTerm(term)) {
-                            editing_tab = tab_i;
                             const edit = self.renameEditText(self.allocator) catch continue;
                             defer self.allocator.free(edit);
                             const label = self.allocator.dupe(u8, edit) catch continue;
+                            // editing_tab은 **term 인덱스가 아니라 titles 인덱스**로 잡는다 — 앞 term의 append가 OOM으로 실패해
+                            // titles가 어긋나도 tail 앵커가 엉뚱한 탭에 안 걸리게(append 실패 시 len 불변 → 매칭 안 됨 = 안전).
+                            editing_tab = titles.items.len;
                             titles.append(self.allocator, label) catch self.allocator.free(label);
                         } else {
                             // running Term 탭은 라벨 앞에 1칸 정적 플래그 "● " prefix(owned) — 에이전트가 도는 바로 그 탭을 가리킨다.

@@ -176,19 +176,7 @@ pub fn view(
     // query 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합 상태가 오버레이에 즉시 보인다). 검색어가 텍스트 영역을
     // 넘치면 inputLineView가 tail 창(선두 "…")으로 오른쪽 정렬해 방금 친 글자·caret이 잘려 안 보이던 문제를 없앤다.
     const line = overlay_input.inputLineView(&state.input, prompt_cols, textCols(state, lay.panel_cols));
-    var runs_buf: [4]draw.Run = undefined;
-    var nr: usize = 0;
-    runs_buf[nr] = .{ .text = "Find: " };
-    nr += 1;
-    if (line.truncated) { // 앞이 잘렸음 — 프롬프트 뒤 "…"
-        runs_buf[nr] = .{ .text = "…" };
-        nr += 1;
-    }
-    runs_buf[nr] = .{ .text = line.query };
-    nr += 1;
-    runs_buf[nr] = .{ .text = line.preedit };
-    nr += 1;
-    const prompt_runs = try arena.dupe(draw.Run, runs_buf[0..nr]);
+    const prompt_runs = try overlay_input.promptRuns(arena, "Find: ", line); // 프롬프트+(…?)+query+preedit run 조립(palette와 공유)
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 
     // 우측 정렬 카운터 "cur/total"(매치 없으면 "0/0", 1-based 현재). 패널에 안 들어가면(좁음) 생략.

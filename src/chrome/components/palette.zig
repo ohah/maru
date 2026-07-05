@@ -172,19 +172,7 @@ pub fn view(
     // 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합이 팝업에 즉시 보인다). 긴 검색어가 패널을 넘치면 inputLineView가
     // tail 창(선두 "…")으로 오른쪽 정렬해 방금 친 글자·caret이 잘려 안 보이던 문제를 없앤다(find와 같은 규칙).
     const line = overlay_input.inputLineView(&state.input, prompt_cols, lay.panel_cols);
-    var runs_buf: [4]draw.Run = undefined;
-    var nr: usize = 0;
-    runs_buf[nr] = .{ .text = "> " };
-    nr += 1;
-    if (line.truncated) { // 앞이 잘렸음 — 프롬프트 뒤 "…"
-        runs_buf[nr] = .{ .text = "…" };
-        nr += 1;
-    }
-    runs_buf[nr] = .{ .text = line.query };
-    nr += 1;
-    runs_buf[nr] = .{ .text = line.preedit };
-    nr += 1;
-    const prompt_runs = try arena.dupe(draw.Run, runs_buf[0..nr]);
+    const prompt_runs = try overlay_input.promptRuns(arena, "> ", line); // 프롬프트+(…?)+query+preedit run 조립(find와 공유)
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 
     // 결과 행: 제목(col 2부터) + 우측 정렬 바인딩 표시. 폭은 EAW(displayCols)로 — 한글 제목/바인딩도 안 잘린다.

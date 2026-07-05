@@ -3538,12 +3538,21 @@ pub const AppSession = struct {
         // heap-pin이라 포인터 안정). split이 이 leaf를 split 노드로 나눈다.
         tab.tree = .{ .leaf = pane };
 
-        try self.tabs.append(self.allocator, tab);
-        errdefer _ = self.tabs.pop();
-        try self.surface_ptrs.append(self.allocator, &pane.activeTerm().surface); // 탭 대표 = 활성 panel의 활성 Term surface
+        // **끝 append가 아니라 비고정 리전 첫 group_start 마커 직전**(= 그 리전 최상위 구간 끝)에 끼운다 — 리스트 끝 탭은
+        // 그룹이 하나라도 있으면 마지막 그룹의 멤버로 위치 파생(§2.1)돼 **새 워크스페이스가 그룹에 흡수**된다(그러면 그 카드
+        // 우클릭 pin이 cardPinRole=.local로 라우팅돼 그룹 안으로 float — 사용자엔 "최상위 카드가 그룹에 흡수"로 보인다).
+        // promotePaneToNewWorkspace(3088)와 **같은 결·firstGroupStartInRegion 공유** — 새 탭은 비고정(Tab 기본 pinned=false)이라
+        // 비고정 리전 [pinned_count, len)의 첫 마커 앞에 넣어 고정 프리픽스를 침범하지 않는다. 그룹 전무(init 첫 탭 포함)면
+        // firstGroupStartInRegion=null → 끝(=기존 append 동작 byte-identical). 두 병렬 배열 capacity를 **먼저** 예약해
+        // insert를 infallible로 만든다(둘 다 성공해야 삽입 — 예약 실패는 위 errdefer가 pane/tab을 무른다, 부분 삽입 없음).
+        try self.tabs.ensureUnusedCapacity(self.allocator, 1);
+        try self.surface_ptrs.ensureUnusedCapacity(self.allocator, 1);
+        const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse self.tabs.items.len;
+        self.tabs.insertAssumeCapacity(insert_at, tab);
+        self.surface_ptrs.insertAssumeCapacity(insert_at, &pane.activeTerm().surface); // 탭 대표 = 활성 panel의 활성 Term surface
         // surface_ptrs가 realloc됐을 수 있으니 app_window.tabs를 새 items로 재바인딩(stale 슬라이스 방지).
         self.app_window.tabs = self.surface_ptrs.items;
-        self.app_window.active_tab = self.tabs.items.len - 1;
+        self.app_window.active_tab = insert_at;
         self.recomputeActivePaneRect(); // 새 탭이 활성이 됐으니 좌표 origin 갱신(init 중엔 사이드바 폭이 아직
         // 0이라 init 끝의 recompute가 다시 잡고, post-init newTab은 여기서 바로 맞는다)
         // 탭 집합/활성이 바뀌었으니 사이드바 셀을 다시 만든다. 실패는 탭 생성을 무르지 않고(탭은 이미
@@ -4931,7 +4940,16 @@ pub const AppSession = struct {
         const e = self.groupSubtreeEnd(mi, null, null); // 토글 전 subtree(마커·멤버 pin 일치라 완전 범위)
         const new_pinned = !marker.pinned;
         var k = mi;
-        while (k < e) : (k += 1) self.tabs.items[k].pinned = new_pinned; // 마커+멤버 pin 직접 동기(§12.5 정합의 유일한 flip 동기원)
+        while (k < e) : (k += 1) {
+            self.tabs.items[k].pinned = new_pinned; // 마커+멤버 pin 직접 동기(§12.5 정합의 유일한 flip 동기원)
+            // **그룹 고정 해제(off) = 그룹 pin 상태 리셋**(사용자 리포트 버그2): 멤버의 그룹-로컬 pin(§13)도 함께 클리어한다.
+            // 안 그러면 로컬 pin 멤버가 `sidebarRowShowsPin`의 local_pinned 선두 분기(§13.6)로 **📌를 유지**해, 그룹을 통째
+            // 해제했는데도 자식이 개별 고정(📌)으로 남는다("해제하면 그냥 그룹 멤버로 복귀해야"). 로컬 pin은 그룹째 고정과
+            // **직교**(§13.1)라 **고정 켜는 동안엔 보존**(위 keystone float 유지)하되, **끄는 순간** 그룹을 깨끗한 멤버 상태로
+            // 되돌린다(리셋 시맨틱 — subtree [mi,e) 통째라 중첩 자식 로컬 pin까지 함께 리셋). 아래 floatLocalPins가 이제 로컬
+            // pin 0개를 보고 재배열을 안 해, 멤버는 해제 직전 위치(마커 직후)에 그대로 남되 📌만 사라진다.
+            if (!new_pinned) self.tabs.items[k].local_pinned = false;
+        }
         self.stablePartitionPinned(); // 그룹 블록을 목표 리전 경계로 안착(프리픽스 불변식 — 복원과 같은 정렬)
         self.normalizePinnedFromGroups(); // 안착 후 canonical 확인(멤버 이미 동기 → idempotent)
         self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 (3) — 항상 stablePartitionPinned 뒤, keystone 보존)
@@ -19957,18 +19975,31 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     try std.testing.expectEqual(@as(usize, 1), header_pins); // 그룹째 고정 헤더 하나
     try std.testing.expectEqual(@as(usize, 2), member_pins); // 로컬 pin 멤버 둘
 
-    // ── 재토글(그룹째 고정 해제): 로컬 pin은 **직교**라 유지된다(그룹만 비고정으로 돌아가고 float는 안 풀림).
+    // ── 재토글(그룹째 고정 해제 = 그룹 리셋): 멤버의 로컬 pin도 **함께 클리어**된다(사용자 리포트 버그2 — §13.1 리셋
+    //    시맨틱). 로컬 pin은 그룹째 고정과 직교라 **고정 켜는 동안엔 보존**(위 keystone)하되, **끄는 순간** 그룹을 깨끗한
+    //    멤버 상태로 되돌려 자식이 개별 📌로 남지 않게 한다. self.tabs 위치는 float된 자리(마커 직후)에 그대로 남되(재배열
+    //    안 함) local_pinned=false·📌 억제로 "그냥 그룹 멤버"가 된다.
     session.toggleGroupPin(t1);
     try std.testing.expect(!t1.pinned); // 그룹째 고정 해제
     try std.testing.expect(!t4.pinned and !t5.pinned); // 멤버 파생 캐시도 해제
-    try std.testing.expect(t4.local_pinned and t5.local_pinned); // ★ 로컬 pin은 직교 → 보존
-    try std.testing.expectEqual(t4, session.tabs.items[1]); // ★ 여전히 마커 직후(subtree float 유지 — GL 축)
+    try std.testing.expect(!t4.local_pinned and !t5.local_pinned); // ★ 그룹 해제 = 로컬 pin 리셋(개별 📌 제거, 버그2)
+    try std.testing.expectEqual(t4, session.tabs.items[1]); // 위치는 float된 자리에 남음(재배열 없음 — 데이터만 클리어)
     try std.testing.expectEqual(t5, session.tabs.items[2]);
     // C2 그룹째 고정/해제는 top-card 위치의 완전 round-trip이 **아니다**(GL과 직교): 고정 때 프리픽스로 옮기며 비고정 t0를
-    // 뒤로 밀었고(위), 해제하면 t0가 그룹 A 꼬리에 남아 위치 파생상 A로 흡수된다(A=[0,6)). 이는 C2(§12) 성질이지 GL 로컬
-    // pin 회귀가 아니다 — 로컬 float(t4·t5 마커 직후)는 위에서 보인 대로 정확히 보존된다. 로컬 pin 멤버는 여전히 A 소속.
+    // 뒤로 밀었고(위), 해제하면 t0가 그룹 A 꼬리에 남아 위치 파생상 A로 흡수된다(A=[0,6)). 이는 C2(§12) 성질이다.
+    // 로컬 pin 멤버(였던 t4·t5)는 여전히 A 소속(위치 파생)이고, 이제 📌 없는 평범한 멤버다.
     try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(1).?); // t4의 enclosing 마커 = t1(index0)
     try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(2).?); // t5의 enclosing 마커 = t1
+    // ★ 렌더 확인: 해제 후 어떤 멤버 카드도 📌를 안 그린다(개별 📌 0 — 버그2 desired outcome).
+    session.recomputeVisibleTabs();
+    var member_pins_after: usize = 0;
+    for (session.sidebar_rows.items) |r| switch (r) {
+        .card => if (session.sidebarRowShowsPin(r)) {
+            member_pins_after += 1;
+        },
+        .group_header => {},
+    };
+    try std.testing.expectEqual(@as(usize, 0), member_pins_after); // 해제 후 카드 📌 0(그냥 그룹 멤버)
 }
 
 // GL4(b) — 중첩(자식 subgroup 안 leaf 멤버 로컬 pin)의 하드닝(docs/sidebar-groups.md §13.3·§13.6.1·§13.8). `floatLocalPinsAllGroups`
@@ -20181,6 +20212,244 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         };
         try std.testing.expectEqual(mi + 1, t2_idx); // ★ 마커 직후(subtree-로컬 float 보존)
     }
+}
+
+// ── pin 회귀 매트릭스(사용자 경로 — cardPinRole 라우팅 + projectRowsCore 실제 row 소속) ─────────────────────────
+// **왜 필요한가(그룹핀 리뷰 #9 갭)**: #9는 "self.tabs 인덱스"만 단언했고 **고정 그룹**(toggleGroupPin) 앞 top카드 흡수만
+// 다뤘다. 실제 재발 경로는 (1) **비고정 그룹**이 있을 때 새 워크스페이스(Cmd+T)가 끝에 append돼 위치 파생상 마지막 그룹
+// 멤버로 **흡수**되고, 그 카드 우클릭 pin이 cardPinRole=.local로 **그룹 안 float**되는 것 — index-only 단언은 이걸 놓친다
+// (흡수는 **렌더 소속**=projectRowsCore depth/enclosing로만 잡힌다). 이 매트릭스는 두 축을 **실제 사용자 경로**로 통과한다:
+// cardPinRole(우클릭 진입점 라우팅) + projectRowsCore(렌더된 카드가 그룹 밖 최상위인가).
+
+/// 카드 `tab`이 **그룹 밖 최상위 고정 카드로 렌더**되는지 사용자 경로로 단언한다(pin 회귀 매트릭스 공용). self.tabs 인덱스가
+/// 아니라 (1) cardPinRole=.individual(우클릭 pin이 개별 전역 pin으로 라우팅), (2) enclosing 마커 null·tabIsInGroup false
+/// (소속 파생상 그룹 밖), (3) projectRowsCore가 이 카드를 depth 0·비파생·📌로 방출(렌더 소속=최상위)을 함께 본다.
+fn expectCardTopLevelPinned(session: *AppSession, tab: *Tab) !void {
+    try std.testing.expect(session.cardPinRole(tab) == .individual); // 우클릭 pin = 개별 전역 pin(그룹 위임/로컬 아님)
+    try std.testing.expect(tab.group_start == null); // 마커 아님
+    try std.testing.expect(tab.pinned); // 개별 pin 상태
+    var idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == tab) {
+        idx = i;
+        break;
+    };
+    try std.testing.expect(session.enclosingGroupMarkerIndex(idx) == null); // 어느 그룹에도 안 속함
+    try std.testing.expect(!session.tabIsInGroup(tab)); // 그룹 밖(흡수 없음)
+    session.recomputeVisibleTabs();
+    var found = false;
+    for (session.sidebar_rows.items) |r| switch (r) {
+        .card => |c| if (c.tab == idx) {
+            found = true;
+            try std.testing.expectEqual(@as(u8, 0), c.depth); // ★ 렌더 depth 0 = 최상위(그룹 흡수 없음)
+            try std.testing.expect(!c.pin_derived); // 개별 pin(그룹 파생 캐시 아님)
+            try std.testing.expect(!c.local_pinned); // 로컬 pin 아님(최상위엔 무의미)
+            try std.testing.expect(session.sidebarRowShowsPin(r)); // ★ 📌 표시(개별 pin 카드)
+        },
+        .group_header => {},
+    };
+    try std.testing.expect(found); // 카드가 실제로 렌더됨(숨김 아님)
+}
+
+/// 우클릭 "위치 고정" 실제 진입점을 태운다(라벨·dispatch 공유 cardPinRole 라우팅) — acceptContextMenu의 ctx_menu_pin 경로.
+fn rightClickPin(session: *AppSession, tab: *Tab) void {
+    session.context_menu_target = .{ .workspace = tab };
+    session.chrome_host.context_menu.selected = ctx_menu_pin;
+    session.acceptContextMenu();
+}
+
+/// 워크스페이스 카드 우클릭 메뉴의 pin 라벨(cardPinRole 분기 결과) — context_menu_target 세팅 후 buildContextMenuItems 공유.
+fn pinMenuLabel(session: *AppSession, tab: *Tab) []const u8 {
+    session.context_menu_target = .{ .workspace = tab };
+    return session.buildContextMenuItems()[ctx_menu_pin];
+}
+
+test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 배치 모두 그룹 밖 최상위 유지(cardPinRole=.individual·projectRows depth0·enclosing null·📌)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // ── (a) 그룹 없음: 순수 최상위 카드끼리 pin은 위치만.
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        inline for (0..1) |_| _ = try session.newTab(); // [t0,t1]
+        const x = session.tabs.items[0];
+        try std.testing.expectEqualStrings("위치 고정", pinMenuLabel(session, x));
+        rightClickPin(session, x);
+        try expectCardTopLevelPinned(session, x);
+    }
+
+    // ── (b) 비고정 그룹 **앞** 최상위 카드: [X, G(비고정), A, B]. pin X → 그룹 밖 유지.
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+        session.createGroupForTab(session.tabs.items[1]); // G=[t1,t2,t3], t0=최상위
+        const x = session.tabs.items[0];
+        rightClickPin(session, x);
+        try expectCardTopLevelPinned(session, x);
+    }
+
+    // ── (c) **비고정 그룹 뒤 = 새 워크스페이스**(버그1 핵심): 비고정 그룹이 있을 때 Cmd+T로 새 탭을 만들면 끝 append로
+    //    마지막 그룹에 흡수되던 버그. createTab 삽입점을 첫 그룹 앞으로 고쳐(promotePaneToNewWorkspace 동형) 새 탭이
+    //    **최상위**로 뜬다. cardPinRole=.individual(그룹 내 위치 고정 아님)·pin 후 그룹 밖 유지. 옛 버그면 .local→흡수(fail).
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        inline for (0..1) |_| _ = try session.newTab(); // [t0,t1]
+        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1]
+        const y = try session.newTab(); // ★ 그룹 존재 시 새 워크스페이스 — 흡수 방지로 그룹 **앞**에 삽입돼야
+        try std.testing.expect(session.cardPinRole(y) == .individual); // ★ 흡수 안 됨(옛 버그면 .local)
+        try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null); // ★ y가 index0(그룹 앞)·그룹 밖
+        try std.testing.expectEqualStrings("위치 고정", pinMenuLabel(session, y)); // "그룹 내 위치 고정" 아님
+        rightClickPin(session, y);
+        try expectCardTopLevelPinned(session, y);
+    }
+
+    // ── (d)/(e) 고정 그룹과 최상위 카드: 고정 그룹 존재 시 새 top카드(비고정 리전)를 pin → 고정 그룹 **앞**으로 안착
+    //    (#1195 의도 — subtree 뒤 흡수 방지). "고정 그룹 뒤(비고정 리전)"→pin→"고정 그룹 앞"(둘 다 그룹 밖 최상위).
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1,t2]
+        session.toggleGroupPin(session.tabs.items[0]); // G 고정 → 프리픽스
+        const y = try session.newTab(); // 새 top카드 — 고정 프리픽스 뒤(비고정 리전)
+        try std.testing.expect(session.cardPinRole(y) == .individual); // 비고정 리전 top카드(고정 그룹 뒤) = 개별
+        rightClickPin(session, y); // pin → 고정 그룹 **앞**으로(흡수 없음)
+        try expectCardTopLevelPinned(session, y);
+        // y가 고정 그룹 마커보다 **앞**(subtree 밖).
+        var yidx: usize = 0;
+        var gidx: usize = 0;
+        for (session.tabs.items, 0..) |t, i| {
+            if (t == y) yidx = i;
+            if (t.group_start != null) gidx = i;
+        }
+        try std.testing.expect(yidx < gidx); // ★ 고정 그룹 앞(subtree 안 아님)
+    }
+
+    // ── 재토글(on→off): pin한 최상위 카드를 다시 우클릭 해제 → 개별 pin 풀림(흡수/잔류 없음, 그냥 top카드).
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+        session.createGroupForTab(session.tabs.items[1]); // G=[t1,t2], t0=최상위
+        const x = session.tabs.items[0];
+        rightClickPin(session, x);
+        try expectCardTopLevelPinned(session, x);
+        try std.testing.expectEqualStrings("고정 해제", pinMenuLabel(session, x));
+        rightClickPin(session, x); // 해제
+        try std.testing.expect(!x.pinned); // 개별 pin 풀림
+        try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null); // 여전히 최상위(그룹 흡수 없음)
+        try std.testing.expect(x.group_start == null and !x.local_pinned); // 마커 아님·로컬 pin 아님
+    }
+}
+
+test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤버 pinned=1·📌억제, 해제 멤버 pinned=0·local_pinned=0·📌 0(그냥 그룹 멤버)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    const countCardPins = struct {
+        fn f(s: *AppSession) usize {
+            s.recomputeVisibleTabs();
+            var n: usize = 0;
+            for (s.sidebar_rows.items) |r| switch (r) {
+                .card => if (s.sidebarRowShowsPin(r)) {
+                    n += 1;
+                },
+                .group_header => {},
+            };
+            return n;
+        }
+    }.f;
+
+    // ── 기본(로컬 pin 없음): 고정→멤버 pinned=1·📌억제(헤더 인디케이터만)·해제→멤버 pinned=0·📌 0.
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        inline for (0..2) |_| _ = try session.newTab();
+        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1,t2]
+        const g = session.tabs.items[0];
+        session.toggleGroupPin(g);
+        try std.testing.expect(g.pinned and session.tabs.items[1].pinned and session.tabs.items[2].pinned); // 멤버 pinned=1
+        try std.testing.expectEqual(@as(usize, 0), countCardPins(session)); // 카드 📌 0(멤버 억제·헤더 인디케이터가 표시)
+        session.toggleGroupPin(g); // 해제
+        try std.testing.expect(!g.pinned and !session.tabs.items[1].pinned and !session.tabs.items[2].pinned); // 멤버 pinned=0
+        try std.testing.expect(!session.tabs.items[1].local_pinned and !session.tabs.items[2].local_pinned); // local_pinned 오염 없음
+        try std.testing.expectEqual(@as(usize, 0), countCardPins(session)); // ★ 해제 후 카드 📌 0(그냥 그룹 멤버)
+        try std.testing.expect(session.tabIsInGroup(session.tabs.items[1])); // 여전히 그룹 멤버(그냥 그룹 안)
+    }
+
+    // ── ★ 버그2 핵심: 멤버가 **로컬 pin**된 상태로 그룹째 고정 → 해제 시, 로컬 pin(📌)이 잔류하면 자식이 개별 고정으로
+    //    남는다. 해제 = 그룹 리셋이라 멤버 local_pinned도 클리어돼 카드 📌 0이어야 한다("그냥 그룹 멤버로 복귀").
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        inline for (0..2) |_| _ = try session.newTab();
+        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1,t2]
+        const g = session.tabs.items[0];
+        const member = session.tabs.items[2];
+        session.toggleLocalPin(member); // 멤버 로컬 pin(📌·마커 직후 float)
+        try std.testing.expect(member.local_pinned);
+        try std.testing.expectEqual(@as(usize, 1), countCardPins(session)); // 로컬 pin 카드 1개 📌(비고정 그룹)
+        session.toggleGroupPin(g); // 그룹째 고정(로컬 pin은 켜는 동안 보존 — keystone)
+        try std.testing.expect(member.local_pinned); // 고정 중 보존
+        session.toggleGroupPin(g); // ★ 해제 = 그룹 리셋
+        try std.testing.expect(!member.pinned); // 파생 pin 해제
+        try std.testing.expect(!member.local_pinned); // ★ 로컬 pin도 클리어(버그2 fix — 개별 📌 잔류 방지)
+        try std.testing.expectEqual(@as(usize, 0), countCardPins(session)); // ★ 해제 후 카드 📌 0(그냥 그룹 멤버)
+        try std.testing.expect(session.tabIsInGroup(member)); // 여전히 그룹 멤버(그룹 밖으로 안 나감)
+    }
+}
+
+test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤버 로컬 pin 공존 — 렌더 소속·📌 카운트(축 3개 독립)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 12, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    // t0=최상위 개별 pin 카드, A=[t1(마커), t2, t3] 그룹째 고정, t3=로컬 pin 멤버.
+    session.createGroupForTab(session.tabs.items[1]); // A=[t1,t2,t3]
+    const top = session.tabs.items[0];
+    const marker = session.tabs.items[1];
+    const lp = session.tabs.items[3];
+    session.toggleLocalPin(lp); // A 멤버 로컬 pin
+    rightClickPin(session, top); // t0 개별 전역 pin(.individual)
+    session.toggleGroupPin(marker); // A 그룹째 고정
+    // 세 축 독립: 개별 pin(top.pinned)·그룹째(marker.pinned)·로컬(lp.local_pinned) 공존.
+    try std.testing.expect(top.pinned and top.group_start == null); // 개별 최상위
+    try std.testing.expect(marker.pinned); // 그룹째 고정 권위
+    try std.testing.expect(lp.pinned and lp.local_pinned); // 파생 캐시 + 로컬 pin
+    try expectCardTopLevelPinned(session, top); // 최상위 카드는 흡수 없이 그룹 밖 최상위 📌
+    // 렌더 📌 카운트: 최상위 카드 1(개별) + 헤더 1(그룹째 인디케이터) + 로컬 pin 멤버 1 = 카드 2·헤더 1.
+    session.recomputeVisibleTabs();
+    var card_pins: usize = 0;
+    var header_pins: usize = 0;
+    for (session.sidebar_rows.items) |r| switch (r) {
+        .card => if (session.sidebarRowShowsPin(r)) {
+            card_pins += 1;
+        },
+        .group_header => if (session.sidebarRowShowsPin(r)) {
+            header_pins += 1;
+        },
+    };
+    try std.testing.expectEqual(@as(usize, 2), card_pins); // 최상위 개별 + 로컬 pin 멤버
+    try std.testing.expectEqual(@as(usize, 1), header_pins); // 그룹째 고정 헤더 인디케이터
 }
 
 test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) — 위/아래·최상위·끝 + 자기그룹 no-op + 연속 파티션" {

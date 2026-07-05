@@ -59,6 +59,11 @@ self.tabs:  t0    t1          t2   t3          t4   t5    t6
 - **불변식(연속 파티션)**: 그룹은 다음 그룹 시작 마커 전까지 이어진다. 최상위 카드는 **첫 그룹 시작 이전 구간에만** 온다
   (한 번 그룹이 시작되면 리스트 끝까지 그룹 안 — 중간에 최상위로 "복귀"하는 경계는 두지 않는다). pinned의 `[고정][비고정]`
   파티션(session_model.zig:88, `moveTab` 3967)을 N-구간으로 일반화한 것이다.
+- **새 워크스페이스 삽입점(끝 append 금지)**: 위 불변식의 직접 귀결로, **새 탭을 리스트 끝에 append하면 그룹이 하나라도
+  있을 때 마지막 그룹의 멤버로 흡수**된다(사용자엔 "새 워크스페이스가 그룹에 빨려들어감" — 그 카드 우클릭 pin은
+  `cardPinRole=.local`로 그룹 안 float까지 된다). 그래서 새 워크스페이스는 **비고정 리전의 첫 그룹 마커 직전**
+  (`firstGroupStartInRegion(pinned_count, len)`)에 끼워 항상 최상위로 뜬다 — `promotePaneToNewWorkspace`와 `createTab`
+  (Cmd+T·사이드바 +)이 이 단일 삽입점을 공유한다(그룹 전무면 끝 = byte-identical).
 - **다단계(중첩) 불변식(SG5-3)**: 중첩은 위 규칙을 **depth로 일반화**한다. `Tab.group_depth`(1=최상위 그룹·2=중첩·…)로
   각 마커의 깊이를 두고, projectRows가 `self.tabs`를 스택으로 훑어 **각 카드의 depth = 자기 위에서 유효한 가장 가까운
   마커(스택 top)의 depth**로 파생한다. 핵심 제약: **부모 그룹의 직접 카드는 자식 그룹보다 앞에 온다** —
@@ -945,6 +950,15 @@ preview_rows 공용 order-aware 투영)에서 마커 **자기 카드** row만 �
 프리픽스로 재float)를 세 전이 지점(`ungroupTab`·`removeFromGroupForTab`·`commitSidebarDragPreview`)이 각자 float **뒤** 1회 부른다.
 commit 지점의 스윕은 §13.5 확정 clamp가 로컬 pin 멤버의 실제 eject를 막으므로 top-level 전이한 카드의 stale/desync를 지우는
 **불변식 net**이다. 헤드리스: GL3(b1/b2/b3).
+
+**그룹째 고정 해제 = 로컬 pin 리셋(사용자 피드백 정정 — 초기 §13.1 "완전 직교" 보강)**: 로컬 pin은 그룹째 고정(§12)과
+**직교하는 축**이라 그룹을 고정하는 동안엔 보존된다(keystone §13.4 — float가 전역 partition에 안 흩뜨려짐). 다만 **`toggleGroupPin`
+으로 그룹을 통째 해제(off)하는 순간**엔 그 그룹 subtree(중첩 자식 포함)의 멤버 `local_pinned`도 함께 **클리어**한다 — 사용자가
+"그룹째 고정을 풀었는데 자식이 개별 📌로 남는다"고 리포트했고, 기대는 "그룹 고정만 풀리고 멤버는 **그냥 그룹 멤버로 복귀**(개별
+📌 없음)"였다. 즉 **직교는 '고정 켜는 동안'의 성질**이고, **해제는 그룹을 깨끗한 멤버 상태로 되돌리는 리셋 시맨틱**이다(고정 카드가
+개별 pin을 유지하는 것과 대조 — 그건 `Tab.pinned` 개별 축이라 그룹 토글과 무관). 위치는 float된 자리에 남되 `local_pinned=false`·
+📌 억제로 평범한 멤버가 된다(재배열 없음). 배선: `toggleGroupPin`의 off 경로가 pin flip 루프에서 `local_pinned:=false`를 함께 세팅.
+헤드리스: GL4(a) 재토글 + `사용자 리포트 버그2` 회귀.
 
 ### 13.8 범위 — **leaf 멤버 로컬 pin만**
 

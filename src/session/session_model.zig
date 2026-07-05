@@ -107,6 +107,14 @@ pub fn Model(comptime Rt: type) type {
             /// §2.1 위치 파생과 동형). 헤더 밴드 tint·소속 카드 좌측 accent 막대에 실린다. 개별 카드 background_color와는
             /// 다른 층(그룹 색=헤더+막대, 카드 배경=별도 tint)이라 서로 안 덮는다. workspace.v1 영속(group-color). 기본 0.
             group_color: u32 = 0,
+            /// 그룹-로컬 pin(GL — docs/sidebar-groups.md §13). 이 카드가 **자기 그룹 subtree 안에서** 위로(마커 직후)
+            /// 고정됐는가(그룹 안 leaf 멤버 전용). 전역 핀(Tab.pinned = [고정][비고정] 리전, §12)과 **직교하는 별개 축**이다:
+            /// pinned=전역 프리픽스, local_pinned=한 그룹 subtree [marker, end) 내부 순서. group_start!=null(마커)·top-level
+            /// 카드에선 무의미(마커=그룹 고정 권위·top카드=개별 pin은 Tab.pinned가 든다). **전역 파티션 머신**
+            /// (countPinnedTabs·stablePartitionPinned·clampMoveToGroup·normalizePinnedFromGroups)은 이 필드를 **안 읽는다**
+            /// — 멤버 pinned를 재해석하면 전역 partition이 그룹을 shred(C3)하므로 새 필드로 격리한다(§13). stablePartitionSubtree만
+            /// 이 값으로 subtree 내부를 물리 재배열한다. workspace.v1 영속(local-pinned, 기본 false=키 생략). destroyTab 무관(스칼라).
+            local_pinned: bool = false,
 
             /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
             pub fn activePane(self: *Tab) *Pane {

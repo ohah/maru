@@ -4601,6 +4601,99 @@ pub const AppSession = struct {
         }.fill);
     }
 
+    /// 그룹-로컬 pin(GL §13) — 마커 `mi`의 subtree `[mi+1, groupSubtreeEnd(mi))` **안에서만** `local_pinned` 직접 멤버
+    /// 카드를 마커 직후로 stable float한다(docs/sidebar-groups.md §13 GL1). 전역 pin(stablePartitionPinned = [고정][비고정]
+    /// 2리전)과 **직교하는 축**이다 — 여긴 한 그룹 subtree 내부 순서만 바꾸고 전역 파티션·소속(§2.1 그룹 연속 I2·중첩 I3)은
+    /// 불변이다(재배열이 [mi+1, e) **안에서만** 일어나 subtree 끝·형제/얕은 마커 경계를 안 넘음 — keystone 보조정리 §13).
+    ///
+    /// **unit-aware(§13 보강5)**: 재배열 단위 = subtree의 **직접 top-level 단위**다. 직접 멤버 카드(group_start==null)는
+    /// 크기 1 단위라 `local_pinned`면 float 대상이고, **자식 subgroup은 통째 블록**(`[j, groupSubtreeEnd(j))`)으로 하나의
+    /// 단위라 절대 안 쪼개진다(moveGroupRange/groupBlockPermutation 결). GL1 범위=leaf 멤버라 subgroup 자체는 float 안 하고
+    /// pass2에서 원순서로 실린다. 자식 subgroup **안** 멤버의 로컬 float는 그 자식 마커에 이 함수를 **따로** 부르는
+    /// caller(GL2 배선) 몫이며, 그땐 이 재배열로 자식 마커 인덱스가 밀리므로 **heap-pin `*Tab` 포인터로 재탐색**해야 한다
+    /// (인덱스 무효화 회피). reorderTabs가 활성 *Tab을 추적·in-place memcpy하니 활성 탭은 자동 보정된다.
+    ///
+    /// **stable**: float끼리·나머지끼리 상대순서 유지(전역 stablePartitionPinned와 동형). 마커 자신(index mi)은 앵커라 제자리.
+    /// **드래그 게이트(§13 보강6)**: `sidebar_drag_preview != null`이면 early-return — SG8 "드래그 내내 self.tabs 불변"을
+    /// 보존한다(normalize 게이트와 동일 규율). **동작 보존**: subtree에 `local_pinned` 직접 멤버가 없으면 alloc 없이 no-op
+    /// (byte-identical) — 현재 모든 탭 local_pinned=false라 GL1은 전 호출이 no-op이다. rebuild/dirty는 caller 몫(GL2).
+    fn stablePartitionSubtree(self: *AppSession, mi: usize) void {
+        if (self.sidebar_drag_preview != null) return; // SG8: 프리뷰 중 self.tabs 불변(드래그 종료 후에만 float)
+        const len = self.tabs.items.len;
+        if (mi >= len or self.tabs.items[mi].group_start == null) return; // mi는 그룹 시작 마커여야 한다
+        const e = self.groupSubtreeEnd(mi, null, null); // subtree 끝(pin-인식·중첩 자식 통째 포함)
+        // early-out: 직접 멤버 카드 중 local_pinned가 없으면 재배열 불필요(alloc 회피, byte-identical). 직접 단위 walk로
+        // 자식 subgroup은 통째 skip해 그 안 카드는 안 본다(subgroup-as-member·자식 멤버는 GL1 대상 아님 — leaf 직접 멤버만).
+        var has_local = false;
+        var scan = mi + 1;
+        while (scan < e) {
+            if (self.tabs.items[scan].group_start != null) {
+                scan = self.groupSubtreeEnd(scan, null, null); // 자식 subtree 통째 skip
+            } else {
+                if (self.tabs.items[scan].local_pinned) {
+                    has_local = true;
+                    break;
+                }
+                scan += 1;
+            }
+        }
+        if (!has_local) return; // no-op — 로컬 pin 직접 멤버 없음(전 호출 no-op = byte-identical, GL1 회귀 0)
+        // reorderTabs(활성 *Tab 추적·임시 버퍼·in-place memcpy)로 [mi+1, e)만 순열, 밖은 identity. ctx=[mi, e].
+        _ = self.reorderTabs(@as([2]usize, .{ mi, e }), struct {
+            fn fill(ctx: [2]usize, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
+                const m = ctx[0];
+                const end = ctx[1];
+                var w: usize = 0;
+                // identity 프리픽스 [0, m] — 마커(앵커) 포함·그 앞 전부 제자리.
+                while (w <= m) : (w += 1) {
+                    new_tabs[w] = s.tabs.items[w];
+                    new_surfaces[w] = s.surface_ptrs.items[w];
+                }
+                // pass1: local_pinned 직접 멤버 카드(상대순서 유지)를 마커 직후로 float. 자식 subgroup은 통째 skip.
+                var j = m + 1;
+                while (j < end) {
+                    if (s.tabs.items[j].group_start != null) {
+                        j = s.groupSubtreeEnd(j, null, null);
+                    } else {
+                        if (s.tabs.items[j].local_pinned) {
+                            new_tabs[w] = s.tabs.items[j];
+                            new_surfaces[w] = s.surface_ptrs.items[j];
+                            w += 1;
+                        }
+                        j += 1;
+                    }
+                }
+                // pass2: 나머지(비-float 직접 카드 + 자식 subgroup 통째, 원 상대순서 유지).
+                j = m + 1;
+                while (j < end) {
+                    if (s.tabs.items[j].group_start != null) {
+                        const unit_end = s.groupSubtreeEnd(j, null, null);
+                        while (j < unit_end) : (j += 1) { // 자식 subtree 통째 이동(I2/I3 — 쪼개지 않음)
+                            new_tabs[w] = s.tabs.items[j];
+                            new_surfaces[w] = s.surface_ptrs.items[j];
+                            w += 1;
+                        }
+                    } else {
+                        if (!s.tabs.items[j].local_pinned) {
+                            new_tabs[w] = s.tabs.items[j];
+                            new_surfaces[w] = s.surface_ptrs.items[j];
+                            w += 1;
+                        }
+                        j += 1;
+                    }
+                }
+                // identity 접미 [end, len).
+                j = end;
+                while (j < s.tabs.items.len) : (j += 1) {
+                    new_tabs[w] = s.tabs.items[j];
+                    new_surfaces[w] = s.surface_ptrs.items[j];
+                    w += 1;
+                }
+                return 0; // 반환값 미사용(stablePartitionPinned와 동형)
+            }
+        }.fill);
+    }
+
     /// 디버그 불변식 확인(런타임 — assertPinnedPrefix는 테스트 전용 std.testing이라 별도). 그룹 고정 C2(§12.11 보강9)로
     /// **두 층**을 assert한다: (1) 고정 프리픽스 연속(고정 탭이 [0, pinned_count)에 연속·그 뒤 전부 비고정), (2) **핀 경계 =
     /// 그룹 경계 정렬**(핀 경계가 그룹 subtree 중간을 자르지 않음 = I3 안전 전제). GP1~3 경로(toggleGroupPin·normalize·복원·
@@ -11542,6 +11635,7 @@ pub const AppSession = struct {
             .group_collapsed = tab.group_collapsed,
             .group_depth = tab.group_depth, // 중첩 그룹 깊이(SG5-3) — 그룹 시작 탭에만 의미(기본 1)
             .group_color = tab.group_color, // 그룹 공통 색(SG5-2) — 그룹 시작 탭에만 의미(무색=0)
+            .local_pinned = tab.local_pinned, // 그룹-로컬 pin(GL §13) — 멤버 카드에만 의미(기본 false)
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -11897,6 +11991,7 @@ pub const AppSession = struct {
         tab.group_collapsed = m.group_collapsed;
         tab.group_depth = m.group_depth; // 중첩 그룹 깊이 복원(SG5-3) — 기본 1, projectRows가 gap 클램프
         tab.group_color = m.group_color; // 그룹 공통 색 복원(SG5-2) — 무색=0 폴백
+        tab.local_pinned = m.local_pinned; // 그룹-로컬 pin 복원(GL §13) — 멤버 카드 subtree-로컬 float 상태(기본 false)
         // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계. OOM 시 위 errdefer(panes·tab·group_start)가 정리한다.
         tab.custom_name = try self.dupeCustomName(m.custom_name);
         tab.pinned = m.pinned; // 위치 고정 복원
@@ -18911,6 +19006,86 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨(원본 복귀)
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_preview_rows.items.len);
     try std.testing.expect(!session.sidebar_drag_active);
+}
+
+test "GL1: stablePartitionSubtree — 로컬 pin 직접 멤버가 마커 직후로 float·자식 subgroup 통째 skip·경계 보존·드래그 게이트·no-op byte-identical" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+    const t4 = session.tabs.items[4];
+    const t5 = session.tabs.items[5];
+
+    // 최상위 그룹 A(마커 t0, depth1)와 그 **자식 subgroup** B(마커 t3, depth2). 위치 파생:
+    //   [t0(mk A d1), t1(A 직접), t2(A 직접), t3(mk B d2), t4(B 멤버), t5(B 멤버)].
+    // createGroupForTab(t3)는 t3가 A 멤버(depth1)라 자동 중첩 depth2 → B는 A의 자식. A subtree=[0,6), B subtree=[3,6).
+    session.createGroupForTab(t0);
+    session.createGroupForTab(t3);
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(0, null, null)); // A 전체
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(3, null, null)); // B는 중첩 depth2
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(3, null, null)); // B=[3,6)
+
+    // ── (a) no-op byte-identical: 로컬 pin 0개 → 재배열 없음(순서·active_tab 불변). GL1 회귀 0 안전망.
+    var snap0: [6]*Tab = undefined;
+    for (session.tabs.items, 0..) |t, i| snap0[i] = t;
+    const active0 = session.app_window.active_tab;
+    session.stablePartitionSubtree(0);
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(snap0[i], t); // 순서 불변(byte-identical)
+    try std.testing.expectEqual(active0, session.app_window.active_tab);
+
+    // ── (b) 직접 멤버 로컬 pin float + 자식 subgroup 통째 skip. t2(A 직접 멤버, 첫째 아님)=로컬 pin,
+    //    t5(B 멤버)=로컬 pin이지만 A의 직접 단위가 아니라(자식 subgroup 안) stablePartitionSubtree(0)에선 **안 뜬다**.
+    t2.local_pinned = true;
+    t5.local_pinned = true;
+    session.stablePartitionSubtree(0);
+    // 기대: [t0, t2(float), t1, t3(mk B), t4, t5] — t2가 마커 직후로, t1은 밀림, B subtree는 통째 유지(t5 제자리).
+    try std.testing.expectEqual(t0, session.tabs.items[0]); // 마커 A 앵커(제자리)
+    try std.testing.expectEqual(t2, session.tabs.items[1]); // 로컬 pin 직접 멤버 → 마커 직후
+    try std.testing.expectEqual(t1, session.tabs.items[2]); // 비-pin 직접 멤버 → 뒤로
+    try std.testing.expectEqual(t3, session.tabs.items[3]); // B 마커(통째 skip — 자리 유지)
+    try std.testing.expectEqual(t4, session.tabs.items[4]); // B 멤버
+    try std.testing.expectEqual(t5, session.tabs.items[5]); // ★ B 멤버 로컬 pin은 A subtree float 대상 아님(자식 통째)
+    // 경계·depth 보존(재배열이 subtree 안에서만 — I2/I3): A subtree·B subtree·B eff depth 불변.
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(0, null, null)); // A=[0,6) 유지
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(3, null, null)); // B eff depth 2 유지
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(3, null, null)); // B=[3,6) 유지
+
+    // ── (c) 자식 subtree 안 float은 그 자식 마커에 대해 **재귀** 호출(GL2 배선의 결) — heap-pin *Tab 재탐색으로 B 인덱스 얻음.
+    var b_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == t3) {
+        b_idx = i;
+        break;
+    };
+    try std.testing.expectEqual(@as(usize, 3), b_idx); // B 마커 새 인덱스(재배열로 안 밀림 — A 직접 float만 있었음)
+    session.stablePartitionSubtree(b_idx);
+    // 기대: [t0, t2, t1, t3, t5(float), t4] — B subtree 안에서 t5가 B 마커 직후로.
+    try std.testing.expectEqual(t3, session.tabs.items[3]); // B 마커 앵커
+    try std.testing.expectEqual(t5, session.tabs.items[4]); // B 로컬 pin → B 마커 직후
+    try std.testing.expectEqual(t4, session.tabs.items[5]); // B 비-pin 멤버 → 뒤로
+    // A subtree 경계 여전히 [0,6) — 자식 재배열이 부모 밖으로 안 샘.
+    try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(0, null, null));
+
+    // ── (d) 드래그 게이트: sidebar_drag_preview 활성이면 float 안 함(SG8 self.tabs 불변). t1도 로컬 pin으로 만들지만 무시돼야.
+    var snap_d: [6]*Tab = undefined;
+    for (session.tabs.items, 0..) |t, i| snap_d[i] = t;
+    session.sidebar_drag_preview = .{ .origin = 0, .origin_len = 1, .plan = .none, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
+    t1.local_pinned = true; // 게이트가 없으면 t1이 float해 순서가 바뀔 상황
+    session.stablePartitionSubtree(0);
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(snap_d[i], t); // ★ 게이트로 순서 불변(드래그 중 float 금지)
+    session.sidebar_drag_preview = null; // teardown
 }
 
 test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) — 위/아래·최상위·끝 + 자기그룹 no-op + 연속 파티션" {

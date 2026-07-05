@@ -3163,14 +3163,17 @@ pub const AppSession = struct {
         return .new_workspace; // 사이드바 빈 영역(카드 목록 아래) — 새 워크스페이스
     }
 
-    /// new_workspace 드롭 하이라이트 표시 슬롯 — promotePaneToNewWorkspace가 새 탭을 **첫 group_start 마커 직전**(최상위
-    /// 구간 끝)에 끼우므로(§2.1 연속 파티션), 하이라이트도 그 위치 = 표시상 **첫 group_header row**를 가리켜 결과와
-    /// 정합한다(거기에 .drop_zone 밴드를 그리면 새 카드가 들어설 자리를 미리 보인다 — bandFill이 헤더 높이로 그려 카드
-    /// 높이와는 살짝 다르지만 위치는 정확). 그룹 헤더 row가 없으면(그룹 전무·검색으로 헤더 숨김) 카드 목록 아래 행
-    /// (rows.len)으로 폴백 = 기존 "빈 영역=새 워크스페이스" 동작 보존.
+    /// new_workspace 드롭 하이라이트 표시 슬롯 — promotePaneToNewWorkspace가 새(비고정) 탭을 **비고정 리전의 첫 group_start
+    /// 마커 직전**(§12 GP1 `firstGroupStartInRegion(pinned_count, len)` = 그 리전 최상위 구간 끝)에 끼우므로, 하이라이트도
+    /// **그 마커의 group_header row**를 가리켜 실제 삽입 위치와 정합한다(전역 첫 헤더가 아니다 — 고정 색 그룹이 앞에 있으면
+    /// 전역 첫 헤더는 고정 리전이라 삽입점과 어긋난다). 거기에 .drop_zone 밴드를 그려 새 카드가 들어설 자리를 미리 보인다
+    /// (bandFill이 헤더 높이로 그려 카드 높이와는 살짝 다르지만 위치는 정확). 비고정 그룹이 없으면(그룹 전무·전부 고정·검색
+    /// 으로 헤더 숨김) 카드 목록 아래 행(rows.len)으로 폴백 = 기존 "빈 영역=새 워크스페이스" 동작 보존. 고정 그룹 0개면
+    /// 비고정 리전 = 전역이라 그 마커의 헤더 = 첫 group_header row → 옛 동작과 byte-identical.
     fn newWorkspaceHighlightSlot(self: *const AppSession) usize {
+        const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse return self.sidebar_rows.items.len;
         for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
-            .group_header => return slot,
+            .group_header => |h| if (h.tab == insert_at) return slot,
             .card => {},
         };
         return self.sidebar_rows.items.len;
@@ -4774,12 +4777,22 @@ pub const AppSession = struct {
         if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 토글 후 프리픽스 불변식(디버그)
     }
 
-    /// 카드 `tab`이 속한 그룹의 enclosing 시작 마커 탭(§2.1 상향 파생, 핀 리전 클램프 — enclosingGroupMarkerIndex 공유).
-    /// 최상위 카드(그룹 미소속)면 null. 개별 카드 pin 입구 차단(§12.7 보강5)이 "그룹 멤버 우클릭 pin = 그룹째 위임"을
+    /// 카드/마커 `tab`이 속한 그룹의 **최상위(depth 1) 시작 마커 탭**(§2.1 상향 파생, 핀 리전 클램프 — enclosingGroupMarkerIndex
+    /// 공유). 최상위 카드(그룹 미소속)면 null. 개별 카드 pin 입구 차단(§12.7 보강5)이 "그룹 멤버 우클릭 pin = 그룹째 위임"을
     /// 판정·실행할 때 쓴다(멤버면 이 마커로 toggleGroupPin, 최상위면 togglePin).
-    fn enclosingGroupMarkerTab(self: *const AppSession, tab: *const Tab) ?*Tab {
+    /// **top-level 해소(§12.1 pin ⊃ group ⊃ nest)**: 그룹 고정은 **top-level 그룹 속성**이라, nearest(중첩 subgroup) 마커에
+    /// 걸면 그 subtree만 pin돼 부모에서 떨어져 나간다. enclosing 마커를 effectiveDepthAt이 1이 될 때까지 부모로 상향해
+    /// (중첩 subgroup 헤더/카드에서 눌러도) 항상 최상위 그룹 통째를 토글한다. subtree는 pin 균일(I3)이라 마커 pinned로 라벨을
+    /// 정하는 호출처(buildContextMenuItems)도 nearest·top-level이 같은 값이라 정합한다.
+    fn enclosingGroupMarkerTab(self: *AppSession, tab: *const Tab) ?*Tab {
         for (self.tabs.items, 0..) |t, i| if (t == tab) {
-            const mi = self.enclosingGroupMarkerIndex(i) orelse return null;
+            var mi = self.enclosingGroupMarkerIndex(i) orelse return null;
+            // depth 1(top-level)까지 부모 마커로 상향. mi는 매 반복 strictly 감소(mi-1에서 재조회)라 종료가 보장된다.
+            // 형제 subgroup을 먼저 만나도 depth>1이라 계속 올라가 결국 top-level 마커에 닿는다(리전/리스트 시작에서 break).
+            while (self.effectiveDepthAt(mi, null, null) > 1) {
+                if (mi == 0) break;
+                mi = self.enclosingGroupMarkerIndex(mi - 1) orelse break;
+            }
             return self.tabs.items[mi];
         };
         return null;
@@ -4833,7 +4846,15 @@ pub const AppSession = struct {
         var found_depth = false;
         var stack: [max_group_nesting]u8 = undefined; // 위치 파생 정규화 depth 스택(projectRows pass1과 동형)
         var top: usize = 0;
+        var prev_pinned: ?bool = null; // 핀 리전 경계 추적(§12 GP1 — effectiveDepthAt과 동형)
         for (self.tabs.items) |t| {
+            // 핀 리전 경계에서 depth 스택 리셋 — subtree는 핀 리전을 못 넘는다(effectiveDepthAt 7263~). 이게 없으면
+            // 고정 그룹(스택에 depth push) 뒤 **비고정 top카드**의 enclosing_depth가 고정 그룹 depth를 상속해, 중첩 그룹을
+            // 만들면 group_depth가 (고정 그룹 depth)+1로 잘못 저장된다(unpin 후 오중첩·persist). 저장 depth는 정확해야 한다.
+            if (prev_pinned) |pp| if (t.pinned != pp) {
+                top = 0;
+            };
+            prev_pinned = t.pinned;
             if (!found_depth and t == tab) { // 이 카드 위치의 소속 그룹 depth = 스택 top(없으면 최상위 0)
                 enclosing_depth = if (top > 0) stack[top - 1] else 0;
                 found_depth = true;
@@ -4912,10 +4933,17 @@ pub const AppSession = struct {
     /// 닫혀/빠져 다음 카드로 마커가 넘어갈 때 pinned도 함께 승계해야 승계 과정에서 그룹 고정이 소실되지 않는다(고정 그룹의
     /// 첫 카드를 닫아도 승계 마커가 pinned=1을 유지 → 남은 그룹이 고정 리전에 그대로). next는 소속 멤버라 정규화 후엔
     /// pinned가 이미 src와 같지만, desync 상태(승계 시점 정규화 전)에서도 권위값을 명시 이전해 안전하게 둔다.
+    /// **same-region 가드(§12 GP1 pin ⊃ group)**: 승계 대상 next는 **같은 핀 리전**(next.pinned == src.pinned)일 때만
+    /// 진짜 멤버다 — 위치 파생상 마커 바로 뒤 카드(group_start==null)는 같은 리전이면 항상 그 그룹 멤버지만, **다른**
+    /// 리전이면(예: 고정 top카드 하나뿐인 그룹을 닫으면 next는 첫 비고정 top카드) 멤버가 아니다. 그런데도 승계하면
+    /// 그 top카드가 마커+pinned를 물려받아 **고정 그룹 마커로 오승격**한다. 리전이 다르면 승계하지 않고(그룹 소멸)
+    /// false를 반환해 호출자가 마커를 free/destroy하게 둔다. canonical 상태(멤버 pin=마커 pin)라 이 판정이 안정하다.
     fn inheritGroupMarker(self: *AppSession, from: usize) bool {
         const src = self.tabs.items[from];
         const marker = src.group_start orelse return false;
-        if (from + 1 < self.tabs.items.len and self.tabs.items[from + 1].group_start == null) {
+        if (from + 1 < self.tabs.items.len and self.tabs.items[from + 1].group_start == null and
+            self.tabs.items[from + 1].pinned == src.pinned)
+        {
             const next = self.tabs.items[from + 1];
             next.group_start = marker; // 소유권 이전(SG5-2 색·SG5-3 depth도 마커 따라 이동, 자식은 위치 파생 유지)
             next.group_collapsed = src.group_collapsed;
@@ -7629,7 +7657,10 @@ pub const AppSession = struct {
             // ungroup·색은 카드 메뉴와 같은 세션 메서드를 쓴다(대상이 마커라 enclosingGroupMarkerIndex가 자기 자신을 찾아 동작).
             const tab = t.group;
             if (sel == ctx_group_menu_pin) {
-                self.toggleGroupPin(tab); // 그룹 고정/해제(마커 pinned 토글 → 멤버 동기 → 리전 안착, GP3 §12.10)
+                // 그룹 고정/해제(마커 pinned 토글 → 멤버 동기 → 리전 안착, GP3 §12.10). **top-level 해소**(§12.1
+                // pin ⊃ group ⊃ nest): 중첩 subgroup 헤더에서 눌러도 그 subtree만 pin돼 부모에서 떨어지지 않게
+                // enclosingGroupMarkerTab(depth 1까지 상향)으로 최상위 마커를 잡는다. 마커는 항상 자기 그룹에 속하니 non-null.
+                if (self.enclosingGroupMarkerTab(tab)) |mk| self.toggleGroupPin(mk);
             } else if (sel == ctx_group_menu_ungroup) {
                 self.ungroupTab(tab); // 그룹 풀기(헤더가 가리키는 그룹의 시작 마커 제거)
             } else if (sel >= ctx_group_menu_color_first and sel < ctx_group_menu_color_first + tab_color_presets.len) {
@@ -9071,7 +9102,12 @@ pub const AppSession = struct {
                 if (!self.sidebar_group_drag_active) {
                     // threshold: 헤더 한 줄 절반(최소 4px). 넘으면 클릭 아님 = 그룹 통째 드래그 시작.
                     const thr: f64 = @floatFromInt(@max(self.sidebar_header_row_h_px / 2, 4));
-                    if (@abs(y_px - self.sidebar_group_drag_down_y) > thr) self.sidebar_group_drag_active = true;
+                    if (@abs(y_px - self.sidebar_group_drag_down_y) > thr) {
+                        self.sidebar_group_drag_active = true;
+                        // 그룹 통째 드래그 시작 — 카드 드래그와 동형으로 stale 호버를 지운다(SG8). 재배치된 preview_rows에
+                        // 옛 hovered_slot 밴드가 남으면 고스트와 어긋난 위치에 호버 밴드가 뜬다(카드 드래그는 arm 시 ~hovered_slot=null).
+                        self.hovered_slot = null;
+                    }
                 }
                 if (self.sidebar_group_drag_active and self.sidebar_group_drag_marker < self.tabs.items.len) {
                     // 마커 탭이어야 유효(승계·재정렬로 사라졌으면 무동작). groupDragPreviewFrame이 subtree 고스트를 재투영한다.
@@ -9262,6 +9298,11 @@ pub const AppSession = struct {
                                 // 검색 필터 중엔 드래그 재정렬을 비활성(부분 목록 재정렬은 의미 모호). 비활성/빈 검색이면 visible=전체라
                                 // 정상 동작. 고정 탭도 arm — moveTab/드래그 타겟이 같은 그룹으로 clamp(고정/비고정 영역 안 넘음).
                                 if (!self.sidebar_search_active and tab_idx < self.tabs.items.len) {
+                                    // 카드 드래그 재-arm 시 **잃은 mouse-up이 남긴 stale 프리뷰**를 먼저 지운다(SG8d·kind==4
+                                    // 더블클릭 rename과 동형). 안 지우면 다음 up(kind 3)이 commitSidebarDragPreview로 그
+                                    // 옛 plan을 커밋하고(§9), stale preview!=null이 normalizePinnedFromGroups 게이트도 계속
+                                    // 막는다(§12.5). arm은 새 origin으로 다시 시작하므로 프리뷰 잔재는 무조건 무효.
+                                    self.clearSidebarDragPreview();
                                     self.sidebar_drag_active = true;
                                     self.sidebar_drag_index = tab_idx;
                                 }
@@ -13408,7 +13449,10 @@ pub const AppSession = struct {
     fn sidebarMaxScroll(self: *const AppSession) u32 {
         // 가변 높이(카드=slot_h·헤더=header_row_h): 콘텐츠 높이를 rows.len*slot_h 대신 contentHeight 누적으로 구한다
         // (code-review #7 — 헤더를 slot_h로 세면 over-travel). 카드만이면 rows.len*slot_h와 같아 동작 보존.
-        const content_h = chrome.components.sidebar.contentHeight(self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px);
+        // 도메인은 **sidebarRenderRows()**(SG8): collapsed 그룹 드래그는 subtree를 force-emit해 preview_rows가 sidebar_rows
+        // 보다 길어지는데, 짧은 sidebar_rows로 content 높이를 재면 스크롤이 안 되고(max=0) thumb가 과대해진다. 렌더가
+        // 보는 rows와 같은 도메인으로 재야 정합. 비드래그면 preview=null이라 sidebar_rows와 동일(byte-identical).
+        const content_h = chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), self.sidebar_slot_height_px, self.sidebar_header_row_h_px);
         return sidebarMaxScrollPx(content_h, self.backing_height_px, self.sidebar_header_height_px);
     }
 
@@ -13704,7 +13748,23 @@ pub const AppSession = struct {
         // 먼저 내므로(§6·연속 파티션), 헤더 row를 지날 때 갱신해 두면 이후 카드 막대에 그 색을 실을 수 있다(위치 파생
         // 동형 — 카드에 색을 저장하지 않고 순회 중 "위 마커의 색"을 따른다). 최상위 카드는 첫 헤더 이전이라 0으로 유지된다.
         var current_group_color: u32 = 0;
+        var prev_pinned: ?bool = null; // 핀 리전 경계 추적(§12 GP1) — 리전 경계에서 그룹 색 상속 차단
         if (slot_h > 0 and self.sidebar_width_px > 0) for (rows, 0..) |row, i| {
+            // 핀 리전 경계(고정→비고정 등)에서 current_group_color를 리셋한다 — 이 색은 헤더 row에서만 갱신되므로,
+            // "고정 색 그룹" 뒤 **비고정 top카드**(다른 리전·자기 리전 첫 마커 이전이라 무색이어야 함, depth 0)가 그 색을
+            // 상속하는 것을 막는다(§12). 헤더/카드 모두 자기 마커 탭의 pinned로 리전을 판정한다 — 헤더는 곧 색을 덮어쓰므로
+            // 리셋이 무해하고, 비고정 top카드는 리셋된 무색을 그대로 쓴다(비고정 헤더 뒤 멤버는 리전 동일이라 안 리셋).
+            // ghost 카드도 self.tabs pinned가 드래그 내내 불변이라 추적이 안정. 고정 그룹 0개면 flip이 없어 no-op(byte-identical).
+            const row_pinned: ?bool = switch (row) {
+                .card => |c| if (c.tab < self.tabs.items.len) self.tabs.items[c.tab].pinned else null,
+                .group_header => |h| if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].pinned else null,
+            };
+            if (row_pinned) |rp| {
+                if (prev_pinned) |pp| if (rp != pp) {
+                    current_group_color = 0;
+                };
+                prev_pinned = rp;
+            }
             const orig = switch (row) {
                 .card => |c| c.tab,
                 .group_header => |h| {
@@ -14277,7 +14337,7 @@ pub const AppSession = struct {
         const max_scroll = self.sidebarMaxScroll();
         if (max_scroll == 0) return; // 안 넘침 — 스크롤바 없음
         const view_px: f32 = @floatFromInt(viewport_h);
-        const content_px: f32 = @floatFromInt(chrome.components.sidebar.contentHeight(self.sidebar_rows.items, slot_h, self.sidebar_header_row_h_px)); // 가변 높이(code-review #7)
+        const content_px: f32 = @floatFromInt(chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), slot_h, self.sidebar_header_row_h_px)); // 가변 높이(code-review #7)·드래그 중 preview_rows(SG8, sidebarMaxScroll과 같은 도메인)
         const min_thumb: f32 = @max(view_px * 0.04, 18.0);
         var thumb_h: f32 = if (content_px > 0) view_px * view_px / content_px else view_px;
         if (thumb_h < min_thumb) thumb_h = min_thumb;
@@ -17282,6 +17342,330 @@ test "GP4(b): assert 확장 pinBoundariesAlignGroups — canonical 정렬 통과
     session.normalizePinnedFromGroups();
     try std.testing.expect(session.tabs.items[1].pinned); // desync 흡수
     try std.testing.expect(session.pinBoundariesAlignGroups()); // 흡수 후 정렬 복귀
+}
+
+// ── 그룹 고정 리뷰 회귀(/code-review max confirmed 8건, docs/sidebar-groups.md §9 SG8·§12 C2) ──────────────────
+// pin ⊃ group ⊃ nest 설계에서 파생 코어·마커 조작·드래그가 핀 리전을 존중하는지 헤드리스로 고정한다. 각 테스트는
+// "옛(버그) 동작이면 실패"하도록 단언을 골랐다(수정이 회귀하면 즉시 red).
+
+test "그룹핀 리뷰 #1: 잃은 mouse-up 뒤 카드 재-arm이 stale 프리뷰를 지워 옛 plan을 안 커밋한다(§9 SG8)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3] 전부 최상위 카드
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+
+    session.recomputeVisibleTabs(); // rows: [c t0(0), c t1(1), c t2(2), c t3(3)]
+    const sb = chrome.components.sidebar;
+    const header_h = session.sidebar_header_height_px;
+    const header_row_h = session.sidebar_header_row_h_px;
+    const slot_h = session.sidebar_slot_height_px;
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const rowY = struct {
+        fn f(s: *AppSession, row: usize, hh: u32, sh: u32, hrh: u32) f64 {
+            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, hh, sh, hrh, 0);
+            return @floatFromInt(top + @as(i64, @intCast(sh / 2)));
+        }
+    }.f;
+    _ = sb;
+
+    // t0(row0) 카드를 잡아(down) t2(row2) 위로 드래그 → 비커밋 카드 프리뷰(plan=.card, 실제 이동). self.tabs 불변.
+    session.mouse(1, x, rowY(session, 0, header_h, slot_h, header_row_h), 0, 0);
+    try std.testing.expect(session.sidebar_drag_active);
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_drag_index);
+    session.mouse(2, x, rowY(session, 2, header_h, slot_h, header_row_h), 0, 0);
+    try std.testing.expect(session.sidebar_drag_preview != null); // 프리뷰 활성
+    try std.testing.expect(std.meta.activeTag(session.sidebar_drag_preview.?.plan) == .card); // up이 커밋하면 재배치될 plan
+
+    // ★ 잃은 mouse-up 시뮬 — up 없이 다른 카드 t3(row3)에서 새 down(재-arm). 재-arm이 stale 프리뷰를 지운다.
+    session.mouse(1, x, rowY(session, 3, header_h, slot_h, header_row_h), 0, 0);
+    try std.testing.expect(session.sidebar_drag_preview == null); // ★ 재-arm이 옛 프리뷰 클리어(잃은 up 정상화)
+    try std.testing.expectEqual(@as(usize, 3), session.sidebar_drag_index); // 새 origin(t3)
+
+    // up → commitSidebarDragPreview는 프리뷰 null이라 no-op → 옛 plan 안 커밋(순서 불변).
+    session.mouse(3, x, rowY(session, 3, header_h, slot_h, header_row_h), 0, 0);
+    try std.testing.expectEqual(t0, session.tabs.items[0]);
+    try std.testing.expectEqual(t1, session.tabs.items[1]);
+    try std.testing.expectEqual(t2, session.tabs.items[2]);
+    try std.testing.expectEqual(t3, session.tabs.items[3]);
+    try std.testing.expect(!session.sidebar_drag_active);
+    try std.testing.expect(session.sidebar_drag_preview == null);
+}
+
+test "그룹핀 리뷰 #2: beginGroupForTab depth가 pin-region-aware — 고정 그룹 뒤 비고정 카드 중첩 depth=1(오중첩 방지, §12)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 고정 그룹 PG=[t0(마커,depth1),t1](pin1) + 비고정 top카드 t2·t3. 프리픽스 [1,1,0,0].
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true;
+
+    // 비고정 top카드 t2에 새 그룹 생성 → t2는 자기 리전 최상위(고정 그룹과 다른 리전)라 enclosing_depth=0 → 저장 depth=1.
+    // 옛 버그: PG 마커가 depth 스택에 남아 enclosing_depth=1 → depth=2(오중첩)로 저장됐다.
+    session.createGroupForTab(session.tabs.items[2]);
+    try std.testing.expectEqual(@as(u8, 1), session.tabs.items[2].group_depth); // ★ 저장 depth 정확(오중첩 방지)
+    // pin-region-aware 파생(effectiveDepthAt)과도 일치 — 저장값이 렌더 파생과 어긋나지 않는다.
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(2, null, null));
+}
+
+test "그룹핀 리뷰 #3: toggleGroupPin이 중첩 subgroup에서 top-level로 해소(부모 detach 없음, §12.1 pin ⊃ group ⊃ nest)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+    const t0 = session.tabs.items[0];
+    const t2 = session.tabs.items[2];
+    const t3 = session.tabs.items[3];
+
+    // 최상위 그룹 G1=[t0..t4](depth1), 그 안 중첩 subgroup G1a=[t2..t4](depth2). t3 = G1a 멤버.
+    session.createGroupForTab(t0); // G1(마커 t0, depth1)
+    session.createGroupForTab(t2); // t2가 G1 안 → 중첩 subgroup(depth2)
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(0, null, null)); // G1 top-level
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(2, null, null)); // G1a 중첩
+
+    // enclosingGroupMarkerTab이 중첩 멤버/마커에서 **top-level(t0)**로 해소(nearest t2가 아니다).
+    try std.testing.expectEqual(t0, session.enclosingGroupMarkerTab(t3).?); // 중첩 멤버 → top-level
+    try std.testing.expectEqual(t0, session.enclosingGroupMarkerTab(t2).?); // 중첩 마커 자신 → top-level 부모
+
+    // 그룹 헤더 우클릭 "그룹 고정"을 **중첩 subgroup 헤더(t2)**에서 실행 → top-level G1 통째 고정(subtree만 떼지 않음).
+    session.context_menu_target = .{ .group = t2 };
+    session.chrome_host.context_menu.selected = ctx_group_menu_pin;
+    session.acceptContextMenu();
+    // ★ G1 전체(t0..t4)가 pinned — 옛 버그면 t2..t4만 pin돼 t0·t1에서 떨어져 나갔다(detach).
+    for (session.tabs.items) |t| try std.testing.expect(t.pinned);
+    try std.testing.expect(session.pinBoundariesAlignGroups()); // 핀 경계가 subtree 중간을 안 자름(I3)
+    try std.testing.expect(t2.group_start != null and t2.group_depth == 2); // 중첩 구조 보존
+}
+
+test "그룹핀 리뷰 #4: inheritGroupMarker same-region 가드 — 단일 고정탭 그룹 닫아도 다음 top카드 안 pinned(§12 GP1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.newTab(); // [t0, t1]
+
+    // 단일 고정탭 그룹 PG=[t0](마커,pin1) + 비고정 top카드 t1(다른 리전). t1은 위치상 마커 바로 뒤지만 리전이 달라 멤버 아님.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    const t1 = session.tabs.items[1];
+
+    // 마커 카드 t0를 닫는다 → inheritGroupMarker는 next(t1)가 다른 핀 리전이라 승계 안 함(그룹 소멸, 마커 free).
+    session.closeTab(0);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(t1, session.tabs.items[0]);
+    // ★ t1이 고정 그룹 마커로 오승격되지 않는다 — 옛 버그면 group_start+pinned를 물려받아 pinned 마커가 됐다.
+    try std.testing.expect(session.tabs.items[0].group_start == null);
+    try std.testing.expect(!session.tabs.items[0].pinned);
+}
+
+test "그룹핀 리뷰 #5: newWorkspaceHighlightSlot이 비고정 리전 첫 마커 헤더를 가리킨다(고정 그룹 앞이어도, §12)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+
+    // 고정 그룹 PG=[t0,t1](pin) + 비고정 top카드 t2 + 비고정 그룹 UG=[t3,t4]. 삽입점 = 비고정 리전 첫 마커(t3) 앞.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true;
+    session.tabs.items[3].group_start = try allocator.dupe(u8, "UG");
+    session.tabs.items[3].group_depth = 1;
+    session.recomputeVisibleTabs();
+
+    const hl = session.newWorkspaceHighlightSlot();
+    try std.testing.expect(hl < session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[hl] == .group_header);
+    // ★ 하이라이트 = 비고정 리전 마커(UG, tab 3)의 헤더 — 삽입 위치와 정합. 옛 버그면 전역 첫 헤더(고정 PG, slot 0)를 반환.
+    try std.testing.expectEqual(@as(usize, 3), session.sidebar_rows.items[hl].group_header.tab);
+    try std.testing.expect(hl != 0); // 고정 리전 헤더(hPG)가 아니다
+}
+
+test "그룹핀 리뷰 #6: accent 막대 current_group_color가 핀 경계에서 리셋(고정 색 그룹 뒤 top카드 무색, §12)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+
+    const red: u32 = 0xFF0000;
+    const blue: u32 = 0x0000FF;
+    // 고정 색 그룹 PG=[t0(RED),t1](pin) + 비고정 top카드 t2(무색) + 비고정 색 그룹 UG=[t3(BLUE),t4].
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].group_color = red;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true;
+    session.tabs.items[3].group_start = try allocator.dupe(u8, "UG");
+    session.tabs.items[3].group_depth = 1;
+    session.tabs.items[3].group_color = blue;
+    session.rebuildSidebar() catch {};
+
+    // 표시 rows: [hPG, c t0, c t1, c t2, hUG, c t3, c t4]. 좌측 accent 막대(layer0·x=gap·w=bar_w) 색을 센다.
+    const tk = session.buildChromeTokens();
+    const gap_f: f32 = @floatFromInt(tk.space.card_gap_px);
+    const bar_w = tk.space.accent_bar_width_px;
+    try std.testing.expect(bar_w > 0); // rich accent 막대 존재(전제)
+    const red_word = packStraightRgbU32(red, 0xFF);
+    var red_accents: usize = 0;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer == 0 and q.fill_color0 == red_word and q.w == @as(f32, @floatFromInt(bar_w)) and q.x == gap_f) red_accents += 1;
+    }
+    // ★ RED accent = PG 마커 카드+멤버 카드 = 2개뿐. 옛 버그면 비고정 top카드 t2가 색을 상속해 3개.
+    try std.testing.expectEqual(@as(usize, 2), red_accents);
+}
+
+test "그룹핀 리뷰 #7: 드래그 중 sidebarMaxScroll이 preview_rows(더 긴 force-emit) 기준(§9 SG8 스크롤 정합)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 순수 스크롤 math 확인 — 실제 탭/기하와 무관하게 행 리스트만 바꿔 content 높이가 렌더 도메인을 따르는지 본다.
+    session.sidebar_slot_height_px = 40;
+    session.sidebar_header_row_h_px = 20;
+    session.sidebar_header_height_px = 40;
+    session.backing_height_px = 200; // 뷰포트 = 200 - 40(헤더) = 160
+    session.sidebar_width_px = 100;
+
+    const mkCard = struct {
+        fn f(tab: usize) chrome.components.sidebar.Row {
+            return .{ .card = .{ .tab = tab, .label = "x", .active = false } };
+        }
+    }.f;
+    session.sidebar_rows.clearRetainingCapacity();
+    inline for (0..3) |i| try session.sidebar_rows.append(session.allocator, mkCard(i)); // 3행 = 120px <= 160 → 스크롤 없음
+    session.sidebar_preview_rows.clearRetainingCapacity();
+    inline for (0..6) |i| try session.sidebar_preview_rows.append(session.allocator, mkCard(i)); // 6행 = 240px > 160(force-emit)
+
+    // 비드래그(preview=null) → sidebar_rows(짧음) 기준 → 스크롤 불필요.
+    try std.testing.expectEqual(@as(u32, 0), session.sidebarMaxScroll());
+    // 드래그 프리뷰 활성 → sidebarRenderRows()=preview_rows(길음) 기준 → 스크롤 가능(240-160=80).
+    session.sidebar_drag_preview = .{ .origin = 0, .origin_len = 1, .plan = .none, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
+    try std.testing.expectEqual(@as(u32, 80), session.sidebarMaxScroll()); // ★ 옛 버그면 sidebar_rows(3행)로 0 → 스크롤 불가
+    session.sidebar_drag_preview = null; // teardown(preview_rows는 deinit이 정리)
+}
+
+test "그룹핀 리뷰 #8: 그룹 헤더 드래그 시작이 hovered_slot을 클리어(재배치 preview에 stale 호버 밴드 방지, §9 SG8)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    const t0 = session.tabs.items[0];
+    const t2 = session.tabs.items[2];
+
+    // 두 형제 그룹 A=[t0,t1], B=[t2,t3](B depth1로 오버라이드해 형제 최상위).
+    session.createGroupForTab(t0);
+    session.createGroupForTab(t2);
+    t2.group_depth = 1;
+    session.recomputeVisibleTabs(); // rows: [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
+
+    const header_h = session.sidebar_header_height_px;
+    const header_row_h = session.sidebar_header_row_h_px;
+    const slot_h = session.sidebar_slot_height_px;
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const rowY = struct {
+        fn f(s: *AppSession, row: usize, hh: u32, sh: u32, hrh: u32) f64 {
+            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, hh, sh, hrh, 0);
+            const rh = chrome.components.sidebar.rowHeight(s.sidebar_rows.items[row], sh, hrh);
+            return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
+        }
+    }.f;
+
+    session.hovered_slot = 2; // stale 호버(카드 슬롯)
+    session.mouse(1, x, rowY(session, 0, header_h, slot_h, header_row_h), 0, 0); // down on 헤더 A → arm(토글 후보)
+    try std.testing.expect(session.sidebar_group_drag_armed);
+    try std.testing.expectEqual(@as(?usize, 2), session.hovered_slot); // arm만으론 호버 유지(클릭=토글일 수 있음)
+
+    // 그룹 B 카드(row4)로 drag → threshold 초과 → 그룹 통째 드래그 시작 → hovered_slot 클리어.
+    session.mouse(2, x, rowY(session, 4, header_h, slot_h, header_row_h), 0, 0);
+    try std.testing.expect(session.sidebar_group_drag_active);
+    try std.testing.expectEqual(@as(?usize, null), session.hovered_slot); // ★ 드래그 시작이 stale 호버 클리어
+    session.mouse(3, x, rowY(session, 4, header_h, slot_h, header_row_h), 0, 0); // up → 커밋(정리)
+    try std.testing.expectEqual(@as(?usize, null), session.hovered_slot);
 }
 
 /// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와

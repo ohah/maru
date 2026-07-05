@@ -149,10 +149,10 @@ fn checkDirectory(
 }
 
 // .zig 소스를 sentinel 종료 버퍼([:0]u8 — std.zig.Tokenizer가 요구)로 읽는다. 호출자가 free한다.
-// 읽기 상한 2MB: core.zig가 256KB를 넘어, 이어서 app_session.zig가 1MB를 넘어 StreamTooLong이 났던 이력이라 넉넉히
-// 둔다(정상적 코드 성장 — 한도는 의미 제약이 아니라 읽기 버퍼 크기일 뿐이다).
+// 읽기 상한 4MB: core.zig가 256KB를 넘어, 이어서 app_session.zig가 1MB→2MB를 넘어 StreamTooLong이 났던 이력이라
+// 넉넉히 둔다(정상적 코드 성장 — 한도는 의미 제약이 아니라 읽기 버퍼 크기일 뿐이다).
 fn readZigFileZ(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
-    const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(2 * 1024 * 1024)) catch |err| {
+    const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(4 * 1024 * 1024)) catch |err| {
         std.debug.print("boundary scan could not read {s}: {s}\n", .{ path, @errorName(err) });
         return err;
     };

@@ -605,6 +605,14 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   단계 **GP1~5로 완결**했다 — 그룹 마커 `pinned`를 그룹 고정 권위로 실어 리스트를 `[고정][비고정]` 2리전으로 나누고 각 리전 안에서
   §2.1가 다시 성립하게 한다(고정 그룹 0개면 byte-identical). **설계 확정본·단계·정정된 자기진단은 §12를 단일 출처로 둔다**(GP1~5 완료:
   파생 코어 pin-region 인식·suffix-exclusion 정규화·`toggleGroupPin`+plan clamp·`pin_derived` 렌더·헤더 인디케이터·문서 동기).
+- **(진행 — GL1~4 완료·GL5 남음, §13) 그룹-로컬 pin — 멤버 그룹 내 위치 고정**: C2(그룹째 고정)와 **직교하는 별개 축**
+  (`Tab.local_pinned` — 새 필드)로, 그룹 안 멤버 우클릭 "그룹 내 위치 고정"이 그 멤버를 subtree `[marker, end)` 안에서 마커 직후
+  (렌더상 그룹 절대 최상단)로 float한다. **완료(GL1~4)**: `stablePartitionSubtree`(unit-aware·포인터 재탐색·드래그 게이트·early-out)
+  파생 코어 · `toggleLocalPin` · 배선 `floatLocalPinsAllGroups`(§13.4 표준 순서 = `stablePartitionPinned` 뒤) · 드래그 clamp
+  (`localPinPrefixBounds` + `commitSidebarDragPreview` 확정 clamp) · 렌더 📌(`sidebarRowShowsPin` 선두 분기·`Row.card.local_pinned`) ·
+  위생(`clearStaleLocalPins`) · 마커 카드 위 배치(`PendingMarkerCard` 버퍼링·`flushMarkerCard`) · 공존/중첩 하드닝 + **버그 2건 수정**
+  (버그1 `createTab` 그룹 흡수 방지 · 버그2 그룹 해제 시 로컬 pin 리셋). **남음(GL5)**: subgroup-as-member/마커 로컬 pin 확장(§13.8).
+  **설계 확정본·단계·정정된 자기진단은 §13을 단일 출처로 둔다**.
 
 ## 11. clean-room
 
@@ -635,6 +643,10 @@ suffix-exclusion 정규화(GP2)·`toggleGroupPin`+plan clamp(GP3)·`pin_derived`
   다퉈 표현 불가다. C3(멤버별 pin)=I1×I2 직접 모순 → 폐기. C1(전역 앵커 유지)=이 인접을 못 담음. **C2(핀-리전 인식
   파생) = 리전별 앵커 2개로만 공존 성립**. 계층은 **pin ⊃ group ⊃ nest**(엄격) — 핀 경계가 **최상위 단위 경계에서만**
   자르면 subtree가 통째로 한 리전에 들어가 I3이 자동 안전하다.
+- **로컬 pin 축은 별개(GL §13, 상호참조)**: 위 삼중 파티션(I1/I2/I3) 위에 **그룹-로컬 pin**이 **직교하는 별개 축**
+  (`Tab.local_pinned` — C2의 `Tab.pinned` 재해석과 달리 **새 필드**, §13.2)으로 얹힌다. C2의 pin 리전·정규화·전역 partition을
+  **안 건드리고** subtree `[marker, end)` 내부만 재배열한다(§13.1 keystone). 단 그룹째 고정 **해제** 시엔 멤버 로컬 pin을
+  리셋한다(직교는 '고정 켜는 동안'의 성질, §13.7 버그2). 상세·단계는 §13 단일 출처.
 
 ### 12.2 모델 — 새 필드 0개, `Tab.pinned` 재해석
 
@@ -734,8 +746,11 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
 
 - **removeFromGroup 고정 멤버 빼기(보강 4)**: 그룹에서 빼면 pin을 잃는다(빼기=pin 상실). `clampMoveToGroup`이 pin-trap이라
   **unpin을 move 전에** 결정한다(그러지 않으면 clamp가 고정 영역에 붙잡는다).
-- **개별 카드 pin 입구 차단(보강 5)**: 그룹 멤버에서 `togglePin`을 누르면 **그룹째 고정으로 위임하거나 비활성**한다(멤버만
-  개별 pin하면 캐시 권위가 깨진다).
+- **개별 카드 pin 입구 차단(보강 5, GL §13에서 라우팅 정정)**: 그룹 멤버는 개별 **전역** pin(`Tab.pinned=1`)을 **못 얻는다** —
+  멤버만 개별 pin하면 전역 partition이 그룹을 shred(C3)하고 캐시 권위가 깨지기 때문이다(이 불변식은 그대로). 초기 GP3은 이
+  입구를 멤버 우클릭 pin의 **그룹째 고정 위임**으로 막았으나, **GL §13이 이를 되돌려** 멤버 우클릭 "위치 고정"을 **그룹-로컬 pin**
+  (`cardPinRole=.local`·`toggleLocalPin` — 전역 축이 안 읽는 별개 필드 `local_pinned`, §13.2·§13.6)으로 라우팅한다. 즉 전역 pin
+  입구 차단(불변식)은 유지하고, 막힌 자리를 직교 축(로컬 pin)으로 채운 것이다(§12.10 cardPinRole 3분기).
 - **`inheritGroupMarker` pinned 승계(보강 6)**: 마커 승계(`closeTab`·removeFromGroup) 시 `group_start/collapsed/depth/color`에
   더해 **`pinned`도 승계**해야 승계 과정에서 그룹 고정이 소실되지 않는다.
 
@@ -751,6 +766,12 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
 (`group_start != null`)도 **억제**(헤더가 인디케이터를 드므로 자기 카드 📌는 중복), (d) 그 외 최상위 카드만 live `tab.pinned` 그대로
 📌(개별 위치 고정 유지). rename 중 헤더는 호출처가 억제(편집 폭 보존). 도메인은 `sidebarRenderRows()`(드래그 중이면 preview_rows).
 
+**로컬 pin 축 선두 분기(GL §13.6, 상호참조)**: 위 (a)~(d) **앞에** `card.local_pinned` 선두 분기를 둔다 — 그룹-로컬 pin 멤버(§13)는
+**실제 사용자 pin**이라 (b) `pin_derived` 억제를 **우회**해 📌를 살린다. `pin_derived`(그룹째 고정 캐시 = `Tab.pinned` 파생)와
+`local_pinned`(멤버 로컬 pin = 별개 필드)는 **직교**해 한 멤버에 **둘 다 참**일 수 있고(그룹째 고정 그룹 안 로컬 pin 멤버), 그때 헤더
+그룹📌 + 멤버 로컬📌가 함께 뜬다(단일 글리프 U+1F4CC — 헤더/카드 **위치로 구별**, §13.6). `Row.card`에 `pin_derived`와 동형의
+`local_pinned: bool = false` 힌트가 실린다(비마커 그룹 멤버 카드에만 채움 — 마커·최상위=false, §13.8 leaf 전용).
+
 ### 12.9 직렬화 — 새 키 0
 
 `workspace.v1`의 `pinned={d}`(탭 라인 스칼라)가 마커 pin을 그대로 싣는다 — 그룹 고정 = 마커 `pinned=1`. 멤버 pinned 캐시는
@@ -763,10 +784,16 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
 - **헤더 우클릭 "그룹 고정" 토글**(`ctx_group_menu_pin` = 그룹 헤더 메뉴 Rename 다음 항목, `.group` 분기): `toggleGroupPin(marker)`
   → 마커+멤버 pin 직접 동기 → **`stablePartitionPinned`로 리전 안착**(§12.6 정정 ③′, `moveGroupRange`가 아님) →
   `normalizePinnedFromGroups`(idempotent) → rebuild → `assertPinnedPrefixRuntime`(디버그).
-- **카드 "위치 고정"**은 top-level 전용 — 그룹 소속 카드 우클릭 pin은 `enclosingGroupMarkerTab`로 마커를 찾아 **그룹째 위임**
-  (`toggleGroupPin`), 최상위면 `togglePin`(§12.7 보강 5, 개별 desync 차단).
-- pin 표시는 §12.8(`sidebarRowShowsPin` 단일 출처 — 멤버·마커 카드 📌 억제·헤더 인디케이터). pane 분리·removeFromGroup은
-  **각 카드가 속한 핀 리전의 첫 마커 앞**(§12.4 리전 헬퍼 `firstGroupStartInRegion`/`pinRegionBounds`).
+- **카드 우클릭 pin = `cardPinRole` 3분기(GL §13 GL2 — 아래 "그룹째 위임"은 되돌림)**: 초기 GP3은 그룹 소속 카드 우클릭 pin을
+  `enclosingGroupMarkerTab`로 **그룹째 위임**(`toggleGroupPin`)했으나, **GL §13이 이를 되돌려** 멤버는 **그룹-로컬 pin**으로
+  라우팅한다. 현행 dispatch(`acceptContextMenu`)·라벨(`buildContextMenuItems`)은 `cardPinRole` **단일 판정**을 공유한다
+  (ctx_menu_pin=1 인덱스 고정, desync 원천 제거): **마커 카드=`.group`** → 그룹째 `toggleGroupPin`(마커는 그룹 시작이라 개별 pin이면
+  C2 캐시 권위가 깨져 그룹째가 유일 안전 경로)·**비마커 멤버=`.local`** → 그룹 내 위치 고정 `toggleLocalPin`(GL §13 — `local_pinned`
+  별개 축)·**최상위 카드=`.individual`** → 개별 전역 pin `togglePin`. 라벨도 "그룹째 고정"/"그룹 내 위치 고정"/"위치 고정"으로 갈린다.
+  멤버가 개별 **전역** pin(`Tab.pinned`)을 얻는 입구는 여전히 차단(§12.7 보강 5)이라 캐시 권위 desync가 없다.
+- pin 표시는 §12.8(`sidebarRowShowsPin` 단일 출처 — 멤버·마커 카드 📌 억제·헤더 인디케이터; **로컬 pin 멤버는 선두 분기로 📌
+  유지**, GL §13.6 예외). pane 분리·removeFromGroup은 **각 카드가 속한 핀 리전의 첫 마커 앞**(§12.4 리전 헬퍼
+  `firstGroupStartInRegion`/`pinRegionBounds`).
 
 ### 12.11 불변식·검증(보강 8·9)
 
@@ -780,8 +807,9 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
 - **헤드리스**: ① **identity byte-identical**(고정 그룹 0개면 리전 경계=양끝 → 기존 projectRows/SG3~SG8 회귀 0, `test "GP1: …"`).
   ② **7 경계**: "고정 그룹(마커 pinned=1) + 비고정 최상위 카드 + 비고정 그룹" 인위 배치로 비고정 카드가 안 삼켜지고(#4·#1)
   고정 접힘 뒤 안 숨고(#2) `(N)` 안 오염(#6) depth 리전별 정확(#3)함을 단언(GP1). ③ **정규화·안착**: shred→canonical·복원
-  순서·마커 pinned 승계(GP2)·suffix-exclusion tension 해소·개별 pin 위임·`toggleGroupPin`·`clampGroupMoveToRegion` 프리뷰=확정
-  (GP3). ④ **렌더**: `pin_derived`·`sidebarRowShowsPin`·`pinBoundariesAlignGroups` desync 검출/흡수(GP4).
+  순서·마커 pinned 승계(GP2)·suffix-exclusion tension 해소·카드 pin 라우팅(`cardPinRole` — GP3(b)/GL2 결합 테스트에서 멤버는
+  GL §13 로컬 pin으로 정정)·`toggleGroupPin`·`clampGroupMoveToRegion` 프리뷰=확정(GP3). ④ **렌더**: `pin_derived`·`sidebarRowShowsPin`·
+  `pinBoundariesAlignGroups` desync 검출/흡수(GP4).
 
 ### 12.12 단계 GP1~5
 
@@ -828,6 +856,13 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
   보존**한다(stable). 그래서 한 그룹 subtree가 전역 리전 안에서 통째로 옮겨져도, 그 subtree 안의 GL float 순서는 **파괴되지
   않는다**. 즉 GL과 C2는 단순히 "서로 다른 필드"라서 독립인 게 아니라, **전역 partition이 subtree 축 위에서 무연산(no-op)**
   이기 때문에 직교한다. 이 보조정리가 "그룹째 고정 × 그룹-로컬 pin 공존"(§13.4)의 합성 안전성을 떠받친다.
+- **직교는 '고정 켜는 동안'의 성질 — 해제는 리셋(사용자 피드백 정정, 버그2 — 초안 "완전 직교 survival" 뒤집음)**: 위 keystone
+  직교는 그룹째 고정이 **켜져 있는 동안** 로컬 pin float가 전역 partition에 안 흩뜨려짐을 뜻한다. **다만 `toggleGroupPin`으로
+  그룹을 통째 해제(off)하는 순간**엔 그 subtree(중첩 자식 포함) 멤버의 `local_pinned`도 함께 **클리어**한다 — 사용자가 "그룹째
+  고정을 풀었는데 자식이 개별 📌로 남는다"고 리포트해(버그2), 기대인 "그룹 고정만 풀리고 멤버는 그냥 그룹 멤버로 복귀"에 맞춘
+  **리셋 시맨틱**이다. 즉 확정 시맨틱은 초안의 "survival(고정 해제 후에도 로컬 pin 유지)"이 **아니라** "고정 켜는 동안 직교 ·
+  해제 시 리셋"이다(고정 카드가 개별 pin을 유지하는 것과 대조 — 그건 `Tab.pinned` 개별 축이라 그룹 토글과 무관). 배선·근거는
+  §13.7, 회귀는 GL4(a)(재토글)·pin매트릭스 #2(버그2).
 
 ### 13.2 모델 — **새 필드 `Tab.local_pinned`**(재해석 불가, 보강1)
 
@@ -957,8 +992,11 @@ commit 지점의 스윕은 §13.5 확정 clamp가 로컬 pin 멤버의 실제 ej
 "그룹째 고정을 풀었는데 자식이 개별 📌로 남는다"고 리포트했고, 기대는 "그룹 고정만 풀리고 멤버는 **그냥 그룹 멤버로 복귀**(개별
 📌 없음)"였다. 즉 **직교는 '고정 켜는 동안'의 성질**이고, **해제는 그룹을 깨끗한 멤버 상태로 되돌리는 리셋 시맨틱**이다(고정 카드가
 개별 pin을 유지하는 것과 대조 — 그건 `Tab.pinned` 개별 축이라 그룹 토글과 무관). 위치는 float된 자리에 남되 `local_pinned=false`·
-📌 억제로 평범한 멤버가 된다(재배열 없음). 배선: `toggleGroupPin`의 off 경로가 pin flip 루프에서 `local_pinned:=false`를 함께 세팅.
-헤드리스: GL4(a) 재토글 + `사용자 리포트 버그2` 회귀.
+📌 억제로 평범한 멤버가 된다(재배열 없음). 배선: `toggleGroupPin`의 off 경로가 pin flip 루프에서 subtree `[mi, e)` 통째로
+`local_pinned:=false`를 함께 세팅한다(중첩 자식 로컬 pin까지 리셋). 이후 `floatLocalPinsAllGroups`가 로컬 pin 0개를 보고 재배열을
+안 해 멤버는 해제 직전 위치(마커 직후)에 남되 📌만 사라진다. 헤드리스: GL4(a) 재토글(해제 후 `local_pinned=0` 단언으로 초안의
+survival 단언을 뒤집음) + `pin매트릭스 #2`(사용자 리포트 버그2 회귀 — 로컬 pin 멤버를 그룹째 고정→해제 시 멤버 `local_pinned=0`·
+카드 📌 0 "그냥 그룹 멤버로 복귀").
 
 ### 13.8 범위 — **leaf 멤버 로컬 pin만**
 
@@ -988,8 +1026,16 @@ pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float)·**마커 �
    + **마커 자기 카드 렌더 위치 = 로컬 pin 뒤**(§13.6.1 — `projectRowsCore` 버퍼링·재방출로 로컬 pin이 그룹 절대 최상단; self.tabs
    불변·hit-test row.tab 정합·프리뷰=확정·로컬 pin 0개 byte-identical). macOS 제품 스크린샷(신규 훅 `MARU_FORCE_GROUP_LOCALPIN`·
    공존 `_GROUPPIN`). 헤드리스: GL3(a)·(a2 공존)·(b1/b2/b3 위생)·(c 드래그 엣지)·(d 마커 카드 순서·hit-test·byte-identical·프리뷰=확정).
-4. **GL4~5 — 공존·중첩 하드닝 + 확장(다음)**: 그룹째×로컬 공존 헤드리스 확장(§13.4 keystone) + 중첩 재귀 하드닝 +
-   **subgroup-as-member/마커 로컬 pin 확장**(§13.8) + 문서 최종 동기화.
+4. **GL4 — 공존·중첩 하드닝 + 버그 2건 수정 ✅**: 그룹째×로컬 공존 헤드리스(§13.4 keystone — GL4(a): 그룹째 고정이 로컬 pin
+   그룹을 전역 프리픽스로 옮겨도 subtree float 보존·배선 순서·재토글·idempotent·렌더) + 중첩 재귀 float(GL4(b): 자식 subgroup
+   안 leaf float, 부모→자식 순차·자식 마커 카드 위 배치·I3 depth 보존) + 회귀 매트릭스(GL4(c): 그룹 색·rename·검색·pane 분리
+   공존). **버그 2건 수정**(별도 fix 커밋): **버그1** = 최상위 카드가 그룹에 흡수(`createTab`이 `firstGroupStartInRegion(pinned_count,
+   len)` 앞 삽입 — `promotePaneToNewWorkspace`와 공유, §2.1)·**버그2** = 그룹째 고정 해제 시 멤버 로컬 pin 리셋(§13.1·§13.7 —
+   초안 "직교 survival"을 "고정 켜는 동안 직교·해제 시 리셋"으로 뒤집음). 회귀: pin매트릭스 #1(버그1)·#2(버그2)·#3(개별 pin +
+   그룹째 + 로컬 3축 독립 공존).
+5. **GL5 — 확장(다음, 범위 제외)**: **subgroup-as-member/마커 로컬 pin 확장**(§13.8 — 자식 subgroup 마커 자체를 부모 멤버로서
+   로컬 pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float) + 그 트리거·의미 확정. `stablePartitionSubtree`의 unit-aware
+   통째-이동이 이미 구조상 수용하나(§13.8), 트리거·시맨틱 확정은 미착수.
 
 ### 13.11 리스크
 

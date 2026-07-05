@@ -14535,18 +14535,20 @@ pub const AppSession = struct {
             // (짧은 이름은 안 걸리던 잠재 버그를 경로줄이 깨움). full_cols ≥ sidebar_cols+indent_cols라 항상 수용한다.
             draw_list.size.cols = @intCast(@min(full_cols, @as(u32, std.math.maxInt(u16))));
         }
-        // SG8d: 고스트 카드 glyph를 background 쪽으로 강하게 흐린 muted 색으로(반투명 밴드+삽입선과 짝 — "떠 있는"
-        // 카드로 읽히게). slot = c.row/sidebar_line_base = 표시 row 인덱스라 preview_rows[ghost_lo,hi) 셀만 고른다. brand
-        // 색 루프 뒤에 적용해 고스트 안 에이전트 아이콘/스피너도 함께 흐려진다(고스트는 어느 셀이든 흐림 — 의도).
+        // SG8d: 고스트 카드 glyph를 살짝만 dim한 muted 색으로(반투명 밴드+삽입선과 짝 — "떠 있는" 카드로 읽히되 무슨
+        // 카드인지는 또렷이 읽히게). slot = c.row/sidebar_line_base = 표시 row 인덱스라 preview_rows[ghost_lo,hi) 셀만 고른다.
+        // brand 색 루프 뒤에 적용해 고스트 안 에이전트 아이콘/스피너도 함께 흐려진다(고스트는 어느 셀이든 흐림 — 의도).
+        // 옛 35/65는 반투명 밴드(≈0x30 밝힘)와 겹쳐 텍스트가 배경에 묻혀 "무슨 카드인지 안 보임"(사용자 피드백)이라
+        // fg 비율을 70/30으로 올렸다 — "고스트 느낌"은 밴드 반투명+삽입선이 전담하고, 텍스트는 거의 정상 밝기로 읽힌다.
         if (self.sidebar_drag_preview) |dp| {
             if (dp.ghost_hi > dp.ghost_lo) {
                 const f = self.appearance.theme.sidebar_foreground;
                 const b = self.appearance.theme.background;
                 const ghost_fg: terminal.Color = .{
-                    .rgb = .{ // 35% fg / 65% bg — mutedForeground(55/45)보다 더 흐림
-                        .r = @intCast((@as(u32, f.r) * 35 + @as(u32, b.r) * 65) / 100),
-                        .g = @intCast((@as(u32, f.g) * 35 + @as(u32, b.g) * 65) / 100),
-                        .b = @intCast((@as(u32, f.b) * 35 + @as(u32, b.b) * 65) / 100),
+                    .rgb = .{ // 70% fg / 30% bg — 텍스트 가독성 확보(밴드 반투명이 고스트 신호를 전담)
+                        .r = @intCast((@as(u32, f.r) * 70 + @as(u32, b.r) * 30) / 100),
+                        .g = @intCast((@as(u32, f.g) * 70 + @as(u32, b.g) * 30) / 100),
+                        .b = @intCast((@as(u32, f.b) * 70 + @as(u32, b.b) * 30) / 100),
                     },
                 };
                 for (draw_list.cells) |*c| {

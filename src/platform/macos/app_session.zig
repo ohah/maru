@@ -1012,6 +1012,41 @@ fn anyCollapsedInStack(entries: []const GroupStackEntry) bool {
     for (entries) |e| if (e.collapsed) return true;
     return false;
 }
+
+/// 블록 [m,j)를 Rest(=[m,j) 제외 원소들)의 `rest_insert`번째 앞에 끼우는 순열을 `perm`(길이 n, dst 위치 w → src 위치)에
+/// 채우고 블록 시작(새 마커)의 dst 위치를 반환한다(docs/sidebar-groups.md §9 SG8b). **moveGroupRange**(self.tabs/
+/// surface_ptrs 적용)와 **simulateDrop**(가상 order/group_depth 적용)의 **단일 순열 출처** — 프리뷰(비커밋)와 확정(커밋)이
+/// 같은 순열 코어를 써 이중경로 divergence를 없앤다. 옛 moveGroupRange 인라인 블록-fill을 그대로 추출한 것(회귀 0).
+/// caller가 `m<=j<=n`·`rest_insert<=Rest 길이`를 보장한다(moveGroupRange/simulateGroupMove의 no-op 가드가 앞서 거른다).
+fn groupBlockPermutation(perm: []usize, n: usize, m: usize, j: usize, rest_insert: usize) usize {
+    var w: usize = 0;
+    var new_marker: usize = 0;
+    var rest_idx: usize = 0;
+    var src: usize = 0;
+    while (src < n) : (src += 1) {
+        if (src >= m and src < j) continue; // 블록은 건너뛴다(따로 삽입)
+        if (rest_idx == rest_insert) { // 이 Rest 원소 앞에 블록 삽입
+            new_marker = w;
+            var k: usize = m;
+            while (k < j) : (k += 1) {
+                perm[w] = k;
+                w += 1;
+            }
+        }
+        perm[w] = src;
+        w += 1;
+        rest_idx += 1;
+    }
+    if (rest_idx == rest_insert) { // Rest 끝에 삽입(rest_insert == rest_len)
+        new_marker = w;
+        var k: usize = m;
+        while (k < j) : (k += 1) {
+            perm[w] = k;
+            w += 1;
+        }
+    }
+    return new_marker;
+}
 const ctx_menu_pin: usize = 1; // 메뉴 항목 인덱스: 0=Rename, 1=Pin/Unpin, bg_first..=배경, accent_first..=바(buildContextMenuItems 순서와 단일 출처).
 const ctx_menu_bg_first: usize = 2;
 const ctx_menu_accent_first: usize = ctx_menu_bg_first + tab_bg_labels.len; // 배경 프리셋 다음(=8)부터 accent 막대 프리셋
@@ -4104,9 +4139,6 @@ pub const AppSession = struct {
     // 삽입 위치를 항상 그룹 경계로 clamp하면(sidebarGroupDropBoundary) 어떤 이동이든 그룹이 다른 그룹을 관통해 쪼개지지
     // 않아 연속 파티션 불변식이 유지된다(그룹 중간엔 다른 group_start가 안 들어간다).
 
-    /// moveGroupRange의 블록-이동 fill 파라미터(reorderTabs context, code-review #10). [m,j)=이동 구간, rest_insert=Rest에서의 삽입 위치.
-    const TabReorderBlock = struct { m: usize, j: usize, rest_insert: usize };
-
     /// tabs/surface_ptrs를 새 순서로 재배열하는 공통 스캐폴딩(code-review #10) — 활성 *Tab을 캡처해 재배열 후 새 인덱스로
     /// 보정하고, 임시 버퍼 2개를 alloc/free한다. `fill`(comptime)이 context와 self로 새 순서를 채운다(정확히 1:1 순열;
     /// 반환값은 caller가 해석 — moveGroupRange는 새 마커 인덱스, stablePartitionPinned는 미사용). tabs가 비었거나 alloc
@@ -4158,43 +4190,21 @@ pub const AppSession = struct {
         // 구간 제거 후 Rest에서의 삽입 위치: 구간 위(≤m)면 그대로, 구간 아래(≥j)면 range_len만큼 앞당김.
         const rest_insert: usize = if (insert_before <= m) insert_before else insert_before - range_len;
 
-        // 임시 버퍼 재배열 + 활성 *Tab 재find는 reorderTabs 공유(code-review #10). fill이 Rest(=tabs[0..m]++tabs[j..])를
-        // 훑다 rest_insert에 닿으면 구간 [m,j)를 끼워 넣고(insert-before) 새 마커 인덱스를 반환한다. alloc 실패면 null → 이동 생략.
-        const new_marker = self.reorderTabs(TabReorderBlock{ .m = m, .j = j, .rest_insert = rest_insert }, struct {
-            fn fill(bm: TabReorderBlock, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
-                const n = s.tabs.items.len;
-                var w: usize = 0;
-                var new_marker: usize = 0;
-                var rest_idx: usize = 0;
-                var src: usize = 0;
-                while (src < n) : (src += 1) {
-                    if (src >= bm.m and src < bm.j) continue; // 구간은 건너뛴다(따로 삽입)
-                    if (rest_idx == bm.rest_insert) { // 이 Rest 원소 앞에 구간 삽입
-                        new_marker = w;
-                        var k: usize = bm.m;
-                        while (k < bm.j) : (k += 1) {
-                            new_tabs[w] = s.tabs.items[k];
-                            new_surfaces[w] = s.surface_ptrs.items[k];
-                            w += 1;
-                        }
-                    }
+        // 순열(dst→src)을 groupBlockPermutation로 산출 — simulateDrop(가상 order 적용)과 **단일 순열 출처**(SG8b).
+        // 그 순열을 self.tabs/surface_ptrs에 적용(reorderTabs가 활성 *Tab을 추적·in-place memcpy, code-review #10).
+        // perm/reorderTabs 어느 alloc이 실패해도 순서 불변(m 반환).
+        const perm = self.allocator.alloc(usize, len) catch return m;
+        defer self.allocator.free(perm);
+        const new_marker = groupBlockPermutation(perm, len, m, j, rest_insert);
+        if (self.reorderTabs(@as([]const usize, perm), struct {
+            fn fill(p: []const usize, s: *AppSession, new_tabs: []*Tab, new_surfaces: []*maru.session.Surface) usize {
+                for (p, 0..) |src, w| {
                     new_tabs[w] = s.tabs.items[src];
                     new_surfaces[w] = s.surface_ptrs.items[src];
-                    w += 1;
-                    rest_idx += 1;
                 }
-                if (rest_idx == bm.rest_insert) { // Rest 끝에 삽입(rest_insert == rest_len)
-                    new_marker = w;
-                    var k: usize = bm.m;
-                    while (k < bm.j) : (k += 1) {
-                        new_tabs[w] = s.tabs.items[k];
-                        new_surfaces[w] = s.surface_ptrs.items[k];
-                        w += 1;
-                    }
-                }
-                return new_marker;
+                return 0; // 새 마커는 groupBlockPermutation이 이미 반환(fill 반환값 미사용)
             }
-        }.fill) orelse return m; // alloc 실패 → 순서 불변
+        }.fill) == null) return m; // alloc 실패 → 순서 불변
         if (!defer_rebuild) { // caller가 relevel 후 1회 rebuild하려면 여기선 생략(code-review #9)
             self.rebuildSidebar() catch {};
             self.metal_dirty = true;
@@ -4331,16 +4341,27 @@ pub const AppSession = struct {
     /// 블록 [start, start+count)의 그룹 마커들 group_depth를 target_depth 기준으로 다시 쓴다 — 블록을 고립 subtree로 보고
     /// (projectRows pass1과 같은 스택 정규화로) 각 마커의 **블록-상대 eff**(첫 마커=1·자식=2·…)를 매긴 뒤 `target_depth +
     /// (블록eff-1)`로 remap한다(첫 마커=target_depth, 자식들은 상대 offset 유지). max_group_nesting 클램프. 실제로 바뀐
-    /// depth가 있으면 true. 스택 pop 판정은 **옛 declared**(현재 group_depth)로 하고 현재 마커는 판정 후에만 덮어써 순서 안전.
+    /// depth가 있으면 true. 라이브 확정 경로(moveGroupNesting/Sibling)는 이 얇은 래퍼로 self.tabs를 직접 relevel한다.
     fn relevelBlock(self: *AppSession, start: usize, count: usize, target_depth: u8) bool {
-        const end = @min(start + count, self.tabs.items.len);
+        return self.relevelBlockCore(start, count, target_depth, null, null);
+    }
+
+    /// relevelBlock의 order-aware 코어(SG8b — docs/sidebar-groups.md §9). `order`/`group_depth`가 non-null이면 **가상
+    /// 배치**(simulateDrop, self.tabs 불변) 위에서 relevel하고 결과를 `group_depth[p]`에 쓰고, **둘 다 null이면 라이브
+    /// self.tabs**를 relevel한다(effectiveDepthAt/groupSubtreeEnd의 null=라이브 패턴 동형). null 경로는 옛 relevelBlock과
+    /// byte-identical. 스택 pop 판정은 **옛 declared**(가상=group_depth[p]·라이브=tab.group_depth)로 하고 현재 마커는 판정
+    /// 후에만 덮어써 순서 안전(라이브·가상 어느 쪽이든 프리뷰와 확정이 같은 정규화를 낸다).
+    fn relevelBlockCore(self: *AppSession, start: usize, count: usize, target_depth: u8, order: ?[]const usize, group_depth: ?[]u8) bool {
+        const total = if (order) |o| o.len else self.tabs.items.len;
+        const end = @min(start + count, total);
         var stack: [max_group_nesting]u8 = undefined; // 블록-상대 eff(정규화)
         var top: usize = 0;
         var changed = false;
         var p = start;
         while (p < end) : (p += 1) {
-            if (self.tabs.items[p].group_start == null) continue;
-            const dd: u8 = @max(@as(u8, 1), self.tabs.items[p].group_depth); // 옛 declared로 pop 판정(projectRows와 동형)
+            const ti = if (order) |o| o[p] else p; // 위치 p의 원본 tab(가상 배치면 order[p], 라이브면 p)
+            if (self.tabs.items[ti].group_start == null) continue;
+            const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[p] else self.tabs.items[ti].group_depth); // 옛 declared
             while (top > 0 and stack[top - 1] >= dd) top -= 1;
             const parent_rel: u8 = if (top > 0) stack[top - 1] else 0;
             const block_eff: u8 = parent_rel + 1; // 첫 마커=1, 자식=2…
@@ -4348,13 +4369,108 @@ pub const AppSession = struct {
                 stack[top] = block_eff;
                 top += 1;
             }
-            const nd: usize = @min(@as(usize, target_depth) + @as(usize, block_eff) - 1, max_group_nesting);
-            if (self.tabs.items[p].group_depth != @as(u8, @intCast(nd))) {
-                self.tabs.items[p].group_depth = @intCast(nd);
+            const nd: u8 = @intCast(@min(@as(usize, target_depth) + @as(usize, block_eff) - 1, max_group_nesting));
+            if (group_depth) |g| { // 가상: 위치-인덱스 depth 배열에 쓴다(self.tabs 불변)
+                if (g[p] != nd) {
+                    g[p] = nd;
+                    changed = true;
+                }
+            } else if (self.tabs.items[ti].group_depth != nd) { // 라이브: self.tabs에 쓴다
+                self.tabs.items[ti].group_depth = nd;
                 changed = true;
             }
         }
         return changed;
+    }
+
+    // ── SG8b: 드롭 프리뷰 순수 코어 — self.tabs를 커밋하지 않고 가상 배치를 낸다 ────────────────────────────────
+    // docs/sidebar-groups.md §9 SG8. 라이브 드래그가 매 프레임 self.tabs를 mutate하던 것을 대신할 **비커밋 프리뷰**의
+    // 토대다: plan을 arena order/group_depth에 재현하고(순열·relevel), 옮겨진 subtree의 가상 위치 [ghost_lo, ghost_hi)를
+    // 함께 낸다. 프리뷰(SG8c)와 확정(기존 move 함수)이 **같은 순수 코어**를 공유한다 — 카드는 clampMoveToGroup+rotateMove,
+    // 그룹은 groupBlockPermutation+relevelBlockCore(+order-aware groupSubtreeEnd/effectiveDepthAt). 이중경로 divergence는
+    // 이 공유 코어 + 등가 테스트(simulateDrop 산출 == 실제 move 후 read)로 고정한다.
+
+    /// 드롭 계획(어떤 이동인가) — 프리뷰 hit-test가 산출하고 확정이 재사용한다(docs §9 SG8). 옮길 subtree 시작(origin)은
+    /// 이 union이 아니라 호출자(SidebarDragPreview.origin / simulateDrop `origin` 인자)가 든다 — 문서 SidebarDragPreview 동형.
+    const DropPlan = union(enum) {
+        card: struct { target_tab: usize }, // SG4: moveTab(origin, target_tab)
+        group_sibling: struct { insert_before: usize }, // SG5-1 형제 + SG5-4 빼기: moveGroupSibling(origin, insert_before)
+        group_nest: struct { insert_before: usize, target_depth: u8 }, // SG5-4 넣기: moveGroupNesting(origin, ...)
+        none, // 제자리·자기 subtree·무효 — identity 배치(고스트 없음, lo==hi==0)
+    };
+
+    /// simulateDrop이 내는 가상 배치(self.tabs 불변). `order[i]`=표시 위치 i에 오는 **원본 tab 인덱스**, `group_depth[i]`=그
+    /// 위치 마커의 (relevel 반영) 선언 depth — projectRowsFrom(order, group_depth)에 그대로 넘긴다(SG8a 코어 재사용). 두 배열은
+    /// **평행**(group_depth[i]는 order[i] 탭의 선언 depth)이라 어떤 순열도 lockstep으로 적용한다. `[ghost_lo, ghost_hi)`=옮겨진
+    /// subtree(카드=1행·그룹=N행)가 앉는 가상 위치 구간(SG8c 고스트 태깅). lo==hi면 고스트 없음(none). arena 소유.
+    const VirtualLayout = struct { order: []usize, group_depth: []u8, ghost_lo: usize, ghost_hi: usize };
+
+    /// plan을 `self.tabs`에 **커밋하지 않고** 이동 후 가상 순열/depth를 arena에 낸다(docs/sidebar-groups.md §9 SG8b). 프리뷰는
+    /// `simulateDrop(origin, plan)` → `projectRowsFrom(vl.order, vl.group_depth)`로 렌더 rows를 만들고(SG8c), 확정은 마지막
+    /// plan으로 기존 move를 1회 부른다 — 둘이 같은 순수 코어를 써 divergence가 없다. **clampMoveToGroup을 카드 경로에 포함**해
+    /// 프리뷰가 핀 경계에서 정직하게 멈춘 착지를 보인다. self.tabs·surface_ptrs·active_tab은 만지지 않는다(포인터 셔플은
+    /// 확정 경로 전용 — reorderTabs가 활성 *Tab을 추적하므로 순서/depth만 다루는 여기선 불필요, 적대검증 정정).
+    fn simulateDrop(self: *AppSession, origin: usize, plan: DropPlan, arena: std.mem.Allocator) !VirtualLayout {
+        const n = self.tabs.items.len;
+        // identity order + 라이브 group_depth(위치별 선언 depth). 카드/그룹 이동이 이 위에서 순열·relevel한다.
+        const order = try arena.alloc(usize, n);
+        const group_depth = try arena.alloc(u8, n);
+        for (self.tabs.items, 0..) |tab, i| {
+            order[i] = i;
+            group_depth[i] = tab.group_depth;
+        }
+        switch (plan) {
+            .none => return .{ .order = order, .group_depth = group_depth, .ghost_lo = 0, .ghost_hi = 0 },
+            .card => |c| {
+                // moveTab과 동일 코어: clampMoveToGroup(핀 정직)로 목표를 같은 핀 그룹에 가두고 rotateMove로 순열.
+                // group_depth는 카드 이동이 depth를 안 바꾸므로 order와 lockstep 회전(위치별 선언 depth가 탭을 따라감).
+                if (origin >= n or c.target_tab >= n) // 범위 밖 = moveTab의 무동작 가드 — 제자리(고스트=origin 자리)
+                    return .{ .order = order, .group_depth = group_depth, .ghost_lo = @min(origin, n), .ghost_hi = @min(origin +| 1, n) };
+                const to = clampMoveToGroup(c.target_tab, self.tabs.items[origin].pinned, self.countPinnedTabs(), n);
+                if (origin != to) {
+                    rotateMove(usize, order, origin, to);
+                    rotateMove(u8, group_depth, origin, to);
+                }
+                return .{ .order = order, .group_depth = group_depth, .ghost_lo = to, .ghost_hi = to + 1 };
+            },
+            .group_sibling => |g| return self.simulateGroupMove(arena, order, group_depth, origin, g.insert_before, null),
+            .group_nest => |g| return self.simulateGroupMove(arena, order, group_depth, origin, g.insert_before, g.target_depth),
+        }
+    }
+
+    /// group_sibling/group_nest 공통 가상 이동 — moveGroupRange(순열)+relevelBlock(depth)의 가상판(self.tabs 불변). moveGroupRange와
+    /// **같은 가드·순열·relevel 코어**를 쓴다: groupSubtreeEnd로 subtree [m,j)를 잡고, no-op(마커 아님·범위 밖·자기 구간)이면
+    /// 순열 없이 relevel만, 그 외엔 groupBlockPermutation으로 order/group_depth를 lockstep 재배열한 뒤 relevelBlockCore(가상)한다.
+    /// `target_depth==null`이면 moveGroupSibling처럼 **새 위치의 자연 eff**(effectiveDepthAt, gap-clamp된 = 빼기면 얕아짐)로,
+    /// 값이면 moveGroupNesting처럼 그 depth로 relevel한다. `order`/`group_depth`는 simulateDrop이 넘긴 **identity 배치**다.
+    fn simulateGroupMove(self: *AppSession, arena: std.mem.Allocator, order: []usize, group_depth: []u8, m: usize, insert_before: usize, target_depth: ?u8) !VirtualLayout {
+        const n = order.len;
+        // moveGroupRange 가드 재현(같은 no-op 판정). order는 아직 identity라 order[m]==m.
+        if (m >= n or self.tabs.items[order[m]].group_start == null)
+            return .{ .order = order, .group_depth = group_depth, .ghost_lo = @min(m, n), .ghost_hi = @min(m + 1, n) };
+        const j = self.groupSubtreeEnd(m, order, group_depth); // subtree 끝(order=identity → 라이브와 동일)
+        const range_len = j - m;
+        if (insert_before > n or (insert_before >= m and insert_before <= j)) {
+            // 제자리(순열 no-op) — relevel만. sibling(자연 eff)이면 자기 자리 depth라 대개 무변, nest면 자기 depth 변경 가능
+            // (moveGroupRange no-op 시 moveGroupNesting/Sibling이 relevelBlock을 그대로 부르는 것과 동형).
+            const td: u8 = target_depth orelse self.effectiveDepthAt(m, order, group_depth);
+            _ = self.relevelBlockCore(m, range_len, td, order, group_depth);
+            return .{ .order = order, .group_depth = group_depth, .ghost_lo = m, .ghost_hi = m + range_len };
+        }
+        const rest_insert: usize = if (insert_before <= m) insert_before else insert_before - range_len;
+        // 블록 순열을 새 버퍼에 산출해 order/group_depth를 lockstep 재배열(groupBlockPermutation = moveGroupRange 공유 코어).
+        const perm = try arena.alloc(usize, n);
+        const new_marker = groupBlockPermutation(perm, n, m, j, rest_insert);
+        const new_order = try arena.alloc(usize, n);
+        const new_gd = try arena.alloc(u8, n);
+        for (perm, 0..) |src, w| {
+            new_order[w] = order[src];
+            new_gd[w] = group_depth[src];
+        }
+        // 이동 후 배치에서 relevel. sibling은 새 위치의 자연 eff(빼기면 gap-clamp로 얕아짐), nest는 target_depth.
+        const td: u8 = target_depth orelse self.effectiveDepthAt(new_marker, new_order, new_gd);
+        _ = self.relevelBlockCore(new_marker, range_len, td, new_order, new_gd);
+        return .{ .order = new_order, .group_depth = new_gd, .ghost_lo = new_marker, .ghost_hi = new_marker + range_len };
     }
 
     /// 고정 탭을 앞쪽으로 stable-partition한다(고정끼리·비고정끼리 상대 순서 유지). tabs와 surface_ptrs를 **함께**
@@ -15924,6 +16040,252 @@ test "SG8a: projectRowsFrom가 order 순열을 존중한다(SG8b 프리뷰 토�
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items[1].card.tab); // order[1]=0
     // self.tabs 자체는 재배열되지 않았다(비커밋 가상 배치).
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+}
+
+/// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와
+/// 일치함을 단언한다: (1) move 전 탭 포인터·선언 depth 스냅샷, (2) simulateDrop → vl(+ self.tabs 불변 단언), (3) plan에
+/// 대응하는 실제 move를 **정확히 1회**, (4) 모든 위치 i에서 `before[vl.order[i]]==tabs[i]`(같은 탭이 같은 위치에)·
+/// `vl.group_depth[i]==tabs[i].group_depth`(같은 depth). 프리뷰(비커밋)와 확정(커밋)이 한 순수 코어로 수렴함을 고정한다.
+/// 중간 버퍼(그룹 순열 perm/new_order 등)까지 arena가 정리하므로 leak 없음.
+fn expectDropEquivalent(session: *AppSession, origin: usize, plan: AppSession.DropPlan) !void {
+    const alloc = std.testing.allocator;
+    const n = session.tabs.items.len;
+    const before = try alloc.alloc(*Tab, n);
+    defer alloc.free(before);
+    const before_gd = try alloc.alloc(u8, n);
+    defer alloc.free(before_gd);
+    for (session.tabs.items, 0..) |t, i| {
+        before[i] = t;
+        before_gd[i] = t.group_depth;
+    }
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const vl = try session.simulateDrop(origin, plan, arena.allocator());
+    // (2) self.tabs 불변 단언 — 순서·group_depth가 그대로(비커밋).
+    for (session.tabs.items, 0..) |t, i| {
+        try std.testing.expectEqual(before[i], t);
+        try std.testing.expectEqual(before_gd[i], t.group_depth);
+    }
+    // (3) 확정 경로 — plan별 실제 move 1회.
+    switch (plan) {
+        .none => {},
+        .card => |c| _ = session.moveTab(origin, c.target_tab),
+        .group_sibling => |g| _ = session.moveGroupSibling(origin, g.insert_before),
+        .group_nest => |g| _ = session.moveGroupNesting(origin, g.insert_before, g.target_depth),
+    }
+    // (4) 등가 단언 — 같은 위치에 같은 탭·같은 depth.
+    try std.testing.expectEqual(n, session.tabs.items.len);
+    for (session.tabs.items, 0..) |t, i| {
+        try std.testing.expectEqual(before[vl.order[i]], t);
+        try std.testing.expectEqual(vl.group_depth[i], t.group_depth);
+    }
+}
+
+test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs 불변 (simulateDrop == moveTab)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0, t1, t2, t3]
+    session.createGroupForTab(session.tabs.items[2]); // A=[t2,t3], 최상위=[t0,t1]
+
+    // 직접 simulateDrop으로 ghost·순열·불변 확인(넣기: t0(index0)를 t3(index3) 자리로 = 그룹 A 안).
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const vl = try session.simulateDrop(0, .{ .card = .{ .target_tab = 3 } }, arena.allocator());
+        // 핀 없음 → clamp 무영향, rotateMove(0→3): order [0,1,2,3] → [1,2,3,0]. 카드는 위치 3에 착지.
+        try std.testing.expectEqualSlices(usize, &[_]usize{ 1, 2, 3, 0 }, vl.order);
+        try std.testing.expectEqual(@as(usize, 3), vl.ghost_lo);
+        try std.testing.expectEqual(@as(usize, 4), vl.ghost_hi);
+        // self.tabs 원본 순서는 그대로.
+        for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(t, session.tabs.items[i]);
+        try std.testing.expectEqual(@as(usize, 4), session.tabs.items.len);
+    }
+
+    // 등가(넣기 커밋): t0를 A 안으로. after=[t1,t2,t3,t0].
+    try expectDropEquivalent(session, 0, .{ .card = .{ .target_tab = 3 } });
+    // 등가(빼기 커밋): t0(현재 index3)를 최상위 카드 자리(index0)로. after=[t0,t1,t2,t3].
+    try expectDropEquivalent(session, 3, .{ .card = .{ .target_tab = 0 } });
+}
+
+test "SG8b: 핀 경계 카드 드롭 — clamp 일치(프리뷰가 핀 경계에서 정직) + 등가" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0, t1, t2, t3]
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true; // 고정 [t0,t1], 비고정 [t2,t3] (pinned_count=2)
+
+    // 비고정 t3(index3)를 고정 영역 target 0으로 드롭 → clampMoveToGroup(0,false,2,4)=2로 클램프(핀 경계에서 정직).
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const vl = try session.simulateDrop(3, .{ .card = .{ .target_tab = 0 } }, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 2), vl.ghost_lo); // raw 0이 아니라 clamp된 2에 착지
+        try std.testing.expectEqual(@as(usize, 3), vl.ghost_hi);
+        try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 3, 2 }, vl.order); // t3가 비고정 영역 시작(2)으로만
+    }
+    // 등가: moveTab(3,0)도 같은 clamp → 프리뷰-확정 일치.
+    try expectDropEquivalent(session, 3, .{ .card = .{ .target_tab = 0 } });
+
+    // 고정 t0(index0)를 비고정 영역 target 3으로 드롭 → clamp(3,true,pinned,4)=1(고정 영역 [0,1]). (커밋 후 t1은 index0.)
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const vl = try session.simulateDrop(0, .{ .card = .{ .target_tab = 3 } }, arena.allocator());
+        try std.testing.expectEqual(@as(usize, 1), vl.ghost_lo); // 고정 영역 끝(1)으로 clamp
+    }
+    try expectDropEquivalent(session, 0, .{ .card = .{ .target_tab = 3 } });
+}
+
+test "SG8b: 그룹 통째 형제 이동 등가 (SG5-1, simulateDrop == moveGroupSibling)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    // A=[t0,t1], B=[t2,t3], C=[t4,t5] 형제 3그룹(전부 depth1).
+    try setGroupMarker(session, 0, "A", 1);
+    try setGroupMarker(session, 2, "B", 1);
+    try setGroupMarker(session, 4, "C", 1);
+
+    // A(m=0)를 B 뒤(insert_before=groupSubtreeEnd(B)=4)로 = B와 C 사이로. 같은 레벨이라 depth 무변(SG5-1 보존).
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const vl = try session.simulateDrop(0, .{ .group_sibling = .{ .insert_before = 4 } }, arena.allocator());
+        // Rest=[t2,t3,t4,t5], 블록 [0,2)=(t0,t1)을 rest_insert=4-2=2 앞에 → [t2,t3,t0,t1,t4,t5].
+        try std.testing.expectEqualSlices(usize, &[_]usize{ 2, 3, 0, 1, 4, 5 }, vl.order);
+        try std.testing.expectEqual(@as(usize, 2), vl.ghost_lo); // A 블록이 위치 2에 착지
+        try std.testing.expectEqual(@as(usize, 4), vl.ghost_hi);
+        for (vl.group_depth) |d| if (d != 0) try std.testing.expectEqual(@as(u8, 1), d); // 형제라 depth 무변(비마커=원래값)
+    }
+    try expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 4 } });
+}
+
+test "SG8b: 중첩 넣기 등가 (SG5-4, simulateDrop == moveGroupNesting) + subtree 상대 depth" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5] 6개
+    // A=[t0,t1] 직접 + C 중첩=[t2,t3](depth2, A 안), B=[t4,t5](depth1, A 형제).
+    try setGroupMarker(session, 0, "A", 1);
+    try setGroupMarker(session, 2, "C", 2);
+    try setGroupMarker(session, 4, "B", 1);
+
+    // A(m=0)를 B 헤더에 드롭 → B 자식으로 중첩(target_depth=B eff1+1=2, insert_before=groupSubtreeEnd(B)=6).
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const vl = try session.simulateDrop(0, .{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } }, arena.allocator());
+        // 블록 [0,4)=(A,·,C,·)을 B(=[4,6)) 뒤로 → order [4,5,0,1,2,3]. A는 위치 2에서 시작.
+        try std.testing.expectEqualSlices(usize, &[_]usize{ 4, 5, 0, 1, 2, 3 }, vl.order);
+        try std.testing.expectEqual(@as(usize, 2), vl.ghost_lo);
+        try std.testing.expectEqual(@as(usize, 6), vl.ghost_hi);
+        // 상대 depth 유지: A(위치2)=2, C(위치4)=3(A보다 1 깊음). B(위치0)=1 불변.
+        try std.testing.expectEqual(@as(u8, 1), vl.group_depth[0]); // B
+        try std.testing.expectEqual(@as(u8, 2), vl.group_depth[2]); // A → B 자식
+        try std.testing.expectEqual(@as(u8, 3), vl.group_depth[4]); // C → A 자식(상대 유지)
+    }
+    try expectDropEquivalent(session, 0, .{ .group_nest = .{ .insert_before = 6, .target_depth = 2 } });
+}
+
+test "SG8b: 형제 빼기 등가 — gap-clamp로 depth 얕아짐 (SG5-4 un-nest, simulateDrop == moveGroupSibling)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4] 5개
+    // t0 최상위, A=[t1,t2](depth1), B 중첩=[t3,t4](depth2, A 안).
+    try setGroupMarker(session, 1, "A", 1);
+    try setGroupMarker(session, 3, "B", 2);
+
+    // B(m=3)를 최상위(첫 그룹 앞, insert_before=firstGroupStart=1)로 빼기 → 자연 eff=1(gap-clamp로 얕아짐).
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const vl = try session.simulateDrop(3, .{ .group_sibling = .{ .insert_before = 1 } }, arena.allocator());
+        // Rest=[t0,t1,t2], 블록 [3,5)=(t3,t4)을 rest_insert=1(t1) 앞에 → [t0, t3,t4, t1,t2].
+        try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 3, 4, 1, 2 }, vl.order);
+        try std.testing.expectEqual(@as(usize, 1), vl.ghost_lo); // B 블록이 위치 1에 착지
+        try std.testing.expectEqual(@as(usize, 3), vl.ghost_hi);
+        // gap-clamp 빼기: B 마커(위치1) 저장 depth가 2→1로 얕아진다(자연 eff).
+        try std.testing.expectEqual(@as(u8, 1), vl.group_depth[1]);
+    }
+    try expectDropEquivalent(session, 3, .{ .group_sibling = .{ .insert_before = 1 } });
+}
+
+test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불변 + no-op 등가" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2]
+    try setGroupMarker(session, 0, "A", 1); // A=[t0,t1,t2] 전부 한 그룹
+
+    // none → identity 배치(고스트 없음 lo==hi==0), self.tabs 불변.
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const vl = try session.simulateDrop(0, .none, arena.allocator());
+        try std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, vl.order);
+        try std.testing.expectEqual(vl.ghost_lo, vl.ghost_hi); // 고스트 없음
+    }
+    try expectDropEquivalent(session, 0, .none); // 실제 move 없음 — identity 등가
+
+    // 자기 subtree 안으로의 형제 이동(insert_before∈[m,j]) → moveGroupRange no-op와 등가(제자리·depth 무변).
+    try expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 2 } });
 }
 
 test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collapsed=false) — 강제 펼친 카드와 정합" {

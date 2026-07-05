@@ -92,6 +92,38 @@ pub fn unregister(io: std.Io, allocator: std.mem.Allocator) void {
     applyToConfigs(io, allocator, .remove);
 }
 
+/// Codex 진행 표시가 안 뜨는 **가장 흔한 원인** 감지 — codex 훅은 등록됐지만(우리 마커) Codex가 아직 그 훅을 **신뢰(trust)
+/// 하지 않은** 상태. Codex는 보안상 사용자 훅(`~/.codex/hooks.json`)을 내용 해시로 검토하고, 신뢰 전엔 **발화하지 않는다**
+/// (그래서 매핑이 안 써져 상태가 unknown → 사이드바 진행중이 안 뜸). 소스 확인(references/codex hook_trust_status):
+/// 비관리 사용자 훅은 `trusted_hash == current_hash`일 때만 실행되고, 신뢰는 `config.toml`의 `[hooks.state]`에
+/// `trusted_hash`로 저장된다. 그래서 "훅은 등록됐는데 config에 `trusted_hash`가 하나도 없음" = 미신뢰로 본다(coarse —
+/// maru 훅이 유일 훅 가정, 오탐해도 안내 한 줄이라 무해). best-effort: 훅 미등록/config 읽기 실패면 false(헛 안내 안 함).
+/// **claude에는 이 신뢰 게이트가 없어** codex만 대상. 단일 출처 docs/agent-session.md "Codex 훅 신뢰".
+pub fn codexHookNeedsTrust(io: std.Io, allocator: std.mem.Allocator) bool {
+    var hooks_buf: [max_path]u8 = undefined;
+    const hooks_path = agentConfigPath(&hooks_buf, "CODEX_HOME", ".codex", "hooks.json") orelse return false;
+    var cfg_buf: [max_path]u8 = undefined;
+    const cfg_path = agentConfigPath(&cfg_buf, "CODEX_HOME", ".codex", "config.toml") orelse return false;
+    return codexHookTrustMissingAt(io, allocator, hooks_path, cfg_path);
+}
+
+/// codexHookNeedsTrust의 **경로 주입 순수 I/O** 코어(테스트가 tmp 파일로 검증). hooks_path에 maru 마커가 있고(등록됨)
+/// cfg_path에 `trusted_hash`가 하나도 없으면(미신뢰) true. 훅 미등록/훅 읽기 실패면 false, config 부재는 미신뢰(true).
+fn codexHookTrustMissingAt(io: std.Io, allocator: std.mem.Allocator, hooks_path: []const u8, cfg_path: []const u8) bool {
+    // 1) 우리 codex 훅이 실제로 등록돼 있나(마커). 미등록이면 setup이 곧 등록하므로 안내 불필요.
+    const hooks_raw = std.Io.Dir.cwd().readFileAlloc(io, hooks_path, allocator, .limited(4 << 20)) catch return false;
+    defer allocator.free(hooks_raw);
+    if (std.mem.indexOf(u8, hooks_raw, marker) == null) return false;
+
+    // 2) Codex config.toml에 훅 신뢰(trusted_hash)가 하나라도 기록됐나. 없으면 미신뢰.
+    const cfg_raw = std.Io.Dir.cwd().readFileAlloc(io, cfg_path, allocator, .limited(4 << 20)) catch |err| switch (err) {
+        error.FileNotFound => return true, // config 없음 = 신뢰 기록 전무 = 미신뢰
+        else => return false, // 읽기 불가(EACCES 등) — 헛 안내 안 함
+    };
+    defer allocator.free(cfg_raw);
+    return std.mem.indexOf(u8, cfg_raw, "trusted_hash") == null;
+}
+
 /// claude·codex config 각각에 모드를 적용한다. cmd_buf는 dir을 2회 담으므로(+셸 텍스트·마커) 넉넉히 잡아 오버플로로
 /// 등록이 조용히 스킵되지 않게 한다(리뷰 지적).
 fn applyToConfigs(io: std.Io, allocator: std.mem.Allocator, mode: Mode) void {
@@ -623,4 +655,37 @@ test "pruneStaleMappingsIn: 트랜스크립트 없는 매핑만 지우고 살아
     try std.testing.expect(exists(io, live_map)); // 라이브 세션 매핑 보존(다른 인스턴스 보호)
     try std.testing.expect(!exists(io, gone_map)); // 세션 gone → 삭제
     try std.testing.expect(!exists(io, broken_map)); // 손상(transcript_path 없음) → 삭제
+}
+
+test "codexHookTrustMissingAt: 훅 등록+config에 trusted_hash 없음=미신뢰, 있음=신뢰, 미등록=안내안함" {
+    // Codex는 훅을 신뢰(trusted_hash)해야 발화한다(references/codex 확인) — 진행중 안 뜨는 흔한 원인. maru가 등록은 했는데
+    // config에 신뢰 기록이 없으면 미신뢰(안내 대상), 있으면 신뢰(안내 안 함), 아예 미등록이면 setup이 곧 등록하므로 안내 안 함.
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const ar = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try std.fmt.allocPrint(ar, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const hooks_path = try std.fmt.allocPrint(ar, "{s}/hooks.json", .{base});
+    const cfg_path = try std.fmt.allocPrint(ar, "{s}/config.toml", .{base});
+
+    // 마커 있는 등록된 훅.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = hooks_path, .data = "{\"hooks\":{}} # " ++ marker });
+
+    // (1) config 없음 = 신뢰 기록 전무 = 미신뢰 → true(안내).
+    try std.testing.expect(codexHookTrustMissingAt(io, a, hooks_path, cfg_path));
+
+    // (2) config에 trusted_hash 없음 = 미신뢰 → true.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "model = \"gpt-5.5\"\n[projects.\"/x\"]\ntrust_level = \"trusted\"\n" });
+    try std.testing.expect(codexHookTrustMissingAt(io, a, hooks_path, cfg_path));
+
+    // (3) config에 trusted_hash 있음 = 신뢰 → false(안내 안 함).
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[hooks.state.\"x\"]\ntrusted_hash = \"abc123\"\n" });
+    try std.testing.expect(!codexHookTrustMissingAt(io, a, hooks_path, cfg_path));
+
+    // (4) 훅에 마커 없음(미등록) = 안내 안 함 → false.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = hooks_path, .data = "{\"hooks\":{}}" });
+    try std.testing.expect(!codexHookTrustMissingAt(io, a, hooks_path, cfg_path));
 }

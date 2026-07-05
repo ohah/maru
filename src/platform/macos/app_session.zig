@@ -1675,6 +1675,9 @@ pub const AppSession = struct {
     // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
     // 포그라운드 프로세스명을 polling해 agent_kind를 갱신한다(claude/codex/none).
     agent_poll_ticks: u32 = 0,
+    // Codex 훅 미신뢰 안내를 **세션당 1회**만 띄웠는지(모달 notice 반복 방지). Codex는 훅을 신뢰해야 발화하는데(진행중
+    // 안 뜨는 흔한 원인), codex-kind Term이 처음 감지되고 훅이 미신뢰면 1회 안내한다(agent_hooks.codexHookNeedsTrust).
+    codex_hook_hint_shown: bool = false,
     // synchronized output(2026) hold가 이어진 tick 수(활성 surface 기준). sync_timeout_ms에 해당하는 tick 수를 넘으면 ESU
     // 유실로 보고 강제 투영해 freeze를 푼다. sync가 꺼지면 0으로 리셋한다.
     sync_hold_ticks: u32 = 0,
@@ -2079,7 +2082,7 @@ pub const AppSession = struct {
                 // (rename 중엔 드묾) null → 터미널 커서 폴백.
                 const slot_row = self.displaySlotOf(idx) orelse return null;
                 const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, slot_row, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-                const block_off: i64 = @intCast((slot_h -| line_count * ch) / 2);
+                const block_off: i64 = @intCast((slot_h -| sidebarBlockHeight(line_count, ch)) / 2); // 줄 스텝 여유와 정합(fillSidebarGlyphPyTop 공유). 이름줄=line 0이라 +block_off만.
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{
                     .x = @intCast(caret_col * cw),
@@ -11422,6 +11425,12 @@ pub const AppSession = struct {
                         term.agent_session_mtime = 0;
                         term.agent_state = .unknown;
                         term.agent_answer_len = 0;
+                        // Codex가 새로 감지됐는데 훅이 미신뢰면(진행중 안 뜨는 흔한 원인) 세션당 1회 안내한다 — Codex는 보안상
+                        // 훅을 신뢰해야 발화한다(references/codex 확인). claude는 이 게이트가 없어 codex만. best-effort(무해).
+                        if (term.agent_kind == .codex and !self.codex_hook_hint_shown and agent_hooks.codexHookNeedsTrust(self.io, self.allocator)) {
+                            self.codex_hook_hint_shown = true;
+                            self.showNotice("Codex 진행 표시가 안 뜨나요? Codex는 보안상 훅을 신뢰(trust)해야 진행 상태를 알립니다 — Codex에서 maru 훅을 승인/신뢰하면 사이드바에 진행중이 뜹니다.");
+                        }
                     }
                     const is_current = focused_term != null and term == focused_term.?; // 지금 그 안에 있는 그 Term만 억제
                     const answer_visible = card_visible and term == shown_term; // 카드 답변 미리보기(활성 Term)
@@ -13985,8 +13994,10 @@ pub const AppSession = struct {
                 // 않고 buildSidebarDrawList가 이름줄 우측 끝에 따로 그린다 — 선두 칼럼을 마커 전용으로 비워 핀이 "동작/활성"
                 // 표시를 가리지 않게 한다(사용자 요청). 마커는 이름줄(line 0) 색을 따라간다(활성=강조, 그 외=흐림).
                 const marker: []const u8 = if (orig == self.app_window.active_tab) "* " else "\u{00B7} ";
-                // SG3: 그룹 안 카드(depth>0)는 이름 앞에 공백을 넣어 들여쓴다(group_indent — 소속 시각화). 헤더 삼각과
-                // 같은 gutter(col 0) 기준으로 카드 이름만 우측으로. 공백은 ellipsis 폭에 자연 반영돼 오버플로가 없다.
+                // SG3: 그룹 안 카드(depth>0)는 group_indent만큼 들여쓴다(소속 시각화). **카드 전체**(이름·브랜치·경로·상태
+                // 모든 줄)에 같은 indent를 붙여 폴더 트리처럼 일관되게 밀린다(사용자 요청 — 예전엔 이름줄만 밀려 비대칭).
+                // 헤더 삼각과 같은 gutter(col 0) 기준. 공백은 ellipsis 폭에 자연 반영돼 오버플로가 없다. 빈 보조줄엔 안 붙인다
+                // (빈 줄은 buildSidebarDrawList가 생략하므로, 공백만 붙이면 빈 줄이 렌더돼 줄 수가 어긋난다). depth 0은 무들여쓰기.
                 // 중첩(SG5-3): depth가 2+면 자동으로 더 들여쓰인다(값 범위만 확장, 산술은 동일 — 위 hoisted indent_buf 공유).
                 const indent_n = @min(@as(usize, card.depth) * @as(usize, group_indent_cols), indent_buf.len);
                 const indent = indent_buf[0..indent_n];
@@ -14003,10 +14014,22 @@ pub const AppSession = struct {
                 // 꽉 찬 단색 실루엣이라 작은 크기에서도 외곽이 살아 GitHub 마크로 읽힌다(icon_glyph fillCoverage 경로 동일).
                 // 폭은 titleCellWidth가 PUA를 **2칸(~16px)** 렌더해 width-1(~8px)일 때 동그란 링처럼 뭉개지던 걸 키웠다 —
                 // 폴더줄(0xF000A)·에이전트 gutter 아이콘과 같은 크기로 통일(사용자 피드백 "깃 아이콘이 너무 작다").
-                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "\u{F0009} {s}", .{b}) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
-                try path_lines.append(self.allocator, if (show_folder and branch != null) try sidebarFolderLine(self.allocator, term) else try self.allocator.dupe(u8, ""));
+                // 각 보조줄은 **비어있지 않을 때만** indent를 붙인다(빈 줄은 그대로 "" — 카드 줄 수 계산 정합).
+                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "{s}\u{F0009} {s}", .{ indent, b }) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, if (show_folder and branch != null) blk: {
+                    const fl = try sidebarFolderLine(self.allocator, term);
+                    if (indent.len == 0 or fl.len == 0) break :blk fl; // depth 0 or 빈 줄 — 그대로(빈 줄에 공백 붙이면 4번째 줄이 생긴다)
+                    defer self.allocator.free(fl);
+                    break :blk try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ indent, fl });
+                } else try self.allocator.dupe(u8, ""));
                 // 상태줄은 **탭 단위** — running이면(어느 pane/Term이든) 파형 스피너, 아니면 활성 Term 상태(위에서 계산한 running 재사용).
-                try status_lines.append(self.allocator, try self.workspaceStatusLine(tab, running));
+                // **빈 상태줄(에이전트 아님)엔 indent를 붙이지 않는다** — 안 그러면 공백-only 줄이 돼 buildSidebarDrawList가
+                // 빈 줄로 생략하지 못하고 **없던 4번째 줄이 렌더**된다(사용자 제보 버그). 빈 줄은 반드시 ""로 유지.
+                const status_raw = try self.workspaceStatusLine(tab, running);
+                try status_lines.append(self.allocator, if (indent.len == 0 or status_raw.len == 0) status_raw else blk: {
+                    defer self.allocator.free(status_raw);
+                    break :blk try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ indent, status_raw });
+                });
             }
         }
 
@@ -14066,6 +14089,19 @@ pub const AppSession = struct {
         fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.cell_height_px);
     }
 
+    /// 사이드바 카드 줄의 세로 **스텝**(줄 top-to-top, px) = cell_height + 여유(≈0.15×ch). 예전엔 줄이 딱 ch 간격으로
+    /// 붙어 촘촘했다(사용자 요청 "line-height 여유"). fillSidebarGlyphPyTop(줄 배치)·renameCaretRect(caret y)가 이 한
+    /// 곳을 공유해 caret과 그려진 줄이 어긋나지 않는다. ch로 두면(여유 0) 옛 동작과 동일.
+    fn sidebarLineStep(ch: u32) u32 {
+        return ch +| @max(1, ch * 15 / 100);
+    }
+    /// `line_count` 줄이 차지하는 블록 높이(px) = (line_count-1)×step + ch(마지막 줄 뒤엔 여유 없음). 슬롯 안 블록중앙
+    /// 정렬에 쓴다. step=ch면 옛 `line_count×ch`와 같아 회귀 없음.
+    fn sidebarBlockHeight(line_count: u32, ch: u32) u32 {
+        if (line_count == 0) return ch;
+        return (line_count -| 1) *| sidebarLineStep(ch) +| ch;
+    }
+
     /// (순수) 사이드바 glyph 셀(카드 + 그룹 헤더)의 origin_y를 **content-상대 rowTop py**로 채운다 — applySidebarGlyphPyTop의
     /// headless-테스트 가능한 코어(self 없이 rows·메트릭만). slot=**표시 row 인덱스**(sidebarGlyphRow 인코딩; SG3c에서 헤더도
     /// slot을 차지해 카드·헤더 통일 도메인). content_tops는 **모든 row**(카드·헤더)에 한 엔트리씩 = Σ(앞선 row 높이;
@@ -14089,8 +14125,8 @@ pub const AppSession = struct {
             const line_count: u32 = rem / 4;
             const line_index: u32 = rem % 4;
             const row_h = chrome.components.sidebar.rowHeight(rows[slot], slot_h, header_row_h); // 이 row의 실제 높이(헤더=얇은 줄)
-            const block_off: u32 = (row_h -| line_count * ch) / 2; // renameCaretRect와 같은 정수 블록중앙(정합)
-            c.origin_y = content_tops.items[slot] +| block_off +| line_index * ch;
+            const block_off: u32 = (row_h -| sidebarBlockHeight(line_count, ch)) / 2; // renameCaretRect와 같은 정수 블록중앙(정합)
+            c.origin_y = content_tops.items[slot] +| block_off +| line_index *| sidebarLineStep(ch); // 줄 스텝=ch+여유(촘촘함 완화)
         }
     }
 
@@ -16855,10 +16891,12 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
     try std.testing.expectEqual(@as(u32, 0 * 100 + 40), cells2[0].origin_y);
     try std.testing.expectEqual(@as(u32, 1 * 100 + 40), cells2[1].origin_y);
 
-    // (C) 다줄 카드: 카드0(slot1, 헤더 뒤) line_count=3 → block_off=(100-60)/2=20, line_index 2줄째는 +2*ch. content top=헤더(24).
+    // (C) 다줄 카드: 카드0(slot1, 헤더 뒤) line_count=3. 줄 스텝=ch+여유(sidebarLineStep)라 블록 높이=sidebarBlockHeight(3,ch),
+    // 블록중앙 오프셋=(slot_h-블록)/2, 2줄째는 +2*step. content top=헤더(24). 값은 헬퍼로 파생해 스텝 조정 시 자동 정합.
     var cells3 = [_]metal_frame.NativeMetalCell{glyphCell(1, 2, 3)};
     AppSession.fillSidebarGlyphPyTop(std.testing.allocator, &cells3, &rows, slot_h, header_row_h, ch);
-    try std.testing.expectEqual(@as(u32, 24 + 20 + 2 * 20), cells3[0].origin_y); // 헤더24 + block_off20 + 2줄*ch
+    const block_off_c: u32 = (slot_h - AppSession.sidebarBlockHeight(3, ch)) / 2;
+    try std.testing.expectEqual(@as(u32, 24 + block_off_c + 2 * AppSession.sidebarLineStep(ch)), cells3[0].origin_y); // 헤더24 + block_off + 2줄*step(여유)
 }
 
 test "workspaceStatusLine: running=파형 스피너 prefix, idle=✓, none=빈 문자열; tabAgentKind 폴백" {
@@ -19241,12 +19279,13 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
     try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| ch) / 2)), cr1.y);
     session.closeRename();
 
-    // 2) idle 에이전트 워크스페이스(scroll 0): 상태줄(✓)이 붙어 카드 2줄 → 이름줄(line 0)이 2줄 블록 상단(ch/2 위).
+    // 2) idle 에이전트 워크스페이스(scroll 0): 상태줄(✓)이 붙어 카드 2줄 → 이름줄(line 0)이 2줄 블록 상단. 블록 높이는
+    // sidebarBlockHeight(2,ch)(줄 스텝 여유 반영)라 block_off=(slot_h-그 값)/2. 이름줄=line 0이라 caret y=header+block_off.
     term.agent_kind = .claude;
     term.agent_state = .idle;
     session.startRename(.{ .workspace = tab });
     const cr2 = session.renameCaretRect() orelse return error.NoCaret;
-    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| 2 * ch) / 2)), cr2.y);
+    try std.testing.expectEqual(@as(i32, @intCast(header + (slot_h -| AppSession.sidebarBlockHeight(2, ch)) / 2)), cr2.y);
     session.closeRename();
 
     // 상태줄 유무로 caret이 실제로 위로 올라가야 한다(겹침 방지의 본질) — 안 그러면 후보창이 파형 상태줄에 겹친다.

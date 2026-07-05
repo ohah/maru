@@ -1065,7 +1065,8 @@ const ctx_menu_count: usize = ctx_menu_group_remove + 1; // 워크스페이스 �
 // (setGroupColorForTab)은 카드 메뉴와 **같은 인프라**를 재사용해 헤더/카드가 같은 색 메뉴를 공유한다(중복 최소). 대상 마커
 // 탭은 renameTargetAt이 group_header row의 self.tabs[gh.tab](= group_start 마커)로 잡는다. 카드 메뉴처럼 pin/배경/accent를
 // 넣지 않는 이유: 헤더는 그룹 전체를 가리키는 합성 row이지 개별 카드가 아니다(개별 카드 색은 그 카드 우클릭에 있다).
-const ctx_group_menu_ungroup: usize = 1; // Rename(0) 다음: 그룹 풀기
+const ctx_group_menu_pin: usize = 1; // Rename(0) 다음: 그룹 고정/해제(toggleGroupPin — 그룹 통째 고정, GP3 §12.10)
+const ctx_group_menu_ungroup: usize = ctx_group_menu_pin + 1; // 그 다음: 그룹 풀기
 const ctx_group_menu_color_first: usize = ctx_group_menu_ungroup + 1; // 그룹 색 프리셋 시작(카드 메뉴의 group_color_first와 같은 라벨/팔레트)
 comptime {
     // 그룹 헤더 메뉴 항목 최대치(Rename + 그룹 풀기 + 색 프리셋)가 공유 버퍼(ctx_menu_count 크기)를 넘지 않는지 확인.
@@ -4287,6 +4288,20 @@ pub const AppSession = struct {
         return self.groupSubtreeEnd(gi, null, null);
     }
 
+    /// 그룹 통째 드래그의 삽입 경계 `insert_before`를 드래그 그룹(마커 `m`)의 **pin 리전**에 가둔다(그룹 고정 C2, §12.6 보강3 GP3).
+    /// 고정 그룹(마커 pinned)은 고정 리전 `[0, pinned_count]`로, 비고정 그룹은 비고정 리전 `[pinned_count, len]`로만 삽입되게
+    /// clamp한다 — 그래야 그룹이 고정/비고정 경계를 가로질러 프리픽스 불변식(I1)이 깨지지 않는다(§12.1 삼중 파티션). 경계값
+    /// `pinned_count`는 리전 경계이자(불변식상) 최상위 단위 경계라, clamp 결과도 항상 그룹 경계라 파티션 연속이 유지된다.
+    /// **plan 산출부 단일 clamp**(groupDragPreviewFrame)에서만 부른다 — 이동 함수(moveGroupRange/simulateGroupMove)에 넣으면
+    /// 프리뷰/확정 이중경로 divergence(SG8)가 재발하므로, plan에 이미 clamp된 값을 굽고 확정이 그 plan을 재사용한다(프리뷰=확정).
+    fn clampGroupMoveToRegion(self: *AppSession, m: usize, insert_before: usize) usize {
+        const len = self.tabs.items.len;
+        if (m >= len) return insert_before;
+        const pinned_count = self.countPinnedTabs();
+        if (self.tabs.items[m].pinned) return @min(insert_before, pinned_count); // 고정 → 고정 리전 [0, pinned_count]
+        return @max(insert_before, pinned_count); // 비고정 → 비고정 리전 [pinned_count, len]
+    }
+
     /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 **원본 sidebar_rows(불변)**로
     /// hit-test하고, 라이브 moveGroupNesting/Sibling 커밋을 **제거**한 **비커밋 프리뷰**(SG8e — docs/sidebar-groups.md §9)를
     /// 재투영한다: 드롭 컨텍스트로 plan만 계산해(헤더 드롭=`.group_nest`·카드/최상위 드롭=`.group_sibling`·무효=`.none`)
@@ -4305,7 +4320,10 @@ pub const AppSession = struct {
         const plan: DropPlan = if (self.groupNestPlan(raw_row, marker)) |np|
             .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
         else if (self.sidebarGroupDropBoundary(raw_row, marker)) |boundary|
-            .{ .group_sibling = .{ .insert_before = boundary } }
+            // 그룹 고정 C2(§12.6 GP3): insert_before를 **plan에 굽기 전** 드래그 그룹의 pin 리전으로 clamp한다 —
+            // 이동 함수(moveGroupRange/simulateGroupMove)가 아니라 여기 단일 지점이라 프리뷰=확정이 같은 clamp 값을
+            // 재사용해 SG8 이중경로 divergence가 없다. (nest는 groupNestPlan이 same-pin 그룹만 내므로 이미 리전 안이다.)
+            .{ .group_sibling = .{ .insert_before = self.clampGroupMoveToRegion(marker, boundary) } }
         else
             .none;
         // 비커밋 프리뷰 재투영(self.tabs 불변). 카드 드래그(SG8d)와 동형 — 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를
@@ -4339,6 +4357,9 @@ pub const AppSession = struct {
         const len = self.tabs.items.len;
         if (g >= len or m >= len) return null;
         if (g == m) return null; // 자기 그룹 헤더 — 무동작
+        // 그룹 고정 C2(§12.6 GP3): pin이 **다른** 그룹엔 중첩 불가 → null로 형제 폴백(clampGroupMoveToRegion이 리전에
+        // 가둔다). 멤버가 다른 pin 리전 마커에 소속되면 C3(멤버별 pin)=I1×I2 모순이 재발하므로 원천 차단한다.
+        if (self.tabs.items[g].pinned != self.tabs.items[m].pinned) return null;
         // 타겟 g가 드래그 subtree [m, my_end) 안이면(자기 자손) 자기 안으로 넣기 불가 — null(형제 경로도 self-guard로 no-op).
         const my_end = self.groupSubtreeEnd(m, null, null);
         if (g >= m and g < my_end) return null;
@@ -4607,25 +4628,40 @@ pub const AppSession = struct {
     /// 후에만 self.tabs 변경). 이 단일 게이트로 모든 호출처가 안전하다(commit 경로는 clearSidebarDragPreview 후라 통과).
     fn normalizePinnedFromGroups(self: *AppSession) void {
         if (self.sidebar_drag_preview != null) return; // SG8: 프리뷰 중 self.tabs.pinned 불변(드래그 종료 후에만 정규화)
-        const StackEntry = struct { depth: u8, pinned: bool };
-        var stack: [max_group_nesting]StackEntry = undefined;
-        var top: usize = 0;
-        for (self.tabs.items) |tab| {
-            if (tab.group_start != null) {
-                const dd: u8 = @max(@as(u8, 1), tab.group_depth); // declared depth로 조상 pop(gap 클램프 정규화)
-                while (top > 0 and stack[top - 1].depth >= dd) top -= 1; // 같거나 깊은 조상 마커 닫기(pass1 동형)
-                // 핀 리전 경계(§12 GP1): pop 후 남은 부모 마커와 pinned가 다르면 pin ⊃ group상 조상 소속 불가 → 새 최상위
-                // 리전이라 스택을 비운다(중첩이 핀 경계를 넘는 손상 배치를 리전 국소화; 정상 형제/중첩은 pinned 동일이라 no-op).
-                if (top > 0 and stack[top - 1].pinned != tab.pinned) top = 0;
-                const parent: u8 = if (top > 0) stack[top - 1].depth else 0;
-                if (top < stack.len) {
-                    stack[top] = .{ .depth = parent + 1, .pinned = tab.pinned }; // 마커 pinned = 권위(불변, 카드 전파원)
-                    top += 1;
-                }
-            } else if (top > 0) {
-                tab.pinned = stack[top - 1].pinned; // 멤버 카드 = enclosing 마커 pinned(파생 캐시 동기)
+        // GP3(§12.5 정합 — GP1 파생과 tension 해소): 각 **최상위 그룹**의 **pin-무시 구조 subtree** 안에서 멤버를 마커
+        // pinned로 동기하되, **suffix-exclusion**으로 "마커와 다른 pin이 subtree 끝까지 이어지는 꼬리"는 안 흡수한다.
+        // 그 꼬리 = 다음 pin 리전의 최상위 카드(§12.1 "고정그룹 + 비고정 top카드"). 이렇게 하면:
+        //   · desync가 없는(§12.7 보강5 개별 pin 차단) canonical 상태에서 구조 subtree = 마커+진짜 멤버뿐 → groupSubtreeEnd
+        //     (pin 인식)과 **동일 답**을 내고 GP1 렌더(per-position)와 정합한다("top카드 안 흡수", idempotent).
+        //   · 사이에 낀 desync 멤버(마커 pin이 뒤에서 재등장)는 여전히 흡수해 shred를 막는다(GP2 회귀 0).
+        //   · pin 경계는 최상위 단위 경계 정렬(pin ⊃ group ⊃ nest)이라 꼬리 배제는 최상위 리전 전이에서만 일어난다.
+        const n = self.tabs.items.len;
+        var i: usize = 0;
+        while (i < n) {
+            const marker = self.tabs.items[i];
+            if (marker.group_start == null) {
+                i += 1; // 최상위 카드 — 개별 pin이라 자기 값 유지(재기록 없음)
+                continue;
             }
-            // top-level 카드(top==0): 개별 pin이라 자기 값 유지(재기록 없음).
+            // pin-무시 구조 subtree [i, e): groupSubtreeEnd와 동형이되 **pin 경계 break는 뺀다**(멤버 desync를 흡수하려면
+            // 구조 범위가 필요 — pin 인식 subtree는 첫 flip에서 끊겨 사이 낀 desync를 못 고친다). 형제/얕은 마커에서만 끊는다.
+            const eff = self.effectiveDepthAt(i, null, null);
+            const pin = marker.pinned; // 마커 = 그룹 고정 권위(§12.2)
+            var e = i + 1;
+            while (e < n) : (e += 1) {
+                const t = self.tabs.items[e];
+                if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff) break;
+            }
+            // subtree 안에서 마커 pin이 **마지막으로** 일치하는 위치(마커 자신 포함)까지가 진짜 멤버 범위. 그 뒤 [last_match+1, e)는
+            // 마커와 다른 pin이 끝까지 이어지는 꼬리(=다음 리전 top카드)라 안 건드린다.
+            var last_match = i;
+            var k = i + 1;
+            while (k < e) : (k += 1) if (self.tabs.items[k].pinned == pin) {
+                last_match = k;
+            };
+            k = i + 1;
+            while (k <= last_match) : (k += 1) self.tabs.items[k].pinned = pin; // 진짜 멤버(사이 desync 흡수)만 마커 pin으로 재기록
+            i = e; // 구조 subtree 통째 처리 — 꼬리 top카드는 다음 마커/리전이 다룬다
         }
     }
 
@@ -4659,6 +4695,48 @@ pub const AppSession = struct {
         // "from==to 안전망"이 metal_dirty라던 주석을 정정).
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+    }
+
+    /// 그룹을 **통째로** 고정/해제한다(togglePin의 그룹판, 그룹 고정 C2 — docs/sidebar-groups.md §12.6·§12.10 GP3).
+    /// `marker`는 그룹 시작 마커 탭(헤더 우클릭 대상 또는 멤버 카드가 위임한 enclosing 마커). 순서:
+    ///  1. **토글 전** 구조 subtree [mi, e)를 잡는다 — 개별 pin 입구가 막혀(§12.7 보강5) desync가 없으니 마커·멤버 pin이
+    ///     아직 일치해 `groupSubtreeEnd`(pin 인식)가 완전 subtree를 낸다.
+    ///  2. 마커+멤버 pin을 새 값으로 **직접 동기**한다 — `normalizePinnedFromGroups`의 suffix-exclusion은 전량 flip된
+    ///     직후(마커만 새 pin, 멤버 전부 옛 pin)를 "꼬리"로 보고 안 흡수하므로, 멤버 동기는 여기서 명시적으로 한다.
+    ///  3. `stablePartitionPinned`로 그룹(연속·uniform-pin 블록)을 목표 리전 경계에 안착한다 — 고정=(다른 고정 뒤)프리픽스
+    ///     끝, 비고정=비고정 리전 시작. **복원과 같은 프리픽스 정렬**이라 그룹이 리전 양쪽에 다른 고정 단위가 있어도(예:
+    ///     고정 그룹 앞에 다른 고정 그룹) 프리픽스 불변식을 항상 지킨다(moveGroupRange 단일 insert_before로는 표현 못 하는
+    ///     경계 케이스 — 연속 블록이라 stable 수집이 그룹 통째를 붙여 옮기고 파티션 무결이 유지된다).
+    ///  4. `normalize`(idempotent 확인) 후 1회 rebuild.
+    fn toggleGroupPin(self: *AppSession, marker: *Tab) void {
+        var mi_opt: ?usize = null;
+        for (self.tabs.items, 0..) |t, i| if (t == marker) {
+            mi_opt = i;
+            break;
+        };
+        const mi = mi_opt orelse return;
+        if (marker.group_start == null) return; // 마커여야 한다(멤버 위임은 호출 전 enclosing 마커로 해석)
+
+        const e = self.groupSubtreeEnd(mi, null, null); // 토글 전 subtree(마커·멤버 pin 일치라 완전 범위)
+        const new_pinned = !marker.pinned;
+        var k = mi;
+        while (k < e) : (k += 1) self.tabs.items[k].pinned = new_pinned; // 마커+멤버 pin 직접 동기(§12.5 정합의 유일한 flip 동기원)
+        self.stablePartitionPinned(); // 그룹 블록을 목표 리전 경계로 안착(프리픽스 불변식 — 복원과 같은 정렬)
+        self.normalizePinnedFromGroups(); // 안착 후 canonical 확인(멤버 이미 동기 → idempotent)
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+        if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 토글 후 프리픽스 불변식(디버그)
+    }
+
+    /// 카드 `tab`이 속한 그룹의 enclosing 시작 마커 탭(§2.1 상향 파생, 핀 리전 클램프 — enclosingGroupMarkerIndex 공유).
+    /// 최상위 카드(그룹 미소속)면 null. 개별 카드 pin 입구 차단(§12.7 보강5)이 "그룹 멤버 우클릭 pin = 그룹째 위임"을
+    /// 판정·실행할 때 쓴다(멤버면 이 마커로 toggleGroupPin, 최상위면 togglePin).
+    fn enclosingGroupMarkerTab(self: *const AppSession, tab: *const Tab) ?*Tab {
+        for (self.tabs.items, 0..) |t, i| if (t == tab) {
+            const mi = self.enclosingGroupMarkerIndex(i) orelse return null;
+            return self.tabs.items[mi];
+        };
+        return null;
     }
 
     // ── 사이드바 그룹(접이식 워크스페이스 묶음, SG3c) — 위치 파생 마커(Tab.group_start) 조작 ─────────────────────
@@ -4886,9 +4964,24 @@ pub const AppSession = struct {
             tab.group_depth = 1;
         }
 
+        // 그룹 고정 C2(§12.7 보강 4 GP3): **고정** 그룹에서 빼기 = pin 상실. `clampMoveToGroup`은 카드를 자기 pin 그룹에
+        // 가두는 pin-trap이라, 고정인 채로 moveTab하면 고정 리전에 붙잡혀 비고정 최상위로 못 나간다. 그래서 **move 전에**
+        // unpin을 결정하고, 비고정 리전 시작(= 남은 고정 수)으로 옮긴 뒤 **move 후에** normalize한다 — 카드가 구조상 아직
+        // 그룹 안일 때 normalize하면 suffix-exclusion이 사이 낀 것으로 보고 재흡수할 수 있어, 비고정 top카드 위치로 옮기고
+        // 정규화해야 "빼기=고정 상실"이 안정된다(남은 그룹은 마커 기준 canonical, 빠진 카드는 비고정 유지).
+        if (tab.pinned) {
+            tab.pinned = false; // §12.7 보강 4 — 빼기로 고정 상실(move 전 결정)
+            const to = self.countPinnedTabs(); // unpin 반영된 비고정 리전 시작
+            _ = self.moveTab(ix, to); // 비고정 리전 최상위로(clamp가 비고정 영역 [pinned_count, len)로 가둠)
+            self.normalizePinnedFromGroups(); // move 후 — 남은 그룹 재동기, 빠진 카드는 비고정 top카드라 안 흡수
+            self.rebuildSidebar() catch {};
+            self.metal_dirty = true;
+            return;
+        }
+
         // 그룹 고정 C2(§12.5 GP2): 마커 승계/제거로 남은 그룹 구성이 바뀌었으니 멤버 pinned 캐시를 재동기(비프리뷰 경로).
         // 아래 moveTab/rebuild 두 종료 경로 모두 앞서 한 번 정규화하면 충분하다(빼낸 카드는 최상위로 이동해 자기 값 유지,
-        // 남은 그룹은 마커 기준 canonical). GP3의 "빼기=고정 상실"(§12.7 보강 4)은 후속 — GP2는 shred 방지 동기만.
+        // 남은 그룹은 마커 기준 canonical). 비고정 멤버는 pin-trap이 없어 그 리전 최상위로 그대로 뺀다(고정 경로는 위에서 처리).
         self.normalizePinnedFromGroups();
 
         // 승계 후(또는 마커 아니었으면) 남은 첫 마커(이 핀 리전 안) 직전으로 옮긴다. 이 카드가 첫 마커였다면 승계로 마커가
@@ -7286,7 +7379,13 @@ pub const AppSession = struct {
         self.context_menu_items_buf[n] = "Rename";
         n += 1;
         if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .workspace) {
-            self.context_menu_items_buf[n] = if (t.workspace.pinned) "고정 해제" else "위치 고정";
+            // 개별 카드 pin 입구 차단(그룹 고정 C2, §12.7 보강 5 GP3): 그룹 **소속** 카드는 개별 pin이 캐시 권위를 깨므로
+            // "위치 고정"을 **"그룹째 고정/해제"로 위임**한다(acceptContextMenu가 enclosing 마커로 toggleGroupPin). 최상위
+            // 카드만 개별 pin(togglePin). 인덱스(ctx_menu_pin=1)는 고정 — 라벨/동작만 소속 여부로 바뀐다(desync 원천 제거).
+            self.context_menu_items_buf[n] = if (self.enclosingGroupMarkerTab(t.workspace)) |mk|
+                (if (mk.pinned) "그룹 고정 해제" else "그룹째 고정")
+            else
+                (if (t.workspace.pinned) "고정 해제" else "위치 고정");
             n += 1;
             for (tab_bg_labels) |lbl| {
                 self.context_menu_items_buf[n] = lbl;
@@ -7320,6 +7419,9 @@ pub const AppSession = struct {
         // 이름 편집은 위에서 이미 넣었고, 여기서 "그룹 풀기"(ungroup)와 "그룹 색: …" 프리셋을 붙인다. 색 라벨/팔레트/세팅은
         // 카드 메뉴와 같은 인프라(tab_group_color_labels·tab_color_presets·setGroupColorForTab)를 재사용해 같은 색 메뉴를 공유한다.
         if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .group) {
+            // 그룹 고정/해제(toggleGroupPin — GP3 §12.10). 마커 pinned = 그룹 고정 권위(§12.2)라 헤더에서 그룹째 토글한다.
+            self.context_menu_items_buf[n] = if (t.group.pinned) "그룹 고정 해제" else "그룹 고정"; // ctx_group_menu_pin
+            n += 1;
             self.context_menu_items_buf[n] = "그룹 풀기"; // ctx_group_menu_ungroup
             n += 1;
             for (tab_group_color_labels) |lbl| { // 그룹 색 프리셋 — ctx_group_menu_color_first부터(카드 메뉴와 같은 라벨)
@@ -7424,7 +7526,9 @@ pub const AppSession = struct {
         if (std.meta.activeTag(t) == .workspace) {
             const tab = t.workspace;
             if (sel == ctx_menu_pin) {
-                self.togglePin(tab); // 위치 고정 토글 + 불변식 유지(고정은 앞쪽 영역으로 정렬)
+                // 개별 카드 pin 입구 차단(§12.7 보강 5 GP3): 그룹 소속 카드는 그룹째 고정으로 **위임**(enclosing 마커
+                // toggleGroupPin — 멤버 개별 pin이 캐시 권위를 깨는 desync를 원천 제거). 최상위 카드만 개별 togglePin.
+                if (self.enclosingGroupMarkerTab(tab)) |mk| self.toggleGroupPin(mk) else self.togglePin(tab);
             } else if (sel == ctx_menu_group_create) {
                 self.createGroupForTab(tab); // 새 그룹으로 묶기=중첩(단축키 Cmd+Opt+G·팔레트 공유 — 클릭 대상 기준)
             } else if (sel == ctx_menu_group_sibling) {
@@ -7444,7 +7548,9 @@ pub const AppSession = struct {
             // 그룹 헤더 우클릭(SG5-2-header) — 대상 tab은 group_start 마커. sel==0(Rename)은 위에서 startRename(.group)로 처리됨.
             // ungroup·색은 카드 메뉴와 같은 세션 메서드를 쓴다(대상이 마커라 enclosingGroupMarkerIndex가 자기 자신을 찾아 동작).
             const tab = t.group;
-            if (sel == ctx_group_menu_ungroup) {
+            if (sel == ctx_group_menu_pin) {
+                self.toggleGroupPin(tab); // 그룹 고정/해제(마커 pinned 토글 → 멤버 동기 → 리전 안착, GP3 §12.10)
+            } else if (sel == ctx_group_menu_ungroup) {
                 self.ungroupTab(tab); // 그룹 풀기(헤더가 가리키는 그룹의 시작 마커 제거)
             } else if (sel >= ctx_group_menu_color_first and sel < ctx_group_menu_color_first + tab_color_presets.len) {
                 self.setGroupColorForTab(tab, tab_color_presets[sel - ctx_group_menu_color_first]); // 그룹 색(카드 메뉴와 같은 dispatch·팔레트)
@@ -16753,6 +16859,231 @@ test "GP2: 드래그 중 불변 — sidebar_drag_preview!=null이면 normalizePi
     try std.testing.expect(t1.pinned); // 이제 마커 권위로 canonical(0→1)
 }
 
+// GP3(그룹 고정 C2 — toggleGroupPin + clampGroupMoveToRegion + 개별 pin 입구 차단 + GP1/GP2 정합, §12.6·§12.7·§12.10).
+// (a)tension 해소·(b)개별 pin 차단·(c)toggleGroupPin·(d)clamp 프리뷰=확정·(e)removeFromGroup unpin 선행.
+
+test "GP3(a): tension 해소 — normalize가 고정그룹 뒤 비고정 top카드를 안 흡수(GP1 렌더 depth0 정합·idempotent)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+
+    // §12.1 약점 최상 "고정그룹 + 비고정 top카드": t0=PG(마커,pin1)·t1=PG멤버(pin1)·t2=비고정 top카드(pin0)·
+    // t3=UG(마커,pin0)·t4=UG멤버(pin0). 마커=1·다음카드=0 패턴이 desync가 아니라 genuine이다(개별 pin 차단으로 desync 불가).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true;
+    session.tabs.items[3].group_start = try allocator.dupe(u8, "UG");
+    session.tabs.items[3].group_depth = 1;
+
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(!session.tabs.items[2].pinned); // ★ top카드 안 흡수(0 유지) — tension 해소 핵심
+    try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned); // 고정 그룹 유지
+    try std.testing.expect(!session.tabs.items[3].pinned and !session.tabs.items[4].pinned); // 비고정 그룹 유지
+    // GP1 per-position 파생과 정합: t2 = 비고정 리전 최상위 depth 0(안 삼켜짐), groupSubtreeEnd가 pin 경계서 끊김.
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null)); // GP1 렌더 depth0
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG=[0,2), t2는 밖
+    // idempotent — 2회 normalize 동일(추가 흡수 없음).
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(!session.tabs.items[2].pinned);
+    try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned);
+    try std.testing.expect(!session.tabs.items[3].pinned and !session.tabs.items[4].pinned);
+}
+
+test "GP3(b): 개별 카드 pin 입구 차단 — 그룹 멤버 ctx_menu_pin이 그룹째 고정으로 위임(개별 desync 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+    session.createGroupForTab(session.tabs.items[0]); // t0=마커, t1·t2=위치 파생 멤버(그룹 [t0,t1,t2])
+
+    // 멤버 카드 우클릭 → pin 항목이 "위치 고정"이 아니라 "그룹째 고정"(개별 pin 입구 차단, §12.7 보강 5).
+    session.context_menu_target = .{ .workspace = session.tabs.items[1] };
+    try std.testing.expectEqualStrings("그룹째 고정", session.buildContextMenuItems()[ctx_menu_pin]);
+
+    // accept → togglePin(개별)이 아니라 toggleGroupPin(그룹째). 마커+모든 멤버가 통째 pinned(개별 desync 원천 제거).
+    session.context_menu_target = .{ .workspace = session.tabs.items[1] };
+    session.chrome_host.context_menu.selected = ctx_menu_pin;
+    session.acceptContextMenu();
+    try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned and session.tabs.items[2].pinned);
+    // 다시 열면 "그룹 고정 해제"(그룹째 토글 상태 반영).
+    session.context_menu_target = .{ .workspace = session.tabs.items[1] };
+    try std.testing.expectEqualStrings("그룹 고정 해제", session.buildContextMenuItems()[ctx_menu_pin]);
+
+    // 대조: 최상위(그룹 미소속) 카드는 개별 pin 그대로 — "위치 고정" 라벨·togglePin.
+    session.context_menu_target = .{ .workspace = session.tabs.items[1] };
+    session.chrome_host.context_menu.selected = ctx_menu_pin;
+    session.acceptContextMenu(); // 그룹 해제(통째)
+    session.ungroupTab(session.tabs.items[0]); // 그룹 풀어 최상위 카드로
+    session.context_menu_target = .{ .workspace = session.tabs.items[0] };
+    try std.testing.expectEqualStrings("위치 고정", session.buildContextMenuItems()[ctx_menu_pin]); // 최상위 = 개별 pin
+}
+
+test "GP3(c): toggleGroupPin — 그룹 통째 고정→프리픽스 끝 이동·멤버 pin 동기, 해제→역(top카드 보존)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // [p0(고정 top카드,1), u0(비고정 top카드,0), G(마커,0), m(멤버,0)]. G를 고정하면 p0 **뒤**(프리픽스 끝)로 이동해야.
+    session.tabs.items[0].pinned = true; // p0 = 고정 최상위 카드(개별 pin)
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "G");
+    session.tabs.items[2].group_depth = 1;
+    const p0 = session.tabs.items[0];
+    const utop = session.tabs.items[1];
+    const g = session.tabs.items[2];
+    const m = session.tabs.items[3];
+
+    session.toggleGroupPin(g); // 그룹째 고정
+    try std.testing.expect(g.pinned and m.pinned); // 멤버 pin 동기(0→1)
+    try std.testing.expect(p0.pinned and !utop.pinned); // p0 고정 유지·u0 비고정 top카드 보존(안 흡수)
+    try std.testing.expectEqual(p0, session.tabs.items[0]); // 기존 고정 카드가 앞
+    try std.testing.expectEqual(g, session.tabs.items[1]); // 그룹이 **프리픽스 끝**(p0 바로 뒤)에 안착
+    try std.testing.expectEqual(m, session.tabs.items[2]);
+    try std.testing.expectEqual(utop, session.tabs.items[3]); // 비고정 top카드는 뒤로
+    try std.testing.expectEqual(@as(usize, 3), session.groupSubtreeEnd(1, null, null)); // G=[1,3) 통째 고정
+
+    session.toggleGroupPin(g); // 해제 = 역
+    try std.testing.expect(!g.pinned and !m.pinned); // 멤버 pin 역동기(1→0)
+    try std.testing.expect(p0.pinned and !utop.pinned); // p0 개별 고정은 불변(그룹 토글과 직교)
+    try std.testing.expectEqual(p0, session.tabs.items[0]); // 고정 프리픽스 [0,1) 유지
+    try std.testing.expectEqual(g, session.tabs.items[1]); // 그룹은 비고정 리전 시작에 남음
+}
+
+test "GP3(c2): toggleGroupPin unpin — 다른 고정 그룹 앞의 그룹을 해제해도 프리픽스 무결(경계 케이스)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 고정 그룹 둘: PG1[0,1]·PG2[2,3] 전부 pin1. PG1(다른 고정 그룹 **앞**)을 해제 → 비고정 리전으로 나가고 PG2는 고정 프리픽스에.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG1");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "PG2");
+    session.tabs.items[2].group_depth = 1;
+    for (0..4) |i| session.tabs.items[i].pinned = true;
+    const pg1 = session.tabs.items[0];
+    const pm1 = session.tabs.items[1];
+    const pg2 = session.tabs.items[2];
+    const pm2 = session.tabs.items[3];
+
+    session.toggleGroupPin(pg1); // PG1 해제 — moveGroupRange 단일 insert_before로는 못 옮기는 경계(stablePartition 정렬)
+    try std.testing.expect(!pg1.pinned and !pm1.pinned); // PG1 비고정
+    try std.testing.expect(pg2.pinned and pm2.pinned); // PG2 고정 유지
+    // 프리픽스 무결: [PG2, pm2, PG1, pm1] = [1,1,0,0](복원식 stable 정렬로 고정이 앞·그룹 연속).
+    try std.testing.expectEqual(pg2, session.tabs.items[0]);
+    try std.testing.expectEqual(pm2, session.tabs.items[1]);
+    try std.testing.expectEqual(pg1, session.tabs.items[2]);
+    try std.testing.expectEqual(pm1, session.tabs.items[3]);
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG2=[0,2) 고정 통째
+    try std.testing.expectEqual(@as(usize, 4), session.groupSubtreeEnd(2, null, null)); // PG1=[2,4) 비고정 통째
+}
+
+test "GP3(d): clampGroupMoveToRegion — 그룹 드래그 plan을 리전 경계로 clamp, 프리뷰=확정(simulateDrop==move)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..5) |_| _ = try session.newTab(); // [t0..t5]
+
+    // 고정 리전 = 그룹 PG1[0,1]·PG2[2,3](마커+멤버 각 pin1), 비고정 리전 = UG[4,5](pin0).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG1");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "PG2");
+    session.tabs.items[2].group_depth = 1;
+    session.tabs.items[4].group_start = try allocator.dupe(u8, "UG");
+    session.tabs.items[4].group_depth = 1;
+    for (0..4) |i| session.tabs.items[i].pinned = true; // [1,1,1,1,0,0] — 프리픽스 canonical
+
+    // 고정 그룹 PG1을 비고정 리전(len=6)으로 끌어도 고정 리전 경계(pinned_count=4)로 clamp.
+    try std.testing.expectEqual(@as(usize, 4), session.clampGroupMoveToRegion(0, 6));
+    // 비고정 그룹 UG를 고정 리전(0)으로 끌어도 비고정 리전 경계(pinned_count=4)로 clamp.
+    try std.testing.expectEqual(@as(usize, 4), session.clampGroupMoveToRegion(4, 0));
+    // clamp된 insert_before(4)로 만든 group_sibling plan은 프리뷰(simulateDrop)와 확정(moveGroupSibling)이 **동일**
+    // (SG8 이중경로 없음 — plan에 이미 clamp 구움). PG1이 고정 리전 안에서 PG2 뒤로 이동.
+    try expectDropEquivalent(session, 0, .{ .group_sibling = .{ .insert_before = 4 } });
+    try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[3].pinned); // 이동 후에도 고정 프리픽스 무결
+    try std.testing.expect(!session.tabs.items[4].pinned); // 비고정 리전 침범 없음
+}
+
+test "GP3(e): removeFromGroup 고정 멤버 — unpin 선행 후 비고정 top카드로(clampMoveToGroup pin-trap 회피)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+
+    // 고정 그룹 PG = [t0(마커) t1 t2] 전부 pin1.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    for (0..3) |i| session.tabs.items[i].pinned = true;
+    const pg = session.tabs.items[0];
+    const a = session.tabs.items[1];
+    const b = session.tabs.items[2];
+
+    session.removeFromGroupForTab(a); // 고정 멤버 a 빼기 → §12.7 보강4: unpin 후 비고정 top카드
+    try std.testing.expect(!a.pinned); // ★ 빼기 = 고정 상실(unpin 선행)
+    try std.testing.expect(pg.pinned and b.pinned); // 남은 그룹은 고정 유지(shred 없음)
+    try std.testing.expectEqual(b, session.tabs.items[1]); // 남은 멤버가 프리픽스에 붙어 있고
+    try std.testing.expectEqual(a, session.tabs.items[2]); // 빠진 카드는 비고정 리전(프리픽스 밖)
+    try std.testing.expect(!session.tabIsInGroup(a)); // 그룹 밖(비고정 최상위)
+    try std.testing.expect(session.tabIsInGroup(b)); // b는 여전히 PG 소속
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG=[0,2) 통째 고정
+}
+
 /// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와
 /// 일치함을 단언한다: (1) move 전 탭 포인터·선언 depth 스냅샷, (2) simulateDrop → vl(+ self.tabs 불변 단언), (3) plan에
 /// 대응하는 실제 move를 **정확히 1회**, (4) 모든 위치 i에서 `before[vl.order[i]]==tabs[i]`(같은 탭이 같은 위치에)·
@@ -20051,11 +20382,12 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
     const marker = session.tabs.items[1];
     session.createGroupForTab(marker); // t1=그룹 시작 마커(헤더가 가리키는 탭)
 
-    // 헤더 우클릭 대상 = 마커 탭(.group). 메뉴: Rename + 그룹 풀기 + 그룹 색 6프리셋 = 2 + tab_group_color_labels.len.
+    // 헤더 우클릭 대상 = 마커 탭(.group). 메뉴: Rename + 그룹 고정 + 그룹 풀기 + 그룹 색 6프리셋 = 3 + tab_group_color_labels.len.
     session.context_menu_target = .{ .group = marker };
     const items = session.buildContextMenuItems();
-    try std.testing.expectEqual(@as(usize, 2 + tab_group_color_labels.len), items.len);
+    try std.testing.expectEqual(@as(usize, 3 + tab_group_color_labels.len), items.len);
     try std.testing.expectEqualStrings("Rename", items[0]); // 그룹 이름 편집(startRename(.group))
+    try std.testing.expectEqualStrings("그룹 고정", items[ctx_group_menu_pin]); // GP3 §12.10 — 미고정 그룹 → "그룹 고정"
     try std.testing.expectEqualStrings("그룹 풀기", items[ctx_group_menu_ungroup]);
     try std.testing.expectEqualStrings("그룹 색: 없음", items[ctx_group_menu_color_first]); // 카드 메뉴와 같은 색 라벨 공유
     try std.testing.expectEqualStrings("그룹 색: 파랑", items[ctx_group_menu_color_first + 2]);

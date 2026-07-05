@@ -66,7 +66,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 브리지 신뢰 게이트(isolated world·per-surface capability·forMainFrameOnly)는 **[control-plane.md] §8.1이 단일 출처**다. 여기서는 web 레이어에서만 발생하는 위협을 다룬다:
 
 - **`.md`는 신뢰 콘텐츠가 아니라 "신뢰 렌더러가 그리는 비신뢰 데이터"**다. raw HTML/script 비활성 새니타이즈(`<script>`·`on*`·`javascript:` 제거)가 기본. maru가 빌드해 번들하는 렌더러 JS는 해시 핀(SRI)·락파일로 공급망 고정.
-- **`maru-app://` 스킴**: 엄격 CSP 응답 헤더(`default-src 'none'; script-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'`)로 외부 네트워크·iframe 차단(exfil 방지). 스킴 핸들러는 **경로 정규화 후 허용 루트 prefix 검증**(realpath·symlink 거부·`..` 차단). 단 기존 `sanitizeDropFilename`(`cli/ssh.zig`)은 basename+문자 필터만 하고 realpath/symlink 거부는 **하지 않으므로 이 경로 샌드박스는 신규 코드**다(선례는 부분 참고). `.md`마다 고유 origin(uuid 호스트)로 신뢰 UI와 분리.
+- **`maru-app://` 스킴**(이름 문법·등록 가능성 근거는 §9): 엄격 CSP 응답 헤더(`default-src 'none'; script-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'`)로 외부 네트워크·iframe 차단(exfil 방지). 스킴 핸들러는 **경로 정규화 후 허용 루트 prefix 검증**(realpath·symlink 거부·`..` 차단). 단 기존 `sanitizeDropFilename`(`cli/ssh.zig`)은 basename+문자 필터만 하고 realpath/symlink 거부는 **하지 않으므로 이 경로 샌드박스는 신규 코드**다(선례는 부분 참고). `.md`마다 고유 origin(uuid 호스트)로 신뢰 UI와 분리.
 - **브리지 호출부 프레임 검증**: 메시지 핸들러 등록은 world-scope(frame 무관)라, 핸들러 진입에서 `frameInfo.isMainFrame` + `securityOrigin == maru-app://`를 검사한다(서브프레임·clickjacking 방지).
 - **untrusted 패널 격리**: `browser` 패널은 신뢰 콘텐츠와 **별도 `WKProcessPool` + `WKWebsiteDataStore`(per-surface ephemeral)** 강제 — content process·쿠키 jar 분리(렌더러 침해가 신뢰 브리지 힙에 못 닿게, 쿠키 공유 차단).
 - **링크 라우팅**: 웹 패널 링크 클릭은 `decidePolicyForNavigationAction`에서 인터셉트해 [링크 감지](link-detection.md)의 존재검증·스킴 화이트리스트·명시 제스처 정책을 재사용한다(`file:///X.app` 실행 등 차단).
@@ -84,6 +84,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 
 - WKWebView 임베드·isolated `WKContentWorld`·`WKURLSchemeHandler`는 WebKit 표준 API. CSP·새니타이즈는 웹 보안 표준.
 - 모달 오버레이 z-order는 CALayer 합성 + `hitTest` 라우팅 표준.
+- **`maru-app://` 스킴 이름 확정 (근거)**: 베이스는 URI 문법 표준 [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-3.1) §3.1로, `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`이다. 즉 하이픈(`-`)은 스킴 이름의 유효 문자이고(첫 글자만 `ALPHA` 강제), `maru-app`은 이 문법을 만족한다. `WKURLSchemeHandler`(`WKWebViewConfiguration.setURLSchemeHandler(_:forURLScheme:)`)는 built-in/특수 스킴(`http`·`https`·`file`·`about`·`data`·`blob`·`ws`·`wss` 등)에 대한 커스텀 핸들러 등록만 예외로 거부하므로, 커스텀 스킴 `maru-app`은 등록 가능하다. 스킴은 대소문자를 구분하지 않고 WebKit이 소문자로 정규화하므로 코드·CSP·핸들러 문자열은 전부 소문자 `maru-app`으로 고정한다(하이픈은 CSP source expression `maru-app:`에서도 유효). 결정: `maruapp`(하이픈 제거)이나 역-DNS(`app.maru`)로 바꾸지 않고 `maru-app://` 그대로 확정한다 — 사람이 읽을 때 maru 앱 내부 스킴임이 분명하고, 단일 라벨 커스텀 스킴이라 충돌 위험도 없다.
 - maru 독립 설계: 모달을 Metal 오버레이로(GPU chrome 일관성), surface 생애주기 ABI, web 특유 보안 게이트.
 
 ## 10. 구현 ([control-plane.md] Phase 4~5와 연계)

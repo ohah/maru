@@ -25,7 +25,11 @@ pub const Row = union(enum) {
     /// projectRowsCore가 order-aware로(depth/member_count와 동형) 채운다 — **비마커 그룹 멤버=true**(파생 억제 대상),
     /// **그룹 마커 카드·최상위 개별 pin 카드=false**(마커는 권위·헤더가 인디케이터, 최상위는 자기 pin). buildSidebarDrawList가
     /// live `tab.pinned` 대신 이 힌트를 읽어 멤버 📌를 억제한다. depth와 달리 "마커 카드 vs 멤버 카드"를 구별한다(둘 다 depth>0).
-    card: struct { tab: usize, label: []const u8, active: bool, depth: u8 = 0, pin_derived: bool = false },
+    /// local_pinned=이 카드가 **그룹-로컬 pin된 멤버**(그룹 내 위치 고정, GL — docs/sidebar-groups.md §13.6)인가. pin_derived가
+    /// 모든 멤버 📌를 억제하는 것과 달리, 로컬 pin은 **실제 사용자 pin**이라 sidebarRowShowsPin이 **선두 분기**(pin_derived보다
+    /// 먼저)로 📌를 살린다. projectRowsCore가 비마커 그룹 멤버 카드에만 `tab.local_pinned`로 채운다(마커 카드·최상위 카드=false —
+    /// 로컬 pin은 leaf 멤버에서만 의미, §13.8). pin_derived와 **직교**한다(그룹째 고정 그룹 안 로컬 pin 멤버는 둘 다 true 가능).
+    card: struct { tab: usize, label: []const u8, active: bool, depth: u8 = 0, pin_derived: bool = false, local_pinned: bool = false },
     /// 그룹 헤더(SG3) — 접기 토글 줄(카드 아님). collapsed=접힘, member_count=접힘 시 "▸ name (N)" 표시용.
     /// tab=이 그룹을 **시작하는 원본 self.tabs 인덱스**(group_start 마커를 든 탭). 헤더 클릭 시 그 탭의 group_collapsed를
     /// 토글하고(onGroupHeader), platform이 라벨 glyph를 그 탭의 `group_start`에서 **직접 라이브로** 뽑는다(label은

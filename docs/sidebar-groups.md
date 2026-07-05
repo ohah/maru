@@ -880,6 +880,15 @@ self.tabs order가 되어 드롭 타깃 매핑이 divergence(기각).
 코어)만**, 실제 드래그 clamp·토글은 GL2. (1차 fallback = re-partition-on-commit: 확정 후 `stablePartitionSubtree`가 다시 float
 해 snap-back — 전역 pin drag가 `clampMoveToGroup`으로 리전에 갇히는 것과 같은 결.)
 
+**확정 클램프 보강(GL3 — 프리뷰=확정 엣지 완성)**: re-partition-on-commit **하나만으로는 부족한 엣지**가 있다 — 로컬 pin 멤버를
+**마커 자기 카드 위로**(target=마커 인덱스) 드래그하면 raw `moveTab(origin, marker)`이 카드를 마커 **앞**(그룹 밖 top-level)으로
+eject하고, 그러면 뒤이은 `floatLocalPinsAllGroups`가 (더 이상 subtree 멤버가 아니라) 회수하지 못해 **프리뷰(clamp돼 그룹 안)≠
+확정(밖으로 튐)** 이 된다. 그래서 `commitSidebarDragPreview`의 `.card` 경로도 `simulateDrop`과 **같은** clamp(`clampMoveToGroup`
+위에 `localPinPrefixBounds` 겹침)를 태워 `moveTab` target을 프리픽스로 가둔다 — 프리뷰=확정을 완성한다. `bounds=null`(비-로컬-pin)
+이면 raw target 그대로라 기존 카드 드래그 동작 불변. **단 "드래그로 그룹 밖 out"은 로컬 pin 해제(§13.7)라 clamp 대상이 아니다**
+— clamp는 로컬 pin **멤버**의 그룹 **안** 이동만 프리픽스로 가두고(실제로는 멤버가 그룹 밖으로 못 나감), 밖으로 나간 top-level
+카드의 stale `local_pinned`는 §13.7 위생 스윕이 지운다(두 기전은 상보적, commit에서 clamp→float→sweep 순서).
+
 ### 13.6 렌더 — `sidebarRowShowsPin` **선두 분기**(보강7)
 
 현재 멤버 카드는 `pin_derived`(그룹째 고정 캐시)라 `sidebarRowShowsPin`(§12.8)이 **모든 멤버 📌를 억제**한다. 로컬 pin 멤버는
@@ -892,13 +901,50 @@ self.tabs order가 되어 드롭 타깃 매핑이 divergence(기각).
 ```
 
 `Row.card`에 렌더 힌트 `local_pinned: bool = false`(chrome/components/sidebar.zig, `pin_derived` 동형) + `appendCardRow`·
-`projectRowsCore` 전달. 그룹째 고정 📌(헤더)와 로컬 pin 📌(멤버 카드)가 **위치로 구별**된다. **공존 시각 모호**(둘 다 단일
-글리프 U+1F4CC)는 **수용**(별도 글리프 미도입). GL4에서 배선.
+`projectRowsCore` 전달(비마커 그룹 멤버 카드에만 `d > 0 and tab.local_pinned`, 마커 카드·최상위 카드=false — §13.8 leaf 전용).
+그룹째 고정 📌(헤더)와 로컬 pin 📌(멤버 카드)가 **위치로 구별**된다. **공존 시각 모호**(둘 다 단일 글리프 U+1F4CC)는 **수용**
+(별도 글리프 미도입). **GL3에서 배선 완료 ✅**(선두 분기·힌트·헤드리스 GL3(a)·공존 GL3(a2)·스크린샷 `MARU_FORCE_GROUP_LOCALPIN`).
+
+### 13.6.1 마커 자기 카드 렌더 위치 — 로컬 pin **뒤**(그룹 절대 최상단 = 로컬 pin)
+
+`stablePartitionSubtree`(GL1)는 로컬 pin 직접 멤버를 마커 **직후**로 float하지만(§2.1 위치 파생상 마커가 subtree 첫 탭이라
+`self.tabs` 순서로는 로컬 pin을 마커 앞에 **못 둔다** — 소속·연속 파티션·직렬화가 그 순서 파생), 사용자는 로컬 pin이 그룹의
+**절대 최상단**(마커 대표 카드 **포함** 그 위)에 뜨길 원한다. 그래서 **렌더/hit-test 레이어**(`projectRowsCore`, sidebar_rows·
+preview_rows 공용 order-aware 투영)에서 마커 **자기 카드** row만 로컬 pin 뒤로 재배치한다 — `self.tabs`(저장/직렬화/전역
+파티션)는 **불변**이다.
+
+- **방식(버퍼링·재방출)**: 마커 진입 시 **헤더 row는 즉시** 내되(현행), 마커 **자기 카드**는 `PendingMarkerCard`(tab_idx·
+  depth·visible·ghost)에 **버퍼링**한다. 이어지는 order 위치가 이 그룹의 **로컬 pin 직접 leaf 멤버**(`group_start==null` ∧
+  `depth==마커 depth` ∧ `local_pinned`)인 동안 그 카드들을 먼저 내고, **첫 비-로컬-pin 위치**(비pin 멤버·자식 subgroup
+  마커·subtree 끝·핀 리전 경계) **직전**에 `flushMarkerCard`로 마커 카드를 낸다. order 끝까지 로컬 pin만인 그룹은 **post-loop
+  flush**가 낸다(그룹-끝 케이스). 결과 카드 순서 = `[로컬pin 멤버…, 마커 자기 카드, 비pin 멤버…]`.
+- **로컬 pin 0개 = byte-identical**: 마커 직후 첫 위치에서 곧바로 flush돼 마커 카드가 여전히 헤더 직후(첫 카드) → 기존 렌더와
+  **byte-identical**(회귀 0).
+- **중첩**: 조상 마커 카드는 자식 subgroup 마커·비pin 멤버 진입 시 즉시 flush되므로 보류는 **한 번에 최대 1개**다(자식 subtree는
+  통째 유지·depth 불변). 각 마커가 자기 그룹의 로컬 pin 뒤로만 재배치된다(재귀 동형).
+- **hit-test 정합**: 각 `Row.card.tab`은 실제 tab index 그대로(순서만 재배치)라, slot→tab 역매핑(`visibleTab`/`displaySlotOf`)이
+  정확하다. 마커 카드 row가 로컬 pin 뒤에 있어도 그 row.tab=마커라 **클릭 시 마커 워크스페이스 활성**(마커 카드 드래그 =
+  그룹 통째 SG5도 `group_start!=null` 라우팅이라 위치 무관).
+- **드래그 정합(SG8, 프리뷰=확정)**: sidebar_rows·preview_rows가 **같은 `projectRowsCore`** 를 쓰므로 재배치가 양쪽에 동형이고,
+  확정은 `commitSidebarDragPreview`의 clamp→float→sweep이 `simulateDrop`과 동일 착지를 낸다. 로컬 pin 멤버 드래그(프리픽스
+  clamp)·그룹 통째 드래그(subtree 블록 이동)는 프리뷰=확정이 유지된다(헤드리스 GL3(d)). **고스트 range**는 재배치된 마커 카드
+  row까지 이어 붙는다(`flushMarkerCard`가 `pm.ghost`면 lo/hi 확장 — 로컬 pin만인 그룹 통째 드래그의 마커 카드가 range 밖으로
+  새지 않게). `Row.card.tab`은 self.tabs **인덱스**(id 아님)라 프리뷰(불변 self.tabs)와 확정(재배열 self.tabs) 인덱스는 좌표계가
+  달라, 정합 비교는 **실제 *Tab 포인터**로 한다(GL2(c) 선례).
+- **엣지(수용)**: 비-로컬-pin 멤버를 로컬 pin **프리픽스 안**으로 드롭하면(프리픽스는 §13.5 clamp 대상=로컬 pin 멤버 origin뿐)
+  프리뷰가 프리픽스 사이에 잠깐 보였다 commit `floatLocalPins`가 프리픽스 **아래**로 snap-back한다 — 이는 **order 레벨의
+  pre-existing snap-back**(마커 카드 재배치와 무관)이라 그대로 수용한다(로컬 pin 프리픽스 = sticky top zone).
+- **배선 완료 ✅**: `projectRowsCore` 버퍼링·재방출 + `flushMarkerCard` + 헤드리스 GL3(a)(순서·힌트)·GL3(d)(순서·hit-test·
+  byte-identical·프리뷰=확정) + 스크린샷 `MARU_FORCE_GROUP_LOCALPIN`(📌가 그룹 절대 최상단, 마커 대표 카드 위).
 
 ### 13.7 위생 — 멤버→top-level 전이 시 `local_pinned:=false`(보강4)
 
 멤버가 그룹 밖으로 나가면(ungroup·removeFromGroup·드래그 out) **`local_pinned:=false`** 로 클리어한다 — top-level 카드에선
-로컬 pin이 무의미하므로 고아 stale 📌를 원천 차단한다. GL4에서 각 전이 지점에 배선.
+로컬 pin이 무의미하므로 고아 stale 📌를 원천 차단한다. **GL3에서 배선 완료 ✅**: 단일 출처 위생 스윕 `clearStaleLocalPins`
+(그룹 마커·최상위 카드의 `local_pinned` 클리어; 중첩 부모로 **재소속**된 멤버는 여전히 그룹 안 leaf라 유지 — floatLocalPins가 부모
+프리픽스로 재float)를 세 전이 지점(`ungroupTab`·`removeFromGroupForTab`·`commitSidebarDragPreview`)이 각자 float **뒤** 1회 부른다.
+commit 지점의 스윕은 §13.5 확정 clamp가 로컬 pin 멤버의 실제 eject를 막으므로 top-level 전이한 카드의 stale/desync를 지우는
+**불변식 net**이다. 헤드리스: GL3(b1/b2/b3).
 
 ### 13.8 범위 — **leaf 멤버 로컬 pin만**
 
@@ -918,15 +964,18 @@ pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float)·**마커 �
    false=키 생략) + 캡처/복원 왕복 + `stablePartitionSubtree`(reorderTabs 재사용·unit-aware·포인터 재탐색·드래그 게이트) 코어.
    **아직 배선(mutation 지점)·토글·UX·렌더·위생 없음**. 로컬 pin 0개면 no-op → 기존 그룹/pin/SG8 **byte-identical**(회귀 0).
    헤드리스: leaf 멤버 float→마커 직후·자식 subgroup 통째 skip·groupSubtreeEnd/effectiveDepthAt 보존·드래그 게이트·round-trip.
-2. **GL2 — 배선 + 토글 + 드래그 clamp**: §13.4 표준 순서로 `stablePartitionSubtree`를 mutation 지점(+복원)에 배선(각 마커
-   재귀·게이트) + `toggleLocalPin`(멤버) + `simulateDrop` subtree-로컬 clamp(§13.5). 헤드리스: 멤버 pin→float·드래그 clamp
-   프리뷰=확정.
-3. **GL3 — UX(멤버 우클릭 되돌리기)**: 그룹 안 멤버 우클릭 "위치 고정"/"고정 해제"(`toggleLocalPin`, 현행 그룹째 위임 제거).
-   헤더 "그룹 고정"은 §12 그대로. top-level 카드는 `togglePin`(개별 전역 pin).
-4. **GL4 — 렌더 + 위생**: `Row.card.local_pinned` 힌트 + `sidebarRowShowsPin` 선두 분기(§13.6, 멤버 📌 부활) + 전이 클리어
-   (§13.7). macOS 제품 스크린샷(신규 훅 `MARU_FORCE_GROUP_LOCALPIN`).
-5. **GL5 — 공존·중첩 하드닝 + 확장**: 그룹째×로컬 공존 헤드리스(§13.4 keystone) + 중첩 재귀 하드닝 + **subgroup-as-member/마커
-   로컬 pin 확장**(§13.8) + 문서 최종 동기화.
+2. **GL2 — 배선 + 토글 + 드래그 clamp + 멤버 우클릭 UX ✅**(구현 커밋이 초안 GL2·GL3를 합침): §13.4 표준 순서로
+   `stablePartitionSubtree`를 mutation 지점(+복원)에 배선(각 마커 재귀·게이트) + `toggleLocalPin`(멤버) + `simulateDrop`
+   subtree-로컬 clamp(§13.5) + **그룹 안 멤버 우클릭 "그룹 내 위치 고정"/"고정 해제"**(`cardPinRole` 분기 — 마커=그룹째·
+   최상위=개별 전역 pin·멤버=로컬, 현행 그룹째 위임 되돌림). 헤드리스: 멤버 pin→float·드래그 clamp 프리뷰=확정·카드 pin 라우팅.
+3. **GL3 — 렌더 📌 + 위생 + 드래그 프리뷰=확정 엣지 완성 + 마커 카드 로컬 pin 뒤 배치 ✅**(초안 GL4 = 렌더+위생을 이 단계로
+   통합): `Row.card.local_pinned` 힌트 + `sidebarRowShowsPin` 선두 분기(§13.6, 멤버 📌 부활, pin_derived 직교) + 전이 3경로 위생
+   스윕 `clearStaleLocalPins`(§13.7) + **확정 클램프**(§13.5 — `commitSidebarDragPreview`가 마커-eject 엣지에서 프리뷰=확정을 완성)
+   + **마커 자기 카드 렌더 위치 = 로컬 pin 뒤**(§13.6.1 — `projectRowsCore` 버퍼링·재방출로 로컬 pin이 그룹 절대 최상단; self.tabs
+   불변·hit-test row.tab 정합·프리뷰=확정·로컬 pin 0개 byte-identical). macOS 제품 스크린샷(신규 훅 `MARU_FORCE_GROUP_LOCALPIN`·
+   공존 `_GROUPPIN`). 헤드리스: GL3(a)·(a2 공존)·(b1/b2/b3 위생)·(c 드래그 엣지)·(d 마커 카드 순서·hit-test·byte-identical·프리뷰=확정).
+4. **GL4~5 — 공존·중첩 하드닝 + 확장(다음)**: 그룹째×로컬 공존 헤드리스 확장(§13.4 keystone) + 중첩 재귀 하드닝 +
+   **subgroup-as-member/마커 로컬 pin 확장**(§13.8) + 문서 최종 동기화.
 
 ### 13.11 리스크
 

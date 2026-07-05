@@ -3001,14 +3001,20 @@ pub const AppSession = struct {
         _ = self.detachPaneFromTab(src_tab, pane); // len>1 확인했으므로 true
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
         self.surface_ptrs.items[src_index] = &src_tab.activeTerm().surface;
-        // 3) 새 Tab에 pane을 단일 leaf로 심고 tabs/surface_ptrs 끝에 붙여 활성으로.
+        // 3) 새 Tab에 pane을 단일 leaf로 심고 tabs/surface_ptrs에 끼워 활성으로. **끝 append가 아니라 첫 group_start
+        //    마커 직전**(= 최상위 구간 끝)에 넣는다 — §2.1 연속 파티션상 리스트 끝 탭은 그룹이 하나라도 있으면 항상
+        //    마지막 그룹의 멤버로 위치 파생돼(들여쓰기·마지막 그룹이 접혔으면 숨김), "단독 워크스페이스로 분리"가
+        //    그룹에 흡수된다. removeFromGroupForTab이 카드를 첫 마커 앞으로 옮기는 것과 같은 결(firstGroupStartIndex 공유).
+        //    tabs/surface_ptrs를 **같은 인덱스**에 insert해 병렬 배열 정합을 유지하고 active_tab을 그 인덱스로. 그룹 전무면
+        //    firstGroupStartIndex=null → 끝(=기존 동작 보존). ensureUnusedCapacity를 위에서 예약했으므로 insert는 realloc/실패 없음.
         tab.panes.appendAssumeCapacity(pane);
         tab.active_pane = 0;
         tab.tree = .{ .leaf = pane };
-        self.tabs.appendAssumeCapacity(tab);
-        self.surface_ptrs.appendAssumeCapacity(&pane.activeTerm().surface);
-        self.app_window.tabs = self.surface_ptrs.items; // realloc 가능성 — 새 items로 재바인딩
-        self.app_window.active_tab = self.tabs.items.len - 1;
+        const insert_at = self.firstGroupStartIndex() orelse self.tabs.items.len;
+        self.tabs.insertAssumeCapacity(insert_at, tab);
+        self.surface_ptrs.insertAssumeCapacity(insert_at, &pane.activeTerm().surface);
+        self.app_window.tabs = self.surface_ptrs.items; // items 슬라이스 길이 변경 — 새 items로 재바인딩
+        self.app_window.active_tab = insert_at;
         // 4) 양쪽 resize(소스는 형제가 빈자리 확장, 새 탭은 단일 leaf 풀 영역) + 좌표/사이드바 갱신.
         self.resizeTabPanes(src_tab); // 비활성이라 best-effort
         self.resizeActiveTabPanes() catch {};
@@ -3082,11 +3088,25 @@ pub const AppSession = struct {
         return .new_workspace; // 사이드바 빈 영역(카드 목록 아래) — 새 워크스페이스
     }
 
+    /// new_workspace 드롭 하이라이트 표시 슬롯 — promotePaneToNewWorkspace가 새 탭을 **첫 group_start 마커 직전**(최상위
+    /// 구간 끝)에 끼우므로(§2.1 연속 파티션), 하이라이트도 그 위치 = 표시상 **첫 group_header row**를 가리켜 결과와
+    /// 정합한다(거기에 .drop_zone 밴드를 그리면 새 카드가 들어설 자리를 미리 보인다 — bandFill이 헤더 높이로 그려 카드
+    /// 높이와는 살짝 다르지만 위치는 정확). 그룹 헤더 row가 없으면(그룹 전무·검색으로 헤더 숨김) 카드 목록 아래 행
+    /// (rows.len)으로 폴백 = 기존 "빈 영역=새 워크스페이스" 동작 보존.
+    fn newWorkspaceHighlightSlot(self: *const AppSession) usize {
+        for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
+            .group_header => return slot,
+            .card => {},
+        };
+        return self.sidebar_rows.items.len;
+    }
+
     /// 드롭 타겟 하이라이트로 강조할 사이드바 표시 슬롯 — computePaneDropDest(드롭 판정 단일 출처)에서 도출한다.
-    /// merge면 그 카드의 표시 슬롯(displaySlotOf), new_workspace면 카드 아래 행(표시 카드 수). 드롭 아님(밖/자기)이면 null.
+    /// merge면 그 카드의 표시 슬롯(displaySlotOf), new_workspace면 첫 그룹 헤더 앞(최상위 구간 끝 = 실제 삽입 위치,
+    /// 그룹 없으면 카드 아래 행). 드롭 아님(밖/자기)이면 null.
     fn paneDropHighlightSlot(self: *AppSession, x_px: f64, y_px: f64) ?usize {
         return switch (self.computePaneDropDest(x_px, y_px) orelse return null) {
-            .new_workspace => self.sidebar_rows.items.len, // 카드 목록 아래 행
+            .new_workspace => self.newWorkspaceHighlightSlot(), // 최상위 구간 끝(첫 그룹 헤더 앞) — 삽입 위치와 정합
             .merge => |tab_idx| self.displaySlotOf(tab_idx), // 합칠 카드의 표시 슬롯(검색 필터로 숨겨졌으면 null)
         };
     }
@@ -21636,6 +21656,120 @@ test "promotePaneToNewWorkspace: 단독 pane 워크스페이스면 무동작(빈
     session.promotePaneToNewWorkspace(session.activePane()); // 단독 pane — no-op
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // 무변(빈 워크스페이스 안 생김)
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
+}
+
+test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 첫 그룹 마커 앞(최상위)에 넣어 그룹 흡수를 막는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // 탭 3개 [t0, t1, t2]. t1을 그룹 시작 마커로 → 그룹(t1,t2), t0은 최상위(첫 마커 이전, §2.1 연속 파티션).
+    inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2], 활성 t2
+    session.createGroupForTab(session.tabs.items[1]); // 마커=t1 → [t0(top), (t1 grp, t2)]
+    try std.testing.expectEqual(@as(?usize, 1), session.firstGroupStartIndex());
+
+    // 활성 t0으로 전환 후 split → t0 pane 2개([a,b]), 활성 b.
+    try std.testing.expect(session.switchTab(0));
+    const pane_a = session.activePane();
+    try session.splitActivePane(.horizontal);
+    const pane_b = session.activePane();
+    try std.testing.expect(pane_b != pane_a);
+    try std.testing.expectEqual(@as(usize, 3), session.tabs.items.len);
+
+    // pane b를 새 워크스페이스로 분리 → 끝 append가 아니라 첫 그룹 마커(현재 idx1) **직전**(idx1)에 삽입.
+    session.promotePaneToNewWorkspace(pane_b);
+
+    // 탭 4개, 새 탭은 idx1(활성), 최상위(group_start==null 마커 아님), 그룹 마커는 idx2로 밀림.
+    try std.testing.expectEqual(@as(usize, 4), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab);
+    const new_tab = session.tabs.items[1];
+    try std.testing.expectEqual(@as(usize, 1), new_tab.panes.items.len);
+    try std.testing.expectEqual(pane_b, new_tab.panes.items[0]);
+    try std.testing.expect(new_tab.group_start == null); // 마커 아님 = 단독 최상위(흡수 안 됨)
+    try std.testing.expect(session.tabs.items[2].group_start != null); // 그룹 마커가 idx2로 이동(그룹 유지)
+    try std.testing.expectEqual(@as(?usize, 2), session.firstGroupStartIndex());
+    // 병렬 배열 정합: 새 탭 surface가 tabs와 같은 인덱스, app_window.tabs가 surface_ptrs.items로 재바인딩.
+    try std.testing.expectEqual(&pane_b.activeTerm().surface, session.surface_ptrs.items[1]);
+    try std.testing.expectEqual(session.surface_ptrs.items.ptr, session.app_window.tabs.ptr);
+
+    // projectRows: 새 카드 depth 0(들여쓰기 없음)이고 첫 그룹 헤더 **앞**에 뜬다(안 사라짐).
+    session.recomputeVisibleTabs();
+    var new_card_slot: ?usize = null;
+    var first_header_slot: ?usize = null;
+    for (session.sidebar_rows.items, 0..) |row, slot| switch (row) {
+        .card => |c| if (c.tab == 1) {
+            new_card_slot = slot;
+            try std.testing.expectEqual(@as(u8, 0), c.depth); // 최상위 = 들여쓰기 0
+        },
+        .group_header => if (first_header_slot == null) {
+            first_header_slot = slot;
+        },
+    };
+    try std.testing.expect(new_card_slot != null); // 사이드바에서 안 사라짐
+    try std.testing.expect(first_header_slot != null);
+    try std.testing.expect(new_card_slot.? < first_header_slot.?); // 첫 그룹 헤더 앞(최상위 구간)
+
+    // 하이라이트 정합: new_workspace 드롭 하이라이트가 첫 그룹 헤더 슬롯(= 삽입 위치)을 가리킨다.
+    try std.testing.expectEqual(first_header_slot.?, session.newWorkspaceHighlightSlot());
+}
+
+test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크스페이스가 사이드바에 보인다(그룹 흡수 안 됨)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // [t0(top), (t1 grp, t2)] — 마지막(유일) 그룹을 접는다. 끝 append면 새 탭이 이 접힌 그룹에 흡수돼 숨겨졌을 것.
+    inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
+    session.createGroupForTab(session.tabs.items[1]);
+    session.tabs.items[1].group_collapsed = true;
+
+    try std.testing.expect(session.switchTab(0));
+    try session.splitActivePane(.horizontal);
+    const pane_b = session.activePane();
+    session.promotePaneToNewWorkspace(pane_b); // 첫 마커 앞(idx1)에 삽입 → 최상위
+
+    // 새 탭 = idx1, 접힌 그룹 마커는 idx2. projectRows에서 새 카드는 보이고(흡수 안 됨) depth 0.
+    session.recomputeVisibleTabs();
+    var saw_new_card = false;
+    var saw_header = false;
+    var saw_grouped_member = false;
+    for (session.sidebar_rows.items) |row| switch (row) {
+        .card => |c| {
+            if (c.tab == 1) {
+                saw_new_card = true;
+                try std.testing.expectEqual(@as(u8, 0), c.depth);
+            }
+            if (c.tab == 3) saw_grouped_member = true; // 접힌 그룹의 멤버(원 t2, 현재 idx3)
+        },
+        .group_header => saw_header = true,
+    };
+    try std.testing.expect(saw_new_card); // 접힌 그룹에 흡수됐다면 여기서 숨겨져 실패했을 버그
+    try std.testing.expect(saw_header); // 그룹은 유지(헤더 존재)
+    try std.testing.expect(!saw_grouped_member); // 접힘 → 멤버 카드는 숨김(접기 정상 동작 보존)
 }
 
 test "mergePaneIntoWorkspace: 활성 pane을 다른 워크스페이스에 합친다(target 활성 pane 좌우 split, 우측·활성)" {

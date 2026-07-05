@@ -4087,7 +4087,7 @@ pub const AppSession = struct {
                     // 밀리니 마커 뒤 마지막 자리 = j. 옛 코드는 항상 j-1이라 marker-only(j==m+1 → j-1==m)에 from>m 드롭이
                     // moveTab(from>m, m)으로 카드를 마커 **앞**에 떨궈 그룹 밖으로 샜다(code-review #2). 이제 두 방향 모두
                     // 마커 뒤(그룹 안)로 떨어진다. from==m(마커 탭)은 호출 전 제외(그룹 통째=SG5).
-                    const j = self.groupSubtreeEnd(m);
+                    const j = self.groupSubtreeEnd(m, null, null);
                     if (from < m) return j - 1;
                     return @min(j, len - 1);
                 }
@@ -4151,7 +4151,7 @@ pub const AppSession = struct {
         if (m >= len or self.tabs.items[m].group_start == null) return m; // m은 그룹 시작 마커여야 한다
         // 구간 [m, j) = 그룹 **subtree**(마커 + 소속 카드 + 자식 그룹 통째, SG5-3). 비중첩이면 "다음 마커"와 동일이라
         // SG5-1 동작 보존. 중첩 자식이 함께 이동해 부모-자식 무결성이 유지된다(§9 드래그 최소 안전 동작).
-        const j = self.groupSubtreeEnd(m);
+        const j = self.groupSubtreeEnd(m, null, null);
         const range_len = j - m;
         if (insert_before > len) return m;
         if (insert_before >= m and insert_before <= j) return m; // 제자리(자기 구간·경계) — no-op
@@ -4229,7 +4229,7 @@ pub const AppSession = struct {
         if (gi == m) return null; // 자기 그룹 — no-op(jitter 방지)
         if (gi < m) return gi; // 대상 그룹이 위 → 그 앞에 삽입(위로 이동)
         // 대상 그룹이 아래(gi > m) → 그 그룹 subtree 뒤(자식 그룹 포함, SG5-3)에 삽입.
-        return self.groupSubtreeEnd(gi);
+        return self.groupSubtreeEnd(gi, null, null);
     }
 
     /// 그룹 통째 드래그의 한 프레임(헤더 드래그·마커 카드 드래그 공통). 커서 y로 드롭 타겟 row를 잡아 하이라이트
@@ -4290,18 +4290,18 @@ pub const AppSession = struct {
         if (g >= len or m >= len) return null;
         if (g == m) return null; // 자기 그룹 헤더 — 무동작
         // 타겟 g가 드래그 subtree [m, my_end) 안이면(자기 자손) 자기 안으로 넣기 불가 — null(형제 경로도 self-guard로 no-op).
-        const my_end = self.groupSubtreeEnd(m);
+        const my_end = self.groupSubtreeEnd(m, null, null);
         if (g >= m and g < my_end) return null;
-        const g_depth = self.effectiveDepthAt(g);
+        const g_depth = self.effectiveDepthAt(g, null, null);
         if (@as(usize, g_depth) + 1 > max_group_nesting) return null; // 과깊이 방지
-        return .{ .insert_before = self.groupSubtreeEnd(g), .target_depth = g_depth + 1 };
+        return .{ .insert_before = self.groupSubtreeEnd(g, null, null), .target_depth = g_depth + 1 };
     }
 
     /// SG5-4 중첩 이동: 그룹 subtree를 insert_before로 옮기고(moveGroupRange 재사용), subtree 마커들의 group_depth를
     /// target_depth 기준으로 **상대 유지 relevel**한다(dragged 마커=target_depth, 자식들은 상대 offset 유지). 이동+relevel
     /// 어느 쪽이든 바뀌면 changed=true. 연속 파티션·subtree 무결성은 moveGroupRange가, 트리 연속은 relevel+projectRows가 보장.
     fn moveGroupNesting(self: *AppSession, m: usize, insert_before: usize, target_depth: u8) GroupMoveResult {
-        const range_len = self.groupSubtreeEnd(m) - m;
+        const range_len = self.groupSubtreeEnd(m, null, null) - m;
         const nm = self.moveGroupRange(m, insert_before, true); // defer rebuild — relevel 후 아래서 1회만(code-review #9)
         const depth_changed = self.relevelBlock(nm, range_len, target_depth);
         const changed = (nm != m) or depth_changed;
@@ -4316,9 +4316,9 @@ pub const AppSession = struct {
     /// depth**로 relevel한다. 같은 레벨 이동이면 relevel이 no-op(저장 depth==eff)이라 기존 SG5-1 동작이 그대로 보존되고,
     /// 얕은 곳(최상위 등)으로 가면 gap-clamp된 eff(≤ 저장값)로 낮춰 빼기가 저장 depth에도 반영된다(gap 제거).
     fn moveGroupSibling(self: *AppSession, m: usize, insert_before: usize) GroupMoveResult {
-        const range_len = self.groupSubtreeEnd(m) - m;
+        const range_len = self.groupSubtreeEnd(m, null, null) - m;
         const nm = self.moveGroupRange(m, insert_before, true); // defer rebuild — relevel 후 아래서 1회만(code-review #9)
-        const natural = self.effectiveDepthAt(nm); // 새 위치의 gap-clamp eff(빼기면 저장값보다 얕다)
+        const natural = self.effectiveDepthAt(nm, null, null); // 새 위치의 gap-clamp eff(빼기면 저장값보다 얕다)
         const depth_changed = self.relevelBlock(nm, range_len, natural);
         const changed = (nm != m) or depth_changed;
         if (changed) { // 이동 or depth 변경 → 프레임당 정확히 1회 rebuild
@@ -6481,16 +6481,38 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 검색 필터·그룹 마커·접힘을 self.tabs에 투영해 sidebar_rows(표시 행)를 채운다(옛 recomputeVisibleTabs의 그룹 확장 —
-    /// docs/sidebar-groups.md §6 projectRows). 규칙: (1) group_start 탭에서 group_header row 삽입 + 그 그룹 카드는 depth 1,
-    /// (2) 접힘(검색 없음)이면 카드 skip(헤더만), (3) 검색 미매치 카드 skip, (4) 표시 카드가 0인 그룹은 **검색 중이면 헤더째
-    /// skip**(빈 그룹 규칙 — 접힘으로 0인 건 헤더 남김), (5) member_count = 표시 카드 수(검색 중=매치 수). 최상위 카드(첫
-    /// group_start 이전, §2.1 연속 파티션)는 depth 0. group_start 없는 SG3a까지는 전부 최상위 카드라 옛 flat 동작과 동일.
+    /// 검색 필터·그룹 마커·접힘을 self.tabs에 투영해 sidebar_rows(표시 행)를 채운다 — **identity order + 라이브 group_depth**를
+    /// 순열/depth 순수 코어 projectRowsFrom에 넘기는 얇은 래퍼(docs/sidebar-groups.md §9 SG8a). SG8b simulateDrop이 여기
+    /// order/group_depth를 가상 배치(고스트 프리뷰)로 갈아끼워 같은 코어를 재사용한다 — identity면 옛 flat 투영과
+    /// **byte-identical row 산출**(동작 보존). order[i]=i, group_depth[i]=마커 저장 depth(비마커는 pass1에서 안 읽힘).
     fn recomputeVisibleTabs(self: *AppSession) void {
+        const n = self.tabs.items.len;
+        const searching = self.sidebar_search_active and self.sidebar_search_input.query.items.len > 0;
+        const q: []const u8 = if (searching) self.sidebar_search_input.query.items else "";
+        // identity 순열 + 라이브 group_depth. OOM(극단)이면 그룹 무시 flat(projectFlatFallback이 clear까지 함께).
+        const order = self.allocator.alloc(usize, n) catch return self.projectFlatFallback(q);
+        defer self.allocator.free(order);
+        const group_depth = self.allocator.alloc(u8, n) catch return self.projectFlatFallback(q);
+        defer self.allocator.free(group_depth);
+        for (self.tabs.items, 0..) |tab, i| {
+            order[i] = i;
+            group_depth[i] = tab.group_depth;
+        }
+        self.projectRowsFrom(order, group_depth);
+    }
+
+    /// 순열/depth 순수 투영 코어(SG8a — docs/sidebar-groups.md §9). `order`(표시 위치 i → 원본 tab 인덱스 순열)와
+    /// `group_depth`(order 위치별 마커 선언 depth)를 self.tabs에 투영해 sidebar_rows를 채운다. 프리뷰(비커밋 가상 배치)와
+    /// 라이브 확정이 이 한 코어를 공유한다(등가 안전화). 규칙: (1) group_start 탭에서 group_header row 삽입 + 그 그룹 카드는
+    /// depth 1, (2) 접힘(검색 없음)이면 카드 skip(헤더만), (3) 검색 미매치 카드 skip, (4) 표시 카드가 0인 그룹은 **검색
+    /// 중이면 헤더째 skip**(빈 그룹 규칙 — 접힘으로 0인 건 헤더 남김), (5) member_count = 표시 카드 수(검색 중=매치 수).
+    /// 최상위 카드(첫 group_start 이전, §2.1 연속 파티션)는 depth 0. pass1/pass2는 self.tabs.items[order[i]]로 원본을 거치고
+    /// depth 파생은 group_depth[i]를 선언값으로 쓴다(order/group_depth가 identity+라이브면 옛 flat 동작과 byte-identical).
+    fn projectRowsFrom(self: *AppSession, order: []const usize, group_depth: []const u8) void {
         self.sidebar_rows.clearRetainingCapacity();
         const searching = self.sidebar_search_active and self.sidebar_search_input.query.items.len > 0;
         const q: []const u8 = if (searching) self.sidebar_search_input.query.items else "";
-        const n = self.tabs.items.len;
+        const n = order.len;
         if (n == 0) return;
 
         // 중첩(SG5-3)은 위치 파생을 **다단계**로 일반화한다(docs/sidebar-groups.md §2.1·§9). subtree 경계·member_count·
@@ -6501,14 +6523,15 @@ pub const AppSession = struct {
         const matches = self.allocator.alloc(bool, n) catch return self.projectFlatFallback(q);
         defer self.allocator.free(matches);
 
-        // Pass 1 — 위치 파생 depth 스택. group_start 마커에서 declared depth(=group_depth, 최소 1)로 스택을 pop하고
+        // Pass 1 — 위치 파생 depth 스택. group_start 마커에서 declared depth(=group_depth[i], 최소 1)로 스택을 pop하고
         // (같거나 깊은 마커를 닫음) parent+1로 **정규화**한다(선언 depth가 부모+1을 넘어도 gap을 클램프 → 항상 연속).
         {
             var stack: [max_group_nesting]u8 = undefined;
             var top: usize = 0;
-            for (self.tabs.items, 0..) |tab, i| {
+            for (order, 0..) |tab_idx, i| {
+                const tab = self.tabs.items[tab_idx];
                 if (tab.group_start != null) {
-                    const dd: u8 = @max(@as(u8, 1), tab.group_depth);
+                    const dd: u8 = @max(@as(u8, 1), group_depth[i]);
                     while (top > 0 and stack[top - 1] >= dd) top -= 1; // 같거나 깊은 조상 마커 닫기
                     const parent: u8 = if (top > 0) stack[top - 1] else 0;
                     const eff: u8 = parent + 1; // == min(dd, parent+1) — pop 후 parent<dd 보장이라 항상 parent+1(gap 클램프)
@@ -6524,18 +6547,19 @@ pub const AppSession = struct {
             }
         }
 
-        // Pass 2 — row 방출. 마커 스택(접힘 조상 추적)으로 가시성을 정한다. 카드/헤더는 self.tabs 순서대로 처리해
+        // Pass 2 — row 방출. 마커 스택(접힘 조상 추적)으로 가시성을 정한다. 카드/헤더는 order 순서대로 처리해
         // 자식 그룹 헤더가 부모 카드 뒤·자식 카드 앞에 자연 삽입된다(§2.1 "부모 직접 카드는 자식 그룹보다 앞").
         var cstack: [max_group_nesting]GroupStackEntry = undefined;
         var ctop: usize = 0;
-        for (self.tabs.items, 0..) |tab, i| {
+        for (order, 0..) |tab_idx, i| {
+            const tab = self.tabs.items[tab_idx];
             if (tab.group_start) |group_name| {
                 const d = depth[i];
                 while (ctop > 0 and cstack[ctop - 1].depth >= d) ctop -= 1;
                 // 헤더 가시성: 검색 중이면 subtree에 매치가 있을 때만(빈 그룹 헤더째 숨김), 아니면 조상이 접혔으면 숨김
                 // (부모 접기 = 자식 그룹 통째 숨김). 자기 접힘은 헤더 자신을 숨기지 않는다(▸ name (N)로 남김).
                 const ancestor_collapsed = anyCollapsedInStack(cstack[0..ctop]);
-                const header_visible = if (searching) self.subtreeHasMatch(i, d, depth, matches) else !ancestor_collapsed;
+                const header_visible = if (searching) self.subtreeHasMatch(order, i, d, depth, matches) else !ancestor_collapsed;
                 if (header_visible) {
                     self.sidebar_rows.append(self.allocator, .{
                         .group_header = .{
@@ -6544,10 +6568,10 @@ pub const AppSession = struct {
                             // (접힘 표시인데 카드가 보임)이 된다(code-review #6). 검색을 지우면 tab.group_collapsed로 복귀.
                             .collapsed = if (searching) false else tab.group_collapsed,
                             // label은 borrowed(tab 소유 group_start)라 destroyTab 후 dangling 위험(code-review #8 UAF). glyph는
-                            // 소스 tab 인덱스(.tab=i)로 live 재조회하므로 label은 안전값으로만 둔다(회귀 방지 겸 borrowed 유지).
+                            // 소스 tab 인덱스(.tab=tab_idx)로 live 재조회하므로 label은 안전값으로만 둔다(회귀 방지 겸 borrowed 유지).
                             .label = group_name,
-                            .member_count = self.directCardCount(i, d, depth, matches, searching),
-                            .tab = i, // 그룹 시작 원본 탭 인덱스 — 클릭 토글·glyph 라벨 live 재조회의 단일 출처(#8)
+                            .member_count = self.directCardCount(order, i, d, depth, matches, searching),
+                            .tab = tab_idx, // 그룹 시작 **원본** 탭 인덱스(=order[i]) — 클릭 토글·glyph 라벨 live 재조회의 단일 출처(#8)
                             .depth = d, // 정규화 깊이 — 헤더 삼각 들여쓰기 (depth-1)*group_indent
                             // 그룹 색(SG5-2)이 있으면 view가 헤더 밴드를 내 색 구분을 유지하고, 없으면 밴드 없이 화살표+이름만
                             // (보더라인 제거 — 사용자 결정 §5). 실제 색 blend는 lowerSidebar가 tab.group_color로(chrome은 판단만).
@@ -6562,58 +6586,66 @@ pub const AppSession = struct {
                 // 마커 탭의 **자기 카드**(그룹 첫 몸통 카드). 자기 그룹 접힘(또는 조상 접힘)이면 숨긴다(헤더만 남음).
                 const self_collapsed = anyCollapsedInStack(cstack[0..ctop]);
                 const card_visible = if (searching) matches[i] else !self_collapsed;
-                if (card_visible) self.appendCardRow(i, d);
+                if (card_visible) self.appendCardRow(tab_idx, d);
             } else {
                 const d = depth[i];
                 const parent_collapsed = anyCollapsedInStack(cstack[0..ctop]);
                 const card_visible = if (searching) matches[i] else !parent_collapsed;
-                if (card_visible) self.appendCardRow(i, d);
+                if (card_visible) self.appendCardRow(tab_idx, d);
             }
         }
     }
 
-    /// projectRows의 OOM 폴백 — 임시 depth/matches 배열 alloc이 실패한 극단 상황에서 그룹을 무시하고 모든 탭을
-    /// 최상위 카드(depth 0)로 방출한다(검색 필터는 유지). 다음 rebuild가 정상 복구. 안전 degradation(§6).
+    /// projectRows의 OOM 폴백 — identity order/group_depth 또는 임시 depth/matches 배열 alloc이 실패한 극단 상황에서
+    /// 그룹을 무시하고 모든 탭을 최상위 카드(depth 0)로 방출한다(검색 필터는 유지). 다음 rebuild가 정상 복구. 안전
+    /// degradation(§6). 래퍼(recomputeVisibleTabs)·코어(projectRowsFrom) 어느 OOM 경로에서 불려도 되게 **여기서 clear**한다.
     fn projectFlatFallback(self: *AppSession, q: []const u8) void {
+        self.sidebar_rows.clearRetainingCapacity();
         for (self.tabs.items, 0..) |tab, i| if (self.tabMatchesSearch(tab, q)) self.appendCardRow(i, 0);
     }
 
-    /// 마커 i(정규화 depth d)의 subtree [i, k)에 검색 매치가 하나라도 있는가(§6 빈 그룹 규칙 — 중첩 확장). subtree는
+    /// 마커 위치 i(정규화 depth d)의 subtree [i, k)에 검색 매치가 하나라도 있는가(§6 빈 그룹 규칙 — 중첩 확장). subtree는
     /// 다음 "같거나 낮은 depth 마커" 전까지(자식 그룹 포함). 부모 헤더는 자식에 매치가 있으면 트리 경로로 떠야 한다.
-    fn subtreeHasMatch(self: *AppSession, i: usize, d: u8, depth: []const u8, matches: []const bool) bool {
-        const n = self.tabs.items.len;
+    /// order-aware(SG8a): i·k는 표시 위치라 원본 탭은 self.tabs.items[order[k]]로 거친다(depth/matches는 위치 인덱스).
+    fn subtreeHasMatch(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool) bool {
+        const n = order.len;
         var k = i;
         while (k < n) : (k += 1) {
-            if (k > i and self.tabs.items[k].group_start != null and depth[k] <= d) break; // subtree 경계
+            if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (matches[k]) return true;
         }
         return false;
     }
 
-    /// 마커 i(정규화 depth d)의 **직접 카드 수**(member_count 배지 "(N)"용). 자식 그룹의 카드는 제외한다 — subtree
+    /// 마커 위치 i(정규화 depth d)의 **직접 카드 수**(member_count 배지 "(N)"용). 자식 그룹의 카드는 제외한다 — subtree
     /// [i, k) 안에서 depth[t]==d(자기 그룹 몸통, 마커 탭 자신 포함)인 카드만 센다(검색 중이면 매치한 것만).
     /// 결정(문서화): (N)은 접힘 시 "이 그룹에 직접 든 워크스페이스 수"라, 중첩 자식 그룹 안 카드는 세지 않는다.
-    fn directCardCount(self: *AppSession, i: usize, d: u8, depth: []const u8, matches: []const bool, searching: bool) u16 {
-        const n = self.tabs.items.len;
+    /// order-aware(SG8a): i·k는 표시 위치라 원본 탭은 self.tabs.items[order[k]]로 거친다(depth/matches는 위치 인덱스).
+    fn directCardCount(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool, searching: bool) u16 {
+        const n = order.len;
         var count: u16 = 0;
         var k = i;
         while (k < n) : (k += 1) {
-            if (k > i and self.tabs.items[k].group_start != null and depth[k] <= d) break; // subtree 경계
+            if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (depth[k] == d and (!searching or matches[k])) count +|= 1;
         }
         return count;
     }
 
-    /// 탭 idx 시점의 위치 파생 depth를 재계산한다(스택 재실행). idx가 마커면 그 마커의 정규화 eff_depth, 카드면 소속
+    /// 위치 idx 시점의 위치 파생 depth를 재계산한다(스택 재실행). idx가 마커면 그 마커의 정규화 eff_depth, 카드면 소속
     /// 그룹 depth(0=최상위). create_group(중첩 생성 depth=카드 depth+1)·groupSubtreeEnd(마커 eff_depth)가 공유한다.
-    fn effectiveDepthAt(self: *AppSession, idx: usize) u8 {
-        const n = self.tabs.items.len;
+    /// **order-aware(SG8a)**: `order`(위치→원본 tab 순열)·`group_depth`(위치별 마커 선언 depth)가 non-null이면 그 가상
+    /// 배치 위에서 계산하고, **둘 다 null이면 라이브 self.tabs**(identity)를 그대로 스캔한다 — null 경로는 옛 동작과
+    /// byte-identical(드래그/create 경로가 그대로 쓴다). SG8b simulateDrop이 가상 order로 이 코어를 재사용한다.
+    fn effectiveDepthAt(self: *AppSession, idx: usize, order: ?[]const usize, group_depth: ?[]const u8) u8 {
+        const n = if (order) |o| o.len else self.tabs.items.len;
         var stack: [max_group_nesting]u8 = undefined;
         var top: usize = 0;
         var i: usize = 0;
         while (i < idx and i < n) : (i += 1) {
-            if (self.tabs.items[i].group_start != null) {
-                const dd: u8 = @max(@as(u8, 1), self.tabs.items[i].group_depth);
+            const ti = if (order) |o| o[i] else i;
+            if (self.tabs.items[ti].group_start != null) {
+                const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[i] else self.tabs.items[ti].group_depth);
                 while (top > 0 and stack[top - 1] >= dd) top -= 1;
                 const parent: u8 = if (top > 0) stack[top - 1] else 0;
                 if (top < stack.len) {
@@ -6622,26 +6654,35 @@ pub const AppSession = struct {
                 }
             }
         }
-        if (idx < n and self.tabs.items[idx].group_start != null) {
-            const dd: u8 = @max(@as(u8, 1), self.tabs.items[idx].group_depth);
-            while (top > 0 and stack[top - 1] >= dd) top -= 1;
-            const parent: u8 = if (top > 0) stack[top - 1] else 0;
-            return parent + 1;
+        if (idx < n) {
+            const ti = if (order) |o| o[idx] else idx;
+            if (self.tabs.items[ti].group_start != null) {
+                const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[idx] else self.tabs.items[ti].group_depth);
+                while (top > 0 and stack[top - 1] >= dd) top -= 1;
+                const parent: u8 = if (top > 0) stack[top - 1] else 0;
+                return parent + 1;
+            }
         }
         return if (top > 0) stack[top - 1] else 0;
     }
 
-    /// 마커 m이 시작하는 그룹의 **subtree 끝** 인덱스 k(구간 [m, k) = 마커 + 소속 카드 + 자식 그룹 통째). k = 다음
+    /// 마커 위치 m이 시작하는 그룹의 **subtree 끝** 위치 k(구간 [m, k) = 마커 + 소속 카드 + 자식 그룹 통째). k = 다음
     /// "정규화 depth <= eff_depth[m] 마커"(=m을 스택에서 pop시키는 마커) 또는 끝. 비중첩(전부 depth 1)이면 "다음
     /// 마커"와 동일이라 SG4/SG5-1 동작 보존. moveGroupRange·DropBoundary·접힌 헤더 드롭이 공유(중첩 subtree 무결성).
-    fn groupSubtreeEnd(self: *AppSession, m: usize) usize {
-        const len = self.tabs.items.len;
-        if (m >= len or self.tabs.items[m].group_start == null) return @min(m + 1, len);
-        const eff_m = self.effectiveDepthAt(m);
+    /// **order-aware(SG8a)**: effectiveDepthAt과 동형 — order/group_depth non-null이면 가상 배치, 둘 다 null이면 라이브
+    /// self.tabs를 스캔한다(null 경로 byte-identical). 드래그/create 경로는 null로 부른다.
+    fn groupSubtreeEnd(self: *AppSession, m: usize, order: ?[]const usize, group_depth: ?[]const u8) usize {
+        const len = if (order) |o| o.len else self.tabs.items.len;
+        if (m >= len) return @min(m + 1, len);
+        const tm = if (order) |o| o[m] else m;
+        if (self.tabs.items[tm].group_start == null) return @min(m + 1, len);
+        const eff_m = self.effectiveDepthAt(m, order, group_depth);
         var k = m + 1;
         while (k < len) : (k += 1) {
-            const t = self.tabs.items[k];
-            if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff_m) break;
+            const tk = if (order) |o| o[k] else k;
+            const t = self.tabs.items[tk];
+            const kd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[k] else t.group_depth);
+            if (t.group_start != null and kd <= eff_m) break;
         }
         return k;
     }
@@ -15787,6 +15828,102 @@ test "projectRows: group_start가 group_header row를 삽입하고 카드는 dep
     try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items.len);
     try std.testing.expect(session.sidebar_rows.items[0].group_header.collapsed);
     try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[0].group_header.member_count);
+}
+
+// SG8a 동작 보존 단언(docs/sidebar-groups.md §9): recomputeVisibleTabs를 projectRowsFrom(order, group_depth) 순수 코어
+// 위의 얇은 래퍼로 일반화했으므로, **identity order + 라이브 group_depth**를 직접 넘긴 코어 산출이 래퍼 산출과
+// byte-identical(모든 Row 태그·필드)임을 헤드리스로 고정한다 — 순수 리팩터가 옛 flat/그룹 투영을 바꾸지 않았다는 증명.
+test "SG8a: projectRowsFrom(identity)가 recomputeVisibleTabs와 byte-identical row를 낸다(동작 보존)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0, t1, t2, t3]
+
+    // 중첩 배치: t0 최상위, t1 그룹 A(depth1, 색 지정→has_color 경로), t2 자식 그룹 B(depth2, A 안), t3 B 소속.
+    session.tabs.items[1].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[1].group_depth = 1;
+    session.tabs.items[1].group_color = 0x336699;
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "B");
+    session.tabs.items[2].group_depth = 2;
+
+    // (1) 라이브 래퍼(=identity projectRowsFrom) 결과를 스냅샷.
+    session.recomputeVisibleTabs();
+    var expected: [16]chrome.components.sidebar.Row = undefined;
+    const expected_len = session.sidebar_rows.items.len;
+    try std.testing.expect(expected_len > 0 and expected_len <= expected.len);
+    for (session.sidebar_rows.items, 0..) |row, i| expected[i] = row;
+
+    // (2) 명시적 identity order + 라이브 group_depth로 순수 코어를 직접 호출.
+    const n = session.tabs.items.len;
+    const order = try allocator.alloc(usize, n);
+    defer allocator.free(order);
+    const gd = try allocator.alloc(u8, n);
+    defer allocator.free(gd);
+    for (session.tabs.items, 0..) |tab, i| {
+        order[i] = i;
+        gd[i] = tab.group_depth;
+    }
+    session.projectRowsFrom(order, gd);
+
+    // (3) byte-identical 단언 — 태그·모든 필드가 일치.
+    try std.testing.expectEqual(expected_len, session.sidebar_rows.items.len);
+    for (session.sidebar_rows.items, 0..) |got, i| {
+        const want = expected[i];
+        try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
+        switch (want) {
+            .card => |wc| {
+                try std.testing.expectEqual(wc.tab, got.card.tab);
+                try std.testing.expectEqual(wc.active, got.card.active);
+                try std.testing.expectEqual(wc.depth, got.card.depth);
+            },
+            .group_header => |wh| {
+                try std.testing.expectEqual(wh.tab, got.group_header.tab);
+                try std.testing.expectEqual(wh.collapsed, got.group_header.collapsed);
+                try std.testing.expectEqual(wh.member_count, got.group_header.member_count);
+                try std.testing.expectEqual(wh.depth, got.group_header.depth);
+                try std.testing.expectEqual(wh.has_color, got.group_header.has_color);
+                try std.testing.expectEqualStrings(wh.label, got.group_header.label);
+            },
+        }
+    }
+}
+
+// SG8a 토대 증명: 순수 코어가 **order 순열을 존중**한다(SG8b simulateDrop 고스트 프리뷰가 이 위에 선다). 뒤집힌 순열을
+// 넘기면 표시 행 순서가 뒤집히되 self.tabs 원본은 불변(비커밋) — 라이브 재배치가 아니라 가상 배치임을 헤드리스로 고정.
+test "SG8a: projectRowsFrom가 order 순열을 존중한다(SG8b 프리뷰 토대)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.newTab(); // [t0, t1] — 둘 다 최상위 카드(그룹 없음)
+
+    // 뒤집힌 순열 [1, 0] → 표시 순서가 뒤집힌다. 마커가 없어 group_depth는 미사용이나 위치별로 채워 넘긴다.
+    const order = [_]usize{ 1, 0 };
+    const gd = [_]u8{ session.tabs.items[1].group_depth, session.tabs.items[0].group_depth };
+    session.projectRowsFrom(&order, &gd);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[0] == .card);
+    try std.testing.expectEqual(@as(usize, 1), session.sidebar_rows.items[0].card.tab); // order[0]=1
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items[1].card.tab); // order[1]=0
+    // self.tabs 자체는 재배열되지 않았다(비커밋 가상 배치).
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
 }
 
 test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collapsed=false) — 강제 펼친 카드와 정합" {

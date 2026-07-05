@@ -9,7 +9,7 @@ chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다
 > **현황**: **SG1~SG8 완료** — 접기 우선(그룹 만들기·헤더 실제 렌더·접기·rename·단축키, 제품 스크린샷 검증) + 카드
 > 드래그로 넣기/빼기(SG4) + 그룹 통째 드래그(SG5-1) + 그룹 색(SG5-2, 헤더 밴드 tint·소속 카드 막대·우클릭 프리셋) +
 > **중첩 그룹(SG5-3, 폴더 트리처럼 그룹 안 그룹 — 위치 파생을 다단계 depth로 일반화)** +
-> **드래그로 중첩 넣기/빼기(SG5-4 — 드롭 컨텍스트 depth로 group_depth 조정: 헤더에 드롭=자식으로 중첩·최상위로 드롭=빼기)** +
+> **드래그로 중첩 넣기/빼기(SG5-4 — 드롭 컨텍스트 depth로 group_depth 조정: `Cmd(⌘)` 눌러야 헤더 드롭=중첩·Cmd 없으면 항상 형제·최상위로 드롭=빼기)** +
 > **UX 조정(SG6 — 우클릭 "그룹에서 빼기"(카드 하나만 최상위로)·헤더 기본 밴드 제거(화살표+이름만, 색·hover만 밴드 유지))** +
 > **SG7 폐기**(드래그 depth "작게" 프리뷰는 적대검증이 전제를 반박 → §9-7 결론이 SG8로 수렴) +
 > **고스트+삽입선 드래그 프리뷰(SG8a~f 완료 — 사이드바 드래그를 라이브 재배치에서 비커밋 고스트+드롭 1회 확정으로 전환:
@@ -277,7 +277,7 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **그룹에서 빼기** | ✅ | 우클릭 "그룹에서 빼기"(**그룹 소속 카드에만** 노출·최상위 카드엔 안 보임) · 팔레트 "Remove from Group"(기본 키 없음) | `remove_from_group` 액션 → `removeFromGroupForTab`: 그 카드를 **첫 `group_start` 마커 직전**(§2.1 최상위 구간)으로 `moveTab`(중첩 깊이 무관 완전 최상위). ungroup(그룹 통째 해제)과 달리 **이 카드 하나만** 뺀다 — 그룹은 유지(마커 카드면 다음 소속 카드로 마커 **승계** = closeTab과 동형, 마지막 멤버면 그룹 소멸). 이미 최상위면 no-op. 주입 조건 = `tabIsInGroup`(첫 마커 이후 = 그룹 안). 위치 파생이라 별도 소속 편집 없음 |
 | **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그(중첩 자식 그룹 안 포함) | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음 — 드롭 위치의 depth가 곧 카드 depth(자식 그룹 안=자식 depth·최상위=0). 마커 탭 드래그=그룹 통째=SG5 |
 | **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
-| **드래그로 중첩 넣기/빼기** | ✅ SG5-4 | 그룹 헤더를 **다른 그룹 헤더에 드롭=자식으로 중첩**, **카드/최상위에 드롭=형제 재정렬(+얕으면 빼기)** | `groupNestPlan`(헤더 드롭→중첩 계획: target_depth=타겟 depth+1·insert=타겟 subtree 끝)·`moveGroupNesting`(이동+`relevelBlock`으로 subtree 상대 depth 유지)·`moveGroupSibling`(형제 이동+자연 eff releveel로 빼기). 카드 드롭=형제(SG5-1 보존)·헤더 드롭=넣기의 명시적 분리 |
+| **드래그로 중첩 넣기/빼기** | ✅ SG5-4 (+Cmd 게이트) | **`Cmd(⌘)` 누른 채** 그룹 헤더를 다른 그룹 헤더에 드롭=자식으로 **중첩**. **`Cmd` 없이는 항상 형제**(헤더 드롭이라도 단순 위치 변경, 중첩 절대 안 됨). 카드/최상위 드롭=형제 재정렬(+얕으면 빼기) | `groupDragPreviewFrame(cmd_held)`가 게이트: `cmd_held`면 헤더 드롭 시 `groupNestPlan`(target_depth=타겟 depth+1·insert=타겟 subtree 끝)→`moveGroupNesting`, 아니면 nest 미시도(`sidebarGroupDropBoundary`→`moveGroupSibling`, 형제/빼기). 카드 드롭은 Cmd 유무 무관 형제(N4 폴백). **modifier 전달**: Swift `modsBits`가 command=32 추가, 터미널 리포트 경로(`mouse`/`mouseMoved`)는 `mods & ~32`로 마스킹(SGR motion 비트 32 충돌 회피). 고스트 피드백: nest=타깃 그룹 하이라이트+들여쓴 고스트, sibling=삽입선만 |
 | 그룹 색 | ✅ SG5-2 | **카드 우클릭 "그룹 색: …"** 프리셋(카드 색과 같은 팔레트) · **헤더 우클릭 "그룹 색: …"**(SG5-2-header, 같은 라벨·팔레트·`setGroupColorForTab` 재사용) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략). 헤더/카드가 같은 색 메뉴를 공유해 사용자가 헤더에서도 색을 찾는다(피드백 반영) |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면

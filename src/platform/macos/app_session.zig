@@ -4322,15 +4322,22 @@ pub const AppSession = struct {
     /// 마지막 plan을 실제 move로 **정확히 1회** 커밋한다(commitSidebarDragPreview). self.tabs가 불변이라 마커 인덱스가 드래그
     /// 내내 안정해 **호출자의 마커를 갱신할 필요가 없다** — SG8f: 옛 라이브 팔로우의 새-마커 추적·반환값 대입 잔재를 걷어내 void.
     ///
-    /// **SG5-4 넣기/빼기 plan 분기(docs/sidebar-groups.md §9 SG5-4)**: 드롭 row가 **다른 그룹의 헤더**면 그 그룹의 자식으로
-    /// **중첩**(`groupNestPlan` → `.group_nest{insert_before, target_depth}`, dragged 마커 depth=타겟 그룹 depth+1, subtree
-    /// 상대 depth 유지 = "폴더 안에 넣기"). 그 외(카드·최상위 드롭)는 **형제 경계 이동**(`sidebarGroupDropBoundary` →
-    /// `.group_sibling{insert_before}`)으로, 얕은 위치면 자연 eff depth로 **빼기(un-nest)**가 확정 시 gap-clamp+relevel로
-    /// 반영된다. 헤더 드롭=넣기·카드 드롭=형제 재정렬의 명시적 분리는 그대로다(확정 경로 moveGroupNesting/Sibling과 동일 plan).
-    fn groupDragPreviewFrame(self: *AppSession, marker: usize, y_px: f64) void {
+    /// **중첩 vs 형제 = Cmd(⌘) modifier로 구분(사용자 확정 정책)**: `cmd_held`면 드롭 row가 **다른 그룹의 헤더**일 때 그 그룹의
+    /// 자식으로 **중첩**(`groupNestPlan` → `.group_nest{insert_before, target_depth}`, dragged 마커 depth=타겟 그룹 depth+1,
+    /// subtree 상대 depth 유지 = "폴더 안에 넣기"). `cmd_held`가 **아니면 nest를 아예 시도하지 않아**(nest=null) 헤더 드롭이라도
+    /// **형제 경계 이동**만 된다(중첩 절대 안 됨). 헤더가 아닌 카드/최상위 드롭은 Cmd 유무와 무관하게 **형제 경계 이동**
+    /// (`sidebarGroupDropBoundary` → `.group_sibling{insert_before}`)으로, 얕은 위치면 자연 eff depth로 **빼기(un-nest)**가
+    /// 확정 시 gap-clamp+relevel로 반영된다. (과거 SG5-4는 modifier 없이 헤더 드롭=넣기였으나, 사용자 요청으로 Cmd 게이트를 얹었다 —
+    /// 확정 경로 moveGroupNesting/Sibling과 동일 plan.)
+    fn groupDragPreviewFrame(self: *AppSession, marker: usize, y_px: f64, cmd_held: bool) void {
         const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-        // plan: 헤더 드롭=중첩(nest)·카드/최상위 드롭=형제(sibling)·무효=none. hit-test는 원본 sidebar_rows(불변)로.
-        const plan: DropPlan = if (self.groupNestPlan(raw_row, marker)) |np|
+        // plan 판정(사용자 확정 정책): **Cmd(⌘) 눌림 = 중첩 시도(안으로 넣기)**, **Cmd 없음 = 항상 형제(중첩 절대 안 함)**.
+        //  - Cmd O: 헤더 드롭이면 groupNestPlan이 `.group_nest`를 내고(그 그룹의 자식으로), 헤더가 아닌 카드/최상위 드롭이면
+        //           groupNestPlan이 null이라 아래 형제 경계로 폴백한다(N4 — Cmd라도 넣을 헤더가 없으면 형제).
+        //  - Cmd X: nest를 아예 시도하지 않아(nest=null) 헤더 드롭이라도 `.group_sibling`(단순 위치 변경)만 된다(N1).
+        // hit-test는 원본 sidebar_rows(불변)로. Cmd 없이는 중첩이 불가능하다는 게 이 함수의 핵심 게이트다.
+        const nest: ?GroupNestPlan = if (cmd_held) self.groupNestPlan(raw_row, marker) else null;
+        const plan: DropPlan = if (nest) |np|
             .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
         else if (self.sidebarGroupDropBoundary(raw_row, marker)) |boundary|
             // 그룹 고정 C2(§12.6 GP3): insert_before를 **plan에 굽기 전** 드래그 그룹의 pin 리전으로 clamp한다 —
@@ -5697,7 +5704,9 @@ pub const AppSession = struct {
         // 보인다(카드 1행 고스트와 달리 그룹은 헤더+카드 연속 N행). MARU_FORCE_GROUP_COLLAPSED=1이면 B를 접어도 프리뷰 투영이
         // 타겟 헤더를 collapsed=false로 flip해 고스트가 보인다(§9 SG8 접힌 그룹 드롭 UX). 라이브 커밋 대신 refreshDragPreview로
         // 프리뷰만 세우고 놔둬(up 없음) 첫 frame을 캡처한다(self.tabs 불변). MARU_FORCE_GROUP_COLOR=1이면 A·B에 색을 얹어
-        // 고스트+헤더 밴드 색을 함께 확인. env-gate라 일반 실행엔 영향 없다.
+        // 고스트+헤더 밴드 색을 함께 확인. **MARU_FORCE_GROUP_DRAGGHOST_SIBLING=1**이면 같은 setup에서 plan을 **형제**(group_sibling,
+        // Cmd 없는 드래그)로 바꿔 "삽입선만"(중첩 없음·하이라이트 없음) 시각을 캡처한다 — Cmd 중첩 vs 일반 형제 스크린샷 비교용.
+        // env-gate라 일반 실행엔 영향 없다.
         if (std.c.getenv("MARU_FORCE_GROUP_DRAGGHOST_GROUP") != null) {
             var made: usize = 0;
             while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
@@ -5718,8 +5727,12 @@ pub const AppSession = struct {
                     },
                     .card => {},
                 };
-                // A(마커 index1)를 B 헤더(b_row)에 드롭 = 중첩. groupNestPlan→group_nest plan을 **프리뷰만**(커밋 안 함).
-                const plan: DropPlan = if (self.groupNestPlan(b_row, 1)) |np|
+                // A(마커 index1)를 B 헤더(b_row)에 드롭. 기본 = 중첩(Cmd 눌린 프리뷰 = group_nest, 타깃 하이라이트+들여쓴 고스트).
+                // MARU_FORCE_GROUP_DRAGGHOST_SIBLING=1이면 = 형제(Cmd 없는 프리뷰 = group_sibling, 삽입선만) — 두 시각을 스크린샷 비교.
+                const plan: DropPlan = if (std.c.getenv("MARU_FORCE_GROUP_DRAGGHOST_SIBLING") != null) blk_plan: {
+                    const boundary = self.sidebarGroupDropBoundary(b_row, 1) orelse break :blk_plan .none;
+                    break :blk_plan .{ .group_sibling = .{ .insert_before = self.clampGroupMoveToRegion(1, boundary) } };
+                } else if (self.groupNestPlan(b_row, 1)) |np|
                     .{ .group_nest = .{ .insert_before = np.insert_before, .target_depth = np.target_depth } }
                 else
                     .none;
@@ -9199,7 +9212,8 @@ pub const AppSession = struct {
         // reportMouse(코어 mutate + 응답)는 full (a)(docs/io-render-threading.md §9 P3-4)로 reader에 위임 — reader가
         // 적용 후 pendingResponse를 PTY로 흘린다. button 3 = no-button motion(any-event 1003). 적용 시점에 앱이 1003을
         // 꺼도 reportMouse 자체가 mouse_tracking 가드(.none이면 무동작)라 안전.
-        self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods) } }, self.io) catch {};
+        // command(32)은 마우스 리포트 modifier가 아니라 그룹 드래그 전용이라 마스킹해 뺀다(위 mouse() report 경로와 동형 — motion 비트 32 충돌 회피).
+        self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods & ~@as(i32, 32)) } }, self.io) catch {};
     }
 
     /// 스크린 px → 셀 변환 결과. 순수 산술·CellHit는 session/layout_math.zig로 분리(b2) — 여긴 alias.
@@ -9225,6 +9239,10 @@ pub const AppSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
+        // command(⌘, xterm 비트 32) 눌림 — 사이드바 그룹 드래그의 "Cmd=중첩 / 없으면 형제" 판정에 쓴다(groupDragPreviewFrame).
+        // 터미널 마우스 리포트로 갈 때는 아래 report_mouse 경로에서 32비트를 마스킹해 뺀다(command=32이 input_report.zig
+        // reportMouse의 SGR motion 비트 32와 충돌 — cb=button+mods+motion이라 섞이면 리포트가 오염된다). shift/option 게이트는 불변.
+        const cmd_held = (mods & 32) != 0;
         // 닫기 확인 모달이 열려 있으면 마우스는 **버튼 클릭만** 처리하고 나머지는 삼킨다 — 파괴적 게이트라 뒤
         // 터미널/사이드바/탭 ✕로 클릭이 새면 또 다른 닫기를 띄우거나 엉뚱한 조작이 된다. down(kind 1)이면
         // confirm.buttonAtPoint로 hit-test(view와 같은 buttonGeom 단일 레이아웃): 확인 버튼=confirmed, 취소 버튼·
@@ -9422,7 +9440,8 @@ pub const AppSession = struct {
                     // **SG8e 고스트 프리뷰**: groupDragPreviewFrame이 라이브 재배치 대신 plan+refreshDragPreview로 subtree 고스트를
                     // 투영한다(self.tabs 불변). up이 마지막 plan(group_sibling/group_nest)을 1회 커밋한다(commitSidebarDragPreview).
                     // self.tabs 불변이라 drag_index(=origin 마커)가 드래그 내내 안정 — SG8f: 옛 새-마커 반환값 대입 잔재 제거.
-                    self.groupDragPreviewFrame(self.sidebar_drag_index, y_px);
+                    // cmd_held: Cmd 눌림이면 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
+                    self.groupDragPreviewFrame(self.sidebar_drag_index, y_px, cmd_held);
                 }
             } else if (kind == 3) {
                 self.sidebar_drag_active = false; // up: 드래그 종료
@@ -9452,7 +9471,8 @@ pub const AppSession = struct {
                     // 마커 탭이어야 유효(승계·재정렬로 사라졌으면 무동작). groupDragPreviewFrame이 subtree 고스트를 재투영한다.
                     if (self.tabs.items[self.sidebar_group_drag_marker].group_start != null) {
                         // self.tabs 불변이라 마커 인덱스가 안정 — SG8f: 옛 반환값 대입 잔재 제거(호출자 마커 갱신 불필요).
-                        self.groupDragPreviewFrame(self.sidebar_group_drag_marker, y_px);
+                        // cmd_held: Cmd 눌림이면 다른 그룹 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
+                        self.groupDragPreviewFrame(self.sidebar_group_drag_marker, y_px, cmd_held);
                     }
                 }
             } else { // kind == 3 (up)
@@ -9792,16 +9812,20 @@ pub const AppSession = struct {
         if (do_report) {
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
-            self.runtime.enqueueCoreCommand(click_surface.id, .{ .report_mouse = .{
-                .button = @intCast(button),
-                .col = col,
-                .row = row,
-                .x_px = cell.term_x_px,
-                .y_px = cell.term_y_px,
-                .pressed = kind != 3,
-                .motion = kind == 2,
-                .mods = @intCast(mods),
-            } }, self.io) catch {};
+            self.runtime.enqueueCoreCommand(click_surface.id, .{
+                .report_mouse = .{
+                    .button = @intCast(button),
+                    .col = col,
+                    .row = row,
+                    .x_px = cell.term_x_px,
+                    .y_px = cell.term_y_px,
+                    .pressed = kind != 3,
+                    .motion = kind == 2,
+                    // command(32)은 사이드바 그룹 드래그 modifier라 터미널 리포트에 실으면 안 된다 — reportMouse의 cb=button+mods+motion에서
+                    // 32가 SGR motion 비트(input_report.zig:68)와 겹쳐 press가 motion으로 오인되거나 cb가 부풀어 리포트가 오염된다(R1 회귀 가드).
+                    .mods = @intCast(mods & ~@as(i32, 32)),
+                },
+            }, self.io) catch {};
             return;
         }
         // 셀렉션은 left 버튼(0)만 시작한다 — tracking 아닌 상태의 right/middle 클릭은 무시(셀렉션·context 메뉴 없음).
@@ -14196,9 +14220,12 @@ pub const AppSession = struct {
                 }
             }
         };
-        // SG8d: 카드 드래그 고스트 — preview_rows[ghost_lo,hi) 구간에 (1) 반투명 밴드(카드 rect처럼 gap inset·둥근,
-        // "떠 있는" 카드 느낌)와 (2) 상단 경계 삽입선(accent 색, 브라우저 탭 드래그식 드롭 위치 지시자)을 얹는다. rowTop은
-        // rows(=preview_rows)와 같은 도메인이라 위치가 정합하고, hit-test·plan은 원본 sidebar_rows(불변)라 무관하다.
+        // 드래그 고스트 — preview_rows[ghost_lo,hi) 구간에 드롭 피드백을 얹는다. plan에 따라 시각이 갈린다(사용자 확정 정책):
+        //  ⑴ **.group_nest(Cmd 중첩)** = 타깃 그룹 하이라이트(부모 그룹 배경 tint로 "여기 안으로") + **들여쓴** 반투명 고스트
+        //     밴드(기존 group_depth 반영 — 한 단계 안쪽) + 들여쓴 삽입선. "폴더 안에 넣기"를 시각화.
+        //  ⑵ **.group_sibling(Cmd 없음 형제)** = **삽입선만**(중첩 아님 = 단순 위치 지시). 고스트 밴드·하이라이트 없음.
+        //  ⑶ **.card / .none** = 기존 SG8d 카드 드래그(반투명 밴드 + 삽입선, 전폭). 카드 경로는 modifier와 무관하게 불변.
+        // rowTop은 rows(=preview_rows)와 같은 도메인이라 위치가 정합하고, hit-test·plan은 원본 sidebar_rows(불변)라 무관하다.
         // 고스트 glyph는 buildSidebarTitleDrawList가 muted 색으로 dim해 밴드와 함께 "고스트"로 읽힌다.
         if (self.sidebar_drag_preview) |dp| {
             if (dp.ghost_hi > dp.ghost_lo and dp.ghost_lo < rows.len and slot_h > 0 and self.sidebar_width_px > 0) {
@@ -14206,30 +14233,84 @@ pub const AppSession = struct {
                 var band_h: u32 = 0;
                 var gi = dp.ghost_lo;
                 while (gi < dp.ghost_hi and gi < rows.len) : (gi += 1) band_h +|= chrome.components.sidebar.rowHeight(rows[gi], slot_h, self.sidebar_header_row_h_px);
-                const w_full: f32 = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap;
-                // 반투명 고스트 밴드(밝은 sidebar_foreground 저알파 — straight-alpha packRgbAlpha, 셰이더 rgb*=a).
-                if (self.sidebarScrollClipQuad(top_abs + gap, @as(f32, @floatFromInt(band_h)) - 2.0 * gap)) |sr| {
-                    const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
-                    const ghost_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x30); // ≈19% 반투명
-                    self.gpu_quads.append(self.allocator, .{
-                        .x = gap,
-                        .y = sr.y,
-                        .w = w_full,
-                        .h = sr.h,
-                        .corner_radii = .{ rr, rr, rr, rr },
-                        .border_widths = .{ 0, 0, 0, 0 },
-                        .fill_color0 = ghost_fill,
-                        .fill_color1 = ghost_fill,
-                        .border_color = 0,
-                        .gradient_kind = 0,
-                        .layer = 0,
-                    }) catch {};
+                const is_nest = dp.plan == .group_nest;
+                const is_sibling = dp.plan == .group_sibling;
+                // 고스트 depth(첫 고스트 row = 드래그 마커/카드) — nest면 relevel된 새(더 깊은) depth를 든다.
+                const ghost_depth: u8 = switch (rows[dp.ghost_lo]) {
+                    .group_header => |h| h.depth,
+                    .card => |c| c.depth,
+                };
+                // nest 들여쓰기(기존 group_depth 반영) — 헤더 glyph indent (depth-1)*group_indent와 정렬. 형제/카드는 0(전폭).
+                const indent_px: f32 = if (is_nest and ghost_depth > 1)
+                    @floatFromInt(@as(u32, ghost_depth - 1) * @as(u32, card_tk.space.group_indent_px))
+                else
+                    0;
+                const w_full: f32 = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap - indent_px;
+                // ⑴ nest: 타깃 그룹 하이라이트 — 부모 그룹(고스트를 담는 그룹)의 rows [parent_row, ghost_lo)에 은은한 배경 tint로
+                //    "이 그룹 안으로 들어간다"를 보인다. parent_row = 고스트 위로 스캔해 depth==ghost_depth-1인 첫 group_header
+                //    (= 타깃 그룹 마커). 못 찾으면(방어) 하이라이트 생략. 밴드는 부모 그룹 상단부터 고스트 아래까지 감싼다.
+                if (is_nest and ghost_depth > 1) {
+                    const want: u8 = ghost_depth - 1;
+                    var pr: usize = dp.ghost_lo; // 못 찾으면 ghost_lo 유지 → 아래 `pr < ghost_lo` 가드로 하이라이트 생략
+                    var scan: usize = dp.ghost_lo;
+                    while (scan > 0) {
+                        scan -= 1;
+                        const hit = switch (rows[scan]) {
+                            .group_header => |h| h.depth == want, // 타깃 그룹 마커(depth == ghost_depth-1)
+                            .card => false,
+                        };
+                        if (hit) {
+                            pr = scan;
+                            break;
+                        }
+                    }
+                    if (pr < dp.ghost_lo) {
+                        const parent_top: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, pr, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
+                        const hl_h: f32 = (top_abs + @as(f32, @floatFromInt(band_h))) - parent_top;
+                        if (self.sidebarScrollClipQuad(parent_top + gap, hl_h - 2.0 * gap)) |sr| {
+                            const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
+                            const hl_fill = packRgbAlpha(card_tk.palette.get(.accent_bar), 0x22); // 타깃 그룹 accent tint(≈13%)
+                            self.gpu_quads.append(self.allocator, .{
+                                .x = gap,
+                                .y = sr.y,
+                                .w = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap,
+                                .h = sr.h,
+                                .corner_radii = .{ rr, rr, rr, rr },
+                                .border_widths = .{ 0, 0, 0, 0 },
+                                .fill_color0 = hl_fill,
+                                .fill_color1 = hl_fill,
+                                .border_color = 0,
+                                .gradient_kind = 0,
+                                .layer = 0,
+                            }) catch {};
+                        }
+                    }
+                }
+                // ⑵ 형제(is_sibling)는 밴드를 생략하고 삽입선만 낸다. nest·card는 반투명 고스트 밴드(nest는 indent_px만큼 들여씀).
+                if (!is_sibling) {
+                    if (self.sidebarScrollClipQuad(top_abs + gap, @as(f32, @floatFromInt(band_h)) - 2.0 * gap)) |sr| {
+                        const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
+                        const ghost_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x30); // ≈19% 반투명
+                        self.gpu_quads.append(self.allocator, .{
+                            .x = gap + indent_px,
+                            .y = sr.y,
+                            .w = w_full,
+                            .h = sr.h,
+                            .corner_radii = .{ rr, rr, rr, rr },
+                            .border_widths = .{ 0, 0, 0, 0 },
+                            .fill_color0 = ghost_fill,
+                            .fill_color1 = ghost_fill,
+                            .border_color = 0,
+                            .gradient_kind = 0,
+                            .layer = 0,
+                        }) catch {};
+                    }
                 }
                 // 삽입선(accent 색) — 고스트 상단 경계에 얇은 quad로 "여기에 놓인다"를 또렷이 보인다(divider보다 대비 높은
-                // accent로 스크린샷 가독성 확보 — 브라우저/VSCode 드래그 삽입선 관례). 두께 ≥2px.
+                // accent로 스크린샷 가독성 확보 — 브라우저/VSCode 드래그 삽입선 관례). 두께 ≥2px. nest는 indent_px만큼 들여씀(형제=전폭).
                 const line_thick: f32 = @floatFromInt(@max(@as(u32, 2), card_tk.border.line_thickness_px));
                 if (self.sidebarScrollClipQuad(top_abs, line_thick)) |sr| {
-                    self.appendSolidQuad(gap, sr.y, w_full, sr.h, packOpaqueRgb(card_tk.palette.get(.accent_bar)), 0);
+                    self.appendSolidQuad(gap + indent_px, sr.y, w_full, sr.h, packOpaqueRgb(card_tk.palette.get(.accent_bar)), 0);
                 }
             }
         }
@@ -20804,7 +20885,7 @@ test "SG5-4: 카드 드래그 — 중첩 자식 그룹 안(자식 depth)·최상
     try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위 = depth0
 }
 
-test "SG5-4: 그룹 헤더를 다른 그룹 헤더에 드롭하면 중첩 (mouse 시뮬레이션 — 통합)" {
+test "SG5-4/N2: 그룹 헤더를 다른 그룹 헤더에 Cmd(⌘) 드롭 → 중첩 (mouse 시뮬레이션 — 통합)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -20841,24 +20922,370 @@ test "SG5-4: 그룹 헤더를 다른 그룹 헤더에 드롭하면 중첩 (mouse
         }
     }.f;
 
-    // 헤더 A(row0)를 잡아 헤더 B(row3) 위로 드래그 → A가 B의 자식으로 중첩.
+    // 헤더 A(row0)를 잡아 헤더 B(row3) 위로 **Cmd(⌘, mods=32) 드래그** → A가 B의 자식으로 중첩(Cmd=중첩 정책).
+    const CMD: i32 = 32;
     const headerA_y = rowCenterY(session, 0, header_h, slot_h, header_row_h);
-    session.mouse(1, x, headerA_y, 0, 0); // down on 헤더 A → arm
+    session.mouse(1, x, headerA_y, 0, CMD); // down on 헤더 A → arm
     try std.testing.expect(session.sidebar_group_drag_armed);
     const headerB_y = rowCenterY(session, 3, header_h, slot_h, header_row_h);
-    session.mouse(2, x, headerB_y, 0, 0); // drag → threshold 초과 → 헤더 드롭=중첩 plan의 **비커밋 프리뷰**(SG8e)
+    session.mouse(2, x, headerB_y, 0, CMD); // Cmd 드래그 → threshold 초과 → 헤더 드롭=중첩 plan의 **비커밋 프리뷰**(SG8e)
     try std.testing.expect(session.sidebar_group_drag_active);
     try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰(subtree 고스트, B 자식 depth로 들여쓰기)
+    try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_nest); // Cmd → 중첩 plan
 
     // 드래그 중 self.tabs 불변 — sidebar_rows(hit-test 도메인)는 아직 중첩 전(원본 depth). 확정은 up.
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // B 최상위(불변)
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // A 아직 최상위(프리뷰만 중첩)
-    session.mouse(3, x, headerB_y, 0, 0); // up → 마지막 plan(group_nest) 1회 커밋
+    session.mouse(3, x, headerB_y, 0, CMD); // up → 마지막 plan(group_nest) 1회 커밋
     // 결과: A가 B의 자식(depth2). B는 최상위(depth1). t0(A 카드)=depth2(라이브 시절과 동일 = 등가).
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // B 최상위
     try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t0)); // A → B 자식(중첩)
     try std.testing.expect(!session.sidebar_group_drag_armed);
     try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨
+}
+
+// ── 그룹 드래그 "Cmd=중첩 / 없으면 형제" modifier 매트릭스(N/P/R/B) 공용 헬퍼 ─────────────────────────────────────────
+// 표시 row의 세로 중앙 y(backing px, scroll=0). 그룹 드래그 mouse 시뮬레이션 테스트가 공유한다(N2와 같은 산식).
+fn sbRowCenterY(s: *AppSession, row: usize) f64 {
+    const sb = chrome.components.sidebar;
+    const top = sb.rowTop(s.sidebar_rows.items, row, s.sidebar_header_height_px, s.sidebar_slot_height_px, s.sidebar_header_row_h_px, 0);
+    const rh = sb.rowHeight(s.sidebar_rows.items[row], s.sidebar_slot_height_px, s.sidebar_header_row_h_px);
+    return @floatFromInt(top + @as(i64, @intCast(rh / 2)));
+}
+
+// 두 형제 최상위 그룹 A=[t0,t1]·B=[t2,t3]을 만든 4-탭 세션. 호출자가 defer deinit/destroy. cols 넉넉히 잡아 사이드바+본문 확보.
+fn makeTwoSiblingGroups(allocator: std.mem.Allocator) !*AppSession {
+    const session = try allocator.create(AppSession);
+    errdefer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    try setGroupMarker(session, 0, "A", 1);
+    try setGroupMarker(session, 2, "B", 1);
+    session.recomputeVisibleTabs(); // [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
+    return session;
+}
+
+test "N1: 그룹 헤더를 다른 헤더에 Cmd 없이 드롭 → 형제(group_sibling, 중첩 안 됨·depth 불변)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try makeTwoSiblingGroups(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const t0 = session.tabs.items[0];
+    const t2 = session.tabs.items[2];
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+
+    // 헤더 A(row0)를 헤더 B(row3)에 **Cmd 없이(mods=0)** 드래그 → 형제(중첩 아님).
+    session.mouse(1, x, sbRowCenterY(session, 0), 0, 0); // down → arm
+    try std.testing.expect(session.sidebar_group_drag_armed);
+    session.mouse(2, x, sbRowCenterY(session, 3), 0, 0); // drag onto 헤더 B
+    try std.testing.expect(session.sidebar_drag_preview != null);
+    try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // Cmd 없음 → 형제(중첩 절대 안 함)
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 드래그 중 depth 불변
+    session.mouse(3, x, sbRowCenterY(session, 3), 0, 0); // up → 형제 이동 커밋
+    // 결과 [t2(B), t3, t0(A), t1] — A가 B 뒤 형제로. depth 둘 다 1(중첩 없음).
+    try std.testing.expectEqual(t2, session.tabs.items[0]);
+    try std.testing.expectEqual(t0, session.tabs.items[2]);
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 최상위 유지
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2));
+    try std.testing.expect(session.sidebar_drag_preview == null);
+}
+
+test "N3: 그룹 헤더를 카드에 Cmd 없이 드롭 → 형제" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try makeTwoSiblingGroups(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const t0 = session.tabs.items[0];
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+
+    // 헤더 A(row0)를 그룹 B의 카드 t3(row5)에 Cmd 없이 드래그 → 형제.
+    session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
+    session.mouse(2, x, sbRowCenterY(session, 5), 0, 0);
+    try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // 카드 타깃 = 항상 형제
+    session.mouse(3, x, sbRowCenterY(session, 5), 0, 0);
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 중첩 안 됨
+    try std.testing.expect(session.sidebar_drag_preview == null);
+}
+
+test "N4: 그룹 헤더를 카드에 Cmd 드롭 → 형제 폴백(넣을 헤더 없음, no-op 아님·정책 고정)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try makeTwoSiblingGroups(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const t0 = session.tabs.items[0];
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const CMD: i32 = 32;
+
+    // 헤더 A(row0)를 카드 t3(row5)에 **Cmd 눌러** 드래그 → 카드는 nest 대상 아님(groupNestPlan=null) → 형제 폴백.
+    session.mouse(1, x, sbRowCenterY(session, 0), 0, CMD);
+    session.mouse(2, x, sbRowCenterY(session, 5), 0, CMD);
+    try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // N4 정책 = 형제 폴백(중첩 아님)
+    session.mouse(3, x, sbRowCenterY(session, 5), 0, CMD);
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // depth 불변(중첩 아님)
+    try std.testing.expect(session.sidebar_drag_preview == null);
+}
+
+test "N5: 접힌 그룹을 Cmd 없이 지나 드롭 → 형제(현재 불가하던 케이스 개선)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try makeTwoSiblingGroups(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const t0 = session.tabs.items[0];
+    const t2 = session.tabs.items[2];
+    session.tabs.items[2].group_collapsed = true; // B 접힘
+    session.recomputeVisibleTabs(); // [hA(0), c t0(1), c t1(2), hB(3, collapsed)] — B 카드 숨김
+    const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+
+    // 헤더 A(row0)를 접힌 헤더 B(row3)에 Cmd 없이 드래그 → 형제(과거엔 헤더 드롭=중첩이라 이 재정렬이 애매했다).
+    session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
+    session.mouse(2, x, sbRowCenterY(session, 3), 0, 0);
+    try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling);
+    session.mouse(3, x, sbRowCenterY(session, 3), 0, 0);
+    // A가 접힌 B 뒤 형제로 — [t2(B), t3, t0(A), t1], depth 불변.
+    try std.testing.expectEqual(t2, session.tabs.items[0]);
+    try std.testing.expectEqual(t0, session.tabs.items[2]);
+    try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0));
+    try std.testing.expect(session.sidebar_drag_preview == null);
+}
+
+test "N6: 프리뷰=확정 — 드래그 중 캡처한 plan이 up 커밋 결과와 일치(nest·sibling)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const CMD: i32 = 32;
+
+    // (a) nest: Cmd 헤더 드롭 → 드래그 중 plan=.group_nest, up 후 착지 depth=target_depth.
+    {
+        const session = try makeTwoSiblingGroups(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const t0 = session.tabs.items[0];
+        const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+        session.mouse(1, x, sbRowCenterY(session, 0), 0, CMD);
+        session.mouse(2, x, sbRowCenterY(session, 3), 0, CMD);
+        const captured = session.sidebar_drag_preview.?.plan;
+        try std.testing.expect(captured == .group_nest);
+        const target_depth = captured.group_nest.target_depth; // 프리뷰가 계획한 착지 depth
+        session.mouse(3, x, sbRowCenterY(session, 3), 0, CMD);
+        try std.testing.expectEqual(@as(?u8, target_depth), sidebarCardDepth(session, t0)); // 착지 = 프리뷰 plan
+    }
+    // (b) sibling: Cmd 없는 헤더 드롭 → plan=.group_sibling, up 후 형제 위치 착지.
+    {
+        const session = try makeTwoSiblingGroups(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const t0 = session.tabs.items[0];
+        const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+        session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
+        session.mouse(2, x, sbRowCenterY(session, 3), 0, 0);
+        try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling);
+        session.mouse(3, x, sbRowCenterY(session, 3), 0, 0);
+        try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 형제(depth 불변)
+    }
+}
+
+test "P1: 고정 탭끼리 재정렬 — 둘 다 최상위 유지(enclosing null·depth 0)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2]
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true; // 고정 탭 2개(그룹 아님)
+    const t0 = session.tabs.items[0];
+    const t1 = session.tabs.items[1];
+
+    _ = session.moveTab(1, 0); // t1을 t0 앞으로(고정 리전 [0,2) 안 재정렬)
+    try std.testing.expectEqual(@as(usize, 2), session.countPinnedTabs());
+    try std.testing.expectEqual(t1, session.tabs.items[0]);
+    try std.testing.expectEqual(t0, session.tabs.items[1]);
+    // 둘 다 그룹 밖 최상위(enclosing null·depth 0).
+    try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null);
+    try std.testing.expect(session.enclosingGroupMarkerIndex(1) == null);
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0));
+    try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t1));
+}
+
+test "P2: 고정 그룹끼리 재정렬 — 둘 다 고정 유지(연속 파티션)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try makeTwoSiblingGroups(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    // A·B 둘 다 고정(마커+멤버 pinned = 정규화 캐시).
+    for (0..4) |i| session.tabs.items[i].pinned = true;
+    const t0 = session.tabs.items[0]; // A 마커
+    const t2 = session.tabs.items[2]; // B 마커
+
+    // B(index2)를 A 앞으로 형제 이동 → [t2,t3,t0,t1]. 리전 clamp(고정)로 파티션 유지.
+    const boundary = session.sidebarGroupDropBoundary(0, 2).?; // B를 A 헤더(row... 여기선 raw_row=0)에 = A 앞
+    const clamped = session.clampGroupMoveToRegion(2, boundary);
+    _ = session.moveGroupSibling(2, clamped);
+    try std.testing.expectEqual(t2, session.tabs.items[0]);
+    try std.testing.expectEqual(t0, session.tabs.items[2]);
+    // 둘 다 여전히 고정(재정렬이 고정 리전 안에서만).
+    try std.testing.expect(session.tabs.items[0].pinned); // B 마커
+    try std.testing.expect(session.tabs.items[2].pinned); // A 마커
+    try std.testing.expectEqual(@as(usize, 4), session.countPinnedTabs());
+}
+
+test "P3: 그룹이 고정 탭 위로 못 감 — clampGroupMoveToRegion이 비고정 리전에 가둠" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2]
+    session.tabs.items[0].pinned = true; // 고정 최상위 탭
+    try setGroupMarker(session, 1, "A", 1); // 비고정 그룹 A=[t1,t2]
+
+    // 비고정 그룹 A(마커 index1)를 고정 리전(index0)으로 넣으려 해도 pinned_count=1로 clamp.
+    try std.testing.expectEqual(@as(usize, 1), session.countPinnedTabs());
+    try std.testing.expectEqual(@as(usize, 1), session.clampGroupMoveToRegion(1, 0)); // insert 0 → max(0, pinned_count=1)=1
+}
+
+test "P4(음성): 고정 탭을 그룹 뒤로 드래그해도 그룹에 흡수 안 됨(인터리빙 미지원 — 고정 리전에 clamp)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2]
+    session.tabs.items[0].pinned = true; // 고정 최상위 탭
+    try setGroupMarker(session, 1, "A", 1); // 비고정 그룹 A=[t1,t2]
+    const t0 = session.tabs.items[0];
+
+    // 고정 탭 t0(index0)를 그룹 A 뒤(index2 이후)로 이동 시도 → clampMoveToGroup이 고정 리전 [0,1)에 가둔다(흡수 아님).
+    _ = session.moveTab(0, 2);
+    // t0는 여전히 index0(고정 최상위), 그룹 A 멤버가 되지 않음(enclosing null).
+    var t0_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == t0) {
+        t0_idx = i;
+    };
+    try std.testing.expectEqual(@as(usize, 0), t0_idx); // 고정 리전 앞에 그대로
+    try std.testing.expect(session.enclosingGroupMarkerIndex(t0_idx) == null); // 그룹에 인터리빙 안 됨
+    try std.testing.expect(session.tabs.items[t0_idx].pinned);
+}
+
+test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(마스킹 회귀 가드)" {
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.io = std.Io.Threaded.global_single_threaded.io();
+    var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 8, .rows = 4 });
+    defer tab_surface.deinit();
+    session.surface_initialized = true;
+    var st_ptrs = [_]*maru.session.Surface{&tab_surface};
+    session.app_window = .{ .tabs = &st_ptrs };
+
+    var capture_buf: std.ArrayList(u8) = .empty;
+    defer capture_buf.deinit(std.testing.allocator);
+    var cap_ctx = ReportCaptureCtx{ .buf = &capture_buf };
+    session.runtime = app.SurfaceRuntime.init(std.testing.allocator);
+    defer session.runtime.deinit();
+    _ = try session.runtime.attach(&tab_surface, tab_surface.id, .{ .ctx = &cap_ctx, .write_input = ReportCaptureCtx.write, .resize_fn = testNoopPtyResize });
+
+    // 리포트 경로가 읽는 상태를 전부 명시(undefined 트랩 회피 — 모든 드래그 캡처 플래그 false).
+    session.metal_dirty = false;
+    session.chrome_host = .{};
+    session.rename = null;
+    session.divider_drag = null;
+    session.sidebar_resize_active = false;
+    session.scrollbar_drag_grab = null;
+    session.sidebar_drag_active = false;
+    session.sidebar_group_drag_armed = false;
+    session.sidebar_group_drag_active = false;
+    session.tab_drag_active = false;
+    session.pane_drag_active = false;
+    session.drag_autoscroll = 0;
+    session.mouse_drag_selecting = false;
+    session.cell_width_px = 8;
+    session.cell_height_px = 16;
+    session.scale_milli = 1000;
+    session.sidebar_width_px = 0; // inSidebar=false → 본문 리포트 경로
+    session.active_pane_rect = .{ .x = 0, .y = 0, .w = 64, .h = 64 };
+    session.last_drag_col = 0;
+
+    // any-event(1003) tracking + SGR — motion을 리포트한다.
+    tab_surface.core.mouse_tracking = .any;
+    tab_surface.core.mouse_format = .sgr;
+
+    // Cmd(mods=32) 드래그(motion) → cb = button(0) + mods(0=마스킹) + motion(32) = 32. 32비트가 안 빠졌으면 cb=64로 오염.
+    session.mouse(2, 16.0, 16.0, 0, 32);
+    try std.testing.expect(std.mem.indexOf(u8, capture_buf.items, "\x1b[<32;") != null); // 정상: cb=32(motion만)
+    try std.testing.expect(std.mem.indexOf(u8, capture_buf.items, "\x1b[<64;") == null); // 오염 없음: command 32가 안 섞임
+    try std.testing.expect(std.mem.indexOf(u8, capture_buf.items, "\x1b[<96;") == null); // 방어: 32+32+32=96도 없음
+}
+
+// B1 헬퍼 — 각 위치의 (그룹 마커 이름 첫 글자<<8 | group_depth) 시그니처. 구조적으로 동일한 두 세션의 착지 비교용.
+fn groupSig4(session: *AppSession, out: *[4]u16) void {
+    for (session.tabs.items, 0..) |t, i| {
+        if (i >= 4) break;
+        const nm: u16 = if (t.group_start) |g| (if (g.len > 0) @as(u16, g[0]) else 0) else 0;
+        out[i] = (nm << 8) | t.group_depth;
+    }
+}
+
+test "B1: 고정 그룹 0 + Cmd 미사용 그룹 드래그 = moveGroupSibling과 동일 착지(SG5/SG8 회귀 0)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // 경로 A: mouse 시뮬레이션(Cmd 없음)으로 헤더 A를 헤더 B에 드롭.
+    var sig_mouse: [4]u16 = undefined;
+    {
+        const session = try makeTwoSiblingGroups(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+        session.mouse(1, x, sbRowCenterY(session, 0), 0, 0);
+        session.mouse(2, x, sbRowCenterY(session, 3), 0, 0);
+        session.mouse(3, x, sbRowCenterY(session, 3), 0, 0);
+        groupSig4(session, &sig_mouse);
+    }
+    // 경로 B: 직접 moveGroupSibling(A 마커=0, insert_before=B subtree 끝) — 옛 SG5-1 확정 경로.
+    var sig_direct: [4]u16 = undefined;
+    {
+        const session = try makeTwoSiblingGroups(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const boundary = session.sidebarGroupDropBoundary(3, 0).?; // 헤더 B(row3) 드롭 경계
+        const clamped = session.clampGroupMoveToRegion(0, boundary);
+        _ = session.moveGroupSibling(0, clamped);
+        groupSig4(session, &sig_direct);
+    }
+    try std.testing.expectEqualSlices(u16, &sig_mouse, &sig_direct); // 두 경로 동일(그룹 구조 byte-identical 착지)
 }
 
 test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 rowTop(가변 높이)로 밀린다 (SG3b-2-ii #1·#5·#6)" {
@@ -21842,6 +22269,16 @@ test "renameCaretRect(.group): 헤더 이름이 넘치면 caret x를 사이드�
 // (enqueue_command=null → enqueueCoreCommand가 코어 락 아래 즉시 apply). io도 세워 폴백의 lockCore에 넘긴다.
 fn testNoopPtyWrite(_: *anyopaque, _: []const u8) anyerror!void {}
 fn testNoopPtyResize(_: *anyopaque, _: terminal.Size) anyerror!void {}
+
+// R1(마우스 리포트 무오염 회귀 가드) 전용 — writeInput으로 흘러나온 터미널 리포트 바이트를 버퍼에 모은다(non-interactive
+// 폴백이 pendingResponse를 이 콜백으로 드레인한다). ctx로 캡처 버퍼를 넘겨 전역 가변 상태 없이 단일 테스트에서 검증한다.
+const ReportCaptureCtx = struct {
+    buf: *std.ArrayList(u8),
+    fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *ReportCaptureCtx = @ptrCast(@alignCast(ctx));
+        try self.buf.appendSlice(std.testing.allocator, bytes);
+    }
+};
 fn attachTestRuntime(session: *AppSession, surface: *maru.session.Surface) !void {
     session.io = std.testing.io;
     session.runtime = app.SurfaceRuntime.init(std.testing.allocator);

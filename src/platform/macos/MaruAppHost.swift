@@ -1580,12 +1580,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return (Double(local.x * scale), Double((view.bounds.height - local.y) * scale))
     }
 
-    // NSEvent 모디파이어 → xterm mods 비트(4=shift, 8=opt/meta, 16=ctrl). mouse reporting(handleMouse·handleMouseMotion) 공용.
+    // NSEvent 모디파이어 → xterm mods 비트(4=shift, 8=opt/meta, 16=ctrl, 32=command). mouse reporting(handleMouse·
+    // handleMouseMotion) 공용. command(32)는 사이드바 그룹 드래그 "Cmd=중첩/없으면 형제" 판정에 쓰이고, 터미널 마우스
+    // 리포트 경로로 갈 때는 Zig(app_session.mouse·mouseMoved)가 32비트를 마스킹해 뺀다(command=32이 SGR motion 비트 32와
+    // 충돌해 리포트가 오염되므로 — input_report.zig reportMouse의 cb=button+mods+motion). urlModsBits(command=32)와 동형.
     private func modsBits(_ event: NSEvent) -> Int32 {
         var mods: Int32 = 0
         if event.modifierFlags.contains(.shift) { mods |= 4 }
         if event.modifierFlags.contains(.option) { mods |= 8 }
         if event.modifierFlags.contains(.control) { mods |= 16 }
+        if event.modifierFlags.contains(.command) { mods |= 32 }
         return mods
     }
 

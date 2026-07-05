@@ -143,6 +143,8 @@ pub fn handle(k: InputEvent.KeyEvent, state: *State) ?Action;                   
 
 박스 기하(폭 clamp·중앙배치·soft-lock 가드·배경 quad/테두리·콘텐츠 셀 좌표)는 `chrome/components/modal_box.zig` **공유 프리미티브**가 단일 출처로 제공한다 — notice(줄 텍스트), confirm(메시지+버튼), 향후 모달이 `layout`/`frame`/`text`/`fillCells`/`centerX`/`rowY`로 재사용한다(각 컴포넌트는 콘텐츠 구성만 소유). 폭은 `overlay_input.displayCols`(EAW 표시폭, placeText와 동일 규약)로 재 한글/CJK가 안 잘린다.
 
+**단일 줄 입력의 scroll-to-caret(tail 창).** find·palette·사이드바 검색바처럼 caret가 항상 문자열 끝에 오는 단일 줄 편집 입력은, 검색어가 패널(입력 영역)보다 길어지면 **선두 고정 + 뒤 잘림**이 아니라 **말미 고정(tail 창)**으로 그린다: 선두에 "…"를 두고 문자열 **끝**(방금 친 글자·caret)을 보여줘, 입력창이 caret를 따라 가로 스크롤하는 것과 같게 한다. 안 그러면 입력 영역을 채우는 순간 caret과 최근 글자가 오른쪽으로 잘려 무엇을 치는지 안 보인다(사용자 제보). 단일 출처는 `overlay_input`의 두 헬퍼다: `tailWindow(bytes, max_cols)`(뒤쪽 온전한 코드포인트 슬라이스 + `truncated` — `truncateToCols`의 EAW 짝, 무 alloc)와 `inputLineView(input, prompt_cols, text_cols)`(프롬프트+입력+caret 배치 — `view`의 run 배치와 `caretRect`가 **공유**해 그림과 caret이 일치, preedit(활성 조합)은 통째 보존하고 query만 tail로 줄임). find는 우측 카운터만큼 `text_cols`를 줄여 caret가 카운터에 안 가려지게 하고, 사이드바 검색바는 셀 기반이라 같은 `tailWindow`로 `app_session.sidebarSearchLine`(렌더·caret rect 공유)이 직접 배치한다. 같은 규칙의 chrome 셀-텍스트 판(탭·pane 라벨·워크스페이스 카드 rename)은 `coretext_frame_builder.appendEllipsizedTitle`의 `TitleAnchor.tail`이다([tabs-splits-layout.md](tabs-splits-layout.md) "긴 이름 편집").
+
 규칙(기존 패턴에서 승계):
 - State는 **렌더를 모르고**, view는 **State를 읽기만**, handle은 **State를 mutate + `?Action` 반환**(단방향).
 - 라이프사이클(언제 열고/배타성)은 **host**가 소유(현 `toggle*` 패턴).

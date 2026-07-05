@@ -241,12 +241,31 @@ pub fn titleDisplayWidth(title: []const u8, widen_icons: bool) usize {
     return total;
 }
 
-/// title을 [start_col, end_col) 칸에 row행 DrawCell로 깐다(좌→우). 다 안 들어가면 **하드 컷 대신 마지막 칸을
-/// "…"(U+2026)로** 바꿔 잘렸음을 표시한다(말줄임). end_col<=start_col이면 무동작. 깨진 UTF-8 U+FFFD, wide 2칸.
-/// 사이드바 제목·pane 탭 바 제목이 공유하는 단일 출처라 잘림 표시가 일관된다. 순수(out append만).
-/// 제목을 [start_col, end_col) 칸에 깐다 — 안 들어가면 마지막 칸을 "…"(U+2026)로 말줄임한다. 사이드바·pane
-/// 탭 바·floating 탭이 공유하는 잘림 규칙의 단일 출처. **다음 빈 col**(제목/말줄임 뒤)을 돌려줘, 호출자가 그 뒤를
-/// 배경으로 채우는(솔리드 박스) 식으로 이어 그릴 수 있다. 글자만 추가하고 빈 칸은 채우지 않는다(중복 셀 없음).
+/// 제목 잘림 앵커. `head`=선두 고정 — 넘치면 **뒤**를 "…"로 자른다(이름 앞부분을 보여주는 읽기 전용 제목의 기본).
+/// `tail`=말미 고정 — 넘치면 **앞**을 "…"로 자르고 문자열 **끝**을 보존한다. 인라인 rename 편집기처럼 caret가 항상
+/// 문자열 끝에 있는 단일 줄 입력에 쓴다: 세그먼트보다 긴 이름을 칠 때 head면 caret(끝)과 방금 친 글자가 오른쪽으로
+/// 잘려 안 보였다(사용자 제보) — tail은 입력창이 caret를 따라 가로 스크롤하는 것과 같은 효과로 끝을 늘 보여준다.
+/// 베이스: 단일 줄 텍스트 필드가 caret를 시야에 유지(scroll-to-caret)하는 건 사실상 모든 GUI 입력창의 공통 관례다.
+pub const TitleAnchor = enum { head, tail };
+
+/// UTF-8 한 글자 디코드(깨진 바이트는 U+FFFD·advance 1). appendEllipsizedTitle의 head/tail 경로가 공유해 폭 셈법이 일치한다.
+fn decodeTitleCp(bytes: []const u8, i: usize) struct { cp: u21, advance: usize } {
+    const seq_len = std.unicode.utf8ByteSequenceLength(bytes[i]) catch return .{ .cp = 0xFFFD, .advance = 1 };
+    const len: usize = seq_len;
+    if (i + len <= bytes.len) {
+        if (std.unicode.utf8Decode(bytes[i .. i + len])) |d| {
+            return .{ .cp = d, .advance = len };
+        } else |_| {}
+    }
+    return .{ .cp = 0xFFFD, .advance = 1 };
+}
+
+/// title을 [start_col, end_col) 칸에 row행 DrawCell로 깐다. `anchor`가 정하는 방향으로 넘침을 처리한다:
+/// - `.head`(기본): 좌→우로 깔고 다 안 들어가면 **하드 컷 대신 마지막 칸을 "…"(U+2026)로** 바꿔 잘렸음을 표시(선두 고정).
+/// - `.tail`: 넘치면 **선두**에 "…"를 두고 문자열 **끝**이 보이도록 앞 글자를 버린다(말미 고정 — rename 편집기의 caret 유지).
+/// end_col<=start_col이면 무동작. 깨진 UTF-8 U+FFFD, wide 2칸. 사이드바 제목·pane 탭 바 제목·pane 라벨·rename 편집기가
+/// 공유하는 잘림 규칙의 단일 출처라 잘림 표시가 일관된다. **다음 빈 col**(제목/말줄임 뒤)을 돌려줘, 호출자가 그 뒤를
+/// 배경으로 채우는(솔리드 박스) 식으로 이어 그릴 수 있다. 글자만 추가하고 빈 칸은 채우지 않는다(중복 셀 없음). 순수(out append만).
 fn appendEllipsizedTitle(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),
@@ -256,29 +275,54 @@ fn appendEllipsizedTitle(
     end_col: u16,
     style: terminal.Style,
     widen_icons: bool, // 카드 보조줄(branch/folder)만 true — 등록 maru 아이콘을 2칸 렌더(titleCellWidth)
+    anchor: TitleAnchor,
 ) !u16 {
     if (end_col <= start_col) return start_col;
-    const fits = titleDisplayWidth(title, widen_icons) <= @as(usize, end_col - start_col);
+    const avail: usize = end_col - start_col;
+    const total = titleDisplayWidth(title, widen_icons);
+
+    // tail 앵커 + 넘침: 선두에 "…"(자리가 있으면 1칸)를 두고 문자열 **끝**이 보이도록 앞 글자를 버린다. rename 편집기가
+    // 세그먼트보다 긴 이름을 칠 때 caret(문자열 끝)를 따라가, 방금 친 글자가 오른쪽으로 사라지지 않게 한다(가로 스크롤 효과).
+    if (anchor == .tail and total > avail) {
+        const lead: u16 = if (avail >= 2) 1 else 0; // "…" 자리 — 폭이 1칸뿐이면 생략하고 tail만 그린다(최소한 caret은 보이게)
+        const tail_cols: usize = avail - lead;
+        // 앞에서부터 codepoint를 버려 남은(=뒤쪽) 표시폭이 tail_cols 이하가 되게 한다(EAW 폭 반영, titleDisplayWidth와 같은 셈법).
+        var drop_i: usize = 0;
+        var rem: usize = total;
+        while (drop_i < title.len and rem > tail_cols) {
+            const d = decodeTitleCp(title, drop_i);
+            rem -= titleCellWidth(d.cp, widen_icons);
+            drop_i += d.advance;
+        }
+        var col: u16 = start_col;
+        if (lead == 1) {
+            try cells.append(allocator, .{ .row = row, .col = col, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
+            col += 1;
+        }
+        var i: usize = drop_i;
+        while (i < title.len) {
+            const d = decodeTitleCp(title, i);
+            const w: u16 = titleCellWidth(d.cp, widen_icons);
+            if (col + w > end_col) break; // 안전장치 — rem<=tail_cols라 보통 tail 전체가 들어간다
+            try cells.append(allocator, .{ .row = row, .col = col, .codepoint = d.cp, .width = @intCast(@min(w, 2)), .style = style });
+            col += w;
+            i += d.advance;
+        }
+        return col;
+    }
+
+    // head 앵커(기본) 또는 넘치지 않음: 선두 고정 — 넘치면 마지막 칸을 "…"로.
+    const fits = total <= avail;
     const text_end: u16 = if (fits) end_col else end_col - 1; // 말줄임이면 마지막 1칸을 "…"에 남긴다
     var col: u16 = start_col;
     var i: usize = 0;
     while (i < title.len) {
-        var cp: u21 = 0xFFFD;
-        var advance: usize = 1;
-        if (std.unicode.utf8ByteSequenceLength(title[i])) |seq_len| {
-            const len: usize = seq_len;
-            if (i + len <= title.len) {
-                if (std.unicode.utf8Decode(title[i .. i + len])) |d| {
-                    cp = d;
-                    advance = len;
-                } else |_| {}
-            }
-        } else |_| {}
-        const w: u16 = titleCellWidth(cp, widen_icons); // 카드 보조줄이면 등록 maru 아이콘 2칸 렌더
+        const d = decodeTitleCp(title, i);
+        const w: u16 = titleCellWidth(d.cp, widen_icons); // 카드 보조줄이면 등록 maru 아이콘 2칸 렌더
         if (col + w > text_end) break; // 텍스트 한도를 넘으면(말줄임 자리 직전) 멈춘다
-        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = cp, .width = @intCast(@min(w, 2)), .style = style });
+        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = d.cp, .width = @intCast(@min(w, 2)), .style = style });
         col += w;
-        i += advance;
+        i += d.advance;
     }
     if (!fits and col < end_col) {
         try cells.append(allocator, .{ .row = row, .col = col, .codepoint = title_ellipsis_glyph, .width = 1, .style = style });
@@ -356,6 +400,7 @@ pub fn buildSidebarDrawList(
     plus_row: ?usize,
     active_row: ?usize,
     active_fg: terminal.Color,
+    editing_row: ?usize, // rename 중인 슬롯(워크스페이스 카드·그룹 헤더). 그 슬롯 **이름줄(j==0)만** tail 앵커로 그려 caret(끝)을 유지한다.
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -423,7 +468,10 @@ pub fn buildSidebarDrawList(
             // 피드백). cols-1로 두면 우측에 ~0.5칸 여백이 생겨 좌측 glyph_pad와 균형이 맞는다.
             // 핀이 있는 이름줄(j==0)은 핀 앞(pin_col)에서 잘라 긴 이름이 핀을 덮지 않게 한다(✕는 호버 전용이라 종전대로 overpaint).
             const end_col: u16 = if (j == 0 and draw_pin) pin_col else (cols -| 1);
-            _ = try appendEllipsizedTitle(allocator, &cells, lines[j], row, text_col, end_col, row_style, line_widen[j]);
+            // rename 중인 슬롯의 **이름줄(j==0)만** tail 앵커 — 긴 이름을 칠 때 선두를 "…"로 자르고 끝(caret)을 보여준다(탭·pane과 같은 규칙).
+            // 보조줄(브랜치·경로·상태)은 rename 중 숨겨지므로 j>0은 늘 head다(편집 중엔 이름줄만 남는다).
+            const line_anchor: TitleAnchor = if (j == 0 and editing_row != null and editing_row.? == i) .tail else .head;
+            _ = try appendEllipsizedTitle(allocator, &cells, lines[j], row, text_col, end_col, row_style, line_widen[j], line_anchor);
             max_row = @max(max_row, row);
         }
         // 핀 글리프: 이름줄(name_row, n줄 블록 중앙) 우측. 컬러 이모지라 style.fg와 무관(빨간 핀 고정).
@@ -511,18 +559,21 @@ pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_
 /// pane 라벨 세그먼트(탭 바 좌측)의 glyph DrawList — 한 줄(row 0)에 사용자 지정 이름을 [1, cols-1) 칸에 깐다
 /// (col 0 좌측 패딩, 마지막 칸은 탭과의 시각 간격). 넘치면 탭 제목과 같은 말줄임(appendEllipsizedTitle 단일
 /// 출처). 색은 `fg`(호출자가 accent로 줘 탭 제목과 구분). cols<3이면(패딩+글자+간격 불가) 빈 DrawList — 호출자는
-/// label_cols를 그 미만으로 예약하지 않는다. 커서/overlay 없는 UI 텍스트라 OS 무관 단위 테스트.
+/// label_cols를 그 미만으로 예약하지 않는다. `anchor`=.tail이면(pane rename 중) 넘칠 때 선두를 "…"로 자르고 이름
+/// **끝**(caret)을 보존한다 — 긴 이름을 칠 때 방금 친 글자가 안 사라지게. 평소(custom_name 표시)엔 .head(앞부분 표시).
+/// 커서/overlay 없는 UI 텍스트라 OS 무관 단위 테스트.
 pub fn buildPaneLabelDrawList(
     allocator: std.mem.Allocator,
     label: []const u8,
     cols: u16,
     fg: terminal.Color,
+    anchor: TitleAnchor,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
     if (cols >= 3) {
-        // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 탭과의 간격. 그 사이에 이름(말줄임).
-        _ = try appendEllipsizedTitle(allocator, &cells, label, 0, 1, cols - 1, .{ .foreground = fg }, false); // pane 라벨(터미널 텍스트) — 아이콘 widen 안 함
+        // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 탭과의 간격. 그 사이에 이름(말줄임 — rename 중이면 tail 앵커로 caret 유지).
+        _ = try appendEllipsizedTitle(allocator, &cells, label, 0, 1, cols - 1, .{ .foreground = fg }, false, anchor); // pane 라벨(터미널 텍스트) — 아이콘 widen 안 함
     }
     return .{
         .size = .{ .cols = cols, .rows = 1 },
@@ -546,7 +597,7 @@ pub fn buildPaneGripDrawList(
     errdefer cells.deinit(allocator);
     if (cols >= 1) {
         const c = cols / 2; // 글리프를 grip 영역 중앙 칸에 — 양쪽 패딩
-        _ = try appendEllipsizedTitle(allocator, &cells, "\u{283F}", 0, c, c + 1, .{ .foreground = fg }, false); // braille(아이콘 아님)
+        _ = try appendEllipsizedTitle(allocator, &cells, "\u{283F}", 0, c, c + 1, .{ .foreground = fg }, false, .head); // braille(아이콘 아님)
     }
     return .{
         .size = .{ .cols = cols, .rows = 1 },
@@ -567,6 +618,7 @@ pub fn buildPaneTabBarDrawList(
     active_fg: terminal.Color,
     tab_width_fixed: u16, // 0=균등분할(tui — 바를 탭 수로 나눔), >0=탭 고정 폭(rich). barMetrics와 같은 값이라 보이는 탭=클릭 탭 정합(§6)
     scroll_cols: u32, // Step 2: 가로 스크롤 offset(컬럼) — segCols에 전달해 보이는 탭 창을 왼쪽으로 민다. 0=기본. barMetrics와 같은 값(정합).
+    editing_tab: ?usize, // rename 중인 Term 탭 인덱스(없으면 null). 그 탭 제목만 tail 앵커로 그려 caret(문자열 끝)를 세그먼트 안에 유지한다.
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
@@ -594,7 +646,9 @@ pub fn buildPaneTabBarDrawList(
             // bold는 셰이퍼가 bold 폰트 face를 골라 실제 굵은 글리프를 그린다(사이드바 활성 행과 같은 규칙).
             const tab_style: terminal.Style = if (active_tab != null and active_tab.? == tab_index) .{ .foreground = active_fg, .bold = true } else style;
             // 좌측 1칸 패딩 뒤에 제목. title_end(✕ 앞)를 넘으면 하드 컷이 아니라 "…"로 말줄임(사이드바와 같은 규칙).
-            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style, false); // pane 탭 제목(터미널 OSC) — widen 안 함
+            // rename 중인 탭이면 tail 앵커 — 넘칠 때 선두를 "…"로 자르고 이름 끝(caret)을 세그먼트 안에 유지한다(긴 이름 입력 가시성).
+            const tab_anchor: TitleAnchor = if (editing_tab != null and editing_tab.? == tab_index) .tail else .head;
+            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), @intCast(title_end), tab_style, false, tab_anchor); // pane 탭 제목(터미널 OSC) — widen 안 함
             if (is_close) { // 호버 탭 우측 안쪽에 ✕ glyph 1개(xInTabCloseZone과 같은 col=seg_end-2).
                 try cells.append(allocator, .{
                     .row = 0,
@@ -657,7 +711,7 @@ pub fn buildFloatingTabDrawList(
         col = 1;
     }
     // 제목을 col 1..cols에 깔고(넘치면 "…"), 다음 빈 col을 받아 그 뒤를 bg로 채운다.
-    col = try appendEllipsizedTitle(allocator, &cells, title, 0, col, cols, style, false); // 제목(터미널 텍스트) — widen 안 함
+    col = try appendEllipsizedTitle(allocator, &cells, title, 0, col, cols, style, false, .head); // 제목(터미널 텍스트) — widen 안 함
     while (col < cols) : (col += 1) { // 남은 col = bg 공백(솔리드 박스 마감)
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
@@ -706,7 +760,7 @@ pub fn buildStickyCommandDrawList(
         }
     }
     // 명령줄 텍스트(넘치면 "…")를 col..cols에 깔고, 남은 col을 bg 공백으로 채워 솔리드 배너로 마감.
-    col = try appendEllipsizedTitle(allocator, &cells, text, 0, col, cols, style, false); // 명령줄 텍스트 — widen 안 함
+    col = try appendEllipsizedTitle(allocator, &cells, text, 0, col, cols, style, false, .head); // 명령줄 텍스트 — widen 안 함
     while (col < cols) : (col += 1) {
         try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = ' ', .width = 1, .style = style });
     }
@@ -945,7 +999,7 @@ test "CoreText frame builder surfaces native shape failures" {
 test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating to cols" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "zsh", "vim" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default, null);
     defer draw_list.deinit(allocator);
 
     // 보조줄 없음(branches/paths 빈) → 각 탭 1줄(line_count=1, 슬롯 중앙). size.rows = 마지막 행 + 1.
@@ -969,7 +1023,7 @@ test "buildSidebarDrawList multi-line card: name/branch/path stack; empty aux li
     const names = [_][]const u8{ "maru", "docs" };
     const branches = [_][]const u8{ "\u{251C} main", "" }; // 탭 0만 브랜치줄
     const paths = [_][]const u8{ "~/dev/maru", "" }; // 탭 0만 경로줄
-    var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 20, .default, null, null, null, .default);
+    var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 20, .default, null, null, null, .default, null);
     defer dl.deinit(allocator);
 
     // 탭 0 = 3줄(이름 idx0·브랜치 idx1·경로 idx2, count=3), 탭 1 = 1줄(이름만, count=1).
@@ -1002,7 +1056,7 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
     const branches = [_][]const u8{"\u{251C} main"};
     const paths = [_][]const u8{"~/dev/maru"};
     const agents = [_]u21{0xF0007}; // claude ✶
-    var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &agents, &[_]bool{}, 30, .default, null, null, null, .default);
+    var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &agents, &[_]bool{}, 30, .default, null, null, null, .default, null);
     defer dl.deinit(allocator);
 
     // 아이콘 ✶: 슬롯 세로 중앙(count=1, idx0) col 0·width 2 — 3줄 블록(count=3)과 무관한 독립 위치.
@@ -1035,7 +1089,7 @@ test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and
     const names = [_][]const u8{"maru"};
     const branches = [_][]const u8{"\u{F0009} main"}; // octocat + 공백 + 브랜치
     const paths = [_][]const u8{"\u{F000A} ~/dev"}; // folder + 공백 + 경로
-    var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 20, .default, null, null, null, .default);
+    var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 20, .default, null, null, null, .default, null);
     defer dl.deinit(allocator);
 
     // 아이콘 셀은 col 0·width 2. 아이콘 폭 2 + 공백 1 = 3이므로, 브랜치 'm'·경로 '~'는 col 3에서 시작.
@@ -1108,7 +1162,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     const allocator = std.testing.allocator;
     // cols=20 → 우측 "+" zone 3칸 떼고 탭 영역 17, 2탭 → tab_w=8. 탭 0은 col [0,8), 탭 1은 [8,16). 각 탭 1칸 좌패딩 뒤 제목.
     const titles = [_][]const u8{ "sh", "vim" };
-    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default, 0, 0);
+    var draw_list = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default, 0, 0, null);
     defer draw_list.deinit(allocator);
 
     // 모든 탭이 행 0(가로), size cols=한도·rows=1.
@@ -1125,7 +1179,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
 
     // 세그먼트보다 긴 제목은 그 탭 한도에서 잘린다. cols=11 → 탭 영역 8, 2탭 → tab_w=4, 제목 칸 = [start+1, start+4) = 3칸.
     const longt = [_][]const u8{ "abcdef", "x" };
-    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 11, .default, null, null, .default, 0, 0);
+    var dl2 = try buildPaneTabBarDrawList(allocator, &longt, 11, .default, null, null, .default, 0, 0, null);
     defer dl2.deinit(allocator);
     var tab0: usize = 0;
     for (dl2.cells) |c| {
@@ -1136,7 +1190,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
     // close_tab이 주어지면 그 탭 우측 안쪽(seg_end-2)에 ✕ glyph를 그리고 제목은 그 앞까지만. cols=20 → "+" zone
     // 3 빼고 탭 영역 17, 2탭 → tab_w=8, 탭 1 seg_end=min(16,17)=16 → ✕ col 14. 탭 1 호버.
     const ht = [_][]const u8{ "sh", "vim" };
-    var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1, null, .default, 0, 0);
+    var dl3 = try buildPaneTabBarDrawList(allocator, &ht, 20, .default, 1, null, .default, 0, 0, null);
     defer dl3.deinit(allocator);
     var found_close = false;
     var found_plus3 = false;
@@ -1159,7 +1213,7 @@ test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab
 test "buildPaneLabelDrawList: 이름을 [1,cols-1)에 깔고 좌패딩·우간격을 남긴다(넘치면 말줄임)" {
     const allocator = std.testing.allocator;
     // cols=8 → [1,7)에 "build"(5칸) 들어감. col 0=패딩, col 7=탭과의 간격(빈 칸).
-    var dl = try buildPaneLabelDrawList(allocator, "build", 8, .default);
+    var dl = try buildPaneLabelDrawList(allocator, "build", 8, .default, .head);
     defer dl.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 8), dl.size.cols);
     try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
@@ -1174,18 +1228,146 @@ test "buildPaneLabelDrawList: 이름을 [1,cols-1)에 깔고 좌패딩·우간�
     try std.testing.expect(max_col <= 5); // col 6·7은 간격(빈 칸)
 
     // 좁으면(cols<3) 빈 DrawList(패딩+글자+간격 불가).
-    var tiny = try buildPaneLabelDrawList(allocator, "build", 2, .default);
+    var tiny = try buildPaneLabelDrawList(allocator, "build", 2, .default, .head);
     defer tiny.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), tiny.cells.len);
 
     // 긴 이름은 말줄임(U+2026)으로 끝난다.
-    var ell = try buildPaneLabelDrawList(allocator, "very-long-pane-name", 6, .default);
+    var ell = try buildPaneLabelDrawList(allocator, "very-long-pane-name", 6, .default, .head);
     defer ell.deinit(allocator);
     var has_ellipsis = false;
     for (ell.cells) |c| {
         if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
     }
     try std.testing.expect(has_ellipsis);
+}
+
+test "buildPaneLabelDrawList tail 앵커: 넘치면 선두를 …로 자르고 이름 끝(rename caret)을 보존한다" {
+    // pane/surface rename 중 편집 텍스트는 "이름|"처럼 caret('|')가 늘 끝에 온다. 세그먼트보다 길면 head 앵커는
+    // caret과 방금 친 글자를 오른쪽으로 잘라 안 보이게 했다(사용자 제보). tail 앵커는 선두를 "…"로 자르고 끝을
+    // 남겨 caret이 항상 보인다(입력창 scroll-to-caret). 이 회귀를 헤드리스로 잠근다.
+    const allocator = std.testing.allocator;
+    // cols=8 → 이름 영역 [1,7) = 6칸. "very-long-name|"(15칸)은 넘친다.
+    var dl = try buildPaneLabelDrawList(allocator, "very-long-name|", 8, .default, .tail);
+    defer dl.deinit(allocator);
+    var last_cp: u21 = 0;
+    var last_col: u16 = 0;
+    var lead_ellipsis = false;
+    for (dl.cells) |c| {
+        if (c.col >= last_col) {
+            last_col = c.col;
+            last_cp = c.codepoint;
+        }
+        if (c.col == 1 and c.codepoint == title_ellipsis_glyph) lead_ellipsis = true; // 선두 "…"는 좌패딩(col0) 뒤 col1
+    }
+    try std.testing.expectEqual(@as(u21, '|'), last_cp); // 문자열 끝(caret)이 보존됨 — head였다면 잘렸을 것
+    try std.testing.expect(lead_ellipsis); // 앞이 잘렸다는 선두 "…"
+
+    // head 앵커 대조: 같은 입력이면 caret이 잘려 마지막이 "…"(끝 보존 안 함).
+    var head = try buildPaneLabelDrawList(allocator, "very-long-name|", 8, .default, .head);
+    defer head.deinit(allocator);
+    var head_last_cp: u21 = 0;
+    var head_last_col: u16 = 0;
+    for (head.cells) |c| {
+        if (c.col >= head_last_col) {
+            head_last_col = c.col;
+            head_last_cp = c.codepoint;
+        }
+    }
+    try std.testing.expect(head_last_cp != '|'); // head는 끝을 못 보여줌(대조군)
+}
+
+test "buildPaneLabelDrawList tail 앵커: 정확한 열 배치(선두 … + 우측 tail) + 경계 넘침 없음" {
+    // tail 창(window) 수학을 열 단위로 못 박는다: 좌패딩(col0) 비움, 선두 "…"는 col1, tail은 col2부터 우측 끝까지,
+    // end_col(cols-1) 이상·col0엔 아무 셀도 없다. cols=8 → 이름 영역 [1,7)=6칸, lead 1 + tail 5.
+    const allocator = std.testing.allocator;
+    var dl = try buildPaneLabelDrawList(allocator, "abcdefghij|", 8, .default, .tail);
+    defer dl.deinit(allocator);
+    // 열→코드포인트 맵으로 정확히 검증.
+    var at: [8]?u21 = .{null} ** 8;
+    for (dl.cells) |c| {
+        try std.testing.expect(c.col >= 1 and c.col <= 6); // col0(좌패딩)·col7(=end_col 우간격) 비움 — 경계 넘침 없음
+        at[c.col] = c.codepoint;
+    }
+    try std.testing.expectEqual(@as(?u21, null), at[0]); // 좌패딩
+    try std.testing.expectEqual(@as(?u21, title_ellipsis_glyph), at[1]); // 선두 "…"
+    try std.testing.expectEqual(@as(?u21, 'g'), at[2]); // 앞 6글자("abcdef")를 버린 tail
+    try std.testing.expectEqual(@as(?u21, 'h'), at[3]);
+    try std.testing.expectEqual(@as(?u21, 'i'), at[4]);
+    try std.testing.expectEqual(@as(?u21, 'j'), at[5]);
+    try std.testing.expectEqual(@as(?u21, '|'), at[6]); // caret은 늘 우측 끝
+    try std.testing.expectEqual(@as(?u21, null), at[7]); // end_col 자리(우간격) 비움
+
+    // fits(안 넘침): tail이어도 선두 "…" 없이 좌측 정렬 그대로 — 짧은 이름에 헛 "…"를 붙이지 않는다.
+    var fits = try buildPaneLabelDrawList(allocator, "ab|", 8, .default, .tail);
+    defer fits.deinit(allocator);
+    var fits_has_ellipsis = false;
+    var fits_min_col: u16 = 999;
+    for (fits.cells) |c| {
+        if (c.codepoint == title_ellipsis_glyph) fits_has_ellipsis = true;
+        if (c.col < fits_min_col) fits_min_col = c.col;
+    }
+    try std.testing.expect(!fits_has_ellipsis); // 안 넘치면 말줄임 없음
+    try std.testing.expectEqual(@as(u16, 1), fits_min_col); // 좌패딩 뒤 col1부터
+
+    // narrow(가용 1칸): "…" 자리조차 없으면 생략하고 최소한 caret만 보인다.
+    var narrow = try buildPaneLabelDrawList(allocator, "abc|", 3, .default, .tail); // [1,2)=1칸
+    defer narrow.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), narrow.cells.len); // 딱 1칸
+    try std.testing.expectEqual(@as(u21, '|'), narrow.cells[0].codepoint); // caret 우선 표시
+    try std.testing.expectEqual(@as(u16, 1), narrow.cells[0].col);
+}
+
+test "buildPaneLabelDrawList tail 앵커: 한글(EAW 2칸)은 온전한 글자 단위로 tail을 남긴다(반쪽 없음)" {
+    // 조합/확정 한글은 셀 폭 2칸이다. tail 창을 코드포인트 폭(EAW)으로 재지 않고 바이트/칸을 섞으면 한글이 반쪽으로
+    // 잘리거나 caret 정렬이 어긋난다(과거 putUtf8 회귀와 같은 부류). tail이 폭 기준으로 온전한 한글만 남기는지 잠근다.
+    const allocator = std.testing.allocator;
+    // "가나다라마|" = 한글 5자(각 2칸=10) + caret 1칸 = 11칸. cols=8 → [1,7)=6칸(lead 1 + tail 5).
+    var dl = try buildPaneLabelDrawList(allocator, "가나다라마|", 8, .default, .tail);
+    defer dl.deinit(allocator);
+    var at: [8]?u21 = .{null} ** 8;
+    var hangul_w2 = false;
+    for (dl.cells) |c| {
+        try std.testing.expect(c.col >= 1 and c.col <= 6); // 경계 넘침 없음
+        at[c.col] = c.codepoint;
+        // 한글 음절(U+AC00~U+D7A3)은 반드시 width 2로 배치돼야 한다(반쪽 렌더 금지).
+        if (c.codepoint >= 0xAC00 and c.codepoint <= 0xD7A3) {
+            try std.testing.expectEqual(@as(u2, 2), c.width);
+            hangul_w2 = true;
+        }
+    }
+    try std.testing.expectEqual(@as(?u21, title_ellipsis_glyph), at[1]); // 선두 "…"
+    try std.testing.expect(hangul_w2); // 온전한 한글(width 2)이 tail에 남았다
+    try std.testing.expectEqual(@as(?u21, '|'), at[6]); // caret은 우측 끝(col6)
+    // tail 시작(col2)은 한글 '라'(온전한 글자) — 앞 3자("가나다")를 폭 단위로 버려 반쪽이 안 생겼다.
+    try std.testing.expectEqual(@as(?u21, '라'), at[2]);
+    try std.testing.expectEqual(@as(?u21, null), at[3]); // '라'가 2칸(col2~3) 점유 → col3엔 별도 셀 없음(연속칸)
+    try std.testing.expectEqual(@as(?u21, '마'), at[4]);
+}
+
+test "buildPaneTabBarDrawList: editing_tab 지정 탭만 tail 앵커로 caret(끝)을 보존한다" {
+    // Term 탭 rename 중 편집 탭(editing_tab)은 tail 앵커라 긴 이름이어도 끝의 caret('|')이 세그먼트에 남아야 한다.
+    // 나머지 탭은 head. editing_tab=null이면(대조) 같은 긴 이름이 head로 잘려 '|'이 사라진다.
+    const allocator = std.testing.allocator;
+    const titles = [_][]const u8{ "short", "renaming-a-really-long-title|" };
+
+    // 편집 탭=1 → 탭1은 tail. 어딘가에 '|'(caret)이 남는다.
+    var edited = try buildPaneTabBarDrawList(allocator, &titles, 24, .default, null, null, .default, 0, 0, 1);
+    defer edited.deinit(allocator);
+    var has_caret = false;
+    for (edited.cells) |c| {
+        if (c.codepoint == '|') has_caret = true;
+    }
+    try std.testing.expect(has_caret); // 편집 탭의 끝 caret 보존
+
+    // editing_tab=null(대조) → 탭1도 head라 긴 제목이 잘려 '|'이 없다.
+    var none = try buildPaneTabBarDrawList(allocator, &titles, 24, .default, null, null, .default, 0, 0, null);
+    defer none.deinit(allocator);
+    var none_caret = false;
+    for (none.cells) |c| {
+        if (c.codepoint == '|') none_caret = true;
+    }
+    try std.testing.expect(!none_caret); // head 앵커는 끝(caret)을 못 보여줌
 }
 
 test "buildPaneGripDrawList: grip 글리프 ⠿를 중앙 칸(cols/2)에 깔아 양쪽 패딩을 둔다" {
@@ -1217,7 +1399,7 @@ test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)
     const allocator = std.testing.allocator;
     // cols=20 → 탭 영역 17, "+"는 col 18. 좁은 바(cols=4 ≤ +zone+1)는 "+" 없음.
     const titles = [_][]const u8{"sh"};
-    var wide = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default, 0, 0);
+    var wide = try buildPaneTabBarDrawList(allocator, &titles, 20, .default, null, null, .default, 0, 0, null);
     defer wide.deinit(allocator);
     var wide_plus = false;
     for (wide.cells) |c| {
@@ -1225,7 +1407,7 @@ test "buildPaneTabBarDrawList reserves a right '+' zone (no '+' when too narrow)
     }
     try std.testing.expect(wide_plus);
 
-    var narrow = try buildPaneTabBarDrawList(allocator, &titles, 4, .default, null, null, .default, 0, 0);
+    var narrow = try buildPaneTabBarDrawList(allocator, &titles, 4, .default, null, null, .default, 0, 0, null);
     defer narrow.deinit(allocator);
     for (narrow.cells) |c| try std.testing.expect(c.codepoint != '+'); // 좁아서 "+" 없음
 }
@@ -1234,7 +1416,7 @@ test "buildPaneTabBarDrawList: fixed tab width (rich) — left-aligned, leaves e
     const allocator = std.testing.allocator;
     // cols=40, "+"zone 3 → tab_cols=37. fixed_w=16: 탭0 [0,16), 탭1 [16,32), 나머지 [32,37) 빈(균등이면 ~18씩 stretch).
     const titles = [_][]const u8{ "sh", "vim" };
-    var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, .default, null, null, .default, 16, 0);
+    var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, .default, null, null, .default, 16, 0, null);
     defer dl.deinit(allocator);
     // 탭1 'v'는 seg start(16) + 1칸 좌패딩 = col 17(고정폭이라 균등분할과 다른 위치 — stretch 안 함).
     var v_col: ?u16 = null;
@@ -1274,7 +1456,7 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
     const allocator = std.testing.allocator;
     // cols=5: 우측 패딩 1칸 예약 → 텍스트 폭은 cols-1=4. "abcdefg"는 4칸까지만(말줄임). 와이드 글자는 2칸 전진.
     const titles = [_][]const u8{ "abcdefg", "한A" };
-    var draw_list = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, null, null, null, .default);
+    var draw_list = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, null, null, null, .default, null);
     defer draw_list.deinit(allocator);
 
     var row0: usize = 0;
@@ -1299,7 +1481,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     // 사이드바: 우측 패딩 1칸 예약 → 텍스트 폭 cols-1=4. "abcdefg"(7) cols=5 → 'a','b','c','…'. 마지막 셀 = U+2026.
     {
         const titles = [_][]const u8{"abcdefg"};
-        var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, null, null, null, .default);
+        var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, null, null, null, .default, null);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 4), dl.cells.len);
         try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[3].codepoint); // 마지막 = …(col 3, col 4는 우측 패딩)
@@ -1309,7 +1491,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     // 텍스트 폭(cols-1=4)에 딱 맞으면 말줄임 없음.
     {
         const titles = [_][]const u8{"abcd"}; // 4칸 = cols-1(우측 패딩 예약 후 가용 폭)
-        var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, null, null, null, .default);
+        var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 5, .default, null, null, null, .default, null);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 4), dl.cells.len);
         for (dl.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
@@ -1317,7 +1499,7 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
     // pane 탭 바: 긴 제목도 세그먼트 한도에서 … . cols=11 → 탭 영역 8, 2탭 → tab_w=4, 탭 0 제목 칸 [1,4) = 3칸.
     {
         const titles = [_][]const u8{ "abcdef", "x" };
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 11, .default, null, null, .default, 0, 0);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 11, .default, null, null, .default, 0, 0, null);
         defer dl.deinit(allocator);
         var saw_ellipsis = false;
         for (dl.cells) |c| {
@@ -1339,7 +1521,7 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
     // 사이드바: active_row=1 → 행 1 글자만 bright + bold, 행 0은 dim + regular.
     {
         const titles = [_][]const u8{ "ab", "cd" };
-        var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, dim, null, null, 1, bright);
+        var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, dim, null, null, 1, bright, null);
         defer dl.deinit(allocator);
         for (dl.cells) |c| {
             const active = c.row == sidebarGlyphRow(1, 0, 1); // slot 1(활성) 1줄 행
@@ -1351,7 +1533,7 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
     // pane 탭 바: active_tab=1 → 탭 1(우측 세그먼트) 글자만 bright + bold. cols=20 → tab_w=8, 탭 0 [1,8), 탭 1 [9,16).
     {
         const titles = [_][]const u8{ "sh", "vim" };
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 20, dim, null, 1, bright, 0, 0);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 20, dim, null, 1, bright, 0, 0, null);
         defer dl.deinit(allocator);
         var saw_bright = false;
         var saw_dim = false;
@@ -1380,7 +1562,7 @@ test "scroll ‹/› highlight only the scrollable direction (boundary uses mute
     const titles = [_][]const u8{ "a", "b", "c" };
     // scroll=0(맨 왼쪽): ‹ 흐림(왼쪽 끝), › 강조(오른쪽 더 있음).
     {
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 0);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 0, null);
         defer dl.deinit(allocator);
         var saw_l = false;
         var saw_r = false;
@@ -1398,7 +1580,7 @@ test "scroll ‹/› highlight only the scrollable direction (boundary uses mute
     }
     // scroll=14(맨 오른쪽=max_scroll): ‹ 강조(왼쪽 더 있음), › 흐림(오른쪽 끝).
     {
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 14);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 14, null);
         defer dl.deinit(allocator);
         var saw_l = false;
         var saw_r = false;
@@ -1416,7 +1598,7 @@ test "scroll ‹/› highlight only the scrollable direction (boundary uses mute
     }
     // scroll=7(중간): 양방향 더 있음 → ‹·› 둘 다 강조.
     {
-        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 7);
+        var dl = try buildPaneTabBarDrawList(allocator, &titles, 40, dim, null, null, bright, 16, 7, null);
         defer dl.deinit(allocator);
         for (dl.cells) |c| {
             if (c.codepoint == '<' or c.codepoint == '>') try std.testing.expectEqual(bright, c.style.foreground);
@@ -1428,7 +1610,7 @@ test "buildSidebarDrawList adds a close glyph at the hovered row's right edge on
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "a", "b" };
     // 호버 슬롯 1 → ✕가 slot 1 이름줄(경로 없으니 single), col cols-2=8에 하나 추가된다.
-    var hovered = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, 1, null, null, .default);
+    var hovered = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, 1, null, null, .default, null);
     defer hovered.deinit(allocator);
     var close_count: usize = 0;
     for (hovered.cells) |c| {
@@ -1441,12 +1623,12 @@ test "buildSidebarDrawList adds a close glyph at the hovered row's right edge on
     try std.testing.expectEqual(@as(usize, 1), close_count);
 
     // close_row=null이면 ✕ 없음.
-    var none = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+    var none = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default, null);
     defer none.deinit(allocator);
     for (none.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
 
     // 범위 밖 close_row(탭 수 이상)는 무시 — ✕ 없음.
-    var oob = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, 5, null, null, .default);
+    var oob = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, 5, null, null, .default, null);
     defer oob.deinit(allocator);
     for (oob.cells) |c| try std.testing.expect(c.codepoint != sidebar_close_glyph);
 }
@@ -1457,7 +1639,7 @@ test "buildSidebarDrawList: pinned row draws the pin at the name line's right ed
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "alpha", "beta" };
     const pins = [_]bool{ true, false }; // 탭0만 고정
-    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &pins, 12, .default, null, null, null, .default);
+    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &pins, 12, .default, null, null, null, .default, null);
     defer dl.deinit(allocator);
 
     var pin_count: usize = 0;
@@ -1482,7 +1664,7 @@ test "buildSidebarDrawList: pinned + hovered row places the pin left of the clos
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{"alpha"};
     const pins = [_]bool{true};
-    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &pins, 12, .default, 0, null, null, .default); // close_row=0(호버)
+    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &pins, 12, .default, 0, null, null, .default, null); // close_row=0(호버)
     defer dl.deinit(allocator);
     var pin_col: ?u16 = null;
     var close_col: ?u16 = null;
@@ -1500,7 +1682,7 @@ test "buildSidebarDrawList: pinned long name is ellipsized before the pin" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{"abcdefghijklmnopqrst"}; // 폭(12)을 넘는 긴 이름
     const pins = [_]bool{true};
-    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &pins, 12, .default, null, null, null, .default);
+    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &pins, 12, .default, null, null, null, .default, null);
     defer dl.deinit(allocator);
     var has_ellipsis = false;
     for (dl.cells) |c| {
@@ -1511,10 +1693,35 @@ test "buildSidebarDrawList: pinned long name is ellipsized before the pin" {
     try std.testing.expect(has_ellipsis); // 잘림 표시 존재
 }
 
+test "buildSidebarDrawList: editing_row 이름줄만 tail 앵커로 caret(끝)을 보존한다" {
+    // 워크스페이스 카드·그룹 헤더 rename도 편집 텍스트가 "이름|"이라 caret이 끝에 온다. 사이드바 폭보다 길면
+    // head는 끝(caret)을 잘라 안 보였다 — editing_row 지정 슬롯의 **이름줄(j==0)만** tail 앵커로 끝을 보존한다.
+    const allocator = std.testing.allocator;
+    const names = [_][]const u8{ "short-a", "renaming-a-very-long-workspace|" };
+
+    // editing_row=1 → 슬롯1 이름줄은 tail. 어딘가에 '|'(caret)이 남는다.
+    var edited = try buildSidebarDrawList(allocator, &names, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 12, .default, null, null, null, .default, 1);
+    defer edited.deinit(allocator);
+    var has_caret = false;
+    for (edited.cells) |c| {
+        if (c.codepoint == '|') has_caret = true;
+    }
+    try std.testing.expect(has_caret); // 편집 슬롯의 끝 caret 보존
+
+    // editing_row=null(대조) → 슬롯1도 head라 긴 이름이 잘려 '|'이 없다.
+    var none = try buildSidebarDrawList(allocator, &names, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 12, .default, null, null, null, .default, null);
+    defer none.deinit(allocator);
+    var none_caret = false;
+    for (none.cells) |c| {
+        if (c.codepoint == '|') none_caret = true;
+    }
+    try std.testing.expect(!none_caret); // head 앵커는 끝(caret)을 못 보여줌
+}
+
 test "buildSidebarDrawList draws a '+' button row below the tabs when plus_row is set" {
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{ "sh", "vim" }; // 탭 2개 → "+"는 slot 2
-    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, titles.len, null, .default);
+    var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, titles.len, null, .default, null);
     defer dl.deinit(allocator);
     // size.rows = "+" 슬롯(slot 2, single) 행 + 1.
     try std.testing.expectEqual(sidebarGlyphRow(2, 0, 1) + 1, dl.size.rows);
@@ -1528,7 +1735,7 @@ test "buildSidebarDrawList draws a '+' button row below the tabs when plus_row i
     }
     try std.testing.expectEqual(@as(usize, 1), plus_count);
     // plus_row=null이면 "+" 없음, rows = 마지막 탭(slot 1, single) 행 + 1.
-    var no_plus = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+    var no_plus = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default, null);
     defer no_plus.deinit(allocator);
     try std.testing.expectEqual(sidebarGlyphRow(1, 0, 1) + 1, no_plus.size.rows);
     for (no_plus.cells) |c| try std.testing.expect(c.codepoint != '+');
@@ -1573,7 +1780,7 @@ test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells 
     // 합성 DrawList가 glyph까지 닿는지 고정한다 — 실제 CoreText 없이 연결 계약만 검증.
     const allocator = std.testing.allocator;
     const titles = [_][]const u8{"ab"};
-    const draw_list = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+    const draw_list = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default, null);
 
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
@@ -1617,7 +1824,7 @@ test "buildFromDrawList interns faces into the shared RendererState registry (Fo
     // Frame 1: ASCII 제목 → fake shaper가 "Menlo-Regular"를 공유 registry에 intern.
     {
         const titles = [_][]const u8{"a"};
-        const dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+        const dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default, null);
         var f = try builder.buildFromDrawList(allocator, dl, &renderer_state);
         defer f.deinit(allocator);
     }
@@ -1629,7 +1836,7 @@ test "buildFromDrawList interns faces into the shared RendererState registry (Fo
     // 등록된 채 그대로 남아(count가 1→2로 누적, 리셋 아님) registry가 frame을 넘어 살아있음을 증명한다.
     {
         const titles = [_][]const u8{"가"};
-        const dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default);
+        const dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 10, .default, null, null, null, .default, null);
         var f = try builder.buildFromDrawList(allocator, dl, &renderer_state);
         defer f.deinit(allocator);
     }

@@ -75,6 +75,54 @@ test "truncateToCols: EAW 폭 기준 자르기 + 말줄임" {
     }
 }
 
+/// `bytes`의 **뒤쪽**(caret 쪽)을 표시 폭 `max_cols` 안에 맞춘다 — truncateToCols(선두 고정)의 **말미 고정 짝**.
+/// 넘치면 앞 코드포인트를 EAW 폭 기준으로 버려 남은 **뒤쪽** 표시폭이 max_cols 이하가 되게 하고 `.truncated=true`를
+/// 돌려준다(호출자가 선두 "…" 1칸을 따로 그림 — 잘림 표시 자리를 미리 빼려면 max_cols-1을 넘긴다). 안 넘치면 원본
+/// 슬라이스 + `.truncated=false`. **무 alloc**(원본의 뒤쪽 부분 슬라이스만) — caretRect(무 arena)도 그대로 쓴다.
+/// 단일 줄 편집 입력(find·palette·사이드바 검색)이 caret(문자열 끝)를 따라 가로 스크롤하게 하는 tail 창의 단일 출처.
+pub fn tailWindow(bytes: []const u8, max_cols: u32) struct { text: []const u8, truncated: bool } {
+    if (displayCols(bytes) <= max_cols) return .{ .text = bytes, .truncated = false };
+    const utf8 = std.unicode.Utf8View.init(bytes) catch return .{ .text = bytes, .truncated = false }; // 손상 UTF-8은 안 자름(원본)
+    // 앞에서부터 코드포인트를 버려 남은 뒤쪽 표시폭이 max_cols 이하가 되는 첫 시작 바이트를 찾는다(displayCols와 같은 셈법).
+    var remaining = displayCols(bytes);
+    var it = utf8.iterator();
+    var start: usize = 0;
+    while (remaining > max_cols) {
+        const cp = it.nextCodepoint() orelse break;
+        remaining -= @max(1, width.cellWidth(cp));
+        start = it.i; // 이 코드포인트 끝(= 다음 시작) — 여기부터가 보이는 tail
+    }
+    return .{ .text = bytes[start..], .truncated = true };
+}
+
+test "tailWindow: 뒤쪽을 폭 안에 남기고(무 alloc) 앞이 잘리면 truncated" {
+    // 안 넘치면 원본 그대로 + truncated=false.
+    {
+        const w = tailWindow("abc", 5);
+        try std.testing.expectEqualStrings("abc", w.text);
+        try std.testing.expect(!w.truncated);
+    }
+    // 넘치면 뒤쪽 max_cols칸만(앞을 버림) + truncated=true. "abcdef" max 3 → "def".
+    {
+        const w = tailWindow("abcdef", 3);
+        try std.testing.expectEqualStrings("def", w.text);
+        try std.testing.expect(w.truncated);
+        try std.testing.expect(displayCols(w.text) <= 3);
+    }
+    // 한글(2칸): "한국어"(6칸) max 3 → 뒤에서 "어"(2칸)만(국 넣으면 4칸 초과), 코드포인트 경계 유지.
+    {
+        const w = tailWindow("한국어", 3);
+        try std.testing.expectEqualStrings("어", w.text);
+        try std.testing.expect(w.truncated);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(w.text)); // 반쪽 안 남김
+    }
+    // 한글 max 4 → "국어"(4칸) 딱.
+    {
+        const w = tailWindow("한국어", 4);
+        try std.testing.expectEqualStrings("국어", w.text);
+    }
+}
+
 /// 목록 오버레이(palette·settings·notifications)의 **보이는-윈도우 시작 인덱스** 단일 출처 — selected가 [start,
 /// start+win) 안에 들게 하되 prev_start(이전 스크롤 위치)를 최대한 존중한다(휠 스크롤 보존). total ≤ win이면 0,
 /// 결과는 [0, total-win]로 clamp. palette·settings는 prev_start=0(selected 기준 재파생), notifications는 scroll_offset을
@@ -159,6 +207,68 @@ pub const OverlayInput = struct {
         return displayCols(self.query.items);
     }
 };
+
+/// find·palette 입력줄의 표시 배치(단일 출처) — `view`의 텍스트 run 배치와 `caretRect`가 **공유**해 caret가 그려진
+/// 글자와 어긋나지 않는다. `text_cols`=프롬프트+입력+caret이 들어갈 수 있는 총 칸(패널 폭에서 카운터 등 우측 예약을
+/// 뺀 값, 호출자가 계산). content(query+preedit)가 그 안에 다 들어가면 넘침 아님(기존 좌측 정렬 배치 그대로 — caret=
+/// prompt_cols+queryCols). 넘치면 **tail 창**(선두 "…")으로 오른쪽 정렬해 caret(= query 끝)을 시야에 유지한다: 긴 검색어를
+/// 칠 때 caret과 방금 친 글자가 오른쪽으로 잘려 안 보이던 문제를 없앤다. 넘침이면 preedit(활성 조합)은 통째 보존하고
+/// query만 tail로 줄인다(극단적으로 preedit이 예산을 넘으면 preedit도 tail). 반환 슬라이스는 원본 부분 슬라이스라 무 alloc
+/// — caretRect(무 arena)도 그대로 쓴다. 프롬프트 폭이 달라도(find "Find: "=6, palette "> "=2) 이 한 함수를 공유한다.
+pub const InputLineView = struct {
+    truncated: bool, // 선두 "…"(1칸)를 그릴지 — 앞이 잘렸음(호출자가 프롬프트 뒤에 "…" run을 넣는다)
+    query: []const u8, // 표시할 query(넘침이면 뒤쪽 슬라이스, 아니면 원본)
+    preedit: []const u8, // 표시할 preedit(보통 원본, 극단 넘침일 때만 tail)
+    caret_col: u32, // 패널(프롬프트 원점) 기준 caret 절대 col — query 끝(조합 글자는 그 위에 겹침)
+};
+
+pub fn inputLineView(in: *const OverlayInput, prompt_cols: u32, text_cols: u32) InputLineView {
+    const q_cols = displayCols(in.query.items);
+    const p_cols = displayCols(in.preedit.items);
+    // 프롬프트+content+caret(1칸)이 다 들어가면 넘침 아님 — 기존 배치 그대로(caret = 프롬프트 + query 폭).
+    const avail_content = text_cols -| prompt_cols -| 1; // 우측 caret 1칸 예약
+    if (q_cols + p_cols <= avail_content) {
+        return .{ .truncated = false, .query = in.query.items, .preedit = in.preedit.items, .caret_col = prompt_cols + q_cols };
+    }
+    // 넘침: 선두 "…"(1칸) 뒤에 뒤쪽만. preedit(활성 조합)을 우선 보존하고 남은 예산으로 query tail을 남긴다.
+    const budget = avail_content -| 1; // "…" 1칸
+    if (p_cols >= budget) {
+        // 조합 텍스트가 예산을 다 먹는 극단(패널보다 긴 조합) — query는 숨기고 preedit tail만, caret은 그 끝.
+        const pw = tailWindow(in.preedit.items, budget);
+        return .{ .truncated = true, .query = "", .preedit = pw.text, .caret_col = prompt_cols + 1 + displayCols(pw.text) };
+    }
+    const qw = tailWindow(in.query.items, budget - p_cols);
+    // caret = "…"(1) 뒤 query tail 끝 = query 끝(조합 글자는 그 위/뒤에 겹쳐 그려진다 — 기존 규약 보존).
+    return .{ .truncated = true, .query = qw.text, .preedit = in.preedit.items, .caret_col = prompt_cols + 1 + displayCols(qw.text) };
+}
+
+test "inputLineView: 비넘침은 기존 배치 유지, 넘치면 tail 창 + caret 시야 유지" {
+    const a = std.testing.allocator;
+    var in: OverlayInput = .{};
+    defer in.deinit(a);
+
+    // 비넘침: 짧은 query → 잘림 없음, caret = prompt_cols + queryCols(기존과 동일).
+    try in.appendChar(a, 'a');
+    try in.appendChar(a, 'b');
+    {
+        const v = inputLineView(&in, 6, 40); // prompt 6, 넉넉한 40칸
+        try std.testing.expect(!v.truncated);
+        try std.testing.expectEqualStrings("ab", v.query);
+        try std.testing.expectEqual(@as(u32, 8), v.caret_col); // 6 + 2
+    }
+
+    // 넘침: 좁은 text_cols → tail 창. caret_col은 text_cols 안(패널 밖으로 안 나감).
+    in.clear();
+    for ("abcdefghij") |c| try in.appendChar(a, c); // 10칸
+    {
+        const v = inputLineView(&in, 6, 12); // prompt 6, text 12 → avail_content=12-6-1=5, budget=4
+        try std.testing.expect(v.truncated);
+        try std.testing.expect(displayCols(v.query) <= 4); // query tail은 예산(4) 이하
+        try std.testing.expectEqualStrings("ghij", v.query); // 뒤 4글자
+        try std.testing.expect(v.caret_col < 12); // caret은 text 영역 안 → 그려짐(숨지 않음)
+        try std.testing.expectEqual(@as(u32, 11), v.caret_col); // 6 + 1(…) + 4(tail)
+    }
+}
 
 pub const PanelLayout = struct { x: i32, y: i32, panel_cols: u32, cw: u32, ch: u32 };
 

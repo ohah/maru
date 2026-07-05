@@ -2126,8 +2126,18 @@ pub const AppSession = struct {
                 // 옛 버그(조사 확인): idx는 원본 탭 인덱스인데 slotTop에 슬롯으로 넣어 검색 필터 활성 시 표시 슬롯과
                 // 어긋났다. displaySlotOf로 원본 탭→표시 row로 바꿔 교정하고, 가변 높이 rowTop을 쓴다. 필터로 숨었으면
                 // (rename 중엔 드묾) null → 터미널 커서 폴백.
-                const slot_row = self.displaySlotOf(idx) orelse return null;
-                const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, slot_row, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+                // SG8d: 카드 드래그 프리뷰 중이면 렌더가 preview_rows를 쓰므로 caret도 그 도메인에서 이 탭 카드의 표시 row를
+                // 찾아 rowTop을 잰다(rename↔카드 드래그는 사실상 배타지만, 공존해도 caret이 그려진 카드와 어긋나지 않게).
+                // 비드래그면 sidebarRenderRows()==sidebar_rows라 displaySlotOf와 동일 결과(회귀 없음).
+                const rrows = self.sidebarRenderRows();
+                const slot_row = blk_sr: {
+                    for (rrows, 0..) |r, s| switch (r) {
+                        .card => |c| if (c.tab == idx) break :blk_sr s,
+                        .group_header => {},
+                    };
+                    break :blk_sr (self.displaySlotOf(idx) orelse return null);
+                };
+                const slot_top = chrome.components.sidebar.rowTop(rrows, slot_row, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                 const block_off: i64 = @intCast((slot_h -| sidebarBlockHeight(line_count, ch)) / 2); // 줄 스텝 여유와 정합(fillSidebarGlyphPyTop 공유). 이름줄=line 0이라 +block_off만.
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{
@@ -2174,7 +2184,9 @@ pub const AppSession = struct {
                 } else return null;
                 var slot_row: ?usize = null;
                 var hdr_depth: u8 = 1;
-                for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                // SG8d: 렌더 도메인(카드 드래그 중=preview_rows)에서 헤더 표시 row를 찾아 caret을 그려진 헤더와 정합시킨다.
+                const rrows = self.sidebarRenderRows();
+                for (rrows, 0..) |row, s| switch (row) {
                     .group_header => |gh| if (gh.tab == idx) {
                         slot_row = s;
                         hdr_depth = gh.depth;
@@ -2200,7 +2212,7 @@ pub const AppSession = struct {
                 // 사이드바 밖 터미널 위로 안 뜨게 한다(.workspace와 같은 규율 + main #5의 indent_cols 항 보존).
                 const full_cols: u32 = self.sidebar_width_px / cw;
                 const caret_col: u32 = @min(indent_cols + hindent_cols + 2 + qcols, full_cols -| 2);
-                const slot_top = chrome.components.sidebar.rowTop(self.sidebar_rows.items, sr, self.sidebar_header_height_px, slot_h, hdr_h, self.sidebar_scroll_offset_px);
+                const slot_top = chrome.components.sidebar.rowTop(rrows, sr, self.sidebar_header_height_px, slot_h, hdr_h, self.sidebar_scroll_offset_px);
                 const block_off: i64 = @intCast((hdr_h -| ch) / 2); // 헤더 1줄 세로 중앙
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{ .x = @intCast(caret_col * cw), .y = @intCast(caret_y), .w = @intCast(cw), .h = @intCast(ch) };
@@ -5122,6 +5134,30 @@ pub const AppSession = struct {
                     _ = self.moveGroupNesting(1, plan.insert_before, plan.target_depth);
                 }
                 self.rebuildSidebar() catch {};
+            }
+        }
+        // MARU_FORCE_GROUP_DRAGGHOST=1 — 첫 frame에 **카드를 접힌 그룹으로 드래그 중인 프리뷰 상태**(SG8d 고스트)를 강제해
+        // 헤드리스 스크린샷으로 시각 확인한다: 최상위 카드 t0(그대로) + 접힌 그룹 A(헤더가 펼침으로 flip) + **반투명 고스트
+        // 카드 t1(삽입선과 함께)**이 그룹 A 안에 떠 "접힌 그룹에 넣어도 고스트가 안 사라짐"을 보인다(§9 SG8 핵심 UX). 라이브
+        // 드래그가 아니라 refreshDragPreview로 프리뷰 상태만 세우고 놔둬(up 없음) 첫 frame을 캡처한다. env-gate라 일반 실행 영향 없음.
+        if (std.c.getenv("MARU_FORCE_GROUP_DRAGGHOST") != null) {
+            var made: usize = 0;
+            while (made < 3) : (made += 1) _ = self.newTab() catch {}; // [t0..t3]
+            if (self.tabs.items.len >= 4) {
+                // t0·t1 최상위, A=[t2,t3](마커 t2, depth1) 접힘. drag t1 → 접힌 A 안(§9 SG8 접힌 그룹 드롭).
+                self.createGroupForTab(self.tabs.items[2]); // 그룹 A(마커 index2) — t2·t3 소속
+                self.tabs.items[2].group_collapsed = true; // 접힘(헤더만, t3 숨김)
+                self.recomputeVisibleTabs(); // rows: [card t0(0), card t1(1), header A collapsed(2)]
+                // hit-test: t1(origin=1)을 접힌 A 헤더(row2)에 드롭 → 그룹 끝 자리(sidebarGroupDropTargetTab). 그 plan을 프리뷰.
+                const raw_row: usize = 2; // 접힌 A 헤더 표시 row
+                if (self.sidebarGroupDropTargetTab(raw_row, 1)) |target_tab| {
+                    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                    defer arena_state.deinit();
+                    self.sidebar_drag_active = true;
+                    self.sidebar_drag_index = 1;
+                    self.refreshDragPreview(1, .{ .card = .{ .target_tab = target_tab } }, 0, arena_state.allocator()) catch {};
+                }
+                self.rebuildSidebar() catch {}; // 렌더가 preview_rows로 고스트+삽입선을 그린다
             }
         }
         // MARU_FORCE_RIGHT_CLICK=1 — 첫 frame에 터미널 본문 우클릭을 시뮬레이트해 input.right-click=menu의 복사/붙여넣기
@@ -8579,6 +8615,7 @@ pub const AppSession = struct {
         if (kind == 4) {
             if (self.renameTargetAt(x_px, y_px)) |target| {
                 self.sidebar_drag_active = false;
+                self.clearSidebarDragPreview(); // SG8d: 카드 드래그 고스트 프리뷰 잔류 방지(더블클릭 rename은 드래그 아님)
                 self.sidebar_group_drag_armed = false; // 그룹 헤더 드래그 후보도 무장 해제(SG5-1 — 더블클릭 rename은 드래그 아님)
                 self.sidebar_group_drag_active = false;
                 self.sidebar_drop_slot = null; // 사이드바 카드 드래그 하이라이트도 무장 해제(SG4)
@@ -8595,35 +8632,48 @@ pub const AppSession = struct {
         if (self.sidebar_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2 and self.sidebar_drag_index < self.tabs.items.len) {
                 if (self.tabs.items[self.sidebar_drag_index].group_start == null) {
-                    // 마커 없는 카드 = SG4 넣기/빼기. dragTargetSlot은 **표시 row 인덱스**(그룹 헤더 포함 가능)를 돌려준다.
-                    // sidebarGroupDropTargetTab이 그 row를 moveTab 목표 탭으로 번역한다(카드 row는 그 자리, 펼친 헤더는 그룹
-                    // 최상단, 접힌 헤더는 그룹 끝; docs/sidebar-groups.md §10). 위치 파생이라 옮긴 뒤 소속은 재투영이 자동 계산.
+                    // 마커 없는 카드 = SG4 넣기/빼기. **SG8d 고스트 프리뷰**: 라이브 moveTab 커밋 대신 **비커밋 프리뷰**를
+                    // 재투영한다(docs/sidebar-groups.md §9 SG8). hit-test는 **원본 sidebar_rows**(불변)로 드롭 목표 탭을
+                    // 계산하고(sidebarGroupDropTargetTab — 카드 row=그 자리, 펼친 헤더=그룹 최상단, 접힌 헤더=그룹 끝),
+                    // 그 plan을 refreshDragPreview에 넘겨 sidebar_preview_rows에 고스트를 투영한다(self.tabs 불변). 렌더는
+                    // sidebarRenderRows()=preview_rows로 반투명 고스트+삽입선을 그리고, up이 이 마지막 plan을 정확히 1회
+                    // 커밋한다. self.tabs가 불변이라 sidebar_drag_index(=origin)도 드래그 내내 안정(옛 landed 팔로우 불필요).
                     const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
-                    // 드롭 타겟 하이라이트(어느 그룹/위치에 들어갈지) — 커서 아래 row. 아래 moveTab의 rebuildSidebar가
-                    // 이 값으로 .drop_zone 밴드를 그리도록 **먼저** 세팅한다.
-                    const new_drop: ?usize = if (raw_row < self.sidebar_rows.items.len) raw_row else null;
-                    const drop_changed = !usizeOptEql(self.sidebar_drop_slot, new_drop);
-                    self.sidebar_drop_slot = new_drop;
-                    var reordered = false;
-                    if (self.sidebarGroupDropTargetTab(raw_row, self.sidebar_drag_index)) |target_tab| {
-                        const before = self.sidebar_drag_index;
-                        const landed = self.moveTab(before, target_tab); // 재정렬 시 rebuildSidebar 내부 호출
-                        reordered = landed != before;
-                        self.sidebar_drag_index = landed; // 이동을 따라가 다음 drag 프레임 기준을 갱신
-                    }
-                    // 이동은 없고 하이라이트 row만 바뀌면(예: 접힌 헤더 위에서 이미 그룹 끝에 안착) 밴드만 재빌드한다.
-                    if (drop_changed and !reordered) {
-                        self.rebuildSidebar() catch {};
-                        self.metal_dirty = true;
-                    }
+                    const origin = self.sidebar_drag_index;
+                    const plan: DropPlan = if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
+                        .{ .card = .{ .target_tab = target_tab } }
+                    else
+                        .none; // 유효 드롭 위치 없음(범위 밖·마커) → 제자리 프리뷰(고스트 없음)
+                    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                    defer arena_state.deinit();
+                    self.refreshDragPreview(origin, plan, y_px, arena_state.allocator()) catch {};
+                    // 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를 주므로 세팅하지 않는다(고스트+삽입선이 대체, 위 rebuild의
+                    // drop_slot 게이트도 프리뷰 중 null). 매 프레임 재투영이 필요하므로 rebuild + dirty.
+                    self.rebuildSidebar() catch {};
+                    self.metal_dirty = true;
                 } else {
                     // 마커 탭(group_start!=null) 카드 드래그 = **그룹 통째 이동(SG5-1)**. 마커는 group_start를 든 그 탭이라
                     // 단독으로 못 옮긴다(옮기면 그룹이 딸려 온다) — 그룹 구간 [M,j)를 하나의 블록으로 재정렬한다(groupDragFrame).
                     // 헤더 드래그(threshold 게이트)와 같은 프리미티브를 공유하며, 카드 드래그는 arm 시 이미 down에서 시작이라 별도 threshold 없음.
+                    // **SG8d 범위 밖**: 그룹 드래그 고스트는 SG8e — 여기선 SG5-1 라이브 재배치 그대로(카드 드래그만 고스트 전환).
                     self.sidebar_drag_index = self.groupDragFrame(self.sidebar_drag_index, y_px);
                 }
             } else if (kind == 3) {
                 self.sidebar_drag_active = false; // up: 드래그 종료
+                // SG8d 확정 — 카드 드래그 프리뷰가 있으면 **마지막 plan**을 실제 move로 정확히 1회 커밋한다(재계산 금지 —
+                // up-시점 재계산은 타이밍 divergence). 프리뷰를 먼저 비워 moveTab 내부 rebuild가 원본(preview=null) 레이아웃으로
+                // 복귀하고, 그 위에 확정된 순서가 반영된다. plan==none이면 제자리(고스트만 제거).
+                if (self.sidebar_drag_preview) |dp| {
+                    const plan = dp.plan;
+                    const origin = dp.origin;
+                    self.clearSidebarDragPreview();
+                    switch (plan) {
+                        .card => |c| _ = self.moveTab(origin, c.target_tab), // rebuildSidebar 내부 호출(고스트 제거 + 확정 순서)
+                        else => self.rebuildSidebar() catch {}, // none: 제자리 — 고스트만 제거(원본 복귀). group_*는 SG8e(카드 경로엔 안 옴)
+                    }
+                    self.metal_dirty = true;
+                }
+                // 그룹 드래그(SG5-1 라이브, 마커 카드 경로)의 드롭 하이라이트 해제 — 카드 드래그는 drop_slot을 안 써 no-op.
                 if (self.sidebar_drop_slot != null) {
                     self.sidebar_drop_slot = null; // 드롭 타겟 하이라이트 해제
                     self.rebuildSidebar() catch {}; // .drop_zone 밴드 제거
@@ -13109,6 +13159,22 @@ pub const AppSession = struct {
         return a.? == b.?;
     }
 
+    /// SG8d — 렌더가 소비하는 표시 행(docs/sidebar-groups.md §9 SG8, 렌더/hit-test 도메인 분리). **카드 드래그 프리뷰**
+    /// 중(sidebar_drag_preview!=null)엔 고스트를 담은 `sidebar_preview_rows`를, 아니면 원본 `sidebar_rows`를 돌려준다.
+    /// hit-test(slotAt·dragTargetSlot·visibleTab·sidebarGroupDropTargetTab)는 **항상 원본 sidebar_rows**를 봐 드래그 중
+    /// self.tabs·plan 계산 기준이 불변이라 yo-yo가 원천 차단된다 — 오직 렌더 소비자(view·glyph·py_top·tint/accent·⌘배지)만
+    /// 이 헬퍼로 preview_rows를 본다. move(순열) 모델이라 두 배열 길이가 같아 스크롤 높이·정합이 흔들리지 않는다.
+    fn sidebarRenderRows(self: *const AppSession) []const chrome.components.sidebar.Row {
+        return if (self.sidebar_drag_preview != null) self.sidebar_preview_rows.items else self.sidebar_rows.items;
+    }
+
+    /// 카드 드래그 프리뷰 정리(up 확정·드래그 취소·teardown 공통) — 고스트 상태와 투영 버퍼를 비운다. 이후 rebuild가
+    /// sidebarRenderRows()로 원본 sidebar_rows 렌더에 복귀한다(preview=null이면 원본을 돌려줌).
+    fn clearSidebarDragPreview(self: *AppSession) void {
+        self.sidebar_drag_preview = null;
+        self.sidebar_preview_rows.clearRetainingCapacity();
+    }
+
     /// 세로 사이드바 셀(탭 엔트리 밴드)을 다시 만든다 — 활성 탭 행에 하이라이트 밴드, 그리고 호버 슬롯이
     /// 활성과 다르면 그 행에 (더 약한) 호버 밴드를 emit한다. 탭 i는 행 i에 대응한다(한 탭=한 슬롯). 제목
     /// glyph는 여기서 안 만든다(tick의 제목 패스가 따로 더해 metal_buffer가 밴드와 머지). 사이드바가
@@ -13125,10 +13191,15 @@ pub const AppSession = struct {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const rows = self.sidebar_rows.items; // recomputeVisibleTabs(위)가 이미 채운 표시 행 — 별도 arena 빌드 불필요
+        // SG8d: 렌더는 sidebarRenderRows()(카드 드래그 중=고스트 포함 preview_rows, 아니면 원본 sidebar_rows)를 본다.
+        // recomputeVisibleTabs(위)가 sidebar_rows를 채우고(hit-test 도메인), refreshDragPreview가 preview_rows를 채운다.
+        const rows = self.sidebarRenderRows();
         // 드롭 타겟 하이라이트 슬롯: pane grip 드래그(pane_drop_slot)와 사이드바 카드 드래그(sidebar_drop_slot, SG4)는
-        // 상호배타라 한쪽만 non-null. view·per-tab tint(is_drop)가 같은 값을 써 밴드/tint 정합.
-        const drop_slot = self.pane_drop_slot orelse self.sidebar_drop_slot;
+        // 상호배타라 한쪽만 non-null. view·per-tab tint(is_drop)가 같은 값을 써 밴드/tint 정합. **SG8d**: 카드 드래그
+        // 프리뷰 중엔 원본-도메인 sidebar_drop_slot을 view에 넘기지 않는다(고스트+삽입선이 대체) — preview_rows 렌더에
+        // 원본 인덱스 drop_slot을 얹으면 엉뚱한 row가 .drop_zone으로 오강조된다(적대검증 지적). 그룹 드래그(SG5-1 라이브)는
+        // 프리뷰가 없어 그대로 sidebar_drop_slot을 쓴다.
+        const drop_slot = if (self.sidebar_drag_preview != null) null else (self.pane_drop_slot orelse self.sidebar_drop_slot);
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
         chrome.components.sidebar.view(rows, self.hovered_slot, drop_slot, self.buildChromeProps(), arena, &ops) catch return;
         self.lowerSidebar(ops.items);
@@ -13200,7 +13271,7 @@ pub const AppSession = struct {
         // 먼저 내므로(§6·연속 파티션), 헤더 row를 지날 때 갱신해 두면 이후 카드 막대에 그 색을 실을 수 있다(위치 파생
         // 동형 — 카드에 색을 저장하지 않고 순회 중 "위 마커의 색"을 따른다). 최상위 카드는 첫 헤더 이전이라 0으로 유지된다.
         var current_group_color: u32 = 0;
-        if (slot_h > 0 and self.sidebar_width_px > 0) for (self.sidebar_rows.items, 0..) |row, i| {
+        if (slot_h > 0 and self.sidebar_width_px > 0) for (rows, 0..) |row, i| {
             const orig = switch (row) {
                 .card => |c| c.tab,
                 .group_header => |h| {
@@ -13210,13 +13281,18 @@ pub const AppSession = struct {
                     continue;
                 },
             };
+            // SG8d: 고스트 카드(preview_rows[ghost_lo,hi))는 아래 반투명 밴드+삽입선으로만 표시하고 per-card 배경 tint·
+            // 불투명 accent 막대는 생략한다 — 불투명 막대가 "떠 있는" 반투명 고스트를 깨뜨리기 때문. current_group_color
+            // 추적은 헤더 branch에서만 갱신되므로 카드 skip이 소속 색 추적을 깨지 않는다.
+            const is_ghost = if (self.sidebar_drag_preview) |dp| (i >= dp.ghost_lo and i < dp.ghost_hi) else false;
+            if (is_ghost) continue;
             const tab = self.tabs.items[orig]; // 표시 슬롯 i → 원본 탭(검색 필터)
             // 가변 높이(code-review #4): 카드 절대 y를 i*slot_h 대신 rowTop 누적으로(앞선 그룹 헤더는 header_row_h만
             // 차지). scroll=0으로 넘겨 sidebarScrollClipQuad가 뺀다(이중 차감 방지). 헤더 row는 위에서 continue라 여긴
             // 카드만 — 카드만이면 rowTop==i*slot_h+header라 동작 보존. card_h도 rowHeight로(카드=slot_h).
-            const slot_abs_y: f32 = @floatFromInt(chrome.components.sidebar.rowTop(self.sidebar_rows.items, i, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
+            const slot_abs_y: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, i, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
             const card_top = slot_abs_y + gap; // 카드 rect = 슬롯 사방 card_gap inset(chrome bandFill과 동일)
-            const card_h = @as(f32, @floatFromInt(chrome.components.sidebar.rowHeight(self.sidebar_rows.items[i], slot_h, self.sidebar_header_row_h_px))) - 2.0 * gap;
+            const card_h = @as(f32, @floatFromInt(chrome.components.sidebar.rowHeight(rows[i], slot_h, self.sidebar_header_row_h_px))) - 2.0 * gap;
             // ① 배경 tint — **밴드 없는 idle 슬롯에만** 오버레이 quad. 활성/호버/드롭 슬롯은 lowerSidebar가 밴드 색에
             // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(gap inset)·둥근 모서리를 밴드와 맞춰
             // rich에서 카드 모양대로 보이게(전폭 직사각 bleed 방지) — tui(gap=0·radius=0)면 전폭·직각(기존 동일).
@@ -13258,6 +13334,43 @@ pub const AppSession = struct {
                 }
             }
         };
+        // SG8d: 카드 드래그 고스트 — preview_rows[ghost_lo,hi) 구간에 (1) 반투명 밴드(카드 rect처럼 gap inset·둥근,
+        // "떠 있는" 카드 느낌)와 (2) 상단 경계 삽입선(accent 색, 브라우저 탭 드래그식 드롭 위치 지시자)을 얹는다. rowTop은
+        // rows(=preview_rows)와 같은 도메인이라 위치가 정합하고, hit-test·plan은 원본 sidebar_rows(불변)라 무관하다.
+        // 고스트 glyph는 buildSidebarTitleDrawList가 muted 색으로 dim해 밴드와 함께 "고스트"로 읽힌다.
+        if (self.sidebar_drag_preview) |dp| {
+            if (dp.ghost_hi > dp.ghost_lo and dp.ghost_lo < rows.len and slot_h > 0 and self.sidebar_width_px > 0) {
+                const top_abs: f32 = @floatFromInt(chrome.components.sidebar.rowTop(rows, dp.ghost_lo, self.sidebar_header_height_px, slot_h, self.sidebar_header_row_h_px, 0));
+                var band_h: u32 = 0;
+                var gi = dp.ghost_lo;
+                while (gi < dp.ghost_hi and gi < rows.len) : (gi += 1) band_h +|= chrome.components.sidebar.rowHeight(rows[gi], slot_h, self.sidebar_header_row_h_px);
+                const w_full: f32 = @as(f32, @floatFromInt(self.sidebar_width_px)) - 2.0 * gap;
+                // 반투명 고스트 밴드(밝은 sidebar_foreground 저알파 — straight-alpha packRgbAlpha, 셰이더 rgb*=a).
+                if (self.sidebarScrollClipQuad(top_abs + gap, @as(f32, @floatFromInt(band_h)) - 2.0 * gap)) |sr| {
+                    const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
+                    const ghost_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x30); // ≈19% 반투명
+                    self.gpu_quads.append(self.allocator, .{
+                        .x = gap,
+                        .y = sr.y,
+                        .w = w_full,
+                        .h = sr.h,
+                        .corner_radii = .{ rr, rr, rr, rr },
+                        .border_widths = .{ 0, 0, 0, 0 },
+                        .fill_color0 = ghost_fill,
+                        .fill_color1 = ghost_fill,
+                        .border_color = 0,
+                        .gradient_kind = 0,
+                        .layer = 0,
+                    }) catch {};
+                }
+                // 삽입선(accent 색) — 고스트 상단 경계에 얇은 quad로 "여기에 놓인다"를 또렷이 보인다(divider보다 대비 높은
+                // accent로 스크린샷 가독성 확보 — 브라우저/VSCode 드래그 삽입선 관례). 두께 ≥2px.
+                const line_thick: f32 = @floatFromInt(@max(@as(u32, 2), card_tk.border.line_thickness_px));
+                if (self.sidebarScrollClipQuad(top_abs, line_thick)) |sr| {
+                    self.appendSolidQuad(gap, sr.y, w_full, sr.h, packOpaqueRgb(card_tk.palette.get(.accent_bar)), 0);
+                }
+            }
+        }
         // 접힘 펼치기 토글(◧) 호버 배경 — 접힘 시 위 헤더-아이콘 호버 경로(sidebar_width_px>0 가드)가 안 타므로 여기서
         // 별도로 그린다. 토글 글리프는 .m이 titlebar_strip 안 세로 중앙 + 1.7×로 그리므로(metalFrame.titlebar_strip_px),
         // quad도 같은 중심에 맞춘다: 가로=셀 중심(col+0.5), 세로=띠 중앙, 폭≈2.6칸. 색·알파·둥글기는 헤더 아이콘 호버와
@@ -13806,7 +13919,8 @@ pub const AppSession = struct {
         const header_row_h = self.sidebar_header_row_h_px;
         const y: u32 = @intCast(band_y);
         var acc: u32 = 0;
-        for (self.sidebar_rows.items, 0..) |row, i| {
+        // SG8d: 밴드 op은 view(sidebarRenderRows())가 냈으므로 역매핑도 같은 도메인(카드 드래그 중=preview_rows)을 쓴다.
+        for (self.sidebarRenderRows(), 0..) |row, i| {
             const rh = chrome.components.sidebar.rowHeight(row, slot_h, header_row_h);
             if (rh == 0) continue;
             if (y < acc +| rh) return i;
@@ -13818,6 +13932,8 @@ pub const AppSession = struct {
     fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
         const slot_h = self.sidebar_slot_height_px;
         if (slot_h == 0) return;
+        // SG8d: tint 소스 역매핑도 렌더 도메인(카드 드래그 중=preview_rows) — 밴드 op을 낸 view와 같은 rows를 본다.
+        const rrows = self.sidebarRenderRows();
         // gpu_quad(rich 밴드)는 슬롯 상대 y를 절대 좌표로 박으므로 상단 헤더만큼 내려야 한다 — .m이 header_h 시프트하는
         // 건 sidebar_cells(텍스트·tui 밴드)뿐이라 gpu_quad는 여기서 header_h를 더한다(위치 정합). 좌측 accent 막대는
         // chrome op이 아니라 카드별 색으로 rebuildSidebar의 per-tab accent 루프가 직접 그린다(배경 tint와 같은 경로).
@@ -13832,7 +13948,7 @@ pub const AppSession = struct {
                 // 이 슬롯 탭에 배경 tint가 있으면 밴드 색에 섞는다 — tui 활성/호버 슬롯은 불투명 밴드(셀)가 tint quad를
                 // 덮으므로, 밴드 색 자체를 tint로 당겨 활성/호버 슬롯에서도 색이 보이게 한다(idle 슬롯은 밴드가 없어 quad가 그대로).
                 // 가변 높이(SG3c): 밴드 y는 rowTop 누적이라 고정 y/slot_h로 row를 못 역산한다 — sidebarBandRow가 누적으로 역산한다.
-                if (self.sidebarBandRow(q.rect.y)) |ri| switch (self.sidebar_rows.items[ri]) { // 표시 슬롯 ri — 밴드가 카드/헤더냐로 tint 소스가 갈린다
+                if (self.sidebarBandRow(q.rect.y)) |ri| switch (rrows[ri]) { // 표시 슬롯 ri — 밴드가 카드/헤더냐로 tint 소스가 갈린다
                     .card => |c| {
                         if (self.tabs.items[c.tab].background_color != 0) // 카드 배경 tint(개별 background_color)
                             color = blendRgb(color, self.tabs.items[c.tab].background_color & 0x00FF_FFFF, tab_bg_tint_alpha);
@@ -13853,7 +13969,7 @@ pub const AppSession = struct {
                     if (q.rect.y < 0) continue; // 이 경로 y는 항상 ≥0(방어)
                     const origin_y: u32 = @intCast(q.rect.y);
                     // .row는 tint 역매핑·디버그용 표시 row(past-end면 rows.len — .m 세로 위치는 origin_y가 단일 출처).
-                    const ri = self.sidebarBandRow(q.rect.y) orelse self.sidebar_rows.items.len;
+                    const ri = self.sidebarBandRow(q.rect.y) orelse rrows.len;
                     const row: u16 = @intCast(@min(ri, @as(usize, std.math.maxInt(u16))));
                     // 드롭 타겟(.drop_zone)은 드래그 중 "어디 떨어질지" 단서라 window.opacity 미적용 — focus 테두리·accent와 동급(불투명 유지).
                     // 나머지 밴드(활성/호버)만 셀 경로 premultiply. drop_zone은 α=1이라 premult==straight로 어느 경로든 안전.
@@ -14211,7 +14327,10 @@ pub const AppSession = struct {
         var active_row: ?usize = null;
         var close_row: ?usize = null;
         var editing_row: ?usize = null; // rename 중인 표시 슬롯(카드 또는 그룹 헤더) — buildSidebarDrawList가 그 이름줄을 tail 앵커로.
-        for (self.sidebar_rows.items, 0..) |disp_row, row_i| {
+        // SG8d: 카드 드래그 프리뷰 중엔 고스트를 담은 preview_rows를 glyph로 조립한다(비드래그=원본 sidebar_rows). 아래
+        // applySidebarGlyphPyTop·view 밴드도 같은 rows를 봐 세로 위치가 정합한다(단일 렌더 도메인).
+        const rrows = self.sidebarRenderRows();
+        for (rrows, 0..) |disp_row, row_i| {
             const card = switch (disp_row) {
                 .card => |c| c,
                 .group_header => |gh| {
@@ -14372,6 +14491,26 @@ pub const AppSession = struct {
             // (짧은 이름은 안 걸리던 잠재 버그를 경로줄이 깨움). full_cols ≥ sidebar_cols+indent_cols라 항상 수용한다.
             draw_list.size.cols = @intCast(@min(full_cols, @as(u32, std.math.maxInt(u16))));
         }
+        // SG8d: 고스트 카드 glyph를 background 쪽으로 강하게 흐린 muted 색으로(반투명 밴드+삽입선과 짝 — "떠 있는"
+        // 카드로 읽히게). slot = c.row/sidebar_line_base = 표시 row 인덱스라 preview_rows[ghost_lo,hi) 셀만 고른다. brand
+        // 색 루프 뒤에 적용해 고스트 안 에이전트 아이콘/스피너도 함께 흐려진다(고스트는 어느 셀이든 흐림 — 의도).
+        if (self.sidebar_drag_preview) |dp| {
+            if (dp.ghost_hi > dp.ghost_lo) {
+                const f = self.appearance.theme.sidebar_foreground;
+                const b = self.appearance.theme.background;
+                const ghost_fg: terminal.Color = .{
+                    .rgb = .{ // 35% fg / 65% bg — mutedForeground(55/45)보다 더 흐림
+                        .r = @intCast((@as(u32, f.r) * 35 + @as(u32, b.r) * 65) / 100),
+                        .g = @intCast((@as(u32, f.g) * 35 + @as(u32, b.g) * 65) / 100),
+                        .b = @intCast((@as(u32, f.b) * 35 + @as(u32, b.b) * 65) / 100),
+                    },
+                };
+                for (draw_list.cells) |*c| {
+                    const slot = c.row / coretext_frame_builder.sidebar_line_base;
+                    if (slot >= dp.ghost_lo and slot < dp.ghost_hi) c.style.foreground = ghost_fg;
+                }
+            }
+        }
         return draw_list;
     }
 
@@ -14384,7 +14523,7 @@ pub const AppSession = struct {
     /// 같은 단일 스크롤 소스). slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 밴드/배경 셀(slot_id==0)은
     /// 손대지 않는다(그 경로는 row 인덱스·별도 기하). replace/replaceSidebar 직후 metal_buffer.sidebar_cells에 in-place 적용.
     fn applySidebarGlyphPyTop(self: *AppSession) void {
-        fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.cell_height_px);
+        fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, self.sidebarRenderRows(), self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.cell_height_px);
     }
 
     /// 사이드바 카드 줄의 세로 **스텝**(줄 top-to-top, px) = cell_height + 여유(≈0.15×ch). 예전엔 줄이 딱 ch 간격으로
@@ -15167,14 +15306,16 @@ pub const AppSession = struct {
             const header_h: i64 = @intCast(self.sidebar_header_height_px);
             const slot_h: i64 = @intCast(self.sidebar_slot_height_px);
             const vp_bottom: i64 = @intCast(self.backing_height_px);
-            for (self.sidebar_rows.items, 0..) |row, s| {
+            // SG8d: 카드 드래그 중이면 배지도 고스트 레이아웃(preview_rows)을 따라간다 — 렌더 도메인 단일화(놓친 소비자 이주).
+            const brows = self.sidebarRenderRows();
+            for (brows, 0..) |row, s| {
                 const abs = switch (row) {
                     .card => |c| c.tab,
                     .group_header => continue, // 헤더 row엔 ⌘숫자(select_tab) 배지가 없다
                 };
                 if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다
                 const cs = (try Local.chordStr(resolver, Action{ .select_tab = abs }, arena)) orelse continue;
-                const y = sidebar.rowTop(self.sidebar_rows.items, s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+                const y = sidebar.rowTop(brows, s, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                 if (y + slot_h <= header_h or y >= vp_bottom) continue; // 헤더 위로 스크롤·뷰포트 아래로 벗어난 카드 생략(render scissor와 정합)
                 try badges.append(arena, .{ .rect = .{ .x = 0, .y = @intCast(@max(y, header_h)), .w = self.sidebar_width_px, .h = self.sidebar_slot_height_px }, .chord = cs });
             }
@@ -17263,20 +17404,28 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     try std.testing.expect(!session.sidebar_drag_active);
     try std.testing.expect(session.sidebar_drop_slot == null); // up에 하이라이트 해제
 
-    // ── 드롭 하이라이트: 마커 없는 카드(t1, A 몸통)를 잡아 끌면 sidebar_drop_slot이 커서 아래 row를 추적하고 up에 해제.
+    // ── SG8d 카드 드래그 고스트 프리뷰: 마커 없는 카드(t1, A 몸통)를 잡아 끌면 라이브 moveTab 대신 **비커밋 프리뷰**가
+    // 뜬다(self.tabs 불변 + sidebar_drag_preview 존재 + preview_rows 고스트). up이 마지막 plan을 1회 커밋하고 프리뷰를 정리한다.
     // 현재 [t2(mk B), t0(mk A), t3, t1] → rows: [header B(0), card t2(1), header A(2), card t0(3), card t3(4), card t1(5)].
     // t1 카드 = row 5. 그 중앙을 down.
     session.recomputeVisibleTabs();
     const t1_card_top = sb.rowTop(session.sidebar_rows.items, 5, header_h, slot_h, header_row_h, 0);
     const t1_card_y: f64 = @floatFromInt(t1_card_top + @as(i64, @intCast(slot_h / 2)));
+    // 드래그 전 self.tabs 스냅샷(드래그 중 불변 확인용).
+    var pre_drag: [8]*Tab = undefined;
+    for (session.tabs.items, 0..) |t, i| pre_drag[i] = t;
     session.mouse(1, x, t1_card_y, 0, 0);
     try std.testing.expect(session.sidebar_drag_active);
     try std.testing.expect(session.tabs.items[session.sidebar_drag_index].group_start == null); // 마커 아님(t1)
-    // drag to some row → 하이라이트 non-null(어느 그룹/위치에 들어갈지 미리보기).
+    // drag to some row → 프리뷰 활성(고스트) + 원본-도메인 drop_slot은 세팅 안 함(고스트+삽입선이 대체) + self.tabs 불변.
     session.mouse(2, x, @floatFromInt(header_h + slot_h + slot_h / 2), 0, 0);
-    try std.testing.expect(session.sidebar_drop_slot != null);
-    session.mouse(3, x, @floatFromInt(header_h + slot_h + slot_h / 2), 0, 0); // up
-    try std.testing.expect(session.sidebar_drop_slot == null); // 해제
+    try std.testing.expect(session.sidebar_drag_preview != null); // 비커밋 프리뷰 활성
+    try std.testing.expect(session.sidebar_drop_slot == null); // 카드 드래그는 drop_slot 대신 고스트 사용
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(pre_drag[i], t); // 드래그 중 self.tabs 불변
+    session.mouse(3, x, @floatFromInt(header_h + slot_h + slot_h / 2), 0, 0); // up → 마지막 plan 1회 커밋 + 프리뷰 정리
+    try std.testing.expect(session.sidebar_drag_preview == null); // 프리뷰 정리됨(원본 복귀)
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_preview_rows.items.len);
+    try std.testing.expect(session.sidebar_drop_slot == null);
     try std.testing.expect(!session.sidebar_drag_active);
 }
 

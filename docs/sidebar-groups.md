@@ -804,3 +804,135 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
 
 **단순화 대안**(C2 churn이 과하면): **S1(Chrome식)** — 그룹 고정 폐기, 카드 pin=그룹 자동 제외(위치 파생 무변경, "그룹째
 고정" UX 상실). 원리는 C2, 리스크 회피는 S1. **C2로 완결(GP1~5)** — churn이 관리 범위였고 위 방어들이 회귀 0을 유지했다.
+
+## 13. 그룹-로컬 pin(멤버 그룹 내 위치 고정, GL)
+
+§12(C2)가 "그룹**째** 고정"(전역 `[고정][비고정]` 리전)을 다뤘다면, GL은 **그룹 안 멤버를 그 그룹 subtree 내부에서 위로
+고정**하는 별개 기능이다. 사용자 요구: 그룹 안 멤버 우클릭 "위치 고정" → 그 멤버가 **그 그룹 subtree 내부에서 프리픽스(마커
+직후)** 로 뜬다. 헤더 우클릭 "그룹 고정"=그룹째(전역, §12 현행 유지)와 트리거·축이 분리된다. 드래그해도 로컬 pin은 유지된다
+(전역 pin과 대칭). doc-first **적대검증 3회 보강**(아래 8개)이 초안(scratchpad group-local-pin-draft.md)을 정정·확정한 결과다.
+
+### 13.1 판정 — C2와 **직교하는 새 축**(keystone 보조정리)
+
+- **얹힘 = (a) C2에 깨끗이 얹힌다.** GL은 C2(전역 핀 리전)와 **직교하는 새 축**이라, C2의 파생/정규화/파티션 코어(pin-region
+  7 경계·normalize·전역 partition·clamp §12.4~12.11)를 **전혀 안 건드리고** 새 필드 + subtree-로컬 물리 재배열로만 성립한다.
+- **C3(§12.1 폐기)와의 차이**: C3=전역 멤버 pin은 멤버를 리스트 앞 고정 프리픽스로 끌어내 그룹에서 **뜯어낸다**(I1×I2 직접
+  모순). GL=로컬 pin은 멤버를 **subtree `[marker, end)` 안에서만** 재배열한다 — 여전히 그 범위 안이라 §2.1 연속 파티션(I2)·
+  중첩(I3)이 안 깨진다. GL은 "그룹 안의 §2.1을 한 단계 더 재귀"한 것.
+- **keystone 보조정리(보강2 — 명문화)**: `stablePartitionPinned`(전역 2-pass §12.6)는 **pin-uniform 블록의 내부 상대순서를
+  보존**한다(stable). 그래서 한 그룹 subtree가 전역 리전 안에서 통째로 옮겨져도, 그 subtree 안의 GL float 순서는 **파괴되지
+  않는다**. 즉 GL과 C2는 단순히 "서로 다른 필드"라서 독립인 게 아니라, **전역 partition이 subtree 축 위에서 무연산(no-op)**
+  이기 때문에 직교한다. 이 보조정리가 "그룹째 고정 × 그룹-로컬 pin 공존"(§13.4)의 합성 안전성을 떠받친다.
+
+### 13.2 모델 — **새 필드 `Tab.local_pinned`**(재해석 불가, 보강1)
+
+저장은 멤버 `Tab.pinned` 재해석이 **아니라** 새 스칼라 `Tab.local_pinned: bool = false`다(`session_model.zig` `Tab` 블록,
+`group_color`/`pinned` 인접). 재해석이 불가능한 이유(보강1):
+
+- **전역 파티션 머신이 로컬 pin을 전역 신호로 읽어 shred한다**: `countPinnedTabs`·`stablePartitionPinned`·`clampMoveToGroup`·
+  `moveTab`이 **per-tab `pinned`를 전역**으로 읽는다. 비고정 그룹 안 멤버를 로컬 pin(=`pinned=1`)하면 그 멤버가 전역 고정
+  프리픽스에 잡혀 **사이드바 맨 앞으로 끌려나가 그룹을 찢는다**(= C3 부활, §12.1).
+- **`normalizePinnedFromGroups`가 로컬 pin을 덮어쓴다**: normalize는 canonical화를 위해 `member.pinned := marker.pinned`로
+  재기록(§12.5)하므로, 로컬 pin을 멤버 `pinned`에 실으면 다음 mutation 때 마커값(보통 0)으로 **소실**된다. C2 모델은
+  `member.pinned == marker.pinned`(캐시 미러)를 **불변식으로 요구**해 멤버 `pinned`에 다른 의미를 실을 수 없다.
+
+→ **새 필드가 유일 해법**: `local_pinned`는 전역 머신이 **안 읽어**(count/partition/clamp/moveTab/normalize 전부 `pinned`만
+본다) 전역 파티션에 절대 영향이 없고(C3 shred 원천 차단), normalize와도 **서로 다른 비트를 소유**해 무충돌이다. `local_pinned`는
+group_start!=null(마커)·top-level 카드에선 무의미(마커=그룹 고정 권위, top카드=개별 pin은 `Tab.pinned`가 든다).
+
+### 13.3 파생 — subtree-로컬 물리 stable partition(`stablePartitionSubtree`)
+
+투영-only(order 순열)가 아니라 **물리 재배열**(self.tabs)이다 — "위치=self.tabs 순서"(§2.1)를 유지해 hit-test·드롭·SG8
+order-aware 인프라가 **전부 무변경**(로컬 pin 0개면 no-op → byte-identical, GP1 안전망 패턴). 투영-only는 표시 order ≠
+self.tabs order가 되어 드롭 타깃 매핑이 divergence(기각).
+
+`stablePartitionSubtree(mi)`(신규, `stablePartitionPinned` 인접): 마커 `mi`의 subtree `[mi+1, groupSubtreeEnd(mi))` **안에서**
+`local_pinned` 직접 멤버 카드를 마커 직후로 stable float한다. `reorderTabs`(공통 재배열 스캐폴딩) 재사용:
+
+- **unit-aware(보강5)**: 재배열 단위 = subtree의 **직접 top-level 단위** — 직접 멤버 카드(크기 1, `local_pinned`면 float
+  대상)와 **자식 subgroup 통째 블록**(`[j, groupSubtreeEnd(j))`, moveGroupRange/groupBlockPermutation 결). 자식 subgroup은
+  절대 안 쪼개진다(per-tab 아님). pass1=`local_pinned` 직접 카드(상대순서 유지), pass2=나머지(비-pin 직접카드·자식 subgroup
+  통째, 상대순서 유지). 마커 자신(index mi)은 앵커라 제자리.
+- **subtree `[marker, groupSubtreeEnd)` 내부만**(I2/I3 보존): float는 그 범위 안에서만 일어나 subtree 끝·형제/얕은 마커 경계를
+  안 넘는다. `groupSubtreeEnd`(pin-인식)·`effectiveDepthAt`는 재배열 후에도 불변(마커·자식 group_depth 무변, 카드만 셔플).
+- **중첩 재귀 + 포인터 재탐색(보강5)**: 자식 subgroup **안** 멤버의 로컬 float는 그 자식 마커에 대해 이 함수를 **따로** 부른다
+  (각 마커별 재귀). 재배열로 자식 마커 인덱스가 밀리므로 **heap-pin `*Tab` 포인터로 재탐색**해야 한다(인덱스 무효화 회피).
+
+### 13.4 배선 — "항상 `stablePartitionPinned` **뒤**"(보강3, 단일화)
+
+`normalizePinnedFromGroups`가 도는 mutation 지점(§12.5 6곳 + 복원)에서, subtree partition은 **항상 전역 `stablePartitionPinned`
+뒤**에 실행한다. 초안 §3.3의 "normalize 직후"는 복원 경로(`applyWorkspaceWindow`: normalize→stablePartitionPinned)와 **순서
+모순**이라(전역 partition 앞에 subtree float를 넣으면 전역 partition이 subtree를 다시 통째로 옮겨 무의미) 정정한다. 표준 순서:
+
+```
+(1) normalizePinnedFromGroups   — 멤버 pinned 캐시 = 마커값(전역 축 canonical, §12.5)
+(2) stablePartitionPinned       — 전역 [고정][비고정] 리전 안착(§12.6)
+(3) 각 마커에 stablePartitionSubtree — subtree-로컬 float(GL, keystone 보조정리로 (2)를 안 흩뜨림)
+```
+
+- **드래그 게이트(필수, 보강6)**: `stablePartitionSubtree`도 `sidebar_drag_preview != null`이면 early-return
+  (normalize 게이트와 동일 규율) — SG8 "드래그 내내 self.tabs 불변" 보존. 확정(commit)은 `clearSidebarDragPreview` **후**라 통과.
+
+### 13.5 드래그 — `simulateDrop`에 subtree-로컬 clamp(보강6, GL2 선결)
+
+로컬 pin 멤버 드래그 시 **subtree-로컬 프리픽스 clamp**를 `simulateDrop`에 **구워** 프리뷰=확정을 맞춘다(SG8 불변식 B — 프리뷰가
+확정이다). C2의 `clampGroupMoveToRegion`(전역 리전 clamp) 패턴을 한 단계 안쪽(subtree)으로 가져온 것. **GL1엔 인프라(파티션
+코어)만**, 실제 드래그 clamp·토글은 GL2. (1차 fallback = re-partition-on-commit: 확정 후 `stablePartitionSubtree`가 다시 float
+해 snap-back — 전역 pin drag가 `clampMoveToGroup`으로 리전에 갇히는 것과 같은 결.)
+
+### 13.6 렌더 — `sidebarRowShowsPin` **선두 분기**(보강7)
+
+현재 멤버 카드는 `pin_derived`(그룹째 고정 캐시)라 `sidebarRowShowsPin`(§12.8)이 **모든 멤버 📌를 억제**한다. 로컬 pin 멤버는
+**실제 사용자 pin**이라 📌를 살려야 하므로 `sidebarRowShowsPin`에 **`local_pinned` 선두 분기**(pin_derived 우회)를 둔다:
+
+```
+.card => if (c.local_pinned) true          // ← 신규: 로컬 pin 멤버는 📌(pin_derived보다 우선)
+         else if (c.pin_derived) false       // 그룹째 고정 캐시 멤버 억제(현행 §12.8)
+         else if (마커 카드) false else tab.pinned // 최상위 개별 pin만(현행)
+```
+
+`Row.card`에 렌더 힌트 `local_pinned: bool = false`(chrome/components/sidebar.zig, `pin_derived` 동형) + `appendCardRow`·
+`projectRowsCore` 전달. 그룹째 고정 📌(헤더)와 로컬 pin 📌(멤버 카드)가 **위치로 구별**된다. **공존 시각 모호**(둘 다 단일
+글리프 U+1F4CC)는 **수용**(별도 글리프 미도입). GL4에서 배선.
+
+### 13.7 위생 — 멤버→top-level 전이 시 `local_pinned:=false`(보강4)
+
+멤버가 그룹 밖으로 나가면(ungroup·removeFromGroup·드래그 out) **`local_pinned:=false`** 로 클리어한다 — top-level 카드에선
+로컬 pin이 무의미하므로 고아 stale 📌를 원천 차단한다. GL4에서 각 전이 지점에 배선.
+
+### 13.8 범위 — **leaf 멤버 로컬 pin만**
+
+1차 스코프는 **그룹 안 leaf 멤버 카드**의 로컬 pin이다. **subgroup-as-member**(자식 subgroup 마커 자체를 부모 멤버로서 로컬
+pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float)·**마커 로컬 pin**은 초안 §2.3↔§6 모순이 남아 **GL5 후속(범위 제외)**.
+`stablePartitionSubtree`의 unit-aware 통째-이동은 이미 그 확장을 수용할 구조지만, 트리거·의미 확정은 GL5로 미룬다.
+
+### 13.9 직렬화 — 새 키 `local-pinned`(순수 additive)
+
+`workspace.v1` `tab` 라인에 **`local-pinned` 스칼라**(`pinned`/`group-*` 패턴). group_start와 **무관**하게(멤버 카드=group_start
+==null) 밖에서 쓴다. **true만 기록·false=키 생략**(round-trip 고정점·옛 파일 flat 정상·옛 리더 미지 키 skip으로 forward-compat).
+캡처/복원 왕복(`local_pinned`)도 additive. 로컬 pin 0개면 기존 파일 **byte-identical**.
+
+### 13.10 단계 GL1~5 — 각 단계 독립 동작·green
+
+1. **GL1 — 저장·파생 토대(동작 보존) ✅**: `Tab.local_pinned`(session_model + workspace 모델) + `local-pinned` 직렬화(additive,
+   false=키 생략) + 캡처/복원 왕복 + `stablePartitionSubtree`(reorderTabs 재사용·unit-aware·포인터 재탐색·드래그 게이트) 코어.
+   **아직 배선(mutation 지점)·토글·UX·렌더·위생 없음**. 로컬 pin 0개면 no-op → 기존 그룹/pin/SG8 **byte-identical**(회귀 0).
+   헤드리스: leaf 멤버 float→마커 직후·자식 subgroup 통째 skip·groupSubtreeEnd/effectiveDepthAt 보존·드래그 게이트·round-trip.
+2. **GL2 — 배선 + 토글 + 드래그 clamp**: §13.4 표준 순서로 `stablePartitionSubtree`를 mutation 지점(+복원)에 배선(각 마커
+   재귀·게이트) + `toggleLocalPin`(멤버) + `simulateDrop` subtree-로컬 clamp(§13.5). 헤드리스: 멤버 pin→float·드래그 clamp
+   프리뷰=확정.
+3. **GL3 — UX(멤버 우클릭 되돌리기)**: 그룹 안 멤버 우클릭 "위치 고정"/"고정 해제"(`toggleLocalPin`, 현행 그룹째 위임 제거).
+   헤더 "그룹 고정"은 §12 그대로. top-level 카드는 `togglePin`(개별 전역 pin).
+4. **GL4 — 렌더 + 위생**: `Row.card.local_pinned` 힌트 + `sidebarRowShowsPin` 선두 분기(§13.6, 멤버 📌 부활) + 전이 클리어
+   (§13.7). macOS 제품 스크린샷(신규 훅 `MARU_FORCE_GROUP_LOCALPIN`).
+5. **GL5 — 공존·중첩 하드닝 + 확장**: 그룹째×로컬 공존 헤드리스(§13.4 keystone) + 중첩 재귀 하드닝 + **subgroup-as-member/마커
+   로컬 pin 확장**(§13.8) + 문서 최종 동기화.
+
+### 13.11 리스크
+
+- **[최상] 멤버 `Tab.pinned`가 전역 파티션 신호**(§13.2 보강1) — 새 필드 `local_pinned`로 격리(전역 머신이 안 읽음)해 닫힘.
+  이 함정이 저장을 재해석 대신 새 필드로 강제한 근본 이유.
+- **[중] 배선 순서 모순**(초안 "normalize 직후" vs 복원 순서) — §13.4 "항상 `stablePartitionPinned` 뒤" 단일화(보강3)로 해소.
+- **[중] 자식 subgroup 쪼개짐 = I2/I3 붕괴** — `stablePartitionSubtree` unit-aware(자식 통째)·재귀+포인터 재탐색(보강5)으로 방어.
+- **[중] 드래그 게이트 누락 = SG8 위반** — `sidebar_drag_preview != null` early-return(보강6, normalize와 동일 게이트).
+- **[하] 공존 시각 모호**(단일 글리프 U+1F4CC) — 헤더(그룹째)/카드(멤버 로컬) 위치 구별로 수용(§13.6 보강7).

@@ -4658,13 +4658,16 @@ pub const AppSession = struct {
     /// stablePartition이 마커만 앞으로 옮겨 그룹을 **shred**한다. 이 함수가 멤버를 마커 값으로 동기해 기존 per-tab 핀 머신을
     /// 무변경 재사용한다(§12.2 "왜 캐시 미러인가").
     ///
-    /// **스택워크(projectRows pass1 동형)**: self.tabs를 순회하며 group_start 마커에서 정규화 depth 스택을 pop/push하고
-    /// (중첩 SG5-3와 같은 gap-클램프), 각 카드는 스택 top(= enclosing 마커)의 pinned로 재기록한다. **top-level 카드**(첫
-    /// 마커 이전 = 스택이 빈 구간)는 개별 pin이라 자기 값을 유지한다(§12.2). 마커 탭 자신은 권위라 pinned를 안 건드린다.
-    /// **핀 리전 정합(§12 GP1)**: 마커의 pinned가 부모(스택 top) 마커와 다르면 pin ⊃ group 계층상 조상 소속이 아니라 새
-    /// 최상위 리전이므로 스택을 리셋한다(중첩이 핀 경계를 넘는 손상 배치를 리전 국소화). 이 재기록은 **enclosing 마커 →
-    /// 멤버 하향 전파**라, 멤버의 (손상됐을 수 있는) 기존 pinned와 무관하게 항상 마커 값으로 canonical화한다 — 손상/레거시
-    /// 혼합 파일(멤버 pinned=1·마커=0, 또는 마커 pinned=1·멤버=0 desync)을 마커 기준으로 흡수한다(§12.9).
+    /// **suffix-exclusion(§12.5, GP3 정합 — marker-propagation 스택워크가 아님)**: self.tabs를 **최상위 그룹 단위**로 순회하며,
+    /// 각 그룹의 **pin-무시 구조 subtree** [i, e)(effectiveDepthAt + 형제/얕은 마커 break, 중첩 SG5-3 자식 통째 포함)에서 마커
+    /// pin이 **마지막으로 일치**하는 위치 last_match까지를 진짜 멤버 범위로 보고 그 범위의 카드를 마커 pinned로 재기록한다.
+    /// 그 뒤 꼬리 [last_match+1, e)(마커와 다른 pin이 subtree 끝까지 이어짐 = 다음 pin 리전의 genuine 최상위 카드, §12.1)는
+    /// **배제**해 GP1 렌더(groupSubtreeEnd pin-인식)와 **동일 답**(top카드 안 흡수·idempotent)을 낸다. **top-level 카드**(첫 마커
+    /// 이전 = group_start==null)는 개별 pin이라 자기 값을 유지하고, 마커 탭 자신은 권위라 pinned를 안 건드린다(§12.2). 이
+    /// 재기록은 enclosing 마커 → 멤버 하향 전파라, 멤버의 (손상됐을 수 있는) 기존 pinned와 무관하게 마커 값으로 canonical화한다
+    /// — 손상/레거시 혼합 파일(멤버 pinned=1·마커=0, 또는 마커 pinned=1·멤버=0 desync)을 마커 기준으로 흡수한다(§12.9).
+    /// 스택워크가 아니라 suffix-exclusion인 이유: 스택워크는 "고정 그룹 + 비고정 top카드" 인접에서 top카드까지 삼켜(shred 반대
+    /// 방향) GP1 렌더와 tension이 났다(§12.5 정정 ②′). 사이에 낀 desync 멤버(마커 pin이 뒤에서 재등장)는 여전히 흡수한다.
     ///
     /// **SG8 드래그 게이트(필수)**: self.tabs를 mutate하므로 `sidebar_drag_preview != null`(드래그 프리뷰 활성)이면 **절대
     /// 안 돈다** — SG8은 "드래그 내내 self.tabs 불변"을 보존한다(프리뷰는 sidebar_preview_rows 위 가상 배치, 확정=commit

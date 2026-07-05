@@ -14,7 +14,9 @@ chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다
 > **SG7 폐기**(드래그 depth "작게" 프리뷰는 적대검증이 전제를 반박 → §9-7 결론이 SG8로 수렴) +
 > **고스트+삽입선 드래그 프리뷰(SG8a~f 완료 — 사이드바 드래그를 라이브 재배치에서 비커밋 고스트+드롭 1회 확정으로 전환:
 > 접힌 그룹 카드 사라짐·헤더 통과 yo-yo 근본 해결, subtree 고스트 depth 프리뷰)** +
-> **그룹 고정(핀+그룹 통합, C2 — §12): GP1(파생 코어 pin-region 인식 토대) 완료, GP2~5 후속**.
+> **그룹 고정(핀+그룹 통합, C2 — §12): GP1~5 완료** — 그룹 통째 고정/해제(헤더 우클릭, 마커 `pinned`가 그룹 고정 권위)·
+> 핀-리전 인식 파생·**suffix-exclusion 정규화**·`toggleGroupPin`+plan clamp·`pin_derived` 렌더(멤버 📌 억제·헤더 고정
+> 인디케이터)·`assertPinnedPrefixRuntime` 확장, 제품 스크린샷(`MARU_FORCE_GROUP_PIN`) 검증.
 > 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
@@ -574,7 +576,8 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   떨구면 옆). 이 규칙이 SG5-1 헤드리스(모두 카드에 드롭)를 그대로 통과시키면서 넣기 제스처를 새로 연다. **남은 한계**: (a) **새
   중첩 레벨을 카드 드롭으로는 못 만든다**(카드 드롭은 형제 전용 — 넣기는 헤더 드롭이 유일 경로). (b) 넣기 시 목표 depth **live
   들여쓰기 프리뷰 미구현**(드롭 row 헤더 밴드 하이라이트로만 "이 그룹 안"을 표시, 드롭 후 재투영으로 확정). (c) 핀+그룹 조합은
-  SG4/SG5-1과 같이 범위 밖. 카드 드래그(SG4)는 드롭 위치의 depth를 위치 파생으로 자연 흡수한다(자식 그룹 안=자식 depth).
+  당시 SG4/SG5-1과 같이 범위 밖이었으나 **이후 C2(§12, GP1~5)로 해소** — 그룹 드래그 plan이 리전에 clamp되고(§12.6) 넣기는
+  같은 pin 그룹만 허용된다(C3 재발 방지). 카드 드래그(SG4)는 드롭 위치의 depth를 위치 파생으로 자연 흡수한다(자식 그룹 안=자식 depth).
 - **(낮) 접힌 그룹에 넣기**: 카드 드래그(SG4)에서 접힌 헤더에 드롭하면 그 그룹 끝에 추가로 처리(브라우저 관례). 접기 우선
   단계(SG1~3)에는 드래그가 없어 무관.
 - **(낮) 접힘 상태 위치**: `group_collapsed`를 workspace.v1에 둔다(세션 넘어 유지). config가 아니라 workspace인 이유 — 그룹은
@@ -591,11 +594,12 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   프리뷰 plan을 `moveTab`/`moveGroupSibling`/`moveGroupNesting` **정확히 1회** 재사용(재계산 금지)한다. SG8f에서 옛 라이브 경로
   잔재(`groupDragFrame`의 매 프레임 앵커 팔로우·write-only-null `sidebar_drop_slot`)를 청소했다. **남은 것**: cosmetic(하이라이트
   밴드 높이 등)·별도 축 후속(아래 "그룹 고정")뿐.
-- **(C2로 착수 — §12) 그룹 고정 — 핀+그룹 조합의 파티션 무결성**: 현재 pin(`[고정][비고정]`)과 그룹은 각자 파티션이라, 그룹이
-  고정/비고정 경계를 가로지르면 고정 프리픽스 불변식을 보장하지 않는다(SG4/SG5-1/SG8 모두 범위 밖). SG8의 `clampMoveToGroup`은
+- **(해소됨, C2 완료 — §12) 그룹 고정 — 핀+그룹 조합의 파티션 무결성**: 현재 pin(`[고정][비고정]`)과 그룹은 각자 파티션이라, 그룹이
+  고정/비고정 경계를 가로지르면 고정 프리픽스 불변식을 보장하지 않았다(SG4/SG5-1/SG8 모두 범위 밖). SG8의 `clampMoveToGroup`은
   **드롭 목표를 핀 경계로 정직하게 클램프**(프리뷰-확정 일치)까지만 했다. 이 별도 축을 **C2(핀-리전 인식 파생)**로 설계 확정하고
-  단계(GP1~5)로 착수한다 — 그룹 마커 `pinned`를 그룹 고정 권위로 실어 리스트를 `[고정][비고정]` 2리전으로 나누고 각 리전 안에서
-  §2.1가 다시 성립하게 한다. **설계 확정본·단계·정정된 자기진단은 §12를 단일 출처로 둔다**(GP1 = 파생 코어 pin-region 인식 토대 완료).
+  단계 **GP1~5로 완결**했다 — 그룹 마커 `pinned`를 그룹 고정 권위로 실어 리스트를 `[고정][비고정]` 2리전으로 나누고 각 리전 안에서
+  §2.1가 다시 성립하게 한다(고정 그룹 0개면 byte-identical). **설계 확정본·단계·정정된 자기진단은 §12를 단일 출처로 둔다**(GP1~5 완료:
+  파생 코어 pin-region 인식·suffix-exclusion 정규화·`toggleGroupPin`+plan clamp·`pin_derived` 렌더·헤더 인디케이터·문서 동기).
 
 ## 11. clean-room
 
@@ -609,8 +613,9 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
 현재 pin(`[고정][비고정]` 프리픽스, session_model 88·`moveTab`)과 그룹(§2.1 위치 파생 마커)은 **각자 파티션**이라, "그룹
 통째를 고정/강등"할 때 그룹이 고정/비고정 경계를 가로지르면 고정 프리픽스 불변식이 깨진다(SG4/SG5-1/SG8 모두 범위 밖).
 C2는 **그룹 마커 `Tab.pinned`를 그룹 고정 권위**로 실어(§12.2) 리스트를 `[고정][비고정]` 2리전으로 나누고, **각 리전
-안에서 §2.1 연속 파티션이 다시 성립**하게 한다. 단계 GP1~5(§12.12) 중 **GP1(파생 코어 pin-region 인식 토대)은 완료** —
-아래 §12.4·§12.11의 헤드리스가 그 게이트다.
+안에서 §2.1 연속 파티션이 다시 성립**하게 한다. 단계 GP1~5(§12.12)는 **전부 완료** — 파생 코어 pin-region 인식(GP1)·
+suffix-exclusion 정규화(GP2)·`toggleGroupPin`+plan clamp(GP3)·`pin_derived` 렌더(GP4)·잔재/문서 동기(GP5). 아래
+§12.4~§12.11의 헤드리스와 `MARU_FORCE_GROUP_PIN` 스크린샷이 그 게이트다.
 
 > **doc-first 적대검증 3회가 초안(scratchpad group-pin-draft.md)의 세 자기진단을 반박했고, 아래는 그 정정본이다.**
 > 틀린 진단 셋 — ① "pass1 상태 폭발이 최대 리스크", ② "정규화를 rebuild 직전 단일 chokepoint로", ③ "group clamp를
@@ -682,17 +687,27 @@ order-공간 per-position `self.tabs.items[order[i]].pinned`**(고정 count 아�
 그러면 마커는 전부 비고정 리전이라 **리전 경계 = 리스트 양끝**이 되고, 7 경계의 pin 리셋/break는 flip 지점에서 스택이
 비어 **no-op** → 기존 `projectRows` 산출과 **byte-identical**이다. 헤드리스 검증(§12.11)이 이를 고정한다.
 
-### 12.5 정규화 — `normalizePinnedFromGroups`(보강 2, 정정 ②) — **GP2**
+### 12.5 정규화 — `normalizePinnedFromGroups`(보강 2, 정정 ②) — **GP2 완료**
 
 **정정 ②(chokepoint 단일화 불가)**: 초안은 "정규화를 rebuild 직전 단일 chokepoint(`recomputeVisibleTabs` 안)로 모으자"
 했으나 세 이유로 불가다 — ⓐ `recomputeVisibleTabs`는 매 rebuild O(n) 스택워크라 여기서 `self.tabs.pinned`를 mutate하면
 매 프레임 비용, ⓑ **`sidebar_drag_preview != null` 게이트**(프리뷰 중 `self.tabs.pinned` mutate 금지 = SG8 "드래그 내내
-`self.tabs` 불변" 보존), ⓒ **복원 특례**(`applyWorkspaceWindow`에서 `stablePartitionPinned` **앞**에 명시 호출). 그래서
-정규화는 rebuild가 아니라 **pinned/그룹을 바꾸는 8 mutation 지점** 뒤에 1회씩 부른다: 복원·`togglePin`·`toggleGroupPin`·
-그룹 생성·`ungroup`·`removeFromGroup`·`closeTab` 마커 승계·`commitSidebarDragPreview`. 정규화는 pass1과 동형 스택워크로
-`member.pinned := enclosingMarker.pinned`를 재기록한다(누락 시 shred가 실패 모드).
+`self.tabs` 불변" 보존 — `normalize` 첫 줄이 early-return), ⓒ **복원 특례**(`applyWorkspaceWindow`에서 `stablePartitionPinned`
+**앞**에 명시 호출, §12.9). 그래서 정규화는 rebuild가 아니라 **pinned/그룹을 바꾸는 6 mutation 지점** 뒤에 1회씩 부른다:
+`toggleGroupPin`·그룹 생성(`beginGroupForTab`)·`ungroup`·`removeFromGroup`(빼기 경로)·`closeTab` 마커 승계·
+`commitSidebarDragPreview`(+복원 특례 `applyWorkspaceWindow`). **`togglePin`(개별 pin)은 정규화 없음** — 최상위 카드는 자기
+값 유지, 그룹 멤버는 개별 pin 입구가 차단(§12.7 보강5)이라 desync가 안 생긴다.
 
-### 12.6 이동/드래그(정정 ③) — **GP3**
+**정정 ②′(marker-propagation → suffix-exclusion)**: 초안·GP2 서술은 "pass1과 동형 스택워크로 `member.pinned :=
+enclosingMarker.pinned`를 재기록"(marker-propagation)이었으나, 그러면 GP1 렌더(`groupSubtreeEnd` **pin-인식**)가 "고정 그룹 +
+비고정 top카드"(§12.1) 인접에서 top카드를 그룹에서 배제하는 것과 tension이 생겨 canonical이 어긋난다. 실제 구현은 **suffix-exclusion**
+이다: 각 **최상위 그룹의 pin-무시 구조 subtree** `[i, e)`(`effectiveDepthAt`+형제/얕은 마커 break)에서 마커 pin이 **마지막으로
+일치**하는 위치 `last_match`까지를 진짜 멤버 범위로 보고 `member.pinned := marker.pinned`로 재기록한다. 그 뒤 꼬리 `[last_match+1, e)`
+(마커와 다른 pin이 subtree 끝까지 이어짐 = 다음 pin 리전의 **genuine 최상위 카드**)는 **배제**하고, 사이에 낀 desync 멤버(마커 pin이
+뒤에서 재등장)는 **흡수**한다. 이렇게 하면 canonical 상태에서 GP1 렌더와 **동일 답**(top카드 안 흡수·idempotent)을 내면서, 손상/
+레거시 혼합 파일(멤버 pinned=1·마커=0, 또는 desync)은 여전히 마커 기준으로 canonical화해 **shred를 막는다**(누락 시 shred가 실패 모드).
+
+### 12.6 이동/드래그(정정 ③) — **GP3 완료**
 
 **정정 ③(clamp는 이동 함수가 아니라 plan 산출부)**: 초안은 `moveGroupRange`/`simulateGroupMove`에 `clampGroupMoveToRegion`을
 넣자 했으나, 두 함수는 프리뷰/확정 **이중 경로**라 양쪽에 넣으면 divergence(SG8 이중경로 위험)가 재발한다. 대신 **`groupDragPreviewFrame`의
@@ -700,6 +715,15 @@ plan 산출부에서 단일 clamp** — `insert_before`를 `DropPlan`에 굽기 
 마지막 plan을 재사용하므로(SG8 iii) 프리뷰=확정이 같은 clamp를 본다. 카드 드래그는 이미 `clampMoveToGroup`(핀 경계)을
 순수 코어에 태워(SG8) 정직하다. 중첩 넣기(`groupNestPlan`)는 **두 그룹 pin이 같을 때만 허용**(다르면 null→형제 폴백,
 C3 재발 방지). 드롭 고정 승계는 **없음**(clamp가 애초에 막고, pin은 명시 토글 전용).
+
+**`toggleGroupPin`의 리전 안착(정정 ③′ — `moveGroupRange` 대신 `stablePartitionPinned`)**: 그룹 통째 고정/해제(§12.10)는
+드래그가 아니라 명시 토글이라 위 plan 경로가 아니다. 순서: (1) 토글 **전** `groupSubtreeEnd`(pin-인식, 개별 pin 차단으로
+마커·멤버 pin 일치)로 완전 subtree `[mi, e)`를 잡고, (2) 마커+멤버 pin을 새 값으로 **직접 동기**(suffix-exclusion은 전량
+flip 직후를 "꼬리"로 보고 안 흡수하므로 여기서 명시 flip이 유일 동기원), (3) **`stablePartitionPinned`**로 그 연속·uniform-pin
+블록을 목표 리전 경계에 안착한다 — 복원과 **같은 프리픽스 정렬**이라 그룹 리전 양쪽에 다른 고정 단위가 있어도(예: 고정 그룹 앞에
+또 다른 고정 그룹) 프리픽스 불변식(I1)을 항상 지킨다(`moveGroupRange`의 단일 `insert_before`로는 표현 못 하는 경계 케이스 —
+stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4) `normalize`(idempotent 확인) 후 1회 rebuild. `clampGroupMoveToRegion`은
+어디까지나 **그룹 드래그** plan 지점 전용이고, 토글의 리전 안착은 `stablePartitionPinned`가 맡는다.
 
 ### 12.7 removeFromGroup·개별 pin·마커 승계(보강 4·5·6)
 
@@ -710,11 +734,17 @@ C3 재발 방지). 드롭 고정 승계는 **없음**(clamp가 애초에 막고,
 - **`inheritGroupMarker` pinned 승계(보강 6)**: 마커 승계(`closeTab`·removeFromGroup) 시 `group_start/collapsed/depth/color`에
   더해 **`pinned`도 승계**해야 승계 과정에서 그룹 고정이 소실되지 않는다.
 
-### 12.8 렌더 힌트 `pin_derived`(보강 7) — **GP4**
+### 12.8 렌더 힌트 `pin_derived`(보강 7) — **GP4 완료**
 
 멤버 캐시 `pinned=1`을 그대로 렌더하면 **모든 멤버에 📌가 떠 노이즈**다. `Row.card`에 **`pin_derived: bool` 힌트**를 실어
-`buildSidebarDrawList`(≈14500)가 live `tab.pinned` 대신 그 힌트를 읽게 한다 — **멤버 📌는 억제**하고 **그룹 헤더에만 고정
-인디케이터**를 낸다(개별 최상위 pin은 그대로 📌).
+(`chrome/components/sidebar.zig`: `card: struct { …, pin_derived }`) `projectRows`가 비마커 멤버 카드엔 `true`, 최상위 카드·
+마커 자기 카드엔 `false`를 굽는다(마커 pinned는 파생이 아니라 **권위**).
+
+**단일 출처 `sidebarRowShowsPin(row)`**: `buildSidebarTitleFrame`이 `pins[]`를 채울 때와 헤드리스 테스트가 **공유**하는 하나의
+판정 함수(live `tab.pinned` 산발 판정 금지). 규칙 — (a) `group_header` row = 마커 `pinned`면 **그룹 고정 인디케이터 📌**(헤더 이름줄
+우측 끝, "이 그룹 고정됨"을 헤더 하나에만), (b) `card` row 중 `pin_derived`(멤버 파생 캐시)면 **억제**, (c) **그룹 마커 자기 카드**
+(`group_start != null`)도 **억제**(헤더가 인디케이터를 드므로 자기 카드 📌는 중복), (d) 그 외 최상위 카드만 live `tab.pinned` 그대로
+📌(개별 위치 고정 유지). rename 중 헤더는 호출처가 억제(편집 폭 보존). 도메인은 `sidebarRenderRows()`(드래그 중이면 preview_rows).
 
 ### 12.9 직렬화 — 새 키 0
 
@@ -725,19 +755,28 @@ C3 재발 방지). 드롭 고정 승계는 **없음**(clamp가 애초에 막고,
 
 ### 12.10 UX
 
-- **헤더 우클릭 "그룹 고정" 토글**(`ctx_group_menu_pin` 신설, `.group` 분기): `toggleGroupPin(marker)` → 마커 pinned 토글 →
-  `normalizePinnedFromGroups` → 그룹을 리전에 안착(`groupDragPreviewFrame` plan 경로 재사용) → rebuild.
-- **카드 "위치 고정"**은 top-level 전용 — 그룹 소속 카드에서 누르면 §12.7 보강 5(그룹째 위임 or 비활성).
-- pin 표시는 §12.8(멤버 📌 억제·헤더 인디케이터). pane 분리·removeFromGroup은 **비고정 리전 첫 마커 앞**(§12.4 8 호출처).
+- **헤더 우클릭 "그룹 고정" 토글**(`ctx_group_menu_pin` = 그룹 헤더 메뉴 Rename 다음 항목, `.group` 분기): `toggleGroupPin(marker)`
+  → 마커+멤버 pin 직접 동기 → **`stablePartitionPinned`로 리전 안착**(§12.6 정정 ③′, `moveGroupRange`가 아님) →
+  `normalizePinnedFromGroups`(idempotent) → rebuild → `assertPinnedPrefixRuntime`(디버그).
+- **카드 "위치 고정"**은 top-level 전용 — 그룹 소속 카드 우클릭 pin은 `enclosingGroupMarkerTab`로 마커를 찾아 **그룹째 위임**
+  (`toggleGroupPin`), 최상위면 `togglePin`(§12.7 보강 5, 개별 desync 차단).
+- pin 표시는 §12.8(`sidebarRowShowsPin` 단일 출처 — 멤버·마커 카드 📌 억제·헤더 인디케이터). pane 분리·removeFromGroup은
+  **각 카드가 속한 핀 리전의 첫 마커 앞**(§12.4 리전 헬퍼 `firstGroupStartInRegion`/`pinRegionBounds`).
 
 ### 12.11 불변식·검증(보강 8·9)
 
 - **경계 도메인(보강 8)**: order-공간 **per-position pinned**(고정 count 아님). 7 경계와 리전 헬퍼가 모두 이 도메인을 쓴다.
-- **`assertPinnedPrefixRuntime` 확장(보강 9)**: 기존 "고정 프리픽스 연속"에 더해 **핀 경계 = 그룹(최상위 단위) 경계 정렬**을
-  런타임 assert(핀 경계가 subtree 중간을 자르지 않음 = I3 안전 전제).
-- **헤드리스**: ① **identity byte-identical**(고정 그룹 0개면 리전 경계=양끝 → 기존 projectRows/SG3~SG8 회귀 0). ② **7 경계**:
-  "고정 그룹(마커 pinned=1) + 비고정 최상위 카드 + 비고정 그룹" 인위 배치로 비고정 카드가 안 삼켜지고(#4·#1) 고정 접힘 뒤
-  안 숨고(#2) `(N)` 안 오염(#6) depth 리전별 정확(#3)함을 단언(GP1 완료 — `test "GP1: pin-region 경계가 7개 subtree-스캔을…"`).
+- **`assertPinnedPrefixRuntime` 확장(보강 9)**: 기존 "고정 프리픽스 연속"(비고정 뒤에 고정이 없음 = I1)에 더해 **핀 경계 =
+  그룹(최상위 단위) 경계 정렬**을 런타임 assert(핀 경계가 subtree 중간을 자르지 않음 = I3 안전 전제). 정렬 판정은 **순수 함수
+  `pinBoundariesAlignGroups()`에 위임**한다 — assert(panic)와 헤드리스 테스트(GP4(b))가 **같은 판정을 공유**하도록. 판정 구조는
+  `normalizePinnedFromGroups`와 **동형(suffix-exclusion)**: 각 최상위 그룹 구조 subtree `[i,e)`에서 마커 pin이 마지막으로 일치하는
+  `last_match`까지의 진짜 멤버 범위 안에 다른 pin 카드가 끼면(desync 샌드위치) `false`, canonical(normalize 후)은 항상 `true`,
+  꼬리 top카드는 다음 리전이 다룬다. 호출처: `toggleGroupPin`·`applyWorkspaceWindow`(복원) 뒤 디버그 게이트.
+- **헤드리스**: ① **identity byte-identical**(고정 그룹 0개면 리전 경계=양끝 → 기존 projectRows/SG3~SG8 회귀 0, `test "GP1: …"`).
+  ② **7 경계**: "고정 그룹(마커 pinned=1) + 비고정 최상위 카드 + 비고정 그룹" 인위 배치로 비고정 카드가 안 삼켜지고(#4·#1)
+  고정 접힘 뒤 안 숨고(#2) `(N)` 안 오염(#6) depth 리전별 정확(#3)함을 단언(GP1). ③ **정규화·안착**: shred→canonical·복원
+  순서·마커 pinned 승계(GP2)·suffix-exclusion tension 해소·개별 pin 위임·`toggleGroupPin`·`clampGroupMoveToRegion` 프리뷰=확정
+  (GP3). ④ **렌더**: `pin_derived`·`sidebarRowShowsPin`·`pinBoundariesAlignGroups` desync 검출/흡수(GP4).
 
 ### 12.12 단계 GP1~5
 
@@ -745,18 +784,23 @@ C3 재발 방지). 드롭 고정 승계는 **없음**(clamp가 애초에 막고,
    `firstGroupStartInRegion`·`pinRegionBounds`·`enclosingGroupMarkerIndex` 핀 클램프 + 8 호출처. 고정 그룹 0개면 byte-identical(§12.11 ①),
    인위 배치로 7 경계 단언(§12.11 ②). `toggleGroupPin`·정규화·clamp·`pin_derived`·UX는 **미포함**(파생 코어가 pin-region을
    **인식**하는 토대만).
-2. **GP2 — `normalizePinnedFromGroups` + 복원 순서(§12.5)**: shred → canonical. `stablePartition`/`togglePin` 회귀 0.
-3. **GP3 — `toggleGroupPin` + plan 산출부 단일 clamp(§12.6) + 헤더 항목**: 고정 그룹 비고정 드래그 → clamp(SG8 등가 확장). 마커 pinned 승계.
-4. **GP4 — UX(§12.8·§12.10)**: 멤버 📌 억제·헤더 인디케이터·pane/remove 리전 정정 + macOS 스크린샷. 훅 `MARU_FORCE_GROUP_PIN`.
-5. **GP5 — 잔재/문서**: §10 해소 마무리·§12 최종 동기화.
+2. **GP2 — `normalizePinnedFromGroups` + 복원 순서(§12.5) ✅**: shred → canonical(suffix-exclusion). `stablePartition`/`togglePin`
+   회귀 0. 복원은 normalize→`stablePartitionPinned` 순서, 마커 pinned 승계(`inheritGroupMarker`), 드래그 게이트.
+3. **GP3 — `toggleGroupPin` + plan 산출부 단일 clamp(§12.6) + 헤더 항목 ✅**: 고정 그룹 비고정 드래그 → `clampGroupMoveToRegion`
+   (SG8 등가 확장, 프리뷰=확정). 토글은 `stablePartitionPinned` 안착. 개별 pin 입구 차단·removeFromGroup unpin 선행.
+4. **GP4 — UX(§12.8·§12.10) ✅**: `pin_derived`+`sidebarRowShowsPin`으로 멤버·마커 카드 📌 억제·헤더 인디케이터, `assertPinnedPrefixRuntime`
+   확장(`pinBoundariesAlignGroups`), pane/remove 리전 정정 + macOS 스크린샷. 훅 `MARU_FORCE_GROUP_PIN`.
+5. **GP5 — 잔재/문서 ✅**: §10 백로그 "그룹 고정" → C2 해소, §12 최종 동기화(§12.5 suffix-exclusion·§12.6 `stablePartitionPinned`·
+   §12.8 `sidebarRowShowsPin`·§12.11 `pinBoundariesAlignGroups`), dead code 없음 확인, 회귀 매트릭스(GP1~4+SG3~SG8+pin) green.
 
 ### 12.13 리스크
 
 - **[약점 최상]** "고정 그룹 + 비고정 최상위 카드"(§12.1) — C2 2앵커만 해소. **정정: 파생 2차 일반화 폭발은 없다**(§12.4 —
-  7 경계 각 한 줄). 적대검증 1순위였고 GP1 헤드리스로 닫힘.
-- **[약점]** 이중표현 정규화 누락 = shred — chokepoint 단일화 대신 **8 mutation 지점 호출 + 게이트/복원 특례**(§12.5).
-- **[중]** SG8 이중경로 divergence — group clamp를 **plan 산출부 단일 clamp**(§12.6)로, `assertPinnedPrefixRuntime` 확장(§12.11)으로 방어.
+  7 경계 각 한 줄). 적대검증 1순위였고 GP1 헤드리스로 닫힘. 정규화도 이 인접을 **suffix-exclusion**으로 흡수(§12.5, GP3 tension 해소).
+- **[약점]** 이중표현 정규화 누락 = shred — chokepoint 단일화 대신 **6 mutation 지점 호출 + 게이트/복원 특례**(§12.5).
+- **[중]** SG8 이중경로 divergence — group clamp를 **plan 산출부 단일 clamp**(§12.6)로, `assertPinnedPrefixRuntime` 확장(§12.11
+  — 순수 `pinBoundariesAlignGroups`)으로 방어.
 - **[중]** 기존 테스트(`togglePin`·`clampMoveToGroup`·SG4/5/8) — 그룹 고정 0개/전부 비고정 byte-identical(GP1 identity)로 회귀 0.
 
 **단순화 대안**(C2 churn이 과하면): **S1(Chrome식)** — 그룹 고정 폐기, 카드 pin=그룹 자동 제외(위치 파생 무변경, "그룹째
-고정" UX 상실). 원리는 C2, 리스크 회피는 S1. 현재 C2로 착수(GP1 완료).
+고정" UX 상실). 원리는 C2, 리스크 회피는 S1. **C2로 완결(GP1~5)** — churn이 관리 범위였고 위 방어들이 회귀 0을 유지했다.

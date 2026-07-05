@@ -408,7 +408,7 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
      - **트리 연속·연속 파티션 유지**: 삽입은 항상 마커 경계(moveGroupRange), depth relevel은 블록을 고립 subtree로 정규화(1,2,3…
        연속)해 target 기준으로 remap하므로 gap·역전이 없다. projectRows 스택 워크가 재투영 시 유효 트리를 보장(gap-clamp).
      - **드롭 하이라이트**: `sidebar_drop_slot`이 드롭 row(넣기면 타겟 그룹 헤더)를 `.drop_zone` 밴드로 표시 — 헤더 밴드가 켜지면
-       "이 그룹 안으로 넣기"를 뜻한다. **한계**: 목표 depth를 미리 들여쓰기로 보여주는 live 프리뷰는 미구현(드롭 후 재투영으로 확정).
+       "이 그룹 안으로 넣기"를 뜻한다. **한계**: 목표 depth를 미리 들여쓰기로 보여주는 **비커밋 프리뷰는 고스트+삽입선(§10·SG7 결론)이라야 성립**한다(적대검증 결론) — 현재는 라이브 relevel이라 indent 자체는 이미 실시간이고, 미구현인 건 "커밋하지 않는" 프리뷰 시맨틱뿐이다.
      - **헤드리스 검증**: ①그룹을 다른 그룹 헤더에 드롭→중첩(depth+1, subtree 상대 depth C:1→2·2→3 유지) ②중첩 그룹을 최상위 카드에
        드롭→빼기(depth1, 저장 relevel) ③카드를 자식 그룹 안→자식 depth·최상위→0 ④mouse 통합(헤더→헤더 중첩). 매 케이스 depth·연속
        파티션·트리 연속 단언. **스크린샷 훅** `MARU_FORCE_GROUP_DRAGNEST`(A를 B 헤더에 드롭한 결과 = A가 B 자식으로 들여쓰기, 검증 완료).
@@ -421,6 +421,109 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
    - **헤더 밴드 정책(기본 보더라인 제거)**: §5 "헤더 밴드 정책" — 무색 헤더는 밴드 없이 화살표+이름만, 색 지정 헤더만 밴드
      (그 색 tint), hover/active는 카드와 같은 경로로 유지(`Row.group_header.has_color` 스위치, `view` 헤더 밴드 루프가 그 값 게이트).
      헤드리스로 무색=밴드 op 0·색=1·호버=호버 밴드 있음을 단언, `MARU_FORCE_GROUP`(무색 깔끔)·`_COLOR`(색 유지) 스크린샷 검증.
+7. **SG7 — 드래그 depth 프리뷰**: 초안은 "작게"(순서는 이미 라이브니 **depth만** 시각 프리뷰 — relevel 없이·`?u8` 한 스칼라·
+   싸게)였으나, **doc-first 적대검증 3회가 전제를 전부 반박**해 "작게"는 폐기한다. 발견(근거 코드는 app_session.zig):
+   - **이미 라이브 relevel이다(잉여)**: SG5-4 그룹 드래그는 매 프레임 `groupDragFrame`(4214)→`moveGroupNesting`/`moveGroupSibling`
+     →`relevelBlock`(4304)이 `group_depth`를 **즉시 커밋 + rebuild**한다 — 드래그 중 indent가 오늘도 라이브로 바뀐다. 별도 depth
+     프리뷰는 잉여다("live 프리뷰 미구현"은 오해 — 미구현인 건 *비커밋 프리뷰 시맨틱*뿐).
+   - **"relevel 없이"는 모순+과소명세**: relevel을 미루면 `recomputeVisibleTabs`가 그 위치를 **"형제"로 파생**(gap-clamp)하므로,
+     프리뷰가 그 파생값을 능동적으로 **뒤엎어야** 한다(모순 주입). 대상도 한 row가 아니라 **subtree**(헤더+직속카드+자식)라
+     `relevelBlock`의 스택 정규화를 렌더에서 재현해야 해 `?u8` 하나로 과소명세.
+   - **비용 회피는 허구**: 매 프레임 `rebuildSidebar`(O(n) 재투영)는 그대로 낸다. 건너뛰는 `relevelBlock` write는 `changed` 가드까지
+     있어 무시 가능한 절감이다.
+   - **`sidebarGroupDropBoundary`는 depth를 안 낸다**: 경계 인덱스만 반환. 빼기 depth는 `moveGroupSibling`의 **post-move**
+     `effectiveDepthAt` — 실제 이동 뒤에야 존재. 카드 드래그(SG4)는 depth 계산 자체가 없다(위치 파생). "이미 산출하니 재사용"은 틀렸다.
+   - **접힌 그룹 사라짐은 relevel 무관**: 사라짐은 `recomputeVisibleTabs` pass2의 가시성 게이트(투영 효과, `anyCollapsedInStack`)라
+     relevel을 생략해도 발생. depth 프리뷰가 가장 필요한 이 케이스에서 삽입 row가 아예 없어 **SG7은 no-op**.
+   - **정작 거슬리는 이동 커밋(yo-yo)은 SG7이 안 건드린다**: "순서는 라이브 유지"라 헤더 통과 시 그룹이 실제로 들락날락하는 커밋은 그대로.
+
+   **결론**: "작게"는 잉여이거나 사실상 §10 고스트 리팩터로 수렴한다. **의미 있는 depth 프리뷰 = 위치까지 비커밋 프리뷰 = 고스트+삽입선
+   (§10)** 하나로 귀결(중첩=depth라 order/depth 분리는 category error). 유리한 사실 하나: depth를 읽는 렌더 경로는 `buildSidebarTitleDrawList`
+   glyph indent 2곳(13884·13956)뿐이고 밴드·accent·hit-test·배지는 depth 무관 → **고스트 구현 시 override 표면 자체는 작다**. 착수 시점은
+   접힌 그룹 사라짐·드래그 yo-yo가 실사용에서 거슬릴 때(§10 고스트 리팩터). 그 전엔 현행 라이브 재배치로 충분(depth가 이미 실시간 보임).
+8. **SG8 — 고스트+삽입선 드래그 프리뷰(설계 확정본, 착수)**: SG7 폐기 결론(§9-7)이 가리킨 하나의 리팩터 — 사이드바 드래그를
+   **라이브 재배치**(매 프레임 `self.tabs` 커밋+relevel+rebuild)에서 **고스트+삽입선**(비커밋 프리뷰 + 드롭 **1회** 확정)으로 전환한다.
+   접힌 그룹 드롭 시 카드가 순간 사라짐·헤더 통과 시 그룹이 들락날락하는 yo-yo가 실사용에 거슬릴 때 착수한다(그 트리거가 왔다).
+   초안은 **적대검증 3회**를 거쳐 아래 보강이 확정됐다.
+   - **핵심 결정 A — 고스트 복제(스냅) + 삽입선**: 드래그 대상(카드=1행·그룹=subtree N행)을 목표 위치·depth로 **반투명 고스트**로
+     그리고 그 상단에 얇은 삽입선을 얹는다. 삽입선 단독은 기각 — 이동단위가 subtree(SG5-4)라 점 하나로는 상대 depth를 못 보인다.
+     고스트는 floating이 아니라 목표 정지(snap)로 둔다(위치·depth 전달이 목적). depth를 읽는 렌더는 `buildSidebarTitleDrawList`
+     indent 2곳뿐이라 override 표면이 작다(§9-7).
+   - **핵심 결정 B — projectRows 가상배치 + 렌더/hit-test 도메인 분리**: 드래그 중 `self.tabs`는 **불변**. 프리뷰 상태를
+     가상배치로 재투영해 **두 투영**을 둔다 — `sidebar_rows`(원본, 불변, hit-test·drop 계산이 봄) vs `sidebar_preview_rows`(신규,
+     고스트 포함, 렌더가 봄). "사라짐"은 pass2 가시성 게이트(`anyCollapsedInStack`)가 원인이라 렌더-레이어 단독으로는 못 고친다 —
+     투영이 프리뷰 입력을 받아 고스트를 **강제 방출**해야 성립한다. reflow·depth·연속 파티션은 가상배치에서 pass1/pass2 재사용으로 공짜.
+   - **row-count 모델 = move(순열)로 확정(초안 정정)**: 고스트는 "복제(행 증가)"가 **아니라** 원본을 목표로 이동한 **가상 순열
+     배치**(그 행을 반투명으로)다. 따라서 `preview_rows.len == sidebar_rows.len`(접힘 게이트로 빠질 행은 프리뷰가 예외로 **되메워**
+     길이를 맞춘다)이라 **스크롤 높이가 발산하지 않는다**(복제 모델의 콘텐츠 높이 증가·스크롤 clamp 흔들림이 원천 제거). 프리뷰는
+     `projectRowsFrom(order, group_depth)`에 **가상 order/group_depth**를 넘긴 결과일 뿐 — SG8a에서 이 코어가 이미 order를 존중한다.
+   - **등가 안전화(이중경로 divergence 방어)**: 프리뷰(비커밋)와 드롭(커밋)이 갈리는 유일 위험은 두 경로가 다른 결과를 내는 것이다.
+     완화 순서 — (i) **순열/depth 순수 코어를 *먼저* 단일화**(SG8a `projectRowsFrom` = 프리뷰·확정 공유 토대, 완료), (ii) 헤드리스
+     **등가 테스트**로 `simulateDrop`이 낸 order/depth == 실제 move 후 read를 고정, (iii) up(확정)에서 **재계산하지 말고** 마지막
+     프리뷰 `plan`을 재사용해 기존 `moveTab`/`moveGroupNesting`/`moveGroupSibling`을 **정확히 1회** 호출. `clampMoveToGroup`(핀 경계)을
+     그 순수 코어에 포함해 **프리뷰가 클램프 전 목표를 보이는 고스트-확정 불일치**를 없앤다(고스트가 핀 경계에서 정직하게 멈춘다).
+   - **게이트/투영 정합**: 프리뷰 투영은 타겟 헤더를 `collapsed=false`로 뒤집어(접힌 그룹에 넣어도 고스트가 보이게) code-review #6
+     류 "접힘 표시인데 카드 보임" 모순 재발을 막는다. `member_count`와 pass2 헬퍼 — `directCardCount`·`subtreeHasMatch`·
+     `effectiveDepthAt`·`groupSubtreeEnd` — 는 **order-aware**여야 가상배치 위에서 옳게 파생된다(**SG8a에서 완료**).
+   - **도메인 인덱스 분리**: `sidebar_drop_slot` 하이라이트는 **preview 도메인**으로 재기준화(렌더가 보는 preview_rows 인덱스).
+     고스트 범위는 상태 배열(`ghost_mask: []bool`, 길이 정합이 함정)이 아니라 **`ghost_lo`/`ghost_hi` range로 파생**(preview_rows에서
+     고스트가 앉는 연속 구간). 표시-슬롯을 읽는 **놓치기 쉬운 렌더 소비자**를 preview 도메인으로 함께 이주 — **⌘1-9 배지**(app_session.zig
+     14799 근처)·**IME caret**(2077 근처). 이 둘을 빠뜨리면 고스트 중 엉뚱한 행에 배지/caret이 간다.
+   - **UX 완결 — 드롭 시 자동펼침**: 접힌 그룹 안으로 드롭하면 확정 후 그 그룹을 자동으로 펼친다(`group_collapsed=false`) —
+     "드래그 중 안 사라짐"(고스트가 해결)에 더해 "드롭 후 접힌 폴더 안으로 사라짐"까지 닫는다.
+   - **핀 파티션 — clamp 코어 포함으로 해소**: 위 등가 안전화의 `clampMoveToGroup`을 순수 코어에 태워 프리뷰·확정이 같은 클램프를
+     본다(핀 경계 드롭이 프리뷰에서도 정직). **그룹 고정(핀+그룹 조합의 파티션 무결성)은 별도 축 후속**으로 §10 백로그.
+   - **프리뷰 상태 모델**:
+     ```zig
+     sidebar_drag_preview: ?SidebarDragPreview = null,
+     sidebar_preview_rows: ArrayListUnmanaged(Row) = .empty, // 렌더 전용(고스트 포함)
+     const SidebarDragPreview = struct {
+         origin: usize,      // 원본 subtree 시작(카드=tab, 그룹=마커). self.tabs 불변이라 안정
+         origin_len: usize,  // subtree 길이(카드=1, 그룹=groupSubtreeEnd(origin)-origin)
+         plan: DropPlan,     // 매 프레임 원본 sidebar_rows hit-test로 재계산(마지막 값이 확정에 재사용)
+         cursor_y: f64,
+     };
+     const DropPlan = union(enum) {
+         card: struct { target_tab: usize },                            // SG4: moveTab
+         group_sibling: struct { insert_before: usize },                // SG5-1 형제 + SG5-4 빼기: moveGroupSibling
+         group_nest: struct { insert_before: usize, target_depth: u8 }, // SG5-4 넣기: moveGroupNesting
+         none,
+     };
+     ```
+     depth 맵은 저장하지 않는다 — `group_nest{target_depth}`만 들고, 자식 상대 depth는 가상 order에 `projectRowsFrom` pass1을
+     재실행해 파생한다(relevel 재현이 아니라 동일 pass1을 가상순서에 적용).
+   - **simulateDrop 순수 코어**: `fn simulateDrop(self, plan, arena) VirtualLayout`이 plan을 `self.tabs`에 **커밋하지 않고** 이동
+     후 순열 `order`·`group_depth`·`ghost_lo`/`ghost_hi`를 반환한다. 프리뷰 = `simulateDrop(plan)` → `projectRowsFrom(vl.order,
+     vl.group_depth)` → `sidebar_preview_rows`(고스트 [lo,hi) 구간은 가시성 게이트 예외로 강제 방출). 확정 = 마지막 plan으로 기존
+     move 1회. **적대검증 정정**: `surface_ptrs`/`active_tab`은 **divergence가 아니다** — `reorderTabs`가 활성 `*Tab` 포인터를
+     추적해 새 인덱스로 보정하고 `surface_ptrs.items`는 `app_window.tabs`와 같은 backing이라, 순서/depth만 다루는 `simulateDrop`은
+     포인터 셔플을 건드릴 필요가 없다(포인터 재배열은 확정 경로 `moveTab`/`moveGroupRange`에만 남는다).
+   - **렌더 통합(모두 preview_rows를 봐야 함, 정합 핵심)**: 밴드(`view`)·glyph(`buildSidebarTitleDrawList`)·py_top/스크롤
+     (`fillSidebarGlyphPyTop`·`contentHeight`)·accent/tint 순회가 드래그 중 **preview_rows**를 본다(고스트 알파↓≈40%, 무색/감쇠).
+     hit-test·plan 계산은 항상 **원본 `sidebar_rows`**(불변)를 봐 yo-yo를 원천 차단한다. 삽입선은 `rowTop(preview_rows, ghost_lo)`에 얇은 quad.
+   - **단계 분해(각 단계 독립 green)**:
+     - **SG8a ✅ — projectRows를 order-aware 토대로(동작 보존, 프리뷰 없음)**: `recomputeVisibleTabs`를 `projectRowsFrom(order:
+       []const usize, group_depth: []const u8)` 순수 코어 + **identity 래퍼**로 분리. pass1/pass2가 `self.tabs.items[order[i]]`를
+       거치고 depth 파생은 `group_depth[i]`를 선언값으로 쓴다. `group_header.tab`=`order[i]`(원본 인덱스)·`.active`=`order[i]==active_tab`.
+       pass2 헬퍼 4개 order-aware — `subtreeHasMatch`/`directCardCount`는 필수 `order`(투영 내부 전용), `effectiveDepthAt`/
+       `groupSubtreeEnd`는 **optional `order`/`group_depth`**(null=라이브 self.tabs, 드래그/create 경로가 그대로 호출·byte-identical).
+       **검증**: identity `projectRowsFrom` == 옛 flat/그룹 투영(모든 Row 태그·필드 byte-identical, 헤드리스 단언) + 뒤집힌 순열이
+       표시 순서만 뒤집고 `self.tabs`는 불변임을 단언. 기존 projectRows/SG3~SG5 그룹 테스트 회귀 0.
+     - **SG8b — `simulateDrop` 순수 코어 + 등가 테스트**: plan→VirtualLayout(order/group_depth/ghost 범위). 검증: `simulateDrop`
+       산출 == 실제 move 후 read(헤드리스 등가).
+     - **SG8c — 프리뷰 투영 + 고스트 방출 + 사라짐 예외**: `sidebar_preview_rows` + 게이트 예외([lo,hi) 강제 방출). 검증: 접힌 그룹
+       카드 plan→preview_rows에 고스트 존재(원본 rows엔 없음).
+     - **SG8d — 카드 드래그 고스트 렌더 + up 확정**: 반투명·삽입선·안 사라짐. 검증: up 후 `self.tabs`가 라이브 시절과 동일 + macOS 스크린샷.
+     - **SG8e — 그룹 드래그 subtree 고스트 + depth 프리뷰**: 검증: up 등가 + 스크린샷.
+     - **SG8f — 라이브 경로 제거·정리**: `groupDragFrame`의 매 프레임 커밋을 프리뷰 재투영으로 축소, 확정 1회로 통일.
+   - **검증 비대칭**: SG8a/b/c는 순수 함수라 **헤드리스가 1급**(byte-identical·등가·고스트 존재). SG8d/e/f의 반투명 알파·삽입선 y·
+     depth 픽셀은 헤드리스로 안 잡혀 **macOS 제품 스크린샷이 1급**(검증 매트릭스). 훅 `MARU_FORCE_GROUP_DRAGGHOST`(예정).
+   - **적대검증이 정정한 것(요약)**: ① `surface_ptrs`/`active_tab`은 divergence 아님(reorderTabs가 활성 포인터 추적·같은 backing). ②
+     핀은 clamp 코어 포함으로 해소(그룹 고정은 독립 백로그). ③ 프리뷰 투영은 타겟 헤더 `collapsed=false` **flip이 필요**(code-review #6
+     재발 방지). ④ row-count는 복제(행 증가)가 아니라 **move(순열)**라 스크롤 발산 없음. ⑤ `ghost_mask`는 상태 배열이 아니라 range 파생.
+   - **리스크**: [높음] 이중경로 divergence(→ 등가 테스트→코어 단일화, SG8a가 첫 단추). [중] 도메인 분리 이주 누락(렌더 소비자를
+     preview_rows로, hit-test는 sidebar_rows로 정확히 — ⌘1-9 배지·IME caret 포함). [중] 스크롤 중 드래그 프리뷰 재투영·삽입선 트리거
+     (autoscroll 없음=기존 한계). [낮] pane grip 별도 경로(상호배타)·rename 중 드래그 confirm 게이트가 up 삼키면 프리뷰 잔류(정리 경로 필요).
 
 ## 10. 리스크 & 미해결
 
@@ -461,6 +564,16 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   per-워크스페이스-파일 구조이지 전역 설정이 아니다.
 - **(낮) group_start 앵커 수명**: 그룹 시작 탭이 닫히면(closeTab) 그 `group_start` 마커를 **다음 탭으로 승계**해야 그룹이
   사라지지 않는다(그룹의 첫 카드를 닫아도 나머지가 그룹에 남게). 마지막 카드까지 닫히면 그룹 소멸 — SG3에서 closeTab 경로에 처리.
+- **(착수, §9-8 SG8) 사이드바 드래그 프리뷰 방식 — 라이브 재배치 → 고스트+삽입선**: 현재 사이드바 드래그는 **라이브 재배치**
+  (드래그 중 실제 `moveTab`/`moveGroupRange`로 카드가 실시간 이동)라 순서는 이미 "프리뷰"가 되지만, **접힌 그룹 드롭 시 카드가
+  순간 사라짐**·헤더 통과 시 그룹이 들락날락하는 **yo-yo**가 남는다. **SG7(작게)은 폐기**(§9-7)됐고, 대신 드래그를
+  **고스트+삽입선**(원본 유지·비커밋 프리뷰·드롭 1회 확정)으로 통일하는 SG8을 **착수**한다 — 순서·depth 프리뷰가 한 시스템으로
+  모이고 위 두 한계가 근본 해결된다. 회귀 표면(SG4/SG5-1/SG5-4 드래그 재작성)은 크되, **순열/depth 순수 코어를 먼저 단일화**
+  (SG8a `projectRowsFrom`, 완료)해 프리뷰·확정 이중경로 divergence를 등가 테스트로 방어하며 단계(SG8a~f)로 쪼갠다(설계 확정본 §9-8).
+- **(후속, 별도 축) 그룹 고정 — 핀+그룹 조합의 파티션 무결성**: 현재 pin(`[고정][비고정]`)과 그룹은 각자 파티션이라, 그룹이
+  고정/비고정 경계를 가로지르면 고정 프리픽스 불변식을 보장하지 않는다(SG4/SG5-1/SG8 모두 범위 밖). SG8의 `clampMoveToGroup`은
+  **드롭 목표를 핀 경계로 정직하게 클램프**(프리뷰-확정 일치)까지만 하고, "그룹 통째를 고정으로 승격/강등"하는 **그룹 고정**은
+  독립 축으로 후속에서 설계한다(그룹 마커에 pinned 상태를 실을지·그룹 단위 파티션을 pin 파티션과 어떻게 합성할지).
 
 ## 11. clean-room
 

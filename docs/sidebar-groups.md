@@ -264,13 +264,13 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **그룹 접기/펴기** | **우선** | 헤더 줄 클릭(삼각 ▾/▸) | `onGroupHeader` → 그 그룹 시작 탭의 `group_collapsed` 토글 → `projectRows` 재투영 + 영속(§4) |
 | **그룹 만들기(중첩)** | **우선** | 우클릭 "새 그룹으로 묶기" · **단축키 `Cmd+Opt+G`** · 팔레트 "New Group" | `create_group` 액션 → 활성/클릭 탭에 `group_start` 세팅. **그룹 안 카드면 depth+1 중첩**(§9), 최상위면 depth 1. 아래 연속 카드가 자동 소속(위치 파생) |
 | **형제 그룹으로 분리** | ✅ SG5-3 | 우클릭 "형제 그룹으로 분리" · **단축키 `Cmd+Opt+Shift+G`** · 팔레트 "New Sibling Group" | `create_sibling_group` 액션 → 그 카드에 `group_start` 세팅 + `group_depth=현재 그룹과 같은 depth`(형제, 중첩 아님). 최상위면 depth 1(create_group과 결과 동일). create_group의 미러 — depth 계산만 다르다(§10 tension 해소) |
-| **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename) |
-| **그룹 해제** | **우선** | 우클릭 "그룹 풀기" · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속 |
+| **그룹 이름 바꾸기** | **우선** | 헤더 더블클릭 · **헤더 우클릭 "Rename"**(SG5-2-header) | rename 인라인 편집(`OverlayInput`) — 워크스페이스 rename과 동형(tabs-splits-layout.md rename). 헤더 우클릭 메뉴의 "Rename"도 같은 `startRename(.group)`(대상=group_start 마커)이라 더블클릭과 동일 |
+| **그룹 해제** | **우선** | 카드 우클릭 "그룹 풀기" · **헤더 우클릭 "그룹 풀기"**(SG5-2-header) · 팔레트 "Ungroup"(기본 키 없음) | `ungroup` 액션 → 그 탭의 `group_start=null`(마커 제거) → 아래 카드는 위 마커/최상위로 자동 재소속. 헤더 우클릭은 대상이 그 헤더의 마커 탭이라 `enclosingGroupMarkerIndex`가 자기 자신을 찾아 카드 경로와 동일 결과 |
 | **그룹에서 빼기** | ✅ | 우클릭 "그룹에서 빼기"(**그룹 소속 카드에만** 노출·최상위 카드엔 안 보임) · 팔레트 "Remove from Group"(기본 키 없음) | `remove_from_group` 액션 → `removeFromGroupForTab`: 그 카드를 **첫 `group_start` 마커 직전**(§2.1 최상위 구간)으로 `moveTab`(중첩 깊이 무관 완전 최상위). ungroup(그룹 통째 해제)과 달리 **이 카드 하나만** 뺀다 — 그룹은 유지(마커 카드면 다음 소속 카드로 마커 **승계** = closeTab과 동형, 마지막 멤버면 그룹 소멸). 이미 최상위면 no-op. 주입 조건 = `tabIsInGroup`(첫 마커 이후 = 그룹 안). 위치 파생이라 별도 소속 편집 없음 |
 | **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그(중첩 자식 그룹 안 포함) | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음 — 드롭 위치의 depth가 곧 카드 depth(자식 그룹 안=자식 depth·최상위=0). 마커 탭 드래그=그룹 통째=SG5 |
 | **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
 | **드래그로 중첩 넣기/빼기** | ✅ SG5-4 | 그룹 헤더를 **다른 그룹 헤더에 드롭=자식으로 중첩**, **카드/최상위에 드롭=형제 재정렬(+얕으면 빼기)** | `groupNestPlan`(헤더 드롭→중첩 계획: target_depth=타겟 depth+1·insert=타겟 subtree 끝)·`moveGroupNesting`(이동+`relevelBlock`으로 subtree 상대 depth 유지)·`moveGroupSibling`(형제 이동+자연 eff releveel로 빼기). 카드 드롭=형제(SG5-1 보존)·헤더 드롭=넣기의 명시적 분리 |
-| 그룹 색 | ✅ SG5-2 | 우클릭 "그룹 색: …" 프리셋(카드 색과 같은 팔레트) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략) |
+| 그룹 색 | ✅ SG5-2 | **카드 우클릭 "그룹 색: …"** 프리셋(카드 색과 같은 팔레트) · **헤더 우클릭 "그룹 색: …"**(SG5-2-header, 같은 라벨·팔레트·`setGroupColorForTab` 재사용) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략). 헤더/카드가 같은 색 메뉴를 공유해 사용자가 헤더에서도 색을 찾는다(피드백 반영) |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
 세 경로에 **자동으로** 뜬다 — (1) 커맨드 팔레트, (2) 설정 화면(⌘,) Input 섹션의 **키바인딩 리바인더**(행 클릭 → 녹음
@@ -368,8 +368,10 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
      (a) **헤더 밴드 tint** — `lowerSidebar`가 group_header 밴드(.tab_hover_bg) 색에 그룹 색을 **카드 배경 tint와 같은 blend
      경로·같은 알파**로 섞는다(층 분리 — 개별 카드 background_color와 다른 row라 안 겹침). (b) **소속 카드 좌측 accent 막대** —
      `rebuildSidebar` per-tab 루프가 순회 중 위 헤더의 색을 기억해 카드 막대에 싣는다. 막대 색 우선순위 = 개별 `accent_color` >
-     그룹 색 > 활성 기본 accent > 없음(개별 지정이 그룹 색보다 명시적). 설정 = 우클릭 "그룹 색: …" 프리셋(카드 색과 같은
-     `tab_color_presets` 팔레트·`setGroupColorForTab`이 소속 그룹 마커에 세팅, 그룹 밖이면 no-op). 직렬화 = workspace.v1
+     그룹 색 > 활성 기본 accent > 없음(개별 지정이 그룹 색보다 명시적). 설정 = **카드 우클릭**과 **헤더 우클릭**(SG5-2-header)
+     "그룹 색: …" 프리셋(카드 색과 같은 `tab_color_presets` 팔레트·`setGroupColorForTab`이 소속 그룹 마커에 세팅, 그룹 밖이면
+     no-op). 헤더 우클릭은 `renameTargetAt`이 group_header row의 마커 탭을 `.group` 대상으로 잡고, `buildContextMenuItems`/
+     `acceptContextMenu`의 `.group` 분기가 카드 메뉴와 **같은 색 라벨/dispatch**를 재사용한다(중복 최소·같은 색 메뉴 공유). 직렬화 = workspace.v1
      `group-color` 스칼라(비영만 group-start 블록에 쓰고 0=키 생략 — additive·round-trip 고정, 옛 리더 미지 키 skip으로 양쪽 호환).
      헤드리스: projectRows/렌더가 헤더 밴드·카드 막대에 그 색을 싣는지 gpu_quad 단언 + workspace.v1 round-trip + 색 없는 그룹
      기본 폴백. **제품 스크린샷 검증 완료**(`MARU_FORCE_GROUP_COLOR=1` — 헤더 밴드 파란 tint + 소속 카드 파란 막대·최상위 카드 무색).

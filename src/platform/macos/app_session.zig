@@ -1059,6 +1059,19 @@ const ctx_menu_group_color_first: usize = ctx_menu_group_ungroup + 1; // ungroup
 const ctx_menu_group_remove: usize = ctx_menu_group_color_first + tab_group_color_labels.len;
 const ctx_menu_count: usize = ctx_menu_group_remove + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기 슬롯 포함)
 
+// 그룹 헤더 우클릭 메뉴(context_menu_target == .group) 인덱스 — 워크스페이스 카드 메뉴와 **별개의 compact 레이아웃**.
+// 헤더는 그룹 스코프 액션만 노출한다(SG5-2-header): 0=Rename(그룹 이름 편집 = startRename(.group) — 헤더 더블클릭과 같은
+// 대상), 1=그룹 풀기(ungroup), 2..=그룹 색 프리셋. 색 프리셋 라벨(tab_group_color_labels)·값(tab_color_presets)·세팅
+// (setGroupColorForTab)은 카드 메뉴와 **같은 인프라**를 재사용해 헤더/카드가 같은 색 메뉴를 공유한다(중복 최소). 대상 마커
+// 탭은 renameTargetAt이 group_header row의 self.tabs[gh.tab](= group_start 마커)로 잡는다. 카드 메뉴처럼 pin/배경/accent를
+// 넣지 않는 이유: 헤더는 그룹 전체를 가리키는 합성 row이지 개별 카드가 아니다(개별 카드 색은 그 카드 우클릭에 있다).
+const ctx_group_menu_ungroup: usize = 1; // Rename(0) 다음: 그룹 풀기
+const ctx_group_menu_color_first: usize = ctx_group_menu_ungroup + 1; // 그룹 색 프리셋 시작(카드 메뉴의 group_color_first와 같은 라벨/팔레트)
+comptime {
+    // 그룹 헤더 메뉴 항목 최대치(Rename + 그룹 풀기 + 색 프리셋)가 공유 버퍼(ctx_menu_count 크기)를 넘지 않는지 확인.
+    if (ctx_group_menu_color_first + tab_group_color_labels.len > ctx_menu_count) @compileError("group header menu exceeds context_menu_items_buf");
+}
+
 fn tabRefEql(a: ?TabRef, b: ?TabRef) bool {
     if (a == null and b == null) return true;
     if (a == null or b == null) return false;
@@ -7127,7 +7140,8 @@ pub const AppSession = struct {
     }
 
     /// 현재 컨텍스트 메뉴 대상에 맞는 항목 라벨을 buf에 채우고 슬라이스 반환. workspace = Rename + Pin/Unpin + 배경
-    /// 프리셋, pane/term = Rename만. show가 호출해 len을 박고, itemAt/draws/accept가 contextMenuItems로 같은 리스트를 본다.
+    /// 프리셋 + 그룹 액션/색, group(헤더) = Rename + 그룹 풀기 + 그룹 색, pane/term = Rename만. show가 호출해 len을
+    /// 박고, itemAt/draws/accept가 contextMenuItems로 같은 리스트를 본다.
     fn buildContextMenuItems(self: *AppSession) []const []const u8 {
         var n: usize = 0;
         self.context_menu_items_buf[n] = "Rename";
@@ -7160,6 +7174,17 @@ pub const AppSession = struct {
             // ungroup(그룹 통째 해제)과 달리 이 카드 하나만 최상위로 뺀다. 맨 끝 조건부라 앞 고정 인덱스를 안 흔든다(sel==ctx_menu_group_remove).
             if (self.tabIsInGroup(t.workspace)) {
                 self.context_menu_items_buf[n] = "그룹에서 빼기"; // ctx_menu_group_remove
+                n += 1;
+            }
+        };
+        // 그룹 헤더 우클릭(SG5-2-header) — 대상은 group_start 마커 탭(renameTargetAt). 헤더 스코프 액션만: Rename(0)=그룹
+        // 이름 편집은 위에서 이미 넣었고, 여기서 "그룹 풀기"(ungroup)와 "그룹 색: …" 프리셋을 붙인다. 색 라벨/팔레트/세팅은
+        // 카드 메뉴와 같은 인프라(tab_group_color_labels·tab_color_presets·setGroupColorForTab)를 재사용해 같은 색 메뉴를 공유한다.
+        if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .group) {
+            self.context_menu_items_buf[n] = "그룹 풀기"; // ctx_group_menu_ungroup
+            n += 1;
+            for (tab_group_color_labels) |lbl| { // 그룹 색 프리셋 — ctx_group_menu_color_first부터(카드 메뉴와 같은 라벨)
+                self.context_menu_items_buf[n] = lbl;
                 n += 1;
             }
         };
@@ -7275,6 +7300,15 @@ pub const AppSession = struct {
                 tab.accent_color = tab_color_presets[sel - ctx_menu_accent_first]; // 좌측 accent 막대색 프리셋(bound·index 모두 tab_color_presets — 공유 팔레트)
             } else if (sel >= ctx_menu_group_color_first and sel < ctx_menu_group_color_first + tab_color_presets.len) {
                 self.setGroupColorForTab(tab, tab_color_presets[sel - ctx_menu_group_color_first]); // 그룹 공통 색(SG5-2) — 소속 그룹 마커에 세팅(카드 색과 같은 팔레트)
+            }
+        } else if (std.meta.activeTag(t) == .group) {
+            // 그룹 헤더 우클릭(SG5-2-header) — 대상 tab은 group_start 마커. sel==0(Rename)은 위에서 startRename(.group)로 처리됨.
+            // ungroup·색은 카드 메뉴와 같은 세션 메서드를 쓴다(대상이 마커라 enclosingGroupMarkerIndex가 자기 자신을 찾아 동작).
+            const tab = t.group;
+            if (sel == ctx_group_menu_ungroup) {
+                self.ungroupTab(tab); // 그룹 풀기(헤더가 가리키는 그룹의 시작 마커 제거)
+            } else if (sel >= ctx_group_menu_color_first and sel < ctx_group_menu_color_first + tab_color_presets.len) {
+                self.setGroupColorForTab(tab, tab_color_presets[sel - ctx_group_menu_color_first]); // 그룹 색(카드 메뉴와 같은 dispatch·팔레트)
             }
         }
     }
@@ -19625,6 +19659,67 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.context_menu_target = .{ .pane = session.activePane() };
     try std.testing.expectEqual(@as(usize, 1), session.buildContextMenuItems().len);
     session.context_menu_target = null;
+}
+
+test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 풀기+그룹 색, accept가 마커 탭에 색 세팅·ungroup" {
+    // 증명: 그룹 **헤더** 우클릭(context_menu_target=.group, 대상=group_start 마커 탭)이 카드 우클릭과 **같은** 그룹 색
+    // 메뉴를 띄우고, accept 시 setGroupColorForTab/ungroupTab이 그 마커 그룹에 적용된다. 사용자 피드백("헤더 우클릭에 색이
+    // 안 보인다")을 헤드리스로 고정한다. 이전엔 .group 대상 메뉴가 Rename 하나뿐이라 헤더에서 색을 못 찾았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.newTab();
+    _ = try session.newTab(); // [t0, t1, t2]
+    try std.testing.expect(session.tabs.items.len >= 3);
+    const marker = session.tabs.items[1];
+    session.createGroupForTab(marker); // t1=그룹 시작 마커(헤더가 가리키는 탭)
+
+    // 헤더 우클릭 대상 = 마커 탭(.group). 메뉴: Rename + 그룹 풀기 + 그룹 색 6프리셋 = 2 + tab_group_color_labels.len.
+    session.context_menu_target = .{ .group = marker };
+    const items = session.buildContextMenuItems();
+    try std.testing.expectEqual(@as(usize, 2 + tab_group_color_labels.len), items.len);
+    try std.testing.expectEqualStrings("Rename", items[0]); // 그룹 이름 편집(startRename(.group))
+    try std.testing.expectEqualStrings("그룹 풀기", items[ctx_group_menu_ungroup]);
+    try std.testing.expectEqualStrings("그룹 색: 없음", items[ctx_group_menu_color_first]); // 카드 메뉴와 같은 색 라벨 공유
+    try std.testing.expectEqualStrings("그룹 색: 파랑", items[ctx_group_menu_color_first + 2]);
+
+    // accept 그룹 색: 파랑 → 마커 탭(t1)에 group_color(카드 우클릭 색 dispatch와 같은 setGroupColorForTab 경로).
+    session.context_menu_target = .{ .group = marker };
+    session.chrome_host.context_menu.selected = ctx_group_menu_color_first + 2; // 파랑(0=없음·1=앰버·2=파랑)
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0x4A7BC4), marker.group_color);
+    try std.testing.expectEqual(@as(u32, 0), marker.background_color); // 그룹 색은 개별 카드 배경/막대와 직교(층 분리)
+    try std.testing.expectEqual(@as(u32, 0), marker.accent_color);
+
+    // accept 그룹 색: 없음 → 0으로 해제(카드 메뉴와 동일한 폴백).
+    session.context_menu_target = .{ .group = marker };
+    session.chrome_host.context_menu.selected = ctx_group_menu_color_first; // 없음
+    session.acceptContextMenu();
+    try std.testing.expectEqual(@as(u32, 0), marker.group_color);
+
+    // accept Rename(sel=0) → 그룹 이름 인라인 편집 시작(마커 group_start 시드). 그룹은 유지.
+    session.context_menu_target = .{ .group = marker };
+    session.chrome_host.context_menu.selected = 0;
+    session.acceptContextMenu();
+    try std.testing.expect(session.rename != null);
+    try std.testing.expect(std.meta.activeTag(session.rename.?) == .group);
+    session.closeRename();
+    try std.testing.expect(marker.group_start != null); // Rename은 그룹을 풀지 않는다(ungroup과 분리)
+
+    // accept 그룹 풀기(ungroup) → 마커의 group_start 제거(그룹 해제). 헤더 스코프 액션이 마커에 그대로 적용됨.
+    session.context_menu_target = .{ .group = marker };
+    session.chrome_host.context_menu.selected = ctx_group_menu_ungroup;
+    session.acceptContextMenu();
+    try std.testing.expect(marker.group_start == null);
 }
 
 test "sidebar group color(SG5-2): 그룹 색 → 헤더 밴드 tint·소속 카드 막대 gpu_quad(층 분리)" {

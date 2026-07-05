@@ -3076,13 +3076,15 @@ pub const AppSession = struct {
         // 3) 새 Tab에 pane을 단일 leaf로 심고 tabs/surface_ptrs에 끼워 활성으로. **끝 append가 아니라 첫 group_start
         //    마커 직전**(= 최상위 구간 끝)에 넣는다 — §2.1 연속 파티션상 리스트 끝 탭은 그룹이 하나라도 있으면 항상
         //    마지막 그룹의 멤버로 위치 파생돼(들여쓰기·마지막 그룹이 접혔으면 숨김), "단독 워크스페이스로 분리"가
-        //    그룹에 흡수된다. removeFromGroupForTab이 카드를 첫 마커 앞으로 옮기는 것과 같은 결(firstGroupStartIndex 공유).
+        //    그룹에 흡수된다. removeFromGroupForTab이 카드를 첫 마커 앞으로 옮기는 것과 같은 결(firstGroupStartInRegion 공유).
         //    tabs/surface_ptrs를 **같은 인덱스**에 insert해 병렬 배열 정합을 유지하고 active_tab을 그 인덱스로. 그룹 전무면
-        //    firstGroupStartIndex=null → 끝(=기존 동작 보존). ensureUnusedCapacity를 위에서 예약했으므로 insert는 realloc/실패 없음.
+        //    firstGroupStartInRegion=null → 끝(=기존 동작 보존). ensureUnusedCapacity를 위에서 예약했으므로 insert는 realloc/실패 없음.
+        //    **핀 리전(§12 GP1)**: 새 탭은 비고정(Tab 기본 pinned=false)이라 **비고정 리전** [pinned_count, len)의 첫 마커
+        //    앞에 넣는다 — 고정 프리픽스를 침범하지 않는다. 고정 그룹 0개면 모든 마커가 비고정 리전이라 리전 앵커=전역 앵커.
         tab.panes.appendAssumeCapacity(pane);
         tab.active_pane = 0;
         tab.tree = .{ .leaf = pane };
-        const insert_at = self.firstGroupStartIndex() orelse self.tabs.items.len;
+        const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse self.tabs.items.len;
         self.tabs.insertAssumeCapacity(insert_at, tab);
         self.surface_ptrs.insertAssumeCapacity(insert_at, &pane.activeTerm().surface);
         self.app_window.tabs = self.surface_ptrs.items; // items 슬라이스 길이 변경 — 새 items로 재바인딩
@@ -4262,9 +4264,12 @@ pub const AppSession = struct {
             .group_header => |h| h.tab,
         };
         if (target_tab >= len) return null;
-        // 첫 그룹 시작 = 최상위 구간의 끝(§2.1: 최상위 카드는 첫 마커 이전에만). firstGroupStartIndex 공유(code-review #14 —
-        // 옛 인라인 스캔 재구현 제거). 마커가 하나도 없으면 len(전부 최상위 = 옛 인라인이 len에서 멈추던 것과 동치).
-        const first_group = self.firstGroupStartIndex() orelse len;
+        // 첫 그룹 시작 = 최상위 구간의 끝(§2.1: 최상위 카드는 첫 마커 이전에만). **핀 리전(§12 GP1)**: 앵커는 드래그
+        // 그룹 m이 속한 핀 리전에 국소화한다(각 리전 안에서 §2.1가 다시 성립 — 비고정 리전이면 [pinned_count, len)의 첫
+        // 마커). 마커가 그 리전에 없으면 리전 끝(reg.hi). 고정 그룹 0개면 m은 비고정 리전이라 리전 앵커=전역 앵커·reg.hi=len
+        // → 옛 `firstGroupStartIndex() orelse len`과 byte-identical. (그룹 통째 이동 자체의 리전 clamp는 GP3 clampGroupMoveToRegion.)
+        const reg = self.pinRegionBounds(m);
+        const first_group = self.firstGroupStartInRegion(reg.lo, reg.hi) orelse reg.hi;
         if (target_tab < first_group) {
             // 최상위 카드에 드롭 → 그룹들 최상단(첫 그룹 앞). 자기가 이미 첫 그룹이면 no-op.
             if (m == first_group) return null;
@@ -4693,9 +4698,15 @@ pub const AppSession = struct {
     /// from(자기 포함)에서 **위로** 가장 가까운 group_start 마커의 인덱스 — §2.1 소속 파생(각 카드의 소속 = 자기 위에서
     /// 가장 가까운 그룹 시작 마커). 위에 마커가 없으면 null(최상위 카드). ungroupTab·setGroupColorForTab·
     /// startRenameGroupForTab이 공유한다(code-review #13 — 옛 세 곳의 상향 스캔 중복 통합). from은 유효 인덱스라 가정.
+    /// **핀 리전 클램프(§12 GP1)**: 소속 마커는 from과 **같은 핀 리전**에 있어야 한다(pin ⊃ group — 비고정 카드가
+    /// 고정 리전의 마커에 소속될 수 없다). 상향 스캔이 per-position pinned가 바뀌는 지점(핀 리전 경계)에 닿으면 null
+    /// (이 리전엔 위에 마커 없음). 고정 그룹 0개면 from이 비고정 카드일 때 리전 안에서 마커를 먼저 만나 옛 동작과
+    /// 동일하고(경계에 닿기 전 return), from이 고정 탭이면 리전에 마커가 없어 양쪽 다 null → byte-identical.
     fn enclosingGroupMarkerIndex(self: *const AppSession, from: usize) ?usize {
+        const pin = self.tabs.items[from].pinned;
         var i = from;
         while (true) : (i -= 1) {
+            if (self.tabs.items[i].pinned != pin) return null; // 핀 리전 경계를 넘음 — 이 리전엔 상위 마커 없음
             if (self.tabs.items[i].group_start != null) return i;
             if (i == 0) return null;
         }
@@ -4737,20 +4748,52 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 첫 group_start 마커의 tab 인덱스(§2.1: 최상위 = 이 인덱스 **이전** 구간). 마커가 하나도 없으면 null(그룹 전무 =
-    /// 전부 최상위). 연속 파티션이라 한 번 그룹이 시작되면 리스트 끝까지 그룹 안이므로 이 하나로 "최상위 경계"가 정해진다.
-    /// removeFromGroupForTab(빼기 목표 위치)과 우클릭 "그룹에서 빼기" 주입 조건(tabIsInGroup)이 공유한다.
-    fn firstGroupStartIndex(self: *const AppSession) ?usize {
-        for (self.tabs.items, 0..) |t, i| if (t.group_start != null) return i;
+    /// 핀 리전 [lo, hi) 안의 첫 group_start 마커 인덱스 — firstGroupStartIndex(§2.1)의 **핀 리전 국소화**(그룹 고정 C2,
+    /// docs/sidebar-groups.md §12). 그룹 고정은 리스트를 `[고정][비고정]` 2리전으로 나누고, 각 리전 안에서 §2.1 연속
+    /// 파티션(최상위 카드 = 그 리전의 첫 마커 이전)이 다시 성립한다. lo/hi로 리전을 국한해 그 리전의 앵커만 찾는다.
+    /// 리전을 [0, len)로 주면(고정 그룹 0개면 모든 마커가 비고정이라 사실상 항상 그렇다) 전역 첫 마커 = 옛 동작과 동일.
+    fn firstGroupStartInRegion(self: *const AppSession, lo: usize, hi: usize) ?usize {
+        const clamp_hi = @min(hi, self.tabs.items.len);
+        var i = lo;
+        while (i < clamp_hi) : (i += 1) if (self.tabs.items[i].group_start != null) return i;
         return null;
+    }
+
+    /// 첫 group_start 마커의 tab 인덱스(§2.1: 최상위 = 이 인덱스 **이전** 구간). 마커가 하나도 없으면 null(그룹 전무 =
+    /// 전부 최상위). 리전 인지 없는 **전역** 조회(= firstGroupStartInRegion(0, len)) — 테스트·전역 판정이 쓴다. 리전별
+    /// 앵커(빼기 목표 위치·tabIsInGroup·pane 분리 삽입점)는 firstGroupStartInRegion에 리전 경계를 넘겨 국소화한다(§12 GP1).
+    fn firstGroupStartIndex(self: *const AppSession) ?usize {
+        return self.firstGroupStartInRegion(0, self.tabs.items.len);
+    }
+
+    /// tab 위치 idx가 속한 **핀 리전** 경계 [lo, hi) — per-position pinned가 같은 최대 연속 구간(§12 GP1 경계 도메인 =
+    /// order-공간 per-position pinned이지 고정 count가 아니다). I1 프리픽스 불변식이면 고정 탭=[0, pinned_count)·비고정=그
+    /// 뒤라 리전이 프리픽스/서픽스이지만, 이 스캔은 프리픽스를 **가정하지 않고** 인접 pinned 플립만 본다(핀 리전 인식
+    /// 파생 토대라 인위적 배치도 옳게 국소화). 고정 그룹 0개(모든 마커 pinned=0)면 마커는 전부 비고정 리전이라 리전
+    /// 앵커 = 전역 앵커 → byte-identical. idx가 범위 밖이면 빈 구간 [idx, idx).
+    const PinRegion = struct { lo: usize, hi: usize };
+    fn pinRegionBounds(self: *const AppSession, idx: usize) PinRegion {
+        const len = self.tabs.items.len;
+        if (idx >= len) return .{ .lo = idx, .hi = idx };
+        const pin = self.tabs.items[idx].pinned;
+        var lo = idx;
+        while (lo > 0 and self.tabs.items[lo - 1].pinned == pin) lo -= 1;
+        var hi = idx + 1;
+        while (hi < len and self.tabs.items[hi].pinned == pin) hi += 1;
+        return .{ .lo = lo, .hi = hi };
     }
 
     /// tab이 어느 그룹에 속하는가(§2.1 연속 파티션: 첫 마커 이후 인덱스 = 그룹 안, 마커 카드 자신 포함). 우클릭
     /// "그룹에서 빼기"를 **그룹 소속 카드에만** 주입하는 조건이자 removeFromGroupForTab no-op 판정과 같은 단일 출처.
     /// 최상위(첫 마커 이전·그룹 전무)면 false → 메뉴에 항목이 안 뜨고 액션도 no-op.
     fn tabIsInGroup(self: *const AppSession, tab: *const Tab) bool {
-        const fm = self.firstGroupStartIndex() orelse return false;
-        for (self.tabs.items, 0..) |t, i| if (t == tab) return i >= fm;
+        // **핀 리전(§12 GP1)**: "그룹 안" = tab이 속한 핀 리전의 첫 마커 이후. 고정 탭이면 그 리전(고정 그룹 0개면
+        // 마커 없음)에 앵커가 없어 false, 비고정 카드면 비고정 리전 앵커와 비교 → 옛 전역 판정과 byte-identical.
+        for (self.tabs.items, 0..) |t, i| if (t == tab) {
+            const reg = self.pinRegionBounds(i);
+            const fm = self.firstGroupStartInRegion(reg.lo, reg.hi) orelse return false;
+            return i >= fm;
+        };
         return false;
     }
 
@@ -4768,8 +4811,11 @@ pub const AppSession = struct {
             break;
         };
         const ix = idx orelse return;
-        const fm0 = self.firstGroupStartIndex() orelse return; // 그룹 전무 → no-op
-        if (ix < fm0) return; // 이미 최상위(첫 마커 이전) → no-op(중첩 깊이 무관, tabIsInGroup=false와 동치)
+        // **핀 리전(§12 GP1)**: 빼기는 이 카드가 속한 핀 리전 **안의** 최상위(그 리전 첫 마커 앞)로만 옮긴다 — 고정
+        // 프리픽스를 침범하지 않는다. reg는 pinned 기반이라 아래 마커 승계(그룹 필드만 이동, pinned 불변)에도 안정하다.
+        const reg = self.pinRegionBounds(ix);
+        const fm0 = self.firstGroupStartInRegion(reg.lo, reg.hi) orelse return; // 이 리전에 그룹 전무 → no-op
+        if (ix < fm0) return; // 이미 (이 리전) 최상위(첫 마커 이전) → no-op(중첩 깊이 무관, tabIsInGroup=false와 동치)
 
         // 이 카드가 그룹 시작 마커면 그룹이 사라지지 않게 마커를 다음 소속 카드로 승계(inheritGroupMarker 공유, #11).
         // 승계 불가(그룹이 이 카드뿐·마지막 탭)면 마커를 free해 그룹 소멸. 이 탭은 살아남으므로 그룹 필드를 기본값 복귀.
@@ -4784,9 +4830,9 @@ pub const AppSession = struct {
             tab.group_depth = 1;
         }
 
-        // 승계 후(또는 마커 아니었으면) 남은 첫 마커 직전으로 옮긴다. 이 카드가 첫 마커였다면 승계로 마커가 ix+1로 내려가
-        // 이미 그 앞(최상위)이 되므로 moveTab 불필요 — 재투영만. moveTab이 tabs/surface/active/rebuild를 처리한다.
-        if (self.firstGroupStartIndex()) |fm| {
+        // 승계 후(또는 마커 아니었으면) 남은 첫 마커(이 핀 리전 안) 직전으로 옮긴다. 이 카드가 첫 마커였다면 승계로 마커가
+        // ix+1로 내려가 이미 그 앞(최상위)이 되므로 moveTab 불필요 — 재투영만. moveTab이 tabs/surface/active/rebuild를 처리한다.
+        if (self.firstGroupStartInRegion(reg.lo, reg.hi)) |fm| {
             if (ix > fm) {
                 _ = self.moveTab(ix, fm);
                 return;
@@ -6807,8 +6853,16 @@ pub const AppSession = struct {
         {
             var stack: [max_group_nesting]u8 = undefined;
             var top: usize = 0;
+            var prev_pinned: bool = false;
             for (order, 0..) |tab_idx, i| {
                 const tab = self.tabs.items[tab_idx];
+                // 핀 리전 경계(그룹 고정 C2, docs/sidebar-groups.md §12 GP1): per-position pinned가 이전 위치와 다르면
+                // 새 핀 리전이 시작한다 → depth 스택 리셋. pin ⊃ group ⊃ nest 계층상 그룹 subtree는 한 리전 통째라
+                // 리전 경계를 그룹이 넘을 수 없다("고정 그룹 + 비고정 최상위 카드" 인접에서 비고정 카드가 고정 subtree에
+                // 삼켜지는 것을 막는다). 경계 도메인 = order-공간 per-position pinned(고정 count 아님). 고정 그룹 0개면
+                // flip 지점(있다면 pinned 프리픽스 끝)에서 스택이 비어 리셋이 no-op → 옛 투영과 byte-identical(SG8a identity).
+                if (i > 0 and tab.pinned != prev_pinned) top = 0;
+                prev_pinned = tab.pinned;
                 if (tab.group_start != null) {
                     const dd: u8 = @max(@as(u8, 1), group_depth[i]);
                     while (top > 0 and stack[top - 1] >= dd) top -= 1; // 같거나 깊은 조상 마커 닫기
@@ -6836,8 +6890,14 @@ pub const AppSession = struct {
         var ghost_row_lo: usize = 0;
         var ghost_row_hi: usize = 0;
         var ghost_row_seen: bool = false;
+        var prev_pinned_p2: bool = false;
         for (order, 0..) |tab_idx, i| {
             const tab = self.tabs.items[tab_idx];
+            // 핀 리전 경계(§12 GP1): per-position pinned가 바뀌면 접힘 조상 스택(cstack)을 리셋한다 — 고정 그룹이
+            // 접혀 있어도 그 뒤 비고정 최상위 카드가 접힘을 상속받아 숨는(shred) 일을 막는다(pin ⊃ group). 고정 그룹
+            // 0개면 flip 지점에서 cstack이 비어 no-op → byte-identical. (파생 depth 리셋은 pass1, 여기는 가시성 게이트.)
+            if (i > 0 and tab.pinned != prev_pinned_p2) ctop = 0;
+            prev_pinned_p2 = tab.pinned;
             // SG8c: 이 표시 위치가 고스트 구간 [lo,hi)면 접힘 게이트를 무시하고 강제 방출한다(옮겨진 subtree가 접힌
             // 그룹에 들어가도 카드가 순간 사라지지 않게 — 사라짐의 원인이 pass2 가시성 게이트라 투영이 예외한다). 라이브
             // (preview=null)면 항상 false라 게이트 유지(byte-identical).
@@ -6909,8 +6969,10 @@ pub const AppSession = struct {
     fn ghostOverlapsSubtree(self: *AppSession, order: []const usize, depth: []const u8, i: usize, d: u8, p: PreviewCtx) bool {
         if (p.ghost_lo >= p.ghost_hi) return false; // 고스트 없음(none)
         const n = order.len;
+        const pin_i = self.tabs.items[order[i]].pinned; // 마커 위치의 핀 리전(§12 GP1)
         var e = i + 1;
         while (e < n) : (e += 1) {
+            if (self.tabs.items[order[e]].pinned != pin_i) break; // 핀 리전 경계 — subtree는 한 리전 통째(pin ⊃ group)
             if (self.tabs.items[order[e]].group_start != null and depth[e] <= d) break; // subtree 경계(형제/조상 마커)
         }
         return p.ghost_lo < e and p.ghost_hi > i; // [lo,hi) ∩ [i,e) ≠ ∅
@@ -6930,8 +6992,10 @@ pub const AppSession = struct {
     /// order-aware(SG8a): i·k는 표시 위치라 원본 탭은 self.tabs.items[order[k]]로 거친다(depth/matches는 위치 인덱스).
     fn subtreeHasMatch(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool) bool {
         const n = order.len;
+        const pin_i = self.tabs.items[order[i]].pinned; // 마커 위치의 핀 리전(§12 GP1)
         var k = i;
         while (k < n) : (k += 1) {
+            if (k > i and self.tabs.items[order[k]].pinned != pin_i) break; // 핀 리전 경계 — subtree는 한 리전 통째
             if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (matches[k]) return true;
         }
@@ -6944,9 +7008,11 @@ pub const AppSession = struct {
     /// order-aware(SG8a): i·k는 표시 위치라 원본 탭은 self.tabs.items[order[k]]로 거친다(depth/matches는 위치 인덱스).
     fn directCardCount(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool, searching: bool) u16 {
         const n = order.len;
+        const pin_i = self.tabs.items[order[i]].pinned; // 마커 위치의 핀 리전(§12 GP1)
         var count: u16 = 0;
         var k = i;
         while (k < n) : (k += 1) {
+            if (k > i and self.tabs.items[order[k]].pinned != pin_i) break; // 핀 리전 경계 — (N) 배지가 다른 리전 카드로 오염되지 않게
             if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (depth[k] == d and (!searching or matches[k])) count +|= 1;
         }
@@ -6962,9 +7028,15 @@ pub const AppSession = struct {
         const n = if (order) |o| o.len else self.tabs.items.len;
         var stack: [max_group_nesting]u8 = undefined;
         var top: usize = 0;
+        var prev_pinned: ?bool = null; // 핀 리전 경계 추적(§12 GP1)
         var i: usize = 0;
         while (i < idx and i < n) : (i += 1) {
             const ti = if (order) |o| o[i] else i;
+            const pin = self.tabs.items[ti].pinned;
+            if (prev_pinned) |pp| if (pin != pp) { // 핀 리전 경계 → 스택 리셋(subtree는 리전을 못 넘는다)
+                top = 0;
+            };
+            prev_pinned = pin;
             if (self.tabs.items[ti].group_start != null) {
                 const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[i] else self.tabs.items[ti].group_depth);
                 while (top > 0 and stack[top - 1] >= dd) top -= 1;
@@ -6977,6 +7049,10 @@ pub const AppSession = struct {
         }
         if (idx < n) {
             const ti = if (order) |o| o[idx] else idx;
+            const pin = self.tabs.items[ti].pinned;
+            if (prev_pinned) |pp| if (pin != pp) { // idx가 새 핀 리전의 첫 위치면 스택 리셋(카드=0·마커=parent+1 from empty)
+                top = 0;
+            };
             if (self.tabs.items[ti].group_start != null) {
                 const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[idx] else self.tabs.items[ti].group_depth);
                 while (top > 0 and stack[top - 1] >= dd) top -= 1;
@@ -6998,10 +7074,12 @@ pub const AppSession = struct {
         const tm = if (order) |o| o[m] else m;
         if (self.tabs.items[tm].group_start == null) return @min(m + 1, len);
         const eff_m = self.effectiveDepthAt(m, order, group_depth);
+        const pin_m = self.tabs.items[tm].pinned; // 마커의 핀 리전(§12 GP1)
         var k = m + 1;
         while (k < len) : (k += 1) {
             const tk = if (order) |o| o[k] else k;
             const t = self.tabs.items[tk];
+            if (t.pinned != pin_m) break; // 핀 리전 경계 — subtree는 한 리전 통째(비고정 카드가 고정 subtree에 안 삼켜짐)
             const kd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[k] else t.group_depth);
             if (t.group_start != null and kd <= eff_m) break;
         }
@@ -16383,6 +16461,76 @@ test "SG8a: projectRowsFrom가 order 순열을 존중한다(SG8b 프리뷰 토�
     try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items[1].card.tab); // order[1]=0
     // self.tabs 자체는 재배열되지 않았다(비커밋 가상 배치).
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+}
+
+// GP1(그룹 고정 C2 — pin-region-aware 파생 토대, docs/sidebar-groups.md §12). "고정 그룹(마커 pinned=1) + 비고정 최상위
+// 카드 + 비고정 그룹" 배치를 인위로 만들어 7개 subtree-스캔 경계가 **핀 리전 경계(per-position pinned 플립)**에서 멈추는지
+// 단언한다. Phase A(모든 탭 비고정=고정 그룹 0개)는 pin 리셋이 **inert**해 옛 §2.1 연속 파티션 그대로(비고정 카드가 그룹에
+// 흡수·member_count 포함) — 동작 보존. Phase B(마커+멤버 pin)는 pin 플립에서 리전이 갈라져 비고정 카드가 고정 subtree에
+// 안 삼켜지고(#4 groupSubtreeEnd·#1 pass1 depth), 고정 collapsed 뒤에도 안 숨고(#2 pass2), (N) 배지가 안 오염(#6 directCardCount)됨.
+test "GP1: pin-region 경계가 7개 subtree-스캔을 리전에서 멈춘다(고정 그룹+비고정 카드 삼킴/shred/배지오염 방지) — 동작 보존" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+
+    // 배치: t0=그룹 PG 마커(depth1)·t1=PG 멤버·t2=비고정 최상위 카드·t3=그룹 UG 마커(depth1)·t4=UG 멤버.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[3].group_start = try allocator.dupe(u8, "UG");
+    session.tabs.items[3].group_depth = 1;
+
+    // ── Phase A — 고정 그룹 0개(모든 탭 비고정). pin 리셋 inert → 옛 §2.1: t2가 PG에 흡수(depth1), PG=[0,3), member=3.
+    session.recomputeVisibleTabs();
+    // rows: [gh PG, c t0 d1, c t1 d1, c t2 d1, gh UG, c t3 d1, c t4 d1] — t2가 PG 소속(연속 파티션).
+    try std.testing.expectEqual(@as(usize, 7), session.sidebar_rows.items.len);
+    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[3].card.depth); // t2 = 그룹 안(흡수, 옛 동작)
+    try std.testing.expectEqual(@as(u16, 3), session.sidebar_rows.items[0].group_header.member_count); // t0·t1·t2
+    try std.testing.expectEqual(@as(usize, 3), session.groupSubtreeEnd(0, null, null)); // PG subtree = [0,3)
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(2, null, null)); // t2 = PG 소속
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[2])); // 흡수됐으니 그룹 안
+
+    // ── Phase B — 고정 그룹: PG 마커+멤버를 pin(프리픽스 [1,1,0,0,0] 유지). pin 플립(pos2)에서 리전이 갈라진다.
+    session.tabs.items[0].pinned = true; // PG 마커 = 그룹 고정 권위
+    session.tabs.items[1].pinned = true; // PG 멤버(정규화 캐시)
+    session.recomputeVisibleTabs();
+    // #1 pass1: t2가 고정 subtree에 안 삼켜지고 비고정 리전 최상위(depth0)로 파생.
+    try std.testing.expectEqual(@as(usize, 7), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[3] == .card);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items[3].card.tab); // t2
+    try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[3].card.depth); // 비고정 리전 최상위(삼킴 방지)
+    // #6 directCardCount: (N) 배지가 비고정 카드로 오염 안 됨(PG 직접 카드 = t0·t1 = 2).
+    try std.testing.expectEqual(@as(u16, 2), session.sidebar_rows.items[0].group_header.member_count);
+    // #4 groupSubtreeEnd: 고정 PG subtree가 pin 경계(pos2)에서 끝난다.
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null));
+    try std.testing.expectEqual(@as(usize, 5), session.groupSubtreeEnd(3, null, null)); // 비고정 UG subtree = [3,5)
+    // #3 effectiveDepthAt: t2는 비고정 리전 최상위(0), 리전별로 정확.
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null));
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(0, null, null)); // 고정 PG 마커
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(3, null, null)); // 비고정 UG 마커
+    // 리전 국소화된 소속 판정: 비고정 최상위 t2=밖, 비고정 그룹 멤버 t4=안, 고정 그룹 멤버 t1=안.
+    try std.testing.expect(!session.tabIsInGroup(session.tabs.items[2]));
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[4]));
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[1]));
+
+    // #2 pass2: 고정 PG를 접어도 그 뒤 비고정 t2가 접힘을 상속받아 숨지(shred) 않는다.
+    session.tabs.items[0].group_collapsed = true;
+    session.recomputeVisibleTabs();
+    // rows: [gh PG(▸,2), c t2 d0, gh UG, c t3 d1, c t4 d1] — 고정 멤버(t0·t1)는 숨고 t2는 남는다.
+    try std.testing.expectEqual(@as(usize, 5), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[0].group_header.collapsed);
+    try std.testing.expect(session.sidebar_rows.items[1] == .card);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items[1].card.tab); // t2 안 사라짐(shred 방지)
+    try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[1].card.depth);
 }
 
 /// SG8b 등가 헬퍼(docs/sidebar-groups.md §9) — simulateDrop이 낸 **가상 배치**가 **실제 move 함수 적용 후 self.tabs**와

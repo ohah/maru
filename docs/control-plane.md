@@ -273,6 +273,34 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 7c viewer/editor | renderer/source editor unit + WKWebView harness | markdown viewer/source editor |
 | 7d bind/link routing | `bind` capability allow/deny, md click routing, CLI help fixture | `panel.bindSession` + links |
 
+## 11.1 구현 착수 순서·에이전트 분배
+
+여러 에이전트로 병렬 구현할 때의 권장 분배다. 원칙은 **의존성 순서는 지키되 독립 축은 병렬**, 에이전트 1명 = slice 1~2개(한 관찰가능 동작 / 한 보안 불변식)다.
+
+```text
+[Track F] M0a → M0b            ← 단독 최우선(두 축 공통 선행, 병렬 불가)
+   ├─[Track C 컨트롤]  A1:1a·1b → A2:1c·1d → A3:1e·1f·1g → A4:2a~2c → A5:3a~3c
+   └─[Track W 웹/이동성] M1 → M2 → B1:4a·4b → B2:4c·4d
+                    └────────┬────────┘
+                       [Track 5] 5a~5d (C·W 합류, 단독)
+                       [Track 7] 7a→7b→7c→7d
+                       [Track 6] WebDriver(독립·나중)
+```
+
+- **동시 최대 2~3 에이전트**(F 이후 A-track 1 + W-track 1). ID/collector 계약이 굳기 전 과도한 병렬은 충돌 위험.
+- 파일 겹침이 큰 track(B1 렌더러, W-M `session_model`)은 병렬 시 worktree 격리.
+- 각 에이전트는 §11 Phase 시작 gate를 지키고, 매 slice 후 누적 `/code-review max`로 정확성 회귀를 본다.
+
+각 slice 프롬프트에 박을 보안·동시성 불변식(적대적 리뷰 산물):
+
+| Track | slice | 반드시 주입할 게이트 |
+|---|---|---|
+| A3 | 1e·1f·1g | cap fd **single-scope**, `write`/`lifecycle`은 상속 fd 금지(§8.5); self-origin은 `metadata:self`+per-request(§8.4); 1g 실측 artifact 필수 |
+| A5 | 3a~3c | 리더는 subscriber 큐에 **블록 금지**, revoke 시 outbound 큐 purge(§5·§8.5) |
+| B1 | 4a·4b | 착수 전 렌더 사전 gate 재실행; 두 레이어 **CATransaction 동시 커밋**·caret 조건부 소유([web-panel.md] §2) |
+| B2 | 4c·4d | **코딩 전 IME responder spike 필수**([web-panel.md] §4) |
+| Track5 | 5a~5d | 신뢰 shell origin에만 브리지·exact-origin·untrusted config 핸들러 미등록(§8.1) |
+
 ## 12. 테스트·검증 전략
 
 브라우저 제어 도구라도 real-browser 의존 E2E만으로 닫지 않는다. Maru 컨트롤 플레인은 ndjson 프레이밍, JSON-RPC 디스패치, capability/scope 권한 판정, 소켓 발견, 소켓 서버를 순수 로직 또는 작은 통합 E2E로 분리해 검증한다.

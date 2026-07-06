@@ -41,8 +41,8 @@ const osc_retain_bytes: usize = 4096;
 /// 777/9(알림)·5379(maru)로 가른다. core.zig의 write 상태기계 루프(`.osc`/`.osc_escape`)가 위임한다.
 pub fn dispatchOsc(self: *TerminalCore) void {
     // 대용량 OSC 뒤 용량 반납 — 핸들러들은 body에서 필요한 것을 모두 복사(dupe/intern/decode)하므로
-    // dispatch가 끝나면 버퍼를 비워도 안전하다(참조 유지 없음).
-    defer if (self.osc_buffer.capacity > osc_retain_bytes) self.osc_buffer.clearAndFree(self.allocator);
+    // dispatch가 끝나면 버퍼를 비워도 안전하다(참조 유지 없음). 정상 종료(BEL/ST)의 즉시 반납 경로다.
+    defer reclaimOscBuffer(self);
     if (self.osc_overflow) return; // 수집 상한(oscMayGrow)을 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
     const body = self.osc_buffer.items;
     if (std.mem.startsWith(u8, body, "8;")) {
@@ -80,13 +80,35 @@ pub fn dispatchOsc(self: *TerminalCore) void {
     // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
 }
 
+/// osc_buffer의 capacity를 반납-or-리셋한다 — 직전 수집이 대용량(클립보드)이었으면 free하고, 아니면 length만
+/// 비운다. **.osc를 벗어나는 모든 경로**가 이걸 불러 옛 고정 2048 상한을 재확립한다: 정상 종료(BEL/ST → dispatch
+/// defer)와 abort(ESC+비-`\`)가 1차 반납 지점이고, OSC 재시작(`]`)·RIS(fullReset)는 방어적 백스톱이다(이 둘이
+/// 실행될 땐 보통 이미 반납돼 있지만, 미래에 종료 경로가 늘어도 megabyte가 새지 않게 한 곳에서 정책을 준다).
+/// 핸들러가 body를 모두 복사하므로 비워도 안전하다(참조 유지 없음).
+pub fn reclaimOscBuffer(self: *TerminalCore) void {
+    if (self.osc_buffer.capacity > osc_retain_bytes)
+        self.osc_buffer.clearAndFree(self.allocator)
+    else
+        self.osc_buffer.clearRetainingCapacity();
+}
+
 /// OSC 본문이 한 바이트 더 자랄 수 있는가 — 수집 게이트. 기본 상한은 max_osc_small_bytes(옛 2048 방어선)이고,
 /// **OSC 52("52;" 접두)만** max_osc_bytes까지 허용한다(클립보드 base64는 한 문단만 돼도 2KB를 넘는다).
-/// 접두 판정은 상한 도달 뒤에만 평가돼(단락) 소형 OSC 경로에 비용이 없다.
-fn oscMayGrow(self: *const TerminalCore) bool {
+/// overflow(상한 초과·OOM)면 즉시 false — 남은 수백만 바이트마다 append를 재시도(alloc storm)하지 않고 값싸게
+/// 버린다. 접두("52;") 판정은 소형 상한 진입 시 **1회만** 하고 osc_large_ok에 latch한다(hot path에서 매
+/// 바이트 startsWith 재실행 제거). self를 mutate하므로 non-const.
+fn oscMayGrow(self: *TerminalCore) bool {
+    if (self.osc_overflow) return false; // 이미 폐기 확정 — 재시도 없이 값싸게 소비
     const len = self.osc_buffer.items.len;
     if (len < max_osc_small_bytes) return true;
-    return len < max_osc_bytes and std.mem.startsWith(u8, self.osc_buffer.items, "52;");
+    if (self.osc_large_ok) return len < max_osc_bytes; // latch된 클립보드 판정(startsWith 재실행 없음)
+    // 소형 상한 첫 도달: 클립보드면 대용량 허용을 latch, 아니면 overflow로 확정(이후 위 가드로 값싸게 폐기).
+    if (std.mem.startsWith(u8, self.osc_buffer.items, "52;")) {
+        self.osc_large_ok = true;
+        return len < max_osc_bytes;
+    }
+    self.osc_overflow = true;
+    return false;
 }
 
 /// 종료된 DCS(ESC P ... ST) 내용을 처리한다. 현재 DECRQSS(`DCS $ q <req> ST`)만 — 그 외 DCS(Sixel 등)는
@@ -841,9 +863,10 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
                 index_ += 1;
             },
             .osc_escape => {
-                // OSC 안에서 ESC 다음 바이트. ST(ESC \)면 정상 종료로 해석하고, 그 외도
-                // OSC를 끝낸다(관대 처리 — 내용은 버린다).
-                if (bytes[index_] == '\\') dispatchOsc(self);
+                // OSC 안에서 ESC 다음 바이트. ST(ESC \)면 정상 종료로 dispatch(defer가 capacity 반납),
+                // 그 외(abort)도 OSC를 끝내되(관대 처리 — 내용은 버린다) dispatch를 안 거치므로 여기서 직접
+                // 반납한다 — 안 그러면 대용량 OSC 52를 abort로 끊었을 때 megabyte가 상주한다(상한 재확립).
+                if (bytes[index_] == '\\') dispatchOsc(self) else reclaimOscBuffer(self);
                 self.parser = .ground;
                 index_ += 1;
             },
@@ -898,8 +921,9 @@ fn handleEscapeByte(self: *TerminalCore, byte: u8) void {
             self.parser = .csi;
         },
         ']' => {
-            self.osc_buffer.clearRetainingCapacity();
+            reclaimOscBuffer(self); // 방어적 백스톱: 정상 경로면 이미 반납됐고, 여기서도 상한을 재확립(clearRetainingCapacity 대체)
             self.osc_overflow = false;
+            self.osc_large_ok = false; // 새 수집 — 접두 판정 캐시 리셋
             self.parser = .osc;
         },
         // APC(ESC _): application program command. kitty graphics(`ESC _ G ...`)가 쓴다. OSC와

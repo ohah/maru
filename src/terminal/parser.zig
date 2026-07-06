@@ -43,7 +43,12 @@ pub fn dispatchOsc(self: *TerminalCore) void {
     // 대용량 OSC 뒤 용량 반납 — 핸들러들은 body에서 필요한 것을 모두 복사(dupe/intern/decode)하므로
     // dispatch가 끝나면 버퍼를 비워도 안전하다(참조 유지 없음). 정상 종료(BEL/ST)의 즉시 반납 경로다.
     defer reclaimOscBuffer(self);
-    if (self.osc_overflow) return; // 수집 상한(oscMayGrow)을 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
+    if (self.osc_overflow) {
+        // 수집 상한(oscMayGrow)을 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어). 그게 클립보드(52;)였으면
+        // (osc_large_ok latch) 무음 폐기 대신 거부를 표면화해 사용자가 "왜 복사가 안 됐는지" 알게 한다.
+        if (self.osc_large_ok) self.clipboard_write_rejected = true;
+        return;
+    }
     const body = self.osc_buffer.items;
     if (std.mem.startsWith(u8, body, "8;")) {
         osc.dispatchHyperlink(self, body[2..]);

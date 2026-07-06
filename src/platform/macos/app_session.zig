@@ -11723,6 +11723,24 @@ pub const AppSession = struct {
         return self.clipboard_out_buffer;
     }
 
+    /// OSC 52 클립보드 쓰기가 상한(≈16MB)을 넘어 거부됐으면 notice로 표면화한다 — 무음 폐기 대신 "왜 복사가
+    /// 안 됐는지"를 보여주는 값싼 UX 우위(Ghostty의 무음 폐기를 넘음, terminal-compatibility-policy.md §OSC52).
+    /// pendingClipboard(쓰기 drain)와 같은 활성 surface 스코프. **불청 이벤트라** 오버레이(세팅/find 등)가 열려
+    /// 있으면 건너뛴다 — showNotice가 그 모달을 닫아 사용자를 끊지 않게(정보는 비필수라 유실 무해). flag 읽기·clear는 락 아래.
+    fn surfaceClipboardWriteRejected(self: *AppSession) void {
+        // 인터랙티브 모달(세팅·find·palette·확인 등)이 열려 있으면 건너뛴다 — showNotice가 그걸 닫아 사용자를
+        // 끊지 않게. notice는 제외(anyModalOverlayOpen) — 기존 토스트 위엔 그냥 교체돼도 무방하므로.
+        if (!self.surface_initialized or self.anyModalOverlayOpen()) return;
+        const s = self.activeSurface();
+        s.lockCore(self.io);
+        const rejected = s.core.takeClipboardWriteRejected();
+        s.unlockCore(self.io);
+        if (!rejected) return;
+        var nbuf: [128]u8 = undefined;
+        const mb = terminal.clipboard_max_bytes / 1_000_000;
+        self.showNotice(std.fmt.bufPrint(&nbuf, "클립보드 복사가 너무 커서 취소되었습니다(최대 약 {d}MB).", .{mb}) catch "클립보드 복사가 너무 커서 취소되었습니다.");
+    }
+
     /// OSC 52 읽기(`?` 쿼리)가 대기 중이고 정책(osc52.read)이 allow면 true — Swift가 시스템 클립보드를 읽어
     /// provideClipboardRead로 돌려준다. **정책 게이트는 여기**다(write의 platform 게이트와 대칭): 코어는 쿼리만
     /// 파싱하고 pending을 세우며, deny여도 pending을 소비(clear)하되 클립보드는 읽지 않는다(allow일 때만 Swift가 읽음
@@ -13584,6 +13602,7 @@ pub const AppSession = struct {
         if (ft_on) ft_drain = std.Io.Clock.awake.now(self.io).nanoseconds; // drain(모든 Term PTY pump) 끝
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
+        self.surfaceClipboardWriteRejected(); // 상한 초과로 거부된 OSC 52 쓰기를 notice로 표면화(무음 실패 방지)
         // 개별 Term이 exit하면(전부는 아닌) 그 Term을 자동으로 닫는다(계층 cascade: Term→pane→워크스페이스,
         // PR5b). 이번 tick에 새 종료가 관측됐을 때만 — 살아있는 Term이 있으면 같은 tick에 reap되고, 전부 죽으면
         // 아래 세션 종료 latch가 마지막을 맡는다(그래서 reap이 빈 세션을 만들지 않는다).
@@ -25964,6 +25983,45 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
 
     // 기본 config는 paste(사용자 결정) — 트래킹 .none이면 우클릭이 paste 동작을 의도.
     try std.testing.expectEqual(config_mod.theme.RightClick.paste, session.loaded_config.config.input.right_click);
+}
+
+test "OSC 52 상한 초과 거부: surfaceClipboardWriteRejected가 notice로 표면화(모달 열림 시 억제)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 거부 신호가 없으면 아무 notice도 안 뜬다.
+    session.surfaceClipboardWriteRejected();
+    try std.testing.expect(!session.chrome_host.notice.open);
+
+    // 코어가 거부 신호를 세우면 tick 헬퍼가 notice를 띄우고 신호를 소비한다(1회성).
+    session.activeSurface().core.clipboard_write_rejected = true;
+    session.surfaceClipboardWriteRejected();
+    try std.testing.expect(session.chrome_host.notice.open); // 무음 실패 대신 가시적
+    try std.testing.expect(!session.activeSurface().core.clipboard_write_rejected); // drain됨
+    session.chrome_host.notice.dismiss();
+
+    // 인터랙티브 모달(세팅)이 열려 있으면 억제 — 사용자를 끊지 않는다. 신호도 아직 안 건드린다(락 전 early-return).
+    session.chrome_host.settings.open = true;
+    session.activeSurface().core.clipboard_write_rejected = true;
+    session.surfaceClipboardWriteRejected();
+    try std.testing.expect(!session.chrome_host.notice.open); // 억제됨
+    try std.testing.expect(session.activeSurface().core.clipboard_write_rejected); // 신호 보존(drain 안 함)
+    session.chrome_host.settings.open = false;
+
+    // 모달을 닫으면 다음 표면화에서 정상적으로 뜬다(보존된 신호 소비).
+    session.surfaceClipboardWriteRejected();
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(!session.activeSurface().core.clipboard_write_rejected);
 }
 
 test "OSC 52 read(F2-6): 정책 게이트(deny=무응답·allow=true) + base64 응답 포맷" {

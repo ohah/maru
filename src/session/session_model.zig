@@ -115,6 +115,16 @@ pub fn Model(comptime Rt: type) type {
             /// — 멤버 pinned를 재해석하면 전역 partition이 그룹을 shred(C3)하므로 새 필드로 격리한다(§13). stablePartitionSubtree만
             /// 이 값으로 subtree 내부를 물리 재배열한다. workspace.v1 영속(local-pinned, 기본 false=키 생략). destroyTab 무관(스칼라).
             local_pinned: bool = false,
+            /// §2.1 재설계 서브파티션 마커(docs/sidebar-groups.md §14). 한 핀 리전 **안**에서 이 카드가 **최상위(depth 0)로
+            /// 복귀**하는 지점 = 앞 그룹 리전을 끝내는 리딩 break 신호(pin 플립과 동형의 두 번째 리셋 신호). 위치 파생 소속을
+            /// **override**: 이 카드는 depth 0(top-level)이고 depth 스택을 비우며, 뒤 비마커 카드는 sticky-reset으로 빈 스택을 타
+            /// 다음 마커 전까지 자동 top-level이다(§2.1 위치 파생을 서브파티션으로 일반화 — pin ⊃ subregion(top_level) ⊃ group ⊃
+            /// nest). group_start==null(비마커)·leaf 카드 전용(마커의 형제 top-level 그룹은 group_depth=1 pop으로 표현하므로
+            /// 마커엔 세팅 금지, local_pinned §13.8 선례). 전역 파티션과 직교(핀 프리픽스 I1 불변 — top_level은 항상 한 핀 리전
+            /// 안의 안쪽 파티션). 소속·depth는 저장하지 않고 위치에서 파생하며(§2.1) 이 필드는 "여기서 그룹 리전 끝, 최상위 복귀"만
+            /// 든다. workspace.v1 영속(top-level, 기본 false=키 생략 → 전 탭 false면 7 파생 경계 리셋/break가 no-op = byte-identical).
+            /// destroyTab 무관(스칼라). SR1은 저장+파생 토대만 — 배선(createGroup write·드래그 전이·normalize 재작성)은 SR2~5.
+            top_level: bool = false,
 
             /// 포커스된 panel. pane 내부(Term/surface) 접근에 쓴다. 탭은 항상 panel ≥1.
             pub fn activePane(self: *Tab) *Pane {

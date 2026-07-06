@@ -5131,6 +5131,10 @@ pub const AppSession = struct {
         var i = from;
         while (true) : (i -= 1) {
             if (self.tabs.items[i].pinned != pin) return null; // 핀 리전 경계를 넘음 — 이 리전엔 상위 마커 없음
+            // §2.1 재설계(§14): top_level 카드는 최상위 복귀 지점이라 상위 마커 스캔을 **마커 return 앞에서** 클램프한다.
+            // from이 top카드면 즉시 null(그룹 밖), from이 그 뒤 sticky-reset 카드면 위로 스캔하다 top카드에 닿아 null
+            // (top-level run은 그룹이 아님). 전 탭 top_level=false면 이 항이 never-fire라 옛 상향 스캔과 byte-identical.
+            if (self.tabs.items[i].top_level) return null;
             if (self.tabs.items[i].group_start != null) return i;
             if (i == 0) return null;
         }
@@ -5224,17 +5228,15 @@ pub const AppSession = struct {
         return .{ .lo = lo, .hi = hi };
     }
 
-    /// tab이 어느 그룹에 속하는가(§2.1 연속 파티션: 첫 마커 이후 인덱스 = 그룹 안, 마커 카드 자신 포함). 우클릭
+    /// tab이 어느 그룹에 속하는가(§2.1 소속 파생: 자기 위 가장 가까운 마커에 소속, 없으면 최상위). 우클릭
     /// "그룹에서 빼기"를 **그룹 소속 카드에만** 주입하는 조건이자 removeFromGroupForTab no-op 판정과 같은 단일 출처.
-    /// 최상위(첫 마커 이전·그룹 전무)면 false → 메뉴에 항목이 안 뜨고 액션도 no-op.
+    /// 최상위(위에 마커 없음·top-level run·그룹 전무)면 false → 메뉴에 항목이 안 뜨고 액션도 no-op.
     fn tabIsInGroup(self: *const AppSession, tab: *const Tab) bool {
-        // **핀 리전(§12 GP1)**: "그룹 안" = tab이 속한 핀 리전의 첫 마커 이후. 고정 탭이면 그 리전(고정 그룹 0개면
-        // 마커 없음)에 앵커가 없어 false, 비고정 카드면 비고정 리전 앵커와 비교 → 옛 전역 판정과 byte-identical.
-        for (self.tabs.items, 0..) |t, i| if (t == tab) {
-            const reg = self.pinRegionBounds(i);
-            const fm = self.firstGroupStartInRegion(reg.lo, reg.hi) orelse return false;
-            return i >= fm;
-        };
+        // §2.1 재설계(§14): "그룹 안" = enclosingGroupMarkerIndex가 non-null(자기 위 같은 핀 리전에 마커가 있고, 그
+        // 사이에 top_level 최상위 복귀가 없다). 옛 "리전 첫 마커 이후" 판정은 **그룹 뒤 top카드**를 그룹 안으로 오판했으나
+        // (첫 마커 이후라는 이유만으로), enclosing 기반은 top_level 상향 클램프로 정확히 밖으로 본다. 전 탭 top_level=false면
+        // enclosing(상향 최근접 마커)과 "리전 첫 마커 이후"가 동치(연속 파티션)라 옛 판정과 byte-identical.
+        for (self.tabs.items, 0..) |t, i| if (t == tab) return self.enclosingGroupMarkerIndex(i) != null;
         return false;
     }
 
@@ -7439,7 +7441,10 @@ pub const AppSession = struct {
                 // 리전 경계를 그룹이 넘을 수 없다("고정 그룹 + 비고정 최상위 카드" 인접에서 비고정 카드가 고정 subtree에
                 // 삼켜지는 것을 막는다). 경계 도메인 = order-공간 per-position pinned(고정 count 아님). 고정 그룹 0개면
                 // flip 지점(있다면 pinned 프리픽스 끝)에서 스택이 비어 리셋이 no-op → 옛 투영과 byte-identical(SG8a identity).
-                if (i > 0 and tab.pinned != prev_pinned) top = 0;
+                // §2.1 재설계(§14): top_level 카드도 같은 edge 경계로 스택을 리셋한다(pin 플립과 동형의 두 번째 리셋 신호) —
+                // 이 카드는 depth 0(top-level)로 파생되고, 뒤 비마커 카드는 sticky-reset으로 빈 스택을 타 다음 마커 전까지 자동
+                // top-level이다. 전 탭 top_level=false면 이 항이 never-flip이라 no-op = byte-identical.
+                if ((i > 0 and tab.pinned != prev_pinned) or tab.top_level) top = 0;
                 prev_pinned = tab.pinned;
                 if (tab.group_start != null) {
                     const dd: u8 = @max(@as(u8, 1), group_depth[i]);
@@ -7490,7 +7495,9 @@ pub const AppSession = struct {
             // 핀 리전 경계(§12 GP1): per-position pinned가 바뀌면 접힘 조상 스택(cstack)을 리셋한다 — 고정 그룹이
             // 접혀 있어도 그 뒤 비고정 최상위 카드가 접힘을 상속받아 숨는(shred) 일을 막는다(pin ⊃ group). 고정 그룹
             // 0개면 flip 지점에서 cstack이 비어 no-op → byte-identical. (파생 depth 리셋은 pass1, 여기는 가시성 게이트.)
-            if (i > 0 and tab.pinned != prev_pinned_p2) ctop = 0;
+            // §2.1 재설계(§14): top_level 카드도 같은 edge 경계로 cstack을 리셋한다 — 접힌 그룹 뒤 top-level 카드가 접힘을
+            // 상속받아 숨는(shred, C2 #2 증상과 동형) 것을 막는다. 전 탭 top_level=false면 no-op = byte-identical.
+            if ((i > 0 and tab.pinned != prev_pinned_p2) or tab.top_level) ctop = 0;
             prev_pinned_p2 = tab.pinned;
             // SG8c: 이 표시 위치가 고스트 구간 [lo,hi)면 접힘 게이트를 무시하고 강제 방출한다(옮겨진 subtree가 접힌
             // 그룹에 들어가도 카드가 순간 사라지지 않게 — 사라짐의 원인이 pass2 가시성 게이트라 투영이 예외한다). 라이브
@@ -7580,6 +7587,7 @@ pub const AppSession = struct {
         var e = i + 1;
         while (e < n) : (e += 1) {
             if (self.tabs.items[order[e]].pinned != pin_i) break; // 핀 리전 경계 — subtree는 한 리전 통째(pin ⊃ group)
+            if (self.tabs.items[order[e]].top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드에서 subtree 끝(OR=min)
             if (self.tabs.items[order[e]].group_start != null and depth[e] <= d) break; // subtree 경계(형제/조상 마커)
         }
         return p.ghost_lo < e and p.ghost_hi > i; // [lo,hi) ∩ [i,e) ≠ ∅
@@ -7604,6 +7612,7 @@ pub const AppSession = struct {
         var k = i;
         while (k < n) : (k += 1) {
             if (k > i and self.tabs.items[order[k]].pinned != pin_i) break; // 핀 리전 경계 — subtree는 한 리전 통째
+            if (k > i and self.tabs.items[order[k]].top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드에서 subtree 끝(OR=min)
             if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (matches[k]) return true;
         }
@@ -7621,6 +7630,7 @@ pub const AppSession = struct {
         var k = i;
         while (k < n) : (k += 1) {
             if (k > i and self.tabs.items[order[k]].pinned != pin_i) break; // 핀 리전 경계 — (N) 배지가 다른 리전 카드로 오염되지 않게
+            if (k > i and self.tabs.items[order[k]].top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드가 (N)에 안 세짐(OR=min)
             if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (depth[k] == d and (!searching or matches[k])) count +|= 1;
         }
@@ -7644,6 +7654,7 @@ pub const AppSession = struct {
             if (prev_pinned) |pp| if (pin != pp) { // 핀 리전 경계 → 스택 리셋(subtree는 리전을 못 넘는다)
                 top = 0;
             };
+            if (self.tabs.items[ti].top_level) top = 0; // §2.1 재설계(§14) top_level edge 경계 — 최상위 복귀(pass1과 동형)
             prev_pinned = pin;
             if (self.tabs.items[ti].group_start != null) {
                 const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[i] else self.tabs.items[ti].group_depth);
@@ -7661,6 +7672,7 @@ pub const AppSession = struct {
             if (prev_pinned) |pp| if (pin != pp) { // idx가 새 핀 리전의 첫 위치면 스택 리셋(카드=0·마커=parent+1 from empty)
                 top = 0;
             };
+            if (self.tabs.items[ti].top_level) top = 0; // §2.1 재설계(§14) top_level edge 경계 — idx가 top카드면 depth 0
             if (self.tabs.items[ti].group_start != null) {
                 const dd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[idx] else self.tabs.items[ti].group_depth);
                 while (top > 0 and stack[top - 1] >= dd) top -= 1;
@@ -7688,6 +7700,7 @@ pub const AppSession = struct {
             const tk = if (order) |o| o[k] else k;
             const t = self.tabs.items[tk];
             if (t.pinned != pin_m) break; // 핀 리전 경계 — subtree는 한 리전 통째(비고정 카드가 고정 subtree에 안 삼켜짐)
+            if (t.top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — 그룹 뒤 최상위 카드에서 subtree 끝(그룹 끝 표현의 핵심, OR=min)
             const kd: u8 = @max(@as(u8, 1), if (group_depth) |g| g[k] else t.group_depth);
             if (t.group_start != null and kd <= eff_m) break;
         }
@@ -11908,6 +11921,7 @@ pub const AppSession = struct {
             .group_depth = tab.group_depth, // 중첩 그룹 깊이(SG5-3) — 그룹 시작 탭에만 의미(기본 1)
             .group_color = tab.group_color, // 그룹 공통 색(SG5-2) — 그룹 시작 탭에만 의미(무색=0)
             .local_pinned = tab.local_pinned, // 그룹-로컬 pin(GL §13) — 멤버 카드에만 의미(기본 false)
+            .top_level = tab.top_level, // §2.1 재설계 서브파티션 마커(§14) — 비마커 leaf 카드에만 의미(기본 false)
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
@@ -12265,6 +12279,7 @@ pub const AppSession = struct {
         tab.group_depth = m.group_depth; // 중첩 그룹 깊이 복원(SG5-3) — 기본 1, projectRows가 gap 클램프
         tab.group_color = m.group_color; // 그룹 공통 색 복원(SG5-2) — 무색=0 폴백
         tab.local_pinned = m.local_pinned; // 그룹-로컬 pin 복원(GL §13) — 멤버 카드 subtree-로컬 float 상태(기본 false)
+        tab.top_level = m.top_level; // §2.1 재설계 서브파티션 마커 복원(§14) — 비마커 leaf 카드의 최상위 복귀 신호(기본 false)
         // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계. OOM 시 위 errdefer(panes·tab·group_start)가 정리한다.
         tab.custom_name = try self.dupeCustomName(m.custom_name);
         tab.pinned = m.pinned; // 위치 고정 복원
@@ -17331,6 +17346,89 @@ test "GP1: pin-region 경계가 7개 subtree-스캔을 리전에서 멈춘다(�
     try std.testing.expect(session.sidebar_rows.items[0].group_header.collapsed);
     try std.testing.expect(session.sidebar_rows.items[1] == .card);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items[1].card.tab); // t2 안 사라짐(shred 방지)
+    try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[1].card.depth);
+}
+
+// SR1(§2.1 재설계 — top_level 저장·파생 토대, docs/sidebar-groups.md §14). `top_level` 카드가 한 핀 리전 안에서
+// **최상위(depth 0)로 복귀**하는 리딩 break 신호임을 7 파생 경계에서 헤드리스로 고정한다: (#1 pass1 depth·#2 pass2
+// cstack shred 방지·#3 effectiveDepthAt·#4 groupSubtreeEnd·#5 subtreeHasMatch·#6 directCardCount 배지·#7
+// ghostOverlapsSubtree) + enclosingGroupMarkerIndex 상향 클램프·tabIsInGroup 정확. 배치 [A(마커), a1, TOP(top_level),
+// B(마커), b1]: TOP은 A subtree를 끊고 depth 0으로 파생되며, 뒤 B는 빈 스택에서 형제 top-level 그룹으로 시작한다.
+test "SR1: top_level이 7 파생 경계에서 최상위 복귀 서브파티션을 만든다(§2.1 재설계 §14)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+
+    // 배치: t0=그룹 A 마커(depth1)·t1=A 멤버·t2=top_level 최상위 복귀 카드·t3=그룹 B 마커(depth1)·t4=B 멤버.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true;
+    session.tabs.items[3].group_start = try allocator.dupe(u8, "B");
+    session.tabs.items[3].group_depth = 1;
+
+    // #1 pass1 depth — rows: [gh A, c t0 d1, c t1 d1, c t2 d0, gh B, c t3 d1, c t4 d1]. TOP이 A를 끊어 depth 0,
+    // B는 빈 스택에서 형제 top-level 그룹(depth1)으로 시작한다.
+    session.recomputeVisibleTabs();
+    try std.testing.expectEqual(@as(usize, 7), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[0] == .group_header);
+    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[1].card.depth); // t0 = A 마커 카드
+    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[2].card.depth); // t1 = A 멤버
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items[3].card.tab); // t2
+    try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[3].card.depth); // TOP = 최상위 복귀 depth0
+    try std.testing.expect(session.sidebar_rows.items[4] == .group_header); // B 헤더(형제 top-level 그룹)
+    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[5].card.depth); // t3 = B 마커 카드(depth1)
+    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[6].card.depth); // t4 = B 멤버
+    // #6 directCardCount — A 배지 = 직접 카드 2(t0·t1), TOP은 subtree 밖이라 안 세짐. B 배지 = 2(t3·t4).
+    try std.testing.expectEqual(@as(u16, 2), session.sidebar_rows.items[0].group_header.member_count);
+    try std.testing.expectEqual(@as(u16, 2), session.sidebar_rows.items[4].group_header.member_count);
+
+    // #3 effectiveDepthAt — TOP은 최상위(0), 마커는 각 1.
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null)); // TOP
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(0, null, null)); // A 마커
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(3, null, null)); // B 마커(형제 top-level)
+    // #4 groupSubtreeEnd — A subtree가 top_level에서 끊긴다(=[0,2), TOP 미포함). B subtree=[3,5).
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null));
+    try std.testing.expectEqual(@as(usize, 5), session.groupSubtreeEnd(3, null, null));
+
+    // enclosingGroupMarkerIndex 상향 클램프 — TOP은 그룹 밖(null), TOP 뒤 sticky 카드도 top카드에 닿아 밖. 멤버는 마커로.
+    try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // TOP = 최상위(그룹 밖)
+    try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(1).?); // t1 = A 소속
+    try std.testing.expectEqual(@as(usize, 3), session.enclosingGroupMarkerIndex(4).?); // t4 = B 소속
+    // tabIsInGroup 정확 — TOP은 밖(옛 "첫 마커 이후" 판정은 오판했음), 멤버는 안.
+    try std.testing.expect(!session.tabIsInGroup(session.tabs.items[2])); // TOP = 밖
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[1])); // A 멤버 = 안
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[4])); // B 멤버 = 안
+
+    // #5 subtreeHasMatch — 순수 함수 직접 호출(order=identity, depth 위 파생 고정값). A subtree [0,2)는 TOP을 안 본다.
+    const order = [_]usize{ 0, 1, 2, 3, 4 };
+    const depth = [_]u8{ 1, 1, 0, 1, 1 };
+    const only_top = [_]bool{ false, false, true, false, false }; // TOP만 매치
+    try std.testing.expect(!session.subtreeHasMatch(&order, 0, 1, &depth, &only_top)); // A subtree엔 TOP이 없음(top_level break)
+    const only_a1 = [_]bool{ false, true, false, false, false }; // a1만 매치
+    try std.testing.expect(session.subtreeHasMatch(&order, 0, 1, &depth, &only_a1)); // A subtree엔 a1이 있음
+
+    // #7 ghostOverlapsSubtree — 순수 함수 직접 호출. A subtree [0,2)는 top_level에서 끊겨 TOP 뒤(pos3~4) 고스트와 안 겹친다.
+    try std.testing.expect(!session.ghostOverlapsSubtree(&order, &depth, 0, 1, .{ .ghost_lo = 3, .ghost_hi = 4 })); // B쪽 고스트 ∉ A
+    try std.testing.expect(session.ghostOverlapsSubtree(&order, &depth, 0, 1, .{ .ghost_lo = 1, .ghost_hi = 2 })); // a1 위치 고스트 ∈ A
+
+    // #2 pass2 cstack — A를 접어도 그 뒤 top_level TOP이 접힘을 상속받아 숨지(shred) 않는다.
+    session.tabs.items[0].group_collapsed = true;
+    session.recomputeVisibleTabs();
+    // rows: [gh A(▸,2), c TOP d0, gh B, c t3 d1, c t4 d1] — A 멤버(t0·t1)는 숨고 TOP은 남는다.
+    try std.testing.expectEqual(@as(usize, 5), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[0].group_header.collapsed);
+    try std.testing.expect(session.sidebar_rows.items[1] == .card);
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items[1].card.tab); // TOP 안 사라짐(shred 방지)
     try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[1].card.depth);
 }
 

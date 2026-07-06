@@ -110,6 +110,11 @@ pub const Tab = struct {
     // false(기본)면 writer가 키를 **생략**해(round-trip 고정점·옛 파일 flat 정상) 옛 리더가 미지 키로 skip하는
     // forward-compat도 유지한다. reader는 없으면 false. 마커·top-level 카드에선 무의미(멤버 카드에만 실린다). 기본 false.
     local_pinned: bool = false,
+    // §2.1 재설계 서브파티션 마커(top_level — docs/sidebar-groups.md §14). 한 핀 리전 안에서 이 카드부터 최상위(depth 0)로
+    // 복귀하는 리딩 break 신호(pin 플립과 동형). 순수 additive 스칼라 — false(기본)면 writer가 키를 **생략**해(round-trip
+    // 고정점·옛 파일 flat 정상) 옛 리더가 미지 키로 skip하는 forward-compat도 유지한다. reader는 없으면 false. 비마커 leaf
+    // 카드에만 의미(마커·최상위-run 뒷카드는 위치 파생). 전 탭 false면 byte-identical. 기본 false.
+    top_level: bool = false,
     tree: []const TreeNode, // preorder; leaf의 pane 인덱스가 panes를 가리킨다
     panes: []const Pane,
 };
@@ -170,6 +175,9 @@ fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
     // 그룹-로컬 pin(GL, §13). group_start와 **무관**하게(멤버 카드 = group_start==null) 밖에서 쓴다. false면 키
     // 생략(additive·key-addressed — 옛 파일/비-로컬-pin 카드의 라인 문자열을 안 바꿔 round-trip 고정점). true면 스칼라.
     if (tab.local_pinned) try w.writeAll(" local-pinned=1");
+    // §2.1 재설계 서브파티션 마커(top-level, §14). group_start와 무관하게 밖에서 쓴다. false면 키 생략(additive·
+    // key-addressed — 옛 파일/비-top-level 카드의 라인 문자열을 안 바꿔 round-trip 고정점·양쪽 호환). true면 스칼라.
+    if (tab.top_level) try w.writeAll(" top-level=1");
     try w.writeByte('\n');
     for (tab.tree) |node| try writeTreeNode(w, node);
     for (tab.panes) |pane| try writePane(w, pane);
@@ -290,6 +298,9 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     // 그룹-로컬 pin(GL, §13). additive 스칼라라 없으면 false. 멤버 카드에만 의미(마커·top카드에선 무시) — 렌더/파티션이
     // 위치·group_start로 게이트하므로 그 밖 탭에서 true로 읽혀도 무해(전역 파티션은 이 필드를 안 읽는다).
     const local_pinned = (try f.getUint("local-pinned", u8, 0)) != 0;
+    // §2.1 재설계 서브파티션 마커(top-level, §14). additive 스칼라라 없으면 false. 비마커 leaf 카드에만 의미 — 렌더/파생이
+    // 위치·group_start로 게이트하므로 그 밖 탭에서 true로 읽혀도 무해(7 파생 경계 리셋/break만 반응, 전역 파티션 무관).
+    const top_level = (try f.getUint("top-level", u8, 0)) != 0;
 
     var tree: std.ArrayList(TreeNode) = .empty;
     // 구조 불변식: pane P개 탭의 split 트리는 leaf P + split (P−1) = 정확히 2P−1 노드다. 그보다 많이 읽히면
@@ -299,7 +310,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines));
-    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .local_pinned = local_pinned, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .local_pinned = local_pinned, .top_level = top_level, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -805,6 +816,45 @@ test "workspace round-trip: tab local_pinned 보존(GL §13 — true는 local-pi
     try std.testing.expectEqual(false, t0.local_pinned); // 마커 = false(키 생략 → 기본)
     try std.testing.expectEqual(true, t1.local_pinned); // 로컬 pin 멤버 복원
     try std.testing.expectEqual(false, t2.local_pinned); // 비-pin 멤버 = false(키 생략 → 기본)
+
+    // round-trip 고정점: 다시 직렬화하면 동일(false↔키부재·true↔키존재 인코딩 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace round-trip: tab top_level 보존(§2.1 재설계 §14 — true는 top-level 키, false는 키 생략)" {
+    // §2.1 재설계 서브파티션 마커(docs/sidebar-groups.md §14): 한 핀 리전 안에서 이 카드부터 최상위(depth 0) 복귀.
+    // 전역 pinned·group_start와 직교하는 리딩 break 스칼라라 group 블록 밖에 실린다. writer는 true만 쓰고(false=키 생략,
+    // additive), 옛 파일/비-top 카드 라인은 안 바꾼다. round-trip이 이 인코딩(false↔키부재·true↔키존재)을 고정하는지 검증.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{
+        // 그룹 마커(frontend) — 마커는 top_level 무의미(비마커 leaf 전용). top_level=false라 키 없음.
+        .{ .custom_name = "web", .group_start = "frontend", .group_collapsed = false, .tree = &tree, .panes = &panes },
+        // 그룹 멤버(top_level 없음) — top-level 키 생략(round-trip 고정점).
+        .{ .custom_name = "docs", .tree = &tree, .panes = &panes },
+        // 그룹 뒤 최상위 복귀 카드 — top-level=1 키가 accent-color 뒤(그룹 블록 밖)에 붙는다.
+        .{ .custom_name = "top", .top_level = true, .tree = &tree, .panes = &panes },
+    };
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // top-level 카드(top): accent-color=0 바로 뒤에 top-level=1(그룹 마커가 아니라 group-* 키가 안 붙는다).
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"top\" pinned=0 background-color=0 accent-color=0 top-level=1\n") != null);
+    // 비-top 멤버(docs): accent-color=0 바로 뒤 개행(top-level 키 없음).
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const t0 = parsed.workspace.windows[0].tabs[0];
+    const t1 = parsed.workspace.windows[0].tabs[1];
+    const t2 = parsed.workspace.windows[0].tabs[2];
+    try std.testing.expectEqual(false, t0.top_level); // 마커 = false(키 생략 → 기본)
+    try std.testing.expectEqual(false, t1.top_level); // 비-top 멤버 = false(키 생략 → 기본)
+    try std.testing.expectEqual(true, t2.top_level); // 최상위 복귀 카드 복원
 
     // round-trip 고정점: 다시 직렬화하면 동일(false↔키부재·true↔키존재 인코딩 안정).
     const text2 = try serialize(std.testing.allocator, parsed.workspace);

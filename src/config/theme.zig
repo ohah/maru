@@ -876,8 +876,9 @@ pub const Config = struct {
     bold_is_bright: bool = false,
     /// ANSI 팔레트(0~15) **자동 대비 게이트**(WCAG 명암비 하한). 팔레트 색이 배경 대비 이 명암비에 못 미치면 색상(hue)을
     /// 보존한 채 검은색 방향으로 최소한만 어둡게 보정해, 밝은 배경에서 안 읽히는 색(밝은 노랑·초록·흰색 등)을 읽히게 한다.
-    /// 기본 3.0. 0(또는 1 이하)=끔(업스트림 원색 그대로). **다크 배경에선 자동 무동작** — 어둡게 해도 대비가 안 올라 목표에
-    /// 못 미치는 색은 원본을 유지하므로 다크 프리셋 팔레트는 안 바뀐다. **팔레트에만** 적용하고 배경·전경·커서·선택색은
+    /// 기본 3.0. 0(또는 1 이하)=끔(업스트림 원색 그대로). **충분히 어두운 배경(모든 번들 다크 프리셋)에선 자동 무동작** —
+    /// 검정으로도 목표 대비에 못 미치면 원본을 유지한다(경계·근거는 appearance.contrastFloor 주석; 중간 회색 배경은 보정될 수
+    /// 있다). 프리셋뿐 아니라 explicit `theme.palette.N`·xterm 기본색에도 적용된다. **팔레트에만** 적용하고 배경·전경·커서·선택색은
     /// 불변이다(그 색은 프리셋이 이미 조정). loader가 `theme.min-contrast` 파싱(스키마-주도), 적용은
     /// appearance.resolveTheme의 contrastFloor 한 곳(단일 출처). 근거·트레이드오프: docs/configuration.md `theme.min-contrast`.
     theme_min_contrast: f32 = theme_min_contrast_default,

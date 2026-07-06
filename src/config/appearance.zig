@@ -164,21 +164,25 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
 fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!ResolvedTheme {
     const background = try parseHexColor(config.background);
     const foreground = try parseHexColor(config.foreground);
+    // 배경의 WCAG relative luminance는 이 resolve 안에서 불변이므로 **한 번만** 계산해 16색 contrastFloor에 공유한다
+    // (인덱스마다 재계산하면 std.math.pow가 16×3회 낭비 — config load·라이브 reload마다 발생).
+    const bg_lum = relativeLuminance(background);
     // ANSI 16색을 풀고 min_contrast(WCAG 명암비 하한)를 적용한다. 각 인덱스의 base는 config override(preset/theme.palette.N)가
     // 있으면 그 색, 없으면 xterm 표준색(color.xterm256)이다. 그 위에 contrastFloor로 배경 대비 하한을 강제한다 — 밝은 배경에서
     // 대비가 약한 색을 색상 보존한 채 어둡게 보정해 가독성을 확보한다(근거·정책: docs/configuration.md theme.min-contrast).
     //
     // null 유지 규칙: config override가 **없고** floor가 실제로 아무것도 안 바꾼 인덱스는 null로 남긴다(그 인덱스는 렌더에서
-    // xterm256으로 폴백). 이렇게 하면 다크 배경·min_contrast=0(둘 다 floor 무동작)에선 미지정 인덱스가 전부 null로 남아 **기존
-    // 동작을 100% 보존**한다(회귀 0). 밝은 배경에서 floor가 실제로 바꾼 default 색만 non-null로 seed해 렌더에 전달한다.
-    // 깨진 override 색은 여기서 막힌다(loader가 valid만 담지만, resolve 단독 호출·테스트도 같은 게이트를 거치게 한다).
+    // xterm256으로 폴백). 이렇게 하면 배경이 충분히 어두울 때(모든 번들 다크 프리셋 — contrastFloor 주석의 활성 경계)·
+    // min_contrast=0(둘 다 floor 무동작)에선 미지정 인덱스가 전부 null로 남아 **기존 동작을 100% 보존**한다(회귀 0). floor가
+    // 실제로 바꾼 default 색만 non-null로 seed해 렌더에 전달한다. 깨진 override 색은 여기서 막힌다(loader가 valid만 담지만,
+    // resolve 단독 호출·테스트도 같은 게이트를 거치게 한다).
     var palette: [16]?color.Rgb = .{null} ** 16;
     for (config.palette, 0..) |maybe, i| {
         if (maybe) |hex| {
-            palette[i] = contrastFloor(try parseHexColor(hex), background, min_contrast);
+            palette[i] = contrastFloor(try parseHexColor(hex), bg_lum, min_contrast);
         } else {
             const base = color.xterm256(@intCast(i));
-            const floored = contrastFloor(base, background, min_contrast);
+            const floored = contrastFloor(base, bg_lum, min_contrast);
             if (!std.meta.eql(floored, base)) palette[i] = floored; // floor가 바꾼 default만 seed(안 바뀌면 null=xterm256 폴백)
         }
     }
@@ -250,15 +254,18 @@ fn scaleTowardBlack(c: color.Rgb, k: f32) color.Rgb {
 }
 
 /// 색이 배경 대비 `target` 명암비에 못 미치면 **색상을 보존한 채 검은색 방향으로 최소한만** 어둡게 보정한다.
+/// `bg_lum`은 배경의 WCAG relative luminance(resolveTheme이 16색에 공유하려고 한 번 계산해 넘긴다).
 /// 밝은 배경에선 어둡게 할수록(k↓) 대비가 단조 증가하므로, 목표 명암비에 막 닿는 최대 k(=최소 변화)를 이진 탐색으로 찾는다.
-/// **다크 배경 자동 무동작**: 검정(luminance 0)으로도 목표 대비에 못 미치면(어두운 배경에선 어둡게 해도 대비가 안 오른다)
-/// 원본을 그대로 반환한다 → 다크 프리셋 팔레트는 안 바뀐다. `target <= 1.0`(끔)이거나 이미 충분하면 원본 그대로.
-/// 단일 출처: 이 함수만 팔레트 대비 하한을 적용한다(resolveTheme이 호출).
-fn contrastFloor(c: color.Rgb, bg: color.Rgb, target: f32) color.Rgb {
+/// **활성 경계**: 검정(luminance 0)으로도 목표 대비에 못 미치면 원본을 그대로 둔다(어둡게 해봐야 목표를 못 넘는다). 이는 배경이
+/// 어두울수록 성립한다 — 경계는 `contrastRatio(0, bg_lum) >= target`, 즉 `bg_lum >= 0.05*(target−1)`이다(target=3.0이면
+/// bg_lum≈0.10). **모든 번들 다크 프리셋**은 배경 bg_lum이 이보다 훨씬 낮아(#101010≈0.005, #1e1e2e·#282828 등 <0.03) 무동작이다.
+/// 중간 밝기(회색) 배경은 목표 도달이 가능하면 보정한다 — 그 배경에서도 대비가 약한 색을 읽히게 하는 게 맞다(따라서 "다크
+/// 배경 무동작"은 다크 *프리셋*엔 성립하나, 임의의 중간 회색 배경까지 보장하진 않는다). `target<=1.0`(끔)·이미 충분하면 원본
+/// 그대로. 단일 출처: 이 함수만 팔레트 대비 하한을 적용한다(resolveTheme이 호출).
+fn contrastFloor(c: color.Rgb, bg_lum: f32, target: f32) color.Rgb {
     if (target <= 1.0) return c; // 끔(0 포함) — 업스트림 원색 그대로
-    const bg_lum = relativeLuminance(bg);
     if (contrastRatio(relativeLuminance(c), bg_lum) >= target) return c; // 이미 충분 → 무변경
-    if (contrastRatio(0.0, bg_lum) < target) return c; // 검정(luminance 0)으로도 미달=다크 배경 → 무동작
+    if (contrastRatio(0.0, bg_lum) < target) return c; // 검정(luminance 0)으로도 미달=배경이 충분히 어두움 → 무동작
     // 이진 탐색: k∈[0,1]에서 c×k. lo=목표 충족(더 어두움), hi=미충족(더 밝음). 24회면 u8 해상도로 수렴한다.
     var lo: f32 = 0.0; // k=0(검정)은 위 가드로 항상 충족
     var hi: f32 = 1.0; // k=1(원본)은 위 fast-path로 미충족
@@ -436,6 +443,28 @@ test "theme.min-contrast is a no-op on dark backgrounds and when disabled" {
     const off = try resolve(.{ .theme = .{ .background = "#ffffff", .foreground = "#000000", .palette = raw2 }, .theme_min_contrast = 0 });
     try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0xff, .g = 0xff, .b = 0x00 }), off.theme.palette[11]);
     try std.testing.expect(off.theme.palette[15] == null); // 끔이면 default seed도 없음(전부 null)
+}
+
+test "theme.min-contrast activation boundary: dark presets stay no-op but medium-gray backgrounds still floor" {
+    // 리뷰 지적: "다크 배경 무동작"은 배경이 **충분히 어두울 때만**(검정으로도 목표 대비 미달) 성립한다. 경계는
+    // contrastRatio(0, bg_lum) >= target, 즉 bg_lum >= 0.05*(target-1)(기본 3.0이면 ≈0.10). 이 테스트가 그 경계를 고정해
+    // 문서(configuration.md·contrastFloor 주석)와 코드가 일치함을 증명한다 — 임의의 중간 회색 배경은 무동작 보장 대상이 아니다.
+
+    // (a) 번들 다크 프리셋 배경(#101010, bg_lum≈0.006): 검정으로도 목표를 못 넘어 floor 무동작. 어두워서 저대비인 색
+    //     (dark blue #000080, 대비≈1.2)조차 손대지 않는다 — 어둡게 해봐야 대비가 더 안 오른다.
+    var raw: [16]?[]const u8 = .{null} ** 16;
+    raw[4] = "#000080";
+    const dark = try resolve(.{ .theme = .{ .background = "#101010", .foreground = "#e8e8e8", .palette = raw } });
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0x00, .g = 0x00, .b = 0x80 }), dark.theme.palette[4]);
+
+    // (b) 중간 회색 배경(#606060, bg_lum≈0.13 > 0.10 경계): floor가 활성이라 배경보다 밝아 저대비인 색(bright-black index 8,
+    //     xterm #808080, 대비≈1.5)을 검은색 방향으로 어둡게 보정해 seed한다. 색이 배경보다 밝아 대비 곡선이 V자여도, 목표를
+    //     넘는 k는 [0, k*] prefix라 이진 탐색이 유효하다(floored 색은 배경보다 어두워짐 → 각 채널 < 0x60).
+    const gray_bg = color.Rgb{ .r = 0x60, .g = 0x60, .b = 0x60 };
+    const gray = try resolve(.{ .theme = .{ .background = "#606060", .foreground = "#f0f0f0" } });
+    try std.testing.expect(gray.theme.palette[8] != null); // 활성 → seed됨(다크 프리셋과 달리 무동작 아님)
+    try std.testing.expect(gray.theme.palette[8].?.r < 0x60); // 배경보다 어두워져 대비 확보
+    try std.testing.expect(contrastRatio(relativeLuminance(gray.theme.palette[8].?), relativeLuminance(gray_bg)) >= 2.95);
 }
 
 test "appearance resolver applies cursor color overrides and keeps them null by default" {

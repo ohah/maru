@@ -4275,6 +4275,45 @@ pub const AppSession = struct {
         return .{ .target_tab = target, .top_level = true };
     }
 
+    /// **(A) 카드 드래그 한 프레임의 드롭 plan을 커서 y(backing px)에서 산출한다 — mouse 핸들러와 헤드리스 테스트의 단일
+    /// 출처**(y_px→raw_row→plan 실경로). 두 단계로 판정한다:
+    ///  1. **"그룹 뒤 top_level 탈출"(sidebarCardDropAfterGroup)** — 드래그 소스 카드가 프리뷰에서 자기 자리를 비워 그 아래
+    ///     콘텐츠가 소스 높이만큼 위로 밀리는 **프리뷰 시프트**를 보정한 `y_esc`로 판정한다. hit-test는 불변 원본 sidebar_rows
+    ///     (소스가 아직 자기 자리에 있음)로 하는데 사용자는 소스가 빠진 프리뷰를 보므로, 보정 없이는 "사용자가 그룹 꼬리를
+    ///     겨냥해도 원본 좌표론 멤버 행 중앙에 떨어져 흡수"됐다(증상 A). 소스가 raw_row **위**면(드래그 다운) y에 소스 행 높이를
+    ///     더해, 프리뷰의 그룹 꼬리를 겨냥한 커서가 원본 마지막 멤버의 하단 경계(탈출 존)에 맞게 한다.
+    ///  2. **일반 위치 판정(sidebarGroupDropTargetTab + sidebarCardDropTopLevel)** — 보정 **없는** raw_row로. moveTab의 from/to가
+    ///     소스 제거를 이미 보정하므로 여기에 시프트를 더하면 이중 보정으로 flat 재정렬이 어긋난다(그래서 탈출 판정에만 보정).
+    /// 유효 드롭 없음(범위 밖·마커)이면 .none(제자리 프리뷰). MARU_DEBUG면 실값(raw_row·y_esc·gap·top_level)을 로깅해
+    /// 실앱 드래그에서 왜 흡수(top_level=false)인지 자기검증한다(관측 가능성 — diag.zig 단일 게이트).
+    fn cardDropPlan(self: *AppSession, origin: usize, y_px: f64) DropPlan {
+        const rows = self.sidebar_rows.items;
+        const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, rows, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+        // 프리뷰 시프트 보정: 소스 카드 행이 raw_row **위**면(드래그 다운) 프리뷰가 그 아래 콘텐츠를 소스 높이만큼 위로 당긴다.
+        var y_esc = y_px;
+        if (self.displaySlotOf(origin)) |os| if (os < raw_row) {
+            y_esc = y_px + @as(f64, @floatFromInt(chrome.components.sidebar.rowHeight(rows[os], self.sidebar_slot_height_px, self.sidebar_header_row_h_px)));
+        };
+        const raw_esc = chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+        const gap = self.sidebarCardDropAfterGroup(raw_esc, origin, y_esc);
+        const plan: DropPlan = if (gap) |g|
+            // §14.6 SR5 요구2: "그룹 뒤/사이 gap" 드롭 = 그룹 밖 top카드로 착지(top_level=true, 흡수 아님).
+            .{ .card = .{ .target_tab = g.target_tab, .top_level = g.top_level } }
+        else if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
+            // §14.6 SR4 model-2: 착지 위치 + 드롭 컨텍스트 top_level 의도(타깃이 최상위 카드면 true·그룹 멤버면 false).
+            .{ .card = .{ .target_tab = target_tab, .top_level = self.sidebarCardDropTopLevel(raw_row) } }
+        else
+            .none;
+        if (diag_gate.maruDebugEnabled()) std.log.scoped(.sidebar_card_drag).info(
+            "cardDropPlan: origin={d} y={d:.1} raw_row={d} y_esc={d:.1} raw_esc={d} gap_target={?} plan_top_level={}",
+            .{ origin, y_px, raw_row, y_esc, raw_esc, if (gap) |g| g.target_tab else null, switch (plan) {
+                .card => |c| c.top_level,
+                else => false,
+            } },
+        );
+        return plan;
+    }
+
     // ── SG5-1: 그룹 통째 드래그(헤더/마커 카드를 잡아 그룹 전체를 재정렬) ─────────────────────────────────────
     // docs/sidebar-groups.md §9 SG5·§2.1 연속 파티션. 그룹은 self.tabs 순서 위의 "[마커, 다음 마커) 연속 구간"이므로
     // 그룹 이동 = 그 구간을 **하나의 블록으로** 다른 그룹 경계(다른 group_start 인덱스·최상위 다음·끝)에 끼우는 것이다.
@@ -4782,9 +4821,16 @@ pub const AppSession = struct {
     /// arena=simulateDrop 중간 버퍼(order/group_depth/perm) 정리용(호출자 소유 — 프레임 스크래치).
     fn refreshDragPreview(self: *AppSession, origin: usize, plan: DropPlan, cursor_y: f64, arena: std.mem.Allocator) !void {
         const vl = try self.simulateDrop(origin, plan, arena);
+        // (3) 드래그 대상이 **접힌 그룹**이면 고스트를 subtree 전체가 아니라 접힌 헤더로만 낸다(force-emit 억제). 그룹 통째
+        // 드래그(group_sibling/group_nest)이고 origin 마커가 group_collapsed일 때만 true — 카드 드래그(대상=카드)는 항상 false라
+        // 접힌 **타깃** 그룹 안 드롭 시의 force-emit(사라짐 방지)은 그대로 유지된다(대상/타깃 구분).
+        const dragged_collapsed = switch (plan) {
+            .group_sibling, .group_nest => origin < self.tabs.items.len and self.tabs.items[origin].group_start != null and self.tabs.items[origin].group_collapsed,
+            else => false,
+        };
         // 가상 order/depth를 프리뷰 모드로 투영 — 고스트 [lo,hi)는 접힘 게이트 예외로 강제 방출(사라짐 방지)·헤더 flip.
         // 반환 range는 vl.ghost(order 위치 도메인)를 방출 후 **표시-row 도메인**으로 옮긴 것(렌더가 그대로 씀).
-        const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, vl.top_level, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi });
+        const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, vl.top_level, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi, .dragged_collapsed = dragged_collapsed });
         // subtree 길이(카드=1·그룹=groupSubtreeEnd-origin·none=0). 프리뷰 상태 메타(확정·origin 안정성 문서화용).
         const origin_len: usize = switch (plan) {
             .none => 0,
@@ -7785,7 +7831,11 @@ pub const AppSession = struct {
     /// SG8c 프리뷰 투영 컨텍스트 — projectRowsCore가 프리뷰 모드일 때 [ghost_lo, ghost_hi) **표시 위치**를 접힘 게이트
     /// 예외로 강제 방출하고(옮겨진 subtree가 접힌 그룹에 들어가도 사라지지 않음), 그 고스트를 담은 접힌 그룹 헤더를
     /// collapsed=false로 flip한다(code-review #6 류 "접힘 표시인데 카드 보임" 모순 재발 방지). null=라이브(게이트 유지).
-    const PreviewCtx = struct { ghost_lo: usize, ghost_hi: usize };
+    /// dragged_collapsed=드래그 **대상**(subject)이 **접힌 그룹**인가(그룹 통째 드래그이고 origin 마커가 group_collapsed).
+    /// true면 그 그룹의 고스트를 subtree 전체가 아니라 **접힌 헤더 한 줄**로만 낸다(force-emit·헤더 flip 억제) — 드래그 중
+    /// 접힌 그룹은 접힌 채 보이길 원함(사용자 요청). 드래그 **타깃**이 접힌 그룹(카드를 그 안으로 드롭)일 때의 force-emit는
+    /// 그대로다(SG8 원래 목적=드롭 시 사라짐 방지) — 그건 ghost가 마커가 아니라 카드라 이 플래그와 무관하게 유지된다.
+    const PreviewCtx = struct { ghost_lo: usize, ghost_hi: usize, dragged_collapsed: bool = false };
 
     /// projectRowsCore가 프리뷰 모드에서 낸 고스트의 **표시-row 도메인** 구간(preview_rows 인덱스). simulateDrop이 준
     /// PreviewCtx.ghost_lo/hi는 **order 위치 도메인**(마커=1 위치)이라 렌더가 못 쓴다 — 마커가 header+card 2 row를 내므로
@@ -7906,6 +7956,8 @@ pub const AppSession = struct {
         var ghost_row_hi: usize = 0;
         var ghost_row_seen: bool = false;
         var prev_pinned_p2: bool = false;
+        // (3) 드래그 대상이 접힌 그룹이면 그 subtree 카드 force-emit를 억제해 고스트를 접힌 헤더로만 낸다(아래 ghost_here 사용처).
+        const dragged_collapsed = if (preview) |p| p.dragged_collapsed else false;
         // GL §13.6.1 — 마커 자기 카드를 그룹의 **로컬 pin 직접 멤버 뒤**로 재배치하기 위한 보류 상태(한 번에 최대 1개:
         // 로컬 pin 멤버는 항상 마커 직후 연속 run이고, 자식 subgroup 마커·비pin 멤버가 나오면 즉시 flush되므로 중첩돼도
         // 조상 마커 카드는 자식 진입 전에 비워진다). null=보류 없음.
@@ -7936,7 +7988,11 @@ pub const AppSession = struct {
             // 그룹에 들어가도 카드가 순간 사라지지 않게 — 사라짐의 원인이 pass2 가시성 게이트라 투영이 예외한다). 라이브
             // (preview=null)면 항상 false라 게이트 유지(byte-identical).
             const ghost_here = if (preview) |p| (i >= p.ghost_lo and i < p.ghost_hi) else false;
-            if (ghost_here and !ghost_row_seen) { // 첫 고스트 위치의 첫 row 인덱스(방출 직전 길이)
+            // (3) 접힌 그룹을 통째로 드래그하면 그 subtree 카드는 force-emit **안 한다**(접힘 게이트 유지 → 마커 자기 카드·멤버
+            // 카드 숨김, 헤더만 남음). dragged_collapsed=false(카드 드래그·펼친 그룹)면 force_card=ghost_here라 기존 SG8c
+            // 사라짐-방지 force-emit이 그대로다(접힌 **타깃** 그룹 안 드롭 = ghost가 카드라 이 경로, dragged_collapsed=false).
+            const force_card = ghost_here and !dragged_collapsed;
+            if (ghost_here and !ghost_row_seen) { // 첫 고스트 위치의 첫 row 인덱스(방출 직전 길이) — 헤더도 고스트라 헤더 row부터
                 ghost_row_lo = out.items.len;
                 ghost_row_seen = true;
             }
@@ -7948,7 +8004,12 @@ pub const AppSession = struct {
                 const ancestor_collapsed = anyCollapsedInStack(cstack[0..ctop]);
                 // SG8c 프리뷰: 고스트가 이 그룹 subtree에 들어오면 (1) 헤더 collapsed를 펼침으로 flip(아래)하고 (2) 접힌
                 // 조상에 가려 헤더가 숨을 때도 강제로 보인다(force-show) — 고스트 카드가 헤더 없이 떠다니지 않게.
-                const ghost_in_subtree = if (preview) |p| self.ghostOverlapsSubtree(order, depth, i, d, p, top_level) else false;
+                const ghost_in_subtree_raw = if (preview) |p| self.ghostOverlapsSubtree(order, depth, i, d, p, top_level) else false;
+                // (3) 드래그 **대상**이 접힌 그룹이면 그 subtree 안의 헤더는 flip/force-show 하지 않는다 — 최상위 마커(ghost_lo)는
+                // ancestor_collapsed=false라 접힌 채 그대로 뜨고(collapsed 유지), 안쪽 중첩 헤더는 ancestor_collapsed=true인데
+                // ghost_in_subtree=false라 숨는다(접힌 그룹 통째=접힌 헤더 한 줄). **타깃** 그룹 헤더(자기 위치는 고스트 밖,
+                // dragged_collapsed=false 경로 또는 카드 드래그)의 flip은 유지(드롭 시 펼쳐 보임 = SG8c 원래 목적).
+                const ghost_in_subtree = ghost_in_subtree_raw and !(dragged_collapsed and ghost_here);
                 const header_visible = if (searching)
                     self.subtreeHasMatch(order, i, d, depth, matches, top_level)
                 else
@@ -7983,7 +8044,7 @@ pub const AppSession = struct {
                 // 마커 탭의 **자기 카드**(그룹 첫 몸통 카드). 자기 그룹 접힘(또는 조상 접힘)이면 숨긴다(헤더만 남음).
                 // SG8c: 이 위치가 고스트 구간이면(그룹 통째 드래그가 접힌 곳으로) 접힘 게이트를 무시하고 강제 방출.
                 const self_collapsed = anyCollapsedInStack(cstack[0..ctop]);
-                const card_visible = (if (searching) matches[i] else !self_collapsed) or ghost_here;
+                const card_visible = (if (searching) matches[i] else !self_collapsed) or force_card;
                 // GL §13.6.1: 마커 자기 카드는 **즉시 방출하지 않고 버퍼링**해, 이 그룹의 로컬 pin 직접 멤버 run **뒤**로
                 // 재배치한다(로컬 pin이 그룹 절대 최상단에 오도록). 실제 방출은 loop-top flush(다음 비-로컬-pin 위치) 또는
                 // loop 종료 후 post-loop flush가 한다. tab_idx/depth는 그대로라 hit-test·클릭·활성 전환은 row.tab 기반 정합
@@ -7993,8 +8054,9 @@ pub const AppSession = struct {
             } else {
                 const d = depth[i];
                 const parent_collapsed = anyCollapsedInStack(cstack[0..ctop]);
-                // SG8c: 고스트 구간 카드는 접힘 게이트 예외로 강제 방출(옮겨진 카드가 접힌 그룹에 들어가도 안 사라짐).
-                const card_visible = (if (searching) matches[i] else !parent_collapsed) or ghost_here;
+                // SG8c: 고스트 구간 카드는 접힘 게이트 예외로 강제 방출(옮겨진 카드가 접힌 그룹에 들어가도 안 사라짐). 단 (3)
+                // 드래그 대상이 접힌 그룹이면 force_card=false라 그 subtree 멤버 카드는 접힌 채 숨긴다(고스트=헤더만).
+                const card_visible = (if (searching) matches[i] else !parent_collapsed) or force_card;
                 // pin_derived(§12.8): depth>0 = 그룹 멤버(비마커) 카드 → pinned가 마커 파생 캐시라 렌더가 📌 억제. depth==0 =
                 // 최상위 개별 pin 카드 → false(자기 pin, 📌 유지). order-aware(가상 order 위 depth라 드래그 프리뷰도 일관, SG8 도메인).
                 // 로컬 pin(GL §13.6): 그룹 멤버(depth>0)면 tab.local_pinned을 그대로 실어 sidebarRowShowsPin 선두 분기가 📌를
@@ -9885,16 +9947,9 @@ pub const AppSession = struct {
                     // 그 plan을 refreshDragPreview에 넘겨 sidebar_preview_rows에 고스트를 투영한다(self.tabs 불변). 렌더는
                     // sidebarRenderRows()=preview_rows로 반투명 고스트+삽입선을 그리고, up이 이 마지막 plan을 정확히 1회
                     // 커밋한다. self.tabs가 불변이라 sidebar_drag_index(=origin)도 드래그 내내 안정(옛 landed 팔로우 불필요).
-                    const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                     const origin = self.sidebar_drag_index;
-                    const plan: DropPlan = if (self.sidebarCardDropAfterGroup(raw_row, origin, y_px)) |gap|
-                        // §14.6 SR5 요구2: "그룹 뒤 빈 gap"(마지막 멤버/접힌 헤더 아래 경계) 드롭 = 그룹 밖 top카드로 착지(첫 인터리브).
-                        .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } }
-                    else if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
-                        // §14.6 SR4 model-2: 착지 위치(target_tab) + 드롭 컨텍스트 top_level 전이 의도(그룹 밖 gap=true·안=false)를 함께 굽는다.
-                        .{ .card = .{ .target_tab = target_tab, .top_level = self.sidebarCardDropTopLevel(raw_row) } }
-                    else
-                        .none; // 유효 드롭 위치 없음(범위 밖·마커) → 제자리 프리뷰(고스트 없음)
+                    // (A) y_px→raw_row→plan 실경로 단일 출처(프리뷰 시프트 보정 포함) — 헤드리스 테스트가 같은 함수를 탄다.
+                    const plan = self.cardDropPlan(origin, y_px);
                     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
                     defer arena_state.deinit();
                     self.refreshDragPreview(origin, plan, y_px, arena_state.allocator()) catch {};
@@ -22148,6 +22203,181 @@ fn cardRowOf(session: *AppSession, tab_idx: usize) usize {
         .group_header => {},
     };
     return 0;
+}
+
+/// 표시 row의 화면 y(backing px)를 그 row 안 frac 위치로 — cardDropPlan 실좌표(y_px) 테스트가 커서 y를 구성한다.
+fn sidebarDragScreenY(session: *AppSession, row: usize, frac: f64) f64 {
+    const rows = session.sidebar_rows.items;
+    const top = chrome.components.sidebar.rowTop(rows, row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
+    const h = chrome.components.sidebar.rowHeight(rows[row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    return @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) * frac;
+}
+
+// ── (A) 카드 드래그 실좌표(y_px→cardDropPlan) — 고정 탭을 그룹 꼬리로 끌면 top_level 탈출(흡수 아님) ────────────────
+// 증상 A: 실앱에서 고정 탭을 드래그하면 그룹 안 멤버로 **흡수**(top_level=false). 기존 헤드리스는 raw_row·y를 직접 넣어
+// (SR5(a)) hit-test **함수**만 봤고, mouse 핸들러의 y_px→raw_row→plan **실경로**(특히 드래그 소스가 프리뷰에서 빠져 그
+// 아래가 위로 밀리는 시프트)를 안 탔다. 이 테스트는 cardDropPlan(실 핸들러가 부르는 단일 출처)을 커서 y로 태워 그 갭을
+// 메운다: 사용자가 프리뷰의 그룹 꼬리를 겨냥하면 top_level 탈출이 발화하고, 보정 없던 옛 판정은 흡수였음을 대비로 고정한다.
+test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_level 탈출 (cardDropPlan y_px 실경로·프리뷰 시프트 보정)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2] 고정 리전
+    inline for (0..3) |i| session.tabs.items[i].pinned = true;
+    // X=t0(고정 leading 탭, top_level=false — createGroup이 남기는 실제 상태), A=[a0=t1(마커), a1=t2(멤버)].
+    try setGroupMarker(session, 1, "A", 1);
+    session.sidebar_slot_height_px = 40;
+    session.sidebar_header_row_h_px = 20;
+    session.sidebar_header_height_px = 30;
+    session.sidebar_scroll_offset_px = 0;
+    session.recomputeVisibleTabs();
+    session.sidebar_drag_index = 0; // X가 드래그 소스
+
+    // 표시 행(원본): [card X(0), header A(1), card a0(2), card a1(3)]. a1=마지막 멤버(그룹 꼬리).
+    const a1_row = cardRowOf(session, 2);
+    try std.testing.expectEqual(@as(usize, 3), a1_row);
+
+    // ① 그룹 꼬리(마지막 멤버 a1의 상단 frac 0.15) 겨냥 — 프리뷰에선 X가 빠져 그룹이 위로 밀리므로 사용자가 보는
+    //    "그룹 꼬리"는 원본 a1 상단쯤이다. 옛 판정(보정 없이 이 y로 sidebarCardDropAfterGroup)은 하단 40% 밖이라 흡수였다.
+    const y_tail = sidebarDragScreenY(session, a1_row, 0.15);
+    // 옛 경로(보정 없음) 대비: raw_row=a1, 하단 경계 아님 → 탈출 null(흡수). 이게 헤드리스가 못 잡던 실패다.
+    const raw_uncomp = chrome.components.sidebar.dragTargetSlot(y_tail, session.sidebar_header_height_px, session.sidebar_rows.items, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
+    try std.testing.expect(session.sidebarCardDropAfterGroup(raw_uncomp, 0, y_tail) == null); // 보정 없으면 탈출 안 함(흡수)
+    // 새 경로(cardDropPlan, 프리뷰 시프트 보정) → top_level 탈출.
+    const plan_tail = session.cardDropPlan(0, y_tail);
+    switch (plan_tail) {
+        .card => |c| {
+            try std.testing.expect(c.top_level); // ★ 흡수 아님 — 그룹 밖 top_level
+            try std.testing.expectEqual(@as(usize, 2), c.target_tab); // a1(그룹 꼬리) 자리
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // ② 실제 commit → X가 그룹 A 뒤 최상위(흡수 안 됨).
+    session.sidebar_drag_preview = .{ .origin = 0, .origin_len = 1, .plan = plan_tail, .cursor_y = y_tail, .ghost_lo = 0, .ghost_hi = 0 };
+    session.commitSidebarDragPreview();
+    const x = session.tabs.items[2]; // X가 [a0, a1, X]로 밀림
+    try std.testing.expect(x.top_level); // ★ top_level 유지(그룹 밖)
+    try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // 그룹 A에 흡수 안 됨
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null));
+    try std.testing.expect(session.tabs.items[0].group_start != null); // A 마커(a0)가 index0으로
+
+    // ③ 대비: 그룹 상단(헤더/첫 멤버)에 드롭하면 여전히 멤버(top_level=false) — 넣기 능력 보존(회귀 0).
+    //    새 세션으로 같은 초기 배치를 세워 헤더 위 드롭을 확인한다.
+    const s2 = try allocator.create(AppSession);
+    defer allocator.destroy(s2);
+    try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s2.deinit();
+    inline for (0..2) |_| _ = try s2.newTab();
+    inline for (0..3) |i| s2.tabs.items[i].pinned = true;
+    try setGroupMarker(s2, 1, "A", 1);
+    s2.sidebar_slot_height_px = 40;
+    s2.sidebar_header_row_h_px = 20;
+    s2.sidebar_header_height_px = 30;
+    s2.sidebar_scroll_offset_px = 0;
+    s2.recomputeVisibleTabs();
+    s2.sidebar_drag_index = 0;
+    const a0_row = cardRowOf(s2, 1); // a0(첫 멤버) row
+    const y_head = sidebarDragScreenY(s2, a0_row, 0.2); // 첫 멤버 상단 = 그룹 안(멤버 넣기)
+    const plan_head = s2.cardDropPlan(0, y_head);
+    switch (plan_head) {
+        .card => |c| try std.testing.expect(!c.top_level), // 멤버 넣기 유지(흡수 능력 보존)
+        else => {},
+    }
+}
+
+// ── (3) 드래그 중 접힌 그룹은 접힌 헤더로만 — 대상=접힌 그룹이면 subtree force-emit 억제, 타깃=접힌 그룹은 유지 ────────
+// SG8은 고스트가 접힌 그룹 subtree에 들어가면 "드롭 시 사라짐" 방지로 force-emit했다. 사용자 요청: 접힌 그룹을 **통째로
+// 드래그**하면 고스트도 접힌 헤더 한 줄이어야(펼쳐 보이면 안 됨). 단 접힌 **타깃** 그룹 안으로 카드를 드롭할 때의
+// force-emit(사라짐 방지)는 유지한다(대상 vs 타깃 구분).
+test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (타깃 접힌 그룹 드롭의 force-emit는 유지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    // ── Part 1: 접힌 그룹 A를 통째 드래그 → 프리뷰에 A는 접힌 헤더 1줄, 멤버 카드 0 ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+        try setGroupMarker(session, 0, "A", 1); // A=[a0=t0(접힘), a1=t1]
+        session.tabs.items[0].group_collapsed = true;
+        try setGroupMarker(session, 2, "B", 1); // B=[b0=t2, b1=t3]
+        session.recomputeVisibleTabs();
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const insert_before = session.groupSubtreeEnd(2, null, null);
+        try session.refreshDragPreview(0, .{ .group_sibling = .{ .insert_before = insert_before } }, 0, arena_state.allocator());
+        var a_header_rows: usize = 0;
+        var a_card_rows: usize = 0;
+        var a_header_collapsed = false;
+        for (session.sidebar_preview_rows.items) |row| switch (row) {
+            .group_header => |h| if (h.tab == 0) {
+                a_header_rows += 1;
+                a_header_collapsed = h.collapsed;
+            },
+            .card => |c| if (c.tab == 0 or c.tab == 1) {
+                a_card_rows += 1;
+            },
+        };
+        try std.testing.expectEqual(@as(usize, 1), a_header_rows); // A 헤더 1줄
+        try std.testing.expectEqual(@as(usize, 0), a_card_rows); // ★ 멤버 카드 방출 안 됨(접힌 채)
+        try std.testing.expect(a_header_collapsed); // ★ 헤더 접힘 유지(펼침 flip 안 함)
+        session.clearSidebarDragPreview();
+    }
+    // ── Part 2: 접힌 **타깃** 그룹 B 안으로 카드 X를 드롭 → force-emit 유지(카드 고스트 방출·사라짐 방지) ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2]
+        // B=[b0=t0(접힘), b1=t1], X=t2(최상위 카드)
+        try setGroupMarker(session, 0, "B", 1);
+        session.tabs.items[0].group_collapsed = true;
+        session.recomputeVisibleTabs();
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        // X(t2)를 접힌 B 끝으로 드롭(카드 드래그, dragged_collapsed=false).
+        const target = session.groupSubtreeEnd(0, null, null) - 1; // 접힌 B subtree 끝
+        try session.refreshDragPreview(2, .{ .card = .{ .target_tab = target } }, 0, arena_state.allocator());
+        var x_visible = false;
+        for (session.sidebar_preview_rows.items) |row| switch (row) {
+            .card => |c| if (c.tab == 2) {
+                x_visible = true;
+            },
+            .group_header => {},
+        };
+        try std.testing.expect(x_visible); // ★ 접힌 타깃 안 드롭이라도 X 고스트 방출(force-emit 유지 — 사라짐 방지)
+        session.clearSidebarDragPreview();
+    }
 }
 
 test "SR4 그룹드래그(a): [탭X, 그룹A]에서 A를 X 앞으로 → [그룹A, 탭X](순서 교환·X top_level 유지, 실제 commit 경로)" {

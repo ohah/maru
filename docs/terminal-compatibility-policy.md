@@ -135,6 +135,10 @@ osc52.write = allow   # 로컬 데스크톱 단일 사용자 — 트래킹 앱�
 - read 기본 `deny`: 원격/내부 프로그램이 로컬 clipboard를 탈취하지 못하게 한다. core가 `?` 쿼리에 응답하지 않는다.
 - ask(요청별 확인 UI)는 후속 작업이다. 구현되면 write 기본을 `ask`로 올릴지 다시 논의한다.
 - clipboard 요청은 trace fixture에 원문을 저장하지 않는다. 필요하면 redaction된 event만 남긴다.
+- 크기 상한: 디코드 결과 16MB(`osc.max_clipboard_bytes`), 파서 수집도 그 base64(4/3×)가 통과하게
+  `parser.max_osc_bytes`를 여기서 파생한다. **OSC 52만** 이 대용량 수집을 허용하고 다른 OSC(title/cwd/
+  OSC 8 URI 등)는 기존 2048B 방어선(`max_osc_small_bytes`)을 유지한다 — 한 문단(원문 ~1.5KB)만 돼도
+  base64가 2KB를 넘어, 고정 2048 버퍼 시절 ssh+tmux/nvim 원격 복사가 조용히 통째로 버려졌다.
 
 요청 흐름:
 

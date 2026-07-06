@@ -25,12 +25,26 @@ const kitty = @import("kitty.zig"); // APC kitty graphics — parseKittyGraphics
 
 const TerminalCore = core.TerminalCore;
 
+/// OSC 52(클립보드) 본문 수집 상한. 디코드 상한(osc.max_clipboard_bytes)이 base64(3바이트→4자) 인코딩으로도
+/// 통과할 수 있어야 한다: 4/3× + 헤더("52;c;" 등) 여유. 이 상한을 넘는 OSC는 통째로 무시한다(osc_overflow).
+pub const max_osc_bytes: usize = osc.max_clipboard_bytes / 3 * 4 + 64;
+/// 비-클립보드 OSC의 수집 상한 — 옛 고정 버퍼(2048)의 방어선을 유지한다. title/cwd/알림/OSC 8 URI 등은
+/// 핸들러가 본문을 dupe해 보관하므로, 대용량을 허용하면 악의적 스트림이 핸들러 저장소(제목·링크 스토어 등)에
+/// 수 MB를 꽂을 수 있다. 대용량이 정당한 건 OSC 52(한 문단 복사가 base64로 2KB를 쉽게 넘는다)뿐이다.
+pub const max_osc_small_bytes: usize = 2048;
+/// dispatch 후 유지할 osc_buffer 용량 상한 — 대용량 OSC(클립보드) 뒤 capacity를 반납해 일상 OSC
+/// (title/cwd/133 등 소형)가 수십 MB를 계속 붙들지 않게 한다.
+const osc_retain_bytes: usize = 4096;
+
 /// 종료된 OSC 내용을 코드별로 분기한다. 각 핸들러는 osc.zig(host-reply)에 있고 여기는 라우터다 —
 /// OSC 8(하이퍼링크)·133(semantic)·7(cwd)·0/2(title)·10/11/110/111(색)·52(클립보드)·4/104(팔레트)·
 /// 777/9(알림)·5379(maru)로 가른다. core.zig의 write 상태기계 루프(`.osc`/`.osc_escape`)가 위임한다.
 pub fn dispatchOsc(self: *TerminalCore) void {
-    if (self.osc_overflow) return; // 2048 버퍼를 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
-    const body = self.osc_buffer[0..self.osc_len];
+    // 대용량 OSC 뒤 용량 반납 — 핸들러들은 body에서 필요한 것을 모두 복사(dupe/intern/decode)하므로
+    // dispatch가 끝나면 버퍼를 비워도 안전하다(참조 유지 없음).
+    defer if (self.osc_buffer.capacity > osc_retain_bytes) self.osc_buffer.clearAndFree(self.allocator);
+    if (self.osc_overflow) return; // 수집 상한(oscMayGrow)을 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어)
+    const body = self.osc_buffer.items;
     if (std.mem.startsWith(u8, body, "8;")) {
         osc.dispatchHyperlink(self, body[2..]);
     } else if (std.mem.startsWith(u8, body, "133;")) {
@@ -64,6 +78,15 @@ pub fn dispatchOsc(self: *TerminalCore) void {
         osc.dispatchMaru(self, body["5379;".len..]); // OSC 5379 = maru 전용 통지(사설 번호; 현재 ssh;<dest>)
     }
     // OSC 1(아이콘 이름만)은 창 제목과 무관 — 위 분기에 없으니 소비만 하고 저장 안 한다.
+}
+
+/// OSC 본문이 한 바이트 더 자랄 수 있는가 — 수집 게이트. 기본 상한은 max_osc_small_bytes(옛 2048 방어선)이고,
+/// **OSC 52("52;" 접두)만** max_osc_bytes까지 허용한다(클립보드 base64는 한 문단만 돼도 2KB를 넘는다).
+/// 접두 판정은 상한 도달 뒤에만 평가돼(단락) 소형 OSC 경로에 비용이 없다.
+fn oscMayGrow(self: *const TerminalCore) bool {
+    const len = self.osc_buffer.items.len;
+    if (len < max_osc_small_bytes) return true;
+    return len < max_osc_bytes and std.mem.startsWith(u8, self.osc_buffer.items, "52;");
 }
 
 /// 종료된 DCS(ESC P ... ST) 내용을 처리한다. 현재 DECRQSS(`DCS $ q <req> ST`)만 — 그 외 DCS(Sixel 등)는
@@ -808,11 +831,12 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
                     self.parser = .ground;
                 } else if (byte == 0x1b) {
                     self.parser = .osc_escape;
-                } else if (self.osc_len < self.osc_buffer.len) {
-                    self.osc_buffer[self.osc_len] = byte;
-                    self.osc_len += 1;
+                } else if (oscMayGrow(self)) {
+                    self.osc_buffer.append(self.allocator, byte) catch {
+                        self.osc_overflow = true; // OOM도 폐기(graceful — APC 수집과 동형)
+                    };
                 } else {
-                    self.osc_overflow = true; // 너무 긴 OSC — 통째로 무시
+                    self.osc_overflow = true; // 상한 초과 — 너무 긴 OSC는 통째로 무시
                 }
                 index_ += 1;
             },
@@ -874,7 +898,7 @@ fn handleEscapeByte(self: *TerminalCore, byte: u8) void {
             self.parser = .csi;
         },
         ']' => {
-            self.osc_len = 0;
+            self.osc_buffer.clearRetainingCapacity();
             self.osc_overflow = false;
             self.parser = .osc;
         },

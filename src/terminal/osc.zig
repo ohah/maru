@@ -88,7 +88,9 @@ pub fn dispatchPaletteReset(self: *TerminalCore, body: []const u8) void {
 }
 
 /// OSC 52(클립보드)가 한 번에 받는 디코드 결과의 상한(바이트) — drain 안 돼도 무한정 안 자라게 하는 폭주 방어선.
-const max_clipboard_bytes: usize = 16 * 1000 * 1000;
+/// parser.max_osc_bytes(OSC 본문 수집 상한)가 이 값에서 파생된다(base64 4/3× + 헤더) — 둘이 어긋나면
+/// 이 상한에 못 미치는 클립보드도 파서가 먼저 버린다(pub인 이유).
+pub const max_clipboard_bytes: usize = 16 * 1000 * 1000;
 
 /// OSC 52(클립보드) — `52;<targets>;<base64>`로 system clipboard 쓰기를 요청한다(tmux/nvim이 SSH 너머
 /// `"+y`로 씀). **코어는 파싱+base64 디코드만** 하고 결과를 clipboard_write pending에 둔다 — 실제 clipboard

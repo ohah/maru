@@ -7,6 +7,8 @@
 
 pub const input_math = @import("session/input_math.zig");
 pub const layout_math = @import("session/layout_math.zig");
+pub const surface_id = @import("session/surface_id.zig"); // M0a: 앱 전역 surface_id allocator(순수 타입, 인스턴스 소유는 L4)
+pub const SurfaceIdAllocator = surface_id.SurfaceIdAllocator;
 pub const ime = @import("session/ime.zig");
 pub const keyhint_hold = @import("session/keyhint_hold.zig"); // 단축키 힌트 홀드 gesture 정책(OS-중립, platform이 alias로 참조)
 pub const agent_transcript = @import("session/agent_transcript.zig");

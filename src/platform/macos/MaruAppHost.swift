@@ -440,9 +440,11 @@ final class TerminalSurface {
     var appSession: OpaquePointer?
     var metalRenderer: OpaquePointer?
 
-    // 데스크톱 알림 클릭 라우팅용 창(세션) 식별 토큰. surface.id는 세션-로컬(창마다 next_id가 1부터)이라 창 간
-    // 중복되므로, 알림 userInfo에 (token, surface_id) 쌍을 실어 클릭 시 token으로 정확한 창/세션을 먼저 고른다.
-    // makeTerminalSurface가 단조 증가로 채번한다(0=미설정 sentinel — parseNotificationRoute가 거른다).
+    // 데스크톱 알림 클릭 라우팅용 창(세션) 식별 토큰. surface.id는 M0a 이후 앱 전역으로 유일하지만(창 간
+    // 중복 없음 — docs/window-surface-mobility.md §8), 알림 userInfo에 (token, surface_id) 쌍을 실어 token으로
+    // 대상 창/세션을 먼저 빠르게 고른 뒤 그 세션에서 surface_id로 (탭·panel·Term)을 역조회한다(token=위치
+    // 메타데이터, id 충돌 방지용 복합키 아님). makeTerminalSurface가 단조 증가로 채번한다(0=미설정 sentinel —
+    // parseNotificationRoute가 거른다).
     var token: UInt64 = 0
 
     // 렌더 캐시(세션별). 의미는 컨트롤러의 drawMetalFrame/tickAppSession 주석 참조.

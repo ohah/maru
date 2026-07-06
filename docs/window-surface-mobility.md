@@ -13,7 +13,7 @@
 - **부분 이동과 전체 윈도우 merge를 둘 다 지원한다.** 기본 primitive는 surface/pane/workspace 이동이고, 전체 window merge는 source window의 workspace들을 target window로 반복 이동한 뒤 빈 source window를 닫는 bulk operation이다.
 - **Maru-owned browser/web panel은 기본적으로 다시 합칠 수 있어야 한다.** "단독 브라우저 창"은 합쳐지지 않는 별도 타입이 아니라 browser surface 하나만 들어 있는 Maru window다. 외부 Safari/Chrome으로 여는 `Open in External Browser`만 Maru로 reattach할 수 없는 별도 앱 경로다.
 - **OS 타이틀바 드래그로 merge하지 않는다.** 창 이동 gesture와 충돌하므로, cross-window 이동은 Maru 내부 요소(surface tab, pane grip, workspace card)를 드래그하는 UX로 제공한다. 전체 window merge는 우선 command/menu/palette로 제공한다.
-- **사이드바 그룹은 v1에서 이동 단위가 아니다.** workspace card는 단독으로만 창을 이동하고, 이동 시 소속 그룹에서 암묵 이탈한다 — 그룹 소속이 별도 필드가 아니라 탭 순서 파생(`group_start` 마커, [sidebar-groups.md](sidebar-groups.md))이기 때문이다. `group_start` 마커 workspace의 이동은 그룹 해체로 처리하고, 잔여 멤버·핀은 기존 위치 파생·핀 정규화 규칙으로 재정규화한다. 그룹 통째 cross-window 이동과 `local_pinned`/`top_level` 보존 여부는 후속 결정이다. 상세 케이스는 §4, red test는 M1(§8).
+- **사이드바 그룹은 v1에서 이동 단위가 아니다.** workspace card는 단독으로만 창을 이동하고, 이동 시 소속 그룹에서 암묵 이탈한다 — 그룹 소속이 별도 필드가 아니라 탭 순서 파생(`group_start` 마커, [sidebar-groups.md](sidebar-groups.md))이기 때문이다. `group_start` 마커 workspace의 이동은 closeTab/removeFromGroup과 **동형**으로 처리한다 — source 창에서는 마커 속성을 다음 소속 카드로 **승계**(`inheritGroupMarker`)해 그룹을 살리고(마지막 멤버였으면 그룹 소멸), 이동된 workspace 자신은 target 창에서 그룹 이탈(최상위)로 들어간다. "해체"가 아니라 승계다(기존 마커 자리비움 규칙과 동일). 그룹 통째 cross-window 이동과 `local_pinned`/`top_level` 보존 여부는 후속 결정이다. 상세 케이스는 §4, red test는 M1(§8).
 - **native drag는 운반만, 정책은 Zig가 소유한다.** AppKit은 cross-window drag lifecycle, 좌표 변환, NSWindow 생성/focus, WKWebView reparent만 맡는다. drop 가능 여부, target 계산, WindowGraph 변경, capability 재평가는 Zig/AppRuntime이 결정한다.
 
 ## 2. 현재 코드 기준 영향
@@ -84,7 +84,7 @@ move_all_workspaces_to_window:N
 
 quick terminal은 이동 단위·대상에서 제외한다 — 싱글톤 dropdown이라 detach/reattach·merge·split drop의 출발지도 도착지도 아니다. `merge_all_windows`/`merge_window_into_active_window`도 quick window를 포함하지 않는다. quick 안의 surface를 일반 창으로 빼내는 별도 UX가 필요하면 추후 명시 결정한다.
 
-사이드바 그룹과의 상호작용(§1 결정의 상세): workspace card 이동은 사이드바 그룹 모델([sidebar-groups.md](sidebar-groups.md))과 직접 상호작용한다 — 소속이 탭 순서 파생이라 창을 떠나는 순간 소속·핀 리전이 바뀐다. v1 케이스: (a) 그룹 멤버 이동 = 그룹 암묵 이탈 + source 창 재정규화, (b) `group_start` 마커 이동 = 그룹 해체 + 잔여 멤버 재정규화, (c) 전역 `pinned` workspace 이동 = target 창의 핀 리전 정책("고정 요소 흡수 불가" 포함)을 그대로 따름, (d) `local_pinned`/`top_level`은 이탈 시 의미를 잃으므로 리셋. 같은 sidebar 안 드래그에는 이미 Cmd=그룹 중첩 제스처가 있으므로, cross-window 드래그가 이 제스처와 충돌하지 않게 M5에서 modifier 의미를 재확인한다.
+사이드바 그룹과의 상호작용(§1 결정의 상세): workspace card 이동은 사이드바 그룹 모델([sidebar-groups.md](sidebar-groups.md))과 직접 상호작용한다 — 소속이 탭 순서 파생이라 창을 떠나는 순간 소속·핀 리전이 바뀐다. v1 케이스: (a) 그룹 멤버 이동 = 그룹 암묵 이탈 + source 창 재정규화, (b) `group_start` 마커 이동 = source에서 마커 승계(그룹 잔존, 마지막 멤버면 소멸) + 이동분은 target 최상위 — closeTab/removeFromGroup과 동형(`inheritGroupMarker`), (c) 전역 `pinned` workspace 이동 = target 창의 핀 리전 정책("고정 요소 흡수 불가" 포함)을 그대로 따름, (d) `local_pinned`/`top_level`은 이탈 시 의미를 잃으므로 리셋. 같은 sidebar 안 드래그에는 이미 Cmd=그룹 중첩 제스처가 있으므로, cross-window 드래그가 이 제스처와 충돌하지 않게 M5에서 modifier 의미를 재확인한다.
 
 ## 5. Native 이벤트 사용 범위
 
@@ -113,6 +113,10 @@ Zig/AppRuntime이 맡는 것:
 
 `surface_id`는 이동해도 유지된다. 따라서 surface 기준 capability(`read-output:self`, `write:self` 등)는 generation이 유지되는 한 그대로 유효할 수 있다. 반면 window 기준 capability(`metadata:window`)는 이동 후 현재 window membership을 기준으로 다시 평가한다.
 
+**trust boundary 교차 시 surface-scope cap 재평가(적대적 리뷰 반영)**: surface-scope cap이 이동 중 generation 불변으로 유지되면, 저신뢰 창에서 (capability fd 상속 등으로, [control-plane.md] §8.5) 새어나간 `read-output`/`write` nonce가 그 surface를 "secure" 창이나 main 작업 창으로 detach/merge한 뒤에도 살아 있다. 따라서 surface가 **trust boundary를 넘으면**(예: quick↔일반, 신뢰 등급이 다른 창) surface-scope cap을 re-mint/revoke한다. 최소한, 이동이 이전에 새어나간 capability를 **격리하지 못한다**는 점을 명시한다.
+
+**이동 이벤트는 원자 트랜잭션**: cross-window move는 `WindowGraph` 변경과 **영향받은 모든 구독의 scope 재평가를 같은 main-thread 트랜잭션 안에서 동기 수행**한다(lazy 재평가면 이동 직후 옛-창 구독자가 떠난 surface 이벤트를 계속 받거나 새 창 surface를 잠깐 엿본다). 트랜잭션 경계를 넘는 이벤트가 stale scope로 새지 않게 한다. 구독 유지/해제/`removed` 이벤트 중 무엇인지는 [control-plane.md] §13 열린 질문으로, M3 착수 전 확정한다.
+
 `window_token`은 bearer token이 아니며 현재 위치를 설명하는 메타데이터다. control-plane selector는 최소 `{instance_nonce, surface_id, generation}`을 핵심으로 하고, 응답 메타데이터에 현재 `{window_id, window_token, window_kind}`를 싣는다.
 
 ## 7. Workspace restore
@@ -130,7 +134,7 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 
 1. **M0a SurfaceIdAllocator**: 앱 인스턴스 전역 opaque u64 발급, 비재사용, generation mismatch 단위 테스트. 기존 per-session `next_id`는 외부 ID로 노출하지 않는다.
 2. **M0b WindowMembershipSnapshot**: full `WindowGraph` 전 2-window+quick membership DTO, `metadata:self/window/all` scope 필터 테스트. `window_kind` 판별자는 현재 코드에 없으므로(quick은 Swift 전용 `quick` 참조·`QuickTerminalPanel`·`chrome_minimal` 플래그로 분산) M0b가 신규 도입한다.
-3. **M1 WindowGraph TDD**: `moveSurface`, `movePane`, `moveWorkspace`, `mergeWindow`, no-op/empty-source/focus 보정 단위 테스트. `moveWorkspace`는 사이드바 그룹 상호작용(§4)을 red test로 고정한다: 그룹 멤버 이탈 재정규화, `group_start` 마커 이동=그룹 해체, 전역 `pinned` 이동 시 target 핀 리전 정규화, `local_pinned`/`top_level` 리셋.
+3. **M1 WindowGraph TDD**: `moveSurface`, `movePane`, `moveWorkspace`, `mergeWindow`, no-op/empty-source/focus 보정 단위 테스트. `moveWorkspace`는 사이드바 그룹 상호작용(§4)을 red test로 고정한다: 그룹 멤버 이탈 재정규화, `group_start` 마커 이동=source 마커 승계(그룹 잔존/마지막이면 소멸)·이동분 target 최상위, 전역 `pinned` 이동 시 target 핀 리전 정규화, `local_pinned`/`top_level` 리셋.
 4. **M2 LiveSurfaceRegistry 분리**: terminal live runtime을 window 밖 owner로 이동. surface 이동 시 PTY/TerminalCore를 재시작하지 않음을 테스트. web panel state/WKWebView handle은 이 시점에 아직 없으므로 terminal runtime만 옮기고, web surface runtime은 Phase 4 이후 같은 registry에 합류한다.
 5. **M3 command 기반 이동**: palette/menu action으로 surface/pane/workspace/window_all 이동. Swift는 window create/focus만 수행. 종료 gate에 workspace restore의 `WindowGraph` 포맷 확장(§7)을 포함한다.
 6. **M4 same-window drag 재연결**: 기존 drag 경로가 WindowGraph move API를 쓰게 정리.
@@ -159,5 +163,5 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 성능 gate:
 
 - 이동은 surface runtime을 재시작하지 않는다.
-- bulk window merge는 workspace 단위로 bounded하게 처리하고, frame tick을 오래 점유하면 chunk/yield한다.
+- bulk window merge는 frame tick을 오래 점유하면 chunk/yield하되, **chunk 단위는 "workspace"가 아니라 tick 예산 기준 surface/reparent 건수**다. workspace 하나가 web Term(=WKWebView) 수십 개를 가질 수 있어([web-panel.md] §6), "workspace 단위 bounded"는 workspace 수만 bound하고 한 chunk 안 reparent 수십 건(각각 AppKit 레이아웃+컴포지팅+WebKit IPC)이 tick을 넘길 수 있다. tick당 WKWebView reparent ≤ k로 제한한다. 중간 chunk에서 reparent가 실패하면 관측 가능한 부분-완료 상태와 재개/중단 정책을 남긴다.
 - drag hover는 매 frame 대량 capture/evaluate/snapshot을 호출하지 않고, target 변경 시에만 highlight를 갱신한다.

@@ -1057,9 +1057,10 @@ const ctx_menu_group_color_first: usize = ctx_menu_group_ungroup + 1; // ungroup
 // "그룹에서 빼기"(remove_from_group) — **그룹 소속 카드에만** 조건부로 맨 끝에 붙인다(최상위 카드엔 안 뜸). 맨 끝이라
 // 항상 present일 때만 이 인덱스를 차지하고(shorter 메뉴에선 sel이 여기 도달 못 함) 앞 고정 인덱스를 안 흔든다.
 const ctx_menu_group_remove: usize = ctx_menu_group_color_first + tab_group_color_labels.len;
-// "여기서 최상위로 분리"(promote_to_top_level, §14.5·§14.7) — remove와 함께 **그룹 소속 카드에만** 맨 끝에 붙인다(둘 다
-// tabIsInGroup 게이트라 함께 등장/부재). remove(그룹 밖 이동+unpin) 바로 뒤 슬롯이라, 그룹 카드면 remove=ctx_menu_group_remove·
-// promote=ctx_menu_group_promote로 고정 인덱스가 정렬한다(promote-in-place=제자리 top_level·pin 불변).
+// "여기서 최상위로 분리"(promote_to_top_level, §14.5·§14.7) — remove 바로 뒤 슬롯. **비마커 그룹 멤버(leaf)에만** 붙인다
+// (§14.8 SR5 결정 (a): 마커 카드는 promoteTabToTopLevelInPlace no-op이라 숨긴다). 그래서 remove(tabIsInGroup)와 promote
+// (tabIsInGroup ∧ 비마커)는 leaf 멤버에선 함께 뜨고(remove=ctx_menu_group_remove·promote=ctx_menu_group_promote로 고정 인덱스
+// 정렬), 마커 카드에선 remove만 떠 메뉴가 한 칸 짧아진다(sel이 ctx_menu_group_promote에 도달 못 해 앞 인덱스 불변).
 const ctx_menu_group_promote: usize = ctx_menu_group_remove + 1;
 const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기·승격 슬롯 포함)
 
@@ -4212,6 +4213,68 @@ pub const AppSession = struct {
         };
     }
 
+    /// 카드/마커 위치 i가 속한 그룹의 **최상위(depth 1) 시작 마커 인덱스**(enclosingGroupMarkerTab의 인덱스판 — §2.1 상향
+    /// 파생 + 중첩 상향 클램프). 최상위 카드(그룹 미소속)면 null. "그룹 뒤 빈 gap" 드롭(§14.6 SR5 요구2)이 "이 카드가 속한
+    /// **최상위 그룹**의 subtree 끝"을 알아야 top카드를 그 그룹 밖 gap에 정확히 착지시킨다(중첩 subgroup의 마지막 멤버여도
+    /// 부모 최상위 그룹 끝 기준). 상향 스캔은 effectiveDepthAt>1이면 부모 마커로 계속 올라간다(mi strictly 감소라 종료 보장).
+    fn topLevelGroupMarkerIndex(self: *AppSession, i: usize) ?usize {
+        var mi = self.enclosingGroupMarkerIndex(i) orelse return null;
+        while (self.effectiveDepthAt(mi, null, null) > 1) {
+            if (mi == 0) break;
+            mi = self.enclosingGroupMarkerIndex(mi - 1) orelse break;
+        }
+        return mi;
+    }
+
+    /// 드래그 커서 y가 표시 row `raw_row`의 **아래 경계 영역**(하단 40%)에 있는가 — "그룹 뒤 빈 gap" 드롭 존 판정(§14.6 SR5
+    /// 요구2). row 모델엔 그룹 사이 빈 gap row가 없어(연속 파티션), 마지막 멤버/접힌 헤더의 하단 밴드를 gap 드롭 존으로 쓴다.
+    /// rowTop/rowHeight(가변 높이 누적, chrome 단일 출처)로 row 안 상대 위치를 구해 frac>=0.6이면 아래 경계. 높이 0/범위 밖은 false.
+    fn dragInRowLowerBoundary(self: *AppSession, raw_row: usize, y_px: f64) bool {
+        const rows = self.sidebar_rows.items;
+        if (raw_row >= rows.len or !std.math.isFinite(y_px)) return false;
+        const top = chrome.components.sidebar.rowTop(rows, raw_row, self.sidebar_header_height_px, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
+        const h = chrome.components.sidebar.rowHeight(rows[raw_row], self.sidebar_slot_height_px, self.sidebar_header_row_h_px);
+        if (h == 0) return false;
+        const frac = (y_px - @as(f64, @floatFromInt(top))) / @as(f64, @floatFromInt(h));
+        return frac >= 0.6;
+    }
+
+    const GapDropPlan = struct { target_tab: usize, top_level: bool };
+
+    /// **§14.6 SR5 요구2 — "그룹 뒤 빈 gap" 카드 드롭(첫 인터리브)**. SR4가 기존 top카드 **옆** 드롭으로 인터리빙을 열었지만,
+    /// 그룹 사이에 top카드가 아직 없으면(빈 gap) row 모델에 그 자리를 가리킬 row가 없어 드래그로 첫 top카드를 못 만들었다.
+    /// 이 함수는 커서가 **최상위 그룹의 마지막 멤버 카드**(또는 **접힌 최상위 그룹 헤더**)의 **아래 경계 영역**(dragInRowLowerBoundary)
+    /// 에 있으면, 드래그 카드를 그 그룹 **subtree 끝**(그룹 밖 gap)에 `top_level:=true`로 착지시키는 plan을 낸다. 위치 계산은
+    /// 접힌 헤더 드롭(sidebarGroupDropTargetTab)과 **동형**(from<m이면 j-1·아니면 min(j,len-1))이라 방향 보정을 공유하고, top_level
+    /// 만 다르다(멤버 흡수 대신 그룹 밖 최상위 복귀). 착지 후 commit이 hasGroupMarkerAboveInRegion 게이트로 실제 write를 굽는다
+    /// (SR4 카드 경로와 동일). 발화 조건이 아니면 null → 호출자가 기존 sidebarGroupDropTargetTab/sidebarCardDropTopLevel 경로로
+    /// 폴백(byte-identical). **제약**: (1) **같은 그룹 안 카드**(from∈[m,j)) 드래그는 null(그룹 안 재정렬 — gap-promote는 밖에서
+    /// 끌어올 때만), (2) **펼친 그룹 헤더** 아래 경계는 null(첫 멤버와 모호 — 접힌 헤더만), (3) **중첩 그룹**은 top-level 그룹 끝만
+    /// (중첩 subgroup 뒤 gap = sticky-reset이 depth를 0으로만 되돌리는 §14.7 제약이라 top-level만 착지).
+    fn sidebarCardDropAfterGroup(self: *AppSession, raw_row: usize, from: usize, y_px: f64) ?GapDropPlan {
+        const len = self.tabs.items.len;
+        if (raw_row >= self.sidebar_rows.items.len or len == 0) return null;
+        if (!self.dragInRowLowerBoundary(raw_row, y_px)) return null; // 아래 경계 영역만 발화
+        const m: usize = switch (self.sidebar_rows.items[raw_row]) {
+            .card => |c| blk: {
+                if (c.tab >= len) return null;
+                const tl = self.topLevelGroupMarkerIndex(c.tab) orelse return null; // 그룹 밖 카드 → gap 아님
+                if (self.groupSubtreeEnd(tl, null, null) != c.tab + 1) return null; // c가 최상위 그룹의 마지막 원소 아님 → 일반 멤버 드롭
+                break :blk tl;
+            },
+            .group_header => |h| blk: {
+                if (h.tab >= len) return null;
+                if (!h.collapsed) return null; // 펼친 헤더 아래 경계 = 첫 멤버(모호) → skip(일반 헤더 드롭)
+                if (self.effectiveDepthAt(h.tab, null, null) != 1) return null; // 최상위 접힌 그룹만(중첩 접힌 헤더 gap은 모호)
+                break :blk h.tab;
+            },
+        };
+        const j = self.groupSubtreeEnd(m, null, null);
+        if (from >= m and from < j) return null; // 같은 그룹 안 카드 → 일반 재정렬(gap-promote 아님)
+        const target = if (from < m) j - 1 else @min(j, len - 1); // 접힌 헤더 드롭과 동형 방향 보정
+        return .{ .target_tab = target, .top_level = true };
+    }
+
     // ── SG5-1: 그룹 통째 드래그(헤더/마커 카드를 잡아 그룹 전체를 재정렬) ─────────────────────────────────────
     // docs/sidebar-groups.md §9 SG5·§2.1 연속 파티션. 그룹은 self.tabs 순서 위의 "[마커, 다음 마커) 연속 구간"이므로
     // 그룹 이동 = 그 구간을 **하나의 블록으로** 다른 그룹 경계(다른 group_start 인덱스·최상위 다음·끝)에 끼우는 것이다.
@@ -6029,6 +6092,78 @@ pub const AppSession = struct {
                     self.refreshDragPreview(3, .{ .card = .{ .target_tab = tt, .top_level = self.sidebarCardDropTopLevel(into_row) } }, 0, arena_state.allocator()) catch {};
                 }
                 self.rebuildSidebar() catch {}; // 렌더가 preview_rows로 고스트+삽입선(X의 최상위/멤버 depth)을 그린다
+            }
+        }
+        // MARU_FORCE_GAP_DROP=1 — §2.1 재설계(§14.6 SR5 요구2) **"그룹 뒤 빈 gap" 첫 인터리브**를 헤드리스 스크린샷으로 self-verify한다.
+        // 배치 [A(마커 t0), a1(t1,멤버), B(마커 t2), b1(t3,B 멤버)] — 인접 두 그룹 **사이에 top카드 없는 빈 gap**. b1을 A의
+        // 마지막 멤버 a1 **아래 경계**로 드래그 중인 프리뷰(SG8d 고스트)를 강제한다: 고스트 b1이 **A·B 사이 최상위 depth 0**(들여쓰기
+        // 없음)로 떠 "빈 gap에 첫 top카드 인터리브"(요구2 완성)가 보인다. 옛 SR4로는 그 자리에 기존 top카드가 있어야 드롭 타깃이
+        // 잡혔다. plan은 sidebarCardDropAfterGroup의 결과(target=groupSubtreeEnd(A)=2, top_level=true)를 직접 굽는다(아래 경계
+        // 판정 자체는 헤드리스 SR5(a)가 커버). MARU_FORCE_GROUP_COLLAPSED=1이면 A를 접어 접힌 헤더 뒤 gap을 캡처. env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_GAP_DROP") != null) {
+            var made: usize = 0;
+            while (made < 3) : (made += 1) _ = self.newTab() catch {}; // [t0..t3]
+            if (self.tabs.items.len >= 4) {
+                self.tabs.items[0].group_start = self.allocator.dupe(u8, "A") catch null;
+                self.tabs.items[0].group_depth = 1;
+                self.tabs.items[2].group_start = self.allocator.dupe(u8, "B") catch null;
+                self.tabs.items[2].group_depth = 1;
+                if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[0].group_collapsed = true; // A 접힘 → 접힌 헤더 뒤 gap
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
+                    self.tabs.items[0].group_color = 0x4A7BC4; // A 파랑
+                    self.tabs.items[2].group_color = 0xB05CD6; // B 자홍
+                }
+                self.recomputeVisibleTabs();
+                // b1(origin=3)을 A subtree 끝(그룹 밖 gap)에 top_level=true로 착지시키는 gap plan(from=3 >= j=2 → target=min(2,3)=2).
+                const j = self.groupSubtreeEnd(0, null, null);
+                const target: usize = if (3 < j) j - 1 else @min(j, self.tabs.items.len - 1);
+                var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena_state.deinit();
+                self.sidebar_drag_active = true;
+                self.sidebar_drag_index = 3;
+                self.refreshDragPreview(3, .{ .card = .{ .target_tab = target, .top_level = true } }, 0, arena_state.allocator()) catch {};
+                self.rebuildSidebar() catch {}; // 렌더가 preview_rows로 그룹 밖 top카드 고스트(depth 0)를 그린다
+            }
+        }
+        // MARU_FORCE_SR5_3AXIS=1 — §14.7 SR5 **pin × local_pinned × top_level 3축 공존**을 헤드리스 스크린샷으로 self-verify한다.
+        // 고정 리전 [A(마커,pin,d1), lp(pin,멤버,로컬📌), m1(pin,멤버), TOP(pin,top_level 고정 top카드), sticky(pin,sticky top)].
+        // 헤더 그룹📌(A 고정 그룹으로도 만들면)·멤버 로컬📌(lp)·개별 top카드📌(TOP)가 위치로 구별돼 함께 뜬다. MARU_FORCE_GROUP_COLLAPSED=1이면
+        // A 접힘(헤더만), MARU_FORCE_GROUP_COLOR=1이면 A 파랑, MARU_FORCE_GROUP_PIN=1이면 A도 그룹째 고정(헤더 인디케이터 추가). env-gate.
+        if (std.c.getenv("MARU_FORCE_SR5_3AXIS") != null) {
+            var made: usize = 0;
+            while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
+            if (self.tabs.items.len >= 5) {
+                inline for (0..5) |i| self.tabs.items[i].pinned = true; // 고정 리전(I1 프리픽스)
+                self.tabs.items[0].group_start = self.allocator.dupe(u8, "A") catch null;
+                self.tabs.items[0].group_depth = 1;
+                self.tabs.items[1].local_pinned = true; // 그룹-로컬 pin 멤버
+                self.tabs.items[3].top_level = true; // 고정 top카드(그룹 뒤 인터리브)
+                if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[0].group_collapsed = true;
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[0].group_color = 0x4A7BC4;
+                self.normalizePinnedFromGroups();
+                self.floatLocalPinsAllGroups();
+                self.clearStaleLocalPins();
+                self.rebuildSidebar() catch {};
+            }
+        }
+        // MARU_FORCE_SR5_NESTED_TOP=1 — §14.7 SR5 **중첩 안 top_level**(subgroup 뒤 top카드 = depth 0, 부모 복귀 없음)을 헤드리스
+        // 스크린샷으로 self-verify한다. [A(마커,d1), a1(A 멤버,d1), B(마커,d2 중첩), b1(B 멤버,d2), TOP(top_level)]. TOP은 부모 A
+        // depth 1로 복귀하지 못하고 **depth 0**(들여쓰기 없음)로 뜬다(sticky-reset은 항상 0으로만 되돌린다 — §14.7 제약 시각화).
+        // MARU_FORCE_GROUP_COLOR=1이면 A 파랑·B 자홍(중첩 색). env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_SR5_NESTED_TOP") != null) {
+            var made: usize = 0;
+            while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
+            if (self.tabs.items.len >= 5) {
+                self.tabs.items[0].group_start = self.allocator.dupe(u8, "A") catch null;
+                self.tabs.items[0].group_depth = 1;
+                self.tabs.items[2].group_start = self.allocator.dupe(u8, "B") catch null;
+                self.tabs.items[2].group_depth = 2; // 중첩 자식
+                self.tabs.items[4].top_level = true; // subgroup B 뒤 top카드(부모 A 밖 depth 0)
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
+                    self.tabs.items[0].group_color = 0x4A7BC4;
+                    self.tabs.items[2].group_color = 0xB05CD6;
+                }
+                self.rebuildSidebar() catch {};
             }
         }
         // MARU_FORCE_RIGHT_CLICK=1 — 첫 frame에 터미널 본문 우클릭을 시뮬레이트해 input.right-click=menu의 복사/붙여넣기
@@ -8124,9 +8259,14 @@ pub const AppSession = struct {
                 self.context_menu_items_buf[n] = "그룹에서 빼기"; // ctx_menu_group_remove
                 n += 1;
                 // "여기서 최상위로 분리"(promote-in-place, §14.5·§14.7) — remove 바로 뒤. removeFromGroup(그룹 밖 이동+unpin)과
-                // 달리 **제자리** top_level만 세팅(위치·pin 불변 — 고정 top카드 가능). remove와 같은 tabIsInGroup 게이트라 함께 뜬다.
-                self.context_menu_items_buf[n] = "여기서 최상위로 분리"; // ctx_menu_group_promote
-                n += 1;
+                // 달리 **제자리** top_level만 세팅(위치·pin 불변 — 고정 top카드 가능). **마커 카드(group_start!=null)에선 숨긴다**
+                // (§14.8 SR5 결정 (a)): promoteTabToTopLevelInPlace가 leaf-only(§13.8)상 마커에 no-op이라, 뜨면 "눌러도 무동작"인
+                // 죽은 항목이 된다(remove는 마커에서도 nested subgroup 빼기로 유효해 유지). 조건부라 마커면 promote 슬롯이 비어
+                // 메뉴가 한 칸 짧아지고(ctx_menu_group_remove까지), sel이 ctx_menu_group_promote에 절대 도달 못 해 인덱스가 안 흔들린다.
+                if (t.workspace.group_start == null) {
+                    self.context_menu_items_buf[n] = "여기서 최상위로 분리"; // ctx_menu_group_promote
+                    n += 1;
+                }
             }
         };
         // 그룹 헤더 우클릭(SG5-2-header) — 대상은 group_start 마커 탭(renameTargetAt). 헤더 스코프 액션만: Rename(0)=그룹
@@ -9682,7 +9822,10 @@ pub const AppSession = struct {
                     // 커밋한다. self.tabs가 불변이라 sidebar_drag_index(=origin)도 드래그 내내 안정(옛 landed 팔로우 불필요).
                     const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                     const origin = self.sidebar_drag_index;
-                    const plan: DropPlan = if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
+                    const plan: DropPlan = if (self.sidebarCardDropAfterGroup(raw_row, origin, y_px)) |gap|
+                        // §14.6 SR5 요구2: "그룹 뒤 빈 gap"(마지막 멤버/접힌 헤더 아래 경계) 드롭 = 그룹 밖 top카드로 착지(첫 인터리브).
+                        .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } }
+                    else if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
                         // §14.6 SR4 model-2: 착지 위치(target_tab) + 드롭 컨텍스트 top_level 전이 의도(그룹 밖 gap=true·안=false)를 함께 굽는다.
                         .{ .card = .{ .target_tab = target_tab, .top_level = self.sidebarCardDropTopLevel(raw_row) } }
                     else
@@ -19306,6 +19449,278 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     try std.testing.expect(x.top_level); // 확정에서 실제 전이
 }
 
+// §14.6 SR5 요구2 완성 — "그룹 뒤 빈 gap"(그룹 사이 top카드 없음) 첫 인터리브. row 모델엔 gap row가 없어, 마지막 멤버(또는
+// 접힌 헤더)의 **아래 경계 영역** 드롭으로 그룹 밖 top카드를 만든다(sidebarCardDropAfterGroup). SR4가 기존 top카드 옆 드롭만
+// 열었던 한계(빈 gap 불가)를 닫는다. 아래 경계 판정은 rowTop/rowHeight(가변 높이 chrome 단일 출처)를 공유한다.
+test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭 = 그룹 밖 top카드 (요구2 완성)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    // 인접 두 최상위 그룹 A=[t0(마커),t1], B=[t2(마커),t3] — 사이에 top카드 없는 "빈 gap"(옛 SR4로는 드래그 인터리브 불가).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "B");
+    session.tabs.items[2].group_depth = 1;
+    // 사이드바 가변 높이 메트릭(아래 경계 판정 rowTop/rowHeight가 필요) — 헤더=20·카드=40.
+    session.sidebar_slot_height_px = 40;
+    session.sidebar_header_row_h_px = 20;
+    session.sidebar_header_height_px = 0;
+    session.sidebar_scroll_offset_px = 0;
+    session.recomputeVisibleTabs();
+
+    // a1(t1) row + 그 row의 아래/위 경계 y(production과 같은 rowTop/rowHeight 누적).
+    var a1_row: usize = 0;
+    for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .card => |c| if (c.tab == 1) {
+            a1_row = s;
+        },
+        .group_header => {},
+    };
+    const rows = session.sidebar_rows.items;
+    const top = chrome.components.sidebar.rowTop(rows, a1_row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
+    const h = chrome.components.sidebar.rowHeight(rows[a1_row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    const y_lower = @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) * 0.8; // 아래 40% 안 → gap 존
+    const y_upper = @as(f64, @floatFromInt(top)) + @as(f64, @floatFromInt(h)) * 0.2; // 상단 → 일반 멤버 드롭
+
+    // (1) 아래 경계: b1(from=3)을 a1 아래 경계로 → gap plan(target=groupSubtreeEnd(A)=2, top_level=true).
+    const gap = session.sidebarCardDropAfterGroup(a1_row, 3, y_lower).?;
+    try std.testing.expectEqual(@as(usize, 2), gap.target_tab);
+    try std.testing.expect(gap.top_level);
+    // (2) 상단 경계는 아래 경계 아님 → null(호출자가 기존 멤버 드롭 경로로 폴백).
+    try std.testing.expect(session.sidebarCardDropAfterGroup(a1_row, 3, y_upper) == null);
+    // (3) 같은 그룹 안 카드(from=1=a1 자신)는 아래 경계여도 null(그룹 안 재정렬 — gap-promote는 밖에서 끌어올 때만).
+    try std.testing.expect(session.sidebarCardDropAfterGroup(a1_row, 1, y_lower) == null);
+
+    // 확정: b1을 gap plan으로 커밋 → [A, a1, b1(top), B]. b1이 A·B 사이 top카드(첫 인터리브).
+    const b1 = session.tabs.items[3];
+    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } });
+    var b1_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == b1) {
+        b1_idx = i;
+    };
+    try std.testing.expectEqual(@as(usize, 2), b1_idx); // A(=[0,2)) 뒤·B(마커) 앞
+    try std.testing.expect(b1.top_level); // ★ 빈 gap 첫 top카드
+    try std.testing.expect(!session.tabIsInGroup(b1)); // 그룹 밖(최상위)
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(b1_idx, null, null)); // depth 0
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // A={t0,t1} 그대로(b1 안 흡수)
+    try std.testing.expect(session.tabs.items[3].group_start != null); // B 마커 유지(index3으로 밀림)
+}
+
+test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 헤더·중첩 헤더·그룹 밖 카드)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    // A=[t0(마커, 접힘),t1], B=[t2(마커),t3]. A 접힘 → 멤버 t1 숨김, 헤더만.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].group_collapsed = true;
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "B");
+    session.tabs.items[2].group_depth = 1;
+    session.sidebar_slot_height_px = 40;
+    session.sidebar_header_row_h_px = 20;
+    session.sidebar_header_height_px = 0;
+    session.sidebar_scroll_offset_px = 0;
+    session.recomputeVisibleTabs();
+
+    // 접힌 헤더 A row + 아래 경계 y.
+    var ha_row: usize = 0;
+    var hb_row: usize = 0;
+    for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .group_header => |gh| {
+            if (gh.tab == 0) ha_row = s;
+            if (gh.tab == 2) hb_row = s;
+        },
+        .card => {},
+    };
+    const rows = session.sidebar_rows.items;
+    const ta = chrome.components.sidebar.rowTop(rows, ha_row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
+    const hh = chrome.components.sidebar.rowHeight(rows[ha_row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    const y_lower_a = @as(f64, @floatFromInt(ta)) + @as(f64, @floatFromInt(hh)) * 0.8;
+
+    // 접힌 A 헤더 아래 경계로 b1(from=3) 드롭 → gap plan(target=groupSubtreeEnd(A)=2, top_level=true).
+    const gap = session.sidebarCardDropAfterGroup(ha_row, 3, y_lower_a).?;
+    try std.testing.expectEqual(@as(usize, 2), gap.target_tab);
+    try std.testing.expect(gap.top_level);
+
+    // 펼친 B 헤더 아래 경계는 null(첫 멤버와 모호 — 접힌 헤더만).
+    const tb = chrome.components.sidebar.rowTop(rows, hb_row, session.sidebar_header_height_px, session.sidebar_slot_height_px, session.sidebar_header_row_h_px, session.sidebar_scroll_offset_px);
+    const hb = chrome.components.sidebar.rowHeight(rows[hb_row], session.sidebar_slot_height_px, session.sidebar_header_row_h_px);
+    try std.testing.expect(session.sidebarCardDropAfterGroup(hb_row, 3, @as(f64, @floatFromInt(tb)) + @as(f64, @floatFromInt(hb)) * 0.8) == null);
+
+    // 확정: b1이 접힌 A 뒤 top카드. [A(접힘), a1(숨김), b1(top), B].
+    const b1 = session.tabs.items[3];
+    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = gap.target_tab, .top_level = gap.top_level } });
+    var b1_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == b1) {
+        b1_idx = i;
+    };
+    try std.testing.expectEqual(@as(usize, 2), b1_idx);
+    try std.testing.expect(b1.top_level);
+    try std.testing.expect(!session.tabIsInGroup(b1));
+    try std.testing.expect(session.tabs.items[0].group_collapsed); // A 접힘 유지
+}
+
+test "SR5(c): promote 마커 숨김 — leaf 멤버=여기서 최상위로 분리 포함(full)·마커 카드=remove만(§14.8 결정 (a))" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+    // A=[t0(마커),t1,t2] 흡수(다중 멤버 — leaf 멤버 t1·t2 존재).
+    session.createGroupAbsorbForTab(session.tabs.items[0]);
+    const marker = session.tabs.items[0];
+    const leaf = session.tabs.items[1];
+    try std.testing.expect(marker.group_start != null);
+    try std.testing.expect(session.tabIsInGroup(marker)); // 마커도 tabIsInGroup=true(자기 그룹)
+    try std.testing.expect(session.tabIsInGroup(leaf));
+
+    // leaf 멤버: remove + promote **둘 다**(full 메뉴, promote=ctx_menu_group_promote).
+    session.context_menu_target = .{ .workspace = leaf };
+    const leaf_items = session.buildContextMenuItems();
+    try std.testing.expectEqual(ctx_menu_count, leaf_items.len);
+    try std.testing.expectEqualStrings("그룹에서 빼기", leaf_items[ctx_menu_group_remove]);
+    try std.testing.expectEqualStrings("여기서 최상위로 분리", leaf_items[ctx_menu_group_promote]);
+
+    // 마커 카드: remove만(promote 숨김 — promoteTabToTopLevelInPlace no-op이라 죽은 항목 방지). len=ctx_menu_group_promote.
+    session.context_menu_target = .{ .workspace = marker };
+    const marker_items = session.buildContextMenuItems();
+    try std.testing.expectEqual(ctx_menu_group_promote, marker_items.len);
+    try std.testing.expectEqualStrings("그룹에서 빼기", marker_items[ctx_menu_group_remove]);
+    // 마커에도 promote를 강제 dispatch하면 no-op(방어 — 숨겨도 인덱스 도달 불가지만 액션 자체가 안전).
+    session.promoteTabToTopLevelInPlace(marker);
+    try std.testing.expect(!marker.top_level); // 마커엔 top_level 안 씀(leaf-only §13.8)
+}
+
+// §14.7·§14.8 SR5 — pin × local_pinned × top_level **3축 공존**(중첩·고정 리전 하드닝). 세 축이 한 고정 그룹 안에서 함께
+// 성립: 전역 pin 프리픽스(I1)·그룹-로컬 pin 프리픽스(subtree 안)·top_level 서브파티션(그룹 밖 복귀)이 직교하며 canonical.
+test "SR5(d): pin × local_pinned × top_level 3축 공존 — 고정 그룹 안 정합(§14.7 하드닝)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+    // 고정 리전 [A(마커,pin,d1), lp(pin,멤버,local_pinned), m1(pin,멤버), TOP(pin,top_level), sticky(pin,sticky top)].
+    inline for (0..5) |i| {
+        session.tabs.items[i].pinned = true;
+    }
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[1].local_pinned = true; // 그룹-로컬 pin 멤버(marker+1 float)
+    session.tabs.items[3].top_level = true; // 고정 top카드(그룹 뒤 인터리브)
+    // 세 축 동기(비프리뷰 경로) — normalize(C2 top_level 인식)·float(로컬 pin)·위생(전이 stale).
+    session.normalizePinnedFromGroups();
+    session.floatLocalPinsAllGroups();
+    session.clearStaleLocalPins();
+
+    // 축1 전역 pin(I1): 5개 전부 고정 프리픽스(비고정 0개).
+    try std.testing.expectEqual(@as(usize, 5), session.countPinnedTabs());
+    for (session.tabs.items) |t| try std.testing.expect(t.pinned);
+    // 축3 top_level 서브파티션: A subtree=[0,3)(TOP에서 끊김), TOP·sticky는 그룹 밖 depth 0.
+    try std.testing.expectEqual(@as(usize, 3), session.groupSubtreeEnd(0, null, null));
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(3, null, null)); // TOP depth 0
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(4, null, null)); // sticky depth 0
+    try std.testing.expect(session.enclosingGroupMarkerIndex(3) == null); // TOP 그룹 밖
+    try std.testing.expect(session.enclosingGroupMarkerIndex(4) == null); // sticky 그룹 밖
+    try std.testing.expect(session.tabs.items[3].top_level and session.tabs.items[3].pinned); // 고정 top카드(pin×top_level)
+    // 축2 그룹-로컬 pin: lp(index1)은 여전히 A 멤버·local_pinned 유지(그룹 밖 안 나감 → 위생이 안 지움).
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[1]));
+    try std.testing.expect(session.tabs.items[1].local_pinned);
+    try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(1).?); // A 소속
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[2])); // m1도 A 멤버
+    // C2 정합: 고정 리전 안 top_level이 핀 경계와 어긋나지 않음(§14.4·§14.7 (1)).
+    try std.testing.expect(session.pinBoundariesAlignGroups());
+    // 렌더 힌트 3축 정합: lp는 local_pinned=true(📌 선두 분기 살림)·멤버 m1은 pin_derived(멤버 📌 억제)·TOP은 개별 pin.
+    session.recomputeVisibleTabs();
+    var saw_lp = false;
+    var saw_top_card = false;
+    for (session.sidebar_rows.items) |row| switch (row) {
+        .card => |c| {
+            if (c.tab == 1) {
+                saw_lp = c.local_pinned; // lp 카드 local_pinned 힌트
+            }
+            if (c.tab == 3) saw_top_card = (c.depth == 0 and !c.pin_derived and !c.local_pinned); // TOP=최상위 개별 pin
+        },
+        .group_header => {},
+    };
+    try std.testing.expect(saw_lp); // 로컬 pin 렌더 힌트 살아있음(그룹째 고정 아니어도)
+    try std.testing.expect(saw_top_card); // 고정 top카드는 depth0·개별 pin(pin_derived/local 아님)
+}
+
+test "SR5(e): 중첩 안 top_level — subgroup 뒤 top카드는 depth 0(부모 복귀 없음, §14.7 제약) + topLevelGroupMarkerIndex 상향" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+    // [A(마커,d1), a1(A 멤버,d1), B(마커,d2 중첩), b1(B 멤버,d2), TOP(top_level)].
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "B");
+    session.tabs.items[2].group_depth = 2;
+    session.tabs.items[4].top_level = true;
+    session.recomputeVisibleTabs();
+
+    // 중첩 파생: a1 depth1(A)·B 마커 depth2·b1 depth2(B)·TOP depth0(그룹 밖).
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(1, null, null));
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(2, null, null));
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(3, null, null));
+    // §14.7 제약: TOP은 **depth 0**(부모 A depth 1로 "복귀" 불가 — sticky-reset은 항상 0으로만 되돌린다).
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(4, null, null));
+    try std.testing.expect(session.enclosingGroupMarkerIndex(4) == null); // TOP 그룹 밖(A·B 어디도 아님)
+    // subtree 끝: A=[0,4)(TOP에서 끊김, 중첩 B 포함)·B=[2,4)(TOP에서 끊김).
+    try std.testing.expectEqual(@as(usize, 4), session.groupSubtreeEnd(0, null, null));
+    try std.testing.expectEqual(@as(usize, 4), session.groupSubtreeEnd(2, null, null));
+    // directCardCount: TOP이 (N) 배지에 안 세짐(top_level break — OR=min). A 직접=a1 1개.
+    // topLevelGroupMarkerIndex: 중첩 subgroup B의 멤버 b1(index3)도 **최상위 A(0)**로 상향(gap 드롭이 부모 그룹 끝 기준).
+    try std.testing.expectEqual(@as(usize, 0), session.topLevelGroupMarkerIndex(3).?);
+    try std.testing.expectEqual(@as(usize, 0), session.topLevelGroupMarkerIndex(2).?); // 중첩 마커 B → 최상위 A
+    try std.testing.expect(session.topLevelGroupMarkerIndex(4) == null); // TOP 최상위 카드 → null
+}
+
 test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs 불변 (simulateDrop == moveTab)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -23978,10 +24393,12 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
     session.chrome_host.context_menu.selected = ctx_menu_group_create;
     session.acceptContextMenu();
     try std.testing.expect(tab.group_start != null);
-    // 그룹 소속이 되면 메뉴 맨 끝에 "그룹에서 빼기"가 뜬다(ctx_menu_group_remove = 버퍼 최대 ctx_menu_count).
+    // 그룹 소속이 되면 메뉴 맨 끝에 "그룹에서 빼기"가 뜬다. **tab은 이제 마커 카드**(createGroup으로 group_start!=null)라
+    // "여기서 최상위로 분리"(promote)는 숨긴다(§14.8 SR5 결정 (a) — 마커 promote no-op). 그래서 len=ctx_menu_group_promote
+    // (=ctx_menu_count-1, remove까지만)이고 remove=ctx_menu_group_remove에 그대로 정렬한다(마커에선 promote 슬롯 비어 한 칸 짧다).
     session.context_menu_target = .{ .workspace = tab };
     const grouped_items = session.buildContextMenuItems();
-    try std.testing.expectEqual(ctx_menu_count, grouped_items.len);
+    try std.testing.expectEqual(ctx_menu_group_promote, grouped_items.len); // 마커 → remove만(promote 숨김)
     try std.testing.expectEqualStrings("그룹에서 빼기", grouped_items[ctx_menu_group_remove]);
     session.context_menu_target = .{ .workspace = tab };
     session.chrome_host.context_menu.selected = ctx_menu_group_ungroup;

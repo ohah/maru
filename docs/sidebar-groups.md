@@ -56,9 +56,14 @@ self.tabs:  t0    t1          t2   t3          t4   t5    t6
 - **각 카드의 소속 = 자기 위에서 가장 가까운 그룹 시작 마커.** 위에 마커가 없으면 **최상위**(별도 상태가 아니라 자동).
 - **"넣기/빼기"라는 명시 동작·메뉴가 없다** — 카드를 드래그해 마커 아래로 옮기면 그 그룹, 마커 위(첫 마커 이전)로
   옮기면 최상위. 소속은 항상 위치가 정한다.
-- **불변식(연속 파티션)**: 그룹은 다음 그룹 시작 마커 전까지 이어진다. 최상위 카드는 **첫 그룹 시작 이전 구간에만** 온다
-  (한 번 그룹이 시작되면 리스트 끝까지 그룹 안 — 중간에 최상위로 "복귀"하는 경계는 두지 않는다). pinned의 `[고정][비고정]`
-  파티션(session_model.zig:88, `moveTab` 3967)을 N-구간으로 일반화한 것이다.
+- **불변식(연속 파티션)**: 그룹은 다음 그룹 시작 마커 전까지 이어진다. 초안 모델에선 최상위 카드가 **첫 그룹 시작 이전
+  구간에만** 왔다(한 번 그룹이 시작되면 리스트 끝까지 그룹 안 — 중간 최상위 복귀 없음). pinned의 `[고정][비고정]`
+  파티션(session_model.zig:88, `moveTab` 3967)을 N-구간으로 일반화한 것이다. **§2.1 재설계(§14, SR1~5 완료)로 이 "중간 복귀
+  없음"을 서브파티션으로 일반화**했다: 리딩 break 플래그 `Tab.top_level`이 한 핀 리전 **안**을 `[탑카드, 그룹, 탑카드, 그룹]`
+  처럼 나눠, **그룹 뒤/사이에도 최상위 카드가 온다**(마커=push·top_level=pop-all·최상위 복귀). 계층은 **pin ⊃ subregion(top_level)
+  ⊃ group ⊃ nest**. 그래도 "한 번 최상위로 나가면 재진입은 **새 마커로만**"은 유지(top_level은 depth를 항상 0으로만 되돌리므로
+  중간에서 "부모 depth로 복귀"는 못 한다 — §14.7). "선택 탭만 그룹"(createGroup은 마커 뒤 첫 비선택 탭에 top_level write) ·
+  드래그·메뉴로 그룹과 최상위 카드를 인터리빙한다(요구1·요구2 — §14 단일 출처).
 - **새 워크스페이스 삽입점(끝 append 금지)**: 위 불변식의 직접 귀결로, **새 탭을 리스트 끝에 append하면 그룹이 하나라도
   있을 때 마지막 그룹의 멤버로 흡수**된다(사용자엔 "새 워크스페이스가 그룹에 빨려들어감" — 그 카드 우클릭 pin은
   `cardPinRole=.local`로 그룹 안 float까지 된다). 그래서 새 워크스페이스는 **비고정 리전의 첫 그룹 마커 직전**
@@ -563,8 +568,13 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   블록중앙으로 완전 계산해 per-cell로 넘겨 `.m` 기하를 없앤다(옵션 1의 per-row 누적/높이 배열 FFI보다, 정합 단일 출처가 Zig
   한 곳으로 모여 회귀 표면이 작다 — caret·배지·색 디코드가 같은 수식 공유). 부수: `bandFill`이 누적 y를 emit하면 `lowerSidebar`의
   `@divTrunc(rect.y, slot_h)` row 역산이 비가역이 되므로, chrome op에 row 인덱스를 실어 넘긴다. 세로 위치는 headless로 안 잡혀 **macOS 스크린샷 검증 필수**.
-- **(낮) 위치 파생의 경계 제약**: 최상위 카드는 첫 그룹 시작 이전 구간에만 온다(§2.1) — 그룹들 사이에 최상위 카드를 끼울 수
-  없다. 브라우저 탭 그룹도 사실상 이 모델이라 실용상 충분. 정말 필요하면 후속에서 "그룹 끝" sentinel 마커로 열 여지만 둔다.
+- **(해소됨, §14 §2.1 재설계 SR1~5 완료) 위치 파생의 경계 제약**: 초안에선 최상위 카드가 첫 그룹 시작 이전 구간에만 와
+  그룹들 **사이에 최상위 카드를 끼울 수 없었다**. 이 제약을 리딩 break 플래그 `Tab.top_level`로 열었다(초안이 남겨둔 "그룹 끝
+  sentinel"의 최종 형태 = 트레일링 `group_end`가 아니라 리딩 `top_level`, 드래그 orphan 회피 — §14.1 옵션 B). "선택 탭만 그룹"
+  (createGroup)·드래그(model-2 `sidebarCardDropAfterGroup` "그룹 뒤 빈 gap" 착지 포함)·메뉴(promote-in-place)로 `[탑카드, 그룹,
+  탑카드, 그룹]` 인터리빙이 성립한다. 단 top_level은 depth를 항상 0으로만 되돌려 **중첩 안 "부모 depth 복귀"는 여전히 불가**
+  (그룹 뒤 카드는 depth 0 최상위로만 복귀 — §14.7 제약). **설계·단계·정정된 자기진단은 §14를 단일 출처로 둔다**(SR1 저장·파생
+  토대·SR2 C2 정합·SR3 createGroup·SR4 model-2 드래그·SR5 빈 gap 제스처·3축 공존·문서 완결).
 - **(해소됨, SG5-3 핵심 판단) create_group vs create_sibling_group — 중첩/형제를 명시적 2액션으로 분리**: §2.1 연속
   파티션상 첫 그룹은 리스트 끝까지 뻗으므로 첫 그룹 뒤의 모든 카드는 "그룹 안"이다. create_group은 "그룹 안 카드 → depth+1
   중첩"(§9)이라, 그것만으론 첫 그룹 뒤에 **형제 최상위 그룹을 못 만든다**(flat 모델(SG1~5-2)에선 create_group이 항상 depth 1이라
@@ -1140,6 +1150,14 @@ inline depth stack에 `or t.top_level`)도 이 단계에서 함께.
 - **정책 결정(다중선택 메커니즘 부재)**: 현재 우클릭은 단일 탭 대상이다. 두 안 — (a) **연속 range 선택**(shift-click 등
   다중선택 UI 선결) 후 그 범위만 그룹, (b) **단일 탭 + 뒤 탭 promote**(선택 탭 하나를 그룹으로, 바로 뒤 탭에 top_level write =
   "이 탭만 그룹"). 1차는 (b)가 메커니즘 추가 없이 요구1을 만족(SR3에서 확정).
+- **중간 promote cascade는 option-B(§14.1) 고유(SR5 명문화)**: 다중 멤버 그룹 `[A(마커), m1, m2, m3]`에서 **중간 멤버** m2를
+  "여기서 최상위로 분리"(promote-in-place)하면, m2에 `top_level:=true`가 sticky break를 개시해 **뒤 멤버 m3도 그룹에서 끊긴다**
+  (m3는 플래그 없이도 빈 스택을 타 자동 top-level — §14.1 sticky-reset). 즉 promote는 "이 카드 하나"가 아니라 "이 카드**부터**
+  그룹 끝까지"를 최상위로 되돌린다. 이는 **리딩 break 플래그(option B)의 직접 귀결**이다 — 트레일링 `group_end`(A안)였다면 중간
+  카드만 뽑고 뒤는 그룹에 남길 수 있었겠지만, A는 드래그 시 경계 소실 orphan으로 기각됐다(§14.1). **마지막 멤버 promote**는
+  cascade 대상이 없어 정확히 그 카드만 그룹 밖 top카드가 된다(그래서 "빈 gap 첫 인터리브"의 메뉴 경로이자, SR5 드래그 gap
+  제스처(§14.6)와 같은 최종 상태를 만든다). 사용자가 "하나만" 빼려면 **removeFromGroup**(그룹 밖 이동, cascade 없음)을 쓴다 —
+  두 eject flavor의 cascade 유무 차이가 §14.7 divergence의 실동작 측면이다.
 
 ### 14.6 model-2 드래그 — `top_level` 전이 (**보강 4**, 요구2, SR4, SG8급)
 
@@ -1154,6 +1172,21 @@ inline depth stack에 `or t.top_level`)도 이 단계에서 함께.
   그룹 밖으로 빼면 자동 top카드"의 완전 positional UX를 못 준다 — **기각**. (SR1~3은 model 무관하게 공유되고, model-2 가상화는
   SR4 단독으로 얹힌다.)
 
+**SR5 — "그룹 뒤 빈 gap" 첫 인터리브(요구2 완성)**: SR4는 카드를 **기존 top카드 옆**으로 끌 때만 top_level 전이를 열었다
+(`sidebarCardDropTopLevel` = 타겟이 최상위면 true). 그런데 두 그룹 `[A, B]` 사이에 아직 top카드가 없으면 **row 모델에 그 빈
+gap을 가리킬 row가 없어**(연속 파티션 — 그룹 사이 빈 gap row 없음) 드래그로 **첫** top카드를 못 만들었다. SR5가 이 엣지를
+`sidebarCardDropAfterGroup`으로 닫는다: 커서가 **최상위 그룹의 마지막 멤버 카드**(또는 **접힌 최상위 그룹 헤더**)의 **아래
+경계 영역**(하단 40%, `dragInRowLowerBoundary` = rowTop/rowHeight 가변 높이 누적 공유)에 있으면, 드래그 카드를 그 그룹의
+**subtree 끝**(그룹 밖 gap)에 `top_level:=true`로 착지시킨다. **위치 계산은 접힌 헤더 드롭(`sidebarGroupDropTargetTab`)과
+동형**(`from<m`이면 `j-1`·아니면 `min(j, len-1)` 방향 보정)이라 새 위치 로직이 아니고, **top_level만** 다르다(멤버 흡수 대신
+그룹 밖 복귀). 착지 후 commit이 SR4 카드 경로와 **같은 `hasGroupMarkerAboveInRegion` 게이트**로 실제 write를 굽는다 →
+프리뷰=확정 불변식 그대로. **제약**: (1) 같은 그룹 안 카드(`from∈[m,j)`) 드래그는 발화 안 함(그룹 안 재정렬 — gap-promote는
+밖에서 끌어올 때만), (2) 펼친 헤더 아래 경계는 발화 안 함(첫 멤버와 모호 — 접힌 헤더만), (3) 중첩은 **최상위 그룹 끝만**
+(`topLevelGroupMarkerIndex` 상향으로 중첩 subgroup 마지막 멤버여도 부모 최상위 그룹 끝 기준 — 중첩 gap의 "부모 depth 복귀"는
+§14.7 sticky-reset 제약상 불가라 top-level 복귀만). 발화 조건이 아니면 기존 SR4 경로로 폴백해 **byte-identical**. **메뉴 경로
+대안**: 마지막 멤버 "여기서 최상위로 분리"(promote-in-place)도 같은 최종 상태를 만든다(§14.5 cascade 문단) — 드래그/메뉴 두
+경로가 같은 gap top카드로 수렴한다.
+
 ### 14.7 pinned × top_level 정합·eject flavor (**보강 5**, SR2/SR3 교차)
 
 핀 리전 **안**의 서브파티션이라 `pinned=1·top_level=1` 상태가 가능하다(고정 리전 안 그룹 뒤 고정 top카드). 정합 divergence
@@ -1167,21 +1200,30 @@ inline depth stack에 `or t.top_level`)도 이 단계에서 함께.
 
 1. **SR1 — 저장·파생 토대(동작 보존, byte-identical) ✅**: `Tab.top_level`(session_model + workspace 모델) + `top-level`
    직렬화(additive, false=키 생략) + 캡처/복원 왕복 + §14.3의 7 경계 리셋/break + `enclosingGroupMarkerIndex` 상향 클램프 +
-   `tabIsInGroup` 재작성 + §14.2 렌더(자동). **아직 SR2(normalize 재작성)·SR3(createGroup)·SR4(드래그)·SR5 없음**. top_level
+   `tabIsInGroup` 재작성 + §14.2 렌더(자동). top_level
    0개면 7 경계 no-op → 기존 그룹/pin/GL/SG8 **byte-identical**(회귀 0). 헤드리스: 7 경계 인터리빙 파생(`[A,a1,TOP,B,b1]` depth
    1,1,0,1,1·`groupSubtreeEnd(A)=[0,2)`·`directCardCount(A)=2`·`effectiveDepthAt(TOP)=0`·`enclosing(TOP)=null`·`tabIsInGroup(TOP)
    =false`·subtreeHasMatch/ghostOverlapsSubtree top_level break·pass2 접힘 shred 방지) + 직렬화 round-trip.
-2. **SR2 — C2 정합 재작성(최고 위험, §14.4)**: `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` 구조 subtree에 top_level
+2. **SR2 — C2 정합 재작성(최고 위험, §14.4) ✅**: `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` 구조 subtree에 top_level
    하드 break + **suffix-exclusion → exact-full-rewrite** + align top_level 인식. 헤드리스: 고정 리전 인터리브 canonical·idempotent·
    align 통과 + **"top_level 앞 desync 멤버 흡수"**(손상 치유 회귀 게이트, 초안 오진 정정 반영).
-3. **SR3 — createGroup write "선택 탭만 그룹"(요구1, §14.5)**: `beginGroupForTab`이 선택 범위 다음 첫 탭에 top_level write +
+3. **SR3 — createGroup write "선택 탭만 그룹"(요구1, §14.5) ✅**: `beginGroupForTab`이 선택 범위 다음 첫 탭에 top_level write +
    카드→마커 전이 시 top_level clear + inline depth stack `or t.top_level` 리셋 + "여기서 최상위로 분리"(promote-in-place) 액션 +
    재흡수 + hygiene(§4.5). 정책(b: 단일+뒤탭 promote) 확정. 스크린샷 훅 `MARU_FORCE_INTERLEAVE`.
-4. **SR4 — model-2 드래그 가상화(요구2, §14.6, SG8급)**: `VirtualLayout.top_level[]` + `DropPlan.top_level` + `simulateDrop`
+4. **SR4 — model-2 드래그 가상화(요구2, §14.6, SG8급) ✅**: `VirtualLayout.top_level[]` + `DropPlan.top_level` + `simulateDrop`
    순열 + 프리뷰 가상 read + **프리뷰=확정 등가 테스트** + `sidebarGroupDropBoundary`/`DropTargetTab` 인터리빙 드롭 타깃.
-5. **SR5 — 잔재/문서/중첩 하드닝**: pin×top_level×local_pin 3중 공존 헤드리스 + 중첩 안 top_level(subgroup 뒤 부모 직접
-   top카드 — sticky-reset이 depth를 항상 0으로만 되돌려 "부모 depth 복귀"는 안 되는 제약 명문화) 확장/범위 결정 + §2.1·§10
-   경계 제약 해소 서술.
+   스크린샷 훅 `MARU_FORCE_SR4_DRAG`(+`_INTO`).
+5. **SR5 — 빈 gap 제스처·잔재/문서/중첩 하드닝 ✅**: (1) **"그룹 뒤 빈 gap" 첫 인터리브**(요구2 완성) — 마지막 멤버/접힌
+   최상위 헤더의 **아래 경계 영역** 드롭으로 그룹 밖 top카드 착지(`sidebarCardDropAfterGroup` — 위치는 접힌 헤더 드롭과 동형
+   방향 보정, top_level만 다름, 커밋 게이트=`hasGroupMarkerAboveInRegion` 공유). SR4가 기존 top카드 **옆** 드롭만 열었던
+   한계(빈 gap 불가)를 닫는다. (2) **pin×top_level×local_pin 3축 공존** 헤드리스(고정 그룹 안 정합·렌더 힌트 3축) + **중첩 안
+   top_level**(subgroup 뒤 top카드 = **depth 0**, sticky-reset이 depth를 항상 0으로만 되돌려 "부모 depth 복귀"는 안 되는
+   §14.7 제약 명문화) + `topLevelGroupMarkerIndex` 상향(중첩 멤버 gap 드롭이 부모 최상위 그룹 끝 기준). (3) **두 UX 결정**:
+   (a) **마커 카드 promote 숨김** — 마커에선 "여기서 최상위로 분리"를 안 띄운다(`promoteTabToTopLevelInPlace`가 leaf-only §13.8상
+   no-op이라 죽은 항목 방지; remove는 마커에서도 nested subgroup 빼기로 유효해 유지 — 메뉴가 한 칸 짧아져 sel이 promote 인덱스
+   미도달). (b) **중간 promote cascade** 문서 명시(§14.5). (4) **§2.1 본문·§10 경계 제약 해소 서술**. 스크린샷 훅
+   `MARU_FORCE_GAP_DROP`(+`_COLLAPSED`)·`MARU_FORCE_SR5_3AXIS`(+`_PIN`/`_COLLAPSED`/`_COLOR`)·`MARU_FORCE_SR5_NESTED_TOP`.
+   헤드리스: `SR5(a)` 빈 gap 드롭·`SR5(b)` 접힌 헤더 gap+skip 엣지·`SR5(c)` promote 마커 숨김·`SR5(d)` 3축 공존·`SR5(e)` 중첩 top_level.
 
 ### 14.9 규모·리스크
 

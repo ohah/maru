@@ -20,12 +20,12 @@
 
 현재 `contentView`는 단일 `MaruMetalTerminalView`(CAMetalLayer)이고, 이 뷰가 firstResponder로 keyDown·IME·마우스·DnD·hover를 전부 받는다. 웹 패널을 위해 **contentView를 컨테이너 NSView로 바꾸고** 세 겹을 쌓는다:
 
-1. **터미널 Metal layer**(맨 아래): 기존 셀·사이드바·탭바·pane chrome. `isOpaque=true`.
+1. **터미널 Metal layer**(맨 아래): 기존 셀·사이드바·탭바·pane chrome. `isOpaque`는 무조건 true가 아니다 — `window.opacity<1`이면 현재 코드가 metalLayer·window의 `isOpaque`를 모두 false로 내리고 chrome 배경(`chromeCellBg`/`chromeQuadBg`)까지 반투명이다. WKWebView와의 정합은 §8.
 2. **WKWebView subview(들)**(중간): web Term마다 하나, **본문 rect**에만(§5). split이면 여러 개.
 3. **모달 Metal 오버레이**(맨 위): command palette·find·confirm. `isOpaque=false`, 평소 clear(투명), 모달 열림 시에만 셀을 그린다.
 
 **모달 레이어 분리는 두 개의 선행 리팩터다**(Phase 4 선행, 가벼운 작업이 아님):
-- **(a) 렌더러 분할**: 현재 모달은 터미널과 같은 cells 배열·같은 draw pass에서 `modal_cells_start` 인덱스로만 갈린다. over-quad(`layer=1`)·그림자·`modal_clip_*`(scissor, ABI v84)이 모두 same-pass 전제다. 이를 `drawTerminal(layer, cellSubset)` / `drawOverlay(layer, modalCells+quads+shadow)` 두 패스로 재분할하고, 두 CAMetalLayer의 drawable·redraw·**generation 게이팅을 독립 추적**한다(현 `lastSeenMetalGeneration` 단일 가정 변경). modal-clip 인프라 재배선 대상.
+- **(a) 렌더러 분할**: 현재 모달은 터미널과 같은 cells 배열·같은 draw pass에서 `modal_cells_start` 인덱스로만 갈린다. same-pass 전제는 over-quad(`layer=1`)·그림자·`modal_clip_*`(scissor, ABI v84)에 더해 **커서 blink 페이드 suffix pass(ABI v95)**까지다 — caret은 단일 cells 버퍼 맨 끝 suffix + 단일 fragment opacity uniform 전제이고 draw 위치가 모달 유무로 갈리므로(모달 열림 시 모달 텍스트 뒤), 분리 시 caret pass를 소유 레이어로 재배선한다. 셀당 2-quad(×12 vertex) 오프셋 규약(`modal_cells_start*12`·`cursor_start*12`의 기반)도 두 패스에 그대로 이관한다. 이를 `drawTerminal(layer, cellSubset)` / `drawOverlay(layer, modalCells+quads+shadow+caret)` 두 패스로 재분할하고, 두 CAMetalLayer의 drawable·redraw·**generation 게이팅을 독립 추적**한다(현 `lastSeenMetalGeneration` 단일 가정 변경). modal-clip 인프라 재배선 대상 — 주의: `MTLScissorRect`는 **좌상단 원점**이다(기존 미사용 modal_clip 경로에 좌하단 착오 이력).
 - **(b) 호스트 재편**: contentView를 컨테이너로, 입력 responder를 명시 위임(§4). 오버레이용 `isOpaque=false` + transparent clear 분기(터미널 전용 `terminal_bg`/opacity clear와 별도).
 
 ## 3. 좌표계와 frame 동기화
@@ -73,6 +73,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 
 ## 8. 빠진 기능 (구현 시 필수)
 
+- **window.opacity 정합**: 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 WKWebView 본문 rect만 불투명하면 시각 부정합(데스크톱이 비치는 chrome 옆에 불투명 웹 패널). WKWebView 배경 처리(`drawsBackground`/`underPageBackgroundColor`) 또는 "웹 패널이 있는 창은 opacity 무시" 중 Phase 4c에서 결정.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
 - **⌘F 분기**: 포커스가 터미널이면 maru find(스크롤백), 웹 패널이면 페이지 내 find. 포커스 기준 라우팅 명시.
 - **컨텍스트 메뉴**: WKWebView 기본 우클릭 메뉴(Inspect Element 포함)는 "chrome는 Zig" 원칙·보안과 충돌 → 억제 또는 maru 메뉴로 대체.
@@ -108,7 +109,7 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
 - **자동(headless/TDD)**: 브리지 격리(`evaluateJavaScript`로 page-world `window.maru === undefined`), per-pane rect 계산(px↔pt·y-flip) 단위, surface diff 로직, WKWebView frame·NSView 계층 값 단언, CSP·경로 정규화(traversal 거부) 단위를 먼저 실패시키고 구현한다. Phase 7 웹 콘텐츠의 순수 JS/TS 로직은 Bun 내장 test runner(`bun test`, `web:test`)로 검증한다. Phase 6 WebDriver 어댑터가 아직 없으면 WKWebView 통합 E2E는 `evaluateJavaScript` 하니스로 먼저 검증하고, WebDriver가 붙은 뒤 같은 subset을 표준 WebDriver smoke로 반복한다.
 - **Phase 4 렌더 사전 gate**: 모달 레이어 분리·overlay layer를 건드리기 전 현재 렌더러 계약이 green인지 먼저 확인한다. 최소 자동 명령은 `mise run test`, `mise run check-boundaries`, `mise run test-macos-coretext-smoke`, `mise run test-macos-metal-smoke`다. display가 있는 macOS에서는 `mise run macos-coretext-smoke`와 `mise run macos-metal-smoke`도 실행해 CoreText draw-list shaper/raster 준비(`renderer_frame_prepared=true`, `drawlist_frame_prepared=true`, `drawlist_glyph_raster_ready=true`)와 제품 Metal atlas path(`product_atlas_uploaded=true`, `product_atlas_sampled=true`, `atlas_sample_missing_cells=0`, `atlas_readback_mismatched_bytes=0`, `screenshot_artifact=true`)를 확인한다. 이 preflight는 자연폭/2-quad/role 기반 cover-fit/atlas sampling의 기존 green 상태를 확인하는 것이고, WKWebView 위 실제 합성·입력은 아래 수동/시각 gate가 별도로 닫는다.
 - **Phase 7 markdown sanitizer adversarial fixture**: `.md` 입력은 비신뢰 데이터이므로 raw HTML/script 제거를 단위+웹 콘텐츠 테스트로 고정한다. 최소 red fixture: `<script>`, `onerror`/`onclick`, `javascript:` URL, `<iframe>`/`srcdoc`, 외부 `http(s)` 리소스. 기대값은 "DOM에 실행 가능한 sink가 남지 않고, CSP 위반 없이 안전한 텍스트/허용 태그만 렌더"다.
-- **수동/시각**: z-order 픽셀 합성(실제 셀 모달 × 투명 오버레이 × 실콘텐츠 WKWebView)은 **CI 자동 불가**(`CGWindowListCreateImage` macOS 15+ 제거, ScreenCaptureKit은 TCC 권한·GUI 필요) → **GUI 골든 1 frame을 Phase 4 종료 게이트**로 둔다. 골든 시나리오는 WKWebView 본문 위에 모달 오버레이를 띄운 상태에서 Hack `workspace` baseline(텍스트는 fit/center 금지), `①②③` cover-fit, 음수 자간, SGR48/선택/블록 커서 밑 자연폭 글리프, split divider 경계 bleed를 함께 담는다. 이 항목은 [glyph-role-render-model.md](glyph-role-render-model.md)와 [font-strategy.md](font-strategy.md)의 렌더 계약을 Phase 4 합성 리팩터가 깨지지 않았는지 보는 수동 gate다.
+- **수동/시각**: z-order 픽셀 합성(실제 셀 모달 × 투명 오버레이 × 실콘텐츠 WKWebView)은 **CI 자동 불가**(`CGWindowListCreateImage` macOS 15+ 제거, ScreenCaptureKit은 TCC 권한·GUI 필요) → **GUI 골든 1 frame을 Phase 4 종료 게이트**로 둔다. 골든 시나리오는 WKWebView 본문 위에 모달 오버레이를 띄운 상태에서 Hack `workspace` baseline(텍스트는 fit/center 금지), `①②③` cover-fit, 음수 자간, SGR48/선택/블록 커서 밑 자연폭 글리프, split divider 경계 bleed를 함께 담는다. 골든 캡처 config는 `theme.min-contrast` 값을 명시 고정한다(팔레트 자동 대비 보정이 baseline 색을 드리프트시키지 않게). 이 항목은 [glyph-role-render-model.md](glyph-role-render-model.md)와 [font-strategy.md](font-strategy.md)의 렌더 계약을 Phase 4 합성 리팩터가 깨지지 않았는지 보는 수동 gate다.
 - **입력 라우팅**(§4)·**드래그 통과**(§5)는 실기 수동 검증(자동 어려움).
 
 ## 12. 리스크

@@ -13,6 +13,7 @@
 - **부분 이동과 전체 윈도우 merge를 둘 다 지원한다.** 기본 primitive는 surface/pane/workspace 이동이고, 전체 window merge는 source window의 workspace들을 target window로 반복 이동한 뒤 빈 source window를 닫는 bulk operation이다.
 - **Maru-owned browser/web panel은 기본적으로 다시 합칠 수 있어야 한다.** "단독 브라우저 창"은 합쳐지지 않는 별도 타입이 아니라 browser surface 하나만 들어 있는 Maru window다. 외부 Safari/Chrome으로 여는 `Open in External Browser`만 Maru로 reattach할 수 없는 별도 앱 경로다.
 - **OS 타이틀바 드래그로 merge하지 않는다.** 창 이동 gesture와 충돌하므로, cross-window 이동은 Maru 내부 요소(surface tab, pane grip, workspace card)를 드래그하는 UX로 제공한다. 전체 window merge는 우선 command/menu/palette로 제공한다.
+- **사이드바 그룹은 v1에서 이동 단위가 아니다.** workspace card는 단독으로만 창을 이동하고, 이동 시 소속 그룹에서 암묵 이탈한다 — 그룹 소속이 별도 필드가 아니라 탭 순서 파생(`group_start` 마커, [sidebar-groups.md](sidebar-groups.md))이기 때문이다. `group_start` 마커 workspace의 이동은 그룹 해체로 처리하고, 잔여 멤버·핀은 기존 위치 파생·핀 정규화 규칙으로 재정규화한다. 그룹 통째 cross-window 이동과 `local_pinned`/`top_level` 보존 여부는 후속 결정이다. 상세 케이스는 §4, red test는 M1(§8).
 - **native drag는 운반만, 정책은 Zig가 소유한다.** AppKit은 cross-window drag lifecycle, 좌표 변환, NSWindow 생성/focus, WKWebView reparent만 맡는다. drop 가능 여부, target 계산, WindowGraph 변경, capability 재평가는 Zig/AppRuntime이 결정한다.
 
 ## 2. 현재 코드 기준 영향
@@ -81,7 +82,9 @@ move_all_workspaces_to_window:N
 
 기본 단축키는 두지 않는다. 단일 macOS 관례가 없고, 실수 시 큰 레이아웃 변형이므로 command palette, window menu, context menu로 노출한다.
 
-quick terminal은 이동 단위·대상에서 제외한다 — 싱글톤 dropdown이라 detach/reattach·merge·split drop의 출발지도 도착지도 아니다. quick 안의 surface를 일반 창으로 빼내는 별도 UX가 필요하면 추후 명시 결정한다.
+quick terminal은 이동 단위·대상에서 제외한다 — 싱글톤 dropdown이라 detach/reattach·merge·split drop의 출발지도 도착지도 아니다. `merge_all_windows`/`merge_window_into_active_window`도 quick window를 포함하지 않는다. quick 안의 surface를 일반 창으로 빼내는 별도 UX가 필요하면 추후 명시 결정한다.
+
+사이드바 그룹과의 상호작용(§1 결정의 상세): workspace card 이동은 사이드바 그룹 모델([sidebar-groups.md](sidebar-groups.md))과 직접 상호작용한다 — 소속이 탭 순서 파생이라 창을 떠나는 순간 소속·핀 리전이 바뀐다. v1 케이스: (a) 그룹 멤버 이동 = 그룹 암묵 이탈 + source 창 재정규화, (b) `group_start` 마커 이동 = 그룹 해체 + 잔여 멤버 재정규화, (c) 전역 `pinned` workspace 이동 = target 창의 핀 리전 정책("고정 요소 흡수 불가" 포함)을 그대로 따름, (d) `local_pinned`/`top_level`은 이탈 시 의미를 잃으므로 리셋. 같은 sidebar 안 드래그에는 이미 Cmd=그룹 중첩 제스처가 있으므로, cross-window 드래그가 이 제스처와 충돌하지 않게 M5에서 modifier 의미를 재확인한다.
 
 ## 5. Native 이벤트 사용 범위
 
@@ -116,7 +119,7 @@ Zig/AppRuntime이 맡는 것:
 
 restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이다. 이 절은 그 문서에 중복 정의하지 않고, 이동성 모델이 요구하는 변경만 적는다(상세 저장/미저장 목록은 거기서 갱신).
 
-- 저장 모델을 단일 창 기준에서 `WindowGraph` 기준(windows, active window, workspace order, pane tree, surface refs)으로 확장한다.
+- 저장 모델을 단일 창 기준에서 `WindowGraph` 기준(windows, active window, workspace order, pane tree, surface refs)으로 확장한다. **이 확장은 M3의 종료 gate다**(§8) — cross-window 배치가 처음 생기는 단계이므로, "이동은 되는데 재시작하면 사라짐" 상태로 M3를 닫지 않는다.
 - live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 계속 저장하지 않는다(기존 정책 유지).
 - 복원 시 live surface는 새 generation으로 생성된다. agent session resume처럼 별도 영속 상관키가 있는 항목만 재연결을 시도한다.
 - 하위 호환은 없으므로 옛 저장 파일은 workspace-restore.md의 "조용한 기본 창 폴백"을 따른다.
@@ -126,10 +129,10 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 이 기능은 full drag UX부터 만들지 않는다. 먼저 command path와 순수 모델을 고정한다.
 
 1. **M0a SurfaceIdAllocator**: 앱 인스턴스 전역 opaque u64 발급, 비재사용, generation mismatch 단위 테스트. 기존 per-session `next_id`는 외부 ID로 노출하지 않는다.
-2. **M0b WindowMembershipSnapshot**: full `WindowGraph` 전 2-window+quick membership DTO, `metadata:self/window/all` scope 필터 테스트.
-3. **M1 WindowGraph TDD**: `moveSurface`, `movePane`, `moveWorkspace`, `mergeWindow`, no-op/empty-source/focus 보정 단위 테스트.
+2. **M0b WindowMembershipSnapshot**: full `WindowGraph` 전 2-window+quick membership DTO, `metadata:self/window/all` scope 필터 테스트. `window_kind` 판별자는 현재 코드에 없으므로(quick은 Swift 전용 `quick` 참조·`QuickTerminalPanel`·`chrome_minimal` 플래그로 분산) M0b가 신규 도입한다.
+3. **M1 WindowGraph TDD**: `moveSurface`, `movePane`, `moveWorkspace`, `mergeWindow`, no-op/empty-source/focus 보정 단위 테스트. `moveWorkspace`는 사이드바 그룹 상호작용(§4)을 red test로 고정한다: 그룹 멤버 이탈 재정규화, `group_start` 마커 이동=그룹 해체, 전역 `pinned` 이동 시 target 핀 리전 정규화, `local_pinned`/`top_level` 리셋.
 4. **M2 LiveSurfaceRegistry 분리**: terminal live runtime을 window 밖 owner로 이동. surface 이동 시 PTY/TerminalCore를 재시작하지 않음을 테스트. web panel state/WKWebView handle은 이 시점에 아직 없으므로 terminal runtime만 옮기고, web surface runtime은 Phase 4 이후 같은 registry에 합류한다.
-5. **M3 command 기반 이동**: palette/menu action으로 surface/pane/workspace/window_all 이동. Swift는 window create/focus만 수행.
+5. **M3 command 기반 이동**: palette/menu action으로 surface/pane/workspace/window_all 이동. Swift는 window create/focus만 수행. 종료 gate에 workspace restore의 `WindowGraph` 포맷 확장(§7)을 포함한다.
 6. **M4 same-window drag 재연결**: 기존 drag 경로가 WindowGraph move API를 쓰게 정리.
 7. **M5 cross-window native drag**: AppKit drag session/destination을 붙이고 Zig drop target API에 연결.
 8. **M6 web surface reparent**: WKWebView를 destroy/recreate하지 않고 target window/container로 reparent. focus/IME/z-order artifact로 검증.
@@ -137,7 +140,7 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 기존 Phase 계획 영향:
 
 - **Phase 1 영향 있음**: live collector 전에 M0a/M0b가 선행된다. 이 때문에 1c가 단순 fake DTO가 아니라 allocator와 membership scope red test를 포함한다.
-- **Phase 2~3 순서 영향 없음**: write/event/stream은 이미 `surface_id + generation`을 쓰므로 Phase 1의 전역 ID 계약을 소비하면 된다.
+- **Phase 2~3 순서 영향 없음**: write/event/stream은 이미 `surface_id + generation`을 쓰므로 Phase 1의 전역 ID 계약을 소비하면 된다. 단 Phase 3의 background 세션 이벤트 소스(3b)는 per-window AppSession 순회 전제라, M1/M2가 먼저 끝나 있으면 AppRuntime graph를 직접 읽어 재배선을 아낀다(권장이지 차단 아님 — [control-plane.md] §7).
 - **Phase 4 영향 있음**: WKWebView hosting 전에는 M0 완료를 확인하고 M1/M2가 선행된다. Phase 4가 Phase 1보다 먼저면 M0a/M0b를 먼저 닫는다. M3(command move/merge)까지 Phase 4 전에 끝낼 필요는 없다.
 - **Phase 5~7 순서 영향 없음**: bridge, WebDriver adapter, markdown content는 새 ID와 WindowGraph membership을 소비한다. 하위호환 bridge/API adapter를 만들지 않는다.
 - **Workspace restore 영향 있음**: 새 graph 포맷을 직접 저장하고, 옛 파일은 조용한 기본 창 폴백으로 둔다. 구버전 reader를 추가하지 않는다.

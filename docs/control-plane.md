@@ -363,6 +363,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 
 - 코어(L2): `src/session/control_plane.zig`
 - collector·소켓·디스패처(L4): `src/platform/macos/MaruAppHost.swift`, `src/platform/macos/control_{collector,socket}.{zig,m}`, `src/platform/macos/app_host_abi.{zig,h}`
+  - **1b 착수 상태(2026-07-07)**: `control_socket.zig`는 unix socket bootstrap(bind/accept/peer-cred/hello)까지 구현됐다. 순수 정책(`socketPathFits`·`peerUidAllowed`·`staleAction`·경로 파생)은 같은 파일의 테스트 가능한 헬퍼로, 소켓 syscall은 libc extern(`std.c`·`getpeereid` — Zig 0.16이 `std.posix` socket wrapper를 제거)으로 둔다. `.m` 동반은 불요(peer-cred/bind가 Zig로 충분). **CI 커버리지 갭**: `control_socket` 테스트는 `build.zig`에서 **macOS-gated**라 ubuntu `check` CI가 돌리지 않는다(Zig 0.16 socket·xucred가 macOS 검증만 됨). macOS 호스트 `zig build test`에서 돈다 — Linux-host 검증 후 un-gate가 후속. accept-loop 스레드↔메인 marshal·실제 dispatch는 1c(§5), capability/self-origin은 1e/1g.
 - 세션 신원: `src/pty/types.zig`(`SpawnRequest`)·`pty/macos.zig`(env)
 - CLI: `src/cli.zig`(`sessions`/`session` 서브커맨드)
 - WKWebView·WebDriver: `src/platform/macos/web_panel.{zig,swift}`

@@ -15,6 +15,7 @@ pub const WindowKind = window_membership.WindowKind;
 pub const MetadataScope = window_membership.MetadataScope;
 pub const window_graph = @import("session/window_graph.zig"); // M1: window→workspace→pane→surface_ref 순수 배치 모델 + move/merge
 pub const WindowGraph = window_graph.WindowGraph;
+pub const control_plane = @import("session/control_plane.zig"); // Track C 1a: 세션 컨트롤 플레인 wire 프로토콜(JSON-RPC 2.0/ndjson/hello, 순수 schema/parser/framing)
 pub const ime = @import("session/ime.zig");
 pub const keyhint_hold = @import("session/keyhint_hold.zig"); // 단축키 힌트 홀드 gesture 정책(OS-중립, platform이 alias로 참조)
 pub const agent_transcript = @import("session/agent_transcript.zig");

@@ -4805,32 +4805,53 @@ pub const AppSession = struct {
     /// 카드가 끼는 것(desync 샌드위치 = 핀 경계가 그룹 subtree 중간을 자름, I3 안전 전제 붕괴). canonical(normalize 후) 상태는
     /// 항상 통과하고, 손상(멤버 desync 주입) 상태는 false. **순수 판정** — assertPinnedPrefixRuntime(런타임 assert)와 헤드리스
     /// 테스트(정렬 통과·어긋남 검출)가 공유한다. 중첩 자식은 부모 구조 subtree [i,e) 안이라 같은 검사로 통째 커버된다.
+    ///
+    /// **§2.1 재설계(§14.4, SR2) — top_level 인식**: 인터리빙에서 그룹 뒤 top카드가 subtree 중간을 자르면 suffix-exclusion 판정이
+    /// 그 앞 desync 멤버를 "꼬리"로 오인해 I3 위반을 **위음성으로 놓친다**. normalize와 동형으로 구조 subtree end 스캔에 top_level
+    /// 하드 break를 넣고, hard_end면 `[i+1, e)` 전량이 마커 pin과 일치하는지 **exact 검사**(꼬리 배제 없음)로 위반을 위음성 없이
+    /// 검출한다. top_level 0개면 hard_end never-true → 기존 suffix-exclusion과 byte-identical.
     fn pinBoundariesAlignGroups(self: *AppSession) bool {
         const n = self.tabs.items.len;
         var i: usize = 0;
         while (i < n) {
             const marker = self.tabs.items[i];
             if (marker.group_start == null) {
-                i += 1; // 최상위 카드 — 그룹 경계 아님
+                i += 1; // 최상위 카드(top_level 복귀 카드 포함) — 그룹 경계 아님
                 continue;
             }
             const eff = self.effectiveDepthAt(i, null, null);
             const pin = marker.pinned; // 마커 = 그룹 고정 권위(§12.2)
+            // 구조 subtree [i, e): normalize와 동형 — 형제/얕은 마커에서 끊되 §2.1 재설계(§14.4, SR2) **top_level 하드 break**도
+            // 추가한다. top_level 카드가 subtree 중간을 자르는 I3 위반을 위음성 없이 검출하려면(exact-end), suffix-exclusion 꼬리
+            // 배제가 top카드 앞의 desync 멤버를 "꼬리"로 오인해 놓치면 안 되기 때문이다.
             var e = i + 1;
+            var hard_end = false; // top_level 하드 break로 끝났는가(exact-end — soft 꼬리 배제 없음)
             while (e < n) : (e += 1) {
                 const t = self.tabs.items[e];
-                if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff) break; // 형제/얕은 마커 = 구조 경계
+                if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff) break; // 형제/얕은 마커 = soft 구조 경계
+                if (t.top_level) {
+                    hard_end = true;
+                    break; // §14.4 top_level = 하드 exact-end(OR=min)
+                }
             }
-            // 마커 pin이 마지막으로 일치하는 위치(진짜 멤버 범위 끝). 그 뒤는 다음 리전 top카드 꼬리라 배제(normalize와 동일).
-            var last_match = i;
-            var k = i + 1;
-            while (k < e) : (k += 1) if (self.tabs.items[k].pinned == pin) {
-                last_match = k;
-            };
-            // 진짜 멤버 범위에 마커 pin과 다른 카드가 끼면 핀 경계가 그룹 subtree 중간을 자름 → I3 안전 전제 위반.
-            k = i + 1;
-            while (k <= last_match) : (k += 1) if (self.tabs.items[k].pinned != pin) return false;
-            i = e; // 구조 subtree 통째 처리 — 꼬리 top카드는 다음 마커/리전이 다룬다
+            if (hard_end) {
+                // exact-end: top_level 앞 [i+1, e) 전량이 마커 pin과 일치해야 정렬(꼬리 배제 없음 — 위음성 방지). 하나라도
+                // 어긋나면 핀 경계가 top_level 서브파티션 subtree 중간을 자름 → I3 위반(normalize의 exact-full-rewrite가 흡수).
+                var k = i + 1;
+                while (k < e) : (k += 1) if (self.tabs.items[k].pinned != pin) return false;
+            } else {
+                // suffix-exclusion(top_level 없는 그룹 — byte-identical): 마커 pin이 마지막으로 일치하는 위치(진짜 멤버 범위 끝)
+                // 까지만 검사. 그 뒤는 다음 리전 top카드 꼬리라 배제(normalize와 동일). 진짜 멤버 범위에 마커 pin과 다른 카드가
+                // 끼면(desync 샌드위치) 핀 경계가 그룹 subtree 중간을 자름 → I3 안전 전제 위반.
+                var last_match = i;
+                var k = i + 1;
+                while (k < e) : (k += 1) if (self.tabs.items[k].pinned == pin) {
+                    last_match = k;
+                };
+                k = i + 1;
+                while (k <= last_match) : (k += 1) if (self.tabs.items[k].pinned != pin) return false;
+            }
+            i = e; // 구조 subtree 통째 처리 — 꼬리/top카드는 다음 마커/리전이 다룬다
         }
         return true;
     }
@@ -4852,6 +4873,15 @@ pub const AppSession = struct {
     /// 스택워크가 아니라 suffix-exclusion인 이유: 스택워크는 "고정 그룹 + 비고정 top카드" 인접에서 top카드까지 삼켜(shred 반대
     /// 방향) GP1 렌더와 tension이 났다(§12.5 정정 ②′). 사이에 낀 desync 멤버(마커 pin이 뒤에서 재등장)는 여전히 흡수한다.
     ///
+    /// **§2.1 재설계(§14.4, SR2) — top_level 하드 break × exact-full-rewrite**: 인터리빙에서 top카드가 subtree 중간(두 그룹
+    /// 사이·같은 핀 리전)에 오면 위 구조 스캔이 top_level에서 break해야 진짜 멤버 범위가 top카드를 절대 포함 안 한다. top_level은
+    /// suffix-exclusion 꼬리(위치 파생, soft)와 달리 **끝이 정확(hard exact-end)**이라, top_level 하드 break로 끝난 그룹은
+    /// suffix-exclusion 대신 `[i+1, e)` **exact-full-rewrite**(전량 무조건 재기록 = §12.6 toggleGroupPin direct sync 결)로
+    /// 분기한다. 이 리전은 I1 uniform이라 shred는 발화 불가(재기록 no-op)이나, top_level **앞에 낀 desync 멤버**(손상/레거시
+    /// 파일)는 [i+1, e)에 들어 여전히 흡수한다(하드 break가 창을 축소해도 top_level 안 subtree 치유는 유지 — 치유 회귀 없음).
+    /// top_level 카드 자신은 e 밖이라 절대 안 흡수(exact-end). top_level 0개면 hard_end never-true → 기존 suffix-exclusion과
+    /// **byte-identical**(GP2·C2 회귀 0).
+    ///
     /// **SG8 드래그 게이트(필수)**: self.tabs를 mutate하므로 `sidebar_drag_preview != null`(드래그 프리뷰 활성)이면 **절대
     /// 안 돈다** — SG8은 "드래그 내내 self.tabs 불변"을 보존한다(프리뷰는 sidebar_preview_rows 위 가상 배치, 확정=commit
     /// 후에만 self.tabs 변경). 이 단일 게이트로 모든 호출처가 안전하다(commit 경로는 clearSidebarDragPreview 후라 통과).
@@ -4869,28 +4899,45 @@ pub const AppSession = struct {
         while (i < n) {
             const marker = self.tabs.items[i];
             if (marker.group_start == null) {
-                i += 1; // 최상위 카드 — 개별 pin이라 자기 값 유지(재기록 없음)
+                i += 1; // 최상위 카드(top_level 복귀 카드 포함) — 개별 pin이라 자기 값 유지(재기록 없음)
                 continue;
             }
             // pin-무시 구조 subtree [i, e): groupSubtreeEnd와 동형이되 **pin 경계 break는 뺀다**(멤버 desync를 흡수하려면
-            // 구조 범위가 필요 — pin 인식 subtree는 첫 flip에서 끊겨 사이 낀 desync를 못 고친다). 형제/얕은 마커에서만 끊는다.
+            // 구조 범위가 필요 — pin 인식 subtree는 첫 flip에서 끊겨 사이 낀 desync를 못 고친다). 형제/얕은 마커에서 끊되,
+            // §2.1 재설계(§14.4, SR2): **top_level 하드 break**도 추가한다(groupSubtreeEnd의 새 break와 정합). top_level은 "그룹
+            // 끝이 정확(hard exact-end)"이라 fuzzy 꼬리가 없다 → hard_end면 suffix-exclusion 대신 exact-full-rewrite로 분기한다.
             const eff = self.effectiveDepthAt(i, null, null);
             const pin = marker.pinned; // 마커 = 그룹 고정 권위(§12.2)
             var e = i + 1;
+            var hard_end = false; // top_level 하드 break로 끝났는가(exact-end — soft 꼬리 배제 없음)
             while (e < n) : (e += 1) {
                 const t = self.tabs.items[e];
-                if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff) break;
+                if (t.group_start != null and @max(@as(u8, 1), t.group_depth) <= eff) break; // 형제/얕은 마커 = soft 구조 경계
+                if (t.top_level) {
+                    hard_end = true;
+                    break; // §14.4 top_level = 하드 exact-end(OR=min) — 마커 pin과 무관, top카드는 subtree 밖
+                }
             }
-            // subtree 안에서 마커 pin이 **마지막으로** 일치하는 위치(마커 자신 포함)까지가 진짜 멤버 범위. 그 뒤 [last_match+1, e)는
-            // 마커와 다른 pin이 끝까지 이어지는 꼬리(=다음 리전 top카드)라 안 건드린다.
-            var last_match = i;
-            var k = i + 1;
-            while (k < e) : (k += 1) if (self.tabs.items[k].pinned == pin) {
-                last_match = k;
-            };
-            k = i + 1;
-            while (k <= last_match) : (k += 1) self.tabs.items[k].pinned = pin; // 진짜 멤버(사이 desync 흡수)만 마커 pin으로 재기록
-            i = e; // 구조 subtree 통째 처리 — 꼬리 top카드는 다음 마커/리전이 다룬다
+            if (hard_end) {
+                // exact-full-rewrite(§14.4 정정 — §12.6 toggleGroupPin direct sync 결): top_level 앞 [i+1, e) 전량을 **무조건**
+                // 마커 pin으로 재기록한다. 끝이 정확하니 suffix-exclusion 꼬리 배제가 불필요하고, I1 uniform 리전이라 shred는
+                // 발화 불가(재기록 no-op). top_level **안** subtree에 낀 desync 멤버는 [i+1, e)에 포함돼 여전히 흡수(치유 회귀
+                // 없음), top_level 카드 자신은 e 밖이라 절대 안 흡수(exact-end 보존).
+                var k = i + 1;
+                while (k < e) : (k += 1) self.tabs.items[k].pinned = pin;
+            } else {
+                // suffix-exclusion(top_level 없는 그룹 — byte-identical): subtree 안에서 마커 pin이 **마지막으로** 일치하는 위치
+                // (마커 자신 포함)까지가 진짜 멤버 범위. 그 뒤 [last_match+1, e)는 마커와 다른 pin이 끝까지 이어지는 fuzzy 꼬리
+                // (=다음 리전 top카드)라 안 건드린다. 사이에 낀 desync 멤버(마커 pin이 뒤에서 재등장)는 여전히 흡수한다.
+                var last_match = i;
+                var k = i + 1;
+                while (k < e) : (k += 1) if (self.tabs.items[k].pinned == pin) {
+                    last_match = k;
+                };
+                k = i + 1;
+                while (k <= last_match) : (k += 1) self.tabs.items[k].pinned = pin; // 진짜 멤버(사이 desync 흡수)만 마커 pin으로 재기록
+            }
+            i = e; // 구조 subtree 통째 처리 — 꼬리/top카드는 다음 마커/리전이 다룬다
         }
     }
 
@@ -17430,6 +17477,128 @@ test "SR1: top_level이 7 파생 경계에서 최상위 복귀 서브파티션�
     try std.testing.expect(session.sidebar_rows.items[1] == .card);
     try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items[1].card.tab); // TOP 안 사라짐(shred 방지)
     try std.testing.expectEqual(@as(u8, 0), session.sidebar_rows.items[1].card.depth);
+}
+
+// SR2(§2.1 재설계 §14.4 — normalizePinnedFromGroups·pinBoundariesAlignGroups top_level 인식 재작성). top_level은 "그룹 끝이
+// 정확(hard exact-end)"이라 하드 break가 있는 그룹은 suffix-exclusion(끝이 fuzzy) 대신 [i+1, e) exact-full-rewrite로 canonical화
+// 한다. 초안 오진 정정: shred는 I1 uniform 리전이라 발화 불가 — 진짜 위험은 하드 break가 desync 흡수 창을 축소하는 것(치유 회귀).
+// 아래 (a·c·e)normalize·(b)align 위음성·(d)byte-identical 4 케이스가 "top_level 안 subtree desync 흡수 유지 + TOP 안 흡수"를 고정한다.
+test "SR2(a·c·e): normalize top_level exact-full-rewrite — top_level 앞 desync 흡수·TOP 안 흡수·idempotent·pinned top_level 통과" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 배치: [A(pin1,마커), a1(pin0 desync), TOP(top_level,pin0), a2(pin1)]. 고정 그룹 A의 멤버 a1이 desync(0), 그 뒤 top_level
+    // 최상위 복귀 카드 TOP(pin0)·독립 카드 a2(pin1). §14.4 exact-full-rewrite는 top_level **앞** subtree 안 a1은 흡수(치유)하되,
+    // top_level 카드 TOP 자신은 e 밖(exact-end)이라 절대 안 흡수한다 — "하드 break로 창이 축소돼도 안쪽 desync 치유는 유지".
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true; // 마커 = 그룹 고정 권위
+    session.tabs.items[1].pinned = false; // a1 DESYNC(0 — top_level 앞 subtree 안이라 흡수돼 1이 돼야)
+    session.tabs.items[2].top_level = true;
+    session.tabs.items[2].pinned = false; // TOP — exact-end라 절대 흡수 안 됨(0 유지)
+    session.tabs.items[3].pinned = true; // a2 — subtree 밖 독립 카드(불변)
+
+    // (a) desync 흡수 유지 + TOP 안 흡수.
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(session.tabs.items[1].pinned); // a1: 0→1(top_level 앞 subtree 안 desync 흡수 = 치유 회귀 없음)
+    try std.testing.expect(!session.tabs.items[2].pinned); // TOP: 0 유지(exact-end — 절대 흡수 안 함)
+    try std.testing.expect(session.tabs.items[2].top_level); // top_level 필드 불변
+    try std.testing.expect(session.tabs.items[3].pinned); // a2: 불변
+    try std.testing.expect(session.tabs.items[0].pinned); // 마커 권위 불변
+
+    // (c) idempotent — 2회 normalize 고정점, top_level 필드 불변, align canonical 통과.
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(session.tabs.items[1].pinned);
+    try std.testing.expect(!session.tabs.items[2].pinned);
+    try std.testing.expect(session.tabs.items[2].top_level);
+    try std.testing.expect(session.pinBoundariesAlignGroups()); // 핀 경계가 top_level subtree 중간을 안 자름
+
+    // (e) pinned × top_level 정합 — TOP을 고정(pin1)으로 승격(고정 리전 안 top_level 서브파티션). normalize/align 통과.
+    session.tabs.items[2].pinned = true; // TOP now pinned top_level 카드(pinned=1·top_level=1)
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(session.tabs.items[2].pinned); // pinned top_level 카드 불변(마커 아니라 재기록 대상 아님)
+    try std.testing.expect(session.tabs.items[2].top_level); // top_level 필드 불변
+    try std.testing.expect(session.tabs.items[1].pinned); // a1 여전히 1
+    try std.testing.expect(session.pinBoundariesAlignGroups()); // pinned×top_level 정합 통과
+}
+
+test "SR2(b): align top_level 인식 — subtree 중간 자르는 I3 위반 위음성 없이 검출 + normalize 흡수" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 배치: [A(pin1,마커), a1(pin1), a2(pin0 desync), TOP(top_level,pin0)]. top_level TOP이 A subtree를 [0,3)로 하드 끊어 a2는
+    // 진짜 멤버(top_level 앞)다. a2 desync(0)는 핀 경계가 subtree **중간**을 자름 = I3 위반. **옛 suffix-exclusion은 a2를 "꼬리"로
+    // 오인해 위음성으로 놓쳤다**(a2가 마커와 다른 pin으로 subtree 끝까지 이어져 last_match=a1에서 배제) — top_level 인식이 잡는다.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = true; // a1 = 마커와 일치
+    session.tabs.items[2].pinned = false; // a2 DESYNC(subtree 중간 자름 = I3 위반)
+    session.tabs.items[3].top_level = true;
+    session.tabs.items[3].pinned = false; // TOP = 하드 exact-end
+
+    try std.testing.expect(!session.pinBoundariesAlignGroups()); // ★ top_level 인식이 위반 검출(옛 suffix-exclusion은 위음성)
+
+    // normalize의 exact-full-rewrite가 [1,3) 전량을 마커 pin1로 재기록 → a2 흡수 → align 통과. TOP은 e 밖(exact-end).
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(session.tabs.items[2].pinned); // a2: 0→1 흡수(exact-full-rewrite)
+    try std.testing.expect(!session.tabs.items[3].pinned); // TOP: 0 유지(exact-end)
+    try std.testing.expect(session.tabs.items[3].top_level); // top_level 필드 불변
+    try std.testing.expect(session.pinBoundariesAlignGroups()); // 흡수 후 정렬 복귀
+}
+
+test "SR2(d): top_level 0개 byte-identical — suffix-exclusion 꼬리 배제·샌드위치 흡수 동일(회귀 0)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // top_level **0개**(전부 false) 배치로 기존 suffix-exclusion과 동일함을 고정한다: [G(pin1,마커), g1(pin0 샌드위치 desync),
+    // g2(pin1), C(pin0 꼬리 top카드)]. suffix-exclusion은 g1을 흡수(마커 pin이 g2에서 재등장 → last_match=g2)하되 꼬리 C는
+    // 배제(다음 리전 genuine top카드, 위치 파생). hard_end never-true라 exact-full-rewrite 분기가 안 타 byte-identical.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "G");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[0].pinned = true;
+    session.tabs.items[1].pinned = false; // g1 샌드위치 desync(흡수돼야)
+    session.tabs.items[2].pinned = true; // g2 = 마커 pin 재등장 → last_match
+    session.tabs.items[3].pinned = false; // C = 꼬리 top카드(top_level 없음, 위치 파생) → 배제돼야
+
+    session.normalizePinnedFromGroups();
+    try std.testing.expect(session.tabs.items[1].pinned); // g1: 0→1 샌드위치 흡수(suffix-exclusion)
+    try std.testing.expect(session.tabs.items[2].pinned); // g2: 1 유지
+    try std.testing.expect(!session.tabs.items[3].pinned); // C: 0 유지(꼬리 배제 — top_level 없이 위치 파생, byte-identical)
+    for (session.tabs.items) |t| try std.testing.expect(!t.top_level); // SR2가 top_level 필드를 안 건드림
 }
 
 // GP2(그룹 고정 C2 — normalizePinnedFromGroups + 복원 순서 + 마커 승계, docs/sidebar-groups.md §12.5·§12.7·§12.9).

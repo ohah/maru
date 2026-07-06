@@ -3,7 +3,6 @@ const maru = @import("maru");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const allocator = init.gpa;
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
@@ -12,6 +11,27 @@ pub fn main(init: std.process.Init) !void {
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_file_writer: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
     const stderr = &stderr_file_writer.interface;
+
+    // `error.UnknownCommand`는 "usage 에러를 이미 stderr에 안내했다"는 sentinel이다. main 밖으로 전파시키면 Zig가
+    // 스택 트레이스를 덤프하고(사용자 오타에 crash처럼 보임) 버퍼된 안내 메시지도 유실된다. 여기서 잡아 stderr/stdout을
+    // 확실히 flush한 뒤 코드 1로 깔끔히 종료한다(트레이스 없음). 그 밖의 진짜 오류는 그대로 전파(디버그 트레이스 유지).
+    dispatch(init, stdout, stderr) catch |err| switch (err) {
+        error.UnknownCommand => {
+            stderr.flush() catch {};
+            stdout.flush() catch {};
+            std.process.exit(1);
+        },
+        else => return err,
+    };
+}
+
+fn dispatch(
+    init: std.process.Init,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const io = init.io;
+    const allocator = init.gpa;
 
     var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();

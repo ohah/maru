@@ -63,6 +63,11 @@ pub const Action = union(enum) {
     // 해제하는 반면 이건 카드 하나만 뺀다(그룹은 살아남는다 — 마커 카드면 다음 소속 카드로 승계). 이미 최상위면 no-op.
     // 저빈도라 기본 키 없이 우클릭 "그룹에서 빼기"·팔레트·config 리바인더가 발견 경로다(docs/sidebar-groups.md §7).
     remove_from_group,
+    // promote_to_top_level=이 워크스페이스 하나를 **제자리에서** 최상위 섬으로 승격한다(§2.1 재설계 §14.5·§14.7 promote-in-place)
+    // — 그 카드에 `top_level:=true`만 세팅해 그룹 안 gap에 최상위로 남긴다(위치·순서 불변, sticky-reset로 뒤 멤버까지 그룹에서
+    // 끊김). remove_from_group(첫 마커 앞으로 **이동** + **고정 상실**)과 구별되는 eject flavor: promote는 **pin을 안 건드린다**
+    // (고정 리전 안이면 고정 top카드로 남음). 저빈도라 기본 키 없이 우클릭 "여기서 최상위로 분리"·팔레트가 발견 경로다.
+    promote_to_top_level,
     // 활성 터미널의 전체 내용(스크롤백 + 화면)을 선택한다(Select All, 관례상 ⌘A). 코어 selection 상태라
     // dispatchAppAction이 core.selectAll로 넘긴다. clipboard 쓰기(copy)는 NSPasteboard(OS) 소유라 Action이
     // 아니다(경계: Zig는 selection, Swift는 clipboard).
@@ -139,6 +144,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "ungroup")) return .ungroup;
     if (std.mem.eql(u8, value, "rename_group")) return .rename_group;
     if (std.mem.eql(u8, value, "remove_from_group")) return .remove_from_group;
+    if (std.mem.eql(u8, value, "promote_to_top_level")) return .promote_to_top_level;
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
@@ -214,6 +220,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.ungroup, parseAction("ungroup").?);
     try std.testing.expectEqual(Action.rename_group, parseAction("rename_group").?);
     try std.testing.expectEqual(Action.remove_from_group, parseAction("remove_from_group").?);
+    try std.testing.expectEqual(Action.promote_to_top_level, parseAction("promote_to_top_level").?);
     try std.testing.expectEqual(Action.new_term, parseAction("new_term").?);
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);

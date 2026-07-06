@@ -303,6 +303,10 @@ pub const TerminalCore = struct {
     // (악의적/거대 시퀀스 방어), 대용량 dispatch 뒤 용량은 반납한다(일상 OSC는 title/cwd/133 등 소형).
     osc_buffer: std.ArrayListUnmanaged(u8) = .empty,
     osc_overflow: bool = false,
+    // OSC 52 대용량 허용 latch — 소형 상한(max_osc_small_bytes) 도달 시 접두("52;")를 **1회만** 판정해
+    // 캐시한다. 이후 바이트는 startsWith 재실행 없이 이 값으로 대용량 수집 여부를 정한다(21MB 클립보드가
+    // 파서 hot path에서 접두를 수천만 번 재비교하던 것 제거). OSC 시작(`]`)에서 리셋.
+    osc_large_ok: bool = false,
     // G14 DCS(ESC P ... ST) 수집 버퍼. 현재 DECRQSS(`DCS $ q <req> ST`)만 처리하고 요청은 짧아 64B면 충분
     // (넘으면 overflow로 폐기). Sixel/DECDLD 등 큰 DCS는 미지원이라 소비만 한다(이 상태기계가 그 토대).
     dcs_buffer: [64]u8 = undefined,
@@ -531,6 +535,7 @@ pub const TerminalCore = struct {
         self.kitty_images.clear(self.allocator); // RIS는 전송된 kitty graphics 이미지를 전부 비운다
         self.kitty_placements.clearRetainingCapacity(); // placement도 함께 비운다
         parser.abortKittyChunk(self); // 진행 중이던 chunked 전송도 폐기(parser 소유)
+        parser.reclaimOscBuffer(self); // 방어적 백스톱 — RIS가 OSC 수집 잔재를 남기지 않게(다른 파서 버퍼 정리와 일관)
         self.grapheme_cluster_mode = false;
         self.charset_g0 = .ascii; // G3 charset도 공장 초기화(G0/G1 ascii, GL=G0).
         self.charset_g1 = .ascii;
@@ -1137,8 +1142,17 @@ pub const TerminalCore = struct {
         return self.clipboard_write.items;
     }
 
+    /// clearClipboardWrite가 대용량 drain 후 capacity를 반납할지 판단하는 임계치(osc_retain_bytes와 같은 취지).
+    const clipboard_write_retain_bytes: usize = 4096;
+
     pub fn clearClipboardWrite(self: *TerminalCore) void {
-        self.clipboard_write.clearRetainingCapacity();
+        // 한 문단 이상(최대 max_clipboard_bytes=16MB) 디코드 버퍼는 drain 후 capacity를 반납한다 —
+        // clearRetainingCapacity만 하면 16MB가 세션 내내 상주한다(osc_buffer 반납과 대칭; 옛 2048 OSC 버퍼
+        // 시절엔 clipboard_write가 ~1.5KB를 못 넘어 무해했으나, 대용량 OSC 52를 받는 지금은 반납이 필요).
+        if (self.clipboard_write.capacity > clipboard_write_retain_bytes)
+            self.clipboard_write.clearAndFree(self.allocator)
+        else
+            self.clipboard_write.clearRetainingCapacity();
     }
 
     /// OSC 52 읽기(`?` 쿼리)가 대기 중인지. platform이 매 tick 확인해 osc52.read 정책 통과 시 클립보드를 읽어 응답한다.
@@ -3910,12 +3924,15 @@ test "OSC 52 (clipboard) write decodes base64 into pending; read(?) sets read-pe
     try std.testing.expectEqualStrings("", core.clipboardReadTarget());
 }
 
-test "OSC 52: 한 문단 크기(>2KB) 클립보드 쓰기도 통째로 받는다 (고정 2048 버퍼 드롭 회귀 가드)" {
+test "OSC 52: 한 문단 크기(>2KB) 클립보드 쓰기도 통째로 받고, drain 후 버퍼 capacity를 반납한다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
     defer core.deinit();
-    // ssh+tmux/nvim 원격 복사(OSC 52)에서 한 문단(원문 ~1.6KB → base64 ~2.2KB)이 옛 고정 2048 OSC
-    // 버퍼를 넘겨 통째로 버려졌다 — "짧은 복사는 되고 문단 복사는 조용히 실패". 동적 버퍼로 받는지 확인.
-    const para = "가나다라마바사아자차카타파하 " ** 40; // ≈1.7KB — base64로 2048 초과
+    // ssh+tmux/nvim 원격 복사(OSC 52)에서 한 문단이 옛 고정 2048 OSC 버퍼를 넘겨 통째로 버려졌다 —
+    // "짧은 복사는 되고 문단 복사는 조용히 실패". 동적 버퍼로 받는지 + drain 후 반납(osc_buffer·clipboard_write
+    // 둘 다)을 확인한다. 반납 임계치(osc_retain_bytes/clipboard_write_retain_bytes=4096)를 실제로 넘기려면
+    // 수집·디코드 버퍼가 모두 4096B를 넘어야 하므로 원문을 넉넉히(~5KB) 잡는다(옛 ~1.7KB는 임계치 미만이라
+    // 반납 분기를 안 타 검증이 공허했다).
+    const para = "가나다라마바사아자차카타파하 " ** 120; // ≈5.1KB → base64 ~6.9KB(수집·디코드 버퍼 모두 4096 초과)
     const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(para.len));
     defer std.testing.allocator.free(b64);
     const enc = std.base64.standard.Encoder.encode(b64, para);
@@ -3924,14 +3941,43 @@ test "OSC 52: 한 문단 크기(>2KB) 클립보드 쓰기도 통째로 받는다
     try seq.appendSlice(std.testing.allocator, "\x1b]52;c;");
     try seq.appendSlice(std.testing.allocator, enc);
     try seq.appendSlice(std.testing.allocator, "\x07");
-    try std.testing.expect(seq.items.len > 2048); // 옛 버퍼면 드롭됐을 크기임을 보장
+    try std.testing.expect(enc.len > 4096); // 수집 버퍼가 반납 임계치(4096)를 확실히 넘김을 보장
     try core.write(seq.items);
     try std.testing.expectEqualStrings(para, core.pendingClipboardWrite());
-    // 대용량 dispatch 뒤 수집 버퍼 용량은 반납된다(일상 소형 OSC가 수 MB를 계속 붙들지 않게).
-    try std.testing.expect(core.osc_buffer.capacity <= 4096);
-    // 이어지는 소형 OSC도 정상 동작.
+    // 대용량 dispatch 뒤 수집 버퍼 capacity는 0으로 반납된다(clearAndFree — 일상 소형 OSC가 수 MB를 안 붙들게).
+    try std.testing.expectEqual(@as(usize, 0), core.osc_buffer.capacity);
+    // 디코드 버퍼(clipboard_write)도 drain(clearClipboardWrite) 후 capacity 반납 — 세션 내내 16MB 상주 방지.
+    try std.testing.expect(core.clipboard_write.capacity > 4096); // drain 전엔 대용량
     core.clearClipboardWrite();
+    try std.testing.expectEqual(@as(usize, 0), core.clipboard_write.capacity);
+    // 이어지는 소형 OSC도 정상 동작(반납 후 재수집).
     try core.write("\x1b]52;c;aGk=\x1b\\");
+    try std.testing.expectEqualStrings("hi", core.pendingClipboardWrite());
+}
+
+test "OSC 52: abort(ESC+비-`\\`)로 끊긴 대용량 수집도 capacity를 반납한다 (비-dispatch 경로 상한 재확립)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // 대용량 OSC 52 본문을 흘리다 ST(ESC \)가 아닌 ESC+X로 중단(abort)하면 dispatch가 안 돼 defer 반납을
+    // 안 탄다 — 옛 고정 2048 시절엔 불가능했던 megabyte 상주. abort 경로가 직접 반납해 상한을 재확립하는지 확인.
+    // (참고: 스트림이 종료 없이 완전히 끊기는 truncate는 파서가 .osc에 머물러 아직 '수집 중'이므로 정당하게
+    //  버퍼를 든다 — 다음 종료/abort나 deinit이 반납한다.)
+    const filler = "가나다라마바사아자차카타파하 " ** 120; // ~5.1KB → base64 ~6.9KB
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(filler.len));
+    defer std.testing.allocator.free(b64);
+    const enc = std.base64.standard.Encoder.encode(b64, filler);
+    var seq: std.ArrayList(u8) = .empty;
+    defer seq.deinit(std.testing.allocator);
+    try seq.appendSlice(std.testing.allocator, "\x1b]52;c;");
+    try seq.appendSlice(std.testing.allocator, enc); // 종료(BEL/ST) 없이 이어짐
+    try core.write(seq.items);
+    try std.testing.expect(core.osc_buffer.capacity > 4096); // 수집 중 — 대용량 보유(정상)
+
+    try core.write("\x1bX"); // ESC+X = abort(ST 아님) → ground, dispatch 없음 → abort 경로가 반납
+    try std.testing.expectEqual(@as(usize, 0), core.osc_buffer.capacity);
+
+    // 반납 후에도 다음 OSC는 정상 동작한다.
+    try core.write("\x1b]52;c;aGk=\x07");
     try std.testing.expectEqualStrings("hi", core.pendingClipboardWrite());
 }
 

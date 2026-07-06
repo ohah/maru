@@ -4346,6 +4346,14 @@ pub const AppSession = struct {
             .{ .group_sibling = .{ .insert_before = self.clampGroupMoveToRegion(marker, boundary) } }
         else
             .none;
+        // MARU_DEBUG 관측(관측 가능성 원칙, diag.zig 단일 게이트): 실제 앱 드래그에서 **Cmd 없이=형제 / Cmd=중첩**이 지켜지는지
+        // 자기검증한다 — 헤드리스 N1~N6가 mouse(mods) 직접 시뮬로 커버하지 못하는 **Swift 드래그 경로**(mouseDragged→handleMouse→
+        // modsBits→maru_macos_app_session_mouse→mouse의 cmd_held)를 실측으로 잇는 단일 로그. Cmd 없이 드래그인데 plan=group_nest면
+        // Swift mods 오전달(command 비트 32 오염) 확정, plan=group_sibling이면 게이트 정상. 미설정이면 분기 하나(캐시 히트)뿐.
+        if (diag_gate.maruDebugEnabled()) std.log.scoped(.group_drag).info(
+            "groupDragPreviewFrame: marker={d} raw_row={d} cmd_held={} plan={s}",
+            .{ marker, raw_row, cmd_held, @tagName(plan) },
+        );
         // 비커밋 프리뷰 재투영(self.tabs 불변). 카드 드래그(SG8d)와 동형 — 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를
         // 주므로 세팅하지 않는다(subtree 고스트+삽입선이 하이라이트를 대체). 매 프레임 재투영이라 rebuild + dirty.
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);

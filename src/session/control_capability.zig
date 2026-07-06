@@ -704,6 +704,38 @@ test "metadata sub-scope: self/window/all이 발급→resolve까지 그대로 �
     }
 }
 
+// ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────
+
+// authorize의 scope↔method 일치(grant) 경로는 지금까지 metadata·read_output·write cap만 밟혔다. bind·lifecycle·
+// browser cap이 자기 category의 method를 실제로 인가하는지(매핑 대칭성)는 안 밟혔다 — validateFdIssuance는
+// lifecycle/write를 fd 발급에서 막지만, 순수 authorize 자체는 이 scope들도 인가해야 한다(§8.5 "authorize는
+// scope 자체 유효; fd 발급만 금지"). 그 grant 대칭을 못박고, resolve의 non-metadata grant는 metadataScope=null.
+test "authorize grant: bind/lifecycle/browser cap이 각자 category method를 인가한다(매핑 대칭)" {
+    const bind_cap: Capability = .{ .surface_id = 10, .generation = 0, .scope = .bind };
+    try testing.expect(authorize(bind_cap, 10, 0, "panel.bindSession", 0) == .granted);
+    // bind cap으로 lifecycle(panel.open)은 거부.
+    const bd = authorize(bind_cap, 10, 0, "panel.open", 0);
+    try testing.expect(bd == .deny and bd.deny == .scope_insufficient);
+
+    const life_cap: Capability = .{ .surface_id = 10, .generation = 0, .scope = .lifecycle };
+    for ([_][]const u8{ "session.resize", "session.focus", "session.close", "session.spawn", "panel.open" }) |m| {
+        try testing.expect(authorize(life_cap, 10, 0, m, 0) == .granted);
+    }
+
+    const br_cap: Capability = .{ .surface_id = 10, .generation = 0, .scope = .browser };
+    try testing.expect(authorize(br_cap, 10, 0, "browser.navigate", 0) == .granted);
+    try testing.expect(authorize(br_cap, 10, 0, "browser.executeScript", 0) == .granted);
+}
+
+test "resolve: non-metadata grant(bind)는 metadataScope가 null(1c/1d가 metadata 아님을 구별)" {
+    var store: CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, nonce_a, .{ .surface_id = 10, .generation = 0, .scope = .bind });
+    const r = resolve(&store, nonce_a, 10, 0, "panel.bindSession", 0);
+    try testing.expect(r == .granted);
+    try testing.expect(r.granted.metadataScope() == null);
+}
+
 test {
     testing.refAllDecls(@This());
 }

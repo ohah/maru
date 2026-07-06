@@ -375,10 +375,26 @@ pub fn serializeSessionsList(
     caller_surface_id: u64,
     scope: wm.MetadataScope,
 ) std.mem.Allocator.Error![]u8 {
+    // window 필터 없는 기본 경로 = filtered(null). 필터 로직 단일 출처는 아래 Filtered.
+    return serializeSessionsListFiltered(gpa, id, snapshot, caller_surface_id, scope, null);
+}
+
+/// `sessions.list {window?}` 디스패치 코어(§6). 기본 `serializeSessionsList`에 **선택적 window_id 좁힘**을 더한다
+/// (Track C 1d: `--window <id>`). `window_filter`가 있으면 그 window에 속한 surface만(그러나 scope로도 가려야 한다 —
+/// scope는 인가 상한, window는 요청 좁힘이라 **교집합**이다). scope 필터가 여전히 존재/oracle의 권위(§8.3).
+/// null이면 window 좁힘 없음(= 기본 sessions.list). caller free.
+pub fn serializeSessionsListFiltered(
+    gpa: std.mem.Allocator,
+    id: cp.Id,
+    snapshot: CollectorSnapshot,
+    caller_surface_id: u64,
+    scope: wm.MetadataScope,
+    window_filter: ?u64,
+) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    (writeSessionsList(&s, id, snapshot, caller_surface_id, scope)) catch return error.OutOfMemory;
+    (writeSessionsList(&s, id, snapshot, caller_surface_id, scope, window_filter)) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
@@ -388,6 +404,7 @@ fn writeSessionsList(
     snapshot: CollectorSnapshot,
     caller_surface_id: u64,
     scope: wm.MetadataScope,
+    window_filter: ?u64,
 ) !void {
     try s.beginObject();
     try s.objectField("jsonrpc");
@@ -397,7 +414,11 @@ fn writeSessionsList(
     try s.objectField("result");
     try s.beginArray();
     for (snapshot.surfaces) |dto| {
+        // scope(인가 상한)를 먼저, 그다음 window(요청 좁힘) — 둘 다 통과해야 결과에 실린다(교집합).
         if (!surfaceVisible(snapshot, caller_surface_id, scope, dto.surface_id)) continue;
+        if (window_filter) |wf| {
+            if (dto.window != wf) continue;
+        }
         try writeSurface(s, dto);
     }
     try s.endArray();
@@ -599,6 +620,42 @@ test "sessions.list all scope: quick 포함 전체 surface — quick은 all에�
         const wire = try serializeSessionsList(testing.allocator, .{ .number = 4 }, fx, 10, .window);
         defer testing.allocator.free(wire);
         try testing.expect(std.mem.indexOf(u8, wire, "\"surface_id\":30") == null);
+    }
+}
+
+// ── 8b) sessions.list {window?} 필터: window 좁힘은 scope와 교집합(Track C 1d) ──
+test "sessions.list window_filter: scope∩window 교집합 — all+window=1 → 창 A만, window 없으면 전체" {
+    // all scope + window=1 → 창 A={10,11}만(20·30 제외).
+    {
+        const wire = try serializeSessionsListFiltered(testing.allocator, .{ .number = 1 }, fx, 10, .all, 1);
+        defer testing.allocator.free(wire);
+        var ids: std.ArrayList(u64) = .empty;
+        defer ids.deinit(testing.allocator);
+        try resultSurfaceIds(testing.allocator, wire, &ids);
+        try testing.expectEqualSlices(u64, &.{ 10, 11 }, ids.items);
+    }
+    // window_filter=null → 기본 sessions.list와 동일(전체).
+    {
+        const a = try serializeSessionsListFiltered(testing.allocator, .{ .number = 1 }, fx, 10, .all, null);
+        defer testing.allocator.free(a);
+        const b = try serializeSessionsList(testing.allocator, .{ .number = 1 }, fx, 10, .all);
+        defer testing.allocator.free(b);
+        try testing.expectEqualStrings(a, b); // null 필터는 무동작(기본 경로와 바이트 동일)
+    }
+    // self scope caller 10 + window=1 → 10만(11은 self 밖). window=2 → self가 window를 이겨 빈 목록.
+    {
+        const w1 = try serializeSessionsListFiltered(testing.allocator, .{ .number = 1 }, fx, 10, .self, 1);
+        defer testing.allocator.free(w1);
+        var ids: std.ArrayList(u64) = .empty;
+        defer ids.deinit(testing.allocator);
+        try resultSurfaceIds(testing.allocator, w1, &ids);
+        try testing.expectEqualSlices(u64, &.{10}, ids.items);
+
+        const w2 = try serializeSessionsListFiltered(testing.allocator, .{ .number = 1 }, fx, 10, .self, 2);
+        defer testing.allocator.free(w2);
+        var pm = try cp.parseMessage(testing.allocator, w2);
+        defer pm.deinit();
+        try testing.expectEqual(@as(usize, 0), pm.message.response.result.?.array.items.len);
     }
 }
 

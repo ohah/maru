@@ -21,6 +21,7 @@ pub const control_plane = @import("session/control_plane.zig"); // Track C 1a: �
 pub const control_surface = @import("session/control_surface.zig"); // Track C 1c: 컨트롤 플레인 Surface 엔티티 DTO + 직렬화 + read-only 디스패치 코어(§3·§6·§8.3)
 pub const SurfaceDto = control_surface.SurfaceDto;
 pub const CollectorSnapshot = control_surface.CollectorSnapshot;
+pub const control_dispatch = @import("session/control_dispatch.zig"); // Track C 1d: read-only 바이트→바이트 디스패치 라우터(요청 바이트 + snapshot → 응답 바이트, §6·§8.3)
 pub const ime = @import("session/ime.zig");
 pub const keyhint_hold = @import("session/keyhint_hold.zig"); // 단축키 힌트 홀드 gesture 정책(OS-중립, platform이 alias로 참조)
 pub const agent_transcript = @import("session/agent_transcript.zig");

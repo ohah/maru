@@ -67,6 +67,16 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "sessions")) {
+        try runSessionCli(allocator, &args, stdout, stderr, .sessions);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "session")) {
+        try runSessionCli(allocator, &args, stdout, stderr, .session);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         try printUsage(stdout);
         return;
@@ -381,6 +391,80 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     try stdout.flush();
 }
 
+/// `maru sessions ...` / `maru session ...` 두 컨트롤 플레인 read-only 명령의 얇은 접착(Track C 1d). 순수
+/// 파싱·요청 조립·응답 포맷은 `maru.cli.sessions`가 갖고, 여긴 인자 수집·stdout/stderr I/O만 한다(ssh/terminfo와
+/// 같은 결). `--help`는 구현된 명령만 담은 help를 낸다(§11 CLI help gate). 실제 요청은 client wire로 JSON-RPC
+/// 한 줄을 조립해 stdout에 낸다 — **소켓 전송·응답 렌더는 후속**(컨트롤 소켓 accept-loop·capability auth(1e)·live
+/// collector(Phase 1)가 붙어야 라이브 조회가 완성된다). 1d는 파서·--help·client wire까지가 범위다.
+const SessionCli = enum { sessions, session };
+
+fn runSessionCli(
+    allocator: std.mem.Allocator,
+    args: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    which: SessionCli,
+) !void {
+    // 서브커맨드 뒤 인자를 소유 복사해 모은다(ssh/terminfo와 같은 패턴).
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |s| allocator.free(s);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
+
+    const parsed = (switch (which) {
+        .sessions => maru.cli.sessions.parseSessions(collected.items),
+        .session => maru.cli.sessions.parseSession(collected.items),
+    }) catch |err| {
+        try writeSessionCliUsage(stderr, which, err);
+        return error.UnknownCommand;
+    };
+
+    switch (parsed) {
+        .help => {
+            try stdout.writeAll(switch (which) {
+                .sessions => maru.cli.sessions.sessions_help,
+                .session => maru.cli.sessions.session_help,
+            });
+            try stdout.flush();
+        },
+        .request => |req| {
+            // client wire: 전송될 JSON-RPC 요청 한 줄을 조립해 stdout에 낸다(관찰 가능·파이프 가능).
+            const bytes = try maru.cli.sessions.buildRequestBytes(allocator, req, .{ .number = 1 });
+            defer allocator.free(bytes);
+            try stdout.writeAll(bytes);
+            try stdout.writeAll("\n");
+            try stdout.flush();
+            // 정직: 라이브 전송은 아직 없다. 소켓 accept-loop(§5)·capability auth(1e)·live collector(Phase 1)가
+            // 붙는 후속 slice에서 이 요청을 실제 서버로 보내 응답을 renderResponse로 표시한다.
+            try stderr.writeAll(
+                "note: 위 줄은 전송될 JSON-RPC 요청입니다. 컨트롤 소켓 전송·응답 표시는 후속(accept-loop·capability auth·live collector)에서 배선됩니다.\n",
+            );
+            try stderr.flush();
+        },
+    }
+}
+
+fn writeSessionCliUsage(stderr: *std.Io.Writer, which: SessionCli, err: maru.cli.sessions.ParseError) !void {
+    const reason = switch (err) {
+        error.MissingSubcommand => "서브커맨드가 필요합니다",
+        error.UnknownSubcommand => "알 수 없는 서브커맨드입니다",
+        error.MissingSurfaceId => "surface id가 필요합니다",
+        error.InvalidSurfaceId => "surface id는 음이 아닌 정수여야 합니다",
+        error.MissingWindowValue => "--window 에는 값이 필요합니다",
+        error.InvalidWindowValue => "--window 값은 음이 아닌 정수여야 합니다",
+        error.UnknownOption => "알 수 없는 옵션입니다",
+        error.UnexpectedArgument => "인자가 너무 많습니다",
+    };
+    try stderr.print("maru {s}: {s}\n\n", .{ @tagName(which), reason });
+    try stderr.writeAll(switch (which) {
+        .sessions => maru.cli.sessions.sessions_help,
+        .session => maru.cli.sessions.session_help,
+    });
+    try stderr.flush();
+}
+
 fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\usage:
@@ -394,6 +478,8 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru ssh [--terminfo-only] <ssh args...>
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
+        \\  maru sessions list [--window <id>]
+        \\  maru session get <id>
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
@@ -405,6 +491,8 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
+        \\  sessions   list running Maru sessions (surfaces) as read-only metadata (`sessions --help`)
+        \\  session    read-only metadata for a single surface (`session get <id>`, `session --help`)
         \\
     );
     try writer.flush();

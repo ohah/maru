@@ -24,7 +24,7 @@ flowchart TD
 | 층 | 위치 | 책임 | 이식 시 |
 |---|---|---|---|
 | **L1 renderer 중립 계약** | `src/renderer/` (존재) | `RenderSnapshot→DrawList→Glyph*Frame` + native DTO 투영(`metal_frame` — §8로 platform에서 이주, 이름만 "Metal"). 백엔드 무관 frame. | **재사용**(Ghostty가 같은 모양으로 입증) |
-| **L2 session core** | `src/session/` (신설) | workspace 모델·직렬화·복원, split/tab/pane 트리+연산, IME 결정, scroll/reorder 수학 | **재사용**(순수 로직, OS 무관) |
+| **L2 session core** | `src/session/` (신설) | workspace 모델·직렬화·복원, split/tab/pane 트리+연산, IME 결정, scroll/reorder 수학, **컨트롤 플레인/이동성 골격**(surface_id·window_membership·window_graph·live_surface_registry generic·control_plane wire·control_surface DTO·control_dispatch 라우터 — surface identity·scope 판정·JSON-RPC 스키마/프레이밍·move/merge 순수 로직) | **재사용**(순수 로직, OS 무관) |
 | **L3 chrome** | `src/chrome/` (신설) | tokens, ChromeDraw(semantic), components(view+hitTest), ChromeState, ChromeHost. session을 **props로만** 읽음 | **재사용**(theme/백엔드만 가장자리) |
 | **L4 platform adapter** | `platform/macos/` (+ 후속 OS) | CoreText shaper/raster, GPU 백엔드(Metal/WebGPU — L1 `metal_frame` DTO를 GPU로 그림), ABI, OS host(윈도우·입력·IME·PTY·클립보드) | **타깃별 신규** |
 

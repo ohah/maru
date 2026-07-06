@@ -203,6 +203,8 @@ Phase 1 live collector 전에는 full AppRuntime을 기다리지 않고 **앱 �
 
 **Phase 시작 gate(모든 구현 PR 공통)**: 각 Phase 또는 micro-slice(1a/1b/7a 등)를 시작하기 전에 작업자는 사용자에게 이번 단계에서 무엇을 구현·검증할지 다시 설명한다. 설명에는 scope, 건드릴 책임 영역/파일 후보, 새로 여는 capability·transport·의존성, 자동/수동 gate, 아직 미결정인 사용자 결정 항목을 포함한다. 그 다음 새 코드를 쓰기 전에 **직전 완료 Phase의 종료 gate를 다시 실행하거나, 현재 환경에서 재현 가능한 동등 regression gate를 실행**해 이전 Phase가 무너지지 않았음을 확인한다. 실패하면 새 Phase를 진행하지 않고 먼저 원인·영향·수정 계획을 보고한다.
 
+**착수 전 문서 재점검(drift gate) — 매 slice 필수**: 이 계획 문서가 "현재 코드"라고 전제한 사실(파일·심볼·동작·ABI 버전·자산 위치)은 구현이 진행되며 실제 코드와 어긋날 수 있다. 문서는 doc-first라 구현 후 정정이 누락되기 쉽고, 앞선 slice의 실제 결과가 뒤 slice가 소비하는 계약을 바꾼다(이 PR에서도 `has_foreground_job` 제거·restore 멀티창 현황·모달 단일 CAMetalLayer 등이 문서 전제와 어긋난 채 발견됐다). 따라서 각 slice **착수 전에 그 slice가 의존하는 문서상 전제를 실제 코드(src)로 재확인**하고, 어긋나면 **코드를 쓰기 전에 문서를 먼저 정정한 뒤** downstream 영향(어느 slice·계약·ABI가 바뀌는지)을 사용자에게 보고한다. 문서를 stale인 채로 두고 그 위에 구현하지 않는다. 구현 결과가 문서 설계와 달라지면(더 나은 경로 발견·전제 오류 등) 그 slice의 종료 조건에 문서 정정과 영향받는 뒤 slice 재점검을 포함한다.
+
 **CLI help gate**: CLI에 새 subcommand/option/enum 값을 노출하는 Phase는 parser와 `--help`를 같은 PR에서 갱신한다. help에는 현재 Phase에서 실제 동작하는 명령만 공개하고, 다음 Phase 계획 명령을 미리 싣지 않는다. 완료 조건에는 `maru --help`와 해당 subcommand `--help` fixture 또는 스냅샷을 포함해 "구현됐는데 help에 없음"과 "help에는 있는데 parser/권한/실행 경로가 없음"을 모두 잡는다.
 
 **TDD micro-slice gate**: 아래 Phase는 제품 milestone일 뿐, 구현 PR의 기본 단위가 아니다. 구현 PR은 가능한 한 하나의 관찰 가능한 동작 또는 하나의 보안 불변식만 열어야 한다. 새 동작은 먼저 실패하는 단위/통합/fixture 테스트를 추가한 뒤 green으로 만들고, 마지막에 refactor와 문서/PR 본문을 맞춘다. 테스트로 먼저 표현하기 어려운 AppKit/WKWebView/GUI 동작은 "spike → 수동/자동 artifact → 최소 자동 회귀 테스트" 순서로 닫고, spike 결과 없이 제품 코드를 넓히지 않는다. 한 PR이 여러 micro-slice를 묶으려면 같은 테스트 harness를 공유해 리뷰·rollback이 더 작아진다는 근거를 PR 본문에 적는다.

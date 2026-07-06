@@ -4355,10 +4355,18 @@ pub const AppSession = struct {
     }
 
     /// 그룹 통째 드래그의 드롭 타겟 해석. 드롭 표시 row(raw_row)와 드래그 중인 그룹 마커 m을 받아 moveGroupRange에 넘길
-    /// **삽입 경계**(다른 그룹 시작 인덱스 또는 len)를 계산한다. 규칙(방향 기반 — sidebarGroupDropTargetTab의 from<M/from>M
-    /// 결과 patterns 동형): raw_row가 가리키는 탭이 속한 대상 그룹 g_i를 찾아, g_i가 드래그 그룹보다 **위면 그 앞(g_i)**,
-    /// **아래면 그 뒤(다음 마커/끝)**에 끼운다 — 항상 그룹 경계라 연속 파티션 유지. 최상위(첫 그룹 이전) row에 드롭하면 첫
-    /// 그룹 앞(그룹들 최상단). 자기 그룹이면 null(무동작). 라이브-팔로우로 매 프레임 인접 그룹을 한 칸씩 지나가며 자연스럽게 옮겨간다.
+    /// **삽입 경계**(다른 그룹 시작 인덱스·top_level run 경계 또는 len)를 계산한다. 규칙(방향 기반 — sidebarGroupDropTargetTab의
+    /// from<M/from>M 결과 patterns 동형): raw_row가 가리키는 **최상위 단위**(그룹 subtree 또는 top_level 탭 run)를 찾아, 그
+    /// 단위가 드래그 그룹보다 **위면 그 앞**, **아래면 그 뒤**에 끼운다 — 항상 단위 경계라 연속 파티션 유지. 리딩 카드(첫 그룹
+    /// 이전·플래그 없음) row에 드롭하면 첫 그룹 앞(그룹들 최상단, 옛 동작). 자기 단위면 null(무동작).
+    ///
+    /// **§14.6 SR4 인터리빙 — 그룹↔top_level 탭 순서 교환(이 함수의 핵심 수정)**: §2.1 재설계(§14)로 top_level 탭이 그룹
+    /// 뒤/사이에 오는데, 옛 코드는 최상위 카드를 전부 "리딩 zone"(첫 그룹 이전)으로만 보고 `first_group`으로 clamp해 **그룹이
+    /// top_level 탭 위/사이로 못 갔다**(증상: `[탭X, 그룹A]`에서 A를 X 앞으로 못 끎). 아래 인터리빙 분기가 **그룹 밖 top카드**
+    /// (`enclosingGroupMarkerIndex==null`)를 하나의 최상위 run 단위로 인식해 그룹을 그 앞/뒤로 끼운다. **리딩 카드는 제외**
+    /// (run이 리전 첫머리에서 시작하고 개시 카드에 top_level 플래그가 없으면 = 옛 리딩 zone) → 옛 clamp로 폴백해 SG5-1
+    /// byte-identical. run 통째로 끼워 sticky follower가 이동한 그룹 마커에 흡수되는 것을 막는다(유효 단위 경계 = {마커,
+    /// top_level 카드, 리전 끝}만).
     fn sidebarGroupDropBoundary(self: *AppSession, raw_row: usize, m: usize) ?usize {
         const len = self.tabs.items.len;
         if (m >= len or raw_row >= self.sidebar_rows.items.len) return null;
@@ -4367,14 +4375,37 @@ pub const AppSession = struct {
             .group_header => |h| h.tab,
         };
         if (target_tab >= len) return null;
-        // 첫 그룹 시작 = 최상위 구간의 끝(§2.1: 최상위 카드는 첫 마커 이전에만). **핀 리전(§12 GP1)**: 앵커는 드래그
-        // 그룹 m이 속한 핀 리전에 국소화한다(각 리전 안에서 §2.1가 다시 성립 — 비고정 리전이면 [pinned_count, len)의 첫
-        // 마커). 마커가 그 리전에 없으면 리전 끝(reg.hi). 고정 그룹 0개면 m은 비고정 리전이라 리전 앵커=전역 앵커·reg.hi=len
-        // → 옛 `firstGroupStartIndex() orelse len`과 byte-identical. (그룹 통째 이동 자체의 리전 clamp는 GP3 clampGroupMoveToRegion.)
+        // 첫 그룹 시작 = 최상위 구간의 끝(§2.1). **핀 리전(§12 GP1)**: 앵커는 드래그 그룹 m이 속한 핀 리전에 국소화한다
+        // (각 리전 안에서 §2.1가 다시 성립 — 비고정 리전이면 [pinned_count, len)의 첫 마커). 마커가 그 리전에 없으면 리전
+        // 끝(reg.hi). 고정 그룹 0개면 m은 비고정 리전이라 리전 앵커=전역 앵커·reg.hi=len → 옛 `firstGroupStartIndex() orelse
+        // len`과 byte-identical. (그룹 통째 이동 자체의 리전 clamp는 GP3 clampGroupMoveToRegion.)
         const reg = self.pinRegionBounds(m);
         const first_group = self.firstGroupStartInRegion(reg.lo, reg.hi) orelse reg.hi;
+
+        // **§14.6 SR4 인터리빙**: target이 **그룹 밖 top카드**(enclosing 마커 없음 = top_level 탭/그 sticky follower)면, 그
+        // 카드가 속한 **최상위 run**을 한 단위로 보고 그룹을 그 앞/뒤로 끼운다(그룹↔탭 순서 교환). 그룹 헤더/멤버 row는 enclosing
+        // 이 non-null이라 이 분기를 안 타고 아래 그룹 경계 로직으로 간다.
+        if (self.enclosingGroupMarkerIndex(target_tab) == null) {
+            // 최상위 run [run_lo, run_hi): run_lo=run 개시 카드(top_level 플래그가 선 카드 또는 리전 시작), run_hi=다음 마커/
+            // 리전 끝. 위로 스캔은 개시 카드(top_level=true)에서 멈추고, 그 앞이 다른 최상위 카드일 때만 이어간다.
+            var run_lo = target_tab;
+            while (run_lo > reg.lo and !self.tabs.items[run_lo].top_level and
+                self.enclosingGroupMarkerIndex(run_lo - 1) == null) run_lo -= 1;
+            // 리딩 zone(옛 동작 보존): run이 리전 첫머리에서 시작하고 개시 카드에 플래그가 없으면 = 그룹은 리딩 카드 뒤라는
+            // 옛 가정. 이 경우만 아래 `first_group` clamp로 폴백한다(SG5-1 byte-identical). 그 외(플래그 있는 인터리브 top카드
+            // ·그룹 뒤 top카드)는 run 단위로 순서 교환한다.
+            const leading = run_lo == reg.lo and !self.tabs.items[run_lo].top_level;
+            if (!leading) {
+                var run_hi = target_tab + 1;
+                while (run_hi < reg.hi and self.tabs.items[run_hi].group_start == null) run_hi += 1;
+                // run은 마커가 없어 드래그 그룹 subtree와 겹치지 않는다(전부 위 또는 전부 아래). 위면 run 앞, 아래면 run 뒤.
+                if (run_lo < m) return run_lo;
+                return run_hi;
+            }
+        }
+
         if (target_tab < first_group) {
-            // 최상위 카드에 드롭 → 그룹들 최상단(첫 그룹 앞). 자기가 이미 첫 그룹이면 no-op.
+            // 리딩 카드에 드롭 → 그룹들 최상단(첫 그룹 앞). 자기가 이미 첫 그룹이면 no-op.
             if (m == first_group) return null;
             return first_group;
         }
@@ -6162,6 +6193,40 @@ pub const AppSession = struct {
                 if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
                     self.tabs.items[0].group_color = 0x4A7BC4;
                     self.tabs.items[2].group_color = 0xB05CD6;
+                }
+                self.rebuildSidebar() catch {};
+            }
+        }
+        // MARU_FORCE_GROUP_TAB_SWAP=1 — §14.6 SR4 인터리빙 **그룹↔top_level 탭 순서 교환**(그룹 통째 드래그가 고정 top카드와
+        // 자유 순서 교환)을 헤드리스 스크린샷으로 self-verify한다. 고정 리전 [X(t0, pin, top_level 탭), A=[a0(t1,pin,마커),
+        // a1(t2,pin,멤버)]]에서 **그룹 A를 X 앞으로 드래그해 실제 커밋**하면 사이드바가 [그룹 A(헤더+a0·a1), 그 뒤 최상위 X]로
+        // 순서 교환된다(X는 흡수 안 되고 top_level 최상위 유지·고정 유지). MARU_FORCE_GROUP_TAB_SWAP_BEFORE=1이면 드래그 전
+        // 초기 순서 [탭 X, 그룹 A]를 그대로 렌더해 before/after를 대비 캡처한다. 커밋은 실제 groupDragPreviewFrame plan(sidebar
+        // GroupDropBoundary + clampGroupMoveToRegion) + commitSidebarDragPreview 경로라 프로덕션 드래그와 동일하다. env-gate.
+        if (std.c.getenv("MARU_FORCE_GROUP_TAB_SWAP") != null) {
+            var made: usize = 0;
+            while (made < 2) : (made += 1) _ = self.newTab() catch {}; // init 1개 + 2개 = [t0, t1, t2]
+            if (self.tabs.items.len >= 3) {
+                inline for (0..3) |i| self.tabs.items[i].pinned = true; // 고정 리전(고정 그룹↔고정 탭)
+                self.tabs.items[0].top_level = true; // X = top_level 탭
+                self.tabs.items[1].group_start = self.allocator.dupe(u8, "A") catch null; // 그룹 A 마커
+                self.tabs.items[1].group_depth = 1;
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
+                self.recomputeVisibleTabs();
+                if (std.c.getenv("MARU_FORCE_GROUP_TAB_SWAP_BEFORE") == null) {
+                    // 그룹 A(마커 index1)를 X row 앞으로 드래그 확정 → [그룹 A, 탭 X].
+                    var x_row: usize = 0;
+                    for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                        .card => |c| if (c.tab == 0) {
+                            x_row = s;
+                        },
+                        .group_header => {},
+                    };
+                    if (self.sidebarGroupDropBoundary(x_row, 1)) |boundary| {
+                        const plan: DropPlan = .{ .group_sibling = .{ .insert_before = self.clampGroupMoveToRegion(1, boundary) } };
+                        self.sidebar_drag_preview = .{ .origin = 1, .origin_len = self.groupSubtreeEnd(1, null, null) - 1, .plan = plan, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
+                        self.commitSidebarDragPreview();
+                    }
                 }
                 self.rebuildSidebar() catch {};
             }
@@ -22068,6 +22133,164 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
     try std.testing.expectEqual(@as(usize, 4), session.moveGroupRange(4, 6, false)); // insert_before==j(=len) → no-op(이미 끝)
     // 비-마커 인덱스로 moveGroupRange 호출 방어(가드). t5(index3)는 마커 아님 → m 그대로.
     try std.testing.expectEqual(@as(usize, 3), session.moveGroupRange(3, 0, false));
+}
+
+// ── §14.6 SR4 인터리빙 회귀 — 그룹 통째 드래그 ↔ top_level 탭 순서 교환 ──────────────────────────────────────────
+// 증상: §2.1 재설계(§14)로 top_level 탭이 그룹 뒤/사이에 오는데, `sidebarGroupDropBoundary`가 최상위 카드를 전부 "리딩
+// zone"(첫 그룹 이전)으로만 보고 `first_group`으로 clamp해 **그룹이 top_level 탭 위/사이로 못 갔다**(카드 드래그 SR4는
+// 되는데 그룹 드래그만 안 됨). 아래 테스트는 그룹 드래그가 top_level 탭과 자유롭게 순서를 교환하고(그룹↔탭 인터리빙),
+// top_level 불변·프리뷰=확정·고정 리전 clamp가 정합함을 고정한다. 리딩 카드(플래그 없음)는 옛 clamp 폴백이라 SG5-1 회귀 0.
+
+/// 표시 카드 row 인덱스를 tab 인덱스로 찾는다(그룹 드래그 경계 테스트가 커서 hit-test 대신 쓰는 헤드리스 헬퍼).
+fn cardRowOf(session: *AppSession, tab_idx: usize) usize {
+    for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .card => |c| if (c.tab == tab_idx) return s,
+        .group_header => {},
+    };
+    return 0;
+}
+
+test "SR4 그룹드래그(a): [탭X, 그룹A]에서 A를 X 앞으로 → [그룹A, 탭X](순서 교환·X top_level 유지, 실제 commit 경로)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // init 기본 탭 1개 + 2개 = [t0, t1, t2] 3개
+    // [X(t0, top_level 탭), A=[a0(t1,마커), a1(t2,멤버)]]. X는 첫 그룹 이전이지만 top_level 플래그가 서 있어 인터리브 대상.
+    const x = session.tabs.items[0];
+    x.top_level = true;
+    try setGroupMarker(session, 1, "A", 1);
+    session.recomputeVisibleTabs();
+    try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null); // X 그룹 밖 최상위
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(0, null, null));
+
+    // A(마커 index1)를 X row로 드래그 → 인터리빙 경계 = X 앞(0). 옛 코드는 target<first_group=1이라 first_group(1)로 clamp,
+    // m==first_group이라 no-op(안 움직임)이었다. 이제 X가 top_level 인터리브 단위라 그 앞(0)을 낸다.
+    const boundary = session.sidebarGroupDropBoundary(cardRowOf(session, 0), 1).?;
+    try std.testing.expectEqual(@as(usize, 0), boundary);
+    const plan: AppSession.DropPlan = .{ .group_sibling = .{ .insert_before = session.clampGroupMoveToRegion(1, boundary) } };
+
+    // 실제 앱 경로로 1회 확정(groupDragPreviewFrame이 굽는 plan을 commitSidebarDragPreview가 재사용 — normalize/float/sweep 포함).
+    session.sidebar_drag_preview = .{ .origin = 1, .origin_len = 2, .plan = plan, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
+    session.commitSidebarDragPreview();
+
+    // 결과 [A=[a0,a1], X] — 순서 교환. X는 그룹 A 뒤 최상위(top_level 유지·흡수 안 됨).
+    try std.testing.expect(session.tabs.items[0].group_start != null); // index0 = A 마커(a0)
+    const x_idx = blk: {
+        for (session.tabs.items, 0..) |t, i| if (t == x) break :blk i;
+        break :blk session.tabs.items.len;
+    };
+    try std.testing.expectEqual(@as(usize, 2), x_idx); // X가 그룹 뒤(index2)로
+    try std.testing.expect(x.top_level); // ★ top_level 유지(그룹 이동은 top_level 불변, §14.6)
+    try std.testing.expect(session.enclosingGroupMarkerIndex(x_idx) == null); // 흡수 안 됨(그룹 밖 최상위)
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(x_idx, null, null)); // depth 0
+    var markers: usize = 0;
+    for (session.tabs.items) |t| if (t.group_start != null) {
+        markers += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), markers); // 마커 1개(쪼개짐/유령 마커 없음)
+}
+
+test "SR4 그룹드래그(b): [그룹A, 탭X, 그룹B]에서 그룹이 X를 넘나들며 순서 변경(X 사이 유지·top_level 불변)·프리뷰=확정 등가" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // init 기본 탭 1개 + 2개 = [t0, t1, t2] 3개
+    // [A=[a0(t0,마커)], X(t1, top_level 탭), B=[b0(t2,마커)]] — 단일 카드 형제 그룹 사이에 top카드.
+    try setGroupMarker(session, 0, "A", 1);
+    const x = session.tabs.items[1];
+    x.top_level = true;
+    try setGroupMarker(session, 2, "B", 1);
+    session.recomputeVisibleTabs();
+    try std.testing.expect(session.enclosingGroupMarkerIndex(1) == null); // X = A·B 사이 최상위
+
+    // ── ① B(마커 index2)를 X 위로 드래그 → B가 X 앞으로 = [A, B, X]. 경계=run_lo(X=1)<m(2) → 1. 프리뷰=확정 등가.
+    const b1 = session.sidebarGroupDropBoundary(cardRowOf(session, 1), 2).?;
+    try std.testing.expectEqual(@as(usize, 1), b1);
+    try expectDropEquivalent(session, 2, .{ .group_sibling = .{ .insert_before = b1 } });
+    try std.testing.expectEqual(x, session.tabs.items[2]); // X가 뒤로 밀림
+    try std.testing.expect(x.top_level); // top_level 유지
+    try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // 흡수 안 됨
+
+    // ── ② B(이제 index1)를 X(이제 index2) 아래로 드래그 → B가 X 뒤로 = [A, X, B](복귀, X가 다시 A·B 사이). 경계=run_hi=len=3.
+    session.recomputeVisibleTabs();
+    const b2 = session.sidebarGroupDropBoundary(cardRowOf(session, 2), 1).?;
+    try std.testing.expectEqual(@as(usize, 3), b2);
+    try expectDropEquivalent(session, 1, .{ .group_sibling = .{ .insert_before = b2 } });
+    try std.testing.expectEqual(x, session.tabs.items[1]); // X가 다시 A·B 사이(index1)
+    try std.testing.expect(x.top_level); // top_level 불변
+    try std.testing.expect(session.enclosingGroupMarkerIndex(1) == null);
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(1, null, null)); // depth 0
+    var markers: usize = 0;
+    for (session.tabs.items) |t| if (t.group_start != null) {
+        markers += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), markers); // 형제 그룹 2개 유지
+}
+
+test "SR4 그룹드래그(d): 고정 리전 인터리빙 clamp — 고정 그룹은 고정 top카드와 순서 교환하되 비고정 리전으로 못 넘어간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4] 5개 사용
+    // 고정 리전 [Xp(t0,pin,top_level), A=[a0(t1,pin,마커), a1(t2,pin,멤버)]] + 비고정 [t3, t4].
+    inline for (0..3) |i| {
+        session.tabs.items[i].pinned = true;
+    }
+    const xp = session.tabs.items[0];
+    xp.top_level = true;
+    try setGroupMarker(session, 1, "A", 1);
+    session.recomputeVisibleTabs();
+
+    // ① 고정 그룹 A(마커1)를 고정 top카드 Xp 앞으로 → 경계 0, clamp 유지(고정 리전 [0, pinned_count] 안). 프리뷰=확정 등가.
+    const b1 = session.sidebarGroupDropBoundary(cardRowOf(session, 0), 1).?;
+    try std.testing.expectEqual(@as(usize, 0), b1);
+    try std.testing.expectEqual(@as(usize, 0), session.clampGroupMoveToRegion(1, b1)); // 고정 리전 안이라 clamp no-op
+    try expectDropEquivalent(session, 1, .{ .group_sibling = .{ .insert_before = session.clampGroupMoveToRegion(1, b1) } });
+    // 결과 [A=[a0,a1], Xp, t3, t4] — Xp 고정·top_level 유지, 그룹 A 고정 프리픽스 유지.
+    const xp_idx = blk: {
+        for (session.tabs.items, 0..) |t, i| if (t == xp) break :blk i;
+        break :blk session.tabs.items.len;
+    };
+    try std.testing.expectEqual(@as(usize, 2), xp_idx);
+    try std.testing.expect(xp.pinned); // ★ 고정 유지(비고정 리전으로 안 샘)
+    try std.testing.expect(xp.top_level);
+    try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned); // A 고정 프리픽스
+
+    // ② 고정 그룹을 **비고정 타겟**(t3)으로 끌어도 clamp가 고정 경계(pinned_count)로 가둔다(비고정 리전 침범 방지, GP3 정합).
+    session.recomputeVisibleTabs();
+    const raw = session.sidebarGroupDropBoundary(cardRowOf(session, 3), 0) orelse 0; // A 마커는 이제 index0
+    const clamped = session.clampGroupMoveToRegion(0, raw);
+    try std.testing.expect(clamped <= session.countPinnedTabs()); // ★ 고정 리전 경계 넘지 않음(프리뷰=확정 공통 clamp)
+    _ = session.moveGroupRange(0, clamped, false);
+    try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned and session.tabs.items[2].pinned); // 고정 3개 유지
+    try std.testing.expect(!session.tabs.items[3].pinned and !session.tabs.items[4].pinned); // 비고정 2개 유지
 }
 
 test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이동)를 threshold로 구분 (mouse 시뮬레이션)" {

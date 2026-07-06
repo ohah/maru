@@ -43,7 +43,7 @@ pub fn LiveSurfaceRegistry(comptime Rt: type) type {
         /// 키는 `surface_id`(전역 유일·비재사용, M0a)이고 `generation`은 §3의 보조 키 필드(respawn 구분용, M2a는 보존만).
         pub const Entry = struct {
             surface_id: u64,
-            generation: u32,
+            generation: u64,
             runtime: *Rt,
         };
 
@@ -72,7 +72,7 @@ pub fn LiveSurfaceRegistry(comptime Rt: type) type {
         /// 반환 포인터는 registry가 소유하는 동안 절대 이동하지 않으므로 reader thread가 `&rt.reader`를 잡아도 안전하다.
         /// 중복 surface_id는 거부한다(M0a 비재사용 — 하나의 surface가 두 런타임에 매핑되는 구조적 버그 차단).
         /// generation은 §3의 키 필드로 그대로 저장한다(M2a는 보존만, 증가 정책 없음).
-        pub fn create(self: *Self, surface_id: u64, generation: u32) Error!*Rt {
+        pub fn create(self: *Self, surface_id: u64, generation: u64) Error!*Rt {
             if (self.indexOf(surface_id) != null) return error.SurfaceAlreadyRegistered;
             const rt = try self.allocator.create(Rt);
             errdefer self.allocator.destroy(rt);
@@ -93,7 +93,7 @@ pub fn LiveSurfaceRegistry(comptime Rt: type) type {
         }
 
         /// surface_id의 generation(§3 보조 키). 없으면 null. 이동은 이 값을 보존한다(respawn만 증가 — M1 후속 범위).
-        pub fn generationOf(self: *const Self, surface_id: u64) ?u32 {
+        pub fn generationOf(self: *const Self, surface_id: u64) ?u64 {
             if (self.indexOf(surface_id)) |i| return self.entries.items[i].generation;
             return null;
         }
@@ -157,7 +157,7 @@ const FakeRuntime = struct {
 const Registry = LiveSurfaceRegistry(FakeRuntime);
 
 /// create + 즉시 in-place init하는 테스트 헬퍼(production createTerm 패턴 — 슬롯 확보 후 그 자리에 init).
-fn spawn(reg: *Registry, allocator: std.mem.Allocator, surface_id: u64, generation: u32, pty_id: u64) !*FakeRuntime {
+fn spawn(reg: *Registry, allocator: std.mem.Allocator, surface_id: u64, generation: u64, pty_id: u64) !*FakeRuntime {
     const rt = try reg.create(surface_id, generation);
     rt.init(allocator, pty_id);
     return rt;
@@ -264,7 +264,7 @@ test "다중 등록 + 중간 제거: 나머지 엔트리의 포인터·generatio
 
     // 5개 등록, 각기 다른 generation.
     var ptrs: [5]*FakeRuntime = undefined;
-    const gens: [5]u32 = .{ 10, 11, 12, 13, 14 };
+    const gens: [5]u64 = .{ 10, 11, 12, 13, 14 };
     for (0..5) |k| ptrs[k] = try spawn(&reg, allocator, @as(u64, k + 1), gens[k], @as(u64, (k + 1) * 100));
 
     // 가운데(surface 3, index 2)를 제거.
@@ -289,11 +289,11 @@ test "generation 보존·조회: create 시 값 저장, 이후 조회로 그대�
     defer reg.deinit();
 
     _ = try spawn(&reg, allocator, 42, 7, 42);
-    try testing.expectEqual(@as(u32, 7), reg.generationOf(42).?);
+    try testing.expectEqual(@as(u64, 7), reg.generationOf(42).?);
     // 다른 surface를 더 등록해도(realloc) 원래 generation 불변.
     _ = try spawn(&reg, allocator, 43, 99, 43);
-    try testing.expectEqual(@as(u32, 7), reg.generationOf(42).?);
-    try testing.expectEqual(@as(u32, 99), reg.generationOf(43).?);
+    try testing.expectEqual(@as(u64, 7), reg.generationOf(42).?);
+    try testing.expectEqual(@as(u64, 99), reg.generationOf(43).?);
 }
 
 test "create OOM: append 실패 시 errdefer가 슬롯을 해제해 leak·유실 없이 registry 불변" {
@@ -363,7 +363,7 @@ test "WindowGraph cross-window 이동: 소유 런타임 identity·scrollback 보
     try testing.expectEqual(@as(usize, 2), p_after.scrollback.items.len);
     try testing.expectEqualStrings("history 1", p_after.scrollback.items[0]);
     try testing.expectEqualStrings("history 2", p_after.scrollback.items[1]);
-    try testing.expectEqual(@as(u32, 3), reg.generationOf(500).?); // 이동은 generation 안 올림
+    try testing.expectEqual(@as(u64, 3), reg.generationOf(500).?); // 이동은 generation 안 올림
 
     // 그래프 배치는 실제로 500이 window1로 옮겨졌다(비-vacuous: 이동이 진짜 일어남). win0엔 resident 501만 남는다.
     var buf0: [4]u64 = undefined;

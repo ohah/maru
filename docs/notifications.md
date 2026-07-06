@@ -66,7 +66,7 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 
 알림을 클릭하면 그 알림을 보낸 터미널의 **창 + 탭 + split panel + 가로탭(Term)까지** 정확히 포커스한다.
 
-- **식별자**: `surface.id`는 `AppSession.next_id`로 발급되는 **세션(창)-로컬** 카운터라 창이 여러 개면 중복될 수 있다.
+- **식별자**: `surface.id`는 M0a 이후 앱 인스턴스 전역 `SurfaceIdAllocator`가 발급해 **창 간 유일**하다(옛 per-session `AppSession.next_id` 세션-로컬 중복은 해소됨 — [window-surface-mobility.md](window-surface-mobility.md) §8 M0a). `(token, surface_id)` 쌍을 싣는 건 이제 id 충돌 방지가 아니라 대상 창을 빠르게 고르는 위치 메타데이터 용도다.
   그래서 알림 `userInfo`에 **`(token, surface_id)` 쌍**을 싣는다 — Swift `TerminalSurface.token`(창마다 유일,
   `makeTerminalSurface` 채번)으로 정확한 창/세션을 먼저 고르고, 그 세션 안에서 `surface_id`로 Term을 찾는다.
   `identifier`는 dedup용 UUID를 유지한다(라우팅 정보를 identifier에 쓰면 연속 알림이 서로 덮어쓴다).

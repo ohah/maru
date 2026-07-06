@@ -134,8 +134,14 @@ pub const Connection = struct {
     /// 0이면 EOF(peer 종료). 프레임 추출은 caller가 `framer.next()`로 한다 — dispatch는 없음(1c+).
     pub fn readInto(self: Connection, gpa: std.mem.Allocator, framer: *cp.Framer) error{ ReadFailed, OutOfMemory }!usize {
         var buf: [4096]u8 = undefined;
-        const n = c.read(self.fd, &buf, buf.len);
-        if (n < 0) return error.ReadFailed;
+        const n = while (true) {
+            const rc = c.read(self.fd, &buf, buf.len);
+            if (rc < 0) {
+                if (posix.errno(rc) == .INTR) continue; // 시그널 인터럽트는 재시도(acceptOne·writeAll과 동일, 적대적 리뷰 반영)
+                return error.ReadFailed;
+            }
+            break rc;
+        };
         if (n == 0) return 0;
         try framer.push(gpa, buf[0..@intCast(n)]);
         return @intCast(n);
@@ -220,6 +226,10 @@ pub const Server = struct {
             // lock 취득 = 옛 소유자 부재 → 경로의 stale 소켓/잔해를 unlink 후 bind 안전.
             .unlink_and_bind => _ = c.unlink(socket_path.ptr),
         }
+        // 이 지점 도달 = lock 취득(unlink_and_bind; abort_live는 위에서 return). 우리가 lock을 소유하므로 이후 단계
+        // (bind/chmod/listen/검증) 실패 시 우리 `<key>.lock`도 정리한다 — 빈 lock 잔해 누적 방지(적대적 리뷰 반영).
+        // abort_live 경로는 여기 못 오므로 살아있는 인스턴스의 lock을 지우지 않는다.
+        errdefer _ = c.unlink(lock_path.ptr);
 
         // ── 3. socket → bind → chmod(0600) → listen ──
         const lfd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);

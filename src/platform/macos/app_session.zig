@@ -4196,6 +4196,22 @@ pub const AppSession = struct {
         }
     }
 
+    /// **§14.6 SR4 model-2 — 드롭 컨텍스트 top_level 분류**(요구2). 카드 드래그의 드롭 표시 row(raw_row)를 보고 착지가 "그룹
+    /// 밖 gap(최상위 복귀)"인지 "그룹 안(멤버)"인지 판정해 DropPlan.card.top_level **의도**를 낸다. sidebarGroupDropTargetTab이
+    /// 착지 **위치**를 정하는 것과 짝(위치=소속, top_level=서브파티션 비트). 규칙:
+    ///  - **카드 row**: 그 타겟 카드가 **최상위(그룹 밖 = enclosing 마커 없음)**면 그 옆에 붙는 드래그 카드도 최상위 복귀(true) —
+    ///    그룹 사이/뒤에 낀 top카드(SR3 인터리빙) 옆 드롭이 이 경로. 타겟이 **그룹 멤버**면 그 그룹에 흡수(false, 기존 SG4).
+    ///  - **그룹 헤더 row**(펼침·접힘): 헤더에 드롭 = 그 그룹 **안으로**(멤버) → false.
+    /// 이 값은 **의도**일 뿐이고, simulateDrop/commit이 hasGroupMarkerAboveInRegion 게이트와 AND해 최소 표현으로 굽는다(그룹
+    /// 없는 flat·leading은 true여도 게이트가 false라 write 없음 → 회귀 0). 범위 밖이면 false(그룹 밖=흡수 안 함이 안전 기본).
+    fn sidebarCardDropTopLevel(self: *AppSession, raw_row: usize) bool {
+        if (raw_row >= self.sidebar_rows.items.len) return false;
+        return switch (self.sidebar_rows.items[raw_row]) {
+            .card => |c| c.tab < self.tabs.items.len and self.enclosingGroupMarkerIndex(c.tab) == null, // 타겟이 최상위면 최상위 복귀
+            .group_header => false, // 헤더 드롭 = 그룹 안(멤버)
+        };
+    }
+
     // ── SG5-1: 그룹 통째 드래그(헤더/마커 카드를 잡아 그룹 전체를 재정렬) ─────────────────────────────────────
     // docs/sidebar-groups.md §9 SG5·§2.1 연속 파티션. 그룹은 self.tabs 순서 위의 "[마커, 다음 마커) 연속 구간"이므로
     // 그룹 이동 = 그 구간을 **하나의 블록으로** 다른 그룹 경계(다른 group_start 인덱스·최상위 다음·끝)에 끼우는 것이다.
@@ -4489,7 +4505,11 @@ pub const AppSession = struct {
     /// 드롭 계획(어떤 이동인가) — 프리뷰 hit-test가 산출하고 확정이 재사용한다(docs §9 SG8). 옮길 subtree 시작(origin)은
     /// 이 union이 아니라 호출자(SidebarDragPreview.origin / simulateDrop `origin` 인자)가 든다 — 문서 SidebarDragPreview 동형.
     const DropPlan = union(enum) {
-        card: struct { target_tab: usize }, // SG4: moveTab(origin, target_tab)
+        // SG4: moveTab(origin, target_tab). **§14.6 SR4 model-2**: `top_level`=드롭 컨텍스트 전이 **의도**(그룹 밖 gap
+        // 드롭=true·그룹 안 멤버 드롭=false). simulateDrop/commit이 이 의도를 meaningfulness 게이트(그룹 마커가 리전 안
+        // 위에 있을 때만 flag가 필요 = 흡수 방지)와 AND해 최소 표현으로 굽는다 — default false ⇒ 옛 카드 드래그(전이 없음)와
+        // byte-identical(SG8b·SG8c 테스트의 `.card = .{ .target_tab = X }` 리터럴도 그대로 컴파일). host가 sidebarCardDropTopLevel로 채운다.
+        card: struct { target_tab: usize, top_level: bool = false },
         group_sibling: struct { insert_before: usize }, // SG5-1 형제 + SG5-4 빼기: moveGroupSibling(origin, insert_before)
         group_nest: struct { insert_before: usize, target_depth: u8 }, // SG5-4 넣기: moveGroupNesting(origin, ...)
         none, // 제자리·자기 subtree·무효 — identity 배치(고스트 없음, lo==hi==0)
@@ -4499,7 +4519,12 @@ pub const AppSession = struct {
     /// 위치 마커의 (relevel 반영) 선언 depth — projectRowsFrom(order, group_depth)에 그대로 넘긴다(SG8a 코어 재사용). 두 배열은
     /// **평행**(group_depth[i]는 order[i] 탭의 선언 depth)이라 어떤 순열도 lockstep으로 적용한다. `[ghost_lo, ghost_hi)`=옮겨진
     /// subtree(카드=1행·그룹=N행)가 앉는 가상 위치 구간(SG8c 고스트 태깅). lo==hi면 고스트 없음(none). arena 소유.
-    const VirtualLayout = struct { order: []usize, group_depth: []u8, ghost_lo: usize, ghost_hi: usize };
+    /// §14.6 SR4 model-2 — `top_level[i]`=표시 위치 i 카드의 **가상** top_level(order/group_depth와 나란한 병렬 배열).
+    /// pin(드래그 중 불변)·group_depth(SG8b 가상화됨)와 달리 top_level은 카드 드래그의 **드롭 컨텍스트로 변하는 소속 비트**라
+    /// 가상화가 필요하다. simulateDrop 카드 경로가 order/group_depth와 lockstep 순열한 뒤 착지 위치를 드롭 의도로 override하고,
+    /// projectRowsCore(프리뷰)가 이 배열을 tab.top_level 대신 읽어 프리뷰가 "이 카드가 그룹 밖 최상위"를 정확히 보인다. 그룹
+    /// 이동(simulateGroupMove)은 top_level을 블록과 함께 순열만 하고 override 없음(그룹 드래그는 top_level 불변). arena 소유.
+    const VirtualLayout = struct { order: []usize, group_depth: []u8, top_level: []bool, ghost_lo: usize, ghost_hi: usize };
 
     /// SG8c 드래그 프리뷰 상태(docs/sidebar-groups.md §9 SG8). self.tabs 불변이라 origin/origin_len가 드래그 내내
     /// 안정하다(포인터 셔플은 확정 경로 전용). plan은 매 프레임 원본 sidebar_rows hit-test로 재계산되고 마지막 값이
@@ -4548,20 +4573,23 @@ pub const AppSession = struct {
 
     fn simulateDrop(self: *AppSession, origin: usize, plan: DropPlan, arena: std.mem.Allocator) !VirtualLayout {
         const n = self.tabs.items.len;
-        // identity order + 라이브 group_depth(위치별 선언 depth). 카드/그룹 이동이 이 위에서 순열·relevel한다.
+        // identity order + 라이브 group_depth(위치별 선언 depth) + 라이브 top_level(위치별 최상위 복귀 비트, §14.6 SR4).
+        // 카드/그룹 이동이 이 위에서 순열·relevel한다.
         const order = try arena.alloc(usize, n);
         const group_depth = try arena.alloc(u8, n);
+        const top_level = try arena.alloc(bool, n);
         for (self.tabs.items, 0..) |tab, i| {
             order[i] = i;
             group_depth[i] = tab.group_depth;
+            top_level[i] = tab.top_level;
         }
         switch (plan) {
-            .none => return .{ .order = order, .group_depth = group_depth, .ghost_lo = 0, .ghost_hi = 0 },
+            .none => return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = 0, .ghost_hi = 0 },
             .card => |c| {
                 // moveTab과 동일 코어: clampMoveToGroup(핀 정직)로 목표를 같은 핀 그룹에 가두고 rotateMove로 순열.
-                // group_depth는 카드 이동이 depth를 안 바꾸므로 order와 lockstep 회전(위치별 선언 depth가 탭을 따라감).
+                // group_depth·top_level은 카드 이동이 위치별 선언값을 안 바꾸므로 order와 lockstep 회전(탭을 따라감).
                 if (origin >= n or c.target_tab >= n) // 범위 밖 = moveTab의 무동작 가드 — 제자리(고스트=origin 자리)
-                    return .{ .order = order, .group_depth = group_depth, .ghost_lo = @min(origin, n), .ghost_hi = @min(origin +| 1, n) };
+                    return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = @min(origin, n), .ghost_hi = @min(origin +| 1, n) };
                 var to = clampMoveToGroup(c.target_tab, self.tabs.items[origin].pinned, self.countPinnedTabs(), n);
                 // 그룹-로컬 pin(GL §13.5 보강6): 로컬 pin 멤버는 subtree-로컬 프리픽스 [marker+1, local_pin_end)에 **더**
                 // 가둔다(전역 clampMoveToGroup이 핀 리전에 가두는 것과 **대칭**, 한 단계 안쪽). clamp를 **여기 simulateDrop
@@ -4572,12 +4600,44 @@ pub const AppSession = struct {
                 if (origin != to) {
                     rotateMove(usize, order, origin, to);
                     rotateMove(u8, group_depth, origin, to);
+                    rotateMove(bool, top_level, origin, to);
+                    // §14.6 SR4 model-2: 드롭 컨텍스트로 top_level을 **직접 전이**한다(가상). 의도(c.top_level = 그룹 밖 gap
+                    // 드롭이면 true)를 meaningfulness 게이트(hasGroupMarkerAboveInRegion — 그룹 마커가 리전 안 위에 있을 때만
+                    // flag가 흡수 방지에 실제 필요)와 AND해 **최소 표현**으로 굽는다: leading/flat(마커 없음)·top-run(위가 이미
+                    // top break)은 flag 없이도 depth 0이라 override가 no-op → byte-identical(회귀 0). 그룹 안 드롭(c.top_level
+                    // =false)은 항상 false write라 top카드가 멤버로 흡수될 때 stale flag를 clear한다. origin==to(제자리)는
+                    // 위치·소속 불변이라 override 안 함(전이 없음). commit이 같은 게이트를 post-move self.tabs에 적용해 프리뷰=확정.
+                    top_level[to] = c.top_level and self.hasGroupMarkerAboveInRegion(to, order, top_level);
                 }
-                return .{ .order = order, .group_depth = group_depth, .ghost_lo = to, .ghost_hi = to + 1 };
+                return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = to, .ghost_hi = to + 1 };
             },
-            .group_sibling => |g| return self.simulateGroupMove(arena, order, group_depth, origin, g.insert_before, null),
-            .group_nest => |g| return self.simulateGroupMove(arena, order, group_depth, origin, g.insert_before, g.target_depth),
+            .group_sibling => |g| return self.simulateGroupMove(arena, order, group_depth, top_level, origin, g.insert_before, null),
+            .group_nest => |g| return self.simulateGroupMove(arena, order, group_depth, top_level, origin, g.insert_before, g.target_depth),
         }
+    }
+
+    /// §14.6 SR4 model-2 — 착지 위치 `landing`이 그룹 마커에 흡수될 위치인가(= top_level flag가 **의미 있는가**). 리전 안에서
+    /// landing 바로 위로 스캔해 (1) 먼저 **top_level break**(이미 최상위 run 개시 카드)를 만나면 false(landing은 flag 없이도
+    /// 최상위 sticky라 flag 불필요), (2) 먼저 **그룹 마커**를 만나면 true(flag 없으면 그 그룹에 흡수 → 전이가 meaningful),
+    /// (3) 핀 리전 경계·리스트 시작까지 아무것도 못 만나면 false(leading/flat 최상위 = flag 불필요). 이 게이트로 카드 드래그
+    /// top_level 전이가 **최소 표현**이 되고 그룹 없는 flat 드래그는 write 0 → byte-identical(회귀 0). `order`/`top_level`
+    /// non-null이면 가상 배치(simulateDrop 프리뷰), 둘 다 null이면 라이브 self.tabs(commit 확정) — 둘이 같은 게이트라 프리뷰=확정.
+    fn hasGroupMarkerAboveInRegion(self: *AppSession, landing: usize, order: ?[]const usize, top_level: ?[]const bool) bool {
+        const n = if (order) |o| o.len else self.tabs.items.len;
+        if (landing >= n) return false;
+        const landing_ti = if (order) |o| o[landing] else landing;
+        const landing_pinned = self.tabs.items[landing_ti].pinned;
+        var k = landing;
+        while (k > 0) {
+            k -= 1;
+            const ti = if (order) |o| o[k] else k;
+            const t = self.tabs.items[ti];
+            if (t.pinned != landing_pinned) break; // 핀 리전 경계(pin ⊃ group) — 다른 리전 마커는 무관
+            const tl = if (top_level) |arr| arr[k] else t.top_level;
+            if (tl) return false; // 위에 top break가 먼저 → landing은 이미 최상위 run(flag 불필요)
+            if (t.group_start != null) return true; // 위에 그룹 마커 → flag 없으면 흡수(전이가 meaningful)
+        }
+        return false;
     }
 
     /// group_sibling/group_nest 공통 가상 이동 — moveGroupRange(순열)+relevelBlock(depth)의 가상판(self.tabs 불변). moveGroupRange와
@@ -4585,34 +4645,38 @@ pub const AppSession = struct {
     /// 순열 없이 relevel만, 그 외엔 groupBlockPermutation으로 order/group_depth를 lockstep 재배열한 뒤 relevelBlockCore(가상)한다.
     /// `target_depth==null`이면 moveGroupSibling처럼 **새 위치의 자연 eff**(effectiveDepthAt, gap-clamp된 = 빼기면 얕아짐)로,
     /// 값이면 moveGroupNesting처럼 그 depth로 relevel한다. `order`/`group_depth`는 simulateDrop이 넘긴 **identity 배치**다.
-    fn simulateGroupMove(self: *AppSession, arena: std.mem.Allocator, order: []usize, group_depth: []u8, m: usize, insert_before: usize, target_depth: ?u8) !VirtualLayout {
+    fn simulateGroupMove(self: *AppSession, arena: std.mem.Allocator, order: []usize, group_depth: []u8, top_level: []bool, m: usize, insert_before: usize, target_depth: ?u8) !VirtualLayout {
         const n = order.len;
         // moveGroupRange 가드 재현(같은 no-op 판정). order는 아직 identity라 order[m]==m.
         if (m >= n or self.tabs.items[order[m]].group_start == null)
-            return .{ .order = order, .group_depth = group_depth, .ghost_lo = @min(m, n), .ghost_hi = @min(m + 1, n) };
+            return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = @min(m, n), .ghost_hi = @min(m + 1, n) };
         const j = self.groupSubtreeEnd(m, order, group_depth); // subtree 끝(order=identity → 라이브와 동일)
         const range_len = j - m;
         if (insert_before > n or (insert_before >= m and insert_before <= j)) {
             // 제자리(순열 no-op) — relevel만. sibling(자연 eff)이면 자기 자리 depth라 대개 무변, nest면 자기 depth 변경 가능
-            // (moveGroupRange no-op 시 moveGroupNesting/Sibling이 relevelBlock을 그대로 부르는 것과 동형).
+            // (moveGroupRange no-op 시 moveGroupNesting/Sibling이 relevelBlock을 그대로 부르는 것과 동형). top_level은 그룹
+            // 이동이 안 바꾸므로(§14.6 — 카드 드래그 전용 전이) 순열도 override도 없이 그대로 넘긴다.
             const td: u8 = target_depth orelse self.effectiveDepthAt(m, order, group_depth);
             _ = self.relevelBlockCore(m, range_len, td, order, group_depth);
-            return .{ .order = order, .group_depth = group_depth, .ghost_lo = m, .ghost_hi = m + range_len };
+            return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = m, .ghost_hi = m + range_len };
         }
         const rest_insert: usize = if (insert_before <= m) insert_before else insert_before - range_len;
-        // 블록 순열을 새 버퍼에 산출해 order/group_depth를 lockstep 재배열(groupBlockPermutation = moveGroupRange 공유 코어).
+        // 블록 순열을 새 버퍼에 산출해 order/group_depth/top_level을 lockstep 재배열(groupBlockPermutation = moveGroupRange 공유
+        // 코어). top_level은 블록과 함께 따라가기만 한다(그룹 이동은 각 카드의 최상위 복귀 비트를 안 바꾼다, §14.6).
         const perm = try arena.alloc(usize, n);
         const new_marker = groupBlockPermutation(perm, n, m, j, rest_insert);
         const new_order = try arena.alloc(usize, n);
         const new_gd = try arena.alloc(u8, n);
+        const new_tl = try arena.alloc(bool, n);
         for (perm, 0..) |src, w| {
             new_order[w] = order[src];
             new_gd[w] = group_depth[src];
+            new_tl[w] = top_level[src];
         }
         // 이동 후 배치에서 relevel. sibling은 새 위치의 자연 eff(빼기면 gap-clamp로 얕아짐), nest는 target_depth.
         const td: u8 = target_depth orelse self.effectiveDepthAt(new_marker, new_order, new_gd);
         _ = self.relevelBlockCore(new_marker, range_len, td, new_order, new_gd);
-        return .{ .order = new_order, .group_depth = new_gd, .ghost_lo = new_marker, .ghost_hi = new_marker + range_len };
+        return .{ .order = new_order, .group_depth = new_gd, .top_level = new_tl, .ghost_lo = new_marker, .ghost_hi = new_marker + range_len };
     }
 
     /// SG8c 프리뷰 재투영 진입점(docs/sidebar-groups.md §9) — plan을 simulateDrop으로 **비커밋 가상 배치**(self.tabs 불변)
@@ -4626,7 +4690,7 @@ pub const AppSession = struct {
         const vl = try self.simulateDrop(origin, plan, arena);
         // 가상 order/depth를 프리뷰 모드로 투영 — 고스트 [lo,hi)는 접힘 게이트 예외로 강제 방출(사라짐 방지)·헤더 flip.
         // 반환 range는 vl.ghost(order 위치 도메인)를 방출 후 **표시-row 도메인**으로 옮긴 것(렌더가 그대로 씀).
-        const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi });
+        const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, vl.top_level, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi });
         // subtree 길이(카드=1·그룹=groupSubtreeEnd-origin·none=0). 프리뷰 상태 메타(확정·origin 안정성 문서화용).
         const origin_len: usize = switch (plan) {
             .none => 0,
@@ -5927,6 +5991,44 @@ pub const AppSession = struct {
                 self.createGroupForTab(self.tabs.items[1]); // 선택 탭만 그룹(§14.5) — t1만 그룹, t2에 top_level write
                 if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
                 self.rebuildSidebar() catch {};
+            }
+        }
+        // MARU_FORCE_SR4_DRAG=1 — §2.1 재설계(§14.6 SR4) **model-2 드래그 top_level 전이**를 헤드리스 스크린샷으로 self-verify한다.
+        // 배치 [A(마커 t0), a1(t1,멤버), TOP1(t2,top_level 인터리브 top카드), X(t3, TOP1 뒤 sticky top)]에서 **X를 TOP1 옆(그룹 뒤
+        // gap)으로 드래그 중인 프리뷰**(SG8d 고스트)를 강제한다: 반투명 고스트 카드 X가 **그룹 A 밖 최상위 depth 0**(들여쓰기 없음)
+        // 으로 떠 "카드를 그룹 뒤로 끌면 최상위 복귀"(요구2)가 보인다. MARU_FORCE_SR4_DRAG_INTO=1이면 같은 setup에서 X를 **a1(멤버)
+        // 옆**으로 드래그해 고스트가 **그룹 안 depth 1**(들여쓰기)로 떠 "그룹 안으로 끌면 멤버 흡수"를 대비 캡처한다. MARU_FORCE_GROUP_PIN=1
+        // 이면 A·a1·TOP1·X를 고정해 **고정 탭↔고정 그룹 인터리빙**(고정 리전 안 top_level 전이·pin 유지)을 본다. 라이브 커밋 대신
+        // refreshDragPreview로 프리뷰만 세우고 놔둬(up 없음) 첫 frame을 캡처한다(self.tabs 불변). env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_SR4_DRAG") != null) {
+            var made: usize = 0;
+            while (made < 3) : (made += 1) _ = self.newTab() catch {}; // [t0..t3]
+            if (self.tabs.items.len >= 4) {
+                self.tabs.items[0].group_start = self.allocator.dupe(u8, "A") catch null; // 그룹 A 마커
+                self.tabs.items[0].group_depth = 1;
+                self.tabs.items[2].top_level = true; // TOP1 = 그룹 뒤 인터리브 top카드
+                if (std.c.getenv("MARU_FORCE_GROUP_PIN") != null) inline for (0..4) |i| {
+                    self.tabs.items[i].pinned = true; // 고정 리전 인터리빙
+                };
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[0].group_color = 0x4A7BC4;
+                self.recomputeVisibleTabs();
+                // 드래그: X(origin=3)를 타겟 row로. 기본=TOP1(그룹 뒤 gap→최상위 고스트), INTO=a1(그룹 안→멤버 고스트).
+                const target_tab: usize = if (std.c.getenv("MARU_FORCE_SR4_DRAG_INTO") != null) 1 else 2;
+                var into_row: usize = 0;
+                for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
+                    .card => |c| if (c.tab == target_tab) {
+                        into_row = s;
+                    },
+                    .group_header => {},
+                };
+                if (self.sidebarGroupDropTargetTab(into_row, 3)) |tt| {
+                    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                    defer arena_state.deinit();
+                    self.sidebar_drag_active = true;
+                    self.sidebar_drag_index = 3;
+                    self.refreshDragPreview(3, .{ .card = .{ .target_tab = tt, .top_level = self.sidebarCardDropTopLevel(into_row) } }, 0, arena_state.allocator()) catch {};
+                }
+                self.rebuildSidebar() catch {}; // 렌더가 preview_rows로 고스트+삽입선(X의 최상위/멤버 depth)을 그린다
             }
         }
         // MARU_FORCE_RIGHT_CLICK=1 — 첫 frame에 터미널 본문 우클릭을 시뮬레이트해 input.right-click=menu의 복사/붙여넣기
@@ -7477,7 +7579,7 @@ pub const AppSession = struct {
     /// SG8a 순수 투영 코어를 **라이브 sidebar_rows**에 얇게 위임하는 래퍼(preview=null). recomputeVisibleTabs·SG8a/b
     /// 테스트가 이 시그니처(order/group_depth)를 그대로 부른다 — identity면 옛 flat 동작과 byte-identical.
     fn projectRowsFrom(self: *AppSession, order: []const usize, group_depth: []const u8) void {
-        _ = self.projectRowsCore(&self.sidebar_rows, order, group_depth, null); // 라이브는 고스트 range 미사용
+        _ = self.projectRowsCore(&self.sidebar_rows, order, group_depth, null, null); // 라이브는 top_level·고스트 range 미사용(tab.top_level 직접)
     }
 
     /// SG8c 프리뷰 투영 컨텍스트 — projectRowsCore가 프리뷰 모드일 때 [ghost_lo, ghost_hi) **표시 위치**를 접힘 게이트
@@ -7532,7 +7634,11 @@ pub const AppSession = struct {
     /// depth 파생은 group_depth[i]를 선언값으로 쓴다(order/group_depth가 identity+라이브·preview=null이면 옛 flat 동작과
     /// byte-identical). **preview!=null**(SG8c)이면 [ghost_lo,hi) 표시 위치 카드를 접힘 게이트 예외로 강제 방출하고, 그
     /// 구간을 담은 접힌 헤더를 펼침 flip한다 — member_count는 가상 order 위 directCardCount라 고스트를 반영(self.tabs 미스캔).
-    fn projectRowsCore(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), order: []const usize, group_depth: []const u8, preview: ?PreviewCtx) PreviewRange {
+    /// **§14.6 SR4 model-2**: `top_level`=order/group_depth와 나란한 **가상** top_level 병렬 배열(non-null=simulateDrop
+    /// 프리뷰, null=라이브라 tab.top_level 직접). 카드 드래그가 착지 위치의 top_level을 override하므로 pass1/pass2 리셋과
+    /// pass2 subtree 헬퍼(subtreeHasMatch·directCardCount·ghostOverlapsSubtree)가 이 가상 배열을 읽어야 프리뷰가 "그룹 밖
+    /// 최상위" 전이를 정확히 반영한다. null이면 옛 tab.top_level 경로와 byte-identical(라이브 회귀 0).
+    fn projectRowsCore(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row), order: []const usize, group_depth: []const u8, top_level: ?[]const bool, preview: ?PreviewCtx) PreviewRange {
         out.clearRetainingCapacity();
         const searching = self.sidebar_search_active and self.sidebar_search_input.query.items.len > 0;
         const q: []const u8 = if (searching) self.sidebar_search_input.query.items else "";
@@ -7568,8 +7674,9 @@ pub const AppSession = struct {
                 // flip 지점(있다면 pinned 프리픽스 끝)에서 스택이 비어 리셋이 no-op → 옛 투영과 byte-identical(SG8a identity).
                 // §2.1 재설계(§14): top_level 카드도 같은 edge 경계로 스택을 리셋한다(pin 플립과 동형의 두 번째 리셋 신호) —
                 // 이 카드는 depth 0(top-level)로 파생되고, 뒤 비마커 카드는 sticky-reset으로 빈 스택을 타 다음 마커 전까지 자동
-                // top-level이다. 전 탭 top_level=false면 이 항이 never-flip이라 no-op = byte-identical.
-                if ((i > 0 and tab.pinned != prev_pinned) or tab.top_level) top = 0;
+                // top-level이다. 전 탭 top_level=false면 이 항이 never-flip이라 no-op = byte-identical. §14.6 SR4: 가상 top_level
+                // (드래그 프리뷰의 착지 override)이 있으면 tab.top_level 대신 그 값을 읽어 전이를 반영한다(null=라이브=tab 직접).
+                if ((i > 0 and tab.pinned != prev_pinned) or (if (top_level) |tl| tl[i] else tab.top_level)) top = 0;
                 prev_pinned = tab.pinned;
                 if (tab.group_start != null) {
                     const dd: u8 = @max(@as(u8, 1), group_depth[i]);
@@ -7621,8 +7728,9 @@ pub const AppSession = struct {
             // 접혀 있어도 그 뒤 비고정 최상위 카드가 접힘을 상속받아 숨는(shred) 일을 막는다(pin ⊃ group). 고정 그룹
             // 0개면 flip 지점에서 cstack이 비어 no-op → byte-identical. (파생 depth 리셋은 pass1, 여기는 가시성 게이트.)
             // §2.1 재설계(§14): top_level 카드도 같은 edge 경계로 cstack을 리셋한다 — 접힌 그룹 뒤 top-level 카드가 접힘을
-            // 상속받아 숨는(shred, C2 #2 증상과 동형) 것을 막는다. 전 탭 top_level=false면 no-op = byte-identical.
-            if ((i > 0 and tab.pinned != prev_pinned_p2) or tab.top_level) ctop = 0;
+            // 상속받아 숨는(shred, C2 #2 증상과 동형) 것을 막는다. 전 탭 top_level=false면 no-op = byte-identical. §14.6 SR4:
+            // 가상 top_level(드래그 프리뷰 착지 override) 우선(null=라이브=tab 직접).
+            if ((i > 0 and tab.pinned != prev_pinned_p2) or (if (top_level) |tl| tl[i] else tab.top_level)) ctop = 0;
             prev_pinned_p2 = tab.pinned;
             // SG8c: 이 표시 위치가 고스트 구간 [lo,hi)면 접힘 게이트를 무시하고 강제 방출한다(옮겨진 subtree가 접힌
             // 그룹에 들어가도 카드가 순간 사라지지 않게 — 사라짐의 원인이 pass2 가시성 게이트라 투영이 예외한다). 라이브
@@ -7640,9 +7748,9 @@ pub const AppSession = struct {
                 const ancestor_collapsed = anyCollapsedInStack(cstack[0..ctop]);
                 // SG8c 프리뷰: 고스트가 이 그룹 subtree에 들어오면 (1) 헤더 collapsed를 펼침으로 flip(아래)하고 (2) 접힌
                 // 조상에 가려 헤더가 숨을 때도 강제로 보인다(force-show) — 고스트 카드가 헤더 없이 떠다니지 않게.
-                const ghost_in_subtree = if (preview) |p| self.ghostOverlapsSubtree(order, depth, i, d, p) else false;
+                const ghost_in_subtree = if (preview) |p| self.ghostOverlapsSubtree(order, depth, i, d, p, top_level) else false;
                 const header_visible = if (searching)
-                    self.subtreeHasMatch(order, i, d, depth, matches)
+                    self.subtreeHasMatch(order, i, d, depth, matches, top_level)
                 else
                     (!ancestor_collapsed or ghost_in_subtree);
                 if (header_visible) {
@@ -7659,7 +7767,7 @@ pub const AppSession = struct {
                             .label = group_name,
                             // member_count는 가상 order 위 order-aware directCardCount라 고스트를 반영한다(self.tabs 직접
                             // 스캔 금지 — 드래그 중 self.tabs가 불변이라 직접 스캔하면 고스트가 (N)에 안 잡힌다, SG8a 완료).
-                            .member_count = self.directCardCount(order, i, d, depth, matches, searching),
+                            .member_count = self.directCardCount(order, i, d, depth, matches, searching, top_level),
                             .tab = tab_idx, // 그룹 시작 **원본** 탭 인덱스(=order[i]) — 클릭 토글·glyph 라벨 live 재조회의 단일 출처(#8)
                             .depth = d, // 정규화 깊이 — 헤더 삼각 들여쓰기 (depth-1)*group_indent
                             // 그룹 색(SG5-2)이 있으면 view가 헤더 밴드를 내 색 구분을 유지하고, 없으면 밴드 없이 화살표+이름만
@@ -7705,14 +7813,14 @@ pub const AppSession = struct {
     /// SG8c 프리뷰 — 마커 위치 i(정규화 depth d)의 subtree [i, e) 위치 구간에 고스트 [lo,hi)가 겹치는가. subtree 끝 e =
     /// 다음 "같거나 낮은 depth 마커" 위치(projectRows pass2 pop 경계와 동형) 또는 n. 헤더 flip·force-show 판정에 쓴다
     /// (고스트가 담긴 접힌 그룹만 펼침 표시). 위치 도메인 순수 함수(order/depth는 pass1 산출, self.tabs는 마커 판별만).
-    fn ghostOverlapsSubtree(self: *AppSession, order: []const usize, depth: []const u8, i: usize, d: u8, p: PreviewCtx) bool {
+    fn ghostOverlapsSubtree(self: *AppSession, order: []const usize, depth: []const u8, i: usize, d: u8, p: PreviewCtx, top_level: ?[]const bool) bool {
         if (p.ghost_lo >= p.ghost_hi) return false; // 고스트 없음(none)
         const n = order.len;
         const pin_i = self.tabs.items[order[i]].pinned; // 마커 위치의 핀 리전(§12 GP1)
         var e = i + 1;
         while (e < n) : (e += 1) {
             if (self.tabs.items[order[e]].pinned != pin_i) break; // 핀 리전 경계 — subtree는 한 리전 통째(pin ⊃ group)
-            if (self.tabs.items[order[e]].top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드에서 subtree 끝(OR=min)
+            if (if (top_level) |tl| tl[e] else self.tabs.items[order[e]].top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드(가상 §14.6)에서 subtree 끝(OR=min)
             if (self.tabs.items[order[e]].group_start != null and depth[e] <= d) break; // subtree 경계(형제/조상 마커)
         }
         return p.ghost_lo < e and p.ghost_hi > i; // [lo,hi) ∩ [i,e) ≠ ∅
@@ -7731,13 +7839,13 @@ pub const AppSession = struct {
     /// 마커 위치 i(정규화 depth d)의 subtree [i, k)에 검색 매치가 하나라도 있는가(§6 빈 그룹 규칙 — 중첩 확장). subtree는
     /// 다음 "같거나 낮은 depth 마커" 전까지(자식 그룹 포함). 부모 헤더는 자식에 매치가 있으면 트리 경로로 떠야 한다.
     /// order-aware(SG8a): i·k는 표시 위치라 원본 탭은 self.tabs.items[order[k]]로 거친다(depth/matches는 위치 인덱스).
-    fn subtreeHasMatch(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool) bool {
+    fn subtreeHasMatch(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool, top_level: ?[]const bool) bool {
         const n = order.len;
         const pin_i = self.tabs.items[order[i]].pinned; // 마커 위치의 핀 리전(§12 GP1)
         var k = i;
         while (k < n) : (k += 1) {
             if (k > i and self.tabs.items[order[k]].pinned != pin_i) break; // 핀 리전 경계 — subtree는 한 리전 통째
-            if (k > i and self.tabs.items[order[k]].top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드에서 subtree 끝(OR=min)
+            if (k > i and (if (top_level) |tl| tl[k] else self.tabs.items[order[k]].top_level)) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드(가상 §14.6)에서 subtree 끝(OR=min)
             if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (matches[k]) return true;
         }
@@ -7748,14 +7856,14 @@ pub const AppSession = struct {
     /// [i, k) 안에서 depth[t]==d(자기 그룹 몸통, 마커 탭 자신 포함)인 카드만 센다(검색 중이면 매치한 것만).
     /// 결정(문서화): (N)은 접힘 시 "이 그룹에 직접 든 워크스페이스 수"라, 중첩 자식 그룹 안 카드는 세지 않는다.
     /// order-aware(SG8a): i·k는 표시 위치라 원본 탭은 self.tabs.items[order[k]]로 거친다(depth/matches는 위치 인덱스).
-    fn directCardCount(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool, searching: bool) u16 {
+    fn directCardCount(self: *AppSession, order: []const usize, i: usize, d: u8, depth: []const u8, matches: []const bool, searching: bool, top_level: ?[]const bool) u16 {
         const n = order.len;
         const pin_i = self.tabs.items[order[i]].pinned; // 마커 위치의 핀 리전(§12 GP1)
         var count: u16 = 0;
         var k = i;
         while (k < n) : (k += 1) {
             if (k > i and self.tabs.items[order[k]].pinned != pin_i) break; // 핀 리전 경계 — (N) 배지가 다른 리전 카드로 오염되지 않게
-            if (k > i and self.tabs.items[order[k]].top_level) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드가 (N)에 안 세짐(OR=min)
+            if (k > i and (if (top_level) |tl| tl[k] else self.tabs.items[order[k]].top_level)) break; // §2.1 재설계(§14) 서브파티션 경계 — top카드(가상 §14.6)가 (N)에 안 세짐(OR=min)
             if (k > i and self.tabs.items[order[k]].group_start != null and depth[k] <= d) break; // subtree 경계
             if (depth[k] == d and (!searching or matches[k])) count +|= 1;
         }
@@ -9575,7 +9683,8 @@ pub const AppSession = struct {
                     const raw_row = chrome.components.sidebar.dragTargetSlot(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px);
                     const origin = self.sidebar_drag_index;
                     const plan: DropPlan = if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
-                        .{ .card = .{ .target_tab = target_tab } }
+                        // §14.6 SR4 model-2: 착지 위치(target_tab) + 드롭 컨텍스트 top_level 전이 의도(그룹 밖 gap=true·안=false)를 함께 굽는다.
+                        .{ .card = .{ .target_tab = target_tab, .top_level = self.sidebarCardDropTopLevel(raw_row) } }
                     else
                         .none; // 유효 드롭 위치 없음(범위 밖·마커) → 제자리 프리뷰(고스트 없음)
                     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -14178,7 +14287,15 @@ pub const AppSession = struct {
                         target = std.math.clamp(region, b.lo, b.hi);
                     }
                 }
-                _ = self.moveTab(origin, target); // SG8d 카드
+                const landed = self.moveTab(origin, target); // SG8d 카드 — 반환값 = clamp 후 실제 안착 인덱스(no-op이면 origin)
+                // §14.6 SR4 model-2: 드롭 컨텍스트 top_level 전이를 **실제 write**로 확정한다(프리뷰의 가상 override와 등가).
+                // 실제로 옮겼을 때(landed != origin)만 전이하고, simulateDrop 카드 경로와 **같은** 게이트(hasGroupMarkerAboveInRegion —
+                // null=post-move self.tabs 직접)를 적용해 프리뷰=확정을 맞춘다. moveTab이 clamp한 landed가 simulateDrop의 `to`와
+                // 같아(같은 clampMoveToGroup+localPin) 프리뷰가 본 착지에 그대로 write한다. 그룹 안 드롭(c.top_level=false)은 false
+                // write라 top카드가 멤버로 흡수될 때 stale flag를 clear한다. 전이 안 하는 드래그(그룹 없음·leading·in-place)는 게이트
+                // 가 false거나 landed==origin이라 write가 없어 byte-identical(회귀 0). normalize/float는 아래에서 이 write를 반영한다.
+                if (landed != origin and landed < self.tabs.items.len)
+                    self.tabs.items[landed].top_level = c.top_level and self.hasGroupMarkerAboveInRegion(landed, null, null);
             },
             .group_sibling => |g| _ = self.moveGroupSibling(origin, g.insert_before), // SG5-1 형제 + SG5-4 빼기
             .group_nest => |g| _ = self.moveGroupNesting(origin, g.insert_before, g.target_depth), // SG5-4 넣기
@@ -17544,13 +17661,13 @@ test "SR1: top_level이 7 파생 경계에서 최상위 복귀 서브파티션�
     const order = [_]usize{ 0, 1, 2, 3, 4 };
     const depth = [_]u8{ 1, 1, 0, 1, 1 };
     const only_top = [_]bool{ false, false, true, false, false }; // TOP만 매치
-    try std.testing.expect(!session.subtreeHasMatch(&order, 0, 1, &depth, &only_top)); // A subtree엔 TOP이 없음(top_level break)
+    try std.testing.expect(!session.subtreeHasMatch(&order, 0, 1, &depth, &only_top, null)); // A subtree엔 TOP이 없음(top_level break; null=라이브 tab.top_level)
     const only_a1 = [_]bool{ false, true, false, false, false }; // a1만 매치
-    try std.testing.expect(session.subtreeHasMatch(&order, 0, 1, &depth, &only_a1)); // A subtree엔 a1이 있음
+    try std.testing.expect(session.subtreeHasMatch(&order, 0, 1, &depth, &only_a1, null)); // A subtree엔 a1이 있음
 
     // #7 ghostOverlapsSubtree — 순수 함수 직접 호출. A subtree [0,2)는 top_level에서 끊겨 TOP 뒤(pos3~4) 고스트와 안 겹친다.
-    try std.testing.expect(!session.ghostOverlapsSubtree(&order, &depth, 0, 1, .{ .ghost_lo = 3, .ghost_hi = 4 })); // B쪽 고스트 ∉ A
-    try std.testing.expect(session.ghostOverlapsSubtree(&order, &depth, 0, 1, .{ .ghost_lo = 1, .ghost_hi = 2 })); // a1 위치 고스트 ∈ A
+    try std.testing.expect(!session.ghostOverlapsSubtree(&order, &depth, 0, 1, .{ .ghost_lo = 3, .ghost_hi = 4 }, null)); // B쪽 고스트 ∉ A
+    try std.testing.expect(session.ghostOverlapsSubtree(&order, &depth, 0, 1, .{ .ghost_lo = 1, .ghost_hi = 2 }, null)); // a1 위치 고스트 ∈ A
 
     // #2 pass2 cstack — A를 접어도 그 뒤 top_level TOP이 접힘을 상속받아 숨지(shred) 않는다.
     session.tabs.items[0].group_collapsed = true;
@@ -18896,6 +19013,297 @@ fn expectDropEquivalent(session: *AppSession, origin: usize, plan: AppSession.Dr
         try std.testing.expectEqual(before[vl.order[i]], t);
         try std.testing.expectEqual(vl.group_depth[i], t.group_depth);
     }
+}
+
+/// §14.6 SR4 model-2 프리뷰=확정 등가(카드 경로) — simulateDrop이 낸 가상 `top_level[]`가 **실제 commitSidebarDragPreview**
+/// 확정 후 self.tabs.top_level와 위치별로 일치함을 단언한다(+order·group_depth도). expectDropEquivalent(raw move)와 달리
+/// **commit 경로**(top_level write 포함)를 태워, 프리뷰(가상 override)와 확정(실제 write)이 같은 게이트를 써 갈리지 않음을
+/// 고정한다(카드 plan 전용 — 그룹 plan은 top_level 불변이라 expectDropEquivalent로 충분). 로컬 pin 없는 시나리오라 commit의
+/// normalize/float/sweep 후처리는 no-op이라 vl와 committed가 그대로 일치한다(등가 정확성 보장).
+fn expectCardDropTopLevelEquivalent(session: *AppSession, origin: usize, plan: AppSession.DropPlan) !void {
+    const alloc = std.testing.allocator;
+    const n = session.tabs.items.len;
+    const before = try alloc.alloc(*Tab, n);
+    defer alloc.free(before);
+    for (session.tabs.items, 0..) |t, i| before[i] = t;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const vl = try session.simulateDrop(origin, plan, arena.allocator());
+    for (session.tabs.items, 0..) |t, i| try std.testing.expectEqual(before[i], t); // self.tabs 불변(비커밋 SG8)
+    // 확정 — 실제 commit 경로(moveTab + top_level write + normalize/float/sweep).
+    session.sidebar_drag_preview = .{ .origin = origin, .origin_len = 1, .plan = plan, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
+    session.commitSidebarDragPreview();
+    try std.testing.expectEqual(n, session.tabs.items.len);
+    for (session.tabs.items, 0..) |t, i| {
+        try std.testing.expectEqual(before[vl.order[i]], t); // 같은 위치에 같은 탭(순열 일치)
+        try std.testing.expectEqual(vl.group_depth[i], t.group_depth); // 선언 depth 일치
+        try std.testing.expectEqual(vl.top_level[i], t.top_level); // ★ 가상 top_level == 확정 실제 top_level(프리뷰=확정)
+    }
+}
+
+// §14.6 SR4 model-2 — 카드 드래그가 top_level을 **직접 전이**한다(그룹 밖 gap=최상위 복귀 / 그룹 안=멤버 흡수). VirtualLayout.
+// top_level[] 가상화로 프리뷰(가상 override)=확정(실제 write)이 같은 depth/소속을 낸다. 배치 [A(마커), a1, TOP1(top_level), X].
+test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_level=true·depth0·enclosing null(model-2 전이)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    // [A(마커 t0,depth1), a1(t1,멤버), TOP1(t2,top_level 인터리브 top카드), X(t3, TOP1 뒤 sticky top)].
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true;
+    const top1 = session.tabs.items[2];
+    const x = session.tabs.items[3];
+    session.recomputeVisibleTabs();
+    // 사전: X(t3)는 sticky top(밖·depth0), TOP1(t2)도 밖.
+    try std.testing.expect(session.enclosingGroupMarkerIndex(3) == null);
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(3, null, null));
+
+    // X를 TOP1 row(=그룹 뒤 gap의 top카드) 옆으로 드래그. 분류: 타겟 TOP1이 최상위 → 전이 의도 true(그룹 밖 gap).
+    var top1_row: usize = 0;
+    for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .card => |c| if (c.tab == 2) {
+            top1_row = s;
+        },
+        .group_header => {},
+    };
+    try std.testing.expect(session.sidebarCardDropTopLevel(top1_row)); // 타겟 최상위 → true
+    const target = session.sidebarGroupDropTargetTab(top1_row, 3).?; // TOP1 위치 = 2
+    try std.testing.expectEqual(@as(usize, 2), target);
+    const plan: AppSession.DropPlan = .{ .card = .{ .target_tab = target, .top_level = true } };
+
+    // 프리뷰=확정 등가(가상 top_level == commit 후 실제).
+    try expectCardDropTopLevelEquivalent(session, 3, plan);
+
+    // 확정 결과: [A, a1, X, TOP1] — X는 그룹 뒤 최상위(top_level=true·depth0·밖), TOP1도 top카드 유지.
+    var x_idx: usize = 0;
+    var top1_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| {
+        if (t == x) x_idx = i;
+        if (t == top1) top1_idx = i;
+    }
+    try std.testing.expectEqual(@as(usize, 2), x_idx);
+    try std.testing.expectEqual(@as(usize, 3), top1_idx);
+    try std.testing.expect(x.top_level); // ★ model-2 전이 — 그룹 뒤 gap = top_level 세팅
+    try std.testing.expect(session.enclosingGroupMarkerIndex(x_idx) == null); // 그룹 밖
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(x_idx, null, null)); // depth 0
+    try std.testing.expect(!session.tabIsInGroup(x)); // 소속 없음(최상위)
+    // 렌더 정합: X 카드 row depth 0.
+    session.recomputeVisibleTabs();
+    var x_depth: u8 = 255;
+    for (session.sidebar_rows.items) |row| switch (row) {
+        .card => |c| if (c.tab == x_idx) {
+            x_depth = c.depth;
+        },
+        .group_header => {},
+    };
+    try std.testing.expectEqual(@as(u8, 0), x_depth);
+}
+
+test "SR4(b): 카드를 그룹 안(멤버 카드)으로 드래그 → top_level=false·멤버 흡수(기존 SG4 + stale flag clear)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    // [A(마커 t0), a1(t1,멤버), TOP1(t2,top_level), X(t3, top카드 — top_level=true로 두고 그룹 안 드롭 시 clear 확인)].
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true;
+    session.tabs.items[3].top_level = true; // X도 top카드(그룹 안 드롭이 stale flag를 clear하는지 본다)
+    const x = session.tabs.items[3];
+    session.recomputeVisibleTabs();
+
+    // X를 a1(멤버) row로 드래그 → 그룹 A 안(멤버). 분류: 타겟 a1이 멤버 → 전이 의도 false(그룹 안).
+    var a1_row: usize = 0;
+    for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+        .card => |c| if (c.tab == 1) {
+            a1_row = s;
+        },
+        .group_header => {},
+    };
+    try std.testing.expect(!session.sidebarCardDropTopLevel(a1_row)); // 타겟 멤버 → false(그룹 안)
+    const target = session.sidebarGroupDropTargetTab(a1_row, 3).?;
+    const plan: AppSession.DropPlan = .{ .card = .{ .target_tab = target, .top_level = false } };
+
+    try expectCardDropTopLevelEquivalent(session, 3, plan);
+
+    // 확정: X가 그룹 A 멤버로 흡수 — top_level=false(stale flag clear)·depth>0·enclosing=A마커.
+    var x_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == x) {
+        x_idx = i;
+    };
+    try std.testing.expect(!x.top_level); // ★ 그룹 안 드롭 = top_level clear(멤버 전이)
+    try std.testing.expect(session.tabIsInGroup(x)); // 그룹 소속
+    try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(x_idx).?); // A 마커 소속
+    try std.testing.expect(session.effectiveDepthAt(x_idx, null, null) >= 1); // 멤버 depth
+}
+
+test "SR4(c): 프리뷰=확정 등가 — 전이(그룹 밖/안)·no-op·none 모두 vl.top_level == commit 후(model-2 이중경로 게이트)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+    // [A(마커 t0), a1(t1), TOP1(t2,top_level), X(t3), t4(flat top)].
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true;
+    session.recomputeVisibleTabs();
+
+    // (1) 그룹 밖 전이(X를 TOP1 옆으로, top_level=true 의도).
+    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } });
+    // (2) flat 드래그(t4를 t3 자리로, top_level 의도 false) — 그룹 마커 위 없음 리전이면 게이트가 false라 write 0(byte-identical).
+    try expectCardDropTopLevelEquivalent(session, session.tabs.items.len - 1, .{ .card = .{ .target_tab = 0, .top_level = true } });
+    // (3) none plan — 제자리(전이 없음).
+    try expectCardDropTopLevelEquivalent(session, 1, .none);
+}
+
+test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 뒤로 = pin 유지·top_level 전이·clampMoveToGroup 정합(§14.6)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+    // 고정 리전 [A(마커 t0,pin,group), a1(t1,pin 멤버), TOP1(t2,pin,top_level), X(t3,pin sticky top)] + 비고정 [t4].
+    inline for (0..4) |i| {
+        session.tabs.items[i].pinned = true;
+    }
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true;
+    const x = session.tabs.items[3];
+    const t4 = session.tabs.items[4];
+    session.recomputeVisibleTabs();
+
+    // 구조 방어: 고정 리전 인터리빙 프리뷰가 **정확히 그룹 헤더 1개**(A)만 낸다(top_level 전이가 유령 헤더를 안 만듦).
+    {
+        var arena2 = std.heap.ArenaAllocator.init(allocator);
+        defer arena2.deinit();
+        try session.refreshDragPreview(3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena2.allocator());
+        var hdrs: usize = 0;
+        for (session.sidebar_preview_rows.items) |row| switch (row) {
+            .group_header => hdrs += 1,
+            .card => {},
+        };
+        try std.testing.expectEqual(@as(usize, 1), hdrs); // ★ 프리뷰에 그룹 헤더 1개(A)만
+        session.clearSidebarDragPreview();
+    }
+
+    // X(고정 top, index3)를 TOP1 옆으로 → 고정 리전 안 인터리빙(top_level 전이, pin 유지). 등가.
+    try expectCardDropTopLevelEquivalent(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } });
+    session.recomputeVisibleTabs();
+    {
+        var hdrs: usize = 0;
+        for (session.sidebar_rows.items) |row| switch (row) {
+            .group_header => hdrs += 1,
+            .card => {},
+        };
+        try std.testing.expectEqual(@as(usize, 1), hdrs); // ★ 확정에도 그룹 헤더 1개(A)만
+    }
+    var x_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == x) {
+        x_idx = i;
+    };
+    try std.testing.expectEqual(@as(usize, 2), x_idx); // TOP1 앞(그룹 뒤 gap) 안착
+    try std.testing.expect(x.pinned); // ★ 고정 유지(비고정 리전으로 안 샘)
+    try std.testing.expect(x.top_level); // 고정 top카드로 전이
+    try std.testing.expect(session.tabs.items[0].pinned and session.tabs.items[1].pinned); // 그룹 A 고정 프리픽스 유지
+    try std.testing.expect(!t4.pinned); // 비고정 t4 불변
+    try std.testing.expectEqual(@as(usize, 4), session.countPinnedTabs()); // 고정 4개 유지(전이가 pin 깨지 않음)
+
+    // clampMoveToGroup 정합: X(고정, index2)를 비고정 t4(index4)로 끌어도 고정 리전 [0,4)에 clamp(비고정 못 감).
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const vl = try session.simulateDrop(2, .{ .card = .{ .target_tab = 4, .top_level = false } }, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 3), vl.ghost_lo); // raw 4가 아니라 고정 리전 끝(pinned_count-1=3)으로 clamp
+}
+
+test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 depth와 정합(프리뷰=확정 렌더 depth)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true;
+    const x = session.tabs.items[3];
+    session.recomputeVisibleTabs();
+
+    // 프리뷰: X(origin=3)를 TOP1(t2) 옆으로 — 가상 top_level[to]=true. refreshDragPreview가 preview_rows에 투영.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    try session.refreshDragPreview(3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena.allocator());
+    // 프리뷰 고스트(X)가 depth 0(그룹 밖 최상위)로 투영되는가 — 가상 top_level[]이 pass1 depth를 몰았는지.
+    var preview_depth: u8 = 255;
+    for (session.sidebar_preview_rows.items) |row| switch (row) {
+        .card => |c| if (c.tab == 3) {
+            preview_depth = c.depth;
+        },
+        .group_header => {},
+    };
+    try std.testing.expectEqual(@as(u8, 0), preview_depth); // ★ 가상 top_level → 프리뷰 depth 0
+    // self.tabs는 불변(비커밋).
+    try std.testing.expect(!x.top_level);
+
+    // 확정 후 같은 카드 depth 0 == 프리뷰 depth(프리뷰=확정 렌더 정합).
+    session.sidebar_drag_preview = .{ .origin = 3, .origin_len = 1, .plan = .{ .card = .{ .target_tab = 2, .top_level = true } }, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
+    session.commitSidebarDragPreview();
+    var x_idx: usize = 0;
+    for (session.tabs.items, 0..) |t, i| if (t == x) {
+        x_idx = i;
+    };
+    var confirmed_depth: u8 = 255;
+    for (session.sidebar_rows.items) |row| switch (row) {
+        .card => |c| if (c.tab == x_idx) {
+            confirmed_depth = c.depth;
+        },
+        .group_header => {},
+    };
+    try std.testing.expectEqual(preview_depth, confirmed_depth); // 프리뷰 depth == 확정 depth
+    try std.testing.expect(x.top_level); // 확정에서 실제 전이
 }
 
 test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs 불변 (simulateDrop == moveTab)" {

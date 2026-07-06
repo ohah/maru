@@ -1098,6 +1098,14 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
     return a;
 }
 
+// 앱 인스턴스 전역 surface_id allocator (M0a). **모든 창(AppSession)이 이 한 인스턴스를 공유**해 surface_id가
+// 앱 전역으로 단조·비재사용된다 — per-session 카운터가 아니라서 멀티 창에서도 id(및 MARU_PANE_ID)가 충돌하지
+// 않는다(docs/window-surface-mobility.md §8 M0a). 타입은 L2 순수(src/session/surface_id.zig), 인스턴스 소유는 여기
+// L4다. Zig엔 아직 앱 전역 세션 코디네이터가 없어(창마다 Swift가 maru_macos_app_session_create를 부른다) 이
+// 모듈-로컬 var가 그 소유 seam이다 — M1 AppRuntime이 생기면 그 소유를 넘겨받는다(그때 AppSession.surface_ids 주입
+// 경로만 바꾸면 된다). 메인 스레드 전용(surface_id.zig 스레드 계약).
+var app_surface_ids: maru.session.SurfaceIdAllocator = .{};
+
 pub const AppSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1108,8 +1116,12 @@ pub const AppSession = struct {
     // surface 안정 주소를 모은다. tabs 변경(생성/닫기/이동)·활성 panel 변경 때 갱신하고 app_window.tabs를
     // 여기로 재바인딩한다. 단일 panel(지금)이면 panes[0].surface.
     surface_ptrs: std.ArrayList(*maru.session.Surface) = .empty,
-    // surface_id·pty_id 발급(탭마다 유일). runtime이 두 id로 라우팅하므로 재사용하지 않는다.
-    next_id: u64 = 1,
+    // surface_id·pty_id 발급기(앱 인스턴스 전역 — app_surface_ids 공유). runtime이 두 id로 라우팅하므로
+    // 재사용하지 않는다. per-session이 아니라 앱 전역이라 멀티 창에서도 id가 유일하다(MARU_PANE_ID 포함 — 창별
+    // 충돌로 에이전트 트랜스크립트 경로가 겹치던 잠재 문제도 해소). 기본값이 공유 인스턴스 주소라 init의
+    // `self.* = .{...}`·reset 경로가 모두 같은 allocator를 가리킨다. **주의**: `var session: AppSession = undefined`
+    // 테스트는 이 포인터가 0xaa가 되므로 createTerm을 타면 이 필드를 명시 초기화해야 한다([[devsession-undefined-test-field-trap]]).
+    surface_ids: *maru.session.SurfaceIdAllocator = &app_surface_ids,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격
     // (homeForRootCwd)에 쓴다. getcwd 실패 시 false(승격 안 함 — 상속 그대로).
@@ -3394,7 +3406,7 @@ pub const AppSession = struct {
 
     /// 한 Term(터미널)을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
     /// `LivePtySession` reader가 `&term.rt.live_pty.reader`를 잡으므로 Term은 heap 고정(ArrayList는 `*Term`만 들어
-    /// realloc·탭 재정렬에도 본체 안 움직임). surface_id·pty_id 발급(next_id), 부분 실패는 errdefer로 정리
+    /// realloc·탭 재정렬에도 본체 안 움직임). surface_id·pty_id 발급(앱 전역 surface_ids), 부분 실패는 errdefer로 정리
     /// (create→live_pty→surface 역순). Pane에 거는 건 호출자(createPane/⌘T)가 한다.
     fn createTerm(
         self: *AppSession,
@@ -3408,7 +3420,7 @@ pub const AppSession = struct {
         errdefer self.allocator.destroy(term);
         term.* = .{};
 
-        const id = self.next_id; // surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
+        const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
         var req = request;
         req.pane_id = id; // 이 팬 셸에 MARU_PANE_ID=<id> 주입 — 에이전트(claude/codex) 훅이 이 id로 세션 트랜스크립트 경로를 남긴다
         try term.rt.live_pty.init(self.io, self.allocator, id, req, queue_capacity);
@@ -3450,7 +3462,6 @@ pub const AppSession = struct {
         // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
         _ = try term.rt.live_pty.attachSurface(&self.runtime, &term.surface, request.login);
         term.rt.pump = term.rt.live_pty.pump(&self.runtime);
-        self.next_id += 1;
         return term;
     }
 
@@ -3586,15 +3597,16 @@ pub const AppSession = struct {
 
     /// surface.id로 그 surface가 속한 (탭, panel, Term)을 찾아 그 자리로 활성화한다(찾으면 true). 데스크톱 알림
     /// (OSC 9/777·에이전트 완료) 클릭이 발신 터미널로 점프하는 단일 경로다 — Swift가 알림 식별자의 (창 토큰,
-    /// surface_id)에서 토큰으로 올바른 창(세션)을 고른 뒤, 이 세션에 surface_id만 넘긴다(surface.id는 next_id로
-    /// 발급돼 세션-로컬이라 창 간 중복 가능 — 창 선택은 Swift, 세션 내 역조회는 Zig가 분담).
+    /// surface_id)에서 토큰으로 올바른 창(세션)을 고른 뒤, 이 세션에 surface_id만 넘긴다(surface.id는 이제 앱 전역
+    /// surface_ids로 발급돼 창 간 유일하다 — M0a. 창 토큰은 id 충돌 방지용 복합키가 아니라 대상 창을 빠르게 고르는
+    /// 위치 메타데이터고, 세션 내 (탭·panel·Term) 역조회는 Zig가 분담한다).
     ///
     /// **순서가 핵심**: focusPaneByPtr는 활성 탭의 panes만, focusTerm은 활성 pane만 보므로
     /// switchTab→focusPaneByPtr→focusTerm 순으로 해야 한다 — 먼저 대상 탭을 활성으로 만들지 않으면 focusPaneByPtr가
     /// 다른 탭의 panes에서 못 찾아 false가 되고, focusTerm도 엉뚱한 pane을 만진다. 이 순서 의존성을 여기 한 곳에
     /// 가둔다(단일 출처). 세 호출은 같은 자리면 각자 no-op이라 이미 활성인 surface를 다시 눌러도 무해하다.
     ///
-    /// id는 재사용하지 않으므로(next_id 단조 증가) stale id가 다른 surface로 오인 활성화될 위험이 없다 — 알림 후
+    /// id는 재사용하지 않으므로(surface_ids 단조 증가) stale id가 다른 surface로 오인 활성화될 위험이 없다 — 알림 후
     /// 그 Term이 닫혔으면 못 찾아 false(무동작). 클릭 시점에 실시간 3중 순회하므로 알림 도착 후 탭/pane이 재배치돼도
     /// 인덱스 캐시 없이 정확히 현재 위치로 점프한다.
     pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
@@ -24702,6 +24714,44 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
     session.dispatchBell();
     try std.testing.expect(session.takeBellBadge()); // 언포커스 → 배지
     try std.testing.expect(!session.takeBellBadge()); // 1회성
+}
+
+// M0a SurfaceIdAllocator — surface_id는 앱 인스턴스 전역 opaque u64로 발급되며, 서로 다른 창(AppSession)이
+// 같은 allocator 인스턴스를 공유한다(docs/window-surface-mobility.md §8). per-session next_id로 발급하면 두 창의
+// 첫 surface가 둘 다 1이라 충돌하는데(멀티 창 MARU_PANE_ID 충돌 포함), 이 테스트가 그 회귀를 잡는다.
+test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 공유해 충돌하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+
+    const s1 = try allocator.create(AppSession);
+    defer allocator.destroy(s1);
+    try s1.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s1.deinit();
+
+    const s2 = try allocator.create(AppSession);
+    defer allocator.destroy(s2);
+    try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s2.deinit();
+
+    // 두 세션은 앱 인스턴스에 하나뿐인 allocator를 공유한다(창마다 별도 카운터가 아님).
+    try std.testing.expectEqual(s1.surface_ids, s2.surface_ids);
+    try std.testing.expectEqual(&app_surface_ids, s1.surface_ids);
+
+    // createTerm이 per-session 카운터가 아니라 앱 전역 SurfaceIdAllocator에서 발급하므로, 서로 다른 창의 첫
+    // surface조차 id가 겹치지 않는다(per-session이면 둘 다 1이라 충돌 — 이 단언이 그 회귀를 잡는다).
+    try std.testing.expect(s1.activeSurface().id != s2.activeSurface().id);
 }
 
 test "dispatchBell: 배경(비활성) pane의 BEL도 잡는다 — Dock 배지/소리 (리뷰 D)" {

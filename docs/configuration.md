@@ -43,6 +43,7 @@ theme.selection  = #334455
 # ANSI 16색 override(선택, 인덱스 0~15). 적은 인덱스만 덮으면 나머지는 xterm 표준색.
 theme.palette.0  = #1c1c1c
 theme.palette.1  = #d35f5f
+# theme.min-contrast = 3.0   # 라이트 배경 ANSI 팔레트 가독성 하한(WCAG 명암비). 0=끔. 다크는 무동작
 
 cursor.shape = block
 cursor.blink = true
@@ -86,6 +87,7 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 | `theme.selection` | `#RRGGBB` | `#334455` | 선택 하이라이트 배경 |
 | `theme.palette.0`~`theme.palette.15` | `#RRGGBB` | xterm 표준색 | ANSI 16색(0~15) override — `ls`/`vim`/프롬프트 색 테마 완성용. 적은 인덱스만 덮어도 됨(나머지는 xterm 표준 폴백). 우선순위는 **OSC 4(앱 동적 설정) > config > xterm256**: 앱이 OSC 4로 색을 바꾸면 그게 우선이고, RIS·OSC 104(리셋) 후엔 다시 이 config 값으로 돌아온다. 범위 밖 인덱스(16+)·비정수 인덱스·형식 오류 색은 무시(그 인덱스는 기본 유지) |
 | `theme.bold-is-bright` | `true`\|`false` | `false` | bold(SGR 1) 글자의 ANSI **indexed 전경(0~7)** 을 그 bright 짝(8~15)으로 올린다. `.default` 전경·`.rgb`·256색 cube(8~255)는 안 바꾼다(정의가 분명한 부분집합만). reverse(7)/conceal/blink-off 경로엔 적용 안 함(그 경로는 배경색을 그림). render-only(코어 셀·SGR 상태 불변). 베이스: xterm `boldColors`·Ghostty `bold-is-bright`와 같은 opt-in 트레이드오프 |
+| `theme.min-contrast` | 실수(0.0~21.0) | `3.0` | **ANSI 팔레트 자동 대비 게이트** — ANSI 16색(0~15)이 배경 대비 이 명암비(WCAG contrast ratio)에 못 미치면 **색상(hue)은 보존한 채 검은색 방향으로 최소한만 어둡게** 보정해, 밝은 배경에서 안 읽히는 색(밝은 노랑·초록·흰색 등)을 읽히게 한다. 프리셋·`theme.palette.N`·프리셋 없이 배경만 밝힌 경우의 xterm 기본색까지 모두 적용된다. **다크 배경에선 자동 무동작**(어둡게 해도 대비가 안 올라 목표에 못 미치는 색은 원본 유지 → 다크 테마 안 바뀜). `0`(또는 `1` 이하)=끔(업스트림 원색 그대로). 기본 `3.0`=WCAG 대형 텍스트/UI 컴포넌트 기준(테마 정체성 보존 + 안 보이는 색 교정), 더 강한 대비는 `4.5`(WCAG 일반 텍스트 AA)로 올린다. **팔레트에만** 적용 — 배경·전경·커서·선택색은 안 바꾼다(그건 프리셋이 이미 조정). 범위 밖/비실수는 무시(기본 유지) |
 | `cursor.shape` | `block`\|`bar`\|`underline` | `block` | 그 외 값은 무시 |
 | `cursor.blink` | `true`\|`false` | `true` | |
 | `cursor.blink-interval-ms` | 정수(100~10000) | `500` | 커서 깜빡임 **반주기**(밀리초) — on/off 각 단계 길이(500이면 0.5초 켜짐·0.5초 꺼짐). host frame-loop tick으로 환산(반올림, 최소 1틱)하므로 주사율을 바꿔도 실제 깜빡임 시간은 유지된다. `cursor.blink = false`면 이 값과 무관하게 안 깜빡인다. 범위 밖/비정수는 무시(기본 유지). Ghostty `cursor-blink-interval` 대응 |
@@ -214,6 +216,13 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 > - **선택색 가독성**: Maru는 선택 글자색을 안 바꾸고 배경만 칠하므로, 스킴 원값이 **밝은색**(`catppuccin-*`의 rosewater,
 >   `nord`의 snow-storm `#eceff4`)이면 밝은 글자가 묻힌다 — 어두운/중간 표면색(`nord`는 polar night `#434c5e`)으로 바꾼다.
 >   `one-light`의 커서도 스킴 원값(`#bbbbbb`)이 라이트 배경에서 안 보여 foreground(진한 잉크)로 둔다.
+> - **ANSI 팔레트 대비 자동 보정**: 위 라이트 프리셋(과 `theme.palette`·프리셋 없이 배경만 밝힌 xterm 기본색)은
+>   **업스트림 표준값을 그대로 보존**하는 게 원칙이라, 일부 색(밝은 노랑·초록·흰색 등)은 라이트 배경에서 대비가 약해
+>   안 읽힐 수 있다. 이를 런타임에 읽히게 하는 안전장치가 [`theme.min-contrast`](#키)(기본 `3.0`)다 — 팔레트 색이 배경
+>   대비 그 명암비에 못 미치면 색상을 보존한 채 최소한만 어둡게 보정한다. **프리셋 상수(파일의 원색 세트)는 손대지 않고
+>   렌더 시점 해석에서만 하한을 적용**하므로 "스킴 표준값 보존"과 "가독성"이 양립한다(특히 `one-light`의 안 보이는
+>   bright-white `#ffffff`·밝은 yellow처럼 업스트림 자체가 저대비인 경우를 교정). `0`으로 끄면 업스트림 원색 그대로다.
+>   다크 프리셋은 팔레트가 이미 다크 배경 대비 충분해 이 게이트가 무동작이다.
 >
 > 색 룩만 정하며, chrome **디자인 룩**(`chrome.theme` = tui|rich)과는 직교다.
 

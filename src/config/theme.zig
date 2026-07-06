@@ -148,6 +148,13 @@ pub const ThemeConfig = struct {
     };
 };
 
+/// `theme.min-contrast` 기본값·상한(단일 출처 — Config 필드 기본값과 schema range가 이 const를 공유한다).
+/// 단위는 WCAG contrast ratio(1.0~21.0). 기본 3.0 = WCAG 대형 텍스트/UI 컴포넌트 기준 — 라이트 배경에서 안 보이는
+/// 팔레트 색(밝은 노랑·초록·흰색)만 교정하고 테마 정체성은 보존하는 절충값이다(더 강하게 원하면 4.5=일반 텍스트 AA로
+/// 올린다). 상한 21.0 = 검정 대 흰색 최대 명암비. 0(또는 1 이하)이면 보정 끔. 적용·근거 단일 출처: docs/configuration.md.
+pub const theme_min_contrast_default: f32 = 3.0;
+pub const theme_min_contrast_max: f32 = 21.0;
+
 /// 이름 붙은 컬러 테마(프리셋). 색 세트의 base를 한 번에 고른다. 기본 maru. loader가 `theme.preset` 키로
 /// 파싱해 presetColors()로 config.theme를 채우고, 개별 theme.* 키가 그 뒤에서 일부를 override한다(순차 적용 —
 /// 나중 줄 우선; 프리셋 줄이 개별 색 키보다 뒤면 앞 설정을 리셋 — Ghostty `theme` 시맨틱과 동일). 색(룩)만
@@ -312,6 +319,11 @@ const one_light_palette: [16]?[]const u8 = .{
 /// - selection 가독성: maru는 selection 글자색을 안 바꾸고 배경만 칠하므로, 스킴 원값이 **밝은색**(catppuccin rosewater,
 ///   nord snow-storm #eceff4)이면 밝은 글자가 묻힌다 — catppuccin은 어두운 surface(surface2/surface1), nord는 polar night
 ///   nord2(#434c5e)로 바꾼다. one_light cursor도 스킴 원값(#bbbbbb)이 라이트 배경에서 안 보여 foreground로 둔다.
+/// - **팔레트 대비 하한**: 라이트 프리셋(과 아래 iTerm2-sourced 팔레트)은 **업스트림 표준값을 그대로 보존**하는 게 원칙이라
+///   일부 색(밝은 노랑·초록·흰색, one_light의 bright-white #ffffff 등)은 라이트 배경에서 대비가 약하다. 그 저대비를 여기서
+///   손대(원색을 바꾸)지 않고, `theme.min-contrast`(기본 3.0)가 **렌더 해석 시점**(appearance.resolveTheme의 contrastFloor)에
+///   배경 대비 하한을 강제해 읽히게 한다 — 파일의 원색 세트는 이 함수가 정의한 그대로 두고 가독성만 확보한다(표준값 보존과
+///   가독성 양립). 다크 프리셋은 팔레트가 이미 다크 배경 대비 충분해 그 게이트가 무동작이다.
 pub fn presetColors(preset: ThemePreset) ThemeConfig {
     return switch (preset) {
         .maru => .{}, // struct default가 곧 maru 테마.
@@ -862,6 +874,13 @@ pub const Config = struct {
     /// opt-in으로 둔다 — 폰트가 weight를 안 주는 환경에서 bold를 색으로도 구분하려는 사용자용. 적용은 render-only
     /// (코어 셀/SGR 상태 불변)라 packForeground 한 곳이 단일 출처다.
     bold_is_bright: bool = false,
+    /// ANSI 팔레트(0~15) **자동 대비 게이트**(WCAG 명암비 하한). 팔레트 색이 배경 대비 이 명암비에 못 미치면 색상(hue)을
+    /// 보존한 채 검은색 방향으로 최소한만 어둡게 보정해, 밝은 배경에서 안 읽히는 색(밝은 노랑·초록·흰색 등)을 읽히게 한다.
+    /// 기본 3.0. 0(또는 1 이하)=끔(업스트림 원색 그대로). **다크 배경에선 자동 무동작** — 어둡게 해도 대비가 안 올라 목표에
+    /// 못 미치는 색은 원본을 유지하므로 다크 프리셋 팔레트는 안 바뀐다. **팔레트에만** 적용하고 배경·전경·커서·선택색은
+    /// 불변이다(그 색은 프리셋이 이미 조정). loader가 `theme.min-contrast` 파싱(스키마-주도), 적용은
+    /// appearance.resolveTheme의 contrastFloor 한 곳(단일 출처). 근거·트레이드오프: docs/configuration.md `theme.min-contrast`.
+    theme_min_contrast: f32 = theme_min_contrast_default,
     /// 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) 가장자리 사이의 빈 여백(논리 pt, DPI로 스케일). 4방 개별
     /// (top/right/bottom/left); x/y는 loader에서 alias(`window.padding-x`=left+right 동시, `window.padding-y`=top+bottom
     /// 동시)로 두 필드에 같은 값을 대입한다. loader가 `window.padding-{top,right,bottom,left,x,y}` 키로 파싱. 0이면
@@ -956,6 +975,7 @@ pub const Config = struct {
         .ambiguous_width = Meta{ .key = "text.ambiguous-width", .doc = "EAW Ambiguous 문자 폭", .widget = .dropdown, .section = .theme },
         .emoji_width = Meta{ .key = "text.emoji-width", .doc = "이모지(VS16·키캡) 폭", .widget = .dropdown, .section = .theme },
         .bold_is_bright = Meta{ .key = "theme.bold-is-bright", .doc = "bold를 bright 색으로", .widget = .toggle, .section = .theme },
+        .theme_min_contrast = Meta{ .key = "theme.min-contrast", .doc = "ANSI 팔레트 최소 명암비(0=끔, 라이트 배경 가독성)", .range = .{ 0.0, theme_min_contrast_max }, .widget = .number, .section = .theme },
         .window_padding_top = Meta{ .key = "window.padding-top", .doc = "위 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_right = Meta{ .key = "window.padding-right", .doc = "오른쪽 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },
         .window_padding_bottom = Meta{ .key = "window.padding-bottom", .doc = "아래 여백(pt)", .range = .{ 0, 256 }, .widget = .number, .section = .window },

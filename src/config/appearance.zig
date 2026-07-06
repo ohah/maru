@@ -105,7 +105,7 @@ pub fn resolve(config: theme.Config) ResolveError!ResolvedAppearance {
     // 시점에 한 번 검증된 ResolvedAppearance로 바꾼다.
     return .{
         .font = try resolveFont(config.font),
-        .theme = try resolveTheme(config.theme),
+        .theme = try resolveTheme(config.theme, config.theme_min_contrast),
         .cursor = .{
             .shape = config.cursor.shape,
             .blink = config.cursor.blink,
@@ -161,14 +161,26 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
     };
 }
 
-fn resolveTheme(config: theme.ThemeConfig) ResolveError!ResolvedTheme {
+fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!ResolvedTheme {
     const background = try parseHexColor(config.background);
     const foreground = try parseHexColor(config.foreground);
-    // ANSI 16색 override: non-null만 검증·변환(다른 테마 색과 같은 #RRGGBB 검증), null은 null 유지(그 인덱스는 기본
-    // xterm). 깨진 색은 여기서 막힌다(loader가 valid만 담지만, resolve 단독 호출·테스트도 검증을 거치게 한다).
+    // ANSI 16색을 풀고 min_contrast(WCAG 명암비 하한)를 적용한다. 각 인덱스의 base는 config override(preset/theme.palette.N)가
+    // 있으면 그 색, 없으면 xterm 표준색(color.xterm256)이다. 그 위에 contrastFloor로 배경 대비 하한을 강제한다 — 밝은 배경에서
+    // 대비가 약한 색을 색상 보존한 채 어둡게 보정해 가독성을 확보한다(근거·정책: docs/configuration.md theme.min-contrast).
+    //
+    // null 유지 규칙: config override가 **없고** floor가 실제로 아무것도 안 바꾼 인덱스는 null로 남긴다(그 인덱스는 렌더에서
+    // xterm256으로 폴백). 이렇게 하면 다크 배경·min_contrast=0(둘 다 floor 무동작)에선 미지정 인덱스가 전부 null로 남아 **기존
+    // 동작을 100% 보존**한다(회귀 0). 밝은 배경에서 floor가 실제로 바꾼 default 색만 non-null로 seed해 렌더에 전달한다.
+    // 깨진 override 색은 여기서 막힌다(loader가 valid만 담지만, resolve 단독 호출·테스트도 같은 게이트를 거치게 한다).
     var palette: [16]?color.Rgb = .{null} ** 16;
     for (config.palette, 0..) |maybe, i| {
-        if (maybe) |hex| palette[i] = try parseHexColor(hex);
+        if (maybe) |hex| {
+            palette[i] = contrastFloor(try parseHexColor(hex), background, min_contrast);
+        } else {
+            const base = color.xterm256(@intCast(i));
+            const floored = contrastFloor(base, background, min_contrast);
+            if (!std.meta.eql(floored, base)) palette[i] = floored; // floor가 바꾼 default만 seed(안 바뀌면 null=xterm256 폴백)
+        }
     }
     return .{
         .background = background,
@@ -202,6 +214,64 @@ fn lighten(rgb: color.Rgb, delta: u8) color.Rgb {
         .g = @intCast(@min(@as(u32, rgb.g) + delta, 255)),
         .b = @intCast(@min(@as(u32, rgb.b) + delta, 255)),
     };
+}
+
+// ── ANSI 팔레트 대비 하한(theme.min-contrast) ─────────────────────────────────────────────────────────────
+// 라이트 테마·기본 xterm 팔레트는 밝은 배경에서 대비가 약한 색(밝은 노랑·초록·흰색 등)이 있어 안 읽힌다. contrastFloor가
+// 배경 대비 WCAG 명암비 하한을 강제해 그런 색을 색상 보존한 채 어둡게 보정한다. 베이스: WCAG 2.x relative luminance·contrast
+// ratio 정의(공개 명세). 단일 표준이 없는 "가독성 보정"이 아니라 표준 명암비 수식을 그대로 쓴다(docs/configuration.md).
+
+/// 한 sRGB 채널(0~255)을 WCAG relative luminance용 선형값으로 변환한다(WCAG 2.x: 임계 0.03928, 그 위는 감마 2.4).
+fn channelLuminance(c: u8) f32 {
+    const s = @as(f32, @floatFromInt(c)) / 255.0;
+    return if (s <= 0.03928) s / 12.92 else std.math.pow(f32, (s + 0.055) / 1.055, 2.4);
+}
+
+/// 색의 WCAG relative luminance(0~1) — 채널 선형화 후 0.2126/0.7152/0.0722 가중합(눈의 채널 민감도).
+fn relativeLuminance(rgb: color.Rgb) f32 {
+    return 0.2126 * channelLuminance(rgb.r) + 0.7152 * channelLuminance(rgb.g) + 0.0722 * channelLuminance(rgb.b);
+}
+
+/// 두 luminance의 WCAG contrast ratio: (L_hi + 0.05) / (L_lo + 0.05), 범위 1.0(같은 밝기)~21.0(검정 대 흰색).
+fn contrastRatio(lum_a: f32, lum_b: f32) f32 {
+    const hi = @max(lum_a, lum_b);
+    const lo = @min(lum_a, lum_b);
+    return (hi + 0.05) / (lo + 0.05);
+}
+
+/// 색을 검은색 쪽으로 k(0~1)배 스케일한다(각 채널 × k, 반올림). k=1이면 원본, k=0이면 검정. R:G:B 비를 유지하므로
+/// hue(색상)를 보존하고 명도(luminance)만 낮춘다 — "색은 그대로, 더 진하게"에 해당.
+fn scaleTowardBlack(c: color.Rgb, k: f32) color.Rgb {
+    return .{
+        .r = @intFromFloat(@round(@as(f32, @floatFromInt(c.r)) * k)),
+        .g = @intFromFloat(@round(@as(f32, @floatFromInt(c.g)) * k)),
+        .b = @intFromFloat(@round(@as(f32, @floatFromInt(c.b)) * k)),
+    };
+}
+
+/// 색이 배경 대비 `target` 명암비에 못 미치면 **색상을 보존한 채 검은색 방향으로 최소한만** 어둡게 보정한다.
+/// 밝은 배경에선 어둡게 할수록(k↓) 대비가 단조 증가하므로, 목표 명암비에 막 닿는 최대 k(=최소 변화)를 이진 탐색으로 찾는다.
+/// **다크 배경 자동 무동작**: 검정(luminance 0)으로도 목표 대비에 못 미치면(어두운 배경에선 어둡게 해도 대비가 안 오른다)
+/// 원본을 그대로 반환한다 → 다크 프리셋 팔레트는 안 바뀐다. `target <= 1.0`(끔)이거나 이미 충분하면 원본 그대로.
+/// 단일 출처: 이 함수만 팔레트 대비 하한을 적용한다(resolveTheme이 호출).
+fn contrastFloor(c: color.Rgb, bg: color.Rgb, target: f32) color.Rgb {
+    if (target <= 1.0) return c; // 끔(0 포함) — 업스트림 원색 그대로
+    const bg_lum = relativeLuminance(bg);
+    if (contrastRatio(relativeLuminance(c), bg_lum) >= target) return c; // 이미 충분 → 무변경
+    if (contrastRatio(0.0, bg_lum) < target) return c; // 검정(luminance 0)으로도 미달=다크 배경 → 무동작
+    // 이진 탐색: k∈[0,1]에서 c×k. lo=목표 충족(더 어두움), hi=미충족(더 밝음). 24회면 u8 해상도로 수렴한다.
+    var lo: f32 = 0.0; // k=0(검정)은 위 가드로 항상 충족
+    var hi: f32 = 1.0; // k=1(원본)은 위 fast-path로 미충족
+    var iter: usize = 0;
+    while (iter < 24) : (iter += 1) {
+        const mid = (lo + hi) / 2.0;
+        if (contrastRatio(relativeLuminance(scaleTowardBlack(c, mid)), bg_lum) >= target) {
+            lo = mid; // 충족 → 더 밝게(원본에 가깝게) 시도
+        } else {
+            hi = mid; // 미충족 → 더 어둡게
+        }
+    }
+    return scaleTowardBlack(c, lo); // lo는 항상 충족 지점(테스트한 값 그대로 반환)
 }
 
 pub fn parseHexColor(value: []const u8) ResolveError!color.Rgb {
@@ -312,6 +382,60 @@ test "appearance resolver propagates ANSI palette overrides and keeps unset indi
     var bad_fmt: [16]?[]const u8 = .{null} ** 16;
     bad_fmt[7] = "nope";
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .palette = bad_fmt } }));
+}
+
+test "theme.min-contrast floors low-contrast ANSI palette colors on light backgrounds" {
+    // 라이트 배경에서 밝은 팔레트 색이 안 읽히는 게 이 기능이 고치는 버그다(diff의 초록·노랑 등). 흰 배경 + 안 보이는 색
+    // (bright-white·bright-yellow)을 넣고, floor가 배경 대비 기본 3.0 명암비까지 어둡게 보정하되 색상(hue)은 보존하는지 고정한다.
+    const white = color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff };
+    const bg_lum = relativeLuminance(white);
+
+    var raw: [16]?[]const u8 = .{null} ** 16;
+    raw[11] = "#ffff00"; // bright yellow — 흰 배경 대비 ~1.07(거의 안 보임)
+    raw[15] = "#ffffff"; // bright white — 대비 1.0(완전히 안 보임)
+    raw[4] = "#000080"; // blue — 대비 ~16(이미 충분, 무변경 대조군)
+    const r = try resolve(.{ .theme = .{ .background = "#ffffff", .foreground = "#000000", .palette = raw } });
+
+    // 저대비 색은 기본 3.0 이상까지 어두워진다(이진 탐색은 목표 이상만 채택 — 반올림 여유로 2.95로 검사).
+    try std.testing.expect(r.theme.palette[11].?.r < 0xff); // 실제로 어두워짐
+    try std.testing.expect(contrastRatio(relativeLuminance(r.theme.palette[11].?), bg_lum) >= 2.95);
+    try std.testing.expect(contrastRatio(relativeLuminance(r.theme.palette[15].?), bg_lum) >= 2.95);
+    // 색상 보존: bright yellow는 검은색 방향 스케일이라 R==G, B==0 비율을 유지한 채 어두워진다(hue 불변).
+    try std.testing.expectEqual(r.theme.palette[11].?.r, r.theme.palette[11].?.g);
+    try std.testing.expectEqual(@as(u8, 0), r.theme.palette[11].?.b);
+    // 이미 충분한 색(blue)은 원본 그대로(무변경).
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0x00, .g = 0x00, .b = 0x80 }), r.theme.palette[4]);
+}
+
+test "theme.min-contrast seeds only floor-changed default indices on light backgrounds" {
+    // 프리셋 없이 배경만 밝힌 경우(팔레트 override 없음)에도 기본 xterm 팔레트의 안 보이는 색을 고쳐야 한다. floor가 실제로
+    // 바꾼 default 인덱스만 non-null로 seed하고, 이미 충분한 인덱스는 null(=렌더에서 xterm256 폴백) 그대로 두는지 고정한다.
+    const white = color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff };
+    const bg_lum = relativeLuminance(white);
+    const r = try resolve(.{ .theme = .{ .background = "#ffffff", .foreground = "#000000" } });
+
+    // bright-white(15)는 흰 배경서 안 보여 floor가 seed(non-null, 대비 확보).
+    try std.testing.expect(r.theme.palette[15] != null);
+    try std.testing.expect(contrastRatio(relativeLuminance(r.theme.palette[15].?), bg_lum) >= 2.95);
+    // black(0)·blue(4)는 흰 배경 대비 이미 충분 → null 유지(기존 xterm256 폴백 경로 보존).
+    try std.testing.expect(r.theme.palette[0] == null);
+    try std.testing.expect(r.theme.palette[4] == null);
+}
+
+test "theme.min-contrast is a no-op on dark backgrounds and when disabled" {
+    // 다크 배경: 어둡게 해도 대비가 안 올라(목표 미달) 원본 유지 → 다크 프리셋 팔레트 불변, 미지정 default는 null.
+    var raw: [16]?[]const u8 = .{null} ** 16;
+    raw[15] = "#ffffff";
+    const dark = try resolve(.{ .theme = .{ .background = "#101010", .foreground = "#e8e8e8", .palette = raw } });
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }), dark.theme.palette[15]);
+    try std.testing.expect(dark.theme.palette[0] == null); // 미지정 default는 다크 배경서 floor 무동작 → null 유지
+
+    // min-contrast=0(끔): 밝은 배경이어도 업스트림 원색을 그대로 보존한다(사용자가 명시적으로 끈 것 — 표준값 우선).
+    var raw2: [16]?[]const u8 = .{null} ** 16;
+    raw2[11] = "#ffff00";
+    const off = try resolve(.{ .theme = .{ .background = "#ffffff", .foreground = "#000000", .palette = raw2 }, .theme_min_contrast = 0 });
+    try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0xff, .g = 0xff, .b = 0x00 }), off.theme.palette[11]);
+    try std.testing.expect(off.theme.palette[15] == null); // 끔이면 default seed도 없음(전부 null)
 }
 
 test "appearance resolver applies cursor color overrides and keeps them null by default" {

@@ -50,6 +50,14 @@ pub const ErrorCode = enum(i64) {
     /// impl-defined server-error 범위에서 maru가 택한 값(docs/document-basis-and-decision — 명세가 번호를 정하지
     /// 않아 우리가 고정). 문서에는 payload-too-large라는 이름만 있고 번호는 미지정이었다.
     payload_too_large = -32001,
+    /// authz 실패(§8.3). surface-scoped 메서드가 granted scope로 대상 surface를 볼 수 없을 때, **존재 여부와
+    /// 무관하게 존재검사 이전에** 이 균일 오류를 돌려준다(surface_id 열거 oracle 방지 — §8.3). 코드값 -32002는
+    /// impl-defined server-error 범위(-32000~-32099)에서 maru가 택한 값(명세 미지정 — document-basis-and-decision).
+    unauthorized = -32002,
+    /// 대상 surface가 (인가는 됐으나) 더는 존재하지 않음(§5·§8.3 "없음/process-exited"). 인가 통과 후 snapshot에
+    /// 그 surface가 없을 때만 반환하므로 oracle이 아니다(호출자는 이미 그 surface를 볼 권한이 있다). 코드값 -32003도
+    /// impl-defined server-error 범위에서 maru가 택한 값.
+    process_exited = -32003,
 
     /// 이 코드의 표준 짧은 message(JSON-RPC §5.1의 관례). 에러 응답 build 편의.
     pub fn defaultMessage(self: ErrorCode) []const u8 {
@@ -60,6 +68,8 @@ pub const ErrorCode = enum(i64) {
             .invalid_params => "Invalid params",
             .internal_error => "Internal error",
             .payload_too_large => "Payload too large",
+            .unauthorized => "Unauthorized",
+            .process_exited => "Process exited",
         };
     }
 };
@@ -309,7 +319,9 @@ fn writeMessage(w: *std.Io.Writer, msg: Message) !void {
     }
 }
 
-fn writeId(s: *std.json.Stringify, id: Id) !void {
+/// JSON-RPC id(`Id` union)를 Stringify에 쓴다(null/number/string). 응답을 인라인으로 조립하는 후속 slice
+/// (1c 디스패치 코어가 result에 surface JSON을 직접 실을 때 등)가 같은 id 표현을 재사용하도록 pub이다.
+pub fn writeId(s: *std.json.Stringify, id: Id) !void {
     switch (id) {
         .null => try s.write(null),
         .number => |n| try s.write(n),
@@ -608,14 +620,20 @@ test "에러 코드: 표준 5개 + payload-too-large 코드값과 default messag
     try testing.expectEqual(@as(i64, -32601), @intFromEnum(ErrorCode.method_not_found));
     try testing.expectEqual(@as(i64, -32602), @intFromEnum(ErrorCode.invalid_params));
     try testing.expectEqual(@as(i64, -32603), @intFromEnum(ErrorCode.internal_error));
-    // payload-too-large는 impl-defined server-error 범위(-32000~-32099)에 있어야 한다.
-    const ptl = @intFromEnum(ErrorCode.payload_too_large);
-    try testing.expect(ptl >= -32099 and ptl <= -32000);
+    // maru 확장 코드는 전부 impl-defined server-error 범위(-32000~-32099)에 있어야 한다.
+    for ([_]ErrorCode{ .payload_too_large, .unauthorized, .process_exited }) |ext| {
+        const v = @intFromEnum(ext);
+        try testing.expect(v >= -32099 and v <= -32000);
+    }
+    try testing.expectEqual(@as(i64, -32002), @intFromEnum(ErrorCode.unauthorized));
+    try testing.expectEqual(@as(i64, -32003), @intFromEnum(ErrorCode.process_exited));
     try testing.expectEqualStrings("Method not found", ErrorCode.method_not_found.defaultMessage());
+    try testing.expectEqualStrings("Unauthorized", ErrorCode.unauthorized.defaultMessage());
+    try testing.expectEqualStrings("Process exited", ErrorCode.process_exited.defaultMessage());
 }
 
 test "에러 모델: 각 표준 코드가 에러 응답으로 직렬화된다" {
-    for ([_]ErrorCode{ .parse_error, .invalid_request, .method_not_found, .invalid_params, .internal_error, .payload_too_large }) |code| {
+    for ([_]ErrorCode{ .parse_error, .invalid_request, .method_not_found, .invalid_params, .internal_error, .payload_too_large, .unauthorized, .process_exited }) |code| {
         const wire = try serializeError(testing.allocator, .{ .number = 1 }, code, code.defaultMessage(), null);
         defer testing.allocator.free(wire);
         var pm = try parseMessage(testing.allocator, wire);

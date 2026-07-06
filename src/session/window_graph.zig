@@ -186,10 +186,12 @@ pub const WindowGraph = struct {
         const p_dst = try self.paneAt(dst);
         if (p_src == p_dst) return; // 같은 pane = no-op
 
-        const ref = p_src.surfaces.orderedRemove(src.surface);
-        p_src.active_surface = activeAfterRemoval(p_src.active_surface, src.surface, p_src.surfaces.items.len);
-
+        // append(fallible)를 remove(infallible) **앞에** 둔다 — OOM이면 source가 그대로라 구조 불변이다
+        // (remove-후-append 순서면 append 실패 시 SurfaceRef가 어느 pane에도 없어 surface_id가 그래프에서 유실).
+        const ref = p_src.surfaces.items[src.surface];
         try p_dst.surfaces.append(self.allocator, ref);
+        _ = p_src.surfaces.orderedRemove(src.surface);
+        p_src.active_surface = activeAfterRemoval(p_src.active_surface, src.surface, p_src.surfaces.items.len);
         p_dst.active_surface = p_dst.surfaces.items.len - 1; // 이동한 surface가 dst에서 active(focus 따라감)
 
         self.pruneEmptyPane(win_src, ws_src, p_src, win_dst);
@@ -206,10 +208,11 @@ pub const WindowGraph = struct {
         const ws_dst = try self.workspaceAt(dst);
         if (ws_src == ws_dst) return; // 같은 workspace = no-op
 
-        const pane = ws_src.panes.orderedRemove(src.pane);
-        ws_src.active_pane = activeAfterRemoval(ws_src.active_pane, src.pane, ws_src.panes.items.len);
-
+        // append(fallible) 먼저 — OOM이면 source 불변(remove-후-append면 *Pane이 어느 리스트에도 없어 leak+그래프 손상).
+        const pane = ws_src.panes.items[src.pane];
         try ws_dst.panes.append(self.allocator, pane);
+        _ = ws_src.panes.orderedRemove(src.pane);
+        ws_src.active_pane = activeAfterRemoval(ws_src.active_pane, src.pane, ws_src.panes.items.len);
         ws_dst.active_pane = ws_dst.panes.items.len - 1; // 이동한 pane이 dst에서 active
 
         self.pruneEmptyWorkspace(win_src, ws_src, win_dst);
@@ -224,10 +227,11 @@ pub const WindowGraph = struct {
         const win_dst = try self.windowAt(dst_win);
         if (win_src == win_dst) return; // 같은 window = no-op
 
-        const ws = win_src.workspaces.orderedRemove(src.ws);
-        win_src.active_workspace = activeAfterRemoval(win_src.active_workspace, src.ws, win_src.workspaces.items.len);
-
+        // append(fallible) 먼저 — OOM이면 source 불변(remove-후-append면 *Workspace 서브트리 전체가 leak).
+        const ws = win_src.workspaces.items[src.ws];
         try win_dst.workspaces.append(self.allocator, ws);
+        _ = win_src.workspaces.orderedRemove(src.ws);
+        win_src.active_workspace = activeAfterRemoval(win_src.active_workspace, src.ws, win_src.workspaces.items.len);
         win_dst.active_workspace = win_dst.workspaces.items.len - 1; // 이동한 workspace가 dst에서 active
 
         self.pruneEmptyWindow(win_src, win_dst);
@@ -243,8 +247,11 @@ pub const WindowGraph = struct {
 
         // source workspace를 앞에서부터 떼어 target 뒤에 붙인다 → 상대 순서 보존.
         while (win_src.workspaces.items.len > 0) {
-            const ws = win_src.workspaces.orderedRemove(0);
+            // append(fallible) 먼저 — OOM이면 이 ws가 아직 source에 남아 leak/손상 없음(부분 merge지만 모든 ws가
+            // 정확히 한 window에 속한 유효 상태). remove-후-append면 실패 시 서브트리 leak + source 반쪽 상태.
+            const ws = win_src.workspaces.items[0];
             try win_dst.workspaces.append(self.allocator, ws);
+            _ = win_src.workspaces.orderedRemove(0);
         }
         // source는 이제 비었다 → 닫는다. active_window는 target으로 따라간다(source가 active였다면).
         self.removeWindow(win_src, win_dst);
@@ -784,4 +791,90 @@ test "deinit: 여러 window/workspace/pane/surface를 누수 없이 해제(testi
     }
     try testing.expectEqual(@as(usize, 3), g.windows.items.len);
     // defer deinit이 전부 해제. leak이 있으면 testing.allocator가 실패시킨다.
+}
+
+// ── OOM 안전(code-review max 반영): move는 append(fallible)를 remove(infallible) **앞에** 두므로, 목적지 append가
+//    OOM으로 실패해도 source가 불변이라 SurfaceRef/노드 유실·leak이 없다. 아래는 fail_index=0으로 첫 alloc
+//    (=빈 dst로의 append)을 실패시켜 그 불변식을 못박는다. leak이 생기면 deinit이 놓쳐 testing.allocator가 실패시킨다.
+
+test "moveSurface OOM: append 실패면 SurfaceRef 유실 없이 source 불변" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w = try g.addWindow(1, .normal);
+    const ws = try g.addWorkspace(w, .{});
+    const p0 = try g.addPane(ws);
+    const p1 = try g.addPane(ws); // 빈 pane — 첫 append가 반드시 alloc
+    try g.addSurface(p0, 100);
+    try g.addSurface(p0, 101);
+
+    var fail = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    g.allocator = fail.allocator();
+    try testing.expectError(error.OutOfMemory, g.moveSurface(
+        .{ .win = 0, .ws = 0, .pane = 0, .surface = 0 },
+        .{ .win = 0, .ws = 0, .pane = 1 },
+    ));
+    g.allocator = testing.allocator; // deinit 복구
+
+    try testing.expectEqual(@as(usize, 2), p0.surfaces.items.len); // 100,101 그대로(유실 없음)
+    try testing.expectEqual(@as(u64, 100), p0.surfaces.items[0].surface_id);
+    try testing.expectEqual(@as(usize, 0), p1.surfaces.items.len); // dst 비어 있음
+}
+
+test "movePane OOM: append 실패면 *Pane leak·유실 없이 source 불변" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w = try g.addWindow(1, .normal);
+    const ws0 = try g.addWorkspace(w, .{});
+    const ws1 = try g.addWorkspace(w, .{}); // 빈 workspace — 첫 append가 alloc
+    const p = try g.addPane(ws0);
+    try g.addSurface(p, 100);
+
+    var fail = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    g.allocator = fail.allocator();
+    try testing.expectError(error.OutOfMemory, g.movePane(.{ .win = 0, .ws = 0, .pane = 0 }, .{ .win = 0, .ws = 1 }));
+    g.allocator = testing.allocator;
+
+    try testing.expectEqual(@as(usize, 1), ws0.panes.items.len); // 그대로(leak이면 testing.allocator가 실패)
+    try testing.expectEqual(p, ws0.panes.items[0]);
+    try testing.expectEqual(@as(usize, 0), ws1.panes.items.len);
+}
+
+test "moveWorkspace OOM: append 실패면 *Workspace 서브트리 leak·유실 없이 source 불변" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal);
+    const w1 = try g.addWindow(2, .normal); // 빈 window
+    const ws = try g.addWorkspace(w0, .{});
+    const p = try g.addPane(ws);
+    try g.addSurface(p, 100);
+
+    var fail = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    g.allocator = fail.allocator();
+    try testing.expectError(error.OutOfMemory, g.moveWorkspace(.{ .win = 0, .ws = 0 }, 1));
+    g.allocator = testing.allocator;
+
+    try testing.expectEqual(@as(usize, 1), w0.workspaces.items.len); // 서브트리 그대로
+    try testing.expectEqual(ws, w0.workspaces.items[0]);
+    try testing.expectEqual(@as(usize, 0), w1.workspaces.items.len);
+}
+
+test "mergeWindow OOM: append 실패면 leak 없이 부분 상태가 유효(모든 ws가 정확히 한 window에)" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal); // src
+    const w1 = try g.addWindow(2, .normal); // dst(빈) — 첫 append가 alloc
+    const ws = try g.addWorkspace(w0, .{});
+    const p = try g.addPane(ws);
+    try g.addSurface(p, 100);
+
+    var fail = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    g.allocator = fail.allocator();
+    try testing.expectError(error.OutOfMemory, g.mergeWindow(0, 1));
+    g.allocator = testing.allocator;
+
+    // 첫 append 실패 → src에 ws 그대로, src window 닫히지 않음(2창 유지), dst 비어 있음. 유효한 부분 상태.
+    try testing.expectEqual(@as(usize, 2), g.windows.items.len);
+    try testing.expectEqual(@as(usize, 1), w0.workspaces.items.len);
+    try testing.expectEqual(ws, w0.workspaces.items[0]);
+    try testing.expectEqual(@as(usize, 0), w1.workspaces.items.len);
 }

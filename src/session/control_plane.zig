@@ -399,15 +399,16 @@ pub const Framer = struct {
         self.pending_consume = 0;
     }
 
-    /// read 결과 바이트를 누적한다. 마지막 개행 뒤 미완결 tail이 max_frame을 넘으면 too_large를 세운다.
+    /// read 결과 바이트를 순수 누적만 한다. oversize 판정은 next()가 완결 frame을 다 뽑은 **뒤에** 한다
+    /// (push에서 미완결 tail로 too_large를 세우면, 그 tail 앞에 이미 버퍼된 완결 유효 frame을 next()가 유실한다).
     pub fn push(self: *Framer, gpa: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}!void {
         self.drainConsumed();
         try self.buf.appendSlice(gpa, bytes);
-        const tail_start = if (std.mem.lastIndexOfScalar(u8, self.buf.items, '\n')) |i| i + 1 else 0;
-        if (self.buf.items.len - tail_start > self.max_frame) self.too_large = true;
     }
 
     /// 다음 완결 frame(개행 제외, 선행 `\r` strip)을 돌려준다. 없으면 null. max 초과면 error.PayloadTooLarge.
+    /// **완결 frame을 먼저 전부 돌려준 뒤에** 미완결 tail의 oversize를 판정한다 — 유효 완결 frame 뒤에 oversize
+    /// 미완결 tail이 붙어 있어도(한 read에 둘이 같이 도착) 앞의 유효 frame을 삼키지 않는다. too_large는 sticky.
     pub fn next(self: *Framer) error{PayloadTooLarge}!?[]const u8 {
         self.drainConsumed();
         if (self.too_large) return error.PayloadTooLarge;
@@ -428,6 +429,12 @@ pub const Framer = struct {
         }
         // 완결 frame 없음. 앞서 건너뛴 빈 줄들은 다음 호출에 버린다.
         if (start > 0) self.pending_consume = start;
+        // 남은 미완결 tail(개행 없는 마지막 조각)이 max_frame을 넘으면 유효 frame이 될 수 없다 → OOM 방어로 거부.
+        // 완결 frame을 다 돌려준 **뒤**라 앞선 유효 frame을 삼키지 않는다.
+        if (self.buf.items.len - start > self.max_frame) {
+            self.too_large = true;
+            return error.PayloadTooLarge;
+        }
         return null;
     }
 };
@@ -700,13 +707,17 @@ test "프레이밍: 완결 frame이 max_frame 초과 → PayloadTooLarge(sticky)
     try testing.expectError(error.PayloadTooLarge, f.next()); // sticky.
 }
 
-test "프레이밍: 미완결 tail이 max_frame 초과하면 개행 오기 전에 too_large(무한 누적 방어)" {
+test "프레이밍: 미완결 tail이 max_frame 초과하면 next()가 완결 frame 부재 확인 후 PayloadTooLarge(무한 누적 방어)" {
     var f: Framer = .{ .max_frame = 8 };
     defer f.deinit(testing.allocator);
     try f.push(testing.allocator, "12345"); // 5 ≤ 8, 아직 정상.
     try testing.expect(!f.too_large);
-    try f.push(testing.allocator, "6789"); // 누적 9 > 8, 개행 없이도 too_large.
-    try testing.expect(f.too_large);
+    try testing.expect((try f.next()) == null); // 완결 frame 없음, tail 5 ≤ 8 → null
+    try f.push(testing.allocator, "6789"); // 누적 9 > 8, 개행 없는 미완결 tail.
+    // push는 oversize를 판정하지 않는다(완결 frame 유실 방지 — code-review 반영). 판정은 next()가 한다.
+    try testing.expect(!f.too_large);
+    try testing.expectError(error.PayloadTooLarge, f.next()); // 완결 frame 없음을 확인한 뒤 oversize tail 거부
+    try testing.expect(f.too_large); // 이제 sticky
     try testing.expectError(error.PayloadTooLarge, f.next());
 }
 
@@ -850,4 +861,17 @@ test "네임스페이스: 미지 네임스페이스도 거부하지 않고 verba
     try testing.expectEqualStrings("ping", bare.namespace);
     try testing.expect(bare.core == null);
     try testing.expectEqualStrings("", bare.rest);
+}
+
+// code-review max 반영: 완결 유효 frame 뒤에 oversize 미완결 tail이 한 read에 같이 도착해도, next()가 앞의
+// 완결 frame을 유실하지 않고 먼저 돌려준 뒤에야 oversize를 거부해야 한다(옛 코드는 push가 too_large를 세워 유실).
+test "Framer: 완결 frame 뒤 oversize 미완결 tail이 와도 앞 frame을 유실하지 않는다" {
+    var f = Framer{ .max_frame = 16 };
+    defer f.deinit(testing.allocator);
+    try f.push(testing.allocator, "hello\n");
+    try f.push(testing.allocator, "0123456789ABCDEFGHIJ"); // 20 > 16, 개행 없는 미완결 tail
+
+    try testing.expectEqualStrings("hello", (try f.next()).?); // 앞 frame 먼저 정상 반환
+    try testing.expectError(error.PayloadTooLarge, f.next()); // 그다음에야 oversize tail 거부
+    try testing.expectError(error.PayloadTooLarge, f.next()); // sticky
 }

@@ -132,7 +132,10 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 
 이 기능은 full drag UX부터 만들지 않는다. 먼저 command path와 순수 모델을 고정한다.
 
-1. **M0a SurfaceIdAllocator**: 앱 인스턴스 전역 opaque u64 발급, 비재사용, generation mismatch 단위 테스트. 기존 per-session `next_id`는 외부 ID로 노출하지 않는다.
+1. **M0a SurfaceIdAllocator**: 앱 인스턴스 전역 opaque u64 발급, 단조·비재사용 단위 테스트. 기존 per-session `next_id`(app_session.zig)는 외부 ID로 노출하지 않는다. 착수 결정(코드 대조로 확정):
+   - **스레드: plain `u64`, 메인 스레드 전용(atomic 불필요)**. `createTerm` 호출처(`createTab`·`createPane`·`createTermFromSurface`/restore)는 전부 메인 이벤트이고, 리더 스레드는 `core_mutex` 아래 ring/scrollback만 만지고 세션 트리는 건드리지 않는다. `assert(main-thread)` 주석으로 계약을 고정한다.
+   - **주입: `AppSession`이 코디네이터 소유 allocator를 `*SurfaceIdAllocator` 포인터로 참조**하고 `createTerm`이 거기서 발급받는다. 이 포인터를 읽으므로 `var session: AppSession = undefined` 테스트(현재 3곳 + createTerm 호출 테스트)는 call site에서 포인터를 **명시 초기화**해야 UB를 피한다([[devsession-undefined-test-field-trap]]).
+   - **generation은 M0a 범위 밖 — M1로 미룬다**. surface_id 비재사용(단조)이 주 방어이고([control-plane.md] §3 defense-in-depth), generation이 증가하는 유일 경로(crash-respawn으로 surface_id 유지)는 런타임 수명을 다루는 M1에서 모델한다.
 2. **M0b WindowMembershipSnapshot**: full `WindowGraph` 전 2-window+quick membership DTO, `metadata:self/window/all` scope 필터 테스트. `window_kind` 판별자는 현재 코드에 없으므로(quick은 Swift 전용 `quick` 참조·`QuickTerminalPanel`·`chrome_minimal` 플래그로 분산) M0b가 신규 도입한다.
 3. **M1 WindowGraph TDD**: `moveSurface`, `movePane`, `moveWorkspace`, `mergeWindow`, no-op/empty-source/focus 보정 단위 테스트. `moveWorkspace`는 사이드바 그룹 상호작용(§4)을 red test로 고정한다: 그룹 멤버 이탈 재정규화, `group_start` 마커 이동=source 마커 승계(그룹 잔존/마지막이면 소멸)·이동분 target 최상위, 전역 `pinned` 이동 시 target 핀 리전 정규화, `local_pinned`/`top_level` 리셋.
 4. **M2 LiveSurfaceRegistry 분리**: terminal live runtime을 window 밖 owner로 이동. surface 이동 시 PTY/TerminalCore를 재시작하지 않음을 테스트. web panel state/WKWebView handle은 이 시점에 아직 없으므로 terminal runtime만 옮기고, web surface runtime은 Phase 4 이후 같은 registry에 합류한다.

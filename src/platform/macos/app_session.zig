@@ -4029,6 +4029,30 @@ pub const AppSession = struct {
         }
     }
 
+    /// **top_level 경계 홀더 재확립(§14.8 code-review finding #2, 단일 출처 헬퍼)** — 위치 `idx`의 카드가 top_level **경계
+    /// 홀더**(그룹 밖 최상위 복귀 개시)라 곧 제거/이동으로 그 자리에서 빠질 때, 뒤 sticky follower(idx+1)에 `top_level:=true`를
+    /// 재확립한다. sticky-reset은 개시 카드가 있어야 빈 스택을 타므로, 경계를 안 넘기면 follower가 위 마커로 재소속(재부모화)
+    /// 된다. 게이트: 홀더가 top_level이고, follower가 같은 핀 리전 leaf(비마커·아직 top_level 아님)이며, 위(앞 idx-1)에 이 리전
+    /// 그룹이 있어(`enclosingGroupMarkerIndex(idx-1)!=null`) 실제로 흡수될 때만 — 안 그러면 불필요(리전 시작·앞도 top-level).
+    /// top카드는 마커가 아니라 inheritGroupMarker와 배타. **재확립했으면 true 반환** — 홀더가 실제로 안 움직인 제자리
+    /// 케이스면 caller가 spurious flag를 되돌릴 수 있게(commit의 landed==origin revert와 동형). closeTab(제거는 항상 일어남)은
+    /// 반환값을 무시하고, togglePin은 moveTab no-op이면 되돌린다. simulateDrop/commit은 각자 가상/post-clamp 문맥이라 인라인 유지.
+    fn reestablishTopLevelBoundaryOnMove(self: *AppSession, idx: usize) bool {
+        const len = self.tabs.items.len;
+        if (idx == 0 or idx >= len or idx + 1 >= len) return false;
+        const holder = self.tabs.items[idx];
+        if (!holder.top_level) return false;
+        const follower = self.tabs.items[idx + 1];
+        if (follower.group_start == null and !follower.top_level and
+            follower.pinned == holder.pinned and
+            self.enclosingGroupMarkerIndex(idx - 1) != null)
+        {
+            follower.top_level = true;
+            return true;
+        }
+        return false;
+    }
+
     /// 탭을 닫는다. 마지막 한 개면 창(세션)을 닫는다 — 탭을 헐지 않고 종료를 latch해 기존 terminate/
     /// deinit 경로가 정리하게 한다(빈 tabs 리스트로 activeSurface가 패닉하는 걸 피한다). 그 외엔 teardown
     /// (deinit과 같은 순서: closeAndDetach(runtime) → live_pty.deinit(reader join) → surface.deinit → Tab
@@ -4047,18 +4071,10 @@ pub const AppSession = struct {
         // 없이 closing.group_start가 남아 아래 destroyTabStandalone이 free한다(그룹 소멸). inheritGroupMarker 공유(#11).
         _ = self.inheritGroupMarker(index);
 
-        // §14 경계 유지(code-review finding #2): 닫는 카드가 **top_level 경계 홀더**(그룹 밖 최상위 복귀 개시)면, 제거 후 그 뒤
-        // sticky follower가 앞 그룹에 흡수되지 않게 경계를 **다음 카드에 재확립**한다(top_level:=true 이전). sticky-reset은 개시
-        // 카드가 있어야 빈 스택을 타므로, 경계를 안 넘기면 follower가 위 마커로 재소속(재부모화)된다. 조건: follower가 같은
-        // 핀 리전 leaf(비마커·아직 top_level 아님)이고, top카드 **위(앞)**에 이 리전 그룹이 있어(enclosing(index-1)!=null) 실제로
-        // 흡수될 때만 — 안 그러면 리셋이 불필요(리전 시작·앞도 top-level). top_level 카드는 마커가 아니라 위 inheritGroupMarker와 배타.
-        if (self.tabs.items[index].top_level and index > 0 and index + 1 < self.tabs.items.len) {
-            const follower = self.tabs.items[index + 1];
-            if (follower.group_start == null and !follower.top_level and
-                follower.pinned == self.tabs.items[index].pinned and
-                self.enclosingGroupMarkerIndex(index - 1) != null)
-                follower.top_level = true;
-        }
+        // §14 경계 유지(code-review finding #2): 닫는 카드가 **top_level 경계 홀더**면, 제거 후 그 뒤 sticky follower가 앞
+        // 그룹에 흡수되지 않게 경계를 다음 카드에 재확립한다(togglePin·simulateDrop·commit과 동형 단일 출처 헬퍼). 제거는
+        // 항상 일어나므로 반환값(재확립 여부)은 무시한다 — 제자리 revert가 필요 없다(그 처리는 no-op move 가능한 togglePin 몫).
+        _ = self.reestablishTopLevelBoundaryOnMove(index);
 
         const tab = self.tabs.orderedRemove(index);
         _ = self.surface_ptrs.orderedRemove(index);
@@ -4352,11 +4368,24 @@ pub const AppSession = struct {
         const plan: DropPlan = if (gap) |g|
             // §14.6 SR5 요구2: "그룹 뒤/사이 gap" 드롭 = 그룹 밖 top카드로 착지(top_level=true, 흡수 아님).
             .{ .card = .{ .target_tab = g.target_tab, .top_level = g.top_level or source_pinned } }
-        else if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
+        else if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab| blk: {
             // §14.6 SR4 model-2: 착지 위치 + 드롭 컨텍스트 top_level 의도(타깃이 최상위 카드면 true·그룹 멤버면 false). 고정 소스는 강제 true.
-            .{ .card = .{ .target_tab = target_tab, .top_level = self.sidebarCardDropTopLevel(raw_row) or source_pinned } }
-        else
-            .none;
+            // **[2] 고정 탭은 그룹 안에 착지 금지(§14.9 정합 — "흡수 금지"가 "그룹 split"이 되면 안 됨)**: source_pinned가
+            // 그룹 멤버 사이(subtree 한복판)에 착지하면 위 top_level 강제가 그 자리에 top_level break를 써 **뒤 멤버를 그룹에서
+            // eject**(그룹 쪼갬)한다. 착지 target을 그룹 subtree **밖 경계**로 clamp해 고정 탭이 그룹 경계에만 착지하게 한다 —
+            // 그러면 top_level break가 그룹 무결을 안 깬다(경계 뒤엔 자를 멤버가 없다). 방향: 소스가 그룹 **위**(origin<gm)면
+            // 그룹 **뒤 끝**(ge-1, moveTab from<to가 그룹 다음 자리에 안착), 소스가 그룹 **아래/안**이면 그룹 **앞 마커**(gm,
+            // from>to가 마커 앞에 안착). topLevelGroupMarkerIndex가 null(타깃이 그룹 밖 top카드)이면 clamp 없음 — 고정 top카드
+            // 옆 인터리브(SR4(d))는 무변경. 비고정 소스는 이 clamp를 안 타 그룹 흡수 능력 보존.
+            var tt = target_tab;
+            if (source_pinned) {
+                if (self.topLevelGroupMarkerIndex(tt)) |gm| {
+                    const ge = self.groupSubtreeEnd(gm, null, null);
+                    tt = if (origin < gm) ge - 1 else gm;
+                }
+            }
+            break :blk .{ .card = .{ .target_tab = tt, .top_level = self.sidebarCardDropTopLevel(raw_row) or source_pinned } };
+        } else .none;
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.sidebar_card_drag).info(
             "cardDropPlan: origin={d} y={d:.1} raw_row={d} y_esc={d:.1} raw_esc={d} gap_target={?} src_pinned={} plan_top_level={}",
             .{ origin, y_px, raw_row, y_esc, raw_esc, if (gap) |g| g.target_tab else null, source_pinned, switch (plan) {
@@ -5054,8 +5083,10 @@ pub const AppSession = struct {
     /// 드래그로 그룹 밖 out) 로컬 pin이 무의미해진다 — 고아 stale 📌를 원천 차단한다. 판정: `group_start!=null`(마커)이거나
     /// `enclosingGroupMarkerIndex(i)==null`(어느 그룹에도 안 속한 최상위 카드)면 클리어. 중첩 부모 그룹으로 **재소속**된 멤버
     /// (ungroup 시 자식 마커만 사라져 부모 멤버가 됨)는 여전히 그룹 안 leaf라 유지된다(floatLocalPinsAllGroups가 부모 프리픽스로
-    /// 재float — §13.7 "그룹 밖으로 나가면"은 top-level 전이만). 전이 3지점(ungroupTab·removeFromGroupForTab·commitSidebarDragPreview)
-    /// 이 각자 float **뒤** 1회 부른다 — 단일 출처 위생 스윕(각 지점 개별 클리어 중복 회피). 로컬 pin 0개면 no-op(byte-identical).
+    /// 재float — §13.7 "그룹 밖으로 나가면"은 top-level 전이만). 전이 5지점(ungroupTab·removeFromGroupForTab·
+    /// promoteTabToTopLevelInPlace·commitSidebarDragPreview·beginGroupForTab)이 각자 float **뒤** 1회 부른다 — 단일 출처
+    /// 위생 스윕(각 지점 개별 클리어 중복 회피). beginGroupForTab은 카드→마커 전이(leaf 아님) + break_next top_level write
+    /// (그 카드 leaf 아님) 둘 다 스윕한다. 로컬 pin 0개면 no-op(byte-identical).
     fn clearStaleLocalPins(self: *AppSession) void {
         for (self.tabs.items, 0..) |t, i| {
             if (!t.local_pinned) continue;
@@ -5219,6 +5250,12 @@ pub const AppSession = struct {
             self.metal_dirty = true;
             return;
         };
+        // **[3] top_level 경계 홀더 재확립(§14.8 finding #2 — closeTab/commit과 동형 헬퍼)**: tab이 top_level 경계 홀더면
+        // pin 토글 이동으로 그 자리에서 빠질 때 뒤 sticky follower가 앞 그룹에 흡수(재부모화)되지 않게 경계를 재확립한다.
+        // **flip 전** 원래 pin 상태로 판정해야 한다 — follower는 홀더와 같은 리전이라 헬퍼의 `follower.pinned==holder.pinned`
+        // 게이트가 flip 뒤엔 어긋난다(그러면 리전 넘는 no-op 케이스가 자동 배제되는 부수효과도 있다). 아래 moveTab이 실제로
+        // 안 옮기면(landed==idx) 경계 소실이 없어 spurious flag를 되돌린다(commit landed==origin revert와 동형).
+        const set_boundary = self.reestablishTopLevelBoundaryOnMove(idx);
         tab.pinned = !tab.pinned; // 토글 먼저 — moveTab의 그룹 clamp가 새 pin 상태를 본다.
         // 새 pinned_count 기준 목적 인덱스: pin이면 고정 리전의 **첫 그룹 마커 앞**(= [고정 top카드][고정 그룹] 순서 유지 —
         // 끝 count-1에 두면 고정 그룹 subtree 뒤라 위치 파생(§2.1)이 그 카드를 그룹 멤버로 흡수한다; 고정 그룹이 없으면
@@ -5229,7 +5266,9 @@ pub const AppSession = struct {
             (self.firstGroupStartInRegion(0, pinned_count) orelse (pinned_count - 1))
         else
             pinned_count;
-        _ = self.moveTab(idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
+        const landed = self.moveTab(idx, to); // 같은 그룹 내 clamp이라 그대로 to로 이동(active_tab·surface_ptrs도 같이)
+        if (set_boundary and landed == idx and idx + 1 < self.tabs.items.len)
+            self.tabs.items[idx + 1].top_level = false; // 제자리(no-op move) = 경계 소실 없음 → spurious flag 되돌림
         // 무조건 rebuildSidebar: moveTab은 from==to(이미 그룹 경계 — 단일 탭/경계 탭 토글)면 early-return해 사이드바
         // 밴드/슬롯 상태(rebuildSidebar 산출)를 다시 짓지 않는다. 토글이 reorder 없이도 사이드바 모델을 새 pin 상태로
         // 일관되게 두려고 여기서 무조건 다시 짓는다(토글은 핫패스가 아니라 중복 호출 무해). 📌 글리프 자체는 매 frame
@@ -5440,6 +5479,11 @@ pub const AppSession = struct {
         // 그 top_level을 clear한다(마커의 "형제 top-level 그룹"은 group_depth pop으로 표현, §13.8). 카드가 top_level이 아니었으면
         // no-op(byte-identical) — 흡수 경로(break_next=false)도 안전.
         tab.top_level = false;
+        // leaf-only §13.8: 마커는 local_pinned도 금지(로컬 pin은 "그룹 안 leaf 멤버의 위치 고정", 마커는 leaf 아님). 로컬 pin
+        // 멤버 카드를 그룹 마커로 전이시키면 stale local_pinned=1 마커가 남아(leaf-only 위반) sidebarRowShowsPin 선두 분기가
+        // 마커에 📌를 살린다. 여기서 클리어하고, 아래 clearStaleLocalPins가 이 create로 top_level 전이한 카드(break_next write)
+        // 의 stale local_pinned도 함께 스윕한다(ungroup·removeFromGroup·promote·commit과 동형 위생 — §13.7 전이 지점).
+        tab.local_pinned = false;
         // §2.1 재설계(§14.5, 요구1) **"선택 탭만 그룹"**: 마커 뒤 첫 탭에 `top_level:=true`를 써 위치 파생 흡수를 top_level
         // break로 끊는다(정책 b — 단일 탭 그룹 + 뒤 탭들 promote: 첫 탭이 최상위 복귀 run을 개시해 그 뒤 카드도 sticky-reset로
         // 최상위). break_next=false는 SR3 이전 "마커 뒤 전부 흡수"를 재현하는 테스트/스크린샷 경로(위 tab.top_level clear만).
@@ -5459,6 +5503,7 @@ pub const AppSession = struct {
         // 경우엔 흡수 멤버가 마커 pinned를 따르게 canonical화한다(마커 = 그룹 고정 권위, §12.2).
         self.normalizePinnedFromGroups();
         self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — 새 마커 subtree에 흡수된 로컬 pin 멤버 정렬)
+        self.clearStaleLocalPins(); // 위생(GL §13.7): 마커 전이·top_level break로 leaf 아니게 된 카드의 stale local_pinned 클리어(고아 📌 방지)
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
     }
@@ -5502,18 +5547,29 @@ pub const AppSession = struct {
         // clearStaleLocalPins가 top-level로 전이한 멤버만 골라 정리하므로(중첩 생존 subgroup 멤버 로컬 pin은 보존) 여기선
         // 안 건드린다 — 전 subtree를 무조건 클리어하면 살아남는 자식 그룹 멤버의 유효 로컬 pin까지 지운다.
         const e = self.groupSubtreeEnd(mi, null, null); // 마커 제거 전 subtree 범위(mi가 유효 마커일 때만 정확)
+        // **top-level 그룹 vs 중첩 subgroup 판정(마커 제거 전 — mi가 유효 마커일 때만 effectiveDepthAt가 정확)**: 그룹째
+        // 고정은 **top-level 그룹 속성**(§12.1 pin ⊃ group ⊃ nest)이라 ungroup의 pinned 처리가 대상 깊이에 달렸다.
+        //  - **top-level 그룹**(effectiveDepthAt==1): 그룹을 통째 소멸시키므로 그룹째 고정도 소멸 → 멤버 pinned 캐시를
+        //    [mi,e) 클리어하고, 남은 고정 프리픽스를 stablePartitionPinned로 복구한다(고정 그룹이 다른 고정 단위 **앞**이던
+        //    경계에서 I1 무결 — ungroup-pin(d)).
+        //  - **중첩 subgroup**(effectiveDepthAt>1): 마커만 사라지고 멤버는 **부모 그룹으로 재소속**되므로 부모 pinned를
+        //    **상속**해야 한다 — pinned를 클리어하면 멤버가 부모에서 튕겨나가 비고정 리전으로 eject된다. 클리어도 partition도
+        //    하지 않는다(pin count 불변이라 프리픽스 무결·아래 normalize가 부모 마커 기준으로 canonical 재동기). **[5]도 함께
+        //    닫힘**: groupSubtreeEnd가 trailing 고정 top_level 카드(그룹 밖)를 [mi,e)에서 제외하므로, 중첩 ungroup에서
+        //    partition을 스킵하면 그 **무관 고정 top카드**가 stablePartitionPinned로 맨 앞으로 front-jump하던 갭이 사라진다
+        //    (partition 범위/조건이 top-level 게이트로 정합 — 무관 top카드 pinned·위치 유지).
+        const is_top_level = self.effectiveDepthAt(mi, null, null) == 1;
         self.allocator.free(self.tabs.items[mi].group_start.?); // owned 마커 해제
         self.tabs.items[mi].group_start = null;
         self.tabs.items[mi].group_collapsed = false;
-        var k = mi;
-        while (k < e) : (k += 1) self.tabs.items[k].pinned = false; // 마커+멤버 pinned 캐시 클리어 — 그룹째 고정 인계 금지
-        // 고정 그룹을 풀면 그 카드들이 고정 프리픽스에서 빠지므로, 남은 **다른 고정 단위**가 있으면(예: 고정 그룹이 다른
-        // 고정 그룹 **앞**에 있던 경계) 프리픽스 불변식(I1)이 깨진다 — toggleGroupPin unpin과 같은 stable 재파티션으로 남은
-        // 고정을 앞으로 모아 무결을 복구한다(비고정 그룹 ungroup은 고정 count 무변이라 stable no-op·byte-identical).
-        self.stablePartitionPinned();
+        if (is_top_level) {
+            var k = mi;
+            while (k < e) : (k += 1) self.tabs.items[k].pinned = false; // 마커+멤버 pinned 캐시 클리어 — top-level 그룹째 고정 소멸(인계 금지)
+            self.stablePartitionPinned(); // 남은 고정 프리픽스 무결 복구(중첩은 스킵 — 무관 고정 top카드 front-jump 방지 [5])
+        }
         // 그룹 고정 C2(§12.5 GP2): 마커가 사라져 아래 카드가 위 마커/최상위로 재소속됐으니 pinned 캐시를 새 enclosing 기준
-        // 으로 재동기(비프리뷰 경로). 옛 멤버가 최상위가 되면 자기 값 유지(위에서 0으로 클리어), 상위 그룹으로 재소속되면
-        // 그 마커 pinned를 따른다(중첩 자식 ungroup이 부모로 재소속되는 경로).
+        // 으로 재동기(비프리뷰 경로). 옛 멤버가 최상위가 되면 자기 값 유지(top-level이면 위에서 0으로 클리어), 상위 그룹으로
+        // 재소속되면 그 마커 pinned를 따른다(중첩 자식 ungroup이 부모로 재소속·부모 pin 상속하는 경로).
         self.normalizePinnedFromGroups();
         self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — 마커 제거로 상위 그룹에 재소속된 멤버 정렬)
         self.clearStaleLocalPins(); // 위생(GL §13.7): 그룹 밖 top-level로 나간 옛 멤버의 stale local_pinned 클리어(고아 📌 방지)
@@ -18275,6 +18331,40 @@ test "CR#2: top카드 제거/이동이 경계를 다음 sticky follower에 재�
     try std.testing.expectEqual(@as(usize, 2), s2.groupSubtreeEnd(0, null, null)); // A=[0,2)
 }
 
+test "CR#2(togglePin): top_level 카드 pin이 경계를 follower에 재확립 — follower 앞 그룹 흡수 안 됨([3])" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    // [G(마커,d1), a1, TOP(top_level), f] 전부 비고정. TOP=경계 홀더, f=그 sticky follower(그룹 밖).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "G");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true; // TOP
+    const top = session.tabs.items[2];
+    const f = session.tabs.items[3];
+    try std.testing.expect(session.enclosingGroupMarkerIndex(3) == null); // 사전: f는 그룹 밖(TOP sticky follower)
+
+    session.togglePin(top); // TOP을 고정 → pin 리전으로 이동. 경계 미확립이면 f가 앞 그룹 G에 흡수(재부모화)된다.
+    try std.testing.expect(top.pinned); // TOP 고정됨
+    // ★ [3] f에 경계 재확립 — top_level 유지 + 그룹 G에 흡수 안 됨(revert하면 f.top_level=false·enclosing=G로 실패).
+    try std.testing.expect(f.top_level);
+    var f_idx: usize = 99;
+    for (session.tabs.items, 0..) |t, i| if (t == f) {
+        f_idx = i;
+    };
+    try std.testing.expect(session.enclosingGroupMarkerIndex(f_idx) == null); // f 그룹 밖 유지(흡수 없음)
+    try std.testing.expect(!session.tabIsInGroup(f));
+}
+
 test "CR#4: removeFromGroup은 그룹 뒤 top카드에 no-op(tabIsInGroup 가드) — 옛 ix<fm0은 top카드를 밖으로 못 봄" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -19032,6 +19122,83 @@ test "ungroup-pin(d): 다른 고정 그룹 앞의 고정 그룹 ungroup — 프�
     try std.testing.expectEqual(pg1, session.tabs.items[2]);
     try std.testing.expectEqual(pm1, session.tabs.items[3]);
     try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG2=[0,2) 고정 통째
+}
+
+test "ungroup-pin(nested): 고정 중첩 subgroup ungroup — 멤버가 부모 pinned 상속·부모 재소속(eject 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    // 고정 top-level 그룹 P=[Pm=t0(d1), c1=t1] 안에 **중첩** subgroup S=[Sm=t2(d2), s1=t3]. 넷 다 pinned.
+    try setGroupMarker(session, 0, "P", 1);
+    try setGroupMarker(session, 2, "S", 2);
+    for (0..4) |i| session.tabs.items[i].pinned = true;
+    const pm = session.tabs.items[0];
+    const c1 = session.tabs.items[1];
+    const sm = session.tabs.items[2];
+    const s1 = session.tabs.items[3];
+    try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(2, null, null)); // 사전: S는 중첩(depth 2)
+
+    session.ungroupTab(s1); // s1 소속=S → 가장 가까운 마커 S(중첩) 제거. 멤버는 부모 P로 재소속되어야.
+    try std.testing.expect(sm.group_start == null); // S 마커 제거
+    try std.testing.expect(pm.group_start != null); // P 유지
+    // ★ [1] 중첩 subgroup ungroup: 멤버 pinned **상속**(eject 없음) — 넷 다 여전히 pinned(부모 P가 고정).
+    try std.testing.expect(pm.pinned and c1.pinned and sm.pinned and s1.pinned);
+    // ★ 부모 P로 재소속 — 옛 S 멤버(sm-card·s1)의 enclosing 마커가 P.
+    try std.testing.expectEqual(pm, session.enclosingGroupMarkerTab(sm).?);
+    try std.testing.expectEqual(pm, session.enclosingGroupMarkerTab(s1).?);
+    // 순서 불변(중첩은 partition 스킵이라 front-jump 없음): [Pm, c1, sm-card, s1].
+    try std.testing.expectEqual(pm, session.tabs.items[0]);
+    try std.testing.expectEqual(c1, session.tabs.items[1]);
+    try std.testing.expectEqual(sm, session.tabs.items[2]);
+    try std.testing.expectEqual(s1, session.tabs.items[3]);
+}
+
+test "ungroup-pin(top-jump): 중첩 subgroup ungroup이 무관 고정 top카드를 front-jump 안 시킴(위치·pin 유지, [5])" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
+    // 고정 top-level 그룹 P 안 중첩 S, 그 **뒤**에 그룹 밖 고정 top카드 TOP(top_level)·비고정 u1.
+    // 배치: [Pm=t0(d1), Sm=t1(d2), s1=t2, TOP=t3(pin,top_level), u1=t4(unpin)].
+    // groupSubtreeEnd(P)가 TOP의 top_level break서 멈춰 TOP은 P 밖 = "무관 고정 top카드".
+    try setGroupMarker(session, 0, "P", 1);
+    try setGroupMarker(session, 1, "S", 2);
+    for (0..4) |i| session.tabs.items[i].pinned = true; // Pm·Sm·s1·TOP 고정, u1 비고정
+    session.tabs.items[3].top_level = true; // TOP = P subtree 밖 그룹 밖 고정 top카드
+    const top = session.tabs.items[3];
+    const sm = session.tabs.items[1];
+    const s1 = session.tabs.items[2];
+    const pm = session.tabs.items[0];
+    try std.testing.expect(session.enclosingGroupMarkerIndex(3) == null); // 사전: TOP은 그룹 밖
+
+    session.ungroupTab(s1); // 중첩 S ungroup — partition 스킵이라 TOP front-jump 없어야.
+    try std.testing.expect(sm.group_start == null); // S 소멸
+    // ★ [5] 무관 고정 top카드 TOP: 위치(index 3)·pinned·top_level 모두 유지(front-jump 없음).
+    try std.testing.expectEqual(top, session.tabs.items[3]);
+    try std.testing.expect(top.pinned and top.top_level);
+    try std.testing.expect(session.enclosingGroupMarkerIndex(3) == null); // 여전히 그룹 밖
+    // ★ [1] S 멤버는 부모 P로 재소속·pinned 유지(eject 없음).
+    try std.testing.expect(sm.pinned and s1.pinned);
+    try std.testing.expectEqual(pm, session.enclosingGroupMarkerTab(s1).?);
 }
 
 test "GP3(d): clampGroupMoveToRegion — 그룹 드래그 plan을 리전 경계로 clamp, 프리뷰=확정(simulateDrop==move)" {
@@ -21873,6 +22040,35 @@ test "GL3(b3): 위생 드래그 out — commitSidebarDragPreview 스윕이 top-l
     try std.testing.expect(t3.local_pinned); // ★ 진짜 그룹 멤버 로컬 pin은 보존
 }
 
+test "GL3(b4): 위생 create group — 로컬 pin 멤버로 그룹 생성 시 마커 local_pinned=0 + break_next top카드도 스윕(§13.7·leaf-only)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+    session.createGroupAbsorbForTab(session.tabs.items[0]); // G=[Gm=t0, m1=t1, m2=t2]
+    const m1 = session.tabs.items[1];
+    const m2 = session.tabs.items[2];
+    session.toggleLocalPin(m1); // m1 로컬 pin(leaf 멤버 — float은 이미 마커 직후라 제자리)
+    session.toggleLocalPin(m2); // m2 로컬 pin
+    try std.testing.expect(m1.local_pinned and m2.local_pinned); // 사전: 둘 다 leaf 로컬 pin
+
+    // m1로 (중첩) 그룹 생성 → m1은 마커(leaf 아님), break_next가 다음 카드 m2에 top_level write(그룹 밖 leaf 아님).
+    session.createGroupForTab(m1);
+    try std.testing.expect(m1.group_start != null); // m1이 새 마커
+    try std.testing.expect(!m1.local_pinned); // ★ 마커 전이 → local_pinned 클리어(leaf-only §13.8, revert하면 true로 실패)
+    try std.testing.expect(m2.top_level); // break_next로 m2 = 그룹 밖 top카드
+    try std.testing.expect(!m2.local_pinned); // ★ top-level 전이 카드 stale local_pinned 스윕(clearStaleLocalPins)
+}
+
 test "GL3(c): 드래그 엣지 — 로컬 pin 멤버를 마커 자기 카드 위로 드래그해도 프리뷰=확정(commit clamp, eject 없음, §13.5)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -22726,16 +22922,20 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
     session.recomputeVisibleTabs();
     session.sidebar_drag_index = 0;
     const x_ptr = session.tabs.items[0];
+    const am_ptr = session.tabs.items[1];
+    const a1_ptr = session.tabs.items[2];
+    const a2_ptr = session.tabs.items[3]; // 한복판 뒤 멤버 — [2] 그룹 무결(안 eject) 검증 대상
 
     // 표시 행: [card X(0), header A(1), card a1(2), card a2(3)]. a1(=tab2) 한복판을 frac 0.3(상단)로 겨냥 →
     // 하단 경계(gap) 미발화라 sidebarGroupDropTargetTab(멤버 자리)+sidebarCardDropTopLevel(그룹 멤버=false) 경로.
     const a1_row = cardRowOf(session, 2);
     const y_mid = sidebarDragScreenY(session, a1_row, 0.3);
-    // ① mouseMoved 산출(cardDropPlan): 고정 소스라 위치가 그룹 멤버여도 top_level=true 강제.
+    // ① mouseMoved 산출(cardDropPlan): 고정 소스라 흡수 금지(top_level=true 강제) + **[2] 그룹 안 착지 금지** — target을
+    // 그룹 A subtree 밖 경계로 clamp. origin=0(그룹 위)이라 그룹 뒤 끝(ge-1=3)으로 착지(한복판 2가 아니라 경계).
     const plan_mid = session.cardDropPlan(0, y_mid);
     switch (plan_mid) {
         .card => |c| {
-            try std.testing.expectEqual(@as(usize, 2), c.target_tab); // a1(멤버) 자리로 착지
+            try std.testing.expectEqual(@as(usize, 3), c.target_tab); // ★ [2] 그룹 subtree 밖 경계(뒤 끝)로 clamp(한복판 2 아님)
             try std.testing.expect(c.top_level); // ★ 고정 소스 = 흡수 금지(위치 무관 top_level 강제)
         },
         else => return error.TestUnexpectedResult,
@@ -22748,14 +22948,21 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
     try std.testing.expect(session.sidebar_drag_preview.?.plan == .card);
     try std.testing.expect(session.sidebar_drag_preview.?.plan.card.top_level); // ★ 저장된 plan에 top_level=true 온전
 
-    // ③ up 확정(commitSidebarDragPreview): 저장 plan을 그대로 replay — X가 그룹 안으로 흡수되지 않음.
+    // ③ up 확정(commitSidebarDragPreview): 저장 plan을 그대로 replay — X가 그룹 경계(뒤)에 착지, 그룹 A는 무결.
     session.commitSidebarDragPreview();
-    // X(t0)는 [Am, a1, X, a2]로 밀려 position 2. top_level=true 유지 + 그룹 A에 흡수 안 됨.
-    try std.testing.expectEqual(x_ptr, session.tabs.items[2]); // X가 position 2로
-    try std.testing.expect(session.tabs.items[2].top_level); // ★ 흡수 금지(top_level 확정 write)
-    try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // 그룹 A 멤버 아님
-    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null)); // 그룹 밖(depth0)
-    try std.testing.expect(session.tabs.items[2].pinned); // 고정 유지(고정 리전 안)
+    // 확정 배치 [Am, a1, a2, X] — X는 그룹 A **뒤** 고정 top카드(흡수 아님), 그룹 A=[Am,a1,a2] 온전(a2 안 eject).
+    try std.testing.expectEqual(am_ptr, session.tabs.items[0]);
+    try std.testing.expectEqual(a1_ptr, session.tabs.items[1]);
+    try std.testing.expectEqual(a2_ptr, session.tabs.items[2]);
+    try std.testing.expectEqual(x_ptr, session.tabs.items[3]); // X가 그룹 뒤 경계(position 3)
+    try std.testing.expect(session.tabs.items[3].top_level); // ★ 흡수 금지(top_level 확정 write)
+    try std.testing.expect(session.enclosingGroupMarkerIndex(3) == null); // X는 그룹 A 멤버 아님
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(3, null, null)); // 그룹 밖(depth0)
+    try std.testing.expect(session.tabs.items[3].pinned); // 고정 유지(고정 리전 안)
+    // ★ [2] 그룹 무결 — 뒤 멤버 a2가 그룹에서 eject되지 않았다(revert하면 X가 한복판에 착지해 a2가 top-level로 튕겨나감).
+    try std.testing.expectEqual(@as(usize, 0), session.enclosingGroupMarkerIndex(2).?); // a2는 여전히 A(마커 index0) 멤버
+    try std.testing.expect(!a2_ptr.top_level); // a2 안 eject
+    try std.testing.expectEqual(@as(usize, 3), session.groupSubtreeEnd(0, null, null)); // A=[0,3) 완전 subtree(쪼개짐 없음)
 }
 
 test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유지(top_level=false, 비고정 회귀 0)" {
@@ -22922,9 +23129,9 @@ test "SR-PIN5: 프리뷰=확정 등가 — 고정 탭 그룹 한복판 drop plan
     inline for (0..4) |i| session.tabs.items[i].pinned = true; // 전부 고정
     try setGroupMarker(session, 1, "A", 1); // X=t0, A=[Am=t1, a1=t2, a2=t3]
     session.recomputeVisibleTabs();
-    // 고정 소스 X를 a1(멤버 position 2) 자리로 — plan.top_level=true(cardDropPlan이 강제할 값과 동일 리터럴).
+    // 고정 소스 X를 그룹 경계(뒤 끝 position 3 — [2] cardDropPlan이 그룹 밖으로 clamp할 값)로, top_level=true.
     // simulateDrop 가상 top_level[] == commitSidebarDragPreview 후 실제 top_level[] (프리뷰=확정 게이트 동일).
-    try expectCardDropTopLevelEquivalent(session, 0, .{ .card = .{ .target_tab = 2, .top_level = true } });
+    try expectCardDropTopLevelEquivalent(session, 0, .{ .card = .{ .target_tab = 3, .top_level = true } });
 }
 
 // ── (3) 드래그 중 접힌 그룹은 접힌 헤더로만 — 대상=접힌 그룹이면 subtree force-emit 억제, 타깃=접힌 그룹은 유지 ────────

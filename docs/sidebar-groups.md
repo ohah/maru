@@ -1148,12 +1148,13 @@ top카드는 null)로 교체해 닫는다. top_level=false면 enclosing(상향 �
 - **수정 = `top_level` 하드 break를 구조 subtree end 스캔에 추가**(`groupSubtreeEnd`의 새 break와 정합). 그러면 진짜 멤버
   범위가 top카드를 절대 포함 안 하고, suffix-exclusion 꼬리 배제(핀 경계, soft)와 **공존**한다. `pinBoundariesAlignGroups`도
   top_level 인식 — 그룹 뒤 top카드가 subtree 중간을 자르는 **I3 위반을 위음성 없이 검출**하는 게이트다.
-- **초안 오진 정정(핵심)**: 초안은 "top카드 재기록(shred)"을 최상 위험으로 봤으나, `normalize`/`align`이 재기록하는 리전은
-  **I1 uniform**(한 핀 리전 = 균일 pinned)이라 **shred는 발화 불가**(재기록이 no-op). suffix-exclusion 대신 **exact-full-rewrite**
-  (`[i+1, break)` 전량 무조건 재기록 — §12.6 `toggleGroupPin` direct sync 결과)로 단순화한다. **진짜 위험은 하드 break가
-  desync 흡수 창을 축소**하는 것 = 손상 파일 복원 시 "그룹 마커와 pin이 어긋난 멤버"를 흡수해 치유하던 폭이 top_level 앞에서
-  잘려 **치유 회귀**가 날 수 있다. → SR2 헤드리스에 **"top_level 앞 desync 멤버 흡수"** 케이스 필수(손상/desync 주입 + assert
-  게이트 집중).
+- **⚠️ exact-full-rewrite 폐기(code-review PR#1197 정정)**: SR2 초안은 suffix-exclusion 대신 **exact-full-rewrite**
+  (`[i+1, break)` 전량 무조건 재기록)를 택했으나, 이는 **pin 리전 경계를 넘어** 비고정 tail 카드
+  (`[고정그룹][비고정 x][top_level]`의 x)를 `pinned=1`로 **오염·persist**시킨다(구조 스캔이 pin flip에서 break 안 하므로 `[i+1,e)`가
+  리전을 가로지름). "I1 uniform이라 shred no-op"이라던 초안 논거는 **인터리빙에서 "한 리전에 여러 pin"이 가능**해 무효다. →
+  **suffix-exclusion 유지가 정답**: top_level 하드 break로 멤버 범위 끝을 정하되 **재기록은 pin flip도 존중**(리전 경계 넘으면
+  중단). 같은 리전 내 sandwiched desync는 여전히 흡수·치유. `pinBoundariesAlignGroups`도 동형(위음성 없이 I3 검출). SR2(a)/(b)
+  테스트는 이 계약(꼬리 top카드 pin 유지)으로 재작성.
 
 ### 14.5 createGroup write — "선택 탭만 그룹" (**보강 3**, 요구1, SR3)
 
@@ -1220,7 +1221,7 @@ gap을 가리킬 row가 없어**(연속 파티션 — 그룹 사이 빈 gap row 
    1,1,0,1,1·`groupSubtreeEnd(A)=[0,2)`·`directCardCount(A)=2`·`effectiveDepthAt(TOP)=0`·`enclosing(TOP)=null`·`tabIsInGroup(TOP)
    =false`·subtreeHasMatch/ghostOverlapsSubtree top_level break·pass2 접힘 shred 방지) + 직렬화 round-trip.
 2. **SR2 — C2 정합 재작성(최고 위험, §14.4) ✅**: `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` 구조 subtree에 top_level
-   하드 break + **suffix-exclusion → exact-full-rewrite** + align top_level 인식. 헤드리스: 고정 리전 인터리브 canonical·idempotent·
+   하드 break + **suffix-exclusion 유지(재기록이 pin flip 존중 — exact-full-rewrite는 리전 넘어 오염이라 폐기 PR#1197)** + align top_level 인식. 헤드리스: 고정 리전 인터리브 canonical·idempotent·
    align 통과 + **"top_level 앞 desync 멤버 흡수"**(손상 치유 회귀 게이트, 초안 오진 정정 반영).
 3. **SR3 — createGroup write "선택 탭만 그룹"(요구1, §14.5) ✅**: `beginGroupForTab`이 선택 범위 다음 첫 탭에 top_level write +
    카드→마커 전이 시 top_level clear + inline depth stack `or t.top_level` 리셋 + "여기서 최상위로 분리"(promote-in-place) 액션 +
@@ -1246,8 +1247,8 @@ gap을 가리킬 row가 없어**(연속 파티션 — 그룹 사이 빈 gap row 
   normalize + align(SR2) + beginGroupForTab(SR3) — 대부분 한 줄 `or/break/return null`. **+ model-2 SG8 가상화**(`top_level[]`
   병렬 배열·`simulateDrop` 순열·프리뷰=확정 등가, SR4)가 얹혀 GP1 단독을 넘는다. **+ 직렬화 4 + Tab 필드 1 + UX(action·dispatch·
   catalog·우클릭)**.
-- **[최상] SR2 — suffix-exclusion × top_level 하드 break 정합**(§14.4): canonical·idempotent 공존. 초안 오진(shred) 정정 —
-  진짜 위험은 desync 흡수 창 축소(손상 치유 회귀). pin 축은 항상 존재하므로 model 무관하게 SR2는 남는다.
+- **[최상] SR2 — suffix-exclusion × top_level 하드 break 정합**(§14.4): canonical·idempotent 공존. exact-full-rewrite는
+  pin 리전 넘어 비고정 tail 오염(code-review PR#1197 정정) → **suffix-exclusion 유지·재기록이 pin flip 존중**. pin 축은 항상 존재하므로 SR2는 남는다.
 - **[중] model-2 SG8 이중경로**(§14.6): top_level이 드래그 중 변하는 소속 비트라 가상화 필요. 프리뷰=확정 등가 테스트가 게이트.
 - **[중] tabIsInGroup 정확성 버그**(§14.3): 조용한 오노출/오동작 — enclosing 기반 교체로 닫힘(SR1 완료).
 - **[하] leaf-only guard·스택 리셋 배치**: 마커·top-run 뒷카드에 top_level 세팅 금지(§13.8 선례), 리셋을 마커/카드 분기 **전**에

@@ -1057,7 +1057,11 @@ const ctx_menu_group_color_first: usize = ctx_menu_group_ungroup + 1; // ungroup
 // "그룹에서 빼기"(remove_from_group) — **그룹 소속 카드에만** 조건부로 맨 끝에 붙인다(최상위 카드엔 안 뜸). 맨 끝이라
 // 항상 present일 때만 이 인덱스를 차지하고(shorter 메뉴에선 sel이 여기 도달 못 함) 앞 고정 인덱스를 안 흔든다.
 const ctx_menu_group_remove: usize = ctx_menu_group_color_first + tab_group_color_labels.len;
-const ctx_menu_count: usize = ctx_menu_group_remove + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기 슬롯 포함)
+// "여기서 최상위로 분리"(promote_to_top_level, §14.5·§14.7) — remove와 함께 **그룹 소속 카드에만** 맨 끝에 붙인다(둘 다
+// tabIsInGroup 게이트라 함께 등장/부재). remove(그룹 밖 이동+unpin) 바로 뒤 슬롯이라, 그룹 카드면 remove=ctx_menu_group_remove·
+// promote=ctx_menu_group_promote로 고정 인덱스가 정렬한다(promote-in-place=제자리 top_level·pin 불변).
+const ctx_menu_group_promote: usize = ctx_menu_group_remove + 1;
+const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기·승격 슬롯 포함)
 
 // 그룹 헤더 우클릭 메뉴(context_menu_target == .group) 인덱스 — 워크스페이스 카드 메뉴와 **별개의 compact 레이아웃**.
 // 헤더는 그룹 스코프 액션만 노출한다(SG5-2-header): 0=Rename(그룹 이름 편집 = startRename(.group) — 헤더 더블클릭과 같은
@@ -3545,6 +3549,9 @@ pub const AppSession = struct {
         // 비고정 리전 [pinned_count, len)의 첫 마커 앞에 넣어 고정 프리픽스를 침범하지 않는다. 그룹 전무(init 첫 탭 포함)면
         // firstGroupStartInRegion=null → 끝(=기존 append 동작 byte-identical). 두 병렬 배열 capacity를 **먼저** 예약해
         // insert를 infallible로 만든다(둘 다 성공해야 삽입 — 예약 실패는 위 errdefer가 pane/tab을 무른다, 부분 삽입 없음).
+        // **§2.1 재설계(§14) 정합**: 첫 마커 **앞**(그 리전 최상위 구간)에 끼우므로 새 탭은 위치 파생상 depth 0 최상위 카드다 —
+        // 마커 뒤가 아니라 앞이라 top_level 세팅이 불필요하다(top_level은 "그룹 뒤/사이 최상위 복귀"용, 여기선 애초에 그룹 앞).
+        // Tab 기본 top_level=false로 충분(버그1 수정으로 그룹 흡수를 삽입 위치로 이미 막음 — SR3 write 경로와 직교).
         try self.tabs.ensureUnusedCapacity(self.allocator, 1);
         try self.surface_ptrs.ensureUnusedCapacity(self.allocator, 1);
         const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse self.tabs.items.len;
@@ -5096,7 +5103,7 @@ pub const AppSession = struct {
     /// 소속된다(§2.1). **중첩(SG5-3)**: 그룹 **안** 카드에서 실행하면 그 카드의 현재 depth+1로 자식 그룹 마커를 만든다.
     /// 최상위 카드에서는 depth 1. 위치 파생상 이 마커 뒤 형제 카드들은 새 자식 그룹으로 흡수된다(§9 create_group 규칙).
     fn createGroupForTab(self: *AppSession, tab: *Tab) void {
-        self.beginGroupForTab(tab, .nested);
+        self.beginGroupForTab(tab, .nested, true);
     }
 
     /// 워크스페이스에 **형제** 그룹 시작 마커를 얹는다(create_sibling_group — SG5-3, create_group과 명시적 분리). 그룹 안
@@ -5104,7 +5111,19 @@ pub const AppSession = struct {
     /// 형제로 시작 — 위치 파생상 마커 뒤 형제 카드들이 새 그룹으로 흡수). 최상위 카드면 depth 1(create_group과 결과 동일).
     /// create_group(depth+1 중첩)의 미러 — depth 계산만 다르다(현재 depth vs +1). §10 "형제 못 만듦" tension 해소 경로.
     fn createSiblingGroupForTab(self: *AppSession, tab: *Tab) void {
-        self.beginGroupForTab(tab, .sibling);
+        self.beginGroupForTab(tab, .sibling, true);
+    }
+
+    /// **테스트/스크린샷 전용** — SR3 이전 "마커 뒤 리스트 끝까지 전부 흡수" 그룹 생성(§14.5 요구1 도입 전 동작). 프로덕션
+    /// createGroup은 이제 **선택 탭만 그룹**(다음 탭에 `top_level:=true` write)이지만, 그룹 크기와 무관한 기능(중첩·로컬핀·
+    /// 그룹핀·빼기·드래그·헤더)을 **다중 멤버 그룹**으로 검증하는 기존 테스트/FORCE 스크린샷 훅이 이 흡수 변형을 쓴다. 다중
+    /// 멤버 그룹은 SR4 드래그로도 도달하는 정상 상태이며, `break_next=false`로 top_level write를 생략해 SR3 이전과 byte-identical
+    /// 하게 재현한다(전 탭 top_level=false → 인라인 depth 리셋도 never-fire).
+    fn createGroupAbsorbForTab(self: *AppSession, tab: *Tab) void {
+        self.beginGroupForTab(tab, .nested, false);
+    }
+    fn createSiblingGroupAbsorbForTab(self: *AppSession, tab: *Tab) void {
+        self.beginGroupForTab(tab, .sibling, false);
     }
 
     const GroupCreateKind = enum { nested, sibling };
@@ -5112,27 +5131,33 @@ pub const AppSession = struct {
     /// 이미 그룹 시작이면 no-op(중복 방지·기존 이름 보존; 이름 변경은 rename_group). 기본 이름 "그룹 N"(N=기존 마커 수+1).
     /// group_start는 owned(destroyTab/deinit이 free — custom_name과 같은 규율). depth는 **group_start 세팅 전에** 계산한다 —
     /// 그래야 effectiveDepthAt이 이 탭을 아직 마커가 아닌 "소속 카드"로 보고 현재(소속) depth를 돌려준다(최상위=0).
-    fn beginGroupForTab(self: *AppSession, tab: *Tab, kind: GroupCreateKind) void {
+    fn beginGroupForTab(self: *AppSession, tab: *Tab, kind: GroupCreateKind, break_next: bool) void {
         if (tab.group_start != null) return;
         // 단일 패스로 (1) 전체 마커 수(group_count — 기본 이름 "그룹 N"용)와 (2) tab 위치의 enclosing depth(위치 파생 스택,
         // effectiveDepthAt과 동형)를 함께 구한다 — 옛 코드는 count 루프 후 effectiveDepthAt이 0부터 스택을 다시 훑었다
         // (code-review #15). tab은 아직 마커가 아니므로(위 가드) 카드 = 자기 앞 마커들의 스택 top depth(최상위=0). depth는
         // tab 도달 시점에 캡처하고(이후 마커는 depth 무관), group_count는 tab 이후 마커도 세야 하므로 루프를 끝까지 돈다.
+        // tab_index는 §14.5 "선택 탭만 그룹"의 top_level write 대상(마커 뒤 첫 탭)을 찾는 데 쓴다.
         var group_count: usize = 0;
         var enclosing_depth: u8 = 0;
         var found_depth = false;
+        var tab_index: usize = 0; // tab의 리스트 인덱스(top_level write 대상 = tab_index+1, §14.5 요구1)
         var stack: [max_group_nesting]u8 = undefined; // 위치 파생 정규화 depth 스택(projectRows pass1과 동형)
         var top: usize = 0;
         var prev_pinned: ?bool = null; // 핀 리전 경계 추적(§12 GP1 — effectiveDepthAt과 동형)
-        for (self.tabs.items) |t| {
-            // 핀 리전 경계에서 depth 스택 리셋 — subtree는 핀 리전을 못 넘는다(effectiveDepthAt 7263~). 이게 없으면
-            // 고정 그룹(스택에 depth push) 뒤 **비고정 top카드**의 enclosing_depth가 고정 그룹 depth를 상속해, 중첩 그룹을
-            // 만들면 group_depth가 (고정 그룹 depth)+1로 잘못 저장된다(unpin 후 오중첩·persist). 저장 depth는 정확해야 한다.
-            if (prev_pinned) |pp| if (t.pinned != pp) {
+        for (self.tabs.items, 0..) |t, i| {
+            // 핀 리전 경계 + §2.1 재설계(§14.3·§14.5 SR3) **top_level edge 경계**에서 depth 스택 리셋(projectRows pass1과 동형).
+            // 핀 리전: subtree는 핀 리전을 못 넘는다(effectiveDepthAt 7263~). 이게 없으면 고정 그룹(스택에 depth push) 뒤
+            // **비고정 top카드**의 enclosing_depth가 고정 그룹 depth를 상속해, 중첩 그룹을 만들면 group_depth가 (고정 그룹
+            // depth)+1로 잘못 저장된다(unpin 후 오중첩·persist). top_level: 최상위 복귀 카드도 depth 0으로 리셋해야 그 뒤
+            // 카드가 그룹 depth를 상속하지 않는다(SR1이 SR3로 미룬 pass1 미러). 전 탭 top_level=false면 이 항은 never-fire라
+            // 옛 동작과 byte-identical. 저장 depth는 정확해야 한다.
+            if ((prev_pinned != null and t.pinned != prev_pinned.?) or t.top_level) {
                 top = 0;
-            };
+            }
             prev_pinned = t.pinned;
             if (!found_depth and t == tab) { // 이 카드 위치의 소속 그룹 depth = 스택 top(없으면 최상위 0)
+                tab_index = i;
                 enclosing_depth = if (top > 0) stack[top - 1] else 0;
                 found_depth = true;
             }
@@ -5157,6 +5182,24 @@ pub const AppSession = struct {
         tab.group_start = name; // owned
         tab.group_collapsed = false;
         tab.group_depth = new_depth;
+        // §2.1 재설계(§14.5·leaf-only §13.8): 마커는 top_level 금지 — top_level 최상위 카드를 그룹으로 묶으면(카드→마커 전이)
+        // 그 top_level을 clear한다(마커의 "형제 top-level 그룹"은 group_depth pop으로 표현, §13.8). 카드가 top_level이 아니었으면
+        // no-op(byte-identical) — 흡수 경로(break_next=false)도 안전.
+        tab.top_level = false;
+        // §2.1 재설계(§14.5, 요구1) **"선택 탭만 그룹"**: 마커 뒤 첫 탭에 `top_level:=true`를 써 위치 파생 흡수를 top_level
+        // break로 끊는다(정책 b — 단일 탭 그룹 + 뒤 탭들 promote: 첫 탭이 최상위 복귀 run을 개시해 그 뒤 카드도 sticky-reset로
+        // 최상위). break_next=false는 SR3 이전 "마커 뒤 전부 흡수"를 재현하는 테스트/스크린샷 경로(위 tab.top_level clear만).
+        // **엣지 안전 처리**: (1) 다음 탭 없음(마커가 리스트 끝) → 흡수할 게 없어 write 생략, (2) 다음이 이미 마커
+        // (group_start!=null, 연속 그룹) → 그 자체가 그룹 경계라 write 불필요·leaf-only상 마커엔 top_level 금지, (3) 다음이
+        // 다른 핀 리전(pinned 불일치) → 핀 경계가 이미 subtree를 끊음(§12 GP1). 위 3경우가 아니면 다음 leaf 카드에 top_level
+        // write(이미 true여도 idempotent). normalize/float **전에** 써야 그들이 top_level break를 인식해 멤버 범위를 정확히 잡는다.
+        if (break_next) {
+            const ni = tab_index + 1;
+            if (ni < self.tabs.items.len) {
+                const next = self.tabs.items[ni];
+                if (next.group_start == null and next.pinned == tab.pinned) next.top_level = true;
+            }
+        }
         // 그룹 고정 C2(§12.5 GP2): 새 마커 밑으로 흡수된 멤버 카드의 pinned 캐시를 마커 기준으로 재동기(비프리뷰 경로).
         // 보통은 새 마커 pinned=0(create는 pin을 안 건드림)이라 멤버도 0(무변화)이지만, 고정 top-level 카드를 마커로 만든
         // 경우엔 흡수 멤버가 마커 pinned를 따르게 canonical화한다(마커 = 그룹 고정 권위, §12.2).
@@ -5356,6 +5399,26 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 그룹 멤버 카드를 **제자리에서** 최상위 섬으로 승격한다(promote-in-place — 우클릭 "여기서 최상위로 분리", §14.5·§14.7).
+    /// `top_level:=true`만 세팅해 그 카드부터 최상위 복귀 run을 개시한다(위치·순서 불변 — 그룹 안 gap에 최상위 섬으로 남고,
+    /// sticky-reset로 뒤 멤버까지 그룹에서 끊긴다, §14.1). **removeFromGroupForTab과 구별되는 eject flavor divergence(§14.7)**:
+    ///  - removeFromGroup = 카드를 그 리전 첫 마커 **앞으로 이동** + **고정 상실**(unpin, §12.7 보강4).
+    ///  - promote-in-place = **제자리** top_level 세팅 + **pin 불변**(고정 리전 안이면 고정 top카드로 남음 — §14.7 (2)).
+    /// 마커 카드(group_start!=null)면 no-op(마커는 이미 그룹 시작이라 승격 무의미·leaf-only상 top_level 금지). 그룹 밖(최상위·
+    /// top-level run·그룹 전무 = tabIsInGroup=false)이면 no-op(승격할 소속이 없음). top_level 하드 break로 이 카드가 그룹 subtree
+    /// 에서 빠졌으니 pinned 캐시를 재동기(§14.4 top_level 인식 normalize)하고, top-level로 전이한 카드의 stale local_pinned를
+    /// 클리어한다(GL §13.7 전이 4번째 지점 — ungroup·removeFromGroup·드래그와 동형 위생).
+    fn promoteTabToTopLevelInPlace(self: *AppSession, tab: *Tab) void {
+        if (tab.group_start != null) return; // 마커 카드 → no-op(leaf-only §13.8, 승격 무의미)
+        if (!self.tabIsInGroup(tab)) return; // 그룹 밖(최상위·top-level run) → no-op(승격할 소속 없음)
+        tab.top_level = true; // 제자리 최상위 복귀(위치·pin 불변 — §14.7 eject flavor divergence)
+        self.normalizePinnedFromGroups(); // 그룹 고정 C2(§14.4): top_level 하드 break로 빠진 카드 반영, 남은 그룹 canonical
+        self.floatLocalPinsAllGroups(); // 남은 그룹 로컬 pin 재float(승격 카드는 이제 최상위)
+        self.clearStaleLocalPins(); // 위생(GL §13.7): top-level 전이한 카드의 stale local_pinned 클리어(고아 📌 방지)
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
     /// 워크스페이스가 속한 그룹에 공통 색을 지정한다(SG5-2 — 우클릭 "그룹 색: …"). 그 탭 위(자기 포함)에서 가장 가까운
     /// group_start 마커 탭을 찾아 group_color를 세팅한다(ungroupTab과 같은 상향 탐색). 그룹 색은 마커 탭 **하나에만**
     /// 저장하고 소속 카드는 위치 파생으로 그 색을 따른다(별도 저장 없음 — §2.1 위치 파생과 동형). color=0이면 색 해제
@@ -5523,6 +5586,7 @@ pub const AppSession = struct {
             .ungroup => self.ungroupTab(self.activeTab()),
             .rename_group => self.startRenameGroupForTab(self.activeTab()),
             .remove_from_group => self.removeFromGroupForTab(self.activeTab()), // 이 카드 하나만 최상위로(그룹은 유지)
+            .promote_to_top_level => self.promoteTabToTopLevelInPlace(self.activeTab()), // 제자리 최상위 승격(§14.5·§14.7 — top_level만·pin 불변)
 
             // Term(가로 탭) 단위: ⌘T=활성 pane에 새 Term, ⌘W=활성 Term 닫기(Term→pane→워크스페이스
             // cascade), ⌘]/⌘[=다음/이전 Term. 생성 실패는 무시(newTermInActivePane이 errdefer로 원복).
@@ -5654,7 +5718,7 @@ pub const AppSession = struct {
             _ = self.newTab() catch {};
             _ = self.newTab() catch {}; // [t0, t1, t2]
             if (self.tabs.items.len >= 2) {
-                self.createGroupForTab(self.tabs.items[1]); // t0=최상위, t1·t2=그룹
+                self.createGroupAbsorbForTab(self.tabs.items[1]); // t0=최상위, t1·t2=그룹
                 if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[1].group_collapsed = true;
                 // SG5-2: MARU_FORCE_GROUP_COLOR=1이면 그 그룹에 파랑(0x4A7BC4)을 얹어 헤더 밴드 tint·소속 카드 좌측
                 // accent 막대에 그룹 색이 뜨는지 헤드리스 스크린샷으로 self-verify(브라우저 탭 그룹식 색 구분).
@@ -5675,8 +5739,8 @@ pub const AppSession = struct {
             while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
             if (self.tabs.items.len >= 5) {
                 // 두 형제 최상위 그룹: A=[t1,t2](마커 t1, depth1), B=[t3,t4](마커 t3, depth1). t0는 고정 최상위 카드(개별 pin 대조).
-                self.createGroupForTab(self.tabs.items[1]); // A
-                self.createSiblingGroupForTab(self.tabs.items[3]); // B(형제, depth1)
+                self.createGroupAbsorbForTab(self.tabs.items[1]); // A
+                self.createSiblingGroupAbsorbForTab(self.tabs.items[3]); // B(형제, depth1)
                 if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[1].group_collapsed = true; // A 접힘 → 헤더만
                 if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
                     self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
@@ -5697,8 +5761,8 @@ pub const AppSession = struct {
             var made: usize = 0;
             while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
             if (self.tabs.items.len >= 5) {
-                self.createGroupForTab(self.tabs.items[1]); // 그룹 A(depth 1) — t1·t2 소속
-                self.createGroupForTab(self.tabs.items[3]); // t3은 A 안(depth1 카드)이라 새 그룹 B는 depth 2(중첩)
+                self.createGroupAbsorbForTab(self.tabs.items[1]); // 그룹 A(depth 1) — t1·t2 소속
+                self.createGroupAbsorbForTab(self.tabs.items[3]); // t3은 A 안(depth1 카드)이라 새 그룹 B는 depth 2(중첩)
                 if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[1].group_collapsed = true; // 부모 접기 → 자식 통째 숨김
                 if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
                     self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
@@ -5715,8 +5779,8 @@ pub const AppSession = struct {
             while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
             if (self.tabs.items.len >= 5) {
                 // 두 형제 최상위 그룹: A=[t1,t2](depth1), B=[t3,t4](depth1). t0는 최상위 카드.
-                self.createGroupForTab(self.tabs.items[1]); // A
-                self.createSiblingGroupForTab(self.tabs.items[3]); // B(형제, depth1)
+                self.createGroupAbsorbForTab(self.tabs.items[1]); // A
+                self.createSiblingGroupAbsorbForTab(self.tabs.items[3]); // B(형제, depth1)
                 // A(마커 index1)를 B 헤더에 드롭 = 중첩. B 헤더 row를 찾아 groupNestPlan→moveGroupNesting(드롭 결과 재현).
                 self.recomputeVisibleTabs();
                 var b_row: usize = 0;
@@ -5741,7 +5805,7 @@ pub const AppSession = struct {
             while (made < 3) : (made += 1) _ = self.newTab() catch {}; // [t0..t3]
             if (self.tabs.items.len >= 4) {
                 // t0·t1 최상위, A=[t2,t3](마커 t2, depth1) 접힘. drag t1 → 접힌 A 안(§9 SG8 접힌 그룹 드롭).
-                self.createGroupForTab(self.tabs.items[2]); // 그룹 A(마커 index2) — t2·t3 소속
+                self.createGroupAbsorbForTab(self.tabs.items[2]); // 그룹 A(마커 index2) — t2·t3 소속
                 self.tabs.items[2].group_collapsed = true; // 접힘(헤더만, t3 숨김)
                 self.recomputeVisibleTabs(); // rows: [card t0(0), card t1(1), header A collapsed(2)]
                 // hit-test: t1(origin=1)을 접힌 A 헤더(row2)에 드롭 → 그룹 끝 자리(sidebarGroupDropTargetTab). 그 plan을 프리뷰.
@@ -5769,8 +5833,8 @@ pub const AppSession = struct {
             while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
             if (self.tabs.items.len >= 5) {
                 // 두 형제 최상위 그룹: A=[t1,t2](마커 index1, depth1), B=[t3,t4](마커 index3, depth1). t0는 최상위 카드.
-                self.createGroupForTab(self.tabs.items[1]); // A
-                self.createSiblingGroupForTab(self.tabs.items[3]); // B(형제, depth1)
+                self.createGroupAbsorbForTab(self.tabs.items[1]); // A
+                self.createSiblingGroupAbsorbForTab(self.tabs.items[3]); // B(형제, depth1)
                 if (std.c.getenv("MARU_FORCE_GROUP_COLLAPSED") != null) self.tabs.items[3].group_collapsed = true; // B 접힘 → 고스트도 보임(flip)
                 if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) {
                     self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
@@ -5813,7 +5877,7 @@ pub const AppSession = struct {
             var made: usize = 0;
             while (made < 4) : (made += 1) _ = self.newTab() catch {}; // [t0..t4]
             if (self.tabs.items.len >= 5) {
-                self.createGroupForTab(self.tabs.items[1]); // A = [t1(마커), t2, t3, t4] — t0는 최상위 카드
+                self.createGroupAbsorbForTab(self.tabs.items[1]); // A = [t1(마커), t2, t3, t4] — t0는 최상위 카드
                 const t3 = self.tabs.items[3]; // 그룹 A의 (중간) 멤버 — heap-pin이라 float 재배치 후에도 안정
                 self.toggleLocalPin(t3); // t3 로컬 pin → 마커 t1 직후(그룹 내 상단)로 float, 📌
                 if (std.c.getenv("MARU_FORCE_GROUP_LOCALPIN_GROUPPIN") != null) {
@@ -5838,8 +5902,8 @@ pub const AppSession = struct {
             var made: usize = 0;
             while (made < 5) : (made += 1) _ = self.newTab() catch {}; // [t0..t5]
             if (self.tabs.items.len >= 6) {
-                self.createGroupForTab(self.tabs.items[1]); // A = [t1(마커 d1), t2, t3, t4, t5] — t0 최상위
-                self.createGroupForTab(self.tabs.items[3]); // t3은 A 안(d1 카드) → 자식 B(d2) = [t3, t4, t5], A 직접 = t2
+                self.createGroupAbsorbForTab(self.tabs.items[1]); // A = [t1(마커 d1), t2, t3, t4, t5] — t0 최상위
+                self.createGroupAbsorbForTab(self.tabs.items[3]); // t3은 A 안(d1 카드) → 자식 B(d2) = [t3, t4, t5], A 직접 = t2
                 const t2 = self.tabs.items[2]; // A 직접 멤버(heap-pin — float 재배치 후에도 안정)
                 const t5 = self.tabs.items[5]; // 자식 B leaf 멤버
                 self.toggleLocalPin(t2); // A 직접 로컬 pin → A 마커 직후로 float, 📌
@@ -5848,6 +5912,20 @@ pub const AppSession = struct {
                     self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
                     self.tabs.items[3].group_color = 0xC44A7B; // B 자홍(중첩 색 구분)
                 }
+                self.rebuildSidebar() catch {};
+            }
+        }
+        // MARU_FORCE_INTERLEAVE=1 — §2.1 재설계(§14.5 SR3) "선택 탭만 그룹"을 헤드리스 스크린샷으로 self-verify한다. 워크스페이스
+        // 4개 [t0,t1,t2,t3]에서 **t1만** 그룹으로 묶으면(프로덕션 createGroup — 다음 탭 t2에 top_level write) 사이드바에
+        //   (a) 최상위 카드 t0, (b) 그룹 헤더 A + 그룹 안 카드 t1(들여쓰기, 배지 1), (c) **그룹 밖 최상위 카드 t2·t3**
+        // (흡수 안 됨 — t2가 top_level 복귀 run 개시, t3은 sticky top-level)가 뜬다. 옛 흡수 동작이면 t2·t3이 그룹으로
+        // 빨려들어갔을 것 — 인터리빙(그룹 뒤 최상위 카드 복귀)이 보이는지 대비 캡처. env-gate라 일반 실행엔 영향 없다.
+        if (std.c.getenv("MARU_FORCE_INTERLEAVE") != null) {
+            var made: usize = 0;
+            while (made < 3) : (made += 1) _ = self.newTab() catch {}; // [t0..t3]
+            if (self.tabs.items.len >= 4) {
+                self.createGroupForTab(self.tabs.items[1]); // 선택 탭만 그룹(§14.5) — t1만 그룹, t2에 top_level write
+                if (std.c.getenv("MARU_FORCE_GROUP_COLOR") != null) self.tabs.items[1].group_color = 0x4A7BC4; // A 파랑
                 self.rebuildSidebar() catch {};
             }
         }
@@ -7937,6 +8015,10 @@ pub const AppSession = struct {
             if (self.tabIsInGroup(t.workspace)) {
                 self.context_menu_items_buf[n] = "그룹에서 빼기"; // ctx_menu_group_remove
                 n += 1;
+                // "여기서 최상위로 분리"(promote-in-place, §14.5·§14.7) — remove 바로 뒤. removeFromGroup(그룹 밖 이동+unpin)과
+                // 달리 **제자리** top_level만 세팅(위치·pin 불변 — 고정 top카드 가능). remove와 같은 tabIsInGroup 게이트라 함께 뜬다.
+                self.context_menu_items_buf[n] = "여기서 최상위로 분리"; // ctx_menu_group_promote
+                n += 1;
             }
         };
         // 그룹 헤더 우클릭(SG5-2-header) — 대상은 group_start 마커 탭(renameTargetAt). 헤더 스코프 액션만: Rename(0)=그룹
@@ -8065,6 +8147,8 @@ pub const AppSession = struct {
                 self.ungroupTab(tab); // 그룹 풀기(클릭 대상이 속한 그룹의 시작 마커 제거)
             } else if (sel == ctx_menu_group_remove) {
                 self.removeFromGroupForTab(tab); // 그룹에서 빼기(이 카드 하나만 최상위로 — 그룹 유지). 그룹 소속 카드에만 뜨는 항목
+            } else if (sel == ctx_menu_group_promote) {
+                self.promoteTabToTopLevelInPlace(tab); // 여기서 최상위로 분리(제자리 top_level·pin 불변 — remove의 이동+unpin과 구별, §14.7)
             } else if (sel >= ctx_menu_bg_first and sel < ctx_menu_bg_first + tab_color_presets.len) {
                 tab.background_color = tab_color_presets[sel - ctx_menu_bg_first]; // 배경 tint 프리셋
             } else if (sel >= ctx_menu_accent_first and sel < ctx_menu_accent_first + tab_color_presets.len) {
@@ -17601,6 +17685,256 @@ test "SR2(d): top_level 0개 byte-identical — suffix-exclusion 꼬리 배제·
     for (session.tabs.items) |t| try std.testing.expect(!t.top_level); // SR2가 top_level 필드를 안 건드림
 }
 
+// SR3(§2.1 재설계 §14.5 — createGroup write "선택 탭만 그룹" + promote-in-place). 프로덕션 createGroup은 이제 마커 뒤 첫 탭에
+// top_level:=true를 써 그룹을 **선택 탭만**으로 끊고(정책 b — 뒤 탭들 promote), 마커 승격 시 그 카드의 top_level을 clear한다
+// (leaf-only §13.8). 아래 (a)선택-탭-만·(b)엣지·(c)promote-in-place·(d)inline depth 리셋·(e)흡수 변형 byte-identical을 고정한다.
+test "SR3(a): createGroup 선택 탭만 그룹 — 마커 뒤 첫 탭 top_level write·뒤 탭 promote·흡수 안 됨(§14.5 요구1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // createGroup(t1) in [t0,t1,t2,t3] → t1이 마커·그룹 첫 멤버, 마커 뒤 첫 탭 t2에 top_level write. t3은 top_level 플래그가
+    // 없어도 sticky top-level run(t2가 스택을 비움)이라 자동 최상위 → 그룹은 {t1}만.
+    session.createGroupForTab(session.tabs.items[1]);
+    try std.testing.expect(session.tabs.items[1].group_start != null); // t1 = 마커
+    try std.testing.expect(!session.tabs.items[1].top_level); // 마커는 top_level 금지(leaf-only) — 원래 false라 no-op
+    try std.testing.expect(session.tabs.items[2].top_level); // ★ 마커 뒤 첫 탭에 top_level write(선택 탭만 그룹)
+    try std.testing.expect(!session.tabs.items[3].top_level); // t3은 플래그 없음 — sticky 파생으로만 최상위(첫 탭에만 write)
+    try std.testing.expect(!session.tabs.items[0].top_level); // t0은 마커 앞 최상위 카드(무변화)
+
+    // 파생: 그룹={t1}. groupSubtreeEnd(1)=2(t1만), t2·t3은 depth0 최상위·enclosing null·그룹 밖.
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(1, null, null)); // A subtree=[1,2) — t2 흡수 안 됨
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(1, null, null)); // t1 마커 depth1
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null)); // t2 = 최상위 복귀 depth0
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(3, null, null)); // t3 = sticky top-level depth0
+    try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // t2 = 그룹 밖
+    try std.testing.expect(session.enclosingGroupMarkerIndex(3) == null); // t3 = 그룹 밖(sticky — t2 top_level에 닿아 null)
+    try std.testing.expect(!session.tabIsInGroup(session.tabs.items[2])); // t2 흡수 안 됨
+    try std.testing.expect(!session.tabIsInGroup(session.tabs.items[3])); // t3도 최상위
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[1])); // 마커는 자기 그룹 안
+
+    // 렌더: rows=[c t0, gh A(member_count=1), c t1, c t2, c t3]. 배지는 마커+자기카드 1개만(t2 흡수 안 됨).
+    session.recomputeVisibleTabs();
+    try std.testing.expectEqual(@as(usize, 5), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[1] == .group_header);
+    try std.testing.expectEqual(@as(u16, 1), session.sidebar_rows.items[1].group_header.member_count); // ★ 그룹={t1} 배지 1
+}
+
+test "SR3(b): createGroup top_level write 엣지 — 다음 마커·리스트 끝·다른 핀 리전 안전 skip + 형제 그룹 정합" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 엣지(1) 다음이 이미 마커(연속 그룹): createGroup(t2)이 먼저 t2를 마커로(다음 t3에 top_level). 그다음 createGroup(t1) —
+    // t1의 다음 탭 t2가 **마커**라 top_level write skip(마커엔 top_level 금지·그 자체가 경계). t2.top_level은 false 유지.
+    session.createGroupForTab(session.tabs.items[2]); // t2 마커, t3.top_level=true
+    try std.testing.expect(session.tabs.items[3].top_level);
+    session.createGroupForTab(session.tabs.items[1]); // 다음 t2=마커 → write skip
+    try std.testing.expect(session.tabs.items[1].group_start != null);
+    try std.testing.expect(!session.tabs.items[2].top_level); // ★ 마커엔 top_level 안 씀(엣지 skip)
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(1, null, null)); // {t1}만(t2 마커가 형제로 끊음)
+
+    // 엣지(2) 리스트 끝(다음 탭 없음): 새 세션 [u0,u1]에서 createGroup(u1) — u1이 마지막이라 write 대상 없음, 안전(그룹={u1}).
+    const s2 = try allocator.create(AppSession);
+    defer allocator.destroy(s2);
+    try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s2.deinit();
+    _ = try s2.newTab(); // [u0, u1]
+    s2.createGroupForTab(s2.tabs.items[1]); // 마지막 탭 → 다음 없음
+    try std.testing.expect(s2.tabs.items[1].group_start != null);
+    try std.testing.expectEqual(@as(usize, 2), s2.groupSubtreeEnd(1, null, null)); // {u1}(len까지, 안전)
+
+    // 엣지(3) 다음이 다른 핀 리전: [p0(pin),p1(pin),c0,c1]에서 createGroup(p1) — 다음 c0는 비고정(다른 리전)이라 write skip
+    // (핀 경계가 이미 subtree를 끊음). c0.top_level false 유지. 그룹={p1}.
+    const s3 = try allocator.create(AppSession);
+    defer allocator.destroy(s3);
+    try s3.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s3.deinit();
+    inline for (0..3) |_| _ = try s3.newTab(); // [p0,p1,c0,c1]
+    s3.tabs.items[0].pinned = true;
+    s3.tabs.items[1].pinned = true;
+    s3.createGroupForTab(s3.tabs.items[1]); // 다음 c0=비고정(다른 리전) → write skip
+    try std.testing.expect(s3.tabs.items[1].group_start != null);
+    try std.testing.expect(!s3.tabs.items[2].top_level); // ★ 다른 핀 리전 카드엔 top_level 안 씀(엣지 skip)
+
+    // 형제 그룹 정합: [w0, w1, w2, w3] 흡수 그룹 A(w0) 뒤 createSiblingGroup(w2) — w2가 형제 마커, 다음 w3에 top_level write.
+    // A={w0,w1}(w2가 형제로 끊음), B={w2}(w3 promote). "선택 탭만 그룹"이 형제 경로에도 적용됨.
+    const s4 = try allocator.create(AppSession);
+    defer allocator.destroy(s4);
+    try s4.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s4.deinit();
+    inline for (0..3) |_| _ = try s4.newTab(); // [w0..w3]
+    s4.createGroupAbsorbForTab(s4.tabs.items[0]); // A = [w0,w1,w2,w3] 흡수(SR3 이전 다중 멤버)
+    s4.createSiblingGroupForTab(s4.tabs.items[2]); // w2 형제 마커(선택 탭만) → w3에 top_level write
+    try std.testing.expect(s4.tabs.items[3].top_level); // ★ 형제도 다음 탭 promote
+    try std.testing.expectEqual(@as(usize, 2), s4.groupSubtreeEnd(0, null, null)); // A={w0,w1}
+    try std.testing.expectEqual(@as(usize, 3), s4.groupSubtreeEnd(2, null, null)); // B={w2}(w3 흡수 안 됨)
+    try std.testing.expect(!s4.tabIsInGroup(s4.tabs.items[3])); // w3 최상위
+}
+
+test "SR3(c): promote-in-place — 제자리 top_level·위치·pin 불변(removeFromGroup eject flavor 대비, §14.7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 다중 멤버 그룹 A=[t0(마커),t1,t2,t3]을 흡수로 만든 뒤(SR4 드래그로 도달 가능한 정상 상태) 중간 멤버 t2를 promote.
+    session.createGroupAbsorbForTab(session.tabs.items[0]);
+    const t2 = session.tabs.items[2];
+    try std.testing.expect(session.tabIsInGroup(t2)); // 승격 전 = 그룹 안
+    session.promoteTabToTopLevelInPlace(t2);
+
+    try std.testing.expect(t2.top_level); // ★ 제자리 top_level 세팅
+    try std.testing.expectEqual(t2, session.tabs.items[2]); // ★ 위치 불변(이동 없음 — removeFromGroup의 첫마커 앞 이동과 대비)
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null)); // ★ 그룹 depth 벗어남(0)
+    try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // 그룹 밖
+    try std.testing.expect(!session.tabIsInGroup(t2)); // 그룹 밖
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[1])); // 앞 멤버 t1은 여전히 A 안
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // A={t0,t1}(t2에서 끊김)
+    try std.testing.expect(!session.tabIsInGroup(session.tabs.items[3])); // t3 sticky top-level(cascade — §14.1)
+
+    // 마커 카드 promote = no-op(leaf-only §13.8 — 마커는 top_level 금지). 그룹 밖 카드도 no-op.
+    session.promoteTabToTopLevelInPlace(session.tabs.items[0]); // 마커 t0
+    try std.testing.expect(!session.tabs.items[0].top_level); // 마커엔 안 씀
+    session.promoteTabToTopLevelInPlace(t2); // 이미 최상위(그룹 밖) → no-op(idempotent)
+    try std.testing.expect(t2.top_level);
+
+    // pin 불변(eject flavor divergence §14.7): 고정 그룹에서 promote는 pin을 유지(고정 top카드). removeFromGroup은 unpin.
+    const s2 = try allocator.create(AppSession);
+    defer allocator.destroy(s2);
+    try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s2.deinit();
+    inline for (0..3) |_| _ = try s2.newTab(); // [t0..t3]
+    s2.createGroupAbsorbForTab(s2.tabs.items[0]);
+    for (s2.tabs.items) |t| t.pinned = true; // 고정 그룹(I1 uniform)
+    s2.normalizePinnedFromGroups();
+    const p2 = s2.tabs.items[2];
+    s2.promoteTabToTopLevelInPlace(p2);
+    try std.testing.expect(p2.top_level); // 제자리 승격
+    try std.testing.expect(p2.pinned); // ★ pin 불변(고정 top카드 — removeFromGroup의 unpin과 대비)
+    try std.testing.expect(s2.pinBoundariesAlignGroups()); // 고정 리전 안 top_level 정합(§14.4·§14.7 (1))
+}
+
+test "SR3(d): beginGroupForTab inline depth 리셋 — top_level 뒤 새 그룹이 그룹 depth 상속 안 함(§14.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 배치: t0=그룹 A 마커(d1)·t1=A 멤버·t2=top_level 최상위 복귀 카드·t3=최상위. t3에 createGroup(.nested)을 부르면,
+    // inline depth 스택이 t2의 top_level에서 리셋돼야 enclosing_depth=0 → 새 그룹 C가 depth 1(t3이 A 안이 아님). 리셋이
+    // 없으면 t3이 A depth(1)를 상속해 C.group_depth=2(오중첩·persist)가 된다.
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "A");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].top_level = true;
+    session.createGroupForTab(session.tabs.items[3]); // C 마커(t3은 마지막이라 다음 top_level write 없음)
+    try std.testing.expect(session.tabs.items[3].group_start != null);
+    try std.testing.expectEqual(@as(u8, 1), session.tabs.items[3].group_depth); // ★ depth1(A depth 상속 안 함 — 리셋 동작)
+    try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(3, null, null)); // 렌더 depth도 1(형제 top-level 그룹)
+}
+
+test "SR3(e): createGroupAbsorb 다중 멤버 byte-identical 재현(회귀 0) + 마커 top_level clear" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+
+    // 흡수 변형(테스트용)은 SR3 이전 동작을 재현 — createGroupAbsorb(t0) → 그룹={t0,t1,t2}(마커 뒤 전부 흡수), top_level 0개.
+    session.createGroupAbsorbForTab(session.tabs.items[0]);
+    try std.testing.expectEqual(@as(usize, 3), session.groupSubtreeEnd(0, null, null)); // 전부 한 그룹(연속 파티션)
+    for (session.tabs.items) |t| try std.testing.expect(!t.top_level); // 흡수 경로는 top_level를 안 씀(byte-identical)
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[1])); // t1 흡수됨
+    try std.testing.expect(session.tabIsInGroup(session.tabs.items[2])); // t2 흡수됨
+
+    // 마커 top_level clear(카드→마커 전이): top_level 최상위 카드를 그룹으로 묶으면 그 top_level이 clear된다(leaf-only §13.8).
+    const s2 = try allocator.create(AppSession);
+    defer allocator.destroy(s2);
+    try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s2.deinit();
+    inline for (0..2) |_| _ = try s2.newTab(); // [t0..t2]
+    s2.tabs.items[1].top_level = true; // t1 = top_level 최상위 섬
+    s2.createGroupForTab(s2.tabs.items[1]); // t1을 그룹 마커로 승격
+    try std.testing.expect(s2.tabs.items[1].group_start != null); // 마커
+    try std.testing.expect(!s2.tabs.items[1].top_level); // ★ 카드→마커 전이 시 top_level clear(마커는 leaf-only상 top_level 금지)
+}
+
 // GP2(그룹 고정 C2 — normalizePinnedFromGroups + 복원 순서 + 마커 승계, docs/sidebar-groups.md §12.5·§12.7·§12.9).
 // 마커 pinned = 그룹 고정 권위, 멤버 카드 pinned = 파생 캐시. normalize가 멤버를 마커 값으로 재기록해 stablePartition이
 // 그룹을 통째 옮기게 한다(정규화 누락 = shred). 아래 (a)shred방지·(b)복원순서·(c)마커승계·(d)드래그불변 4케이스.
@@ -17805,7 +18139,7 @@ test "GP3(b)/GL2: 카드 pin 라우팅 — 마커 카드=그룹째 고정·비�
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
-    session.createGroupForTab(session.tabs.items[0]); // t0=마커, t1·t2=위치 파생 멤버(그룹 [t0,t1,t2])
+    session.createGroupAbsorbForTab(session.tabs.items[0]); // t0=마커, t1·t2=위치 파생 멤버(그룹 [t0,t1,t2])
 
     // ── (1) **마커 카드**(t0) 우클릭 → 그룹째 고정(cardPinRole=.group). 마커는 그룹 시작이라 개별 pin이면 C2 캐시 권위
     //    (§12.2)가 깨지므로 그룹째로 위임(GP3 유지). accept → 마커+모든 멤버 통째 pinned.
@@ -18014,8 +18348,8 @@ test "GP4(a): pin_derived·sidebarRowShowsPin — 멤버 📌 억제·헤더 인
     inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
 
     // MARU_FORCE_GROUP_PIN 훅과 동형: t0=고정 최상위 카드(개별 pin), A=[t1,t2] 고정 그룹, B=[t3,t4] 비고정 그룹(대조).
-    session.createGroupForTab(session.tabs.items[1]); // A
-    session.createSiblingGroupForTab(session.tabs.items[3]); // B(형제, depth1)
+    session.createGroupAbsorbForTab(session.tabs.items[1]); // A
+    session.createSiblingGroupAbsorbForTab(session.tabs.items[3]); // B(형제, depth1)
     session.tabs.items[0].pinned = true; // 고정 최상위 카드(개별 pin — 그룹과 직교)
     session.toggleGroupPin(session.tabs.items[1]); // A 그룹째 고정 → 프리픽스로·멤버 pin 동기(§12.10 GP3)
     session.recomputeVisibleTabs();
@@ -18173,7 +18507,7 @@ test "그룹핀 리뷰 #2: beginGroupForTab depth가 pin-region-aware — 고정
 
     // 비고정 top카드 t2에 새 그룹 생성 → t2는 자기 리전 최상위(고정 그룹과 다른 리전)라 enclosing_depth=0 → 저장 depth=1.
     // 옛 버그: PG 마커가 depth 스택에 남아 enclosing_depth=1 → depth=2(오중첩)로 저장됐다.
-    session.createGroupForTab(session.tabs.items[2]);
+    session.createGroupAbsorbForTab(session.tabs.items[2]);
     try std.testing.expectEqual(@as(u8, 1), session.tabs.items[2].group_depth); // ★ 저장 depth 정확(오중첩 방지)
     // pin-region-aware 파생(effectiveDepthAt)과도 일치 — 저장값이 렌더 파생과 어긋나지 않는다.
     try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(2, null, null));
@@ -18198,8 +18532,8 @@ test "그룹핀 리뷰 #3: toggleGroupPin이 중첩 subgroup에서 top-level로 
     const t3 = session.tabs.items[3];
 
     // 최상위 그룹 G1=[t0..t4](depth1), 그 안 중첩 subgroup G1a=[t2..t4](depth2). t3 = G1a 멤버.
-    session.createGroupForTab(t0); // G1(마커 t0, depth1)
-    session.createGroupForTab(t2); // t2가 G1 안 → 중첩 subgroup(depth2)
+    session.createGroupAbsorbForTab(t0); // G1(마커 t0, depth1)
+    session.createGroupAbsorbForTab(t2); // t2가 G1 안 → 중첩 subgroup(depth2)
     try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(0, null, null)); // G1 top-level
     try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(2, null, null)); // G1a 중첩
 
@@ -18382,8 +18716,8 @@ test "그룹핀 리뷰 #8: 그룹 헤더 드래그 시작이 hovered_slot을 클
     const t2 = session.tabs.items[2];
 
     // 두 형제 그룹 A=[t0,t1], B=[t2,t3](B depth1로 오버라이드해 형제 최상위).
-    session.createGroupForTab(t0);
-    session.createGroupForTab(t2);
+    session.createGroupAbsorbForTab(t0);
+    session.createGroupAbsorbForTab(t2);
     t2.group_depth = 1;
     session.recomputeVisibleTabs(); // rows: [hA(0), c t0(1), c t1(2), hB(3), c t2(4), c t3(5)]
 
@@ -18578,7 +18912,7 @@ test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try session.newTab(); // [t0, t1, t2, t3]
-    session.createGroupForTab(session.tabs.items[2]); // A=[t2,t3], 최상위=[t0,t1]
+    session.createGroupAbsorbForTab(session.tabs.items[2]); // A=[t2,t3], 최상위=[t0,t1]
 
     // 직접 simulateDrop으로 ghost·순열·불변 확인(넣기: t0(index0)를 t3(index3) 자리로 = 그룹 A 안).
     {
@@ -18972,7 +19306,7 @@ test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collap
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
-    session.createGroupForTab(session.tabs.items[0]); // 전부 한 그룹(연속 파티션)
+    session.createGroupAbsorbForTab(session.tabs.items[0]); // 전부 한 그룹(연속 파티션)
     session.tabs.items[0].group_collapsed = true; // 그룹 접힘(영속 의도)
     session.tabs.items[1].custom_name = try allocator.dupe(u8, "findme"); // 그룹 안 카드 하나에 매치용 이름
 
@@ -19016,7 +19350,7 @@ test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 
     inline for (0..2) |_| _ = try session.newTab(); // 탭 3개: [t0, t1, t2]
 
     // create_group(t0) → group_start 세팅 + projectRows에 group_header(소스 tab=0) 삽입, 아래 카드 depth 1(연속 파티션으로 t0~t2 한 그룹).
-    session.createGroupForTab(session.tabs.items[0]);
+    session.createGroupAbsorbForTab(session.tabs.items[0]);
     try std.testing.expect(session.tabs.items[0].group_start != null);
     session.recomputeVisibleTabs();
     try std.testing.expect(session.sidebar_rows.items[0] == .group_header);
@@ -19027,7 +19361,7 @@ test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 
 
     // 중복 create_group은 no-op(이름 보존).
     const marker_ptr = session.tabs.items[0].group_start.?.ptr;
-    session.createGroupForTab(session.tabs.items[0]);
+    session.createGroupAbsorbForTab(session.tabs.items[0]);
     try std.testing.expectEqual(marker_ptr, session.tabs.items[0].group_start.?.ptr);
 
     // 헤더 클릭(slot 0) → group_collapsed 토글 → 카드 skip(헤더만).
@@ -19069,7 +19403,7 @@ test "code-review #1: 그룹 헤더 우클릭(context_menu_target=.group) 중 �
     defer session.deinit();
     inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
     const marker_tab = session.tabs.items[0];
-    session.createGroupForTab(marker_tab); // t0=그룹 시작 마커
+    session.createGroupAbsorbForTab(marker_tab); // t0=그룹 시작 마커
 
     // 그룹 헤더 우클릭 시뮬레이션 — context_menu_target을 마커 탭으로 잡는다(renameTargetAt/8154 경로).
     session.context_menu_target = .{ .group = marker_tab };
@@ -19099,7 +19433,7 @@ test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영
     defer session.deinit();
     _ = try session.newTab(); // [t0, t1]
     const marker = session.tabs.items[0];
-    session.createGroupForTab(marker); // t0 그룹 시작(depth1, 기본 이름 "그룹 1")
+    session.createGroupAbsorbForTab(marker); // t0 그룹 시작(depth1, 기본 이름 "그룹 1")
     session.startRename(.{ .group = marker }); // 그룹 이름 편집 시작(query=group_start 시드)
     session.recomputeVisibleTabs();
 
@@ -19135,7 +19469,7 @@ test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞
     const t3 = session.tabs.items[3];
 
     // t1에 그룹 시작 → 연속 파티션으로 group=[t1,t2,t3], t0=최상위.
-    session.createGroupForTab(t1);
+    session.createGroupAbsorbForTab(t1);
     try std.testing.expect(t1.group_start != null);
 
     // 주입 조건(tabIsInGroup): 최상위 t0=false, 그룹 소속 t1/t2/t3=true(마커 카드 t1 포함).
@@ -19196,8 +19530,8 @@ test "SG5-3: 2단계 중첩(A>B) — projectRows depth 0/1/2·헤더 depth·memb
 
     // 구조: t0=최상위, A=t1(depth1)·직접카드 t1,t2, B=t3(depth2, A 안 중첩)·직접카드 t3,t4.
     // create_group 위치 파생: t1은 최상위 카드 → A depth 1. t3은 A 안 카드(depth1) → B depth 2(중첩).
-    session.createGroupForTab(t1);
-    session.createGroupForTab(t3);
+    session.createGroupAbsorbForTab(t1);
+    session.createGroupAbsorbForTab(t3);
     try std.testing.expectEqual(@as(u8, 2), t3.group_depth); // t3 create가 중첩 depth 2
 
     session.recomputeVisibleTabs();
@@ -19237,8 +19571,8 @@ test "SG5-3: 다단계 접기 — 부모 A 접으면 자식 B와 그 카드 통�
     defer session.deinit();
     inline for (0..3) |_| _ = try session.newTab(); // [t0..t3] 4개
     // A=t0(depth1)·카드 t0,t1, B=t2(depth2 중첩)·카드 t2,t3.
-    session.createGroupForTab(session.tabs.items[0]);
-    session.createGroupForTab(session.tabs.items[2]);
+    session.createGroupAbsorbForTab(session.tabs.items[0]);
+    session.createGroupAbsorbForTab(session.tabs.items[2]);
     try std.testing.expectEqual(@as(u8, 2), session.tabs.items[2].group_depth);
 
     // 펼침 전체: [hA, c t0, c t1, hB, c t2, c t3] = 6 rows.
@@ -19284,8 +19618,8 @@ test "SG5-3: ungroup 중첩 — 자식 ungroup은 부모로 재소속·부모 un
     const t2 = session.tabs.items[2];
     const t3 = session.tabs.items[3];
     // A=t0(depth1)·t0,t1, B=t2(depth2 중첩)·t2,t3.
-    session.createGroupForTab(session.tabs.items[0]);
-    session.createGroupForTab(t2);
+    session.createGroupAbsorbForTab(session.tabs.items[0]);
+    session.createGroupAbsorbForTab(t2);
 
     // ── 자식 B ungroup(t3 소속=B) → 가장 가까운 마커 B 제거 → t2,t3가 부모 A로 재소속(depth 1).
     session.ungroupTab(t3);
@@ -19295,7 +19629,7 @@ test "SG5-3: ungroup 중첩 — 자식 ungroup은 부모로 재소속·부모 un
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3));
 
     // 다시 B를 중첩 생성한 뒤, 부모 A ungroup → A 마커 제거 → t0,t1 최상위·B는 부모 없어 gap 클램프로 depth 1(최상위 그룹) 승격.
-    session.createGroupForTab(t2); // B 재생성(depth 2)
+    session.createGroupAbsorbForTab(t2); // B 재생성(depth 2)
     try std.testing.expectEqual(@as(u8, 2), t2.group_depth);
     session.ungroupTab(session.tabs.items[0]); // A(t0) 마커 제거
     try std.testing.expect(session.tabs.items[0].group_start == null); // A 제거
@@ -19324,13 +19658,13 @@ test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 de
     const t3 = session.tabs.items[3];
 
     // ── 최상위 카드에서 두 액션은 결과 동일(depth 1). t0에 create_sibling_group → depth 1(create_group과 동일).
-    session.createSiblingGroupForTab(t0);
+    session.createSiblingGroupAbsorbForTab(t0);
     try std.testing.expectEqual(@as(u8, 1), t0.group_depth);
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t0)); // 최상위 그룹 A
 
     // 이제 t0=그룹 A(depth1, [t0..t3] 전부). 그룹 안 카드 t2에서 두 액션을 대비한다.
     // ── create_group(t2) = **중첩**: t2 현재 depth 1 → B depth 2(A 자식). t3도 B(depth 2).
-    session.createGroupForTab(t2);
+    session.createGroupAbsorbForTab(t2);
     try std.testing.expectEqual(@as(u8, 2), t2.group_depth); // 중첩 = depth+1
     try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t2)); // 중첩 자식
     try std.testing.expectEqual(@as(?u8, 2), sidebarCardDepth(session, t3)); // B 몸통(중첩)
@@ -19341,7 +19675,7 @@ test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 de
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2));
 
     // ── create_sibling_group(t2) = **형제**: t2 현재 depth 1 → C depth 1(A와 같은 depth 형제, 중첩 아님). t3도 C(depth 1).
-    session.createSiblingGroupForTab(t2);
+    session.createSiblingGroupAbsorbForTab(t2);
     try std.testing.expectEqual(@as(u8, 1), t2.group_depth); // 형제 = 같은 depth
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // 형제 그룹 C(최상위, 중첩 아님)
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // C 몸통(depth 1, 중첩 아님)
@@ -19383,7 +19717,7 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
     const t3 = session.tabs.items[3];
 
     // 그룹 A를 t2에서 시작 → t2·t3가 그룹 A(연속), t0·t1은 최상위(§2.1 첫 마커 이전 구간).
-    session.createGroupForTab(t2);
+    session.createGroupAbsorbForTab(t2);
     try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t2)); // 그룹 A 마커 카드
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // 그룹 A 몸통
@@ -19482,8 +19816,8 @@ test "code-review #2: 접힌 marker-only 그룹에 아래 카드 드롭(from>m) 
     const t3 = session.tabs.items[3];
 
     // A=t1(그룹 시작), B=t2(형제 그룹 시작 같은 depth) → A는 marker-only([1,2))·B=[2,4)(t2,t3). A를 접는다.
-    session.createGroupForTab(t1); // A depth1, 연속상 [1,4)
-    session.createSiblingGroupForTab(t2); // t2 형제 마커(depth1) → A=[1,2) marker-only, B=[2,4)
+    session.createGroupAbsorbForTab(t1); // A depth1, 연속상 [1,4)
+    session.createSiblingGroupAbsorbForTab(t2); // t2 형제 마커(depth1) → A=[1,2) marker-only, B=[2,4)
     t1.group_collapsed = true;
     session.recomputeVisibleTabs();
     // rows: [card t0, header A(tab1,collapsed), header B(tab2), card t2(d1), card t3(d1)]
@@ -19521,7 +19855,7 @@ test "code-review #3: pane grip을 그룹 헤더에 드롭 → 새 워크스페�
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2], 활성=t2(마지막 생성)
-    session.createGroupForTab(session.tabs.items[1]); // t1=그룹 시작 → rows: [card t0, header(t1), card t1, card t2]
+    session.createGroupAbsorbForTab(session.tabs.items[1]); // t1=그룹 시작 → rows: [card t0, header(t1), card t1, card t2]
     session.recomputeVisibleTabs();
     try std.testing.expect(session.sidebar_rows.items[1] == .group_header);
 
@@ -19574,8 +19908,8 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
     // 주의(SG5-3): create_group은 이제 "그룹 안 카드에서 실행 → depth+1 중첩"이라(§9), A가 끝까지 뻗은 상태에서
     // t2에 create_group을 부르면 B가 A의 자식(depth 2)이 된다. 이 테스트는 **형제 그룹 통째 드래그**를 검증하므로
     // B의 group_depth를 1로 명시해 형제로 만든다(위치 파생 모델에서 첫 그룹 뒤 형제 최상위 그룹은 depth 힌트로 표현).
-    session.createGroupForTab(t0);
-    session.createGroupForTab(t2);
+    session.createGroupAbsorbForTab(t0);
+    session.createGroupAbsorbForTab(t2);
     t2.group_depth = 1; // B를 최상위 형제로(create_group 중첩 기본을 이 테스트 목적에 맞게 오버라이드)
     try std.testing.expectEqual(@as(?u8, 1), sidebarCardDepth(session, t3)); // B 몸통
 
@@ -19675,8 +20009,8 @@ test "GL1: stablePartitionSubtree — 로컬 pin 직접 멤버가 마커 직후�
     // 최상위 그룹 A(마커 t0, depth1)와 그 **자식 subgroup** B(마커 t3, depth2). 위치 파생:
     //   [t0(mk A d1), t1(A 직접), t2(A 직접), t3(mk B d2), t4(B 멤버), t5(B 멤버)].
     // createGroupForTab(t3)는 t3가 A 멤버(depth1)라 자동 중첩 depth2 → B는 A의 자식. A subtree=[0,6), B subtree=[3,6).
-    session.createGroupForTab(t0);
-    session.createGroupForTab(t3);
+    session.createGroupAbsorbForTab(t0);
+    session.createGroupAbsorbForTab(t3);
     try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(0, null, null)); // A 전체
     try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(3, null, null)); // B는 중첩 depth2
     try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(3, null, null)); // B=[3,6)
@@ -19749,7 +20083,7 @@ test "GL2(a): toggleLocalPin — 멤버가 마커 직후로 float·그룹 연속
     const t1 = session.tabs.items[1];
     const t2 = session.tabs.items[2];
     const t3 = session.tabs.items[3];
-    session.createGroupForTab(t0); // 그룹 [t0(마커), t1, t2, t3]
+    session.createGroupAbsorbForTab(t0); // 그룹 [t0(마커), t1, t2, t3]
     session.app_window.active_tab = 3; // 활성 = t3(포인터 보존 검증용)
 
     // ── float: **마지막** 멤버 t3 로컬 pin → 마커 직후(index 1)로 stable float. 비-pin 멤버는 상대순서로 뒤에.
@@ -19800,7 +20134,7 @@ test "GL2(c): 드래그 clamp — 로컬 pin 멤버가 subtree-로컬 프리픽�
     const t0 = session.tabs.items[0];
     const t1 = session.tabs.items[1];
     const t2 = session.tabs.items[2];
-    session.createGroupForTab(t0); // 그룹 [t0(마커), t1, t2, t3, t4]
+    session.createGroupAbsorbForTab(t0); // 그룹 [t0(마커), t1, t2, t3, t4]
     t1.local_pinned = true;
     t2.local_pinned = true;
     session.floatLocalPinsAllGroups(); // canonical: t1·t2 = 프리픽스 [1,3)(이미 그 자리라 no-op)
@@ -19862,7 +20196,7 @@ test "GL3(a): 렌더 📌 — 로컬 pin 멤버 sidebarRowShowsPin=true·비pin 
     const t1 = session.tabs.items[1];
     const t3 = session.tabs.items[3];
 
-    session.createGroupForTab(t1); // A = [t1(마커), t2, t3, t4] — t0는 최상위 카드
+    session.createGroupAbsorbForTab(t1); // A = [t1(마커), t2, t3, t4] — t0는 최상위 카드
     session.toggleLocalPin(t3); // t3 로컬 pin → 마커 t1 직후(그룹 내 상단)로 float
     try std.testing.expectEqual(t3, session.tabs.items[2]); // ★ float: 마커(index1) 직후 index2로
 
@@ -19928,7 +20262,7 @@ test "GL3(a2): 공존 렌더 — 그룹째 고정 그룹 안 로컬 pin 멤버 =
     const t1 = session.tabs.items[1];
     const t3 = session.tabs.items[3];
 
-    session.createGroupForTab(t1); // A = [t1(마커), t2, t3, t4]
+    session.createGroupAbsorbForTab(t1); // A = [t1(마커), t2, t3, t4]
     session.toggleLocalPin(t3); // t3 로컬 pin → 마커 직후
     session.toggleGroupPin(t1); // A를 그룹째 고정(전역 프리픽스 안착 — keystone §13.1로 subtree 내 float 순서 보존)
     // t3은 여전히 마커 직후(그룹 내 상단)이고 local_pinned 유지(그룹째 고정과 직교).
@@ -19977,7 +20311,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
-        session.createGroupForTab(t1); // A = [t1(마커=idx1), t2, t3, t4]
+        session.createGroupAbsorbForTab(t1); // A = [t1(마커=idx1), t2, t3, t4]
         session.toggleLocalPin(t3); // t3 → idx2(마커 직후로 float)
         try std.testing.expectEqual(t3, session.tabs.items[2]);
         session.recomputeVisibleTabs();
@@ -20002,7 +20336,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         defer session.deinit();
         inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
         const t1 = session.tabs.items[1];
-        session.createGroupForTab(t1); // A = [t1(마커), t2, t3] — 로컬 pin 0개
+        session.createGroupAbsorbForTab(t1); // A = [t1(마커), t2, t3] — 로컬 pin 0개
         session.recomputeVisibleTabs();
         const rows = session.sidebar_rows.items;
         // rows: [card t0, header A, card t1(마커=첫 카드), card t2, card t3]
@@ -20026,7 +20360,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         const t3 = session.tabs.items[3];
         const t0 = session.tabs.items[0];
         const t4 = session.tabs.items[4];
-        session.createGroupForTab(t1); // A = [t1(마커=idx1), t2, t3, t4]
+        session.createGroupAbsorbForTab(t1); // A = [t1(마커=idx1), t2, t3, t4]
         t2.local_pinned = true;
         t3.local_pinned = true;
         session.floatLocalPinsAllGroups(); // canonical: t2·t3 = 프리픽스 [2,4)(이미 그 자리)
@@ -20077,7 +20411,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         const t1 = session.tabs.items[1];
         const t2 = session.tabs.items[2];
         const t3 = session.tabs.items[3];
-        session.createGroupForTab(t1); // A = [t1(마커=idx1), t2, t3] — t0 최상위
+        session.createGroupAbsorbForTab(t1); // A = [t1(마커=idx1), t2, t3] — t0 최상위
         t2.local_pinned = true;
         session.floatLocalPinsAllGroups(); // A = [마커, t2(lp), t3]
         var pre: [8]*Tab = undefined;
@@ -20138,7 +20472,7 @@ test "GL3(b1): 위생 ungroup — 로컬 pin 멤버가 그룹 해제로 top-leve
     inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
     const t0 = session.tabs.items[0];
     const t1 = session.tabs.items[1];
-    session.createGroupForTab(t0); // A = [t0(마커), t1, t2]
+    session.createGroupAbsorbForTab(t0); // A = [t0(마커), t1, t2]
     session.toggleLocalPin(t1);
     try std.testing.expect(t1.local_pinned);
     session.ungroupTab(t1); // A 해제 → t0·t1·t2 전부 top-level
@@ -20163,7 +20497,7 @@ test "GL3(b2): 위생 removeFromGroup — 빠진 로컬 pin 멤버만 클리어�
     const t0 = session.tabs.items[0];
     const t1 = session.tabs.items[1];
     const t2 = session.tabs.items[2];
-    session.createGroupForTab(t0); // A = [t0(마커), t1, t2]
+    session.createGroupAbsorbForTab(t0); // A = [t0(마커), t1, t2]
     session.toggleLocalPin(t1);
     session.toggleLocalPin(t2); // t1·t2 둘 다 로컬 pin
     try std.testing.expect(t1.local_pinned and t2.local_pinned);
@@ -20191,7 +20525,7 @@ test "GL3(b3): 위생 드래그 out — commitSidebarDragPreview 스윕이 top-l
     // desync/잔재 local_pinned를 지우는 **불변식 net**이다(§13.7 "그룹 밖으로 나가면"의 commit 지점). 그룹 멤버 로컬 pin은 보존.
     inline for (0..3) |_| _ = try session.newTab(); // [c0, c1, t2, t3]
     const c0 = session.tabs.items[0];
-    session.createGroupForTab(session.tabs.items[2]); // A = [t2(마커), t3] — c0·c1 최상위 카드
+    session.createGroupAbsorbForTab(session.tabs.items[2]); // A = [t2(마커), t3] — c0·c1 최상위 카드
     const t3 = session.tabs.items[3];
     session.toggleLocalPin(t3); // 진짜 그룹 멤버 로컬 pin(보존 대상)
     c0.local_pinned = true; // stale: top-level 카드에 남은 로컬 pin(전이 잔재 시뮬레이션)
@@ -20218,7 +20552,7 @@ test "GL3(c): 드래그 엣지 — 로컬 pin 멤버를 마커 자기 카드 위
     inline for (0..4) |_| _ = try session.newTab(); // [t0..t4]
     const t1 = session.tabs.items[1];
     const t2 = session.tabs.items[2];
-    session.createGroupForTab(t1); // A = [t1(마커, index1), t2, t3, t4] — t0 최상위
+    session.createGroupAbsorbForTab(t1); // A = [t1(마커, index1), t2, t3, t4] — t0 최상위
     t2.local_pinned = true;
     const t3 = session.tabs.items[3];
     t3.local_pinned = true;
@@ -20274,7 +20608,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     const t4 = session.tabs.items[4];
     const t5 = session.tabs.items[5];
 
-    session.createGroupForTab(t1); // A = [t1(마커 d1), t2, t3, t4, t5] — t0는 **비고정 최상위 카드**(전역 partition의 대조)
+    session.createGroupAbsorbForTab(t1); // A = [t1(마커 d1), t2, t3, t4, t5] — t0는 **비고정 최상위 카드**(전역 partition의 대조)
     // 두 멤버(t4·t5)를 로컬 pin → 마커 직후로 float(상대순서 t4,t5 유지). 그룹 안 상단 프리픽스 [1,3) = t4·t5.
     session.toggleLocalPin(t4);
     session.toggleLocalPin(t5);
@@ -20384,8 +20718,8 @@ test "GL4(b): 중첩 — 자식 subgroup 안 leaf 로컬 pin float(부모→자�
     const t5 = session.tabs.items[5];
 
     // 2단계 중첩: A(마커 t1, d1) ⊃ [t2(A 직접), B(마커 t3, d2) ⊃ [t4, t5]]. t0는 최상위 카드.
-    session.createGroupForTab(t1); // A = [t1, t2, t3, t4, t5]
-    session.createGroupForTab(t3); // t3은 A 안 카드(d1) → 자식 B(d2) 흡수 t4·t5. A 직접 = t2.
+    session.createGroupAbsorbForTab(t1); // A = [t1, t2, t3, t4, t5]
+    session.createGroupAbsorbForTab(t3); // t3은 A 안 카드(d1) → 자식 B(d2) 흡수 t4·t5. A 직접 = t2.
     try std.testing.expectEqual(@as(usize, 6), session.groupSubtreeEnd(1, null, null)); // A=[1,6)
     try std.testing.expectEqual(@as(u8, 1), session.effectiveDepthAt(1, null, null)); // A d1
     try std.testing.expectEqual(@as(u8, 2), session.effectiveDepthAt(3, null, null)); // B d2(중첩)
@@ -20463,7 +20797,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
-        session.createGroupForTab(t1); // A = [t1(마커), t2, t3]
+        session.createGroupAbsorbForTab(t1); // A = [t1(마커), t2, t3]
         session.toggleLocalPin(t3); // t3 → 마커 직후(index2)
         try std.testing.expectEqual(t3, session.tabs.items[2]);
         session.setGroupColorForTab(t3, 0x4A7BC4); // 색은 enclosing 마커(t1)에 저장
@@ -20481,7 +20815,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         inline for (0..3) |_| _ = try session.newTab();
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
-        session.createGroupForTab(t1);
+        session.createGroupAbsorbForTab(t1);
         session.toggleLocalPin(t3);
         var snap: [4]*Tab = undefined;
         for (session.tabs.items, 0..) |t, i| snap[i] = t;
@@ -20501,7 +20835,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
         const t1 = session.tabs.items[1];
         const t3 = session.tabs.items[3];
-        session.createGroupForTab(t1); // A = [t1(마커), t2, t3]
+        session.createGroupAbsorbForTab(t1); // A = [t1(마커), t2, t3]
         session.toggleLocalPin(t3); // t3 → 마커 직후(index2)
         t3.custom_name = try allocator.dupe(u8, "findlp"); // 검색 매치용 이름(session.deinit이 free)
         session.sidebar_search_active = true;
@@ -20538,7 +20872,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
         const t1 = session.tabs.items[1];
         const t2 = session.tabs.items[2];
-        session.createGroupForTab(t1); // A = [t1(마커), t2] — t0 최상위(분리 소스로 쓴다)
+        session.createGroupAbsorbForTab(t1); // A = [t1(마커), t2] — t0 최상위(분리 소스로 쓴다)
         session.toggleLocalPin(t2); // t2 로컬 pin → 마커 직후(index2, 이미 그 자리)
         try std.testing.expect(t2.local_pinned);
         // 최상위 t0(index0)을 활성으로 만들고 split → 2 pane → 그 새 pane을 새 워크스페이스로 분리.
@@ -20643,7 +20977,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
-        session.createGroupForTab(session.tabs.items[1]); // G=[t1,t2,t3], t0=최상위
+        session.createGroupAbsorbForTab(session.tabs.items[1]); // G=[t1,t2,t3], t0=최상위
         const x = session.tabs.items[0];
         rightClickPin(session, x);
         try expectCardTopLevelPinned(session, x);
@@ -20658,7 +20992,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..1) |_| _ = try session.newTab(); // [t0,t1]
-        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1]
+        session.createGroupAbsorbForTab(session.tabs.items[0]); // G=[t0,t1]
         const y = try session.newTab(); // ★ 그룹 존재 시 새 워크스페이스 — 흡수 방지로 그룹 **앞**에 삽입돼야
         try std.testing.expect(session.cardPinRole(y) == .individual); // ★ 흡수 안 됨(옛 버그면 .local)
         try std.testing.expect(session.enclosingGroupMarkerIndex(0) == null); // ★ y가 index0(그룹 앞)·그룹 밖
@@ -20675,7 +21009,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
-        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1,t2]
+        session.createGroupAbsorbForTab(session.tabs.items[0]); // G=[t0,t1,t2]
         session.toggleGroupPin(session.tabs.items[0]); // G 고정 → 프리픽스
         const y = try session.newTab(); // 새 top카드 — 고정 프리픽스 뒤(비고정 리전)
         try std.testing.expect(session.cardPinRole(y) == .individual); // 비고정 리전 top카드(고정 그룹 뒤) = 개별
@@ -20698,7 +21032,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
-        session.createGroupForTab(session.tabs.items[1]); // G=[t1,t2], t0=최상위
+        session.createGroupAbsorbForTab(session.tabs.items[1]); // G=[t1,t2], t0=최상위
         const x = session.tabs.items[0];
         rightClickPin(session, x);
         try expectCardTopLevelPinned(session, x);
@@ -20735,7 +21069,7 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try session.newTab();
-        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1,t2]
+        session.createGroupAbsorbForTab(session.tabs.items[0]); // G=[t0,t1,t2]
         const g = session.tabs.items[0];
         session.toggleGroupPin(g);
         try std.testing.expect(g.pinned and session.tabs.items[1].pinned and session.tabs.items[2].pinned); // 멤버 pinned=1
@@ -20755,7 +21089,7 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try session.newTab();
-        session.createGroupForTab(session.tabs.items[0]); // G=[t0,t1,t2]
+        session.createGroupAbsorbForTab(session.tabs.items[0]); // G=[t0,t1,t2]
         const g = session.tabs.items[0];
         const member = session.tabs.items[2];
         session.toggleLocalPin(member); // 멤버 로컬 pin(📌·마커 직후 float)
@@ -20780,7 +21114,7 @@ test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤�
     defer session.deinit();
     inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
     // t0=최상위 개별 pin 카드, A=[t1(마커), t2, t3] 그룹째 고정, t3=로컬 pin 멤버.
-    session.createGroupForTab(session.tabs.items[1]); // A=[t1,t2,t3]
+    session.createGroupAbsorbForTab(session.tabs.items[1]); // A=[t1,t2,t3]
     const top = session.tabs.items[0];
     const marker = session.tabs.items[1];
     const lp = session.tabs.items[3];
@@ -20832,8 +21166,8 @@ test "SG5-1: 그룹 통째 이동(moveGroupRange + sidebarGroupDropBoundary) —
     // 최상위 카드 t0·t1 + 두 **형제** 그룹 A=[t2,t3], B=[t4,t5](§2.1: 최상위는 첫 마커 이전 구간에만).
     // SG5-3: create_group은 그룹 안 카드에서 depth+1 중첩이라, A가 끝까지 뻗은 뒤 t4에 부르면 B가 A 자식(depth 2)이 된다.
     // 이 테스트는 형제 그룹 통째 이동을 보므로 B의 depth를 1로 명시해 형제 최상위 그룹으로 둔다(§9 tension 문서화).
-    session.createGroupForTab(t2); // A(마커 index2)
-    session.createGroupForTab(t4); // B(마커 index4) — 중첩 기본
+    session.createGroupAbsorbForTab(t2); // A(마커 index2)
+    session.createGroupAbsorbForTab(t4); // B(마커 index4) — 중첩 기본
     t4.group_depth = 1; // B를 최상위 형제로 오버라이드
     // 마커 수·초기 순서 확인.
     try std.testing.expectEqual(@as(?u8, 0), sidebarCardDepth(session, t0)); // 최상위
@@ -20937,8 +21271,8 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
     // 두 **형제** 그룹: A=t0에서 시작(t0,t1), B=t2에서 시작(t2,t3). 연속 파티션 [A][B], 최상위 없음.
     // SG5-3: create_group은 그룹 안 카드에서 depth+1 중첩이라, t2에 부르면 B가 A 자식이 된다. 형제 헤더 드래그/접기
     // 토글을 보는 테스트라 B의 depth를 1로 명시해 형제 최상위 그룹으로 둔다(§9 create_group 중첩 tension 문서화).
-    session.createGroupForTab(t0); // A(마커 index0)
-    session.createGroupForTab(t2); // B(마커 index2) — 중첩 기본
+    session.createGroupAbsorbForTab(t0); // A(마커 index0)
+    session.createGroupAbsorbForTab(t2); // B(마커 index2) — 중첩 기본
     t2.group_depth = 1; // B를 최상위 형제로 오버라이드
 
     const sb = chrome.components.sidebar;
@@ -23334,7 +23668,7 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
     _ = try session.newTab(); // [t0, t1, t2]
     try std.testing.expect(session.tabs.items.len >= 3);
     const marker = session.tabs.items[1];
-    session.createGroupForTab(marker); // t1=그룹 시작 마커(헤더가 가리키는 탭)
+    session.createGroupAbsorbForTab(marker); // t1=그룹 시작 마커(헤더가 가리키는 탭)
 
     // 헤더 우클릭 대상 = 마커 탭(.group). 메뉴: Rename + 그룹 고정 + 그룹 풀기 + 그룹 색 6프리셋 = 3 + tab_group_color_labels.len.
     session.context_menu_target = .{ .group = marker };
@@ -23396,7 +23730,7 @@ test "sidebar group color(SG5-2): 그룹 색 → 헤더 밴드 tint·소속 카�
     _ = try session.newTab();
     _ = try session.newTab();
     try std.testing.expect(session.tabs.items.len >= 3);
-    session.createGroupForTab(session.tabs.items[1]);
+    session.createGroupAbsorbForTab(session.tabs.items[1]);
 
     const hasQuad = struct {
         fn run(s: *const AppSession, fill: u32) bool {
@@ -26439,7 +26773,7 @@ test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 �
 
     // 탭 3개 [t0, t1, t2]. t1을 그룹 시작 마커로 → 그룹(t1,t2), t0은 최상위(첫 마커 이전, §2.1 연속 파티션).
     inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2], 활성 t2
-    session.createGroupForTab(session.tabs.items[1]); // 마커=t1 → [t0(top), (t1 grp, t2)]
+    session.createGroupAbsorbForTab(session.tabs.items[1]); // 마커=t1 → [t0(top), (t1 grp, t2)]
     try std.testing.expectEqual(@as(?usize, 1), session.firstGroupStartIndex());
 
     // 활성 t0으로 전환 후 split → t0 pane 2개([a,b]), 활성 b.
@@ -26506,7 +26840,7 @@ test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크
 
     // [t0(top), (t1 grp, t2)] — 마지막(유일) 그룹을 접는다. 끝 append면 새 탭이 이 접힌 그룹에 흡수돼 숨겨졌을 것.
     inline for (0..2) |_| _ = try session.newTab(); // [t0, t1, t2]
-    session.createGroupForTab(session.tabs.items[1]);
+    session.createGroupAbsorbForTab(session.tabs.items[1]);
     session.tabs.items[1].group_collapsed = true;
 
     try std.testing.expect(session.switchTab(0));

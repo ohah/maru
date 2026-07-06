@@ -59,6 +59,9 @@ pub const entries = [_]Entry{
     .{ .action = .rename_group, .key = "rename_group", .title = "Rename Group" },
     // remove_from_group=이 워크스페이스 하나만 그룹에서 빼 최상위로(ungroup=그룹 통째 해제와 다름). 기본 키 없이 팝업/우클릭 발견.
     .{ .action = .remove_from_group, .key = "remove_from_group", .title = "Remove from Group" },
+    // promote_to_top_level=이 워크스페이스를 **제자리에서** 최상위 섬으로 승격(§14.5·§14.7 promote-in-place, top_level만 세팅·pin
+    // 불변). remove_from_group(이동+unpin)과 구별. 기본 키 없이 우클릭 "여기서 최상위로 분리"·팝업이 발견 경로.
+    .{ .action = .promote_to_top_level, .key = "promote_to_top_level", .title = "Promote to Top Level" },
     .{ .action = .select_all, .key = "select_all", .title = "Select All" },
     // 화면+스크롤백 비우기(⌘K). select_all과 같은 일반 코어 액션 — 메뉴/팝업에 노출, 메뉴는 ⌘K chord를 표시한다.
     .{ .action = .clear_screen, .key = "clear_screen", .title = "Clear" },

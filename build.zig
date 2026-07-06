@@ -808,6 +808,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_update_check_tests = b.addRunArtifact(update_check_tests);
     test_step.dependOn(&run_update_check_tests.step);
+    // control_socket.zig(Track C 1b)는 실제 unix domain socket을 bind/accept하는 L4 컨트롤 플레인 부트스트랩이다.
+    // getpeereid + std.c로 이식 가능하게 썼지만, 검증이 macOS에서만 되고 후속 slice(1e/1g)가 macOS 전용
+    // xucred/LOCAL_PEERPID를 더하므로 **macOS에서만** test step에 배선한다(ubuntu CI에 미검증 Linux 소켓
+    // 경로를 걸지 않는다 — un-gate는 Linux 호스트 검증 후 후속). maru 모듈(1a control_plane)을 import한다.
+    if (target.result.os.tag == .macos) {
+        const control_socket_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/control_socket.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_control_socket_tests = b.addRunArtifact(control_socket_tests);
+        test_step.dependOn(&run_control_socket_tests.step);
+    }
     // coretext_font.zig는 Objective-C/CoreText runtime을 직접 호출하지 않는 제품 후보
     // adapter다. 그래서 macOS smoke opt-in에 숨기지 말고 기본 Zig test에서 돌린다.
     test_step.dependOn(&run_macos_coretext_font_tests.step);

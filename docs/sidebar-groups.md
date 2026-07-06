@@ -16,7 +16,15 @@ chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다
 > 접힌 그룹 카드 사라짐·헤더 통과 yo-yo 근본 해결, subtree 고스트 depth 프리뷰)** +
 > **그룹 고정(핀+그룹 통합, C2 — §12): GP1~5 완료** — 그룹 통째 고정/해제(헤더 우클릭, 마커 `pinned`가 그룹 고정 권위)·
 > 핀-리전 인식 파생·**suffix-exclusion 정규화**·`toggleGroupPin`+plan clamp·`pin_derived` 렌더(멤버 📌 억제·헤더 고정
-> 인디케이터)·`assertPinnedPrefixRuntime` 확장, 제품 스크린샷(`MARU_FORCE_GROUP_PIN`) 검증.
+> 인디케이터)·`assertPinnedPrefixRuntime` 확장, 제품 스크린샷(`MARU_FORCE_GROUP_PIN`) 검증. +
+> **그룹-로컬 pin(멤버 그룹 내 위치 고정, GL — §13): GL1~4 완료**(GL5 subgroup-as-member 확장은 범위 밖) — 새 축
+> `Tab.local_pinned`·subtree-로컬 float·`sidebarRowShowsPin` 선두 분기·마커 카드 로컬 pin 뒤 배치. +
+> **§2.1 재설계(top_level 인터리빙 + 선택 탭만 그룹, §14): SR1~5 완료** — 리딩 break 플래그 `Tab.top_level`로 한 핀 리전 안을
+> `[탑카드, 그룹, 탑카드, 그룹]` 서브파티션으로 일반화(7 파생 경계 리셋/break)·createGroup "선택 탭만 그룹"(break_next)·
+> model-2 드래그(top_level 직접 전이, SG8 가상화)·"그룹 뒤 빈 gap" 제스처. **+ code-review PR#1197 경계 유지**(기존
+> mutation/render 경로가 top_level 경계를 유지 — inherit·removal·normalize·guard·run_hi·accent, §14.8) **+ 고정 정책**(사용자
+> 규칙 "고정된 건 어디에도 흡수 안 됨" — 고정 탭 top_level 강제·고정 그룹 nest 금지·고정 리전 clamp, 3레이어 대칭
+> preview=commit, §14.9).
 > 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX
@@ -63,7 +71,11 @@ self.tabs:  t0    t1          t2   t3          t4   t5    t6
   처럼 나눠, **그룹 뒤/사이에도 최상위 카드가 온다**(마커=push·top_level=pop-all·최상위 복귀). 계층은 **pin ⊃ subregion(top_level)
   ⊃ group ⊃ nest**. 그래도 "한 번 최상위로 나가면 재진입은 **새 마커로만**"은 유지(top_level은 depth를 항상 0으로만 되돌리므로
   중간에서 "부모 depth로 복귀"는 못 한다 — §14.7). "선택 탭만 그룹"(createGroup은 마커 뒤 첫 비선택 탭에 top_level write) ·
-  드래그·메뉴로 그룹과 최상위 카드를 인터리빙한다(요구1·요구2 — §14 단일 출처).
+  드래그·메뉴로 그룹과 최상위 카드를 인터리빙한다(요구1·요구2 — §14 단일 출처). **고정 정책(§14.9 — "고정된 건 어디에도
+  흡수 안 됨")**: pin이 최외곽 리전이라, **고정 탭은 top_level이 강제**돼 어느 그룹에도 흡수되지 않고(위치 무관), **고정
+  그룹은 다른 그룹의 자식으로 nest 금지**(sibling만)이며, 둘 다 **고정 리전 `[0, pinned_count)`로 clamp**돼 비고정 영역과
+  섞이지 않는다. **기존 mutation/render 경로도 이 top_level 경계를 유지**해야 한다(inherit·removal·normalize·guard·run_hi·
+  accent — code-review PR#1197, §14.8): §2.1 재설계의 숨은 요구다.
 - **새 워크스페이스 삽입점(끝 append 금지)**: 위 불변식의 직접 귀결로, **새 탭을 리스트 끝에 append하면 그룹이 하나라도
   있을 때 마지막 그룹의 멤버로 흡수**된다(사용자엔 "새 워크스페이스가 그룹에 빨려들어감" — 그 카드 우클릭 pin은
   `cardPinRole=.local`로 그룹 안 float까지 된다). 그래서 새 워크스페이스는 **비고정 리전의 첫 그룹 마커 직전**
@@ -588,8 +600,13 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   sentinel"의 최종 형태 = 트레일링 `group_end`가 아니라 리딩 `top_level`, 드래그 orphan 회피 — §14.1 옵션 B). "선택 탭만 그룹"
   (createGroup)·드래그(model-2 `sidebarCardDropAfterGroup` "그룹 뒤 빈 gap" 착지 포함)·메뉴(promote-in-place)로 `[탑카드, 그룹,
   탑카드, 그룹]` 인터리빙이 성립한다. 단 top_level은 depth를 항상 0으로만 되돌려 **중첩 안 "부모 depth 복귀"는 여전히 불가**
-  (그룹 뒤 카드는 depth 0 최상위로만 복귀 — §14.7 제약). **설계·단계·정정된 자기진단은 §14를 단일 출처로 둔다**(SR1 저장·파생
-  토대·SR2 C2 정합·SR3 createGroup·SR4 model-2 드래그·SR5 빈 gap 제스처·3축 공존·문서 완결).
+  (그룹 뒤 카드는 depth 0 최상위로만 복귀 — §14.7 제약). **고정 정책(§14.9 — 사용자 규칙 "고정된 건 어디에도 흡수 안 됨")**:
+  고정 탭은 top_level 강제(cardDropPlan/simulateDrop/commit 3레이어 OR — 그룹 흡수 금지)·고정 그룹은 nest 금지(groupNestPlan
+  마커 pinned→null, sibling만)·둘 다 고정 리전 [0, pinned_count) clamp. **기존 경로의 경계 유지(code-review PR#1197, §14.8)**:
+  inheritGroupMarker `!next.top_level`·top_level 카드 제거(closeTab·드래그 commit) 시 경계 재확립·normalize suffix-exclusion
+  (pin flip 존중)·removeFromGroupForTab `!tabIsInGroup` 가드·sidebarGroupDropBoundary run_hi `!top_level`·accent
+  current_group_color top_level 리셋. **설계·단계·정정된 자기진단은 §14를 단일 출처로 둔다**(SR1 저장·파생 토대·SR2 C2 정합·
+  SR3 createGroup·SR4 model-2 드래그·SR5 빈 gap 제스처·3축 공존·§14.8 경계 유지·§14.9 고정 정책·문서 완결).
 - **(해소됨, SG5-3 핵심 판단) create_group vs create_sibling_group — 중첩/형제를 명시적 2액션으로 분리**: §2.1 연속
   파티션상 첫 그룹은 리스트 끝까지 뻗으므로 첫 그룹 뒤의 모든 카드는 "그룹 안"이다. create_group은 "그룹 안 카드 → depth+1
   중첩"(§9)이라, 그것만으론 첫 그룹 뒤에 **형제 최상위 그룹을 못 만든다**(flat 모델(SG1~5-2)에선 create_group이 항상 depth 1이라
@@ -1083,7 +1100,10 @@ pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float)·**마커 �
 **두 사용자 요구를 함께 연다**: (요구1) 그룹 만들 때 **선택 탭만 그룹**(현재는 마커 뒤 전부 흡수) — §14.5. (요구2) 드래그로
 **고정 탭↔그룹 순서 직접 변경** — §14.6. 사용자가 (요구2를) **model-2(드래그가 top_level을 직접 전이, SG8급)** 로 결정했다
 (model-1=메뉴 전용 기각). **규모**: 초안은 GP1급으로 봤으나 model-2 채택으로 SG8 order-aware 가상화가 얹혀 **GP1+SG8급**이다
-(초안 과소평가 정정, §14.9). 이 절은 **적대검증 3회 보강 5건**(§14.3~14.7의 굵은 "보강 N")을 반영해 확정한 설계다.
+(초안 과소평가 정정, §14.11). 이 절은 **적대검증 3회 보강 5건**(§14.3~14.7의 굵은 "보강 N")에 더해, 구현 중 드러난 **두 숨은
+요구**를 반영해 확정한 설계다: (a) **기존 mutation/render 경로의 top_level 경계 유지**(code-review PR#1197 — §14.8: inherit·
+removal·normalize·guard·run_hi·accent)와 (b) **고정 정책**(사용자 규칙 "고정된 건 어디에도 흡수 안 됨" — §14.9: 고정 탭
+top_level 강제·고정 그룹 nest 금지·고정 리전 clamp, 3레이어 대칭 preview=commit).
 
 ### 14.1 모델 — 옵션 B(리딩 `top_level` break 플래그)
 
@@ -1111,7 +1131,10 @@ depth 0(최상위·스택 리셋 유지), 아니면 스택 top(그룹 멤버). �
   기록·false=키 생략**(round-trip 고정점·옛 파일 flat 정상·옛 리더 미지 키 skip으로 forward/backward compat). 캡처/복원 왕복.
   top_level 0개면 기존 파일 **byte-identical**.
 - **렌더(§12.8 자동)**: top카드 depth 0 ⇒ `pin_derived=false`·`local_pinned=false` ⇒ `sidebarRowShowsPin`이 개별 `tab.pinned`
-  📌 표시(정확 — 개별 pin 카드로 복귀). **렌더 코드 변경 0** — depth 0 파생이 자동 처리.
+  📌 표시(정확 — 개별 pin 카드로 복귀). **📌 렌더 코드 변경 0** — depth 0 파생이 자동 처리. **단 accent 막대 색은 예외**
+  (code-review PR#1197, §14.8): `rebuildSidebar` accent 루프의 `current_group_color`는 헤더 row에서만 갱신되고 카드 순회에서
+  상속되므로, **top_level 카드에서 `current_group_color:=0`으로 리셋**해야 색 그룹 뒤 top카드가 그 그룹 색을 물려받지 않는다
+  (핀 리전 경계 리셋과 **동형**). 이 한 줄이 없으면 "색 그룹 뒤 최상위 카드"가 무색이 아니라 그룹 색 막대를 단다.
 
 ### 14.3 파생 7 경계 + 헬퍼 — GP1급 동형 (**보강 1**, SR1 완료)
 
@@ -1158,10 +1181,19 @@ top카드는 null)로 교체해 닫는다. top_level=false면 enclosing(상향 �
 
 ### 14.5 createGroup write — "선택 탭만 그룹" (**보강 3**, 요구1, SR3)
 
-`beginGroupForTab`이 지금은 마커만 심고 **마커 뒤 전부를 위치 파생으로 흡수**한다(요구1 위반). "선택 탭만 그룹" = 마커 심은
+SR3 이전 `beginGroupForTab`은 마커만 심고 **마커 뒤 전부를 위치 파생으로 흡수**했다(요구1 위반). "선택 탭만 그룹" = 마커 심은
 뒤 **선택 범위 다음 첫 비선택 탭에 `top_level:=true` write**(그 카드부터 최상위 복귀 → 그룹이 선택 탭에서 끊김). 마커로
 승격되는 카드가 top_level이었으면 leaf-only 규율상 `top_level:=false` clear(카드→마커 전이). 파생 스택 리셋(`beginGroupForTab`
 inline depth stack에 `or t.top_level`)도 이 단계에서 함께.
+
+- **시그니처(구현)**: `beginGroupForTab(tab, kind: GroupCreateKind{nested|sibling}, break_next: bool)`. 프로덕션 진입점
+  `createGroupForTab`(=`.nested, true`)·`createSiblingGroupForTab`(=`.sibling, true`)은 **`break_next=true`**로 다음 leaf
+  탭에 top_level break를 심어 "선택 탭만 그룹"을 연다. **`break_next=false`**는 SR3 이전 "마커 뒤 전부 흡수"를 재현하는
+  **테스트/스크린샷 전용 훅**(`createGroupAbsorbForTab`/`createSiblingGroupAbsorbForTab`) — 다중 멤버 그룹으로 그룹-무관
+  기능(중첩·로컬핀·그룹핀·드래그·헤더)을 검증하는 기존 테스트가 쓴다(전 탭 top_level=false → 인라인 리셋 never-fire =
+  byte-identical). **엣지 안전(break_next 시)**: 다음 탭 없음(마커=리스트 끝)·다음이 이미 마커(연속 그룹)·다음이 다른 핀
+  리전(pinned 불일치)이면 write 생략(이미 경계가 있음). write는 `normalizePinnedFromGroups`/`floatLocalPinsAllGroups` **전에**
+  해야 그들이 top_level break를 인식해 멤버 범위를 정확히 잡는다.
 
 - **정책 결정(다중선택 메커니즘 부재)**: 현재 우클릭은 단일 탭 대상이다. 두 안 — (a) **연속 range 선택**(shift-click 등
   다중선택 UI 선결) 후 그 범위만 그룹, (b) **단일 탭 + 뒤 탭 promote**(선택 탭 하나를 그룹으로, 바로 뒤 탭에 top_level write =
@@ -1184,6 +1216,23 @@ inline depth stack에 `or t.top_level`)도 이 단계에서 함께.
 - `VirtualLayout`에 **`top_level[]` 병렬 배열** 추가(order·group_depth와 나란히) + card `DropPlan.top_level` + `simulateDrop`
   순열이 top_level도 재배치 + 프리뷰가 가상 배열 read + **프리뷰=확정 등가 테스트**(SG8 order-aware 불변식). 이것이 "위치 파생
   override가 SG8 order-aware와 충돌"의 실체이며, model-2는 그 이중경로 비용을 **감수**한다(사용자가 직접 조작 UX를 택함).
+- **3레이어 대칭(cardDropPlan → simulateDrop → commitSidebarDragPreview, 프리뷰=확정)**: 카드 드래그의 top_level 전이는 세
+  레이어가 **같은 조건**을 쓴다 — ① `cardDropPlan`(mouse 핸들러·헤드리스 단일 출처)이 커서 y로 `DropPlan.top_level`을 산출
+  (그룹 뒤 gap=`sidebarCardDropAfterGroup`·타깃 최상위=`sidebarCardDropTopLevel`·고정 소스=강제 true), ② `simulateDrop`이 가상
+  배열에 그 전이를 **meaningfulness 게이트**(`hasGroupMarkerAboveInRegion` — 리전 안 위에 그룹 마커가 있어 flag가 흡수 방지에
+  **실제 필요**할 때만 write; leading/flat/top-run은 no-op=byte-identical)와 AND해 굽고, ③ `commitSidebarDragPreview`가
+  **post-move self.tabs**에 같은 게이트로 실제 write한다(재계산 금지 — 마지막 plan 재사용). 이 3레이어가 어긋나면 "프리뷰는
+  최상위인데 확정은 흡수" 같은 divergence가 나므로 등가가 게이트다.
+- **`sidebarGroupDropBoundary` 인터리빙(SR4)**: top카드가 그룹 뒤/사이에 오면, target이 **그룹 밖 top카드**
+  (`enclosingGroupMarkerIndex==null`)일 때 그 카드가 속한 **최상위 run**을 한 단위로 보고 그룹을 그 앞/뒤로 끼운다(그룹↔탭 순서
+  교환). run 경계는 `run_lo`(위로 스캔이 top_level 개시 카드에서 정지)와 **대칭으로 `run_hi`도 다음 `top_level` 카드에서 정지**
+  (code-review PR#1197 — 두 인접 top카드가 한 run으로 잘못 병합되면 두 top카드 사이 그룹 드롭이 어긋난다). 리딩 카드(리전
+  첫머리·플래그 없음)는 옛 `first_group` clamp로 폴백해 SG5-1 byte-identical.
+- **드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만(`dragged_collapsed`, SG8g)**: SG8c의 고스트 force-emit(접힌 그룹 안 드롭 시
+  카드 사라짐 방지)이 접힌 그룹을 **통째로 드래그**할 때도 subtree를 강제 방출해 펼쳐 보였다. `PreviewCtx.dragged_collapsed`
+  (그룹 통째 드래그 && origin 마커 `group_collapsed`)로 **대상/타깃을 구분**: 대상=접힌 그룹이면 subtree force-emit·안쪽 헤더
+  flip을 억제해 **접힌 헤더 한 줄만**, 타깃=접힌 그룹(카드를 그 안에 드롭)은 force-emit 유지(사라짐 방지). §14.6과 직교하는
+  드래그 렌더 마감이나, 인터리빙 드래그의 실앱 UX 정합이라 여기 명시한다.
 - model-1(메뉴 전용·드래그 불변·sticky-reset로 기존 run 넣기/빼기 공짜)은 SG8 divergence를 구조적으로 회피하지만 "드롭으로
   그룹 밖으로 빼면 자동 top카드"의 완전 positional UX를 못 준다 — **기각**. (SR1~3은 model 무관하게 공유되고, model-2 가상화는
   SR4 단독으로 얹힌다.)
@@ -1209,10 +1258,73 @@ gap을 가리킬 row가 없어**(연속 파티션 — 그룹 사이 빈 gap row 
 2건: (1) **서브파티션 상태** — pin 프리픽스 I1은 여전히 최외곽이고 top_level은 그 안쪽이라 직교하지만, `normalize`/`align`이
 고정 리전 안에서 top_level을 하드 break로 봐야 멤버 범위가 정확(§14.4와 같은 수정). (2) **eject flavor divergence** —
 `removeFromGroupForTab`(맨 위 이동, 기존)은 §12.7 보강4로 **unpin**하지만, "여기서 최상위로 분리"(제자리 top_level:=true,
-신규 promote)는 **pin을 안 건드린다**(고정 top카드로 남음). 두 flavor의 pin 처리 차이를 명문화하고 UX에서 구분(§4.5 미러:
-제자리 vs 이동).
+신규 promote)는 **pin을 안 건드린다**(고정 top카드로 남음). 두 flavor의 pin 처리 차이를 명문화하고 UX에서 구분(§14.5 미러:
+제자리 vs 이동). (`removeFromGroupForTab`의 고정 경로가 move 전 unpin·비고정 리전 시작으로 moveTab하는 상세는 §12.7 보강4.)
 
-### 14.8 단계 SR1~5 — 각 단계 독립 동작·green
+### 14.8 기존 경로의 top_level 경계 유지 (code-review PR#1197 — 숨은 요구)
+
+`top_level`은 **리딩 경계 플래그**(마커=push와 같은 결의 self-describing 앵커)라, tabs/마커/렌더를 건드리는 **모든 기존
+mutation/render 경로가 이 경계를 유지**해야 한다. `/code-review max`가 §2.1 재설계 초기 구현이 이 경계를 유지 안 해 **무관
+워크스페이스 그룹 재부모화**·**비고정 카드 고정 오염(디스크 persist)**을 낸다는 걸 잡았다 — 이게 §2.1 재설계의 **숨은 요구**다.
+6+3건을 한 줄씩 꿴다(각 revert-fail 헤드리스 CR#1~6):
+
+- **inheritGroupMarker `!next.top_level`(leaf-only 승계 가드)**: 마커 승계(closeTab·removeFromGroup 공유)는 다음 탭이
+  `top_level`이면 마커를 **안 넘긴다**(false 반환 → 호출자가 마커 free = 그룹 소멸). top_level 카드는 "그룹 밖 최상위 복귀"를
+  개시하는 경계 홀더라 그룹 헤더가 될 수 없다(마커=leaf-only §13.8 위반). 가드가 없으면 **단일 카드 그룹**의 마커가 뒤 top카드로
+  넘어가 그 top카드를 오승격하고 sticky follower들을 무관 그룹으로 **재부모화**한다.
+- **top_level 카드 제거 시 경계 재확립(closeTab + commit 드래그, finding #2)**: 닫는/이동하는 카드가 top_level **경계 홀더**면
+  제거 후 그 뒤 sticky follower에 `top_level:=true`를 **재확립**한다 — 경계를 안 넘기면 follower가 앞 그룹에 흡수(재부모화)된다.
+  게이트: follower가 같은 핀 리전 leaf(비마커·아직 top_level 아님)이고, 위(앞)에 이 리전 그룹이 있어(`enclosingGroupMarkerIndex
+  (index-1)!=null`) 실제로 흡수될 때만. **`simulateDrop`이 rotateMove 전 같은 조건·같은 지점에 미러**해 프리뷰=확정이고,
+  commit은 실제 이동이 없으면(`landed==origin`, 제자리 드롭) spurious flag를 되돌린다(경계 소실이 없으므로).
+- **normalize/align: exact-full-rewrite → suffix-exclusion(finding #3, §14.4 상세)**: 재기록이 **pin flip을 존중**(리전 경계
+  넘으면 중단)해 `[고정그룹][비고정 x][top_level]`의 x가 `pinned=1`로 오염·persist되지 않게 한다. 같은 리전 내 sandwiched
+  desync는 여전히 흡수·치유. `pinBoundariesAlignGroups`도 동형(위음성 없이 I3 검출). §14.4가 이 계약의 단일 출처다.
+- **removeFromGroupForTab: `ix<fm0` 가드 → `!tabIsInGroup`(enclosing 기반)**: 옛 "첫 마커 이전" 가드는 인터리빙의 **그룹 뒤
+  top카드**를 out-of-group으로 못 봤다(그 카드는 `ix>=fm0`이지만 enclosing 마커가 없어 실제론 그룹 밖). `!tabIsInGroup`으로
+  바꿔 top카드·top-level run·그룹 전무를 모두 밖으로 정확 판정 → **그룹 뒤 top카드 remove = no-op**(흡수·unpin 방지). 우클릭
+  노출 조건(`tabIsInGroup`)과 no-op 판정이 같은 단일 출처라 desync 없음.
+- **sidebarGroupDropBoundary run_hi `!top_level`(run_lo 대칭)**: 최상위 run 상단 스캔 `run_lo`가 top_level 개시 카드에서 멈추는
+  것과 **대칭으로 `run_hi`도 다음 top_level 카드에서 정지** — 두 인접 top카드가 한 run으로 잘못 병합되면 **두 top카드 사이 그룹
+  드롭**이 어긋난다(그룹↔탭 순서 교환 붕괴).
+- **accent 색: top_level에서 `current_group_color` 리셋(§14.2 상세)**: 색 그룹 뒤 top카드가 그룹 색 막대를 물려받지 않게
+  accent 루프가 핀 리전 경계 리셋과 **동형**으로 top_level에서 색을 0으로 되돌린다.
+
+**효율(정답 — 스타일 아님)**: (1) **`topLevelGroupMarkerIndex` O(depth·n) → O(n)** — 옛 `while effectiveDepthAt(mi)>1` climb이
+매 반복 `effectiveDepthAt`(O(n))를 재계산했다(드래그 프레임 핫패스). effectiveDepthAt과 **동형 단일 스캔**으로 마커 인덱스를
+스택에 함께 쌓아 바닥(depth 1 마커) 1회 반환. (2) **cardDropPlan 중복 `dragTargetSlot` 제거** — 프리뷰 시프트 보정이 없으면
+(`y_esc==y_px`) `raw_esc=raw_row` 재사용. (3) **sidebarCardDropAfterGroup `groupSubtreeEnd` 재사용** — 카드 branch는 위 가드가
+이미 `groupSubtreeEnd(tl)==c.tab+1`을 확립하므로 j를 재계산하지 않고 `c.tab+1` 재사용(헤더 branch만 계산).
+
+### 14.9 고정 정책 — 고정 요소는 흡수 불가 (사용자 규칙)
+
+**사용자 규칙**: "고정된 애들은 어디에도 흡수되면 안 된다." pin이 **최외곽 리전**(pin ⊃ subregion ⊃ group ⊃ nest)이라, 고정
+요소는 그 안쪽 계층(그룹·중첩)에 절대 안 빨려든다.
+
+**근본 정정(commit divergence 아니었음)**: 처음엔 commit이 잘못이라 봤으나 commit은 이미 `plan.top_level`을 replay한다. 실증상은
+`cardDropPlan`이 **드롭 위치 따라 top_level을 다르게** 냈다 — 고정 탭을 그룹 멤버 위치에 드롭하면 위치 판정이 `false`→흡수(중간
+프레임 로그의 `true`는 up 직전 최종이 멤버라 `false`로 뒤집힘). 그래서 **위치 판정을 pin으로 override**하는 게 해법이다.
+
+세 규율을 **레이어 대칭(preview=commit)**으로 편다:
+
+- **고정 탭 = top_level 강제(그룹 흡수 금지)**: `cardDropPlan`이 `source_pinned`이면 드롭 위치와 **무관하게** `top_level=true`를
+  OR한다(위치 기반 `sidebarCardDropTopLevel`=그룹 멤버 false를 덮음). `simulateDrop`(프리뷰)·`commitSidebarDragPreview`(확정)도
+  **같은 `source_pinned`를 OR** — **3레이어 대칭**이라 프리뷰=확정. self.tabs 불변이라 origin의 라이브 pinned가 드래그 내내
+  안정하고, commit은 moveTab **전에** pinned를 캡처(회전으로 origin이 소스가 아니게 되므로). 단 top_level 강제도 흡수 방지가
+  meaningful할 때만 실제 write(`hasGroupMarkerAboveInRegion` AND) — flat/leading은 no-op=byte-identical.
+- **고정 그룹 = nest 금지(sibling만)**: `groupNestPlan`이 드래그 마커가 `pinned`면 **`return null`**(Cmd nest여도 형제 폴백).
+  고정 그룹은 고정 리전 안 **독립(top-level) 그룹**으로만 존재하며 다른 그룹의 자식이 될 수 없다. 이는 다른-pin-리전 차단(GP3
+  §12.6)보다 **강한 규칙**(같은 고정 리전 안 고정↔고정 중첩도 금지)이라 GP3 체크보다 **먼저** 건다.
+- **고정 탭/그룹 = 고정 리전 `[0, pinned_count)` clamp**: `clampMoveToGroup`(카드)·`clampGroupMoveToRegion`(그룹)이 착지
+  위치를 고정 리전에 가둔다(top_level 강제와 **별개** 축 — 하나는 "그룹에 안 흡수", 하나는 "비고정 영역에 안 섞임"). 고정
+  소스는 `[0, pinned_count]`로, 비고정 소스는 `[pinned_count, len]`로만. 프리뷰/확정 divergence 없게 **plan 산출부 단일 clamp**
+  (이동 함수에 안 넣음, SG8 §12.6과 동일 규율).
+
+**대칭 정리**: 고정 **탭** = cardDropPlan/simulateDrop/commit **3레이어** top_level OR. 고정 **그룹** = groupNestPlan nest 차단.
+**리전** = clamp 2함수. 셋 다 preview=commit이라 실앱 드래그가 프리뷰대로 확정된다. **검증**: 헤드리스 SR-PIN1~5(전체 마우스
+경로 preview→commit, commit 직접 호출 아님)·부정검증, commit MARU_DEBUG 로그(`src_pinned`·`top_level_written`).
+
+### 14.10 단계 SR1~5 — 각 단계 독립 동작·green
 
 1. **SR1 — 저장·파생 토대(동작 보존, byte-identical) ✅**: `Tab.top_level`(session_model + workspace 모델) + `top-level`
    직렬화(additive, false=키 생략) + 캡처/복원 왕복 + §14.3의 7 경계 리셋/break + `enclosingGroupMarkerIndex` 상향 클램프 +
@@ -1225,7 +1337,7 @@ gap을 가리킬 row가 없어**(연속 파티션 — 그룹 사이 빈 gap row 
    align 통과 + **"top_level 앞 desync 멤버 흡수"**(손상 치유 회귀 게이트, 초안 오진 정정 반영).
 3. **SR3 — createGroup write "선택 탭만 그룹"(요구1, §14.5) ✅**: `beginGroupForTab`이 선택 범위 다음 첫 탭에 top_level write +
    카드→마커 전이 시 top_level clear + inline depth stack `or t.top_level` 리셋 + "여기서 최상위로 분리"(promote-in-place) 액션 +
-   재흡수 + hygiene(§4.5). 정책(b: 단일+뒤탭 promote) 확정. 스크린샷 훅 `MARU_FORCE_INTERLEAVE`.
+   재흡수 + hygiene(§14.5). 정책(b: 단일+뒤탭 promote) 확정. 스크린샷 훅 `MARU_FORCE_INTERLEAVE`.
 4. **SR4 — model-2 드래그 가상화(요구2, §14.6, SG8급) ✅**: `VirtualLayout.top_level[]` + `DropPlan.top_level` + `simulateDrop`
    순열 + 프리뷰 가상 read + **프리뷰=확정 등가 테스트** + `sidebarGroupDropBoundary`/`DropTargetTab` 인터리빙 드롭 타깃.
    스크린샷 훅 `MARU_FORCE_SR4_DRAG`(+`_INTO`).
@@ -1240,8 +1352,18 @@ gap을 가리킬 row가 없어**(연속 파티션 — 그룹 사이 빈 gap row 
    미도달). (b) **중간 promote cascade** 문서 명시(§14.5). (4) **§2.1 본문·§10 경계 제약 해소 서술**. 스크린샷 훅
    `MARU_FORCE_GAP_DROP`(+`_COLLAPSED`)·`MARU_FORCE_SR5_3AXIS`(+`_PIN`/`_COLLAPSED`/`_COLOR`)·`MARU_FORCE_SR5_NESTED_TOP`.
    헤드리스: `SR5(a)` 빈 gap 드롭·`SR5(b)` 접힌 헤더 gap+skip 엣지·`SR5(c)` promote 마커 숨김·`SR5(d)` 3축 공존·`SR5(e)` 중첩 top_level.
+6. **CR — 기존 경로의 top_level 경계 유지(code-review PR#1197, §14.8) ✅**: `/code-review max`가 잡은 9건 — inheritGroupMarker
+   `!next.top_level`·top_level 카드 제거(closeTab·드래그 commit) 경계 재확립·normalize/align exact-full-rewrite→suffix-exclusion
+   (§14.4 정정)·removeFromGroupForTab `!tabIsInGroup`·sidebarGroupDropBoundary run_hi `!top_level`·accent current_group_color
+   리셋 + 효율 3건(topLevelGroupMarkerIndex O(n)·cardDropPlan 중복 dragTargetSlot·sidebarCardDropAfterGroup groupSubtreeEnd
+   재사용). 헤드리스 CR#1~6(각 revert-fail, #3은 8테스트 load-bearing). build·fmt·boundaries·check·macos EXIT 0, 회귀 0.
+7. **PIN — 고정 정책 "고정 요소는 흡수 불가"(사용자 규칙, §14.9) ✅**: 고정 탭 top_level 강제(cardDropPlan에 `source_pinned`
+   OR·simulateDrop·commit gate도 OR = 3레이어 대칭 preview=commit)·고정 그룹 nest 금지(groupNestPlan 마커 pinned→`return null`,
+   Cmd nest여도 sibling 폴백)·고정 리전 clamp(clampMoveToGroup/clampGroupMoveToRegion `[0,pinned_count)` — 테스트 잠금). 근본
+   정정: commit divergence 아니었음(commit은 plan.top_level 이미 replay) — 실증상은 cardDropPlan이 드롭 위치 따라 top_level을
+   다르게 냄. 헤드리스 SR-PIN1~5(전체 마우스 경로 preview→commit)·부정검증. build·fmt·boundaries·check·macos EXIT 0, 회귀 0.
 
-### 14.9 규모·리스크
+### 14.11 규모·리스크
 
 - **규모 = GP1+SG8급**(초안 GP1 과소평가 정정): 코어 7 경계 + effectiveDepthAt(2) + enclosingGroupMarkerIndex + tabIsInGroup +
   normalize + align(SR2) + beginGroupForTab(SR3) — 대부분 한 줄 `or/break/return null`. **+ model-2 SG8 가상화**(`top_level[]`
@@ -1251,5 +1373,11 @@ gap을 가리킬 row가 없어**(연속 파티션 — 그룹 사이 빈 gap row 
   pin 리전 넘어 비고정 tail 오염(code-review PR#1197 정정) → **suffix-exclusion 유지·재기록이 pin flip 존중**. pin 축은 항상 존재하므로 SR2는 남는다.
 - **[중] model-2 SG8 이중경로**(§14.6): top_level이 드래그 중 변하는 소속 비트라 가상화 필요. 프리뷰=확정 등가 테스트가 게이트.
 - **[중] tabIsInGroup 정확성 버그**(§14.3): 조용한 오노출/오동작 — enclosing 기반 교체로 닫힘(SR1 완료).
+- **[중] 기존 경로 경계 유지 누락(code-review PR#1197, §14.8)**: top_level 리딩 플래그를 기존 mutation/render 경로가 유지 안 하면
+  **무관 그룹 재부모화·비고정 카드 고정 오염(persist)**. 6+3건을 한 줄씩(inherit·removal·normalize·guard·run_hi·accent + 효율 3)
+  꿰어 닫힘 — §2.1 재설계의 숨은 요구라 회귀 게이트(CR#1~6 각 revert-fail)로 잠갔다.
+- **[중] 고정 정책 3레이어 대칭(§14.9)**: 고정 탭 top_level 강제가 cardDropPlan/simulateDrop/commit **세 곳**에 흩어져 하나라도
+  빠지면 프리뷰≠확정("프리뷰는 최상위인데 확정은 흡수"). 셋 다 같은 `source_pinned` OR + SR-PIN1~5 전체 마우스 경로 등가가
+  게이트. 근본 정정: **commit divergence 아님**(commit은 plan.top_level 이미 replay) — 실증상은 cardDropPlan 위치 의존 편차.
 - **[하] leaf-only guard·스택 리셋 배치**: 마커·top-run 뒷카드에 top_level 세팅 금지(§13.8 선례), 리셋을 마커/카드 분기 **전**에
   (top카드가 depth 0 받고 뒤 카드 sticky) — GP1 pin 리셋과 같은 위치라 패턴 검증됨.

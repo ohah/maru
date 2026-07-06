@@ -5090,8 +5090,9 @@ pub const AppSession = struct {
     ///
     /// **§2.1 재설계(§14.4, SR2) — top_level 인식**: 인터리빙에서 그룹 뒤 top카드가 subtree 중간을 자르면 suffix-exclusion 판정이
     /// 그 앞 desync 멤버를 "꼬리"로 오인해 I3 위반을 **위음성으로 놓친다**. normalize와 동형으로 구조 subtree end 스캔에 top_level
-    /// 하드 break를 넣고, hard_end면 `[i+1, e)` 전량이 마커 pin과 일치하는지 **exact 검사**(꼬리 배제 없음)로 위반을 위음성 없이
-    /// 검출한다. top_level 0개면 hard_end never-true → 기존 suffix-exclusion과 byte-identical.
+    /// 하드 break를 넣되(**code-review PR#1197 정정**: exact 검사가 아니라 **pin flip도 존중하는 suffix-exclusion** — 리전 경계
+    /// 넘는 tail은 검사서 배제하고 같은 리전 내 위반만 검출; exact 검사는 비고정 tail을 위반으로 오판·오염 유발), 위음성 없이
+    /// 검출한다. top_level 0개면 기존 suffix-exclusion과 byte-identical.
     fn pinBoundariesAlignGroups(self: *AppSession) bool {
         const n = self.tabs.items.len;
         var i: usize = 0;
@@ -5144,14 +5145,13 @@ pub const AppSession = struct {
     /// 스택워크가 아니라 suffix-exclusion인 이유: 스택워크는 "고정 그룹 + 비고정 top카드" 인접에서 top카드까지 삼켜(shred 반대
     /// 방향) GP1 렌더와 tension이 났다(§12.5 정정 ②′). 사이에 낀 desync 멤버(마커 pin이 뒤에서 재등장)는 여전히 흡수한다.
     ///
-    /// **§2.1 재설계(§14.4, SR2) — top_level 하드 break × exact-full-rewrite**: 인터리빙에서 top카드가 subtree 중간(두 그룹
-    /// 사이·같은 핀 리전)에 오면 위 구조 스캔이 top_level에서 break해야 진짜 멤버 범위가 top카드를 절대 포함 안 한다. top_level은
-    /// suffix-exclusion 꼬리(위치 파생, soft)와 달리 **끝이 정확(hard exact-end)**이라, top_level 하드 break로 끝난 그룹은
-    /// suffix-exclusion 대신 `[i+1, e)` **exact-full-rewrite**(전량 무조건 재기록 = §12.6 toggleGroupPin direct sync 결)로
-    /// 분기한다. 이 리전은 I1 uniform이라 shred는 발화 불가(재기록 no-op)이나, top_level **앞에 낀 desync 멤버**(손상/레거시
-    /// 파일)는 [i+1, e)에 들어 여전히 흡수한다(하드 break가 창을 축소해도 top_level 안 subtree 치유는 유지 — 치유 회귀 없음).
-    /// top_level 카드 자신은 e 밖이라 절대 안 흡수(exact-end). top_level 0개면 hard_end never-true → 기존 suffix-exclusion과
-    /// **byte-identical**(GP2·C2 회귀 0).
+    /// **§2.1 재설계(§14.4, SR2) — top_level 하드 break × suffix-exclusion(pin flip 존중)**: 인터리빙에서 top카드가 subtree
+    /// 중간(두 그룹 사이·같은 핀 리전)에 오면 위 구조 스캔이 top_level에서 break해야 진짜 멤버 범위가 top카드를 절대 포함 안 한다.
+    /// **⚠️ code-review PR#1197 정정**: 초안은 top_level 하드 break시 `[i+1, e)` **exact-full-rewrite**(전량 무조건 재기록)를
+    /// 택했으나, 이는 **pin 리전 경계를 넘어** 비고정 tail 카드(`[고정그룹][비고정 x][top_level]`의 x)를 pinned=1로 오염·persist
+    /// 시켰다(구조 스캔이 pin flip서 break 안 해 [i+1,e)가 리전 가로지름). → **suffix-exclusion 유지·재기록이 pin flip도 존중**
+    /// (리전 경계 넘으면 중단)이 정답. top_level 하드 break로 멤버 끝을 정하되, 같은 리전 내 sandwiched desync는 여전히 흡수·치유,
+    /// top_level 카드/pin-flip tail은 배제. top_level 0개면 기존 suffix-exclusion과 **byte-identical**(GP2·C2 회귀 0).
     ///
     /// **SG8 드래그 게이트(필수)**: self.tabs를 mutate하므로 `sidebar_drag_preview != null`(드래그 프리뷰 활성)이면 **절대
     /// 안 돈다** — SG8은 "드래그 내내 self.tabs 불변"을 보존한다(프리뷰는 sidebar_preview_rows 위 가상 배치, 확정=commit
@@ -5493,16 +5493,33 @@ pub const AppSession = struct {
             break;
         };
         const mi = self.enclosingGroupMarkerIndex(idx orelse return) orelse return; // 최상위 카드 → no-op
+        // 그룹째 고정 인계 차단(사용자 정책 "그룹 속성은 그룹 속성에서만" — 그룹 고정 C2 §12.2): 마커 `pinned`=그룹째 고정
+        // **권위**, 멤버 `pinned`=파생 캐시다. ungroup은 그룹을 **소멸**시키므로(마커의 group_start 제거) 그룹째 고정은
+        // 소멸하고 **멤버에 인계되면 안 된다** — 안 그러면 옛 멤버가 개별 고정(pinned=1)으로 잔류한다. 마커 제거 **전**(mi가
+        // 아직 유효 마커일 때) subtree 범위 [mi, e)(마커·멤버·중첩 자식 통째, groupSubtreeEnd는 핀 리전/top_level 경계를
+        // 존중해 비고정 꼬리는 안 삼킨다)를 캡처해 pinned 캐시를 클리어한다 → 멤버는 비고정 최상위 탭으로 복귀한다. **비고정
+        // 그룹**은 이미 멤버 pinned=0이라 이 클리어가 no-op(회귀 0)이고, **고정 그룹**만 동작한다. local_pinned은 아래
+        // clearStaleLocalPins가 top-level로 전이한 멤버만 골라 정리하므로(중첩 생존 subgroup 멤버 로컬 pin은 보존) 여기선
+        // 안 건드린다 — 전 subtree를 무조건 클리어하면 살아남는 자식 그룹 멤버의 유효 로컬 pin까지 지운다.
+        const e = self.groupSubtreeEnd(mi, null, null); // 마커 제거 전 subtree 범위(mi가 유효 마커일 때만 정확)
         self.allocator.free(self.tabs.items[mi].group_start.?); // owned 마커 해제
         self.tabs.items[mi].group_start = null;
         self.tabs.items[mi].group_collapsed = false;
+        var k = mi;
+        while (k < e) : (k += 1) self.tabs.items[k].pinned = false; // 마커+멤버 pinned 캐시 클리어 — 그룹째 고정 인계 금지
+        // 고정 그룹을 풀면 그 카드들이 고정 프리픽스에서 빠지므로, 남은 **다른 고정 단위**가 있으면(예: 고정 그룹이 다른
+        // 고정 그룹 **앞**에 있던 경계) 프리픽스 불변식(I1)이 깨진다 — toggleGroupPin unpin과 같은 stable 재파티션으로 남은
+        // 고정을 앞으로 모아 무결을 복구한다(비고정 그룹 ungroup은 고정 count 무변이라 stable no-op·byte-identical).
+        self.stablePartitionPinned();
         // 그룹 고정 C2(§12.5 GP2): 마커가 사라져 아래 카드가 위 마커/최상위로 재소속됐으니 pinned 캐시를 새 enclosing 기준
-        // 으로 재동기(비프리뷰 경로). 옛 멤버가 최상위가 되면 자기 값 유지, 상위 그룹으로 재소속되면 그 마커 pinned를 따른다.
+        // 으로 재동기(비프리뷰 경로). 옛 멤버가 최상위가 되면 자기 값 유지(위에서 0으로 클리어), 상위 그룹으로 재소속되면
+        // 그 마커 pinned를 따른다(중첩 자식 ungroup이 부모로 재소속되는 경로).
         self.normalizePinnedFromGroups();
         self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — 마커 제거로 상위 그룹에 재소속된 멤버 정렬)
         self.clearStaleLocalPins(); // 위생(GL §13.7): 그룹 밖 top-level로 나간 옛 멤버의 stale local_pinned 클리어(고아 📌 방지)
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+        if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // ungroup 후 프리픽스·정렬 불변식(toggleGroupPin과 동형)
     }
 
     /// 그룹 시작 마커 탭(from)의 마커(group_start/collapsed/depth/color/**pinned**)를 **다음 탭**으로 승계한다 — closeTab(닫힘)·
@@ -18928,6 +18945,93 @@ test "GP3(c2): toggleGroupPin unpin — 다른 고정 그룹 앞의 그룹을 �
     try std.testing.expectEqual(pm1, session.tabs.items[3]);
     try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG2=[0,2) 고정 통째
     try std.testing.expectEqual(@as(usize, 4), session.groupSubtreeEnd(2, null, null)); // PG1=[2,4) 비고정 통째
+}
+
+test "ungroup-pin: 고정 그룹 ungroup — 그룹째 고정이 멤버에 인계 안 됨(비고정 최상위 복귀) + 비고정 그룹 무변" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0..t2]
+
+    // ── (a) 그룹째 고정 그룹 A={m,a1,a2}(toggleGroupPin 통째 고정, 모두 pinned=1) ungroup → 셋 다 pinned=0·최상위(enclosing null).
+    session.createGroupAbsorbForTab(session.tabs.items[0]); // t0=마커, t1·t2 위치 파생 멤버
+    const m = session.tabs.items[0];
+    const a1 = session.tabs.items[1];
+    const a2 = session.tabs.items[2];
+    session.toggleGroupPin(m); // 그룹째 고정 — 마커+멤버 모두 pinned=1
+    try std.testing.expect(m.pinned and a1.pinned and a2.pinned);
+    session.ungroupTab(a1); // 멤버 a1 ungroup = enclosing 마커 m 제거(그룹 소멸)
+    try std.testing.expect(m.group_start == null); // 그룹 소멸
+    try std.testing.expect(!m.pinned and !a1.pinned and !a2.pinned); // ★ 그룹째 고정이 멤버에 인계 안 됨(비고정 복귀)
+    try std.testing.expect(session.enclosingGroupMarkerTab(m) == null); // 셋 다 그룹 밖 최상위(enclosing 마커 없음)
+    try std.testing.expect(session.enclosingGroupMarkerTab(a1) == null);
+    try std.testing.expect(session.enclosingGroupMarkerTab(a2) == null);
+
+    // ── (b) 비고정 그룹 ungroup → 무변(pinned=0 유지, 회귀 0). 셋 다 비고정 최상위이므로 재그룹 후 다시 푼다.
+    session.createGroupAbsorbForTab(m); // B={m,a1,a2}(전부 비고정)
+    try std.testing.expect(m.group_start != null and !m.pinned and !a1.pinned and !a2.pinned);
+    session.ungroupTab(a2);
+    try std.testing.expect(m.group_start == null);
+    try std.testing.expect(!m.pinned and !a1.pinned and !a2.pinned); // 무변
+
+    // ── (c) 로컬 pin 멤버 있던 고정 그룹 ungroup → local_pinned도 정리(+ pinned 클리어).
+    session.createGroupAbsorbForTab(m); // C={m,a1,a2}
+    session.toggleLocalPin(a1); // a1 그룹-로컬 pin(그룹째 고정과 직교)
+    try std.testing.expect(a1.local_pinned);
+    session.toggleGroupPin(m); // 그룹째 고정 — 로컬 pin은 고정 켜는 동안 보존
+    try std.testing.expect(m.pinned and a1.pinned and a2.pinned and a1.local_pinned);
+    session.ungroupTab(m); // 마커 카드 자체 ungroup
+    try std.testing.expect(m.group_start == null);
+    try std.testing.expect(!m.pinned and !a1.pinned and !a2.pinned); // 고정 인계 안 됨
+    try std.testing.expect(!a1.local_pinned); // ★ top-level 전이라 로컬 pin도 정리(고아 📌 방지)
+}
+
+test "ungroup-pin(d): 다른 고정 그룹 앞의 고정 그룹 ungroup — 프리픽스 무결(I1)·남은 고정 그룹 유지" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+
+    // 고정 그룹 둘: PG1[0,1]·PG2[2,3] 전부 pin1(GP3(c2)와 같은 셋업). PG1(다른 고정 그룹 **앞**)을 ungroup →
+    // PG1 멤버는 비고정으로 프리픽스에서 빠지고, PG2는 고정 프리픽스에 stable 재파티션으로 안착(I1 무결).
+    session.tabs.items[0].group_start = try allocator.dupe(u8, "PG1");
+    session.tabs.items[0].group_depth = 1;
+    session.tabs.items[2].group_start = try allocator.dupe(u8, "PG2");
+    session.tabs.items[2].group_depth = 1;
+    for (0..4) |i| session.tabs.items[i].pinned = true;
+    const pg1 = session.tabs.items[0];
+    const pm1 = session.tabs.items[1];
+    const pg2 = session.tabs.items[2];
+    const pm2 = session.tabs.items[3];
+
+    session.ungroupTab(pg1); // PG1 그룹 해제(마커 제거)
+    try std.testing.expect(pg1.group_start == null); // PG1 소멸
+    try std.testing.expect(!pg1.pinned and !pm1.pinned); // PG1 멤버 비고정(인계 금지)
+    try std.testing.expect(pg2.pinned and pm2.pinned and pg2.group_start != null); // PG2 고정 그룹은 유지
+    // 프리픽스 무결: [PG2, pm2, PG1, pm1] = [1,1,0,0](stable 재파티션으로 고정이 앞·그룹 연속).
+    try std.testing.expectEqual(pg2, session.tabs.items[0]);
+    try std.testing.expectEqual(pm2, session.tabs.items[1]);
+    try std.testing.expectEqual(pg1, session.tabs.items[2]);
+    try std.testing.expectEqual(pm1, session.tabs.items[3]);
+    try std.testing.expectEqual(@as(usize, 2), session.groupSubtreeEnd(0, null, null)); // PG2=[0,2) 고정 통째
 }
 
 test "GP3(d): clampGroupMoveToRegion — 그룹 드래그 plan을 리전 경계로 clamp, 프리뷰=확정(simulateDrop==move)" {

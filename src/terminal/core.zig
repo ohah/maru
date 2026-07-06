@@ -352,6 +352,10 @@ pub const TerminalCore = struct {
     config_palette: [16]?types.Rgb = .{null} ** 16,
     // OSC 52 클립보드 쓰기 요청(디코드된 바이트, pending). platform이 정책(allow) 확인 후 drain → system clipboard.
     clipboard_write: std.ArrayListUnmanaged(u8) = .empty,
+    // OSC 52 클립보드 쓰기가 크기 상한(max_clipboard_bytes/max_osc_bytes)을 넘어 **거부**됐다는 1회성 신호.
+    // 옛날엔 조용히 버려 사용자가 "복사가 왜 안 되지"만 겪었다(무음 실패). platform이 매 tick takeClipboardWriteRejected로
+    // drain해 notice 토스트로 표면화한다 — Ghostty의 무음 폐기를 넘는 "우아한 가시적 상한"(terminal-compatibility-policy.md §OSC52).
+    clipboard_write_rejected: bool = false,
     // OSC 52 클립보드 **읽기**(`?` 쿼리) pending. true면 platform이 정책(osc52.read) 확인 후 시스템 클립보드를
     // 읽어 base64 OSC 52 응답을 PTY로 보낸다(F2-6). 코어는 쿼리 파싱만 — 클립보드는 OS 소유라 직접 안 읽는다(write 대칭).
     clipboard_read_pending: bool = false,
@@ -1153,6 +1157,14 @@ pub const TerminalCore = struct {
             self.clipboard_write.clearAndFree(self.allocator)
         else
             self.clipboard_write.clearRetainingCapacity();
+    }
+
+    /// OSC 52 클립보드 쓰기가 상한 초과로 거부됐는지 1회성으로 가져온다(drain하면 false). platform이 매 tick
+    /// 호출해 true면 사용자에게 notice로 알린다 — 무음 실패 대신 "왜 복사가 안 됐는지"를 보여준다. take_bell과 같은 결.
+    pub fn takeClipboardWriteRejected(self: *TerminalCore) bool {
+        const rejected = self.clipboard_write_rejected;
+        self.clipboard_write_rejected = false;
+        return rejected;
     }
 
     /// OSC 52 읽기(`?` 쿼리)가 대기 중인지. platform이 매 tick 확인해 osc52.read 정책 통과 시 클립보드를 읽어 응답한다.
@@ -3953,6 +3965,32 @@ test "OSC 52: 한 문단 크기(>2KB) 클립보드 쓰기도 통째로 받고, d
     // 이어지는 소형 OSC도 정상 동작(반납 후 재수집).
     try core.write("\x1b]52;c;aGk=\x1b\\");
     try std.testing.expectEqualStrings("hi", core.pendingClipboardWrite());
+}
+
+test "OSC 52: 상한 초과 쓰기는 clipboard_write_rejected를 1회성으로 세운다 (무음 실패 → 가시적 상한)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // 정상 크기 쓰기는 거부 신호를 안 세운다.
+    try core.write("\x1b]52;c;aGk=\x07"); // "hi"
+    try std.testing.expectEqualStrings("hi", core.pendingClipboardWrite());
+    try std.testing.expect(!core.takeClipboardWriteRejected());
+    core.clearClipboardWrite();
+
+    // 수집 상한(max_osc_bytes) 초과는 parser overflow로 잡힌다. 실제 16MB를 흘리는 대신, dispatchOsc의 overflow
+    // 분기만 결정적으로 치려고 overflow latch를 직접 세운다(21MB write 회피 — 순수 분기 검증). 클립보드(osc_large_ok)
+    // 였으면 거부 신호를 세우고, 클립보드가 아니면(제목 등) 안 세운다.
+    core.osc_overflow = true;
+    core.osc_large_ok = true; // "52;"로 인식돼 대용량 허용됐던 시퀀스가 상한 초과
+    parser.dispatchOsc(&core);
+    try std.testing.expect(core.takeClipboardWriteRejected());
+    try std.testing.expect(!core.takeClipboardWriteRejected()); // 1회성(drain하면 false)
+    try std.testing.expectEqualStrings("", core.pendingClipboardWrite()); // 클립보드엔 안 씀
+
+    // 비-클립보드 OSC의 overflow는 거부 신호를 안 세운다.
+    core.osc_overflow = true;
+    core.osc_large_ok = false; // 제목 등 — 클립보드 아님
+    parser.dispatchOsc(&core);
+    try std.testing.expect(!core.takeClipboardWriteRejected());
 }
 
 test "OSC 52: abort(ESC+비-`\\`)로 끊긴 대용량 수집도 capacity를 반납한다 (비-dispatch 경로 상한 재확립)" {

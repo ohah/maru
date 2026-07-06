@@ -3,6 +3,9 @@ pub const input = @import("terminal/input.zig");
 pub const types = @import("terminal/types.zig");
 pub const png = @import("terminal/png.zig"); // PNG 디코드(kitty f=100·window.background-image F2-1)
 pub const selection = @import("terminal/selection.zig"); // 링크 자동 감지 분류(LinkScopes/LinkKind — docs/link-detection.md)
+
+/// OSC 52 클립보드 쓰기 디코드 상한(바이트). platform이 거부 notice 문구에 쓴다(단일 출처 — osc.zig).
+pub const clipboard_max_bytes = @import("terminal/osc.zig").max_clipboard_bytes;
 // Unicode 셀 폭(EAW)은 순수·레이어 무관이라 top-level 중립 유틸(src/width.zig)로 옮겼다 — terminal·platform·
 // chrome이 모두 쓴다(색=color.zig와 같은 선례). 여기선 호환 re-export만 한다(terminal.width/cellWidth 그대로).
 pub const width = @import("width.zig");

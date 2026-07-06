@@ -115,7 +115,13 @@ pub fn dispatchClipboard(self: *TerminalCore, body: []const u8) void {
     }
     const dec = std.base64.standard.Decoder;
     const decoded_len = dec.calcSizeForSlice(data) catch return; // 잘못된 base64
-    if (decoded_len == 0 or decoded_len > max_clipboard_bytes) return; // 빈/과대 거부(폭주 방어선)
+    if (decoded_len == 0) return; // 빈 데이터 무시(no-op — 거부 아님)
+    if (decoded_len > max_clipboard_bytes) {
+        // 상한 초과 거부(폭주 방어선). 무음 폐기 대신 표면화 — platform이 takeClipboardWriteRejected로 drain해 notice.
+        // (대개 base64가 max_osc_bytes를 먼저 넘어 parser overflow로 잡히지만, 경계 반올림 케이스의 belt다.)
+        self.clipboard_write_rejected = true;
+        return;
+    }
     self.clipboard_write.resize(self.allocator, decoded_len) catch return;
     dec.decode(self.clipboard_write.items, data) catch {
         self.clipboard_write.clearRetainingCapacity();

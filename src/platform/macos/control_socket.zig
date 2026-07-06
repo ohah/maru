@@ -40,6 +40,9 @@ const c = std.c;
 const posix = std.posix;
 const maru = @import("maru");
 const cp = maru.session.control_plane;
+const cd = maru.session.control_dispatch; // Track C 1d: read-only 바이트→바이트 디스패치 라우터(소켓 왕복 통합 테스트).
+const cs = maru.session.control_surface; // 1c Surface DTO/CollectorSnapshot(fake snapshot 주입).
+const wm = maru.session.window_membership; // M0b membership DTO + scope.
 
 /// peer 프로세스의 effective uid/gid를 읽는다. §8.2 LOCAL_PEERCRED(macOS·xucred)/SO_PEERCRED(Linux·ucred)를
 /// libc가 래핑한 이식 함수(std.c 미노출이라 직접 extern). 1b는 uid만 쓴다(gid는 미사용).
@@ -644,6 +647,112 @@ test "socket: 순차 다중 연결 — 각 연결이 hello를 받는다(accept-l
         try testing.expect(ct.got_len > 0);
         try testing.expectEqual(@as(u8, '\n'), ct.got[ct.got_len - 1]);
     }
+}
+
+// ── 1d 통합: 실제 소켓 왕복 + read-only 디스패치(fake collector snapshot 주입, tmpDir만·~/.cache 미접촉) ──
+//
+// 1b(hello 왕복)에 1d 디스패치를 얹어 client가 요청을 보내고 server가 fake snapshot으로 응답하는 전체 경로를
+// **최소 동기**로 검증한다(accept-loop 스레드·메인 marshal(§5)·capability auth(1e)·live collector는 범위 밖 —
+// 여긴 acceptOne 한 번 + per-connection read→dispatch→write만). caller_surface_id/scope는 auth가 발급할 값을
+// 테스트가 주입한다(1d 순수 경계). dispatch 자체의 라우팅/에러/scope는 control_dispatch.zig 단위 테스트가 커버.
+
+// fake collector snapshot: 창 A(win1)={10 terminal}, 창 B(win2)={20 terminal}. caller=10.
+const rt_surfaces = [_]cs.SurfaceDto{
+    .{ .surface_id = 10, .title = "shell-a", .window = 1, .focused = true, .detail = .{ .terminal = .{ .cwd = "/home/a", .at_prompt = .not_at_prompt } } },
+    .{ .surface_id = 20, .title = "shell-b", .window = 2, .detail = .{ .terminal = .{ .at_prompt = .at_prompt } } },
+};
+const rt_a = [_]u64{10};
+const rt_b = [_]u64{20};
+const rt_windows = [_]wm.WindowMembershipSnapshot{
+    .{ .window_id = 1, .window_kind = .normal, .surface_ids = &rt_a },
+    .{ .window_id = 2, .window_kind = .normal, .surface_ids = &rt_b },
+};
+const rt_snapshot: cs.CollectorSnapshot = .{ .surfaces = &rt_surfaces, .windows = &rt_windows };
+
+test "socket 1d: client가 sessions.list 요청 → server가 fake snapshot으로 디스패치 → 응답 왕복(scope=all)" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "dispatch");
+    defer rmTmpBase(base);
+
+    var srv = try Server.bind(testing.allocator, base, "k1");
+    defer srv.deinit();
+
+    // 클라이언트: connect → hello 버림 → sessions.list 요청 전송 → 응답 한 줄 수신.
+    const ClientT = struct {
+        base: []const u8,
+        resp: [2048]u8 = undefined,
+        resp_len: usize = 0,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            const fd = connectClient(self.base, "k1") catch |e| {
+                self.err = e;
+                return;
+            };
+            defer _ = c.close(fd);
+            // hello 한 줄을 읽어 버린다.
+            var hb: [512]u8 = undefined;
+            _ = c.read(fd, &hb, hb.len);
+            // 요청 전송(client wire 대신 raw 한 줄 — client wire는 cli/sessions.zig 단위 테스트가 커버).
+            const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}\n";
+            _ = c.write(fd, req, req.len);
+            // 응답을 프레임이 완결될 때까지 읽는다(개행 종단).
+            var framer: cp.Framer = .{};
+            defer framer.deinit(std.testing.allocator);
+            var guard: usize = 0;
+            while (guard < 100) : (guard += 1) {
+                var rb: [512]u8 = undefined;
+                const n = c.read(fd, &rb, rb.len);
+                if (n <= 0) break;
+                framer.push(std.testing.allocator, rb[0..@intCast(n)]) catch |e| {
+                    self.err = e;
+                    return;
+                };
+                if (framer.next() catch null) |line| {
+                    @memcpy(self.resp[0..line.len], line);
+                    self.resp_len = line.len;
+                    return;
+                }
+            }
+            self.err = error.NoResponse;
+        }
+    };
+    var ct = ClientT{ .base = base };
+    const th = try std.Thread.spawn(.{}, ClientT.run, .{&ct});
+
+    // server: accept(hello 전송) → 요청 프레임 조립 → 1d 디스패치 → 응답 + 개행 write.
+    var conn = try srv.acceptOne(testing.allocator, test_hello);
+    defer conn.deinit();
+
+    var framer: cp.Framer = .{};
+    defer framer.deinit(testing.allocator);
+    var line: ?[]const u8 = null;
+    var guard: usize = 0;
+    while (line == null and guard < 100) : (guard += 1) {
+        const n = try conn.readInto(testing.allocator, &framer);
+        if (n == 0) break;
+        line = try framer.next();
+    }
+    try testing.expect(line != null);
+
+    // 주입: caller_surface_id=10, scope=all(auth가 발급할 값을 테스트가 주입 — 1d 순수 경계).
+    const response = try cd.dispatchReadOnly(testing.allocator, line.?, rt_snapshot, 10, .all);
+    defer testing.allocator.free(response);
+    try writeAll(conn.fd, response);
+    try writeAll(conn.fd, "\n");
+
+    th.join();
+    try testing.expect(ct.err == null);
+    try testing.expect(ct.resp_len > 0);
+
+    // client가 받은 응답을 파싱해 sessions.list 결과(전체 = 10,20)를 확인한다.
+    var pm = try cp.parseMessage(testing.allocator, ct.resp[0..ct.resp_len]);
+    defer pm.deinit();
+    try testing.expect(pm.message == .response);
+    try testing.expect(cp.idEql(pm.message.response.id, .{ .number = 1 }));
+    const arr = pm.message.response.result.?.array;
+    try testing.expectEqual(@as(usize, 2), arr.items.len);
+    try testing.expectEqual(@as(i64, 10), arr.items[0].object.get("id").?.object.get("surface_id").?.integer);
+    try testing.expectEqual(@as(i64, 20), arr.items[1].object.get("id").?.object.get("surface_id").?.integer);
 }
 
 test {

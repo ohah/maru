@@ -1045,3 +1045,153 @@ pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float)·**마커 �
 - **[중] 자식 subgroup 쪼개짐 = I2/I3 붕괴** — `stablePartitionSubtree` unit-aware(자식 통째)·재귀+포인터 재탐색(보강5)으로 방어.
 - **[중] 드래그 게이트 누락 = SG8 위반** — `sidebar_drag_preview != null` early-return(보강6, normalize와 동일 게이트).
 - **[하] 공존 시각 모호**(단일 글리프 U+1F4CC) — 헤더(그룹째)/카드(멤버 로컬) 위치 구별로 수용(§13.6 보강7).
+
+## 14. §2.1 재설계(top_level, 고정 탭↔그룹 인터리빙 + 선택 탭만 그룹)
+
+§2.1의 **연속 파티션 I2**("한 번 그룹이 시작되면 리스트 끝까지 그룹 안 — 중간 최상위 복귀 없음")를 **서브파티션으로
+일반화**한다. 한 핀 리전 안에서 `[탑카드, 그룹, 탑카드, 그룹]`처럼 **최상위 카드가 그룹 뒤/사이에도** 오게 하는 리딩 break
+스칼라 `Tab.top_level`를 도입한다. 계층은 **pin ⊃ subregion(top_level) ⊃ group ⊃ nest** — pin(§12)이 리스트를
+`[고정][비고정]` 최외곽 2리전으로, top_level이 각 핀 리전 **안**을 서브파티션으로, group(§2.1)·nest(SG5-3)가 그 안을
+다시 나눈다. C2(§12)가 `Tab.pinned` 플립을 7 subtree-스캔 경계에 리셋 신호로 꿴 것과 **동형**으로, `top_level`을 **두 번째
+리셋 신호**로 같은 7 경계에 한 줄씩 꿴다.
+
+**두 사용자 요구를 함께 연다**: (요구1) 그룹 만들 때 **선택 탭만 그룹**(현재는 마커 뒤 전부 흡수) — §14.5. (요구2) 드래그로
+**고정 탭↔그룹 순서 직접 변경** — §14.6. 사용자가 (요구2를) **model-2(드래그가 top_level을 직접 전이, SG8급)** 로 결정했다
+(model-1=메뉴 전용 기각). **규모**: 초안은 GP1급으로 봤으나 model-2 채택으로 SG8 order-aware 가상화가 얹혀 **GP1+SG8급**이다
+(초안 과소평가 정정, §14.9). 이 절은 **적대검증 3회 보강 5건**(§14.3~14.7의 굵은 "보강 N")을 반영해 확정한 설계다.
+
+### 14.1 모델 — 옵션 B(리딩 `top_level` break 플래그)
+
+소속·depth·subtree 경계가 전부 "위에서 가장 가까운 마커" 한 축으로만 파생되고 **그룹 끝을 저장하는 필드가 없어서**, 마커
+뒤 카드는 무조건 그 그룹에 흡수됐다("사이"≠"안" 구분 불가). 세 대안 중 **옵션 B**를 택한다: break하는 카드에 `top_level`
+스칼라(+sticky-reset). A(트레일링 `group_end`)는 드래그로 마지막 멤버가 이동하면 경계가 소실돼 뒤 top카드가 재흡수되는
+orphan 위험, D(명시 `group` id/count)는 §2.1·§9가 지운 group-tab 정합을 부활시켜 기각. B는 (1) **C2 리셋 패턴 완전 동형**
+(같은 줄에 `or top_level` 한 조건 — §12.4가 증명한 "각 경계 한 줄, 폭발 아님"), (2) **리딩 앵커 = 마커와 같은 결**(마커=push,
+top_level=pop-all·최상위 복귀 → self-describing이라 삽입·승계·드래그 orphan 없음), (3) **additive·byte-identical**(default
+false ⇒ 새 조건 전부 no-op).
+
+**데이터 모델(§3 인접, `local_pinned` 선례)**: `Tab.top_level: bool = false`. `group_start==null`(비마커)·leaf 카드 전용
+(마커의 "형제 top-level 그룹"은 이미 `group_depth=1` pop으로 표현하므로 마커엔 세팅 금지, §13.8 leaf-only 규율). pin과 직교
+(항상 한 핀 리전 **안**의 서브파티션, pin 프리픽스 I1 불변).
+
+**파생 규칙(sticky-reset)**: 마커는 기존대로 push(parent+1). 비마커 카드는 `top_level=true` **또는** 스택 비어있음이면
+depth 0(최상위·스택 리셋 유지), 아니면 스택 top(그룹 멤버). 플래그는 break를 **개시**만 하고, 개시 카드가 스택을 비우면
+뒤 비-플래그 카드는 빈 스택을 타 자동 top-level이며, 새 그룹은 새 마커로만 재진입한다(§2.1의 "중간 그룹 복귀 없음"은 유지 —
+한 번 최상위로 나가면 재진입은 새 마커로). 예: `[A(마커,d1), a1(d1), TOP(flag,d0), x(d0), B(마커,d1), b1(d1)]` — `x`는
+플래그 없이도 sticky top-level, `B`는 빈 스택이라 형제 top-level 그룹(d1).
+
+### 14.2 데이터·직렬화·렌더 (SR1 — 자동 정합)
+
+- **직렬화(§4·§13.9 동형)**: `workspace.v1` `tab` 라인에 `top-level` 스칼라. `group_start`와 무관하게 밖에서 쓰고, **true만
+  기록·false=키 생략**(round-trip 고정점·옛 파일 flat 정상·옛 리더 미지 키 skip으로 forward/backward compat). 캡처/복원 왕복.
+  top_level 0개면 기존 파일 **byte-identical**.
+- **렌더(§12.8 자동)**: top카드 depth 0 ⇒ `pin_derived=false`·`local_pinned=false` ⇒ `sidebarRowShowsPin`이 개별 `tab.pinned`
+  📌 표시(정확 — 개별 pin 카드로 복귀). **렌더 코드 변경 0** — depth 0 파생이 자동 처리.
+
+### 14.3 파생 7 경계 + 헬퍼 — GP1급 동형 (**보강 1**, SR1 완료)
+
+`top_level`을 **7 subtree-스캔 경계**에 리셋/break 신호로 꿴다. **edge 경계**(스택 리셋)는 `or top_level`로 depth 0 복귀,
+**break 경계**(subtree 끝 스캔)는 `if top_level break`(OR=min, 여러 break 중 최소 지점 승). **순서 충돌 없음**(검증 확인 —
+edge는 리셋이라 pin 리셋 뒤 무순, break는 min이라 pin/marker break와 교환법칙).
+
+| # | 함수 | 종류 | 추가 |
+|---|---|---|---|
+| 1 | `projectRowsCore` pass1 depth stack | edge | `... or tab.top_level` → 카드 depth 0 자동 |
+| 2 | `projectRowsCore` pass2 cstack | edge | `... or tab.top_level` → 접힌 그룹 뒤 top카드 **shred 방지**(C2 #2 증상) |
+| 3 | `effectiveDepthAt`(loop+idx 두 곳) | edge | 두 곳 `if top_level top=0` |
+| 4 | `groupSubtreeEnd` | break | `if (t.top_level) break` — **그룹 끝 표현의 핵심** |
+| 5 | `subtreeHasMatch` | break | `if (k>i and top_level) break` |
+| 6 | `directCardCount` | break | `if (k>i and top_level) break` → `(N)` 배지 오염 방지 |
+| 7 | `ghostOverlapsSubtree` | break | `if (top_level) break` |
+| + | `enclosingGroupMarkerIndex` | 상향 클램프 | 상향 스캔 중 `if (top_level) return null`(**마커 return 앞**) |
+| + | `tabIsInGroup` | 재작성 | `enclosingGroupMarkerIndex(i) != null`로 교체 |
+
+**`tabIsInGroup` 정확성 버그 수정**: 현재 "리전 첫 마커 이후 = 그룹 안"은 인터리빙에서 **그룹 뒤 top카드도 "첫 마커
+이후"라 true 오판** → "그룹에서 빼기" 메뉴 오노출·remove 오동작. `enclosingGroupMarkerIndex(i)!=null`(위 상향 클램프로
+top카드는 null)로 교체해 닫는다. top_level=false면 enclosing(상향 최근접 마커)과 "리전 첫 마커 이후"가 동치라 byte-identical.
+
+**동작 보존**: 전 탭 top_level=false ⇒ edge `or top_level`는 never-flip·break·클램프는 never-fire ⇒ 7 경계 no-op ⇒ 기존
+그룹/pin/GL/SG8 투영과 **byte-identical**(GP1/GL1 identity 안전망). ✅ SR1에서 구현·헤드리스 고정("SR1: top_level이 7 파생
+경계에서 최상위 복귀 서브파티션을 만든다").
+
+### 14.4 C2 정합 재작성 — `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` (**보강 2**, SR2 — 최고 위험대)
+
+두 함수는 **구조 subtree** `[i,e)`를 pin **무시**로 스캔(형제/얕은 마커에서만 break)하고 **suffix-exclusion**(마지막 pin
+일치 `last_match`까지 진짜 멤버, 꼬리는 다음 리전 top카드로 배제)으로 canonical화한다. 인터리빙에서 top카드가 **subtree
+중간**(두 그룹 사이·같은 핀 리전)에 오면, 현재 구조 스캔이 top_level에서 break 안 해 top카드를 A 멤버 범위로 오인한다.
+
+- **수정 = `top_level` 하드 break를 구조 subtree end 스캔에 추가**(`groupSubtreeEnd`의 새 break와 정합). 그러면 진짜 멤버
+  범위가 top카드를 절대 포함 안 하고, suffix-exclusion 꼬리 배제(핀 경계, soft)와 **공존**한다. `pinBoundariesAlignGroups`도
+  top_level 인식 — 그룹 뒤 top카드가 subtree 중간을 자르는 **I3 위반을 위음성 없이 검출**하는 게이트다.
+- **초안 오진 정정(핵심)**: 초안은 "top카드 재기록(shred)"을 최상 위험으로 봤으나, `normalize`/`align`이 재기록하는 리전은
+  **I1 uniform**(한 핀 리전 = 균일 pinned)이라 **shred는 발화 불가**(재기록이 no-op). suffix-exclusion 대신 **exact-full-rewrite**
+  (`[i+1, break)` 전량 무조건 재기록 — §12.6 `toggleGroupPin` direct sync 결과)로 단순화한다. **진짜 위험은 하드 break가
+  desync 흡수 창을 축소**하는 것 = 손상 파일 복원 시 "그룹 마커와 pin이 어긋난 멤버"를 흡수해 치유하던 폭이 top_level 앞에서
+  잘려 **치유 회귀**가 날 수 있다. → SR2 헤드리스에 **"top_level 앞 desync 멤버 흡수"** 케이스 필수(손상/desync 주입 + assert
+  게이트 집중).
+
+### 14.5 createGroup write — "선택 탭만 그룹" (**보강 3**, 요구1, SR3)
+
+`beginGroupForTab`이 지금은 마커만 심고 **마커 뒤 전부를 위치 파생으로 흡수**한다(요구1 위반). "선택 탭만 그룹" = 마커 심은
+뒤 **선택 범위 다음 첫 비선택 탭에 `top_level:=true` write**(그 카드부터 최상위 복귀 → 그룹이 선택 탭에서 끊김). 마커로
+승격되는 카드가 top_level이었으면 leaf-only 규율상 `top_level:=false` clear(카드→마커 전이). 파생 스택 리셋(`beginGroupForTab`
+inline depth stack에 `or t.top_level`)도 이 단계에서 함께.
+
+- **정책 결정(다중선택 메커니즘 부재)**: 현재 우클릭은 단일 탭 대상이다. 두 안 — (a) **연속 range 선택**(shift-click 등
+  다중선택 UI 선결) 후 그 범위만 그룹, (b) **단일 탭 + 뒤 탭 promote**(선택 탭 하나를 그룹으로, 바로 뒤 탭에 top_level write =
+  "이 탭만 그룹"). 1차는 (b)가 메커니즘 추가 없이 요구1을 만족(SR3에서 확정).
+
+### 14.6 model-2 드래그 — `top_level` 전이 (**보강 4**, 요구2, SR4, SG8급)
+
+**model-2 채택(사용자 결정)**: 드래그가 `top_level`을 **직접 전이**한다 — 카드를 그룹 사이로 끌면 드롭 컨텍스트로 top_level을
+세팅(고정 탭↔그룹 순서를 인터리빙으로 직접 조작). 이때 top_level은 **드래그 중 변하는 소속 결정 비트**가 되어, pin(드래그 중
+불변)·group_depth(이미 SG8b에서 가상화)와 달리 **가상화가 필요**하다:
+
+- `VirtualLayout`에 **`top_level[]` 병렬 배열** 추가(order·group_depth와 나란히) + card `DropPlan.top_level` + `simulateDrop`
+  순열이 top_level도 재배치 + 프리뷰가 가상 배열 read + **프리뷰=확정 등가 테스트**(SG8 order-aware 불변식). 이것이 "위치 파생
+  override가 SG8 order-aware와 충돌"의 실체이며, model-2는 그 이중경로 비용을 **감수**한다(사용자가 직접 조작 UX를 택함).
+- model-1(메뉴 전용·드래그 불변·sticky-reset로 기존 run 넣기/빼기 공짜)은 SG8 divergence를 구조적으로 회피하지만 "드롭으로
+  그룹 밖으로 빼면 자동 top카드"의 완전 positional UX를 못 준다 — **기각**. (SR1~3은 model 무관하게 공유되고, model-2 가상화는
+  SR4 단독으로 얹힌다.)
+
+### 14.7 pinned × top_level 정합·eject flavor (**보강 5**, SR2/SR3 교차)
+
+핀 리전 **안**의 서브파티션이라 `pinned=1·top_level=1` 상태가 가능하다(고정 리전 안 그룹 뒤 고정 top카드). 정합 divergence
+2건: (1) **서브파티션 상태** — pin 프리픽스 I1은 여전히 최외곽이고 top_level은 그 안쪽이라 직교하지만, `normalize`/`align`이
+고정 리전 안에서 top_level을 하드 break로 봐야 멤버 범위가 정확(§14.4와 같은 수정). (2) **eject flavor divergence** —
+`removeFromGroupForTab`(맨 위 이동, 기존)은 §12.7 보강4로 **unpin**하지만, "여기서 최상위로 분리"(제자리 top_level:=true,
+신규 promote)는 **pin을 안 건드린다**(고정 top카드로 남음). 두 flavor의 pin 처리 차이를 명문화하고 UX에서 구분(§4.5 미러:
+제자리 vs 이동).
+
+### 14.8 단계 SR1~5 — 각 단계 독립 동작·green
+
+1. **SR1 — 저장·파생 토대(동작 보존, byte-identical) ✅**: `Tab.top_level`(session_model + workspace 모델) + `top-level`
+   직렬화(additive, false=키 생략) + 캡처/복원 왕복 + §14.3의 7 경계 리셋/break + `enclosingGroupMarkerIndex` 상향 클램프 +
+   `tabIsInGroup` 재작성 + §14.2 렌더(자동). **아직 SR2(normalize 재작성)·SR3(createGroup)·SR4(드래그)·SR5 없음**. top_level
+   0개면 7 경계 no-op → 기존 그룹/pin/GL/SG8 **byte-identical**(회귀 0). 헤드리스: 7 경계 인터리빙 파생(`[A,a1,TOP,B,b1]` depth
+   1,1,0,1,1·`groupSubtreeEnd(A)=[0,2)`·`directCardCount(A)=2`·`effectiveDepthAt(TOP)=0`·`enclosing(TOP)=null`·`tabIsInGroup(TOP)
+   =false`·subtreeHasMatch/ghostOverlapsSubtree top_level break·pass2 접힘 shred 방지) + 직렬화 round-trip.
+2. **SR2 — C2 정합 재작성(최고 위험, §14.4)**: `normalizePinnedFromGroups`·`pinBoundariesAlignGroups` 구조 subtree에 top_level
+   하드 break + **suffix-exclusion → exact-full-rewrite** + align top_level 인식. 헤드리스: 고정 리전 인터리브 canonical·idempotent·
+   align 통과 + **"top_level 앞 desync 멤버 흡수"**(손상 치유 회귀 게이트, 초안 오진 정정 반영).
+3. **SR3 — createGroup write "선택 탭만 그룹"(요구1, §14.5)**: `beginGroupForTab`이 선택 범위 다음 첫 탭에 top_level write +
+   카드→마커 전이 시 top_level clear + inline depth stack `or t.top_level` 리셋 + "여기서 최상위로 분리"(promote-in-place) 액션 +
+   재흡수 + hygiene(§4.5). 정책(b: 단일+뒤탭 promote) 확정. 스크린샷 훅 `MARU_FORCE_INTERLEAVE`.
+4. **SR4 — model-2 드래그 가상화(요구2, §14.6, SG8급)**: `VirtualLayout.top_level[]` + `DropPlan.top_level` + `simulateDrop`
+   순열 + 프리뷰 가상 read + **프리뷰=확정 등가 테스트** + `sidebarGroupDropBoundary`/`DropTargetTab` 인터리빙 드롭 타깃.
+5. **SR5 — 잔재/문서/중첩 하드닝**: pin×top_level×local_pin 3중 공존 헤드리스 + 중첩 안 top_level(subgroup 뒤 부모 직접
+   top카드 — sticky-reset이 depth를 항상 0으로만 되돌려 "부모 depth 복귀"는 안 되는 제약 명문화) 확장/범위 결정 + §2.1·§10
+   경계 제약 해소 서술.
+
+### 14.9 규모·리스크
+
+- **규모 = GP1+SG8급**(초안 GP1 과소평가 정정): 코어 7 경계 + effectiveDepthAt(2) + enclosingGroupMarkerIndex + tabIsInGroup +
+  normalize + align(SR2) + beginGroupForTab(SR3) — 대부분 한 줄 `or/break/return null`. **+ model-2 SG8 가상화**(`top_level[]`
+  병렬 배열·`simulateDrop` 순열·프리뷰=확정 등가, SR4)가 얹혀 GP1 단독을 넘는다. **+ 직렬화 4 + Tab 필드 1 + UX(action·dispatch·
+  catalog·우클릭)**.
+- **[최상] SR2 — suffix-exclusion × top_level 하드 break 정합**(§14.4): canonical·idempotent 공존. 초안 오진(shred) 정정 —
+  진짜 위험은 desync 흡수 창 축소(손상 치유 회귀). pin 축은 항상 존재하므로 model 무관하게 SR2는 남는다.
+- **[중] model-2 SG8 이중경로**(§14.6): top_level이 드래그 중 변하는 소속 비트라 가상화 필요. 프리뷰=확정 등가 테스트가 게이트.
+- **[중] tabIsInGroup 정확성 버그**(§14.3): 조용한 오노출/오동작 — enclosing 기반 교체로 닫힘(SR1 완료).
+- **[하] leaf-only guard·스택 리셋 배치**: 마커·top-run 뒷카드에 top_level 세팅 금지(§13.8 선례), 리셋을 마커/카드 분기 **전**에
+  (top카드가 depth 0 받고 뒤 카드 sticky) — GP1 pin 리셋과 같은 위치라 패턴 검증됨.

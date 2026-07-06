@@ -297,10 +297,11 @@ pub const TerminalCore = struct {
     // IME 조합 중(preedit) 텍스트(UTF-8, core 소유). 셀 그리드를 더럽히지 않고 renderSnapshot
     // 합성 단계에서만 커서 위치에 반전 스타일로 표시된다 — 조합이 끝나면(확정/취소) 비워진다.
     preedit: ?[]u8 = null,
-    // OSC 내용 축적 버퍼(OSC 8 하이퍼링크 파싱용). 넘치면 그 OSC는 통째로 무시한다(악의적/거대
-    // URI가 메모리를 못 잡게). title 등 다른 OSC는 여전히 소비만 한다.
-    osc_buffer: [2048]u8 = undefined,
-    osc_len: usize = 0,
+    // OSC 내용 축적 버퍼(동적 — apc_buffer와 동형). 고정 2048이던 시절 OSC 52 클립보드 쓰기가 한 문단
+    // (base64 ~2KB)만 돼도 통째로 버려져 ssh+tmux/nvim 원격 복사가 조용히 실패했다 — 상한을 OSC 52 디코드
+    // 상한이 통과 가능한 parser.max_osc_bytes로 올린다. 초과/OOM이면 osc_overflow로 dispatch에서 폐기하고
+    // (악의적/거대 시퀀스 방어), 대용량 dispatch 뒤 용량은 반납한다(일상 OSC는 title/cwd/133 등 소형).
+    osc_buffer: std.ArrayListUnmanaged(u8) = .empty,
     osc_overflow: bool = false,
     // G14 DCS(ESC P ... ST) 수집 버퍼. 현재 DECRQSS(`DCS $ q <req> ST`)만 처리하고 요청은 짧아 64B면 충분
     // (넘으면 overflow로 폐기). Sixel/DECDLD 등 큰 DCS는 미지원이라 소비만 한다(이 상태기계가 그 토대).
@@ -594,6 +595,7 @@ pub const TerminalCore = struct {
         self.kitty_placements.deinit(self.allocator);
         self.kitty_chunk.deinit(self.allocator);
         self.apc_buffer.deinit(self.allocator);
+        self.osc_buffer.deinit(self.allocator);
         self.clipboard_write.deinit(self.allocator);
         self.clipboard_read_target.deinit(self.allocator);
         self.notification_title.deinit(self.allocator);
@@ -3906,6 +3908,31 @@ test "OSC 52 (clipboard) write decodes base64 into pending; read(?) sets read-pe
     try core.write("\x1b]52;;?\x1b\\"); // 빈 Pc
     try std.testing.expect(core.clipboardReadPending());
     try std.testing.expectEqualStrings("", core.clipboardReadTarget());
+}
+
+test "OSC 52: 한 문단 크기(>2KB) 클립보드 쓰기도 통째로 받는다 (고정 2048 버퍼 드롭 회귀 가드)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    // ssh+tmux/nvim 원격 복사(OSC 52)에서 한 문단(원문 ~1.6KB → base64 ~2.2KB)이 옛 고정 2048 OSC
+    // 버퍼를 넘겨 통째로 버려졌다 — "짧은 복사는 되고 문단 복사는 조용히 실패". 동적 버퍼로 받는지 확인.
+    const para = "가나다라마바사아자차카타파하 " ** 40; // ≈1.7KB — base64로 2048 초과
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(para.len));
+    defer std.testing.allocator.free(b64);
+    const enc = std.base64.standard.Encoder.encode(b64, para);
+    var seq: std.ArrayList(u8) = .empty;
+    defer seq.deinit(std.testing.allocator);
+    try seq.appendSlice(std.testing.allocator, "\x1b]52;c;");
+    try seq.appendSlice(std.testing.allocator, enc);
+    try seq.appendSlice(std.testing.allocator, "\x07");
+    try std.testing.expect(seq.items.len > 2048); // 옛 버퍼면 드롭됐을 크기임을 보장
+    try core.write(seq.items);
+    try std.testing.expectEqualStrings(para, core.pendingClipboardWrite());
+    // 대용량 dispatch 뒤 수집 버퍼 용량은 반납된다(일상 소형 OSC가 수 MB를 계속 붙들지 않게).
+    try std.testing.expect(core.osc_buffer.capacity <= 4096);
+    // 이어지는 소형 OSC도 정상 동작.
+    core.clearClipboardWrite();
+    try core.write("\x1b]52;c;aGk=\x1b\\");
+    try std.testing.expectEqualStrings("hi", core.pendingClipboardWrite());
 }
 
 test "OSC 4 (palette) set/query, multi-pair, OSC 104 reset(one/all), RIS clears overrides" {
@@ -7293,7 +7320,7 @@ test "OSC 133: an overflowing sequence is ignored, later OSC still works" {
     var big: [2100]u8 = undefined;
     @memset(&big, 'x');
     try core.write("\x1b]133;A;"); // OSC 시작
-    try core.write(&big); // 2048 버퍼 초과 → osc_overflow
+    try core.write(&big); // 비-클립보드 OSC 상한(max_osc_small_bytes=2048) 초과 → osc_overflow
     try core.write("\x07"); // 종료 — overflow라 dispatch가 무시
     try std.testing.expectEqual(types.SemanticPrompt.unknown, core.screen.prompt_marks[0].kind); // 태깅 안 됨
     try core.write("\x1b]133;A\x07"); // 다음 OSC는 정상 동작(overflow 리셋)

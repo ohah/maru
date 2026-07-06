@@ -4342,18 +4342,24 @@ pub const AppSession = struct {
             chrome.components.sidebar.dragTargetSlot(y_esc, self.sidebar_header_height_px, rows, self.sidebar_slot_height_px, self.sidebar_header_row_h_px, self.sidebar_scroll_offset_px)
         else
             raw_row;
+        // **고정(pinned) 흡수 금지(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 소스 카드가 pinned면 드롭 위치가
+        // 그룹 한복판이어도 top_level=true를 **무조건** 낸다(위치 판정과 무관). 고정 탭은 고정 리전 안 top_level 서브파티션으로만
+        // 존재해야 하므로(고정 그룹과 인터리브), 위치 기반 sidebarCardDropTopLevel(그룹 멤버=false)을 OR로 덮어 흡수를 원천 차단한다.
+        // 비고정 소스는 기존 위치 판정 유지(그룹 안=멤버·밖=top_level). simulateDrop/commit도 같은 source_pinned를 OR해 프리뷰=확정.
+        // (착지 위치의 고정 리전 clamp는 simulateDrop/moveTab의 clampMoveToGroup이 별도로 보장 — 고정 소스는 [0,pinned_count)에 갇힌다.)
+        const source_pinned = origin < self.tabs.items.len and self.tabs.items[origin].pinned;
         const gap = self.sidebarCardDropAfterGroup(raw_esc, origin, y_esc);
         const plan: DropPlan = if (gap) |g|
             // §14.6 SR5 요구2: "그룹 뒤/사이 gap" 드롭 = 그룹 밖 top카드로 착지(top_level=true, 흡수 아님).
-            .{ .card = .{ .target_tab = g.target_tab, .top_level = g.top_level } }
+            .{ .card = .{ .target_tab = g.target_tab, .top_level = g.top_level or source_pinned } }
         else if (self.sidebarGroupDropTargetTab(raw_row, origin)) |target_tab|
-            // §14.6 SR4 model-2: 착지 위치 + 드롭 컨텍스트 top_level 의도(타깃이 최상위 카드면 true·그룹 멤버면 false).
-            .{ .card = .{ .target_tab = target_tab, .top_level = self.sidebarCardDropTopLevel(raw_row) } }
+            // §14.6 SR4 model-2: 착지 위치 + 드롭 컨텍스트 top_level 의도(타깃이 최상위 카드면 true·그룹 멤버면 false). 고정 소스는 강제 true.
+            .{ .card = .{ .target_tab = target_tab, .top_level = self.sidebarCardDropTopLevel(raw_row) or source_pinned } }
         else
             .none;
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.sidebar_card_drag).info(
-            "cardDropPlan: origin={d} y={d:.1} raw_row={d} y_esc={d:.1} raw_esc={d} gap_target={?} plan_top_level={}",
-            .{ origin, y_px, raw_row, y_esc, raw_esc, if (gap) |g| g.target_tab else null, switch (plan) {
+            "cardDropPlan: origin={d} y={d:.1} raw_row={d} y_esc={d:.1} raw_esc={d} gap_target={?} src_pinned={} plan_top_level={}",
+            .{ origin, y_px, raw_row, y_esc, raw_esc, if (gap) |g| g.target_tab else null, source_pinned, switch (plan) {
                 .card => |c| c.top_level,
                 else => false,
             } },
@@ -4591,6 +4597,11 @@ pub const AppSession = struct {
         const len = self.tabs.items.len;
         if (g >= len or m >= len) return null;
         if (g == m) return null; // 자기 그룹 헤더 — 무동작
+        // **고정(pinned) 그룹은 흡수 불가(사용자 정책 — "고정된 건 어디에도 흡수 안 됨")**: 드래그 대상 그룹 마커가 pinned면
+        // 어느 그룹에도(고정 그룹 포함) 중첩하지 않는다 → null(groupDragPreviewFrame이 형제 경계 이동으로 폴백, Cmd nest도 차단).
+        // 고정 그룹은 고정 리전 안 **독립(top-level) 그룹**으로만 존재하며 다른 그룹의 자식이 될 수 없다. 아래 다른-pin 리전
+        // 차단(GP3)보다 강한 규칙(같은 고정 리전 안 고정↔고정 중첩도 금지)이라 먼저 건다. 비고정 그룹은 기존 중첩 동작 유지.
+        if (self.tabs.items[m].pinned) return null;
         // 그룹 고정 C2(§12.6 GP3): pin이 **다른** 그룹엔 중첩 불가 → null로 형제 폴백(clampGroupMoveToRegion이 리전에
         // 가둔다). 멤버가 다른 pin 리전 마커에 소속되면 C3(멤버별 pin)=I1×I2 모순이 재발하므로 원천 차단한다.
         if (self.tabs.items[g].pinned != self.tabs.items[m].pinned) return null;
@@ -4798,7 +4809,9 @@ pub const AppSession = struct {
                     // top break)은 flag 없이도 depth 0이라 override가 no-op → byte-identical(회귀 0). 그룹 안 드롭(c.top_level
                     // =false)은 항상 false write라 top카드가 멤버로 흡수될 때 stale flag를 clear한다. origin==to(제자리)는
                     // 위치·소속 불변이라 override 안 함(전이 없음). commit이 같은 게이트를 post-move self.tabs에 적용해 프리뷰=확정.
-                    top_level[to] = c.top_level and self.hasGroupMarkerAboveInRegion(to, order, top_level);
+                    // **고정 흡수 금지(프리뷰)**: 소스 pinned면 top_level 강제 true(cardDropPlan과 동일 규칙). self.tabs 불변이라
+                    // origin의 라이브 pinned가 드래그 내내 안정하고, commit이 같은 source_pinned를 OR해 프리뷰=확정(대칭).
+                    top_level[to] = (c.top_level or self.tabs.items[origin].pinned) and self.hasGroupMarkerAboveInRegion(to, order, top_level);
                 }
                 return .{ .order = order, .group_depth = group_depth, .top_level = top_level, .ghost_lo = to, .ghost_hi = to + 1 };
             },
@@ -14587,6 +14600,9 @@ pub const AppSession = struct {
         self.clearSidebarDragPreview();
         switch (plan) {
             .card => |c| {
+                // **고정 흡수 금지(확정)**: 드래그 소스가 pinned면 top_level=true를 강제한다(cardDropPlan/simulateDrop과 동일 규칙).
+                // moveTab이 origin을 회전시켜 이동 후엔 origin 위치가 소스가 아니므로 **moveTab 전에** 라이브 pinned를 캡처한다.
+                const source_pinned = origin < self.tabs.items.len and self.tabs.items[origin].pinned;
                 // GL §13.5(프리뷰=확정 엣지): 로컬 pin 멤버 드래그는 commit도 simulateDrop과 **같은** subtree-로컬 프리픽스
                 // clamp를 태운다. 마커 자기 카드 위로 드롭하면 raw moveTab이 카드를 마커 **앞**(top-level)으로 eject해 뒤이은
                 // floatLocalPins가 회수 못 하던(프리뷰≠확정) 엣지를 닫는다. clampMoveToGroup(전역 핀 리전) 위에
@@ -14619,8 +14635,20 @@ pub const AppSession = struct {
                 // 같아(같은 clampMoveToGroup+localPin) 프리뷰가 본 착지에 그대로 write한다. 그룹 안 드롭(c.top_level=false)은 false
                 // write라 top카드가 멤버로 흡수될 때 stale flag를 clear한다. 전이 안 하는 드래그(그룹 없음·leading·in-place)는 게이트
                 // 가 false거나 landed==origin이라 write가 없어 byte-identical(회귀 0). normalize/float는 아래에서 이 write를 반영한다.
-                if (landed != origin and landed < self.tabs.items.len)
-                    self.tabs.items[landed].top_level = c.top_level and self.hasGroupMarkerAboveInRegion(landed, null, null);
+                // 고정 소스는 `c.top_level or source_pinned`로 강제 true(simulateDrop 프리뷰와 대칭 → 프리뷰=확정). MARU_DEBUG면
+                // 저장 plan.top_level vs 실제 write를 한 줄로 찍어 "commit이 저장 plan을 그대로 쓴다"(프리뷰=확정)를 실증한다
+                // (cardDropPlan 로그와 짝 — 사용자 재현 대비). landed==origin(제자리)이면 write 없음(top_level 불변).
+                if (landed != origin and landed < self.tabs.items.len) {
+                    const tl = (c.top_level or source_pinned) and self.hasGroupMarkerAboveInRegion(landed, null, null);
+                    self.tabs.items[landed].top_level = tl;
+                    if (diag_gate.maruDebugEnabled()) std.log.scoped(.sidebar_card_drag).info(
+                        "commit card: origin={d} landed={d} plan_top_level={} src_pinned={} top_level_written={}",
+                        .{ origin, landed, c.top_level, source_pinned, tl },
+                    );
+                } else if (diag_gate.maruDebugEnabled()) std.log.scoped(.sidebar_card_drag).info(
+                    "commit card: origin={d} landed={d} plan_top_level={} src_pinned={} (no move — top_level unchanged)",
+                    .{ origin, landed, c.top_level, source_pinned },
+                );
             },
             .group_sibling => |g| _ = self.moveGroupSibling(origin, g.insert_before), // SG5-1 형제 + SG5-4 빼기
             .group_nest => |g| _ = self.moveGroupNesting(origin, g.insert_before, g.target_depth), // SG5-4 넣기
@@ -22533,8 +22561,9 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null));
     try std.testing.expect(session.tabs.items[0].group_start != null); // A 마커(a0)가 index0으로
 
-    // ③ 대비: 그룹 상단(헤더/첫 멤버)에 드롭하면 여전히 멤버(top_level=false) — 넣기 능력 보존(회귀 0).
-    //    새 세션으로 같은 초기 배치를 세워 헤더 위 드롭을 확인한다.
+    // ③ 새 정책(고정 흡수 금지): 같은 **고정** 탭을 그룹 상단(첫 멤버)에 드롭해도 흡수 안 됨 = top_level=true.
+    //    옛 동작은 위치가 그룹 안이면 멤버 흡수(false)였으나, 고정 소스는 위치 무관하게 top_level 강제 — "고정된 건 어디에도
+    //    흡수 안 됨". 비고정 소스의 멤버 넣기 능력(회귀 0)은 아래 별도 테스트(SR-PIN 비고정 대비)가 지킨다.
     const s2 = try allocator.create(AppSession);
     defer allocator.destroy(s2);
     try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -22555,12 +22584,243 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
     s2.recomputeVisibleTabs();
     s2.sidebar_drag_index = 0;
     const a0_row = cardRowOf(s2, 1); // a0(첫 멤버) row
-    const y_head = sidebarDragScreenY(s2, a0_row, 0.2); // 첫 멤버 상단 = 그룹 안(멤버 넣기)
+    const y_head = sidebarDragScreenY(s2, a0_row, 0.2); // 첫 멤버 상단 = 그룹 안이지만 고정 소스라 흡수 금지
     const plan_head = s2.cardDropPlan(0, y_head);
     switch (plan_head) {
-        .card => |c| try std.testing.expect(!c.top_level), // 멤버 넣기 유지(흡수 능력 보존)
-        else => {},
+        .card => |c| try std.testing.expect(c.top_level), // ★ 고정 소스 = 그룹 안 드롭이어도 흡수 금지(top_level 강제)
+        else => return error.TestUnexpectedResult,
     }
+}
+
+// ── SR-PIN: "고정된 건 어디에도 흡수 안 됨" — 고정 탭/그룹은 고정 리전 안 top_level(그룹 밖)로만 존재(사용자 정책) ──────
+// 4개 규율을 헤드리스로 고정한다: (1) 프리뷰=확정 유실 수정(commit이 저장 plan.top_level 그대로 씀), (2) 고정 탭 그룹 흡수
+// 금지(위치 무관 top_level 강제), (3) 고정 그룹 nest 흡수 금지(Cmd nest여도 sibling), (4) 고정 리전 clamp(비고정으로 안 넘어감).
+// 특히 (1)(2)는 **전체 마우스 경로**(cardDropPlan=mouseMoved 산출 → refreshDragPreview=sidebar_drag_preview.plan 저장 →
+// commitSidebarDragPreview=up 확정)를 태워, 헤드리스가 commit을 직접 호출하던 사각(실앱 mouse→preview→commit 체인)을 메운다.
+
+test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체 마우스 경로 cardDropPlan→저장→commit, 프리뷰=확정)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3] 4개, 전부 고정 리전
+    inline for (0..4) |i| session.tabs.items[i].pinned = true;
+    // X=t0(고정 leading 탭, 드래그 소스), A=[Am=t1(마커), a1=t2, a2=t3]. a1=**한복판 멤버**(꼬리/헤더 아님, gap 미발화).
+    try setGroupMarker(session, 1, "A", 1);
+    session.sidebar_slot_height_px = 40;
+    session.sidebar_header_row_h_px = 20;
+    session.sidebar_header_height_px = 30;
+    session.sidebar_scroll_offset_px = 0;
+    session.recomputeVisibleTabs();
+    session.sidebar_drag_index = 0;
+    const x_ptr = session.tabs.items[0];
+
+    // 표시 행: [card X(0), header A(1), card a1(2), card a2(3)]. a1(=tab2) 한복판을 frac 0.3(상단)로 겨냥 →
+    // 하단 경계(gap) 미발화라 sidebarGroupDropTargetTab(멤버 자리)+sidebarCardDropTopLevel(그룹 멤버=false) 경로.
+    const a1_row = cardRowOf(session, 2);
+    const y_mid = sidebarDragScreenY(session, a1_row, 0.3);
+    // ① mouseMoved 산출(cardDropPlan): 고정 소스라 위치가 그룹 멤버여도 top_level=true 강제.
+    const plan_mid = session.cardDropPlan(0, y_mid);
+    switch (plan_mid) {
+        .card => |c| {
+            try std.testing.expectEqual(@as(usize, 2), c.target_tab); // a1(멤버) 자리로 착지
+            try std.testing.expect(c.top_level); // ★ 고정 소스 = 흡수 금지(위치 무관 top_level 강제)
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // ② refreshDragPreview가 그 plan을 sidebar_drag_preview.plan에 **저장**(실 핸들러 mouseMoved의 저장 지점).
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try session.refreshDragPreview(0, plan_mid, y_mid, arena_state.allocator());
+    try std.testing.expect(session.sidebar_drag_preview != null);
+    try std.testing.expect(session.sidebar_drag_preview.?.plan == .card);
+    try std.testing.expect(session.sidebar_drag_preview.?.plan.card.top_level); // ★ 저장된 plan에 top_level=true 온전
+
+    // ③ up 확정(commitSidebarDragPreview): 저장 plan을 그대로 replay — X가 그룹 안으로 흡수되지 않음.
+    session.commitSidebarDragPreview();
+    // X(t0)는 [Am, a1, X, a2]로 밀려 position 2. top_level=true 유지 + 그룹 A에 흡수 안 됨.
+    try std.testing.expectEqual(x_ptr, session.tabs.items[2]); // X가 position 2로
+    try std.testing.expect(session.tabs.items[2].top_level); // ★ 흡수 금지(top_level 확정 write)
+    try std.testing.expect(session.enclosingGroupMarkerIndex(2) == null); // 그룹 A 멤버 아님
+    try std.testing.expectEqual(@as(u8, 0), session.effectiveDepthAt(2, null, null)); // 그룹 밖(depth0)
+    try std.testing.expect(session.tabs.items[2].pinned); // 고정 유지(고정 리전 안)
+}
+
+test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유지(top_level=false, 비고정 회귀 0)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3], 전부 **비고정**(기본)
+    try setGroupMarker(session, 1, "A", 1); // X=t0(top카드), A=[Am=t1, a1=t2, a2=t3]
+    session.sidebar_slot_height_px = 40;
+    session.sidebar_header_row_h_px = 20;
+    session.sidebar_header_height_px = 30;
+    session.sidebar_scroll_offset_px = 0;
+    session.recomputeVisibleTabs();
+    session.sidebar_drag_index = 0;
+    const a1_row = cardRowOf(session, 2);
+    const y_mid = sidebarDragScreenY(session, a1_row, 0.3);
+    const plan_mid = session.cardDropPlan(0, y_mid);
+    switch (plan_mid) {
+        .card => |c| {
+            try std.testing.expectEqual(@as(usize, 2), c.target_tab);
+            try std.testing.expect(!c.top_level); // ★ 비고정 소스 = 그룹 안 = 멤버 흡수(top_level=false, 기존 동작)
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 전체 경로 확정 후에도 흡수(그룹 A 멤버).
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try session.refreshDragPreview(0, plan_mid, y_mid, arena_state.allocator());
+    session.commitSidebarDragPreview();
+    try std.testing.expect(!session.tabs.items[2].top_level); // 멤버(흡수)
+    try std.testing.expect(session.enclosingGroupMarkerIndex(2) != null); // ★ 그룹 A에 흡수됨(비고정 능력 보존)
+}
+
+test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여도 sibling) + 비고정 그룹은 nest 유지" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    // ── Part 1: 고정 그룹 A를 고정 그룹 B 헤더에 Cmd 드롭 → sibling(nest 안 됨) ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+        inline for (0..4) |i| session.tabs.items[i].pinned = true; // 전부 고정
+        try setGroupMarker(session, 0, "A", 1); // A=[Am=t0, a1=t1]
+        try setGroupMarker(session, 2, "B", 1); // B=[Bm=t2, b1=t3]
+        session.recomputeVisibleTabs();
+        var b_header_row: usize = 0;
+        for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+            .group_header => |gh| if (gh.tab == 2) {
+                b_header_row = s;
+            },
+            .card => {},
+        };
+        // groupNestPlan 직접: 드래그 그룹 마커(0)가 고정이라 nest 불가 → null(형제 폴백).
+        try std.testing.expect(session.groupNestPlan(b_header_row, 0) == null); // ★ 고정 그룹 nest 금지
+        // 전체 프레임(Cmd 눌림): nest 시도해도 sibling으로 폴백.
+        const y_b = sidebarDragScreenY(session, b_header_row, 0.5);
+        session.groupDragPreviewFrame(0, y_b, true); // cmd_held=true
+        try std.testing.expect(session.sidebar_drag_preview != null);
+        try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_sibling); // ★ Cmd여도 sibling(중첩 아님)
+        session.clearSidebarDragPreview();
+    }
+    // ── Part 2: 비고정 그룹 A를 비고정 그룹 B 헤더에 Cmd 드롭 → nest(중첩 유지, 회귀 0) ──
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        inline for (0..3) |_| _ = try session.newTab(); // [t0..t3] 전부 비고정
+        try setGroupMarker(session, 0, "A", 1);
+        try setGroupMarker(session, 2, "B", 1);
+        session.recomputeVisibleTabs();
+        var b_header_row: usize = 0;
+        for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
+            .group_header => |gh| if (gh.tab == 2) {
+                b_header_row = s;
+            },
+            .card => {},
+        };
+        try std.testing.expect(session.groupNestPlan(b_header_row, 0) != null); // 비고정 = nest 가능(기존 동작)
+        const y_b = sidebarDragScreenY(session, b_header_row, 0.5);
+        session.groupDragPreviewFrame(0, y_b, true); // cmd_held=true
+        try std.testing.expect(session.sidebar_drag_preview.?.plan == .group_nest); // ★ 비고정 Cmd = 중첩(회귀 0)
+        session.clearSidebarDragPreview();
+    }
+}
+
+test "SR-PIN4: 고정 탭을 비고정 리전 위치로 드래그 → 고정 리전 끝으로 clamp(비고정 안 넘어감, 전체 경로)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..2) |_| _ = try session.newTab(); // [t0,t1,t2]
+    session.tabs.items[0].pinned = true; // X=t0(고정, 드래그 소스)
+    session.tabs.items[1].pinned = true; // P1=t1(고정)
+    // u2=t2 비고정. 고정 리전 [0,2), 비고정 [2,3).
+    session.sidebar_slot_height_px = 40;
+    session.sidebar_header_row_h_px = 20;
+    session.sidebar_header_height_px = 30;
+    session.sidebar_scroll_offset_px = 0;
+    session.recomputeVisibleTabs();
+    session.sidebar_drag_index = 0;
+    const x_ptr = session.tabs.items[0];
+    const u2_ptr = session.tabs.items[2];
+    // X(고정)를 u2(비고정, position 2) 위로 드래그. target=2(비고정 리전)여도 clampMoveToGroup이 고정 리전 끝(1)로 가둔다.
+    const u2_row = cardRowOf(session, 2);
+    const y_u2 = sidebarDragScreenY(session, u2_row, 0.5);
+    const plan = session.cardDropPlan(0, y_u2);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    try session.refreshDragPreview(0, plan, y_u2, arena_state.allocator());
+    session.commitSidebarDragPreview();
+    // X는 고정 리전 끝(position 1)까지만 — 비고정(position 2)으로 못 넘어간다. u2는 여전히 position 2.
+    try std.testing.expectEqual(x_ptr, session.tabs.items[1]); // ★ X가 고정 리전 끝(1)로 clamp
+    try std.testing.expect(session.tabs.items[1].pinned); // 고정 유지
+    try std.testing.expectEqual(u2_ptr, session.tabs.items[2]); // u2 비고정 자리 불변(X 안 넘어옴)
+    try std.testing.expect(!session.tabs.items[2].pinned);
+}
+
+test "SR-PIN5: 프리뷰=확정 등가 — 고정 탭 그룹 한복판 drop plan을 simulateDrop vs commitSidebarDragPreview 동일" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    inline for (0..3) |_| _ = try session.newTab(); // [t0..t3]
+    inline for (0..4) |i| session.tabs.items[i].pinned = true; // 전부 고정
+    try setGroupMarker(session, 1, "A", 1); // X=t0, A=[Am=t1, a1=t2, a2=t3]
+    session.recomputeVisibleTabs();
+    // 고정 소스 X를 a1(멤버 position 2) 자리로 — plan.top_level=true(cardDropPlan이 강제할 값과 동일 리터럴).
+    // simulateDrop 가상 top_level[] == commitSidebarDragPreview 후 실제 top_level[] (프리뷰=확정 게이트 동일).
+    try expectCardDropTopLevelEquivalent(session, 0, .{ .card = .{ .target_tab = 2, .top_level = true } });
 }
 
 // ── (3) 드래그 중 접힌 그룹은 접힌 헤더로만 — 대상=접힌 그룹이면 subtree force-emit 억제, 타깃=접힌 그룹은 유지 ────────

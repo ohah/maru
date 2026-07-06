@@ -765,6 +765,61 @@ test "socket 1d: client가 sessions.list 요청 → server가 fake snapshot으�
     try testing.expectEqual(@as(i64, 20), arr.items[1].object.get("id").?.object.get("surface_id").?.integer);
 }
 
+// ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────
+
+// 순수 path 파생 함수들의 문서화된 error{NoSpaceLeft}: 기존 테스트는 formatInstanceKey만 버퍼 부족을 밟았다.
+// controlDirPath/socketPathIn/lockPathIn도 같은 bufPrintZ 계약이라 작은 버퍼에서 NoSpaceLeft를 내야 한다.
+test "policy: controlDirPath/socketPathIn/lockPathIn은 버퍼 부족 시 NoSpaceLeft" {
+    var tiny: [4]u8 = undefined;
+    try testing.expectError(error.NoSpaceLeft, controlDirPath(&tiny, "/base"));
+    try testing.expectError(error.NoSpaceLeft, socketPathIn(&tiny, "/base/control", "1234-ab"));
+    try testing.expectError(error.NoSpaceLeft, lockPathIn(&tiny, "/base/control", "1234-ab"));
+}
+
+// 인스턴스 키 격리(§4.2 "소켓 경로 키 = 인스턴스"): 같은 base에서 **서로 다른 키**는 독립 lock/소켓이라 둘 다
+// bind되고 각자 connect된다. 같은 키 재bind가 AddressInUse인 것("live" 테스트)과 대조되는 반대 방향 — 여러 maru
+// 인스턴스 공존이라는 키 설계의 목적을 못박는다.
+test "socket: 서로 다른 인스턴스 키는 같은 base에서 공존한다(각자 bind·connect)" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "twokeys");
+    defer rmTmpBase(base);
+
+    var srv_a = try Server.bind(testing.allocator, base, "kA");
+    defer srv_a.deinit();
+    var srv_b = try Server.bind(testing.allocator, base, "kB"); // 다른 키 → 독립 lock, 성공해야
+    defer srv_b.deinit();
+
+    // 두 소켓 경로가 다르다.
+    try testing.expect(!std.mem.eql(u8, srv_a.socket_path, srv_b.socket_path));
+
+    // 각 키로 별도 클라이언트가 connect → 각자 accept가 hello를 보낸다.
+    const ClientT = struct {
+        base: []const u8,
+        key: []const u8,
+        ok: bool = false,
+        fn run(self: *@This()) void {
+            const fd = connectClient(self.base, self.key) catch return;
+            defer _ = c.close(fd);
+            var rb: [256]u8 = undefined;
+            const n = c.read(fd, &rb, rb.len);
+            self.ok = n > 0 and rb[@intCast(n - 1)] == '\n';
+        }
+    };
+    var ca = ClientT{ .base = base, .key = "kA" };
+    var cb = ClientT{ .base = base, .key = "kB" };
+    const ta = try std.Thread.spawn(.{}, ClientT.run, .{&ca});
+    var conn_a = try srv_a.acceptOne(testing.allocator, test_hello);
+    ta.join();
+    conn_a.deinit();
+    const tb = try std.Thread.spawn(.{}, ClientT.run, .{&cb});
+    var conn_b = try srv_b.acceptOne(testing.allocator, test_hello);
+    tb.join();
+    conn_b.deinit();
+
+    try testing.expect(ca.ok);
+    try testing.expect(cb.ok);
+}
+
 test {
     testing.refAllDecls(@This());
 }

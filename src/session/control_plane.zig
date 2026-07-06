@@ -893,3 +893,50 @@ test "Framer: 완결 frame 뒤 oversize 미완결 tail이 와도 앞 frame을 �
     try testing.expectError(error.PayloadTooLarge, f.next()); // 그다음에야 oversize tail 거부
     try testing.expectError(error.PayloadTooLarge, f.next()); // sticky
 }
+
+// ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────
+
+// 계약 고정: JSON-RPC §1 "notification = id member 없는 Request"이므로, **명시적 `id:null`은 notification이 아니라
+// null id를 가진 request**다(member 부재 ≠ member=null). classify가 obj.get("id")의 존재(std.json은 명시 null을
+// `.null` Value로 저장)로 request/notification을 가르는 분기를 못박는다 — 이 구분이 무너지면 라우터가 응답 없는
+// notification으로 오분류해 조회가 조용히 사라진다(1d dispatchReadOnly는 request만 디스패치).
+test "classify: 명시적 id:null은 notification이 아니라 null id request(member 부재 ≠ null)" {
+    var pm = try parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"sessions.list\"}");
+    defer pm.deinit();
+    try testing.expect(pm.message == .request); // notification 아님.
+    try testing.expect(pm.message.request.id == .null);
+    try testing.expectEqualStrings("sessions.list", pm.message.request.method);
+
+    // 대조: id member 자체가 없으면 notification.
+    var nt = try parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"sessions.list\"}");
+    defer nt.deinit();
+    try testing.expect(nt.message == .notification);
+
+    // null id request가 serialize→parse 왕복에서 request·null id로 보존된다("id":null이 실린다).
+    const wire = try serializeMessage(testing.allocator, pm.message);
+    defer testing.allocator.free(wire);
+    try testing.expect(std.mem.indexOf(u8, wire, "\"id\":null") != null);
+    var rt = try parseMessage(testing.allocator, wire);
+    defer rt.deinit();
+    try testing.expect(rt.message == .request);
+    try testing.expect(rt.message.request.id == .null);
+}
+
+// 에러 응답의 optional `data`(§5.1)는 parse가 `err.data`로 담고 serialize가 다시 싣는다 — 기존 테스트는 전부
+// data=null이라 이 왕복(serialize의 `if (e.data)` 분기 + parse의 `.data = eo.get("data")`)이 안 밟혔다.
+test "error data: 에러 응답의 optional data(불투명 JSON)가 parse→serialize→parse 왕복에서 보존된다" {
+    const raw =
+        \\{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"Payload too large","data":{"limit":1048576}}}
+    ;
+    var pm = try parseMessage(testing.allocator, raw);
+    defer pm.deinit();
+    try testing.expect(pm.message.response.err.?.data != null);
+    try testing.expectEqual(@as(i64, 1048576), pm.message.response.err.?.data.?.object.get("limit").?.integer);
+
+    const wire = try serializeMessage(testing.allocator, pm.message);
+    defer testing.allocator.free(wire);
+    try testing.expect(std.mem.indexOf(u8, wire, "\"data\"") != null);
+    var pm2 = try parseMessage(testing.allocator, wire);
+    defer pm2.deinit();
+    try testing.expectEqual(@as(i64, 1048576), pm2.message.response.err.?.data.?.object.get("limit").?.integer);
+}

@@ -789,3 +789,31 @@ test "SurfaceDto.kind()는 detail tag를 돌려준다" {
 fn idEqlNum(id: cp.Id, n: i64) bool {
     return cp.idEql(id, .{ .number = n });
 }
+
+// ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────
+
+// 모듈 헤더 계약: "wire 문자열은 exhaustive switch로 못박아(내부 rename이 wire를 안 흔들게) 고정한다". 기존
+// 테스트는 agent kind=claude·state=running만 실었다 — agentKindWire(.codex)·agentStateWire(.idle|.unknown)
+// 분기는 어떤 테스트도 안 밟아, 내부 enum rename이 이 wire 문자열을 조용히 바꿔도 잡히지 않았다. 그 wire 상수를 못박는다.
+test "wire enum 안정성: agent kind=codex, state=idle/unknown이 문서화된 wire 문자열로 직렬화된다" {
+    // codex + idle.
+    {
+        const dto = termSurface(1, "s", .{ .agent = .{ .kind = .codex, .state = .idle }, .at_prompt = .unknown });
+        const wire = try serializeSurface(testing.allocator, dto);
+        defer testing.allocator.free(wire);
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
+        defer parsed.deinit();
+        const ag = parsed.value.object.get("agent").?.object;
+        try testing.expectEqualStrings("codex", ag.get("kind").?.string);
+        try testing.expectEqualStrings("idle", ag.get("state").?.string);
+    }
+    // agent state=unknown(내부 3상 중 running/idle 아닌 나머지 — false로 접히지 않고 "unknown" 문자열).
+    {
+        const dto = termSurface(2, "s", .{ .agent = .{ .kind = .claude, .state = .unknown }, .at_prompt = .unknown });
+        const wire = try serializeSurface(testing.allocator, dto);
+        defer testing.allocator.free(wire);
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("unknown", parsed.value.object.get("agent").?.object.get("state").?.string);
+    }
+}

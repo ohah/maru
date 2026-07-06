@@ -878,3 +878,90 @@ test "mergeWindow OOM: append 실패면 leak 없이 부분 상태가 유효(모�
     try testing.expectEqual(ws, w0.workspaces.items[0]);
     try testing.expectEqual(@as(usize, 0), w1.workspaces.items.len);
 }
+
+// ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────
+
+// collectWindowSurfaceIds: (a) out 버퍼가 모자라면 window_membership.collectVisibleSurfaces와 같은 조용한 절단
+// (앞에서부터 채우고 멈춤), (b) 범위 밖 win_index는 InvalidCoordinate. 기존 결합 테스트는 늘 충분한 버퍼를 써
+// 이 두 분기(`if (n >= out.len)`·`windowAt` 실패)를 안 밟았다.
+test "collectWindowSurfaceIds: out 절단(모자란 버퍼) + 범위 밖 win_index는 InvalidCoordinate" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w = try g.addWindow(1, .normal);
+    const ws = try g.addWorkspace(w, .{});
+    const p = try g.addPane(ws);
+    try g.addSurface(p, 100);
+    try g.addSurface(p, 101);
+    try g.addSurface(p, 102); // window 0 = {100,101,102}
+
+    // 절단: out이 2칸뿐이면 앞 2개만.
+    var small: [2]u64 = undefined;
+    const got = try g.collectWindowSurfaceIds(0, &small);
+    try testing.expectEqual(@as(usize, 2), got.len);
+    try testing.expectEqualSlices(u64, &.{ 100, 101 }, got);
+    // out.len==0 극단: 아무것도 안 쓰고 빈 slice.
+    var none: [0]u64 = undefined;
+    try testing.expectEqual(@as(usize, 0), (try g.collectWindowSurfaceIds(0, &none)).len);
+    // 범위 밖 window index → InvalidCoordinate.
+    var buf: [8]u64 = undefined;
+    try testing.expectError(error.InvalidCoordinate, g.collectWindowSurfaceIds(5, &buf));
+}
+
+// empty-source 정리 **전 계단**(pane→workspace→window)이 moveSurface 하나로 연쇄해 source window가 닫히고
+// active_window가 목적지로 따라가는 경로. 기존 moveSurface 테스트는 전부 source에 resident surface를 남겨
+// pane 정리에서 멈췄다 — surface 이동이 창을 통째로 닫는 full cascade는 안 밟혔다(focus 규칙 2→3 연쇄).
+test "moveSurface full cascade: source의 마지막 surface가 빠지면 pane→ws→window가 연쇄 정리되고 active_window가 dst로 따라간다" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    // win0: 단일 ws/pane/surface(100). win1: ws/pane/surface(200).
+    const w0 = try g.addWindow(1, .normal);
+    const w1 = try g.addWindow(2, .normal);
+    const ws0 = try g.addWorkspace(w0, .{});
+    const p0 = try g.addPane(ws0);
+    try g.addSurface(p0, 100);
+    const ws1 = try g.addWorkspace(w1, .{});
+    const p1 = try g.addPane(ws1);
+    try g.addSurface(p1, 200);
+    g.active_window = 0; // win0가 active(닫힐 것)
+
+    // win0의 유일 surface(100)를 win1로 옮긴다 → win0의 pane·ws·window가 전부 비어 연쇄 제거.
+    try g.moveSurface(.{ .win = 0, .ws = 0, .pane = 0, .surface = 0 }, .{ .win = 1, .ws = 0, .pane = 0 });
+
+    try testing.expectEqual(@as(usize, 1), g.windows.items.len); // win0 닫힘.
+    try testing.expectEqual(w1, g.windows.items[0]);
+    try testing.expectEqual(@as(usize, 0), g.active_window); // 닫힌 win0(idx0) → dst win1로 따라감(shift 반영).
+    // 이동한 surface는 win1의 pane에 append돼 active.
+    try testing.expectEqual(@as(usize, 2), p1.surfaces.items.len);
+    try testing.expectEqual(@as(u64, 100), p1.surfaces.items[1].surface_id);
+    try testing.expectEqual(@as(usize, 1), p1.active_surface);
+}
+
+// removeWindow의 focus-follow 산술 `fib - @intFromBool(fib > idx)`의 **fib>idx 참 분기**: active였던 source가
+// 닫히고 목적지가 source보다 **뒤 인덱스**에 있어 제거 shift로 당겨질 때. 기존 merge 테스트는 target이 source보다
+// 앞(fib<idx)이라 이 분기를 안 밟았다.
+test "mergeWindow focus-follow: 목적지가 source보다 뒤 인덱스여도 active_window가 정확히 따라간다(fib>idx 보정)" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal); // source(idx0, active, 닫힐 것)
+    const w1 = try g.addWindow(2, .normal); // 방관자(idx1)
+    const w2 = try g.addWindow(3, .normal); // target(idx2, source보다 뒤)
+    const s0 = try g.addWorkspace(w0, .{});
+    _ = try g.addPane(s0);
+    const b0 = try g.addWorkspace(w1, .{});
+    _ = try g.addPane(b0);
+    const t0 = try g.addWorkspace(w2, .{});
+    _ = try g.addPane(t0);
+    g.active_window = 0; // source가 active
+
+    try g.mergeWindow(0, 2); // source(idx0)를 target(idx2)로 merge → source 닫힘.
+
+    // 남은 창: [w1, w2], w2는 idx1로 당겨짐. active_window는 target(w2=이제 idx1)로 따라간다.
+    try testing.expectEqual(@as(usize, 2), g.windows.items.len);
+    try testing.expectEqual(w1, g.windows.items[0]);
+    try testing.expectEqual(w2, g.windows.items[1]);
+    try testing.expectEqual(@as(usize, 1), g.active_window);
+    // target에 자기 것 + source 것(순서 보존).
+    try testing.expectEqual(@as(usize, 2), w2.workspaces.items.len);
+    try testing.expectEqual(t0, w2.workspaces.items[0]);
+    try testing.expectEqual(s0, w2.workspaces.items[1]);
+}

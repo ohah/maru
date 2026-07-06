@@ -222,3 +222,29 @@ test "window_kind: normal과 quick 분류(값에 라우팅 의미 없이 분류�
     try std.testing.expectEqual(WindowKind.quick, quick_win.window_kind);
     try std.testing.expect(normal_win.window_kind != quick_win.window_kind);
 }
+
+// ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────
+
+// 문서화된 결정론 계약(line 58~59): 앱 전역 surface_id는 정상적으로 한 window에만 나타나지만, fake/조립 입력이
+// 어긋나 같은 surface가 두 window에 실려도 windowOfSurface는 **첫 매치만** 반환한다(판정을 결정론적으로 고정).
+// 이 불변식이 무너지면 window scope 판정이 입력 순서에 따라 흔들린다.
+test "windowOfSurface: 같은 surface가 두 window에 중복돼도 첫 매치만 반환(결정론)" {
+    const dup_a = [_]u64{ 10, 99 };
+    const dup_b = [_]u64{99}; // 99가 A·B 양쪽에 등장(어긋난 입력)
+    const windows = [_]WindowMembershipSnapshot{
+        .{ .window_id = 1, .window_kind = .normal, .surface_ids = &dup_a },
+        .{ .window_id = 2, .window_kind = .normal, .surface_ids = &dup_b },
+    };
+    const w = windowOfSurface(&windows, 99).?;
+    try std.testing.expectEqual(@as(u64, 1), w.window_id); // 첫 매치(window 1), 둘째(window 2) 아님.
+    // 없는 surface는 null.
+    try std.testing.expect(windowOfSurface(&windows, 12345) == null);
+}
+
+// 경계값: collectVisibleSurfaces의 절단 분기(`if (n >= out.len)`)의 극단 = out.len==0. 어떤 것도 쓰지 않고
+// 즉시 빈 slice를 돌려줘야 한다(첫 write 전 절단, out-of-bounds 없음).
+test "collectVisibleSurfaces: out 길이 0이면 아무것도 쓰지 않고 빈 slice(절단 경계 극단)" {
+    var none: [0]u64 = undefined;
+    const visible = collectVisibleSurfaces(&fx_windows, 10, .all, &none);
+    try std.testing.expectEqual(@as(usize, 0), visible.len);
+}

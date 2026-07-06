@@ -500,6 +500,56 @@ test "renderResponse: at_prompt unknown(JSON null)은 unknown으로" {
     try testing.expect(std.mem.indexOf(u8, out.items, "at_prompt=unknown") != null);
 }
 
+// ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────
+
+// renderResponse의 방어 분기(파싱 실패·비-response·list인데 배열 아님·surface가 객체 아님)는 정상 응답만 넣던
+// 기존 테스트가 하나도 안 밟았다. 사용자에게 노출되는 실패 경로라 각 메시지를 못박는다.
+test "renderResponse 방어 경로: 손상 응답·비-response·잘못된 result 모양이 각각 명확한 error 줄로" {
+    // (a) 파싱 실패 바이트 → "malformed response from server".
+    {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try render("{not json", .list, &out);
+        try testing.expect(std.mem.indexOf(u8, out.items, "malformed response from server") != null);
+    }
+    // (b) response가 아닌 메시지(notification) → "unexpected message (not a response)".
+    {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try render("{\"jsonrpc\":\"2.0\",\"method\":\"hello\"}", .get, &out);
+        try testing.expect(std.mem.indexOf(u8, out.items, "not a response") != null);
+    }
+    // (c) kind=list인데 result가 배열이 아님(단건 객체) → "expected a list result".
+    {
+        const wire =
+            \\{"jsonrpc":"2.0","id":1,"result":{"id":{"surface_id":1,"generation":0},"kind":"terminal","title":"x","window":0,"tab":0,"pane":0,"focused":false,"at_prompt":null}}
+        ;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try render(wire, .list, &out);
+        try testing.expect(std.mem.indexOf(u8, out.items, "expected a list result") != null);
+    }
+    // (d) list 배열 안에 객체 아닌 항목 → "malformed surface"(개별 항목 방어).
+    {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        try render("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[5]}", .list, &out);
+        try testing.expect(std.mem.indexOf(u8, out.items, "malformed surface") != null);
+    }
+}
+
+// web surface의 loading=true 렌더 분기(" loading" 부착)는 기존 테스트가 loading:false만 써서 안 밟혔다.
+test "renderResponse: web surface loading=true면 'loading' 표시" {
+    const wire =
+        \\{"jsonrpc":"2.0","id":1,"result":{"id":{"surface_id":11,"generation":0},"kind":"web","title":"docs","window":1,"tab":0,"pane":0,"focused":false,"url":"https://x/y","panel_kind":"browser","loading":true,"trust":"untrusted"}}
+    ;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try render(wire, .get, &out);
+    try testing.expect(std.mem.indexOf(u8, out.items, " loading") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "panel=browser") != null);
+}
+
 test {
     testing.refAllDecls(@This());
 }

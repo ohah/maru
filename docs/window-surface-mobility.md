@@ -123,7 +123,7 @@ Zig/AppRuntime이 맡는 것:
 
 restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이다. 이 절은 그 문서에 중복 정의하지 않고, 이동성 모델이 요구하는 변경만 적는다(상세 저장/미저장 목록은 거기서 갱신).
 
-- 저장 모델을 단일 창 기준에서 `WindowGraph` 기준(windows, active window, workspace order, pane tree, surface refs)으로 확장한다. **이 확장은 M3의 종료 gate다**(§8) — cross-window 배치가 처음 생기는 단계이므로, "이동은 되는데 재시작하면 사라짐" 상태로 M3를 닫지 않는다.
+- 저장 모델의 **권위 출처**를 바꾼다. 현재 `saveWorkspace`/`restoreWorkspace`는 이미 멀티 창을 창별 per-session `Model` 블록으로 저장·복원한다(첫 블록 primary + 나머지 블록마다 새 창) — 즉 멀티 창 저장은 stale 미구현이 아니라 현재형이다. M1/M2가 배치 권위를 per-session `Model` 밖 `WindowGraph`/`AppRuntime`으로 올리면, 직렬화 출처도 창별 `Model` 블록에서 `WindowGraph`(windows, active window, workspace order, pane tree, surface refs)로 옮겨진다. **이 전환은 M3의 종료 gate다**(§8): M3부터 `WindowGraph`가 배치 권위가 되므로, 그 권위와 per-session 직렬화(active window·`window_kind`·graph 메타)의 정합을 M3 안에서 닫아 이동 결과가 재시작 후에도 살아남게 한다.
 - live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 계속 저장하지 않는다(기존 정책 유지).
 - 복원 시 live surface는 새 generation으로 생성된다. agent session resume처럼 별도 영속 상관키가 있는 항목만 재연결을 시도한다.
 - 하위 호환은 없으므로 옛 저장 파일은 workspace-restore.md의 "조용한 기본 창 폴백"을 따른다.

@@ -25,7 +25,7 @@
 3. **모달 Metal 오버레이**(맨 위): command palette·find·confirm. `isOpaque=false`, 평소 clear(투명), 모달 열림 시에만 셀을 그린다.
 
 **모달 레이어 분리는 두 개의 선행 리팩터다**(Phase 4 선행, 가벼운 작업이 아님):
-- **(a) 렌더러 분할**: 현재 모달은 터미널과 같은 cells 배열·같은 draw pass에서 `modal_cells_start` 인덱스로만 갈린다. same-pass 전제는 over-quad(`layer=1`)·그림자·`modal_clip_*`(scissor, ABI v84)에 더해 **커서 blink 페이드 suffix pass(ABI v95)**까지다 — caret은 단일 cells 버퍼 맨 끝 suffix + 단일 fragment opacity uniform 전제이고 draw 위치가 모달 유무로 갈리므로(모달 열림 시 모달 텍스트 뒤), 분리 시 caret pass를 소유 레이어로 재배선한다. 셀당 2-quad(×12 vertex) 오프셋 규약(`modal_cells_start*12`·`cursor_start*12`의 기반)도 두 패스에 그대로 이관한다. 이를 `drawTerminal(layer, cellSubset)` / `drawOverlay(layer, modalCells+quads+shadow+caret)` 두 패스로 재분할하고, 두 CAMetalLayer의 drawable·redraw·**generation 게이팅을 독립 추적**한다(현 `lastSeenMetalGeneration` 단일 가정 변경). modal-clip 인프라 재배선 대상 — 주의: `MTLScissorRect`는 **좌상단 원점**이다(현재 미사용 modal_clip 경로에 좌하단 y-flip 가정이 **미수정으로 남아 있다** — 활성 scissor는 좌상단으로 올바름).
+- **(a) 렌더러 분할**: 현재 모달은 터미널과 같은 cells 배열·같은 draw pass에서 `modal_cells_start` 인덱스로만 갈린다. same-pass 전제는 over-quad(`layer=1`)·그림자·`modal_clip_*`(scissor, ABI v84)에 더해 **커서 blink 페이드 suffix pass(ABI v95)**까지다 — caret은 단일 cells 버퍼 맨 끝 suffix + 단일 fragment opacity uniform 전제이고 draw 위치가 모달 유무로 갈리므로(모달 열림 시 모달 텍스트 뒤), 분리 시 caret pass를 소유 레이어로 재배선한다. 셀당 2-quad(×12 vertex) 오프셋 규약(`modal_cells_start*12`·`cursor_start*12`의 기반)도 두 패스에 그대로 이관한다. 이를 `drawTerminal(layer, cellSubset[, caret])` / `drawOverlay(layer, modalCells+quads+shadow[, caret])` 두 패스로 재분할한다. **caret은 조건부 이중 소유**다 — 모달이 닫힌 평시 caret은 터미널 콘텐츠라 `drawTerminal` 소유, 모달 열림 시에만 모달 텍스트 위 `drawOverlay` 소유로 이관한다(현재 `has_modal` 분기가 draw 위치를 가르는 그 지점). 두 CAMetalLayer의 drawable·redraw·**generation 게이팅을 독립 추적**한다(현 `lastSeenMetalGeneration` 단일 가정 변경). modal-clip 인프라 재배선 대상 — 주의: `MTLScissorRect`는 **좌상단 원점**이다(현재 미사용 modal_clip 경로에 좌하단 y-flip 가정이 **미수정으로 남아 있다** — 활성 scissor는 좌상단으로 올바름).
   - **present 원자성 불변식(tearing 방지)**: 두 레이어의 generation이 독립이면, 모달 열림/닫힘 **전이 프레임**은 두 레이어를 원자적으로 함께 바꿔야 하는 프레임인데(터미널 레이어에서 caret 제거 + 오버레이에 모달+caret 그림) 서로 다른 vsync에 커밋되면 tearing(모달만 새 프레임·배경은 옛것, 또는 caret 0개/2개)이 난다. 전이 프레임은 **두 레이어를 같은 `CATransaction`에서 커밋**(또는 both-ready까지 both-hold)하고, caret 소유권 이관은 그 단일 커밋 경계에서만 일어난다. 검증 artifact: 전이 프레임에서 caret이 정확히 1개.
 - **(b) 호스트 재편**: contentView를 컨테이너로, 입력 responder를 명시 위임(§4). 오버레이용 `isOpaque=false` + transparent clear 분기(터미널 전용 `terminal_bg`/opacity clear와 별도).
 
@@ -76,7 +76,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 
 ## 8. 빠진 기능 (구현 시 필수)
 
-- **window.opacity 정합**: 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 WKWebView 본문 rect만 불투명하면 시각 부정합(데스크톱이 비치는 chrome 옆에 불투명 웹 패널). WKWebView 배경 처리(`drawsBackground`/`underPageBackgroundColor`) 또는 "웹 패널이 있는 창은 opacity 무시" 중 Phase 4c에서 결정.
+- **window.opacity 정합**: 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 WKWebView 본문 rect만 불투명하면 시각 부정합(데스크톱이 비치는 chrome 옆에 불투명 웹 패널). WKWebView 배경 처리 또는 "웹 패널이 있는 창은 opacity 무시" 중 Phase 4c에서 결정. 배경 투명화는 공개 API `underPageBackgroundColor`(macOS 12+)를 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
 - **⌘F 분기**: 포커스가 터미널이면 maru find(스크롤백), 웹 패널이면 페이지 내 find. 포커스 기준 라우팅 명시.
 - **컨텍스트 메뉴**: WKWebView 기본 우클릭 메뉴(Inspect Element 포함)는 "chrome는 Zig" 원칙·보안과 충돌 → 억제 또는 maru 메뉴로 대체.

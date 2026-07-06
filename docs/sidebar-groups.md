@@ -545,6 +545,21 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
        `rebuildSidebar` 정확히 1회(두 투영: hit-test용 원본 `sidebar_rows` + 렌더용 `sidebar_preview_rows`는 설계상 필요, 이중
        rebuild 아님). 확정(up)의 `commitSidebarDragPreview`가 move 1회+rebuild로 마무리한다. 검증: `zig build test`+`mise run check`
        (oracle/e2e/stress) 회귀 0 + 스크린샷 4변형(카드·그룹·접힘·색) 정상 + 비드래그(`MARU_FORCE_GROUP`) 고스트 없이 clean.
+   - **SG8g ✅ — 실앱 드래그 UX 마감(실 drop 위치 판정·접힌 그룹 드래그 렌더)**: 헤드리스가 `raw_row`를 직접 넣어 hit-test **함수**만
+     보던 갭을, mouse 핸들러의 **`y_px`→`raw_row`→plan 실경로**로 메운다.
+     - **(A) 카드 드래그 "그룹 뒤/사이 top_level 탈출" 실좌표 보정 — `cardDropPlan`(mouse 핸들러·테스트 단일 출처)**: hit-test는
+       불변 원본 `sidebar_rows`(드래그 소스가 아직 자기 자리)로 하는데 사용자는 소스가 빠진 **프리뷰**를 본다. 소스 카드 아래
+       콘텐츠가 소스 높이만큼 위로 밀리는 **프리뷰 시프트** 때문에, 사용자가 프리뷰의 그룹 꼬리를 겨냥해도 원본 좌표론 멤버 행
+       중앙에 떨어져 **흡수**(top_level=false)됐다(증상). `cardDropPlan`이 소스 행이 `raw_row` 위면(드래그 다운) 탈출 판정 y에
+       소스 행 높이를 더해(`sidebarCardDropAfterGroup`만 보정), 프리뷰의 그룹 꼬리 겨냥이 마지막 멤버 하단 경계(탈출 존)에 맞게
+       한다. 일반 위치 판정(`sidebarGroupDropTargetTab`)은 보정 **없이**(moveTab from/to가 소스 제거를 이미 보정 — 이중 보정 방지).
+       `MARU_DEBUG`면 `cardDropPlan`이 `origin/y/raw_row/y_esc/raw_esc/gap/top_level`을 로깅(실앱 자기검증). **잔여**: "첫 그룹
+       **위**로 탭 끌어 leading 만들기"는 여전히 헤더=넣기라 미해결(별도 "before-group" 탈출 필요 — 후속).
+     - **(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만**: SG8c의 고스트 force-emit(접힌 그룹 드롭 시 사라짐 방지)이 접힌
+       그룹을 **통째로 드래그**할 때도 subtree를 강제 방출해 펼쳐 보였다. `PreviewCtx.dragged_collapsed`(그룹 통째 드래그 &&
+       origin 마커 `group_collapsed`)로 대상/타깃을 구분: 대상=접힌 그룹이면 그 subtree의 `force_card`를 끄고 안쪽 헤더 flip을
+       억제해 **접힌 헤더 한 줄**만 낸다. 타깃=접힌 그룹(카드를 그 안으로 드롭, `dragged_collapsed=false`)의 force-emit는 그대로
+       (사라짐 방지 유지). 헤드리스로 대상=접힌 그룹→헤더 1·멤버 0·collapsed 유지, 타깃=접힌 그룹→드롭 카드 고스트 방출 단언.
    - **검증 비대칭**: SG8a/b/c는 순수 함수라 **헤드리스가 1급**(byte-identical·등가·고스트 존재). SG8d/e/f의 반투명 알파·삽입선 y·
      depth 픽셀은 헤드리스로 안 잡혀 **macOS 제품 스크린샷이 1급**(검증 매트릭스). 훅 `MARU_FORCE_GROUP_DRAGGHOST`(예정).
    - **적대검증이 정정한 것(요약)**: ① `surface_ptrs`/`active_tab`은 divergence 아님(reorderTabs가 활성 포인터 추적·같은 backing). ②

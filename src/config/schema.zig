@@ -1248,3 +1248,100 @@ test "doc 정합성: 모든 스키마 키가 configuration.md 표에 문서화�
     }
     try std.testing.expectEqual(@as(usize, 0), missing);
 }
+
+// ── doc range 정합성 가드(CS-3 확장) ──────────────────────────────────────────────────────────────────────
+// 위 CS-3 가드는 스키마 키가 configuration.md 표에 **존재**하는지만 봤다(range 값은 손으로 씀). 그래서
+// quick-terminal.width처럼 문서 range 텍스트가 코드 스키마 range와 어긋나도 새어나갔다. 이 가드는 각 숫자 키
+// (f32/u32 + range)의 문서 행에서 range를 파싱해 **실제 파일 파싱 범위(parse_range orelse range)**와 대조한다 —
+// 사용자가 config 파일에 넣을 수 있는 범위(파싱 게이트)가 문서와 정확히 일치함을 강제한다(문서의 계약은 GUI
+// 보수 범위가 아니라 파일 범위이므로 parse_range 우선 — font.size는 GUI [6,72]와 별개로 문서·파일 [1,512]).
+
+/// 문서 range 파싱용 숫자 채우기 문자(음수 부호는 별도 처리).
+fn isDocNumChar(c: u8) bool {
+    return (c >= '0' and c <= '9') or c == '.';
+}
+
+/// 문서 표 한 행에서 **첫 `A~B` range**를 파싱한다. 타입 컬럼의 `정수(100~10000)`·`실수(0.0~1.0)`·`숫자(0~1.0)`,
+/// 백틱 표기 `` `8`~`512` ``, 설명에 적힌 `1~512 범위`·음수 `-8~32`를 모두 처리한다(규약: 첫 `~`가 곧 range다 —
+/// 타입 컬럼 range가 설명보다 앞서고, 타입에 range가 없는 font.*는 설명의 range가 첫 `~`다). 못 찾으면 null.
+fn parseDocRange(row: []const u8) ?[2]f64 {
+    const tilde = std.mem.indexOfScalar(u8, row, '~') orelse return null;
+    // A(왼쪽): 인접 닫는 백틱 스킵 → 숫자/점 → 음수 부호.
+    var le = tilde;
+    if (le > 0 and row[le - 1] == '`') le -= 1;
+    var ls = le;
+    while (ls > 0 and isDocNumChar(row[ls - 1])) ls -= 1;
+    if (ls == le) return null; // 숫자 없음
+    if (ls > 0 and row[ls - 1] == '-') ls -= 1; // 음수 부호
+    const a = std.fmt.parseFloat(f64, row[ls..le]) catch return null;
+    // B(오른쪽): 인접 여는 백틱 스킵 → 음수 부호 → 숫자/점.
+    var rs = tilde + 1;
+    if (rs < row.len and row[rs] == '`') rs += 1;
+    var re = rs;
+    if (re < row.len and row[re] == '-') re += 1;
+    const num_start = re;
+    while (re < row.len and isDocNumChar(row[re])) re += 1;
+    if (re == num_start) return null; // 숫자 없음
+    const b = std.fmt.parseFloat(f64, row[rs..re]) catch return null;
+    return .{ a, b };
+}
+
+/// 한 숫자 키의 문서 행 range를 스키마 parse range와 대조한다. 행이 없으면(키-존재 가드가 잡음) skip. range를 못
+/// 찾거나 값이 다르면 diagnostic + mismatch 증가. key는 comptime(마커를 comptime 연결).
+fn checkDocRange(doc: []const u8, comptime key: []const u8, expected: [2]f64, mismatches: *usize) void {
+    const marker = "| `" ++ key ++ "` |";
+    const idx = std.mem.indexOf(u8, doc, marker) orelse return; // 행 자체가 없는 건 위 doc-drift 가드가 잡는다
+    const rest = doc[idx..];
+    const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    const row = rest[0..nl];
+    const got = parseDocRange(row) orelse {
+        std.debug.print("문서 range 미검출: '{s}' 행에 A~B 패턴이 없음(범위를 문서에 표기해야 함)\n", .{key});
+        mismatches.* += 1;
+        return;
+    };
+    if (@abs(got[0] - expected[0]) > 1e-6 or @abs(got[1] - expected[1]) > 1e-6) {
+        std.debug.print("문서 range 불일치: '{s}' 문서={d}~{d} vs 코드(parse)={d}~{d} — configuration.md 표를 스키마에 맞춰라\n", .{ key, got[0], got[1], expected[0], expected[1] });
+        mismatches.* += 1;
+    }
+}
+
+test "doc range 정합성: 숫자 키 문서 범위가 스키마 parse range와 일치 (CS-3 확장)" {
+    const doc = @embedFile("config_doc_md");
+    var mismatches: usize = 0;
+    // 최상위(Config.schema)
+    inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        const meta = @field(theme.Config.schema, sf.name);
+        const eff: ?[2]f64 = comptime if (meta.parse_range != null) meta.parse_range else meta.range;
+        if (eff) |r| checkDocRange(doc, comptime topKey(sf.name, meta), r, &mismatches);
+    }
+    // sub-struct
+    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+        const Container = cf.type;
+        if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
+            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+                const meta = @field(Container.schema, sf.name);
+                const eff: ?[2]f64 = comptime if (meta.parse_range != null) meta.parse_range else meta.range;
+                if (eff) |r| checkDocRange(doc, comptime keyOf(cf.name, sf.name, meta), r, &mismatches);
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "parseDocRange: 괄호·백틱·음수·설명 위치 range를 모두 파싱" {
+    const eq = struct {
+        fn run(row: []const u8, a: f64, b: f64) !void {
+            const r = parseDocRange(row) orelse return error.TestExpectedRange;
+            try std.testing.expectApproxEqAbs(a, r[0], 1e-6);
+            try std.testing.expectApproxEqAbs(b, r[1], 1e-6);
+        }
+    }.run;
+    try eq("| `k` | 정수(100~10000) | `500` | 설명", 100, 10000); // 괄호+정수
+    try eq("| `k` | 실수(0.0~1.0) | `1.0` | 설명", 0, 1); // 소수
+    try eq("| `k` | 숫자(0~1.0) | `0` | 설명", 0, 1); // 0 sentinel
+    try eq("| `k` | `8`~`512` | `64` | 설명", 8, 512); // 백틱 표기(notifications 스타일)
+    try eq("| `k` | 숫자 | `14` | 1~512 범위. ...", 1, 512); // 설명에 range(font.size 스타일)
+    try eq("| `k` | 숫자 | `0.0` | 자간. -8~32 범위(음수 허용).", -8, 32); // 음수
+    // range가 없으면 null(bool/enum 등은 애초에 이 가드 대상 아님).
+    try std.testing.expect(parseDocRange("| `k` | `true`\\|`false` | `true` | 설명") == null);
+}

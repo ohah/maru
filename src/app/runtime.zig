@@ -191,6 +191,11 @@ pub const SurfaceRuntime = struct {
         });
 
         surface.process_state = .running;
+        // MARU_TRACE: surface가 붙는 순간 초기 grid 크기를 resize 이벤트로 기록해 trace를 self-contained하게 만든다.
+        // recordResize는 변경 시에만 발화하므로, 이 baseline이 없으면 resize 없는 세션은 초기 크기를 trace에서 복원
+        // 못 해 replay가 호출자 추정 크기에 의존한다(다른 열에서 wrap → 화면 불일치). 이제 replay가 이 첫 resize를
+        // 먼저 적용해 코어를 원 크기로 맞춘 뒤 output을 먹인다.
+        if (self.trace_recorder) |rec| rec.recordResize(surface_id, surface.core.size.cols, surface.core.size.rows);
         return .{ .surface_id = surface_id, .pty_id = pty_id };
     }
 
@@ -498,9 +503,11 @@ test "runtime records base kind to trace recorder and replay reconstructs the sc
     try runtime.resize(7, .{ .cols = 10, .rows = 3 }, std.testing.io);
     try runtime.applyPtyEvent(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } }, std.testing.io);
 
-    // recorder가 세 이벤트를 surface_id=7로, 인덱스 순서대로 기록.
+    // recorder가 surface_id=7로 이벤트를 기록. attach가 초기 크기(8x2)를 event 0 resize로 먼저 남겨 trace가
+    // self-contained(초기 grid 복원 가능)하다 — 그 뒤 output·resize(10x3)·process-exit.
     const t = rec.text();
-    try std.testing.expect(std.mem.indexOf(u8, t, "event 0 output surface=7 bytes=\"ab\\r\\nCD\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "event 0 resize surface=7 cols=8 rows=2\n") != null); // 초기 크기 baseline
+    try std.testing.expect(std.mem.indexOf(u8, t, "output surface=7 bytes=\"ab\\r\\nCD\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, t, "resize surface=7 cols=10 rows=3\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, t, "process-exit surface=7 code=0\n") != null);
 
@@ -513,6 +520,55 @@ test "runtime records base kind to trace recorder and replay reconstructs the sc
     const rep_screen = try replayed.dumpUtf8(allocator);
     defer allocator.free(rep_screen);
     try std.testing.expectEqualStrings(src_screen, rep_screen);
+}
+
+// 멀티 surface(탭/split) trace는 한 파일에 여러 surface가 섞인다 — replay는 한 core에 한 surface만 재구성해야
+// 화면이 안 뒤섞인다(code-review [0]). target(첫 output surface)만 적용되고, 다른 pane은 surface_id로 골라 재생된다.
+test "runtime: 멀티 surface trace replay는 surface별로 분리 재구성한다(뒤섞임 없음)" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var rec = TraceRecorder.init(allocator);
+    defer rec.deinit();
+    runtime.trace_recorder = &rec;
+
+    var sa = try surface_mod.Surface.init(allocator, 7, .{ .cols = 6, .rows = 1 });
+    defer sa.deinit();
+    var sb = try surface_mod.Surface.init(allocator, 8, .{ .cols = 6, .rows = 1 });
+    defer sb.deinit();
+    var pa = FakePty.init(allocator);
+    defer pa.deinit();
+    var pb = FakePty.init(allocator);
+    defer pb.deinit();
+    _ = try runtime.attach(&sa, 10, pa.io());
+    _ = try runtime.attach(&sb, 20, pb.io());
+
+    // 두 surface에 서로 다른 출력을 교차로 흘린다.
+    try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "AAAA" } }, std.testing.io);
+    try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 20, .bytes = "BBBB" } }, std.testing.io);
+
+    const t = rec.text();
+    const replay = @import("../observability.zig").replay;
+
+    // 기본 replay(첫 output surface=7)는 surface 7만 재구성 → "AAAA"만, "BBBB" 섞이지 않음.
+    var r7 = try replay.replayTrace(allocator, t, .{ .cols = 6, .rows = 1 });
+    defer r7.deinit();
+    const s7 = try r7.dumpUtf8(allocator);
+    defer allocator.free(s7);
+    try std.testing.expect(std.mem.indexOf(u8, s7, "AAAA") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s7, "BBBB") == null); // 다른 pane이 안 섞임
+
+    // surface 8을 명시하면 "BBBB"만.
+    const trace = @import("../observability.zig").trace;
+    const parsed = try trace.parseEvents(allocator, t);
+    defer trace.freeParsedEvents(allocator, parsed);
+    var r8 = try terminal.TerminalCore.init(allocator, .{ .cols = 6, .rows = 1 });
+    defer r8.deinit();
+    try replay.replayEventsForSurface(&r8, parsed, 8);
+    const s8 = try r8.dumpUtf8(allocator);
+    defer allocator.free(s8);
+    try std.testing.expect(std.mem.indexOf(u8, s8, "BBBB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s8, "AAAA") == null);
 }
 
 test "runtime sends terminal input through the attached pty io" {

@@ -3,15 +3,22 @@
 //! 직접 만지지 않고 실제 파서(`core.write`)/`core.resize`를 거친다. 그래야 재현이 파서 경로까지 검증한다(재적용이
 //! 파서 버그도 드러낸다).
 //!
+//! **한 번에 한 surface**: 멀티 surface trace(탭/split은 MARU_TRACE가 한 파일에 모든 surface를 섞어 기록)를 한
+//! core에 통째로 먹이면 화면이 뒤섞이므로, `replayEvents`는 target surface(첫 output의 surface) 하나만 재구성한다.
+//! 다른 pane은 `replayEventsForSurface(core, events, surface_id)`로 각각 재생한다(멀티 core 관리는 호출자 몫).
+//!
 //! **두 모드**:
 //!  1. **화면 replay**(권위) — trace에 `output`/`resize` 이벤트가 있으면 output 바이트를 `core.write`로, resize를
 //!     `core.resize`로 흘린다. output이 OSC 133/7·텍스트·SGR을 다 담으므로 파서가 **화면·셸 이벤트·cwd를 전부
 //!     재도출**한다(byte-for-byte). 이때 shell.* 이벤트는 output에서 파생되므로 재발행하지 않는다(중복 방지).
-//!  2. **semantic replay**(fallback) — output 이벤트가 없는 shell-only trace(semantic 인덱스)는 각 shell.* 를 해당
-//!     OSC로 **재발행**하고(행 좌표는 CUP로 커서를 먼저 두어 재현), cwd_changed는 OSC 7로 재발행한다.
+//!  2. **semantic replay**(fallback) — output 이벤트가 없는 **shell-only trace**(reader가 `renderShellEvents`로 만든
+//!     semantic 인덱스 — MARU_TRACE 라이브 레코딩은 이걸 안 냄)는 각 shell.* 를 해당 OSC로 **재발행**하고(행 좌표는
+//!     CUP로 커서를 먼저 두어 재현), cwd_changed는 OSC 7로 재발행한다. 라이브 캡처엔 안 쓰이지만 shell-only trace를
+//!     다루는 유일한 경로라 유지한다.
 //!
-//! trace에 size가 없어(초기 resize가 없을 수 있음) 호출자가 초기 size를 준다 — 화면 replay면 trace의 resize가
-//! 이후 크기를 바꾸고, semantic replay면 rows가 최대 이벤트 행+1 이상이어야 CUP가 clamp되지 않는다.
+//! trace는 이제 attach 시점에 초기 grid 크기를 첫 resize 이벤트로 기록하므로(runtime.attach), replay가 그걸 먼저
+//! 적용해 코어를 원 크기로 맞춘 뒤 output을 먹인다. 호출자가 주는 초기 size는 그 첫 resize 전까지의 TerminalCore.init
+//! 값(보통 곧 덮어써짐). semantic replay면 rows가 최대 이벤트 행+1 이상이어야 CUP가 clamp되지 않는다.
 
 const std = @import("std");
 const terminal = @import("../terminal.zig");
@@ -30,13 +37,32 @@ pub fn replayTrace(allocator: std.mem.Allocator, text: []const u8, size: termina
     return core;
 }
 
-/// 파싱된 이벤트를 순서대로 core에 재적용. output 이벤트가 하나라도 있으면 화면 replay(shell.* 는 output에서
-/// 파생되므로 skip), 없으면 semantic replay(shell.* 를 OSC로 재발행).
+/// 파싱된 이벤트를 순서대로 core에 재적용한다. 멀티 surface trace(탭/split은 한 파일에 모든 surface가 섞임)를 한
+/// core에 통째로 먹이면 화면이 뒤섞이므로, **한 surface만** 재구성한다 — 첫 output(없으면 첫 이벤트)의 surface를
+/// target으로 잡는다. 다른 pane은 `replayEventsForSurface`에 그 surface_id를 줘 각각 재생한다(멀티 core는 호출자 몫).
 pub fn replayEvents(core: *terminal.TerminalCore, events: []const trace.ParsedEvent) !void {
+    const target = targetSurface(events) orelse return; // 이벤트 없음 — no-op
+    try replayEventsForSurface(core, events, target);
+}
+
+/// 특정 surface의 이벤트만 골라 core에 재적용한다(멀티 surface trace에서 pane별 재생). has_output도 그 surface
+/// 기준으로 본다(그 surface에 output이 있으면 화면 replay, 없으면 semantic fallback).
+pub fn replayEventsForSurface(core: *terminal.TerminalCore, events: []const trace.ParsedEvent, surface_id: u64) !void {
     const has_output = for (events) |pe| {
-        if (pe.event == .output) break true;
+        if (pe.surface_id == surface_id and pe.event == .output) break true;
     } else false;
-    for (events) |pe| try replayOne(core, pe, has_output);
+    for (events) |pe| {
+        if (pe.surface_id != surface_id) continue;
+        try replayOne(core, pe, has_output);
+    }
+}
+
+/// 화면 재구성 대상 surface — 첫 output 이벤트의 surface(화면 본문이 있는 것). output이 없으면(semantic-only
+/// trace) 첫 이벤트의 surface. 이벤트가 없으면 null.
+pub fn targetSurface(events: []const trace.ParsedEvent) ?u64 {
+    for (events) |pe| if (pe.event == .output) return pe.surface_id;
+    if (events.len > 0) return events[0].surface_id;
+    return null;
 }
 
 fn replayOne(core: *terminal.TerminalCore, pe: trace.ParsedEvent, has_output: bool) !void {

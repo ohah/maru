@@ -10,6 +10,8 @@
 
 **웹 패널(WKWebView) 예외**: "네이티브 뷰 비사용"의 예외로 리치 웹 패널을 둔다. **예외의 닫힌 열거·근거(diff는 예외가 아니라 GPU 셀)는 [docs/control-plane.md] §1을 단일 출처로 둔다** — 여기 중복하지 않는다. 호스트 경계 관점의 규율만 여기 둔다: Swift는 WKWebView API 호출(`load`·`evaluateJavaScript`·`takeSnapshot`)만, **JSON-RPC 라우팅·디스패치·프레이밍·신뢰 게이트 판정은 Zig**(테스트 가능성·이식성). 웹 패널도 "OS 호출만 네이티브, 정책 0" 규율을 지킨다.
 
+**컨트롤 플레인 collector Zig↔Swift 분담**: 세션 상태 수집(sessions.list 등의 데이터)은 2층이다(단일 출처 [docs/control-plane.md] §2). **Swift 몫은 열거뿐** — 살아있는 창(`windows`+`quick`)을 순회하며 창마다 per-session collect ABI를 호출한다(전역 AppSession 레지스트리가 아직 Zig에 없기 때문). **평탄화·정책은 Zig** — `AppSession.collectSessionInto`(A1, `app_session.zig`)가 한 세션의 tabs→panes→terms 트리를 walk해 OS-중립 `SurfaceDto[]`+`WindowMembershipSnapshot`으로 만들고(좌표·focused·cwd·git_branch·agent·at_prompt 3상 매핑, 코어 read는 `core_mutex` 아래 복사만 — §5), scope 필터·직렬화는 L2 순수 코어(`control_surface.zig`)가 소비한다. Swift는 DTO 필드 해석·wire 인코딩을 하지 않는다("OS 호출만 네이티브, 정책 0"). accept-loop 스레드↔메인 marshal·소켓 배선은 A2(미배선).
+
 ## 현재 결정
 
 - Swift는 지속 실행되는 `NSApplication`을 소유한다.

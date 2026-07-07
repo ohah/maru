@@ -59,7 +59,7 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
 
 ### 민감정보 redaction 기준 (단일 출처)
 
-env override 저장, trace fixture, 실패 artifact는 모두 같은 redaction 기준을 쓴다. 포맷별로 키 목록을 따로 두지 말고 이 절을 단일 출처로 참조한다. 코드 미러는 중립 leaf `src/redact.zig`다(`sensitive_tokens`·`keyIsSensitive`·fixture 저장 가드 `guardFixture` — app/observability/config가 공유 import). 새 소비처는 새 목록을 만들지 말고 이 모듈을 import한다.
+env override 저장, trace fixture, 실패 artifact는 모두 같은 redaction 기준을 쓴다. 포맷별로 키 목록을 따로 두지 말고 이 절을 단일 출처로 참조한다. 코드 미러는 중립 leaf `src/redact.zig`다(`sensitive_tokens`·`keyIsSensitive`·`hasSensitiveContent`·plain 가드 `guardFixture` — app/observability/config가 공유 import). **trace fixture는 output이 이벤트 경계로 쪼개지므로 `observability.trace.guardFixture`**(output 재조립 후 스캔)를 쓴다. 새 소비처는 새 목록을 만들지 말고 이 모듈을 import한다.
 
 - key 이름에 다음 토큰이 들어가면(대소문자 무시, 부분 일치) 기본 redaction 대상이다: `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `COOKIE`, `KEY`, `AUTH`, `CREDENTIAL`, `SESSION`.
 - redaction은 deny-by-default다. 위 목록은 최소 보장이며, 애매하면 남기지 말고 제거한다.

@@ -17659,10 +17659,11 @@ pub const AppSession = struct {
                 app.artifact_io.writeText(self.io, path, trace_text) catch |e| {
                     if (diag_gate.maruDebugEnabled()) std.debug.print("[maru trace] write failed path={s}: {s}\n", .{ path, @errorName(e) });
                 };
-                // 라이브 trace는 local-only지만, git fixture로 승격하려면 sanitize가 선결이다. 민감 할당(TOKEN/SECRET/…
-                // =값)이 잡히면 한 번 알린다(deny-by-default 안내 — project-rules.md §redaction, redact.guardFixture가 가드).
-                if (maru.redact.hasSensitiveAssignment(trace_text)) {
-                    std.debug.print("[maru trace] '{s}'에 민감 할당이 있습니다 — git fixture 승격 전 sanitize 필요(project-rules.md §민감정보 redaction)\n", .{path});
+                // 라이브 trace는 local-only지만, git fixture로 승격하려면 sanitize가 선결이다. output을 재조립해(read
+                // 경계로 쪼개진 비밀도) 민감 데이터가 잡히면 한 번 알린다(deny-by-default 안내 — project-rules.md
+                // §redaction; 승격 경로는 observability.trace.guardFixture가 강제 차단).
+                if (maru.observability.trace.traceHasSensitiveContent(self.allocator, trace_text) catch false) {
+                    std.debug.print("[maru trace] '{s}'에 민감 데이터가 있을 수 있습니다 — git fixture 승격 전 sanitize 확인(project-rules.md §민감정보 redaction)\n", .{path});
                 }
             }
             self.runtime.trace_recorder = null;

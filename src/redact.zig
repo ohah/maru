@@ -32,28 +32,60 @@ fn isKeyChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
 }
 
-/// 자유 텍스트(trace output·env dump·argv)에 **민감 key 할당**(`<key>=` 또는 `<key>:` where key가 민감 토큰 포함)이
-/// 있으면 true. `=`/`:` 앞의 식별자 run을 key로 보고 판정하므로, 평범한 단어("monkey" 등 할당 아님)엔 안 걸린다 —
-/// deny-by-default를 유지하면서도 실제 secret 유출 패턴(`export API_TOKEN=…`, `password: …`)만 잡아 fixture 가드가
-/// 쓸모 있게 한다. (bare 토큰까지 최대 보수적으로 막으려면 호출자가 segment마다 keyIsSensitive를 직접 쓴다.)
-pub fn hasSensitiveAssignment(text: []const u8) bool {
-    for (text, 0..) |c, i| {
-        if (c != '=' and c != ':') continue;
-        var start = i;
-        while (start > 0 and isKeyChar(text[start - 1])) start -= 1;
-        if (start == i) continue; // '='/'：' 앞에 식별자 run 없음
-        if (keyIsSensitive(text[start..i])) return true;
+/// 선두 '-'를 제거한 key(0.16엔 mem.trimLeft 없음).
+fn stripDashes(s: []const u8) []const u8 {
+    var key = s;
+    while (key.len > 0 and key[0] == '-') key = key[1..];
+    return key;
+}
+
+/// 자유 텍스트(trace output·env dump·argv·명령줄)에 **민감 데이터**가 있으면 true. deny-by-default(project-rules.md).
+/// 다음을 잡는다:
+///  (a) 인라인 할당 `<key>=val`·`<key>:val`(= 주변 공백 허용 — `TOKEN = x`도),
+///  (b) dash-prefixed 민감 플래그 `--api-key`·`-p`류(값이 다음 토큰으로 이어짐 — `claude --api-key sk-...`),
+///  (c) 공백 분리 할당 `<key> = val`.
+/// key 판정은 substring-on-key(`keyIsSensitive`) — 정책상 `apikey`·`myapitoken`까지 잡으려는 의도라, 대가로 "monkey="
+/// 처럼 토큰을 부분 포함한 평범한 단어의 **할당**도 걸린다(deny-by-default — fixture 가드가 사람 검토를 부르는 건 안전).
+/// 경로·서버 주소·사용자 이름(홈dir·ssh 대상) 같은 PII/인프라는 keyword가 아니라 **익명화** 대상이라 여기서 안 잡는다
+/// (project-rules.md의 별도 항목 — 후속).
+pub fn hasSensitiveContent(text: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
+    var prev_sensitive_key = false; // 직전 토큰이 민감 bare key였다 → 다음이 '='/':'면 공백분리 할당
+    while (it.next()) |tok| {
+        // (a) 인라인 할당: 토큰 안 '='/':' 앞의 key run이 민감?
+        if (tokenHasInlineSensitive(tok)) return true;
+        // (b) dash-prefixed 민감 플래그.
+        if (std.mem.startsWith(u8, tok, "-") and keyIsSensitive(stripDashes(tok))) return true;
+        // (c) 공백 분리 할당: 이전이 민감 key이고 지금 토큰이 '='/':' (또는 '=val')로 시작.
+        if (prev_sensitive_key and (tok[0] == '=' or tok[0] == ':')) return true;
+        prev_sensitive_key = keyIsSensitive(tok);
     }
     return false;
 }
 
+/// 한 토큰(공백 없음) 안에서 `<key>=`·`<key>:`(맨 앞 '-'는 무시)의 key가 민감하면 true.
+fn tokenHasInlineSensitive(tok: []const u8) bool {
+    for (tok, 0..) |c, i| {
+        if (c != '=' and c != ':') continue;
+        const key = stripDashes(tok[0..i]);
+        if (key.len > 0 and keyIsSensitive(key)) return true;
+    }
+    return false;
+}
+
+/// 하위호환 별칭(할당 한정) — 새 코드는 hasSensitiveContent를 쓴다.
+pub fn hasSensitiveAssignment(text: []const u8) bool {
+    return hasSensitiveContent(text);
+}
+
 pub const FixtureError = error{SensitiveContent};
 
-/// trace/snapshot 텍스트를 **커밋용 fixture로 저장하기 전 가드**. 민감 할당이 있으면 SensitiveContent로 거부한다
-/// (deny-by-default — docs/project-rules.md, docs/trace-replay.md "민감정보 키워드가 있는 trace fixture는 저장 전에
-/// 실패한다"). 라이브 trace는 기본 local-only라 이 가드를 안 거치지만, git에 올리는 fixture 승격 경로가 호출한다.
+/// **plain-text** fixture(snapshot 등)를 커밋 전 가드한다 — 민감 데이터가 있으면 SensitiveContent로 거부한다
+/// (deny-by-default — docs/project-rules.md, docs/trace-replay.md "민감정보 키워드가 있는 fixture는 저장 전에 실패").
+/// **trace fixture는 output 바이트가 이벤트 경계로 쪼개져 있어** 직렬화 텍스트를 그대로 스캔하면 놓친다 —
+/// `observability.trace.guardFixture`가 output을 재조립·unescape한 뒤 이 판정을 돌린다(그걸 써야 한다).
 pub fn guardFixture(text: []const u8) FixtureError!void {
-    if (hasSensitiveAssignment(text)) return error.SensitiveContent;
+    if (hasSensitiveContent(text)) return error.SensitiveContent;
 }
 
 test "keyIsSensitive: 토큰 부분 일치(대소문자 무시), 안전 키는 통과" {
@@ -66,26 +98,26 @@ test "keyIsSensitive: 토큰 부분 일치(대소문자 무시), 안전 키는 �
     try std.testing.expect(!keyIsSensitive("HOME"));
 }
 
-test "hasSensitiveAssignment: 할당 형태만 잡고 평범한 단어는 안 잡는다" {
-    try std.testing.expect(hasSensitiveAssignment("export GITHUB_TOKEN=ghp_abc123"));
-    try std.testing.expect(hasSensitiveAssignment("password: hunter2"));
-    try std.testing.expect(hasSensitiveAssignment("AWS_SECRET_ACCESS_KEY=xyz"));
-    // 평범한 단어(할당 아님)엔 안 걸린다 — deny-by-default지만 쓸모 있게.
-    try std.testing.expect(!hasSensitiveAssignment("the monkey climbed a tree"));
-    try std.testing.expect(!hasSensitiveAssignment("ls -la /home/user"));
-    try std.testing.expect(!hasSensitiveAssignment("PATH=/usr/bin:/bin")); // 안전 키 할당
+test "hasSensitiveContent: 할당·플래그·공백분리 형태를 잡는다(code-review [4])" {
+    // 인라인 할당(= 주변 공백 포함).
+    try std.testing.expect(hasSensitiveContent("export GITHUB_TOKEN=ghp_abc123"));
+    try std.testing.expect(hasSensitiveContent("password: hunter2"));
+    try std.testing.expect(hasSensitiveContent("AWS_SECRET_ACCESS_KEY=xyz"));
+    try std.testing.expect(hasSensitiveContent("API_TOKEN = ghp_xxx")); // = 주변 공백
+    // dash-prefixed 민감 플래그(값은 다음 토큰).
+    try std.testing.expect(hasSensitiveContent("claude --api-key sk-ant-live-abc"));
+    try std.testing.expect(hasSensitiveContent("cmd --auth-token=abc"));
+    // 안전 키 할당·비할당은 통과.
+    try std.testing.expect(!hasSensitiveContent("PATH=/usr/bin:/bin"));
+    try std.testing.expect(!hasSensitiveContent("ls -la /home/user"));
+    try std.testing.expect(!hasSensitiveContent("the monkey climbed a tree")); // 할당 아님 → 통과
+    // ⚠️ 정책 귀결(substring-on-key): "monkey"는 "key" 부분포함이라 **할당 형태**면 걸린다 — apikey/myapitoken까지
+    // 잡으려는 deny-by-default의 대가. fixture 가드는 사람 검토를 부르므로 안전(false negative보다 낫다).
+    try std.testing.expect(hasSensitiveContent("monkey=42"));
 }
 
-test "guardFixture: 민감 할당이 있는 trace 텍스트는 SensitiveContent로 거부, clean은 통과" {
-    // 실제 trace 모양: output 이벤트의 bytes 안에 secret이 echo된 경우.
-    const dirty =
-        "maru.trace.v1\n" ++
-        "event 0 output surface=1 bytes=\"$ export API_TOKEN=sk-live-abc\\r\\n\"\n";
-    try std.testing.expectError(error.SensitiveContent, guardFixture(dirty));
-
-    const clean =
-        "maru.trace.v1\n" ++
-        "event 0 output surface=1 bytes=\"$ ls -la\\r\\n\"\n" ++
-        "event 1 resize surface=1 cols=80 rows=24\n";
-    try guardFixture(clean); // 통과
+test "guardFixture: 민감 데이터가 있는 plain 텍스트는 거부, clean은 통과" {
+    try std.testing.expectError(error.SensitiveContent, guardFixture("$ export API_TOKEN=sk-live-abc"));
+    try std.testing.expectError(error.SensitiveContent, guardFixture("run --api-key sk-live-xyz"));
+    try guardFixture("$ ls -la /home/user\nregular output"); // 통과
 }

@@ -15,6 +15,7 @@
 const std = @import("std");
 const terminal = @import("../terminal.zig");
 const text_escape = @import("../text_escape.zig"); // 따옴표 값 escape/unescape 단일 출처(workspace/snapshot과 공유)
+const redact = @import("../redact.zig"); // 민감정보 판정 단일 출처(중립 leaf)
 const writeEscaped = text_escape.writeEscaped;
 
 pub const header = "maru.trace.v1";
@@ -168,6 +169,35 @@ fn freeEvent(allocator: std.mem.Allocator, event: Event) void {
         .cwd_changed, .output, .input => |s| allocator.free(s),
         else => {},
     }
+}
+
+// ── fixture redaction 가드 (커밋 전) ─────────────────────────────────────────────────────────────────────────
+
+/// trace의 output/input/cwd 값에 민감 데이터가 있는지. **핵심**: output 바이트는 PTY read 경계로 이벤트마다 쪼개져
+/// 있어(`API_TOKEN`과 `=값`이 서로 다른 event에 걸칠 수 있음), 직렬화 텍스트를 그대로 스캔하면 놓친다(code-review
+/// [12]). 그래서 output을 **경계 없이 연속으로 재조립·unescape**해 원래 터미널 바이트 스트림을 복원한 뒤 스캔한다
+/// (split secret 재결합). input/cwd 값은 각각 스캔. trace가 아니면(파싱 불가) raw 텍스트를 스캔(안전 폴백).
+pub fn traceHasSensitiveContent(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error!bool {
+    const events = parseEvents(allocator, text) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return redact.hasSensitiveContent(text), // trace가 아니면 raw 스캔
+    };
+    defer freeParsedEvents(allocator, events);
+
+    var stream: std.ArrayList(u8) = .empty; // 연속 output(경계 없이 — split secret 재결합)
+    defer stream.deinit(allocator);
+    for (events) |pe| switch (pe.event) {
+        .output => |s| try stream.appendSlice(allocator, s),
+        .input, .cwd_changed => |s| if (redact.hasSensitiveContent(s)) return true,
+        else => {},
+    };
+    return redact.hasSensitiveContent(stream.items);
+}
+
+/// trace를 **커밋용 fixture로 저장하기 전 가드**. 민감 데이터가 있으면 SensitiveContent로 거부(deny-by-default —
+/// docs/project-rules.md, docs/trace-replay.md). redact.guardFixture(plain 텍스트용)와 달리 output을 재조립해 스캔한다.
+pub fn guardFixture(allocator: std.mem.Allocator, text: []const u8) (std.mem.Allocator.Error || redact.FixtureError)!void {
+    if (try traceHasSensitiveContent(allocator, text)) return error.SensitiveContent;
 }
 
 /// `event <index> <kind> surface=<id> <payload>` 한 줄을 ParsedEvent로. 따옴표 값(cwd/bytes)은 공백/따옴표를 담을 수
@@ -411,4 +441,29 @@ test "parseEvents: 모든 할당 실패 지점에서 누수 없음" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Runner.run, .{text});
+}
+
+// fixture 가드는 output을 재조립해 스캔해야 한다 — 핵심 회귀(code-review [12]): 비밀이 PTY read 경계로 두 output
+// 이벤트에 쪼개져도(`...API_TOKEN` / `=secret...`) 연속 재결합 후 잡아야 한다. per-event 직렬화 텍스트 스캔은 놓친다.
+test "guardFixture: read 경계로 쪼개진 비밀도 재조립해 잡는다" {
+    const a = std.testing.allocator;
+    // API_TOKEN 과 =값이 서로 다른 output 이벤트에 걸침.
+    const split =
+        "maru.trace.v1\n" ++
+        "event 0 output surface=1 bytes=\"$ export API_TOKEN\"\n" ++
+        "event 1 output surface=1 bytes=\"=ghp_realsecret\\r\\n\"\n";
+    try std.testing.expectError(error.SensitiveContent, guardFixture(a, split));
+
+    // cwd 값에 든 비밀도.
+    const cwd_secret =
+        "maru.trace.v1\n" ++
+        "event 0 shell.cwd-changed surface=1 cwd=\"/home/u/SECRET_KEY=abc\"\n";
+    try std.testing.expectError(error.SensitiveContent, guardFixture(a, cwd_secret));
+
+    // clean trace는 통과.
+    const clean =
+        "maru.trace.v1\n" ++
+        "event 0 output surface=1 bytes=\"$ ls -la /home/user\\r\\n\"\n" ++
+        "event 1 resize surface=1 cols=80 rows=24\n";
+    try guardFixture(a, clean);
 }

@@ -74,7 +74,7 @@ tests/artifacts/**/maru.snapshot.txt
 - 테스트 실패 시 cursor, size, cells 같은 구조화 상태를 확인한다.
 - 나중의 trace/replay와 inspector가 같은 도메인 데이터를 소비하게 만든다.
 
-Snapshot artifact는 기본적으로 로컬 산출물이다. 회귀 테스트 fixture로 승격할 때는 `src/redact.zig`의 `guardFixture`로 민감 할당이 없는지 확인한 뒤(deny-by-default) 별도 PR에서 추가한다.
+Snapshot artifact는 기본적으로 로컬 산출물이다. 회귀 테스트 fixture로 승격할 때는 `redact.guardFixture`(plain 텍스트)로 민감 데이터가 없는지 확인한 뒤(deny-by-default) 별도 PR에서 추가한다.
 
 snapshot schema version을 언제 유지하고 언제 올릴지는 [Snapshot Versioning](snapshot-versioning.md)을 따른다.
 
@@ -88,7 +88,7 @@ snapshot schema version을 언제 유지하고 언제 올릴지는 [Snapshot Ver
 tests/fixtures/traces/*.trace.txt
 ```
 
-직렬화·역파싱·replay·라이브 레코딩은 **구현됐다**([Trace와 Replay](trace-replay.md)). fixture 파일은 `maru.trace.v1` 형식을 따르고, git에 넣기 전 `src/redact.zig`의 `guardFixture(text)`로 민감 할당을 거른다(deny-by-default — 걸리면 `SensitiveContent`). 코드가 기능마다 ad-hoc trace 포맷을 만들지 않도록, schema token, event index, surface id, event kind를 고정한다.
+직렬화·역파싱·replay·라이브 레코딩은 **구현됐다**([Trace와 Replay](trace-replay.md)). fixture 파일은 `maru.trace.v1` 형식을 따르고, git에 넣기 전 `observability.trace.guardFixture(allocator, text)`로 민감 데이터를 거른다(deny-by-default — 걸리면 `SensitiveContent`; output을 재조립해 read 경계로 쪼개진 비밀도 잡는다). 코드가 기능마다 ad-hoc trace 포맷을 만들지 않도록, schema token, event index, surface id, event kind를 고정한다.
 
 ```text
 maru.trace.v1

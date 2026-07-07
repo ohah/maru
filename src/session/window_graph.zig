@@ -38,6 +38,7 @@
 
 const std = @import("std");
 const window_membership = @import("window_membership.zig");
+const group_normalize = @import("group_normalize.zig"); // M3c: 그룹 정규화 순수 함수(승계·핀 재정규화·depth·로컬핀 위생)
 
 /// window 분류자 — M0b가 도입한 중립 enum을 재사용한다(normal/quick). 값에 라우팅 의미 없음(분류만).
 pub const WindowKind = window_membership.WindowKind;
@@ -55,18 +56,26 @@ pub const Pane = struct {
     active_surface: usize = 0,
 };
 
-/// workspace의 그룹 메타데이터(pass-through 보존 전용). **M1은 이 값을 정규화하지 않고 이동 시 그대로 실어 나른다**
-/// (docs/window-surface-mobility.md §4·§8 M1). session_model.Tab의 그룹 필드 중 §4가 이동 케이스로 지목한 것만 든다.
-/// 문자열(group_start)은 **borrowed**다 — graph는 소유하지 않는다(WindowMembershipSnapshot.surface_ids와 같은 계약,
-/// 소유는 collector/라이브 모델). 정규화(마커 승계·핀 리전 재정규화)는 M3이 L4 `inheritGroupMarker` 기준으로 한다.
+/// workspace의 그룹 메타데이터. **M1 골격은 이 값을 정규화하지 않고 pass-through로 실어 날랐고, M3c부터 `moveWorkspace`가
+/// L2 순수 함수(`group_normalize`)로 실제 정규화한다**(docs/window-surface-mobility.md §4·§8A.4). session_model.Tab의 그룹
+/// 필드를 미러한다 — §4 (a)~(d) 케이스가 요구하는 승계·핀 재정규화·depth 파생에 필요한 필드 전부를 든다(effectiveDepthAt은
+/// group_depth를, inheritGroupMarker는 group_collapsed·group_color 승계를 읽으므로 M1의 4필드로는 부족했다). 문자열
+/// (group_start)은 **borrowed**다 — graph는 소유하지 않는다(WindowMembershipSnapshot.surface_ids와 같은 계약, 소유는
+/// collector/라이브 모델). 정규화 권위는 L2 `group_normalize`(L4 `inheritGroupMarker`/`normalizePinnedFromGroups`에서 리프트).
 pub const WorkspaceMeta = struct {
     /// 사이드바 그룹 **시작 마커**(위치 파생 소속 — docs/sidebar-groups.md §2.1). null=마커 아님. borrowed.
     group_start: ?[]const u8 = null,
-    /// 전역 위치 고정(핀 프리픽스, §12). pass-through — target 핀 리전 정규화는 M3.
+    /// 그룹 접힘(group_start!=null일 때만 의미 — §2.1). inheritGroupMarker가 승계 시 다음 노드로 이전한다.
+    group_collapsed: bool = false,
+    /// 중첩 그룹 깊이(SG5-3, group_start!=null일 때만 의미 — 1=최상위·2=중첩·…). effectiveDepthAt의 위치 파생 입력.
+    group_depth: u8 = 1,
+    /// 그룹 공통 색(0xRRGGBB, 0=없음 — SG5-2). inheritGroupMarker가 승계 시 다음 노드로 이전한다.
+    group_color: u32 = 0,
+    /// 전역 위치 고정(핀 프리픽스, §12). moveWorkspace가 §4 (c)/(d)로 정규화(top-level 개별 pin=보존, 그룹 멤버=이탈 시 unpin).
     pinned: bool = false,
-    /// 그룹-로컬 pin(GL, §13). 이탈 시 의미를 잃어 M3이 리셋하지만, M1 골격은 보존만 한다.
+    /// 그룹-로컬 pin(GL, §13). 이탈 시 의미를 잃어 moveWorkspace가 리셋(§4 (d) — clearStaleLocalPins 위생).
     local_pinned: bool = false,
-    /// 서브파티션 top-level 복귀 마커(§14). 이탈 시 의미를 잃어 M3이 리셋하지만, M1 골격은 보존만 한다.
+    /// 서브파티션 top-level 복귀 마커(§14). moveWorkspace가 목적지 top-level로 넣을 때 명시 set(§4 (d) 결정).
     top_level: bool = false,
 };
 
@@ -218,8 +227,25 @@ pub const WindowGraph = struct {
         self.pruneEmptyWorkspace(win_src, ws_src, win_dst);
     }
 
-    /// workspace를 window 간 이동. 같은 window면 no-op. 이동한 workspace는 dst window에서 active. 그룹 메타는
-    /// pass-through(정규화 없음 — §8 M1). source window가 비면 제거(active_window는 dst로 따라감 — focus 규칙 3).
+    /// workspace를 window 간 이동. 같은 window면 no-op. 이동한 workspace는 dst window에서 active. source window가
+    /// 비면 제거(active_window는 dst로 따라감 — focus 규칙 3).
+    ///
+    /// **M3c 그룹 정규화(docs/window-surface-mobility.md §4·§8A.4)**: M1은 그룹 필드를 pass-through로 보존만 했지만,
+    /// M3c부터 L2 순수 함수(`group_normalize`)로 §4 케이스 (a)~(d)를 실현한다 — 소속이 tab-순서 파생이라 창을 떠나는
+    /// 순간 소속·핀 리전이 바뀐다. 정규화는 **행동 발산 금지**로 L4 `closeTab`/`removeFromGroupForTab`과 같은 함수를 쓴다.
+    ///  - **(a) 그룹 멤버 이동**: source에서 빠지면 소속이 재-파생 → source를 `normalizePinnedFromGroups` +
+    ///    `clearStaleLocalPins`로 재정규화(= removeFromGroup이 도는 것).
+    ///  - **(b) group_start 마커 이동**: `inheritGroupMarker`로 마커를 source의 다음 카드에 승계(그룹 잔존)하거나,
+    ///    승계 불가면 그룹 소멸. 이동분은 목적지에서 마커가 아닌 최상위 카드가 된다(group_start=null).
+    ///  - **(c) 전역 pinned 최상위 카드 이동**: 그룹 소속이 아니면 pinned 유지(목적지 핀 리전으로 — "고정 요소 흡수
+    ///    불가", top_level=true가 그룹 흡수를 차단). 핀 리전 내 **위치**(프리픽스) 안착은 라이브 트리/M3d 몫(그래프는
+    ///    append + 플래그 정규화만; 그래프는 라이브 미러가 아니라 순수 오라클+직렬화 포맷 — §8A.6).
+    ///  - **(d) 이탈 정규화**: `local_pinned:=false`(clearStaleLocalPins 명시 리셋 대칭), `top_level:=true`(**명시 set**
+    ///    — 목적지는 append-to-end라 위치-암묵 top-level이 성립 안 함: 뒤 그룹에 흡수되므로 서브파티션 break 플래그가
+    ///    필수. §14.9 "고정 탭은 top_level 강제"와도 정합), 그룹 멤버였으면(마커 포함) pinned 캐시 이탈로 `pinned:=false`
+    ///    (§12.7 보강4 — 그룹 고정은 source 잔존 그룹에 남고 이탈분은 unpin). **top_level 결정 근거**: L4 removeFromGroup은
+    ///    같은-창이라 "첫 마커 앞으로 재배치"(위치-암묵)로 top-level을 만들지만, 창 간 이동은 목적지에 소스 위치 맥락이
+    ///    없고 append 위치가 뒤 그룹 안이라 **명시 top_level=true**가 아니면 흡수된다 → red test로 "명시 set" 확정.
     pub fn moveWorkspace(self: *WindowGraph, src: WorkspaceAddr, dst_win: WindowAddr) MoveError!void {
         const win_src = try self.windowAt(src.win);
         if (src.ws >= win_src.workspaces.items.len) return error.InvalidCoordinate;
@@ -227,12 +253,48 @@ pub const WindowGraph = struct {
         const win_dst = try self.windowAt(dst_win);
         if (win_src == win_dst) return; // 같은 window = no-op
 
-        // append(fallible) 먼저 — OOM이면 source 불변(remove-후-append면 *Workspace 서브트리 전체가 leak).
         const ws = win_src.workspaces.items[src.ws];
+
+        // 임시 `[]*WorkspaceMeta`(원본 meta를 가리킴) — 정규화 순수 함수의 `[]*T` 계약에 맞춘다. **구조 mutation 전에**
+        // 할당(fallible)해 OOM이면 source가 완전히 불변이다(아래 append 실패와 함께 유일한 fallible 지점). append 후는
+        // 전부 infallible(정규화 함수는 할당 없이 플래그만 mutate).
+        const src_len = win_src.workspaces.items.len;
+        const metas = try self.allocator.alloc(*WorkspaceMeta, src_len);
+        defer self.allocator.free(metas);
+        for (win_src.workspaces.items, 0..) |w, i| metas[i] = &w.meta;
+
+        // source membership 판정(ws가 아직 source에 있을 때): 그룹 소속(마커 포함)이면 이탈 시 unpin, 순수 최상위 카드면
+        // pinned 유지(§4 (c) vs (d)). enclosingGroupMarkerIndex는 마커면 자기 자신을 찾아 non-null → 마커도 "그룹 소속"으로 분류.
+        const keep_pin = group_normalize.enclosingGroupMarkerIndex(WorkspaceMeta, metas, src.ws) == null;
+        const was_marker = ws.meta.group_start != null;
+
+        // append(fallible) — OOM이면 source 불변(metas는 defer로 free, ws는 아직 source에만).
         try win_dst.workspaces.append(self.allocator, ws);
+
+        // ── 이하 infallible ──
+        // (b) 마커 승계: source의 다음 카드로 마커를 넘겨 그룹을 살린다(마지막 멤버면 false=소멸). ws가 source에 아직 있을 때 실행.
+        if (was_marker) _ = group_normalize.inheritGroupMarker(WorkspaceMeta, metas, src.ws);
+
         _ = win_src.workspaces.orderedRemove(src.ws);
         win_src.active_workspace = activeAfterRemoval(win_src.active_workspace, src.ws, win_src.workspaces.items.len);
         win_dst.active_workspace = win_dst.workspaces.items.len - 1; // 이동한 workspace가 dst에서 active
+
+        // (b)(d) 이동분 = 목적지 최상위 카드로 정규화. 마커였으면 승계로 group_start가 이미 null이거나(성공) 아직 남아 있다
+        // (소멸=승계 불가). 어느 쪽이든 목적지에선 마커 아님이므로 그룹 필드 기본값 복귀.
+        ws.meta.group_start = null;
+        ws.meta.group_collapsed = false;
+        ws.meta.group_color = 0;
+        ws.meta.group_depth = 1;
+        ws.meta.local_pinned = false; // (d) 이탈 시 로컬 pin 상실(clearStaleLocalPins 명시 리셋 대칭)
+        ws.meta.top_level = true; // (d) 목적지 최상위 — append-to-end라 명시 set 필수(위 결정 근거)
+        if (!keep_pin) ws.meta.pinned = false; // (d) 그룹 멤버/마커 이탈 = 그룹 고정 캐시 상실(§12.7 보강4). (c) 최상위 pin은 유지.
+
+        // (a) source 재정규화: 승계/이탈로 남은 그룹 구성이 바뀌었으니 멤버 pinned 캐시를 마커 기준 재동기 + stale 로컬핀 위생.
+        // metas에서 이동한 src.ws 항목을 제거(compact)해 source-after 뷰를 만든다(할당 없음 — infallible).
+        std.mem.copyForwards(*WorkspaceMeta, metas[src.ws..], metas[src.ws + 1 ..]);
+        const src_after = metas[0 .. src_len - 1];
+        group_normalize.normalizePinnedFromGroups(WorkspaceMeta, src_after);
+        group_normalize.clearStaleLocalPins(WorkspaceMeta, src_after);
 
         self.pruneEmptyWindow(win_src, win_dst);
     }
@@ -543,41 +605,153 @@ test "movePane: source workspace의 마지막 pane이 빠지면 그 workspace가
     try testing.expectEqual(p0, ws_b.panes.items[1]);
 }
 
-test "moveWorkspace: window 간 이동 + 그룹 필드 pass-through 보존(정규화 없음)" {
+// ── M3c 그룹 정규화 §4 (a)~(d) (docs/window-surface-mobility.md §8A.4) ──────────────────────────────────────
+// M1은 그룹 필드를 pass-through 보존만 했으나, M3c부터 moveWorkspace가 L2 group_normalize로 §4 케이스를 정규화한다.
+// 아래 테스트들은 옛 pass-through 동작에 대해 red다(top_level 명시 set·마커 승계·멤버 unpin·로컬핀 리셋을 단언).
+
+test "moveWorkspace §4(a): 그룹 멤버 이동 = 암묵 이탈 + source 재정규화(잔존 그룹 canonical·sandwich desync 치유)" {
     var g = WindowGraph.init(testing.allocator);
     defer g.deinit();
     const w0 = try g.addWindow(1, .normal);
     const w1 = try g.addWindow(2, .normal);
-    // source window에 workspace 둘: 하나는 그룹 마커+핀 메타를 지닌다.
-    const marker = "project-alpha";
-    const ws_grouped = try g.addWorkspace(w0, .{
-        .group_start = marker,
-        .pinned = true,
-        .local_pinned = true,
-        .top_level = true,
-    });
-    _ = try g.addPane(ws_grouped);
-    const ws_keep = try g.addWorkspace(w0, .{});
-    _ = try g.addPane(ws_keep);
-    const ws_dst = try g.addWorkspace(w1, .{});
-    _ = try g.addPane(ws_dst);
+    // source: 고정 그룹 [marker(pin), a(pin), bad(pin=F desync), good(pin)] — 위치 파생 멤버.
+    const marker = try g.addWorkspace(w0, .{ .group_start = "g", .pinned = true });
+    _ = try g.addPane(marker);
+    const a = try g.addWorkspace(w0, .{ .pinned = true });
+    _ = try g.addPane(a);
+    const bad = try g.addWorkspace(w0, .{ .pinned = false }); // desync 멤버(마커 pin과 어긋남)
+    _ = try g.addPane(bad);
+    const good = try g.addWorkspace(w0, .{ .pinned = true });
+    _ = try g.addPane(good);
+    const dst = try g.addWorkspace(w1, .{});
+    _ = try g.addPane(dst);
 
-    // 그룹 메타를 지닌 ws_grouped(index 0)를 window1로 옮긴다.
+    // 멤버 a(index 1)를 window1로 옮긴다.
+    try g.moveWorkspace(.{ .win = 0, .ws = 1 }, 1);
+
+    // (a) 이동분 a = 목적지 최상위(암묵 이탈): group_start 없음·top_level·그룹 멤버였으니 pinned 상실(§4 d).
+    try testing.expect(a.meta.group_start == null);
+    try testing.expect(a.meta.top_level);
+    try testing.expect(!a.meta.pinned);
+    try testing.expect(!a.meta.local_pinned);
+    // source 재정규화: 잔존 그룹 [marker(pin), bad, good]에서 sandwich desync `bad`가 마커 pin으로 치유됨(normalize).
+    try testing.expectEqual(@as(usize, 3), w0.workspaces.items.len);
+    try testing.expect(marker.meta.group_start != null); // 그룹 잔존
+    try testing.expect(bad.meta.pinned); // desync → 마커 pin(T)로 canonical 치유
+    try testing.expect(good.meta.pinned);
+}
+
+test "moveWorkspace §4(b): group_start 마커 이동 = source 마커 승계(그룹 잔존) + 이동분 목적지 최상위" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal);
+    const w1 = try g.addWindow(2, .normal);
+    // source: [marker(group_start="g", collapsed, color, depth), m1(member), m2(member)]
+    const marker = try g.addWorkspace(w0, .{ .group_start = "g", .group_collapsed = true, .group_color = 0xABCDEF, .group_depth = 1 });
+    _ = try g.addPane(marker);
+    const m1 = try g.addWorkspace(w0, .{});
+    _ = try g.addPane(m1);
+    const m2 = try g.addWorkspace(w0, .{});
+    _ = try g.addPane(m2);
+    const dst = try g.addWorkspace(w1, .{});
+    _ = try g.addPane(dst);
+
+    // 마커(index 0)를 window1로 옮긴다.
     try g.moveWorkspace(.{ .win = 0, .ws = 0 }, 1);
 
-    // window1에 두 workspace, 이동분이 마지막·active.
-    try testing.expectEqual(@as(usize, 2), w1.workspaces.items.len);
-    try testing.expectEqual(ws_grouped, w1.workspaces.items[1]);
-    try testing.expectEqual(@as(usize, 1), w1.active_workspace);
-    // **pass-through 보존**: 그룹 필드가 이동 후에도 그대로다(정규화·리셋 안 함 — M1 group-agnostic).
-    try testing.expect(ws_grouped.meta.group_start != null);
-    try testing.expectEqualStrings(marker, ws_grouped.meta.group_start.?);
-    try testing.expect(ws_grouped.meta.pinned);
-    try testing.expect(ws_grouped.meta.local_pinned); // M3이라면 리셋했겠지만 M1은 보존만
-    try testing.expect(ws_grouped.meta.top_level);
-    // source window에는 ws_keep만 남는다.
+    // 이동분 marker = 목적지에서 마커 아님(승계로 group_start 넘어감) + 최상위 카드.
+    try testing.expect(marker.meta.group_start == null);
+    try testing.expect(marker.meta.top_level);
+    try testing.expect(marker.meta.group_color == 0);
+    try testing.expect(!marker.meta.group_collapsed);
+    // source: m1이 마커를 승계(그룹 잔존) — group_start·collapsed·color·depth 이전.
+    try testing.expectEqual(@as(usize, 2), w0.workspaces.items.len);
+    try testing.expect(m1.meta.group_start != null);
+    try testing.expectEqualStrings("g", m1.meta.group_start.?);
+    try testing.expect(m1.meta.group_collapsed);
+    try testing.expectEqual(@as(u32, 0xABCDEF), m1.meta.group_color);
+    try testing.expect(m2.meta.group_start == null); // m2는 여전히 멤버(위치 파생)
+}
+
+test "moveWorkspace §4(b) 소멸: 마지막 멤버 마커 이동 = 승계 불가 → 그룹 소멸 + 이동분 최상위" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal);
+    const w1 = try g.addWindow(2, .normal);
+    // source: [plain(top-level card), marker(group_start="solo", 마지막 = 다음 카드 없음)]
+    const plain = try g.addWorkspace(w0, .{});
+    _ = try g.addPane(plain);
+    const marker = try g.addWorkspace(w0, .{ .group_start = "solo" });
+    _ = try g.addPane(marker);
+    const dst = try g.addWorkspace(w1, .{});
+    _ = try g.addPane(dst);
+
+    // 마지막 카드인 마커(index 1)를 옮긴다 — 승계 대상(다음 카드) 없음 → 그룹 소멸.
+    try g.moveWorkspace(.{ .win = 0, .ws = 1 }, 1);
+
+    // 이동분 marker = 목적지 최상위(그룹 소멸로 마커 없음).
+    try testing.expect(marker.meta.group_start == null);
+    try testing.expect(marker.meta.top_level);
+    // source: plain만 남고 그룹은 소멸(어떤 workspace도 group_start 없음).
     try testing.expectEqual(@as(usize, 1), w0.workspaces.items.len);
-    try testing.expectEqual(ws_keep, w0.workspaces.items[0]);
+    try testing.expect(plain.meta.group_start == null);
+}
+
+test "moveWorkspace §4(c): 전역 pinned 최상위 카드 이동 = pinned 유지(목적지 흡수 불가 — top_level)" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal);
+    const w1 = try g.addWindow(2, .normal);
+    // source: [pinned_top(pinned, 그룹 미소속 최상위 카드), other]
+    const pinned_top = try g.addWorkspace(w0, .{ .pinned = true });
+    _ = try g.addPane(pinned_top);
+    const other = try g.addWorkspace(w0, .{});
+    _ = try g.addPane(other);
+    // dest에 기존 그룹 [d_marker, d_member] — 흡수 위험.
+    const d_marker = try g.addWorkspace(w1, .{ .group_start = "dg" });
+    _ = try g.addPane(d_marker);
+    const d_member = try g.addWorkspace(w1, .{});
+    _ = try g.addPane(d_member);
+
+    try g.moveWorkspace(.{ .win = 0, .ws = 0 }, 1);
+
+    // (c) 전역 pin(그룹 미소속 최상위)은 이동해도 유지되고, top_level로 목적지 그룹에 흡수되지 않는다("고정 요소 흡수 불가").
+    try testing.expect(pinned_top.meta.pinned);
+    try testing.expect(pinned_top.meta.top_level);
+    // 목적지에서 흡수 안 됨: dest 메타 뷰로 enclosing 마커가 null(그룹 밖)인지 확인.
+    var metas: [3]*WorkspaceMeta = undefined;
+    for (w1.workspaces.items, 0..) |w, i| metas[i] = &w.meta;
+    try testing.expect(group_normalize.enclosingGroupMarkerIndex(WorkspaceMeta, &metas, 2) == null);
+}
+
+test "moveWorkspace §4(d): 그룹 멤버 local_pinned·pinned 이탈 = 리셋 + top_level 명시 set(목적지 append 흡수 방지)" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal);
+    const w1 = try g.addWindow(2, .normal);
+    // source: 고정 그룹 [marker(pin), m(pin, local_pinned)] — m은 그룹-로컬 pin된 멤버.
+    const marker = try g.addWorkspace(w0, .{ .group_start = "g", .pinned = true });
+    _ = try g.addPane(marker);
+    const m = try g.addWorkspace(w0, .{ .pinned = true, .local_pinned = true });
+    _ = try g.addPane(m);
+    // dest에 기존 그룹 [d_marker, d_member] — m이 append-to-end로 이 그룹 뒤에 붙는다(흡수 위험).
+    const d_marker = try g.addWorkspace(w1, .{ .group_start = "dg" });
+    _ = try g.addPane(d_marker);
+    const d_member = try g.addWorkspace(w1, .{});
+    _ = try g.addPane(d_member);
+
+    // 멤버 m(index 1)을 window1로 옮긴다.
+    try g.moveWorkspace(.{ .win = 0, .ws = 1 }, 1);
+
+    // (d) 이탈 리셋: local_pinned:=false·pinned:=false(그룹 멤버 unpin, §12.7 보강4)·top_level:=true(명시).
+    try testing.expect(!m.meta.local_pinned);
+    try testing.expect(!m.meta.pinned);
+    try testing.expect(m.meta.top_level);
+    // **top_level 명시 결정 검증**: dest는 [d_marker, d_member, m] append라, top_level=true가 아니면 m이 dg 그룹에
+    // 위치 파생으로 흡수된다. enclosing 마커가 null이어야(그룹 밖) "목적지 최상위"가 성립 — top_level 명시 set의 근거.
+    var metas: [3]*WorkspaceMeta = undefined;
+    for (w1.workspaces.items, 0..) |w, i| metas[i] = &w.meta;
+    try testing.expect(group_normalize.enclosingGroupMarkerIndex(WorkspaceMeta, &metas, 2) == null);
 }
 
 test "moveWorkspace: source window의 마지막 workspace가 빠지면 그 window가 닫힌다(empty-source window)" {
@@ -839,23 +1013,27 @@ test "movePane OOM: append 실패면 *Pane leak·유실 없이 source 불변" {
     try testing.expectEqual(@as(usize, 0), ws1.panes.items.len);
 }
 
-test "moveWorkspace OOM: append 실패면 *Workspace 서브트리 leak·유실 없이 source 불변" {
-    var g = WindowGraph.init(testing.allocator);
-    defer g.deinit();
-    const w0 = try g.addWindow(1, .normal);
-    const w1 = try g.addWindow(2, .normal); // 빈 window
-    const ws = try g.addWorkspace(w0, .{});
-    const p = try g.addPane(ws);
-    try g.addSurface(p, 100);
+test "moveWorkspace OOM: 정규화 temp/append 실패 둘 다 source 불변(구조 mutation 전 두 fallible 지점)" {
+    // M3c로 moveWorkspace의 fallible 지점이 둘이다: (0) 정규화용 임시 `[]*WorkspaceMeta` 할당, (1) dest append.
+    // 둘 다 **구조 mutation·정규화 전**이라 어느 쪽이 실패해도 source가 완전히 불변이다(temp는 defer로 free).
+    inline for (.{ 0, 1 }) |fail_index| {
+        var g = WindowGraph.init(testing.allocator);
+        defer g.deinit();
+        const w0 = try g.addWindow(1, .normal);
+        const w1 = try g.addWindow(2, .normal); // 빈 window
+        const ws = try g.addWorkspace(w0, .{});
+        const p = try g.addPane(ws);
+        try g.addSurface(p, 100);
 
-    var fail = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    g.allocator = fail.allocator();
-    try testing.expectError(error.OutOfMemory, g.moveWorkspace(.{ .win = 0, .ws = 0 }, 1));
-    g.allocator = testing.allocator;
+        var fail = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        g.allocator = fail.allocator();
+        try testing.expectError(error.OutOfMemory, g.moveWorkspace(.{ .win = 0, .ws = 0 }, 1));
+        g.allocator = testing.allocator;
 
-    try testing.expectEqual(@as(usize, 1), w0.workspaces.items.len); // 서브트리 그대로
-    try testing.expectEqual(ws, w0.workspaces.items[0]);
-    try testing.expectEqual(@as(usize, 0), w1.workspaces.items.len);
+        try testing.expectEqual(@as(usize, 1), w0.workspaces.items.len); // 서브트리 그대로
+        try testing.expectEqual(ws, w0.workspaces.items[0]);
+        try testing.expectEqual(@as(usize, 0), w1.workspaces.items.len);
+    }
 }
 
 test "mergeWindow OOM: append 실패면 leak 없이 부분 상태가 유효(모든 ws가 정확히 한 window에)" {

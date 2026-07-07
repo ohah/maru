@@ -24,7 +24,12 @@ chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다
 > model-2 드래그(top_level 직접 전이, SG8 가상화)·"그룹 뒤 빈 gap" 제스처. **+ code-review PR#1197 경계 유지**(기존
 > mutation/render 경로가 top_level 경계를 유지 — inherit·removal·normalize·guard·run_hi·accent, §14.8) **+ 고정 정책**(사용자
 > 규칙 "고정된 건 어디에도 흡수 안 됨" — 고정 탭 top_level 강제·고정 그룹 nest 금지·고정 리전 clamp, 3레이어 대칭
-> preview=commit, §14.9).
+> preview=commit, §14.9). **+ 그룹 정규화 L2 리프트**(이동성 M3c — [window-surface-mobility.md](window-surface-mobility.md)
+> §8A.4): `inheritGroupMarker`·`normalizePinnedFromGroups`·`effectiveDepthAt`·`clearStaleLocalPins`·`enclosingGroupMarkerIndex`의
+> 정규화 코어를 `src/session/group_normalize.zig`에 **generic 순수 함수**로 올렸다(OS-중립). L4 `app_session`의 그 다섯
+> 메서드는 이제 본문을 L2 위임으로 교체했을 뿐(시그니처·동작 불변, drag-preview 게이트는 `normalizePinnedFromGroups`
+> wrapper에 잔류)이라 이 문서의 §12·§13·§14 규칙 기술은 그대로 유효하고, `WindowGraph.moveWorkspace`(창 간 이동)가
+> 같은 코어를 재사용해 §4 (a)~(d) 정규화를 한다.
 > 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
 
 ## 1. 목표 UX

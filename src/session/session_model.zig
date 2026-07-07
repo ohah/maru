@@ -33,7 +33,11 @@ pub fn Model(comptime Rt: type) type {
         /// 한 터미널의 모델 — surface(OS-중립 그리드/스크롤백)와 라벨·git·agent 메타. 런타임 부착은 `rt: Rt`로
         /// 주입(platform=TermRuntime). 모델은 `Rt`(PTY 결합)를 모른 채 surface·메타만 소유한다.
         pub const Term = struct {
-            surface: Surface = undefined,
+            /// 한 surface를 **참조만** 한다(소유 아님) — M3a: surface는 앱 전역 `LiveSurfaceRegistry`가 `LiveSurface`
+            /// 번들 슬롯으로 소유하고(주소 안정 heap), Term은 그 슬롯의 `&slot.surface`를 든다. 값→포인터는 M2b가
+            /// `live_pty`에 한 것과 동형(auto-deref로 `term.surface.core` 등 읽기 접근은 그대로 유효).
+            /// 단일 출처: docs/window-surface-mobility.md §8A.1(옵션 A).
+            surface: *Surface = undefined,
             /// 런타임 부착(PTY 세션·pump·생애 플래그) — generic `Rt`로 주입. platform이 `TermRuntime`을 넣는다.
             rt: Rt = .{},
             /// git 브랜치 표시 캐시(owned, cwd 파생). termGitBranch가 cwd가 바뀔 때만 재계산. destroyTerm이 해제.

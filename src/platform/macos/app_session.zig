@@ -67,7 +67,7 @@ pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
 // 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz).
 // Swift frame-loop NSTimer가 config를 읽어 cadence를 정한다.
-pub const abi_version: u32 = 96;
+pub const abi_version: u32 = 97;
 // 96: maru_macos_app_session_quick_terminal_frames + QuickTerminalFrames(extern struct, quick_terminal_geometry.zig로 분리) —
 // quick 패널 보임/숨김 사각형을 세션의 **현재** config로 매 호출 라이브 계산(위치별 가장자리 슬라이드·center 페이드, 순수
 // quick_terminal_geometry.compute + 단위 테스트). quick_terminal_config(세션-불변 스냅샷)와 달리 매 토글 재조회라 설정 GUI 변경이
@@ -30324,6 +30324,50 @@ test "collector: 다중 tab — tab 0/1 좌표, membership에 두 surface" {
     }
     try std.testing.expect(seen0 and seen1);
     try std.testing.expectEqual(@as(usize, 2), c.snapshot.windows[0].surface_ids.len);
+}
+
+// ── 6b) 멀티창 collect(§2 A2b): 두 세션을 공유 리스트로 collectSessionInto → 하나의 CollectorSnapshot ──
+// 실 서버 drain(app_host_abi collectSessionsInto)이 살아있는 창마다 이 함수를 공유 리스트로 부른다. 핵심 계약:
+// (1) 두 창의 surface가 한 스냅샷에 다 들어오고, (2) **오직 key 창(window_focused=true)의 활성 surface 하나만**
+// focused=true(비-key 창은 window_focused=false라 그 창의 어떤 surface도 focused 아님 → 전역에 focused 하나).
+test "collector 멀티창: 두 세션을 공유 리스트로 합치면 window별 surface + key 창만 focused" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const s_key = try initSmokeSessionSized(allocator); // key 창(focused)
+    defer allocator.destroy(s_key);
+    defer s_key.deinit();
+    const s_bg = try initSmokeSessionSized(allocator); // 비-key 창(background)
+    defer allocator.destroy(s_bg);
+    defer s_bg.deinit();
+    s_bg.window_focused = false; // 이 창은 key가 아님 → 어떤 surface도 focused 아님
+
+    const key_active = s_key.activeSurface().id;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    // 서버 drain과 동형: 창마다 window_id/window_kind로 공유 리스트에 collect.
+    try s_key.collectSessionInto(a, 100, .normal, &surfaces, &windows);
+    try s_bg.collectSessionInto(a, 200, .normal, &surfaces, &windows);
+
+    const snapshot: maru.session.CollectorSnapshot = .{ .surfaces = surfaces.items, .windows = windows.items };
+    // 두 창의 surface가 다 들어왔다(각 창 1개).
+    try std.testing.expectEqual(@as(usize, 2), snapshot.surfaces.len);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.windows.len);
+    try std.testing.expectEqual(@as(u64, 100), snapshot.windows[0].window_id);
+    try std.testing.expectEqual(@as(u64, 200), snapshot.windows[1].window_id);
+    // focused는 전역에 정확히 하나 — key 창(100)의 활성 surface.
+    var focused_count: usize = 0;
+    for (snapshot.surfaces) |dto| {
+        if (dto.focused) {
+            focused_count += 1;
+            try std.testing.expectEqual(key_active, dto.surface_id); // key 창 surface만
+            try std.testing.expectEqual(@as(u64, 100), dto.window);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), focused_count);
 }
 
 // ── 7) at_prompt 3상이 트리에서 term별로 반영(command=false, unknown=null, alt 오버라이드=false) ──

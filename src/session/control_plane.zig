@@ -380,6 +380,58 @@ fn writeHello(w: *std.Io.Writer, params: HelloParams) !void {
     try s.endObject();
 }
 
+// ── auth 셀렉터(§4.2·§8.4, A2b 최소 auth) ────────────────────────────────────────────────────────────────
+/// caller가 연결 직후 보내는 self-origin 셀렉터 프레임의 method 이름(§8.4 1단계). request 프레임 앞에 온다.
+pub const auth_self_method = "auth.self";
+
+/// A2b 최소 auth 셀렉터를 notification으로 직렬화한다: `{"jsonrpc":"2.0","method":"auth.self","params":{"surface_id":N}}`.
+/// `surface_id`는 caller가 자기 surface를 주장하는 값(CLI가 `$MARU_PANE_ID`에서 읽음 — 실제 env는 MARU_PANE_ID이고
+/// 그 값이 곧 surface_id다). null이면 params `{}`(maru 밖 shell 등 셀렉터 없음 — 서버는 아무 surface도 self로 주지
+/// 않는다). **§8.4 경계 정직**: 이 셀렉터는 비밀 토큰이 아니라 단순 주장이다 — same-uid peer면 임의 surface_id를
+/// 주장할 수 있고(tty/pgrp 검증은 1g 후속), 서버는 `metadata:self`만 부여하므로 그 한 surface의 metadata만 열린다.
+pub fn serializeAuthSelf(gpa: std.mem.Allocator, surface_id: ?u64) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    writeAuthSelf(&aw.writer, surface_id) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeAuthSelf(w: *std.Io.Writer, surface_id: ?u64) !void {
+    var s: std.json.Stringify = .{ .writer = w, .options = .{} };
+    try s.beginObject();
+    try s.objectField("jsonrpc");
+    try s.write(jsonrpc_version);
+    try s.objectField("method");
+    try s.write(auth_self_method);
+    try s.objectField("params");
+    try s.beginObject();
+    if (surface_id) |sid| {
+        try s.objectField("surface_id");
+        try s.write(sid);
+    }
+    try s.endObject();
+    try s.endObject();
+}
+
+/// auth 셀렉터 프레임 한 줄에서 주장된 surface_id를 뽑는다(순수, 관대 파싱 — 서버 accept 스레드가 부른다). 반환:
+///  - notification `auth.self` + `params.surface_id`가 음이 아닌 정수 → 그 값.
+///  - 그 밖(파싱 실패·다른 method·surface_id 부재/음수/비정수) → null(셀렉터 없음, 서버가 self를 안 준다).
+/// 에러를 던지지 않는다(OOM은 파싱 실패로 접어 null) — 소켓 입력이라 방어적으로 다룬다.
+pub fn parseAuthSelector(gpa: std.mem.Allocator, bytes: []const u8) ?u64 {
+    var pm = parseMessage(gpa, bytes) catch return null;
+    defer pm.deinit();
+    if (pm.message != .notification) return null;
+    const notif = pm.message.notification;
+    if (!std.mem.eql(u8, notif.method, auth_self_method)) return null;
+    const params = notif.params orelse return null;
+    if (params != .object) return null;
+    const sid_v = params.object.get("surface_id") orelse return null;
+    return switch (sid_v) {
+        .integer => |i| if (i >= 0) @intCast(i) else null,
+        else => null,
+    };
+}
+
 // ── ndjson 프레이머(§4.3) ─────────────────────────────────────────────────────────────────────────────────
 /// ndjson 프레이머: 바이트 스트림(부분 읽기, 줄이 여러 read에 걸쳐 도착)을 개행 경계로 frame(한 줄)으로 조립한다.
 ///
@@ -818,6 +870,39 @@ test "hello: protocol/server_version/capabilities를 담은 notification으로 �
     try testing.expectEqual(@as(usize, 3), arr.items.len);
     try testing.expectEqualStrings("sessions.list", arr.items[0].string);
     try testing.expectEqualStrings("session.capture", arr.items[2].string);
+}
+
+// ── 5b) auth 셀렉터(A2b) 왕복·관대 파싱 ──
+test "auth.self: surface_id 있는 셀렉터 왕복 — serialize→parse가 값 보존, 한 줄" {
+    const wire = try serializeAuthSelf(testing.allocator, 42);
+    defer testing.allocator.free(wire);
+    try testing.expect(std.mem.indexOfScalar(u8, wire, '\n') == null); // 한 줄 프레임 불변식
+    // notification 모양 확인.
+    var pm = try parseMessage(testing.allocator, wire);
+    defer pm.deinit();
+    try testing.expect(pm.message == .notification);
+    try testing.expectEqualStrings(auth_self_method, pm.message.notification.method);
+    // parseAuthSelector가 값을 뽑는다.
+    try testing.expectEqual(@as(?u64, 42), parseAuthSelector(testing.allocator, wire));
+}
+
+test "auth.self: surface_id 없음(null)이면 params 빈 객체 → parseAuthSelector null" {
+    const wire = try serializeAuthSelf(testing.allocator, null);
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, wire));
+}
+
+test "parseAuthSelector 관대 파싱: 다른 method·잘못된 모양·음수·비정수는 null" {
+    // 다른 method(request)는 셀렉터 아님.
+    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}"));
+    // 손상 JSON.
+    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{not json"));
+    // auth.self지만 surface_id 음수.
+    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":-1}}"));
+    // auth.self지만 surface_id 문자열.
+    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\"x\"}}"));
+    // 큰 값(u64 도메인)도 보존.
+    try testing.expectEqual(@as(?u64, 9007199254740993), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":9007199254740993}}"));
 }
 
 // ── 6) method 네임스페이스 파싱 ──

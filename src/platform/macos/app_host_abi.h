@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 96u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 97u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -868,5 +868,36 @@ int32_t maru_macos_app_session_metal_frame(
     MaruAppHostSession *session,
     MaruAppHostMetalFrame *out_frame
 );
+
+/* ── 세션 컨트롤 플레인 라이브 서버(Track C A2b) ──────────────────────────────────────────────
+   앱 인스턴스 전역 컨트롤 소켓 + accept 스레드 + 메인 marshal. Swift는 (1) 시작 시 start를 한 번,
+   (2) 매 frame tick에 drain을 살아있는 세션 목록과 함께, (3) 종료 시 stop을 부른다. 소켓/스레드/
+   collector/dispatch/auth는 전부 Zig가 소유한다(Swift는 열거만 — docs/control-plane.md §2·§5). */
+
+/* 한 세션(창)에 대한 collector 참조 — Swift가 창마다 채운다(§2 열거). window_id=위치 메타(Swift의
+   창 토큰), window_kind: 0=일반 창, 1=quick terminal. app_session이 NULL이면 그 항목은 건너뛴다. */
+typedef struct MaruControlSessionRef {
+    MaruAppHostSession *app_session;
+    uint64_t window_id;
+    uint32_t window_kind;
+    uint32_t reserved; /* 8바이트 정렬 패딩(향후 확장) */
+} MaruControlSessionRef;
+
+/* 컨트롤 소켓을 bind하고 accept 스레드를 띄운다(앱 인스턴스 전역, 결정론 경로 <cache>/maru/control).
+   0=ok(또는 이미 시작됨), 비-0=실패(소켓 bind 불가 등 — 컨트롤 플레인만 꺼지고 앱은 계속). idempotent. */
+int32_t maru_macos_control_server_start(void);
+
+/* 값싼 per-tick 게이트: 대기 중인 컨트롤 요청이 하나라도 있으면 1, 없으면 0. Swift가 매 tick drain 전에
+   이걸 봐 pending이 없으면 refs 배열(힙 할당+창별 copy)을 아예 짓지 않고 early return한다(렌더 핫패스 0-할당).
+   서버 미시작이면 0. drain과 동일 no-handle(앱-전역 서버). 짧은 큐 락만 잡는다. take_* predicate와 같은 u32(1/0). */
+uint32_t maru_macos_control_server_has_pending(void);
+
+/* 대기 중인 컨트롤 요청을 메인에서 처리한다(매 frame tick). refs=살아있는 세션 목록(창마다 하나 +
+   quick). 요청마다 실 collector(refs 순회)로 스냅샷을 만들고 auth(metadata:self)·dispatch해 응답한다.
+   서버 미시작이면 무동작. per-tick 처리량은 Zig가 제한한다(§5). refs가 NULL이면 count=0으로 취급. */
+void maru_macos_control_server_drain(const MaruControlSessionRef *refs, size_t count);
+
+/* accept 스레드를 멈추고 join한 뒤 소켓을 닫는다(앱 종료 시). idempotent(미시작이면 무동작). */
+void maru_macos_control_server_stop(void);
 
 #endif

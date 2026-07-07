@@ -32,6 +32,10 @@ const Rule = struct {
 
 const rules = [_]Rule{
     .{
+        // terminal(L1 VT 코어)의 facade 계약(docs/facade-contracts.md TerminalCore "몰라야 하는 것"): PTY/platform
+        // API·renderer/GPU뿐 아니라 **workspace/tab/split·plugin runtime**도 몰라야 한다. workspace/tab/split은 3차
+        // 추출로 session(L2)에 있으므로 session을, plugin runtime은 plugin을 각각 금지해 "L1은 위 레이어를 모른다"를
+        // 강제한다(과거엔 pty/platform/renderer만 막아 terminal→session/plugin이 뚫려 있었다 — 문서화됐으나 미강제).
         .layer = "terminal",
         .barrel = "src/terminal.zig",
         .implementation_dir = "src/terminal",
@@ -39,6 +43,8 @@ const rules = [_]Rule{
             .{ .layer = "pty" },
             .{ .layer = "platform" },
             .{ .layer = "renderer" },
+            .{ .layer = "session" }, // workspace/tab/split 모델이 사는 곳 — L1이 L2를 import하면 위상 역전
+            .{ .layer = "plugin" }, // plugin runtime을 몰라야 한다(facade-contracts.md:28)
         },
     },
     .{
@@ -97,12 +103,17 @@ const rules = [_]Rule{
         },
     },
     .{
+        // plugin(future Wasm 경계)의 facade 계약(docs/facade-contracts.md:290-291): plugin은 domain event·action
+        // facade로만 상호작용하고, TerminalCore private storage·PTY handle·**renderer resource**를 직접 받지 않는다.
+        // 그래서 pty(전체)·terminal(private 구현)에 더해 renderer(전체 — 프레임/atlas/GPU resource)를 금지한다
+        // (문서화됐으나 pty/terminal만 막혀 plugin→renderer가 뚫려 있었다). plugin은 현재 registry stub이라 위반 0.
         .layer = "plugin",
         .barrel = "src/plugin.zig",
         .implementation_dir = "src/plugin",
         .forbidden = &.{
             .{ .layer = "pty" },
             .{ .layer = "terminal", .private_only = true },
+            .{ .layer = "renderer" }, // renderer resource(프레임·atlas·GPU)를 직접 받지 않는다(facade-contracts.md:291)
         },
     },
     .{
@@ -264,6 +275,54 @@ test "importTraversesLayer distinguishes barrel from private implementation" {
     // 무관한 import는 잡지 않는다.
     try std.testing.expect(!importTraversesLayer("core.zig", .{ .layer = "pty" }));
     try std.testing.expect(!importTraversesLayer("std", .{ .layer = "renderer" }));
+}
+
+test "boundary rules enforce documented facade contracts (terminal↛session/plugin, plugin↛renderer)" {
+    // 이 테스트가 증명하는 것: facade-contracts.md의 "몰라야 하는 것" 경계 중 예전엔 미강제였던 항목을 rules가
+    // 실제로 잡는다는 것 — 규칙 추가가 no-op(영원히 안 걸림)이 아니라 위반 fixture에서 정확히 발화한다. 실제 소스는
+    // 위반이 0이라(top의 "facade layers..." 테스트가 전 파일 스캔) 여기선 fixture 문자열로 규칙 자체의 발화를 고정한다.
+    const findRule = struct {
+        fn run(layer: []const u8) Rule {
+            for (rules) |r| {
+                if (std.mem.eql(u8, r.layer, layer)) return r;
+            }
+            unreachable;
+        }
+    }.run;
+
+    // terminal → session(workspace/tab/split이 사는 L2): 위상 역전이라 잡아야 한다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("const w = @import(\"../session/workspace.zig\");", findRule("terminal"), "fixture", &v);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // terminal → plugin: plugin runtime을 몰라야 한다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("const p = @import(\"../plugin/registry.zig\");", findRule("terminal"), "fixture", &v);
+        try std.testing.expectEqual(@as(usize, 1), v);
+    }
+    // plugin → renderer(전체 — barrel도 금지): renderer resource를 직접 받지 않는다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("const r = @import(\"../renderer.zig\");", findRule("plugin"), "fixture", &v);
+        try std.testing.expectEqual(@as(usize, 1), v);
+        var v2: usize = 0;
+        scanImportsQuiet("const r = @import(\"../renderer/metal_frame.zig\");", findRule("plugin"), "fixture", &v2);
+        try std.testing.expectEqual(@as(usize, 1), v2); // 구현부도
+    }
+    // 반대로 허용된 import는 여전히 통과 — terminal이 중립 top-level(color/width)·자기 모듈을 쓰는 건 정상.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("const c = @import(\"../color.zig\");\nconst w = @import(\"width.zig\");", findRule("terminal"), "fixture", &v);
+        try std.testing.expectEqual(@as(usize, 0), v);
+    }
+    // plugin이 action/config facade로 상호작용하는 건 계약상 허용(pty/terminal-private/renderer만 금지) — config는 안 막힌다.
+    {
+        var v: usize = 0;
+        scanImportsQuiet("const cfg = @import(\"../config.zig\");\nconst t = @import(\"../terminal.zig\");", findRule("plugin"), "fixture", &v);
+        try std.testing.expectEqual(@as(usize, 0), v); // config·terminal 공개 barrel은 허용(terminal은 private_only 금지)
+    }
 }
 
 test "scanImports catches zig fmt-clean whitespace and multi-line @import forms" {

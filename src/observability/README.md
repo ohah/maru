@@ -5,6 +5,7 @@
 현재 구현:
 
 - `snapshot.zig` — `maru.snapshot.v3` 화면 스냅샷 **writer**(`renderTerminalSnapshot`) + **reader**(`parseSnapshot` → `ParsedSnapshot`, round-trip). 부분 복원(writer가 직렬화하는 size·cursor·dirty·행·cell-metadata·styled-cells만 — docs/snapshot-versioning.md "v3 reader 규칙").
-- `trace.zig` — `maru.trace.v1` 셸 의미 이벤트 **writer**(`renderShellEvents`/`writeEvent`) + **reader**(`parseShellEvents`, round-trip). escape/unescape는 top-level `text_escape.zig` 단일 출처.
+- `trace.zig` — `maru.trace.v1` **writer**(shell: `renderShellEvents`/`writeEvent`, base kind: `writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`) + **reader**(`parseEvents` → `[]ParsedEvent`, shell.* 와 base kind 전부). escape/unescape는 top-level `text_escape.zig` 단일 출처.
+- `replay.zig` — trace **재적용**(`replayTrace`). output/resize를 `core.write`/`core.resize`로 흘려 화면을 byte-for-byte 재구성(파서가 셸 이벤트·cwd 재도출), output 없는 shell-only trace는 shell.* 를 OSC로 재발행(fallback).
 
-후속 책임(아직 없음): live 레코딩(`MARU_TRACE` 게이트), replay 재적용(`ReplayRunner` — reader가 되읽은 이벤트를 facade로 다시 흘림), base kind(output/input/resize/process-exit) 이벤트, GUI inspector. 실제 심볼명은 `RenderSnapshot`(terminal/types.zig)·`renderTerminalSnapshot`/`parseSnapshot`·`renderShellEvents`/`parseShellEvents`이며, 예전 개념명(`DebugSnapshot`/`TraceRecorder` 등)은 코드에 없다 — 이 데이터를 새로 소비하는 컴포넌트는 실제 심볼을 재사용한다.
+후속 책임(아직 없음): live 레코딩(`MARU_TRACE` 게이트 — `SurfaceRuntime.applyPtyEvent`/`resize`에서 base kind writer 호출), GUI inspector, redaction. 실제 심볼명은 `RenderSnapshot`(terminal/types.zig)·`renderTerminalSnapshot`/`parseSnapshot`·`renderShellEvents`/`parseEvents`/`replayTrace`이며, 예전 개념명(`DebugSnapshot`/`TraceRecorder`/`ReplayRunner` 등)은 코드에 없다 — 이 데이터를 새로 소비하는 컴포넌트는 실제 심볼을 재사용한다.

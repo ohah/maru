@@ -13981,6 +13981,9 @@ pub const AppSession = struct {
                     .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
                     .text = self.appearance.cursor.text orelse self.appearance.theme.background,
                 },
+                // per-cell 대비 하한(theme.min-contrast): 256색·truecolor 전경이 라이트 배경에서 안 읽히면
+                // 렌더가 셀 단위로 보정한다(ANSI16은 resolve 선보정 — metal_frame.CellColors.min_contrast 주석).
+                .min_contrast = self.appearance.theme.min_contrast,
             };
             cc_surface.unlockCore(self.io); // cell_colors의 활성 코어 읽기 끝 — 이후 shaping/GPU는 락 밖
             // 사이드바 탭 제목 glyph 패스(macOS만 — buildFromDrawList는 실 CoreText 브리지). 터미널과
@@ -14148,6 +14151,8 @@ pub const AppSession = struct {
                 // 여기 한 곳에 dim_milli를 세우면 모든 비활성 pane 셀 색이 배경 쪽으로 흐려진다. 활성 pane은
                 // CoreTextFrameBuilder(cell_colors, dim_milli=0)라 영향 없다. f32 0~1 → 천분율(클램프).
                 .dim_milli = @intFromFloat(@min(@max(self.appearance.unfocused_dim, 0.0), 1.0) * 1000.0),
+                // per-cell 대비 하한 — 활성 pane(cell_colors)과 동일 규칙(비활성 pane의 256색·truecolor도 보정).
+                .min_contrast = self.appearance.theme.min_contrast,
             };
             // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
             const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };

@@ -132,6 +132,99 @@ pub fn xterm256(index: u8) Rgb {
     return .{ .r = level, .g = level, .b = level };
 }
 
+// ── WCAG 대비(contrast) 유틸 — `theme.min-contrast`의 단일 출처 ─────────────────────────────────────────
+// config resolve(ANSI 16 팔레트 선보정 — appearance.resolveTheme)와 렌더 hot path(metal_frame의 256색·
+// truecolor per-cell 하한)가 같은 수식을 공유한다. 베이스: WCAG 2.x relative luminance·contrast ratio
+// 정의(공개 명세 — 단일 표준이 없는 "가독성 보정" 발명이 아니라 표준 명암비 수식 그대로, docs/configuration.md).
+
+/// sRGB 채널(0~255)의 WCAG 선형 luminance LUT. 렌더 hot path가 셀마다 luminance를 계산하므로 pow를
+/// 매번 부르지 않게 comptime으로 256개를 미리 푼다(채널당 조회 1회). 수식: WCAG 2.x — 임계 0.03928,
+/// 그 위는 감마 2.4 (((s+0.055)/1.055)^2.4).
+const channel_luminance_lut: [256]f32 = blk: {
+    @setEvalBranchQuota(200_000);
+    var t: [256]f32 = undefined;
+    for (&t, 0..) |*v, i| {
+        const s = @as(f32, @floatFromInt(i)) / 255.0;
+        v.* = if (s <= 0.03928) s / 12.92 else std.math.pow(f32, (s + 0.055) / 1.055, 2.4);
+    }
+    break :blk t;
+};
+
+/// 색의 WCAG relative luminance(0~1) — 채널 선형화(LUT) 후 0.2126/0.7152/0.0722 가중합(눈의 채널 민감도).
+pub fn relativeLuminance(rgb: Rgb) f32 {
+    return 0.2126 * channel_luminance_lut[rgb.r] + 0.7152 * channel_luminance_lut[rgb.g] + 0.0722 * channel_luminance_lut[rgb.b];
+}
+
+/// 두 luminance의 WCAG contrast ratio: (L_hi + 0.05) / (L_lo + 0.05), 범위 1.0(같은 밝기)~21.0(검정 대 흰색).
+pub fn contrastRatio(lum_a: f32, lum_b: f32) f32 {
+    const hi = @max(lum_a, lum_b);
+    const lo = @min(lum_a, lum_b);
+    return (hi + 0.05) / (lo + 0.05);
+}
+
+/// 색을 검은색 쪽으로 k(0~1)배 스케일한다(각 채널 × k, 반올림). k=1이면 원본, k=0이면 검정. R:G:B 비를 유지하므로
+/// hue(색상)를 보존하고 명도(luminance)만 낮춘다 — "색은 그대로, 더 진하게"에 해당.
+fn scaleTowardBlack(c: Rgb, k: f32) Rgb {
+    return .{
+        .r = @intFromFloat(@round(@as(f32, @floatFromInt(c.r)) * k)),
+        .g = @intFromFloat(@round(@as(f32, @floatFromInt(c.g)) * k)),
+        .b = @intFromFloat(@round(@as(f32, @floatFromInt(c.b)) * k)),
+    };
+}
+
+/// 색이 배경 대비 `target` 명암비에 못 미치면 **색상을 보존한 채 검은색 방향으로 최소한만** 어둡게 보정한다.
+/// `bg_lum`은 배경의 WCAG relative luminance(호출자가 재사용을 위해 계산해 넘긴다 — resolve는 16색에 1회,
+/// 렌더는 셀 배경마다). 밝은 배경에선 어둡게 할수록(k↓) 대비가 단조 증가하므로, 목표 명암비에 막 닿는 최대
+/// k(=최소 변화)를 이진 탐색으로 찾는다.
+/// **활성 경계**: 검정(luminance 0)으로도 목표 대비에 못 미치면 원본을 그대로 둔다(어둡게 해봐야 목표를 못
+/// 넘는다). 이는 배경이 어두울수록 성립한다 — 경계는 `contrastRatio(0, bg_lum) >= target`, 즉
+/// `bg_lum >= 0.05*(target−1)`이다(target=3.0이면 bg_lum≈0.10). **모든 번들 다크 프리셋**은 배경 bg_lum이
+/// 이보다 훨씬 낮아(#101010≈0.005 등) 무동작이다. 중간 밝기(회색) 배경은 목표 도달이 가능하면 보정한다.
+/// `target<=1.0`(끔)·이미 충분하면 원본 그대로. 단일 출처: 팔레트 선보정(appearance.resolveTheme)과 렌더
+/// per-cell 하한(metal_frame)이 모두 이 함수만 쓴다.
+pub fn contrastFloor(c: Rgb, bg_lum: f32, target: f32) Rgb {
+    if (target <= 1.0) return c; // 끔(0 포함) — 업스트림 원색 그대로
+    if (contrastRatio(relativeLuminance(c), bg_lum) >= target) return c; // 이미 충분 → 무변경
+    if (contrastRatio(0.0, bg_lum) < target) return c; // 검정(luminance 0)으로도 미달=배경이 충분히 어두움 → 무동작
+    // 이진 탐색: k∈[0,1]에서 c×k. lo=목표 충족(더 어두움), hi=미충족(더 밝음). 24회면 u8 해상도로 수렴한다.
+    var lo: f32 = 0.0; // k=0(검정)은 위 가드로 항상 충족
+    var hi: f32 = 1.0; // k=1(원본)은 위 fast-path로 미충족
+    var iter: usize = 0;
+    while (iter < 24) : (iter += 1) {
+        const mid = (lo + hi) / 2.0;
+        if (contrastRatio(relativeLuminance(scaleTowardBlack(c, mid)), bg_lum) >= target) {
+            lo = mid; // 충족 → 더 밝게(원본에 가깝게) 시도
+        } else {
+            hi = mid; // 미충족 → 더 어둡게
+        }
+    }
+    return scaleTowardBlack(c, lo); // lo는 항상 충족 지점(테스트한 값 그대로 반환)
+}
+
+test "contrast: LUT luminance 경계·단조, contrastFloor 라이트/다크 동작" {
+    // 이 테스트가 증명하는 것: LUT 기반 luminance가 WCAG 정의(검정 0, 흰색 1, 단조 증가)를 지키고,
+    // contrastFloor가 밝은 배경에선 목표 명암비를 강제하며 어두운 배경에선 무동작이라는 계약 —
+    // 렌더 per-cell 하한과 팔레트 선보정이 공유하는 단일 출처의 기본 성질이다.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), relativeLuminance(.{ .r = 0, .g = 0, .b = 0 }), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), relativeLuminance(.{ .r = 255, .g = 255, .b = 255 }), 1e-4);
+    var prev: f32 = -1.0;
+    var g: usize = 0;
+    while (g < 256) : (g += 8) {
+        const lum = relativeLuminance(.{ .r = @intCast(g), .g = @intCast(g), .b = @intCast(g) });
+        try std.testing.expect(lum > prev);
+        prev = lum;
+    }
+    // 밝은 배경(흰색): 거의 안 보이는 밝은 회색이 목표 3.0 이상으로 보정되고 hue(무채색)는 유지된다.
+    const white_lum = relativeLuminance(.{ .r = 255, .g = 255, .b = 255 });
+    const floored = contrastFloor(.{ .r = 235, .g = 235, .b = 235 }, white_lum, 3.0);
+    try std.testing.expect(contrastRatio(relativeLuminance(floored), white_lum) >= 2.95);
+    try std.testing.expect(floored.r == floored.g and floored.g == floored.b); // 무채색 보존
+    // 어두운 배경(#101010): 검정으로도 목표 미달 → 무동작(다크 프리셋 회귀 0 가드).
+    const dark_lum = relativeLuminance(.{ .r = 0x10, .g = 0x10, .b = 0x10 });
+    const kept = contrastFloor(.{ .r = 30, .g = 30, .b = 30 }, dark_lum, 3.0);
+    try std.testing.expectEqual(@as(u8, 30), kept.r);
+}
+
 /// xterm OSC "color specification"을 RGB로 푼다(OSC 4 팔레트·후속 OSC 10/11 set이 공유). 지원 형식:
 ///   - `rgb:<r>/<g>/<b>` — 각 채널 1..4 hex 자리를 8-bit로 스케일(rgb:ff/00/80, rgb:ffff/0000/8080 등).
 ///   - `#rgb` / `#rrggbb` / `#rrrgggbbb` / `#rrrrggggbbbb` — 채널당 1..4 hex 자리.

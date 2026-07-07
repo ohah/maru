@@ -22,6 +22,24 @@ static const char *maru_screenshot_path(void) {
     return path;
 }
 
+/* MARU_SCREENSHOT_DELAY_MS: 캡처를 "내용이 있는 첫 frame"에서 N ms 늦춘다(그동안은 평소 present).
+   기본(미설정/0)은 기존과 동일한 즉시 캡처. 첫 frame은 탭바/커서만으로도 '내용'이 되므로, PTY
+   출력(셸 스크립트의 색 테스트 등)이 화면에 도달한 뒤를 찍으려면 이 지연이 필요하다 — 렌더 검증
+   하니스 전용이며 env 미설정 일반 실행엔 비용·분기가 없다(스크린샷 모드 안에서만 읽는다). */
+static bool maru_screenshot_delay_elapsed(void) {
+    static double delay_ms = -1.0;
+    static double first_content_frame_at = 0.0;
+    if (delay_ms < 0.0) {
+        const char *env = getenv("MARU_SCREENSHOT_DELAY_MS");
+        delay_ms = (env != NULL) ? strtod(env, NULL) : 0.0;
+        if (delay_ms < 0.0) delay_ms = 0.0;
+    }
+    if (delay_ms == 0.0) return true;
+    const double now_ms = CACurrentMediaTime() * 1000.0;
+    if (first_content_frame_at == 0.0) first_content_frame_at = now_ms;
+    return (now_ms - first_content_frame_at) >= delay_ms;
+}
+
 /* Metal copyFromTexture:toBuffer:의 destinationBytesPerRow는 GPU에 따라 256 정렬을 요구하므로
    (smoke의 readback stride와 같은 값) width*4를 256의 배수로 올림한다. PPM writer는 이 stride를
    행 간격으로 받아 width 픽셀만 쓰므로 패딩 바이트는 무시된다. */
@@ -1035,9 +1053,10 @@ bool maru_metal_renderer_draw(
     // 스크린샷 하니스: MARU_SCREENSHOT가 설정되면 layer의 drawable(framebufferOnly=true라 읽을 수
     // 없다) 대신 같은 크기·픽셀포맷의 오프스크린 텍스처에 같은 패스를 그린다. 그래야 blit로 readback해
     // PPM으로 남길 수 있다. 평소(NULL)엔 이 분기가 없는 것과 같다. atlas==nil·cols/rows==0 같은 이른
-    // return은 이 위에서 이미 걸러지므로, 캡처는 "내용이 있는 첫 frame"에서만 일어난다.
+    // return은 이 위에서 이미 걸러지므로, 캡처는 "내용이 있는 첫 frame"에서만 일어난다 —
+    // MARU_SCREENSHOT_DELAY_MS가 있으면 그 시점부터 N ms 지난 다음 frame에서 찍는다(PTY 출력 검증용).
     const char *screenshot_path = maru_screenshot_path();
-    const bool screenshot_mode = (screenshot_path != NULL);
+    const bool screenshot_mode = (screenshot_path != NULL) && maru_screenshot_delay_elapsed();
 
     id<CAMetalDrawable> drawable = nil;
     id<MTLTexture> target_texture = nil;

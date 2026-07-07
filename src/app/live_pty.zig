@@ -294,6 +294,36 @@ pub const LivePtySession = struct {
     }
 };
 
+/// M3a: 한 surface의 라이브 소유 **번들**(docs/window-surface-mobility.md §8A.1 옵션 A). registry가 이 번들을
+/// heap 슬롯으로 개별 소유(`allocator.create(LiveSurface)`)하므로, `&slot.surface.core`/`&slot.surface.core_mutex`
+/// (reader 바인딩)와 `&slot.live_pty.reader`가 **창 밖 registry 슬롯에 고정**된다 — Term이 heap-pin이라 안정하던 것을
+/// registry 슬롯 고정으로 옮긴 것(cross-window 이동 시 Term은 창을 옮겨도 이 슬롯 주소는 불변, reader 계약 보존).
+/// M2b가 `live_pty`(값→포인터)에 한 것과 **동형**으로 `Surface`도 이 번들로 흡수해 registry 소유로 올린다.
+///
+/// Term은 `surface: *Surface`·`rt.live_pty: *LivePtySession`로 이 슬롯의 두 필드를 참조만 한다(소유 아님).
+/// 두 포인터가 한 슬롯을 가리킨다(surface_id 하나 = 번들 하나).
+pub const LiveSurface = struct {
+    surface: surface_mod.Surface = undefined,
+    live_pty: LivePtySession = undefined,
+    /// 번들 **내부**(core·session/queue·surface owned string)를 만든 창 allocator. `deinit`이 `custom_name`
+    /// 해제에 쓴다 — `Surface.deinit`엔 allocator가 없어(§ surface.zig) owned string 해제를 번들이 흡수한다
+    /// (§8A.1 "owned string 해제 번들 이관"). live_pty 내부(session/queue)는 `LivePtySession`이 자기 allocator를
+    /// 들고 있어 `live_pty.deinit`이 자족한다. 번들이 자기 allocator를 들고 다니므로 cross-window 이동이 창을
+    /// 옮겨도 teardown allocator 짝이 맞는다(M2b allocator 분리의 확장 — bookkeeping=registry smp, 내부=창).
+    internal_allocator: std.mem.Allocator = undefined,
+
+    /// registry.remove/deinit이 부르는 번들 teardown. **순서 계약**: `live_pty.deinit`(reader thread join — reader가
+    /// `&surface.core`를 잡음) → `surface` owned string 해제 → `surface.deinit`(core 해제). detach(라우팅)는
+    /// coordinator가 remove **전에** `closeAndDetach`로 선행한다(§8A.1·live_surface_registry.zig remove 계약).
+    /// closeAndDetach가 이미 reader를 join했으면 여기 live_pty.deinit의 close는 멱등 no-op join이라 순서가 안전하다.
+    pub fn deinit(self: *LiveSurface) void {
+        self.live_pty.deinit();
+        if (self.surface.custom_name) |n| self.internal_allocator.free(n);
+        self.surface.deinit();
+        self.* = undefined;
+    }
+};
+
 test "live pty session owns controlled command until normal termination" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 

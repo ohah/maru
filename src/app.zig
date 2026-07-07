@@ -25,6 +25,7 @@ pub const KeyHandlingResult = host.KeyHandlingResult;
 pub const LivePtyRegistry = live_pty_registry.LivePtyRegistry;
 pub const LivePtyRegistryError = live_pty_registry.RegistryError;
 pub const LivePtySession = live_pty.LivePtySession;
+pub const LiveSurface = live_pty.LiveSurface;
 pub const AppPtySmokeConfig = pty_smoke.AppPtySmokeConfig;
 pub const AppPtySmokeResult = pty_smoke.AppPtySmokeResult;
 pub const AppSmokeConfig = host.AppSmokeConfig;

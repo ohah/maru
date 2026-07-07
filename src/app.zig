@@ -11,6 +11,7 @@ pub const pty_smoke = @import("app/pty_smoke.zig");
 pub const pty_reader = @import("app/pty_reader.zig");
 pub const runtime = @import("app/runtime.zig");
 pub const runtime_pump = @import("app/runtime_pump.zig");
+pub const trace_recorder = @import("app/trace_recorder.zig");
 pub const smoke_drain = @import("app/smoke_drain.zig");
 
 pub const AppHostFrame = host.AppHostFrame;

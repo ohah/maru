@@ -27,7 +27,7 @@ pub const header = "maru.trace.v1";
 /// 둘 다 현재 cwd로 적힌다(한 프레임 내 연속 cd — 드물고 문서화된 한계).
 pub fn renderShellEvents(
     allocator: std.mem.Allocator,
-    surface_id: u32,
+    surface_id: u64,
     events: []const terminal.types.ShellEvent,
     cwd: []const u8,
 ) ![]u8 {
@@ -43,7 +43,7 @@ pub fn renderShellEvents(
 pub fn writeEvent(
     writer: *std.Io.Writer,
     index: usize,
-    surface_id: u32,
+    surface_id: u64,
     event: terminal.types.ShellEvent,
     cwd: []const u8,
 ) !void {
@@ -79,26 +79,26 @@ pub fn writeHeader(writer: *std.Io.Writer) !void {
 
 /// `event <i> output surface=<s> bytes="<escaped>"` — 원시 PTY 출력. bytes는 따옴표 값 escape(개행/CR/Tab/`\`/`"`),
 /// 그 외 바이트(ESC·제어·UTF-8)는 그대로. 재생이 이 바이트를 core.write로 흘려 화면을 정확히 재구성한다.
-pub fn writeOutputEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, bytes: []const u8) !void {
+pub fn writeOutputEvent(writer: *std.Io.Writer, index: usize, surface_id: u64, bytes: []const u8) !void {
     try writer.print("event {d} output surface={d} bytes=\"", .{ index, surface_id });
     try writeEscaped(writer, bytes);
     try writer.writeAll("\"\n");
 }
 
 /// `event <i> input surface=<s> bytes="<escaped>"` — 사용자 입력(재생 화면엔 직접 영향 없음 — child로 감; 기록·분석용).
-pub fn writeInputEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, bytes: []const u8) !void {
+pub fn writeInputEvent(writer: *std.Io.Writer, index: usize, surface_id: u64, bytes: []const u8) !void {
     try writer.print("event {d} input surface={d} bytes=\"", .{ index, surface_id });
     try writeEscaped(writer, bytes);
     try writer.writeAll("\"\n");
 }
 
 /// `event <i> resize surface=<s> cols=<c> rows=<r>` — 터미널 크기 변경. 재생이 core.resize로 적용해 reflow까지 재구성.
-pub fn writeResizeEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, cols: u16, rows: u16) !void {
+pub fn writeResizeEvent(writer: *std.Io.Writer, index: usize, surface_id: u64, cols: u16, rows: u16) !void {
     try writer.print("event {d} resize surface={d} cols={d} rows={d}\n", .{ index, surface_id, cols, rows });
 }
 
 /// `event <i> process-exit surface=<s> code=<n>` — child 종료(RuntimePtyEvent.exited 1:1). code 없으면 `code=none`.
-pub fn writeProcessExitEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, code: ?i32) !void {
+pub fn writeProcessExitEvent(writer: *std.Io.Writer, index: usize, surface_id: u64, code: ?i32) !void {
     if (code) |c| {
         try writer.print("event {d} process-exit surface={d} code={d}\n", .{ index, surface_id, c });
     } else {
@@ -128,7 +128,7 @@ pub const Event = union(enum) {
 /// 파싱된 이벤트 한 개 — 라인 메타(index·surface_id) + payload.
 pub const ParsedEvent = struct {
     index: usize,
-    surface_id: u32,
+    surface_id: u64,
     event: Event,
 };
 
@@ -172,7 +172,7 @@ fn parseEventLine(allocator: std.mem.Allocator, line: []const u8) ParseError!Par
     if (!eqTok(it.next(), "event")) return error.BadLine;
     const index = parseUintTok(it.next(), usize) orelse return error.BadLine;
     const kind = it.next() orelse return error.BadLine;
-    const surface_id = parseKeyUint(it.next(), "surface", u32) orelse return error.BadLine;
+    const surface_id = parseKeyUint(it.next(), "surface", u64) orelse return error.BadLine;
 
     const event: Event = if (std.mem.eql(u8, kind, "shell.prompt-start"))
         .{ .prompt_start = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine }
@@ -311,7 +311,7 @@ test "trace round-trip: parseEvents(renderShellEvents(...))가 원 이벤트·cw
     // ShellEvent(원)와 Event(파싱)를 태그+payload로 대조. cwd_changed는 POD void↔경로 문자열이라 별도 비교.
     for (events, parsed, 0..) |ev, pe, i| {
         try std.testing.expectEqual(i, pe.index);
-        try std.testing.expectEqual(@as(u32, 1), pe.surface_id);
+        try std.testing.expectEqual(@as(u64, 1), pe.surface_id);
         switch (ev) {
             .prompt_start => |r| try std.testing.expect(pe.event == .prompt_start and pe.event.prompt_start == r),
             .input_start => |r| try std.testing.expect(pe.event == .input_start and pe.event.input_start == r),

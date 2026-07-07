@@ -1219,6 +1219,10 @@ pub const AppSession = struct {
     new_tab_ssh_bin: ?[]const u8 = null,
     app_window: maru.session.AppWindow = undefined,
     runtime: app.SurfaceRuntime = undefined,
+    // MARU_TRACE=<파일경로>면 세션의 base kind 이벤트(output/resize/process-exit)를 누적하고, deinit에서 그 경로로
+    // 굳힌다(observability replayTrace로 GUI 없이 화면 재생). 미설정이면 null(오버헤드 0). 경로는 allocator 소유.
+    trace_recorder: ?app.trace_recorder.TraceRecorder = null,
+    trace_path: ?[]const u8 = null,
     renderer_state: renderer.RendererState = undefined,
     frame_loop: app.AppFrameLoop = undefined,
     // 제품 app shell은 fake font backend가 아니라 실제 CoreText로 glyph frame을 만든다.
@@ -1953,6 +1957,19 @@ pub const AppSession = struct {
         self.runtime = app.SurfaceRuntime.init(allocator);
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
+
+        // MARU_TRACE=<파일경로>: 라이브 trace 레코딩을 켠다. 레코더는 self에 두어 주소가 안정적이고(runtime이
+        // 포인터로 참조), 경로는 dupe해 보관한다. deinit에서 누적본을 그 경로로 쓴다. 미설정이면 건너뛴다(opt-in).
+        if (std.c.getenv("MARU_TRACE")) |raw| {
+            const path = std.mem.sliceTo(raw, 0);
+            if (path.len > 0) {
+                self.trace_path = allocator.dupe(u8, path) catch null;
+                if (self.trace_path != null) {
+                    self.trace_recorder = app.trace_recorder.TraceRecorder.init(allocator);
+                    self.runtime.trace_recorder = &self.trace_recorder.?;
+                }
+            }
+        }
 
         // appearance·cell 메트릭을 **spawn 전에** 잡는다 — 셸 PTY를 처음부터 실제 창 grid로 띄워 80×24 기본 spawn
         // 후 resize하는 핸드셰이크/레이스(zsh 첫 프롬프트의 PROMPT_EOL_MARK `%` 잔상)를 없앤다. 로더가 valid-아니면-
@@ -17634,6 +17651,19 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        // MARU_TRACE: 세션 종료 시 누적한 trace를 파일로 굳힌다(best-effort — 실패해도 종료는 계속). runtime이 아직
+        // 유효할 때(deinit 초입) 레코더 포인터를 끊고 해제한다. capped면 부분 trace라도 앞부분은 재생 가능.
+        if (self.trace_recorder) |*rec| {
+            if (self.trace_path) |path| {
+                app.artifact_io.writeText(self.io, path, rec.text()) catch |e| {
+                    if (diag_gate.maruDebugEnabled()) std.debug.print("[maru trace] write failed path={s}: {s}\n", .{ path, @errorName(e) });
+                };
+            }
+            self.runtime.trace_recorder = null;
+            rec.deinit();
+        }
+        if (self.trace_path) |path| self.allocator.free(path);
+
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
         self.clipboard_read_target_buf.deinit(self.allocator);

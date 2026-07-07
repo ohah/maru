@@ -32,7 +32,8 @@ pub const Buttons = struct {
 /// 어느 버튼에 포커스가 있나(←/→로 이동). Enter가 포커스된 버튼을 실행한다. 열 때마다 기본 = confirm(Enter=확정 유지).
 pub const Focus = enum { confirm, cancel };
 
-/// 순수 상태 — message + 버튼 라벨 + 포커스 + open 플래그. host가 보류(pending)하며 show를 부른다. 라벨은 show가 채운다.
+/// 순수 상태 — message + (선택) 본문 미리보기 + 버튼 라벨 + 포커스 + open 플래그. host가 보류(pending)하며 show를
+/// 부른다. 라벨은 show가 채우고, body는 show 뒤 host가 따로 주입한다(대부분의 확인엔 없음 — 붙여넣기 미리보기 전용).
 pub const State = struct {
     open: bool = false,
     message: []const u8 = "",
@@ -41,12 +42,16 @@ pub const State = struct {
     confirm_label: []const u8 = "",
     cancel_label: []const u8 = "",
     focused: Focus = .confirm,
+    // 메시지와 버튼 사이에 그릴 **본문 미리보기 줄들**(비면 없음 — 기존 동작). Ghostty의 붙여넣기 확인창이 내용을
+    // 스크롤 뷰로 보여주는 것의 셀-그리드 근사(앞 몇 줄 + 요약). 슬라이스는 host가 세션 소유 버퍼로 준다(message와 동형).
+    body: []const []const u8 = &.{},
 
     pub fn show(self: *State, message: []const u8, buttons: Buttons) void {
         self.message = message;
         self.confirm_label = buttons.confirm;
         self.cancel_label = buttons.cancel;
         self.focused = .confirm; // 열 때마다 기본 포커스 = 확정 버튼(Enter=확정, ←/→로 이동)
+        self.body = &.{}; // 이전 확인이 남긴 미리보기가 새 모달에 새지 않게 리셋(붙여넣기 경로가 show 뒤 다시 주입)
         self.open = true;
     }
 
@@ -111,34 +116,44 @@ pub fn view(
     const box = g.box;
     try modal_box.frame(box, p, arena, out);
 
-    // (1) 메시지 — 중앙.
+    // (1) 메시지 — 중앙, row 0.
     try modal_box.text(box, modal_box.centerX(box, overlay_input.displayCols(state.message)), 0, state.message, .surface_fg, arena, out);
 
-    // (2) 버튼 행 — **포커스된 버튼이 accent**(focus_accent + 대비색 surface_bg 라벨)로 강조되고, 나머지는 은은한 배경
+    // (1.5) 본문 미리보기(있으면) — 메시지 아래 빈 줄 다음부터 좌측 정렬. 각 줄에 은은한 배경 fill(tab_hover_bg)을
+    //       inner 폭만큼 깔아 인셋 패널처럼 보이게 하고, 그 위에 muted 텍스트를 놓는다(painter order: fill→text).
+    //       Ghostty의 스크롤 텍스트 뷰를 셀-그리드로 근사한 것 — 붙여넣을 내용을 눈으로 확인하고 결정하게 한다.
+    for (state.body, 0..) |line, i| {
+        const row = body_start_row + @as(u32, @intCast(i));
+        try modal_box.fillCells(box, box.inner_x, row, box.inner_cols, .tab_hover_bg, arena, out);
+        try modal_box.text(box, box.inner_x, row, line, .muted_fg, arena, out);
+    }
+
+    // (2) 버튼 행(g.btn_row — 미리보기 줄 수만큼 아래로 내려감) — **포커스된 버튼이 accent**(focus_accent + 대비색 surface_bg 라벨)로 강조되고, 나머지는 은은한 배경
     //     (tab_hover_bg + surface_fg 라벨)이다. ←/→로 포커스가 옮겨가면 강조도 따라 이동한다(어느 버튼이 Enter 대상인지
     //     보임). 둘 다 배경 fill로 버튼처럼(painter order: bg→glyph). 위치/폭은 buttonGeom 단일 출처(클릭 hit-test와 공유).
     //     라벨은 버튼 패딩만큼 우측에서 시작. arena에 만든 라벨 슬라이스는 view 동안(=lower까지) 유효.
     const confirm_focused = state.focused == .confirm;
     if (g.confirm_fit > 0) {
-        try modal_box.fillCells(box, g.confirm_x, btn_content_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
+        try modal_box.fillCells(box, g.confirm_x, g.btn_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_confirm, state.confirm_label });
-        try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), btn_content_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
+        try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
     }
     if (g.cancel_fit > 0) {
-        try modal_box.fillCells(box, g.cancel_x, btn_content_row, g.cancel_fit, if (confirm_focused) .tab_hover_bg else .focus_accent, arena, out);
+        try modal_box.fillCells(box, g.cancel_x, g.btn_row, g.cancel_fit, if (confirm_focused) .tab_hover_bg else .focus_accent, arena, out);
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_cancel, state.cancel_label });
-        try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), btn_content_row, t, if (confirm_focused) .surface_fg else .surface_bg, arena, out);
+        try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (confirm_focused) .surface_fg else .surface_bg, arena, out);
     }
 }
 
 const btn_pad: u32 = 1; // 버튼 라벨 좌우 패딩(배경이 라벨을 감싸 버튼처럼)
 const btn_gap: u32 = 2; // 두 버튼 사이 간격(칸)
-const btn_content_row: u32 = 2; // 콘텐츠 행: 0=메시지, 1=빈줄, 2=버튼
+const body_start_row: u32 = 2; // 본문 미리보기 시작 행: 0=메시지, 1=빈줄, 2~=본문
 
 /// 버튼 행 기하 — view(그리기)와 buttonAtPoint(클릭 hit-test)가 공유하는 **단일 레이아웃**(chrome 계약 §5.4의
 /// view↔hitTest 단일 모델). 박스·각 버튼 x·fit-clamp된 폭(칸; 0이면 너무 좁아 생략)을 돌려준다. null=안 열림/생략 박스.
 const ButtonGeom = struct {
     box: modal_box.Box,
+    btn_row: u32, // 버튼 콘텐츠 행 — 미리보기(body) 줄 수만큼 아래로 내려간다(view↔hitTest 공유)
     confirm_x: i32,
     confirm_fit: u32,
     cancel_x: i32,
@@ -156,9 +171,13 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     const default_btn_cols = confirm_cols + 2 * btn_pad;
     const cancel_btn_cols = cancel_cols + 2 * btn_pad;
     const btn_row_cols = default_btn_cols + btn_gap + cancel_btn_cols;
-    const content_cols = @max(overlay_input.displayCols(state.message), btn_row_cols);
-    // 콘텐츠 3행: 0=메시지, 1=빈줄, 2=버튼. modal_box가 사방 여백을 더해 패널처럼.
-    const box = modal_box.layout(content_cols, 3, p, tk) orelse return null;
+    var content_cols = @max(overlay_input.displayCols(state.message), btn_row_cols);
+    for (state.body) |line| content_cols = @max(content_cols, overlay_input.displayCols(line)); // 미리보기 줄도 폭에 반영
+    // 콘텐츠 행: 미리보기 없으면 3행(0=메시지·1=빈줄·2=버튼); 있으면 0=메시지·1=빈줄·[2..2+n)=본문·2+n=빈줄·3+n=버튼.
+    const n: u32 = @intCast(state.body.len);
+    const content_rows: u32 = if (n == 0) 3 else 4 + n;
+    const btn_row: u32 = if (n == 0) body_start_row else body_start_row + n + 1; // 본문 뒤 빈 줄 다음
+    const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     const group_x = modal_box.centerX(box, btn_row_cols);
     // 버튼이 박스 안쪽 우측 끝을 넘으면(좁은 창/긴 라벨) fill이 rasterize bbox를 패널 밖으로 키운다 → 폭을 clamp하고
     // 0이면(완전히 밖) 호출자가 버튼을 생략(그땐 키보드 Esc/Y/N). 정상 창은 무변화. inner=[inner_x, inner_x+inner_cols×cw).
@@ -166,6 +185,7 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     const cancel_x = group_x + @as(i32, @intCast((default_btn_cols + btn_gap) * box.cw));
     return .{
         .box = box,
+        .btn_row = btn_row,
         .confirm_x = group_x,
         .confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right),
         .cancel_x = cancel_x,
@@ -190,7 +210,7 @@ pub fn buttonAtPoint(state: *const State, p: props.ChromeProps, tk: *const token
     // 패널 밖 → 취소(바깥 클릭 dismiss).
     if (x_px < fx or x_px >= fx + @as(f64, @floatFromInt(b.w)) or y_px < fy or y_px >= fy + @as(f64, @floatFromInt(b.h))) return .cancelled;
     // 버튼 행 y 범위 안에서 각 버튼 x 범위(fit 폭) 검사.
-    const ry = @as(f64, @floatFromInt(modal_box.rowY(g.box, btn_content_row)));
+    const ry = @as(f64, @floatFromInt(modal_box.rowY(g.box, g.btn_row)));
     const cw_f = @as(f64, @floatFromInt(g.box.cw));
     if (y_px >= ry and y_px < ry + @as(f64, @floatFromInt(g.box.ch))) {
         const cfx = @as(f64, @floatFromInt(g.confirm_x));
@@ -335,6 +355,69 @@ test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad)+accent 기본 
     try std.testing.expect(saw_msg and saw_confirm and saw_cancel); // 메시지 + [Y]/[N] 버튼 라벨
     // 박스는 터미널 영역(사이드바 오른쪽) 안. 기하 엣지케이스는 modal_box.zig 테스트가 단일 출처로 커버.
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
+}
+
+test "confirm view: body(미리보기)가 있으면 메시지·본문·버튼 순으로 그리고 버튼이 본문 아래로 내려간다" {
+    // 이 테스트가 증명하는 것: 붙여넣기 미리보기(body 줄들)가 메시지와 버튼 사이에 그려지고(각 줄 배경 fill +
+    // muted 텍스트), 버튼 행이 본문 줄 수만큼 아래로 내려가며(btn_row 동적), 클릭 hit-test도 같은 위치를 따라간다
+    // (view↔hitTest 단일 레이아웃). body가 없으면 기존 3행 레이아웃 그대로.
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var s = State{};
+    // 미리보기 없음(기준) — 박스 높이.
+    var out0: std.ArrayList(draw.Op) = .empty;
+    s.show("붙여넣을까요?", .{ .confirm = "붙여넣기", .cancel = "취소" });
+    try view(&s, p, &tk, arena, &out0);
+    const h0 = out0.items[0].quad.rect.h;
+
+    // 미리보기 2줄 주입 후.
+    var out1: std.ArrayList(draw.Op) = .empty;
+    const body = [_][]const u8{ "echo hi", "rm -rf ~/important" };
+    s.body = &body;
+    try view(&s, p, &tk, arena, &out1);
+
+    // 박스가 미리보기(2줄) + 빈 줄 1개 만큼 더 커진다(정확히 3행 × ch).
+    try std.testing.expectEqual(h0 + 3 * @as(u32, 16), out1.items[0].quad.rect.h);
+
+    // 본문 텍스트 두 줄이 muted로 그려지고, 각 줄에 배경 fill이 깔린다.
+    var saw_line0 = false;
+    var saw_line1 = false;
+    var body_fills: usize = 0;
+    var confirm_label_y: i32 = -1;
+    var line0_y: i32 = -1;
+    for (out1.items) |op| switch (op) {
+        .text => |t| {
+            const txt = t.runs[0].text;
+            if (std.mem.eql(u8, txt, "echo hi")) {
+                saw_line0 = true;
+                line0_y = t.origin.y;
+            }
+            if (std.mem.eql(u8, txt, "rm -rf ~/important")) saw_line1 = true;
+            if (std.mem.eql(u8, txt, "[Y] 붙여넣기")) confirm_label_y = t.origin.y;
+        },
+        .fill => |f| if (f.role == .tab_hover_bg) {
+            body_fills += 1;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_line0 and saw_line1); // 미리보기 두 줄
+    try std.testing.expect(body_fills >= 2); // 본문 줄 배경 fill(버튼 fill과 별개로 최소 2)
+    try std.testing.expect(confirm_label_y > line0_y); // 버튼이 미리보기 아래
+
+    // 클릭 hit-test도 내려간 버튼 위치를 따라간다 — 확인 버튼 fill 중심 클릭이 confirmed.
+    var confirm_rect: ?draw.Rect = null;
+    for (out1.items) |op| if (op == .fill and op.fill.role == .focus_accent) {
+        confirm_rect = op.fill.rect;
+    };
+    const cr = confirm_rect.?;
+    const cx = @as(f64, @floatFromInt(cr.x)) + @as(f64, @floatFromInt(cr.w)) / 2.0;
+    const cy = @as(f64, @floatFromInt(cr.y)) + @as(f64, @floatFromInt(cr.h)) / 2.0;
+    try std.testing.expectEqual(@as(?Action, .confirmed), buttonAtPoint(&s, p, &tk, cx, cy));
 }
 
 test "confirm view: 포커스가 accent 강조를 이동시킨다(←/→ 선택 가시화)" {

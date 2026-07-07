@@ -17655,9 +17655,15 @@ pub const AppSession = struct {
         // 유효할 때(deinit 초입) 레코더 포인터를 끊고 해제한다. capped면 부분 trace라도 앞부분은 재생 가능.
         if (self.trace_recorder) |*rec| {
             if (self.trace_path) |path| {
-                app.artifact_io.writeText(self.io, path, rec.text()) catch |e| {
+                const trace_text = rec.text();
+                app.artifact_io.writeText(self.io, path, trace_text) catch |e| {
                     if (diag_gate.maruDebugEnabled()) std.debug.print("[maru trace] write failed path={s}: {s}\n", .{ path, @errorName(e) });
                 };
+                // 라이브 trace는 local-only지만, git fixture로 승격하려면 sanitize가 선결이다. 민감 할당(TOKEN/SECRET/…
+                // =값)이 잡히면 한 번 알린다(deny-by-default 안내 — project-rules.md §redaction, redact.guardFixture가 가드).
+                if (maru.redact.hasSensitiveAssignment(trace_text)) {
+                    std.debug.print("[maru trace] '{s}'에 민감 할당이 있습니다 — git fixture 승격 전 sanitize 필요(project-rules.md §민감정보 redaction)\n", .{path});
+                }
             }
             self.runtime.trace_recorder = null;
             rec.deinit();

@@ -26,6 +26,8 @@
 
 ## 3. 목표 구조
 
+이 절은 **최종형(target)**이다. M2b 완료 시점의 **실제 코드는 이 절반**이다(Surface·core는 아직 `Term`에 inline, registry는 `LivePtySession`만 소유, `SurfaceRuntime`은 per-window, `AppRuntime` 부재, `WindowGraph`/registry generic은 production 미배선) — M3 시작점의 정확한 코드 현실과 그 위 분해는 **§8A.0·§8A**를 단일 출처로 둔다.
+
 ```text
 Identity/scope foundation (M0)
   SurfaceIdAllocator
@@ -84,7 +86,7 @@ move_all_workspaces_to_window:N
 
 quick terminal은 이동 단위·대상에서 제외한다 — 싱글톤 dropdown이라 detach/reattach·merge·split drop의 출발지도 도착지도 아니다. `merge_all_windows`/`merge_window_into_active_window`도 quick window를 포함하지 않는다. quick 안의 surface를 일반 창으로 빼내는 별도 UX가 필요하면 추후 명시 결정한다.
 
-사이드바 그룹과의 상호작용(§1 결정의 상세): workspace card 이동은 사이드바 그룹 모델([sidebar-groups.md](sidebar-groups.md))과 직접 상호작용한다 — 소속이 탭 순서 파생이라 창을 떠나는 순간 소속·핀 리전이 바뀐다. v1 케이스: (a) 그룹 멤버 이동 = 그룹 암묵 이탈 + source 창 재정규화, (b) `group_start` 마커 이동 = source에서 마커 승계(그룹 잔존, 마지막 멤버면 소멸) + 이동분은 target 최상위 — closeTab/removeFromGroup과 동형(`inheritGroupMarker`), (c) 전역 `pinned` workspace 이동 = target 창의 핀 리전 정책("고정 요소 흡수 불가" 포함)을 그대로 따름, (d) `local_pinned`/`top_level`은 이탈 시 의미를 잃으므로 리셋. **이 정규화 케이스 (a)~(d)는 실제 그룹 workspace를 창 간 이동하는 command 경로(M3)에서 구현·red test한다** — M1 `WindowGraph` 골격은 group-agnostic이라 그룹 필드(`group_start`·`top_level`·`local_pinned`·`pinned`)를 pass-through로 **보존만** 하고 정규화하지 않는다. 정규화 권위는 L4 `app_session`의 `inheritGroupMarker`/`normalizePinnedFromGroups`이고, 그 L2 리프트 여부(순수 함수로 뽑아 M1 골격 위에 얹을지)는 M3이 결정한다 — L2에 정규화를 조기 재구현하면 L4와 발산하므로 하지 않는다(§8 M1). 같은 sidebar 안 드래그에는 이미 Cmd=그룹 중첩 제스처가 있으므로, cross-window 드래그가 이 제스처와 충돌하지 않게 M5에서 modifier 의미를 재확인한다.
+사이드바 그룹과의 상호작용(§1 결정의 상세): workspace card 이동은 사이드바 그룹 모델([sidebar-groups.md](sidebar-groups.md))과 직접 상호작용한다 — 소속이 탭 순서 파생이라 창을 떠나는 순간 소속·핀 리전이 바뀐다. v1 케이스: (a) 그룹 멤버 이동 = 그룹 암묵 이탈 + source 창 재정규화, (b) `group_start` 마커 이동 = source에서 마커 승계(그룹 잔존, 마지막 멤버면 소멸) + 이동분은 target 최상위 — closeTab/removeFromGroup과 동형(`inheritGroupMarker`), (c) 전역 `pinned` workspace 이동 = target 창의 핀 리전 정책("고정 요소 흡수 불가" 포함)을 그대로 따름, (d) `local_pinned`/`top_level`은 이탈 시 의미를 잃으므로 리셋. **이 정규화 케이스 (a)~(d)는 실제 그룹 workspace를 창 간 이동하는 command 경로(M3)에서 구현·red test한다** — M1 `WindowGraph` 골격은 group-agnostic이라 그룹 필드(`group_start`·`top_level`·`local_pinned`·`pinned`)를 pass-through로 **보존만** 하고 정규화하지 않는다. 정규화 권위는 L4 `app_session`의 `inheritGroupMarker`/`normalizePinnedFromGroups`이고, 그 L2 리프트 여부(순수 함수로 뽑아 M1 골격 위에 얹을지)는 **§8A.4에서 확정: L2로 리프트한다**(`inheritGroupMarker`·`normalizePinnedFromGroups`·`effectiveDepthAt`를 순수 함수로 `src/session`에 올리고 L4 `closeTab`/`removeFromGroup`이 재사용, drag-preview 게이트는 L4 유지) — M3c 슬라이스가 (a)~(d) red test와 함께 실현한다((d)의 `top_level` 뉘앙스·pinned-멤버 unpin은 §8A.4 참조). 같은 sidebar 안 드래그에는 이미 Cmd=그룹 중첩 제스처가 있으므로, cross-window 드래그가 이 제스처와 충돌하지 않게 M5에서 modifier 의미를 재확인한다.
 
 ## 5. Native 이벤트 사용 범위
 
@@ -115,7 +117,7 @@ Zig/AppRuntime이 맡는 것:
 
 **trust boundary 교차 시 surface-scope cap 재평가(적대적 리뷰 반영)**: surface-scope cap이 이동 중 generation 불변으로 유지되면, 저신뢰 창에서 (capability fd 상속 등으로, [control-plane.md] §8.5) 새어나간 `read-output`/`write` nonce가 그 surface를 "secure" 창이나 main 작업 창으로 detach/merge한 뒤에도 살아 있다. 따라서 surface가 **trust boundary를 넘으면**(예: quick↔일반, 신뢰 등급이 다른 창) surface-scope cap을 re-mint/revoke한다. 최소한, 이동이 이전에 새어나간 capability를 **격리하지 못한다**는 점을 명시한다.
 
-**이동 이벤트는 원자 트랜잭션**: cross-window move는 `WindowGraph` 변경과 **영향받은 모든 구독의 scope 재평가를 같은 main-thread 트랜잭션 안에서 동기 수행**한다(lazy 재평가면 이동 직후 옛-창 구독자가 떠난 surface 이벤트를 계속 받거나 새 창 surface를 잠깐 엿본다). 트랜잭션 경계를 넘는 이벤트가 stale scope로 새지 않게 한다. 구독 유지/해제/`removed` 이벤트 중 무엇인지는 [control-plane.md] §13 열린 질문으로, M3 착수 전 확정한다.
+**이동 이벤트는 원자 트랜잭션**: cross-window move는 `WindowGraph` 변경과 **영향받은 모든 구독의 scope 재평가를 같은 main-thread 트랜잭션 안에서 동기 수행**한다(lazy 재평가면 이동 직후 옛-창 구독자가 떠난 surface 이벤트를 계속 받거나 새 창 surface를 잠깐 엿본다). 트랜잭션 경계를 넘는 이벤트가 stale scope로 새지 않게 한다. 구독 유지/해제/`removed` 이벤트 중 무엇인지는 [control-plane.md] §13 열린 질문이었고 **§8A.3에서 확정**: window-scope 구독은 **유지**하고 옮겨진 surface에 대해 `session.movedOut`/`movedIn`(membership-changed) notification을 방출한다(`removed`/`closed` 아님 — surface는 살아 있음). `metadata:self`는 surface_id 불변이라 무영향(응답 메타 window 필드만 갱신).
 
 `window_token`은 bearer token이 아니며 현재 위치를 설명하는 메타데이터다. control-plane selector는 최소 `{instance_nonce, surface_id, generation}`을 핵심으로 하고, 응답 메타데이터에 현재 `{window_id, window_token, window_kind}`를 싣는다.
 
@@ -123,7 +125,7 @@ Zig/AppRuntime이 맡는 것:
 
 restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이다. 이 절은 그 문서에 중복 정의하지 않고, 이동성 모델이 요구하는 변경만 적는다(상세 저장/미저장 목록은 거기서 갱신).
 
-- 저장 모델의 **권위 출처**를 바꾼다. 현재 `saveWorkspace`/`restoreWorkspace`는 이미 멀티 창을 창별 per-session `Model` 블록으로 저장·복원한다(첫 블록 primary + 나머지 블록마다 새 창) — 즉 멀티 창 저장은 stale 미구현이 아니라 현재형이다. M1/M2가 배치 권위를 per-session `Model` 밖 `WindowGraph`/`AppRuntime`으로 올리면, 직렬화 출처도 창별 `Model` 블록에서 `WindowGraph`(windows, active window, workspace order, pane tree, surface refs)로 옮겨진다. **이 전환은 M3의 종료 gate다**(§8): M3부터 `WindowGraph`가 배치 권위가 되므로, 그 권위와 per-session 직렬화(active window·`window_kind`·graph 메타)의 정합을 M3 안에서 닫아 이동 결과가 재시작 후에도 살아남게 한다.
+- 저장 모델의 **권위 출처**를 바꾼다. 현재 `saveWorkspace`/`restoreWorkspace`는 이미 멀티 창을 창별 per-session `Model` 블록(`maru.workspace.v1`)으로 저장·복원한다(첫 블록 primary + 나머지 블록마다 새 창) — 즉 멀티 창 저장은 stale 미구현이 아니라 현재형이다. **정정(drift)**: M1/M2는 배치 권위를 아직 올리지 **않았다** — `WindowGraph`(M1)·registry generic(M2a)은 순수 L2 골격 + 헤드리스 테스트만이고 production 라이브 트리(per-window `AppSession`)가 여전히 배치 권위다. **§8A.6 설계 결정**: `WindowGraph`는 **라이브 미러가 아니라** (1) 순수 move 알고리즘/테스트 오라클 + (2) 직렬화 포맷이고, 라이브 배치 권위는 per-window 트리로 유지하되 `AppRuntime`가 저장 시 전 창을 하나의 `WindowGraph`-형태 v2 문서(windows, active window, `window_id`/`window_kind`, workspace order, pane tree, surface refs)로 조립한다. **이 전환은 M3(슬라이스 M3e)의 종료 gate다**(§8·§8A.8): 스키마 `.v1`→`.v2`(구조 변경, 옛 파일=조용한 기본-창 폴백), 이동 결과가 재시작 후에도 살아남게 한다.
 - live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 계속 저장하지 않는다(기존 정책 유지).
 - 복원 시 live surface는 새 generation으로 생성된다. agent session resume처럼 별도 영속 상관키가 있는 항목만 재연결을 시도한다.
 - 하위 호환은 없으므로 옛 저장 파일은 workspace-restore.md의 "조용한 기본 창 폴백"을 따른다.
@@ -146,7 +148,7 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
      - **teardown 계약**: **coordinator(`app_session`)가 `live_pty.closeAndDetach(&runtime)` 선행 → `registry.remove(surface_id)`**(= `Rt.deinit`=reader join + 슬롯 해제) 순서. registry는 L2 generic이라 runtime/detach를 모른 채 `deinit`만 부른다("coordinator closeAndDetach 선행" 옵션 채택). init-실패 errdefer는 `removeUninitialized`(uninit 슬롯을 deinit 없이 해제 — `create`/errdefer 계약의 짝)로 닫는다.
      - **generation**: `create(id, 0)`으로 0에서 시작하고 **보존만** 한다(M2a와 동일). generation++는 **crash-respawn 연산과 함께** 도입하는데 그 연산 자체가 아직 없어(현재 exit는 reap→close로 Term teardown, 같은 surface_id 재생성 경로 없음) **미도입/후속으로 결정**한다 — respawn 기능이 생기면 그때 old entry remove + `create(id, gen+1)`로 새 슬롯을 만든다(surface_id 유지, generation 증가). §8 M0a의 "M2b가 generation 증가 정책을 정한다"는 이로써 닫힌다(정책=respawn 시 증가, 현재 respawn 없음→불변).
      - **비소유 close-index(`app/live_pty_registry.zig`)**: 여전히 별개(smoke/test 전용). M2b는 새 소유 registry만 배선하고 옛 비소유 index 통합/재배선은 손대지 않았다(범위 밖 — control_* 병렬 작업과 충돌 회피).
-5. **M3 command 기반 이동**: palette/menu action으로 surface/pane/workspace/window_all 이동. Swift는 window create/focus만 수행. 종료 gate에 workspace restore의 `WindowGraph` 포맷 확장(§7)을 포함한다.
+5. **M3 command 기반 이동**: palette/menu action으로 surface/pane/workspace/window_all 이동. Swift는 window create/focus만 수행. 종료 gate에 workspace restore의 `WindowGraph` 포맷 확장(§7)을 포함한다. **이 단계는 대수술이라 한 슬라이스로 하지 않는다 — §8A가 M3a(Surface 소유권 lift)→M3b(AppRuntime+앱-전역 라우팅)→M3c(그룹 정규화 L2 리프트, 병렬)→M3d(command 이동)→M3e(직렬화 v2)로 분해하고, 여섯 어려운 문제의 구체 해법을 못박는다. 첫 슬라이스=M3a.**
 6. **M4 same-window drag 재연결**: 기존 drag 경로가 WindowGraph move API를 쓰게 정리.
 7. **M5 cross-window native drag**: AppKit drag session/destination을 붙이고 Zig drop target API에 연결.
 8. **M6 web surface reparent**: WKWebView를 destroy/recreate하지 않고 target window/container로 reparent. focus/IME/z-order artifact로 검증.
@@ -160,6 +162,127 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 - **Workspace restore 영향 있음**: 새 graph 포맷을 직접 저장하고, 옛 파일은 조용한 기본 창 폴백으로 둔다. 구버전 reader를 추가하지 않는다.
 
 각 단계는 [세션 컨트롤 플레인](control-plane.md) §11의 Phase 시작 gate와 같은 방식으로, 시작 전에 사용자에게 scope·파일 후보·권한 변화·검증 gate를 설명하고 직전 단계 regression gate를 재실행한다.
+
+## 8A. M3 구체 설계 (대수술 — Surface 소유권 이동 + 하위 슬라이스 분해)
+
+§8의 5번 "M3 command 기반 이동"은 한 슬라이스로 하기엔 너무 크다(대수술). 이 절은 코드 현실(drift gate)에 근거해 M3을 **관찰 가능한 한 디딤돌씩** M3a~M3e로 분해하고, 여섯 어려운 문제의 **구체 해법**(추상론 말고 실제 코드 구조)을 못박는다. 착수 전 각 슬라이스는 §8·[control-plane.md] §11의 drift gate와 직전 슬라이스 regression gate를 재실행한다.
+
+### 8A.0 M2b 후 코드 현실 (drift gate 정정 — §3·§8의 M3 시작점)
+
+§3 목표 구조는 최종형이고, M2b 완료 시점(2026-07)의 **실제 코드**는 그 절반이다. M3 설계는 아래 현실에서 출발한다(코드 재확인 완료):
+
+- **Surface는 아직 `Term`에 inline value로 남아 있다.** `session_model.Term`(`src/session/session_model.zig:35`)이 `surface: Surface`를 **값**으로 품고, `Surface`(`src/session/surface.zig:26`)가 `core: TerminalCore` + `core_mutex: std.Io.Mutex`를 **값**으로 든다. `&surface.core`/`&surface.core_mutex`의 주소 안정성은 **오직 `Term`이 heap-pin(`*Term` in `ArrayList(*Term)`)이라서** 성립한다. 즉 §3이 말한 "registry가 TerminalCore를 소유"는 **아직 실현되지 않았다** — registry는 M2b에서 `LivePtySession`만 소유로 올렸다.
+- **`LiveSurfaceRegistry`는 `LivePtySession`만 인스턴스화·소유한다.** `app_live_registry: LiveSurfaceRegistry(app.LivePtySession)`(app_session.zig:1130, 앱 전역 모듈-로컬 `var`, `smp_allocator`), Term은 `rt.live_pty: *LivePtySession`로 그 슬롯을 **참조만** 한다(M2b). Surface(=core)는 미포함.
+- **`SurfaceRuntime`(입력/resize/명령 라우팅)은 per-window다.** `AppSession.runtime: app.SurfaceRuntime`(app_session.zig:1219, 창마다 하나). 라우팅 표 `Link{surface_id, *Surface, pty_id, pty_io}`가 창별로 분리돼 있다. 앱 전역 라우팅 owner는 **없다**.
+- **`AppRuntime`은 아직 없다.** §3이 "registry와 graph를 함께 갱신하는 단일 정책 소유자"라 부른 것은 현재 app_session.zig의 모듈-로컬 `var app_live_registry`/`var app_surface_ids` + per-window `runtime`으로 흩어져 있다.
+- **`WindowGraph`(M1)·`LiveSurfaceRegistry` generic(M2a)은 production에 배선되지 않았다.** 순수 L2 골격 + 헤드리스 테스트만 존재하고, 라이브 배치 권위는 여전히 per-window `AppSession` 트리(`SplitTree(*Pane)` + `tabs: []*Tab`)다. 따라서 §7이 말한 "M1/M2가 배치 권위를 WindowGraph로 올림"은 **아직 안 일어났다** — M3이 그 배선을 한다.
+- **reader의 교차 바인딩(불변식의 심장)**: `attachSurface`(live_pty.zig:209)가 `reader.setProcessing(&surface.core, &surface.core_mutex, io)`로 **Term-inline `&surface.core`**와 **registry-슬롯 `&live_pty.reader`**를 함께 잡는다. teardown은 `closeAndDetach`(라우팅 detach + reader join) → `live_registry.remove`(deinit=join) → `surface.deinit` 순서를 강제한다(destroyTerm:3573, deinit 2-pass:17698/17724, reap:14730 — 세 곳 동기 유지 필요).
+
+이 현실에서 **cross-window 이동이 아직 불가능한 이유**는 명확하다: surface(core)가 Term에 갇혀 있고 reader가 `&term.surface.core`를 잡고 있어, 다른 창으로 옮기려면 (구현 A) Surface를 registry로 올려 주소를 창 밖에 고정하거나 (구현 C) heap-pin된 `*Term` 자체를 창 간 재부모화해야 한다. 8A.1이 이 선택을 다룬다.
+
+### 8A.1 Surface/TerminalCore 소유권 이동 (문제 1 — M3 대수술의 핵심)
+
+**목표**: cross-window 이동 중에도 `&surface.core`/`&surface.core_mutex`(reader 바인딩)·`Link.surface`(라우팅)·`surface_ptrs[]→app_window.tabs`(렌더 활성 표면)가 가리키는 주소가 안정해야 한다. M2b가 `live_pty`에 쓴 패턴(값→포인터 + heap-pin 슬롯)을 Surface에 어떻게 적용하는가.
+
+두 가지 구조가 가능하다. **채택(A)**과 **대안(C)**을 근거와 함께 제시한다([[document-basis-and-decision]]).
+
+**옵션 A — Surface를 registry로 올려 `LivePtySession`과 **번들**로 소유(채택).** registry 인스턴스화를 `LiveSurfaceRegistry(LivePtySession)` → `LiveSurfaceRegistry(LiveSurface)`로 바꾼다. `LiveSurface`는 한 surface의 라이브 소유 번들이다:
+
+```text
+LiveSurface = struct {
+    surface: Surface,           // core + core_mutex + 메타(현 Term-inline을 이관)
+    live_pty: LivePtySession,   // M2b가 이미 registry로 올린 런타임(inline로 흡수)
+    internal_allocator,         // 이 번들 내부(core·session·queue·owned strings)를 만든 창 allocator
+    fn deinit: live_pty.deinit()(reader join) → surface.deinit() 순서
+}
+```
+
+- **근거**: (1) §3 목표 구조가 문자 그대로 "registry: surface_id → terminal runtime(=PTY reader/pump·**TerminalCore**·…)"라 A가 설계 의도다. (2) **M2a의 `FakeRuntime` 테스트가 이미 이 번들을 모델한다** — `pty_id`(LivePtySession identity) + `scrollback`(TerminalCore 상태)을 한 번들로 흉내내며 "M2 registry가 그 번들을 소유"라고 주석에 못박았다(live_surface_registry.zig:141-169). 즉 A는 이미 red 테스트 스캐폴드가 있다. (3) **web surface(Phase 4/M6)가 같은 registry에 번들로 합류**한다 — `LiveSurface`가 terminal 번들이면 web 번들(WKWebView handle + panel state)도 같은 registry 슬롯 모델로 통합돼 "surface = registry-owned" 추상이 균일해진다. (4) 이동이 **런타임을 전혀 안 건드린다** — registry는 surface_id로 keyed라 배치만 재-포인트하면 되고, 이게 M2a 테스트가 단언하는 불변식(재시작 0회·동일 포인터)이다.
+- **Term의 변화(churn)**: `Term.surface: Surface`(값) → `Term.surface: *Surface`(번들 슬롯 참조, borrowed). `Term.rt.live_pty`는 이미 `*LivePtySession`이라 그대로 번들의 `&slot.live_pty`를 가리킨다. **두 포인터가 한 슬롯을 가리킨다**(surface_id 하나 = 번들 하나). `term.surface.core` 등 **읽기 접근(≈83 `term.surface` + 59 `.surface.core` 사이트)은 Zig auto-deref로 그대로 유효**하다(M2b의 `live_pty.X` auto-deref 선례와 동일). 진짜 churn은 **주소 취득 `&term.surface`(30 사이트)**를 `term.surface`(이미 포인터)로 **`&` 제거**하는 것 + teardown 재배선이다.
+- **주소 안정성 보존**: reader의 `&surface.core`는 이제 `&slot.surface.core`(registry 슬롯) — `&live_pty.reader`와 **똑같은 heap-pin 메커니즘**(registry가 `allocator.create(LiveSurface)`로 슬롯을 개별 고정, entries realloc는 `*LiveSurface` 포인터만 옮김)으로 안정하다. M2a "주소 안정성" 테스트가 이미 이 불변식을 증명한다.
+- **createTerm 재배선**: `registry.create(id)` → `*LiveSurface` 슬롯 확보 → 슬롯의 `surface`·`live_pty`를 **제자리 init**(현 createTerm의 `Surface.init` + `live_pty.init`을 슬롯 필드에 대고) → `term.surface = &slot.surface; term.rt.live_pty = &slot.live_pty`. errdefer는 M2b의 `remove`/`removeUninitialized` 분기를 번들 단위로 확장.
+- **teardown 재배선**: `closeAndDetach(&runtime)`(라우팅 detach) → `registry.remove(id)`가 이제 번들 deinit(=`live_pty.deinit` reader join → `surface.deinit`)을 한 번에. 현재 destroyTerm이 `term.surface.custom_name`·git 캐시를 창 allocator로 free하던 것은, **owned string 해제를 번들 `internal_allocator`로 이관**(surface에 allocator 참조를 실어 deinit에서 해제)하거나 remove 직전에 free한다 — "Surface.deinit엔 allocator가 없다"는 현 제약을 번들이 흡수한다. 세 teardown 사본(destroyTerm·deinit 2-pass·reap)을 동기 갱신.
+- **allocator 분리**: registry bookkeeping(entries + 각 `LiveSurface` 슬롯)은 앱 전역 `smp_allocator`, 번들 **내부**(core·session·queue·owned strings)는 그 번들을 만든 창 allocator — **M2b의 분리를 그대로 확장**(프로덕션은 창도 smp라 사실상 동일, 테스트만 분리). cross-window 이동은 내부 allocator를 안 바꾼다(번들이 자기 allocator를 들고 다니므로 deinit이 창을 옮겨도 균형).
+
+**옵션 C — Surface는 Term에 두고 heap-pin `*Term`을 창 간 재부모화(대안, 미채택).** `Term`이 이미 heap-pin이라, cross-window 이동을 "Term을 파괴/재생성"이 아니라 "`*Term` 포인터를 창 A 트리에서 떼어 창 B 트리에 붙이기"로 하면 주소가 안 바뀌어 reader 바인딩이 그대로 유효하다. **장점**: Surface 값→포인터 churn·30-사이트 `&` 제거·번들 타입이 전부 불필요(훨씬 적은 churn). **단점(미채택 사유)**: (1) web surface로 **일반화 안 됨** — web surface는 "Surface를 든 Term"이 아니라 registry-owned handle이라, A의 번들 모델이 terminal/web을 통합하는 반면 C는 terminal 전용 경로가 된다(Phase 4/M6에서 별도 메커니즘 필요). (2) **소유와 배치가 Term에 계속 엉킨다** — §3의 분리(WindowGraph=배치, registry=소유)에 어긋난다. (3) Term의 창-specific 상태(git 캐시는 특정 cwd 기준, `rt.pump`는 소스 창 runtime 바인딩)를 함께 옮겨 per-move fixup이 오히려 늘 수 있다. **결론**: churn은 A가 크지만 A를 **전용 no-behavior-change 슬라이스(M3a)로 격리**하면 M2b와 동형의 디딤돌이 되고, 장기 구조(web 통합·소유/배치 분리)가 A로만 닫힌다. **A 채택, C는 A의 리스크가 실측에서 감당 불가로 판명될 때의 후퇴 경로로 문서화**.
+
+### 8A.2 라우팅 앱-전역화 + AppRuntime coordinator (문제 1의 배치 층)
+
+cross-window 이동 후 목적지 창의 메인 스레드가 옮겨온 surface에 입력/resize/명령을 라우팅하려면 그 창의 라우팅 표가 링크를 알아야 한다. 현재 `SurfaceRuntime`이 per-window라 두 선택지가 있다:
+
+- **채택: `SurfaceRuntime`을 앱-전역으로 승격**하고 `AppRuntime`(L4 coordinator, `src/app` 또는 `src/platform/macos`)이 **{registry, SurfaceIdAllocator, 앱-전역 SurfaceRuntime}**를 소유한다. 이동은 라우팅을 **전혀 안 건드린다**(링크가 surface_id로 keyed돼 그대로 유효, 목적지 창 메인 스레드가 같은 표를 조회). §3의 "단일 정책 소유자 AppRuntime"을 실체화하는 것이고, 모듈-로컬 `var`(app_live_registry·app_surface_ids)를 AppRuntime 필드로 정식화한다. reader는 interactive 모드에서 core에 **직접** 쓰므로(setProcessing) SurfaceRuntime 승격과 무관하고, per-Term `pump`만 앱-전역 runtime에 바인딩하도록 재배선한다.
+- **대안(미채택): per-window 유지 + 이동 시 링크 마이그레이션**(A의 runtime에서 detach → B의 runtime에 attach + pump 재바인딩). per-move churn이 크고 AppRuntime 설계와 어긋난다.
+
+**레이어**: AppRuntime은 핸들 수명을 직접 들되(L4) 이동 가부·drop target·정규화는 L2 순수 함수를 호출한다(§3 배치 규칙 — 정책과 플랫폼 핸들을 한 god object에 안 섞음).
+
+### 8A.3 이동 이벤트 원자 트랜잭션 + control-plane 구독 재평가 (문제 4, §13 확정)
+
+cross-window move는 AppRuntime가 **한 메인-스레드 트랜잭션**으로 원자 수행한다(§6):
+
+1. **라이브 트리 수술**: 소스 `AppSession` 트리(`SplitTree(*Pane)`·`tabs`)에서 대상(surface/pane/workspace 서브트리)을 떼어 목적지 트리에 붙이고, 양쪽 `surface_ptrs`/`app_window.tabs`/focus/empty-source 정리를 한다. registry·라우팅은 안 건드린다(surface_id 불변).
+2. **그룹 정규화**(workspace 이동일 때 — 8A.4).
+3. **control-plane 구독 scope 재평가**(같은 트랜잭션): `metadata:window` 구독은 **창에 바인딩**(개별 surface가 아니라)이므로 **유지**하고, 옮겨진 surface에 대해 소스-창 구독자에게 `session.movedOut`, 목적지-창 구독자에게 `session.movedIn`(= membership-changed notification)을 방출한다. **`closed`/`removed`가 아니다**(surface는 살아 있음). `metadata:self` 구독은 surface_id가 불변이라 영향 없고 응답 메타의 `{window_id, window_token, window_kind}`만 갱신된다. lazy 재평가면 옛-창 구독자가 떠난 surface 이벤트를 계속 받거나 새 창 surface를 엿보므로, 이 재평가를 **트랜잭션 경계 안에서 동기** 수행한다.
+4. **trust boundary cap 재평가**(8A.5).
+
+**[control-plane.md] §13 열린 질문 확정**: "surface가 구독 window를 떠날 때 구독 유지/해제/removed 중 무엇인가" → **구독 유지 + `session.movedOut`/`movedIn` membership-changed notification**(neither 해제 nor removed). 근거: window-scope 구독은 window에 거는 것이라 surface가 떠나도 구독 자체는 그 window의 남은 surface를 계속 봐야 하고, `removed`는 surface 종료를 뜻해 살아 있는 이동과 의미가 다르며, silent drop은 클라이언트(세션 리스트 UI 등)가 membership 변화를 못 봐 불충분하기 때문이다. 이벤트 어휘: `session.movedOut{surface_id, from_window, to_window}`·`session.movedIn{surface_id, from_window, to_window}`(정확한 이름은 §7 event 스키마에 편입, M3d 착수 시 확정).
+
+### 8A.4 그룹 정규화 §4 (a)~(d)의 L2 리프트 결정 (문제 3)
+
+§4/§8 M1이 "M3이 `inheritGroupMarker`의 L2 리프트 여부를 결정"이라 미룬 것을 **확정**한다. 코드 실측(app_session.zig): `inheritGroupMarker(from)`(5715)은 인접 tab 슬라이스만 읽고/쓰는 **거의 순수** 연산(할당·surface·registry·`sidebar_drag_preview` 미참조)이라 **깔끔히 L2-liftable**. `normalizePinnedFromGroups()`(5310)는 `sidebar_drag_preview` 게이트 + `tabs` + `effectiveDepthAt`만 참조라, `effectiveDepthAt`을 함께 리프트하고 **drag 게이트를 L4 호출 경계에 남기면** L2-liftable.
+
+**결정: L2로 리프트한다.** `inheritGroupMarker`(마커 승계)와 `normalizePinnedFromGroups`(핀 캐시 재동기, + `effectiveDepthAt`)를 `[]WorkspaceMeta`(또는 tab-슬라이스)에 대한 **순수 함수**로 `src/session`에 올리고, `WindowGraph.moveWorkspace`와 command 이동 경로가 이를 호출한다. drag-preview 게이트는 L4 호출부에 유지. L4 `app_session`의 `closeTab`/`removeFromGroupForTab`도 같은 L2 함수를 재사용하도록 재배선(재구현 금지 — [[full-removal-no-legacy-shims]]).
+
+**red test로 §4 케이스 (a)~(d)를 고정**(실측 확인한 뉘앙스 포함):
+- **(a) 그룹 멤버 이동 = 암묵 이탈 + 소스 재정규화**: 소속이 tab-순서 파생이라 소스에서 빼면 재-파생되고, 소스 정리 = `normalizePinnedFromGroups` + `clearStaleLocalPins`(= `removeFromGroupForTab`이 도는 것).
+- **(b) `group_start` 마커 이동 = 소스 마커 승계(그룹 잔존, 마지막 멤버면 소멸) + 이동분은 목적지 최상위**: `inheritGroupMarker`가 `closeTab`(4192)·`removeFromGroupForTab`(5811)과 **동형**으로 공유. `false` 반환 → 마커 free → 그룹 소멸. 목적지 최상위는 leaf-only 가드(마커는 top_level 카드가 될 수 없음)와 정합.
+- **(c) 전역 `pinned` workspace 이동 = 목적지 창의 핀 리전 정책("고정 요소 흡수 불가")**: `pinRegionBounds`·suffix-exclusion·`clampMoveToGroup`이 코드화한 규칙을 목적지에 적용.
+- **(d) `local_pinned`/`top_level`은 이탈 시 리셋** — **뉘앙스**: `local_pinned`는 `clearStaleLocalPins`(5 전이점)로 명시 리셋되지만, `top_level`은 현 L4가 **플래그를 지우지 않고 카드를 핀-리전 최상위로 재배치**해 top-level을 위치-암묵으로 만든다(`reestablishTopLevelBoundaryOnMove`는 follower의 경계만 set). 또 §12.7 보강4로 **pinned 멤버는 이탈 시 unpin**된다. **M3의 L2 리프트는 (d)를 신중히 결정**: cross-window 이동은 목적지에 소스 위치 맥락이 없으므로, 이동분을 목적지 최상위(top-level)로 넣고 `local_pinned:=false`·`top_level`은 재배치-암묵(또는 명시 false — 슬라이스 착수 시 red test로 확정)으로 정규화한다.
+
+### 8A.5 trust boundary cap 재평가 (문제 5)
+
+surface-scope cap(`read-output`/`write`)이 이동 중 generation 불변으로 유지되면 저신뢰 창에서 새어나간 nonce가 고신뢰 창으로 따라간다(§6·[control-plane.md] §8.5). **정직한 v1 범위**: v1의 유일한 trust boundary는 quick↔normal(`window_kind`)인데 **quick은 이동 단위·대상에서 제외**(§4)라 **지원되는 v1 이동 중 trust boundary를 넘는 경로는 없다**. 따라서 이 문제의 v1 산출물은 **가드 + 훅**이다:
+
+- AppRuntime 이동 트랜잭션(8A.3 4단계)이 `source_window.trust_class`와 `dest_window.trust_class`를 비교한다.
+- 다르면 그 surface의 outstanding `read-output`/`write` cap을 **revoke**(cap 저장소에 `revoked` 표시 — §8.5가 dispatch·chunk 경계·outbound 큐에서 이미 재검증·purge)하고, **re-mint는 안 한다**(fresh grant UX 필요). `metadata:self`는 OS-관측 origin이라 per-request 재증명되므로 생존.
+- v1에선 도달 불가(quick 제외)이므로, **가상 cross-boundary 이동이 revoke를 트리거하는 단위 테스트**로 훅을 고정하되 UX로는 도달하지 않는다. quick→normal 추출이나 web trust-class 같은 미래 이동 단위가 생기면 이 훅이 이미 자리에 있다. "이동이 이전에 새어나간 capability를 격리하지 못한다"는 §6의 명시 한계는 유지.
+
+### 8A.6 직렬화 권위 → WindowGraph 포맷 (문제 2 — M3 종료 gate)
+
+**현실**(실측): 저장 권위는 두 곳이다 — 각 `AppSession` 라이브 트리(내용, `captureWorkspaceWindow`:12882)와 Swift `MaruAppHost.windows` 배열(창 집합·순서·"index 0 = primary"). 포맷 `maru.workspace.v1`(workspace.zig:16)엔 **window_id·window_kind·active-window 마커가 없다**. 파싱 권위는 Zig에 집중(app_host_abi, Swift는 `window ` 경계를 안 나눔). 파싱 실패 = 조용한 기본-창 폴백, 부분 실패 = 비-모달 notice.
+
+**설계 결정**: WindowGraph는 **라이브 미러가 아니다**. 두 역할만 한다 — (1) **순수 move 알고리즘 + 테스트 오라클**(M1, 이미 존재; M3c가 그룹 정규화로 확장), (2) **직렬화 포맷**. 라이브 배치 권위는 per-window 트리로 유지하고(분할 기하·focus·그룹을 든다), AppRuntime가 저장 시 전 창을 하나의 WindowGraph-형태 문서로 조립한다. 근거: 매 tick 라이브 그래프를 동기화하는 복잡도를 피하고, `window_graph.zig` 헤더가 명시한 "split 기하는 session_model.PaneTree가 계속 소유, AppRuntime가 라이브 모델 쪽에 유지"와 정합.
+
+**M3e의 구체 델타**:
+- 스키마 **`maru.workspace.v1` → `.v2`**(구조 변경 — additive scalar 아님): window당 `window_id`·`window_kind`, 문서 레벨 `active-window` 마커, graph 메타 추가. 옛 파일 = 기존 조용한 기본-창 폴백([[serialization-format-change-migration-fallout.md]] 정신 — 구버전 reader 안 넣음).
+- **capture 출처 이전**: `AppSession.tabs`/Swift `windows` 배열 → AppRuntime가 아는 전 창 뷰. window당 분할 기하 직렬화(session_model)는 재사용.
+- **복원**: v2 문서에서 창을 재조립(현재 primary 재사용 + 창당 새 `AppSession` 경로 유지), Term당 **새 surface_id/generation 0**(현행). surface_ref는 `surface_id`만 들어 정합(복원이 새로 채번).
+- **종료 gate**: 멀티-윈도우 graph round-trip 테스트 + "이동 후 재시작이 배치를 살림"(어느 창에 무엇이 있는지 복원).
+
+### 8A.7 드래그 detach/reattach UX (문제 6 — M4/M5가 M3 이동 API 위에 얹음)
+
+**설계 원칙**: 정책은 Zig(AppRuntime/L2), 운반만 AppKit(§1·§5). 드래그는 **M3d의 command 이동 API를 그대로 소비**한다 — 드래그는 "어느 이동을 호출할지"를 포인터로 고르는 얇은 UX 층일 뿐, 이동 로직을 재구현하지 않는다.
+
+- **시작 affordance**(§4 표, OS 타이틀바 아님): surface tab·pane grip(pane tabbar 좌측)·workspace card. 같은-창 드래그는 기존 Zig hit-test 경로(M4가 WindowGraph move API로 정리), 다른 창/창 밖은 AppKit `NSDraggingSession`(M5).
+- **고스트 피드백**: 드래그 payload(surface/pane/workspace 판정은 Zig)의 floating preview를 AppKit drag image로. hover는 매 frame 대량 snapshot 금지, **target 변경 시에만** highlight 갱신(§9 성능 gate).
+- **drop target 계산**: Zig가 유효성·target(같은/다른 pane tabbar, pane 본문 split drop-zone, sidebar, 창 밖 빈 공간)·의미를 결정하고, AppKit은 좌표 변환·NSWindow 생성/focus·(M6) WKWebView reparent만. drop이 확정되면 AppRuntime의 해당 move 트랜잭션(8A.3) 호출.
+- **modifier 충돌**(§4 마지막 줄): 같은 sidebar 안 Cmd=그룹 중첩 제스처와 cross-window 드래그가 안 충돌하게 M5에서 modifier 의미 재확인(기존 결정 유지).
+- **GUI 손 테스트 슬라이스**: M4(same-window drag 재연결), M5(cross-window native drag). 스크린샷 하니스로 자동화 못 하는 AppKit drag lifecycle은 spike → 수동 artifact → 최소 회귀([control-plane.md] §11 TDD gate).
+
+### 8A.8 M3 하위 슬라이스 분해 (M3a~M3e — 의존·관찰가능·리스크·GUI 손 테스트·종료 gate)
+
+각 슬라이스는 M2b처럼 "한 디딤돌"이다(하나의 관찰 가능한 동작 또는 하나의 불변식). 순서: **M3a → M3b → M3d → M3e**, **M3c는 순수 L2라 병렬/선행 가능**.
+
+| 슬라이스 | 무엇 | 의존 | 관찰가능/불변식 | 리스크 | GUI 손 테스트 | 종료 gate |
+|---|---|---|---|---|---|---|
+| **M3a Surface 소유권 lift** | `LiveSurfaceRegistry(LivePtySession)`→`(LiveSurface 번들)`; `Term.surface` 값→`*Surface`; createTerm/destroyTerm/deinit 2-pass/reap 재배선; 30 `&term.surface`→`term.surface`; owned-string 해제 번들 이관 | M2b(완료) | **사용자 가시 변화 0**(순수 소유 이전). reader가 여전히 안정 `&slot.surface.core` 바인딩; 단일·멀티창 무변경; 스크롤백 보존·재시작 0 | **높음**(reader 불변식·teardown 순서·140-사이트 churn·allocator 페어링) | **예** — 타이핑·⌘D split·⌘T 탭·⌘W 닫기·focus 전환·resize·⌘Q; 크래시/회귀 0, 스크롤백 보존 | 전체 테스트 green + `zig build macos-app` 실행 + `/code-review max` |
+| **M3b AppRuntime + 앱-전역 라우팅** | `SurfaceRuntime` per-window→앱-전역; `AppRuntime`(L4)가 {registry, SurfaceIdAllocator, routing} 소유(모듈-로컬 `var` 정식화); pump 재바인딩 | M3a | **변화 0**. 입력/resize/명령이 surface_id로 한 표를 통해 라우팅; 두 창은 여전히 자기 surface만 참조(격리) | 중(공유 표 aliasing·pump 재바인딩) | **예** — 창 2개서 각 입력/resize/닫기, 격리 확인 | 멀티창 smoke green + `/code-review max` |
+| **M3c 그룹 정규화 L2 리프트 + move 알고리즘** | `inheritGroupMarker`·`normalizePinnedFromGroups`(+`effectiveDepthAt`) L2 순수화; §4 (a)~(d) red test; L4 `closeTab`/`removeFromGroup` 재사용 재배선 | M1(완료) | 순수 모델 정확성(승계·핀-정규화·(d) 뉘앙스). **병렬 가능** | 중(그룹 로직 뉘앙스·(d)·pinned-unpin) | 아니오(순수 L2 테스트) | red→green non-vacuous + boundary green |
+| **M3d command 기반 이동** | AppRuntime move ops(surface/pane/workspace/window_all) = 라이브 트리 수술(registry/routing 무변경); palette/menu action; 원자 트랜잭션(트리+구독 재평가+cap 재평가); 그룹 정규화(M3c) 적용; Swift는 창 create/focus/close만 | M3a·M3b·M3c | **cross-window 이동이 command로 동작**; focus 착지·empty-source 정리·그룹 잔존/소멸 정확 | **높음**(양 트리 수술·control-plane 트랜잭션) | **예** — palette로 창 간 surface/pane/workspace 이동·merge; 소스 창 auto-close; 그룹 승계/소멸 | 이동 통합 테스트 + macos-app 실측 + `/code-review max` |
+| **M3e 직렬화 → WindowGraph 포맷** | `.v1`→`.v2`(window_id·window_kind·active-window); capture 출처 AppRuntime 뷰로; 복원 재조립; 옛 파일 조용한 폴백 | M3d | **이동 결과가 재시작 후 살아남음**; 멀티-윈도우 round-trip | 중(포맷 변경·복원·멀티창) | **예** — 창 간 이동 후 ⌘Q·재실행, 배치(어느 창에 무엇) 복원 확인 | round-trip 테스트 + move-then-restart 실측 |
+
+M3 완료 후 **M4~M6은 §8 그대로**(same-window drag 재연결·cross-window native drag·web reparent)이며, 전부 M3d의 이동 API를 소비한다(8A.7). M4/M5가 문제 6(드래그 UX)의 GUI 손 테스트 슬라이스다.
+
+**첫 슬라이스 권장 = M3a.** 이유: (1) M3의 대수술 핵심(Surface 소유권)이고 나머지(M3b~e)가 전부 그 위에 서므로 **가장 큰 리스크를 가장 먼저 격리**한다. (2) 사용자 가시 변화 0인 순수 소유 이전이라 M2b와 **동형의 안전한 디딤돌**이고, red→green + macos-app 실측으로 reader 불변식을 단독 검증할 수 있다. (3) M2a `FakeRuntime` 번들 테스트가 이미 스캐폴드라 red test 표면이 준비돼 있다. **주의**: M3a는 churn이 커 [[stale-build-before-gpu-deepdive]](풀 재빌드)·[[run-macos-app-before-merge]](머지 전 실행)·[[run-fmt-check-before-push]]를 엄수하고, teardown 3사본 동기·allocator 페어링을 /code-review max로 재확인한다.
 
 ## 9. 검증
 

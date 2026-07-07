@@ -349,7 +349,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - login shell에서 read-output 권한을 줄 UX(일회성 GUI 확인, 짧은 TTL grant, 별도 verified channel). 현재 login wrapper는 fd를 닫는 것으로 실측됐다(§8.5).
 - `sendKeys` 키 표기법(tmux 호환 이름) 세부.
 - `events.subscribe {filter?}` 필터 스키마.
-- surface 이동(이동성 M3+) 이벤트 어휘: window membership 변경 notification과 `metadata:window` 구독자의 scope 재평가 동작(surface가 구독 window를 떠날 때 구독 유지/해제/removed 이벤트 중 무엇인지) — [window-surface-mobility.md] §6과 함께 M3 착수 전 결정.
+- ~~surface 이동(이동성 M3+) 이벤트 어휘: `metadata:window` 구독자의 scope 재평가 동작(구독 유지/해제/removed 중 무엇)~~ **확정([window-surface-mobility.md] §8A.3)**: window-scope 구독은 **유지**하고, 옮겨진 surface에 대해 `session.movedOut`/`movedIn`(membership-changed) notification을 방출한다(`removed`/`closed` 아님 — surface 생존). 재평가는 이동 원자 트랜잭션 안에서 동기 수행. `metadata:self`는 surface_id 불변이라 무영향(응답 메타 window 필드만 갱신). 정확한 event 이름은 §7 스키마 편입 시(M3d) 확정.
 - 세션 이름/별칭, 영속/재연결(전역 UUID 도입 여부).
 - 마크다운 편집 WYSIWYG 시점/방식(뷰어+소스편집은 확정).
 

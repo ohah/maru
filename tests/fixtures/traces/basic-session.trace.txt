@@ -1,0 +1,7 @@
+maru.trace.v1
+event 0 resize surface=1 cols=10 rows=4
+event 1 output surface=1 bytes="hello\r\n"
+event 2 output surface=1 bytes="한글 wide\r\n"
+event 3 resize surface=1 cols=14 rows=5
+event 4 output surface=1 bytes="after resize\r\n"
+event 5 process-exit surface=1 code=0

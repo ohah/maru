@@ -66,9 +66,11 @@ event 4 shell.command-end surface=1 row=2 exit=0
 - `command-end`의 `exit=`는 OSC 133 D의 종료코드, 없으면 `exit=none`.
 - `cwd="..."`는 `currentCwd()` 값(따옴표로 감싸고 `\` `"`·개행/CR/Tab을 escape). `ShellEvent.cwd_changed`는 값을 안 들므로(POD) 직렬화 시점의 `currentCwd()`를 적는다 — 한 batch에 cwd_changed가 둘이면(한 프레임 내 연속 cd) 둘 다 현재 cwd로 적힌다(문서화된 한계).
 
-**구현됨**: base kind(`output`/`input`/`resize`/`process-exit`) writer(`writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`) + reader(`parseEvents` — shell.* 와 base kind 전부 되읽음) + **replay 재적용**(`observability/replay.zig`의 `replayTrace`, 아래 "replay가 하는 일"). `output`을 재생하면 파서가 화면·셸 이벤트·cwd를 전부 재도출한다(byte-for-byte).
+**구현됨**: base kind(`output`/`input`/`resize`/`process-exit`) writer(`writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`) + reader(`parseEvents` — shell.* 와 base kind 전부 되읽음) + **replay 재적용**(`observability/replay.zig`의 `replayTrace`, 아래 "replay가 하는 일") + **live 레코딩**. `output`을 재생하면 파서가 화면·셸 이벤트·cwd를 전부 재도출한다(byte-for-byte).
 
-**아직 없는 것**(후속): **live 레코딩** — 실제 세션에서 이 라인을 파일로 append하는 `MARU_TRACE` 게이트. 훅 자리는 `app/runtime.zig`의 `SurfaceRuntime.applyPtyEvent`(output/exited)·`resize`(위 base kind writer를 그 자리에서 호출하면 된다). shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다.
+**live 레코딩**(구현됨): `MARU_TRACE=<파일경로>`로 켠다. `app/trace_recorder.zig`의 `TraceRecorder`가 `SurfaceRuntime.applyPtyEvent`(output/exited)·`resize` 훅에서 base kind를 누적하고, 세션 종료(`AppSession.deinit`)에서 그 경로로 굳힌다. opt-in(미설정이면 오버헤드 0), in-memory 누적(핫패스 파일 I/O 없음, 8 MB 상한). shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다.
+
+**아직 없는 것**(후속): 증분 flush(크래시 복원), redaction 강제, 입력 이벤트 기록.
 
 ### Control-plane event (미정)
 

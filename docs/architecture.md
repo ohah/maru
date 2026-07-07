@@ -168,7 +168,7 @@ PTY/input/parser/terminal/renderer/workspace
 구현 상태(실제 심볼명):
 
 1. **화면 스냅샷** ✅ — `RenderSnapshot`(terminal/types.zig)을 `renderTerminalSnapshot`(writer)이 `maru.snapshot.v3` 텍스트로 직렬화하고 `parseSnapshot`(reader)이 되읽는다(cursor·grid·dirty·cell-metadata·styled-cells). 예전 개념명 `DebugSnapshot`은 코드에 없다.
-2. **trace** ✅ — `maru.trace.v1` writer(shell: `renderShellEvents`, base kind: `writeOutputEvent`/`writeResizeEvent`/…)/reader(`parseEvents`)가 shell.* 와 base kind(output/input/resize/process-exit)를 왕복한다. 라이브 레코딩(`MARU_TRACE`)만 후속(옛 `TraceRecorder`).
+2. **trace** ✅ — `maru.trace.v1` writer(shell: `renderShellEvents`, base kind: `writeOutputEvent`/`writeResizeEvent`/…)/reader(`parseEvents`)가 shell.* 와 base kind(output/input/resize/process-exit)를 왕복하고, **라이브 레코딩**(`MARU_TRACE`, `app/trace_recorder.zig`의 `TraceRecorder` — `SurfaceRuntime` 훅에서 누적, `AppSession.deinit`에서 파일로)까지 구현. 옛 개념명 `TraceRecorder`는 이 struct다.
 3. **replay** ✅ — `replayTrace`(observability/replay.zig)가 `output`을 `core.write`, `resize`를 `core.resize`로 재적용해 화면을 byte-for-byte 재구성(파서가 셸 이벤트·cwd 재도출). output 없는 shell-only trace는 shell.* 를 OSC로 재발행(fallback). 옛 개념명 `ReplayRunner`는 이 함수다.
 4. `FailureArtifact`(후속): 테스트 실패 시 trace, snapshot, config를 로컬 산출물로 남긴다.
 

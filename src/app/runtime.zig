@@ -3,6 +3,7 @@ const pty = @import("../pty.zig");
 const terminal = @import("../terminal.zig");
 const surface_mod = @import("../session/surface.zig");
 const core_command = @import("../session/core_command.zig");
+const TraceRecorder = @import("trace_recorder.zig").TraceRecorder; // MARU_TRACE 라이브 레코더(opt-in — host가 주입)
 
 // PTY 출력의 제어 시퀀스를 찍는 진단 logger(드래그 시 zsh redraw 분석용). 게이트는 host가
 // SurfaceRuntime.debug_input으로 주입한다(플랫폼 무관 — runtime은 libc/env에 직접 의존하지 않음).
@@ -141,11 +142,23 @@ pub const PtyIo = struct {
     }
 };
 
+/// PTY 종료 상태를 trace process-exit code로. exited→code, signaled→128+시그널(POSIX 셸 관례), unknown→none.
+fn exitCode(status: pty.ExitStatus) ?i32 {
+    return switch (status) {
+        .exited => |c| c,
+        .signaled => |s| 128 + @as(i32, s),
+        .unknown => null,
+    };
+}
+
 pub const SurfaceRuntime = struct {
     allocator: std.mem.Allocator,
     links: std.ArrayList(Link) = .empty,
     // host가 켜면 PTY 출력의 제어 시퀀스를 진단 로깅한다(MARU_DEBUG 드래그 분석용). 기본 off.
     debug_input: bool = false,
+    // host가 MARU_TRACE로 주입하는 라이브 trace 레코더(base kind output/resize/process-exit를 누적). null이면 기록 안 함
+    // (opt-in — 분기 한 번, 오버헤드 0). 소유·수명은 host(app_session)가 관리하고 runtime은 이벤트만 흘린다.
+    trace_recorder: ?*TraceRecorder = null,
 
     pub fn init(allocator: std.mem.Allocator) SurfaceRuntime {
         return .{ .allocator = allocator };
@@ -257,6 +270,8 @@ pub const SurfaceRuntime = struct {
             defer link.surface.unlockCore(io);
             try link.surface.core.resize(grid.cols, grid.rows);
         }
+        // MARU_TRACE: 재생이 core.resize로 reflow를 재구성하도록 clamp된 grid 크기를 기록(코어에 적용된 값과 동일).
+        if (self.trace_recorder) |rec| rec.recordResize(link.surface_id, grid.cols, grid.rows);
         link.pty_io.resize(grid) catch return error.ResizeFailed;
     }
 
@@ -294,6 +309,8 @@ pub const SurfaceRuntime = struct {
                     }
                 }
                 link.surface.process_state = .running;
+                // MARU_TRACE: 원시 출력을 trace로 기록(락 밖 — 코어 변경과 무관한 순수 append). 재생의 권위 데이터.
+                if (self.trace_recorder) |rec| rec.recordOutput(link.surface_id, output.bytes);
                 // zsh는 SIGWINCH redraw 때 CSI 6n으로 커서를 묻고, 응답이 없으면 redraw가 어긋나
                 // 프롬프트가 중복된다. best-effort(실패해도 출력 적용은 유지).
                 if (reply_buf) |reply| {
@@ -307,8 +324,9 @@ pub const SurfaceRuntime = struct {
             },
             .exited => |exited| {
                 const link = self.linkByPty(exited.pty_id) orelse return error.UnknownPty;
-                _ = exited.status;
                 link.surface.process_state = .exited;
+                // MARU_TRACE: child 종료 기록(exited→code, signaled→128+sig 셸 관례, unknown→none).
+                if (self.trace_recorder) |rec| rec.recordProcessExit(link.surface_id, exitCode(exited.status));
             },
             .read_error => |read_error| {
                 _ = read_error.message;
@@ -457,6 +475,44 @@ test "runtime routes pty output to the matching surface core" {
     try std.testing.expect(std.mem.indexOf(u8, screen_a, "runtime") == null);
     try std.testing.expect(std.mem.indexOf(u8, screen_b, "runtime") != null);
     try std.testing.expectEqual(surface_mod.ProcessState.running, surface_b.process_state);
+}
+
+// MARU_TRACE 라이브 레코딩의 핵심 계약: runtime이 output/resize/process-exit를 recorder에 흘리고, 그 trace를
+// replay하면 실제 surface 화면이 byte-for-byte 재구성된다(캡처→재생 end-to-end).
+test "runtime records base kind to trace recorder and replay reconstructs the screen byte-for-byte" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var rec = TraceRecorder.init(allocator);
+    defer rec.deinit();
+    runtime.trace_recorder = &rec; // host가 MARU_TRACE로 주입하는 것과 동일
+
+    var surface = try surface_mod.Surface.init(allocator, 7, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+
+    try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "ab\r\nCD" } }, std.testing.io);
+    try runtime.resize(7, .{ .cols = 10, .rows = 3 }, std.testing.io);
+    try runtime.applyPtyEvent(.{ .exited = .{ .pty_id = 10, .status = .{ .exited = 0 } } }, std.testing.io);
+
+    // recorder가 세 이벤트를 surface_id=7로, 인덱스 순서대로 기록.
+    const t = rec.text();
+    try std.testing.expect(std.mem.indexOf(u8, t, "event 0 output surface=7 bytes=\"ab\\r\\nCD\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "resize surface=7 cols=10 rows=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "process-exit surface=7 code=0\n") != null);
+
+    // 기록한 trace를 replay하면 원 surface 화면(resize 후 10x3)과 byte-for-byte 동일.
+    const replay = @import("../observability.zig").replay;
+    var replayed = try replay.replayTrace(allocator, t, .{ .cols = 8, .rows = 2 });
+    defer replayed.deinit();
+    const src_screen = try surface.core.dumpUtf8(allocator);
+    defer allocator.free(src_screen);
+    const rep_screen = try replayed.dumpUtf8(allocator);
+    defer allocator.free(rep_screen);
+    try std.testing.expectEqualStrings(src_screen, rep_screen);
 }
 
 test "runtime sends terminal input through the attached pty io" {

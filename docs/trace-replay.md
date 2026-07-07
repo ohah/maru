@@ -124,7 +124,7 @@ raw output bytes에는 경로, 서버 이름, token, 환경변수 값이 섞일 
 
 git에 fixture로 넣으려면 [프로젝트 규칙](project-rules.md)의 "민감정보 redaction 기준 (단일 출처)"을 따른다. 같은 키 목록과 경로 일반화·익명화 규칙을 쓰며, 여기에 목록을 복제하지 않는다. sanitize 후에도 같은 replay 결과가 나오는지 확인하는 것까지가 fixture 추가 조건이다.
 
-코드 단일 출처는 중립 leaf `src/redact.zig`다(project-rules.md 미러 — 토큰 목록·key 판정을 env·argv·fixture가 공유). **`redact.guardFixture(text)`가 저장 가드**로, 민감 할당(`<민감키>=값`/`:값`)이 있으면 `SensitiveContent`로 거부한다(deny-by-default). 라이브 `MARU_TRACE`는 local-only라 이 가드를 거치지 않지만, 민감 할당이 잡히면 trace 파일 write 시 stderr로 한 번 알려 fixture 승격 전 sanitize를 유도한다.
+코드 단일 출처는 중립 leaf `src/redact.zig`다(project-rules.md 미러 — 토큰 목록·key 판정을 env·argv·fixture가 공유). 판정 `redact.hasSensitiveContent`는 인라인 할당(`<키>=값`·`:값`, `=` 주변 공백 허용)·dash 플래그(`--api-key sk-…`)·공백분리 할당을 잡는다(substring-on-key라 `apikey`·`myapitoken`까지 — 대가로 `monkey=` 류도 걸리는 deny-by-default). **trace fixture 가드는 `observability.trace.guardFixture(allocator, text)`**: output 바이트는 PTY read 경계로 이벤트마다 쪼개지므로 직렬화 텍스트를 그대로 스캔하면 놓친다 — output을 **경계 없이 재조립·unescape**한 뒤 스캔해(split secret 재결합) `SensitiveContent`로 거부한다. plain 텍스트(snapshot)는 `redact.guardFixture(text)`. 라이브 `MARU_TRACE`는 local-only라 차단은 안 하지만, 같은 재조립 스캔으로 민감 데이터가 잡히면 파일 write 시 stderr로 한 번 알린다. 경로·서버·사용자 이름 익명화는 keyword가 아니라 **별도 후속**(project-rules.md §redaction).
 
 ## 초기 테스트
 
@@ -138,6 +138,7 @@ replay 재적용(구현됨, `observability/replay.zig`):
 - **semantic replay(fallback)**: output 없는 shell-only trace는 shell.* 를 OSC로 재발행해 이벤트 스트림·행·cwd를 재구성(cwd percent-encode 왕복 포함).
 - replay는 private parser storage를 import하지 않고 `core.write`/`core.resize` public 경로만 쓴다.
 
-redaction(구현됨, `src/redact.zig`):
-- **fixture 가드**: 민감 할당이 있는 trace 텍스트는 `guardFixture`가 `SensitiveContent`로 거부한다(clean은 통과). 평범한 단어("monkey" 등 할당 아님)엔 안 걸려 가드가 쓸모 있다.
+redaction(구현됨, `src/redact.zig` + `observability/trace.zig`):
+- **trace fixture 가드**: `trace.guardFixture`가 output을 재조립해 스캔하므로, 비밀이 read 경계로 두 output 이벤트에 쪼개져도(`API_TOKEN`/`=값`) 재결합해 `SensitiveContent`로 거부한다(직렬화 텍스트 스캔은 놓침). cwd 값 내 비밀도.
+- **판정 범위**: 인라인 할당(공백 허용)·dash 플래그·공백분리 할당을 잡는다. substring-on-key라 `monkey=` 류도 걸린다(deny-by-default — false negative보다 안전). 경로·서버·사용자 이름 익명화는 후속.
 - `keyIsSensitive`가 env·argv redaction과 같은 토큰 목록을 공유한다(agent_resume가 위임).

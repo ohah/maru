@@ -14,9 +14,13 @@
 //! 1d는 그걸 **인자로 주입**받아 read-only 판정만 한다(auth 발급·소켓 accept-loop 스레드·메인 marshal(§5)은
 //! 범위 밖 — L4 1b/1e/1g가 나중에 이 순수 함수를 호출해 배선한다). 그래서 헤드리스 단위 테스트가 전부 커버한다.
 //!
-//! **범위(1d 라우터):** 요청 한 줄 parse → 최상위 라우팅. 지원 메서드는 read-only 둘뿐:
+//! **범위(1d 라우터):** 요청 한 줄 parse → 최상위 라우팅. 지원 메서드:
 //!   - `sessions.list {window?}` → 1c `serializeSessionsListFiltered`(scope 필터 + 선택적 window_id 좁힘).
 //!   - `session.get {id}` → 1c `serializeSessionGet`(§8.3 존재검사 이전 scope 판정 → unauthorized/process_exited).
+//!   - `session.capture {id, scrollback?}`(1f) → 이 read-only 라우터는 metadata scope만 나르는데 capture는
+//!     **read-output** capability를 요구하므로(§8.3) 여기선 **항상 §8.3 균일 unauthorized**로 접는다(존재검사 이전,
+//!     oracle 방지). 실 read-output grant + chunk 스트리밍은 control_capture(1f) `dispatchCaptureAck` + `Capture`가
+//!     소유하고, L4가 1e fd·1g self-origin으로 read-output을 발급한 뒤 그 경로로 배선한다(이 metadata 라우터 밖).
 //! 그 밖: 미지 method → method_not_found(-32601), malformed JSON → parse_error(-32700), 유효 JSON이나 유효
 //! request 아님 → invalid_request(-32600), 잘못된 params(id 부재/비정수/음수, window 비정수/음수) → invalid_params(-32602).
 //!
@@ -76,6 +80,15 @@ pub fn dispatchReadOnly(
         const requested = readIdParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
         // §8.3 균일 unauthorized/process_exited 판정·직렬화는 1c가 단일 출처로 소유(재구현 금지).
         return cs.serializeSessionGet(gpa, req.id, snapshot, caller_surface_id, scope, requested);
+    }
+    if (method.core == .session and std.mem.eql(u8, method.rest, "capture")) {
+        // session.capture는 **read-output** capability를 요구한다(§8.3). 이 read-only 라우터는 **metadata scope만**
+        // 나르고(caller가 주입받는 `scope`는 `MetadataScope`), metadata는 read-output을 **절대** 만족하지 못하므로
+        // §8.3 **균일 unauthorized**로 접는다(존재검사 이전 — target 존재 여부 무관, surface_id 열거 oracle 방지).
+        // 실 read-output grant + chunk 스트리밍은 control_capture(1f) `dispatchCaptureAck` + `Capture`가 소유하고,
+        // L4가 1e fd·1g self-origin으로 read-output을 발급한 뒤 **그 경로로** 배선한다(이 metadata 라우터가 아니라).
+        // params/id 형식도 읽지 않는다 — 인가가 이 경로에선 구조적으로 실패라 즉시 종료(oracle 최소화).
+        return errorResponse(gpa, req.id, .unauthorized);
     }
     return errorResponse(gpa, req.id, .method_not_found);
 }
@@ -250,12 +263,28 @@ test "dispatch: 미지 method → method_not_found(-32601)" {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.sendText\",\"params\":{\"id\":10,\"text\":\"x\"}}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.foo\"}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"foo.bar\"}",
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}",
     }) |req| {
         const wire = try dispatch(req, 10, .all);
         defer testing.allocator.free(wire);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
     }
+}
+
+// session.capture(1f)는 read-output capability를 요구하는데(§8.3) 이 read-only 라우터는 metadata scope만 나른다 —
+// metadata는 read-output을 절대 만족하지 못하므로 method_not_found가 아니라 **§8.3 균일 unauthorized**로 접는다
+// (실 read-output 경로는 control_capture.dispatchCaptureAck·1f). all scope로도, target 존재/부재와도 무관하게 균일.
+test "dispatch: session.capture는 metadata 라우터에서 read-output 미충족 → 균일 unauthorized(method_not_found 아님)" {
+    for ([_]wm.MetadataScope{ .self, .window, .all }) |scope| {
+        const wire = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}", 10, scope);
+        defer testing.allocator.free(wire);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    }
+    // §8.3 oracle 방지: target surface_id가 존재하는 10이든 없는 999든 바이트 동일(존재 여부 무누설).
+    const w_exists = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}", 10, .all);
+    defer testing.allocator.free(w_exists);
+    const w_absent = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":999}}", 10, .all);
+    defer testing.allocator.free(w_absent);
+    try testing.expectEqualStrings(w_exists, w_absent);
 }
 
 test "dispatch: malformed JSON → parse_error(-32700), id=null" {

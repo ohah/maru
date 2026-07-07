@@ -1071,8 +1071,10 @@ test "A2a 왕복 엣지: 미지 method는 serveReadOnly가 에러 응답 → cli
     const base = makeTmpBase(&bb, "a2a-unknown");
     defer rmTmpBase(base);
 
-    // buildRequestBytes는 list/get만 만들므로 미지 method는 raw 바이트로 보낸다(후속 Phase 메서드).
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}";
+    // buildRequestBytes는 list/get만 만들므로 미지 method는 raw 바이트로 보낸다. **라우터가 절대 안 다루는** 미지
+    // 메서드를 쓴다(`session.capture`는 1f에서 read-output 요구 메서드로 인식돼 §8.3 unauthorized로 접히므로 더는
+    // method_not_found 예시가 아니다 — control_dispatch 1f 변경 반영).
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.nonexistent\"}";
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     try RoundTripHarness.run(base, req, .get, rt_snapshot, 10, .all, &out);

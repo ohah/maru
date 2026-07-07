@@ -9,6 +9,7 @@ pub const ssh = @import("cli/ssh.zig");
 pub const install = @import("cli/install.zig");
 pub const terminfo = @import("cli/terminfo.zig");
 pub const sessions = @import("cli/sessions.zig"); // Track C 1d: `maru sessions list`/`session get` read-only 메타데이터 CLI(파서·--help·client wire)
+pub const trace = @import("cli/trace.zig"); // `maru trace anonymize` — 캡처 trace의 PII 익명화(fixture 승격용)
 
 test {
     // 하위 모듈을 참조해 `zig build test`가 그 안의 test 블록을 수집하게 한다 — barrel 관례.

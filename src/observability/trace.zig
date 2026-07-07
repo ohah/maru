@@ -208,6 +208,47 @@ pub fn guardFixture(allocator: std.mem.Allocator, text: []const u8) (std.mem.All
     if (try traceHasSensitiveContent(allocator, text)) return error.SensitiveContent;
 }
 
+/// trace를 파싱해 output/input/cwd 값의 **PII를 익명화**(경로·IP·user@host·유저명)하고 index·구조를 보존해 다시
+/// 직렬화한다 — 결과는 여전히 파싱·재생 가능하다. shell.* 의 행/exit·resize·process-exit는 PII가 없어 그대로 통과한다.
+/// 반환은 새 trace 텍스트(호출자 소유). guardFixture(secret 차단)와 짝: 익명화는 PII **일반화**다(project-rules.md).
+pub fn anonymizeTrace(allocator: std.mem.Allocator, text: []const u8, opts: redact.AnonymizeOptions) (ParseError || error{WriteFailed})![]u8 {
+    const events = try parseEvents(allocator, text);
+    defer freeParsedEvents(allocator, events);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try writeHeader(&out.writer);
+    for (events) |pe| try reserializeAnon(allocator, &out.writer, pe, opts);
+    return out.toOwnedSlice() catch error.OutOfMemory;
+}
+
+fn reserializeAnon(allocator: std.mem.Allocator, w: *std.Io.Writer, pe: ParsedEvent, opts: redact.AnonymizeOptions) !void {
+    const idx = pe.index;
+    const sid = pe.surface_id;
+    switch (pe.event) {
+        .output => |b| {
+            const anon = try redact.anonymizeAlloc(allocator, b, opts);
+            defer allocator.free(anon);
+            try writeOutputEvent(w, idx, sid, anon);
+        },
+        .input => |b| {
+            const anon = try redact.anonymizeAlloc(allocator, b, opts);
+            defer allocator.free(anon);
+            try writeInputEvent(w, idx, sid, anon);
+        },
+        .resize => |s| try writeResizeEvent(w, idx, sid, s.cols, s.rows),
+        .process_exit => |c| try writeProcessExitEvent(w, idx, sid, c),
+        .cwd_changed => |c| {
+            const anon = try redact.anonymizeAlloc(allocator, c, opts);
+            defer allocator.free(anon);
+            try writeEvent(w, idx, sid, .cwd_changed, anon); // cwd_changed 라인을 익명화 cwd로 재작성
+        },
+        .prompt_start => |row| try writeEvent(w, idx, sid, .{ .prompt_start = row }, ""),
+        .input_start => |row| try writeEvent(w, idx, sid, .{ .input_start = row }, ""),
+        .command_start => |row| try writeEvent(w, idx, sid, .{ .command_start = row }, ""),
+        .command_end => |ce| try writeEvent(w, idx, sid, .{ .command_end = ce }, ""),
+    }
+}
+
 /// `event <index> <kind> surface=<id> <payload>` 한 줄을 ParsedEvent로. 따옴표 값(cwd/bytes)은 공백/따옴표를 담을 수
 /// 있어 토크나이저가 아니라 원문에서 따옴표 범위를 잘라 unescape한다(그 외 필드는 공백 토큰).
 fn parseEventLine(allocator: std.mem.Allocator, line: []const u8) ParseError!ParsedEvent {
@@ -486,4 +527,34 @@ test "guardFixture: read 경계로 쪼개진 비밀도 재조립해 잡는다" {
         "event 0 output surface=1 bytes=\"$ ls -la /home/user\\r\\n\"\n" ++
         "event 1 resize surface=1 cols=80 rows=24\n";
     try guardFixture(a, clean);
+}
+
+// 익명화는 PII를 일반화하되 구조를 보존해 결과가 여전히 파싱·재생 가능해야 한다(sanitize 후에도 replay 일관 —
+// project-rules.md). output/cwd의 경로·user@host·유저명이 사라지고, index·resize는 그대로.
+test "anonymizeTrace: output/cwd의 PII를 일반화하고 구조·재생성을 보존한다" {
+    const a = std.testing.allocator;
+    const src =
+        "maru.trace.v1\n" ++
+        "event 0 output surface=1 bytes=\"$ pwd\\r\\n/Users/alice/proj\\r\\n\"\n" ++
+        "event 1 shell.cwd-changed surface=1 cwd=\"/Users/alice/proj\"\n" ++
+        "event 2 output surface=1 bytes=\"ssh bob@prod.example.com\\r\\n\"\n" ++
+        "event 3 resize surface=1 cols=80 rows=24\n";
+    const anon = try anonymizeTrace(a, src, .{ .username = "alice", .home = "/Users/alice" });
+    defer a.free(anon);
+
+    // PII가 사라졌다.
+    try std.testing.expect(std.mem.indexOf(u8, anon, "alice") == null);
+    try std.testing.expect(std.mem.indexOf(u8, anon, "bob@prod.example.com") == null);
+    try std.testing.expect(std.mem.indexOf(u8, anon, "prod.example.com") == null);
+    // 일반화된 자리표시자가 들어갔다.
+    try std.testing.expect(std.mem.indexOf(u8, anon, "/Users/user/proj") != null);
+    try std.testing.expect(std.mem.indexOf(u8, anon, "user@host") != null);
+    // 구조 보존: 여전히 4 이벤트로 파싱되고 resize·index가 그대로.
+    const parsed = try parseEvents(a, anon);
+    defer freeParsedEvents(a, parsed);
+    try std.testing.expectEqual(@as(usize, 4), parsed.len);
+    try std.testing.expect(parsed[3].event == .resize);
+    try std.testing.expectEqual(@as(u16, 80), parsed[3].event.resize.cols);
+    try std.testing.expect(parsed[1].event == .cwd_changed);
+    try std.testing.expectEqualStrings("/Users/user/proj", parsed[1].event.cwd_changed);
 }

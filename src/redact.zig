@@ -88,6 +88,176 @@ pub fn guardFixture(text: []const u8) FixtureError!void {
     if (hasSensitiveContent(text)) return error.SensitiveContent;
 }
 
+// ── 익명화 transform (일반화) ────────────────────────────────────────────────────────────────────────────────
+// keyword 가드(hasSensitiveContent)가 secret **차단**이라면, 익명화는 PII/인프라(경로·서버·유저명) **일반화**다
+// (project-rules.md "홈 디렉터리 경로·서버 주소·사용자 이름은 일반화하거나 익명화"). 구조를 보존해 결과가 여전히
+// 유효한 텍스트/경로라 sanitize 후에도 replay가 일관된다. 역할 분리: 익명화는 값을 바꾸고, 가드는 secret을 막는다.
+
+pub const AnonymizeOptions = struct {
+    /// 정확 치환할 홈 경로(예: env HOME "/Users/alice") — basename을 "user"로. null이면 생략. 오탐 없음(알려진 값).
+    home: ?[]const u8 = null,
+    /// 정확 치환할 유저명(예: env USER "alice") — 단어 경계에서 "user"로. null이면 생략.
+    username: ?[]const u8 = null,
+};
+
+/// bytes의 PII/인프라를 일반화한 새 문자열(호출자 소유). 홈 경로 세그먼트·IPv4·`user@host.domain`·알려진 유저명을
+/// 자리표시자로 바꾼다. keyword-value secret(`TOKEN=…`)은 여기서 안 지운다 — 그건 guardFixture가 거부한다.
+pub fn anonymizeAlloc(allocator: std.mem.Allocator, bytes: []const u8, opts: AnonymizeOptions) std.mem.Allocator.Error![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    anonymizeInto(&out.writer, bytes, opts) catch return error.OutOfMemory;
+    return out.toOwnedSlice() catch error.OutOfMemory;
+}
+
+fn anonymizeInto(w: *std.Io.Writer, bytes: []const u8, opts: AnonymizeOptions) !void {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const word_start = i == 0 or !isIdentByte(bytes[i - 1]);
+
+        // 1a. 알려진 홈 경로 정확 치환(비표준 HOME도 커버): "/opt/me" → "/opt/user".
+        if (opts.home) |home| {
+            if (home.len > 0 and std.mem.startsWith(u8, bytes[i..], home)) {
+                try writeHomeReplacement(w, home);
+                i += home.len;
+                continue;
+            }
+        }
+        // 1b. 일반 홈 세그먼트: "/Users/<X>" · "/home/<X>" → ".../user"(다른 유저 홈).
+        if (matchHomeSeg(bytes, i)) |m| {
+            try w.writeAll(m.prefix);
+            try w.writeAll("user");
+            i += m.consumed;
+            continue;
+        }
+        // 2. IPv4 → 0.0.0.0. 앞이 ident(숫자·글자·_-)나 '.'면 더 긴 토큰(버전 "v1.2.3.4"·"1.2.3.4.5")의 일부라 매치 안 함.
+        if (i == 0 or (!isIdentByte(bytes[i - 1]) and bytes[i - 1] != '.')) {
+            if (matchIPv4(bytes, i)) |len| {
+                try w.writeAll("0.0.0.0");
+                i += len;
+                continue;
+            }
+        }
+        // 3. <user>@<host.domain> → user@host (ssh 대상·이메일).
+        if (word_start) {
+            if (matchUserAtHost(bytes, i)) |len| {
+                try w.writeAll("user@host");
+                i += len;
+                continue;
+            }
+        }
+        // 4. 알려진 유저명(단어 경계) → user.
+        if (word_start) {
+            if (opts.username) |u| {
+                if (u.len > 0 and std.mem.startsWith(u8, bytes[i..], u) and
+                    (i + u.len >= bytes.len or !isIdentByte(bytes[i + u.len])))
+                {
+                    try w.writeAll("user");
+                    i += u.len;
+                    continue;
+                }
+            }
+        }
+        try w.writeByte(bytes[i]);
+        i += 1;
+    }
+}
+
+/// home("/Users/alice")의 마지막 세그먼트를 "user"로: "/Users/alice" → "/Users/user".
+fn writeHomeReplacement(w: *std.Io.Writer, home: []const u8) !void {
+    const slash = std.mem.lastIndexOfScalar(u8, home, '/') orelse {
+        try w.writeAll("user");
+        return;
+    };
+    try w.writeAll(home[0 .. slash + 1]);
+    try w.writeAll("user");
+}
+
+/// 경로 세그먼트 종료 문자(다음 컴포넌트 '/' 또는 공백/따옴표/제어) — 유저명 세그먼트의 끝.
+fn isPathStop(b: u8) bool {
+    return b == '/' or b == ' ' or b == '\t' or b == '\n' or b == '\r' or b == '"' or b == 0;
+}
+
+const HomeSeg = struct { prefix: []const u8, consumed: usize };
+
+fn matchHomeSeg(bytes: []const u8, i: usize) ?HomeSeg {
+    const prefixes = [_][]const u8{ "/Users/", "/home/" };
+    for (prefixes) |p| {
+        if (!std.mem.startsWith(u8, bytes[i..], p)) continue;
+        const seg_start = i + p.len;
+        var j = seg_start;
+        while (j < bytes.len and !isPathStop(bytes[j])) j += 1;
+        if (j > seg_start) return .{ .prefix = p, .consumed = j - i };
+    }
+    return null;
+}
+
+fn matchIPv4(bytes: []const u8, i: usize) ?usize {
+    var pos = i;
+    var octet: usize = 0;
+    while (octet < 4) : (octet += 1) {
+        const d0 = pos;
+        while (pos < bytes.len and pos - d0 < 3 and std.ascii.isDigit(bytes[pos])) pos += 1;
+        if (pos == d0) return null; // 숫자 없음
+        if (octet < 3) {
+            if (pos >= bytes.len or bytes[pos] != '.') return null;
+            pos += 1; // '.'
+        }
+    }
+    // 뒤에 숫자/'.'가 이어지면 더 긴 토큰(버전 등)이라 매치 안 함.
+    if (pos < bytes.len and (std.ascii.isDigit(bytes[pos]) or bytes[pos] == '.')) return null;
+    return pos - i;
+}
+
+fn matchUserAtHost(bytes: []const u8, i: usize) ?usize {
+    var pos = i;
+    while (pos < bytes.len and isIdentByte(bytes[pos])) pos += 1;
+    if (pos == i or pos >= bytes.len or bytes[pos] != '@') return null; // user + '@'
+    pos += 1;
+    const host_start = pos;
+    var dots: usize = 0;
+    while (pos < bytes.len and (isIdentByte(bytes[pos]) or bytes[pos] == '.')) {
+        if (bytes[pos] == '.') dots += 1;
+        pos += 1;
+    }
+    if (pos == host_start or dots == 0) return null; // dotted host(FQDN/email)만 — 보수적
+    return pos - i;
+}
+
+fn isIdentByte(b: u8) bool {
+    return std.ascii.isAlphanumeric(b) or b == '_' or b == '-';
+}
+
+test "anonymizeAlloc: 홈경로·IPv4·user@host·유저명 일반화, 구조 보존·오탐 회피" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { in: []const u8, out: []const u8, opts: AnonymizeOptions }{
+        // 홈 경로 세그먼트(다른 유저 포함).
+        .{ .in = "cd /Users/alice/proj && cat /home/bob/x", .out = "cd /Users/user/proj && cat /home/user/x", .opts = .{} },
+        // IPv4.
+        .{ .in = "ping 192.168.1.42 ok", .out = "ping 0.0.0.0 ok", .opts = .{} },
+        // 버전 문자열은 IP로 오탐 안 함(앞 v·뒤 .5).
+        .{ .in = "v1.2.3.4 and 1.2.3.4.5", .out = "v1.2.3.4 and 1.2.3.4.5", .opts = .{} },
+        // user@host.domain(ssh·이메일).
+        .{ .in = "ssh alice@prod.example.com done", .out = "ssh user@host done", .opts = .{} },
+        // 알려진 유저명(단어경계) — "malice"는 안 바뀜.
+        .{ .in = "whoami: alice; not malice", .out = "whoami: user; not malice", .opts = .{ .username = "alice" } },
+        // 비표준 HOME 정확 치환.
+        .{ .in = "at /opt/me/work", .out = "at /opt/user/work", .opts = .{ .home = "/opt/me" } },
+        // secret 할당은 익명화가 지우지 않는다(그건 guardFixture 역할).
+        .{ .in = "API_TOKEN=abc", .out = "API_TOKEN=abc", .opts = .{} },
+    };
+    for (cases) |c| {
+        const r = try anonymizeAlloc(a, c.in, c.opts);
+        defer a.free(r);
+        try std.testing.expectEqualStrings(c.out, r);
+    }
+    // 멱등: 익명화한 결과를 다시 익명화해도 같다.
+    const once = try anonymizeAlloc(a, "cd /Users/alice/p; ssh x@y.z; ip 10.0.0.1", .{});
+    defer a.free(once);
+    const twice = try anonymizeAlloc(a, once, .{});
+    defer a.free(twice);
+    try std.testing.expectEqualStrings(once, twice);
+}
+
 test "keyIsSensitive: 토큰 부분 일치(대소문자 무시), 안전 키는 통과" {
     try std.testing.expect(keyIsSensitive("API_TOKEN"));
     try std.testing.expect(keyIsSensitive("aws_secret_access_key"));

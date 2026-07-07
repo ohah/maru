@@ -80,15 +80,16 @@ snapshot schema version을 언제 유지하고 언제 올릴지는 [Snapshot Ver
 
 현재 `maru.snapshot.v3`는 row text와 별도로 `cell-metadata` section을 기록한다. 이 section은 wide character의 continuation cell, zero-width combining mark, non-1-cell width를 확인하기 위한 것이다.
 
-## Trace fixture 초안
+## Trace fixture
 
 위치:
 
 ```text
-tests/fixtures/traces/*.trace.txt
+tests/fixtures/traces/*.trace.txt      # fixture
+tests/golden/screen/replay/*.txt       # replay 화면 golden
 ```
 
-직렬화·역파싱·replay·라이브 레코딩은 **구현됐다**([Trace와 Replay](trace-replay.md)). fixture 파일은 `maru.trace.v1` 형식을 따르고, git에 넣기 전 `observability.trace.guardFixture(allocator, text)`로 민감 데이터를 거른다(deny-by-default — 걸리면 `SensitiveContent`; output을 재조립해 read 경계로 쪼개진 비밀도 잡는다). 코드가 기능마다 ad-hoc trace 포맷을 만들지 않도록, schema token, event index, surface id, event kind를 고정한다.
+직렬화·역파싱·replay·라이브 레코딩은 **구현됐다**([Trace와 Replay](trace-replay.md)). **fixture+CI도 구현됐다**: `tests/oracle/replay.zig`(→ `zig build test-replay`, 기본 `test`에 포함)가 각 fixture를 replay해 화면이 golden과 byte-for-byte 일치하는지 검증하고(회귀 고정), 동시에 `observability.trace.guardFixture`로 민감 데이터가 없는지 검사한다(있으면 테스트 실패 → 커밋 차단, deny-by-default; output을 재조립해 read 경계로 쪼개진 비밀도 잡는다). golden 갱신은 `MARU_UPDATE_GOLDEN=1 zig build test-replay`. fixture 파일은 `maru.trace.v1` 형식을 따르고, 코드가 기능마다 ad-hoc trace 포맷을 만들지 않도록 schema token·event index·surface id·event kind를 고정한다.
 
 ```text
 maru.trace.v1

@@ -1,0 +1,5 @@
+hello         
+한글 wide     
+after resize  
+              
+              

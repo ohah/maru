@@ -913,6 +913,26 @@ pub fn build(b: *std.Build) void {
     const oracle_step = b.step("test-oracle", "Compare Maru snapshots against recorded terminal oracles");
     oracle_step.dependOn(&run_oracle_tests.step);
 
+    // Trace fixture + CI: replay committed trace fixtures and assert the reconstructed screen matches the golden
+    // (and that each fixture passes the redaction guard, so it is commit-safe). Runs in the default `test` step.
+    const replay_fixture_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/oracle/replay.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "test_support", .module = test_support_mod },
+            },
+        }),
+    });
+    const run_replay_fixture_tests = b.addRunArtifact(replay_fixture_tests);
+    run_replay_fixture_tests.setCwd(b.path("."));
+    test_step.dependOn(&run_replay_fixture_tests.step);
+
+    const replay_step = b.step("test-replay", "Replay committed trace fixtures against golden screens (MARU_UPDATE_GOLDEN=1 to refresh)");
+    replay_step.dependOn(&run_replay_fixture_tests.step);
+
     const boundary_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/boundary/imports.zig"),

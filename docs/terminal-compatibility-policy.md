@@ -215,8 +215,9 @@ input.bracketed-paste-is-safe = true
   라인 규율 제어키 — xterm/Ghostty strip 목록)를 공백으로 치환한다. 특히 ESC 제거가 본문에 심은 `ESC[201~`
   조기 종료 인젝션을 무력화한다. 이 sanitize는 설정과 무관하게 항상 적용된다.
 - (2) **확인 게이트(`input.paste-protection`)**: `core.pasteNeedsConfirmation`(단일 출처)이 붙여넣기가
-  위험한지 판정하고, 위험하면 platform(`app_session.submitPaste`)이 PTY로 보내지 않고 확인 모달을 띄운다
-  — [붙여넣기]면 진행, [취소]면 버린다. 판정 규칙: bracketed paste면 (a) 본문에 `ESC[201~`가 있으면
+  위험한지 판정하고, 위험하면 platform(`app_session.submitPaste`)이 PTY로 보내지 않고 **붙여넣을 내용을
+  미리보기로 함께 보여주는 확인 모달**(Ghostty식 — 앞 몇 줄 + "…N줄 더" 요약, `buildPastePreview`)을 띄운다
+  — 사용자가 숨은 명령을 눈으로 확인하고 [붙여넣기]/[취소]를 고른다. 판정 규칙: bracketed paste면 (a) 본문에 `ESC[201~`가 있으면
   bracketed여도 **항상** 확인, (b) 아니고 `input.bracketed-paste-is-safe`가 true면 확인 생략(괄호가 감싸
   자동 실행 안 됨); 비-bracketed면 개행(`\n`/`\r`) 유무로 확인. IME 확정·OSC 52 응답·키 타이핑은 이 경로를
   타지 않아 영향받지 않는다. config·동작 세부는 [configuration.md](configuration.md) `input.paste-protection`.

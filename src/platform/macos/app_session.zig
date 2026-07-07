@@ -1297,6 +1297,11 @@ pub const AppSession = struct {
     // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.
     // pending_close/reset/quit과 배타(한 번에 한 모달 — showConfirmButtons가 열 때 비운다).
     pending_paste_confirm: std.ArrayList(u8) = .empty,
+    // 붙여넣기 확인 모달 **미리보기**(붙여넣을 내용 앞부분)의 세션 소유 백킹. confirm.State.body가 이 버퍼로 만든
+    // 줄 슬라이스를 가리킨다(message처럼 slice라 transient 버퍼면 dangling). Ghostty가 붙여넣기 내용을 확인창에
+    // 보여주는 것의 셀-그리드 근사 — 앞 몇 줄만 담고 나머지는 "…N줄 더"로 요약(buildPastePreview).
+    paste_preview_buf: [768]u8 = undefined,
+    paste_preview_lines: [paste_preview_max_lines + 1][]const u8 = undefined,
     // Cmd+Q 종료 확인의 결정 latch. tick epilogue가 FrameSummary.quit_decision에 실어 host로 한 번 전달한 뒤 .none으로 리셋한다.
     quit_decision: QuitDecision = .none,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
@@ -11279,9 +11284,70 @@ pub const AppSession = struct {
         self.submitPaste(payload, false); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
     }
 
-    /// 붙여넣기 확인 모달 메시지(단일 출처). 미리보기(붙여넣을 내용 표시)는 confirm 컴포넌트가 단일 메시지
-    /// 한 줄만 받아 후속으로 둔다 — 지금은 개행/제어문자 위험을 알리고 진행 여부만 묻는다.
+    /// 붙여넣기 확인 모달 메시지(단일 출처). 아래 미리보기(buildPastePreview)가 붙여넣을 내용을 함께 보여준다.
     const paste_confirm_message = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?";
+    const paste_preview_max_lines = 6; // 미리보기에 보여줄 앞 줄 수(넘으면 "…N줄 더"로 요약 — Ghostty 스크롤 뷰의 근사)
+    const paste_preview_max_cols = 56; // 한 줄 표시폭 상한(넘으면 … 절단) — 모달이 너무 넓어지지 않게
+
+    /// 붙여넣기 미리보기 한 줄을 세션 버퍼에 sanitize·절단해 담고 그 슬라이스를 돌려준다. 제어문자는 ·(탭은
+    /// 공백)로 바꿔 레이아웃이 안 깨지게 하고, 표시폭이 상한을 넘으면 …로 자른다. 잘못된 UTF-8은 빈 줄로.
+    fn appendPreviewLine(buf: []u8, used: *usize, line: []const u8) []const u8 {
+        const start = used.*;
+        var cols: u32 = 0;
+        var it = (std.unicode.Utf8View.init(line) catch return buf[start..start]).iterator();
+        while (it.nextCodepoint()) |cp| {
+            const disp: u21 = if (cp == '\t') ' ' else if (cp < 0x20 or cp == 0x7f) '·' else cp;
+            const w: u32 = @max(terminal.width.cellWidth(disp), 1);
+            if (cols + w > paste_preview_max_cols) {
+                const ell = "…";
+                if (used.* + ell.len <= buf.len) {
+                    @memcpy(buf[used.*..][0..ell.len], ell);
+                    used.* += ell.len;
+                }
+                break;
+            }
+            var cpbuf: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(disp, &cpbuf) catch continue;
+            if (used.* + n > buf.len) break;
+            @memcpy(buf[used.*..][0..n], cpbuf[0..n]);
+            used.* += n;
+            cols += w;
+        }
+        return buf[start..used.*];
+    }
+
+    /// 붙여넣을 payload에서 확인 모달 미리보기 줄들(세션 소유)을 만든다 — 개행(\n/\r, CRLF는 한 번)으로 줄 분리해
+    /// 앞 max_lines줄을 sanitize·절단해 담고, 남는 줄은 "…N줄 더"로 요약한다. confirm.State.body가 이 슬라이스를
+    /// 가리킨다. Ghostty가 붙여넣기 내용을 확인창 텍스트 뷰로 보여주는 것을 셀-그리드로 근사한 것(스크롤 대신 요약).
+    fn buildPastePreview(self: *AppSession, payload: []const u8) []const []const u8 {
+        var used: usize = 0;
+        var count: usize = 0;
+        var total_lines: usize = 0;
+        var i: usize = 0;
+        while (i < payload.len) {
+            var j = i;
+            while (j < payload.len and payload[j] != '\n' and payload[j] != '\r') j += 1;
+            if (count < paste_preview_max_lines) {
+                self.paste_preview_lines[count] = appendPreviewLine(&self.paste_preview_buf, &used, payload[i..j]);
+                count += 1;
+            }
+            total_lines += 1;
+            if (j < payload.len) {
+                j += if (payload[j] == '\r' and j + 1 < payload.len and payload[j + 1] == '\n') @as(usize, 2) else 1;
+            }
+            i = j;
+        }
+        // 요약 줄: 미리보기에 못 담은 나머지 줄 수. count는 항상 ≤ max_lines라 배열 마지막 칸에 안전히 담긴다.
+        if (total_lines > paste_preview_max_lines) {
+            const more = total_lines - paste_preview_max_lines;
+            const start = used;
+            const s = std.fmt.bufPrint(self.paste_preview_buf[used..], "… {d}줄 더", .{more}) catch "";
+            used += s.len;
+            self.paste_preview_lines[count] = self.paste_preview_buf[start .. start + s.len];
+            count += 1;
+        }
+        return self.paste_preview_lines[0..count];
+    }
 
     /// 최종 payload(escape 적용 후 평문)를 인코딩해 PTY 큐에 넣는다. allow_unsafe=false면 paste protection
     /// 게이트를 먼저 통과해야 하고, 위험(개행/ESC[201~ 인젝션)하면 payload를 세션 소유 버퍼에 보관하고 확인
@@ -11296,6 +11362,8 @@ pub const AppSession = struct {
             // 위험 → 바로 실행 대신 확인. showConfirmButtons가 (paste 포함) 다른 보류를 비우므로 그 호출
             // *뒤에* 보관한다(requestAppQuit의 pending_quit 순서와 동형 — 자기 payload를 자기가 안 지움).
             self.showConfirmButtons(paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+            // 미리보기 주입: 붙여넣을 내용을 확인창에 함께 보여준다(Ghostty식). show가 body를 리셋하므로 그 뒤에 준다.
+            self.chrome_host.confirm.body = self.buildPastePreview(payload);
             self.pending_paste_confirm.clearRetainingCapacity();
             self.pending_paste_confirm.appendSlice(self.allocator, payload) catch {
                 // 보관 실패(OOM): 유령 확인(예 눌러도 아무것도 안 붙는)을 막으려 모달도 닫는다.
@@ -35228,10 +35296,14 @@ test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 �
             s.deinit();
             allocator.destroy(s);
         }
-        s.pasteText("AXK\n", false); // \n → 위험 → 보류
+        s.pasteText("AXK\nL2\nL3\nL4\nL5\nL6\nL7\nL8", false); // \n → 위험 → 보류(8줄 → 미리보기 6줄 + 요약)
         try std.testing.expect(s.chrome_host.confirm.open); // 확인 모달 열림
         try std.testing.expect(s.pending_paste_confirm.items.len > 0); // payload 보관
         try std.testing.expectEqual(@as(usize, 0), s.pending_paste.items.len); // 아직 PTY로 안 감(보류)
+        // 미리보기(Ghostty식): 확인창 body가 붙여넣을 내용을 반영한다 — 앞 6줄 + "…N줄 더" 요약 = 7줄.
+        try std.testing.expectEqual(@as(usize, AppSession.paste_preview_max_lines + 1), s.chrome_host.confirm.body.len);
+        try std.testing.expect(std.mem.indexOf(u8, s.chrome_host.confirm.body[0], "AXK") != null); // 첫 줄
+        try std.testing.expect(std.mem.indexOf(u8, s.chrome_host.confirm.body[AppSession.paste_preview_max_lines], "줄 더") != null); // 요약
         // 프로덕션 순서(confirm.handle이 dismiss 후 dispatch)를 흉내: dismiss → dispatch.
         s.chrome_host.confirm.dismiss();
         s.dispatchChromeAction(.confirm_accept);

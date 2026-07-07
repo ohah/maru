@@ -184,7 +184,7 @@ codepoint / grapheme
 - unsupported/ambiguous width는 보수적으로 1 cell로 시작하고 fixture로 확장한다.
 - emoji는 표시 폭과 실제 glyph bounds가 다를 수 있으므로, cursor advance는 width policy를 따른다.
 
-wide/combining 처리는 [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목과 연결한다. 현재 구현은 최소 width table, continuation cell, **combining mark 1개 저장**을 제공한다 — 이 단일-combining 한계 때문에 NFD 한글(초성+중성+종성 3개 코드포인트)이 한 셀로 안 묶여 `ls` 출력의 한글 자모가 분리되고 폭이 음절당 2배로 깨진다(근본 해법은 다중 코드포인트 grapheme 저장 — [Grapheme Cluster 저장·렌더링 전략](grapheme-clustering.md)). UAX#11 전체, ambiguous width 설정, ZWJ emoji 폭 처리는 fixture를 추가하며 확장한다.
+wide/combining 처리는 [검증 매트릭스](verification-matrix.md)의 `wide-character(East-Asian width)` 항목과 연결한다. 현재 구현은 width table, continuation cell에 더해 **다중 코드포인트 grapheme cluster 저장**(`Cell.grapheme_id` + 전역 grapheme store)을 제공한다 — combining mark 1개만 저장하던 옛 `combining` 필드 한계(NFD 한글 자모가 분리돼 `ls` 폭이 음절당 2배로 깨지던 문제)는 grapheme 저장으로 해소돼 필드 자체가 제거됐다. 저장·셰이핑 세부는 [Grapheme Cluster 저장·렌더링 전략](grapheme-clustering.md)이 단일 출처다. ambiguous width 설정(`text.ambiguous-width`)과 ZWJ emoji 클러스터(mode 2027)는 구현됐고, UAX#11 전체 커버리지는 fixture를 추가하며 확장한다.
 
 ## Fallback 전략
 

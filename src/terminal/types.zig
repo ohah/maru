@@ -287,7 +287,7 @@ pub const RenderSnapshot = struct {
     // grapheme cluster 본체 store(TerminalCore.grapheme_store.items, id-1 인덱싱) — cells의
     // grapheme_id가 가리킨다. zero-copy(코어 store 슬라이스를 빌려줌). 비어 있으면 cluster 셀이
     // 없다(일반 경로). 직렬화(dumpUtf8·snapshot.zig)·후속 렌더(HG3)가 RowCodepoints로 이걸 풀어
-    // 다중 코드포인트를 무손실로 본다. 셀의 combining은 첫 extra의 잠정 그림자다(HG2b에서 제거).
+    // 다중 코드포인트를 무손실로 본다. (첫 extra 1개만 담던 옛 `combining` 필드는 이 store로 대체·제거됐다.)
     graphemes: []const []const u21 = &.{},
     // 행별 OSC 133 정보(분류 + 종료코드, 길이=size.rows, cells와 같은 행 인덱싱). 스크롤된
     // 뷰포트에서도 보이는 행에 맞춰 합성된다. 마킹이 없으면 전부 {.unknown, null}이라 렌더러는

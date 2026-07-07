@@ -158,10 +158,14 @@ layout
 저장 모델(앞 절 직렬화 모델에 필드 추가, 빈 문자열 = 이름 없음):
 
 ```text
-tab ... custom-name="<workspace custom_name>" pinned=<0|1> background-color=<0xRRGGBB 10진> accent-color=<0xRRGGBB 10진> group-start="<그룹 이름>" group-collapsed=<0|1>
+tab ... custom-name="<workspace custom_name>" pinned=<0|1> background-color=<0xRRGGBB 10진> accent-color=<0xRRGGBB 10진> group-start="<그룹 이름>" group-collapsed=<0|1> group-depth=<n> group-color=<0xRRGGBB 10진> local-pinned=1 top-level=1
                                                  # 워크스페이스 custom_name + 위치 고정(pinned) + 카드 배경 tint + 좌측 accent 막대색
                                                  # + 사이드바 그룹 시작 마커(group-start=이 탭부터 그 이름의 그룹 시작·위치 파생 소속,
                                                  #   null이면 키 생략=그룹 아님) + 접힘 상태(group-collapsed) — docs/sidebar-groups.md
+                                                 # + 중첩 그룹 깊이(group-depth — 기본 1이면 키 생략, SG5-3) + 그룹 공통 색(group-color —
+                                                 #   0이면 키 생략, SG5-2) + 그룹-로컬 pin(local-pinned — false면 키 생략, §13) +
+                                                 #   서브파티션 마커(top-level — false면 키 생략, §14). 기본값 키 생략은 옛 파일과의
+                                                 #   round-trip 고정점 유지 목적(additive·key-addressed)
 pane ... custom-name="<pane custom_name>"        # pane custom_name (자동 출처 없음)
 surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
                                                  # surface는 custom_name(사용자)과 title(자동) 둘 다 저장
@@ -197,7 +201,8 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 - **required(구조 키)** — 없으면 블록 파싱이 불가능한 개수 키(`window.tabs`·`tab.panes`·`pane.surfaces`·`surface.agent-argc`).
   없으면 `BadLine → 통째 폴백`(loud-fail, 손상 탐지 유지). `requireUint`. 값이 비숫자·거대값이어도 BadLine.
 - **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·
-  `group-collapsed`=0·`title`=""·`cols`=80·`rows`=24 및 앞으로의 per-tab/surface 스칼라). 없으면 기본값. **단 키가 있는데 값이
+  `group-collapsed`=0·`group-depth`=1·`group-color`=0·`local-pinned`=0·`top-level`=0·`title`=""·`cols`=80·`rows`=24 및
+  앞으로의 per-tab/surface 스칼라). 없으면 기본값. **단 키가 있는데 값이
   깨졌으면 조용히 기본값으로 때우지 않고 BadLine**(존재하는 손상은 숨기지 않는다). `getUint`/`getQuoted`. **예외 —
   `group-start`(사이드바 그룹 시작 마커)**: 값이 아니라 **키 존재 자체가 그룹 시작**을 뜻하므로(없으면 그룹 아님=null, 빈
   문자열도 유효한 '이름 없는 그룹') `find`로 키 유무를 먼저 본 뒤 `getQuoted`한다(위치 파생 — docs/sidebar-groups.md §4).

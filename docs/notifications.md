@@ -193,8 +193,8 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   활성화(`makeKeyAndOrderFront`/`NSApp.activate`), 알림 `userInfo`에 정수 2개(`wt`/`sid`) 싣기·꺼내기, 전면 표시 스타일
   적용(`willPresent`). 정책 결정은 안 한다.
 - **ABI**: `app_host_abi.h`의 `MARU_MACOS_APP_HOST_ABI_VERSION` 매크로(+ `app_session.zig` `abi_version` 상수, Zig
-  크로스체크가 동기 강제)가 ABI 버전의 단일 출처다. 알림 함수는 **v78에서 도입**됐다 — `pending_notification`
-  (`surface_id`/`foreground` out) + `activate_surface(session, surface_id) → found`. **v92**에서 세팅 GUI 알림 토글을
+  크로스체크가 동기 강제)가 ABI 버전의 단일 출처다. 현재 형태의 알림 함수는 **v76에서 확정**됐다 — `pending_notification`
+  (v52 도입 원형에 v76에서 `surface_id` out 추가; `foreground` out 포함) + `activate_surface(session, surface_id) → found`(v76 신설). **v92**에서 세팅 GUI 알림 토글을
   macOS 권한 요청으로 잇는 `take_notification_authorization_request` 1회성 신호를 추가했다. 인앱 알림 센터는 chrome
   오버레이라 추가 ABI가 없다(Swift 무변경).
 

@@ -153,17 +153,16 @@ resize는 두 곳에 반영되어야 한다.
 
 ## session close
 
-이미 `PtyEvent.exited`로 종료가 관측된 session은 close 시 child를 다시 건드리지 않는다. 아직 살아 있는 child를 close할 때는 zombie를 남기지 않으면서도 shell이 정리할 기회를 주기 위해 신호를 단계적으로 올린다.
+이미 `PtyEvent.exited`로 종료가 관측된 session은 close 시 child를 다시 건드리지 않는다. 아직 살아 있는 child를 close할 때는 shell이 정리할 기회를 주기 위해 신호를 단계적으로 올린다. master fd는 이 단계에서 닫지 않는다(reader join 뒤 `deinit`에서 닫는다 — 아래 reader 정리 문단 참조).
 
 ```text
 close (child가 아직 살아 있을 때)
-  -> master fd close
   -> SIGHUP  (process group + child) + 짧은 grace 동안 reap 시도
   -> SIGTERM (process group + child) + 짧은 grace 동안 reap 시도
-  -> SIGKILL (process group + child) + blocking reap
+  -> SIGKILL (process group + child) + bounded reap (WNOHANG poll, 최대 ~3s)
 ```
 
-`setsid`로 child가 process group leader가 되므로 group(`-pid`)과 child(`pid`) 양쪽에 보낸다. grace는 짧고 상한이 있어 close가 오래 멈추지 않는다. 마지막 `SIGKILL`은 무시할 수 없으므로 blocking reap이 반드시 진행되어 zombie가 남지 않는다.
+`setsid`로 child가 process group leader가 되므로 group(`-pid`)과 child(`pid`) 양쪽에 보낸다. grace는 짧고 상한이 있어 close가 오래 멈추지 않는다. 마지막 `SIGKILL`은 무시할 수 없으므로 child 종료 자체는 보장되지만, **reap은 blocking `wait4`가 아니라 상한 있는 poll**(`reapBoundedAfterKill`, 10ms × 300 = 최대 ~3s, 보통 1~2회에 거둠)이다. 멀티스레드 reap 경합 등으로 `wait4(pid, 0)`이 영영 반환하지 않아 close가 22분 멈춘 사례가 관측돼, "무한 hang 위험" 대신 "포기 시 zombie가 잠깐 남을 수 있음"을 택했다 — 못 거둔 child는 부모 프로세스 종료 시 launchd/init이 고아로 회수하므로 zombie는 프로세스 수명 한정이다(단일 출처: `src/pty/macos.zig`의 `shutdownChild` 주석).
 
 이 escalation은 `PtySession.close`에서 동기적으로 수행하고, `deinit`은 같은 close 경로를 재사용한다. 이 분리가 필요한 이유는 app이 탭/창을 닫을 때 session memory를 바로 파괴하면 reader thread가 아직 `readEvent` 안에서 같은 session을 잡고 있을 수 있기 때문이다.
 
@@ -177,7 +176,7 @@ reader를 깨우는 방식은 self-pipe다. `readEvent`는 실제 `read` 전에 
 
 reap 경로도 마찬가지로 `close`가 끼어들 수 없는 bare blocking `waitpid`를 쓰지 않는다. EOF를 보면 먼저 `WNOHANG`로 거두고(보통 child가 이미 종료해 즉시 성공), child가 stdio만 닫고 계속 살아 있으면(드문 daemonize) `kqueue`로 child의 실제 종료(`EVFILT_PROC`/`NOTE_EXIT`)와 close의 wake(self-pipe `EVFILT_READ`)를 함께 기다린다. 그래서 child가 끝내 종료하지 않아도 `stopAndJoin`이 reader를 깨워 `join`이 멈추지 않고, child는 close의 SIGKILL escalation으로 정리된다.
 
-아직 남은 범위는 macOS window/app host의 실제 close button, tab close command, app quit lifecycle이 `FrameLoop.closeActiveLivePty`를 호출하도록 native lifecycle에 연결하는 일이다. `FrameLoop.closeActiveLivePty`는 registry에서 active surface의 live PTY를 찾아 `LivePtySession.closeAndDetach`로 내려간다. close 경로를 native UI와 조립할 때도 "신호를 올리며 반드시 reap한다"는 계약은 동일하게 유지한다.
+아직 남은 범위는 macOS window/app host의 실제 close button, tab close command, app quit lifecycle이 `FrameLoop.closeActiveLivePty`를 호출하도록 native lifecycle에 연결하는 일이다. `FrameLoop.closeActiveLivePty`는 registry에서 active surface의 live PTY를 찾아 `LivePtySession.closeAndDetach`로 내려간다. close 경로를 native UI와 조립할 때도 "신호를 단계적으로 올리고 상한 안에서 reap을 시도한다(절대 무한 대기하지 않는다)"는 계약은 동일하게 유지한다.
 
 ## 초기 테스트
 
@@ -185,7 +184,7 @@ reap 경로도 마찬가지로 `close`가 끼어들 수 없는 bare blocking `wa
 - output event는 drop되지 않는다.
 - process exit가 `PtyEvent.exited`로 관측된다.
 - resize request가 PTY layer까지 전달된다.
-- 아직 살아 있는 child를 close할 때 HUP/TERM을 무시해도 escalation으로 reap되어 zombie가 남지 않는다.
+- 아직 살아 있는 child를 close할 때 HUP/TERM을 무시해도 escalation으로 reap된다(reap은 hang 방지를 위해 상한 있는 poll — 위 session close 절).
 
 SurfaceRuntime reader thread와 pump 단계에서 추가된 테스트:
 

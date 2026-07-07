@@ -17,6 +17,19 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 각 라이선스 전문은 폰트 옆(`assets/fonts/<Family>/OFL.txt` 또는 `LICENSE.md`)에 두고, 번들에도 패밀리명 프리픽스로 함께 들어간다(`Resources/Fonts/<Family>-OFL.txt` 등).
 
+## 번들 아이콘 (GitHub Octicons)
+
+`assets/icons/`의 SVG 중 아래 8종은 **GitHub Octicons**(primer/octicons, MIT) 유래다. 빌드 준비 단계에서 `tools/svg_to_coverage.py`가 coverage 마스터로 변환해 커밋된 `src/renderer/icon_coverage_data.zig`(+ `src/platform/macos/icon_codepoints.h`)에 들어가고, 앱이 이 데이터를 렌더하므로 **파생 형태(coverage 데이터)로 배포물에 포함**된다. SVG 파일 자체는 번들에 복사되지 않는다.
+
+| 아이콘 | 파일 | 라이선스 | 저작권 | 출처 |
+| --- | --- | --- | --- | --- |
+| bell · folder · gear · git-branch · mark-github · plus · search · sidebar-collapse | `assets/icons/<이름>.svg` | MIT | © GitHub, Inc. | <https://github.com/primer/octicons> |
+
+- 라이선스 전문은 `assets/icons/LICENSE-octicons.txt`에 둔다(MIT — 저작권·허가 고지 유지 의무).
+- `sparkle.svg`·`diamond.svg`는 Maru 자작(파일 헤더 주석 참조)이라 이 표 대상이 아니다(Maru 본체 MIT).
+- **상표 주의**: `mark-github.svg`는 GitHub 로고 마크다. 라이선스(MIT)와 별개로 GitHub 상표이므로, GitHub(리포·프로필)로 연결하는 표시 용도로만 쓴다(<https://github.com/logos> 가이드라인). 현재 용도(사이드바 카드의 GitHub 리포 표시)는 이 범위 안이다.
+- 배포물 내 고지 노출은 아래 "About 화면 attribution"과 같은 후속으로 묶는다(현재는 리포 내 라이선스 파일 + 이 문서로 기록).
+
 ## 라이선스별 의무와 충족 방법
 
 ### SIL Open Font License 1.1 (OFL) — JetBrains Mono · Fira Code · Cascadia Code
@@ -49,5 +62,5 @@ Hack는 두 부분으로 나뉜다:
 
 1. **라이선스 호환 확인** — 재배포·임베드 허용 라이선스인지 본다(OFL·MIT·Apache-2.0 등). 불확실하면 사용자와 논의한다([project-rules.md](project-rules.md) §의존성).
 2. **원본 무수정 원칙** — 가능하면 원본을 그대로 넣는다. 수정(서브셋·패치)이 필요하면 RFN·상표·라이선스 표기 의무를 먼저 확인한다.
-3. **라이선스 파일 동봉** — `assets/fonts/<Family>/`에 폰트와 함께 라이선스 전문(`OFL.txt`/`LICENSE.md`/`LICENSE.txt`)을 둔다. `build.zig` 번들 단계가 이 파일명을 패밀리명 프리픽스로 자동 복사한다.
-4. **이 문서 + [font-strategy.md](font-strategy.md) 표 갱신** — 패밀리·버전·라이선스·저작권·출처를 기록한다.
+3. **라이선스 파일 동봉** — 자산 옆에 라이선스 전문을 둔다. 폰트는 `assets/fonts/<Family>/`(`OFL.txt`/`LICENSE.md` — `build.zig` 번들 단계가 패밀리명 프리픽스로 자동 복사), 아이콘처럼 파생 형태로만 배포물에 들어가는 자산은 원본 옆(`assets/icons/LICENSE-*.txt` 등)에 둔다.
+4. **이 문서 갱신**(폰트는 [font-strategy.md](font-strategy.md) 표도) — 이름·버전·라이선스·저작권·출처를 기록한다.

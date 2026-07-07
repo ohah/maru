@@ -103,6 +103,8 @@ struct 필드로 안 떨어지는 키는 **명시 핸들러**로 둔다(지금 �
 | 특수 키 | 이유 | 처리 |
 |---|---|---|
 | `theme.preset` | 한 줄이 여러 필드를 채움(확장) | `presetColors()`가 `config.theme`를 통째로 깔고, 뒤 개별 색이 override(순차) — 현행 유지 |
+| `chrome.preset` | 한 줄이 여러 chrome 축을 채움(TS3 — 룩 `chrome.theme` + 탭 `chrome.tab-style`) | `chromePresetValues()` 단일 출처로 두 축을 깔고, 뒤 개별 키가 override(theme.preset과 동형) |
+| `cursor.color` / `cursor.text` | **nullable 색**(스키마 제너릭은 non-null 필드만) | `dupValidColor` 재사용 명시 핸들러 — 유효할 때만 슬롯 갱신(palette와 동형) |
 | `window.padding-x` / `-y` | **alias**(두 필드 동시) | `padding-x`→left+right 같은 값 — 현행 유지(제너릭은 1키=1필드) |
 | `theme.palette.N` | **인덱스 키**(N=0~15) | suffix 파싱 + 색 검증 — 현행 유지. GUI는 16칸 팔레트 에디터(bespoke) |
 | `env.<KEY>` | **동적 prefix**(임의 KEY) | prefix 누적 → `Config.env` 리스트 — 현행 유지. GUI는 KEY/VALUE 리스트 에디터(bespoke) |
@@ -110,7 +112,7 @@ struct 필드로 안 떨어지는 키는 **명시 핸들러**로 둔다(지금 �
 | `workspace.root` | **경로 검증**(절대경로/`~`만) | 형식 규칙을 `loader.isValidWorkspaceRoot` **단일 헬퍼**로 뽑아 loader 파싱과 세팅 GUI 커밋(`setWorkspaceRoot`)이 공유(드리프트 방지). 제너릭 text 경로엔 없는 특수 검증이라 명시 핸들러 유지. GUI는 Workspace 섹션 합성 text 행(shell.args 동형, config-gui.md §6.6a) |
 | `shell.args` | **공백-토큰 리스트** | 한 줄을 공백으로 분리해 argv 배열 — 제너릭 스칼라(1키=1값)가 아니라 명시 핸들러. GUI는 토큰 리스트 에디터(bespoke) |
 
-> 즉 **스칼라/enum/bool/색/문자열 ~40개는 스키마-주도(공짜)**, 위 **7종만 bespoke**(명시 핸들러). bespoke GUI 위젯
+> 즉 **스칼라/enum/bool/색/문자열 ~40개는 스키마-주도(공짜)**, 위 표의 키들만 bespoke(명시 핸들러 — 목록이 늘면 이 표를 갱신한다). bespoke GUI 위젯
 > (팔레트·env·keybind 등)은 어차피 [settings-page.md] Phase G에서 만들 것이라 손해가 아니다 — 다만 **본문(스칼라)이
 > 공짜**가 된다.
 

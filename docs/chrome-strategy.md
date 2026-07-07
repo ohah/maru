@@ -12,7 +12,7 @@ chrome(탭바·사이드바·divider·focus 테두리·탭점·팝업·모달)�
 
 - chrome 컴포넌트는 **플랫폼·세션·렌더 백엔드를 모른다.** 순수 로직(상태) + 순수 렌더(상태+토큰 → semantic draw) + 순수 hit-test로, macOS·PTY 없이 헤드리스 단위 테스트한다.
 - **TUI(현재 cell-grid 룩)는 theme로 보존**하고 rich를 추가한다(교체 아님). 같은 컴포넌트 코드가 두 룩을 다 만든다.
-- 7600줄 `app_session.zig`의 chrome를 `src/chrome/`로 옮겨 세션은 "세션 코어(수명·입력·워크스페이스·ABI)"로 줄인다.
+- 거대해진 `app_session.zig`(이 문서 작성 시점 7,600줄 — 2026-07 현재 35,000줄+)의 chrome를 `src/chrome/`로 옮겨 세션은 "세션 코어(수명·입력·워크스페이스·ABI)"로 줄인다.
 
 ## 2. 베이스·결정 (왜 이 구조인가)
 
@@ -113,8 +113,8 @@ pub const Run = struct { text: []const u8, bold: bool = false };
 pub const ChromeDraw = struct { layer: Layer, ops: []const Op };  // 한 컴포넌트의 한 프레임 출력
 ```
 
-### 5.3 Backend — `chrome/backend.zig` (계약) + `platform/macos/chrome_tui_backend.zig`
-ChromeDraw를 실제 합성 입력으로 lowering. tui = `NativeMetalCell`(+텍스트는 glyph `PaneFrame`). rich(C4) = GPU 프리미티브.
+### 5.3 Backend — `chrome/backend.zig` (계약) + `platform/macos/chrome_tui_backend.zig` **(계획 — 두 파일 모두 아직 미생성)**
+ChromeDraw를 실제 합성 입력으로 lowering. tui = `NativeMetalCell`(+텍스트는 glyph `PaneFrame`). rich(C4) = GPU 프리미티브. **현황**: 별도 backend 파일 분리는 아직 실행되지 않았고, lowering은 `app_session.zig`의 `rasterizeOverlayCells`(오버레이)와 §6 매핑표의 손코드 헬퍼들(`sentinelBgCell`·`appendVerticalLine` 등 — 여전히 `app_session.zig` 잔존)이 담당한다(상단 현황 헤더와 동일).
 
 ```zig
 pub const ChromeFrame = struct {                 // replace()가 먹을 번들(layer별)
@@ -240,7 +240,7 @@ chrome.tab-style  = connected | pill | underline     (탭)        — 신규 축
 chrome `Spacing`에 enum 토큰을 둔다 — 컴포넌트는 `if (style == .pill)` 같은 분기를 **읽기만** 하고(색 토큰과 동형), 값은 platform이 채운다.
 
 ```zig
-pub const TabActiveStyle = enum(u8) { connected = 0, pill = 1, underline = 2 };
+pub const TabActiveStyle = enum(u8) { connected = 0, underline = 1, pill = 2 };
 // Spacing 안:
 tab_active_style: TabActiveStyle = .connected,
 ```

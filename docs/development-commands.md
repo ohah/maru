@@ -54,10 +54,14 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 외부 오라클(opt-in, libvterm 필요): `mise run oracle-ext`
 - 외부 오라클(opt-in, Ghostty libghostty-vt 필요): `mise run oracle-ghostty`
 - 외부 오라클(opt-in, Alacritty Rust dumper 필요): `mise run oracle-alacritty`
+- vttest 시각 적합성 점검(opt-in, 수동): `mise run vttest` (Maru 앱을 띄운다 — 그 안에서 `vttest`를 직접 실행해 시각 점검한다. `brew install vttest`. [VT 적합성 테스트](conformance-testing.md) 참조)
 - 빠른 스트레스 테스트: `mise run stress`
 - 긴 opt-in 스트레스 테스트: `mise run stress-soak`
 - 성능 예산 측정: `mise run perf`
 - macOS PTY opt-in 테스트: `mise run pty` (macOS `openpty` controlled command, SurfaceRuntime routing, resize, reader close/reap, bounded queue stress, 그리고 `$MARU_INTERACTIVE_SHELL` 또는 `$SHELL`을 `-i`로 실행하는 interactive shell smoke를 검증한다. interactive shell smoke는 `tests/artifacts/integration/pty/interactive-shell.*` raw/screen/snapshot/summary artifact를 남기지만, 사용자 dotfile/prompt escape 영향을 받으므로 기본 `mise run check`에는 넣지 않는다)
+- maru terminfo 검증(opt-in): `mise run terminfo-check` (`terminfo/`를 수정할 때 실행한다 — 컴파일 클린, Sync 2026 round-trip, Tc를 확인한다)
+- maru terminfo 설치(opt-in): `mise run install-terminfo` (`~/.terminfo`에 설치한다, sudo 불필요. 설치 후 config에 `term = "xterm-maru"`를 쓴다)
+- `maru ssh` 전파 smoke(opt-in): `mise run ssh-smoke` (`ssh localhost` 경유 — sshd/키가 없으면 skip한다. 먼저 `mise run build`가 필요하다)
 - 포맷: `mise run fmt`
 - 포맷 검사(변경 없이): `mise run fmt-check`
 - facade import 경계 검사: `mise run check-boundaries`

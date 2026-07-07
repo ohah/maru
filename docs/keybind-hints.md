@@ -50,7 +50,7 @@
 
 | 요소 | 배지(chord) | rect 출처 |
 |---|---|---|
-| 사이드바 워크스페이스 카드 1~9 | `⌘1`~`⌘9`(select_tab) | `sidebar.slotTop(i, header_h, slot_h, scroll)` — slotAt의 역(단일 출처) |
+| 사이드바 워크스페이스 카드 1~9 | `⌘1`~`⌘9`(select_tab) | `sidebar.rowTop(rows, i, header_h, card_slot_h, header_row_h, scroll)` — 옛 slotTop의 가변 높이판(그룹 헤더 row 도입으로 앞 row 높이 누적, 단일 출처) |
 | 사이드바 새 워크스페이스 + 버튼 | `⌘⇧T`(new_tab) | `sidebar.headerIconCol(.new_workspace, cols)` — render와 공유 |
 | 활성 pane 탭바 + 버튼 | `⌘T`(new_term) | `paneBarForLeaf` + `barMetrics.plusZoneStart` — render·hit-test와 공유 |
 | 활성 pane 활성 탭 | `⌘W`(close_term) | `barMetrics.segOf(active_term)` |
@@ -61,12 +61,12 @@
 
 **배지 1개** = 요소 rect 우상단에 셀 배경 `fill`(keycap_bg, 패널 대비 색 §3.6.3) + chord glyph text(surface_fg). 요소보다 chord가 넓으면 좌단으로 clamp(밖으로 안 나감). 전체 chord(`⌘1`)를 `formatChord`로 그대로 — per-key 분리(chordKeycaps)는 안 쓴다(요소 위 작은 배지라 한 토막이 낫다).
 
-**경계.** chrome 컴포넌트 `shortcut_hints`는 `State{visible}` + `view(badges: []Badge, …)`만(handle 없음 — 입력 비소비). `Badge = { rect: draw.Rect, chord: []const u8 }`. platform(`app_session.buildKeyHintBadges`)이 요소 레이아웃에서 rect를, `command_catalog.chordForAction`+`formatChord`로 chord를 빌드해 주입한다(find/palette의 row 주입과 동형). 요소 레이아웃 수식은 **`sidebar.zig`가 단일 출처**(`slotTop`·`headerIconCol`) — platform이 인라인 중복하지 않는다(KH-6 리뷰 지적: 인라인 중복이 `scroll` 이름 충돌을 낳았고, rename이 아니라 단일 출처화가 정답).
+**경계.** chrome 컴포넌트 `shortcut_hints`는 `State{visible}` + `view(badges: []Badge, …)`만(handle 없음 — 입력 비소비). `Badge = { rect: draw.Rect, chord: []const u8 }`. platform(`app_session.buildKeyHintBadges`)이 요소 레이아웃에서 rect를, `command_catalog.chordForAction`+`formatChord`로 chord를 빌드해 주입한다(find/palette의 row 주입과 동형). 요소 레이아웃 수식은 **`sidebar.zig`가 단일 출처**(`rowTop`(옛 slotTop — 사이드바 그룹 가변 높이 도입 때 rename)·`headerIconCol`) — platform이 인라인 중복하지 않는다(KH-6 리뷰 지적: 인라인 중복이 `scroll` 이름 충돌을 낳았고, rename이 아니라 단일 출처화가 정답).
 
 ```mermaid
 flowchart TD
   V["key_hints.visible (Swift 홀드 감지 §3.4·3.5)"] --> BB["app_session.buildKeyHintBadges"]
-  BB --> RE["요소 rect: sidebar.slotTop / headerIconCol / active_pane_rect"]
+  BB --> RE["요소 rect: sidebar.rowTop / headerIconCol / active_pane_rect"]
   BB --> CH["chord: command_catalog.chordForAction + formatChord (unbind 반영)"]
   RE --> BD["[]shortcut_hints.Badge {rect, chord}"]
   CH --> BD

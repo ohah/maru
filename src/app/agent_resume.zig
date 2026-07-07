@@ -4,6 +4,7 @@
 //! resume", redaction 토큰은 docs/project-rules.md "민감정보 redaction 기준".
 
 const std = @import("std");
+const redact = @import("../redact.zig"); // 민감정보 redaction 단일 출처(중립 leaf) — 토큰 목록·key 판정을 공유
 
 pub const Kind = enum {
     claude,
@@ -26,25 +27,13 @@ pub const Kind = enum {
 
 // ── redaction (저장 전) ──────────────────────────────────────────────────────────────
 
-/// redaction 대상 key 토큰 — docs/project-rules.md "민감정보 redaction 기준" 단일 출처를 코드로 반영한 것.
-/// **다른 redaction 소비처(env override 저장·trace fixture 등)가 생기면 새 목록을 만들지 말고 이 상수를 import**해
-/// 단일 출처를 유지한다(목록 divergence = 한쪽 포맷에서 자격증명 유출). 대소문자 무시 부분 일치.
-pub const sensitive_tokens = [_][]const u8{ "TOKEN", "SECRET", "PASSWORD", "PASSWD", "COOKIE", "KEY", "AUTH", "CREDENTIAL", "SESSION" };
+/// redaction 대상 key 토큰 — 단일 출처는 중립 leaf `src/redact.zig`(docs/project-rules.md 미러). 여기선 재노출만 해
+/// 기존 소비처(app_session 등)의 `agent_resume.sensitive_tokens` 경로를 유지한다(목록은 한 곳에만 존재).
+pub const sensitive_tokens = redact.sensitive_tokens;
 
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
-    }
-    return false;
-}
-
-/// key 이름에 민감 토큰이 (대소문자 무시) 부분 일치로 들어가면 true. deny-by-default(project-rules.md).
+/// key 이름에 민감 토큰이 있으면 true(redact.keyIsSensitive 위임 — 단일 출처).
 fn isSensitiveKey(key: []const u8) bool {
-    for (sensitive_tokens) |tok| if (containsIgnoreCase(key, tok)) return true;
-    return false;
+    return redact.keyIsSensitive(key);
 }
 
 /// 선두 '-'/'--'를 제거한 key를 돌려준다(0.16엔 mem.trimLeft 없음).

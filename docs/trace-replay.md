@@ -70,7 +70,7 @@ event 4 shell.command-end surface=1 row=2 exit=0
 
 **live 레코딩**(구현됨): `MARU_TRACE=<파일경로>`로 켠다. `app/trace_recorder.zig`의 `TraceRecorder`가 `SurfaceRuntime.applyPtyEvent`(output/exited)·`resize` 훅에서 base kind를 누적하고, 세션 종료(`AppSession.deinit`)에서 그 경로로 굳힌다. opt-in(미설정이면 오버헤드 0), in-memory 누적(핫패스 파일 I/O 없음, 8 MB 상한). shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다.
 
-**아직 없는 것**(후속): 증분 flush(크래시 복원), redaction 강제, 입력 이벤트 기록.
+**아직 없는 것**(후속): 증분 flush(크래시 복원), 입력 이벤트 기록.
 
 ### Control-plane event (미정)
 
@@ -124,6 +124,8 @@ raw output bytes에는 경로, 서버 이름, token, 환경변수 값이 섞일 
 
 git에 fixture로 넣으려면 [프로젝트 규칙](project-rules.md)의 "민감정보 redaction 기준 (단일 출처)"을 따른다. 같은 키 목록과 경로 일반화·익명화 규칙을 쓰며, 여기에 목록을 복제하지 않는다. sanitize 후에도 같은 replay 결과가 나오는지 확인하는 것까지가 fixture 추가 조건이다.
 
+코드 단일 출처는 중립 leaf `src/redact.zig`다(project-rules.md 미러 — 토큰 목록·key 판정을 env·argv·fixture가 공유). **`redact.guardFixture(text)`가 저장 가드**로, 민감 할당(`<민감키>=값`/`:값`)이 있으면 `SensitiveContent`로 거부한다(deny-by-default). 라이브 `MARU_TRACE`는 local-only라 이 가드를 거치지 않지만, 민감 할당이 잡히면 trace 파일 write 시 stderr로 한 번 알려 fixture 승격 전 sanitize를 유도한다.
+
 ## 초기 테스트
 
 reader(구현됨, `observability/trace.zig`):
@@ -136,4 +138,6 @@ replay 재적용(구현됨, `observability/replay.zig`):
 - **semantic replay(fallback)**: output 없는 shell-only trace는 shell.* 를 OSC로 재발행해 이벤트 스트림·행·cwd를 재구성(cwd percent-encode 왕복 포함).
 - replay는 private parser storage를 import하지 않고 `core.write`/`core.resize` public 경로만 쓴다.
 
-후속(live 레코딩): 민감정보 키워드가 있는 trace fixture는 저장 전에 실패한다(redaction).
+redaction(구현됨, `src/redact.zig`):
+- **fixture 가드**: 민감 할당이 있는 trace 텍스트는 `guardFixture`가 `SensitiveContent`로 거부한다(clean은 통과). 평범한 단어("monkey" 등 할당 아님)엔 안 걸려 가드가 쓸모 있다.
+- `keyIsSensitive`가 env·argv redaction과 같은 토큰 목록을 공유한다(agent_resume가 위임).

@@ -68,9 +68,9 @@ event 4 shell.command-end surface=1 row=2 exit=0
 
 **구현됨**: base kind(`output`/`input`/`resize`/`process-exit`) writer(`writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`) + reader(`parseEvents` — shell.* 와 base kind 전부 되읽음) + **replay 재적용**(`observability/replay.zig`의 `replayTrace`, 아래 "replay가 하는 일") + **live 레코딩**. `output`을 재생하면 파서가 화면·셸 이벤트·cwd를 전부 재도출한다(byte-for-byte).
 
-**live 레코딩**(구현됨): `MARU_TRACE=<파일경로>`로 켠다. `app/trace_recorder.zig`의 `TraceRecorder`가 `SurfaceRuntime.applyPtyEvent`(output/exited)·`resize` 훅에서 base kind를 누적하고, 세션 종료(`AppSession.deinit`)에서 그 경로로 굳힌다. opt-in(미설정이면 오버헤드 0), in-memory 누적(핫패스 파일 I/O 없음, 8 MB 상한). shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다.
+**live 레코딩**(구현됨): `MARU_TRACE=<파일경로>`로 켠다. `app/trace_recorder.zig`의 `TraceRecorder`가 `SurfaceRuntime.applyPtyEvent`(output/exited)·`resize` 훅에서 base kind를 host가 준 file writer에 **이벤트마다 쓰고 flush**한다(증분 append). 그래서 **크래시가 나도 직전까지의 이벤트가 디스크에 남아** 재생된다(clean 종료 불필요 — `AppSession.deinit`은 마지막 버퍼 flush + sync + close만). opt-in(미설정이면 오버헤드 0), 8 MB 상한. write가 중간에 끊겨 부분 줄이 남아도 reader(`parseEvents`)가 잘린 마지막 줄을 관대 처리한다. shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다.
 
-**아직 없는 것**(후속): 증분 flush(크래시 복원), 입력 이벤트 기록.
+**아직 없는 것**(후속): 입력 이벤트 기록, 경로/유저명 익명화.
 
 ### Control-plane event (미정)
 

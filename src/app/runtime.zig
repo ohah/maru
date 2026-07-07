@@ -489,8 +489,9 @@ test "runtime records base kind to trace recorder and replay reconstructs the sc
     var runtime = SurfaceRuntime.init(allocator);
     defer runtime.deinit();
 
-    var rec = TraceRecorder.init(allocator);
-    defer rec.deinit();
+    var out: std.Io.Writer.Allocating = .init(allocator); // 테스트 sink(in-memory) — 프로덕션은 host가 file writer 주입
+    defer out.deinit();
+    var rec = TraceRecorder.init(&out.writer);
     runtime.trace_recorder = &rec; // host가 MARU_TRACE로 주입하는 것과 동일
 
     var surface = try surface_mod.Surface.init(allocator, 7, .{ .cols = 8, .rows = 2 });
@@ -505,7 +506,7 @@ test "runtime records base kind to trace recorder and replay reconstructs the sc
 
     // recorder가 surface_id=7로 이벤트를 기록. attach가 초기 크기(8x2)를 event 0 resize로 먼저 남겨 trace가
     // self-contained(초기 grid 복원 가능)하다 — 그 뒤 output·resize(10x3)·process-exit.
-    const t = rec.text();
+    const t = out.written();
     try std.testing.expect(std.mem.indexOf(u8, t, "event 0 resize surface=7 cols=8 rows=2\n") != null); // 초기 크기 baseline
     try std.testing.expect(std.mem.indexOf(u8, t, "output surface=7 bytes=\"ab\\r\\nCD\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, t, "resize surface=7 cols=10 rows=3\n") != null);
@@ -528,8 +529,9 @@ test "runtime: 멀티 surface trace replay는 surface별로 분리 재구성한�
     const allocator = std.testing.allocator;
     var runtime = SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    var rec = TraceRecorder.init(allocator);
-    defer rec.deinit();
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var rec = TraceRecorder.init(&out.writer);
     runtime.trace_recorder = &rec;
 
     var sa = try surface_mod.Surface.init(allocator, 7, .{ .cols = 6, .rows = 1 });
@@ -547,7 +549,7 @@ test "runtime: 멀티 surface trace replay는 surface별로 분리 재구성한�
     try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "AAAA" } }, std.testing.io);
     try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 20, .bytes = "BBBB" } }, std.testing.io);
 
-    const t = rec.text();
+    const t = out.written();
     const replay = @import("../observability.zig").replay;
 
     // 기본 replay(첫 output surface=7)는 surface 7만 재구성 → "AAAA"만, "BBBB" 섞이지 않음.

@@ -47,15 +47,15 @@ Snapshot version은 제품 버전이 아니라 **테스트와 디버깅 데이�
 
 ## v3 reader 규칙
 
-초기 v3 reader는 보수적으로 동작한다.
+v3 reader는 **구현됐다** — `observability/snapshot.zig`의 `parseSnapshot(allocator, text) → ParsedSnapshot`이 writer(`renderTerminalSnapshot`)가 낸 텍스트를 되읽는다(round-trip 테스트). **부분 복원**임에 유의: writer가 직렬화하는 필드(size·cursor·dirty·행 텍스트·cell-metadata·styled-cells)만 채우고, writer가 안 쓰는 필드(cursor_shape·cursor_blink·prompt_marks·last_command_exit·kitty placements/images·`Style`의 dim/reverse/blink 등)는 복원 대상이 아니다 — 이들이 필요해지면 writer를 먼저 확장한다. 아래 규칙대로 보수적으로 동작한다.
 
-- 첫 줄 전체가 bare 토큰 `maru.snapshot.v3`인지 확인한다. `schema=` 같은 접두어 없이 첫 줄이 곧 schema 토큰이다(현재 코드가 내보내는 형식).
+- 첫 줄 전체가 bare 토큰 `maru.snapshot.v3`인지 확인한다(아니면 `BadHeader`). `schema=` 같은 접두어 없이 첫 줄이 곧 schema 토큰이다(현재 코드가 내보내는 형식).
 - dirty 상태는 `dirty start_row=<n> end_row=<n>` 또는 `dirty none` 중 하나다. `dirty none`은 renderer가 이미 변경 범위를 소비했거나 변경 범위가 없다는 뜻이다.
 - `cell-metadata` section은 width가 1이 아니거나 continuation cell이거나 combining mark가 있는 cell만 기록한다.
 - continuation cell은 앞 cell의 double-width glyph가 차지한 두 번째 cell이다. row text에는 중복 출력하지 않는다.
 - combining mark는 직전에 출력된 printable cell에 붙는 zero-width codepoint다. cursor를 전진시키지 않으며, 마지막 열에서 cursor가 그 cell에 머물러도 같은 cell에 붙는다. 붙을 base가 없으면(스트림 시작, CR/LF 직후) 어디에도 기록되지 않는다.
-- 알 수 없는 semantic section을 만나면 실패한다.
-- `debug.` prefix를 가진 non-semantic line은 무시할 수 있다.
+- 알 수 없는 semantic section을 만나면 실패한다(`UnknownSection` — styled-cells `none` 뒤 낯선 라인 등).
+- `debug.` prefix를 가진 non-semantic line은 무시한다(LineReader가 건너뜀).
 
 이 규칙의 의도는 조용히 잘못 해석하는 것을 막는 것이다.
 
@@ -74,9 +74,10 @@ consumer 영향:
   replay, inspector, golden, artifact reader가 영향을 받는지
 ```
 
-## 초기 테스트
+## 초기 테스트 (구현됨 — `observability/snapshot.zig`)
 
-- snapshot text 첫 줄에 schema가 있다.
-- v3 reader가 v3 snapshot을 읽는다.
-- v3 reader가 모르는 semantic section을 만나면 실패한다.
-- debug-only line 추가는 version bump 없이 허용된다.
+- snapshot text 첫 줄에 schema가 있다(writer 테스트).
+- **round-trip**: writer가 낸 v3 텍스트를 `parseSnapshot`으로 되읽으면 직렬화된 필드(size·cursor·dirty·행 텍스트·wide/grapheme cell-metadata·styled-cells)가 구조로 복원된다.
+- v3 reader가 모르는 semantic section을 만나면 실패한다(`UnknownSection`), 잘못된 헤더는 `BadHeader`.
+- debug-only(`debug.`) line은 무시하고 version bump 없이 허용된다.
+- rgb/indexed 색·`\|`·`\\` escape된 행 텍스트가 복원된다.

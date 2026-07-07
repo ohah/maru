@@ -15,6 +15,7 @@ pub const WindowKind = window_membership.WindowKind;
 pub const MetadataScope = window_membership.MetadataScope;
 pub const window_graph = @import("session/window_graph.zig"); // M1: window→workspace→pane→surface_ref 순수 배치 모델 + move/merge
 pub const WindowGraph = window_graph.WindowGraph;
+pub const group_normalize = @import("session/group_normalize.zig"); // M3c: 사이드바 그룹 정규화 순수 함수(마커 승계·핀 재정규화·depth 파생) L2 리프트
 pub const live_surface_registry = @import("session/live_surface_registry.zig"); // M2a: 앱 전역 live surface 런타임 소유자 골격(주소 안정 heap, generic Rt)
 pub const LiveSurfaceRegistry = live_surface_registry.LiveSurfaceRegistry;
 pub const control_plane = @import("session/control_plane.zig"); // Track C 1a: 세션 컨트롤 플레인 wire 프로토콜(JSON-RPC 2.0/ndjson/hello, 순수 schema/parser/framing)

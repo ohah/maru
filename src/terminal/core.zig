@@ -908,10 +908,16 @@ pub const TerminalCore = struct {
         return .{ .row = cr, .exit = exit };
     }
 
-    /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다(bracketed paste 래핑 + CR 정규화 + ESC 인젝션 방어).
+    /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다(bracketed paste 래핑 + CR 정규화 + 위험 제어 바이트 방어).
     /// 본문: input_report.encodePaste. 호출자가 free한다.
     pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         return input_report.encodePaste(self, allocator, bytes);
+    }
+
+    /// 이 붙여넣기가 paste protection 확인을 요구하는지(개행/ESC[201~ 인젝션 + bracketed 상태·설정 반영).
+    /// 본문: input_report.pasteNeedsConfirmation. app이 확인 모달을 띄울지 결정하는 데 쓴다.
+    pub fn pasteNeedsConfirmation(self: *const TerminalCore, data: []const u8, protection_enabled: bool, bracketed_safe: bool) bool {
+        return input_report.pasteNeedsConfirmation(self, data, protection_enabled, bracketed_safe);
     }
 
     // ── 선택/검색/URL facade — 본문은 selection.zig(외부 점-호출이라 struct 메서드로 잔류) ──────────
@@ -5076,6 +5082,41 @@ test "encodePaste strips ESC from the body to prevent bracketed-paste injection"
         if (b == 0x1b) esc_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), esc_count);
+}
+
+test "encodePaste strips the full xterm control-byte set (NUL/BS/DEL/VINTR 등), not just ESC" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    // 위험 제어 바이트가 전부 공백으로 치환된다(xterm/Ghostty strip 목록). 탭·정상 글자는 보존, 개행은 \r.
+    const dangerous = "a\x00b\x08c\x7fd\x03e\x1af\tg\nh";
+    const encoded = try core.encodePaste(std.testing.allocator, dangerous);
+    defer std.testing.allocator.free(encoded);
+    // NUL/BS/DEL/Ctrl+C/Ctrl+Z → 공백, \t 보존, \n → \r.
+    try std.testing.expectEqualStrings("a b c d e f\tg\rh", encoded);
+}
+
+test "pasteNeedsConfirmation: 개행/인젝션 감지 + bracketed-safe 게이트 (Ghostty 동형)" {
+    // 이 테스트가 증명하는 것: paste protection 게이트가 (1) protection 꺼짐이면 무조건 통과, (2) 비-bracketed
+    // 개행 붙여넣기는 확인 요구, (3) bracketed + bracketed-safe면 개행이 있어도 확인 생략(괄호가 감쌈),
+    // (4) 단 bracketed여도 본문 종료 마커(ESC[201~)는 항상 확인(조기 종료 인젝션), (5) 개행 없는 평문은 안전.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+
+    // 비-bracketed 기본(2004 off):
+    try std.testing.expect(!core.pasteNeedsConfirmation("echo hi", true, true)); // 개행 없음 → 안전
+    try std.testing.expect(core.pasteNeedsConfirmation("echo hi\nrm -rf ~", true, true)); // \n → 확인
+    try std.testing.expect(core.pasteNeedsConfirmation("a\rb", true, true)); // \r도 실행 트리거 → 확인
+    try std.testing.expect(!core.pasteNeedsConfirmation("echo hi\nrm", false, true)); // protection 꺼짐 → 통과
+
+    // bracketed paste on(zsh/claude가 켬):
+    try core.write("\x1b[?2004h");
+    try std.testing.expect(core.bracketed_paste);
+    // bracketed-safe=true(기본): 개행이 있어도 괄호가 감싸 안전 → 확인 생략.
+    try std.testing.expect(!core.pasteNeedsConfirmation("echo hi\nrm -rf ~", true, true));
+    // 단 본문 종료 마커는 bracketed여도 항상 확인(괄호 조기 종료 인젝션).
+    try std.testing.expect(core.pasteNeedsConfirmation("x\x1b[201~rm", true, true));
+    // bracketed-safe=false: bracketed여도 개행 검사 → 확인.
+    try std.testing.expect(core.pasteNeedsConfirmation("echo hi\nrm", true, false));
 }
 
 test "extractUrlAt finds an http(s) URL in the clicked word, across soft-wrap, trimming punctuation" {

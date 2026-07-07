@@ -1292,6 +1292,11 @@ pub const AppSession = struct {
     // Cmd+Q "maru를 종료할까요?" 확인 모달의 보류. true면 confirm_accept가 quit_decision=.accepted,
     // confirm_cancel이 .cancelled로 latch한다. requestAppQuit이 세우며 pending_close/pending_reset과 배타(한 번에 한 모달).
     pending_quit: bool = false,
+    // 붙여넣기 보호(input.paste-protection) 확인 모달의 보류. 위험한 붙여넣기(개행/ESC[201~ 인젝션)를 감지하면
+    // 바로 PTY로 안 보내고 이 버퍼에 최종 payload(escape 적용 후)를 세션 소유로 보관한 뒤 확인 모달을 연다.
+    // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.
+    // pending_close/reset/quit과 배타(한 번에 한 모달 — showConfirmButtons가 열 때 비운다).
+    pending_paste_confirm: std.ArrayList(u8) = .empty,
     // Cmd+Q 종료 확인의 결정 latch. tick epilogue가 FrameSummary.quit_decision에 실어 host로 한 번 전달한 뒤 .none으로 리셋한다.
     quit_decision: QuitDecision = .none,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
@@ -4053,6 +4058,9 @@ pub const AppSession = struct {
             self.pending_quit = false;
             self.quit_decision = .cancelled; // 다음 tick에 host가 NSApp.reply(false) → 앱 유지
         }
+        // 보류 중이던 붙여넣기 확인이 있으면 폐기한다 — 새 모달이 그 자리를 차지하므로(한 번에 한 모달). 붙여넣기
+        // 확인 자신은 이 호출 *뒤에* payload를 보관하므로(submitPaste 순서) 자기 것을 지우지 않는다.
+        self.pending_paste_confirm.clearRetainingCapacity();
         self.dismissMessageOverlays();
         self.clearAllHover(); // 모달 뒤(중앙 패널 밖)에 stale 호버 강조가 얼어붙지 않게 — hoverCursor는 모달 중 호버를 안 갱신
         self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), buttons);
@@ -6570,6 +6578,22 @@ pub const AppSession = struct {
         if (std.c.getenv("MARU_OPEN_NOTIFICATIONS_EMPTY") != null and !self.chrome_host.notifications.open) {
             self.openNotificationPanel();
         }
+        // MARU_PASTE=<텍스트> — 그 텍스트를 붙여넣는다(pasteText, escape 없음). paste protection 확인 모달을
+        // 헤드리스 스크린샷으로 self-verify하는 debug-gate — 개행이 있으면 확인 모달이 뜬다. `\n`은 실제 개행으로
+        // 해석해 여러 줄을 만든다(env로 리터럴 개행 넣기 번거로워서). 미설정이면 무동작.
+        if (std.c.getenv("MARU_PASTE")) |pv| {
+            const raw = std.mem.span(pv);
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(self.allocator);
+            var i: usize = 0;
+            while (i < raw.len) : (i += 1) {
+                if (raw[i] == '\\' and i + 1 < raw.len and raw[i + 1] == 'n') {
+                    buf.append(self.allocator, '\n') catch break;
+                    i += 1;
+                } else buf.append(self.allocator, raw[i]) catch break;
+            }
+            self.pasteText(buf.items, false);
+        }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();
         // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.
@@ -8794,19 +8818,22 @@ pub const AppSession = struct {
                 } else if (self.pending_reset) {
                     self.pending_reset = false;
                     self.resetAllSettings(); // 리셋 확인 — 전체 기본값 + config 파일 덮어쓰기
+                } else if (self.pending_paste_confirm.items.len > 0) {
+                    self.confirmPendingPaste(); // 붙여넣기 확인 — 보관 payload를 allow_unsafe로 재제출 후 버퍼 비움
                 } else {
                     const target = self.pending_close;
                     self.pending_close = null;
                     if (target) |t| self.executeClose(t);
                 }
             },
-            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료)을 버린다.
+            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기)을 버린다.
                 if (self.pending_quit) {
                     self.pending_quit = false;
                     self.quit_decision = .cancelled; // 다음 tick summary로 Swift에 전달 → NSApp.reply(false)
                 }
                 self.pending_close = null;
                 self.pending_reset = false;
+                self.pending_paste_confirm.clearRetainingCapacity(); // 취소한 붙여넣기 payload 폐기
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
@@ -11243,12 +11270,40 @@ pub const AppSession = struct {
     /// 타입에 묶여 host(Swift)가 정하고, 이스케이프 '메커니즘'은 여기(Zig)가 단일 출처로 한다.
     pub fn pasteText(self: *AppSession, bytes: []const u8, escape_each: bool) void {
         if (!self.surface_initialized or bytes.len == 0) return;
-        // escape면 NUL 구분 토큰을 각각 셸 이스케이프 후 공백 join한 임시 버퍼를 encodePaste에 넘긴다.
+        // escape면 NUL 구분 토큰을 각각 셸 이스케이프 후 공백 join한 임시 버퍼를 만든다(최종 payload).
         const payload: []const u8 = if (escape_each)
             shellEscapeJoin(self.allocator, bytes) catch return
         else
             bytes;
         defer if (escape_each) self.allocator.free(payload);
+        self.submitPaste(payload, false); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
+    }
+
+    /// 붙여넣기 확인 모달 메시지(단일 출처). 미리보기(붙여넣을 내용 표시)는 confirm 컴포넌트가 단일 메시지
+    /// 한 줄만 받아 후속으로 둔다 — 지금은 개행/제어문자 위험을 알리고 진행 여부만 묻는다.
+    const paste_confirm_message = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?";
+
+    /// 최종 payload(escape 적용 후 평문)를 인코딩해 PTY 큐에 넣는다. allow_unsafe=false면 paste protection
+    /// 게이트를 먼저 통과해야 하고, 위험(개행/ESC[201~ 인젝션)하면 payload를 세션 소유 버퍼에 보관하고 확인
+    /// 모달을 띄운 뒤 반환한다(confirmPendingPaste가 allow_unsafe=true로 재호출). 게이트 판정은 core가 단일
+    /// 출처(pasteNeedsConfirmation — bracketed 상태·설정 반영). 큐/flush는 기존 non-blocking 경로 그대로.
+    fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool) void {
+        if (!allow_unsafe and self.activeSurface().core.pasteNeedsConfirmation(
+            payload,
+            self.loaded_config.config.input.paste_protection,
+            self.loaded_config.config.input.bracketed_paste_is_safe,
+        )) {
+            // 위험 → 바로 실행 대신 확인. showConfirmButtons가 (paste 포함) 다른 보류를 비우므로 그 호출
+            // *뒤에* 보관한다(requestAppQuit의 pending_quit 순서와 동형 — 자기 payload를 자기가 안 지움).
+            self.showConfirmButtons(paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+            self.pending_paste_confirm.clearRetainingCapacity();
+            self.pending_paste_confirm.appendSlice(self.allocator, payload) catch {
+                // 보관 실패(OOM): 유령 확인(예 눌러도 아무것도 안 붙는)을 막으려 모달도 닫는다.
+                self.pending_paste_confirm.clearRetainingCapacity();
+                self.chrome_host.confirm.dismiss();
+            };
+            return;
+        }
         const encoded = self.activeSurface().core.encodePaste(self.allocator, payload) catch return;
         defer self.allocator.free(encoded);
         // 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
@@ -11257,6 +11312,13 @@ pub const AppSession = struct {
         self.pendingPasteRetarget();
         self.pending_paste.appendSlice(self.allocator, encoded) catch return;
         self.flushPendingPaste();
+    }
+
+    /// 확인 모달에서 "붙여넣기"를 고른 뒤 보관한 payload를 실제로 붙여넣는다(allow_unsafe로 게이트 우회 —
+    /// 사용자가 이미 확인). submitPaste는 allow_unsafe면 payload를 안 건드리므로 소비 후 버퍼를 비운다.
+    fn confirmPendingPaste(self: *AppSession) void {
+        self.submitPaste(self.pending_paste_confirm.items, true);
+        self.pending_paste_confirm.clearRetainingCapacity();
     }
 
     // 드롭 업로드 백그라운드 스레드에 넘기는 작업 묶음(모두 owned — 워커가 해제). io를 안 싣는다:
@@ -17471,6 +17533,7 @@ pub const AppSession = struct {
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.config_path_buffer) |b| self.allocator.free(b);
         self.pending_paste.deinit(self.allocator);
+        self.pending_paste_confirm.deinit(self.allocator);
         // 진행 중 업로드 스레드 완료 대기(detach 스레드가 self.upload_*를 건드리므로 self 해제 전 0까지).
         while (true) {
             self.upload_mutex.lockUncancelable(self.io);
@@ -34146,7 +34209,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     const cf2 = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(command_catalog.entries.len, cf2.keybind_entries.len);
     try std.testing.expect(cf2.enums.len > 0); // input dropdown 복귀
-    try std.testing.expectEqual(@as(usize, 3), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing(F1-6) + option-as-meta(F2-2) + keyhint.enabled(KH-3) 3개(split bool은 workspace라 검색 끝나 사라짐)
+    try std.testing.expectEqual(@as(usize, 5), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing(F1-6) + option-as-meta(F2-2) + keyhint.enabled(KH-3) + paste-protection + bracketed-paste-is-safe 5개(split bool은 workspace라 검색 끝나 사라짐)
 }
 
 test "mouse-hide-while-typing: IME 확정(글자) 입력 시 takeMouseHide 신호(1회성), 한글·meta chord·config off 구분 (F1-6)" {
@@ -35104,6 +35167,10 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
     // 포함한 줄 단위로 만든다: controlled 자식(read -r line)은 canonical 모드라 개행 없는
     // 대용량은 줄을 영영 못 끝내 read에 갇히고, deinit의 자식 reap(wait4)이 hang된다 — 첫
     // 줄이 들어가면 자식이 진행해 정상 종료한다.
+    // 이 테스트는 non-blocking drain 경로가 목적이라 paste protection을 끈다 — 안 그러면 개행 포함
+    // 페이로드가 확인 모달에 걸려 큐로 안 들어가고, 검증이 무의미(0==0)해진다(paste protection 자체는
+    // 별도 테스트가 커버). 실제 사용자 config 기본은 protection ON.
+    session.loaded_config.config.input.paste_protection = false;
     const big = try allocator.alloc(u8, 64 * 1024);
     defer allocator.free(big);
     @memset(big, 'x');
@@ -35118,6 +35185,91 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
     }
     // 자식(read 대기 중)이 소비하므로 결국 큐가 빈다.
     try std.testing.expectEqual(session.pending_paste_offset, session.pending_paste.items.len);
+}
+
+test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 시 자식까지 도달·취소는 미도달·off는 즉시 (input.paste-protection)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 PTY/모달 경로
+    const allocator = std.testing.allocator;
+
+    // controlled_smoke 자식은 `read -r line` 한 줄을 읽어 `Maru app input:<line>`로 에코한다(PTY 라인 규율
+    // ICRNL이 CR→NL 변환하므로 encodePaste가 \n을 흘린 \r가 read 종료로 인식된다). 이 에코를 화면에서 찾아
+    // "붙여넣기가 실제 자식 PTY까지 도달했는지"를 결정론적으로 본다. 자식이 한 줄만 읽고 종료하므로 각
+    // 시나리오(accept/cancel/off)는 **fresh 세션**으로 분리한다(한 세션 재사용 시 첫 줄 뒤 자식이 죽어 취약).
+    const H = struct {
+        fn make(a: std.mem.Allocator) !*AppSession {
+            const s = try a.create(AppSession);
+            errdefer a.destroy(s);
+            try s.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+                .abi_version = abi_version,
+                .cols = 40,
+                .rows = 10,
+                .queue_capacity = 16,
+                .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            });
+            return s;
+        }
+        /// bound tick 안에 활성 surface 화면이 needle을 담는지(자식 에코 관측). deinit reap도 여기 tick으로 자식을 진행시킨다.
+        fn tickUntil(s: *AppSession, needle: []const u8, a: std.mem.Allocator) !bool {
+            var i: usize = 0;
+            while (i < 400) : (i += 1) {
+                _ = try s.tick();
+                const dump = try s.activeSurface().core.dumpUtf8(a);
+                defer a.free(dump);
+                if (std.mem.indexOf(u8, dump, needle) != null) return true;
+            }
+            return false;
+        }
+    };
+
+    // (A) 확인(accept) → 붙여넣기가 자식 PTY까지 도달한다(자식이 "Maru app input:AXK" 에코).
+    {
+        const s = try H.make(allocator);
+        defer {
+            s.deinit();
+            allocator.destroy(s);
+        }
+        s.pasteText("AXK\n", false); // \n → 위험 → 보류
+        try std.testing.expect(s.chrome_host.confirm.open); // 확인 모달 열림
+        try std.testing.expect(s.pending_paste_confirm.items.len > 0); // payload 보관
+        try std.testing.expectEqual(@as(usize, 0), s.pending_paste.items.len); // 아직 PTY로 안 감(보류)
+        // 프로덕션 순서(confirm.handle이 dismiss 후 dispatch)를 흉내: dismiss → dispatch.
+        s.chrome_host.confirm.dismiss();
+        s.dispatchChromeAction(.confirm_accept);
+        try std.testing.expectEqual(@as(usize, 0), s.pending_paste_confirm.items.len); // 보류 소비
+        try std.testing.expect(try H.tickUntil(s, "Maru app input:AXK", allocator)); // 자식이 붙여넣은 줄을 받음
+    }
+
+    // (B) 취소(cancel) → 붙여넣기가 자식까지 가지 않는다(자식은 read에 대기, "Maru app input:" 안 뜸).
+    {
+        const s = try H.make(allocator);
+        defer {
+            s.deinit();
+            allocator.destroy(s);
+        }
+        s.pasteText("CXL\n", false);
+        try std.testing.expect(s.chrome_host.confirm.open);
+        try std.testing.expect(s.pending_paste_confirm.items.len > 0);
+        s.chrome_host.confirm.dismiss();
+        s.dispatchChromeAction(.confirm_cancel);
+        try std.testing.expectEqual(@as(usize, 0), s.pending_paste_confirm.items.len); // 폐기
+        try std.testing.expectEqual(@as(usize, 0), s.pending_paste.items.len); // PTY 큐에도 안 들어감
+        // 취소했으니 자식은 입력을 못 받는다 — 여러 tick 후에도 에코가 없다(붙여넣은 게 없으니 read 미완).
+        try std.testing.expect(!(try H.tickUntil(s, "Maru app input:", allocator)));
+    }
+
+    // (C) protection off → 모달 없이 바로 자식까지 도달.
+    {
+        const s = try H.make(allocator);
+        defer {
+            s.deinit();
+            allocator.destroy(s);
+        }
+        s.loaded_config.config.input.paste_protection = false;
+        s.pasteText("OXF\n", false); // 개행 있어도 off라 확인 없음
+        try std.testing.expect(!s.chrome_host.confirm.open); // 모달 없음
+        try std.testing.expectEqual(@as(usize, 0), s.pending_paste_confirm.items.len); // 보관 안 함
+        try std.testing.expect(try H.tickUntil(s, "Maru app input:OXF", allocator)); // 바로 자식까지
+    }
 }
 
 // imeDecide(이제 ime.decide) 단위 테스트는 함수와 함께 src/session/ime.zig로 이동. imeEnd(부작용 포함)의

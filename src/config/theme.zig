@@ -662,8 +662,18 @@ pub const InputConfig = struct {
     /// 연다(클릭 시 존재 stat 게이트가 오탐 차단). web=http(s)만(이전 동작), osc8-only=자동 감지 끔(OSC 8 명시 링크만).
     /// 단일 출처: docs/link-detection.md.
     link_detection: LinkDetection = .full,
+    /// 붙여넣기 보호. 기본 true. 개행(\n/\r)이나 bracketed paste 종료 마커(ESC[201~ 인젝션)가 있는 붙여넣기를
+    /// 바로 PTY로 보내지 않고 확인 모달을 띄운다 — 웹/문서에서 몰래 명령이 딸려온 클립보드가 붙여넣는 순간
+    /// 실행되는 "copy/paste 공격"을 막는다. 베이스: Ghostty `clipboard-paste-protection`(기본 true). 단일 출처:
+    /// docs/terminal-compatibility-policy.md "Bracketed Paste".
+    paste_protection: bool = true,
+    /// bracketed paste(DECSET 2004)를 안전으로 볼지. 기본 true. 실행 중 프로그램이 2004를 켰으면(zsh/bash 등
+    /// 대부분의 대화형 셸) paste가 괄호로 감싸져 자동 실행이 안 되므로, paste_protection이 켜져 있어도 확인을
+    /// 생략한다(단 본문에 종료 마커 ESC[201~가 섞이면 bracketed여도 항상 확인). false면 bracketed paste도 개행
+    /// 검사를 거친다. 베이스: Ghostty `clipboard-paste-bracketed-safe`(기본 true).
+    bracketed_paste_is_safe: bool = true,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection / input.paste-protection / input.bracketed-paste-is-safe (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
@@ -673,6 +683,8 @@ pub const InputConfig = struct {
         .right_click = Meta{ .doc = "터미널 우클릭 동작", .widget = .dropdown, .section = .input },
         .word_separators = Meta{ .doc = "더블클릭 단어 구분자", .widget = .text, .section = .input },
         .link_detection = Meta{ .doc = "링크 자동 감지 범위", .widget = .dropdown, .section = .input },
+        .paste_protection = Meta{ .doc = "위험한 붙여넣기 확인", .widget = .toggle, .section = .input },
+        .bracketed_paste_is_safe = Meta{ .doc = "bracketed paste는 안전으로", .widget = .toggle, .section = .input },
     };
 };
 

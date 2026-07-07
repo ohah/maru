@@ -18,9 +18,65 @@ const input = @import("input.zig");
 
 const TerminalCore = core.TerminalCore;
 
+/// 붙여넣기 본문에서 공백으로 치환하는 위험 제어 바이트 집합. 어떤 삽입 방식(paste·drop)에서도 제거된다.
+/// 베이스: xterm이 paste에서 항상 strip하는 제어문자(Ghostty input/paste.zig가 "copied directly from xterm's
+/// source"로 같은 목록 사용). 개행(\n/\r)·탭(\t)은 여기 없음 — 개행은 encodePaste가 실행 트리거 \r로
+/// 정규화하고(bracketed면 괄호가 감쌈), 탭은 정당한 공백이라 보존한다. ESC[201~ 조기 종료 인젝션은 이
+/// 목록의 ESC(0x1b) 제거로 무력화된다(ECMA-48 C1/CSI가 ESC로 시작). VINTR·VSUSP 등 라인 규율 제어키는
+/// tcsetattr로 프로그램이 바꿀 수 있어 100% 안전하진 않지만, xterm/Ghostty처럼 관례값을 하드코딩한다.
+const paste_strip_bytes = [_]u8{
+    0x00, // NUL
+    0x08, // BS  (backspace — 앞 글자 삭제)
+    0x05, // ENQ
+    0x04, // EOT (Ctrl+D — EOF)
+    0x1b, // ESC (C1/CSI 시퀀스·bracketed 종료 마커 인젝션 무력화)
+    0x7f, // DEL
+    0x03, // VINTR   (Ctrl+C)
+    0x1c, // VQUIT   (Ctrl+\)
+    0x15, // VKILL   (Ctrl+U)
+    0x1a, // VSUSP   (Ctrl+Z)
+    0x11, // VSTART  (Ctrl+Q)
+    0x13, // VSTOP   (Ctrl+S)
+    0x17, // VWERASE (Ctrl+W)
+    0x16, // VLNEXT  (Ctrl+V — 다음 글자 리터럴 인용)
+    0x12, // VREPRINT(Ctrl+R)
+    0x0f, // VDISCARD(Ctrl+O)
+};
+
+fn isPasteStripByte(b: u8) bool {
+    return std.mem.indexOfScalar(u8, &paste_strip_bytes, b) != null;
+}
+
+/// 붙여넣기 데이터가 "붙여넣는 순간 바로 실행"될 위험이 있는지(paste protection 판정용 순수 검사). 개행
+/// (\n/\r — encodePaste가 실행 트리거 \r로 정규화)이나 bracketed paste 종료 마커(ESC[201~ — 괄호를 일찍
+/// 닫아 뒤 내용을 타이핑으로 실행시키는 인젝션)가 있으면 unsafe. 베이스: Ghostty input/paste.zig `isSafe`
+/// 동형(개행 + 종료 마커 검사). Ghostty는 \n만 보지만, maru encodePaste는 \r도 실행 \r로 흘리므로 \r도 본다.
+pub fn pasteHasUnsafeBytes(data: []const u8) bool {
+    return std.mem.indexOfScalar(u8, data, '\n') != null or
+        std.mem.indexOfScalar(u8, data, '\r') != null or
+        std.mem.indexOf(u8, data, "\x1b[201~") != null;
+}
+
+/// 이 붙여넣기가 사용자 확인을 요구하는지(paste protection 게이트). Ghostty Surface.zig 게이트 동형:
+///   - protection이 꺼져 있으면 확인 안 함(false).
+///   - bracketed paste 모드(DECSET 2004)면: (1) 본문에 종료 마커 ESC[201~가 있으면 bracketed여도 **항상**
+///     확인(괄호 조기 종료 인젝션은 절대 신뢰 안 함), (2) 아니고 bracketed_safe가 true면 확인 생략(괄호가
+///     감싸 자동 실행 안 됨), false면 개행 검사로 넘어간다.
+///   - 비-bracketed면 pasteHasUnsafeBytes로 판정.
+/// 베이스: Ghostty `clipboard-paste-protection` / `clipboard-paste-bracketed-safe`.
+pub fn pasteNeedsConfirmation(self: *const TerminalCore, data: []const u8, protection_enabled: bool, bracketed_safe: bool) bool {
+    if (!protection_enabled) return false;
+    if (self.bracketed_paste) {
+        if (std.mem.indexOf(u8, data, "\x1b[201~") != null) return true; // bracketed여도 조기 종료 마커는 불신
+        if (bracketed_safe) return false; // 괄호가 감싸 안전 → 확인 생략
+    }
+    return pasteHasUnsafeBytes(data);
+}
+
 /// 붙여넣기 바이트를 PTY 입력으로 인코딩한다: 개행을 CR로 정규화(\r\n/\n -> \r — 셸 입력의
-/// 줄바꿈 관례)하고, 프로그램이 bracketed paste(DECSET 2004)를 켰으면 ESC[200~ ... ESC[201~로
-/// 감싼다(타이핑과 구분돼 자동 들여쓰기/즉시 실행 방지). 호출자가 free한다.
+/// 줄바꿈 관례)하고, 위험 제어 바이트(paste_strip_bytes — ESC 포함)를 공백으로 치환하며, 프로그램이
+/// bracketed paste(DECSET 2004)를 켰으면 ESC[200~ ... ESC[201~로 감싼다(타이핑과 구분돼 자동 들여쓰기/
+/// 즉시 실행 방지). 호출자가 free한다.
 pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -31,12 +87,10 @@ pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, byte
         if (b == '\r' or b == '\n') {
             try out.append(allocator, '\r');
             if (b == '\r' and i + 1 < bytes.len and bytes[i + 1] == '\n') i += 1; // CRLF는 한 번만
-        } else if (b == 0x1b) {
-            // 보안: 붙여넣기 본문의 ESC를 공백으로 치환한다. 안 그러면 악성 클립보드가 ESC[201~
-            // 를 심어 bracketed paste 괄호를 일찍 닫고, 뒤따르는 \r-종료 바이트가 "타이핑"으로
-            // 실행된다(고전적 paste 인젝션). bracketed paste를 안 쓸 때도 ESC 시퀀스가 그대로
-            // 터미널에 주입되는 걸 막는다. ECMA-48의 C1/CSI는 ESC로 시작하므로 ESC만 막으면
-            // 시퀀스가 무력화된다. Ghostty(input/paste.zig)도 같은 보호를 한다.
+        } else if (isPasteStripByte(b)) {
+            // 보안: 위험 제어 바이트를 공백으로 치환한다(paste_strip_bytes 주석 참조). 특히 ESC는 악성
+            // 클립보드가 ESC[201~를 심어 bracketed paste 괄호를 일찍 닫고 뒤따르는 \r-종료 바이트를
+            // "타이핑"으로 실행시키는 고전적 인젝션을 막고, VINTR/VSUSP 등은 붙여넣기가 시그널을 쏘는 걸 막는다.
             try out.append(allocator, ' ');
         } else {
             try out.append(allocator, b);

@@ -194,12 +194,12 @@ UX 명분으로 팔지 않는다. 로드맵 항목은 [implementation-plan.md](i
 
 bracketed paste는 paste 시작과 끝을 shell/program에 알려주는 기능이다. 이 기능이 있으면 `vim`, shell, REPL이 사용자가 타이핑한 텍스트와 붙여넣은 텍스트를 구분할 수 있다.
 
-v1 기본값:
+v1 기본값(config 키는 `input.` 네임스페이스):
 
 ```text
-bracketed_paste = true
-paste_protection = true
-bracketed_paste_is_safe = true
+bracketed_paste          = true    # DECSET 2004 — 프로그램이 켬(터미널 설정 아님)
+input.paste-protection   = true    # 위험한 붙여넣기 확인
+input.bracketed-paste-is-safe = true
 ```
 
 정책:
@@ -208,11 +208,18 @@ bracketed_paste_is_safe = true
 - newline이 포함된 일반 paste는 unsafe 후보로 보고 사용자 확인을 요구한다.
 - bracketed paste는 기본적으로 safe로 보되, 사용자가 더 엄격한 정책으로 바꿀 수 있게 한다.
 
-현황(2026-07): bracketed paste 자체는 구현됐다 — `terminal/input_report.zig`의 `encodePaste`가 개행을 CR로
-정규화하고 mode 2004면 `ESC[200~…ESC[201~`로 감싸며, 본문의 ESC를 제거해 escape injection을 방어한다.
-**paste protection(newline 포함 일반 paste의 사용자 확인)은 아직 미구현이다** — `paste_protection`/
-`bracketed_paste_is_safe` config 키도 아직 없고, 붙여넣기는 확인 없이 PTY로 전달된다. 위 기본값 블록은
-구현 시 적용할 정책 선언이며, 구현 우선순위는 사용자 결정 사항으로 남아 있다.
+현황(2026-07): **구현 완료**. 두 겹으로 막는다(Ghostty `clipboard-paste-protection`/`-bracketed-safe` 동형).
+
+- (1) **바이트 sanitize(항상)**: `terminal/input_report.zig`의 `encodePaste`가 개행을 CR로 정규화하고,
+  mode 2004면 `ESC[200~…ESC[201~`로 감싸며, 위험 제어 바이트(NUL·BS·ENQ·EOT·ESC·DEL + VINTR/VSUSP 등
+  라인 규율 제어키 — xterm/Ghostty strip 목록)를 공백으로 치환한다. 특히 ESC 제거가 본문에 심은 `ESC[201~`
+  조기 종료 인젝션을 무력화한다. 이 sanitize는 설정과 무관하게 항상 적용된다.
+- (2) **확인 게이트(`input.paste-protection`)**: `core.pasteNeedsConfirmation`(단일 출처)이 붙여넣기가
+  위험한지 판정하고, 위험하면 platform(`app_session.submitPaste`)이 PTY로 보내지 않고 확인 모달을 띄운다
+  — [붙여넣기]면 진행, [취소]면 버린다. 판정 규칙: bracketed paste면 (a) 본문에 `ESC[201~`가 있으면
+  bracketed여도 **항상** 확인, (b) 아니고 `input.bracketed-paste-is-safe`가 true면 확인 생략(괄호가 감싸
+  자동 실행 안 됨); 비-bracketed면 개행(`\n`/`\r`) 유무로 확인. IME 확정·OSC 52 응답·키 타이핑은 이 경로를
+  타지 않아 영향받지 않는다. config·동작 세부는 [configuration.md](configuration.md) `input.paste-protection`.
 
 ## Shell Integration
 

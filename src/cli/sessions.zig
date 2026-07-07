@@ -277,6 +277,52 @@ fn atPromptWire(v: ?std.json.Value) []const u8 {
     };
 }
 
+// ══ 소켓 발견(A2a — §4.2 다중 인스턴스·결정론 경로) ═══════════════════════════════════════════════════════
+// CLI-side 순수 경로/정책(cli/ssh.zig `controlSocketPath`와 같은 결 — I/O(getenv·readdir)는 main이 하고 여긴
+// 계산만). 소켓 syscall(connect/read/write)은 L4다(§11) — main.zig가 그 얇은 접착을 갖는다. 서버측 경로 파생
+// (`control_socket.controlDirPath`/`socketPathIn`, L4·macOS-gated)와 **같은 `<cache>/maru/control/*.sock` 계약**을
+// 공유한다(그 파일은 dev-CLI 모듈 그래프 밖이라 여기서 같은 형식을 CLI-side로 둔다 — cli/ssh.zig 선례).
+
+/// 컨트롤 소켓 디렉터리 경로 `<cache>/maru/control`. `cache` = `$XDG_CACHE_HOME`(설정+비어있지 않음) else
+/// `<home>/.cache`(셸 `${XDG_CACHE_HOME:-$HOME/.cache}` 규칙 — terminfo_cache.cacheDirZ와 동일). trailing slash는
+/// 떼어 이중 슬래시를 막는다. caller free. 서버(A2b)가 `control_socket.controlDirPath(<cache>/maru)`로 만드는
+/// 것과 같은 경로로 resolve된다(§4.2 단일 계약).
+pub fn controlDir(gpa: std.mem.Allocator, xdg_cache_home: ?[]const u8, home: []const u8) std.mem.Allocator.Error![]u8 {
+    if (xdg_cache_home) |x| {
+        if (x.len > 0) return std.fmt.allocPrint(gpa, "{s}/maru/control", .{trimTrailingSlash(x)});
+    }
+    return std.fmt.allocPrint(gpa, "{s}/.cache/maru/control", .{trimTrailingSlash(home)});
+}
+
+/// base 끝의 '/' 하나를 제거(경로 조합 시 이중 슬래시 방지). "/" 단독은 그대로(빈 base 방지) — cli/ssh.zig와 동일.
+fn trimTrailingSlash(base: []const u8) []const u8 {
+    if (base.len > 1 and base[base.len - 1] == '/') return base[0 .. base.len - 1];
+    return base;
+}
+
+/// 컨트롤 디렉터리의 엔트리 이름들에서 살아있는 인스턴스 소켓을 고르는 순수 정책(§4.2). `.sock`으로 끝나는 항목이
+/// 정확히 하나면 `single`(그 이름 borrow), 없으면 `none`, 둘 이상이면 `multiple`이다. main이 readdir 결과를 넘긴다.
+/// **A2a는 단일 인스턴스 자동 발견까지만**이다 — 여럿 중 선택 어휘(`$MARU_SESSION` selector 매칭 등)는 미정(§13).
+pub const SocketDiscovery = union(enum) {
+    /// 살아있는 소켓 없음 → main은 "실행 중인 maru 인스턴스를 찾지 못했습니다"로 접는다.
+    none,
+    /// 정확히 하나 → 이 `.sock` 파일명(디렉터리 엔트리 borrow, main이 dir과 조합).
+    single: []const u8,
+    /// 둘 이상 → 선택 어휘 미정(§13). main은 graceful하게 알린다.
+    multiple,
+};
+
+/// 엔트리 이름 목록에서 `.sock` 하나를 고른다(위 정책). 순수 — I/O 없음.
+pub fn pickSocket(entries: []const []const u8) SocketDiscovery {
+    var found: ?[]const u8 = null;
+    for (entries) |e| {
+        if (!std.mem.endsWith(u8, e, ".sock")) continue;
+        if (found != null) return .multiple; // 둘째 발견 → 즉시 multiple.
+        found = e;
+    }
+    return if (found) |f| .{ .single = f } else .none;
+}
+
 // ══ --help 텍스트(§11 CLI help gate — 구현된 명령만) ════════════════════════════════════════════════════════
 
 /// `maru sessions --help`. 이 slice에서 동작하는 `list`만 공개한다(후속 명령 미기재 — §11).
@@ -548,6 +594,48 @@ test "renderResponse: web surface loading=true면 'loading' 표시" {
     try render(wire, .get, &out);
     try testing.expect(std.mem.indexOf(u8, out.items, " loading") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "panel=browser") != null);
+}
+
+// ── A2a: 소켓 발견 순수 정책(단일 인스턴스 결정론 경로 — §4.2) ──────────────────────────────────────────────
+
+test "controlDir: XDG_CACHE_HOME 우선, 없으면 <home>/.cache, trailing slash 정규화" {
+    {
+        const d = try controlDir(testing.allocator, "/x/cache", "/home/me");
+        defer testing.allocator.free(d);
+        try testing.expectEqualStrings("/x/cache/maru/control", d);
+    }
+    {
+        const d = try controlDir(testing.allocator, null, "/home/me");
+        defer testing.allocator.free(d);
+        try testing.expectEqualStrings("/home/me/.cache/maru/control", d);
+    }
+    {
+        // 빈 XDG_CACHE_HOME은 미설정으로 취급(shell ${XDG_CACHE_HOME:-...} 규칙).
+        const d = try controlDir(testing.allocator, "", "/home/me");
+        defer testing.allocator.free(d);
+        try testing.expectEqualStrings("/home/me/.cache/maru/control", d);
+    }
+    {
+        // trailing slash는 떼어 이중 슬래시를 막는다.
+        const d = try controlDir(testing.allocator, "/x/cache/", "/home/me");
+        defer testing.allocator.free(d);
+        try testing.expectEqualStrings("/x/cache/maru/control", d);
+    }
+}
+
+test "pickSocket: .sock 항목이 정확히 하나면 single, 0개면 none, 2개+면 multiple(§4.2 단일 인스턴스)" {
+    // 없음(빈 목록/비-.sock만).
+    try testing.expect(pickSocket(&.{}) == .none);
+    try testing.expect(pickSocket(&.{ "a.lock", "notes.txt" }) == .none);
+    // 단일 — 이름을 그대로 돌려준다(borrow).
+    {
+        const p = pickSocket(&.{ "1234-ab.sock", "1234-ab.lock" });
+        try testing.expect(p == .single);
+        try testing.expectEqualStrings("1234-ab.sock", p.single);
+    }
+    // 여럿 — 어느 것을 고를지 어휘 미정(§13)이라 multiple로 접는다.
+    try testing.expect(pickSocket(&.{ "a.sock", "b.sock" }) == .multiple);
+    try testing.expect(pickSocket(&.{ "a.sock", "x.lock", "b.sock", "c.sock" }) == .multiple);
 }
 
 test {

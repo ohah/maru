@@ -88,12 +88,12 @@ fn dispatch(
     }
 
     if (std.mem.eql(u8, command, "sessions")) {
-        try runSessionCli(allocator, &args, stdout, stderr, .sessions);
+        try runSessionCli(io, allocator, &args, stdout, stderr, .sessions);
         return;
     }
 
     if (std.mem.eql(u8, command, "session")) {
-        try runSessionCli(allocator, &args, stdout, stderr, .session);
+        try runSessionCli(io, allocator, &args, stdout, stderr, .session);
         return;
     }
 
@@ -411,14 +411,18 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     try stdout.flush();
 }
 
-/// `maru sessions ...` / `maru session ...` 두 컨트롤 플레인 read-only 명령의 얇은 접착(Track C 1d). 순수
-/// 파싱·요청 조립·응답 포맷은 `maru.cli.sessions`가 갖고, 여긴 인자 수집·stdout/stderr I/O만 한다(ssh/terminfo와
-/// 같은 결). `--help`는 구현된 명령만 담은 help를 낸다(§11 CLI help gate). 실제 요청은 client wire로 JSON-RPC
-/// 한 줄을 조립해 stdout에 낸다 — **소켓 전송·응답 렌더는 후속**(컨트롤 소켓 accept-loop·capability auth(1e)·live
-/// collector(Phase 1)가 붙어야 라이브 조회가 완성된다). 1d는 파서·--help·client wire까지가 범위다.
+/// `maru sessions ...` / `maru session ...` 두 컨트롤 플레인 read-only 명령의 얇은 접착(Track C 1d·A2a). 순수
+/// 파싱·요청 조립·응답 포맷·소켓 발견 정책은 `maru.cli.sessions`가 갖고, 여긴 인자 수집·getenv/readdir/소켓 syscall·
+/// stdout/stderr I/O만 한다(ssh/terminfo와 같은 결 — §11 "소켓 syscall L4·CLI는 src/cli·main 얇게"). `--help`는
+/// 구현된 명령만 담은 help를 낸다(§11 CLI help gate). **A2a**: 요청은 이제 실제로 컨트롤 소켓에 connect해 왕복한다 —
+/// 결정론 경로(`<cache>/maru/control`)에서 단일 인스턴스 소켓을 찾아(§4.2) `buildRequestBytes` 전송 → hello skip →
+/// 응답 프레임(1a `Framer`) 수신 → `renderResponse`로 사람이 읽게 낸다. 살아있는 인스턴스가 없거나 connect가 실패하면
+/// crash/트레이스 없이 graceful하게 안내하고 종료한다. 서버가 소켓을 실제로 띄우는 배선(accept-loop 스레드·메인
+/// marshal(§5)·실 collector·capability auth(1e))은 **A2b/후속**이라, 지금은 보통 "인스턴스 없음"으로 접힌다.
 const SessionCli = enum { sessions, session };
 
 fn runSessionCli(
+    io: std.Io,
     allocator: std.mem.Allocator,
     args: anytype,
     stdout: *std.Io.Writer,
@@ -449,21 +453,135 @@ fn runSessionCli(
             });
             try stdout.flush();
         },
-        .request => |req| {
-            // client wire: 전송될 JSON-RPC 요청 한 줄을 조립해 stdout에 낸다(관찰 가능·파이프 가능).
-            const bytes = try maru.cli.sessions.buildRequestBytes(allocator, req, .{ .number = 1 });
-            defer allocator.free(bytes);
-            try stdout.writeAll(bytes);
-            try stdout.writeAll("\n");
-            try stdout.flush();
-            // 정직: 라이브 전송은 아직 없다. 소켓 accept-loop(§5)·capability auth(1e)·live collector(Phase 1)가
-            // 붙는 후속 slice에서 이 요청을 실제 서버로 보내 응답을 renderResponse로 표시한다.
-            try stderr.writeAll(
-                "note: 위 줄은 전송될 JSON-RPC 요청입니다. 컨트롤 소켓 전송·응답 표시는 후속(accept-loop·capability auth·live collector)에서 배선됩니다.\n",
-            );
-            try stderr.flush();
-        },
+        .request => |req| try runSessionRequest(io, allocator, req, stdout, stderr),
     }
+}
+
+/// `sessions list`/`session get` 요청을 실제 컨트롤 소켓에 왕복한다(A2a). 소켓 발견(§4.2 결정론 경로 + 단일
+/// 인스턴스 자동 발견) → connect → `buildRequestBytes` 전송 → hello notification skip → 응답 프레임 수신 →
+/// `renderResponse`. 순수 정책(경로·발견 판정)은 `maru.cli.sessions`, 프레이밍/parse는 1a, 여긴 getenv/readdir/소켓
+/// syscall 접착만(§11 소켓 syscall L4). 살아있는 인스턴스가 없거나 connect 실패면 crash 없이 graceful 종료(exit 1).
+fn runSessionRequest(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    req: maru.cli.sessions.Request,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const c = std.c;
+    const posix = std.posix;
+
+    // 응답 렌더 모양(list=배열, get=단건)은 요청 종류로 정해진다(1d ResponseKind).
+    const kind: maru.cli.sessions.ResponseKind = switch (req) {
+        .list => .list,
+        .get => .get,
+    };
+
+    // ── 소켓 발견: 결정론 경로 <cache>/maru/control에서 살아있는 인스턴스 소켓 하나를 찾는다(§4.2) ──
+    const home_z = c.getenv("HOME") orelse
+        return sessionNoInstance(stderr, "HOME 환경변수가 없어 컨트롤 소켓 위치를 정할 수 없습니다");
+    const xdg: ?[]const u8 = if (c.getenv("XDG_CACHE_HOME")) |x| std.mem.span(x) else null;
+    const control_dir = try maru.cli.sessions.controlDir(allocator, xdg, std.mem.span(home_z));
+    defer allocator.free(control_dir);
+
+    // control dir을 열어 `.sock` 엔트리 이름을 모은다(못 열면 = 인스턴스 없음). readdir는 L4 I/O라 여기(main)서 한다.
+    var names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+    {
+        var dir = std.Io.Dir.cwd().openDir(io, control_dir, .{ .iterate = true }) catch
+            return sessionNoInstance(stderr, null);
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            // kind로 거르지 않는다 — 소켓 파일의 dir 엔트리 kind는 `.unix_domain_socket`(≠`.file`)이라 `.file`만
+            // 받으면 소켓을 놓친다. `.sock` 접미사로만 거르고(같은 dir의 `<key>.lock`은 제외), 최종 판정은 pickSocket이 한다.
+            if (!std.mem.endsWith(u8, entry.name, ".sock")) continue;
+            try names.append(allocator, try allocator.dupe(u8, entry.name)); // entry.name은 iterator 버퍼(transient) → 복사
+        }
+    }
+
+    // 발견 정책은 순수(1d pickSocket): 정확히 하나면 그 소켓, 없으면/여럿이면 graceful.
+    const chosen = switch (maru.cli.sessions.pickSocket(names.items)) {
+        .none => return sessionNoInstance(stderr, null),
+        .multiple => return sessionNoInstance(stderr, "여러 maru 인스턴스가 있습니다 — 인스턴스 선택은 아직 지원되지 않습니다"),
+        .single => |name| name,
+    };
+    const socket_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ control_dir, chosen }, 0);
+    defer allocator.free(socket_path);
+
+    // ── connect(L4 syscall — 1b가 std.c로 소켓을 쓰는 선례) ──
+    const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    if (fd < 0) return sessionNoInstance(stderr, "소켓을 만들 수 없습니다");
+    defer _ = c.close(fd);
+    var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    if (socket_path.len >= addr.path.len) return sessionNoInstance(stderr, null); // 경로가 sun_path 초과(비정상) → graceful
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+    // 서버 부재(ENOENT)·stale 소켓(ECONNREFUSED) 등은 전부 graceful "인스턴스 없음"으로 접는다(crash·트레이스 금지).
+    if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0)
+        return sessionNoInstance(stderr, null);
+
+    // ── 요청 전송(1d client wire) → 응답 프레임 수신(1a Framer) → hello skip → renderResponse(1d) ──
+    const request_bytes = try maru.cli.sessions.buildRequestBytes(allocator, req, .{ .number = 1 });
+    defer allocator.free(request_bytes);
+    if (!writeAllFd(fd, request_bytes) or !writeAllFd(fd, "\n"))
+        return sessionNoInstance(stderr, "요청 전송에 실패했습니다");
+
+    var framer: maru.session.control_plane.Framer = .{};
+    defer framer.deinit(allocator);
+    while (true) {
+        // 완결 프레임을 소비한다: hello(notification)는 서버가 accept 시 먼저 보내므로 skip, 그 밖(응답)이면 렌더 후 종료.
+        while (framer.next() catch null) |line| {
+            var pm = maru.session.control_plane.parseMessage(allocator, line) catch {
+                try maru.cli.sessions.renderResponse(allocator, line, kind, stdout); // 손상 응답도 render가 안전하게 접는다
+                try stdout.flush();
+                return;
+            };
+            const is_notification = pm.message == .notification;
+            pm.deinit();
+            if (is_notification) continue; // hello notification skip
+            try maru.cli.sessions.renderResponse(allocator, line, kind, stdout);
+            try stdout.flush();
+            return;
+        }
+        var buf: [4096]u8 = undefined;
+        const n = c.read(fd, &buf, buf.len);
+        if (n <= 0) break; // EOF/에러 — 응답 없이 종료
+        framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
+    }
+    return sessionNoInstance(stderr, "서버가 응답하지 않았습니다");
+}
+
+/// 부분 write를 처리하는 blocking write-all(소켓 stream). 성공하면 true. main의 얇은 소켓 접착 편의(control_socket의
+/// writeAll과 같은 결이지만 그 파일은 dev-CLI 모듈 밖이라 여기 둔다).
+fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) bool {
+    const c = std.c;
+    const posix = std.posix;
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = c.write(fd, bytes.ptr + off, bytes.len - off);
+        if (n < 0) {
+            if (posix.errno(n) == .INTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        off += @intCast(n);
+    }
+    return true;
+}
+
+/// 살아있는 maru 인스턴스가 없거나 connect가 실패했을 때의 graceful 종료. stderr에 안내를 쓰고 `error.UnknownCommand`
+/// (main이 트레이스 없이 exit 1로 접는 sentinel)를 돌려준다 — 사용자 오타/부재에 crash처럼 보이지 않게. `detail`은
+/// 있으면 괄호로 덧붙인다.
+fn sessionNoInstance(stderr: *std.Io.Writer, detail: ?[]const u8) error{UnknownCommand} {
+    stderr.writeAll("실행 중인 maru 인스턴스를 찾지 못했습니다") catch {};
+    if (detail) |d| stderr.print(" ({s})", .{d}) catch {};
+    stderr.writeAll(".\n") catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
 }
 
 fn writeSessionCliUsage(stderr: *std.Io.Writer, which: SessionCli, err: maru.cli.sessions.ParseError) !void {

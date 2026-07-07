@@ -138,7 +138,7 @@ fn resolveFont(config: theme.FontConfig) ResolveError!ResolvedFontRequest {
     // 폰트명이 renderer로 샌다.
     const family = std.mem.trim(u8, config.family, &std.ascii.whitespace);
     if (family.len == 0) return error.EmptyFontFamily;
-    if (!(config.size >= 1.0 and config.size <= 512.0)) return error.InvalidFontSize;
+    if (!(config.size >= theme.font_size_file_min and config.size <= theme.font_size_file_max)) return error.InvalidFontSize;
     // line-height(배수)·letter-spacing(논리 pt)도 theme const로 재검증(loader가 valid만 담지만, resolve 단독
     // 호출·테스트도 같은 게이트를 거치게 한다). !(>=min and <=max) 형태라 NaN도 함께 거부된다(size 가드와 동형).
     if (!(config.line_height >= theme.font_line_height_min and config.line_height <= theme.font_line_height_max)) return error.InvalidFontSize;

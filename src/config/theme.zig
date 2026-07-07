@@ -21,8 +21,13 @@ pub const Meta = struct {
     /// field명≠segment인 예외만 명시(`height_fraction` → `"height"`). `key`가 있으면 이건 무시된다.
     key_seg: ?[]const u8 = null,
     doc: []const u8 = "",
-    /// 숫자 범위(min,max). f32 필드엔 **필수**(파서 검증 + GUI 슬라이더 공유). 그 외 타입엔 null.
+    /// 숫자 범위(min,max). f32 필드엔 **필수**(파서 검증 + GUI 위젯 공유). 그 외 타입엔 null.
     range: ?[2]f64 = null,
+    /// **파일 파싱 전용** 범위 override(min,max). 없으면(기본) 파일 파싱도 `range`를 쓴다. GUI 위젯(range)보다
+    /// config 파일 직접 편집을 더 넓게 허용해야 하는 필드만 지정한다 — 예: font.size는 GUI ⌘±/입력 박스가 보수
+    /// 범위 [6,72]만 노출하지만 파일은 [1,512]를 허용한다(power-user 특대/특소 폰트). GUI 경로
+    /// (appendNumberFields·setNumber)는 이 값을 보지 않으므로 위젯 범위가 넓어지지 않는다.
+    parse_range: ?[2]f64 = null,
     /// GUI 위젯(.auto면 타입에서 유추: bool→toggle, enum→dropdown, f32→number, color→color, []const u8→text).
     widget: Widget = .auto,
     section: ?Section = null,
@@ -79,12 +84,13 @@ pub const FontConfig = struct {
     family_italic: []const u8 = "",
 
     // 범위는 아래 font_* const(단일 출처 — appearance.resolveFont도 같은 const를 써 schema↔resolve drift 없음).
-    // size만 예외 구조: **GUI 슬라이더·⌘+/⌘- range = [font_size_min, font_size_max] = [6,72]** 와 **파일 검증 범위
-    // [1,512](resolveFont)** 가 의도적으로 다르다. 슬라이더가 resolver 범위(최대 512pt)를 쓰면 한 스텝(범위의 4%)이
-    // ~20pt라 "+" 한 번에 폰트가 수십 pt 뛰어 한 셀이 화면을 다 먹고 grid가 1×1로 붕괴한다 — 그래서 슬라이더·단축키는
-    // 보수 범위([6,72])만 노출하고, config 파일 직접 편집만 더 넓은 [1,512]를 허용한다.
+    // size만 예외 구조: **GUI 입력 박스·⌘+/⌘- range = [font_size_min, font_size_max] = [6,72]** 와 **파일 검증 범위
+    // parse_range = [font_size_file_min, font_size_file_max] = [1,512]** 가 의도적으로 다르다. GUI가 resolver
+    // 범위(최대 512pt)를 쓰면 "+" 한 번에 폰트가 수십 pt 뛰어 한 셀이 화면을 다 먹고 grid가 1×1로 붕괴한다 —
+    // 그래서 GUI·단축키는 보수 범위([6,72])만 노출하고, config 파일 직접 편집만 parse_range로 더 넓은 [1,512]를
+    // 허용한다(configuration.md "1~512"·resolveFont와 같은 계약).
     pub const schema = .{ // 키: font.size / font.line-height / font.letter-spacing / font.family / font.fallback / font.family-bold / font.family-italic (필드명 dashed)
-        .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ font_size_min, font_size_max }, .widget = .number, .section = .font },
+        .size = Meta{ .doc = "폰트 크기(pt)", .range = .{ font_size_min, font_size_max }, .parse_range = .{ font_size_file_min, font_size_file_max }, .widget = .number, .section = .font },
         .line_height = Meta{ .doc = "행간 배수", .range = .{ font_line_height_min, font_line_height_max }, .widget = .number, .section = .font },
         .letter_spacing = Meta{ .doc = "자간(논리 pt, 음수 허용)", .range = .{ font_letter_spacing_min, font_letter_spacing_max }, .widget = .number, .section = .font },
         .family = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text, .section = .font },
@@ -97,9 +103,15 @@ pub const FontConfig = struct {
 /// font.size GUI 슬라이더·⌘+/⌘- 허용 범위(pt, 단일 출처 — 세팅 슬라이더 range가 이 const를 쓴다).
 /// app_session.setFontSize 클램프(단축키)도 같은 [6,72] 값을 쓴다(거기 const와 동기 — drift 시 둘 다 갱신).
 /// 6pt 미만은 글자가 안 읽히고, 72pt 초과는 한 셀이 화면을 다 먹어 grid가 1~2칸으로 붕괴한다. config 파일 직접
-/// 편집은 더 넓은 [1,512](resolveFont)를 허용하지만 GUI·단축키는 이 보수 범위만 노출한다.
+/// 편집은 더 넓은 [1,512](아래 file 범위)를 허용하지만 GUI·단축키는 이 보수 범위만 노출한다.
 pub const font_size_min: f32 = 6.0;
 pub const font_size_max: f32 = 72.0;
+
+/// font.size **config 파일 파싱·resolve** 허용 범위(pt, 단일 출처 — 위 schema `.size`의 `parse_range`와
+/// appearance.resolveFont가 공유). GUI·단축키는 위 보수 범위만 노출하지만 파일 직접 편집은 이 넓은 범위를
+/// 허용한다 — 1pt 미만은 렌더 불능, 512pt 초과는 비현실적 극단값 가드(configuration.md "1~512" 계약).
+pub const font_size_file_min: f32 = 1.0;
+pub const font_size_file_max: f32 = 512.0;
 
 /// font.line-height 허용 배수 범위(단일 출처 — loader 파싱과 appearance resolveFont가 공유). 0.5 미만이면 줄이
 /// 겹쳐 읽기 어렵고, 3.0 초과면 화면당 행 수가 급감한다(가독성 가드).

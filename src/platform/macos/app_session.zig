@@ -4456,6 +4456,15 @@ pub const AppSession = struct {
         return tabSurfaceCount(self.tabs.items[idx]);
     }
 
+    /// M3d-2b 단일 카드 이동 배선 — 활성 워크스페이스(탭) 인덱스(read-only). Swift 메뉴가 이 인덱스를
+    /// `moveWorkspaceToSession`(ABI move_workspace_to)에 넘겨 활성 카드 **하나**만 다른 창으로 옮긴다(merge는
+    /// 전체라 인덱스 불요). `app_window`는 `surface_initialized` 전엔 `undefined`(1215)라 그 전/탭 전무면 null —
+    /// 호출부(ABI)가 sentinel로 접어 Swift가 무동작. `activeTab()`과 같은 `app_window.active_tab` 활성 단일 출처.
+    pub fn activeWorkspaceIndex(self: *const AppSession) ?usize {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+        return self.app_window.active_tab;
+    }
+
     /// 이 세션의 모든 워크스페이스 surface 총수 — mergeSessionInto(cross-window)의 참 이동 개수(버퍼 절단과 무관, [6]).
     pub fn totalSurfaceCount(self: *AppSession) usize {
         var n: usize = 0;

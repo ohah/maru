@@ -478,7 +478,7 @@ final class QuickTerminalPanel: NSPanel {
 
 @main
 @MainActor
-final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
+final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private static var retainedDelegate: MaruAppHostController?
     private static let statusOK = Int32(MaruAppHostStatusOk.rawValue)
     // PTY 셸이 정상 종료했다는 신호. fault가 아니라 우아한 종료 대상이다.
@@ -2281,6 +2281,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // MARK: - 메뉴바 (NSMenu)
 
+    /// "Merge Window Into" 서브메뉴(M3d-2b) — 열 때 대상 창 목록을 동적으로 채운다(menuNeedsUpdate). buildMainMenu가
+    /// 매 재빌드마다 새 NSMenu로 재생성하므로 weak(부모 메뉴가 강참조, 재빌드 시 이전 것은 해제되고 이 ref가 새 것으로 갱신).
+    private weak var moveToWindowMenu: NSMenu?
+
+    /// "Move Workspace to Window" 서브메뉴(M3d-2b 단일 카드 이동) — merge와 같은 대상 창 열거를 쓰되, 키 창의 **활성**
+    /// 워크스페이스 하나만 옮긴다(move_workspace_to). 수명·갱신은 moveToWindowMenu와 동일(weak, menuNeedsUpdate 동적).
+    private weak var moveWorkspaceMenu: NSMenu?
+
     /// command_catalog의 modifier 비트마스크(shift=1,control=2,option=4,command=8)를 NSEvent.ModifierFlags로.
     private static func modifierFlags(_ mask: UInt32) -> NSEvent.ModifierFlags {
         var flags: NSEvent.ModifierFlags = []
@@ -2409,6 +2417,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.addItem(catalogMenuItem("previous_tab", catalog))
         window.addItem(catalogMenuItem("next_term", catalog))
         window.addItem(catalogMenuItem("previous_term", catalog))
+        window.addItem(.separator())
+        // Merge Window Into(M3d-2b) — 현재(키) 창의 모든 워크스페이스를 다른 창으로 병합(merge_window, docs §4 "Window all")
+        // 하고 비워진 이 창을 닫는다. 대상 창 목록은 창 수가 런타임에 바뀌므로 열 때 동적으로 채운다(menuNeedsUpdate).
+        // 정책·라이브 트리 수술은 Zig, NSWindow focus/close만 Swift(경계). 단축키 없음 — 발견성용(실수 시 큰 변형, docs §4).
+        let moveMenu = NSMenu(title: "Merge Window Into")
+        moveMenu.delegate = self
+        self.moveToWindowMenu = moveMenu
+        let moveItem = NSMenuItem(title: "Merge Window Into", action: nil, keyEquivalent: "")
+        moveItem.submenu = moveMenu
+        window.addItem(moveItem)
+        // Move Workspace to Window(M3d-2b 단일 카드 이동) — 키 창의 **활성** 워크스페이스 하나만 다른 창으로 옮긴다
+        // (move_workspace_to). merge와 달리 src에 워크스페이스가 남으면 src 창은 유지된다. 대상 목록도 동적(menuNeedsUpdate).
+        let moveOneMenu = NSMenu(title: "Move Workspace to Window")
+        moveOneMenu.delegate = self
+        self.moveWorkspaceMenu = moveOneMenu
+        let moveOneItem = NSMenuItem(title: "Move Workspace to Window", action: nil, keyEquivalent: "")
+        moveOneItem.submenu = moveOneMenu
+        window.addItem(moveOneItem)
         let windowItem = attachSubmenu(mainMenu, "Window", window)
         NSApp.windowsMenu = window
         _ = windowItem
@@ -2471,6 +2497,98 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let bytes = Array(key.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_run_action(session, buf.baseAddress, buf.count)
+        }
+    }
+
+    // MARK: - Cross-window workspace 이동(M3d-2b)
+
+    /// "Merge Window Into"/"Move Workspace to Window" 서브메뉴를 열 때 대상 창 목록을 동적으로 채운다(창 수는 런타임에
+    /// 변하므로 정적 빌드가 아닌 open 시점 갱신). 소스 = 현재 키(활성) 일반 창, 대상 = 그 외 모든 일반 창(quick은
+    /// `windows`에 없어 자동 제외 — docs §4 quick 이동 제외). 대상이 없으면(단일 창·키 창 없음) 비활성 안내 항목. 두 메뉴는
+    /// 대상 열거가 동일하고 항목의 action selector(전체 merge vs 단일 이동)만 다르다. self는 이 두 서브메뉴에만 delegate라
+    /// 다른 메뉴엔 안 불리지만, 방어적으로 우리 서브메뉴만 처리한다.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let action: Selector
+        if menu === moveToWindowMenu {
+            action = #selector(mergeIntoWindowAction(_:))
+        } else if menu === moveWorkspaceMenu {
+            action = #selector(moveWorkspaceToWindowAction(_:))
+        } else {
+            return
+        }
+        menu.removeAllItems()
+        let source = windows.first(where: { $0.window?.isKeyWindow == true })
+        let targets = source == nil ? [] : windows.filter { $0 !== source }
+        guard !targets.isEmpty else {
+            let empty = NSMenuItem(title: "No Other Windows", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return
+        }
+        for (i, target) in targets.enumerated() {
+            let title = target.window?.title ?? "Window \(i + 1)"
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.representedObject = NSNumber(value: target.token) // 대상 창 = 알림 라우팅 토큰(창마다 유일)으로 역조회
+            item.target = self
+            menu.addItem(item)
+        }
+    }
+
+    /// "Merge Window Into ▸ <창>" 선택 — 키(소스) 창의 모든 워크스페이스를 대상 창으로 병합한다. 소스는 클릭 시점에
+    /// 다시 키 창으로 해석한다(메뉴 트래킹 중엔 키 창이 안 바뀐다). 대상은 representedObject 토큰으로 역조회.
+    @objc private func mergeIntoWindowAction(_ sender: NSMenuItem) {
+        guard !smokeMode,
+              let token = (sender.representedObject as? NSNumber)?.uint64Value,
+              let dst = surfaceForToken(token),
+              let src = windows.first(where: { $0.window?.isKeyWindow == true }),
+              src !== dst else { return }
+        mergeWindow(from: src, into: dst)
+    }
+
+    /// src 세션의 모든 워크스페이스를 dst 세션으로 병합하고(merge_window — 정책·라이브 트리 수술·무재시작은 Zig),
+    /// dst로 포커스를 착지시킨 뒤 비워진 src 창을 닫는다(§8A.2 source_window_closed — merge는 항상 1). 이동 거부
+    /// (move_failed — 그룹/pinned 워크스페이스는 M3d-2a-ii 범위, OOM)면 세션·창을 둘 다 그대로 둔다(이 이벤트만 무시).
+    /// close()는 emptied source(0탭)에서 안전하다(app_session이 activeSurface 접근을 가드) — 그래서 라이브 창 확인
+    /// 게이트인 request_window_close가 아니라 closeWindowOrQuit(직접 teardown+close, delegate 끊어 재진입 방지)를 쓴다.
+    private func mergeWindow(from src: TerminalSurface, into dst: TerminalSurface) {
+        guard let srcSession = src.appSession, let dstSession = dst.appSession else { return }
+        var result = MaruAppHostMoveResult()
+        guard maru_macos_app_session_merge_window(srcSession, dstSession, &result) == Self.statusOK else { return }
+        dst.window?.makeKeyAndOrderFront(nil) // 목적지 focus 착지(src close 전에 먼저 키로 — AppKit이 임의 창을 키로 안 고르게)
+        withSurface(dst) { _ = renderTick() } // 병합된 워크스페이스 즉시 repaint(다음 timer tick 안 기다림)
+        if result.source_window_closed == 1 {
+            closeWindowOrQuit(src) // 비워진 소스 창 teardown+close. src는 마지막 창이 아니라(dst 존재) else 경로.
+        }
+    }
+
+    /// "Move Workspace to Window ▸ <창>" 선택 — 키(소스) 창의 **활성** 워크스페이스 하나만 대상 창으로 옮긴다. 소스·대상
+    /// 해석은 merge 액션과 동일(키 창 재해석·representedObject 토큰 역조회) — 이동 단위(활성 카드 1개 vs 전체)만 다르다.
+    @objc private func moveWorkspaceToWindowAction(_ sender: NSMenuItem) {
+        guard !smokeMode,
+              let token = (sender.representedObject as? NSNumber)?.uint64Value,
+              let dst = surfaceForToken(token),
+              let src = windows.first(where: { $0.window?.isKeyWindow == true }),
+              src !== dst else { return }
+        moveWorkspace(from: src, into: dst)
+    }
+
+    /// src 세션의 **활성** 워크스페이스 하나를 dst 세션으로 옮기고(move_workspace_to — 정책·라이브 트리 수술·무재시작은
+    /// Zig), dst로 포커스를 착지시킨다(merge 흐름 재사용). 활성 인덱스는 Zig getter로 읽는다(sentinel=UInt32.max면 세션
+    /// 미초기화·탭 전무 → 무동작). 이동 후 src가 비었으면(source_window_closed=1 — 마지막 워크스페이스였음) 비워진 src
+    /// 창을 닫고(§8A.2), 남았으면(=0) src 창은 유지하고 repaint만 한다(활성 재선택은 Zig detachTabForMove가 이미 함).
+    /// 이동 거부(move_failed — 그룹/pinned 워크스페이스는 M3d-2a-ii 범위·OOM)면 세션·창을 둘 다 그대로 둔다(이 이벤트만 무시).
+    private func moveWorkspace(from src: TerminalSurface, into dst: TerminalSurface) {
+        guard let srcSession = src.appSession, let dstSession = dst.appSession else { return }
+        let idx = maru_macos_app_session_active_workspace_index(srcSession)
+        guard idx != UInt32.max else { return } // surface 미초기화·탭 전무 sentinel — 무동작
+        var result = MaruAppHostMoveResult()
+        guard maru_macos_app_session_move_workspace_to(srcSession, dstSession, Int(idx), &result) == Self.statusOK else { return }
+        dst.window?.makeKeyAndOrderFront(nil) // 목적지 focus 착지(src 유지/close 전에 먼저 키로 — AppKit이 임의 창을 키로 안 고르게)
+        withSurface(dst) { _ = renderTick() } // 옮겨온 워크스페이스 즉시 repaint(다음 timer tick 안 기다림)
+        if result.source_window_closed == 1 {
+            closeWindowOrQuit(src) // src의 마지막 워크스페이스였다 — 비워진 소스 창 teardown+close(dst 존재라 else 경로).
+        } else {
+            withSurface(src) { _ = renderTick() } // src에 워크스페이스 남음 — 사이드바·활성 재계산은 Zig가 함, src 창 repaint만.
         }
     }
 

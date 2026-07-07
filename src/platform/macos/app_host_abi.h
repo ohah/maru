@@ -29,6 +29,10 @@ typedef enum MaruAppHostStatus {
     /* tick이 PTY 세션 종료(shell exit/read_error)를 관측했다. fault가 아니라 정상 종료
        신호이므로 host는 frame loop를 멈추고 우아하게 내려가야 한다. */
     MaruAppHostStatusSessionEnded = 9,
+    /* cross-window 이동(M3d-2a) 실패 — 잘못된 워크스페이스 인덱스·dst 용량 확보 실패(OOM)·
+       범위 밖 워크스페이스(그룹/pinned는 M3d-2a-ii). 이 한 event만 거부이고 세션은 유지된다(fault 아님).
+       app_host_abi.zig Status.move_failed=10과 값이 정합해야 한다(ABI 계약 테스트가 강제). */
+    MaruAppHostStatusMoveFailed = 10,
 } MaruAppHostStatus;
 
 typedef enum MaruAppHostEventKind {
@@ -423,6 +427,37 @@ int32_t maru_macos_app_session_request_window_close(
 void maru_macos_app_session_request_app_quit(
     MaruAppHostSession *session
 );
+/* cross-window workspace 이동(M3d-2a) 결과 — status(ok/move_failed/null_out) + 소스 창이 비어 닫아야 하는지
+   (§8A.2) + 이동한 surface 수(§8A.3). Swift(M3d-2b)가 source_window_closed=1이면 NSWindow를 닫는다(판정은 Zig,
+   close는 platform). app_host_abi.zig MoveResult와 layout이 정합해야 한다(ABI 계약 테스트가 @sizeOf/@offsetOf로 강제). */
+typedef struct MaruAppHostMoveResult {
+    int32_t status;
+    uint32_t source_window_closed;
+    uint32_t moved_count;
+} MaruAppHostMoveResult;
+/* M3d-2a-i cross-window workspace 이동(docs/window-surface-mobility.md §8A.8) — src 세션의 src_index 워크스페이스를
+   dst 세션으로 옮긴다(registry/routing 무변경 → surface 재시작 없음). *out.source_window_closed=1이면 src 창이 비어
+   Swift가 닫아야 한다. src/dst/out NULL이면 NullOut, 잘못된 인덱스·OOM·범위 밖(그룹/pinned) 워크스페이스면 MoveFailed
+   (세션 유지). */
+int32_t maru_macos_app_session_move_workspace_to(
+    MaruAppHostSession *src,
+    MaruAppHostSession *dst,
+    size_t src_index,
+    MaruAppHostMoveResult *out
+);
+/* M3d-2a-i 전체 window merge(§1·§4) — src 세션의 **모든** 워크스페이스를 dst로 옮기고 src를 비운다
+   (source_window_closed 항상 1). surface 무재시작. src/dst/out NULL이면 NullOut, src 워크스페이스 중 하나라도
+   범위 밖(그룹/pinned)이거나 OOM이면 MoveFailed(source 불변). */
+int32_t maru_macos_app_session_merge_window(
+    MaruAppHostSession *src,
+    MaruAppHostSession *dst,
+    MaruAppHostMoveResult *out
+);
+/* M3d-2b 단일 카드 이동 배선 — src 세션의 **활성** 워크스페이스(탭) 인덱스. Swift 메뉴 "Move Workspace to Window"가
+   이 인덱스를 move_workspace_to(src, dst, src_index)의 src_index로 써서 활성 카드 하나만 옮긴다(merge_window은 전체라
+   불요). read-only(take_bell류 u32 — 값이지 상태 코드 아님). session NULL·surface 미초기화·탭 전무면 sentinel(UINT32_MAX)
+   → Swift가 무동작. app_host_abi.zig maru_macos_app_session_active_workspace_index와 시그니처가 정합해야 한다(swift-check). */
+uint32_t maru_macos_app_session_active_workspace_index(MaruAppHostSession *session);
 /* 휠 스크롤. Swift는 raw 델타(포인트, 세로 delta_y·가로 delta_x)·정밀 델타 여부(0/1)·마우스 위치(backing px)만
    넘기고, 줄/열 환산과 어느 panel로 보낼지(커서 아래 pane — split의 비활성 panel 위 휠도 그 panel로 라우팅)는
    Zig가 한다. delta_y는 그 panel 터미널 스크롤백, delta_x는 그 pane 탭 바 가로 스크롤(탭이 넘칠 때만). 단일

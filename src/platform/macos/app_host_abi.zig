@@ -310,6 +310,16 @@ pub export fn maru_macos_app_session_merge_window(
     return moveResultOk(o, outcome, moved_count);
 }
 
+// M3d-2b 단일 카드 이동 배선 — src 세션의 **활성** 워크스페이스(탭) 인덱스를 Swift에 준다. Swift 메뉴 "Move Workspace
+// to Window ▸ <창>"이 이 인덱스를 move_workspace_to(src,dst,idx)에 넘겨 활성 카드 하나만 옮긴다(merge_window은 전체라
+// 인덱스 불요). read-only(take_bell류 u32 반환 — 상태 코드가 아니라 값). session null·surface 미초기화·탭 전무면
+// sentinel(maxInt u32)을 돌려주고 Swift가 무동작한다(이동 로직은 늘리지 않음 — 이미 있는 move_workspace_to 재사용).
+pub export fn maru_macos_app_session_active_workspace_index(session: ?*AppSession) u32 {
+    const app_session = session orelse return std.math.maxInt(u32);
+    const idx = app_session.activeWorkspaceIndex() orelse return std.math.maxInt(u32);
+    return @intCast(idx);
+}
+
 // 휠 스크롤: Swift는 raw 델타(포인트)·정밀 델타 여부·마우스 위치(backing px)만 넘기고, 줄 수 환산(매직
 // 상수·clamp·NaN 가드)과 어느 panel로 보낼지(커서 아래 pane)는 app session이 한다. 스크롤 자체는
 // TerminalCore가 소유한다. x/y는 split에서 비활성 panel 위 휠을 그 panel로 라우팅하는 데 쓴다(단일 panel
@@ -1372,6 +1382,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusNullOut), @intFromEnum(Status.null_out));
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusInvalidConfig), @intFromEnum(Status.invalid_config));
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusSessionEnded), @intFromEnum(Status.session_ended));
+    // M3d-2b: cross-window 이동 거부 status(=10)를 Swift가 이 값으로 판정하므로 .h와 고정 정합(값 드리프트면 이동 실패를 성공으로 오독).
+    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusMoveFailed), @intFromEnum(Status.move_failed));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostEventKeyDown), @intFromEnum(EventKind.key_down));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostEventAppShouldTerminate), @intFromEnum(EventKind.app_should_terminate));
     try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeArrowUp)), @intFromEnum(KeyCode.arrow_up));
@@ -1385,6 +1397,13 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostCapabilities), @alignOf(Capabilities));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostKeyEvent), @sizeOf(KeyEvent));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostResizeEvent), @sizeOf(ResizeEvent));
+    // M3d-2b MoveResult(Swift가 이동/merge 결과를 이 layout으로 읽는다). 필드 타입이 달라 @sizeOf가 대부분의 reorder를
+    // 잡지만, source_window_closed↔moved_count(둘 다 u32) 뒤바뀜은 못 잡으므로 @offsetOf로 세 필드 위치를 대조한다.
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostMoveResult), @sizeOf(MoveResult));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostMoveResult), @alignOf(MoveResult));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMoveResult, "status"), @offsetOf(MoveResult, "status"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMoveResult, "source_window_closed"), @offsetOf(MoveResult, "source_window_closed"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMoveResult, "moved_count"), @offsetOf(MoveResult, "moved_count"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostSessionConfig), @sizeOf(AppSessionConfig));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostSessionConfig), @alignOf(AppSessionConfig));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostQuickTerminalConfig), @sizeOf(session_mod.QuickTerminalConfig));

@@ -1983,7 +1983,9 @@ pub const AppSession = struct {
                 self.trace_buf = buf;
                 self.trace_writer = file.writer(io, buf);
                 self.trace_recorder = app.trace_recorder.TraceRecorder.init(&self.trace_writer.?.interface);
-                self.runtime.trace_recorder = &self.trace_recorder.?;
+                // recorder는 **surface가 없는** trace 셋업 단계라 여기서 runtime에 붙이지 않는다 — 앱-전역 runtime에
+                // 싱글톤으로 대입하면 창끼리 서로 덮어써 오염된다(리뷰 [0]). 대신 createTerm이 surface spawn마다
+                // 이 창의 recorder를 그 링크에 per-link로 붙인다(setSurfaceTraceRecorder).
             }
         }
 
@@ -3607,6 +3609,10 @@ pub const AppSession = struct {
         // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
         // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
         _ = try term.rt.live_pty.attachSurface(self.runtime, term.surface, request.login); // term.surface는 이미 *Surface(번들 슬롯)
+        // MARU_TRACE: 이 창의 trace 레코더를 방금 attach한 링크에 per-link로 붙인다(모든 surface spawn 단일 chokepoint —
+        // 첫탭·⌘T·split·restore 다 여기). 앱-전역 runtime이라 창끼리 안 섞이도록 싱글톤이 아니라 링크별로 건다(리뷰 [0]).
+        // recorder는 self 소유(안정 주소)라 링크가 든 포인터가 세션 내내 유효하다. 붙는 순간 초기 grid baseline resize 기록.
+        if (self.trace_recorder != null) try self.runtime.setSurfaceTraceRecorder(term.surface.id, &self.trace_recorder.?);
         // pump를 **앱 전역 라우팅**에 바인딩(M3b) — 창을 옮겨도(M3d) surface_id 키드 라우팅이 그대로 유효하다(§8A.2).
         term.rt.pump = term.rt.live_pty.pump(self.runtime);
         return term;
@@ -17558,10 +17564,11 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
-        // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 레코더 포인터를 끊고(runtime 아직 유효),
-        // 남은 버퍼를 flush + sync(durability) + close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다.
+        // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
+        // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
+        // 없다 — 이 창의 링크가 든 recorder 포인터는 아래 1) closeAndDetach가 링크째 detach하며 사라진다(리뷰 [0]).
+        // deinit 중엔 pump가 안 돌아 이벤트가 생기지 않으므로 flush/close와 detach 사이에 recorder가 참조되지 않는다.
         if (self.trace_recorder != null) {
-            self.runtime.trace_recorder = null;
             self.trace_recorder = null;
             if (self.trace_writer) |*fw| {
                 fw.interface.flush() catch {};

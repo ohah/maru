@@ -4,6 +4,10 @@ const session_mod = @import("app_session.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
+const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
+const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
+const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터
+const control_surface = maru.session.control_surface; // 1c: Surface DTO/CollectorSnapshot
 
 const c = @cImport({
     @cInclude("app_host_abi.h");
@@ -1135,6 +1139,151 @@ fn keyEventFromAbi(event: KeyEvent) !terminal.KeyEvent {
         .keypad = keycode.isKeypad(event.raw_key_code),
     };
 }
+// ══ 세션 컨트롤 플레인 라이브 서버(Track C A2b) ══════════════════════════════════════════════════════════════
+// 단일 출처: docs/control-plane.md §2(collector 2층)·§5(메인 marshal)·§8.4(auth 한계)·§16.
+//  - 소켓 bind·accept 스레드·marshal 큐는 control_server.zig(generic L4)가 소유.
+//  - 실 collector 조립(창마다 collectSessionInto)·auth 판정(A2b metadata:self)·dispatch(1d)는 여기서 — AppSession을
+//    아는 유일한 L4 층이라(§16 코드배치 gate: app_session.zig 인접 L4 허용).
+//  - Swift는 (1) start 1회, (2) 매 tick drain(살아있는 세션 목록), (3) stop만 부른다(§2 열거만).
+
+/// 세션(창) collector 참조 — Swift가 창마다 채운다. app_host_abi.h `MaruControlSessionRef`와 layout 일치.
+pub const ControlSessionRef = extern struct {
+    app_session: ?*AppSession,
+    window_id: u64,
+    window_kind: u32,
+    reserved: u32 = 0,
+};
+
+/// 앱 인스턴스 전역 라이브 서버(주소 안정 필요 — accept 스레드가 &storage를 잡는다). 메인 스레드만 active 토글/drain을
+/// 만진다(server 내부 필드는 자체 동기화). 서버 미시작(bind 실패 등)이면 컨트롤 플레인만 꺼지고 앱은 계속 산다.
+var control_server_storage: control_server_mod.ControlServer = undefined;
+var control_server_active: bool = false;
+
+/// hello가 광고하는 read-only 메서드(현재 구현된 것만 — §11 help gate와 같은 정직성).
+const control_hello_caps = [_][]const u8{ "sessions.list", "session.get" };
+const control_hello_version = "0.1.0";
+/// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
+const control_drain_budget: usize = 32;
+
+fn appHostIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+/// 결정론 컨트롤 base dir `<cache>/maru`(§4.2)를 buf에 NUL 종단으로 만든다. XDG_CACHE_HOME 우선, 없으면 HOME/.cache.
+/// 못 정하면 null. Server.bind가 `<base>/control`을 mkdir하므로 caller(start)가 `<base>`까지 존재를 보장한다.
+fn controlBaseDir(buf: []u8) ?[:0]u8 {
+    if (std.c.getenv("XDG_CACHE_HOME")) |x| {
+        const xs = std.mem.span(x);
+        if (xs.len > 0) return std.fmt.bufPrintZ(buf, "{s}/maru", .{std.mem.trimEnd(u8, xs, "/")}) catch null;
+    }
+    const home = std.c.getenv("HOME") orelse return null;
+    const hs = std.mem.span(home);
+    if (hs.len == 0) return null;
+    return std.fmt.bufPrintZ(buf, "{s}/.cache/maru", .{std.mem.trimEnd(u8, hs, "/")}) catch null;
+}
+
+/// 인스턴스 nonce(§4.2 "부팅 nonce") — 파일명 유일성용(암호 비밀 아님). macOS arc4random_buf로 8바이트 채운다.
+fn instanceNonce() u64 {
+    var bytes: [8]u8 = undefined;
+    std.c.arc4random_buf(&bytes, bytes.len);
+    return std.mem.readInt(u64, &bytes, .little);
+}
+
+/// 살아있는 세션들(refs)을 창마다 `collectSessionInto`로 평탄화해 하나의 CollectorSnapshot으로 조립한다(§2). 스냅샷은
+/// `arena` 메모리를 빌린다(caller가 arena 수명 관리). app_session=NULL 항목은 건너뛴다. 순수 조립 — 테스트가 실 AppSession으로 커버.
+fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator) std.mem.Allocator.Error!control_surface.CollectorSnapshot {
+    var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    for (refs) |ref| {
+        const app = ref.app_session orelse continue;
+        const kind = std.enums.fromInt(maru.session.WindowKind, ref.window_kind) orelse .normal;
+        try app.collectSessionInto(arena, ref.window_id, kind, &surfaces, &windows);
+    }
+    return .{ .surfaces = surfaces.items, .windows = windows.items };
+}
+
+/// 한 요청을 실 collector + auth(metadata:self) + dispatch(1d)로 처리해 응답 바이트(server.cross_gpa 소유)를 만든다.
+/// **A2b auth 한계(§8.4)**: caller=셀렉터가 주장한 surface_id, scope=metadata:self 고정. same-uid peer면 임의 surface를
+/// self로 주장할 수 있고 tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만 열린다(§8.3 self 필터가 나머지를 가림).
+fn buildControlResponse(
+    server: *control_server_mod.ControlServer,
+    refs: []const ControlSessionRef,
+    pending: *control_server_mod.PendingRequest,
+) std.mem.Allocator.Error!?[]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit(); // 스냅샷은 dispatch 동안만 필요 — 응답(cross_gpa)은 arena와 독립
+    const snapshot = try collectSessionsInto(refs, arena.allocator());
+    const caller = pending.selector orelse 0;
+    return try control_dispatch.dispatchReadOnly(server.cross_gpa, pending.request_bytes, snapshot, caller, .self);
+}
+
+pub export fn maru_macos_control_server_start() c_int {
+    if (control_server_active) return @intFromEnum(Status.ok); // idempotent
+    var base_buf: [1024]u8 = undefined;
+    const base = controlBaseDir(&base_buf) orelse return @intFromEnum(Status.create_failed);
+    // <base>(<cache>/maru) 존재 보장(Server.bind는 <base>/control만 mkdir). 부모(<cache>)도 best-effort mkdir.
+    if (std.mem.lastIndexOfScalar(u8, base, '/')) |slash| {
+        if (slash > 0) {
+            base_buf[slash] = 0; // 부모 경로로 임시 절단
+            _ = std.c.mkdir(@ptrCast(base_buf[0..slash].ptr), 0o700);
+            base_buf[slash] = '/'; // 복원
+        }
+    }
+    _ = std.c.mkdir(base.ptr, 0o700);
+
+    var key_buf: [64]u8 = undefined;
+    const key = control_socket.formatInstanceKey(&key_buf, std.c.getpid(), instanceNonce()) catch return @intFromEnum(Status.create_failed);
+
+    control_server_storage.start(
+        appHostIo(),
+        allocator, // cross_gpa: smp_allocator는 thread-safe(요청/응답 cross-thread)
+        allocator, // items/socket alloc
+        base,
+        key,
+        control_hello_version,
+        &control_hello_caps,
+        16, // max_pending(accept 스레드 1개·in-flight ≤1이라 넉넉)
+    ) catch |e| {
+        if (std.c.getenv("MARU_DEBUG") != null) std.debug.print("[maru control] start failed base={s} key={s} err={s}\n", .{ base, key, @errorName(e) });
+        return @intFromEnum(Status.create_failed);
+    };
+    control_server_active = true;
+    return @intFromEnum(Status.ok);
+}
+
+/// #4 값싼 per-tick 게이트: 대기 중인 컨트롤 요청이 하나라도 있으면 1, 없으면 0. Swift가 매 tick `drain` 전에 이걸 봐
+/// pending이 없으면 refs 배열(힙 할당 + 창별 copy)을 **아예 짓지 않고** early return한다(렌더 핫패스 0-할당). 서버
+/// 미시작이면 0. `take_bell` 등 predicate와 같은 u32(1/0) 패턴 — bool은 .h에 stdbool을 끌어들이고 codebase 관례와도
+/// 어긋난다. (ABI 신규 export — 버전 bump 없음, drain과 동일 no-handle. 짧은 큐 락만 잡는다.)
+pub export fn maru_macos_control_server_has_pending() u32 {
+    if (!control_server_active) return 0;
+    return if (control_server_storage.hasPendingRequest()) 1 else 0;
+}
+
+pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSessionRef, count: usize) void {
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    const refs: []const ControlSessionRef = if (refs_ptr) |p| p[0..count] else &.{};
+    var handled: usize = 0;
+    while (handled < control_drain_budget) : (handled += 1) {
+        const pending = server.tryPopRequest() orelse break;
+        // 팝한 pending은 **반드시** resolve해야 accept 스레드가 무한 대기하지 않는다(OOM이면 응답 없이 종료).
+        const response = buildControlResponse(server, refs, pending) catch |e| switch (e) {
+            error.OutOfMemory => {
+                server.resolveRequest(pending, null);
+                continue;
+            },
+        };
+        server.resolveRequest(pending, response);
+    }
+}
+
+pub export fn maru_macos_control_server_stop() void {
+    if (!control_server_active) return;
+    control_server_active = false;
+    control_server_storage.stop();
+}
+
 test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
@@ -1179,6 +1328,12 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "key_display"), @offsetOf(session_mod.CommandEntry, "key_display"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "key_equivalent"), @offsetOf(session_mod.CommandEntry, "key_equivalent"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostCommand, "key_modifiers"), @offsetOf(session_mod.CommandEntry, "key_modifiers"));
+    // A2b ControlSessionRef ABI 정합(Swift가 창마다 채워 drain에 넘긴다). offsetOf로 필드 위치까지 대조.
+    try std.testing.expectEqual(@sizeOf(c.MaruControlSessionRef), @sizeOf(ControlSessionRef));
+    try std.testing.expectEqual(@alignOf(c.MaruControlSessionRef), @alignOf(ControlSessionRef));
+    try std.testing.expectEqual(@offsetOf(c.MaruControlSessionRef, "app_session"), @offsetOf(ControlSessionRef, "app_session"));
+    try std.testing.expectEqual(@offsetOf(c.MaruControlSessionRef, "window_id"), @offsetOf(ControlSessionRef, "window_id"));
+    try std.testing.expectEqual(@offsetOf(c.MaruControlSessionRef, "window_kind"), @offsetOf(ControlSessionRef, "window_kind"));
     // GlobalHotkey ABI 정합(전역 단축키 enumerate가 out_ptr로 노출) — 이전엔 대조가 통째로 빠져 있었다.
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostGlobalHotkey), @sizeOf(session_mod.GlobalHotkey));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostGlobalHotkey), @alignOf(session_mod.GlobalHotkey));

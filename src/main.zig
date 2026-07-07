@@ -524,6 +524,20 @@ fn runSessionRequest(
     if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0)
         return sessionNoInstance(stderr, null);
 
+    // ── A2b auth 셀렉터 전송(§8.4 1단계): caller가 자기 surface를 주장한다. maru 팬 셸엔 MARU_PANE_ID=<surface.id>가
+    // 주입돼 있으므로(pty/macos appendParentEnv) 그 값을 self 셀렉터로 보낸다. 실제 env는 `$MARU_SESSION`이 아니라
+    // MARU_PANE_ID이고 그 값이 곧 surface_id다(문서 전제와의 drift — control-plane.md §8.4에 정정). maru 밖 shell엔
+    // 없어 null → 서버가 아무 surface도 self로 주지 않는다(§8.3 self 필터로 빈 목록). **한계**: same-uid면 임의
+    // surface_id를 주장할 수 있고 tty/pgrp 검증은 1g 후속(§8.4 경계 정직) — A2b는 그 한 surface의 metadata만 연다. ──
+    const selector: ?u64 = if (c.getenv("MARU_PANE_ID")) |pane|
+        (std.fmt.parseInt(u64, std.mem.span(pane), 10) catch null)
+    else
+        null;
+    const auth_bytes = try maru.session.control_plane.serializeAuthSelf(allocator, selector);
+    defer allocator.free(auth_bytes);
+    if (!writeAllFd(fd, auth_bytes) or !writeAllFd(fd, "\n"))
+        return sessionNoInstance(stderr, "auth 셀렉터 전송에 실패했습니다");
+
     // ── 요청 전송(1d client wire) → 응답 프레임 수신(1a Framer) → hello skip → renderResponse(1d) ──
     const request_bytes = try maru.cli.sessions.buildRequestBytes(allocator, req, .{ .number = 1 });
     defer allocator.free(request_bytes);

@@ -163,6 +163,14 @@ Phase 2 누적 변경에 다각도 리뷰를 돌려 두 결함을 tip에서 수�
 - **수용된 한계(미수정, 무회귀 또는 pathological)**: (1) reader write 단계가 응답(reader-로컬)을 메인 입력보다 먼저 비워, **지속적 응답 폭주**(질의 시퀀스 연속) 시 메인 입력 지연 가능 — 응답은 지연 민감(query 답)이라 우선순위 유지, 입력 순서 비결정성은 §8.4대로 터미널 관용. (2) paste throttle 지점이 PTY 버퍼→write_queue cap(256KiB)로 이동(전량·순서 보존, 흐름 제어는 cap에서).
 - **응답 버퍼 상한(구현 — 버그헌트 후속, 옛 한계 (3) 갱신)**: reader-로컬 응답 버퍼(`out_buf`)를 `pty_reader.response_buffer_capacity`(256 KiB, write_queue cap과 동일)로 bound한다. **근거**: 자식이 stdin을 안 비우면서(POLLOUT 미발화) 응답 유발 출력을 쏟으면 `out_buf`가 **무한 증가**(버그헌트 감사서 확정 — write_queue·command_queue는 bound인데 이 경로만 무상한이었다)하던 경로를 막는다. pending(미전송 응답)이 상한을 넘으면 추가 응답을 드롭하고(자식이 안 읽어 어차피 전달 불가 — OOM best-effort 드롭과 같은 의미), 소비된 prefix를 상한마다 compact해 점유를 ~2× 이내로 bound한다(append는 여전히 무블록이라 P2-3a self-write 데드락 회피 불변). **결정 변경**: 옛 "응답 드롭은 OOM만, capping은 실측 근거 생기면 재검토"는 이 확정 버그 + 사용자 승인으로 갱신했다(추가 전 상의 완료 — [[no-defensive-code-without-consult]] 충족). OOM 시 드롭(best-effort)은 그대로 유지.
 
+### 8.9 컨트롤 플레인 accept 스레드도 이 marshal 규율을 따른다(A2b — [control-plane.md] §5)
+
+세션 컨트롤 플레인 라이브 서버(A2b, `src/platform/macos/control_server.zig`)가 이 §8.8 lock-order 선례를 **재사용**한다: 앱-전역 소켓 accept 스레드가 요청을 메인 frame loop로 marshal해 코어/트리/collector에 안전 접근하게 한다. 구조는 `PtyEventQueue`/`PtyWriteQueue`와 같은 결(bounded FIFO + `Io.Mutex`/`Io.Condition`)의 `ControlRequestQueue`다.
+
+- **§8.8 불변식 엄수**: accept 스레드는 `core_mutex`를 **안 쥔 채로만** 요청 큐에 push하고 응답을 대기한다(그 스레드는 코어를 절대 안 만짐 — accept/parse/framing/write만). 메인 drain은 `collectSessionInto` 안에서만 surface `core_mutex`를 짧게(복사만) 잡고, 그 락을 쥔 채 요청 큐에 push/wait하지 않는다. 요청 큐 drainer=메인, 응답 pending signal도 메인, accept 스레드는 아무 락도 안 쥔 채 대기 → **교차-큐 순환대기 없음**(P2-5가 끊은 그 클래스).
+- **응답 rendezvous**: 응답 바이트는 pending 자체의 mutex+cond로 메인→accept 스레드에 전달하고, write는 accept 스레드가 락 밖에서 한다(§5 "응답 write는 락 밖·소켓 스레드").
+- **cross-thread 할당**: 요청/응답 바이트는 두 스레드를 오가므로 thread-safe allocator(`smp_allocator`)로만 다룬다(collector arena는 메인 전용). accept 스레드 수명은 poll-gated blocking accept + `closing` 플래그(stop이 큐 close로 대기 pending을 cancel → join). 단일 출처는 [control-plane.md] §5.
+
 ## 9. Phase 3 — 메인발 코어 mutate를 I/O 스레드로 위임 ((a) 단일책임 확정 — P3-1~P3-4 구현 완료 + `/code-review max` 통과, 확정 결함 0)
 
 Phase 1(읽기·코어 처리·응답)·Phase 2(PTY 쓰기)는 I/O 스레드로 옮겼지만, **메인 스레드가 아직 비-PTY 코어 mutate(IME `setPreedit`, 스크롤, 선택, 리포팅)를 `core_mutex` 아래 직접 수행**한다. 이 잔재가 재진입 데드락의 토양이다(#700). §6-5의 `CoreOwner` 안전망이 그 클래스를 panic으로 봉인했지만(1단계), 근본 해소는 **메인이 코어를 직접 안 만지는 것** — **I/O 스레드를 코어의 유일한 mutator로 두는 단일책임 모델**이며, §3의 "I/O 스레드가 코어를 소유한다, 렌더는 락 아래 스냅샷만 읽는다"를 **글자 그대로 실현**한다(2단계).

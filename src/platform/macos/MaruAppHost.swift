@@ -604,6 +604,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
     private var tickTimer: Timer?
     private var frameLoopRateHz: UInt32 = 0
+    // 세션 컨트롤 플레인 라이브 서버(A2b)가 떴는지. Zig가 앱 전역 소켓 + accept 스레드를 소유하고, 여긴 (1) 시작 시
+    // start 1회, (2) 매 tick drain(살아있는 세션 목록 전달 — §2 열거), (3) 종료 시 stop만 부른다. bind 실패는
+    // 비치명(false로 남고 컨트롤 플레인만 꺼짐). 단일 출처: docs/control-plane.md §2·§5.
+    private var controlServerStarted = false
     // smoke 자동 종료용 one-shot timer. 창이 먼저 닫혀도 run loop에 남아 teardown 뒤
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
@@ -756,6 +760,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         startFrameLoopTicks()
+
+        // 세션 컨트롤 플레인 라이브 서버(A2b): 앱 전역 소켓 + accept 스레드를 띄운다. 이 뒤로 tickAppSession이 매
+        // tick drain하고(살아있는 세션 목록), applicationWillTerminate가 stop한다. bind 실패는 비치명(컨트롤 플레인만
+        // 꺼짐 — maru sessions list가 "인스턴스 없음"으로 접힌다). 소켓·스레드·collector·dispatch·auth는 전부 Zig.
+        controlServerStarted = (maru_macos_control_server_start() == Self.statusOK)
+
         if smokeMode {
             sendSmokeDevEvents()
         }
@@ -790,6 +800,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         tickTimer = nil
         smokeTimer?.invalidate()
         smokeTimer = nil
+        // 컨트롤 플레인 서버를 세션 teardown '전에' 멈춘다 — accept 스레드를 join하고 대기 중 요청을 cancel해, 이후
+        // shutdownAppSession이 세션을 해제할 때 accept 스레드가 (marshal 큐 밖에서) 세션을 만지지 않게 한다. tick은
+        // 이미 멈춰(위) 더 이상 drain되지 않는다. idempotent(미시작이면 무동작).
+        if controlServerStarted {
+            maru_macos_control_server_stop()
+            controlServerStarted = false
+        }
         // workspace를 '정상 종료'에 저장한다 — applicationWillTerminate는 크래시에선 안 불리므로(자동 충족),
         // 마지막 정상 세션만 디스크에 남는다(다음 실행이 그걸 복원, R4). shutdown '전에'(세션이 아직 살아 있을 때).
         saveWorkspace()
@@ -1428,7 +1445,33 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 tearDownQuickTerminal()
             }
         }
+        // 컨트롤 플레인 요청을 메인에서 drain한다(§5 단일 디스패치=메인 marshal). 살아있는 세션 목록(일반 창 + quick)을
+        // 넘겨 Zig가 창마다 collectSessionInto로 스냅샷을 조립·auth·dispatch한다(§2 Swift는 열거만). 요청이 없으면 무동작.
+        drainControlServer()
         restartFrameLoopTicksIfNeeded()
+    }
+
+    /// 컨트롤 플레인 라이브 서버 drain: 살아있는 세션(일반 창 + quick)을 collector 참조 배열로 모아 Zig에 넘긴다.
+    /// window_id=창 토큰(위치 메타), window_kind: 0=일반, 1=quick. app_session 없는 창은 건너뛴다(§2 열거만 — 평탄화·
+    /// auth·dispatch는 Zig). 서버 미시작이면 무동작. 매 tick 호출되지만 요청이 없으면 Zig가 즉시 반환한다.
+    private func drainControlServer() {
+        guard controlServerStarted else { return }
+        // #4 값싼 게이트: 대기 요청이 없으면 refs 배열 힙 할당·창별 copy 없이 즉시 반환한다(매 tick 최대 120Hz 렌더
+        // 핫패스에서 0-할당). drain 자체가 여전히 권위 있는 소비 지점 — 확인 직후 도착한 요청은 다음 tick에서 처리된다.
+        guard maru_macos_control_server_has_pending() != 0 else { return }
+        var refs: [MaruControlSessionRef] = []
+        refs.reserveCapacity(windows.count + 1)
+        for surface in windows {
+            if let session = surface.appSession {
+                refs.append(MaruControlSessionRef(app_session: session, window_id: surface.token, window_kind: 0, reserved: 0))
+            }
+        }
+        if let quick, let session = quick.appSession {
+            refs.append(MaruControlSessionRef(app_session: session, window_id: quick.token, window_kind: 1, reserved: 0))
+        }
+        refs.withUnsafeBufferPointer { buf in
+            maru_macos_control_server_drain(buf.baseAddress, buf.count)
+        }
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가

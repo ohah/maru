@@ -154,7 +154,8 @@ pub const Connection = struct {
 };
 
 /// 부분 write를 처리하는 blocking write-all(소켓 stream). 짧은 hello/`\n`이지만 부분 write·EINTR를 방어한다.
-fn writeAll(fd: c.fd_t, bytes: []const u8) error{WriteFailed}!void {
+/// A2b accept-loop 스레드가 응답을 소켓에 쓸 때도 재사용한다(락 밖·소켓 스레드, §5) — 그래서 pub.
+pub fn writeAll(fd: c.fd_t, bytes: []const u8) error{WriteFailed}!void {
     var off: usize = 0;
     while (off < bytes.len) {
         const n = c.write(fd, bytes.ptr + off, bytes.len - off);
@@ -182,6 +183,12 @@ pub const Server = struct {
     lock_path: [:0]u8,
 
     pub const backlog: c_uint = 16;
+
+    /// `pollReady` 결과 3상(§5 accept 스레드 수명). `.ready`=대기 연결 있음(다음 `acceptOne`이 안 막힘), `.timeout`=
+    /// 대기 없음/일시적 에러(EINTR 등 — 호출자가 closing 확인 후 재-poll), `.broken`=listen fd가 치명적으로 망가짐
+    /// (POLLERR/POLLHUP/POLLNVAL sticky). broken은 회복 불가라 호출자가 재-poll(tight-spin)이 아니라 accept 루프를
+    /// **종료**해야 한다 — 예전 bool 반환은 broken을 `.timeout`과 못 구분해 즉시 재-poll → 100% CPU 스핀이었다(#5 방어).
+    pub const PollResult = enum { ready, timeout, broken };
 
     /// `<base>/control/<key>.sock`에 unix domain socket 서버를 세운다(§4.2·§8.2). 순서:
     ///  1. 컨트롤 dir 0700 보장(mkdir + chmod, 소유자 검증).
@@ -214,6 +221,12 @@ pub const Server = struct {
         var dst: posix.Stat = undefined;
         if (c.fstatat(posix.AT.FDCWD, dir.ptr, &dst, posix.AT.SYMLINK_NOFOLLOW) != 0) return error.ControlDirFailed;
         if (!posix.S.ISDIR(dst.mode) or dst.uid != server_uid) return error.OwnershipCheckFailed;
+
+        // ── 1.5. **다른 인스턴스**의 stale 소켓 회수(§4.2 "flock 회수") — crash/force-quit로 deinit(unlink)이 못 돈
+        //  인스턴스가 `<key>.sock`+`<key>.lock`을 남기면, 다음 실행이 새 nonce로 새 소켓을 bind해 dir에 `.sock`이 여럿이
+        //  되어 CLI `pickSocket`이 `.multiple`로 접힌다(→ `maru sessions list` 영구 "여러 인스턴스" 고장). self_key(우리
+        //  것)는 아래 unlink_and_bind가 따로 처리하므로 제외한다(#1). best-effort. ──
+        pruneStaleSockets(gpa, dir, key);
 
         // ── 2. 라이브니스 lock 파일 flock(EX|NB) — §4.2 stale 판별의 단일 지점 ──
         const lock_fd = c.open(lock_path.ptr, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(c.mode_t, 0o600));
@@ -279,6 +292,10 @@ pub const Server = struct {
         if (!peerUidAllowed(self.server_uid, euid)) return error.PeerUidMismatch;
 
         // hello notification(§4.1): 1a serializeHello + 종단 `\n`. 직렬화는 1a L2가 소유(재구현 금지).
+        // **2-write(wire, 그다음 `\n`)**: 응답 경로(serveReadOnly·serveConnection)도 2-write라 일관성을 맞춘다. stream
+        // 소켓에서 client의 단일 read가 개행 앞에서 끊길 수 있는 건 맞지만, 그건 프레임 경계 재조립을 client의 `Framer`가
+        // 담당하기 때문에 결함이 아니다(실 client=main.zig·cli/sessions는 이미 Framer로 skip-hello). single-write로 원자
+        // 전달하려 alloc+memcpy하던 건 응답 경로와 불일치할 뿐 이득이 없어 제거한다(#7). 개행은 별도 write.
         const wire = cp.serializeHello(gpa, .{
             .server_version = hello.server_version,
             .capabilities = hello.capabilities,
@@ -302,7 +319,91 @@ pub const Server = struct {
     pub fn socketPath(self: *const Server) [:0]const u8 {
         return self.socket_path;
     }
+
+    /// A2b accept-loop 스레드용: listen fd에 대기 연결이 있는지 `poll(POLLIN)`로 확인한다(blocking accept를 poll로
+    /// gate). 반환 `PollResult` 3상(위 참조). **왜 poll gate인가**: blocking `accept`만 쓰면 종료 시 accept 스레드를
+    /// 깨우기 위해 self-connect 같은 fragile 트릭이 필요하다. poll timeout으로 주기적으로 깨어나 closing을 확인하면
+    /// self-connect 없이 결정론적으로 종료할 수 있다(§5 accept 스레드 수명). 단일 acceptor라 poll-then-accept race는 없다.
+    pub fn pollReady(self: *const Server, timeout_ms: i32) PollResult {
+        var fds = [_]c.pollfd{.{ .fd = self.listen_fd, .events = c.POLL.IN, .revents = 0 }};
+        const rc = c.poll(&fds, 1, timeout_ms);
+        if (rc < 0) return .timeout; // 에러(EINTR 등) — 치명 아님, 호출자가 closing 확인 후 재-poll.
+        if (rc == 0) return .timeout; // timeout — 대기 연결 없음, 재-poll.
+        const revents = fds[0].revents;
+        if (revents & c.POLL.IN != 0) return .ready;
+        // rc>0인데 POLLIN 없음 = 치명 revent(POLLERR|POLLHUP|POLLNVAL sticky) → listen fd 회복 불가. 호출자가 재-poll하면
+        // 같은 revent가 매번 즉시 반환돼 tight-spin(100% CPU)이 되므로 broken을 구분해 accept 루프를 종료하게 한다(#5).
+        if (revents & (c.POLL.ERR | c.POLL.HUP | c.POLL.NVAL) != 0) return .broken;
+        return .timeout; // 그 밖(이론상 도달 불가한 revent) — 안전하게 재-poll로 접는다.
+    }
 };
+
+/// accepted 연결 fd에 read 타임아웃(SO_RCVTIMEO)을 건다(§5 accept 스레드가 serial serve). **왜 필요한가**: 단일
+/// accept 스레드가 연결을 순차 처리하므로, 요청을 안 보내는 stuck client가 있으면 그 스레드가 read에서 영영 막혀
+/// (a) 다른 클라이언트 요청과 (b) 종료 시 accept 스레드 join이 무한 대기가 된다. 타임아웃은 "serial serve + 깨끗한
+/// join" 계약의 correctness 요건이다(투기적 방어 아님). 실패는 무시(best-effort — 타임아웃 없이도 정상 client는 동작).
+pub fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
+    var tv = posix.timeval{ .sec = @intCast(ms / 1000), .usec = @intCast((ms % 1000) * 1000) };
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, &tv, @sizeOf(posix.timeval));
+}
+
+/// accepted 연결 fd에 write 타임아웃(SO_SNDTIMEO)을 건다 — read 타임아웃과 **대칭**인 correctness 요건(#2). **왜
+/// 필요한가**: accept 스레드가 응답을 `writeAll`할 때, 응답을 안 읽어 커널 송신 버퍼를 채운 same-uid client가 있으면
+/// write(2)가 영영 막혀 read 타임아웃과 똑같이 (a) 다른 client와 (b) 종료 시 join이 무한 대기가 된다(제어면 정지 →
+/// Cmd+Q 프리즈). 타임아웃 만료 시 write가 EAGAIN을 돌려주고 `writeAll`이 그걸 `WriteFailed`로 접어(부분 write 후에도
+/// 결국 EAGAIN) accept 스레드가 그 연결을 abandon한다 — 무한 블록 없음. 실패는 무시(best-effort). serveConnection이
+/// read 타임아웃과 함께 accept 직후 건다.
+pub fn setWriteTimeoutMs(fd: c.fd_t, ms: u32) void {
+    var tv = posix.timeval{ .sec = @intCast(ms / 1000), .usec = @intCast((ms % 1000) * 1000) };
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.SNDTIMEO, &tv, @sizeOf(posix.timeval));
+}
+
+/// 컨트롤 dir(`dir_path`)에서 **다른 인스턴스**의 stale 소켓을 회수한다(§4.2 "flock 회수", #1). 메커니즘은 bind의 stale
+/// 판별(§8.2)과 동일하다: 각 `<key>.sock`(단, `self_key`는 제외 — 그건 bind의 `unlink_and_bind`가 처리)에 대응하는
+/// `<key>.lock`을 O_CREAT 없이 열어 non-blocking `flock(EX|NB)`을 시도한다 —
+///  - 취득 성공 = 소유 인스턴스 부재(프로세스 종료로 그 fd가 닫혀 flock이 자동 해제됨) → 그 `.sock`+`.lock`을 unlink,
+///  - 취득 실패(EWOULDBLOCK) = 살아있는 인스턴스가 홀드 중 → **보존**(우린 소켓을 절대 지우지 않는다).
+///  - `.lock` 파일이 없음(ENOENT) = liveness 증거 부재(우리 bind는 소켓보다 lock을 먼저 만든다) → 고아 `.sock` unlink.
+/// unlink 직후 fd를 닫아 우리가 잡았던 transient flock을 해제한다. readdir 중 unlink는 POSIX상 미정의라 key를 먼저 모은
+/// 뒤(pass 1) 처리한다(pass 2). best-effort — dir 열기·readdir·open 실패는 조용히 스킵(prune 없이도 앱은 동작; 최악은
+/// CLI가 여전히 `.multiple`로 접힘). L4(readdir·flock·unlink syscall).
+pub fn pruneStaleSockets(gpa: std.mem.Allocator, dir_path: [:0]const u8, self_key: []const u8) void {
+    const dir = c.opendir(dir_path.ptr) orelse return;
+    defer _ = c.closedir(dir);
+
+    // pass 1: `.sock` 엔트리의 key를 모은다(readdir 중 unlink는 미정의 — POSIX).
+    var keys: std.ArrayList([]u8) = .empty;
+    defer {
+        for (keys.items) |k| gpa.free(k);
+        keys.deinit(gpa);
+    }
+    while (c.readdir(dir)) |ent| {
+        const name = std.mem.sliceTo(ent.name[0..], 0);
+        if (!std.mem.endsWith(u8, name, ".sock")) continue; // `.lock`·`.`/`..`·그 밖 파일 무시.
+        const key = name[0 .. name.len - ".sock".len];
+        if (key.len == 0 or std.mem.eql(u8, key, self_key)) continue; // 우리 소켓은 bind가 따로 처리.
+        keys.append(gpa, gpa.dupe(u8, key) catch continue) catch continue; // OOM이면 이 항목만 스킵(best-effort).
+    }
+
+    // pass 2: 각 key의 lock을 flock으로 liveness 판별해 stale이면 소켓+lock 회수.
+    for (keys.items) |key| {
+        var lp_buf: [512]u8 = undefined;
+        const lp = lockPathIn(&lp_buf, dir_path, key) catch continue;
+        var sp_buf: [512]u8 = undefined;
+        const sp = socketPathIn(&sp_buf, dir_path, key) catch continue;
+        const lfd = c.open(lp.ptr, .{ .ACCMODE = .RDWR }, @as(c.mode_t, 0)); // O_CREAT 없음 — 고아 lock 생성 방지.
+        if (lfd < 0) {
+            _ = c.unlink(sp.ptr); // lock 부재 = 살아있는 소유자 없음(bind는 lock을 소켓보다 먼저 만든다) → 고아 회수.
+            continue;
+        }
+        defer _ = c.close(lfd); // 취득 여부와 무관하게 fd를 닫아 우리 transient flock 해제.
+        if (c.flock(lfd, posix.LOCK.EX | posix.LOCK.NB) == 0) {
+            // 취득 = 소유 인스턴스 부재 → stale. 소켓+lock 둘 다 회수(살아있으면 여기 도달 안 함).
+            _ = c.unlink(sp.ptr);
+            _ = c.unlink(lp.ptr);
+        }
+    }
+}
 
 // ══ per-connection read-only serve(Track C A2a) ══════════════════════════════════════════════════════════════
 // 한 연결의 요청 1개를 **동기** 처리하는 재사용 단위: `readInto`로 요청 프레임(1a `Framer`)을 조립 → 1d
@@ -347,8 +448,9 @@ pub fn serveReadOnly(
 }
 
 /// 코드의 default message로 에러 응답 한 줄(+종단 `\n`)을 conn에 쓴다(1a `serializeError` 재사용). serveReadOnly의
-/// payload-too-large 경로 편의 — id를 아직 못 읽었으므로 `.null`(JSON-RPC 관례, 1a와 동일).
-fn writeErrorResponse(fd: c.fd_t, gpa: std.mem.Allocator, code: cp.ErrorCode) ServeError!void {
+/// payload-too-large 경로 편의 — id를 아직 못 읽었으므로 `.null`(JSON-RPC 관례, 1a와 동일). A2b `control_server.readFrame`도
+/// PayloadTooLarge 시 이 함수로 같은 payload_too_large(-32001) 응답을 쓴다(§4.3 응답 계약 단일 출처 — pub, #3).
+pub fn writeErrorResponse(fd: c.fd_t, gpa: std.mem.Allocator, code: cp.ErrorCode) ServeError!void {
     const bytes = cp.serializeError(gpa, .null, code, code.defaultMessage(), null) catch return error.OutOfMemory;
     defer gpa.free(bytes);
     try writeAll(fd, bytes);
@@ -460,6 +562,23 @@ fn connectClient(base: []const u8, key: []const u8) !c.fd_t {
 const test_caps = [_][]const u8{ "sessions.list", "session.get", "session.capture" };
 const test_hello = HelloConfig{ .server_version = "0.1.0-test", .capabilities = &test_caps };
 
+/// 테스트 헬퍼: fd에서 완결 프레임 한 줄이 조립될 때까지 read 루프(1a `Framer`). hello가 2-write(wire, `\n`)라 단일
+/// read가 개행 앞에서 끊길 수 있으므로(실 client는 이미 Framer로 재조립), 프레임 경계는 이 헬퍼로 재조립한다(#7).
+/// owned 반환(caller free). 완결 프레임 없이 EOF면 error.NoFrame.
+fn readOneFrame(gpa: std.mem.Allocator, fd: c.fd_t) ![]u8 {
+    var framer: cp.Framer = .{};
+    defer framer.deinit(gpa);
+    var guard: usize = 0;
+    while (guard < 200) : (guard += 1) {
+        if (try framer.next()) |line| return gpa.dupe(u8, line);
+        var rb: [1024]u8 = undefined;
+        const n = c.read(fd, &rb, rb.len);
+        if (n <= 0) break;
+        try framer.push(gpa, rb[0..@intCast(n)]);
+    }
+    return error.NoFrame;
+}
+
 test "socket: bind→connect→hello 왕복 — accept가 hello notification을 보내고 client가 Framer로 파싱" {
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "roundtrip");
@@ -480,12 +599,17 @@ test "socket: bind→connect→hello 왕복 — accept가 hello notification을 
                 return;
             };
             defer _ = c.close(fd);
-            const n = c.read(fd, &self.got, self.got.len);
-            if (n < 0) {
-                self.err = error.ClientRead;
-                return;
+            // hello는 2-write(wire, `\n`)라 완결 프레임까지 개행이 보일 때까지 누적 read(부분 read 대비, #7).
+            while (self.got_len < self.got.len) {
+                const n = c.read(fd, self.got[self.got_len..].ptr, self.got.len - self.got_len);
+                if (n < 0) {
+                    self.err = error.ClientRead;
+                    return;
+                }
+                if (n == 0) break;
+                self.got_len += @intCast(n);
+                if (std.mem.indexOfScalar(u8, self.got[0..self.got_len], '\n') != null) break;
             }
-            self.got_len = @intCast(n);
         }
     };
     var ct = ClientT{ .base = base };
@@ -527,8 +651,13 @@ test "socket: accept가 peer uid(getpeereid)를 읽어 같은 uid면 accept — 
         fn run(self: *@This()) void {
             const fd = connectClient(self.base, "k1") catch return;
             defer _ = c.close(fd);
-            const n = c.read(fd, &self.got, self.got.len);
-            if (n > 0) self.got_len = @intCast(n);
+            // hello 2-write(wire, `\n`)를 완결 프레임까지 누적 read(#7) — "정확히 한 줄" 검증이 부분 read에 흔들리지 않게.
+            while (self.got_len < self.got.len) {
+                const n = c.read(fd, self.got[self.got_len..].ptr, self.got.len - self.got_len);
+                if (n <= 0) break;
+                self.got_len += @intCast(n);
+                if (std.mem.indexOfScalar(u8, self.got[0..self.got_len], '\n') != null) break;
+            }
         }
     };
     var ct = ClientT{ .base = base };
@@ -697,8 +826,13 @@ test "socket: 순차 다중 연결 — 각 연결이 hello를 받는다(accept-l
             fn run(self: *@This()) void {
                 const fd = connectClient(self.base, "k1") catch return;
                 defer _ = c.close(fd);
-                const n = c.read(fd, &self.got, self.got.len);
-                if (n > 0) self.got_len = @intCast(n);
+                // hello 2-write(wire, `\n`)를 완결 프레임(종단 `\n`)까지 누적 read(#7).
+                while (self.got_len < self.got.len) {
+                    const n = c.read(fd, self.got[self.got_len..].ptr, self.got.len - self.got_len);
+                    if (n <= 0) break;
+                    self.got_len += @intCast(n);
+                    if (std.mem.indexOfScalar(u8, self.got[0..self.got_len], '\n') != null) break;
+                }
             }
         };
         var ct = ClientT{ .base = base };
@@ -751,9 +885,12 @@ test "socket 1d: client가 sessions.list 요청 → server가 fake snapshot으�
                 return;
             };
             defer _ = c.close(fd);
-            // hello 한 줄을 읽어 버린다.
-            var hb: [512]u8 = undefined;
-            _ = c.read(fd, &hb, hb.len);
+            // hello 완결 프레임을 통째로 소비(2-write라 개행이 다음 read로 넘어가면 응답 프레임에 빈 줄이 섞인다, #7).
+            const hello = readOneFrame(std.testing.allocator, fd) catch |e| {
+                self.err = e;
+                return;
+            };
+            std.testing.allocator.free(hello);
             // 요청 전송(client wire 대신 raw 한 줄 — client wire는 cli/sessions.zig 단위 테스트가 커버).
             const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}\n";
             _ = c.write(fd, req, req.len);
@@ -972,15 +1109,23 @@ test "A2a 왕복 엣지: 부분 read로 쪼갠 요청도 serveReadOnly가 조립
                 return;
             };
             defer _ = c.close(fd);
-            var hb: [512]u8 = undefined;
-            _ = c.read(fd, &hb, hb.len); // hello 버림
+            const hello = readOneFrame(testing.allocator, fd) catch |e| { // hello 완결 프레임 통째 소비(#7)
+                self.err = e;
+                return;
+            };
+            testing.allocator.free(hello);
             const p1 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"met";
             const p2 = "hod\":\"sessions.list\"}\n";
             _ = c.write(fd, p1, p1.len);
             std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
             _ = c.write(fd, p2, p2.len);
-            const n = c.read(fd, &self.resp, self.resp.len);
-            if (n > 0) self.resp_len = @intCast(n);
+            // 응답 완결 프레임(종단 `\n`)까지 누적 read.
+            while (self.resp_len < self.resp.len) {
+                const n = c.read(fd, self.resp[self.resp_len..].ptr, self.resp.len - self.resp_len);
+                if (n <= 0) break;
+                self.resp_len += @intCast(n);
+                if (std.mem.indexOfScalar(u8, self.resp[0..self.resp_len], '\n') != null) break;
+            }
         }
     };
     var ct = ClientT{ .base = base };
@@ -1082,9 +1227,16 @@ test "socket: 서로 다른 인스턴스 키는 같은 base에서 공존한다(�
         fn run(self: *@This()) void {
             const fd = connectClient(self.base, self.key) catch return;
             defer _ = c.close(fd);
+            // hello 2-write(wire, `\n`)를 완결 프레임(종단 `\n`)까지 누적 read(#7).
             var rb: [256]u8 = undefined;
-            const n = c.read(fd, &rb, rb.len);
-            self.ok = n > 0 and rb[@intCast(n - 1)] == '\n';
+            var got: usize = 0;
+            while (got < rb.len) {
+                const n = c.read(fd, rb[got..].ptr, rb.len - got);
+                if (n <= 0) break;
+                got += @intCast(n);
+                if (std.mem.indexOfScalar(u8, rb[0..got], '\n') != null) break;
+            }
+            self.ok = got > 0 and rb[got - 1] == '\n';
         }
     };
     var ca = ClientT{ .base = base, .key = "kA" };
@@ -1100,6 +1252,128 @@ test "socket: 서로 다른 인스턴스 키는 같은 base에서 공존한다(�
 
     try testing.expect(ca.ok);
     try testing.expect(cb.ok);
+}
+
+// ── 적대적 리뷰 반영: #1 stale prune · #2 write timeout · #5 pollReady 3상 ─────────────────────────────────────
+
+test "prune(#1): 다른 인스턴스의 stale 소켓/lock은 회수, 살아있는(flock 보유) 건 보존, self_key는 제외" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "prune");
+    defer rmTmpBase(base);
+    var db: [512]u8 = undefined;
+    const dir = try controlDirPath(&db, base);
+    _ = c.mkdir(dir.ptr, 0o700);
+
+    // 파일 잔해를 만들고 존재를 확인하는 로컬 헬퍼(플레인 파일 = stale 소켓/lock 흉내).
+    const H = struct {
+        fn touch(d: [:0]const u8, key: []const u8, comptime is_sock: bool) void {
+            var buf: [512]u8 = undefined;
+            const p = (if (is_sock) socketPathIn(&buf, d, key) else lockPathIn(&buf, d, key)) catch return;
+            const fd = c.open(p.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c.mode_t, 0o600));
+            if (fd >= 0) _ = c.close(fd);
+        }
+        fn exists(d: [:0]const u8, key: []const u8, comptime is_sock: bool) bool {
+            var buf: [512]u8 = undefined;
+            const p = (if (is_sock) socketPathIn(&buf, d, key) else lockPathIn(&buf, d, key)) catch return false;
+            return c.access(p.ptr, @intCast(posix.F_OK)) == 0;
+        }
+        fn rm(d: [:0]const u8, key: []const u8, comptime is_sock: bool) void {
+            var buf: [512]u8 = undefined;
+            const p = (if (is_sock) socketPathIn(&buf, d, key) else lockPathIn(&buf, d, key)) catch return;
+            _ = c.unlink(p.ptr);
+        }
+    };
+
+    // stale: 소켓+lock, 아무도 flock 안 잡음 → prune이 둘 다 회수해야.
+    H.touch(dir, "stale", true);
+    H.touch(dir, "stale", false);
+    // self: 소켓+lock — self_key라 prune 대상 밖(bind의 unlink_and_bind가 처리).
+    H.touch(dir, "self", true);
+    H.touch(dir, "self", false);
+    // live: 소켓 + lock에 실제 flock 보유(살아있는 인스턴스 흉내) → 보존해야.
+    H.touch(dir, "live", true);
+    var lp_buf: [512]u8 = undefined;
+    const live_lp = try lockPathIn(&lp_buf, dir, "live");
+    const live_fd = c.open(live_lp.ptr, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(c.mode_t, 0o600));
+    try testing.expect(live_fd >= 0);
+    try testing.expectEqual(@as(c_int, 0), c.flock(live_fd, posix.LOCK.EX | posix.LOCK.NB));
+
+    pruneStaleSockets(testing.allocator, dir, "self");
+
+    try testing.expect(!H.exists(dir, "stale", true)); // stale 소켓 회수
+    try testing.expect(!H.exists(dir, "stale", false)); // stale lock 회수
+    try testing.expect(H.exists(dir, "self", true)); // self는 제외 → 보존
+    try testing.expect(H.exists(dir, "self", false));
+    try testing.expect(H.exists(dir, "live", true)); // live는 flock 보유 → 보존
+    try testing.expect(H.exists(dir, "live", false));
+
+    _ = c.close(live_fd); // flock 해제
+    // 뒤처리(rmTmpBase는 빈 dir만 지운다) — 남은 self/live 잔해 unlink.
+    H.rm(dir, "self", true);
+    H.rm(dir, "self", false);
+    H.rm(dir, "live", true);
+    H.rm(dir, "live", false);
+}
+
+test "prune(#1): lock 없는 고아 소켓도 회수(liveness 증거 부재)" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "prune-orphan");
+    defer rmTmpBase(base);
+    var db: [512]u8 = undefined;
+    const dir = try controlDirPath(&db, base);
+    _ = c.mkdir(dir.ptr, 0o700);
+    var sb: [512]u8 = undefined;
+    const sp = try socketPathIn(&sb, dir, "orphan");
+    const fd = c.open(sp.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c.mode_t, 0o600)); // 소켓만, lock 없음
+    try testing.expect(fd >= 0);
+    _ = c.close(fd);
+    pruneStaleSockets(testing.allocator, dir, "self");
+    try testing.expect(c.access(sp.ptr, @intCast(posix.F_OK)) != 0); // 고아 소켓 회수됨(access 실패)
+}
+
+test "timeouts(#2): setReadTimeoutMs/setWriteTimeoutMs가 SO_RCVTIMEO/SO_SNDTIMEO를 실제로 건다(getsockopt 왕복)" {
+    const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    try testing.expect(fd >= 0);
+    defer _ = c.close(fd);
+    setReadTimeoutMs(fd, 1500);
+    setWriteTimeoutMs(fd, 2500);
+    var rtv: posix.timeval = undefined;
+    var rlen: c.socklen_t = @sizeOf(posix.timeval);
+    try testing.expectEqual(@as(c_int, 0), c.getsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, &rtv, &rlen));
+    try testing.expectEqual(@as(i64, 1), @as(i64, @intCast(rtv.sec)));
+    try testing.expectEqual(@as(i64, 500_000), @as(i64, @intCast(rtv.usec)));
+    var wtv: posix.timeval = undefined;
+    var wlen: c.socklen_t = @sizeOf(posix.timeval);
+    try testing.expectEqual(@as(c_int, 0), c.getsockopt(fd, c.SOL.SOCKET, c.SO.SNDTIMEO, &wtv, &wlen));
+    try testing.expectEqual(@as(i64, 2), @as(i64, @intCast(wtv.sec)));
+    try testing.expectEqual(@as(i64, 500_000), @as(i64, @intCast(wtv.usec)));
+}
+
+test "pollReady(#5) 분기: 대기 연결 없음=timeout, 도착=ready" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "pollready");
+    defer rmTmpBase(base);
+    var srv = try Server.bind(testing.allocator, base, "k1");
+    defer srv.deinit();
+    try testing.expectEqual(Server.PollResult.timeout, srv.pollReady(10)); // 대기 연결 없음
+    const fd = try connectClient(base, "k1");
+    defer _ = c.close(fd);
+    var ready = false;
+    var i: usize = 0;
+    while (i < 50 and !ready) : (i += 1) {
+        if (srv.pollReady(20) == .ready) ready = true;
+    }
+    try testing.expect(ready); // 연결이 backlog에 들어와 POLLIN
+}
+
+test "pollReady(#5): 닫힌 listen fd는 broken(POLLNVAL — 재-poll tight-spin 대신 루프 종료)" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "pollbroken");
+    defer rmTmpBase(base);
+    var srv = try Server.bind(testing.allocator, base, "k1");
+    defer srv.deinit(); // deinit의 listen_fd 재close는 EBADF 무시
+    _ = c.close(srv.listen_fd); // fd를 밖에서 닫아 POLLNVAL 유발
+    try testing.expectEqual(Server.PollResult.broken, srv.pollReady(10));
 }
 
 test {

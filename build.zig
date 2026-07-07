@@ -824,6 +824,19 @@ pub fn build(b: *std.Build) void {
         });
         const run_control_socket_tests = b.addRunArtifact(control_socket_tests);
         test_step.dependOn(&run_control_socket_tests.step);
+        // control_server.zig(Track C A2b)는 앱 전역 라이브 컨트롤 소켓 + accept 스레드 + 메인 marshal 큐다.
+        // control_socket과 같은 이유로 **macOS에서만** test step에 배선한다(실 unix socket·스레드·peer-cred).
+        const control_server_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/control_server.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_control_server_tests = b.addRunArtifact(control_server_tests);
+        test_step.dependOn(&run_control_server_tests.step);
     }
     // coretext_font.zig는 Objective-C/CoreText runtime을 직접 호출하지 않는 제품 후보
     // adapter다. 그래서 macOS smoke opt-in에 숨기지 말고 기본 Zig test에서 돌린다.

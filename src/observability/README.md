@@ -10,4 +10,4 @@
 
 라이브 레코딩은 `app/trace_recorder.zig`의 `TraceRecorder`(app 레이어 — 파일 I/O)가 맡는다: `MARU_TRACE=<경로>`면 `SurfaceRuntime` 훅에서 base kind를 이 폴더의 writer 함수로 누적하고 `AppSession.deinit`에서 파일로 굳힌다.
 
-후속 책임(아직 없음): GUI inspector, 입력 이벤트 기록, 경로/유저명 익명화 transform. 실제 심볼명은 `RenderSnapshot`(terminal/types.zig)·`renderTerminalSnapshot`/`parseSnapshot`·`renderShellEvents`/`parseEvents`/`replayTrace`·`TraceRecorder`(app/trace_recorder.zig)이며, 예전 개념명(`DebugSnapshot`/`ReplayRunner` 등)은 코드에 없다 — 이 데이터를 새로 소비하는 컴포넌트는 실제 심볼을 재사용한다.
+후속 책임(아직 없음): GUI inspector, allowlist(PATH/LANG — 정책상 사용자 확인 선행). 실제 심볼명은 `RenderSnapshot`(terminal/types.zig)·`renderTerminalSnapshot`/`parseSnapshot`·`renderShellEvents`/`parseEvents`/`replayTrace`·`TraceRecorder`(app/trace_recorder.zig)이며, 예전 개념명(`DebugSnapshot`/`ReplayRunner` 등)은 코드에 없다 — 이 데이터를 새로 소비하는 컴포넌트는 실제 심볼을 재사용한다.

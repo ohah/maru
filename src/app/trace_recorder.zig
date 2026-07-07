@@ -8,7 +8,9 @@
 //! **크래시 복원**: 크래시 직전까지의 이벤트가 디스크에 남는다), 테스트는 in-memory `Allocating`. **이벤트마다
 //! flush**하므로 file sink면 OS로 밀려난다. 파일/버퍼 수명과 최종 flush/sync/close는 host 몫. 폭주 세션은 `cap_bytes`
 //! 상한으로 막는다(초과 시 기록 중단·`capped`). write 중간 실패로 부분 줄이 남아도 reader(parseEvents)가 잘린 tail을
-//! 관대 처리한다. 한계(후속): 입력 이벤트 미기록(화면 무영향), 경로/유저명 익명화.
+//! 관대 처리한다. output/resize/process-exit(SurfaceRuntime.applyPtyEvent·resize)와 input(writeInput/NonBlocking)을
+//! 기록한다 — input은 재생 화면엔 안 쓰이지만(화면은 output echo로 재구성) 완전한 세션 기록·분석용이고 타이핑된
+//! 비밀까지 담을 수 있어 output보다 민감하다(recordInput 참고).
 
 const std = @import("std");
 const observability = @import("../observability.zig");
@@ -68,6 +70,17 @@ pub const TraceRecorder = struct {
     pub fn recordOutput(self: *TraceRecorder, surface_id: u64, bytes: []const u8) void {
         const w = self.gate() orelse return;
         observability.trace.writeOutputEvent(w, self.index, surface_id, bytes) catch return self.markFailed();
+        self.afterEvent(bytes.len + line_overhead);
+    }
+
+    /// 사용자 입력(core→pty로 실제 전송된 바이트)을 기록한다. **재생 화면엔 직접 영향 없음**(입력은 child로 가고,
+    /// 화면은 child가 되돌린 output에 담긴 echo로 재구성됨) — 완전한 세션 기록·입력 타이밍 분석용. ⚠️입력은 화면에
+    /// 안 뜨는 타이핑(비밀번호 프롬프트 등)까지 담을 수 있어 output보다 민감하다. guardFixture/anonymize가 할당·PII를
+    /// 처리하지만 bare 비밀은 못 잡으니 fixture 승격 전 사람 검토가 최종 안전망(docs/trace-replay.md §민감정보).
+    pub fn recordInput(self: *TraceRecorder, surface_id: u64, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        const w = self.gate() orelse return;
+        observability.trace.writeInputEvent(w, self.index, surface_id, bytes) catch return self.markFailed();
         self.afterEvent(bytes.len + line_overhead);
     }
 

@@ -580,6 +580,7 @@ fn readOneFrame(gpa: std.mem.Allocator, fd: c.fd_t) ![]u8 {
 }
 
 test "socket: bind→connect→hello 왕복 — accept가 hello notification을 보내고 client가 Framer로 파싱" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "roundtrip");
     defer rmTmpBase(base);
@@ -637,6 +638,7 @@ test "socket: bind→connect→hello 왕복 — accept가 hello notification을 
 }
 
 test "socket: accept가 peer uid(getpeereid)를 읽어 같은 uid면 accept — hello가 정확히 한 줄(\\n 종단)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "peeruid");
     defer rmTmpBase(base);
@@ -674,6 +676,7 @@ test "socket: accept가 peer uid(getpeereid)를 읽어 같은 uid면 accept — 
 }
 
 test "socket: 권한 — 소켓 path 0600, 컨트롤 dir 0700, 소유자==우리(fstatat SYMLINK_NOFOLLOW)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "perms");
     defer rmTmpBase(base);
@@ -699,6 +702,7 @@ test "socket: 권한 — 소켓 path 0600, 컨트롤 dir 0700, 소유자==우리
 }
 
 test "socket: stale 소켓(살아있는 소유자 없음)은 unlink-then-bind로 회수" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "stale");
     defer rmTmpBase(base);
@@ -722,6 +726,7 @@ test "socket: stale 소켓(살아있는 소유자 없음)은 unlink-then-bind로
 }
 
 test "socket: 살아있는 소켓은 unlink 금지 — 같은 키 재bind는 AddressInUse, 원본 소켓 생존" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "live");
     defer rmTmpBase(base);
@@ -753,6 +758,7 @@ test "socket: 살아있는 소켓은 unlink 금지 — 같은 키 재bind는 Add
 }
 
 test "socket: sun_path 초과 경로는 syscall 전에 SocketPathTooLong으로 거부" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     // 아주 긴 base로 sun_path(104)를 확실히 넘긴다. 실제 mkdir/bind는 시도하지 않아야(순수 판정이 먼저 거부).
     var bb: [512]u8 = undefined;
     var long: [300]u8 = undefined;
@@ -762,6 +768,7 @@ test "socket: sun_path 초과 경로는 syscall 전에 SocketPathTooLong으로 �
 }
 
 test "socket: 부분 read 프레이밍 — 두 write로 쪼갠 프레임이 Framer로 한 줄로 조립(dispatch 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "framing");
     defer rmTmpBase(base);
@@ -810,6 +817,7 @@ test "socket: 부분 read 프레이밍 — 두 write로 쪼갠 프레임이 Fram
 }
 
 test "socket: 순차 다중 연결 — 각 연결이 hello를 받는다(accept-loop 골격)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "multi");
     defer rmTmpBase(base);
@@ -866,6 +874,7 @@ const rt_windows = [_]wm.WindowMembershipSnapshot{
 const rt_snapshot: cs.CollectorSnapshot = .{ .surfaces = &rt_surfaces, .windows = &rt_windows };
 
 test "socket 1d: client가 sessions.list 요청 → server가 fake snapshot으로 디스패치 → 응답 왕복(scope=all)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "dispatch");
     defer rmTmpBase(base);
@@ -1015,6 +1024,7 @@ const RoundTripHarness = struct {
 };
 
 test "A2a 왕복: buildRequestBytes(sessions.list) → serveReadOnly → renderResponse 사람이 읽는 출력(all scope=10,20)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "a2a-list");
     defer rmTmpBase(base);
@@ -1037,6 +1047,7 @@ test "A2a 왕복: buildRequestBytes(sessions.list) → serveReadOnly → renderR
 }
 
 test "A2a 왕복: buildRequestBytes(session.get 10) self scope → 단건 Surface 렌더" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "a2a-get");
     defer rmTmpBase(base);
@@ -1055,6 +1066,7 @@ test "A2a 왕복: buildRequestBytes(session.get 10) self scope → 단건 Surfac
 }
 
 test "A2a 왕복 엣지: 미지 method는 serveReadOnly가 에러 응답 → client가 균일 error 줄로 렌더" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "a2a-unknown");
     defer rmTmpBase(base);
@@ -1071,6 +1083,7 @@ test "A2a 왕복 엣지: 미지 method는 serveReadOnly가 에러 응답 → cli
 }
 
 test "A2a 왕복 엣지: 빈 세션 목록 → renderResponse '(no sessions)'" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "a2a-empty");
     defer rmTmpBase(base);
@@ -1090,6 +1103,7 @@ test "A2a 왕복 엣지: 빈 세션 목록 → renderResponse '(no sessions)'" {
 }
 
 test "A2a 왕복 엣지: 부분 read로 쪼갠 요청도 serveReadOnly가 조립해 응답한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "a2a-split");
     defer rmTmpBase(base);
@@ -1148,6 +1162,7 @@ test "A2a 왕복 엣지: 부분 read로 쪼갠 요청도 serveReadOnly가 조립
 }
 
 test "A2a 왕복 엣지: 여러 연결을 순차로 각각 serveReadOnly가 처리(accept-loop 골격)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "a2a-multi");
     defer rmTmpBase(base);
@@ -1182,6 +1197,7 @@ test "A2a 왕복 엣지: 여러 연결을 순차로 각각 serveReadOnly가 처�
 }
 
 test "A2a 엣지: 서버 없는 소켓에 connect하면 client가 깔끔히 실패(graceful 근거 — crash 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "a2a-absent");
     defer rmTmpBase(base);
@@ -1207,6 +1223,7 @@ test "policy: controlDirPath/socketPathIn/lockPathIn은 버퍼 부족 시 NoSpac
 // bind되고 각자 connect된다. 같은 키 재bind가 AddressInUse인 것("live" 테스트)과 대조되는 반대 방향 — 여러 maru
 // 인스턴스 공존이라는 키 설계의 목적을 못박는다.
 test "socket: 서로 다른 인스턴스 키는 같은 base에서 공존한다(각자 bind·connect)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "twokeys");
     defer rmTmpBase(base);
@@ -1257,6 +1274,7 @@ test "socket: 서로 다른 인스턴스 키는 같은 base에서 공존한다(�
 // ── 적대적 리뷰 반영: #1 stale prune · #2 write timeout · #5 pollReady 3상 ─────────────────────────────────────
 
 test "prune(#1): 다른 인스턴스의 stale 소켓/lock은 회수, 살아있는(flock 보유) 건 보존, self_key는 제외" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "prune");
     defer rmTmpBase(base);
@@ -1316,6 +1334,7 @@ test "prune(#1): 다른 인스턴스의 stale 소켓/lock은 회수, 살아있�
 }
 
 test "prune(#1): lock 없는 고아 소켓도 회수(liveness 증거 부재)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "prune-orphan");
     defer rmTmpBase(base);
@@ -1332,6 +1351,7 @@ test "prune(#1): lock 없는 고아 소켓도 회수(liveness 증거 부재)" {
 }
 
 test "timeouts(#2): setReadTimeoutMs/setWriteTimeoutMs가 SO_RCVTIMEO/SO_SNDTIMEO를 실제로 건다(getsockopt 왕복)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     try testing.expect(fd >= 0);
     defer _ = c.close(fd);
@@ -1350,6 +1370,7 @@ test "timeouts(#2): setReadTimeoutMs/setWriteTimeoutMs가 SO_RCVTIMEO/SO_SNDTIME
 }
 
 test "pollReady(#5) 분기: 대기 연결 없음=timeout, 도착=ready" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "pollready");
     defer rmTmpBase(base);
@@ -1367,6 +1388,7 @@ test "pollReady(#5) 분기: 대기 연결 없음=timeout, 도착=ready" {
 }
 
 test "pollReady(#5): 닫힌 listen fd는 broken(POLLNVAL — 재-poll tight-spin 대신 루프 종료)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = makeTmpBase(&bb, "pollbroken");
     defer rmTmpBase(base);

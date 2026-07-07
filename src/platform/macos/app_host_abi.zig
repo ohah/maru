@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
 const keycode = @import("keycode.zig");
@@ -1218,6 +1219,10 @@ fn buildControlResponse(
 }
 
 pub export fn maru_macos_control_server_start() c_int {
+    // 비-macOS: 라이브 서버 없음(1b/A2b는 macOS 전용 — 소켓 부트스트랩이 fstatat/arc4random_buf 등 macOS syscall에
+    // 의존). comptime-true 조기 반환이 뒤 macOS 바디(Server.bind·instanceNonce)를 linux 컴파일에서 prune한다
+    // (live_pty.zig:298 선례). Linux/Win 이식 시 OS-중립 부트스트랩으로 대체.
+    if (builtin.os.tag != .macos) return @intFromEnum(Status.create_failed);
     if (control_server_active) return @intFromEnum(Status.ok); // idempotent
     var base_buf: [1024]u8 = undefined;
     const base = controlBaseDir(&base_buf) orelse return @intFromEnum(Status.create_failed);

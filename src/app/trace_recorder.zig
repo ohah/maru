@@ -33,34 +33,47 @@ pub const TraceRecorder = struct {
             self.capped = true;
             return null;
         }
-        if (self.out.written().len == 0) observability.trace.writeHeader(&self.out.writer) catch return null;
+        if (self.out.written().len == 0) observability.trace.writeHeader(&self.out.writer) catch {
+            self.capped = true;
+            return null;
+        };
         return &self.out.writer;
+    }
+
+    /// 이벤트 write가 중간에 실패하면(OOM) `event … bytes="…` 부분 줄이 남아, 다음 이벤트가 이어붙어 trace 전체가
+    /// 파싱 불가가 된다. write 실패 시 **더 기록하지 않도록 capped로 막는다**(부분 줄은 text()가 마지막 완전한 줄까지만
+    /// 반환해 떨궈, 앞부분은 유효한 trace로 남는다 — cap-comment의 "앞부분은 재생 가능" 보장).
+    fn markFailed(self: *TraceRecorder) void {
+        self.capped = true;
     }
 
     /// 원시 PTY 출력을 기록(재생의 권위 — 파서가 화면·셸 이벤트·cwd를 재도출한다).
     pub fn recordOutput(self: *TraceRecorder, surface_id: u64, bytes: []const u8) void {
         const w = self.gate() orelse return;
-        observability.trace.writeOutputEvent(w, self.index, surface_id, bytes) catch return;
+        observability.trace.writeOutputEvent(w, self.index, surface_id, bytes) catch return self.markFailed();
         self.index += 1;
     }
 
     /// 터미널 크기 변경을 기록(재생이 core.resize로 reflow까지 재구성).
     pub fn recordResize(self: *TraceRecorder, surface_id: u64, cols: u16, rows: u16) void {
         const w = self.gate() orelse return;
-        observability.trace.writeResizeEvent(w, self.index, surface_id, cols, rows) catch return;
+        observability.trace.writeResizeEvent(w, self.index, surface_id, cols, rows) catch return self.markFailed();
         self.index += 1;
     }
 
     /// child 종료를 기록. exited→code, signaled→128+sig(셸 관례), unknown→none.
     pub fn recordProcessExit(self: *TraceRecorder, surface_id: u64, code: ?i32) void {
         const w = self.gate() orelse return;
-        observability.trace.writeProcessExitEvent(w, self.index, surface_id, code) catch return;
+        observability.trace.writeProcessExitEvent(w, self.index, surface_id, code) catch return self.markFailed();
         self.index += 1;
     }
 
-    /// 누적된 trace 텍스트(비파괴). 세션 종료 시 파일로 쓴다.
+    /// 누적된 trace 텍스트(비파괴). 세션 종료 시 파일로 쓴다. **마지막 완전한 줄('\n')까지만** 반환해, write 실패·상한
+    /// 절단으로 남은 부분 줄이 파서를 깨지 않게 한다(정상 trace는 매 이벤트가 '\n'으로 끝나 no-op).
     pub fn text(self: *TraceRecorder) []const u8 {
-        return self.out.written();
+        const t = self.out.written();
+        const nl = std.mem.lastIndexOfScalar(u8, t, '\n') orelse return "";
+        return t[0 .. nl + 1];
     }
 };
 
@@ -106,4 +119,32 @@ test "TraceRecorder round-trip: 누적한 trace를 replay하면 화면이 재구
     defer a.free(rep_screen);
     try std.testing.expectEqualStrings(src_screen, rep_screen);
     try std.testing.expectEqualStrings("/w", replayed.currentCwd());
+}
+
+// write 실패(OOM) 회귀: 어느 할당이 실패해 이벤트 write가 중간에 끊겨도, text()는 부분 줄 없이 완전한 줄로 끝나
+// 파서가 앞부분을 정상 재생할 수 있어야 한다(code-review [13]). FailingAllocator로 실패 지점을 훑는다.
+test "TraceRecorder: 어떤 write 실패 지점에서도 text()는 파싱 가능한 prefix" {
+    var idx: usize = 0;
+    while (idx < 60) : (idx += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = idx });
+        const a = failing.allocator();
+        var rec = TraceRecorder.init(a);
+        defer rec.deinit();
+        rec.recordOutput(1, "hello world output chunk one");
+        rec.recordResize(1, 80, 24);
+        rec.recordOutput(1, "second chunk of output bytes");
+        rec.recordProcessExit(1, 0);
+
+        const t = rec.text();
+        // 부분 줄이 남으면 안 된다 — 비었거나 '\n'으로 끝난다.
+        try std.testing.expect(t.len == 0 or t[t.len - 1] == '\n');
+        // 그리고 그 prefix는 항상 파싱 가능해야 한다(별도 non-failing allocator로 검증).
+        if (t.len > 0) {
+            const parsed = observability.trace.parseEvents(std.testing.allocator, t) catch |e| {
+                try std.testing.expect(e == error.OutOfMemory); // 파싱 자체 OOM만 허용, BadLine은 불가
+                continue;
+            };
+            observability.trace.freeParsedEvents(std.testing.allocator, parsed);
+        }
+    }
 }

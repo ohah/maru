@@ -780,7 +780,7 @@ const NormalizedConfig = struct {
 };
 
 /// 한 터미널의 런타임 단위: surface(그리드/스크롤백, 참조) + 그 surface에 붙은 live PTY 셸(참조) + 그 PTY를 drain하는
-/// pump. **M3a**: `surface`와 `live_pty`의 **소유**가 둘 다 앱 전역 `app_live_registry`로 옮겨졌고(`LiveSurface` 번들
+/// pump. **M3a**: `surface`와 `live_pty`의 **소유**가 둘 다 앱 전역 `app_runtime.live_registry`로 옮겨졌고(`LiveSurface` 번들
 /// 슬롯), Term은 각각 그 슬롯 필드를 가리키는 포인터다(docs/window-surface-mobility.md §8A.1 옵션 A). reader thread가
 /// 잡는 `&live_pty.reader`·`&surface.core`/`&surface.core_mutex` 주소는 registry의 heap 슬롯(`allocator.create`)이
 /// 고정하므로 여전히 안정적이다 — 소유 위치가 Term-inline → registry-슬롯으로 바뀌었을 뿐 heap-pin 메커니즘은 동일하다.
@@ -793,7 +793,7 @@ const NormalizedConfig = struct {
 /// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). 모델 struct
 /// (Term/Pane/Tab)는 session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
 const TermRuntime = struct {
-    // M3a: 런타임 소유는 앱 전역 `app_live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, Term은 그 번들 슬롯의
+    // M3a: 런타임 소유는 앱 전역 `app_runtime.live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, Term은 그 번들 슬롯의
     // `&slot.live_pty`를 가리키는 포인터만 든다(docs/window-surface-mobility.md §8A.1). registry가 `allocator.create`로
     // 각 `LiveSurface` 번들을 개별 heap 슬롯에 두므로 reader thread가 잡는 `&live_pty.reader` 주소는 Term-inline 시절과
     // **같은 heap-pin 메커니즘**으로 안정적이다(소유 위치만 Term→registry로 옮겼을 뿐, 슬롯은 수명 내내 안 움직인다).
@@ -1108,27 +1108,20 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
     return a;
 }
 
-// 앱 인스턴스 전역 surface_id allocator (M0a). **모든 창(AppSession)이 이 한 인스턴스를 공유**해 surface_id가
-// 앱 전역으로 단조·비재사용된다 — per-session 카운터가 아니라서 멀티 창에서도 id(및 MARU_PANE_ID)가 충돌하지
-// 않는다(docs/window-surface-mobility.md §8 M0a). 타입은 L2 순수(src/session/surface_id.zig), 인스턴스 소유는 여기
-// L4다. Zig엔 아직 앱 전역 세션 코디네이터가 없어(창마다 Swift가 maru_macos_app_session_create를 부른다) 이
-// 모듈-로컬 var가 그 소유 seam이다 — M1 AppRuntime이 생기면 그 소유를 넘겨받는다(그때 AppSession.surface_ids 주입
-// 경로만 바꾸면 된다). 메인 스레드 전용(surface_id.zig 스레드 계약).
-var app_surface_ids: maru.session.SurfaceIdAllocator = .{};
-
-// 앱 인스턴스 전역 live surface 런타임 **소유자** (M2b). **모든 창(AppSession)이 이 한 registry를 공유**해, live
-// PTY 런타임(`LivePtySession`: PTY 세션·reader thread·이벤트/write/command 큐)의 소유가 창(Term/트리) 밖 앱 전역에
-// 있다(docs/window-surface-mobility.md §3·§8 M2b). Term은 `surface_id`로 이 registry의 안정 heap 슬롯을 참조만 한다 —
-// surface_id가 앱 전역 유일(M0a)이라 멀티 창에서도 키가 안 겹친다. surface_id_allocator(app_surface_ids)와 같은
-// 모듈-로컬 소유 seam이며(M1 AppRuntime이 생기면 그 소유를 넘겨받는다), AppSession.live_registry 필드 기본값이 이 주소다.
+// 앱 인스턴스 전역 런타임 coordinator (M3b — docs/window-surface-mobility.md §3·§8A.2). **모든 창(AppSession)이 이 한
+// 인스턴스를 공유**한다. M2b까지 흩어져 있던 앱 전역 소유 seam — `surface_ids`(M0a: surface_id 발급기)·`live_registry`
+// (M2b/M3a: LiveSurface 번들 소유자)·`routing`(M3b: 입력/resize/명령/이벤트 라우팅 표) — 을 하나의 `AppRuntime`으로
+// 묶어 정식화한 것이다(흩어진 모듈-로컬 var → 한 coordinator). 세 자원 전부 창보다 오래 사는 앱 전역 수명이라, 창이
+// 여러 개여도 surface_id 하나로 registry·라우팅을 조회한다(멀티 창 id 비충돌·cross-window 이동 토대).
 //
-// **allocator**: registry **자체의 bookkeeping**(entries 배열 + 각 런타임 heap 슬롯)은 창보다 오래 사는 앱 전역
-// 수명이라 프로세스 전역 `smp_allocator`(app_host_abi.zig가 AppSession을 만들 때 쓰는 것과 동일)로 소유한다. 각
-// `LivePtySession` **내부**(session/queue 등)는 그 런타임을 만든 창의 allocator가 소유한다(createTerm이 init에 주입) —
-// registry.remove가 `deinit`(창 allocator로 내부 해제) 후 슬롯을 smp로 destroy하므로 두 allocator가 각자 해제 짝이
-// 맞는다. 프로덕션은 창 allocator도 smp_allocator라 사실상 동일 allocator다(테스트만 창=testing.allocator로 분리).
-// **스레드**: 메인 스레드 전용(surface_id.zig·세션 트리와 같은 계약 — createTerm/destroyTerm/deinit은 전부 메인 이벤트).
-var app_live_registry: maru.session.LiveSurfaceRegistry(app.LiveSurface) = .{ .allocator = std.heap.smp_allocator };
+// Zig엔 아직 앱 전역 세션 coordinator가 없어(창마다 Swift가 maru_macos_app_session_create를 부른다) 이 모듈-로컬
+// var가 그 소유 seam이다 — 앱 전역 coordinator가 생기면 소유만 이관한다(AppSession의 세 포인터 필드 주입 경로만 바꿈).
+// **allocator**: bookkeeping(카운터·entries·links + registry가 소유하는 각 런타임 heap 슬롯)은 앱 전역이라 `smp_allocator`,
+// 각 런타임 **내부**(core·session/queue·owned string)는 그 런타임을 만든 창 allocator가 소유한다(createTerm이 슬롯에
+// 실어줌 — M2b allocator 분리 유지, remove에서 짝이 맞음). 프로덕션은 창 allocator도 smp라 사실상 동일(테스트만 분리).
+// **스레드**: 메인 스레드 전용(surface_id.zig·세션 트리와 같은 계약 — createTerm/destroyTerm/입력/resize/tick pump는
+// 전부 메인 이벤트다). 리더는 interactive 모드서 core에 직접 write(setProcessing)라 `routing`을 안 건드린다(§8A.2 독립).
+var app_runtime: app.AppRuntime = .{};
 
 // ── 컨트롤 플레인 collector 순수 매핑(Track C A1, 내부 상태 → wire enum) ──────────────────────────────────
 // docs/control-plane.md §3(엔티티 상태 수집)·control_surface.zig(wire enum은 내부 상태머신과 격리 — collector가
@@ -1192,19 +1185,19 @@ pub const AppSession = struct {
     // surface 안정 주소를 모은다. tabs 변경(생성/닫기/이동)·활성 panel 변경 때 갱신하고 app_window.tabs를
     // 여기로 재바인딩한다. 단일 panel(지금)이면 panes[0].surface.
     surface_ptrs: std.ArrayList(*maru.session.Surface) = .empty,
-    // surface_id·pty_id 발급기(앱 인스턴스 전역 — app_surface_ids 공유). runtime이 두 id로 라우팅하므로
+    // surface_id·pty_id 발급기(앱 인스턴스 전역 — app_runtime.surface_ids 공유). runtime이 두 id로 라우팅하므로
     // 재사용하지 않는다. per-session이 아니라 앱 전역이라 멀티 창에서도 id가 유일하다(MARU_PANE_ID 포함 — 창별
-    // 충돌로 에이전트 트랜스크립트 경로가 겹치던 잠재 문제도 해소). 기본값이 공유 인스턴스 주소라 init의
+    // 충돌로 에이전트 트랜스크립트 경로가 겹치던 잠재 문제도 해소). 기본값이 공유 coordinator 필드 주소라 init의
     // `self.* = .{...}`·reset 경로가 모두 같은 allocator를 가리킨다. **주의**: `var session: AppSession = undefined`
     // 테스트는 이 포인터가 0xaa가 되므로 createTerm을 타면 이 필드를 명시 초기화해야 한다([[devsession-undefined-test-field-trap]]).
-    surface_ids: *maru.session.SurfaceIdAllocator = &app_surface_ids,
-    // 앱 전역 live surface 소유자(M3a — app_live_registry 공유). createTerm이 여기 `create`로 `LiveSurface` 번들
+    surface_ids: *maru.session.SurfaceIdAllocator = &app_runtime.surface_ids,
+    // 앱 전역 live surface 소유자(M3a — app_runtime.live_registry 공유). createTerm이 여기 `create`로 `LiveSurface` 번들
     // (surface + live_pty) 슬롯을 소유시키고 Term은 그 두 필드의 안정 포인터를 든다. destroyTerm/close/deinit이 `remove`로
-    // teardown(번들 deinit=reader join + surface.deinit + 슬롯 해제). 기본값이 공유 인스턴스 주소라 init의
+    // teardown(번들 deinit=reader join + surface.deinit + 슬롯 해제). 기본값이 공유 coordinator 필드 주소라 init의
     // `self.* = .{...}`·reset 경로가 모두 같은 registry를 가리킨다(surface_ids 패턴과 동형). **주의**:
     // `var session: AppSession = undefined` 테스트가 createTerm을 타면 이 포인터도 명시 초기화해야 한다
     // ([[devsession-undefined-test-field-trap]]) — 단 그런 테스트는 init을 먼저 부르므로 기본값이 채워진다.
-    live_registry: *maru.session.LiveSurfaceRegistry(app.LiveSurface) = &app_live_registry,
+    live_registry: *maru.session.LiveSurfaceRegistry(app.LiveSurface) = &app_runtime.live_registry,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격
     // (homeForRootCwd)에 쓴다. getcwd 실패 시 false(승격 안 함 — 상속 그대로).
@@ -1218,7 +1211,13 @@ pub const AppSession = struct {
     // 필요하므로 init 끝에 free하지 않고 보관하다 deinit에서 푼다. 꺼졌거나 경로 해석 실패면 null(주입 안 함).
     new_tab_ssh_bin: ?[]const u8 = null,
     app_window: maru.session.AppWindow = undefined,
-    runtime: app.SurfaceRuntime = undefined,
+    // 입력/resize/명령/PTY 이벤트 라우팅 표 — **앱 전역**(M3b, per-window → app_runtime.routing 공유). 링크가
+    // `surface_id`로 keyed라 cross-window 이동이 라우팅을 안 건드리고(surface_id 불변) 목적지 창 메인 스레드가 같은
+    // 표를 조회한다(docs/window-surface-mobility.md §8A.2). 창이 닫혀도 이 표를 deinit하지 않는다(다른 창 링크가 살아
+    // 있음) — 그 창의 링크만 per-Term `closeAndDetach`로 detach한다. 기본값이 공유 coordinator 필드 주소라 init의
+    // `self.* = .{...}`·reset이 모두 같은 표를 가리킨다(surface_ids/live_registry 패턴과 동형). **주의**:
+    // `var session: AppSession = undefined` 테스트가 라우팅을 타면 이 포인터를 명시 초기화해야 한다(attachTestRuntime).
+    runtime: *app.SurfaceRuntime = &app_runtime.routing,
     // MARU_TRACE=<파일경로>면 세션의 base kind 이벤트(output/resize/process-exit)를 **파일로 증분 append**한다
     // (레코더는 이벤트마다 flush → 크래시 직전까지 디스크에 남음, observability replayTrace로 화면 재생). 미설정이면
     // null(오버헤드 0). 레코더는 self가 소유한 file writer(`trace_writer`, heap 버퍼 `trace_buf`)에 쓴다 — self가 안정
@@ -1957,8 +1956,9 @@ pub const AppSession = struct {
             null;
         self.new_tab_config = config;
 
-        // runtime을 먼저 세운다 — createTab의 attachSurface가 surface를 runtime link에 등록한다.
-        self.runtime = app.SurfaceRuntime.init(allocator);
+        // runtime은 **앱 전역 공유**(app_runtime.routing) — 필드 기본값이 그 주소라 창마다 새로 만들지 않는다(M3b).
+        // createTab의 attachSurface가 이 공유 표에 이 창 surface를 등록하고, surface_id 키드라 다른 창 링크와 안 겹친다.
+        // debug_input은 프로세스 전역 MARU_DEBUG라 모든 창이 같은 값을 세운다(멱등 — 공유 표에 반복 대입해도 무해).
         self.runtime.debug_input = diag_gate.maruDebugEnabled(); // MARU_DEBUG면 zsh redraw 시퀀스 로깅
         self.runtime_initialized = true;
 
@@ -2049,7 +2049,7 @@ pub const AppSession = struct {
         // (읽히지 않는 필드를 유지하는 방어 코드 불필요). frame_loop.tick/tickWithFrameBuilder로 바꾸려면 그때 pump를 살려야 한다.
         // io는 frame 조립 경로의 코어 락에 쓰인다 — frame_loop.pump는 위 주석대로 안 읽히므로 그 queue.io에 기대지
         // 않고(undefined일 수 있다) AppSession이 가진 valid한 io를 직접 넘긴다(docs/io-render-threading.md PR3).
-        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, &self.runtime, &self.activePane().activeTerm().rt.pump, &self.renderer_state, io);
+        self.frame_loop = app.AppFrameLoop.init(allocator, &self.app_window, self.runtime, &self.activePane().activeTerm().rt.pump, &self.renderer_state, io);
         // 활성 panel rect를 초기화한다 — refreshCellMetrics가 사이드바 폭을 채운 '뒤'라야 단일 panel 기준
         // (x = 사이드바 폭, y = 0)이 맞다(createTab 시점엔 사이드바 폭이 아직 0이라 여기서 다시 잡는다).
         self.recomputeActivePaneRect();
@@ -3605,14 +3605,15 @@ pub const AppSession = struct {
 
         // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
         // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
-        _ = try term.rt.live_pty.attachSurface(&self.runtime, term.surface, request.login); // term.surface는 이미 *Surface(번들 슬롯)
-        term.rt.pump = term.rt.live_pty.pump(&self.runtime);
+        _ = try term.rt.live_pty.attachSurface(self.runtime, term.surface, request.login); // term.surface는 이미 *Surface(번들 슬롯)
+        // pump를 **앱 전역 라우팅**에 바인딩(M3b) — 창을 옮겨도(M3d) surface_id 키드 라우팅이 그대로 유효하다(§8A.2).
+        term.rt.pump = term.rt.live_pty.pump(self.runtime);
         return term;
     }
 
     /// 한 Term을 teardown하고 heap 해제한다(closeAndDetach → live_registry.remove(번들 deinit=reader join + custom_name
     /// 해제 + surface.deinit + 슬롯 해제, M3a) → destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·
-    /// split 실패 정리에 쓴다. (deinit은 runtime.deinit 순서 때문에 이 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
+    /// split 실패 정리에 쓴다. (deinit은 surface 정리를 config/appearance 해제 앞에 두려 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
     fn destroyTerm(self: *AppSession, term: *Term) void {
         // rename 대상이 이 Term이면 stale 포인터 방지로 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
         if (self.renamingTerm(term)) {
@@ -3631,7 +3632,7 @@ pub const AppSession = struct {
             // `&surface.core`가 번들 deinit의 surface.deinit 순간까지 살아 있다. surface_id는 remove 실행 전에 읽는다
             // (remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
             const sid = term.surface.id;
-            if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(&self.runtime);
+            if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(self.runtime);
             self.live_registry.remove(sid) catch {};
             term.rt.live_initialized = false;
         }
@@ -14769,7 +14770,7 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        term.rt.live_pty.closeAndDetach(&self.runtime);
+                        term.rt.live_pty.closeAndDetach(self.runtime);
                     } else if (term.rt.live_initialized) {
                         term.rt.live_pty.close();
                     }
@@ -17763,16 +17764,16 @@ pub const AppSession = struct {
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
         self.divider_seg_scratch.deinit(self.allocator);
-        // 1) 각 탭의 각 panel의 각 Term routing detach — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
-        //    M3a: 번들 slot의 소유 해제(registry.remove=번들 deinit=reader join + surface.deinit)는 **아래 2)로 미룬다**.
-        //    번들 remove가 이제 surface까지 deinit하는데, surface 정리는 runtime.deinit '뒤'·config/appearance 해제 '앞'이
-        //    어야 하기 때문이다(원래 surface.deinit 위치 = pass 2). closeAndDetach가 reader를 여기서 join하므로(멱등),
-        //    2)의 번들 deinit이 runtime.deinit 뒤에 와도 reader는 이미 멈춰 있다(live_pty.deinit은 runtime 불참조).
+        // 1) 각 탭의 각 panel의 각 Term routing detach — closeAndDetach가 **앱 전역 라우팅**(app_runtime.routing)에서 이
+        //    창의 링크만 뺀다(surface_id 키드 — 다른 창 링크는 안 건드림, M3b 창 격리 불변식). M3a: 번들 slot의 소유 해제
+        //    (registry.remove=번들 deinit=reader join + surface.deinit)는 **아래 2)로 미룬다** — 번들 remove가 surface까지
+        //    deinit하는데 surface 정리는 config/appearance 해제 '앞'이어야 하기 때문이다(원래 surface.deinit 위치 = pass 2).
+        //    closeAndDetach가 reader를 여기서 join하므로(멱등), 2)의 번들 deinit이 뒤에 와도 reader는 이미 멈춰 있다.
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized and self.runtime_initialized) {
-                        term.rt.live_pty.closeAndDetach(&self.runtime);
+                        term.rt.live_pty.closeAndDetach(self.runtime);
                     }
                 }
             }
@@ -17781,21 +17782,22 @@ pub const AppSession = struct {
             self.renderer_state.deinit();
             self.renderer_initialized = false;
         }
-        if (self.runtime_initialized) {
-            self.runtime.deinit();
-            self.runtime_initialized = false;
-        }
+        // M3b: 라우팅 표(runtime)는 **앱 전역 공유**(app_runtime.routing)라 창이 닫혀도 deinit하지 않는다 — 다른 창의
+        // 링크가 그 표에 살아 있기 때문이다(창 하나 닫기가 전 창 라우팅을 파괴하면 안 됨 = 창 격리 불변식). 이 창의 링크는
+        // 위 1)의 closeAndDetach가 이미 detach했다. 플래그만 내려 idempotent 계약을 지킨다(M2b 이전엔 여기서 per-window
+        // runtime.deinit을 불렀으나, 앱-전역 승격으로 제거 — 공유 표 수명은 프로세스 전역이다).
+        self.runtime_initialized = false;
         // 2) 각 panel의 각 Term 번들 소유 해제(registry.remove=번들 deinit: custom_name 해제 + surface.deinit) + Term/Pane/
-        //    Tab heap 해제(runtime.deinit 뒤 — 번들 deinit은 runtime 불요, reader는 pass 1에서 이미 join). M3a: 이 창이
-        //    소유하던 번들 슬롯을 앱 전역 registry에서 뺀다(다른 창 슬롯은 안 건드림 — surface_id 키드). registry 자체는
-        //    앱 전역이라 여기서 deinit하지 않는다. appearance가 surface family를 빌리므로 surface 정리(번들 deinit)는 아래
-        //    config/appearance 해제보다 앞이어야 한다(원래 순서 보존 — 그래서 remove가 pass 1이 아니라 여기).
+        //    Tab heap 해제(번들 deinit은 runtime 불요, reader는 pass 1에서 이미 join). M3a: 이 창이 소유하던 번들 슬롯을
+        //    앱 전역 registry에서 뺀다(다른 창 슬롯은 안 건드림 — surface_id 키드). registry 자체는 앱 전역이라 여기서
+        //    deinit하지 않는다. appearance가 surface family를 빌리므로 surface 정리(번들 deinit)는 아래 config/appearance
+        //    해제보다 앞이어야 한다(원래 순서 보존 — 그래서 remove가 pass 1이 아니라 여기).
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
-                    // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 runtime.deinit
-                    // 순서 때문에 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제). custom_name·surface는
-                    // 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
+                    // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 surface 정리를
+                    // config/appearance 해제 앞에 두려 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제).
+                    // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
                     if (term.git_branch) |b| self.allocator.free(b);
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     term.auto_title.deinit(self.allocator);
@@ -24380,7 +24382,10 @@ test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(
     var capture_buf: std.ArrayList(u8) = .empty;
     defer capture_buf.deinit(std.testing.allocator);
     var cap_ctx = ReportCaptureCtx{ .buf = &capture_buf };
-    session.runtime = app.SurfaceRuntime.init(std.testing.allocator);
+    // M3b: runtime은 앱-전역 공유 포인터라, 이 undefined-session 테스트는 로컬 SurfaceRuntime을 소유해 격리한다.
+    var test_rt: app.SurfaceRuntime = undefined;
+    test_rt = app.SurfaceRuntime.init(std.testing.allocator);
+    session.runtime = &test_rt;
     defer session.runtime.deinit();
     _ = try session.runtime.attach(&tab_surface, tab_surface.id, .{ .ctx = &cap_ctx, .write_input = ReportCaptureCtx.write, .resize_fn = testNoopPtyResize });
 
@@ -25184,7 +25189,7 @@ test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 
 
     // 두 세션은 앱 인스턴스에 하나뿐인 allocator를 공유한다(창마다 별도 카운터가 아님).
     try std.testing.expectEqual(s1.surface_ids, s2.surface_ids);
-    try std.testing.expectEqual(&app_surface_ids, s1.surface_ids);
+    try std.testing.expectEqual(&app_runtime.surface_ids, s1.surface_ids);
 
     // createTerm이 per-session 카운터가 아니라 앱 전역 SurfaceIdAllocator에서 발급하므로, 서로 다른 창의 첫
     // surface조차 id가 겹치지 않는다(per-session이면 둘 다 1이라 충돌 — 이 단언이 그 회귀를 잡는다).
@@ -25192,14 +25197,14 @@ test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 
 }
 
 // M3a LiveSurfaceRegistry 배선 — surface + live PTY 런타임의 **소유**가 Term-inline이 아니라 앱 전역
-// `app_live_registry`의 `LiveSurface` 번들 슬롯으로 이전됐고, 모든 창(AppSession)이 그 한 registry를 공유한다
+// `app_runtime.live_registry`의 `LiveSurface` 번들 슬롯으로 이전됐고, 모든 창(AppSession)이 그 한 registry를 공유한다
 // (docs/window-surface-mobility.md §8A.1). createTerm이 `create`로 번들을 registry에 소유시키고 Term은 슬롯의
 // surface·live_pty를 포인터로 참조만 한다. 이 테스트는 (1) 창 간 registry 공유, (2) Term이 든 두 포인터 == 번들
 // 슬롯의 두 필드(소유는 registry), (3) 두 창 번들의 앱 전역 공존을 못박는다.
 test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surface·런타임 소유는 창 밖 번들 슬롯" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
     const allocator = std.testing.allocator;
-    const before = app_live_registry.count();
+    const before = app_runtime.live_registry.count();
 
     const s1 = try allocator.create(AppSession);
     defer allocator.destroy(s1);
@@ -25225,7 +25230,7 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
 
     // 두 세션이 앱 인스턴스에 하나뿐인 registry를 공유한다(창별 소유가 아님, surface_ids와 동형).
     try std.testing.expectEqual(s1.live_registry, s2.live_registry);
-    try std.testing.expectEqual(&app_live_registry, s1.live_registry);
+    try std.testing.expectEqual(&app_runtime.live_registry, s1.live_registry);
 
     // 각 창의 첫 Term의 surface·런타임이 그 창의 surface_id로 registry 번들에 소유돼 있고, Term이 든 두 포인터가
     // 번들 슬롯의 두 필드와 **동일**하다(소유는 registry, Term은 참조 — 이 단언이 M3a 배선을 못박는다).
@@ -25240,7 +25245,63 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
     try std.testing.expectEqual(s1.activePane().activeTerm().surface, &b1.surface);
     try std.testing.expectEqual(s2.activePane().activeTerm().surface, &b2.surface);
     // 두 창의 번들이 한 registry에 공존한다(앱 전역 소유 — 창이 달라도 같은 owner).
-    try std.testing.expectEqual(before + 2, app_live_registry.count());
+    try std.testing.expectEqual(before + 2, app_runtime.live_registry.count());
+}
+
+// M3b 라우팅 앱-전역화 — 입력/resize/명령/PTY 이벤트 라우팅 표(`SurfaceRuntime`)가 per-window가 아니라 **앱 전역**
+// (`app_runtime.routing`)이고, 모든 창(AppSession)이 그 한 표를 공유한다(docs/window-surface-mobility.md §8A.2). 이
+// 테스트는 세 가지를 못박는다: (1) 두 창이 같은 라우팅 표를 가리킨다(공유), (2) **한 표가 두 창 surface를 모두**
+// surface_id로 keyed 보유한다(격리는 값 분리가 아니라 유일 키로 — 이게 cross-window 이동(M3d)이 라우팅을 안 건드려도
+// 되는 근거), (3) **창 격리 불변식**: 한 창(s1)을 닫으면 그 창 링크만 표에서 빠지고 다른 창(s2) surface는 그대로
+// 라우팅된다 — 창 close가 `self.runtime.deinit()`으로 공유 표를 파괴하면 s2가 죽는다(그 회귀를 이 단언이 잡는다).
+// 실 init(실 PTY/CoreText)이라 macOS 게이트 — 프로덕션 배선 검증(모듈-로컬 var·필드 기본값 포함).
+test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + 창 격리(s1 닫아도 s2 라우팅 생존)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
+
+    const allocator = std.testing.allocator;
+
+    const s1 = try allocator.create(AppSession);
+    defer allocator.destroy(s1);
+    try s1.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    // s1.deinit()은 아래에서 **명시** 호출한다(창 격리 검증: s1 close 후 s2가 살아 있는지).
+
+    const s2 = try allocator.create(AppSession);
+    defer allocator.destroy(s2);
+    try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s2.deinit();
+
+    // (1) 두 창이 앱 전역 라우팅 표 하나를 공유한다(per-window 값 필드가 아니라 공유 coordinator 필드 포인터).
+    try std.testing.expectEqual(s1.runtime, s2.runtime);
+    try std.testing.expectEqual(&app_runtime.routing, s1.runtime);
+
+    const sid1 = s1.activeSurface().id;
+    const sid2 = s2.activeSurface().id;
+    try std.testing.expect(sid1 != sid2); // M0a: 앱 전역 유일
+
+    // (2) 한 표가 두 창 surface를 모두 surface_id로 보유한다 — 공유 표를 통해 어느 창 surface든 라우팅된다(빈 바이트
+    // write는 무해한 라우팅 probe: 링크 없으면 UnknownSurface, 있으면 attach된 pty_io로 0바이트 write). per-window 표라면
+    // s1의 표엔 sid2가 없어 UnknownSurface가 났을 것 — 앱-전역이라 둘 다 성공한다.
+    try s1.runtime.writeInput(sid1, .{ .bytes = "" });
+    try s1.runtime.writeInput(sid2, .{ .bytes = "" }); // s1을 통해서도 s2 surface가 조회된다(한 표)
+    try s2.runtime.writeInput(sid1, .{ .bytes = "" }); // 대칭
+
+    // (3) 창 격리 불변식: s1을 닫으면 s1 링크만 표에서 빠지고 s2 surface는 그대로 라우팅된다. s1.deinit()이 공유 표를
+    // deinit하면(옛 per-window 규율) s2가 UnknownSurface/UB로 죽는다 — 그 회귀를 잡는다. s2.runtime(==공유 표)로 probe.
+    s1.deinit();
+    try std.testing.expectError(error.UnknownSurface, s2.runtime.writeInput(sid1, .{ .bytes = "" })); // s1 링크 제거됨
+    try s2.runtime.writeInput(sid2, .{ .bytes = "" }); // s2는 생존 — 공유 표가 s1 close에 파괴되지 않았다
 }
 
 // M3a 핵심 불변식(주소 안정성) — surface·런타임 소유를 registry 번들로 옮겨도 reader thread가 잡는 두 embedded
@@ -25250,7 +25311,7 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
 test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주소가 등록/해제에 불변 + 스크롤백 보존" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const before = app_live_registry.count();
+    const before = app_runtime.live_registry.count();
 
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -25323,7 +25384,7 @@ test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주
 test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const before = app_live_registry.count();
+    const before = app_runtime.live_registry.count();
 
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -25658,9 +25719,13 @@ const ReportCaptureCtx = struct {
         try self.buf.appendSlice(std.testing.allocator, bytes);
     }
 };
-fn attachTestRuntime(session: *AppSession, surface: *maru.session.Surface) !void {
+// M3b: `runtime`이 앱-전역 공유 포인터가 됐으므로(app_runtime.routing), `var session = undefined` 테스트는 공유 표를
+// 쓰지 않고 **테스트-로컬** SurfaceRuntime을 소유해야 한다(테스트 격리 + testing.allocator leak 검출). 호출자가
+// `var test_rt: app.SurfaceRuntime = undefined`를 스택에 두고 그 주소를 넘긴다 — session.runtime이 그 로컬을 가리킨다.
+fn attachTestRuntime(session: *AppSession, rt: *app.SurfaceRuntime, surface: *maru.session.Surface) !void {
     session.io = std.testing.io;
-    session.runtime = app.SurfaceRuntime.init(std.testing.allocator);
+    rt.* = app.SurfaceRuntime.init(std.testing.allocator);
+    session.runtime = rt;
     _ = try session.runtime.attach(surface, surface.id, .{ .ctx = undefined, .write_input = testNoopPtyWrite, .resize_fn = testNoopPtyResize });
 }
 
@@ -25671,7 +25736,8 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
     session.surface_initialized = true;
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
-    try attachTestRuntime(&session, &tab_surface);
+    var test_rt: app.SurfaceRuntime = undefined;
+    try attachTestRuntime(&session, &test_rt, &tab_surface);
     defer session.runtime.deinit();
     session.metal_dirty = false;
     // 9줄 출력 -> 5행 화면 위로 4줄이 스크롤백에 쌓인다.
@@ -25695,7 +25761,8 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.surface_initialized = true;
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
-    try attachTestRuntime(&session, &tab_surface);
+    var test_rt: app.SurfaceRuntime = undefined;
+    try attachTestRuntime(&session, &test_rt, &tab_surface);
     defer session.runtime.deinit();
     session.metal_dirty = false;
     session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
@@ -25731,7 +25798,8 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.surface_initialized = true;
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
-    try attachTestRuntime(&session, &tab_surface);
+    var test_rt: app.SurfaceRuntime = undefined;
+    try attachTestRuntime(&session, &test_rt, &tab_surface);
     defer session.runtime.deinit();
     session.metal_dirty = false;
     session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
@@ -25786,7 +25854,8 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     session.surface_initialized = true;
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
-    try attachTestRuntime(&session, &tab_surface);
+    var test_rt: app.SurfaceRuntime = undefined;
+    try attachTestRuntime(&session, &test_rt, &tab_surface);
     defer session.runtime.deinit();
     session.chrome_host = .{};
     session.frame_loop_rate_hz = 120; // host cadence 120Hz → msPerTick=8
@@ -28026,7 +28095,8 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.surface_initialized = true;
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
-    try attachTestRuntime(&session, &tab_surface);
+    var test_rt: app.SurfaceRuntime = undefined;
+    try attachTestRuntime(&session, &test_rt, &tab_surface);
     defer session.runtime.deinit();
     session.metal_dirty = false;
     session.chrome_host = .{}; // inputFocus가 읽음
@@ -35440,7 +35510,8 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.surface_initialized = true;
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
-    try attachTestRuntime(&session, &tab_surface);
+    var test_rt: app.SurfaceRuntime = undefined;
+    try attachTestRuntime(&session, &test_rt, &tab_surface);
     defer session.runtime.deinit();
     session.metal_dirty = false;
     session.metal_buffer = .{};

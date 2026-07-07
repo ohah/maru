@@ -207,6 +207,16 @@ pub const SurfaceRuntime = struct {
         if (rec) |r| r.recordResize(surface_id, link.surface.core.size.cols, link.surface.core.size.rows);
     }
 
+    /// 이 surface의 링크에서 trace 레코더를 뗀다 — `setSurfaceTraceRecorder`의 **대칭**. cross-window 이동(M3d-2a)이
+    /// surface를 recorder가 **없는** 목적지 창으로 옮길 때, 소스 창 recorder를 가리키던 stale 포인터를 끊는다(안 끊으면
+    /// 옮겨진 surface의 입력이 떠난 소스 창 trace로 계속 샌다 — 앱-전역 라우팅 표라 링크가 살아 있으므로). setter에 null을
+    /// 넘기는 것과 결과는 같으나, "recorder 없음" 의도를 recorder 인자 없이 표현하는 전용 진입점이다(§8A.8 M3d-2a trace
+    /// 재지정). 링크가 없으면 UnknownSurface(surface가 아직/이미 attach 안 됨 — setter와 동일 계약).
+    pub fn clearSurfaceTraceRecorder(self: *SurfaceRuntime, surface_id: SurfaceId) RuntimeError!void {
+        const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
+        link.trace_recorder = null;
+    }
+
     pub fn detachSurface(self: *SurfaceRuntime, surface_id: SurfaceId) void {
         if (self.findBySurface(surface_id)) |index| {
             _ = self.links.orderedRemove(index);

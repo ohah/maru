@@ -31,6 +31,9 @@ pub const Status = enum(c_int) {
     // tick이 PTY 세션 종료를 관측했다(shell exit/read_error). fault가 아니라 정상 종료
     // 신호이므로 host는 frame loop를 멈추고 우아하게 내려간다.
     session_ended = 9,
+    // cross-window 이동(M3d-2a) 실패 — 잘못된 워크스페이스 인덱스(InvalidCoordinate) 또는 dst 용량 확보 실패(OOM).
+    // Swift 미소비(M3d-2b가 배선하며 app_host_abi.h에 미러). 이 한 event만 거부이고 세션은 유지(fault 아님).
+    move_failed = 10,
 };
 
 // EventKind는 app_session.zig가 소유한다(FrameSummary.last_event_kind에 실린다).
@@ -239,6 +242,62 @@ pub export fn maru_macos_app_session_request_window_close(session: ?*AppSession)
 pub export fn maru_macos_app_session_request_app_quit(session: ?*AppSession) void {
     const app_session = session orelse return;
     app_session.requestAppQuit();
+}
+
+/// cross-window 이동(M3d-2a) 결과 — status(ok/move_failed/null_out) + 소스 창이 비어 닫아야 하는지(§8A.2) + 이동한
+/// surface 수(§8A.3). 라이브 배선(M3d-2b Swift)이 source_window_closed=1일 때 NSWindow를 닫는다(판정은 Zig, close는 platform).
+pub const MoveResult = extern struct {
+    status: c_int,
+    source_window_closed: u32,
+    moved_count: u32,
+};
+
+// 이동 에러(InvalidCoordinate/OutOfMemory)를 MoveResult로 접는다 — 둘 다 move_failed(세션 유지, 이 event만 거부).
+fn moveResultError(out: *MoveResult) c_int {
+    out.* = .{ .status = @intFromEnum(Status.move_failed), .source_window_closed = 0, .moved_count = 0 };
+    return @intFromEnum(Status.move_failed);
+}
+
+fn moveResultOk(out: *MoveResult, outcome: maru.session.MoveOutcome) c_int {
+    out.* = .{
+        .status = @intFromEnum(Status.ok),
+        .source_window_closed = @intFromBool(outcome.source_window_closed),
+        .moved_count = @intCast(outcome.moved_surfaces.len),
+    };
+    return @intFromEnum(Status.ok);
+}
+
+/// M3d-2a-i cross-window workspace 이동(docs/window-surface-mobility.md §8A.8) — src 세션의 src_index 워크스페이스를 dst
+/// 세션으로 옮긴다. registry/routing을 안 건드리므로 surface가 재시작하지 않는다(§9). out.source_window_closed=1이면 소스
+/// 창이 비어 Swift가 닫아야 한다(실제 NSWindow close·목적지 focus는 **M3d-2b**가 배선 — 현재 Swift 미호출, plan-link 주석).
+/// src/dst/out null이면 null_out, 잘못된 인덱스나 OOM이면 move_failed.
+pub export fn maru_macos_app_session_move_workspace_to(
+    src: ?*AppSession,
+    dst: ?*AppSession,
+    src_index: usize,
+    out: ?*MoveResult,
+) c_int {
+    const s = src orelse return @intFromEnum(Status.null_out);
+    const d = dst orelse return @intFromEnum(Status.null_out);
+    const o = out orelse return @intFromEnum(Status.null_out);
+    var buf: [256]u64 = undefined; // moved surface_id 수집(초과분은 조용히 절단 — moved_count만 보고, MoveOutcome 계약)
+    const outcome = s.moveWorkspaceToSession(d, src_index, &buf) catch return moveResultError(o);
+    return moveResultOk(o, outcome);
+}
+
+/// M3d-2a-i 전체 window merge(§1·§4) — src 세션의 **모든** 워크스페이스를 dst로 옮기고 src를 비운다(source_window_closed
+/// 항상 1). surface 무재시작(§9). Swift 미호출(M3d-2b가 배선 — plan-link). src/dst/out null이면 null_out, OOM이면 move_failed.
+pub export fn maru_macos_app_session_merge_window(
+    src: ?*AppSession,
+    dst: ?*AppSession,
+    out: ?*MoveResult,
+) c_int {
+    const s = src orelse return @intFromEnum(Status.null_out);
+    const d = dst orelse return @intFromEnum(Status.null_out);
+    const o = out orelse return @intFromEnum(Status.null_out);
+    var buf: [256]u64 = undefined;
+    const outcome = s.mergeSessionInto(d, &buf) catch return moveResultError(o);
+    return moveResultOk(o, outcome);
 }
 
 // 휠 스크롤: Swift는 raw 델타(포인트)·정밀 델타 여부·마우스 위치(backing px)만 넘기고, 줄 수 환산(매직

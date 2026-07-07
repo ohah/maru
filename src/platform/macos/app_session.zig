@@ -53,6 +53,7 @@ const Pane = Model.Pane;
 const PaneTree = Model.PaneTree;
 const Tab = Model.Tab;
 const group_normalize = maru.session.group_normalize; // M3c: 그룹 정규화 순수 함수(L2 리프트) — 아래 L4 메서드가 self.tabs.items로 위임(재구현 금지)
+const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 정책 어휘(MoveOutcome·crossesTrustBoundary·WindowKind) 재사용 — 라이브 수술이 outcome을 직접 채운다(§1.3·§8A.8)
 
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
@@ -4266,6 +4267,173 @@ pub const AppSession = struct {
         self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — normalize 뒤, 마커 승계로 subtree 재구성 반영)
         self.rebuildSidebar() catch {};
         self.metal_dirty = true;
+    }
+
+    // ══ M3d-2a-i: cross-window workspace/window 라이브 이동(docs/window-surface-mobility.md §8A.8·§8A.3) ═══════════
+    // 라이브 수술이 트리 위상 변경의 **단일 구현**이다(§1.3). `detachTabForMove`(closeTab tail을 destroy 없이 재사용 →
+    // `*Tab` 반환)로 src 트리에서 워크스페이스를 떼고, `adoptTab`(createTab tail을 createPane 없이 재사용)으로 dst 트리에
+    // 붙인다 — surface_id가 불변이라 앱-전역 registry(런타임 소유)·routing(surface_id 키드)을 **전혀 안 건드린다**(§9
+    // 무재시작: 이동 전후 같은 `*LiveSurface`·live_pty·스크롤백, 재시작 0). `moveWorkspaceToSession`/`mergeSessionInto`가
+    // 이 둘을 조합하고 `surface_move.MoveOutcome`을 라이브 결과에서 **직접** 채운다 — 매 이동 transient `WindowGraph`를
+    // 조립하지 않고(§8A.6 라이브 미러 금지) `surface_move`에서 **정책 어휘만 재사용**(MoveOutcome·crossesTrustBoundary·
+    // WindowKind). **범위(M3d-2a-i)**: 비-그룹·비-pinned workspace만(그룹 마커 문자열 free·pinned 정규화는 M3d-2a-ii).
+    // 단 src 측 잔존 탭 재정규화(normalizePinnedFromGroups 등)는 closeTab tail 그대로 돈다. Swift 창 수명(빈 source
+    // close·목적지 focus)은 M3d-2b(ABI outcome 소비).
+
+    /// src 트리에서 `index` 워크스페이스(탭)를 **destroy 없이** 떼어 `*Tab`을 반환한다(dst가 소유 승계) — closeTab tail과
+    /// 동형이되 `destroyTabStandalone`을 **생략**한다. 담긴 Term/surface/PTY는 heap-pin + 앱-전역 registry 소유라 그대로
+    /// 따라온다(이동이지 파괴가 아님). 잔존(src) 측은 closeTab처럼 재정규화·reselect·사이드바 재빌드한다. 마지막 워크스페이스를
+    /// 떼면(빈 source, §1.6) active-의존 refresh(reselectAfterClose new_len=0 underflow·recomputeActivePaneRect activePane
+    /// deref)를 **건너뛴다** — `ended_seen` latch는 caller가 cross-window로 실제 비었을 때만 세운다(same-window 이동은 곧
+    /// re-adopt해 src가 안 닫히므로 detach가 세우면 오탐; `latchSessionClose`도 activeSurface UB라 못 씀). index 범위 밖이면 null.
+    fn detachTabForMove(self: *AppSession, index: usize) ?*Tab {
+        if (index >= self.tabs.items.len) return null;
+        // closeTab tail과 동일한 src-측 그룹 위생: 마커 승계 + top_level 경계 재확립. 범위(M3d-2a-i)가 비-그룹이라 이동
+        // 탭 자신엔 무동작(group_start==null·top_level=false)이지만, 잔존 탭 재정규화의 단일 출처를 갈리지 않게 그대로 부른다.
+        _ = self.inheritGroupMarker(index);
+        _ = self.reestablishTopLevelBoundaryOnMove(index);
+        const tab = self.tabs.orderedRemove(index);
+        _ = self.surface_ptrs.orderedRemove(index);
+        self.app_window.tabs = self.surface_ptrs.items; // 길이 변경 — 새 items로 재바인딩(stale 슬라이스 방지)
+        // destroyTabStandalone 생략(dst 승계). Pane/split·Term·surface는 안 건드린다.
+        if (self.tabs.items.len == 0) {
+            // 빈 source(§1.6): active-의존 refresh를 건너뛴다(0탭 UB 회피). ended_seen은 caller가 세운다(위 doc).
+            self.metal_dirty = true;
+            return tab;
+        }
+        self.app_window.active_tab = reselectAfterClose(index, self.app_window.active_tab, self.tabs.items.len);
+        self.recomputeActivePaneRect();
+        self.normalizePinnedFromGroups(); // 잔존 탭 멤버 pin 재동기(closeTab tail 동형 — src 측 재정규화 §1.4)
+        self.floatLocalPinsAllGroups();
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+        return tab;
+    }
+
+    /// 떼어온 `*Tab`을 이 세션(dst) 트리에 붙인다 — createTab tail과 동형이되 `createPane`을 **생략**한다(Term/surface는
+    /// 이미 존재). 원자성: tabs/surface_ptrs capacity를 **먼저** 예약(fallible)해 실패 시 dst 불변. 그 뒤는 infallible —
+    /// createTab과 같은 삽입점(비고정 리전 첫 group_start 마커 앞 = 그 리전 최상위 구간 끝, 그룹 흡수 방지)에 insert하고,
+    /// §8A.4(d) 이탈 정규화(top_level:=true·local_pinned:=false), 각 Term 라우팅 링크의 trace_recorder 재지정,
+    /// **dst cell metric**으로 resize(surface_id 키드 resize라 무재시작), 좌표·사이드바 갱신.
+    fn adoptTab(self: *AppSession, tab: *Tab) !void {
+        // 1) fallible 먼저(원자성) — 두 병렬 배열 capacity 예약. 실패하면 tab은 안 붙고 dst 불변(caller가 전파).
+        try self.tabs.ensureUnusedCapacity(self.allocator, 1);
+        try self.surface_ptrs.ensureUnusedCapacity(self.allocator, 1);
+        // 2) infallible: createTab tail과 같은 삽입점(비고정 리전 첫 마커 앞). 병렬 배열을 같은 인덱스에 insert해 정합 유지.
+        const insert_at = self.firstGroupStartInRegion(self.countPinnedTabs(), self.tabs.items.len) orelse self.tabs.items.len;
+        self.tabs.insertAssumeCapacity(insert_at, tab);
+        self.surface_ptrs.insertAssumeCapacity(insert_at, tab.activeTerm().surface);
+        self.app_window.tabs = self.surface_ptrs.items;
+        self.app_window.active_tab = insert_at;
+        // 3) §8A.4(d) 이탈 정규화 — 목적지 위치 맥락이 없고 append-to-end라 위치-암묵 top-level이 불성립 → 명시 set으로
+        //    그룹 흡수를 막는다(§14.9 정합). local_pin은 그룹 leaf 위치 고정이라 이탈 시 무의미(clearStaleLocalPins 대칭).
+        //    pinned은 M3d-2a-i 범위상 비-pinned라 안 건드린다(pinned workspace 이동은 M3d-2a-ii).
+        tab.top_level = true;
+        tab.local_pinned = false;
+        // 4) 옮긴 각 Term의 앱-전역 라우팅 링크 trace_recorder를 이 창(dst)으로 재지정 — 링크는 surface_id 키드라 살아
+        //    있고, src recorder를 가리키던 채면 떠난 창 trace로 샌다. dst에 recorder 있으면 붙이고(초기 baseline resize
+        //    기록), 없으면 끊는다(§8A.8 M3d-2a). 수술은 이미 커밋됐고 링크는 반드시 있으나, 트레이스는 부수기록이라 best-effort.
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (self.trace_recorder != null) {
+                    self.runtime.setSurfaceTraceRecorder(term.surface.id, &self.trace_recorder.?) catch {};
+                } else {
+                    self.runtime.clearSurfaceTraceRecorder(term.surface.id) catch {};
+                }
+            }
+        }
+        // 5) dst cell metric으로 옮겨온 트리를 dst 창 grid에 맞춘다(resize는 surface_id 키드 → 무재시작) + 좌표·사이드바.
+        self.resizeTabPanes(tab);
+        self.recomputeActivePaneRect();
+        self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 이 창의 trust 분류(§8A.5) — chrome_minimal이면 quick, 아니면 normal. cross-window 이동의 trust boundary
+    /// (`crossesTrustBoundary`) 판정에 쓴다. quick은 이동 단위에서 제외(§4)라 v1 실 경로는 normal↔normal뿐이지만,
+    /// revoke_caps guard+hook을 정확히 계산하려면 kind가 필요하다.
+    fn windowKind(self: *const AppSession) maru.session.WindowKind {
+        return if (self.chrome_minimal) .quick else .normal;
+    }
+
+    /// 한 워크스페이스(탭)의 모든 Term surface_id를 preorder(pane→Term)로 `out`에 채워 slice 반환(할당 없음, 버퍼 초과분은
+    /// 조용히 절단 — surface_move.collectWorkspaceSurfaces와 같은 계약). MoveOutcome.moved_surfaces backing.
+    fn collectTabSurfaceIds(tab: *Tab, out: []u64) []const u64 {
+        return out[0..appendTabSurfaceIds(tab, out, 0)];
+    }
+
+    fn appendTabSurfaceIds(tab: *Tab, out: []u64, start: usize) usize {
+        var n = start;
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (n >= out.len) break;
+                out[n] = term.surface.id;
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// 라이브 cross-window workspace 이동(M3d-2a-i) — src의 `idx` 워크스페이스를 detach(무-destroy)해 dst에 adopt(무-재시작).
+    /// outcome을 라이브 수술 결과에서 **직접** 채운다(§1.3): cross_window=src!=dst · source_window_closed=cross-window로 src가
+    /// 빈 경우 · moved_surfaces=이동 서브트리의 surface_id(out_ids backing) · revoke_caps=cross_window && trust boundary 교차.
+    /// same-window(src==dst)면 reorder로 보존(재구현 아님). idx 범위 밖 or dst OOM이면 error — 원자성: dst capacity를 detach
+    /// **전에** 예약해 실패 시 source 불변(promotePaneToNewWorkspace 선례). 빈 source면 `ended_seen`을 직접 latch(§1.6 —
+    /// activeSurface 접근 없이; 실제 창 close는 M3d-2b Swift가 source_window_closed 신호로 수행).
+    pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, out_ids: []u64) !surface_move.MoveOutcome {
+        if (idx >= src.tabs.items.len) return error.InvalidCoordinate;
+        // before(수술 전, 순수): 이동 서브트리 surface_id 수집 + trust kind. surface_id는 이동 중 불변이라 순서만 안정하면 된다.
+        const moved = collectTabSurfaceIds(src.tabs.items[idx], out_ids);
+        const from_kind = src.windowKind();
+        const to_kind = dst.windowKind();
+        const cross_window = src != dst;
+        // 원자성(§8A.3): dst capacity를 detach(비가역 src 수술) **전에** 예약 — 실패하면 src 불변. adoptTab도 자체 예약(dst
+        // 단독 원자성)하지만, 이 pre-reserve가 두-세션 트랜잭션의 source 불변을 보장한다(예약됨 → adoptTab 내부 예약은 no-op).
+        try dst.tabs.ensureUnusedCapacity(dst.allocator, 1);
+        try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, 1);
+        const tab = src.detachTabForMove(idx).?; // 위에서 idx 검증 → non-null
+        try dst.adoptTab(tab); // capacity 예약됨 → 무실패. insert+정규화+resize+trace 재지정.
+        const source_closed = cross_window and src.tabs.items.len == 0; // §1.6: cross-window로 src가 비었나
+        if (source_closed) src.ended_seen = true; // 빈 source 종료 latch(직접 — activeSurface 안 만짐, 실제 close는 M3d-2b)
+        return .{
+            .moved_surfaces = moved,
+            .from_window = @intCast(@intFromPtr(src)), // opaque window_id(§1 — 라우팅 키 아님). M3d-2b가 Swift window_id로 대체.
+            .to_window = @intCast(@intFromPtr(dst)),
+            .cross_window = cross_window,
+            .revoke_caps = cross_window and surface_move.crossesTrustBoundary(from_kind, to_kind),
+            .source_window_closed = source_closed,
+        };
+    }
+
+    /// 라이브 전체 window merge(M3d-2a-i, §1·§4) — src의 **모든** 워크스페이스를 dst로 옮기고 src를 비운다(source_window_closed
+    /// 항상 true). 각 워크스페이스를 순서대로 detach(0)→adopt한다(detach가 앞에서 빼므로 항상 idx 0). moved_surfaces는 수술
+    /// 전 src 전체 surface_id(out_ids backing, 초과분 조용히 절단). src==dst(자기 merge)면 no-op. dst OOM은 부분-완료로 전파
+    /// (§9 bulk merge partial 허용 — 각 단일 이동은 pre-reserve로 원자적).
+    pub fn mergeSessionInto(src: *AppSession, dst: *AppSession, out_ids: []u64) !surface_move.MoveOutcome {
+        if (src == dst) {
+            // 자기 merge = no-op(모든 워크스페이스가 이미 dst). src는 안 닫힌다.
+            return .{ .moved_surfaces = out_ids[0..0], .from_window = @intCast(@intFromPtr(src)), .to_window = @intCast(@intFromPtr(dst)), .cross_window = false, .revoke_caps = false, .source_window_closed = false };
+        }
+        const from_kind = src.windowKind();
+        const to_kind = dst.windowKind();
+        var moved_n: usize = 0;
+        for (src.tabs.items) |tab| moved_n = appendTabSurfaceIds(tab, out_ids, moved_n);
+        const moved = out_ids[0..moved_n];
+        while (src.tabs.items.len > 0) {
+            try dst.tabs.ensureUnusedCapacity(dst.allocator, 1);
+            try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, 1);
+            const tab = src.detachTabForMove(0).?; // len>0 → non-null
+            try dst.adoptTab(tab);
+        }
+        src.ended_seen = true; // §1.6 merge는 src를 항상 비우고 닫는다(실제 close는 M3d-2b)
+        return .{
+            .moved_surfaces = moved,
+            .from_window = @intCast(@intFromPtr(src)),
+            .to_window = @intCast(@intFromPtr(dst)),
+            .cross_window = true,
+            .revoke_caps = surface_move.crossesTrustBoundary(from_kind, to_kind),
+            .source_window_closed = true,
+        };
     }
 
     /// 활성 탭의 활성 panel을 닫는다(split이 있으면 pane을 하나씩 닫는다). 트리를 형제로
@@ -36098,3 +36266,250 @@ test "pxToCell subtracts the active pane origin so clicks map to that pane's col
 }
 
 // pageScrollDelta 단위 테스트는 함수와 함께 src/session/input_math.zig로 이동.
+
+// ══ M3d-2a-i: cross-window workspace/window 라이브 이동(docs/window-surface-mobility.md §8A.8) ═══════════════════
+// 두 controlled_smoke 세션이 앱-전역 `app_runtime`(surface_ids·live_registry·routing)을 **공유**하므로, fake registry
+// 없이 실제 두-창 트리 수술의 **무재시작 불변식**(§9 — 이동 전후 같은 `*LiveSurface`·live_pty·스크롤백, 재시작 0)과
+// 양-창 정합·빈 source latch·outcome·trace 재지정을 헤드리스로 못박는다. 실 PTY라 macOS 게이트. 세션은 tick하지
+// 않으므로(surface 존재만 필요) controlled_smoke 셸의 exit/reap과 무관하게 결정론적이다.
+
+/// 살아 있는 워크스페이스(탭)를 하나 더 만든다 — cat으로 stdin을 물고 있어 (tick하면) reap이 안 닫는다(여기선 tick 안 함).
+fn addMoveTestWorkspace(session: *AppSession, title: []const u8) !void {
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        title,
+        "sh",
+    );
+}
+
+test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSurface·live_pty·surface·스크롤백·재시작0) + 양창 정합 + outcome" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    // src에 두 번째 워크스페이스를 만들어 그걸 옮긴다(첫 워크스페이스는 src에 남아 src가 안 닫히게).
+    try addMoveTestWorkspace(src, "moved-ws");
+    try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
+
+    // 옮길 워크스페이스(idx 1)의 라이브 슬롯 스냅샷.
+    const moved_term = src.tabs.items[1].activeTerm();
+    const moved_surface = moved_term.surface; // *Surface(번들 슬롯 참조)
+    const moved_id = moved_surface.id;
+    const slot_before = src.live_registry.findBySurface(moved_id).?; // *LiveSurface(registry 소유 슬롯)
+    const live_pty_before = moved_term.rt.live_pty; // *LivePtySession(같은 슬롯 필드)
+    const entries_before = src.live_registry.entries.items.len;
+
+    // 코어 스크롤백에 마커를 심어 이동이 터미널 상태를 보존하는지 본다(재생성이면 사라진다).
+    moved_surface.lockCore(src.io);
+    moved_surface.core.write("MOVE_MARK_42\r\n") catch {};
+    moved_surface.unlockCore(src.io);
+
+    var buf: [8]u64 = undefined;
+    const outcome = try src.moveWorkspaceToSession(dst, 1, &buf);
+
+    // outcome: 창 간 이동, moved={moved_id}, normal↔normal이라 revoke 없음, src에 첫 워크스페이스 남아 안 닫힘.
+    try std.testing.expect(outcome.cross_window);
+    try std.testing.expect(!outcome.revoke_caps);
+    try std.testing.expect(!outcome.source_window_closed);
+    try std.testing.expectEqual(@as(usize, 1), outcome.moved_surfaces.len);
+    try std.testing.expectEqual(moved_id, outcome.moved_surfaces[0]);
+
+    // 양창 정합: src 1탭·dst 2탭, src 안 닫힘. surface_ptrs가 app_window.tabs와 같은 backing(재바인딩).
+    try std.testing.expectEqual(@as(usize, 1), src.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), dst.tabs.items.len);
+    try std.testing.expect(!src.ended_seen);
+    try std.testing.expectEqual(dst.surface_ptrs.items.len, dst.tabs.items.len);
+    try std.testing.expectEqual(dst.surface_ptrs.items.ptr, dst.app_window.tabs.ptr);
+    try std.testing.expectEqual(src.surface_ptrs.items.ptr, src.app_window.tabs.ptr);
+
+    // **무재시작(§9)**: registry를 안 건드렸으니 dst에서 조회해도 같은 슬롯·같은 live_pty·같은 *Surface·엔트리 수 불변(create/remove 0).
+    const adopted_term = dst.tabs.items[1].activeTerm();
+    const slot_after = dst.live_registry.findBySurface(moved_id).?;
+    try std.testing.expectEqual(slot_before, slot_after);
+    try std.testing.expectEqual(live_pty_before, adopted_term.rt.live_pty);
+    try std.testing.expectEqual(moved_surface, adopted_term.surface);
+    try std.testing.expectEqual(entries_before, dst.live_registry.entries.items.len);
+    // dst 대표 surface_ptr가 옮겨온 워크스페이스의 활성 surface(정합).
+    try std.testing.expectEqual(moved_surface, dst.surface_ptrs.items[1]);
+
+    // 코어 스크롤백 보존(같은 core, 재생성 아님).
+    const dump = try slot_after.surface.core.dumpUtf8(allocator);
+    defer allocator.free(dump);
+    try std.testing.expect(std.mem.indexOf(u8, dump, "MOVE_MARK_42") != null);
+}
+
+test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스페이스 이동 시 source_window_closed·ended_seen·0탭·deinit 무패닉" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), src.tabs.items.len);
+    const moved_id = src.tabs.items[0].activeTerm().surface.id;
+
+    var buf: [8]u64 = undefined;
+    const outcome = try src.moveWorkspaceToSession(dst, 0, &buf);
+
+    // src의 유일 워크스페이스가 빠져 빈 창 → source_window_closed + ended_seen 직접 latch(실제 close는 M3d-2b).
+    try std.testing.expect(outcome.cross_window);
+    try std.testing.expect(outcome.source_window_closed);
+    try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
+    try std.testing.expect(src.ended_seen);
+    try std.testing.expectEqual(@as(usize, 2), dst.tabs.items.len);
+    // dst에서 이동 surface 무재시작 조회 가능.
+    try std.testing.expect(dst.live_registry.findBySurface(moved_id) != null);
+    // 빈 source deinit(0탭 순회)이 패닉 안 함 — defer src.deinit()가 검증.
+}
+
+test "M3d-2a-i moveWorkspaceToSession: membershipChangeEvents가 movedOut+movedIn 방출(§8A.3 어휘 재사용, from!=to)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    try addMoveTestWorkspace(src, "ws");
+    const moved_id = src.tabs.items[1].activeTerm().surface.id;
+
+    var buf: [8]u64 = undefined;
+    const outcome = try src.moveWorkspaceToSession(dst, 1, &buf);
+
+    var evbuf: [4]surface_move.SurfaceMovedEvent = undefined;
+    const events = surface_move.membershipChangeEvents(outcome, &evbuf);
+    try std.testing.expectEqual(@as(usize, 2), events.len);
+    try std.testing.expectEqual(surface_move.MovedDir.out, events[0].dir);
+    try std.testing.expectEqualStrings("session.movedOut", events[0].method());
+    try std.testing.expectEqual(moved_id, events[0].surface_id);
+    try std.testing.expectEqual(surface_move.MovedDir.in, events[1].dir);
+    try std.testing.expectEqualStrings("session.movedIn", events[1].method());
+    try std.testing.expect(events[0].from_window != events[0].to_window); // opaque window_id 구분(§1)
+}
+
+test "M3d-2a-i mergeSessionInto: src 전체 이동 + source_window_closed(항상)·ended_seen + 모든 surface 무재시작 이동" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    // src에 워크스페이스 2개(총 2), dst 1개.
+    try addMoveTestWorkspace(src, "ws2");
+    const id_a = src.tabs.items[0].activeTerm().surface.id;
+    const id_b = src.tabs.items[1].activeTerm().surface.id;
+
+    var buf: [8]u64 = undefined;
+    const outcome = try src.mergeSessionInto(dst, &buf);
+
+    try std.testing.expect(outcome.cross_window);
+    try std.testing.expect(outcome.source_window_closed);
+    try std.testing.expectEqual(@as(usize, 2), outcome.moved_surfaces.len);
+    try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
+    try std.testing.expect(src.ended_seen);
+    try std.testing.expectEqual(@as(usize, 3), dst.tabs.items.len); // dst 1 + src 2
+    // 두 surface 모두 dst에서 무재시작 조회 가능.
+    try std.testing.expect(dst.live_registry.findBySurface(id_a) != null);
+    try std.testing.expect(dst.live_registry.findBySurface(id_b) != null);
+}
+
+test "M3d-2a-i mergeSessionInto(self,self): no-op(무한루프 방지·src 안 닫힘)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const s = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(s);
+    defer s.deinit();
+    try addMoveTestWorkspace(s, "ws2");
+    try std.testing.expectEqual(@as(usize, 2), s.tabs.items.len);
+
+    var buf: [8]u64 = undefined;
+    const outcome = try s.mergeSessionInto(s, &buf);
+    try std.testing.expect(!outcome.cross_window);
+    try std.testing.expect(!outcome.source_window_closed);
+    try std.testing.expectEqual(@as(usize, 0), outcome.moved_surfaces.len);
+    try std.testing.expectEqual(@as(usize, 2), s.tabs.items.len); // 불변
+    try std.testing.expect(!s.ended_seen);
+}
+
+test "M3d-2a-i adoptTab trace 재지정(SET): dst에 recorder 있으면 옮긴 surface 링크가 dst recorder로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator); // 먼저 선언 → 마지막 defer(모든 세션 deinit 뒤 해제)
+    defer aw.deinit();
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+    dst.trace_recorder = app.trace_recorder.TraceRecorder.init(&aw.writer); // MARU_TRACE 흉내
+
+    try addMoveTestWorkspace(src, "ws"); // src(recorder 없음) → 이 링크는 null
+    const moved_id = src.tabs.items[1].activeTerm().surface.id;
+
+    var buf: [8]u64 = undefined;
+    _ = try src.moveWorkspaceToSession(dst, 1, &buf);
+
+    // dst에 recorder가 있으니 옮긴 surface 링크의 trace_recorder가 dst 것(&dst.trace_recorder.?)으로 재지정된다(앱-전역 공유 표).
+    var found = false;
+    var link_rec: ?*app.trace_recorder.TraceRecorder = null;
+    for (dst.runtime.links.items) |link| if (link.surface_id == moved_id) {
+        found = true;
+        link_rec = link.trace_recorder;
+    };
+    try std.testing.expect(found);
+    try std.testing.expect(link_rec != null);
+    try std.testing.expectEqual(&dst.trace_recorder.?, link_rec.?);
+}
+
+test "M3d-2a-i adoptTab trace 재지정(CLEAR): dst에 recorder 없으면 옮긴 surface 링크의 recorder를 끊는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    // src에 recorder를 붙인 뒤 워크스페이스를 만들면 createTerm chokepoint가 그 surface 링크에 src recorder를 자동 부착.
+    src.trace_recorder = app.trace_recorder.TraceRecorder.init(&aw.writer);
+    try addMoveTestWorkspace(src, "ws");
+    const moved_id = src.tabs.items[1].activeTerm().surface.id;
+
+    // 비-vacuous: 이동 전 링크가 recorder를 실제로 가졌는지 확인(안 그러면 clear가 무의미).
+    var pre_had = false;
+    for (src.runtime.links.items) |link| if (link.surface_id == moved_id and link.trace_recorder != null) {
+        pre_had = true;
+    };
+    try std.testing.expect(pre_had);
+
+    var buf: [8]u64 = undefined;
+    _ = try src.moveWorkspaceToSession(dst, 1, &buf); // dst엔 recorder 없음 → clear
+
+    var found = false;
+    var cleared = false;
+    for (dst.runtime.links.items) |link| if (link.surface_id == moved_id) {
+        found = true;
+        cleared = link.trace_recorder == null;
+    };
+    try std.testing.expect(found);
+    try std.testing.expect(cleared);
+}

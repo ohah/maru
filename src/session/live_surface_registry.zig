@@ -106,10 +106,24 @@ pub fn LiveSurfaceRegistry(comptime Rt: type) type {
         /// surface를 registry에서 제거하고 소유 런타임을 teardown(`Rt.deinit`)·해제한다. surface close 경로가 부른다
         /// (`WindowGraph`에서 surface_ref가 사라질 때 L4 coordinator가 호출). 없는 surface면 `SurfaceNotRegistered`.
         /// 다른 엔트리의 `*Rt` 포인터는 orderedRemove가 `Entry` 값만 옮기므로 불변이다(런타임 본체는 안 움직임).
+        /// **teardown 순서 계약(M2b)**: `Rt.deinit`은 자기 자원만 정리하므로(reader join·fd/queue), 런타임이 외부
+        /// (예: SurfaceRuntime routing)에 attach돼 있으면 coordinator가 `remove` **전에** detach를 선행해야 한다
+        /// (app_session은 `live_pty.closeAndDetach(&runtime)` → `remove` 순서 — registry는 L2 generic이라 runtime을
+        /// 모른다). registry는 detach를 모르는 채 `deinit`만 부른다.
         pub fn remove(self: *Self, surface_id: u64) Error!void {
             const idx = self.indexOf(surface_id) orelse return error.SurfaceNotRegistered;
             const entry = self.entries.orderedRemove(idx);
             entry.runtime.deinit();
+            self.allocator.destroy(entry.runtime);
+        }
+
+        /// **init-실패 errdefer 전용(M2b)**: `create`로 슬롯을 얻었으나 caller의 in-place init이 **실패**해 슬롯이
+        /// 아직 초기화되지 않은(=`Rt.deinit` 호출이 UB인) 상태에서, 엔트리와 heap 슬롯만 해제한다(deinit **없이**).
+        /// `remove`는 init을 마친 슬롯에만 쓸 수 있으므로(deinit 호출), init 실패 경로는 반드시 이 함수를 써야 한다.
+        /// 없는 surface면 `SurfaceNotRegistered`. `create`의 create/errdefer 계약(uninit 슬롯 deinit=UB)을 닫는 짝이다.
+        pub fn removeUninitialized(self: *Self, surface_id: u64) Error!void {
+            const idx = self.indexOf(surface_id) orelse return error.SurfaceNotRegistered;
+            const entry = self.entries.orderedRemove(idx);
             self.allocator.destroy(entry.runtime);
         }
 
@@ -310,6 +324,31 @@ test "create OOM: append 실패 시 errdefer가 슬롯을 해제해 leak·유실
 
     try testing.expectEqual(@as(usize, 0), reg.count()); // 부분 상태 없음
     try testing.expect(reg.findBySurface(2) == null);
+}
+
+test "removeUninitialized: init 실패 슬롯을 deinit 없이 해제(엔트리 제거·leak 없음), 타 엔트리 불변" {
+    const allocator = testing.allocator;
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+
+    // 정상 소유 하나(in-place init됨) + init 실패를 흉내낸 슬롯 하나(create만 하고 init 생략 = undefined 슬롯).
+    const live = try spawn(&reg, allocator, 1, 0, 1);
+    try live.push("alive");
+    _ = try reg.create(2, 0); // 슬롯만 확보, in-place init은 (일부러) 생략 — production createTerm의 init 실패 흉내
+    try testing.expectEqual(@as(usize, 2), reg.count());
+
+    // init-실패 errdefer 경로: deinit 없이 슬롯+엔트리만 해제. deinit을 부르면 undefined scrollback deref=UB라 못 부른다
+    // (이 테스트의 non-vacuous 증거 — 구현이 remove처럼 deinit하면 garbage deref/double-free로 깨진다).
+    try reg.removeUninitialized(2);
+    try testing.expect(reg.findBySurface(2) == null);
+    try testing.expectEqual(@as(usize, 1), reg.count());
+
+    // 정상 엔트리는 온전(포인터·상태 불변) — orderedRemove가 Entry 값만 옮김.
+    try testing.expectEqual(live, reg.findBySurface(1).?);
+    try testing.expectEqualStrings("alive", reg.findBySurface(1).?.scrollback.items[0]);
+
+    // 없는 surface면 SurfaceNotRegistered(remove와 같은 계약).
+    try testing.expectError(error.SurfaceNotRegistered, reg.removeUninitialized(999));
 }
 
 test "deinit: 여러 소유 런타임을 누수 없이 teardown(testing.allocator가 검증)" {

@@ -148,7 +148,7 @@ Maru는 처음부터 디버깅, 테스트, 로그, 리플레이가 같은 데이
 ```text
 PTY/input/parser/terminal/renderer/workspace
   -> ShellEvent (도메인 이벤트) / renderShellEvents·renderTerminalSnapshot (writer)
-  -> parseShellEvents·parseSnapshot (reader — 구현됨)
+  -> parseEvents·parseSnapshot (reader — 구현됨)
   -> structured log
   -> headless replay (재적용은 후속)
   -> golden snapshot

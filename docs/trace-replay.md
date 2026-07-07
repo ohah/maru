@@ -82,7 +82,7 @@ event 4 shell.command-end surface=1 row=2 exit=0
 
 ## replay가 하는 일
 
-Replay runner(`observability/replay.zig`의 `replayTrace`)는 trace를 읽고 **public 경로만** 호출한다 — `parseEvents`로 되읽은 뒤 두 모드로 재적용한다.
+Replay runner(`observability/replay.zig`의 `replayTrace`)는 trace를 읽고 **public 경로만** 호출한다 — `parseEvents`로 되읽은 뒤 두 모드로 재적용한다. **한 core엔 한 surface만** 재구성한다(멀티 surface trace는 target=첫 output의 surface만; 다른 pane은 `replayEventsForSurface`로 각각) — 안 그러면 탭/split 출력이 한 화면에 뒤섞인다. 각 surface의 **초기 grid 크기는 attach 시점에 첫 resize 이벤트로 기록**돼(trace가 self-contained) replay가 원 크기를 정확히 복원한다.
 
 ```text
 trace file

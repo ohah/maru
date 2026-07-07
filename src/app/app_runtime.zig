@@ -41,3 +41,15 @@ pub const AppRuntime = struct {
     /// 닫혀도 이 표를 deinit하지 않는다 — 그 창의 링크만 per-Term `closeAndDetach`로 detach하고 다른 창 링크는 살아 있다.
     routing: runtime_mod.SurfaceRuntime = .{ .allocator = std.heap.smp_allocator },
 };
+
+/// M3d cross-window 이동 **트랜잭션 seam**(§8A.2·§8A.3) — AppRuntime coordinator가 소유하는 이동 ops. §8A.2가 못박은
+/// "이동 가부·정책은 L2 순수 함수, 핸들 수명만 L4"에 따라, 트랜잭션(트리 수술 오라클 + 구독 재평가 movedOut/movedIn +
+/// trust boundary cap 재평가 + 빈 source auto-close 판정)은 **L2 `surface_move`**에 두고 coordinator가 여기서 re-export해
+/// 이동 ops의 단일 진입점을 이룬다(`AppRuntime.cross_window_move.moveWorkspace(...)` 등).
+///
+/// **M3d-1(현재, 헤드리스)**: 순수 오라클 `WindowGraph` 위 트랜잭션 + 정책만. registry(`live_registry`)·routing(`routing`)은
+/// **전혀 안 건드린다**(surface_id 불변 = 무재시작 §9). **M3d-2(범위 밖)**: 이 트랜잭션을 **라이브 per-window 트리 수술**
+/// (두 `AppSession` 트리 재부모화 + 양-창 surface_ptrs/app_window/resize/sidebar 리프레시) + Swift NSWindow 생성/focus/
+/// close·command/드래그에 배선한다. 그때도 registry·routing은 안 건드리고(이미 앱-전역), coordinator가 이 정책 outcome을
+/// 받아 라이브 트리 수술 + Swift 창 수명(빈 source close·목적지 focus)을 수행한다.
+pub const cross_window_move = @import("../session/surface_move.zig");

@@ -215,6 +215,9 @@ pub const SurfaceRuntime = struct {
             input_diag.info("core->pty {d}B: {s}", .{ input.bytes.len, escapeForLog(input.bytes, &ebuf) });
         }
         link.pty_io.writeInput(input.bytes) catch return error.WriteFailed;
+        // MARU_TRACE: 실제 child로 전송된 사용자 입력을 기록(완전한 세션 기록·분석용 — 재생 화면엔 영향 없음,
+        // 화면은 output의 echo로 재구성). 터미널이 만든 응답(CPR 등)은 pty_io.writeInput을 직접 타 여기 안 걸린다.
+        if (self.trace_recorder) |rec| rec.recordInput(surface_id, input.bytes);
     }
 
     /// non-blocking 쓰기: 지금 쓸 수 있는 만큼만 쓰고 길이를 돌려준다(0 = 다음에). paste 큐가
@@ -227,7 +230,11 @@ pub const SurfaceRuntime = struct {
             var ebuf: [320]u8 = undefined;
             input_diag.info("core->pty(nb) {d}B: {s}", .{ bytes.len, escapeForLog(bytes, &ebuf) });
         }
-        return link.pty_io.writeInputNonBlocking(bytes) catch return error.WriteFailed;
+        const written = link.pty_io.writeInputNonBlocking(bytes) catch return error.WriteFailed;
+        // MARU_TRACE: **실제 전송된 만큼만**(written) 기록한다 — 호출자가 나머지를 재시도하며 다시 호출하므로,
+        // 전체를 매번 기록하면 부분 write가 중복 기록된다. 이어붙이면 전송된 입력 스트림 전체가 된다.
+        if (self.trace_recorder) |rec| rec.recordInput(surface_id, bytes[0..written]);
+        return written;
     }
 
     /// Phase 3 단일책임(docs/io-render-threading.md §9 P3-2~): 메인발 코어 mutate를 위임한다. interactive
@@ -571,6 +578,48 @@ test "runtime: 멀티 surface trace replay는 surface별로 분리 재구성한�
     defer allocator.free(s8);
     try std.testing.expect(std.mem.indexOf(u8, s8, "BBBB") != null);
     try std.testing.expect(std.mem.indexOf(u8, s8, "AAAA") == null);
+}
+
+// MARU_TRACE 입력 기록: 사용자 입력(core→pty)이 input 이벤트로 남고, 비차단은 **전송된 만큼만** 기록된다(중복 방지).
+// 재생 화면엔 영향 없음(입력은 child로 감 — 화면은 output echo로 재구성; 여기선 output이 없어 화면이 빈다).
+test "runtime: 사용자 입력을 trace input 이벤트로 기록하되 재생 화면엔 영향 없다" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var rec = TraceRecorder.init(&out.writer);
+    runtime.trace_recorder = &rec;
+
+    var surface = try surface_mod.Surface.init(allocator, 5, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+
+    try runtime.writeInput(5, .{ .bytes = "ls\r" });
+    _ = try runtime.writeInputNonBlocking(5, "cd /\r");
+
+    const t = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, t, "input surface=5 bytes=\"ls\\r\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "input surface=5 bytes=\"cd /\\r\"\n") != null);
+
+    // 되읽으면 input이 원문으로 복원되고, 재생하면 화면엔 입력이 안 뜬다(입력은 child로 갔던 것).
+    const observability = @import("../observability.zig");
+    const parsed = try observability.trace.parseEvents(allocator, t);
+    defer observability.trace.freeParsedEvents(allocator, parsed);
+    var saw_ls = false;
+    for (parsed) |pe| {
+        if (pe.event == .input and std.mem.eql(u8, pe.event.input, "ls\r")) saw_ls = true;
+    }
+    try std.testing.expect(saw_ls);
+
+    var replayed = try observability.replay.replayTrace(allocator, t, .{ .cols = 8, .rows = 2 });
+    defer replayed.deinit();
+    const screen = try replayed.dumpUtf8(allocator);
+    defer allocator.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "ls") == null); // 입력은 화면 미적용
+    try std.testing.expect(std.mem.indexOf(u8, screen, "cd") == null);
 }
 
 test "runtime sends terminal input through the attached pty io" {

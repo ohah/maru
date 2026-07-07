@@ -100,6 +100,14 @@ pub const CellColors = struct {
     /// **비활성 pane CellColors에만** 세운다 — 활성 pane(CoreTextFrameBuilder)은 0이라 풀 밝기. 모든 셀(전경·명시
     /// 배경·reverse)에 일률 적용돼 SGR/truecolor 색도 같이 흐려진다(default 배경 셀은 A=0 투명 유지 — fill과 같음).
     dim_milli: u32 = 0,
+    /// per-cell 대비 하한 목표(WCAG 명암비, `theme.min-contrast`의 resolved 값). 0(기본)·1 이하 = 끔.
+    /// ANSI 16색은 resolve 시점에 이미 선보정되지만(appearance.resolveTheme), 256색(16~255)·truecolor
+    /// 전경은 프로그램이 직접 고르므로 여기서 셀 단위로 하한을 강제한다 — 다크 전용 색을 쓰는 프로그램
+    /// (예: truecolor 밝은 회색 본문)이 라이트 배경에서 안 보이는 것을 교정한다. packForeground가 자기 셀
+    /// 배경(reverse-aware; 선택/검색 하이라이트는 미반영 근사) 대비로 적용하고, conceal/blink-off(의도적
+    /// 비표시)와 도형 글리프(contrastFloorExempt — powerline/box/block 이음매)는 제외한다. app이 활성·비활성
+    /// pane CellColors에 `appearance.theme.min_contrast`를 wiring한다(chrome/사이드바 텍스트는 theme 색이라 불필요).
+    min_contrast: f32 = 0,
 };
 
 /// dim_milli(천분율)만큼 색 c를 fill 쪽으로 선형 보간한다(0=c 그대로, 1000=fill). 비활성 split pane 디밍
@@ -226,12 +234,15 @@ fn lerpHalf(a: color.Rgb, b: color.Rgb) color.Rgb {
 fn packForeground(style: terminal.Style, colors: CellColors) u32 {
     // DECSCNM(화면 반전, G9)과 SGR reverse(7)를 XOR한다 — 둘 다 켜지면 상쇄(정상), 하나만 켜지면 스왑.
     const reverse = style.reverse != colors.screen_reverse;
+    // conceal/blink-off는 "의도적 비표시"(글자=배경색)라 아래 per-cell 대비 하한을 적용하면 안 된다 —
+    // 숨긴 글자가 다시 보이게 된다. 그래서 하한 게이트가 이 플래그를 본다.
+    const concealed = style.conceal or (style.blink and !colors.blink_on);
     // 최종 전경 RGB를 한 변수로 모아 끝에서 디밍(F2-7)을 **한 번만** 적용한다 — conceal/faint/일반 경로가
     // 모두 같은 dim 후처리를 거치게(비활성 split pane이면 dim_milli>0).
     const fg: color.Rgb = blk: {
         // SGR 8 conceal(G1) 또는 blink(SGR 5) off 위상: 글자를 그 셀 배경색으로 그려 안 보이게 한다(invisible/점멸).
         // reverse면 스왑된 배경.
-        if (style.conceal or (style.blink and !colors.blink_on)) {
+        if (concealed) {
             break :blk if (reverse)
                 resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
             else
@@ -254,8 +265,46 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
         }
         break :blk base;
     };
+    // per-cell 대비 하한(theme.min-contrast): 프로그램이 직접 고른 256색·truecolor 전경이 자기 셀 배경에서
+    // 안 읽히면 색상 보존한 채 최소한만 어둡게 한다(color.contrastFloor — resolve 시점 ANSI16 선보정과 같은
+    // 단일 출처 수식). ANSI16(resolve에서 이미 보정)·다크 배경(floor의 활성 경계 밖)은 fast-path로 무변경.
+    // faint(SGR 2) 뒤에 적용한다 — 의도적 감쇠라도 "안 보임"까지는 허용하지 않는 가독성 하한이기 때문.
+    // 셀 배경은 reverse-aware 자기 셀 값(선택/검색 하이라이트는 미반영 근사 — 하이라이트 색은 theme 소유라 안전).
+    const floored: color.Rgb = if (!concealed and colors.min_contrast > 1.0) flr: {
+        const cell_bg: color.Rgb = if (reverse)
+            resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
+        else switch (style.background) {
+            .default => colors.default_bg,
+            else => resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette),
+        };
+        break :flr color.contrastFloor(fg, color.relativeLuminance(cell_bg), colors.min_contrast);
+    } else fg;
     // 비활성 split pane 디밍(F2-7): 최종 전경을 pane 배경 쪽으로 dim_milli만큼 흐리게(dim_milli=0이면 무변화).
-    return packRgb(dimToward(fg, colors.default_bg, colors.dim_milli));
+    // 하한(floored) 뒤에 디밍 — 비활성 pane 감쇠는 pane 전체의 의도된 워시아웃이라 하한이 덮어쓰지 않는다.
+    return packRgb(dimToward(floored, colors.default_bg, colors.dim_milli));
+}
+
+/// per-cell 대비 하한에서 제외할 "도형" 코드포인트. powerline 세그먼트·box/block 요소·legacy computing
+/// 조각은 이웃 셀 배경과 **같은 색으로 이어 붙이는 게 의도**라(전경=옆 셀 배경), 하한이 색을 바꾸면
+/// 프롬프트 세그먼트 이음매가 갈라진다. braille(U+2800~, 스피너/점자 텍스트)은 제외하지 않는다 —
+/// 도형이 아니라 읽어야 할 표시라 가독성 보정 대상이다. 근거: 대비 하한을 도형에 적용하면 powerline
+/// 이음매가 깨진다는 것은 렌더 기하(전경-배경 이어붙임 구조)에서 직접 따른다.
+fn contrastFloorExempt(cp: u21) bool {
+    return (cp >= 0x2500 and cp <= 0x259F) // box drawing(2500~257F) + block elements(2580~259F)
+    or (cp >= 0x25E2 and cp <= 0x25E5) // 대각 코너 조각 ◢◣◤◥(합성 도형 — powerline식 이어붙임)
+    or (cp >= 0x1FB00 and cp <= 0x1FBFF) // legacy computing(sextant·octant·wedge·smooth 등)
+    or (cp >= 0xE0B0 and cp <= 0xE0BF) or cp == 0xE0D2 or cp == 0xE0D4; // powerline(+확장 반원)
+}
+
+/// glyph 셀 전경 packing: 도형 코드포인트는 per-cell 대비 하한을 끄고(packForeground의 min_contrast
+/// 게이트 우회), 그 외는 packForeground 그대로. 셀 색 의미는 packForeground가 단일 출처다.
+fn packGlyphForeground(style: terminal.Style, colors: CellColors, codepoint: u21) u32 {
+    if (colors.min_contrast > 1.0 and contrastFloorExempt(codepoint)) {
+        var no_floor = colors;
+        no_floor.min_contrast = 0;
+        return packForeground(style, no_floor);
+    }
+    return packForeground(style, colors);
 }
 
 /// 텍스트 장식선(line overlay)의 화면 RGB. 전경색을 풀고, dim(SGR 2)이면 packForeground와 같은 규칙으로
@@ -268,7 +317,14 @@ fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
     // 적용한다 — 안 하면 밑줄/취소선/윗줄만 풀 밝기로 남아 디밍된 글자 위에서 튄다(packForeground/packBackground와
     // 같은 dimToward 후처리로 모든 셀 요소를 일률 디밍). dim_milli=0(활성 pane)이면 dimToward는 무변화.
     const faint = if (l.dim) lerpHalf(fg, colors.default_bg) else fg;
-    return dimToward(faint, colors.default_bg, colors.dim_milli);
+    // per-cell 대비 하한(theme.min-contrast): 글리프 전경(packForeground)과 같은 하한을 장식선에도 적용해
+    // 보정된 글자와 그 밑줄/취소선 색이 어긋나지 않게 한다(overlay는 셀 배경을 캐리하지 않으므로 default
+    // 배경 대비 — 위 dim 근사와 같은 한계·같은 이유로 허용).
+    const floored = if (colors.min_contrast > 1.0)
+        color.contrastFloor(faint, color.relativeLuminance(colors.default_bg), colors.min_contrast)
+    else
+        faint;
+    return dimToward(floored, colors.default_bg, colors.dim_milli);
 }
 
 /// terminal cell의 배경 Color를 0xAARRGGBB로 packing한다. default 배경은 theme 기본 배경
@@ -362,7 +418,7 @@ pub fn buildNativeCellsSplit(
             .v0 = glyph.uv.v0,
             .u1 = colorUv(glyph.uv.u1, glyph.run.cache_key.color_glyph_kind),
             .v1 = glyph.uv.v1,
-            .foreground = packForeground(glyph.run.style, colors),
+            .foreground = packGlyphForeground(glyph.run.style, colors, glyph.run.codepoint),
             .background = if (highlightBg(colors, glyph.run.row, glyph.run.col)) |hl|
                 0xFF00_0000 | packRgb(hl)
             else
@@ -1796,6 +1852,56 @@ test "a dim line overlay interpolates its color toward the background (SGR 2 con
     try std.testing.expectEqual(@as(usize, 1), cells.len);
     try std.testing.expectEqual(@as(u16, 9), cells[0].reserved); // underline(하단)
     try std.testing.expectEqual(@as(u32, 0xFF878787), cells[0].background); // dim 보간된 전경
+}
+
+test "packGlyphForeground: per-cell 대비 하한 — truecolor/256색 보정·도형 제외·conceal 보존" {
+    // 이 테스트가 증명하는 것: 라이트 배경에서 프로그램이 직접 고른(ANSI16 팔레트 밖) 밝은 전경을
+    // min_contrast가 셀 단위로 읽히게 보정한다는 계약. 실제 회귀: Claude Code처럼 truecolor 밝은
+    // 회백색을 본문에 쓰는 프로그램이 라이트 테마에서 거의 안 보였다 — 기존 하한은 ANSI16 팔레트
+    // 선보정뿐이라 truecolor·256색이 게이트 밖이었다. 동시에 powerline/box 도형(이음매)·conceal
+    // (의도적 비표시)·min_contrast=0(끔)은 원래 색을 유지해야 한다.
+    const light: CellColors = .{
+        .default_fg = .{ .r = 0x20, .g = 0x20, .b = 0x20 },
+        .default_bg = .{ .r = 0xfd, .g = 0xf6, .b = 0xe3 }, // solarized-light 배경
+        .min_contrast = 3.0,
+    };
+    const bg_lum = color.relativeLuminance(light.default_bg);
+    const near_white: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 235, .g = 235, .b = 235 } } };
+    // truecolor 보정: 밝은 회색이 어두워져 배경 대비 3.0 이상 + 무채색(hue) 보존.
+    const floored = packGlyphForeground(near_white, light, 'A');
+    try std.testing.expect(floored != 0xEBEBEB);
+    const fr: color.Rgb = .{ .r = @intCast((floored >> 16) & 0xff), .g = @intCast((floored >> 8) & 0xff), .b = @intCast(floored & 0xff) };
+    try std.testing.expect(color.contrastRatio(color.relativeLuminance(fr), bg_lum) >= 2.95);
+    try std.testing.expect(fr.r == fr.g and fr.g == fr.b);
+    // 256색(indexed 255 근백색 #EEEEEE)도 보정된다 — ANSI16 밖 인덱스가 게이트 밖이던 회귀의 다른 절반.
+    const idx_floored = packGlyphForeground(.{ .foreground = .{ .indexed = 255 } }, light, 'A');
+    const ir: color.Rgb = .{ .r = @intCast((idx_floored >> 16) & 0xff), .g = @intCast((idx_floored >> 8) & 0xff), .b = @intCast(idx_floored & 0xff) };
+    try std.testing.expect(color.contrastRatio(color.relativeLuminance(ir), bg_lum) >= 2.95);
+    // 도형 제외: powerline 세그먼트·box drawing은 원색 유지(전경=옆 셀 배경 이어붙임 이음매 보존).
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, light, 0xE0B0));
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, light, 0x2500));
+    // braille(스피너)는 도형 제외가 아니라 보정 대상.
+    try std.testing.expect(packGlyphForeground(near_white, light, 0x280B) != 0xEBEBEB);
+    // conceal(SGR 8): 글자=배경(의도적 비표시)이 하한으로 되살아나면 안 된다.
+    const concealed: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 235, .g = 235, .b = 235 } }, .conceal = true };
+    try std.testing.expectEqual(packRgb(light.default_bg), packGlyphForeground(concealed, light, 'A'));
+    // 끔(min_contrast=0 기본): 원색 그대로 — 기존 동작 100% 보존.
+    var off_colors = light;
+    off_colors.min_contrast = 0;
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, off_colors, 'A'));
+    // 명시 어두운 배경 셀: 하한은 자기 셀 배경 기준이라 이미 대비 충분 → 무변경(라이트 default 배경과 무관).
+    const on_dark_bg: terminal.Style = .{
+        .foreground = .{ .rgb = .{ .r = 235, .g = 235, .b = 235 } },
+        .background = .{ .rgb = .{ .r = 0x10, .g = 0x10, .b = 0x40 } },
+    };
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(on_dark_bg, light, 'A'));
+    // 다크 테마(#101010 배경): floor 활성 경계 밖 → 무동작(다크 프리셋 회귀 0).
+    const dark: CellColors = .{
+        .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
+        .default_bg = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+        .min_contrast = 3.0,
+    };
+    try std.testing.expectEqual(@as(u32, 0x1A1A1A), packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 'A'));
 }
 
 test "packForeground halves a faint foreground toward the background (SGR 2)" {

@@ -49,6 +49,10 @@ pub const ResolvedTheme = struct {
     // `.indexed` 색을 풀 때 OSC4 override → 이 config base → xterm256 순으로 폴백한다(OSC4가 없을 때만 이 값이 보인다).
     // 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
     palette: [16]?color.Rgb = .{null} ** 16,
+    // theme.min-contrast 목표 명암비(resolve된 값 그대로). 위 palette는 이 값으로 이미 선보정돼 있고,
+    // 렌더(metal_frame)가 팔레트 밖 색(256색 16~255·truecolor)의 per-cell 하한에 같은 값을 쓴다 —
+    // 렌더 배선의 단일 출처를 resolve 결과에 둔다(config 원값을 렌더가 따로 읽지 않게). 0=끔.
+    min_contrast: f32 = 0,
 };
 
 pub const ResolvedCursor = struct {
@@ -202,6 +206,7 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
         // accent: 명시하면 그 색, null이면 maru 브랜드 앰버(accent_default) — 프리셋 없는/사용자 지정 테마는 기존 앰버 유지.
         .accent = if (config.accent) |a| try parseHexColor(a) else accent_default,
         .palette = palette,
+        .min_contrast = min_contrast,
     };
 }
 
@@ -222,64 +227,12 @@ fn lighten(rgb: color.Rgb, delta: u8) color.Rgb {
 
 // ── ANSI 팔레트 대비 하한(theme.min-contrast) ─────────────────────────────────────────────────────────────
 // 라이트 테마·기본 xterm 팔레트는 밝은 배경에서 대비가 약한 색(밝은 노랑·초록·흰색 등)이 있어 안 읽힌다. contrastFloor가
-// 배경 대비 WCAG 명암비 하한을 강제해 그런 색을 색상 보존한 채 어둡게 보정한다. 베이스: WCAG 2.x relative luminance·contrast
-// ratio 정의(공개 명세). 단일 표준이 없는 "가독성 보정"이 아니라 표준 명암비 수식을 그대로 쓴다(docs/configuration.md).
-
-/// 한 sRGB 채널(0~255)을 WCAG relative luminance용 선형값으로 변환한다(WCAG 2.x: 임계 0.03928, 그 위는 감마 2.4).
-fn channelLuminance(c: u8) f32 {
-    const s = @as(f32, @floatFromInt(c)) / 255.0;
-    return if (s <= 0.03928) s / 12.92 else std.math.pow(f32, (s + 0.055) / 1.055, 2.4);
-}
-
-/// 색의 WCAG relative luminance(0~1) — 채널 선형화 후 0.2126/0.7152/0.0722 가중합(눈의 채널 민감도).
-fn relativeLuminance(rgb: color.Rgb) f32 {
-    return 0.2126 * channelLuminance(rgb.r) + 0.7152 * channelLuminance(rgb.g) + 0.0722 * channelLuminance(rgb.b);
-}
-
-/// 두 luminance의 WCAG contrast ratio: (L_hi + 0.05) / (L_lo + 0.05), 범위 1.0(같은 밝기)~21.0(검정 대 흰색).
-fn contrastRatio(lum_a: f32, lum_b: f32) f32 {
-    const hi = @max(lum_a, lum_b);
-    const lo = @min(lum_a, lum_b);
-    return (hi + 0.05) / (lo + 0.05);
-}
-
-/// 색을 검은색 쪽으로 k(0~1)배 스케일한다(각 채널 × k, 반올림). k=1이면 원본, k=0이면 검정. R:G:B 비를 유지하므로
-/// hue(색상)를 보존하고 명도(luminance)만 낮춘다 — "색은 그대로, 더 진하게"에 해당.
-fn scaleTowardBlack(c: color.Rgb, k: f32) color.Rgb {
-    return .{
-        .r = @intFromFloat(@round(@as(f32, @floatFromInt(c.r)) * k)),
-        .g = @intFromFloat(@round(@as(f32, @floatFromInt(c.g)) * k)),
-        .b = @intFromFloat(@round(@as(f32, @floatFromInt(c.b)) * k)),
-    };
-}
-
-/// 색이 배경 대비 `target` 명암비에 못 미치면 **색상을 보존한 채 검은색 방향으로 최소한만** 어둡게 보정한다.
-/// `bg_lum`은 배경의 WCAG relative luminance(resolveTheme이 16색에 공유하려고 한 번 계산해 넘긴다).
-/// 밝은 배경에선 어둡게 할수록(k↓) 대비가 단조 증가하므로, 목표 명암비에 막 닿는 최대 k(=최소 변화)를 이진 탐색으로 찾는다.
-/// **활성 경계**: 검정(luminance 0)으로도 목표 대비에 못 미치면 원본을 그대로 둔다(어둡게 해봐야 목표를 못 넘는다). 이는 배경이
-/// 어두울수록 성립한다 — 경계는 `contrastRatio(0, bg_lum) >= target`, 즉 `bg_lum >= 0.05*(target−1)`이다(target=3.0이면
-/// bg_lum≈0.10). **모든 번들 다크 프리셋**은 배경 bg_lum이 이보다 훨씬 낮아(#101010≈0.005, #1e1e2e·#282828 등 <0.03) 무동작이다.
-/// 중간 밝기(회색) 배경은 목표 도달이 가능하면 보정한다 — 그 배경에서도 대비가 약한 색을 읽히게 하는 게 맞다(따라서 "다크
-/// 배경 무동작"은 다크 *프리셋*엔 성립하나, 임의의 중간 회색 배경까지 보장하진 않는다). `target<=1.0`(끔)·이미 충분하면 원본
-/// 그대로. 단일 출처: 이 함수만 팔레트 대비 하한을 적용한다(resolveTheme이 호출).
-fn contrastFloor(c: color.Rgb, bg_lum: f32, target: f32) color.Rgb {
-    if (target <= 1.0) return c; // 끔(0 포함) — 업스트림 원색 그대로
-    if (contrastRatio(relativeLuminance(c), bg_lum) >= target) return c; // 이미 충분 → 무변경
-    if (contrastRatio(0.0, bg_lum) < target) return c; // 검정(luminance 0)으로도 미달=배경이 충분히 어두움 → 무동작
-    // 이진 탐색: k∈[0,1]에서 c×k. lo=목표 충족(더 어두움), hi=미충족(더 밝음). 24회면 u8 해상도로 수렴한다.
-    var lo: f32 = 0.0; // k=0(검정)은 위 가드로 항상 충족
-    var hi: f32 = 1.0; // k=1(원본)은 위 fast-path로 미충족
-    var iter: usize = 0;
-    while (iter < 24) : (iter += 1) {
-        const mid = (lo + hi) / 2.0;
-        if (contrastRatio(relativeLuminance(scaleTowardBlack(c, mid)), bg_lum) >= target) {
-            lo = mid; // 충족 → 더 밝게(원본에 가깝게) 시도
-        } else {
-            hi = mid; // 미충족 → 더 어둡게
-        }
-    }
-    return scaleTowardBlack(c, lo); // lo는 항상 충족 지점(테스트한 값 그대로 반환)
-}
+// 배경 대비 WCAG 명암비 하한을 강제해 그런 색을 색상 보존한 채 어둡게 보정한다. **수식·탐색의 단일 출처는
+// color.zig의 WCAG 대비 유틸**로 이동했다 — 렌더 per-cell 하한(metal_frame의 256색·truecolor 보정)과 이
+// resolve 시점 16색 선보정이 같은 함수를 공유한다(여기는 소비처, 기존 호출·테스트용 별칭만 유지).
+const relativeLuminance = color.relativeLuminance;
+const contrastRatio = color.contrastRatio;
+const contrastFloor = color.contrastFloor;
 
 pub fn parseHexColor(value: []const u8) ResolveError!color.Rgb {
     // v1 설정은 일부러 #RRGGBB만 허용한다. CSS 색 이름이나 짧은 #RGB까지 받으면

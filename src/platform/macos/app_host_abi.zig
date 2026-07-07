@@ -31,8 +31,9 @@ pub const Status = enum(c_int) {
     // tick이 PTY 세션 종료를 관측했다(shell exit/read_error). fault가 아니라 정상 종료
     // 신호이므로 host는 frame loop를 멈추고 우아하게 내려간다.
     session_ended = 9,
-    // cross-window 이동(M3d-2a) 실패 — 잘못된 워크스페이스 인덱스(InvalidCoordinate) 또는 dst 용량 확보 실패(OOM).
-    // Swift 미소비(M3d-2b가 배선하며 app_host_abi.h에 미러). 이 한 event만 거부이고 세션은 유지(fault 아님).
+    // cross-window 이동(M3d-2a) 실패 — 잘못된 워크스페이스 인덱스(InvalidCoordinate)·dst 용량 확보 실패(OOM)·범위 밖
+    // 워크스페이스(UnsupportedMove: pinned·그룹은 M3d-2a-ii). Swift 미소비(M3d-2b가 배선하며 app_host_abi.h에 미러). 이
+    // 한 event만 거부이고 세션은 유지(fault 아님).
     move_failed = 10,
 };
 
@@ -252,17 +253,20 @@ pub const MoveResult = extern struct {
     moved_count: u32,
 };
 
-// 이동 에러(InvalidCoordinate/OutOfMemory)를 MoveResult로 접는다 — 둘 다 move_failed(세션 유지, 이 event만 거부).
+// 이동 에러(InvalidCoordinate/OutOfMemory/UnsupportedMove)를 MoveResult로 접는다 — 셋 다 move_failed(세션 유지, 이 event만 거부).
 fn moveResultError(out: *MoveResult) c_int {
     out.* = .{ .status = @intFromEnum(Status.move_failed), .source_window_closed = 0, .moved_count = 0 };
     return @intFromEnum(Status.move_failed);
 }
 
-fn moveResultOk(out: *MoveResult, outcome: maru.session.MoveOutcome) c_int {
+// moved_count는 **참 이동 개수**(code-review [6]) — caller가 넘긴다. outcome.moved_surfaces는 아래 export의 [256]u64
+// 버퍼에 절단될 수 있어(>256=비현실적) len으로 세면 under-report하므로, 수술 전에 센 참값(workspaceSurfaceCount/
+// totalSurfaceCount)을 쓴다.
+fn moveResultOk(out: *MoveResult, outcome: maru.session.MoveOutcome, moved_count: usize) c_int {
     out.* = .{
         .status = @intFromEnum(Status.ok),
         .source_window_closed = @intFromBool(outcome.source_window_closed),
-        .moved_count = @intCast(outcome.moved_surfaces.len),
+        .moved_count = @intCast(moved_count),
     };
     return @intFromEnum(Status.ok);
 }
@@ -280,9 +284,12 @@ pub export fn maru_macos_app_session_move_workspace_to(
     const s = src orelse return @intFromEnum(Status.null_out);
     const d = dst orelse return @intFromEnum(Status.null_out);
     const o = out orelse return @intFromEnum(Status.null_out);
-    var buf: [256]u64 = undefined; // moved surface_id 수집(초과분은 조용히 절단 — moved_count만 보고, MoveOutcome 계약)
+    // 참 이동 개수를 수술 **전에** 센다(버퍼 절단과 무관, code-review [6]). idx 범위 밖이면 0 — 이동 자체도 아래서 실패.
+    const moved_count = s.workspaceSurfaceCount(src_index);
+    var buf: [256]u64 = undefined; // moved surface_id 버퍼(초과분은 조용히 절단 — MoveOutcome 계약, moved_count는 참값 별도 보고)
+    if (moved_count > buf.len) std.log.warn("move_workspace_to: moved surface_id buffer truncated ({d} > {d}) — moved_count is exact", .{ moved_count, buf.len });
     const outcome = s.moveWorkspaceToSession(d, src_index, &buf) catch return moveResultError(o);
-    return moveResultOk(o, outcome);
+    return moveResultOk(o, outcome, moved_count);
 }
 
 /// M3d-2a-i 전체 window merge(§1·§4) — src 세션의 **모든** 워크스페이스를 dst로 옮기고 src를 비운다(source_window_closed
@@ -295,9 +302,12 @@ pub export fn maru_macos_app_session_merge_window(
     const s = src orelse return @intFromEnum(Status.null_out);
     const d = dst orelse return @intFromEnum(Status.null_out);
     const o = out orelse return @intFromEnum(Status.null_out);
+    // 참 이동 개수(버퍼 절단과 무관, [6]): self-merge(s==d)는 no-op이라 0, 아니면 src 전체 surface. 수술 전에 센다.
+    const moved_count: usize = if (s == d) 0 else s.totalSurfaceCount();
     var buf: [256]u64 = undefined;
+    if (moved_count > buf.len) std.log.warn("merge_window: moved surface_id buffer truncated ({d} > {d}) — moved_count is exact", .{ moved_count, buf.len });
     const outcome = s.mergeSessionInto(d, &buf) catch return moveResultError(o);
-    return moveResultOk(o, outcome);
+    return moveResultOk(o, outcome, moved_count);
 }
 
 // 휠 스크롤: Swift는 raw 델타(포인트)·정밀 델타 여부·마우스 위치(backing px)만 넘기고, 줄 수 환산(매직

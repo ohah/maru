@@ -202,6 +202,19 @@ fn windowPtrAt(graph: *WindowGraph, i: usize) MoveError!*window_graph.Window {
     return graph.windows.items[i];
 }
 
+/// `Before` 조립 공통 tail(code-review [7]) — 4개 read*Before가 각자 bounds 검사·moved 수집 뒤 이 헬퍼로 동일한
+/// from/to window_id·kind + prune 판정용 src_window(같은 창이면 null=no-op 안전)을 채운다(반복 리터럴 제거).
+fn makeBefore(moved: []const u64, src_win: *window_graph.Window, dst_win: *window_graph.Window, same_window: bool) Before {
+    return .{
+        .moved = moved,
+        .from_window = src_win.window_id,
+        .from_kind = src_win.kind,
+        .to_window = dst_win.window_id,
+        .to_kind = dst_win.kind,
+        .src_window = if (same_window) null else src_win,
+    };
+}
+
 fn readSurfaceBefore(graph: *WindowGraph, src: SurfaceAddr, dst: PaneAddr, out_ids: []u64) MoveError!Before {
     const src_win = try windowPtrAt(graph, src.win);
     if (src.ws >= src_win.workspaces.items.len) return error.InvalidCoordinate;
@@ -216,14 +229,7 @@ fn readSurfaceBefore(graph: *WindowGraph, src: SurfaceAddr, dst: PaneAddr, out_i
         out_ids[0] = pane.surfaces.items[src.surface].surface_id;
         n = 1;
     }
-    return .{
-        .moved = out_ids[0..n],
-        .from_window = src_win.window_id,
-        .from_kind = src_win.kind,
-        .to_window = dst_win.window_id,
-        .to_kind = dst_win.kind,
-        .src_window = if (src.win == dst.win) null else src_win,
-    };
+    return makeBefore(out_ids[0..n], src_win, dst_win, src.win == dst.win);
 }
 
 fn readPaneBefore(graph: *WindowGraph, src: PaneAddr, dst_win_idx: WindowAddr, out_ids: []u64) MoveError!Before {
@@ -235,14 +241,7 @@ fn readPaneBefore(graph: *WindowGraph, src: PaneAddr, dst_win_idx: WindowAddr, o
     const dst_win = try windowPtrAt(graph, dst_win_idx);
 
     const moved = collectPaneSurfaces(pane, out_ids);
-    return .{
-        .moved = moved,
-        .from_window = src_win.window_id,
-        .from_kind = src_win.kind,
-        .to_window = dst_win.window_id,
-        .to_kind = dst_win.kind,
-        .src_window = if (src.win == dst_win_idx) null else src_win,
-    };
+    return makeBefore(moved, src_win, dst_win, src.win == dst_win_idx);
 }
 
 fn readWorkspaceBefore(graph: *WindowGraph, src: WorkspaceAddr, dst_win_idx: WindowAddr, out_ids: []u64) MoveError!Before {
@@ -252,14 +251,7 @@ fn readWorkspaceBefore(graph: *WindowGraph, src: WorkspaceAddr, dst_win_idx: Win
     const dst_win = try windowPtrAt(graph, dst_win_idx);
 
     const moved = collectWorkspaceSurfaces(ws, out_ids);
-    return .{
-        .moved = moved,
-        .from_window = src_win.window_id,
-        .from_kind = src_win.kind,
-        .to_window = dst_win.window_id,
-        .to_kind = dst_win.kind,
-        .src_window = if (src.win == dst_win_idx) null else src_win,
-    };
+    return makeBefore(moved, src_win, dst_win, src.win == dst_win_idx);
 }
 
 fn readWindowBefore(graph: *WindowGraph, src_win_idx: WindowAddr, dst_win_idx: WindowAddr, out_ids: []u64) MoveError!Before {
@@ -268,30 +260,17 @@ fn readWindowBefore(graph: *WindowGraph, src_win_idx: WindowAddr, dst_win_idx: W
 
     var n: usize = 0;
     for (src_win.workspaces.items) |ws| n = appendWorkspaceSurfaces(ws, out_ids, n);
-    return .{
-        .moved = out_ids[0..n],
-        .from_window = src_win.window_id,
-        .from_kind = src_win.kind,
-        .to_window = dst_win.window_id,
-        .to_kind = dst_win.kind,
-        .src_window = if (src_win_idx == dst_win_idx) null else src_win,
-    };
+    return makeBefore(out_ids[0..n], src_win, dst_win, src_win_idx == dst_win_idx);
 }
 
+/// `appendPaneSurfaces`를 start=0으로 감싼 편의 — pane 안 surface_id를 `out`에 채워 slice 반환(재구현 아님, code-review [8]).
 fn collectPaneSurfaces(pane: *window_graph.Pane, out: []u64) []const u64 {
-    var n: usize = 0;
-    for (pane.surfaces.items) |ref| {
-        if (n >= out.len) break;
-        out[n] = ref.surface_id;
-        n += 1;
-    }
-    return out[0..n];
+    return out[0..appendPaneSurfaces(pane, out, 0)];
 }
 
+/// `appendWorkspaceSurfaces`를 start=0으로 감싼 편의 — workspace 안 모든 surface_id를 slice로(재구현 아님, code-review [8]).
 fn collectWorkspaceSurfaces(ws: *window_graph.Workspace, out: []u64) []const u64 {
-    var n: usize = 0;
-    for (ws.panes.items) |pane| n = appendPaneSurfaces(pane, out, n);
-    return out[0..n];
+    return out[0..appendWorkspaceSurfaces(ws, out, 0)];
 }
 
 fn appendPaneSurfaces(pane: *window_graph.Pane, out: []u64, start: usize) usize {

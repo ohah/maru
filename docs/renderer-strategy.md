@@ -170,7 +170,7 @@ dirty region 범위:
 - 장기 목표는 cell 단위 dirty다. 다만 현재 `TerminalCore`/snapshot 계약은 `start_row/end_row` row 범위만 가진다.
 - 초기 `DrawList`는 현재 코드 계약에 맞춰 dirty row 범위만 draw command로 만든다. 한 cell만 바뀌어도 그 row의 셀들이 들어가는 것이 현재 정상 경로다.
 - cell 단위 dirty는 `TerminalCore`의 dirty 모델을 확장하는 별도 PR에서 진행한다. renderer가 화면을 스캔해 직접 dirty를 추론하지 않는 원칙은 유지한다.
-- cursor 이동과 resize는 각각 dirty 범위를 만든다. 이 범위 산출은 domain 쪽 계약이고 GPU와 무관하다. 현재 `TerminalCore`는 CR/backspace/line feed 같은 cursor-only 이동에서도 old/new cursor row를 dirty로 만든다. selection은 아직 domain data가 없으므로 selection dirty는 selection 모델을 도입할 때 별도 PR에서 고정한다.
+- cursor 이동과 resize는 각각 dirty 범위를 만든다. 이 범위 산출은 domain 쪽 계약이고 GPU와 무관하다. 현재 `TerminalCore`는 CR/backspace/line feed 같은 cursor-only 이동에서도 old/new cursor row를 dirty로 만든다. selection domain 모델 자체는 terminal layer에 있다(`terminal/selection.zig` — `SelectionSpan`/`selectionStart`/`selectWordAt` 등, copy·find highlight·링크 감지가 소비). 다만 selection은 아직 `RenderSnapshot`/dirty 계약에 실리지 않으므로, selection dirty는 snapshot 계약에 넣는 별도 PR에서 고정한다.
 - cursor와 underline은 glyph bitmap이 아니라 draw-time overlay다. `DrawList`는 `DrawCell`과 별도로 overlay command를 내보내며, cursor overlay는 dirty row에 cursor가 포함될 때만 생성한다.
 - 검증은 아래 "검증 전략"의 "dirty region이 draw command 범위를 줄이는지 확인하는 test"로 고정한다.
 

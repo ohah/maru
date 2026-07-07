@@ -3,6 +3,8 @@
 `src/terminal/core.zig`(분해 시작 시점 9,962줄·573KB·함수 236개·테스트 289개)는 VT **파서 상태기계** + **화면/스크롤백 storage** + **host-reply/encoding**을 한 struct에 섞고 있었다. 이는 `docs/project-rules.md` "구조와 파일 분리"(한 파일이 parser·storage·encoding처럼 서로 다른 이유로 바뀌면 facade는 유지하되 구현을 목적별로 분리) 위반이었다. 이 문서는 그 분해(parser·active screen storage)의 설계·메커니즘·PR 시퀀스를 단일 출처로 둔다.
 
 > **상태: 분해 완결**(분할 1~21/N + 리뷰 3배치 머지). core.zig는 7,228줄로 줄고 parser.zig(989줄)·screen.zig(2,001줄)·osc.zig(294줄)로 분리됐다. 이 문서는 이제 **완료된 분해의 설계 기록**이며, §0 현황표가 최종 결과를, §2가 채택한 전략(방향 A)을, §6이 후속 별도 initiative를 담는다.
+>
+> **줄 수 읽는 법**: 본문의 줄 수는 각 분할 **머지 시점 기록**이다(역사 보존). 이후 후속 작업(§10 Screen struct fold·§11 page storage·grapheme(HG)·link-detection·OSC 52 대용량 등)으로 파일이 커져, 2026-07 실측은 core.zig 7,648줄·parser.zig 1,049줄·screen.zig 2,219줄·osc.zig 306줄·selection.zig 810줄·kitty.zig 517줄·input_report.zig 111줄이다. "분해 완결"은 책임 분리가 끝났다는 뜻이지 줄 수가 고정된다는 뜻이 아니다.
 
 이 문서는 `AGENTS.md` 설계 문서 인덱스에 연결된다. 분해 작업의 경계·메커니즘·PR 시퀀스를 바꿀 때는 이 문서를 먼저 갱신한다.
 
@@ -221,7 +223,7 @@ core.zig의 289개 테스트는 내부 함수를 이름으로 부르지 않고(�
 
 1. `zig build test` — 터미널 코어 289 테스트(동작-보존 그물, §1.7) + 전체 단위.
 2. `zig build macos-app-build` — macOS 앱이 바뀐 코어에 대해 **컴파일**되는지(코어는 앱 핫패스의 소비처 — `run-macos-app-before-merge`/`macos-build-sandbox-framework-cache`). addExecutable green을 컴파일 기준으로.
-3. `zig build check-boundaries` — facade import 경계·중립성. parser.zig/screen.zig는 `src/terminal/` 안이라 terminal 레이어 규칙을 받으며 pty/platform/renderer를 import하면 빌드 실패(현 설계는 `core`/`types`/`osc`/`screen`/`width`만 import — 통과).
+3. `zig build check-boundaries` — facade import 경계·중립성. parser.zig/screen.zig는 `src/terminal/` 안이라 terminal 레이어 규칙을 받으며 pty/platform/renderer를 import하면 빌드 실패(현재 parser.zig는 `core`/`types`/`osc`/`screen`/`kitty`를, screen.zig는 `types`/`core`/`width`/`grapheme`를 import — 통과. §8 kitty 분리와 HG grapheme 모듈 추가가 반영된 목록).
 4. `mise run fmt-check` — 포맷.
 5. perf 민감 PR(14/N scroll, 17/N resize, 16/N print)은 `mise run perf`로 예산 회귀 확인(reflow alloc churn 전례).
 

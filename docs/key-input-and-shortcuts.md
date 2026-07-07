@@ -30,20 +30,21 @@ TerminalInput
 
 ## 설정 범주
 
-초기 config는 다음 범주를 분리한다.
+config는 다음 범주를 분리한다. 실제 형식은 `keybind = <chord> = <action>` 한 줄이며, 전역은 chord 앞 `global:` 접두사로 구분한다(형식·키는 [설정(config) 파일](configuration.md)이 단일 출처).
 
 ```text
-global_shortcuts:
+전역(OS) 단축키 — keybind = global:<chord> = <action>:
+  - toggle_window
+  - show_window
   - toggle_quick_terminal
-  - focus_or_create_window
 
-app_keybindings:
+앱 단축키 — keybind = <chord> = <action>:
   - new_tab
   - close_tab
-  - split_surface
-  - focus_next_surface
+  - split_horizontal / split_vertical
+  - next_pane / focus_pane_left …
 
-terminal_key_overrides:
+터미널 입력 매크로 — keybind = <chord> = send_*:
   - send_control
   - send_text
   - send_escape_sequence
@@ -172,7 +173,7 @@ terminal_key_overrides:
 - macro가 app action으로 소비된 key event와 같은 key chord를 쓰면 config validation 오류다.
 - `Ctrl+B -> send_control("b")`처럼 동일 입력을 동일 bytes로 다시 매핑하는 설정은 보통 필요 없다. 기본 terminal input encoding이 이미 처리하기 때문이다.
 - global shortcut이 직접 `send_control("b")`를 실행하는 것은 기본 허용하지 않는다. 앱 밖에서 눌렀을 때 어느 surface에 보낼지 불명확하기 때문이다.
-- global shortcut에서 terminal bytes를 보내야 한다면 `focus_or_create_window -> select_target_surface -> send_control("b")`처럼 대상 surface를 명시하는 action chain이어야 한다.
+- global shortcut에서 terminal bytes를 보내야 한다면 대상 surface를 명시하는 action chain(창 포커스 → 대상 surface 선택 → send_control)이어야 한다. action chain 자체는 미구현 설계이고, 현재 `GlobalAction`은 창 가시성 동작 3종만 지원한다.
 
 ## 위험한 터미널 조합
 
@@ -198,9 +199,15 @@ Esc      vim, readline, shell mode 전환에 자주 쓰인다.
 - `Ctrl+B`, `Ctrl+C`, `Ctrl+D`, `Ctrl+R`, `Ctrl+Z`, `Esc` 같은 terminal 관용 조합을 app/global shortcut으로 등록하면 경고다.
 - 사용자가 경고를 명시적으로 허용하지 않으면 기본 설정 파일 생성이나 GUI 설정 화면에서 저장하지 않는다.
 
-## 초기 범위
+## 글로벌 핫키 현황 (구현됨)
 
-초기 구현에서는 글로벌 핫키를 구현하지 않는다. 제품 정책은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#global-shortcut)을 따른다. 지금은 다음 경계만 유지한다.
+글로벌 핫키는 구현되어 있다. 제품 정책은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#global-shortcut)을 따른다.
+
+- config: `keybind = global:<chord> = <action>` 한 줄 형식(`config/loader.zig`가 `global:` 접두사로 분기해 `global_bindings`로 파싱).
+- 동작: `GlobalAction` enum — `toggle_window`/`show_window`/`toggle_quick_terminal`(`config/action.zig`). 앱이 비활성이어도 OS가 잡아 Swift가 수행하는 NSWindow 동작이라, in-app `Action`과 별도 enum으로 분리했다(dispatch exhaustive switch 오염 방지).
+- OS 등록: 설계대로 `src/platform/macos/` platform bridge 책임 — `global_hotkey.zig`가 KeyChord를 Carbon `RegisterEventHotKey` 인자(가상 키코드 + Carbon modifier mask)로 변환(순수 매핑, OS 무관 단위 테스트)하고, `MaruAppHost.swift`가 시작·config reload 시 등록/재등록하고 `drainGlobalHotkeys`로 이벤트를 Zig에 전달한다.
+
+구현과 무관하게 유지하는 경계:
 
 - `Action`/keybinding config가 terminal input과 분리될 수 있어야 한다.
 - `PtySession`은 이미 해석된 terminal input bytes만 받는다.

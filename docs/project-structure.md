@@ -25,12 +25,16 @@ src/
   config.zig            action/config facade
   pty.zig               process/PTY facade
   renderer.zig          render facade
+  session.zig           OS-중립 세션 코어 facade(L2) — 세션 모델·입력/재정렬 수학·IME 판정·agent transcript
   terminal.zig          terminal-core facade
   terminfo_cache.zig    maru 자체 terminfo 로컬 캐시 단일 출처(경로·버전·컴파일 셸 명령). pty 자동 컴파일 + cli/terminfo 서브커맨드가 공유(top-level 중립 — color.zig 결)
+  text_escape.zig       라인 기반 텍스트 포맷(maru.workspace.v1·maru.trace.v1·snapshot)의 따옴표 escape 규칙 단일 출처. 어느 facade에도 속하지 않는 중립 leaf
+  width.zig             코드포인트 셀 폭·wide 렌더 심볼 판정 단일 출처(중립 leaf). C 게이트(coretext_smoke.m)와 주석-동기 미러
   observability.zig     debug event/trace/snapshot facade
   plugin.zig            action/plugin facade
 
   app/                  window/surface/runtime/pty_reader/runtime_pump처럼 앱 상태와 live 연결 책임별 구현
+  chrome/               플랫폼 중립 디자인 시스템 구현 — draw/tokens/props/input/state/host + components/(sidebar·tabbar·settings·palette·find·notice·modal 등)
   cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다(A2a: `runSessionRequest`가 결정론 경로 발견→`std.c.connect`→왕복→`renderResponse`, 서버 부재면 graceful; 소켓 syscall만 main에)
   session/              L2 세션 코어(OS-중립·app/pty/platform import 0, check-boundaries 강제): 세션 모델(Model·Tab·Pane·surface·split_tree·workspace·core_command)과 **컨트롤 플레인/이동성 골격** — surface_id(M0a), window_membership(M0b), window_graph(M1), live_surface_registry(M2a generic), control_plane(1a JSON-RPC/ndjson), control_surface(1c Surface DTO·scope 응답), control_dispatch(1d read-only 라우터), layout/input math·ime·keyhint. platform이 런타임 타입을 넣어 인스턴스화한다
   config/               action parsing, raw theme/font/cursor config, resolved appearance config
@@ -99,6 +103,7 @@ tools/
   pull_request_template.md  PR마다 전략 영향 평가와 한계 보고를 빠뜨리지 않게 하는 템플릿
   workflows/
     ci.yml                  check 게이트(`mise run check`: fmt-check/unit/e2e/recorded-oracle/stress/facade 경계/build) + 외부 오라클 oracles 잡(libvterm·Alacritty를 매 푸시/PR에 강제, Ghostty는 CI 제외) + 테스트 artifact 업로드
-    performance.yml         `mise run perf`를 main push/수동/주간으로 실행한다(PR required check 아님)
+    performance.yml         `mise run perf`를 모든 PR(required check)·main push·수동·주간으로 실행한다(성능 회귀가 main에 들어가기 전에 잡는다 — 예산 정책은 performance-budget.md)
     pr-metadata.yml         라벨 1개 이상 + assignee=ohah 강제(required check 지정은 branch protection에서 한다)
+    release.yml             태그 푸시(v*) 시 universal .dmg를 서명·공증해 GitHub Release에 첨부한다(distribution.md "CI 릴리스")
 ```

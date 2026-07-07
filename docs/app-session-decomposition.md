@@ -4,7 +4,7 @@
 
 ## 1. 배경 (측정 — 2026-06)
 
-`src/platform/macos/app_session.zig`는 **20,183줄·`AppSession` 단일 struct**다. 실측 구성:
+`src/platform/macos/app_session.zig`는 측정 시점 기준 **20,183줄·`AppSession` 단일 struct**다(이후에도 계속 커져 2026-07 실측 35,134줄 — 아래 구획 수치는 2026-06 스냅샷). 실측 구성:
 
 | 구획 | 라인 | 비고 |
 |---|---|---|

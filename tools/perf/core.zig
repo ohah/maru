@@ -30,9 +30,10 @@ const budgets = struct {
     const kitty_image_pipeline_ns = 2 * std.time.ns_per_s;
     // I/O–렌더 스레딩(docs/io-render-threading.md §5): 렌더는 core_mutex를 잡은 채
     // renderSnapshot()+buildDrawList()로 dirty 셀을 DrawList로 복사한 뒤 언락한다(host.zig). 이
-    // 구간이 길면 그동안 I/O 스레드(코어 write)가 대기하므로, 그 락-보유 비용의 상한을 잰다. 2000회
-    // 2s = 회당 1ms 상한 — 30Hz tick(33ms)의 ~1/33이라 I/O 대기로 충분히 작고, 구조 회귀(셀당 비용
-    // 증가·여분 할당)는 잡는다. perf는 머신 의존이라 budget 여유가 원칙(다른 벤치와 동일한 2s).
+    // 구간이 길면 그동안 I/O 스레드(코어 write)가 대기하므로, 그 락-보유 비용의 상한을 잰다. 200회
+    // 2s = 회당 10ms 상한(반복 수 근거는 measureRenderBuildDrawList 주석 — CI Debug 러너 여유;
+    // ReleaseFast 실측은 회당 ~0.12ms로 30Hz tick 대비 충분히 작다). 구조 회귀(셀당 비용 증가·여분
+    // 할당)는 잡는다. perf는 머신 의존이라 budget 여유가 원칙(다른 벤치와 동일한 2s).
     const render_build_drawlist_ns = 2 * std.time.ns_per_s;
     const render_build_scrolled_ns = 2 * std.time.ns_per_s;
     // I/O–렌더 스레딩 Phase 3(docs/io-render-threading.md §9.7): 메인발 코어 mutate를 I/O 스레드로 위임하는

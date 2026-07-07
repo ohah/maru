@@ -123,16 +123,18 @@ OSC52는 터미널 내부 프로그램이 system clipboard를 읽거나 쓰는 e
 v1 기본값(사용자 결정 2026-06-20):
 
 ```text
-osc52.read  = deny    # 클립보드 탈취 방지 — core가 `?` 쿼리에 응답하지 않는다(무동작)
+osc52.read  = deny    # 클립보드 탈취 방지 — 기본값에서는 `?` 쿼리에 응답이 나가지 않는다
 osc52.write = allow   # 로컬 데스크톱 단일 사용자 — 트래킹 앱의 드래그 복사를 시스템 클립보드에 반영
 ```
 
 정책:
 
-- `deny`, `ask`, `allow` 세 값을 지원할 수 있게 설계한다(정식 config 키는 후속).
+- read는 정식 config 키 `osc52.read`(`deny`|`allow`, 기본 `deny`)로 구현됐다(`config/theme.zig`, 세팅 GUI 포함). `ask`까지 세 값을 지원할 수 있게 설계한다(`ask`는 후속).
 - write 기본 `allow`: 로컬 단일 사용자 데스크톱 터미널이라 편의를 택했다(iTerm2/Ghostty도 유사). 트래킹 앱
   (예: Claude Code)의 드래그 복사가 그대로 시스템 클립보드에 반영된다.
-- read 기본 `deny`: 원격/내부 프로그램이 로컬 clipboard를 탈취하지 못하게 한다. core가 `?` 쿼리에 응답하지 않는다.
+- read 기본 `deny`: 원격/내부 프로그램이 로컬 clipboard를 탈취하지 못하게 한다. core는 `?` 쿼리를 버리는 게 아니라
+  read 대상(target)과 `clipboard_read_pending`만 기억하고, 응답 생성은 platform이 정책을 보고 결정한다 —
+  `osc52.read = allow`일 때만 클립보드를 읽어 응답하고, `deny`면 응답이 나가지 않는다.
 - ask(요청별 확인 UI)는 후속 작업이다. 구현되면 write 기본을 `ask`로 올릴지 다시 논의한다.
 - clipboard 요청은 trace fixture에 원문을 저장하지 않는다. 필요하면 redaction된 event만 남긴다.
 - 크기 상한: 디코드 결과 16MB(`osc.max_clipboard_bytes`), 파서 수집도 그 base64(4/3×)가 통과하게
@@ -147,21 +149,22 @@ osc52.write = allow   # 로컬 데스크톱 단일 사용자 — 트래킹 앱�
   알게 한다(값싼 UX 우위: Ghostty·xterm은 상한 초과를 조용히 버린다). 불청 이벤트라 인터랙티브 모달
   (`anyModalOverlayOpen`)이 열려 있으면 억제해 사용자를 끊지 않는다(정보는 비필수라 유실 무해).
 
-요청 흐름:
+요청 흐름(poll/drain 모델 — 별도 이벤트 큐 없이 코어가 pending 상태를 들고 platform이 tick마다 회수한다):
 
 ```text
 PTY output
 -> TerminalCore parses OSC52
--> TerminalCore emits ClipboardRequest domain event
--> SurfaceRuntime queues AppRequest.clipboard
--> app/platform applies policy (현재 write=allow, read=deny; 요청별 ask UI는 후속)
--> app/platform completes the request
+-> TerminalCore가 pending 상태를 남긴다
+   (write: pendingClipboardWrite, read: clipboard_read_pending + target)
+-> platform이 매 tick ABI로 drain (pending_clipboard / take_clipboard_read_request)
+-> app/platform이 정책 적용 (write=allow 즉시 반영, read는 osc52.read=allow일 때만; 요청별 ask UI는 후속)
+-> 완료 (write: OS pasteboard 반영, read: allow면 base64 응답을 PTY 입력 경로로 회신)
 ```
 
 중요한 경계:
 
 - `TerminalCore`는 macOS pasteboard나 system clipboard API를 직접 호출하지 않는다.
-- `SurfaceRuntime`은 clipboard 요청을 app layer로 올리는 큐 역할만 한다.
+- 코어는 pending 상태 보관까지만 하고, 정책 판정·drain 주기는 app/platform이 소유한다. read 응답 바이트는 `SurfaceRuntime`의 PTY 입력 경로(비차단 write)를 재사용해 PTY로 돌아간다.
 - app/platform layer만 사용자 확인 UI와 실제 clipboard read/write를 안다.
 - write는 사용자 결정(2026-06-20)으로 `allow`다. read는 ask 구현 전까지 `deny`로 둔다(read를 `allow`로 shortcut하지 않는다).
 
@@ -204,6 +207,12 @@ bracketed_paste_is_safe = true
 - bracketed paste mode `2004`는 v1 필수 호환성으로 본다.
 - newline이 포함된 일반 paste는 unsafe 후보로 보고 사용자 확인을 요구한다.
 - bracketed paste는 기본적으로 safe로 보되, 사용자가 더 엄격한 정책으로 바꿀 수 있게 한다.
+
+현황(2026-07): bracketed paste 자체는 구현됐다 — `terminal/input_report.zig`의 `encodePaste`가 개행을 CR로
+정규화하고 mode 2004면 `ESC[200~…ESC[201~`로 감싸며, 본문의 ESC를 제거해 escape injection을 방어한다.
+**paste protection(newline 포함 일반 paste의 사용자 확인)은 아직 미구현이다** — `paste_protection`/
+`bracketed_paste_is_safe` config 키도 아직 없고, 붙여넣기는 확인 없이 PTY로 전달된다. 위 기본값 블록은
+구현 시 적용할 정책 선언이며, 구현 우선순위는 사용자 결정 사항으로 남아 있다.
 
 ## Shell Integration
 

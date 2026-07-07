@@ -244,12 +244,12 @@ pub fn setBool(config: *theme.Config, key: []const u8, value: bool) bool {
     return false;
 }
 
-/// 한 숫자(f32/u32 + range) 스키마 필드의 GUI 슬라이더 행 기술자. value/min/max는 f64로 통일(슬라이더 ratio
-/// 계산 공용), is_int면 u32(정수 스텝·표시). key/doc는 comptime 리터럴.
+/// 한 숫자(f32/u32 + range) 스키마 필드의 GUI 숫자 입력 박스 행 기술자(CS-4에서 슬라이더→input_box로 대체).
+/// value/min/max는 f64로 통일(커밋 시 clamp 공용), is_int면 u32(정수 스텝·표시). key/doc는 comptime 리터럴.
 pub const NumberField = struct { key: []const u8, doc: []const u8, value: f64, min: f64, max: f64, is_int: bool, section: ?theme.Section = null };
 
-/// 스키마'd **숫자 필드(f32/u32, range 필수)**를 전부 슬라이더 행으로 emit한다(appendBoolFields의 숫자 짝). range
-/// 메타가 슬라이더 min/max를 준다(파서 검증과 같은 출처). 순서는 parse/serialize와 같은 Config 필드 순회 순.
+/// 스키마'd **숫자 필드(f32/u32, range 필수)**를 전부 숫자 입력 박스 행으로 emit한다(appendBoolFields의 숫자 짝).
+/// range 메타가 커밋 clamp의 min/max를 준다(파서 검증과 같은 출처). 순서는 parse/serialize와 같은 Config 필드 순회 순.
 pub fn appendNumberFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(NumberField)) !void {
     if (@hasDecl(theme.Config, "schema")) {
         inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
@@ -289,7 +289,7 @@ fn appendNumberFieldSub(arena: std.mem.Allocator, config: theme.Config, comptime
     try list.append(arena, .{ .key = full_key, .doc = meta.doc, .value = v, .min = r[0], .max = r[1], .is_int = FieldT == u32, .section = meta.section });
 }
 
-/// 키로 숫자(f32/u32) 스키마 필드를 설정한다(세팅 슬라이더 → config). value는 range로 클램프, u32면 반올림 정수화.
+/// 키로 숫자(f32/u32) 스키마 필드를 설정한다(세팅 숫자 입력 박스 → config). value는 range로 클램프, u32면 반올림 정수화.
 /// 매칭하는 숫자 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
 pub fn setNumber(config: *theme.Config, key: []const u8, value: f64) bool {
     if (@hasDecl(theme.Config, "schema")) {
@@ -321,7 +321,8 @@ fn setNumberField(ptr: anytype, comptime meta: theme.Meta, comptime full_key: []
 }
 
 /// 한 enum 스키마 필드의 GUI dropdown 행 기술자. current는 현재 변형의 표시 토큰(dashed — config 파일 규약).
-/// CS-4-1c는 사이클러(현재값 표시 + 클릭/←→로 변형 순환)라 옵션 목록은 안 싣는다(팝업 목록은 후속).
+/// 행 기술자에는 옵션 목록을 싣지 않는다 — 팝업을 열 때 platform이 `enumVariants`로 전체 변형을 따로 받는다
+/// (CS-4-1 열리는 팝업 목록 + ↑↓ 라이브 프리뷰; ←→ 순환은 cycleEnum).
 pub const EnumField = struct { key: []const u8, doc: []const u8, current: []const u8, section: ?theme.Section = null };
 
 /// 스키마'd **enum 필드**를 전부 dropdown 행으로 emit한다(appendBoolFields의 enum 짝). current=현재 변형 dashed 토큰.

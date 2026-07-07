@@ -64,8 +64,8 @@ env override 저장, trace fixture, 실패 artifact는 모두 같은 redaction �
 - key 이름에 다음 토큰이 들어가면(대소문자 무시, 부분 일치) 기본 redaction 대상이다: `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `COOKIE`, `KEY`, `AUTH`, `CREDENTIAL`, `SESSION`.
 - redaction은 deny-by-default다. 위 목록은 최소 보장이며, 애매하면 남기지 말고 제거한다.
 - `PATH`, `LANG`, `LC_*`처럼 명백히 안전한 값만 allowlist 후보로 둔다. allowlist는 구현 전에 사용자와 다시 확인한다.
-- raw output bytes, cwd, command에 섞인 홈 디렉터리 경로·서버 주소·사용자 이름은 일반화하거나 익명화한다.
-- sanitize 후에도 같은 replay/restore 결과가 나오는지 확인한다.
+- raw output bytes, cwd, command에 섞인 홈 디렉터리 경로·서버 주소·사용자 이름은 일반화하거나 익명화한다. trace는 `maru trace anonymize <in> [out]`(코드: `redact.anonymizeAlloc`·`observability.trace.anonymizeTrace`)이 홈 경로 세그먼트(`/Users/<X>/`→`/Users/user/`)·IPv4·`user@host.domain`·알려진 유저명을 자리표시자로 바꾼다(구조 보존 → 여전히 재생 가능). 이는 값 **일반화**이고, keyword-value secret(`TOKEN=…`) **차단**은 `guardFixture`가 맡는다(역할 분리).
+- sanitize 후에도 같은 replay/restore 결과가 나오는지 확인한다(익명화는 멱등·구조 보존이라 재생성 유지).
 
 ## 구조와 파일 분리
 

@@ -97,6 +97,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "trace")) {
+        try runTrace(io, allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
         try printUsage(stdout);
         return;
@@ -411,6 +416,60 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     try stdout.flush();
 }
 
+/// `maru trace anonymize <in> [out]`: 캡처한 trace(`MARU_TRACE`)의 PII(경로·IP·user@host·유저명)를 일반화해
+/// fixture로 커밋 가능하게 만든다. 순수 파싱은 maru.cli.trace, 익명화는 maru.observability.trace, 여기선 파일 I/O·
+/// env(HOME/USER)·경고만 한다. 익명화 후에도 남은 secret 할당(TOKEN=…)은 경고한다(가드가 커밋 시 차단).
+fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |s| allocator.free(s);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
+
+    const cmd = maru.cli.trace.parse(collected.items) catch {
+        try stderr.writeAll("usage: maru trace anonymize <input.trace> [output.trace]\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+
+    switch (cmd) {
+        .anonymize => |an| {
+            const input = std.Io.Dir.cwd().readFileAlloc(io, an.input, allocator, .limited(64 * 1024 * 1024)) catch |e| {
+                try stderr.print("maru trace anonymize: '{s}' 읽기 실패 ({s})\n", .{ an.input, @errorName(e) });
+                try stderr.flush();
+                return error.UnknownCommand;
+            };
+            defer allocator.free(input);
+
+            const opts: maru.redact.AnonymizeOptions = .{
+                .home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null,
+                .username = if (std.c.getenv("USER")) |u| std.mem.span(u) else null,
+            };
+            const anon = maru.observability.trace.anonymizeTrace(allocator, input, opts) catch |e| {
+                try stderr.print("maru trace anonymize: 변환 실패 ({s}) — 유효한 maru.trace.v1인가요?\n", .{@errorName(e)});
+                try stderr.flush();
+                return error.UnknownCommand;
+            };
+            defer allocator.free(anon);
+
+            if (an.output) |out_path| {
+                try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = anon, .flags = .{ .truncate = true } });
+                try stdout.print("anonymized -> {s} ({d} bytes)\n", .{ out_path, anon.len });
+            } else {
+                try stdout.writeAll(anon);
+            }
+
+            // 익명화는 secret(TOKEN=…)을 안 지운다 — 남아 있으면 경고(커밋 시 guardFixture가 차단).
+            if (maru.observability.trace.traceHasSensitiveContent(allocator, anon) catch false) {
+                try stderr.writeAll("경고: 익명화 후에도 민감 할당(TOKEN/SECRET/… =값)이 남아 있습니다 — 커밋 전 수동 제거 필요\n");
+                try stderr.flush();
+            }
+        },
+    }
+    try stdout.flush();
+}
+
 /// `maru sessions ...` / `maru session ...` 두 컨트롤 플레인 read-only 명령의 얇은 접착(Track C 1d·A2a). 순수
 /// 파싱·요청 조립·응답 포맷·소켓 발견 정책은 `maru.cli.sessions`가 갖고, 여긴 인자 수집·getenv/readdir/소켓 syscall·
 /// stdout/stderr I/O만 한다(ssh/terminfo와 같은 결 — §11 "소켓 syscall L4·CLI는 src/cli·main 얇게"). `--help`는
@@ -632,6 +691,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru terminfo [--status|--refresh|--clear|--path]
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
+        \\  maru trace anonymize <input.trace> [output.trace]
         \\
         \\commands:
         \\  demo       run the headless PTY -> SurfaceRuntime -> snapshot demo
@@ -645,6 +705,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
         \\  sessions   list running Maru sessions (surfaces) as read-only metadata (`sessions --help`)
         \\  session    read-only metadata for a single surface (`session get <id>`, `session --help`)
+        \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\
     );
     try writer.flush();

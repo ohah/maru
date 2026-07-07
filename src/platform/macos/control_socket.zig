@@ -43,6 +43,7 @@ const cp = maru.session.control_plane;
 const cd = maru.session.control_dispatch; // Track C 1d: read-only 바이트→바이트 디스패치 라우터(소켓 왕복 통합 테스트).
 const cs = maru.session.control_surface; // 1c Surface DTO/CollectorSnapshot(fake snapshot 주입).
 const wm = maru.session.window_membership; // M0b membership DTO + scope.
+const sess = maru.cli.sessions; // A2a: client wire(buildRequestBytes/renderResponse) — 왕복 테스트가 실 client 경로를 탄다.
 
 /// peer 프로세스의 effective uid/gid를 읽는다. §8.2 LOCAL_PEERCRED(macOS·xucred)/SO_PEERCRED(Linux·ucred)를
 /// libc가 래핑한 이식 함수(std.c 미노출이라 직접 extern). 1b는 uid만 쓴다(gid는 미사용).
@@ -302,6 +303,57 @@ pub const Server = struct {
         return self.socket_path;
     }
 };
+
+// ══ per-connection read-only serve(Track C A2a) ══════════════════════════════════════════════════════════════
+// 한 연결의 요청 1개를 **동기** 처리하는 재사용 단위: `readInto`로 요청 프레임(1a `Framer`)을 조립 → 1d
+// `dispatchReadOnly` → 응답 바이트 + 종단 `\n`을 conn에 write. **A2b의 accept-loop 스레드**가 `acceptOne`(hello)
+// 뒤에 연결마다 이 함수를 부른다(그 스레드·메인 marshal(§5)은 A2a 범위 밖). `snapshot`·`caller_surface_id`·`scope`는
+// **주입**이다 — A2b가 실 collector(A1 `collectSessionInto`)·capability auth(1e)·self-origin(1g)이 발급한 값으로
+// 채운다(여긴 판정하지 않는다). read-only 조회는 요청 1개 = 응답 1개라 완결 프레임 하나만 처리하고 반환한다
+// (EOF면 처리 없이 반환). 프레이밍/에러 모델은 1a, 라우팅/scope는 1d가 단일 출처 — 여기서 재구현하지 않는다.
+
+pub const ServeError = error{ ReadFailed, WriteFailed, OutOfMemory };
+
+pub fn serveReadOnly(
+    conn: Connection,
+    gpa: std.mem.Allocator,
+    snapshot: cs.CollectorSnapshot,
+    caller_surface_id: u64,
+    scope: wm.MetadataScope,
+) ServeError!void {
+    var framer: cp.Framer = .{};
+    defer framer.deinit(gpa);
+    while (true) {
+        const maybe_line = framer.next() catch {
+            // §4.3: frame이 max를 초과하면 payload-too-large 응답 후 반환한다(연결 종료는 caller/accept-loop 몫).
+            return writeErrorResponse(conn.fd, gpa, .payload_too_large);
+        };
+        if (maybe_line) |line| {
+            // 주입 snapshot/caller/scope로 1d 라우터에 위임(바이트→바이트). OOM만 전파, 나머지는 라우터가 에러 응답으로 접는다.
+            const response = cd.dispatchReadOnly(gpa, line, snapshot, caller_surface_id, scope) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            defer gpa.free(response);
+            try writeAll(conn.fd, response);
+            try writeAll(conn.fd, "\n");
+            return;
+        }
+        const n = conn.readInto(gpa, &framer) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ReadFailed => return error.ReadFailed,
+        };
+        if (n == 0) return; // EOF — peer가 완결 요청 없이 닫음(처리할 것 없음).
+    }
+}
+
+/// 코드의 default message로 에러 응답 한 줄(+종단 `\n`)을 conn에 쓴다(1a `serializeError` 재사용). serveReadOnly의
+/// payload-too-large 경로 편의 — id를 아직 못 읽었으므로 `.null`(JSON-RPC 관례, 1a와 동일).
+fn writeErrorResponse(fd: c.fd_t, gpa: std.mem.Allocator, code: cp.ErrorCode) ServeError!void {
+    const bytes = cp.serializeError(gpa, .null, code, code.defaultMessage(), null) catch return error.OutOfMemory;
+    defer gpa.free(bytes);
+    try writeAll(fd, bytes);
+    try writeAll(fd, "\n");
+}
 
 // ══ 테스트 ═════════════════════════════════════════════════════════════════════════════════════════════════
 const testing = std.testing;
@@ -729,26 +781,11 @@ test "socket 1d: client가 sessions.list 요청 → server가 fake snapshot으�
     var ct = ClientT{ .base = base };
     const th = try std.Thread.spawn(.{}, ClientT.run, .{&ct});
 
-    // server: accept(hello 전송) → 요청 프레임 조립 → 1d 디스패치 → 응답 + 개행 write.
+    // server: accept(hello 전송) → serveReadOnly(요청 프레임 조립 → 1d 디스패치 → 응답 + 개행 write)로 A2a
+    // serve 함수를 dogfood한다. 주입: caller_surface_id=10, scope=all(auth가 발급할 값을 테스트가 주입 — 1d 순수 경계).
     var conn = try srv.acceptOne(testing.allocator, test_hello);
     defer conn.deinit();
-
-    var framer: cp.Framer = .{};
-    defer framer.deinit(testing.allocator);
-    var line: ?[]const u8 = null;
-    var guard: usize = 0;
-    while (line == null and guard < 100) : (guard += 1) {
-        const n = try conn.readInto(testing.allocator, &framer);
-        if (n == 0) break;
-        line = try framer.next();
-    }
-    try testing.expect(line != null);
-
-    // 주입: caller_surface_id=10, scope=all(auth가 발급할 값을 테스트가 주입 — 1d 순수 경계).
-    const response = try cd.dispatchReadOnly(testing.allocator, line.?, rt_snapshot, 10, .all);
-    defer testing.allocator.free(response);
-    try writeAll(conn.fd, response);
-    try writeAll(conn.fd, "\n");
+    try serveReadOnly(conn, testing.allocator, rt_snapshot, 10, .all);
 
     th.join();
     try testing.expect(ct.err == null);
@@ -763,6 +800,251 @@ test "socket 1d: client가 sessions.list 요청 → server가 fake snapshot으�
     try testing.expectEqual(@as(usize, 2), arr.items.len);
     try testing.expectEqual(@as(i64, 10), arr.items[0].object.get("id").?.object.get("surface_id").?.integer);
     try testing.expectEqual(@as(i64, 20), arr.items[1].object.get("id").?.object.get("surface_id").?.integer);
+}
+
+// ── A2a: 실 socket 왕복(client 연결 + serveReadOnly), tmpDir만·~/.cache 미접촉 ───────────────────────────────
+//
+// 1d 통합(위)이 raw 요청 바이트를 직접 write했다면, A2a는 **실 client wire**(1d `buildRequestBytes`) 전송 →
+// `serveReadOnly`(A2a serve 함수) 처리 → 실 client 렌더(1d `renderResponse`) 사람이 읽는 출력까지 왕복한다.
+// 이 시퀀스(connect → 요청+`\n` → hello notification skip → 응답 프레임 → render)는 `main.zig runSessionCli`의
+// client 경로와 **동형**이다(같은 프레이밍·skip-hello·재사용 함수) — main은 여기에 소켓 발견(discovery)만 얹는다.
+// snapshot·caller·scope는 auth(1e)·collector(A1/A2b)가 발급할 값을 테스트가 주입한다(A2a 순수 경계).
+
+/// 왕복 테스트용 client: base/key 소켓에 connect → `request_bytes`+`\n` 전송 → hello notification skip → 응답
+/// 프레임 한 줄을 owned로 돌려준다(caller free). main.zig client 시퀀스와 동형. hello는 서버가 accept 시 먼저
+/// 보내므로 첫 non-notification 프레임이 응답이다(parse로 판별 — 순서에 의존하지 않음).
+fn clientRoundTrip(gpa: std.mem.Allocator, base: []const u8, key: []const u8, request_bytes: []const u8) ![]u8 {
+    const fd = try connectClient(base, key);
+    defer _ = c.close(fd);
+    try writeAll(fd, request_bytes);
+    try writeAll(fd, "\n");
+    var framer: cp.Framer = .{};
+    defer framer.deinit(gpa);
+    while (true) {
+        // 완결 프레임을 소비: hello(notification)는 skip, 그 밖(응답/에러)이면 반환한다.
+        while (try framer.next()) |line| {
+            var pm = cp.parseMessage(gpa, line) catch return gpa.dupe(u8, line); // 파싱 실패도 그대로 반환(renderResponse가 접는다)
+            const is_notif = pm.message == .notification;
+            pm.deinit();
+            if (!is_notif) return gpa.dupe(u8, line);
+        }
+        var rb: [1024]u8 = undefined;
+        const n = c.read(fd, &rb, rb.len);
+        if (n <= 0) break;
+        try framer.push(gpa, rb[0..@intCast(n)]);
+    }
+    return error.NoResponse;
+}
+
+/// 왕복 테스트 공통 스캐폴드: base/key에 Server를 세우고, client 스레드가 `req_bytes`를 보내 응답을 렌더한 뒤,
+/// 메인 스레드가 `acceptOne`(hello) + `serveReadOnly`(caller/scope 주입)로 처리한다. 렌더된 출력을 `out`에 담는다.
+const RoundTripHarness = struct {
+    fn run(base: []const u8, req_bytes: []const u8, kind: sess.ResponseKind, snapshot: cs.CollectorSnapshot, caller: u64, scope: wm.MetadataScope, out: *std.ArrayList(u8)) !void {
+        const gpa = testing.allocator;
+        var srv = try Server.bind(gpa, base, "k1");
+        defer srv.deinit();
+
+        const ClientT = struct {
+            base: []const u8,
+            req: []const u8,
+            kind: sess.ResponseKind,
+            rendered: std.ArrayList(u8) = .empty,
+            err: ?anyerror = null,
+            fn go(self: *@This()) void {
+                self.render() catch |e| {
+                    self.err = e;
+                };
+            }
+            fn render(self: *@This()) !void {
+                const a = testing.allocator;
+                const resp = try clientRoundTrip(a, self.base, "k1", self.req);
+                defer a.free(resp);
+                var aw: std.Io.Writer.Allocating = .init(a);
+                defer aw.deinit();
+                try sess.renderResponse(a, resp, self.kind, &aw.writer);
+                try self.rendered.appendSlice(a, aw.written());
+            }
+        };
+        var ct = ClientT{ .base = base, .req = req_bytes, .kind = kind };
+        defer ct.rendered.deinit(gpa);
+        const th = try std.Thread.spawn(.{}, ClientT.go, .{&ct});
+        var conn = try srv.acceptOne(gpa, test_hello);
+        defer conn.deinit();
+        try serveReadOnly(conn, gpa, snapshot, caller, scope);
+        th.join();
+        if (ct.err) |e| return e;
+        try out.appendSlice(gpa, ct.rendered.items);
+    }
+};
+
+test "A2a 왕복: buildRequestBytes(sessions.list) → serveReadOnly → renderResponse 사람이 읽는 출력(all scope=10,20)" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "a2a-list");
+    defer rmTmpBase(base);
+
+    const req = try sess.buildRequestBytes(testing.allocator, .{ .list = .{} }, .{ .number = 1 });
+    defer testing.allocator.free(req);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try RoundTripHarness.run(base, req, .list, rt_snapshot, 10, .all, &out);
+
+    const s = out.items;
+    // 두 surface가 사람이 읽는 줄로 렌더됐다(10 shell-a, 20 shell-b).
+    try testing.expect(std.mem.indexOf(u8, s, "[10]") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "shell-a") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "cwd=/home/a") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "[20]") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "shell-b") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "*focused*") != null); // 10이 focused
+}
+
+test "A2a 왕복: buildRequestBytes(session.get 10) self scope → 단건 Surface 렌더" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "a2a-get");
+    defer rmTmpBase(base);
+
+    const req = try sess.buildRequestBytes(testing.allocator, .{ .get = .{ .surface_id = 10 } }, .{ .number = 1 });
+    defer testing.allocator.free(req);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try RoundTripHarness.run(base, req, .get, rt_snapshot, 10, .self, &out);
+
+    const s = out.items;
+    try testing.expect(std.mem.indexOf(u8, s, "[10]") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "shell-a") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "[20]") == null); // self scope라 남(20)은 안 보인다
+}
+
+test "A2a 왕복 엣지: 미지 method는 serveReadOnly가 에러 응답 → client가 균일 error 줄로 렌더" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "a2a-unknown");
+    defer rmTmpBase(base);
+
+    // buildRequestBytes는 list/get만 만들므로 미지 method는 raw 바이트로 보낸다(후속 Phase 메서드).
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}";
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try RoundTripHarness.run(base, req, .get, rt_snapshot, 10, .all, &out);
+
+    const s = out.items;
+    try testing.expect(std.mem.indexOf(u8, s, "error:") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "-32601") != null); // method_not_found
+}
+
+test "A2a 왕복 엣지: 빈 세션 목록 → renderResponse '(no sessions)'" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "a2a-empty");
+    defer rmTmpBase(base);
+
+    const empty_s = [_]cs.SurfaceDto{};
+    const empty_w = [_]wm.WindowMembershipSnapshot{};
+    const empty_snap: cs.CollectorSnapshot = .{ .surfaces = &empty_s, .windows = &empty_w };
+
+    const req = try sess.buildRequestBytes(testing.allocator, .{ .list = .{} }, .{ .number = 1 });
+    defer testing.allocator.free(req);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try RoundTripHarness.run(base, req, .list, empty_snap, 10, .all, &out);
+
+    try testing.expect(std.mem.indexOf(u8, out.items, "(no sessions)") != null);
+}
+
+test "A2a 왕복 엣지: 부분 read로 쪼갠 요청도 serveReadOnly가 조립해 응답한다" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "a2a-split");
+    defer rmTmpBase(base);
+
+    var srv = try Server.bind(testing.allocator, base, "k1");
+    defer srv.deinit();
+
+    // client가 hello를 버린 뒤 요청 한 줄을 두 조각(부분 read)으로 보낸다.
+    const ClientT = struct {
+        base: []const u8,
+        resp_len: usize = 0,
+        resp: [1024]u8 = undefined,
+        err: ?anyerror = null,
+        fn go(self: *@This()) void {
+            const fd = connectClient(self.base, "k1") catch |e| {
+                self.err = e;
+                return;
+            };
+            defer _ = c.close(fd);
+            var hb: [512]u8 = undefined;
+            _ = c.read(fd, &hb, hb.len); // hello 버림
+            const p1 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"met";
+            const p2 = "hod\":\"sessions.list\"}\n";
+            _ = c.write(fd, p1, p1.len);
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+            _ = c.write(fd, p2, p2.len);
+            const n = c.read(fd, &self.resp, self.resp.len);
+            if (n > 0) self.resp_len = @intCast(n);
+        }
+    };
+    var ct = ClientT{ .base = base };
+    const th = try std.Thread.spawn(.{}, ClientT.go, .{&ct});
+    var conn = try srv.acceptOne(testing.allocator, test_hello);
+    defer conn.deinit();
+    try serveReadOnly(conn, testing.allocator, rt_snapshot, 10, .all); // 조각난 요청을 조립해 응답
+    th.join();
+    try testing.expect(ct.err == null);
+    try testing.expect(ct.resp_len > 0);
+
+    // 응답이 sessions.list 결과(10,20)인지 확인.
+    var framer: cp.Framer = .{};
+    defer framer.deinit(testing.allocator);
+    try framer.push(testing.allocator, ct.resp[0..ct.resp_len]);
+    const line = (try framer.next()).?;
+    var pm = try cp.parseMessage(testing.allocator, line);
+    defer pm.deinit();
+    try testing.expectEqual(@as(usize, 2), pm.message.response.result.?.array.items.len);
+}
+
+test "A2a 왕복 엣지: 여러 연결을 순차로 각각 serveReadOnly가 처리(accept-loop 골격)" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "a2a-multi");
+    defer rmTmpBase(base);
+
+    var srv = try Server.bind(testing.allocator, base, "k1");
+    defer srv.deinit();
+
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const ClientT = struct {
+            base: []const u8,
+            ok: bool = false,
+            fn go(self: *@This()) void {
+                const a = testing.allocator;
+                const req = sess.buildRequestBytes(a, .{ .list = .{} }, .{ .number = 1 }) catch return;
+                defer a.free(req);
+                const resp = clientRoundTrip(a, self.base, "k1", req) catch return;
+                defer a.free(resp);
+                var pm = cp.parseMessage(a, resp) catch return;
+                defer pm.deinit();
+                self.ok = pm.message == .response and pm.message.response.result != null;
+            }
+        };
+        var ct = ClientT{ .base = base };
+        const th = try std.Thread.spawn(.{}, ClientT.go, .{&ct});
+        var conn = try srv.acceptOne(testing.allocator, test_hello);
+        try serveReadOnly(conn, testing.allocator, rt_snapshot, 10, .all);
+        th.join();
+        conn.deinit();
+        try testing.expect(ct.ok);
+    }
+}
+
+test "A2a 엣지: 서버 없는 소켓에 connect하면 client가 깔끔히 실패(graceful 근거 — crash 없음)" {
+    var bb: [256]u8 = undefined;
+    const base = makeTmpBase(&bb, "a2a-absent");
+    defer rmTmpBase(base);
+    // 컨트롤 dir은 있지만 소켓은 없다 → connect가 error로 실패(main은 이를 "인스턴스 없음"으로 접는다).
+    var db: [512]u8 = undefined;
+    const dir = try controlDirPath(&db, base);
+    _ = c.mkdir(dir.ptr, 0o700);
+    try testing.expectError(error.ClientConnect, connectClient(base, "nope"));
 }
 
 // ── 커버리지 보강(test/foundation-coverage-gaps) ──────────────────────────────────────────────────────────

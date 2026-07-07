@@ -156,9 +156,9 @@ pub const SurfaceRuntime = struct {
     links: std.ArrayList(Link) = .empty,
     // host가 켜면 PTY 출력의 제어 시퀀스를 진단 로깅한다(MARU_DEBUG 드래그 분석용). 기본 off.
     debug_input: bool = false,
-    // host가 MARU_TRACE로 주입하는 라이브 trace 레코더(base kind output/resize/process-exit를 누적). null이면 기록 안 함
-    // (opt-in — 분기 한 번, 오버헤드 0). 소유·수명은 host(app_session)가 관리하고 runtime은 이벤트만 흘린다.
-    trace_recorder: ?*TraceRecorder = null,
+    // MARU_TRACE 라이브 trace 레코더는 **per-link**(각 `Link.trace_recorder`)다 — runtime은 앱-전역 공유라, 싱글톤 한
+    // 필드에 두면 여러 창이 서로를 덮어써 한 창 출력이 다른 창 파일에 섞이고 창 하나가 닫히면 다른 창 기록이 끊긴다(리뷰
+    // [0]). host(app_session)가 surface spawn마다 `setSurfaceTraceRecorder`로 그 창의 recorder를 해당 링크에 붙인다.
 
     pub fn init(allocator: std.mem.Allocator) SurfaceRuntime {
         return .{ .allocator = allocator };
@@ -191,12 +191,20 @@ pub const SurfaceRuntime = struct {
         });
 
         surface.process_state = .running;
-        // MARU_TRACE: surface가 붙는 순간 초기 grid 크기를 resize 이벤트로 기록해 trace를 self-contained하게 만든다.
-        // recordResize는 변경 시에만 발화하므로, 이 baseline이 없으면 resize 없는 세션은 초기 크기를 trace에서 복원
-        // 못 해 replay가 호출자 추정 크기에 의존한다(다른 열에서 wrap → 화면 불일치). 이제 replay가 이 첫 resize를
-        // 먼저 적용해 코어를 원 크기로 맞춘 뒤 output을 먹인다.
-        if (self.trace_recorder) |rec| rec.recordResize(surface_id, surface.core.size.cols, surface.core.size.rows);
+        // trace baseline(초기 grid 크기 resize) 기록은 `setSurfaceTraceRecorder`가 recorder를 붙이는 순간에 한다 —
+        // recorder는 attach 시점에 아직 없을 수 있어(host가 attach 뒤 붙임) 여기서 기록하면 놓친다(per-link 전환).
         return .{ .surface_id = surface_id, .pty_id = pty_id };
+    }
+
+    /// 이 surface의 링크에 라이브 trace 레코더를 붙인다(per-link — 각 창이 자기 recorder에 기록해 멀티창 오염을 막는다,
+    /// 리뷰 [0]). rec!=null이면 붙이는 순간 초기 grid 크기를 resize 이벤트로 기록해 trace를 self-contained하게 만든다:
+    /// recordResize는 변경 시에만 발화하므로, 이 baseline이 없으면 resize 없는 세션은 초기 크기를 trace에서 복원 못 해
+    /// replay가 호출자 추정 크기에 의존한다(다른 열에서 wrap → 화면 불일치). replay는 이 첫 resize를 먼저 적용해 코어를
+    /// 원 크기로 맞춘 뒤 output을 먹인다. 링크가 없으면 UnknownSurface(surface가 아직/이미 attach 안 됨).
+    pub fn setSurfaceTraceRecorder(self: *SurfaceRuntime, surface_id: SurfaceId, rec: ?*TraceRecorder) RuntimeError!void {
+        const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
+        link.trace_recorder = rec;
+        if (rec) |r| r.recordResize(surface_id, link.surface.core.size.cols, link.surface.core.size.rows);
     }
 
     pub fn detachSurface(self: *SurfaceRuntime, surface_id: SurfaceId) void {
@@ -217,7 +225,7 @@ pub const SurfaceRuntime = struct {
         link.pty_io.writeInput(input.bytes) catch return error.WriteFailed;
         // MARU_TRACE: 실제 child로 전송된 사용자 입력을 기록(완전한 세션 기록·분석용 — 재생 화면엔 영향 없음,
         // 화면은 output의 echo로 재구성). 터미널이 만든 응답(CPR 등)은 pty_io.writeInput을 직접 타 여기 안 걸린다.
-        if (self.trace_recorder) |rec| rec.recordInput(surface_id, input.bytes);
+        if (link.trace_recorder) |rec| rec.recordInput(surface_id, input.bytes);
     }
 
     /// non-blocking 쓰기: 지금 쓸 수 있는 만큼만 쓰고 길이를 돌려준다(0 = 다음에). paste 큐가
@@ -233,7 +241,7 @@ pub const SurfaceRuntime = struct {
         const written = link.pty_io.writeInputNonBlocking(bytes) catch return error.WriteFailed;
         // MARU_TRACE: **실제 전송된 만큼만**(written) 기록한다 — 호출자가 나머지를 재시도하며 다시 호출하므로,
         // 전체를 매번 기록하면 부분 write가 중복 기록된다. 이어붙이면 전송된 입력 스트림 전체가 된다.
-        if (self.trace_recorder) |rec| rec.recordInput(surface_id, bytes[0..written]);
+        if (link.trace_recorder) |rec| rec.recordInput(surface_id, bytes[0..written]);
         return written;
     }
 
@@ -283,7 +291,7 @@ pub const SurfaceRuntime = struct {
             try link.surface.core.resize(grid.cols, grid.rows);
         }
         // MARU_TRACE: 재생이 core.resize로 reflow를 재구성하도록 clamp된 grid 크기를 기록(코어에 적용된 값과 동일).
-        if (self.trace_recorder) |rec| rec.recordResize(link.surface_id, grid.cols, grid.rows);
+        if (link.trace_recorder) |rec| rec.recordResize(link.surface_id, grid.cols, grid.rows);
         link.pty_io.resize(grid) catch return error.ResizeFailed;
     }
 
@@ -322,7 +330,7 @@ pub const SurfaceRuntime = struct {
                 }
                 link.surface.process_state = .running;
                 // MARU_TRACE: 원시 출력을 trace로 기록(락 밖 — 코어 변경과 무관한 순수 append). 재생의 권위 데이터.
-                if (self.trace_recorder) |rec| rec.recordOutput(link.surface_id, output.bytes);
+                if (link.trace_recorder) |rec| rec.recordOutput(link.surface_id, output.bytes);
                 // zsh는 SIGWINCH redraw 때 CSI 6n으로 커서를 묻고, 응답이 없으면 redraw가 어긋나
                 // 프롬프트가 중복된다. best-effort(실패해도 출력 적용은 유지).
                 if (reply_buf) |reply| {
@@ -338,7 +346,7 @@ pub const SurfaceRuntime = struct {
                 const link = self.linkByPty(exited.pty_id) orelse return error.UnknownPty;
                 link.surface.process_state = .exited;
                 // MARU_TRACE: child 종료 기록(exited→code, signaled→128+sig 셸 관례, unknown→none).
-                if (self.trace_recorder) |rec| rec.recordProcessExit(link.surface_id, exitCode(exited.status));
+                if (link.trace_recorder) |rec| rec.recordProcessExit(link.surface_id, exitCode(exited.status));
             },
             .read_error => |read_error| {
                 _ = read_error.message;
@@ -383,6 +391,10 @@ const Link = struct {
     surface: *surface_mod.Surface,
     pty_id: PtyId,
     pty_io: PtyIo,
+    // host가 MARU_TRACE로 붙이는 라이브 trace 레코더(이 링크의 base kind output/resize/process-exit를 누적). null이면
+    // 기록 안 함(opt-in — 분기 한 번, 오버헤드 0). per-link라 각 창이 자기 recorder에 기록해 앱-전역 runtime에서도 창끼리
+    // 섞이지 않는다(리뷰 [0]). 소유·수명은 host(app_session)가 관리하고 runtime은 이벤트만 흘린다.
+    trace_recorder: ?*TraceRecorder = null,
 };
 
 const FakePty = struct {
@@ -499,13 +511,13 @@ test "runtime records base kind to trace recorder and replay reconstructs the sc
     var out: std.Io.Writer.Allocating = .init(allocator); // 테스트 sink(in-memory) — 프로덕션은 host가 file writer 주입
     defer out.deinit();
     var rec = TraceRecorder.init(&out.writer);
-    runtime.trace_recorder = &rec; // host가 MARU_TRACE로 주입하는 것과 동일
 
     var surface = try surface_mod.Surface.init(allocator, 7, .{ .cols = 8, .rows = 2 });
     defer surface.deinit();
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
     _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try runtime.setSurfaceTraceRecorder(surface.id, &rec); // host가 attach 뒤 recorder를 붙이는 것과 동일(초기 baseline resize 기록)
 
     try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "ab\r\nCD" } }, std.testing.io);
     try runtime.resize(7, .{ .cols = 10, .rows = 3 }, std.testing.io);
@@ -539,7 +551,6 @@ test "runtime: 멀티 surface trace replay는 surface별로 분리 재구성한�
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     var rec = TraceRecorder.init(&out.writer);
-    runtime.trace_recorder = &rec;
 
     var sa = try surface_mod.Surface.init(allocator, 7, .{ .cols = 6, .rows = 1 });
     defer sa.deinit();
@@ -551,6 +562,9 @@ test "runtime: 멀티 surface trace replay는 surface별로 분리 재구성한�
     defer pb.deinit();
     _ = try runtime.attach(&sa, 10, pa.io());
     _ = try runtime.attach(&sb, 20, pb.io());
+    // 한 파일 trace: 두 surface가 같은 recorder에 attach 뒤 붙는다(같은 창의 두 pane 시나리오 — 각자 baseline resize 기록).
+    try runtime.setSurfaceTraceRecorder(sa.id, &rec);
+    try runtime.setSurfaceTraceRecorder(sb.id, &rec);
 
     // 두 surface에 서로 다른 출력을 교차로 흘린다.
     try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "AAAA" } }, std.testing.io);
@@ -589,13 +603,13 @@ test "runtime: 사용자 입력을 trace input 이벤트로 기록하되 재생 
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     var rec = TraceRecorder.init(&out.writer);
-    runtime.trace_recorder = &rec;
 
     var surface = try surface_mod.Surface.init(allocator, 5, .{ .cols = 8, .rows = 2 });
     defer surface.deinit();
     var fake_pty = FakePty.init(allocator);
     defer fake_pty.deinit();
     _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try runtime.setSurfaceTraceRecorder(surface.id, &rec); // per-link(리뷰 [0]): attach 뒤 그 링크에 recorder 부착
 
     try runtime.writeInput(5, .{ .bytes = "ls\r" });
     _ = try runtime.writeInputNonBlocking(5, "cd /\r");
@@ -620,6 +634,59 @@ test "runtime: 사용자 입력을 trace input 이벤트로 기록하되 재생 
     defer allocator.free(screen);
     try std.testing.expect(std.mem.indexOf(u8, screen, "ls") == null); // 입력은 화면 미적용
     try std.testing.expect(std.mem.indexOf(u8, screen, "cd") == null);
+}
+
+// per-link 레코더의 격리 계약(리뷰 [0]): 두 surface에 **서로 다른** recorder를 붙이면 각자 자기 것에만 기록된다 —
+// 멀티창 오염(창 A 출력이 창 B 파일에 섞임)이 구조적으로 불가함을 고정한다. 옛 싱글톤(runtime 한 필드)은 recorder가
+// 하나뿐이라 두 창이 서로를 덮어써 이 격리가 성립하지 않았다(이 테스트는 setSurfaceTraceRecorder API가 있어야 컴파일됨).
+test "runtime: per-link 레코더는 surface별 recorder에 분리 기록한다(멀티창 오염 불가)" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var out_a: std.Io.Writer.Allocating = .init(allocator); // 창 A 파일 sink
+    defer out_a.deinit();
+    var out_b: std.Io.Writer.Allocating = .init(allocator); // 창 B 파일 sink
+    defer out_b.deinit();
+    var rec_a = TraceRecorder.init(&out_a.writer);
+    var rec_b = TraceRecorder.init(&out_b.writer);
+
+    var sa = try surface_mod.Surface.init(allocator, 7, .{ .cols = 8, .rows = 2 });
+    defer sa.deinit();
+    var sb = try surface_mod.Surface.init(allocator, 8, .{ .cols = 8, .rows = 2 });
+    defer sb.deinit();
+    var pa = FakePty.init(allocator);
+    defer pa.deinit();
+    var pb = FakePty.init(allocator);
+    defer pb.deinit();
+    _ = try runtime.attach(&sa, 10, pa.io());
+    _ = try runtime.attach(&sb, 20, pb.io());
+
+    // 서로 다른 recorder를 각 surface에 붙인다(각 창이 자기 파일에 기록하는 것과 동형).
+    try runtime.setSurfaceTraceRecorder(sa.id, &rec_a);
+    try runtime.setSurfaceTraceRecorder(sb.id, &rec_b);
+
+    // 두 surface에 서로 다른 이벤트를 흘린다(출력·resize·exit 교차).
+    try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 10, .bytes = "AAAA" } }, std.testing.io);
+    try runtime.applyPtyEvent(.{ .output = .{ .pty_id = 20, .bytes = "BBBB" } }, std.testing.io);
+    try runtime.resize(sa.id, .{ .cols = 10, .rows = 2 }, std.testing.io);
+    try runtime.applyPtyEvent(.{ .exited = .{ .pty_id = 20, .status = .{ .exited = 0 } } }, std.testing.io);
+
+    const ta = out_a.written();
+    const tb = out_b.written();
+
+    // rec_a엔 surface 7 것만(baseline resize 7·AAAA·resize 7). surface 8 것(BBBB·exit)은 안 섞인다.
+    try std.testing.expect(std.mem.indexOf(u8, ta, "output surface=7 bytes=\"AAAA\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ta, "resize surface=7 cols=10 rows=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ta, "BBBB") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ta, "surface=8") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ta, "process-exit") == null);
+
+    // rec_b엔 surface 8 것만(baseline resize 8·BBBB·process-exit 8). surface 7 것(AAAA·resize 7)은 안 섞인다.
+    try std.testing.expect(std.mem.indexOf(u8, tb, "output surface=8 bytes=\"BBBB\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tb, "process-exit surface=8 code=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tb, "AAAA") == null);
+    try std.testing.expect(std.mem.indexOf(u8, tb, "surface=7") == null);
 }
 
 test "runtime sends terminal input through the attached pty io" {

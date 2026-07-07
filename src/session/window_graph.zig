@@ -263,16 +263,27 @@ pub const WindowGraph = struct {
         defer self.allocator.free(metas);
         for (win_src.workspaces.items, 0..) |w, i| metas[i] = &w.meta;
 
-        // source membership 판정(ws가 아직 source에 있을 때): 그룹 소속(마커 포함)이면 이탈 시 unpin, 순수 최상위 카드면
-        // pinned 유지(§4 (c) vs (d)). enclosingGroupMarkerIndex는 마커면 자기 자신을 찾아 non-null → 마커도 "그룹 소속"으로 분류.
-        const keep_pin = group_normalize.enclosingGroupMarkerIndex(WorkspaceMeta, metas, src.ws) == null;
+        // group_start는 정규화가 건드리지 않으므로(pinned/local_pinned만 mutate) append 전에 읽어도 canonical 뒤와 동일.
         const was_marker = ws.meta.group_start != null;
 
         // append(fallible) — OOM이면 source 불변(metas는 defer로 free, ws는 아직 source에만).
         try win_dst.workspaces.append(self.allocator, ws);
 
         // ── 이하 infallible ──
-        // (b) 마커 승계: source의 다음 카드로 마커를 넘겨 그룹을 살린다(마지막 멤버면 false=소멸). ws가 source에 아직 있을 때 실행.
+        // **정규화-먼저(리뷰 [1])**: 소속 판정·마커 승계 **전에** source를 canonical화한다. L4 closeTab/removeFromGroupForTab은
+        // 항상 정규 상태에서만 inherit하는데(inheritGroupMarker는 승계 대상 next가 마커와 **같은 pin**일 때만 이전), moveWorkspace가
+        // 비정규 source(마커 직후 pin-desync 멤버)를 그대로 먹이면 same-pin 게이트가 실패해 그룹이 통째 소멸한다(미래 restore/M3d
+        // build가 비정규 상태를 먹이는 경로 방어). 정규화는 할당 없이 플래그만 mutate(infallible)라 append(유일한 fallible) 뒤에
+        // 둬 "OOM이면 source 불변"을 지킨다. ws가 아직 source(metas[src.ws])에 있는 상태로 전체를 canonical화한다.
+        group_normalize.normalizePinnedFromGroups(WorkspaceMeta, metas);
+        group_normalize.clearStaleLocalPins(WorkspaceMeta, metas);
+
+        // source membership 판정(canonical 상태, ws가 아직 source에 있을 때): 그룹 소속(마커 포함)이면 이탈 시 unpin, 순수 최상위
+        // 카드면 pinned 유지(§4 (c) vs (d)). enclosingGroupMarkerIndex는 마커면 자기 자신을 찾아 non-null → 마커도 "그룹 소속"으로 분류.
+        const keep_pin = group_normalize.enclosingGroupMarkerIndex(WorkspaceMeta, metas, src.ws) == null;
+
+        // (b) 마커 승계: source의 다음 카드로 마커를 넘겨 그룹을 살린다(마지막 멤버면 false=소멸). canonical source라 마커 직후 첫
+        // 멤버가 pin-synced → same-pin 게이트 통과. ws가 source에 아직 있을 때 실행.
         if (was_marker) _ = group_normalize.inheritGroupMarker(WorkspaceMeta, metas, src.ws);
 
         _ = win_src.workspaces.orderedRemove(src.ws);
@@ -752,6 +763,41 @@ test "moveWorkspace §4(d): 그룹 멤버 local_pinned·pinned 이탈 = 리셋 +
     var metas: [3]*WorkspaceMeta = undefined;
     for (w1.workspaces.items, 0..) |w, i| metas[i] = &w.meta;
     try testing.expect(group_normalize.enclosingGroupMarkerIndex(WorkspaceMeta, &metas, 2) == null);
+}
+
+// 리뷰 [1]: 마커 승계는 **canonical(정규화된) source**에서만 성립한다 — inheritGroupMarker는 승계 대상 next가 마커와
+// 같은 pin일 때만 이전한다. moveWorkspace가 비정규 source(마커 직후 pin-desync 멤버)를 그대로 먹이면 same-pin 게이트가
+// 실패해 그룹이 통째 소멸한다(L4 closeTab/removeFromGroup은 항상 canonical에서 inherit — moveWorkspace만 어긋났다).
+// 정규화-먼저 수정 전엔 red: desync 멤버가 마커를 승계 못 받아 group_start가 어디에도 안 남는다.
+test "moveWorkspace §4(b) desync: 마커 직후 pin-desync 멤버가 있어도 마커 이동 시 그룹 보존(정규화-먼저)" {
+    var g = WindowGraph.init(testing.allocator);
+    defer g.deinit();
+    const w0 = try g.addWindow(1, .normal);
+    const w1 = try g.addWindow(2, .normal);
+    // source: 고정 그룹 [marker(group_start="g", pin=T), desync(pin=F, 마커와 어긋남), tail(pin=T)].
+    // 마커 직후 첫 멤버가 desync라, canonical화 없이는 inheritGroupMarker의 same-pin 게이트를 통과 못 한다.
+    const marker = try g.addWorkspace(w0, .{ .group_start = "g", .pinned = true });
+    _ = try g.addPane(marker);
+    const desync = try g.addWorkspace(w0, .{ .pinned = false });
+    _ = try g.addPane(desync);
+    const tail = try g.addWorkspace(w0, .{ .pinned = true });
+    _ = try g.addPane(tail);
+    const dst = try g.addWorkspace(w1, .{});
+    _ = try g.addPane(dst);
+
+    // 마커(index 0)를 window1로 옮긴다.
+    try g.moveWorkspace(.{ .win = 0, .ws = 0 }, 1);
+
+    // 이동분 marker = 목적지 최상위 카드(승계로 group_start 넘어감).
+    try testing.expect(marker.meta.group_start == null);
+    try testing.expect(marker.meta.top_level);
+    // **핵심(green)**: source를 먼저 canonical화(desync.pin := 마커 pin=T)한 덕에 desync가 마커를 승계 → 그룹 잔존.
+    try testing.expectEqual(@as(usize, 2), w0.workspaces.items.len);
+    try testing.expect(desync.meta.group_start != null); // 그룹 소멸하지 않고 desync가 이어받음
+    try testing.expectEqualStrings("g", desync.meta.group_start.?);
+    try testing.expect(desync.meta.pinned); // canonical화로 마커 pin(T) 승계
+    try testing.expect(tail.meta.group_start == null); // tail은 여전히 위치 파생 멤버
+    try testing.expect(tail.meta.pinned);
 }
 
 test "moveWorkspace: source window의 마지막 workspace가 빠지면 그 window가 닫힌다(empty-source window)" {

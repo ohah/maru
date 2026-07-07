@@ -229,7 +229,7 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 ### 9.5 시퀀싱 (각 PR green, doc-first)
 
 - **P3-0 — 이 설계 + (a) 확정 + §9.7 측정/디버그** ✅(이 PR).
-- **P3-1 — CoreCommandQueue 프리미티브** ✅(`e77a82c`): `src/app/core_command.zig` + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_queue` perf 벤치. P3-1에선 미배선 프리미티브로 추가(`PtyWriteQueue` 선례) — P3-2부터 `enqueueCoreCommand`로 배선된다.
+- **P3-1 — CoreCommandQueue 프리미티브** ✅(`e77a82c`): `src/session/core_command.zig`(L2 세션 코어 — 3차 추출로 app→session 이동, `src/app`은 `../session/core_command.zig`로 import) + 단위 테스트 + `coreq.*` 디버그 스코프 + `core_command_queue` perf 벤치. P3-1에선 미배선 프리미티브로 추가(`PtyWriteQueue` 선례) — P3-2부터 `enqueueCoreCommand`로 배선된다.
 - **P3-2 — IME `setPreedit` 위임** ✅(`85658ce`): 비민감 첫 사례 — `commitComposition`/`imeMarked`를 명령으로. 재진입 토양 1순위 제거.
 - **P3-3 — `reportFocus`·config 위임** ✅(`8e9581a`): `reportFocus`(드묾)·`setConfigPalette`/`max_scrollback`(reload 루프)·`setCellMetrics`(폰트 변경)를 `enqueueCoreCommand`로 위임. 응답 생성 명령은 reader가 PTY로 흘리고 non-interactive 폴백도 같게 흘린다. `report_mouse`/config 명령 변형 + `apply` 추가. createTerm 초기화·per-tick 렌더 metric은 §9.1대로 직접 유지. `reportMouse`는 P3-4(측정)로 이동.
 - **P3-4 — scroll·선택·`reportMouse` 위임(full (a))** ✅(`e147604`): read-modify-decide를 명령으로 원자화(`select_extend_or_collapse`·`scroll_and_extend`·`scroll_to_offset`)해 메인 코어 mutate 0 달성(§9.4 구현 결과). 모든 mouse 선택/scroll/reportMouse 사이트(클릭·드래그·휠·PageUp·find·스크롤바·hover)를 `enqueueCoreCommand`로. 예외(per-tick 렌더·createTerm init)는 §9.1 직접 유지. 검증: `core_command.apply` 단위(선택/scroll 변형)·macos-app-build·런타임 GUI는 수동.

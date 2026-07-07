@@ -145,7 +145,7 @@ split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 
 | `keyhint.delay` | 숫자(0~5000) | `400` | 힌트 표시까지 모디파이어를 누르고 있어야 하는 시간(ms). 짧으면 빠른 `Cmd+T`에도 깜빡이고, 길면 반응이 굼뜨다. 다른 키를 누르면(=실제 단축키 실행) 표시 전이라도 취소된다. 범위 밖은 무시(기본 유지) |
 | `keyhint.modifier` | `command`\|`control`\|`option` | `command` | 힌트를 띄우는 트리거 모디파이어(이 키 **단독 홀드**). 기본 `command`(⌘). 그 외 값은 무시(기본 유지) |
 | `quick-terminal.height` | 숫자(0.1~1.0) | `0.45` | 가장자리에 수직인 '두께' 비율(화면 대비). `top`/`bottom`=높이, `left`/`right`=폭, `center`=세로 비율. 범위 밖/비숫자는 무시 |
-| `quick-terminal.width` | 숫자(0.1~1.0) | (`height` 따라감) | **`center` 전용** 가로 비율(화면 대비). 미설정이면 `height`와 같게(정사각). `top`/`bottom`(전폭)·`left`/`right`(`height`로 두께)에선 무시. 범위 밖/비숫자는 무시 |
+| `quick-terminal.width` | 숫자(0~1.0) | `0`(=`height` 따라감) | **`center` 전용** 가로 비율(화면 대비). 기본 `0`은 **sentinel**로 `height`와 같게(정사각) — `0`을 직렬화→재파싱해도 diagnostic이 안 나게 range 하한을 `0`으로 둔다(`height`는 sentinel이 없어 `0.1~1.0`). `0`보다 크면 그 비율(아주 좁은 `0<x<0.1`도 forgiving 허용). `top`/`bottom`(전폭)·`left`/`right`(`height`로 두께)에선 무시. 범위 밖/비숫자는 무시 |
 | `quick-terminal.auto-hide` | `true`\|`false` | `true` | 포커스 잃으면(다른 창/앱 클릭) 자동 숨김. `false`면 토글로만 |
 | `quick-terminal.screen` | `main`\|`mouse` | `main` | 어느 화면에 띄울지(`mouse`=마우스가 있는 화면). 그 외 값은 무시 |
 | `quick-terminal.position` | `top`\|`bottom`\|`left`\|`right`\|`center` | `top` | 어느 가장자리에서 슬라이드해 나올지. `center`=화면 중앙(세로=`height`·가로=`width`, 슬라이드 대신 페이드 인). 그 외 값은 무시 |

@@ -1,4 +1,5 @@
 pub const agent_resume = @import("app/agent_resume.zig");
+pub const app_runtime = @import("app/app_runtime.zig");
 pub const artifact_io = @import("app/artifact_io.zig");
 pub const headless_demo = @import("app/headless_demo.zig");
 pub const frame_loop = @import("app/frame_loop.zig");
@@ -14,6 +15,7 @@ pub const runtime_pump = @import("app/runtime_pump.zig");
 pub const trace_recorder = @import("app/trace_recorder.zig");
 pub const smoke_drain = @import("app/smoke_drain.zig");
 
+pub const AppRuntime = app_runtime.AppRuntime;
 pub const AppHostFrame = host.AppHostFrame;
 pub const AppHostError = host.HostError;
 pub const AppFrameLoop = frame_loop.FrameLoop;

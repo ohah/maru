@@ -169,6 +169,8 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 
 ### 8A.0 M2b 후 코드 현실 (drift gate 정정 — §3·§8의 M3 시작점)
 
+**상태(2026-07): M3a·M3b 머지됨** — 아래 bullet들은 **M3 착수 직전(pre-slice) 코드 현실의 역사적 스냅샷**이라 그 시점 기준으로 읽는다(M3a 머지 때도 이 스냅샷은 프리즈로 뒀다). 이후 정정: (M3a) Surface·TerminalCore 소유가 Term-inline → 앱 전역 `app_runtime.live_registry`의 `LiveSurface` 번들 슬롯으로 이전됐고 registry는 `LiveSurfaceRegistry(LiveSurface)`로 인스턴스화된다(bullet 1·2 무효화, §8A.1). (M3b) `SurfaceRuntime`(라우팅)이 per-window → **앱-전역**으로 승격됐고, 흩어져 있던 모듈-로컬 `var app_surface_ids`/`app_live_registry` + per-window `runtime`이 하나의 `AppRuntime` coordinator(`src/app/app_runtime.zig` = {surface_ids, live_registry, routing}, 모듈-로컬 `var app_runtime`이 소유·모든 창 공유)로 정식화됐다. per-Term `pump`는 앱-전역 routing에 바인딩되고, 창 close는 그 창 링크만 detach하며 공유 표를 deinit하지 않는다(창 격리)(bullet 3·4 무효화, §8A.2). **아직 남은 것**(M3d): 라이브 배치 권위는 여전히 per-window 트리이고, cross-window 이동 로직 자체는 없다(bullet 5 유효 — registry·routing은 배선됐으나 `WindowGraph` 배치 권위 전환·이동 command는 M3d/M3e).
+
 §3 목표 구조는 최종형이고, M2b 완료 시점(2026-07)의 **실제 코드**는 그 절반이다. M3 설계는 아래 현실에서 출발한다(코드 재확인 완료):
 
 - **Surface는 아직 `Term`에 inline value로 남아 있다.** `session_model.Term`(`src/session/session_model.zig:35`)이 `surface: Surface`를 **값**으로 품고, `Surface`(`src/session/surface.zig:26`)가 `core: TerminalCore` + `core_mutex: std.Io.Mutex`를 **값**으로 든다. `&surface.core`/`&surface.core_mutex`의 주소 안정성은 **오직 `Term`이 heap-pin(`*Term` in `ArrayList(*Term)`)이라서** 성립한다. 즉 §3이 말한 "registry가 TerminalCore를 소유"는 **아직 실현되지 않았다** — registry는 M2b에서 `LivePtySession`만 소유로 올렸다.

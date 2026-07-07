@@ -260,7 +260,12 @@ pub fn parseSnapshot(allocator: std.mem.Allocator, text: []const u8) ParseError!
     var line = lr.next() orelse return error.Truncated;
     if (!std.mem.eql(u8, line, "none")) {
         while (!std.mem.eql(u8, line, "styled-cells")) {
-            try cm.append(allocator, try parseCellMeta(allocator, line));
+            const meta = try parseCellMeta(allocator, line);
+            // append가 OOM하면 meta는 cm.items에 없어 errdefer가 못 잡는다 — 방금 파싱한 grapheme 슬라이스를 회수.
+            cm.append(allocator, meta) catch |e| {
+                if (meta.grapheme.len > 0) allocator.free(meta.grapheme);
+                return e;
+            };
             line = lr.next() orelse return error.Truncated;
         }
     } else {
@@ -279,13 +284,21 @@ pub fn parseSnapshot(allocator: std.mem.Allocator, text: []const u8) ParseError!
         return error.UnknownSection; // "none" 뒤에 또 다른 섹션 = 알 수 없는 semantic section
     }
 
+    // cell_metadata를 먼저 확정하고 own한다 — 이후 styled_cells toOwnedSlice가 OOM하면 cm는 이미 비어 cm errdefer가
+    // 못 잡으므로(옮겨진 슬라이스가 고아가 됨), 여기서 별도 errdefer로 커버한다.
+    const cell_meta = try cm.toOwnedSlice(allocator);
+    errdefer {
+        for (cell_meta) |c| if (c.grapheme.len > 0) allocator.free(c.grapheme);
+        allocator.free(cell_meta);
+    }
+    const styled = try sc.toOwnedSlice(allocator);
     return .{
         .size = size,
         .cursor = cursor,
         .dirty = dirty,
         .rows = rows,
-        .cell_metadata = try cm.toOwnedSlice(allocator),
-        .styled_cells = try sc.toOwnedSlice(allocator),
+        .cell_metadata = cell_meta,
+        .styled_cells = styled,
     };
 }
 
@@ -605,4 +618,28 @@ test "snapshot reader: v3 규칙 — 헤더/none/debug 무시/알 수 없는 섹
         try std.testing.expectEqual(@as(u8, 20), parsed.styled_cells[0].fg.rgb.g);
         try std.testing.expect(parsed.styled_cells[0].italic);
     }
+}
+
+// OOM 경로 누수 회귀: rows·cell-metadata(grapheme 소유)·styled-cells를 파싱하는 도중 어느 할당이 실패해도 새지
+// 않아야 한다 — cm.append 실패 시 방금 파싱한 grapheme, styled toOwnedSlice 실패 시 이미 옮긴 cell_metadata가
+// errdefer 밖으로 새던 갭(code-review 회귀).
+test "parseSnapshot: 모든 할당 실패 지점에서 누수 없음" {
+    const text = "maru.snapshot.v3\n" ++
+        "size cols=6 rows=2\n" ++
+        "cursor row=0 col=0 visible=true\n" ++
+        "dirty none\n" ++
+        "rows\n" ++
+        "row 0: |A\\|B  |\n" ++
+        "row 1: |xy    |\n" ++
+        "cell-metadata\n" ++
+        "cell row=0 col=1 codepoint=U+0065 width=1 continuation=false grapheme=U+0301,U+0302\n" ++
+        "styled-cells\n" ++
+        "cell row=0 col=0 codepoint=U+0041 fg=rgb(1,2,3) bg=default bold=true italic=false underline=false\n";
+    const Runner = struct {
+        fn run(a: std.mem.Allocator, t: []const u8) !void {
+            const parsed = try parseSnapshot(a, t);
+            parsed.deinit(a);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Runner.run, .{text});
 }

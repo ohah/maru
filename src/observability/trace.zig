@@ -147,7 +147,12 @@ pub fn parseEvents(allocator: std.mem.Allocator, text: []const u8) ParseError![]
     }
     while (lines.next()) |line| {
         if (line.len == 0) continue; // 마지막 개행 뒤 빈 줄 skip
-        try list.append(allocator, try parseEventLine(allocator, line));
+        const ev = try parseEventLine(allocator, line);
+        // append가 OOM하면 ev는 아직 list.items에 없어 errdefer가 못 잡는다 — 방금 파싱한 소유 문자열을 여기서 회수.
+        list.append(allocator, ev) catch |e| {
+            freeEvent(allocator, ev.event);
+            return e;
+        };
     }
     return list.toOwnedSlice(allocator);
 }
@@ -389,4 +394,21 @@ test "trace base kind round-trip: output/resize/input/process-exit writer↔pars
     try std.testing.expect(parsed[3].event == .process_exit);
     try std.testing.expectEqual(@as(?i32, 0), parsed[3].event.process_exit);
     try std.testing.expectEqual(@as(?i32, null), parsed[4].event.process_exit);
+}
+
+// OOM 경로 누수 회귀: 소유 문자열(output/input/cwd)을 든 이벤트를 파싱하는 도중 어느 할당이 실패해도, 방금
+// 파싱한 문자열과 list 전체가 새지 않아야 한다(list.append 실패 시 errdefer가 못 잡는 갭 — code-review 회귀).
+test "parseEvents: 모든 할당 실패 지점에서 누수 없음" {
+    const text = "maru.trace.v1\n" ++
+        "event 0 output surface=1 bytes=\"hi\\r\\nthere\"\n" ++
+        "event 1 shell.cwd-changed surface=1 cwd=\"/tmp/proj\"\n" ++
+        "event 2 input surface=1 bytes=\"ls\\r\"\n" ++
+        "event 3 resize surface=1 cols=8 rows=2\n";
+    const Runner = struct {
+        fn run(a: std.mem.Allocator, t: []const u8) !void {
+            const parsed = try parseEvents(a, t);
+            freeParsedEvents(a, parsed);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Runner.run, .{text});
 }

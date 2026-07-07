@@ -3567,8 +3567,8 @@ pub const AppSession = struct {
         return term;
     }
 
-    /// 한 Term을 teardown하고 heap 해제한다(closeAndDetach → live_pty.deinit(reader join) → surface.deinit →
-    /// destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·split 실패 정리에 쓴다.
+    /// 한 Term을 teardown하고 heap 해제한다(closeAndDetach → live_registry.remove(reader join·슬롯 해제, M2b) →
+    /// surface.deinit → destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·split 실패 정리에 쓴다.
     /// (deinit은 runtime.deinit 순서 때문에 이 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
     fn destroyTerm(self: *AppSession, term: *Term) void {
         // rename 대상이 이 Term이면 stale 포인터 방지로 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
@@ -4175,8 +4175,8 @@ pub const AppSession = struct {
 
     /// 탭을 닫는다. 마지막 한 개면 창(세션)을 닫는다 — 탭을 헐지 않고 종료를 latch해 기존 terminate/
     /// deinit 경로가 정리하게 한다(빈 tabs 리스트로 activeSurface가 패닉하는 걸 피한다). 그 외엔 teardown
-    /// (deinit과 같은 순서: closeAndDetach(runtime) → live_pty.deinit(reader join) → surface.deinit → Tab
-    /// heap 해제) 후 tabs/surface_ptrs에서 빼고 app_window.tabs를 재바인딩하고 active_tab을 clamp한다
+    /// (deinit과 같은 순서: closeAndDetach(runtime) → live_registry.remove(reader join·슬롯 해제, M2b) → surface.deinit
+    /// → Tab heap 해제) 후 tabs/surface_ptrs에서 빼고 app_window.tabs를 재바인딩하고 active_tab을 clamp한다
     /// (reselectAfterClose). 범위 밖 index면 무동작.
     pub fn closeTab(self: *AppSession, index: usize) void {
         if (index >= self.tabs.items.len) return;

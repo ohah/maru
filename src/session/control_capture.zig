@@ -144,13 +144,16 @@ pub const Capture = struct {
 
     /// chunked capture(§4.3 기본 경로). 매 chunk 경계에서 generation을 대조해 torn-read를 검출한다(`atomic=false`).
     pub fn initChunked(capture_id: u64, start_generation: u64, chunk_size: usize) Capture {
-        return .{ .capture_id = capture_id, .fixed_generation = start_generation, .chunk_size = chunk_size, .atomic = false };
+        // chunk_size 0이면 next()의 `end = @min(offset+0, len) == offset`이라 offset이 안 늘고 seq만 증가 →
+        // 무한 빈 chunk 스트림(never-complete, /code-review max 지적). 최소 1을 보장해 항상 전진·종료한다.
+        return .{ .capture_id = capture_id, .fixed_generation = start_generation, .chunk_size = @max(chunk_size, 1), .atomic = false };
     }
 
     /// atomic fallback capture(§4.3 재시도 상한 초과). 소스 bytes는 한 락 홀드로 통째 복사한 스냅샷이라 generation
     /// 검사를 건너뛴다(invalidated 불가) — 항상 완료한다(revoke는 예외로 종료). `atomic=true`.
     pub fn initAtomic(capture_id: u64, snapshot_generation: u64, chunk_size: usize) Capture {
-        return .{ .capture_id = capture_id, .fixed_generation = snapshot_generation, .chunk_size = chunk_size, .atomic = true };
+        // chunk_size 최소 1 보장(initChunked 참조 — 0이면 무한 빈 chunk).
+        return .{ .capture_id = capture_id, .fixed_generation = snapshot_generation, .chunk_size = @max(chunk_size, 1), .atomic = true };
     }
 
     /// 다음 chunk 또는 종단을 돌려준다(§4.3). 확인 순서(§8.5 "경계마다 재검증"): **revoked 먼저**(보안 우선) →
@@ -361,6 +364,11 @@ fn readCaptureParams(params: ?std.json.Value) CaptureParamError!struct { target:
 ///
 /// **범위 밖(정직)**: target surface 존재 확인(process_exited)은 여기서 안 한다 — snapshot이 필요한 collector/1d
 /// 관심사라, L4가 capture 시작 전에 1c/collector로 존재를 확인한 뒤 이 게이트를 부른다(L2 capture 코어는 프로토콜만).
+///
+/// **tracked follow-up(/code-review max)**: parse→request 추출→parseMethod→method-eql 분류 preamble이
+/// `control_dispatch.dispatchReadOnly`와 병렬 중복이다. 분류 계약이 바뀌면 둘을 lockstep 수정해야 하므로,
+/// 공유 `classifyRequest` 헬퍼로 추출하는 건 별도 정리 작업(지금은 read-only 라우터와 capture 게이트의
+/// downstream이 달라 preamble만 겹침 — 재작성 리스크 대비 가치 낮아 분리).
 pub fn dispatchCaptureAck(
     gpa: std.mem.Allocator,
     request_bytes: []const u8,
@@ -560,6 +568,29 @@ test "capture 빈 스크롤백: chunk 없이 즉시 complete(chunks=0), invalida
     var pm = try cp.parseMessage(testing.allocator, res.frames.items[0]);
     defer pm.deinit();
     try testing.expectEqualStrings(complete_method, pm.message.notification.method);
+}
+
+// ── 3b) chunk_size 0 가드: 클램프(최소 1) 없으면 offset이 안 늘어 무한 빈 chunk(never-complete) — /code-review max 지적 ──
+test "capture chunk_size 0: 최소 1로 클램프돼 무한루프 없이 종료(바이트당 1 chunk + complete)" {
+    const scrollback = "AB"; // 2바이트
+    var cap = Capture.initChunked(1, 3, 0); // chunk_size=0 주입 → 클램프 안 하면 pump가 무한루프
+    var res = try pump(testing.allocator, &cap, scrollback, .{ .base_gen = 3 });
+    defer res.deinit(testing.allocator);
+    // 클램프(0→1)로 1바이트 chunk 2개 + complete = 3 프레임, chunks=2. (무한루프면 이 지점에 도달 못 함.)
+    try testing.expect(res.terminal == .complete);
+    try testing.expectEqual(@as(u32, 2), res.terminal.complete.chunks);
+    try testing.expectEqual(@as(usize, 3), res.frames.items.len);
+    // 원문 무손실 재조립 확인.
+    var reassembled: std.ArrayList(u8) = .empty;
+    defer reassembled.deinit(testing.allocator);
+    for (res.frames.items[0..2]) |wire| {
+        var seq: u64 = undefined;
+        var gen: u64 = undefined;
+        const raw = try decodeChunk(testing.allocator, wire, &seq, &gen);
+        defer testing.allocator.free(raw);
+        try reassembled.appendSlice(testing.allocator, raw);
+    }
+    try testing.expectEqualStrings(scrollback, reassembled.items);
 }
 
 // ── 4) generation 불일치(중간 chunk 경계에서 변경) → capture-invalidated, 완료 마커 금지(§4.3 핵심 불변식) ──

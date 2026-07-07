@@ -80,13 +80,15 @@ fn parseAndSet(
             return;
         };
     } else if (T == f32) {
-        const r = comptime (meta.range orelse @compileError(full_key ++ ": f32 필드엔 range 메타가 필수"));
+        // 파일 파싱은 parse_range(있으면)를 우선한다 — GUI 위젯 범위(range)보다 파일 편집을 넓게 허용하는
+        // 필드(font.size [1,512] vs GUI [6,72])가 GUI 범위로 좁혀지지 않게 한다(Meta.parse_range 주석 참조).
+        const r = comptime (meta.parse_range orelse (meta.range orelse @compileError(full_key ++ ": f32 필드엔 range 메타가 필수")));
         ptr.* = parseFloatRange(value, @floatCast(r[0]), @floatCast(r[1])) orelse {
             try diags.append(a, .{ .line = line_no, .message = std.fmt.comptimePrint("{s}는 {d}~{d} 범위 밖이거나 숫자가 아님 — 기본값 유지", .{ full_key, r[0], r[1] }) });
             return;
         };
     } else if (T == u32) {
-        const r = comptime (meta.range orelse @compileError(full_key ++ ": u32 필드엔 range 메타가 필수"));
+        const r = comptime (meta.parse_range orelse (meta.range orelse @compileError(full_key ++ ": u32 필드엔 range 메타가 필수")));
         ptr.* = parseUintRange(value, @intFromFloat(r[0]), @intFromFloat(r[1])) orelse {
             try diags.append(a, .{ .line = line_no, .message = std.fmt.comptimePrint("{s}는 {d}~{d} 정수여야 함 — 기본값 유지", .{ full_key, @as(u32, @intFromFloat(r[0])), @as(u32, @intFromFloat(r[1])) }) });
             return;
@@ -905,6 +907,41 @@ test "schema tryParse: 최상위 스칼라(Config.schema) — Meta.key 전체 �
     try std.testing.expect(try tryParse(a, &cfg, "render.frame-rate", "144", &diags, 7));
     try std.testing.expectEqual(@as(u32, 120), cfg.render_frame_rate);
     try std.testing.expectEqual(@as(usize, 3), diags.items.len);
+}
+
+test "schema tryParse: font.size 파일 파싱은 GUI 범위보다 넓은 parse_range를 쓴다(1~512)" {
+    // 이 테스트가 증명하는 것: config 파일 직접 편집은 [1,512](configuration.md·appearance.resolveFont와 같은
+    // 범위)를 허용한다는 계약. GUI 슬라이더·⌘± 보수 범위 [6,72](Meta.range)가 파일 파싱 게이트로 새면, 문서가
+    // 허용한 `font.size = 100` 같은 값이 조용히 기본값(14)으로 되돌아가 사용자가 터미널 폰트를 크게 키울 방법이
+    // 없어진다(CS-2 스키마 이주에서 실제로 있었던 회귀).
+    const a = std.testing.allocator;
+    var diags: std.ArrayList(Diag) = .empty;
+    defer diags.deinit(a);
+    var cfg: theme.Config = .{};
+
+    // GUI 상한(72) 밖·파일 범위(512) 안 → 수용.
+    try std.testing.expect(try tryParse(a, &cfg, "font.size", "100", &diags, 1));
+    try std.testing.expectEqual(@as(f32, 100), cfg.font.size);
+    // GUI 하한(6) 아래·파일 하한(1) 위 → 수용.
+    try std.testing.expect(try tryParse(a, &cfg, "font.size", "3", &diags, 2));
+    try std.testing.expectEqual(@as(f32, 3), cfg.font.size);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    // 파일 범위 밖(>512)은 여전히 거부 + 직전 값 유지(무음 아님 — diagnostic).
+    try std.testing.expect(try tryParse(a, &cfg, "font.size", "600", &diags, 3));
+    try std.testing.expectEqual(@as(f32, 3), cfg.font.size);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+
+    // GUI 위젯 범위(NumberField min/max)는 여전히 보수 범위 [6,72](Meta.range) — 파일 범위가 GUI로 새지 않는다.
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var list: std.ArrayList(NumberField) = .empty;
+    try appendNumberFields(arena.allocator(), cfg, &list);
+    for (list.items) |f| {
+        if (std.mem.eql(u8, f.key, "font.size")) {
+            try std.testing.expectEqual(@as(f64, theme.font_size_min), f.min);
+            try std.testing.expectEqual(@as(f64, theme.font_size_max), f.max);
+        }
+    }
 }
 
 test "schema tryParse: 잘못된 값은 diagnostic + 기본값 유지 + true(폴백 안 함)" {

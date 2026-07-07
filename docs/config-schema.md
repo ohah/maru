@@ -36,7 +36,7 @@ pub const FontConfig = struct {
 
     // 이 sub-struct 필드들의 메타(comptime). 키는 부모 경로 + 아래 규칙으로 유도, segment override 가능.
     pub const schema = .{
-        .size        = Meta{ .doc = "폰트 크기(pt)", .range = .{ 1, 512 }, .widget = .number },
+        .size        = Meta{ .doc = "폰트 크기(pt)", .range = .{ 6, 72 }, .parse_range = .{ 1, 512 }, .widget = .number }, // GUI는 보수 범위, 파일 파싱은 parse_range
         .line_height = Meta{ .doc = "행간 배수", .range = .{ 0.5, 3.0 }, .widget = .number }, // 키는 line_height→line-height 자동
         .family      = Meta{ .doc = "폰트 패밀리(내부 공백 보존)", .widget = .text },
     };
@@ -48,6 +48,9 @@ pub const Meta = struct {
     doc: []const u8,
     /// 숫자 범위(min,max). enum/bool/문자열엔 무의미(null). 파서 검증과 GUI 숫자 입력 박스 clamp가 공유.
     range: ?[2]f64 = null,
+    /// 파일 파싱 전용 범위 override(없으면 range와 동일). GUI 위젯 범위보다 config 파일 직접 편집을 더 넓게
+    /// 허용해야 하는 필드만 지정(예: font.size — GUI [6,72] vs 파일 [1,512]). GUI 경로는 이 값을 보지 않는다.
+    parse_range: ?[2]f64 = null,
     /// GUI 위젯 종류(타입에서 기본 유추, 명시로 override). toggle|number|dropdown|text|color|...
     /// (range 숫자 필드는 `.number`(입력 박스로 렌더). 옛 `.slider` 값은 제거됐다 — 숫자 필드 분류는 위젯이 아니라
     /// 타입(f32/u32+range)으로 하므로 위젯 값은 안 읽혔고, 슬라이더 막대는 입력 박스로 대체됐다.)

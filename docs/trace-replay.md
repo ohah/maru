@@ -50,7 +50,7 @@ event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대�
 
 `TerminalCore`가 OSC 133/7을 파싱하며 `types.ShellEvent`(`prompt_start`·`input_start`·`command_start`·`command_end{row,exit}`·`cwd_changed`)를 시간순으로 기록하고, 소비자가 `shellEvents()`로 읽고 `clearShellEvents()`로 비운다. 같은 도메인 데이터를 디버그 로그(`MARU_DEBUG`의 `shell.*` scoped 로그)·결정적 테스트·trace 직렬화가 공유한다(관측 가능성 원칙 — 임시 포맷을 따로 두지 않는다).
 
-**직렬화는 구현됐다**(writer): `observability/trace.zig`의 `renderShellEvents`/`writeEvent`가 이벤트 스트림을 `maru.trace.v1` 라인으로 굳힌다. 이벤트 이름은 trace 토큰과 1:1이다.
+**직렬화·역파싱이 구현됐다**(writer + reader): `observability/trace.zig`의 `renderShellEvents`/`writeEvent`(writer)가 이벤트 스트림을 `maru.trace.v1` 라인으로 굳히고, `parseShellEvents`(reader)가 그 라인을 `ParsedEvent`(원 `ShellEvent` + index/surface_id + cwd_changed의 unescape된 경로)로 되읽는다 — `parseShellEvents(renderShellEvents(events, cwd))`가 원 이벤트와 cwd를 복원한다(round-trip 테스트). 이벤트 이름은 trace 토큰과 1:1이다. escape/unescape는 `text_escape.zig` 단일 출처를 공유한다.
 
 ```text
 maru.trace.v1
@@ -66,7 +66,7 @@ event 4 shell.command-end surface=1 row=2 exit=0
 - `command-end`의 `exit=`는 OSC 133 D의 종료코드, 없으면 `exit=none`.
 - `cwd="..."`는 `currentCwd()` 값(따옴표로 감싸고 `\` `"`·개행/CR/Tab을 escape). `ShellEvent.cwd_changed`는 값을 안 들므로(POD) 직렬화 시점의 `currentCwd()`를 적는다 — 한 batch에 cwd_changed가 둘이면(한 프레임 내 연속 cd) 둘 다 현재 cwd로 적힌다(문서화된 한계).
 
-**아직 없는 것**(후속): (1) live 레코딩 — 실제 세션에서 이 라인을 파일로 append하는 `MARU_TRACE` 게이트, (2) replay용 `output`/`input`/`resize`/`process-exit` 이벤트(위 base kind), (3) reader/ReplayRunner. reader/replay PR은 위 라인을 같은 escape 규칙으로 되읽어 facade로 재생하고, metadata가 surface/workspace에 어떻게 반영되는지 테스트한다.
+**아직 없는 것**(후속): (1) live 레코딩 — 실제 세션에서 이 라인을 파일로 append하는 `MARU_TRACE` 게이트(drain 훅은 `app_session.zig`의 `drainShellEventsForFrame`에 표시돼 있다), (2) replay용 `output`/`input`/`resize`/`process-exit` 이벤트(위 base kind), (3) **`ReplayRunner`** — reader가 되읽은 이벤트를 public facade(`SurfaceRuntime`)로 **재적용**해 상태를 재현하는 것(아래 "replay가 하는 일"). reader(텍스트→이벤트 역파싱)는 **구현됨**(`parseShellEvents`) — ReplayRunner는 그 위에서 재적용 단계를 얹는다.
 
 ### Control-plane event (미정)
 
@@ -78,15 +78,16 @@ event 4 shell.command-end surface=1 row=2 exit=0
 
 ## replay가 하는 일
 
-Replay runner는 trace를 읽고 public facade만 호출한다.
+Replay runner는 trace를 읽고 public facade만 호출한다. trace **읽기**(`parseShellEvents`)는 구현됐고, 아래 **재적용**(ReplayRunner)이 후속이다 — reader가 낸 이벤트를 facade로 흘려보내는 단계.
 
 ```text
 trace file
--> ReplayRunner
+-> parseShellEvents (reader — 구현됨)
+-> ReplayRunner (재적용 — 후속)
 -> SurfaceRuntime.applyPtyEvent / writeInput / resize
 -> Surface
 -> TerminalCore
--> DebugSnapshot
+-> RenderSnapshot (renderTerminalSnapshot)
 ```
 
 중요한 점은 replay가 private parser storage를 직접 만지지 않는다는 것이다. 실제 앱과 같은 public 경로로만 재현해야 버그를 제대로 잡는다.
@@ -119,6 +120,11 @@ git에 fixture로 넣으려면 [프로젝트 규칙](project-rules.md)의 "민�
 
 ## 초기 테스트
 
+reader(구현됨, `observability/trace.zig`):
+- **round-trip**: 실제 OSC 133/7을 먹인 core의 이벤트 스트림을 직렬화한 뒤 `parseShellEvents`로 되읽으면 원 이벤트(태그+payload)와 cwd 경로가 그대로 복원된다.
+- 헤더가 틀리면 `BadHeader`, 라인이 깨지면(kind/surface 누락 등) `BadLine`. `exit=none`/실패 exit code, cwd escape(공백·따옴표·개행) 복원.
+
+replay 재적용(후속):
 - 같은 trace를 두 번 replay하면 같은 snapshot이 나온다.
 - trace event 순서가 바뀌면 다른 snapshot이 나올 수 있음을 테스트한다.
 - 민감정보 키워드가 있는 trace fixture는 저장 전에 실패한다.

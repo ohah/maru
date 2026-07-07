@@ -3,9 +3,10 @@
 //! 포맷을 따로 두지 않는다). 스키마 단일 출처는 docs/trace-replay.md. snapshot 직렬화와 같은 규칙: 첫 줄은
 //! bare 토큰(`schema=` 접두어 없음), 이후 `key=val` 라인.
 //!
-//! **writer**(`renderShellEvents`/`writeEvent`)와 **reader**(`parseShellEvents`)가 짝을 이뤄 round-trip한다 —
-//! parse(render(events, cwd))가 원 events와 cwd_changed 경로를 복원한다. 라이브 레코딩(`MARU_TRACE` 게이트)과
-//! trace를 코어에 다시 먹이는 replay 재적용(base kind output/input/resize)은 후속(docs/trace-replay.md §후속).
+//! **writer**(shell: `renderShellEvents`/`writeEvent`, base kind: `writeOutputEvent`/`writeResizeEvent`/…)와
+//! **reader**(`parseEvents`)가 짝을 이뤄 round-trip한다. shell.* 는 OSC 133/7에서 파생된 semantic 인덱스이고,
+//! base kind(output/input/resize/process-exit)가 replay의 권위 데이터다 — `observability/replay.zig`가 output을
+//! 재생하면 파서가 화면·셸 이벤트·cwd를 전부 재도출한다. 라이브 레코딩(`MARU_TRACE` 게이트)은 후속(문서 §후속).
 //!
 //! 이벤트 이름은 trace-replay.md 토큰과 1:1: prompt_start→shell.prompt-start,
 //! input_start→shell.prompt-end(입력 시작=프롬프트 끝), command_start→shell.command-start,
@@ -66,31 +67,82 @@ pub fn writeEvent(
     }
 }
 
+// ── base kind writer (재생의 권위 데이터 — SurfaceRuntime runtime event 1:1) ──────────────────────────────────
+// shell.* 이벤트는 output에서 파생되는 semantic 인덱스이고, 아래 output/resize/input/process-exit이 **재생의 권위
+// 데이터**다. output 바이트를 재생하면 파서가 화면·셸 이벤트·cwd를 전부 재도출한다(docs/trace-replay.md). 라이브
+// 레코더(MARU_TRACE, 후속)는 같은 헤더 뒤에 이 함수들로 한 줄씩 append한다(index를 누적 카운터로 넘김).
+
+/// trace 헤더 한 줄. 라이브 레코더가 첫 이벤트 전에 한 번 쓴다.
+pub fn writeHeader(writer: *std.Io.Writer) !void {
+    try writer.print("{s}\n", .{header});
+}
+
+/// `event <i> output surface=<s> bytes="<escaped>"` — 원시 PTY 출력. bytes는 따옴표 값 escape(개행/CR/Tab/`\`/`"`),
+/// 그 외 바이트(ESC·제어·UTF-8)는 그대로. 재생이 이 바이트를 core.write로 흘려 화면을 정확히 재구성한다.
+pub fn writeOutputEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, bytes: []const u8) !void {
+    try writer.print("event {d} output surface={d} bytes=\"", .{ index, surface_id });
+    try writeEscaped(writer, bytes);
+    try writer.writeAll("\"\n");
+}
+
+/// `event <i> input surface=<s> bytes="<escaped>"` — 사용자 입력(재생 화면엔 직접 영향 없음 — child로 감; 기록·분석용).
+pub fn writeInputEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, bytes: []const u8) !void {
+    try writer.print("event {d} input surface={d} bytes=\"", .{ index, surface_id });
+    try writeEscaped(writer, bytes);
+    try writer.writeAll("\"\n");
+}
+
+/// `event <i> resize surface=<s> cols=<c> rows=<r>` — 터미널 크기 변경. 재생이 core.resize로 적용해 reflow까지 재구성.
+pub fn writeResizeEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, cols: u16, rows: u16) !void {
+    try writer.print("event {d} resize surface={d} cols={d} rows={d}\n", .{ index, surface_id, cols, rows });
+}
+
+/// `event <i> process-exit surface=<s> code=<n>` — child 종료(RuntimePtyEvent.exited 1:1). code 없으면 `code=none`.
+pub fn writeProcessExitEvent(writer: *std.Io.Writer, index: usize, surface_id: u32, code: ?i32) !void {
+    if (code) |c| {
+        try writer.print("event {d} process-exit surface={d} code={d}\n", .{ index, surface_id, c });
+    } else {
+        try writer.print("event {d} process-exit surface={d} code=none\n", .{ index, surface_id });
+    }
+}
+
 // ── reader (역파싱) ───────────────────────────────────────────────────────────────────────────────────────
 
 pub const ParseError = error{ BadHeader, BadLine } || std.mem.Allocator.Error;
 
-/// 파싱된 이벤트 한 개 — 원 이벤트(POD union) + 라인 메타(index·surface_id) + cwd_changed의 unescape된 경로.
-/// cwd는 allocator 소유(그 외 이벤트는 null). writer가 POD ShellEvent엔 cwd를 안 싣지만(currentCwd()가 권위),
-/// reader는 trace 라인에 적힌 값을 복원해 여기 실어 준다(라인만으로 cwd를 되찾게).
+/// 파싱된 이벤트의 payload. shell.* 는 OSC 133/7에서 파생된 **semantic 인덱스**(output이 있으면 재생 시 파서가
+/// 재도출)이고, base kind(output/input/resize/process_exit)가 **재생의 권위 데이터**다. 소유 문자열(cwd·output·
+/// input)은 allocator 소유 — freeParsedEvents로 해제한다.
+pub const Event = union(enum) {
+    prompt_start: u16,
+    input_start: u16,
+    command_start: u16,
+    command_end: terminal.types.ShellEvent.CommandEnd,
+    cwd_changed: []const u8, // shell.cwd-changed의 unescape된 경로(owned) — writer가 currentCwd()로 적은 값
+    output: []const u8, // 원시 PTY 출력 바이트(owned, unescape됨) — 재생의 권위
+    input: []const u8, // 사용자 입력 바이트(owned)
+    resize: terminal.Size,
+    process_exit: ?i32, // child 종료코드(code=none이면 null)
+};
+
+/// 파싱된 이벤트 한 개 — 라인 메타(index·surface_id) + payload.
 pub const ParsedEvent = struct {
     index: usize,
     surface_id: u32,
-    event: terminal.types.ShellEvent,
-    cwd: ?[]const u8 = null,
+    event: Event,
 };
 
-/// `maru.trace.v1` 텍스트를 이벤트 스트림으로 되읽는다(renderShellEvents의 역연산). round-trip:
-/// parseShellEvents(renderShellEvents(events, cwd))가 원 events와 cwd_changed 경로를 복원한다. 반환 슬라이스와
-/// 각 cwd 문자열은 allocator 소유 — freeParsedEvents로 해제한다. 헤더가 틀리면 BadHeader, 라인이 깨지면 BadLine.
-pub fn parseShellEvents(allocator: std.mem.Allocator, text: []const u8) ParseError![]ParsedEvent {
+/// `maru.trace.v1` 텍스트를 이벤트 스트림으로 되읽는다(writer의 역연산). shell.* + base kind 전부 처리한다.
+/// round-trip: render→parse가 원 이벤트(+ 소유 문자열)를 복원한다. 반환 슬라이스와 소유 문자열은 allocator 소유 —
+/// freeParsedEvents로 해제한다. 헤더가 틀리면 BadHeader, 라인이 깨지면 BadLine.
+pub fn parseEvents(allocator: std.mem.Allocator, text: []const u8) ParseError![]ParsedEvent {
     var lines = std.mem.splitScalar(u8, text, '\n');
     const first = lines.next() orelse return error.BadHeader;
     if (!std.mem.eql(u8, first, header)) return error.BadHeader;
 
     var list: std.ArrayList(ParsedEvent) = .empty;
     errdefer {
-        for (list.items) |e| if (e.cwd) |c| allocator.free(c);
+        for (list.items) |e| freeEvent(allocator, e.event);
         list.deinit(allocator);
     }
     while (lines.next()) |line| {
@@ -100,13 +152,20 @@ pub fn parseShellEvents(allocator: std.mem.Allocator, text: []const u8) ParseErr
     return list.toOwnedSlice(allocator);
 }
 
-/// parseShellEvents 결과를 해제한다(각 cwd 문자열 + 슬라이스). 반드시 짝으로 부른다.
+/// parseEvents 결과를 해제한다(소유 문자열 + 슬라이스). 반드시 짝으로 부른다.
 pub fn freeParsedEvents(allocator: std.mem.Allocator, events: []const ParsedEvent) void {
-    for (events) |e| if (e.cwd) |c| allocator.free(c);
+    for (events) |e| freeEvent(allocator, e.event);
     allocator.free(events);
 }
 
-/// `event <index> <kind> surface=<id> <payload>` 한 줄을 ParsedEvent로. cwd-changed 값은 공백/따옴표를 담을 수
+fn freeEvent(allocator: std.mem.Allocator, event: Event) void {
+    switch (event) {
+        .cwd_changed, .output, .input => |s| allocator.free(s),
+        else => {},
+    }
+}
+
+/// `event <index> <kind> surface=<id> <payload>` 한 줄을 ParsedEvent로. 따옴표 값(cwd/bytes)은 공백/따옴표를 담을 수
 /// 있어 토크나이저가 아니라 원문에서 따옴표 범위를 잘라 unescape한다(그 외 필드는 공백 토큰).
 fn parseEventLine(allocator: std.mem.Allocator, line: []const u8) ParseError!ParsedEvent {
     var it = std.mem.tokenizeScalar(u8, line, ' ');
@@ -115,24 +174,38 @@ fn parseEventLine(allocator: std.mem.Allocator, line: []const u8) ParseError!Par
     const kind = it.next() orelse return error.BadLine;
     const surface_id = parseKeyUint(it.next(), "surface", u32) orelse return error.BadLine;
 
-    if (std.mem.eql(u8, kind, "shell.prompt-start")) {
-        return .{ .index = index, .surface_id = surface_id, .event = .{ .prompt_start = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine } };
-    } else if (std.mem.eql(u8, kind, "shell.prompt-end")) {
-        return .{ .index = index, .surface_id = surface_id, .event = .{ .input_start = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine } };
-    } else if (std.mem.eql(u8, kind, "shell.command-start")) {
-        return .{ .index = index, .surface_id = surface_id, .event = .{ .command_start = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine } };
-    } else if (std.mem.eql(u8, kind, "shell.command-end")) {
+    const event: Event = if (std.mem.eql(u8, kind, "shell.prompt-start"))
+        .{ .prompt_start = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine }
+    else if (std.mem.eql(u8, kind, "shell.prompt-end"))
+        .{ .input_start = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine }
+    else if (std.mem.eql(u8, kind, "shell.command-start"))
+        .{ .command_start = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine }
+    else if (std.mem.eql(u8, kind, "shell.command-end")) blk: {
         const row = parseKeyUint(it.next(), "row", u16) orelse return error.BadLine;
         const exit_tok = it.next() orelse return error.BadLine;
         if (!std.mem.startsWith(u8, exit_tok, "exit=")) return error.BadLine;
         const exit_s = exit_tok["exit=".len..];
         const exit: ?i16 = if (std.mem.eql(u8, exit_s, "none")) null else (std.fmt.parseInt(i16, exit_s, 10) catch return error.BadLine);
-        return .{ .index = index, .surface_id = surface_id, .event = .{ .command_end = .{ .row = row, .exit = exit } } };
-    } else if (std.mem.eql(u8, kind, "shell.cwd-changed")) {
-        const raw = extractQuoted(line, "cwd") orelse return error.BadLine;
-        return .{ .index = index, .surface_id = surface_id, .event = .cwd_changed, .cwd = try text_escape.unescapeAlloc(allocator, raw) };
-    }
-    return error.BadLine; // 알 수 없는 kind
+        break :blk .{ .command_end = .{ .row = row, .exit = exit } };
+    } else if (std.mem.eql(u8, kind, "shell.cwd-changed"))
+        .{ .cwd_changed = try text_escape.unescapeAlloc(allocator, extractQuoted(line, "cwd") orelse return error.BadLine) }
+    else if (std.mem.eql(u8, kind, "output"))
+        .{ .output = try text_escape.unescapeAlloc(allocator, extractQuoted(line, "bytes") orelse return error.BadLine) }
+    else if (std.mem.eql(u8, kind, "input"))
+        .{ .input = try text_escape.unescapeAlloc(allocator, extractQuoted(line, "bytes") orelse return error.BadLine) }
+    else if (std.mem.eql(u8, kind, "resize")) blk: {
+        const cols = parseKeyUint(it.next(), "cols", u16) orelse return error.BadLine;
+        const rows = parseKeyUint(it.next(), "rows", u16) orelse return error.BadLine;
+        break :blk .{ .resize = .{ .cols = cols, .rows = rows } };
+    } else if (std.mem.eql(u8, kind, "process-exit")) blk: {
+        const code_tok = it.next() orelse return error.BadLine;
+        if (!std.mem.startsWith(u8, code_tok, "code=")) return error.BadLine;
+        const code_s = code_tok["code=".len..];
+        const code: ?i32 = if (std.mem.eql(u8, code_s, "none")) null else (std.fmt.parseInt(i32, code_s, 10) catch return error.BadLine);
+        break :blk .{ .process_exit = code };
+    } else return error.BadLine; // 알 수 없는 kind
+
+    return .{ .index = index, .surface_id = surface_id, .event = event };
 }
 
 fn eqTok(tok: ?[]const u8, expected: []const u8) bool {
@@ -217,7 +290,7 @@ test "trace serializes failing and absent exit codes, escapes cwd special chars"
 // reader는 writer의 역연산 — 핵심 검증: 실제 이벤트 스트림을 직렬화한 텍스트를 되읽으면 원 이벤트(태그+payload)와
 // cwd 경로가 그대로 복원된다(round-trip). 관측 가능성 원칙: writer/reader가 같은 도메인 데이터를 공유해 fixture·
 // replay가 GUI 없이 명령 라이프사이클을 되살린다.
-test "trace round-trip: parseShellEvents(renderShellEvents(...))가 원 이벤트·cwd를 복원한다" {
+test "trace round-trip: parseEvents(renderShellEvents(...))가 원 이벤트·cwd를 복원한다" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 3 });
     defer core.deinit();
     try core.write("\x1b]133;A\x1b\\"); // prompt start row 0
@@ -231,29 +304,38 @@ test "trace round-trip: parseShellEvents(renderShellEvents(...))가 원 이벤�
     const text = try renderShellEvents(std.testing.allocator, 1, events, cwd);
     defer std.testing.allocator.free(text);
 
-    const parsed = try parseShellEvents(std.testing.allocator, text);
+    const parsed = try parseEvents(std.testing.allocator, text);
     defer freeParsedEvents(std.testing.allocator, parsed);
 
     try std.testing.expectEqual(events.len, parsed.len);
+    // ShellEvent(원)와 Event(파싱)를 태그+payload로 대조. cwd_changed는 POD void↔경로 문자열이라 별도 비교.
     for (events, parsed, 0..) |ev, pe, i| {
         try std.testing.expectEqual(i, pe.index);
         try std.testing.expectEqual(@as(u32, 1), pe.surface_id);
-        try std.testing.expect(std.meta.eql(ev, pe.event)); // union 태그 + payload 동일
-        if (ev == .cwd_changed) try std.testing.expectEqualStrings(cwd, pe.cwd.?); // cwd 경로 복원
+        switch (ev) {
+            .prompt_start => |r| try std.testing.expect(pe.event == .prompt_start and pe.event.prompt_start == r),
+            .input_start => |r| try std.testing.expect(pe.event == .input_start and pe.event.input_start == r),
+            .command_start => |r| try std.testing.expect(pe.event == .command_start and pe.event.command_start == r),
+            .command_end => |ce| try std.testing.expect(pe.event == .command_end and std.meta.eql(pe.event.command_end, ce)),
+            .cwd_changed => {
+                try std.testing.expect(pe.event == .cwd_changed);
+                try std.testing.expectEqualStrings(cwd, pe.event.cwd_changed); // cwd 경로 복원
+            },
+        }
     }
 }
 
 test "trace reader: 헤더/라인 검증 — 잘못된 헤더·깨진 라인은 error, exit=none·cwd escape 복원" {
     const a = std.testing.allocator;
     // 헤더 틀림 → BadHeader.
-    try std.testing.expectError(error.BadHeader, parseShellEvents(a, "not-a-trace\n"));
+    try std.testing.expectError(error.BadHeader, parseEvents(a, "not-a-trace\n"));
     // 깨진 라인(kind/surface 없음) → BadLine.
-    try std.testing.expectError(error.BadLine, parseShellEvents(a, "maru.trace.v1\nevent 0\n"));
-    try std.testing.expectError(error.BadLine, parseShellEvents(a, "maru.trace.v1\nevent 0 shell.prompt-start row=1\n")); // surface= 누락
+    try std.testing.expectError(error.BadLine, parseEvents(a, "maru.trace.v1\nevent 0\n"));
+    try std.testing.expectError(error.BadLine, parseEvents(a, "maru.trace.v1\nevent 0 shell.prompt-start row=1\n")); // surface= 누락
 
     // exit=none 복원(code 없는 D).
     {
-        const parsed = try parseShellEvents(a, "maru.trace.v1\nevent 0 shell.command-end surface=1 row=2 exit=none\n");
+        const parsed = try parseEvents(a, "maru.trace.v1\nevent 0 shell.command-end surface=1 row=2 exit=none\n");
         defer freeParsedEvents(a, parsed);
         try std.testing.expectEqual(@as(usize, 1), parsed.len);
         try std.testing.expect(parsed[0].event == .command_end);
@@ -262,7 +344,7 @@ test "trace reader: 헤더/라인 검증 — 잘못된 헤더·깨진 라인은 
     }
     // 실패 exit(130) 복원.
     {
-        const parsed = try parseShellEvents(a, "maru.trace.v1\nevent 3 shell.command-end surface=1 row=0 exit=130\n");
+        const parsed = try parseEvents(a, "maru.trace.v1\nevent 3 shell.command-end surface=1 row=0 exit=130\n");
         defer freeParsedEvents(a, parsed);
         try std.testing.expectEqual(@as(?i16, 130), parsed[0].event.command_end.exit);
         try std.testing.expectEqual(@as(usize, 3), parsed[0].index);
@@ -272,9 +354,39 @@ test "trace reader: 헤더/라인 검증 — 잘못된 헤더·깨진 라인은 
         const events = [_]terminal.types.ShellEvent{.cwd_changed};
         const text = try renderShellEvents(a, 2, &events, "a \"b\"\n/c");
         defer a.free(text);
-        const parsed = try parseShellEvents(a, text);
+        const parsed = try parseEvents(a, text);
         defer freeParsedEvents(a, parsed);
         try std.testing.expect(parsed[0].event == .cwd_changed);
-        try std.testing.expectEqualStrings("a \"b\"\n/c", parsed[0].cwd.?);
+        try std.testing.expectEqualStrings("a \"b\"\n/c", parsed[0].event.cwd_changed);
     }
+}
+
+// base kind는 재생의 권위 데이터 — 핵심 검증: output/resize/input/process-exit writer가 낸 라인을 parseEvents가
+// 원 payload(원시 바이트·크기·종료코드)로 되읽는다(round-trip). output 바이트는 ESC·제어·개행이 섞여도 escape
+// 왕복으로 무손실 복원돼야 재생이 화면을 정확히 재구성한다.
+test "trace base kind round-trip: output/resize/input/process-exit writer↔parseEvents" {
+    const a = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try writeHeader(&out.writer);
+    try writeOutputEvent(&out.writer, 0, 1, "hi\x1b[31m!\r\n"); // ESC·CR·LF 섞인 출력
+    try writeResizeEvent(&out.writer, 1, 1, 120, 40);
+    try writeInputEvent(&out.writer, 2, 1, "ls\r");
+    try writeProcessExitEvent(&out.writer, 3, 1, 0);
+    try writeProcessExitEvent(&out.writer, 4, 1, null); // code=none
+
+    const parsed = try parseEvents(a, out.written());
+    defer freeParsedEvents(a, parsed);
+
+    try std.testing.expectEqual(@as(usize, 5), parsed.len);
+    try std.testing.expect(parsed[0].event == .output);
+    try std.testing.expectEqualStrings("hi\x1b[31m!\r\n", parsed[0].event.output); // 무손실 복원
+    try std.testing.expect(parsed[1].event == .resize);
+    try std.testing.expectEqual(@as(u16, 120), parsed[1].event.resize.cols);
+    try std.testing.expectEqual(@as(u16, 40), parsed[1].event.resize.rows);
+    try std.testing.expect(parsed[2].event == .input);
+    try std.testing.expectEqualStrings("ls\r", parsed[2].event.input);
+    try std.testing.expect(parsed[3].event == .process_exit);
+    try std.testing.expectEqual(@as(?i32, 0), parsed[3].event.process_exit);
+    try std.testing.expectEqual(@as(?i32, null), parsed[4].event.process_exit);
 }

@@ -779,18 +779,26 @@ const NormalizedConfig = struct {
     scale_milli: u32,
 };
 
-/// 한 터미널의 런타임 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸 + 그 PTY를 drain하는
-/// pump. `LivePtySession`의 reader thread가 `&rt.live_pty.reader`를 잡으므로 이 묶음은 한번 만들면 이동하면
-/// 안 된다 — heap-pin(`*Term`)이라 ArrayList realloc·트리 회전·탭 재정렬에도 본체(reader가 잡는
-/// `&rt.live_pty.reader`, SplitTree leaf가 잡는 `&surface`)가 안 움직인다. pump는 안정 `*queue`만 들어 이동
+/// 한 터미널의 런타임 단위: surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸(참조) + 그 PTY를 drain하는
+/// pump. **M2b**: live PTY 런타임(`LivePtySession`)의 **소유**는 앱 전역 `app_live_registry`로 옮겨졌고, 여기 `live_pty`는
+/// 그 registry heap 슬롯을 가리키는 포인터다(docs/window-surface-mobility.md §8 M2b). reader thread가 잡는
+/// `&live_pty.reader` 주소는 registry의 heap 슬롯(`allocator.create`)이 고정하므로 여전히 안정적이다 — 소유 위치가
+/// Term-inline → registry-슬롯으로 바뀌었을 뿐 heap-pin 메커니즘은 동일하다. `surface`(TerminalCore=스크롤백)는 아직
+/// Term 안에 nested라(Surface를 Term 밖으로 빼는 대수술은 M3+) SplitTree leaf가 잡는 `&surface`는 heap-pin `*Term`이
+/// 고정한다. reader가 `&live_pty.reader`(registry 슬롯)와 `&surface.core`(Term)를 교차 바인딩하므로, teardown은
+/// detach 선행 후 registry.remove(reader join) → surface.deinit 순서를 지킨다. pump는 안정 `*queue`만 들어 이동
 /// 제약이 없다. 탭→pane 모델에서 한 Pane(split leaf)이 이 Term을 가로 탭으로 여러 개 들 수 있다(⌘T로 추가).
 ///
-/// `TermRuntime` = Term의 런타임 부착(PTY 세션·이벤트 펌프·생애 플래그) — platform이 소유하는 OS/런타임
-/// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). heap-pin
-/// Term 안에 nested라 reader가 잡는 `&rt.live_pty.reader` 주소 안정성은 그대로다. 모델 struct(Term/Pane/Tab)는
-/// session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
+/// `TermRuntime` = Term의 런타임 부착(PTY 세션 **참조**·이벤트 펌프·생애 플래그) — platform이 소유하는 OS/런타임
+/// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). 모델 struct
+/// (Term/Pane/Tab)는 session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
 const TermRuntime = struct {
-    live_pty: app.LivePtySession = undefined,
+    // M2b: 런타임 소유는 앱 전역 `app_live_registry`(LiveSurfaceRegistry)에 있고, Term은 그 **안정 heap 슬롯**을
+    // 가리키는 포인터만 든다(docs/window-surface-mobility.md §8 M2b). registry가 `allocator.create`로 각 런타임을
+    // 개별 heap 슬롯에 두므로 reader thread가 잡는 `&live_pty.reader` 주소는 Term-inline 시절과 **같은 heap-pin
+    // 메커니즘**으로 안정적이다(소유 위치만 Term→registry로 옮겼을 뿐, 슬롯은 수명 내내 안 움직인다). 필드가 포인터라
+    // 대부분의 `live_pty.X` 접근은 Zig auto-deref로 그대로 유효하고, 소유/수명(create·remove)만 registry를 거친다.
+    live_pty: *app.LivePtySession = undefined,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
@@ -1107,6 +1115,20 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
 // 경로만 바꾸면 된다). 메인 스레드 전용(surface_id.zig 스레드 계약).
 var app_surface_ids: maru.session.SurfaceIdAllocator = .{};
 
+// 앱 인스턴스 전역 live surface 런타임 **소유자** (M2b). **모든 창(AppSession)이 이 한 registry를 공유**해, live
+// PTY 런타임(`LivePtySession`: PTY 세션·reader thread·이벤트/write/command 큐)의 소유가 창(Term/트리) 밖 앱 전역에
+// 있다(docs/window-surface-mobility.md §3·§8 M2b). Term은 `surface_id`로 이 registry의 안정 heap 슬롯을 참조만 한다 —
+// surface_id가 앱 전역 유일(M0a)이라 멀티 창에서도 키가 안 겹친다. surface_id_allocator(app_surface_ids)와 같은
+// 모듈-로컬 소유 seam이며(M1 AppRuntime이 생기면 그 소유를 넘겨받는다), AppSession.live_registry 필드 기본값이 이 주소다.
+//
+// **allocator**: registry **자체의 bookkeeping**(entries 배열 + 각 런타임 heap 슬롯)은 창보다 오래 사는 앱 전역
+// 수명이라 프로세스 전역 `smp_allocator`(app_host_abi.zig가 AppSession을 만들 때 쓰는 것과 동일)로 소유한다. 각
+// `LivePtySession` **내부**(session/queue 등)는 그 런타임을 만든 창의 allocator가 소유한다(createTerm이 init에 주입) —
+// registry.remove가 `deinit`(창 allocator로 내부 해제) 후 슬롯을 smp로 destroy하므로 두 allocator가 각자 해제 짝이
+// 맞는다. 프로덕션은 창 allocator도 smp_allocator라 사실상 동일 allocator다(테스트만 창=testing.allocator로 분리).
+// **스레드**: 메인 스레드 전용(surface_id.zig·세션 트리와 같은 계약 — createTerm/destroyTerm/deinit은 전부 메인 이벤트).
+var app_live_registry: maru.session.LiveSurfaceRegistry(app.LivePtySession) = .{ .allocator = std.heap.smp_allocator };
+
 // ── 컨트롤 플레인 collector 순수 매핑(Track C A1, 내부 상태 → wire enum) ──────────────────────────────────
 // docs/control-plane.md §3(엔티티 상태 수집)·control_surface.zig(wire enum은 내부 상태머신과 격리 — collector가
 // 내부→wire 매핑). 이 두 매핑은 self를 안 쓰는 순수 함수라 헤드리스 단위 테스트로 못박는다(macOS PTY 불요).
@@ -1175,6 +1197,12 @@ pub const AppSession = struct {
     // `self.* = .{...}`·reset 경로가 모두 같은 allocator를 가리킨다. **주의**: `var session: AppSession = undefined`
     // 테스트는 이 포인터가 0xaa가 되므로 createTerm을 타면 이 필드를 명시 초기화해야 한다([[devsession-undefined-test-field-trap]]).
     surface_ids: *maru.session.SurfaceIdAllocator = &app_surface_ids,
+    // 앱 전역 live surface 런타임 소유자(M2b — app_live_registry 공유). createTerm이 여기 `create`로 `LivePtySession`
+    // 슬롯을 소유시키고 Term은 그 안정 포인터를 든다. destroyTerm/close/deinit이 `remove`로 teardown(reader join +
+    // 슬롯 해제). 기본값이 공유 인스턴스 주소라 init의 `self.* = .{...}`·reset 경로가 모두 같은 registry를 가리킨다
+    // (surface_ids 패턴과 동형). **주의**: `var session: AppSession = undefined` 테스트가 createTerm을 타면 이 포인터도
+    // 명시 초기화해야 한다([[devsession-undefined-test-field-trap]]) — 단 그런 테스트는 init을 먼저 부르므로 기본값이 채워진다.
+    live_registry: *maru.session.LiveSurfaceRegistry(app.LivePtySession) = &app_live_registry,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격
     // (homeForRootCwd)에 쓴다. getcwd 실패 시 false(승격 안 함 — 상속 그대로).
@@ -3457,10 +3485,12 @@ pub const AppSession = struct {
         self.focusPane(tab.panes.items.len - 1);
     }
 
-    /// 한 Term(터미널)을 heap-pin(`create`)으로 만든다 — 셸 PTY spawn → surface init → runtime attach → pump.
-    /// `LivePtySession` reader가 `&term.rt.live_pty.reader`를 잡으므로 Term은 heap 고정(ArrayList는 `*Term`만 들어
-    /// realloc·탭 재정렬에도 본체 안 움직임). surface_id·pty_id 발급(앱 전역 surface_ids), 부분 실패는 errdefer로 정리
-    /// (create→live_pty→surface 역순). Pane에 거는 건 호출자(createPane/⌘T)가 한다.
+    /// 한 Term(터미널)을 heap-pin(`create`)으로 만든다 — registry가 런타임 슬롯 소유 → surface init → runtime attach → pump.
+    /// M2b: `LivePtySession` 런타임 소유는 앱 전역 `live_registry`가 든다(`create`가 안정 heap 슬롯) — reader가 잡는
+    /// `&live_pty.reader`는 그 슬롯이 고정한다. Term 자체도 heap-pin(ArrayList는 `*Term`만 들어 realloc·탭 재정렬에도
+    /// surface·pump가 안 움직임 — reader가 `&surface.core`도 잡음). surface_id·pty_id 발급(앱 전역 surface_ids),
+    /// 부분 실패는 errdefer로 정리(registry create→live_pty init→surface 역순; init 실패는 removeUninitialized).
+    /// Pane에 거는 건 호출자(createPane/⌘T)가 한다.
     fn createTerm(
         self: *AppSession,
         request: maru.pty.SpawnRequest,
@@ -3476,8 +3506,17 @@ pub const AppSession = struct {
         const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
         var req = request;
         req.pane_id = id; // 이 팬 셸에 MARU_PANE_ID=<id> 주입 — 에이전트(claude/codex) 훅이 이 id로 세션 트랜스크립트 경로를 남긴다
+        // M2b: 런타임 소유를 앱 전역 registry로. `create`가 안정 heap 슬롯을 잡아 Term은 그 포인터만 든다 — reader가
+        // 잡는 `&live_pty.reader` 주소를 슬롯이 고정한다(Term-inline과 같은 heap-pin). generation=0으로 시작(M2a는
+        // 보존만 — respawn 시 증가는 미도입, §8 M0a). id는 앱 전역 유일이라 중복 등록 없음.
+        term.rt.live_pty = try self.live_registry.create(id, 0);
+        // init 실패 시 슬롯은 undefined라 deinit이 UB → `removeUninitialized`(deinit 없이 슬롯만 해제). init 성공 뒤
+        // later 실패는 `remove`(deinit=reader join + 슬롯 해제). live_initialized 플래그로 두 경로를 가른다(errdefer
+        // 등록은 init 호출 '전'이라 init 자체 실패도 이 errdefer가 덮는다 — 그때는 아직 !live_initialized).
+        var live_initialized = false;
+        errdefer if (live_initialized) (self.live_registry.remove(id) catch {}) else (self.live_registry.removeUninitialized(id) catch {});
         try term.rt.live_pty.init(self.io, self.allocator, id, req, queue_capacity);
-        errdefer term.rt.live_pty.deinit();
+        live_initialized = true;
         term.rt.live_initialized = true;
         term.rt.spawned_at_ns = std.Io.Clock.awake.now(self.io).nanoseconds; // uptime(비정상 시작 사망 grace) 기준 시각
         // 비정상 시작 사망으로 held된 창에 새 셸이 뜨면 held를 풀어(re-arm), 이 새 세션이 정상 종료할 때 세션 종료
@@ -3533,8 +3572,11 @@ pub const AppSession = struct {
             self.chrome_host.context_menu.hide();
         };
         if (term.rt.live_initialized) {
+            // M2b: detach(runtime routing) 선행 → registry.remove가 런타임 소유를 teardown(deinit=reader join + 슬롯
+            // 해제). remove는 surface_id로 키드 — Term은 슬롯을 참조만 하므로 소유 해제는 registry가 단일 출처로 한다.
+            // reader join(remove 내부 deinit)이 surface.deinit(아래)보다 먼저라, reader가 잡던 `&surface.core`가 살아 있다.
             if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(&self.runtime);
-            term.rt.live_pty.deinit();
+            self.live_registry.remove(term.surface.id) catch {};
             term.rt.live_initialized = false;
         }
         // custom_name(사용자 rename, owned)만 해제 — surface.title은 정적/borrowed라 해제 안 함. Surface.deinit에
@@ -17523,13 +17565,15 @@ pub const AppSession = struct {
         self.hover_divider_scratch.deinit(self.allocator);
         self.divider_seg_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term live PTY 정리 — closeAndDetach는 runtime을 쓰므로 runtime.deinit '전에'.
-        //    detach 후 deinit이 reader thread join + fd/queue 해제(이동 금지 계약이라 in-place로 정리).
+        //    detach 후 registry.remove가 런타임 소유를 teardown(deinit=reader thread join + fd/queue 해제, 주소 안정
+        //    계약이라 슬롯은 안 움직이고 그 자리서 정리). M2b: 이 창이 소유하던 슬롯을 앱 전역 registry에서 뺀다
+        //    (다른 창 슬롯은 안 건드림 — surface_id 키드). registry 자체는 앱 전역이라 여기서 deinit하지 않는다.
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.rt.live_initialized) {
                         if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(&self.runtime);
-                        term.rt.live_pty.deinit();
+                        self.live_registry.remove(term.surface.id) catch {};
                         term.rt.live_initialized = false;
                     }
                 }
@@ -24943,6 +24987,149 @@ test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 
     // createTerm이 per-session 카운터가 아니라 앱 전역 SurfaceIdAllocator에서 발급하므로, 서로 다른 창의 첫
     // surface조차 id가 겹치지 않는다(per-session이면 둘 다 1이라 충돌 — 이 단언이 그 회귀를 잡는다).
     try std.testing.expect(s1.activeSurface().id != s2.activeSurface().id);
+}
+
+// M2b LiveSurfaceRegistry 배선 — live PTY 런타임(LivePtySession)의 **소유**가 Term-inline이 아니라 앱 전역
+// `app_live_registry`로 이전됐고, 모든 창(AppSession)이 그 한 registry를 공유한다(docs/window-surface-mobility.md §8 M2b).
+// createTerm이 `create`로 런타임을 registry에 소유시키고 Term은 안정 슬롯 포인터를 참조만 한다. 이 테스트는
+// (1) 창 간 registry 공유, (2) Term이 든 포인터 == registry 엔트리, (3) 두 창 런타임의 앱 전역 공존을 못박는다.
+test "M2b: 앱 전역 live registry를 모든 창(AppSession)이 공유 — 런타임 소유는 창 밖 registry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const before = app_live_registry.count();
+
+    const s1 = try allocator.create(AppSession);
+    defer allocator.destroy(s1);
+    try s1.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s1.deinit();
+
+    const s2 = try allocator.create(AppSession);
+    defer allocator.destroy(s2);
+    try s2.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer s2.deinit();
+
+    // 두 세션이 앱 인스턴스에 하나뿐인 registry를 공유한다(창별 소유가 아님, surface_ids와 동형).
+    try std.testing.expectEqual(s1.live_registry, s2.live_registry);
+    try std.testing.expectEqual(&app_live_registry, s1.live_registry);
+
+    // 각 창의 첫 Term 런타임이 그 창의 surface_id로 registry에 소유돼 있고, Term이 든 포인터와 **동일**하다
+    // (소유는 registry, Term은 참조 — 이 단언이 배선을 못박는다).
+    const sid1 = s1.activeSurface().id;
+    const sid2 = s2.activeSurface().id;
+    try std.testing.expect(sid1 != sid2); // M0a: 앱 전역 유일
+    try std.testing.expectEqual(s1.activePane().activeTerm().rt.live_pty, s1.live_registry.findBySurface(sid1).?);
+    try std.testing.expectEqual(s2.activePane().activeTerm().rt.live_pty, s2.live_registry.findBySurface(sid2).?);
+    // 두 창의 런타임이 한 registry에 공존한다(앱 전역 소유 — 창이 달라도 같은 owner).
+    try std.testing.expectEqual(before + 2, app_live_registry.count());
+}
+
+// M2b 핵심 불변식(주소 안정성) — 런타임 소유를 registry로 옮겨도 reader thread가 잡는 embedded `&reader` 주소가
+// 등록(realloc)·타 런타임 해제에도 **불변**이어야 한다(Term-inline heap-pin과 같은 메커니즘 = registry 개별 heap 슬롯).
+// 이 단언이 실패하면 소유 이전이 reader 계약을 깬 것이다. 실 PTY(실 reader thread)라 macOS 게이트 — 프로덕션 배선 검증.
+test "M2b: 런타임 소유 이전 후에도 reader embedded 주소가 등록/해제에 불변(reader 계약 보존)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const before = app_live_registry.count();
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 첫 Term(T0)의 런타임 포인터·reader embedded 주소·surface_id를 잡는다.
+    const t0 = session.tabs.items[0].activePane().activeTerm();
+    const p0 = t0.rt.live_pty; // registry 슬롯 포인터(안정)
+    const reader_addr0 = &p0.reader; // reader thread가 잡는 embedded 필드 주소 — 절대 이동 금지
+    const sid0 = t0.surface.id;
+    try std.testing.expectEqual(p0, session.live_registry.findBySurface(sid0).?);
+    try std.testing.expectEqual(before + 1, session.live_registry.count());
+
+    // 워크스페이스(런타임)를 여러 개 더 등록해 registry entries realloc을 유도한다. cat으로 살려 tick 미실행이라
+    // reap과 무관하게 등록 상태를 유지한다(멀티-탭 테스트와 같은 셋업).
+    const N: usize = 6;
+    var k: usize = 0;
+    while (k < N) : (k += 1) {
+        _ = try session.createTab(
+            .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+            .{ .cols = 20, .rows = 5 },
+            16,
+            "w",
+            "sh",
+        );
+    }
+    try std.testing.expectEqual(before + 1 + N, session.live_registry.count());
+    // 등록이 늘어도 T0 슬롯은 개별 heap이라 안 움직인다 — 같은 런타임 포인터·같은 reader 주소·같은 Term 참조.
+    try std.testing.expectEqual(p0, session.live_registry.findBySurface(sid0).?);
+    try std.testing.expectEqual(reader_addr0, &session.live_registry.findBySurface(sid0).?.reader);
+    try std.testing.expectEqual(p0, t0.rt.live_pty);
+
+    // 추가분을 뒤에서부터 닫아(런타임 소유 해제) 남은 T0(index 0)가 여전히 불변인지 — orderedRemove가 다른
+    // 슬롯을 안 옮긴다(런타임 본체는 개별 heap). 마지막 1개(T0)까지 줄인다.
+    while (session.tabs.items.len > 1) session.closeTab(session.tabs.items.len - 1);
+    try std.testing.expectEqual(before + 1, session.live_registry.count());
+    try std.testing.expectEqual(p0, session.live_registry.findBySurface(sid0).?);
+    try std.testing.expectEqual(reader_addr0, &session.live_registry.findBySurface(sid0).?.reader);
+}
+
+// M2b close/teardown 배선 — Term을 닫으면 그 런타임 소유가 registry에서 **제거**되고(findBySurface→null), 남은
+// 런타임은 온전해야 한다. destroyTerm이 `remove`로 teardown하는 경로를 못박는다(누수·이중해제는 testing.allocator가 잡음).
+test "M2b: Term close가 registry 엔트리를 제거하고 남은 런타임은 불변" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const before = app_live_registry.count();
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const keep = session.tabs.items[0].activePane().activeTerm();
+    const keep_ptr = keep.rt.live_pty;
+    const keep_sid = keep.surface.id;
+
+    // 두 번째 워크스페이스(런타임)를 추가 → registry 소유 2개.
+    _ = try session.createTab(
+        .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "w2",
+        "sh",
+    );
+    const closing_sid = session.tabs.items[1].activePane().activeTerm().surface.id;
+    try std.testing.expectEqual(before + 2, session.live_registry.count());
+    try std.testing.expect(session.live_registry.findBySurface(closing_sid) != null);
+
+    // 두 번째 워크스페이스를 닫는다 → 그 런타임 소유가 registry에서 사라진다(destroyTerm → remove).
+    session.closeTab(1);
+    try std.testing.expect(session.live_registry.findBySurface(closing_sid) == null);
+    try std.testing.expectEqual(before + 1, session.live_registry.count());
+    // 남은 런타임(keep)은 포인터·소유가 온전(orderedRemove가 keep 슬롯을 안 건드림).
+    try std.testing.expectEqual(keep_ptr, session.live_registry.findBySurface(keep_sid).?);
+    try std.testing.expectEqual(keep_ptr, keep.rt.live_pty);
 }
 
 test "dispatchBell: 배경(비활성) pane의 BEL도 잡는다 — Dock 배지/소리 (리뷰 D)" {

@@ -136,7 +136,15 @@ pub const ParsedEvent = struct {
 /// `maru.trace.v1` 텍스트를 이벤트 스트림으로 되읽는다(writer의 역연산). shell.* + base kind 전부 처리한다.
 /// round-trip: render→parse가 원 이벤트(+ 소유 문자열)를 복원한다. 반환 슬라이스와 소유 문자열은 allocator 소유 —
 /// freeParsedEvents로 해제한다. 헤더가 틀리면 BadHeader, 라인이 깨지면 BadLine.
-pub fn parseEvents(allocator: std.mem.Allocator, text: []const u8) ParseError![]ParsedEvent {
+pub fn parseEvents(allocator: std.mem.Allocator, text_in: []const u8) ParseError![]ParsedEvent {
+    // 증분 레코딩(MARU_TRACE)은 이벤트마다 flush하지만, 크래시·I/O 에러가 마지막 이벤트를 반쯤 쓴 채 끊을 수 있다.
+    // 그런 **개행으로 안 끝난 잘린 마지막 줄**은 떨궈, 디스크에 남은 완전한 앞부분은 그대로 재생되게 한다(정상 trace는
+    // 매 이벤트가 '\n'으로 끝나므로 no-op). 중간 줄은 여전히 '\n'으로 끝나 엄격히 검증된다.
+    const text = if (text_in.len > 0 and text_in[text_in.len - 1] != '\n')
+        text_in[0 .. (std.mem.lastIndexOfScalar(u8, text_in, '\n') orelse return error.BadHeader) + 1]
+    else
+        text_in;
+
     var lines = std.mem.splitScalar(u8, text, '\n');
     const first = lines.next() orelse return error.BadHeader;
     if (!std.mem.eql(u8, first, header)) return error.BadHeader;
@@ -358,6 +366,18 @@ test "trace round-trip: parseEvents(renderShellEvents(...))가 원 이벤트·cw
             },
         }
     }
+}
+
+test "trace reader: 크래시로 잘린 마지막 줄(개행 없음)은 관대 처리 — 앞부분은 파싱된다" {
+    const a = std.testing.allocator;
+    // 증분 레코딩이 두 번째 이벤트를 반쯤 쓴 채 끊긴 모양(마지막 줄 개행 없음).
+    const truncated = "maru.trace.v1\nevent 0 output surface=1 bytes=\"hi\\r\\n\"\nevent 1 resize surf";
+    const parsed = try parseEvents(a, truncated);
+    defer freeParsedEvents(a, parsed);
+    try std.testing.expectEqual(@as(usize, 1), parsed.len); // 완전한 event 0만, 잘린 event 1은 떨어짐
+    try std.testing.expect(parsed[0].event == .output);
+    // 중간 줄이 깨진 건(개행 뒤) 여전히 엄격히 실패.
+    try std.testing.expectError(error.BadLine, parseEvents(a, "maru.trace.v1\nevent 0 bogus\nevent 1 resize surface=1 cols=8 rows=2\n"));
 }
 
 test "trace reader: 헤더/라인 검증 — 잘못된 헤더·깨진 라인은 error, exit=none·cwd escape 복원" {

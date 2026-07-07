@@ -8,6 +8,7 @@ const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
+const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 
 // L2 session core(src/session)로 추출한 순수 입력/재정렬 수학. 내부 호출처는 bare 이름을 유지하도록 file-scope
 // alias로 재노출한다(docs/layering-and-portability.md §3 — 2차 추출 슬라이스 1). 정의·테스트는 session/input_math.zig.
@@ -1105,6 +1106,58 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
 // 모듈-로컬 var가 그 소유 seam이다 — M1 AppRuntime이 생기면 그 소유를 넘겨받는다(그때 AppSession.surface_ids 주입
 // 경로만 바꾸면 된다). 메인 스레드 전용(surface_id.zig 스레드 계약).
 var app_surface_ids: maru.session.SurfaceIdAllocator = .{};
+
+// ── 컨트롤 플레인 collector 순수 매핑(Track C A1, 내부 상태 → wire enum) ──────────────────────────────────
+// docs/control-plane.md §3(엔티티 상태 수집)·control_surface.zig(wire enum은 내부 상태머신과 격리 — collector가
+// 내부→wire 매핑). 이 두 매핑은 self를 안 쓰는 순수 함수라 헤드리스 단위 테스트로 못박는다(macOS PTY 불요).
+
+/// 코어 `semantic_state`(+`alt_active`) → 컨트롤 플레인 at_prompt **3상**(§3). alt-screen 중에는 semantic_state와
+/// 무관하게 `not_at_prompt`(§3 alt 오버라이드). 그 외엔 OSC 133 분류로: prompt/input=at_prompt, command=not_at_prompt,
+/// unknown=unknown. **unknown(OSC 133 미통합 셸, 대다수)을 false로 접지 않는다** — 닫기 확인 `cursorIsAtPrompt`는
+/// unknown을 false로 접지만(bool), 컨트롤 플레인은 known-not-prompt와 no-integration을 구별해야 하므로 3상을
+/// 보존한다(§3·§6 raw semantic_state 사용). wire 인코딩(true/false/null)은 control_surface가 한다.
+fn atPromptWire(semantic: terminal.SemanticPrompt, alt_active: bool) control_surface.AtPrompt {
+    if (alt_active) return .not_at_prompt;
+    return switch (semantic) {
+        .prompt, .input => .at_prompt,
+        .command => .not_at_prompt,
+        .unknown => .unknown,
+    };
+}
+
+/// 내부 `session_model.AgentKind`/`agent_transcript.AgentState` → 컨트롤 플레인 agent DTO(§3). `none`이면 null
+/// (에이전트 없음 → wire에서 필드 생략, control_surface가 처리). 내부 rename이 wire를 조용히 흔들지 않도록(§3 경계
+/// 격리) exhaustive switch로 wire enum을 못박는다.
+fn agentInfoWire(
+    kind: maru.session.session_model.AgentKind,
+    state: maru.session.agent_transcript.AgentState,
+) ?control_surface.AgentInfo {
+    const wire_kind: control_surface.AgentKind = switch (kind) {
+        .none => return null,
+        .claude => .claude,
+        .codex => .codex,
+    };
+    const wire_state: control_surface.AgentState = switch (state) {
+        .unknown => .unknown,
+        .running => .running,
+        .idle => .idle,
+    };
+    return .{ .kind = wire_kind, .state = wire_state };
+}
+
+/// A1 collector 결과(단일 세션 편의 래퍼). 빌린 슬라이스(SurfaceDto·surface_ids·title/cwd/git_branch)의 backing
+/// 메모리를 arena로 소유한다 — `snapshot`은 arena 메모리를 빌리므로 `deinit` 전까지만 유효하다(control_surface.zig
+/// "collector 소유 버퍼를 빌린다" 계약). arena는 heap-pin(std.json.Parsed 선례)이라 값 복사가 안전하다.
+pub const SessionCollection = struct {
+    arena: *std.heap.ArenaAllocator,
+    snapshot: maru.session.CollectorSnapshot,
+
+    pub fn deinit(self: SessionCollection) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
+};
 
 pub const AppSession = struct {
     allocator: std.mem.Allocator,
@@ -12108,7 +12161,14 @@ pub const AppSession = struct {
     /// (사이드바는 매 프레임 빌드되므로 fs 읽기를 cwd 변경으로 게이트). 없으면 null. 반환은 term 소유(다음 cwd 변경/
     /// teardown까지 유효). 파생값이라 영속 안 함 — restore가 cwd에서 재도출.
     fn termGitBranch(self: *AppSession, term: *Term) ?[]const u8 {
-        const cwd = term.surface.core.currentCwd();
+        return self.termGitBranchForCwd(term, term.surface.core.currentCwd());
+    }
+
+    /// termGitBranch의 코어 무참조 변형 — 이미 확보한 `cwd`로 git 브랜치 캐시를 계산한다. 컨트롤 플레인 collector
+    /// (§5)가 cwd를 core_mutex 아래에서 복사해 두고, git .git/HEAD 읽기(blocking fs)는 락 밖에서 하도록 코어 read를
+    /// cwd 인자로 분리한다(sidebar 경로는 termGitBranch가 core.currentCwd()를 넘겨 기존 동작 그대로). 캐시 키·재계산
+    /// 로직은 단일 출처(재구현 금지).
+    fn termGitBranchForCwd(self: *AppSession, term: *Term, cwd: []const u8) ?[]const u8 {
         if (cwd.len == 0) return null;
         if (term.git_branch_cwd) |c| {
             if (std.mem.eql(u8, c, cwd)) return term.git_branch; // 캐시 적중(cwd 불변)
@@ -12120,6 +12180,113 @@ pub const AppSession = struct {
         term.git_branch_cwd = self.allocator.dupe(u8, cwd) catch null;
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.git).info("branch: cwd={s} -> {?s}", .{ cwd, term.git_branch });
         return term.git_branch;
+    }
+
+    // ── 컨트롤 플레인 collector (Track C A1, Zig 측 per-AppSession 평탄화) ─────────────────────────────────
+    // docs/control-plane.md §2(collector 2층: 전역 AppSession 레지스트리가 없어 Swift가 windows+quick 순회하며
+    // per-session collect ABI 호출, Zig는 한 세션의 tabs→panes→terms 트리만 중립 DTO로 평탄화)·§3(엔티티)·
+    // §5(코어 read는 surface core_mutex 아래)·§16(collector L4 = src/platform/macos/). Swift 멀티창 열거·
+    // accept-loop 스레드↔메인 marshal·소켓 배선·capability auth는 **범위 밖(A2/1e)** — 이 함수는 순수 트리 평탄화만.
+
+    /// A1 collector 코어(§2 Zig 측 per-session 평탄화). 이 AppSession의 tabs→panes→terms 트리를 walk해 SurfaceDto[]를
+    /// `surfaces`에, 이 창의 WindowMembershipSnapshot 하나를 `windows`에 append한다(전부 `arena`에서 할당). A2(Swift
+    /// 멀티창 열거 ABI)가 살아있는 각 AppSession마다 이 함수를 **공유 리스트**로 호출해 하나의 CollectorSnapshot을
+    /// 만든다(§2). 매핑: id={surface.id(M0a), generation=0}, kind=terminal(web는 Phase 4), title=termLabel(custom_name
+    /// 우선), 좌표(window_id 주입·tab/pane 0-based 인덱스), focused(key 창의 활성 surface), cwd/git_branch/agent/
+    /// at_prompt 3상(§3). **core_mutex(§5)**: cwd·semantic_state·alt_active 코어 read는 각 surface core_mutex 아래에서
+    /// **복사만** 하고, git .git/HEAD fs 읽기·DTO 조립·직렬화는 락 밖에서 한다(리더 스레드 evict/free와 경합 방지).
+    pub fn collectSessionInto(
+        self: *AppSession,
+        arena: std.mem.Allocator,
+        window_id: u64,
+        window_kind: maru.session.WindowKind,
+        surfaces: *std.ArrayList(control_surface.SurfaceDto),
+        windows: *std.ArrayList(maru.session.WindowMembershipSnapshot),
+    ) std.mem.Allocator.Error!void {
+        // focused는 **key 창의 활성 surface 하나**만 true(§3 공통 메타). window_focused=false(비-key 창)면 이 세션의
+        // 어떤 surface도 focused 아님 — A2가 여러 창을 하나의 CollectorSnapshot으로 합치면 오직 key 창의 활성
+        // surface 하나만 focused=true가 된다(전역 정합). activeSurface()==활성 tab·pane·term의 surface(app_window).
+        const focused_surface_id: ?u64 = if (self.surface_initialized and self.window_focused)
+            self.activeSurface().id
+        else
+            null;
+
+        var member_ids: std.ArrayList(u64) = .empty; // arena 소유(함수 반환 후에도 windows[].surface_ids로 유효)
+
+        for (self.tabs.items, 0..) |tab, ti| {
+            for (tab.panes.items, 0..) |pane, pi| {
+                for (pane.terms.items) |term| {
+                    // ── 코어 read는 surface core_mutex 아래에서 **복사만**(§5, 리더 스레드 evict/free 경합 방지) ──
+                    term.surface.lockCore(self.io);
+                    const sem = term.surface.core.semantic_state;
+                    const alt = term.surface.core.alt_active;
+                    const cwd_live = term.surface.core.currentCwd(); // core 소유(다음 OSC 7까지 유효) → 락 아래 복사
+                    const cwd_copy: ?[]const u8 = if (cwd_live.len == 0) null else try arena.dupe(u8, cwd_live);
+                    term.surface.unlockCore(self.io);
+
+                    // ── 나머지(§5 락 밖): at_prompt 매핑·agent·git .git/HEAD fs 읽기·title·DTO 조립 ──
+                    const at_prompt = atPromptWire(sem, alt); // 3상(§3, unknown 보존)
+                    const agent = agentInfoWire(term.agent_kind, term.agent_state); // 내부→wire, none=null
+                    // git branch: 락 아래 복사한 cwd로 계산(fs 읽기를 core_mutex 아래로 넣지 않음). termGitBranch 캐시
+                    // 재사용. 반환은 term 소유 캐시(다음 cwd 변경까지) → snapshot 수명 위해 arena로 복사.
+                    const branch_live: ?[]const u8 = if (cwd_copy) |cw| self.termGitBranchForCwd(term, cw) else null;
+                    const branch_copy: ?[]const u8 = if (branch_live) |b| try arena.dupe(u8, b) else null;
+                    // title: main-thread 소유(custom_name·auto_title 캐시·정적 title, reader 미접근 — termLabel doc). arena 복사.
+                    const title_copy = try arena.dupe(u8, termLabel(term));
+
+                    const sid = term.surface.id;
+                    try member_ids.append(arena, sid);
+                    try surfaces.append(arena, .{
+                        .surface_id = sid, // = surface.id(M0a 앱 전역 opaque)
+                        .generation = 0, // §3 defense-in-depth 보조 — respawn 경로(M1) 전엔 0
+                        .title = title_copy,
+                        .window = window_id, // 좌표(위치 메타) 주입
+                        .tab = @intCast(ti), // window 안 tab 0-based
+                        .pane = @intCast(pi), // tab split 안 pane 0-based(가로 탭 term은 pane 좌표 공유)
+                        .focused = (focused_surface_id != null and sid == focused_surface_id.?),
+                        .detail = .{
+                            .terminal = .{
+                                .cwd = cwd_copy, // 없으면 null(§3 필드 생략)
+                                .git_branch = branch_copy,
+                                .agent = agent,
+                                .at_prompt = at_prompt, // terminal엔 항상(3상)
+                            },
+                        },
+                    });
+                }
+            }
+        }
+
+        try windows.append(arena, .{
+            .window_id = window_id,
+            .window_kind = window_kind,
+            .surface_ids = member_ids.items, // tree 순서(tab→pane→term). arena 소유라 반환 후 유효
+        });
+    }
+
+    /// A1 collector 편의 래퍼(단일 세션 = A1 산출물·헤드리스 테스트). `gpa`에서 private arena를 만들어 이 세션 하나를
+    /// 평탄화하고 backing 메모리를 소유하는 `SessionCollection`을 돌려준다(caller가 `deinit`). A2는 대신
+    /// `collectSessionInto`를 공유 리스트로 창마다 호출한다.
+    pub fn collectSession(
+        self: *AppSession,
+        gpa: std.mem.Allocator,
+        window_id: u64,
+        window_kind: maru.session.WindowKind,
+    ) std.mem.Allocator.Error!SessionCollection {
+        const arena = try gpa.create(std.heap.ArenaAllocator);
+        errdefer gpa.destroy(arena);
+        arena.* = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+
+        var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+        var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+        try self.collectSessionInto(a, window_id, window_kind, &surfaces, &windows);
+
+        return .{
+            .arena = arena,
+            .snapshot = .{ .surfaces = surfaces.items, .windows = windows.items },
+        };
     }
 
     /// config 파일 경로(Open Config 메뉴용). loader.defaultConfigPath(MARU_CONFIG override·$HOME/.config/maru/
@@ -29985,6 +30152,274 @@ test "close-confirm: 셸 통합 없음(unknown, primary 화면)이면 보수적�
     // 정책). 데이터 손실 방지 우선. maru 기본 zsh는 통합을 주입하므로 대부분 세션은 이 경로가 아님.
     session.activePane().activeTerm().surface.core.semantic_state = .unknown;
     try std.testing.expect(session.closeTargetHasRunningJob(.term_or_pane));
+}
+
+// ══ 컨트롤 플레인 collector (Track C A1) 테스트 ═══════════════════════════════════════════════════════════
+// docs/control-plane.md §2(전역 레지스트리 부재 → Swift가 창 순회, Zig는 한 세션 tabs→panes→terms 트리를 중립
+// DTO로 평탄화)·§3(엔티티: 좌표·focused·cwd·git_branch·agent·at_prompt 3상)·§5(코어 read는 core_mutex 아래 복사만)·
+// §16(collector L4 = 이 파일). 순수 매핑 두 개(atPromptWire·agentInfoWire)는 헤드리스, 트리 평탄화(collectSession)는
+// 실 AppSession(controlled_smoke — OSC 133/alt를 안 쏘므로 코어 상태를 세팅한 값 그대로 결정론)으로 검증한다.
+
+// ── 순수 매핑 1) at_prompt 3상(§3): alt 오버라이드 + prompt/input=true, command=false, unknown=null(false로 안 접음) ──
+test "collector atPromptWire: semantic_state(+alt) → at_prompt 3상(unknown≠not_at_prompt)" {
+    // alt-screen이면 semantic_state 무관 not_at_prompt(§3 alt 오버라이드).
+    for ([_]terminal.SemanticPrompt{ .unknown, .prompt, .input, .command }) |s| {
+        try std.testing.expectEqual(control_surface.AtPrompt.not_at_prompt, atPromptWire(s, true));
+    }
+    // primary 화면: OSC 133 분류대로.
+    try std.testing.expectEqual(control_surface.AtPrompt.at_prompt, atPromptWire(.prompt, false));
+    try std.testing.expectEqual(control_surface.AtPrompt.at_prompt, atPromptWire(.input, false));
+    try std.testing.expectEqual(control_surface.AtPrompt.not_at_prompt, atPromptWire(.command, false));
+    // 핵심 불변식: unknown(OSC 133 미통합 셸, 대다수)은 unknown이지 not_at_prompt가 아니다(§3 — false로 접지 않음).
+    try std.testing.expectEqual(control_surface.AtPrompt.unknown, atPromptWire(.unknown, false));
+}
+
+// ── 순수 매핑 2) agent 내부→wire(§3): none=null(생략), kind/state 조합 ──
+test "collector agentInfoWire: none→null, claude/codex × running/idle/unknown 매핑(내부→wire 격리)" {
+    try std.testing.expect(agentInfoWire(.none, .running) == null); // none이면 state 무관 null(wire 생략)
+    try std.testing.expect(agentInfoWire(.none, .idle) == null);
+
+    const a = agentInfoWire(.claude, .running).?;
+    try std.testing.expectEqual(control_surface.AgentKind.claude, a.kind);
+    try std.testing.expectEqual(control_surface.AgentState.running, a.state);
+
+    const b = agentInfoWire(.codex, .idle).?;
+    try std.testing.expectEqual(control_surface.AgentKind.codex, b.kind);
+    try std.testing.expectEqual(control_surface.AgentState.idle, b.state);
+
+    const c = agentInfoWire(.claude, .unknown).?; // running/idle 아닌 3상 나머지 보존
+    try std.testing.expectEqual(control_surface.AgentState.unknown, c.state);
+}
+
+// 실 AppSession(controlled_smoke) 단일 term + 창 사이즈 세팅(split/newTab 선행). initSmokeSessionTwoTerms와 같은
+// 하니스 패턴(§ 위 close-confirm 테스트) — collector는 이 실 트리를 평탄화한다.
+fn initSmokeSessionSized(allocator: std.mem.Allocator) !*AppSession {
+    const session = try allocator.create(AppSession);
+    errdefer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    errdefer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    return session;
+}
+
+// ── 3) 단일 term: 좌표·id·generation·kind·focused·membership + 없는 cwd/agent 생략(§2·§3) ──
+test "collector: 단일 term 세션 — 좌표·id·focused·membership·terminal 메타" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.activePane().activeTerm().surface.core.semantic_state = .input; // 프롬프트 idle → at_prompt=true
+    const active_id = session.activeSurface().id;
+
+    const c = try session.collectSession(allocator, 42, .normal);
+    defer c.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), c.snapshot.surfaces.len);
+    const dto = c.snapshot.surfaces[0];
+    try std.testing.expectEqual(active_id, dto.surface_id); // id = surface.id(M0a)
+    try std.testing.expectEqual(@as(u64, 0), dto.generation); // generation 0(§3 defense-in-depth 보조, M1 respawn 전)
+    try std.testing.expectEqual(control_surface.SurfaceKind.terminal, dto.kind()); // web는 Phase 4
+    try std.testing.expectEqual(@as(u64, 42), dto.window); // window_id 주입
+    try std.testing.expectEqual(@as(u32, 0), dto.tab); // 0-based
+    try std.testing.expectEqual(@as(u32, 0), dto.pane);
+    try std.testing.expect(dto.focused); // key 창(window_focused 기본 true)의 활성 surface
+    try std.testing.expectEqual(control_surface.AtPrompt.at_prompt, dto.detail.terminal.at_prompt);
+    // controlled_smoke는 OSC 7·에이전트 없음 → cwd/git_branch/agent 전부 생략(null).
+    try std.testing.expect(dto.detail.terminal.cwd == null);
+    try std.testing.expect(dto.detail.terminal.git_branch == null);
+    try std.testing.expect(dto.detail.terminal.agent == null);
+
+    try std.testing.expectEqual(@as(usize, 1), c.snapshot.windows.len);
+    const w = c.snapshot.windows[0];
+    try std.testing.expectEqual(@as(u64, 42), w.window_id);
+    try std.testing.expectEqual(maru.session.WindowKind.normal, w.window_kind);
+    try std.testing.expectEqualSlices(u64, &.{active_id}, w.surface_ids);
+}
+
+// ── 4) 다중 term(한 pane 가로 탭): 같은 좌표·구별 id, focused는 활성 term만 ──
+test "collector: 다중 term(가로 탭) — 같은 tab/pane 좌표·구별 id, focused 하나" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    const active_id = session.activeSurface().id;
+
+    const c = try session.collectSession(allocator, 7, .normal);
+    defer c.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), c.snapshot.surfaces.len);
+    var focused_count: usize = 0;
+    for (c.snapshot.surfaces) |dto| {
+        try std.testing.expectEqual(@as(u64, 7), dto.window);
+        try std.testing.expectEqual(@as(u32, 0), dto.tab);
+        try std.testing.expectEqual(@as(u32, 0), dto.pane); // 가로 탭은 같은 pane 좌표
+        if (dto.focused) focused_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), focused_count);
+    try std.testing.expect(c.snapshot.find(active_id).?.focused); // 활성 term이 그 하나
+    try std.testing.expectEqual(@as(usize, 2), c.snapshot.windows[0].surface_ids.len);
+}
+
+// ── 5) split pane: pane 인덱스 0/1로 좌표 구분 ──
+test "collector: split pane — pane 0/1 좌표, 같은 tab" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try session.splitActivePane(.horizontal); // pane [0,1]
+    try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
+
+    const c = try session.collectSession(allocator, 1, .normal);
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 2), c.snapshot.surfaces.len);
+    var seen0 = false;
+    var seen1 = false;
+    for (c.snapshot.surfaces) |dto| {
+        try std.testing.expectEqual(@as(u32, 0), dto.tab);
+        if (dto.pane == 0) seen0 = true;
+        if (dto.pane == 1) seen1 = true;
+    }
+    try std.testing.expect(seen0 and seen1);
+}
+
+// ── 6) 다중 tab(워크스페이스): tab 인덱스 0/1 ──
+test "collector: 다중 tab — tab 0/1 좌표, membership에 두 surface" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    _ = try session.newTab(); // 둘째 워크스페이스(활성)
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+
+    const c = try session.collectSession(allocator, 3, .normal);
+    defer c.deinit();
+    try std.testing.expectEqual(@as(usize, 2), c.snapshot.surfaces.len);
+    var seen0 = false;
+    var seen1 = false;
+    for (c.snapshot.surfaces) |dto| {
+        try std.testing.expectEqual(@as(u32, 0), dto.pane);
+        if (dto.tab == 0) seen0 = true;
+        if (dto.tab == 1) seen1 = true;
+    }
+    try std.testing.expect(seen0 and seen1);
+    try std.testing.expectEqual(@as(usize, 2), c.snapshot.windows[0].surface_ids.len);
+}
+
+// ── 7) at_prompt 3상이 트리에서 term별로 반영(command=false, unknown=null, alt 오버라이드=false) ──
+test "collector: at_prompt 3상 term별 반영(command·unknown·alt)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const pane = session.activePane();
+    const t0 = pane.terms.items[0];
+    const t1 = pane.terms.items[1];
+    t0.surface.core.semantic_state = .command; // 실행 중 → not_at_prompt
+    t1.surface.core.semantic_state = .unknown; // 미통합 → unknown
+    {
+        const c = try session.collectSession(allocator, 1, .normal);
+        defer c.deinit();
+        try std.testing.expectEqual(control_surface.AtPrompt.not_at_prompt, c.snapshot.find(t0.surface.id).?.detail.terminal.at_prompt);
+        try std.testing.expectEqual(control_surface.AtPrompt.unknown, c.snapshot.find(t1.surface.id).?.detail.terminal.at_prompt);
+    }
+    // alt 오버라이드: prompt여도 alt면 not_at_prompt(§3).
+    t1.surface.core.semantic_state = .input;
+    t1.surface.core.alt_active = true;
+    {
+        const c = try session.collectSession(allocator, 1, .normal);
+        defer c.deinit();
+        try std.testing.expectEqual(control_surface.AtPrompt.not_at_prompt, c.snapshot.find(t1.surface.id).?.detail.terminal.at_prompt);
+    }
+}
+
+// ── 8) agent·cwd·title(custom_name 우선) 채움(§3) ──
+test "collector: agent·cwd(OSC 7)·title(custom_name 우선)이 DTO에 실린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const term = session.activePane().activeTerm();
+    term.agent_kind = .claude; // 포그라운드 에이전트(pollAgentKinds가 세우는 파생값을 직접 세팅)
+    term.agent_state = .running;
+    try term.surface.core.write("\x1b]7;file://h/Users/me/proj\x07"); // OSC 7 → cwd
+    term.surface.custom_name = try session.allocator.dupe(u8, "my-shell"); // rename(owned, deinit이 해제)
+
+    const c = try session.collectSession(allocator, 1, .normal);
+    defer c.deinit();
+    const dto = c.snapshot.surfaces[0];
+    try std.testing.expectEqualStrings("my-shell", dto.title); // custom_name 우선(app.pickLabel)
+    try std.testing.expectEqualStrings("/Users/me/proj", dto.detail.terminal.cwd.?);
+    const ag = dto.detail.terminal.agent.?;
+    try std.testing.expectEqual(control_surface.AgentKind.claude, ag.kind);
+    try std.testing.expectEqual(control_surface.AgentState.running, ag.state);
+}
+
+// ── 9) 비-key 창(window_focused=false)이면 어떤 surface도 focused 아님(전역 정합) ──
+test "collector: window_focused=false면 focused 전무(A2 창 합류 시 key 창만 focused)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.window_focused = false;
+    const c = try session.collectSession(allocator, 1, .normal);
+    defer c.deinit();
+    for (c.snapshot.surfaces) |dto| try std.testing.expect(!dto.focused);
+}
+
+// ── 10) window_kind 주입(quick)이 membership에 그대로 실린다 ──
+test "collector: window_kind(quick)·window_id 주입이 membership에 반영" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const c = try session.collectSession(allocator, 9, .quick);
+    defer c.deinit();
+    try std.testing.expectEqual(maru.session.WindowKind.quick, c.snapshot.windows[0].window_kind);
+    try std.testing.expectEqual(@as(u64, 9), c.snapshot.windows[0].window_id);
+}
+
+// ── 11) A1→1c 연결: 실 수집 snapshot이 read-only 디스패치(sessions.list self)로 소비된다 ──
+test "collector→dispatch: 실 snapshot이 sessions.list(self)로 자기 surface를 응답" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const active_id = session.activeSurface().id;
+    const c = try session.collectSession(allocator, 1, .normal);
+    defer c.deinit();
+
+    // self scope caller = 자기 surface_id → membership이 권위라 자기 하나가 응답에 실린다(§8.3).
+    const wire = try control_surface.serializeSessionsList(allocator, .{ .number = 1 }, c.snapshot, active_id, .self);
+    defer allocator.free(wire);
+    var buf: [64]u8 = undefined;
+    const needle = try std.fmt.bufPrint(&buf, "\"surface_id\":{d}", .{active_id});
+    try std.testing.expect(std.mem.indexOf(u8, wire, needle) != null);
 }
 
 // 닫기 확인의 모달 흐름(실제 키 경로): 확인 모달이 떠 있고 닫기가 보류된 상태에서 Esc면 보류를 버리고(안 닫음),

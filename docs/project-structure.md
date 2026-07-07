@@ -38,7 +38,7 @@ src/
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
   platform/             OS별 process/window/input bridge
-    macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello — macOS-gated 테스트)
+    macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello — macOS-gated 테스트), app_session.zig 안 A1 컨트롤 플레인 per-session collector(collectSessionInto/collectSession — 실 트리→중립 SurfaceDto[]+membership, private 자산 재사용 위해 세션 모듈에 co-locate)
     windows/
     linux/
   workspace/            project workspace, layout restore, recent workspaces

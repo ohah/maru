@@ -69,7 +69,11 @@ pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
 // 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz).
 // Swift frame-loop NSTimer가 config를 읽어 cadence를 정한다.
-pub const abi_version: u32 = 97;
+// 98: Phase 4b-2 — maru_metal_renderer_draw 시그니처에 overlay_layer(CAMetalLayer*) 2번째 인자 추가(모달을
+// 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
+// draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
+// Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
+pub const abi_version: u32 = 98;
 // 96: maru_macos_app_session_quick_terminal_frames + QuickTerminalFrames(extern struct, quick_terminal_geometry.zig로 분리) —
 // quick 패널 보임/숨김 사각형을 세션의 **현재** config로 매 호출 라이브 계산(위치별 가장자리 슬라이드·center 페이드, 순수
 // quick_terminal_geometry.compute + 단위 테스트). quick_terminal_config(세션-불변 스냅샷)와 달리 매 토글 재조회라 설정 GUI 변경이
@@ -6916,6 +6920,14 @@ pub const AppSession = struct {
                 } else buf.append(self.allocator, raw[i]) catch break;
             }
             self.pasteText(buf.items, false);
+        }
+        // MARU_OPEN_QUIT_CONFIRM=1 — 첫 frame에 "maru를 종료할까요?" 종료 확인 모달을 연다(applicationShouldTerminate가
+        // 라이브로 여는 것과 같은 requestAppQuit 경로). 종료 확인 모달이 오버레이 레이어에 렌더되는지 헤드리스 스크린샷으로
+        // self-verify하는 debug-gate. env 미설정이면 무동작. pending_quit/quit_decision은 세워지나 screenshot 모드는 첫 frame
+        // 캡처 후 exit라 결정이 소비되지 않는다(무해).
+        if (std.c.getenv("MARU_OPEN_QUIT_CONFIRM") != null) {
+            self.requestAppQuit();
+            return;
         }
         if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
         self.toggleSettings();

@@ -431,6 +431,100 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 }
 
+// MARK: - Phase 4b-2: 모달 오버레이 Metal 뷰 (컨테이너 맨 위, 투명)
+//
+// 터미널 레이어 위에 합성되는 **별도 물리 CAMetalLayer**. isOpaque=false·평소 clear(투명)라 아래 터미널
+// (+미래 WKWebView, 4c)이 비치고, 모달(command palette·find·confirm·settings) 열림 시에만 렌더러가 이
+// layer에 그림자·over quad·모달 텍스트·caret을 그린다. **입력은 안 받는다** — hitTest=nil로 마우스가 아래
+// 터미널 뷰로 통과하고 acceptsFirstResponder=false로 키/IME는 터미널 뷰가 계속 소유한다(IME 전이·WKWebView
+// 포커스 경합은 4d로 연기, 지금은 기계적 배선만). drawableSize만 자기 layer에서 관리하고 세션 resize는 안
+// 건드린다(그건 터미널 뷰가 단일 소유). docs/web-panel.md §2 (b)·§10 4b.
+@MainActor
+final class MaruMetalOverlayView: NSView {
+    override func makeBackingLayer() -> CALayer {
+        let metalLayer = CAMetalLayer()
+        metalLayer.pixelFormat = .bgra8Unorm
+        // 색 관리는 터미널 레이어와 동일하게 sRGB로 태그(모달 색이 wide-gamut에서 과장되지 않게).
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        metalLayer.device = MTLCreateSystemDefaultDevice()
+        metalLayer.framebufferOnly = true
+        // 핵심: 투명 오버레이. 모달이 없는 영역은 (0,0,0,0) clear라 아래 레이어가 비친다.
+        metalLayer.isOpaque = false
+        return metalLayer
+    }
+
+    var metalLayer: CAMetalLayer? {
+        return layer as? CAMetalLayer
+    }
+
+    // 오버레이는 입력 대상이 아니다 — 마우스는 아래 터미널 뷰로 통과, 키/IME는 터미널이 firstResponder.
+    override var acceptsFirstResponder: Bool { return false }
+    override func hitTest(_ point: NSPoint) -> NSView? { return nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateDrawableSize()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateDrawableSize()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateDrawableSize()
+    }
+
+    // 터미널 뷰와 동일한 backing-px drawableSize 계산(단, 세션 resize는 트리거하지 않는다). 렌더러가 두 레이어의
+    // drawableSize를 present 직전 lockstep으로 한 번 더 맞추지만(모달 NDC 정합), 뷰 레벨에서도 추종해 둔다.
+    func updateDrawableSize() {
+        guard let metalLayer else { return }
+        let scale = window?.backingScaleFactor ?? layer?.contentsScale ?? 1.0
+        let width = max(1.0, bounds.width * scale)
+        let height = max(1.0, bounds.height * scale)
+        let newSize = CGSize(width: width, height: height)
+        metalLayer.contentsScale = scale
+        if metalLayer.drawableSize != newSize {
+            metalLayer.drawableSize = newSize
+        }
+    }
+}
+
+// MARK: - Phase 4b-2: contentView 컨테이너 뷰 (3겹 합성 호스트)
+//
+// window.contentView를 단일 터미널 뷰에서 **컨테이너**로 재편한다. 자식: 터미널 뷰(맨 아래, layer isOpaque는
+// window.opacity 따라감) + 모달 오버레이 뷰(맨 위, 투명). **미래 WKWebView(4c)가 그 사이**에 본문 rect로 낀다.
+// 두 자식은 컨테이너를 꽉 채우고(autoresizing) 창 리사이즈를 함께 따라간다. 오버레이 hitTest=nil이라 입력은
+// 터미널 뷰가 계속 처리한다(모달 keyDown/anyOverlayOpen 현행 그대로 — IME 전이는 4d).
+@MainActor
+final class MaruTerminalContainerView: NSView {
+    let terminalView: MaruMetalTerminalView
+    let overlayView: MaruMetalOverlayView
+
+    init(frame frameRect: NSRect, controller: MaruAppHostController) {
+        terminalView = MaruMetalTerminalView(frame: frameRect)
+        overlayView = MaruMetalOverlayView(frame: frameRect)
+        super.init(frame: frameRect)
+        terminalView.controller = controller
+        // wantsLayer=true가 각 뷰의 makeBackingLayer()로 CAMetalLayer를 즉시 만들게 한다.
+        terminalView.wantsLayer = true
+        overlayView.wantsLayer = true
+        terminalView.autoresizingMask = [.width, .height]
+        overlayView.autoresizingMask = [.width, .height]
+        // 오버레이 CAMetalLayer는 터미널과 **같은 MTLDevice**여야 두 drawable을 한 command buffer에서 present할 수
+        // 있다(MTLCreateSystemDefaultDevice는 호출마다 다른 인스턴스를 줄 수 있으므로 명시적으로 공유한다).
+        if let dev = terminalView.metalLayer?.device {
+            overlayView.metalLayer?.device = dev
+        }
+        addSubview(terminalView) // 맨 아래(터미널·사이드바·chrome)
+        addSubview(overlayView)  // 맨 위(모달 오버레이 — 미래 WKWebView는 이 둘 사이 4c)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("MaruTerminalContainerView는 coder 초기화 미지원") }
+}
+
 // 한 터미널 세션의 per-session 상태 — 창/PTY(appSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
 // 컨트롤러가 메인 창을 `primary`로 들고, quick terminal(후속)이 두 번째 인스턴스가 된다. 세션별 로직은
 // 컨트롤러 메서드가 이 surface의 상태를 읽고 쓰며 수행한다(상태만 여기 — 두 세션이 같은 메서드를 공유).
@@ -463,9 +557,14 @@ final class TerminalSurface {
     var appSessionStatus: Int32 = 0
     var lastWindowTitle = ""
 
-    // Metal terminal view = 창의 contentView. window가 살아 있는 동안 유효(window가 강참조).
+    // Metal terminal view = 창 컨테이너(contentView)의 터미널 자식 뷰(Phase 4b-2). window가 살아 있는 동안 유효.
     var view: MaruMetalTerminalView? {
-        return window?.contentView as? MaruMetalTerminalView
+        return (window?.contentView as? MaruTerminalContainerView)?.terminalView
+    }
+
+    // 모달 오버레이 자식 뷰(컨테이너 맨 위, 투명). 렌더러 draw가 터미널 layer와 함께 이 layer에 그린다.
+    var overlayView: MaruMetalOverlayView? {
+        return (window?.contentView as? MaruTerminalContainerView)?.overlayView
     }
 }
 
@@ -723,7 +822,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(window.contentView)
+        focusTerminalView(window)
         NSApp.activate(ignoringOtherApps: true)
 
         // app session의 첫 tick(startAppSession 안)이 바로 그릴 수 있도록 renderer를 먼저 만든다.
@@ -970,17 +1069,29 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.titlebarSeparatorStyle = .none
         window.styleMask.insert(.fullSizeContentView)
 
-        let content = MaruMetalTerminalView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600))
-        content.controller = self
-        // wantsLayer를 켜면 NSView가 makeBackingLayer()로 만든 CAMetalLayer를 backing layer로 쓴다.
-        content.wantsLayer = true
-        window.contentView = content
+        // Phase 4b-2: contentView를 컨테이너로 재편한다 — 터미널 뷰(맨 아래) + 모달 오버레이 뷰(맨 위). 미래 WKWebView(4c)가 그 사이.
+        let container = MaruTerminalContainerView(
+            frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600),
+            controller: self
+        )
+        window.contentView = container
 
         return window
     }
 
+    // Phase 4b-2: contentView 컨테이너의 터미널/오버레이 자식 뷰 접근자.
     private var metalTerminalView: MaruMetalTerminalView? {
-        return window?.contentView as? MaruMetalTerminalView
+        return (window?.contentView as? MaruTerminalContainerView)?.terminalView
+    }
+
+    private var metalOverlayView: MaruMetalOverlayView? {
+        return (window?.contentView as? MaruTerminalContainerView)?.overlayView
+    }
+
+    // 창/패널 컨테이너의 터미널 자식 뷰를 firstResponder로 만든다(입력·IME는 터미널 뷰가 소유 — 4d 전 기계적 배선).
+    private func focusTerminalView(_ window: NSWindow?) {
+        guard let window else { return }
+        window.makeFirstResponder((window.contentView as? MaruTerminalContainerView)?.terminalView)
     }
 
     private func setupMetalRenderer() {
@@ -996,17 +1107,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // frame(새 output/resize)에서만 atlas를 갱신하고 다시 그린다. idle tick은 마지막으로
     // present한 frame을 그대로 둔다.
     private func drawMetalFrame() {
+        // Phase 4b-2: 컨테이너의 터미널 layer(맨 아래) + 오버레이 layer(맨 위, 투명)를 함께 렌더러에 넘긴다.
         guard let appSession, let renderer = metalRenderer,
-              let view = metalTerminalView, let metalLayer = view.metalLayer else {
+              let view = metalTerminalView, let metalLayer = view.metalLayer,
+              let overlayLayer = metalOverlayView?.metalLayer else {
             return
         }
         var frame = MaruAppHostMetalFrame()
         guard maru_macos_app_session_metal_frame(appSession, &frame) == Self.statusOK else {
             return
         }
-        // 창 배경 투명도(window.opacity): opacity<1이면 layer·window를 비불투명으로 만들어 clear color의 낮은 alpha가
-        // 뒤(데스크톱/다른 창)를 비추게 하고, 1이면 불투명 유지(합성 비용·창 그림자 보존). 매 frame 멱등 — 값이 바뀔
-        // 때만 실제 set한다(reload config 런타임 반영). clear color alpha 자체는 renderer가 window_opacity_milli로 적용.
+        // 창 배경 투명도(window.opacity): opacity<1이면 터미널 layer·window를 비불투명으로 만들어 clear color의 낮은
+        // alpha가 뒤(데스크톱/다른 창)를 비추게 하고, 1이면 불투명 유지(합성 비용·창 그림자 보존). 매 frame 멱등 —
+        // 값이 바뀔 때만 실제 set한다. **오버레이 layer는 항상 투명(isOpaque=false 고정)** — 모달만 그리므로 window.opacity와
+        // 무관하게 아래 터미널이 비쳐야 한다. clear color alpha 자체는 renderer가 window_opacity_milli로 터미널에만 적용.
         let opaqueWindow = frame.window_opacity_milli >= 1000
         if metalLayer.isOpaque != opaqueWindow { metalLayer.isOpaque = opaqueWindow }
         if let win = view.window, win.isOpaque != opaqueWindow {
@@ -1054,7 +1168,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if frame.cell_height_px > 0 { lastCellHeightPx = frame.cell_height_px }
         let drew = maru_metal_renderer_draw(
             renderer,
-            metalLayer,
+            metalLayer,    // 터미널 물리 레이어(맨 아래)
+            overlayLayer,  // 모달 오버레이 물리 레이어(맨 위, 투명)
             cols,
             rows,
             frame.cell_width_px,
@@ -1197,7 +1312,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let offset = CGFloat((windows.count - 1) * 26)
             window.setFrameOrigin(NSPoint(x: window.frame.minX + offset, y: window.frame.minY - offset))
             window.makeKeyAndOrderFront(nil)
-            window.makeFirstResponder(window.contentView)
+            focusTerminalView(window)
             setupMetalRenderer()
             guard createSessionForActiveSurface(smokeMode: false) else { return }
             if let ws {
@@ -3155,7 +3270,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func showAndActivateWindow(_ window: NSWindow) {
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(window.contentView)
+        focusTerminalView(window)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -3209,15 +3324,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        let content = MaruMetalTerminalView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 800, height: 300))
-        content.controller = self
-        content.wantsLayer = true
-        panel.contentView = content
+        // Phase 4b-2: quick 패널도 동형 컨테이너(터미널 + 모달 오버레이 뷰)로 재편한다.
+        let container = MaruTerminalContainerView(
+            frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 800, height: 300),
+            controller: self
+        )
+        panel.contentView = container
         surface.window = panel
 
-        // Metal 렌더러: 이 패널 뷰의 CAMetalLayer로(메인과 별도 인스턴스).
-        if let metalLayer = content.metalLayer, let device = metalLayer.device {
-            content.updateDrawableSize()
+        // Metal 렌더러: 이 패널 터미널 뷰의 CAMetalLayer로(메인과 별도 인스턴스). 렌더러 pipeline은 터미널 layer의
+        // pixelFormat로 만들고, 오버레이 layer도 같은 bgra8Unorm·같은 device라 한 command buffer에서 함께 present된다.
+        if let metalLayer = container.terminalView.metalLayer, let device = metalLayer.device {
+            container.terminalView.updateDrawableSize()
+            container.overlayView.updateDrawableSize()
             surface.metalRenderer = maru_metal_renderer_create(device, metalLayer.pixelFormat)
             surface.metalRendererCreated = surface.metalRenderer != nil
         }
@@ -3321,7 +3440,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // stale 캐시를 비운다 — 안 그러면 다음 hide가 직전 show의 다른 화면 사각형으로 엉뚱하게 빠진다.
             quickHideFrame = nil
             panel.makeKeyAndOrderFront(nil)
-            panel.makeFirstResponder(panel.contentView)
+            focusTerminalView(panel)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -3332,7 +3451,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         panel.setFrame(frames.hidden, display: false)
         if centered { panel.alphaValue = 0 } // 중앙은 투명에서 시작해 페이드 인(가장자리 슬라이드가 없음)
         panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(panel.contentView)
+        focusTerminalView(panel)
         NSApp.activate(ignoringOtherApps: true)
         // 크기는 최종값(frames.hidden은 보임과 폭·높이 동일)이라 지금 grid를 맞춘다 — 슬라이드/페이드 중 재계산 불필요.
         explicitSurface = quick

@@ -40,12 +40,19 @@ bool maru_metal_renderer_set_atlas(
     size_t raster_pixel_count
 );
 
-/* 현재 atlas로 cell quad들을 layer의 다음 drawable에 그리고 present한다. cell_width_px/
-   cell_height_px(고정 cell 픽셀 크기)와 layer.drawableSize로 픽셀 정확 배치를 한다(좌상단
-   기준, grid를 창에 맞춰 늘이지 않는다). 성공 시 true. */
+/* Phase 4b(b2): 두 **물리** 레이어에 그린다 — terminal_layer(맨 아래: 셀·사이드바·chrome·kitty)와
+   overlay_layer(맨 위: 모달 그림자·배경·텍스트·caret, 투명 clear). 각 레이어는 자기 CAMetalLayer의
+   drawable/encoder를 받고, 두 drawable을 **한 command buffer에 present + 단일 commit**해 모달 열림/닫힘
+   전이 프레임이 원자적으로 표시된다(caret은 두 레이어 중 has_modal 분기로 정확히 한 곳에만 → 항상 1개).
+   drawable_size는 terminal_layer가 authoritative고, overlay_layer.drawableSize를 여기서 그에 맞춘다.
+   overlay_layer가 nil이면 터미널만 그려 present한다(안전 폴백). cell_width_px/cell_height_px(고정 cell 픽셀
+   크기)와 terminal_layer.drawableSize로 픽셀 정확 배치를 한다(좌상단 기준, grid를 창에 맞춰 늘이지 않는다).
+   성공 시 true. MARU_SCREENSHOT 모드는 두 pass를 한 오프스크린 텍스처에 합성(터미널 Clear → 오버레이 Load)해
+   실제 2레이어 합성과 같은 최종 픽셀을 한 장으로 캡처한다. */
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
-    CAMetalLayer *layer,
+    CAMetalLayer *terminal_layer,
+    CAMetalLayer *overlay_layer,
     uint16_t cols,
     uint16_t rows,
     uint32_t cell_width_px,

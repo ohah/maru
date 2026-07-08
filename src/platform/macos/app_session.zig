@@ -28919,6 +28919,12 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
     try std.testing.expect(std.mem.indexOf(u8, b2, "win-x=100 win-y=200 win-w=960 win-h=600") != null); // frame 전달됨
     const b3 = try session.serializeWorkspaceWindow(false, null);
     try std.testing.expect(std.mem.indexOf(u8, b3, "win-x") == null); // frame=null → 키 생략
+
+    // [4] 테스트 갭 메움: 실 key 창은 is_active=true AND frame 둘 다다(한 블록에 active-window=1과 win-* 동시).
+    // 위 케이스는 각각 하나만 검증했다(b0=active만, b2=frame만) — 조합 블록이 둘 다 방출하는지 확인.
+    const b4 = try session.serializeWorkspaceWindow(true, .{ .x = 100, .y = 200, .w = 960, .h = 600 });
+    try std.testing.expect(std.mem.indexOf(u8, b4, "active-window=1") != null); // 활성 마커
+    try std.testing.expect(std.mem.indexOf(u8, b4, "win-x=100 win-y=200 win-w=960 win-h=600") != null); // frame 둘 다
 }
 
 test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term 구조·active 인덱스)" {

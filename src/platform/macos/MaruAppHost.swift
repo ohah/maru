@@ -1178,11 +1178,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return surface
     }
 
-    /// 새 일반 창(+세션+렌더러)을 만든다. 성공하면 true. 실패 시 만든 것을 정리한다. 복원할 창이면 (전체 텍스트,
-    /// 창 인덱스)를 받아 세션 생성 직후 그 인덱스의 창을 적용해 탭/split/Term을 복원한다(R4b) — 포맷 파싱은
-    /// Zig ABI가 소유한다(Swift는 'window ' 경계를 분할하지 않음).
+    /// 새 일반 창(+세션+렌더러)을 만든다. 성공하면 **생성된 surface**를 반환하고, 실패하면 nil(만든 것을 정리한 뒤).
+    /// 복원할 창이면 (전체 텍스트, 창 인덱스)를 받아 세션 생성 직후 그 인덱스의 창을 적용해 탭/split/Term을 복원한다
+    /// (R4b) — 포맷 파싱은 Zig ABI가 소유한다(Swift는 'window ' 경계를 분할하지 않음). 반환값은 복원 loop가 블록
+    /// 인덱스 → 실제 창 매핑을 만들어(M3e 활성 창 focus) 창별 spawn 실패로 windows 배열이 compact돼도 정확한 창을
+    /// 고를 수 있게 한다.
     @discardableResult
-    private func createTerminalWindow(applyingWorkspace ws: (text: String, index: Int)?) -> Bool {
+    private func createTerminalWindow(applyingWorkspace ws: (text: String, index: Int)?) -> TerminalSurface? {
         let surface = makeTerminalSurface()
         windows.append(surface)
         var ok = false
@@ -1218,8 +1220,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.window?.delegate = nil
             surface.window?.close()
             surface.window = nil
+            return nil
         }
-        return ok
+        return surface
     }
 
     /// 활성 surface(forwarder 대상)의 세션에 workspace **전체 텍스트**의 window_index번째 창을 적용한다 — 헤더
@@ -1251,24 +1254,35 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.setFrame(clampFrameToVisibleScreens(saved), display: false)
     }
 
-    /// (M3f) 저장 frame이 **어떤** NSScreen.visibleFrame과도 충분히 교차하면(가시 면적 임계 이상 = 그 모니터가
-    /// 여전히 존재) 그대로 두고(맞는 모니터·사용자가 거기서 리사이즈한 크기 보존), 아니면(모니터 분리·레이아웃 변경으로
-    /// 창이 화면 밖) main 화면 visibleFrame 안으로 재배치·clamp한다. 전역 좌표가 모니터를 인코딩하므로 display ID
-    /// 없이 이 교차 검사만으로 "그 모니터가 아직 붙어 있나"를 판정한다. macOS constrainFrameRect(타이틀바를 화면에
-    /// 남김)를 참고했으나 명시 clamp로 예측 가능하게. 화면이 없으면(비정상) 저장 frame 그대로.
+    /// (M3f) 저장 frame을 **항상 화면 안·타이틀바 잡힘**이 보장되게 clamp한다(pre-M3f "창은 늘 화면 안" 불변식 복원).
+    /// 저장 frame과 **가장 많이 겹치는** NSScreen을 고르고(전역 좌표가 모니터를 인코딩 — 그 모니터가 아직 붙어 있으면
+    /// 최대 겹침), 어떤 화면과도 안 겹치면(모니터 분리·레이아웃 변경) main 화면으로 폴백한 뒤, **그 화면 visibleFrame
+    /// 안으로 frame을 clamp**한다: 화면보다 크면 축소하고, 가장자리를 넘으면 이동해 창이 완전히 화면 안에 오게 한다.
+    /// 예전엔 "가시 면적이 임계 이상이면 그대로" 통과시켜 모니터 배치가 바뀌면 구석만 걸친 채 거의 화면 밖으로 복원됐다
+    /// (타이틀바가 화면 위에 없어 드래그 불가). 이제 "겹치면 그대로"가 아니라 "항상 사용 가능하게 clamp"다. frame이
+    /// 화면 안에 완전히 들어가면 clamp가 그대로 반환하므로(크기·위치 불변) 맞는 모니터의 사용자 리사이즈 크기는 보존된다.
+    /// macOS constrainFrameRect(타이틀바를 화면에 남김)를 참고했으나 명시 clamp로 예측 가능하게. 화면이 없으면(비정상)
+    /// 저장 frame 그대로.
     private func clampFrameToVisibleScreens(_ frame: NSRect) -> NSRect {
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return frame }
-        // 최소 가시 면적(pt^2) — 타이틀바/신호등을 잡을 수 있는 정도. 어떤 화면과도 이보다 덜 겹치면 화면 밖으로 본다.
-        let minVisibleArea: CGFloat = 60 * 60
+        // 저장 frame과 가장 많이 겹치는 화면 = "그 창이 있던 모니터"(전역 좌표가 모니터를 인코딩). 어떤 화면과도 안
+        // 겹치면 best=nil → main 화면 폴백.
+        var best: NSScreen?
         var bestArea: CGFloat = 0
         for screen in screens {
             let inter = frame.intersection(screen.visibleFrame)
-            if !inter.isNull { bestArea = max(bestArea, inter.width * inter.height) }
+            if !inter.isNull {
+                let area = inter.width * inter.height
+                if area > bestArea {
+                    bestArea = area
+                    best = screen
+                }
+            }
         }
-        if bestArea >= minVisibleArea { return frame } // 맞는 모니터 위 → 그대로(크기 보존)
-        // 화면 밖(모니터 분리·레이아웃 변경) → main 화면 visibleFrame으로 clamp(크기는 화면보다 크면 줄임).
-        let vis = (NSScreen.main ?? screens[0]).visibleFrame
+        let vis = (best ?? NSScreen.main ?? screens[0]).visibleFrame
+        // 그 화면 안으로 clamp: 크기는 화면보다 크면 줄이고(저장 w/h가 비정상 0/음수면 sane 폴백), 위치는 가장자리를
+        // 넘으면 이동해 완전히 화면 안에 둔다. 이미 화면 안이면 그대로(크기·위치 보존).
         let w = min(frame.width > 0 ? frame.width : 960, vis.width)
         let h = min(frame.height > 0 ? frame.height : 600, vis.height)
         let x = max(vis.minX, min(frame.minX, vis.maxX - w))
@@ -1278,6 +1292,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 시작 시 저장된 workspace를 복원한다(R4b). Zig가 창 개수를 세고(헤더·포맷 검증 겸함), 창 0을 primary에,
     /// 나머지를 새 창에 인덱스로 적용한다. 저장 없음·복원 off·smoke·손상(count<=0)이면 무동작(기본 단일 창 유지).
+    ///
+    /// 성능 주: 복원은 창마다 workspace 전체 텍스트를 재파싱한다(apply_workspace_window N + workspace_window_frame N +
+    /// active_window 1 + count 1). frame·is_active read를 per-window apply에 fold해(out-params) 재파싱을 줄이는 최적화가
+    /// 가능하나, 시작 1회·작은 파일·창 몇 개뿐이라 hot path가 아니고 fold는 3개 ABI 함수 시그니처 변경(cross-boundary
+    /// churn)이라 도입하지 않는다(6차 리뷰 [5] cleanup — 문서 follow-up). 필요해지면 apply_workspace_window가 그 창
+    /// frame(out)+is_active(flag)를 함께 반환하게 확장한다.
     private func restoreWorkspace() {
         guard !smokeMode else { return }
         // 끄기(임시): config 토글은 후속. 기본은 ON. 이 플래그는 saveWorkspace도 막는다 — 복원을 끈 사용자의 저장
@@ -1299,10 +1319,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard count > 0 else { return } // 0=빈 workspace → 기본 단일 창(알림 없음)
         // primary(창 0) 적용 성공 여부를 잡는다 — count>0이라 헤더는 파싱됐어도 창 블록이 spawn 실패 등으로 적용
         // 안 될 수 있다(손상 count<0과 다른 실패 모드). 실패하면 아래에서 Notice로 알린다(예전엔 상태값을 버려 무알림).
+        // 블록 인덱스 → 생성된 창 매핑. `active-window`(활성 창 마커)는 workspace 텍스트의 **블록 인덱스**라, 라이브
+        // `windows` 배열 인덱스와 도메인이 다르다: 중간 창이 spawn 실패하면 teardownWindowSurface가 windows를 compact해
+        // 두 인덱스가 발산한다(그러면 windows[activeIndex]가 엉뚱한 창을 key로 만든다). 블록 인덱스로 직접 조회하려고
+        // 매핑을 만든다 — 블록 0 = primary, 추가 창 i = createTerminalWindow가 성공 시 반환한 surface(실패 = 키 없음).
+        var windowByBlock: [Int: TerminalSurface] = [:]
+        if let primary { windowByBlock[0] = primary }
         var primaryApplied = false
         withSurface(primary) { primaryApplied = applyWorkspaceWindow(text, 0) }
         for i in 1..<Int(count) {
-            createTerminalWindow(applyingWorkspace: (text, i))
+            if let created = createTerminalWindow(applyingWorkspace: (text, i)) {
+                windowByBlock[i] = created
+            }
         }
         if !primaryApplied {
             showNotice("저장된 작업 공간을 일부만 복원했습니다 — 기본 창으로 시작합니다.")
@@ -1318,14 +1346,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             _ = renderTick()
         }
         // M3e: 저장 시점 활성(key)이던 창을 다시 focus한다(docs/window-surface-mobility.md §8A.8). Zig가 active-window=1
-        // 마커가 있는 창의 인덱스를 주고(없으면 -1 → 무동작, 현행 동작 = 마지막 생성 창 key 유지), windows[index]를 key로
-        // 올린다. createTerminalWindow가 각자 makeKeyAndOrderFront하므로 복원 loop **뒤**(마지막)에 호출해야 활성 창이
-        // 최종 key가 된다. windows.count 범위 밖(중간 창 생성 실패 등)이면 건너뛴다(best-effort).
+        // 마커가 있는 창의 **블록 인덱스**를 주고(없으면 -1 → 무동작, 현행 동작 = 마지막 생성 창 key 유지),
+        // windowByBlock으로 그 블록에 해당하는 실제 창을 골라 key로 올린다(라이브 windows 배열에 직접 인덱싱하지
+        // 않는다 — 위 매핑 주석의 도메인 발산 방지). createTerminalWindow가 각자 makeKeyAndOrderFront하므로 복원 loop
+        // **뒤**(마지막)에 호출해야 활성 창이 최종 key가 된다. 그 블록 창이 spawn 실패로 없으면 건너뛴다(best-effort).
         let activeIndex = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_workspace_active_window(session, buf.baseAddress, buf.count)
         }
-        if activeIndex >= 0, Int(activeIndex) < windows.count {
-            windows[Int(activeIndex)].window?.makeKeyAndOrderFront(nil)
+        if activeIndex >= 0, let keyWindowSurface = windowByBlock[Int(activeIndex)] {
+            keyWindowSurface.window?.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -2593,60 +2622,68 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    /// "Merge Window Into ▸ <창>" 선택 — 키(소스) 창의 모든 워크스페이스를 대상 창으로 병합한다. 소스는 클릭 시점에
-    /// 다시 키 창으로 해석한다(메뉴 트래킹 중엔 키 창이 안 바뀐다). 대상은 representedObject 토큰으로 역조회.
-    @objc private func mergeIntoWindowAction(_ sender: NSMenuItem) {
+    /// 두 cross-window 이동 액션(merge/move)이 공유하는 (src, dst) 해석 — 창 수명 로직이 두 곳에서 발산하지 않게
+    /// 한 곳으로 모은다([6]). smoke 아님 + representedObject 토큰 역조회로 대상(dst) + 소스(src) = 현재 키(활성) 창 +
+    /// src≠dst. 하나라도 불충족이면 nil(무동작). 소스는 **클릭 시점에** 다시 키 창으로 해석한다(메뉴 트래킹 중엔 키
+    /// 창이 안 바뀐다).
+    private func resolveMoveEndpoints(_ sender: NSMenuItem) -> (src: TerminalSurface, dst: TerminalSurface)? {
         guard !smokeMode,
               let token = (sender.representedObject as? NSNumber)?.uint64Value,
               let dst = surfaceForToken(token),
               let src = windows.first(where: { $0.window?.isKeyWindow == true }),
-              src !== dst else { return }
+              src !== dst else { return nil }
+        return (src, dst)
+    }
+
+    /// merge/move 완료 공통 마무리([6]) — dst로 포커스를 먼저 착지시키고(src close 전에 키로 — AppKit이 임의 창을
+    /// 키로 안 고르게) repaint한 뒤, 비워진 src 창을 닫는다(§8A.2 source_window_closed=1). close()는 emptied source
+    /// (0탭)에서 안전하다(app_session이 activeSurface 접근을 가드) — 그래서 라이브 창 확인 게이트인 request_window_close가
+    /// 아니라 closeWindowOrQuit(직접 teardown+close, delegate 끊어 재진입 방지)를 쓴다. src는 마지막 창이 아니라(dst
+    /// 존재) closeWindowOrQuit의 else 경로. src가 남으면(=0) 호출자가 별도 처리한다(merge는 항상 1이라 무관, move는 src repaint).
+    private func finishCrossWindowMove(_ result: MaruAppHostMoveResult, from src: TerminalSurface, into dst: TerminalSurface) {
+        dst.window?.makeKeyAndOrderFront(nil)
+        withSurface(dst) { _ = renderTick() } // 이동된 워크스페이스 즉시 repaint(다음 timer tick 안 기다림)
+        if result.source_window_closed == 1 {
+            closeWindowOrQuit(src)
+        }
+    }
+
+    /// "Merge Window Into ▸ <창>" 선택 — 키(소스) 창의 모든 워크스페이스를 대상 창으로 병합한다.
+    @objc private func mergeIntoWindowAction(_ sender: NSMenuItem) {
+        guard let (src, dst) = resolveMoveEndpoints(sender) else { return }
         mergeWindow(from: src, into: dst)
     }
 
     /// src 세션의 모든 워크스페이스를 dst 세션으로 병합하고(merge_window — 정책·라이브 트리 수술·무재시작은 Zig),
-    /// dst로 포커스를 착지시킨 뒤 비워진 src 창을 닫는다(§8A.2 source_window_closed — merge는 항상 1). 이동 거부
-    /// (move_failed — 그룹/pinned 워크스페이스는 M3d-2a-ii 범위, OOM)면 세션·창을 둘 다 그대로 둔다(이 이벤트만 무시).
-    /// close()는 emptied source(0탭)에서 안전하다(app_session이 activeSurface 접근을 가드) — 그래서 라이브 창 확인
-    /// 게이트인 request_window_close가 아니라 closeWindowOrQuit(직접 teardown+close, delegate 끊어 재진입 방지)를 쓴다.
+    /// dst로 포커스를 착지시킨 뒤 비워진 src 창을 닫는다(finishCrossWindowMove — merge는 source_window_closed 항상 1).
+    /// 이동 거부(move_failed — 그룹/pinned 워크스페이스는 M3d-2a-ii 범위, OOM)면 세션·창을 둘 다 그대로 둔다(무시).
     private func mergeWindow(from src: TerminalSurface, into dst: TerminalSurface) {
         guard let srcSession = src.appSession, let dstSession = dst.appSession else { return }
         var result = MaruAppHostMoveResult()
         guard maru_macos_app_session_merge_window(srcSession, dstSession, &result) == Self.statusOK else { return }
-        dst.window?.makeKeyAndOrderFront(nil) // 목적지 focus 착지(src close 전에 먼저 키로 — AppKit이 임의 창을 키로 안 고르게)
-        withSurface(dst) { _ = renderTick() } // 병합된 워크스페이스 즉시 repaint(다음 timer tick 안 기다림)
-        if result.source_window_closed == 1 {
-            closeWindowOrQuit(src) // 비워진 소스 창 teardown+close. src는 마지막 창이 아니라(dst 존재) else 경로.
-        }
+        finishCrossWindowMove(result, from: src, into: dst)
     }
 
     /// "Move Workspace to Window ▸ <창>" 선택 — 키(소스) 창의 **활성** 워크스페이스 하나만 대상 창으로 옮긴다. 소스·대상
-    /// 해석은 merge 액션과 동일(키 창 재해석·representedObject 토큰 역조회) — 이동 단위(활성 카드 1개 vs 전체)만 다르다.
+    /// 해석은 merge 액션과 동일(resolveMoveEndpoints 공유) — 이동 단위(활성 카드 1개 vs 전체)만 다르다.
     @objc private func moveWorkspaceToWindowAction(_ sender: NSMenuItem) {
-        guard !smokeMode,
-              let token = (sender.representedObject as? NSNumber)?.uint64Value,
-              let dst = surfaceForToken(token),
-              let src = windows.first(where: { $0.window?.isKeyWindow == true }),
-              src !== dst else { return }
+        guard let (src, dst) = resolveMoveEndpoints(sender) else { return }
         moveWorkspace(from: src, into: dst)
     }
 
     /// src 세션의 **활성** 워크스페이스 하나를 dst 세션으로 옮기고(move_workspace_to — 정책·라이브 트리 수술·무재시작은
-    /// Zig), dst로 포커스를 착지시킨다(merge 흐름 재사용). 활성 인덱스는 Zig getter로 읽는다(sentinel=UInt32.max면 세션
-    /// 미초기화·탭 전무 → 무동작). 이동 후 src가 비었으면(source_window_closed=1 — 마지막 워크스페이스였음) 비워진 src
-    /// 창을 닫고(§8A.2), 남았으면(=0) src 창은 유지하고 repaint만 한다(활성 재선택은 Zig detachTabForMove가 이미 함).
-    /// 이동 거부(move_failed — 그룹/pinned 워크스페이스는 M3d-2a-ii 범위·OOM)면 세션·창을 둘 다 그대로 둔다(이 이벤트만 무시).
+    /// Zig), dst로 포커스를 착지시킨다(finishCrossWindowMove 공유). 활성 인덱스는 Zig getter로 읽는다(sentinel=UInt32.max면
+    /// 세션 미초기화·탭 전무 → 무동작). 이동 후 src가 비었으면(source_window_closed=1 — 마지막 워크스페이스였음) 비워진
+    /// src 창을 닫고(finishCrossWindowMove), 남았으면(=0) src 창은 유지하고 repaint만 한다(활성 재선택은 Zig가 이미 함).
+    /// 이동 거부(move_failed — 그룹/pinned 워크스페이스는 M3d-2a-ii 범위·OOM)면 세션·창을 둘 다 그대로 둔다(무시).
     private func moveWorkspace(from src: TerminalSurface, into dst: TerminalSurface) {
         guard let srcSession = src.appSession, let dstSession = dst.appSession else { return }
         let idx = maru_macos_app_session_active_workspace_index(srcSession)
         guard idx != UInt32.max else { return } // surface 미초기화·탭 전무 sentinel — 무동작
         var result = MaruAppHostMoveResult()
         guard maru_macos_app_session_move_workspace_to(srcSession, dstSession, Int(idx), &result) == Self.statusOK else { return }
-        dst.window?.makeKeyAndOrderFront(nil) // 목적지 focus 착지(src 유지/close 전에 먼저 키로 — AppKit이 임의 창을 키로 안 고르게)
-        withSurface(dst) { _ = renderTick() } // 옮겨온 워크스페이스 즉시 repaint(다음 timer tick 안 기다림)
-        if result.source_window_closed == 1 {
-            closeWindowOrQuit(src) // src의 마지막 워크스페이스였다 — 비워진 소스 창 teardown+close(dst 존재라 else 경로).
-        } else {
+        finishCrossWindowMove(result, from: src, into: dst)
+        if result.source_window_closed != 1 {
             withSurface(src) { _ = renderTick() } // src에 워크스페이스 남음 — 사이드바·활성 재계산은 Zig가 함, src 창 repaint만.
         }
     }
@@ -3385,6 +3422,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// `maru.workspace.v1` 헤더 하나 아래로 모은다. quick 패널은 transient라 제외. smoke·빈 창·쓰기 실패는
     /// best-effort로 건너뛴다(저장 실패가 종료를 막지 않는다). 크래시 가드는 호출처(applicationWillTerminate가
     /// 정상 종료에만 불림)가 보장 — 깨진 세션이 마지막 저장을 덮어쓰지 않는다.
+    /// 안전한 Double→Int32 변환(saveWorkspace 창 frame 저장용). `Int32(x.rounded())`는 **trapping** 변환이라 비유한
+    /// (NaN/inf)·Int32 범위 초과에서 크래시하는데, saveWorkspace는 applicationWillTerminate에서 불려 여기서 크래시하면
+    /// **전체 창/탭/pane 상태가 저장되지 않아 소실**된다(치명적). 그래서 비유한이면 nil(그 창 frame 저장 스킵 →
+    /// has_frame=0 → cascade), 유한하지만 범위를 넘으면 Int32 범위로 clamp, 아니면 반올림한다. [[no-defensive-code-without-consult]]의
+    /// 예외 = 실제 trap 가드(추측 아님 — Int32(Double)이 실제로 trap하고 결과가 전체 상태 소실이라 방어 근거 충분).
+    private func safeInt32(_ value: CGFloat) -> Int32? {
+        guard value.isFinite else { return nil }
+        let r = value.rounded()
+        if r >= CGFloat(Int32.max) { return Int32.max }
+        if r <= CGFloat(Int32.min) { return Int32.min }
+        return Int32(r)
+    }
+
     private func saveWorkspace() {
         guard !smokeMode, !windows.isEmpty else { return }
         // 복원을 끈 사용자(MARU_NO_WORKSPACE_RESTORE)는 저장도 막는다 — 안 그러면 복원 안 한 기본 단일 창이 종료 시
@@ -3398,15 +3448,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let isActive: UInt32 = (surface.window?.isKeyWindow == true) ? 1 : 0
             // M3f: 창 frame(전역 스크린 좌표, bottom-left 원점)을 저장해 재시작 시 위치·크기·모니터를 복원한다. 절대
             // frame이라 어느 모니터인지 자동 인코딩된다(display ID 불필요). 점 단위 정수로 반올림(픽셀 아님 — backing
-            // scale 무관). 창이 없으면 hasFrame=0(win-* 생략 → cascade). 값은 항상 작은 유한 점이라 Int32 변환 안전.
+            // scale 무관). 창이 없으면 hasFrame=0(win-* 생략 → cascade).
             var hasFrame: UInt32 = 0
             var fx: Int32 = 0, fy: Int32 = 0, fw: Int32 = 0, fh: Int32 = 0
-            if let f = surface.window?.frame {
-                hasFrame = 1
-                fx = Int32(f.origin.x.rounded())
-                fy = Int32(f.origin.y.rounded())
-                fw = Int32(f.size.width.rounded())
-                fh = Int32(f.size.height.rounded())
+            // 전체화면(native `.fullScreen`) 창은 frame이 **화면 전체**라, 저장하면 복원 시 clamp를 통과해 타이틀바
+            // 달린 거대 windowed 창으로 뜬다(전체화면 아님 = 회귀). 전체화면이면 frame 저장을 스킵한다(hasFrame=0 →
+            // win-* 생략 → 복원은 cascade 기본 위치). zoomed(green button)는 frame이 유효한 windowed 크기라 저장 OK
+            // (전체화면만 대상). 전체화면 상태 자체의 복원(window-fullscreen 마커+toggleFullScreen)은 timing 위험이 커
+            // 스킵-저장만으로 회귀를 제거한다(최소 안전) — 후속(docs/workspace-restore.md·window-surface-mobility.md).
+            if let window = surface.window, !window.styleMask.contains(.fullScreen) {
+                // Int32(Double) trap 방어: 비유한 좌표면 그 창 frame 저장 스킵(hasFrame=0), 범위 초과는 clamp([3]).
+                let f = window.frame
+                if let sx = safeInt32(f.origin.x), let sy = safeInt32(f.origin.y),
+                    let sw = safeInt32(f.size.width), let sh = safeInt32(f.size.height) {
+                    hasFrame = 1
+                    fx = sx
+                    fy = sy
+                    fw = sw
+                    fh = sh
+                }
             }
             var ptr: UnsafePointer<UInt8>? = nil
             var len: size_t = 0

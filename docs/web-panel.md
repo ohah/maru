@@ -97,7 +97,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 - **Phase 5(브리지)**: isolated world 브리지 + `maru-app://` 스킴 + CSP + 경로 샌드박스 + [control-plane.md] `browser.*`·§8.1 게이트 연결. (마크다운 sanitizer adversarial fixture는 마크다운 콘텐츠가 생기는 [control-plane.md] Phase 7와 함께 — §11. WebDriver 어댑터는 첫 콘텐츠의 필수 선행이 아니며, 기본 E2E는 `evaluateJavaScript` 하니스로 먼저 닫는다.)
 
 Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro-slice를 따른다:
-- 4a: rect/surface lifecycle ABI를 순수 계산 테스트로 먼저 고정한다.
+- 4a: rect/surface lifecycle ABI를 순수 계산 테스트로 먼저 고정한다. **(구현 완료 — `src/session/web_panel_layout.zig`: `contentRect`·`pxTopLeftToPtBottomLeft`·`surfaceDiff`, 헤드리스 TDD·§14.)**
 - 4b: 모달 renderer 2-pass와 overlay layer 계약을 웹뷰 없이 먼저 고정한다.
 - 4c: 빈 WKWebView를 붙이고 frame/NSView 계층 값 단언 + GUI z-order artifact로 닫는다.
 - 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다.
@@ -164,7 +164,8 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 ## 14. 코드 위치 (구현 시 채움)
 
 - 합성·WKWebView·입력: `src/platform/macos/web_panel.{zig,swift}`
-- surface 생애주기·per-pane rect ABI: `src/platform/macos/app_host_abi.{zig,h}`
+- **surface 생애주기·per-pane rect 순수 계산(4a, 구현 완료)**: `src/session/web_panel_layout.zig`(L2, OS-중립). 본문 rect(`contentRect` — pane rect − chrome inset), backing px·좌상단 → pt·좌하단 y-flip(`pxTopLeftToPtBottomLeft`), surface 생애주기 diff(`surfaceDiff` — created/destroyed/reframed/hidden/shown 전이)의 **단일 출처**다. 헤드리스 단위 테스트로 고정(§11)하고 `check-boundaries`가 L2 중립(app/pty/platform/AppKit import 0·OS 타입명 0)을 강제한다. y-flip 생산 적용(ABI export 또는 Swift 미러)은 이 함수를 단일 출처로 두고 4c가 배선한다.
+- surface 생애주기·per-pane rect ABI wiring(4c 예정): `src/platform/macos/app_host_abi.{zig,h}` — 위 순수 계산을 export/marshaling.
 - 모달 레이어 분리: `src/platform/macos/maru_metal_renderer.{h,m}`(별도 오버레이 layer·2패스), `src/renderer/metal_frame.zig`
 - `maru-app://` OS 어댑터: `src/platform/macos/web_panel.swift`(WKURLSchemeHandler·WKWebView API 호출·ABI marshaling만)
 - `maru-app://` 보안 정책: 테스트 가능한 Zig 모듈(구현 PR에서 `src/platform/macos/web_panel_security.zig` 같은 가장 가까운 책임 파일로 확정). CSP 상수, realpath/symlink/traversal 거부, origin/frame allowlist 판정은 여기가 단일 출처다.

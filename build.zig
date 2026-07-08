@@ -640,6 +640,10 @@ pub fn build(b: *std.Build) void {
             "Metal",
             "-framework",
             "QuartzCore",
+            // Phase 4c: 빈 WKWebView를 pane 본문에 부착(터미널<웹뷰<오버레이 z-order). WebKit은 시스템 프레임워크라
+            // 의존성 0(docs/web-panel.md §13). 콘텐츠·브리지·보안은 Phase 5.
+            "-framework",
+            "WebKit",
             // Retina HiDPI: bare 실행파일(.app 번들 없음)에 Info.plist를 __TEXT,__info_plist
             // 섹션으로 임베드해 NSHighResolutionCapable을 켠다. 없으면 macOS가 창을 1x backing
             // store로 렌더해 window.backingScaleFactor가 1.0이 되고 Retina에서 흐려진다.

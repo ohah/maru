@@ -180,6 +180,7 @@ pub export fn maru_macos_app_session_tick(
     const out = out_summary orelse return @intFromEnum(Status.null_out);
     app_session.setFrameLoopRateHz(frame_loop_rate_hz);
     app_session.maybeDebugOpenSettings(); // MARU_OPEN_SETTINGS 시각 확인 훅 — tick(렌더) 전에 열어야 이 frame에 모달이 든다(env 미설정이면 무동작)
+    app_session.maybeDebugOpenWebPanel(); // MARU_WEB_PANEL 시각 확인 훅 — 활성 pane 본문에 빈 WKWebView 하나(env 미설정이면 무동작, Phase 4c)
     out.* = app_session.tick() catch return @intFromEnum(Status.tick_failed);
     // PTY 세션이 종료되면 ok가 아니라 session_ended를 올려, host가 죽은 세션을 무한 tick하지
     // 않고 frame loop를 멈춰 우아하게 내려가게 한다. ended는 latch라 이후 tick도 동일 신호다.
@@ -1195,6 +1196,42 @@ pub export fn maru_macos_app_session_metal_frame(
     return @intFromEnum(Status.ok);
 }
 
+// Phase 4c: 웹 패널(WKWebView) surface 전이 ABI DTO. app_host_abi.h의 MaruAppHostWebSurfaceTransition과 layout 정합
+// (아래 계약 테스트가 size/offset 강제). op·panel_kind는 u32로 marshaling(session_mod.WebSurfaceOp/PanelKind ↔ 값 정합).
+pub const WebSurfaceTransitionAbi = extern struct {
+    op: u32,
+    surface_id: u64,
+    panel_kind: u32,
+    frame_pt_x: f64,
+    frame_pt_y: f64,
+    frame_pt_w: f64,
+    frame_pt_h: f64,
+};
+
+pub export fn maru_macos_app_session_web_surface_transition(
+    session: ?*AppSession,
+    out: ?*WebSurfaceTransitionAbi,
+) c_int {
+    // 이번 tick의 web surface 전이 하나(§10 4c). Zig가 4a 순수 계산으로 diff한 결과를 marshaling만 한다 —
+    // NSView 연산은 Swift(op 적용). session/out null이면 null_out, 전이 없으면 op=none으로 ok.
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const o = out orelse return @intFromEnum(Status.null_out);
+    const t = app_session.webSurfaceTransition();
+    o.* = .{
+        .op = @intFromEnum(t.op),
+        .surface_id = t.surface_id,
+        .panel_kind = switch (t.panel_kind) {
+            .markdown => 0,
+            .browser => 1,
+        },
+        .frame_pt_x = t.frame_pt.x,
+        .frame_pt_y = t.frame_pt.y,
+        .frame_pt_w = t.frame_pt.w,
+        .frame_pt_h = t.frame_pt.h,
+    };
+    return @intFromEnum(Status.ok);
+}
+
 // 전역(OS) 단축키가 라이브로 바뀌어(세팅 GUI 녹음/해제·reload·reset) OS 재등록이 필요하면 1(플래그 비움), 없으면 0.
 // Swift가 tick마다 호출해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 global_hotkeys를 OS에 다시 깐다.
 // take_bell과 같은 1회성 신호 — drain하면 비워진다. session null=0. (v82)
@@ -1546,6 +1583,24 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "window_opacity_milli"), @offsetOf(AppMetalFrame, "window_opacity_milli"));
     // v86: 사이드바 세로 스크롤량(px) — 끝에 추가, 위치 대조로 C↔Zig 정합 보장.
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "sidebar_scroll_offset_px"), @offsetOf(AppMetalFrame, "sidebar_scroll_offset_px"));
+    // v99 Phase 4c: 웹 패널 surface 전이 struct — mixed-width(u32/u64/f64)라 @sizeOf만으론 필드 reorder를 못 잡으므로
+    // 모든 필드 offset을 C↔Zig 대조한다(surface_id↔frame_pt 뒤바뀌면 Swift가 엉뚱한 frame을 읽는다).
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostWebSurfaceTransition), @sizeOf(WebSurfaceTransitionAbi));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostWebSurfaceTransition), @alignOf(WebSurfaceTransitionAbi));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "op"), @offsetOf(WebSurfaceTransitionAbi, "op"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "surface_id"), @offsetOf(WebSurfaceTransitionAbi, "surface_id"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "panel_kind"), @offsetOf(WebSurfaceTransitionAbi, "panel_kind"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_x"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_x"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_y"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_y"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_w"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_w"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_h"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_h"));
+    // op enum 값(C ↔ session_mod.WebSurfaceOp) 정합 — Swift switch가 이 정수로 분기하므로 값이 어긋나면 안 된다.
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpNone), @intFromEnum(session_mod.WebSurfaceOp.none));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpCreate), @intFromEnum(session_mod.WebSurfaceOp.create));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpDestroy), @intFromEnum(session_mod.WebSurfaceOp.destroy));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpReframe), @intFromEnum(session_mod.WebSurfaceOp.reframe));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpHide), @intFromEnum(session_mod.WebSurfaceOp.hide));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpShow), @intFromEnum(session_mod.WebSurfaceOp.show));
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

@@ -119,6 +119,18 @@ pub const Tab = struct {
     panes: []const Pane,
 };
 
+/// 한 OS 창의 픽셀(점) frame — 전역 스크린 좌표(bottom-left 원점, macOS NSWindow.frame). 절대 frame이라 어느
+/// 모니터인지 자동 인코딩된다(각 모니터가 전역 좌표 영역을 차지하므로 display ID가 불필요 — M3f, docs/
+/// window-surface-mobility.md §8A.8). x/y는 음수 가능(main 왼쪽/아래 보조 모니터), w/h는 양수. 저장은 점 단위
+/// 정수(픽셀 아님 — HiDPI backing scale 무관). 복원 시 Swift가 어떤 NSScreen.visibleFrame과도 충분히 교차 안
+/// 하면 main 화면으로 clamp한다.
+pub const Frame = struct {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+};
+
 /// 한 OS 창 = 한 AppSession. 탭들 + 활성 탭.
 pub const Window = struct {
     active_tab: usize = 0,
@@ -128,6 +140,11 @@ pub const Window = struct {
     // true(저장 시점 key 창) — 복원 loop가 activeWindowIndex로 그 창을 makeKeyAndOrderFront한다. 없으면(옛 파일·무마커)
     // 현행 동작(마지막 생성 창이 key) 유지. 기본 false.
     active: bool = false,
+    // 창 픽셀(점) frame(M3f — docs/window-surface-mobility.md §8A.8). null=미저장(옛 파일·부분 필드) → 복원이 현행
+    // 기본(cascade) 위치. 순수 additive 스칼라 4개(win-x/y/w/h)라 active-window와 동일한 옵션-키 패턴: null이면 writer가
+    // 넷 다 생략(round-trip 고정점·옛 파일 flat 정상), 옛 리더가 미지 키 skip(forward-compat). 넷 다 있어야 frame,
+    // 하나라도 없으면 null(부분=손상 방어). 전역 좌표라 어느 모니터인지 자동 인코딩. 기본 null.
+    frame: ?Frame = null,
     tabs: []const Tab,
 };
 
@@ -163,11 +180,23 @@ pub fn activeWindowIndex(ws: Workspace) ?usize {
     return null;
 }
 
+/// 저장된 workspace에서 window_index 창의 픽셀(점) frame(전역 스크린 좌표) — 있으면 그 값, 없으면 null. 복원 loop가
+/// 창마다 이 값을 받아 clamp 후 setFrame한다(없으면 현행 기본 cascade 위치 유지). null이 되는 경우: 옛 파일(win-* 키
+/// 없음)·부분 필드(넷 중 일부만)·index 범위 밖. M3f — docs/window-surface-mobility.md §8A.8.
+pub fn windowFrame(ws: Workspace, index: usize) ?Frame {
+    if (index >= ws.windows.len) return null;
+    return ws.windows[index].frame;
+}
+
 fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     try w.print("window tabs={d} active-tab={d}", .{ win.tabs.len, win.active_tab });
     // 활성(key) 창 마커(M3e §8A.8). false면 키 생략(additive·key-addressed — 옛 파일/비활성 창의 라인 문자열을 안
     // 바꿔 round-trip 고정점·양쪽 호환, group-collapsed와 동일). true면 active-window=1 스칼라로 쓴다.
     if (win.active) try w.writeAll(" active-window=1");
+    // 창 픽셀(점) frame(M3f §8A.8). null이면 넷 다 생략(additive·key-addressed — 옛 파일/무-frame 창의 라인 문자열을
+    // 안 바꿔 round-trip 고정점·양쪽 호환, active-window와 동일 패턴). 있으면 win-x/y/w/h를 넷 다 방출(전역 좌표, x/y는
+    // 음수 가능 → {d}가 부호 포함). reader는 넷 다 있어야 frame으로 읽고 하나라도 없으면 null(부분=손상 방어).
+    if (win.frame) |fr| try w.print(" win-x={d} win-y={d} win-w={d} win-h={d}", .{ fr.x, fr.y, fr.w, fr.h });
     try w.writeByte('\n');
     for (win.tabs) |tab| try writeTab(w, tab);
 }
@@ -282,11 +311,21 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
     // 활성(key) 창 마커(M3e §8A.8). additive 스칼라라 없으면 false(옛 파일 = 무마커 = 현행 동작). 여러 창 중 최대
     // 하나만 true(저장 시점 key 창). group-collapsed와 동일한 옵션-키 패턴(getUint 기본 0 → forward/backward 호환).
     const active = (try f.getUint("active-window", u8, 0)) != 0;
+    // 창 픽셀(점) frame(M3f §8A.8). additive 스칼라 4개(win-x/y/w/h)라 **넷 다 있어야** frame이고, 하나라도 없으면 null:
+    // 옛 파일(win-* 무)·부분 필드(손상/변조로 일부만) 모두 cascade 기본 위치로 graceful 폴백한다(writer는 넷 다 or 아무것도
+    // 안 냄 → 정상 파일은 all-or-none, 부분은 손상뿐). 단 넷 다 **있는데** 값이 깨졌으면 getInt가 BadLine(존재하는 손상은
+    // 숨기지 않음 — 스칼라 규칙). x/y는 음수 가능(전역 좌표 = 보조 모니터)이라 getInt(signed). group-collapsed 옵션-키와 동형.
+    const frame: ?Frame = if (f.find("win-x") != null and f.find("win-y") != null and f.find("win-w") != null and f.find("win-h") != null) .{
+        .x = try f.getInt("win-x", i32, 0),
+        .y = try f.getInt("win-y", i32, 0),
+        .w = try f.getInt("win-w", i32, 0),
+        .h = try f.getInt("win-h", i32, 0),
+    } else null;
 
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
     while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines));
-    return .{ .active_tab = active_tab, .active = active, .tabs = try tabs.toOwnedSlice(a) };
+    return .{ .active_tab = active_tab, .active = active, .frame = frame, .tabs = try tabs.toOwnedSlice(a) };
 }
 
 fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
@@ -544,6 +583,15 @@ const LineFields = struct {
 
     /// 스칼라 정수 속성: 있으면 파싱(quoted면 BadLine·garbage면 BadLine — 있는데 깨졌으면 조용히 기본값 금지), 없으면 default.
     fn getUint(self: LineFields, key: []const u8, comptime T: type, default: T) ParseError!T {
+        const f = self.find(key) orelse return default;
+        if (f.is_quoted) return error.BadLine;
+        return std.fmt.parseInt(T, f.raw, 10) catch error.BadLine;
+    }
+
+    /// 스칼라 부호 정수 속성(음수 가능 — 전역 스크린 좌표 win-x/y 등): 있으면 파싱(quoted면 BadLine·garbage면 BadLine —
+    /// 있는데 깨졌으면 조용히 기본값 금지), 없으면 default. getUint와 같은 실패 모델이되 signed T(std.fmt.parseInt가
+    /// 선행 `-`를 해석)라 음수 좌표를 안전히 읽는다. M3f 창 frame(win-x/y/w/h)이 첫 signed 필드다.
+    fn getInt(self: LineFields, key: []const u8, comptime T: type, default: T) ParseError!T {
         const f = self.find(key) orelse return default;
         if (f.is_quoted) return error.BadLine;
         return std.fmt.parseInt(T, f.raw, 10) catch error.BadLine;
@@ -990,6 +1038,117 @@ test "workspace round-trip: 멀티 창 배치 + 활성 창 재시작 유지(M3e 
     const text2 = try serialize(std.testing.allocator, parsed.workspace);
     defer std.testing.allocator.free(text2);
     try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace round-trip: window frame(win-x/y/w/h) 보존(M3f — 전역 좌표·음수 포함)" {
+    // 창 픽셀(점) frame(docs/window-surface-mobility.md §8A.8). active-window와 동일한 옵션-키 패턴: frame이 있으면
+    // win-x/y/w/h 넷을 방출하고, round-trip이 그 값(음수 x/y = 보조 모니터 포함)을 고정한다. windowFrame 헬퍼도 검증.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs0 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const tabs1 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    // 창0=main 모니터(양수), 창1=왼쪽/아래 보조 모니터(음수 origin) — 전역 좌표가 모니터를 인코딩.
+    const windows = [_]Window{
+        .{ .frame = .{ .x = 100, .y = 200, .w = 960, .h = 600 }, .tabs = &tabs0 },
+        .{ .frame = .{ .x = -1440, .y = -300, .w = 800, .h = 500 }, .tabs = &tabs1 },
+    };
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 창0: active-tab 뒤에 win-x/y/w/h 넷(양수).
+    try std.testing.expect(std.mem.indexOf(u8, text, "win-x=100 win-y=200 win-w=960 win-h=600\n") != null);
+    // 창1: 음수 origin도 그대로(부호).
+    try std.testing.expect(std.mem.indexOf(u8, text, "win-x=-1440 win-y=-300 win-w=800 win-h=500\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const f0 = parsed.workspace.windows[0].frame.?;
+    try std.testing.expectEqual(@as(i32, 100), f0.x);
+    try std.testing.expectEqual(@as(i32, 200), f0.y);
+    try std.testing.expectEqual(@as(i32, 960), f0.w);
+    try std.testing.expectEqual(@as(i32, 600), f0.h);
+    const f1 = windowFrame(parsed.workspace, 1).?; // 헬퍼가 창1 frame 반환
+    try std.testing.expectEqual(@as(i32, -1440), f1.x);
+    try std.testing.expectEqual(@as(i32, -300), f1.y);
+    try std.testing.expectEqual(@as(?Frame, null), windowFrame(parsed.workspace, 2)); // index 범위 밖 → null
+
+    // round-trip 고정점: 다시 직렬화하면 동일(음수·부호 인코딩 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace serialize: frame=null 창은 win-* 키 생략(옛 파일 flat 고정점)" {
+    // frame이 null(미저장)이면 win-x/y/w/h 어디에도 안 붙어, 옛(M3f 이전) 저장 파일과 라인이 byte-identical하다
+    // (additive 옵션-키 = null 생략). windowFrame은 null. active-window 생략 패턴과 동일한 계약.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{ .{ .tabs = &tabs }, .{ .tabs = &tabs } }; // frame 기본 null
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "win-x") == null); // 어디에도 없음
+    try std.testing.expect(std.mem.indexOf(u8, text, "win-w") == null);
+    try std.testing.expectEqual(@as(?Frame, null), windowFrame(.{ .windows = &windows }, 0));
+
+    // round-trip 고정점(null↔키부재).
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?Frame, null), parsed.workspace.windows[0].frame);
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace parse: 옛 v1 파일(win-* 키 없음) 하위호환 — 크래시/BadHeader 없이 frame 전부 null" {
+    // ⭐ M3f 하위호환의 핵심: win-x/y/w/h 키가 **없는** 옛 maru.workspace.v1 텍스트를 parse해도 헤더 유지(BadHeader
+    // 없음)·정상 로드·frame 전부 null(복원=cascade 기본 위치). 버림·모달·크래시 없음. 배치(cwd)도 그대로 로드.
+    // active-window 마커가 있는(M3e) 파일에도 win-* 없이 정상(M3e만 있고 M3f 없는 중간 버전 파일 하위호환).
+    const old =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0 active-window=1\n" ++ // M3e 마커만, win-* 없음(M3f 이전 파일)
+        "tab panes=1 custom-name=\"w0\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    var parsed = try parse(std.testing.allocator, old); // BadHeader/크래시 없이 성공
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows.len);
+    try std.testing.expectEqual(@as(?Frame, null), parsed.workspace.windows[0].frame); // win-* 없음 → null
+    try std.testing.expectEqual(@as(?Frame, null), windowFrame(parsed.workspace, 0));
+    try std.testing.expectEqual(true, parsed.workspace.windows[0].active); // active-window는 여전히 정상 파싱
+    try std.testing.expectEqualStrings("/a", parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0].cwd);
+}
+
+test "workspace parse: 부분 win-* 필드(일부만)는 frame null(손상 방어)" {
+    // writer는 넷 다 or 아무것도 안 내지만, 손상/변조 파일이 win-x만 담을 수 있다. 넷 중 하나라도 없으면 frame=null로
+    // graceful(부분 좌표는 setFrame에 쓸 수 없어 cascade 폴백). 크래시·BadLine 아님(스칼라 부재는 기본값 규칙).
+    const partial =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0 win-x=100 win-y=200\n" ++ // win-w/win-h 없음 → 부분
+        "tab panes=1 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    var parsed = try parse(std.testing.allocator, partial); // 성공(부분 필드는 손상 아님·스칼라 부재)
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?Frame, null), parsed.workspace.windows[0].frame); // 부분 → null(넷 다 필요)
+}
+
+test "workspace parse: win-* 키가 있는데 값이 깨지면 BadLine(존재하는 손상은 안 숨김)" {
+    // additive 스칼라 규칙(docs/workspace-restore.md): 키가 **있는데** 값이 비숫자면 조용히 기본값으로 때우지 않고
+    // BadLine. win-w에 garbage → getInt가 BadLine(넷 다 존재하므로 frame을 만들려다 파싱 실패). 부재(위 테스트)와 구분.
+    const broken =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0 win-x=10 win-y=20 win-w=abc win-h=40\n" ++ // win-w 비숫자
+        "tab panes=1 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, broken));
 }
 
 test "workspace parse: 구조·escape 해제·forgiving" {

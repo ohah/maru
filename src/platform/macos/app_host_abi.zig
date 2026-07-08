@@ -930,13 +930,24 @@ pub export fn maru_macos_app_session_serialize_workspace(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
     is_active: u32,
+    has_frame: u32,
+    frame_x: i32,
+    frame_y: i32,
+    frame_w: i32,
+    frame_h: i32,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
     const len_out = out_len orelse return @intFromEnum(Status.null_out);
     // is_active(!=0) = 이 창이 저장 시점 key 창(Swift window.isKeyWindow). 활성 창만 workspace.v1 옵션-키
     // active-window=1을 내고, 재시작 복원이 그 창을 다시 focus한다(M3e). false면 키 생략(옛 파일 flat 동일).
-    const text = app_session.serializeWorkspaceWindow(is_active != 0) catch {
+    // has_frame(!=0) = Swift window.frame(전역 스크린 좌표 점)을 저장. win-x/y/w/h 옵션-키를 내고 재시작 복원이
+    // 그 위치·크기·모니터로 setFrame한다(M3f). 0이면 키 생략(옛 파일 flat 동일 → cascade). x/y는 음수 가능(보조 모니터).
+    const frame: ?maru.session.workspace.Frame = if (has_frame != 0)
+        .{ .x = frame_x, .y = frame_y, .w = frame_w, .h = frame_h }
+    else
+        null;
+    const text = app_session.serializeWorkspaceWindow(is_active != 0, frame) catch {
         ptr_out.* = null;
         len_out.* = 0;
         return @intFromEnum(Status.ok);
@@ -1017,6 +1028,37 @@ pub export fn maru_macos_app_session_workspace_active_window(
     defer parsed.deinit();
     const idx = maru.session.workspace.activeWindowIndex(parsed.workspace) orelse return -1;
     return @intCast(idx);
+}
+
+// 저장된 workspace 텍스트에서 window_index 창의 픽셀(점) frame(전역 스크린 좌표)을 out_x/y/w/h로 준다(M3f —
+// docs/window-surface-mobility.md §8A.8). Swift 복원 loop가 창마다 이 값을 받아 clamp 후 setFrame해 재시작 후
+// 위치·크기·모니터를 되살린다. 반환: 1=frame 있음(out_* 채움), 0=없음(옛 파일·부분 필드 → Swift가 현행 기본 cascade
+// 유지), -1=parse 실패·null 인자(count와 같은 조용한 폴백). 포맷 파싱은 Zig 단일 권위. 세션 allocator로 parse(임시
+// arena, 즉시 해제). workspace_active_window와 동형의 read-only getter다.
+pub export fn maru_macos_app_session_workspace_window_frame(
+    session: ?*AppSession,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+    window_index: usize,
+    out_x: ?*i32,
+    out_y: ?*i32,
+    out_w: ?*i32,
+    out_h: ?*i32,
+) c_int {
+    const app_session = session orelse return -1;
+    const tp = text_ptr orelse return -1;
+    const px = out_x orelse return -1;
+    const py = out_y orelse return -1;
+    const pw = out_w orelse return -1;
+    const ph = out_h orelse return -1;
+    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
+    defer parsed.deinit();
+    const fr = maru.session.workspace.windowFrame(parsed.workspace, window_index) orelse return 0; // 없음/부분/범위밖
+    px.* = fr.x;
+    py.* = fr.y;
+    pw.* = fr.w;
+    ph.* = fr.h;
+    return 1;
 }
 
 // 전역(OS) 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라, Swift가 시작 시 한 번
@@ -1570,6 +1612,9 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     // v40 chrome Notice: null session은 ABI 오류, null bytes(len>0)도 오류, len==0은 무동작 ok(붙여넣기와 같은 규율).
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_show_notice(null, null, 0));
     try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_show_notice(null, "x", 1));
+    // M3f workspace_window_frame: null session·null out 포인터는 -1(조용한 폴백 = count/active-window와 동형, Status가
+    // 아니라 present/absent/fail의 정수 신호). Swift는 -1/0을 "frame 없음 → 현행 기본"으로 동일 처리한다.
+    try std.testing.expectEqual(@as(c_int, -1), maru_macos_app_session_workspace_window_frame(null, null, 0, 0, null, null, null, null));
 }
 
 test {

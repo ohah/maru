@@ -13121,10 +13121,13 @@ pub const AppSession = struct {
     /// is_active = 이 창이 저장 시점 key(활성) 창인가(Swift `window.isKeyWindow`). 재시작 복원 loop가 이 마커로
     /// 활성 창을 다시 focus한다(M3e — docs/window-surface-mobility.md §8A.8). false면 workspace.v1 옵션-키가
     /// 생략돼(group-collapsed 패턴) 옛 파일과 flat 동일하다.
-    pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool) !maru.session.workspace.Window {
+    /// frame = 이 창의 픽셀(점) frame(Swift `window.frame`, 전역 스크린 좌표). null이면 win-* 키 생략(옛 파일 flat 동일)
+    /// → 복원이 cascade 기본 위치. 있으면 재시작 시 그 위치·크기·모니터로 복원한다(M3f — §8A.8). frame은 AppKit
+    /// NSWindow 영역이라 Swift가 읽어 ABI로 넘긴다(Zig는 창 픽셀 좌표를 모른다).
+    pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool, frame: ?maru.session.workspace.Frame) !maru.session.workspace.Window {
         var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
         for (self.tabs.items) |tab| try tabs.append(arena, try self.captureWorkspaceTab(arena, tab));
-        return .{ .active_tab = self.app_window.active_tab, .active = is_active, .tabs = try tabs.toOwnedSlice(arena) };
+        return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena) };
     }
 
     fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !maru.session.workspace.Tab {
@@ -13265,14 +13268,14 @@ pub const AppSession = struct {
     /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
     /// 캡처는 임시 arena로 하고, 결과 텍스트만 self.allocator로 보관한다(다음 호출/deinit까지 유효 — cwd ABI와
     /// 같은 소유 규칙). Swift가 멀티 창 저장에서 세션마다 호출해 `maru.workspace.v1` 헤더 아래로 모은다.
-    pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool) ![]const u8 {
+    pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool, frame: ?maru.session.workspace.Frame) ![]const u8 {
         if (self.workspace_buffer) |b| {
             self.allocator.free(b);
             self.workspace_buffer = null;
         }
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const win = try self.captureWorkspaceWindow(arena.allocator(), is_active);
+        const win = try self.captureWorkspaceWindow(arena.allocator(), is_active, frame);
         const text = try maru.session.workspace.serializeWindow(self.allocator, win);
         self.workspace_buffer = text;
         return text;
@@ -28854,7 +28857,7 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const win = try session.captureWorkspaceWindow(arena.allocator(), false);
+    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
 
     // 탭 2개, 활성 탭 = 1(방금 만든 새 탭).
     try std.testing.expectEqual(@as(usize, 2), win.tabs.len);
@@ -28900,16 +28903,22 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
     _ = try session.resize(800, 600, 1000);
     try session.activeSurface().core.write("\x1b]7;file://h/srv\x07");
 
-    const b0 = try session.serializeWorkspaceWindow(true); // 활성 창 → active-window=1 마커(M3e)
+    const b0 = try session.serializeWorkspaceWindow(true, null); // 활성 창 → active-window=1 마커(M3e)
     try std.testing.expect(std.mem.startsWith(u8, b0, "window ")); // 헤더 없는 블록(Swift가 헤더 하나로 모음)
     try std.testing.expect(std.mem.indexOf(u8, b0, "cwd=\"/srv\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, b0, "active-window=1") != null); // is_active=true 전달됨
 
     // 재호출: 이전 버퍼를 해제하고 새로 만든다(이전 버퍼를 안 free하면 testing.allocator leak). is_active=false면
     // active-window 키가 생략된다(옵션-키 패턴 — 옛 파일과 flat 동일).
-    const b1 = try session.serializeWorkspaceWindow(false);
+    const b1 = try session.serializeWorkspaceWindow(false, null);
     try std.testing.expect(std.mem.startsWith(u8, b1, "window "));
     try std.testing.expect(std.mem.indexOf(u8, b1, "active-window") == null); // is_active=false → 키 생략
+
+    // M3f: frame을 넘기면 win-x/y/w/h가 블록에 실린다(Swift window.frame → ABI → 여기). null이면(위) 키 생략(옛 파일 flat).
+    const b2 = try session.serializeWorkspaceWindow(false, .{ .x = 100, .y = 200, .w = 960, .h = 600 });
+    try std.testing.expect(std.mem.indexOf(u8, b2, "win-x=100 win-y=200 win-w=960 win-h=600") != null); // frame 전달됨
+    const b3 = try session.serializeWorkspaceWindow(false, null);
+    try std.testing.expect(std.mem.indexOf(u8, b3, "win-x") == null); // frame=null → 키 생략
 }
 
 test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term 구조·active 인덱스)" {
@@ -28954,7 +28963,7 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     // 캡처해 구조·active 인덱스가 모델과 일치하는지(cwd는 OSC-side라 round-trip 안 함 — 구조만).
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const cap = try session.captureWorkspaceWindow(arena.allocator(), false);
+    const cap = try session.captureWorkspaceWindow(arena.allocator(), false, null);
     try std.testing.expectEqual(@as(usize, 2), cap.tabs.len);
     try std.testing.expectEqual(@as(usize, 1), cap.active_tab);
     // 탭0: split horizontal ratio 500 + pane 2, active_pane 1.
@@ -29010,7 +29019,7 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const cap = try session.captureWorkspaceWindow(arena.allocator(), false);
+    const cap = try session.captureWorkspaceWindow(arena.allocator(), false, null);
     try std.testing.expectEqual(@as(usize, 1), cap.tabs.len);
     try std.testing.expectEqual(@as(usize, 2), cap.tabs[0].panes.len);
     try std.testing.expectEqual(@as(usize, 1), cap.tabs[0].active_pane);

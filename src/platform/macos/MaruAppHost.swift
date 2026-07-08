@@ -1198,7 +1198,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             window.makeFirstResponder(window.contentView)
             setupMetalRenderer()
             guard createSessionForActiveSurface(smokeMode: false) else { return }
-            if let ws { applyWorkspaceWindow(ws.text, ws.index) } // 복원: 기본 탭을 이 창의 탭/split/Term으로 교체
+            if let ws {
+                applyWorkspaceWindow(ws.text, ws.index) // 복원: 기본 탭을 이 창의 탭/split/Term으로 교체
+                // M3f: 저장된 창 위치·크기·모니터로 복원(없으면 위 cascade 유지). resize 전에 setFrame해 아래 resize가
+                // 복원된 크기를 세션에 전달하게 한다.
+                applyRestoredWindowFrame(window, text: ws.text, index: ws.index)
+            }
             resizeAppSessionFromWindow()
             // 새 창 세션에 현재 시스템 외관을 즉시 알린다(theme.follow-system 라이브 적용) — viewDidChangeEffectiveAppearance는
             // 창 표시 중 세션 생성 **전**에 발화해 이 새 세션을 놓치고, didApplyInitialAppearance는 앱-전역 1회뿐이라
@@ -1228,6 +1233,47 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_macos_app_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
         }
         return status == Self.statusOK
+    }
+
+    /// (M3f) 저장된 workspace에서 window_index 창의 frame(전역 스크린 좌표)을 읽어, 화면 안이면 그대로·아니면 main
+    /// 화면으로 clamp한 뒤 setFrame한다. frame이 없으면(옛 파일·부분 필드·parse 실패) 무동작 → 호출자가 만든 현행
+    /// 기본(cascade) 위치를 유지한다. 포맷 파싱은 Zig가 소유한다(Swift는 xywh 정수만 받는다). session은 forwarder
+    /// 대상(현재 surface)의 것을 쓴다 — 파싱은 어느 세션 allocator든 되고, 창 index로 정확한 창 frame을 뽑는다.
+    private func applyRestoredWindowFrame(_ window: NSWindow, text: String, index: Int) {
+        guard let session = appSession else { return }
+        let bytes = Array(text.utf8)
+        var x: Int32 = 0, y: Int32 = 0, w: Int32 = 0, h: Int32 = 0
+        let present = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_workspace_window_frame(session, buf.baseAddress, buf.count, index, &x, &y, &w, &h)
+        }
+        guard present == 1 else { return } // 0=없음/-1=parse실패 → 현행 기본(cascade) 유지
+        let saved = NSRect(x: CGFloat(x), y: CGFloat(y), width: CGFloat(w), height: CGFloat(h))
+        window.setFrame(clampFrameToVisibleScreens(saved), display: false)
+    }
+
+    /// (M3f) 저장 frame이 **어떤** NSScreen.visibleFrame과도 충분히 교차하면(가시 면적 임계 이상 = 그 모니터가
+    /// 여전히 존재) 그대로 두고(맞는 모니터·사용자가 거기서 리사이즈한 크기 보존), 아니면(모니터 분리·레이아웃 변경으로
+    /// 창이 화면 밖) main 화면 visibleFrame 안으로 재배치·clamp한다. 전역 좌표가 모니터를 인코딩하므로 display ID
+    /// 없이 이 교차 검사만으로 "그 모니터가 아직 붙어 있나"를 판정한다. macOS constrainFrameRect(타이틀바를 화면에
+    /// 남김)를 참고했으나 명시 clamp로 예측 가능하게. 화면이 없으면(비정상) 저장 frame 그대로.
+    private func clampFrameToVisibleScreens(_ frame: NSRect) -> NSRect {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return frame }
+        // 최소 가시 면적(pt^2) — 타이틀바/신호등을 잡을 수 있는 정도. 어떤 화면과도 이보다 덜 겹치면 화면 밖으로 본다.
+        let minVisibleArea: CGFloat = 60 * 60
+        var bestArea: CGFloat = 0
+        for screen in screens {
+            let inter = frame.intersection(screen.visibleFrame)
+            if !inter.isNull { bestArea = max(bestArea, inter.width * inter.height) }
+        }
+        if bestArea >= minVisibleArea { return frame } // 맞는 모니터 위 → 그대로(크기 보존)
+        // 화면 밖(모니터 분리·레이아웃 변경) → main 화면 visibleFrame으로 clamp(크기는 화면보다 크면 줄임).
+        let vis = (NSScreen.main ?? screens[0]).visibleFrame
+        let w = min(frame.width > 0 ? frame.width : 960, vis.width)
+        let h = min(frame.height > 0 ? frame.height : 600, vis.height)
+        let x = max(vis.minX, min(frame.minX, vis.maxX - w))
+        let y = max(vis.minY, min(frame.minY, vis.maxY - h))
+        return NSRect(x: x, y: y, width: w, height: h)
     }
 
     /// 시작 시 저장된 workspace를 복원한다(R4b). Zig가 창 개수를 세고(헤더·포맷 검증 겸함), 창 0을 primary에,
@@ -1265,6 +1311,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // createTerminalWindow가 renderTick하지만 primary는 안 그래서, 기본 레이아웃이 한 프레임 깜빡이는 걸 막는다.
         // (showNotice의 metal_dirty도 이 renderTick이 그린다.)
         withSurface(primary) {
+            // M3f: primary(창 0)도 저장된 창 frame으로 복원(없으면 현행 기본 위치). resize 전에 setFrame해 resize가
+            // 복원 크기를 세션에 전달하게 한다(추가 창은 createTerminalWindow에서 동일 처리).
+            if let w = primary?.window { applyRestoredWindowFrame(w, text: text, index: 0) }
             resizeAppSessionFromWindow()
             _ = renderTick()
         }
@@ -3347,9 +3396,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).
             // 최대 하나의 창만 isKeyWindow라 마커도 최대 하나. 옵션-키라 비활성 창은 키가 생략된다(옛 파일 flat 동일).
             let isActive: UInt32 = (surface.window?.isKeyWindow == true) ? 1 : 0
+            // M3f: 창 frame(전역 스크린 좌표, bottom-left 원점)을 저장해 재시작 시 위치·크기·모니터를 복원한다. 절대
+            // frame이라 어느 모니터인지 자동 인코딩된다(display ID 불필요). 점 단위 정수로 반올림(픽셀 아님 — backing
+            // scale 무관). 창이 없으면 hasFrame=0(win-* 생략 → cascade). 값은 항상 작은 유한 점이라 Int32 변환 안전.
+            var hasFrame: UInt32 = 0
+            var fx: Int32 = 0, fy: Int32 = 0, fw: Int32 = 0, fh: Int32 = 0
+            if let f = surface.window?.frame {
+                hasFrame = 1
+                fx = Int32(f.origin.x.rounded())
+                fy = Int32(f.origin.y.rounded())
+                fw = Int32(f.size.width.rounded())
+                fh = Int32(f.size.height.rounded())
+            }
             var ptr: UnsafePointer<UInt8>? = nil
             var len: size_t = 0
-            guard maru_macos_app_session_serialize_workspace(session, &ptr, &len, isActive) == Self.statusOK,
+            guard maru_macos_app_session_serialize_workspace(session, &ptr, &len, isActive, hasFrame, fx, fy, fw, fh) == Self.statusOK,
                   let bytes = ptr, len > 0 else { continue } // 캡처 실패한 창은 건너뜀
             blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         }

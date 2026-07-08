@@ -201,11 +201,16 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 - **required(구조 키)** — 없으면 블록 파싱이 불가능한 개수 키(`window.tabs`·`tab.panes`·`pane.surfaces`·`surface.agent-argc`).
   없으면 `BadLine → 통째 폴백`(loud-fail, 손상 탐지 유지). `requireUint`. 값이 비숫자·거대값이어도 BadLine.
 - **optional(스칼라 속성)** — 합리적 기본값이 있는 키(`custom-name`=""·`pinned`=0·`background-color`=0·`accent-color`=0·
-  `group-collapsed`=0·`group-depth`=1·`group-color`=0·`local-pinned`=0·`top-level`=0·`title`=""·`cols`=80·`rows`=24 및
-  앞으로의 per-tab/surface 스칼라). 없으면 기본값. **단 키가 있는데 값이
-  깨졌으면 조용히 기본값으로 때우지 않고 BadLine**(존재하는 손상은 숨기지 않는다). `getUint`/`getQuoted`. **예외 —
+  `group-collapsed`=0·`group-depth`=1·`group-color`=0·`local-pinned`=0·`top-level`=0·`title`=""·`cols`=80·`rows`=24·
+  `window.active-window`=0(활성 창 마커 — M3e)·`window.win-x/win-y/win-w/win-h`(창 픽셀 frame — M3f, 아래 절) 및
+  앞으로의 per-tab/surface/window 스칼라). 없으면 기본값. **단 키가 있는데 값이
+  깨졌으면 조용히 기본값으로 때우지 않고 BadLine**(존재하는 손상은 숨기지 않는다). `getUint`/`getInt`/`getQuoted`. **예외 —
   `group-start`(사이드바 그룹 시작 마커)**: 값이 아니라 **키 존재 자체가 그룹 시작**을 뜻하므로(없으면 그룹 아님=null, 빈
   문자열도 유효한 '이름 없는 그룹') `find`로 키 유무를 먼저 본 뒤 `getQuoted`한다(위치 파생 — docs/sidebar-groups.md §4).
+  **또 하나의 all-or-none 예외 — `window.win-x/win-y/win-w/win-h`(창 frame, M3f)**: 4개가 **넷 다 있어야** frame이고
+  하나라도 없으면 null(옛 파일·부분 필드 = cascade 기본 위치). writer는 넷 다 or 아무것도 안 내므로(all-or-none) 부분은
+  손상뿐이고 그때도 조용히 null로 graceful 폴백한다. 단 넷 다 **있는데** 값이 깨졌으면(`win-w=abc`) getInt가 BadLine
+  (부재≠손상). x/y는 음수 가능(전역 좌표 = main 왼쪽/아래 보조 모니터)이라 `getInt`(signed)로 읽는다. 아래 "창 geometry 복원" 절.
 
 **미지 키.** 조회하지 않는 키는 자연히 skip된다(forward-compat — 옛 바이너리가 새 파일의 모르는 스칼라 키를 무시). 오타 키가
 조용히 무시되는 트레이드오프는 optional 속성이라 감수하고, 구조 이상은 required 규칙이 잡는다(미지 키 진단 로그는 후속).
@@ -218,6 +223,36 @@ bump(`maru.workspace.v1`→`.v2`) 또는 통째 폴백+self-heal 대상이다("[
 
 **writer.** writer는 항상 전체 키를 `key=value`로 쓴다(불변) → round-trip 고정점 유지. reader만 순서 무관·기본값이라, writer가 낸
 최신 포맷은 정확히, 옛 파일은 관대하게 읽는다.
+
+## 창 geometry 복원 (M3f — 위치·크기·모니터)
+
+재시작 시 창이 종료 전 위치·크기·모니터에 뜨게 하는 additive 스칼라 필드다. 단일 출처(슬라이스 표·상태)는
+[윈도우와 Surface 이동성](window-surface-mobility.md) §8A.8이고, 이 절은 저장 포맷·좌표계·clamp 동작만 기록한다.
+M3e 활성 창(`active-window`)과 **완전 동일한 옵션 additive 패턴**이라 헤더(`maru.workspace.v1`)를 안 올리고 하위호환된다.
+
+**저장 필드(window 라인, 옵션 additive):**
+
+```text
+window tabs=<N> active-tab=<i> [active-window=1] [win-x=<X> win-y=<Y> win-w=<W> win-h=<H>]
+                                # active-window(M3e)=저장 시점 key 창 마커
+                                # win-x/y/w/h(M3f)=창 픽셀(점) frame(전역 스크린 좌표). 넷 다 or 아무것도.
+```
+
+- **좌표계 = 전역 스크린 좌표(bottom-left 원점, macOS NSWindow.frame).** 절대 frame이라 **어느 모니터인지 자동
+  인코딩**된다(각 모니터가 전역 좌표 공간의 한 영역을 차지) — display ID를 따로 저장하지 않는다. `win-x`/`win-y`는
+  **음수 가능**(main 화면 왼쪽/아래에 놓인 보조 모니터). `win-w`/`win-h`는 양수. 저장 단위는 **점(point)**이지 픽셀이
+  아니다(HiDPI backing scale 무관). frame은 AppKit NSWindow 영역이라 Swift가 `window.frame`을 읽어 ABI로 넘기고, Zig가
+  저장·파싱하며, 복원 시 Swift가 `setFrame`한다.
+- **all-or-none·부분=null.** writer는 frame이 있으면 넷을 다 내고 없으면 넷을 다 생략한다(round-trip 고정점). reader는
+  넷이 **다 있어야** frame으로 읽고 하나라도 없으면 null → 복원이 **현행 기본(cascade) 위치**를 유지한다. 옛 파일(win-*
+  무)·부분 필드(손상/변조로 일부만) 모두 여기로 graceful 폴백한다. 단 넷 다 있는데 값이 깨졌으면 BadLine(부재≠손상).
+- **복원 clamp(멀티모니터·레이아웃 변경 방어).** 저장 frame을 `setFrame`하되, 그 frame이 **어떤** `NSScreen.visibleFrame`과도
+  충분히 교차하면(가시 면적 임계 이상 = 그 모니터가 여전히 붙어 있음) **그대로** 둔다(맞는 모니터·사용자가 거기서 리사이즈한
+  크기 보존). 아니면(모니터 분리·레이아웃 변경으로 창이 화면 밖) **main 화면 `visibleFrame` 안으로 재배치·clamp**한다(크기가
+  화면보다 크면 줄임). macOS `constrainFrameRect`(타이틀바를 화면에 남김)를 참고하되 명시 clamp로 예측 가능하게. 전역
+  좌표가 모니터를 인코딩하므로 이 교차 검사 하나로 "그 모니터가 아직 있나"를 판정한다(display ID 불필요).
+- **하위호환.** 옛 파일(win-* 키 없음) → frame=null → cascade 기본 위치. 크래시·모달·마이그레이션·헤더 bump·v1 reject
+  없음([[serialization-format-change-migration-fallout]]). 새 파일 → 옛 리더가 미지 win-* 키를 skip(forward-compat).
 
 ## env 저장 정책
 

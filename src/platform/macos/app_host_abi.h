@@ -747,12 +747,19 @@ int32_t maru_macos_app_session_window_title(
    maru.workspace.v1 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
    캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장.
    is_active(!=0)=이 창이 저장 시점 key 창(window.isKeyWindow) → active-window=1 옵션-키를 내고 재시작 복원이
-   그 창을 다시 focus한다(M3e). false면 키 생략(옛 파일과 flat 동일 — 하위호환). */
+   그 창을 다시 focus한다(M3e). false면 키 생략(옛 파일과 flat 동일 — 하위호환).
+   has_frame(!=0)=window.frame(전역 스크린 좌표 점)을 저장 → win-x/y/w/h 옵션-키를 내고 재시작 복원이 그 위치·
+   크기·모니터로 setFrame한다(M3f). 0이면 키 생략(옛 파일 flat 동일 → cascade). frame_x/y는 음수 가능(보조 모니터). */
 int32_t maru_macos_app_session_serialize_workspace(
     MaruAppHostSession *session,
     const uint8_t **out_ptr,
     size_t *out_len,
-    uint32_t is_active
+    uint32_t is_active,
+    uint32_t has_frame,
+    int32_t frame_x,
+    int32_t frame_y,
+    int32_t frame_w,
+    int32_t frame_h
 );
 
 /* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 활성(key) 창의 인덱스를 준다(M3e). Swift가 복원 loop 뒤
@@ -762,6 +769,21 @@ int64_t maru_macos_app_session_workspace_active_window(
     MaruAppHostSession *session,
     const uint8_t *text_ptr,
     size_t text_len
+);
+
+/* 저장된 workspace 텍스트에서 window_index 창의 픽셀(점) frame(전역 스크린 좌표)을 out_x/y/w/h로 준다(M3f).
+   Swift 복원 loop가 창마다 이 값을 받아 clamp 후 setFrame해 재시작 후 위치·크기·모니터를 되살린다. 반환:
+   1=frame 있음(out_* 채움), 0=없음(옛 파일·부분 필드 → Swift가 현행 기본 cascade 유지), -1=parse 실패·null 인자.
+   frame x/y는 음수 가능(보조 모니터). 포맷 파싱은 Zig 단일 권위 — workspace_active_window와 동형의 read-only getter. */
+int32_t maru_macos_app_session_workspace_window_frame(
+    MaruAppHostSession *session,
+    const uint8_t *text_ptr,
+    size_t text_len,
+    size_t window_index,
+    int32_t *out_x,
+    int32_t *out_y,
+    int32_t *out_w,
+    int32_t *out_h
 );
 
 /* 현재 sidebar 토글(show-branch/show-folder)을 반영한 갱신 config 텍스트(UTF-8)를 직렬화한다 — Swift가

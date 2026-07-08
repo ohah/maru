@@ -446,7 +446,9 @@ final class MaruMetalOverlayView: NSView {
         metalLayer.pixelFormat = .bgra8Unorm
         // 색 관리는 터미널 레이어와 동일하게 sRGB로 태그(모달 색이 wide-gamut에서 과장되지 않게).
         metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
-        metalLayer.device = MTLCreateSystemDefaultDevice()
+        // device는 여기서 세팅하지 않는다 — 컨테이너(MaruTerminalContainerView.init)가 터미널 레이어와 **같은
+        // MTLDevice**를 주입해야 두 drawable을 한 command buffer에서 present할 수 있다. 여기서 시스템 default를
+        // 조회하면 그 값이 컨테이너 주입으로 즉시 덮여 낭비다(MTLCreateSystemDefaultDevice 1회 제거).
         metalLayer.framebufferOnly = true
         // 핵심: 투명 오버레이. 모달이 없는 영역은 (0,0,0,0) clear라 아래 레이어가 비친다.
         metalLayer.isOpaque = false
@@ -1211,6 +1213,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             lastDrawnGeneration = frame.generation
             metalNeedsRedraw = false
             metalFramesDrawn += 1
+        } else {
+            // 렌더러가 false(오버레이 drawable pool starvation으로 모달·닫힘 clear를 드롭 등)를 반환하면 재시도가
+            // 필요하다. tick 게이트(tickAppSession)는 lastSeenMetalGeneration을 이미 전진시켜 두므로 generation
+            // 불일치만으론 재호출되지 않는다 → metalNeedsRedraw를 세워 `|| metalNeedsRedraw` 경로로 다음 tick에
+            // drawMetalFrame을 다시 부른다. 성공 draw면 위에서 다시 false로 내려가 재시도가 자동 종료된다.
+            metalNeedsRedraw = true
         }
     }
 

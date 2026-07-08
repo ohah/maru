@@ -41,14 +41,20 @@ bool maru_metal_renderer_set_atlas(
 );
 
 /* Phase 4b(b2): 두 **물리** 레이어에 그린다 — terminal_layer(맨 아래: 셀·사이드바·chrome·kitty)와
-   overlay_layer(맨 위: 모달 그림자·배경·텍스트·caret, 투명 clear). 각 레이어는 자기 CAMetalLayer의
-   drawable/encoder를 받고, 두 drawable을 **한 command buffer에 present + 단일 commit**해 모달 열림/닫힘
-   전이 프레임이 원자적으로 표시된다(caret은 두 레이어 중 has_modal 분기로 정확히 한 곳에만 → 항상 1개).
-   drawable_size는 terminal_layer가 authoritative고, overlay_layer.drawableSize를 여기서 그에 맞춘다.
-   overlay_layer가 nil이면 터미널만 그려 present한다(안전 폴백). cell_width_px/cell_height_px(고정 cell 픽셀
-   크기)와 terminal_layer.drawableSize로 픽셀 정확 배치를 한다(좌상단 기준, grid를 창에 맞춰 늘이지 않는다).
-   성공 시 true. MARU_SCREENSHOT 모드는 두 pass를 한 오프스크린 텍스처에 합성(터미널 Clear → 오버레이 Load)해
-   실제 2레이어 합성과 같은 최종 픽셀을 한 장으로 캡처한다. */
+   overlay_layer(맨 위: 모달 그림자·배경·텍스트·caret, 투명 clear). command buffer를 **drawable 획득 전에**
+   잡고(큐 고갈 시 잡힌 drawable 없음 = 누수 0), 잡은 drawable을 각자 그린 뒤 **한 command buffer에 present +
+   단일 commit**해 모달 열림/닫힘 전이 프레임이 원자적으로 표시된다(caret은 두 레이어 중 has_modal 분기로
+   정확히 한 곳에만 → 항상 1개). drawable_size는 terminal_layer가 authoritative다.
+   **오버레이는 조건부 present**: 그릴 내용(모달·그림자)이 있거나 직전 present가 content였는데 이번엔 비었을 때
+   (clear 전이 — 닫힌 모달 잔상 제거)만 overlay drawable을 잡아 present하고, 빈→빈이면 건너뛴다(매 프레임 이중
+   present 방지 — CAMetalLayer가 마지막 present한 투명 clear 유지). 그때 overlay_layer.drawableSize를 여기서
+   terminal에 맞춘다. overlay_layer가 nil이어도 터미널만 그려 present한다(안전 폴백).
+   cell_width_px/cell_height_px(고정 cell 픽셀 크기)와 terminal_layer.drawableSize로 픽셀 정확 배치를 한다
+   (좌상단 기준, grid를 창에 맞춰 늘이지 않는다). **반환값**: 정상 present면 true. present가 필요한데 오버레이
+   drawable을 pool starvation으로 못 잡아 드롭했으면 **false**(호출자는 다음 tick에 재시도해야 한다 — 정적
+   모달·닫힘 clear 유실 방지; MaruAppHost.drawMetalFrame이 metalNeedsRedraw로 재시도). MARU_SCREENSHOT
+   모드는 두 pass를 한 오프스크린 텍스처에 합성(터미널 Clear → 오버레이 Load)해 실제 2레이어 합성과 같은 최종
+   픽셀을 한 장으로 캡처한다(획득/인코딩 실패는 retry 없이 exit(1) fail-fast). */
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *terminal_layer,

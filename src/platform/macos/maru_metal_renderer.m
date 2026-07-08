@@ -677,6 +677,175 @@ static void maru_evict_image_textures(
     }
 }
 
+/* Phase 4b(b1): 한 draw pass의 인코딩 시퀀스를 두 논리 레이어(터미널 / 모달 오버레이)로 분할한다.
+   지금은 두 함수가 **같은 encoder·같은 drawable**에 back-to-back으로 그려 출력이 byte-identical이다
+   (1레이어 무회귀 — docs/web-panel.md §2 (a) 렌더러 분할의 함수 경계만 먼저 고정). b2에서 각 함수에
+   자기 CAMetalLayer의 drawable/encoder를 주면 실제 2레이어가 된다(그때 present 원자성·컨테이너 재편).
+   이 컨텍스트는 그 분할 경계에 필요한 상태(encoder·버퍼·오프셋·모달/커서 파라미터)를 한 번에 나른다.
+   ARC 소유 객체는 __unsafe_unretained로 담는다 — 이 struct는 stack-local이고 담긴 객체(encoder·버퍼·
+   impl)는 모두 maru_metal_renderer_draw 지역이 draw 호출 동안 강참조로 살려 두므로 안전하다. */
+typedef struct {
+    __unsafe_unretained id<MTLRenderCommandEncoder> encoder;
+    __unsafe_unretained MaruMetalRendererImpl *impl;
+    __unsafe_unretained id<MTLBuffer> vertex_buffer;
+    __unsafe_unretained id<MTLBuffer> quad_vertex_buffer;
+    __unsafe_unretained id<MTLBuffer> shadow_vertex_buffer;
+    __unsafe_unretained id<MTLBuffer> image_vertex_buffer;
+    const MaruAppHostGpuImage *gpu_images;
+    CGSize drawable_size;
+    // gpu_quads 레이어 세그먼트 정점 수: bottom(탭 밴드)·under(사이드바 밴드)·header(배지) + 전체.
+    size_t bottom_vertex_count;
+    size_t under_vertex_count;
+    size_t header_vertex_count;
+    size_t quad_vertex_total;
+    size_t shadow_vertex_total;
+    // kitty 이미지: 텍스트-앞(pass>=2) 시작 인덱스와 전체 개수.
+    size_t image_above_start;
+    size_t gpu_image_n;
+    // 셀 정점 오프셋(자간 자연폭이라 셀당 2 quad = ×12): 사이드바 bg quad 뒤 터미널 셀 base·사이드바 셀 시작·전체.
+    size_t cells_base_v;
+    size_t pre_sidebar_vertices;
+    size_t total_vertices;
+    // 본문 터미널(모달·커서 suffix 제외) 끝 정점.
+    size_t terminal_end_v;
+    // 커서 blink 페이드 suffix(셀): 시작·개수·불투명도·게이트.
+    size_t cursor_start;
+    size_t cursor_cells;
+    float cursor_opacity;
+    bool draw_cursor;
+    bool has_modal;
+    // 모달 오버레이: 셀 시작 인덱스와 클리핑 px(w==0=없음).
+    size_t modal_cells_start;
+    uint32_t modal_clip_x_px;
+    uint32_t modal_clip_y_px;
+    uint32_t modal_clip_w_px;
+    uint32_t modal_clip_h_px;
+    // 사이드바 스크롤 scissor 판정용.
+    size_t sidebar_cells_n;
+    uint32_t sidebar_scroll_offset_px;
+    uint32_t sidebar_header_height_px;
+} MaruDrawPass;
+
+// 셀/quad/이미지 draw 매크로(컨텍스트 c 기준). 커서 페이드 pass만 op<1이라 셀 fragment opacity를 넘긴다.
+#define MARU_DRAW_CELLS(sv, cv, op)                                        \
+    do {                                                                   \
+        if ((cv) > 0) {                                                    \
+            float _op = (op);                                              \
+            [c->encoder setRenderPipelineState:c->impl.pipeline];          \
+            [c->encoder setVertexBuffer:c->vertex_buffer offset:0 atIndex:0]; \
+            [c->encoder setFragmentBytes:&_op length:sizeof(float) atIndex:1]; \
+            [c->encoder setFragmentTexture:c->impl.atlas atIndex:0];       \
+            [c->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
+        }                                                                  \
+    } while (0)
+#define MARU_DRAW_QUADS(sv, cv)                                            \
+    do {                                                                   \
+        if ((cv) > 0) {                                                    \
+            [c->encoder setRenderPipelineState:c->impl.quadPipeline];      \
+            [c->encoder setVertexBuffer:c->quad_vertex_buffer offset:0 atIndex:0]; \
+            [c->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
+        }                                                                  \
+    } while (0)
+#define MARU_DRAW_IMAGES(si, ei)                                           \
+    do {                                                                   \
+        if (c->image_vertex_buffer != nil && (ei) > (si)) {               \
+            /* pipeline·vertex buffer는 범위당 1회만 바인딩하고 이미지마다 fragment texture만 바꾼다. */ \
+            [c->encoder setRenderPipelineState:c->impl.imagePipeline];    \
+            [c->encoder setVertexBuffer:c->image_vertex_buffer offset:0 atIndex:0]; \
+            for (size_t ii = (si); ii < (ei); ii++) {                     \
+                id<MTLTexture> tex = c->impl.imageTextures[@(c->gpu_images[ii].image_id)]; \
+                if (tex == nil) continue;                                 \
+                [c->encoder setFragmentTexture:tex atIndex:0];            \
+                [c->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(ii * 6) vertexCount:6]; \
+            }                                                             \
+        }                                                                 \
+    } while (0)
+
+/* 터미널 레이어 pass(맨 아래): 탭 밴드 quad → kitty(텍스트 뒤) → 사이드바 bg strip → 헤더 배지 quad →
+   터미널 본문 셀 → 터미널 커서 페이드(모달 없을 때) → kitty(텍스트 앞) → 사이드바 밴드 quad → 사이드바 셀.
+   b2에서 이 함수가 터미널 CAMetalLayer의 drawable/encoder를 받는다. */
+static void maru_draw_terminal_layer(const MaruDrawPass *c) {
+    if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, c->bottom_vertex_count); // 0. bottom quad(탭 밴드 — 터미널·제목 앞, 제목 아래로)
+    MARU_DRAW_IMAGES(0, c->image_above_start);                                    // 0.5 kitty 이미지(텍스트 뒤 — 투명 셀로 비침)
+    // 1a. 사이드바 배경 strip(bg quad, 버퍼 맨 앞 [0, cells_base_v)) — 터미널 cells '앞'에 그려 사이드바 헤더
+    //     glyph(origin_x=0, 셀 패스)·밴드·제목이 배경 '위'에 보이게 한다(painter — 헤더 glyph 가림 회귀 fix).
+    if (c->vertex_buffer != nil) MARU_DRAW_CELLS(0, c->cells_base_v, 1.0f);
+    // 1a+. 헤더 quad(layer 4, 알림 종 배지 빨강 원) — 사이드바 bg strip '뒤' / 터미널·헤더 글리프 '앞'에 끼운다(흰 숫자
+    //      글리프가 원 위에 보이게). 버퍼 구간 [bottom+under, +header). 배지 없으면 0이라 no-op(기존 경로 불변).
+    if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count, c->header_vertex_count);
+    // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터. opacity 1.0(커서 suffix는 terminal_end_v가 제외).
+    if (c->vertex_buffer != nil) MARU_DRAW_CELLS(c->cells_base_v, c->terminal_end_v, 1.0f);
+    // 1b+. 터미널 커서 페이드 pass(모달 없을 때 — 커서=터미널 suffix). 본문 '뒤'·kitty 텍스트-앞 이미지 '앞'에 그려 기존
+    //      커서 레이어를 보존한다. cursor_fade_milli<1이면 반투명으로 아래 본문 셀에 합성돼 blink가 페이드.
+    if (c->vertex_buffer != nil && c->draw_cursor && !c->has_modal)
+        MARU_DRAW_CELLS(c->cells_base_v + c->cursor_start * 12, c->cursor_cells * 12, c->cursor_opacity);
+    MARU_DRAW_IMAGES(c->image_above_start, c->gpu_image_n);                        // 1.5 kitty 이미지(텍스트 앞)
+    if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count, c->under_vertex_count); // 3. under quad(사이드바 밴드)
+    // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 헤더 영역 [0, header_h)를
+    //    scissor 밖으로 둬 [header_h, drawable_h]만 그린다. **MTLScissorRect는 좌상단 원점**(Apple 문서 — framebuffer
+    //    픽셀 좌표, y가 아래로 증가). 정점 셰이더가 py_top(좌상단 px)→NDC로 매핑해 framebuffer가 표준 방향이라, 상단
+    //    헤더를 자르려면 y=header_h부터 남긴다. 헤더 glyph는 터미널 셀 패스(위)라 이 scissor에 안 걸려 고정된다. 바로
+    //    뒤 패스(그림자·모달)를 위해 full drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
+    const bool sidebar_scroll_clip = (c->sidebar_cells_n > 0 && c->sidebar_scroll_offset_px > 0u &&
+                                      (float)c->sidebar_header_height_px < (float)c->drawable_size.height);
+    if (sidebar_scroll_clip) {
+        const NSUInteger dw = (NSUInteger)c->drawable_size.width;
+        const NSUInteger dh = (NSUInteger)c->drawable_size.height;
+        const NSUInteger header_h = (NSUInteger)c->sidebar_header_height_px; // 좌상단 원점 → 상단 header_h를 잘라내고 [header_h, dh] 유지
+        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = header_h, .width = dw, .height = dh - header_h }];
+    }
+    if (c->vertex_buffer != nil) MARU_DRAW_CELLS(c->pre_sidebar_vertices, c->total_vertices - c->pre_sidebar_vertices, 1.0f); // 사이드바 cells(제목)
+    if (sidebar_scroll_clip) {
+        const NSUInteger dw = (NSUInteger)c->drawable_size.width;
+        const NSUInteger dh = (NSUInteger)c->drawable_size.height;
+        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }]; // full 복원(다음 패스용)
+    }
+}
+
+/* 모달 오버레이 레이어 pass(맨 위): 그림자 → over quad(모달 배경) → 모달 텍스트 셀(clip scissor) →
+   오버레이 caret 페이드(모달 열림일 때). b2에서 이 함수가 투명 오버레이 CAMetalLayer의 drawable/encoder를
+   받아 터미널 레이어(+미래 WKWebView) 위에 합성된다. 모달이 없으면(has_modal=false, over/modal 세그먼트 0)
+   그림자·caret pass만 게이트로 걸러져 사실상 no-op이다. */
+static void maru_draw_overlay_layer(const MaruDrawPass *c) {
+    // C4b: shadow 패스 — 터미널·사이드바 위, 모달 배경(over quad) 아래. 모달이 떠 보이게(맨 처음이면 터미널
+    // 셀이 halo를 덮어 그림자가 깜빡/사라졌다). 모달 over quad·텍스트가 이 위에 그려진다.
+    if (c->shadow_vertex_buffer != nil) {
+        [c->encoder setRenderPipelineState:c->impl.shadowPipeline];
+        [c->encoder setVertexBuffer:c->shadow_vertex_buffer offset:0 atIndex:0];
+        [c->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:c->shadow_vertex_total];
+    }
+    if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count + c->header_vertex_count, c->quad_vertex_total - c->bottom_vertex_count - c->under_vertex_count - c->header_vertex_count); // 5. over quad(모달 배경)
+    // 6. 모달 텍스트(cells_base_v 오프셋) — clip 영역이 있으면 모달 셀만 scissor로 자른다(부분 카드 픽셀 스크롤
+    //    인프라). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 본문 draw다.
+    //    ⚠️ 알려진 이슈: 아래 y-flip(cy = dh - (y+h))은 MTLScissorRect를 **좌하단 원점**으로 가정하지만, Metal의
+    //    실제 규약은 **좌상단 원점**이다(위 사이드바 scissor 참고). 이 modal_clip 경로는 아직 어떤 컴포넌트도
+    //    draw.Op.clip을 emit하지 않는 미사용 인프라(metal_frame.zig "적용 후속")라 이 버그가 런타임에 드러나지
+    //    않았다. 부분 픽셀 스크롤을 실제 컴포넌트에 연결할 때 좌상단 원점으로 정정(cy = modal_clip_y_px)하고 함께
+    //    검증할 것 — 지금 고치면 검증 경로가 없어 보류한다(4b 분할은 이 경로 동작을 그대로 이관).
+    if (c->vertex_buffer != nil && c->has_modal) {
+        if (c->modal_clip_w_px > 0) {
+            const NSUInteger dw = (NSUInteger)c->drawable_size.width;
+            const NSUInteger dh = (NSUInteger)c->drawable_size.height;
+            const NSUInteger cx = ((NSUInteger)c->modal_clip_x_px < dw) ? (NSUInteger)c->modal_clip_x_px : 0;
+            const NSUInteger cw2 = ((NSUInteger)c->modal_clip_x_px + (NSUInteger)c->modal_clip_w_px <= dw) ? (NSUInteger)c->modal_clip_w_px : (dw - cx);
+            const NSUInteger top = (NSUInteger)c->modal_clip_y_px + (NSUInteger)c->modal_clip_h_px;
+            const NSUInteger cy = (top <= dh) ? (dh - top) : 0;
+            const NSUInteger ch2 = (cy + (NSUInteger)c->modal_clip_h_px <= dh) ? (NSUInteger)c->modal_clip_h_px : (dh - cy);
+            [c->encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
+        }
+        // 모달 본문(모달 셀 중 커서 suffix 제외 — 커서=모달 뒤 오버레이 caret). has_modal이면 항상
+        // modal_cells_start ≤ cursor_start ≤ cell_count.
+        MARU_DRAW_CELLS(c->cells_base_v + c->modal_cells_start * 12, (c->cursor_start - c->modal_cells_start) * 12, 1.0f); // 셀당 2 quad — ×12
+    }
+    // 6+. 오버레이 caret 페이드 pass(모달 열림 — 커서=모달 뒤 suffix). 모달 텍스트 '위'(마지막 draw)에 opacity로 그린다.
+    //     modal_clip scissor가 위에서 걸렸으면 그대로 이어져 caret도 같은 영역에 클립된다(모달 셀의 일부라 의도된 동작).
+    if (c->vertex_buffer != nil && c->draw_cursor && c->has_modal)
+        MARU_DRAW_CELLS(c->cells_base_v + c->cursor_start * 12, c->cursor_cells * 12, c->cursor_opacity);
+}
+#undef MARU_DRAW_CELLS
+#undef MARU_DRAW_QUADS
+#undef MARU_DRAW_IMAGES
+
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *layer,
@@ -1144,119 +1313,46 @@ bool maru_metal_renderer_draw(
     const bool draw_cursor = (cursor_cells > 0 && cursor_fade_milli > 0);
     // 본문 터미널(모달 제외)은 모달 시작(모달 있음) 또는 커서 시작(모달 없음=커서가 터미널 suffix)에서 끝난다.
     const size_t terminal_end_v = (has_modal ? modal_cells_start : cursor_start) * 12; // 셀당 2 quad(자간 자연폭) — ×12
-#define MARU_DRAW_CELLS(sv, cv, op)                                   \
-    do {                                                             \
-        if ((cv) > 0) {                                              \
-            float _op = (op);                                        \
-            [encoder setRenderPipelineState:impl.pipeline];          \
-            [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0]; \
-            [encoder setFragmentBytes:&_op length:sizeof(float) atIndex:1]; /* 셀 fragment opacity(커서 페이드 pass만 <1) */ \
-            [encoder setFragmentTexture:impl.atlas atIndex:0];       \
-            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
-        }                                                            \
-    } while (0)
-#define MARU_DRAW_QUADS(sv, cv)                                       \
-    do {                                                             \
-        if ((cv) > 0) {                                              \
-            [encoder setRenderPipelineState:impl.quadPipeline];      \
-            [encoder setVertexBuffer:quad_vertex_buffer offset:0 atIndex:0]; \
-            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(sv) vertexCount:(cv)]; \
-        }                                                            \
-    } while (0)
-    // kitty graphics(K2): 이미지를 image_id별 텍스처로 한 장씩 그린다([si,ei) 구간). 텍스처 없는 건 skip
-    // (Zig는 업로드했다고 보지만 캐시에 없으면 — 렌더러 재생성 등 — 안 그릴 뿐, crash 없음).
-#define MARU_DRAW_IMAGES(si, ei)                                      \
-    do {                                                             \
-        if (image_vertex_buffer != nil && (ei) > (si)) {             \
-            /* pipeline·vertex buffer는 범위당 1회만 바인딩한다 — 이미지마다 바뀌는 건 fragment   \
-               texture뿐이라, 매 이미지 재바인딩(pipeline/vertex state 변경은 인코더에서 가장 비싼 \
-               연산)을 루프 밖으로 끌어낸다. draw 순서·결과는 불변. */                            \
-            [encoder setRenderPipelineState:impl.imagePipeline];     \
-            [encoder setVertexBuffer:image_vertex_buffer offset:0 atIndex:0]; \
-            for (size_t ii = (si); ii < (ei); ii++) {                \
-                id<MTLTexture> tex = impl.imageTextures[@(gpu_images[ii].image_id)]; \
-                if (tex == nil) continue;                            \
-                [encoder setFragmentTexture:tex atIndex:0];          \
-                [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(ii * 6) vertexCount:6]; \
-            }                                                        \
-        }                                                            \
-    } while (0)
-    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(0, bottom_vertex_count);   // 0. bottom quad(탭 밴드 — 터미널·제목 앞, 제목 아래로)
-    MARU_DRAW_IMAGES(0, image_above_start);                                   // 0.5 kitty 이미지(텍스트 뒤 — 투명 셀로 비침)
-    // 1a. 사이드바 배경 strip(bg quad, 버퍼 맨 앞 [0, cells_base_v)) — 터미널 cells '앞'에 그려 사이드바 헤더
-    //     glyph(origin_x=0, 셀 패스)·밴드·제목이 배경 '위'에 보이게 한다(painter — 헤더 glyph 가림 회귀 fix).
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(0, cells_base_v, 1.0f);
-    // 1a+. 헤더 quad(layer 4, 알림 종 배지 빨강 원) — 사이드바 bg strip '뒤' / 터미널·헤더 글리프 '앞'에 끼운다(흰 숫자
-    //      글리프가 원 위에 보이게). 버퍼 구간 [bottom+under, +header). 배지 없으면 0이라 no-op(기존 경로 불변).
-    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count, header_vertex_count);
-    // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터. opacity 1.0(커서 suffix는 위 terminal_end_v가 제외).
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(cells_base_v, terminal_end_v, 1.0f);
-    // 1b+. 터미널 커서 페이드 pass(모달 없을 때 — 커서=터미널 suffix). 본문 '뒤'·kitty 텍스트-앞 이미지 '앞'에 그려 기존
-    //      커서 레이어(1b 안이던 위치)를 보존한다. cursor_fade_milli<1이면 반투명으로 아래 본문 셀에 합성돼 blink가 페이드.
-    if (vertex_buffer != nil && draw_cursor && !has_modal)
-        MARU_DRAW_CELLS(cells_base_v + cursor_start * 12, cursor_cells * 12, cursor_opacity);
-    MARU_DRAW_IMAGES(image_above_start, gpu_image_n);                         // 1.5 kitty 이미지(텍스트 앞)
-    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count, under_vertex_count); // 3. under quad(사이드바 밴드)
-    // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 헤더 영역 [0, header_h)를
-    //    scissor 밖으로 둬 [header_h, drawable_h]만 그린다. **MTLScissorRect는 좌상단 원점**(Apple 문서 — framebuffer
-    //    픽셀 좌표, y가 아래로 증가; NDC 좌하단 원점과 다르다). 이 렌더러는 커스텀 viewport가 없고 정점 셰이더가
-    //    py_top(좌상단 px)→NDC로 매핑(maru_fill_glyph_quad)해 framebuffer가 표준 방향이라, 상단 헤더를 자르려면
-    //    y=header_h부터 남긴다(이전엔 y=0·height=dh-header로 둬 좌하단 원점으로 착각 — 정반대로 **하단** header_h가
-    //    잘리고 스크롤된 카드 텍스트가 고정 검색 헤더를 덮었다). GPU-quad 밴드/tint는 sidebarScrollClipQuad가 좌상단
-    //    px 공간에서 기하 클립하는 별개 경로라 영향 없었다(그래서 밴드는 안 새고 카드 '글리프'만 헤더로 샜다).
-    //    헤더 glyph는 터미널 셀 패스(위)라 이 scissor에 안 걸려 고정된다. 바로 뒤 패스(그림자·모달)를 위해 full
-    //    drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
-    const bool sidebar_scroll_clip = (sidebar_cells_n > 0 && sidebar_scroll_offset_px > 0u &&
-                                      (float)sidebar_header_height_px < drawable_h);
-    if (sidebar_scroll_clip) {
-        const NSUInteger dw = (NSUInteger)drawable_size.width;
-        const NSUInteger dh = (NSUInteger)drawable_size.height;
-        const NSUInteger header_h = (NSUInteger)sidebar_header_height_px; // 좌상단 원점 → 상단 header_h를 잘라내고 [header_h, dh] 유지
-        [encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = header_h, .width = dw, .height = dh - header_h }];
-    }
-    if (vertex_buffer != nil) MARU_DRAW_CELLS(pre_sidebar_vertices, total_vertices - pre_sidebar_vertices, 1.0f); // 사이드바 cells(제목)
-    if (sidebar_scroll_clip) {
-        const NSUInteger dw = (NSUInteger)drawable_size.width;
-        const NSUInteger dh = (NSUInteger)drawable_size.height;
-        [encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }]; // full 복원(다음 패스용)
-    }
-    // C4b: shadow 패스 — 터미널·사이드바 위, 모달 배경(over quad) 아래. 모달이 떠 보이게(리뷰 #1 — 맨 처음이면
-    // 터미널 셀이 halo를 덮어 그림자가 깜빡/사라졌다). 모달 over quad·텍스트가 이 위에 그려진다.
-    if (shadow_vertex_buffer != nil) {
-        [encoder setRenderPipelineState:impl.shadowPipeline];
-        [encoder setVertexBuffer:shadow_vertex_buffer offset:0 atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:shadow_vertex_total];
-    }
-    if (quad_vertex_buffer != nil) MARU_DRAW_QUADS(bottom_vertex_count + under_vertex_count + header_vertex_count, quad_vertex_total - bottom_vertex_count - under_vertex_count - header_vertex_count); // 5. over quad(모달 배경)
-    // 6. 모달 텍스트(cells_base_v 오프셋) — clip 영역이 있으면 모달 셀만 scissor로 자른다(부분 카드 픽셀 스크롤
-    //    인프라). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 draw라 복원 불필요.
-    //    ⚠️ 알려진 이슈: 아래 y-flip(cy = dh - (y+h))은 MTLScissorRect를 **좌하단 원점**으로 가정하지만, Metal의
-    //    실제 규약은 **좌상단 원점**이다(위 사이드바 scissor 참고 — 같은 착오로 카드가 헤더를 덮던 걸 y=header로
-    //    정정). 이 modal_clip 경로는 아직 어떤 컴포넌트도 draw.Op.clip을 emit하지 않는 미사용 인프라(metal_frame.zig
-    //    "적용 후속")라 이 버그가 런타임에 드러나지 않았다. 부분 픽셀 스크롤을 실제 컴포넌트에 연결할 때 좌상단
-    //    원점으로 정정(cy = modal_clip_y_px)하고 함께 검증할 것 — 지금 고치면 검증 경로가 없어 보류한다.
-    if (vertex_buffer != nil && has_modal) {
-        if (modal_clip_w_px > 0) {
-            const NSUInteger dw = (NSUInteger)drawable_size.width;
-            const NSUInteger dh = (NSUInteger)drawable_size.height;
-            const NSUInteger cx = ((NSUInteger)modal_clip_x_px < dw) ? (NSUInteger)modal_clip_x_px : 0;
-            const NSUInteger cw2 = ((NSUInteger)modal_clip_x_px + (NSUInteger)modal_clip_w_px <= dw) ? (NSUInteger)modal_clip_w_px : (dw - cx);
-            const NSUInteger top = (NSUInteger)modal_clip_y_px + (NSUInteger)modal_clip_h_px;
-            const NSUInteger cy = (top <= dh) ? (dh - top) : 0;
-            const NSUInteger ch2 = (cy + (NSUInteger)modal_clip_h_px <= dh) ? (NSUInteger)modal_clip_h_px : (dh - cy);
-            [encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
-        }
-        // 모달 본문(모달 셀 중 커서 suffix 제외 — 커서=모달 뒤 오버레이 caret). cursor_start는 모달 없음 땐 cell_count와
-        // 같아 이 분기(has_modal)를 안 타므로 여기선 항상 modal_cells_start ≤ cursor_start ≤ cell_count.
-        MARU_DRAW_CELLS(cells_base_v + modal_cells_start * 12, (cursor_start - modal_cells_start) * 12, 1.0f); // 셀당 2 quad — ×12
-    }
-    // 6+. 오버레이 caret 페이드 pass(모달 열림 — 커서=모달 뒤 suffix). 모달 텍스트 '위'(마지막 draw)에 opacity로 그린다.
-    //     modal_clip scissor가 위에서 걸렸으면 그대로 이어져 caret도 같은 영역에 클립된다(모달 셀의 일부라 의도된 동작).
-    if (vertex_buffer != nil && draw_cursor && has_modal)
-        MARU_DRAW_CELLS(cells_base_v + cursor_start * 12, cursor_cells * 12, cursor_opacity);
-#undef MARU_DRAW_CELLS
-#undef MARU_DRAW_QUADS
-#undef MARU_DRAW_IMAGES
+    // Phase 4b(b1): 인코딩 시퀀스를 터미널/오버레이 두 논리 레이어 함수로 나눠 호출한다. 지금은 둘 다
+    // **같은 encoder**를 받아 back-to-back으로 그리므로 출력이 byte-identical이다(1레이어 무회귀). b2에서
+    // 각 함수에 자기 CAMetalLayer의 encoder/drawable을 주면 실제 2레이어 합성이 된다. 위에서 계산한 오프셋·
+    // 모달/커서 파라미터를 컨텍스트에 모아 넘긴다(vertex 채우기·drawable 획득·clear는 위/아래 그대로).
+    MaruDrawPass pass_ctx = {
+        .encoder = encoder,
+        .impl = impl,
+        .vertex_buffer = vertex_buffer,
+        .quad_vertex_buffer = quad_vertex_buffer,
+        .shadow_vertex_buffer = shadow_vertex_buffer,
+        .image_vertex_buffer = image_vertex_buffer,
+        .gpu_images = gpu_images,
+        .drawable_size = drawable_size,
+        .bottom_vertex_count = bottom_vertex_count,
+        .under_vertex_count = under_vertex_count,
+        .header_vertex_count = header_vertex_count,
+        .quad_vertex_total = quad_vertex_total,
+        .shadow_vertex_total = shadow_vertex_total,
+        .image_above_start = image_above_start,
+        .gpu_image_n = gpu_image_n,
+        .cells_base_v = cells_base_v,
+        .pre_sidebar_vertices = pre_sidebar_vertices,
+        .total_vertices = total_vertices,
+        .terminal_end_v = terminal_end_v,
+        .cursor_start = cursor_start,
+        .cursor_cells = cursor_cells,
+        .cursor_opacity = cursor_opacity,
+        .draw_cursor = draw_cursor,
+        .has_modal = has_modal,
+        .modal_cells_start = modal_cells_start,
+        .modal_clip_x_px = modal_clip_x_px,
+        .modal_clip_y_px = modal_clip_y_px,
+        .modal_clip_w_px = modal_clip_w_px,
+        .modal_clip_h_px = modal_clip_h_px,
+        .sidebar_cells_n = sidebar_cells_n,
+        .sidebar_scroll_offset_px = sidebar_scroll_offset_px,
+        .sidebar_header_height_px = sidebar_header_height_px,
+    };
+    maru_draw_terminal_layer(&pass_ctx); // 맨 아래: 터미널 셀·사이드바·chrome·kitty·(모달 없을 때)터미널 커서
+    maru_draw_overlay_layer(&pass_ctx);  // 맨 위: 그림자·모달 배경·모달 텍스트·(모달 열림)오버레이 caret
     [encoder endEncoding];
 
     if (screenshot_mode) {

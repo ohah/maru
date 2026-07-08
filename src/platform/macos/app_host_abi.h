@@ -11,7 +11,7 @@
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
-#define MARU_WORKSPACE_HEADER "maru.workspace.v1"
+#define MARU_WORKSPACE_HEADER "maru.workspace.v2"
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -744,10 +744,15 @@ int32_t maru_macos_app_session_window_title(
 );
 
 /* 이 창(세션)의 workspace restore 블록(헤더 없는 "window ..." 라인; UTF-8). Swift가 멀티 창 저장에서
-   maru.workspace.v1 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
-   캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장. */
+   maru.workspace.v2 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
+   캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장.
+   M3e v2: window_id(NSWindow 토큰), window_kind(0=normal,1=quick), is_active(!=0=key 창=활성 window 마커)를
+   Swift가 넘긴다 — window 라인에 직렬화돼 재시작 후 배치·활성 창이 산다. */
 int32_t maru_macos_app_session_serialize_workspace(
     MaruAppHostSession *session,
+    uint64_t window_id,
+    uint32_t window_kind,
+    uint32_t is_active,
     const uint8_t **out_ptr,
     size_t *out_len
 );
@@ -766,6 +771,15 @@ int32_t maru_macos_app_session_serialize_sidebar_config(
    검증도 겸한다: parse 실패(헤더 불일치·손상)면 -1(Swift가 복원 건너뜀), 0이면 빈 workspace. 포맷 파싱은 Zig
    단일 권위 — Swift는 'window ' 경계를 직접 나누지 않는다. */
 int64_t maru_macos_app_session_workspace_window_count(
+    MaruAppHostSession *session,
+    const uint8_t *text_ptr,
+    size_t text_len
+);
+
+/* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 활성(key) 창의 인덱스를 돌려준다(M3e v2). Swift가 복원 loop
+   뒤 그 창을 다시 key로 올려 재시작 후 이동 전 활성 창이 포커스되게 한다. parse 실패·활성 표시 없으면 -1(Swift
+   폴백 = 마지막-생성 창 key). 포맷 파싱은 Zig 단일 권위. */
+int64_t maru_macos_app_session_workspace_active_window(
     MaruAppHostSession *session,
     const uint8_t *text_ptr,
     size_t text_len

@@ -120,7 +120,7 @@ claude `--resume`은 대화만 복원하고 `--dangerously-skip-permissions` 같
 ## 저장 모델 초안
 
 ```text
-maru.workspace.v1
+maru.workspace.v2
 workspace id=<stable-id>
 root /path/to/repo
 
@@ -136,9 +136,9 @@ layout
   tab 1 surface=1
 ```
 
-실제 직렬화는 나중에 정한다. 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로 bare 토큰(`maru.workspace.v1`)을 쓰고 `schema=` 접두어를 두지 않는다.
+실제 직렬화는 나중에 정한다(위 초안과 실제 라인 문법은 다르다 — 실제는 `window`/`tab`/`tree-node`/`pane`/`surface` 라인, src/session/workspace.zig). 중요한 것은 저장 대상이 live object가 아니라 선언적 상태라는 점이다. 첫 줄 schema 토큰은 snapshot/trace와 같은 규칙으로 bare 토큰(`maru.workspace.v2`, M3e)을 쓰고 `schema=` 접두어를 두지 않는다.
 
-멀티윈도우와 live surface 소유권(AppRuntime/WindowGraph) 모델은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다. 그 모델이 도입되면 저장 대상은 단일 창에서 `WindowGraph` 기준(windows, active window, workspace order, pane tree, surface refs)으로 확장되고, 각 surface는 복원 시 새 generation으로 생성된다. live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 여전히 저장하지 않는다.
+멀티윈도우와 live surface 소유권(AppRuntime/WindowGraph) 모델은 [윈도우와 Surface 이동성](window-surface-mobility.md)을 단일 출처로 둔다. **M3e(구현됨)**로 저장 대상이 `WindowGraph`-형 v2 문서(windows, active window=per-window `active-window` 플래그, `window_id`/`window_kind`, workspace order, pane tree, surface refs)로 확장됐고, 각 surface는 복원 시 새 generation으로 생성된다. live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 여전히 저장하지 않는다.
 
 ## 사용자 지정 이름(custom_name)과 자동 제목
 
@@ -215,6 +215,7 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 **범위 밖(하위호환 안 되는 변경).** 새 블록 타입 추가·`tree-node` 인코딩 변경·카운트 의미 변경은 구조 파괴라 스키마 버전
 bump(`maru.workspace.v1`→`.v2`) 또는 통째 폴백+self-heal 대상이다("[저장 파일을 통째로 파싱 못 할 때](#저장-파일을-통째로-파싱-못-할-때)"). additive 스칼라 필드는 버전을 안 올린다.
+**M3e(구현됨)**: `window` 라인에 창 identity(`window-id`·`window-kind`·`active-window`)를 더하며 스키마를 `.v1`→`.v2`로 bump했다(구조 변경 — additive 아님). 옛 `maru.workspace.v1` 파일은 v2 parser가 BadHeader로 거부→조용한 기본-창 폴백(v1 reader 없음), 다음 정상 종료가 v2로 같은 경로를 덮어써 self-heal한다(docs/window-surface-mobility.md §8A.6).
 
 **writer.** writer는 항상 전체 키를 `key=value`로 쓴다(불변) → round-trip 고정점 유지. reader만 순서 무관·기본값이라, writer가 낸
 최신 포맷은 정확히, 옛 파일은 관대하게 읽는다.

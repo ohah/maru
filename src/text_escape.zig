@@ -1,4 +1,4 @@
-//! 라인 기반 텍스트 포맷의 따옴표 문자열 escape 단일 출처. maru.workspace.v1·maru.trace.v1·snapshot이 cwd/title/
+//! 라인 기반 텍스트 포맷의 따옴표 문자열 escape 단일 출처. maru.workspace.v2·maru.trace.v1·snapshot이 cwd/title/
 //! command/codepoint 같은 값을 한 줄·한 토큰으로 안전하게 보관하려고 같은 규칙을 쓴다(`\` `"`·개행/CR/Tab → `\\`
 //! `\"` `\n` `\r` `\t`, 나머지는 그대로). 각 파일에 복제돼 있던 걸 여기로 모아, 규칙이 한 곳에서만 정의되게 한다
 //! (한 reader/writer만 고치고 다른 포맷이 조용히 갈라지는 drift 방지). reader는 같은 규칙으로 unescape한다.

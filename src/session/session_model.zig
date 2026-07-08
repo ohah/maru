@@ -13,7 +13,7 @@ const std = @import("std");
 const surface_mod = @import("surface.zig");
 const split_tree = @import("split_tree.zig");
 const agent_transcript = @import("agent_transcript.zig");
-const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
+const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v2) — TreeNode 변환용
 
 const Surface = surface_mod.Surface;
 
@@ -88,12 +88,12 @@ pub fn Model(comptime Rt: type) type {
             tree: PaneTree.Node = undefined,
             /// 워크스페이스 사용자 지정 이름(rename, owned). 없으면 활성 Term 라벨로 폴백. destroyTab이 해제.
             custom_name: ?[]const u8 = null,
-            /// 위치 고정(Pin) — true면 드래그 재정렬에서 안 움직인다. workspace.v1 영속.
+            /// 위치 고정(Pin) — true면 드래그 재정렬에서 안 움직인다. workspace.v2 영속.
             pinned: bool = false,
-            /// 사이드바 카드 배경 tint(0xRRGGBB, 0=기본 테마색). workspace.v1 영속.
+            /// 사이드바 카드 배경 tint(0xRRGGBB, 0=기본 테마색). workspace.v2 영속.
             background_color: u32 = 0,
             /// 사이드바 카드 좌측 accent 막대색(0xRRGGBB, 0=기본 — 활성 카드는 테마 앰버, 비활성은 막대 없음).
-            /// 지정하면 활성·비활성 카드 모두 그 색으로 막대 표시(배경 tint와 직교). workspace.v1 영속.
+            /// 지정하면 활성·비활성 카드 모두 그 색으로 막대 표시(배경 tint와 직교). workspace.v2 영속.
             accent_color: u32 = 0,
             /// 사이드바 그룹 **시작 마커**(위치 파생 소속 — docs/sidebar-groups.md §2.1). null=그룹 시작 아님
             /// (자기 위 가장 가까운 마커에 소속되거나, 위에 마커가 없으면 최상위). 소속 자체는 저장하지 않고
@@ -104,12 +104,12 @@ pub fn Model(comptime Rt: type) type {
             /// 중첩 그룹 깊이 레벨(SG5-3 — docs/sidebar-groups.md §9). group_start!=null일 때만 의미: 1=최상위 그룹,
             /// 2=그 안 중첩, … 소속과 마찬가지로 **정규화 depth는 위치에서 파생**(projectRows가 스택으로 재계산·클램프)하고
             /// 이 필드는 "이 마커가 얼마나 깊이 들어가려는가"의 힌트다. 최상위에서 create_group=1, 그룹 안에서=그 카드
-            /// depth+1. workspace.v1 영속(group-depth, 기본 1=키 생략). 기본 1(비마커 탭에선 무의미).
+            /// depth+1. workspace.v2 영속(group-depth, 기본 1=키 생략). 기본 1(비마커 탭에선 무의미).
             group_depth: u8 = 1,
             /// 사이드바 그룹 공통 색(0xRRGGBB, 0=색 없음/기본 폴백 — docs/sidebar-groups.md §9 SG5-2). group_start!=null일
             /// 때만 의미 — 그룹 시작 마커 **하나에만** 저장하고, 소속 카드는 위치 파생으로 그 색을 따른다(별도 저장 없음,
             /// §2.1 위치 파생과 동형). 헤더 밴드 tint·소속 카드 좌측 accent 막대에 실린다. 개별 카드 background_color와는
-            /// 다른 층(그룹 색=헤더+막대, 카드 배경=별도 tint)이라 서로 안 덮는다. workspace.v1 영속(group-color). 기본 0.
+            /// 다른 층(그룹 색=헤더+막대, 카드 배경=별도 tint)이라 서로 안 덮는다. workspace.v2 영속(group-color). 기본 0.
             group_color: u32 = 0,
             /// 그룹-로컬 pin(GL — docs/sidebar-groups.md §13). 이 카드가 **자기 그룹 subtree 안에서** 위로(마커 직후)
             /// 고정됐는가(그룹 안 leaf 멤버 전용). 전역 핀(Tab.pinned = [고정][비고정] 리전, §12)과 **직교하는 별개 축**이다:
@@ -117,7 +117,7 @@ pub fn Model(comptime Rt: type) type {
             /// 카드에선 무의미(마커=그룹 고정 권위·top카드=개별 pin은 Tab.pinned가 든다). **전역 파티션 머신**
             /// (countPinnedTabs·stablePartitionPinned·clampMoveToGroup·normalizePinnedFromGroups)은 이 필드를 **안 읽는다**
             /// — 멤버 pinned를 재해석하면 전역 partition이 그룹을 shred(C3)하므로 새 필드로 격리한다(§13). stablePartitionSubtree만
-            /// 이 값으로 subtree 내부를 물리 재배열한다. workspace.v1 영속(local-pinned, 기본 false=키 생략). destroyTab 무관(스칼라).
+            /// 이 값으로 subtree 내부를 물리 재배열한다. workspace.v2 영속(local-pinned, 기본 false=키 생략). destroyTab 무관(스칼라).
             local_pinned: bool = false,
             /// §2.1 재설계 서브파티션 마커(docs/sidebar-groups.md §14). 한 핀 리전 **안**에서 이 카드가 **최상위(depth 0)로
             /// 복귀**하는 지점 = 앞 그룹 리전을 끝내는 리딩 break 신호(pin 플립과 동형의 두 번째 리셋 신호). 위치 파생 소속을
@@ -126,7 +126,7 @@ pub fn Model(comptime Rt: type) type {
             /// nest). group_start==null(비마커)·leaf 카드 전용(마커의 형제 top-level 그룹은 group_depth=1 pop으로 표현하므로
             /// 마커엔 세팅 금지, local_pinned §13.8 선례). 전역 파티션과 직교(핀 프리픽스 I1 불변 — top_level은 항상 한 핀 리전
             /// 안의 안쪽 파티션). 소속·depth는 저장하지 않고 위치에서 파생하며(§2.1) 이 필드는 "여기서 그룹 리전 끝, 최상위 복귀"만
-            /// 든다. workspace.v1 영속(top-level, 기본 false=키 생략 → 전 탭 false면 7 파생 경계 리셋/break가 no-op = byte-identical).
+            /// 든다. workspace.v2 영속(top-level, 기본 false=키 생략 → 전 탭 false면 7 파생 경계 리셋/break가 no-op = byte-identical).
             /// destroyTab 무관(스칼라). SR1은 저장+파생 토대만 — 배선(createGroup write·드래그 전이·normalize 재작성)은 SR2~5.
             top_level: bool = false,
 
@@ -141,7 +141,7 @@ pub fn Model(comptime Rt: type) type {
         };
 
         // ── workspace 직렬화 변환(PaneTree ↔ session.workspace.TreeNode) ──────────────────────────────────
-        // 라이브 split 트리(세션 모델)와 직렬화 모델(session.workspace.v1) 사이의 pure 변환. PTY/렌더 없이
+        // 라이브 split 트리(세션 모델)와 직렬화 모델(session.workspace.v2) 사이의 pure 변환. PTY/렌더 없이
         // 트리 구조만 다루므로 session core가 소유한다(capture/restore 오케스트레이션·PTY spawn은 platform).
 
         /// 활성 탭 트리(PaneTree, `*Pane` leaf)를 `workspace.TreeNode` preorder 리스트로 평탄화(저장용).

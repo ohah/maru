@@ -1268,6 +1268,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             resizeAppSessionFromWindow()
             _ = renderTick()
         }
+        // M3e v2: 저장된 활성(key) 창을 **마지막에** 다시 key로 올린다 — v1엔 이 마커가 없어 마지막-생성 창이 key가 됐다.
+        // 복원 loop가 각 새 창을 makeKey하므로, 이동 전 활성 창을 여기서 다시 올려야 그 창이 포커스로 착지한다. windows
+        // 인덱스는 블록 순서(=저장 순서)와 정렬(windows[0]=primary=블록0, windows[i]=블록i). 활성 표시 없음(-1)이면 무동작(현행 유지).
+        let activeIdx = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_workspace_active_window(session, buf.baseAddress, buf.count)
+        }
+        if activeIdx >= 0, Int(activeIdx) < windows.count {
+            windows[Int(activeIdx)].window?.makeKeyAndOrderFront(nil)
+        }
     }
 
     /// chrome Notice 모달(손상 알림 등)을 primary 세션에 띄운다. 메시지는 UTF-8로 Zig에 넘긴다(세션이 복사 소유라
@@ -1280,8 +1289,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    /// workspace.v1 raw 텍스트를 읽는다(관대 UTF-8 디코드 — 깨진 바이트는 U+FFFD). 없으면 nil. 헤더 검증·창 분할은
-    /// Zig ABI가 한다(파싱 권위 단일화) — 여기선 포맷을 파싱하지 않는다.
+    /// workspace 저장 파일의 raw 텍스트를 읽는다(관대 UTF-8 디코드 — 깨진 바이트는 U+FFFD). 없으면 nil. 헤더 검증·창
+    /// 분할은 Zig ABI가 한다(파싱 권위 단일화) — 여기선 포맷을 파싱하지 않는다. M3e에서 내용 헤더는 v2지만 옛 v1 내용
+    /// 파일도 이 경로로 읽혀 Zig가 BadHeader→조용한 폴백으로 처리한다(다음 저장이 v2로 같은 경로를 덮어씀=self-heal).
     private func loadWorkspaceText() -> String? {
         guard let url = workspaceFileURL, let data = try? Data(contentsOf: url) else { return nil }
         return String(decoding: data, as: UTF8.self)
@@ -3315,6 +3325,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// 저장된 workspace 파일 위치(~/Library/Application Support/maru/workspace.v1). R5 저장·R4 로드가 공유한다.
+    /// **파일명 `.v1`은 안정적 on-disk 경로일 뿐 포맷 버전이 아니다** — 포맷 버전은 내용 첫 줄 헤더(`maru.workspace.v2`,
+    /// M3e)에 산다. 경로를 안정으로 유지해야 v2 저장이 옛 v1 내용 파일을 **같은 경로에서 in-place로 덮어써** self-heal한다
+    /// (경로를 바꾸면 옛 파일이 고아로 남고 조용한-폴백 self-heal이 깨진다 — [[serialization-format-change-migration-fallout]]).
     private var workspaceFileURL: URL? {
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
@@ -3323,7 +3336,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// 정상 종료 시 현재 멀티 창 workspace를 디스크에 저장한다(R5). 각 일반 창(세션)의 블록을 ABI로 받아
-    /// `maru.workspace.v1` 헤더 하나 아래로 모은다. quick 패널은 transient라 제외. smoke·빈 창·쓰기 실패는
+    /// `maru.workspace.v2` 헤더 하나 아래로 모은다. quick 패널은 transient라 제외. smoke·빈 창·쓰기 실패는
     /// best-effort로 건너뛴다(저장 실패가 종료를 막지 않는다). 크래시 가드는 호출처(applicationWillTerminate가
     /// 정상 종료에만 불림)가 보장 — 깨진 세션이 마지막 저장을 덮어쓰지 않는다.
     private func saveWorkspace() {
@@ -3334,9 +3347,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var blocks = ""
         for surface in windows {
             guard let session = surface.appSession else { continue }
+            // M3e v2: 창 수준 메타를 Swift가 넘긴다 — window_id=창 토큰(surface.token), window_kind=0(normal; 이 loop는
+            // 일반 창만·quick 제외), is_active=이 창이 key 창인가(활성 window 마커 → 재시작 후 포커스 복원).
+            let isActive: UInt32 = (surface.window?.isKeyWindow == true) ? 1 : 0
             var ptr: UnsafePointer<UInt8>? = nil
             var len: size_t = 0
-            guard maru_macos_app_session_serialize_workspace(session, &ptr, &len) == Self.statusOK,
+            guard maru_macos_app_session_serialize_workspace(session, surface.token, 0, isActive, &ptr, &len) == Self.statusOK,
                   let bytes = ptr, len > 0 else { continue } // 캡처 실패한 창은 건너뜀
             blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         }

@@ -41,7 +41,7 @@ chrome 컴포넌트 경계는 [Chrome 전략](chrome-strategy.md) §5.4/§5.5다
   접히고(▸), 다시 클릭하면 펴진다. 접힌 그룹은 헤더 한 줄만 남아 사이드바가 짧아진다.
 - **그룹에 속하지 않는 카드**(최상위)는 지금처럼 헤더 없이 그대로 나열된다 — 그룹은 opt-in이라 안 쓰면 현재와 동일.
 - **그룹 안 카드는 살짝 들여쓰기**해 소속을 시각적으로 보인다(depth 1).
-- **접힘 상태는 영속**한다 — 세션을 껐다 켜도 접어둔 그룹은 접힌 채로 복원된다(workspace.v1).
+- **접힘 상태는 영속**한다 — 세션을 껐다 켜도 접어둔 그룹은 접힌 채로 복원된다(workspace.v2).
 - **검색과 그룹의 상호작용**: 검색 중에는 매치된 카드가 어느 그룹에 있든 보여야 찾기 쉽다 → 검색 활성 동안은 **그룹
   접힘을 일시 무시**(매치 카드를 그 그룹 헤더 아래 펼쳐 보임). 검색을 지우면 원래 접힘 상태로 돌아온다. 접힘은 사용자
   의도(영속)지만 검색은 일시 질의라 검색이 우선한다(베이스: VSCode 탐색기 검색이 접힌 폴더를 임시로 펼치는 동작).
@@ -155,7 +155,7 @@ group_collapsed: bool = false,
 탭부터 다음 `group_start` 전까지가 그 그룹이다. 접힘도 그 그룹 시작 탭의 `group_collapsed`를 따른다. `AppSession`은
 추가 소유 상태가 없다(그룹은 탭에 산다).
 
-## 4. 직렬화 — `maru.workspace.v1` (순수 additive, 상·하위호환)
+## 4. 직렬화 — `maru.workspace.v2` (순수 additive, 상·하위호환)
 
 [Workspace Restore 전략](workspace-restore.md#직렬화-전략-스칼라-필드-key-addressed-파싱)의 key-addressed 규율을 따른다.
 §2.1 덕분에 **새 블록·count 키가 필요 없고**, `tab` 라인에 스칼라 2개만 붙인다:
@@ -300,7 +300,7 @@ fn projectRows(self: *AppSession) void { ... }   // self.sidebar_rows 채움
 | **카드 드래그로 넣기/빼기** | ✅ SG4 | 카드를 마커 위/아래·헤더로 드래그(중첩 자식 그룹 안 포함) | `sidebarGroupDropTargetTab`(드롭 row→목표 탭 매핑) + `sidebar_drop_slot` 하이라이트. 위치 파생이라 별도 소속 편집 없음 — 드롭 위치의 depth가 곧 카드 depth(자식 그룹 안=자식 depth·최상위=0). 마커 탭 드래그=그룹 통째=SG5 |
 | **그룹 통째 드래그** | ✅ SG5-1 | 헤더 잡아 드래그(클릭=접기와 threshold 구분) | `moveGroupRange`(구간 블록 이동)·`sidebarGroupDropBoundary`(경계 clamp)·`sidebar_group_drag_*` |
 | **드래그로 중첩 넣기/빼기** | ✅ SG5-4 (+Cmd 게이트) | **`Cmd(⌘)` 누른 채** 그룹 헤더를 다른 그룹 헤더에 드롭=자식으로 **중첩**. **`Cmd` 없이는 항상 형제**(헤더 드롭이라도 단순 위치 변경, 중첩 절대 안 됨). 카드/최상위 드롭=형제 재정렬(+얕으면 빼기) | `groupDragPreviewFrame(cmd_held)`가 게이트: `cmd_held`면 헤더 드롭 시 `groupNestPlan`(target_depth=타겟 depth+1·insert=타겟 subtree 끝)→`moveGroupNesting`, 아니면 nest 미시도(`sidebarGroupDropBoundary`→`moveGroupSibling`, 형제/빼기). 카드 드롭은 Cmd 유무 무관 형제(N4 폴백). **modifier 전달**: Swift `modsBits`가 command=32 추가, 터미널 리포트 경로(`mouse`/`mouseMoved`)는 `mods & ~32`로 마스킹(SGR motion 비트 32 충돌 회피). 고스트 피드백: nest=타깃 그룹 하이라이트+들여쓴 고스트, sibling=삽입선만 |
-| 그룹 색 | ✅ SG5-2 | **카드 우클릭 "그룹 색: …"** 프리셋(카드 색과 같은 팔레트) · **헤더 우클릭 "그룹 색: …"**(SG5-2-header, 같은 라벨·팔레트·`setGroupColorForTab` 재사용) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v1 `group-color`(0=키 생략). 헤더/카드가 같은 색 메뉴를 공유해 사용자가 헤더에서도 색을 찾는다(피드백 반영) |
+| 그룹 색 | ✅ SG5-2 | **카드 우클릭 "그룹 색: …"** 프리셋(카드 색과 같은 팔레트) · **헤더 우클릭 "그룹 색: …"**(SG5-2-header, 같은 라벨·팔레트·`setGroupColorForTab` 재사용) / 헤더 밴드 tint·소속 카드 막대 | `group_start` 탭에 `group_color` 저장(마커 하나에만, 소속 카드는 위치 파생). 헤더 밴드=lowerSidebar 블렌드(카드 배경 tint와 같은 경로)·소속 카드 막대=per-tab accent 루프(개별 accent>그룹 색>기본). workspace.v2 `group-color`(0=키 생략). 헤더/카드가 같은 색 메뉴를 공유해 사용자가 헤더에서도 색을 찾는다(피드백 반영) |
 
 **단축키·설정 노출(베이스/결정)**: `create_group`/`ungroup`을 **bindable 액션**으로 정의하고 `command_catalog`에 등록하면
 세 경로에 **자동으로** 뜬다 — (1) 커맨드 팔레트, (2) 설정 화면(⌘,) Input 섹션의 **키바인딩 리바인더**(행 클릭 → 녹음
@@ -348,7 +348,7 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
    `Row.card`를 공급한다(헤드리스 테스트: 헤더가 섞여도 카드 밴드만·슬롯=row 인덱스 유지). app_session 내부
    `sidebar_visible_tabs` → `sidebar_rows` **완전 격상은 헤더가 실제로 필요한 SG3로 미룬다**(카드만일 땐
    `sidebar_visible_tabs`로 충분 — YAGNI, 각 단계 green). 순수 리팩터라 검색·재정렬·스크롤 동작 그대로.
-2. **SG2 — 데이터·직렬화 ✅**: `Tab.group_start`/`group_collapsed`(session_model + workspace 모델) + workspace.v1
+2. **SG2 — 데이터·직렬화 ✅**: `Tab.group_start`/`group_collapsed`(session_model + workspace 모델) + workspace.v2
    `group-start`/`group-collapsed` 스칼라(순수 additive) + 캡처/복원 변환(owned dup·errdefer·deinit free) +
    round-trip·하위호환·leak 테스트. 렌더는 아직 안 붙임(모델만).
 3. **SG3 — sidebar_rows 격상 + 가변 높이 + 헤더 렌더 + 접기 + 만들기/이름/해제** (가변 높이라 커서 하위 분할):
@@ -401,9 +401,9 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
      그룹 색 > 활성 기본 accent > 없음(개별 지정이 그룹 색보다 명시적). 설정 = **카드 우클릭**과 **헤더 우클릭**(SG5-2-header)
      "그룹 색: …" 프리셋(카드 색과 같은 `tab_color_presets` 팔레트·`setGroupColorForTab`이 소속 그룹 마커에 세팅, 그룹 밖이면
      no-op). 헤더 우클릭은 `renameTargetAt`이 group_header row의 마커 탭을 `.group` 대상으로 잡고, `buildContextMenuItems`/
-     `acceptContextMenu`의 `.group` 분기가 카드 메뉴와 **같은 색 라벨/dispatch**를 재사용한다(중복 최소·같은 색 메뉴 공유). 직렬화 = workspace.v1
+     `acceptContextMenu`의 `.group` 분기가 카드 메뉴와 **같은 색 라벨/dispatch**를 재사용한다(중복 최소·같은 색 메뉴 공유). 직렬화 = workspace.v2
      `group-color` 스칼라(비영만 group-start 블록에 쓰고 0=키 생략 — additive·round-trip 고정, 옛 리더 미지 키 skip으로 양쪽 호환).
-     헤드리스: projectRows/렌더가 헤더 밴드·카드 막대에 그 색을 싣는지 gpu_quad 단언 + workspace.v1 round-trip + 색 없는 그룹
+     헤드리스: projectRows/렌더가 헤더 밴드·카드 막대에 그 색을 싣는지 gpu_quad 단언 + workspace.v2 round-trip + 색 없는 그룹
      기본 폴백. **제품 스크린샷 검증 완료**(`MARU_FORCE_GROUP_COLOR=1` — 헤더 밴드 파란 tint + 소속 카드 파란 막대·최상위 카드 무색).
    - **SG5-3 ✅ — 중첩 그룹(그룹 안 그룹, 폴더 트리)**: 위치 파생을 **다단계 depth로 일반화**한다. `Tab.group_depth: u8`
      (마커에만 의미, 1=최상위·2=중첩·…, 기본 1) 추가. `projectRows`를 **스택 기반 2패스**로 재작성 — pass1이 `self.tabs`를
@@ -423,12 +423,12 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
      - **ungroup(중첩)**: 그 탭의 **가장 가까운(innermost) 마커**를 해제한다. 자식 ungroup → 자식 카드가 부모로 재소속(한 단계
        얕아짐). 부모 ungroup → 부모 직접 카드는 최상위로, 남은 자식 그룹은 부모가 사라져 projectRows의 **gap 클램프로 depth 1
        (최상위 그룹)로 자동 승격**(저장 group_depth는 그대로 두고 투영이 정규화 — 위치 파생 철학과 동형).
-     - **직렬화**: workspace.v1 `group-depth` 스칼라(additive·기본 1=키 생략→round-trip 고정·옛 리더 미지 키 skip으로 양쪽 호환).
+     - **직렬화**: workspace.v2 `group-depth` 스칼라(additive·기본 1=키 생략→round-trip 고정·옛 리더 미지 키 skip으로 양쪽 호환).
      - **드래그(subtree 통째 이동)**: 그룹 통째 이동(`moveGroupRange`)·드롭 경계(`sidebarGroupDropBoundary`)·접힌 헤더 드롭이
        "다음 마커" 대신 **subtree 끝**(`groupSubtreeEnd`=같거나 낮은 depth 마커 전까지)을 쓴다 — 부모+자식이 함께 이동해 무결성
        유지(비중첩이면 "다음 마커"와 동일이라 SG4/SG5-1 동작 보존). **드롭 위치로 depth 변경(넣기/빼기)은 SG5-4에서 구현**한다.
      - **헤드리스 검증**: 2단계 중첩(A>B) depth 0/1/2·헤더 depth·member_count·부모 직접카드가 자식 앞·다단계 접기(부모/자식)·
-       ungroup 재소속/승격·workspace.v1 group-depth round-trip. **스크린샷 훅** `MARU_FORCE_GROUP_NESTED`(+`_COLLAPSED`/`_COLOR`).
+       ungroup 재소속/승격·workspace.v2 group-depth round-trip. **스크린샷 훅** `MARU_FORCE_GROUP_NESTED`(+`_COLLAPSED`/`_COLOR`).
    - **SG5-4 ✅ — 드래그로 중첩 넣기/빼기(드롭 컨텍스트 depth로 group_depth 조정)**: SG5-3의 subtree 통째 이동에, **드롭 위치가
      가리키는 depth로 명시적으로 넣고/뺀다**. 그룹 드래그의 드롭 해석을 **헤더 드롭 vs 카드 드롭**으로 나눠(`groupDragFrame` 분기):
      - **다른 그룹 헤더에 드롭 = 그 그룹의 자식으로 중첩**(`groupNestPlan`→`moveGroupNesting`). target_depth=타겟 그룹 eff+1,
@@ -632,7 +632,7 @@ entry(SG3c에서 create_group·ungroup·rename_group, SG5-3에서 create_sibling
   같은 pin 그룹만 허용된다(C3 재발 방지). 카드 드래그(SG4)는 드롭 위치의 depth를 위치 파생으로 자연 흡수한다(자식 그룹 안=자식 depth).
 - **(낮) 접힌 그룹에 넣기**: 카드 드래그(SG4)에서 접힌 헤더에 드롭하면 그 그룹 끝에 추가로 처리(브라우저 관례). 접기 우선
   단계(SG1~3)에는 드래그가 없어 무관.
-- **(낮) 접힘 상태 위치**: `group_collapsed`를 workspace.v1에 둔다(세션 넘어 유지). config가 아니라 workspace인 이유 — 그룹은
+- **(낮) 접힘 상태 위치**: `group_collapsed`를 workspace.v2에 둔다(세션 넘어 유지). config가 아니라 workspace인 이유 — 그룹은
   per-워크스페이스-파일 구조이지 전역 설정이 아니다.
 - **(낮) group_start 앵커 수명**: 그룹 시작 탭이 닫히면(closeTab) 그 `group_start` 마커를 **다음 탭으로 승계**해야 그룹이
   사라지지 않는다(그룹의 첫 카드를 닫아도 나머지가 그룹에 남게). 마지막 카드까지 닫히면 그룹 소멸 — SG3에서 closeTab 경로에 처리.
@@ -821,7 +821,7 @@ stable 수집이 그룹을 통째로 붙여 옮겨 파티션 무결 유지). (4)
 
 ### 12.9 직렬화 — 새 키 0
 
-`workspace.v1`의 `pinned={d}`(탭 라인 스칼라)가 마커 pin을 그대로 싣는다 — 그룹 고정 = 마커 `pinned=1`. 멤버 pinned 캐시는
+`workspace.v2`의 `pinned={d}`(탭 라인 스칼라)가 마커 pin을 그대로 싣는다 — 그룹 고정 = 마커 `pinned=1`. 멤버 pinned 캐시는
 저장돼도 무해(복원 정규화가 흡수). **복원 순서: (1) 탭 설치 → (2) `normalizePinnedFromGroups` → (3) `stablePartitionPinned`.**
 지금은 (3)만 있으니 **(2)를 (3) 앞에 삽입**한다(§12.5 복원 특례). 손상 파일(멤버 pinned=1·마커=0)은 복원 정규화가 canonical로
 흡수 — round-trip 테스트는 "정규화 후 canonical 단언"으로 둔다.
@@ -1053,7 +1053,7 @@ pin = 자식 subtree 통째를 부모 멤버 구역 안에서 float)·**마커 �
 
 ### 13.9 직렬화 — 새 키 `local-pinned`(순수 additive)
 
-`workspace.v1` `tab` 라인에 **`local-pinned` 스칼라**(`pinned`/`group-*` 패턴). group_start와 **무관**하게(멤버 카드=group_start
+`workspace.v2` `tab` 라인에 **`local-pinned` 스칼라**(`pinned`/`group-*` 패턴). group_start와 **무관**하게(멤버 카드=group_start
 ==null) 밖에서 쓴다. **true만 기록·false=키 생략**(round-trip 고정점·옛 파일 flat 정상·옛 리더 미지 키 skip으로 forward-compat).
 캡처/복원 왕복(`local_pinned`)도 additive. 로컬 pin 0개면 기존 파일 **byte-identical**.
 
@@ -1132,7 +1132,7 @@ depth 0(최상위·스택 리셋 유지), 아니면 스택 top(그룹 멤버). �
 
 ### 14.2 데이터·직렬화·렌더 (SR1 — 자동 정합)
 
-- **직렬화(§4·§13.9 동형)**: `workspace.v1` `tab` 라인에 `top-level` 스칼라. `group_start`와 무관하게 밖에서 쓰고, **true만
+- **직렬화(§4·§13.9 동형)**: `workspace.v2` `tab` 라인에 `top-level` 스칼라. `group_start`와 무관하게 밖에서 쓰고, **true만
   기록·false=키 생략**(round-trip 고정점·옛 파일 flat 정상·옛 리더 미지 키 skip으로 forward/backward compat). 캡처/복원 왕복.
   top_level 0개면 기존 파일 **byte-identical**.
 - **렌더(§12.8 자동)**: top카드 depth 0 ⇒ `pin_derived=false`·`local_pinned=false` ⇒ `sidebarRowShowsPin`이 개별 `tab.pinned`

@@ -329,7 +329,7 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   반투명 tint, 좌측 막대는 카드 좌단(폭=`tokens.space.accent_bar_width_px`, 카드 텍스트는 이 폭만큼 좌측 여백 예약)에
   불투명 막대다. **막대색 기본(`accent_color`=0)은 활성 카드=테마 accent(`.accent_bar` role — 프리셋별 시그니처, 기본 앰버)·비활성 카드=막대 없음**이고,
   프리셋으로 색을 지정하면 **활성·비활성 카드 모두** 그 색 막대를 표시한다("바: …"를 지정하면 비활성에서도 보인다).
-  chrome `sidebar.view`는 카드 밴드(role 기반)만 내고 막대는 내지 않는다. 셋 다 workspace.v1에 영속
+  chrome `sidebar.view`는 카드 밴드(role 기반)만 내고 막대는 내지 않는다. 셋 다 workspace.v2에 영속
   (`pinned`/`background-color`/`accent-color` — docs/workspace-restore.md).
 - **기본 키바인딩 없음(베이스)**: rename 기본 단축키는 macOS 단일 관례가 없어(Terminal.app은 탭 rename 기본키 없음,
   iTerm2는 더블클릭/⌘I 등 제각각) 임의로 고르지 않는다 — 액션은 정의해 bindable로 두고, 발견성은 커맨드 팔릿·더블클릭·

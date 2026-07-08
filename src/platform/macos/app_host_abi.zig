@@ -922,18 +922,26 @@ pub export fn maru_macos_app_session_window_title(
 }
 
 // 이 창(세션)의 workspace restore 블록(헤더 없는 `window …` 라인)을 직렬화해 돌려준다. Swift가 멀티 창
-// 저장에서 `maru.workspace.v1` 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유(다음 호출/destroy까지
+// 저장에서 `maru.workspace.v2` 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유(다음 호출/destroy까지
 // 유효). 캡처/직렬화 실패(OOM 등)면 *out_len=0(Swift가 그 창을 건너뜀) — best-effort 저장이라 한 창 실패가
 // 전체 저장을 막지 않는다.
+//
+// **M3e v2**: 창 수준 메타는 AppSession이 소유하지 않아 Swift가 넘긴다 — `window_id`(NSWindow 토큰=surface.token),
+// `window_kind`(0=normal, 1=quick; 저장은 normal만이나 포맷 완결성), `is_active`(!=0이면 이 창이 key 창 = 활성
+// window 마커). 이 셋이 `window` 라인의 window-id/window-kind/active-window로 직렬화돼 재시작 후 배치·활성 창이 산다.
 pub export fn maru_macos_app_session_serialize_workspace(
     session: ?*AppSession,
+    window_id: u64,
+    window_kind: u32,
+    is_active: u32,
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
     const len_out = out_len orelse return @intFromEnum(Status.null_out);
-    const text = app_session.serializeWorkspaceWindow() catch {
+    const kind = std.enums.fromInt(maru.session.WindowKind, window_kind) orelse .normal;
+    const text = app_session.serializeWorkspaceWindow(window_id, kind, is_active != 0) catch {
         ptr_out.* = null;
         len_out.* = 0;
         return @intFromEnum(Status.ok);
@@ -997,6 +1005,23 @@ pub export fn maru_macos_app_session_workspace_window_count(
     var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
     defer parsed.deinit();
     return @intCast(parsed.workspace.windows.len);
+}
+
+// 저장된 workspace 텍스트에서 **활성(key) 창의 인덱스**를 돌려준다(M3e v2). Swift가 복원 loop 뒤 그 창을 다시 key로
+// 올려 재시작 후에도 이동 전 활성 창이 포커스되게 한다(v1은 이 마커가 없어 마지막-생성 창이 key가 됐다). per-window
+// `active-window=1` 플래그에서 파생(activeWindowIndex, 첫 매치). parse 실패·활성 표시 창 없으면 -1(Swift 폴백 = 현행
+// 마지막-창 key). 포맷 파싱은 Zig 단일 권위. 세션 allocator로 parse(임시 arena, 즉시 해제).
+pub export fn maru_macos_app_session_workspace_active_window(
+    session: ?*AppSession,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) i64 {
+    const app_session = session orelse return -1;
+    const tp = text_ptr orelse return -1;
+    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
+    defer parsed.deinit();
+    const idx = maru.session.workspace.activeWindowIndex(parsed.workspace) orelse return -1;
+    return @intCast(idx);
 }
 
 // 전역(OS) 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라, Swift가 시작 시 한 번

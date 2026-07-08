@@ -1,5 +1,5 @@
 //! Workspace restore 직렬화(R1, writer). 실행 중이던 창/탭/split/터미널 레이아웃과 각 터미널의 cwd·shell을
-//! 다시 열기 위한 **선언적 상태**를 `maru.workspace.v1` 텍스트로 굳힌다 — live PTY/process/grid 내용은 담지
+//! 다시 열기 위한 **선언적 상태**를 `maru.workspace.v2` 텍스트로 굳힌다 — live PTY/process/grid 내용은 담지
 //! 않는다(docs/workspace-restore.md). snapshot/trace와 같은 규칙: 첫 줄 bare 토큰(`schema=` 접두어 없음),
 //! 이후 `<kind> <fields>` 라인, 따옴표 문자열은 `\` `"`·개행 escape. 이 파일은 모델(값 타입)과 writer만 둔다 —
 //! reader(R2)·라이브 캡처(R3)·복원(R4)은 후속이 같은 모델을 소비/생산한다(snapshot.zig writer-only 선례).
@@ -13,7 +13,16 @@ const std = @import("std");
 const split_tree = @import("split_tree.zig");
 const writeEscaped = @import("../text_escape.zig").writeEscaped; // 따옴표 값 escape 단일 출처(trace/snapshot과 공유)
 
-pub const header = "maru.workspace.v1";
+/// window 분류자(normal/quick) — 저장 포맷의 window_kind. session core의 중립 enum을 재사용한다(0=normal, 1=quick,
+/// MaruControlSessionRef·M0b와 같은 약속). 저장은 normal 창만 담으므로(quick=transient, saveWorkspace 제외) 실제
+/// 파일엔 항상 normal이지만, WindowGraph-형 v2 포맷 완결성을 위해 필드로 든다(docs/window-surface-mobility.md §8A.6).
+pub const WindowKind = @import("window_membership.zig").WindowKind;
+
+/// 저장 포맷 헤더(첫 줄). **M3e(직렬화 v2)**: v1→v2 구조 변경으로 `window` 라인에 window_id·window_kind·active-window
+/// 마커를 더한다(docs/window-surface-mobility.md §8A.6·§8A.8). 하위호환 미고려 정책([[serialization-format-change-migration-fallout]])
+/// — 옛 `maru.workspace.v1` 파일은 parse가 BadHeader로 거부하고 복원 측이 **조용히 기본-창 폴백**한다(v1 reader 안 둠,
+/// 다음 정상 종료 saveWorkspace가 v2로 덮어써 self-heal). `.h`의 MARU_WORKSPACE_HEADER와 단일 출처(app_host_abi 테스트가 강제).
+pub const header = "maru.workspace.v2";
 
 /// 한 탭의 pane 수 sanity 상한. 손상·변조된 복원 파일이 pane_count를 부풀려도 split 트리 노드 상한
 /// (2·pane_count−1)이 거대해져 깊은 재귀로 스택 오버플로가 나지 않게, parseTab이 먼저 이 값으로 가둔다.
@@ -119,9 +128,21 @@ pub const Tab = struct {
     panes: []const Pane,
 };
 
-/// 한 OS 창 = 한 AppSession. 탭들 + 활성 탭.
+/// 한 OS 창 = 한 AppSession. 탭들 + 활성 탭 + 창 identity(M3e v2).
 pub const Window = struct {
     active_tab: usize = 0,
+    // ── M3e(v2) 창 identity/분류/활성(docs/window-surface-mobility.md §8A.6·§8A.8) ──
+    // window_id = 위치 메타데이터(opaque, 라우팅 키 아님 — §1). 저장 시 Swift 창 토큰(surface.token)에서 채운다.
+    // 복원은 새 NSWindow에 새 토큰을 발급하므로 이 값을 **재사용하지 않는다**(현행 — surface_id처럼 재채번). 포맷
+    // 완결성·미래 window-identity 기능(control-plane 재연결)용으로 든다. 기본 0.
+    window_id: u64 = 0,
+    // window_kind = normal/quick 분류. 저장은 normal 창만 담으므로(quick=transient) 실제 파일엔 항상 normal이지만
+    // v2 포맷이 명시한다(§8A.6). 기본 normal.
+    window_kind: WindowKind = .normal,
+    // active = 이 창이 **활성(key) 창**인가. 문서 전체에서 정확히 하나만 true인 게 정상(활성 window 마커를 per-window
+    // 플래그로 분산 인코딩 — 라이브 저장이 per-session 블록 조립이라 문서-레벨 라인을 쓸 단일 지점이 없다; parse가
+    // activeWindowIndex로 문서-레벨 인덱스를 파생한다). 이동/재시작 후 어느 창이 포커스였는지 보존(§8A.8 M3e 델타). 기본 false.
+    active: bool = false,
     tabs: []const Tab,
 };
 
@@ -141,7 +162,7 @@ pub fn serialize(allocator: std.mem.Allocator, ws: Workspace) ![]u8 {
 }
 
 /// 한 창(Window) 블록만 직렬화한다(헤더 없음). 멀티 창 저장(R5)에서 각 AppSession이 자기 창 블록을 내고,
-/// Swift가 `maru.workspace.v1` 헤더 하나 아래로 모아 parse 가능한 전체 텍스트를 만든다.
+/// Swift가 `maru.workspace.v2` 헤더 하나 아래로 모아 parse 가능한 전체 텍스트를 만든다.
 pub fn serializeWindow(allocator: std.mem.Allocator, win: Window) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
@@ -149,8 +170,22 @@ pub fn serializeWindow(allocator: std.mem.Allocator, win: Window) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// 문서-레벨 활성 창 인덱스를 per-window `active` 플래그에서 파생한다(§8A.6 — 활성 window 마커). 정확히 하나가
+/// true인 게 정상이라 **첫** true 창을 돌려주고, 아무 창도 active가 아니면 null(복원 측은 폴백 = 현행 마지막-창 key).
+/// 손상 파일이 여러 창을 active로 표시해도 첫 매치만 취해 결정적이다.
+pub fn activeWindowIndex(ws: Workspace) ?usize {
+    for (ws.windows, 0..) |win, i| {
+        if (win.active) return i;
+    }
+    return null;
+}
+
 fn writeWindow(w: *std.Io.Writer, win: Window) !void {
-    try w.print("window tabs={d} active-tab={d}\n", .{ win.tabs.len, win.active_tab });
+    // v2: identity(window-id·window-kind·active-window)를 구조 키 tabs 앞에 명시한다. 탭 라인의 pinned/bg/accent를
+    // 항상 내는 것과 같은 스타일로 세 필드를 항상 낸다(normal/0/false여도) — 라인이 self-describing해 사람이 읽기 쉽다.
+    try w.print("window window-id={d} window-kind={d} active-window={d} tabs={d} active-tab={d}\n", .{
+        win.window_id, @intFromEnum(win.window_kind), @intFromBool(win.active), win.tabs.len, win.active_tab,
+    });
     for (win.tabs) |tab| try writeTab(w, tab);
 }
 
@@ -223,7 +258,7 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
 }
 
 // ── R2: reader/parser ──────────────────────────────────────────────────────────
-// maru.workspace.v1 텍스트를 같은 모델로 되읽는다(round-trip). 결과는 arena가 모든 슬라이스·문자열을 소유하므로
+// maru.workspace.v2 텍스트를 같은 모델로 되읽는다(round-trip). 결과는 arena가 모든 슬라이스·문자열을 소유하므로
 // ParsedWorkspace.deinit() 한 번으로 정리한다. split 트리는 writer와 같은 preorder를 재귀로 재구성한다(split는
 // 뒤따르는 두 subtree를 소비). 알 수 없는 trailing 라인은 forgiving하게 멈춘다(window 루프가 안 맞으면 종료).
 
@@ -261,11 +296,16 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
     if (!std.mem.eql(u8, f.kind, "window")) return error.BadLine;
     const tab_count = try f.requireUint("tabs", usize); // 구조 키(탭 개수) — 없으면 BadLine
     const active_tab = try f.getUint("active-tab", usize, 0); // 스칼라(기본 0=첫 탭)
+    // ── M3e(v2) 창 identity/분류/활성. 스칼라 key-addressed라 없으면 기본값(0/normal/false) — additive forward-compat +
+    // 손상 graceful(옛 미래 v2 파일이 필드를 빼도 안 깨짐). window-kind 미지값은 normal로 폴백(관대).
+    const window_id = try f.getUint("window-id", u64, 0);
+    const window_kind = std.enums.fromInt(WindowKind, try f.getUint("window-kind", u8, 0)) orelse .normal;
+    const active = (try f.getUint("active-window", u8, 0)) != 0;
 
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
     while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines));
-    return .{ .active_tab = active_tab, .tabs = try tabs.toOwnedSlice(a) };
+    return .{ .active_tab = active_tab, .window_id = window_id, .window_kind = window_kind, .active = active, .tabs = try tabs.toOwnedSlice(a) };
 }
 
 fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
@@ -555,8 +595,8 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
 
-    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "window window-id=0 window-kind=0 active-window=0 tabs=1 active-tab=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\" pinned=0 background-color=0 accent-color=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
@@ -864,7 +904,7 @@ test "workspace round-trip: tab top_level 보존(§2.1 재설계 §14 — true�
 
 test "workspace parse: 구조·escape 해제·forgiving" {
     const text =
-        "maru.workspace.v1\n" ++
+        "maru.workspace.v2\n" ++
         "window tabs=1 active-tab=0\n" ++
         "tab panes=2 active-pane=1 custom-name=\"my tab\" pinned=0 background-color=0 accent-color=0\n" ++
         "tree-node split vertical ratio=250\n" ++
@@ -1080,4 +1120,125 @@ test "workspace parse: 라인 필드 수 상한 초과는 BadLine(key-addressed 
     while (k < max_line_fields + 8) : (k += 1) try buf.appendSlice(a, " agent-arg=\"x\""); // 기본 9키 + 이만큼 → 상한 초과
     try buf.appendSlice(a, "\n");
     try std.testing.expectError(error.BadLine, parse(a, buf.items));
+}
+
+// ══ M3e: 직렬화 v2 (docs/window-surface-mobility.md §8A.6·§8A.8) ══════════════════════════════════════════════
+// v1→v2 구조 변경: `window` 라인에 window-id·window-kind·active-window 마커를 더한다. 아래 테스트는 (1) 세 필드
+// round-trip·writer 라인 형태, (2) 옛 v1 파일=조용한 폴백(BadHeader), (3) cross-window 이동 결과가 재시작(serialize→
+// parse)을 넘어 유지, (4) 빈/손상 파일 graceful을 못박는다.
+
+test "workspace v2: window_id·window_kind·active-window round-trip(문서-레벨 활성 파생)" {
+    const s = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &s }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs0 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const tabs1 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{
+        .{ .window_id = 7, .window_kind = .normal, .active = false, .tabs = &tabs0 },
+        .{ .window_id = 42, .window_kind = .normal, .active = true, .tabs = &tabs1 },
+    };
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v2\n") != null);
+    // window 라인이 identity(window-id·window-kind·active-window)를 tabs 앞에 명시한다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "window window-id=7 window-kind=0 active-window=0 tabs=1 active-tab=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "window window-id=42 window-kind=0 active-window=1 tabs=1 active-tab=0\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u64, 7), parsed.workspace.windows[0].window_id);
+    try std.testing.expectEqual(@as(u64, 42), parsed.workspace.windows[1].window_id);
+    try std.testing.expectEqual(WindowKind.normal, parsed.workspace.windows[0].window_kind);
+    try std.testing.expectEqual(false, parsed.workspace.windows[0].active);
+    try std.testing.expectEqual(true, parsed.workspace.windows[1].active);
+    // 문서-레벨 활성 창 = per-window 플래그에서 파생(창 1).
+    try std.testing.expectEqual(@as(?usize, 1), activeWindowIndex(parsed.workspace));
+
+    // round-trip 고정점.
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace v2: window_kind=quick round-trip(포맷 완결성 — 저장은 normal만이나 필드는 든다)" {
+    const s = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &s }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{.{ .window_id = 3, .window_kind = .quick, .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "window window-id=3 window-kind=1 active-window=0 tabs=1 active-tab=0\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(WindowKind.quick, parsed.workspace.windows[0].window_kind);
+}
+
+test "workspace v2: 옛 v1 파일은 BadHeader로 거부(조용한 폴백 계약 — 크래시/blocking 없음)" {
+    // 하위호환 미고려 정책([[serialization-format-change-migration-fallout]]): v1 헤더 파일은 v2 parser가 BadHeader로
+    // 거부한다. 복원 측(app_host_abi workspace_window_count → -1, Swift restoreWorkspace count<0)이 이를 **조용히**
+    // 기본-창 폴백으로 처리하고(모달/블로킹 없음), 다음 정상 종료가 v2로 덮어써 self-heal한다. 여기선 parse가 크래시
+    // 없이 error.BadHeader를 내는지 고정한다(v1 reader를 두지 않는다 — docs "구버전 reader 안 넣음").
+    const v1_text =
+        "maru.workspace.v1\n" ++ // 의도적으로 옛 v1 헤더 — v2 parser가 BadHeader로 거부해야 한다
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\" pinned=0 background-color=0 accent-color=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/w\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    try std.testing.expectError(error.BadHeader, parse(std.testing.allocator, v1_text));
+}
+
+test "workspace v2: cross-window 이동 결과가 serialize→parse로 유지(배치·active 보존)" {
+    // M3d-2b 이동 후 저장을 모사한다: 창A=[W1], 창B=[W3, W2(이동분)], 활성=창B. saveWorkspace가 라이브 per-window
+    // 트리(이동으로 W2가 이미 창B에 있음)를 v2로 조립하고, restore가 parse해 배치·active-window를 복원한다. v1도
+    // 배치는 위치로 살았지만 active-window는 잃었다 — v2가 그 델타(활성 창)를 보존함을 함께 못박는다.
+    const s = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &s }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const w_a = [_]Tab{.{ .custom_name = "W1", .tree = &tree, .panes = &panes }};
+    const w_b = [_]Tab{
+        .{ .custom_name = "W3", .tree = &tree, .panes = &panes },
+        .{ .custom_name = "W2", .tree = &tree, .panes = &panes }, // 다른 창에서 이동해 온 워크스페이스
+    };
+    const windows = [_]Window{
+        .{ .window_id = 1, .active = false, .tabs = &w_a },
+        .{ .window_id = 2, .active_tab = 1, .active = true, .tabs = &w_b },
+    };
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const restored = parsed.workspace;
+    try std.testing.expectEqual(@as(usize, 2), restored.windows.len);
+    // 창A: W1 하나 그대로.
+    try std.testing.expectEqual(@as(usize, 1), restored.windows[0].tabs.len);
+    try std.testing.expectEqualStrings("W1", restored.windows[0].tabs[0].custom_name);
+    // 창B: W3, W2 — 옮긴 워크스페이스(W2)가 목적지 창에 그대로 살아남는다.
+    try std.testing.expectEqual(@as(usize, 2), restored.windows[1].tabs.len);
+    try std.testing.expectEqualStrings("W3", restored.windows[1].tabs[0].custom_name);
+    try std.testing.expectEqualStrings("W2", restored.windows[1].tabs[1].custom_name);
+    try std.testing.expectEqual(@as(usize, 1), restored.windows[1].active_tab);
+    // active-window = 창B(index 1) 보존 — v2가 v1 대비 새로 살리는 델타.
+    try std.testing.expectEqual(@as(?usize, 1), activeWindowIndex(restored));
+}
+
+test "workspace v2: 빈·헤더만·손상 파일 graceful(폴백, 크래시 없음)" {
+    // 빈 파일 = 헤더 라인 없음 → Truncated(복원 측 -1 폴백). 헤더만 = 창 0개 = 빈 workspace(OK, 조용한 기본 창).
+    // v2 헤더 + 손상 window 라인 = BadLine(그 문서 통째 폴백). 전부 크래시 없이 에러/빈 결과로 떨어진다.
+    try std.testing.expectError(error.Truncated, parse(std.testing.allocator, ""));
+
+    var empty_ws = try parse(std.testing.allocator, header ++ "\n"); // 헤더만 = 창 0개
+    defer empty_ws.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty_ws.workspace.windows.len);
+    try std.testing.expectEqual(@as(?usize, null), activeWindowIndex(empty_ws.workspace));
+
+    // v2 헤더지만 window 라인의 구조 키(tabs=)가 손상 → BadLine.
+    const corrupt = header ++ "\n" ++ "window window-id=1 active-window=0 active-tab=0\n"; // tabs= 없음
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, corrupt));
 }

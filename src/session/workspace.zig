@@ -1079,6 +1079,45 @@ test "workspace round-trip: window frame(win-x/y/w/h) 보존(M3f — 전역 좌�
     try std.testing.expectEqualStrings(text, text2);
 }
 
+test "workspace round-trip: 활성 창 + frame 동시(M3e+M3f — 실 key-창 인코딩·한 줄 둘 다)" {
+    // 실제 저장 시 key 창은 active=true AND frame 둘 다 실린다(한 window 라인에 active-window=1과 win-x/y/w/h).
+    // 기존 M3e·M3f 테스트는 각각 한 마커만 검증해 이 조합 라인을 안 덮었다([4] 테스트 갭). 둘 다 방출되고(writer 순서=
+    // active-window 뒤 win-*), parse가 active·frame 둘 다 복원하고, 재직렬화가 고정점인지 검증한다.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs0 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const tabs1 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{
+        .{ .tabs = &tabs0 }, // 창0 = 비활성·frame 없음
+        .{ .active = true, .frame = .{ .x = 100, .y = 200, .w = 960, .h = 600 }, .tabs = &tabs1 }, // 창1 = 활성 AND frame
+    };
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 한 줄에 active-window=1과 win-* 넷이 함께(둘 다 있는 실 key-창 라인).
+    try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0 active-window=1 win-x=100 win-y=200 win-w=960 win-h=600\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    // 둘 다 복원: 창1이 활성이고 그 창 frame이 저장값.
+    try std.testing.expectEqual(@as(?usize, 1), activeWindowIndex(parsed.workspace));
+    try std.testing.expectEqual(true, parsed.workspace.windows[1].active);
+    const f1 = parsed.workspace.windows[1].frame.?;
+    try std.testing.expectEqual(@as(i32, 100), f1.x);
+    try std.testing.expectEqual(@as(i32, 200), f1.y);
+    try std.testing.expectEqual(@as(i32, 960), f1.w);
+    try std.testing.expectEqual(@as(i32, 600), f1.h);
+    // 창0은 둘 다 없음(비활성·frame null) — 옵션-키 생략 유지.
+    try std.testing.expectEqual(false, parsed.workspace.windows[0].active);
+    try std.testing.expectEqual(@as(?Frame, null), parsed.workspace.windows[0].frame);
+
+    // 재직렬화 고정점(active·frame 동시 인코딩 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
 test "workspace serialize: frame=null 창은 win-* 키 생략(옛 파일 flat 고정점)" {
     // frame이 null(미저장)이면 win-x/y/w/h 어디에도 안 붙어, 옛(M3f 이전) 저장 파일과 라인이 byte-identical하다
     // (additive 옵션-키 = null 생략). windowFrame은 null. active-window 생략 패턴과 동일한 계약.

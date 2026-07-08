@@ -246,11 +246,23 @@ window tabs=<N> active-tab=<i> [active-window=1] [win-x=<X> win-y=<Y> win-w=<W> 
 - **all-or-none·부분=null.** writer는 frame이 있으면 넷을 다 내고 없으면 넷을 다 생략한다(round-trip 고정점). reader는
   넷이 **다 있어야** frame으로 읽고 하나라도 없으면 null → 복원이 **현행 기본(cascade) 위치**를 유지한다. 옛 파일(win-*
   무)·부분 필드(손상/변조로 일부만) 모두 여기로 graceful 폴백한다. 단 넷 다 있는데 값이 깨졌으면 BadLine(부재≠손상).
-- **복원 clamp(멀티모니터·레이아웃 변경 방어).** 저장 frame을 `setFrame`하되, 그 frame이 **어떤** `NSScreen.visibleFrame`과도
-  충분히 교차하면(가시 면적 임계 이상 = 그 모니터가 여전히 붙어 있음) **그대로** 둔다(맞는 모니터·사용자가 거기서 리사이즈한
-  크기 보존). 아니면(모니터 분리·레이아웃 변경으로 창이 화면 밖) **main 화면 `visibleFrame` 안으로 재배치·clamp**한다(크기가
-  화면보다 크면 줄임). macOS `constrainFrameRect`(타이틀바를 화면에 남김)를 참고하되 명시 clamp로 예측 가능하게. 전역
-  좌표가 모니터를 인코딩하므로 이 교차 검사 하나로 "그 모니터가 아직 있나"를 판정한다(display ID 불필요).
+- **전체화면 창은 frame 저장 스킵.** 저장 시 창이 native 전체화면(`window.styleMask.contains(.fullScreen)`)이면 `window.frame`이
+  **화면 전체**라, 그대로 저장하면 복원 시 아래 clamp를 통과해 **타이틀바 달린 거대 windowed 창**으로 떠 전체화면이 아니게
+  된다(회귀). 그래서 **전체화면이면 frame 저장을 건너뛴다**(has_frame=0 → win-* 생략 → 복원은 cascade 기본 위치). zoomed
+  (green button 최대화)는 frame이 유효한 windowed 크기라 저장 대상이다(전체화면만 예외). 전체화면 상태 자체의 복원
+  (window-fullscreen 마커 + `toggleFullScreen`)은 timing 위험이 커 도입하지 않고, 스킵-저장만으로 회귀를 제거한다(최소 안전 —
+  후속 검토 여지). 또한 저장 시 `window.frame` 성분을 `Int32`로 굳힐 때 비유한(NaN/inf)이면 그 창 frame을 스킵하고(has_frame=0)
+  범위 초과는 clamp한다 — trapping 변환(`Int32(Double)`)이 종료 경로(`applicationWillTerminate`)에서 크래시해 **전체 상태를
+  소실**하지 않게 하는 실제 trap 가드다([[no-defensive-code-without-consult]] 예외).
+- **복원 clamp(멀티모니터·레이아웃 변경 방어) — 항상 화면 안.** 저장 frame과 **가장 많이 겹치는** `NSScreen`을 고르고(전역
+  좌표가 모니터를 인코딩하므로 최대 겹침 = 그 창이 있던 모니터; 어떤 화면과도 안 겹치면 main 화면으로 폴백), **그 화면
+  `visibleFrame` 안으로 frame을 clamp**한다: 화면보다 크면 축소하고, 가장자리를 넘으면 이동해 **창이 완전히 화면 안·타이틀바를
+  잡을 수 있게** 보장한다(pre-M3f "창은 늘 화면 안" 불변식 복원). frame이 이미 화면 안에 완전히 들어가면 clamp가 그대로
+  반환하므로(크기·위치 불변) 맞는 모니터의 사용자 리사이즈 크기는 보존된다. 예전 "가시 면적이 임계 이상이면 저장 frame
+  그대로 통과"는 모니터 배치가 바뀌면 창을 구석만 걸친 채 거의 화면 밖으로 복원해(타이틀바가 화면 위에 없어 드래그 불가)
+  불변식을 약화시켰다 — 이제 "겹치면 그대로"가 아니라 "항상 사용 가능하게 clamp"다. macOS `constrainFrameRect`(타이틀바를
+  화면에 남김)를 참고하되 명시 clamp로 예측 가능하게. 전역 좌표가 모니터를 인코딩하므로 이 최대-겹침 판정 하나로 "그 모니터가
+  아직 있나"를 정한다(display ID 불필요).
 - **하위호환.** 옛 파일(win-* 키 없음) → frame=null → cascade 기본 위치. 크래시·모달·마이그레이션·헤더 bump·v1 reject
   없음([[serialization-format-change-migration-fallout]]). 새 파일 → 옛 리더가 미지 win-* 키를 skip(forward-compat).
 

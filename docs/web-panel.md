@@ -21,7 +21,9 @@
 현재 `contentView`는 단일 `MaruMetalTerminalView`(CAMetalLayer)이고, 이 뷰가 firstResponder로 keyDown·IME·마우스·DnD·hover를 전부 받는다. 웹 패널을 위해 **contentView를 컨테이너 NSView로 바꾸고** 세 겹을 쌓는다:
 
 1. **터미널 Metal layer**(맨 아래): 기존 셀·사이드바·탭바·pane chrome. `isOpaque`는 무조건 true가 아니다 — `window.opacity<1`이면 현재 코드가 metalLayer·window의 `isOpaque`를 모두 false로 내리고 chrome 배경(`chromeCellBg`/`chromeQuadBg`)까지 반투명이다. WKWebView와의 정합은 §8.
-2. **WKWebView subview(들)**(중간): web Term마다 하나, **본문 rect**에만(§5). split이면 여러 개.
+2. **WKWebView subview(들)**(중간): web Term마다 하나, **본문 rect**에만(§5). split이면 여러 개. **(4c 현재 상태)**: 아직
+   web Term 모델은 없고 **활성 pane에 바인딩된 단일 빈 웹뷰**(env 훅)만 붙는다 — hitTest→nil 래퍼(`MaruWebPanelView`)로 감싸
+   입력을 아래 터미널에 통과시킨다(4d 전). web Term마다 하나·재부모화는 후속(§10 4c).
 3. **모달 Metal 오버레이**(맨 위): command palette·find·confirm. `isOpaque=false`, 평소 clear(투명), 모달 열림 시에만 셀을 그린다.
 
 **모달 레이어 분리는 두 개의 선행 리팩터다**(Phase 4 선행, 가벼운 작업이 아님):
@@ -100,7 +102,19 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro-slice를 따른다:
 - 4a: rect/surface lifecycle ABI를 순수 계산 테스트로 먼저 고정한다. **(구현 완료 — `src/session/web_panel_layout.zig`: `contentRect`·`pxTopLeftToPtBottomLeft`·`surfaceDiff`, 헤드리스 TDD·§14.)**
 - 4b: 모달 renderer 2-pass와 overlay layer 계약을 웹뷰 없이 먼저 고정한다.
-- 4c: 빈 WKWebView를 붙이고 frame/NSView 계층 값 단언 + GUI z-order artifact로 닫는다.
+- 4c: 빈 WKWebView를 붙이고 frame/NSView 계층 값 단언 + GUI z-order artifact로 닫는다. **(구현 완료 — 최소 범위)**: 라이브
+  web-Term 모델(트리·탭 혼합·재부모화)은 후속으로 미루고, **활성 pane 본문에 바인딩된 단일 빈 WKWebView**를 hosting 증명으로
+  붙였다(app_session에 `web_panel` 필드 하나, split/Term 트리 미진입). 생성 경로는 디버그 env 훅 `MARU_WEB_PANEL=1`(kind는
+  `MARU_WEB_PANEL_MARKDOWN=1`이면 markdown, 기본 browser — 4c 빈 웹뷰라 시각 무영향). 매 tick 4a 세 순수함수(`contentRect`·
+  `pxTopLeftToPtBottomLeft`·`surfaceDiff`)를 **Zig가 전부 소비**해 단일 전이(none/create/destroy/reframe/hide/show)를 계산하고
+  ABI(`maru_macos_app_session_web_surface_transition`, v99)로 export하면, Swift가 그 op만 기계적으로 적용한다. 웹뷰는 컨테이너
+  z-order **중간**(터미널<웹뷰<오버레이)에 삽입되고 본문 rect(pt·좌하단)를 추종한다. **입력 통과(4d 전)**: 웹뷰를 hitTest→nil
+  래퍼 NSView(`MaruWebPanelView`)로 감싸 마우스가 아래 터미널로 통과하고 빈 웹뷰가 firstResponder를 훔치지 않는다(WKWebView
+  서브클래스 override 대신 검증된 래퍼 메커니즘 — MaruMetalOverlayView와 동일). §3 드래그 중 hide는 4c 생략(빈 페이지라 jitter
+  무해 — 후속). 콘텐츠·URL·브리지·스킴 핸들러·CSP·데이터스토어 격리는 **Phase 5**, IME/firstResponder 전이는 4d. 자동 검증:
+  ABI struct 계약 테스트(size/offset·op enum 값) + 4a 순수 계산 단위 테스트 + macos-app-smoke의 `web_panel_subview_order_ok`/
+  `web_panel_present`/`web_panel_hittest_nil` 값 단언(단, 스모크는 backing=0이라 frame 값은 degenerate — 실제 frame·z-order
+  픽셀 합성·입력 통과는 GUI 손 테스트가 닫는다).
 - 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다.
 - 5a~5d: `browser.*` schema/authz, isolated bridge, `maru-app://` security, minimal browser ops를 각각 별도 red test로 시작한다.
 
@@ -164,9 +178,17 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 ## 14. 코드 위치 (구현 시 채움)
 
-- 합성·WKWebView·입력: `src/platform/macos/web_panel.{zig,swift}`
+- 합성·WKWebView·입력: 계획상 `src/platform/macos/web_panel.{zig,swift}`였으나, **4c는 최소 범위라 전용 파일 없이 기존 host
+  파일에 통합**했다(빈 웹뷰 hosting + 전이 하나라 표면이 작다 — 전용 모듈 분리는 Phase 5 브리지/스킴 핸들러가 붙어 표면이 커질
+  때 한다). 4c 실제 위치: `MaruAppHost.swift`(`MaruWebPanelView` = hitTest→nil 래퍼 + 빈 WKWebView, `MaruTerminalContainerView.insertWebPanel`
+  = z-order 중간 삽입, `TerminalSurface.webPanel` 상태, `drainWebSurfaceTransition` = op 적용), `app_session.zig`(`web_panel`/
+  `web_panel_prev` 상태, `active_pane_leaf_rect` 캐시, `maybeDebugOpenWebPanel` env 훅, `webSurfaceTransition`/`webFramePt` = 4a
+  3함수 소비).
 - **surface 생애주기·per-pane rect 순수 계산(4a, 구현 완료)**: `src/session/web_panel_layout.zig`(L2, OS-중립). 본문 rect(`contentRect` — pane rect − chrome inset), backing px·좌상단 → pt·좌하단 y-flip(`pxTopLeftToPtBottomLeft`), surface 생애주기 diff(`surfaceDiff` — created/destroyed/reframed/hidden/shown 전이)의 **단일 출처**다. 헤드리스 단위 테스트로 고정(§11)하고 `check-boundaries`가 L2 중립(app/pty/platform/AppKit import 0·OS 타입명 0)을 강제한다. y-flip 생산 적용(ABI export 또는 Swift 미러)은 이 함수를 단일 출처로 두고 4c가 배선한다.
-- surface 생애주기·per-pane rect ABI wiring(4c 예정): `src/platform/macos/app_host_abi.{zig,h}` — 위 순수 계산을 export/marshaling.
+- surface 생애주기·per-pane rect ABI wiring(**4c 구현 완료**): `src/platform/macos/app_host_abi.{zig,h}` — 위 순수 계산을
+  export/marshaling. v99에서 `MaruAppHostWebSurfaceTransition`(extern struct: op·surface_id·panel_kind·frame_pt_{x,y,w,h}) +
+  `maru_macos_app_session_web_surface_transition` export 추가. Zig가 `surfaceDiff`로 계산한 단일 전이를 marshaling만 하고
+  (NSView 연산은 Swift), struct size/offset·op enum 값을 헤드리스 계약 테스트가 강제한다.
 - 모달 레이어 분리: `src/platform/macos/maru_metal_renderer.{h,m}`(별도 오버레이 layer·2패스), `src/renderer/metal_frame.zig`
 - `maru-app://` OS 어댑터: `src/platform/macos/web_panel.swift`(WKURLSchemeHandler·WKWebView API 호출·ABI marshaling만)
 - `maru-app://` 보안 정책: 테스트 가능한 Zig 모듈(구현 PR에서 `src/platform/macos/web_panel_security.zig` 같은 가장 가까운 책임 파일로 확정). CSP 상수, realpath/symlink/traversal 거부, origin/frame allowlist 판정은 여기가 단일 출처다.

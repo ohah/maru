@@ -6,6 +6,7 @@ import Metal
 import QuartzCore
 import UniformTypeIdentifiers // NSOpenPanel.allowedContentTypes = [.png] (배경 이미지 파일 선택, v81)
 import UserNotifications
+import WebKit // Phase 4c: 빈 WKWebView를 pane 본문에 부착(터미널<웹뷰<오버레이 z-order). 콘텐츠·브리지·보안은 Phase 5.
 
 // MARK: - CGS 비공개 API (창 뒤 배경 블러, F3-1)
 //
@@ -434,7 +435,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 // MARK: - Phase 4b-2: 모달 오버레이 Metal 뷰 (컨테이너 맨 위, 투명)
 //
 // 터미널 레이어 위에 합성되는 **별도 물리 CAMetalLayer**. isOpaque=false·평소 clear(투명)라 아래 터미널
-// (+미래 WKWebView, 4c)이 비치고, 모달(command palette·find·confirm·settings) 열림 시에만 렌더러가 이
+// (+ 4c WKWebView가 있으면 그것)이 비치고, 모달(command palette·find·confirm·settings) 열림 시에만 렌더러가 이
 // layer에 그림자·over quad·모달 텍스트·caret을 그린다. **입력은 안 받는다** — hitTest=nil로 마우스가 아래
 // 터미널 뷰로 통과하고 acceptsFirstResponder=false로 키/IME는 터미널 뷰가 계속 소유한다(IME 전이·WKWebView
 // 포커스 경합은 4d로 연기, 지금은 기계적 배선만). drawableSize만 자기 layer에서 관리하고 세션 resize는 안
@@ -493,10 +494,48 @@ final class MaruMetalOverlayView: NSView {
     }
 }
 
+// MARK: - Phase 4c: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼)
+//
+// 활성 pane 본문 rect에 붙는 **빈 WKWebView**를 감싸는 래퍼. WKWebView를 직접 컨테이너에 넣지 않고 이 투명
+// 래퍼로 감싸는 이유는 **입력 통과(4d 전)**를 확실히 하기 위해서다: WKWebView는 내부 서브뷰 계층이 복잡해
+// 서브클래스에서 hitTest→nil override만으론 통과가 완전하지 않을 수 있다. 래퍼 NSView가 hitTest→nil이면
+// AppKit이 이 뷰(와 그 안 WKWebView)로 아예 내려오지 않아 마우스가 아래 터미널 뷰로 통과하고, WKWebView가
+// firstResponder를 훔치지 않는다(MaruMetalOverlayView와 같은 검증된 메커니즘). **콘텐츠·URL·브리지·스킴
+// 핸들러·CSP·데이터스토어 격리는 전부 Phase 5** — 여기선 about:blank 빈 문서만 로드해 z-order·frame-sync를
+// 증명한다. 입력/IME/firstResponder 전이는 4d. docs/web-panel.md §2·§4·§5·§10 4c.
+@MainActor
+final class MaruWebPanelView: NSView {
+    let webView: WKWebView
+    // Zig 전이(surface_id)와 매칭해 create/destroy/reframe이 옳은 웹뷰를 대상으로 하게 한다(§6 안정 키).
+    let surfaceId: UInt64
+
+    init(frame frameRect: NSRect, surfaceId: UInt64) {
+        self.surfaceId = surfaceId
+        // 빈 설정 — bridge·URLSchemeHandler·userContentController 메시지 핸들러·per-surface 데이터스토어 커스텀은
+        // 전부 없다(Phase 5). 기본 WKWebViewConfiguration은 임의 URL을 못 열게 하는 정책이 없지만, 4c는 about:blank만
+        // 로드하고 네비게이션 정책(decidePolicyForNavigationAction)도 안 붙인다 — 콘텐츠/네트워크 진입 자체가 없다.
+        self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: WKWebViewConfiguration())
+        super.init(frame: frameRect)
+        webView.autoresizingMask = [.width, .height] // 래퍼 frame 갱신(reframe) 시 웹뷰가 꽉 채워 따라간다.
+        // 빈 문서. 네트워크 로드 없음(about:blank는 내장 스킴). 기본 흰 배경이라 스크린샷에서 본문 rect 위치가 또렷.
+        if let blank = URL(string: "about:blank") {
+            webView.load(URLRequest(url: blank))
+        }
+        addSubview(webView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("MaruWebPanelView는 coder 초기화 미지원") }
+
+    // 입력 통과(4d 전): 마우스는 아래 터미널로, 키/IME는 터미널이 firstResponder 유지 — 빈 웹뷰가 포커스를 훔치지 않게.
+    override func hitTest(_ point: NSPoint) -> NSView? { return nil }
+    override var acceptsFirstResponder: Bool { return false }
+}
+
 // MARK: - Phase 4b-2: contentView 컨테이너 뷰 (3겹 합성 호스트)
 //
 // window.contentView를 단일 터미널 뷰에서 **컨테이너**로 재편한다. 자식: 터미널 뷰(맨 아래, layer isOpaque는
-// window.opacity 따라감) + 모달 오버레이 뷰(맨 위, 투명). **미래 WKWebView(4c)가 그 사이**에 본문 rect로 낀다.
+// window.opacity 따라감) + 모달 오버레이 뷰(맨 위, 투명). **4c WKWebView(insertWebPanel)가 그 사이**에 본문 rect로 낀다.
 // 두 자식은 컨테이너를 꽉 채우고(autoresizing) 창 리사이즈를 함께 따라간다. 오버레이 hitTest=nil이라 입력은
 // 터미널 뷰가 계속 처리한다(모달 keyDown/anyOverlayOpen 현행 그대로 — IME 전이는 4d).
 @MainActor
@@ -520,11 +559,18 @@ final class MaruTerminalContainerView: NSView {
             overlayView.metalLayer?.device = dev
         }
         addSubview(terminalView) // 맨 아래(터미널·사이드바·chrome)
-        addSubview(overlayView)  // 맨 위(모달 오버레이 — 미래 WKWebView는 이 둘 사이 4c)
+        addSubview(overlayView)  // 맨 위(모달 오버레이 — WKWebView는 이 둘 사이, insertWebPanel 4c)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("MaruTerminalContainerView는 coder 초기화 미지원") }
+
+    // Phase 4c: 웹 패널 래퍼를 터미널(맨 아래)과 오버레이(맨 위) **사이**에 삽입한다 — z-order: 터미널 < 웹뷰 <
+    // 오버레이(모달이 웹뷰 위). NSView는 UIKit식 insertSubview(at:)가 없어 positioned:.below relativeTo:로 오버레이
+    // 바로 아래(=터미널 위)에 넣는다. 이후 subviews == [terminalView, webPanel, overlayView].
+    func insertWebPanel(_ v: NSView) {
+        addSubview(v, positioned: .below, relativeTo: overlayView)
+    }
 }
 
 // 한 터미널 세션의 per-session 상태 — 창/PTY(appSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
@@ -568,6 +614,10 @@ final class TerminalSurface {
     var overlayView: MaruMetalOverlayView? {
         return (window?.contentView as? MaruTerminalContainerView)?.overlayView
     }
+
+    // Phase 4c: 활성 pane 본문에 붙은 빈 WKWebView 래퍼(있으면). Zig 전이(surface_id)로 생애주기를 매칭한다.
+    // 컨테이너 서브뷰로도 살아 있지만, 빠른 조회·전이 매칭을 위해 세션별로 강참조를 든다(창이 닫히면 함께 해제).
+    var webPanel: MaruWebPanelView?
 }
 
 // quick terminal용 떠 있는 패널. borderless NSWindow/NSPanel은 기본적으로 key가 될 수 없어 타이핑을 못
@@ -1071,7 +1121,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.titlebarSeparatorStyle = .none
         window.styleMask.insert(.fullSizeContentView)
 
-        // Phase 4b-2: contentView를 컨테이너로 재편한다 — 터미널 뷰(맨 아래) + 모달 오버레이 뷰(맨 위). 미래 WKWebView(4c)가 그 사이.
+        // Phase 4b-2: contentView를 컨테이너로 재편한다 — 터미널 뷰(맨 아래) + 모달 오버레이 뷰(맨 위). 4c WKWebView(insertWebPanel)가 그 사이.
         let container = MaruTerminalContainerView(
             frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600),
             controller: self
@@ -1717,6 +1767,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 lastSeenMetalGeneration = summary.metal_generation
                 drawMetalFrame()
             }
+            drainWebSurfaceTransition() // Phase 4c: 이번 tick의 웹 패널 surface 전이(생성/파괴/reframe)를 컨테이너 NSView에 적용.
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotificationAuthorizationRequest() // 세팅에서 데스크톱 알림 토글을 켰으면 macOS 알림 권한을 요청한다.
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
@@ -2410,6 +2461,41 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         if maru_macos_app_session_take_mouse_hide(session) != 0 {
             NSCursor.setHiddenUntilMouseMoves(true)
+        }
+    }
+
+    // Phase 4c: 이번 tick의 웹 패널 surface 전이 하나를 컨테이너 NSView에 적용한다. Zig가 4a 순수 계산
+    // (contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로 diff한 op만 받아 기계적으로 실행한다 — 웹뷰를 z-order
+    // 중간(터미널<웹뷰<오버레이)에 삽입하고 frame(pt·좌하단·컨테이너 좌표)을 맞춘다. 창(surface)마다 자기 웹뷰를
+    // 들고, tick 중엔 activeSurface=explicitSurface라 대상 창이 정확하다. 콘텐츠·입력은 범위 밖(4d/Phase 5).
+    private func drainWebSurfaceTransition() {
+        guard let surface = activeSurface, let session = surface.appSession,
+              let container = surface.window?.contentView as? MaruTerminalContainerView else { return }
+        var t = MaruAppHostWebSurfaceTransition()
+        guard maru_macos_app_session_web_surface_transition(session, &t) == Self.statusOK else { return }
+        let frame = NSRect(x: t.frame_pt_x, y: t.frame_pt_y, width: t.frame_pt_w, height: t.frame_pt_h)
+        switch Int(t.op) {
+        case Int(MaruAppHostWebSurfaceOpCreate.rawValue):
+            // id가 바뀌어 새로 만드는 경우 기존 것을 먼저 정리(single-panel 불변식상 드묾이지만 안전).
+            surface.webPanel?.removeFromSuperview()
+            let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id)
+            container.insertWebPanel(v)
+            surface.webPanel = v
+        case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
+            if let v = surface.webPanel, v.surfaceId == t.surface_id {
+                v.removeFromSuperview()
+                surface.webPanel = nil
+            }
+        case Int(MaruAppHostWebSurfaceOpReframe.rawValue):
+            if let v = surface.webPanel, v.surfaceId == t.surface_id { v.frame = frame }
+        case Int(MaruAppHostWebSurfaceOpHide.rawValue):
+            if let v = surface.webPanel, v.surfaceId == t.surface_id { v.isHidden = true }
+        case Int(MaruAppHostWebSurfaceOpShow.rawValue):
+            if let v = surface.webPanel, v.surfaceId == t.surface_id {
+                v.isHidden = false
+                v.frame = frame
+            }
+        default: break // None — 무동작
         }
     }
 
@@ -3681,6 +3767,33 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         smoke_duration_ms=\(duration)
 
         """
+
+        // Phase 4c: MARU_WEB_PANEL=1이면 빈 WKWebView가 컨테이너에 붙었는지 값으로 단언한다(GUI 손 테스트의
+        // 자동 보조 — z-order 골든·실제 입력 통과는 여전히 손 테스트). subviews 순서 [터미널, 웹뷰, 오버레이] +
+        // webview.frame(pt)을 요약에 남겨, MARU_WEB_PANEL=1 zig build macos-app-smoke로 반복 확인한다. env 미설정이면
+        // 무동작(빈 웹뷰가 안 뜨므로 요약 계약 불변). docs/web-panel.md §10 4c·§11.
+        if ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil {
+            let container = activeSurface?.window?.contentView as? MaruTerminalContainerView
+            let wp = activeSurface?.webPanel
+            let subs = container?.subviews ?? []
+            var orderOk = false
+            if let container, let wp, subs.count == 3 {
+                orderOk = subs[0] === container.terminalView && subs[1] === wp && subs[2] === container.overlayView
+            }
+            let f = wp?.frame ?? .zero
+            summary += """
+            web_panel_present=\(wp != nil)
+            web_panel_subview_order_ok=\(orderOk)
+            web_panel_subview_count=\(subs.count)
+            web_panel_surface_id=\(wp?.surfaceId ?? 0)
+            web_panel_frame_x=\(f.origin.x)
+            web_panel_frame_y=\(f.origin.y)
+            web_panel_frame_w=\(f.size.width)
+            web_panel_frame_h=\(f.size.height)
+            web_panel_hittest_nil=\(wp?.hitTest(NSPoint(x: f.width / 2, y: f.height / 2)) == nil)
+
+            """
+        }
 
         // 진단 필드는 MARU_DEBUG일 때만 붙인다. 평소엔 summary 계약을 안정적으로 유지하고,
         // 스케일/레이아웃을 디버깅할 때만 화면/창 scale·cell·drawable 값을 남긴다.

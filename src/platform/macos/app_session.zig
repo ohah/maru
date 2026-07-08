@@ -9,6 +9,7 @@ const renderer = maru.renderer;
 const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
+const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
 
 // L2 session core(src/session)로 추출한 순수 입력/재정렬 수학. 내부 호출처는 bare 이름을 유지하도록 file-scope
 // alias로 재노출한다(docs/layering-and-portability.md §3 — 2차 추출 슬라이스 1). 정의·테스트는 session/input_math.zig.
@@ -64,6 +65,31 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
+// ── Phase 4c: 웹 패널 surface 전이(ABI 소비 타입) ──────────────────────────────────────────────────────────
+// 활성 pane 본문에 붙은 단일 빈 WKWebView의 생애주기를 매 tick 4a `surfaceDiff`로 계산해 **하나의 전이**로 낸다.
+// single-panel 불변식: 웹뷰는 생성부터 파괴까지 surface_id를 유지하므로 create/destroy가 같은 tick에 겹치지 않아,
+// 한 tick당 op은 최대 1개다(멀티 web-Term·탭 혼합은 후속 — 그땐 배열로 승격). docs/web-panel.md §6·§10 4c.
+
+/// web surface 전이 op(§6 surfaceDiff 전이의 단일-패널 투영). 값은 ABI(app_host_abi.h)의 u32와 정합해야 한다.
+pub const WebSurfaceOp = enum(u32) { none = 0, create = 1, destroy = 2, reframe = 3, hide = 4, show = 5 };
+
+/// 한 tick의 web surface 전이(Swift가 소비). create/reframe/show는 frame_pt(pt·좌하단·컨테이너 좌표)를 싣고,
+/// destroy/hide는 surface_id만 유효(frame_pt=0). none이면 무동작. panel_kind: markdown|browser(생성 시 설정 선택용).
+pub const WebSurfaceTransition = struct {
+    op: WebSurfaceOp = .none,
+    surface_id: u64 = 0,
+    panel_kind: web_panel_layout.PanelKind = .markdown,
+    frame_pt: web_panel_layout.RectPt = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+};
+
+/// 활성 pane 본문에 붙은 단일 웹 패널 상태(라이브 web-Term 아님 — split/Term 트리 미진입). env 훅 MARU_WEB_PANEL=1이
+/// 하나 바인딩한다. surface_id는 앱 전역 SurfaceIdAllocator 발급(비재사용). 활성 pane을 **동적으로** 추종하므로
+/// pane 포인터를 들지 않는다(dangling 없음) — 본문 rect는 매 tick 활성 pane leaf rect에서 계산한다.
+const WebPanel = struct {
+    surface_id: u64,
+    panel_kind: web_panel_layout.PanelKind,
+};
+
 // 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
 // 멀티 창/quick 세션이 같은 wall-clock 기준으로 blink/fade/poll/sync timeout을 계산하게 한다.
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
@@ -73,7 +99,13 @@ pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 98;
+pub const abi_version: u32 = 99;
+// 99: Phase 4c — maru_macos_app_session_web_surface_transition + WebSurfaceTransition(extern struct). 활성 pane 본문에
+// 붙는 **단일 빈 WKWebView**(라이브 web-Term 트리 미진입 — app_session.web_panel 필드 하나)의 생애주기를 4a 순수
+// 계산(contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로 매 tick diff해 단일 전이 op(none/create/destroy/reframe/
+// hide/show)로 export한다. Swift가 그 op만 기계적으로 적용(웹뷰 삽입=터미널<웹뷰<오버레이 중간, frame=pt 좌하단).
+// 콘텐츠·브리지·보안(Phase 5)·입력/IME(4d)는 범위 밖(빈 웹뷰는 hitTest→nil로 입력 통과). 새 export 1개 + 새 struct
+// 추가 — 기존 struct offset·인자 순서 불변. docs/web-panel.md §2·§6·§10 4c·§14.
 // 96: maru_macos_app_session_quick_terminal_frames + QuickTerminalFrames(extern struct, quick_terminal_geometry.zig로 분리) —
 // quick 패널 보임/숨김 사각형을 세션의 **현재** config로 매 호출 라이브 계산(위치별 가장자리 슬라이드·center 페이드, 순수
 // quick_terminal_geometry.compute + 단위 테스트). quick_terminal_config(세션-불변 스냅샷)와 달리 매 토글 재조회라 설정 GUI 변경이
@@ -1446,6 +1478,10 @@ pub const AppSession = struct {
     // 아니라 이 rect의 origin을 기준으로 셀↔픽셀을 변환해야 마우스/커서/IME가 활성 panel에 맞는다. 레이아웃·
     // 포커스·리사이즈가 바뀔 때 recomputeActivePaneRect가 갱신한다. (w/h는 캐시만 — 현재 clamp는 surface grid로.)
     active_pane_rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    // Phase 4c: 활성 pane의 **raw leaf rect**(탭 바 포함, backing px·좌상단). active_pane_rect(paneTermRect=탭 바·패딩
+    // 제거)와 달리, 웹 패널 본문 rect는 4a `contentRect(leaf, {top=paneBarHeightPx})`로 **탭 바만** 빼 pane 탭 바가
+    // 웹뷰에 안 가리게 노출해야 하므로(§5) raw leaf rect가 필요하다. recomputeActivePaneRect가 함께 갱신한다.
+    active_pane_leaf_rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
     // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
     sidebar_slot_height_px: u32 = 0,
@@ -1684,6 +1720,11 @@ pub const AppSession = struct {
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
+    // Phase 4c: 활성 pane 본문에 붙은 단일 빈 웹 패널(없으면 null). env 훅 MARU_WEB_PANEL=1이 바인딩(maybeDebugOpenWebPanel).
+    web_panel: ?WebPanel = null,
+    // web surface diff의 prev(직전 tick이 낸 layout, 0~1개). webSurfaceTransition이 매 tick 4a surfaceDiff의 prev로
+    // 쓰고 cur로 전진시킨다(Swift가 전이를 적용했다는 전제). null=직전 tick에 웹 패널 없었음.
+    web_panel_prev: ?web_panel_layout.SurfaceLayout = null,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경·바·그룹 색 프리셋 + 그룹 묶기/풀기 = ctx_menu_count)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
@@ -2479,11 +2520,13 @@ pub const AppSession = struct {
             for (leaf_rects.items) |lr| {
                 if (lr.leaf == active_pane) {
                     self.active_pane_rect = self.paneTermRect(lr.rect); // 상단 탭 바를 뺀 영역(좌표 origin)
+                    self.active_pane_leaf_rect = lr.rect; // Phase 4c: 웹 패널 본문 rect 계산용 raw leaf rect(탭 바 포함)
                     return;
                 }
             }
         } else |_| {}
         self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백: 터미널 영역(바 아래)
+        self.active_pane_leaf_rect = self.termRect(); // Phase 4c: 폴백도 raw(단일 panel=터미널 영역 전체)
     }
 
     /// panel 사이 divider 선 색(0xAARRGGBB) — 활성 하이라이트 색을 써서 두 panel 사이 경계가 또렷하게 보이게.
@@ -6959,6 +7002,74 @@ pub const AppSession = struct {
                 }
             } else |_| {}
         }
+    }
+
+    /// Phase 4c 시각 확인 디버그 훅 — MARU_WEB_PANEL=1 env가 설정됐고 surface가 준비됐으면 활성 pane 본문에 빈
+    /// WKWebView 하나를 붙인다(한 번만). GUI 손 테스트·스크린샷 self-verify(MARU_SCREENSHOT)로 z-order/frame-sync를
+    /// 확인하는 유일한 생성 경로(4c는 메뉴/action 미배선 — 후속). env 미설정이면 무동작(MARU_OPEN_SETTINGS와 같은
+    /// env-gate). MARU_WEB_PANEL_MARKDOWN=1이면 markdown, 아니면 browser(임의 URL 인앱 브라우저 = 원래 목표)로 kind만
+    /// 정한다 — 4c는 빈 웹뷰라 kind가 시각에 영향 없고, Phase 5 브리지/보안이 kind로 trust·config를 가른다.
+    pub fn maybeDebugOpenWebPanel(self: *AppSession) void {
+        if (self.web_panel != null) return;
+        if (!self.surface_initialized) return;
+        if (std.c.getenv("MARU_WEB_PANEL") == null) return;
+        const kind: web_panel_layout.PanelKind = if (std.c.getenv("MARU_WEB_PANEL_MARKDOWN") != null) .markdown else .browser;
+        self.web_panel = .{ .surface_id = self.surface_ids.next(), .panel_kind = kind };
+    }
+
+    /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
+    /// content view의 backing 높이(backing_height_px)를 y-flip 기준으로 쓴다(§3 — OS 타이틀바 포함 전체 창이 아니라
+    /// pane rect가 사는 그 좌표 공간의 높이).
+    fn webFramePt(self: *const AppSession, rect_px: maru.session.SplitRect) web_panel_layout.RectPt {
+        return web_panel_layout.pxTopLeftToPtBottomLeft(rect_px, self.backing_height_px, self.scale_milli);
+    }
+
+    /// Phase 4c: 이번 tick의 web surface 전이를 계산한다(§6·§10 4c). **4a 세 순수함수를 전부 소비**한다:
+    ///   ① `contentRect` — 활성 pane raw leaf rect에서 탭 바(top inset)를 빼 본문 rect(§5 탭 바 노출)를 얻고,
+    ///   ② `surfaceDiff` — 직전 tick layout(web_panel_prev)과 이번 layout(0~1개)을 diff해 전이를 뽑고,
+    ///   ③ `pxTopLeftToPtBottomLeft`(webFramePt) — 전이가 실을 본문 rect를 WKWebView frame(pt·좌하단)으로 변환.
+    /// single-panel이라 카테고리마다 ≤1이고 한 tick당 op은 최대 1개(create/destroy 비동시 불변식). prev를 cur로
+    /// 전진시켜(Swift가 전이를 적용한다는 전제) 다음 tick이 무변경이면 none을 낸다(§10 "diff 있을 때만 sync").
+    /// OOM(웹 surface 수 ≤1이라 사실상 불가)이면 prev를 안 건드리고 none — 다음 tick 재시도.
+    pub fn webSurfaceTransition(self: *AppSession) WebSurfaceTransition {
+        // cur: 웹 패널이 있으면 본문 rect로 1개, 없으면 0개.
+        var cur_buf: [1]web_panel_layout.SurfaceLayout = undefined;
+        const cur: []const web_panel_layout.SurfaceLayout = if (self.web_panel) |wp| blk: {
+            const body = web_panel_layout.contentRect(self.active_pane_leaf_rect, .{ .top = self.paneBarHeightPx() });
+            cur_buf[0] = .{ .surface_id = wp.surface_id, .panel_kind = wp.panel_kind, .content_rect = body, .visible = true };
+            break :blk cur_buf[0..1];
+        } else cur_buf[0..0];
+
+        // prev: 직전 tick layout(0~1개)에서 slice.
+        var prev_buf: [1]web_panel_layout.SurfaceLayout = undefined;
+        const prev: []const web_panel_layout.SurfaceLayout = if (self.web_panel_prev) |p| blk: {
+            prev_buf[0] = p;
+            break :blk prev_buf[0..1];
+        } else prev_buf[0..0];
+
+        var diff = web_panel_layout.surfaceDiff(self.allocator, prev, cur) catch return .{ .op = .none };
+        defer diff.deinit(self.allocator);
+
+        // single-panel: 한 tick당 정확히 하나의 카테고리만 채워진다(create/destroy 비동시). 순서는 상호배타라 무관.
+        var out: WebSurfaceTransition = .{ .op = .none };
+        if (diff.created.items.len > 0) {
+            const s = diff.created.items[0];
+            out = .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .frame_pt = self.webFramePt(s.content_rect) };
+        } else if (diff.destroyed.items.len > 0) {
+            out = .{ .op = .destroy, .surface_id = diff.destroyed.items[0] };
+        } else if (diff.shown.items.len > 0) {
+            const s = diff.shown.items[0];
+            out = .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .frame_pt = self.webFramePt(s.content_rect) };
+        } else if (diff.hidden.items.len > 0) {
+            out = .{ .op = .hide, .surface_id = diff.hidden.items[0] };
+        } else if (diff.reframed.items.len > 0) {
+            const s = diff.reframed.items[0];
+            out = .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .frame_pt = self.webFramePt(s.content_rect) };
+        }
+
+        // prev ← cur(Swift가 이 전이를 적용한다는 전제로 상태 전진).
+        self.web_panel_prev = if (cur.len > 0) cur[0] else null;
+        return out;
     }
 
     /// `maru` CLI를 PATH(`~/.local/bin/maru`)에 symlink 설치한다(커맨드 팝업 "Install CLI"). main.zig install-cli와

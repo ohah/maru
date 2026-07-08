@@ -114,6 +114,11 @@ _Static_assert(sizeof(MaruRendererImageVertex) == 16, "MaruRendererImageVertex m
 // kitty graphics(K2): image_id → MTLTexture 캐시. image_uploads로 (재)생성하고, gpu_images가 image_id로
 // 찾아 그린다. 삭제된 이미지 텍스처의 명시적 eviction은 후속(K4) — 참조 안 되면 안 그려질 뿐이다.
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *imageTextures;
+// Phase 4b-2 오버레이 present 상태: 직전 present에서 오버레이 레이어에 실제로 그린 게 content(모달·그림자)였는가.
+// present 결정에 쓴다 — content→빈 전이 프레임엔 clear를 present해 닫힌 모달 잔상을 지우고(그 뒤엔 빈→빈이라 skip),
+// 빈→빈이면 오버레이 present를 통째로 건너뛴다(모달 없는 평상시 매 프레임 이중 present 방지). 기본 false(초기
+// 오버레이=미present=투명). per-surface impl이라 창마다 자기 오버레이 상태를 정확히 추적한다.
+@property (nonatomic) bool overlayHadContent;
 @end
 
 @implementation MaruMetalRendererImpl
@@ -1333,7 +1338,8 @@ bool maru_metal_renderer_draw(
         }
         id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];
         if (command_buffer == nil) {
-            return false;
+            fprintf(stderr, "MARU_SCREENSHOT: command buffer 생성 실패\n");
+            exit(1);
         }
         // pass 1: 터미널(Clear)
         MTLRenderPassDescriptor *tpass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1343,7 +1349,8 @@ bool maru_metal_renderer_draw(
         tpass.colorAttachments[0].clearColor = terminal_clear;
         id<MTLRenderCommandEncoder> tenc = [command_buffer renderCommandEncoderWithDescriptor:tpass];
         if (tenc == nil) {
-            return false;
+            fprintf(stderr, "MARU_SCREENSHOT: 터미널 pass 인코더 생성 실패\n");
+            exit(1);
         }
         pass_ctx.encoder = tenc;
         maru_draw_terminal_layer(&pass_ctx);
@@ -1355,7 +1362,8 @@ bool maru_metal_renderer_draw(
         opass.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> oenc = [command_buffer renderCommandEncoderWithDescriptor:opass];
         if (oenc == nil) {
-            return false;
+            fprintf(stderr, "MARU_SCREENSHOT: 오버레이 pass 인코더 생성 실패\n");
+            exit(1);
         }
         pass_ctx.encoder = oenc;
         maru_draw_overlay_layer(&pass_ctx);
@@ -1411,29 +1419,40 @@ bool maru_metal_renderer_draw(
     // 단일 commit**한다 → 모달 열림/닫힘 전이 프레임이 원자적으로 표시된다(터미널 caret 제거 + 오버레이 모달·caret이
     // 서로 다른 vsync로 갈라지지 않아 tearing/‌caret 0·2개가 없다). vertex 버퍼는 위에서 이미 다 만들었으므로,
     // drawable 획득 실패가 이미 만든 자원을 낭비할 뿐 잡은 drawable을 새게(starve) 하지 않는다.
-    id<CAMetalDrawable> terminal_drawable = [terminal_layer nextDrawable];
-    if (terminal_drawable == nil) {
-        return false; // command buffer 미생성 — 누수 없음, 다음 frame 재시도
-    }
-    // 오버레이 drawableSize를 터미널과 lockstep으로 맞춘다(둘이 다르면 모달 NDC 투영이 어긋난다). draw는 main
-    // thread(Swift frame timer)에서만 불리므로 CAMetalLayer 속성 접근이 안전하다.
-    if (overlay_layer != nil && !CGSizeEqualToSize(overlay_layer.drawableSize, drawable_size)) {
-        overlay_layer.drawableSize = drawable_size;
-    }
-    // 오버레이 drawable을 잡는다. nil이면(드물게 pool starvation) 이 frame은 터미널만 present한다.
-    id<CAMetalDrawable> overlay_drawable = (overlay_layer != nil) ? [overlay_layer nextDrawable] : nil;
-    // 오버레이에 그릴 콘텐츠(모달·그림자)가 있는데 drawable을 못 잡았으면 이 frame은 모달을 안 그린 것이다(caret은
-    // has_modal 분기로 어느 레이어든 1개라 유실 없음). 문제는 **정적 모달**(종료/닫기 확인 등 검색 caret이 없어
-    // metal_dirty가 churn 안 하는 모달): 한 번 드롭되면 재그리기 트리거가 없어 영구 미표시가 된다(설정/palette/find는
-    // 검색 caret blink로 자가복구). 그래서 콘텐츠 드롭 시 return false → drawMetalFrame이 lastDrawnGeneration을 갱신
-    // 안 해 다음 tick이 generation 불일치로 재시도(pool 복구까지)한다. 투명 오버레이(모달·그림자 없음)는 드롭돼도
-    // 보일 게 없어 정상 present로 둔다.
-    const bool overlay_content_dropped = (overlay_drawable == nil && (has_modal || shadow_vertex_total > 0));
-
+    //
+    // command buffer를 **drawable 획득 전에** 잡는다: 큐 고갈로 command buffer가 nil이면 아직 drawable을 안 잡았으니
+    // 새는 drawable이 없다. 그 뒤 인코더 생성이 실패해도(사실상 없음) 이미 잡은 drawable은 present+commit으로 pool에
+    // 되돌려 고갈을 막는다(단순 return이면 미커밋 drawable이 pool을 굶긴다).
     id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];
     if (command_buffer == nil) {
-        return false;
+        return false; // drawable 미획득 — 누수 없음, 다음 frame 재시도
     }
+    id<CAMetalDrawable> terminal_drawable = [terminal_layer nextDrawable];
+    if (terminal_drawable == nil) {
+        return false; // command buffer는 미커밋 폐기(누수 없음), 다음 frame 재시도
+    }
+
+    // 오버레이 present 결정(모달 잔상·이중 present 홀리스틱): 오버레이는 **그릴 내용이 있거나(모달·그림자) 직전
+    // present가 content였는데 이번엔 비었을 때(clear 전이)**만 present한다. 빈→빈이면 이미 clear(또는 미present=투명)라
+    // 건너뛴다 → 모달 없는 평상시 매 frame 오버레이 이중 present(GPU·컴포지터 낭비)를 없앤다. content→빈 전이 프레임엔
+    // clear를 present해 **닫힌 모달의 잔상**을 지운다(그 뒤엔 빈→빈이라 다시 skip). CAMetalLayer는 마지막 present
+    // 콘텐츠를 유지하므로, skip 상태에서도 오버레이는 마지막에 present한 (투명) clear 그대로 남는다.
+    const bool overlay_has_content = (has_modal || shadow_vertex_total > 0);
+    const bool overlay_needs_present = overlay_has_content || impl.overlayHadContent;
+    id<CAMetalDrawable> overlay_drawable = nil;
+    if (overlay_layer != nil && overlay_needs_present) {
+        // 오버레이 drawableSize를 터미널과 lockstep으로 맞춘다(둘이 다르면 모달 NDC 투영이 어긋난다). draw는 main
+        // thread(Swift frame timer)에서만 불리므로 CAMetalLayer 속성 접근이 안전하다.
+        if (!CGSizeEqualToSize(overlay_layer.drawableSize, drawable_size)) {
+            overlay_layer.drawableSize = drawable_size;
+        }
+        overlay_drawable = [overlay_layer nextDrawable]; // nil이면(드물게 pool starvation) 아래 drop 처리.
+    }
+    // present가 필요한데(내용 있음 또는 clear 전이) drawable을 못 잡았으면 이 frame은 드롭이다: return false로 신호해
+    // 다음 tick이 재시도하게 한다. **정적 모달**(종료/닫기 확인 등 검색 caret이 없어 metal_dirty가 churn 안 하는 모달)은
+    // 한 번 드롭되면 재그리기 트리거가 없어 영구 미표시가 되고, **닫힘 clear** 드롭은 모달 잔상이 남는다 — 둘 다
+    // drawMetalFrame이 metalNeedsRedraw로 재시도해야 한다(caret은 has_modal 분기로 어느 레이어든 1개라 유실 없음).
+    const bool overlay_content_dropped = (overlay_needs_present && overlay_drawable == nil);
 
     // pass 1: 터미널 레이어(Clear=terminal_clear). vertex_buffer가 nil이면(cell 없음) clear만 한 빈 frame이다.
     MTLRenderPassDescriptor *tpass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1443,14 +1462,21 @@ bool maru_metal_renderer_draw(
     tpass.colorAttachments[0].clearColor = terminal_clear;
     id<MTLRenderCommandEncoder> tenc = [command_buffer renderCommandEncoderWithDescriptor:tpass];
     if (tenc == nil) {
+        // 인코더 실패(사실상 없음)라도 이미 잡은 drawable(들)은 present+commit으로 pool에 되돌린다(누수 0). 미인코딩
+        // drawable은 1 frame stale이 보일 수 있으나 return false로 다음 frame이 재그린다(pool 고갈보다 낫다).
+        [command_buffer presentDrawable:terminal_drawable];
+        if (overlay_drawable != nil) {
+            [command_buffer presentDrawable:overlay_drawable];
+        }
+        [command_buffer commit];
         return false;
     }
     pass_ctx.encoder = tenc;
     maru_draw_terminal_layer(&pass_ctx); // 맨 아래: 터미널 셀·사이드바·chrome·kitty·(모달 없을 때)터미널 커서
     [tenc endEncoding];
 
-    // pass 2: 오버레이 레이어(Clear=투명). 모달만 그리고 나머지는 투명이라 아래 터미널이 비친다. drawable을 못
-    // 잡았으면(overlay_drawable==nil) 이 pass를 건너뛴다.
+    // pass 2: 오버레이 레이어(Clear=투명). 모달만 그리고 나머지는 투명이라 아래 터미널이 비친다. present 대상이
+    // 아니면(overlay_drawable==nil — 빈→빈 skip 또는 drop) 이 pass를 건너뛴다.
     if (overlay_drawable != nil) {
         MTLRenderPassDescriptor *opass = [MTLRenderPassDescriptor renderPassDescriptor];
         opass.colorAttachments[0].texture = overlay_drawable.texture;
@@ -1459,6 +1485,10 @@ bool maru_metal_renderer_draw(
         opass.colorAttachments[0].clearColor = overlay_clear;
         id<MTLRenderCommandEncoder> oenc = [command_buffer renderCommandEncoderWithDescriptor:opass];
         if (oenc == nil) {
+            // 오버레이 인코더 실패: 터미널은 이미 인코딩됐다. 두 drawable을 present+commit해 pool에 되돌린다(누수 0).
+            [command_buffer presentDrawable:terminal_drawable];
+            [command_buffer presentDrawable:overlay_drawable];
+            [command_buffer commit];
             return false;
         }
         pass_ctx.encoder = oenc;
@@ -1470,9 +1500,13 @@ bool maru_metal_renderer_draw(
     [command_buffer presentDrawable:terminal_drawable];
     if (overlay_drawable != nil) {
         [command_buffer presentDrawable:overlay_drawable];
+        // 이번에 오버레이 레이어에 실제 present한 내용이 content였는지 기록(다음 frame의 present 결정용). clear 전이를
+        // present한 경우 overlay_has_content=false라 다음부터 빈→빈 skip으로 넘어간다. drop(present 안 함)이면 갱신하지
+        // 않아, 재시도 프레임이 여전히 present 필요로 판단한다.
+        impl.overlayHadContent = overlay_has_content;
     }
     [command_buffer commit];
-    return !overlay_content_dropped; // 모달·그림자가 drawable 부족으로 드롭됐으면 재시도(위 주석) — 정적 모달 영구 실종 방지.
+    return !overlay_content_dropped; // 내용/clear 전이가 drawable 부족으로 드롭됐으면 재시도(위 주석).
 }
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer) {

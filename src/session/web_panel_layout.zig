@@ -55,10 +55,11 @@ pub const RectPt = struct { x: f64, y: f64, w: f64, h: f64 };
 /// 곳이고, 좌하단 pt origin.y는 컨테이너 아래에서 잰 그 거리 = (window_height_px − y − h)/scale이다. x/w/h는
 /// 스케일 나눗셈만. `window_height_px`는 WKWebView가 subview로 붙는 **컨테이너 content view의 backing 높이**다
 /// (OS 타이틀바 포함 전체 창 높이가 아니라, pane rect가 사는 그 좌표 공간의 높이 — y-flip 기준이 어긋나면
-/// 웹 패널이 세로로 밀린다). 전제: scale_milli는 실제 backing scale(>0). f64 나눗셈이라 0이어도 트랩 없이
-/// inf(garbage-in)일 뿐이다(정수 나눗셈 트랩 회피).
+/// 웹 패널이 세로로 밀린다). 전제: scale_milli는 실제 backing scale(>0). 다만 0이 넘어오면 나눗셈이 inf/NaN을
+/// 만들고 그 값이 하류의 @intFromFloat(illegal behavior) 등으로 번지므로 `@max(1, scale_milli)`로 clamp해 최소
+/// 방어한다(0=garbage-in이라 결과 좌표는 무의미하되 유한·비트랩). Phase 4c가 이 함수를 실제로 호출하기 시작한다.
 pub fn pxTopLeftToPtBottomLeft(rect_px: Rect, window_height_px: u32, scale_milli: u32) RectPt {
-    const scale = @as(f64, @floatFromInt(scale_milli)) / 1000.0;
+    const scale = @as(f64, @floatFromInt(@max(@as(u32, 1), scale_milli))) / 1000.0;
     const y_px: f64 = @floatFromInt(rect_px.y);
     const h_px: f64 = @floatFromInt(rect_px.h);
     const win_h_px: f64 = @floatFromInt(window_height_px);
@@ -234,6 +235,16 @@ test "pxToPt: 3x 스케일 분수 pt(정수로 안 나눠떨어지는 경계)" {
     try testing.expectApproxEqAbs(@as(f64, 270), got.y, 1e-9); // (900 − 60 − 30)/3 = 810/3
     try testing.expectApproxEqAbs(@as(f64, 30), got.w, 1e-9); // 90/3
     try testing.expectApproxEqAbs(@as(f64, 10), got.h, 1e-9); // 30/3
+}
+
+test "pxToPt: scale_milli==0은 clamp(@max 1)로 유한 좌표(inf/NaN 방지)" {
+    // 0 스케일은 계약 위반(garbage-in)이지만 나눗셈이 inf/NaN을 내면 하류 @intFromFloat이 illegal이 된다.
+    // @max(1,0)=1 → scale=0.001로 clamp되어 결과는 (무의미하나) 유한해야 한다.
+    const got = pxTopLeftToPtBottomLeft(.{ .x = 10, .y = 20, .w = 30, .h = 40 }, 1000, 0);
+    try testing.expect(std.math.isFinite(got.x));
+    try testing.expect(std.math.isFinite(got.y));
+    try testing.expect(std.math.isFinite(got.w));
+    try testing.expect(std.math.isFinite(got.h));
 }
 
 // ── ③ surface diff ──

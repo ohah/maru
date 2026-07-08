@@ -1268,6 +1268,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             resizeAppSessionFromWindow()
             _ = renderTick()
         }
+        // M3e: 저장 시점 활성(key)이던 창을 다시 focus한다(docs/window-surface-mobility.md §8A.8). Zig가 active-window=1
+        // 마커가 있는 창의 인덱스를 주고(없으면 -1 → 무동작, 현행 동작 = 마지막 생성 창 key 유지), windows[index]를 key로
+        // 올린다. createTerminalWindow가 각자 makeKeyAndOrderFront하므로 복원 loop **뒤**(마지막)에 호출해야 활성 창이
+        // 최종 key가 된다. windows.count 범위 밖(중간 창 생성 실패 등)이면 건너뛴다(best-effort).
+        let activeIndex = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_workspace_active_window(session, buf.baseAddress, buf.count)
+        }
+        if activeIndex >= 0, Int(activeIndex) < windows.count {
+            windows[Int(activeIndex)].window?.makeKeyAndOrderFront(nil)
+        }
     }
 
     /// chrome Notice 모달(손상 알림 등)을 primary 세션에 띄운다. 메시지는 UTF-8로 Zig에 넘긴다(세션이 복사 소유라
@@ -3334,9 +3344,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var blocks = ""
         for surface in windows {
             guard let session = surface.appSession else { continue }
+            // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).
+            // 최대 하나의 창만 isKeyWindow라 마커도 최대 하나. 옵션-키라 비활성 창은 키가 생략된다(옛 파일 flat 동일).
+            let isActive: UInt32 = (surface.window?.isKeyWindow == true) ? 1 : 0
             var ptr: UnsafePointer<UInt8>? = nil
             var len: size_t = 0
-            guard maru_macos_app_session_serialize_workspace(session, &ptr, &len) == Self.statusOK,
+            guard maru_macos_app_session_serialize_workspace(session, &ptr, &len, isActive) == Self.statusOK,
                   let bytes = ptr, len > 0 else { continue } // 캡처 실패한 창은 건너뜀
             blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
         }

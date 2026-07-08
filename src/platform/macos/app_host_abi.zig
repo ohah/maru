@@ -929,11 +929,14 @@ pub export fn maru_macos_app_session_serialize_workspace(
     session: ?*AppSession,
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
+    is_active: u32,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
     const len_out = out_len orelse return @intFromEnum(Status.null_out);
-    const text = app_session.serializeWorkspaceWindow() catch {
+    // is_active(!=0) = 이 창이 저장 시점 key 창(Swift window.isKeyWindow). 활성 창만 workspace.v1 옵션-키
+    // active-window=1을 내고, 재시작 복원이 그 창을 다시 focus한다(M3e). false면 키 생략(옛 파일 flat 동일).
+    const text = app_session.serializeWorkspaceWindow(is_active != 0) catch {
         ptr_out.* = null;
         len_out.* = 0;
         return @intFromEnum(Status.ok);
@@ -997,6 +1000,23 @@ pub export fn maru_macos_app_session_workspace_window_count(
     var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
     defer parsed.deinit();
     return @intCast(parsed.workspace.windows.len);
+}
+
+// 저장된 workspace 텍스트에서 활성(key) 창의 인덱스를 준다(M3e — docs/window-surface-mobility.md §8A.8). Swift가 복원
+// loop 뒤 이 인덱스의 창을 makeKeyAndOrderFront해 재시작 후 활성 창을 되살린다. active-window=1 마커가 있는 첫 창의
+// 인덱스, 없으면(옛 파일·무마커) -1 → Swift 무동작(현행 동작 = 마지막 생성 창 key). parse 실패도 -1(count와 같은
+// 조용한 폴백). 포맷 파싱은 Zig 단일 권위 — Swift는 창 경계를 안 나눈다. 세션 allocator로 parse(임시 arena, 즉시 해제).
+pub export fn maru_macos_app_session_workspace_active_window(
+    session: ?*AppSession,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) i64 {
+    const app_session = session orelse return -1;
+    const tp = text_ptr orelse return -1;
+    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return -1;
+    defer parsed.deinit();
+    const idx = maru.session.workspace.activeWindowIndex(parsed.workspace) orelse return -1;
+    return @intCast(idx);
 }
 
 // 전역(OS) 단축키 등록 기술자 목록. config에서 한 번 만들어 세션 동안 불변이라, Swift가 시작 시 한 번

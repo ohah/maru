@@ -122,6 +122,12 @@ pub const Tab = struct {
 /// 한 OS 창 = 한 AppSession. 탭들 + 활성 탭.
 pub const Window = struct {
     active_tab: usize = 0,
+    // 재시작 시 다시 focus할 활성(key) 창 마커(M3e — docs/window-surface-mobility.md §8A.8). 순수 additive 스칼라라
+    // false(기본)면 writer가 키를 **생략**해(round-trip 고정점·옛 파일 flat 정상) 옛 리더가 미지 키로 skip하는
+    // forward-compat도 유지한다(group-collapsed 옵션-키 패턴 그대로). reader는 없으면 false. 여러 창 중 최대 하나만
+    // true(저장 시점 key 창) — 복원 loop가 activeWindowIndex로 그 창을 makeKeyAndOrderFront한다. 없으면(옛 파일·무마커)
+    // 현행 동작(마지막 생성 창이 key) 유지. 기본 false.
+    active: bool = false,
     tabs: []const Tab,
 };
 
@@ -149,8 +155,20 @@ pub fn serializeWindow(allocator: std.mem.Allocator, win: Window) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// 저장된 workspace에서 활성(key) 창의 인덱스 — active=true인 **첫** window(없으면 null). 복원 loop가 이 인덱스의
+/// 창을 다시 focus(makeKeyAndOrderFront)한다. 옛 파일·무마커면 null(현행 동작 유지 — 마지막 생성 창이 key). 최대
+/// 하나만 active=true지만, 손상/변조로 여러 개면 관대하게 첫 번째를 쓴다. M3e — docs/window-surface-mobility.md §8A.8.
+pub fn activeWindowIndex(ws: Workspace) ?usize {
+    for (ws.windows, 0..) |win, i| if (win.active) return i;
+    return null;
+}
+
 fn writeWindow(w: *std.Io.Writer, win: Window) !void {
-    try w.print("window tabs={d} active-tab={d}\n", .{ win.tabs.len, win.active_tab });
+    try w.print("window tabs={d} active-tab={d}", .{ win.tabs.len, win.active_tab });
+    // 활성(key) 창 마커(M3e §8A.8). false면 키 생략(additive·key-addressed — 옛 파일/비활성 창의 라인 문자열을 안
+    // 바꿔 round-trip 고정점·양쪽 호환, group-collapsed와 동일). true면 active-window=1 스칼라로 쓴다.
+    if (win.active) try w.writeAll(" active-window=1");
+    try w.writeByte('\n');
     for (win.tabs) |tab| try writeTab(w, tab);
 }
 
@@ -261,11 +279,14 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
     if (!std.mem.eql(u8, f.kind, "window")) return error.BadLine;
     const tab_count = try f.requireUint("tabs", usize); // 구조 키(탭 개수) — 없으면 BadLine
     const active_tab = try f.getUint("active-tab", usize, 0); // 스칼라(기본 0=첫 탭)
+    // 활성(key) 창 마커(M3e §8A.8). additive 스칼라라 없으면 false(옛 파일 = 무마커 = 현행 동작). 여러 창 중 최대
+    // 하나만 true(저장 시점 key 창). group-collapsed와 동일한 옵션-키 패턴(getUint 기본 0 → forward/backward 호환).
+    const active = (try f.getUint("active-window", u8, 0)) != 0;
 
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
     while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines));
-    return .{ .active_tab = active_tab, .tabs = try tabs.toOwnedSlice(a) };
+    return .{ .active_tab = active_tab, .active = active, .tabs = try tabs.toOwnedSlice(a) };
 }
 
 fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
@@ -857,6 +878,115 @@ test "workspace round-trip: tab top_level 보존(§2.1 재설계 §14 — true�
     try std.testing.expectEqual(true, t2.top_level); // 최상위 복귀 카드 복원
 
     // round-trip 고정점: 다시 직렬화하면 동일(false↔키부재·true↔키존재 인코딩 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace round-trip: window active(활성 창) 마커 보존(M3e — true는 active-window 키, false는 키 생략)" {
+    // 재시작 시 다시 focus할 활성(key) 창 마커(docs/window-surface-mobility.md §8A.8). group-collapsed 옵션-키 패턴
+    // 그대로: writer는 active=true인 창만 active-window=1을 내고(false=키 생략, additive), 옛 파일/비활성 창 라인은
+    // 안 바꾼다. round-trip이 이 인코딩(false↔키부재·true↔키존재)을 고정하는지 + activeWindowIndex를 검증.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs0 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const tabs1 = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    // 창0=비활성(마커 없음), 창1=활성(active-window=1).
+    const windows = [_]Window{
+        .{ .tabs = &tabs0 },
+        .{ .active = true, .tabs = &tabs1 },
+    };
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 창0(비활성): active-tab=0 바로 뒤 개행(active-window 키 없음 — group-collapsed와 동일 생략).
+    try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0\n") != null);
+    // 창1(활성): active-tab 뒤에 active-window=1.
+    try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0 active-window=1\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(false, parsed.workspace.windows[0].active);
+    try std.testing.expectEqual(true, parsed.workspace.windows[1].active);
+    try std.testing.expectEqual(@as(?usize, 1), activeWindowIndex(parsed.workspace)); // 활성 = 창1
+
+    // round-trip 고정점: 다시 직렬화하면 동일(false↔키부재·true↔키존재 인코딩 안정).
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace serialize: active=false 창은 active-window 키 생략(옛 파일 flat 고정점)" {
+    // 모든 창이 비활성(기본)이면 active-window 키가 어디에도 안 붙어, 옛(M3e 이전) 저장 파일과 라인이 byte-identical하다
+    // (additive 옵션-키 = false 생략). 이게 "필드 추가 전후 라인 문자열 불변" 계약 — activeWindowIndex는 null(활성 없음).
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]Window{ .{ .tabs = &tabs }, .{ .tabs = &tabs } };
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "active-window") == null); // 어디에도 없음
+    try std.testing.expectEqual(@as(?usize, null), activeWindowIndex(.{ .windows = &windows })); // 활성 창 없음 = null
+}
+
+test "workspace parse: 옛 v1 파일(active-window 키 없음) 하위호환 — 크래시/BadHeader 없이 active 전부 false" {
+    // ⭐ M3e 하위호환의 핵심(사용자가 확인한 "필드 없이 저장 후 버전업 로드 무문제"): active-window 키가 **없는** 옛
+    // maru.workspace.v1 텍스트(멀티 창)를 parse해도 헤더 유지(BadHeader 없음)·정상 로드·active 전부 false·
+    // activeWindowIndex==null(현행 동작 = 마지막 생성 창 key). 버림·모달·크래시 없음. 배치(창별 cwd)도 그대로 로드.
+    const old =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++ // active-window 키 없음(옛 파일)
+        "tab panes=1 custom-name=\"w0\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/a\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n" ++
+        "window tabs=1 active-tab=0\n" ++ // 두 번째 창도 마커 없음
+        "tab panes=1 custom-name=\"w1\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/b\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    var parsed = try parse(std.testing.allocator, old); // BadHeader/크래시 없이 성공
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.workspace.windows.len);
+    try std.testing.expectEqual(false, parsed.workspace.windows[0].active); // 없음 → 기본 false
+    try std.testing.expectEqual(false, parsed.workspace.windows[1].active);
+    try std.testing.expectEqual(@as(?usize, null), activeWindowIndex(parsed.workspace)); // 마커 없음 = null(현행 유지)
+    try std.testing.expectEqualStrings("/a", parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0].cwd);
+    try std.testing.expectEqualStrings("/b", parsed.workspace.windows[1].tabs[0].panes[0].surfaces[0].cwd);
+}
+
+test "workspace round-trip: 멀티 창 배치 + 활성 창 재시작 유지(M3e cross-window 이동 회귀)" {
+    // cross-window 이동은 각 세션 라이브 트리를 창별 블록으로 저장하므로 배치(어느 창에 무엇)는 이미 v1으로 재시작 후
+    // 유지된다(M3 핵심 목표 충족). M3e는 그 위에 활성 창만 얹는다. 두 창(구분되는 cwd) + 창1 활성을 round-trip해서
+    // 배치와 활성 마커가 함께 살아남는지(회귀 없나) 검증.
+    const s0 = [_]Surface{.{ .cwd = "/proj/a", .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const s1 = [_]Surface{.{ .cwd = "/proj/b", .command = "/bin/zsh", .cols = 90, .rows = 30 }};
+    const p0 = [_]Pane{.{ .surfaces = &s0 }};
+    const p1 = [_]Pane{.{ .surfaces = &s1 }};
+    const t0 = [_]TreeNode{.{ .leaf = 0 }};
+    const t1 = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs0 = [_]Tab{.{ .tree = &t0, .panes = &p0 }};
+    const tabs1 = [_]Tab{.{ .tree = &t1, .panes = &p1 }};
+    const windows = [_]Window{
+        .{ .tabs = &tabs0 }, // 창0 비활성
+        .{ .active = true, .tabs = &tabs1 }, // 창1 활성
+    };
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+
+    // 배치 유지: 창0=/proj/a, 창1=/proj/b (cross-window placement).
+    try std.testing.expectEqual(@as(usize, 2), parsed.workspace.windows.len);
+    try std.testing.expectEqualStrings("/proj/a", parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0].cwd);
+    try std.testing.expectEqualStrings("/proj/b", parsed.workspace.windows[1].tabs[0].panes[0].surfaces[0].cwd);
+    // 활성 창 유지: 창1.
+    try std.testing.expectEqual(@as(?usize, 1), activeWindowIndex(parsed.workspace));
+
     const text2 = try serialize(std.testing.allocator, parsed.workspace);
     defer std.testing.allocator.free(text2);
     try std.testing.expectEqualStrings(text, text2);

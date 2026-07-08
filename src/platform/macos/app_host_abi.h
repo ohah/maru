@@ -745,11 +745,23 @@ int32_t maru_macos_app_session_window_title(
 
 /* 이 창(세션)의 workspace restore 블록(헤더 없는 "window ..." 라인; UTF-8). Swift가 멀티 창 저장에서
    maru.workspace.v1 헤더 하나 아래로 각 세션 블록을 모은다. 버퍼는 Zig 소유로 다음 호출/destroy까지 유효,
-   캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장. */
+   캡처/직렬화 실패·빈 경우 *out_len=0(Swift가 그 창을 건너뜀). 정상 종료(applicationWillTerminate) 시 저장.
+   is_active(!=0)=이 창이 저장 시점 key 창(window.isKeyWindow) → active-window=1 옵션-키를 내고 재시작 복원이
+   그 창을 다시 focus한다(M3e). false면 키 생략(옛 파일과 flat 동일 — 하위호환). */
 int32_t maru_macos_app_session_serialize_workspace(
     MaruAppHostSession *session,
     const uint8_t **out_ptr,
-    size_t *out_len
+    size_t *out_len,
+    uint32_t is_active
+);
+
+/* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 활성(key) 창의 인덱스를 준다(M3e). Swift가 복원 loop 뒤
+   이 인덱스의 창을 makeKeyAndOrderFront해 재시작 후 활성 창을 되살린다. active-window=1 마커가 있는 첫 창의
+   인덱스, 없으면(옛 파일·무마커·parse 실패) -1 → Swift 무동작(현행 동작 유지). 포맷 파싱은 Zig 단일 권위. */
+int64_t maru_macos_app_session_workspace_active_window(
+    MaruAppHostSession *session,
+    const uint8_t *text_ptr,
+    size_t text_len
 );
 
 /* 현재 sidebar 토글(show-branch/show-folder)을 반영한 갱신 config 텍스트(UTF-8)를 직렬화한다 — Swift가

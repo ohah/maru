@@ -848,7 +848,8 @@ static void maru_draw_overlay_layer(const MaruDrawPass *c) {
 
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
-    CAMetalLayer *layer,
+    CAMetalLayer *terminal_layer,
+    CAMetalLayer *overlay_layer,
     uint16_t cols,
     uint16_t rows,
     uint32_t cell_width_px,
@@ -894,7 +895,7 @@ bool maru_metal_renderer_draw(
     size_t cursor_cells,
     uint32_t cursor_fade_milli
 ) {
-    if (renderer == NULL || layer == nil || cols == 0 || rows == 0) {
+    if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
     }
     if (cell_width_px == 0 || cell_height_px == 0) {
@@ -905,8 +906,9 @@ bool maru_metal_renderer_draw(
         return false;
     }
     // drawable의 backing 픽셀 크기. fixed-cell layout은 cell을 고정 픽셀 크기로 깔고 이 크기로
-    // NDC에 투영하므로, 창을 키우면 글자가 늘어나는 게 아니라 더 많은 cell이 보인다.
-    const CGSize drawable_size = layer.drawableSize;
+    // NDC에 투영하므로, 창을 키우면 글자가 늘어나는 게 아니라 더 많은 cell이 보인다. 터미널 레이어가
+    // authoritative — 오버레이 레이어는 아래에서 이 크기에 맞춘다(두 레이어 NDC 투영 lockstep).
+    const CGSize drawable_size = terminal_layer.drawableSize;
     if (drawable_size.width < 1.0 || drawable_size.height < 1.0) {
         return false;
     }
@@ -1219,78 +1221,21 @@ bool maru_metal_renderer_draw(
         }
     }
 
-    // 스크린샷 하니스: MARU_SCREENSHOT가 설정되면 layer의 drawable(framebufferOnly=true라 읽을 수
-    // 없다) 대신 같은 크기·픽셀포맷의 오프스크린 텍스처에 같은 패스를 그린다. 그래야 blit로 readback해
-    // PPM으로 남길 수 있다. 평소(NULL)엔 이 분기가 없는 것과 같다. atlas==nil·cols/rows==0 같은 이른
-    // return은 이 위에서 이미 걸러지므로, 캡처는 "내용이 있는 첫 frame"에서만 일어난다 —
-    // MARU_SCREENSHOT_DELAY_MS가 있으면 그 시점부터 N ms 지난 다음 frame에서 찍는다(PTY 출력 검증용).
+    // 스크린샷 하니스: MARU_SCREENSHOT가 설정되면 drawable(framebufferOnly=true라 읽을 수 없다) 대신
+    // 같은 크기·픽셀포맷의 오프스크린 텍스처에 두 pass(터미널 Clear → 오버레이 Load)를 합성해 그린다 —
+    // 두 물리 레이어가 CoreAnimation으로 합성되는 최종 픽셀을 한 장으로 캡처(무회귀 실측). 평소(NULL)엔 이
+    // 분기가 없는 것과 같다. atlas==nil·cols/rows==0 같은 이른 return은 위에서 걸러지므로 캡처는 "내용이 있는
+    // 첫 frame"에서만 일어난다 — MARU_SCREENSHOT_DELAY_MS가 있으면 그 시점부터 N ms 지난 frame에서 찍는다.
     const char *screenshot_path = maru_screenshot_path();
     const bool screenshot_mode = (screenshot_path != NULL) && maru_screenshot_delay_elapsed();
 
-    id<CAMetalDrawable> drawable = nil;
-    id<MTLTexture> target_texture = nil;
-    if (screenshot_mode) {
-        MTLTextureDescriptor *offscreen_desc = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:layer.pixelFormat
-                                         width:(NSUInteger)drawable_size.width
-                                        height:(NSUInteger)drawable_size.height
-                                     mipmapped:NO];
-        // 렌더 타깃 + blit 소스. blit 소스는 별도 usage가 필요 없고, Private 스토리지가 Intel/Apple
-        // Silicon 모두에서 렌더 타깃으로 안전하다(Shared 텍스처는 일부 Intel GPU에서 렌더 타깃 불가).
-        offscreen_desc.storageMode = MTLStorageModePrivate;
-        offscreen_desc.usage = MTLTextureUsageRenderTarget;
-        target_texture = [impl.device newTextureWithDescriptor:offscreen_desc];
-        if (target_texture == nil) {
-            fprintf(stderr, "MARU_SCREENSHOT: offscreen texture 생성 실패\n");
-            exit(1);
-        }
-    } else {
-        drawable = [layer nextDrawable];
-        if (drawable == nil) {
-            return false;
-        }
-        target_texture = drawable.texture;
-    }
-
-    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = target_texture;
-    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    // 화면 clear color: terminal_bg(0xAARRGGBB — OSC 11 배경 set 또는 theme.background)가 비-0이면 그 색,
-    // 0이면 기존 기본(어두운 남색)으로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색.
-    // window.opacity(배경 투명도): clear color의 **alpha에만** 곱한다 — default 배경(여기 clear로 칠해지는 영역)만
-    // 투명해지고, 명시적 배경색 셀(bg.a=1)은 셀 quad로 그려져 영향 없다(iTerm2/Ghostty background-opacity 모델).
-    // BGRA8Unorm은 straight-alpha clear라 rgb는 그대로, alpha만 낮추면 layer(비불투명)가 뒤를 비춘다. milli/1000.
-    const double opacity = (double)window_opacity_milli / 1000.0;
-    if (terminal_bg != 0) {
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(
-            (double)((terminal_bg >> 16) & 0xff) / 255.0,
-            (double)((terminal_bg >> 8) & 0xff) / 255.0,
-            (double)(terminal_bg & 0xff) / 255.0,
-            opacity);
-    } else {
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.06, 0.08, 0.12, opacity);
-    }
-
-    id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];
-    if (command_buffer == nil) {
-        return false;
-    }
-    id<MTLRenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
-    if (encoder == nil) {
-        return false;
-    }
-
-    // vertex_buffer가 nil이면(cell 없음) clear만 한 빈 frame이다. 어떤 경우든 encoder는 반드시
-    // endEncoding하고 present/commit한다.
     // C4b: 레이어 순서 = [사이드바 배경 strip] → [터미널 cells(헤더 glyph 포함)] → quad(둥근 밴드) → [사이드바
     // cells(제목)]. 배경 strip(불투명 bg quad)을 '맨 앞'에 그려야 (a)사이드바 헤더 glyph(origin_x=0, 터미널 셀 패스)가
     // 그 위에 보이고 (b)rich 밴드 quad가 strip 위에 보인다(strip을 셀 패스 전체 뒤에 두면 밴드를 덮어 안 보였다).
     // 그래서 셀 패스를 [배경 strip(1a)] · [터미널(1b)] · [사이드바 제목(4)] 셋으로 쪼개고, 밴드 quad(under)를
-    // 터미널 '뒤'·제목 glyph '앞'에 끼운다. (모달/divider quad의 위 레이어 분리는 후속.)
+    // 터미널 '뒤'·제목 glyph '앞'에 끼운다.
     // A(자간 자연폭): 터미널 셀은 배경+전경 2 quad = 셀당 12 vertex라, 셀 인덱스→vertex는 ×12다. 인접 배치라
     // 한 셀의 두 quad가 연속이므로, 연속 vertex 구간 draw가 [배경,전경]을 cell 순서대로 함께 그린다(패스 분할 불요).
-    const size_t cell_count_v = cell_count * 12;
     // 사이드바 cells 시작 = 사이드바 bg quad(6) + 터미널 cells(cc×12). 사이드바는 1 quad/셀이라 그 뒤 sc×6.
     const size_t pre_sidebar_vertices = sidebar_bg_quads * 6 + cell_count * 12;
     // 버퍼 레이아웃은 [사이드바 bg quad][터미널 cells(셀당 2 quad)][사이드바 cells]다(채우기 순서). bg quad가 '맨 앞'
@@ -1301,24 +1246,41 @@ bool maru_metal_renderer_draw(
     const size_t under_vertex_count = under_quad_n * 6;
     const size_t header_vertex_count = header_quad_n * 6; // 헤더 quad(알림 배지) — bg strip 뒤·헤더 글리프 앞 패스
     // C4b 모달: 모달(overlay) 셀이 cells[modal_cells_start..cell_count]에 있으면, over quad(모달 배경)를 모달
-    // 텍스트 '앞'에 끼운다 → 터미널(모달 제외) → 배경 → under quad(사이드바 밴드) → 사이드바 → over quad
-    // (모달 배경) → 모달 텍스트. 모달 없으면(0) terminal_end=cell_count라 1·6이 합쳐져 기존과 같다.
+    // 텍스트 '앞'에 끼운다. 모달 없으면(0) terminal_end=cell_count.
     const bool has_modal = (modal_cells_start > 0 && modal_cells_start < cell_count);
     // 커서 blink 페이드: 커서 overlay는 항상 cells의 맨 끝(cursor_cells개)이다. 본문(터미널·모달) draw에서 이 suffix를
-    // 제외하고, 아래에서 opacity=cursor_opacity로 **별도 pass**로 그린다 — blink가 하드 on/off 대신 부드럽게 페이드한다.
-    // fade_milli==0이면 커서 pass를 생략해 옛 chop(안 그림)과 같다. 커서는 모달이 열렸으면 모달 뒤 suffix(오버레이 caret),
-    // 닫혔으면 터미널 뒤 suffix라 어느 세그먼트든 [cursor_start, cell_count)에 온다(app view()가 그렇게 emit).
+    // 제외하고, opacity=cursor_opacity로 **별도 pass**로 그린다. fade_milli==0이면 커서 pass를 생략(옛 chop). 커서는
+    // 모달이 열렸으면 모달 뒤 suffix(오버레이 caret), 닫혔으면 터미널 뒤 suffix라 [cursor_start, cell_count)에 온다.
     const size_t cursor_start = (cursor_cells <= cell_count) ? (cell_count - cursor_cells) : cell_count; // 커서 suffix 시작(셀)
     const float cursor_opacity = (float)cursor_fade_milli / 1000.0f;
     const bool draw_cursor = (cursor_cells > 0 && cursor_fade_milli > 0);
     // 본문 터미널(모달 제외)은 모달 시작(모달 있음) 또는 커서 시작(모달 없음=커서가 터미널 suffix)에서 끝난다.
     const size_t terminal_end_v = (has_modal ? modal_cells_start : cursor_start) * 12; // 셀당 2 quad(자간 자연폭) — ×12
-    // Phase 4b(b1): 인코딩 시퀀스를 터미널/오버레이 두 논리 레이어 함수로 나눠 호출한다. 지금은 둘 다
-    // **같은 encoder**를 받아 back-to-back으로 그리므로 출력이 byte-identical이다(1레이어 무회귀). b2에서
-    // 각 함수에 자기 CAMetalLayer의 encoder/drawable을 주면 실제 2레이어 합성이 된다. 위에서 계산한 오프셋·
-    // 모달/커서 파라미터를 컨텍스트에 모아 넘긴다(vertex 채우기·drawable 획득·clear는 위/아래 그대로).
+
+    // 터미널 레이어 clear color: terminal_bg(0xAARRGGBB — OSC 11 배경 set 또는 theme.background)가 비-0이면 그 색,
+    // 0이면 기존 기본(어두운 남색)으로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색. window.opacity(배경 투명도)는
+    // clear color의 **alpha에만** 곱한다 — default 배경만 투명, 명시적 배경색 셀(bg.a=1)은 셀 quad로 그려져 무영향
+    // (iTerm2/Ghostty background-opacity 모델). BGRA8Unorm straight-alpha clear라 rgb는 그대로. milli/1000.
+    const double opacity = (double)window_opacity_milli / 1000.0;
+    MTLClearColor terminal_clear;
+    if (terminal_bg != 0) {
+        terminal_clear = MTLClearColorMake(
+            (double)((terminal_bg >> 16) & 0xff) / 255.0,
+            (double)((terminal_bg >> 8) & 0xff) / 255.0,
+            (double)(terminal_bg & 0xff) / 255.0,
+            opacity);
+    } else {
+        terminal_clear = MTLClearColorMake(0.06, 0.08, 0.12, opacity);
+    }
+    // 오버레이 레이어 clear: 완전 투명(0,0,0,0). 모달이 없는 영역은 아래 터미널(+미래 WKWebView)이 비친다
+    // (오버레이 CAMetalLayer는 isOpaque=false). 모달 셀·그림자·over quad·caret만 그 위에 premultiplied-over로 합성.
+    const MTLClearColor overlay_clear = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+
+    // Phase 4b(b2): 두 논리 레이어 함수(터미널/오버레이)에 각자 CAMetalLayer의 drawable/encoder를 준다. 공통 오프셋·
+    // 모달/커서 파라미터는 한 컨텍스트에 모아 두 pass가 나눠 쓰고, encoder만 pass별로 교체한다. drawable_size는
+    // 터미널 레이어가 authoritative(위에서 계산)이며, 오버레이 draw도 같은 크기로 NDC 투영해 모달 좌표가 정합한다.
     MaruDrawPass pass_ctx = {
-        .encoder = encoder,
+        .encoder = nil, // pass별로 아래에서 설정
         .impl = impl,
         .vertex_buffer = vertex_buffer,
         .quad_vertex_buffer = quad_vertex_buffer,
@@ -1351,14 +1313,56 @@ bool maru_metal_renderer_draw(
         .sidebar_scroll_offset_px = sidebar_scroll_offset_px,
         .sidebar_header_height_px = sidebar_header_height_px,
     };
-    maru_draw_terminal_layer(&pass_ctx); // 맨 아래: 터미널 셀·사이드바·chrome·kitty·(모달 없을 때)터미널 커서
-    maru_draw_overlay_layer(&pass_ctx);  // 맨 위: 그림자·모달 배경·모달 텍스트·(모달 열림)오버레이 caret
-    [encoder endEncoding];
 
     if (screenshot_mode) {
-        // 오프스크린 텍스처(Private)를 Shared 버퍼로 blit해 CPU에서 읽고 PPM으로 쓴 뒤 프로세스를
-        // 끝낸다("한 frame 캡처 후 종료" — 하니스 계약). 캡처 실패는 retry 없이 즉시 exit(1)로 닫아
-        // 하니스가 멈추지 않게 한다(평소 경로의 이른 return과 달리 screenshot_mode는 항상 종료한다).
+        // 2레이어 합성을 한 오프스크린 텍스처에 캡처: 터미널 pass(Clear=terminal_clear) → 오버레이 pass(Load,
+        // over-blend)로 CoreAnimation 합성과 같은 최종 픽셀을 만든다(b1 단일 pass와 시각 동일 — 무회귀 실측 근거).
+        // Private 스토리지 렌더 타깃 + blit 소스(Intel/Apple Silicon 모두 안전). loadAction=Load는 같은 command
+        // buffer 안에서 pass1 결과를 유지하므로 오버레이가 그 위에 정확히 합성된다.
+        MTLTextureDescriptor *offscreen_desc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:terminal_layer.pixelFormat
+                                         width:(NSUInteger)drawable_size.width
+                                        height:(NSUInteger)drawable_size.height
+                                     mipmapped:NO];
+        offscreen_desc.storageMode = MTLStorageModePrivate;
+        offscreen_desc.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> target_texture = [impl.device newTextureWithDescriptor:offscreen_desc];
+        if (target_texture == nil) {
+            fprintf(stderr, "MARU_SCREENSHOT: offscreen texture 생성 실패\n");
+            exit(1);
+        }
+        id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];
+        if (command_buffer == nil) {
+            return false;
+        }
+        // pass 1: 터미널(Clear)
+        MTLRenderPassDescriptor *tpass = [MTLRenderPassDescriptor renderPassDescriptor];
+        tpass.colorAttachments[0].texture = target_texture;
+        tpass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        tpass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        tpass.colorAttachments[0].clearColor = terminal_clear;
+        id<MTLRenderCommandEncoder> tenc = [command_buffer renderCommandEncoderWithDescriptor:tpass];
+        if (tenc == nil) {
+            return false;
+        }
+        pass_ctx.encoder = tenc;
+        maru_draw_terminal_layer(&pass_ctx);
+        [tenc endEncoding];
+        // pass 2: 오버레이(Load — 터미널 결과 위에 합성)
+        MTLRenderPassDescriptor *opass = [MTLRenderPassDescriptor renderPassDescriptor];
+        opass.colorAttachments[0].texture = target_texture;
+        opass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        opass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> oenc = [command_buffer renderCommandEncoderWithDescriptor:opass];
+        if (oenc == nil) {
+            return false;
+        }
+        pass_ctx.encoder = oenc;
+        maru_draw_overlay_layer(&pass_ctx);
+        [oenc endEncoding];
+
+        // 오프스크린 텍스처(Private)를 Shared 버퍼로 blit해 CPU에서 읽고 PPM으로 쓴 뒤 프로세스를 끝낸다
+        // ("한 frame 캡처 후 종료" — 하니스 계약). 캡처 실패는 retry 없이 즉시 exit(1)로 닫는다.
         const size_t shot_w = (size_t)target_texture.width;
         const size_t shot_h = (size_t)target_texture.height;
         const size_t bytes_per_row = maru_align_up_256(shot_w * 4);
@@ -1403,9 +1407,72 @@ bool maru_metal_renderer_draw(
         exit(0);
     }
 
-    [command_buffer presentDrawable:drawable];
+    // 평소(present) 경로: 두 물리 레이어의 drawable을 잡아 각자 그리고, **한 command buffer에 둘 다 present +
+    // 단일 commit**한다 → 모달 열림/닫힘 전이 프레임이 원자적으로 표시된다(터미널 caret 제거 + 오버레이 모달·caret이
+    // 서로 다른 vsync로 갈라지지 않아 tearing/‌caret 0·2개가 없다). vertex 버퍼는 위에서 이미 다 만들었으므로,
+    // drawable 획득 실패가 이미 만든 자원을 낭비할 뿐 잡은 drawable을 새게(starve) 하지 않는다.
+    id<CAMetalDrawable> terminal_drawable = [terminal_layer nextDrawable];
+    if (terminal_drawable == nil) {
+        return false; // command buffer 미생성 — 누수 없음, 다음 frame 재시도
+    }
+    // 오버레이 drawableSize를 터미널과 lockstep으로 맞춘다(둘이 다르면 모달 NDC 투영이 어긋난다). draw는 main
+    // thread(Swift frame timer)에서만 불리므로 CAMetalLayer 속성 접근이 안전하다.
+    if (overlay_layer != nil && !CGSizeEqualToSize(overlay_layer.drawableSize, drawable_size)) {
+        overlay_layer.drawableSize = drawable_size;
+    }
+    // 오버레이 drawable을 잡는다. nil이면(드물게 pool starvation) 이 frame은 터미널만 present한다.
+    id<CAMetalDrawable> overlay_drawable = (overlay_layer != nil) ? [overlay_layer nextDrawable] : nil;
+    // 오버레이에 그릴 콘텐츠(모달·그림자)가 있는데 drawable을 못 잡았으면 이 frame은 모달을 안 그린 것이다(caret은
+    // has_modal 분기로 어느 레이어든 1개라 유실 없음). 문제는 **정적 모달**(종료/닫기 확인 등 검색 caret이 없어
+    // metal_dirty가 churn 안 하는 모달): 한 번 드롭되면 재그리기 트리거가 없어 영구 미표시가 된다(설정/palette/find는
+    // 검색 caret blink로 자가복구). 그래서 콘텐츠 드롭 시 return false → drawMetalFrame이 lastDrawnGeneration을 갱신
+    // 안 해 다음 tick이 generation 불일치로 재시도(pool 복구까지)한다. 투명 오버레이(모달·그림자 없음)는 드롭돼도
+    // 보일 게 없어 정상 present로 둔다.
+    const bool overlay_content_dropped = (overlay_drawable == nil && (has_modal || shadow_vertex_total > 0));
+
+    id<MTLCommandBuffer> command_buffer = [impl.queue commandBuffer];
+    if (command_buffer == nil) {
+        return false;
+    }
+
+    // pass 1: 터미널 레이어(Clear=terminal_clear). vertex_buffer가 nil이면(cell 없음) clear만 한 빈 frame이다.
+    MTLRenderPassDescriptor *tpass = [MTLRenderPassDescriptor renderPassDescriptor];
+    tpass.colorAttachments[0].texture = terminal_drawable.texture;
+    tpass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    tpass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    tpass.colorAttachments[0].clearColor = terminal_clear;
+    id<MTLRenderCommandEncoder> tenc = [command_buffer renderCommandEncoderWithDescriptor:tpass];
+    if (tenc == nil) {
+        return false;
+    }
+    pass_ctx.encoder = tenc;
+    maru_draw_terminal_layer(&pass_ctx); // 맨 아래: 터미널 셀·사이드바·chrome·kitty·(모달 없을 때)터미널 커서
+    [tenc endEncoding];
+
+    // pass 2: 오버레이 레이어(Clear=투명). 모달만 그리고 나머지는 투명이라 아래 터미널이 비친다. drawable을 못
+    // 잡았으면(overlay_drawable==nil) 이 pass를 건너뛴다.
+    if (overlay_drawable != nil) {
+        MTLRenderPassDescriptor *opass = [MTLRenderPassDescriptor renderPassDescriptor];
+        opass.colorAttachments[0].texture = overlay_drawable.texture;
+        opass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        opass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        opass.colorAttachments[0].clearColor = overlay_clear;
+        id<MTLRenderCommandEncoder> oenc = [command_buffer renderCommandEncoderWithDescriptor:opass];
+        if (oenc == nil) {
+            return false;
+        }
+        pass_ctx.encoder = oenc;
+        maru_draw_overlay_layer(&pass_ctx); // 맨 위: 그림자·모달 배경·모달 텍스트·(모달 열림)오버레이 caret
+        [oenc endEncoding];
+    }
+
+    // 두 drawable을 같은 command buffer에 present → 단일 commit으로 원자 표시(전이 tearing 방지, caret 항상 1개).
+    [command_buffer presentDrawable:terminal_drawable];
+    if (overlay_drawable != nil) {
+        [command_buffer presentDrawable:overlay_drawable];
+    }
     [command_buffer commit];
-    return true;
+    return !overlay_content_dropped; // 모달·그림자가 drawable 부족으로 드롭됐으면 재시도(위 주석) — 정적 모달 영구 실종 방지.
 }
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer) {

@@ -513,7 +513,7 @@ final class MaruMetalOverlayView: NSView {
 //      전부 해석한다(⌘T=new_term·⌘⇧P=toggle_command_palette·⌘F=toggle_find …). 웹이 포커스가 아니면(터미널
 //      포커스) 이 override는 false만 반환해 **완전 무동작** — 터미널 IME/keyDown 경로는 손대지 않는다(무회귀).
 //
-// **범위**: 빈 about:blank라 웹 콘텐츠 입력은 얇지만 전이·preedit·keybinding **메커니즘**을 검증한다. 웹 소유
+// **범위**: 빈 흰 HTML(콘텐츠 없음)이라 웹 콘텐츠 입력은 얇지만 전이·preedit·keybinding **메커니즘**을 검증한다. 웹 소유
 // 키(⌘C/⌘V/⌘A 편집·⌘F 페이지 내 find §8)를 WebKit에 양보하는 **포커스 기준 분기**는 Phase 5(실콘텐츠). WKWebView
 // 내부 IME는 WebKit 소유(안 건드림). 콘텐츠·URL·브리지·스킴·CSP·데이터스토어 격리는 Phase 5. docs/web-panel.md §4·§10 4d.
 @MainActor
@@ -527,15 +527,16 @@ final class MaruWebPanelView: NSView {
     init(frame frameRect: NSRect, surfaceId: UInt64) {
         self.surfaceId = surfaceId
         // 빈 설정 — bridge·URLSchemeHandler·userContentController 메시지 핸들러·per-surface 데이터스토어 커스텀은
-        // 전부 없다(Phase 5). 기본 WKWebViewConfiguration은 임의 URL을 못 열게 하는 정책이 없지만, 4c는 about:blank만
-        // 로드하고 네비게이션 정책(decidePolicyForNavigationAction)도 안 붙인다 — 콘텐츠/네트워크 진입 자체가 없다.
+        // 전부 없다(Phase 5). 기본 WKWebViewConfiguration은 임의 URL을 못 열게 하는 정책이 없지만, 여기선 인라인 흰
+        // HTML만 로드하고 네비게이션 정책(decidePolicyForNavigationAction)도 안 붙인다 — 콘텐츠/네트워크 진입 자체가 없다.
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: WKWebViewConfiguration())
         super.init(frame: frameRect)
         webView.autoresizingMask = [.width, .height] // 래퍼 frame 갱신(reframe) 시 웹뷰가 꽉 채워 따라간다.
-        // 빈 문서. 네트워크 로드 없음(about:blank는 내장 스킴). 기본 흰 배경이라 스크린샷에서 본문 rect 위치가 또렷.
-        if let blank = URL(string: "about:blank") {
-            webView.load(URLRequest(url: blank))
-        }
+        // 빈 문서. 네트워크 로드 없음(인라인 HTML). **about:blank를 쓰지 않는 이유**: WKWebView는 배경이 지정되지 않은
+        // 문서(about:blank)를 시스템 appearance에 맞춰 렌더하므로 macOS **다크 모드에선 흰색이 아니라 다크 배경**이 되어
+        // 아래 다크 터미널과 구분되지 않는다("흰 화면 안 뜸"의 루트 코즈). 이 hosting 확인 placeholder는 CSS로 배경을
+        // **명시 흰색**으로 못박아 appearance 무관하게 흰 rect가 보이도록 한다(Phase 5 실콘텐츠가 이 load를 통째 대체).
+        webView.loadHTMLString("<!doctype html><html><head><meta name=\"color-scheme\" content=\"light\"></head><body style=\"margin:0;background:#ffffff\"></body></html>", baseURL: nil)
         addSubview(webView)
     }
 

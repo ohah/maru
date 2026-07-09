@@ -2498,6 +2498,10 @@ pub const AppSession = struct {
             // panel의 모든 Term(가로 탭)을 같은 rect grid로 맞춘다 — 비활성 Term도 전환 즉시 올바른 크기가 되게.
             // 활성 panel의 활성 Term만 에러를 전파(기존 단일 surface resize의 try 동작 보존), 나머지는 무시.
             for (lr.leaf.terms.items) |term| {
+                // [4e-2, §6] web Term은 PTY가 없다(sentinel, 미-attach) — runtime.resize가 UnknownSurface를 낸다.
+                // 활성 web이면 아래 `try`가 그 에러를 전파해 resize() 전체가 실패하므로(창 크기 조정 깨짐), web Term은
+                // 건너뛴다. WKWebView frame은 surfaceDiff가 별도로 sync한다. web Term 없으면 no-op(byte-identical).
+                if (term.kind == .web) continue;
                 if (lr.leaf == active_pane and term == lr.leaf.activeTerm()) {
                     try self.runtime.resize(term.surface.id, psize, self.io);
                 } else {
@@ -2518,7 +2522,10 @@ pub const AppSession = struct {
         for (leaf_rects.items) |lr| {
             const trect = self.paneTermRect(lr.rect);
             const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
-            for (lr.leaf.terms.items) |term| self.runtime.resize(term.surface.id, psize, self.io) catch {};
+            for (lr.leaf.terms.items) |term| {
+                if (term.kind == .web) continue; // [4e-2, §6] web Term은 PTY 없음(sentinel) — resize 대상 아님(WKWebView=surfaceDiff)
+                self.runtime.resize(term.surface.id, psize, self.io) catch {};
+            }
         }
     }
 
@@ -3587,7 +3594,10 @@ pub const AppSession = struct {
         }
 
         // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
-        for (active.terms.items) |term| self.runtime.resize(term.surface.id, a_size, self.io) catch {};
+        for (active.terms.items) |term| {
+            if (term.kind == .web) continue; // [4e-2, §6] web Term은 PTY 없음(sentinel) — resize 대상 아님(WKWebView=surfaceDiff)
+            self.runtime.resize(term.surface.id, a_size, self.io) catch {};
+        }
 
         // 6) 새 panel로 포커스 이동(멀티플렉서 split 관행). focusPane이 탭 대표 surface(= app_window.active())·
         //    frame_loop pump 재바인딩 + 활성 panel rect 재계산 + metal_dirty를 한 곳에서 한다. 탭 인덱스는
@@ -4466,7 +4476,10 @@ pub const AppSession = struct {
             for (leaf_rects.items) |lr| {
                 const trect = self.paneTermRect(lr.rect);
                 const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
-                for (lr.leaf.terms.items) |term| self.runtime.resize(term.surface.id, psize, self.io) catch {};
+                for (lr.leaf.terms.items) |term| {
+                    if (term.kind == .web) continue; // [4e-2, §6] web Term은 PTY 없음(sentinel) — resize 대상 아님(WKWebView=surfaceDiff)
+                    self.runtime.resize(term.surface.id, psize, self.io) catch {};
+                }
                 if (lr.leaf == active_pane) {
                     self.active_pane_rect = trect; // 상단 탭 바를 뺀 영역(좌표 origin) — recomputeActivePaneRect 동형
                     self.active_pane_leaf_rect = lr.rect; // Phase 4c: 웹 패널 본문 rect 계산용 raw leaf rect(탭 바 포함) — recomputeActivePaneRect 동형
@@ -7060,9 +7073,10 @@ pub const AppSession = struct {
     /// 미설정이면 무동작(표준 macos-app-smoke는 env 미설정이라 이 훅 무동작 = 터미널 빌드 byte-identical). MARU_WEB_PANEL_MARKDOWN=1이면
     /// markdown, 아니면 browser로 kind를 정한다(라벨·후속 trust 파생).
     ///
-    /// **비활성 탭으로 append**: active_term을 바꾸지 않아 활성 Term은 터미널 그대로다 — 활성 렌더 skip·per-Term WKWebView
-    /// 부착이 아직 없는 4e-1에서 활성 surface를 web sentinel로 만들면 렌더/입력/resize 경로가 sentinel을 만지므로, web
-    /// Term은 per-pane 탭바에만 나타나고 활성은 터미널로 둔다(터미널 무회귀). 활성 전환·렌더 skip은 4e-2가 배선한다.
+    /// **[4e-2] 활성 탭으로 전환**: append 후 `focusTerm`으로 web Term을 활성화한다 — 4e-2가 활성 render 경로를
+    /// activeTermIsTerminal/activeTerminalSurface로 gate했으므로 활성 web은 sentinel core를 만지지 않고 본문 blank·
+    /// 크래시 0이다(§6). WKWebView 부착은 4e-3(그전엔 본문이 theme 배경으로 비어 보인다). 4e-1은 렌더 skip이 없어
+    /// 비활성 탭으로만 뒀으나, 4e-2가 skip을 배선해 활성 전환이 안전해졌다.
     pub fn maybeDebugOpenWebPanel(self: *AppSession) void {
         if (self.debug_web_term_opened) return;
         if (!self.surface_initialized) return;
@@ -7074,9 +7088,12 @@ pub const AppSession = struct {
             self.destroyTerm(term); // append 실패 시 방금 만든 web Term을 되돌린다(registry 슬롯까지 정리)
             return;
         };
-        // active_term은 그대로(터미널 활성 유지) — web Term은 비활성 탭으로만 존재(§6 per-pane 탭바 혼합, 4e-2가 활성 전환).
+        // [4e-2] web Term을 **활성**으로 전환한다(4e-1은 비활성 탭이었음) — 활성 render skip이 배선됐으므로 활성 web은
+        // 본문 blank·크래시 0이다(§6). focusTerm이 surface_ptrs를 web sentinel로 재바인딩 + active_pane_rect 재계산 +
+        // metal_dirty를 세운다(append 직후라 web Term은 terms의 마지막 인덱스). 이걸로 스크린샷 self-verify가 활성 web을 본다.
+        self.focusTerm(pane.terms.items.len - 1);
         self.debug_web_term_opened = true;
-        self.metal_dirty = true; // 탭바에 web Term 탭이 늘어 재그림
+        self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)
     }
 
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
@@ -9373,6 +9390,30 @@ pub const AppSession = struct {
         return self.app_window.activeConst().?;
     }
 
+    /// [4e-2, web-panel.md §6] 활성 탭·활성 pane의 **보이는 Term이 terminal인가**. web이면 활성 render 경로
+    /// (readActiveSnapshot·shapeOnlyBuild·cell_colors·kitty·find·terminal_bg)와 일부 입력 핸들러가 web **sentinel
+    /// core**를 만지지 않도록 gate한다(활성 web = 본문 blank·no-terminal-frame, WKWebView는 4e-3서 채움). 활성 없음
+    /// (surface 미초기화·0탭)은 terminal로 취급해 기존 경로가 그대로 돈다(0탭 조기 반환은 tick 상단이 이미 처리).
+    /// **web Term이 하나도 없으면 항상 true**라 터미널 렌더·입력이 byte-identical이다. `activeSurface()`와 **같은
+    /// active_tab 인덱스**를 봐 정합한다(surface_ptrs[active_tab]가 activePane().activeTerm().surface로 동기 유지 —
+    /// focusTerm/focusPane 등이 재바인딩). `*const`라 mutable tick 경로와 const metalFrame 경로가 함께 쓴다.
+    fn activeTermIsTerminal(self: *const AppSession) bool {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return true;
+        const tab = self.tabs.items[self.app_window.active_tab];
+        const pane = tab.panes.items[tab.active_pane];
+        return pane.terms.items[pane.active_term].kind == .terminal;
+    }
+
+    /// [4e-2, web-panel.md §6] 활성 Term이 terminal이면 그 surface(=`activeSurface()`), web이면 null. 활성 render
+    /// 경로가 코어를 lock/deref하기 전에 이걸로 gate해 web sentinel deref를 막는다(활성 web = 의도적 no-terminal-frame).
+    /// terminal이면 `if (self.activeTerminalSurface()) |s|`가 `if (self.surface_initialized) { const s = self.activeSurface(); … }`와
+    /// **동형**이라 byte-identical. surface 미초기화면 null(app_window undefined deref 방지 — 옛 `surface_initialized` 가드 동형).
+    fn activeTerminalSurface(self: *AppSession) ?*maru.session.Surface {
+        if (!self.surface_initialized) return null;
+        if (!self.activeTermIsTerminal()) return null;
+        return self.activeSurface();
+    }
+
     /// 현재 font·scale_milli에 대한 cell 픽셀 크기(advance 폭 × line-height)를 CoreText에서
     /// 뽑아 갱신한다. 분수 scale을 그대로 곱한 device 픽셀 font size로 조회한다. macOS가
     /// 아니거나(테스트/CI) 조회 실패면 같은 device 픽셀 font size의 정사각으로 대체한다.
@@ -10169,7 +10210,8 @@ pub const AppSession = struct {
     /// 소유하고, 여기선 다음 tick이 새 뷰를 그리도록 metal_dirty만 세운다(Swift는 휠/키 이벤트를
     /// 이 함수로 넘기는 얇은 글루다).
     pub fn scroll(self: *AppSession, delta_up: i32) void {
-        if (!self.surface_initialized) return;
+        // [4e-2, §6·1-B] 활성 Term이 web이면 스크롤 대상(스크롤백)이 없다(sentinel) — no-op(웹 스크롤은 WKWebView 소유).
+        if (!self.surface_initialized or !self.activeTermIsTerminal()) return;
         const surface = self.activeSurface();
         // scrollViewport는 코어 mutate라 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
         self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, delta_up) }, self.io) catch {};
@@ -11563,6 +11605,11 @@ pub const AppSession = struct {
         if (overlay_caret) |r| {
             return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
         }
+        // [4e-2, §6·1-B] 활성 Term이 web이면 터미널 커서(sentinel)가 없다 — 본문 origin 폴백 rect를 준다(WebKit이 웹
+        // 포커스 IME 후보창 위치를 자체 관리, 4d). web Term 없으면 이 분기 미진입(byte-identical).
+        if (!self.activeTermIsTerminal()) {
+            return .{ .x = @floatFromInt(self.active_pane_rect.x), .y = @floatFromInt(self.active_pane_rect.y), .w = cw, .h = ch };
+        }
         // [P4-3, §12] 터미널 커서 위치를 **활성 surface 코어에서 lockCore 아래** 읽는다 — 예전 무락 직접
         // (core.screen.cursor) 읽기는 리더 write와 torn read 잠재 race였다(값 struct라 크래시는 아니나 한 프레임 잘못된
         // 위치 가능). imeCursorRect는 IME 후보창 질의 시에만(조합 중) 불리는 event-driven 경로라 per-tick 아님 — 여기 lock은
@@ -11757,7 +11804,9 @@ pub const AppSession = struct {
     /// URL은 false로 raw 전송한다(이스케이프하면 ?,&,= 등이 깨진다). 무엇을 이스케이프할지는 pasteboard
     /// 타입에 묶여 host(Swift)가 정하고, 이스케이프 '메커니즘'은 여기(Zig)가 단일 출처로 한다.
     pub fn pasteText(self: *AppSession, bytes: []const u8, escape_each: bool) void {
-        if (!self.surface_initialized or bytes.len == 0) return;
+        // [4e-2, §6·1-B] 활성 Term이 web이면 붙여넣기 대상 PTY가 없다(sentinel) — no-op. 웹 포커스 입력은 WKWebView가
+        // 소유(4d)라 평시 dormant지만 모달 엣지 방어. web Term 없으면 조건이 접혀 byte-identical.
+        if (!self.surface_initialized or bytes.len == 0 or !self.activeTermIsTerminal()) return;
         // escape면 NUL 구분 토큰을 각각 셸 이스케이프 후 공백 join한 임시 버퍼를 만든다(최종 payload).
         const payload: []const u8 = if (escape_each)
             shellEscapeJoin(self.allocator, bytes) catch return
@@ -13859,7 +13908,8 @@ pub const AppSession = struct {
     // 정의·단위 테스트는 src/session/input_math.zig.
 
     pub fn scrollPage(self: *AppSession, delta_pages: i32) void {
-        if (!self.surface_initialized) return;
+        // [4e-2, §6·1-B] 활성 Term이 web이면 스크롤 대상 없음(sentinel) — no-op(scroll과 동형).
+        if (!self.surface_initialized or !self.activeTermIsTerminal()) return;
         const rows = self.activeSurface().core.size.rows;
         const page: i32 = @max(@as(i32, 1), @as(i32, rows) - 1);
         self.scrollLines(delta_pages *| page);
@@ -13933,6 +13983,7 @@ pub const AppSession = struct {
     /// 같은 row에 겹치는지(개행 안 됨) 다른 row인지 데이터로 구분한다.
     fn logScreenIfDebug(self: *AppSession) void {
         if (!diag_gate.maruDebugEnabled() or !self.surface_initialized) return;
+        if (!self.activeTermIsTerminal()) return; // [4e-2, §6] 활성 web Term은 sentinel core라 화면 덤프 skip
         const core = &self.activeSurface().core;
         const cols = @min(@as(usize, core.size.cols), 240);
         // 헤더에 OSC 133 마지막 명령 종료코드도 찍는다(셸 통합이 emit하면 채워진다).
@@ -13986,6 +14037,7 @@ pub const AppSession = struct {
     /// 같은 도메인 데이터를 후속 trace writer도 바로 이 자리에서 drain하면 된다(관측 가능성 원칙).
     fn drainShellEventsForFrame(self: *AppSession) void {
         if (!self.surface_initialized) return;
+        if (!self.activeTermIsTerminal()) return; // [4e-2, §6] 활성 web Term은 sentinel(셸 이벤트 없음) — skip
         const core = &self.activeSurface().core;
         if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
         if (diag_gate.maruDebugEnabled()) {
@@ -14312,7 +14364,10 @@ pub const AppSession = struct {
     /// 활성 surface 코어를 한 번 lock해 per-tick read를 CoreSnapshot으로 복사한다(§12 P4-2). `need_blink_scan`이 true일
     /// 때만 viewportHasBlink(셀 스캔)를 수행한다 — 출력 tick이나 blink_text off면 스캔 불요(updateCursorBlink 미호출).
     fn readActiveSnapshot(self: *AppSession, need_blink_scan: bool) CoreSnapshot {
-        const s = self.activeSurface();
+        // [4e-2, §6] 활성 Term이 web이면 sentinel core를 lock하지 않고 **중립 스냅샷**(전부 기본값=0/false)을 낸다 —
+        // blink/sync 게이트가 off로 접혀(sync_output=false·view_offset=0·cursor 안 보임) 활성 web에서 무의미한 blink/sync
+        // 재투영이 안 돈다. terminal이면 activeSurface()라 byte-identical.
+        const s = self.activeTerminalSurface() orelse return .{};
         s.lockCore(self.io);
         defer s.unlockCore(self.io);
         const core = &s.core;
@@ -14516,9 +14571,15 @@ pub const AppSession = struct {
                 // (chrome만 그려 blank/stale terminal을 합성하지 않게 — 기존 build-실패 동형). frame 카운터
                 // (advanceFrameIndex)는 활성이 실제 그려질 때만 올린다(placeAndDistribute 후) — 실패 frame은 기존처럼
                 // frame_loop_ticks를 안 올린다.
-                active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, &self.renderer_state.font_registry, self.io) catch null;
-                // 이 프레임이 실제로 그린 스크롤 위치(shapeOnlyBuild가 같은 락 아래 캡처). null=빌드 실패.
-                if (active_shaped) |sp| rendered_view_offset = sp.view_offset;
+                // [4e-2, §6] 활성 Term이 web이면 shapeOnly 경로 자체를 건너뛴다 — active_shaped=null은 **의도적**
+                // no-terminal-frame(빌드 실패 아님)이라, 아래 active_failed 가드가 activeTermIsTerminal로 좁혀 self-heal을
+                // 트리거하지 않고 chrome+빈 본문을 정상 커밋한다(본문은 blank, WKWebView가 4e-3서 채움). terminal이면
+                // shapeOnlyBuild(activeSurface())라 byte-identical.
+                if (self.activeTermIsTerminal()) {
+                    active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, &self.renderer_state.font_registry, self.io) catch null;
+                    // 이 프레임이 실제로 그린 스크롤 위치(shapeOnlyBuild가 같은 락 아래 캡처). null=빌드 실패.
+                    if (active_shaped) |sp| rendered_view_offset = sp.view_offset;
+                }
             } else {
                 tick_result = try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
                 // 비-macOS(단일 leaf·fake backend)는 활성 멀티 페인 통합을 쓰지 않는다. active_*는 macOS 통합 경로
@@ -14547,8 +14608,9 @@ pub const AppSession = struct {
             // 루프까지 한 락으로 — find_view_spans/setMatchCount는 app 상태라 락 보유 중 안전.
             self.find_view_spans.clearRetainingCapacity();
             var find_current_span: ?terminal.SelectionSpan = null;
-            {
-                const fa_surface = self.activeSurface();
+            // [4e-2, §6] 활성 Term이 web이면 스크롤백 Find 재검색·뷰포트 클립을 건너뛴다(sentinel엔 스크롤백/매치 없음) —
+            // find_view_spans/current_span은 위에서 비운 상태 유지. terminal이면 activeSurface()라 byte-identical.
+            if (self.activeTerminalSurface()) |fa_surface| {
                 fa_surface.lockCore(self.io);
                 defer fa_surface.unlockCore(self.io);
                 if (find_active and drain_summary.output_events > 0) {
@@ -14579,46 +14641,51 @@ pub const AppSession = struct {
             // 읽는다(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지). palette는 소유 버퍼로 복사해
             // CellColors가 코어 포인터를 안 들게 한다(복사본은 이 tick 동안 유효, replace가 소비). 리터럴은
             // shaping/GPU 없이 값만 모으므로 락 보유가 짧다(.cursor 등 app state는 코어 무관).
-            const cc_surface = self.activeSurface();
-            cc_surface.lockCore(self.io);
-            self.active_palette_copy = cc_surface.core.paletteOverride().*;
-            const cell_colors: metal_frame.CellColors = .{
-                // OSC 10/11 색 설정이 있으면 그 색, 없으면 theme 기본. SGR reverse의 default 색 스왑·OSC 11 배경에도 반영.
-                .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
-                .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
-                .palette = &self.active_palette_copy, // 코어 alias 대신 소유 복사본(OSC 4 .indexed 색 풀이)
-                // ANSI 16색 config base(theme.palette). OSC4 override가 없을 때만 index<16에 적용(OSC4 → config → xterm256).
-                // appearance는 세션 동안 불변·소유라 포인터 안전(복사 불필요) — OSC4 복사본과 달리 매 tick 변하지 않는다.
-                .config_palette = &self.appearance.theme.palette,
-                .screen_reverse = self.activeSurface().core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
-                // blink(SGR 5): config text.blink가 켜졌을 때만 위상(blink_visible)을 반영해 off 위상에 숨긴다.
-                // 꺼져 있으면(기본) 항상 on → 정적(안 깜빡임). 접근성 기본값.
-                .blink_on = !self.appearance.blink_text or self.blink_visible,
-                // bold-is-bright(theme.bold-is-bright): bold + indexed 0~7 전경을 bright(8~15)로(render-only).
-                .bold_is_bright = self.appearance.bold_is_bright,
-                .selection_bg = self.appearance.theme.selection,
-                .selection = self.activeSurface().core.selectionViewportSpan(),
-                .hover_link = self.hoverLinkSpan(),
-                // 스크롤백 Find 매치 하이라이트(활성 surface에만 적용 — 비활성 pane은 inactive_colors).
-                .search_match_bg = self.appearance.theme.search_match,
-                .search_matches = self.find_view_spans.items,
-                .current_match_bg = self.appearance.theme.search_match_current,
-                .current_match = find_current_span,
+            // [4e-2, §6] 활성 Term이 web이면 sentinel core를 만지지 않고 최소 theme 폴백을 쓴다 — 이 cell_colors는
+            // 활성 web일 때 active_result==null(본문 blank)이라 pane_frames에 실리지 않아 **소비되지 않는다**(값 무관).
+            // terminal이면 activeSurface()라 byte-identical(옛 무조건 lock 동형).
+            var cell_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+            if (self.activeTerminalSurface()) |cc_surface| {
+                cc_surface.lockCore(self.io);
+                self.active_palette_copy = cc_surface.core.paletteOverride().*;
+                cell_colors = .{
+                    // OSC 10/11 색 설정이 있으면 그 색, 없으면 theme 기본. SGR reverse의 default 색 스왑·OSC 11 배경에도 반영.
+                    .default_fg = self.activeSurface().core.defaultFgOverride() orelse self.appearance.theme.foreground,
+                    .default_bg = self.activeSurface().core.defaultBgOverride() orelse self.appearance.theme.background,
+                    .palette = &self.active_palette_copy, // 코어 alias 대신 소유 복사본(OSC 4 .indexed 색 풀이)
+                    // ANSI 16색 config base(theme.palette). OSC4 override가 없을 때만 index<16에 적용(OSC4 → config → xterm256).
+                    // appearance는 세션 동안 불변·소유라 포인터 안전(복사 불필요) — OSC4 복사본과 달리 매 tick 변하지 않는다.
+                    .config_palette = &self.appearance.theme.palette,
+                    .screen_reverse = self.activeSurface().core.reverseScreen(), // DECSCNM(?5) 화면 전역 반전(G9)
+                    // blink(SGR 5): config text.blink가 켜졌을 때만 위상(blink_visible)을 반영해 off 위상에 숨긴다.
+                    // 꺼져 있으면(기본) 항상 on → 정적(안 깜빡임). 접근성 기본값.
+                    .blink_on = !self.appearance.blink_text or self.blink_visible,
+                    // bold-is-bright(theme.bold-is-bright): bold + indexed 0~7 전경을 bright(8~15)로(render-only).
+                    .bold_is_bright = self.appearance.bold_is_bright,
+                    .selection_bg = self.appearance.theme.selection,
+                    .selection = self.activeSurface().core.selectionViewportSpan(),
+                    .hover_link = self.hoverLinkSpan(),
+                    // 스크롤백 Find 매치 하이라이트(활성 surface에만 적용 — 비활성 pane은 inactive_colors).
+                    .search_match_bg = self.appearance.theme.search_match,
+                    .search_matches = self.find_view_spans.items,
+                    .current_match_bg = self.appearance.theme.search_match_current,
+                    .current_match = find_current_span,
 
-                // 커서는 반전 블록으로 그린다: 칸 배경=cursor.color(없으면 theme.cursor), 그 위 glyph=
-                // cursor.text(없으면 theme.background). cursor.* override는 테마와 독립적으로 커서만 칠하는
-                // opt-in이라 미설정 시 기존 동작(흰 커서 + 배경색 반전 글자)을 그대로 보존한다.
-                // blink와 무관하게 항상 투영한다 — off 위상 숨김은 metal_buffer가 커서 suffix 노출
-                // 길이로 처리해(setCursorVisible) frame rebuild가 필요 없다.
-                .cursor = .{
-                    .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
-                    .text = self.appearance.cursor.text orelse self.appearance.theme.background,
-                },
-                // per-cell 대비 하한(theme.min-contrast): 256색·truecolor 전경이 라이트 배경에서 안 읽히면
-                // 렌더가 셀 단위로 보정한다(ANSI16은 resolve 선보정 — metal_frame.CellColors.min_contrast 주석).
-                .min_contrast = self.appearance.theme.min_contrast,
-            };
-            cc_surface.unlockCore(self.io); // cell_colors의 활성 코어 읽기 끝 — 이후 shaping/GPU는 락 밖
+                    // 커서는 반전 블록으로 그린다: 칸 배경=cursor.color(없으면 theme.cursor), 그 위 glyph=
+                    // cursor.text(없으면 theme.background). cursor.* override는 테마와 독립적으로 커서만 칠하는
+                    // opt-in이라 미설정 시 기존 동작(흰 커서 + 배경색 반전 글자)을 그대로 보존한다.
+                    // blink와 무관하게 항상 투영한다 — off 위상 숨김은 metal_buffer가 커서 suffix 노출
+                    // 길이로 처리해(setCursorVisible) frame rebuild가 필요 없다.
+                    .cursor = .{
+                        .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
+                        .text = self.appearance.cursor.text orelse self.appearance.theme.background,
+                    },
+                    // per-cell 대비 하한(theme.min-contrast): 256색·truecolor 전경이 라이트 배경에서 안 읽히면
+                    // 렌더가 셀 단위로 보정한다(ANSI16은 resolve 선보정 — metal_frame.CellColors.min_contrast 주석).
+                    .min_contrast = self.appearance.theme.min_contrast,
+                };
+                cc_surface.unlockCore(self.io); // cell_colors의 활성 코어 읽기 끝 — 이후 shaping/GPU는 락 밖
+            }
             // 사이드바 탭 제목 glyph 패스(macOS만 — buildFromDrawList는 실 CoreText 브리지). 터미널과
             // 같은 frame_builder/renderer_state(atlas)를 써서 제목 glyph도 같은 slot을 재사용한다. 실패는
             // 무시하고 제목 없이 밴드만 그린다(세션을 죽이지 않음). 짧은 제목이라 매 frame 재-shape해도
@@ -14887,6 +14954,7 @@ pub const AppSession = struct {
                     self.pane_palette_copies.ensureTotalCapacity(self.allocator, leaf_rects.items.len) catch {};
                     for (leaf_rects.items) |lr| {
                         if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
+                        if (lr.leaf.activeTerm().kind == .web) continue; // [4e-2, §6] 비활성 web pane은 터미널 frame 없음(본문 배경만 — 탭바·divider는 chrome이 계속 렌더). web Term 없으면 no-op(byte-identical)
                         const pane_surface = lr.leaf.activeTerm().surface;
                         const pane_core = &pane_surface.core;
                         // 코어 읽기(snapshot→DrawList 복사 + per-pane 색 상태)는 락 아래, CoreText shaping
@@ -14951,7 +15019,10 @@ pub const AppSession = struct {
             // shapeOnly/place가 실패한 것(드문 OOM) — 기존 build-실패와 동형으로 이 frame을 통째로 포기해야 한다(chrome만
             // 그려 blank/stale terminal을 합성하면 metal_dirty가 내려가 self-heal이 막히므로). 활성이 실제 그려질 때만
             // frame 카운터를 올린다(실패 frame은 frame_loop_ticks를 안 올림 — 기존 build-실패 동형).
-            const active_failed = builtin.os.tag == .macos and self.surface_initialized and active_result == null;
+            // [4e-2, §6] 활성 web Term은 active_result==null이 **정상**(의도적 no-terminal-frame)이라 self-heal 대상이
+            // 아니다 — activeTermIsTerminal로 좁혀 web일 때 active_failed=false로 두고 chrome+빈 본문을 정상 커밋한다.
+            // web Term 없으면 activeTermIsTerminal=true라 조건이 옛것과 동일(byte-identical).
+            const active_failed = builtin.os.tag == .macos and self.surface_initialized and self.activeTermIsTerminal() and active_result == null;
             if (builtin.os.tag == .macos and active_result != null) {
                 active_index = self.frame_loop.advanceFrameIndex();
             }
@@ -14988,7 +15059,10 @@ pub const AppSession = struct {
             // active_failed면 replace를 스킵한다 — chrome panes만으로 blank/stale terminal을 합성하면 metal_dirty가
             // 내려가 다음 tick에 재빌드되지 않아 깨진 frame이 화면에 고정된다. 스킵하면 metal_dirty가 유지돼 다음 tick에
             // 재시도한다(기존 build-실패 frame 스킵 동형).
-            if (pane_frames.items.len > 0 and !active_failed) {
+            // [4e-2, §6] 활성 web Term(단일 pane)은 pane_frames가 비어도(터미널 frame 없음) replace를 돌려 chrome
+            // (사이드바·탭바)을 커밋한다 — 안 그러면 web 활성 시 chrome이 stale로 남고 metal_dirty가 안 내려가 스핀한다.
+            // terminal이면 `!activeTermIsTerminal()`=false라 조건이 `pane_frames.items.len > 0`으로 접혀 byte-identical.
+            if ((pane_frames.items.len > 0 or !self.activeTermIsTerminal()) and !active_failed) {
                 // kitty graphics(K2d): 활성 surface(이 frame을 만든 surface)의 placement를 GpuImage로 환산하고,
                 // generation이 바뀐 이미지만 업로드 채널로 만든다. dest origin은 활성 panel의 픽셀 origin(사이드바
                 // 폭·탭 바 아래)으로 박아 터미널 sub-rect에 그려지게 한다. 비활성 panel 이미지는 후속(단일 활성 기준).
@@ -15000,12 +15074,13 @@ pub const AppSession = struct {
                 defer self.allocator.free(kg_uploads);
                 defer self.allocator.free(kg_pixels);
                 defer kg_live_ids.deinit(self.allocator);
-                if (self.surface_initialized) {
+                // [4e-2, §6] 활성 Term이 web이면 kitty 이미지 경로를 건너뛴다(sentinel엔 placement 없음) — terminal이면
+                // activeTerminalSurface()=activeSurface()라 옛 `if (self.surface_initialized)`와 byte-identical.
+                if (self.activeTerminalSurface()) |active_surface| {
                     // 코어 변경(setCellMetrics·setDefaultColors)과 kitty 이미지 읽기(snap.placements/images는
                     // 코어 alias)는 모두 락 아래(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지).
                     // buildGpuImages/planImageUploads가 이미지 데이터를 owned 버퍼로 복사하므로(planImageUploads는
                     // img.pixels를 appendSlice로 복사), 락 밖 replace()는 코어를 안 본다.
-                    const active_surface = self.activeSurface();
                     active_surface.lockCore(self.io);
                     defer active_surface.unlockCore(self.io);
                     // kitty 자동 크기 이미지의 커서 advance용 셀 메트릭을 활성 surface 코어에 주입한다(매 tick 최신).
@@ -18049,7 +18124,9 @@ pub const AppSession = struct {
         // surface 기준(렌더 pass clearColor — 셀이 default 배경=A0일 때 드러남). surface_initialized 가드는
         // 다른 surface-touch 메서드와 동일 — activeSurfaceConst()의 .? unwrap이 탭이 빈 시점(teardown 등)에
         // 패닉하지 않게 한다(그땐 theme 기본 배경으로 폴백).
-        frame.terminal_bg = if (self.surface_initialized) blk: {
+        // [4e-2, §6] 활성 Term이 web이면 sentinel core 대신 theme 배경 폴백(else 분기 재사용) — 본문 blank의 clear
+        // color. web Term 없으면 activeTermIsTerminal=true라 옛 `surface_initialized` 조건과 동일(byte-identical).
+        frame.terminal_bg = if (self.surface_initialized and self.activeTermIsTerminal()) blk: {
             const active_core = &self.activeSurfaceConst().core;
             const eff_bg = active_core.defaultBgOverride() orelse self.appearance.theme.background;
             const eff_fg = active_core.defaultFgOverride() orelse self.appearance.theme.foreground;
@@ -26168,6 +26245,7 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
     try attachTestRuntime(&session, &test_rt, &tab_surface);
     defer session.runtime.deinit();
     session.metal_dirty = false;
+    session.tabs = .empty; // [4e-2] scrollPage 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     // 9줄 출력 -> 5행 화면 위로 4줄이 스크롤백에 쌓인다.
     try tab_surface.core.write("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
     try std.testing.expectEqual(@as(usize, 4), tab_surface.core.scrollbackLen());
@@ -28529,6 +28607,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.metal_dirty = false;
     session.chrome_host = .{}; // inputFocus가 읽음
     session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
+    session.tabs = .empty; // [4e-2] scrollPage 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     session.ime_inserted = .empty; // imeBegin이 clearRetainingCapacity 호출
     defer session.chrome_host.deinit(std.testing.allocator);
     defer session.ime_inserted.deinit(std.testing.allocator);
@@ -36558,6 +36637,7 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     // 초기화로 결정적 `.terminal`(오버레이 caret 없음) 경로를 타게 한다.
     session.chrome_host = .{};
     session.rename = null; // inputFocus(imeCursorRect)가 rename을 읽음([[devsession-undefined-test-field-trap]])
+    session.tabs = .empty; // [4e-2] imeCursorRect 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
 
     const core = &tab_surface.core;
@@ -36594,6 +36674,8 @@ test "readActiveSnapshot: 활성 코어 sync/커서/위치를 단일 lock 값 �
     defer tab_surface.deinit();
     var st_ptrs = [_]*maru.session.Surface{&tab_surface};
     session.app_window = .{ .tabs = &st_ptrs };
+    session.surface_initialized = true; // [4e-2] readActiveSnapshot 게이트 activeTerminalSurface가 읽음
+    session.tabs = .empty; // [4e-2] activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(activeSurface 경로, byte-identical)
     const core = &tab_surface.core;
 
     // sync(2026) BSU + 커서 이동 → sync_output=true, bsu=1, 커서 (0,3).

@@ -32,7 +32,8 @@ pub const AppRuntime = struct {
     /// surface_id·pty_id 발급기 — 앱 전역 단조·비재사용(M0a). 모든 창이 공유해 멀티 창에서도 id가 유일하다.
     surface_ids: surface_id.SurfaceIdAllocator = .{},
 
-    /// live surface 소유자(M2b/M3a) — `LiveSurface` 번들(surface + live_pty)을 surface_id 키드 heap 슬롯으로 소유한다.
+    /// live surface 소유자(M2b/M3a) — `LiveSurface` 번들(4e-1: `union(SurfaceKind)` — terminal arm=surface + live_pty,
+    /// web arm=sentinel surface)을 surface_id 키드 heap 슬롯으로 소유한다.
     /// 창은 `surface_id`로 안정 슬롯을 참조만 한다. bookkeeping은 앱 전역이라 `smp_allocator`(위 주석의 allocator 분리).
     live_registry: live_surface_registry.LiveSurfaceRegistry(live_pty.LiveSurface) = .{ .allocator = std.heap.smp_allocator },
 

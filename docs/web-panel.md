@@ -70,7 +70,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 현 ABI는 활성 surface 1개(`FrameSummary.surface_id`)만 노출한다. 여러 WKWebView를 관리하려면 신규가 필요하다:
 
 - 매 tick **surface diff**: "어느 surface_id ↔ 어느 NSView, url/panel_kind/trust, 생성/숨김/파괴" — [control-plane.md] §3 엔티티·`panel.open` 생애주기와 직접 커플링.
-- web surface는 **Term**이다(leaf=Pane이 아니라 Pane 안 Term). 한 Pane이 terminal Term + web Term을 가로 탭으로 섞을 수 있고, per-pane 탭바가 둘을 같이 보인다. **web Term마다 WKWebView**(한 leaf에 N개 가능, 활성만 show, 비활성 hidden으로 상태 유지).
+- web surface는 **Term**이다(leaf=Pane이 아니라 Pane 안 Term). 한 Pane이 terminal Term + web Term을 가로 탭으로 섞을 수 있고, per-pane 탭바가 둘을 같이 보인다. **web Term마다 WKWebView**(한 leaf에 N개 가능, 활성만 show, 비활성 hidden으로 상태 유지). **(4e-1 구현 완료 — 모델 토대)**: `session_model.Term.kind`(terminal|web) + `LiveSurface` `union(SurfaceKind)`(web arm=sentinel surface)로 web Term을 트리에 담고, `createWebTerm`이 PTY 없이 생성한다. per-Term WKWebView 부착·재부모화는 4e-3/4e-4(§10).
 - Term 탭을 다른 pane으로 이동하면 WKWebView **재부모화·재프레임**.
 
 ## 7. web 특유 보안 (브리지 게이트는 control §8.1)
@@ -146,6 +146,7 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
   포커스 전환으로 복귀 가능하다. 이 한계는 web surface를 Term(탭)으로 만들어 포커스가 터미널/웹 Term을 오가게 하는 **4e가
   근본 해소**한다(빈 오버레이가 아니라 first-class surface).
 - 4e(웹 Term 통합 — 4c "후속"의 명시 슬라이스, §6): 4c는 web 패널을 활성 pane에 얹은 **디버그 오버레이**라 가려진 터미널이 뒤에서 계속 렌더된다(낭비·못 씀). 4e는 §6대로 **web surface를 Term(탭)으로 split/Term 트리에 넣어**(활성 Term만 렌더 → 터미널 대체, per-pane 탭바가 terminal/web Term을 같이 보임, Term 탭 재부모화) **first-class surface**로 만든다. **순서 권장**: 콘텐츠(Phase 5)를 오버레이 위에 쌓기 전에 4e로 surface 모델을 먼저 확정하는 게 낫다([control-plane.md] §11 "나중에 소유권 갈아엎기 회피" 정신) — 단 Phase 5 bridge는 per-WKWebView라 4e와 강결합은 아니어서 순서는 유연하다. 생성 경로도 4c의 env 훅에서 **메뉴/command로 승격**(웹 Term 열기)한다.
+  - **4e-1(웹 Term 모델 토대 — 구현 완료, 렌더·WKWebView·ABI 무변경 = 터미널 byte-identical)**: `session_model.Term`에 `kind: SurfaceKind = .terminal`(기본값이라 terminal Term 생성부 무변경) + `web_panel_kind: PanelKind`(web 라벨·후속 trust 단일 출처) + `surfaceId()`/`webPanelLabel()` accessor를 더하고, `LiveSurface`를 `union(SurfaceKind)`(terminal arm=M3a 번들 그대로, web arm=**sentinel surface**만 — 빈 1×1 core, 렌더/PTY 없음)로 승격했다. 두 arm이 모두 `surface: Surface`를 노출해 `Term.surface: *Surface`가 web에서도 유효 → surface_ptrs 재바인딩·`activeSurface()` 계약 **불변**(sentinel `id`가 web surface_id). `createWebTerm(panel_kind)`가 web Term을 만들고(PTY spawn·attach·pump 없음), `destroyTerm`/deinit이 `kind`로 teardown 분기(web=경량 registry.remove). 4c의 `maybeDebugOpenWebPanel`(MARU_WEB_PANEL 훅)은 오버레이(app_session.web_panel — dormant화) 대신 활성 pane에 web Term을 **비활성 탭**으로 append한다(활성은 터미널 유지 = 무회귀; 활성 전환·렌더 skip은 4e-2). 헤드리스 TDD: `Model(FakeRt)` 혼합 Pane·surfaceId/webPanelLabel 분기, `LiveSurface` web arm sentinel teardown 누수 0. **범위 밖**: 활성 Term 렌더 skip(4e-2)·per-Term WKWebView(4e-3)·탭 혼합 UX/재부모화(4e-4)·command 생성(4e-5).
 - 5a~5d: `browser.*` schema/authz, isolated bridge, `maru-app://` security, minimal browser ops를 각각 별도 red test로 시작한다.
 - 7e(browser chrome UI — §8): `browser` kind용 **주소창 + back/forward/reload** nav chrome. WKWebView가 nav 함수(`goBack`/`goForward`/`reload`/`load`/`canGoBack`)를 공짜로 주므로 **UI 껍데기만** 만든다(mechanics=WebKit). GPU 셀(탭바처럼 Zig 렌더), 버튼→ABI→WKWebView API. **주소창 2모드**: ① 비활성=현재 URL 표시만 ② 편집=URL 입력→`load`. 편집 모드의 임의 URL 로드는 §7 보안(untrusted 격리·링크 라우팅)이 걸리므로 Phase 5(security) 이후. markdown kind는 주소창 불요라 kind별 분기.
 
@@ -209,6 +210,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 ## 14. 코드 위치 (구현 시 채움)
 
+- **웹 Term 모델 토대(4e-1, 구현 완료 — 렌더·WKWebView·ABI 무변경)**: L2 = `src/session/session_model.zig`(`Term.kind: SurfaceKind`·`web_panel_kind: PanelKind` 필드 + `surfaceId()`/`webPanelLabel()` accessor + `SurfaceKind`/`PanelKind` 별칭; 헤드리스 TDD로 혼합 Pane·kind 분기 고정). app = `src/app/live_pty.zig`(`LiveSurface` struct→`union(SurfaceKind)`: terminal arm=M3a 번들, web arm=sentinel `Surface`; `deinit`이 arm 분기; web arm sentinel teardown 헤드리스 테스트). platform = `src/platform/macos/app_session.zig`(`createTerm` terminal arm 접근, 신규 `createWebTerm`, `destroyTerm`/deinit teardown `kind` 분기, `termLabel` web 분기, `maybeDebugOpenWebPanel`이 web Term을 비활성 탭으로 append). 활성 렌더 skip·per-Term WKWebView·ABI 배선은 4e-2/4e-3.
 - 합성·WKWebView·입력: 계획상 `src/platform/macos/web_panel.{zig,swift}`였으나, **4c는 최소 범위라 전용 파일 없이 기존 host
   파일에 통합**했다(빈 웹뷰 hosting + 전이 하나라 표면이 작다 — 전용 모듈 분리는 Phase 5 브리지/스킴 핸들러가 붙어 표면이 커질
   때 한다). 4c 실제 위치: `MaruAppHost.swift`(`MaruWebPanelView` = hitTest→nil 래퍼 + 빈 WKWebView, `MaruTerminalContainerView.insertWebPanel`

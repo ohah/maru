@@ -1350,8 +1350,11 @@ pub const MetalFrameBuffer = struct {
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+
-        // origin으로 그려지므로 이 값은 가드에만 영향).
-        self.size = pane_frames[pane_frames.len - 1].frame.glyph_frame.size;
+        // origin으로 그려지므로 이 값은 가드에만 영향, 렌더러 draw 본체는 cols/rows를 안 읽는다).
+        // [4e-2, web-panel.md §6] 활성 web Term(단일 pane)이면 터미널 frame이 없어 pane_frames가 비었다 — 언더플로
+        // 방지 + chrome(사이드바·탭바 셀)을 그리려면 렌더러 가드(cols==0/rows==0면 frame 통째 skip)를 통과해야 하므로
+        // 1×1 폴백을 쓴다(chrome 셀은 자기 origin으로 그려져 무영향, 본문은 blank). 비어 있지 않으면 옛 동작 byte-identical.
+        self.size = if (pane_frames.len > 0) pane_frames[pane_frames.len - 1].frame.glyph_frame.size else .{ .cols = 1, .rows = 1 };
         self.atlas_width_px = atlas_config.atlas_width_px;
         self.atlas_height_px = atlas_config.atlas_height_px;
         self.cell_width_px = cell_width_px;

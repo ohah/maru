@@ -180,7 +180,7 @@ pub export fn maru_macos_app_session_tick(
     const out = out_summary orelse return @intFromEnum(Status.null_out);
     app_session.setFrameLoopRateHz(frame_loop_rate_hz);
     app_session.maybeDebugOpenSettings(); // MARU_OPEN_SETTINGS 시각 확인 훅 — tick(렌더) 전에 열어야 이 frame에 모달이 든다(env 미설정이면 무동작)
-    app_session.maybeDebugOpenWebPanel(); // MARU_WEB_PANEL 시각 확인 훅 — 활성 pane 본문에 빈 WKWebView 하나(env 미설정이면 무동작, Phase 4c)
+    app_session.maybeDebugOpenWebPanel(); // MARU_WEB_PANEL 시각 확인 훅 — 활성 pane에 web Term을 열고 활성화(4e-2, 본문 blank·크래시 0; env 미설정이면 무동작)
     out.* = app_session.tick() catch return @intFromEnum(Status.tick_failed);
     // PTY 세션이 종료되면 ok가 아니라 session_ended를 올려, host가 죽은 세션을 무한 tick하지
     // 않고 frame loop를 멈춰 우아하게 내려가게 한다. ended는 latch라 이후 tick도 동일 신호다.

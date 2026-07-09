@@ -639,6 +639,9 @@ fn blendRgb(base: u32, tint_rgb: u32, alpha: u8) u32 {
 /// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name=세션 소유,
 /// auto_title=메인 스레드 소유 캐시, surface.title=정적) — 모두 reader 스레드가 안 건드려 렌더 중 안정. 호출자가 즉시 복사.
 fn termLabel(term: *const Term) []const u8 {
+    // 4e-1 web Term: 자동 제목(OSC)이 없으니 kind 파생 라벨("Browser"/"Markdown")을 auto로 쓴다 — 사용자 rename
+    // (custom_name)이 있으면 그게 우선(pickLabel 단일 해석). terminal 경로는 `if` 아래로 **byte-identical**.
+    if (term.kind == .web) return app.pickLabel(term.surface.custom_name, term.webPanelLabel());
     const auto = if (term.auto_title.items.len > 0) term.auto_title.items else term.surface.title;
     return app.pickLabel(term.surface.custom_name, auto);
 }
@@ -837,12 +840,14 @@ const NormalizedConfig = struct {
 /// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). 모델 struct
 /// (Term/Pane/Tab)는 session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
 const TermRuntime = struct {
-    // M3a: 런타임 소유는 앱 전역 `app_runtime.live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, Term은 그 번들 슬롯의
-    // `&slot.live_pty`를 가리키는 포인터만 든다(docs/window-surface-mobility.md §8A.1). registry가 `allocator.create`로
-    // 각 `LiveSurface` 번들을 개별 heap 슬롯에 두므로 reader thread가 잡는 `&live_pty.reader` 주소는 Term-inline 시절과
-    // **같은 heap-pin 메커니즘**으로 안정적이다(소유 위치만 Term→registry로 옮겼을 뿐, 슬롯은 수명 내내 안 움직인다).
-    // 필드가 포인터라 대부분의 `live_pty.X` 접근은 Zig auto-deref로 그대로 유효하고, 소유/수명(create·remove)만 registry를
-    // 거친다. `Term.surface`는 같은 번들 슬롯의 `&slot.surface`를 가리킨다(두 포인터가 한 슬롯 = surface_id 하나).
+    // M3a: 런타임 소유는 앱 전역 `app_runtime.live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, terminal Term은 그
+    // 번들 슬롯 terminal arm의 `&slot.terminal.live_pty`를 가리키는 포인터만 든다(docs/window-surface-mobility.md §8A.1).
+    // registry가 `allocator.create`로 각 `LiveSurface` 번들을 개별 heap 슬롯에 두므로 reader thread가 잡는 `&live_pty.reader`
+    // 주소는 Term-inline 시절과 **같은 heap-pin 메커니즘**으로 안정적이다(소유 위치만 Term→registry로 옮겼을 뿐, 슬롯은
+    // 수명 내내 안 움직인다). 필드가 포인터라 대부분의 `live_pty.X` 접근은 Zig auto-deref로 그대로 유효하고, 소유/수명
+    // (create·remove)만 registry를 거친다. `Term.surface`는 같은 번들 슬롯의 `&slot.terminal.surface`를 가리킨다(두 포인터가
+    // 한 슬롯 = surface_id 하나). **4e-1**: web Term(kind==.web)은 live PTY가 없어 이 필드를 세우지 않고(undefined) 아래
+    // `live_initialized=false`로 둔다 — `Term.surface`는 web arm sentinel(`&slot.web.surface`)을 가리킨다.
     live_pty: *app.LivePtySession = undefined,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
@@ -1726,8 +1731,12 @@ pub const AppSession = struct {
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
-    // Phase 4c: 활성 pane 본문에 붙은 단일 빈 웹 패널(없으면 null). env 훅 MARU_WEB_PANEL=1이 바인딩(maybeDebugOpenWebPanel).
+    // Phase 4c: 활성 pane 본문에 붙은 단일 빈 웹 패널(없으면 null). **4e-1에서 dormant** — maybeDebugOpenWebPanel이
+    // 더는 이 필드를 세우지 않고 web **Term**을 트리에 만든다(§6 first-class surface). webSurfaceTransition 코드는
+    // 무변(4e-2/4e-3이 per-Term WKWebView로 재배선). 필드는 항상 null이라 전이가 늘 none이다(오버레이 경로 비활성).
     web_panel: ?WebPanel = null,
+    // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.
+    debug_web_term_opened: bool = false,
     // web surface diff의 prev(직전 tick이 낸 layout, 0~1개). webSurfaceTransition이 매 tick 4a surfaceDiff의 prev로
     // 쓰고 cur로 전진시킨다(Swift가 전이를 적용했다는 전제). null=직전 tick에 웹 패널 없었음.
     web_panel_prev: ?web_panel_layout.SurfaceLayout = null,
@@ -3612,9 +3621,11 @@ pub const AppSession = struct {
         // 같은 heap-pin). generation=0으로 시작(M2a는 보존만 — respawn 시 증가는 미도입, §8 M0a). id는 앱 전역 유일이라
         // 중복 등록 없음. 번들 내부 owned string(custom_name) 해제는 이 창 allocator를 슬롯에 실어 deinit이 흡수한다.
         const slot = try self.live_registry.create(id, 0);
-        slot.internal_allocator = self.allocator;
-        term.surface = &slot.surface; // 번들 슬롯의 surface를 참조(소유는 registry)
-        term.rt.live_pty = &slot.live_pty; // 같은 슬롯의 live_pty를 참조(두 포인터 = 한 슬롯)
+        // 4e-1: LiveSurface는 union — terminal arm을 확정한 뒤 그 arm 필드(surface·live_pty)를 in-place init한다.
+        // (undefined 슬롯에 arm 태그를 먼저 심어야 아래 &slot.terminal.X가 활성 arm을 가리킨다.)
+        slot.* = .{ .terminal = .{ .internal_allocator = self.allocator } };
+        term.surface = &slot.terminal.surface; // 번들 슬롯 terminal arm의 surface를 참조(소유는 registry)
+        term.rt.live_pty = &slot.terminal.live_pty; // 같은 슬롯 terminal arm의 live_pty를 참조(두 포인터 = 한 슬롯)
         // 부분 init 정리: live_pty/surface 각각 in-place init 성공 플래그로 갈라, 그만큼만 sub-deinit + removeUninitialized로
         // 슬롯 메모리만 해제(deinit 없이). remove(=번들 deinit)는 둘 다 inited 가정이라 부분 상태엔 못 쓴다 —
         // create/removeUninitialized 계약(live_surface_registry.zig)의 짝을 두 하위자원으로 확장.
@@ -3686,7 +3697,12 @@ pub const AppSession = struct {
             self.context_menu_target = null;
             self.chrome_host.context_menu.hide();
         };
-        if (term.rt.live_initialized) {
+        if (term.kind == .web) {
+            // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
+            // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.
+            // surface_id는 remove 실행 전에 읽는다(remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
+            self.live_registry.remove(term.surfaceId()) catch {};
+        } else if (term.rt.live_initialized) {
             // M3a: detach(runtime routing) 선행 → registry.remove가 번들 소유를 teardown(deinit=live_pty reader join →
             // custom_name 해제 → surface.deinit → 슬롯 해제). remove는 surface_id로 키드 — Term은 슬롯을 참조만 하므로
             // 소유 해제는 registry가 단일 출처로 한다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던
@@ -3702,6 +3718,30 @@ pub const AppSession = struct {
         if (term.git_branch_cwd) |c| self.allocator.free(c);
         term.auto_title.deinit(self.allocator);
         self.allocator.destroy(term);
+    }
+
+    /// 4e-1: 한 **web Term**(WKWebView 패널의 first-class surface)을 heap-pin(`create`)으로 만든다 — registry가
+    /// LiveSurface **union web arm** 슬롯을 소유하고, 그 arm의 sentinel `Surface`(빈 core — 4e-1은 렌더/PTY 없음)를
+    /// 제자리 init한다. terminal `createTerm`과 대칭이되 **PTY spawn·attachSurface·pump가 없다**(web-panel.md §6). surface_id는
+    /// 앱 전역 `SurfaceIdAllocator` 발급(비재사용) — sentinel surface의 `id`에 실려 `Term.surface.id`가 web에서도 유효하다
+    /// (surface_ptrs·activeSurface 계약 불변). `kind`·`web_panel_kind`는 모델 Term에 저장(라벨·후속 trust 단일 출처).
+    /// Pane에 거는 건 호출자(maybeDebugOpenWebPanel·후속 command)가 한다. teardown은 `destroyTerm`이 kind로 분기.
+    fn createWebTerm(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !*Term {
+        const term = try self.allocator.create(Term);
+        errdefer self.allocator.destroy(term);
+        term.* = .{ .kind = .web, .web_panel_kind = panel_kind };
+
+        const id = self.surface_ids.next(); // 앱 전역 발급(비재사용) — terminal과 같은 네임스페이스, 유일
+        const slot = try self.live_registry.create(id, 0);
+        // union web arm 확정 후 sentinel surface를 제자리 init. init 실패 시 슬롯은 아직 uninit이라(surface undefined)
+        // removeUninitialized로 deinit 없이 슬롯만 해제한다(remove=web arm deinit은 surface inited 가정이라 못 씀).
+        slot.* = .{ .web = .{ .internal_allocator = self.allocator } };
+        term.surface = &slot.web.surface;
+        errdefer self.live_registry.removeUninitialized(id) catch {};
+        // sentinel: 최소 1×1 grid(빈 core, clampGridSize가 최소 보장). 렌더/PTY 없이 id·title만 실어 Term.surface를 유효화.
+        term.surface.* = try maru.session.Surface.init(self.allocator, id, .{ .cols = 1, .rows = 1 });
+        // web Term은 PTY/pump/attach 없음 — rt는 기본값(live_pty=undefined, live_initialized=false). destroyTerm이 kind로 가드.
+        return term;
     }
 
     /// 한 panel(Pane)을 heap-pin으로 만든다 — Term 1개를 담은 컨테이너. 탭→pane 모델에서 Pane은 여러 Term을
@@ -7014,17 +7054,29 @@ pub const AppSession = struct {
         }
     }
 
-    /// Phase 4c 시각 확인 디버그 훅 — MARU_WEB_PANEL=1 env가 설정됐고 surface가 준비됐으면 활성 pane 본문에 빈
-    /// WKWebView 하나를 붙인다(한 번만). GUI 손 테스트·스크린샷 self-verify(MARU_SCREENSHOT)로 z-order/frame-sync를
-    /// 확인하는 유일한 생성 경로(4c는 메뉴/action 미배선 — 후속). env 미설정이면 무동작(MARU_OPEN_SETTINGS와 같은
-    /// env-gate). MARU_WEB_PANEL_MARKDOWN=1이면 markdown, 아니면 browser(임의 URL 인앱 브라우저 = 원래 목표)로 kind만
-    /// 정한다 — 4c는 빈 웹뷰라 kind가 시각에 영향 없고, Phase 5 브리지/보안이 kind로 trust·config를 가른다.
+    /// 4e-1 시각/모델 확인 디버그 훅 — MARU_WEB_PANEL=1 env가 설정됐고 surface가 준비됐으면 활성 pane에 web **Term**
+    /// 하나를 만들어 append한다(한 번만). 4c는 이 훅이 활성 pane 본문에 오버레이 WKWebView(app_session.web_panel)를
+    /// 붙였으나, 4e-1은 §6대로 web surface를 **트리의 Term**으로 만든다(4e-2/3 fixture용 — 4e-5서 command 승격). env
+    /// 미설정이면 무동작(표준 macos-app-smoke는 env 미설정이라 이 훅 무동작 = 터미널 빌드 byte-identical). MARU_WEB_PANEL_MARKDOWN=1이면
+    /// markdown, 아니면 browser로 kind를 정한다(라벨·후속 trust 파생).
+    ///
+    /// **비활성 탭으로 append**: active_term을 바꾸지 않아 활성 Term은 터미널 그대로다 — 활성 렌더 skip·per-Term WKWebView
+    /// 부착이 아직 없는 4e-1에서 활성 surface를 web sentinel로 만들면 렌더/입력/resize 경로가 sentinel을 만지므로, web
+    /// Term은 per-pane 탭바에만 나타나고 활성은 터미널로 둔다(터미널 무회귀). 활성 전환·렌더 skip은 4e-2가 배선한다.
     pub fn maybeDebugOpenWebPanel(self: *AppSession) void {
-        if (self.web_panel != null) return;
+        if (self.debug_web_term_opened) return;
         if (!self.surface_initialized) return;
         if (std.c.getenv("MARU_WEB_PANEL") == null) return;
         const kind: web_panel_layout.PanelKind = if (std.c.getenv("MARU_WEB_PANEL_MARKDOWN") != null) .markdown else .browser;
-        self.web_panel = .{ .surface_id = self.surface_ids.next(), .panel_kind = kind };
+        const term = self.createWebTerm(kind) catch return; // 실패면 다음 tick 재시도(플래그 안 세움)
+        const pane = self.activePane();
+        pane.terms.append(self.allocator, term) catch {
+            self.destroyTerm(term); // append 실패 시 방금 만든 web Term을 되돌린다(registry 슬롯까지 정리)
+            return;
+        };
+        // active_term은 그대로(터미널 활성 유지) — web Term은 비활성 탭으로만 존재(§6 per-pane 탭바 혼합, 4e-2가 활성 전환).
+        self.debug_web_term_opened = true;
+        self.metal_dirty = true; // 탭바에 web Term 탭이 늘어 재그림
     }
 
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
@@ -18170,8 +18222,10 @@ pub const AppSession = struct {
                     if (term.git_branch) |b| self.allocator.free(b);
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     term.auto_title.deinit(self.allocator);
-                    if (term.rt.live_initialized) {
-                        self.live_registry.remove(term.surface.id) catch {}; // 번들 deinit(custom_name + surface.deinit + 슬롯)
+                    // 4e-1: web Term은 live_initialized=false지만 registry 슬롯(web arm sentinel)을 소유하므로 remove 대상이다.
+                    // remove가 union arm 태그로 분기(terminal=reader join·web=경량)해 해당 슬롯 소유를 teardown한다.
+                    if (term.rt.live_initialized or term.kind == .web) {
+                        self.live_registry.remove(term.surface.id) catch {}; // 번들/sentinel deinit(custom_name + surface.deinit + 슬롯)
                         term.rt.live_initialized = false;
                     }
                     self.allocator.destroy(term);
@@ -25613,11 +25667,11 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
     try std.testing.expect(sid1 != sid2); // M0a: 앱 전역 유일
     const b1 = s1.live_registry.findBySurface(sid1).?; // *LiveSurface 번들 슬롯
     const b2 = s2.live_registry.findBySurface(sid2).?;
-    try std.testing.expectEqual(s1.activePane().activeTerm().rt.live_pty, &b1.live_pty);
-    try std.testing.expectEqual(s2.activePane().activeTerm().rt.live_pty, &b2.live_pty);
+    try std.testing.expectEqual(s1.activePane().activeTerm().rt.live_pty, &b1.terminal.live_pty);
+    try std.testing.expectEqual(s2.activePane().activeTerm().rt.live_pty, &b2.terminal.live_pty);
     // M3a 핵심: Term.surface가 이제 번들 슬롯의 surface를 가리킨다(Term-inline이 아니라 registry 소유).
-    try std.testing.expectEqual(s1.activePane().activeTerm().surface, &b1.surface);
-    try std.testing.expectEqual(s2.activePane().activeTerm().surface, &b2.surface);
+    try std.testing.expectEqual(s1.activePane().activeTerm().surface, &b1.terminal.surface);
+    try std.testing.expectEqual(s2.activePane().activeTerm().surface, &b2.terminal.surface);
     // 두 창의 번들이 한 registry에 공존한다(앱 전역 소유 — 창이 달라도 같은 owner).
     try std.testing.expectEqual(before + 2, app_runtime.live_registry.count());
 }
@@ -25706,8 +25760,8 @@ test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주
     const core_addr0 = &surface0.core; // reader가 잡는 다른 바인딩(&surface.core) — 절대 이동 금지
     const sid0 = t0.surface.id;
     const b0 = session.live_registry.findBySurface(sid0).?; // *LiveSurface 번들 슬롯
-    try std.testing.expectEqual(p0, &b0.live_pty);
-    try std.testing.expectEqual(surface0, &b0.surface);
+    try std.testing.expectEqual(p0, &b0.terminal.live_pty);
+    try std.testing.expectEqual(surface0, &b0.terminal.surface);
     try std.testing.expectEqual(before + 1, session.live_registry.count());
 
     // 스크롤백(코어 상태)을 몇 줄 넣는다(controlled_smoke=reader 미처리라 메인이 코어를 직접 write — 경합 없음).
@@ -25733,13 +25787,13 @@ test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주
     // 같은 스크롤백(재시작 0).
     const b0_after = session.live_registry.findBySurface(sid0).?;
     try std.testing.expectEqual(b0, b0_after);
-    try std.testing.expectEqual(p0, &b0_after.live_pty);
-    try std.testing.expectEqual(surface0, &b0_after.surface);
-    try std.testing.expectEqual(reader_addr0, &b0_after.live_pty.reader);
-    try std.testing.expectEqual(core_addr0, &b0_after.surface.core);
+    try std.testing.expectEqual(p0, &b0_after.terminal.live_pty);
+    try std.testing.expectEqual(surface0, &b0_after.terminal.surface);
+    try std.testing.expectEqual(reader_addr0, &b0_after.terminal.live_pty.reader);
+    try std.testing.expectEqual(core_addr0, &b0_after.terminal.surface.core);
     try std.testing.expectEqual(p0, t0.rt.live_pty);
     try std.testing.expectEqual(surface0, t0.surface);
-    try std.testing.expectEqual(scrollback_before, b0_after.surface.core.scrollbackLen());
+    try std.testing.expectEqual(scrollback_before, b0_after.terminal.surface.core.scrollbackLen());
 
     // 추가분을 뒤에서부터 닫아(번들 소유 해제) 남은 T0(index 0)가 여전히 불변인지 — orderedRemove가 다른
     // 슬롯을 안 옮긴다(번들 본체는 개별 heap). 마지막 1개(T0)까지 줄인다.
@@ -25747,9 +25801,9 @@ test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주
     try std.testing.expectEqual(before + 1, session.live_registry.count());
     const b0_final = session.live_registry.findBySurface(sid0).?;
     try std.testing.expectEqual(b0, b0_final);
-    try std.testing.expectEqual(reader_addr0, &b0_final.live_pty.reader);
-    try std.testing.expectEqual(core_addr0, &b0_final.surface.core);
-    try std.testing.expectEqual(scrollback_before, b0_final.surface.core.scrollbackLen());
+    try std.testing.expectEqual(reader_addr0, &b0_final.terminal.live_pty.reader);
+    try std.testing.expectEqual(core_addr0, &b0_final.terminal.surface.core);
+    try std.testing.expectEqual(scrollback_before, b0_final.terminal.surface.core.scrollbackLen());
 }
 
 // M3a close/teardown 배선 — Term을 닫으면 그 번들 소유(surface + live_pty)가 registry에서 **제거**되고
@@ -25794,8 +25848,8 @@ test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변
     try std.testing.expectEqual(before + 1, session.live_registry.count());
     // 남은 번들(keep)은 포인터·소유가 온전(orderedRemove가 keep 슬롯을 안 건드림).
     const keep_bundle = session.live_registry.findBySurface(keep_sid).?;
-    try std.testing.expectEqual(keep_ptr, &keep_bundle.live_pty);
-    try std.testing.expectEqual(keep_surface, &keep_bundle.surface);
+    try std.testing.expectEqual(keep_ptr, &keep_bundle.terminal.live_pty);
+    try std.testing.expectEqual(keep_surface, &keep_bundle.terminal.surface);
     try std.testing.expectEqual(keep_ptr, keep.rt.live_pty);
     try std.testing.expectEqual(keep_surface, keep.surface);
 }
@@ -36663,7 +36717,7 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     try std.testing.expectEqual(moved_surface, dst.surface_ptrs.items[1]);
 
     // 코어 스크롤백 보존(같은 core, 재생성 아님).
-    const dump = try slot_after.surface.core.dumpUtf8(allocator);
+    const dump = try slot_after.terminal.surface.core.dumpUtf8(allocator);
     defer allocator.free(dump);
     try std.testing.expect(std.mem.indexOf(u8, dump, "MOVE_MARK_42") != null);
 }

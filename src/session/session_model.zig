@@ -14,8 +14,17 @@ const surface_mod = @import("surface.zig");
 const split_tree = @import("split_tree.zig");
 const agent_transcript = @import("agent_transcript.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
+const control_surface = @import("control_surface.zig"); // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
 
 const Surface = surface_mod.Surface;
+
+/// surface 종류(terminal|web) — 단일 출처는 control_surface(§3). `Term.kind`가 트리에 **web surface**(WKWebView 패널)를
+/// terminal과 같은 leaf/탭 모델로 담게 한다(web-panel.md §6 "web surface는 Term이다"). platform·web_panel_layout과
+/// 같은 열거를 공유해 kind가 경계마다 재정의되지 않는다.
+pub const SurfaceKind = control_surface.SurfaceKind;
+/// web 패널 종류(markdown|browser) — 단일 출처는 control_surface. web Term의 라벨(`Term.webPanelLabel`) 파생과
+/// (후속) trust/WKWebView config 선택의 기반. "닫힌 열거"(web-panel.md §7 — 새 종류는 사용자 승인 필요).
+pub const PanelKind = control_surface.PanelKind;
 
 /// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✶, codex=◆).
 /// platform이 PTY proc_name 폴링(pollAgentKinds)으로 채우는 파생값이고, 모델은 라벨 표시에만 쓴다.
@@ -38,6 +47,15 @@ pub fn Model(comptime Rt: type) type {
             /// `live_pty`에 한 것과 동형(auto-deref로 `term.surface.core` 등 읽기 접근은 그대로 유효).
             /// 단일 출처: docs/window-surface-mobility.md §8A.1(옵션 A).
             surface: *Surface = undefined,
+            /// surface 종류(terminal|web). 기본 `.terminal` — 기존 terminal Term 생성(`.{ ... }`)은 이 기본을 받아
+            /// **byte-identical**(호출부 무변경). `.web`이면 `surface`는 registry LiveSurface **web arm의 sentinel**
+            /// (빈 core — 렌더/PTY 없음)을 가리키고 `rt`엔 live PTY가 없다(web-panel.md §6 "web surface는 Term"). 렌더
+            /// skip·WKWebView 부착은 후속(4e-2/4e-3) — 이 필드는 트리에 web을 담는 판별자다.
+            kind: SurfaceKind = .terminal,
+            /// web Term(`kind == .web`)의 패널 종류(markdown|browser). terminal Term엔 무의미(기본값 무시). web Term
+            /// 라벨(`webPanelLabel`)과 (후속) trust/WKWebView config 파생의 **단일 출처** — LiveSurface web arm에
+            /// 중복 저장하지 않는다("중복 저장 없이"). 기본 `.markdown`이라 terminal Term은 byte-identical.
+            web_panel_kind: PanelKind = .markdown,
             /// 런타임 부착(PTY 세션·pump·생애 플래그) — generic `Rt`로 주입. platform이 `TermRuntime`을 넣는다.
             rt: Rt = .{},
             /// git 브랜치 표시 캐시(owned, cwd 파생). termGitBranch가 cwd가 바뀔 때만 재계산. destroyTerm이 해제.
@@ -57,6 +75,23 @@ pub fn Model(comptime Rt: type) type {
             /// 제목/cwd가 안 바뀐 것이라 lock+복사를 건너뛴다(매 tick 전-Term lock 제거 — docs/io-render-threading.md §12).
             /// 0=아직 미반영(초기 windowTitle이 빈 상태와 일치 — 코어 title/cwd가 세팅돼야 generation이 ≥1로 오른다).
             last_title_gen: u32 = 0,
+
+            /// 이 Term의 surface_id. terminal은 live surface, web은 sentinel surface의 id이고, **둘 다** 앱 전역
+            /// `SurfaceIdAllocator`가 발급한 값이 `surface.id`에 실린다 — kind와 무관하게 여기서 파생하므로 Term에
+            /// surface_id를 **중복 저장하지 않는다**(web arm sentinel이 web id를 든다). registry 조회·라우팅 키.
+            pub fn surfaceId(self: *const Term) u64 {
+                return self.surface.id;
+            }
+
+            /// web Term(`kind == .web`)의 kind 파생 기본 라벨(사용자 `custom_name`이 없을 때 탭·사이드바 표시).
+            /// terminal Term에서 부르면 `web_panel_kind` 기본값 기준이라 무의미 — 호출자(platform termLabel)가
+            /// `kind == .web`일 때만 쓴다. 값은 "닫힌 열거"(web-panel.md §7)라 exhaustive switch로 고정한다.
+            pub fn webPanelLabel(self: *const Term) []const u8 {
+                return switch (self.web_panel_kind) {
+                    .markdown => "Markdown",
+                    .browser => "Browser",
+                };
+            }
         };
 
         /// split leaf 하나 = 가로 탭(Term) 묶음. 항상 Term ≥1. tree leaf가 active_term의 surface를 가리킨다.
@@ -299,6 +334,68 @@ test "session model: 헤드리스 — fake Rt로 Term/Pane/Tab/PaneTree 구성(P
     try tab.panes.append(allocator, &pane);
     try std.testing.expectEqual(&pane, tab.activePane());
     try std.testing.expectEqual(&t1, tab.activeTerm());
+}
+
+// 4e-1: web Term(kind=.web)이 트리에 담기고, surfaceId()/webPanelLabel()이 kind로 분기하며, 한 Pane이
+// terminal+web Term을 혼합해도 activeTerm()이 활성 Term(web 포함)을 돌려줌을 헤드리스로 못박는다(web-panel.md §6).
+// sentinel surface는 빈 core(1×1)로 흉내낸다 — 렌더/PTY 없이 id만 싣는 실제 Surface(platform이 registry web arm에
+// 두는 것과 동형). terminal Term의 kind 기본값(.terminal)·surfaceId 파생이 byte-identical임도 함께 단언한다.
+test "session model: web Term(kind=.web) + surfaceId/webPanelLabel kind 분기(fake Rt, sentinel surface)" {
+    const FakeRt = struct {};
+    const M = Model(FakeRt);
+    const allocator = std.testing.allocator;
+
+    // web Term(browser): sentinel surface(빈 core)에 web surface_id를 싣고, Term.kind=.web + web_panel_kind.
+    var web_surface = try Surface.init(allocator, 4242, .{ .cols = 1, .rows = 1 });
+    defer web_surface.deinit();
+    var wt: M.Term = .{ .kind = .web, .web_panel_kind = .browser, .surface = &web_surface };
+    try std.testing.expectEqual(SurfaceKind.web, wt.kind);
+    try std.testing.expectEqual(@as(u64, 4242), wt.surfaceId()); // sentinel surface.id에서 파생(중복 저장 없음)
+    try std.testing.expectEqualStrings("Browser", wt.webPanelLabel());
+
+    // markdown web Term은 "Markdown" 라벨(닫힌 열거 분기).
+    var md_surface = try Surface.init(allocator, 7, .{ .cols = 1, .rows = 1 });
+    defer md_surface.deinit();
+    var md: M.Term = .{ .kind = .web, .web_panel_kind = .markdown, .surface = &md_surface };
+    try std.testing.expectEqualStrings("Markdown", md.webPanelLabel());
+
+    // terminal Term 기본은 .terminal(생성부 무변경 byte-identical) — surfaceId도 live surface.id.
+    var term_surface = try Surface.init(allocator, 9, .{ .cols = 4, .rows = 2 });
+    defer term_surface.deinit();
+    var tt: M.Term = .{ .surface = &term_surface };
+    try std.testing.expectEqual(SurfaceKind.terminal, tt.kind); // 기본값
+    try std.testing.expectEqual(@as(u64, 9), tt.surfaceId());
+}
+
+test "session model: 한 Pane에 terminal+web Term 혼합, activeTerm이 활성 Term(web 포함)을 반환(fake Rt)" {
+    const FakeRt = struct {};
+    const M = Model(FakeRt);
+    const allocator = std.testing.allocator;
+
+    var ts = try Surface.init(allocator, 1, .{ .cols = 4, .rows = 2 });
+    defer ts.deinit();
+    var ws = try Surface.init(allocator, 2, .{ .cols = 1, .rows = 1 });
+    defer ws.deinit();
+    var t_term: M.Term = .{ .surface = &ts }; // terminal(kind 기본)
+    var w_term: M.Term = .{ .kind = .web, .web_panel_kind = .markdown, .surface = &ws };
+
+    // 한 Pane이 terminal + web Term을 가로 탭으로 섞는다(§6 "한 Pane이 terminal Term + web Term을 가로 탭으로 섞을 수 있고").
+    var pane: M.Pane = .{};
+    defer pane.terms.deinit(allocator);
+    try pane.terms.append(allocator, &t_term);
+    try pane.terms.append(allocator, &w_term);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+
+    // 활성=0(terminal): activeTerm이 terminal Term.
+    try std.testing.expectEqual(&t_term, pane.activeTerm());
+    try std.testing.expectEqual(SurfaceKind.terminal, pane.activeTerm().kind);
+
+    // 활성을 web으로 전환: activeTerm이 web Term(트리에 담긴 web surface — §6).
+    pane.active_term = 1;
+    try std.testing.expectEqual(&w_term, pane.activeTerm());
+    try std.testing.expectEqual(SurfaceKind.web, pane.activeTerm().kind);
+    try std.testing.expectEqual(@as(u64, 2), pane.activeTerm().surfaceId());
+    try std.testing.expectEqualStrings("Markdown", pane.activeTerm().webPanelLabel());
 }
 
 // workspace 직렬화 변환(flattenTree→buildTreeNode)이 라이브 트리를 PTY/surface 없이 round-trip한다.

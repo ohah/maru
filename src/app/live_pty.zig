@@ -7,6 +7,7 @@ const runtime_pump = @import("runtime_pump.zig");
 const surface_mod = @import("../session/surface.zig");
 const pty_reader = @import("pty_reader.zig");
 const core_command = @import("../session/core_command.zig");
+const control_surface = @import("../session/control_surface.zig"); // SurfaceKind(terminal|web) — union 태그(web-panel.md §6 4e)
 
 /// 입력 방향 write 큐 버퍼링 상한(바이트). 키 입력은 작아 paste 뒤에 막히지 않을 만큼 넉넉하게 두고, 큰
 /// paste는 per-tick enqueueSome으로 흘려보낸다(상한 초과분은 다음 tick). 사전 할당 없이 필요 시 이만큼까지 grow.
@@ -295,34 +296,79 @@ pub const LivePtySession = struct {
 };
 
 /// M3a: 한 surface의 라이브 소유 **번들**(docs/window-surface-mobility.md §8A.1 옵션 A). registry가 이 번들을
-/// heap 슬롯으로 개별 소유(`allocator.create(LiveSurface)`)하므로, `&slot.surface.core`/`&slot.surface.core_mutex`
-/// (reader 바인딩)와 `&slot.live_pty.reader`가 **창 밖 registry 슬롯에 고정**된다 — Term이 heap-pin이라 안정하던 것을
-/// registry 슬롯 고정으로 옮긴 것(cross-window 이동 시 Term은 창을 옮겨도 이 슬롯 주소는 불변, reader 계약 보존).
-/// M2b가 `live_pty`(값→포인터)에 한 것과 **동형**으로 `Surface`도 이 번들로 흡수해 registry 소유로 올린다.
+/// heap 슬롯으로 개별 소유(`allocator.create(LiveSurface)`)하므로, terminal arm의 `&slot.terminal.surface.core`/
+/// `&slot.terminal.surface.core_mutex`(reader 바인딩)와 `&slot.terminal.live_pty.reader`가 **창 밖 registry 슬롯에
+/// 고정**된다 — Term이 heap-pin이라 안정하던 것을 registry 슬롯 고정으로 옮긴 것(cross-window 이동 시 Term은 창을
+/// 옮겨도 이 슬롯 주소는 불변, reader 계약 보존).
 ///
-/// Term은 `surface: *Surface`·`rt.live_pty: *LivePtySession`로 이 슬롯의 두 필드를 참조만 한다(소유 아님).
-/// 두 포인터가 한 슬롯을 가리킨다(surface_id 하나 = 번들 하나).
-pub const LiveSurface = struct {
-    surface: surface_mod.Surface = undefined,
-    live_pty: LivePtySession = undefined,
-    /// 번들 **내부**(core·session/queue·surface owned string)를 만든 창 allocator. `deinit`이 `custom_name`
-    /// 해제에 쓴다 — `Surface.deinit`엔 allocator가 없어(§ surface.zig) owned string 해제를 번들이 흡수한다
-    /// (§8A.1 "owned string 해제 번들 이관"). live_pty 내부(session/queue)는 `LivePtySession`이 자기 allocator를
-    /// 들고 있어 `live_pty.deinit`이 자족한다. 번들이 자기 allocator를 들고 다니므로 cross-window 이동이 창을
-    /// 옮겨도 teardown allocator 짝이 맞는다(M2b allocator 분리의 확장 — bookkeeping=registry smp, 내부=창).
-    internal_allocator: std.mem.Allocator = undefined,
+/// **4e-1: `union(SurfaceKind)`으로 승격**(web-panel.md §6 "web surface는 Term"). terminal arm은 M3a 번들 그대로
+/// (surface + live PTY), web arm은 **sentinel surface만**(빈 core — 렌더/PTY 없음, WKWebView는 Swift가 surfaceDiff로
+/// 별도 구동). 두 arm이 **모두** `surface: Surface`를 노출하므로 `Term.surface: *Surface`가 web에서도 유효해
+/// surface_ptrs 재바인딩·activeSurface() 계약이 **불변**이다(sentinel의 `id`가 web surface_id를 든다). 기본 태그가
+/// 없어 caller(createTerm/createWebTerm)가 `slot.* = .{ .terminal = … }` / `.{ .web = … }`로 arm을 확정한 뒤 arm
+/// 필드를 in-place init한다. registry(live_surface_registry.zig)는 `Rt.deinit()`만 부르므로 union도 struct처럼
+/// **중립**(registry·removeUninitialized 코드 무변경).
+///
+/// Term은 `surface: *Surface`(양 arm의 `surface`)·`rt.live_pty: *LivePtySession`(terminal arm만)로 슬롯 필드를 참조만
+/// 한다(소유 아님). web Term은 live PTY가 없어 `rt.live_pty`를 세우지 않고 `rt.live_initialized=false`로 둔다.
+pub const LiveSurface = union(control_surface.SurfaceKind) {
+    /// terminal arm(M3a 번들 그대로): surface(그리드/스크롤백) + 그 surface에 붙은 live PTY 셸.
+    terminal: Terminal,
+    /// web arm: sentinel surface만(빈 core — 4e-1은 렌더 안 함). WKWebView 부착·콘텐츠는 후속(4e-3/Phase 5).
+    web: Web,
 
-    /// registry.remove/deinit이 부르는 번들 teardown. **순서 계약**: `live_pty.deinit`(reader thread join — reader가
-    /// `&surface.core`를 잡음) → `surface` owned string 해제 → `surface.deinit`(core 해제). detach(라우팅)는
-    /// coordinator가 remove **전에** `closeAndDetach`로 선행한다(§8A.1·live_surface_registry.zig remove 계약).
-    /// closeAndDetach가 이미 reader를 join했으면 여기 live_pty.deinit의 close는 멱등 no-op join이라 순서가 안전하다.
+    /// terminal Term의 라이브 소유(surface + live PTY + 번들 allocator). 필드·수명은 M3a와 동일.
+    pub const Terminal = struct {
+        surface: surface_mod.Surface = undefined,
+        live_pty: LivePtySession = undefined,
+        /// 번들 **내부**(core·session/queue·surface owned string)를 만든 창 allocator. teardown이 `custom_name`
+        /// 해제에 쓴다 — `Surface.deinit`엔 allocator가 없어(§ surface.zig) owned string 해제를 번들이 흡수한다
+        /// (§8A.1). live_pty 내부(session/queue)는 `LivePtySession`이 자기 allocator를 들고 자족한다.
+        internal_allocator: std.mem.Allocator = undefined,
+    };
+
+    /// web Term의 라이브 소유(sentinel surface + 번들 allocator). PTY/reader 없음 — teardown이 경량(reader join
+    /// 없이 custom_name 해제 + sentinel surface.deinit). panel_kind는 여기 두지 않고 `Term.web_panel_kind`가 단일
+    /// 출처(중복 저장 없이) — web arm은 registry 안정 heap 슬롯이 필요한 sentinel `Surface`만 든다.
+    pub const Web = struct {
+        surface: surface_mod.Surface = undefined,
+        internal_allocator: std.mem.Allocator = undefined,
+    };
+
+    /// registry.remove/deinit이 부르는 번들 teardown. **arm 분기**: terminal은 `live_pty.deinit`(reader thread join —
+    /// reader가 `&surface.core`를 잡음) → `surface` owned string 해제 → `surface.deinit`; web은 reader가 없어 경량
+    /// (custom_name 해제 → sentinel surface.deinit). detach(라우팅)는 coordinator가 remove **전에** terminal에 한해
+    /// `closeAndDetach`로 선행한다(§8A.1·live_surface_registry.zig remove 계약). closeAndDetach가 이미 reader를
+    /// join했으면 여기 live_pty.deinit의 close는 멱등 no-op join이라 순서가 안전하다.
     pub fn deinit(self: *LiveSurface) void {
-        self.live_pty.deinit();
-        if (self.surface.custom_name) |n| self.internal_allocator.free(n);
-        self.surface.deinit();
+        switch (self.*) {
+            .terminal => |*t| {
+                t.live_pty.deinit();
+                if (t.surface.custom_name) |n| t.internal_allocator.free(n);
+                t.surface.deinit();
+            },
+            .web => |*w| {
+                if (w.surface.custom_name) |n| w.internal_allocator.free(n);
+                w.surface.deinit();
+            },
+        }
         self.* = undefined;
     }
 };
+
+// 4e-1: web arm sentinel teardown이 reader join 없이 경량(custom_name 해제 + sentinel surface.deinit)이고 누수 0임을
+// 헤드리스로 못박는다(web-panel.md §6). terminal arm(reader join)은 실제 PTY가 필요해 별도(macOS) 경로이고, 여기선
+// web arm만 — PTY/reader가 전혀 없어 순수 Zig로 leak을 testing.allocator가 검증한다. non-vacuous: custom_name(owned)을
+// 안 해제하거나 sentinel surface.core를 안 deinit하면 testing.allocator가 leak으로 실패한다.
+test "live surface web arm: sentinel teardown frees core + owned custom_name (leak 0, headless)" {
+    const allocator = std.testing.allocator;
+    var slot: LiveSurface = .{ .web = .{ .internal_allocator = allocator } };
+    slot.web.surface = try surface_mod.Surface.init(allocator, 4242, .{ .cols = 1, .rows = 1 });
+    // web Term의 사용자 rename(owned) — teardown이 internal_allocator로 해제해야 한다(web arm은 reader join 없이 경량).
+    slot.web.surface.custom_name = try allocator.dupe(u8, "docs");
+    // deinit이 union arm 분기(web) — custom_name free + sentinel surface.deinit(빈 core 해제). leak이면 실패.
+    slot.deinit();
+}
 
 test "live pty session owns controlled command until normal termination" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

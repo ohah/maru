@@ -45,10 +45,17 @@
 합성만으로는 부족하다 — WKWebView가 포커스를 쥐면 `keyDown`/`performKeyEquivalent`가 WKWebView로 가고 Metal 뷰로 오지 않는다. 그러면 모달이 오버레이에 그려져도 키가 안 간다. 다음을 정한다:
 
 - **모달 firstResponder 전이**: 모달(palette/find/confirm/rename) 열림 시 입력 responder를 **오버레이(또는 Metal 뷰)로 makeFirstResponder**, 닫힘 시 직전 WKWebView로 복원. 모달 입력·IME preedit가 이 경로로 흐른다.
-- **maru 키바인딩 가로채기**: ⌘T·⌘W·⌘1.. 등 앱 액션은 WKWebView 포커스 중에도 먼저 잡아야 한다. WKWebView 서브클래스의 `performKeyEquivalent` override 또는 local event monitor로 — 메커니즘을 하나 택해 명시(현 코드는 오버레이 중 메뉴 keyEquivalent를 일부러 우회하므로 그 경로와 정합 필요).
+- **maru 키바인딩 가로채기**: ⌘T·⌘W·⌘1.. 등 앱 액션은 WKWebView 포커스 중에도 먼저 잡아야 한다. WKWebView 서브클래스의 `performKeyEquivalent` override 또는 local event monitor로 — 메커니즘을 하나 택해 명시(현 코드는 오버레이 중 메뉴 keyEquivalent를 일부러 우회하므로 그 경로와 정합 필요). **(4d 확정: `performKeyEquivalent` override — 근거는 아래 spike 결과.)**
 - **`anyOverlayOpen` 게이트**: 웹 패널 포커스 시 "활성 세션"이 무엇인지 정의해 게이트가 올바른 surface를 읽게 한다.
-- **마우스(hitTest)**: 모달 오버레이는 평소 `hitTest=nil`(아래로 통과), 모달 열림 시 `self`(잡음).
+- **마우스(hitTest)**: 모달 오버레이는 평소 `hitTest=nil`(아래로 통과), 모달 열림 시 `self`(잡음). **(4d 실제: 오버레이는 `nil` 유지하고, 대신 웹 패널 래퍼가 모달 열림 시 `nil`을 반환해 클릭을 아래 터미널로 통과시킨다 — 오버레이가 `self`면 클릭이 dead-end라 모달 바깥-클릭 dismiss가 깨지므로, 통과가 더 안전하고 최소다.)**
 - **Phase 4 코딩 전 입력 responder spike 선행**(가장 깨지기 쉬운 IME 코드를 건드리므로): WKWebView 포커스 중 모달 열림 → responder 전이 → IME preedit → 복귀를 실측해 메커니즘(`performKeyEquivalent` override vs local event monitor)을 **착수 전에 확정**한다. 자동 테스트가 어려워 spike+수동이 유일 안전망이다.
+
+**spike 확정 결과(4d, 코드 실측 근거)**: 메커니즘을 **`performKeyEquivalent` override**로 확정한다(local event monitor 기각). 근거:
+  1. **모든 maru 앱 키바인딩은 Zig `default_app_bindings`(config/keybinding.zig)가 단일 출처**이고 keyDown 경로(`maru_macos_app_session_key_down` → `KeyBindingResolver.resolve` → `.app_action`)가 ⌘T=new_term·⌘⇧P=toggle_command_palette·⌘F=toggle_find·⌘,=toggle_settings·⌘1..=select_tab 등을 **전부** 해석한다(메뉴 keyEquivalent는 발견성용 병렬 경로일 뿐, keyDown resolver가 자기완결). 따라서 웹 포커스 중 Cmd-조합을 `handleKeyDown`으로 보내면 Zig가 모두 처리한다 — 메뉴/WebKit performKeyEquivalent 동작에 의존하지 않는다.
+  2. **터미널 IME 무회귀**: 웹 래퍼(`MaruWebPanelView`)의 override는 **웹이 포커스일 때만** 동작하고(그 외엔 `false`만 반환) 터미널 뷰의 keyDown/`NSTextInputClient`/`performKeyEquivalent`를 **한 줄도 건드리지 않는다**. local event monitor는 매 keystroke(한글 조합 포함)를 앱 전역에서 가로채는 병렬 경로라 터미널 IME 폭발반경이 크고, 현행 performKeyEquivalent+`anyOverlayOpen` 패턴과도 이질적이라 기각.
+  3. **모달 responder 전이**: 웹 포커스 중 모달이 열리면(`anyOverlayOpen` false→true 엣지) `makeFirstResponder(터미널 뷰)`로 전이해 모달 입력·IME preedit가 터미널 `NSTextInputClient`로 흐르고, 닫히면(true→false) 직전 웹뷰로 복원한다. 전이는 **기존** `becomeFirstResponder`(imeFocus true)/`resignFirstResponder`(commitComposition)를 그대로 태운다 — 새 IME 로직 없음. 엣지는 매 tick + 모달 여는 조합 직후 동기로 조정한다(조합 직후 타이핑이 웹뷰로 새지 않게).
+  - **자동으로 못 잡는 부분(수동 필수)**: 실제 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손 테스트만 확정한다(§11). smoke는 `web_panel_focused`(시작 시 웹이 firstResponder를 안 훔침 = false)만 결정적으로 단언한다.
+  - **범위 밖(Phase 5)**: 웹 소유 키(⌘C/⌘V/⌘A 편집·⌘F 페이지 내 find, §8)를 WebKit에 양보하는 **포커스 기준 분기** — 4d 최소 spike는 빈 about:blank라 웹 콘텐츠가 없어 Cmd-조합을 전부 maru로 라우팅한다(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해). 실콘텐츠에서 이 분기 정책은 Zig/config가 소유한다.
 
 ## 5. WKWebView가 막는 터미널-chrome 인터랙션
 
@@ -115,7 +122,16 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
   ABI struct 계약 테스트(size/offset·op enum 값) + 4a 순수 계산 단위 테스트 + macos-app-smoke의 `web_panel_subview_order_ok`/
   `web_panel_present`/`web_panel_hittest_nil` 값 단언(단, 스모크는 backing=0이라 frame 값은 degenerate — 실제 frame·z-order
   픽셀 합성·입력 통과는 GUI 손 테스트가 닫는다).
-- 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다.
+- 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다. **(입력 responder 전이 spike 구현 완료 — 최소 범위, ABI 무변경·Swift 전용)**: 4c의 hitTest→nil 완전 통과를
+  **focusable**로 전환하고(모달 닫힘=`super.hitTest`로 웹뷰가 클릭 받아 WKWebView firstResponder→WebKit 자체 IME; 모달
+  열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합만
+  `handleKeyDown`→Zig `default_app_bindings` resolver로 라우팅; 그 외 무동작이라 터미널 IME/keyDown 경로 무회귀 — §4
+  spike 확정 근거). **모달 responder 전이**는 `reconcileWebModalFocus`가 `anyOverlayOpen` 엣지로 조정한다(웹 포커스 중
+  모달 열림→터미널 뷰로 makeFirstResponder, 닫힘→직전 웹뷰 복원; 전이는 기존 becomeFirstResponder/resignFirstResponder를
+  그대로 태워 새 IME 로직 0). 전부 **MARU_WEB_PANEL 훅 뒤**(웹 패널 없으면 무동작)라 평시 터미널 빌드 동작 불변. 자동
+  검증: swift-check·macos-app-build·macos-app-smoke(`web_panel_focused=false` — 웹이 firstResponder 안 훔침)·ABI 계약
+  테스트·zig test·check-boundaries·fmt green. **실 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손
+  테스트가 닫는다**(§11 수동 gate — 자동 불가). 웹 소유 키 포커스-분기(§8)·드래그 통과(§5)·web-Term lifecycle 포커스는 후속.
 - 5a~5d: `browser.*` schema/authz, isolated bridge, `maru-app://` security, minimal browser ops를 각각 별도 red test로 시작한다.
 
 각 slice는 안정성·성능 영향을 같이 닫는다. WKWebView frame sync는 pane rect diff가 있을 때만 수행하고, 매 frame 무조건 `evaluateJavaScript`/snapshot/navigation을 호출하지 않는다. bridge는 bounded message size와 dispatch backpressure를 갖고, `browser.*` 호출은 main tick을 오래 점유하면 chunk/yield 또는 비동기 완료로 분리한다. z-order/IME처럼 wall-clock 성능 숫자가 흔들리는 영역은 frame 값, responder 전이 순서, message count, dropped/coalesced count 같은 결정적 artifact를 남긴다.
@@ -184,6 +200,12 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
   = z-order 중간 삽입, `TerminalSurface.webPanel` 상태, `drainWebSurfaceTransition` = op 적용), `app_session.zig`(`web_panel`/
   `web_panel_prev` 상태, `active_pane_leaf_rect` 캐시, `maybeDebugOpenWebPanel` env 훅, `webSurfaceTransition`/`webFramePt` = 4a
   3함수 소비).
+- **입력 responder 전이(4d, 구현 완료 — Swift 전용, ABI 무변경)**: `MaruAppHost.swift`만. `MaruWebPanelView`에 `weak controller` +
+  조건부 `hitTest`(모달 닫힘=super/열림=nil) + `performKeyEquivalent` override(웹 포커스 중 Cmd-조합→`handleWebPanelChord`).
+  컨트롤러: `isWebPanelFocused`(firstResponder가 wp 자손인지), `handleWebPanelChord`(`handleKeyDown`+즉시 reconcile),
+  `reconcileWebModalFocus`(`anyOverlayOpen` 엣지→웹↔터미널 firstResponder 전이·복원, renderTick 매 tick 호출). 전이 추적 상태
+  (`lastOverlayOpen`·`webFocusStashedForModal`)는 `TerminalSurface`(세션별). 키바인딩 정책의 단일 출처는 여전히 Zig
+  `config/keybinding.zig`의 `default_app_bindings`(Swift는 keyDown으로 넘기기만). 새 ABI 없음(`any_overlay_open` v80 재사용).
 - **surface 생애주기·per-pane rect 순수 계산(4a, 구현 완료)**: `src/session/web_panel_layout.zig`(L2, OS-중립). 본문 rect(`contentRect` — pane rect − chrome inset), backing px·좌상단 → pt·좌하단 y-flip(`pxTopLeftToPtBottomLeft`), surface 생애주기 diff(`surfaceDiff` — created/destroyed/reframed/hidden/shown 전이)의 **단일 출처**다. 헤드리스 단위 테스트로 고정(§11)하고 `check-boundaries`가 L2 중립(app/pty/platform/AppKit import 0·OS 타입명 0)을 강제한다. y-flip 생산 적용(ABI export 또는 Swift 미러)은 이 함수를 단일 출처로 두고 4c가 배선한다.
 - surface 생애주기·per-pane rect ABI wiring(**4c 구현 완료**): `src/platform/macos/app_host_abi.{zig,h}` — 위 순수 계산을
   export/marshaling. v99에서 `MaruAppHostWebSurfaceTransition`(extern struct: op·surface_id·panel_kind·frame_pt_{x,y,w,h}) +

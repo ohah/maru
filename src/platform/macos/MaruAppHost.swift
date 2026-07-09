@@ -494,20 +494,35 @@ final class MaruMetalOverlayView: NSView {
     }
 }
 
-// MARK: - Phase 4c: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼)
+// MARK: - Phase 4c/4d: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼 + 입력 전이 spike)
 //
-// 활성 pane 본문 rect에 붙는 **빈 WKWebView**를 감싸는 래퍼. WKWebView를 직접 컨테이너에 넣지 않고 이 투명
-// 래퍼로 감싸는 이유는 **입력 통과(4d 전)**를 확실히 하기 위해서다: WKWebView는 내부 서브뷰 계층이 복잡해
-// 서브클래스에서 hitTest→nil override만으론 통과가 완전하지 않을 수 있다. 래퍼 NSView가 hitTest→nil이면
-// AppKit이 이 뷰(와 그 안 WKWebView)로 아예 내려오지 않아 마우스가 아래 터미널 뷰로 통과하고, WKWebView가
-// firstResponder를 훔치지 않는다(MaruMetalOverlayView와 같은 검증된 메커니즘). **콘텐츠·URL·브리지·스킴
-// 핸들러·CSP·데이터스토어 격리는 전부 Phase 5** — 여기선 about:blank 빈 문서만 로드해 z-order·frame-sync를
-// 증명한다. 입력/IME/firstResponder 전이는 4d. docs/web-panel.md §2·§4·§5·§10 4c.
+// 활성 pane 본문 rect에 붙는 **빈 WKWebView**를 감싸는 래퍼. WKWebView를 직접 컨테이너에 넣지 않고 이 래퍼로
+// 감싸는 이유는 입력 라우팅(hitTest·performKeyEquivalent)을 한 곳에서 정책적으로 제어하기 위해서다.
+//
+// **4d(입력 responder 전이 spike, docs/web-panel.md §4)**: 4c는 hitTest→nil로 웹뷰를 완전 통과(입력 못 받음)
+// 시켰지만, 4d는 웹뷰를 **focusable**로 바꾼다(클릭→WKWebView firstResponder→WebKit이 자체 keyDown/IME 소유).
+// 단, maru 창 chrome을 위해 두 조건부 라우팅을 둔다:
+//   1. **마우스(hitTest)**: 모달(palette/find/confirm/settings)이 **닫혀** 있으면 super.hitTest로 웹뷰가 클릭을
+//      받아 포커스된다. 모달이 **열려** 있으면 nil을 반환해 클릭이 아래 터미널 뷰로 통과하고(overlay hitTest=nil
+//      불변), Zig 모달 로직(바깥 클릭 dismiss·모달 요소 클릭)이 그대로 처리한다 — 웹뷰가 모달 위 클릭을 훔치지
+//      않게(§4). 본문 rect 밖(탭 바·divider·grip)은 애초에 이 프레임에 없어 늘 터미널이 받는다.
+//   2. **maru 키바인딩(performKeyEquivalent)**: 웹 포커스 중에도 ⌘T·⌘⇧P·⌘F·⌘,·⌘1.. 등이 먼저 잡혀야 한다.
+//      메커니즘은 **performKeyEquivalent override**(현 터미널 뷰·anyOverlayOpen 게이트와 **같은 패턴** — local
+//      event monitor 기각, 근거는 §4·PR 본문). 웹이 포커스일 때만 Cmd-조합을 controller.handleKeyDown으로 라우팅
+//      하는데, **모든 maru 앱 키바인딩은 Zig default_app_bindings의 단일 출처**라 keyDown 경로(key_down resolver)가
+//      전부 해석한다(⌘T=new_term·⌘⇧P=toggle_command_palette·⌘F=toggle_find …). 웹이 포커스가 아니면(터미널
+//      포커스) 이 override는 false만 반환해 **완전 무동작** — 터미널 IME/keyDown 경로는 손대지 않는다(무회귀).
+//
+// **범위**: 빈 about:blank라 웹 콘텐츠 입력은 얇지만 전이·preedit·keybinding **메커니즘**을 검증한다. 웹 소유
+// 키(⌘C/⌘V/⌘A 편집·⌘F 페이지 내 find §8)를 WebKit에 양보하는 **포커스 기준 분기**는 Phase 5(실콘텐츠). WKWebView
+// 내부 IME는 WebKit 소유(안 건드림). 콘텐츠·URL·브리지·스킴·CSP·데이터스토어 격리는 Phase 5. docs/web-panel.md §4·§10 4d.
 @MainActor
 final class MaruWebPanelView: NSView {
     let webView: WKWebView
     // Zig 전이(surface_id)와 매칭해 create/destroy/reframe이 옳은 웹뷰를 대상으로 하게 한다(§6 안정 키).
     let surfaceId: UInt64
+    // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanel을 소유하므로 retain cycle 방지).
+    weak var controller: MaruAppHostController?
 
     init(frame frameRect: NSRect, surfaceId: UInt64) {
         self.surfaceId = surfaceId
@@ -527,9 +542,24 @@ final class MaruWebPanelView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("MaruWebPanelView는 coder 초기화 미지원") }
 
-    // 입력 통과(4d 전): 마우스는 아래 터미널로, 키/IME는 터미널이 firstResponder 유지 — 빈 웹뷰가 포커스를 훔치지 않게.
-    override func hitTest(_ point: NSPoint) -> NSView? { return nil }
-    override var acceptsFirstResponder: Bool { return false }
+    // 4d 마우스: 모달 닫힘=웹뷰가 클릭 받아 포커스(super.hitTest), 모달 열림=nil로 아래 터미널에 통과(모달 dismiss·
+    // 요소 클릭이 Zig로). anyOverlayOpen이 라이브 단일 출처. (웹 패널 존재 자체가 MARU_WEB_PANEL 훅 뒤라 평시 무영향.)
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if controller?.anyOverlayOpen == true { return nil }
+        return super.hitTest(point)
+    }
+
+    // 4d 키바인딩: 웹 포커스 중일 때만 Cmd-조합을 maru로 먼저 라우팅한다(Zig resolver가 앱 액션·모달 토글을 소유).
+    // 웹 포커스가 아니면 false만 반환 — 터미널 포커스 경로(메뉴 keyEquivalent + 터미널 뷰 keyDown/IME)를 손대지 않는다.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard controller?.isWebPanelFocused(self) == true else { return false }
+        // Cmd-조합만 가로챈다. 나머지(평문 타이핑·Ctrl 등)는 false로 흘려 WKWebView가 자체 keyDown/IME로 받는다.
+        if event.modifierFlags.contains(.command) {
+            controller?.handleWebPanelChord(event)
+            return true
+        }
+        return false
+    }
 }
 
 // MARK: - Phase 4b-2: contentView 컨테이너 뷰 (3겹 합성 호스트)
@@ -618,6 +648,13 @@ final class TerminalSurface {
     // Phase 4c: 활성 pane 본문에 붙은 빈 WKWebView 래퍼(있으면). Zig 전이(surface_id)로 생애주기를 매칭한다.
     // 컨테이너 서브뷰로도 살아 있지만, 빠른 조회·전이 매칭을 위해 세션별로 강참조를 든다(창이 닫히면 함께 해제).
     var webPanel: MaruWebPanelView?
+
+    // Phase 4d: 웹↔모달 firstResponder 전이 추적(세션별 — 멀티창 정합). reconcileWebModalFocus가 매 tick
+    // anyOverlayOpen 엣지를 본다: 웹 포커스 중 모달이 열리면(false→true) 웹→터미널 뷰로 전이(모달 입력·IME
+    // preedit가 터미널 NSTextInputClient로 흐르게)하고 webFocusStashedForModal을 세운다; 모달이 닫히면(true→false)
+    // 그 플래그가 서 있으면 직전 웹뷰로 firstResponder를 복원한다. lastOverlayOpen은 엣지 검출용 직전 값.
+    var lastOverlayOpen = false
+    var webFocusStashedForModal = false
 }
 
 // quick terminal용 떠 있는 패널. borderless NSWindow/NSPanel은 기본적으로 key가 될 수 없어 타이핑을 못
@@ -1140,10 +1177,51 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return (window?.contentView as? MaruTerminalContainerView)?.overlayView
     }
 
-    // 창/패널 컨테이너의 터미널 자식 뷰를 firstResponder로 만든다(입력·IME는 터미널 뷰가 소유 — 4d 전 기계적 배선).
+    // 창/패널 컨테이너의 터미널 자식 뷰를 firstResponder로 만든다(입력·IME는 터미널 뷰가 소유).
     private func focusTerminalView(_ window: NSWindow?) {
         guard let window else { return }
         window.makeFirstResponder((window.contentView as? MaruTerminalContainerView)?.terminalView)
+    }
+
+    // MARK: - Phase 4d: 웹 패널 입력 responder 전이 (docs/web-panel.md §4)
+
+    // 이 웹 패널이 지금 입력 포커스를 쥐고 있는가 — WKWebView가 포커스면 firstResponder는 그 내부 뷰(WKContentView
+    // 등, wp의 자손)다. 웹 패널 hitTest·performKeyEquivalent override가 "웹 포커스일 때만" 동작하도록 이 판정을 쓴다.
+    func isWebPanelFocused(_ wp: MaruWebPanelView) -> Bool {
+        guard let fr = wp.window?.firstResponder as? NSView else { return false }
+        return fr.isDescendant(of: wp)
+    }
+
+    // 웹 포커스 중 눌린 Cmd-조합을 maru keyDown 경로로 라우팅한다(Zig resolver가 앱 액션·모달 토글을 해석). 곧바로
+    // reconcile을 돌려, 이 조합이 모달을 열었으면(⌘⇧P·⌘F·⌘,) firstResponder를 같은 이벤트 루프에서 터미널 뷰로
+    // 전이한다(다음 tick까지 기다리지 않아 조합 직후 타이핑/IME가 웹뷰로 새지 않게). handleKeyDown은 기존 경로 그대로.
+    func handleWebPanelChord(_ event: NSEvent) {
+        handleKeyDown(event)
+        reconcileWebModalFocus()
+    }
+
+    // 웹 패널 포커스 ↔ 모달 responder 전이를 anyOverlayOpen 엣지로 조정한다(renderTick 매 tick + 웹 조합 직후 동기
+    // 호출). 웹 패널이 없으면 무동작이라 MARU_WEB_PANEL 훅이 없는 평시 빌드엔 영향이 없다. 터미널 IME/keyDown 코드는
+    // 건드리지 않고 makeFirstResponder만 부른다 — 전이는 기존 becomeFirstResponder(imeFocus true)/resignFirstResponder
+    // (commitComposition)를 그대로 태운다(새 IME 로직 없음). 단일 출처: docs/web-panel.md §4.
+    func reconcileWebModalFocus() {
+        guard let surface = activeSurface, let window = surface.window, let wp = surface.webPanel else { return }
+        let open = anyOverlayOpen
+        defer { surface.lastOverlayOpen = open }
+        guard open != surface.lastOverlayOpen else { return } // 엣지에서만
+        if open {
+            // 모달이 열렸다 — 웹이 포커스였으면 터미널 뷰로 전이(모달 입력·IME preedit가 터미널로). 복원용 플래그 세움.
+            if isWebPanelFocused(wp) {
+                surface.webFocusStashedForModal = true
+                focusTerminalView(window)
+            }
+        } else {
+            // 모달이 닫혔다 — 우리가 웹→터미널로 전이했었고 웹뷰가 아직 살아 있으면 직전 웹뷰로 포커스 복원.
+            if surface.webFocusStashedForModal, wp.superview != nil {
+                window.makeFirstResponder(wp.webView)
+            }
+            surface.webFocusStashedForModal = false
+        }
     }
 
     private func setupMetalRenderer() {
@@ -1768,6 +1846,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 drawMetalFrame()
             }
             drainWebSurfaceTransition() // Phase 4c: 이번 tick의 웹 패널 surface 전이(생성/파괴/reframe)를 컨테이너 NSView에 적용.
+            reconcileWebModalFocus() // Phase 4d: 웹 패널 포커스↔모달 responder 전이(anyOverlayOpen 엣지). 웹 패널 없으면 무동작.
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotificationAuthorizationRequest() // 세팅에서 데스크톱 알림 토글을 켰으면 macOS 알림 권한을 요청한다.
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
@@ -2479,6 +2558,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // id가 바뀌어 새로 만드는 경우 기존 것을 먼저 정리(single-panel 불변식상 드묾이지만 안전).
             surface.webPanel?.removeFromSuperview()
             let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id)
+            v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
             container.insertWebPanel(v)
             surface.webPanel = v
         case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
@@ -3768,10 +3848,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         """
 
-        // Phase 4c: MARU_WEB_PANEL=1이면 빈 WKWebView가 컨테이너에 붙었는지 값으로 단언한다(GUI 손 테스트의
-        // 자동 보조 — z-order 골든·실제 입력 통과는 여전히 손 테스트). subviews 순서 [터미널, 웹뷰, 오버레이] +
-        // webview.frame(pt)을 요약에 남겨, MARU_WEB_PANEL=1 zig build macos-app-smoke로 반복 확인한다. env 미설정이면
-        // 무동작(빈 웹뷰가 안 뜨므로 요약 계약 불변). docs/web-panel.md §10 4c·§11.
+        // Phase 4c/4d: MARU_WEB_PANEL=1이면 빈 WKWebView가 컨테이너에 붙었는지 + 4d 입력 라우팅 상태를 값으로 남긴다
+        // (GUI 손 테스트의 자동 보조 — z-order 골든·실제 포커스 전이·IME는 여전히 손 테스트). subviews 순서 [터미널,
+        // 웹뷰, 오버레이] + webview.frame(pt)에 더해 4d 계약(모달 닫힘 시 웹 focusable·시작 시 터미널 포커스 유지)을
+        // 기록한다. **스모크는 backing=0이라 frame·hitTest 좌표가 degenerate**라 hard 단언이 아니라 값 기록이다(실제
+        // 전이는 GUI 손 테스트). env 미설정이면 무동작(요약 계약 불변). docs/web-panel.md §10 4c·4d·§11.
         if ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil {
             let container = activeSurface?.window?.contentView as? MaruTerminalContainerView
             let wp = activeSurface?.webPanel
@@ -3781,6 +3862,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 orderOk = subs[0] === container.terminalView && subs[1] === wp && subs[2] === container.overlayView
             }
             let f = wp?.frame ?? .zero
+            // 4d: 모달이 닫혀 있으면 웹뷰가 클릭/포커스를 받아야 한다(hitTest가 wp 자손을 돌려줌 = focusable). 시작 직후엔
+            // 모달이 없고 터미널 뷰가 firstResponder라 web_panel_focused는 false여야 한다(웹이 포커스를 안 훔침).
+            let hit = wp?.hitTest(NSPoint(x: f.width / 2, y: f.height / 2))
+            let hitInWeb = (hit != nil) && (hit?.isDescendant(of: wp ?? NSView()) ?? false)
+            let webFocused = wp.map { isWebPanelFocused($0) } ?? false
             summary += """
             web_panel_present=\(wp != nil)
             web_panel_subview_order_ok=\(orderOk)
@@ -3790,7 +3876,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)
             web_panel_frame_h=\(f.size.height)
-            web_panel_hittest_nil=\(wp?.hitTest(NSPoint(x: f.width / 2, y: f.height / 2)) == nil)
+            web_panel_overlay_open=\(anyOverlayOpen)
+            web_panel_hittest_in_web=\(hitInWeb)
+            web_panel_focused=\(webFocused)
 
             """
         }

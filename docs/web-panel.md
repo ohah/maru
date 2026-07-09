@@ -86,6 +86,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 
 ## 8. 빠진 기능 (구현 시 필수)
 
+- **browser chrome UI (주소창·nav — `browser` kind 전용, 슬라이스 7e)**: WKWebView는 **네비게이션 UI를 제공하지 않는다**(Safari.app의 주소창·버튼은 Safari 앱 자체 chrome이지 WKWebView가 아님; SFSafariViewController의 내장 chrome은 iOS 전용·모달이라 embed 불가). 단 **nav 함수는 공짜**다 — `goBack()`/`goForward()`/`canGoBack`/`canGoForward`/`reload()`/`load(URLRequest)`/`url`/`title`/`backForwardList`/`estimatedProgress`를 WKWebView가 주고 WebKit이 히스토리·백스택을 소유한다. 그래서 maru는 **UI 껍데기만** 만든다: "chrome=Zig+GPU" 원칙대로 **탭바처럼 GPU 셀로 back/forward/reload 버튼 + 주소창**을 그리고, 버튼→ABI→WKWebView API를 호출한다(`canGoBack`/`canGoForward`로 버튼 활성/비활성). **주소창 2모드**: **① 비활성(읽기전용)** = 현재 `url`만 표시(입력 불가 — 위치 확인용, 임의 URL 입력 보안면 없음), **② 편집** = URL 입력 → `load`(임의 웹 로드라 §7 보안 — untrusted 프로세스 격리·`decidePolicyForNavigationAction` 링크 라우팅 — 동반, Phase 5 security 이후). `panel.navigated`(control §11 이벤트)/navigation delegate로 URL·progress 갱신. markdown kind는 주소창 불요라 kind별 분기(닫힌 열거).
 - **window.opacity 정합**: 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 WKWebView 본문 rect만 불투명하면 시각 부정합(데스크톱이 비치는 chrome 옆에 불투명 웹 패널). WKWebView 배경 처리 또는 "웹 패널이 있는 창은 opacity 무시" 중 Phase 4c에서 결정. 배경 투명화는 공개 API `underPageBackgroundColor`(macOS 12+)를 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
 - **⌘F 분기**: 포커스가 터미널이면 maru find(스크롤백), 웹 패널이면 페이지 내 find. 포커스 기준 라우팅 명시.
@@ -132,7 +133,9 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
   검증: swift-check·macos-app-build·macos-app-smoke(`web_panel_focused=false` — 웹이 firstResponder 안 훔침)·ABI 계약
   테스트·zig test·check-boundaries·fmt green. **실 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손
   테스트가 닫는다**(§11 수동 gate — 자동 불가). 웹 소유 키 포커스-분기(§8)·드래그 통과(§5)·web-Term lifecycle 포커스는 후속.
+- 4e(웹 Term 통합 — 4c "후속"의 명시 슬라이스, §6): 4c는 web 패널을 활성 pane에 얹은 **디버그 오버레이**라 가려진 터미널이 뒤에서 계속 렌더된다(낭비·못 씀). 4e는 §6대로 **web surface를 Term(탭)으로 split/Term 트리에 넣어**(활성 Term만 렌더 → 터미널 대체, per-pane 탭바가 terminal/web Term을 같이 보임, Term 탭 재부모화) **first-class surface**로 만든다. **순서 권장**: 콘텐츠(Phase 5)를 오버레이 위에 쌓기 전에 4e로 surface 모델을 먼저 확정하는 게 낫다([control-plane.md] §11 "나중에 소유권 갈아엎기 회피" 정신) — 단 Phase 5 bridge는 per-WKWebView라 4e와 강결합은 아니어서 순서는 유연하다. 생성 경로도 4c의 env 훅에서 **메뉴/command로 승격**(웹 Term 열기)한다.
 - 5a~5d: `browser.*` schema/authz, isolated bridge, `maru-app://` security, minimal browser ops를 각각 별도 red test로 시작한다.
+- 7e(browser chrome UI — §8): `browser` kind용 **주소창 + back/forward/reload** nav chrome. WKWebView가 nav 함수(`goBack`/`goForward`/`reload`/`load`/`canGoBack`)를 공짜로 주므로 **UI 껍데기만** 만든다(mechanics=WebKit). GPU 셀(탭바처럼 Zig 렌더), 버튼→ABI→WKWebView API. **주소창 2모드**: ① 비활성=현재 URL 표시만 ② 편집=URL 입력→`load`. 편집 모드의 임의 URL 로드는 §7 보안(untrusted 격리·링크 라우팅)이 걸리므로 Phase 5(security) 이후. markdown kind는 주소창 불요라 kind별 분기.
 
 각 slice는 안정성·성능 영향을 같이 닫는다. WKWebView frame sync는 pane rect diff가 있을 때만 수행하고, 매 frame 무조건 `evaluateJavaScript`/snapshot/navigation을 호출하지 않는다. bridge는 bounded message size와 dispatch backpressure를 갖고, `browser.*` 호출은 main tick을 오래 점유하면 chunk/yield 또는 비동기 완료로 분리한다. z-order/IME처럼 wall-clock 성능 숫자가 흔들리는 영역은 frame 값, responder 전이 순서, message count, dropped/coalesced count 같은 결정적 artifact를 남긴다.
 

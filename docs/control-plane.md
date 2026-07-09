@@ -272,6 +272,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 4b modal split | renderer 2-pass와 overlay layer 단위/contract + 2-quad 자연폭 셀 순서(배경 quad→전경 quad) 보존 + role 기반 cover-fit 회귀 fixture | terminal modal overlay 분리 |
 | 4c empty WKWebView | NSView frame/계층 단언, GUI z-order artifact | 빈 `kind=web` panel |
 | 4d input routing | responder/IME/drag spike artifact + 최소 회귀 | WKWebView focus/input routing |
+| 4e web-Term 통합 | web surface를 **Term(탭)** 으로 split/Term 트리 진입, 활성 Term만 렌더(터미널 대체 — 4c의 오버레이 낭비 해소), Term 탭 재부모화([web-panel.md] §6) | 웹 패널 first-class surface(오버레이 아님) |
 | 5a browser core | `browser.*` schema/dispatch/authz 단위 | WKWebView control core skeleton |
 | 5b trusted bridge | isolated world 주입/미주입 자동 E2E | trusted `window.maru.*` bridge |
 | 5c app scheme security | CSP, realpath/symlink/traversal 거부 단위 | `maru-app://` loader |
@@ -283,6 +284,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 7b markdown sanitizer | adversarial red fixtures in Bun test | sanitizer package |
 | 7c viewer/editor | renderer/source editor unit + WKWebView harness | markdown viewer/source editor |
 | 7d bind/link routing | `bind` capability allow/deny, md click routing, CLI help fixture | `panel.bindSession` + links |
+| 7e browser chrome UI | `browser` kind용 nav chrome(GPU 셀, 탭바처럼 Zig 렌더): **back/forward/reload 버튼** + **주소창 2모드**〔① 비활성=현재 URL 표시만 ② 편집=URL 입력→load〕. 버튼→WKWebView nav API(`goBack`/`goForward`/`reload`/`load`, WebKit이 히스토리·백스택 소유)를 ABI로 호출. `canGoBack`/`canGoForward`로 버튼 활성 상태. 단위: nav 상태 투영·URL 표시·load 라우팅([web-panel.md] §8) | browser kind 네비게이션 UI(mechanics는 WKWebView 공짜, UI 껍데기만) |
 
 ## 11.1 구현 착수 순서·에이전트 분배
 

@@ -543,22 +543,27 @@ final class MaruWebPanelView: NSView {
     required init?(coder: NSCoder) { fatalError("MaruWebPanelView는 coder 초기화 미지원") }
 
     // 4d 마우스: 모달 닫힘=웹뷰가 클릭 받아 포커스(super.hitTest), 모달 열림=nil로 아래 터미널에 통과(모달 dismiss·
-    // 요소 클릭이 Zig로). anyOverlayOpen이 라이브 단일 출처. (웹 패널 존재 자체가 MARU_WEB_PANEL 훅 뒤라 평시 무영향.)
+    // 요소 클릭이 Zig로). **이 웹 패널이 속한 창의 모달 상태**로 판정한다(활성 창 anyOverlayOpen 아님 — 배경 창을
+    // 클릭하면 다른 창의 모달 상태를 반영하던 오라우팅 방지, code-review [9]). (웹 패널 존재 자체가 MARU_WEB_PANEL
+    // 훅 뒤라 평시 무영향.)
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if controller?.anyOverlayOpen == true { return nil }
+        if controller?.isOverlayOpenForWebPanel(self) == true { return nil }
         return super.hitTest(point)
     }
 
-    // 4d 키바인딩: 웹 포커스 중일 때만 Cmd-조합을 maru로 먼저 라우팅한다(Zig resolver가 앱 액션·모달 토글을 소유).
-    // 웹 포커스가 아니면 false만 반환 — 터미널 포커스 경로(메뉴 keyEquivalent + 터미널 뷰 keyDown/IME)를 손대지 않는다.
+    // 4d 키바인딩: 웹 포커스 중일 때만, **maru 앱 바인딩(app_action)인 Cmd-조합만** 가로채 maru로 라우팅한다(Zig
+    // resolver가 앱 액션·모달 토글을 소유). 앱 바인딩이 아닌 Cmd-조합(⌘Q 종료·⌘H 숨김·⌘M 최소화=메뉴 전용, ⌘C/⌘V/
+    // ⌘A=WebKit 편집, ⌘Backspace/←/→=terminal 매크로)은 false로 양보해 메뉴바 keyEquivalent → WebKit이 받게 한다 —
+    // 셸은 포커스가 아니므로 라우팅하지 않는다(옛 "모든 Cmd 조합 가로채 셸로" 버그로 ⌘Q가 종료 안 되고 ⌘Backspace가
+    // 셸로 새던 것 수정, code-review [1-3,5]). 판정은 Zig resolver를 side-effect 없이 조회(handleKeyEvent와 같은
+    // keyBindingResolver 단일 출처 — terminal 매크로가 셸로 새기 전에 가른다). 웹 포커스가 아니면 false만 반환 —
+    // 터미널 포커스 경로(메뉴 keyEquivalent + 터미널 뷰 keyDown/IME)를 손대지 않는다(무회귀).
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard controller?.isWebPanelFocused(self) == true else { return false }
-        // Cmd-조합만 가로챈다. 나머지(평문 타이핑·Ctrl 등)는 false로 흘려 WKWebView가 자체 keyDown/IME로 받는다.
-        if event.modifierFlags.contains(.command) {
-            controller?.handleWebPanelChord(event)
-            return true
-        }
-        return false
+        guard event.modifierFlags.contains(.command) else { return false }
+        guard controller?.isWebPanelAppChord(self, event) == true else { return false }
+        controller?.handleWebPanelChord(event)
+        return true
     }
 }
 
@@ -1192,6 +1197,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return fr.isDescendant(of: wp)
     }
 
+    // 이 웹 패널을 소유한 surface(창). 배경 창의 웹 패널 hitTest가 활성 창이 아니라 자기 창의 모달 상태로 판정하게
+    // 한다(code-review [9]). webPanel 참조 identity로 매칭해 일반 창·quick 패널을 모두 커버한다.
+    private func surfaceOwning(_ wp: MaruWebPanelView) -> TerminalSurface? {
+        if let s = windows.first(where: { $0.webPanel === wp }) { return s }
+        if let quick, quick.webPanel === wp { return quick }
+        return nil
+    }
+
+    // 이 웹 패널이 속한 창의 chrome 오버레이(모달/녹음)가 열려 있는가 — hitTest가 열림이면 nil을 돌려 클릭을 아래
+    // 터미널로 통과시킨다(모달 dismiss·요소 클릭이 Zig로). anyOverlayOpen(활성 창)과 달리 그 웹 패널의 **자기 창**
+    // 세션을 조회한다(멀티 창 오라우팅 방지, code-review [9]). 소유 surface를 못 찾으면 false(통과 안 함=평소 focusable).
+    func isOverlayOpenForWebPanel(_ wp: MaruWebPanelView) -> Bool {
+        guard let session = surfaceOwning(wp)?.appSession else { return false }
+        return maru_macos_app_session_any_overlay_open(session) != 0
+    }
+
+    // 이 Cmd-조합이 maru 앱 바인딩(app_action)인가 — 웹 포커스 performKeyEquivalent가 가로챌지(true) 메뉴/WebKit에
+    // 양보할지(false) 판정한다. Zig resolver를 side-effect 없이 조회한다(PTY write 없음, handleKeyEvent와 같은
+    // keyBindingResolver 단일 출처). 웹 패널 포커스 시 그 창이 key라 activeSurface=소유 창이지만, 명시적으로 소유
+    // surface 세션을 써 멀티 창에서도 정확히 그 창의 바인딩으로 판정한다. 정규화 실패·세션 없음이면 false(양보).
+    func isWebPanelAppChord(_ wp: MaruWebPanelView, _ event: NSEvent) -> Bool {
+        guard let session = surfaceOwning(wp)?.appSession ?? appSession,
+              var keyEvent = normalizedKeyEvent(from: event) else { return false }
+        return maru_macos_app_session_key_is_app_action(session, &keyEvent) != 0
+    }
+
     // 웹 포커스 중 눌린 Cmd-조합을 maru keyDown 경로로 라우팅한다(Zig resolver가 앱 액션·모달 토글을 해석). 곧바로
     // reconcile을 돌려, 이 조합이 모달을 열었으면(⌘⇧P·⌘F·⌘,) firstResponder를 같은 이벤트 루프에서 터미널 뷰로
     // 전이한다(다음 tick까지 기다리지 않아 조합 직후 타이핑/IME가 웹뷰로 새지 않게). handleKeyDown은 기존 경로 그대로.
@@ -1708,6 +1739,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // MARU_DEBUG=1일 때만 켜지는 진단. 렌더링/스케일 문제를 추적할 때 창 제목에 live
     // scale/cell/drawable 값을 띄운다(summary 파일·launch 방식과 무관하게 제목줄만 보면 됨).
     private let debugEnabled = ProcessInfo.processInfo.environment["MARU_DEBUG"] != nil
+    // Phase 4c 웹 패널 생성 경로는 현재 디버그 env 훅 MARU_WEB_PANEL 하나뿐이다(maybeDebugOpenWebPanel). env가 없으면
+    // Zig가 web_panel을 절대 세우지 않아 웹 surface 전이는 늘 none이므로, drainWebSurfaceTransition의 매 tick FFI+
+    // surfaceDiff가 순수 낭비다. 이 값싼 1회 캐시 게이트로 평시(env 미설정) 빌드는 FFI를 통째로 건너뛴다(code-review [8]).
+    // Phase 4e에서 웹 Term 생성이 메뉴/command로 승격되면 이 게이트를 그 경로도 포함하게 확장한다(docs/web-panel.md 4e).
+    private let webPanelHookEnabled = ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil
 
     private func updateDiagnosticTitle() {
         guard debugEnabled, let window else { return }
@@ -2548,6 +2584,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 중간(터미널<웹뷰<오버레이)에 삽입하고 frame(pt·좌하단·컨테이너 좌표)을 맞춘다. 창(surface)마다 자기 웹뷰를
     // 들고, tick 중엔 activeSurface=explicitSurface라 대상 창이 정확하다. 콘텐츠·입력은 범위 밖(4d/Phase 5).
     private func drainWebSurfaceTransition() {
+        // 값싼 게이트: 웹 패널 생성 훅(MARU_WEB_PANEL)이 없으면 웹 패널이 생길 수 없어 전이가 늘 none이므로 FFI를
+        // 통째로 건너뛴다(평시 렌더 핫패스 0-FFI, code-review [8]). 훅이 켜졌을 때만 아래 권위 있는 전이 소비로 내려간다.
+        guard webPanelHookEnabled else { return }
         guard let surface = activeSurface, let session = surface.appSession,
               let container = surface.window?.contentView as? MaruTerminalContainerView else { return }
         var t = MaruAppHostWebSurfaceTransition()
@@ -3864,7 +3903,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let f = wp?.frame ?? .zero
             // 4d: 모달이 닫혀 있으면 웹뷰가 클릭/포커스를 받아야 한다(hitTest가 wp 자손을 돌려줌 = focusable). 시작 직후엔
             // 모달이 없고 터미널 뷰가 firstResponder라 web_panel_focused는 false여야 한다(웹이 포커스를 안 훔침).
-            let hit = wp?.hitTest(NSPoint(x: f.width / 2, y: f.height / 2))
+            // NSView.hitTest는 **superview 좌표**를 받는다(뷰 자기 bounds가 아님). wp.frame 중심을 superview
+            // 좌표(midX/midY)로 줘야 origin>0(하단 split·사이드바 옆)에서도 진단이 옳다(code-review [0]).
+            let hit = wp?.hitTest(NSPoint(x: f.midX, y: f.midY))
             let hitInWeb = (hit != nil) && (hit?.isDescendant(of: wp ?? NSView()) ?? false)
             let webFocused = wp.map { isWebPanelFocused($0) } ?? false
             summary += """

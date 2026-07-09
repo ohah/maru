@@ -121,18 +121,30 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
   서브클래스 override 대신 검증된 래퍼 메커니즘 — MaruMetalOverlayView와 동일). §3 드래그 중 hide는 4c 생략(빈 페이지라 jitter
   무해 — 후속). 콘텐츠·URL·브리지·스킴 핸들러·CSP·데이터스토어 격리는 **Phase 5**, IME/firstResponder 전이는 4d. 자동 검증:
   ABI struct 계약 테스트(size/offset·op enum 값) + 4a 순수 계산 단위 테스트 + macos-app-smoke의 `web_panel_subview_order_ok`/
-  `web_panel_present`/`web_panel_hittest_nil` 값 단언(단, 스모크는 backing=0이라 frame 값은 degenerate — 실제 frame·z-order
+  `web_panel_present`/`web_panel_hittest_in_web`(4d가 4c의 `_nil`을 focusable 전환하며 rename·의미 반전 — 웹 자손을 돌려주는가)
+  값 단언(단, 스모크는 backing=0이라 frame 값은 degenerate — 실제 frame·z-order
   픽셀 합성·입력 통과는 GUI 손 테스트가 닫는다).
 - 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다. **(입력 responder 전이 spike 구현 완료 — 최소 범위, ABI 무변경·Swift 전용)**: 4c의 hitTest→nil 완전 통과를
   **focusable**로 전환하고(모달 닫힘=`super.hitTest`로 웹뷰가 클릭 받아 WKWebView firstResponder→WebKit 자체 IME; 모달
-  열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합만
-  `handleKeyDown`→Zig `default_app_bindings` resolver로 라우팅; 그 외 무동작이라 터미널 IME/keyDown 경로 무회귀 — §4
-  spike 확정 근거). **모달 responder 전이**는 `reconcileWebModalFocus`가 `anyOverlayOpen` 엣지로 조정한다(웹 포커스 중
+  열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합
+  중에서도 **maru 앱 바인딩(app_action)인 것만** 가로채 `handleKeyDown`→Zig resolver로 라우팅한다 — ⌘T·⌘W·⌘1-9·⌘⇧P·⌘F·
+  ⌘,·⌘A·⌘K 등. 앱 바인딩이 **아닌** Cmd-조합은 `return false`로 **메뉴바 keyEquivalent → WebKit**에 양보한다: ⌘Q 종료·
+  ⌘H 숨김·⌘M 최소화(메뉴 전용) + ⌘C/⌘V(WebKit 편집) + ⌘Backspace/←/→(terminal 매크로). app_action 판정은
+  `maru_macos_app_session_key_is_app_action`(v100)가 **handleKeyEvent와 같은 `keyBindingResolver`를 side-effect 없이 조회** —
+  셸은 포커스가 아니므로 어느 것도 셸로 라우팅하지 않고, terminal 매크로 Cmd 조합도 write 전에 걸러 셸로 새지 않는다.
+  옛 spike는 **모든** Cmd 조합을 가로채 셸로 흘려 ⌘Q가 종료 안 되고 키보드가 갇혔었다[code-review 4c/4d]. 웹 포커스가
+  아니면 무동작이라 터미널 IME/keyDown 경로 무회귀 — §4 spike 확정 근거). **모달 responder 전이**는
+  `reconcileWebModalFocus`가 `anyOverlayOpen` 엣지로 조정한다(웹 포커스 중
   모달 열림→터미널 뷰로 makeFirstResponder, 닫힘→직전 웹뷰 복원; 전이는 기존 becomeFirstResponder/resignFirstResponder를
   그대로 태워 새 IME 로직 0). 전부 **MARU_WEB_PANEL 훅 뒤**(웹 패널 없으면 무동작)라 평시 터미널 빌드 동작 불변. 자동
   검증: swift-check·macos-app-build·macos-app-smoke(`web_panel_focused=false` — 웹이 firstResponder 안 훔침)·ABI 계약
   테스트·zig test·check-boundaries·fmt green. **실 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손
   테스트가 닫는다**(§11 수동 gate — 자동 불가). 웹 소유 키 포커스-분기(§8)·드래그 통과(§5)·web-Term lifecycle 포커스는 후속.
+  **알려진 한계(4c/4d 오버레이 focusable)**: 4c 웹 패널은 활성 pane에 얹힌 빈 `about:blank` 오버레이라, 클릭해 웹을 포커스한
+  뒤 평문 타이핑은 빈 페이지로 들어가고(셸 아님) 그 상태에서 키보드만으로 터미널에 곧장 되돌아갈 전용 키는 없다. 단
+  ⌘-nav(⌘1-9·⌘T·⌘⇧P 등 app_action)와 다른 창/탭 클릭은 위 `performKeyEquivalent` 앱-바인딩 가로채기로 **작동**하므로
+  포커스 전환으로 복귀 가능하다. 이 한계는 web surface를 Term(탭)으로 만들어 포커스가 터미널/웹 Term을 오가게 하는 **4e가
+  근본 해소**한다(빈 오버레이가 아니라 first-class surface).
 - 4e(웹 Term 통합 — 4c "후속"의 명시 슬라이스, §6): 4c는 web 패널을 활성 pane에 얹은 **디버그 오버레이**라 가려진 터미널이 뒤에서 계속 렌더된다(낭비·못 씀). 4e는 §6대로 **web surface를 Term(탭)으로 split/Term 트리에 넣어**(활성 Term만 렌더 → 터미널 대체, per-pane 탭바가 terminal/web Term을 같이 보임, Term 탭 재부모화) **first-class surface**로 만든다. **순서 권장**: 콘텐츠(Phase 5)를 오버레이 위에 쌓기 전에 4e로 surface 모델을 먼저 확정하는 게 낫다([control-plane.md] §11 "나중에 소유권 갈아엎기 회피" 정신) — 단 Phase 5 bridge는 per-WKWebView라 4e와 강결합은 아니어서 순서는 유연하다. 생성 경로도 4c의 env 훅에서 **메뉴/command로 승격**(웹 Term 열기)한다.
 - 5a~5d: `browser.*` schema/authz, isolated bridge, `maru-app://` security, minimal browser ops를 각각 별도 red test로 시작한다.
 - 7e(browser chrome UI — §8): `browser` kind용 **주소창 + back/forward/reload** nav chrome. WKWebView가 nav 함수(`goBack`/`goForward`/`reload`/`load`/`canGoBack`)를 공짜로 주므로 **UI 껍데기만** 만든다(mechanics=WebKit). GPU 셀(탭바처럼 Zig 렌더), 버튼→ABI→WKWebView API. **주소창 2모드**: ① 비활성=현재 URL 표시만 ② 편집=URL 입력→`load`. 편집 모드의 임의 URL 로드는 §7 보안(untrusted 격리·링크 라우팅)이 걸리므로 Phase 5(security) 이후. markdown kind는 주소창 불요라 kind별 분기.

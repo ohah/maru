@@ -7072,7 +7072,7 @@ pub const AppSession = struct {
     /// **[4e-2] 활성 탭으로 전환**: append 후 `focusTerm`으로 web Term을 활성화한다 — 4e-2가 활성 render 경로를
     /// activeTermIsTerminal/activeTerminalSurface로 gate했으므로 활성 web은 sentinel core를 만지지 않고 본문 blank·
     /// 크래시 0이다(§6). **[4e-3] WKWebView 부착**: computeWebSurfaceTransitions가 이 web Term을 walk해 create 전이를
-    /// 내면 Swift가 자기 pane 본문 rect에 흰 about:blank WKWebView를 붙인다(그전엔 theme 배경으로 비어 보였다).
+    /// 내면 Swift가 자기 pane 본문 rect에 인라인 흰 HTML WKWebView를 붙인다(about:blank는 다크 모드서 다크로 렌더돼 명시 흰 배경 사용; 그전엔 theme 배경으로 비어 보였다).
     pub fn maybeDebugOpenWebPanel(self: *AppSession) void {
         if (self.debug_web_term_opened) return;
         if (!self.surface_initialized) return;

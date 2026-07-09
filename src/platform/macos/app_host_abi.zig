@@ -518,6 +518,18 @@ pub export fn maru_macos_app_session_any_overlay_open(session: ?*AppSession) c_i
     return if (app_session.anyOverlayOpen()) 1 else 0;
 }
 
+// 웹 패널 포커스 중 Cmd 조합이 maru 앱 바인딩(app_action)인지 **side-effect 없이** 조회한다(PTY write·상태 변경 0).
+// Swift 웹 performKeyEquivalent가 1이면 가로채 keyDown 경로로 라우팅(⌘T·⌘⇧P·⌘F·⌘A·⌘K …), 0이면 메뉴바 keyEquivalent
+// (⌘Q/H/M)·WebKit(⌘C/V) 편집·terminal 매크로(⌘Backspace/←/→)에 양보한다 — 옛 "웹 포커스 중 모든 Cmd 조합 가로채 셸로"
+// 버그(⌘Q 종료 안 됨·⌘Backspace가 셸로 샘) 수정. handleKeyEvent와 같은 keyBindingResolver 단일 출처. session/event
+// null이거나 event 변환 실패면 0(앱 바인딩 아님 → 양보). docs/web-panel.md §4.
+pub export fn maru_macos_app_session_key_is_app_action(session: ?*AppSession, event: ?*const KeyEvent) u32 {
+    const app_session = session orelse return 0;
+    const raw_event = (event orelse return 0).*;
+    const key_event = keyEventFromAbi(raw_event) catch return 0;
+    return if (app_session.keyResolvesToAppAction(key_event)) 1 else 0;
+}
+
 // 진행 중 IME 조합을 확정(커밋)한다. Swift가 IME를 우회하는 특수키/단축키 직전에 호출해
 // marked text와 core preedit가 어긋나지 않게 한다(조합 없으면 무동작).
 pub export fn maru_macos_app_session_commit_composition(session: ?*AppSession) c_int {

@@ -99,7 +99,13 @@ const WebPanel = struct {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 99;
+pub const abi_version: u32 = 100;
+// 100: Phase 4c/4d code-review — maru_macos_app_session_key_is_app_action(순수 조회 u32 getter) 추가. 웹 패널
+// 포커스 중 Swift performKeyEquivalent가 Cmd 조합이 maru 앱 바인딩(app_action)인지 side-effect 없이 물어, app_action
+// (⌘T·⌘W·⌘1-9·⌘⇧P·⌘F·⌘,·⌘A·⌘K …)만 가로채 keyDown으로 라우팅하고 나머지(⌘Q/H/M 메뉴 전용·⌘C/V WebKit 편집·
+// ⌘Backspace/←/→ terminal 매크로)는 메뉴바 keyEquivalent/WebKit에 양보한다 — 옛 "웹 포커스 중 모든 Cmd 조합을
+// 가로채 셸로 흘림"(⌘Q가 종료 안 되고 ⌘Backspace 등이 셸로 새던) 버그 수정. handleKeyEvent와 같은 keyBindingResolver
+// 단일 출처를 재사용하되 PTY write·상태 변경 0(순수). 새 export 1개 — 구조체 offset·인자 순서 불변. docs/web-panel.md §4.
 // 99: Phase 4c — maru_macos_app_session_web_surface_transition + WebSurfaceTransition(extern struct). 활성 pane 본문에
 // 붙는 **단일 빈 WKWebView**(라이브 web-Term 트리 미진입 — app_session.web_panel 필드 하나)의 생애주기를 4a 순수
 // 계산(contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로 매 tick diff해 단일 전이 op(none/create/destroy/reframe/
@@ -4423,11 +4429,15 @@ pub const AppSession = struct {
                 for (lr.leaf.terms.items) |term| self.runtime.resize(term.surface.id, psize, self.io) catch {};
                 if (lr.leaf == active_pane) {
                     self.active_pane_rect = trect; // 상단 탭 바를 뺀 영역(좌표 origin) — recomputeActivePaneRect 동형
+                    self.active_pane_leaf_rect = lr.rect; // Phase 4c: 웹 패널 본문 rect 계산용 raw leaf rect(탭 바 포함) — recomputeActivePaneRect 동형
                     captured = true;
                 }
             }
         } else |_| {}
-        if (!captured) self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백(단일 leaf면 위 루프가 이미 세팅)
+        if (!captured) {
+            self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백(단일 leaf면 위 루프가 이미 세팅)
+            self.active_pane_leaf_rect = self.termRect(); // Phase 4c: 폴백도 raw(단일 panel=터미널 영역 전체) — recomputeActivePaneRect 동형
+        }
     }
 
     /// `defer_rebuild`=true면 dst 사이드바 재빌드를 caller가 배치(mergeSessionInto 끝 1회, code-review [4]).
@@ -10008,6 +10018,23 @@ pub const AppSession = struct {
         self.writeSummaryFromState();
         self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
         return self.last_summary;
+    }
+
+    /// 웹 패널 포커스 중 Swift performKeyEquivalent가 "이 Cmd 조합이 maru 앱 바인딩(app_action)인가"를 **side-effect
+    /// 없이** 묻는다 — app_action이면 Swift가 가로채 keyDown 경로(handleKeyEvent)로 라우팅하고(⌘T·⌘W·⌘1-9·⌘⇧P·⌘F·⌘,·
+    /// ⌘A·⌘K …), 아니면 메뉴바 keyEquivalent(⌘Q/H/M 종료·숨김·최소화)·WebKit(⌘C/V 편집)에 양보한다. 실제 handleKeyEvent와
+    /// **같은 resolver**(loaded_config.keyBindingResolver)를 쓰되 PTY write·상태 변경이 전혀 없다(순수 조회) — terminal
+    /// 매크로 Cmd 조합(⌘Backspace/←/→ 줄편집=terminal_input)이 셸로 새기 **전에** 가르는 게 요점이다. encode_options는
+    /// app_action 판정에 무관(terminal_input fallback 인코딩에만 쓰임)하므로 기본값. resolve 에러(터미널 매크로 바이트
+    /// 초과 등)면 app_action 아님(false). 웹 소유 키(⌘A/⌘F 등)를 실 콘텐츠에서 WebKit에 양보하는 포커스-분기는 Phase 5
+    /// (4c/4d 빈 web 패널은 app_action을 maru가 처리해도 무해). docs/web-panel.md §4.
+    pub fn keyResolvesToAppAction(self: *AppSession, event: terminal.KeyEvent) bool {
+        var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+        const resolved = self.loaded_config.keyBindingResolver().resolve(event, &buffer, .{}) catch return false;
+        return switch (resolved) {
+            .app_action => true,
+            else => false,
+        };
     }
 
     /// macOS Option을 Meta로 쓰는지(config input.option-as-meta 캐시). Swift keyDown이 ABI로 읽어 Option-단독 키를

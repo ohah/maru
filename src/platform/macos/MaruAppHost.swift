@@ -521,7 +521,7 @@ final class MaruWebPanelView: NSView {
     let webView: WKWebView
     // Zig 전이(surface_id)와 매칭해 create/destroy/reframe이 옳은 웹뷰를 대상으로 하게 한다(§6 안정 키).
     let surfaceId: UInt64
-    // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanel을 소유하므로 retain cycle 방지).
+    // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
 
     init(frame frameRect: NSRect, surfaceId: UInt64) {
@@ -600,9 +600,9 @@ final class MaruTerminalContainerView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("MaruTerminalContainerView는 coder 초기화 미지원") }
 
-    // Phase 4c: 웹 패널 래퍼를 터미널(맨 아래)과 오버레이(맨 위) **사이**에 삽입한다 — z-order: 터미널 < 웹뷰 <
+    // Phase 4e-3: 웹 패널 래퍼를 터미널(맨 아래)과 오버레이(맨 위) **사이**에 삽입한다 — z-order: 터미널 < 웹뷰들 <
     // 오버레이(모달이 웹뷰 위). NSView는 UIKit식 insertSubview(at:)가 없어 positioned:.below relativeTo:로 오버레이
-    // 바로 아래(=터미널 위)에 넣는다. 이후 subviews == [terminalView, webPanel, overlayView].
+    // 바로 아래(=터미널 위)에 넣는다. web Term마다 하나씩 이 사이 밴드에 쌓인다 — subviews == [terminalView, ...웹뷰들, overlayView].
     func insertWebPanel(_ v: NSView) {
         addSubview(v, positioned: .below, relativeTo: overlayView)
     }
@@ -650,16 +650,19 @@ final class TerminalSurface {
         return (window?.contentView as? MaruTerminalContainerView)?.overlayView
     }
 
-    // Phase 4c: 활성 pane 본문에 붙은 빈 WKWebView 래퍼(있으면). Zig 전이(surface_id)로 생애주기를 매칭한다.
+    // Phase 4e-3: 이 창(세션)의 web Term별 WKWebView 래퍼 dict(surface_id → view). 한 pane에 여러 web Term이
+    // 가로 탭으로 섞일 수 있고 split이면 여러 pane이 동시에 web을 보일 수 있어(§6), **web Term마다 하나**를 든다.
+    // Zig batch 전이(surface_id)로 create/destroy/reframe/hide/show를 이 dict에 적용한다(컨테이너 z-order 중간 삽입).
     // 컨테이너 서브뷰로도 살아 있지만, 빠른 조회·전이 매칭을 위해 세션별로 강참조를 든다(창이 닫히면 함께 해제).
-    var webPanel: MaruWebPanelView?
+    var webPanels: [UInt64: MaruWebPanelView] = [:]
 
-    // Phase 4d: 웹↔모달 firstResponder 전이 추적(세션별 — 멀티창 정합). reconcileWebModalFocus가 매 tick
-    // anyOverlayOpen 엣지를 본다: 웹 포커스 중 모달이 열리면(false→true) 웹→터미널 뷰로 전이(모달 입력·IME
-    // preedit가 터미널 NSTextInputClient로 흐르게)하고 webFocusStashedForModal을 세운다; 모달이 닫히면(true→false)
-    // 그 플래그가 서 있으면 직전 웹뷰로 firstResponder를 복원한다. lastOverlayOpen은 엣지 검출용 직전 값.
+    // Phase 4d/4e-3: 웹↔모달 firstResponder 전이 추적(세션별 — 멀티창 정합). reconcileWebModalFocus가 매 tick
+    // anyOverlayOpen 엣지를 본다: 웹 포커스 중 모달이 열리면(false→true) 포커스된 웹뷰→터미널 뷰로 전이(모달 입력·
+    // IME preedit가 터미널 NSTextInputClient로 흐르게)하고 그 웹뷰의 surface_id를 stashedWebFocusSurfaceId에 담는다;
+    // 모달이 닫히면(true→false) 그 id의 웹뷰가 아직 살아 있으면 firstResponder를 복원한다. lastOverlayOpen은 엣지
+    // 검출용 직전 값. surface_id로 기억하는 이유: 여러 web Term 중 **어느 것**을 복원할지 정확히 가리키기 위해서다.
     var lastOverlayOpen = false
-    var webFocusStashedForModal = false
+    var stashedWebFocusSurfaceId: UInt64?
 }
 
 // quick terminal용 떠 있는 패널. borderless NSWindow/NSPanel은 기본적으로 key가 될 수 없어 타이핑을 못
@@ -1198,10 +1201,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     // 이 웹 패널을 소유한 surface(창). 배경 창의 웹 패널 hitTest가 활성 창이 아니라 자기 창의 모달 상태로 판정하게
-    // 한다(code-review [9]). webPanel 참조 identity로 매칭해 일반 창·quick 패널을 모두 커버한다.
+    // 한다(code-review [9]). webPanels dict의 surface_id·identity로 매칭해 일반 창·quick 패널을 모두 커버한다.
     private func surfaceOwning(_ wp: MaruWebPanelView) -> TerminalSurface? {
-        if let s = windows.first(where: { $0.webPanel === wp }) { return s }
-        if let quick, quick.webPanel === wp { return quick }
+        if let s = windows.first(where: { $0.webPanels[wp.surfaceId] === wp }) { return s }
+        if let quick, quick.webPanels[wp.surfaceId] === wp { return quick }
         return nil
     }
 
@@ -1236,22 +1239,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 건드리지 않고 makeFirstResponder만 부른다 — 전이는 기존 becomeFirstResponder(imeFocus true)/resignFirstResponder
     // (commitComposition)를 그대로 태운다(새 IME 로직 없음). 단일 출처: docs/web-panel.md §4.
     func reconcileWebModalFocus() {
-        guard let surface = activeSurface, let window = surface.window, let wp = surface.webPanel else { return }
+        guard let surface = activeSurface, let window = surface.window, !surface.webPanels.isEmpty else { return }
         let open = anyOverlayOpen
         defer { surface.lastOverlayOpen = open }
         guard open != surface.lastOverlayOpen else { return } // 엣지에서만
         if open {
-            // 모달이 열렸다 — 웹이 포커스였으면 터미널 뷰로 전이(모달 입력·IME preedit가 터미널로). 복원용 플래그 세움.
-            if isWebPanelFocused(wp) {
-                surface.webFocusStashedForModal = true
+            // 모달이 열렸다 — 포커스된 web Term이 있으면 터미널 뷰로 전이(모달 입력·IME preedit가 터미널로). 복원용 id 저장.
+            if let focused = surface.webPanels.values.first(where: { isWebPanelFocused($0) }) {
+                surface.stashedWebFocusSurfaceId = focused.surfaceId
                 focusTerminalView(window)
             }
         } else {
-            // 모달이 닫혔다 — 우리가 웹→터미널로 전이했었고 웹뷰가 아직 살아 있으면 직전 웹뷰로 포커스 복원.
-            if surface.webFocusStashedForModal, wp.superview != nil {
+            // 모달이 닫혔다 — 우리가 웹→터미널로 전이했었고 그 웹뷰가 아직 살아 있으면 그 웹뷰로 포커스 복원.
+            if let sid = surface.stashedWebFocusSurfaceId, let wp = surface.webPanels[sid], wp.superview != nil {
                 window.makeFirstResponder(wp.webView)
             }
-            surface.webFocusStashedForModal = false
+            surface.stashedWebFocusSurfaceId = nil
         }
     }
 
@@ -1739,10 +1742,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // MARU_DEBUG=1일 때만 켜지는 진단. 렌더링/스케일 문제를 추적할 때 창 제목에 live
     // scale/cell/drawable 값을 띄운다(summary 파일·launch 방식과 무관하게 제목줄만 보면 됨).
     private let debugEnabled = ProcessInfo.processInfo.environment["MARU_DEBUG"] != nil
-    // Phase 4c 웹 패널 생성 경로는 현재 디버그 env 훅 MARU_WEB_PANEL 하나뿐이다(maybeDebugOpenWebPanel). env가 없으면
-    // Zig가 web_panel을 절대 세우지 않아 웹 surface 전이는 늘 none이므로, drainWebSurfaceTransition의 매 tick FFI+
-    // surfaceDiff가 순수 낭비다. 이 값싼 1회 캐시 게이트로 평시(env 미설정) 빌드는 FFI를 통째로 건너뛴다(code-review [8]).
-    // Phase 4e에서 웹 Term 생성이 메뉴/command로 승격되면 이 게이트를 그 경로도 포함하게 확장한다(docs/web-panel.md 4e).
+    // 웹 Term 생성 경로는 현재 디버그 env 훅 MARU_WEB_PANEL 하나뿐이다(maybeDebugOpenWebPanel). env가 없으면 web Term이
+    // 트리에 생기지 않아 웹 surface batch가 늘 비므로, drainWebSurfaceTransition의 매 tick FFI(count)+pane 트리 walk가
+    // 순수 낭비다. 이 값싼 1회 캐시 게이트로 평시(env 미설정) 빌드는 FFI를 통째로 건너뛴다(code-review [8]).
+    // Phase 4e-5에서 웹 Term 생성이 메뉴/command로 승격되면 이 게이트를 그 경로도 포함하게 확장한다(docs/web-panel.md 4e).
     private let webPanelHookEnabled = ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil
 
     private func updateDiagnosticTitle() {
@@ -1881,7 +1884,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 lastSeenMetalGeneration = summary.metal_generation
                 drawMetalFrame()
             }
-            drainWebSurfaceTransition() // Phase 4c: 이번 tick의 웹 패널 surface 전이(생성/파괴/reframe)를 컨테이너 NSView에 적용.
+            drainWebSurfaceTransition() // Phase 4e-3: 이번 tick의 웹 surface 전이 batch(생성/파괴/reframe/hide/show)를 컨테이너 NSView에 적용.
             reconcileWebModalFocus() // Phase 4d: 웹 패널 포커스↔모달 responder 전이(anyOverlayOpen 엣지). 웹 패널 없으면 무동작.
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotificationAuthorizationRequest() // 세팅에서 데스크톱 알림 토글을 켰으면 macOS 알림 권한을 요청한다.
@@ -2579,42 +2582,50 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    // Phase 4c: 이번 tick의 웹 패널 surface 전이 하나를 컨테이너 NSView에 적용한다. Zig가 4a 순수 계산
-    // (contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로 diff한 op만 받아 기계적으로 실행한다 — 웹뷰를 z-order
-    // 중간(터미널<웹뷰<오버레이)에 삽입하고 frame(pt·좌하단·컨테이너 좌표)을 맞춘다. 창(surface)마다 자기 웹뷰를
+    // Phase 4e-3: 이번 tick의 웹 surface 전이 **batch**를 컨테이너 NSView에 적용한다. Zig가 활성 워크스페이스 탭 pane
+    // 트리를 walk해 web Term 집합을 4a 순수 계산(contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로 diff한 op들만
+    // 받아 기계적으로 실행한다 — 각 웹뷰를 z-order 중간(터미널<웹뷰들<오버레이)에 삽입하고 **자기 pane 본문 rect**
+    // (pt·좌하단·컨테이너 좌표)에 고정한다(4c의 활성 pane 추종 완전 제거). 창(surface)마다 web Term별 webPanels dict를
     // 들고, tick 중엔 activeSurface=explicitSurface라 대상 창이 정확하다. 콘텐츠·입력은 범위 밖(4d/Phase 5).
     private func drainWebSurfaceTransition() {
-        // 값싼 게이트: 웹 패널 생성 훅(MARU_WEB_PANEL)이 없으면 웹 패널이 생길 수 없어 전이가 늘 none이므로 FFI를
-        // 통째로 건너뛴다(평시 렌더 핫패스 0-FFI, code-review [8]). 훅이 켜졌을 때만 아래 권위 있는 전이 소비로 내려간다.
+        // 값싼 게이트: 웹 패널 생성 훅(MARU_WEB_PANEL)이 없으면 web Term이 생길 수 없어 batch가 늘 비므로 FFI를 통째로
+        // 건너뛴다(평시 렌더 핫패스 0-FFI). 훅이 켜졌을 때만 아래 권위 있는 batch 소비로 내려간다. (4e-5 command 승격 시 확장.)
         guard webPanelHookEnabled else { return }
         guard let surface = activeSurface, let session = surface.appSession,
               let container = surface.window?.contentView as? MaruTerminalContainerView else { return }
-        var t = MaruAppHostWebSurfaceTransition()
-        guard maru_macos_app_session_web_surface_transition(session, &t) == Self.statusOK else { return }
-        let frame = NSRect(x: t.frame_pt_x, y: t.frame_pt_y, width: t.frame_pt_w, height: t.frame_pt_h)
-        switch Int(t.op) {
-        case Int(MaruAppHostWebSurfaceOpCreate.rawValue):
-            // id가 바뀌어 새로 만드는 경우 기존 것을 먼저 정리(single-panel 불변식상 드묾이지만 안전).
-            surface.webPanel?.removeFromSuperview()
-            let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id)
-            v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
-            container.insertWebPanel(v)
-            surface.webPanel = v
-        case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
-            if let v = surface.webPanel, v.surfaceId == t.surface_id {
-                v.removeFromSuperview()
-                surface.webPanel = nil
+        // count가 이번 tick batch를 계산(prev 전진 = tick당 1회)한다. 이어서 at(i)로 각 전이를 읽어 적용한다.
+        let count = maru_macos_app_session_web_surface_transitions_count(session)
+        var i: UInt32 = 0
+        while i < count {
+            defer { i += 1 }
+            var t = MaruAppHostWebSurfaceTransition()
+            guard maru_macos_app_session_web_surface_transition_at(session, i, &t) == Self.statusOK else { continue }
+            let frame = NSRect(x: t.frame_pt_x, y: t.frame_pt_y, width: t.frame_pt_w, height: t.frame_pt_h)
+            switch Int(t.op) {
+            case Int(MaruAppHostWebSurfaceOpCreate.rawValue):
+                // id는 앱 전역 비재사용이라 충돌은 없지만, 방어적으로 같은 id의 기존 뷰가 있으면 먼저 정리.
+                surface.webPanels[t.surface_id]?.removeFromSuperview()
+                let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id)
+                v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
+                container.insertWebPanel(v)
+                v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
+                surface.webPanels[t.surface_id] = v
+            case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
+                if let v = surface.webPanels[t.surface_id] {
+                    v.removeFromSuperview()
+                    surface.webPanels[t.surface_id] = nil
+                }
+            case Int(MaruAppHostWebSurfaceOpReframe.rawValue):
+                surface.webPanels[t.surface_id]?.frame = frame
+            case Int(MaruAppHostWebSurfaceOpHide.rawValue):
+                surface.webPanels[t.surface_id]?.isHidden = true
+            case Int(MaruAppHostWebSurfaceOpShow.rawValue):
+                if let v = surface.webPanels[t.surface_id] {
+                    v.isHidden = false
+                    v.frame = frame
+                }
+            default: break // None — 무동작
             }
-        case Int(MaruAppHostWebSurfaceOpReframe.rawValue):
-            if let v = surface.webPanel, v.surfaceId == t.surface_id { v.frame = frame }
-        case Int(MaruAppHostWebSurfaceOpHide.rawValue):
-            if let v = surface.webPanel, v.surfaceId == t.surface_id { v.isHidden = true }
-        case Int(MaruAppHostWebSurfaceOpShow.rawValue):
-            if let v = surface.webPanel, v.surfaceId == t.surface_id {
-                v.isHidden = false
-                v.frame = frame
-            }
-        default: break // None — 무동작
         }
     }
 
@@ -3887,18 +3898,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         """
 
-        // Phase 4c/4d: MARU_WEB_PANEL=1이면 빈 WKWebView가 컨테이너에 붙었는지 + 4d 입력 라우팅 상태를 값으로 남긴다
-        // (GUI 손 테스트의 자동 보조 — z-order 골든·실제 포커스 전이·IME는 여전히 손 테스트). subviews 순서 [터미널,
-        // 웹뷰, 오버레이] + webview.frame(pt)에 더해 4d 계약(모달 닫힘 시 웹 focusable·시작 시 터미널 포커스 유지)을
-        // 기록한다. **스모크는 backing=0이라 frame·hitTest 좌표가 degenerate**라 hard 단언이 아니라 값 기록이다(실제
-        // 전이는 GUI 손 테스트). env 미설정이면 무동작(요약 계약 불변). docs/web-panel.md §10 4c·4d·§11.
+        // Phase 4e-3: MARU_WEB_PANEL=1이면 활성 web Term의 WKWebView가 컨테이너에 붙었는지(계층 순서·개수) + 4d 입력
+        // 라우팅 상태를 값으로 남긴다(GUI 손 테스트의 자동 보조 — z-order 골든·실제 포커스 전이·IME·흰 화면은 여전히 손
+        // 테스트). 디버그 훅은 web Term 하나를 만들어 활성화하므로 컨테이너 subviews == [터미널, 웹뷰, 오버레이]다. 웹뷰가
+        // 터미널과 오버레이 **사이**(z-order 중간)에 있고 개수가 dict와 맞는지 단언 + webview.frame(pt) + 4d 계약(모달
+        // 닫힘 시 웹 focusable·시작 시 터미널 포커스 유지)을 기록한다. **스모크는 backing=0이라 frame·hitTest 좌표가
+        // degenerate**라 hard 단언이 아니라 값 기록이다(실제 전이는 GUI 손 테스트). env 미설정이면 무동작(요약 계약 불변).
+        // docs/web-panel.md §10 4e-3·4d·§11.
         if ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil {
             let container = activeSurface?.window?.contentView as? MaruTerminalContainerView
-            let wp = activeSurface?.webPanel
+            let panels = activeSurface?.webPanels ?? [:]
+            let wp = panels.values.first // 디버그 훅은 정확히 하나(활성 web Term).
             let subs = container?.subviews ?? []
+            // 웹뷰들이 터미널(맨 아래)과 오버레이(맨 위) 사이에 있는가 — 순서 index로 단언(멀티 웹뷰 일반화).
             var orderOk = false
-            if let container, let wp, subs.count == 3 {
-                orderOk = subs[0] === container.terminalView && subs[1] === wp && subs[2] === container.overlayView
+            if let container, !panels.isEmpty,
+               let termIdx = subs.firstIndex(where: { $0 === container.terminalView }),
+               let ovIdx = subs.firstIndex(where: { $0 === container.overlayView }) {
+                orderOk = panels.values.allSatisfy { v in
+                    guard let wi = subs.firstIndex(where: { $0 === v }) else { return false }
+                    return wi > termIdx && wi < ovIdx
+                }
             }
             let f = wp?.frame ?? .zero
             // 4d: 모달이 닫혀 있으면 웹뷰가 클릭/포커스를 받아야 한다(hitTest가 wp 자손을 돌려줌 = focusable). 시작 직후엔
@@ -3910,6 +3930,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let webFocused = wp.map { isWebPanelFocused($0) } ?? false
             summary += """
             web_panel_present=\(wp != nil)
+            web_panel_count=\(panels.count)
             web_panel_subview_order_ok=\(orderOk)
             web_panel_subview_count=\(subs.count)
             web_panel_surface_id=\(wp?.surfaceId ?? 0)

@@ -1208,10 +1208,12 @@ pub export fn maru_macos_app_session_metal_frame(
     return @intFromEnum(Status.ok);
 }
 
-// Phase 4c: 웹 패널(WKWebView) surface 전이 ABI DTO. app_host_abi.h의 MaruAppHostWebSurfaceTransition과 layout 정합
-// (아래 계약 테스트가 size/offset 강제). op·panel_kind는 u32로 marshaling(session_mod.WebSurfaceOp/PanelKind ↔ 값 정합).
+// Phase 4e-3: 웹 Term(WKWebView) surface 전이 ABI DTO. app_host_abi.h의 MaruAppHostWebSurfaceTransition과 layout 정합
+// (아래 계약 테스트가 size/offset 강제). op·panel_kind·visible은 u32로 marshaling(session_mod.WebSurfaceOp/PanelKind ↔
+// 값 정합). `visible`은 op 뒤 pad 자리에 들어가 struct size가 v99와 같다(op·visible이 8B, 이어서 surface_id 8B 정렬).
 pub const WebSurfaceTransitionAbi = extern struct {
     op: u32,
+    visible: u32, // create: 1=즉시 show, 0=hidden 생성. show/reframe=함의상 1, hide/destroy 무의미.
     surface_id: u64,
     panel_kind: u32,
     frame_pt_x: f64,
@@ -1220,17 +1222,28 @@ pub const WebSurfaceTransitionAbi = extern struct {
     frame_pt_h: f64,
 };
 
-pub export fn maru_macos_app_session_web_surface_transition(
+// Phase 4e-3: 이번 tick의 web surface 전이 batch 개수. Zig가 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합을
+// 직전 tick 집합과 4a surfaceDiff한 batch를 **계산·보관**하고 개수를 돌려준다(command_catalog식 count+at). Swift가 tick당
+// 정확히 한 번 호출해(계산·prev 전진이 여기서 일어난다) count를 받은 뒤 web_surface_transition_at으로 각 전이를 읽어
+// dict[surface_id]의 WKWebView에 create/destroy/reframe/hide/show를 적용한다. session null=0.
+pub export fn maru_macos_app_session_web_surface_transitions_count(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return @intCast(app_session.webSurfaceTransitionsCount());
+}
+
+// index번째 web surface 전이를 out에 marshaling한다(위 count 이후, 같은 tick·스레드). Zig가 4a 순수 계산으로 diff한
+// 결과를 marshaling만 한다 — NSView 연산은 Swift(op 적용). session/out null이면 null_out, 범위 밖이면 op=none으로 ok.
+pub export fn maru_macos_app_session_web_surface_transition_at(
     session: ?*AppSession,
+    index: u32,
     out: ?*WebSurfaceTransitionAbi,
 ) c_int {
-    // 이번 tick의 web surface 전이 하나(§10 4c). Zig가 4a 순수 계산으로 diff한 결과를 marshaling만 한다 —
-    // NSView 연산은 Swift(op 적용). session/out null이면 null_out, 전이 없으면 op=none으로 ok.
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const o = out orelse return @intFromEnum(Status.null_out);
-    const t = app_session.webSurfaceTransition();
+    const t = app_session.webSurfaceTransitionAt(index);
     o.* = .{
         .op = @intFromEnum(t.op),
+        .visible = if (t.visible) 1 else 0,
         .surface_id = t.surface_id,
         .panel_kind = switch (t.panel_kind) {
             .markdown => 0,
@@ -1600,6 +1613,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostWebSurfaceTransition), @sizeOf(WebSurfaceTransitionAbi));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostWebSurfaceTransition), @alignOf(WebSurfaceTransitionAbi));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "op"), @offsetOf(WebSurfaceTransitionAbi, "op"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "visible"), @offsetOf(WebSurfaceTransitionAbi, "visible"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "surface_id"), @offsetOf(WebSurfaceTransitionAbi, "surface_id"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "panel_kind"), @offsetOf(WebSurfaceTransitionAbi, "panel_kind"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_x"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_x"));

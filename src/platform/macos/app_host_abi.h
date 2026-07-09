@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 100u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 101u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -943,25 +943,29 @@ int32_t maru_macos_app_session_metal_frame(
     MaruAppHostMetalFrame *out_frame
 );
 
-/* ── Phase 4c: 웹 패널(WKWebView) surface 전이 ─────────────────────────────────────────────────
-   활성 pane 본문에 붙은 **단일 빈 WKWebView**의 생애주기 전이를 매 tick 하나 낸다(라이브 web-Term 트리 미진입 —
-   app_session.web_panel 필드 하나). Zig가 4a 순수 계산(contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로
-   직전 tick과 diff해 전이를 뽑고, Swift는 op만 기계적으로 적용한다: 웹뷰를 컨테이너 z-order 중간(터미널<웹뷰<
-   오버레이)에 삽입하고 frame(pt·좌하단·컨테이너 좌표)을 맞춘다. 콘텐츠·브리지·보안(Phase 5)·입력/IME(4d)는 범위
-   밖 — 빈 웹뷰는 hitTest→nil로 입력을 아래 터미널에 통과시킨다. docs/web-panel.md §2·§6·§10 4c·§14. */
+/* ── Phase 4e-3: 웹 Term(WKWebView) surface 전이 batch ─────────────────────────────────────────
+   활성 워크스페이스 탭의 pane 트리를 walk해 **web Term마다** WKWebView 하나를 관리한다(§6 "web surface는 Term").
+   Zig가 4a 순수 계산(contentRect·pxTopLeftToPtBottomLeft·surfaceDiff)으로 직전 tick 집합과 diff해 **batch 전이**를
+   계산·보관하고(count), Swift는 각 전이를 op만 기계적으로 적용한다: webPanels[surface_id] dict의 WKWebView를 생성
+   (z-order 중간=터미널<웹뷰들<오버레이 삽입)·파괴·reframe·hide·show한다. 각 웹뷰는 **자기 pane 본문 rect에 고정**
+   (frame=pt·좌하단·컨테이너 좌표) — 4c의 활성 pane 추종을 완전 제거한다. 같은 pane의 활성 Term만 show·비활성 탭은
+   hidden(상태 유지), 비활성 워크스페이스 탭의 web Term은 destroy. 콘텐츠·브리지·보안(Phase 5)은 범위 밖.
+   docs/web-panel.md §2·§6·§10 4e-3·§14. */
 typedef enum MaruAppHostWebSurfaceOp {
-    MaruAppHostWebSurfaceOpNone = 0,    /* 무동작(무변경 tick) */
-    MaruAppHostWebSurfaceOpCreate = 1,  /* WKWebView 생성 + frame + z-order 중간 삽입(frame_pt 유효) */
+    MaruAppHostWebSurfaceOpNone = 0,    /* 무동작(범위 초과 at 조회 폴백) */
+    MaruAppHostWebSurfaceOpCreate = 1,  /* WKWebView 생성 + frame + z-order 중간 삽입(visible=1이면 show, 0이면 hidden; frame_pt 유효) */
     MaruAppHostWebSurfaceOpDestroy = 2, /* WKWebView 파괴(surface_id만 유효) */
     MaruAppHostWebSurfaceOpReframe = 3, /* frame 갱신(frame_pt 유효) */
-    MaruAppHostWebSurfaceOpHide = 4,    /* isHidden=true(surface_id만 유효 — 4c 단일 패널선 미발생, 멀티 탭 후속) */
-    MaruAppHostWebSurfaceOpShow = 5,    /* isHidden=false + 최신 frame(frame_pt 유효 — 후속) */
+    MaruAppHostWebSurfaceOpHide = 4,    /* isHidden=true(surface_id만 유효 — 같은 pane 비활성 탭 web Term) */
+    MaruAppHostWebSurfaceOpShow = 5,    /* isHidden=false + 최신 frame(frame_pt 유효) */
 } MaruAppHostWebSurfaceOp;
 
-/* 한 tick의 웹 surface 전이. frame_pt_*는 pt·좌하단(컨테이너 content view 좌표) — WKWebView.frame에 그대로 쓴다.
-   panel_kind: 0=markdown, 1=browser(생성 시 Phase 5 trust/config 선택용 — 4c 빈 웹뷰는 시각에 무영향). */
+/* batch 한 항목의 웹 surface 전이. frame_pt_*는 pt·좌하단(컨테이너 content view 좌표) — WKWebView.frame에 그대로 쓴다.
+   visible: create 시 1=즉시 show, 0=hidden 생성(같은 pane 비활성 탭). show/reframe=함의상 1, hide/destroy엔 무의미.
+   panel_kind: 0=markdown, 1=browser(생성 시 Phase 5 trust/config 선택용). */
 typedef struct MaruAppHostWebSurfaceTransition {
     uint32_t op;         /* MaruAppHostWebSurfaceOp */
+    uint32_t visible;    /* create: 1=show, 0=hidden 생성 */
     uint64_t surface_id; /* 앱 전역 unique·비재사용(§3) — 전이 매칭 안정 키 */
     uint32_t panel_kind; /* 0=markdown, 1=browser */
     double frame_pt_x;
@@ -970,10 +974,14 @@ typedef struct MaruAppHostWebSurfaceTransition {
     double frame_pt_h;
 } MaruAppHostWebSurfaceTransition;
 
-/* 이번 tick의 웹 surface 전이 하나를 out에 채운다(위 참조). Swift는 metal_frame 직후(같은 tick·같은 스레드)에
-   호출해 op을 적용한다. session/out이 NULL이면 NullOut, 그 외 Ok. 전이가 없으면 op=None으로 Ok. */
-int32_t maru_macos_app_session_web_surface_transition(
+/* 이번 tick의 웹 surface 전이 batch 개수. Zig가 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합을 diff한 batch를
+   계산·보관하고 개수를 돌려준다. Swift는 metal_frame 직후(같은 tick·같은 스레드) 정확히 한 번 호출한다(prev 전진). session NULL=0. */
+uint32_t maru_macos_app_session_web_surface_transitions_count(MaruAppHostSession *session);
+
+/* index번째 전이를 out에 채운다(위 count 이후, 같은 tick·스레드). session/out이 NULL이면 NullOut, 범위 밖이면 op=None으로 Ok. */
+int32_t maru_macos_app_session_web_surface_transition_at(
     MaruAppHostSession *session,
+    uint32_t index,
     MaruAppHostWebSurfaceTransition *out
 );
 

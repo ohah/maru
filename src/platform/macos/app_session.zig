@@ -65,29 +65,26 @@ pub const MetalGpuShadow = metal_frame.GpuShadow;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
-// ── Phase 4c: 웹 패널 surface 전이(ABI 소비 타입) ──────────────────────────────────────────────────────────
-// 활성 pane 본문에 붙은 단일 빈 WKWebView의 생애주기를 매 tick 4a `surfaceDiff`로 계산해 **하나의 전이**로 낸다.
-// single-panel 불변식: 웹뷰는 생성부터 파괴까지 surface_id를 유지하므로 create/destroy가 같은 tick에 겹치지 않아,
-// 한 tick당 op은 최대 1개다(멀티 web-Term·탭 혼합은 후속 — 그땐 배열로 승격). docs/web-panel.md §6·§10 4c.
+// ── Phase 4e-3: 웹 Term(WKWebView) surface 전이 batch(ABI 소비 타입) ────────────────────────────────────────
+// 활성 워크스페이스 탭의 pane 트리를 walk해 **web Term마다** WKWebView 하나를 관리한다(§6 "web surface는 Term").
+// 매 tick 4a `surfaceDiff`로 직전 tick 집합과 diff해 **batch 전이**(created/destroyed/reframed/hidden/shown 여러 개)를
+// 낸다. 4c의 "단일 패널·활성 pane 추종"을 완전히 대체한다 — 각 웹뷰는 **자기 pane 본문 rect**에 고정되고, 같은 pane의
+// 활성 Term만 show·비활성 탭 web Term은 hidden(상태 유지). 비활성 워크스페이스 탭의 web Term은 집합 밖이라 destroy된다
+// (§6 "destroy 또는 미포함"). docs/web-panel.md §2·§6·§10 4e-3.
 
-/// web surface 전이 op(§6 surfaceDiff 전이의 단일-패널 투영). 값은 ABI(app_host_abi.h)의 u32와 정합해야 한다.
+/// web surface 전이 op(§6 surfaceDiff 전이). 값은 ABI(app_host_abi.h)의 u32와 정합해야 한다.
 pub const WebSurfaceOp = enum(u32) { none = 0, create = 1, destroy = 2, reframe = 3, hide = 4, show = 5 };
 
-/// 한 tick의 web surface 전이(Swift가 소비). create/reframe/show는 frame_pt(pt·좌하단·컨테이너 좌표)를 싣고,
-/// destroy/hide는 surface_id만 유효(frame_pt=0). none이면 무동작. panel_kind: markdown|browser(생성 시 설정 선택용).
+/// 한 batch 항목의 web surface 전이(Swift가 소비). create/reframe/show는 frame_pt(pt·좌하단·컨테이너 좌표)를 싣고,
+/// destroy/hide는 surface_id만 유효(frame_pt=0). `visible`은 **create 전용** — 새 web Term이 자기 pane의 활성 탭이면
+/// 1(즉시 show), 아니면 0(hidden 생성해 상태만 유지). show/reframe은 함의상 보임, hide/destroy엔 무의미. panel_kind:
+/// markdown|browser(생성 시 설정 선택용). none은 batch 밖(범위 초과 at 조회 폴백).
 pub const WebSurfaceTransition = struct {
     op: WebSurfaceOp = .none,
     surface_id: u64 = 0,
     panel_kind: web_panel_layout.PanelKind = .markdown,
+    visible: bool = false,
     frame_pt: web_panel_layout.RectPt = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-};
-
-/// 활성 pane 본문에 붙은 단일 웹 패널 상태(라이브 web-Term 아님 — split/Term 트리 미진입). env 훅 MARU_WEB_PANEL=1이
-/// 하나 바인딩한다. surface_id는 앱 전역 SurfaceIdAllocator 발급(비재사용). 활성 pane을 **동적으로** 추종하므로
-/// pane 포인터를 들지 않는다(dangling 없음) — 본문 rect는 매 tick 활성 pane leaf rect에서 계산한다.
-const WebPanel = struct {
-    surface_id: u64,
-    panel_kind: web_panel_layout.PanelKind,
 };
 
 // 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
@@ -99,7 +96,14 @@ const WebPanel = struct {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 100;
+pub const abi_version: u32 = 101;
+// 101: Phase 4e-3 — web surface 전이를 **단일 op → batch**로 승격. maru_macos_app_session_web_surface_transition(v99
+// 단일 out) 제거하고 maru_macos_app_session_web_surface_transitions_count(u32) + maru_macos_app_session_web_surface_
+// transition_at(index, out) 두 export로 대체(command_catalog식 count+at). Zig가 활성 워크스페이스 탭 pane 트리를 walk해
+// **web Term마다** 본문 rect·visible(자기 pane 활성 탭인가)을 계산하고 직전 tick 집합과 surfaceDiff한 batch를 낸다 —
+// 각 WKWebView가 **자기 pane 본문 rect에 고정**(4c의 활성 pane 추종 완전 제거). WebSurfaceTransitionAbi에 `visible`
+// (create 시 hidden 생성 여부) 필드 추가(op 뒤 pad 자리라 size 불변). Swift는 webPanels[surface_id] dict에 op을 적용.
+// docs/web-panel.md §2·§6·§10 4e-3·§14.
 // 100: Phase 4c/4d code-review — maru_macos_app_session_key_is_app_action(순수 조회 u32 getter) 추가. 웹 패널
 // 포커스 중 Swift performKeyEquivalent가 Cmd 조합이 maru 앱 바인딩(app_action)인지 side-effect 없이 물어, app_action
 // (⌘T·⌘W·⌘1-9·⌘⇧P·⌘F·⌘,·⌘A·⌘K …)만 가로채 keyDown으로 라우팅하고 나머지(⌘Q/H/M 메뉴 전용·⌘C/V WebKit 편집·
@@ -1489,10 +1493,6 @@ pub const AppSession = struct {
     // 아니라 이 rect의 origin을 기준으로 셀↔픽셀을 변환해야 마우스/커서/IME가 활성 panel에 맞는다. 레이아웃·
     // 포커스·리사이즈가 바뀔 때 recomputeActivePaneRect가 갱신한다. (w/h는 캐시만 — 현재 clamp는 surface grid로.)
     active_pane_rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    // Phase 4c: 활성 pane의 **raw leaf rect**(탭 바 포함, backing px·좌상단). active_pane_rect(paneTermRect=탭 바·패딩
-    // 제거)와 달리, 웹 패널 본문 rect는 4a `contentRect(leaf, {top=paneBarHeightPx})`로 **탭 바만** 빼 pane 탭 바가
-    // 웹뷰에 안 가리게 노출해야 하므로(§5) raw leaf rect가 필요하다. recomputeActivePaneRect가 함께 갱신한다.
-    active_pane_leaf_rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     // 사이드바 탭 슬롯 한 칸의 backing 픽셀 높이(= cell_height_px × 2.5). refreshCellMetrics가 갱신.
     // metalFrame()이 렌더러에 넘겨 사이드바 셀을 cell 높이가 아니라 이 슬롯 높이로 세로 배치한다.
     sidebar_slot_height_px: u32 = 0,
@@ -1731,15 +1731,15 @@ pub const AppSession = struct {
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
-    // Phase 4c: 활성 pane 본문에 붙은 단일 빈 웹 패널(없으면 null). **4e-1에서 dormant** — maybeDebugOpenWebPanel이
-    // 더는 이 필드를 세우지 않고 web **Term**을 트리에 만든다(§6 first-class surface). webSurfaceTransition 코드는
-    // 무변(4e-2/4e-3이 per-Term WKWebView로 재배선). 필드는 항상 null이라 전이가 늘 none이다(오버레이 경로 비활성).
-    web_panel: ?WebPanel = null,
     // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.
     debug_web_term_opened: bool = false,
-    // web surface diff의 prev(직전 tick이 낸 layout, 0~1개). webSurfaceTransition이 매 tick 4a surfaceDiff의 prev로
-    // 쓰고 cur로 전진시킨다(Swift가 전이를 적용했다는 전제). null=직전 tick에 웹 패널 없었음.
-    web_panel_prev: ?web_panel_layout.SurfaceLayout = null,
+    // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
+    // 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(cur)을 만들고 이 prev와 4a surfaceDiff한 뒤 cur로 전진시킨다
+    // (Swift가 batch를 적용했다는 전제). 비어 있으면 직전 tick에 web Term이 없었음.
+    web_panel_prev: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty,
+    // Phase 4e-3: 이번 tick의 web surface 전이 batch(count/at ABI 소비). webSurfaceTransitionsCount가 계산해 채우고
+    // 다음 count 호출까지 유효하다(command_catalog식 "한 번 계산 + 인덱스 조회").
+    web_surface_transitions: std.ArrayList(WebSurfaceTransition) = .empty,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경·바·그룹 색 프리셋 + 그룹 묶기/풀기 = ctx_menu_count)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
@@ -2542,13 +2542,11 @@ pub const AppSession = struct {
             for (leaf_rects.items) |lr| {
                 if (lr.leaf == active_pane) {
                     self.active_pane_rect = self.paneTermRect(lr.rect); // 상단 탭 바를 뺀 영역(좌표 origin)
-                    self.active_pane_leaf_rect = lr.rect; // Phase 4c: 웹 패널 본문 rect 계산용 raw leaf rect(탭 바 포함)
                     return;
                 }
             }
         } else |_| {}
         self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백: 터미널 영역(바 아래)
-        self.active_pane_leaf_rect = self.termRect(); // Phase 4c: 폴백도 raw(단일 panel=터미널 영역 전체)
     }
 
     /// panel 사이 divider 선 색(0xAARRGGBB) — 활성 하이라이트 색을 써서 두 panel 사이 경계가 또렷하게 보이게.
@@ -4482,14 +4480,12 @@ pub const AppSession = struct {
                 }
                 if (lr.leaf == active_pane) {
                     self.active_pane_rect = trect; // 상단 탭 바를 뺀 영역(좌표 origin) — recomputeActivePaneRect 동형
-                    self.active_pane_leaf_rect = lr.rect; // Phase 4c: 웹 패널 본문 rect 계산용 raw leaf rect(탭 바 포함) — recomputeActivePaneRect 동형
                     captured = true;
                 }
             }
         } else |_| {}
         if (!captured) {
             self.active_pane_rect = self.paneTermRect(self.termRect()); // 폴백(단일 leaf면 위 루프가 이미 세팅)
-            self.active_pane_leaf_rect = self.termRect(); // Phase 4c: 폴백도 raw(단일 panel=터미널 영역 전체) — recomputeActivePaneRect 동형
         }
     }
 
@@ -7075,8 +7071,8 @@ pub const AppSession = struct {
     ///
     /// **[4e-2] 활성 탭으로 전환**: append 후 `focusTerm`으로 web Term을 활성화한다 — 4e-2가 활성 render 경로를
     /// activeTermIsTerminal/activeTerminalSurface로 gate했으므로 활성 web은 sentinel core를 만지지 않고 본문 blank·
-    /// 크래시 0이다(§6). WKWebView 부착은 4e-3(그전엔 본문이 theme 배경으로 비어 보인다). 4e-1은 렌더 skip이 없어
-    /// 비활성 탭으로만 뒀으나, 4e-2가 skip을 배선해 활성 전환이 안전해졌다.
+    /// 크래시 0이다(§6). **[4e-3] WKWebView 부착**: computeWebSurfaceTransitions가 이 web Term을 walk해 create 전이를
+    /// 내면 Swift가 자기 pane 본문 rect에 흰 about:blank WKWebView를 붙인다(그전엔 theme 배경으로 비어 보였다).
     pub fn maybeDebugOpenWebPanel(self: *AppSession) void {
         if (self.debug_web_term_opened) return;
         if (!self.surface_initialized) return;
@@ -7103,52 +7099,80 @@ pub const AppSession = struct {
         return web_panel_layout.pxTopLeftToPtBottomLeft(rect_px, self.backing_height_px, self.scale_milli);
     }
 
-    /// Phase 4c: 이번 tick의 web surface 전이를 계산한다(§6·§10 4c). **4a 세 순수함수를 전부 소비**한다:
-    ///   ① `contentRect` — 활성 pane raw leaf rect에서 탭 바(top inset)를 빼 본문 rect(§5 탭 바 노출)를 얻고,
-    ///   ② `surfaceDiff` — 직전 tick layout(web_panel_prev)과 이번 layout(0~1개)을 diff해 전이를 뽑고,
-    ///   ③ `pxTopLeftToPtBottomLeft`(webFramePt) — 전이가 실을 본문 rect를 WKWebView frame(pt·좌하단)으로 변환.
-    /// single-panel이라 카테고리마다 ≤1이고 한 tick당 op은 최대 1개(create/destroy 비동시 불변식). prev를 cur로
-    /// 전진시켜(Swift가 전이를 적용한다는 전제) 다음 tick이 무변경이면 none을 낸다(§10 "diff 있을 때만 sync").
-    /// OOM(웹 surface 수 ≤1이라 사실상 불가)이면 prev를 안 건드리고 none — 다음 tick 재시도.
-    pub fn webSurfaceTransition(self: *AppSession) WebSurfaceTransition {
-        // cur: 웹 패널이 있으면 본문 rect로 1개, 없으면 0개.
-        var cur_buf: [1]web_panel_layout.SurfaceLayout = undefined;
-        const cur: []const web_panel_layout.SurfaceLayout = if (self.web_panel) |wp| blk: {
-            const body = web_panel_layout.contentRect(self.active_pane_leaf_rect, .{ .top = self.paneBarHeightPx() });
-            cur_buf[0] = .{ .surface_id = wp.surface_id, .panel_kind = wp.panel_kind, .content_rect = body, .visible = true };
-            break :blk cur_buf[0..1];
-        } else cur_buf[0..0];
+    /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
+    /// **자기 pane leaf rect**에서 탭 바(top inset)를 뺀 본문 rect(4a `contentRect`, §5 탭 바 노출)에 고정되고, visible은
+    /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). 비활성 워크스페이스
+    /// 탭은 walk 대상이 아니라 그 탭의 web Term은 집합 밖(→ destroy). OOM/미초기화면 error(호출자가 prev 불변 유지).
+    fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layout.SurfaceLayout)) !void {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return; // 활성 탭 없음 = web Term 0개(cur 빈 채로).
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
+        const bar_h = self.paneBarHeightPx();
+        for (leaf_rects.items) |lr| {
+            for (lr.leaf.terms.items, 0..) |term, i| {
+                if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
+                try out.append(self.allocator, .{
+                    .surface_id = term.surfaceId(),
+                    .panel_kind = term.web_panel_kind,
+                    .content_rect = web_panel_layout.contentRect(lr.rect, .{ .top = bar_h }),
+                    .visible = (i == lr.leaf.active_term), // 자기 pane의 활성 Term만 show(§6).
+                });
+            }
+        }
+    }
 
-        // prev: 직전 tick layout(0~1개)에서 slice.
-        var prev_buf: [1]web_panel_layout.SurfaceLayout = undefined;
-        const prev: []const web_panel_layout.SurfaceLayout = if (self.web_panel_prev) |p| blk: {
-            prev_buf[0] = p;
-            break :blk prev_buf[0..1];
-        } else prev_buf[0..0];
+    /// 4a `surfaceDiff` 결과를 self.web_surface_transitions batch로 marshaling한다(§6 전이 열거). created는 visible을
+    /// 실어 Swift가 hidden 생성 여부를 알게 하고, show/reframe은 함의상 보임(visible=true), destroy/hide는 surface_id만.
+    fn marshalWebTransitions(self: *AppSession, diff: *web_panel_layout.SurfaceDiff) !void {
+        for (diff.destroyed.items) |sid| // 먼저 파괴(id 비재사용이라 create와 충돌 없지만 명료성).
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .destroy, .surface_id = sid });
+        for (diff.created.items) |s|
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = s.visible, .frame_pt = self.webFramePt(s.content_rect) });
+        for (diff.hidden.items) |sid|
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .hide, .surface_id = sid });
+        for (diff.shown.items) |s|
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .frame_pt = self.webFramePt(s.content_rect) });
+        for (diff.reframed.items) |s|
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .frame_pt = self.webFramePt(s.content_rect) });
+    }
 
-        var diff = web_panel_layout.surfaceDiff(self.allocator, prev, cur) catch return .{ .op = .none };
+    /// Phase 4e-3: 이번 tick의 web surface 전이 batch를 계산해 self.web_surface_transitions에 채운다(§6·§10 4e-3).
+    /// **4a 세 순수함수를 전부 소비**한다: ① `contentRect`(per-pane 본문 rect) ② `surfaceDiff`(prev 집합↔cur 집합
+    /// 전이) ③ `pxTopLeftToPtBottomLeft`(webFramePt, 전이가 실을 본문 rect → WKWebView frame). prev를 cur로 전진시켜
+    /// (Swift가 batch를 적용한다는 전제) 다음 tick이 무변경이면 batch가 빈다(§10 "diff 있을 때만 sync"). 원자성: cur
+    /// 수집·marshal 중 OOM이면 transitions를 비우고 prev도 **안 전진**해 다음 tick이 같은 상태로 재시도한다(부분 적용 없음).
+    fn computeWebSurfaceTransitions(self: *AppSession) void {
+        self.web_surface_transitions.clearRetainingCapacity();
+
+        var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+        defer cur.deinit(self.allocator);
+        self.collectWebSurfaces(&cur) catch return; // OOM/미초기화 → batch 빔, prev 불변(재시도).
+
+        var diff = web_panel_layout.surfaceDiff(self.allocator, self.web_panel_prev.items, cur.items) catch return;
         defer diff.deinit(self.allocator);
 
-        // single-panel: 한 tick당 정확히 하나의 카테고리만 채워진다(create/destroy 비동시). 순서는 상호배타라 무관.
-        var out: WebSurfaceTransition = .{ .op = .none };
-        if (diff.created.items.len > 0) {
-            const s = diff.created.items[0];
-            out = .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .frame_pt = self.webFramePt(s.content_rect) };
-        } else if (diff.destroyed.items.len > 0) {
-            out = .{ .op = .destroy, .surface_id = diff.destroyed.items[0] };
-        } else if (diff.shown.items.len > 0) {
-            const s = diff.shown.items[0];
-            out = .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .frame_pt = self.webFramePt(s.content_rect) };
-        } else if (diff.hidden.items.len > 0) {
-            out = .{ .op = .hide, .surface_id = diff.hidden.items[0] };
-        } else if (diff.reframed.items.len > 0) {
-            const s = diff.reframed.items[0];
-            out = .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .frame_pt = self.webFramePt(s.content_rect) };
-        }
+        self.marshalWebTransitions(&diff) catch {
+            self.web_surface_transitions.clearRetainingCapacity(); // 부분 marshal 롤백, prev 불변(원자성).
+            return;
+        };
 
-        // prev ← cur(Swift가 이 전이를 적용한다는 전제로 상태 전진).
-        self.web_panel_prev = if (cur.len > 0) cur[0] else null;
-        return out;
+        // prev ← cur: 스토리지 swap(할당 0). cur의 defer deinit이 옛 prev 버퍼를 해제한다(marshal이 필요 값을 이미 복사).
+        std.mem.swap(std.ArrayList(web_panel_layout.SurfaceLayout), &self.web_panel_prev, &cur);
+    }
+
+    /// Phase 4e-3: 이번 tick의 web surface 전이 batch를 계산해 개수를 돌려준다(command_catalog식 count+at). Swift가
+    /// tick당 **정확히 한 번** 호출해(계산·prev 전진이 여기서 일어난다) count를 받고, `webSurfaceTransitionAt`로 각
+    /// 전이를 읽어 dict의 WKWebView에 적용한다. 계산이 count에 있는 이유: prev 전진이 tick당 1회여야 하기 때문이다.
+    pub fn webSurfaceTransitionsCount(self: *AppSession) usize {
+        self.computeWebSurfaceTransitions();
+        return self.web_surface_transitions.items.len;
+    }
+
+    /// index번째 전이(webSurfaceTransitionsCount 이후 같은 tick 유효). 범위 밖이면 op=none(무동작).
+    pub fn webSurfaceTransitionAt(self: *const AppSession, index: usize) WebSurfaceTransition {
+        if (index >= self.web_surface_transitions.items.len) return .{ .op = .none };
+        return self.web_surface_transitions.items[index];
     }
 
     /// `maru` CLI를 PATH(`~/.local/bin/maru`)에 symlink 설치한다(커맨드 팝업 "Install CLI"). main.zig install-cli와
@@ -18227,6 +18251,8 @@ pub const AppSession = struct {
         if (self.update_thread) |t| t.join();
         self.ime_inserted.deinit(self.allocator);
 
+        self.web_panel_prev.deinit(self.allocator); // Phase 4e-3: web surface diff prev 집합
+        self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
@@ -30725,6 +30751,59 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
     try std.testing.expectEqual(session.titlebar_strip_px, first.origin_y);
     try std.testing.expectEqual(@as(u32, 0), first.slot_id);
     try std.testing.expectEqual(@as(u32, 0xFF), first.background >> 24); // 불투명 바 배경
+}
+
+// Phase 4e-3: computeWebSurfaceTransitions가 활성 워크스페이스 탭 pane 트리를 walk해 **web Term마다** 전이를 낸다 —
+// 자기 pane 본문 rect(탭 바 아래) + visible(자기 pane 활성 탭인가)을 계산하고 prev를 전진시켜 무변경 tick은 batch를
+// 비운다(§6·§10 4e-3). 실 init/resize가 도는 macOS 경로라 게이트(sentinel surface·registry가 필요).
+test "web surface transitions: per-Term batch carries visibility and advances prev" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // web Term이 없으면 batch가 빈다(터미널만 있는 평시).
+    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
+
+    // 활성 pane에 web Term 하나를 만들어 활성화(디버그 훅과 같은 경로).
+    const w1 = try session.createWebTerm(.browser);
+    const pane = session.activePane();
+    try pane.terms.append(allocator, w1);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    // 첫 계산: web1 create(자기 pane 활성 탭이라 visible), 자기 pane 본문 rect는 탭 바 아래라 유한·양수 폭/높이.
+    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
+    const t1 = session.webSurfaceTransitionAt(0);
+    try std.testing.expectEqual(WebSurfaceOp.create, t1.op);
+    try std.testing.expectEqual(w1.surfaceId(), t1.surface_id);
+    try std.testing.expect(t1.visible);
+    try std.testing.expectEqual(web_panel_layout.PanelKind.browser, t1.panel_kind);
+    try std.testing.expect(t1.frame_pt.w > 0 and t1.frame_pt.h > 0);
+
+    // 무변경 tick: prev가 전진했으므로 batch가 빈다(§10 "diff 있을 때만 sync").
+    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
+
+    // 같은 pane에 web Term 하나 더(비활성 탭 — 활성은 web1 유지) → create + visible=false(hidden 생성해 상태만 유지).
+    const w2 = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, w2);
+    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
+    const t2 = session.webSurfaceTransitionAt(0);
+    try std.testing.expectEqual(WebSurfaceOp.create, t2.op);
+    try std.testing.expectEqual(w2.surfaceId(), t2.surface_id);
+    try std.testing.expect(!t2.visible); // 자기 pane 활성 탭이 아니므로 hidden 생성(§6)
+    try std.testing.expectEqual(web_panel_layout.PanelKind.markdown, t2.panel_kind);
+
+    // 범위 밖 조회는 op=none(무동작 폴백).
+    try std.testing.expectEqual(WebSurfaceOp.none, session.webSurfaceTransitionAt(5).op);
 }
 
 // pane에 Term이 여럿이면 탭 바가 제목 탭들 + 활성 Term 하이라이트를 그리는지(PR-C2) — 실 init/spawn/tick이

@@ -107,6 +107,14 @@ pub fn writeProcessExitEvent(writer: *std.Io.Writer, index: usize, surface_id: u
     }
 }
 
+/// `event <i> read-error surface=<s> err=<name>` — reader I/O 오류 종료(RuntimePtyEvent.read_error 1:1). `err`은
+/// `@errorName`(예: `WriteFailed`=write EIO=slave 사라짐/자식 죽음, `PollFailed`=POLLNVAL=fd 레이스)이라 종료
+/// **트리거를 특정**한다 — process-exit(=검증된 자식 종료)와 별개 kind로 둬, 트레이스만 봐도 "탭이 왜 사라졌나"가
+/// 검증된 exit인지 미검증 read_error인지 구분된다. 이름은 항상 식별자(공백·따옴표 없음)라 unquoted 단일 토큰.
+pub fn writeReadErrorEvent(writer: *std.Io.Writer, index: usize, surface_id: u64, message: []const u8) !void {
+    try writer.print("event {d} read-error surface={d} err={s}\n", .{ index, surface_id, message });
+}
+
 // ── reader (역파싱) ───────────────────────────────────────────────────────────────────────────────────────
 
 pub const ParseError = error{ BadHeader, BadLine } || std.mem.Allocator.Error;
@@ -124,6 +132,7 @@ pub const Event = union(enum) {
     input: []const u8, // 사용자 입력 바이트(owned)
     resize: terminal.Size,
     process_exit: ?i32, // child 종료코드(code=none이면 null)
+    read_error: []const u8, // reader I/O 오류 종료(RuntimePtyEvent.read_error) — errno 이름(owned, @errorName 파생)
 };
 
 /// 파싱된 이벤트 한 개 — 라인 메타(index·surface_id) + payload.
@@ -174,7 +183,7 @@ pub fn freeParsedEvents(allocator: std.mem.Allocator, events: []const ParsedEven
 
 fn freeEvent(allocator: std.mem.Allocator, event: Event) void {
     switch (event) {
-        .cwd_changed, .output, .input => |s| allocator.free(s),
+        .cwd_changed, .output, .input, .read_error => |s| allocator.free(s),
         else => {},
     }
 }
@@ -237,6 +246,7 @@ fn reserializeAnon(allocator: std.mem.Allocator, w: *std.Io.Writer, pe: ParsedEv
         },
         .resize => |s| try writeResizeEvent(w, idx, sid, s.cols, s.rows),
         .process_exit => |c| try writeProcessExitEvent(w, idx, sid, c),
+        .read_error => |m| try writeReadErrorEvent(w, idx, sid, m), // errno 이름 — PII 없어 그대로(anonymize 불요)
         .cwd_changed => |c| {
             const anon = try redact.anonymizeAlloc(allocator, c, opts);
             defer allocator.free(anon);
@@ -287,6 +297,11 @@ fn parseEventLine(allocator: std.mem.Allocator, line: []const u8) ParseError!Par
         const code_s = code_tok["code=".len..];
         const code: ?i32 = if (std.mem.eql(u8, code_s, "none")) null else (std.fmt.parseInt(i32, code_s, 10) catch return error.BadLine);
         break :blk .{ .process_exit = code };
+    } else if (std.mem.eql(u8, kind, "read-error")) blk: {
+        const err_tok = it.next() orelse return error.BadLine;
+        if (!std.mem.startsWith(u8, err_tok, "err=")) return error.BadLine;
+        // errno 이름을 owned로 복사한다(line은 파싱 후 해제 — output/input과 같은 수명 규칙).
+        break :blk .{ .read_error = try allocator.dupe(u8, err_tok["err=".len..]) };
     } else return error.BadLine; // 알 수 없는 kind
 
     return .{ .index = index, .surface_id = surface_id, .event = event };
@@ -485,6 +500,28 @@ test "trace base kind round-trip: output/resize/input/process-exit writer↔pars
     try std.testing.expect(parsed[3].event == .process_exit);
     try std.testing.expectEqual(@as(?i32, 0), parsed[3].event.process_exit);
     try std.testing.expectEqual(@as(?i32, null), parsed[4].event.process_exit);
+}
+
+// read-error는 process-exit(검증된 종료)와 별개 kind로 왕복돼야 한다 — 트레이스만 봐도 세션 종료 트리거가 검증된
+// exit인지 미검증 reader I/O 오류(errno 이름)인지 구분되게. "인터럽트에 좌측 탭이 왜 사라졌나"의 진단 근거.
+test "trace read-error round-trip: writeReadErrorEvent↔parseEvents (errno 이름 보존)" {
+    const a = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try writeHeader(&out.writer);
+    try writeReadErrorEvent(&out.writer, 0, 7, "WriteFailed"); // write EIO=slave 사라짐=자식 죽음 트리거
+    try writeReadErrorEvent(&out.writer, 1, 7, "PollFailed"); // POLLNVAL=fd 레이스 트리거
+
+    // 라인이 process-exit과 명확히 구분되는 별개 kind인지(직렬화 형태 확인).
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "event 0 read-error surface=7 err=WriteFailed\n") != null);
+
+    const parsed = try parseEvents(a, out.written());
+    defer freeParsedEvents(a, parsed);
+    try std.testing.expectEqual(@as(usize, 2), parsed.len);
+    try std.testing.expect(parsed[0].event == .read_error);
+    try std.testing.expectEqualStrings("WriteFailed", parsed[0].event.read_error);
+    try std.testing.expectEqualStrings("PollFailed", parsed[1].event.read_error);
+    try std.testing.expectEqual(@as(u64, 7), parsed[0].surface_id);
 }
 
 // OOM 경로 누수 회귀: 소유 문자열(output/input/cwd)을 든 이벤트를 파싱하는 도중 어느 할당이 실패해도, 방금

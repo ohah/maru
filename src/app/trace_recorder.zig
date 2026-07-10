@@ -97,6 +97,15 @@ pub const TraceRecorder = struct {
         observability.trace.writeProcessExitEvent(w, self.index, surface_id, code) catch return self.markFailed();
         self.afterEvent(line_overhead);
     }
+
+    /// reader I/O 오류 종료를 기록(`@errorName`, 예: `WriteFailed`/`PollFailed`). process-exit(=검증된 자식 종료)와
+    /// 별개 kind라, 트레이스만 봐도 세션이 **검증된 exit**로 끝났는지 **미검증 read_error**로 끝났는지 구분된다 —
+    /// "인터럽트에 탭이 왜 사라졌나"의 트리거 특정용(read_error 무검증 종료 수정의 관측 경로).
+    pub fn recordReadError(self: *TraceRecorder, surface_id: u64, message: []const u8) void {
+        const w = self.gate() orelse return;
+        observability.trace.writeReadErrorEvent(w, self.index, surface_id, message) catch return self.markFailed();
+        self.afterEvent(line_overhead);
+    }
 };
 
 test "TraceRecorder: base kind를 maru.trace.v1로 이벤트마다 flush하며 누적한다" {
@@ -108,13 +117,15 @@ test "TraceRecorder: base kind를 maru.trace.v1로 이벤트마다 flush하며 �
     rec.recordOutput(1, "hi\r\n");
     rec.recordResize(1, 80, 24);
     rec.recordProcessExit(1, 0);
+    rec.recordReadError(1, "PollFailed"); // reader I/O 오류 종료 — 트리거 진단(process-exit과 별개 kind)
 
-    // 헤더 + 3 이벤트가 순서·인덱스대로 누적된다.
+    // 헤더 + 4 이벤트가 순서·인덱스대로 누적된다.
     const t = out.written();
     try std.testing.expect(std.mem.startsWith(u8, t, "maru.trace.v1\n"));
     try std.testing.expect(std.mem.indexOf(u8, t, "event 0 output surface=1 bytes=\"hi\\r\\n\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, t, "event 1 resize surface=1 cols=80 rows=24\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, t, "event 2 process-exit surface=1 code=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "event 3 read-error surface=1 err=PollFailed\n") != null);
 }
 
 test "TraceRecorder round-trip: 기록한 trace를 replay하면 화면이 재구성된다" {

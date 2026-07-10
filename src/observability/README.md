@@ -5,7 +5,7 @@
 현재 구현:
 
 - `snapshot.zig` — `maru.snapshot.v3` 화면 스냅샷 **writer**(`renderTerminalSnapshot`) + **reader**(`parseSnapshot` → `ParsedSnapshot`, round-trip). 부분 복원(writer가 직렬화하는 size·cursor·dirty·행·cell-metadata·styled-cells만 — docs/snapshot-versioning.md "v3 reader 규칙").
-- `trace.zig` — `maru.trace.v1` **writer**(shell: `renderShellEvents`/`writeEvent`, base kind: `writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`) + **reader**(`parseEvents` → `[]ParsedEvent`, shell.* 와 base kind 전부). escape/unescape는 top-level `text_escape.zig` 단일 출처.
+- `trace.zig` — `maru.trace.v1` **writer**(shell: `renderShellEvents`/`writeEvent`, base kind: `writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`/`writeReadErrorEvent`) + **reader**(`parseEvents` → `[]ParsedEvent`, shell.* 와 base kind 전부). escape/unescape는 top-level `text_escape.zig` 단일 출처. `read-error`(reader I/O 오류 종료, `err=<errno 이름>`)는 `process-exit`(검증된 자식 종료)과 별개 kind — 세션 종료 트리거 진단용.
 - `replay.zig` — trace **재적용**(`replayTrace`). output/resize를 `core.write`/`core.resize`로 흘려 화면을 byte-for-byte 재구성(파서가 셸 이벤트·cwd 재도출), output 없는 shell-only trace는 shell.* 를 OSC로 재발행(fallback).
 
 라이브 레코딩은 `app/trace_recorder.zig`의 `TraceRecorder`(app 레이어 — 파일 I/O)가 맡는다: `MARU_TRACE=<경로>`면 `SurfaceRuntime` 훅에서 base kind를 이 폴더의 writer 함수로 누적하고 `AppSession.deinit`에서 파일로 굳힌다.

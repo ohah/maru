@@ -40,11 +40,11 @@ event 4 process-exit surface=1 code=0
 
 - schema 토큰: 첫 줄 전체가 bare 토큰 `maru.trace.v1`이다. snapshot과 같은 규칙으로 `schema=` 접두어를 쓰지 않는다.
 - `event index`: 이벤트 순서. timestamp보다 중요하다.
-- `event kind`: `output`, `input`, `resize`, `process-exit`.
+- `event kind`: `output`, `input`, `resize`, `process-exit`, `read-error`.
 - `surface`: 어느 surface에 속한 이벤트인지.
 - event별 payload.
 
-event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절을 단일 출처로 둔다. 요약하면 `process-exit`는 runtime의 `RuntimePtyEvent.exited`와 같은 사건이고, `RuntimePtyEvent.read_error`는 환경 의존적 실패라 trace에 남기지 않는다.
+event kind는 `SurfaceRuntime`의 runtime event와 1:1로 맞춘다. 정식 대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절을 단일 출처로 둔다. 요약하면 `process-exit`는 runtime의 `RuntimePtyEvent.exited`(=**검증된 자식 종료**)와 같은 사건이고, `read-error`는 `RuntimePtyEvent.read_error`(reader I/O 오류 종료 — `err=<errno 이름>`, 예: `WriteFailed`=write EIO=slave 사라짐/자식 죽음, `PollFailed`=POLLNVAL=fd 레이스)와 같은 사건이다. 둘을 **별개 kind**로 둬, 세션 종료 트리거가 검증된 exit인지 미검증 read_error인지 트레이스만 봐도 구분된다("인터럽트에 탭이 왜 사라졌나" 진단 — read_error 무검증 종료 수정의 관측 경로). `read-error` payload에는 PII가 없어(정적 errno 이름) anonymize·redaction 대상이 아니다. 재생 화면 상태엔 영향 없는 메타데이터다(replay는 skip).
 
 ### Shell integration event (semantic prompt 라이프사이클)
 
@@ -66,9 +66,9 @@ event 4 shell.command-end surface=1 row=2 exit=0
 - `command-end`의 `exit=`는 OSC 133 D의 종료코드, 없으면 `exit=none`.
 - `cwd="..."`는 `currentCwd()` 값(따옴표로 감싸고 `\` `"`·개행/CR/Tab을 escape). `ShellEvent.cwd_changed`는 값을 안 들므로(POD) 직렬화 시점의 `currentCwd()`를 적는다 — 한 batch에 cwd_changed가 둘이면(한 프레임 내 연속 cd) 둘 다 현재 cwd로 적힌다(문서화된 한계).
 
-**구현됨**: base kind(`output`/`input`/`resize`/`process-exit`) writer(`writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`) + reader(`parseEvents` — shell.* 와 base kind 전부 되읽음) + **replay 재적용**(`observability/replay.zig`의 `replayTrace`, 아래 "replay가 하는 일") + **live 레코딩**. `output`을 재생하면 파서가 화면·셸 이벤트·cwd를 전부 재도출한다(byte-for-byte).
+**구현됨**: base kind(`output`/`input`/`resize`/`process-exit`/`read-error`) writer(`writeOutputEvent`/`writeResizeEvent`/`writeInputEvent`/`writeProcessExitEvent`/`writeReadErrorEvent`) + reader(`parseEvents` — shell.* 와 base kind 전부 되읽음) + **replay 재적용**(`observability/replay.zig`의 `replayTrace`, 아래 "replay가 하는 일") + **live 레코딩**. `output`을 재생하면 파서가 화면·셸 이벤트·cwd를 전부 재도출한다(byte-for-byte).
 
-**live 레코딩**(구현됨): `MARU_TRACE=<파일경로>`로 켠다. `app/trace_recorder.zig`의 `TraceRecorder`가 `SurfaceRuntime.applyPtyEvent`(output/exited)·`resize`(output/resize/process-exit)·`writeInput`/`writeInputNonBlocking`(input) 훅에서 base kind를 host가 준 file writer에 **이벤트마다 쓰고 flush**한다(증분 append). 그래서 **크래시가 나도 직전까지의 이벤트가 디스크에 남아** 재생된다(clean 종료 불필요 — `AppSession.deinit`은 마지막 버퍼 flush + sync + close만). opt-in(미설정이면 오버헤드 0), 8 MB 상한. write가 중간에 끊겨 부분 줄이 남아도 reader(`parseEvents`)가 잘린 마지막 줄을 관대 처리한다. shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다. **input은 재생 화면엔 안 쓰인다**(입력은 child로 갔고, 화면은 child가 되돌린 output의 echo로 재구성) — 완전한 세션 기록·타이밍 분석용이다. ⚠️input은 화면에 안 뜨는 타이핑(비밀번호 프롬프트 등)까지 담아 output보다 민감하다: guardFixture/anonymize가 할당·PII는 처리하지만 bare 비밀은 못 잡으니 fixture 승격 전 사람 검토가 최종 안전망.
+**live 레코딩**(구현됨): `MARU_TRACE=<파일경로>`로 켠다. `app/trace_recorder.zig`의 `TraceRecorder`가 `SurfaceRuntime.applyPtyEvent`(output/exited/**read_error**)·`resize`(output/resize/process-exit/read-error)·`writeInput`/`writeInputNonBlocking`(input) 훅에서 base kind를 host가 준 file writer에 **이벤트마다 쓰고 flush**한다(증분 append). 그래서 **크래시가 나도 직전까지의 이벤트가 디스크에 남아** 재생된다(clean 종료 불필요 — `AppSession.deinit`은 마지막 버퍼 flush + sync + close만). opt-in(미설정이면 오버헤드 0), 8 MB 상한. write가 중간에 끊겨 부분 줄이 남아도 reader(`parseEvents`)가 잘린 마지막 줄을 관대 처리한다. shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다. **input은 재생 화면엔 안 쓰인다**(입력은 child로 갔고, 화면은 child가 되돌린 output의 echo로 재구성) — 완전한 세션 기록·타이밍 분석용이다. ⚠️input은 화면에 안 뜨는 타이핑(비밀번호 프롬프트 등)까지 담아 output보다 민감하다: guardFixture/anonymize가 할당·PII는 처리하지만 bare 비밀은 못 잡으니 fixture 승격 전 사람 검토가 최종 안전망.
 
 **아직 없는 것**(후속): GUI inspector(아래 "GUI inspector 설계 방향"), allowlist(`PATH`/`LANG` — 정책상 사용자 확인 선행).
 

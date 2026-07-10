@@ -265,8 +265,8 @@ trace schema와 replay 동작은 [Trace와 Replay](trace-replay.md)를 따른다
 | `output` | `RuntimePtyEvent.output` | PTY → surface 방향. |
 | `input` | `SurfaceRuntime.writeInput`(`TerminalInput`) | app → PTY 방향이라 대응하는 `RuntimePtyEvent`가 없다. |
 | `resize` | `SurfaceRuntime.resize` | core resize와 PTY resize를 한 event로 묶는다. |
-| `process-exit` | `RuntimePtyEvent.exited` | 같은 사건의 두 이름이다. 새 이름을 추가하지 않는다. |
-| (없음) | `RuntimePtyEvent.read_error` | 환경 의존적 실패라 trace에 남기지 않고 실패 artifact로만 남긴다. |
+| `process-exit` | `RuntimePtyEvent.exited` | 같은 사건의 두 이름이다(=**검증된 자식 종료**). 새 이름을 추가하지 않는다. |
+| `read-error` | `RuntimePtyEvent.read_error` | reader I/O 오류 종료. payload `err=<errno 이름>`(`@errorName`, PII 없음). `process-exit`(검증된 종료)과 **별개 kind**라 트레이스에서 세션 종료 트리거가 검증된 exit인지 미검증 read_error인지 구분된다. replay 화면 상태엔 영향 없는 메타데이터(skip). |
 
 Shell integration event(`shell.cwd-changed`, `shell.prompt-start`, `shell.prompt-end`, `shell.command-start`, `shell.command-end`)는 [터미널 호환성/보안 정책](terminal-compatibility-policy.md#shell-integration)의 어휘를 따른다. 이 event를 `maru.trace.v1`에 저장하는 구현 PR은 먼저 이 표와 [Trace와 Replay](trace-replay.md)의 schema를 함께 갱신해야 한다. raw OSC bytes를 각 기능이 임시로 파싱하지 않는다.
 

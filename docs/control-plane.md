@@ -198,6 +198,36 @@ Phase 1 live collector 전에는 full AppRuntime을 기다리지 않고 **앱 �
 - 명령→WKWebView API: navigate→`load`, execute_script→`evaluateJavaScript`, screenshot→`takeSnapshot`, get_cookies→`WKHTTPCookieStore`, back/forward/reload→`goBack`/`goForward`/`reload`, find_element/click/send_keys→`evaluateJavaScript`. Swift는 API 호출만, 라우팅·매핑·프레이밍은 Zig.
 - `safaridriver`는 Safari.app만 제어하므로 WKWebView용 WebDriver 서버는 직접 구현한다. agent-browser가 우리 endpoint에 붙는 통합은 별도(remote WebDriver URL 추가 — Apache-2.0 fork/PR, 또는 인터페이스 흉내).
 
+### 9.1 5a — browser core (헤드리스 스키마·디스패치·authz·제어코어 skeleton)
+
+Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **wire 스키마 + 디스패치 라우팅 + `browser` capability authz + WKWebView 제어 코어 경계(skeleton)**를 헤드리스로 확정한다. 브리지(5b)·`maru-app://`/CSP(5c)·실 ops(5d)의 토대다. 이미 존재하는 조각 위에 얹는다: `control_plane.CoreNamespace.browser`(메서드 네임스페이스 파싱)·`control_capability.ScopeClass.browser`(capability 카테고리).
+
+**① `browser.*` 메서드 스키마** — 신규 `src/session/control_browser.zig`(L2, `control_surface.zig`와 같은 "wire 스키마만" 레이어). W3C WebDriver 병렬 명령을 자체 enum + params/result DTO로 정의한다(내부 상태와 격리 — §3 정신, 내부 rename이 wire를 안 흔들게). `id`는 대상 **web surface_id**(u64):
+
+| 메서드 | params | result | → WKWebView(5d) |
+|---|---|---|---|
+| `browser.navigate` | `{id, url}` | `{ok}` | `load(URLRequest)` |
+| `browser.getUrl` | `{id}` | `{url}` | `.url` |
+| `browser.back`/`forward`/`refresh` | `{id}` | `{ok}` | `goBack`/`goForward`/`reload` |
+| `browser.executeScript` | `{id, script, args?}` | `{result}` | `evaluateJavaScript` |
+| `browser.screenshot` | `{id}` | `{png_base64}` | `takeSnapshot` |
+| `browser.findElement` | `{id, using, value}` | `{element}` | `evaluateJavaScript`(CSS/xpath) |
+| `browser.click` | `{id, element}` | `{ok}` | `evaluateJavaScript` |
+| `browser.sendKeys` | `{id, element, text}` | `{ok}` | `evaluateJavaScript` |
+| `browser.getCookies` | `{id}` | `{cookies}` | `WKHTTPCookieStore` |
+
+`BrowserMethod` enum + `parseBrowserMethod` + 각 params 파서(InvalidParams 규율은 `control_dispatch`의 `session.get` 선례) + result 직렬화. **5a 구현 범위(사용자 결정 2026-07-10)**: 위 표는 browser.* 전체 로드맵이고, **5a는 핵심 3개 `browser.navigate`/`browser.getUrl`/`browser.executeScript`의 스키마·파싱·직렬화만** 확정한다(디스패치·authz는 네임스페이스 단위라 아래 ②③이 browser.* 전부를 균일 처리 — 스키마 없는 나머지 메서드는 `method_not_found`/`not_implemented`). 나머지 메서드(screenshot/back/forward/refresh/findElement/click/sendKeys/getCookies)의 스키마·실행은 **5d**에서 확장한다.
+
+**② 디스패치** — `browser.*`는 **write-class**(WKWebView 상태 변경)라 read-only 라우터(`dispatchReadOnly`)가 아니라 write/lifecycle 경로다. 순서: `parseMethod`(browser 네임스페이스) → **authz(③)** → **대상 surface 검증**(surface_id 존재 + `kind==.web` — terminal id면 `invalid_params`/`unauthorized` 균일) → **main frame loop로 marshal**(WKWebView는 Swift·메인 스레드 소유, collector와 같은 marshal 패턴 §2) → Swift **제어 코어(④)**. 5a는 제어 코어를 skeleton으로 두어 dispatch가 `not_implemented`(또는 stub result)를 반환 — **파싱·authz·surface 검증까지 헤드리스 red test**, 실행은 5d.
+
+**③ authz(§8.3)** — `browser.*` → `ScopeClass.browser`. `browser` capability가 없으면 **존재검사 이전에 §8.3 균일 unauthorized**(`session.get`의 read-output 접기와 동형 — 존재 여부 누설 금지). `browser`는 **기본 거부/사용자 확인**(§8.3 line 140: write·lifecycle·browser는 fd 상속으로 발급 금지)이라, 일반 login shell 자동경로로는 절대 안 열리고 capability fd(§8.5) 또는 명시 grant로만. 5a는 capability category 매핑 + 거부 경로를 테스트(발급 UX는 별도).
+
+**④ WKWebView 제어 코어 skeleton (L4)** — `src/platform/macos`에 `BrowserControl`(가칭) 구조체 인터페이스. web surface_id를 받아 `TerminalSurface.webPanels[id].webView`에 §9 매핑대로 API를 호출하는 **시그니처·경계만** 5a에서 정의(navigate/getUrl/executeScript/…). 실 호출·async 완료(evaluateJavaScript/takeSnapshot은 콜백)·프레이밍은 5d. Swift는 **API 호출만**, 라우팅·매핑·wire는 Zig(§9 원칙).
+
+**⑤ 슬라이스 경계** — 5a=헤드리스(①②③④ skeleton). **5b**=isolated `WKContentWorld` 브리지(`window.maru.*`, §8.1 origin 격리). **5c**=`maru-app://` 스킴 핸들러 + 엄격 CSP + realpath/symlink/traversal 거부([web-panel.md] §7). **5d**=제어 코어 skeleton을 실 WKWebView API로 채움(navigate/executeScript/screenshot 최소 3개 먼저, fixture E2E).
+
+**⑥ TDD(전부 헤드리스)** — `control_browser` 스키마 파싱/직렬화 단위(각 메서드 params 유효/오류) + dispatch authz(browser capability 없음→unauthorized·있음→통과·surface_id 부재/`kind==.terminal`→균일 거부) red→green. WKWebView·브리지·스킴은 5b~5d.
+
 ## 10. 베이스와 결정 (clean-room)
 
 - **메커니즘**: JSON-RPC 2.0 over 로컬 stdio/socket(LSP/DAP/CDP 공유). 메커니즘만 빌리고 LSP 스펙(textDocument/*)은 채택하지 않는다. 프레이밍은 ndjson(대형은 §4.3 chunk).
@@ -273,7 +303,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 4c empty WKWebView | NSView frame/계층 단언, GUI z-order artifact | 빈 `kind=web` panel |
 | 4d input routing | responder/IME/drag spike artifact + 최소 회귀 | WKWebView focus/input routing |
 | 4e web-Term 통합 | web surface를 **Term(탭)** 으로 split/Term 트리 진입, 활성 Term만 렌더(터미널 대체 — 4c의 오버레이 낭비 해소). 세부 슬라이스·순서는 [web-panel.md] §10: 4e-1/2/3(모델·렌더 skip·per-Term WKWebView) 완료 → 4e-5(생성 command화) → **4e-4(창 간 재부모화)는 Phase 5 콘텐츠와 함께**(빈 페이지론 상태 보존 검증 vacuous — [web-panel.md] "결정된 실행 순서") | 웹 패널 first-class surface(오버레이 아님) |
-| 5a browser core | `browser.*` schema/dispatch/authz 단위 | WKWebView control core skeleton |
+| 5a browser core | `browser.*` schema/dispatch/authz 단위 **(구현 완료 — §9.1)**: `control_browser.zig`(L2) — BrowserMethod 3개(navigate/getUrl/executeScript) 스키마·`dispatchBrowser`(parse→id→**authz 균일 unauthorized·존재검사 이전**→method→params→surface kind==web→skeleton `internal_error`). `authorize` 재사용, oracle 방지 byte-identical test | WKWebView control core skeleton |
 | 5b trusted bridge | isolated world 주입/미주입 자동 E2E | trusted `window.maru.*` bridge |
 | 5c app scheme security | CSP, realpath/symlink/traversal 거부 단위 | `maru-app://` loader |
 | 5d minimal browser ops | navigate/evaluate/screenshot fixture | minimal `browser.*` |

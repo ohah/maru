@@ -7185,17 +7185,20 @@ pub const AppSession = struct {
                 // WKWebView가 분할선을 덮지 않게 한다(작은 시각 gap). top seam은 탭 바(bar_h ≫ seam)가 이미 덮으므로 불요.
                 // seam_edges 비트마스크(L=1·R=2·B=4)를 함께 실어 Swift가 그 가장자리 근처 클릭/hover를 통과시키게 한다
                 // (넓은 grab 폭 — 시각 gap과 분리). left/right는 x축, bottom은 top-left px 기준 아래(y 큰 쪽).
+                // **`seam > 0`으로 게이트**: divider 숨김(split.divider-thickness=0 → seam=0)이면 잡을 divider가 없어
+                // inset도 seam_edges도 0으로 둔다 — 안 그러면 Swift hitTest가 잡을 것 없는 가장자리서 클릭을 헛통과한다
+                // (10차 review 기각 항목이나 정합상 게이트). seam==0이라 inset.left=seam이 0이어도 비트는 안 세운다.
                 var inset: web_panel_layout.ChromeInset = .{ .top = bar_h };
                 var seam_edges: u8 = 0;
-                if (lr.rect.x > tr.x) {
+                if (seam > 0 and lr.rect.x > tr.x) {
                     inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
                     seam_edges |= 1;
                 }
-                if (lr.rect.x + lr.rect.w < tr.x + tr.w) {
+                if (seam > 0 and lr.rect.x + lr.rect.w < tr.x + tr.w) {
                     inset.right = seam; // 오른쪽 세로 divider
                     seam_edges |= 2;
                 }
-                if (lr.rect.y + lr.rect.h < tr.y + tr.h) {
+                if (seam > 0 and lr.rect.y + lr.rect.h < tr.y + tr.h) {
                     inset.bottom = seam; // 아래 가로 divider
                     seam_edges |= 4;
                 }
@@ -13555,8 +13558,7 @@ pub const AppSession = struct {
             // web-only pane(모든 Term이 web): surfaces가 비면 buildWorkspacePane이 error.EmptyPane로 **전체 복원을
             // 중단**한다 — 기본 셸 placeholder 1개를 넣어 그 pane이 기본 로그인 셸로 복원되게 한다(제목/cwd/command/
             // agent 전부 빈값 → restoreSpawn 기본 셸; 브라우저 콘텐츠는 어차피 미영속). 크기는 pane 첫 Term의 (sentinel여도
-            // 유효한) core size에서 취한다. pane.active_term은 buildWorkspacePane이 @min(active_term, terms.len-1)로
-            // clamp하므로 web active_term이 범위를 넘어도 안전(별도 보정 불요).
+            // 유효한) core size에서 취한다.
             if (surfaces.items.len == 0) {
                 const c = &pane.terms.items[0].surface.core; // sentinel이어도 size 유효(1×1)
                 try surfaces.append(arena, .{
@@ -13571,8 +13573,17 @@ pub const AppSession = struct {
                     .agent_argv = &.{},
                 });
             }
+            // active_term 보정(리뷰 [0]): web Term을 스킵했으므로 저장 active_term은 verbatim이 아니라 **원래 active_term
+            // 앞의 비-web(터미널) Term 수**로 remap한다. 활성이 터미널이면 그 압축 인덱스, 활성이 web이면 다음 터미널
+            // 인덱스가 된다. buildWorkspacePane의 @min(active_term, terms.len-1)은 상한만 clamp하지 스킵 시프트는 remap
+            // 안 하므로(그래서 [browser, termA, termB]서 termA 활성이면 복원 시 termB로 오포커스했다), 여기서 정확히 remap.
+            // web-only pane(placeholder 1개)은 앞 터미널 0개라 0.
+            var restored_active: usize = 0;
+            for (pane.terms.items[0..pane.active_term]) |t| {
+                if (t.kind != .web) restored_active += 1;
+            }
             try panes.append(arena, .{
-                .active_term = pane.active_term,
+                .active_term = restored_active,
                 .custom_name = try arena.dupe(u8, pane.custom_name orelse ""), // pane 사용자 rename(없으면 "")
                 .surfaces = try surfaces.toOwnedSlice(arena),
             });
@@ -31161,6 +31172,35 @@ test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
         try std.testing.expectEqualStrings("", s.agent_kind);
         try std.testing.expect(s.cols > 0 and s.rows > 0);
     }
+}
+
+// [10차 review 0] captureWorkspaceTab active_term remap: web Term을 스킵하면 활성 인덱스가 앞의 web 수만큼 시프트되는데
+// verbatim으로 저장하면 복원 시 엉뚱한 터미널에 포커스한다(buildWorkspacePane @min은 상한만 clamp·remap 안 함).
+// surfaces.len≥3이라야 @min이 안 가려 버그가 드러난다([term,web,term,term]서 중간 터미널 활성).
+test "captureWorkspaceTab: active_term remap — web 스킵 시 활성 터미널 인덱스 보정" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // pane = [term0(0), web(1), term2(2), term3(3)] 구성 후 term2(idx 2, 터미널) 활성.
+    session.dispatchAppAction(.new_web_tab); // [term0, web], active=web
+    session.dispatchAppAction(.new_term); // [term0, web, term2], active=term2
+    session.dispatchAppAction(.new_term); // [term0, web, term2, term3], active=term3
+    session.focusTerm(2); // active=term2(터미널, idx 2)
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 4), pane.terms.items.len);
+    try std.testing.expect(pane.terms.items[1].kind == .web);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term);
+
+    const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
+    // web(1) 스킵 → surfaces=[term0, term2, term3](3). 활성 term2의 압축 인덱스 = 앞의 비-web 수(term0만) = 1.
+    // (수정 전: verbatim 2 → buildWorkspacePane @min(2, 3-1)=2 → term3로 오포커스.)
+    try std.testing.expectEqual(@as(usize, 3), wtab.panes[0].surfaces.len);
+    try std.testing.expectEqual(@as(usize, 1), wtab.panes[0].active_term);
 }
 
 // [4e review 4] collectSessionInto: web Term은 .terminal이 아니라 .web detail(panel_kind·trust)로 직렬화한다 —

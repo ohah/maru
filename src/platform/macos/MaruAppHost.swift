@@ -700,6 +700,34 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
     """
 }
 
+// MARK: - Phase 5d: browser.* 제어 코어 (WKWebView API 실행 — L4 어댑터)
+//
+// control-plane.md §9.1 ④의 제어 코어를 실 WKWebView API로 채운다. web surface의 webView를 받아 §9 매핑대로 호출만
+// 한다(라우팅·매핑·wire는 Zig control_browser). **정책=Zig, 어댑터=Swift**. 5d 범위=핵심 3개(navigate=`load`,
+// getUrl=`.url`, executeScript=`evaluateJavaScript`). screenshot/back/forward/… 는 후속. **라이브 배선(외부 소켓 →
+// dispatchBrowser → 이 코어를 main-loop async marshal로 연결)은 1e(browser capability 발급)·async marshal 확장 대기**
+// (§8.5 browser=기본거부·fd상속 발급 금지) — 5d는 이 코어를 **fixture E2E**(smoke가 browser 패널을 직접 구동)로 확립한다.
+enum BrowserControl {
+    // browser.navigate → load(URLRequest). 유효 URL이면 로드 시작(완료는 navigationDelegate didFinish, async)하고 true.
+    @MainActor static func navigate(_ webView: WKWebView, url: String) -> Bool {
+        guard let u = URL(string: url) else { return false }
+        webView.load(URLRequest(url: u))
+        return true
+    }
+
+    // browser.getUrl → 현재 문서 URL(sync). 로드 전엔 nil.
+    @MainActor static func currentUrl(_ webView: WKWebView) -> String? {
+        webView.url?.absoluteString
+    }
+
+    // browser.executeScript → evaluateJavaScript(page world). async 콜백으로 결과(불투명 JSON 값)나 에러를 돌려준다.
+    @MainActor static func executeScript(_ webView: WKWebView, _ script: String, completion: @escaping (Result<Any, Error>) -> Void) {
+        webView.evaluateJavaScript(script) { value, error in
+            if let error { completion(.failure(error)) } else { completion(.success(value ?? NSNull())) }
+        }
+    }
+}
+
 // MARK: - Phase 4c/4d: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼 + 입력 전이 spike)
 //
 // 활성 pane 본문 rect에 붙는 **빈 WKWebView**를 감싸는 래퍼. WKWebView를 직접 컨테이너에 넣지 않고 이 래퍼로
@@ -737,6 +765,12 @@ final class MaruWebPanelView: NSView {
     var bridgePageWorldProbe: String?
     // 5b round-trip probe: isolated world에서 await maru.hello()의 server_version(핸들러 도달 + Zig dispatch 증명, "0.1.0" 기대).
     var bridgeHelloProbe: String?
+    // 5d BrowserControl fixture E2E(스모크, browser 패널): 0=초기 로드 대기, 1=data: URL navigate 완료 대기, 2=probe 완료.
+    var browserFixtureStage = 0
+    var browserFixtureUrl: String? // BrowserControl.currentUrl 결과(navigate한 data: URL 기대).
+    var browserFixtureScript: String? // BrowserControl.executeScript 결과(data: 문서의 #t 텍스트="maru5d" 기대).
+    // 5d fixture가 navigate하는 무-네트워크 data: URL(외부 로드 없이 navigate/getUrl/executeScript를 검증).
+    static let browserFixtureURL = "data:text/html,<h1 id='t'>maru5d</h1>"
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
     // 이 web 본문 rect가 split divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
@@ -852,17 +886,33 @@ extension MaruWebPanelView: WKNavigationDelegate {
     // (WKWebView·evaluateJavaScript async라 헤드리스 Zig 아니라 macos smoke E2E — control-plane.md §8.1.1 ④). 정상
     // 런에선 안 돈다(isSmokeMode 게이트 — 오버헤드 0). browser 패널은 bridgeWorld=nil이라 probe 없음.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard controller?.isSmokeMode == true, let world = bridgeWorld else { return }
-        webView.evaluateJavaScript("typeof window.maru", in: nil, in: world) { [weak self] result in
-            if case .success(let v) = result { self?.bridgeIsolatedProbe = v as? String }
+        guard controller?.isSmokeMode == true else { return }
+        if let world = bridgeWorld {
+            // 5b 신뢰 브리지 격리 probe(trusted 패널).
+            webView.evaluateJavaScript("typeof window.maru", in: nil, in: world) { [weak self] result in
+                if case .success(let v) = result { self?.bridgeIsolatedProbe = v as? String }
+            }
+            webView.evaluateJavaScript("typeof window.maru", in: nil, in: .page) { [weak self] result in
+                if case .success(let v) = result { self?.bridgePageWorldProbe = v as? String }
+            }
+            // round-trip: isolated world에서 maru.hello()를 await(callAsyncJavaScript는 Promise를 기다림)해 server_version을
+            // 얻는다 → 핸들러 도달 + origin 통과 + Zig dispatchBridge 응답까지 자동 증명("0.1.0" 기대).
+            webView.callAsyncJavaScript("return (await window.maru.hello()).result.server_version", arguments: [:], in: nil, in: world) { [weak self] result in
+                if case .success(let v) = result { self?.bridgeHelloProbe = v as? String }
+            }
+            return
         }
-        webView.evaluateJavaScript("typeof window.maru", in: nil, in: .page) { [weak self] result in
-            if case .success(let v) = result { self?.bridgePageWorldProbe = v as? String }
-        }
-        // round-trip: isolated world에서 maru.hello()를 await(callAsyncJavaScript는 Promise를 기다림)해 server_version을
-        // 얻는다 → 핸들러 도달 + origin 통과 + Zig dispatchBridge 응답까지 자동 증명("0.1.0" 기대).
-        webView.callAsyncJavaScript("return (await window.maru.hello()).result.server_version", arguments: [:], in: nil, in: world) { [weak self] result in
-            if case .success(let v) = result { self?.bridgeHelloProbe = v as? String }
+        // 5d BrowserControl fixture E2E(browser/untrusted 패널). 2단계: ① 초기 흰 HTML 로드 완료 → data: URL navigate,
+        // ② 그 data: 로드 완료 → getUrl/executeScript로 navigate·읽기·스크립트 실행을 자동 증명(무-네트워크).
+        if browserFixtureStage == 0 {
+            browserFixtureStage = 1
+            _ = BrowserControl.navigate(webView, url: Self.browserFixtureURL)
+        } else if browserFixtureStage == 1 {
+            browserFixtureStage = 2
+            browserFixtureUrl = BrowserControl.currentUrl(webView) // navigate한 data: URL이어야 함(getUrl 검증).
+            BrowserControl.executeScript(webView, "document.getElementById('t').textContent") { [weak self] result in
+                if case .success(let v) = result { self?.browserFixtureScript = v as? String } // "maru5d" 기대.
+            }
         }
     }
 }
@@ -4257,6 +4307,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             bridge_isolated_probe=\(wp?.bridgeIsolatedProbe ?? "pending")
             bridge_pageworld_probe=\(wp?.bridgePageWorldProbe ?? "pending")
             bridge_hello_version=\(wp?.bridgeHelloProbe ?? "pending")
+            browser_fixture_url=\(wp?.browserFixtureUrl ?? "pending")
+            browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

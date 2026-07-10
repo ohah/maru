@@ -359,13 +359,15 @@ pub const SurfaceRuntime = struct {
                 if (link.trace_recorder) |rec| rec.recordProcessExit(link.surface_id, exitCode(exited.status));
             },
             .read_error => |read_error| {
-                _ = read_error.message;
                 // A read error means the PTY is no longer usable. Latch the
                 // surface as exited (mirroring the .exited path) so later input
                 // and resize are rejected with ProcessExited instead of being
                 // routed to a dead PTY adapter.
                 const link = self.linkByPty(read_error.pty_id) orelse return error.UnknownPty;
                 link.surface.process_state = .exited;
+                // MARU_TRACE: read_error를 errno 이름과 함께 기록 — process-exit(검증된 종료)와 별개 kind라, 트레이스에서
+                // 세션 종료 트리거가 검증된 exit인지 미검증 read_error인지 구분된다("인터럽트에 탭이 왜 사라졌나" 진단).
+                if (link.trace_recorder) |rec| rec.recordReadError(link.surface_id, read_error.message);
                 return error.ReadFailed;
             },
         }
@@ -550,6 +552,37 @@ test "runtime records base kind to trace recorder and replay reconstructs the sc
     const rep_screen = try replayed.dumpUtf8(allocator);
     defer allocator.free(rep_screen);
     try std.testing.expectEqualStrings(src_screen, rep_screen);
+}
+
+// read_error(reader I/O 오류 종료)도 trace에 기록돼야 한다 — process-exit(검증된 자식 종료)와 **별개 kind**(errno
+// 이름)라, 트레이스만 봐도 세션 종료 트리거가 검증된 exit인지 미검증 read_error인지 구분된다(Ctrl+C에 탭이 왜
+// 사라졌나 진단). applyPtyEvent는 read_error를 surface exited로 latch하고 error.ReadFailed를 돌려주므로 그걸 기대한다.
+test "runtime records read_error to trace recorder with errno name (process-exit과 별개 kind)" {
+    const allocator = std.testing.allocator;
+    var runtime = SurfaceRuntime.init(allocator);
+    defer runtime.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var rec = TraceRecorder.init(&out.writer);
+
+    var surface = try surface_mod.Surface.init(allocator, 7, .{ .cols = 8, .rows = 2 });
+    defer surface.deinit();
+    var fake_pty = FakePty.init(allocator);
+    defer fake_pty.deinit();
+    _ = try runtime.attach(&surface, 10, fake_pty.io());
+    try runtime.setSurfaceTraceRecorder(surface.id, &rec);
+
+    // read_error는 surface를 exited로 latch하고 error.ReadFailed를 돌려준다(dead adapter로 라우팅 거부).
+    try std.testing.expectError(error.ReadFailed, runtime.applyPtyEvent(.{
+        .read_error = .{ .pty_id = 10, .message = "WriteFailed" },
+    }, std.testing.io));
+    try std.testing.expectEqual(surface_mod.ProcessState.exited, surface.process_state);
+
+    // trace에 errno 이름이 read-error kind로 남는다(process-exit이 아니라).
+    const t = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, t, "read-error surface=7 err=WriteFailed\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "process-exit surface=7") == null); // read_error는 process-exit로 안 샌다
 }
 
 // 멀티 surface(탭/split) trace는 한 파일에 여러 surface가 섞인다 — replay는 한 core에 한 surface만 재구성해야

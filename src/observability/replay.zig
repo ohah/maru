@@ -72,6 +72,7 @@ fn replayOne(core: *terminal.TerminalCore, pe: trace.ParsedEvent, has_output: bo
         .resize => |size| core.resize(size.cols, size.rows) catch return error.WriteFailed,
         .input => {}, // 사용자 입력은 child로 갔던 것 — 화면 상태엔 직접 영향 없음(child 출력이 output으로 옴)
         .process_exit => {}, // 메타데이터(화면 상태 아님)
+        .read_error => {}, // reader I/O 오류 종료 — 메타데이터(화면 상태 아님; 트리거 진단용)
         // ── shell.* : output이 있으면 파생이라 skip, 없으면 OSC 재발행(semantic replay) ──
         .prompt_start => |row| if (!has_output) {
             try cursorTo(core, row);

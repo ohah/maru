@@ -523,6 +523,14 @@ final class MaruWebPanelView: NSView {
     let surfaceId: UInt64
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
+    // 이 web 본문 rect가 split divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
+    // show 전이가 갱신한다. hitTest가 그 가장자리 margin 안 클릭/hover를 통과시켜 아래 터미널 뷰의 divider 드래그·resize
+    // 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭 분리 — 4e review 0 후속). 0이면 통과 없음(모든 가장자리 바깥 경계).
+    var seamEdges: UInt32 = 0
+    // divider grab을 위해 seam 가장자리서 통과시킬 밴드 폭(pt). divider.hitTest 허용폭(cell/2+2 px)을 넉넉히 덮어 그 안
+    // 클릭이 아래 터미널 뷰 dividerAtPoint에 닿게 한다. (빈 흰 페이지라 이 밴드에 눌릴 웹 콘텐츠가 없어 무해 — Phase 5
+    // 실콘텐츠에선 seam-only + 정확 허용폭으로 좁힐 여지. 지금은 넓게 잡아 grab 편의를 우선.)
+    static let dividerGrabBand: CGFloat = 10
 
     init(frame frameRect: NSRect, surfaceId: UInt64) {
         self.surfaceId = surfaceId
@@ -549,6 +557,17 @@ final class MaruWebPanelView: NSView {
     // 훅 뒤라 평시 무영향.)
     override func hitTest(_ point: NSPoint) -> NSView? {
         if controller?.isOverlayOpenForWebPanel(self) == true { return nil }
+        // divider grab 분리(4e review 0 후속): seam 가장자리(Zig seam_edges) margin 안 클릭/hover는 nil로 통과시켜, 아래
+        // 터미널 뷰가 event를 받아 dividerAtPoint로 드래그·resize 커서를 처리하게 한다 — WKWebView는 native라 자기 frame
+        // 클릭을 삼키므로, 이걸로 시각 gap은 작게(Zig seam inset) 두고 grab 폭만 넓힌다. point는 superview(=self.frame) 좌표,
+        // frame은 pt 좌하단(webFramePt y-flip)이라 bottom seam=minY. top은 탭 바라 seam_edges에 없다.
+        if seamEdges != 0 {
+            let m = Self.dividerGrabBand
+            let f = frame
+            if (seamEdges & 1) != 0, point.x <= f.minX + m { return nil } // 왼쪽 세로 divider
+            if (seamEdges & 2) != 0, point.x >= f.maxX - m { return nil } // 오른쪽 세로 divider
+            if (seamEdges & 4) != 0, point.y <= f.minY + m { return nil } // 아래 가로 divider(좌하단 원점=minY가 아래)
+        }
         return super.hitTest(point)
     }
 
@@ -2614,6 +2633,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 surface.webPanels[t.surface_id]?.removeFromSuperview()
                 let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id)
                 v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
+                v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
                 container.insertWebPanel(v)
                 v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
                 surface.webPanels[t.surface_id] = v
@@ -2623,13 +2643,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     surface.webPanels[t.surface_id] = nil
                 }
             case Int(MaruAppHostWebSurfaceOpReframe.rawValue):
-                surface.webPanels[t.surface_id]?.frame = frame
+                if let v = surface.webPanels[t.surface_id] {
+                    v.frame = frame
+                    v.seamEdges = t.seam_edges // split 변화로 맞닿는 divider 가장자리가 바뀔 수 있어 reframe서 갱신.
+                }
             case Int(MaruAppHostWebSurfaceOpHide.rawValue):
                 surface.webPanels[t.surface_id]?.isHidden = true
             case Int(MaruAppHostWebSurfaceOpShow.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
                     v.isHidden = false
                     v.frame = frame
+                    v.seamEdges = t.seam_edges
                 }
             default: break // None — 무동작
             }

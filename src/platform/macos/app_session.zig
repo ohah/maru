@@ -85,6 +85,9 @@ pub const WebSurfaceTransition = struct {
     panel_kind: web_panel_layout.PanelKind = .markdown,
     visible: bool = false,
     frame_pt: web_panel_layout.RectPt = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    // 이 web 본문 rect가 divider에 맞닿는 가장자리 비트마스크(L=1·R=2·B=4) — create/show/reframe에 실어 Swift hitTest가
+    // 그 가장자리 근처 클릭/hover를 통과시켜 넓은 divider grab을 준다(§10 4e review 0 후속: gap↔grab 분리). destroy/hide 무의미.
+    seam_edges: u8 = 0,
 };
 
 // 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
@@ -96,7 +99,10 @@ pub const WebSurfaceTransition = struct {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 102;
+pub const abi_version: u32 = 103;
+// 103: 웹 패널 divider grab 분리 — WebSurfaceTransitionAbi에 seam_edges(u32, panel_kind 뒤 pad 자리 → struct size 불변)
+// 추가. Zig가 각 web 본문 rect의 divider 맞닿는 가장자리(L=1·R=2·B=4)를 실어, Swift hitTest가 그 가장자리 근처 클릭/hover를
+// 통과시켜 아래 터미널 뷰의 divider 드래그·resize 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭 분리 — [4e review 0] 후속).
 // 102: Phase 4e-5 — 웹 브라우저 탭 생성 command화(new_web_tab). FrameSummary에 web_surfaces_present(u32) 추가 —
 // 살아 있는 web Term 존재 신호로 Swift drainWebSurfaceTransition 게이트가 env 훅(MARU_WEB_PANEL) 없이 command 생성
 // web surface도 그린다. quit_decision 뒤 4B tail padding을 채워 struct @sizeOf는 176으로 불변(offset 대조로 정합 고정).
@@ -7176,14 +7182,27 @@ pub const AppSession = struct {
             for (lr.leaf.terms.items, 0..) |term, i| {
                 if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
                 // 각 leaf 가장자리가 바깥 경계(termRect)가 아니면 형제 pane과 맞닿는 **seam** → seam만큼 본문 rect를 들여
-                // WKWebView가 분할선을 덮지 않게 한다. top seam은 탭 바(bar_h ≫ seam)가 이미 그 영역을 덮으므로 추가 inset 불요.
+                // WKWebView가 분할선을 덮지 않게 한다(작은 시각 gap). top seam은 탭 바(bar_h ≫ seam)가 이미 덮으므로 불요.
+                // seam_edges 비트마스크(L=1·R=2·B=4)를 함께 실어 Swift가 그 가장자리 근처 클릭/hover를 통과시키게 한다
+                // (넓은 grab 폭 — 시각 gap과 분리). left/right는 x축, bottom은 top-left px 기준 아래(y 큰 쪽).
                 var inset: web_panel_layout.ChromeInset = .{ .top = bar_h };
-                if (lr.rect.x > tr.x) inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
-                if (lr.rect.x + lr.rect.w < tr.x + tr.w) inset.right = seam; // 오른쪽 세로 divider
-                if (lr.rect.y + lr.rect.h < tr.y + tr.h) inset.bottom = seam; // 아래 가로 divider
+                var seam_edges: u8 = 0;
+                if (lr.rect.x > tr.x) {
+                    inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
+                    seam_edges |= 1;
+                }
+                if (lr.rect.x + lr.rect.w < tr.x + tr.w) {
+                    inset.right = seam; // 오른쪽 세로 divider
+                    seam_edges |= 2;
+                }
+                if (lr.rect.y + lr.rect.h < tr.y + tr.h) {
+                    inset.bottom = seam; // 아래 가로 divider
+                    seam_edges |= 4;
+                }
                 try out.append(self.allocator, .{
                     .surface_id = term.surfaceId(),
                     .panel_kind = term.web_panel_kind,
+                    .seam_edges = seam_edges,
                     .content_rect = web_panel_layout.contentRect(lr.rect, inset),
                     .visible = (i == lr.leaf.active_term), // 자기 pane의 활성 Term만 show(§6).
                 });
@@ -7197,13 +7216,13 @@ pub const AppSession = struct {
         for (diff.destroyed.items) |sid| // 먼저 파괴(id 비재사용이라 create와 충돌 없지만 명료성).
             try self.web_surface_transitions.append(self.allocator, .{ .op = .destroy, .surface_id = sid });
         for (diff.created.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = s.visible, .frame_pt = self.webFramePt(s.content_rect) });
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = s.visible, .seam_edges = s.seam_edges, .frame_pt = self.webFramePt(s.content_rect) });
         for (diff.hidden.items) |sid|
             try self.web_surface_transitions.append(self.allocator, .{ .op = .hide, .surface_id = sid });
         for (diff.shown.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .frame_pt = self.webFramePt(s.content_rect) });
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .frame_pt = self.webFramePt(s.content_rect) });
         for (diff.reframed.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .frame_pt = self.webFramePt(s.content_rect) });
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .frame_pt = self.webFramePt(s.content_rect) });
     }
 
     /// Phase 4e-3: 이번 tick의 web surface 전이 batch를 계산해 self.web_surface_transitions에 채운다(§6·§10 4e-3).
@@ -31201,6 +31220,12 @@ fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Alloca
         try std.testing.expectEqual(rect.y + bar_h, cr.y); // top은 항상 탭 바(seam 추가 inset 없음)
         try std.testing.expectEqual(rect.w - el - er, cr.w);
         try std.testing.expectEqual(rect.h - bar_h - eb, cr.h);
+        // seam_edges 비트마스크(L=1·R=2·B=4)는 inset이 걸린 가장자리와 정확히 일치해야 한다(Swift hitTest 통과의 단일 출처).
+        var expected_mask: u8 = 0;
+        if (el > 0) expected_mask |= 1;
+        if (er > 0) expected_mask |= 2;
+        if (eb > 0) expected_mask |= 4;
+        try std.testing.expectEqual(expected_mask, s.seam_edges);
     }
     return saw;
 }

@@ -85,6 +85,10 @@ pub const SurfaceLayout = struct {
     content_rect: Rect,
     /// 이 tick에 화면에 보여야 하는가(활성 탭). false면 존재하되 hidden(상태 유지).
     visible: bool,
+    /// 이 web 본문 rect의 어느 가장자리가 split divider(형제 pane 경계)에 맞닿는가 — 비트마스크(left=1·right=2·bottom=4,
+    /// top은 탭 바라 divider 없음). Swift가 WKWebView hitTest에서 그 가장자리 근처 클릭/hover를 **통과**시켜 아래 터미널
+    /// 뷰의 divider 드래그·resize 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭을 분리 — WKWebView가 native라 안 삼키게).
+    seam_edges: u8 = 0,
 };
 
 /// prev→cur surface 집합의 순수 diff(§6). Swift가 소비할 NSView 연산을 **전이(transition)**로 낸다 — 매 tick
@@ -151,7 +155,9 @@ pub fn surfaceDiff(
         } else if (p.visible and !c.visible) {
             try diff.hidden.append(gpa, c.surface_id); // 보임 → 숨김.
         } else if (p.visible and c.visible) {
-            if (!rectEql(p.content_rect, c.content_rect)) try diff.reframed.append(gpa, c); // 둘 다 보임 + rect 변경.
+            // 둘 다 보임 + rect 또는 seam_edges 변경(seam 변화는 거의 rect 변화 동반이나 방어적으로 함께 비교 — Swift가
+            // frame·seamEdges를 reframe에서 갱신하므로 seam-only 변화도 놓치지 않는다).
+            if (!rectEql(p.content_rect, c.content_rect) or p.seam_edges != c.seam_edges) try diff.reframed.append(gpa, c);
         }
         // hidden→hidden: 무동작(숨은 뷰에 frame set 안 함 — §3). rect는 다음 shown에서 실림.
     }

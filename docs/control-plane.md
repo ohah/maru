@@ -144,6 +144,9 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
 
 **⑤ 슬라이스 경계** — 5b=브리지 메커니즘·`isMainFrame`·격리 E2E(fixture). **5c**=`maru-app://` origin exact-pin·엄격 CSP·realpath/symlink/traversal 스킴 샌드박스. **5d**=browser.* 실 ops(browser 패널 navigate/evaluate). 실 `window.maru.*` API·신뢰 UI=Phase 7.
 
+**⑥ 구현 상태**
+- **5b-1(브리지 디스패치 코어 — 구현 완료, L2 순수·헤드리스)**: `src/session/control_bridge.zig` — `dispatchBridge(gpa, request_bytes, server_version)`가 신뢰 브리지 요청 한 줄(JSON-RPC 2.0)을 처리해 응답 한 줄을 만든다. **auth 없음**(신뢰는 Swift가 origin/frame으로 확립 — 위 ②). 5b 최소 method = `hello`→`{protocol, server_version}`(round-trip 증명), 미지원 method→`method_not_found`, 비-request→`invalid_request`. wire 스키마는 소켓과 동일(cp.parseMessage/serializeError/writeId 재사용). C-ABI = `maru_macos_app_bridge_dispatch`(app_host_abi.{zig,h}). server_version은 소켓 hello와 같은 단일 출처(`control_hello_version`). 헤드리스 테스트(hello round-trip·method_not_found·invalid_request·parse 실패·minified). **범위 밖(5b-2)**: Swift `WKContentWorld`·`WKScriptMessageHandlerWithReply`·`window.maru` shim·origin/frame 검증·격리 smoke.
+
 ### 8.2 소켓 권한·peer-cred
 - 0700 전용 디렉터리 + socket path 0600. **1b 구현 확정(`control_socket.zig`)**: 권한은 `umask`가 아니라 **bind 후 `chmod(path,0600)`** 로 고정한다 — 프로세스 전역 `umask`는 멀티스레드 앱에서 다른 스레드와 경합하므로 배제하고, bind~chmod 사이 창은 부모 dir 0700이 덮는다(same-uid는 신뢰 경계 안). `fchmod(fd)`는 쓰지 않는다(spike -1). 심볼릭 링크·소유자 검증은 `fstatat(SYMLINK_NOFOLLOW)`로 bind 결과가 S_IFSOCK·소유자==우리·0600인지 확인.
 - **stale 소켓 판별(§4.2)**: `flock`은 소켓 fd가 아니라 **별도 `<key>.lock` regular 파일**에 건다(macOS는 소켓 fd `flock`이 `ENOTSUP`). lock 취득 성공=옛 소유자 부재→unlink-then-bind, 실패(EWOULDBLOCK)=살아있는 인스턴스→소켓 unlink 금지·중단. bind 이후 단계 실패 시 자기 lock 파일도 errdefer로 정리(빈 잔해 누적 방지). **다른 인스턴스**의 crash 잔해는 start마다 같은 flock 메커니즘으로 회수한다(§4.2 stale prune — `pruneStaleSockets`).

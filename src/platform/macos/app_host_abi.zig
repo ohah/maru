@@ -1349,6 +1349,41 @@ pub export fn maru_macos_app_csp_header(out_ptr: ?[*]u8, out_cap: usize) i64 {
     return @intCast(csp.len);
 }
 
+// Track C 5b: 신뢰 웹 브리지(window.maru.*) 요청 디스패치(5b-1 코어). Swift가 신뢰(markdown) 패널의 isolated
+// WKContentWorld 메시지 핸들러 진입에서 **frameInfo.isMainFrame + securityOrigin(maru-app://app) exact-pin을 먼저
+// 검증**(신뢰 게이트)한 뒤, 통과한 요청 JSON 한 줄을 넘기면 control_bridge.dispatchBridge로 응답 JSON을 만들어 out에
+// 쓴다. 정책=Zig(디스패치·wire), 어댑터=Swift(world·핸들러·origin 검증). server_version은 소켓 hello와 같은 단일
+// 출처(control_hello_version). 반환: >=0 = out에 쓴 응답 길이. -1=out 용량 부족, -2=NULL 포인터, -3=OOM.
+pub export fn maru_macos_app_bridge_dispatch(
+    req_ptr: ?[*]const u8,
+    req_len: usize,
+    out_ptr: ?[*]u8,
+    out_cap: usize,
+) i64 {
+    const rp = req_ptr orelse return -2;
+    const op = out_ptr orelse return -2;
+    const reply = maru.session.control_bridge.dispatchBridge(allocator, rp[0..req_len], control_hello_version) catch return -3;
+    defer allocator.free(reply);
+    if (reply.len > out_cap) return -1;
+    @memcpy(op[0..reply.len], reply);
+    return @intCast(reply.len);
+}
+
+test "maru_macos_app_bridge_dispatch export: hello=len>0, 미지원=method_not_found 응답, null=-2" {
+    var out: [512]u8 = undefined;
+    const hello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}";
+    const n = maru_macos_app_bridge_dispatch(hello.ptr, hello.len, &out, out.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(n)], "server_version") != null);
+    // 미지원 method도 **응답 바이트**(method_not_found 에러)를 돌려준다(음수 아님 — dispatch가 정상 처리).
+    const bad = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"nope\"}";
+    const m = maru_macos_app_bridge_dispatch(bad.ptr, bad.len, &out, out.len);
+    try std.testing.expect(m > 0);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(m)], "-32601") != null);
+    // NULL 포인터 → -2.
+    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_bridge_dispatch(null, 0, &out, out.len));
+}
+
 test "maru_macos_app_csp_header export: 단일출처 복사 + cap 부족 -1 + null -2" {
     var buf: [512]u8 = undefined;
     const n = maru_macos_app_csp_header(&buf, buf.len);

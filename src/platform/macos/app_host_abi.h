@@ -1005,6 +1005,15 @@ int64_t maru_macos_app_resolve_app_asset(
 /* maru-app:// 응답 CSP 헤더(5c-2c, 단일 출처=Zig app_scheme.csp_header). out에 복사하고 길이 반환. cap 부족=-1, NULL=-2. */
 int64_t maru_macos_app_csp_header(uint8_t *out_ptr, size_t out_cap);
 
+/* 신뢰 웹 브리지(window.maru.*) 요청 디스패치(5b). Swift가 isolated world 핸들러서 isMainFrame + securityOrigin
+   (maru-app://app) 검증 후 요청 JSON을 넘기면 응답 JSON을 out에 쓴다. 반환: >=0=응답 길이, -1=용량부족, -2=NULL, -3=OOM. */
+int64_t maru_macos_app_bridge_dispatch(
+    const uint8_t *req_ptr,
+    size_t req_len,
+    uint8_t *out_ptr,
+    size_t out_cap
+);
+
 /* ── 세션 컨트롤 플레인 라이브 서버(Track C A2b) ──────────────────────────────────────────────
    앱 인스턴스 전역 컨트롤 소켓 + accept 스레드 + 메인 marshal. Swift는 (1) 시작 시 start를 한 번,
    (2) 매 frame tick에 drain을 살아있는 세션 목록과 함께, (3) 종료 시 stop을 부른다. 소켓/스레드/

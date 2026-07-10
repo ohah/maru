@@ -128,6 +128,22 @@ Phase 1 live collector 전에는 full AppRuntime을 기다리지 않고 **앱 �
 - 신뢰 콘텐츠도 자기 surface(또는 명시 위임)만 제어한다.
 - **브리지는 sanitizer에 전적으로 의존하지 않는다(origin 격리 명시).** `.md`는 비신뢰 데이터(§8.1 위 문단·[web-panel.md] §7)인데 브리지가 그 콘텐츠를 서빙하는 origin에 살면, sanitizer 한 번 우회(mXSS·DOM clobbering·SVG/MathML)로 브리지에 도달한다. 따라서 (a) 브리지는 **신뢰 viewer shell origin에만** 붙이고 md-derived 문서는 브리지가 없는 **별도 origin**으로 렌더한다(sanitizer 우회는 script 실행까지만, 브리지 미도달), (b) `securityOrigin` 검사는 scheme(`maru-app://`) 수준이 아니라 **정확한 shell origin**으로 pin, (c) `panel_kind=browser`(untrusted) `WKWebViewConfiguration`에는 `maru-app://` scheme handler와 message handler를 **애초에 등록하지 않고** `maru-app://` 네비게이션도 `decidePolicyForNavigationAction`에서 차단한다(origin 위장으로 브리지 탈취 방지). 상세는 [web-panel.md] §7.
 
+#### 8.1.1 5b — trusted bridge 설계 (isolated world 주입/미주입 + 프레임 검증)
+
+Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 신뢰 콘텐츠(maru-app:// UI, Phase 7)가 `window.maru.*`로 maru에 콜백하는 브리지를 **isolated `WKContentWorld`에만** 주입해, 임의 page-world JS(md sanitizer 우회 mXSS 등)가 브리지에 못 닿게 한다(2026-06 spike 실측: isolated world만 접근 가능).
+
+**의존성·시퀀싱(정직)**: 브리지 origin **exact-pin**(§8.1 (b))은 신뢰 origin `maru-app://`가 필요한데 그건 **5c**다. 그리고 브리지는 **신뢰 콘텐츠 전용**인데 현재는 `browser`(untrusted, 빈 흰 HTML)만 있다. 따라서 5b는 **브리지 메커니즘 + `isMainFrame` 검증 + 격리 자동 E2E**를 **fixture 신뢰 config**로 확립하고, 실 `maru-app://` origin-pin·CSP·스킴 샌드박스는 5c, 실 `window.maru.*` API 표면·신뢰 UI는 5d+/Phase 7로 둔다. untrusted(browser) 패널엔 브리지를 **애초에 미등록**(§8.1 (c)).
+
+**① 브리지 등록(신뢰 패널만)** — 신뢰 `WKWebViewConfiguration`에: `WKContentWorld.world(name:"MaruBridge")`(page-world와 격리된 named isolated world) + `userContentController.addScriptMessageHandler(_, contentWorld: bridgeWorld, name:"maru")`(**WKScriptMessageHandlerWithReply** — async 응답, macOS 11+) + `WKUserScript(<window.maru shim>, .atDocumentStart, forMainFrameOnly: true, in: bridgeWorld)`. shim은 isolated world에 `window.maru.request(method, params) → Promise`(핸들러 postMessage + reply)를 깐다. `forMainFrameOnly`는 **user script에만** 적용되고 핸들러 등록은 world-scope(프레임 무관)라 → ②로 별도 검증.
+
+**② 핸들러 진입 검증(§8.1·[web-panel.md] §7)** — 매 메시지: `frameInfo.isMainFrame`(서브프레임 거부 — clickjacking·중첩 차단) + `securityOrigin` **exact 신뢰 origin 일치**(**5c에서 `maru-app://` origin으로 pin** — 5b는 fixture origin 자리만, scheme 수준 매칭 아님). 둘 중 하나라도 불일치면 거부(reply 에러). 통과 시 신뢰 method subset으로 라우팅(5b 최소: round-trip 증명 `maru.hello()`→server_version 응답 **1개**; 실 method는 5d+/Phase 7).
+
+**③ untrusted(browser) 격리** — `browser` 패널 config엔 message handler·isolated shim **미등록**(브리지 부재 — 힙 격리 1차). `maru-app://` 네비 차단·per-surface `WKProcessPool`/`WKWebsiteDataStore` 분리는 5c/후속(§7).
+
+**④ 격리 자동 E2E(macOS smoke)** — 신뢰 fixture 패널에 테스트 페이지 로드 후: `evaluateJavaScript("typeof window.maru", in: bridgeWorld)`→`"object"`(isolated 접근) · `evaluateJavaScript(…, in: .page)`→`"undefined"`(page-world 미접근 — §8.1 spike 자동화) · `maru.hello()` round-trip→version(핸들러 도달) · 미등록 browser 패널→window.maru 부재. smoke 요약에 `bridge_isolated_ok`/`bridge_pageworld_absent` 단언(WKWebView·evaluateJavaScript async라 헤드리스 Zig 아니라 macos smoke E2E).
+
+**⑤ 슬라이스 경계** — 5b=브리지 메커니즘·`isMainFrame`·격리 E2E(fixture). **5c**=`maru-app://` origin exact-pin·엄격 CSP·realpath/symlink/traversal 스킴 샌드박스. **5d**=browser.* 실 ops(browser 패널 navigate/evaluate). 실 `window.maru.*` API·신뢰 UI=Phase 7.
+
 ### 8.2 소켓 권한·peer-cred
 - 0700 전용 디렉터리 + socket path 0600. **1b 구현 확정(`control_socket.zig`)**: 권한은 `umask`가 아니라 **bind 후 `chmod(path,0600)`** 로 고정한다 — 프로세스 전역 `umask`는 멀티스레드 앱에서 다른 스레드와 경합하므로 배제하고, bind~chmod 사이 창은 부모 dir 0700이 덮는다(same-uid는 신뢰 경계 안). `fchmod(fd)`는 쓰지 않는다(spike -1). 심볼릭 링크·소유자 검증은 `fstatat(SYMLINK_NOFOLLOW)`로 bind 결과가 S_IFSOCK·소유자==우리·0600인지 확인.
 - **stale 소켓 판별(§4.2)**: `flock`은 소켓 fd가 아니라 **별도 `<key>.lock` regular 파일**에 건다(macOS는 소켓 fd `flock`이 `ENOTSUP`). lock 취득 성공=옛 소유자 부재→unlink-then-bind, 실패(EWOULDBLOCK)=살아있는 인스턴스→소켓 unlink 금지·중단. bind 이후 단계 실패 시 자기 lock 파일도 errdefer로 정리(빈 잔해 누적 방지). **다른 인스턴스**의 crash 잔해는 start마다 같은 flock 메커니즘으로 회수한다(§4.2 stale prune — `pruneStaleSockets`).

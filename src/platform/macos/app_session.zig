@@ -2834,7 +2834,7 @@ pub const AppSession = struct {
     fn focusPane(self: *AppSession, pane_index: usize) void {
         const tab = self.activeTab();
         if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
-        self.invalidatePendingCloseOnFocusChange(); // 닫기 모달 보류 중 pane 이동 → 보류 무효화(stale 대상 close 방지)
+        self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 pane 이동 → 보류 무효화(stale 대상 close 방지)
         tab.active_pane = pane_index;
         self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
@@ -2882,7 +2882,7 @@ pub const AppSession = struct {
     fn focusTerm(self: *AppSession, term_index: usize) void {
         const pane = self.activePane();
         if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
-        self.invalidatePendingCloseOnFocusChange(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
+        self.invalidatePositionalPendingClose(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
         pane.active_term = term_index;
         self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
@@ -3468,7 +3468,7 @@ pub const AppSession = struct {
             const loc = self.findTerminatedTerm() orelse return; // 더 닫을 죽은 Term 없음
             // 닫기 확인 모달이 보류 중이면, 곧 닫을 closeTermAt이 탭/pane 인덱스·활성 선택을 바꿔 보류 표적이 stale가
             // 된다 → 무효화(.window 제외). 첫 reap에서 한 번 취소하면 이후는 무동작(pending null).
-            self.invalidatePendingCloseOnReap();
+            self.invalidatePositionalPendingClose();
             self.closeTermAt(loc.tab_index, loc.pane, loc.term_index);
         }
     }
@@ -3871,8 +3871,12 @@ pub const AppSession = struct {
     /// metal_dirty를 세우고 true. 범위 밖 index면 false(활성 불변). 입력/렌더는 activeSurface가
     /// active_tab을 따라가므로 이것만으로 라우팅이 바뀐다.
     pub fn switchTab(self: *AppSession, index: usize) bool {
+        const prev_tab = self.app_window.active_tab;
         if (!self.app_window.selectTab(index)) return false;
-        self.invalidatePendingCloseOnFocusChange(); // 닫기 모달 보류 중 탭 전환 → 보류 무효화(다른 탭이 닫히는 것 방지)
+        // 실제 탭이 바뀔 때만 보류 닫기 무효화 — selectTab은 index<len이면 같은 탭 재선택에도 true를 돌려주므로
+        // (window.zig), 알림 클릭이 이미 활성인 탭의 Term을 activateSurfaceById→switchTab(same)로 지날 때 유효한
+        // 닫기 모달을 헛되이 취소하던 것 방지(code-review — focusPane/focusTerm은 자체 early-return이 no-op을 거른다).
+        if (index != prev_tab) self.invalidatePositionalPendingClose();
         // 전환한 탭을 현재 창 grid로 맞춘다. resize()는 활성 탭만 만지고 last_resize_size는 세션-전역이라, 다른
         // 탭이 활성인 동안 창이 리사이즈됐거나 복원으로 저장 grid로 spawn된 탭은 전환 시점까지 stale grid다 —
         // 여기서 lazy 보정한다(복원·일반 둘 다). best-effort: 죽은 PTY 등은 무시(resizeTabPanes 계약).
@@ -4320,30 +4324,20 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// reap(자동 종료 정리)이 트리를 바꾸기 직전에 보류한 닫기를 무효화한다. .window(창 전체)는 표적이 불변이라
-    /// 유지하고, 그 외(.tab_index·.active_term·.term_or_pane·.pane_or_tab)는 인덱스·활성 선택 기준이라 reap이
-    /// 탭/pane/Term을 지우거나 활성 선택을 옮기면 stale → 확정 시 엉뚱한 대상을 닫는다(데이터 손실). 그래서 reap이
-    /// 일어나면 보류를 취소하고 모달을 닫는다(사용자는 새 상태에서 다시 닫으면 됨 — 안전한 abort).
-    fn invalidatePendingCloseOnReap(self: *AppSession) void {
+    /// **위치성 보류 닫기 무효화(reap·포커스 이동 방어 공유 — 단일 출처)**: 닫기 확인 모달이 보류(`pending_close`) 중일 때
+    /// 트리 변경(reap)이나 활성 탭/pane/Term 이동(포커스)이 일어나면 그 보류를 무효화한다. `requestClose`는 **진입점**만
+    /// `pending_close`에 담고 `confirm_accept`가 `executeClose`→`resolveCloseScope`로 **확정 시점의** active_tab/activePane
+    /// 기준으로 범위를 다시 풀므로, 그 사이 트리·포커스가 바뀌면 사용자가 본 대상이 아닌 다른 탭/pane이 닫힌다(데이터 손실).
+    /// 위치성 표적(`.tab_index`·`.active_term`·`.term_or_pane`·`.pane_or_tab`)은 그때 취소하고 모달을 닫는다(안전한 abort —
+    /// 사용자는 새 상태에서 다시 닫으면 됨). `.window`(창 전체)는 표적이 세션 전체라 트리/포커스 변화와 무관하게 유지한다.
+    /// 호출부: `reapTerminatedTerms`(reap 직전) + `switchTab`/`focusPane`/`focusTerm`(포커스가 **실제로 바뀔 때만** — 각
+    /// 호출부가 no-op 재선택을 걸러 호출; `focusPaneByPtr`는 `focusPane` 경유로 커버). `confirm_accept`는 `executeClose`
+    /// 전에 `pending_close`를 null로 비우므로(재진입 방지), 닫기 실행 중 포커스 이동이 이걸 다시 건드리지 않는다.
+    /// (옛 `invalidatePendingCloseOnReap`/`invalidatePendingCloseOnFocusChange` byte-identical 중복을 통합 — code-review.)
+    fn invalidatePositionalPendingClose(self: *AppSession) void {
         const p = self.pending_close orelse return;
         switch (p) {
-            .window => {}, // 창 전체 닫기는 reap이 탭을 줄여도 유효
-            else => self.cancelPendingClose(),
-        }
-    }
-
-    /// **지연 confirm 재해석 해저드 방어(reap 방어의 포커스판)**: 닫기 확인 모달이 보류 중일 때 활성 탭/pane/Term이
-    /// 바뀌면 그 보류를 무효화한다. requestClose는 진입점만 pending_close에 담고, confirm_accept가 executeClose→
-    /// resolveCloseScope로 **확정 시점의** active_tab/activePane을 기준으로 범위를 다시 푼다 — 모달이 뜬 동안 포커스가
-    /// 옮겨가면(알림 클릭 activateSurfaceById, 탭/pane 전환) 사용자가 본 대상이 아닌 다른 탭/pane이 닫혀 데이터가 날아간다.
-    /// invalidatePendingCloseOnReap과 같은 안전한 abort를 포커스 이동에도 적용한다(.window=창 전체는 대상 불변이라 유지).
-    /// switchTab/focusPane/focusTerm 세 포커스 funnel에서 **실제로 바뀔 때만**(early-return 가드 통과 후) 호출한다
-    /// (focusPaneByPtr는 focusPane 경유라 함께 커버). confirm_accept는 executeClose 전에
-    /// pending_close를 이미 null로 비우므로(재진입 방지), 닫기 실행 중 포커스 이동이 이걸 다시 건드리지 않는다.
-    fn invalidatePendingCloseOnFocusChange(self: *AppSession) void {
-        const p = self.pending_close orelse return;
-        switch (p) {
-            .window => {}, // 창 전체 닫기는 포커스가 바뀌어도 유효(대상=세션 전체)
+            .window => {}, // 창 전체 닫기는 reap/포커스 변화와 무관하게 유효(대상=세션 전체)
             else => self.cancelPendingClose(),
         }
     }
@@ -14626,6 +14620,18 @@ pub const AppSession = struct {
                         } else {
                             // read_error: 워크스페이스 유지. surface는 runtime이 이미 exited로 latch(I/O 거부)했으니 표시만
                             // 갱신하고, close/reap/세션종료는 하지 않는다. 끝난 reader thread는 Term teardown(close)이 join한다.
+                            //
+                            // **의도된 트레이드오프(code-review 확인)**: 여기서 `terminated`를 세우지 않으므로 이 Term은
+                            //   (1) `allTabsTerminated`에서 계속 "살아있음"으로 세어져 **다른 탭이 전부 exit해도 창이 자동으로
+                            //       안 닫힐 수 있고**(사용자가 창을 수동으로 닫아야 함),
+                            //   (2) reader가 이미 return하고 surface가 exited로 latch돼 **응답 없는 죽은 pane**으로 남는다
+                            //       (스크롤백은 보존 — maru의 "종료 surface 마지막 화면 유지" 원칙과 동일. 살아있던 셸은
+                            //       고아로 남았다가 Term teardown 시 shutdownChild로 정리).
+                            // 이걸 "고치려고" terminated=true를 세우면 곧장 reap→closeTermAt→closeTab이 돌아, **사용자가
+                            // 신고한 바로 그 버그(read_error에 좌측 탭이 통째로 닫힘)가 재발**한다. 즉 산 셸 데이터를 지키려면
+                            // 이 Term은 non-terminated로 둘 수밖에 없다. read_error-with-alive-child는 EINTR/EAGAIN 재시도·
+                            // EIO=죽음(→.exited) 뒤 남는 드문(POLLNVAL 등) 경로라, 이 degraded 상태는 흔치 않다. 단일 출처:
+                            // docs/pty-operating-model.md "read_error vs 검증된 exit".
                             self.metal_dirty = true;
                         }
                     }
@@ -29710,13 +29716,13 @@ test "terminationClosesWorkspace: .exited만 워크스페이스를 닫고 read_e
 // 프리미티브(pty/macos.zig reapIfExited)를 단위로 고정하고, 전체 통합은 수동 검증(docs/pty-operating-model.md의
 // read_error 절 + `mise run macos-app`으로 claude 인터럽트 반복)으로 커버한다. — 사용자에게 보고된 한계.
 
-// 이 테스트가 증명하는 것: 닫기 확인 모달이 보류(pending_close) 중일 때 포커스/탭 전환을 무효화 판정에 태우는
-// invalidatePendingCloseOnFocusChange가 **위치성 보류(.term_or_pane/.tab_index 등)는 취소**하고 **창 전체(.window)는
+// 이 테스트가 증명하는 것: 닫기 확인 모달이 보류(pending_close) 중일 때 트리 변경(reap)·포커스/탭 전환을 무효화 판정에
+// 태우는 invalidatePositionalPendingClose가 **위치성 보류(.term_or_pane/.tab_index 등)는 취소**하고 **창 전체(.window)는
 // 유지**한다는 것. 왜 중요한가: requestClose는 진입점만 저장하고 confirm_accept가 확정 시점의 active_tab/activePane으로
 // close 범위를 다시 푼다(resolveCloseScope) — 모달이 뜬 동안 포커스가 옮겨가면 사용자가 본 대상이 아닌 다른 탭/pane이
-// 닫혀 데이터가 날아가는 지연 재해석 해저드가 있다. 이 방어(switchTab/focusPane/focusTerm에서 호출)가 그 창을 abort로
-// 막는다(reap 방어 invalidatePendingCloseOnReap의 포커스판). chrome_host.confirm.dismiss 경로가 필요해 실 세션에서 돈다.
-test "invalidatePendingCloseOnFocusChange: 위치성 보류는 무효화, .window는 유지(지연 confirm 해저드 방어)" {
+// 닫혀 데이터가 날아가는 지연 재해석 해저드가 있다. 이 방어(reapTerminatedTerms + switchTab/focusPane/focusTerm에서 호출)가
+// 그 창을 abort로 막는다. chrome_host.confirm.dismiss 경로가 필요해 실 세션에서 돈다.
+test "invalidatePositionalPendingClose: 위치성 보류는 무효화, .window는 유지(지연 confirm 해저드 방어)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(controlled smoke) — chrome_host 초기화 필요
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -29732,16 +29738,16 @@ test "invalidatePendingCloseOnFocusChange: 위치성 보류는 무효화, .windo
 
     // 위치성 보류(활성 탭/pane/Term 인덱스 기준)는 포커스가 옮겨가면 stale → 무효화(안전한 abort).
     session.pending_close = .term_or_pane;
-    session.invalidatePendingCloseOnFocusChange();
+    session.invalidatePositionalPendingClose();
     try std.testing.expect(session.pending_close == null);
 
     session.pending_close = .{ .tab_index = 0 };
-    session.invalidatePendingCloseOnFocusChange();
+    session.invalidatePositionalPendingClose();
     try std.testing.expect(session.pending_close == null);
 
     // 창 전체 닫기(.window)는 대상이 세션 전체라 포커스 이동과 무관하게 유지된다.
     session.pending_close = .window;
-    session.invalidatePendingCloseOnFocusChange();
+    session.invalidatePositionalPendingClose();
     try std.testing.expect(session.pending_close != null);
 }
 

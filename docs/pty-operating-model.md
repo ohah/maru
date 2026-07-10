@@ -158,6 +158,8 @@ reader가 `readChunk`/`waitIo`/`writeInputNonBlocking`에서 EOF가 아닌 I/O �
 - **소스 검증(pty_reader `pushTerminationForIoError`)**: I/O 오류를 만난 reader는 `PtySession.reapIfExited`(비차단 `waitpid` WNOHANG)로 child 생존을 확인한다. 이미 죽었으면 `PtyEvent.exited`(검증된 종료 — EOF 경로와 동치)로, 아직 살아 있으면 `PtyEvent.read_error`로 방출한다.
 - **닫기 게이트(app_session `terminationClosesWorkspace`)**: tick drain이 `.exited`를 관측하면 기존대로 `finishAfterTermination`(reader join + child reap) → cascade close(Term→pane→워크스페이스)를 탄다. `.read_error`(= child 생존 미검증)는 surface를 exited로 latch해 I/O만 거부하고, **`finishAfterTermination`(→`session.close`→`shutdownChild`로 살아 있는 셸을 죽인다)·reap·closeTab을 타지 않는다.** 끝난 reader thread는 Term teardown(`close`/`stopAndJoin`)이 join한다.
 
+  **의도된 트레이드오프(code-review)**: `.read_error` Term은 `terminated`를 세우지 않으므로 non-terminated로 남는다 — 이 때문에 (1) `allTabsTerminated`가 이 Term을 "살아있음"으로 세어 **다른 탭이 전부 exit해도 창이 자동으로 안 닫힐 수 있고**(수동 닫기 필요), (2) reader가 return하고 surface가 exited로 latch된 **응답 없는 죽은 pane**이 남는다(스크롤백은 보존 — "종료 surface 마지막 화면 유지" 원칙과 동일; 산 셸은 고아→Term teardown 시 `shutdownChild`로 정리). 이걸 "고치려" `terminated=true`를 세우면 곧장 reap→closeTab이 돌아 **사용자 신고 버그(read_error에 좌측 탭 닫힘)가 재발**하므로, 산 셸 데이터 보존을 위해 non-terminated가 불가피하다. `read_error`-with-alive-child 자체가 EINTR/EAGAIN 재시도·EIO=죽음(→`.exited`) 뒤 남는 드문(POLLNVAL 등) 경로라 이 degraded 상태는 흔치 않다.
+
 이 게이트가 없으면, 셸에서 `claude` 같은 포그라운드 명령을 실행 중 `Ctrl+C`(0x03 write)가 일으킨 일시적 I/O 오류가 read_error → 미검증 종료로 처리돼, **살아 있는 셸을 죽이고 좌측 워크스페이스 탭을 통째로 닫는** 데이터 손실이 난다(사용자 보고 루트커즈). 단위 검증: `pty/macos.zig`의 `reapIfExited` 테스트(생존→null/종료→상태)와 `app_session.zig`의 `terminationClosesWorkspace` 테스트(.exited만 닫힘). 전체 통합은 mock 세션 주입 불가·live reader join 순서 문제로 수동 검증(위 시나리오 반복)이다.
 
 ## session close

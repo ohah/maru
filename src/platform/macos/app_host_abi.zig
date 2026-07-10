@@ -1259,6 +1259,127 @@ pub export fn maru_macos_app_session_web_surface_transition_at(
     return @intFromEnum(Status.ok);
 }
 
+// ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
+//
+// 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root
+// 아래 안전한 절대 경로**를 얻어 그 파일을 CSP와 함께 서빙한다. 5c-1 `validateAppPath`(문자열: `..`·whitelist)로 못 잡는
+// **symlink 탈출**을 realpath로 막는다 — candidate와 root를 각각 realpath해 canonical candidate가 canonical root **아래**인지
+// 확인(심링크가 root 밖을 가리키면 realpath가 밖을 반환 → 거부). I/O라 L2가 아니라 여기(platform).
+pub const AppAssetError = error{
+    /// 5c-1 문자열 검증 실패(traversal `..`·whitelist 밖·너무 긺) — 요청 자체가 부적격.
+    Reject,
+    /// candidate가 존재하지 않거나 일반 파일이 아님(디렉터리 등) → 404.
+    NotFound,
+    /// realpath 결과가 asset root 밖 — symlink 탈출 등. 거부(정보 노출 방지).
+    OutsideRoot,
+};
+
+fn pathIsUnder(p: []const u8, root: []const u8) bool {
+    // p == root/... : root로 시작하고 그 다음 문자가 경로 구분자('/')여야 root의 **하위**다(root 자신·형제 접두 배제).
+    if (p.len <= root.len) return false;
+    if (!std.mem.startsWith(u8, p, root)) return false;
+    return p[root.len] == '/';
+}
+
+/// `maru-app://` 요청 경로를 asset root 아래 안전한 **절대 경로**로 resolve한다(5c-1 문자열 + realpath symlink 방어).
+/// 성공 시 canonical 절대 경로를 `out`에 쓰고 슬라이스를 돌려준다(Swift가 그 파일을 읽어 CSP와 서빙). `root_abs`는 절대
+/// 경로(Swift가 Bundle asset root 전달). 빈 경로(`/`)는 `index.html`로 매핑한다. `io`는 platform I/O(Swift C-ABI 래퍼는
+/// 5c-2b에서 host io를 전달; 여기 테스트는 std.testing.io).
+pub fn resolveAppAsset(io: std.Io, root_abs: []const u8, request_path: []const u8, out: []u8) AppAssetError![]const u8 {
+    var clean_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const clean = maru.session.app_scheme.validateAppPath(request_path, &clean_buf) catch |e| switch (e) {
+        error.Empty => "index.html", // 루트 요청(`/`·`""`) → index 문서
+        else => return AppAssetError.Reject, // Traversal·InvalidChar·TooLong
+    };
+    var join_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const candidate = std.fmt.bufPrint(&join_buf, "{s}/{s}", .{ root_abs, clean }) catch return AppAssetError.Reject;
+    const dir = std.Io.Dir.cwd();
+    var cand_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cn = dir.realPathFile(io, candidate, &cand_buf) catch return AppAssetError.NotFound; // symlink 따라감·부재면 실패
+    const cand_real = cand_buf[0..cn];
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rn = dir.realPathFile(io, root_abs, &root_buf) catch return AppAssetError.Reject;
+    const root_real = root_buf[0..rn];
+    if (!pathIsUnder(cand_real, root_real)) return AppAssetError.OutsideRoot; // symlink 탈출 방어(canonical 비교)
+    const st = dir.statFile(io, cand_real, .{}) catch return AppAssetError.NotFound;
+    if (st.kind != .file) return AppAssetError.NotFound; // 디렉터리·특수 파일은 서빙 안 함
+    if (cand_real.len > out.len) return AppAssetError.Reject;
+    @memcpy(out[0..cand_real.len], cand_real);
+    return out[0..cand_real.len];
+}
+
+test "resolveAppAsset: 정상 파일 서빙 + 빈 경로 → index" {
+    const io = std.testing.io;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "index.html", .data = "<html>root</html>" });
+    try root_tmp.dir.createDirPath(io, "sub");
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "sub/page.html", .data = "<html>sub</html>" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    const idx = try resolveAppAsset(io, root_abs, "index.html", &out);
+    try std.testing.expect(pathIsUnder(idx, root_abs));
+    try std.testing.expect(std.mem.endsWith(u8, idx, "/index.html"));
+
+    var out2: [std.fs.max_path_bytes]u8 = undefined;
+    const root_req = try resolveAppAsset(io, root_abs, "/", &out2); // 빈→index
+    try std.testing.expect(std.mem.endsWith(u8, root_req, "/index.html"));
+
+    var out3: [std.fs.max_path_bytes]u8 = undefined;
+    const sub = try resolveAppAsset(io, root_abs, "sub/page.html", &out3);
+    try std.testing.expect(std.mem.endsWith(u8, sub, "/sub/page.html"));
+    try std.testing.expect(pathIsUnder(sub, root_abs));
+}
+
+test "resolveAppAsset: traversal(`..`)·whitelist 밖 → Reject(5c-1 문자열 단계)" {
+    const io = std.testing.io;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "index.html", .data = "x" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, root_abs, "../index.html", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, root_abs, "a/../../etc/passwd", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, root_abs, "%2e%2e/x", &out)); // `%` whitelist 밖
+}
+
+test "resolveAppAsset: symlink 탈출 → OutsideRoot(realpath canonical 방어)" {
+    const io = std.testing.io;
+    // out_tmp/secret.txt(root 밖) + root/evil → 그 절대 경로 symlink. resolve는 canonical이 root 밖이라 거부.
+    var out_tmp = std.testing.tmpDir(.{});
+    defer out_tmp.cleanup();
+    try out_tmp.dir.writeFile(io, .{ .sub_path = "secret.txt", .data = "SECRET" });
+    var sec_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const secret_abs = sec_buf[0..try out_tmp.dir.realPathFile(io, "secret.txt", &sec_buf)];
+
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "index.html", .data = "x" });
+    root_tmp.dir.symLink(io, secret_abs, "evil", .{}) catch |e| switch (e) {
+        error.AccessDenied => return error.SkipZigTest, // 일부 FS는 symlink 불가
+        else => return e,
+    };
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(AppAssetError.OutsideRoot, resolveAppAsset(io, root_abs, "evil", &out));
+}
+
+test "resolveAppAsset: 부재 파일·디렉터리 → NotFound" {
+    const io = std.testing.io;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.createDirPath(io, "adir");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(AppAssetError.NotFound, resolveAppAsset(io, root_abs, "nonexistent.html", &out));
+    try std.testing.expectError(AppAssetError.NotFound, resolveAppAsset(io, root_abs, "adir", &out)); // 디렉터리는 서빙 안 함
+}
+
 // 전역(OS) 단축키가 라이브로 바뀌어(세팅 GUI 녹음/해제·reload·reset) OS 재등록이 필요하면 1(플래그 비움), 없으면 0.
 // Swift가 tick마다 호출해 1이면 unregisterGlobalHotkeys 후 registerGlobalHotkeys로 새 global_hotkeys를 OS에 다시 깐다.
 // take_bell과 같은 1회성 신호 — drain하면 비워진다. session null=0. (v82)

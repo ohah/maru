@@ -25,7 +25,10 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
   child process id
   임의의 전체 env dump
   임의 명령의 last_observed_command 자동 재실행 정보(claude/codex는 allowlist 예외 — 아래 절)
+  web Term(인앱 브라우저/마크다운 패널) — 아래 절
 ```
+
+**web Term(4e)은 저장하지 않는다.** `workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고(포맷에 kind 추가는 Phase 5), sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn되므로 `captureWorkspaceTab`이 web Term을 **스킵**한다. 한 pane이 web Term만 가진 경우(모든 terminal Term을 닫음) surfaces가 비면 복원이 `error.EmptyPane`으로 전체를 중단하므로, 그 pane엔 **기본 셸 placeholder 하나**를 넣어 기본 로그인 셸로 복원한다(브라우저 콘텐츠·URL은 어차피 미영속). web 콘텐츠 영속은 Phase 5(콘텐츠·브리지)와 함께 포맷에 kind를 더해 다룬다.
 
 ## 자동 복구와 명령 재실행은 다르다
 

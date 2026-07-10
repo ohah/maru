@@ -1748,6 +1748,12 @@ pub const AppSession = struct {
     // Phase 4e-3: 이번 tick의 web surface 전이 batch(count/at ABI 소비). webSurfaceTransitionsCount가 계산해 채우고
     // 다음 count 호출까지 유효하다(command_catalog식 "한 번 계산 + 인덱스 조회").
     web_surface_transitions: std.ArrayList(WebSurfaceTransition) = .empty,
+    // Phase 4e-3: web surface 수집의 **영속 scratch**(렌더 hot path 재할당 회피 — web_panel_prev가 swap+clearRetainingCapacity로
+    // realloc을 피하는 것과 같은 패턴). computeWebSurfaceTransitions가 매 tick 재사용하기 전에 clearRetainingCapacity하고
+    // deinit은 세션 deinit에서만 한다. web_cur_scratch는 diff 계산 후 web_panel_prev와 swap하므로 swap 후엔 옛 prev 버퍼를
+    // 들고(다음 tick clearRetainingCapacity로 재사용), web_leaf_rects_scratch는 collectWebSurfaces 내부 leaf-rect 임시.
+    web_cur_scratch: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty,
+    web_leaf_rects_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경·바·그룹 색 프리셋 + 그룹 묶기/풀기 = ctx_menu_count)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
@@ -3524,13 +3530,14 @@ pub const AppSession = struct {
         self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
     }
 
-    /// 활성 pane에 새 **web(브라우저) Term**을 띄우고 그 탭으로 포커스한다(command `new_web_tab`·File 메뉴 — 4e-5).
-    /// `newTermInActivePane`을 미러링하되 PTY spawn/셸 없이 `createWebTerm(.browser)`로 sentinel surface를 만든다
-    /// (WKWebView는 computeWebSurfaceTransitions가 walk해 Swift가 붙인다, §6). maybeDebugOpenWebPanel(env 훅)과 같은
-    /// 3단계(create→append→focus)지만 트리거가 사용자다. alloc/append 실패는 errdefer로 원복(pane 불변).
-    fn newWebTermInActivePane(self: *AppSession) !void {
+    /// 활성 pane에 새 **web Term**(`panel_kind`=markdown|browser)을 띄우고 그 탭으로 포커스한다(command
+    /// `new_web_tab`·File 메뉴 — 4e-5, 그리고 debug 훅 maybeDebugOpenWebPanel의 위임 대상). `newTermInActivePane`을
+    /// 미러링하되 PTY spawn/셸 없이 `createWebTerm(panel_kind)`로 sentinel surface를 만든다(WKWebView는
+    /// computeWebSurfaceTransitions가 walk해 Swift가 붙인다, §6). create→append→focus 3단계 + append 실패 errdefer
+    /// 롤백이 web Term 생성의 **단일 출처**다(debug 훅이 이 시퀀스를 재구현하지 않게).
+    fn newWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !void {
         const pane = self.activePane();
-        const term = try self.createWebTerm(.browser);
+        const term = try self.createWebTerm(panel_kind);
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)
@@ -6311,6 +6318,9 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
+                    // 4e web Term은 sentinel core라 `live_initialized=false`지만 종료된 게 아니다 — 살아 있는 web
+                    // 패널이 하나라도 있으면 세션(창)을 살려 둔다(안 그러면 터미널만 다 죽었을 때 web-only 창이 통째로 닫힘).
+                    if (term.kind == .web) return false;
                     if (term.rt.live_initialized and !term.rt.terminated) return false;
                 }
             }
@@ -6340,8 +6350,19 @@ pub const AppSession = struct {
     /// free한다(dispatchOscCwd). 메인 스레드가 그 슬라이스를 락 없이 읽어 들고 있으면, spawn까지의 창에서 reader가
     /// free·재할당해 use-after-free/torn read가 난다(그 cwd가 자식 chdir로 감). 그래서 lockCore 아래에서 읽고 **즉시
     /// 복사**해 끊는다 — 반환 슬라이스는 core가 아니라 `buf` 소유라 그 뒤 reader가 core.cwd를 바꿔도 안전하다.
+    /// cwd 상속 출처가 될 Term을 고른다 — 활성 Term이 terminal이면 그것, 활성 Term이 web(sentinel core라 cwd
+    /// 없음)이면 같은 pane의 첫 terminal 형제로 상속한다. web-only pane(터미널 형제 없음)이면 null → 호출자가 root
+    /// 폴백. web Term의 sentinel core를 읽어 cwd 상속이 루트로 떨어지는 4e 회귀를 막는다.
+    fn cwdSourceTerm(self: *AppSession) ?*Term {
+        const pane = self.activePane();
+        const active = pane.activeTerm();
+        if (active.kind == .terminal) return active;
+        for (pane.terms.items) |t| if (t.kind == .terminal) return t; // web 활성이면 pane 내 터미널 형제로 상속
+        return null; // web-only pane: 상속원 없음 → 루트 폴백
+    }
+
     fn focusedTermCwd(self: *AppSession, buf: []u8) ?[]const u8 {
-        const surface = self.activePane().activeTerm().surface;
+        const surface = (self.cwdSourceTerm() orelse return null).surface;
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         const cwd = usableRestoreCwd(surface.core.currentCwd()) orelse return null;
@@ -6459,7 +6480,7 @@ pub const AppSession = struct {
             // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 대체). tabsBlocked(chrome 최소)면 막고,
             // 생성 실패는 무시(newWebTermInActivePane이 errdefer로 원복).
             .new_web_tab => if (!self.tabsBlocked()) {
-                self.newWebTermInActivePane() catch {};
+                self.newWebTermInActivePane(.browser) catch {};
             },
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
             .close_term => self.requestClose(.term_or_pane),
@@ -7104,18 +7125,10 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         if (std.c.getenv("MARU_WEB_PANEL") == null) return;
         const kind: web_panel_layout.PanelKind = if (std.c.getenv("MARU_WEB_PANEL_MARKDOWN") != null) .markdown else .browser;
-        const term = self.createWebTerm(kind) catch return; // 실패면 다음 tick 재시도(플래그 안 세움)
-        const pane = self.activePane();
-        pane.terms.append(self.allocator, term) catch {
-            self.destroyTerm(term); // append 실패 시 방금 만든 web Term을 되돌린다(registry 슬롯까지 정리)
-            return;
-        };
-        // [4e-2] web Term을 **활성**으로 전환한다(4e-1은 비활성 탭이었음) — 활성 render skip이 배선됐으므로 활성 web은
-        // 본문 blank·크래시 0이다(§6). focusTerm이 surface_ptrs를 web sentinel로 재바인딩 + active_pane_rect 재계산 +
-        // metal_dirty를 세운다(append 직후라 web Term은 terms의 마지막 인덱스). 이걸로 스크린샷 self-verify가 활성 web을 본다.
-        self.focusTerm(pane.terms.items.len - 1);
+        // web Term 생성의 create→append→focus 시퀀스(+append 실패 errdefer 롤백)는 newWebTermInActivePane 단일
+        // 출처에 위임한다. 실패면 debug 플래그를 안 세워 다음 tick 재시도한다(pane은 errdefer로 불변).
+        self.newWebTermInActivePane(kind) catch return;
         self.debug_web_term_opened = true;
-        self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)
     }
 
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
@@ -7146,17 +7159,27 @@ pub const AppSession = struct {
     /// 탭은 walk 대상이 아니라 그 탭의 web Term은 집합 밖(→ destroy). OOM/미초기화면 error(호출자가 prev 불변 유지).
     fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layout.SurfaceLayout)) !void {
         if (!self.surface_initialized or self.tabs.items.len == 0) return; // 활성 탭 없음 = web Term 0개(cur 빈 채로).
-        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
-        defer leaf_rects.deinit(self.allocator);
-        try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
+        self.web_leaf_rects_scratch.clearRetainingCapacity(); // 영속 scratch 재사용(hot path 재할당 회피, layout이 append만 함)
+        try self.activeTabLeafRects(self.allocator, self.termRect(), &self.web_leaf_rects_scratch);
         const bar_h = self.paneBarHeightPx();
-        for (leaf_rects.items) |lr| {
+        const dt = self.dividerThicknessPx();
+        const half: u32 = dt / 2; // divider는 seam 중앙 정렬(셀 clamp) → 각 pane은 절반만 inset해 분할선을 Metal 노출로 남긴다.
+        const tr = self.termRect();
+        for (self.web_leaf_rects_scratch.items) |lr| {
             for (lr.leaf.terms.items, 0..) |term, i| {
                 if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
+                // 각 leaf 가장자리가 바깥 경계(termRect)가 아니면 형제 pane과 맞닿는 **seam**이다 → divider 절반만큼
+                // 본문 rect를 들여 WKWebView가 분할선을 덮지 않게 한다(마우스가 seam에 닿아 드래그 리사이즈 가능,
+                // web-panel.md §5). top seam은 탭 바(bar_h ≫ half)가 이미 그 영역을 덮으므로 추가 inset 불요.
+                // dividerThicknessPx()==0(divider 숨김)이면 half=0이라 자동으로 무-inset(byte-identical).
+                var inset: web_panel_layout.ChromeInset = .{ .top = bar_h };
+                if (lr.rect.x > tr.x) inset.left = half; // 왼쪽에 형제 pane(세로 seam)
+                if (lr.rect.x + lr.rect.w < tr.x + tr.w) inset.right = half; // 오른쪽 세로 seam
+                if (lr.rect.y + lr.rect.h < tr.y + tr.h) inset.bottom = half; // 아래 가로 seam
                 try out.append(self.allocator, .{
                     .surface_id = term.surfaceId(),
                     .panel_kind = term.web_panel_kind,
-                    .content_rect = web_panel_layout.contentRect(lr.rect, .{ .top = bar_h }),
+                    .content_rect = web_panel_layout.contentRect(lr.rect, inset),
                     .visible = (i == lr.leaf.active_term), // 자기 pane의 활성 Term만 show(§6).
                 });
             }
@@ -7186,11 +7209,12 @@ pub const AppSession = struct {
     fn computeWebSurfaceTransitions(self: *AppSession) void {
         self.web_surface_transitions.clearRetainingCapacity();
 
-        var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
-        defer cur.deinit(self.allocator);
-        self.collectWebSurfaces(&cur) catch return; // OOM/미초기화 → batch 빔, prev 불변(재시도).
+        // 영속 scratch 재사용(매 tick fresh 할당 회피). collect 실패(OOM/미초기화)면 batch 빔·prev 불변(재시도) —
+        // scratch에 남은 부분 데이터는 다음 tick clearRetainingCapacity가 리셋하므로 무해.
+        self.web_cur_scratch.clearRetainingCapacity();
+        self.collectWebSurfaces(&self.web_cur_scratch) catch return;
 
-        var diff = web_panel_layout.surfaceDiff(self.allocator, self.web_panel_prev.items, cur.items) catch return;
+        var diff = web_panel_layout.surfaceDiff(self.allocator, self.web_panel_prev.items, self.web_cur_scratch.items) catch return;
         defer diff.deinit(self.allocator);
 
         self.marshalWebTransitions(&diff) catch {
@@ -7198,8 +7222,10 @@ pub const AppSession = struct {
             return;
         };
 
-        // prev ← cur: 스토리지 swap(할당 0). cur의 defer deinit이 옛 prev 버퍼를 해제한다(marshal이 필요 값을 이미 복사).
-        std.mem.swap(std.ArrayList(web_panel_layout.SurfaceLayout), &self.web_panel_prev, &cur);
+        // prev ↔ cur: 스토리지 swap(할당 0, marshal이 필요 값을 이미 복사). swap 후 web_panel_prev는 이번 tick cur를
+        // 들어 다음 tick diff 기준이 되고, web_cur_scratch는 옛 prev 버퍼를 들어 다음 tick clearRetainingCapacity로 재사용된다.
+        // 둘 다 세션 deinit이 정확히 한 번씩 해제한다(distinct 스토리지라 double-free/leak 없음).
+        std.mem.swap(std.ArrayList(web_panel_layout.SurfaceLayout), &self.web_panel_prev, &self.web_cur_scratch);
     }
 
     /// Phase 4e-3: 이번 tick의 web surface 전이 batch를 계산해 개수를 돌려준다(command_catalog식 count+at). Swift가
@@ -12918,8 +12944,9 @@ pub const AppSession = struct {
     /// A1 collector 코어(§2 Zig 측 per-session 평탄화). 이 AppSession의 tabs→panes→terms 트리를 walk해 SurfaceDto[]를
     /// `surfaces`에, 이 창의 WindowMembershipSnapshot 하나를 `windows`에 append한다(전부 `arena`에서 할당). A2(Swift
     /// 멀티창 열거 ABI)가 살아있는 각 AppSession마다 이 함수를 **공유 리스트**로 호출해 하나의 CollectorSnapshot을
-    /// 만든다(§2). 매핑: id={surface.id(M0a), generation=0}, kind=terminal(web는 Phase 4), title=termLabel(custom_name
-    /// 우선), 좌표(window_id 주입·tab/pane 0-based 인덱스), focused(key 창의 활성 surface), cwd/git_branch/agent/
+    /// 만든다(§2). 매핑: id={surface.id(M0a), generation=0}, kind=detail tag(terminal | web — web Term은 `.web`
+    /// variant로 emit해 sentinel core를 안 만진다), title=termLabel(custom_name 우선), 좌표(window_id 주입·tab/pane
+    /// 0-based 인덱스), focused(key 창의 활성 surface), cwd/git_branch/agent/
     /// at_prompt 3상(§3). **core_mutex(§5)**: cwd·semantic_state·alt_active 코어 read는 각 surface core_mutex 아래에서
     /// **복사만** 하고, git .git/HEAD fs 읽기·DTO 조립·직렬화는 락 밖에서 한다(리더 스레드 evict/free와 경합 방지).
     pub fn collectSessionInto(
@@ -12943,6 +12970,34 @@ pub const AppSession = struct {
         for (self.tabs.items, 0..) |tab, ti| {
             for (tab.panes.items, 0..) |pane, pi| {
                 for (pane.terms.items) |term| {
+                    // 4e web Term: sentinel core라 cwd/git/at_prompt를 읽으면 안 된다(활성 render gate와 같은 이유) —
+                    // core lock을 건너뛰고 `.web` detail을 emit한다(§3 web 전용 메타). url은 콘텐츠 영속이 없어 null,
+                    // trust는 §8.1(browser=임의 URL=untrusted, markdown=trusted).
+                    if (term.kind == .web) {
+                        const web_sid = term.surface.id;
+                        try member_ids.append(arena, web_sid);
+                        try surfaces.append(arena, .{
+                            .surface_id = web_sid,
+                            .generation = 0,
+                            .title = try arena.dupe(u8, termLabel(term)),
+                            .window = window_id,
+                            .tab = @intCast(ti),
+                            .pane = @intCast(pi),
+                            .focused = (focused_surface_id != null and web_sid == focused_surface_id.?),
+                            .detail = .{
+                                .web = .{
+                                    .url = null, // 콘텐츠 URL 미영속(Phase 5)
+                                    .panel_kind = switch (term.web_panel_kind) {
+                                        .markdown => .markdown,
+                                        .browser => .browser,
+                                    },
+                                    .loading = false,
+                                    .trust = if (term.web_panel_kind == .browser) .untrusted else .trusted, // §8.1
+                                },
+                            },
+                        });
+                        continue; // terminal 경로(core lock·cwd·git·at_prompt) 건너뜀
+                    }
                     // ── 코어 read는 surface core_mutex 아래에서 **복사만**(§5, 리더 스레드 evict/free 경합 방지) ──
                     term.surface.lockCore(self.io);
                     const sem = term.surface.core.semantic_state;
@@ -13041,6 +13096,9 @@ pub const AppSession = struct {
     /// 반환은 core 소유로 다음 OSC 0/2/7·RIS·destroy까지 유효하다(별도 복사 없음).
     pub fn windowTitle(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
+        // 4e: 활성 Term이 web이면 sentinel core엔 OSC 제목이 없어 빈값이 나온다 — kind 파생 라벨("Browser"/
+        // "Markdown", custom_name 우선)을 창 제목으로 쓴다(termLabel 단일 해석). terminal 경로는 그대로.
+        if (!self.activeTermIsTerminal()) return termLabel(self.activePane().activeTerm());
         return self.activeSurface().core.windowTitle();
     }
 
@@ -13451,6 +13509,9 @@ pub const AppSession = struct {
         for (tab.panes.items) |pane| {
             var surfaces: std.ArrayList(maru.session.workspace.Surface) = .empty;
             for (pane.terms.items) |term| {
+                // 4e web Term은 sentinel core라 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다 — capture서 스킵한다
+                // (workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다; Phase 5서 포맷에 kind 추가 전까지).
+                if (term.kind == .web) continue;
                 const core = &term.surface.core;
                 const agent = self.captureAgentForRestore(arena, term);
                 try surfaces.append(arena, .{
@@ -13465,6 +13526,25 @@ pub const AppSession = struct {
                     .agent_kind = agent.kind,
                     .agent_session = agent.session,
                     .agent_argv = agent.argv,
+                });
+            }
+            // web-only pane(모든 Term이 web): surfaces가 비면 buildWorkspacePane이 error.EmptyPane로 **전체 복원을
+            // 중단**한다 — 기본 셸 placeholder 1개를 넣어 그 pane이 기본 로그인 셸로 복원되게 한다(제목/cwd/command/
+            // agent 전부 빈값 → restoreSpawn 기본 셸; 브라우저 콘텐츠는 어차피 미영속). 크기는 pane 첫 Term의 (sentinel여도
+            // 유효한) core size에서 취한다. pane.active_term은 buildWorkspacePane이 @min(active_term, terms.len-1)로
+            // clamp하므로 web active_term이 범위를 넘어도 안전(별도 보정 불요).
+            if (surfaces.items.len == 0) {
+                const c = &pane.terms.items[0].surface.core; // sentinel이어도 size 유효(1×1)
+                try surfaces.append(arena, .{
+                    .custom_name = try arena.dupe(u8, ""),
+                    .title = try arena.dupe(u8, ""),
+                    .cwd = try arena.dupe(u8, ""),
+                    .command = try arena.dupe(u8, ""),
+                    .cols = c.size.cols,
+                    .rows = c.size.rows,
+                    .agent_kind = try arena.dupe(u8, ""),
+                    .agent_session = try arena.dupe(u8, ""),
+                    .agent_argv = &.{},
                 });
             }
             try panes.append(arena, .{
@@ -18299,6 +18379,8 @@ pub const AppSession = struct {
 
         self.web_panel_prev.deinit(self.allocator); // Phase 4e-3: web surface diff prev 집합
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
+        self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
+        self.web_leaf_rects_scratch.deinit(self.allocator); // Phase 4e: web leaf-rect 영속 scratch
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
@@ -30954,6 +31036,206 @@ test "web_surfaces_present는 활성 탭 트리에서 파생된다(비활성 탭
     session.closeActiveTerm(); // 활성 pane의 활성 Term(web)을 닫는다(pane에 terminal+web 2개라 동작).
     try std.testing.expect(!session.activeTabHasWebTerm());
     try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
+}
+
+// [4e review 1] allTabsTerminated: 살아 있는 web Term(sentinel core라 live_initialized=false)이 남으면 세션을 종료로
+// 판정하지 않는다 — 터미널만 다 죽고 web만 남은 창이 통째로 닫히던 회귀 방지. 실 init/spawn 경로라 게이트(수정 전엔 true).
+test "allTabsTerminated: web-only 잔여는 세션을 살려 둔다(web-only 창 종료 방지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.dispatchAppAction(.new_web_tab); // pane=[terminal, web], web 활성
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+
+    // 터미널(인덱스 0)을 활성으로 만들어 닫아 web만 남긴다.
+    session.focusTerm(0);
+    try std.testing.expect(pane.terms.items[pane.active_term].kind == .terminal);
+    session.closeActiveTerm();
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expect(pane.terms.items[0].kind == .web);
+
+    // 살아 있는 web Term이 남았으니 종료로 판정되면 안 된다(수정 전: web는 live_initialized=false라 true=창 닫힘).
+    try std.testing.expect(!session.allTabsTerminated());
+}
+
+// [4e review 2] cwdSourceTerm/focusedTermCwd: 활성 Term이 web이면 sentinel core(빈 cwd)가 아니라 pane 내 terminal
+// 형제에서 cwd를 상속한다 — 새 surface spawn cwd가 루트로 폴백하던 회귀 방지. 실 init/OSC7 경로라 게이트(수정 전: null).
+test "cwdSourceTerm: web 활성이면 terminal 형제로 cwd 상속(sentinel→루트 폴백 아님)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try session.activeSurface().core.write("\x1b]7;file://h/tmp/proj\x07"); // 터미널에 OSC 7 cwd
+    const term_sibling = session.activePane().activeTerm();
+
+    session.dispatchAppAction(.new_web_tab); // pane=[terminal, web], web 활성
+    const pane = session.activePane();
+    try std.testing.expect(pane.activeTerm().kind == .web);
+
+    // cwdSourceTerm은 sentinel(web)이 아니라 terminal 형제를 골라야 한다.
+    try std.testing.expectEqual(term_sibling, session.cwdSourceTerm().?);
+
+    // focusedTermCwd도 web sentinel(빈 cwd) 대신 terminal 형제 cwd를 복사해 돌려준다(수정 전: sentinel→null).
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = session.focusedTermCwd(&buf);
+    try std.testing.expect(cwd != null);
+    try std.testing.expectEqualStrings("/tmp/proj", cwd.?);
+}
+
+// [4e review 6] windowTitle: 활성 web Term은 sentinel core의 빈 제목이 아니라 kind 파생 라벨("Browser")을 반환한다.
+// 실 init/spawn 경로라 게이트(수정 전엔 빈 슬라이스).
+test "windowTitle: 활성 web Term은 kind 라벨(Browser)을 반환(sentinel 빈 제목 아님)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.dispatchAppAction(.new_web_tab); // web(browser) Term 활성화
+    try std.testing.expect(session.activePane().activeTerm().kind == .web);
+    try std.testing.expectEqualStrings("Browser", session.windowTitle());
+}
+
+// [4e review 3] captureWorkspaceTab: web Term은 capture서 스킵(복원 시 셸 오spawn 방지)하고, web-only pane은 기본 셸
+// placeholder 1개를 실어 빈 pane(→EmptyPane 전체 복원 중단)을 막는다. 실 init/spawn 경로라 게이트.
+test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // (a) pane=[terminal, web] → capture는 terminal 하나만 싣는다(수정 전: web 포함 2개).
+    session.dispatchAppAction(.new_web_tab);
+    try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
+    {
+        const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
+        try std.testing.expectEqual(@as(usize, 1), wtab.panes.len);
+        try std.testing.expectEqual(@as(usize, 1), wtab.panes[0].surfaces.len);
+    }
+
+    // (b) web-only pane: 터미널을 닫아 pane=[web]만 → capture는 셸 placeholder 하나(빈 command/agent, sentinel size 유효).
+    session.focusTerm(0);
+    session.closeActiveTerm();
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expect(session.activePane().terms.items[0].kind == .web);
+    {
+        const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
+        try std.testing.expectEqual(@as(usize, 1), wtab.panes.len);
+        try std.testing.expectEqual(@as(usize, 1), wtab.panes[0].surfaces.len); // 빈 pane 방지 placeholder
+        const s = wtab.panes[0].surfaces[0];
+        try std.testing.expectEqualStrings("", s.command); // 기본 로그인 셸(command 빈값)
+        try std.testing.expectEqualStrings("", s.agent_kind);
+        try std.testing.expect(s.cols > 0 and s.rows > 0);
+    }
+}
+
+// [4e review 4] collectSessionInto: web Term은 .terminal이 아니라 .web detail(panel_kind·trust)로 직렬화한다 —
+// 컨트롤 플레인이 web을 terminal로 오보고하던 회귀 방지. 실 init/spawn/collect 경로라 게이트(수정 전: .terminal).
+test "collector: web Term은 .web detail(panel_kind=browser·trust=untrusted)로 직렬화" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.dispatchAppAction(.new_web_tab); // web(browser) Term
+    const web_id = session.activePane().activeTerm().surfaceId();
+
+    const c = try session.collectSession(allocator, 7, .normal);
+    defer c.deinit();
+
+    var found: ?control_surface.SurfaceDto = null;
+    for (c.snapshot.surfaces) |dto| {
+        if (dto.surface_id == web_id) found = dto;
+    }
+    const w = found.?;
+    try std.testing.expectEqual(control_surface.SurfaceKind.web, w.kind());
+    try std.testing.expectEqual(control_surface.PanelKind.browser, w.detail.web.panel_kind);
+    try std.testing.expectEqual(control_surface.TrustLevel.untrusted, w.detail.web.trust);
+    try std.testing.expect(w.detail.web.url == null);
+    try std.testing.expect(!w.detail.web.loading);
+    try std.testing.expectEqualStrings("Browser", w.title);
+}
+
+// [4e review 0] collectWebSurfaces: split에서 각 web 패널 본문 rect는 형제 pane과 맞닿는 **seam** 가장자리를 divider
+// 절반만큼 들여 WKWebView가 분할선을 덮지 않게 한다(바깥 경계·top 탭 바는 그대로). 헤드리스 rect 검증(수정 전: seam inset 0).
+test "collectWebSurfaces: split seam 가장자리는 divider 절반 inset(바깥 경계는 0, top은 탭 바)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.appearance.split_divider_thickness = 4.0; // dt=4 @1x → half=2 (0이면 vacuous)
+    const half = session.dividerThicknessPx() / 2;
+    try std.testing.expect(half > 0);
+
+    // 두 pane split 후 양쪽 pane에 web Term(collectWebSurfaces는 pane 포커스 무관하게 활성 탭 web 전부 수집).
+    session.dispatchAppAction(.split_horizontal);
+    session.dispatchAppAction(.new_web_tab); // 활성(방금 만든) pane에 web
+    session.focusPaneRelative(-1); // 다른 pane로 포커스
+    session.dispatchAppAction(.new_web_tab); // 그 pane에도 web
+
+    var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaves.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
+    try std.testing.expectEqual(@as(usize, 2), leaves.items.len);
+
+    var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+    defer cur.deinit(allocator);
+    try session.collectWebSurfaces(&cur);
+    try std.testing.expectEqual(@as(usize, 2), cur.items.len);
+
+    const tr = session.termRect();
+    const bar_h = session.paneBarHeightPx();
+    var saw_seam = false; // 최소 하나의 seam inset(>0)을 실제로 밟았는지(non-vacuous 보장)
+    for (cur.items) |s| {
+        // 이 web surface가 사는 leaf rect를 surface_id로 찾는다.
+        var lr: ?maru.session.SplitRect = null;
+        for (leaves.items) |lf| {
+            for (lf.leaf.terms.items) |t| {
+                if (t.kind == .web and t.surfaceId() == s.surface_id) lr = lf.rect;
+            }
+        }
+        const rect = lr.?;
+        const cr = s.content_rect;
+        const exp_left: u32 = if (rect.x > tr.x) half else 0; // 왼쪽 seam
+        const exp_right: u32 = if (rect.x + rect.w < tr.x + tr.w) half else 0; // 오른쪽 seam
+        const exp_bottom: u32 = if (rect.y + rect.h < tr.y + tr.h) half else 0; // 아래 seam
+        if (exp_left > 0 or exp_right > 0 or exp_bottom > 0) saw_seam = true;
+        try std.testing.expectEqual(rect.x + exp_left, cr.x);
+        try std.testing.expectEqual(rect.y + bar_h, cr.y); // top은 항상 탭 바(seam 추가 inset 없음)
+        try std.testing.expectEqual(rect.w - exp_left - exp_right, cr.w);
+        try std.testing.expectEqual(rect.h - bar_h - exp_bottom, cr.h);
+    }
+    try std.testing.expect(saw_seam); // 실제 seam을 밟았음(inset 로직이 아무것도 안 했으면 vacuous)
+}
+
+// [4e review 8] web scratch: web Term 있는 세션을 여러 tick 돌려도 영속 scratch(swap 후 옛 prev 버퍼 보유)가 누수/
+// double-free 없이 정확히 해제된다. testing.allocator가 감시. 실 init/spawn/tick 경로.
+test "web scratch: 다중 tick 누수/크래시 0(영속 scratch swap 소유 흐름)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.dispatchAppAction(.new_web_tab);
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        _ = session.webSurfaceTransitionsCount(); // computeWebSurfaceTransitions(collect+diff+swap) 반복
+        _ = try session.tick();
+    }
+    try std.testing.expect(session.activeTabHasWebTerm());
 }
 
 // pane에 Term이 여럿이면 탭 바가 제목 탭들 + 활성 Term 하이라이트를 그리는지(PR-C2) — 실 init/spawn/tick이

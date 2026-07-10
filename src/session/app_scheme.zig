@@ -71,6 +71,49 @@ pub fn validateAppPath(path: []const u8, out: []u8) SandboxError![]const u8 {
     return out[0..w];
 }
 
+// ── Phase 7e-2a: browser 웹 패널 주소창 스킴 정책(L2 순수 — 헤드리스·이식성) ────────────────────────────────
+
+/// browser 웹 패널 주소창에 친 `input`을 **로드 가능한 URL**로 정규화하거나 거부한다(§7.2 browser 주소창). `maru-app://`
+/// 신뢰 UI가 아니라 **외부 http/https 웹**을 여는 경로다(위 `validateAppPath`와 별개 — 저건 번들 asset root 샌드박스).
+///
+/// 정책(무엇을·왜):
+///  - 공백·탭 trim 후 **빈 문자열 → null**(로드 안 함).
+///  - `"://"` 포함(스킴 있는 절대 URL): `http://`·`https://`(대소문자 무시) 접두면 **그대로 통과**, 아니면 **null로 거부**
+///    (`file://`·`javascript://`·`data://`·`maru-app://` 등 위험/미허용 스킴 — 로컬 파일 노출·스크립트 실행·신뢰 스킴
+///    스푸핑 차단). 베이스: 브라우저 주소창이 신뢰 컨텍스트에서 임의 스킴을 실행하지 않도록 **허용 목록**(http/https)만 연다.
+///  - `"://"` 없음: `https://{input}` 프리픽스(bare 도메인 `example.com`·`localhost:3000` 등을 https로). `"://"` 없는
+///    위험 스킴(`javascript:alert(1)`)도 이 프리픽스로 **무해화**된다 — `https://javascript:alert(1)`은 스킴이 아니라
+///    (잘못된) host/path로 파싱돼 스크립트가 실행되지 않는다(안전한 기본값).
+///  - 결과가 `out` 버퍼보다 길면 **null**(방어 — 호출자가 여유 있는 out을 준다).
+///
+/// 반환 슬라이스는 `out` 소유(호출자가 살려 둔다). L2 순수: I/O·상태 없음(입력·out만). 실제 navigate 실행은 platform(7e-2b).
+pub fn resolveNavUrl(input: []const u8, out: []u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, input, " \t");
+    if (trimmed.len == 0) return null; // 빈/공백뿐 → 로드 안 함
+
+    if (std.mem.indexOf(u8, trimmed, "://") != null) {
+        // 스킴 있는 절대 URL — http/https만 허용, 나머지(file·javascript·data·maru-app 등)는 거부(허용 목록).
+        if (hasSchemePrefix(trimmed, "http://") or hasSchemePrefix(trimmed, "https://")) {
+            if (trimmed.len > out.len) return null; // out 초과 방어
+            @memcpy(out[0..trimmed.len], trimmed);
+            return out[0..trimmed.len];
+        }
+        return null; // 미허용 스킴 거부
+    }
+
+    // 스킴 없음 → https:// 프리픽스(bare 도메인·localhost:port; "://" 없는 위험 스킴도 무해화).
+    const prefix = "https://";
+    if (prefix.len + trimmed.len > out.len) return null; // out 초과 방어
+    @memcpy(out[0..prefix.len], prefix);
+    @memcpy(out[prefix.len..][0..trimmed.len], trimmed);
+    return out[0 .. prefix.len + trimmed.len];
+}
+
+/// `s`가 `prefix`(스킴)로 시작하는가 — 스킴은 대소문자 무시(RFC 3986 §3.1)라 `HTTP://`·`Https://`도 허용한다.
+fn hasSchemePrefix(s: []const u8, prefix: []const u8) bool {
+    return s.len >= prefix.len and std.ascii.eqlIgnoreCase(s[0..prefix.len], prefix);
+}
+
 // ── 테스트: adversarial(경로 탈출·인코딩·주입) + 정규화 + 정상 ──────────────────────────────────────────────
 
 const testing = std.testing;
@@ -150,4 +193,58 @@ test "validateAppPath: 반환 경로는 절대 `..`·선행 `/`를 포함하지 
 test "validateAppPath: TooLong(out 버퍼 초과) 방어" {
     var small: [4]u8 = undefined;
     try testing.expectError(SandboxError.TooLong, validateAppPath("abcdefgh", &small));
+}
+
+// ── resolveNavUrl(7e-2a 주소창 스킴 정책) adversarial ───────────────────────────────────────────────────────
+
+fn expectNav(input: []const u8, want: []const u8) !void {
+    var buf: [2048]u8 = undefined;
+    const got = resolveNavUrl(input, &buf) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings(want, got);
+}
+
+fn expectNavNull(input: []const u8) !void {
+    var buf: [2048]u8 = undefined;
+    try testing.expect(resolveNavUrl(input, &buf) == null);
+}
+
+test "resolveNavUrl: http/https 절대 URL은 그대로 통과(대소문자 무시)" {
+    try expectNav("http://example.com/", "http://example.com/");
+    try expectNav("https://example.com/path?q=1", "https://example.com/path?q=1");
+    try expectNav("HTTPS://Example.COM/", "HTTPS://Example.COM/"); // 스킴 대소문자 무시(원문 보존)
+    try expectNav("http://localhost:3000", "http://localhost:3000");
+}
+
+test "resolveNavUrl: 위험/미허용 스킴(://) 거부 — file·javascript·data·maru-app" {
+    try expectNavNull("file:///etc/passwd"); // 로컬 파일 노출
+    try expectNavNull("javascript://alert(1)"); // 스크립트 스킴
+    try expectNavNull("data://text/html,<script>"); // data 스킴(:// 형)
+    try expectNavNull("maru-app://app/index.html"); // 신뢰 스킴 스푸핑
+    try expectNavNull("ftp://host/f"); // 그 외 스킴도 허용 목록 밖 → 거부
+}
+
+test "resolveNavUrl: bare 도메인·localhost는 https:// 프리픽스" {
+    try expectNav("example.com", "https://example.com");
+    try expectNav("localhost:3000", "https://localhost:3000");
+    try expectNav("sub.example.com/a/b", "https://sub.example.com/a/b");
+}
+
+test "resolveNavUrl: '://' 없는 위험 스킴은 https:// 프리픽스로 무해화" {
+    // javascript:alert(1)은 "://"가 없어 스킴 판정을 안 타고 host/path로 프리픽스 → 스크립트 실행 안 됨(안전).
+    try expectNav("javascript:alert(1)", "https://javascript:alert(1)");
+    try expectNav("data:text/html,x", "https://data:text/html,x");
+}
+
+test "resolveNavUrl: 빈/공백뿐 → null(로드 안 함), trim 적용" {
+    try expectNavNull("");
+    try expectNavNull("   ");
+    try expectNavNull("\t \t");
+    try expectNav("  example.com  ", "https://example.com"); // 앞뒤 공백 trim 후 프리픽스
+    try expectNav("  http://x/  ", "http://x/"); // trim 후 http 통과
+}
+
+test "resolveNavUrl: out 버퍼 초과 → null(http 통과·https 프리픽스 두 경로 모두)" {
+    var tiny: [4]u8 = undefined;
+    try testing.expect(resolveNavUrl("http://example.com/", &tiny) == null); // 통과 경로 out 초과
+    try testing.expect(resolveNavUrl("example.com", &tiny) == null); // 프리픽스 경로 out 초과("https://"만도 8B>4)
 }

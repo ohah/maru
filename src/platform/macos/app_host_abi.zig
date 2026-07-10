@@ -1333,6 +1333,27 @@ pub export fn maru_macos_app_resolve_app_asset(
     return @intCast(resolved.len);
 }
 
+// maru-app:// 응답 CSP 헤더 문자열(5c-2c). **단일 출처 = maru.session.app_scheme.csp_header** — Swift 핸들러가 문자열을
+// 중복해 들지 않고 1회 읽어 캐시한다(doc↔code drift 방지, docs/web-panel.md §7.1 ③). out에 복사하고 길이를 돌려준다.
+// cap 부족이면 -1, out null이면 -2.
+pub export fn maru_macos_app_csp_header(out_ptr: ?[*]u8, out_cap: usize) i64 {
+    const op = out_ptr orelse return -2;
+    const csp = maru.session.app_scheme.csp_header;
+    if (csp.len > out_cap) return -1;
+    @memcpy(op[0..csp.len], csp);
+    return @intCast(csp.len);
+}
+
+test "maru_macos_app_csp_header export: 단일출처 복사 + cap 부족 -1 + null -2" {
+    var buf: [512]u8 = undefined;
+    const n = maru_macos_app_csp_header(&buf, buf.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expectEqualStrings(maru.session.app_scheme.csp_header, buf[0..@intCast(n)]);
+    var tiny: [4]u8 = undefined; // csp_header보다 작음 → -1
+    try std.testing.expectEqual(@as(i64, -1), maru_macos_app_csp_header(&tiny, tiny.len));
+    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_csp_header(null, 512));
+}
+
 test "maru_macos_app_resolve_app_asset export: 정상=len>0, traversal=-1, 부재=-2, null=-4" {
     const io = std.testing.io;
     var root_tmp = std.testing.tmpDir(.{});

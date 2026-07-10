@@ -7163,19 +7163,24 @@ pub const AppSession = struct {
         try self.activeTabLeafRects(self.allocator, self.termRect(), &self.web_leaf_rects_scratch);
         const bar_h = self.paneBarHeightPx();
         const dt = self.dividerThicknessPx();
-        const half: u32 = dt / 2; // divider는 seam 중앙 정렬(셀 clamp) → 각 pane은 절반만 inset해 분할선을 Metal 노출로 남긴다.
+        // seam inset: WKWebView는 native NSView라 자기 frame 안 클릭을 **삼킨다**(터미널처럼 mouse handler가
+        // dividerAtPoint를 먼저 가로챌 수 없다) → 형제 pane과 맞닿는 seam 가장자리서 divider를 **물리적으로 노출**해야
+        // 마우스가 seam에 닿아 드래그 리사이즈된다(web-panel.md §5). 이전 `dt/2`는 기본 dt=1px에서 **0**이라 아무 효과
+        // 없었다(세로·가로 divider가 안 잡히던 회귀 — [4e review 0] 재수정). `divider.hitTest` 허용폭
+        // (chrome/components/divider.zig: cell/2+2)이 넉넉해 divider 선 밖 아주 작은 밴드만 있으면 보이는 선을 겨냥해
+        // 잡히므로, gap을 **최소화**한다 — divider 선(dt) + 1pt 클릭 여유(scale 인지)만 들인다(사용자 요청: 공백 최대 축소).
+        // dt==0(divider 숨김)이면 seam=0(무-inset, 웹뷰가 seam까지 채움).
+        const seam: u32 = if (dt == 0) 0 else dt + @max(@as(u32, 1), self.scale_milli / 1000);
         const tr = self.termRect();
         for (self.web_leaf_rects_scratch.items) |lr| {
             for (lr.leaf.terms.items, 0..) |term, i| {
                 if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
-                // 각 leaf 가장자리가 바깥 경계(termRect)가 아니면 형제 pane과 맞닿는 **seam**이다 → divider 절반만큼
-                // 본문 rect를 들여 WKWebView가 분할선을 덮지 않게 한다(마우스가 seam에 닿아 드래그 리사이즈 가능,
-                // web-panel.md §5). top seam은 탭 바(bar_h ≫ half)가 이미 그 영역을 덮으므로 추가 inset 불요.
-                // dividerThicknessPx()==0(divider 숨김)이면 half=0이라 자동으로 무-inset(byte-identical).
+                // 각 leaf 가장자리가 바깥 경계(termRect)가 아니면 형제 pane과 맞닿는 **seam** → seam만큼 본문 rect를 들여
+                // WKWebView가 분할선을 덮지 않게 한다. top seam은 탭 바(bar_h ≫ seam)가 이미 그 영역을 덮으므로 추가 inset 불요.
                 var inset: web_panel_layout.ChromeInset = .{ .top = bar_h };
-                if (lr.rect.x > tr.x) inset.left = half; // 왼쪽에 형제 pane(세로 seam)
-                if (lr.rect.x + lr.rect.w < tr.x + tr.w) inset.right = half; // 오른쪽 세로 seam
-                if (lr.rect.y + lr.rect.h < tr.y + tr.h) inset.bottom = half; // 아래 가로 seam
+                if (lr.rect.x > tr.x) inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
+                if (lr.rect.x + lr.rect.w < tr.x + tr.w) inset.right = seam; // 오른쪽 세로 divider
+                if (lr.rect.y + lr.rect.h < tr.y + tr.h) inset.bottom = seam; // 아래 가로 divider
                 try out.append(self.allocator, .{
                     .surface_id = term.surfaceId(),
                     .panel_kind = term.web_panel_kind,
@@ -31167,57 +31172,81 @@ test "collector: web Term은 .web detail(panel_kind=browser·trust=untrusted)로
     try std.testing.expectEqualStrings("Browser", w.title);
 }
 
-// [4e review 0] collectWebSurfaces: split에서 각 web 패널 본문 rect는 형제 pane과 맞닿는 **seam** 가장자리를 divider
-// 절반만큼 들여 WKWebView가 분할선을 덮지 않게 한다(바깥 경계·top 탭 바는 그대로). 헤드리스 rect 검증(수정 전: seam inset 0).
-test "collectWebSurfaces: split seam 가장자리는 divider 절반 inset(바깥 경계는 0, top은 탭 바)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try initSmokeSessionSized(allocator);
-    defer allocator.destroy(session);
-    defer session.deinit();
-    session.appearance.split_divider_thickness = 4.0; // dt=4 @1x → half=2 (0이면 vacuous)
-    const half = session.dividerThicknessPx() / 2;
-    try std.testing.expect(half > 0);
-
-    // 두 pane split 후 양쪽 pane에 web Term(collectWebSurfaces는 pane 포커스 무관하게 활성 탭 web 전부 수집).
-    session.dispatchAppAction(.split_horizontal);
-    session.dispatchAppAction(.new_web_tab); // 활성(방금 만든) pane에 web
-    session.focusPaneRelative(-1); // 다른 pane로 포커스
-    session.dispatchAppAction(.new_web_tab); // 그 pane에도 web
-
+// [4e review 0] collectWebSurfaces seam inset 검증 헬퍼 — 각 web 본문 rect가 seam(형제 pane 경계) 가장자리서 `seam`만큼,
+// 바깥 경계는 0, top은 탭 바(bar_h)만 들어갔는지 확인하고 어느 seam을 실제로 밟았는지 [left,right,bottom]로 돌려준다.
+fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Allocator) ![3]bool {
     var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer leaves.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
-    try std.testing.expectEqual(@as(usize, 2), leaves.items.len);
-
     var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
     defer cur.deinit(allocator);
     try session.collectWebSurfaces(&cur);
-    try std.testing.expectEqual(@as(usize, 2), cur.items.len);
-
     const tr = session.termRect();
     const bar_h = session.paneBarHeightPx();
-    var saw_seam = false; // 최소 하나의 seam inset(>0)을 실제로 밟았는지(non-vacuous 보장)
+    var saw = [3]bool{ false, false, false }; // left, right, bottom seam을 실제 밟았는지(non-vacuous)
     for (cur.items) |s| {
-        // 이 web surface가 사는 leaf rect를 surface_id로 찾는다.
         var lr: ?maru.session.SplitRect = null;
-        for (leaves.items) |lf| {
-            for (lf.leaf.terms.items) |t| {
-                if (t.kind == .web and t.surfaceId() == s.surface_id) lr = lf.rect;
-            }
-        }
+        for (leaves.items) |lf| for (lf.leaf.terms.items) |t| {
+            if (t.kind == .web and t.surfaceId() == s.surface_id) lr = lf.rect;
+        };
         const rect = lr.?;
         const cr = s.content_rect;
-        const exp_left: u32 = if (rect.x > tr.x) half else 0; // 왼쪽 seam
-        const exp_right: u32 = if (rect.x + rect.w < tr.x + tr.w) half else 0; // 오른쪽 seam
-        const exp_bottom: u32 = if (rect.y + rect.h < tr.y + tr.h) half else 0; // 아래 seam
-        if (exp_left > 0 or exp_right > 0 or exp_bottom > 0) saw_seam = true;
-        try std.testing.expectEqual(rect.x + exp_left, cr.x);
+        const el: u32 = if (rect.x > tr.x) seam else 0;
+        const er: u32 = if (rect.x + rect.w < tr.x + tr.w) seam else 0;
+        const eb: u32 = if (rect.y + rect.h < tr.y + tr.h) seam else 0;
+        if (el > 0) saw[0] = true;
+        if (er > 0) saw[1] = true;
+        if (eb > 0) saw[2] = true;
+        try std.testing.expectEqual(rect.x + el, cr.x);
         try std.testing.expectEqual(rect.y + bar_h, cr.y); // top은 항상 탭 바(seam 추가 inset 없음)
-        try std.testing.expectEqual(rect.w - exp_left - exp_right, cr.w);
-        try std.testing.expectEqual(rect.h - bar_h - exp_bottom, cr.h);
+        try std.testing.expectEqual(rect.w - el - er, cr.w);
+        try std.testing.expectEqual(rect.h - bar_h - eb, cr.h);
     }
-    try std.testing.expect(saw_seam); // 실제 seam을 밟았음(inset 로직이 아무것도 안 했으면 vacuous)
+    return saw;
+}
+
+// [4e review 0 재수정] collectWebSurfaces: split에서 각 web 본문 rect는 seam 가장자리를 `dt + 클릭여유`만큼 들여 WKWebView가
+// divider를 덮지 않게 한다(예전 `dt/2`는 기본 dt=1에서 0이라 무효과 — 세로·가로 divider가 안 잡히던 회귀). 세로 divider
+// (split_horizontal=좌우)와 **가로 divider(split_vertical=상하, 원래 테스트가 놓친 bottom seam)** 둘 다 헤드리스 검증.
+test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클릭여유 inset, 바깥 경계 0" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    const expected_seam = struct {
+        fn v(session: *AppSession) u32 {
+            const dt = session.dividerThicknessPx();
+            return if (dt == 0) 0 else dt + @max(@as(u32, 1), session.scale_milli / 1000);
+        }
+    }.v;
+
+    // ① split_horizontal = 세로 divider(좌우 pane) → left/right seam.
+    {
+        const session = try initSmokeSessionSized(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const seam = expected_seam(session);
+        try std.testing.expect(seam > 0);
+        session.dispatchAppAction(.split_horizontal);
+        session.dispatchAppAction(.new_web_tab);
+        session.focusPaneRelative(-1);
+        session.dispatchAppAction(.new_web_tab);
+        const saw = try checkWebSeamInsets(session, seam, allocator);
+        try std.testing.expect(saw[0] or saw[1]); // 세로 divider의 좌/우 seam을 실제 밟음
+    }
+
+    // ② split_vertical = 가로 divider(상/하 pane) → bottom seam(원래 테스트가 안 밟던 경로 — 사용자 제보 버그).
+    {
+        const session = try initSmokeSessionSized(allocator);
+        defer allocator.destroy(session);
+        defer session.deinit();
+        const seam = expected_seam(session);
+        session.dispatchAppAction(.split_vertical);
+        session.dispatchAppAction(.new_web_tab);
+        session.focusPaneRelative(-1);
+        session.dispatchAppAction(.new_web_tab);
+        const saw = try checkWebSeamInsets(session, seam, allocator);
+        try std.testing.expect(saw[2]); // ★ 위 pane의 아래(가로 divider) seam을 실제 밟음 — bottom inset 잠금
+    }
 }
 
 // [4e review 8] web scratch: web Term 있는 세션을 여러 tick 돌려도 영속 scratch(swap 후 옛 prev 버퍼 보유)가 누수/

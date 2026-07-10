@@ -1308,6 +1308,50 @@ pub fn resolveAppAsset(io: std.Io, root_abs: []const u8, request_path: []const u
     return out[0..cand_real.len];
 }
 
+// maru-app:// asset resolve C-ABI(5c-2b): Swift WKURLSchemeHandler(5c-2c)가 요청 경로를 안전한 절대 경로로 resolve한다.
+// 정책(경로 샌드박스·realpath 탈출 방어)은 여기 Zig가 소유하고, Swift는 반환 경로의 바이트를 읽어 CSP와 서빙만 한다
+// (docs/web-panel.md §10 "정책은 테스트 가능한 Zig, Swift는 WebKit 어댑터"). 반환: **>=0** = `out`에 쓴 canonical 절대
+// 경로 길이. **음수** = 에러 코드(-1 Reject=문자열 거부, -2 NotFound=부재/디렉터리, -3 OutsideRoot=symlink 탈출,
+// -4 null 포인터). io는 앱 전역 single-threaded(다른 export와 동일 출처).
+pub export fn maru_macos_app_resolve_app_asset(
+    root_ptr: ?[*]const u8,
+    root_len: usize,
+    req_ptr: ?[*]const u8,
+    req_len: usize,
+    out_ptr: ?[*]u8,
+    out_cap: usize,
+) i64 {
+    const rp = root_ptr orelse return -4;
+    const qp = req_ptr orelse return -4;
+    const op = out_ptr orelse return -4;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const resolved = resolveAppAsset(io, rp[0..root_len], qp[0..req_len], op[0..out_cap]) catch |e| return switch (e) {
+        error.Reject => -1,
+        error.NotFound => -2,
+        error.OutsideRoot => -3,
+    };
+    return @intCast(resolved.len);
+}
+
+test "maru_macos_app_resolve_app_asset export: 정상=len>0, traversal=-1, 부재=-2, null=-4" {
+    const io = std.testing.io;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "index.html", .data = "x" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    // 정상: resolved 절대 경로 길이(양수)를 돌려주고 out에 canonical 경로를 씀.
+    const n = maru_macos_app_resolve_app_asset(root_abs.ptr, root_abs.len, "index.html", 10, &out, out.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..@intCast(n)], "/index.html"));
+    // traversal → -1(Reject), 부재 → -2(NotFound), null root → -4.
+    try std.testing.expectEqual(@as(i64, -1), maru_macos_app_resolve_app_asset(root_abs.ptr, root_abs.len, "../x", 4, &out, out.len));
+    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_resolve_app_asset(root_abs.ptr, root_abs.len, "nope.html", 9, &out, out.len));
+    try std.testing.expectEqual(@as(i64, -4), maru_macos_app_resolve_app_asset(null, 0, "index.html", 10, &out, out.len));
+}
+
 test "resolveAppAsset: 정상 파일 서빙 + 빈 경로 → index" {
     const io = std.testing.io;
     var root_tmp = std.testing.tmpDir(.{});

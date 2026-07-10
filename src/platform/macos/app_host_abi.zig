@@ -1216,6 +1216,7 @@ pub const WebSurfaceTransitionAbi = extern struct {
     visible: u32, // create: 1=즉시 show, 0=hidden 생성. show/reframe=함의상 1, hide/destroy 무의미.
     surface_id: u64,
     panel_kind: u32,
+    seam_edges: u32, // divider 맞닿는 가장자리 비트마스크(L=1·R=2·B=4). panel_kind 뒤 f64 정렬 pad 자리 → struct size 불변(ABI v103).
     frame_pt_x: f64,
     frame_pt_y: f64,
     frame_pt_w: f64,
@@ -1249,6 +1250,7 @@ pub export fn maru_macos_app_session_web_surface_transition_at(
             .markdown => 0,
             .browser => 1,
         },
+        .seam_edges = t.seam_edges,
         .frame_pt_x = t.frame_pt.x,
         .frame_pt_y = t.frame_pt.y,
         .frame_pt_w = t.frame_pt.w,
@@ -1619,6 +1621,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "visible"), @offsetOf(WebSurfaceTransitionAbi, "visible"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "surface_id"), @offsetOf(WebSurfaceTransitionAbi, "surface_id"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "panel_kind"), @offsetOf(WebSurfaceTransitionAbi, "panel_kind"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "seam_edges"), @offsetOf(WebSurfaceTransitionAbi, "seam_edges")); // v103: panel_kind 뒤 pad 자리(size 불변)
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_x"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_x"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_y"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_y"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_w"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_w"));

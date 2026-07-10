@@ -11806,7 +11806,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, confirm, notice, settings, rename, sidebar_search, find, palette };
+    const InputFocus = enum { terminal, confirm, notice, settings, rename, sidebar_search, find, palette, addr_edit };
     fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -11818,6 +11818,11 @@ pub const AppSession = struct {
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
+        // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
+        // (평문 타이핑이 IME→routeCommittedText 경로라 handleKeyEvent 인터셉트만으론 안 잡혔던 버그). 모달·rename·find·
+        // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
+        // 비-terminal이면 sendTextAsKeys→handleKeyEvent→addr_edit 인터셉트로 글자를 append한다.
+        if (self.addr_edit != null) return .addr_edit;
         return .terminal;
     }
 
@@ -11831,6 +11836,7 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
+            .addr_edit => {}, // 주소창 편집 MVP는 IME preedit 미표시(ASCII URL) — 확정 텍스트는 routeCommittedText 경로로 append
             .terminal => {
                 // Phase 3 위임(docs/io-render-threading.md §9 P3-2): setPreedit는 코어 mutate라 메인이 직접 하지
                 // 않고 reader로 위임한다 — IME 조합 확정 중 포커스 상실 재진입 데드락(#700)을 구조적으로 없앤다.
@@ -11852,6 +11858,7 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
             .palette => self.chrome_host.palette.input.preedit.items.len > 0,
+            .addr_edit => false, // 주소창 편집 MVP는 IME preedit 미표시(ASCII URL) — 조합 상태 없음
             .terminal => self.activeSurfaceConst().core.preedit != null,
         };
     }
@@ -12010,6 +12017,7 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebarSearchCaretRect(),
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
+            .addr_edit => null, // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다(오버레이 후보창 위치는 무의미)
             .terminal => null,
         };
         if (overlay_caret) |r| {
@@ -12062,6 +12070,7 @@ pub const AppSession = struct {
                 self.rebuildSidebar() catch {}; // 확정 글자로 필터 재적용
                 self.metal_dirty = true;
             },
+            .addr_edit => {}, // 주소창 편집 MVP는 preedit 미추적 — 확정할 조합 없음(글자는 routeCommittedText로 직접 append)
             .terminal => {
                 // preedit 읽기 + setPreedit("") 변경은 코어 mutate — 락 아래(docs/io-render-threading.md PR3,
                 // 리더 경합 방지). 단 확정 텍스트 전송(sendTextAsKeys)은 락을 푼 뒤에 한다:
@@ -29165,6 +29174,7 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     session.allocator = std.testing.allocator;
     session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
+    session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.find_matches = .empty; // toggleFind/showNotice가 clearRetainingCapacity 호출
     session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
     session.metal_dirty = false;
@@ -29211,6 +29221,7 @@ test "IME 라우팅: 세팅 모달 열림이면 inputFocus=.settings이라 조�
     session.allocator = std.testing.allocator;
     session.chrome_host = .{}; // inputFocus가 settings/notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음
+    session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.sidebar_search_active = false; // inputFocus가 읽음(설정 안 하면 UB로 .sidebar_search 오판)
     session.find_matches = .empty;
     session.palette_filtered = .empty;
@@ -29253,6 +29264,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.metal_dirty = false;
     session.chrome_host = .{}; // inputFocus가 읽음
     session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
+    session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // [4e-2] scrollPage 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     session.ime_inserted = .empty; // imeBegin이 clearRetainingCapacity 호출
     defer session.chrome_host.deinit(std.testing.allocator);

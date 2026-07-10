@@ -598,12 +598,22 @@ pub fn buildPaneAddressBarDrawList(
     url: []const u8,
     cols: u16,
     fg: terminal.Color,
+    editing: bool, // Phase 7e-2a: 편집 중이면 tail 앵커(끝=caret 시야 유지) + 끝 block caret 셀
+    caret_color: terminal.Color, // 편집 caret 색(block caret 셀 배경) — editing=false면 미사용
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
     if (cols >= 3) {
-        // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 우측 여백. 그 사이에 URL(넘치면 .head 앵커로 앞부분 보존·말미 말줄임).
-        _ = try appendEllipsizedTitle(allocator, &cells, url, 0, 1, cols - 1, .{ .foreground = fg }, false, .head); // 주소창 URL(터미널 텍스트) — 아이콘 widen 안 함
+        // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 우측 여백. 그 사이에 URL/편집 텍스트. 편집 중이면 tail 앵커로 문자열
+        // **끝**(caret 위치)을 늘 보이게(넘치면 앞을 …로 — rename 편집기와 동형), 읽기전용은 head 앵커로 앞부분(scheme·host) 보존.
+        const anchor: TitleAnchor = if (editing) .tail else .head;
+        const end_col = try appendEllipsizedTitle(allocator, &cells, url, 0, 1, cols - 1, .{ .foreground = fg }, false, anchor); // 주소창 텍스트(터미널 텍스트) — 아이콘 widen 안 함
+        // Phase 7e-2a: 편집 중이면 텍스트 끝 칸에 block caret(반전 블록 = 배경만 caret_color인 셀 — input_box end-caret 규약의
+        // 셀-정렬 판). appendEllipsizedTitle는 텍스트를 [1, cols-1)에만 깔아 반환 col ≤ cols-1이라, caret은 늘 밴드 안(< cols)
+        // 이다 — end_col<cols 가드는 방어(cols<3이면 이 블록 자체를 안 탐). 텍스트가 밴드를 꽉 채우면 우측 여백 칸에 caret이 온다.
+        if (editing and end_col < cols) {
+            try cells.append(allocator, .{ .row = 0, .col = end_col, .codepoint = ' ', .width = 1, .style = .{ .background = caret_color } });
+        }
     }
     return .{
         .size = .{ .cols = cols, .rows = 1 },
@@ -1275,7 +1285,7 @@ test "buildPaneLabelDrawList: 이름을 [1,cols-1)에 깔고 좌패딩·우간�
 test "buildPaneAddressBarDrawList: URL을 [1,cols-1)에 셀로 깔고 빈 url·cols<3이면 빈 strip (7e-1b)" {
     const allocator = std.testing.allocator;
     // cols=12 → URL 영역 [1,11) = 10칸. "https://a/"(10칸)이 정확히 들어감. col 0 = 좌패딩.
-    var dl = try buildPaneAddressBarDrawList(allocator, "https://a/", 12, .default);
+    var dl = try buildPaneAddressBarDrawList(allocator, "https://a/", 12, .default, false, .default);
     defer dl.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 12), dl.size.cols);
     try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
@@ -1292,23 +1302,52 @@ test "buildPaneAddressBarDrawList: URL을 [1,cols-1)에 셀로 깔고 빈 url·c
     try std.testing.expect(max_col <= 10); // col 11은 우측 여백(빈 칸)
 
     // 빈 url이면 빈 strip(밴드 배경만 보임 — 첫 frame nav 미도착 시).
-    var empty = try buildPaneAddressBarDrawList(allocator, "", 12, .default);
+    var empty = try buildPaneAddressBarDrawList(allocator, "", 12, .default, false, .default);
     defer empty.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), empty.cells.len);
 
     // cols<3이면 빈 strip(패딩+글자+여백 불가).
-    var tiny = try buildPaneAddressBarDrawList(allocator, "https://a/", 2, .default);
+    var tiny = try buildPaneAddressBarDrawList(allocator, "https://a/", 2, .default, false, .default);
     defer tiny.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), tiny.cells.len);
 
     // 긴 URL은 .head 앵커라 앞부분 보존 + 말미 말줄임(U+2026)으로 끝난다(scheme·host 우선 표시).
-    var long = try buildPaneAddressBarDrawList(allocator, "https://example.com/very/long/path/segment", 12, .default);
+    var long = try buildPaneAddressBarDrawList(allocator, "https://example.com/very/long/path/segment", 12, .default, false, .default);
     defer long.deinit(allocator);
     var has_ellipsis = false;
     for (long.cells) |c| {
         if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
     }
     try std.testing.expect(has_ellipsis);
+}
+
+test "buildPaneAddressBarDrawList: 편집 중이면 텍스트 끝에 block caret(배경=caret_color) + tail 앵커 (7e-2a)" {
+    const allocator = std.testing.allocator;
+    const caret: terminal.Color = .{ .rgb = .{ .r = 9, .g = 8, .b = 7 } };
+    // cols=12 → 텍스트 영역 [1,11). "abc"(3칸)이 col 1~3에 들어가고, 끝 칸(col 4)에 block caret(공백 + 배경 caret_color).
+    var dl = try buildPaneAddressBarDrawList(allocator, "abc", 12, .default, true, caret);
+    defer dl.deinit(allocator);
+    var caret_cell: ?renderer.DrawCell = null;
+    var text_cells: usize = 0;
+    for (dl.cells) |c| {
+        if (c.style.background == .rgb and c.codepoint == ' ') caret_cell = c else text_cells += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), text_cells); // "abc" 3글자
+    try std.testing.expect(caret_cell != null); // 편집 caret 셀 존재
+    try std.testing.expectEqual(@as(u16, 4), caret_cell.?.col); // 텍스트 끝(col 1~3) 다음 = col 4
+    try std.testing.expectEqual(caret, caret_cell.?.style.background); // 배경 = caret_color(block caret)
+
+    // 편집 아님(읽기전용)이면 같은 텍스트라도 caret 셀 없음(회귀 방지 — editing 플래그가 caret을 가른다).
+    var ro = try buildPaneAddressBarDrawList(allocator, "abc", 12, .default, false, caret);
+    defer ro.deinit(allocator);
+    for (ro.cells) |c| try std.testing.expect(!(c.style.background == .rgb and c.codepoint == ' ')); // caret 셀 없음
+
+    // 빈 편집 버퍼면 caret만(col 1, 텍스트 셀 0) — 빈 주소창에 입력 위치를 보인다.
+    var empty_edit = try buildPaneAddressBarDrawList(allocator, "", 12, .default, true, caret);
+    defer empty_edit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), empty_edit.cells.len);
+    try std.testing.expectEqual(@as(u16, 1), empty_edit.cells[0].col); // 좌패딩(col 0) 다음
+    try std.testing.expectEqual(caret, empty_edit.cells[0].style.background);
 }
 
 test "buildPaneLabelDrawList tail 앵커: 넘치면 선두를 …로 자르고 이름 끝(rename caret)을 보존한다" {

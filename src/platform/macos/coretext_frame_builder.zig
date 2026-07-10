@@ -587,6 +587,33 @@ pub fn buildPaneLabelDrawList(
     };
 }
 
+/// Phase 7e-1b: browser(비신뢰) 웹 패널 주소창의 URL glyph DrawList — 한 줄(row 0)에 현재 URL을 [1, cols-1) 칸에
+/// 깐다(col 0 좌측 패딩, 마지막 칸은 우측 여백). `buildPaneLabelDrawList`와 같은 셀-정렬 1-row strip이되 앵커는
+/// **`.head`**(URL 앞부분 = scheme·host를 보존, 긴 경로는 말미를 "…"로 자름 — 주소창은 어디를 보는지가 먼저).
+/// 색은 `fg`(호출자가 muted로 줘 읽기전용 표시가 과하지 않게). 빈 url이면 빈 DrawList(밴드 배경만 보임). cols<3이면
+/// (패딩+글자+여백 불가) 빈 strip — 호출자는 그 미만으로 예약하지 않는다. **읽기전용**(입력·버튼 없음 — 편집은 7e-2,
+/// back/fwd/reload 버튼은 7e-3). 커서/overlay 없는 UI 텍스트라 OS 무관 단위 테스트(quad 금지, 셀 text만).
+pub fn buildPaneAddressBarDrawList(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    cols: u16,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    if (cols >= 3) {
+        // [1, cols-1): col 0 = 좌측 패딩, 마지막 칸 = 우측 여백. 그 사이에 URL(넘치면 .head 앵커로 앞부분 보존·말미 말줄임).
+        _ = try appendEllipsizedTitle(allocator, &cells, url, 0, 1, cols - 1, .{ .foreground = fg }, false, .head); // 주소창 URL(터미널 텍스트) — 아이콘 widen 안 함
+    }
+    return .{
+        .size = .{ .cols = cols, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 /// pane 탭 바 좌측 grip 핸들(pane 통째 드래그 손잡이)의 glyph DrawList — 한 줄(row 0)에 grip 글리프 ⠿
 /// (U+283F, braille 6점 — 사용자 preview 손잡이 모양)를 **중앙 칸(cols/2)**에 깐다(좌·우 칸은 패딩 — 글리프가
 /// 좌단·divider에 안 붙게). 폰트에 글리프가 없으면 빈 칸으로 degrade하지만, grip 영역은 paneBar가 예약하고 마우스
@@ -1240,6 +1267,45 @@ test "buildPaneLabelDrawList: 이름을 [1,cols-1)에 깔고 좌패딩·우간�
     defer ell.deinit(allocator);
     var has_ellipsis = false;
     for (ell.cells) |c| {
+        if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
+    }
+    try std.testing.expect(has_ellipsis);
+}
+
+test "buildPaneAddressBarDrawList: URL을 [1,cols-1)에 셀로 깔고 빈 url·cols<3이면 빈 strip (7e-1b)" {
+    const allocator = std.testing.allocator;
+    // cols=12 → URL 영역 [1,11) = 10칸. "https://a/"(10칸)이 정확히 들어감. col 0 = 좌패딩.
+    var dl = try buildPaneAddressBarDrawList(allocator, "https://a/", 12, .default);
+    defer dl.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 12), dl.size.cols);
+    try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
+    try std.testing.expect(!dl.cursor.visible); // 읽기전용 UI — 커서 없음
+    try std.testing.expect(dl.cells.len > 0); // URL이 셀로 들어감(quad 아님)
+    // 첫 글자 'h'는 col 1(좌패딩 뒤) — 밴드 좌측 1칸 패딩 확인.
+    var min_col: u16 = 999;
+    var max_col: u16 = 0;
+    for (dl.cells) |c| {
+        if (c.col < min_col) min_col = c.col;
+        if (c.col > max_col) max_col = c.col;
+    }
+    try std.testing.expectEqual(@as(u16, 1), min_col); // 좌패딩(col 0 비움)
+    try std.testing.expect(max_col <= 10); // col 11은 우측 여백(빈 칸)
+
+    // 빈 url이면 빈 strip(밴드 배경만 보임 — 첫 frame nav 미도착 시).
+    var empty = try buildPaneAddressBarDrawList(allocator, "", 12, .default);
+    defer empty.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), empty.cells.len);
+
+    // cols<3이면 빈 strip(패딩+글자+여백 불가).
+    var tiny = try buildPaneAddressBarDrawList(allocator, "https://a/", 2, .default);
+    defer tiny.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), tiny.cells.len);
+
+    // 긴 URL은 .head 앵커라 앞부분 보존 + 말미 말줄임(U+2026)으로 끝난다(scheme·host 우선 표시).
+    var long = try buildPaneAddressBarDrawList(allocator, "https://example.com/very/long/path/segment", 12, .default);
+    defer long.deinit(allocator);
+    var has_ellipsis = false;
+    for (long.cells) |c| {
         if (c.codepoint == title_ellipsis_glyph) has_ellipsis = true;
     }
     try std.testing.expect(has_ellipsis);

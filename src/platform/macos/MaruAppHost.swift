@@ -778,6 +778,10 @@ final class MaruWebPanelView: NSView {
     // 필수(리뷰12 [0]): 공백·`<`·`>`가 raw면 macOS 11-13의 legacy CFURL 파서가 URL(string:)=nil로 거부해 navigate 실패·
     // fixture silent false-green. 인코딩하면 전 지원 OS에서 파싱된다. 디코드 결과=`<h1 id=t>maru5d</h1>`(id=t라 getElementById('t') 매칭).
     static let browserFixtureURL = "data:text/html,%3Ch1%20id=t%3Emaru5d%3C/h1%3E"
+    // 7e-0: 비신뢰(browser) 패널이 **공유**하는 ephemeral(비영속) 웹사이트 데이터스토어. 쿠키·localStorage·캐시가 디스크에
+    // 안 남고(비영속, 종료 시 소멸) 신뢰 콘텐츠(maru-app://, 기본 persistent store)와 **격리**된다(§7 untrusted 격리). browser
+    // 탭들끼리는 공유(브라우저 세션 시맨틱 — 탭 간 로그인 유지). 앱 전역 1개(static lazy). 임의 웹 로드(7e-2) 전 안전 확보.
+    static let browserDataStore = WKWebsiteDataStore.nonPersistent()
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
     // 이 web 본문 rect가 split divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
@@ -799,7 +803,11 @@ final class MaruWebPanelView: NSView {
         let trusted = (panelKind == 0)
         var appURL: URL?
         var bridgeWorldLocal: WKContentWorld?
-        if trusted, let root = MaruAppSchemeHandler.webAssetRoot() {
+        if !trusted {
+            // 7e-0: 비신뢰(browser) 패널은 ephemeral 데이터스토어로 격리(비영속 + 신뢰 persistent store와 분리). 스킴
+            // 핸들러·브리지는 미등록(신뢰 전용). 임의 웹 로딩은 7e-2, 스킴 화이트리스트는 그때 navigate 경로(Zig)에.
+            config.websiteDataStore = Self.browserDataStore
+        } else if let root = MaruAppSchemeHandler.webAssetRoot() {
             config.setURLSchemeHandler(MaruAppSchemeHandler(assetRoot: root), forURLScheme: MaruAppSchemeHandler.scheme)
             // 5b: 신뢰 브리지 — page-world와 격리된 named isolated world에만 window.maru 메시지 핸들러 + shim을 주입한다.
             // 핸들러(WKScriptMessageHandlerWithReply)는 진입서 isMainFrame+origin을 검사하고 통과분만 Zig로 넘긴다.
@@ -4318,6 +4326,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_panel_surface_id=\(wp?.surfaceId ?? 0)
             web_panel_kind=\(wp?.panelKind ?? 99)
             web_panel_scheme_handler_registered=\(schemeRegistered)
+            web_panel_data_store_persistent=\(wp?.webView.configuration.websiteDataStore.isPersistent ?? true)
             bridge_world_registered=\(wp?.bridgeWorld != nil)
             bridge_isolated_probe=\(wp?.bridgeIsolatedProbe ?? "pending")
             bridge_pageworld_probe=\(wp?.bridgePageWorldProbe ?? "pending")

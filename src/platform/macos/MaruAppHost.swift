@@ -555,7 +555,10 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         else {
             // 거부(샌드박스·탈출·부재) → 404. 정보 노출 없이 균일 실패하되, **흰 HTML**로 응답해 신뢰 패널이 다크모드
             // 에서 다크 사각형이 아니라 흰 페이지를 그리게 한다(리뷰11 [1] — 인라인 흰 placeholder 제거로 생긴 회귀).
-            respond(urlSchemeTask, url: url, status: 404, mime: "text/html; charset=utf-8", data: Data(Self.errorPageHTML("요청한 리소스를 찾을 수 없습니다 (404).").utf8))
+            // error page엔 엄격 CSP를 붙이지 않는다(리뷰12 [2]): CSP의 style-src 'self'가 error page의 인라인 흰 배경
+            // (`body style="background:#fff"`)을 차단해 color-scheme만 남으면 다크모드서 흰색이 안 보장된다. error page는
+            // 고정 maru HTML(스크립트·외부 리소스·리플렉션 0)이라 샌드박스가 불필요 → CSP 생략이 안전하고 흰 배경을 보장.
+            respond(urlSchemeTask, url: url, status: 404, mime: "text/html; charset=utf-8", data: Data(Self.errorPageHTML("요청한 리소스를 찾을 수 없습니다 (404).").utf8), attachCSP: false)
             return
         }
         respond(urlSchemeTask, url: url, status: 200, mime: Self.mimeType(forPath: filePath), data: data)
@@ -588,12 +591,14 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         Self.callResolve(root: assetRoot, reqPath).path
     }
 
-    private func respond(_ task: WKURLSchemeTask, url: URL, status: Int, mime: String, data: Data) {
-        let headers = [
+    private func respond(_ task: WKURLSchemeTask, url: URL, status: Int, mime: String, data: Data, attachCSP: Bool = true) {
+        var headers = [
             "Content-Type": mime,
             "Content-Length": "\(data.count)",
-            "Content-Security-Policy": csp, // 엄격 CSP를 모든 응답에 부착(외부 네트워크·iframe·base-uri·form-action 차단).
         ]
+        // 서빙 asset(app 콘텐츠)엔 엄격 CSP를 붙인다(외부 네트워크·iframe·base-uri·form-action 차단). 정적 error page는
+        // 활성 콘텐츠가 없어 CSP를 생략한다(위 404 주석 — 인라인 흰 배경이 차단되지 않게).
+        if attachCSP { headers["Content-Security-Policy"] = csp }
         guard let resp = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers) else {
             task.didFailWithError(URLError(.cannotParseResponse))
             return
@@ -769,8 +774,10 @@ final class MaruWebPanelView: NSView {
     var browserFixtureStage = 0
     var browserFixtureUrl: String? // BrowserControl.currentUrl 결과(navigate한 data: URL 기대).
     var browserFixtureScript: String? // BrowserControl.executeScript 결과(data: 문서의 #t 텍스트="maru5d" 기대).
-    // 5d fixture가 navigate하는 무-네트워크 data: URL(외부 로드 없이 navigate/getUrl/executeScript를 검증).
-    static let browserFixtureURL = "data:text/html,<h1 id='t'>maru5d</h1>"
+    // 5d fixture가 navigate하는 무-네트워크 data: URL(외부 로드 없이 navigate/getUrl/executeScript를 검증). **percent-encode**
+    // 필수(리뷰12 [0]): 공백·`<`·`>`가 raw면 macOS 11-13의 legacy CFURL 파서가 URL(string:)=nil로 거부해 navigate 실패·
+    // fixture silent false-green. 인코딩하면 전 지원 OS에서 파싱된다. 디코드 결과=`<h1 id=t>maru5d</h1>`(id=t라 getElementById('t') 매칭).
+    static let browserFixtureURL = "data:text/html,%3Ch1%20id=t%3Emaru5d%3C/h1%3E"
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
     // 이 web 본문 rect가 split divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
@@ -875,20 +882,28 @@ extension MaruWebPanelView: WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
-        let isMaruApp = navigationAction.request.url?.scheme?.lowercased() == MaruAppSchemeHandler.scheme
+        let scheme = navigationAction.request.url?.scheme?.lowercased()
+        // about:blank/nil = loadHTMLString 인라인 폴백(신뢰·비신뢰 공통, 실제 네비 아님) → 항상 허용(리뷰12 [1]). 이게
+        // 없으면 신뢰 패널(trusted)의 흰 placeholder 폴백(about:blank)이 `trusted != isMaruApp`으로 cancel돼 다크로 떠
+        // 다크모드 blank 회귀가 재발한다(비대칭 정정).
+        if scheme == nil || scheme == "about" {
+            decisionHandler(.allow)
+            return
+        }
+        let isMaruApp = scheme == MaruAppSchemeHandler.scheme
         let trusted = (panelKind == 0)
         // 신뢰: maru-app://만 허용. 비신뢰: maru-app://만 cancel.
         decisionHandler(trusted == isMaruApp ? .allow : .cancel)
     }
 
-    // 5b 격리 E2E probe(스모크 전용): 신뢰 패널 로드 완료 후 typeof window.maru를 isolated world(="object" 기대)와
-    // page world(="undefined" 기대)에서 각각 읽어 저장한다. 스모크 요약이 이 값으로 브리지 격리를 자동 단언한다
-    // (WKWebView·evaluateJavaScript async라 헤드리스 Zig 아니라 macos smoke E2E — control-plane.md §8.1.1 ④). 정상
-    // 런에선 안 돈다(isSmokeMode 게이트 — 오버헤드 0). browser 패널은 bridgeWorld=nil이라 probe 없음.
+    // 5b/5d E2E probe(스모크 전용): 로드 완료 후 패널 종류별로 자동 단언 데이터를 저장한다. **분기는 panelKind 기준**
+    // (리뷰12 [3] — bridgeWorld nil-ness가 아니라): 신뢰(0)=브리지 격리 probe, 비신뢰(1)=5d BrowserControl fixture.
+    // asset root 부재로 신뢰 패널에 bridgeWorld가 없어도 5d fixture로 오구동하지 않는다. 정상 런은 안 돈다(isSmokeMode 게이트).
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard controller?.isSmokeMode == true else { return }
-        if let world = bridgeWorld {
-            // 5b 신뢰 브리지 격리 probe(trusted 패널).
+        if panelKind == 0 {
+            // 5b 신뢰 브리지 격리 probe. 브리지가 등록됐을 때만(asset root 부재면 bridgeWorld=nil=브리지 미등록 → probe 스킵).
+            guard let world = bridgeWorld else { return }
             webView.evaluateJavaScript("typeof window.maru", in: nil, in: world) { [weak self] result in
                 if case .success(let v) = result { self?.bridgeIsolatedProbe = v as? String }
             }
@@ -900,18 +915,18 @@ extension MaruWebPanelView: WKNavigationDelegate {
             webView.callAsyncJavaScript("return (await window.maru.hello()).result.server_version", arguments: [:], in: nil, in: world) { [weak self] result in
                 if case .success(let v) = result { self?.bridgeHelloProbe = v as? String }
             }
-            return
-        }
-        // 5d BrowserControl fixture E2E(browser/untrusted 패널). 2단계: ① 초기 흰 HTML 로드 완료 → data: URL navigate,
-        // ② 그 data: 로드 완료 → getUrl/executeScript로 navigate·읽기·스크립트 실행을 자동 증명(무-네트워크).
-        if browserFixtureStage == 0 {
-            browserFixtureStage = 1
-            _ = BrowserControl.navigate(webView, url: Self.browserFixtureURL)
-        } else if browserFixtureStage == 1 {
-            browserFixtureStage = 2
-            browserFixtureUrl = BrowserControl.currentUrl(webView) // navigate한 data: URL이어야 함(getUrl 검증).
-            BrowserControl.executeScript(webView, "document.getElementById('t').textContent") { [weak self] result in
-                if case .success(let v) = result { self?.browserFixtureScript = v as? String } // "maru5d" 기대.
+        } else {
+            // 5d BrowserControl fixture E2E(browser/untrusted 패널). 2단계: ① 초기 흰 HTML 로드 완료 → data: URL navigate,
+            // ② 그 data: 로드 완료 → getUrl/executeScript로 navigate·읽기·스크립트 실행을 자동 증명(무-네트워크).
+            if browserFixtureStage == 0 {
+                browserFixtureStage = 1
+                _ = BrowserControl.navigate(webView, url: Self.browserFixtureURL)
+            } else if browserFixtureStage == 1 {
+                browserFixtureStage = 2
+                browserFixtureUrl = BrowserControl.currentUrl(webView) // navigate한 data: URL이어야 함(getUrl 검증).
+                BrowserControl.executeScript(webView, "document.getElementById('t').textContent") { [weak self] result in
+                    if case .success(let v) = result { self?.browserFixtureScript = v as? String } // "maru5d" 기대.
+                }
             }
         }
     }

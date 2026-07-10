@@ -1743,10 +1743,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // MARU_DEBUG=1일 때만 켜지는 진단. 렌더링/스케일 문제를 추적할 때 창 제목에 live
     // scale/cell/drawable 값을 띄운다(summary 파일·launch 방식과 무관하게 제목줄만 보면 됨).
     private let debugEnabled = ProcessInfo.processInfo.environment["MARU_DEBUG"] != nil
-    // 웹 Term 생성 경로는 현재 디버그 env 훅 MARU_WEB_PANEL 하나뿐이다(maybeDebugOpenWebPanel). env가 없으면 web Term이
-    // 트리에 생기지 않아 웹 surface batch가 늘 비므로, drainWebSurfaceTransition의 매 tick FFI(count)+pane 트리 walk가
-    // 순수 낭비다. 이 값싼 1회 캐시 게이트로 평시(env 미설정) 빌드는 FFI를 통째로 건너뛴다(code-review [8]).
-    // Phase 4e-5에서 웹 Term 생성이 메뉴/command로 승격되면 이 게이트를 그 경로도 포함하게 확장한다(docs/web-panel.md 4e).
+    // 웹 패널 생성 디버그 env 훅(MARU_WEB_PANEL — maybeDebugOpenWebPanel). 4e-5부터 web Term 생성은 command/메뉴
+    // (new_web_tab)로 승격돼 drainWebSurfaceTransition 게이트는 Zig FrameSummary.web_surfaces_present(생성 신호)로
+    // 판정한다(env 무관). 이 상수는 이제 **스모크 요약 경로**(writeSmokeSummary의 web 계층 단언 — env 훅으로 web Term을
+    // 여는 디버그 시나리오에서만 web NSView 계층·개수·frame을 기록)에서만 쓴다(docs/web-panel.md §10 4e-5·§11).
     private let webPanelHookEnabled = ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil
 
     private func updateDiagnosticTitle() {
@@ -2589,11 +2589,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // (pt·좌하단·컨테이너 좌표)에 고정한다(4c의 활성 pane 추종 완전 제거). 창(surface)마다 web Term별 webPanels dict를
     // 들고, tick 중엔 activeSurface=explicitSurface라 대상 창이 정확하다. 콘텐츠·입력은 범위 밖(4d/Phase 5).
     private func drainWebSurfaceTransition() {
-        // 값싼 게이트: 웹 패널 생성 훅(MARU_WEB_PANEL)이 없으면 web Term이 생길 수 없어 batch가 늘 비므로 FFI를 통째로
-        // 건너뛴다(평시 렌더 핫패스 0-FFI). 훅이 켜졌을 때만 아래 권위 있는 batch 소비로 내려간다. (4e-5 command 승격 시 확장.)
-        guard webPanelHookEnabled else { return }
         guard let surface = activeSurface, let session = surface.appSession,
               let container = surface.window?.contentView as? MaruTerminalContainerView else { return }
+        // 값싼 게이트(4e-5): env 훅(MARU_WEB_PANEL)뿐 아니라 command(new_web_tab)로 만든 web Term(env 없음)도 그려야 하므로,
+        // Zig가 매 tick 실은 web_surfaces_present(살아 있는 web Term 존재 = 생성 신호) **OR** webPanels 비어있지 않음
+        // (마지막 web Term이 닫힌 뒤 destroy 전이를 처리해 뷰를 제거할 때까지 지속)으로 판정한다. 둘 다 false면 batch가 늘
+        // 비므로 FFI(count)+pane 트리 walk를 통째로 건너뛴다(평시 렌더 핫패스 0-FFI). 한 tick 지연(직전 tick summary)은
+        // 무해하다(web Term은 여러 tick 지속, create 전이는 다음 tick 처리). — docs/web-panel.md §10 4e-5 "게이트 정정".
+        guard surface.latestFrameSummary.web_surfaces_present != 0 || !surface.webPanels.isEmpty else { return }
         // count가 이번 tick batch를 계산(prev 전진 = tick당 1회)한다. 이어서 at(i)로 각 전이를 읽어 적용한다.
         let count = maru_macos_app_session_web_surface_transitions_count(session)
         var i: UInt32 = 0
@@ -2785,6 +2788,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         file.addItem(.separator())
         file.addItem(catalogMenuItem("new_term", catalog))
         file.addItem(catalogMenuItem("new_tab", catalog))
+        file.addItem(catalogMenuItem("new_web_tab", catalog)) // 4e-5: 활성 pane에 브라우저 Term(발견성 — 기본 키바인딩 없음)
         file.addItem(.separator())
         file.addItem(catalogMenuItem("close_term", catalog))
         attachSubmenu(mainMenu, "File", file)
@@ -3905,8 +3909,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 터미널과 오버레이 **사이**(z-order 중간)에 있고 개수가 dict와 맞는지 단언 + webview.frame(pt) + 4d 계약(모달
         // 닫힘 시 웹 focusable·시작 시 터미널 포커스 유지)을 기록한다. **스모크는 backing=0이라 frame·hitTest 좌표가
         // degenerate**라 hard 단언이 아니라 값 기록이다(실제 전이는 GUI 손 테스트). env 미설정이면 무동작(요약 계약 불변).
-        // docs/web-panel.md §10 4e-3·4d·§11.
-        if ProcessInfo.processInfo.environment["MARU_WEB_PANEL"] != nil {
+        // docs/web-panel.md §10 4e-3·4d·§11. (4e-5: 이 스모크 web 계층 단언이 webPanelHookEnabled 상수의 유일 소비처다.)
+        if webPanelHookEnabled {
             let container = activeSurface?.window?.contentView as? MaruTerminalContainerView
             let panels = activeSurface?.webPanels ?? [:]
             let wp = panels.values.first // 디버그 훅은 정확히 하나(활성 web Term).

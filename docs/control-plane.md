@@ -272,7 +272,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 4b modal split | renderer 2-pass와 overlay layer 단위/contract + 2-quad 자연폭 셀 순서(배경 quad→전경 quad) 보존 + role 기반 cover-fit 회귀 fixture | terminal modal overlay 분리 |
 | 4c empty WKWebView | NSView frame/계층 단언, GUI z-order artifact | 빈 `kind=web` panel |
 | 4d input routing | responder/IME/drag spike artifact + 최소 회귀 | WKWebView focus/input routing |
-| 4e web-Term 통합 | web surface를 **Term(탭)** 으로 split/Term 트리 진입, 활성 Term만 렌더(터미널 대체 — 4c의 오버레이 낭비 해소), Term 탭 재부모화([web-panel.md] §6) | 웹 패널 first-class surface(오버레이 아님) |
+| 4e web-Term 통합 | web surface를 **Term(탭)** 으로 split/Term 트리 진입, 활성 Term만 렌더(터미널 대체 — 4c의 오버레이 낭비 해소). 세부 슬라이스·순서는 [web-panel.md] §10: 4e-1/2/3(모델·렌더 skip·per-Term WKWebView) 완료 → 4e-5(생성 command화) → **4e-4(창 간 재부모화)는 Phase 5 콘텐츠와 함께**(빈 페이지론 상태 보존 검증 vacuous — [web-panel.md] "결정된 실행 순서") | 웹 패널 first-class surface(오버레이 아님) |
 | 5a browser core | `browser.*` schema/dispatch/authz 단위 | WKWebView control core skeleton |
 | 5b trusted bridge | isolated world 주입/미주입 자동 E2E | trusted `window.maru.*` bridge |
 | 5c app scheme security | CSP, realpath/symlink/traversal 거부 단위 | `maru-app://` loader |

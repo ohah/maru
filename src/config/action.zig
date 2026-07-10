@@ -10,6 +10,10 @@ pub const Action = union(enum) {
     // 활성 pane 안의 Term(가로 탭 = 터미널) 단위(탭 모델). ⌘T=새 Term, ⌘W=활성 Term 닫기(마지막이면 pane→워크
     // 스페이스로 cascade), ⌘]/⌘[=다음/이전 Term. 워크스페이스(위)와 modifier(shift 유무)로 갈린다.
     new_term,
+    // 활성 pane에 web(브라우저) Term을 생성한다 — new_term의 web 버전(PTY/셸 없이 WKWebView surface). 4c/4e의 디버그
+    // env 훅 MARU_WEB_PANEL을 사용자 command/메뉴로 승격(docs/web-panel.md §10 4e-5). panel_kind는 .browser(markdown은
+    // 후속). 기본 키바인딩 없음(⌘T=new_term 선점 — 발견성은 메뉴 File·커맨드 팔릿, move_pane_to_new_workspace류 선례).
+    new_web_tab,
     close_term,
     previous_term,
     next_term,
@@ -146,6 +150,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "remove_from_group")) return .remove_from_group;
     if (std.mem.eql(u8, value, "promote_to_top_level")) return .promote_to_top_level;
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
+    if (std.mem.eql(u8, value, "new_web_tab")) return .new_web_tab;
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
     if (std.mem.eql(u8, value, "next_term")) return .next_term;
@@ -222,6 +227,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.remove_from_group, parseAction("remove_from_group").?);
     try std.testing.expectEqual(Action.promote_to_top_level, parseAction("promote_to_top_level").?);
     try std.testing.expectEqual(Action.new_term, parseAction("new_term").?);
+    try std.testing.expectEqual(Action.new_web_tab, parseAction("new_web_tab").?);
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);
     try std.testing.expectEqual(Action.previous_term, parseAction("previous_term").?);

@@ -100,37 +100,8 @@ pub const WebNavState = struct {
     url: []u8, // gpa 소유(빈 문자열이면 len 0)
 };
 
-/// Phase 7e-2a: browser 웹 패널 주소창 편집 상태(session-level `AppSession.addr_edit`, **한 번에 하나**). settings.State의
-/// enterEdit/appendEditCp/backspaceEdit 편집 버퍼 규율을 미러한 **자립 struct** — 고정 버퍼 + UTF-8 코드포인트 경계
-/// (truncateToBoundary·dropLastCodepoint 단일 출처, [[devsession-undefined-test-field-trap]] 기본값 초기화). `surface_id`
-/// =편집 대상 browser web Term, `buf`/`len`=URL 편집 텍스트(UTF-8). url은 짧아 2KB 고정 버퍼면 충분(초과분은 경계 절단).
-/// 신뢰(markdown) 패널은 주소창이 없어 대상 아님 — browser web Term만(밴드 렌더/클릭 라우팅이 web_panel_kind로 가른다).
-pub const AddrEdit = struct {
-    pub const cap: usize = 2048;
-    surface_id: u64,
-    buf: [cap]u8 = undefined,
-    len: usize = 0,
-
-    /// 현재 편집 텍스트(버퍼 슬라이스). addr_edit 수명 동안 유효.
-    pub fn text(self: *const AddrEdit) []const u8 {
-        return self.buf[0..self.len];
-    }
-    /// 코드포인트 1개를 UTF-8로 추가(넘치거나 인코딩 불가면 무시 — 고정 버퍼, settings.appendEditCp 동형).
-    pub fn appendCp(self: *AddrEdit, cp: u21) void {
-        var tmp: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(cp, &tmp) catch return;
-        if (self.len + n > cap) return;
-        @memcpy(self.buf[self.len..][0..n], tmp[0..n]);
-        self.len += n;
-    }
-    /// 마지막 코드포인트(UTF-8 경계) 제거(settings.backspaceEdit 동형 — 반쪽 멀티바이트 안 남김).
-    pub fn backspace(self: *AddrEdit) void {
-        self.len = terminal.width.dropLastCodepoint(&self.buf, self.len);
-    }
-};
-
 /// resolveNavUrl 결과(https:// 프리픽스 포함)를 담는 navigate pending 버퍼 크기 — 편집 버퍼(cap) + "https://"(8) 여유.
-const addr_nav_url_cap: usize = AddrEdit.cap + 16;
+const addr_nav_url_cap: usize = 4096;
 
 // 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
 // 멀티 창/quick 세션이 같은 wall-clock 기준으로 blink/fade/poll/sync timeout을 계산하게 한다.
@@ -1816,10 +1787,13 @@ pub const AppSession = struct {
     // 7e-1b 주소창이 webNavState로 읽는다. url은 gpa 소유(dup) — deinit이 모든 url + 맵을 해제한다. `.empty` 기본
     // 초기화라 init(self.* = .{...}) 경로가 자동으로 세운다(별도 대입 불요).
     web_nav_states: std.AutoHashMapUnmanaged(u64, WebNavState) = .empty,
-    // Phase 7e-2a: browser 웹 패널 주소창 편집 상태(한 번에 하나). 밴드 클릭(enterAddrEdit)이 세우고, 활성이면 keyDown이
-    // 주소창 편집으로 라우팅된다(handleKeyEvent가 rename처럼 인터셉트). null=편집 아님(읽기전용 URL 밴드). AddrEdit는
-    // 고정 버퍼(heap 없음)라 deinit 특별 처리 불요 — teardown 시 stale surface_id만 null로 비운다(dropAddrEditIfSurface).
-    addr_edit: ?AddrEdit = null,
+    // Phase 7e-2a: browser 웹 패널 주소창 편집 상태(한 번에 하나). `addr_edit`=편집 중인 web surface_id(null=편집 아님=읽기전용
+    // URL 밴드). 텍스트 입력은 **find/palette/rename과 같은 공유 `OverlayInput`**(`addr_input`)이 담당한다 — query/preedit(IME
+    // 조합)·caret·가로 스크롤·EAW 폭을 단일 출처로 제공(별도 버퍼 재구현 안 함, DRY). 밴드 클릭(enterAddrEdit)이 addr_edit을
+    // 세우고 addr_input에 현재 URL을 시드하며, 활성이면 keyDown이 handleKeyEvent 인터셉트로·평문 IME 확정이 inputFocus=.addr_edit
+    // 라우팅으로 addr_input에 들어간다. teardown 시 stale surface면 addr_edit=null + addr_input.clear(dropAddrEditIfSurface).
+    addr_edit: ?u64 = null,
+    addr_input: chrome.components.overlay_input.OverlayInput = .{},
     // 7e-2a 신호 3종(1회성 take 패턴 — takeBell/takeClipboardAction 동형, 7e-2b Swift가 ABI로 drain). 편집 진입/커밋/취소가
     // 세우고 Swift가 매 tick take해 WKWebView 포커스 전이·navigate를 실행한다(정책·타이밍은 Zig, 실행은 platform).
     //  ① focus-pull: 편집 진입 시 세움 — 키 포커스를 WKWebView에서 뺏어 타이핑이 주소창(Zig)으로 오게(값=surface_id, 관련 없음).
@@ -7352,78 +7326,82 @@ pub const AppSession = struct {
     /// 편집 진입(밴드 클릭). 현재 URL을 초기 버퍼로 시드(UTF-8 경계 절단) + focus-pull pending 세움(키 포커스를 WKWebView
     /// 에서 뺏어 타이핑이 주소창으로 오게 — 7e-2b Swift가 실행). 이미 편집 중이면 대상을 교체한다(한 번에 하나).
     fn enterAddrEdit(self: *AppSession, surface_id: u64, current_url: []const u8) void {
-        var ae: AddrEdit = .{ .surface_id = surface_id };
-        const n = terminal.width.truncateToBoundary(current_url, AddrEdit.cap); // 버퍼 초과는 UTF-8 경계로 자름(단일 출처)
-        @memcpy(ae.buf[0..n], current_url[0..n]);
-        ae.len = n;
-        self.addr_edit = ae;
+        self.addr_input.clear(); // 이전 편집 잔재 제거
+        self.addr_input.query.appendSlice(self.allocator, current_url) catch {}; // 현재 URL을 편집 초기값으로(OOM이면 빈 편집)
+        self.addr_edit = surface_id;
         self.addr_focus_pull_pending = surface_id;
     }
 
-    /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다(payload 통째 복사 회피).
+    /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다.
     fn addrEditSurfaceId(self: *const AppSession) ?u64 {
-        if (self.addr_edit) |*ae| return ae.surface_id;
-        return null;
+        return self.addr_edit;
     }
 
-    /// 현재 편집 텍스트(버퍼 슬라이스, 없으면 빈). addr_edit 수명 동안 유효 — 렌더가 URL 대신 이걸 그린다.
+    /// 현재 편집 확정 텍스트(OverlayInput query, 없으면 빈). 렌더가 URL 대신 이걸(+preedit) 그린다.
     fn addrEditText(self: *const AppSession) []const u8 {
-        if (self.addr_edit) |*ae| return ae.text();
-        return "";
+        return self.addr_input.query.items;
+    }
+    /// IME 조합 중(preedit) 텍스트 — 렌더가 query 뒤에 붙여 조합 중 글자를 보인다(find/palette와 동형).
+    fn addrEditPreedit(self: *const AppSession) []const u8 {
+        return self.addr_input.preedit.items;
     }
 
     fn addrEditAppend(self: *AppSession, cp: u21) void {
-        if (self.addr_edit) |*ae| ae.appendCp(cp);
+        if (self.addr_edit == null) return;
+        self.addr_input.appendChar(self.allocator, cp) catch {}; // 동적 버퍼(OOM이면 무시)
     }
 
     fn addrEditBackspace(self: *AppSession) void {
-        if (self.addr_edit) |*ae| ae.backspace();
+        if (self.addr_edit == null) return;
+        self.addr_input.backspace();
     }
 
-    /// Enter — 편집 텍스트를 resolveNavUrl로 검증. 유효(허용 스킴/프리픽스 가능)하면 navigate pending(surface_id +
-    /// resolved url)을 세우고, 무효(null)면 로드하지 않는다. 두 경우 다 편집을 종료하고 focus-restore pending을 세운다.
+    /// Enter — 편집 텍스트(query)를 resolveNavUrl로 검증. 유효(허용 스킴/프리픽스 가능)하면 navigate pending(surface_id +
+    /// resolved url)을 세우고, 무효(null)면 로드하지 않는다. 두 경우 다 편집을 종료(addr_input.clear)하고 focus-restore를 세운다.
     fn commitAddrEdit(self: *AppSession) void {
-        if (self.addr_edit) |*ae| {
-            const sid = ae.surface_id;
-            // resolveNavUrl은 ae.buf(편집)에서 읽어 addr_navigate_url_buf(별도 필드)로 쓴다 — aliasing 없음. resolved는
-            // 그 버퍼 슬라이스라 아래 pending 세팅 후 addr_edit=null로 지워도 유효(url 바이트는 세션 필드에 남음).
-            if (maru.session.app_scheme.resolveNavUrl(ae.text(), &self.addr_navigate_url_buf)) |resolved| {
+        if (self.addr_edit) |sid| {
+            // query(편집)에서 읽어 addr_navigate_url_buf(별도 세션 필드)로 쓴다 — aliasing 없음. resolved는 그 버퍼 슬라이스라
+            // 아래 clear/null 후에도 유효(url 바이트는 세션 필드에 남음).
+            if (maru.session.app_scheme.resolveNavUrl(self.addr_input.query.items, &self.addr_navigate_url_buf)) |resolved| {
                 self.addr_navigate_url_len = resolved.len;
                 self.addr_navigate_pending = sid;
             }
             self.addr_edit = null;
+            self.addr_input.clear();
             self.addr_focus_restore_pending = sid;
         }
     }
 
     /// Esc — 편집만 종료(로드 안 함) + focus-restore pending. navigate는 안 세운다.
     fn cancelAddrEdit(self: *AppSession) void {
-        if (self.addr_edit) |*ae| {
-            self.addr_focus_restore_pending = ae.surface_id;
+        if (self.addr_edit) |sid| {
+            self.addr_focus_restore_pending = sid;
             self.addr_edit = null;
+            self.addr_input.clear();
         }
     }
 
     /// teardown 훅 — surface_id가 편집 대상이면 편집·관련 pending을 정리한다(stale surface_id 방지). web Term이 닫히거나
     /// (destroyTerm) 이동할 때 부른다. navigate/restore pending은 이미 종료된 편집의 잔재일 수 있어 대상 일치 시 함께 비운다.
     fn dropAddrEditIfSurface(self: *AppSession, surface_id: u64) void {
-        if (self.addrEditSurfaceId()) |sid| if (sid == surface_id) {
+        if (self.addr_edit) |sid| if (sid == surface_id) {
             self.addr_edit = null;
+            self.addr_input.clear();
         };
-        if (self.addr_focus_pull_pending) |sid| if (sid == surface_id) {
-            self.addr_focus_pull_pending = null;
-        };
-        if (self.addr_navigate_pending) |sid| if (sid == surface_id) {
-            self.addr_navigate_pending = null;
-        };
-        if (self.addr_focus_restore_pending) |sid| if (sid == surface_id) {
-            self.addr_focus_restore_pending = null;
-        };
+        if (self.addr_focus_pull_pending) |sid| {
+            if (sid == surface_id) self.addr_focus_pull_pending = null;
+        }
+        if (self.addr_navigate_pending) |sid| {
+            if (sid == surface_id) self.addr_navigate_pending = null;
+        }
+        if (self.addr_focus_restore_pending) |sid| {
+            if (sid == surface_id) self.addr_focus_restore_pending = null;
+        }
     }
 
     /// 편집 활성 중 키 처리(handleKeyEvent 래퍼가 호출 — 활성이면 모든 키 소비). handleRenameKey 동형: Enter=확정·
     /// Esc=취소·Backspace=삭제·평문 글자=추가, 모디파이어 조합·기타 키(↑↓ 등)는 무시(편집기 유지). 시각(metal_dirty·
-    /// blink)은 래퍼가 세운다(순수 코어 분리). IME 조합은 이 슬라이스 범위 밖(7e-2b/후속 — 평문 char 경로만).
+    /// blink)은 래퍼가 세운다(순수 코어 분리). IME 조합은 inputFocus=.addr_edit 라우팅으로 addr_input.setPreedit가 처리한다.
     fn handleAddrEditKey(self: *AppSession, ev: chrome.input.InputEvent) void {
         switch (ev) {
             .key => |k| switch (k.key) {
@@ -11836,7 +11814,7 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
-            .addr_edit => {}, // 주소창 편집 MVP는 IME preedit 미표시(ASCII URL) — 확정 텍스트는 routeCommittedText 경로로 append
+            .addr_edit => self.addr_input.setPreedit(self.allocator, bytes) catch {}, // 조합 중 텍스트를 addr_input에(밴드가 query 뒤에 표시; imeMarked가 metal_dirty)
             .terminal => {
                 // Phase 3 위임(docs/io-render-threading.md §9 P3-2): setPreedit는 코어 mutate라 메인이 직접 하지
                 // 않고 reader로 위임한다 — IME 조합 확정 중 포커스 상실 재진입 데드락(#700)을 구조적으로 없앤다.
@@ -11858,7 +11836,7 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
             .palette => self.chrome_host.palette.input.preedit.items.len > 0,
-            .addr_edit => false, // 주소창 편집 MVP는 IME preedit 미표시(ASCII URL) — 조합 상태 없음
+            .addr_edit => self.addr_input.preedit.items.len > 0, // 주소창 조합 중이면 true
             .terminal => self.activeSurfaceConst().core.preedit != null,
         };
     }
@@ -12070,7 +12048,9 @@ pub const AppSession = struct {
                 self.rebuildSidebar() catch {}; // 확정 글자로 필터 재적용
                 self.metal_dirty = true;
             },
-            .addr_edit => {}, // 주소창 편집 MVP는 preedit 미추적 — 확정할 조합 없음(글자는 routeCommittedText로 직접 append)
+            .addr_edit => if (self.addr_input.commitPreedit(self.allocator)) {
+                self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
+            },
             .terminal => {
                 // preedit 읽기 + setPreedit("") 변경은 코어 mutate — 락 아래(docs/io-render-threading.md PR3,
                 // 리더 경합 방지). 단 확정 텍스트 전송(sendTextAsKeys)은 락을 푼 뒤에 한다:
@@ -15470,7 +15450,18 @@ pub const AppSession = struct {
                             // nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성 판정(payload 통째 복사 회피). 텍스트는 셀
                             // 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만. muted 색.
                             const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
-                            const url: []const u8 = if (editing) self.addrEditText() else (if (self.webNavState(addr_term.surfaceId())) |st| st.url else "");
+                            // 편집 중이면 확정 텍스트(query) + IME 조합(preedit)을 이어 그린다(조합 중 한글이 보이게). 읽기전용이면
+                            // nav URL. disp_buf는 렌더 임시(query 실질<4096·preedit<256). 초과분은 잘라도 tail 앵커라 끝이 보인다.
+                            var disp_buf: [addr_nav_url_cap + 512]u8 = undefined;
+                            const url: []const u8 = if (editing) blk: {
+                                const q = self.addrEditText();
+                                const p = self.addrEditPreedit();
+                                const qn = @min(q.len, disp_buf.len);
+                                @memcpy(disp_buf[0..qn], q[0..qn]);
+                                const pn = @min(p.len, disp_buf.len - qn);
+                                @memcpy(disp_buf[qn..][0..pn], p[0..pn]);
+                                break :blk disp_buf[0 .. qn + pn];
+                            } else (if (self.webNavState(addr_term.surfaceId())) |st| st.url else "");
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
                                 const addr_fg: terminal.Color = .{ .rgb = self.mutedForeground() }; // 읽기전용 URL — 비활성 탭과 같은 muted 톤
@@ -18777,6 +18768,7 @@ pub const AppSession = struct {
         var nav_it = self.web_nav_states.valueIterator();
         while (nav_it.next()) |v| self.allocator.free(v.url);
         self.web_nav_states.deinit(self.allocator);
+        self.addr_input.deinit(self.allocator); // 7e-2: 주소창 편집 OverlayInput(query/preedit ArrayList) 해제
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
@@ -26263,6 +26255,9 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     // ([[devsession-undefined-test-field-trap]] — 나머지 undefined 필드는 안 읽음). 시각(metal_dirty·blink)은 순수 코어
     // 밖(handleKeyEvent 래퍼/클릭 핸들러)이라 여기서 안 탄다 = 헤드리스 검증 가능(이식성 증거).
     var session: AppSession = undefined;
+    session.allocator = std.testing.allocator; // OverlayInput(addr_input)이 self.allocator를 쓴다(query/preedit 동적)
+    session.addr_input = .{};
+    defer session.addr_input.deinit(std.testing.allocator);
     session.addr_edit = null;
     session.addr_focus_pull_pending = null;
     session.addr_navigate_pending = null;
@@ -26741,6 +26736,7 @@ test "commitComposition is a safe no-op when there is no active preedit" {
     // 필요해 헤드리스로 못 돌리고 GUI 수동 검증으로 본다(PR 본문).
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.addr_edit = null; // 7e-2: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음(undefined면 garbage가 .rename 분기 → rename_input crash)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -27111,6 +27107,7 @@ test "blinkIntervalTicks: cursor.blink-interval-ms를 host frame-loop 틱으로 
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.addr_edit = null; // 7e-2: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();
@@ -27205,6 +27202,7 @@ test "cursorFadeMilliForPhase: 반주기 끝에서 대칭 램프(사라짐 1000�
 test "cursor blink fade: updateCursorBlink이 반주기 끝에서 커서 불투명도를 램프(중간값 존재)·램프 중 매 틱 generation↑·재빌드 없음" {
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator;
+    session.addr_edit = null; // 7e-2: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
     defer tab_surface.deinit();

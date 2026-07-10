@@ -66,6 +66,8 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 - **WKWebView frame을 본문 rect로 한정**한다 — pane 탭바·divider seam·pane grip은 Metal 노출 영역으로 남겨 마우스가 닿게.
 - **drop-zone split 생성**(Term 탭을 본문 4분할에 드롭)은 드래그 중 대상 WKWebView를 `isHidden`/`hitTest nil`로 임시 통과시키고, drop-zone 하이라이트는 **모달 오버레이(최상위)**에 그린다(터미널 Metal 레이어에 그리면 WKWebView에 가림).
 - **divider 드래그·hover 커서**(↔/grip)도 본문 한정 + 드래그 중 통과로 처리.
+  - **구현(4e review 0 후속)**: ⑴ Zig가 각 web 본문 rect를 divider에서 작은 seam inset(`dt + 1pt`)만큼 들여 **작은 시각 gap**을 두고, 그 rect의 **divider 맞닿는 가장자리 비트마스크**(`seam_edges`: left=1·right=2·bottom=4)를 ABI(`WebSurfaceTransitionAbi.seam_edges`, v103)로 Swift에 넘긴다. ⑵ `MaruWebPanelView.hitTest`가 seam 가장자리 밴드(`dividerGrabBand`≈10pt) 안 클릭/hover를 `nil`로 **통과**시켜 아래 터미널 뷰의 `dividerAtPoint`가 드래그를 잡는다(기존 divider 로직 재사용 — 네이티브 중복 없음). 이로써 **작은 gap과 넓은 grab 폭을 분리**한다(순수 geometry inset은 gap=grab이라 둘을 같이 줄일 수밖에 없던 한계 해소).
+  - **알려진 한계(인지·미해결, Phase 5)**: 클릭·드래그 리사이즈는 통과로 되지만, **hover 시 resize 커서(↔/↕) 힌트가 web pane divider 밴드 위에서 안 뜬다** — WKWebView가 native NSView라 자기 frame 위 **커서 소유권**을 갖고(클릭은 hitTest로 우회되나 커서는 별개 메커니즘), arrow로 남는다. 이는 웹뷰를 split pane에 임베드하는 앱의 **잘 알려진 문제**(NSSplitView+WKWebView·Electron/VS Code 등 — maru는 divider를 GPU로 직접 그려 NSSplitView 공짜 divider를 못 쓰므로 DIY 통과가 필연). 전체 커서 해결안 2가지는 실콘텐츠(Phase 5)와 함께 재검토: **(a)** WKWebView를 밴드만큼 들이고 래퍼를 흰 배경으로 채운 뒤 래퍼가 seam 밴드에 resize `addCursorRect` — 동작하나 실콘텐츠에선 seam 가장자리에 ~밴드폭 흰 테두리가 생김. **(b)** divider 위에 얹는 오버레이 grabber 뷰 — 분리는 깔끔하나 divider 드래그를 네이티브로 중복. 지금은 grab 폭 확보(클릭/드래그)만 반영하고 커서 힌트는 미룬다.
 
 ## 6. surface 식별·생애주기 ABI (신규)
 

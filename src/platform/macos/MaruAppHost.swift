@@ -523,10 +523,25 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
 
     // CSP 문자열은 Zig `app_scheme.csp_header`가 단일 출처 — export로 1회 읽어 캐시한다(Swift에 중복 문자열 두지 않음).
     private static func loadCSP() -> String {
-        var buf = [UInt8](repeating: 0, count: 512)
+        // 버퍼는 csp_header(현재 ~152B) 대비 넉넉히(1024B). 초과(-1)는 사실상 도달 불가지만 **조용히** default-deny로
+        // 폴백하면 신뢰 패널이 자기 script/style을 CSP로 막아 blank가 되고 원인 불명이 되므로, 개발 빌드에서 소리내어
+        // 실패시켜(assertionFailure) 버퍼를 키우도록 강제한다(리뷰11 [3]). 릴리스 폴백은 fail-closed(과제약이 안전).
+        var buf = [UInt8](repeating: 0, count: 1024)
         let n = maru_macos_app_csp_header(&buf, buf.count)
-        guard n > 0 else { return "default-src 'none'" } // 방어: export 실패 시 최대 제약(사실상 도달 불가).
+        guard n > 0 else {
+            assertionFailure("maru_macos_app_csp_header 실패/초과(\(n)) — csp_header가 버퍼(\(buf.count)B)를 넘음. 버퍼를 키우세요.")
+            return "default-src 'none'"
+        }
         return String(decoding: buf[0 ..< Int(n)], as: UTF8.self)
+    }
+
+    // 다크모드 blank 회귀 방지: 배경 미지정 문서는 시스템 appearance(다크모드=다크)로 렌더돼 아래 다크 터미널과 구분되지
+    // 않으므로, placeholder·에러 응답은 항상 color-scheme:light + 흰 배경을 명시한다(리뷰11 [1]). 신뢰 패널이 asset을 못
+    // 찾아도(404) 다크 사각형 대신 흰 페이지가 보인다. 메시지는 고정 문자열이라 reflection/injection 없음.
+    static func errorPageHTML(_ message: String) -> String {
+        "<!doctype html><html><head><meta name=\"color-scheme\" content=\"light\"></head>"
+            + "<body style=\"margin:0;background:#ffffff;color:#1a1a1a;font-family:-apple-system,system-ui,sans-serif;padding:2rem\">"
+            + message + "</body></html>"
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
@@ -538,8 +553,9 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         guard let filePath = resolveAsset(url.path),
               let data = FileManager.default.contents(atPath: filePath)
         else {
-            // 거부(샌드박스·탈출·부재) → 404. 정보 노출 없이 균일 실패.
-            respond(urlSchemeTask, url: url, status: 404, mime: "text/plain; charset=utf-8", data: Data("Not Found".utf8))
+            // 거부(샌드박스·탈출·부재) → 404. 정보 노출 없이 균일 실패하되, **흰 HTML**로 응답해 신뢰 패널이 다크모드
+            // 에서 다크 사각형이 아니라 흰 페이지를 그리게 한다(리뷰11 [1] — 인라인 흰 placeholder 제거로 생긴 회귀).
+            respond(urlSchemeTask, url: url, status: 404, mime: "text/html; charset=utf-8", data: Data(Self.errorPageHTML("요청한 리소스를 찾을 수 없습니다 (404).").utf8))
             return
         }
         respond(urlSchemeTask, url: url, status: 200, mime: Self.mimeType(forPath: filePath), data: data)
@@ -549,11 +565,11 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         // start에서 동기 완료하므로 취소할 진행 작업이 없다(작은 asset 동기 읽기, 메인 스레드).
     }
 
-    // Zig 정책 호출: 요청 path → asset root 아래 안전한 절대 경로. 실패(음수: 거부·부재·탈출)면 nil.
-    private func resolveAsset(_ reqPath: String) -> String? {
-        // 빈 path(`maru-app://app`처럼 authority만)는 Zig가 index.html로 매핑하는 계약이지만, 빈 Swift 배열은
-        // baseAddress=nil이라 export가 NULL(-4)로 오판한다 → "/"로 정규화해 Zig의 빈→index 경로를 그대로 태운다.
-        let rootBytes = Array(assetRoot.utf8)
+    // FFI 마샬링 **단일 출처**(핸들러 인스턴스 + 스모크 검증이 공유 — 리뷰11 [6]). 요청 path → (Zig 반환 코드,
+    // 성공(>0) 시 asset root 아래 안전한 절대 경로). 빈 path(`maru-app://app`처럼 authority만)는 Zig가 index.html로
+    // 매핑하는 계약이지만 빈 Swift 배열은 baseAddress=nil이라 export가 NULL(-4)로 오판하므로 "/"로 정규화한다.
+    static func callResolve(root: String, _ reqPath: String) -> (code: Int64, path: String?) {
+        let rootBytes = Array(root.utf8)
         let reqBytes = Array((reqPath.isEmpty ? "/" : reqPath).utf8)
         var out = [UInt8](repeating: 0, count: 4096)
         let n = rootBytes.withUnsafeBufferPointer { rp in
@@ -563,8 +579,13 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
                 }
             }
         }
-        guard n > 0 else { return nil }
-        return String(decoding: out[0 ..< Int(n)], as: UTF8.self)
+        guard n > 0 else { return (n, nil) }
+        return (n, String(decoding: out[0 ..< Int(n)], as: UTF8.self))
+    }
+
+    // Zig 정책 호출: 요청 path → asset root 아래 안전한 절대 경로. 실패(음수: 거부·부재·탈출)면 nil.
+    private func resolveAsset(_ reqPath: String) -> String? {
+        Self.callResolve(root: assetRoot, reqPath).path
     }
 
     private func respond(_ task: WKURLSchemeTask, url: URL, status: Int, mime: String, data: Data) {
@@ -655,6 +676,10 @@ final class MaruWebPanelView: NSView {
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
         super.init(frame: frameRect)
         webView.autoresizingMask = [.width, .height] // 래퍼 frame 갱신(reframe) 시 웹뷰가 꽉 채워 따라간다.
+        // 네비게이션 정책은 신뢰·비신뢰 **양쪽** 모두 건다(리뷰11 [2]). 신뢰 패널은 maru-app:// 안으로만 top-level
+        // 네비를 허용해 origin을 pin하고(신뢰 문서가 외부 URL로 top-level 이동하는 것 차단 — CSP는 sub-resource·form만
+        // 막고 top-level 네비는 안 막음), 비신뢰 패널은 maru-app:// 네비를 cancel한다(origin 위장 방지). 분기는 아래 확장.
+        webView.navigationDelegate = self
         if let appURL {
             // 신뢰 UI: maru-app://app/index.html — 스킴 핸들러가 asset root 아래 파일을 엄격 CSP와 함께 서빙한다(5c).
             // 실 UI asset은 Phase 7이 대체한다. 하위 리소스(app.css·app.js)도 same-origin 상대 경로로 핸들러가 서빙.
@@ -663,10 +688,8 @@ final class MaruWebPanelView: NSView {
             // 비신뢰(browser) 또는 asset root 부재: 인라인 흰 HTML placeholder(외부 URL 로딩은 5d). **about:blank를 쓰지
             // 않는 이유**: WKWebView는 배경 미지정 문서(about:blank)를 시스템 appearance로 렌더해 macOS 다크 모드에선
             // 다크가 되어 아래 다크 터미널과 구분되지 않는다("흰 화면 안 뜸"의 루트 코즈). CSS로 배경을 명시 흰색으로
-            // 못박아 appearance 무관하게 흰 rect를 보장한다. + navigationDelegate로 maru-app:// 네비를 차단한다(신뢰 origin
-            // 위장 탈취 2차 방어 — 핸들러 미등록이 1차, §7 ④·§8.1(c)).
-            webView.navigationDelegate = self
-            webView.loadHTMLString("<!doctype html><html><head><meta name=\"color-scheme\" content=\"light\"></head><body style=\"margin:0;background:#ffffff\"></body></html>", baseURL: nil)
+            // 못박아 appearance 무관하게 흰 rect를 보장한다.
+            webView.loadHTMLString(MaruAppSchemeHandler.errorPageHTML(""), baseURL: nil)
         }
         addSubview(webView)
     }
@@ -710,21 +733,22 @@ final class MaruWebPanelView: NSView {
     }
 }
 
-// Phase 5c-2c: 비신뢰(browser) 패널의 네비게이션 정책 — maru-app:// 네비게이션을 차단한다. 비신뢰 패널엔 스킴 핸들러를
-// 애초에 등록하지 않아(1차) maru-app://는 로드 자체가 실패하지만, `decidePolicyForNavigationAction`에서 명시적으로
-// cancel해 신뢰 origin 위장 탈취를 2차로 막는다(§7 ④·§8.1(c)). 신뢰 패널은 delegate를 안 붙여 maru-app://를 정상 로드한다.
-// 외부 http(s) 네비게이션 정책(링크 감지·스킴 화이트리스트)은 browser 패널이 실제 URL을 여는 5d에서 확장한다.
+// Phase 5c-2c: 웹 패널 top-level 네비게이션 정책(신뢰·비신뢰 대칭 — 리뷰11 [2]). CSP는 sub-resource·form만 막고
+// **top-level 네비게이션은 안 막으므로**, 여기서 스킴으로 pin한다:
+//   - **신뢰(markdown)**: maru-app:// 안으로만 top-level 네비 허용, 외부(http/https 등)는 cancel → 신뢰 UI가 코드
+//     버그·손상 asset으로 외부 URL로 튀어 신뢰 표면에 임의 원격 콘텐츠가 뜨는 것 차단(origin pin, exact-origin은 5b).
+//   - **비신뢰(browser)**: maru-app:// 네비를 cancel(핸들러 미등록이 1차, 이 cancel이 2차 — 신뢰 origin 위장 방지),
+//     그 외는 허용(외부 http(s) URL 로딩·링크 감지 정책은 5d에서 확장).
 extension MaruWebPanelView: WKNavigationDelegate {
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
-        if navigationAction.request.url?.scheme?.lowercased() == MaruAppSchemeHandler.scheme {
-            decisionHandler(.cancel)
-            return
-        }
-        decisionHandler(.allow)
+        let isMaruApp = navigationAction.request.url?.scheme?.lowercased() == MaruAppSchemeHandler.scheme
+        let trusted = (panelKind == 0)
+        // 신뢰: maru-app://만 허용. 비신뢰: maru-app://만 cancel.
+        decisionHandler(trusted == isMaruApp ? .allow : .cancel)
     }
 }
 
@@ -4128,13 +4152,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 준다. 정상=len>0, traversal=-1(Reject), 부재=-2(NotFound). 정책 로직 자체(symlink 탈출·whitelist)는 Zig
         // adversarial 테스트(5c-2a/2b)가 덮으므로 여기선 링크 + 3가지 대표 코드만 확인한다. root 없으면 스킵.
         if let root = MaruAppSchemeHandler.webAssetRoot() {
-            func smokeResolve(_ req: String) -> Int64 {
-                let rb = Array(root.utf8), qb = Array(req.utf8)
-                var out = [UInt8](repeating: 0, count: 4096)
-                return rb.withUnsafeBufferPointer { rp in qb.withUnsafeBufferPointer { qp in out.withUnsafeMutableBufferPointer { op in
-                    maru_macos_app_resolve_app_asset(rp.baseAddress, rp.count, qp.baseAddress, qp.count, op.baseAddress, op.count)
-                } } }
-            }
+            // FFI 마샬링은 핸들러와 공유 헬퍼(callResolve) 단일 출처 — 스모크가 별도 복제하지 않는다(리뷰11 [6]).
+            func smokeResolve(_ req: String) -> Int64 { MaruAppSchemeHandler.callResolve(root: root, req).code }
             summary += """
             web_app_asset_root=\(root)
             web_app_resolve_index=\(smokeResolve("/index.html"))

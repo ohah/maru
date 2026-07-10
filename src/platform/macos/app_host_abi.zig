@@ -1297,6 +1297,11 @@ pub fn resolveAppAsset(io: std.Io, root_abs: []const u8, request_path: []const u
     var cand_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cn = dir.realPathFile(io, candidate, &cand_buf) catch return AppAssetError.NotFound; // symlink 따라감·부재면 실패
     const cand_real = cand_buf[0..cn];
+    // root를 요청마다 canonicalize한다(리뷰11 [7]): 상수 root라 잉여 realpath지만, 이 함수는 **stateless**(호출 간
+    // 상태 없음)라는 정책 계약을 지키려는 의도적 선택이다. 캐싱하려면 Zig에 상태를 두거나 canonical-root 전용 export를
+    // 추가해 어댑터가 1회 canonicalize+캐시해야 하는데, 현재 asset 수(placeholder 3개, Phase 7도 modest)에선 realpath
+    // 비용이 무시가능이라 그 API 복잡도/보안 계약 약화 리스크를 지지 않는다. Phase 7이 서브리소스 다량 서빙으로 실측
+    // 지연이 생기면 그때 canonical-root 캐시 export로 분리한다.
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rn = dir.realPathFile(io, root_abs, &root_buf) catch return AppAssetError.Reject;
     const root_real = root_buf[0..rn];

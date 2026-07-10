@@ -2834,6 +2834,7 @@ pub const AppSession = struct {
     fn focusPane(self: *AppSession, pane_index: usize) void {
         const tab = self.activeTab();
         if (pane_index >= tab.panes.items.len or tab.active_pane == pane_index) return;
+        self.invalidatePendingCloseOnFocusChange(); // 닫기 모달 보류 중 pane 이동 → 보류 무효화(stale 대상 close 방지)
         tab.active_pane = pane_index;
         self.surface_ptrs.items[self.app_window.active_tab] = tab.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
@@ -2881,6 +2882,7 @@ pub const AppSession = struct {
     fn focusTerm(self: *AppSession, term_index: usize) void {
         const pane = self.activePane();
         if (term_index >= pane.terms.items.len or pane.active_term == term_index) return;
+        self.invalidatePendingCloseOnFocusChange(); // 닫기 모달 보류 중 Term 이동 → 보류 무효화(stale 대상 close 방지)
         pane.active_term = term_index;
         self.surface_ptrs.items[self.app_window.active_tab] = pane.activeTerm().surface;
         self.app_window.tabs = self.surface_ptrs.items;
@@ -3870,6 +3872,7 @@ pub const AppSession = struct {
     /// active_tab을 따라가므로 이것만으로 라우팅이 바뀐다.
     pub fn switchTab(self: *AppSession, index: usize) bool {
         if (!self.app_window.selectTab(index)) return false;
+        self.invalidatePendingCloseOnFocusChange(); // 닫기 모달 보류 중 탭 전환 → 보류 무효화(다른 탭이 닫히는 것 방지)
         // 전환한 탭을 현재 창 grid로 맞춘다. resize()는 활성 탭만 만지고 last_resize_size는 세션-전역이라, 다른
         // 탭이 활성인 동안 창이 리사이즈됐거나 복원으로 저장 grid로 spawn된 탭은 전환 시점까지 stale grid다 —
         // 여기서 lazy 보정한다(복원·일반 둘 다). best-effort: 죽은 PTY 등은 무시(resizeTabPanes 계약).
@@ -4325,6 +4328,22 @@ pub const AppSession = struct {
         const p = self.pending_close orelse return;
         switch (p) {
             .window => {}, // 창 전체 닫기는 reap이 탭을 줄여도 유효
+            else => self.cancelPendingClose(),
+        }
+    }
+
+    /// **지연 confirm 재해석 해저드 방어(reap 방어의 포커스판)**: 닫기 확인 모달이 보류 중일 때 활성 탭/pane/Term이
+    /// 바뀌면 그 보류를 무효화한다. requestClose는 진입점만 pending_close에 담고, confirm_accept가 executeClose→
+    /// resolveCloseScope로 **확정 시점의** active_tab/activePane을 기준으로 범위를 다시 푼다 — 모달이 뜬 동안 포커스가
+    /// 옮겨가면(알림 클릭 activateSurfaceById, 탭/pane 전환) 사용자가 본 대상이 아닌 다른 탭/pane이 닫혀 데이터가 날아간다.
+    /// invalidatePendingCloseOnReap과 같은 안전한 abort를 포커스 이동에도 적용한다(.window=창 전체는 대상 불변이라 유지).
+    /// switchTab/focusPane/focusTerm 세 포커스 funnel에서 **실제로 바뀔 때만**(early-return 가드 통과 후) 호출한다
+    /// (focusPaneByPtr는 focusPane 경유라 함께 커버). confirm_accept는 executeClose 전에
+    /// pending_close를 이미 null로 비우므로(재진입 방지), 닫기 실행 중 포커스 이동이 이걸 다시 건드리지 않는다.
+    fn invalidatePendingCloseOnFocusChange(self: *AppSession) void {
+        const p = self.pending_close orelse return;
+        switch (p) {
+            .window => {}, // 창 전체 닫기는 포커스가 바뀌어도 유효(대상=세션 전체)
             else => self.cancelPendingClose(),
         }
     }
@@ -14588,14 +14607,27 @@ pub const AppSession = struct {
                     drain_summary.output_events += ds.output_events;
                     drain_summary.exit_events += ds.exit_events;
                     // Term별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' Term이 끝났을 때.
-                    if (ds.ended != null and !term.rt.terminated) {
-                        term.rt.live_pty.finishAfterTermination();
-                        term.rt.terminated = true;
-                        // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
-                        // spawned_at_ns=0(미스탬프)이면 판정 생략(직전 값 유지 — 보수적).
-                        if (term.rt.spawned_at_ns != 0)
-                            self.last_exit_uptime_ms = @intCast(@divFloor(std.Io.Clock.awake.now(self.io).nanoseconds - term.rt.spawned_at_ns, std.time.ns_per_ms));
-                        drain_summary.ended = ds.ended; // 마지막 관측 종료를 frame 보고에 싣는다
+                    // **루트커즈 게이트**: 워크스페이스 자동 닫기(reap→closeTab)·세션 종료 latch는 **검증된 자식 종료
+                    // (.exited)** 에만 반응한다(terminationClosesWorkspace). read_error(자식 생존 미검증 I/O 오류 —
+                    // pty_reader가 reapIfExited로 자식이 살아있음을 확인하고 방출)는 finishAfterTermination(→session.close
+                    // →shutdownChild로 산 셸을 죽인다)·terminated·reap을 타지 않는다. 셸에서 claude 실행 중 Ctrl+C가
+                    // 유발한 일시적 write 오류가 read_error로 잡혀 좌측 워크스페이스 탭을 통째로 닫던 버그의 수정.
+                    if (ds.ended) |ended| {
+                        if (terminationClosesWorkspace(ended)) {
+                            if (!term.rt.terminated) {
+                                term.rt.live_pty.finishAfterTermination();
+                                term.rt.terminated = true;
+                                // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
+                                // spawned_at_ns=0(미스탬프)이면 판정 생략(직전 값 유지 — 보수적).
+                                if (term.rt.spawned_at_ns != 0)
+                                    self.last_exit_uptime_ms = @intCast(@divFloor(std.Io.Clock.awake.now(self.io).nanoseconds - term.rt.spawned_at_ns, std.time.ns_per_ms));
+                                drain_summary.ended = ended; // 마지막 관측 종료를 frame 보고에 싣는다(read_error는 안 싣는다)
+                            }
+                        } else {
+                            // read_error: 워크스페이스 유지. surface는 runtime이 이미 exited로 latch(I/O 거부)했으니 표시만
+                            // 갱신하고, close/reap/세션종료는 하지 않는다. 끝난 reader thread는 Term teardown(close)이 join한다.
+                            self.metal_dirty = true;
+                        }
                     }
                 }
             }
@@ -18605,6 +18637,19 @@ fn resolveConfiguredShell(command: []const u8) []const u8 {
 /// 셸이 spawn 후 이 시간(ms) 안에 죽으면 "usable 세션 미도달"로 본다(에러 한 줄 찍고 곧장 죽는 오설정 포착).
 /// 실제 사용자가 프롬프트를 읽고 `exit`하기엔 짧고, exec 실패·`exit N`는 수십 ms 내 죽어 넉넉히 걸린다.
 const startup_grace_ms: i64 = 2000;
+
+/// 워크스페이스 자동 닫기(reap→closeTab)·세션 종료 latch가 이 종료 신호에 반응해야 하는가 — **검증된 자식 종료
+/// (.exited)** 만 true다. read_error(자식 생존이 검증되지 않은 PTY I/O 오류)는 false: 산 셸을 죽이거나 좌측
+/// 워크스페이스 탭을 통째로 닫지 않는다. **루트커즈**: 셸에서 claude 실행 중 Ctrl+C가 유발한 일시적 write 오류가
+/// read_error로 잡혀 미검증 종료로 처리되며 탭을 닫던 버그. pty_reader가 reapIfExited로 실제 죽음을 확인하면
+/// .exited로 승격하므로, 여기 오는 read_error는 자식이 살아있는(=닫으면 안 되는) 경우다. exitAbnormal(held 판정)과는
+/// 별개 축이다 — 저건 "닫을 때 정상/비정상", 이건 "애초에 닫을지".
+fn terminationClosesWorkspace(ended: app.RuntimePumpTermination) bool {
+    return switch (ended) {
+        .exited => true,
+        .read_error => false,
+    };
+}
 
 /// 종료가 **비정상**인지(정상 `exit 0`이 아닌지). exit code≠0·시그널·unknown·read_error·정보 없음은 비정상.
 /// exit-code 게이트가 핵심 — 이게 없으면 `/usr/bin/true`처럼 조용히 성공(exit 0·무출력)한 명령까지 held돼 창이
@@ -29640,6 +29685,64 @@ test "holdOnStartupExit/exitAbnormal/startupExitDetail: 비정상+미도달만 �
     try std.testing.expectEqualStrings("비정상 종료", startupExitDetail(&buf, app.RuntimePumpTermination{ .exited = .{ .unknown = -1 } }));
     try std.testing.expectEqualStrings("읽기 오류", startupExitDetail(&buf, app.RuntimePumpTermination{ .read_error = "boom" }));
     try std.testing.expectEqualStrings("즉시 종료", startupExitDetail(&buf, null));
+}
+
+// 이 테스트가 증명하는 것: 워크스페이스 자동 닫기 게이트 terminationClosesWorkspace가 **검증된 자식 종료(.exited)**
+// 에만 true이고 read_error엔 false라는 정책. 왜 터미널에 중요한가: 셸에서 claude를 실행 중 Ctrl+C를 누르면 그
+// 인터럽트(0x03) write가 일시적으로 실패해 read_error가 날 수 있는데, 그것이 미검증 종료로 처리되면 reap→closeTab이
+// 살아있는 셸을 죽이고 좌측 워크스페이스 탭을 통째로 닫는다(사용자 보고 버그). 이 게이트가 read_error를 닫힘에서
+// 제외해, 검증된 종료만 워크스페이스를 닫게 한다(pty_reader가 실제 죽음을 reapIfExited로 확인하면 .exited로 승격).
+test "terminationClosesWorkspace: .exited만 워크스페이스를 닫고 read_error는 유지(순수)" {
+    // 검증된 자식 종료 — 모든 ExitStatus variant가 닫힘 대상.
+    try std.testing.expect(terminationClosesWorkspace(.{ .exited = .{ .exited = 0 } }));
+    try std.testing.expect(terminationClosesWorkspace(.{ .exited = .{ .exited = 130 } })); // SIGINT로 죽은 자식(128+2)
+    try std.testing.expect(terminationClosesWorkspace(.{ .exited = .{ .signaled = 9 } }));
+    try std.testing.expect(terminationClosesWorkspace(.{ .exited = .{ .unknown = -1 } }));
+    // 자식 생존 미검증 I/O 오류 — 닫지 않는다(루트커즈: 산 셸을 죽이고 탭을 닫던 경로 차단).
+    try std.testing.expect(!terminationClosesWorkspace(.{ .read_error = "boom" }));
+}
+
+// 통합(reader I/O 오류 → drain → 탭 유지) E2E 경계: read_error를 산 셸에서 재현하려면 실제 master fd I/O 오류가
+// 필요한데(EINTR/EAGAIN은 재시도라 제외), pty_reader가 concrete `*pty.PtySession`을 들어 mock 세션 주입이 안 되고,
+// 살아있는 controlled_smoke reader의 큐에 read_error를 직접 주입하면 finishAfterTermination의 reader.join()이
+// (아직 안 끝난 reader를 join하려다) 데드락한다 — 프로덕션에선 reader가 read_error를 push한 **직후 return**하므로
+// join이 즉시 완료되지만, 테스트가 그 순서를 재현하기 어렵다. 그래서 이 파일은 정책(terminationClosesWorkspace)과
+// 프리미티브(pty/macos.zig reapIfExited)를 단위로 고정하고, 전체 통합은 수동 검증(docs/pty-operating-model.md의
+// read_error 절 + `mise run macos-app`으로 claude 인터럽트 반복)으로 커버한다. — 사용자에게 보고된 한계.
+
+// 이 테스트가 증명하는 것: 닫기 확인 모달이 보류(pending_close) 중일 때 포커스/탭 전환을 무효화 판정에 태우는
+// invalidatePendingCloseOnFocusChange가 **위치성 보류(.term_or_pane/.tab_index 등)는 취소**하고 **창 전체(.window)는
+// 유지**한다는 것. 왜 중요한가: requestClose는 진입점만 저장하고 confirm_accept가 확정 시점의 active_tab/activePane으로
+// close 범위를 다시 푼다(resolveCloseScope) — 모달이 뜬 동안 포커스가 옮겨가면 사용자가 본 대상이 아닌 다른 탭/pane이
+// 닫혀 데이터가 날아가는 지연 재해석 해저드가 있다. 이 방어(switchTab/focusPane/focusTerm에서 호출)가 그 창을 abort로
+// 막는다(reap 방어 invalidatePendingCloseOnReap의 포커스판). chrome_host.confirm.dismiss 경로가 필요해 실 세션에서 돈다.
+test "invalidatePendingCloseOnFocusChange: 위치성 보류는 무효화, .window는 유지(지연 confirm 해저드 방어)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(controlled smoke) — chrome_host 초기화 필요
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 위치성 보류(활성 탭/pane/Term 인덱스 기준)는 포커스가 옮겨가면 stale → 무효화(안전한 abort).
+    session.pending_close = .term_or_pane;
+    session.invalidatePendingCloseOnFocusChange();
+    try std.testing.expect(session.pending_close == null);
+
+    session.pending_close = .{ .tab_index = 0 };
+    session.invalidatePendingCloseOnFocusChange();
+    try std.testing.expect(session.pending_close == null);
+
+    // 창 전체 닫기(.window)는 대상이 세션 전체라 포커스 이동과 무관하게 유지된다.
+    session.pending_close = .window;
+    session.invalidatePendingCloseOnFocusChange();
+    try std.testing.expect(session.pending_close != null);
 }
 
 test "latchSessionEndOrHold: 비정상 시작 사망은 창 유지(held)+re-arm+zombie reap, 정상 종료는 앱 종료" {

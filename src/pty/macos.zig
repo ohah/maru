@@ -489,6 +489,30 @@ pub const PtySession = struct {
         }
     }
 
+    /// reapAfterEof의 **비차단** 형제: 자식이 이미 죽었으면 종료 상태를, 아직 살아있으면 `null`을 즉시 돌려준다
+    /// (kqueue로 종료를 기다리지 않는다). read/write/poll에서 EOF가 아닌 I/O 오류를 만난 reader가 "이 오류가 정말
+    /// 자식 종료인지"를 **검증**하는 데 쓴다 — 죽었으면 `.exited`(EOF 경로와 동치인 검증된 종료)로, 살아있으면
+    /// `.read_error`(surface만 unusable 표시, 워크스페이스 유지)로 방출하게 해서, Ctrl+C가 유발한 일시적 write 오류
+    /// 같은 미검증 신호가 산 셸을 죽이고 좌측 탭을 통째로 닫던 루트커즈(read_error 무검증 종료)를 막는다.
+    /// double-reap은 reapAfterEof와 같은 reaping swap-guard로 막는다(close·EOF-reap과 경합 시 한쪽만 거둔다).
+    /// 성공(죽음) 시 `exited`를 세워 이후 close()가 shutdownChild를 건너뛰게 한다(중복 신호 없음).
+    pub fn reapIfExited(self: *PtySession) !?types.ExitStatus {
+        if (self.closing.load(.acquire)) return null;
+        if (self.reaping.swap(true, .acq_rel)) return null; // 다른 곳이 이미 reap 중 — 미검증으로 취급(null)
+
+        const reaped = reapNoHang(self.child_pid) catch |err| {
+            self.reaping.store(false, .release);
+            return err;
+        };
+        if (reaped) |status| {
+            self.exited.store(true, .release);
+            return status; // 성공 시 reaping=true 유지(reapAfterEof와 동일 — 자식은 이미 거둬졌다)
+        }
+
+        self.reaping.store(false, .release); // 아직 살아있다 — 다음 검증이 다시 시도할 수 있게 가드 반납
+        return null;
+    }
+
     /// 출력 이벤트를 하나 읽어 반환한다(blocking). 큐-기반 경로와 reader-processing 모두 사용. 내부적으로
     /// waitIo(write 없음)+readChunk+reapAfterEof로 조립한다(Phase 2 P2-2 — 동작 보존). EOF면 reap해
     /// exited/SessionClosed.
@@ -1236,6 +1260,43 @@ test "decodeExitStatus reports a terminating signal" {
 test "decodeExitStatus reports a stopped child as unknown" {
     // WIFSTOPPED status (low 7 bits == 0x7f) must not be mistaken for signal 0x7f.
     try std.testing.expectEqual(types.ExitStatus{ .unknown = 0x137f }, decodeExitStatus(0x137f));
+}
+
+// 이 테스트가 증명하는 것: 비차단 reap 프리미티브 reapIfExited가 (A) 살아있는 자식엔 즉시 null을, (B) 이미
+// 종료한 자식엔 실제 종료 상태를 돌려준다는 것. 왜 터미널에 중요한가: reader가 read/write/poll I/O 오류를 만났을
+// 때 "자식이 정말 죽었는지"를 이 프리미티브로 검증해, 살아있으면 read_error(탭 유지)·죽었으면 exited(정상 닫기)로
+// 분기한다. 이 검증이 없으면 Ctrl+C가 유발한 일시적 I/O 오류가 미검증 종료로 처리돼 산 셸을 죽이고 좌측 워크스페이스
+// 탭을 통째로 닫는다(사용자 보고 버그의 루트커즈). 실 PTY spawn이 필요하므로 macOS 백엔드에서만 컴파일된다.
+test "reapIfExited: 살아있는 자식엔 null, 종료한 자식엔 상태를 비차단으로 (read_error 무검증 종료 방지의 검증 프리미티브)" {
+    const allocator = std.testing.allocator;
+
+    // (A) 살아있는 자식(sleep): 비차단이라 kqueue 대기 없이 즉시 null. reaping 가드는 반납돼 다음 검증이 재시도 가능.
+    var alive = try PtySession.spawn(allocator, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "sleep 30" },
+        .size = .{ .cols = 20, .rows = 3 },
+    });
+    try std.testing.expect((try alive.reapIfExited()) == null);
+    try std.testing.expect((try alive.reapIfExited()) == null); // 가드 반납 확인 — 반복 호출도 null
+    alive.deinit(); // sleep을 shutdownChild(SIGHUP→TERM→KILL)로 정리
+
+    // (B) 이미 종료한 자식(exit 7): 실제 종료 상태를 돌려준다 → reader가 .exited로 승격해 정상 닫힘 경로를 탄다.
+    // 종료 관측까지 비차단으로 bounded 폴링(자식이 방금 fork돼 아직 안 죽었을 수 있으므로).
+    var dead = try PtySession.spawn(allocator, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "exit 7" },
+        .size = .{ .cols = 20, .rows = 3 },
+    });
+    var status: ?types.ExitStatus = null;
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        status = try dead.reapIfExited();
+        if (status != null) break;
+        sleepMillis(1); // 자식이 방금 fork돼 아직 안 죽었을 수 있으니 잠깐 양보 후 재폴링
+
+    }
+    try std.testing.expectEqual(types.ExitStatus{ .exited = 7 }, status.?);
+    dead.deinit(); // exited=true라 close는 shutdownChild를 건너뛴다(double-reap 없음)
 }
 
 test "validateRequest rejects requests that cannot produce a reliable PTY" {

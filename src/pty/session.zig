@@ -53,6 +53,12 @@ const UnsupportedPtySession = struct {
         return error.UnsupportedPlatform;
     }
 
+    /// 비-macOS 스텁 — macOS 백엔드의 reapIfExited(비차단 자식 생존 검증 — read_error 무검증 종료 방지)와 구조 동기.
+    pub fn reapIfExited(self: *UnsupportedPtySession) !?types.ExitStatus {
+        _ = self;
+        return error.UnsupportedPlatform;
+    }
+
     pub fn writeInput(self: *UnsupportedPtySession, bytes: []const u8) !void {
         _ = self;
         _ = bytes;

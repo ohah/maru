@@ -7208,7 +7208,13 @@ pub const AppSession = struct {
                 // **`seam > 0`으로 게이트**: divider 숨김(split.divider-thickness=0 → seam=0)이면 잡을 divider가 없어
                 // inset도 seam_edges도 0으로 둔다 — 안 그러면 Swift hitTest가 잡을 것 없는 가장자리서 클릭을 헛통과한다
                 // (10차 review 기각 항목이나 정합상 게이트). seam==0이라 inset.left=seam이 0이어도 비트는 안 세운다.
-                var inset: web_panel_layout.ChromeInset = .{ .top = bar_h };
+                // 7e-1b: browser(비신뢰) 웹 패널은 탭 바 바로 아래에 읽기전용 주소창 밴드(현재 URL)를 두므로 top inset을
+                // bar_h + addr_h로 늘려 WKWebView 본문을 그만큼 더 내린다 → 밴드 영역이 웹뷰에서 비워지고, 탭 바 collect
+                // 루프가 그 밴드에 배경 quad + URL 셀을 그린다(밴드 y = [bar_h, bar_h+addr_h]가 웹뷰 top과 정확히 abut).
+                // addr_h는 탭 바 높이(paneBarHeightPx) 재사용 — 단일 소스, 별도 상수 없음. markdown web Term은 주소창이
+                // 없어 top=bar_h 유지(byte-identical). bar_h==0(chrome_minimal)이면 addr_h도 0이라 밴드 없음(탭 바와 동조).
+                const addr_h: u32 = if (term.web_panel_kind == .browser) bar_h else 0;
+                var inset: web_panel_layout.ChromeInset = .{ .top = bar_h + addr_h };
                 var seam_edges: u8 = 0;
                 if (seam > 0 and lr.rect.x > tr.x) {
                     inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
@@ -15183,6 +15189,32 @@ pub const AppSession = struct {
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
                     if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
+
+                    // 1c) Phase 7e-1b: browser 웹 패널 주소창 밴드 — 이 pane의 **활성 탭**이 browser web Term이면 탭 바 바로
+                    //     아래에 읽기전용 URL 밴드(배경 quad + URL 셀)를 그린다. collectWebSurfaces inset이 browser면 top을
+                    //     bar_h+addr_h로 늘려 WKWebView 본문을 이 밴드 아래로 내리므로([[active-surface-render-path-trap]]),
+                    //     밴드는 chrome 영역이고 배경 quad가 터미널/웹뷰 콘텐츠를 덮지 않는다(밴드 = [full.y+bar_h, +2·bar_h]
+                    //     = inset.top과 정확히 abut). markdown web/터미널 탭은 밴드 없음(skip). 편집·버튼은 7e-2/7e-3.
+                    const addr_at = lr.leaf.active_term;
+                    if (addr_at < lr.leaf.terms.items.len) {
+                        const addr_term = lr.leaf.terms.items[addr_at];
+                        if (addr_term.kind == .web and addr_term.web_panel_kind == .browser) {
+                            const addr_bar_h = pb.full.h; // == paneBarHeightPx()(paneBarRect .h) → addr_h=bar_h, inset과 동일 소스
+                            const band_rect: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + addr_bar_h, .w = pb.full.w, .h = addr_bar_h };
+                            // 밴드 배경 = 탭 바와 같은 chrome 배경(sidebarBg, window.opacity 반영) — 주소창이 하나의 밴드로 이어져 보이게(quad).
+                            self.appendBarBgQuad(band_rect, self.chromeQuadBg(self.sidebarBg()));
+                            // URL 텍스트(셀 정렬 DrawCell — quad 금지) — 7e-1a nav 상태의 url(없으면 빈 문자열 = 밴드 배경만). muted 색.
+                            const url: []const u8 = if (self.webNavState(addr_term.surfaceId())) |st| st.url else "";
+                            const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
+                            if (addr_cols > 0) {
+                                const addr_fg: terminal.Color = .{ .rgb = self.mutedForeground() }; // 읽기전용 URL — 비활성 탭과 같은 muted 톤
+                                const band_text_origin_y = band_rect.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 탭 바 text_origin_y와 같은 pad_y
+                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg)) |adl| {
+                                    self.collectShaped(&collected, adl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = band_text_origin_y, .colors = tabbar_colors } });
+                                } else |_| {} // draw 생성 OOM은 탭 바처럼 무시(밴드 배경만이라도)
+                            }
+                        }
+                    }
                 }
 
                 // 2) 비활성 panel 터미널 frame(자기 활성 Term surface, 바 아래 origin). split일 때만 여럿이다.
@@ -31322,7 +31354,8 @@ test "collector: web Term은 .web detail(panel_kind=browser·trust=untrusted)로
 }
 
 // [4e review 0] collectWebSurfaces seam inset 검증 헬퍼 — 각 web 본문 rect가 seam(형제 pane 경계) 가장자리서 `seam`만큼,
-// 바깥 경계는 0, top은 탭 바(bar_h)만 들어갔는지 확인하고 어느 seam을 실제로 밟았는지 [left,right,bottom]로 돌려준다.
+// 바깥 경계는 0, top은 탭 바(bar_h) + (7e-1b) browser면 주소창 밴드(addr_h=bar_h)까지 들어갔는지 확인하고 어느 seam을
+// 실제로 밟았는지 [left,right,bottom]로 돌려준다. markdown web은 top=bar_h(주소창 없음), browser web은 top=2·bar_h.
 fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Allocator) ![3]bool {
     var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer leaves.deinit(allocator);
@@ -31346,10 +31379,12 @@ fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Alloca
         if (el > 0) saw[0] = true;
         if (er > 0) saw[1] = true;
         if (eb > 0) saw[2] = true;
+        // 7e-1b: browser web은 탭 바 아래 읽기전용 주소창 밴드(addr_h=bar_h)만큼 top inset이 더 들어간다(markdown은 0).
+        const addr_h: u32 = if (s.panel_kind == .browser) bar_h else 0;
         try std.testing.expectEqual(rect.x + el, cr.x);
-        try std.testing.expectEqual(rect.y + bar_h, cr.y); // top은 항상 탭 바(seam 추가 inset 없음)
+        try std.testing.expectEqual(rect.y + bar_h + addr_h, cr.y); // top = 탭 바 + (browser면) 주소창 밴드(seam 추가 inset 없음)
         try std.testing.expectEqual(rect.w - el - er, cr.w);
-        try std.testing.expectEqual(rect.h - bar_h - eb, cr.h);
+        try std.testing.expectEqual(rect.h - bar_h - addr_h - eb, cr.h);
         // seam_edges 비트마스크(L=1·R=2·B=4)는 inset이 걸린 가장자리와 정확히 일치해야 한다(Swift hitTest 통과의 단일 출처).
         var expected_mask: u8 = 0;
         if (el > 0) expected_mask |= 1;

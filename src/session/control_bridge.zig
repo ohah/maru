@@ -31,19 +31,12 @@ pub fn serializeHelloResult(gpa: std.mem.Allocator, id: cp.Id, server_version: [
 }
 
 fn writeHelloResult(s: *std.json.Stringify, id: cp.Id, server_version: []const u8) !void {
-    try s.beginObject();
-    try s.objectField("jsonrpc");
-    try s.write(cp.jsonrpc_version);
-    try s.objectField("id");
-    try cp.writeId(s, id);
-    try s.objectField("result");
-    try s.beginObject();
+    try cp.beginResult(s, id); // result envelope 단일 출처(control_browser와 공유 — 리뷰12 [4]).
     try s.objectField("protocol");
     try s.write(cp.protocol_id); // 신뢰 브리지도 같은 프로토콜 식별자를 보고(소켓 hello와 정합).
     try s.objectField("server_version");
     try s.write(server_version);
-    try s.endObject(); // result body
-    try s.endObject(); // envelope
+    try cp.endResult(s);
 }
 
 /// 신뢰 브리지 요청 한 줄(ndjson frame, 개행 제외)을 처리해 **응답 한 줄 바이트**를 만든다. `server_version`은 L4가

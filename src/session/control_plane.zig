@@ -329,6 +329,25 @@ pub fn writeId(s: *std.json.Stringify, id: Id) !void {
     }
 }
 
+/// 성공 응답 result envelope `{"jsonrpc":"2.0","id":<id>,"result":{` 까지 연다(§5.1). body는 호출자가 채우고
+/// `endResult`로 닫는다. `browser.*`(control_browser)·브리지(control_bridge) result 직렬화의 **단일 출처** — 응답
+/// envelope 모양이 소켓·브리지 경로에서 드리프트하지 않게 한다(각 모듈 로컬 복제 대신 cp 재사용).
+pub fn beginResult(s: *std.json.Stringify, id: Id) !void {
+    try s.beginObject();
+    try s.objectField("jsonrpc");
+    try s.write(jsonrpc_version);
+    try s.objectField("id");
+    try writeId(s, id);
+    try s.objectField("result");
+    try s.beginObject();
+}
+
+/// `beginResult`가 연 result body와 envelope를 닫는다.
+pub fn endResult(s: *std.json.Stringify) !void {
+    try s.endObject(); // result body
+    try s.endObject(); // envelope
+}
+
 /// 에러 응답 `{jsonrpc, id, error:{code, message, data?}}`를 한 줄로 직렬화하는 편의(§5.1). id를 아직 못 읽은
 /// 프레이밍/parse 실패는 `.null` id로 부른다(JSON-RPC 관례). caller가 free.
 pub fn serializeError(

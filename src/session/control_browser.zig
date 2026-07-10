@@ -202,21 +202,9 @@ fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.V
     try endResult(s);
 }
 
-/// `{"jsonrpc":"2.0","id":<id>,"result":{` 까지 연다(1a `writeId` 재사용). body는 호출자가 채우고 `endResult`로 닫는다.
-fn beginResult(s: *std.json.Stringify, id: cp.Id) !void {
-    try s.beginObject();
-    try s.objectField("jsonrpc");
-    try s.write(cp.jsonrpc_version);
-    try s.objectField("id");
-    try cp.writeId(s, id);
-    try s.objectField("result");
-    try s.beginObject();
-}
-
-fn endResult(s: *std.json.Stringify) !void {
-    try s.endObject(); // result body
-    try s.endObject(); // envelope
-}
+// result envelope open/close는 cp.beginResult/endResult 단일 출처 재사용(리뷰12 [4] — 브리지와 공유, 로컬 복제 제거).
+const beginResult = cp.beginResult;
+const endResult = cp.endResult;
 
 // ── ② dispatchBrowser(§9.1 ②③ — 정확한 보안 순서) ─────────────────────────────────────────────────────────
 

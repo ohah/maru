@@ -101,7 +101,7 @@ TDD 방식:
 아직 하지 않는다:
 
 - full trace/replay 구현.
-- GUI inspector.
+- GUI inspector — 관전형(read-only) HTML 스텝 뷰어를 [웹 패널](web-panel.md)에 띄우는 방향으로 확정(네이티브 패널·개입형 아님). replay 엔진 재사용, 단일 출처. 상세는 [trace-replay.md](trace-replay.md) "GUI inspector 설계 방향".
 
 ## 3단계: 초기 shell 경로에 필요한 parser/core 동작만 작게 확장
 

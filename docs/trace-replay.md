@@ -70,7 +70,16 @@ event 4 shell.command-end surface=1 row=2 exit=0
 
 **live 레코딩**(구현됨): `MARU_TRACE=<파일경로>`로 켠다. `app/trace_recorder.zig`의 `TraceRecorder`가 `SurfaceRuntime.applyPtyEvent`(output/exited)·`resize`(output/resize/process-exit)·`writeInput`/`writeInputNonBlocking`(input) 훅에서 base kind를 host가 준 file writer에 **이벤트마다 쓰고 flush**한다(증분 append). 그래서 **크래시가 나도 직전까지의 이벤트가 디스크에 남아** 재생된다(clean 종료 불필요 — `AppSession.deinit`은 마지막 버퍼 flush + sync + close만). opt-in(미설정이면 오버헤드 0), 8 MB 상한. write가 중간에 끊겨 부분 줄이 남아도 reader(`parseEvents`)가 잘린 마지막 줄을 관대 처리한다. shell.* 이벤트는 `output`에서 파생되므로 재생의 권위는 base kind다. **input은 재생 화면엔 안 쓰인다**(입력은 child로 갔고, 화면은 child가 되돌린 output의 echo로 재구성) — 완전한 세션 기록·타이밍 분석용이다. ⚠️input은 화면에 안 뜨는 타이핑(비밀번호 프롬프트 등)까지 담아 output보다 민감하다: guardFixture/anonymize가 할당·PII는 처리하지만 bare 비밀은 못 잡으니 fixture 승격 전 사람 검토가 최종 안전망.
 
-**아직 없는 것**(후속): GUI inspector, allowlist(`PATH`/`LANG` — 정책상 사용자 확인 선행).
+**아직 없는 것**(후속): GUI inspector(아래 "GUI inspector 설계 방향"), allowlist(`PATH`/`LANG` — 정책상 사용자 확인 선행).
+
+## GUI inspector 설계 방향 (후속 — 미구현)
+
+캡처한 세션을 사람이 **넘겨보며 각 순간의 화면을 보는** 뷰어다(트레이드오프 논의 결과 확정된 방향).
+
+- **관전형(read-only)이다.** replay 스텝을 앞뒤로 스크럽하며 그 시점 화면을 본다 — asciinema·게임 다시보기와 같은 결. **중간 개입(입력 주입·상태 변경)은 없다:** replay엔 살아있는 셸이 없어(child 프로세스는 녹화에 없음) 개입이 원리적으로 불가능하다. 개입이 필요하면 그건 replay가 아니라 **라이브 디버깅**(런타임/컨트롤 플레인을 건드리는 별개 작업)이다.
+- **HTML로, [웹 패널](web-panel.md)(인앱 브라우저)에 띄운다** — 네이티브 창이 아니다. 이유: (1) 이미 만드는 웹 패널을 재사용해 **새 UI 구조가 0**이다(네이티브 패널은 웹 패널과 기능이 겹치는 중복 UI가 된다), (2) 화면은 **터미널 격자**라 터미널 안에 그리면 색/커서가 엉키지만(터미널 속 터미널) HTML에선 자연스럽다, (3) 파일 하나로 공유·첨부 가능. 자기완결 HTML이라 웹 패널 완성 전엔 아무 브라우저로도 열린다.
+- **replay 엔진을 그대로 쓴다(단일 출처).** 스텝 계산 = `replayEventsForSurface`로 N번째까지 재생 → `dumpUtf8`(레벨1: 글자 격자를 `<pre>`) 또는 `renderTerminalSnapshot`(레벨2: 칸별 색을 `<span>`). 브라우저에서 터미널을 재구현하지 않는다 — Zig 코어가 이미 만든 **완성된 격자를 칠하기만** 한다. HTML은 `maru trace anonymize`와 같은 패턴으로 **Zig가 문자열로 생성**하고, 브라우저 안 스크립트는 "슬라이더→미리 구운 화면 바꿔치기" 수십 줄뿐.
+- **예상 CLI**: `maru trace inspect <trace> [out.html]`. 규모는 중간 PR 1개(replay·CLI 재사용 — 익명화·fixture+CI급). 각 스텝 재생은 한 코어에 이어붙여 O(N)으로.
 
 ### Control-plane event (미정)
 

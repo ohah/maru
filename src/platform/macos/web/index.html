@@ -1,9 +1,11 @@
 <!doctype html>
 <!--
-  Phase 5c placeholder: maru-app:// 신뢰 UI 채널의 메커니즘·보안(스킴 핸들러·엄격 CSP·경로 샌드박스)을 확립하는
-  최소 test 문서. app.css(style-src 'self')·app.js(script-src 'self')를 same-origin 상대 경로로 링크해, 스킴 핸들러가
-  하위 리소스도 asset root 아래에서 서빙하고 CSP가 그것을 허용하는지 확인한다. 실 UI asset(설정·md 뷰어·대시보드)은
-  Phase 7(zntc/Bun 빌드)이 이 파일들을 대체한다. docs/web-panel.md §7.1.
+  Phase 5b/5c placeholder: maru-app:// 신뢰 UI 채널의 메커니즘·보안(스킴 핸들러·엄격 CSP·경로 샌드박스 = 5c) +
+  신뢰 브리지(isolated world window.maru.* = 5b)를 확립하는 최소 test 문서. app.css(style-src 'self')·app.js
+  (script-src 'self')를 same-origin 상대 경로로 링크한다. 두 상태 줄이 브리지 격리를 눈으로 증명한다:
+    - #status(app.js = **page world**): typeof window.maru → "undefined"여야 함(브리지는 isolated world에만, 격리 OK).
+    - #bridge-status(브리지 shim = **isolated world**): maru.hello() round-trip → server_version 표시(핸들러 도달 OK).
+  실 UI asset(설정·md 뷰어·대시보드)은 Phase 7(zntc/Bun 빌드)이 이 파일들을 대체한다. docs/web-panel.md §7.1, control-plane.md §8.1.1.
 -->
 <html>
 <head>
@@ -17,6 +19,7 @@
   <main class="maru-app-placeholder">
     <h1>maru-app://</h1>
     <p id="status">신뢰 UI 채널 placeholder — Phase 5c</p>
+    <p id="bridge-status">브리지 대기 중… (Phase 5b)</p>
   </main>
   <script src="app.js"></script>
 </body>

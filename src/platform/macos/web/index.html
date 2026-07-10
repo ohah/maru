@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  Phase 5c placeholder: maru-app:// 신뢰 UI 채널의 메커니즘·보안(스킴 핸들러·엄격 CSP·경로 샌드박스)을 확립하는
+  최소 test 문서. app.css(style-src 'self')·app.js(script-src 'self')를 same-origin 상대 경로로 링크해, 스킴 핸들러가
+  하위 리소스도 asset root 아래에서 서빙하고 CSP가 그것을 허용하는지 확인한다. 실 UI asset(설정·md 뷰어·대시보드)은
+  Phase 7(zntc/Bun 빌드)이 이 파일들을 대체한다. docs/web-panel.md §7.1.
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <!-- 명시 흰 배경(app.css) — WKWebView는 배경 미지정 문서를 시스템 appearance로 렌더해 다크 모드서 다크가 되므로. -->
+  <meta name="color-scheme" content="light">
+  <link rel="stylesheet" href="app.css">
+  <title>maru-app</title>
+</head>
+<body>
+  <main class="maru-app-placeholder">
+    <h1>maru-app://</h1>
+    <p id="status">신뢰 UI 채널 placeholder — Phase 5c</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

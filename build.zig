@@ -703,6 +703,11 @@ pub fn build(b: *std.Build) void {
                 "done; " ++
                 "[ \"$lic_found\" = 1 ] || { echo \"error: font family $fam has .ttf but no license (OFL.txt/LICENSE.md/LICENSE.txt) — 재배포 의무\" >&2; exit 1; }; " ++
                 "done; " ++
+                // Phase 5c-2c: maru-app:// 신뢰 UI asset(placeholder index.html·app.css·app.js)을 Resources/web/에 복사한다.
+                // 스킴 핸들러가 Bundle.main.resourceURL/web 아래만 서빙한다(경로 샌드박스·realpath 탈출 방어=Zig 정책).
+                // Phase 7 실 UI(zntc/Bun 빌드)가 이 소스 asset을 대체한다. docs/web-panel.md §7.1.
+                "mkdir -p zig-out/Maru.app/Contents/Resources/web; " ++
+                "cp src/platform/macos/web/* zig-out/Maru.app/Contents/Resources/web/; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
         macos_app_bundle.setCwd(b.path("."));
@@ -794,6 +799,9 @@ pub fn build(b: *std.Build) void {
         const macos_app_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app"});
         macos_app_smoke.setCwd(b.path("."));
         macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "1500");
+        // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
+        // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.
+        macos_app_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", "src/platform/macos/web");
         macos_app_smoke.step.dependOn(&macos_app_compile.step);
         macos_app_smoke_step.dependOn(&macos_app_smoke.step);
     }

@@ -494,6 +494,110 @@ final class MaruMetalOverlayView: NSView {
     }
 }
 
+// MARK: - Phase 5c-2c: maru-app:// 신뢰 스킴 핸들러 (WKURLSchemeHandler 어댑터)
+//
+// 신뢰(markdown) 웹 패널의 `WKWebViewConfiguration`에만 등록되는 커스텀 스킴 핸들러. `maru-app://app/<path>` 요청을
+// 받으면 **Zig 정책**(`maru_macos_app_resolve_app_asset` — 5c-1 경로 샌드박스 + 5c-2a realpath symlink 탈출 방어)으로
+// asset root 아래 안전한 절대 경로를 얻어, 그 파일 바이트를 **엄격 CSP 헤더**(단일 출처=Zig `app_scheme.csp_header`)와
+// 함께 응답한다. 거부(샌드박스·탈출·부재)는 정보 노출 없이 404. **정책 판정은 전부 Zig, 여기는 파일 읽기 + 응답 조립
+// 이라는 WebKit 어댑터만** 한다(docs/web-panel.md §10). 비신뢰(browser) 패널엔 이 핸들러를 애초에 등록하지 않는다
+// (origin 위장 탈취 1차 차단 — §7 ④·§8.1(c), 2차는 browser 패널의 maru-app:// 네비 차단).
+@MainActor
+final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
+    static let scheme = "maru-app"
+    private let assetRoot: String // 번들 web asset root 절대 경로(Bundle.main.resourceURL/web 또는 MARU_WEB_APP_ROOT).
+    private let csp: String
+
+    init(assetRoot: String) {
+        self.assetRoot = assetRoot
+        self.csp = Self.loadCSP()
+        super.init()
+    }
+
+    // 신뢰 UI asset root — 번들 Resources/web(정식 실행) 또는 MARU_WEB_APP_ROOT override(bare 스모크·dev). override는
+    // root만 바꾸고 샌드박스는 그 아래로 그대로 적용되므로 안전(dev/smoke 편의). nil이면 핸들러 미등록(패널이 blank).
+    static func webAssetRoot() -> String? {
+        if let ov = ProcessInfo.processInfo.environment["MARU_WEB_APP_ROOT"], !ov.isEmpty { return ov }
+        return Bundle.main.resourceURL?.appendingPathComponent("web").path
+    }
+
+    // CSP 문자열은 Zig `app_scheme.csp_header`가 단일 출처 — export로 1회 읽어 캐시한다(Swift에 중복 문자열 두지 않음).
+    private static func loadCSP() -> String {
+        var buf = [UInt8](repeating: 0, count: 512)
+        let n = maru_macos_app_csp_header(&buf, buf.count)
+        guard n > 0 else { return "default-src 'none'" } // 방어: export 실패 시 최대 제약(사실상 도달 불가).
+        return String(decoding: buf[0 ..< Int(n)], as: UTF8.self)
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+        // 요청 path(authority 뒤). 예: maru-app://app/index.html → "/index.html". 빈 경로("/")는 Zig가 index.html로 매핑.
+        guard let filePath = resolveAsset(url.path),
+              let data = FileManager.default.contents(atPath: filePath)
+        else {
+            // 거부(샌드박스·탈출·부재) → 404. 정보 노출 없이 균일 실패.
+            respond(urlSchemeTask, url: url, status: 404, mime: "text/plain; charset=utf-8", data: Data("Not Found".utf8))
+            return
+        }
+        respond(urlSchemeTask, url: url, status: 200, mime: Self.mimeType(forPath: filePath), data: data)
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        // start에서 동기 완료하므로 취소할 진행 작업이 없다(작은 asset 동기 읽기, 메인 스레드).
+    }
+
+    // Zig 정책 호출: 요청 path → asset root 아래 안전한 절대 경로. 실패(음수: 거부·부재·탈출)면 nil.
+    private func resolveAsset(_ reqPath: String) -> String? {
+        // 빈 path(`maru-app://app`처럼 authority만)는 Zig가 index.html로 매핑하는 계약이지만, 빈 Swift 배열은
+        // baseAddress=nil이라 export가 NULL(-4)로 오판한다 → "/"로 정규화해 Zig의 빈→index 경로를 그대로 태운다.
+        let rootBytes = Array(assetRoot.utf8)
+        let reqBytes = Array((reqPath.isEmpty ? "/" : reqPath).utf8)
+        var out = [UInt8](repeating: 0, count: 4096)
+        let n = rootBytes.withUnsafeBufferPointer { rp in
+            reqBytes.withUnsafeBufferPointer { qp in
+                out.withUnsafeMutableBufferPointer { op in
+                    maru_macos_app_resolve_app_asset(rp.baseAddress, rp.count, qp.baseAddress, qp.count, op.baseAddress, op.count)
+                }
+            }
+        }
+        guard n > 0 else { return nil }
+        return String(decoding: out[0 ..< Int(n)], as: UTF8.self)
+    }
+
+    private func respond(_ task: WKURLSchemeTask, url: URL, status: Int, mime: String, data: Data) {
+        let headers = [
+            "Content-Type": mime,
+            "Content-Length": "\(data.count)",
+            "Content-Security-Policy": csp, // 엄격 CSP를 모든 응답에 부착(외부 네트워크·iframe·base-uri·form-action 차단).
+        ]
+        guard let resp = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers) else {
+            task.didFailWithError(URLError(.cannotParseResponse))
+            return
+        }
+        task.didReceive(resp)
+        task.didReceive(data)
+        task.didFinish()
+    }
+
+    // 확장자 기반 MIME(어댑터 관심사). asset root의 신뢰 파일만 서빙하므로 sniffing 없이 확장자로 충분.
+    private static func mimeType(forPath path: String) -> String {
+        switch (path as NSString).pathExtension.lowercased() {
+        case "html", "htm": return "text/html; charset=utf-8"
+        case "js", "mjs": return "text/javascript; charset=utf-8"
+        case "css": return "text/css; charset=utf-8"
+        case "json": return "application/json; charset=utf-8"
+        case "svg": return "image/svg+xml"
+        case "png": return "image/png"
+        case "woff2": return "font/woff2"
+        case "wasm": return "application/wasm"
+        default: return "application/octet-stream"
+        }
+    }
+}
+
 // MARK: - Phase 4c/4d: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼 + 입력 전이 spike)
 //
 // 활성 pane 본문 rect에 붙는 **빈 WKWebView**를 감싸는 래퍼. WKWebView를 직접 컨테이너에 넣지 않고 이 래퍼로
@@ -521,6 +625,9 @@ final class MaruWebPanelView: NSView {
     let webView: WKWebView
     // Zig 전이(surface_id)와 매칭해 create/destroy/reframe이 옳은 웹뷰를 대상으로 하게 한다(§6 안정 키).
     let surfaceId: UInt64
+    // 패널 종류(ABI panel_kind: 0=markdown=신뢰, 1=browser=비신뢰). 신뢰만 maru-app:// 스킴 핸들러를 등록하고 신뢰 UI를
+    // 로드한다(5c-2c). 비신뢰는 인라인 placeholder + maru-app:// 네비 차단(외부 URL 로딩은 5d).
+    let panelKind: UInt32
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
     // 이 web 본문 rect가 split divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
@@ -532,19 +639,35 @@ final class MaruWebPanelView: NSView {
     // 실콘텐츠에선 seam-only + 정확 허용폭으로 좁힐 여지. 지금은 넓게 잡아 grab 편의를 우선.)
     static let dividerGrabBand: CGFloat = 10
 
-    init(frame frameRect: NSRect, surfaceId: UInt64) {
+    init(frame frameRect: NSRect, surfaceId: UInt64, panelKind: UInt32) {
         self.surfaceId = surfaceId
-        // 빈 설정 — bridge·URLSchemeHandler·userContentController 메시지 핸들러·per-surface 데이터스토어 커스텀은
-        // 전부 없다(Phase 5). 기본 WKWebViewConfiguration은 임의 URL을 못 열게 하는 정책이 없지만, 여기선 인라인 흰
-        // HTML만 로드하고 네비게이션 정책(decidePolicyForNavigationAction)도 안 붙인다 — 콘텐츠/네트워크 진입 자체가 없다.
-        self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: WKWebViewConfiguration())
+        self.panelKind = panelKind
+        // 트러스트 분기(5c-2c): markdown(0)=신뢰만 maru-app:// 스킴 핸들러를 config에 등록하고 신뢰 UI를 로드한다.
+        // browser(1)=비신뢰엔 스킴 핸들러를 **애초에 등록하지 않는다**(origin 위장 탈취 1차 차단, §7 ④). 핸들러는
+        // WKWebView 생성 **전에** config에 심어야 하므로 여기서 결정한다.
+        let config = WKWebViewConfiguration()
+        let trusted = (panelKind == 0)
+        var appURL: URL?
+        if trusted, let root = MaruAppSchemeHandler.webAssetRoot() {
+            config.setURLSchemeHandler(MaruAppSchemeHandler(assetRoot: root), forURLScheme: MaruAppSchemeHandler.scheme)
+            appURL = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html") // 신뢰 origin = maru-app://app(5b가 pin).
+        }
+        self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
         super.init(frame: frameRect)
         webView.autoresizingMask = [.width, .height] // 래퍼 frame 갱신(reframe) 시 웹뷰가 꽉 채워 따라간다.
-        // 빈 문서. 네트워크 로드 없음(인라인 HTML). **about:blank를 쓰지 않는 이유**: WKWebView는 배경이 지정되지 않은
-        // 문서(about:blank)를 시스템 appearance에 맞춰 렌더하므로 macOS **다크 모드에선 흰색이 아니라 다크 배경**이 되어
-        // 아래 다크 터미널과 구분되지 않는다("흰 화면 안 뜸"의 루트 코즈). 이 hosting 확인 placeholder는 CSS로 배경을
-        // **명시 흰색**으로 못박아 appearance 무관하게 흰 rect가 보이도록 한다(Phase 5 실콘텐츠가 이 load를 통째 대체).
-        webView.loadHTMLString("<!doctype html><html><head><meta name=\"color-scheme\" content=\"light\"></head><body style=\"margin:0;background:#ffffff\"></body></html>", baseURL: nil)
+        if let appURL {
+            // 신뢰 UI: maru-app://app/index.html — 스킴 핸들러가 asset root 아래 파일을 엄격 CSP와 함께 서빙한다(5c).
+            // 실 UI asset은 Phase 7이 대체한다. 하위 리소스(app.css·app.js)도 same-origin 상대 경로로 핸들러가 서빙.
+            webView.load(URLRequest(url: appURL))
+        } else {
+            // 비신뢰(browser) 또는 asset root 부재: 인라인 흰 HTML placeholder(외부 URL 로딩은 5d). **about:blank를 쓰지
+            // 않는 이유**: WKWebView는 배경 미지정 문서(about:blank)를 시스템 appearance로 렌더해 macOS 다크 모드에선
+            // 다크가 되어 아래 다크 터미널과 구분되지 않는다("흰 화면 안 뜸"의 루트 코즈). CSS로 배경을 명시 흰색으로
+            // 못박아 appearance 무관하게 흰 rect를 보장한다. + navigationDelegate로 maru-app:// 네비를 차단한다(신뢰 origin
+            // 위장 탈취 2차 방어 — 핸들러 미등록이 1차, §7 ④·§8.1(c)).
+            webView.navigationDelegate = self
+            webView.loadHTMLString("<!doctype html><html><head><meta name=\"color-scheme\" content=\"light\"></head><body style=\"margin:0;background:#ffffff\"></body></html>", baseURL: nil)
+        }
         addSubview(webView)
     }
 
@@ -584,6 +707,24 @@ final class MaruWebPanelView: NSView {
         guard controller?.isWebPanelAppChord(self, event) == true else { return false }
         controller?.handleWebPanelChord(event)
         return true
+    }
+}
+
+// Phase 5c-2c: 비신뢰(browser) 패널의 네비게이션 정책 — maru-app:// 네비게이션을 차단한다. 비신뢰 패널엔 스킴 핸들러를
+// 애초에 등록하지 않아(1차) maru-app://는 로드 자체가 실패하지만, `decidePolicyForNavigationAction`에서 명시적으로
+// cancel해 신뢰 origin 위장 탈취를 2차로 막는다(§7 ④·§8.1(c)). 신뢰 패널은 delegate를 안 붙여 maru-app://를 정상 로드한다.
+// 외부 http(s) 네비게이션 정책(링크 감지·스킴 화이트리스트)은 browser 패널이 실제 URL을 여는 5d에서 확장한다.
+extension MaruWebPanelView: WKNavigationDelegate {
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if navigationAction.request.url?.scheme?.lowercased() == MaruAppSchemeHandler.scheme {
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
     }
 }
 
@@ -2631,7 +2772,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case Int(MaruAppHostWebSurfaceOpCreate.rawValue):
                 // id는 앱 전역 비재사용이라 충돌은 없지만, 방어적으로 같은 id의 기존 뷰가 있으면 먼저 정리.
                 surface.webPanels[t.surface_id]?.removeFromSuperview()
-                let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id)
+                let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id, panelKind: t.panel_kind)
                 v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
                 v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
                 container.insertWebPanel(v)
@@ -3960,12 +4101,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let hit = wp?.hitTest(NSPoint(x: f.midX, y: f.midY))
             let hitInWeb = (hit != nil) && (hit?.isDescendant(of: wp ?? NSView()) ?? false)
             let webFocused = wp.map { isWebPanelFocused($0) } ?? false
+            // 5c-2c 트러스트 분기 단언: 신뢰(markdown, panelKind==0) 패널만 maru-app:// 스킴 핸들러가 config에 등록돼야
+            // 한다. 비신뢰(browser)면 미등록(nil). MARU_WEB_PANEL_MARKDOWN=1이면 markdown 패널이라 registered=true 기대.
+            let schemeRegistered = wp?.webView.configuration.urlSchemeHandler(forURLScheme: MaruAppSchemeHandler.scheme) != nil
             summary += """
             web_panel_present=\(wp != nil)
             web_panel_count=\(panels.count)
             web_panel_subview_order_ok=\(orderOk)
             web_panel_subview_count=\(subs.count)
             web_panel_surface_id=\(wp?.surfaceId ?? 0)
+            web_panel_kind=\(wp?.panelKind ?? 99)
+            web_panel_scheme_handler_registered=\(schemeRegistered)
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)
@@ -3973,6 +4119,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_panel_overlay_open=\(anyOverlayOpen)
             web_panel_hittest_in_web=\(hitInWeb)
             web_panel_focused=\(webFocused)
+
+            """
+        }
+
+        // 5c-2c: maru-app:// resolve 정책 C-ABI(maru_macos_app_resolve_app_asset)가 빌드 바이너리에서 실 asset root를
+        // 상대로 동작하는지 — 헤드리스 CI 신호(WKWebView 없이 결정적). 스모크 스텝이 MARU_WEB_APP_ROOT=src/platform/macos/web를
+        // 준다. 정상=len>0, traversal=-1(Reject), 부재=-2(NotFound). 정책 로직 자체(symlink 탈출·whitelist)는 Zig
+        // adversarial 테스트(5c-2a/2b)가 덮으므로 여기선 링크 + 3가지 대표 코드만 확인한다. root 없으면 스킵.
+        if let root = MaruAppSchemeHandler.webAssetRoot() {
+            func smokeResolve(_ req: String) -> Int64 {
+                let rb = Array(root.utf8), qb = Array(req.utf8)
+                var out = [UInt8](repeating: 0, count: 4096)
+                return rb.withUnsafeBufferPointer { rp in qb.withUnsafeBufferPointer { qp in out.withUnsafeMutableBufferPointer { op in
+                    maru_macos_app_resolve_app_asset(rp.baseAddress, rp.count, qp.baseAddress, qp.count, op.baseAddress, op.count)
+                } } }
+            }
+            summary += """
+            web_app_asset_root=\(root)
+            web_app_resolve_index=\(smokeResolve("/index.html"))
+            web_app_resolve_traversal=\(smokeResolve("/../etc/passwd"))
+            web_app_resolve_missing=\(smokeResolve("/nope.zzz"))
 
             """
         }

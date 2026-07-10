@@ -1002,6 +1002,9 @@ int64_t maru_macos_app_resolve_app_asset(
     size_t out_cap
 );
 
+/* maru-app:// 응답 CSP 헤더(5c-2c, 단일 출처=Zig app_scheme.csp_header). out에 복사하고 길이 반환. cap 부족=-1, NULL=-2. */
+int64_t maru_macos_app_csp_header(uint8_t *out_ptr, size_t out_cap);
+
 /* ── 세션 컨트롤 플레인 라이브 서버(Track C A2b) ──────────────────────────────────────────────
    앱 인스턴스 전역 컨트롤 소켓 + accept 스레드 + 메인 marshal. Swift는 (1) 시작 시 start를 한 번,
    (2) 매 frame tick에 drain을 살아있는 세션 목록과 함께, (3) 종료 시 stop을 부른다. 소켓/스레드/

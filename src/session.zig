@@ -32,6 +32,7 @@ pub const CapabilityStore = control_capability.CapabilityStore;
 pub const Capability = control_capability.Capability;
 pub const control_capture = @import("session/control_capture.zig"); // Track C 1f: session.capture 프로토콜 코어(chunk 스트림 상태머신·base64·generation 고정/invalidated·재시도 상한 fallback·authz ack, §4.3·§6·§8.3·§8.5)
 pub const control_browser = @import("session/control_browser.zig"); // Track C 5a: browser.* wire 스키마 + 디스패치 + browser capability authz(제어코어 skeleton, §9.1)
+pub const app_scheme = @import("session/app_scheme.zig"); // Phase 5c-1: maru-app:// 경로 샌드박스(traversal/whitelist, L2 순수) + CSP([web-panel.md] §7.1)
 pub const Capture = control_capture.Capture;
 pub const CaptureIdAllocator = control_capture.CaptureIdAllocator;
 pub const BrowserMethod = control_browser.BrowserMethod;

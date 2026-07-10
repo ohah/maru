@@ -89,6 +89,26 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 - **untrusted 패널 격리**: `browser` 패널은 신뢰 콘텐츠와 **별도 `WKProcessPool` + `WKWebsiteDataStore`(per-surface ephemeral)** 강제 — content process·쿠키 jar 분리(렌더러 침해가 신뢰 브리지 힙에 못 닿게, 쿠키 공유 차단).
 - **링크 라우팅**: 웹 패널 링크 클릭은 `decidePolicyForNavigationAction`에서 인터셉트해 [링크 감지](link-detection.md)의 존재검증·스킴 화이트리스트·명시 제스처 정책을 재사용한다(`file:///X.app` 실행 등 차단).
 
+### 7.1 5c — `maru-app://` 스킴 + 엄격 CSP + 경로 샌드박스 설계
+
+Phase 5 세 번째 슬라이스(신뢰 UI 경로). maru **자기 웹 UI**(설정·md 뷰어·대시보드 — Phase 7)를 서빙할 신뢰 콘텐츠 채널 `maru-app://`를 **안정적 origin + 강한 격리**로 확립한다. 5b 브리지가 pin할 **신뢰 origin을 여기서 정의**하므로 **5b보다 먼저**(사용자 결정 2026-07-10: 신뢰 UI + 코드 안정성 → rework 회피 순서). 실 UI asset은 Phase 7 — 5c는 스킴·CSP·샌드박스 메커니즘을 **placeholder asset**으로 확립한다.
+
+**의존성**: 소켓 write-경로·capability 발급(1e)·1g와 **무관**(자족적 — 스킴은 in-WKWebView 콘텐츠 서빙이라 컨트롤 소켓 경로를 안 탄다). 안정적으로 독립 진전.
+
+**① 경로 샌드박스(신규 코드 — 보안 코어)**: `sanitizeDropFilename`(cli/ssh.zig, basename+문자 필터만)은 realpath/symlink 거부를 안 하므로 **신규**다. 두 층:
+- **L2 순수(헤드리스, `src/session/`)**: 요청 경로 문자열 검증 — `..`(및 인코딩 `%2e%2e`·중복 슬래시·backslash)·절대경로 탈출 거부 + 정규화 후 **허용 asset root prefix 아래인지** 확인. adversarial 단위 test(`../`·`....//`·`%2e%2e%2f`·절대·null byte·`.`만·빈 경로)로 탄탄히. 문자열 레벨이라 순수·이식성.
+- **platform(macOS, 실 FS)**: 정규화된 경로를 **realpath**한 결과가 여전히 asset root 아래인지 + **symlink 탈출 거부**(realpath가 root 밖을 가리키면 거부). 실 FS I/O라 platform. macos smoke로 검증(symlink→거부).
+
+**② 스킴 핸들러(`WKURLSchemeHandler`, platform)**: 신뢰 config에만 `setURLSchemeHandler(_, forURLScheme:"maru-app")` 등록. 요청 → ① 샌드박스 검증 → 통과면 **maru 번들 asset root**의 바이트를 읽어 **엄격 CSP 헤더**와 함께 응답, 거부면 차단(404). **뷰되는 파일 자신의 디렉터리는 안 서빙**(§7 — `script-src 'self'` 아래 공격자 디렉터리 스크립트 same-origin 로드 차단). 스킴 이름 근거=§9(RFC 3986, `WKURLSchemeHandler` 커스텀 스킴 등록 가능·소문자 고정).
+
+**③ CSP(응답 헤더)**: `default-src 'none'; script-src 'self'; img-src 'self' data:; connect-src 'none'; frame-src 'none'`(외부 네트워크·iframe 차단, exfil 방지). 응답에 항상 부착.
+
+**④ 트러스트 분기**: `markdown`(신뢰) config만 스킴 핸들러 등록. `browser`(untrusted) config엔 **미등록** + `maru-app://` 네비 `decidePolicyForNavigationAction`에서 차단(origin 위장 방지 — §8.1 (c)). 현재 실 신뢰 콘텐츠(Phase 7) 전이라 5c는 **fixture 신뢰 패널 + placeholder asset**(최소 test HTML)으로 메커니즘·보안을 확립.
+
+**⑤ 자동 검증**: 경로 샌드박스 adversarial(헤드리스 Zig) + macos smoke(`maru-app://…/index.html` 로드·CSP 존재·asset 서빙; `maru-app://…/../etc/passwd`·symlink→거부; browser 패널서 `maru-app://` 네비 차단).
+
+**⑥ 슬라이스 경계** — 5c=스킴·CSP·샌드박스·placeholder asset. **5b**(다음)=브리지가 이 `maru-app://` origin을 exact-pin(§8.1.1). **Phase 7**=실 UI asset(zntc/Bun 빌드).
+
 ## 8. 빠진 기능 (구현 시 필수)
 
 - **browser chrome UI (주소창·nav — `browser` kind 전용, 슬라이스 7e)**: WKWebView는 **네비게이션 UI를 제공하지 않는다**(Safari.app의 주소창·버튼은 Safari 앱 자체 chrome이지 WKWebView가 아님; SFSafariViewController의 내장 chrome은 iOS 전용·모달이라 embed 불가). 단 **nav 함수는 공짜**다 — `goBack()`/`goForward()`/`canGoBack`/`canGoForward`/`reload()`/`load(URLRequest)`/`url`/`title`/`backForwardList`/`estimatedProgress`를 WKWebView가 주고 WebKit이 히스토리·백스택을 소유한다. 그래서 maru는 **UI 껍데기만** 만든다: "chrome=Zig+GPU" 원칙대로 **탭바처럼 GPU 셀로 back/forward/reload 버튼 + 주소창**을 그리고, 버튼→ABI→WKWebView API를 호출한다(`canGoBack`/`canGoForward`로 버튼 활성/비활성). **주소창 2모드**: **① 비활성(읽기전용)** = 현재 `url`만 표시(입력 불가 — 위치 확인용, 임의 URL 입력 보안면 없음), **② 편집** = URL 입력 → `load`(임의 웹 로드라 §7 보안 — untrusted 프로세스 격리·`decidePolicyForNavigationAction` 링크 라우팅 — 동반, Phase 5 security 이후). `panel.navigated`(control §11 이벤트)/navigation delegate로 URL·progress 갱신. markdown kind는 주소창 불요라 kind별 분기(닫힌 열거).

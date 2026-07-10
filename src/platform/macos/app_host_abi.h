@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 103u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 104u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -988,6 +988,28 @@ int32_t maru_macos_app_session_web_surface_transition_at(
     MaruAppHostSession *session,
     uint32_t index,
     MaruAppHostWebSurfaceTransition *out
+);
+
+/* Phase 7e-1a: browser(비신뢰) 웹 패널의 WKWebView nav 상태(현재 url·canGoBack·canGoForward)를 per-surface로 저장한다.
+   Swift KVO(MaruWebPanelView)가 url/canGoBack/canGoForward 변화를 관측해 dirty면 tick drain에서 호출한다 — 관측·
+   marshaling은 Swift(L4 어댑터), 저장·정책은 Zig. can_go_back/forward는 0/1, url_ptr NULL이면 빈 url. session NULL=NullOut.
+   소비(주소창 렌더)는 7e-1b. v104. */
+int32_t maru_macos_app_session_set_web_nav_state(
+    MaruAppHostSession *session,
+    uint64_t surface_id,
+    int32_t can_go_back,
+    int32_t can_go_forward,
+    const uint8_t *url_ptr,
+    size_t url_len
+);
+
+/* surface_id에 저장된 nav url을 out에 복사하고 그 길이를 돌려준다(스모크가 KVO → set_web_nav_state → 저장 → getter
+   왕복을 값으로 검증). 엔트리 없으면 0(빈 url 저장도 0), session/out이 NULL이면 -1, out_cap 부족이면 -2. v104. */
+int64_t maru_macos_app_session_web_nav_url_at(
+    MaruAppHostSession *session,
+    uint64_t surface_id,
+    uint8_t *out_ptr,
+    size_t out_cap
 );
 
 /* maru-app:// asset resolve(5c-2b): WKURLSchemeHandler(5c-2c)가 요청 경로를 안전한 절대 경로로 resolve한다.

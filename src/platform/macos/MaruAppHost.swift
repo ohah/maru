@@ -619,6 +619,87 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
+// MARK: - Phase 5b: 신뢰 웹 브리지 핸들러 (isolated WKContentWorld window.maru.*)
+//
+// 신뢰(markdown) 패널의 **page-world와 격리된 named isolated world**("MaruBridge")에만 등록되는 메시지 핸들러
+// (WKScriptMessageHandlerWithReply — async reply, macOS 11+). page-world JS(md sanitizer 우회 mXSS 등)는 다른 JS
+// global이라 window.maru에 못 닿는다(2026-06 spike 실측: isolated world만 접근). 단 **메시지 핸들러 등록은 world-scope
+// 라 프레임/origin을 안 가리므로**, 핸들러 진입에서 `frameInfo.isMainFrame` + `securityOrigin` exact-pin을 검사한다
+// (서브프레임 clickjacking·origin 위장 차단 — control-plane.md §8.1.1 ②). 통과한 요청만 Zig 정책 코어(5b-1
+// dispatchBridge)로 넘긴다 — **정책=Zig, 어댑터=Swift**(world·핸들러·origin 검증·shim). browser(비신뢰) 패널엔 이
+// 브리지를 애초에 미등록(§8.1 (c)). 5b 최소: maru.hello()→server_version. 실 window.maru.* API는 5d+/Phase 7.
+@MainActor
+final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
+    // 신뢰 origin exact-pin(§8.1.1 ②): 5c가 신뢰 UI를 maru-app://app로 서빙하므로 정확히 그 scheme+host의 메인
+    // 프레임 메시지만 받는다(scheme 수준 any maru-app:// 매칭이 아니라 exact host까지 — 위장 origin 차단).
+    static let trustedScheme = MaruAppSchemeHandler.scheme // "maru-app"
+    static let trustedHost = "app"
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        // ── 신뢰 게이트: 메인 프레임 + 정확한 신뢰 origin(scheme+host)만. 하나라도 불일치면 reply 에러(Promise reject). ──
+        guard message.frameInfo.isMainFrame else { replyHandler(nil, "unauthorized: not main frame"); return }
+        let origin = message.frameInfo.securityOrigin
+        guard origin.protocol == Self.trustedScheme, origin.host == Self.trustedHost else {
+            replyHandler(nil, "unauthorized: origin")
+            return
+        }
+        // ── 요청(JS 객체) → JSON-RPC 한 줄 → Zig dispatchBridge(정책) → 응답 파싱해 Promise 해소. ──
+        guard let body = message.body as? [String: Any],
+              let reqData = try? JSONSerialization.data(withJSONObject: body),
+              let replyBytes = Self.callBridge(reqData),
+              let replyObj = try? JSONSerialization.jsonObject(with: replyBytes)
+        else {
+            replyHandler(nil, "bad request")
+            return
+        }
+        replyHandler(replyObj, nil) // JSON-RPC 응답 객체로 Promise 해소(shim의 request()가 이걸 반환).
+    }
+
+    // Zig dispatchBridge C-ABI 마샬링(단일 출처). 요청 바이트 → 응답 바이트(nil=음수 코드=NULL/용량/OOM 실패).
+    static func callBridge(_ req: Data) -> Data? {
+        let reqBytes = [UInt8](req)
+        var out = [UInt8](repeating: 0, count: 8192)
+        let n = reqBytes.withUnsafeBufferPointer { rp in
+            out.withUnsafeMutableBufferPointer { op in
+                maru_macos_app_bridge_dispatch(rp.baseAddress, rp.count, op.baseAddress, op.count)
+            }
+        }
+        guard n > 0 else { return nil }
+        return Data(out[0 ..< Int(n)])
+    }
+
+    // isolated world에 window.maru를 까는 shim(atDocumentStart, main frame only). WKScriptMessageHandlerWithReply라
+    // postMessage가 **Promise를 반환**한다(핸들러 replyHandler로 해소). 로드되면 maru.hello() round-trip 결과를 공유
+    // DOM(#bridge-status)에 적어 손 테스트로 브리지 도달을 눈으로 확인한다(page-world app.js는 window.maru 못 봄=격리).
+    static let shim = """
+    (function () {
+      "use strict";
+      if (window.maru) return;
+      var __id = 0;
+      window.maru = {
+        request: function (method, params) {
+          var msg = { jsonrpc: "2.0", id: ++__id, method: method };
+          if (params !== undefined) { msg.params = params; }
+          return window.webkit.messageHandlers.maru.postMessage(msg);
+        },
+        hello: function () { return window.maru.request("hello"); }
+      };
+      document.addEventListener("DOMContentLoaded", function () {
+        var el = document.getElementById("bridge-status");
+        window.maru.hello().then(function (r) {
+          if (el) { el.textContent = "브리지 OK (isolated world) · server_version " + (r && r.result && r.result.server_version); }
+        }).catch(function (e) {
+          if (el) { el.textContent = "브리지 ERROR: " + e; }
+        });
+      });
+    })();
+    """
+}
+
 // MARK: - Phase 4c/4d: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼 + 입력 전이 spike)
 //
 // 활성 pane 본문 rect에 붙는 **빈 WKWebView**를 감싸는 래퍼. WKWebView를 직접 컨테이너에 넣지 않고 이 래퍼로
@@ -649,6 +730,13 @@ final class MaruWebPanelView: NSView {
     // 패널 종류(ABI panel_kind: 0=markdown=신뢰, 1=browser=비신뢰). 신뢰만 maru-app:// 스킴 핸들러를 등록하고 신뢰 UI를
     // 로드한다(5c-2c). 비신뢰는 인라인 placeholder + maru-app:// 네비 차단(외부 URL 로딩은 5d).
     let panelKind: UInt32
+    // 5b: 신뢰 패널의 브리지 isolated world(page-world와 격리, window.maru 주입처). 비신뢰=nil. 스모크 격리 probe에 쓴다.
+    var bridgeWorld: WKContentWorld?
+    // 5b 격리 E2E probe 결과(스모크, MARU_WEB_PANEL): isolated world의 typeof window.maru("object" 기대) / page-world("undefined" 기대).
+    var bridgeIsolatedProbe: String?
+    var bridgePageWorldProbe: String?
+    // 5b round-trip probe: isolated world에서 await maru.hello()의 server_version(핸들러 도달 + Zig dispatch 증명, "0.1.0" 기대).
+    var bridgeHelloProbe: String?
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
     // 이 web 본문 rect가 split divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
@@ -669,11 +757,19 @@ final class MaruWebPanelView: NSView {
         let config = WKWebViewConfiguration()
         let trusted = (panelKind == 0)
         var appURL: URL?
+        var bridgeWorldLocal: WKContentWorld?
         if trusted, let root = MaruAppSchemeHandler.webAssetRoot() {
             config.setURLSchemeHandler(MaruAppSchemeHandler(assetRoot: root), forURLScheme: MaruAppSchemeHandler.scheme)
+            // 5b: 신뢰 브리지 — page-world와 격리된 named isolated world에만 window.maru 메시지 핸들러 + shim을 주입한다.
+            // 핸들러(WKScriptMessageHandlerWithReply)는 진입서 isMainFrame+origin을 검사하고 통과분만 Zig로 넘긴다.
+            let world = WKContentWorld.world(name: "MaruBridge")
+            config.userContentController.addScriptMessageHandler(MaruBridgeHandler(), contentWorld: world, name: "maru")
+            config.userContentController.addUserScript(WKUserScript(source: MaruBridgeHandler.shim, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world))
+            bridgeWorldLocal = world
             appURL = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html") // 신뢰 origin = maru-app://app(5b가 pin).
         }
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
+        self.bridgeWorld = bridgeWorldLocal
         super.init(frame: frameRect)
         webView.autoresizingMask = [.width, .height] // 래퍼 frame 갱신(reframe) 시 웹뷰가 꽉 채워 따라간다.
         // 네비게이션 정책은 신뢰·비신뢰 **양쪽** 모두 건다(리뷰11 [2]). 신뢰 패널은 maru-app:// 안으로만 top-level
@@ -749,6 +845,25 @@ extension MaruWebPanelView: WKNavigationDelegate {
         let trusted = (panelKind == 0)
         // 신뢰: maru-app://만 허용. 비신뢰: maru-app://만 cancel.
         decisionHandler(trusted == isMaruApp ? .allow : .cancel)
+    }
+
+    // 5b 격리 E2E probe(스모크 전용): 신뢰 패널 로드 완료 후 typeof window.maru를 isolated world(="object" 기대)와
+    // page world(="undefined" 기대)에서 각각 읽어 저장한다. 스모크 요약이 이 값으로 브리지 격리를 자동 단언한다
+    // (WKWebView·evaluateJavaScript async라 헤드리스 Zig 아니라 macos smoke E2E — control-plane.md §8.1.1 ④). 정상
+    // 런에선 안 돈다(isSmokeMode 게이트 — 오버헤드 0). browser 패널은 bridgeWorld=nil이라 probe 없음.
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard controller?.isSmokeMode == true, let world = bridgeWorld else { return }
+        webView.evaluateJavaScript("typeof window.maru", in: nil, in: world) { [weak self] result in
+            if case .success(let v) = result { self?.bridgeIsolatedProbe = v as? String }
+        }
+        webView.evaluateJavaScript("typeof window.maru", in: nil, in: .page) { [weak self] result in
+            if case .success(let v) = result { self?.bridgePageWorldProbe = v as? String }
+        }
+        // round-trip: isolated world에서 maru.hello()를 await(callAsyncJavaScript는 Promise를 기다림)해 server_version을
+        // 얻는다 → 핸들러 도달 + origin 통과 + Zig dispatchBridge 응답까지 자동 증명("0.1.0" 기대).
+        webView.callAsyncJavaScript("return (await window.maru.hello()).result.server_version", arguments: [:], in: nil, in: world) { [weak self] result in
+            if case .success(let v) = result { self?.bridgeHelloProbe = v as? String }
+        }
     }
 }
 
@@ -993,6 +1108,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
     private var smokeMode = false
+    // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
+    var isSmokeMode: Bool { smokeMode }
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
@@ -4136,6 +4253,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_panel_surface_id=\(wp?.surfaceId ?? 0)
             web_panel_kind=\(wp?.panelKind ?? 99)
             web_panel_scheme_handler_registered=\(schemeRegistered)
+            bridge_world_registered=\(wp?.bridgeWorld != nil)
+            bridge_isolated_probe=\(wp?.bridgeIsolatedProbe ?? "pending")
+            bridge_pageworld_probe=\(wp?.bridgePageWorldProbe ?? "pending")
+            bridge_hello_version=\(wp?.bridgeHelloProbe ?? "pending")
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

@@ -151,6 +151,15 @@ resize는 두 곳에 반영되어야 한다.
 
 `SurfaceRuntime`은 이 event를 받아 surface metadata를 갱신한다. 이때 surface 자체를 바로 삭제하지 않는다. 사용자는 종료된 surface의 마지막 화면을 볼 수 있어야 하기 때문이다. 이 "마지막 화면 유지" 원칙은 app host에서 **창의 마지막 surface**까지 확장된다 — 첫 셸이 usable 세션에 도달하지 못하고(출력 0) 죽으면 앱을 종료하지 않고 창을 유지해 사용자가 원인을 보고 설정을 고치게 한다(단일 출처: `macos-app-host-boundary.md` "세션 자동 종료: 정상 종료 vs 비정상 시작 사망").
 
+### read_error vs 검증된 exit — 워크스페이스 자동 닫기 게이트
+
+reader가 `readChunk`/`waitIo`/`writeInputNonBlocking`에서 EOF가 아닌 I/O 오류(`POLLNVAL`, 비-`EIO` read 오류, master write 실패 등)를 만나면 `PtyEvent.read_error`를 낸다. **핵심 불변식: 워크스페이스(탭)의 자동 닫기·세션 종료 latch는 오직 "검증된 child 종료"에만 반응한다.** read_error는 그 자체로 child가 죽었다는 증거가 아니기 때문이다(EOF는 `reapAfterEof`가 `waitpid`/`kqueue`로 죽음을 확인하지만, read_error 경로엔 그 확인이 없었다).
+
+- **소스 검증(pty_reader `pushTerminationForIoError`)**: I/O 오류를 만난 reader는 `PtySession.reapIfExited`(비차단 `waitpid` WNOHANG)로 child 생존을 확인한다. 이미 죽었으면 `PtyEvent.exited`(검증된 종료 — EOF 경로와 동치)로, 아직 살아 있으면 `PtyEvent.read_error`로 방출한다.
+- **닫기 게이트(app_session `terminationClosesWorkspace`)**: tick drain이 `.exited`를 관측하면 기존대로 `finishAfterTermination`(reader join + child reap) → cascade close(Term→pane→워크스페이스)를 탄다. `.read_error`(= child 생존 미검증)는 surface를 exited로 latch해 I/O만 거부하고, **`finishAfterTermination`(→`session.close`→`shutdownChild`로 살아 있는 셸을 죽인다)·reap·closeTab을 타지 않는다.** 끝난 reader thread는 Term teardown(`close`/`stopAndJoin`)이 join한다.
+
+이 게이트가 없으면, 셸에서 `claude` 같은 포그라운드 명령을 실행 중 `Ctrl+C`(0x03 write)가 일으킨 일시적 I/O 오류가 read_error → 미검증 종료로 처리돼, **살아 있는 셸을 죽이고 좌측 워크스페이스 탭을 통째로 닫는** 데이터 손실이 난다(사용자 보고 루트커즈). 단위 검증: `pty/macos.zig`의 `reapIfExited` 테스트(생존→null/종료→상태)와 `app_session.zig`의 `terminationClosesWorkspace` 테스트(.exited만 닫힘). 전체 통합은 mock 세션 주입 불가·live reader join 순서 문제로 수동 검증(위 시나리오 반복)이다.
+
 ## session close
 
 이미 `PtyEvent.exited`로 종료가 관측된 session은 close 시 child를 다시 건드리지 않는다. 아직 살아 있는 child를 close할 때는 shell이 정리할 기회를 주기 위해 신호를 단계적으로 올린다. master fd는 이 단계에서 닫지 않는다(reader join 뒤 `deinit`에서 닫는다 — 아래 reader 정리 문단 참조).

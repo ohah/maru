@@ -171,7 +171,9 @@ Node = leaf(Pane)
   (마지막이면 창) 닫는다. 즉 Cmd+W를 반복하면 Term → pane → 워크스페이스 순으로 하나씩 닫힌다.
 - **exit 자동 collapse(PR5b)**: 셸이 `exit`하면 그 Term도 같은 cascade로 자동 정리된다(Cmd+W 닫기와 동일 경로의
   exit 버전) — 활성/배경 탭·pane 어디서 죽어도 tick의 drain이 종료를 관측한 직후 reap한다. 단 **모든 Term이
-  죽으면** 마지막은 reap하지 않고 세션 종료(창 닫힘) latch가 맡는다(빈 세션을 만들지 않음).
+  죽으면** 마지막은 reap하지 않고 세션 종료(창 닫힘) latch가 맡는다(빈 세션을 만들지 않음). **이 reap은 검증된
+  자식 종료(`.exited`)에만 일어난다** — `.read_error`(자식 생존 미검증 PTY I/O 오류)는 이 cascade를 타지 않아 산 셸이
+  달린 탭이 유지된다(`terminationClosesWorkspace` 게이트; 단일 출처: `pty-operating-model.md` "read_error vs 검증된 exit").
 - **per-pane 탭 바 렌더(PR-C)**: 각 pane(leaf rect) 상단에 가로 탭 바 strip(높이 = cell 1칸)을 예약하고 그
   아래를 터미널 영역으로 쓴다(`paneTermRect`/`paneBarRect` 단일 출처 — 좌표·resize·split·렌더가 공유). 바는
   터미널 셀 스트림에 origin 박힌 셀로 그려진다(`metal_frame.replace`의 `pane_chrome_cells`, 렌더러·ABI 무변경).

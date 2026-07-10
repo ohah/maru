@@ -515,7 +515,7 @@ pub const PtyReader = struct {
                 // SessionClosed/NoMoreEvents는 사용자가 닫은 정상 종료다. read 실패가 아니므로
                 // read_error로 surface하지 않는다. 그 밖의 에러만 consumer에게 알린다.
                 if (err != error.SessionClosed and err != error.NoMoreEvents) {
-                    self.pushReadError(@errorName(err));
+                    self.pushTerminationForIoError(@errorName(err));
                 }
                 return;
             };
@@ -562,7 +562,7 @@ pub const PtyReader = struct {
             const main_pending = if (self.write_queue) |wq| wq.hasPending() else false;
             const ready = self.session.waitIo(reply_pending or main_pending) catch |err| {
                 if (err != error.SessionClosed and err != error.NoMoreEvents) {
-                    self.pushReadError(@errorName(err));
+                    self.pushTerminationForIoError(@errorName(err));
                 }
                 return;
             };
@@ -574,7 +574,7 @@ pub const PtyReader = struct {
                 // POLLOUT 스핀(라이브락)·입력 조용한 손실이 되므로, 에러면 reader를 종료한다(read 에러 경로와 동일).
                 if (out_head < out_buf.items.len) {
                     const written = self.session.writeInputNonBlocking(out_buf.items[out_head..]) catch |err| {
-                        if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                        if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
                         return;
                     };
                     out_head += written;
@@ -594,7 +594,7 @@ pub const PtyReader = struct {
                     const n = wq.drainChunk(&writebuf);
                     if (n > 0) {
                         const written = self.session.writeInputNonBlocking(writebuf[0..n]) catch |err| {
-                            if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                            if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
                             return;
                         };
                         wq.consume(written); // 실제 쓴 만큼만 head 전진(부분 write 잔량은 다음 poll)
@@ -629,7 +629,7 @@ pub const PtyReader = struct {
             // read 단계: 출력을 코어에 적용하고 응답을 outbound 버퍼에 적재한다.
             if (ready.readable) {
                 switch (self.session.readChunk(&readbuf) catch |err| {
-                    if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                    if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
                     return;
                 }) {
                     .again => {}, // readable/read race — 다음 poll에서 재시도
@@ -657,7 +657,7 @@ pub const PtyReader = struct {
                     },
                     .eof => {
                         const status = self.session.reapAfterEof() catch |err| {
-                            if (err != error.SessionClosed) self.pushReadError(@errorName(err));
+                            if (err != error.SessionClosed) self.pushTerminationForIoError(@errorName(err));
                             return;
                         };
                         if (status) |s| {
@@ -678,6 +678,25 @@ pub const PtyReader = struct {
             .pty_id = self.pty_id,
             .message = message,
         } }) catch {};
+    }
+
+    /// I/O 오류(waitIo/read/write/reapAfterEof 실패)를 만난 reader가 큐에 넣을 종료 이벤트를 정한다 — **루트커즈 수정**:
+    /// read_error가 자식 생존 검증 없이 종료로 취급돼 산 셸을 죽이고(finishAfterTermination→session.close→shutdownChild)
+    /// 좌측 워크스페이스 탭을 통째로 닫던 버그(셸에서 claude 실행 중 Ctrl+C가 유발한 일시적 write 오류가 트리거).
+    /// 세션에 비차단 reap(reapIfExited)을 걸어 검증한다: 자식이 이미 죽었으면 `.exited`(EOF 경로와 동치인 검증된 종료
+    /// → 정상 자동 닫힘), 아직 살아있으면 `.read_error`(surface만 unusable로 latch되고 워크스페이스는 유지된다).
+    /// reapIfExited 실패(ECHILD 등 — 이미 다른 곳이 reap 중)는 미검증이라 `.read_error`로 둔다(보수적). 어느 쪽이든
+    /// 이 reader는 종료한다(연결이 끊겼다) — 이 함수는 "무엇을 큐에 넣을지"만 정하고, 큐 push 실패는 무시(닫힘).
+    fn pushTerminationForIoError(self: *PtyReader, message: []const u8) void {
+        const reaped = self.session.reapIfExited() catch null;
+        if (reaped) |status| {
+            self.queue.pushBlocking(.{ .exited = .{
+                .pty_id = self.pty_id,
+                .status = status,
+            } }) catch {};
+        } else {
+            self.pushReadError(message);
+        }
     }
 };
 

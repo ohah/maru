@@ -141,7 +141,11 @@ const addr_nav_url_cap: usize = AddrEdit.cap + 16;
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 104;
+pub const abi_version: u32 = 105;
+// 105: Phase 7e-2b — 주소창 편집 신호 3 export(take_web_addr_focus_pull/navigate/focus_restore). 7e-2a Zig 코어의
+// 1회성 pending(밴드 클릭→편집 진입 focus-pull·Enter→navigate[surface_id+resolved url]·commit/cancel→focus-restore)을
+// Swift가 tick drain해 focusTerminalView / BrowserControl.navigate / makeFirstResponder(webView)로 실행한다(take_bell
+// 패턴). 신규 export만 — 구조체 offset·인자 순서 불변.
 // 104: Phase 7e-1a — browser 웹 패널 nav 상태 파이프라인. maru_macos_app_session_set_web_nav_state(surface_id,
 // can_go_back, can_go_forward, url) + maru_macos_app_session_web_nav_url_at(surface_id, out, cap) 두 export 추가.
 // Swift KVO가 WKWebView의 url·canGoBack·canGoForward를 관측해 per-surface(surface_id → WebNavState)로 Zig에 저장하고,

@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 104u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 105u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -1011,6 +1011,18 @@ int64_t maru_macos_app_session_web_nav_url_at(
     uint8_t *out_ptr,
     size_t out_cap
 );
+
+/* Phase 7e-2b: 주소창 편집 신호 drain(tick마다). (1) focus-pull: 편집 진입 시 "포커스를 터미널 뷰로"(1=있음, keyDown이
+   Zig로 흐르게). (2) navigate: Enter 시 로드 요청 — url을 out에, surface_id를 out-ptr에, url 길이 반환(없으면 -1) →
+   BrowserControl.navigate. (3) focus-restore: commit/cancel 후 웹뷰로 포커스 복원 대상 surface_id(out-ptr, 1=있음). */
+uint32_t maru_macos_app_session_take_web_addr_focus_pull(MaruAppHostSession *session);
+int64_t maru_macos_app_session_take_web_addr_navigate(
+    MaruAppHostSession *session,
+    uint8_t *url_out,
+    size_t url_cap,
+    uint64_t *surface_id_out
+);
+int32_t maru_macos_app_session_take_web_addr_focus_restore(MaruAppHostSession *session, uint64_t *surface_id_out);
 
 /* maru-app:// asset resolve(5c-2b): WKURLSchemeHandler(5c-2c)가 요청 경로를 안전한 절대 경로로 resolve한다.
    정책(경로 샌드박스·realpath symlink 탈출 방어)은 Zig 소유, Swift는 반환 경로를 읽어 CSP와 함께 서빙만 한다.

@@ -3070,6 +3070,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             panel.navStateDirty = false
         }
+
+        // Phase 7e-2b: 주소창 편집 신호 drain(7e-2a Zig 코어가 세운 1회성 pending). 정책·상태는 Zig, 여기는 WebKit
+        // 포커스·load 어댑터만. (1) focus-pull: 밴드 클릭 편집 진입 → 키보드 포커스를 터미널 뷰로(편집 keyDown이 Zig
+        // handleKeyEvent로 흐르게; 클릭이 이미 터미널 뷰를 firstResponder로 만들지만 확정). (2) navigate: Enter →
+        // BrowserControl.navigate(그 web 패널 webView, resolved url). (3) focus-restore: commit/cancel 후 웹뷰로 복원.
+        if maru_macos_app_session_take_web_addr_focus_pull(session) == 1 {
+            focusTerminalView(surface.window)
+        }
+        var navSid: UInt64 = 0
+        var urlBuf = [UInt8](repeating: 0, count: 4096)
+        let navLen = urlBuf.withUnsafeMutableBufferPointer { p in
+            maru_macos_app_session_take_web_addr_navigate(session, p.baseAddress, p.count, &navSid)
+        }
+        if navLen > 0, let wp = surface.webPanels[navSid] {
+            _ = BrowserControl.navigate(wp.webView, url: String(decoding: urlBuf[0 ..< Int(navLen)], as: UTF8.self))
+        }
+        var restoreSid: UInt64 = 0
+        if maru_macos_app_session_take_web_addr_focus_restore(session, &restoreSid) == 1, let wp = surface.webPanels[restoreSid] {
+            surface.window?.makeFirstResponder(wp.webView)
+        }
     }
 
     // 세팅 window.background-image 행 활성(input 타이핑 대신 파일 선택창 — 사용자 요청): Zig가 file_pick_pending을 세우면

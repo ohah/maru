@@ -1294,6 +1294,45 @@ pub export fn maru_macos_app_session_web_nav_url_at(
     return @intCast(state.url.len);
 }
 
+// Phase 7e-2b: 주소창 편집 신호 drain(7e-2a Zig 코어의 1회성 pending을 Swift가 tick마다 뺀다 — take_bell 패턴).
+// (1) focus-pull: 밴드 클릭으로 편집 진입 시 세워지는 "키보드 포커스를 터미널 뷰로" 신호(편집 keyDown이 Zig로
+//     흐르게). Swift가 1이면 focusTerminalView. surface_id는 활성 surface라 값 불요 → bool(1=있음).
+pub export fn maru_macos_app_session_take_web_addr_focus_pull(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeWebAddrFocusPull() != null) 1 else 0;
+}
+
+// (2) navigate: Enter(commit)가 세운 로드 요청 — resolved url을 out에 쓰고 surface_id를 out-ptr에 실어 url 길이를
+//     돌려준다(없으면 -1). Swift가 webPanels[surface_id].webView에 BrowserControl.navigate(url). null 인자/용량 부족은
+//     pending을 소비하기 전에 -1(신호 유실 방지 — Swift는 늘 유효 인자).
+pub export fn maru_macos_app_session_take_web_addr_navigate(
+    session: ?*AppSession,
+    url_out: ?[*]u8,
+    url_cap: usize,
+    surface_id_out: ?*u64,
+) i64 {
+    const app_session = session orelse return -1;
+    const uo = url_out orelse return -1;
+    const so = surface_id_out orelse return -1;
+    const nav = app_session.takeWebAddrNavigate() orelse return -1;
+    if (nav.url.len > url_cap) return -1; // 방어(resolveNavUrl이 이미 세션 버퍼 cap 제한)
+    @memcpy(uo[0..nav.url.len], nav.url);
+    so.* = nav.surface_id;
+    return @intCast(nav.url.len);
+}
+
+// (3) focus-restore: commit/cancel 후 키보드 포커스를 그 web 패널 WKWebView로 복원할 대상 surface_id(out-ptr).
+//     Swift가 1이면 makeFirstResponder(webPanels[surface_id].webView). 없으면 0. surface_id 0은 미발급이라 out-ptr로 실어 구분.
+pub export fn maru_macos_app_session_take_web_addr_focus_restore(session: ?*AppSession, surface_id_out: ?*u64) c_int {
+    const app_session = session orelse return 0;
+    const so = surface_id_out orelse return 0;
+    if (app_session.takeWebAddrFocusRestore()) |sid| {
+        so.* = sid;
+        return 1;
+    }
+    return 0;
+}
+
 // ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
 //
 // 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root

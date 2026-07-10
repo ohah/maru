@@ -1240,9 +1240,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 건드리지 않고 makeFirstResponder만 부른다 — 전이는 기존 becomeFirstResponder(imeFocus true)/resignFirstResponder
     // (commitComposition)를 그대로 태운다(새 IME 로직 없음). 단일 출처: docs/web-panel.md §4.
     func reconcileWebModalFocus() {
-        guard let surface = activeSurface, let window = surface.window, !surface.webPanels.isEmpty else { return }
+        guard let surface = activeSurface, let window = surface.window else { return }
         let open = anyOverlayOpen
+        // 엣지 기록(defer)은 webPanels 유무와 무관하게 항상 한다 — 모달이 열린 채 마지막 web 패널이 파괴돼도
+        // lastOverlayOpen이 갱신되게 해, 다음에 web 패널이 다시 생겼을 때 stale 엣지로 전이가 stuck되지 않는다.
         defer { surface.lastOverlayOpen = open }
+        guard !surface.webPanels.isEmpty else { surface.stashedWebFocusSurfaceId = nil; return } // 패널 없으면 stale stash 정리
         guard open != surface.lastOverlayOpen else { return } // 엣지에서만
         if open {
             // 모달이 열렸다 — 포커스된 web Term이 있으면 터미널 뷰로 전이(모달 입력·IME preedit가 터미널로). 복원용 id 저장.

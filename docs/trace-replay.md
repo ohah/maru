@@ -72,6 +72,32 @@ event 4 shell.command-end surface=1 row=2 exit=0
 
 **아직 없는 것**(후속): GUI inspector(아래 "GUI inspector 설계 방향"), allowlist(`PATH`/`LANG` — 정책상 사용자 확인 선행).
 
+## 디버깅 워크플로: 세션 종료 트리거 판독
+
+"인터럽트(Ctrl+C)에 좌측 탭이 왜 사라졌나" 같은 **세션/pane 종료 원인**을 사후에 특정하는 표준 절차다. `process-exit`(검증된 자식 종료)와 `read-error`(reader I/O 오류 종료)를 별개 kind로 남기므로, 트레이스만 봐도 트리거가 구분된다.
+
+```bash
+# 1. 트레이스를 켜고 앱 실행(파일은 그 창의 모든 surface 이벤트를 surface_id 태그로 증분 기록)
+MARU_TRACE=/tmp/maru.trace mise run macos-app
+
+# 2. 재현: 좌측 탭 셸에서 claude 등을 실행하고 Ctrl+C 인터럽트를 평소처럼 반복(간헐 케이스 유도)
+# 3. 증상(탭 사라짐/pane 무응답) 재현 후 앱 종료(deinit이 최종 flush; 크래시여도 직전까지 디스크에 남음)
+
+# 4. 종료 이벤트만 추려 트리거 판독
+grep -E "read-error|process-exit" /tmp/maru.trace
+```
+
+판독:
+
+| 인터럽트 근처에 나타난 이벤트 | 트리거 해석 |
+| --- | --- |
+| `read-error surface=<s> err=WriteFailed` | write EIO = slave fd 사라짐 = **자식이 실제로 죽음**(이 경우 `reapIfExited`가 죽음을 확인하면 `.exited`로 승격돼야 정상) |
+| `read-error surface=<s> err=PollFailed` 등 | POLLNVAL 등 = fd 레이스 = **자식은 살아있는데 PTY 연결만 깨짐**(미검증 reader 오류 — `terminationClosesWorkspace`가 탭을 안 닫고 유지) |
+| `process-exit surface=<s> code=<n>` | **검증된 셸 종료**. `code`로 원인 추적(0=정상, 130=SIGINT로 죽음 등) |
+| 인터럽트 근처에 둘 다 없음 | claude가 SIGINT만 잡고 계속 실행 — **아무 종료도 없음**(정상) |
+
+단일 출처: `read_error` 무검증 종료가 산 셸을 죽이고 탭을 닫던 루트커즈와 그 닫기 게이트는 [PTY 운영 모델](pty-operating-model.md)의 "read_error vs 검증된 exit — 워크스페이스 자동 닫기 게이트" 절.
+
 ## GUI inspector 설계 방향 (후속 — 미구현)
 
 캡처한 세션을 사람이 **넘겨보며 각 순간의 화면을 보는** 뷰어다(트레이드오프 논의 결과 확정된 방향).

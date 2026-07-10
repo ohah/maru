@@ -205,7 +205,7 @@ pub const SurfaceRuntime = struct {
 - `RuntimePtyEvent`는 `surface_id`를 직접 들고 있지 않다. event의 `pty_id`로 attach 매핑을 거꾸로 조회해 대상 surface를 찾는다. 매핑에 없는 `pty_id`면 `UnknownPty`다.
 - `output`은 해당 surface의 `TerminalCore.write`로 들어간다.
 - `exited`는 surface metadata와 artifact에 반영한다. 이 event를 trace로 남길 때의 이름은 `process-exit`이며, 둘은 같은 사건의 두 이름이다(대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절).
-- `read_error`는 `RuntimePtyEvent`에서만 쓰는 runtime 오류 event다. 실패 artifact에 남기고, 환경 의존적 실패라 trace에는 기록하지 않는다.
+- `read_error`는 reader I/O 오류 종료 event다. surface를 `.exited`로 latch(dead adapter로의 input/resize 라우팅 거부)하고, trace에는 `process-exit`(검증된 자식 종료)과 **별개 kind인 `read-error`**로 `err=<errno 이름>`(`@errorName`)와 함께 남긴다 — 세션 종료 트리거가 검증된 exit인지 미검증 reader 오류인지 트레이스로 구분하기 위함(대응표는 [Facade 계약](facade-contracts.md)의 `Trace/Event` 절, 진단 워크플로는 [Trace와 Replay](trace-replay.md)의 "디버깅 워크플로: 세션 종료 트리거 판독").
 
 `RuntimeEventPump.applyQueuedEvent`:
 

@@ -90,6 +90,16 @@ pub const WebSurfaceTransition = struct {
     seam_edges: u8 = 0,
 };
 
+/// Phase 7e-1a: browser(비신뢰) 웹 패널의 WKWebView nav 상태 스냅샷(per-surface). Swift KVO(MaruWebPanelView)가
+/// url·canGoBack·canGoForward 변화를 관측해 `setWebNavState`로 upsert하고, 7e-1b 주소창이 `webNavState`로 읽는다
+/// (소비는 다음 슬라이스 — 이 슬라이스는 저장·왕복 검증까지). `url`은 gpa 소유(setWebNavState가 dup, 교체·prune·
+/// deinit이 free). 정책·저장은 Zig, 관측·marshaling만 Swift(L4 어댑터).
+pub const WebNavState = struct {
+    can_go_back: bool,
+    can_go_forward: bool,
+    url: []u8, // gpa 소유(빈 문자열이면 len 0)
+};
+
 // 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
 // 멀티 창/quick 세션이 같은 wall-clock 기준으로 blink/fade/poll/sync timeout을 계산하게 한다.
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
@@ -99,7 +109,12 @@ pub const WebSurfaceTransition = struct {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 103;
+pub const abi_version: u32 = 104;
+// 104: Phase 7e-1a — browser 웹 패널 nav 상태 파이프라인. maru_macos_app_session_set_web_nav_state(surface_id,
+// can_go_back, can_go_forward, url) + maru_macos_app_session_web_nav_url_at(surface_id, out, cap) 두 export 추가.
+// Swift KVO가 WKWebView의 url·canGoBack·canGoForward를 관측해 per-surface(surface_id → WebNavState)로 Zig에 저장하고,
+// collectWebSurfaces가 매 tick 활성 탭 web surface 집합에 없는 nav 상태 키를 prune(close/move stale url 누수 방지).
+// 저장·정책은 Zig, 관측·marshaling만 Swift. 소비(주소창 렌더)는 7e-1b. 끝에 export 2개 추가 — 구조체 offset·인자 순서 불변.
 // 103: 웹 패널 divider grab 분리 — WebSurfaceTransitionAbi에 seam_edges(u32, panel_kind 뒤 pad 자리 → struct size 불변)
 // 추가. Zig가 각 web 본문 rect의 divider 맞닿는 가장자리(L=1·R=2·B=4)를 실어, Swift hitTest가 그 가장자리 근처 클릭/hover를
 // 통과시켜 아래 터미널 뷰의 divider 드래그·resize 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭 분리 — [4e review 0] 후속).
@@ -1760,6 +1775,11 @@ pub const AppSession = struct {
     // 들고(다음 tick clearRetainingCapacity로 재사용), web_leaf_rects_scratch는 collectWebSurfaces 내부 leaf-rect 임시.
     web_cur_scratch: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty,
     web_leaf_rects_scratch: std.ArrayList(PaneTree.LeafRect) = .empty,
+    // Phase 7e-1a: browser 웹 패널 nav 상태(surface_id → WebNavState). Swift KVO가 setWebNavState로 upsert하고,
+    // collectWebSurfaces가 매 tick 활성 탭 web surface 집합에 없는 키를 prune(surface 닫힘/이동 시 stale url 누수 방지),
+    // 7e-1b 주소창이 webNavState로 읽는다. url은 gpa 소유(dup) — deinit이 모든 url + 맵을 해제한다. `.empty` 기본
+    // 초기화라 init(self.* = .{...}) 경로가 자동으로 세운다(별도 대입 불요).
+    web_nav_states: std.AutoHashMapUnmanaged(u64, WebNavState) = .empty,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경·바·그룹 색 프리셋 + 그룹 묶기/풀기 = ctx_menu_count)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
@@ -7211,6 +7231,43 @@ pub const AppSession = struct {
                 });
             }
         }
+        // Phase 7e-1a: 이번 tick 활성 탭 web surface 집합(out)에 없는 nav 상태 키를 제거한다 — surface 닫힘/이동/비활성
+        // 탭 이동 시 소유 url 메모리가 세션 끝까지 새지 않게(id는 앱 전역 비재사용이라 stale 오인은 없으나 소유 자원은
+        // 즉시 회수). 흔한 경우 stale 0이라 바깥 while은 1회(스캔서 못 찾으면 break). fetchRemove로 iterator 무효화 없이
+        // 한 건씩 지운다(스캔→break→제거→재스캔). web surface·nav 상태 수는 소수라 O(n·m) 비용 무해.
+        while (self.web_nav_states.count() > 0) {
+            var stale: ?u64 = null;
+            var it = self.web_nav_states.keyIterator();
+            scan: while (it.next()) |key_ptr| {
+                const sid = key_ptr.*;
+                for (out.items) |s| {
+                    if (s.surface_id == sid) continue :scan; // 이번 tick 존재 → 유지
+                }
+                stale = sid; // out에 없음 → 제거 대상
+                break :scan;
+            }
+            const sid = stale orelse break;
+            if (self.web_nav_states.fetchRemove(sid)) |kv| self.allocator.free(kv.value.url);
+        }
+    }
+
+    /// Phase 7e-1a: browser 웹 패널의 WKWebView nav 상태를 per-surface로 upsert한다(Swift KVO → set_web_nav_state ABI).
+    /// 기존 엔트리가 있으면 옛 url을 free하고 새 url을 dup해 교체한다. url dup 또는 맵 성장이 OOM이면 조용히 무시한다
+    /// (nav 상태는 best-effort 표시용 — 실패해도 옛 상태 유지, 크래시 없음). 저장·정책은 Zig 단일 출처.
+    pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can_go_forward: bool, url: []const u8) void {
+        const dup = self.allocator.dupe(u8, url) catch return; // OOM: 상태 미갱신(조용히 무시)
+        const gop = self.web_nav_states.getOrPut(self.allocator, surface_id) catch {
+            self.allocator.free(dup); // 맵 성장 OOM: dup 회수 후 미갱신
+            return;
+        };
+        if (gop.found_existing) self.allocator.free(gop.value_ptr.url); // 옛 url 해제 후 교체
+        gop.value_ptr.* = .{ .can_go_back = can_go_back, .can_go_forward = can_go_forward, .url = dup };
+    }
+
+    /// Phase 7e-1a: surface_id의 저장된 nav 상태(없으면 null). 반환 url 슬라이스는 맵 소유로 다음 mutation까지 유효
+    /// (ABI getter가 즉시 out 버퍼로 복사). 7e-1b 주소창 소비.
+    pub fn webNavState(self: *AppSession, surface_id: u64) ?WebNavState {
+        return self.web_nav_states.get(surface_id);
     }
 
     /// 4a `surfaceDiff` 결과를 self.web_surface_transitions batch로 marshaling한다(§6 전이 열거). created는 visible을
@@ -18416,6 +18473,11 @@ pub const AppSession = struct {
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
         self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
         self.web_leaf_rects_scratch.deinit(self.allocator); // Phase 4e: web leaf-rect 영속 scratch
+        // Phase 7e-1a: browser 웹 패널 nav 상태 — 각 엔트리의 소유 url을 free한 뒤 맵을 해제한다(prune이 살아 있는
+        // 동안 stale을 지우므로 여기 남은 건 세션 종료 시점의 활성 nav 상태들뿐).
+        var nav_it = self.web_nav_states.valueIterator();
+        while (nav_it.next()) |v| self.allocator.free(v.url);
+        self.web_nav_states.deinit(self.allocator);
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
@@ -25855,6 +25917,34 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
 // M0a SurfaceIdAllocator — surface_id는 앱 인스턴스 전역 opaque u64로 발급되며, 서로 다른 창(AppSession)이
 // 같은 allocator 인스턴스를 공유한다(docs/window-surface-mobility.md §8). per-session next_id로 발급하면 두 창의
 // 첫 surface가 둘 다 1이라 충돌하는데(멀티 창 MARU_PANE_ID 충돌 포함), 이 테스트가 그 회귀를 잡는다.
+test "setWebNavState: upsert + 옛 url free + 조회 + 없는 surface null (7e-1a)" {
+    // setWebNavState/webNavState는 self.allocator·self.web_nav_states만 만지므로 minimal init로 충분하다
+    // (undefined session의 나머지 필드는 안 읽음 — [[devsession-undefined-test-field-trap]] 범위 밖). testing.allocator가
+    // upsert의 옛 url free 누락(누수)·이중 free(UAF)를 검출한다.
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.web_nav_states = .empty;
+    defer {
+        var it = session.web_nav_states.valueIterator();
+        while (it.next()) |v| session.allocator.free(v.url);
+        session.web_nav_states.deinit(session.allocator);
+    }
+    session.setWebNavState(42, true, false, "https://a/");
+    try std.testing.expectEqualStrings("https://a/", session.webNavState(42).?.url);
+    try std.testing.expect(session.webNavState(42).?.can_go_back);
+    try std.testing.expect(!session.webNavState(42).?.can_go_forward);
+    // upsert: 옛 url을 free하고 새 url(다른 길이)로 교체 — 누수/UAF 없어야 통과.
+    session.setWebNavState(42, false, true, "https://b/longer");
+    try std.testing.expectEqualStrings("https://b/longer", session.webNavState(42).?.url);
+    try std.testing.expect(session.webNavState(42).?.can_go_forward);
+    try std.testing.expect(!session.webNavState(42).?.can_go_back);
+    // 빈 url(url_ptr null ABI 경로) 저장.
+    session.setWebNavState(7, false, false, "");
+    try std.testing.expectEqualStrings("", session.webNavState(7).?.url);
+    // 없는 surface → null.
+    try std.testing.expect(session.webNavState(999) == null);
+}
+
 test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 공유해 충돌하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
     const allocator = std.testing.allocator;

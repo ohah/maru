@@ -1259,6 +1259,41 @@ pub export fn maru_macos_app_session_web_surface_transition_at(
     return @intFromEnum(Status.ok);
 }
 
+// Phase 7e-1a: browser(비신뢰) 웹 패널의 WKWebView nav 상태(현재 url·canGoBack·canGoForward)를 per-surface로 저장한다.
+// Swift KVO(MaruWebPanelView)가 url/canGoBack/canGoForward 변화를 관측해 dirty면 tick drain에서 이걸 호출한다 —
+// 관측·marshaling은 Swift(L4 어댑터), 저장·정책은 Zig(setWebNavState). can_go_back/forward는 i32 bool(0/1), url_ptr가
+// null이면 빈 url. session null=null_out. 소비(주소창 렌더)는 7e-1b. provide_picked_file과 같은 Swift→Zig setter 스타일.
+pub export fn maru_macos_app_session_set_web_nav_state(
+    session: ?*AppSession,
+    surface_id: u64,
+    can_go_back: i32,
+    can_go_forward: i32,
+    url_ptr: ?[*]const u8,
+    url_len: usize,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const url: []const u8 = if (url_ptr) |p| p[0..url_len] else &.{};
+    app_session.setWebNavState(surface_id, can_go_back != 0, can_go_forward != 0, url);
+    return @intFromEnum(Status.ok);
+}
+
+// surface_id에 저장된 nav url을 out에 복사하고 그 길이를 돌려준다(스모크가 Swift KVO → set_web_nav_state → 저장 →
+// getter 왕복을 값으로 검증). 엔트리 없으면 0(빈 url 저장도 0), session/out이 null이면 -1, out_cap 부족이면 -2.
+// url_at/notification_title_out과 같은 per-surface borrowed-string out-ptr 패턴(단 값 복사 — 여기선 out 버퍼로).
+pub export fn maru_macos_app_session_web_nav_url_at(
+    session: ?*AppSession,
+    surface_id: u64,
+    out_ptr: ?[*]u8,
+    out_cap: usize,
+) i64 {
+    const app_session = session orelse return -1;
+    const out = out_ptr orelse return -1;
+    const state = app_session.webNavState(surface_id) orelse return 0;
+    if (state.url.len > out_cap) return -2;
+    @memcpy(out[0..state.url.len], state.url);
+    return @intCast(state.url.len);
+}
+
 // ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
 //
 // 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root

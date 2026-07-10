@@ -793,6 +793,18 @@ final class MaruWebPanelView: NSView {
     // 실콘텐츠에선 seam-only + 정확 허용폭으로 좁힐 여지. 지금은 넓게 잡아 grab 편의를 우선.)
     static let dividerGrabBand: CGFloat = 10
 
+    // Phase 7e-1a: browser(비신뢰, panelKind==1) 패널의 WKWebView nav 상태 — block-based KVO 관측값. url/canGoBack/
+    // canGoForward 변화 시 여기 저장 + navStateDirty=true. tick drain(drainWebSurfaceTransition)이 dirty면 Zig
+    // (set_web_nav_state)로 push 후 clear한다(핫패스 — dirty만 push). 7e-1b 주소창이 소비. 신뢰 패널은 주소창이
+    // 없어 관측하지 않는다(navStateDirty는 늘 false 유지).
+    var navUrl: String?
+    var navCanGoBack = false
+    var navCanGoForward = false
+    var navStateDirty = false
+    // KVO 관측 토큰 — deinit(뷰 dealloc)까지 프로퍼티로 붙잡아 관측을 유지한다(NSKeyValueObservation은 해제 시
+    // 자동 invalidate). browser 패널만 등록한다.
+    private var navObservers: [NSKeyValueObservation] = []
+
     init(frame frameRect: NSRect, surfaceId: UInt64, panelKind: UInt32) {
         self.surfaceId = surfaceId
         self.panelKind = panelKind
@@ -837,6 +849,34 @@ final class MaruWebPanelView: NSView {
             webView.loadHTMLString(MaruAppSchemeHandler.errorPageHTML(""), baseURL: nil)
         }
         addSubview(webView)
+        // Phase 7e-1a: browser(비신뢰) 패널만 nav 상태를 관측한다(신뢰 패널은 주소창이 없음). WKWebView의 url·
+        // canGoBack·canGoForward는 KVO 준수 프로퍼티라 block-based KVO로 변화를 잡아 패널 프로퍼티에 저장 + dirty를
+        // 세운다(tick drain이 Zig로 push). 관측 자체가 어댑터 책임(정책·저장은 Zig).
+        // KVO changeHandler는 @Sendable이라 main-actor 상태를 직접 못 건드린다. WKWebView의 이 세 프로퍼티는 WebKit
+        // 네비게이션(메인 스레드)에서만 바뀌므로 assumeIsolated로 동기 진입한다(NSColorSampler/애니메이션 콜백과 같은
+        // 코드베이스 공통 패턴). wv도 @MainActor라 assumeIsolated 안에서 읽는다.
+        if panelKind == 1 {
+            navObservers = [
+                webView.observe(\.url, options: [.new]) { [weak self] wv, _ in
+                    MainActor.assumeIsolated {
+                        self?.navUrl = wv.url?.absoluteString
+                        self?.navStateDirty = true
+                    }
+                },
+                webView.observe(\.canGoBack, options: [.new]) { [weak self] wv, _ in
+                    MainActor.assumeIsolated {
+                        self?.navCanGoBack = wv.canGoBack
+                        self?.navStateDirty = true
+                    }
+                },
+                webView.observe(\.canGoForward, options: [.new]) { [weak self] wv, _ in
+                    MainActor.assumeIsolated {
+                        self?.navCanGoForward = wv.canGoForward
+                        self?.navStateDirty = true
+                    }
+                },
+            ]
+        }
     }
 
     @available(*, unavailable)
@@ -3013,6 +3053,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             default: break // None — 무동작
             }
         }
+        // Phase 7e-1a: dirty한 browser 패널의 nav 상태(KVO 관측값)를 Zig에 push한다 — 핫패스라 navStateDirty만 push하고
+        // 전량 push는 하지 않는다(변화 없는 tick은 FFI 0). url은 UTF-8 바이트로 marshaling(빈 문자열이면 baseAddress=nil,
+        // len 0 → Zig가 빈 url로 저장). 저장 후 dirty를 내린다. 저장·prune·정책은 Zig(setWebNavState/collectWebSurfaces).
+        for panel in surface.webPanels.values where panel.navStateDirty {
+            let urlBytes = Array((panel.navUrl ?? "").utf8)
+            urlBytes.withUnsafeBufferPointer { buf in
+                _ = maru_macos_app_session_set_web_nav_state(
+                    session,
+                    panel.surfaceId,
+                    panel.navCanGoBack ? 1 : 0,
+                    panel.navCanGoForward ? 1 : 0,
+                    buf.baseAddress,
+                    buf.count
+                )
+            }
+            panel.navStateDirty = false
+        }
     }
 
     // 세팅 window.background-image 행 활성(input 타이핑 대신 파일 선택창 — 사용자 요청): Zig가 file_pick_pending을 세우면
@@ -4318,6 +4375,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 5c-2c 트러스트 분기 단언: 신뢰(markdown, panelKind==0) 패널만 maru-app:// 스킴 핸들러가 config에 등록돼야
             // 한다. 비신뢰(browser)면 미등록(nil). MARU_WEB_PANEL_MARKDOWN=1이면 markdown 패널이라 registered=true 기대.
             let schemeRegistered = wp?.webView.configuration.urlSchemeHandler(forURLScheme: MaruAppSchemeHandler.scheme) != nil
+            // Phase 7e-1a: browser 패널 nav 상태 왕복 검증 — Swift KVO 관측값(navUrl)과 Zig 저장 getter 결과가
+            // 5d fixture의 data: URL로 채워지는지(url KVO → tick push(set_web_nav_state) → Zig 저장 → web_nav_url_at
+            // 왕복). 세션 핸들=activeSurface.appSession, out 버퍼 4096. len>0이면 문자열, 아니면 "pending"(아직 push 전).
+            var navUrlZig = "pending"
+            if let wp, let session = activeSurface?.appSession {
+                var buf = [UInt8](repeating: 0, count: 4096)
+                let n = buf.withUnsafeMutableBufferPointer { p in
+                    maru_macos_app_session_web_nav_url_at(session, wp.surfaceId, p.baseAddress, p.count)
+                }
+                if n > 0 { navUrlZig = String(decoding: buf[0..<Int(n)], as: UTF8.self) }
+            }
             summary += """
             web_panel_present=\(wp != nil)
             web_panel_count=\(panels.count)
@@ -4327,6 +4395,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_panel_kind=\(wp?.panelKind ?? 99)
             web_panel_scheme_handler_registered=\(schemeRegistered)
             web_panel_data_store_persistent=\(wp?.webView.configuration.websiteDataStore.isPersistent ?? true)
+            web_nav_url_swift=\(wp?.navUrl ?? "pending")
+            web_nav_url_zig=\(navUrlZig)
             bridge_world_registered=\(wp?.bridgeWorld != nil)
             bridge_isolated_probe=\(wp?.bridgeIsolatedProbe ?? "pending")
             bridge_pageworld_probe=\(wp?.bridgePageWorldProbe ?? "pending")

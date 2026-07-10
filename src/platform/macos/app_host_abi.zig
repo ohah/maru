@@ -1556,6 +1556,9 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostGlobalHotkey), @alignOf(session_mod.GlobalHotkey));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostFrameSummary), @sizeOf(AppFrameSummary));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostFrameSummary), @alignOf(AppFrameSummary));
+    // v102(4e-5): web_surfaces_present는 quit_decision 뒤 4B tail padding을 채워 @sizeOf가 176으로 불변이라 필드 존재를
+    // 못 강제한다 — offset을 C↔Zig 대조해 패딩 자리에 정확히 들어갔는지(위치 정합) 고정한다(GpuQuad 동일-폭 필드 선례).
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostFrameSummary, "web_surfaces_present"), @offsetOf(AppFrameSummary, "web_surfaces_present"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostMetalCell), @sizeOf(AppMetalCell));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostMetalCell), @alignOf(AppMetalCell));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostMetalRasterUpload), @sizeOf(AppMetalRasterUpload));
@@ -1650,7 +1653,7 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 4), @alignOf(KeyEvent));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(ResizeEvent));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(AppSessionConfig)); // 10 u32(abi/cols/rows/queue/cmd/chrome_minimal/minimal_tabs + width_px/height_px/scale_milli)
-    try std.testing.expectEqual(@as(usize, 176), @sizeOf(AppFrameSummary)); // +quit_decision(u32) + 8 정렬 패딩(168→176, ABI v90)
+    try std.testing.expectEqual(@as(usize, 176), @sizeOf(AppFrameSummary)); // quit_decision(u32,v90)+web_surfaces_present(u32,v102)가 168→176 정렬 패딩을 채워 176 불변
     try std.testing.expectEqual(@as(usize, 8), @alignOf(AppFrameSummary));
 }
 test "macOS app exported session API reports null outputs as ABI errors" {

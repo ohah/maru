@@ -144,6 +144,15 @@ pub fn SplitTree(comptime Leaf: type) type {
             };
         }
 
+        /// 트리의 어떤 leaf라도 pred를 만족하면 true(alloc-free 단축 평가). web Term 존재 등 per-tick 신호에 쓴다
+        /// (leafCount의 재귀 패턴 그대로 — leaf를 pointer-identity로만 넘기고 pred가 해석한다).
+        pub fn anyLeaf(node: Node, comptime pred: fn (Leaf) bool) bool {
+            return switch (node) {
+                .leaf => |l| pred(l),
+                .split => |sp| anyLeaf(sp.a, pred) or anyLeaf(sp.b, pred),
+            };
+        }
+
         /// 트리에 주어진 split 노드가 들어 있는지(포인터 식별). 트리를 통째 해제(deinit)하기 전에 호출자가
         /// 라이브 split 포인터(divider_drag 등)가 이 트리 소속인지 표적 판정하는 데 쓴다 — 소속이면 그 포인터를
         /// 비워야 dangling을 막는다. deref 없이 == 비교만 한다.
@@ -235,6 +244,13 @@ fn testLeaf(allocator: std.mem.Allocator, v: u32) !*u32 {
     return p;
 }
 
+fn leafIsTwo(l: *u32) bool {
+    return l.* == 2;
+}
+fn leafIsNine(l: *u32) bool {
+    return l.* == 9;
+}
+
 test "layout: single leaf fills the whole rect" {
     const allocator = std.testing.allocator;
     const a = try testLeaf(allocator, 1);
@@ -304,6 +320,24 @@ test "layout: nested split recurses into sub-rects in tree order" {
     try std.testing.expectEqual(c, out.items[2].leaf);
     try std.testing.expectEqual(Rect{ .x = 100, .y = 50, .w = 100, .h = 50 }, out.items[2].rect); // c 우하
     try std.testing.expectEqual(@as(usize, 3), TestTree.leafCount(.{ .split = &root }));
+}
+
+test "anyLeaf short-circuits when any leaf matches the predicate" {
+    const allocator = std.testing.allocator;
+    const a = try testLeaf(allocator, 1);
+    defer allocator.destroy(a);
+    const b = try testLeaf(allocator, 2);
+    defer allocator.destroy(b);
+
+    // 단일 leaf: pred가 그 leaf에만 걸린다.
+    try std.testing.expect(TestTree.anyLeaf(.{ .leaf = b }, leafIsTwo)); // b.*==2 → true
+    try std.testing.expect(!TestTree.anyLeaf(.{ .leaf = a }, leafIsTwo)); // a.*==1 → false
+    try std.testing.expect(!TestTree.anyLeaf(.{ .leaf = b }, leafIsNine)); // 아무 leaf도 9 아님 → false
+
+    // split 트리: 자식 어느 쪽이든 매치하면 true, 아무도 없으면 false.
+    var split = TestTree.Split{ .direction = .horizontal, .ratio = 0.5, .a = .{ .leaf = a }, .b = .{ .leaf = b } };
+    try std.testing.expect(TestTree.anyLeaf(.{ .split = &split }, leafIsTwo)); // b가 매치
+    try std.testing.expect(!TestTree.anyLeaf(.{ .split = &split }, leafIsNine)); // 둘 다 미매치
 }
 
 test "layoutDividers: emits a divider seg per split with boundary pos and parent bounds" {

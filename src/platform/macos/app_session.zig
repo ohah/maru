@@ -96,7 +96,10 @@ pub const WebSurfaceTransition = struct {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 101;
+pub const abi_version: u32 = 102;
+// 102: Phase 4e-5 — 웹 브라우저 탭 생성 command화(new_web_tab). FrameSummary에 web_surfaces_present(u32) 추가 —
+// 살아 있는 web Term 존재 신호로 Swift drainWebSurfaceTransition 게이트가 env 훅(MARU_WEB_PANEL) 없이 command 생성
+// web surface도 그린다. quit_decision 뒤 4B tail padding을 채워 struct @sizeOf는 176으로 불변(offset 대조로 정합 고정).
 // 101: Phase 4e-3 — web surface 전이를 **단일 op → batch**로 승격. maru_macos_app_session_web_surface_transition(v99
 // 단일 out) 제거하고 maru_macos_app_session_web_surface_transitions_count(u32) + maru_macos_app_session_web_surface_
 // transition_at(index, out) 두 export로 대체(command_catalog식 count+at). Zig가 활성 워크스페이스 탭 pane 트리를 walk해
@@ -816,6 +819,11 @@ pub const FrameSummary = extern struct {
     // 이 값에 latch되면(다음 tick) Swift가 NSApp.reply(toApplicationShouldTerminate:)로 종료를 진행/취소한다. tick
     // epilogue에서 self.quit_decision을 실어 보낸 직후 .none으로 리셋해 한 번만 전달한다(ended latch와 같은 패턴).
     quit_decision: u32 = 0,
+    // Phase 4e-5: 활성 워크스페이스 탭에 web Term이 하나라도 있으면 1(activeTabHasWebTerm — 매 tick 트리에서 계산, 유지
+    // 카운터 아님이라 창 간 이동에도 드리프트 없음). Swift drainWebSurfaceTransition 게이트가 env 훅(MARU_WEB_PANEL) 없이도
+    // command로 만든 web surface를 그리게 하는 "존재 신호"다(§10 4e-5). tick epilogue가 quit_decision 옆에서 매 tick 채운다.
+    // quit_decision 뒤 4B tail padding 자리라 struct @sizeOf는 176으로 불변(ABI v102).
+    web_surfaces_present: u32 = 0,
 };
 
 const NormalizedConfig = struct {
@@ -3514,6 +3522,19 @@ pub const AppSession = struct {
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
+    }
+
+    /// 활성 pane에 새 **web(브라우저) Term**을 띄우고 그 탭으로 포커스한다(command `new_web_tab`·File 메뉴 — 4e-5).
+    /// `newTermInActivePane`을 미러링하되 PTY spawn/셸 없이 `createWebTerm(.browser)`로 sentinel surface를 만든다
+    /// (WKWebView는 computeWebSurfaceTransitions가 walk해 Swift가 붙인다, §6). maybeDebugOpenWebPanel(env 훅)과 같은
+    /// 3단계(create→append→focus)지만 트리거가 사용자다. alloc/append 실패는 errdefer로 원복(pane 불변).
+    fn newWebTermInActivePane(self: *AppSession) !void {
+        const pane = self.activePane();
+        const term = try self.createWebTerm(.browser);
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
+        self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)
+        self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)
     }
 
     /// 키보드 pane 이동 — 활성 panel에서 direction 방향의 인접 panel로 포커스를 옮긴다(있으면). split이 없거나
@@ -6435,6 +6456,11 @@ pub const AppSession = struct {
             .new_term => if (!self.tabsBlocked()) {
                 self.newTermInActivePane() catch {};
             },
+            // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 대체). tabsBlocked(chrome 최소)면 막고,
+            // 생성 실패는 무시(newWebTermInActivePane이 errdefer로 원복).
+            .new_web_tab => if (!self.tabsBlocked()) {
+                self.newWebTermInActivePane() catch {};
+            },
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
             .close_term => self.requestClose(.term_or_pane),
             .next_term => self.focusTermRelative(1),
@@ -7097,6 +7123,21 @@ pub const AppSession = struct {
     /// pane rect가 사는 그 좌표 공간의 높이).
     fn webFramePt(self: *const AppSession, rect_px: maru.session.SplitRect) web_panel_layout.RectPt {
         return web_panel_layout.pxTopLeftToPtBottomLeft(rect_px, self.backing_height_px, self.scale_milli);
+    }
+
+    /// 이 pane(leaf)에 web Term이 하나라도 있는가(anyLeaf pred — pointer-identity leaf를 여기서 해석). alloc-free.
+    fn paneHasWebTerm(pane: *Pane) bool {
+        for (pane.terms.items) |term| if (term.kind == .web) return true;
+        return false;
+    }
+
+    /// Phase 4e-5: 활성 워크스페이스 탭에 web Term이 하나라도 있으면 true(FrameSummary.web_surfaces_present 원천). **유지
+    /// 카운터가 아니라 매 tick 활성 탭 트리에서 계산**한 신호라 `collectWebSurfaces`(활성 탭만 walk)와 **정확히 같은 범위** —
+    /// 창 간 이동(moveWorkspaceToSession=detach/adopt 포인터 relocate, destroy/create 없음)·재부모화·닫기 어느 경로에도
+    /// 트리가 단일 출처로 자동 정합한다(옛 유지 카운터는 이동에서 원본 stuck-high·대상 stuck-0으로 드리프트했다). alloc-free 재귀.
+    fn activeTabHasWebTerm(self: *AppSession) bool {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+        return PaneTree.anyLeaf(self.activeTab().tree, paneHasWebTerm);
     }
 
     /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
@@ -14441,6 +14482,7 @@ pub const AppSession = struct {
             );
             self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
             self.quit_decision = .none;
+            self.last_summary.web_surfaces_present = if (self.activeTabHasWebTerm()) 1 else 0; // 4e-5(0탭이면 activeTabHasWebTerm=false → 0)
             return self.last_summary;
         }
         if (!self.update_started) { // 첫 tick에서 인앱 새 버전 안내 백그라운드 체크를 1회 띄운다(config로 끔)
@@ -15276,6 +15318,10 @@ pub const AppSession = struct {
         // last_summary를 덮어쓰므로 여기 epilogue가 단일 출처 — 모든 tick 경로(render/tick/idle)를 거친다.
         self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
         self.quit_decision = .none;
+        // 4e-5: 활성 탭 web Term 존재 신호(Swift drain 게이트용). 매 tick 활성 탭 트리에서 계산(유지 카운터 아님 —
+        // 창 간 이동 드리프트 없음, collectWebSurfaces와 같은 활성-탭 범위). writeSummaryFromState가 이 필드를 안
+        // 건드리므로(last_summary는 매 tick 덮어쓰기가 아니라 필드별 갱신) epilogue가 quit_decision과 같은 단일 출처로 실는다.
+        self.last_summary.web_surfaces_present = if (self.activeTabHasWebTerm()) 1 else 0;
         return self.last_summary;
     }
 
@@ -30806,6 +30852,110 @@ test "web surface transitions: per-Term batch carries visibility and advances pr
     try std.testing.expectEqual(WebSurfaceOp.none, session.webSurfaceTransitionAt(5).op);
 }
 
+// 4e-5: new_web_tab dispatch가 활성 pane에 web Term을 append+활성화(4e-1/2/3 경로 재사용)하고, tick epilogue가
+// FrameSummary.web_surfaces_present를 세우는지 + minimal(tabsBlocked)에선 무동작인지. 실 init/spawn/tick 경로라 게이트.
+test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces_present 신호 (minimal=no-op)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // ① full 세션(tabsBlocked=false): new_web_tab이 web Term을 append+활성화한다.
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+        const pane = session.activePane();
+        const before = pane.terms.items.len; // 첫 터미널 Term 하나
+        try std.testing.expect(!session.activeTabHasWebTerm());
+
+        session.dispatchAppAction(.new_web_tab);
+
+        // 활성 pane의 마지막 Term이 web이고 활성(active_term)인지.
+        try std.testing.expectEqual(before + 1, pane.terms.items.len);
+        const last = pane.terms.items[pane.terms.items.len - 1];
+        try std.testing.expect(last.kind == .web);
+        try std.testing.expectEqual(pane.terms.items.len - 1, pane.active_term);
+        try std.testing.expectEqual(web_panel_layout.PanelKind.browser, last.web_panel_kind);
+        try std.testing.expect(session.activeTabHasWebTerm());
+
+        // tick epilogue가 web_surfaces_present=1을 실는다(비-vacuous — 대입 없으면 기본 0). 활성 web Term은 4e-2가 렌더 skip → 크래시 0.
+        const summary = try session.tick();
+        try std.testing.expectEqual(@as(u32, 1), summary.web_surfaces_present);
+    }
+
+    // ② minimal 스크래치(chrome_minimal=1·minimal_tabs=0 → tabsBlocked): new_web_tab이 무동작(new_term/new_tab과 동일 가드).
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .chrome_minimal = 1,
+            .minimal_tabs = 0,
+        });
+        defer session.deinit();
+        try std.testing.expect(session.tabsBlocked());
+        session.dispatchAppAction(.new_web_tab);
+        try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len); // web Term 안 생김
+        try std.testing.expect(!session.activeTabHasWebTerm());
+    }
+}
+
+// 4e-5: web_surfaces_present는 **유지 카운터가 아니라 활성 워크스페이스 탭 트리에서 매 tick 파생**된 신호다(activeTabHasWebTerm).
+// 그래서 web Term이 **비활성 탭**으로 가면(다른 워크스페이스로 전환) 신호가 off된다 — 유지 카운터로는 불가능했던, collectWebSurfaces와
+// 같은 활성-탭 범위의 핵심(창 간 이동에서 카운터가 드리프트하던 버그를 이 범위 정합이 근본 해소). 실 init/spawn/tick 경로라 게이트.
+test "web_surfaces_present는 활성 탭 트리에서 파생된다(비활성 탭 web Term은 off — 유지 카운터 드리프트 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 처음(터미널만): 신호 off.
+    try std.testing.expect(!session.activeTabHasWebTerm());
+
+    // 활성 탭(워크스페이스 0)에 web Term 생성+활성화 → 신호 on, tick summary=1.
+    session.dispatchAppAction(.new_web_tab);
+    try std.testing.expect(session.activeTabHasWebTerm());
+    try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
+
+    // 터미널 전용 새 워크스페이스 탭을 만들어 그리로 전환(newTab이 새 탭을 활성으로) → web Term은 비활성 탭(0)에 있으니
+    // 신호 off(활성-탭 범위의 핵심 — 유지 카운터로는 여전히 1이었을 것). tick summary=0.
+    _ = try session.newTab();
+    try std.testing.expect(!session.activeTabHasWebTerm());
+    try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
+
+    // 다시 원래 탭(0)으로 전환 → web Term이 활성 탭에 돌아오니 신호 on. tick summary=1.
+    _ = session.switchTab(0);
+    try std.testing.expect(session.activeTabHasWebTerm());
+    try std.testing.expectEqual(@as(u32, 1), (try session.tick()).web_surfaces_present);
+
+    // 그 web Term을 닫으면(closeActiveTerm=terms에서 제거+destroyTerm+재바인딩 — 트리 신호가 정확히 반영되려면 트리에서도
+    // 빠져야 하므로 raw destroyTerm이 아닌 close 경로) 신호 off. tick summary=0.
+    session.closeActiveTerm(); // 활성 pane의 활성 Term(web)을 닫는다(pane에 terminal+web 2개라 동작).
+    try std.testing.expect(!session.activeTabHasWebTerm());
+    try std.testing.expectEqual(@as(u32, 0), (try session.tick()).web_surfaces_present);
+}
+
 // pane에 Term이 여럿이면 탭 바가 제목 탭들 + 활성 Term 하이라이트를 그리는지(PR-C2) — 실 init/spawn/tick이
 // 도는 macOS 경로라 게이트. ⌘T로 Term 2개를 만들고 tick이 바 배경 + 활성 탭 하이라이트 chrome을 내는지 본다.
 test "pane tab bar draws Term-title tabs with an active-Term highlight" {
@@ -36881,6 +37031,44 @@ test "M3d-2a-i moveWorkspaceToSession: cross-window 무재시작(동일 *LiveSur
     const dump = try slot_after.terminal.surface.core.dumpUtf8(allocator);
     defer allocator.free(dump);
     try std.testing.expect(std.mem.indexOf(u8, dump, "MOVE_MARK_42") != null);
+}
+
+// 4e-5(크래시 안전 + 신호 정합): web Term이 든 워크스페이스를 다른 창으로 옮겨도(moveWorkspaceToSession =
+// detachTabForMove/adoptTab 포인터 relocate, destroy/create 없음) 헤드리스에서 UB/누수/패닉이 없고, tree-derived
+// web_surfaces_present 신호가 **양 창 모두** 자동 정합하는지 — 옛 유지 카운터는 원본 stuck-high·대상 stuck-0으로
+// 드리프트해 이동한 web 패널이 대상 창에 안 떴다(이 test가 그 회귀의 근본 해소를 고정). 실제 WKWebView 재부모화·상태
+// 보존은 4e-4·GUI 범위 밖 — 여기선 트리 relocate가 안전하고 신호가 옳게 따라오는지만 본다.
+test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 activeTabHasWebTerm 정합(tree-derived, 카운터 드리프트 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    // src에 두 번째 워크스페이스(createTab이 활성으로) — 그 활성 pane에 web Term을 만든다(new_web_tab).
+    try addMoveTestWorkspace(src, "web-ws");
+    try std.testing.expectEqual(@as(usize, 2), src.tabs.items.len);
+    src.dispatchAppAction(.new_web_tab);
+    try std.testing.expect(src.activeTabHasWebTerm()); // 이동 전: src 활성 탭(1)에 web 신호 on
+
+    // 워크스페이스 1(web 포함)을 dst로 옮긴다 — 크래시/누수 없이 완료(testing.allocator가 누수 감시).
+    var buf: [8]u64 = undefined;
+    const outcome = try src.moveWorkspaceToSession(dst, 1, &buf);
+    try std.testing.expect(outcome.cross_window);
+    try std.testing.expectEqual(@as(usize, 1), src.tabs.items.len); // src에 첫(터미널) 워크스페이스 남음
+    try std.testing.expectEqual(@as(usize, 2), dst.tabs.items.len); // dst가 web 워크스페이스 흡수
+
+    // 대상(dst): adoptTab이 옮겨온 탭을 활성으로 세운다 → tree-derived 신호가 그 web Term을 본다(카운터로는 dst stuck-0였을 것).
+    try std.testing.expect(dst.activeTabHasWebTerm());
+    // 원본(src): web 워크스페이스가 떠났으니 남은 활성 탭엔 web 없음 → off(카운터로는 src stuck-high였을 것). 드리프트 없음.
+    try std.testing.expect(!src.activeTabHasWebTerm());
+
+    // tick 신호도 양 창 정합(epilogue가 각 세션 활성 탭 트리에서 파생).
+    try std.testing.expectEqual(@as(u32, 1), (try dst.tick()).web_surfaces_present);
+    try std.testing.expectEqual(@as(u32, 0), (try src.tick()).web_surfaces_present);
 }
 
 test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스페이스 이동 시 source_window_closed·ended_seen·0탭·deinit 무패닉" {

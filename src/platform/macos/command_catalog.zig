@@ -30,6 +30,8 @@ pub const Entry = struct {
 pub const entries = [_]Entry{
     .{ .action = .new_term, .key = "new_term", .title = "New Terminal" },
     .{ .action = .new_tab, .key = "new_tab", .title = "New Workspace" },
+    // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 MARU_WEB_PANEL 대체). 기본 키바인딩 없음(⌘T=new_term 선점 — 팔릿/메뉴 발견).
+    .{ .action = .new_web_tab, .key = "new_web_tab", .title = "New Browser Tab" },
     .{ .action = .close_term, .key = "close_term", .title = "Close Terminal" },
     .{ .action = .close_tab, .key = "close_tab", .title = "Close Workspace" },
     .{ .action = .next_term, .key = "next_term", .title = "Next Terminal" },

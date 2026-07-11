@@ -14,16 +14,17 @@
 //!      + 각 params 파서(navigate `{id,url}`·getUrl `{id}`·executeScript `{id,script}`) + result 직렬화
 //!      (navigate `{ok}`·getUrl `{url}`·executeScript `{result}`). W3C WebDriver 병렬 명령을 **자체 enum + DTO**로
 //!      정의해 내부 상태와 격리(§3 정신 — 내부 rename이 wire를 안 흔들게). `args`(executeScript)는 5d.
-//!   ② `dispatchBrowser`: 요청 한 줄 + 주입 snapshot + 주입 `caller_cap`(라이브 서버가 nonce→Capability resolve해
-//!      넘김, 1e) → 응답 한 줄. **정확한 보안 순서**(아래 §보안 불변식).
+//!   ② `dispatchBrowser`: 요청 한 줄 + 주입 snapshot + 주입 `caller_cap`(라이브 서버가 nonce→Capability lookup해
+//!      넘김, 1e) → `BrowserDispatch`(게이트 실패=`err` 응답 바이트 / 통과=`op` 실행 op). **정확한 보안 순서**(아래).
+//!      **5e**: 옛 skeleton(`internal_error "not implemented (5d)"`)을 **`BrowserOp` 반환**으로 교체 — 모든 게이트를
+//!      통과한 인가·유효 요청을 L4가 §5-async marshal → Swift `BrowserControl`이 WKWebView API 호출.
 //!   ③ authz(§8.3): `browser.*`→`ScopeClass.browser`(1e `methodRequiredScope`가 단일 출처). browser cap 없거나
-//!      deny면 **존재검사 이전에 균일 unauthorized**(oracle 방지).
+//!      deny면 **존재검사 이전에 균일 unauthorized**(oracle 방지). browser cap의 anchor는 target web surface(dispatchAuthenticated가 위임).
 //!
-//! **범위 밖(구현 금지 — 5b~5d)**: isolated `WKContentWorld` 브리지(`window.maru.*`, 5b), `maru-app://` 스킴+CSP
-//! (5c), 실 WKWebView API 호출(navigate=`load`/executeScript=`evaluateJavaScript`/…, 5d), main-loop marshal,
-//! 나머지 메서드(screenshot/back/forward/refresh/findElement/click/sendKeys/getCookies) 스키마·실행(5d). 5a는
-//! 모든 게이트를 통과한 뒤 **제어 코어 skeleton**이 `internal_error`("... not implemented (5d)")로 실행을 보류한다.
-//! 5d에서 이 지점을 `executeBrowser`로 교체해 main-loop로 marshal → Swift `BrowserControl`이 WKWebView API를 호출한다.
+//! **범위 밖(구현 금지 — 이 파일 밖)**: isolated `WKContentWorld` 브리지(5b)·`maru-app://` 스킴+CSP(5c)·실 WKWebView
+//! API 호출(navigate=`load`/executeScript=`evaluateJavaScript`, 5d, Swift `BrowserControl`)·**dispatchAuthenticated
+//! 라우팅 + L4 marshal + ABI(5e-2)**·나머지 메서드(screenshot/back/forward/…) 스키마·실행(5f). 이 파일은 `BrowserOp`
+//! 산출까지(순수 L2). op의 실 실행·응답 직렬화 배선은 L4(app_host_abi)가 소유한다.
 //!
 //! **보안 불변식(§8.3·§9.1 ②③ — 구현·주석 둘 다):**
 //!   - **authz(순서 4)는 존재검사(순서 7)보다 먼저**. `surface_id`가 monotonic u64라(§3) "존재하나 unauthorized"
@@ -64,15 +65,6 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "getUrl")) return .get_url;
     if (eq(rest, "executeScript")) return .execute_script;
     return null;
-}
-
-/// dispatch 실행 보류 메시지(§8·에러) 및 result 직렬화에서 쓰는 정규 wire 메서드 이름(BrowserMethod → "browser.*").
-fn browserMethodName(m: BrowserMethod) []const u8 {
-    return switch (m) {
-        .navigate => "browser.navigate",
-        .get_url => "browser.getUrl",
-        .execute_script => "browser.executeScript",
-    };
 }
 
 inline fn eq(a: []const u8, b: []const u8) bool {
@@ -148,9 +140,10 @@ pub fn parseExecuteScriptParams(params: ?std.json.Value) ParamError!ExecuteScrip
     return .{ .id = try idFromObj(obj), .script = try strFromObj(obj, "script") };
 }
 
-// ── result 직렬화(§9.1 ① — 5d가 값 채울 때 쓸 헬퍼, 5a도 단위 test) ─────────────────────────────────────────
-// serializeError처럼 gpa로 **완결 JSON-RPC 응답 한 줄**(`{jsonrpc, id, result:{...}}`)을 빌드한다. 5d dispatch가
-// 실행 결과를 이 헬퍼로 실어 응답한다(5a dispatch는 실행 보류라 아직 호출하지 않지만 스키마를 확정·test). caller free.
+// ── result 직렬화(§9.1 ① — 5e-2 L4 completion이 값 채울 때 쓸 헬퍼, 여기선 단위 test) ─────────────────────────
+// serializeError처럼 gpa로 **완결 JSON-RPC 응답 한 줄**(`{jsonrpc, id, result:{...}}`)을 빌드한다. 5e-2에서 L4가
+// Swift BrowserControl 결과(url/script-result/ok)를 이 헬퍼로 실어 completeInFlight 응답한다(dispatchBrowser는 op만
+// 산출해 아직 호출하지 않지만 스키마를 확정·test). caller free.
 // 모든 직렬화는 minified 한 줄(1a·1c와 동일 — ndjson frame 경계 안전). 종단 `\n`은 프레이밍(1b/L4)이 붙인다.
 
 /// `browser.navigate` 성공 result: `{"jsonrpc":"2.0","id":<id>,"result":{"ok":true}}`.
@@ -208,12 +201,34 @@ const endResult = cp.endResult;
 
 // ── ② dispatchBrowser(§9.1 ②③ — 정확한 보안 순서) ─────────────────────────────────────────────────────────
 
-/// `browser.*` 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot + 주입 `caller_cap`으로 처리해 **응답 한 줄
-/// 바이트**를 만든다. OOM만 error로 전파(응답 자체를 만들 메모리도 없을 때). caller가 반환 슬라이스를 free한다.
+/// **5e: 모든 게이트(authz·params·surface)를 통과한 인가된 browser 요청의 실행 op.** L4가 main-loop marshal
+/// (§5-async deferRequest) → Swift `BrowserControl`이 `webPanels[surface_id]`의 WKWebView API를 호출한다. `arg`는
+/// method별 인자(navigate=url·executeScript=script·getUrl=빈) — `gpa`로 **dupe한 소유 슬라이스**라(파싱 arena와
+/// 수명 분리) caller가 op를 소비할 때 free한다(§9.3 "arg는 cross_gpa 복사"). `req_id`는 응답 직렬화에 echo할 요청 id.
+pub const BrowserOp = struct {
+    surface_id: u64,
+    method: BrowserMethod,
+    /// gpa-owned(caller가 free). navigate=url·executeScript=script·getUrl=빈("").
+    arg: []const u8,
+    /// 요청 id(응답 echo용). Id는 값 타입이나 `.string`은 파싱 arena를 빌리므로, string id는 caller가 arg처럼 복사해야
+    /// 안전하다 — L4는 완료 시 pending.request_bytes를 **재파싱**해 id를 얻으므로(§9.3 ⑥) 이 필드는 number id 편의용.
+    req_id: cp.Id,
+};
+
+/// dispatchBrowser 결과(5e): 게이트 실패면 응답 바이트(`err`, gpa-owned), 통과면 실행 `op`. **정확히 하나**만 유효.
+pub const BrowserDispatch = union(enum) {
+    err: []u8,
+    op: BrowserOp,
+};
+
+/// `browser.*` 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot + 주입 `caller_cap`으로 처리한다. 게이트 실패면
+/// `.err`(응답 바이트, gpa-owned), 통과면 `.op`(인가·유효한 실행 op — L4가 marshal). OOM만 error로 전파. caller가
+/// `.err` 또는 `.op.arg`를 free한다.
 ///
-/// `caller_cap`은 라이브 서버(L4)가 소켓 auth frame의 nonce를 1e `resolve`해 넘긴 `Capability`(null=cap 없음).
-/// **5a: 라이브 서버가 resolve에서 generation 신선도를 이미 강제**하므로 authz엔 `requested_generation=cap.generation`
-/// 을 넘긴다(generation 검사는 이 경로에선 항상 통과 — surface·scope 검사가 실질 게이트). `now`는 TTL 판정 시각.
+/// `caller_cap`은 라이브 서버(L4)가 소켓 auth frame의 nonce를 1e `lookupByNonce`해 넘긴 `Capability`(null=cap 없음).
+/// authz는 `requested_surface_id=target id`(cap이 이 web surface에 묶였는지), `requested_generation=cap.generation`.
+/// **browser cap의 anchor는 selector(에이전트 자기 surface)가 아니라 target(제어 대상 web surface)** — dispatchAuthenticated가
+/// browser.*를 이 함수로 위임하며 selector 앵커를 안 쓴다(§9.3). `now`는 TTL 판정 시각.
 ///
 /// **보안 순서(§8.3·§9.1 ②③ — 각 단계 정확히, 모듈 헤더 §보안 불변식):**
 ///   1. parseMessage → request 아니면 `invalid_request`(id=null). parse 실패 → `parseFailureCode`.
@@ -223,84 +238,72 @@ const endResult = cp.endResult;
 ///      `.granted`가 아니면(어떤 deny든) **균일 `unauthorized`**(존재검사보다 먼저 — oracle 방지). deny 이유 노출 금지.
 ///   5. `parseBrowserMethod(method.rest)`. null(screenshot 등 5a 미구현) → `method_not_found`(authz 뒤 — 미인가
 ///      caller가 메서드 탐침 못 하게).
-///   6. method별 params 파싱(url/script). 오류 → `invalid_params`.
+///   6. method별 params 파싱(url/script). 오류 → `invalid_params`. url/script는 gpa로 dupe(op.arg).
 ///   7. **surface 검증(방어)** — snapshot에서 `id`로 SurfaceDto 찾기. 없으면 `unauthorized`(존재 누설 금지), 있으나
-///      `detail != .web`이면 `unauthorized`(browser cap은 web surface 전용). authz의 surface_mismatch가 다른 surface를
-///      막지만, cap의 surface 자체가 web인지 방어 확인.
-///   8. **제어코어 skeleton** — 여기까지 통과 = 인가·유효. 실 WKWebView 실행은 5d. `internal_error`로 실행 보류.
+///      `detail != .web`이면 `unauthorized`(browser cap은 web surface 전용).
+///   8. **op 반환(5e)** — 여기까지 통과 = 인가·유효. `BrowserOp{surface_id, method, arg(dupe), req_id}`. L4가 실행.
 pub fn dispatchBrowser(
     gpa: std.mem.Allocator,
     request_bytes: []const u8,
     snapshot: cs.CollectorSnapshot,
     caller_cap: ?capmod.Capability,
     now: u64,
-) std.mem.Allocator.Error![]u8 {
+) std.mem.Allocator.Error!BrowserDispatch {
     // ── 1. parse. 실패는 JSON-RPC 관례대로 id=null 에러 응답으로 접는다(OOM만 전파). ──
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return errorResponse(gpa, .null, cp.parseFailureCode(e)),
+        else => return .{ .err = try errorResponse(gpa, .null, cp.parseFailureCode(e)) },
     };
     defer pm.deinit();
 
     // browser.*는 응답에 request id가 필요하므로 request만 디스패치한다(비-request → invalid_request, 1d와 동일).
     const req = switch (pm.message) {
         .request => |r| r,
-        else => return errorResponse(gpa, .null, .invalid_request),
+        else => return .{ .err = try errorResponse(gpa, .null, .invalid_request) },
     };
 
     // ── 2. parseMethod 라우팅(§4.1). 방어: 라우터가 browser.* 만 이 함수로 보내지만, core != browser면 거부. ──
     const method = cp.parseMethod(req.method);
-    if (method.core != .browser) return errorResponse(gpa, req.id, .method_not_found);
+    if (method.core != .browser) return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
 
     // ── 3. id 파싱(target web surface_id). authz(4)가 target을 알아야 하므로 먼저. 형식 오류는 surface 존재
     //       oracle이 아니라 요청 형식 오류다(session.get과 동일) → invalid_params. ──
-    const target_id = readIdParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+    const target_id = readIdParam(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
 
     // ── 4. authz(§8.3 균일 unauthorized — 존재검사 이전, deny 이유 절대 노출 금지). ──
-    // cap 부재면 즉시 unauthorized. 있으면 authorize: requested_surface_id=target id(cap이 이 surface에 묶였는지),
-    // requested_generation=cap.generation(5a: 라이브 서버 resolve가 generation 신선도 이미 강제). 결과가 granted가
-    // 아니면(revoked/expired/surface_mismatch/generation_mismatch/scope_insufficient/unknown_method 어떤 deny든)
-    // 이유를 버리고 하나의 unauthorized로 접는다(oracle 방지 — DenyReason은 내부 진단 전용이라 wire로 안 나간다).
-    const caller = caller_cap orelse return errorResponse(gpa, req.id, .unauthorized);
+    const caller = caller_cap orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
     switch (capmod.authorize(caller, target_id, caller.generation, req.method, now)) {
         .granted => {},
-        .deny => return errorResponse(gpa, req.id, .unauthorized),
+        .deny => return .{ .err = try errorResponse(gpa, req.id, .unauthorized) },
     }
 
     // ── 5. BrowserMethod 파싱(authz 뒤 — 미인가 caller가 메서드 탐침 못 하게). 5a 미구현(screenshot 등) → method_not_found. ──
-    const bmethod = parseBrowserMethod(method.rest) orelse return errorResponse(gpa, req.id, .method_not_found);
+    const bmethod = parseBrowserMethod(method.rest) orelse return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
 
-    // ── 6. method별 params 파싱(url/script). id는 3에서 검증됐고, 여기선 스키마 파서(단일 출처)로 전체를 재검증해
-    //       method-specific 필드(url/script) 유무·타입을 확인한다. 오류 → invalid_params. ──
-    switch (bmethod) {
-        .navigate => _ = parseNavigateParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params),
-        .get_url => {}, // {id}만 — 3에서 이미 검증. 추가 필드 없음.
-        .execute_script => _ = parseExecuteScriptParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params),
-    }
+    // ── 6. method별 params 파싱 + arg(url/script) dupe(파싱 arena와 수명 분리 — op는 pm.deinit 뒤에도 유효해야). ──
+    const arg: []const u8 = switch (bmethod) {
+        .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
+        .get_url => try gpa.dupe(u8, ""), // {id}만 — 인자 없음(빈 슬라이스도 dupe해 free 규약 일관)
+        .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
+    };
+    // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
+    // (errdefer는 error 반환에만 걸려 .err union 반환은 안 잡는다 — free 후 errorResponse가 OOM나도 double-free 없음).
 
     // ── 7. surface 검증(방어, §9.1 ②·⑧). cap이 이 surface에 묶였는데 snapshot에 없으면 respawn/닫힘 → 존재 누설
     //       금지로 균일 unauthorized. 있으나 web이 아니면(terminal) browser cap을 terminal에 쓰는 것이라 unauthorized. ──
-    const dto = snapshot.find(target_id) orelse return errorResponse(gpa, req.id, .unauthorized);
-    if (dto.kind() != .web) return errorResponse(gpa, req.id, .unauthorized);
+    const dto = snapshot.find(target_id);
+    if (dto == null or dto.?.kind() != .web) {
+        gpa.free(arg); // op 미생성 → arg 해제
+        return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+    }
 
-    // ── 8. 제어코어 skeleton(§9.1 ②·④). 여기까지 통과 = 인가·유효한 web surface 대상. 실 WKWebView 실행은 5d다.
-    //       5d에서 이 지점을 executeBrowser로 교체해 main-loop로 marshal → Swift BrowserControl이 WKWebView API
-    //       (navigate=load / getUrl=.url / executeScript=evaluateJavaScript, §9)를 호출하고 결과를 위 result 직렬화
-    //       헬퍼로 응답한다. 5a 계약 = 모든 게이트 통과 후 실행 보류. ──
-    return notImplementedResponse(gpa, req.id, bmethod);
+    // ── 8. op 반환(5e). 여기까지 통과 = 인가·유효한 web surface 대상. L4가 §5-async marshal → Swift BrowserControl. ──
+    return .{ .op = .{ .surface_id = target_id, .method = bmethod, .arg = arg, .req_id = req.id } };
 }
 
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용). 편의 wrapper(1d와 동일).
 fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.Allocator.Error![]u8 {
     return cp.serializeError(gpa, id, code, code.defaultMessage(), null);
-}
-
-/// 제어코어 skeleton 응답(§9.1 ②④): `internal_error`(-32603) + message `"browser.<method> not implemented (5d)"`.
-/// 5d에서 실 실행으로 교체된다(모듈 헤더). message에 method 이름을 실어 어떤 op가 보류됐는지 진단만 노출(민감 정보 아님).
-fn notImplementedResponse(gpa: std.mem.Allocator, id: cp.Id, m: BrowserMethod) std.mem.Allocator.Error![]u8 {
-    const msg = try std.fmt.allocPrint(gpa, "{s} not implemented (5d)", .{browserMethodName(m)});
-    defer gpa.free(msg);
-    return cp.serializeError(gpa, id, .internal_error, msg, null);
 }
 
 // ══ ③ 테스트(헤드리스, Linux CI 포함 — 순수 로직·소켓/WKWebView 0) ═══════════════════════════════════════════
@@ -324,8 +327,25 @@ fn browserCap(sid: u64) capmod.Capability {
     return .{ .surface_id = sid, .generation = 0, .scope = .browser };
 }
 
-fn dispatch(bytes: []const u8, cap: ?capmod.Capability) ![]u8 {
-    return dispatchBrowser(testing.allocator, bytes, fx, cap, 0);
+// 게이트 실패(.err) 기대 — 응답 바이트(호출자 free). .op면 op.arg free 후 실패.
+fn dispatchErr(bytes: []const u8, cap: ?capmod.Capability) ![]u8 {
+    switch (try dispatchBrowser(testing.allocator, bytes, fx, cap, 0)) {
+        .err => |e| return e,
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedErrGotOp;
+        },
+    }
+}
+// 게이트 통과(.op) 기대 — op(호출자 op.arg free). .err면 free 후 실패.
+fn dispatchOp(bytes: []const u8, cap: ?capmod.Capability) !BrowserOp {
+    switch (try dispatchBrowser(testing.allocator, bytes, fx, cap, 0)) {
+        .op => |op| return op,
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOpGotErr;
+        },
+    }
 }
 
 // 응답 바이트의 에러 코드를 뽑는다(성공이면 실패 단언).
@@ -349,7 +369,7 @@ const req_navigate_11 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navi
 
 // ── 1) cap 없음(null) → unauthorized ──
 test "dispatchBrowser: cap 없음(null) → 균일 unauthorized(-32002)" {
-    const wire = try dispatch(req_navigate_11, null);
+    const wire = try dispatchErr(req_navigate_11, null);
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
     // oracle: message는 균일 "Unauthorized"(deny 이유 노출 없음).
@@ -363,14 +383,14 @@ test "dispatchBrowser: cap.scope가 browser 아님(metadata/lifecycle) → 균�
     // metadata cap(surface 11에 묶였지만 scope가 browser 아님) → authorize scope_insufficient → unauthorized.
     {
         const meta_cap: capmod.Capability = .{ .surface_id = 11, .generation = 0, .scope = .{ .metadata = .self } };
-        const wire = try dispatch(req_navigate_11, meta_cap);
+        const wire = try dispatchErr(req_navigate_11, meta_cap);
         defer testing.allocator.free(wire);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
     }
     // lifecycle cap도 마찬가지.
     {
         const life_cap: capmod.Capability = .{ .surface_id = 11, .generation = 0, .scope = .lifecycle };
-        const wire = try dispatch(req_navigate_11, life_cap);
+        const wire = try dispatchErr(req_navigate_11, life_cap);
         defer testing.allocator.free(wire);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
     }
@@ -379,7 +399,7 @@ test "dispatchBrowser: cap.scope가 browser 아님(metadata/lifecycle) → 균�
 // ── 3) surface 불일치(web cap이 다른 surface) → unauthorized(surface_mismatch 균일) ──
 test "dispatchBrowser: cap.surface_id != target id → 균일 unauthorized" {
     // browser cap이 surface 99에 묶였는데 target은 11 → authorize surface_mismatch → unauthorized.
-    const wire = try dispatch(req_navigate_11, browserCap(99));
+    const wire = try dispatchErr(req_navigate_11, browserCap(99));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
@@ -388,7 +408,7 @@ test "dispatchBrowser: cap.surface_id != target id → 균일 unauthorized" {
 test "dispatchBrowser: revoked cap → 균일 unauthorized" {
     var cap = browserCap(11);
     cap.revoked = true;
-    const wire = try dispatch(req_navigate_11, cap);
+    const wire = try dispatchErr(req_navigate_11, cap);
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
@@ -396,32 +416,51 @@ test "dispatchBrowser: revoked cap → 균일 unauthorized" {
 test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
     var cap = browserCap(11);
     cap.expires_at = 100;
-    // now=100 >= exp=100 → expired → unauthorized(균일).
-    const wire = try dispatchBrowser(testing.allocator, req_navigate_11, fx, cap, 100);
-    defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
-    // 대조: now=99 < exp면 만료 아님 → 게이트 통과해 internal_error(다른 코드)라야 이 테스트가 만료를 실제로 검사.
-    const wire_ok = try dispatchBrowser(testing.allocator, req_navigate_11, fx, cap, 99);
-    defer testing.allocator.free(wire_ok);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(wire_ok));
+    // now=100 >= exp=100 → expired → unauthorized(균일, .err).
+    switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, cap, 100)) {
+        .err => |wire| {
+            defer testing.allocator.free(wire);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedErrGotOp;
+        },
+    }
+    // 대조: now=99 < exp면 만료 아님 → 게이트 통과해 **op**라야 이 테스트가 만료를 실제로 검사.
+    switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, cap, 99)) {
+        .op => |op| testing.allocator.free(op.arg),
+        .err => |wire| {
+            testing.allocator.free(wire);
+            return error.ExpectedOpGotErr;
+        },
+    }
 }
 
-// ── 5) 유효 browser cap + web surface target → internal_error("not implemented (5d)") ── 모든 게이트 통과
-test "dispatchBrowser: 유효 browser cap + web surface → internal_error(-32603, not implemented 5d)" {
-    const wire = try dispatch(req_navigate_11, browserCap(11));
-    defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(wire));
-    // skeleton message에 method 이름 + "not implemented (5d)"가 실린다(5d 교체 지점 진단).
-    const msg = try errMessage(wire);
-    defer testing.allocator.free(msg);
-    try testing.expectEqualStrings("browser.navigate not implemented (5d)", msg);
+// ── 5) 유효 browser cap + web surface target → **op 반환**(5e). 모든 게이트 통과 = 인가·유효한 실행 op.
+test "dispatchBrowser: 유효 browser cap + web surface → BrowserOp{surface_id, navigate, url}(5e)" {
+    const op = try dispatchOp(req_navigate_11, browserCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(@as(u64, 11), op.surface_id);
+    try testing.expectEqual(BrowserMethod.navigate, op.method);
+    try testing.expectEqualStrings("https://a/", op.arg); // navigate arg = url
+    // getUrl은 arg 빈("").
+    const op_url = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.getUrl\",\"params\":{\"id\":11}}", browserCap(11));
+    defer testing.allocator.free(op_url.arg);
+    try testing.expectEqual(BrowserMethod.get_url, op_url.method);
+    try testing.expectEqualStrings("", op_url.arg);
+    // executeScript arg = script.
+    const op_js = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"document.title\"}}", browserCap(11));
+    defer testing.allocator.free(op_js.arg);
+    try testing.expectEqual(BrowserMethod.execute_script, op_js.method);
+    try testing.expectEqualStrings("document.title", op_js.arg);
 }
 
 // ── 6) 유효 cap + browser.screenshot(5a 미구현) → method_not_found ── authz는 통과, method 파싱서 접힘
 test "dispatchBrowser: 유효 cap + browser.screenshot(5a 미구현) → method_not_found(-32601)" {
     // screenshot도 browser.* 라 methodRequiredScope=.browser → authz granted → parseBrowserMethod(null) → method_not_found.
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}";
-    const wire = try dispatch(req, browserCap(11));
+    const wire = try dispatchErr(req, browserCap(11));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
 }
@@ -429,7 +468,7 @@ test "dispatchBrowser: 유효 cap + browser.screenshot(5a 미구현) → method_
 // ── 7) 유효 cap + navigate params에 url 없음 → invalid_params ──
 test "dispatchBrowser: 유효 cap + navigate params에 url 없음 → invalid_params(-32602)" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11}}";
-    const wire = try dispatch(req, browserCap(11));
+    const wire = try dispatchErr(req, browserCap(11));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
 }
@@ -439,7 +478,7 @@ test "dispatchBrowser: target이 terminal surface면 authz 통과해도 surface 
     // cap이 terminal surface 10에 묶임(browser scope) → authorize granted(surface·scope 일치). 그러나 10은
     // terminal(detail=.terminal)이라 순서 7의 web 검증서 거부. browser cap은 web surface 전용(방어).
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":10,\"url\":\"https://a/\"}}";
-    const wire = try dispatch(req, browserCap(10));
+    const wire = try dispatchErr(req, browserCap(10));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
     // oracle: 여기도 균일 "Unauthorized"(terminal이라는 이유·존재를 노출하지 않음).
@@ -452,15 +491,15 @@ test "dispatchBrowser: target이 terminal surface면 authz 통과해도 surface 
 test "dispatchBrowser §8.3: cap 부재·scope 불충족·surface 불일치·revoked가 전부 바이트 동일 unauthorized" {
     // 같은 요청 바이트(=같은 request id echo)에 서로 다른 deny 사유의 cap을 넣으면, 응답이 **바이트 동일**해야
     // deny 이유가 응답으로 새지 않는다(§8.3 균일 unauthorized oracle). 전부 순서 4에서 접힌다.
-    const w_null = try dispatch(req_navigate_11, null); // cap 부재
+    const w_null = try dispatchErr(req_navigate_11, null); // cap 부재
     defer testing.allocator.free(w_null);
-    const w_scope = try dispatch(req_navigate_11, capmod.Capability{ .surface_id = 11, .generation = 0, .scope = .{ .metadata = .self } }); // scope 불충족
+    const w_scope = try dispatchErr(req_navigate_11, capmod.Capability{ .surface_id = 11, .generation = 0, .scope = .{ .metadata = .self } }); // scope 불충족
     defer testing.allocator.free(w_scope);
-    const w_surface = try dispatch(req_navigate_11, browserCap(99)); // surface 불일치
+    const w_surface = try dispatchErr(req_navigate_11, browserCap(99)); // surface 불일치
     defer testing.allocator.free(w_surface);
     var revoked = browserCap(11);
     revoked.revoked = true;
-    const w_revoked = try dispatch(req_navigate_11, revoked); // revoked
+    const w_revoked = try dispatchErr(req_navigate_11, revoked); // revoked
     defer testing.allocator.free(w_revoked);
 
     try testing.expectEqualStrings(w_null, w_scope);
@@ -566,7 +605,7 @@ test "result 직렬화: executeScript {result:<value>} — 불투명 JSON 반환
 // ── 10) dispatch 라우팅 엣지: 비-browser 메서드·비-request·malformed ──
 test "dispatchBrowser: core != browser 방어 → method_not_found" {
     // 라우터가 browser.* 만 보내지만 방어적으로 확인 — session.get이 여기 오면 method_not_found.
-    const wire = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":11}}", browserCap(11));
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":11}}", browserCap(11));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
 }
@@ -574,13 +613,13 @@ test "dispatchBrowser: core != browser 방어 → method_not_found" {
 test "dispatchBrowser: 비-request(notification)·malformed·id 형식오류" {
     // notification(id 없음) → invalid_request.
     {
-        const wire = try dispatch("{\"jsonrpc\":\"2.0\",\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}", browserCap(11));
+        const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}", browserCap(11));
         defer testing.allocator.free(wire);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_request)), try errCode(wire));
     }
     // malformed JSON → parse_error(id=null).
     {
-        const wire = try dispatch("{not json", browserCap(11));
+        const wire = try dispatchErr("{not json", browserCap(11));
         defer testing.allocator.free(wire);
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
@@ -589,7 +628,7 @@ test "dispatchBrowser: 비-request(notification)·malformed·id 형식오류" {
     }
     // id 형식오류(비정수)는 authz 이전이라 invalid_params(surface oracle 아님). cap 유효여도 형식이 먼저.
     {
-        const wire = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":\"x\",\"url\":\"u\"}}", browserCap(11));
+        const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":\"x\",\"url\":\"u\"}}", browserCap(11));
         defer testing.allocator.free(wire);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
     }

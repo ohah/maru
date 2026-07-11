@@ -1333,6 +1333,20 @@ pub export fn maru_macos_app_session_take_web_addr_focus_restore(session: ?*AppS
     return 0;
 }
 
+// Phase 7e-3: 주소창 nav 버튼 클릭 신호 drain(tick마다). 밴드 좌측 버튼 존(back/forward/reload) 클릭이 **활성 버튼**일 때
+// Zig 코어가 세운 1회성 pending을 뺀다(take_web_addr_focus_restore 패턴). 반환: action code(-1=없음, 0=back·1=forward·
+// 2=reload), surface_id는 out-ptr. Swift가 code에 따라 BrowserControl.goBack/goForward/reload(webPanels[surface_id].webView).
+// session/out null이면 -1(pending 미소비 — Swift는 늘 유효 인자).
+pub export fn maru_macos_app_session_take_web_nav_action(session: ?*AppSession, surface_id_out: ?*u64) i32 {
+    const app_session = session orelse return -1;
+    const so = surface_id_out orelse return -1;
+    if (app_session.takeWebNavAction()) |act| {
+        so.* = act.surface_id;
+        return @intCast(act.code); // 0=back·1=forward·2=reload
+    }
+    return -1;
+}
+
 // ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
 //
 // 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root
@@ -2002,6 +2016,10 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     // M3f workspace_window_frame: null session·null out 포인터는 -1(조용한 폴백 = count/active-window와 동형, Status가
     // 아니라 present/absent/fail의 정수 신호). Swift는 -1/0을 "frame 없음 → 현행 기본"으로 동일 처리한다.
     try std.testing.expectEqual(@as(c_int, -1), maru_macos_app_session_workspace_window_frame(null, null, 0, 0, null, null, null, null));
+    // v106 Phase 7e-3 take_web_nav_action: null session·null out-ptr는 -1(신호 없음/유실 방지 — take_web_addr_navigate 동형).
+    try std.testing.expectEqual(@as(i32, -1), maru_macos_app_session_take_web_nav_action(null, null));
+    var nav_action_sid: u64 = 0;
+    try std.testing.expectEqual(@as(i32, -1), maru_macos_app_session_take_web_nav_action(null, &nav_action_sid));
 }
 
 test {

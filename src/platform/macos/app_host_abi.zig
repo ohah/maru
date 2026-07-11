@@ -1751,7 +1751,7 @@ pub const ControlSessionRef = extern struct {
 var control_server_storage: control_server_mod.ControlServer = undefined;
 var control_server_active: bool = false;
 
-/// 라이브 capability store(§8.5 1e). **메인 스레드 전용**(buildControlResponse가 메인 drain에서만 read — accept
+/// 라이브 capability store(§8.5 1e). **메인 스레드 전용**(handleControlRequest가 메인 drain에서만 read — accept
 /// 스레드는 절대 안 만진다, §8.8 lock-order). 지금은 **비어 있다**: 실 fd 발급/상속(§8.5, 1e-confirm/후속)이 아직
 /// 없어 nonce를 실은 요청은 전부 default-deny(unauthorized)다. nonce 없는 요청은 기존 metadata:self 경로(회귀 없음).
 /// dispatchAuthenticated가 이 store로 nonce→scope를 resolve한다. 발급 경로가 붙으면 여기 issueForFd로 채운다.
@@ -2045,6 +2045,13 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // LinkKind 순서를 바꾸면 분기가 silent하게 뒤집히므로(웹↔파일) 태그 값을 고정한다(C typedef 없는 enum 가드 — Status/EventKind 선례).
     try std.testing.expectEqual(@as(i32, 0), @intFromEnum(terminal.LinkKind.url));
     try std.testing.expectEqual(@as(i32, 1), @intFromEnum(terminal.LinkKind.file_path));
+    // 5e-2b op_kind wire 계약: take_browser_op이 @intFromEnum(BrowserMethod)를 그대로 op_kind로 싣고 Swift
+    // drainBrowserOps가 0=navigate·1=getUrl·2=executeScript로 디코드한다. BrowserMethod 순서를 바꾸면 op_kind가
+    // silent하게 재매핑돼 navigate 요청이 getUrl/executeScript를 구동하므로(컴파일·테스트 무경보) 태그 값을 고정한다
+    // (LinkKind 선례 — .h 주석·Swift switch와 단일 계약). 신규 메서드는 **끝에** 추가한다.
+    try std.testing.expectEqual(@as(u8, 0), @as(u8, @intFromEnum(control_browser.BrowserMethod.navigate)));
+    try std.testing.expectEqual(@as(u8, 1), @as(u8, @intFromEnum(control_browser.BrowserMethod.get_url)));
+    try std.testing.expectEqual(@as(u8, 2), @as(u8, @intFromEnum(control_browser.BrowserMethod.execute_script)));
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
     try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusOk), @intFromEnum(Status.ok));

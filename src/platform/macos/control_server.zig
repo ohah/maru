@@ -11,8 +11,10 @@
 //!  - 메인 drain(app_host_abi가 tick마다 호출): `tryPopRequest`로 요청을 꺼내 실 collector + auth + dispatch(1d)로
 //!    응답 바이트를 만들고 `resolveRequest`로 pending에 채워 accept 스레드를 깨운다.
 //!
-//! **범위 밖:** subscribeOutput 출력 직송(§5, 별도), full self-origin tty 검증(1g), capability fd 실 발급(1e),
-//!  실 collector 조립·auth 판정(그건 app_host_abi가 AppSession을 알기에 거기서 — 이 모듈은 AppSession 비의존 generic).
+//! **범위 밖:** subscribeOutput 출력 직송(§5, 별도), full self-origin tty 검증(1g), capability fd 실 발급/상속
+//!  (1e-confirm — 이 서버는 auth 프레임의 `cap_nonce`를 `parseAuthFrame`으로 파싱해 `PendingRequest.cap_nonce`로 메인
+//!  marshal까지만 하고, resolve·store는 app_host_abi가 소유), 실 collector 조립·auth 판정(그건 app_host_abi가
+//!  AppSession을 알기에 거기서 — 이 모듈은 AppSession 비의존 generic).
 //!
 //! **§8.8 lock-order 불변식 엄수:** accept 스레드는 `core_mutex`를 보유하지 않은 채로만 marshal 큐에 push/wait한다.
 //!  메인은 collectSessionInto 안에서만 core_mutex를 (짧게) 잡고, 그 락을 쥔 채 marshal 큐에 push/wait하지 않는다.
@@ -35,6 +37,13 @@ const posix = std.posix;
 const maru = @import("maru");
 const cs = @import("control_socket.zig");
 const cp = maru.session.control_plane;
+const cap = maru.session.control_capability;
+
+// auth 프레임 cap_nonce의 wire 길이(1a)와 capability nonce 길이(1e)가 어긋나면 fd payload↔auth 프레임이 안 맞는다.
+// 1a는 capability를 import하지 않으므로(레이어 base) 두 상수를 각자 두되, 둘 다 import하는 이 L4에서 comptime으로 못박는다.
+comptime {
+    std.debug.assert(cp.auth_cap_nonce_len == cap.nonce_len);
+}
 
 /// 메인이 accept 스레드에 응답을 돌려주는 rendezvous 단위. accept 스레드의 serve 스택에 살며(대기 동안 유효),
 /// marshal 큐는 `*PendingRequest`만 담는다. `request_bytes`는 accept 스레드가 `cross_gpa`로 소유(serve 끝에 해제),
@@ -44,6 +53,10 @@ pub const PendingRequest = struct {
     request_bytes: []const u8,
     /// caller가 주장한 self surface_id(auth.self 셀렉터, §8.4). 없으면 null(maru 밖 shell 등).
     selector: ?u64,
+    /// 선택적 capability nonce(auth 프레임 `cap_nonce`, §8.5 1e). 있으면 메인 drain이 CapabilityStore로 resolve해
+    /// self보다 넓은 scope를 발급한다(없으면 metadata:self만). accept 스레드가 parseAuthFrame으로 채운다(값 복사 — 소켓
+    /// 입력 lifetime과 분리). 실 fd 상속은 1e-core 범위 밖(CLI가 아직 안 실음)이라 라이브에선 늘 null·store 빈=default-deny.
+    cap_nonce: ?[cp.auth_cap_nonce_len]u8 = null,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
@@ -284,16 +297,17 @@ pub const ControlServer = struct {
         var framer: cp.Framer = .{};
         defer framer.deinit(self.cross_gpa);
 
-        // 프레임 1 = auth.self 셀렉터(§8.4 1단계). 없거나 손상이면 selector=null(서버가 self를 안 줌).
+        // 프레임 1 = auth.self 셀렉터 + 선택적 cap_nonce(§8.4·§8.5 1e). 없거나 손상이면 빈 AuthFrame(self 안 줌·cap 없음).
+        // AuthFrame은 값 타입(selector·cap_nonce 복사본)이라 framer 슬라이스 무효화와 무관하게 대기 동안 유효하다.
         const auth_line = self.readFrame(conn, &framer) orelse return;
-        const selector = cp.parseAuthSelector(self.cross_gpa, auth_line);
+        const auth = cp.parseAuthFrame(self.cross_gpa, auth_line);
 
         // 프레임 2 = 요청. Framer 슬라이스는 다음 read에 무효화되므로 marshal 전에 dupe(대기 동안 유효 보장).
         const req_line = self.readFrame(conn, &framer) orelse return;
         const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
         defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 스택 프레임 끝에서 해제(대기 후라 안전)
 
-        var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = selector, .io = self.io };
+        var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonce = auth.cap_nonce, .io = self.io };
         self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon
 
         switch (pending.waitResolved()) {
@@ -420,8 +434,8 @@ const rt_windows = [_]wm.WindowMembershipSnapshot{
 const rt_snapshot: csurf.CollectorSnapshot = .{ .surfaces = &rt_surfaces, .windows = &rt_windows };
 const test_caps = [_][]const u8{ "sessions.list", "session.get" };
 
-/// 테스트 client: connect → auth.self(surface_id) → 요청 → hello skip → 응답 한 줄(owned).
-fn clientReq(gpa: std.mem.Allocator, base: []const u8, key: []const u8, selector: ?u64, request: []const u8) ![]u8 {
+/// 테스트 client: connect → auth.self(surface_id [+ cap_nonce]) → 요청 → hello skip → 응답 한 줄(owned).
+fn clientReq(gpa: std.mem.Allocator, base: []const u8, key: []const u8, selector: ?u64, cap_nonce: ?[cap.nonce_len]u8, request: []const u8) ![]u8 {
     var db: [512]u8 = undefined;
     const dir = try cs.controlDirPath(&db, base);
     var sb: [512]u8 = undefined;
@@ -434,7 +448,7 @@ fn clientReq(gpa: std.mem.Allocator, base: []const u8, key: []const u8, selector
     @memcpy(addr.path[0..sp.len], sp);
     if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return error.ClientConnect;
 
-    const auth = try cp.serializeAuthSelf(gpa, selector);
+    const auth = try cp.serializeAuthSelf(gpa, selector, cap_nonce);
     defer gpa.free(auth);
     try cs.writeAll(fd, auth);
     try cs.writeAll(fd, "\n");
@@ -458,13 +472,13 @@ fn clientReq(gpa: std.mem.Allocator, base: []const u8, key: []const u8, selector
     return error.NoResponse;
 }
 
-/// 메인 drain 흉내(app_host_abi가 할 일): pending을 꺼내 fake snapshot + selector auth(scope=self) + dispatch로
-/// 응답을 만들어 resolve. 실제 collector 대신 rt_snapshot을 쓴다(collector 배선은 app_host_abi 테스트가 커버).
-fn drainWithFakeSnapshot(server: *ControlServer) !usize {
+/// 메인 drain 흉내(app_host_abi가 할 일): pending을 꺼내 fake snapshot + capability auth(1e `dispatchAuthenticated`)로
+/// 응답을 만들어 resolve. 실제 collector 대신 rt_snapshot, 실 CapabilityStore 대신 주입 store를 쓴다(라이브 배선은
+/// app_host_abi 테스트가 커버). store가 빈이면 nonce 없는 요청은 self, nonce 있는 요청은 default-deny(unauthorized).
+fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilityStore) !usize {
     var handled: usize = 0;
     while (server.tryPopRequest()) |pending| {
-        const caller = pending.selector orelse 0;
-        const resp = try cd.dispatchReadOnly(server.cross_gpa, pending.request_bytes, rt_snapshot, caller, .self);
+        const resp = try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, rt_snapshot, pending.selector, pending.cap_nonce, store, 0);
         server.resolveRequest(pending, resp);
         handled += 1;
     }
@@ -489,7 +503,7 @@ test "server 왕복: client가 auth.self(10)+sessions.list → 메인 drain이 �
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
-            self.resp = clientReq(std.heap.c_allocator, self.base, "k1", 10, req) catch |e| {
+            self.resp = clientReq(std.heap.c_allocator, self.base, "k1", 10, null, req) catch |e| { // cap_nonce 없음 = self
                 self.err = e;
                 return;
             };
@@ -498,11 +512,13 @@ test "server 왕복: client가 auth.self(10)+sessions.list → 메인 drain이 �
     var ct = ClientT{ .base = base };
     const th = try std.Thread.spawn(.{}, ClientT.run, .{&ct});
 
+    var store: cap.CapabilityStore = .{}; // 빈 store — nonce 없는 요청은 self 경로.
+    defer store.deinit(testing.allocator);
     // 메인 drain 루프(응답이 나올 때까지 짧게 폴링 — 실제 앱은 frame tick이 부른다).
     var got = false;
     var guard: usize = 0;
     while (!got and guard < 2000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(&server);
+        _ = try drainWithFakeSnapshot(&server, &store);
         got = ct.resp != null or ct.err != null;
         if (!got) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
@@ -535,7 +551,7 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
-            self.resp = clientReq(std.heap.c_allocator, self.base, "k1", null, req) catch |e| { // 셀렉터 없음
+            self.resp = clientReq(std.heap.c_allocator, self.base, "k1", null, null, req) catch |e| { // 셀렉터·cap 없음
                 self.err = e;
                 return;
             };
@@ -544,9 +560,11 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
     var ct = ClientT{ .base = base };
     const th = try std.Thread.spawn(.{}, ClientT.run, .{&ct});
 
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
     var guard: usize = 0;
     while (ct.resp == null and ct.err == null and guard < 2000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(&server);
+        _ = try drainWithFakeSnapshot(&server, &store);
         if (ct.resp == null and ct.err == null) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     th.join();
@@ -558,6 +576,58 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
     defer pm.deinit();
     try testing.expect(pm.message == .response);
     try testing.expectEqual(@as(usize, 0), pm.message.response.result.?.array.items.len); // 셀렉터 0 → self 필터로 빈 목록
+}
+
+// 1e-core 라이브 e2e: auth 프레임에 cap_nonce를 실으면(주입 store에 metadata:all cap) 서버가 self보다 넓은 scope로
+// 응답한다 — 소켓→auth 프레임→parseAuthFrame→PendingRequest.cap_nonce→dispatchAuthenticated→resolve→scope 발급의
+// 전 경로를 실 소켓 왕복으로 증명. 대조(위 "auth.self(10)" 테스트)는 cap 없이 self만 봤다.
+test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.list가 전체(10,20) 조회" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "capnonce");
+    defer srvRmBase(base);
+
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, std.heap.c_allocator, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    defer server.stop();
+
+    const cap_nonce: [cap.nonce_len]u8 = [_]u8{0x5A} ** cap.nonce_len;
+    const ClientT = struct {
+        base: []const u8,
+        nonce: [cap.nonce_len]u8,
+        resp: ?[]u8 = null,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
+            self.resp = clientReq(std.heap.c_allocator, self.base, "k1", 10, self.nonce, req) catch |e| { // anchor 10 + cap
+                self.err = e;
+                return;
+            };
+        }
+    };
+    var ct = ClientT{ .base = base, .nonce = cap_nonce };
+    const th = try std.Thread.spawn(.{}, ClientT.run, .{&ct});
+
+    // 주입 store: anchor 10에 묶인 metadata:all cap(라이브 앱에선 1e fd 발급이 채운다 — 여기선 하니스가 직접 주입).
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, cap_nonce, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
+
+    var guard: usize = 0;
+    while (ct.resp == null and ct.err == null and guard < 2000) : (guard += 1) {
+        _ = try drainWithFakeSnapshot(&server, &store);
+        if (ct.resp == null and ct.err == null) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    th.join();
+    try testing.expect(ct.err == null);
+    try testing.expect(ct.resp != null);
+    defer std.heap.c_allocator.free(ct.resp.?);
+
+    var pm = try cp.parseMessage(std.heap.c_allocator, ct.resp.?);
+    defer pm.deinit();
+    try testing.expect(pm.message == .response);
+    const arr = pm.message.response.result.?.array;
+    try testing.expectEqual(@as(usize, 2), arr.items.len); // metadata:all → rt_snapshot 전체(10,20)
 }
 
 test "server: start 실패 없이 즉시 stop해도 accept 스레드가 깨끗이 join(요청 0건)" {

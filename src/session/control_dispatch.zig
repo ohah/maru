@@ -43,6 +43,7 @@ const std = @import("std");
 const cp = @import("control_plane.zig");
 const cs = @import("control_surface.zig");
 const wm = @import("window_membership.zig");
+const cap = @import("control_capability.zig");
 
 /// read-only 조회 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot으로 처리해 **응답 한 줄 바이트**를 만든다.
 /// 성공/에러 모두 유효한 JSON-RPC 응답 바이트(개행 없음, 프레이밍은 L4가 붙임)를 돌려준다 — OOM만 error로 전파한다
@@ -96,6 +97,60 @@ pub fn dispatchReadOnly(
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a serializeError 재사용). 편의 wrapper.
 fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.Allocator.Error![]u8 {
     return cp.serializeError(gpa, id, code, code.defaultMessage(), null);
+}
+
+/// **1e-core: capability 인가 배선.** auth 프레임의 `{selector, cap_nonce}`(1a `parseAuthFrame`)와 라이브
+/// `CapabilityStore`(L4가 소유·주입)로 요청의 `(caller_surface_id, scope)`를 판정한 뒤 read-only 라우터에 넘긴다.
+/// `dispatchReadOnly`가 auth를 **인자로 주입**받던 것을, 그 인자를 capability로 **발급**하는 상위 래퍼다(1d 헤더 §범위).
+///
+/// 경로:
+///  - `cap_nonce == null`(cap 없음): 기존 self-origin 경로 — `caller = selector orelse 0`, `scope = .self`
+///    (§8.4 A2b — maru 밖/no-cap shell은 자기 surface metadata만). 라이브 동작 불변(회귀 없음).
+///  - `cap_nonce` 제시: `control_capability.resolve`(store lookup → authorize → 균일 unauthorized)로 판정.
+///    grant면 capability가 실은 `(surface_id, scope)`로 read-only 라우터를 태우고, deny면 **균일 `unauthorized`**
+///    (§8.3 oracle 방지 — resolve가 모든 deny 이유를 접는다). resolve는 method↔scope를 검사하므로 요청 method가
+///    필요해 1a로 한 번 파싱한다(라우터가 다시 파싱하지만 로컬 소켓이라 이 이중 파싱은 무시할 비용, 라우터 단일화 유지).
+///
+/// **non-metadata cap(browser/write/…)**: resolve는 인가하지만 이 **read-only** 라우터엔 그 method 라우팅이 없어
+/// `method_not_found`로 접힌다 — 라이브 dispatch 배선은 5e(browser)·2a(write)다. 즉 "cap resolve됨 but 미배선"은
+/// `method_not_found`, "cap이 scope 불충족"은 `unauthorized`로 **구별**되어 관측 가능하다(1e-core 인가 자체 검증).
+///
+/// **generation anchor**: 현재 전 시스템이 generation 0(§3 respawn 경로 미구현)이라 anchor generation을 0으로 고정한다
+/// (auth.self 셀렉터는 surface_id만 나름). generation 셀렉터·respawn 무효화는 후속(cap의 generation 검사는 이미 순수
+/// 코어에 있음 — 발급 시 0으로 묶이면 0 anchor와 일치).
+pub fn dispatchAuthenticated(
+    gpa: std.mem.Allocator,
+    request_bytes: []const u8,
+    snapshot: cs.CollectorSnapshot,
+    selector: ?u64,
+    cap_nonce: ?cap.Nonce,
+    store: *const cap.CapabilityStore,
+    now: u64,
+) std.mem.Allocator.Error![]u8 {
+    const nonce = cap_nonce orelse
+        return dispatchReadOnly(gpa, request_bytes, snapshot, selector orelse 0, .self);
+
+    // cap 제시 → method가 필요해 1a 파싱(라우터가 재파싱하지만 단일 라우터 유지가 우선). parse 실패/비-request는
+    // dispatchReadOnly와 동일 관례(id=null 에러)로 접는다.
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorResponse(gpa, .null, cp.parseFailureCode(e)),
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return errorResponse(gpa, .null, .invalid_request),
+    };
+
+    const anchor = selector orelse 0;
+    switch (cap.resolve(store, nonce, anchor, 0, req.method, now)) {
+        .unauthorized => return errorResponse(gpa, req.id, .unauthorized),
+        .granted => |g| {
+            // metadata면 resolved sub-scope, 아니면 .self placeholder(그 method는 read-only 밖이라 method_not_found).
+            const ms = g.metadataScope() orelse wm.MetadataScope.self;
+            return dispatchReadOnly(gpa, request_bytes, snapshot, g.surface_id, ms);
+        },
+    }
 }
 
 /// params 오류(shape/타입/범위)를 하나로 접는 sentinel — 호출자가 invalid_params로 매핑한다.
@@ -355,6 +410,94 @@ test "dispatch: 응답이 request id(number·string)를 echo한다" {
     var pm = try cp.parseMessage(testing.allocator, wire);
     defer pm.deinit();
     try testing.expect(cp.idEql(pm.message.response.id, .{ .string = "req-9" }));
+}
+
+// ══ 1e-core: dispatchAuthenticated(capability 인가 배선) 테스트(헤드리스, 주입 store) ══════════════════════
+const n_all: cap.Nonce = [_]u8{0x01} ** cap.nonce_len;
+const n_win: cap.Nonce = [_]u8{0x02} ** cap.nonce_len;
+const n_browser: cap.Nonce = [_]u8{0x03} ** cap.nonce_len;
+const n_unknown: cap.Nonce = [_]u8{0xEE} ** cap.nonce_len;
+
+fn authDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *const cap.CapabilityStore) ![]u8 {
+    return dispatchAuthenticated(testing.allocator, bytes, fx, selector, nonce, store, 0);
+}
+
+test "dispatchAuthenticated: nonce 없음 → 기존 self 경로(회귀 없음) — selector=10 sessions.list → 10만" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, null, &store);
+    defer testing.allocator.free(wire);
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(testing.allocator);
+    try listIds(wire, &ids);
+    try testing.expectEqualSlices(u64, &.{10}, ids.items); // cap 없음 = self only(기존 동작)
+}
+
+test "dispatchAuthenticated: metadata:all cap(surface 10) → sessions.list 전체(10,11,20,30)" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_all, &store);
+    defer testing.allocator.free(wire);
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(testing.allocator);
+    try listIds(wire, &ids);
+    try testing.expectEqualSlices(u64, &.{ 10, 11, 20, 30 }, ids.items); // cap이 self보다 넓은 scope 발급
+}
+
+test "dispatchAuthenticated: metadata:window cap(surface 10) → 창 A(10,11)만" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, n_win, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .window } });
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_win, &store);
+    defer testing.allocator.free(wire);
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(testing.allocator);
+    try listIds(wire, &ids);
+    try testing.expectEqualSlices(u64, &.{ 10, 11 }, ids.items);
+}
+
+test "dispatchAuthenticated: 미지 nonce → 균일 unauthorized(store 부재 = default-deny)" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    // 빈 store(라이브 앱의 fd 발급 전 상태)에 nonce 제시 → unauthorized.
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_unknown, &store);
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
+test "dispatchAuthenticated: cap surface≠제시 anchor → unauthorized(surface_mismatch 균일 접힘)" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    // cap은 surface 20에 묶였는데 caller가 anchor 10을 주장 → surface_mismatch → 균일 unauthorized.
+    try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 20, .generation = 0, .scope = .{ .metadata = .all } });
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_all, &store);
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
+// 핵심: cap resolve 자체가 동작함을 "구별되는 결과"로 증명한다 — browser cap + browser.navigate는 resolve 성공하나
+// read-only 라우터에 미배선이라 method_not_found(5e 대기); metadata cap + browser.navigate는 scope 불충족이라
+// unauthorized. 이 둘이 다른 것이 곧 "1e-core 인가가 scope↔method를 실제로 판정한다"는 증거.
+test "dispatchAuthenticated: browser cap + browser.navigate → method_not_found(resolve됨·미배선); metadata cap → unauthorized(scope)" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, n_browser, .{ .surface_id = 10, .generation = 0, .scope = .browser });
+    try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":10,\"url\":\"https://x\"}}";
+    // browser cap → resolve 성공 → read-only 라우터엔 browser.* 없음 → method_not_found.
+    const w_ok = try authDispatch(req, 10, n_browser, &store);
+    defer testing.allocator.free(w_ok);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(w_ok));
+    // metadata cap으로 browser.navigate → scope 불충족 → unauthorized(method_not_found 아님).
+    const w_deny = try authDispatch(req, 10, n_all, &store);
+    defer testing.allocator.free(w_deny);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_deny));
+    // 대칭: browser cap으로 sessions.list(metadata) → scope 불충족 → unauthorized.
+    const w_cross = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_browser, &store);
+    defer testing.allocator.free(w_cross);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_cross));
 }
 
 test {

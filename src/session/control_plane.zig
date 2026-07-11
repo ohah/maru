@@ -403,19 +403,34 @@ fn writeHello(w: *std.Io.Writer, params: HelloParams) !void {
 /// caller가 연결 직후 보내는 self-origin 셀렉터 프레임의 method 이름(§8.4 1단계). request 프레임 앞에 온다.
 pub const auth_self_method = "auth.self";
 
-/// A2b 최소 auth 셀렉터를 notification으로 직렬화한다: `{"jsonrpc":"2.0","method":"auth.self","params":{"surface_id":N}}`.
-/// `surface_id`는 caller가 자기 surface를 주장하는 값(CLI가 `$MARU_PANE_ID`에서 읽음 — 실제 env는 MARU_PANE_ID이고
-/// 그 값이 곧 surface_id다). null이면 params `{}`(maru 밖 shell 등 셀렉터 없음 — 서버는 아무 surface도 self로 주지
-/// 않는다). **§8.4 경계 정직**: 이 셀렉터는 비밀 토큰이 아니라 단순 주장이다 — same-uid peer면 임의 surface_id를
-/// 주장할 수 있고(tty/pgrp 검증은 1g 후속), 서버는 `metadata:self`만 부여하므로 그 한 surface의 metadata만 열린다.
-pub fn serializeAuthSelf(gpa: std.mem.Allocator, surface_id: ?u64) std.mem.Allocator.Error![]u8 {
+/// auth 프레임이 실을 수 있는 capability nonce의 바이트 길이(§8.5, 1e). **wire 수준 상수** — 1a(control_plane)는
+/// capability(1e)를 import하지 않으므로(레이어 base) nonce를 "capability 개념"이 아니라 hex 인코딩된 고정폭 바이트로
+/// 다룬다. `control_capability.nonce_len`과 **같은 값이어야 한다**(control_server가 comptime assert로 drift를 잡는다).
+pub const auth_cap_nonce_len = 32;
+
+/// auth 프레임 파싱 결과(§8.4·§8.5). `selector`=caller가 주장한 self surface_id(anchor), `cap_nonce`=선택적
+/// capability nonce(1e — hex-decoded 고정폭). 둘 다 없을 수 있다(maru 밖 shell·no-cap CLI = selector만·anchor 없음).
+pub const AuthFrame = struct {
+    /// auth.self anchor(주장 self surface_id). 없으면 null(서버가 self를 안 줌).
+    selector: ?u64 = null,
+    /// 선택적 capability nonce(§8.5, 1e). 있으면 서버가 CapabilityStore로 resolve해 scope를 발급한다(없으면 self만).
+    cap_nonce: ?[auth_cap_nonce_len]u8 = null,
+};
+
+/// A2b 최소 auth 셀렉터를 notification으로 직렬화한다: `{"jsonrpc":"2.0","method":"auth.self","params":{"surface_id":N,
+/// "cap_nonce":"<hex>"}}`. `surface_id`는 caller가 자기 surface를 주장하는 값(CLI가 `$MARU_PANE_ID`에서 읽음 — 실제
+/// env는 MARU_PANE_ID이고 그 값이 곧 surface_id다). `cap_nonce`(1e)는 CLI가 상속 capability fd(§8.5, MARU_CONTROL_CAP_FD)
+/// 에서 읽은 nonce(hex, 실 fd 상속은 1e-core 범위 밖)를 실어 self보다 넓은 scope를 요청한다. 둘 다 null이면 params `{}`
+/// (maru 밖 shell·no-cap = 서버가 metadata:self만, cap 없음). **§8.4 경계 정직**: selector는 비밀 토큰이 아니라 단순
+/// 주장이다(tty/pgrp 검증은 1g 후속); cap_nonce는 §8.5 capability로 resolve되는 실 grant다.
+pub fn serializeAuthSelf(gpa: std.mem.Allocator, surface_id: ?u64, cap_nonce: ?[auth_cap_nonce_len]u8) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    writeAuthSelf(&aw.writer, surface_id) catch return error.OutOfMemory;
+    writeAuthSelf(&aw.writer, surface_id, cap_nonce) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeAuthSelf(w: *std.Io.Writer, surface_id: ?u64) !void {
+fn writeAuthSelf(w: *std.Io.Writer, surface_id: ?u64, cap_nonce: ?[auth_cap_nonce_len]u8) !void {
     var s: std.json.Stringify = .{ .writer = w, .options = .{} };
     try s.beginObject();
     try s.objectField("jsonrpc");
@@ -428,27 +443,43 @@ fn writeAuthSelf(w: *std.Io.Writer, surface_id: ?u64) !void {
         try s.objectField("surface_id");
         try s.write(sid);
     }
+    if (cap_nonce) |nonce| {
+        try s.objectField("cap_nonce");
+        const hex = std.fmt.bytesToHex(nonce, .lower); // [2*len]u8
+        try s.write(&hex);
+    }
     try s.endObject();
     try s.endObject();
 }
 
-/// auth 셀렉터 프레임 한 줄에서 주장된 surface_id를 뽑는다(순수, 관대 파싱 — 서버 accept 스레드가 부른다). 반환:
-///  - notification `auth.self` + `params.surface_id`가 음이 아닌 정수 → 그 값.
-///  - 그 밖(파싱 실패·다른 method·surface_id 부재/음수/비정수) → null(셀렉터 없음, 서버가 self를 안 준다).
-/// 에러를 던지지 않는다(OOM은 파싱 실패로 접어 null) — 소켓 입력이라 방어적으로 다룬다.
-pub fn parseAuthSelector(gpa: std.mem.Allocator, bytes: []const u8) ?u64 {
-    var pm = parseMessage(gpa, bytes) catch return null;
+/// auth 셀렉터 프레임 한 줄에서 `{selector, cap_nonce}`를 뽑는다(순수, 관대 파싱 — 서버 accept 스레드가 부른다).
+///  - `selector`: notification `auth.self` + `params.surface_id`가 음이 아닌 정수 → 그 값, 아니면 null.
+///  - `cap_nonce`: `params.cap_nonce`가 정확히 `2*auth_cap_nonce_len` hex 문자면 디코드한 바이트, 아니면 null
+///    (부재·잘못된 길이·비-hex는 조용히 null = cap 없음).
+/// 에러를 던지지 않는다(OOM·파싱 실패·다른 method는 전부 빈 AuthFrame으로 접는다) — 소켓 입력이라 방어적으로 다룬다.
+pub fn parseAuthFrame(gpa: std.mem.Allocator, bytes: []const u8) AuthFrame {
+    var pm = parseMessage(gpa, bytes) catch return .{};
     defer pm.deinit();
-    if (pm.message != .notification) return null;
+    if (pm.message != .notification) return .{};
     const notif = pm.message.notification;
-    if (!std.mem.eql(u8, notif.method, auth_self_method)) return null;
-    const params = notif.params orelse return null;
-    if (params != .object) return null;
-    const sid_v = params.object.get("surface_id") orelse return null;
-    return switch (sid_v) {
-        .integer => |i| if (i >= 0) @intCast(i) else null,
-        else => null,
+    if (!std.mem.eql(u8, notif.method, auth_self_method)) return .{};
+    const params = switch (notif.params orelse return .{}) {
+        .object => |o| o,
+        else => return .{},
     };
+    var frame: AuthFrame = .{};
+    if (params.get("surface_id")) |sid_v| {
+        if (sid_v == .integer and sid_v.integer >= 0) frame.selector = @intCast(sid_v.integer);
+    }
+    if (params.get("cap_nonce")) |nonce_v| {
+        if (nonce_v == .string and nonce_v.string.len == 2 * auth_cap_nonce_len) {
+            var out: [auth_cap_nonce_len]u8 = undefined;
+            if (std.fmt.hexToBytes(&out, nonce_v.string)) |decoded| {
+                if (decoded.len == auth_cap_nonce_len) frame.cap_nonce = out;
+            } else |_| {} // 비-hex → cap 없음(관대)
+        }
+    }
+    return frame;
 }
 
 // ── ndjson 프레이머(§4.3) ─────────────────────────────────────────────────────────────────────────────────
@@ -893,7 +924,7 @@ test "hello: protocol/server_version/capabilities를 담은 notification으로 �
 
 // ── 5b) auth 셀렉터(A2b) 왕복·관대 파싱 ──
 test "auth.self: surface_id 있는 셀렉터 왕복 — serialize→parse가 값 보존, 한 줄" {
-    const wire = try serializeAuthSelf(testing.allocator, 42);
+    const wire = try serializeAuthSelf(testing.allocator, 42, null);
     defer testing.allocator.free(wire);
     try testing.expect(std.mem.indexOfScalar(u8, wire, '\n') == null); // 한 줄 프레임 불변식
     // notification 모양 확인.
@@ -901,27 +932,55 @@ test "auth.self: surface_id 있는 셀렉터 왕복 — serialize→parse가 값
     defer pm.deinit();
     try testing.expect(pm.message == .notification);
     try testing.expectEqualStrings(auth_self_method, pm.message.notification.method);
-    // parseAuthSelector가 값을 뽑는다.
-    try testing.expectEqual(@as(?u64, 42), parseAuthSelector(testing.allocator, wire));
+    // parseAuthFrame이 selector를 뽑고, nonce 없이 보낸 프레임은 cap_nonce=null.
+    const frame = parseAuthFrame(testing.allocator, wire);
+    try testing.expectEqual(@as(?u64, 42), frame.selector);
+    try testing.expect(frame.cap_nonce == null);
 }
 
-test "auth.self: surface_id 없음(null)이면 params 빈 객체 → parseAuthSelector null" {
-    const wire = try serializeAuthSelf(testing.allocator, null);
+test "auth.self: surface_id 없음(null)이면 params 빈 객체 → parseAuthFrame selector null" {
+    const wire = try serializeAuthSelf(testing.allocator, null, null);
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, wire));
+    const frame = parseAuthFrame(testing.allocator, wire);
+    try testing.expect(frame.selector == null and frame.cap_nonce == null);
 }
 
-test "parseAuthSelector 관대 파싱: 다른 method·잘못된 모양·음수·비정수는 null" {
+test "parseAuthFrame 관대 파싱: 다른 method·잘못된 모양·음수·비정수는 selector null" {
     // 다른 method(request)는 셀렉터 아님.
-    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}"));
+    try testing.expect(parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}").selector == null);
     // 손상 JSON.
-    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{not json"));
+    try testing.expect(parseAuthFrame(testing.allocator, "{not json").selector == null);
     // auth.self지만 surface_id 음수.
-    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":-1}}"));
+    try testing.expect(parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":-1}}").selector == null);
     // auth.self지만 surface_id 문자열.
-    try testing.expectEqual(@as(?u64, null), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\"x\"}}"));
+    try testing.expect(parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\"x\"}}").selector == null);
     // 큰 값(u64 도메인)도 보존.
-    try testing.expectEqual(@as(?u64, 9007199254740993), parseAuthSelector(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":9007199254740993}}"));
+    try testing.expectEqual(@as(?u64, 9007199254740993), parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":9007199254740993}}").selector);
+}
+
+// ── 5c) auth 프레임 cap_nonce(1e — capability nonce 왕복·관대 파싱) ──
+test "auth.self cap_nonce: 왕복 — serialize(nonce)→parseAuthFrame이 32바이트 nonce 보존 + selector 병존" {
+    const nonce: [auth_cap_nonce_len]u8 = [_]u8{0xAB} ** auth_cap_nonce_len;
+    const wire = try serializeAuthSelf(testing.allocator, 42, nonce);
+    defer testing.allocator.free(wire);
+    try testing.expect(std.mem.indexOfScalar(u8, wire, '\n') == null);
+    const frame = parseAuthFrame(testing.allocator, wire);
+    try testing.expectEqual(@as(?u64, 42), frame.selector); // selector·nonce 병존
+    try testing.expect(frame.cap_nonce != null);
+    try testing.expect(std.mem.eql(u8, &frame.cap_nonce.?, &nonce));
+}
+
+test "auth.self cap_nonce 관대 파싱: 잘못된 길이·비-hex·비-string은 cap_nonce null(selector는 보존)" {
+    // 짧은 hex(길이 불일치) → null, selector는 유효.
+    const short = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":7,\"cap_nonce\":\"abcd\"}}";
+    const f_short = parseAuthFrame(testing.allocator, short);
+    try testing.expectEqual(@as(?u64, 7), f_short.selector);
+    try testing.expect(f_short.cap_nonce == null);
+    // 올바른 길이지만 비-hex 문자(g) → null.
+    const nonhex = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"cap_nonce\":\"" ++ ("g" ** (2 * auth_cap_nonce_len)) ++ "\"}}";
+    try testing.expect(parseAuthFrame(testing.allocator, nonhex).cap_nonce == null);
+    // 정수 cap_nonce(비-string) → null.
+    try testing.expect(parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"cap_nonce\":123}}").cap_nonce == null);
 }
 
 // ── 6) method 네임스페이스 파싱 ──

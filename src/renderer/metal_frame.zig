@@ -2690,6 +2690,43 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     }
 }
 
+// [5] 리뷰: [0] 오버레이 순서 불변식([하이라이트][고스트][모달])의 헤드리스 회귀 테스트. 모달을 맨 뒤에 둬야 그
+// caret이 버퍼 suffix(overlay_cursor_cells)라 blink chop이 모달을 깜빡인다. replace가 PaneFrame에서 읽는 건
+// glyph_quad_frame(.glyphs/.overlays/.size)+draw_list.cells+glyph_raster_frame뿐(glyph_frame/backend 미접근)이라
+// 그 셋만 유효값·나머지 undefined로 최소 frame을 만든다. **RenderFrame.deinit 미호출**(undefined 필드 접근 회피);
+// overlays는 stack 배열, raster/glyphs/cells는 빈 리터럴이라 별도 free 없음.
+fn fakeCursorFrame(overlays: []renderer.DrawOverlay) renderer.RenderFrame {
+    return .{
+        .backend = undefined,
+        .glyph_frame = undefined,
+        .glyph_quad_frame = .{ .size = .{ .cols = 1, .rows = 1 }, .cursor = undefined, .dirty = null, .glyphs = &.{}, .overlays = overlays, .stats = .{} },
+        .draw_list = .{ .size = .{ .cols = 1, .rows = 1 }, .cursor = undefined, .dirty = null, .cells = &.{}, .overlays = &.{} },
+        .glyph_raster_frame = .{ .uploads = &.{}, .skips = &.{}, .pixels = &.{}, .stats = .{} },
+    };
+}
+
+test "replace [5]: 모달(caret)+드래그 고스트 공존 → modal caret이 버퍼 suffix([0] 순서 불변식)" {
+    const allocator = std.testing.allocator;
+    const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
+    const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
+    // 모달·고스트 둘 다 block 커서 overlay 1개(각 커서 셀 1) — origin으로 구별(모달=0·고스트=500).
+    var modal_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    var ghost_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    const modal_pf: PaneFrame = .{ .frame = fakeCursorFrame(&modal_ov), .origin_x = 0, .origin_y = 0, .colors = colors };
+    const ghost_pf: PaneFrame = .{ .frame = fakeCursorFrame(&ghost_ov), .origin_x = 500, .origin_y = 0, .colors = colors };
+
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+    // 마우스 드래그 중 ⌘F: overlay_frame(모달)+drag_overlay_frame(고스트) 공존. replace가 [고스트][모달] 순으로 조립.
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, modal_pf, ghost_pf, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+
+    // cursor_cells는 **모달**의 caret만(고스트 caret은 overlay_cursor_cells에 안 실림). 그 suffix가 버퍼 맨 끝 = 모달
+    // 셀이어야 blink chop이 맞다. 고스트를 모달 '뒤'에 append하는 리팩터([0] 재발)면 buf.cells 끝이 고스트(origin 500)라 실패.
+    try std.testing.expect(buf.cursor_cells >= 1);
+    try std.testing.expect(buf.cells.len >= 2); // 고스트 커서 셀 + 모달 커서 셀
+    try std.testing.expectEqual(@as(u32, 0), buf.cells[buf.cells.len - 1].origin_x); // 맨 끝 = 모달(origin 0), 고스트(500) 아님
+}
+
 test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid cells untouched (A)" {
     const allocator = std.testing.allocator;
     var buf: MetalFrameBuffer = .{};

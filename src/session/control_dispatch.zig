@@ -116,10 +116,13 @@ fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.
 /// `CapabilityStore`(L4가 소유·주입)로 요청의 `(caller_surface_id, scope)`를 판정한 뒤 read-only 라우터에 넘긴다.
 /// `dispatchReadOnly`가 auth를 **인자로 주입**받던 것을, 그 인자를 capability로 **발급**하는 상위 래퍼다(1d 헤더 §범위).
 ///
-/// 경로:
-///  - `cap_nonce == null`(cap 없음): 기존 self-origin 경로 — `caller = selector orelse 0`, `scope = .self`
+/// 경로(먼저 파싱 → method로 분기):
+///  - **`browser.*`(nonce 유무 무관, 5e)**: `control_browser.browserOpFromRequest`에 위임(cap은 nonce면 lookup, 없으면
+///    null). browser cap의 anchor는 selector가 아니라 target web surface(params.id). cap 부재/nonce 부재/deny 전부
+///    **균일 unauthorized**(리뷰 [2] — nonce 유무로 갈리면 §8.3 위배 + browser.* 존재 oracle). 게이트 통과면 `.browser` op.
+///  - `cap_nonce == null`(비-browser): 기존 self-origin 경로 — `caller = selector orelse 0`, `scope = .self`
 ///    (§8.4 A2b — maru 밖/no-cap shell은 자기 surface metadata만). 라이브 동작 불변(회귀 없음).
-///  - `cap_nonce` 제시: `control_capability.resolve`(store lookup → authorize → 균일 unauthorized)로 판정.
+///  - `cap_nonce` 제시(비-browser): `control_capability.resolve`(store lookup → authorize → 균일 unauthorized)로 판정.
 ///    grant면 capability가 실은 `(surface_id, scope)`로 read-only 라우터를 태우고, deny면 **균일 `unauthorized`**
 ///    (§8.3 oracle 방지 — resolve가 모든 deny 이유를 접는다). resolve는 method↔scope를 검사하므로 요청 method가
 ///    필요해 1a로 한 번 파싱한다(라우터가 다시 파싱하지만 로컬 소켓이라 이 이중 파싱은 무시할 비용, 라우터 단일화 유지).
@@ -155,11 +158,10 @@ pub fn dispatchAuthenticated(
     store: *const cap.CapabilityStore,
     now: u64,
 ) std.mem.Allocator.Error!AuthDispatch {
-    const nonce = cap_nonce orelse
-        return .{ .immediate = try dispatchReadOnly(gpa, request_bytes, snapshot, selector orelse 0, .self) };
-
-    // cap 제시 → method↔scope 검사에 method가 필요해 1a 파싱. parse 실패/비-request는 dispatchReadOnly와 동일 관례
-    // (id=null 에러)로 접는다. grant면 그 파싱한 req를 routeReadOnly에 **재파싱 없이** 넘긴다(리뷰 [10]).
+    // **먼저 파싱**한다 — browser.* 라우팅은 nonce 유무와 무관하게 method로 판정해야 한다(리뷰 [2]: cap_nonce 없는
+    // browser.*가 옛날엔 dispatchReadOnly로 새 method_not_found였고, nonce 있으면 unauthorized라 갈렸다 — §8.3 균일
+    // unauthorized 위배 + browser.* 존재 oracle). parse 실패/비-request는 기존 관례(id=null 에러)로 접는다. 파싱한
+    // req를 아래 모든 경로가 재사용해 재파싱이 없다(리뷰 [10]).
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return .{ .immediate = try errorResponse(gpa, .null, cp.parseFailureCode(e)) },
@@ -170,18 +172,21 @@ pub fn dispatchAuthenticated(
         else => return .{ .immediate = try errorResponse(gpa, .null, .invalid_request) },
     };
 
-    // ── 5e: browser.*는 control_browser에 위임(anchor=target web surface, selector 무관). ──
+    // ── 5e: browser.*는 **nonce 유무 무관** control_browser에 위임(anchor=target web surface, selector 무관). cap은
+    //       nonce 있으면 lookup, 없으면 null → browserOpFromRequest가 **균일 unauthorized**(cap 부재도 nonce 부재도 동일). ──
     if (cp.parseMethod(req.method).core == .browser) {
-        // cap을 lookup해 넘긴다(null=cap 없음 → browserOpFromRequest가 균일 unauthorized). browser cap의 authz는
-        // 그 함수가 target(params.id)를 앵커로 수행하므로 여기선 resolve(selector 앵커)를 안 쓴다.
-        const caller_cap = store.lookupByNonce(nonce);
+        const caller_cap = if (cap_nonce) |n| store.lookupByNonce(n) else null;
         return switch (try cb.browserOpFromRequest(gpa, req, snapshot, caller_cap, now)) {
             .err => |e| .{ .immediate = e },
             .op => |op| .{ .browser = op },
         };
     }
 
-    // ── 비-browser: 기존 metadata resolve 경로(anchor=selector). ──
+    // ── 비-browser + nonce 없음: 기존 self-origin 경로(회귀 없음). 파싱한 req를 routeReadOnly에 직접 넘긴다(재파싱 없음). ──
+    const nonce = cap_nonce orelse
+        return .{ .immediate = try routeReadOnly(gpa, req, snapshot, selector orelse 0, .self) };
+
+    // ── 비-browser + nonce: metadata resolve 경로(anchor=selector). ──
     const anchor = selector orelse 0;
     switch (cap.resolve(store, nonce, anchor, 0, req.method, now)) {
         .unauthorized => return .{ .immediate = try errorResponse(gpa, req.id, .unauthorized) },
@@ -559,6 +564,23 @@ test "dispatchAuthenticated 5e: browser cap + browser.navigate(web) → .browser
     const w_cross = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 11, n_browser, &store);
     defer testing.allocator.free(w_cross);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_cross));
+}
+
+// 리뷰 [2]: cap_nonce **없는** browser.*도 균일 unauthorized여야 한다(옛날엔 self 경로로 새 method_not_found였음 —
+// §8.3 위배 + nonce 유무로 browser.* 존재가 갈리는 oracle). 대조: nonce 있으나 store 빈(미지 nonce)도 unauthorized라
+// 바이트까지 동일해야 nonce 유무가 안 샌다.
+test "dispatchAuthenticated 5e[2]: cap_nonce 없는 browser.navigate → 균일 unauthorized(method_not_found 아님·nonce 유무 무oracle)" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"https://x\"}}";
+    // nonce 없음(cap fd 못 받은 shell) → 균일 unauthorized(옛 method_not_found 회귀).
+    const w_none = try authDispatch(req, 11, null, &store);
+    defer testing.allocator.free(w_none);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_none));
+    // 미지 nonce(빈 store) → 역시 unauthorized. nonce 유무로 응답이 안 갈린다(바이트 동일 = oracle 없음).
+    const w_unknown = try authDispatch(req, 11, n_unknown, &store);
+    defer testing.allocator.free(w_unknown);
+    try testing.expectEqualStrings(w_none, w_unknown);
 }
 
 // 리뷰 [4] 회귀: read_output은 non-metadata지만 session.capture를 **실제로 인가**하는 유일한 scope다(다른 non-metadata

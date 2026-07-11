@@ -28,6 +28,14 @@ TerminalInput
 - app shortcut이 아닌 key event만 terminal input encoding을 거쳐 PTY로 간다.
 - `TerminalCore`는 글로벌 핫키 존재를 몰라야 한다.
 
+### 입력 대상 라우팅 통합 (후속 — 계획)
+
+평문/IME 확정 텍스트·조합(preedit)을 **어느 입력이 받나**는 `AppSession.inputFocus()`(단일 출처 enum: `terminal`·`confirm`·`notice`·`settings`·`rename`·`sidebar_search`·`find`·`palette`·`addr_edit`)가 판정하고, 그 판정을 **exhaustive switch 여러 곳**(`imeSetPreedit`·`imeComposingActive`·`commitComposition`·`overlayCaretRect`·`routeCommittedText`)이 소비한다. 컴파일러가 케이스 누락을 잡아 **안전**하지만, 새 입력 대상 하나를 추가하면 **각 switch에 케이스**를 넣어야 하고(주소창 7e-2 추가 시 실제로 5곳 — 그 중 `routeCommittedText`를 놓쳐 "조합 아닌 평문이 터미널로 새는" IME 버그가 났었다), 같은 디스패치("활성 입력의 메서드 호출")가 여러 곳에 복제되는 냄새가 있다.
+
+**장기 방향**: 텍스트 입력 프리미티브는 `OverlayInput`(query/preedit·caret·가로 스크롤·EAW 단일 출처) **하나로 수렴**한다 — `find`/`palette`/`rename`/`sidebar_search`/`addr_edit`는 이미 그것이고, **`settings`의 고정 버퍼 편집(마지막 중복)을 OverlayInput으로 이주**한다. 그러면 "활성 OverlayInput"이 동종이므로 `activeTextInput() ?*OverlayInput` 하나로 뽑아, 위 switch들을 `if (activeTextInput()) |in| in.method(...) else <터미널>` 형태로 **접을 수 있다**("누가 활성인가"를 한 곳에서만 판정, 각 호출부는 스위치 없이 메서드만). **터미널은 정당한 예외**(버퍼가 아니라 PTY로 확정 전송·preedit이 core에 있음)라 명시적 단일 특수 케이스로 남긴다. 각 기능(주소창 URL 검증·네비, find 검색 등)의 **행동**은 프리미티브가 아니라 그 위에 얹는다(공유 프리미티브 + 개별 기능 분리).
+
+**순서**: IME·키 경로(민감)를 건드리는 회귀 위험이 있어 Phase 7(인앱 브라우저) 안정 후 **별도 슬라이스**로 한다(주소창 addr_edit 추가가 동기 증거). 지금은 프리미티브를 더 늘리지 않는 것(신규 텍스트 입력은 OverlayInput 재사용)만으로 충분하다.
+
 ## 설정 범주
 
 config는 다음 범주를 분리한다. 실제 형식은 `keybind = <chord> = <action>` 한 줄이며, 전역은 chord 앞 `global:` 접두사로 구분한다(형식·키는 [설정(config) 파일](configuration.md)이 단일 출처).

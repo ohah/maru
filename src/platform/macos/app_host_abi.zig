@@ -1803,7 +1803,8 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
 /// **1e**: `dispatchAuthenticated`가 auth 프레임의 `{selector, cap_nonce}`(pending)와 라이브 `control_cap_store`로
 /// `(caller, scope)`를 발급한다 — cap_nonce 없으면 기존 metadata:self(§8.4 A2b, 회귀 없음), 있으면 resolve(빈 store라
 /// 지금은 default-deny). **§8.4 self 경로 한계 유지**: nonce 없는 same-uid peer는 임의 surface를 self로 주장할 수 있고
-/// tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만(§8.3 self 필터). `now`=벽시계 초(TTL 판정용, 순수 코어에 주입).
+/// tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만(§8.3 self 필터). `now`=**모노토닉 awake 초**(TTL 판정용, 순수
+/// 코어에 주입 — 미래 fd 발급도 같은 시계로 expires_at 계산해야 정합; wall-clock 아님, 아래 impl 참조 — 리뷰 [2]).
 fn buildControlResponse(
     server: *control_server_mod.ControlServer,
     refs: []const ControlSessionRef,

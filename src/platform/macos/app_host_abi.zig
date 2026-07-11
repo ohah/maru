@@ -1373,6 +1373,15 @@ pub export fn maru_macos_app_session_active_web_surface_id(session: ?*AppSession
     return app_session.activeWebSurfaceId();
 }
 
+// Phase 7f-0: 새 창/팝업 adopt — Swift `WKUIDelegate.createWebViewWith`가 WebKit config로 만든 WKWebView를 붙일
+// browser web Term을 활성 pane에 새 탭으로 만들고 그 surface_id를 반환한다(Swift-first 동기 생성 — 소유·시점 역전).
+// Swift는 이 id로 pre-created webview를 webPanels에 키잉하고, drain은 존재 시 중복 생성을 스킵한다(7f-1). 반환:
+// 새 surface_id(>=1), 또는 0(null session·생성 실패 sentinel). 신규 export만 — 구조체 offset 불변.
+pub export fn maru_macos_app_session_create_adopted_web_term(session: ?*AppSession) u64 {
+    const app_session = session orelse return 0;
+    return app_session.createAdoptedWebTermInActivePane() catch 0;
+}
+
 // ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
 //
 // 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root
@@ -2052,6 +2061,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_browser_nav(null, 42, 3));
     // v108 Phase 7e-4 후속 active_web_surface_id: null session은 0(browser 아님 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id(null));
+    // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
 }
 
 test {

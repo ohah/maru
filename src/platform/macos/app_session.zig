@@ -140,7 +140,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 108;
+pub const abi_version: u32 = 109;
+// 109: Phase 7f-0 — 새 창/팝업 adopt: create_adopted_web_term export 1개(Swift `WKUIDelegate.createWebViewWith`가
+// WebKit config로 만든 WKWebView를 붙일 browser web Term을 활성 pane에 새 탭으로 만들고 surface_id 반환 — Swift-first
+// 동기 생성, 소유·시점 역전). Swift가 id로 pre-created webview를 webPanels에 키잉, drain은 존재 시 중복 생성 스킵(7f-1).
+// 신규 export만 — 구조체 offset 불변. docs/web-panel.md §8 7f.
 // 108: Phase 7e-4 후속 — active_web_surface_id getter 1개(활성 pane 활성 term이 browser면 surface_id, 아니면 0). Swift
 // performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 WKWebView 키보드 포커스 유무와 무관하게 "지금 활성 탭이
 // browser면" 동작하게 게이트하는 데 쓴다(브라우저 탭 활성화 시 webView 자동 포커스가 없어 isWebPanelFocused만으론
@@ -3655,6 +3659,22 @@ pub const AppSession = struct {
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)
         self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)
+    }
+
+    /// Phase 7f-0: 팝업(`WKUIDelegate.createWebViewWith`) adopt용 — Swift가 WebKit이 넘긴 config로 **이미 만든**
+    /// WKWebView를 붙일 browser web Term을 활성 pane에 새 탭으로 만들고 그 surface_id를 돌려준다(Swift-first 동기 생성).
+    /// `newWebTermInActivePane` 미러이되 (1) 팝업은 임의 외부 콘텐츠라 **항상 browser(비신뢰)** 이고 (2) surface_id를
+    /// 반환해 Swift가 pre-created webview를 `webPanels[surface_id]`에 키잉하게 한다(소유·시점 역전: 평소 Zig-first lazy
+    /// 생성과 반대). create 전이는 평소대로 emit되며, Swift drain이 `webPanels[surface_id]` 존재 시 중복 WKWebView 생성을
+    /// 스킵한다(7f-1) — 이 함수는 term/트리만 만든다. 실패는 호출처(ABI)가 0(sentinel)으로 접는다.
+    pub fn createAdoptedWebTermInActivePane(self: *AppSession) !u64 {
+        const pane = self.activePane();
+        const term = try self.createWebTerm(.browser); // 팝업 = untrusted browser 고정(§7 격리)
+        errdefer self.destroyTerm(term); // append 실패 시 방금 만든 term 롤백(newWebTermInActivePane과 동형)
+        try pane.terms.append(self.allocator, term);
+        self.focusTerm(pane.terms.items.len - 1); // 새 탭으로 포커스(사용자가 연 새 창 = 활성)
+        self.metal_dirty = true;
+        return term.surfaceId();
     }
 
     /// 키보드 pane 이동 — 활성 panel에서 direction 방향의 인접 panel로 포커스를 옮긴다(있으면). split이 없거나
@@ -31887,6 +31907,48 @@ test "web surface transitions: per-Term batch carries visibility and advances pr
 
     // 범위 밖 조회는 op=none(무동작 폴백).
     try std.testing.expectEqual(WebSurfaceOp.none, session.webSurfaceTransitionAt(5).op);
+}
+
+test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 + surface_id 반환 (7f-0 헤드리스)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const terms_before = pane.terms.items.len;
+
+    // 팝업 adopt term 생성 → 유효 surface_id 반환(1부터 발급, 0=sentinel).
+    const sid = try session.createAdoptedWebTermInActivePane();
+    try std.testing.expect(sid != 0);
+
+    // 활성 pane에 새 탭이 하나 늘고, 마지막 Term이 browser web이며 focusTerm으로 활성이다.
+    try std.testing.expectEqual(terms_before + 1, pane.terms.items.len);
+    const term = pane.terms.items[pane.terms.items.len - 1];
+    try std.testing.expect(term.kind == .web);
+    try std.testing.expect(term.web_panel_kind == .browser); // 팝업=untrusted browser 고정
+    try std.testing.expectEqual(sid, term.surfaceId());
+    try std.testing.expectEqual(pane.terms.items.len - 1, pane.active_term);
+
+    // 반환 id == activeWebSurfaceId(7e-4 nav 단축키 게이트가 소비) — 새 팝업 탭이 활성 browser.
+    try std.testing.expectEqual(sid, session.activeWebSurfaceId());
+
+    // create 전이가 이 surface에 emit(활성 탭이라 visible) — Swift drain이 소비하며 7f-1이 중복 WKWebView 생성을 스킵.
+    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
+    const t = session.webSurfaceTransitionAt(0);
+    try std.testing.expectEqual(WebSurfaceOp.create, t.op);
+    try std.testing.expectEqual(sid, t.surface_id);
+    try std.testing.expect(t.visible);
+    try std.testing.expect(t.panel_kind == .browser);
 }
 
 // 4e-5: new_web_tab dispatch가 활성 pane에 web Term을 append+활성화(4e-1/2/3 경로 재사용)하고, tick epilogue가

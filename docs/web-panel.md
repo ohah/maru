@@ -67,7 +67,7 @@
 **불변식(단일 출처)**: **`firstResponder` ⟺ Zig 활성 pane**.
 - 활성 pane의 활성 term이 **web term** → 그 **webview**가 firstResponder.
 - 활성 pane의 활성 term이 **terminal** → **터미널 뷰**가 firstResponder.
-- **override(우선순위)**: **모달 열림**(anyOverlayOpen) > **주소창 편집**(addr_edit) → **터미널 뷰**(그 입력은 Zig `handleKeyEvent` 경로라 터미널 뷰가 소유). 모달/편집이 끝나면 불변식이 복원한다(별도 focus-restore pending 불요).
+- **override(우선순위)**: **모달 열림**(notice 제외) 또는 **터미널-라우팅 텍스트 입력**(주소창 편집·rename·사이드바 검색) → **터미널 뷰**(그 입력은 Zig `handleKeyEvent` 경로라 터미널 뷰가 소유). 이 판정은 Zig `terminalOwnsInput`(=`anyModalOverlayOpen ∪ addr_edit ∪ rename ∪ sidebar_search`) **단일 출처**다(4g-3 통합, ABI `terminal_owns_input`). 모달/편집이 끝나면 불변식이 복원한다(별도 focus-restore pending 불요). 비-모달 notice(토스트)는 제외 — 지나가는 토스트가 입력 responder를 뺏으면 안 되고, Zig 키 intercept(rename/addr_edit/sidebar_search)도 같은 `anyModalOverlayOpen` 게이트를 쓴다.
 
 **두 방향 동기(매 tick `reconcileWebFocus`, 순서 중요)**:
 1. **Direction 2 — webview 클릭 → Zig 활성**: webview가 **새로 firstResponder가 된 rising edge**(= 사용자가 그 web 콘텐츠를 클릭)면 `activate_surface`로 Zig 활성 pane을 그 surface로 동기한다. **rising edge인 이유**: 키보드 전환 후 webview가 stale 포커스로 남은 경우(활성=terminal인데 webview 포커스)와 싸우지 않게 — "새 클릭"만 반영한다.
@@ -85,6 +85,7 @@
 - **4g-0 (Zig — 구현 완료)**: `activeWebSurfaceIdAnyKind` getter(활성 term이 web[browser·markdown]이면 surface_id, 아니면 0, ABI v112) + 헤드리스 테스트(터미널=0·browser/markdown=id·browser-only는 markdown서 0=핵심 구분).
 - **4g-1 (Swift — 구현 완료, GUI 손 테스트 통과)**: 통합 `reconcileWebFocus`(override → Direction 2 rising-edge → Direction 1) 구현, `reconcileWebModalFocus`·`reconcileWebFocusActivation` **대체·삭제**. override용 `addr_edit_surface` getter(ABI v113). 미사용 `lastOverlayOpen`·`stashedWebFocusSurfaceId` 제거. 손 테스트: 모달 Enter·터미널/브라우저 클릭·키보드 pane/탭 전환(새로 닫은 갭)·주소 편집·팝업·터미널 IME 무회귀 전부 통과.
 - **4g-2 (정리 — 완료)**: **검토 결론**: `addr_focus_restore_pending`(주소 편집 종료 후 webview 복원)·⌘R `activeWebSurfaceId` 게이트는 불변식 Direction 1에 **subsume**되지만(D1이 복원·브라우저 탭 활성 시 webview 포커스), **제거 시 ABI export 제거+체인+손 테스트인데 동작 이득 0**(D1과 same-tick 복원)이라 **belt-and-suspenders로 유지**(harmless 중복 — 즉시 복원 fast-path/견고한 게이트, D1이 authority; 향후 저우선 cleanup서 제거 가능). ⌘R KVO `assumeIsolated`(13차 리뷰 [7] PLAUSIBLE)=**유지**(WKWebView nav KVO는 WebKit 메인 스레드 갱신·off-main 미관측 + 코드베이스 확립 패턴[NSColorSampler 등 7곳] + 근거 없는 방어 지양; 실 크래시 관측 시 dispatch 전환). 주석에 근거 명시.
+- **4g-3 (14차 리뷰 후속 — 완료)**: override 판정을 `anyOverlayOpen ∪ addr_edit`에서 **`terminalOwnsInput` 단일 출처**로 교체(ABI `addr_edit_surface`→`terminal_owns_input`, v113→v114). 옛 override는 ⑴ **rename·사이드바 검색을 빠뜨려** web pane 활성 중 그 편집 키가 웹뷰로 샜고(리뷰 [0]) ⑵ **notice까지 세어** 비-모달 토스트가 편집 responder를 뺏었다(리뷰 [3]). 겸사로 Zig 키 intercept 3개(rename/addr_edit/sidebar_search)도 `anyOverlayOpen`→`anyModalOverlayOpen`으로 일치, 주소창 편집 chord 처리는 **⌘A/C/V/X/Z를 제외**해 ⌘V가 편집을 통째 날리던 회귀 수정([1], 소비 no-op으로 편집 보존·실 붙여넣기는 후속), 잘못된 주소 무효 시 편집 유지 docstring 정정([5]), `focusTerminalView` 재downcast→바인딩된 `tv` 재사용([8]). **헤드리스**: 브라우저 web term 닫기 확인([4]) + `terminal_owns_input(null)=0` ABI 테스트. **GUI 손 테스트 필요**: web pane 위 rename/사이드바 검색이 웹뷰로 안 새는지, 주소창서 ⌘V가 편집을 안 지우는지, 모달 Enter·키보드 pane 전환 무회귀.
 
 **리스크·검증**: 코어 포커스라 회귀 시 **모달·타이핑·IME가 깨진다** → firstResponder는 AppKit이라 헤드리스 불가, **GUI 손 테스트가 유일 안전망**(§11). 특히 `reconcileWebModalFocus`(검증된 모달 Enter 동작)를 대체하므로 그 무회귀를 재확인한다. Zig getter(4g-0)만 헤드리스. 기존 터미널 IME/keyDown은 **한 줄도 안 건드림**(4d 규율 유지 — override는 makeFirstResponder만).
 

@@ -140,7 +140,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 113;
+pub const abi_version: u32 = 114;
+// 114: Phase 4g-1 후속(14차 리뷰 [0][3]) — focus-sync override 단일 출처: addr_edit_surface를 terminal_owns_input getter로
+// 교체(모달[notice 제외]·주소창 편집·rename·사이드바 검색 중 하나라도면 1). 옛 getter는 rename·사이드바 검색을 빠뜨려
+// web pane 활성 중 그 편집이 웹뷰로 새고 notice까지 세는 버그. export 교체(개수 불변) — 구조체 offset 불변. §4.1.
 // 113: Phase 4g-1 — focus-sync 불변식 override: addr_edit_surface getter 1개(주소창 편집 중 surface_id, 아니면 0).
 // 통합 reconcileWebFocus가 편집 중(모달과 함께 override)엔 불변식 대신 터미널 뷰로 firstResponder를 강제하는 데 쓴다
 // (편집 키가 Zig 경로라 터미널 뷰 소유). 순수 read getter만 추가 — 구조체 offset 불변. docs/web-panel.md §4.1.
@@ -7586,8 +7589,9 @@ pub const AppSession = struct {
         self.addr_focus_pull_pending = surface_id;
     }
 
-    /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다.
-    pub fn addrEditSurfaceId(self: *const AppSession) ?u64 {
+    /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다(파일 내부 전용, ABI export는
+    /// terminal_owns_input으로 대체돼 더는 pub 아님).
+    fn addrEditSurfaceId(self: *const AppSession) ?u64 {
         return self.addr_edit;
     }
 
@@ -7611,7 +7615,9 @@ pub const AppSession = struct {
     }
 
     /// Enter — 편집 텍스트(query)를 resolveNavUrl로 검증. 유효(허용 스킴/프리픽스 가능)하면 navigate pending(surface_id +
-    /// resolved url)을 세우고, 무효(null)면 로드하지 않는다. 두 경우 다 편집을 종료(addr_input.clear)하고 focus-restore를 세운다.
+    /// resolved url)을 세우고 편집을 종료(addr_input.clear)+focus-restore를 세운다. **무효(null)면 로드하지 않고 편집을
+    /// 그대로 유지**한다(clear·focus-restore 안 함) — 조용히 지워 무시하지 않고 사용자가 고쳐 재-Enter하거나 Esc로 취소하게
+    /// 한다(제보 "잘못된 주소가 그냥 무시됨"). 상세는 아래 else 분기 주석 참조.
     fn commitAddrEdit(self: *AppSession) void {
         if (self.addr_edit) |sid| {
             // query(편집)에서 읽어 addr_navigate_url_buf(별도 세션 필드)로 쓴다 — aliasing 없음. resolved는 그 버퍼 슬라이스라
@@ -10565,10 +10571,12 @@ pub const AppSession = struct {
         // 인라인 rename이 활성이면 키를 rename 편집기로 라우팅한다 — chrome 모달과 같은 최상위 규율(배타적: startRename이
         // find/palette를 닫음). Enter=확정·Esc=취소·Backspace·평문 글자를 handleRenameKey가 처리하고 모든 키를 소비한다
         // (텍스트 필드라 터미널/단축키로 안 흘린다). IME 조합은 imeSetPreedit/imeEnd가 rename_input에 직접 넣는다.
-        // **단 오버레이(모달/notice)가 열려 있으면 양보한다**(`and !anyOverlayOpen`) — ⌘Q 종료 모달이 rename 중 뜨면 첫
+        // **단 모달 오버레이가 열려 있으면 양보한다**(`and !anyModalOverlayOpen`) — ⌘Q 종료 모달이 rename 중 뜨면 첫
         // Enter가 확정이 아니라 commitRename으로 새는 걸 막고 아래 모달 핸들러가 받게 한다(rename 상태는 유지=모달 닫히면
         // 편집 재개). 마우스 클릭엔 mouse-down commit 가드가 이미 안전하지만 Cmd+Q 메뉴 경로는 이 게이트가 필요하다(리뷰 [2]).
-        if (self.rename != null and !self.anyOverlayOpen()) {
+        // 비-모달 notice(토스트)는 제외 — 지나가는 토스트가 활성 편집을 끊으면 안 되고, terminalOwnsInput(Swift focus-sync
+        // override 단일 출처)도 anyModalOverlayOpen을 쓰므로 일치시킨다(14차 리뷰 [3]).
+        if (self.rename != null and !self.anyModalOverlayOpen()) {
             self.handleRenameKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             self.total_app_key_events += 1; // rename(앱)이 소비
@@ -10579,17 +10587,26 @@ pub const AppSession = struct {
         // Phase 7e-2a: browser 주소창 편집이 활성이면 키를 주소창 편집으로 라우팅한다(rename과 같은 최상위 규율 — 활성 중
         // 모든 키 소비, 터미널/단축키로 안 흘린다). Enter=확정(navigate)·Esc=취소·Backspace·평문 글자를 handleAddrEditKey가
         // 처리한다. 시각(metal_dirty·blink)은 여기서 세운다(상태 전이 메서드는 순수 코어라 시각 부수효과 없음).
-        // **단 오버레이(모달/notice)가 열려 있으면 양보한다**(`and !anyOverlayOpen`) — 편집 중 ⌘Q 종료 모달이 뜨면 첫
+        // **단 모달 오버레이가 열려 있으면 양보한다**(`and !anyModalOverlayOpen`) — 편집 중 ⌘Q 종료 모달이 뜨면 첫
         // Enter가 confirm이 아니라 commitAddrEdit(navigate)로 새던 걸 막고 아래 모달 핸들러가 받게 한다. addr_edit 상태는
-        // 유지 = 모달이 닫히면 편집 재개(리뷰 [2]).
-        if (self.addr_edit != null and !self.anyOverlayOpen()) {
+        // 유지 = 모달이 닫히면 편집 재개(리뷰 [2]). 비-모달 notice는 제외(terminalOwnsInput과 일치, 14차 리뷰 [3]).
+        if (self.addr_edit != null and !self.anyModalOverlayOpen()) {
             const ie = chromeInputFromKeyEvent(event);
             // cmd/ctrl 단축키(⌘[·⌘T 등)는 편집기가 삼키지 않고 **아래 keybinding 경로로 흘린다**(제보: 주소창서 단축키 안
             // 먹음 — 브라우저 URL 바에서도 앱 단축키는 동작해야). 단축키가 pane/탭 컨텍스트를 바꾸므로 편집을 취소한다
-            // (navigate 안 함). fall-through라 return 안 함. **텍스트 편집 chord(⌘V 붙여넣기·⌘A 등)도 지금은 함께 흘린다**
-            // — OverlayInput이 chord 편집 미지원이라(후속). enter/esc/backspace/평문은 편집기가 처리.
+            // (navigate 안 함). fall-through라 return 안 함. **단 텍스트 편집 chord(⌘A/C/V/X/Z)는 제외** — pane/탭
+            // 컨텍스트를 안 바꾸므로 취소·fall-through 대상이 아니고, 아래 else(handleAddrEditKey)의 `.char` 핸들러가
+            // command/control mods를 보고 early-return하는 소비 no-op이 되어 **편집을 보존**한다(OverlayInput이 chord 편집
+            // 미지원이라 실제 붙여넣기는 후속). ⌘V가 주소창 편집을 통째 날리던 회귀 수정(14차 리뷰 [1]).
             const is_shortcut_chord = switch (ie) {
-                .key => |k| k.mods.command or k.mods.control,
+                .key => |k| blk: {
+                    if (!(k.mods.command or k.mods.control)) break :blk false;
+                    if (k.mods.command and k.key == .char) {
+                        const c = k.codepoint | 0x20; // ASCII 소문자화(비-letter는 비교서 자연 탈락)
+                        if (c == 'a' or c == 'c' or c == 'v' or c == 'x' or c == 'z') break :blk false;
+                    }
+                    break :blk true;
+                },
                 else => false,
             };
             if (is_shortcut_chord) {
@@ -10608,9 +10625,9 @@ pub const AppSession = struct {
         }
         // 사이드바 검색바가 활성이면 키를 검색 입력으로 라우팅한다(rename과 같은 규율 — 활성 중 모든 키 소비).
         // Enter=첫 매칭 이동·Esc=종료·Backspace·평문 글자를 handleSidebarSearchKey가 처리한다(단축키 조합은 안 쌓음).
-        // **오버레이(모달/notice)가 열려 있으면 양보한다**(rename·addr_edit과 같은 게이트 — ⌘Q 종료 모달 첫 Enter가 검색
-        // 이동으로 새는 걸 막고 아래 모달 핸들러가 받게; 검색 상태는 유지, 리뷰 [2]).
-        if (self.sidebar_search_active and !self.anyOverlayOpen()) {
+        // **모달 오버레이가 열려 있으면 양보한다**(rename·addr_edit과 같은 게이트 — ⌘Q 종료 모달 첫 Enter가 검색
+        // 이동으로 새는 걸 막고 아래 모달 핸들러가 받게; 검색 상태는 유지, 리뷰 [2]). 비-모달 notice는 제외(14차 리뷰 [3]).
+        if (self.sidebar_search_active and !self.anyModalOverlayOpen()) {
             self.handleSidebarSearchKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             self.total_app_key_events += 1; // 검색(앱)이 소비
@@ -10996,6 +11013,15 @@ pub const AppSession = struct {
     fn anyModalOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
         return h.confirm.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
+    }
+
+    /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
+    /// anyModalOverlayOpen) 또는 터미널-라우팅 텍스트 입력(주소창 편집·rename·사이드바 검색) 중 하나라도 활성. focus-sync
+    /// 불변식(reconcileWebFocus)의 **override 단일 출처**로 쓴다: 이 값이면 웹뷰가 아니라 터미널 뷰가 firstResponder여야
+    /// (그 키/IME가 Zig 경로). 옛 override(anyOverlayOpen or addr_edit만)는 rename·사이드바 검색을 빠뜨려 web pane 활성 중
+    /// 그 편집이 웹뷰로 새고(리뷰 [0]), notice까지 세어 토스트가 편집 키를 뺏었다(리뷰 [3]) — 여기서 정정.
+    pub fn terminalOwnsInput(self: *const AppSession) bool {
+        return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or self.sidebar_search_active;
     }
 
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
@@ -32978,6 +33004,42 @@ test "close-confirm: 명령 실행 중(OSC 133 command)이면 확인 모달을 �
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_close != null);
+}
+
+// Phase 7f/4g: 브라우저 web term은 셸 명령이 없어(rt.live_initialized=false → termHasRunningJob 즉시 false) running-job
+// 게이트를 안 타 조용히 닫히던 것을, 열린 웹 페이지=잃을 수 있는 상태라 "닫을까요?" 확인 모달로 게이트한다(제보). 실행 중
+// 명령이 전혀 없어도 scopeHasWebBrowser 분기가 모달을 띄우는 걸 requestClose 진입점부터 증명한다(14차 리뷰 [4]).
+test "close-confirm: 브라우저 web term은 실행 중 명령 없이도 확인 모달을 띄운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 활성 pane에 browser web Term을 추가·활성화 → pane이 [terminal, browser]라 .term_or_pane이 .term으로 해석되고
+    // 활성 term=browser. web term은 live_initialized=false라 running job이 아니다(이게 조용히 닫히던 버그의 핵).
+    const w1 = try session.createWebTerm(.browser);
+    const pane = session.activePane();
+    try pane.terms.append(allocator, w1);
+    session.focusTerm(pane.terms.items.len - 1);
+    try std.testing.expectEqual(web_panel_layout.PanelKind.browser, pane.activeTerm().web_panel_kind);
+    try std.testing.expect(!session.closeTargetHasRunningJob(.term_or_pane)); // 셸 명령 없음
+    try std.testing.expect(session.scopeHasWebBrowser(.term)); // 하지만 브라우저는 있음
+
+    // requestClose → 실행 중 명령이 없어도 웹 브라우저라 확인 모달을 띄우고 닫기를 보류(안 닫음).
+    const terms_before = pane.terms.items.len;
+    session.requestClose(.term_or_pane);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_close != null);
+    try std.testing.expectEqual(terms_before, pane.terms.items.len); // 아직 안 닫음(확정 대기)
 }
 
 // 마지막(유일) 창에서 세션 전체를 닫는 인앱 제스처(⌘W cascade 끝)는 창 하나 닫기가 아니라 앱 종료다 — Cmd+Q와 동일한

@@ -15349,9 +15349,10 @@ pub const AppSession = struct {
         // 순간 투영한다(그 surface에 머문 것과 동형). 비-sync surface는 sync_active=false라 metal_dirty로 즉시 투영(stale 없음).
         // 트레이드오프: mid-sync surface로 전환하면 완성까지 직전 탭 프레임이 잠깐 보인다 — 보통 ≤1 프레임(다음 ESU)이나
         // 대상 sync가 stall하면 최악 ~1초(syncTimeoutTicks 강제 해제)까지. 지속 blank를 sub-frame~≤1초 잔상으로 바꾸는 순개선.
-        // ⚠️ 밴드에이드(전환마다 특수 리셋): 루트코즈는 이 3개 baseline이 단일 필드인 것(sync_esu_count처럼 per-surface여야
-        // 한다). per-surface로 옮기면 이 리셋 블록과 last_ticked_surface_id 추적이 통째로 불필요해진다 — 별도 후속
-        // (단일 출처: docs/io-render-threading.md §11.7).
+        // ⚠️ 이 전환-리셋은 sync 게이트 baseline이 단일 AppSession 필드 vs per-surface 비교 대상이라는 미스매치를 메운다.
+        // per-surface로 옮겨도 배경 reader가 코어를 계속 진행시켜(esu/view_offset) 재활성화 리셋이 여전히 필요하므로 이 블록이
+        // 안 사라진다 — 이게 최소 해법이다. blank·이전-탭 잔상을 둘 다 없애려면 per-surface 완성-프레임 스냅샷(큰 변경)이
+        // 필요하고 잔상 체감 시에만 값어치가 있다(대안·근거 분석: docs/io-render-threading.md §11.7).
         {
             const active_id = self.activeSurface().id;
             if (active_id != self.last_ticked_surface_id) {

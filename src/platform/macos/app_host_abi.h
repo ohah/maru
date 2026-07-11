@@ -1136,4 +1136,13 @@ uint32_t maru_macos_control_take_browser_op(uint64_t *out_async_id, uint64_t *ou
    (늦은 콜백). 메인 스레드에서만(WKWebView 콜백이 메인). */
 void maru_macos_control_complete_browser_op(uint64_t async_id, uint32_t status, const uint8_t *result, size_t result_len);
 
+/* 5e-2b-2(테스트 전용): env MARU_TEST_BROWSER_CAP이 설정됐을 때만 surface_id에 묶인 browser cap을 라이브 store에
+   발급하고 nonce(raw 32B)를 out_nonce로 넘긴다. 반환 1=발급·0=env 미설정/용량 부족/실패. macos smoke가 소켓
+   browser.navigate(이 nonce)→실 WKWebView 이동을 자동 증명하는 용도. 프로덕션 무영향(env 미설정=무동작). 메인 스레드만. */
+uint32_t maru_macos_control_test_issue_browser_cap(uint64_t surface_id, uint8_t *out_nonce, size_t out_nonce_cap);
+
+/* 5e-2b-2(테스트 전용): 라이브 컨트롤 서버가 바인딩한 유닉스 소켓 경로를 out에 복사하고 길이를 반환한다(0=미시작/용량
+   부족). smoke의 인-프로세스 소켓 클라이언트가 자기 앱 소켓에 connect하는 데 쓴다(경로는 비밀 아님). NUL 미포함 길이. */
+size_t maru_macos_control_socket_path(uint8_t *out, size_t out_cap);
+
 #endif

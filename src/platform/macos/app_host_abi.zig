@@ -2001,6 +2001,42 @@ pub export fn maru_macos_control_server_stop() void {
     browser_op_take_buf = .empty;
 }
 
+/// 5e-2b-2(**테스트 전용 훅**): env `MARU_TEST_BROWSER_CAP`이 설정됐을 때만 `surface_id`에 묶인 `browser` scope
+/// capability를 라이브 `control_cap_store`에 발급하고 그 nonce(raw 32B)를 out으로 넘긴다. 실 fd 발급(1e-confirm)
+/// 전이라 store가 비어 browser 요청이 default-deny인 상태에서, macos smoke가 소켓 `browser.navigate`(이 nonce)→실
+/// WKWebView 이동을 자동 증명하게 하는 것이 유일한 목적이다. **프로덕션 무영향**: env 미설정이면 아무것도 안 하고 0을
+/// 반환한다(호출자 Swift도 같은 env 게이트 뒤에서만 부른다 — 이중 게이트, capability 발급이라 방어적으로 Zig에도 게이트).
+/// 발급은 §8.8대로 메인 스레드에서만(Swift tick). `generation`=0(collector가 web surface를 generation 0으로 방출 —
+/// `app_session.collectSessionInto`; authz는 target id·cap.generation 앵커라 값 자체가 자기-정합). raw nonce는 store에
+/// 저장 안 됨(hashNonce만). 반환 1=발급+nonce 채움, 0=env 미설정·out null·용량 부족·발급 실패. `out_nonce` 최소 32B.
+pub export fn maru_macos_control_test_issue_browser_cap(surface_id: u64, out_nonce: ?[*]u8, out_nonce_cap: usize) u32 {
+    if (std.c.getenv("MARU_TEST_BROWSER_CAP") == null) return 0; // env 게이트(테스트 전용 — 프로덕션 경로 무영향)
+    const np = out_nonce orelse return 0;
+    if (out_nonce_cap < control_capability.nonce_len) return 0;
+    // 결정적 테스트 nonce(고정 바이트 파생). 실 crypto-random 생성은 1e-confirm 발급 경로 소유 — 이 훅은 smoke 왕복만.
+    var nonce: control_capability.Nonce = undefined;
+    for (&nonce, 0..) |*b, i| b.* = @intCast((i * 7 + 0x5e) & 0xff);
+    control_cap_store.issueForFd(allocator, nonce, .{
+        .surface_id = surface_id,
+        .generation = 0,
+        .scope = .browser,
+    }) catch return 0; // validateFdIssuance(browser=allowed·TTL 불요) 통과가 정상 — OOM만 0
+    @memcpy(np[0..control_capability.nonce_len], &nonce);
+    return 1;
+}
+
+/// 5e-2b-2(**테스트 전용 훅**): 라이브 컨트롤 서버가 바인딩한 유닉스 소켓 경로를 out으로 복사하고 그 길이를 반환한다
+/// (0=서버 미시작·out null·용량 부족). macos smoke의 인-프로세스 소켓 클라이언트가 자기 앱 소켓에 connect하는 데 쓴다
+/// (경로는 비밀이 아님 — same-uid peer가 control dir을 열거 가능, §4.2). NUL 미포함 길이.
+pub export fn maru_macos_control_socket_path(out: ?[*]u8, out_cap: usize) usize {
+    if (!control_server_active) return 0;
+    const p = out orelse return 0;
+    const path = control_server_storage.server.socketPath(); // [:0]const u8
+    if (path.len > out_cap) return 0;
+    @memcpy(p[0..path.len], path);
+    return path.len;
+}
+
 test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.

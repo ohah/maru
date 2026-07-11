@@ -1382,6 +1382,14 @@ pub export fn maru_macos_app_session_active_web_surface_id(session: ?*AppSession
     return app_session.activeWebSurfaceId();
 }
 
+// Phase 4g-0: 활성 pane 활성 term이 web(browser·markdown 무관)이면 surface_id, 아니면 0. focus-sync 불변식(§4.1)
+// Direction 1(Zig 활성 pane → firstResponder)이 "활성이 web이면 그 webview 포커스, 아니면 터미널 뷰"를 정하는 데 쓴다
+// (activeWebSurfaceId는 browser 전용이라 markdown 활성 시 0을 줘 터미널로 오포커스). 순수 read getter — 구조체 offset 불변.
+pub export fn maru_macos_app_session_active_web_surface_id_any_kind(session: ?*AppSession) u64 {
+    const app_session = session orelse return 0;
+    return app_session.activeWebSurfaceIdAnyKind();
+}
+
 // Phase 7f-0: 새 창/팝업 adopt — Swift `WKUIDelegate.createWebViewWith`가 WebKit config로 만든 WKWebView를 붙일
 // browser web Term을 활성 pane에 새 탭으로 만들고 그 surface_id를 반환한다(Swift-first 동기 생성 — 소유·시점 역전).
 // Swift는 이 id로 pre-created webview를 webPanels에 키잉하고, drain은 존재 시 중복 생성을 스킵한다(7f-1). 반환:
@@ -2079,6 +2087,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_browser_nav(null, 42, 3));
     // v108 Phase 7e-4 후속 active_web_surface_id: null session은 0(browser 아님 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id(null));
+    // v112 Phase 4g-0 active_web_surface_id_any_kind: null session은 0(web 아님 sentinel).
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id_any_kind(null));
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
     // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.

@@ -60,6 +60,34 @@
   - **자동으로 못 잡는 부분(수동 필수)**: 실제 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손 테스트만 확정한다(§11). smoke는 `web_panel_focused`(시작 시 웹이 firstResponder를 안 훔침 = false)만 결정적으로 단언한다.
   - **범위 밖(Phase 5)**: 웹 소유 키(⌘C/⌘V/⌘A 편집·⌘F 페이지 내 find, §8)를 WebKit에 양보하는 **포커스 기준 분기** — 4d 최소 spike는 빈 about:blank라 웹 콘텐츠가 없어 Cmd-조합을 전부 maru로 라우팅한다(⌘C/⌘V가 웹이 아니라 터미널에 작용하지만 빈 페이지라 무해). 실콘텐츠에서 이 분기 정책은 Zig/config가 소유한다.
 
+### 4.1 웹↔터미널 포커스 동기 불변식 (4g — 흩어진 포커스 패치 통합, 계획)
+
+**문제(관측)**: Phase 7 손 테스트에서 포커스 버그가 **반복** 나왔다 — ⑴ 브라우저 보던 중 ⌘Q 종료 모달이 Enter로 안 닫힘 ⑵ 주소창 편집→터미널 클릭 시 포커스가 브라우저로 튐 ⑶ 터미널→브라우저 web 클릭 후 ⌘R 무동작 ⑷ 브라우저 탭을 활성화해도 webview에 포커스가 안 가 ⌘R 게이트가 stale ⑸ (남은 갭) 키보드 pane 전환(⌘⌥→)이 webview 포커스를 안 옮김. **다섯이 전부 하나의 근본**이다: **WKWebView 네이티브 `firstResponder`와 Zig 활성-pane 모델 사이에 단일 권위 있는 양방향 동기가 없어** 둘이 어긋난다. 지금은 케이스별로 기웠다(`reconcileWebModalFocus`·`reconcileWebFocusActivation`·`cancelAddrEdit` focus-restore·⌘R `activeWebSurfaceId` 게이트) — 옳은 레이어지만 파편화라 하나 고치면 옆에서 또 터진다.
+
+**불변식(단일 출처)**: **`firstResponder` ⟺ Zig 활성 pane**.
+- 활성 pane의 활성 term이 **web term** → 그 **webview**가 firstResponder.
+- 활성 pane의 활성 term이 **terminal** → **터미널 뷰**가 firstResponder.
+- **override(우선순위)**: **모달 열림**(anyOverlayOpen) > **주소창 편집**(addr_edit) → **터미널 뷰**(그 입력은 Zig `handleKeyEvent` 경로라 터미널 뷰가 소유). 모달/편집이 끝나면 불변식이 복원한다(별도 focus-restore pending 불요).
+
+**두 방향 동기(매 tick `reconcileWebFocus`, 순서 중요)**:
+1. **Direction 2 — webview 클릭 → Zig 활성**: webview가 **새로 firstResponder가 된 rising edge**(= 사용자가 그 web 콘텐츠를 클릭)면 `activate_surface`로 Zig 활성 pane을 그 surface로 동기한다. **rising edge인 이유**: 키보드 전환 후 webview가 stale 포커스로 남은 경우(활성=terminal인데 webview 포커스)와 싸우지 않게 — "새 클릭"만 반영한다.
+2. **Direction 1 — Zig 활성 → firstResponder**: 활성 pane에 firstResponder를 맞춘다(활성=web이면 그 webview, 활성=terminal이면 터미널 뷰, 이미 맞으면 no-op). Direction 2가 클릭을 반영한 **뒤** 실행해, 키보드 pane/탭 전환이 포커스를 따라오게(갭 ⑸ 닫음) + 브라우저 탭 활성화가 webview를 포커스(갭 ⑷ 닫음).
+
+**이 하나가 흩어진 것을 대체(subsume)한다**:
+- `reconcileWebModalFocus`(모달→터미널) = override 규칙.
+- `reconcileWebFocusActivation`(클릭→활성) = Direction 2.
+- `cancelAddrEdit`의 `addr_focus_restore_pending`(편집 종료 시 webview 복원) = addr_edit override 해제 후 Direction 1이 복원(pending 불요·단순화).
+- ⌘R `activeWebSurfaceId` 게이트 = Direction 1이 브라우저 탭 활성 시 webview를 포커스하므로 `isWebPanelFocused`가 신뢰 가능해져 원 게이트로 회귀 가능(belt-and-suspenders로 유지 가능).
+
+**필요 표면**: `activate_surface`(v78, 있음). **활성 web surface getter 확장** — 현 `activeWebSurfaceId`는 browser 전용(0=아님)이라, Direction 1이 활성 pane이 **어떤 web kind든**(browser·markdown) 그 webview를 포커스하려면 "활성 pane 활성 term이 web이면 surface_id + kind, 아니면 0"이 필요하다(신규 getter 또는 확장, Zig 순수·헤드리스 테스트). Swift는 surface_id→webPanels로 webview 조회.
+
+**분해**:
+- **4g-0 (Zig)**: 활성 pane 활성 term의 web surface_id(any kind)·kind getter + 헤드리스 테스트(터미널=0·browser/markdown=id). ABI 신규 getter.
+- **4g-1 (Swift)**: 통합 `reconcileWebFocus`(override → Direction 2 rising-edge → Direction 1) 구현, `reconcileWebModalFocus`·`reconcileWebFocusActivation`를 **대체**(삭제). tick에서 이 하나만 호출. **GUI 손 테스트**: 모달 Enter·터미널 클릭·브라우저 클릭·키보드 pane/탭 전환·주소 편집 종료·⌘R·팝업 focus 전 시나리오.
+- **4g-2 (정리)**: 불변식으로 불필요해진 `addr_focus_restore_pending`(Direction 1이 복원)·⌘R `activeWebSurfaceId` 게이트 단순화 검토(회귀 없이 제거 가능한 것만). ⌘R KVO `assumeIsolated`(13차 리뷰 [7] PLAUSIBLE)도 이때 함께 판단.
+
+**리스크·검증**: 코어 포커스라 회귀 시 **모달·타이핑·IME가 깨진다** → firstResponder는 AppKit이라 헤드리스 불가, **GUI 손 테스트가 유일 안전망**(§11). 특히 `reconcileWebModalFocus`(검증된 모달 Enter 동작)를 대체하므로 그 무회귀를 재확인한다. Zig getter(4g-0)만 헤드리스. 기존 터미널 IME/keyDown은 **한 줄도 안 건드림**(4d 규율 유지 — override는 makeFirstResponder만).
+
 ## 5. WKWebView가 막는 터미널-chrome 인터랙션
 
 z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙션이 웹 pane 위에서 WKWebView에 가로채인다. 다음을 정한다:

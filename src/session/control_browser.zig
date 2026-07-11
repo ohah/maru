@@ -204,15 +204,13 @@ const endResult = cp.endResult;
 /// **5e: 모든 게이트(authz·params·surface)를 통과한 인가된 browser 요청의 실행 op.** L4가 main-loop marshal
 /// (§5-async deferRequest) → Swift `BrowserControl`이 `webPanels[surface_id]`의 WKWebView API를 호출한다. `arg`는
 /// method별 인자(navigate=url·executeScript=script·getUrl=빈) — `gpa`로 **dupe한 소유 슬라이스**라(파싱 arena와
-/// 수명 분리) caller가 op를 소비할 때 free한다(§9.3 "arg는 cross_gpa 복사"). `req_id`는 응답 직렬화에 echo할 요청 id.
+/// 수명 분리) caller가 op를 소비할 때 free한다(§9.3 "arg는 cross_gpa 복사"). 응답 id/method는 L4가 완료 시
+/// pending.request_bytes를 재파싱해 얻으므로(§9.3 ⑥) op엔 실행에 필요한 surface_id·method·arg만 싣는다.
 pub const BrowserOp = struct {
     surface_id: u64,
     method: BrowserMethod,
     /// gpa-owned(caller가 free). navigate=url·executeScript=script·getUrl=빈("").
     arg: []const u8,
-    /// 요청 id(응답 echo용). Id는 값 타입이나 `.string`은 파싱 arena를 빌리므로, string id는 caller가 arg처럼 복사해야
-    /// 안전하다 — L4는 완료 시 pending.request_bytes를 **재파싱**해 id를 얻으므로(§9.3 ⑥) 이 필드는 number id 편의용.
-    req_id: cp.Id,
 };
 
 /// dispatchBrowser 결과(5e): 게이트 실패면 응답 바이트(`err`, gpa-owned), 통과면 실행 `op`. **정확히 하나**만 유효.
@@ -241,7 +239,7 @@ pub const BrowserDispatch = union(enum) {
 ///   6. method별 params 파싱(url/script). 오류 → `invalid_params`. url/script는 gpa로 dupe(op.arg).
 ///   7. **surface 검증(방어)** — snapshot에서 `id`로 SurfaceDto 찾기. 없으면 `unauthorized`(존재 누설 금지), 있으나
 ///      `detail != .web`이면 `unauthorized`(browser cap은 web surface 전용).
-///   8. **op 반환(5e)** — 여기까지 통과 = 인가·유효. `BrowserOp{surface_id, method, arg(dupe), req_id}`. L4가 실행.
+///   8. **op 반환(5e)** — 여기까지 통과 = 인가·유효. `BrowserOp{surface_id, method, arg(dupe)}`. L4가 실행.
 pub fn dispatchBrowser(
     gpa: std.mem.Allocator,
     request_bytes: []const u8,
@@ -261,7 +259,19 @@ pub fn dispatchBrowser(
         .request => |r| r,
         else => return .{ .err = try errorResponse(gpa, .null, .invalid_request) },
     };
+    return browserOpFromRequest(gpa, req, snapshot, caller_cap, now);
+}
 
+/// dispatchBrowser의 **파싱된 req** 버전(steps 2~8). `dispatchAuthenticated`(1e)가 이미 파싱한 req로 직접 호출해
+/// 이중 파싱을 피한다(리뷰 [10] 정신). dispatchBrowser는 parse 후 이걸 부른다. `req.params`/`req.method` 슬라이스는
+/// 호출자 parseMessage arena를 빌리므로 이 함수는 그 수명 안에서 즉시 처리하고 op.arg만 gpa-dupe로 분리한다.
+pub fn browserOpFromRequest(
+    gpa: std.mem.Allocator,
+    req: cp.Request,
+    snapshot: cs.CollectorSnapshot,
+    caller_cap: ?capmod.Capability,
+    now: u64,
+) std.mem.Allocator.Error!BrowserDispatch {
     // ── 2. parseMethod 라우팅(§4.1). 방어: 라우터가 browser.* 만 이 함수로 보내지만, core != browser면 거부. ──
     const method = cp.parseMethod(req.method);
     if (method.core != .browser) return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
@@ -298,7 +308,7 @@ pub fn dispatchBrowser(
     }
 
     // ── 8. op 반환(5e). 여기까지 통과 = 인가·유효한 web surface 대상. L4가 §5-async marshal → Swift BrowserControl. ──
-    return .{ .op = .{ .surface_id = target_id, .method = bmethod, .arg = arg, .req_id = req.id } };
+    return .{ .op = .{ .surface_id = target_id, .method = bmethod, .arg = arg } };
 }
 
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용). 편의 wrapper(1d와 동일).

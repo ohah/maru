@@ -1817,7 +1817,29 @@ fn buildControlResponse(
     // expires_at을 계산하면 정합한다(코드베이스가 이미 std.Io.Clock.awake를 uptime에 씀). store가 빈 지금은 TTL 미사용.
     const now_ns: i128 = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
-    return try control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, &control_cap_store, now);
+    switch (try control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, &control_cap_store, now)) {
+        .immediate => |resp| return resp,
+        .browser => |op| {
+            // 5e-1/5e-2a: browser.*가 인가·유효한 실행 op로 라우팅됐다(dispatchAuthenticated → control_browser). **단
+            // WKWebView marshal(§5-async deferRequest + Swift take/complete_browser_op)은 5e-2b라 아직 미배선** — op를
+            // 실행할 경로가 없어 op.arg를 해제하고 internal_error로 보류한다(5e-2b에서 이 분기를 deferRequest+op 큐로 교체).
+            server.cross_gpa.free(op.arg);
+            return try browserPendingResponse(server.cross_gpa, pending.request_bytes);
+        },
+    }
+}
+
+/// 5e-2a 전환 응답: browser op이 인가됐으나 WKWebView marshal(5e-2b) 미배선일 때 internal_error를 요청 id로 낸다.
+/// request_bytes를 재파싱해 id를 얻는다(op이 id를 안 실음 — §9.3 ⑥ 재파싱 규약). 5e-2b가 이 함수를 대체한다.
+fn browserPendingResponse(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error!?[]u8 {
+    const cpm = maru.session.control_plane;
+    var pm = cpm.parseMessage(gpa, request_bytes) catch return try cpm.serializeError(gpa, .null, .internal_error, "browser marshal pending (5e-2b)", null);
+    defer pm.deinit();
+    const id = switch (pm.message) {
+        .request => |r| r.id,
+        else => cpm.Id.null,
+    };
+    return try cpm.serializeError(gpa, id, .internal_error, "browser marshal pending (5e-2b)", null);
 }
 
 pub export fn maru_macos_control_server_start() c_int {

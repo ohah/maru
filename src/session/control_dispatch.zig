@@ -44,6 +44,7 @@ const cp = @import("control_plane.zig");
 const cs = @import("control_surface.zig");
 const wm = @import("window_membership.zig");
 const cap = @import("control_capability.zig");
+const cb = @import("control_browser.zig"); // 5e: browser.* op 산출(dispatchAuthenticated가 위임)
 
 /// read-only 조회 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot으로 처리해 **응답 한 줄 바이트**를 만든다.
 /// 성공/에러 모두 유효한 JSON-RPC 응답 바이트(개행 없음, 프레이밍은 L4가 붙임)를 돌려준다 — OOM만 error로 전파한다
@@ -133,6 +134,18 @@ fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.
 /// **generation anchor**: 현재 전 시스템이 generation 0(§3 respawn 경로 미구현)이라 anchor generation을 0으로 고정한다
 /// (auth.self 셀렉터는 surface_id만 나름). generation 셀렉터·respawn 무효화는 후속(cap의 generation 검사는 이미 순수
 /// 코어에 있음 — 발급 시 0으로 묶이면 0 anchor와 일치).
+///
+/// **5e: browser.* 라우팅**. method가 `browser.*`면 metadata resolve(anchor=selector)를 **안 타고** `control_browser.
+/// browserOpFromRequest`에 위임한다 — browser cap의 anchor는 selector(에이전트 자기 surface)가 아니라 target web
+/// surface(params.id)라, 그 함수가 target을 앵커로 authz·validate한다(§9.3). 반환은 `AuthDispatch{immediate|browser}`:
+/// 게이트 실패/비-browser는 `.immediate`(응답 바이트, L4가 즉시 resolve), browser op은 `.browser`(L4가 §5-async marshal).
+pub const AuthDispatch = union(enum) {
+    /// 즉시 소켓에 resolve할 응답 바이트(gpa-owned). metadata·에러·비-browser 전부.
+    immediate: []u8,
+    /// L4가 marshal할 browser 실행 op(op.arg는 gpa-owned — L4가 큐로 소유 이전 후 free).
+    browser: cb.BrowserOp,
+};
+
 pub fn dispatchAuthenticated(
     gpa: std.mem.Allocator,
     request_bytes: []const u8,
@@ -141,30 +154,42 @@ pub fn dispatchAuthenticated(
     cap_nonce: ?cap.Nonce,
     store: *const cap.CapabilityStore,
     now: u64,
-) std.mem.Allocator.Error![]u8 {
+) std.mem.Allocator.Error!AuthDispatch {
     const nonce = cap_nonce orelse
-        return dispatchReadOnly(gpa, request_bytes, snapshot, selector orelse 0, .self);
+        return .{ .immediate = try dispatchReadOnly(gpa, request_bytes, snapshot, selector orelse 0, .self) };
 
     // cap 제시 → method↔scope 검사에 method가 필요해 1a 파싱. parse 실패/비-request는 dispatchReadOnly와 동일 관례
     // (id=null 에러)로 접는다. grant면 그 파싱한 req를 routeReadOnly에 **재파싱 없이** 넘긴다(리뷰 [10]).
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return errorResponse(gpa, .null, cp.parseFailureCode(e)),
+        else => return .{ .immediate = try errorResponse(gpa, .null, cp.parseFailureCode(e)) },
     };
     defer pm.deinit();
     const req = switch (pm.message) {
         .request => |r| r,
-        else => return errorResponse(gpa, .null, .invalid_request),
+        else => return .{ .immediate = try errorResponse(gpa, .null, .invalid_request) },
     };
 
+    // ── 5e: browser.*는 control_browser에 위임(anchor=target web surface, selector 무관). ──
+    if (cp.parseMethod(req.method).core == .browser) {
+        // cap을 lookup해 넘긴다(null=cap 없음 → browserOpFromRequest가 균일 unauthorized). browser cap의 authz는
+        // 그 함수가 target(params.id)를 앵커로 수행하므로 여기선 resolve(selector 앵커)를 안 쓴다.
+        const caller_cap = store.lookupByNonce(nonce);
+        return switch (try cb.browserOpFromRequest(gpa, req, snapshot, caller_cap, now)) {
+            .err => |e| .{ .immediate = e },
+            .op => |op| .{ .browser = op },
+        };
+    }
+
+    // ── 비-browser: 기존 metadata resolve 경로(anchor=selector). ──
     const anchor = selector orelse 0;
     switch (cap.resolve(store, nonce, anchor, 0, req.method, now)) {
-        .unauthorized => return errorResponse(gpa, req.id, .unauthorized),
+        .unauthorized => return .{ .immediate = try errorResponse(gpa, req.id, .unauthorized) },
         .granted => |g| {
-            // metadata → 파싱한 req로 read-only 라우팅(재파싱 없음). non-metadata → 미배선이라 method_not_found
-            // (라우터 우회 — capture unauthorized 특수처리 회피, 리뷰 [4]).
-            if (g.metadataScope()) |ms| return routeReadOnly(gpa, req, snapshot, g.surface_id, ms);
-            return errorResponse(gpa, req.id, .method_not_found);
+            // metadata → 파싱한 req로 read-only 라우팅(재파싱 없음). non-metadata(write/read-output/bind) → 미배선이라
+            // method_not_found(라우터 우회 — capture unauthorized 특수처리 회피, 리뷰 [4]). browser는 위에서 이미 분기.
+            if (g.metadataScope()) |ms| return .{ .immediate = try routeReadOnly(gpa, req, snapshot, g.surface_id, ms) };
+            return .{ .immediate = try errorResponse(gpa, req.id, .method_not_found) };
         },
     }
 }
@@ -434,8 +459,25 @@ const n_win: cap.Nonce = [_]u8{0x02} ** cap.nonce_len;
 const n_browser: cap.Nonce = [_]u8{0x03} ** cap.nonce_len;
 const n_unknown: cap.Nonce = [_]u8{0xEE} ** cap.nonce_len;
 
+// .immediate(응답 바이트) 기대 — 호출자 free. .browser면 op.arg free 후 실패(5e 라우팅 분리 검증).
 fn authDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *const cap.CapabilityStore) ![]u8 {
-    return dispatchAuthenticated(testing.allocator, bytes, fx, selector, nonce, store, 0);
+    switch (try dispatchAuthenticated(testing.allocator, bytes, fx, selector, nonce, store, 0)) {
+        .immediate => |b| return b,
+        .browser => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedImmediateGotBrowser;
+        },
+    }
+}
+// .browser(op) 기대 — 호출자 op.arg free. .immediate면 free 후 실패.
+fn authDispatchOp(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *const cap.CapabilityStore) !cb.BrowserOp {
+    switch (try dispatchAuthenticated(testing.allocator, bytes, fx, selector, nonce, store, 0)) {
+        .browser => |op| return op,
+        .immediate => |b| {
+            testing.allocator.free(b);
+            return error.ExpectedBrowserGotImmediate;
+        },
+    }
 }
 
 test "dispatchAuthenticated: nonce 없음 → 기존 self 경로(회귀 없음) — selector=10 sessions.list → 10만" {
@@ -492,26 +534,29 @@ test "dispatchAuthenticated: cap surface≠제시 anchor → unauthorized(surfac
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
-// 핵심: cap resolve 자체가 동작함을 "구별되는 결과"로 증명한다 — browser cap + browser.navigate는 resolve 성공하나
-// read-only 라우터에 미배선이라 method_not_found(5e 대기); metadata cap + browser.navigate는 scope 불충족이라
-// unauthorized. 이 둘이 다른 것이 곧 "1e-core 인가가 scope↔method를 실제로 판정한다"는 증거.
-test "dispatchAuthenticated: browser cap + browser.navigate → method_not_found(resolve됨·미배선); metadata cap → unauthorized(scope)" {
+// 5e: browser.*는 control_browser에 위임(anchor=target web surface, selector 무관) → 모든 게이트 통과면 **.browser op**.
+// metadata cap + browser.* = scope 불충족 unauthorized(.immediate). browser cap + 비-browser = scope 불충족 unauthorized.
+// browser 경로(target 앵커)와 metadata resolve 경로(selector 앵커)의 분리를 증명한다.
+test "dispatchAuthenticated 5e: browser cap + browser.navigate(web) → .browser op(selector 무관); metadata/cross → unauthorized" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    try store.issueForFd(testing.allocator, n_browser, .{ .surface_id = 10, .generation = 0, .scope = .browser });
-    try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
+    // cap은 **web surface 11**(fx: web/markdown)에 묶임 — browser cap의 anchor는 target이다.
+    try store.issueForFd(testing.allocator, n_browser, .{ .surface_id = 11, .generation = 0, .scope = .browser });
+    try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 11, .generation = 0, .scope = .{ .metadata = .all } });
 
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":10,\"url\":\"https://x\"}}";
-    // browser cap → resolve 성공 → read-only 라우터엔 browser.* 없음 → method_not_found.
-    const w_ok = try authDispatch(req, 10, n_browser, &store);
-    defer testing.allocator.free(w_ok);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(w_ok));
-    // metadata cap으로 browser.navigate → scope 불충족 → unauthorized(method_not_found 아님).
-    const w_deny = try authDispatch(req, 10, n_all, &store);
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"https://x\"}}";
+    // browser cap → control_browser 위임 → 모든 게이트 통과 → .browser op. **selector=99(자기 surface)와 무관**(target 11 앵커).
+    const op = try authDispatchOp(req, 99, n_browser, &store);
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(@as(u64, 11), op.surface_id);
+    try testing.expectEqual(cb.BrowserMethod.navigate, op.method);
+    try testing.expectEqualStrings("https://x", op.arg);
+    // metadata cap으로 browser.navigate → browserOpFromRequest authz서 scope 불충족 → .immediate unauthorized.
+    const w_deny = try authDispatch(req, 11, n_all, &store);
     defer testing.allocator.free(w_deny);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_deny));
-    // 대칭: browser cap으로 sessions.list(metadata) → scope 불충족 → unauthorized.
-    const w_cross = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_browser, &store);
+    // browser cap으로 sessions.list(metadata, 비-browser 경로) → scope 불충족 → unauthorized.
+    const w_cross = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 11, n_browser, &store);
     defer testing.allocator.free(w_cross);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_cross));
 }

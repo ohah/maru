@@ -140,7 +140,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 112;
+pub const abi_version: u32 = 113;
+// 113: Phase 4g-1 — focus-sync 불변식 override: addr_edit_surface getter 1개(주소창 편집 중 surface_id, 아니면 0).
+// 통합 reconcileWebFocus가 편집 중(모달과 함께 override)엔 불변식 대신 터미널 뷰로 firstResponder를 강제하는 데 쓴다
+// (편집 키가 Zig 경로라 터미널 뷰 소유). 순수 read getter만 추가 — 구조체 offset 불변. docs/web-panel.md §4.1.
 // 112: Phase 4g-0 — focus-sync 불변식(§4.1) 토대: active_web_surface_id_any_kind getter 1개(활성 pane 활성 term이
 // web[browser·markdown 무관]이면 surface_id, 아니면 0). 통합 reconcileWebFocus의 Direction 1이 "활성=web이면 그 webview
 // 포커스, 아니면 터미널 뷰"를 정하는 데 쓴다. 순수 read getter만 추가 — 구조체 offset 불변. docs/web-panel.md §4.1.
@@ -7584,7 +7587,7 @@ pub const AppSession = struct {
     }
 
     /// 편집 대상 surface_id(없으면 null) — 렌더/라우팅이 편집 활성 판정에 쓴다.
-    fn addrEditSurfaceId(self: *const AppSession) ?u64 {
+    pub fn addrEditSurfaceId(self: *const AppSession) ?u64 {
         return self.addr_edit;
     }
 

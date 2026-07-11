@@ -1390,6 +1390,15 @@ pub export fn maru_macos_app_session_active_web_surface_id_any_kind(session: ?*A
     return app_session.activeWebSurfaceIdAnyKind();
 }
 
+// Phase 4g-1: 주소창 편집(addr_edit) 중인 surface_id, 아니면 0. focus-sync 불변식(§4.1)의 **override**가 쓴다 — 편집 중엔
+// 터미널 뷰가 firstResponder여야(편집 키·IME preedit가 Zig handleKeyEvent 경로) 하므로, 통합 reconcileWebFocus가 이 값이
+// 0이 아니면(모달과 함께) 불변식 대신 터미널 뷰로 강제한다. focus-pull(take_web_addr_focus_pull)은 1회성이라 "편집 중"
+// 연속 상태를 못 주므로 이 read getter가 필요하다. 순수 read — 구조체 offset 불변.
+pub export fn maru_macos_app_session_addr_edit_surface(session: ?*AppSession) u64 {
+    const app_session = session orelse return 0;
+    return app_session.addrEditSurfaceId() orelse 0;
+}
+
 // Phase 7f-0: 새 창/팝업 adopt — Swift `WKUIDelegate.createWebViewWith`가 WebKit config로 만든 WKWebView를 붙일
 // browser web Term을 활성 pane에 새 탭으로 만들고 그 surface_id를 반환한다(Swift-first 동기 생성 — 소유·시점 역전).
 // Swift는 이 id로 pre-created webview를 webPanels에 키잉하고, drain은 존재 시 중복 생성을 스킵한다(7f-1). 반환:
@@ -2089,6 +2098,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id(null));
     // v112 Phase 4g-0 active_web_surface_id_any_kind: null session은 0(web 아님 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id_any_kind(null));
+    // v113 Phase 4g-1 addr_edit_surface: null session은 0(편집 아님 sentinel).
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_addr_edit_surface(null));
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
     // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.

@@ -341,6 +341,20 @@ sync(2026) 게이트는 폴링 렌더 루프의 미묘한 부분이라(hold가 �
 - **유력 가설 = active 중 half-drawn 투영.** `shouldProjectFrame`이 `sync_active=1`(리더 기준 프레임 미완성)인데 grid를 투영하는 두 경로가 half-drawn을 만든다 — bubbletea는 diff 렌더라 그 stale 셀을 이후 안 고쳐(변경분만 보냄) 색·셀렉터가 깨지고 `Ctrl+L`도 무효다. (a) **esu_edge(SSH 빈발, 유력)**: `esu_advanced` flush가 "리더가 이미 **다음** 프레임 BSU를 시작"한 시점에 떨어지면 진행 중 next 프레임을 half-drawn으로 투영한다(로컬은 다음 ESU가 곧 교정하지만 SSH diff는 안 함) — `shouldProjectFrame` 테스트 [B] case 주석 참고. (b) **timeout(드묾)**: 조각 전달이 `sync_timeout_ms`(1초)를 넘겨 hold를 강제 해제. `.sync` 로그의 `active=1 gproj=1`로 잡히고 원인은 아래 분석기가 분해한다.
 - **분석 도구(영구)**: `tools/sync/analyze_sync_log.py`가 캡처한 `.sync` 로그를 파싱해 half-frame(active 중 투영)을 원인별(esu_edge/timeout/scroll/force)로, 샘플링 누락(리더 BSU/ESU ≫ 메인 active)을 자동으로 짚는다 — `.sync` 로거(영구 관측)의 동반 도구(`tools/perf` 선례). 사용: `MARU_DEBUG=1 ./maru-macos-app 2> log` → `python3 tools/sync/analyze_sync_log.py log`.
 
+### 11.7 활성 surface 전환 시 게이트 baseline 재설정 (구현)
+
+`shouldProjectFrame`의 세 안전판은 **렌더-측 baseline과 코어-측 per-surface 값을 쌍으로 비교**한다: `esu_advanced`=(`last_rendered_esu` vs `core.sync_esu_count`), `view_scrolled`=(`last_rendered_view_offset` vs `core.view_offset`), timeout=(`sync_hold_ticks`가 `syncTimeoutTicks()` 초과). 문제는 이 세 baseline이 전부 **단일 `AppSession` 필드**인데 비교 대상은 **per-surface**라는 것 — 한 surface에 머물면 정확하지만, **탭/pane 전환 tick**에선 baseline에 이전 surface 값이 남아 새 surface 코어값과 비교돼 셋 다 "달라졌다"로 오판한다.
+
+**증상(수정한 버그)**: sync(2026) TUI(Claude 등) 탭으로 전환하면 화면이 사라진다(blank). 전환은 `resizeTabPanes`→SIGWINCH로 대상 앱의 전체 clear+repaint(2026 블록)를 유발하는데, 그 "clear됐고 리페인트 전"인 중간 상태를 위 오판이 **강제 투영**한다(공유 `metal_buffer`엔 새 surface의 완성 프레임이 없어 비워진 grid가 그려진다). 되살릴 완성 프레임은 esu-edge MISS로 드롭돼 스크롤(view_offset 변화만 게이트 우회) 전까지 남는다. 세 오판 경로가 각각 blank를 낼 수 있다: (a) `esu_advanced`(이전 esu vs 새 esu>0), (b) `view_scrolled`(이전 탭이 스크롤돼 있으면), (c) `hold>=timeout`(이전 탭의 만료 hold 이월).
+
+**수정(현재 구현, 밴드에이드)**: 활성 surface 변경을 감지한 tick에 세 baseline을 새 surface 현재값으로 재설정한다 — `last_rendered_esu=core.esu`·`last_rendered_view_offset=core.view_offset`·`sync_hold_ticks=0`. 그러면 전환 tick엔 세 비교가 모두 "불변"이 되어 hold(공유 버퍼의 직전 완성 프레임 유지, 미완성 안 그림), 대상이 ESU로 완성하는 순간 투영한다(그 surface에 계속 머문 것과 동형). 비-sync 전환은 `sync_output=false`라 `metal_dirty`로 즉시 투영(stale 없음). 전환 감지는 **`Surface.id`**(세션-로컬 monotonic·재사용 없음)로 한다 — 포인터를 쓰면 닫힌 surface 주소 재사용(ABA)에 전환을 놓쳐 stale baseline이 남는다.
+
+**트레이드오프**: mid-sync surface로 전환하면 완성까지 직전 탭 프레임이 잠깐 보인다 — 보통 ≤1 프레임(다음 ESU), 대상 sync가 stall하면 최악 ~1초(timeout 강제 해제). 지속 blank를 sub-frame~≤1초 잔상으로 바꾸는 순개선.
+
+**루트코즈 / 후속(밴드에이드 제거)**: 세 baseline이 단일 필드인 것이 근본이다. 코어 카운터(`sync_esu_count`·`view_offset`)가 이미 per-surface인 것과 대칭으로, 이 렌더-측 baseline도 **per-surface**(각 surface가 자기 "마지막 투영" 상태를 소유)로 옮기면 전환 리셋 블록과 `Surface.id` 추적이 통째로 불필요해지고 cross-surface 오판이 **구조적으로 불가능**해진다(재발 방지) — surface detach/reattach(윈도우 이동성, [window-surface-mobility.md](window-surface-mobility.md)) 방향과도 정합. 생성/첫-활성화 시 baseline 초기화(mid-sync 상태로 처음 열려도 blank 안 나게)만 설계하면 된다. 별도 후속.
+
+**관측/회귀**: `.sync` 로거(§11.6)의 `esuadv`/`scr`로 전환 tick의 게이트 이유를 본다(전환 직후 `gproj=0`=hold이 정상). 회귀 테스트는 `app_session.zig`에 4개 — mid-sync·완성없음(esu==0)·mid-sync·완성있음(esu>0)·스크롤된 이전 탭(view_scrolled)·이월된 hold — 음성 대조로 각 리셋의 판별력을 고정한다.
+
 ## 12. Phase 4 — 렌더 read 스냅샷 통합 (tick당 활성 surface 단일 lock, 설계)
 
 > 단일 출처(design). §3의 이상(**"렌더는 락 아래 스냅샷만 읽는다"**, tick당 코어 접근 1회)을 **글자 그대로 실현**한다. §9(Phase 3)가 메인의 코어 *mutate*를 리더로 위임했다면, Phase 4는 메인의 코어 *read*를 tick당 흩어진 다중 lock에서 **단일 스냅샷**으로 통합한다. 미구현 — doc-first 설계.

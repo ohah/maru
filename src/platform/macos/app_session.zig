@@ -15350,7 +15350,8 @@ pub const AppSession = struct {
         // 트레이드오프: mid-sync surface로 전환하면 완성까지 직전 탭 프레임이 잠깐 보인다 — 보통 ≤1 프레임(다음 ESU)이나
         // 대상 sync가 stall하면 최악 ~1초(syncTimeoutTicks 강제 해제)까지. 지속 blank를 sub-frame~≤1초 잔상으로 바꾸는 순개선.
         // ⚠️ 밴드에이드(전환마다 특수 리셋): 루트코즈는 이 3개 baseline이 단일 필드인 것(sync_esu_count처럼 per-surface여야
-        // 한다). per-surface로 옮기면 이 리셋 블록과 last_ticked_surface_id 추적이 통째로 불필요해진다 — 별도 후속 대상.
+        // 한다). per-surface로 옮기면 이 리셋 블록과 last_ticked_surface_id 추적이 통째로 불필요해진다 — 별도 후속
+        // (단일 출처: docs/io-render-threading.md §11.7).
         {
             const active_id = self.activeSurface().id;
             if (active_id != self.last_ticked_surface_id) {

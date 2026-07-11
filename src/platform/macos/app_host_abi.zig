@@ -7,8 +7,9 @@ const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정�
 const command_catalog = @import("command_catalog.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
-const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터
+const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터 + 1e dispatchAuthenticated
 const control_surface = maru.session.control_surface; // 1c: Surface DTO/CollectorSnapshot
+const control_capability = maru.session.control_capability; // 1e: capability fd resolve(라이브 auth 배선)
 
 const c = @cImport({
     @cInclude("app_host_abi.h");
@@ -1749,6 +1750,12 @@ pub const ControlSessionRef = extern struct {
 var control_server_storage: control_server_mod.ControlServer = undefined;
 var control_server_active: bool = false;
 
+/// 라이브 capability store(§8.5 1e). **메인 스레드 전용**(buildControlResponse가 메인 drain에서만 read — accept
+/// 스레드는 절대 안 만진다, §8.8 lock-order). 지금은 **비어 있다**: 실 fd 발급/상속(§8.5, 1e-confirm/후속)이 아직
+/// 없어 nonce를 실은 요청은 전부 default-deny(unauthorized)다. nonce 없는 요청은 기존 metadata:self 경로(회귀 없음).
+/// dispatchAuthenticated가 이 store로 nonce→scope를 resolve한다. 발급 경로가 붙으면 여기 issueForFd로 채운다.
+var control_cap_store: control_capability.CapabilityStore = .{};
+
 /// hello가 광고하는 read-only 메서드(현재 구현된 것만 — §11 help gate와 같은 정직성).
 const control_hello_caps = [_][]const u8{ "sessions.list", "session.get" };
 const control_hello_version = "0.1.0";
@@ -1792,9 +1799,11 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
     return .{ .surfaces = surfaces.items, .windows = windows.items };
 }
 
-/// 한 요청을 실 collector + auth(metadata:self) + dispatch(1d)로 처리해 응답 바이트(server.cross_gpa 소유)를 만든다.
-/// **A2b auth 한계(§8.4)**: caller=셀렉터가 주장한 surface_id, scope=metadata:self 고정. same-uid peer면 임의 surface를
-/// self로 주장할 수 있고 tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만 열린다(§8.3 self 필터가 나머지를 가림).
+/// 한 요청을 실 collector + auth(1e capability) + dispatch(1d)로 처리해 응답 바이트(server.cross_gpa 소유)를 만든다.
+/// **1e**: `dispatchAuthenticated`가 auth 프레임의 `{selector, cap_nonce}`(pending)와 라이브 `control_cap_store`로
+/// `(caller, scope)`를 발급한다 — cap_nonce 없으면 기존 metadata:self(§8.4 A2b, 회귀 없음), 있으면 resolve(빈 store라
+/// 지금은 default-deny). **§8.4 self 경로 한계 유지**: nonce 없는 same-uid peer는 임의 surface를 self로 주장할 수 있고
+/// tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만(§8.3 self 필터). `now`=벽시계 초(TTL 판정용, 순수 코어에 주입).
 fn buildControlResponse(
     server: *control_server_mod.ControlServer,
     refs: []const ControlSessionRef,
@@ -1803,8 +1812,11 @@ fn buildControlResponse(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit(); // 스냅샷은 dispatch 동안만 필요 — 응답(cross_gpa)은 arena와 독립
     const snapshot = try collectSessionsInto(refs, arena.allocator());
-    const caller = pending.selector orelse 0;
-    return try control_dispatch.dispatchReadOnly(server.cross_gpa, pending.request_bytes, snapshot, caller, .self);
+    // now = 모노토닉 awake 초(TTL 판정 단위). wall-clock보다 clock 변경에 안전하고, 미래 fd 발급도 같은 시계로
+    // expires_at을 계산하면 정합한다(코드베이스가 이미 std.Io.Clock.awake를 uptime에 씀). store가 빈 지금은 TTL 미사용.
+    const now_ns: i128 = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    return try control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, &control_cap_store, now);
 }
 
 pub export fn maru_macos_control_server_start() c_int {

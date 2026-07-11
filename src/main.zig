@@ -592,7 +592,9 @@ fn runSessionRequest(
         (std.fmt.parseInt(u64, std.mem.span(pane), 10) catch null)
     else
         null;
-    const auth_bytes = try maru.session.control_plane.serializeAuthSelf(allocator, selector);
+    // cap_nonce=null: CLI는 아직 상속 capability fd(§8.5, MARU_CONTROL_CAP_FD)를 안 읽는다(실 fd 상속은 1e-core 범위
+    // 밖 — 1e-confirm/후속). 지금은 selector만 보내 metadata:self만 요청한다(cap 없음).
+    const auth_bytes = try maru.session.control_plane.serializeAuthSelf(allocator, selector, null);
     defer allocator.free(auth_bytes);
     if (!writeAllFd(fd, auth_bytes) or !writeAllFd(fd, "\n"))
         return sessionNoInstance(stderr, "auth 셀렉터 전송에 실패했습니다");

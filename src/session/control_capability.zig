@@ -21,9 +21,12 @@
 //!   5. §8.5 정책 인코딩(타입/함수 레벨): read-output은 default grant 아님(TTL 필수)·single-scope 강제(`Scope`는
 //!      단일 값)·write/lifecycle은 이 상속 fd 경로로 발급 금지(`allowedViaInheritedFd`).
 //!
-//! **범위 밖(구현 금지 — 사용자 손 테스트/후속)**: 실제 fd 발급/상속(0600 unlinked fd·MARU_CONTROL_CAP_FD·pread·
-//! CLOEXEC·셸별 상속 실측), 실 socket auth handshake(첫 auth frame), nonce 랜덤 생성의 실 crypto(테스트는 고정
-//! nonce), self-origin(§8.4=1g), redaction 실측. fd/socket이 얽히면 코어는 순수로 둔다.
+//! **이 순수 코어의 범위 밖(다른 레이어가 소유)**: 실제 fd 발급/상속(0600 unlinked fd·MARU_CONTROL_CAP_FD·pread·
+//! CLOEXEC·셸별 상속 실측 = 1e-confirm/후속), nonce 랜덤 생성의 실 crypto(테스트는 고정 nonce), self-origin(§8.4=1g),
+//! redaction 실측. **auth handshake 라이브 배선은 1e-core에서 완료**: 첫 auth 프레임의 `cap_nonce`(control_plane
+//! `parseAuthFrame`) → `control_dispatch.dispatchAuthenticated`가 이 코어의 `resolve`를 호출 → `(caller, scope)` 발급
+//! (control_server가 nonce를 메인 marshal로 나르고 app_host_abi가 라이브 store로 resolve). 이 파일은 그 배선이 소비하는
+//! **순수 인가 판정**만 소유한다(소켓/fd/스레드는 L4). fd/socket이 얽히면 코어는 순수로 둔다.
 //!
 //! **§8.5 headline 위협(주석 인용)**: capability fd는 CLI만이 아니라 **셸이 exec하는 모든 명령**(사용자가 실행한
 //! curl·python·untrusted 자동화 포함 — 위협모델이 격리하려던 바로 그 저권한 코드)이 `pread(MARU_CONTROL_CAP_FD, 0)`

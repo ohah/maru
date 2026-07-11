@@ -2445,6 +2445,59 @@ pub const AppSession = struct {
         return null;
     }
 
+    /// Phase 7e-2a: 주소창 편집 중(addr_edit)인 surface가 **활성 탭인 leaf**의 PaneBar(밴드·caret 위치 공유 소스).
+    /// 편집 아님/그 surface가 활성 탭 아님/바 없음이면 null. imeCursorRect(.addr_edit caret)·mouse-down 클릭-어웨이(밴드
+    /// 재클릭 판정)가 같은 leaf 기하를 쓰게 한다 — 렌더 "1c"·클릭 ①b의 band(y=full.y+bar_h)와 정합.
+    fn addrEditPaneBar(self: *AppSession) ?PaneBar {
+        const sid = self.addrEditSurfaceId() orelse return null;
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
+        for (leaf_rects.items) |lr| {
+            const at = lr.leaf.active_term;
+            if (at >= lr.leaf.terms.items.len) continue;
+            const term = lr.leaf.terms.items[at];
+            if (term.kind == .web and term.web_panel_kind == .browser and term.surfaceId() == sid) {
+                return self.paneBar(lr.rect, lr.leaf);
+            }
+        }
+        return null;
+    }
+
+    /// 주소창 편집 밴드(탭 바 바로 아래)가 포인트를 포함하는가 — mouse-down 클릭-어웨이(cancelAddrEdit)가 "자기 밴드
+    /// 재클릭(caret 재배치·nav 버튼)"만 살리게 판정한다(그 외 클릭이면 false → 편집 취소). 편집 아님/밴드 없음이면 false.
+    fn addrEditBandContainsPoint(self: *AppSession, x_px: f64, y_px: f64) bool {
+        const pb = self.addrEditPaneBar() orelse return false;
+        const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(렌더 "1c"·클릭 ①b와 동일 소스)
+        const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
+        return layout_math.pointInRect(x_px, y_px, band);
+    }
+
+    /// 주소창 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect .addr_edit)에 쓴다. 렌더 "1c"
+    /// 와 같은 셈법: 밴드 y(full.y+bar_h) + text pad_y, caret_col = nav_end(버튼 존) + 편집 표시폭(query EAW + preedit EAW).
+    /// tail 앵커라 넘치면 URL 영역 우경계(cols-1)로 clamp(렌더 caret과 정합). 편집 surface가 활성 탭인 leaf를 못 찾거나
+    /// cell 미상이면 null(imeCursorRect가 본문 origin으로 폴백). px 정확도는 헤드리스로 검증 어려움 — 밴드 근처 non-null만 확인.
+    fn addrEditCaretRect(self: *AppSession) ?chrome.draw.Rect {
+        const cw = self.cell_width_px;
+        const ch = self.cell_height_px;
+        if (cw == 0 or ch == 0) return null;
+        const pb = self.addrEditPaneBar() orelse return null;
+        const cols: u32 = pb.full.w / cw;
+        if (cols == 0) return null;
+        const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)(navButtonAt·렌더 단일 소스)
+        // 편집 표시폭(확정 query + 조합 preedit) — caret은 그 끝. tail 앵커라 URL 영역 우경계(cols-1)로 clamp(렌더 정합).
+        const edit_cols: u32 = self.addr_input.queryCols() + chrome.components.overlay_input.displayCols(self.addr_input.preedit.items);
+        const caret_col: u32 = @min(nav_end + edit_cols, cols -| 1);
+        const bar_h = pb.full.h;
+        const text_origin_y = pb.full.y + bar_h + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 렌더 band_text_origin_y와 동일
+        return .{
+            .x = @intCast(pb.full.x + caret_col * cw),
+            .y = @intCast(text_origin_y),
+            .w = @intCast(cw),
+            .h = @intCast(ch),
+        };
+    }
+
     /// rename 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect)에 쓴다. 대상별 편집기
     /// 텍스트 origin + caret 컬럼(prefix + query 폭)을 잡는다. preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐
     /// 그려짐 — 단일 줄 append라 뒤 텍스트 없음, find.caretRect와 동일). 사이드바 슬롯 y는 slot_height 기준 세로 중앙 근사(후보창은 근처면 충분). 못
@@ -10453,7 +10506,10 @@ pub const AppSession = struct {
         // 인라인 rename이 활성이면 키를 rename 편집기로 라우팅한다 — chrome 모달과 같은 최상위 규율(배타적: startRename이
         // find/palette를 닫음). Enter=확정·Esc=취소·Backspace·평문 글자를 handleRenameKey가 처리하고 모든 키를 소비한다
         // (텍스트 필드라 터미널/단축키로 안 흘린다). IME 조합은 imeSetPreedit/imeEnd가 rename_input에 직접 넣는다.
-        if (self.rename != null) {
+        // **단 오버레이(모달/notice)가 열려 있으면 양보한다**(`and !anyOverlayOpen`) — ⌘Q 종료 모달이 rename 중 뜨면 첫
+        // Enter가 확정이 아니라 commitRename으로 새는 걸 막고 아래 모달 핸들러가 받게 한다(rename 상태는 유지=모달 닫히면
+        // 편집 재개). 마우스 클릭엔 mouse-down commit 가드가 이미 안전하지만 Cmd+Q 메뉴 경로는 이 게이트가 필요하다(리뷰 [2]).
+        if (self.rename != null and !self.anyOverlayOpen()) {
             self.handleRenameKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             self.total_app_key_events += 1; // rename(앱)이 소비
@@ -10464,7 +10520,10 @@ pub const AppSession = struct {
         // Phase 7e-2a: browser 주소창 편집이 활성이면 키를 주소창 편집으로 라우팅한다(rename과 같은 최상위 규율 — 활성 중
         // 모든 키 소비, 터미널/단축키로 안 흘린다). Enter=확정(navigate)·Esc=취소·Backspace·평문 글자를 handleAddrEditKey가
         // 처리한다. 시각(metal_dirty·blink)은 여기서 세운다(상태 전이 메서드는 순수 코어라 시각 부수효과 없음).
-        if (self.addr_edit != null) {
+        // **단 오버레이(모달/notice)가 열려 있으면 양보한다**(`and !anyOverlayOpen`) — 편집 중 ⌘Q 종료 모달이 뜨면 첫
+        // Enter가 confirm이 아니라 commitAddrEdit(navigate)로 새던 걸 막고 아래 모달 핸들러가 받게 한다. addr_edit 상태는
+        // 유지 = 모달이 닫히면 편집 재개(리뷰 [2]).
+        if (self.addr_edit != null and !self.anyOverlayOpen()) {
             self.handleAddrEditKey(chromeInputFromKeyEvent(event));
             self.resetCursorBlink();
             self.metal_dirty = true;
@@ -10475,7 +10534,9 @@ pub const AppSession = struct {
         }
         // 사이드바 검색바가 활성이면 키를 검색 입력으로 라우팅한다(rename과 같은 규율 — 활성 중 모든 키 소비).
         // Enter=첫 매칭 이동·Esc=종료·Backspace·평문 글자를 handleSidebarSearchKey가 처리한다(단축키 조합은 안 쌓음).
-        if (self.sidebar_search_active) {
+        // **오버레이(모달/notice)가 열려 있으면 양보한다**(rename·addr_edit과 같은 게이트 — ⌘Q 종료 모달 첫 Enter가 검색
+        // 이동으로 새는 걸 막고 아래 모달 핸들러가 받게; 검색 상태는 유지, 리뷰 [2]).
+        if (self.sidebar_search_active and !self.anyOverlayOpen()) {
             self.handleSidebarSearchKey(chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             self.total_app_key_events += 1; // 검색(앱)이 소비
@@ -11086,6 +11147,15 @@ pub const AppSession = struct {
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
         if (kind == 1 and self.rename != null) self.commitRename();
+        // Phase 7e-2a: 주소창 편집 중 **자기 밴드 밖**(탭/pane/워크스페이스/터미널)을 down하면 편집을 취소한다 — rename의
+        // mouse-down commit-away를 미러하되, 브라우저 관례상 클릭-어웨이 = **취소(현재 URL 복원)**로 한다(commit-navigate는
+        // 안 친 URL로 튀어 놀람). 단 편집 중인 그 밴드 재클릭(caret 재배치·nav 버튼)은 유지 — 아래 ①b 밴드 핸들러가 URL 존
+        // 재클릭이면 draft 보존·버튼이면 nav action으로 처리하게 양보한다(addrEditBandContainsPoint가 자기 밴드면 true → 취소
+        // 안 함). rename 인터셉트가 안 풀려 모든 키가 보이지 않는 편집기로 가던 하이재킹 수정(리뷰 [1]).
+        if (kind == 1 and self.addr_edit != null and !self.addrEditBandContainsPoint(x_px, y_px)) {
+            self.cancelAddrEdit();
+            self.metal_dirty = true;
+        }
         // 컨텍스트 메뉴가 열려 있으면 클릭(down)을 메뉴로 라우팅한다 — 항목 위면 그 항목 실행, 밖이면 닫는다(다른
         // 마우스 이벤트도 메뉴 중엔 소비). 메뉴는 최상위 모달이라 뒤(터미널/탭)로 안 흘린다.
         if (self.chrome_host.context_menu.open) {
@@ -12169,7 +12239,10 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebarSearchCaretRect(),
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
-            .addr_edit => null, // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다(오버레이 후보창 위치는 무의미)
+            // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가
+            // 렌더 "1c"와 같은 밴드·nav_end·편집폭 셈법으로 위치 단일 소스). null이면(밴드 못 찾음) 아래 폴백. web term 활성 중
+            // (activeTermIsTerminal=false) 본문 origin 폴백은 caret과 어긋나므로 이 rect가 필요하다(리뷰 [4]).
+            .addr_edit => self.addrEditCaretRect(),
             .terminal => null,
         };
         if (overlay_caret) |r| {
@@ -15671,11 +15744,16 @@ pub const AppSession = struct {
                             const url: []const u8 = if (editing) blk: {
                                 const q = self.addrEditText();
                                 const p = self.addrEditPreedit();
-                                const qn = @min(q.len, disp_buf.len);
-                                @memcpy(disp_buf[0..qn], q[0..qn]);
-                                const pn = @min(p.len, disp_buf.len - qn);
-                                @memcpy(disp_buf[qn..][0..pn], p[0..pn]);
-                                break :blk disp_buf[0 .. qn + pn];
+                                // preedit(조합 중, 항상 뒤·작음)를 head 경계로 먼저 확보하고, query는 **tail**(caret 끝)이
+                                // 보이게 남는 자리에 넣는다. 초장문 URL(q.len>disp_buf)이면 head를 버리고 tail을 UTF-8
+                                // 경계에서 잘라 caret 끝이 보이게 한다 — 렌더 .tail 앵커와 정합(옛 head @memcpy는 caret이
+                                // 있는 끝을 잘라 멀티바이트를 쪼갰다, 리뷰 [5]).
+                                const pn = terminal.width.truncateToBoundary(p, disp_buf.len);
+                                const q_start = terminal.width.tailToBoundary(q, disp_buf.len - pn);
+                                const q_tail = q[q_start..]; // ≤ disp_buf.len - pn(tailToBoundary 보장), UTF-8 경계 정렬
+                                @memcpy(disp_buf[0..q_tail.len], q_tail);
+                                @memcpy(disp_buf[q_tail.len..][0..pn], p[0..pn]);
+                                break :blk disp_buf[0 .. q_tail.len + pn];
                             } else (if (nav_state) |st| st.url else "");
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
@@ -26514,8 +26592,9 @@ test "setWebNavState: upsert + 옛 url free + 조회 + 없는 surface null (7e-1
 
 test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정리 (7e-2a 헤드리스)" {
     // enter/append/backspace/commit/cancel + take 3종은 addr_edit·pending 필드만 만지므로 minimal init로 충분하다
-    // ([[devsession-undefined-test-field-trap]] — 나머지 undefined 필드는 안 읽음). 시각(metal_dirty·blink)은 순수 코어
-    // 밖(handleKeyEvent 래퍼/클릭 핸들러)이라 여기서 안 탄다 = 헤드리스 검증 가능(이식성 증거).
+    // ([[devsession-undefined-test-field-trap]]). **dropAddrEditIfSurface(step 6)가 읽는 pending 필드 전부**를 초기화한다 —
+    // web_nav_action_pending도 그중 하나라 초기화하지 않으면 undefined read(UB)다(리뷰 [6]; 옛 주석 "나머지 필드 안 읽음"은
+    // 틀렸음). 시각(metal_dirty·blink)은 순수 코어 밖(handleKeyEvent 래퍼/클릭 핸들러)이라 여기서 안 탄다 = 헤드리스 검증 가능.
     var session: AppSession = undefined;
     session.allocator = std.testing.allocator; // OverlayInput(addr_input)이 self.allocator를 쓴다(query/preedit 동적)
     session.addr_input = .{};
@@ -26525,6 +26604,7 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     session.addr_navigate_pending = null;
     session.addr_navigate_url_len = 0;
     session.addr_focus_restore_pending = null;
+    session.web_nav_action_pending = null; // dropAddrEditIfSurface가 읽음(teardown 정리 대상 일치 검사) — undefined read 방지
 
     // 1) 편집 진입: 현재 URL 시드 + focus-pull pending(1회성).
     session.enterAddrEdit(42, "https://old.example/");
@@ -27321,6 +27401,35 @@ fn attachTestRuntime(session: *AppSession, rt: *app.SurfaceRuntime, surface: *ma
     rt.* = app.SurfaceRuntime.init(std.testing.allocator);
     session.runtime = rt;
     _ = try session.runtime.attach(surface, surface.id, .{ .ctx = undefined, .write_input = testNoopPtyWrite, .resize_fn = testNoopPtyResize });
+}
+
+test "addrEditCaretRect: 주소창 편집 caret이 밴드 안(y) + nav_end 뒤(x) non-null (7e-2a 리뷰 [4])" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term/셀 메트릭 필요(session.init)
+    const allocator = std.testing.allocator;
+    const session = try initRenameCaretTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    // termRect가 유효 폭·높이를 갖게 backing 픽셀을 채운다(rename 테스트는 사이드바 기하만 써 안 채웠다). titlebar 띠 0으로.
+    session.backing_width_px = 800;
+    session.backing_height_px = 400;
+    session.titlebar_strip_px = 0;
+
+    // 활성 pane에 browser web 탭을 만들어 활성 term으로(surface_id 반환). 편집 진입 후 caret rect 조회.
+    const sid = try session.createAdoptedWebTermInActivePane();
+    session.enterAddrEdit(sid, "https://x");
+    const r = session.addrEditCaretRect() orelse return error.NoCaret;
+
+    const pb = session.addrEditPaneBar() orelse return error.NoBar;
+    const cw = session.cell_width_px;
+    const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존(렌더·hit-test 단일 소스)
+    const cols: u32 = pb.full.w / cw;
+    const expect_col = @min(nav_end + session.addr_input.queryCols(), cols -| 1); // caret = nav_end + 편집폭(tail clamp)
+    try std.testing.expectEqual(@as(i32, @intCast(pb.full.x + expect_col * cw)), r.x); // x = 밴드 origin + caret col
+    // y는 주소창 밴드([full.y+bar_h, +2·bar_h]) 안 — 탭 바 아래 URL 밴드에 후보창이 뜬다(터미널 본문 origin 폴백 아님).
+    const band_y = pb.full.y + pb.full.h;
+    try std.testing.expect(r.y >= @as(i32, @intCast(band_y)) and r.y < @as(i32, @intCast(band_y + pb.full.h)));
+    try std.testing.expectEqual(cw, r.w);
+    try std.testing.expectEqual(session.cell_height_px, r.h);
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
@@ -38303,6 +38412,8 @@ test "imeCursorRect returns the cursor cell rect in backing px for IME candidate
     // 초기화로 결정적 `.terminal`(오버레이 caret 없음) 경로를 타게 한다.
     session.chrome_host = .{};
     session.rename = null; // inputFocus(imeCursorRect)가 rename을 읽음([[devsession-undefined-test-field-trap]])
+    session.sidebar_search_active = false; // inputFocus가 rename 다음으로 읽음 — 결정적 .terminal 경로용
+    session.addr_edit = null; // inputFocus가 읽고, 이제 .addr_edit 분기가 addrEditCaretRect로 상태를 역참조함(리뷰 [4]) → 명시 init 필수
     session.tabs = .empty; // [4e-2] imeCursorRect 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
 

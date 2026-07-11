@@ -78,12 +78,15 @@ pub fn validateAppPath(path: []const u8, out: []u8) SandboxError![]const u8 {
 ///
 /// 정책(무엇을·왜):
 ///  - 공백·탭 trim 후 **빈 문자열 → null**(로드 안 함).
-///  - `"://"` 포함(스킴 있는 절대 URL): `http://`·`https://`(대소문자 무시) 접두면 **그대로 통과**, 아니면 **null로 거부**
-///    (`file://`·`javascript://`·`data://`·`maru-app://` 등 위험/미허용 스킴 — 로컬 파일 노출·스크립트 실행·신뢰 스킴
-///    스푸핑 차단). 베이스: 브라우저 주소창이 신뢰 컨텍스트에서 임의 스킴을 실행하지 않도록 **허용 목록**(http/https)만 연다.
-///  - `"://"` 없음: `https://{input}` 프리픽스(bare 도메인 `example.com`·`localhost:3000` 등을 https로). `"://"` 없는
-///    위험 스킴(`javascript:alert(1)`)도 이 프리픽스로 **무해화**된다 — `https://javascript:alert(1)`은 스킴이 아니라
-///    (잘못된) host/path로 파싱돼 스크립트가 실행되지 않는다(안전한 기본값).
+///  - **유효 스킴 + `"://"`**(스킴 있는 절대 URL): `"://"` 앞이 RFC 3986 스킴(`schemeIsValidPrefix` — 첫 글자 ALPHA +
+///    이후 ALPHA/DIGIT/`+`/`-`/`.`)일 때만 절대 URL로 본다. `http://`·`https://`(대소문자 무시) 접두면 **그대로 통과**,
+///    아니면 **null로 거부**(`file://`·`javascript://`·`data://`·`maru-app://` 등 위험/미허용 스킴 — 로컬 파일 노출·스크립트
+///    실행·신뢰 스킴 스푸핑 차단). 베이스: 브라우저 주소창이 신뢰 컨텍스트에서 임의 스킴을 실행하지 않도록 **허용 목록**(http/https)만 연다.
+///  - **스킴 없음**(`"://"` 없거나, 있어도 그 앞이 유효 스킴이 아님): `https://{input}` 프리픽스(bare 도메인 `example.com`·
+///    `localhost:3000` 등을 https로). **박힌 `://`**(예: `example.com/redirect?url=https://foo`·`google.com/search?q=a://b`)는
+///    `"://"` 앞에 `/`·`?` 등이 있어 스킴이 아니므로 오판하지 않고 프리픽스된다(쿼리에 URL이 든 검색/리다이렉트 링크 보존).
+///    `"://"` 없는 위험 스킴(`javascript:alert(1)`)도 이 프리픽스로 **무해화**된다 — `https://javascript:alert(1)`은 스킴이
+///    아니라 (잘못된) host/path로 파싱돼 스크립트가 실행되지 않는다(안전한 기본값).
 ///  - 결과가 `out` 버퍼보다 길면 **null**(방어 — 호출자가 여유 있는 out을 준다).
 ///
 /// 반환 슬라이스는 `out` 소유(호출자가 살려 둔다). L2 순수: I/O·상태 없음(입력·out만). 실제 navigate 실행은 platform(7e-2b).
@@ -91,17 +94,22 @@ pub fn resolveNavUrl(input: []const u8, out: []u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, input, " \t");
     if (trimmed.len == 0) return null; // 빈/공백뿐 → 로드 안 함
 
-    if (std.mem.indexOf(u8, trimmed, "://") != null) {
-        // 스킴 있는 절대 URL — http/https만 허용, 나머지(file·javascript·data·maru-app 등)는 거부(허용 목록).
-        if (hasSchemePrefix(trimmed, "http://") or hasSchemePrefix(trimmed, "https://")) {
-            if (trimmed.len > out.len) return null; // out 초과 방어
-            @memcpy(out[0..trimmed.len], trimmed);
-            return out[0..trimmed.len];
+    if (std.mem.indexOf(u8, trimmed, "://")) |sep| {
+        // `://` 앞이 **유효 스킴**일 때만 절대 URL로 본다 — 박힌 `://`(`.../redirect?url=https://x`)를 스킴으로 오판하지
+        // 않게(앞에 `/`·`?`·`#`가 있으면 스킴 아님 → 아래 https:// 프리픽스로 폴백).
+        if (schemeIsValidPrefix(trimmed[0..sep])) {
+            // 스킴 있는 절대 URL — http/https만 허용, 나머지(file·javascript·data·maru-app 등)는 거부(허용 목록).
+            if (hasSchemePrefix(trimmed, "http://") or hasSchemePrefix(trimmed, "https://")) {
+                if (trimmed.len > out.len) return null; // out 초과 방어
+                @memcpy(out[0..trimmed.len], trimmed);
+                return out[0..trimmed.len];
+            }
+            return null; // 미허용 스킴 거부
         }
-        return null; // 미허용 스킴 거부
+        // 앞이 유효 스킴 아님(박힌 `://`) → 스킴 없음으로 폴백해 아래 https:// 프리픽스.
     }
 
-    // 스킴 없음 → https:// 프리픽스(bare 도메인·localhost:port; "://" 없는 위험 스킴도 무해화).
+    // 스킴 없음 → https:// 프리픽스(bare 도메인·localhost:port; "://" 없는 위험 스킴·박힌 `://`도 무해화·보존).
     const prefix = "https://";
     if (prefix.len + trimmed.len > out.len) return null; // out 초과 방어
     @memcpy(out[0..prefix.len], prefix);
@@ -112,6 +120,19 @@ pub fn resolveNavUrl(input: []const u8, out: []u8) ?[]const u8 {
 /// `s`가 `prefix`(스킴)로 시작하는가 — 스킴은 대소문자 무시(RFC 3986 §3.1)라 `HTTP://`·`Https://`도 허용한다.
 fn hasSchemePrefix(s: []const u8, prefix: []const u8) bool {
     return s.len >= prefix.len and std.ascii.eqlIgnoreCase(s[0..prefix.len], prefix);
+}
+
+/// `s`(=`"://"` 바로 앞 세그먼트)가 **유효한 RFC 3986 스킴**인가 — `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`
+/// (§3.1). 첫 글자 ALPHA, 이후 ALPHA/DIGIT/`+`/`-`/`.`만 허용한다. `/`·`?`·`#`·공백 등은 스킴 문자가 아니라 false →
+/// `resolveNavUrl`이 박힌 `://`(`example.com/redirect?url=https://x`처럼 `://` 앞에 경로/쿼리가 있는 경우)를 스킴으로
+/// 오판하지 않는다(그런 세그먼트는 `/`·`?`를 포함해 여기서 false). 빈 세그먼트도 false(스킴 없음).
+fn schemeIsValidPrefix(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (!std.ascii.isAlphabetic(s[0])) return false;
+    for (s[1..]) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.')) return false;
+    }
+    return true;
 }
 
 /// Phase 7f-2: 새 창/팝업(`WKUIDelegate.createWebViewWith`) 대상 URL 정책 게이트. 팝업은 **웹 콘텐츠가 시작**하므로
@@ -268,6 +289,17 @@ test "resolveNavUrl: '://' 없는 위험 스킴은 https:// 프리픽스로 무�
     // javascript:alert(1)은 "://"가 없어 스킴 판정을 안 타고 host/path로 프리픽스 → 스크립트 실행 안 됨(안전).
     try expectNav("javascript:alert(1)", "https://javascript:alert(1)");
     try expectNav("data:text/html,x", "https://data:text/html,x");
+}
+
+test "resolveNavUrl: 박힌 '://'(쿼리·경로 안)는 스킴이 아니라 https:// 프리픽스 — 스킴 오판 방지(adversarial)" {
+    // `://` 앞에 `/`·`?`가 있어 유효 스킴이 아니므로(schemeIsValidPrefix false) 절대 URL이 아니다 → 프리픽스·보존.
+    try expectNav("example.com/redirect?url=https://foo.com", "https://example.com/redirect?url=https://foo.com");
+    try expectNav("google.com/search?q=a://b", "https://google.com/search?q=a://b");
+    // 진짜 스킴(앞 세그먼트가 순수 스킴 문자)은 그대로 판정한다: http/https 통과, 그 외 거부.
+    try expectNav("http://x", "http://x");
+    try expectNav("https://x", "https://x");
+    try expectNavNull("javascript://x"); // 유효 스킴이나 http/https 아님 → 거부(무해화 아님, 절대 URL 거부 경로)
+    try expectNavNull("ftp://host/f"); // 유효 스킴·미허용
 }
 
 test "resolveNavUrl: 빈/공백뿐 → null(로드 안 함), trim 적용" {

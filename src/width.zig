@@ -256,6 +256,17 @@ pub fn truncateToBoundary(bytes: []const u8, max: usize) usize {
     return n;
 }
 
+/// `bytes`의 **마지막 최대 `max` 바이트**를 담는 tail의 **시작 오프셋**을 UTF-8 codepoint 경계에서 돌려준다(head를 버림).
+/// `truncateToBoundary`(head 보존, 끝 오프셋)의 대칭 — 반환 오프셋부터 `bytes` 끝까지가 항상 ≤ max 바이트이고 lead
+/// 바이트에서 시작한다(잘린 지점이 continuation 0x80~0xBF면 앞으로 되감음). 초장문 편집(주소창 URL 등)에서 caret이 있는
+/// **끝**을 고정 버퍼에 보이게 하는 단일 출처. `bytes.len <= max`면 0(통째). 반환은 항상 ≤ bytes.len.
+pub fn tailToBoundary(bytes: []const u8, max: usize) usize {
+    if (bytes.len <= max) return 0; // 안 넘침 — head부터 통째
+    var start = bytes.len - max;
+    while (start < bytes.len and (bytes[start] & 0xC0) == 0x80) : (start += 1) {} // continuation면 다음 lead까지 전진
+    return start;
+}
+
 /// `bytes[0..len]`에서 **마지막 codepoint 한 개**를 뺀 길이를 돌려준다(백스페이스 — UTF-8 경계). `len==0`이면 0.
 /// 마지막 바이트부터 continuation(0x80~0xBF)을 lead까지 건너뛴다. 백스페이스가 멀티바이트를 한 바이트씩 깨는 걸 막는
 /// 단일 출처(검색·인라인 편집 버퍼 공유). `len`은 `bytes`의 유효 길이(≤ bytes.len)여야 한다.
@@ -280,6 +291,23 @@ test "truncateToBoundary: codepoint 경계에서 자른다(멀티바이트 중�
     try std.testing.expectEqual(@as(usize, 0), truncateToBoundary("", 5));
     // 큰 max(>255)에서도 usize 반환이라 overflow 없음.
     try std.testing.expectEqual(@as(usize, 2), truncateToBoundary("ab", 1000));
+}
+
+test "tailToBoundary: 끝에서 max 바이트를 UTF-8 경계로 자른 tail 시작 오프셋" {
+    try std.testing.expectEqual(@as(usize, 0), tailToBoundary("abc", 64)); // 상한 이하 — 통째(오프셋 0)
+    try std.testing.expectEqual(@as(usize, 0), tailToBoundary("abcd", 4)); // 딱 상한 — 통째
+    try std.testing.expectEqual(@as(usize, 1), tailToBoundary("abcd", 3)); // 마지막 3바이트 "bcd"
+    // "a가" = 61 EA B0 80(len 4). max=2: start=2(B0=continuation)→3(80)→4(끝) → tail="" (경계 못 맞추면 빈 tail, caret만 보임).
+    try std.testing.expectEqual(@as(usize, 4), tailToBoundary("a가", 2));
+    try std.testing.expectEqual(@as(usize, 1), tailToBoundary("a가", 3)); // start=1(EA lead) → "가"(3바이트) 통째
+    try std.testing.expectEqual(@as(usize, 0), tailToBoundary("a가", 4)); // len==max → 통째(오프셋 0)
+    // "가나" = EA B0 80 EB 82 98(len 6). max=3: start=3(EB=lead)→ "나"(3바이트) 통째.
+    try std.testing.expectEqual(@as(usize, 3), tailToBoundary("가나", 3));
+    // max=4: start=2(80 continuation)→3(EB lead) → "나"(3바이트, ≤4). '가' 중간서 안 쪼갬.
+    try std.testing.expectEqual(@as(usize, 3), tailToBoundary("가나", 4));
+    // max=0·빈 입력 안전(오프셋이 끝/0).
+    try std.testing.expectEqual(@as(usize, 3), tailToBoundary("가", 0)); // start=len=3(끝) → 빈 tail
+    try std.testing.expectEqual(@as(usize, 0), tailToBoundary("", 5));
 }
 
 test "dropLastCodepoint: 마지막 codepoint 한 개 제거(UTF-8 경계)" {

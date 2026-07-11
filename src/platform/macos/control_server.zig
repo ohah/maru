@@ -183,6 +183,18 @@ pub const ControlRequestQueue = struct {
 
 pub const StartError = cs.BindError || std.Thread.SpawnError || QueueError;
 
+/// §5-async: async 응답을 나중에 되돌릴 **in-flight 요청** 하나(deferred marshal). 메인 drain이 즉시 resolve 대신
+/// `deferRequest`로 등록하면, 나중에 `completeInFlight`(콜백)이 resolve한다. `pending`은 accept 스레드 serve 스택에
+/// 살며(waitResolved 대기 중) resolve/cancel까지 유효하다.
+pub const InFlight = struct {
+    /// 이 async 요청의 상관 id(서버 발급, monotonic). Swift 콜백이 이 id로 complete한다.
+    id: u64,
+    /// 붙잡은 pending(accept 스레드 소유, resolve/cancel 대상).
+    pending: *PendingRequest,
+    /// 모노토닉 awake ns 마감 — `reapExpiredInFlight`가 지나면 timeout으로 resolve(hung async op 방어).
+    deadline_ns: i128,
+};
+
 /// A2b 라이브 서버. **start() 후 절대 이동/복사 금지**(accept 스레드가 `&self`를 잡는다 — LivePtySession 핀 선례).
 /// caller가 global static 또는 heap로 주소를 고정한다.
 pub const ControlServer = struct {
@@ -199,6 +211,16 @@ pub const ControlServer = struct {
     read_timeout_ms: u32 = 5000,
     /// accept blocking을 gate하는 poll 간격(종료 시 이 간격 안에 closing 확인 → join). 짧을수록 종료 빠름·wakeup 잦음.
     poll_interval_ms: i32 = 200,
+    // ── §5-async: deferred marshal(in-flight 레지스트리 — **메인 스레드 전용**, 락 없음: deferRequest·completeInFlight·
+    //    reapExpiredInFlight·stop이 전부 메인. pending.resolve/cancel만 cross-thread지만 그건 이미 thread-safe) ──
+    /// in-flight async 요청 목록(items_gpa 소유). accept가 serial이라 실질 ≤1이지만 bounded로 견고성 유지.
+    in_flight: std.ArrayList(InFlight) = .empty,
+    /// items/socket alloc(in_flight 리스트도 이걸로 — start가 채운다).
+    items_gpa: std.mem.Allocator = undefined,
+    /// 다음 발급할 async 상관 id(monotonic, 1부터).
+    next_async_id: u64 = 1,
+    /// 동시 in-flight 상한(§11 안정성 게이트 — bounded). 초과 defer는 TooManyInFlight(호출자가 에러 resolve).
+    max_in_flight: usize = 8,
 
     /// 소켓을 bind하고 accept 스레드를 띄운다. **self는 이미 최종 주소에 있어야 한다.** bind 실패면 스레드 없이 에러.
     pub fn start(
@@ -225,6 +247,7 @@ pub const ControlServer = struct {
             .queue = queue,
             .hello_version = hello_version,
             .hello_caps = hello_caps,
+            .items_gpa = items_gpa, // §5-async in_flight 리스트 alloc
         };
         errdefer self.queue.deinit();
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
@@ -250,16 +273,64 @@ pub const ControlServer = struct {
         pending.resolve(response);
     }
 
-    /// 종료: accept 스레드에 closing을 알리고 join한 뒤 소켓/큐를 해제한다(deinit 계약: 스레드 join·소켓 close).
+    /// **§5-async(메인 전용)**: 응답이 나중에 오는 요청을 in-flight로 등록한다(즉시 resolve 안 함). drain이 async
+    /// 메서드(browser.* — 5e)에 대해 `resolveRequest` 대신 이걸 호출해 pending을 붙잡으면, WKWebView 콜백 완료 시
+    /// `completeInFlight(반환 id, ...)`이 resolve한다. accept 스레드는 그동안 waitResolved에서 대기(pending 유효).
+    /// bounded — `max_in_flight` 초과면 `TooManyInFlight`(호출자가 에러로 즉시 resolve해야 accept 무한 대기 방지).
+    /// `deadline_ns`=모노토닉 awake ns 마감(호출자가 now+timeout 계산). 반환=async 상관 id(>=1). **메인 스레드 전용**.
+    pub fn deferRequest(self: *ControlServer, pending: *PendingRequest, deadline_ns: i128) error{ TooManyInFlight, OutOfMemory }!u64 {
+        if (self.in_flight.items.len >= self.max_in_flight) return error.TooManyInFlight;
+        const id = self.next_async_id;
+        self.next_async_id += 1;
+        try self.in_flight.append(self.items_gpa, .{ .id = id, .pending = pending, .deadline_ns = deadline_ns });
+        return id;
+    }
+
+    /// **§5-async(메인 전용)**: `async_id`의 in-flight 요청을 `response`(cross_gpa 소유 또는 null)로 resolve하고
+    /// 레지스트리에서 제거한다. 찾으면 true, 없으면 false(옛/이미 완료/reap된 id — 무동작이라 늦은 콜백에 안전).
+    /// Swift async 콜백(evaluateJavaScript/takeSnapshot/navigation 완료)이 ABI를 거쳐 부른다(메인 스레드).
+    pub fn completeInFlight(self: *ControlServer, async_id: u64, response: ?[]u8) bool {
+        for (self.in_flight.items, 0..) |e, i| {
+            if (e.id == async_id) {
+                e.pending.resolve(response);
+                _ = self.in_flight.swapRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// **§5-async(메인 전용)**: `now_ns`(모노토닉 awake) 기준 마감이 지난 in-flight를 timeout으로 정리한다 — 응답 없이
+    /// (`resolve(null)`) accept 스레드를 깨워 연결을 닫게 하고(client read 타임아웃이 받음, OOM 경로와 동형 계약)
+    /// 레지스트리에서 제거한다. drain이 매 tick 부른다(hung WKWebView async op가 accept 스레드를 영구 붙잡는 것 방어).
+    /// 반환=reap 개수. proper timeout **에러 응답**(요청 id 파싱 + 직렬화)은 후속 — 지금은 null 종료로 단순·일관.
+    pub fn reapExpiredInFlight(self: *ControlServer, now_ns: i128) usize {
+        var reaped: usize = 0;
+        var i: usize = 0;
+        while (i < self.in_flight.items.len) {
+            if (self.in_flight.items[i].deadline_ns <= now_ns) {
+                self.in_flight.items[i].pending.resolve(null);
+                _ = self.in_flight.swapRemove(i); // 마지막을 i로 당김 → i 재검사(증가 안 함)
+                reaped += 1;
+            } else i += 1;
+        }
+        return reaped;
+    }
+
+    /// 종료: accept 스레드에 closing을 알리고 join한 뒤 소켓/큐/in-flight를 해제한다(deinit 계약: 스레드 join·소켓 close).
     pub fn stop(self: *ControlServer) void {
         self.closing.store(true, .release);
         self.queue.close(); // 대기 pending cancel → accept 스레드가 wait에서 깨어나 abandon
+        // §5-async: in-flight로 붙잡힌 async 요청도 cancel(queue.close와 대칭 — 콜백이 영영 안 오는 요청의 accept
+        // 스레드를 깨워 abandon시킨다). join 전에 해 blocked accept 스레드가 빠져나오게 한다.
+        for (self.in_flight.items) |e| e.pending.cancel();
         if (self.thread) |thread| {
             thread.join(); // poll_interval 안에 closing을 봐 루프를 나온다(mid-serve면 read_timeout까지)
             self.thread = null;
         }
         self.server.deinit();
         self.queue.deinit();
+        self.in_flight.deinit(self.items_gpa);
         self.* = undefined;
     }
 
@@ -399,6 +470,85 @@ test "pending rendezvous: producer가 대기, consumer가 resolve하면 응답�
     try testing.expect(ctx.got != null);
     try testing.expectEqualStrings("the-response", ctx.got.?);
     testing.allocator.free(resp);
+}
+
+// ── §5-async: deferred marshal(in-flight 레지스트리 — 메인 전용, 스레드 없이 단위) ──
+// 최소 srv(in_flight/items_gpa/next_async_id/max_in_flight만 세팅) — deferRequest/completeInFlight/reapExpiredInFlight는
+// 이 필드들만 만지고 소켓·스레드를 안 탄다(readFrame 단위 테스트가 cross_gpa만 세팅한 것과 같은 결).
+fn inflightSrv(max: usize) ControlServer {
+    var srv: ControlServer = undefined;
+    srv.in_flight = .empty;
+    srv.items_gpa = testing.allocator;
+    srv.next_async_id = 1;
+    srv.max_in_flight = max;
+    return srv;
+}
+
+test "§5-async deferRequest→completeInFlight: 응답을 나중에 되돌린다(pending 즉시 resolve 안 됨)" {
+    var srv = inflightSrv(8);
+    defer srv.in_flight.deinit(testing.allocator);
+    var p: PendingRequest = .{ .request_bytes = "req", .selector = null, .io = std.testing.io };
+    const id = try srv.deferRequest(&p, std.math.maxInt(i128)); // 마감 먼 미래
+    try testing.expectEqual(@as(u64, 1), id);
+    try testing.expectEqual(PendingRequest.State.pending, p.state); // in-flight — 아직 resolve 안 됨
+    try testing.expectEqual(@as(usize, 1), srv.in_flight.items.len);
+
+    const resp = try testing.allocator.dupe(u8, "async-response");
+    try testing.expect(srv.completeInFlight(id, resp)); // 콜백이 나중에 완료
+    try testing.expectEqual(PendingRequest.State.done, p.state);
+    try testing.expectEqualStrings("async-response", p.response.?);
+    try testing.expectEqual(@as(usize, 0), srv.in_flight.items.len); // 제거됨
+    testing.allocator.free(resp);
+    // 이미 완료/미지 id 재-complete는 false(늦은 중복 콜백·옛 id 안전).
+    try testing.expect(!srv.completeInFlight(id, null));
+    try testing.expect(!srv.completeInFlight(999, null));
+}
+
+test "§5-async deferRequest bounded: max_in_flight 초과 → TooManyInFlight(호출자가 에러 resolve)" {
+    var srv = inflightSrv(2);
+    defer srv.in_flight.deinit(testing.allocator);
+    var p1: PendingRequest = .{ .request_bytes = "a", .selector = null, .io = std.testing.io };
+    var p2: PendingRequest = .{ .request_bytes = "b", .selector = null, .io = std.testing.io };
+    var p3: PendingRequest = .{ .request_bytes = "c", .selector = null, .io = std.testing.io };
+    _ = try srv.deferRequest(&p1, std.math.maxInt(i128));
+    _ = try srv.deferRequest(&p2, std.math.maxInt(i128));
+    try testing.expectError(error.TooManyInFlight, srv.deferRequest(&p3, std.math.maxInt(i128)));
+    try testing.expectEqual(@as(usize, 2), srv.in_flight.items.len);
+    // 하나 완료하면 슬롯이 나 다시 defer 가능.
+    try testing.expect(srv.completeInFlight(1, null));
+    _ = try srv.deferRequest(&p3, std.math.maxInt(i128));
+}
+
+test "§5-async reapExpiredInFlight: 마감 지난 것만 timeout(null) resolve+제거, 나머지 유지" {
+    var srv = inflightSrv(8);
+    defer srv.in_flight.deinit(testing.allocator);
+    var expired: PendingRequest = .{ .request_bytes = "old", .selector = null, .io = std.testing.io };
+    var live: PendingRequest = .{ .request_bytes = "new", .selector = null, .io = std.testing.io };
+    _ = try srv.deferRequest(&expired, 100); // 마감 100
+    _ = try srv.deferRequest(&live, 10_000); // 마감 먼 미래
+    try testing.expectEqual(@as(usize, 1), srv.reapExpiredInFlight(500)); // now=500: expired만
+    try testing.expectEqual(PendingRequest.State.done, expired.state); // timeout resolve
+    try testing.expect(expired.response == null); // 응답 없음(연결 닫힘 → client read 타임아웃)
+    try testing.expectEqual(PendingRequest.State.pending, live.state); // 유지
+    try testing.expectEqual(@as(usize, 1), srv.in_flight.items.len);
+    // live도 마감 지나면 reap.
+    try testing.expectEqual(@as(usize, 1), srv.reapExpiredInFlight(20_000));
+    try testing.expectEqual(PendingRequest.State.done, live.state);
+    try testing.expectEqual(@as(usize, 0), srv.in_flight.items.len);
+}
+
+test "§5-async stop: in-flight 요청을 cancel한다(콜백 영영 안 오는 요청의 accept를 깨워 abandon)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "inflight-stop");
+    defer srvRmBase(base);
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, std.heap.c_allocator, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    // 실 연결 없이 fake pending을 in-flight로 등록(메인 전용 API) — stop이 cancel해야 한다.
+    var p: PendingRequest = .{ .request_bytes = "req", .selector = null, .io = std.testing.io };
+    _ = try server.deferRequest(&p, std.math.maxInt(i128));
+    server.stop(); // in-flight cancel + join + deinit
+    try testing.expectEqual(PendingRequest.State.cancelled, p.state);
 }
 
 // ── 전체 라이브 서버 왕복(accept 스레드 + marshal + 메인 drain + 응답) ──

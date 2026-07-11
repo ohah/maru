@@ -250,6 +250,40 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **⑦ 구현 상태 — 5d(제어 코어 실 WKWebView API + fixture E2E, 구현 완료)**: `MaruAppHost.swift`의 `enum BrowserControl`(L4 어댑터) — web 패널 webView를 받아 §9 매핑대로 호출만 한다: `navigate(url)`=`load(URLRequest)`, `currentUrl()`=`.url`, `executeScript(script)`=`evaluateJavaScript`(async 콜백). 5d 범위=핵심 3개(navigate/getUrl/executeScript). **fixture E2E(macos smoke, MARU_WEB_PANEL — browser/untrusted 패널)**: 초기 로드 후 무-네트워크 `data:text/html,…` URL로 navigate→그 로드 완료 시 `currentUrl`(navigate 검증)·`executeScript("…textContent")`(스크립트 실행 검증). 실측: `browser_fixture_url=data:…maru5d…`·`browser_fixture_script=maru5d`. **범위 밖**: screenshot(`takeSnapshot`)·back/forward/refresh/findElement/click/sendKeys/getCookies는 후속. **라이브 배선(외부 소켓 → `dispatchBrowser` → 이 코어를 main-loop async marshal로 연결)은 1e(browser capability 발급)·async marshal 확장 대기**(§8.5 browser=기본거부·fd상속 발급 금지 — `dispatchBrowser`는 여전히 gate 통과 후 `not implemented (5d)` skeleton으로, 라이브 소켓 dispatch에도 미배선). 5d는 이 코어를 fixture로 확립해 실 WKWebView 실행 API·async 완료를 de-risk한다.
 
+### 9.2 라이브 end-to-end 에이전트 제어 — 남은 슬라이스 (설계, doc-first)
+
+**목표**: 외부/에이전트가 컨트롤 소켓으로 보낸 `browser.navigate`/`executeScript`가 **실제 인앱 WKWebView surface(7f 팝업 adopt 포함)를 움직이고 결과를 응답으로 받는** 라이브 경로. 이것이 [web-panel.md] §12의 "host-mediated 브라우저 MCP"(Safari MCP tool 표면을 자체 미러링 — 임베드 WKWebView는 `safaridriver`가 안 잡으므로) 의 실체다. maru는 **일반 브라우저 UX(사용자 브라우징) + 에이전트 제어**를 동시에 주는 게 목표고(7f adopt가 팝업까지 addressable하게 만든 전제), 엔진 피벗(CEF, §13) 없이 WKWebView에서 성립한다.
+
+**현재 상태(드리프트 게이트 실측 — 2026-07-11, 코드 인용)**:
+- **5a 완료(L2 순수)**: `src/session/control_browser.zig` — `BrowserMethod` **3개**(navigate/getUrl/executeScript, `:50`) 스키마·파서·직렬화 + `dispatchBrowser`(`:231`)가 parse→`browser` authz(`:265`, 존재검사 이전 균일 unauthorized)→surface 검증(`kind==.web`, `:283`)까지 수행. 헤드리스 테스트 있음.
+- **5d 완료(L4)**: `MaruAppHost.swift` `enum BrowserControl`(`:715`) — navigate/currentUrl/executeScript 실 WKWebView API. **fixture 스모크로만 구동**(컨트롤 플레인 아님).
+- **capability 순수 코어**: `control_capability.zig`에 `ScopeClass.browser`(`:58`)·`issueForFd`/`resolve`/`lookupByNonce`(`:204`·`:226`·`:240`) 정의 — **라이브 호출자 0**.
+
+**라이브 e2e를 막는 gap(4 + 보조 2)**:
+1. **라우팅 미배선** — 라이브 경로(`control_socket.zig` `serveReadOnly`·`app_host_abi.zig` `buildControlResponse` `:1807`)가 `dispatchReadOnly`만 부른다. write-class인 `browser.*`는 read-only 라우터가 받아 `method_not_found`로 접어 `dispatchBrowser`에 **도달조차 못 한다**. → **통합 dispatch 분기**(read-only vs write/browser)가 필요.
+2. **capability 발급·resolve 미배선(1e 라이브)** — 라이브 서버는 `scope=.self`(metadata:self) 하드코딩(`app_host_abi.zig:1806`)이고 auth 프레임 nonce→`CapabilityStore.resolve`→`Capability` 배선이 없다. `dispatchBrowser`가 요구하는 `caller_cap: ?Capability`(`control_browser.zig:235`)를 채울 라이브 경로가 없어, 라우팅만 이어도 **항상 `unauthorized`**. → **1e가 browser뿐 아니라 write/lifecycle 라이브 auth의 공통 선행**.
+3. **async marshal 부재** — 메인 drain(`app_host_abi.zig:1871`)은 pending pop→동기 `dispatchReadOnly`→**즉시 resolve**(한 tick 완결). `PendingRequest.resolve`(`control_server.zig:67`)는 1회 동기 rendezvous라, `evaluateJavaScript` completion·navigation didFinish 같은 **지연 콜백 결과를 pending으로 되돌리는** 경로가 없다. → **deferred resolve**(요청을 in-flight로 두고 콜백에서 나중에 resolve) 확장 필요.
+4. **surface_id → webView 해소** — `BrowserControl`은 `WKWebView`를 인자로 받는다(`:717`). dispatch가 판정한 target surface_id를 메인에서 `webPanels[surface_id].webView`로 푸는 배선이 주소창 nav 경로(`surfaceOwning`/`webPanels`)에만 있다 — browser dispatch용으로 재사용해야.
+5. *(보조)* **`panel.navigated` 이벤트** — `installNavObservers` KVO(`MaruAppHost.swift:898`)는 현재 **주소창 UI 갱신 전용**(`web_nav_states` 해시맵). 에이전트가 nav 완료를 관측하려면 이 KVO를 컨트롤 플레인 이벤트(§11 `events.subscribe`)로도 흘려야 — e2e 제어 자체는 안 막지만 폴링 없는 관측에 필요.
+6. *(보조)* **나머지 browser.* 메서드** — screenshot/back/forward/refresh/findElement/click/sendKeys/getCookies는 `BrowserMethod` enum·`BrowserControl` 둘 다 미정의. e2e 토대(1~4)와 독립적으로 확장.
+
+**슬라이스 시퀀싱(제안 — 각 헤드리스/fixture 게이트 후 머지)**:
+- **1e (capability fd 발급·resolve 라이브)** — *선행이자 공통 토대*. `browser`·`write`·`lifecycle` 라이브 auth가 전부 여기 걸린다. 순수 코어(`issueForFd`/`resolve`)를 라이브 서버 auth에 배선 + **발급 UX 결정(아래 "결정 필요")**.
+- **§5-async (deferred marshal)** — `PendingRequest`를 "동기 즉시 resolve"에서 "in-flight 등록 → 콜백에서 resolve" 로 확장. bounded in-flight(§11 안정성 게이트 — per-tick 처리량·타임아웃·slow 정리). browser뿐 아니라 미래 async 메서드 공용.
+- **5e (browser 라이브 배선)** — 통합 dispatch가 `browser.*`를 `dispatchBrowser`로 라우팅 → authz(1e cap) → surface 검증 → **메인 marshal**(surface_id→webView 해소) → `BrowserControl` 호출 → async 완료를 5-async로 응답. 최소 3개(navigate/getUrl/executeScript)로 e2e 왕복 fixture. `dispatchBrowser`의 `notImplementedResponse`(`control_browser.zig:290`)를 `executeBrowser` 실행으로 교체.
+- **5f (나머지 browser.* 메서드)** — enum + `BrowserControl` 확장(screenshot=`takeSnapshot`, back/forward/reload=이미 있는 `goBack`/`goForward`/`reload` 재노출, click/sendKeys/findElement=`evaluateJavaScript` DOM, getCookies=`WKHTTPCookieStore`). 각 스키마 헤드리스 + fixture E2E.
+- **5g (panel.navigated 이벤트)** — KVO→컨트롤 이벤트 방출(§11). `events.subscribe`(Phase 3) 위에 얹음.
+
+**결정 필요 — `browser` capability 발급 UX (1e의 피벗, downstream 무관하게 이 하나만 미정)**: `browser`는 **기본 거부**(§8.3)다 — 팝업·탭은 임의 untrusted 콘텐츠라, 에이전트 제어는 사용자 브라우징(로그인 세션·OAuth 토큰·폼)을 **읽고 대신 조작**할 수 있어 `sessions.list`와 차원이 다른 신뢰 표면이다. 어떻게 발급할지가 미결(§8.3 "발급 UX 별도·어휘 미정"). 후보:
+  - **(A) capability fd 상속(maru-spawned trusted agent profile)** — maru가 에이전트를 **자기 신뢰 자식 프로파일**로 spawn하며 `browser` cap fd를 상속(§8.5). per-op 프롬프트 없음, 기존 fd 모델 재사용. 단 "신뢰 에이전트 프로파일" 개념과 spawn 경로 필요. `allowedViaInheritedFd`가 이미 browser=허용(`control_capability.zig:95`)이라 정책상 부합.
+  - **(B) 명시 사용자 확인 모달(per grant/session)** — 에이전트가 `browser` cap 요청 → maru가 확인 모달(chrome overlay) → 승인 시 그 surface/session 한정 발급. 명시 동의로 가장 안전, UX 마찰·grant 프로토콜·모달 필요.
+  - **(C) config allowlist** — config가 어느 프로파일/surface에 browser를 주는지 선언. 런타임 프롬프트 없음, 정적·오설정 시 위험.
+  - **추천(초안)**: **default-deny + (A) fd 상속을 주 경로**(에이전트=maru의 신뢰 자식, per-op 마찰 0, §8.5 모델 재사용) + **surface 범위 한정**(에이전트는 자기 bound surface만 제어) + 첫 browser grant에 **(B) 1회 사용자 확인**(defense-in-depth). (A) 단독은 spawn 시점 신뢰에 전적 의존하므로, 최소 1회 명시 동의를 얹는다. **최종 결정은 사용자 몫** — 이 선택이 1e의 grant 프로토콜·CLI/에이전트 UX를 정한다(다른 슬라이스 1~4는 "어떤 cap이든 resolve됨"만 가정해 이 결정과 독립).
+
+**host-mediated 얕게 vs 깊게(Web Inspector) — 이미 결정된 분기**: 위 5e/5f는 **host-mediated JS**(evaluateJavaScript로 DOM·click·eval, takeSnapshot으로 screenshot, WKHTTPCookieStore로 쿠키, 주입 JS로 console)라 **network 계층은 얕다**. CDP급 network(요청 가로채기·수정)가 필요하면 maru WKWebView를 `isInspectable`로 켜고 **Web Inspector 원격 프로토콜**로 구동한다(복잡·별도 채널 — Safari MCP의 존재가 WKWebView에서 가능함을 방증). 기본은 얕은 host-mediated, 깊은 network는 실수요 시 별도 슬라이스([web-panel.md] §12 분기와 단일 출처 정합).
+
+**MCP 어댑터 관계**: wire가 JSON-RPC 2.0이라(§10) 향후 MCP 어댑터를 얇게 얹으면 `browser.*`가 MCP tool로 노출된다 — "host-mediated 브라우저 MCP"의 MCP 표면은 이 어댑터(§10 note, 구현 계획 미정, 네임스페이스/발견 seam만 보존)로 충족한다.
+
 ## 10. 베이스와 결정 (clean-room)
 
 - **메커니즘**: JSON-RPC 2.0 over 로컬 stdio/socket(LSP/DAP/CDP 공유). 메커니즘만 빌리고 LSP 스펙(textDocument/*)은 채택하지 않는다. 프레이밍은 ndjson(대형은 §4.3 chunk).
@@ -328,7 +362,10 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 | 5a browser core | `browser.*` schema/dispatch/authz 단위 **(구현 완료 — §9.1)**: `control_browser.zig`(L2) — BrowserMethod 3개(navigate/getUrl/executeScript) 스키마·`dispatchBrowser`(parse→id→**authz 균일 unauthorized·존재검사 이전**→method→params→surface kind==web→skeleton `internal_error`). `authorize` 재사용, oracle 방지 byte-identical test | WKWebView control core skeleton |
 | 5b trusted bridge | isolated world 주입/미주입 자동 E2E | trusted `window.maru.*` bridge |
 | 5c app scheme security | CSP, realpath/symlink/traversal 거부 단위 | `maru-app://` loader |
-| 5d minimal browser ops | navigate/evaluate/screenshot fixture | minimal `browser.*` |
+| 5d minimal browser ops | navigate/evaluate/screenshot fixture | minimal `browser.*` **(구현 완료 — fixture 전용, §9.1 ⑦)** |
+| 5e browser 라이브 배선 | 통합 dispatch가 `browser.*`→`dispatchBrowser` 라우팅 + surface_id→webView marshal + async 응답 왕복(navigate/getUrl/executeScript) 헤드리스+fixture E2E. **선행: 1e(cap 발급)·§5-async(deferred marshal)** | 소켓으로 온 `browser.*`가 실 WKWebView 구동(§9.2) |
+| 5f 나머지 browser ops | screenshot/back/forward/refresh/click/sendKeys/findElement/getCookies enum+`BrowserControl` 확장, 스키마 헤드리스+fixture | full `browser.*` 표면 |
+| 5g panel.navigated 이벤트 | nav KVO→컨트롤 이벤트 방출, `events.subscribe`(Phase 3) 위 통합 | 에이전트 nav 완료 관측(폴링 없이) |
 | 6a WebDriver shell | token/Origin/session HTTP routing 단위 | authenticated endpoint skeleton |
 | 6b WebDriver subset | navigate/evaluate/screenshot standard client smoke | read-only automation subset |
 | 6c element/input subset | find/click/send_keys/cookies/download smoke | agent-browser subset compatibility |

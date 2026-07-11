@@ -1481,6 +1481,15 @@ pub export fn maru_macos_app_csp_header(out_ptr: ?[*]u8, out_cap: usize) i64 {
     return @intCast(csp.len);
 }
 
+// Phase 7f-2: 새 창/팝업(WKUIDelegate.createWebViewWith) 대상 URL 정책 게이트. Swift가 navigationAction.request.url을
+// 넘기면 app_scheme.popupTargetAllowed(허용 = about·http·https·빈만, javascript·file·data·blob·maru-app 등 거부)로
+// 판정한다 — 정책 단일 출처=Zig, 어댑터=Swift(url 추출·차단). 반환: 1=허용, 0=거부, -1=url_ptr null. 세션리스 순수
+// 정책(csp_header 동형).
+pub export fn maru_macos_app_popup_target_allowed(url_ptr: ?[*]const u8, url_len: usize) c_int {
+    const up = url_ptr orelse return -1;
+    return if (maru.session.app_scheme.popupTargetAllowed(up[0..url_len])) 1 else 0;
+}
+
 // Track C 5b: 신뢰 웹 브리지(window.maru.*) 요청 디스패치(5b-1 코어). Swift가 신뢰(markdown) 패널의 isolated
 // WKContentWorld 메시지 핸들러 진입에서 **frameInfo.isMainFrame + securityOrigin(maru-app://app) exact-pin을 먼저
 // 검증**(신뢰 게이트)한 뒤, 통과한 요청 JSON 한 줄을 넘기면 control_bridge.dispatchBridge로 응답 JSON을 만들어 out에
@@ -2072,6 +2081,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id(null));
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
+    // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.
+    try std.testing.expectEqual(@as(c_int, -1), maru_macos_app_popup_target_allowed(null, 5));
 }
 
 test {

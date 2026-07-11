@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 110u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 111u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -1068,6 +1068,11 @@ int64_t maru_macos_app_resolve_app_asset(
 
 /* maru-app:// 응답 CSP 헤더(5c-2c, 단일 출처=Zig app_scheme.csp_header). out에 복사하고 길이 반환. cap 부족=-1, NULL=-2. */
 int64_t maru_macos_app_csp_header(uint8_t *out_ptr, size_t out_cap);
+
+/* Phase 7f-2: 새 창/팝업(WKUIDelegate.createWebViewWith) 대상 URL 정책 게이트. Swift가 navigationAction.request.url을
+   넘기면 Zig app_scheme.popupTargetAllowed(허용 = about·http·https·빈만, javascript·file·data·blob·maru-app 거부)로
+   판정한다. 반환: 1=허용, 0=거부, -1=url_ptr NULL. 세션리스 순수 정책. v111. */
+int maru_macos_app_popup_target_allowed(const uint8_t *url_ptr, size_t url_len);
 
 /* 신뢰 웹 브리지(window.maru.*) 요청 디스패치(5b). Swift가 isolated world 핸들러서 isMainFrame + securityOrigin
    (maru-app://app) 검증 후 요청 JSON을 넘기면 응답 JSON을 out에 쓴다. 반환: >=0=응답 길이, -1=용량부족, -2=NULL, -3=OOM. */

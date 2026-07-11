@@ -738,6 +738,121 @@ enum BrowserControl {
     @MainActor static func goBack(_ webView: WKWebView) { webView.goBack() }
     @MainActor static func goForward(_ webView: WKWebView) { webView.goForward() }
     @MainActor static func reload(_ webView: WKWebView) { webView.reload() }
+
+    // 5e-2b-2: `executeScript` 반환값(evaluateJavaScript 결과, 불투명 Any)을 응답에 실을 **문자열**로 바꾼다. Zig
+    // serializeBrowserResponse가 이 문자열을 `{"result":{"result":<문자열>}}`로 싣는다(진짜 JSON 값 embed는 후속 —
+    // §9.3 ⑥ "스크립트 반환값을 문자열로"). 컨트롤 플레인 계약은 Zig, 여긴 WKWebView 값→문자열 매핑 어댑터만.
+    // 매핑: 문자열=그대로, 숫자/불리언=NSNumber description, null/undefined(NSNull)=빈 문자열, 그 외(배열·객체)=description.
+    @MainActor static func scriptResultString(_ value: Any) -> String {
+        if value is NSNull { return "" }
+        if let s = value as? String { return s }
+        if let n = value as? NSNumber { return n.stringValue }
+        return String(describing: value)
+    }
+}
+
+// 5e-2b-2(**테스트 전용 — 배경 스레드**): 앱 자신의 컨트롤 소켓에 붙어 `browser.navigate`/`browser.getUrl`을 **소켓 전
+// 경로**(auth 프레임 → accept 스레드 → 메인 marshal → drainBrowserOps → BrowserControl → complete)로 자동 증명한다.
+// 5d fixture가 BrowserControl을 **직접** 부른 것과 달리, 이건 인가(cap nonce)·wire·async marshal을 실제로 태운다.
+// main-actor 상태를 안 건드리는 순수 C 소켓 I/O라 파일 스코프 nonisolated 자유 함수다(배경 큐에서 실행 — 메인 tick이
+// 계속 돌며 marshal/complete해야 하므로 **메인을 블로킹하면 안 됨**). wire 포맷 단일 출처=Zig control_plane
+// (serializeAuthSelf)·control_browser(browser.* params) — 여기 문자열은 그 계약을 미러링한 테스트 클라이언트다.
+// **서버는 연결당 요청 1개**(control_server serveConnection: auth+요청 1개 → 응답 → close)라 요청마다 **새 연결**을 연다.
+// 반환: (navigateOk="true"/진단, getUrl=data: URL 또는 진단). 실패(connect/타임아웃)는 진단 문자열로 남긴다(스모크는
+// display 필요라 CI 비게이트 — 값 기록이 목적). socketPath=바인딩 경로, sid=web 패널 surface_id, nonceHex=cap nonce(64 hex).
+private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonceHex: String, navigateURL: String) -> (navigateOk: String, getUrl: String) {
+    let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid),\"cap_nonce\":\"\(nonceHex)\"}}"
+    // 프레임 1 = auth.self(cap nonce), 프레임 2 = 요청. wire 포맷은 Zig serializeAuthSelf·browser.* params를 미러링.
+    // url/hex는 제어문자 없는 data:/16진이라 raw 삽입 안전(테스트 고정 입력).
+    let navReq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":\(sid),\"url\":\"\(navigateURL)\"}}"
+    let navResp = browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: navReq)
+    let navigateOk: String
+    switch navResp {
+    case .ok(let line): navigateOk = line.contains("\"ok\":true") ? "true" : "unexpected:\(line.prefix(120))"
+    case .err(let why): navigateOk = why
+    }
+
+    // navigate는 async(load 시작만) — data: URL이 커밋될 시간을 잠깐 준 뒤 **새 연결**로 getUrl로 실제 이동을 확인.
+    Thread.sleep(forTimeInterval: 0.4)
+    let getUrlReq = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.getUrl\",\"params\":{\"id\":\(sid)}}"
+    var getUrl: String
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: getUrlReq) {
+    case .ok(let line):
+        // 응답 `{"result":{"url":"<url>"}}`에서 url 추출(간단 스캔 — 테스트 진단용).
+        if let r = line.range(of: "\"url\":\"") {
+            let rest = line[r.upperBound...]
+            getUrl = rest.firstIndex(of: "\"").map { String(rest[..<$0]) } ?? "unexpected:\(line.prefix(120))"
+        } else {
+            getUrl = "unexpected:\(line.prefix(120))"
+        }
+    case .err(let why):
+        getUrl = why
+    }
+    return (navigateOk, getUrl)
+}
+
+private enum BrowserCtlReqResult { case ok(String); case err(String) }
+
+// 5e-2b-2(테스트 전용): 컨트롤 소켓에 **한 번** 붙어 auth 프레임 + 요청 프레임을 보내고 응답 한 줄(hello notification
+// 스킵)을 돌려준다. 서버가 연결당 요청 1개라 이 함수가 요청 하나 = 연결 하나. `SO_NOSIGPIPE`로 broken pipe가 앱을
+// 죽이지 않게 한다(write는 -1/EPIPE로 접힘). 수신 타임아웃 2s. 실패는 `.err(진단)`.
+private func browserCtlOneRequest(socketPath: String, authFrame: String, requestFrame: String) -> BrowserCtlReqResult {
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    if fd < 0 { return .err("error:socket") }
+    defer { close(fd) }
+    var noSigPipe: Int32 = 1
+    _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = Array(socketPath.utf8)
+    let pathCap = MemoryLayout.size(ofValue: addr.sun_path) // 104
+    if pathBytes.count >= pathCap { return .err("error:path-too-long") }
+    withUnsafeMutablePointer(to: &addr.sun_path) { p in
+        p.withMemoryRebound(to: CChar.self, capacity: pathCap) { dst in
+            for (i, b) in pathBytes.enumerated() { dst[i] = CChar(bitPattern: b) }
+            dst[pathBytes.count] = 0
+        }
+    }
+    let connRc = withUnsafePointer(to: &addr) { ap in
+        ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+            connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    if connRc != 0 { return .err("error:connect") }
+    var tv = timeval(tv_sec: 2, tv_usec: 0)
+    _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+    func writeLine(_ s: String) -> Bool {
+        var bytes = Array(s.utf8); bytes.append(0x0A) // ndjson: 프레임 + 개행
+        return bytes.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let n = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+                if n <= 0 { return false }
+                off += n
+            }
+            return true
+        }
+    }
+    if !writeLine(authFrame) || !writeLine(requestFrame) { return .err("error:write") }
+
+    // 응답 프레임(개행 종단, `"result"`/`"error"` 포함 = hello notification 아닌 응답)을 읽어 돌려준다. leftover로 프레임
+    // 경계가 read 경계와 어긋나도 조립. 타임아웃/close/상한이면 .err.
+    var leftover = [UInt8]()
+    while true {
+        while let nl = leftover.firstIndex(of: 0x0A) {
+            let line = String(decoding: leftover[0 ..< nl], as: UTF8.self)
+            leftover.removeSubrange(0 ... nl)
+            if line.contains("\"result\"") || line.contains("\"error\"") { return .ok(line) }
+            // hello 등 notification은 스킵하고 계속.
+        }
+        var buf = [UInt8](repeating: 0, count: 1024)
+        let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+        if n <= 0 { return .err("error:no-response") } // 타임아웃(EAGAIN)·close
+        leftover.append(contentsOf: buf[0 ..< n])
+        if leftover.count > 64 * 1024 { return .err("error:overflow") } // 폭주 방어
+    }
 }
 
 // MARK: - Phase 4c/4d: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼 + 입력 전이 spike)
@@ -1314,6 +1429,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var smokeMode = false
     // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
     var isSmokeMode: Bool { smokeMode }
+    // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 딱 1회 kick하는 one-shot 가드 + 결과 저장.
+    // 배경 스레드(소켓 클라이언트)가 채우고 메인(writeSummary)이 읽으므로 lock으로 보호한다(nonisolated(unsafe) — lock이
+    // 안전 보장). 기본 "pending"(kick 전/미완). didKick은 메인(tick)만 만져 main-actor 유지.
+    private var didKickBrowserCtlSmoke = false
+    private let browserCtlLock = NSLock()
+    private nonisolated(unsafe) var browserCtlNavigateOkStore = "pending" // 소켓 browser.navigate 응답에 "ok":true 포함 여부.
+    private nonisolated(unsafe) var browserCtlGetUrlStore = "pending" // 소켓 browser.getUrl 응답의 url(navigate한 data: URL 기대).
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
@@ -2429,6 +2551,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 컨트롤 플레인 요청을 메인에서 drain한다(§5 단일 디스패치=메인 marshal). 살아있는 세션 목록(일반 창 + quick)을
         // 넘겨 Zig가 창마다 collectSessionInto로 스냅샷을 조립·auth·dispatch한다(§2 Swift는 열거만). 요청이 없으면 무동작.
         drainControlServer()
+        drainBrowserOps() // 5e-2b-2: 인가된 browser op을 WKWebView로 실행 + 완료 콜백(reap 포함, 매 tick).
+        maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
         restartFrameLoopTicksIfNeeded()
     }
 
@@ -2453,6 +2577,112 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         refs.withUnsafeBufferPointer { buf in
             maru_macos_control_server_drain(buf.baseAddress, buf.count)
         }
+    }
+
+    /// 5e-2b-2: 컨트롤 플레인 browser op drain(매 tick). `take_browser_op`은 (1) hung op reap + (2) 큐에서 op 하나 pop을
+    /// 하므로, 서버가 떠 있으면 요청 유무와 무관하게 매 tick 부른다(reap이 timeout op를 정리). op가 있으면 surface_id로
+    /// 그 web 패널 WKWebView를 찾아 `BrowserControl`(op_kind)을 실행하고, 완료 시 `complete_browser_op`으로 결과를
+    /// 되돌린다(navigate/getUrl은 동기 완료, executeScript는 async 콜백 — 늦은 콜백도 메인 스레드). 정책·인가·라우팅은
+    /// 전부 Zig(dispatchAuthenticated→browserOpFromRequest), 여긴 op→WKWebView API 어댑터 + 완료 콜백만. 소유권:
+    /// arg는 이 호출 중에만 유효(Zig 안정 슬롯)라 즉시 String으로 복사. surface 부재=status 1(error)로 완료(누설 없이).
+    /// 큐가 남았을 수 있어 0 반환까지 loop drain(op ≤ max, 유한). 서버 미시작이면 첫 호출이 0 반환(무동작).
+    private func drainBrowserOps() {
+        guard controlServerStarted else { return }
+        while true {
+            var asyncId: UInt64 = 0
+            var surfaceId: UInt64 = 0
+            var opKind: UInt8 = 0
+            var argPtr: UnsafePointer<UInt8>? = nil
+            var argLen = 0
+            guard maru_macos_control_take_browser_op(&asyncId, &surfaceId, &opKind, &argPtr, &argLen) == 1 else { return }
+            // arg는 이 호출 중에만 유효(다음 take가 덮어씀) — 즉시 복사한다.
+            let arg = (argPtr != nil && argLen > 0) ? String(decoding: UnsafeBufferPointer(start: argPtr, count: argLen), as: UTF8.self) : ""
+            // surface_id로 그 web 패널을 소유한 창(일반 창·quick)을 찾는다. 없으면(패널이 닫힘 등) error로 완료.
+            guard let surface = surfaceOwning(byId: surfaceId), let wp = surface.webPanels[surfaceId] else {
+                maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)
+                continue
+            }
+            switch opKind {
+            case 0: // navigate — 동기 완료(load 시작 여부만; 완료는 didFinish, 응답은 시작=ok).
+                let ok = BrowserControl.navigate(wp.webView, url: arg)
+                maru_macos_control_complete_browser_op(asyncId, ok ? 0 : 1, nil, 0)
+            case 1: // getUrl — 동기(현재 문서 URL, 로드 전엔 빈).
+                completeBrowserOp(asyncId, status: 0, result: BrowserControl.currentUrl(wp.webView) ?? "")
+            case 2: // executeScript — async 콜백(evaluateJavaScript). 성공=값 문자열, 실패=에러 메시지.
+                BrowserControl.executeScript(wp.webView, arg) { result in
+                    switch result {
+                    case .success(let value):
+                        self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
+                    case .failure(let error):
+                        self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
+                    }
+                }
+            default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
+                maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)
+            }
+        }
+    }
+
+    /// 5e-2b-2: `complete_browser_op`을 문자열 result 바이트로 부르는 얇은 헬퍼(getUrl/executeScript 공용). 빈 문자열도
+    /// 유효(result_len=0). Zig가 status·method별로 응답을 직렬화(serializeBrowserResponse)한다.
+    private func completeBrowserOp(_ asyncId: UInt64, status: UInt32, result: String) {
+        let bytes = Array(result.utf8)
+        bytes.withUnsafeBufferPointer { buf in
+            maru_macos_control_complete_browser_op(asyncId, status, buf.baseAddress, buf.count)
+        }
+    }
+
+    /// 5e-2b-2(**테스트 전용, MARU_TEST_BROWSER_CAP**): 소켓 browser.* E2E를 딱 1회 kick한다(one-shot). 스모크 + env
+    /// 설정 + 서버 기동 + browser(비신뢰) web 패널 존재가 전부 충족될 때만 동작하고, 그 외(프로덕션 포함)는 즉시 반환한다.
+    /// 순서: (메인) cap 발급(그 패널 surface에 묶인 browser cap nonce) + 소켓 경로 조회 → (배경 큐) 소켓 클라이언트가
+    /// auth+navigate+getUrl 왕복 → 결과 저장. **배경 큐인 이유**: 소켓 read/write가 메인을 블로킹하면 tick의
+    /// drainBrowserOps가 못 돌아 op이 영영 완료 안 됨(교착). cap 발급/store 접근은 §8.8대로 메인에서만 하고, 배경은
+    /// 순수 소켓 I/O만 한다. env 미설정이면 test ABI가 0을 반환해 조용히 접힌다(이중 게이트).
+    private func maybeRunBrowserControlSmoke() {
+        guard smokeMode, !didKickBrowserCtlSmoke, controlServerStarted else { return }
+        guard ProcessInfo.processInfo.environment["MARU_TEST_BROWSER_CAP"] != nil else { return }
+        // browser(untrusted, panelKind==1) web 패널을 찾는다(5d fixture가 쓰는 그 패널 — cap을 이 surface에 묶는다).
+        var target: (surfaceId: UInt64, url: String)?
+        for surface in windows + (quick.map { [$0] } ?? []) {
+            if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 }) {
+                target = (wp.surfaceId, MaruWebPanelView.browserFixtureURL)
+                break
+            }
+        }
+        guard let t = target else { return } // 아직 패널이 안 붙음 — 다음 tick 재시도(가드는 여전히 false).
+        didKickBrowserCtlSmoke = true
+
+        // cap 발급(메인) — 그 surface에 묶인 browser cap nonce(raw 32B). env 미설정/실패면 0 → 진단 남기고 종료.
+        var nonce = [UInt8](repeating: 0, count: 32)
+        let issued = nonce.withUnsafeMutableBufferPointer { maru_macos_control_test_issue_browser_cap(t.surfaceId, $0.baseAddress, $0.count) }
+        guard issued == 1 else { storeBrowserCtlResult(navigateOk: "error:cap-issue", getUrl: "error:cap-issue"); return }
+        let nonceHex = nonce.map { String(format: "%02x", $0) }.joined()
+
+        // 소켓 경로 조회(메인).
+        var pathBuf = [UInt8](repeating: 0, count: 512)
+        let pathLen = pathBuf.withUnsafeMutableBufferPointer { maru_macos_control_socket_path($0.baseAddress, $0.count) }
+        guard pathLen > 0 else { storeBrowserCtlResult(navigateOk: "error:socket-path", getUrl: "error:socket-path"); return }
+        let socketPath = String(decoding: pathBuf[0 ..< pathLen], as: UTF8.self)
+
+        // 배경 큐에서 소켓 왕복 — 메인 tick은 계속 돌며 marshal/complete한다. 결과는 lock으로 저장.
+        DispatchQueue.global().async { [weak self] in
+            let r = runBrowserControlSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex, navigateURL: t.url)
+            self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl)
+        }
+    }
+
+    /// 5e-2b-2: 배경 소켓 클라이언트가 결과를 저장(lock 보호). nonisolated — 배경 큐에서 호출.
+    private nonisolated func storeBrowserCtlResult(navigateOk: String, getUrl: String) {
+        browserCtlLock.lock()
+        browserCtlNavigateOkStore = navigateOk
+        browserCtlGetUrlStore = getUrl
+        browserCtlLock.unlock()
+    }
+
+    /// 5e-2b-2: writeSummary(메인)가 결과를 읽는다(lock 보호). 미완이면 "pending".
+    private func browserCtlResults() -> (navigateOk: String, getUrl: String) {
+        browserCtlLock.lock(); defer { browserCtlLock.unlock() }
+        return (browserCtlNavigateOkStore, browserCtlGetUrlStore)
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
@@ -4644,6 +4874,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             bridge_hello_version=\(wp?.bridgeHelloProbe ?? "pending")
             browser_fixture_url=\(wp?.browserFixtureUrl ?? "pending")
             browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
+            browser_ctl_navigate_ok=\(browserCtlResults().navigateOk)
+            browser_ctl_get_url=\(browserCtlResults().getUrl)
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

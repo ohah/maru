@@ -4308,6 +4308,33 @@ pub const AppSession = struct {
         return false;
     }
 
+    // 닫힐 scope에 browser web term이 있나 — 브라우저 탭 닫기는 실행 중 셸 명령이 없어도(web term=live_initialized=false라
+    // termHasRunningJob=false) "닫을까요?" 확인을 띄운다(제보). running job과 병렬 게이트. markdown web term은 제외(browser만).
+    fn termIsWebBrowser(term: *Term) bool {
+        return term.kind == .web and term.web_panel_kind == .browser;
+    }
+    fn paneHasWebBrowser(pane: *Pane) bool {
+        for (pane.terms.items) |t| if (termIsWebBrowser(t)) return true;
+        return false;
+    }
+    fn tabHasWebBrowser(tab: *Tab) bool {
+        for (tab.panes.items) |p| if (paneHasWebBrowser(p)) return true;
+        return false;
+    }
+    fn sessionHasWebBrowser(self: *AppSession) bool {
+        for (self.tabs.items) |t| if (tabHasWebBrowser(t)) return true;
+        return false;
+    }
+    fn scopeHasWebBrowser(self: *AppSession, scope: CloseScope) bool {
+        return switch (scope) {
+            .none => false,
+            .term => termIsWebBrowser(self.activePane().activeTerm()),
+            .pane => paneHasWebBrowser(self.activePane()),
+            .tab => |idx| tabHasWebBrowser(self.tabs.items[idx]),
+            .session => self.sessionHasWebBrowser(),
+        };
+    }
+
     /// 워크스페이스 cascade(close_tab/close_term이 단일 pane에서 떨어질 때)를 범위로 해석한다 — split이면 활성 pane만
     /// collapse, 단일 pane이면 탭(마지막 탭이면 세션 전체)을 닫는다. resolveCloseScope의 하위 단계(단일 출처).
     fn resolveWorkspaceScope(self: *AppSession) CloseScope {
@@ -4368,6 +4395,16 @@ pub const AppSession = struct {
             self.showConfirm(switch (target) {
                 .window => "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
                 else => "실행 중인 명령이 있습니다. 닫을까요?",
+            });
+        } else if (self.scopeHasWebBrowser(scope)) {
+            // 브라우저 탭 닫기 확인(제보): web browser term은 실행 중 셸 명령이 없어(live_initialized=false) 위 게이트를
+            // 안 타 조용히 닫혔다. 열린 웹 페이지 = 잃을 수 있는 상태라 running job과 병렬로 "닫을까요?"를 띄운다. accept는
+            // 같은 pending_close→executeClose 경로.
+            self.pending_close = target;
+            self.pending_reset = false;
+            self.showConfirm(switch (target) {
+                .window => "열린 브라우저 탭이 있습니다. 이 창을 닫을까요?",
+                else => "열린 브라우저 탭이 있습니다. 닫을까요?",
             });
         } else {
             self.executeClose(target);
@@ -7566,10 +7603,13 @@ pub const AppSession = struct {
             if (maru.session.app_scheme.resolveNavUrl(self.addr_input.query.items, &self.addr_navigate_url_buf)) |resolved| {
                 self.addr_navigate_url_len = resolved.len;
                 self.addr_navigate_pending = sid;
+                self.addr_edit = null;
+                self.addr_input.clear();
+                self.addr_focus_restore_pending = sid;
             }
-            self.addr_edit = null;
-            self.addr_input.clear();
-            self.addr_focus_restore_pending = sid;
+            // else: 잘못된 주소(허용 스킴 아님 — file://·javascript:// 등, 또는 빈 입력). **편집을 유지**한다 — 입력을 지우고
+            // 조용히 종료하지 않아(제보 "그냥 무시 당함") 사용자가 고쳐 다시 Enter하거나 Esc로 취소하게 한다. (bare 도메인은
+            // resolveNavUrl이 https:// 프리픽스로 대부분 통과하므로 여기 걸리는 건 명시적 미허용 스킴·빈 입력뿐.)
         }
     }
 
@@ -10527,13 +10567,28 @@ pub const AppSession = struct {
         // Enter가 confirm이 아니라 commitAddrEdit(navigate)로 새던 걸 막고 아래 모달 핸들러가 받게 한다. addr_edit 상태는
         // 유지 = 모달이 닫히면 편집 재개(리뷰 [2]).
         if (self.addr_edit != null and !self.anyOverlayOpen()) {
-            self.handleAddrEditKey(chromeInputFromKeyEvent(event));
-            self.resetCursorBlink();
-            self.metal_dirty = true;
-            self.total_app_key_events += 1; // 주소창 편집(앱)이 소비
-            self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-            return self.last_summary;
+            const ie = chromeInputFromKeyEvent(event);
+            // cmd/ctrl 단축키(⌘[·⌘T 등)는 편집기가 삼키지 않고 **아래 keybinding 경로로 흘린다**(제보: 주소창서 단축키 안
+            // 먹음 — 브라우저 URL 바에서도 앱 단축키는 동작해야). 단축키가 pane/탭 컨텍스트를 바꾸므로 편집을 취소한다
+            // (navigate 안 함). fall-through라 return 안 함. **텍스트 편집 chord(⌘V 붙여넣기·⌘A 등)도 지금은 함께 흘린다**
+            // — OverlayInput이 chord 편집 미지원이라(후속). enter/esc/backspace/평문은 편집기가 처리.
+            const is_shortcut_chord = switch (ie) {
+                .key => |k| k.mods.command or k.mods.control,
+                else => false,
+            };
+            if (is_shortcut_chord) {
+                self.cancelAddrEdit(false); // 단축키가 포커스/컨텍스트를 정하므로 focus-restore 안 함(클릭-어웨이와 동일)
+                self.metal_dirty = true;
+                // fall through — 아래 sidebar_search/모달/keybinding 경로가 이 단축키를 실행한다.
+            } else {
+                self.handleAddrEditKey(ie);
+                self.resetCursorBlink();
+                self.metal_dirty = true;
+                self.total_app_key_events += 1; // 주소창 편집(앱)이 소비
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
         }
         // 사이드바 검색바가 활성이면 키를 검색 입력으로 라우팅한다(rename과 같은 규율 — 활성 중 모든 키 소비).
         // Enter=첫 매칭 이동·Esc=종료·Backspace·평문 글자를 handleSidebarSearchKey가 처리한다(단축키 조합은 안 쌓음).
@@ -26632,14 +26687,18 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     try std.testing.expectEqual(@as(?u64, 42), session.takeWebAddrFocusRestore());
     try std.testing.expect(session.takeWebAddrFocusRestore() == null); // 1회성
 
-    // 4) 위험 스킴은 commit해도 navigate 안 세움(로드 거부) — 편집만 종료 + focus-restore.
+    // 4) 위험 스킴(허용 안 되는 스킴)은 commit해도 navigate 안 세우고 **편집을 유지**한다 — 입력을 지우고 조용히 종료하지
+    //    않아(제보 "그냥 무시 당함") 사용자가 고치거나 Esc로 취소하게 한다(이슈2).
     session.enterAddrEdit(7, "");
     _ = session.takeWebAddrFocusPull();
     for ("javascript://evil") |c| session.addrEditAppend(c);
     session.commitAddrEdit();
-    try std.testing.expect(session.addr_edit == null);
+    try std.testing.expect(session.addr_edit != null); // 무효 → 편집 유지(조용히 종료 안 함)
+    try std.testing.expectEqualStrings("javascript://evil", session.addrEditText()); // 입력 보존
     try std.testing.expect(session.takeWebAddrNavigate() == null); // 무효 스킴 → navigate 없음
-    try std.testing.expectEqual(@as(?u64, 7), session.takeWebAddrFocusRestore());
+    try std.testing.expect(session.takeWebAddrFocusRestore() == null); // 편집 유지 = focus-restore 안 세움
+    session.cancelAddrEdit(true); // 다음 step 위해 편집 정리(Esc 의미)
+    _ = session.takeWebAddrFocusRestore(); // drain
 
     // 5) cancel(Esc): 편집만 종료, navigate 없음, focus-restore만.
     session.enterAddrEdit(9, "https://x/");

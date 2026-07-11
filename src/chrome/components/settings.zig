@@ -35,6 +35,9 @@ pub const FieldRow = struct {
     // platform이 주입하는 비활성 표식 — 회색(muted_fg)으로 그리고 입력은 platform이 차단/전환한다(예: 테마 프리셋이
     // 활성이면 색·팔레트 행을 잠근다). 값은 config 비소유 — 매 프레임 platform이 판정해 주입(palette 선례와 같은 규율).
     disabled: bool = false,
+    // 이 행이 기본값과 같은가(§6.11) — platform이 theme.Config{} 대비로 판정해 주입(neutral: 컴포넌트는 config 무지).
+    // false(=override됨)면 view가 control 열 좌측에 ↺(되돌리기) 어포던스를 그리고, 그 셀 클릭/행 Backspace로 항목 리셋.
+    is_default: bool = true,
 
     pub const Kind = union(enum) {
         toggle: bool, // 현재 on/off
@@ -125,6 +128,10 @@ pub const State = struct {
     /// 현재 행 수 — platform이 매 프레임 setFieldCount로 주입(palette.setResultCount 선례). host 키 라우팅이 행 목록
     /// 없이 handle(k,&state)를 부를 수 있게(wrap 가드).
     count: usize = 0,
+    /// 좌측 네비 맨 아래 "↺ 모든 설정 초기화" 액션 행의 인덱스(§6.4·§6.11). platform이 매 프레임 주입(=실제 섹션 수;
+    /// 없으면 null). 이 행은 섹션이 아니라 액션이라, 네비 포커스 Enter/클릭이 이 인덱스면 handle이 폼 진입 대신 .reset_all을
+    /// 낸다. section이 이 값까지 내려갈 수 있게 platform이 clamp 상한을 리셋 행까지 허용한다.
+    nav_reset_row: ?usize = null,
     /// color 피커 SV 그리드 드래그 진행 중(down이 그리드에서 시작해 up까지). move를 그 행에 캡처한다(divider 드래그 패턴).
     dragging: bool = false,
     /// text 행 인라인 편집 중. 켜지면 키가 편집 버퍼로 라우팅된다(Enter=커밋, Esc=취소). platform이 enterEdit로 켜고
@@ -359,9 +366,11 @@ pub const State = struct {
 ///   toggle=행 활성(bool flip·number 편집 진입·enum/font 드롭다운 팝업 열기·text 편집·color picker·keybind 녹음),
 ///   dropdown_accept=열린 팝업에서 Enter — platform이 state.dropdown.selected 변형을 set + 팝업 닫기,
 ///   section_changed=←→ 섹션 전환, selection_changed=재렌더, close=hide, consumed=소비만(모달 뒤로 안 샘).
+///   reset_field=선택 폼 행을 기본값으로 되돌림(↺ 클릭·Backspace — §6.11, platform이 rows[selected].kind로 분기),
+///   reset_all=네비 "↺ 모든 설정 초기화" 활성(§6.4 — platform이 requestResetAll 확인 모달).
 ///   값 종류 판정은 platform이 rows[selected].kind로 한다. (slider_set/adjust_left/right는 슬라이더 제거로 더는
 ///   방출하지 않는 deprecated 잔재 — 슬라이더→입력 박스 전환. 정리 예정, 지금은 dispatch exhaustiveness 유지용.)
-pub const Action = enum { close, toggle, dropdown_accept, dropdown_preview, dropdown_cancel, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, color_picked, eyedropper, consumed };
+pub const Action = enum { close, toggle, dropdown_accept, dropdown_preview, dropdown_cancel, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, reset_field, reset_all, color_picked, eyedropper, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
 
@@ -505,6 +514,10 @@ fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
 }
 
 const title_text = "Settings";
+/// 되돌리기(기본값 리셋) 어포던스 글리프(§6.11 폼 행 ↺·§6.4 네비 "↺ 초기화" 라벨의 단일 출처). U+21BA는 번들 폰트
+/// (JetBrains Mono/Fira/Cascadia) 미커버지만, CoreText 셰이퍼가 시스템 기본 cascade(`CTFontCopyDefaultCascadeListForLanguages`,
+/// coretext_smoke.m)를 폴백 뒤에 이어 macOS 시스템 폰트로 렌더한다(GUI는 macOS 전용). 만약 tofu로 보이면 이 상수만 교체하면 된다.
+pub const reset_glyph = "↺";
 /// 검색 입력줄 프롬프트 접두 — view의 제목 렌더와 searchCaretRect(IME 후보창 위치)가 같은 폭을 쓰게 하는 단일 출처.
 const search_prompt = "검색: ";
 
@@ -578,10 +591,17 @@ pub fn view(
     const cw_i: i32 = @intCast(box.cw);
     for (sections, 0..) |label, i| {
         const row = l.first_field_row + @as(u32, @intCast(i));
+        // 맨 아래 "↺ 초기화" 액션 행(§6.4)은 섹션이 아니라 액션이라 항상 muted(선택 시만 accent)로 섹션 목록과 구별한다.
+        const is_reset = if (state.nav_reset_row) |ri| i == ri else false;
         if (i == state.section) {
             try modal_box.fillCells(box, box.inner_x + cw_i, row, l.nav_cols -| 1, .tab_active_bg, arena, out);
         }
-        const role: tokens.ColorRole = if (i == state.section) .accent_bar else if (state.nav_focused) .surface_fg else .muted_fg;
+        const role: tokens.ColorRole = if (i == state.section)
+            .accent_bar
+        else if (is_reset or !state.nav_focused)
+            .muted_fg // 리셋 행은 포커스와 무관하게 muted, 섹션은 폼 포커스일 때만 muted
+        else
+            .surface_fg;
         try modal_box.text(box, box.inner_x + cw_i, row, label, role, arena, out);
     }
 
@@ -615,6 +635,19 @@ pub fn view(
         const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| label_gap_cols) catch r.label;
         try modal_box.text(box, l.form_x, content_row, label_shown, label_role, arena, out);
         const ctrl = fieldControlRect(l, vi);
+        // 항목별 리셋 어포던스(§6.11): 기본값과 다른(override된) 행은 control/grid 열 좌단 **바로 왼쪽 셀**에 ↺를 얹는다.
+        // 폼 고정 폭·control rect를 안 건드리게 라벨↔control 사이 label_gap(2칸) 안에 그린다(라벨은 그 폭만큼 truncate돼 겹치지
+        // 않음). 잠금(프리셋) 행은 편집 자체가 막혀 생략. 선택 행은 accent(강조), 그 외 muted. handlePointer가 이 셀을 hit-test.
+        if (!r.is_default and !r.disabled) {
+            const block_x = switch (r.kind) {
+                .palette_grid => paletteGridRect(l, vi).x, // palette는 control 열 비공유(그리드 블록 좌단 기준)
+                else => ctrl.x,
+            };
+            const runs = try arena.alloc(draw.Run, 1);
+            runs[0] = .{ .text = reset_glyph };
+            const rrole: tokens.ColorRole = if (actual == state.selected) .accent_bar else .muted_fg;
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = block_x - cw_i, .y = ctrl.y }, .runs = runs, .role = rrole } });
+        }
         switch (r.kind) {
             .toggle => |v| {
                 var ts = toggle.State{ .value = v };
@@ -1019,6 +1052,8 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
         },
         .enter => {
             if (state.nav_focused) {
+                // 네비 맨 아래 "↺ 모든 설정 초기화" 액션 행이면 폼 진입 대신 전체 리셋(§6.4). 그 외 섹션 행은 폼으로 진입.
+                if (state.nav_reset_row) |ri| if (state.section == ri) return .reset_all;
                 state.nav_focused = false; // 네비에서 Enter → 폼으로 진입(그 섹션 확정)
                 return .selection_changed;
             }
@@ -1150,6 +1185,12 @@ pub fn handlePointer(
             const ny: f64 = @floatFromInt(modal_box.rowY(box, l.first_field_row + @as(u32, @intCast(i))));
             if (ev.y_px >= ny and ev.y_px < ny + @as(f64, @floatFromInt(box.ch))) {
                 state.nav_focused = true; // 네비 클릭 → 네비 포커스(↑↓가 섹션 이동)
+                // 맨 아래 "↺ 초기화" 액션 행 클릭 → 전체 리셋(§6.4). 섹션 전환이 아니라 액션이라 selectSection을 안 부른다
+                // (그 행을 하이라이트만; platform이 requestResetAll로 확인 모달을 연다).
+                if (state.nav_reset_row) |ri| if (i == ri) {
+                    state.section = i;
+                    return .reset_all;
+                };
                 if (i == state.section) return .selection_changed; // 같은 섹션 재클릭 — 부수효과 없음
                 state.selectSection(i);
                 return .section_changed;
@@ -1167,6 +1208,16 @@ pub fn handlePointer(
         if (ev.y_px >= ry and ev.y_px < ry + @as(f64, @floatFromInt(ctrl.h))) {
             state.selected = actual;
             state.nav_focused = false; // 폼 행 클릭 → 폼 포커스(↑↓가 행 이동)
+            // ↺ 리셋 어포던스 셀(control/grid 좌단 왼쪽 1칸, view와 같은 위치) 클릭 → 그 항목만 기본값 복원(§6.11).
+            // 변경된(!is_default)·잠금 아닌(!disabled) 행만. 위젯 hit보다 먼저 검사(↺ 셀은 gap이라 위젯 영역과 안 겹침).
+            if (!r.is_default and !r.disabled) {
+                const block_x: i32 = switch (r.kind) {
+                    .palette_grid => paletteGridRect(l, vi).x,
+                    else => ctrl.x,
+                };
+                const rx: f64 = @floatFromInt(block_x - @as(i32, @intCast(box.cw)));
+                if (ev.x_px >= rx and ev.x_px < rx + @as(f64, @floatFromInt(box.cw))) return .reset_field;
+            }
             switch (r.kind) {
                 .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,
                 .number => return if (input_box.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 입력 박스 클릭 → 편집 진입(.toggle=활성, platform이 현재값 시드), 라벨은 선택만
@@ -1543,6 +1594,48 @@ test "settings nav: 섹션 라벨 렌더(선택 강조) + 네비 클릭 → sect
     const act2 = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 4), .y_px = ny + 4 }, &test_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expectEqual(Action.selection_changed, act2);
     try std.testing.expectEqual(@as(usize, 1), s.section);
+}
+
+test "settings 리셋 UX(§6.4·§6.11): 네비 리셋 행 Enter/클릭 → reset_all·변경 행에만 ↺ 어포던스 렌더" {
+    // 전체 리셋 진입점(네비 맨 아래 액션 행)과 항목별 리셋 어포던스(변경 행 ↺)의 컴포넌트 계약:
+    // (1) nav_reset_row에서 Enter/클릭이 폼 진입이 아니라 .reset_all을 내고, (2) view가 is_default=false 행에만 ↺를 그린다.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+
+    // 네비 라벨 = 실제 섹션 3개 + 맨 아래 "↺ 초기화" 액션 행(platform의 buildSettingsSectionLabels 형태).
+    const nav = [_][]const u8{ "Font", "Cursor", "Window", "↺ 초기화" };
+    var s = State{};
+    s.show();
+    s.nav_reset_row = 3; // platform이 refreshSettingsFieldCount에서 주입(=실제 섹션 수)
+    s.nav_focused = true;
+    s.section = 3; // 리셋 행 선택
+
+    // (1a) 네비 포커스 + 리셋 행에서 Enter → reset_all(섹션 폼 진입 아님).
+    try std.testing.expectEqual(Action.reset_all, handle(.{ .key = .enter }, &s));
+
+    // (1b) 리셋 행 클릭 → reset_all.
+    const rows = [_]FieldRow{.{ .label = "A", .kind = .{ .toggle = false } }};
+    const l = computeLayout(&nav, &rows, s.selected, test_props, &tk).?;
+    const ny: f64 = @floatFromInt(modal_box.rowY(l.box, l.first_field_row + 3)); // 리셋 행(nav 인덱스 3)
+    const act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 2), .y_px = ny + 2 }, &nav, &rows, no_items, test_props, &tk, &s);
+    try std.testing.expectEqual(Action.reset_all, act);
+
+    // (2) view는 is_default=false 행에만 ↺(reset_glyph)를 그린다 — 기본값 행엔 없음.
+    var out: std.ArrayList(draw.Op) = .empty;
+    const rows2 = [_]FieldRow{
+        .{ .label = "changed", .kind = .{ .toggle = true }, .is_default = false },
+        .{ .label = "keeps-default", .kind = .{ .toggle = false }, .is_default = true },
+    };
+    s.nav_focused = false;
+    s.section = 0;
+    try view(&s, &nav, &rows2, no_items, test_props, &tk, arena, &out);
+    var reset_glyphs: usize = 0;
+    for (out.items) |op| if (op == .text) {
+        if (std.mem.eql(u8, op.text.runs[0].text, reset_glyph)) reset_glyphs += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), reset_glyphs); // 변경 행 1개만 ↺
 }
 
 test "settings text edit: enterEdit 시드 + char/backspace 편집 + Enter=text_commit + Esc=취소(close 아님)" {

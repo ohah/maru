@@ -55,7 +55,9 @@ pub const HostAction = union(enum) {
     settings_section_changed, // 세팅 좌측 네비 클릭 — platform이 새 섹션 필드 수 주입(refreshSettingsFieldCount) + 재렌더
     settings_text_commit, // 세팅 text 행 인라인 편집 Enter — platform이 editText()→config arena dupe→setText + 적용
     settings_search_changed, // 세팅 검색 쿼리 변경(시작/입력/Backspace/종료) — platform이 필터 재적용(refreshSettingsFieldCount) + 재렌더
-    settings_delete_row, // 세팅 선택 행 Backspace — platform이 env 변수 삭제 등(해당 안 되는 행은 무동작)
+    settings_delete_row, // 세팅 선택 행 Backspace — platform이 env 변수 삭제 등(해당 안 되는 행은 무동작). 스칼라 행은 기본값 복원(§6.11)
+    settings_reset_field, // 세팅 선택 행 ↺ 클릭 — platform이 그 항목만 기본값으로 복원(§6.11, resetSelectedSettingRow)
+    settings_reset_all, // 세팅 네비 "↺ 초기화" Enter/클릭 — platform이 requestResetAll 확인 모달을 연다(§6.4)
     settings_color_picked, // 세팅 HSV picker Enter — platform이 settings.pickerRgb()→#rrggbb로 선택 color 행 커밋 + picker 닫기
     settings_eyedropper, // 세팅 HSV picker `i` — platform이 OS 화면 색 추출기(NSColorSampler)를 열고 고른 색을 picker에 반영
 };
@@ -253,7 +255,9 @@ pub const ChromeHost = struct {
                         .section_changed => .settings_section_changed, // 키보드 네비(Tab→↑↓ 섹션 이동)도 platform이 refreshSettingsFieldCount(새 섹션 행 수 재주입)·섹션 상한 clamp를 타게 한다 — 포인터(클릭) 경로와 동일. 안 그러면 count가 직전 섹션 값으로 고정돼 ↓가 입력 섹션 중간(right-click 부근)에서 wrap한다
                         .text_commit => .settings_text_commit, // 인라인 편집 Enter
                         .search_changed => .settings_search_changed, // 검색 시작/입력/종료 — 필터 재적용
-                        .delete_row => .settings_delete_row, // 선택 행 Backspace — env 삭제 등
+                        .delete_row => .settings_delete_row, // 선택 행 Backspace — env 삭제/스칼라 기본값 복원
+                        .reset_field => .settings_reset_field, // 선택 행 ↺ — 그 항목만 기본값 복원(§6.11)
+                        .reset_all => .settings_reset_all, // 네비 "↺ 초기화" — 전체 리셋 확인 모달(§6.4)
                         .color_picked => .settings_color_picked, // HSV picker Enter — 선택 color 행 커밋
                         .eyedropper => .settings_eyedropper, // HSV picker `i` — OS 화면 색 추출기 열기
                         .consumed => .none,

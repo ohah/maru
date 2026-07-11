@@ -1250,8 +1250,10 @@ bool maru_metal_renderer_draw(
     const size_t bottom_vertex_count = bottom_quad_n * 6; // C4b-5: 탭 밴드(part1 앞 패스)
     const size_t under_vertex_count = under_quad_n * 6;
     const size_t header_vertex_count = header_quad_n * 6; // 헤더 quad(알림 배지) — bg strip 뒤·헤더 글리프 앞 패스
-    // C4b 모달: 모달(overlay) 셀이 cells[modal_cells_start..cell_count]에 있으면, over quad(모달 배경)를 모달
-    // 텍스트 '앞'에 끼운다. 모달 없으면(0) terminal_end=cell_count.
+    // C4b 모달: 오버레이 셀(모달 텍스트 **또는** 탭/pane 드래그 고스트·drop 하이라이트 — web-panel.md §5)이
+    // cells[modal_cells_start..cell_count]에 있으면 이 셀들을 오버레이 레이어(WKWebView 위)에 그리고, over quad(모달
+    // 배경)를 그 '앞'에 끼운다. 오버레이 없으면(modal_cells_start==0) terminal_end=cursor_start. 이름은 modal이지만
+    // 실제 게이트는 "오버레이 영역 존재"라 드래그 시각물도 이 경로로 최상위에 뜬다(Zig replace가 modal_cells_start를 세움).
     const bool has_modal = (modal_cells_start > 0 && modal_cells_start < cell_count);
     // 커서 blink 페이드: 커서 overlay는 항상 cells의 맨 끝(cursor_cells개)이다. 본문(터미널·모달) draw에서 이 suffix를
     // 제외하고, opacity=cursor_opacity로 **별도 pass**로 그린다. fade_milli==0이면 커서 pass를 생략(옛 chop). 커서는

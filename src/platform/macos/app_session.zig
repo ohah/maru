@@ -15646,7 +15646,11 @@ pub const AppSession = struct {
             // overlay로 넘겨 터미널 위·커서 아래에 그린다(seam 위라 터미널에 안 가리게). 단일 panel이면 빈 리스트.
             var pane_overlay: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_overlay.deinit(self.allocator);
-            self.appendDropTargetHighlight(&pane_overlay); // ④b 드롭 타겟 반투명 하이라이트(divider보다 먼저 → 아래)
+            // ④b 드롭 타겟 반투명 하이라이트는 **최상위 오버레이 레이어**(drag_overlay_cells)로 라우팅한다 — pane_overlay
+            // (터미널 레이어)에 두면 WKWebView에 가려 web pane 위 드롭존이 안 보인다(web-panel.md §5). 아래 replace로 전달.
+            var drag_overlay_cells: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
+            defer drag_overlay_cells.deinit(self.allocator);
+            self.appendDropTargetHighlight(&drag_overlay_cells);
             self.appendActiveTabDividers(&pane_overlay);
 
             // 활성 panel의 origin(터미널 영역 = 바 아래). 못 구하면(빈 리스트 — OOM) 터미널 영역 전체의 바 아래로 폴백.
@@ -15978,8 +15982,9 @@ pub const AppSession = struct {
                 const dthick: u32 = @max(@as(u32, 1), self.buildChromeTokens().border.line_thickness_px);
                 self.appendSolidQuad(@floatFromInt(pf.origin_x), @floatFromInt(pf.origin_y + dch), @floatFromInt(active_term_rect.w), @floatFromInt(dthick), self.dividerColor(), 3);
             }
-            // floating 탭은 활성 터미널·커서보다 위(맨 마지막 frame)에 그린다 — 드래그 ghost가 가장 위에 보이게.
-            if (floating_pf) |pf| pane_frames.append(self.allocator, pf) catch {};
+            // floating 탭 ghost는 **최상위 오버레이 레이어**(replace의 drag_overlay_frame)로 라우팅한다 — pane_frames
+            // (터미널 레이어)에 두면 WKWebView에 가려 web pane 위 드래그가 안 보인다(web-panel.md §5). raster는 replace의
+            // buildMergedUploadsN drag_raster가 머지한다. built_frames가 소유(view)라 여기서 pane_frames에 안 넣어도 누수 없음.
 
             // active_failed면 replace를 스킵한다 — chrome panes만으로 blank/stale terminal을 합성하면 metal_dirty가
             // 내려가 다음 tick에 재빌드되지 않아 깨진 frame이 화면에 고정된다. 스킵하면 metal_dirty가 유지돼 다음 tick에
@@ -16075,7 +16080,7 @@ pub const AppSession = struct {
                     }
                 }
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.applySidebarGlyphPyTop(); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
                     self.metal_dirty = false;
                     self.force_reproject = false; // [A] full 투영이 atlas를 GPU에 정합했으므로 강제 재투영 요구 해제(code-review [0])

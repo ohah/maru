@@ -70,8 +70,19 @@ pub fn dispatchReadOnly(
         .request => |r| r,
         else => return errorResponse(gpa, .null, .invalid_request),
     };
+    return routeReadOnly(gpa, req, snapshot, caller_surface_id, scope);
+}
 
-    // ── 1a parseMethod 라우팅(§4.1). 코어 read-only 둘만 지원, 그 밖은 method_not_found. ──
+/// **파싱된** request를 read-only 라우팅한다(§4.1). `dispatchReadOnly`(바이트 파싱)와 `dispatchAuthenticated`
+/// (cap resolve 후 metadata grant)가 공유하는 **단일 라우팅 진입점** — 후자는 이미 파싱한 req를 넘겨 이중 파싱을 피한다
+/// (리뷰 [10]). 코어 read-only 둘(list/get)만 지원, capture는 §8.3 균일 unauthorized, 그 밖은 method_not_found.
+fn routeReadOnly(
+    gpa: std.mem.Allocator,
+    req: cp.Request,
+    snapshot: cs.CollectorSnapshot,
+    caller_surface_id: u64,
+    scope: wm.MetadataScope,
+) std.mem.Allocator.Error![]u8 {
     const method = cp.parseMethod(req.method);
     if (method.core == .sessions and std.mem.eql(u8, method.rest, "list")) {
         const window_filter = readWindowParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
@@ -83,12 +94,13 @@ pub fn dispatchReadOnly(
         return cs.serializeSessionGet(gpa, req.id, snapshot, caller_surface_id, scope, requested);
     }
     if (method.core == .session and std.mem.eql(u8, method.rest, "capture")) {
-        // session.capture는 **read-output** capability를 요구한다(§8.3). 이 read-only 라우터는 **metadata scope만**
-        // 나르고(caller가 주입받는 `scope`는 `MetadataScope`), metadata는 read-output을 **절대** 만족하지 못하므로
-        // §8.3 **균일 unauthorized**로 접는다(존재검사 이전 — target 존재 여부 무관, surface_id 열거 oracle 방지).
-        // 실 read-output grant + chunk 스트리밍은 control_capture(1f) `dispatchCaptureAck` + `Capture`가 소유하고,
-        // L4가 1e fd·1g self-origin으로 read-output을 발급한 뒤 **그 경로로** 배선한다(이 metadata 라우터가 아니라).
-        // params/id 형식도 읽지 않는다 — 인가가 이 경로에선 구조적으로 실패라 즉시 종료(oracle 최소화).
+        // session.capture는 **read-output** capability를 요구한다(§8.3). 이 라우터는 **metadata scope만** 나르고
+        // (caller가 주입받는 `scope`는 `MetadataScope`), metadata는 read-output을 **절대** 만족하지 못하므로 §8.3
+        // **균일 unauthorized**로 접는다(존재검사 이전 — target 존재 무관, surface_id 열거 oracle 방지). 실 read-output
+        // grant + chunk 스트리밍은 control_capture(1f) `dispatchCaptureAck`가 소유하고, L4가 read-output을 발급한 뒤
+        // **그 경로로** 배선한다(이 metadata 라우터가 아니라). **주의**: `dispatchAuthenticated`는 read_output cap이
+        // capture를 실제로 인가해도 여기로 보내지 **않는다**(non-metadata granted는 method_not_found로 접음, 리뷰 [4])
+        // — 이 unauthorized는 오직 metadata scope가 capture를 시도할 때만(구조적 미충족).
         return errorResponse(gpa, req.id, .unauthorized);
     }
     return errorResponse(gpa, req.id, .method_not_found);
@@ -111,9 +123,12 @@ fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.
 ///    (§8.3 oracle 방지 — resolve가 모든 deny 이유를 접는다). resolve는 method↔scope를 검사하므로 요청 method가
 ///    필요해 1a로 한 번 파싱한다(라우터가 다시 파싱하지만 로컬 소켓이라 이 이중 파싱은 무시할 비용, 라우터 단일화 유지).
 ///
-/// **non-metadata cap(browser/write/…)**: resolve는 인가하지만 이 **read-only** 라우터엔 그 method 라우팅이 없어
-/// `method_not_found`로 접힌다 — 라이브 dispatch 배선은 5e(browser)·2a(write)다. 즉 "cap resolve됨 but 미배선"은
-/// `method_not_found`, "cap이 scope 불충족"은 `unauthorized`로 **구별**되어 관측 가능하다(1e-core 인가 자체 검증).
+/// **non-metadata cap(browser/write/read-output/bind)**: resolve는 인가하지만 그 method의 **라이브 dispatch가 아직
+/// 없다**(browser=5e·write=2a·read-output capture=1f 배선 대기). 이 경우 **균일 `method_not_found`**로 접는다 —
+/// read-only 라우터(metadata 전용)로 보내지 않는다. 특히 `session.capture`는 라우터가 unauthorized로 특수처리하므로
+/// (구조적 metadata 미충족) read_output cap이 실제로 인가해도 거기로 보내면 `unauthorized`로 오접힌다 → 그래서
+/// non-metadata granted는 라우터 우회로 직접 method_not_found를 낸다(리뷰 [4]). 즉 "cap resolve됨 but 미배선"은
+/// **모든** non-metadata method에서 `method_not_found`, "cap scope 불충족"은 `unauthorized`로 일관 구별된다.
 ///
 /// **generation anchor**: 현재 전 시스템이 generation 0(§3 respawn 경로 미구현)이라 anchor generation을 0으로 고정한다
 /// (auth.self 셀렉터는 surface_id만 나름). generation 셀렉터·respawn 무효화는 후속(cap의 generation 검사는 이미 순수
@@ -130,8 +145,8 @@ pub fn dispatchAuthenticated(
     const nonce = cap_nonce orelse
         return dispatchReadOnly(gpa, request_bytes, snapshot, selector orelse 0, .self);
 
-    // cap 제시 → method가 필요해 1a 파싱(라우터가 재파싱하지만 단일 라우터 유지가 우선). parse 실패/비-request는
-    // dispatchReadOnly와 동일 관례(id=null 에러)로 접는다.
+    // cap 제시 → method↔scope 검사에 method가 필요해 1a 파싱. parse 실패/비-request는 dispatchReadOnly와 동일 관례
+    // (id=null 에러)로 접는다. grant면 그 파싱한 req를 routeReadOnly에 **재파싱 없이** 넘긴다(리뷰 [10]).
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errorResponse(gpa, .null, cp.parseFailureCode(e)),
@@ -146,9 +161,10 @@ pub fn dispatchAuthenticated(
     switch (cap.resolve(store, nonce, anchor, 0, req.method, now)) {
         .unauthorized => return errorResponse(gpa, req.id, .unauthorized),
         .granted => |g| {
-            // metadata면 resolved sub-scope, 아니면 .self placeholder(그 method는 read-only 밖이라 method_not_found).
-            const ms = g.metadataScope() orelse wm.MetadataScope.self;
-            return dispatchReadOnly(gpa, request_bytes, snapshot, g.surface_id, ms);
+            // metadata → 파싱한 req로 read-only 라우팅(재파싱 없음). non-metadata → 미배선이라 method_not_found
+            // (라우터 우회 — capture unauthorized 특수처리 회피, 리뷰 [4]).
+            if (g.metadataScope()) |ms| return routeReadOnly(gpa, req, snapshot, g.surface_id, ms);
+            return errorResponse(gpa, req.id, .method_not_found);
         },
     }
 }
@@ -498,6 +514,31 @@ test "dispatchAuthenticated: browser cap + browser.navigate → method_not_found
     const w_cross = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_browser, &store);
     defer testing.allocator.free(w_cross);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_cross));
+}
+
+// 리뷰 [4] 회귀: read_output은 non-metadata지만 session.capture를 **실제로 인가**하는 유일한 scope다(다른 non-metadata
+// method는 read-only 라우터에 아예 없어 자연히 method_not_found). read_output cap+capture가 라우터로 새면 라우터의
+// capture 특수 unauthorized에 오접힌다 → non-metadata granted는 라우터 우회로 직접 method_not_found여야 한다.
+test "dispatchAuthenticated: read_output cap + session.capture → method_not_found(미배선), metadata cap → unauthorized(scope)" {
+    const cap_req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}";
+    // read_output cap(TTL 필수)이 capture를 인가(resolve grant) → 라이브 미배선(1f) → method_not_found(unauthorized 아님).
+    {
+        var store: cap.CapabilityStore = .{};
+        defer store.deinit(testing.allocator);
+        try store.issueForFd(testing.allocator, n_browser, .{ .surface_id = 10, .generation = 0, .scope = .read_output, .expires_at = 1000 });
+        const wire = try authDispatch(cap_req, 10, n_browser, &store); // now=0 < 1000 유효
+        defer testing.allocator.free(wire);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
+    }
+    // 대조: metadata cap으로 capture → 구조적 read_output 미충족 → unauthorized.
+    {
+        var store: cap.CapabilityStore = .{};
+        defer store.deinit(testing.allocator);
+        try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
+        const wire = try authDispatch(cap_req, 10, n_all, &store);
+        defer testing.allocator.free(wire);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    }
 }
 
 test {

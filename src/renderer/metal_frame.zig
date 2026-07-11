@@ -1291,32 +1291,45 @@ pub const MetalFrameBuffer = struct {
         // 재빌드 없이 caret을 깜빡인다 — 터미널 커서와 같은 메커니즘 재활용. caret이 없으면(notice 등) 0.
         var overlay_cursor_cells: usize = 0;
         // C4b 모달: 최상위 오버레이 영역(모달 셀·드래그 시각물) 시작 인덱스. draw가 over quad(모달 배경)를 이 경계
-        // '앞'(오버레이 셀 아래·터미널 위)에 끼우고, 렌더러가 has_modal(=modal_cells_start>0)로 이 셀들을 **오버레이
-        // 레이어**(WKWebView 위)에 그린다. 0 = 오버레이 없음(draw가 분할 안 함 = terminal_end가 커서 suffix). 모달뿐 아니라
-        // 드래그 고스트·drop 하이라이트도 이 영역에 넣어 웹 pane 위에서도 보이게 한다(web-panel.md §5).
+        // '앞'(오버레이 셀 아래·터미널 위)에 끼우고, 렌더러가 has_modal(=modal_cells_start>0 && <cell_count)로 이 셀들을
+        // **오버레이 레이어**(WKWebView 위)에 그린다. 0 = 오버레이 없음(draw가 분할 안 함 = terminal_end가 커서 suffix).
+        // 모달뿐 아니라 드래그 고스트·drop 하이라이트도 이 영역에 넣어 웹 pane 위에서도 보이게 한다(web-panel.md §5).
+        //
+        // **알려진 sentinel 한계(리뷰 [7], 후속)**: `0`이 "오버레이 없음"과 "오버레이가 인덱스 0에서 시작"을 겸한다. 실무상
+        // 오버레이 영역 앞에는 늘 최소 1셀(탭 바 배경 등 pane_chrome, 또는 사이드바 헤더)이 있어 modal_cells_start≥1이라
+        // 이 겹침이 안 드러난다. **단 rich 테마(탭 바 배경=quad라 pane_chrome 셀 0) + 사이드바 접힘(헤더 셀 0) + 단일
+        // web pane(터미널 frame 0)** 조합에선 오버레이 앞 셀이 0이 될 수 있어, 그 창에서 탭 드래그 시 시각물이
+        // modal_cells_start=0으로 터미널 레이어에 그려져 WKWebView에 가릴 수 있다. 견고 수정(sentinel을 cell_count로
+        // 재정의하거나 has_overlay를 ABI로 명시)은 렌더러 게이트·replaceSidebar assert를 함께 건드려 GUI 손 테스트가
+        // 필요하므로 후속으로 둔다(이 좁은 config는 현재 미검증).
         var modal_cells_start: usize = 0;
         var modal_clip: ?ClipPx = null; // 모달 오버레이 클리핑(px) — overlay PaneFrame에서 흘러와 renderer scissor
         // 오버레이 영역이 존재하는가(모달 또는 드래그). 하나라도 있으면 modal_cells_start를 이 영역 시작으로 잡는다.
         const has_overlay = overlay_frame != null or drag_overlay_frame != null or drag_overlay_cells.len > 0;
         if (has_overlay) {
             modal_cells_start = cells_list.items.len; // 오버레이 영역 시작(terminal_end 경계 = 이 앞까지 터미널 레이어)
-            // drop-target 하이라이트(bg-only sentinel 셀) 먼저 — 오버레이 영역 '아래'(모달/고스트가 위에 겹침). raster 불요.
+            // 오버레이 영역 순서 = [하이라이트(아래)] [드래그 고스트(중간)] [모달(위)]. **모달을 맨 뒤**에 둬야 그 caret이
+            // 버퍼 맨 끝(overlay_cursor_cells suffix)에 와 blink chop이 정확히 modal caret을 깜빡인다. 예전엔 고스트를 모달
+            // '뒤'에 둬, 마우스 드래그 중(고스트 활성) ⌘F/⌘K/⌘P로 caret 있는 모달을 열면(모달·드래그는 키보드 모달로는
+            // 배타가 아님) blink suffix가 고스트 마지막 셀에 얹혀 고스트가 깜빡이고 모달 caret은 안 깜빡였다(리뷰 [0]).
+            // z-order도 모달이 고스트 위 = 올바르다(모달이 드래그 위에 뜬다).
+            // ① drop-target 하이라이트(bg-only sentinel 셀) — 맨 아래. raster 불요.
             try cells_list.appendSlice(allocator, drag_overlay_cells);
-            // 모달 frame(있으면) — 그 caret이 버퍼 맨 끝이면 blink suffix. 드래그와 배타라 아래 고스트와 공존 안 함.
-            if (overlay_frame) |pf| {
-                const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
-                defer allocator.free(built.cells);
-                setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
-                try cells_list.appendSlice(allocator, built.cells);
-                overlay_cursor_cells = built.cursor_cells; // 오버레이 caret이 버퍼 맨 끝 — blink suffix
-                modal_clip = pf.clip_rect; // 모달 셀 draw에 scissor로 적용(renderer)
-            }
-            // 드래그 floating 고스트(있으면) — 오버레이 영역 '위'(하이라이트·모달 위). caret 없음(overlay_cursor_cells 불변).
+            // ② 드래그 floating 고스트(있으면) — 하이라이트 위·모달 아래. caret 없음(overlay_cursor_cells 불변).
             if (drag_overlay_frame) |pf| {
                 const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
                 defer allocator.free(built.cells);
                 setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
                 try cells_list.appendSlice(allocator, built.cells);
+            }
+            // ③ 모달 frame(있으면) — **맨 뒤(위)**라 그 caret이 버퍼 suffix = blink chop 대상. 모달이 고스트/하이라이트를 덮는다.
+            if (overlay_frame) |pf| {
+                const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
+                defer allocator.free(built.cells);
+                setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+                try cells_list.appendSlice(allocator, built.cells);
+                overlay_cursor_cells = built.cursor_cells; // 모달 caret이 버퍼 맨 끝 — blink suffix
+                modal_clip = pf.clip_rect; // 모달 셀 draw에 scissor로 적용(renderer)
             }
         }
         const new_cells = try cells_list.toOwnedSlice(allocator);

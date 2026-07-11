@@ -1364,6 +1364,15 @@ pub export fn maru_macos_app_session_browser_nav(session: ?*AppSession, surface_
     return 1;
 }
 
+// Phase 7e-4 후속: 활성 pane의 활성 term이 browser web이면 그 surface_id, 아니면 0(browser 아님/null session). Swift
+// performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 이 값 == 이 패널 surface_id일 때만 처리해, WKWebView 키보드
+// 포커스 유무와 무관하게 "지금 활성 탭이 browser면" 동작하게 한다(탭만 열어 봐도 되게). split의 비활성 pane 브라우저는
+// 0으로 걸러진다. 순수 read getter — 구조체 offset 불변.
+pub export fn maru_macos_app_session_active_web_surface_id(session: ?*AppSession) u64 {
+    const app_session = session orelse return 0;
+    return app_session.activeWebSurfaceId();
+}
+
 // ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
 //
 // 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root
@@ -2041,6 +2050,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     // 여기선 null session이 먼저라 0. (활성 판정·pending 세움은 코어 setBrowserNavAction 헤드리스 테스트가 덮는다.)
     try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_browser_nav(null, 42, 0));
     try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_browser_nav(null, 42, 3));
+    // v108 Phase 7e-4 후속 active_web_surface_id: null session은 0(browser 아님 sentinel).
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id(null));
 }
 
 test {

@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 107u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 108u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -1034,6 +1034,11 @@ int32_t maru_macos_app_session_take_web_nav_action(MaruAppHostSession *session, 
    공유하는 활성 판정)으로 pending을 세우고, 같은 tick의 take_web_nav_action drain이 BrowserControl을 실행한다(클릭
    경로 재사용). 반환: 1=전달, 0=session NULL/알 수 없는 code. v107. */
 int32_t maru_macos_app_session_browser_nav(MaruAppHostSession *session, uint64_t surface_id, uint32_t code);
+
+/* Phase 7e-4 후속: 활성 pane의 활성 term이 browser web이면 그 surface_id, 아니면 0(browser 아님/session NULL). Swift
+   performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 이 값 == 이 패널 surface_id일 때만 처리해, WKWebView 키보드
+   포커스 유무와 무관하게 "지금 활성 탭이 browser면" 동작하게 게이트한다. 0은 유효 surface_id 아님(sentinel). v108. */
+uint64_t maru_macos_app_session_active_web_surface_id(MaruAppHostSession *session);
 
 /* maru-app:// asset resolve(5c-2b): WKURLSchemeHandler(5c-2c)가 요청 경로를 안전한 절대 경로로 resolve한다.
    정책(경로 샌드박스·realpath symlink 탈출 방어)은 Zig 소유, Swift는 반환 경로를 읽어 CSP와 함께 서빙만 한다.

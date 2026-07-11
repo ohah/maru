@@ -140,7 +140,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 107;
+pub const abi_version: u32 = 108;
+// 108: Phase 7e-4 후속 — active_web_surface_id getter 1개(활성 pane 활성 term이 browser면 surface_id, 아니면 0). Swift
+// performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 WKWebView 키보드 포커스 유무와 무관하게 "지금 활성 탭이
+// browser면" 동작하게 게이트하는 데 쓴다(브라우저 탭 활성화 시 webView 자동 포커스가 없어 isWebPanelFocused만으론
+// 놓치던 것 수정). 순수 read getter만 추가 — 구조체 offset 불변. docs/web-panel.md.
 // 107: Phase 7e-4 — 주소창 nav 버튼 키보드 단축키(browser 포커스 한정 Cmd+←/→/R) export 1개(browser_nav). Swift
 // performKeyEquivalent가 panelKind==browser일 때 Cmd+←/→/R을 code(0/1/2)로 마샬링해 이 함수를 부르면, Zig가
 // setBrowserNavAction(클릭 ①b와 공유하는 활성 판정 단일 정책)으로 web_nav_action_pending을 세우고 같은 tick의
@@ -7364,7 +7368,18 @@ pub const AppSession = struct {
             self.allocator.free(dup); // 맵 성장 OOM: dup 회수 후 미갱신
             return;
         };
-        if (gop.found_existing) self.allocator.free(gop.value_ptr.url); // 옛 url 해제 후 교체
+        if (gop.found_existing) {
+            // 값이 실제로 바뀐 tick에만 재렌더 요청 — 주소창 밴드(url)·nav 버튼 활성색(can_go_*)이 이 상태를 소비하므로,
+            // 링크 이동으로 URL/히스토리가 바뀌면 metal_dirty를 세워야 주소창이 갱신된다("이동해도 주소 안 바뀜" 수정).
+            // KVO push는 navStateDirty로 throttle돼 핫루프는 아니지만, 무변화 push(같은 값 재관측)는 재렌더 안 한다.
+            const changed = gop.value_ptr.can_go_back != can_go_back or
+                gop.value_ptr.can_go_forward != can_go_forward or
+                !std.mem.eql(u8, gop.value_ptr.url, url);
+            self.allocator.free(gop.value_ptr.url); // 옛 url 해제 후 교체
+            if (changed) self.metal_dirty = true;
+        } else {
+            self.metal_dirty = true; // 새 상태 = 첫 주소 표시 → 재렌더
+        }
         gop.value_ptr.* = .{ .can_go_back = can_go_back, .can_go_forward = can_go_forward, .url = dup };
     }
 
@@ -7372,6 +7387,17 @@ pub const AppSession = struct {
     /// (ABI getter가 즉시 out 버퍼로 복사). 7e-1b 주소창 소비.
     pub fn webNavState(self: *AppSession, surface_id: u64) ?WebNavState {
         return self.web_nav_states.get(surface_id);
+    }
+
+    /// Phase 7e-4 후속: 활성 pane의 활성 term이 browser web이면 그 surface_id, 아니면 0. browser nav 단축키
+    /// (⌘←/→/R)를 **키보드 포커스(WKWebView firstResponder) 유무와 무관하게** "지금 활성 탭이 browser면" 동작하게
+    /// 게이트하는 데 쓴다(탭만 열어 보기만 해도 되게 — 브라우저 탭 활성화 시 webView에 자동 포커스를 안 주므로
+    /// isWebPanelFocused만으론 놓친다). split의 비활성 pane 브라우저는 활성 pane이 아니라 0을 반환해 걸러진다.
+    /// 0은 유효 surface_id가 아니므로(1부터 발급) sentinel로 안전.
+    pub fn activeWebSurfaceId(self: *AppSession) u64 {
+        const term = self.activePane().activeTerm();
+        if (term.kind == .web and term.web_panel_kind == .browser) return term.surfaceId();
+        return 0;
     }
 
     /// Phase 7e-3/7e-4: browser 주소창 nav 버튼(back/forward/reload)을 눌러(밴드 클릭 ①b 또는 키보드 단축키 ABI) 이
@@ -26618,6 +26644,38 @@ test "setBrowserNavAction: 활성 버튼만 pending을 세운다 (7e-3 클릭·7
     session.setBrowserNavAction(999, .reload);
     try std.testing.expectEqual(@as(?u64, 999), session.web_nav_action_pending);
     try std.testing.expectEqual(@as(u8, 2), session.web_nav_action_code);
+}
+
+test "setWebNavState: 값이 바뀔 때만 metal_dirty (링크 이동 주소창 재렌더, 7e-4 후속 헤드리스)" {
+    // web_nav_states + metal_dirty만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
+    // testing.allocator가 url 누수를 검출한다.
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.web_nav_states = .empty;
+    session.metal_dirty = false;
+    defer {
+        var it = session.web_nav_states.valueIterator();
+        while (it.next()) |v| session.allocator.free(v.url);
+        session.web_nav_states.deinit(session.allocator);
+    }
+
+    // 첫 상태 = 새 항목 → metal_dirty(첫 주소 표시).
+    session.setWebNavState(7, false, false, "https://a/");
+    try std.testing.expect(session.metal_dirty);
+
+    // 같은 값 재push(무변화 KVO 재관측) → metal_dirty 안 세움(불필요 재렌더 방지).
+    session.metal_dirty = false;
+    session.setWebNavState(7, false, false, "https://a/");
+    try std.testing.expect(!session.metal_dirty);
+
+    // url 변경(링크 이동) → metal_dirty(주소창 갱신 — 이 슬라이스의 핵심 수정).
+    session.setWebNavState(7, true, false, "https://b/");
+    try std.testing.expect(session.metal_dirty);
+
+    // can_go_back만 변경 → metal_dirty(nav 버튼 활성색 갱신).
+    session.metal_dirty = false;
+    session.setWebNavState(7, false, false, "https://b/");
+    try std.testing.expect(session.metal_dirty);
 }
 
 test "setHoveredNavButton: surface_id·버튼이 바뀔 때만 metal_dirty (dedup, 7e-4 헤드리스)" {

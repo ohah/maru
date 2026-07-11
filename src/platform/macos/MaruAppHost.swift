@@ -917,28 +917,25 @@ final class MaruWebPanelView: NSView {
     // keyBindingResolver 단일 출처 — terminal 매크로가 셸로 새기 전에 가른다). 웹 포커스가 아니면 false만 반환 —
     // 터미널 포커스 경로(메뉴 keyEquivalent + 터미널 뷰 keyDown/IME)를 손대지 않는다(무회귀).
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard controller?.isWebPanelFocused(self) == true else { return false }
-        guard event.modifierFlags.contains(.command) else { return false }
-        // Phase 7e-4: browser 패널 nav 단축키(⌘←=back·⌘→=forward·⌘R=reload) — isWebPanelAppChord보다 **먼저**, panelKind==
-        // browser(1)일 때만. 이 override는 **웹 패널 포커스 중에만** 타므로(터미널 포커스면 이 메서드가 안 불림), ⌘←/→는
-        // 터미널의 커서 매크로로 회귀하지 않는다(글로벌 바인딩 금지 이유). 화살표는 keyCode(123 ←·124 →)로, R은 레이아웃
-        // 무관하게 charactersIgnoringModifiers로 판정한다. 실행은 controller.dispatchBrowserNav → Zig setBrowserNavAction
-        // (클릭 ①b와 공유하는 활성 판정) → take_web_nav_action drain → BrowserControl. 소비(true)해 WebKit 기본 동작 차단.
-        if panelKind == 1 {
-            let navCode: UInt32? = {
-                switch event.keyCode {
-                case 123: return 0 // ← back
-                case 124: return 1 // → forward
-                default:
-                    if event.charactersIgnoringModifiers?.lowercased() == "r" { return 2 } // R reload
-                    return nil
-                }
-            }()
-            if let code = navCode {
-                controller?.dispatchBrowserNav(surfaceId, code)
-                return true
+        // Phase 7e-4(+후속): browser nav 단축키(⌘←=back·⌘→=forward·⌘R=reload)는 **이 패널이 활성 pane의 browser 탭일
+        // 때** 처리한다 — WKWebView 키보드 포커스(isWebPanelFocused) 유무와 무관하게. 브라우저 탭을 활성화해도 webView에
+        // 자동 포커스를 안 주므로 isWebPanelFocused만 보면 "탭 열어 보기만 하면 ⌘R 안 됨" 버그가 난다(제보). 배경 탭
+        // 패널은 hidden이라 애초에 performKeyEquivalent 순회에서 빠지고, split의 비활성 pane 브라우저는 activeWebSurfaceId
+        // 가 걸러낸다(활성 pane이 아니면 0/다른 id라 매칭 실패). R은 레이아웃 무관하게 keyCode 15로(⌘←/→와 동일 방식 —
+        // charactersIgnoringModifiers 의존 제거). 실행은 dispatchBrowserNav → Zig setBrowserNavAction(클릭 ①b와 공유하는
+        // 활성 판정) → take_web_nav_action drain → BrowserControl. 소비(true)해 WKWebView 기본 ⌘R/히스토리 동작 차단.
+        if event.modifierFlags.contains(.command), panelKind == 1,
+           surfaceId != 0, controller?.activeWebSurfaceId() == surfaceId {
+            switch event.keyCode {
+            case 123: controller?.dispatchBrowserNav(surfaceId, 0); return true // ← back
+            case 124: controller?.dispatchBrowserNav(surfaceId, 1); return true // → forward
+            case 15: controller?.dispatchBrowserNav(surfaceId, 2); return true // R reload
+            default: break
             }
         }
+        // 그 외 앱 액션 Cmd 조합(⌘T 등)은 웹 포커스일 때만 maru keyDown 경로로 라우팅한다(Zig resolver가 판정).
+        guard controller?.isWebPanelFocused(self) == true else { return false }
+        guard event.modifierFlags.contains(.command) else { return false }
         guard controller?.isWebPanelAppChord(self, event) == true else { return false }
         controller?.handleWebPanelChord(event)
         return true
@@ -1689,6 +1686,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             ?? (quick?.webPanels[surfaceId] != nil ? quick : nil)
         guard let session = owner?.appSession ?? appSession else { return }
         _ = maru_macos_app_session_browser_nav(session, surfaceId, code)
+    }
+
+    // Phase 7e-4 후속: 활성 창의 활성 pane 활성 term이 browser web이면 그 surface_id, 아니면 0. web 패널
+    // performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 "이 패널이 활성 browser 탭일 때만" 처리하도록 게이트한다
+    // (WKWebView 키보드 포커스 유무와 무관). 정책·트리 판정은 Zig(activeWebSurfaceId), Swift는 read만.
+    func activeWebSurfaceId() -> UInt64 {
+        guard let session = appSession else { return 0 }
+        return maru_macos_app_session_active_web_surface_id(session)
     }
 
     // 웹 패널 포커스 ↔ 모달 responder 전이를 anyOverlayOpen 엣지로 조정한다(renderTick 매 tick + 웹 조합 직후 동기

@@ -199,6 +199,33 @@ fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.V
 const beginResult = cp.beginResult;
 const endResult = cp.endResult;
 
+/// **5e-2b: L4 completion이 Swift `BrowserControl` 결과를 browser.* 응답으로 직렬화한다.** op은 응답 id/method를 안
+/// 싣으므로(§9.3 ⑥) 원 `request_bytes`(in-flight pending이 아직 소유 — resolve 전이라 유효)를 재파싱해 id·method를
+/// 얻고, method별 result 헬퍼로 실는다. `ok=false`(webView 부재·evaluateJavaScript 에러 등)면 `internal_error`(+`result`
+/// 를 message로). `result`는 method별: navigate=무시·getUrl=url·executeScript=스크립트 반환값을 **문자열로** 싣는다
+/// (JS 값 → 문자열; 진짜 JSON 값 embed는 후속). 재파싱 실패·비-browser는 방어적 내부오류(dispatch가 이미 검증했으므로 도달 안 함).
+pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u8, ok: bool, result: []const u8) std.mem.Allocator.Error![]u8 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    const bmethod = parseBrowserMethod(cp.parseMethod(req.method).rest) orelse return errorResponse(gpa, req.id, .internal_error);
+    if (!ok) {
+        const msg = if (result.len > 0) result else "browser op failed";
+        return cp.serializeError(gpa, req.id, .internal_error, msg, null);
+    }
+    return switch (bmethod) {
+        .navigate => serializeNavigateResult(gpa, req.id),
+        .get_url => serializeGetUrlResult(gpa, req.id, result),
+        .execute_script => serializeExecuteScriptResult(gpa, req.id, .{ .string = result }),
+    };
+}
+
 // ── ② dispatchBrowser(§9.1 ②③ — 정확한 보안 순서) ─────────────────────────────────────────────────────────
 
 /// **5e: 모든 게이트(authz·params·surface)를 통과한 인가된 browser 요청의 실행 op.** L4가 main-loop marshal
@@ -641,6 +668,45 @@ test "dispatchBrowser: 비-request(notification)·malformed·id 형식오류" {
         const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":\"x\",\"url\":\"u\"}}", browserCap(11));
         defer testing.allocator.free(wire);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+    }
+}
+
+// 5e-2b: serializeBrowserResponse — L4 completion이 request_bytes 재파싱해 method별 result/error를 실는다.
+test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·error(id·method 재파싱)" {
+    // navigate ok → {result:{ok:true}}, request id echo(7).
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}", true, "");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expect(pm.message.response.err == null);
+        try testing.expect(pm.message.response.result.?.object.get("ok").?.bool);
+        try testing.expect(cp.idEql(pm.message.response.id, .{ .number = 7 }));
+    }
+    // getUrl ok → {result:{url:<result>}}.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getUrl\",\"params\":{\"id\":11}}", true, "https://x/y");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqualStrings("https://x/y", pm.message.response.result.?.object.get("url").?.string);
+    }
+    // executeScript ok → {result:{result:"<result 문자열>"}}.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"document.title\"}}", true, "My Page");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqualStrings("My Page", pm.message.response.result.?.object.get("result").?.string);
+    }
+    // ok=false → internal_error + result를 message로.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}", false, "webView not found");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
+        try testing.expectEqualStrings("webView not found", pm.message.response.err.?.message);
     }
 }
 

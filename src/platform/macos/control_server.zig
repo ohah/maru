@@ -304,6 +304,15 @@ pub const ControlServer = struct {
         return false;
     }
 
+    /// **§5-async/5e-2b(메인 전용)**: `async_id`의 in-flight pending을 **제거 없이** 돌려준다(없으면 null). 5e-2b
+    /// complete가 응답 직렬화에 필요한 원 `request_bytes`(pending 소유, resolve 전이라 유효)를 재파싱하려고 조회한다.
+    pub fn inFlightPending(self: *ControlServer, async_id: u64) ?*PendingRequest {
+        for (self.in_flight.items) |e| {
+            if (e.id == async_id) return e.pending;
+        }
+        return null;
+    }
+
     /// **§5-async(메인 전용)**: `now_ns`(모노토닉 awake) 기준 마감이 지난 in-flight를 timeout으로 정리한다 — 응답 없이
     /// (`resolve(null)`) accept 스레드를 깨워 연결을 닫게 하고(client read 타임아웃이 받음, OOM 경로와 동형 계약)
     /// 레지스트리에서 제거한다. drain이 매 tick 부른다(hung WKWebView async op가 accept 스레드를 영구 붙잡는 것 방어).

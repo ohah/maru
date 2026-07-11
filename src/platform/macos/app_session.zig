@@ -103,6 +103,33 @@ pub const WebNavState = struct {
 /// resolveNavUrl 결과(https:// 프리픽스 포함)를 담는 navigate pending 버퍼 크기 — 편집 버퍼(cap) + "https://"(8) 여유.
 const addr_nav_url_cap: usize = 4096;
 
+/// Phase 7e-3: browser 주소창 nav 버튼(back/forward/reload) 존 기하 — **렌더와 hit-test가 공유하는 단일 소스**
+/// (NavBarMetrics). 밴드 좌측 [0, nav_button_count*nav_button_w) 셀을 버튼 존으로 쓴다(버튼당 `nav_button_w` 칸):
+/// [0,3)=back·[3,6)=forward·[6,9)=reload. 렌더(buildPaneAddressBarDrawList)는 각 존 가운데 칸에 글리프를, hit-test
+/// (navButtonAt)는 x_px를 존으로 나눠 클릭 버튼을 판정 — 두 경로가 같은 두 값을 쓰므로 "보이는 버튼 == 클릭되는 버튼"이
+/// 성립한다. URL/편집 텍스트는 nav_end(=존 폭)부터 그려 버튼과 겹치지 않는다.
+const nav_button_w: u16 = 3; // 버튼당 셀 수
+const nav_button_count: u16 = 3; // back·forward·reload
+
+/// Phase 7e-3: 주소창 nav 버튼 식별. web_nav_action_code로 마샬링(0=back·1=forward·2=reload) — ABI take와 정합.
+const NavButton = enum { back, forward, reload };
+
+/// Phase 7e-3: 밴드 좌표(band_x px) 기준 x_px가 어느 nav 버튼 존인가(URL 존이면 null). cell = floor((x_px-band_x)/cw),
+/// cell < nav_button_count*nav_button_w면 그 버튼(cell/nav_button_w), 아니면 null(=URL 존 → 편집 진입). cw==0·비유한·
+/// 밴드 좌측 밖(x_px<band_x)이면 null. 렌더(존 가운데 글리프)와 같은 nav_button_w/nav_button_count를 쓰는 단일 소스.
+fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
+    if (cw == 0 or !std.math.isFinite(x_px)) return null;
+    const bx: f64 = @floatFromInt(band_x);
+    if (x_px < bx) return null;
+    const cell: u32 = @intFromFloat((x_px - bx) / @as(f64, @floatFromInt(cw)));
+    if (cell >= @as(u32, nav_button_count) * nav_button_w) return null;
+    return switch (cell / nav_button_w) {
+        0 => .back,
+        1 => .forward,
+        else => .reload,
+    };
+}
+
 // 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
 // 멀티 창/quick 세션이 같은 wall-clock 기준으로 blink/fade/poll/sync timeout을 계산하게 한다.
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
@@ -112,7 +139,11 @@ const addr_nav_url_cap: usize = 4096;
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 105;
+pub const abi_version: u32 = 106;
+// 106: Phase 7e-3 — 주소창 nav 버튼(back/forward/reload) 클릭 신호 export 1개(take_web_nav_action). 밴드 좌측 버튼 존
+// (navButtonAt 단일 소스) 클릭이 활성 버튼일 때 세운 1회성 pending(surface_id + code 0=back·1=forward·2=reload)을 Swift가
+// tick drain해 BrowserControl.goBack/goForward/reload(webView)로 실행한다(take_web_addr_focus_restore 패턴). 신규 export만 —
+// 구조체 offset·인자 순서 불변. 버튼 글리프 렌더는 buildPaneAddressBarDrawList 인자 확장(ABI 무관, 순수 draw-list 함수).
 // 105: Phase 7e-2b — 주소창 편집 신호 3 export(take_web_addr_focus_pull/navigate/focus_restore). 7e-2a Zig 코어의
 // 1회성 pending(밴드 클릭→편집 진입 focus-pull·Enter→navigate[surface_id+resolved url]·commit/cancel→focus-restore)을
 // Swift가 tick drain해 focusTerminalView / BrowserControl.navigate / makeFirstResponder(webView)로 실행한다(take_bell
@@ -1805,6 +1836,12 @@ pub const AppSession = struct {
     addr_navigate_url_len: usize = 0,
     //  ③ focus-restore: commit/cancel이 세움 — 편집 종료 후 키 포커스를 WKWebView로 되돌릴 대상 surface_id.
     addr_focus_restore_pending: ?u64 = null,
+    // Phase 7e-3: browser 주소창 nav 버튼(back/forward/reload) 클릭 신호(1회성 take — takeWebNavAction). **활성 버튼만**
+    // (navButtonAt 존 + webNavState.can_go_back/can_go_forward, reload는 항상) 클릭이 이 pending을 세우고, Swift가 매 tick
+    // take해 BrowserControl.goBack/goForward/reload(webPanels[surface_id].webView)로 실행한다(정책·게이트=Zig, 실행=platform).
+    // teardown 시 stale surface면 dropAddrEditIfSurface가 함께 비운다. code: 0=back·1=forward·2=reload(ABI take와 정합).
+    web_nav_action_pending: ?u64 = null,
+    web_nav_action_code: u8 = 0,
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경·바·그룹 색 프리셋 + 그룹 묶기/풀기 = ctx_menu_count)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
@@ -7397,6 +7434,10 @@ pub const AppSession = struct {
         if (self.addr_focus_restore_pending) |sid| {
             if (sid == surface_id) self.addr_focus_restore_pending = null;
         }
+        // Phase 7e-3: nav 버튼 클릭 pending도 대상 일치 시 비운다(이미 세워진 채 surface가 닫히면 stale surface_id 방지).
+        if (self.web_nav_action_pending) |sid| {
+            if (sid == surface_id) self.web_nav_action_pending = null;
+        }
     }
 
     /// 편집 활성 중 키 처리(handleKeyEvent 래퍼가 호출 — 활성이면 모든 키 소비). handleRenameKey 동형: Enter=확정·
@@ -7440,6 +7481,16 @@ pub const AppSession = struct {
         const v = self.addr_focus_restore_pending;
         self.addr_focus_restore_pending = null;
         return v;
+    }
+
+    /// Phase 7e-3: nav 버튼(back/forward/reload) 클릭 신호를 drain(1회성). null=이번 tick 없음. 7e-3 Swift가 code에 따라
+    /// BrowserControl.goBack/goForward/reload(webPanels[surface_id].webView)를 실행한다. code: 0=back·1=forward·2=reload.
+    pub fn takeWebNavAction(self: *AppSession) ?struct { surface_id: u64, code: u8 } {
+        if (self.web_nav_action_pending) |sid| {
+            self.web_nav_action_pending = null;
+            return .{ .surface_id = sid, .code = self.web_nav_action_code };
+        }
+        return null;
     }
 
     /// 4a `surfaceDiff` 결과를 self.web_surface_transitions batch로 marshaling한다(§6 전이 열거). created는 visible을
@@ -11395,12 +11446,14 @@ pub const AppSession = struct {
                         self.mouse_drag_selecting = false;
                         return;
                     }
-                    // ①b) Phase 7e-2a: 주소창 밴드 클릭 → 편집 진입. 밴드는 탭 바(pb.full) **바로 아래**(7e-1b band_rect와
-                    //     동일 소스: y=pb.full.y+bar_h, 높이=bar_h)이고, 이 pane의 **활성 탭이 browser web Term**일 때만 존재한다
-                    //     (markdown web·터미널 탭은 밴드 없음 — skip). 밴드 클릭이면 그 web Term surface로 편집 진입(현재 nav
-                    //     URL을 초기값으로 시드)하고 클릭을 소비한다. 탭 바(pb.full)보다 뒤·divider/pane 선택보다 앞에 둬,
-                    //     밴드 영역 클릭이 아래 터미널/웹뷰 선택으로 새지 않게 한다. 편집 중 다시 밴드 클릭은 같은 대상 재진입
-                    //     (caret 이동은 MVP 범위 밖 — enterAddrEdit이 현재 URL로 재시드하되 대상 동일이라 사실상 무해).
+                    // ①b) Phase 7e-2a/7e-3: 주소창 밴드 클릭 → **버튼 존이면 nav action**, **URL 존이면 편집 진입**. 밴드는
+                    //     탭 바(pb.full) **바로 아래**(7e-1b band_rect와 동일 소스: y=pb.full.y+bar_h, 높이=bar_h)이고, 이 pane의
+                    //     **활성 탭이 browser web Term**일 때만 존재한다(markdown web·터미널 탭은 밴드 없음 — skip). 밴드 좌측
+                    //     [0, nav_end) 셀은 back/forward/reload 버튼 존(navButtonAt — 렌더와 같은 단일 소스), 그 오른쪽은 URL 존이다.
+                    //     버튼 존이면 그 버튼이 **활성**(back=canGoBack·forward=canGoForward·reload=항상)일 때만 web_nav_action_pending을
+                    //     세워 Swift가 goBack/goForward/reload를 실행하게 하고, URL 존이면 편집 진입(현재 nav URL 시드). 어느 쪽이든
+                    //     클릭을 소비한다(탭 바보다 뒤·divider/pane 선택보다 앞 — 밴드 클릭이 아래 터미널/웹뷰로 새지 않게). **편집
+                    //     중에도 버튼 클릭은 nav action**(편집 재진입은 URL 존 클릭만). 편집 중 URL 존 재클릭은 같은 대상 재진입 skip.
                     const addr_at = lr.leaf.active_term;
                     if (addr_at < lr.leaf.terms.items.len) {
                         const addr_term = lr.leaf.terms.items[addr_at];
@@ -11409,8 +11462,32 @@ pub const AppSession = struct {
                             const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
                             if (layout_math.pointInRect(x_px, y_px, band)) {
                                 _ = self.focusPaneByPtr(lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
-                                // 이미 이 surface를 편집 중이면 재진입하지 않고 클릭만 소비한다(MVP — caret 재배치 없음,
-                                // 타이핑 초안 보존). 편집 아님/다른 대상이면 현재 nav URL을 초기값으로 새 편집 진입.
+                                // 버튼 존(navButtonAt)이면 nav action. 렌더가 존 가운데 칸에 그린 것과 같은 nav_button_w/count 단일 소스라
+                                // 보이는 버튼 == 클릭되는 버튼. 활성 버튼만 pending을 세운다(비활성 버튼은 클릭만 소비 — 편집 진입 안 함).
+                                if (navButtonAt(x_px, band.x, self.cell_width_px)) |btn| {
+                                    const nav_state = self.webNavState(addr_term.surfaceId());
+                                    const can_back = if (nav_state) |st| st.can_go_back else false;
+                                    const can_fwd = if (nav_state) |st| st.can_go_forward else false;
+                                    const active = switch (btn) {
+                                        .back => can_back,
+                                        .forward => can_fwd,
+                                        .reload => true, // reload = 항상 활성
+                                    };
+                                    if (active) {
+                                        self.web_nav_action_pending = addr_term.surfaceId();
+                                        self.web_nav_action_code = switch (btn) {
+                                            .back => 0,
+                                            .forward => 1,
+                                            .reload => 2,
+                                        };
+                                        self.metal_dirty = true;
+                                    }
+                                    self.drag_autoscroll = 0;
+                                    self.mouse_drag_selecting = false;
+                                    return;
+                                }
+                                // URL 존 클릭 → 편집 진입. 이미 이 surface를 편집 중이면 재진입하지 않고 클릭만 소비한다(MVP —
+                                // caret 재배치 없음, 타이핑 초안 보존). 편집 아님/다른 대상이면 현재 nav URL을 초기값으로 새 편집 진입.
                                 const already = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
                                 if (!already) {
                                     const cur_url: []const u8 = if (self.webNavState(addr_term.surfaceId())) |st| st.url else "";
@@ -15450,6 +15527,12 @@ pub const AppSession = struct {
                             // nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성 판정(payload 통째 복사 회피). 텍스트는 셀
                             // 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만. muted 색.
                             const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
+                            // Phase 7e-3: nav 버튼(back/forward) 활성 여부는 이 surface의 저장된 nav 상태에서 온다(없으면 false —
+                            // 첫 frame nav 미도착 시 비활성으로 보임). reload는 늘 활성(builder 내부). URL(읽기전용)도 같은 상태에서 읽어
+                            // 버튼·URL이 한 번의 조회를 공유한다.
+                            const nav_state = self.webNavState(addr_term.surfaceId());
+                            const can_back = if (nav_state) |st| st.can_go_back else false;
+                            const can_fwd = if (nav_state) |st| st.can_go_forward else false;
                             // 편집 중이면 확정 텍스트(query) + IME 조합(preedit)을 이어 그린다(조합 중 한글이 보이게). 읽기전용이면
                             // nav URL. disp_buf는 렌더 임시(query 실질<4096·preedit<256). 초과분은 잘라도 tail 앵커라 끝이 보인다.
                             var disp_buf: [addr_nav_url_cap + 512]u8 = undefined;
@@ -15461,13 +15544,17 @@ pub const AppSession = struct {
                                 const pn = @min(p.len, disp_buf.len - qn);
                                 @memcpy(disp_buf[qn..][0..pn], p[0..pn]);
                                 break :blk disp_buf[0 .. qn + pn];
-                            } else (if (self.webNavState(addr_term.surfaceId())) |st| st.url else "");
+                            } else (if (nav_state) |st| st.url else "");
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
                                 const addr_fg: terminal.Color = .{ .rgb = self.mutedForeground() }; // 읽기전용 URL — 비활성 탭과 같은 muted 톤
                                 const caret_color: terminal.Color = .{ .rgb = self.appearance.theme.cursor }; // 편집 caret = 커서 색(block caret 셀 배경)
+                                // Phase 7e-3: 활성 버튼 = 활성 탭 전경(sidebar_foreground, muted URL보다 밝아 클릭 가능함이 드러남),
+                                // 비활성 버튼 = dimRgb(grip 손잡이와 같은 흐린 톤). 렌더가 쓰는 nav_button_w/count는 hit-test와 같은 단일 소스.
+                                const button_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+                                const button_dim_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
                                 const band_text_origin_y = band_rect.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 탭 바 text_origin_y와 같은 pad_y
-                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, editing, caret_color)) |adl| {
+                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, editing, caret_color, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
                                     self.collectShaped(&collected, adl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = band_text_origin_y, .colors = tabbar_colors } });
                                 } else |_| {} // draw 생성 OOM은 탭 바처럼 무시(밴드 배경만이라도)
                             }
@@ -18792,6 +18879,7 @@ pub const AppSession = struct {
         self.rename = null;
         self.context_menu_target = null;
         self.addr_edit = null; // Phase 7e-2a: 주소창 편집 상태(고정 버퍼라 heap 없음 — 방어적 클리어, 대칭 규율)
+        self.web_nav_action_pending = null; // Phase 7e-3: nav 버튼 클릭 pending(POD, heap 없음 — 같은 대칭 규율)
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
@@ -26314,6 +26402,70 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     session.dropAddrEditIfSurface(11); // 대상 surface → 정리
     try std.testing.expect(session.addr_edit == null);
     try std.testing.expect(session.addr_focus_pull_pending == null); // enter가 세운 pull도 대상 일치라 정리
+}
+
+test "navButtonAt: 밴드 좌측 존을 back/forward/reload로 가르고 URL 존은 null (7e-3 hit-test)" {
+    // 순수 함수 — nav_button_w=3, nav_button_count=3(단일 소스). band_x=100px, cw=10px 기준.
+    // 존: [100,130)=back·[130,160)=forward·[160,190)=reload·[190,∞)=URL(null). 렌더 글리프 col(1·4·7 = 존 가운데)와 정합.
+    const band_x: u32 = 100;
+    const cw: u32 = 10;
+    // back 존(cell 0~2 = px 100~129). 렌더 글리프는 col 1(px 110~119)에 — 존 안.
+    try std.testing.expectEqual(@as(?NavButton, .back), navButtonAt(100, band_x, cw)); // 존 좌단
+    try std.testing.expectEqual(@as(?NavButton, .back), navButtonAt(115, band_x, cw)); // 글리프 칸(col 1)
+    try std.testing.expectEqual(@as(?NavButton, .back), navButtonAt(129, band_x, cw)); // 존 우단
+    // forward 존(cell 3~5). 글리프 col 4.
+    try std.testing.expectEqual(@as(?NavButton, .forward), navButtonAt(130, band_x, cw));
+    try std.testing.expectEqual(@as(?NavButton, .forward), navButtonAt(145, band_x, cw)); // 글리프 칸(col 4)
+    try std.testing.expectEqual(@as(?NavButton, .forward), navButtonAt(159, band_x, cw));
+    // reload 존(cell 6~8). 글리프 col 7.
+    try std.testing.expectEqual(@as(?NavButton, .reload), navButtonAt(160, band_x, cw));
+    try std.testing.expectEqual(@as(?NavButton, .reload), navButtonAt(175, band_x, cw)); // 글리프 칸(col 7)
+    try std.testing.expectEqual(@as(?NavButton, .reload), navButtonAt(189, band_x, cw));
+    // URL 존(cell >= 9 = px >= 190) → null(밴드 클릭이 편집 진입으로).
+    try std.testing.expectEqual(@as(?NavButton, null), navButtonAt(190, band_x, cw));
+    try std.testing.expectEqual(@as(?NavButton, null), navButtonAt(500, band_x, cw));
+    // 밴드 좌측 밖·cw==0·비유한 → null(방어).
+    try std.testing.expectEqual(@as(?NavButton, null), navButtonAt(99, band_x, cw)); // band_x 왼쪽
+    try std.testing.expectEqual(@as(?NavButton, null), navButtonAt(150, band_x, 0)); // cw==0
+    try std.testing.expectEqual(@as(?NavButton, null), navButtonAt(std.math.inf(f64), band_x, cw));
+}
+
+test "takeWebNavAction: 활성 버튼 클릭이 세운 pending을 1회 drain + teardown 정리 (7e-3 헤드리스)" {
+    // web_nav_action_pending/code만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.addr_edit = null;
+    session.addr_focus_pull_pending = null;
+    session.addr_navigate_pending = null;
+    session.addr_focus_restore_pending = null;
+    session.web_nav_action_pending = null;
+    session.web_nav_action_code = 0;
+
+    // 초기: 없음(-1 상당 = null).
+    try std.testing.expect(session.takeWebNavAction() == null);
+
+    // back(code 0) 세움 → 1회 drain으로 (surface_id, code) 반환, 두 번째는 null(1회성).
+    session.web_nav_action_pending = 42;
+    session.web_nav_action_code = 0;
+    const act = session.takeWebNavAction() orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(u64, 42), act.surface_id);
+    try std.testing.expectEqual(@as(u8, 0), act.code);
+    try std.testing.expect(session.takeWebNavAction() == null); // 1회성 drain
+
+    // reload(code 2) 세움 → 반환 code=2.
+    session.web_nav_action_pending = 7;
+    session.web_nav_action_code = 2;
+    const act2 = session.takeWebNavAction() orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(u8, 2), act2.code);
+
+    // teardown: pending을 세운 채 그 surface가 닫히면 dropAddrEditIfSurface가 비운다(stale 방지). addr_input은 이 경로가
+    // 안 만지므로(대상 addr_edit=null) init 불요 — web_nav_action_pending 정리만 검증.
+    session.web_nav_action_pending = 11;
+    session.web_nav_action_code = 1;
+    session.dropAddrEditIfSurface(999); // 다른 surface → 무동작
+    try std.testing.expectEqual(@as(?u64, 11), session.web_nav_action_pending);
+    session.dropAddrEditIfSurface(11); // 대상 → 정리
+    try std.testing.expect(session.web_nav_action_pending == null);
 }
 
 test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 공유해 충돌하지 않는다" {

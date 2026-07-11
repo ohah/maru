@@ -731,6 +731,13 @@ enum BrowserControl {
             if let error { completion(.failure(error)) } else { completion(.success(value ?? NSNull())) }
         }
     }
+
+    // Phase 7e-3: 주소창 nav 버튼(back/forward/reload) 실행. 정책(활성 판정·surface 매핑)은 Zig(take_web_nav_action)가
+    // 하고, 여기는 WKWebView 히스토리 API를 부르는 얇은 어댑터다. goBack/goForward는 히스토리가 없으면 WebKit이 no-op
+    // (canGoBack/Forward가 false면 Zig가 애초에 pending을 안 세우지만, 이중 안전). reload는 로드된 페이지가 없으면 no-op.
+    @MainActor static func goBack(_ webView: WKWebView) { webView.goBack() }
+    @MainActor static func goForward(_ webView: WKWebView) { webView.goForward() }
+    @MainActor static func reload(_ webView: WKWebView) { webView.reload() }
 }
 
 // MARK: - Phase 4c/4d: 웹 패널 뷰 (빈 WKWebView 호스팅 래퍼 + 입력 전이 spike)
@@ -3089,6 +3096,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var restoreSid: UInt64 = 0
         if maru_macos_app_session_take_web_addr_focus_restore(session, &restoreSid) == 1, let wp = surface.webPanels[restoreSid] {
             surface.window?.makeFirstResponder(wp.webView)
+        }
+
+        // Phase 7e-3: 주소창 nav 버튼 클릭 신호 drain — 밴드 좌측 버튼 존(back/forward/reload) 클릭이 활성 버튼일 때
+        // Zig 코어가 세운 1회성 pending. code(0=back·1=forward·2=reload)에 따라 그 web 패널 WKWebView 히스토리 API를 호출한다.
+        // 정책·surface 매핑은 Zig, 여기는 WebKit 어댑터만. -1=이번 tick 없음.
+        var navActionSid: UInt64 = 0
+        let navActionCode = maru_macos_app_session_take_web_nav_action(session, &navActionSid)
+        if navActionCode >= 0, let wp = surface.webPanels[navActionSid] {
+            switch navActionCode {
+            case 0: BrowserControl.goBack(wp.webView)
+            case 1: BrowserControl.goForward(wp.webView)
+            case 2: BrowserControl.reload(wp.webView)
+            default: break
+            }
         }
     }
 

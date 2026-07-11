@@ -844,6 +844,9 @@ final class MaruWebPanelView: NSView {
         // 네비를 허용해 origin을 pin하고(신뢰 문서가 외부 URL로 top-level 이동하는 것 차단 — CSP는 sub-resource·form만
         // 막고 top-level 네비는 안 막음), 비신뢰 패널은 maru-app:// 네비를 cancel한다(origin 위장 방지). 분기는 아래 확장.
         webView.navigationDelegate = self
+        // Phase 7f-1: browser(비신뢰) 패널만 팝업(target=_blank·window.open)을 연다 — uiDelegate로 createWebViewWith를
+        // 받는다. 신뢰(maru-app UI) 패널은 uiDelegate 미설정이라 WKWebView 기본 동작(새 창 안 열림)으로 창 생성이 막힌다.
+        if trusted == false { webView.uiDelegate = self }
         if let appURL {
             // 신뢰 UI: maru-app://app/index.html — 스킴 핸들러가 asset root 아래 파일을 엄격 CSP와 함께 서빙한다(5c).
             // 실 UI asset은 Phase 7이 대체한다. 하위 리소스(app.css·app.js)도 same-origin 상대 경로로 핸들러가 서빙.
@@ -862,28 +865,53 @@ final class MaruWebPanelView: NSView {
         // KVO changeHandler는 @Sendable이라 main-actor 상태를 직접 못 건드린다. WKWebView의 이 세 프로퍼티는 WebKit
         // 네비게이션(메인 스레드)에서만 바뀌므로 assumeIsolated로 동기 진입한다(NSColorSampler/애니메이션 콜백과 같은
         // 코드베이스 공통 패턴). wv도 @MainActor라 assumeIsolated 안에서 읽는다.
-        if panelKind == 1 {
-            navObservers = [
-                webView.observe(\.url, options: [.new]) { [weak self] wv, _ in
-                    MainActor.assumeIsolated {
-                        self?.navUrl = wv.url?.absoluteString
-                        self?.navStateDirty = true
-                    }
-                },
-                webView.observe(\.canGoBack, options: [.new]) { [weak self] wv, _ in
-                    MainActor.assumeIsolated {
-                        self?.navCanGoBack = wv.canGoBack
-                        self?.navStateDirty = true
-                    }
-                },
-                webView.observe(\.canGoForward, options: [.new]) { [weak self] wv, _ in
-                    MainActor.assumeIsolated {
-                        self?.navCanGoForward = wv.canGoForward
-                        self?.navStateDirty = true
-                    }
-                },
-            ]
-        }
+        installNavObservers()
+    }
+
+    // Phase 7f-1: 팝업 adopt init — `WKUIDelegate.createWebViewWith`가 넘긴 configuration으로 새 WKWebView를 만들어
+    // 채택한다. `window.opener`·named window·`postMessage` 링크는 **그 config로 만든 webview**로만 성립하므로(WebKit
+    // 계약 — 넘어온 config를 그대로 써야 하고 수정 금지), 자기 config를 짓는 위 init과 갈라진다. 팝업은 임의 외부
+    // 콘텐츠라 항상 browser(untrusted, panelKind==1). frame은 호출처(`adoptPopupWebView`)가 컨테이너 bounds로 주고,
+    // drain의 `.create`가 다음 tick에 정확한 pane rect로 보정한다(그 전 ~1프레임은 placeholder frame).
+    init(adoptingConfiguration configuration: WKWebViewConfiguration, surfaceId: UInt64, frame frameRect: NSRect) {
+        self.surfaceId = surfaceId
+        self.panelKind = 1
+        self.bridgeWorld = nil // browser=브리지 없음(신뢰 전용)
+        self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: configuration)
+        super.init(frame: frameRect)
+        webView.autoresizingMask = [.width, .height]
+        webView.navigationDelegate = self
+        webView.uiDelegate = self // 팝업이 또 팝업을 열 수 있게(중첩 창)
+        addSubview(webView)
+        installNavObservers()
+    }
+
+    // Phase 7e-1a/7f-1: browser(panelKind==1) 패널의 WKWebView nav 상태 block-based KVO 등록(url·canGoBack·canGoForward
+    // → 프로퍼티 저장 + navStateDirty). config init·adopt init이 공유한다(DRY). 신뢰 패널은 주소창이 없어 no-op.
+    // changeHandler는 @Sendable이라 main-actor 상태를 직접 못 건드리므로 assumeIsolated로 동기 진입한다(이 세 프로퍼티는
+    // WebKit 네비게이션=메인 스레드에서만 바뀜). 토큰은 navObservers 프로퍼티가 deinit까지 붙잡아 관측을 유지한다.
+    private func installNavObservers() {
+        guard panelKind == 1 else { return }
+        navObservers = [
+            webView.observe(\.url, options: [.new]) { [weak self] wv, _ in
+                MainActor.assumeIsolated {
+                    self?.navUrl = wv.url?.absoluteString
+                    self?.navStateDirty = true
+                }
+            },
+            webView.observe(\.canGoBack, options: [.new]) { [weak self] wv, _ in
+                MainActor.assumeIsolated {
+                    self?.navCanGoBack = wv.canGoBack
+                    self?.navStateDirty = true
+                }
+            },
+            webView.observe(\.canGoForward, options: [.new]) { [weak self] wv, _ in
+                MainActor.assumeIsolated {
+                    self?.navCanGoForward = wv.canGoForward
+                    self?.navStateDirty = true
+                }
+            },
+        ]
     }
 
     @available(*, unavailable)
@@ -1001,6 +1029,24 @@ extension MaruWebPanelView: WKNavigationDelegate {
                 }
             }
         }
+    }
+}
+
+// Phase 7f-1: 새 창/팝업(target=_blank·window.open) adopt.
+extension MaruWebPanelView: WKUIDelegate {
+    // 페이지가 새 창을 요청하면 WebKit이 이 메서드를 **동기 호출**하고 새 WKWebView 반환을 기대한다(같은 뷰 내 top-level
+    // 이동은 decidePolicyForNavigationAction 담당 — 이건 별개 경로). browser(비신뢰) 패널만 팝업을 연다(uiDelegate를
+    // browser에만 걸지만, adopt된 중첩 팝업도 panelKind==1이라 방어적으로 재확인). 넘어온 configuration으로 새 webview를
+    // 만들어야 window.opener·named window·postMessage 링크가 성립하므로, controller가 그 config로 adopt 패널을 만들어
+    // webview를 돌려준다. nil이면 WebKit이 새 창 생성을 취소한다. 스킴·user-gesture 정책 게이트는 7f-2.
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard panelKind == 1 else { return nil } // 신뢰 패널은 창 생성 차단
+        return controller?.adoptPopupWebView(configuration: configuration, openerSurfaceId: surfaceId)
     }
 }
 
@@ -1694,6 +1740,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func activeWebSurfaceId() -> UInt64 {
         guard let session = appSession else { return 0 }
         return maru_macos_app_session_active_web_surface_id(session)
+    }
+
+    // Phase 7f-1: 팝업 adopt — MaruWebPanelView.createWebViewWith(WKUIDelegate)가 넘긴 config로 새 WKWebView를 만들어
+    // 붙일 browser web Term을 Zig에 등록(7f-0 create_adopted_web_term)하고, adopt 패널로 감싸 **opener가 속한 창**의
+    // 컨테이너에 즉시 삽입한 뒤 그 webview를 돌려준다. WebKit은 반환된 webview로 새 페이지를 로드하며, 이 webview가
+    // 넘어온 config로 만들어졌기에 opener/named-window 링크가 성립한다. **즉시 삽입** 이유: window 없는 webview는
+    // WebKit이 안 그리므로 반환 전에 뷰 하이어라키에 넣는다(정확한 pane rect는 다음 tick drain .create가 보정 —
+    // 그 create는 webPanels[sid]가 이미 있어 중복 WKWebView 생성을 스킵한다). opener를 못 찾거나 term 생성 실패면 nil
+    // (WebKit이 창 생성 취소). surfaceOwning 규율(dispatchBrowserNav)과 동일하게 openerSurfaceId로 창을 고른다.
+    func adoptPopupWebView(configuration: WKWebViewConfiguration, openerSurfaceId: UInt64) -> WKWebView? {
+        let owner = windows.first(where: { $0.webPanels[openerSurfaceId] != nil })
+            ?? (quick?.webPanels[openerSurfaceId] != nil ? quick : nil)
+        guard let surface = owner, let session = surface.appSession,
+              let container = surface.window?.contentView as? MaruTerminalContainerView else { return nil }
+        let sid = maru_macos_app_session_create_adopted_web_term(session)
+        guard sid != 0 else { return nil }
+        let panel = MaruWebPanelView(adoptingConfiguration: configuration, surfaceId: sid, frame: container.bounds)
+        panel.controller = self
+        surface.webPanels[sid] = panel
+        container.insertWebPanel(panel) // 반환 전 삽입(정확한 frame은 drain이 보정)
+        return panel.webView
     }
 
     // 웹 패널 포커스 ↔ 모달 responder 전이를 anyOverlayOpen 엣지로 조정한다(renderTick 매 tick + 웹 조합 직후 동기
@@ -3081,14 +3148,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let frame = NSRect(x: t.frame_pt_x, y: t.frame_pt_y, width: t.frame_pt_w, height: t.frame_pt_h)
             switch Int(t.op) {
             case Int(MaruAppHostWebSurfaceOpCreate.rawValue):
-                // id는 앱 전역 비재사용이라 충돌은 없지만, 방어적으로 같은 id의 기존 뷰가 있으면 먼저 정리.
-                surface.webPanels[t.surface_id]?.removeFromSuperview()
-                let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id, panelKind: t.panel_kind)
-                v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
-                v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
-                container.insertWebPanel(v)
-                v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
-                surface.webPanels[t.surface_id] = v
+                if let adopted = surface.webPanels[t.surface_id] {
+                    // Phase 7f-1: 팝업 adopt 패널 — 이미 Swift(createWebViewWith→adoptPopupWebView)가 넘어온 config로
+                    // WKWebView를 만들어 webPanels에 키잉·삽입했다(소유·시점 역전). 중복 WKWebView를 만들면 opener 링크가
+                    // 끊기므로, 여기선 생성하지 않고 이 tick의 rect/seam/가시성만 반영한다(id는 앱 전역 비재사용이라 else는
+                    // 항상 신규).
+                    if adopted.superview == nil { container.insertWebPanel(adopted) }
+                    adopted.frame = frame
+                    adopted.seamEdges = t.seam_edges
+                    adopted.isHidden = (t.visible == 0)
+                } else {
+                    let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id, panelKind: t.panel_kind)
+                    v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
+                    v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
+                    container.insertWebPanel(v)
+                    v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
+                    surface.webPanels[t.surface_id] = v
+                }
             case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
                     v.removeFromSuperview()

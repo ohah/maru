@@ -8,6 +8,7 @@ const command_catalog = @import("command_catalog.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
 const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터 + 1e dispatchAuthenticated
+const control_browser = maru.session.control_browser; // 5e: browser.* op·응답 직렬화(dispatchAuthenticated가 산출한 op을 marshal)
 const control_surface = maru.session.control_surface; // 1c: Surface DTO/CollectorSnapshot
 const control_capability = maru.session.control_capability; // 1e: capability fd resolve(라이브 auth 배선)
 
@@ -1756,6 +1757,37 @@ var control_server_active: bool = false;
 /// dispatchAuthenticated가 이 store로 nonce→scope를 resolve한다. 발급 경로가 붙으면 여기 issueForFd로 채운다.
 var control_cap_store: control_capability.CapabilityStore = .{};
 
+/// 5e-2b: browser op 큐 엔트리. `arg`는 cross_gpa 소유(method별 인자 — navigate=url·executeScript=script·getUrl=빈).
+const BrowserOpEntry = struct { async_id: u64, surface_id: u64, op_kind: u8, arg: []const u8 };
+
+/// 5e-2b: browser op FIFO 큐(**메인 스레드 전용** — handleControlRequest가 push, take_browser_op가 pop해 Swift가
+/// 실행). accept가 serial이라 실질 ≤1이나 bounded(`max`)로 견고성 유지. push 성공 시 `arg` 소유권을 큐가 인수한다.
+const BrowserOpQueue = struct {
+    items: std.ArrayList(BrowserOpEntry) = .empty,
+    max: usize = 8,
+
+    /// bounded push. 초과면 `error.Full`(호출자가 arg free + 요청 에러 resolve). 성공 시 arg 소유권 인수.
+    fn push(self: *BrowserOpQueue, gpa: std.mem.Allocator, e: BrowserOpEntry) error{ Full, OutOfMemory }!void {
+        if (self.items.items.len >= self.max) return error.Full;
+        try self.items.append(gpa, e);
+    }
+    /// FIFO pop(없으면 null). 반환 엔트리의 arg 소유권은 호출자로 이전(호출자가 free).
+    fn take(self: *BrowserOpQueue) ?BrowserOpEntry {
+        if (self.items.items.len == 0) return null;
+        return self.items.orderedRemove(0);
+    }
+    /// 남은 op의 arg 해제 + 리스트 해제(서버 종료 시).
+    fn deinit(self: *BrowserOpQueue, gpa: std.mem.Allocator, arg_gpa: std.mem.Allocator) void {
+        for (self.items.items) |e| arg_gpa.free(e.arg);
+        self.items.deinit(gpa);
+    }
+};
+var browser_op_queue: BrowserOpQueue = .{};
+/// take_browser_op이 pop한 op의 arg를 **다음 take까지** 살려 Swift가 이 호출 중 동기 복사하게 하는 안정 슬롯(app allocator).
+var browser_op_take_buf: std.ArrayList(u8) = .empty;
+/// hung WKWebView op 마감(reap) — evaluateJavaScript/navigation이 영영 안 끝나는 op가 accept 스레드를 영구 붙잡는 것 방어.
+const browser_op_timeout_ns: i128 = 30 * std.time.ns_per_s;
+
 /// hello가 광고하는 read-only 메서드(현재 구현된 것만 — §11 help gate와 같은 정직성).
 const control_hello_caps = [_][]const u8{ "sessions.list", "session.get" };
 const control_hello_version = "0.1.0";
@@ -1805,41 +1837,51 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
 /// 지금은 default-deny). **§8.4 self 경로 한계 유지**: nonce 없는 same-uid peer는 임의 surface를 self로 주장할 수 있고
 /// tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만(§8.3 self 필터). `now`=**모노토닉 awake 초**(TTL 판정용, 순수
 /// 코어에 주입 — 미래 fd 발급도 같은 시계로 expires_at 계산해야 정합; wall-clock 아님, 아래 impl 참조 — 리뷰 [2]).
-fn buildControlResponse(
+fn handleControlRequest(
     server: *control_server_mod.ControlServer,
     refs: []const ControlSessionRef,
     pending: *control_server_mod.PendingRequest,
-) std.mem.Allocator.Error!?[]u8 {
+) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit(); // 스냅샷은 dispatch 동안만 필요 — 응답(cross_gpa)은 arena와 독립
-    const snapshot = try collectSessionsInto(refs, arena.allocator());
+    const snapshot = collectSessionsInto(refs, arena.allocator()) catch {
+        server.resolveRequest(pending, null); // collect OOM — 응답 없이 종료(accept 무한 대기 방지)
+        return;
+    };
     // now = 모노토닉 awake 초(TTL 판정 단위). wall-clock보다 clock 변경에 안전하고, 미래 fd 발급도 같은 시계로
     // expires_at을 계산하면 정합한다(코드베이스가 이미 std.Io.Clock.awake를 uptime에 씀). store가 빈 지금은 TTL 미사용.
     const now_ns: i128 = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
-    switch (try control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, &control_cap_store, now)) {
-        .immediate => |resp| return resp,
-        .browser => |op| {
-            // 5e-1/5e-2a: browser.*가 인가·유효한 실행 op로 라우팅됐다(dispatchAuthenticated → control_browser). **단
-            // WKWebView marshal(§5-async deferRequest + Swift take/complete_browser_op)은 5e-2b라 아직 미배선** — op를
-            // 실행할 경로가 없어 op.arg를 해제하고 internal_error로 보류한다(5e-2b에서 이 분기를 deferRequest+op 큐로 교체).
-            server.cross_gpa.free(op.arg);
-            return try browserPendingResponse(server.cross_gpa, pending.request_bytes);
-        },
+    const disp = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, &control_cap_store, now) catch {
+        server.resolveRequest(pending, null);
+        return;
+    };
+    switch (disp) {
+        .immediate => |resp| server.resolveRequest(pending, resp),
+        // 5e-2b: 인가·유효한 browser op — §5-async로 defer(즉시 resolve 안 함) + browser op 큐에 enqueue(Swift가 실행).
+        .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
     }
 }
 
-/// 5e-2a 전환 응답: browser op이 인가됐으나 WKWebView marshal(5e-2b) 미배선일 때 internal_error를 요청 id로 낸다.
-/// request_bytes를 재파싱해 id를 얻는다(op이 id를 안 실음 — §9.3 ⑥ 재파싱 규약). 5e-2b가 이 함수를 대체한다.
-fn browserPendingResponse(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error!?[]u8 {
-    const cpm = maru.session.control_plane;
-    var pm = cpm.parseMessage(gpa, request_bytes) catch return try cpm.serializeError(gpa, .null, .internal_error, "browser marshal pending (5e-2b)", null);
-    defer pm.deinit();
-    const id = switch (pm.message) {
-        .request => |r| r.id,
-        else => cpm.Id.null,
+/// 5e-2b: 인가·유효한 browser op을 §5-async `deferRequest`(pending 붙잡음) + browser op 큐에 enqueue(Swift가 매 tick
+/// take_browser_op으로 drain해 `BrowserControl` 실행 → complete_browser_op). deferRequest/큐 실패는 op.arg 해제 +
+/// 에러 응답으로 즉시 resolve(누수·accept 무한 대기 방지). 성공 시 op.arg 소유권은 큐가 인수(take/deinit이 free).
+fn enqueueBrowserOp(
+    server: *control_server_mod.ControlServer,
+    pending: *control_server_mod.PendingRequest,
+    op: control_browser.BrowserOp,
+    now_ns: i128,
+) void {
+    const async_id = server.deferRequest(pending, now_ns + browser_op_timeout_ns) catch {
+        server.cross_gpa.free(op.arg);
+        const resp = control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "browser op queue full") catch null;
+        server.resolveRequest(pending, resp);
+        return;
     };
-    return try cpm.serializeError(gpa, id, .internal_error, "browser marshal pending (5e-2b)", null);
+    browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = op.arg }) catch {
+        server.cross_gpa.free(op.arg);
+        _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
+    };
 }
 
 pub export fn maru_macos_control_server_start() c_int {
@@ -1896,21 +1938,67 @@ pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSession
     var handled: usize = 0;
     while (handled < control_drain_budget) : (handled += 1) {
         const pending = server.tryPopRequest() orelse break;
-        // 팝한 pending은 **반드시** resolve해야 accept 스레드가 무한 대기하지 않는다(OOM이면 응답 없이 종료).
-        const response = buildControlResponse(server, refs, pending) catch |e| switch (e) {
-            error.OutOfMemory => {
-                server.resolveRequest(pending, null);
-                continue;
-            },
-        };
-        server.resolveRequest(pending, response);
+        // 팝한 pending은 **반드시** resolve 또는 defer(browser op)해야 accept 스레드가 무한 대기하지 않는다.
+        handleControlRequest(server, refs, pending);
     }
+}
+
+/// 5e-2b: Swift가 매 tick 호출 — (1) `reapExpiredInFlight`(hung browser op timeout), (2) browser op 큐에서 하나 pop해
+/// out으로 넘긴다. 반환 1=op 있음(Swift가 surface_id로 webView 찾아 `BrowserControl`[op_kind] 실행 → 완료 시
+/// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript. `arg_ptr`는 안정 슬롯
+/// (`browser_op_take_buf`)을 가리켜 **이 호출 중 동기 읽기**만 유효(다음 take가 덮어씀 — Swift가 즉시 복사). 서버
+/// 미시작이면 0. **메인 스레드 전용**(reap·pop·in-flight 레지스트리는 메인).
+pub export fn maru_macos_control_take_browser_op(
+    out_async_id: ?*u64,
+    out_surface_id: ?*u64,
+    out_op_kind: ?*u8,
+    out_arg_ptr: ?*?[*]const u8,
+    out_arg_len: ?*usize,
+) u32 {
+    if (!control_server_active) return 0;
+    const server = &control_server_storage;
+    // §5-async reap: 매 tick hung op timeout(evaluateJavaScript/navigation이 안 끝나는 op가 accept를 영구 붙잡는 것 방어).
+    _ = server.reapExpiredInFlight(std.Io.Clock.awake.now(appHostIo()).nanoseconds);
+    const e = browser_op_queue.take() orelse return 0;
+    // arg를 안정 슬롯에 복사(Swift가 이 호출 중 동기 읽음), 엔트리 arg(cross_gpa) 해제.
+    browser_op_take_buf.clearRetainingCapacity();
+    browser_op_take_buf.appendSlice(allocator, e.arg) catch {
+        server.cross_gpa.free(e.arg); // 복사 OOM: op 드롭(pending은 reap-timeout으로 정리) — 0 반환
+        return 0;
+    };
+    server.cross_gpa.free(e.arg);
+    if (out_async_id) |p| p.* = e.async_id;
+    if (out_surface_id) |p| p.* = e.surface_id;
+    if (out_op_kind) |p| p.* = e.op_kind;
+    if (out_arg_ptr) |p| p.* = if (browser_op_take_buf.items.len > 0) browser_op_take_buf.items.ptr else null;
+    if (out_arg_len) |p| p.* = browser_op_take_buf.items.len;
+    return 1;
+}
+
+/// 5e-2b: Swift `BrowserControl` async 완료 콜백이 호출 — `async_id`의 in-flight 요청을 결과로 응답한다. `status`:
+/// 0=ok·非0=error(webView 부재·evaluateJavaScript 에러 등). `result`: method별(getUrl=url·executeScript=반환값
+/// 문자열·navigate=무시; error면 message). 미지/reap된 async_id는 무시(늦은 콜백 — inFlightPending null). **메인 스레드
+/// 전용**(WKWebView 콜백이 메인). serializeBrowserResponse가 pending.request_bytes 재파싱해 id·method로 응답 직렬화.
+pub export fn maru_macos_control_complete_browser_op(async_id: u64, status: u32, result_ptr: ?[*]const u8, result_len: usize) void {
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    const result: []const u8 = if (result_ptr) |p| p[0..result_len] else &.{};
+    const pending = server.inFlightPending(async_id) orelse return; // 늦은/미지 콜백 — 무시
+    const resp = control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, status == 0, result) catch null;
+    _ = server.completeInFlight(async_id, resp); // found → resolve(resp)(accept 스레드가 write 후 free)
 }
 
 pub export fn maru_macos_control_server_stop() void {
     if (!control_server_active) return;
     control_server_active = false;
     control_server_storage.stop();
+    // 5e-2b: 큐에 남은 browser op의 arg·안정 슬롯 해제. stop이 in-flight pending은 cancel하지만 큐 arg는 별도. arg는
+    // dispatchAuthenticated가 cross_gpa로 dupe했고 cross_gpa==`allocator`(start가 그렇게 넘김)라 여기서 allocator로 free
+    // (stop 후 control_server_storage.cross_gpa는 undefined라 접근 금지 — self.*=undefined).
+    browser_op_queue.deinit(allocator, allocator);
+    browser_op_queue = .{};
+    browser_op_take_buf.deinit(allocator);
+    browser_op_take_buf = .empty;
 }
 
 test "macOS app host ABI header and Zig declarations stay aligned" {
@@ -2245,4 +2333,24 @@ test "Option+Backspace chains through ABI to meta-DEL (\\e\\x7f, word delete)" {
     try std.testing.expectEqual(terminal.input.Key.backspace, ev.key);
     var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     try std.testing.expectEqualStrings("\x1b\x7f", try terminal.input.encodeKey(ev, &buf, .{}));
+}
+
+// 5e-2b: BrowserOpQueue FIFO push/take + bounded + deinit(남은 arg 해제). arg 소유권 이전 규약을 testing.allocator로
+// 검증(누수/이중free 없음). ABI take/complete_browser_op 글루·handleControlRequest defer는 5e-2b-2 macos smoke가 e2e로.
+test "5e-2b BrowserOpQueue: FIFO push/take + bounded(Full) + deinit이 남은 arg 해제" {
+    const gpa = std.testing.allocator;
+    var q: BrowserOpQueue = .{ .max = 2 };
+    // push 2개(각 arg는 gpa 소유 — 큐가 인수).
+    try q.push(gpa, .{ .async_id = 1, .surface_id = 10, .op_kind = 0, .arg = try gpa.dupe(u8, "https://a") });
+    try q.push(gpa, .{ .async_id = 2, .surface_id = 11, .op_kind = 2, .arg = try gpa.dupe(u8, "1+1") });
+    // 3번째는 bounded → Full(호출자가 arg free 책임 — 여기선 dupe 안 하고 바로 검사).
+    try std.testing.expectError(error.Full, q.push(gpa, .{ .async_id = 3, .surface_id = 12, .op_kind = 1, .arg = "" }));
+    // FIFO take: 1번 먼저. arg 소유권 이전 → 호출자 free.
+    const e1 = q.take().?;
+    try std.testing.expectEqual(@as(u64, 1), e1.async_id);
+    try std.testing.expectEqual(@as(u8, 0), e1.op_kind);
+    try std.testing.expectEqualStrings("https://a", e1.arg);
+    gpa.free(e1.arg);
+    // 남은 1개(async_id 2)는 deinit이 arg 해제(누수 없음 — testing.allocator가 잡음).
+    q.deinit(gpa, gpa);
 }

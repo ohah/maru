@@ -324,6 +324,12 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **열린 결정 요약**: ① dispatchAuthenticated tagged union(권장) vs buildControlResponse 선-검출. ② smoke cap 주입 env-gate(권장) vs 별도 바이너리. 둘 다 권장안이 기존 패턴과 정합 — 이견 없으면 그대로 진행.
 
+**구현 분할·상태(5e-2를 헤드리스/GUI 경계로 나눔)**:
+- **5e-1(구현 완료)**: `control_browser.dispatchBrowser` → `BrowserOp` 반환(skeleton 교체).
+- **5e-2a(구현 완료)**: `control_dispatch.dispatchAuthenticated` → `AuthDispatch{immediate|browser}`, browser.*는 nonce 유무 무관 `browserOpFromRequest` 위임(리뷰 [2]).
+- **5e-2b-1(Zig L4 marshal — 구현 완료)**: `control_browser.serializeBrowserResponse`(완료 시 request_bytes 재파싱→method별 result/error) + `control_server.inFlightPending`(async_id→pending 조회) + `app_host_abi`의 `BrowserOpQueue`(bounded FIFO, 메인 전용) + `handleControlRequest`(dispatchAuthenticated의 .browser를 `deferRequest`+큐 enqueue) + ABI `maru_macos_control_take_browser_op`(reap + pop, 안정 슬롯 arg)·`maru_macos_control_complete_browser_op`(직렬화+completeInFlight). 헤드리스 유닛(BrowserOpQueue push/take/bounded·serializeBrowserResponse). op.arg 소유권=cross_gpa(큐 인수→take/deinit free), completeInFlight 미발견=free(리뷰 [1] 대칭 소유).
+- **5e-2b-2(Swift + macos smoke — 남음)**: `MaruAppHost.swift`가 매 tick `take_browser_op` drain → `webPanels[surface_id]` webView 해소 → `BrowserControl`(op_kind) 실행 → completion에서 `complete_browser_op`. env-gate 테스트 cap 주입(`MARU_TEST_BROWSER_CAP`) + macos smoke(소켓 `browser.navigate`→실 WKWebView 이동 자동 증명). Swift/WKWebView라 헤드리스 아닌 smoke E2E.
+
 ## 10. 베이스와 결정 (clean-room)
 
 - **메커니즘**: JSON-RPC 2.0 over 로컬 stdio/socket(LSP/DAP/CDP 공유). 메커니즘만 빌리고 LSP 스펙(textDocument/*)은 채택하지 않는다. 프레이밍은 ndjson(대형은 §4.3 chunk).

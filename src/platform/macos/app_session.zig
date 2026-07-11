@@ -7573,10 +7573,13 @@ pub const AppSession = struct {
         }
     }
 
-    /// Esc — 편집만 종료(로드 안 함) + focus-restore pending. navigate는 안 세운다.
-    fn cancelAddrEdit(self: *AppSession) void {
+    /// 편집만 종료(로드 안 함). navigate는 안 세운다. `restore_focus`면 focus-restore pending(→webView) —
+    /// **Esc는 true**(편집 취소 후 브라우저로 복귀), **클릭-어웨이는 false**: 클릭한 target(터미널·다른 pane)이 포커스를
+    /// 정하므로 webView로 되돌리면 터미널을 클릭했는데 포커스가 브라우저로 튄다(제보). false면 focus-pull로 이미 터미널
+    /// 뷰에 있는 firstResponder를 그대로 둬 클릭 처리(focusPaneByPtr 등)가 목표 pane을 포커스한다.
+    fn cancelAddrEdit(self: *AppSession, restore_focus: bool) void {
         if (self.addr_edit) |sid| {
-            self.addr_focus_restore_pending = sid;
+            if (restore_focus) self.addr_focus_restore_pending = sid;
             self.addr_edit = null;
             self.addr_input.clear();
         }
@@ -7610,7 +7613,7 @@ pub const AppSession = struct {
     fn handleAddrEditKey(self: *AppSession, ev: chrome.input.InputEvent) void {
         switch (ev) {
             .key => |k| switch (k.key) {
-                .escape => self.cancelAddrEdit(),
+                .escape => self.cancelAddrEdit(true), // Esc = 편집 취소 후 브라우저(webView)로 포커스 복귀
                 .enter => self.commitAddrEdit(),
                 .backspace => self.addrEditBackspace(),
                 .char => {
@@ -11153,7 +11156,7 @@ pub const AppSession = struct {
         // 재클릭이면 draft 보존·버튼이면 nav action으로 처리하게 양보한다(addrEditBandContainsPoint가 자기 밴드면 true → 취소
         // 안 함). rename 인터셉트가 안 풀려 모든 키가 보이지 않는 편집기로 가던 하이재킹 수정(리뷰 [1]).
         if (kind == 1 and self.addr_edit != null and !self.addrEditBandContainsPoint(x_px, y_px)) {
-            self.cancelAddrEdit();
+            self.cancelAddrEdit(false); // 클릭-어웨이 = focus-restore 안 함(클릭한 target이 포커스 소유 — 터미널 클릭인데 webView로 튀는 것 방지, 제보)
             self.metal_dirty = true;
         }
         // 컨텍스트 메뉴가 열려 있으면 클릭(down)을 메뉴로 라우팅한다 — 항목 위면 그 항목 실행, 밖이면 닫는다(다른
@@ -26642,7 +26645,7 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     session.enterAddrEdit(9, "https://x/");
     _ = session.takeWebAddrFocusPull();
     for ("abc") |c| session.addrEditAppend(c);
-    session.cancelAddrEdit();
+    session.cancelAddrEdit(true); // Esc 의미 — focus-restore 세움
     try std.testing.expect(session.addr_edit == null);
     try std.testing.expect(session.takeWebAddrNavigate() == null); // cancel은 로드 안 함
     try std.testing.expectEqual(@as(?u64, 9), session.takeWebAddrFocusRestore());

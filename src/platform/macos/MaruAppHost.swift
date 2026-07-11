@@ -952,8 +952,11 @@ final class MaruWebPanelView: NSView {
         // 가 걸러낸다(활성 pane이 아니면 0/다른 id라 매칭 실패). R은 레이아웃 무관하게 keyCode 15로(⌘←/→와 동일 방식 —
         // charactersIgnoringModifiers 의존 제거). 실행은 dispatchBrowserNav → Zig setBrowserNavAction(클릭 ①b와 공유하는
         // 활성 판정) → take_web_nav_action drain → BrowserControl. 소비(true)해 WKWebView 기본 ⌘R/히스토리 동작 차단.
-        if event.modifierFlags.contains(.command), panelKind == 1,
-           surfaceId != 0, controller?.activeWebSurfaceId() == surfaceId {
+        // **정확히 Cmd만**(Shift/Option/Control 동반 아님)일 때로 게이트한다 — `.contains(.command)`은 ⌘⇧R(Reset
+        // Terminal keyEquivalent, keyCode 15)·⌘⌥←/→까지 back/forward/reload로 삼켜 그 조합들을 가로챈다(리뷰 [8]). Cmd+C/V
+        // 등 다른 exact-cmd 게이트(chordMods)와 같은 intersection 규약.
+        if event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+           panelKind == 1, surfaceId != 0, controller?.activeWebSurfaceId() == surfaceId {
             switch event.keyCode {
             case 123: controller?.dispatchBrowserNav(surfaceId, 0); return true // ← back
             case 124: controller?.dispatchBrowserNav(surfaceId, 1); return true // → forward
@@ -1212,6 +1215,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // theme.follow-system 초기 외관을 한 번 적용했는지(F2-9). 세션 생성 직후 첫 tick에서 현재 NSAppearance를 알린다 —
     // 이후 변경은 viewDidChangeEffectiveAppearance가 처리한다. tick은 세션이 확실히 있는 시점이라 초기 적용에 안전하다.
     private var didApplyInitialAppearance = false
+    // 주소창 navigate(⏎) URL을 Zig에서 받는 재사용 버퍼 — drainWebSurfaceTransition이 매 tick 부르는데 navigate는 Enter
+    // 시에만이라, tick마다 4KB 새로 할당·zero-fill하지 않고 이 버퍼를 재사용한다(리뷰 [9]). Zig가 navLen만 쓰고 반환 길이로
+    // 슬라이스하므로 zero-fill 불필요. addr_nav_url_cap(4096, app_scheme)과 정합.
+    private var webNavigateUrlBuf = [UInt8](repeating: 0, count: 4096)
     // 세션별 forwarder의 대상. tick 중에는 explicitSurface, 그 외(입력/IME/hover)에는 key 창의 surface
     // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
     private var activeSurface: TerminalSurface? {
@@ -1715,6 +1722,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return nil
     }
 
+    // surface_id로 그 웹 패널을 소유한 창(일반 창·quick)을 찾는다 — dispatchBrowserNav·adoptPopupWebView가 공유하는
+    // 단일 소스(위 identity 기반 surfaceOwning(_:)의 id 판). 못 찾으면 nil(호출처가 활성 세션 폴백).
+    private func surfaceOwning(byId surfaceId: UInt64) -> TerminalSurface? {
+        if let s = windows.first(where: { $0.webPanels[surfaceId] != nil }) { return s }
+        if let quick, quick.webPanels[surfaceId] != nil { return quick }
+        return nil
+    }
+
     // 이 웹 패널이 속한 창의 chrome 오버레이(모달/녹음)가 열려 있는가 — hitTest가 열림이면 nil을 돌려 클릭을 아래
     // 터미널로 통과시킨다(모달 dismiss·요소 클릭이 Zig로). anyOverlayOpen(활성 창)과 달리 그 웹 패널의 **자기 창**
     // 세션을 조회한다(멀티 창 오라우팅 방지, code-review [9]). 소유 surface를 못 찾으면 false(통과 안 함=평소 focusable).
@@ -1746,9 +1761,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // **소유 창(surface)의 세션**에 세운다 — drain이 그 세션 tick에서 돌기 때문(멀티 창 오라우팅 방지, surfaceOwning과
     // 같은 규율이되 surface_id 키로 조회). 못 찾으면 활성 세션 폴백(isWebPanelAppChord의 `?? appSession`과 대칭).
     func dispatchBrowserNav(_ surfaceId: UInt64, _ code: UInt32) {
-        let owner = windows.first(where: { $0.webPanels[surfaceId] != nil })
-            ?? (quick?.webPanels[surfaceId] != nil ? quick : nil)
-        guard let session = owner?.appSession ?? appSession else { return }
+        guard let session = surfaceOwning(byId: surfaceId)?.appSession ?? appSession else { return }
         _ = maru_macos_app_session_browser_nav(session, surfaceId, code)
     }
 
@@ -1768,9 +1781,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 그 create는 webPanels[sid]가 이미 있어 중복 WKWebView 생성을 스킵한다). opener를 못 찾거나 term 생성 실패면 nil
     // (WebKit이 창 생성 취소). surfaceOwning 규율(dispatchBrowserNav)과 동일하게 openerSurfaceId로 창을 고른다.
     func adoptPopupWebView(configuration: WKWebViewConfiguration, openerSurfaceId: UInt64) -> WKWebView? {
-        let owner = windows.first(where: { $0.webPanels[openerSurfaceId] != nil })
-            ?? (quick?.webPanels[openerSurfaceId] != nil ? quick : nil)
-        guard let surface = owner, let session = surface.appSession,
+        guard let surface = surfaceOwning(byId: openerSurfaceId), let session = surface.appSession,
               let container = surface.window?.contentView as? MaruTerminalContainerView else { return nil }
         let sid = maru_macos_app_session_create_adopted_web_term(session)
         guard sid != 0 else { return nil }
@@ -3250,12 +3261,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             focusTerminalView(surface.window)
         }
         var navSid: UInt64 = 0
-        var urlBuf = [UInt8](repeating: 0, count: 4096)
-        let navLen = urlBuf.withUnsafeMutableBufferPointer { p in
+        let navLen = webNavigateUrlBuf.withUnsafeMutableBufferPointer { p in
             maru_macos_app_session_take_web_addr_navigate(session, p.baseAddress, p.count, &navSid)
         }
         if navLen > 0, let wp = surface.webPanels[navSid] {
-            _ = BrowserControl.navigate(wp.webView, url: String(decoding: urlBuf[0 ..< Int(navLen)], as: UTF8.self))
+            _ = BrowserControl.navigate(wp.webView, url: String(decoding: webNavigateUrlBuf[0 ..< Int(navLen)], as: UTF8.self))
         }
         var restoreSid: UInt64 = 0
         if maru_macos_app_session_take_web_addr_focus_restore(session, &restoreSid) == 1, let wp = surface.webPanels[restoreSid] {

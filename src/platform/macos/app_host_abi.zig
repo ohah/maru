@@ -1347,6 +1347,23 @@ pub export fn maru_macos_app_session_take_web_nav_action(session: ?*AppSession, 
     return -1;
 }
 
+// Phase 7e-4: 주소창 nav 버튼 키보드 단축키(browser 웹 패널 포커스 한정 Cmd+←/→/R)를 Zig 코어로 전달한다. Swift
+// performKeyEquivalent가 panelKind==browser일 때만 code(0=back·1=forward·2=reload)로 마샬링해 부른다. Zig는
+// setBrowserNavAction(밴드 클릭 ①b와 공유하는 활성 판정 단일 정책)으로 web_nav_action_pending을 세우고, 같은 tick의
+// take_web_nav_action drain이 BrowserControl.goBack/goForward/reload를 실행한다(클릭 경로 재사용 — 키보드는 pending을
+// 세우는 진입점만 다르다). 반환: 1=전달함(활성 무관 — 활성 게이트는 코어), 0=session null/알 수 없는 code(무동작).
+pub export fn maru_macos_app_session_browser_nav(session: ?*AppSession, surface_id: u64, code: u32) c_int {
+    const app_session = session orelse return 0;
+    const btn: session_mod.NavButton = switch (code) {
+        0 => .back,
+        1 => .forward,
+        2 => .reload,
+        else => return 0, // 알 수 없는 code — 무동작
+    };
+    app_session.setBrowserNavAction(surface_id, btn);
+    return 1;
+}
+
 // ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
 //
 // 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root
@@ -2020,6 +2037,10 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(i32, -1), maru_macos_app_session_take_web_nav_action(null, null));
     var nav_action_sid: u64 = 0;
     try std.testing.expectEqual(@as(i32, -1), maru_macos_app_session_take_web_nav_action(null, &nav_action_sid));
+    // v107 Phase 7e-4 browser_nav: null session은 0(무동작). 알 수 없는 code(3)도 0 — 세션 있어도 매핑 안 되면 무동작이나
+    // 여기선 null session이 먼저라 0. (활성 판정·pending 세움은 코어 setBrowserNavAction 헤드리스 테스트가 덮는다.)
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_browser_nav(null, 42, 0));
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_session_browser_nav(null, 42, 3));
 }
 
 test {

@@ -286,17 +286,21 @@ pub const ControlServer = struct {
         return id;
     }
 
-    /// **§5-async(메인 전용)**: `async_id`의 in-flight 요청을 `response`(cross_gpa 소유 또는 null)로 resolve하고
-    /// 레지스트리에서 제거한다. 찾으면 true, 없으면 false(옛/이미 완료/reap된 id — 무동작이라 늦은 콜백에 안전).
-    /// Swift async 콜백(evaluateJavaScript/takeSnapshot/navigation 완료)이 ABI를 거쳐 부른다(메인 스레드).
+    /// **§5-async(메인 전용)**: `async_id`의 in-flight 요청을 `response`(**cross_gpa 소유** 또는 null)로 resolve하고
+    /// 레지스트리에서 제거한다. 찾으면 true, 없으면 false. **completeInFlight는 어느 경로든 `response` 소유권을
+    /// 인수**한다(대칭 소유 — 리뷰 [1]): 찾으면 `pending.resolve`가 accept 스레드로 넘겨 거기서 free, **못 찾으면**
+    /// (옛/이미 완료/reap된 id — 늦은/중복 콜백) 여기서 `cross_gpa.free`한다. 안 그러면 reap된 async op의 결과 버퍼가
+    /// 누수한다(hit=이전, miss=drop의 비대칭 함정). Swift async 콜백이 ABI를 거쳐 부른다(메인 스레드).
     pub fn completeInFlight(self: *ControlServer, async_id: u64, response: ?[]u8) bool {
         for (self.in_flight.items, 0..) |e, i| {
             if (e.id == async_id) {
-                e.pending.resolve(response);
+                e.pending.resolve(response); // 소유권 이전 → accept 스레드가 write 후 free
                 _ = self.in_flight.swapRemove(i);
                 return true;
             }
         }
+        // 미발견: 늦은/중복 콜백이 넘긴 버퍼를 여기서 해제(소유권 인수 — 누수 방지, 리뷰 [1]).
+        if (response) |r| self.cross_gpa.free(r);
         return false;
     }
 
@@ -479,6 +483,7 @@ fn inflightSrv(max: usize) ControlServer {
     var srv: ControlServer = undefined;
     srv.in_flight = .empty;
     srv.items_gpa = testing.allocator;
+    srv.cross_gpa = testing.allocator; // completeInFlight 미발견 경로가 response를 free(리뷰 [1])
     srv.next_async_id = 1;
     srv.max_in_flight = max;
     return srv;
@@ -502,6 +507,9 @@ test "§5-async deferRequest→completeInFlight: 응답을 나중에 되돌린�
     // 이미 완료/미지 id 재-complete는 false(늦은 중복 콜백·옛 id 안전).
     try testing.expect(!srv.completeInFlight(id, null));
     try testing.expect(!srv.completeInFlight(999, null));
+    // 리뷰 [1]: 미발견 경로가 넘긴 **response 버퍼를 소유 인수해 free**한다(안 하면 누수 — testing.allocator가 잡음).
+    const late = try testing.allocator.dupe(u8, "late-callback-result");
+    try testing.expect(!srv.completeInFlight(id, late)); // reap/완료된 id에 늦은 콜백 → false + late free됨(누수 없음)
 }
 
 test "§5-async deferRequest bounded: max_in_flight 초과 → TooManyInFlight(호출자가 에러 resolve)" {

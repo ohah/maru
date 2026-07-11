@@ -82,9 +82,9 @@
 **필요 표면**: `activate_surface`(v78, 있음). **활성 web surface getter 확장** — 현 `activeWebSurfaceId`는 browser 전용(0=아님)이라, Direction 1이 활성 pane이 **어떤 web kind든**(browser·markdown) 그 webview를 포커스하려면 "활성 pane 활성 term이 web이면 surface_id + kind, 아니면 0"이 필요하다(신규 getter 또는 확장, Zig 순수·헤드리스 테스트). Swift는 surface_id→webPanels로 webview 조회.
 
 **분해**:
-- **4g-0 (Zig)**: 활성 pane 활성 term의 web surface_id(any kind)·kind getter + 헤드리스 테스트(터미널=0·browser/markdown=id). ABI 신규 getter.
-- **4g-1 (Swift)**: 통합 `reconcileWebFocus`(override → Direction 2 rising-edge → Direction 1) 구현, `reconcileWebModalFocus`·`reconcileWebFocusActivation`를 **대체**(삭제). tick에서 이 하나만 호출. **GUI 손 테스트**: 모달 Enter·터미널 클릭·브라우저 클릭·키보드 pane/탭 전환·주소 편집 종료·⌘R·팝업 focus 전 시나리오.
-- **4g-2 (정리)**: 불변식으로 불필요해진 `addr_focus_restore_pending`(Direction 1이 복원)·⌘R `activeWebSurfaceId` 게이트 단순화 검토(회귀 없이 제거 가능한 것만). ⌘R KVO `assumeIsolated`(13차 리뷰 [7] PLAUSIBLE)도 이때 함께 판단.
+- **4g-0 (Zig — 구현 완료)**: `activeWebSurfaceIdAnyKind` getter(활성 term이 web[browser·markdown]이면 surface_id, 아니면 0, ABI v112) + 헤드리스 테스트(터미널=0·browser/markdown=id·browser-only는 markdown서 0=핵심 구분).
+- **4g-1 (Swift — 구현 완료, GUI 손 테스트 통과)**: 통합 `reconcileWebFocus`(override → Direction 2 rising-edge → Direction 1) 구현, `reconcileWebModalFocus`·`reconcileWebFocusActivation` **대체·삭제**. override용 `addr_edit_surface` getter(ABI v113). 미사용 `lastOverlayOpen`·`stashedWebFocusSurfaceId` 제거. 손 테스트: 모달 Enter·터미널/브라우저 클릭·키보드 pane/탭 전환(새로 닫은 갭)·주소 편집·팝업·터미널 IME 무회귀 전부 통과.
+- **4g-2 (정리 — 완료)**: **검토 결론**: `addr_focus_restore_pending`(주소 편집 종료 후 webview 복원)·⌘R `activeWebSurfaceId` 게이트는 불변식 Direction 1에 **subsume**되지만(D1이 복원·브라우저 탭 활성 시 webview 포커스), **제거 시 ABI export 제거+체인+손 테스트인데 동작 이득 0**(D1과 same-tick 복원)이라 **belt-and-suspenders로 유지**(harmless 중복 — 즉시 복원 fast-path/견고한 게이트, D1이 authority; 향후 저우선 cleanup서 제거 가능). ⌘R KVO `assumeIsolated`(13차 리뷰 [7] PLAUSIBLE)=**유지**(WKWebView nav KVO는 WebKit 메인 스레드 갱신·off-main 미관측 + 코드베이스 확립 패턴[NSColorSampler 등 7곳] + 근거 없는 방어 지양; 실 크래시 관측 시 dispatch 전환). 주석에 근거 명시.
 
 **리스크·검증**: 코어 포커스라 회귀 시 **모달·타이핑·IME가 깨진다** → firstResponder는 AppKit이라 헤드리스 불가, **GUI 손 테스트가 유일 안전망**(§11). 특히 `reconcileWebModalFocus`(검증된 모달 Enter 동작)를 대체하므로 그 무회귀를 재확인한다. Zig getter(4g-0)만 헤드리스. 기존 터미널 IME/keyDown은 **한 줄도 안 건드림**(4d 규율 유지 — override는 makeFirstResponder만).
 

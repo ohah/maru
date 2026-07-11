@@ -1140,6 +1140,9 @@ fn buildMergedUploadsN(
     sidebar_raster: ?renderer.GlyphRasterFrame,
     sidebar_header_raster: ?renderer.GlyphRasterFrame,
     palette_raster: ?renderer.GlyphRasterFrame,
+    // 드래그 고스트(floating 탭/pane 미리보기) glyph raster — 최상위 오버레이 레이어 프레임이 pane_frames에서
+    // 빠졌으므로(터미널 레이어가 아닌 오버레이 레이어로 라우팅) 그 raster를 여기서 따로 머지한다. null=드래그 없음.
+    drag_raster: ?renderer.GlyphRasterFrame,
 ) !MergedUploads {
     var pixels: std.ArrayList(u8) = .empty;
     errdefer pixels.deinit(allocator);
@@ -1150,6 +1153,7 @@ fn buildMergedUploadsN(
     if (sidebar_raster) |sr| try appendRaster(allocator, &pixels, &uploads, sr);
     if (sidebar_header_raster) |hr| try appendRaster(allocator, &pixels, &uploads, hr);
     if (palette_raster) |pr| try appendRaster(allocator, &pixels, &uploads, pr);
+    if (drag_raster) |dr| try appendRaster(allocator, &pixels, &uploads, dr);
 
     return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = try pixels.toOwnedSlice(allocator) };
 }
@@ -1229,6 +1233,15 @@ pub const MetalFrameBuffer = struct {
         // 달리 커서 suffix '뒤'에 붙여 터미널·chrome·커서 위 맨 앞에 그린다 — 모달이 그 아래를 다 덮는다. 각 셀이
         // 자기 bg(불투명)+glyph를 들어 buildNativeCellsSplit로 투영되고, raster는 uploads에 머지된다. null이면 무동작.
         overlay_frame: ?PaneFrame,
+        // 탭/pane 드래그 floating 고스트 frame(끌리는 대상 라벨 박스, 커서 추종). **최상위 오버레이 레이어**(WKWebView
+        // 위)에 그려 웹 pane 위에서도 보이게 한다 — 터미널 레이어(pane_frames)에 두면 WKWebView에 가린다(web-panel.md §5).
+        // 모달과 상호배타(드래그 중엔 마우스가 잡혀 모달을 못 연다)라 오버레이 영역에서 modal '위'에 겹쳐도 실제로 둘 중
+        // 하나만. built_frames가 소유하는 view(replace는 deinit 안 함) — raster는 buildMergedUploadsN drag_raster로 머지. null=드래그 없음.
+        drag_overlay_frame: ?PaneFrame,
+        // 탭/pane 드래그 drop-target 반투명 하이라이트 셀(bg-only sentinel — glyph 없음). floating 고스트와 같은 이유로
+        // **최상위 오버레이 레이어**에 그린다(터미널 레이어면 WKWebView에 가림). 오버레이 영역의 '아래'(고스트가 위에 겹침).
+        // 빈이면 무동작. raster 불요(sentinel UV).
+        drag_overlay_cells: []const NativeMetalCell,
         // C4b: chrome rich GPU quad 프리미티브(AppSession이 chrome lowering으로 모은 것). buffer가 dupe 소유한다.
         // 셀 그리드와 별개 파이프라인으로 렌더된다(둥근 박스). 빈이면 0(tui — 무동작).
         gpu_quads: []const GpuQuad,
@@ -1277,18 +1290,34 @@ pub const MetalFrameBuffer = struct {
         // caret이 **버퍼 맨 끝**(overlay suffix)에 와, 아래 cursor_cells를 그 길이로 잡아 setCursorVisible(suffix-trim)이
         // 재빌드 없이 caret을 깜빡인다 — 터미널 커서와 같은 메커니즘 재활용. caret이 없으면(notice 등) 0.
         var overlay_cursor_cells: usize = 0;
-        // C4b 모달: 모달(overlay) 셀 시작 인덱스. draw가 over quad(모달 배경)를 이 경계 '앞'(모달 텍스트 셀
-        // 아래·터미널 위)에 끼운다. 0 = 모달 없음(draw가 분할 안 함).
+        // C4b 모달: 최상위 오버레이 영역(모달 셀·드래그 시각물) 시작 인덱스. draw가 over quad(모달 배경)를 이 경계
+        // '앞'(오버레이 셀 아래·터미널 위)에 끼우고, 렌더러가 has_modal(=modal_cells_start>0)로 이 셀들을 **오버레이
+        // 레이어**(WKWebView 위)에 그린다. 0 = 오버레이 없음(draw가 분할 안 함 = terminal_end가 커서 suffix). 모달뿐 아니라
+        // 드래그 고스트·drop 하이라이트도 이 영역에 넣어 웹 pane 위에서도 보이게 한다(web-panel.md §5).
         var modal_cells_start: usize = 0;
         var modal_clip: ?ClipPx = null; // 모달 오버레이 클리핑(px) — overlay PaneFrame에서 흘러와 renderer scissor
-        if (overlay_frame) |pf| {
-            const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
-            defer allocator.free(built.cells);
-            setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
-            modal_cells_start = cells_list.items.len; // 모달 셀 시작(append 전)
-            try cells_list.appendSlice(allocator, built.cells);
-            overlay_cursor_cells = built.cursor_cells; // 오버레이 caret이 버퍼 맨 끝 — blink suffix
-            modal_clip = pf.clip_rect; // 모달 셀 draw에 scissor로 적용(renderer)
+        // 오버레이 영역이 존재하는가(모달 또는 드래그). 하나라도 있으면 modal_cells_start를 이 영역 시작으로 잡는다.
+        const has_overlay = overlay_frame != null or drag_overlay_frame != null or drag_overlay_cells.len > 0;
+        if (has_overlay) {
+            modal_cells_start = cells_list.items.len; // 오버레이 영역 시작(terminal_end 경계 = 이 앞까지 터미널 레이어)
+            // drop-target 하이라이트(bg-only sentinel 셀) 먼저 — 오버레이 영역 '아래'(모달/고스트가 위에 겹침). raster 불요.
+            try cells_list.appendSlice(allocator, drag_overlay_cells);
+            // 모달 frame(있으면) — 그 caret이 버퍼 맨 끝이면 blink suffix. 드래그와 배타라 아래 고스트와 공존 안 함.
+            if (overlay_frame) |pf| {
+                const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
+                defer allocator.free(built.cells);
+                setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+                try cells_list.appendSlice(allocator, built.cells);
+                overlay_cursor_cells = built.cursor_cells; // 오버레이 caret이 버퍼 맨 끝 — blink suffix
+                modal_clip = pf.clip_rect; // 모달 셀 draw에 scissor로 적용(renderer)
+            }
+            // 드래그 floating 고스트(있으면) — 오버레이 영역 '위'(하이라이트·모달 위). caret 없음(overlay_cursor_cells 불변).
+            if (drag_overlay_frame) |pf| {
+                const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
+                defer allocator.free(built.cells);
+                setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+                try cells_list.appendSlice(allocator, built.cells);
+            }
         }
         const new_cells = try cells_list.toOwnedSlice(allocator);
         errdefer allocator.free(new_cells);
@@ -1317,7 +1346,7 @@ pub const MetalFrameBuffer = struct {
         const new_live_image_ids = try allocator.dupe(u32, live_image_ids);
         errdefer allocator.free(new_live_image_ids);
 
-        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (sidebar_header_frame) |hf| hf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
+        const merged = try buildMergedUploadsN(allocator, pane_frames, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, if (sidebar_header_frame) |hf| hf.glyph_raster_frame else null, if (overlay_frame) |pf| pf.frame.glyph_raster_frame else null, if (drag_overlay_frame) |pf| pf.frame.glyph_raster_frame else null);
         errdefer {
             allocator.free(merged.uploads);
             allocator.free(merged.pixels);
@@ -1341,10 +1370,11 @@ pub const MetalFrameBuffer = struct {
         self.image_uploads = new_image_uploads;
         self.image_pixels = new_image_pixels;
         self.live_image_ids = new_live_image_ids;
-        // 커서 suffix(blink chop 길이): 오버레이가 열렸으면 오버레이 자신의 caret(맨 끝 — overlay_cursor_cells)을 쓴다.
-        // 그러면 setCursorVisible chop이 오버레이 caret을 깜빡인다(터미널 커서 메커니즘 재활용). 오버레이가 caret을
-        // 안 내면(notice 등) overlay_cursor_cells=0이라 chop 없음(정적). 오버레이가 없으면 활성 panel의 터미널 커서.
-        self.cursor_cells = if (overlay_frame != null) overlay_cursor_cells else cursor_cells;
+        // 커서 suffix(blink chop 길이): 오버레이 영역이 있으면(모달·드래그) 오버레이 자신의 caret(맨 끝 —
+        // overlay_cursor_cells)을 쓴다. 모달이 caret을 내면(find·palette) 그걸 깜빡이고, 안 내면(notice·드래그 고스트·
+        // drop 하이라이트) overlay_cursor_cells=0이라 chop 없음(정적) — 터미널 커서는 오버레이 영역 '앞'이라 버퍼 맨 끝이
+        // 아니므로 blink suffix에서 빠져 정적으로 그려진다(모달 열림과 동일). 오버레이 영역이 없으면 활성 panel의 터미널 커서.
+        self.cursor_cells = if (has_overlay) overlay_cursor_cells else cursor_cells;
         self.modal_cells_start = modal_cells_start;
         self.modal_clip = modal_clip;
         self.uploads = merged.uploads;
@@ -1399,7 +1429,7 @@ pub const MetalFrameBuffer = struct {
         renormalizeGlyphCellUvs(new_sidebar_cells, atlas_config.atlas_width_px, atlas_config.atlas_height_px);
         // 사이드바 raster만 실어 새 글리프(warm-up/eviction 후 파형 높이)를 업로드한다 — pane_frames는 비어(터미널
         // 글리프는 persistent atlas에 이미 resident). base offset 0부터라 self.pixels/uploads가 사이드바 delta만 담는다.
-        const merged = try buildMergedUploadsN(allocator, &.{}, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, null, null);
+        const merged = try buildMergedUploadsN(allocator, &.{}, if (sidebar_frame) |sf| sf.glyph_raster_frame else null, null, null, null);
         errdefer {
             allocator.free(merged.uploads);
             allocator.free(merged.pixels);
@@ -2609,6 +2639,42 @@ test "renormalizeGlyphCellUvs rescales glyph UVs to final atlas dims, preserves 
     };
     renormalizeGlyphCellUvs(&zero, 0, 0);
     try std.testing.expectEqual(@as(f32, 0.5), zero[0].u0); // baked 유지
+}
+
+// 렌더러 슬라이스(web-panel.md §5): 탭/pane 드래그 시각물(drop 하이라이트·floating 고스트)을 **최상위 오버레이
+// 레이어**(WKWebView 위)로 라우팅한다. replace가 drag_overlay_cells를 오버레이 영역(modal_cells_start 뒤)에 넣어
+// 렌더러 has_modal(=modal_cells_start>0)로 오버레이 레이어에 그리게 하는지 — 순수 셀 조립 로직을 헤드리스로 단언한다
+// (실제 GPU 합성·web 위 가시성은 손 테스트, PaneFrame 고스트 경로는 modal 경로와 동형이라 여기선 bg-only 셀로 검증).
+test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells_start 뒤)에 들어가 최상위 레이어로 라우팅" {
+    const allocator = std.testing.allocator;
+    const bgCell = struct {
+        fn make(bg: u32) NativeMetalCell {
+            return .{ .row = 0, .col = 0, .width = 1, .codepoint = ' ', .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = -1, .v0 = -1, .u1 = -1, .v1 = -1, .background = bg };
+        }
+    }.make;
+    const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
+    // pane_chrome 1셀(탭 바 흉내 — 실제 드래그 중엔 항상 있어 modal_cells_start>0을 보장한다). drag 하이라이트 2셀.
+    const chrome = [_]NativeMetalCell{bgCell(0xFF112233)};
+    const drag_cells = [_]NativeMetalCell{ bgCell(0x55445566), bgCell(0x55445566) };
+
+    // (1) 드래그 하이라이트 있음 → 오버레이 영역이 chrome(1) 뒤에서 시작 → modal_cells_start==1, cursor_cells==0(caret 없음).
+    {
+        var buf: MetalFrameBuffer = .{};
+        defer buf.deinit(allocator);
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try std.testing.expectEqual(@as(usize, 1), buf.modal_cells_start); // has_modal=true → 오버레이 레이어
+        try std.testing.expectEqual(@as(usize, 0), buf.cursor_cells); // 드래그=caret 없음(정적 커서)
+        try std.testing.expectEqual(@as(usize, 3), buf.cells.len); // chrome(1) + drag(2)
+        try std.testing.expectEqual(@as(u32, 0x55445566), buf.cells[1].background); // 오버레이 영역 첫 셀=하이라이트
+    }
+    // (2) 드래그 없음(대조) → 오버레이 영역 없음 → modal_cells_start==0(전부 터미널 레이어). 새 경로가 셀 없을 땐 무동작.
+    {
+        var buf: MetalFrameBuffer = .{};
+        defer buf.deinit(allocator);
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try std.testing.expectEqual(@as(usize, 0), buf.modal_cells_start); // 오버레이 없음
+        try std.testing.expectEqual(@as(usize, 1), buf.cells.len); // chrome만
+    }
 }
 
 test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid cells untouched (A)" {

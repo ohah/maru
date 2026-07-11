@@ -1390,13 +1390,13 @@ pub export fn maru_macos_app_session_active_web_surface_id_any_kind(session: ?*A
     return app_session.activeWebSurfaceIdAnyKind();
 }
 
-// Phase 4g-1: 주소창 편집(addr_edit) 중인 surface_id, 아니면 0. focus-sync 불변식(§4.1)의 **override**가 쓴다 — 편집 중엔
-// 터미널 뷰가 firstResponder여야(편집 키·IME preedit가 Zig handleKeyEvent 경로) 하므로, 통합 reconcileWebFocus가 이 값이
-// 0이 아니면(모달과 함께) 불변식 대신 터미널 뷰로 강제한다. focus-pull(take_web_addr_focus_pull)은 1회성이라 "편집 중"
-// 연속 상태를 못 주므로 이 read getter가 필요하다. 순수 read — 구조체 offset 불변.
-pub export fn maru_macos_app_session_addr_edit_surface(session: ?*AppSession) u64 {
+// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 터미널 뷰→Zig 경로로 가야 하는가(모달[notice 제외] 또는 주소창 편집·
+// rename·사이드바 검색 활성). focus-sync 불변식(reconcileWebFocus)의 **override 단일 출처** — 1이면 웹뷰가 아니라
+// 터미널 뷰가 firstResponder여야 한다. 옛 addr_edit_surface getter를 대체(그건 rename·사이드바 검색을 빠뜨려 web pane
+// 활성 중 그 편집이 웹뷰로 새고 notice까지 세는 버그였다). 순수 read — 구조체 offset 불변.
+pub export fn maru_macos_app_session_terminal_owns_input(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
-    return app_session.addrEditSurfaceId() orelse 0;
+    return if (app_session.terminalOwnsInput()) 1 else 0;
 }
 
 // Phase 7f-0: 새 창/팝업 adopt — Swift `WKUIDelegate.createWebViewWith`가 WebKit config로 만든 WKWebView를 붙일
@@ -2098,8 +2098,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id(null));
     // v112 Phase 4g-0 active_web_surface_id_any_kind: null session은 0(web 아님 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id_any_kind(null));
-    // v113 Phase 4g-1 addr_edit_surface: null session은 0(편집 아님 sentinel).
-    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_addr_edit_surface(null));
+    // v114 Phase 4g-1 후속 terminal_owns_input: null session은 0.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_terminal_owns_input(null));
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
     // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.

@@ -1796,8 +1796,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return panel.webView
     }
 
-    // 웹 패널 포커스 ↔ 모달 responder 전이를 anyOverlayOpen 엣지로 조정한다(renderTick 매 tick + 웹 조합 직후 동기
-    // 호출). 웹 패널이 없으면 무동작이라 MARU_WEB_PANEL 훅이 없는 평시 빌드엔 영향이 없다. 터미널 IME/keyDown 코드는
+    // 웹 패널 포커스 ↔ 터미널 responder 전이를 Zig terminalOwnsInput/활성 pane 기준으로 조정한다(renderTick 매 tick + 웹
+    // 조합 직후 동기 호출). 웹 패널이 없으면 무동작이라 MARU_WEB_PANEL 훅이 없는 평시 빌드엔 영향이 없다. 터미널 IME/keyDown 코드는
     // 건드리지 않고 makeFirstResponder만 부른다 — 전이는 기존 becomeFirstResponder(imeFocus true)/resignFirstResponder
     // (commitComposition)를 그대로 태운다(새 IME 로직 없음). 단일 출처: docs/web-panel.md §4.
     // Phase 4g-1: 웹↔터미널 포커스 동기 불변식(§4.1) — **firstResponder ⟺ Zig 활성 pane**. 옛 reconcileWebModalFocus +
@@ -1805,9 +1805,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // ⌘Q 직후 동기 호출. 웹 패널 없으면 무동작(평시 무영향). 기존 터미널 IME/keyDown은 한 줄도 안 건드림(4d 규율 —
     // makeFirstResponder만).
     //
-    // **override(우선순위 모달 > addr_edit)**: 모달(anyOverlayOpen) 또는 주소창 편집(addr_edit_surface != 0) 중엔 입력이
-    // Zig handleKeyEvent 경로(모달 Enter/Esc·편집 키·IME preedit)라 **터미널 뷰**가 firstResponder여야 한다 — 웹뷰가 쥐면
-    // 샌다(제보: ⌘Q 종료 모달 Enter 무응답). 열린 내내 self-heal(웹뷰가 재획득해도 되돌림).
+    // **override(우선순위 모달 > 터미널-라우팅 텍스트 입력)**: 모달(notice 제외) 또는 주소창 편집·rename·사이드바 검색 중엔
+    // 입력이 Zig handleKeyEvent 경로(모달 Enter/Esc·편집 키·IME preedit)라 **터미널 뷰**가 firstResponder여야 한다 — 웹뷰가
+    // 쥐면 샌다(제보: ⌘Q 종료 모달 Enter 무응답; web pane 위 rename/검색이 웹뷰로 새던 14차 리뷰 [0]). 판정은 Zig
+    // terminalOwnsInput 단일 출처(anyModalOverlayOpen ∪ addr_edit ∪ rename ∪ sidebar_search). 열린 내내 self-heal.
     //
     // **override 없으면 불변식 2방향 동기(순서 중요)**:
     //   Direction 2 — webview가 **새로 firstResponder(rising edge = 사용자 클릭)** 면 activate_surface로 Zig 활성 pane을 그
@@ -1820,9 +1821,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
               let tv = (window.contentView as? MaruTerminalContainerView)?.terminalView else { return }
         guard !surface.webPanels.isEmpty else { surface.lastFocusedWebSurfaceId = nil; return }
 
-        // override: 모달 또는 주소창 편집 → 터미널 뷰.
-        if anyOverlayOpen || maru_macos_app_session_addr_edit_surface(session) != 0 {
-            if window.firstResponder !== tv { focusTerminalView(window) }
+        // override: 모달(notice 제외) 또는 터미널-라우팅 텍스트 입력(주소창 편집·rename·사이드바 검색) 중이면 터미널 뷰가
+        // firstResponder여야 한다(그 키/IME가 Zig handleKeyEvent 경로) — Zig terminalOwnsInput 단일 출처. 옛 override는
+        // rename·사이드바 검색을 빠뜨려 web pane 활성 중 그 편집이 웹뷰로 샜다(14차 리뷰 [0]) + notice까지 세었다([3]).
+        if maru_macos_app_session_terminal_owns_input(session) != 0 {
+            if window.firstResponder !== tv { window.makeFirstResponder(tv) } // tv 이미 바인딩(재downcast 회피, 리뷰 [8])
             surface.lastFocusedWebSurfaceId = nil // override 중 rising-edge 추적 리셋(해제 후 재평가)
             return
         }
@@ -1844,7 +1847,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         } else if window.firstResponder !== tv {
             // 활성 = terminal → 터미널 뷰(키보드로 웹→터미널 pane 전환 시 stale 웹뷰 포커스 회수 = 키보드 갭 닫음).
-            focusTerminalView(window)
+            window.makeFirstResponder(tv) // tv 이미 바인딩(재downcast 회피, 리뷰 [8])
         }
     }
 

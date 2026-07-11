@@ -4031,7 +4031,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 자동 smoke는 물리 키보드나 사용자의 resize 동작을 기다릴 수 없다. 대신 같은 C ABI를
         // 직접 호출해 key/resize event가 Zig app session까지 내려가는 최소 E2E 신호를 남긴다.
         // grid는 app session이 backing 픽셀에서 계산하므로 픽셀 크기만 보낸다.
-        resizeAppSession(widthPx: 1_200, heightPx: 720)
+        //
+        // **실 창 크기로 resize**(예전엔 하드코딩 1200×720이었다): web 패널이 붙으면서 WKWebView frame이 Zig 표면(=이
+        // resize가 정한 grid)의 pane rect를 따라가는데, 창은 960×600이라 1200×720 표면은 web 패널을 창 밖으로 밀어냈다
+        // (런치 시 삐져나옴 — 리사이즈해야 맞던 증상). 실 창 콘텐츠 크기(makeKeyAndOrderFront 뒤라 레이아웃 완료)를 보내면
+        // Zig 표면 == 창이라 web 패널이 창 안에 정확히 맞는다. resize E2E 신호(Zig까지 내려감) 목적은 그대로 유지된다.
+        resizeAppSessionFromWindow()
         let keyEvent = MaruAppHostKeyEvent(
             codepoint: UInt32(UnicodeScalar("a").value),
             base_codepoint: UInt32(UnicodeScalar("a").value),

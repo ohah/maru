@@ -1675,9 +1675,11 @@ pub const AppSession = struct {
     // ESU를 더 처리했으면(이 값과 달라지면) shouldProjectFrame의 esu_advanced가 sync hold를 해제해 완성 프레임을
     // flush한다 — 폴링이 flush 창을 놓쳐 완성 프레임을 막던 MISS를 없앤다. 투영 성공 시 gate-time esu로 갱신.
     last_rendered_esu: u64 = 0,
-    // [code-review 2] 직전 tick의 활성 surface 포인터. 활성 surface가 바뀌면 last_rendered_esu(단일 필드)가 다른
-    // surface의 sync_esu_count(per-surface)와 비교돼 esu_advanced가 오판되므로, 전환을 감지해 esu 기준을 무효화한다.
-    last_ticked_surface_ptr: usize = 0,
+    // [code-review 2] 직전 tick의 활성 surface **id**(포인터 아님 — 닫힌 surface 주소가 재사용되면 ABA로 전환을
+    // 놓쳐 stale 기준이 남는 걸 막는다; Surface.id는 세션-로컬 monotonic·재사용 없음). 활성 surface가 바뀌면 sync
+    // 게이트 baseline(last_rendered_esu·last_rendered_view_offset·sync_hold_ticks — 전부 단일 AppSession 필드인데
+    // 비교 대상은 per-surface)이 이전 surface 것이라, 전환을 감지해 새 surface 기준으로 재설정한다(15166 블록).
+    last_ticked_surface_id: u64 = 0,
     // 테마 섹션에서 사용자가 "사용자 지정"을 명시 선택했는지(런타임 휘발 — 색은 detectThemePreset로 derive하므로 영속
     // 불요). 색이 어떤 프리셋과 우연히 일치해도 이게 true면 프리셋 잠금을 풀어 색·팔레트 행을 편집 가능하게 둔다.
     // 프리셋을 다시 고르거나 reset하면 false로 돌아간다. themePresetActive()의 판정 인자.
@@ -15335,15 +15337,27 @@ pub const AppSession = struct {
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
-        // 활성 surface가 직전 tick과 바뀌었으면 last_rendered_esu 기준이 다른 surface 것이라 esu 비교가 무의미하다
-        // (last_rendered_esu는 단일 AppSession 필드인데 sync_esu_count는 per-surface — code-review [2]). 전환 직후엔
-        // esu 기준을 무효화(0)해 새 surface 기준으로 재시작한다 — 새 surface가 sync를 쓴 적 있으면 esu_advanced가
-        // 참이 돼 전환 직후 완성 프레임을 강제 투영(stale 방지)하고, 안 썼으면 sync_active=false라 metal_dirty로 투영된다.
+        // 활성 surface가 직전 tick과 바뀌면 sync 게이트 baseline 3개(last_rendered_esu·last_rendered_view_offset·
+        // sync_hold_ticks)가 전부 단일 AppSession 필드라 이전 surface 값이 남는다. 비교 대상(sync_esu_count·view_offset·
+        // freeze 경과)은 per-surface이므로, 남은 값이 전환 tick에 진행 중(mid-sync) 프레임을 **강제 투영**시켜 2026이
+        // 숨기려던 clear/half-drawn 중간 상태를 그린다 = 탭 전환 시 화면이 "사라지는" 버그(공유 metal_buffer엔 새 surface의
+        // 완성 프레임이 없어 비워진 grid가 그려진다). 세 강제-투영 경로를 다 막으려면 셋 다 새 surface 기준으로 재설정한다:
+        //   · last_rendered_esu = 현재 esu      → esu_advanced=(esu!=esu)=false  (이전 =0은 (>0!=0)=true로 오투영시켰다)
+        //   · last_rendered_view_offset = 현재  → view_scrolled=(voff!=voff)=false (이전 탭이 스크롤돼 있으면 오투영 [code-review 0/1])
+        //   · sync_hold_ticks = 0              → 새 surface freeze 예산을 0부터    (이전 탭의 만료된 hold 이월 방지 [code-review 2])
+        // 그러면 전환 tick엔 hold 유지(공유 버퍼의 직전 완성 프레임 그대로 — 미완성 안 그림), 새 surface가 ESU로 완성하는
+        // 순간 투영한다(그 surface에 머문 것과 동형). 비-sync surface는 sync_active=false라 metal_dirty로 즉시 투영(stale 없음).
+        // 트레이드오프: mid-sync surface로 전환하면 완성까지 직전 탭 프레임이 잠깐 보인다 — 보통 ≤1 프레임(다음 ESU)이나
+        // 대상 sync가 stall하면 최악 ~1초(syncTimeoutTicks 강제 해제)까지. 지속 blank를 sub-frame~≤1초 잔상으로 바꾸는 순개선.
+        // ⚠️ 밴드에이드(전환마다 특수 리셋): 루트코즈는 이 3개 baseline이 단일 필드인 것(sync_esu_count처럼 per-surface여야
+        // 한다). per-surface로 옮기면 이 리셋 블록과 last_ticked_surface_id 추적이 통째로 불필요해진다 — 별도 후속 대상.
         {
-            const active_ptr = @intFromPtr(self.activeSurface());
-            if (active_ptr != self.last_ticked_surface_ptr) {
-                self.last_rendered_esu = 0;
-                self.last_ticked_surface_ptr = active_ptr;
+            const active_id = self.activeSurface().id;
+            if (active_id != self.last_ticked_surface_id) {
+                self.last_rendered_esu = core_snap.esu;
+                self.last_rendered_view_offset = core_snap.view_offset;
+                self.sync_hold_ticks = 0;
+                self.last_ticked_surface_id = active_id;
             }
         }
         // synchronized output(DECSET 2026): sync 중이면 frame 투영을 멈춘다(metal_dirty는 쌓인 채 유지) — ESU(2026
@@ -29266,6 +29280,177 @@ test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막�
     _ = try session.tick();
     try std.testing.expect(!session.metal_dirty); // 투영됨(예전엔 sync hold로 막혀 metal_dirty가 true로 남았다)
     try std.testing.expectEqual(@as(usize, 2), session.last_rendered_view_offset);
+}
+
+// 탭 전환 sync-게이트 회귀 테스트 공용 스캐폴딩: controlled_smoke 세션을 만들어 tab0을 정착시키고(출력 소진),
+// 둘째 탭을 만들어(→tab1 활성) 정착시킨 뒤 세션을 돌려준다(호출자가 deinit+destroy). tab0 surface는
+// session.tabs.items[0].panes.items[0].terms.items[0].surface로 얻는다. [code-review 5] 네 테스트의 중복 제거.
+fn setupTwoTabsSettled(allocator: std.mem.Allocator) !*AppSession {
+    const session = try allocator.create(AppSession);
+    errdefer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    errdefer session.deinit();
+    var i: usize = 0;
+    while (i < 150) : (i += 1) _ = try session.tick(); // tab0 정착(controlled 출력 소진 → output_events=0)
+    _ = try session.newTab(); // 둘째 탭 → tab1 활성(createTab이 새 탭을 활성으로)
+    std.debug.assert(session.tabs.items.len == 2);
+    i = 0;
+    while (i < 150) : (i += 1) _ = try session.tick(); // tab1 정착
+    return session;
+}
+
+// ── 회귀: 탭 전환 시 mid-sync·완성 프레임 없는(esu==0) surface는 미완성 프레임을 안 그리고 hold한다 ──────
+// 대상 탭이 2026 sync 중이고 ESU로 프레임을 완성한 적이 없으면(sync_esu_count==0), 전환 tick은 공유 buffer의
+// 직전 완성 프레임을 유지한 채 hold한다(미완성/빈 프레임 안 그림 = 화면 소멸 방지). 완성 프레임이 없으니
+// esu-edge로는 못 풀고, sync 게이트를 우회하는 스크롤(view_offset 변화)이나 1초 timeout으로 복구된다.
+// 전환 시 baseline 3개를 새 surface 기준으로 리셋하는 수정에서 esu==0이면 이 hold는 불변이라 수정 전후 모두 통과.
+test "탭 전환: mid-sync·완성없음(esu==0) surface는 미완성 프레임을 안 그리고 hold하며 스크롤/timeout으로 복구된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 CoreText tick 투영 경로
+    const allocator = std.testing.allocator;
+    const session = try setupTwoTabsSettled(allocator);
+    defer {
+        session.deinit();
+        allocator.destroy(session);
+    }
+
+    // tab0을 "2026 sync 진입 + ESU 완성 이력 없음(esu==0)" 상태로: BSU를 열었지만 아직 ESU로 완성하지 않은 순간.
+    const tab0_surface = session.tabs.items[0].panes.items[0].terms.items[0].surface;
+    tab0_surface.core.sync_output = true;
+    tab0_surface.core.sync_esu_count = 0;
+    tab0_surface.core.view_offset = 0;
+    session.sync_hold_ticks = 0;
+
+    try std.testing.expect(session.switchTab(0));
+    try std.testing.expect(session.metal_dirty); // 전환이 재그림을 요청함
+
+    // ★ 전환 후 첫 tick: 새 surface(tab0) 현재 esu=0으로 baseline 리셋 → esu_advanced=(0!=0)=false → sync_blocks=true
+    //   → will_project=false. 완성 프레임이 없어 hold(직전 완성 프레임 유지, 미완성 안 그림). metal_dirty 유지.
+    _ = try session.tick();
+    try std.testing.expect(session.metal_dirty); // ★ held(미완성 프레임 안 그림)
+
+    // timeout 전까지 계속 hold — 완성 프레임이 없어 esu-edge로 자가복구가 안 됨(스크롤 전까진 유지).
+    var k: usize = 0;
+    while (k < 5) : (k += 1) {
+        _ = try session.tick();
+        try std.testing.expect(session.metal_dirty);
+    }
+
+    // 스크롤(view_offset 변경) → view_scrolled가 sync_blocks를 우회 → 투영 → metal_dirty 해제.
+    tab0_surface.core.view_offset = 1; // 스크롤백을 한 줄 위로 본 것 모사
+    _ = try session.tick();
+    try std.testing.expect(!session.metal_dirty); // ★ 스크롤로 복구(전환은 못 풀던 것을 스크롤이 푼다)
+    try std.testing.expectEqual(@as(usize, 1), session.last_rendered_view_offset);
+}
+
+// ── 회귀: 탭 전환 시 mid-sync(esu>0) surface의 진행 중 프레임을 조기 투영하지 않는다(hold 후 ESU에 투영) ──
+// 실제 Claude류 TUI는 완성 프레임 이력이 있어 sync_esu_count>0. 탭 전환의 resizeTabPanes→SIGWINCH가 전체
+// clear+repaint(2026 블록)를 유발하는데, "clear됐고 리페인트 전"인 순간에 전환해도 baseline을 새 surface 현재
+// esu로 리셋(=core_snap.esu)해 esu_advanced=(N!=N)=false → 전환 tick은 hold(진행 중 빈 프레임 안 그림 = 소멸 방지).
+// 새 surface가 ESU로 완성하는 순간 비로소 투영. ⚠️ 예전(=0)엔 esu_advanced=(N!=0)=true로 위조돼 전환 tick에 빈
+// 프레임을 강제 투영했다(소멸 버그) — 그 회귀가 재발하면 아래 "전환 tick=hold" 단언이 깨진다.
+test "탭 전환: mid-sync(esu>0) surface의 진행 중 프레임을 조기 투영하지 않는다(hold 후 ESU 완성 시 투영)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try setupTwoTabsSettled(allocator);
+    defer {
+        session.deinit();
+        allocator.destroy(session);
+    }
+
+    // tab0 = SIGWINCH 후 2026 블록 안에서 화면을 지우고 리페인트 전: ?2J로 grid 비우고 sync 진입, 완성 이력 있음(esu=5).
+    const tab0_surface = session.tabs.items[0].panes.items[0].terms.items[0].surface;
+    tab0_surface.core.write("\x1b[2J\x1b[H") catch {};
+    tab0_surface.core.sync_output = true;
+    tab0_surface.core.sync_esu_count = 5; // 실제 Claude 조건: 이미 완성 프레임 이력 있음(핵심 — esu>0)
+    session.sync_hold_ticks = 0;
+
+    try std.testing.expect(session.switchTab(0));
+    try std.testing.expect(session.metal_dirty);
+
+    // ★ 전환 후 첫 tick: baseline이 tab0 현재 esu(5)라 esu_advanced=(5!=5)=false → sync_blocks=true → hold.
+    //   (예전 =0이면 강제 투영돼 metal_dirty=false = 소멸. 그 회귀를 이 단언이 잡는다.)
+    _ = try session.tick();
+    try std.testing.expect(session.metal_dirty); // ★ hold — 미완성 프레임을 안 그림
+
+    var k: usize = 0;
+    while (k < 5) : (k += 1) {
+        _ = try session.tick();
+        try std.testing.expect(session.metal_dirty);
+    }
+
+    // Claude가 리페인트를 끝내고 ESU로 프레임 완성(sync 해제 + esu 증가) → 이때 비로소 완성 프레임 투영.
+    tab0_surface.core.write("repainted content after the resize redraw") catch {};
+    tab0_surface.core.sync_output = false;
+    tab0_surface.core.sync_esu_count = 6;
+    _ = try session.tick();
+    try std.testing.expect(!session.metal_dirty); // ★ 완성 프레임이 투영됨 — 소멸 없이 새 탭이 뜬다
+}
+
+// ── 회귀: 스크롤된 이전 탭이 있어도 mid-sync surface로 전환 시 view_scrolled로 오투영하지 않는다 [code-review 0/1] ──
+// last_rendered_view_offset은 단일 필드다. 이전 탭을 스크롤백 위로 본 채(offset>0) mid-sync·완성 이력 있는(esu>0)
+// 탭으로 전환하면, view_offset 리셋이 없으면 view_scrolled=(0 != 이전offset)=true가 sync_blocks를 우회해 진행 중
+// (비워진) 프레임을 강제 투영 = 소멸. 수정은 전환 시 last_rendered_view_offset도 새 surface view_offset(0)으로
+// 리셋해 view_scrolled=false로 만든다. 이 vector만 격리하려 esu·hold는 안 걸리게(esu_advanced=false·hold=0) 세팅.
+test "탭 전환: 스크롤된 이전 탭이 있어도 mid-sync surface로 전환 시 view_scrolled로 오투영하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try setupTwoTabsSettled(allocator);
+    defer {
+        session.deinit();
+        allocator.destroy(session);
+    }
+
+    // 이전 활성 탭이 스크롤백 위로 본 채 렌더된 상태 모사(마지막 렌더 offset이 0이 아님).
+    session.last_rendered_view_offset = 5;
+
+    // tab0 = mid-sync(esu>0), 현재 뷰포트는 라이브(view_offset=0).
+    const tab0_surface = session.tabs.items[0].panes.items[0].terms.items[0].surface;
+    tab0_surface.core.write("\x1b[2J\x1b[H") catch {};
+    tab0_surface.core.sync_output = true;
+    tab0_surface.core.sync_esu_count = 5; // esu vector 차단(esu_advanced=false가 되게)
+    tab0_surface.core.view_offset = 0;
+    session.sync_hold_ticks = 0; // hold vector 차단
+
+    try std.testing.expect(session.switchTab(0));
+    _ = try session.tick();
+    // 수정: last_rendered_view_offset을 tab0 view_offset(0)으로 리셋 → view_scrolled=(0!=0)=false → hold.
+    // (리셋 없으면 view_scrolled=(0!=5)=true → 진행 중 프레임 강제 투영 = 소멸.)
+    try std.testing.expect(session.metal_dirty); // ★ hold — 스크롤된 이전 탭 때문에 오투영하지 않음
+}
+
+// ── 회귀: 이월된 sync_hold_ticks가 timeout을 넘겨도 mid-sync surface로 전환 시 오투영하지 않는다 [code-review 2] ──
+// sync_hold_ticks는 단일 필드다. 이전 탭이 mid-sync로 멈춰 hold가 timeout(≈60틱/1초)을 넘긴 채 전환하면, hold
+// 리셋이 없으면 새 탭이 그 만료 예산을 이월받아 sync_blocks=false(hold>=timeout)로 진행 중 프레임을 강제 투영
+// = 소멸. 수정은 전환 시 sync_hold_ticks=0으로 리셋해 새 surface freeze 예산을 0부터 시작한다.
+test "탭 전환: 이월된 sync_hold_ticks가 timeout을 넘겨도 mid-sync surface로 전환 시 오투영하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try setupTwoTabsSettled(allocator);
+    defer {
+        session.deinit();
+        allocator.destroy(session);
+    }
+
+    const tab0_surface = session.tabs.items[0].panes.items[0].terms.items[0].surface;
+    tab0_surface.core.write("\x1b[2J\x1b[H") catch {};
+    tab0_surface.core.sync_output = true;
+    tab0_surface.core.sync_esu_count = 5; // esu vector 차단
+    tab0_surface.core.view_offset = 0;
+
+    // 이전 탭이 mid-sync로 멈춰 hold가 timeout을 넘긴 상황 모사 — 전환이 이 만료 예산을 이월하면 안 된다.
+    session.sync_hold_ticks = session.syncTimeoutTicks() + 5;
+
+    try std.testing.expect(session.switchTab(0));
+    _ = try session.tick();
+    // 수정: 전환 시 sync_hold_ticks=0 리셋 → hold=1 < timeout → sync_blocks=true → hold.
+    // (리셋 없으면 이월된 hold>=timeout이라 sync_blocks=false → 진행 중 프레임 강제 투영 = 소멸.)
+    try std.testing.expect(session.metal_dirty); // ★ hold — 이월된 hold 예산으로 오투영하지 않음
 }
 
 test "chrome_minimal session suppresses the pane tab bar and the sidebar" {

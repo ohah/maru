@@ -112,7 +112,8 @@ const nav_button_w: u16 = 3; // 버튼당 셀 수
 const nav_button_count: u16 = 3; // back·forward·reload
 
 /// Phase 7e-3: 주소창 nav 버튼 식별. web_nav_action_code로 마샬링(0=back·1=forward·2=reload) — ABI take와 정합.
-const NavButton = enum { back, forward, reload };
+/// pub: 7e-4 키보드 단축키 ABI(maru_macos_app_session_browser_nav)가 code→NavButton으로 변환해 setBrowserNavAction을 부른다.
+pub const NavButton = enum { back, forward, reload };
 
 /// Phase 7e-3: 밴드 좌표(band_x px) 기준 x_px가 어느 nav 버튼 존인가(URL 존이면 null). cell = floor((x_px-band_x)/cw),
 /// cell < nav_button_count*nav_button_w면 그 버튼(cell/nav_button_w), 아니면 null(=URL 존 → 편집 진입). cw==0·비유한·
@@ -139,7 +140,12 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 106;
+pub const abi_version: u32 = 107;
+// 107: Phase 7e-4 — 주소창 nav 버튼 키보드 단축키(browser 포커스 한정 Cmd+←/→/R) export 1개(browser_nav). Swift
+// performKeyEquivalent가 panelKind==browser일 때 Cmd+←/→/R을 code(0/1/2)로 마샬링해 이 함수를 부르면, Zig가
+// setBrowserNavAction(클릭 ①b와 공유하는 활성 판정 단일 정책)으로 web_nav_action_pending을 세우고 같은 tick의
+// take_web_nav_action drain이 BrowserControl을 실행한다(클릭 경로 완전 재사용). hover 커서·하이라이트는 ABI 무관
+// (Zig hoverCursor·렌더 "1c"). 신규 export만 — 구조체 offset·인자 순서 불변. docs/web-panel.md.
 // 106: Phase 7e-3 — 주소창 nav 버튼(back/forward/reload) 클릭 신호 export 1개(take_web_nav_action). 밴드 좌측 버튼 존
 // (navButtonAt 단일 소스) 클릭이 활성 버튼일 때 세운 1회성 pending(surface_id + code 0=back·1=forward·2=reload)을 Swift가
 // tick drain해 BrowserControl.goBack/goForward/reload(webView)로 실행한다(take_web_addr_focus_restore 패턴). 신규 export만 —
@@ -1086,6 +1092,10 @@ fn classifyAgent(name: ?[]const u8) AgentKind {
 /// 이라 포인터가 안정이고, 닫기 등으로 Pane이 사라지면 호출자가 hovered_tab을 null로 비운다.
 const TabRef = struct { pane: *Pane, tab: usize };
 const ScrollRef = struct { pane: *Pane, right: bool }; // #5b: 호버 중인 가로 스크롤 버튼(어느 pane의 ‹=false/›=true)
+/// Phase 7e-4: 호버 중인 browser 주소창 nav 버튼(어느 web surface의 back/forward/reload 존). pane 포인터가 아니라
+/// surface_id로 잡는다 — 렌더 "1c"가 이 surface의 밴드를 그릴 때 자기 버튼 존만 하이라이트하게(TabRef가 pane로 잡는 것과
+/// 대칭이되, 밴드는 surface 단위라 surface_id 키가 자연스럽다). hovered_tab처럼 마우스 이동으로만 갱신되는 transient.
+const NavButtonRef = struct { surface_id: u64, button: NavButton };
 
 /// 인라인 rename 중인 대상(어느 계층의 어느 라이브 객체). 커밋 시 그 객체의 custom_name을 쓴다. 모두 heap-pin
 /// 포인터(*Tab/*Pane/*Term)라 ArrayList realloc·트리 회전에도 안정 — 단 그 객체가 teardown(close/exit/reap)으로
@@ -1696,6 +1706,10 @@ pub const AppSession = struct {
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
     hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
+    // Phase 7e-4: 마우스가 호버 중인 browser 주소창 nav 버튼(없으면 null). hoverCursor가 밴드 버튼 존이면 세우고(그 위면
+    // pointingHand), 렌더 "1c"가 이 surface·이 버튼 존에 hover 배경 quad를 그려 클릭 영역(3칸)을 드러낸다("버튼이 작아
+    // affordance 부족" 피드백). hovered_tab과 같은 transient — 트리/탭 변경 시 함께 null로 정리(stale 하이라이트 방지).
+    hovered_nav_button: ?NavButtonRef = null,
     // 호버 중인 헤더 아이콘 영역(◧ toggle·⚙ view_options·+ new_workspace). 마우스가 그 아이콘 위면 rebuildSidebar가
     // 아이콘 뒤에 둥근 호버 배경(웹 버튼 hover처럼)을 그린다. 검색·빈 영역·아이콘 밖이면 null. 바뀔 때만 재빌드.
     hovered_header_region: ?chrome.components.sidebar.HeaderRegion = null,
@@ -3110,6 +3124,7 @@ pub const AppSession = struct {
         // src에서 임의 위치(src_idx)를 뺐으니 활성 인덱스를 시프트 보정한다(단일 출처) — 비면(아래 collapse) 0 무의미.
         src.active_term = if (src.terms.items.len == 0) 0 else activeIndexAfterRemoval(src.active_term, src_idx, src.terms.items.len);
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
+        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
         if (src.terms.items.len == 0) self.collapsePaneIn(tab, src); // src가 비면 collapse(removeLeaf)
         // 4) 새 pane으로 포커스 + 대표 surface 재바인딩 + 전 panel을 새 leaf rect grid로 resize + 좌표 재계산.
         _ = self.focusPaneByPtr(new_pane);
@@ -3305,6 +3320,7 @@ pub const AppSession = struct {
         dst.active_term = idx; // 옮긴 Term을 dst의 활성으로
 
         self.hovered_tab = null; // 트리/탭이 바뀌니 stale 호버 비움
+        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
         if (src.terms.items.len == 0) self.collapsePane(src); // 마지막 Term이 나갔으면 src collapse(형제로)
 
         // dst를 활성 pane으로(collapse로 인덱스가 밀렸을 수 있어 다시 찾는다) + 대표 surface 재바인딩.
@@ -3390,6 +3406,7 @@ pub const AppSession = struct {
         // 2) infallible: src에서 pane을 떼고(형제로 collapse) src 대표 surface를 새 활성 Term으로 재바인딩.
         _ = self.detachPaneFromTab(src_tab, pane); // len>1 확인했으므로 true
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
+        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
         self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
         // 3) 새 Tab에 pane을 단일 leaf로 심고 tabs/surface_ptrs에 끼워 활성으로. **끝 append가 아니라 첫 group_start
         //    마커 직전**(= 최상위 구간 끝)에 넣는다 — §2.1 연속 파티션상 리스트 끝 탭은 그룹이 하나라도 있으면 항상
@@ -3448,6 +3465,7 @@ pub const AppSession = struct {
         // 3) infallible: src에서 떼고(형제로 collapse) 두 탭 대표 surface 재바인딩 + target.panes에 pane 추가.
         _ = self.detachPaneFromTab(src_tab, pane);
         self.hovered_tab = null;
+        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
         self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
         target_tab.panes.appendAssumeCapacity(pane);
         target_tab.active_pane = target_tab.panes.items.len - 1;
@@ -3590,6 +3608,7 @@ pub const AppSession = struct {
         self.app_window.tabs = self.surface_ptrs.items;
         self.resizeTabPanes(tab);
         self.hovered_tab = null; // 트리/탭 변경 — stale 호버 정리
+        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리(stale 하이라이트 방지)
         if (tab_index == self.app_window.active_tab) {
             self.recomputeActivePaneRect();
             self.metal_dirty = true;
@@ -4086,6 +4105,7 @@ pub const AppSession = struct {
         if (self.hovered_tab) |ht| {
             if (ht.pane == pane) self.hovered_tab = null;
         }
+        self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버는 transient(surface_id 키) — pane 해제 시 보수적으로 비운다(다음 이동이 재설정)
         if (self.tab_drag_pane == pane) {
             self.tab_drag_pane = null;
             self.tab_drag_active = false; // 드래그 대상이 사라졌으니 제스처 중단(다음 mouse-up은 no-op)
@@ -7352,6 +7372,28 @@ pub const AppSession = struct {
     /// (ABI getter가 즉시 out 버퍼로 복사). 7e-1b 주소창 소비.
     pub fn webNavState(self: *AppSession, surface_id: u64) ?WebNavState {
         return self.web_nav_states.get(surface_id);
+    }
+
+    /// Phase 7e-3/7e-4: browser 주소창 nav 버튼(back/forward/reload)을 눌러(밴드 클릭 ①b 또는 키보드 단축키 ABI) 이
+    /// surface의 nav action을 세운다 — **활성 버튼일 때만**(back=can_go_back·forward=can_go_forward·reload=항상). 활성이면
+    /// 1회성 pending(surface_id + code 0=back·1=forward·2=reload)을 세우고 metal_dirty. Swift가 매 tick takeWebNavAction으로
+    /// drain해 BrowserControl.goBack/goForward/reload를 실행한다. 클릭(①b)과 키보드(ABI browser_nav)가 이 단일 정책을
+    /// 공유해 "보이는 활성 == 실행되는 액션"이 두 경로에서 동일하다(활성 판정 중복 제거).
+    pub fn setBrowserNavAction(self: *AppSession, surface_id: u64, btn: NavButton) void {
+        const nav_state = self.webNavState(surface_id);
+        const active = switch (btn) {
+            .back => if (nav_state) |st| st.can_go_back else false,
+            .forward => if (nav_state) |st| st.can_go_forward else false,
+            .reload => true, // reload = 항상 활성
+        };
+        if (!active) return; // 비활성 버튼은 no-op(클릭은 소비하되 pending 안 세움 — 호출처가 소비)
+        self.web_nav_action_pending = surface_id;
+        self.web_nav_action_code = switch (btn) {
+            .back => 0,
+            .forward => 1,
+            .reload => 2,
+        };
+        self.metal_dirty = true;
     }
 
     // ── Phase 7e-2a: browser 웹 패널 주소창 편집 상태·라우팅·신호(정책·상태=Zig, 실행=7e-2b Swift) ──────────────
@@ -11434,6 +11476,7 @@ pub const AppSession = struct {
                         self.focusTerm(tab); // 그 pane의 클릭한 Term으로(같으면 무동작)
                         if (on_close) {
                             self.hovered_tab = null; // 닫으면 Pane/Term이 바뀔 수 있으니 stale 호버 비움
+                            self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
                             // 위에서 focusPaneByPtr+focusTerm로 클릭한 Term을 활성으로 만든 뒤라, 활성 cascade로 닫는다.
                             self.requestClose(.term_or_pane); // 실행 중 명령 있으면 확인 모달(없으면 즉시 닫음)
                         } else {
@@ -11463,25 +11506,10 @@ pub const AppSession = struct {
                             if (layout_math.pointInRect(x_px, y_px, band)) {
                                 _ = self.focusPaneByPtr(lr.leaf); // 다른 pane이면 포커스 이동(같으면 무동작)
                                 // 버튼 존(navButtonAt)이면 nav action. 렌더가 존 가운데 칸에 그린 것과 같은 nav_button_w/count 단일 소스라
-                                // 보이는 버튼 == 클릭되는 버튼. 활성 버튼만 pending을 세운다(비활성 버튼은 클릭만 소비 — 편집 진입 안 함).
+                                // 보이는 버튼 == 클릭되는 버튼. 활성 판정·pending 세움은 setBrowserNavAction 단일 정책(키보드 단축키 7e-4와
+                                // 공유) — 비활성 버튼은 no-op(클릭만 소비, 편집 진입 안 함).
                                 if (navButtonAt(x_px, band.x, self.cell_width_px)) |btn| {
-                                    const nav_state = self.webNavState(addr_term.surfaceId());
-                                    const can_back = if (nav_state) |st| st.can_go_back else false;
-                                    const can_fwd = if (nav_state) |st| st.can_go_forward else false;
-                                    const active = switch (btn) {
-                                        .back => can_back,
-                                        .forward => can_fwd,
-                                        .reload => true, // reload = 항상 활성
-                                    };
-                                    if (active) {
-                                        self.web_nav_action_pending = addr_term.surfaceId();
-                                        self.web_nav_action_code = switch (btn) {
-                                            .back => 0,
-                                            .forward => 1,
-                                            .reload => 2,
-                                        };
-                                        self.metal_dirty = true;
-                                    }
+                                    self.setBrowserNavAction(addr_term.surfaceId(), btn);
                                     self.drag_autoscroll = 0;
                                     self.mouse_drag_selecting = false;
                                     return;
@@ -12728,6 +12756,10 @@ pub const AppSession = struct {
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
         self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
+        // Phase 7e-4: browser 주소창 밴드 nav 버튼 호버도 매 이동 갱신한다(스크롤바 호버처럼 아래 early return 전에 항상 —
+        // 사이드바/탭 바로 나가면 밴드 밖이라 null이 되어 stale 하이라이트가 안 남는다). 밴드는 chrome 영역이라 어느
+        // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
+        self.setHoveredNavButton(self.navButtonHoverAt(x_px, y_px));
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -12792,6 +12824,13 @@ pub const AppSession = struct {
             self.clearHoverUrlAnchor();
             // 좌측 grip+라벨 = 드래그 손잡이 → openHand(grab), 그 외 탭/‹›/+/pane 포커스 = 클릭 가능 → pointingHand.
             return if (bar_hover == .grip) .grab else .link;
+        }
+        // Phase 7e-4: browser 주소창 밴드 nav 버튼 존(back/forward/reload) 위면 클릭 가능 → pointingHand. 밴드는 탭 바
+        // 바로 아래 chrome 영역이라 탭 바 검사 뒤·divider/터미널 검사 앞(클릭 ①b 우선순위와 동일). hovered_nav_button은
+        // 위(스크롤바 옆)에서 이미 갱신됐다 — URL 존(버튼 아님)은 null이라 아래로 흘러 text/기본(편집 클릭이라 iBeam 적절).
+        if (self.hovered_nav_button != null) {
+            self.clearHoverUrlAnchor();
+            return .link;
         }
         // divider 밴드 위면 리사이즈 커서(클릭과 같은 dividerAtPoint — 탭 바 다음 순서). 단일 panel이면 null.
         if (self.dividerAtPoint(x_px, y_px)) |hit| {
@@ -15533,6 +15572,30 @@ pub const AppSession = struct {
                             const nav_state = self.webNavState(addr_term.surfaceId());
                             const can_back = if (nav_state) |st| st.can_go_back else false;
                             const can_fwd = if (nav_state) |st| st.can_go_forward else false;
+                            // Phase 7e-4: 이 surface의 nav 버튼을 호버 중이고 그 버튼이 **활성**이면 그 3칸 존에 hover 배경 quad를
+                            // 얹는다(밴드 배경 위·글리프 아래 = 같은 layer 2, 나중 append라 위). 클릭 영역(3칸)이 드러나 "버튼이 작아
+                            // affordance 부족" 피드백을 완화한다. 활성 게이트(can_back/can_fwd·reload=항상)라 클릭 no-op 버튼은 강조
+                            // 안 함(활성만이 더 정확 — 커서 .link는 존 전체지만 하이라이트는 실제 동작하는 버튼만). 색은 탭 ‹›/슬롯
+                            // 호버와 같은 sidebarHoverBg(중간 톤). nav_button_w/count는 hit-test·글리프와 같은 단일 소스.
+                            if (self.hovered_nav_button) |hnb| {
+                                if (hnb.surface_id == addr_term.surfaceId()) {
+                                    const hover_active = switch (hnb.button) {
+                                        .back => can_back,
+                                        .forward => can_fwd,
+                                        .reload => true,
+                                    };
+                                    if (hover_active) {
+                                        const idx: u32 = switch (hnb.button) {
+                                            .back => 0,
+                                            .forward => 1,
+                                            .reload => 2,
+                                        };
+                                        const zone_w: u32 = @as(u32, nav_button_w) * self.cell_width_px;
+                                        const hover_rect: maru.session.SplitRect = .{ .x = band_rect.x + idx * zone_w, .y = band_rect.y, .w = zone_w, .h = band_rect.h };
+                                        self.appendBarBgQuad(hover_rect, self.chromeQuadBg(self.sidebarHoverBg()));
+                                    }
+                                }
+                            }
                             // 편집 중이면 확정 텍스트(query) + IME 조합(preedit)을 이어 그린다(조합 중 한글이 보이게). 읽기전용이면
                             // nav URL. disp_buf는 렌더 임시(query 실질<4096·preedit<256). 초과분은 잘라도 tail 앵커라 끝이 보인다.
                             var disp_buf: [addr_nav_url_cap + 512]u8 = undefined;
@@ -16097,6 +16160,7 @@ pub const AppSession = struct {
     fn clearAllHover(self: *AppSession) void {
         self.setHoveredSlot(null);
         self.setHoveredTab(null);
+        self.setHoveredNavButton(null); // Phase 7e-4: 밴드 nav 버튼 호버(모달/알림 패널 열림 시 stale 하이라이트 방지)
         self.setHoveredHeaderRegion(.none);
         self.setHoveredCollapsedToggle(false);
         self.setScrollbarHovered(false);
@@ -16144,6 +16208,47 @@ pub const AppSession = struct {
         self.setHoveredTab(next);
         self.setHoveredScroll(next_scroll);
         return if (on_grip) .grip else if (on_bar) .tabs else .none;
+    }
+
+    /// Phase 7e-4: 점이 어느 pane의 browser 주소창 밴드 nav 버튼 존이면 그 (surface_id, 버튼)을, 아니면 null. 밴드는
+    /// 탭 바(pb.full) 바로 아래(y=pb.full.y+bar_h, 높이=bar_h)이고 그 pane의 **활성 탭이 browser web Term**일 때만 존재한다
+    /// (클릭 ①b·렌더 "1c"와 같은 소스). 존 판정은 navButtonAt(단일 소스) — 활성/비활성 무관하게 버튼 존이면 반환한다
+    /// (커서 .link는 클릭 가능해 보이면 되고, 하이라이트 활성 게이트는 렌더가 can_go_* 로 따로 판정). hoverCursor가 매
+    /// 이동 호출해 hovered_nav_button을 갱신한다. updateHoveredTab과 같은 재사용 scratch(hover_leaf_scratch)를 쓴다 —
+    /// 반환은 값(surface_id·enum)이라 leaf_rects 재사용으로 무효화되지 않는다.
+    fn navButtonHoverAt(self: *AppSession, x_px: f64, y_px: f64) ?NavButtonRef {
+        if (self.cell_width_px == 0) return null;
+        const leaf_rects = &self.hover_leaf_scratch;
+        leaf_rects.clearRetainingCapacity();
+        if (self.activeTabLeafRects(self.allocator, self.termRect(), leaf_rects)) |_| {
+            for (leaf_rects.items) |lr| {
+                const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
+                const at = lr.leaf.active_term;
+                if (at >= lr.leaf.terms.items.len) continue;
+                const term = lr.leaf.terms.items[at];
+                if (term.kind != .web or term.web_panel_kind != .browser) continue; // browser 활성 탭만 밴드가 있다
+                const bar_h = pb.full.h; // 밴드 높이 = 탭 바 높이(①b·"1c"와 동일 소스)
+                const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
+                if (!layout_math.pointInRect(x_px, y_px, band)) continue;
+                if (navButtonAt(x_px, band.x, self.cell_width_px)) |btn| {
+                    return .{ .surface_id = term.surfaceId(), .button = btn };
+                }
+                return null; // 밴드 안이지만 URL 존(버튼 아님) — 다른 pane엔 밴드가 없으니 조기 종료
+            }
+        } else |_| {}
+        return null;
+    }
+
+    /// Phase 7e-4: 호버 중인 nav 버튼을 갱신한다. 바뀌면 재드로우(렌더 "1c" hover 배경 quad 추가/제거). 같으면 무동작
+    /// (호버 안 움직임 dedup — setHoveredTab 동형).
+    fn setHoveredNavButton(self: *AppSession, next: ?NavButtonRef) void {
+        const same = (self.hovered_nav_button == null and next == null) or
+            (self.hovered_nav_button != null and next != null and
+                self.hovered_nav_button.?.surface_id == next.?.surface_id and
+                self.hovered_nav_button.?.button == next.?.button);
+        if (same) return;
+        self.hovered_nav_button = next;
+        self.metal_dirty = true;
     }
 
     fn usizeOptEql(a: ?usize, b: ?usize) bool {
@@ -26466,6 +26571,86 @@ test "takeWebNavAction: 활성 버튼 클릭이 세운 pending을 1회 drain + t
     try std.testing.expectEqual(@as(?u64, 11), session.web_nav_action_pending);
     session.dropAddrEditIfSurface(11); // 대상 → 정리
     try std.testing.expect(session.web_nav_action_pending == null);
+}
+
+test "setBrowserNavAction: 활성 버튼만 pending을 세운다 (7e-3 클릭·7e-4 키보드 공유 정책, 헤드리스)" {
+    // web_nav_states(활성 판정) + web_nav_action_pending/code/metal_dirty만 만지므로 minimal init로 충분
+    // ([[devsession-undefined-test-field-trap]]). testing.allocator가 url 누수를 검출한다.
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.web_nav_states = .empty;
+    session.web_nav_action_pending = null;
+    session.web_nav_action_code = 0;
+    session.metal_dirty = false;
+    defer {
+        var it = session.web_nav_states.valueIterator();
+        while (it.next()) |v| session.allocator.free(v.url);
+        session.web_nav_states.deinit(session.allocator);
+    }
+
+    // 42: can_go_back=true, can_go_forward=false.
+    session.setWebNavState(42, true, false, "https://a/");
+
+    // reload는 nav 상태 무관 항상 활성 → pending=42·code=2·metal_dirty.
+    session.setBrowserNavAction(42, .reload);
+    try std.testing.expectEqual(@as(?u64, 42), session.web_nav_action_pending);
+    try std.testing.expectEqual(@as(u8, 2), session.web_nav_action_code);
+    try std.testing.expect(session.metal_dirty);
+
+    // back: can_go_back=true → 활성 → code=0.
+    session.web_nav_action_pending = null;
+    session.web_nav_action_code = 9;
+    session.setBrowserNavAction(42, .back);
+    try std.testing.expectEqual(@as(?u64, 42), session.web_nav_action_pending);
+    try std.testing.expectEqual(@as(u8, 0), session.web_nav_action_code);
+
+    // forward: can_go_forward=false → 비활성 → no-op(pending·code 불변, 클릭도 소비만).
+    session.web_nav_action_pending = null;
+    session.web_nav_action_code = 9;
+    session.setBrowserNavAction(42, .forward);
+    try std.testing.expect(session.web_nav_action_pending == null);
+    try std.testing.expectEqual(@as(u8, 9), session.web_nav_action_code);
+
+    // nav 상태 없는 surface: back(비활성) no-op, reload(항상 활성)만 세운다.
+    session.web_nav_action_pending = null;
+    session.setBrowserNavAction(999, .back);
+    try std.testing.expect(session.web_nav_action_pending == null);
+    session.setBrowserNavAction(999, .reload);
+    try std.testing.expectEqual(@as(?u64, 999), session.web_nav_action_pending);
+    try std.testing.expectEqual(@as(u8, 2), session.web_nav_action_code);
+}
+
+test "setHoveredNavButton: surface_id·버튼이 바뀔 때만 metal_dirty (dedup, 7e-4 헤드리스)" {
+    // hovered_nav_button/metal_dirty만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.hovered_nav_button = null;
+    session.metal_dirty = false;
+
+    // null → {42, back}: 변화 → dirty.
+    session.setHoveredNavButton(.{ .surface_id = 42, .button = .back });
+    try std.testing.expect(session.metal_dirty);
+    try std.testing.expect(session.hovered_nav_button != null);
+
+    // 같은 값 재설정: 무동작(dedup — dirty 안 세워짐).
+    session.metal_dirty = false;
+    session.setHoveredNavButton(.{ .surface_id = 42, .button = .back });
+    try std.testing.expect(!session.metal_dirty);
+
+    // 다른 버튼(같은 surface): 변화 → dirty.
+    session.setHoveredNavButton(.{ .surface_id = 42, .button = .forward });
+    try std.testing.expect(session.metal_dirty);
+
+    // 다른 surface(같은 버튼): 변화 → dirty.
+    session.metal_dirty = false;
+    session.setHoveredNavButton(.{ .surface_id = 7, .button = .forward });
+    try std.testing.expect(session.metal_dirty);
+
+    // → null: 변화 → dirty.
+    session.metal_dirty = false;
+    session.setHoveredNavButton(null);
+    try std.testing.expect(session.metal_dirty);
+    try std.testing.expect(session.hovered_nav_button == null);
 }
 
 test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 공유해 충돌하지 않는다" {

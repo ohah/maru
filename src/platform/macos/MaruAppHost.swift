@@ -919,6 +919,26 @@ final class MaruWebPanelView: NSView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard controller?.isWebPanelFocused(self) == true else { return false }
         guard event.modifierFlags.contains(.command) else { return false }
+        // Phase 7e-4: browser 패널 nav 단축키(⌘←=back·⌘→=forward·⌘R=reload) — isWebPanelAppChord보다 **먼저**, panelKind==
+        // browser(1)일 때만. 이 override는 **웹 패널 포커스 중에만** 타므로(터미널 포커스면 이 메서드가 안 불림), ⌘←/→는
+        // 터미널의 커서 매크로로 회귀하지 않는다(글로벌 바인딩 금지 이유). 화살표는 keyCode(123 ←·124 →)로, R은 레이아웃
+        // 무관하게 charactersIgnoringModifiers로 판정한다. 실행은 controller.dispatchBrowserNav → Zig setBrowserNavAction
+        // (클릭 ①b와 공유하는 활성 판정) → take_web_nav_action drain → BrowserControl. 소비(true)해 WebKit 기본 동작 차단.
+        if panelKind == 1 {
+            let navCode: UInt32? = {
+                switch event.keyCode {
+                case 123: return 0 // ← back
+                case 124: return 1 // → forward
+                default:
+                    if event.charactersIgnoringModifiers?.lowercased() == "r" { return 2 } // R reload
+                    return nil
+                }
+            }()
+            if let code = navCode {
+                controller?.dispatchBrowserNav(surfaceId, code)
+                return true
+            }
+        }
         guard controller?.isWebPanelAppChord(self, event) == true else { return false }
         controller?.handleWebPanelChord(event)
         return true
@@ -1654,6 +1674,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func handleWebPanelChord(_ event: NSEvent) {
         handleKeyDown(event)
         reconcileWebModalFocus()
+    }
+
+    // Phase 7e-4: browser 패널 nav 단축키(⌘←/→/R)를 Zig 코어로 전달한다(performKeyEquivalent에서 code 마샬링 후 호출).
+    // 정책(활성 판정·pending)은 Zig setBrowserNavAction, 실행은 그 세션 tick의 take_web_nav_action drain(클릭 경로 재사용).
+    // **소유 창(surface)의 세션**에 세운다 — drain이 그 세션 tick에서 돌기 때문(멀티 창 오라우팅 방지, surfaceOwning과
+    // 같은 규율이되 surface_id 키로 조회). 못 찾으면 활성 세션 폴백(isWebPanelAppChord의 `?? appSession`과 대칭).
+    func dispatchBrowserNav(_ surfaceId: UInt64, _ code: UInt32) {
+        let owner = windows.first(where: { $0.webPanels[surfaceId] != nil })
+            ?? (quick?.webPanels[surfaceId] != nil ? quick : nil)
+        guard let session = owner?.appSession ?? appSession else { return }
+        _ = maru_macos_app_session_browser_nav(session, surfaceId, code)
     }
 
     // 웹 패널 포커스 ↔ 모달 responder 전이를 anyOverlayOpen 엣지로 조정한다(renderTick 매 tick + 웹 조합 직후 동기

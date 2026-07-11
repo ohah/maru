@@ -708,10 +708,11 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
 // MARK: - Phase 5d: browser.* 제어 코어 (WKWebView API 실행 — L4 어댑터)
 //
 // control-plane.md §9.1 ④의 제어 코어를 실 WKWebView API로 채운다. web surface의 webView를 받아 §9 매핑대로 호출만
-// 한다(라우팅·매핑·wire는 Zig control_browser). **정책=Zig, 어댑터=Swift**. 5d 범위=핵심 3개(navigate=`load`,
-// getUrl=`.url`, executeScript=`evaluateJavaScript`). screenshot/back/forward/… 는 후속. **라이브 배선(외부 소켓 →
-// dispatchBrowser → 이 코어를 main-loop async marshal로 연결)은 1e(browser capability 발급)·async marshal 확장 대기**
-// (§8.5 browser=기본거부·fd상속 발급 금지) — 5d는 이 코어를 **fixture E2E**(smoke가 browser 패널을 직접 구동)로 확립한다.
+// 한다(라우팅·매핑·wire는 Zig control_browser). **정책=Zig, 어댑터=Swift**. 핵심 3개(navigate=`load`, getUrl=`.url`,
+// executeScript=`evaluateJavaScript`); screenshot/back/forward/… 는 5f 후속. **라이브 배선 완료(5e-2b)**: 인가된 소켓
+// browser.* 요청이 dispatchAuthenticated→browserOpFromRequest→§5-async marshal→Zig op 큐→`drainBrowserOps`가 매 tick
+// 이 코어를 구동→completion서 complete_browser_op으로 응답한다(§8.5 browser=기본거부·실 cap 발급은 1e-confirm 후속,
+// 현재는 test-only 주입). 5d fixture(smoke가 browser 패널을 직접 구동)는 이 코어를 라이브 배선 전 de-risk한 토대다.
 enum BrowserControl {
     // browser.navigate → load(URLRequest). 유효 URL이면 로드 시작(완료는 navigationDelegate didFinish, async)하고 true.
     @MainActor static func navigate(_ webView: WKWebView, url: String) -> Bool {
@@ -742,11 +743,17 @@ enum BrowserControl {
     // 5e-2b-2: `executeScript` 반환값(evaluateJavaScript 결과, 불투명 Any)을 응답에 실을 **문자열**로 바꾼다. Zig
     // serializeBrowserResponse가 이 문자열을 `{"result":{"result":<문자열>}}`로 싣는다(진짜 JSON 값 embed는 후속 —
     // §9.3 ⑥ "스크립트 반환값을 문자열로"). 컨트롤 플레인 계약은 Zig, 여긴 WKWebView 값→문자열 매핑 어댑터만.
-    // 매핑: 문자열=그대로, 숫자/불리언=NSNumber description, null/undefined(NSNull)=빈 문자열, 그 외(배열·객체)=description.
+    // 매핑: 문자열=그대로, 불리언="true"/"false", 숫자=NSNumber description, null/undefined(NSNull)=빈 문자열, 그 외(배열·객체)=description.
     @MainActor static func scriptResultString(_ value: Any) -> String {
         if value is NSNull { return "" }
         if let s = value as? String { return s }
-        if let n = value as? NSNumber { return n.stringValue }
+        if let n = value as? NSNumber {
+            // JS boolean(__NSCFBoolean)은 NSNumber 하위형이라 `as? NSNumber`가 먼저 잡는다 → boolean을 여기서 먼저
+            // 가려내지 않으면 true/false가 "1"/"0"으로 나와 숫자 1/0과 구분 불가(에이전트가 페이지 boolean 상태 오독,
+            // 17차 리뷰 [0]). CFBooleanGetTypeID로 진짜 boolean만 "true"/"false"로, 나머지 숫자는 stringValue.
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
+            return n.stringValue
+        }
         return String(describing: value)
     }
 }
@@ -768,27 +775,36 @@ private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonce
     let navResp = browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: navReq)
     let navigateOk: String
     switch navResp {
-    case .ok(let line): navigateOk = line.contains("\"ok\":true") ? "true" : "unexpected:\(line.prefix(120))"
+    case .ok(let line): navigateOk = (browserCtlResult(line)?["ok"] as? Bool == true) ? "true" : "unexpected:\(line.prefix(120))"
     case .err(let why): navigateOk = why
     }
 
-    // navigate는 async(load 시작만) — data: URL이 커밋될 시간을 잠깐 준 뒤 **새 연결**로 getUrl로 실제 이동을 확인.
-    Thread.sleep(forTimeInterval: 0.4)
+    // navigate는 async(load 시작만)라 data: URL 커밋을 **폴링**으로 기다린다(고정 sleep 대신 — 17차 [4]: 부하 시
+    // false-negative 제거). 매 시도 새 연결로 getUrl을 보내 result.url이 채워지면 종료(최대 ~1.8s). 빈 문자열=아직
+    // 커밋 전이라 재시도, 소켓 실패/형식 오류는 즉시 접는다(재시도 무의미).
     let getUrlReq = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.getUrl\",\"params\":{\"id\":\(sid)}}"
-    var getUrl: String
-    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: getUrlReq) {
-    case .ok(let line):
-        // 응답 `{"result":{"url":"<url>"}}`에서 url 추출(간단 스캔 — 테스트 진단용).
-        if let r = line.range(of: "\"url\":\"") {
-            let rest = line[r.upperBound...]
-            getUrl = rest.firstIndex(of: "\"").map { String(rest[..<$0]) } ?? "unexpected:\(line.prefix(120))"
-        } else {
-            getUrl = "unexpected:\(line.prefix(120))"
+    var getUrl = "pending"
+    for attempt in 0 ..< 12 {
+        if attempt > 0 { Thread.sleep(forTimeInterval: 0.15) }
+        switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: getUrlReq) {
+        case .ok(let line):
+            guard let url = browserCtlResult(line)?["url"] as? String else { return (navigateOk, "unexpected:\(line.prefix(120))") }
+            if !url.isEmpty { return (navigateOk, url) }
+            getUrl = url // 빈 = 아직 커밋 전 → 재시도
+        case .err(let why):
+            return (navigateOk, why)
         }
-    case .err(let why):
-        getUrl = why
     }
     return (navigateOk, getUrl)
+}
+
+// 5e-2b-2(테스트 전용): JSON-RPC 응답 한 줄에서 `result` 객체를 파싱한다(hand-rolled 문자열 스캔 대신 — 17차 [5]:
+// escape 따옴표 있는 URL도 정확). 파싱 불가·result 없음이면 nil.
+private func browserCtlResult(_ line: String) -> [String: Any]? {
+    guard let data = line.data(using: .utf8),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let result = obj["result"] as? [String: Any] else { return nil }
+    return result
 }
 
 private enum BrowserCtlReqResult { case ok(String); case err(String) }

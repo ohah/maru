@@ -1429,6 +1429,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard tickTimer != nil, let session = activeSurface?.appSession else { return .terminateNow }
         quitConfirmPending = true
         maru_macos_app_session_request_app_quit(session) // 항상 모달(실행 중 명령 무관)
+        // ⌘Q는 시스템 메뉴 keyEquivalent 경로라 maru keyDown/performKeyEquivalent를 안 거친다 — 브라우저 web 패널이
+        // firstResponder를 쥔 채면 첫 Enter가 아직 WKWebView로 샐 수 있으므로, 모달을 연 즉시 터미널로 포커스를 전이한다
+        // (다음 renderTick의 self-heal reconcile까지 안 기다림 — handleWebPanelChord의 동기 reconcile과 같은 규율).
+        reconcileWebModalFocus()
         return .terminateLater
     }
 
@@ -1694,19 +1698,29 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func reconcileWebModalFocus() {
         guard let surface = activeSurface, let window = surface.window else { return }
         let open = anyOverlayOpen
+        let wasOpen = surface.lastOverlayOpen
         // 엣지 기록(defer)은 webPanels 유무와 무관하게 항상 한다 — 모달이 열린 채 마지막 web 패널이 파괴돼도
         // lastOverlayOpen이 갱신되게 해, 다음에 web 패널이 다시 생겼을 때 stale 엣지로 전이가 stuck되지 않는다.
         defer { surface.lastOverlayOpen = open }
         guard !surface.webPanels.isEmpty else { surface.stashedWebFocusSurfaceId = nil; return } // 패널 없으면 stale stash 정리
-        guard open != surface.lastOverlayOpen else { return } // 엣지에서만
         if open {
-            // 모달이 열렸다 — 포커스된 web Term이 있으면 터미널 뷰로 전이(모달 입력·IME preedit가 터미널로). 복원용 id 저장.
-            if let focused = surface.webPanels.values.first(where: { isWebPanelFocused($0) }) {
-                surface.stashedWebFocusSurfaceId = focused.surfaceId
+            // 최상위 규율: 모달(확인·종료·팔레트·찾기·설정)이 열려 있는 동안 입력은 반드시 터미널 뷰로 가야 한다 — 모달은
+            // Zig가 오버레이 레이어에 그리고 그 키 처리는 터미널 경로(handleKeyEvent)에서 하기 때문이다. web 패널(WKWebView)이
+            // firstResponder를 쥐면 Enter/Esc가 WebKit으로 새 모달이 안 닫힌다(제보: 브라우저 보던 중 ⌘Q 종료 모달이 엔터로
+            // 안 닫힘). **엣지가 아니라 열린 내내** 검사해(self-heal) — 웹뷰가 포커스를 (재)획득하거나 다른 오버레이 선행으로
+            // 열림 엣지를 놓쳐도 회복한다. isWebPanelFocused 탐지 성공에 기대지 않고 "firstResponder가 터미널 뷰가 아니면
+            // (=웹뷰 등) 되돌린다"로 강제한다 — 모달 중엔 터미널 뷰만이 정당한 responder다(다른 AppKit 입력 컨트롤 없음).
+            // 복원용 web surface id는 처음 전이(웹 포커스였을 때)에 한 번만 저장한다.
+            if let tv = (window.contentView as? MaruTerminalContainerView)?.terminalView,
+               window.firstResponder !== tv {
+                if surface.stashedWebFocusSurfaceId == nil,
+                   let focused = surface.webPanels.values.first(where: { isWebPanelFocused($0) }) {
+                    surface.stashedWebFocusSurfaceId = focused.surfaceId
+                }
                 focusTerminalView(window)
             }
-        } else {
-            // 모달이 닫혔다 — 우리가 웹→터미널로 전이했었고 그 웹뷰가 아직 살아 있으면 그 웹뷰로 포커스 복원.
+        } else if wasOpen {
+            // 모달이 닫힌 엣지(true→false) — 우리가 웹→터미널로 전이했었고 그 웹뷰가 아직 살아 있으면 그 웹뷰로 포커스 복원.
             if let sid = surface.stashedWebFocusSurfaceId, let wp = surface.webPanels[sid], wp.superview != nil {
                 window.makeFirstResponder(wp.webView)
             }

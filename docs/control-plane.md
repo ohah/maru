@@ -286,6 +286,44 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **MCP 어댑터 관계**: wire가 JSON-RPC 2.0이라(§10) 향후 MCP 어댑터를 얇게 얹으면 `browser.*`가 MCP tool로 노출된다 — "host-mediated 브라우저 MCP"의 MCP 표면은 이 어댑터(§10 note, 구현 계획 미정, 네임스페이스/발견 seam만 보존)로 충족한다.
 
+### 9.3 5e 상세 설계 — 라이브 browser.* 배선 (doc-first)
+
+**목표(다시)**: 소켓으로 온 `browser.navigate`/`getUrl`/`executeScript`(browser cap 인가)가 **실제 WKWebView를 구동하고 결과를 응답으로 되돌린다**. 1e-core(auth)·§5-async(deferred marshal)·5d(BrowserControl)·5a(스키마)를 잇는 슬라이스. 최소 3개 메서드로 e2e 왕복을 fixture로 증명하고, 나머지는 5f.
+
+**전제(현재 코드, 1e-core·§5-async 후)**: `buildControlResponse`(L4) → `dispatchAuthenticated`(L2)가 auth를 발급한다. browser cap grant는 지금 non-metadata라 `method_not_found`로 접힌다(미배선). `BrowserControl`(Swift, 5d)는 navigate/currentUrl/executeScript를 escaping completion으로 실행한다(async). `ControlServer`는 `deferRequest`/`completeInFlight`/`reapExpiredInFlight`(§5-async)를 갖췄다.
+
+**흐름(레이어별)**:
+```
+소켓 요청 → accept 스레드 → PendingRequest{selector, cap_nonce, request_bytes}
+  → 메인 drain(app_host_abi)
+    → dispatchAuthenticated(L2): browser cap grant면 → dispatchBrowser(L2)로 위임
+        → dispatchBrowser: authz·surface kind==web 검증 후 BrowserOp{surface_id, method, arg} 반환(에러면 응답 바이트)
+    → L4: BrowserOp이면 deferRequest(pending)→async_id + 브라우저 op 큐에 enqueue{async_id, surface_id, method, arg}. 즉시 resolve 안 함.
+  → (다음 tick) Swift가 take_browser_op으로 op를 drain → webPanels[surface_id].webView 해소
+    → BrowserControl.{navigate/currentUrl/executeScript}(completion)
+    → (async 완료) complete_browser_op(async_id, status, result_bytes)
+  → 메인: 요청 id·method로 browser.* 응답 직렬화(control_browser.serializeXResult) → completeInFlight(async_id, 응답)
+    → accept 스레드가 소켓에 write.
+```
+
+**구현 조각**:
+1. **L2 `dispatchBrowser` → BrowserOp 반환(5a skeleton 교체)**: `control_browser.zig`의 `notImplementedResponse`(5a) 대신 `union(enum){ err: []u8, op: BrowserOp }` 반환. `BrowserOp{ surface_id: u64, method: BrowserMethod, arg: []const u8 }`(navigate=url·executeScript=script·getUrl=빈). authz(browser cap)·surface 검증은 그대로.
+2. **L2 `dispatchAuthenticated` 반환 확장**: 현재 `[]u8`. browser cap grant를 marshal하려면 tagged 반환 필요 — `union(enum){ immediate: []u8, browser: BrowserOp }`. metadata/에러=immediate(기존), browser cap grant=browser(op). L4가 분기. (**결정 필요 ①**: dispatchAuthenticated tagged union vs buildControlResponse가 browser.*를 선-검출 — 전자가 auth·라우팅 단일 출처라 우선.)
+3. **L4 marshal(app_host_abi)**: BrowserOp이면 `server.deferRequest(pending, now+timeout)`→async_id, 브라우저 op 큐(신규 Zig 큐, 메인 전용)에 `{async_id, surface_id, method, arg 복사}` push. `TooManyInFlight`면 즉시 에러 resolve(defer 안 함). op의 arg는 cross_gpa 복사(pending.request_bytes 수명과 분리).
+4. **ABI(신규, take/provide async 패턴 — `take_color_sample_request`/`provide_sampled_color` 선례)**:
+   - `maru_macos_control_take_browser_op(out async_id, out surface_id, out op_kind[0=navigate·1=getUrl·2=executeScript], out arg_ptr, out arg_len) u32`(1=op 있음·0=없음). Swift가 매 tick drain.
+   - `maru_macos_control_complete_browser_op(async_id, status[0=ok·1=error], result_ptr, result_len)`. Swift completion이 호출.
+5. **Swift 실행(MaruAppHost)**: take한 op의 surface_id를 `webPanels[surface_id]?.webView`로 해소(없으면 status=error로 즉시 complete). op_kind별 `BrowserControl` 호출 + completion에서 `complete_browser_op`. getUrl/executeScript는 결과 문자열, navigate는 ok/error.
+6. **응답 직렬화(L4 complete 핸들러)**: `complete_browser_op`가 async_id로 in-flight pending을 찾고, 그 `request_bytes`를 **재파싱**해 요청 id·method를 얻어(단일 출처) status·result로 `control_browser.serializeNavigateResult`/`getUrl`/`executeScript`(또는 §8.3 에러) 직렬화 → `completeInFlight(async_id, 응답)`. (request_bytes는 pending이 아직 resolve 안 돼 유효.)
+7. **reap 펌프**: `maru_macos_control_server_drain`이 매 tick `reapExpiredInFlight(now_ns)` 호출(hung op → timeout 정리).
+8. **smoke용 cap 주입 훅(테스트 전용)**: 실 fd 발급(1e-confirm) 전이라 라이브 store가 비어 browser 요청이 default-deny다. **env-gated 테스트 훅**(예: `MARU_TEST_BROWSER_CAP=1`이면 디버그 web 패널 surface에 고정 nonce의 browser cap을 startup에 `issueForFd`)으로 macos smoke가 소켓 `browser.navigate`(그 nonce)→실 WKWebView 이동을 자동 증명. 프로덕션 경로 불변(env 미설정 시 무동작). (**결정 필요 ②**: 주입 훅을 env-gate vs 별도 테스트 바이너리 — env-gate가 기존 `MARU_WEB_PANEL`류 디버그 훅과 정합.)
+
+**검증**: (a) 헤드리스 — `dispatchBrowser` BrowserOp 반환·에러 분기 단위(control_browser), dispatchAuthenticated tagged 반환 단위(control_dispatch), 브라우저 op 큐 marshal 단위. (b) **macos smoke(fixture E2E)** — 주입 cap + 소켓 `browser.navigate`(무-네트워크 `data:` URL)→WKWebView 이동→`getUrl`/`executeScript` 결과 왕복(5d fixture가 BrowserControl 직접 호출로 증명한 걸 이제 **소켓 전 경로**로). WKWebView async라 헤드리스 Zig 아니라 smoke.
+
+**범위 밖(후속)**: 실 cap 발급 UX=1e-confirm. 나머지 메서드(screenshot/back/forward/click/sendKeys/findElement/getCookies)=5f. proper timeout 에러 응답·concurrent accept=후속. **손 테스트**: smoke가 자동 증명하므로 최소(실 에이전트가 실 웹 로그인 세션 제어하는 통합 시나리오만 사용자 확인).
+
+**열린 결정 요약**: ① dispatchAuthenticated tagged union(권장) vs buildControlResponse 선-검출. ② smoke cap 주입 env-gate(권장) vs 별도 바이너리. 둘 다 권장안이 기존 패턴과 정합 — 이견 없으면 그대로 진행.
+
 ## 10. 베이스와 결정 (clean-room)
 
 - **메커니즘**: JSON-RPC 2.0 over 로컬 stdio/socket(LSP/DAP/CDP 공유). 메커니즘만 빌리고 LSP 스펙(textDocument/*)은 채택하지 않는다. 프레이밍은 ndjson(대형은 §4.3 chunk).

@@ -1152,17 +1152,11 @@ final class TerminalSurface {
     // 컨테이너 서브뷰로도 살아 있지만, 빠른 조회·전이 매칭을 위해 세션별로 강참조를 든다(창이 닫히면 함께 해제).
     var webPanels: [UInt64: MaruWebPanelView] = [:]
 
-    // Phase 4d/4e-3: 웹↔모달 firstResponder 전이 추적(세션별 — 멀티창 정합). reconcileWebModalFocus가 매 tick
-    // anyOverlayOpen 엣지를 본다: 웹 포커스 중 모달이 열리면(false→true) 포커스된 웹뷰→터미널 뷰로 전이(모달 입력·
-    // IME preedit가 터미널 NSTextInputClient로 흐르게)하고 그 웹뷰의 surface_id를 stashedWebFocusSurfaceId에 담는다;
-    // 모달이 닫히면(true→false) 그 id의 웹뷰가 아직 살아 있으면 firstResponder를 복원한다. lastOverlayOpen은 엣지
-    // 검출용 직전 값. surface_id로 기억하는 이유: 여러 web Term 중 **어느 것**을 복원할지 정확히 가리키기 위해서다.
-    var lastOverlayOpen = false
-    var stashedWebFocusSurfaceId: UInt64?
-    // Phase 7f 후속: 직전 tick에 firstResponder를 쥔 browser 웹 패널 surface_id(없으면 nil). reconcileWebFocusActivation이
+    // Phase 4g-1: 직전 tick에 firstResponder를 쥔 web 패널 surface_id(없으면 nil). 통합 reconcileWebFocus의 Direction 2가
     // **rising edge**(nil/다른 값 → 이 id, = 사용자가 그 웹뷰를 새로 클릭해 포커스)에서만 Zig 활성 pane을 그 surface로
     // 동기한다(activate_surface). 매 tick 무조건 동기하면 키보드 pane 전환(⌘⌥→)으로 Zig 활성만 바뀌고 webview는 stale
-    // 포커스인 경우와 싸워 브라우저로 되돌아간다 — edge 추적으로 "새 클릭"만 반영한다.
+    // 포커스인 경우와 싸워 브라우저로 되돌아간다 — edge 추적으로 "새 클릭"만 반영한다. (옛 lastOverlayOpen·
+    // stashedWebFocusSurfaceId는 reconcileWebFocus 불변식이 복원을 D1로 흡수해 불요 — 4g-1서 제거.)
     var lastFocusedWebSurfaceId: UInt64?
 }
 
@@ -1497,7 +1491,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // ⌘Q는 시스템 메뉴 keyEquivalent 경로라 maru keyDown/performKeyEquivalent를 안 거친다 — 브라우저 web 패널이
         // firstResponder를 쥔 채면 첫 Enter가 아직 WKWebView로 샐 수 있으므로, 모달을 연 즉시 터미널로 포커스를 전이한다
         // (다음 renderTick의 self-heal reconcile까지 안 기다림 — handleWebPanelChord의 동기 reconcile과 같은 규율).
-        reconcileWebModalFocus()
+        reconcileWebFocus()
         return .terminateLater
     }
 
@@ -1758,7 +1752,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 전이한다(다음 tick까지 기다리지 않아 조합 직후 타이핑/IME가 웹뷰로 새지 않게). handleKeyDown은 기존 경로 그대로.
     func handleWebPanelChord(_ event: NSEvent) {
         handleKeyDown(event)
-        reconcileWebModalFocus()
+        reconcileWebFocus()
     }
 
     // Phase 7e-4: browser 패널 nav 단축키(⌘←/→/R)를 Zig 코어로 전달한다(performKeyEquivalent에서 code 마샬링 후 호출).
@@ -1801,56 +1795,51 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 호출). 웹 패널이 없으면 무동작이라 MARU_WEB_PANEL 훅이 없는 평시 빌드엔 영향이 없다. 터미널 IME/keyDown 코드는
     // 건드리지 않고 makeFirstResponder만 부른다 — 전이는 기존 becomeFirstResponder(imeFocus true)/resignFirstResponder
     // (commitComposition)를 그대로 태운다(새 IME 로직 없음). 단일 출처: docs/web-panel.md §4.
-    func reconcileWebModalFocus() {
-        guard let surface = activeSurface, let window = surface.window else { return }
-        let open = anyOverlayOpen
-        let wasOpen = surface.lastOverlayOpen
-        // 엣지 기록(defer)은 webPanels 유무와 무관하게 항상 한다 — 모달이 열린 채 마지막 web 패널이 파괴돼도
-        // lastOverlayOpen이 갱신되게 해, 다음에 web 패널이 다시 생겼을 때 stale 엣지로 전이가 stuck되지 않는다.
-        defer { surface.lastOverlayOpen = open }
-        guard !surface.webPanels.isEmpty else { surface.stashedWebFocusSurfaceId = nil; return } // 패널 없으면 stale stash 정리
-        if open {
-            // 최상위 규율: 모달(확인·종료·팔레트·찾기·설정)이 열려 있는 동안 입력은 반드시 터미널 뷰로 가야 한다 — 모달은
-            // Zig가 오버레이 레이어에 그리고 그 키 처리는 터미널 경로(handleKeyEvent)에서 하기 때문이다. web 패널(WKWebView)이
-            // firstResponder를 쥐면 Enter/Esc가 WebKit으로 새 모달이 안 닫힌다(제보: 브라우저 보던 중 ⌘Q 종료 모달이 엔터로
-            // 안 닫힘). **엣지가 아니라 열린 내내** 검사해(self-heal) — 웹뷰가 포커스를 (재)획득하거나 다른 오버레이 선행으로
-            // 열림 엣지를 놓쳐도 회복한다. isWebPanelFocused 탐지 성공에 기대지 않고 "firstResponder가 터미널 뷰가 아니면
-            // (=웹뷰 등) 되돌린다"로 강제한다 — 모달 중엔 터미널 뷰만이 정당한 responder다(다른 AppKit 입력 컨트롤 없음).
-            // 복원용 web surface id는 처음 전이(웹 포커스였을 때)에 한 번만 저장한다.
-            if let tv = (window.contentView as? MaruTerminalContainerView)?.terminalView,
-               window.firstResponder !== tv {
-                if surface.stashedWebFocusSurfaceId == nil,
-                   let focused = surface.webPanels.values.first(where: { isWebPanelFocused($0) }) {
-                    surface.stashedWebFocusSurfaceId = focused.surfaceId
-                }
-                focusTerminalView(window)
-            }
-        } else if wasOpen {
-            // 모달이 닫힌 엣지(true→false) — 우리가 웹→터미널로 전이했었고 그 웹뷰가 아직 살아 있으면 그 웹뷰로 포커스 복원.
-            if let sid = surface.stashedWebFocusSurfaceId, let wp = surface.webPanels[sid], wp.superview != nil {
-                window.makeFirstResponder(wp.webView)
-            }
-            surface.stashedWebFocusSurfaceId = nil
-        }
-    }
+    // Phase 4g-1: 웹↔터미널 포커스 동기 불변식(§4.1) — **firstResponder ⟺ Zig 활성 pane**. 옛 reconcileWebModalFocus +
+    // reconcileWebFocusActivation을 **하나로 통합·대체**(파편화된 포커스 패치를 근본 불변식으로). 매 tick + 웹 조합 직후·
+    // ⌘Q 직후 동기 호출. 웹 패널 없으면 무동작(평시 무영향). 기존 터미널 IME/keyDown은 한 줄도 안 건드림(4d 규율 —
+    // makeFirstResponder만).
+    //
+    // **override(우선순위 모달 > addr_edit)**: 모달(anyOverlayOpen) 또는 주소창 편집(addr_edit_surface != 0) 중엔 입력이
+    // Zig handleKeyEvent 경로(모달 Enter/Esc·편집 키·IME preedit)라 **터미널 뷰**가 firstResponder여야 한다 — 웹뷰가 쥐면
+    // 샌다(제보: ⌘Q 종료 모달 Enter 무응답). 열린 내내 self-heal(웹뷰가 재획득해도 되돌림).
+    //
+    // **override 없으면 불변식 2방향 동기(순서 중요)**:
+    //   Direction 2 — webview가 **새로 firstResponder(rising edge = 사용자 클릭)** 면 activate_surface로 Zig 활성 pane을 그
+    //     surface로 동기한다(제보: 브라우저 web 클릭 후 ⌘R 무동작). rising edge만 = 키보드 전환 후 stale 포커스와 안 싸우게.
+    //   Direction 1 — Zig 활성 pane에 firstResponder를 맞춘다(활성=web이면 그 webview, 아니면 터미널 뷰). D2가 클릭을 반영한
+    //     **뒤** 실행 → 키보드 pane/탭 전환·브라우저 탭 활성화가 포커스를 따라오게(키보드 갭·⌘R 게이트 stale 닫음). 모달
+    //     닫힘 후 복원도 D1이 한다(활성=browser면 webview 재포커스) — 별도 stash/restore 불요.
+    func reconcileWebFocus() {
+        guard let surface = activeSurface, let window = surface.window, let session = surface.appSession,
+              let tv = (window.contentView as? MaruTerminalContainerView)?.terminalView else { return }
+        guard !surface.webPanels.isEmpty else { surface.lastFocusedWebSurfaceId = nil; return }
 
-    // Phase 7f 후속: browser 웹 패널(WKWebView)을 **클릭해 새로 firstResponder가 된** 경우(rising edge) Zig 활성 pane/tab을
-    // 그 surface로 동기한다(activate_surface) — 안 하면 activeWebSurfaceId 게이트가 stale해 브라우저 web 콘텐츠를 클릭했는데도
-    // ⌘R 등이 안 먹는다(제보: 터미널→브라우저 클릭 후 ⌘R 무동작; 클릭이 WKWebView 네이티브로 가 Zig 활성 pane을 안 바꿈).
-    // **rising edge만** 동기하는 이유: 키보드 pane 전환(⌘⌥→)으로 Zig 활성만 터미널로 바뀌고 webview가 stale 포커스인
-    // 경우, 매 tick 무조건 동기하면 브라우저로 되돌아가 전환과 싸운다 — edge 추적으로 "새 클릭"만 반영한다. 모달 열림 중엔
-    // reconcileWebModalFocus가 포커스를 터미널로 옮기므로 focusedId=nil로 제외(모달 닫힘 후 복원 시 edge로 재평가). browser
-    // (panelKind==1)만 — activeWebSurfaceId가 browser 전용이라 markdown 패널을 넣으면 영영 불일치로 매 tick 재활성 루프.
-    func reconcileWebFocusActivation() {
-        guard let surface = activeSurface, let session = surface.appSession else { return }
-        let focusedId: UInt64? = anyOverlayOpen
-            ? nil
-            : surface.webPanels.values.first(where: { isWebPanelFocused($0) && $0.panelKind == 1 })?.surfaceId
+        // override: 모달 또는 주소창 편집 → 터미널 뷰.
+        if anyOverlayOpen || maru_macos_app_session_addr_edit_surface(session) != 0 {
+            if window.firstResponder !== tv { focusTerminalView(window) }
+            surface.lastFocusedWebSurfaceId = nil // override 중 rising-edge 추적 리셋(해제 후 재평가)
+            return
+        }
+
+        // Direction 2: webview 새 포커스(클릭 rising edge) → Zig 활성 동기.
+        let focusedId = surface.webPanels.values.first(where: { isWebPanelFocused($0) })?.surfaceId
         let rising = focusedId != nil && focusedId != surface.lastFocusedWebSurfaceId
         surface.lastFocusedWebSurfaceId = focusedId
-        guard rising, let focusedId else { return }
-        if maru_macos_app_session_active_web_surface_id(session) != focusedId {
+        if rising, let focusedId, maru_macos_app_session_active_web_surface_id_any_kind(session) != focusedId {
             _ = maru_macos_app_session_activate_surface(session, focusedId)
+        }
+
+        // Direction 1: firstResponder = Zig 활성 pane(D2가 클릭 반영한 뒤 재조회).
+        let activeWeb = maru_macos_app_session_active_web_surface_id_any_kind(session)
+        if activeWeb != 0 {
+            // 활성 = web term → 그 webview가 firstResponder(아직 아니면 전이). 브라우저 탭 활성화·모달 닫힘 복원 커버.
+            if let wp = surface.webPanels[activeWeb], wp.superview != nil, !wp.isHidden, !isWebPanelFocused(wp) {
+                window.makeFirstResponder(wp.webView)
+            }
+        } else if window.firstResponder !== tv {
+            // 활성 = terminal → 터미널 뷰(키보드로 웹→터미널 pane 전환 시 stale 웹뷰 포커스 회수 = 키보드 갭 닫음).
+            focusTerminalView(window)
         }
     }
 
@@ -2491,8 +2480,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 drawMetalFrame()
             }
             drainWebSurfaceTransition() // Phase 4e-3: 이번 tick의 웹 surface 전이 batch(생성/파괴/reframe/hide/show)를 컨테이너 NSView에 적용.
-            reconcileWebModalFocus() // Phase 4d: 웹 패널 포커스↔모달 responder 전이(anyOverlayOpen 엣지). 웹 패널 없으면 무동작.
-            reconcileWebFocusActivation() // Phase 7f 후속: browser webview를 새로 클릭(rising edge)하면 Zig 활성 pane을 동기(⌘R 등 게이트 stale 방지).
+            reconcileWebFocus() // Phase 4g-1: 웹↔터미널 포커스 동기 불변식(firstResponder ⟺ Zig 활성 pane). 웹 패널 없으면 무동작.
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
             drainNotificationAuthorizationRequest() // 세팅에서 데스크톱 알림 토글을 켰으면 macOS 알림 권한을 요청한다.
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.

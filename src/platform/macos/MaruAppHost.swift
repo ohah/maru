@@ -1046,6 +1046,16 @@ extension MaruWebPanelView: WKUIDelegate {
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         guard panelKind == 1 else { return nil } // 신뢰 패널은 창 생성 차단
+        // Phase 7f-2: 팝업 대상 스킴 정책(정책 단일 출처=Zig app_scheme.popupTargetAllowed) — about/http/https/빈만
+        // 허용, javascript:/file:/data:/blob:/maru-app: 등 위험 스킴 팝업은 차단(nil이면 WebKit이 창 생성 취소).
+        // 빈 target(window.open() 빈 팝업)은 허용이라 ABI 호출을 건너뛴다(빈 배열 baseAddress=nil 회피).
+        let target = navigationAction.request.url?.absoluteString ?? ""
+        if !target.isEmpty {
+            let allowed = Array(target.utf8).withUnsafeBufferPointer { p in
+                maru_macos_app_popup_target_allowed(p.baseAddress, p.count) == 1
+            }
+            guard allowed else { return nil }
+        }
         return controller?.adoptPopupWebView(configuration: configuration, openerSurfaceId: surfaceId)
     }
 }

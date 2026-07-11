@@ -140,7 +140,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 110;
+pub const abi_version: u32 = 111;
+// 111: Phase 7f-2 — 새 창/팝업 대상 URL 정책 게이트: popup_target_allowed export 1개(세션리스 순수 — about·http·
+// https·빈만 허용, javascript·file·data·blob·maru-app 거부). Swift createWebViewWith가 팝업 생성 전 호출해 위험 스킴
+// 팝업을 차단한다(정책=Zig app_scheme.popupTargetAllowed 단일 출처). 신규 export만 — 구조체 offset 불변.
 // 110: set_last_window(호스트가 매 tick 주입하는 "이 세션이 앱의 마지막 일반 창인가" — Zig 리프는 형제 NSWindow를
 // 모름). 마지막 창에서 ⌘W/사이드바·탭바 ✕로 세션(창)을 닫으면 requestClose가 창 하나 닫기 대신 Cmd+Q와 동일한 종료
 // 확인("maru를 종료할까요?")을 띄운다 — 마지막 창 닫기=앱 종료라 재확인(사용자 결정 2026-07). 빨간 버튼 마지막 창도

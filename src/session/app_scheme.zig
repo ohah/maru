@@ -114,9 +114,44 @@ fn hasSchemePrefix(s: []const u8, prefix: []const u8) bool {
     return s.len >= prefix.len and std.ascii.eqlIgnoreCase(s[0..prefix.len], prefix);
 }
 
+/// Phase 7f-2: 새 창/팝업(`WKUIDelegate.createWebViewWith`) 대상 URL 정책 게이트. 팝업은 **웹 콘텐츠가 시작**하므로
+/// (사용자 입력인 주소창 `resolveNavUrl`과 별개 경로) 위험 스킴을 원천 차단한다 — **허용 = 스킴 없음(빈/상대)·`about`·
+/// `http`·`https`만**, 나머지(`javascript`·`file`·`data`·`blob`·`maru-app` 등)는 거부(deny-by-default 허용목록).
+/// 근거: `javascript:`는 새 창에서 스크립트 실행, `file:`은 로컬 파일 접근, `maru-app:`은 신뢰 origin 위장, `data:`/
+/// `blob:`은 주소 불투명 피싱 표면 → 전부 차단. `about`/빈 = `window.open()` 빈 팝업(JS가 이후 navigate하면 그 네비는
+/// `decidePolicyForNavigationAction`이 다시 검사). 베이스: 브라우저 팝업 차단 관례 + 허용목록. 스킴은 대소문자 무시
+/// (RFC 3986 §3.1). WebKit이 주는 팝업 target은 절대 URL이라 스킴이 항상 있다(빈/상대는 방어적 허용).
+pub fn popupTargetAllowed(url: []const u8) bool {
+    const trimmed = std.mem.trim(u8, url, " \t");
+    if (trimmed.len == 0) return true; // 빈 = window.open() 빈 팝업(about:blank 상당) — 허용
+    const scheme_end = std.mem.indexOfScalar(u8, trimmed, ':') orelse return true; // ':' 없음 = 스킴 없는 상대 URL — 허용
+    const scheme = trimmed[0..scheme_end];
+    return std.ascii.eqlIgnoreCase(scheme, "about") or
+        std.ascii.eqlIgnoreCase(scheme, "http") or
+        std.ascii.eqlIgnoreCase(scheme, "https");
+}
+
 // ── 테스트: adversarial(경로 탈출·인코딩·주입) + 정규화 + 정상 ──────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "popupTargetAllowed: about/http/https/빈만 허용, 위험 스킴 거부 (7f-2 팝업 정책 adversarial)" {
+    // 허용: http/https(대소문자 무시)·about:blank·window.open() 빈/공백.
+    try testing.expect(popupTargetAllowed("http://example.com/"));
+    try testing.expect(popupTargetAllowed("https://example.com/path?q=1"));
+    try testing.expect(popupTargetAllowed("HTTPS://Example.com")); // 스킴 대소문자 무시(RFC 3986)
+    try testing.expect(popupTargetAllowed("about:blank"));
+    try testing.expect(popupTargetAllowed("")); // window.open() 빈 팝업
+    try testing.expect(popupTargetAllowed("   ")); // 공백뿐
+    // 거부: 위험 스킴(스크립트 실행·로컬 접근·origin 위장·불투명 피싱).
+    try testing.expect(!popupTargetAllowed("javascript:alert(1)"));
+    try testing.expect(!popupTargetAllowed("JavaScript:alert(document.cookie)")); // 대소문자 무시로도 차단
+    try testing.expect(!popupTargetAllowed("file:///etc/passwd"));
+    try testing.expect(!popupTargetAllowed("data:text/html,<script>alert(1)</script>"));
+    try testing.expect(!popupTargetAllowed("blob:https://x/uuid"));
+    try testing.expect(!popupTargetAllowed("maru-app://app/index.html")); // 신뢰 origin 위장 차단
+    try testing.expect(!popupTargetAllowed("  javascript:alert(1)  ")); // 앞뒤 공백 트림 후에도 차단
+}
 
 fn expectPath(input: []const u8, want: []const u8) !void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;

@@ -207,8 +207,9 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
   무해 — 후속). 콘텐츠·URL·브리지·스킴 핸들러·CSP·데이터스토어 격리는 **Phase 5**, IME/firstResponder 전이는 4d. 자동 검증:
   ABI struct 계약 테스트(size/offset·op enum 값) + 4a 순수 계산 단위 테스트 + macos-app-smoke의 `web_panel_subview_order_ok`/
   `web_panel_present`/`web_panel_hittest_in_web`(4d가 4c의 `_nil`을 focusable 전환하며 rename·의미 반전 — 웹 자손을 돌려주는가)
-  값 단언(단, 스모크는 backing=0이라 frame 값은 degenerate — 실제 frame·z-order
-  픽셀 합성·입력 통과는 GUI 손 테스트가 닫는다).
+  값 단언(스모크 scripted resize가 **실 창 콘텐츠 크기**를 보내므로 web 패널 frame이 창 안에 정확히 맞는다 — 예전 하드코딩
+  1200×720 resize는 창 960×600과 불일치해 web 패널이 창 밖으로 삐져나왔다[런치 시 크기 안 맞음], `sendSmokeDevEvents`가
+  `resizeAppSessionFromWindow`를 쓰도록 수정. 픽셀 합성·입력 통과의 최종 눈 확인은 여전히 GUI 손 테스트가 닫는다).
 - 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다. **(입력 responder 전이 spike 구현 완료 — 최소 범위, ABI 무변경·Swift 전용)**: 4c의 hitTest→nil 완전 통과를
   **focusable**로 전환하고(모달 닫힘=`super.hitTest`로 웹뷰가 클릭 받아 WKWebView firstResponder→WebKit 자체 IME; 모달
   열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합

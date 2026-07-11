@@ -7848,10 +7848,15 @@ pub const AppSession = struct {
         defer scratch.deinit();
         // 네비 키보드 ↓는 섹션 수를 모르는 컴포넌트가 section을 +1만 하므로(상한 미지), 여기서 실제 섹션 수로 clamp한다.
         // 안 하면 section이 범위를 넘어 계속 커져 ↑가 한참 먹지 않는다(currentSectionFields는 min clamp로 보기만 보정).
+        // 네비 맨 아래에 "↺ 초기화" 액션 행(§6.4)이 실제 섹션들 뒤에 하나 더 있으므로 상한은 sections.len(=리셋 행 인덱스)까지
+        // 허용한다 — nav_reset_row로 그 인덱스를 컴포넌트에 알려 Enter/클릭이 폼 진입 대신 .reset_all을 내게 한다.
         if (self.buildSectionList(scratch.allocator())) |sections| {
-            if (sections.len > 0 and self.chrome_host.settings.section >= sections.len)
-                self.chrome_host.settings.section = sections.len - 1;
-        } else |_| {}
+            self.chrome_host.settings.nav_reset_row = sections.len;
+            if (self.chrome_host.settings.section > sections.len)
+                self.chrome_host.settings.section = sections.len;
+        } else |_| {
+            self.chrome_host.settings.nav_reset_row = null;
+        }
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
         self.chrome_host.settings.setFieldCount(cf.total());
     }
@@ -8059,9 +8064,74 @@ pub const AppSession = struct {
         return std.fmt.allocPrint(arena, "{s} › {s}", .{ settingsSectionLabel(section), label });
     }
 
+    /// 기본 config(theme.Config{})의 스키마 필드 값 — 항목별 리셋(§6.11)의 "기본과 다른가" 판정·리셋 대상 값의 단일 출처.
+    /// buildSettingsFields(is_default 주입)와 resetSelectedSettingRow(기본값 적용)가 같은 순회 결과를 키로 룩업한다.
+    /// 별도 기본값 테이블 없이 스키마를 Config{}로 한 번 더 순회해 얻는다(기본값은 구조체 필드 초기화 값이 단일 출처). arena 소유.
+    const SettingsDefaults = struct {
+        bools: []config_mod.schema.BoolField,
+        nums: []config_mod.schema.NumberField,
+        enums: []config_mod.schema.EnumField,
+        texts: []config_mod.schema.TextField,
+        colors: []config_mod.schema.ColorField,
+        fn boolFor(self: SettingsDefaults, key: []const u8) ?bool {
+            for (self.bools) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
+            return null;
+        }
+        fn numFor(self: SettingsDefaults, key: []const u8) ?f64 {
+            for (self.nums) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
+            return null;
+        }
+        fn enumCurrentFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
+            for (self.enums) |f| if (std.mem.eql(u8, f.key, key)) return f.current;
+            return null;
+        }
+        fn textFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
+            for (self.texts) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
+            return null;
+        }
+        fn colorFor(self: SettingsDefaults, key: []const u8) ?[]const u8 {
+            for (self.colors) |f| if (std.mem.eql(u8, f.key, key)) return f.value;
+            return null;
+        }
+    };
+    fn buildSettingsDefaults(arena: std.mem.Allocator) !SettingsDefaults {
+        const def = config_mod.Config{};
+        var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
+        try config_mod.schema.appendBoolFields(arena, def, &bools);
+        var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
+        try config_mod.schema.appendNumberFields(arena, def, &nums);
+        var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
+        try config_mod.schema.appendEnumFields(arena, def, &enums);
+        var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
+        try config_mod.schema.appendTextFields(arena, def, &texts);
+        var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
+        try config_mod.schema.appendColorFields(arena, def, &colors);
+        return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items };
+    }
+
+    /// 합성(synthetic) text 행이 기본값과 같은가(§6.11) — 동기화 키(env/macro)는 값 존재=override, 추가 sentinel은 항상 기본,
+    /// shell.args/workspace.root는 빈 값이 기본, 나머지 schema text는 기본 문자열 비교. buildSettingsFields의 is_default 주입용.
+    fn settingsTextIsDefault(t: config_mod.schema.TextField, defaults: SettingsDefaults) bool {
+        if (std.mem.eql(u8, t.key, "env.") or std.mem.eql(u8, t.key, "macro.")) return true; // 추가 sentinel 행 — ↺ 없음
+        if (std.mem.startsWith(u8, t.key, "env.") or std.mem.startsWith(u8, t.key, "macro.")) return false; // 실제 env/macro = override
+        if (std.mem.eql(u8, t.key, "shell.args") or std.mem.eql(u8, t.key, "workspace.root")) return t.value.len == 0;
+        if (defaults.textFor(t.key)) |dv| return std.mem.eql(u8, dv, t.value);
+        return true;
+    }
+
+    /// 액션에 사용자 지정 in-app 키바인딩이 있는가(§6.11 keybind 행 is_default 판정). 있으면 ↺(=빌트인으로 unbind)를 띄운다.
+    /// unbindActionEntry의 found_user 검사와 같은 기준(빌트인은 loaded_config.keybindings에 없다). 순수 unbind만 한 경우는
+    /// 못 잡는다(chord 기준이라 — v1 한계, 전체 리셋이 담당).
+    fn settingsActionHasUserBinding(self: *AppSession, action: config_mod.Action) bool {
+        // Action은 union(enum)이라 ==가 아니라 std.meta.eql로 비교한다(command_catalog.chordForAction 선례).
+        for (self.loaded_config.keybindings) |b| if (std.meta.eql(b.action, action)) return true;
+        return false;
+    }
+
     fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.settings.FieldRow {
         const Row = chrome.components.settings.FieldRow;
         const cf = try self.currentSectionFields(arena);
+        const defaults = try buildSettingsDefaults(arena); // §6.11 is_default 판정용(기본 config 대비)
         // 교차 검색(쿼리 있음)이면 행 라벨에 섹션명 접두 — currentSectionFields의 cross 게이트와 같은 조건(단일 출처).
         const cross = self.chrome_host.settings.searchQuery().len > 0;
         // 결합 순서: bool(toggle) → number(입력 박스) → enum(dropdown) → text(편집) → color(스와치). selected/handler
@@ -8069,22 +8139,30 @@ pub const AppSession = struct {
         const rows = try arena.alloc(Row, cf.total());
         var i: usize = 0;
         for (cf.bools) |b| {
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, b.section, if (b.doc.len > 0) b.doc else b.key), .kind = .{ .toggle = b.value } };
+            // §6.11: 기본값과 같은가 — 기본 config의 같은 키 값과 비교(못 찾으면 기본으로 봄=↺ 없음).
+            const is_def = if (defaults.boolFor(b.key)) |dv| dv == b.value else true;
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, b.section, if (b.doc.len > 0) b.doc else b.key), .kind = .{ .toggle = b.value }, .is_default = is_def };
             i += 1;
         }
         for (cf.nums) |n| {
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, n.section, if (n.doc.len > 0) n.doc else n.key), .kind = .{ .number = .{ .value = n.value, .min = n.min, .max = n.max } } };
+            const is_def = if (defaults.numFor(n.key)) |dv| dv == n.value else true;
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, n.section, if (n.doc.len > 0) n.doc else n.key), .kind = .{ .number = .{ .value = n.value, .min = n.min, .max = n.max } }, .is_default = is_def };
             i += 1;
         }
         for (cf.enums) |e| {
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, e.section, if (e.doc.len > 0) e.doc else e.key), .kind = .{ .dropdown = e.current } };
+            // theme.preset(synthetic)은 v1에서 ↺ 제외(테마 되돌리기는 프리셋 드롭다운·개별 색 ↺·전체 리셋이 담당 — §6.11).
+            // 나머지 enum은 기본 변형 토큰과 현재 토큰 비교(둘 다 같은 appendEnumFields 변환이라 직접 비교 가능).
+            const is_def = if (std.mem.eql(u8, e.key, "theme.preset"))
+                true
+            else if (defaults.enumCurrentFor(e.key)) |dv| std.mem.eql(u8, dv, e.current) else true;
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, e.section, if (e.doc.len > 0) e.doc else e.key), .kind = .{ .dropdown = e.current }, .is_default = is_def };
             i += 1;
         }
         for (cf.texts) |t| {
             const label = try settingsRowLabel(arena, cross, t.section, if (t.doc.len > 0) t.doc else t.key);
             // font.family는 dropdown 스타일 폰트 피커(←→로 번들 폰트 순환, Enter로 직접입력) — 나머지 텍스트 필드는 인라인 편집.
             const kind: chrome.components.settings.FieldRow.Kind = if (std.mem.eql(u8, t.key, "font.family")) .{ .font = t.value } else .{ .text = t.value };
-            rows[i] = .{ .label = label, .kind = kind };
+            rows[i] = .{ .label = label, .kind = kind, .is_default = settingsTextIsDefault(t, defaults) };
             i += 1;
         }
         // 테마 프리셋이 활성이면 색·팔레트 행을 잠근다(프리셋이 색을 정하므로) — 회색 표시 + 입력은 핸들러가 전환/차단.
@@ -8093,7 +8171,8 @@ pub const AppSession = struct {
             // 현재 hex를 RGB로 파싱해 스와치에. 저장 config는 검증돼 유효하지만 방어적으로 회색 폴백(상수 hex로 — 타입을
             // parseHexColor 반환과 일치시켜 별도 color import 불요; #808080은 항상 유효).
             const rgb = config_mod.appearance.parseHexColor(c.value) catch (config_mod.appearance.parseHexColor("#808080") catch unreachable);
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, c.section, if (c.doc.len > 0) c.doc else c.key), .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } }, .disabled = preset_active };
+            const is_def = if (defaults.colorFor(c.key)) |dv| std.mem.eql(u8, dv, c.value) else true;
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, c.section, if (c.doc.len > 0) c.doc else c.key), .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } }, .disabled = preset_active, .is_default = is_def };
             i += 1;
         }
         if (cf.has_palette) {
@@ -8111,7 +8190,9 @@ pub const AppSession = struct {
                 }
             }
             const sel = @min(self.chrome_host.settings.grid_cell, cells.len - 1);
-            rows[i] = .{ .label = try settingsRowLabel(arena, cross, .theme, "ANSI 팔레트"), .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active };
+            // §6.11: 팔레트 행 ↺는 **선택 셀**이 override(config.theme.palette[sel] 있음)일 때만 — ↺/Backspace가 그 셀만 리셋.
+            const pal_is_def = self.loaded_config.config.theme.palette[sel] == null;
+            rows[i] = .{ .label = try settingsRowLabel(arena, cross, .theme, "ANSI 팔레트"), .kind = .{ .palette_grid = .{ .cells = cells, .selected = sel } }, .disabled = preset_active, .is_default = pal_is_def };
             i += 1;
         }
         if (cf.keybind_entries.len > 0) {
@@ -8122,7 +8203,9 @@ pub const AppSession = struct {
                 const chord = command_catalog.chordForAction(resolver, entry.action);
                 var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
                 const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
-                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .input, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) } };
+                // §6.11: 사용자 지정 rebinding이 있으면 ↺(=빌트인으로 unbind). 순수 unbind만 한 경우는 못 잡음(v1 한계).
+                const is_def = !self.settingsActionHasUserBinding(entry.action);
+                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .input, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) }, .is_default = is_def };
                 i += 1;
             }
         }
@@ -8133,7 +8216,8 @@ pub const AppSession = struct {
                 const chord = command_catalog.chordForGlobalAction(self.loaded_config.global_bindings, entry.action);
                 var disp_scratch: [command_catalog.max_chord_display_len]u8 = undefined;
                 const display: []const u8 = if (chord) |c| command_catalog.formatChord(c, &disp_scratch) else "";
-                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .global_hotkey, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) } };
+                // §6.11: 전역은 빌트인 기본이 없어 사용자 바인딩(chord 존재)이 곧 override — 있으면 ↺(=해제).
+                rows[i] = .{ .label = try settingsRowLabel(arena, cross, .global_hotkey, entry.title), .kind = .{ .keybind = try arena.dupe(u8, display) }, .is_default = chord == null };
                 i += 1;
             }
         }
@@ -8148,8 +8232,11 @@ pub const AppSession = struct {
     /// 좌측 네비 라벨 목록(현재 섹션 강조는 컴포넌트가 settings.section으로). arena 소유.
     fn buildSettingsSectionLabels(self: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
         const sections = try self.buildSectionList(arena);
-        const labels = try arena.alloc([]const u8, sections.len);
+        // +1 = 네비 맨 아래 "↺ 초기화" 액션 행(§6.4). 실제 섹션(폼 매핑=buildSectionList)과 분리해 라벨 목록에만 더한다 —
+        // 이 행은 섹션이 아니라 requestResetAll 액션(nav_reset_row=sections.len으로 컴포넌트에 알림). 라벨 글리프는 단일 출처.
+        const labels = try arena.alloc([]const u8, sections.len + 1);
         for (sections, 0..) |s, i| labels[i] = s.label;
+        labels[sections.len] = try std.fmt.allocPrint(arena, "{s} 초기화", .{chrome.components.settings.reset_glyph});
         return labels;
     }
 
@@ -8779,45 +8866,152 @@ pub const AppSession = struct {
 
     /// 선택 행을 삭제한다(Backspace). **env.<KEY> 행** → env 변수 삭제, **keybind 행** → 사용자 지정 단축키 해제(unbind).
     /// 그 외(schema·shell.args·env 추가 sentinel·palette)는 무동작. 둘 다 spawn/입력 시점이라 appearance 재적용 없음.
-    fn deleteSelectedSettingRow(self: *AppSession) void {
+    /// 선택된 세팅 폼 행을 **기본값으로 되돌린다**(§6.11) — ↺ 클릭(settings_reset_field)·Backspace(settings_delete_row)의
+    /// 공통 경로. 행 종류로 분기: scalar(bool/number/enum)·color·schema text는 기본 config 값으로 setter + **override 줄 제거**
+    /// (markConfigKeyRemoved — override-only 정책상 파일엔 key=default를 안 쓰고 줄을 뺀다), palette 셀은 override 제거(null),
+    /// env/macro/keybind/global은 삭제/해제(=그들의 기본값 "없음"). 인덱스 산술은 toggleSelectedSetting·buildSettingsFields와
+    /// 같은 구간 순서(bool→num→enum→text→color→palette→keybind→global)를 공유한다. 이미 기본값인 행은 조용히 무동작
+    /// (컴포넌트가 is_default 행엔 ↺를 안 그리므로 ↺ 경로로는 안 오고, Backspace로는 no-op).
+    fn resetSelectedSettingRow(self: *AppSession) void {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
         const cf = self.currentSectionFields(scratch.allocator()) catch return;
+        const defaults = buildSettingsDefaults(scratch.allocator()) catch return;
         const sel = self.chrome_host.settings.selected;
-        const after_enums = cf.bools.len + cf.nums.len + cf.enums.len;
-        const after_texts = after_enums + cf.texts.len;
-        // env.<KEY> text 행 → env 삭제.
-        if (sel >= after_enums and sel < after_texts) {
-            const t = cf.texts[sel - after_enums];
-            if (std.mem.startsWith(u8, t.key, "env.") and t.key.len > "env.".len) {
-                self.removeEnvVar(t.key["env.".len..]);
-                self.refreshSettingsFieldCount(); // 행이 줄어듦 → setFieldCount가 selected clamp
+
+        // bool 행 → 기본값으로 flip(theme.follow-system은 toggle과 같은 특수 재적용).
+        if (sel < cf.bools.len) {
+            const key = cf.bools[sel].key;
+            const dv = defaults.boolFor(key) orelse return;
+            if (config_mod.schema.setBool(&self.loaded_config.config, key, dv)) {
+                if (std.mem.eql(u8, key, "theme.follow-system")) {
+                    if (self.loaded_config.config.theme_follow_system) self.applyFollowSystemTheme() else self.disableFollowSystemTheme();
+                    self.refreshSettingsFieldCount();
+                } else self.reapplyLoadedConfig();
+                self.markConfigKeyRemoved(key);
                 self.metal_dirty = true;
-            } else if (std.mem.startsWith(u8, t.key, "macro.") and t.key.len > "macro.".len) {
-                self.removeTerminalMacro(t.key["macro.".len..]); // 터미널 매크로 행 → 매크로 제거
-                self.refreshSettingsFieldCount();
-                self.metal_dirty = true;
-            } else if (std.mem.eql(u8, t.key, "window.background-image")) {
-                // 배경 이미지 행 Backspace = 빈 값(배경 없음)으로 — 파일 선택창의 짝(지우기). schema.setText는 빈 값을
-                // 거부하므로(인라인 편집 클리어가 기본값을 보존하게) 필드를 직접 빈 리터럴로 둔다. 라이브 반영 + 영속.
-                self.loaded_config.config.window_background_image = "";
-                self.reapplyLoadedConfig();
-                self.markConfigKeyDirty("window.background-image");
             }
             return;
         }
-        // keybind 행 → 사용자 지정 단축키 해제(unbind).
+        const after_nums = cf.bools.len + cf.nums.len;
+        if (sel >= cf.bools.len and sel < after_nums) {
+            const key = cf.nums[sel - cf.bools.len].key;
+            const dv = defaults.numFor(key) orelse return;
+            if (config_mod.schema.setNumber(&self.loaded_config.config, key, dv)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyRemoved(key);
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        const after_enums = after_nums + cf.enums.len;
+        if (sel >= after_nums and sel < after_enums) {
+            const e = cf.enums[sel - after_nums];
+            if (std.mem.eql(u8, e.key, "theme.preset")) return; // theme.preset은 v1 ↺ 제외(is_default=true라 안 옴) — 방어적 무동작
+            const di = config_mod.schema.enumIndex(config_mod.Config{}, e.key) orelse return; // 기본 변형의 선언순 인덱스
+            if (config_mod.schema.setEnumIndex(&self.loaded_config.config, e.key, di)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyRemoved(e.key);
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        const after_texts = after_enums + cf.texts.len;
+        if (sel >= after_enums and sel < after_texts) {
+            self.resetSelectedTextRow(cf.texts[sel - after_enums], defaults);
+            return;
+        }
+        const after_colors = after_texts + cf.colors.len;
+        if (sel >= after_texts and sel < after_colors) {
+            if (self.themePresetActive()) return; // 프리셋 잠금 색 행은 ↺가 안 뜨므로 Backspace로도 리셋 금지(잠금 우회 방지 — buildSettingsFields의 disabled와 일치)
+            const c = cf.colors[sel - after_texts];
+            const dv = defaults.colorFor(c.key) orelse return; // 기본 색 hex(#RRGGBB)
+            const owned = self.loaded_config.arena.allocator().dupe(u8, dv) catch return; // setText는 config arena 소유 슬라이스를 요구
+            if (config_mod.schema.setText(&self.loaded_config.config, c.key, owned)) {
+                self.reapplyLoadedConfig();
+                self.markConfigKeyRemoved(c.key);
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        // palette 그리드 행 → **선택 셀** override 제거(null → 표준 xterm256 기본색, §6.5·§6.11).
+        if (cf.paletteRowIndex()) |pi| if (sel == pi) {
+            if (self.themePresetActive()) return; // 프리셋 잠금이면 ↺ 미표시와 일치 — Backspace로도 리셋 금지
+            const gi = @min(self.chrome_host.settings.grid_cell, 15);
+            if (self.loaded_config.config.theme.palette[gi] != null) {
+                self.loaded_config.config.theme.palette[gi] = null;
+                self.reapplyLoadedConfig();
+                self.markConfigKeyRemoved(config_mod.schema.paletteKey(gi));
+                self.metal_dirty = true;
+            }
+            return;
+        };
+        // keybind 행 → 사용자 지정 단축키 해제(빌트인 복귀 — 그들의 "기본값").
         if (cf.keybindRowStart()) |ks| if (sel >= ks and sel - ks < cf.keybind_entries.len) {
             self.unbindActionEntry(cf.keybind_entries[sel - ks]);
             self.metal_dirty = true;
             return;
         };
-        // 전역 단축키 행 → global_bindings에서 제거(unbind) + 줄 제거 예약.
+        // 전역 단축키 행 → global_bindings에서 제거(unbind) + 줄 제거 예약(전역은 빌트인 없어 "없음"이 기본).
         if (cf.globalKeybindRowStart()) |gs| if (sel >= gs and sel - gs < cf.global_entries.len) {
             self.unbindGlobalEntry(cf.global_entries[sel - gs]);
             self.metal_dirty = true;
             return;
         };
+    }
+
+    /// text 행 리셋(§6.11 resetSelectedSettingRow의 text 분기 — 케이스가 많아 분리). 동기화 키(env/macro)는 삭제, bg-image·
+    /// shell.args·workspace.root는 빈 값(직접 클리어 — setText는 빈 값 거부라 필드 직접 세팅), 나머지 schema text(font.family 등)는
+    /// 기본 문자열로 setText. 모두 override 줄 제거(markConfigKeyRemoved). env/macro/shell.args/workspace.root는 spawn 시점
+    /// 값이라 라이브 재적용 생략(removeEnvVar 선례), font.family 등 렌더 영향 키만 reapplyLoadedConfig.
+    fn resetSelectedTextRow(self: *AppSession, t: config_mod.schema.TextField, defaults: SettingsDefaults) void {
+        if (std.mem.startsWith(u8, t.key, "env.") and t.key.len > "env.".len) {
+            self.removeEnvVar(t.key["env.".len..]); // env.<KEY> 삭제(= 그 변수의 기본값 "없음")
+            self.refreshSettingsFieldCount();
+            self.metal_dirty = true;
+            return;
+        }
+        if (std.mem.startsWith(u8, t.key, "macro.") and t.key.len > "macro.".len) {
+            self.removeTerminalMacro(t.key["macro.".len..]); // 터미널 매크로 제거
+            self.refreshSettingsFieldCount();
+            self.metal_dirty = true;
+            return;
+        }
+        if (std.mem.eql(u8, t.key, "window.background-image")) {
+            // 빈 값(배경 없음)으로 — setText는 빈 값을 거부하므로 필드를 직접 빈 리터럴로. 라이브 반영 + override 줄 제거.
+            self.loaded_config.config.window_background_image = "";
+            self.reapplyLoadedConfig();
+            self.markConfigKeyRemoved("window.background-image");
+            self.metal_dirty = true;
+            return;
+        }
+        if (std.mem.eql(u8, t.key, "shell.args")) {
+            self.loaded_config.config.shell.args = &.{}; // 기본값 = 빈 argv(셸 spawn 시점 반영)
+            self.markConfigKeyRemoved("shell.args");
+            self.metal_dirty = true;
+            return;
+        }
+        if (std.mem.eql(u8, t.key, "workspace.root")) {
+            self.loaded_config.config.workspace.root = ""; // 기본값 = 빈(상속 cwd)
+            self.markConfigKeyRemoved("workspace.root");
+            self.metal_dirty = true;
+            return;
+        }
+        const dv = defaults.textFor(t.key) orelse return;
+        if (dv.len == 0) {
+            // 기본값이 빈 문자열인 schema text(font.fallback 등) — setText가 빈 값을 거부해 라이브 클리어 불가. override 줄만
+            // 제거해 다음 로드에서 기본값(빈)이 되게 한다(드묾 — 대부분 비-빈 기본값). 라이브 반영은 reapply로도 config 필드가
+            // 안 비어 못하므로 생략(한계, §6.11 문서화).
+            self.markConfigKeyRemoved(t.key);
+            self.metal_dirty = true;
+            return;
+        }
+        const owned = self.loaded_config.arena.allocator().dupe(u8, dv) catch return; // setText는 config arena 소유 슬라이스 요구
+        if (config_mod.schema.setText(&self.loaded_config.config, t.key, owned)) {
+            self.reapplyLoadedConfig();
+            self.markConfigKeyRemoved(t.key);
+            self.metal_dirty = true;
+        }
     }
 
     /// env.<name>을 config.env에서 제거 + 파일 줄 삭제 예약(removeConfigLines). setEnvVar의 짝. name 키는 동적이라
@@ -9971,7 +10165,9 @@ pub const AppSession = struct {
                 self.refreshSettingsFieldCount();
                 self.metal_dirty = true;
             },
-            .settings_delete_row => self.deleteSelectedSettingRow(), // 선택 행 Backspace — env 변수 삭제(해당 행만)
+            .settings_delete_row => self.resetSelectedSettingRow(), // 선택 행 Backspace — env/macro/keybind 삭제·스칼라 기본값 복원(§6.11)
+            .settings_reset_field => self.resetSelectedSettingRow(), // 선택 행 ↺ 클릭 — 그 항목만 기본값 복원(§6.11, Backspace와 같은 경로)
+            .settings_reset_all => self.requestResetAll(), // 네비 "↺ 초기화" — 전체 리셋 확인 모달(§6.4, 커맨드 팔레트·메뉴와 같은 경로)
             .settings_color_picked => self.commitPickerColor(), // HSV picker Enter — pickerRgb()→#rrggbb로 선택 color 행 커밋
             .settings_eyedropper => self.color_sample_pending = true, // HSV picker `i` — Swift가 NSColorSampler 열도록 신호
         }
@@ -11318,6 +11514,8 @@ pub const AppSession = struct {
                 .adjust_left, .adjust_right => .none, // 포인터 경로엔 안 옴(키 전용) — exhaustiveness
                 .search_changed => .settings_search_changed, // 제목 행 클릭으로 검색 시작(PR1) — 키 '/' 경로와 같이 필터 재적용
                 .delete_row => .none, // 포인터 경로엔 안 옴(삭제는 Backspace 키 전용) — exhaustiveness
+                .reset_field => .settings_reset_field, // 폼 행 ↺ 셀 클릭 → 그 항목 기본값 복원(§6.11)
+                .reset_all => .settings_reset_all, // 네비 "↺ 초기화" 클릭 → 전체 리셋 확인 모달(§6.4)
                 .color_picked => .none, // 포인터 경로엔 안 옴(picker 확정은 Enter 키 전용; 클릭은 selection_changed) — exhaustiveness
                 .eyedropper => .none, // 포인터 경로엔 안 옴(스포이드는 `i` 키 전용) — exhaustiveness
                 .consumed => .none,
@@ -36442,6 +36640,82 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
     try std.testing.expect(found);
 }
 
+test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false(↺)·resetSelectedSettingRow가 기본값 복원 + override 줄 제거" {
+    // 항목별 기본값 리셋의 핵심 계약: (1) buildSettingsFields가 기본 config(theme.Config{}) 대비로 is_default를 정확히
+    // 주입해 변경된 행에만 ↺가 뜨고, (2) resetSelectedSettingRow가 그 항목만 기본값으로 되돌리며 override 줄을 제거
+    // (markConfigKeyRemoved — override-only 정책)한다. 터미널 사용자가 실수로 바꾼 값을 화면에서 한 항목씩 복구하는 경로.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+
+    // 폰트 섹션 선택(font.size number 행 보유). 열면서 nav_reset_row가 실제 섹션 수로 세팅되는지도 본다(§6.4).
+    session.toggleSettings();
+    const sections = try session.buildSectionList(scratch.allocator());
+    var font_idx: ?usize = null;
+    for (sections, 0..) |s, i| if (s.section == .font) {
+        font_idx = i;
+        break;
+    };
+    try std.testing.expect(font_idx != null);
+    session.chrome_host.settings.section = font_idx.?;
+    session.refreshSettingsFieldCount();
+    try std.testing.expectEqual(@as(?usize, sections.len), session.chrome_host.settings.nav_reset_row); // 리셋 행 = 섹션 뒤
+
+    // 기본 상태: 폼의 모든 행이 is_default=true(↺ 없음).
+    {
+        const rows0 = try session.buildSettingsFields(scratch.allocator());
+        for (rows0) |r| try std.testing.expect(r.is_default);
+    }
+
+    // font.size number 행을 찾아 selected로. 결합 순서상 number 구간은 bool 다음(buildSettingsFields·resetSelectedSettingRow 공유).
+    const cf = try session.currentSectionFields(scratch.allocator());
+    var ni: ?usize = null;
+    for (cf.nums, 0..) |n, i| if (std.mem.eql(u8, n.key, "font.size")) {
+        ni = i;
+        break;
+    };
+    try std.testing.expect(ni != null);
+    const sel = cf.bools.len + ni.?;
+    session.chrome_host.settings.selected = sel;
+
+    // 값을 기본값에서 벗어나게 바꾼다(직접 config 수정 — GUI 편집과 동치).
+    const default_size = session.loaded_config.config.font.size;
+    session.loaded_config.config.font.size = default_size + 3;
+
+    // 그 행만 is_default=false(↺ 표시 대상).
+    {
+        const rows1 = try session.buildSettingsFields(scratch.allocator());
+        try std.testing.expect(!rows1[sel].is_default);
+    }
+
+    // 리셋 → 기본값 복원 + config_removed_keys에 font.size(파일 줄 제거 예약).
+    session.resetSelectedSettingRow();
+    try std.testing.expectEqual(default_size, session.loaded_config.config.font.size);
+    var removed = false;
+    for (session.config_removed_keys.items) |k| if (std.mem.eql(u8, k, "font.size")) {
+        removed = true;
+    };
+    try std.testing.expect(removed);
+
+    // 리셋 후 다시 is_default=true(↺ 사라짐).
+    {
+        const rows2 = try session.buildSettingsFields(scratch.allocator());
+        try std.testing.expect(rows2[sel].is_default);
+    }
+}
+
 test "settings notification toggle: 데스크톱 알림을 켤 때 macOS 권한 요청 신호를 한 번 세운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -36579,7 +36853,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
     try std.testing.expect(session.takeConfigDirty());
 
     // (3) 그 행 Backspace → 빈 값(배경 없음)으로 지우기.
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     try std.testing.expectEqualStrings("", session.loaded_config.config.window_background_image);
 
     // (4) 빈 경로 provide(취소 등)는 무동작 — 직전 빈 값 유지.
@@ -36858,7 +37132,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
     // Backspace로 해제 → global_bindings에서 제거 + 줄 제거 예약 + 펜딩 rebind 취소.
     const cf2 = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf2.globalKeybindRowStart().?; // toggle_window 행
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     try std.testing.expect(command_catalog.chordForGlobalAction(session.loaded_config.global_bindings, .toggle_window) == null);
     var saw_removed = false;
     for (session.config_global_removed.items) |k| if (std.mem.eql(u8, k, "toggle_window")) {
@@ -36924,7 +37198,7 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
     _ = session.takeGlobalHotkeysDirty(); // rebind dirty 소비
     const cf2 = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf2.globalKeybindRowStart().?;
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     try std.testing.expect(session.global_hotkeys_dirty); // unbind가 dirty 세움
     try std.testing.expectEqual(@as(usize, 0), session.globalHotkeys().len); // 해제 후 빈 목록
 
@@ -37012,7 +37286,7 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
     try std.testing.expect(has_user_bind);
 
     // 이제 Backspace로 unbind → 사용자 바인딩 제거 + 빌트인 chord(Cmd+T) unbind 지시어 예약 + 줄 제거 + 펜딩 rebind 취소.
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     for (session.loaded_config.keybindings) |b| try std.testing.expect(std.meta.activeTag(b.action) != .new_term); // 사용자 바인딩 사라짐
     // 완전 해제 — chordForAction(new_term)이 null(사용자 Cmd+E 제거 + 빌트인 Cmd+T unbinds로 죽음).
     try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .new_term) == null);
@@ -37033,7 +37307,7 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
     const cf2 = try session.currentSectionFields(scratch.allocator());
     session.chrome_host.settings.selected = cf2.keybindRowStart().?;
     const len_before = session.loaded_config.keybindings.len;
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     try std.testing.expectEqual(len_before, session.loaded_config.keybindings.len); // 불변(이미 미지정)
 }
 
@@ -37146,7 +37420,7 @@ test "settings keybind unbind 다중-chord: 빌트인 chord가 2개인 액션도
     };
     session.chrome_host.settings.selected = nt_sel.?;
     session.config_keybind_unbinds.clearRetainingCapacity();
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     // 두 빌트인 chord가 모두 죽어 next_tab이 **완전히** 미지정(하나만 죽이는 회귀면 첫 chord가 남아 non-null).
     try std.testing.expect(command_catalog.chordForAction(session.loaded_config.keyBindingResolver(), .next_tab) == null);
     try std.testing.expect(session.config_keybind_unbinds.items.len >= 2); // chord 2개 다 unbind 지시어 예약
@@ -37380,7 +37654,7 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
 
     // Backspace 삭제 → FOO 제거, BAZ 유지 + dirty 제거 키.
     session.config_removed_keys.clearRetainingCapacity();
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len);
     try std.testing.expectEqualStrings("BAZ=qux", session.loaded_config.config.env[0]);
     try std.testing.expect(session.takeConfigDirty());
@@ -37398,7 +37672,7 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
         sa_sel = after_enums2 + i;
     };
     session.chrome_host.settings.selected = sa_sel.?;
-    session.deleteSelectedSettingRow();
+    session.resetSelectedSettingRow();
     try std.testing.expectEqual(@as(usize, 1), session.loaded_config.config.env.len); // 그대로
 }
 

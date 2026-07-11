@@ -148,6 +148,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 커맨드 팝업(Cmd+Shift+P) **"Reset All Settings to Defaults"**(action `reset_settings`)와 메뉴 **"Reset to Defaults"**(ABI `reset_defaults`)는 **같은 동작**이다 — 둘 다 `requestResetAll`로 확인 모달을 연 뒤, 확정 시 `resetAllSettings`가 모든 config를 **내장 기본값**으로 되돌린다(code-review #835에서 메뉴 전용 부분 갱신을 이 단일 경로로 통일). `resetAllSettings`이 ① `loaded_config.config = Config{}`(정적 기본값, 새 arena 불요)로 갈고 ② `reapplyLoadedConfig`(=`reloadConfig`와 같은 재적용 — appearance·behavior·scrollback·palette·ambiguous·사이드바)를 한 뒤 ③ **config 파일을 안내 주석만 남긴 기본 상태로 덮어쓴다**(`std.Io` createFile — 삭제가 아니라 파일·경로 보존, 사용자가 기본 상태를 보고 편집 가능). 부분 write-back이 아니라 전체 덮어쓰기인 이유: schema 키만 dirty로 찍으면 (a) 비-schema 키(`theme.preset`·`palette.N`·`env.*`·`cursor.color`·`shell.args`)가 안 지워지고 (b) override-only write-back 정책상 빈 항목까지 기본값 40여 개를 쏟는다. 빈+주석 파일 = 다음 로드에서 schema·특수 키 전부 기본값(진짜 통합 리셋). `config_dirty_keys`를 비워 Swift 부분 write-back이 끼지 않게 하고, 이후 GUI에서 값을 바꾸면 `serializeConfig`가 이 파일을 채운다(자연 복구). **확인 모달**: config 파일을 덮어쓰는 파괴적 동작이라 메뉴·팝업 둘 다 즉시 실행하지 않고 확인을 받는다(닫기 확인과 같은 `confirm` 컴포넌트, "초기화"/"취소").
 
+**세팅 모달 안 진입점(네비 맨 아래 "↺ 모든 설정 초기화")**: 리셋 로직·확인 모달은 위와 동일하되, 진입점이 커맨드 팝업·메뉴에만 있어 세팅 화면(⌘,)을 보면서는 못 찾던 발견성 문제를 해소한다(사용자 제보 "복구가 어렵다"). 좌측 Section 네비 **맨 아래**에 실제 섹션과 구분해(위 간격 + 구별색) 상시 노출하고, 클릭/Enter로 `requestResetAll`(같은 확인 모달)을 연다. 이 행은 **섹션이 아니라 액션**이므로 `buildSectionList`/`currentSectionFields`(폼 섹션 매핑)에는 넣지 않고 `buildSettingsSectionLabels`(네비 표시 라벨)에만 더한다 — 둘을 분리해, 리셋 행을 골라도 폼은 마지막 섹션을 흐리게 유지하고 활성은 네비에 있다. 컴포넌트는 config를 모르므로 platform이 `State.nav_reset_row`(리셋 행 인덱스)를 주입하고, `handle`이 네비 포커스 Enter가 그 행이면 `.reset_all` Action을 낸다(포인터 hit도 동일). 확인 모달과 세팅 모달은 둘 다 중앙 모달이라 단일-오버레이 불변식상 세팅이 닫히며 확인이 뜬다(전체 리셋은 파괴적이라 수용 — 취소해도 세팅은 닫힘).
+
 ### 6.5 ANSI 16색 팔레트 그리드(`theme.palette.0~15`) — 특수 행 (CS-4-5 첫 조각)
 
 테마 섹션 맨 아래 **"ANSI 팔레트"** 행 — 16색을 한 줄 스와치 그리드로 편집한다. `theme.palette.N`은 **schema 필드가 아니라 특수 키**(loader가 인덱스 파싱, `[16]?[]const u8`)라 자동 노출되지 않으므로 platform이 color 뒤에 **한 행**을 합성 주입한다(`SettingsSectionFields.has_palette` — theme 섹션일 때만). 16칸이라 공유 control 열에 안 들어가므로 폼 우측에 그리드 블록(`palette_grid` Kind)을 펼친다(control 열 비공유, [§6.1] tui 규율은 그대로 — 색은 `Op.swatch` 원색).
@@ -157,7 +159,8 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **선택 표식 = 인덱스 텍스트**: 우측에 **`N  #rrggbb`**(선택 ANSI 인덱스 + hex)를 보여준다. 셀 위에 `Op.border`/`fill`을 얹으면 tui lowering(`paintRectBg`가 셀 단위)이 **1행 높이라 셀 전체를 그 색으로 칠해 스와치 색을 덮으므로** 안 쓴다. 인덱스는 색과 무관하게 어느 칸인지 분명히 보여준다.
 - **영속은 공짜**: write-back(`serialize.configKeyValues`)이 **이미 set된 `theme.palette.N`을 직렬화**한다(round-trip 테스트가 보장). 그래서 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다 — `theme.preset`이 깐 팔레트도 이 그리드로 직접 칠하면 영속된다([§6.3] 한계의 직접 해소 경로).
 - **온-그리드 선택 마커**: 선택 스와치 위에 `▾` 글리프(accent text 레이어)를 얹어 어느 칸인지 보여준다 — `Op.border`/`fill`은 tui lowering(`paintRectBg` 셀 단위)이 셀 전체를 칠해 스와치 색을 덮으므로, 글리프(셀 bg=스와치 색은 거의 안 가림)로. 우측 `N  #hex` 인덱스 텍스트와 함께.
-- **한계(후속)**: 셀별 프리셋 순환(현재는 hex 입력만), null로 되돌리기(현재는 통합 리셋이 담당).
+- **셀별 기본값 되돌리기(§6.11)**: 선택 셀이 override(config에 `theme.palette.N` 있음)면 그 셀에 ↺ 어포던스가 뜬다 — 클릭/Backspace로 `theme.palette[N]=null` + `markConfigKeyRemoved(paletteKey(N))`(override 줄 제거)로 표준 xterm256 기본색으로 되돌린다(옛 "null로 되돌리기(통합 리셋이 담당)" 한계 해소).
+- **한계(후속)**: 셀별 프리셋 순환(현재는 hex 입력만).
 
 ### 6.6 셸 인자(`shell.args`) + 환경 변수(`env.<KEY>`) — 특수 행 (CS-4-5)
 
@@ -233,6 +236,23 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **멀티 모니터**: `screen=main`은 **주 디스플레이(메뉴 막대가 있는 원점 화면 = `NSScreen.screens.first`)**에 띄운다. `NSScreen.main`(키보드 포커스 창의 화면)은 글로벌 핫키 특성상 다른 앱이 전면일 때 그 화면으로 새므로 쓰지 않는다. 숨김 애니메이션은 **표시 시점에 캐시한 사각형**으로 되빠져, 표시 이후 마우스가 다른 모니터로 넘어가도(mouse 모드) 패널이 있던 화면 그대로 슬라이드 아웃한다.
 - **한계(후속)**: config를 primary 세션에서 읽으므로, **멀티 창에서 primary가 아닌 창의 세팅으로 바꾸면** 파일엔 써지지만 primary 메모리 config는 stale이라 다음 재시작·해당 창 reload 전까지 퀵 터미널에 안 보일 수 있다(세션 간 config 브로드캐스트는 별도 과제). 단일 창(주 사용 흐름)에선 완전 반영된다.
 
+### 6.11 항목별 기본값 리셋(변경된 행만 ↺) — 폼 행 어포던스
+
+전체 리셋(§6.4)은 모든 설정을 한 번에 되돌려 "이 한 항목만 되돌리기"가 안 됐다. 각 설정 행에 **그 항목만 기본값으로 되돌리는** 어포던스를 둔다(사용자 요청). VS Code 세팅처럼 **기본값과 다른(=override된) 행에만** `↺`를 상시 표시하고, 클릭 또는 Backspace로 그 항목만 복원한다. 이미 기본값인 행엔 ↺가 없다(붐빔 최소).
+
+- **"다름" 판정 = `theme.Config{}` 대비**: 기본값 단일 출처는 Zig 구조체 필드 초기화 값이다(§6.4의 `Config{}`와 같은 출처). platform이 `buildSettingsFields`에서 각 행의 현재값을 **기본 config에서 뽑은 같은 키의 값**과 비교해 `FieldRow.is_default`(true=기본과 같음)를 주입한다 — 기본 field 리스트는 `appendBoolFields`/`appendNumberFields`/… 를 `theme.Config{}`로 한 번 더 순회해 얻고 키로 룩업한다(별도 기본값 테이블 없음). 컴포넌트는 config를 모르므로 판정은 전부 platform이 하고 결과 bool만 내린다(neutral prop — `disabled`/palette 선례).
+- **리셋 = override 줄 제거(값 덮어쓰기 아님)**: 저장은 "기본값 위 override만"(§0·§6.4)이라, 항목 리셋은 파일에 `key = <default>`를 쓰지 않고 **그 override 줄을 삭제**한다 — 라이브는 setter(`setBool`/`setNumber`/`setEnumIndex`/`setText`/`setPaletteColor(null)`)로 기본값을 적용하고, 파일은 `markConfigKeyRemoved(key)`(env 삭제가 쓰는 `removeConfigLines` 체이닝, §6.6)로 그 줄을 뺀다. 그래서 리셋 후 config 파일은 그 키가 아예 없는 깨끗한 상태(다음 로드에서 기본값)가 된다.
+- **Backspace = "되돌리기"로 통일**: 폼 선택 행에서 Backspace(편집 아님)가 "그 항목 기본값 복원"이다. env/keybind/macro는 이미 Backspace=삭제였는데 그게 곧 그들의 기본값(없음)이라 의미가 자연히 일치한다 — 기존 `deleteSelectedSettingRow`를 `resetSelectedSettingRow`로 확장한다(삭제형 행=삭제, 그 외=기본값 setter + 줄 제거). 클릭 `↺`가 주 경로, Backspace가 키보드 동반.
+- **행 종류별 리셋 규칙**:
+  - scalar(bool/number/enum) → 기본 config 값으로 setter + `markConfigKeyRemoved(key)`.
+  - text(자유 문자열)·color·font.family → 기본 문자열로 `setText` + 줄 제거. 기본 색·기본 폰트 패밀리는 `theme.Config{}`에서.
+  - `theme.preset`(synthetic) → **v1 ↺ 제외**(is_default=true로 고정). 테마 되돌리기는 (a) 프리셋 드롭다운에서 기본 프리셋 선택, (b) "사용자 지정" 상태의 개별 **색 행 ↺**(프리셋 잠금이면 색·팔레트 행은 회색이라 ↺가 안 뜸 — §6.3), (c) 전체 리셋이 담당한다. 테마 전체를 되돌리는 파일 정리(모든 `theme.*`·palette override 제거)는 프리셋/follow-system과 얽혀 복잡해 v1에서 뺐다.
+  - palette 셀 → **선택 셀** override 제거(§6.5): `theme.palette[grid_cell]=null` + `markConfigKeyRemoved(paletteKey(cell))`. ↺는 선택 셀이 override일 때만.
+  - env/macro/keybind/global → 기존 삭제/해제 경로(§6.6·§6.7) = 그들의 기본값(없음/빌트인). keybind는 사용자 rebinding이 있을 때만 ↺(순수 unbind만 한 경우는 chord 기준이라 못 잡음 — 한계).
+- **인터랙션 배선**: 컴포넌트 `Action`에 `reset_field`(폼 행 ↺ 클릭 — Backspace는 기존 `delete_row`가 platform에서 같은 `resetSelectedSettingRow`로 합류), `reset_all`(§6.4 네비) 추가 → host `HostAction`(`settings_reset_field`/`settings_reset_all`) → platform dispatch(`resetSelectedSettingRow`/`requestResetAll`). `↺`는 control/grid 열 **좌단 바로 왼쪽 셀**(라벨↔control label_gap 안)에 얹어 폼 고정 폭·control rect를 안 건드린다. `handlePointer`가 그 셀 밴드를 hit-test해 `reset_field`를 낸다.
+- **라이브·영속**: 리셋도 일반 편집과 같은 `reapplyLoadedConfig`(화면 즉시 반영) + write-back 파이프라인(dirty/removed drain → Swift atomic write)을 탄다. env·shell.args·workspace.root처럼 spawn 시점에만 쓰이는 키는 라이브 재적용을 건너뛴다(§6.6과 같은 결).
+- **한계(후속)**: (1) `theme.preset` 항목 ↺(위), (2) 기본값이 빈 문자열인 schema text(font.fallback 등)는 `setText`가 빈 값을 거부해 라이브 클리어가 안 되고 override 줄만 제거된다(다음 로드에 기본값 — 대부분 필드는 비-빈 기본값이라 무관), (3) keybind 순수 unbind 되돌리기. 리셋 확인은 항목 단위라 개별 확인 모달은 두지 않는다(전체 리셋만 파괴적이라 확인).
+
 ## 7. 의존성
 
 - **S0-1b** ✅(머지) — `serialize.updateForKeys(original, config, keys)`로 **변경 키만** write-back(즉시-저장 결정에
@@ -256,6 +276,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | **CS-4-5** | write-back 연결(S0-1b ✅) + bespoke 에디터: **palette 16색 그리드 ✅**(§6.5) · **env·shell.args ✅**(§6.6, upsert; 삭제는 후속) → keybind(CS-4-3) | 헤드리스 + 실기 |
 | **CS-4-6** ✅ | **color HSV picker** — SV 그리드 + hue 스트립 + 미리보기, 세팅 모달 모드(§6.9). `color.zig` HSV↔RGB | 헤드리스 + 실기 |
 | **CS-4-7+** | (선택) picker 연속 해상도·alpha·eyedropper, 고급화 | 실기 |
+| **CS-4-8** | **기본값 리셋 UX** — 세팅 네비 맨 아래 전체 리셋 진입점(§6.4) + 변경 행 ↺ 항목별 리셋(§6.11, 리셋=override 줄 제거) | 헤드리스 + 실기 |
 
 > 시각/상호작용 PR(CS-4-0~5)은 로직을 헤드리스 단위로 고정하되, **머지 전 `zig build macos-app`로 ohah가 실기
 > 확인**한다(보이나·눌리나·드래그되나). 스키마 PR과 결정적으로 다른 점.

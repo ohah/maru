@@ -351,7 +351,9 @@ sync(2026) 게이트는 폴링 렌더 루프의 미묘한 부분이라(hold가 �
 
 **트레이드오프**: mid-sync surface로 전환하면 완성까지 직전 탭 프레임이 잠깐 보인다 — 보통 ≤1 프레임(다음 ESU), 대상 sync가 stall하면 최악 ~1초(timeout 강제 해제). 지속 blank를 sub-frame~≤1초 잔상으로 바꾸는 순개선.
 
-**루트코즈 / 후속(밴드에이드 제거)**: 세 baseline이 단일 필드인 것이 근본이다. 코어 카운터(`sync_esu_count`·`view_offset`)가 이미 per-surface인 것과 대칭으로, 이 렌더-측 baseline도 **per-surface**(각 surface가 자기 "마지막 투영" 상태를 소유)로 옮기면 전환 리셋 블록과 `Surface.id` 추적이 통째로 불필요해지고 cross-surface 오판이 **구조적으로 불가능**해진다(재발 방지) — surface detach/reattach(윈도우 이동성, [window-surface-mobility.md](window-surface-mobility.md)) 방향과도 정합. 생성/첫-활성화 시 baseline 초기화(mid-sync 상태로 처음 열려도 blank 안 나게)만 설계하면 된다. 별도 후속.
+**루트코즈 / 대안 검토(per-surface baseline은 실익 없음 — 착수 보류)**: 세 baseline이 단일 필드인 것이 오판의 **형식적** 원인이라, 렌더 baseline을 **per-surface**로 옮기면 cross-surface 오염([0]/[2]·idle 탭 esu)은 구조적으로 사라진다. 그러나 **각 surface의 reader 스레드가 배경에서 코어를 계속 진행**시키므로(`app/pty_reader.zig` `runProcessing`가 `core.write`로 `sync_esu_count`·`view_offset`를 계속 증가) 배경 surface의 render baseline은 뒤처지고, 재활성화 tick에 그 surface가 mid-sync면 `esu_advanced`가 참이 돼 **여전히 진행 중(빈) 프레임을 강제 투영**한다(Scenario A: 스트리밍 배경 탭으로 전환). 이를 막으려면 **재활성화 시 baseline을 코어값으로 리셋**해야 하는데, 이는 현재의 전환-리셋과 **동일 동작을 위치만 옮긴 것**이라(코드는 오히려 Surface로 분산) 밴드에이드를 제거하지 못한다. per-surface **무리셋**으로 코드를 줄이면 Scenario A에서 keep-last-good-frame이 깨져 **순간 blank 회귀**가 생긴다(현재 `esu>0` 회귀 테스트가 정확히 이 케이스라 무리셋 구현은 그 테스트를 깬다). **결론: 현재의 전환-시 3-baseline 리셋(+`Surface.id` ABA)이 올바른 최소 해법**이다.
+
+**순간 blank·이전-탭 잔상을 둘 다 없애는 유일한 길**은 **per-surface 마지막-완성-프레임 스냅샷**이다 — 각 surface가 활성 중 투영한 완성 프레임을 보관했다가 전환 즉시 blit(리셋·hold·blank·잔상 0, Scenario A도 무관: 항상 완성 프레임). 대신 surface당 프레임 메모리 + 투영마다 스냅샷·무효화가 필요한 큰 변경이라, **이전-탭 잔상이 실제 체감될 때만** 값어치가 있다(잔상 지속 = 대상의 한 2026 프레임 완성까지 ≈ ≤1 프레임이면 sub-perceptual; §11.6 `.sync` 로그의 hold 지속으로 실측). surface detach/reattach([window-surface-mobility.md](window-surface-mobility.md))에서 surface가 창을 이동해도, 새 세션에서 활성화 시 재활성화 리셋이 baseline을 정합시키므로 현재 밴드에이드로 커버된다.
 
 **관측/회귀**: `.sync` 로거(§11.6)의 `esuadv`/`scr`로 전환 tick의 게이트 이유를 본다(전환 직후 `gproj=0`=hold이 정상). 회귀 테스트는 `app_session.zig`에 4개 — mid-sync·완성없음(esu==0)·mid-sync·완성있음(esu>0)·스크롤된 이전 탭(view_scrolled)·이월된 hold — 음성 대조로 각 리셋의 판별력을 고정한다.
 

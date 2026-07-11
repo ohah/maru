@@ -140,7 +140,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 111;
+pub const abi_version: u32 = 112;
+// 112: Phase 4g-0 — focus-sync 불변식(§4.1) 토대: active_web_surface_id_any_kind getter 1개(활성 pane 활성 term이
+// web[browser·markdown 무관]이면 surface_id, 아니면 0). 통합 reconcileWebFocus의 Direction 1이 "활성=web이면 그 webview
+// 포커스, 아니면 터미널 뷰"를 정하는 데 쓴다. 순수 read getter만 추가 — 구조체 offset 불변. docs/web-panel.md §4.1.
 // 111: Phase 7f-2 — 새 창/팝업 대상 URL 정책 게이트: popup_target_allowed export 1개(세션리스 순수 — about·http·
 // https·빈만 허용, javascript·file·data·blob·maru-app 거부). Swift createWebViewWith가 팝업 생성 전 호출해 위험 스킴
 // 팝업을 차단한다(정책=Zig app_scheme.popupTargetAllowed 단일 출처). 신규 export만 — 구조체 offset 불변.
@@ -7530,6 +7533,16 @@ pub const AppSession = struct {
     pub fn activeWebSurfaceId(self: *AppSession) u64 {
         const term = self.activePane().activeTerm();
         if (term.kind == .web and term.web_panel_kind == .browser) return term.surfaceId();
+        return 0;
+    }
+
+    /// Phase 4g-0: 활성 pane의 활성 term이 **web term(browser·markdown 무관)** 이면 그 surface_id, 아니면 0. focus-sync
+    /// 불변식(§4.1)의 Direction 1이 "활성 pane이 web이면 그 webview를 firstResponder로" 하려고 쓴다 —
+    /// `activeWebSurfaceId`(browser 전용)와 달리 **markdown web term도 포함**한다(둘 다 WKWebView라 포커스 대상).
+    /// Swift가 surface_id→webPanels로 webview를 조회한다. terminal 활성이면 0(→터미널 뷰 포커스). 0=유효 id 아님(1부터).
+    pub fn activeWebSurfaceIdAnyKind(self: *AppSession) u64 {
+        const term = self.activePane().activeTerm();
+        if (term.kind == .web) return term.surfaceId();
         return 0;
     }
 
@@ -32143,6 +32156,42 @@ test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 
     try std.testing.expectEqual(sid, t.surface_id);
     try std.testing.expect(t.visible);
     try std.testing.expect(t.panel_kind == .browser);
+}
+
+test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal이면 0 (4g-0 헤드리스)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+
+    // 초기: 활성 term = terminal → any_kind 0(browser 전용 activeWebSurfaceId도 0).
+    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceIdAnyKind());
+    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceId());
+
+    // markdown web term 새 탭 + 활성 → any_kind = id, 하지만 browser 전용은 0(markdown이라 — 이게 4g-0의 핵심 구분).
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+    try std.testing.expectEqual(md.surfaceId(), session.activeWebSurfaceIdAnyKind());
+    try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceId());
+
+    // browser web term 새 탭 + 활성 → 둘 다 id.
+    const br = try session.createWebTerm(.browser);
+    try pane.terms.append(allocator, br);
+    session.focusTerm(pane.terms.items.len - 1);
+    try std.testing.expectEqual(br.surfaceId(), session.activeWebSurfaceIdAnyKind());
+    try std.testing.expectEqual(br.surfaceId(), session.activeWebSurfaceId());
 }
 
 // 4e-5: new_web_tab dispatch가 활성 pane에 web Term을 append+활성화(4e-1/2/3 경로 재사용)하고, tick epilogue가

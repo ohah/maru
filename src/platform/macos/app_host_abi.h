@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 111u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 112u
 
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
@@ -1047,6 +1047,11 @@ int32_t maru_macos_app_session_browser_nav(MaruAppHostSession *session, uint64_t
    performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 이 값 == 이 패널 surface_id일 때만 처리해, WKWebView 키보드
    포커스 유무와 무관하게 "지금 활성 탭이 browser면" 동작하게 게이트한다. 0은 유효 surface_id 아님(sentinel). v108. */
 uint64_t maru_macos_app_session_active_web_surface_id(MaruAppHostSession *session);
+
+/* Phase 4g-0: 활성 pane 활성 term이 web(browser·markdown 무관)이면 surface_id, 아니면 0. focus-sync 불변식(§4.1)
+   Direction 1이 "활성=web이면 그 webview 포커스, 아니면 터미널 뷰"를 정하는 데 쓴다(activeWebSurfaceId는 browser
+   전용이라 markdown 활성 시 0). 0=유효 surface_id 아님(sentinel). v112. */
+uint64_t maru_macos_app_session_active_web_surface_id_any_kind(MaruAppHostSession *session);
 
 /* Phase 7f-0: 새 창/팝업 adopt — Swift WKUIDelegate.createWebViewWith가 WebKit config로 만든 WKWebView를 붙일
    browser web Term을 활성 pane에 새 탭으로 만들고 surface_id를 반환한다(Swift-first 동기 생성). Swift는 이 id로

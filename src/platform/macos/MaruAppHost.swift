@@ -890,6 +890,11 @@ final class MaruWebPanelView: NSView {
     // → 프로퍼티 저장 + navStateDirty). config init·adopt init이 공유한다(DRY). 신뢰 패널은 주소창이 없어 no-op.
     // changeHandler는 @Sendable이라 main-actor 상태를 직접 못 건드리므로 assumeIsolated로 동기 진입한다(이 세 프로퍼티는
     // WebKit 네비게이션=메인 스레드에서만 바뀜). 토큰은 navObservers 프로퍼티가 deinit까지 붙잡아 관측을 유지한다.
+    // **13차 리뷰 [7](PLAUSIBLE) 판단**: assumeIsolated는 off-main 전달 시 trap한다는 지적. 유지 결정 — ⑴ WKWebView url/
+    // canGoBack/canGoForward는 WebKit UI-side(메인 스레드) 네비게이션에서만 갱신되고(off-main 전달 사례 미관측), ⑵
+    // assumeIsolated는 이 코드베이스의 **확립된 패턴**(NSColorSampler·애니메이션·기타 KVO 콜백 등 여러 곳 동일)이라 여기만
+    // dispatch(main)로 바꾸면 이질적, ⑶ 근거 없는 방어 코드 지양([[no-defensive-code-without-consult]]). 실제 off-main
+    // 크래시가 관측되면 그때 dispatch로 전환한다(그 시점엔 증거 있음).
     private func installNavObservers() {
         guard panelKind == 1 else { return }
         navObservers = [

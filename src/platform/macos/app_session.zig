@@ -140,7 +140,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 109;
+pub const abi_version: u32 = 110;
+// 110: set_last_window(호스트가 매 tick 주입하는 "이 세션이 앱의 마지막 일반 창인가" — Zig 리프는 형제 NSWindow를
+// 모름). 마지막 창에서 ⌘W/사이드바·탭바 ✕로 세션(창)을 닫으면 requestClose가 창 하나 닫기 대신 Cmd+Q와 동일한 종료
+// 확인("maru를 종료할까요?")을 띄운다 — 마지막 창 닫기=앱 종료라 재확인(사용자 결정 2026-07). 빨간 버튼 마지막 창도
+// Swift windowShouldClose가 NSApp.terminate로 같은 경로 합류. 순수 setter라 구조체 offset 불변.
 // 109: Phase 7f-0 — 새 창/팝업 adopt: create_adopted_web_term export 1개(Swift `WKUIDelegate.createWebViewWith`가
 // WebKit config로 만든 WKWebView를 붙일 browser web Term을 활성 pane에 새 탭으로 만들고 surface_id 반환 — Swift-first
 // 동기 생성, 소유·시점 역전). Swift가 id로 pre-created webview를 webPanels에 키잉, drain은 존재 시 중복 생성 스킵(7f-1).
@@ -1616,6 +1620,13 @@ pub const AppSession = struct {
     total_resize_events: u64 = 0,
     total_close_events: u64 = 0,
     ended_seen: bool = false,
+    // 호스트(Swift)가 매 tick 주입하는 "이 세션이 앱의 마지막(유일) 일반 창인가". Zig 리프 세션은 형제 NSWindow를
+    // 알 수 없으므로(창 개수는 platform 개념) host가 windows.count로 알려준다. true면 이 세션을 닫는 인앱 제스처
+    // (⌘W·사이드바/탭바 ✕)가 곧 앱 종료라, `requestClose`가 창 하나 닫기 대신 Cmd+Q와 **동일한** "maru를 종료할까요?"
+    // 종료 확인을 띄운다(마지막 창 닫기=모든 탭·pane 동시 소멸이라 재확인, 사용자 결정 2026-07). 기본 false — host가
+    // 갱신하기 전(테스트·런치 극초기)이나 quick 스크래치 세션(앱 종료 단위 아님)은 옛 동작(조용히 창 닫기)으로 안전
+    // 폴백한다. 단일 출처: docs/macos-app-host-boundary.md "닫기 확인".
+    is_last_window: bool = false,
     // 비정상 시작 사망으로 창을 **유지**한 상태(세션 종료 latch 대신). true면 그 latch를 재평가하지 않아 매 tick
     // notice 재표시·재판정이 없다. 새 surface가 spawn되면(`createTerm`이 모든 spawn의 단일 chokepoint) false로
     // re-arm돼, 새 세션이 정상 종료하면 다시 판정한다(held→새 셸→쓰다 종료→정상 앱 종료). `termination_finished`는
@@ -4286,7 +4297,16 @@ pub const AppSession = struct {
     /// 닫기 진입점 게이트(in-app 경로). 닫힐 대상에 실행 중 명령이 있으면 확인 모달을 띄우고 보류, 없으면 즉시 실행.
     /// 창 닫기(빨간 버튼)는 Swift 핸드셰이크가 달라 requestWindowClose가 따로 맡는다.
     fn requestClose(self: *AppSession, target: PendingClose) void {
-        if (self.closeTargetHasRunningJob(target)) {
+        const scope = self.resolveCloseScope(target); // cascade 단일 출처(판정·실행 공유). 아래 두 분기가 이 범위를 함께 쓴다.
+        // 마지막(유일) 창에서 세션 전체를 닫는 인앱 제스처는 곧 앱 종료다 — 창 하나 닫기보다 파괴적이라(열린 모든
+        // 탭·pane이 함께 소멸) Cmd+Q와 **동일하게** 실행 중 명령 유무와 무관하게 "maru를 종료할까요?" 종료 확인을 띄운다
+        // (사용자 결정 2026-07). `is_last_window`는 host가 주입한다(리프는 형제 창을 모름) — false면(멀티 창의 비-마지막
+        // 창·quick) 아래 일반 닫기 경로로 그 창만 닫는다. 단일 출처: docs/macos-app-host-boundary.md "닫기 확인".
+        if (scope == .session and self.is_last_window) {
+            self.requestAppQuit();
+            return;
+        }
+        if (self.scopeHasRunningJob(scope)) {
             self.pending_close = target;
             self.pending_reset = false; // 리셋 보류와 배타(한 번에 한 모달)
             self.showConfirm(switch (target) {
@@ -32732,6 +32752,59 @@ test "close-confirm: 명령 실행 중(OSC 133 command)이면 확인 모달을 �
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_close != null);
+}
+
+// 마지막(유일) 창에서 세션 전체를 닫는 인앱 제스처(⌘W cascade 끝)는 창 하나 닫기가 아니라 앱 종료다 — Cmd+Q와 동일한
+// "maru를 종료할까요?" 종료 확인을 실행 중 명령 유무와 무관하게 띄우고, ended_seen을 미리 latch하지 않아(취소 가능)
+// 사용자가 종료를 물릴 수 있게 한다. is_last_window는 host(Swift)가 매 tick 주입하는 값이라 테스트가 직접 세팅한다.
+test "close-confirm: 마지막 창(is_last_window)에서 세션 닫기는 Cmd+Q와 동일한 종료 확인을 띄운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 두 Term을 하나로 줄여 이제 단일 Term·단일 pane·단일 탭 = requestClose(.term_or_pane)가 .session으로 해석되게.
+    markAllTermsAtPrompt(session);
+    session.closeActiveTerm(); // 2→1 Term(닫기 확인 없이 메커니즘만)
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+
+    // 마지막 창 → 세션(창) 닫기는 앱 종료라 requestAppQuit 경로: pending_quit을 세우고 ended_seen은 latch하지 않는다.
+    // 셸이 프롬프트(실행 중 명령 없음)여도 항상 뜬다(Cmd+Q 모델 — 종료는 창 하나 닫기보다 파괴적).
+    session.is_last_window = true;
+    session.requestClose(.term_or_pane);
+    try std.testing.expect(session.pending_quit);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(!session.ended_seen); // 아직 안 닫음 — 확정 대기
+    try std.testing.expect(session.pending_close == null); // 닫기 보류가 아니라 종료 보류
+    try std.testing.expectEqual(QuitDecision.none, session.quit_decision); // 결정 전
+
+    // 모달 확정(Enter) → quit_decision=.accepted (host가 다음 tick summary로 받아 NSApp.terminate).
+    session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expectEqual(QuitDecision.accepted, session.quit_decision);
+    try std.testing.expect(!session.pending_quit);
+}
+
+// 비-마지막 창(멀티 창의 한 창·is_last_window=false, 기본값)에서 세션 닫기는 앱 종료가 아니라 그 창만 닫기다 —
+// 종료 확인 없이 세션 종료를 latch(ended_seen)해 tick의 closeWindowOrQuit이 그 창만 닫는다(앱은 계속).
+test "close-confirm: 비-마지막 창(is_last_window=false)에서 세션 닫기는 종료 확인 없이 세션 종료를 latch한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    markAllTermsAtPrompt(session);
+    session.closeActiveTerm(); // 2→1 Term
+    try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
+
+    // is_last_window=false(멀티 창의 비-마지막 창·기본값) → 이 창만 닫기: 종료 확인 안 뜨고 세션 종료 latch.
+    session.is_last_window = false;
+    session.requestClose(.term_or_pane);
+    try std.testing.expect(!session.pending_quit);
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expect(session.ended_seen); // 이 창(세션) 종료 latch — Swift가 이 창만 닫음
 }
 
 test "close-confirm: 풀스크린 TUI(alt 화면)면 셸 통합 없이도 확인 모달을 띄운다" {

@@ -1475,12 +1475,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // 빨간 닫기 버튼/창 단위 닫기 요청. 닫힐 창(세션)에 실행 중인 명령이 있으면 Zig가 확인 모달을 열고 1을
-        // 돌려준다 → false로 닫기를 보류한다(데이터 손실 방지 — iTerm2/Terminal.app/Ghostty 관례). 모달 확정 시
-        // tick의 session-ended가 closeWindowOrQuit으로 실제 창을 닫는다 — 그건 프로그래밍적 close()라 이 델리게이트가
-        // 다시 안 불려 재확인 루프가 없다. 실행 중 명령이 없으면 true(평소 닫기 → windowWillClose가 terminate/
-        // teardown). session이 없으면(quick 창 등 delegate 미사용 경로) 평소대로 닫는다.
+        // 빨간 닫기 버튼/창 단위 닫기 요청. session이 없으면(quick 창 등 delegate 미사용 경로) 평소대로 닫는다.
         guard let surface = surfaceForWindow(sender), let session = surface.appSession else { return true }
+        // 마지막(유일) 일반 창의 빨간 버튼 = 앱 종료다. 창 하나 닫기(request_window_close, 실행 중 명령 게이트)가 아니라
+        // Cmd+Q와 **동일한** 종료 확인을 띄운다 — NSApp.terminate가 applicationShouldTerminate→requestAppQuit로 모달을
+        // 연다(마지막 창 닫기=모든 탭·세션 동시 소멸이라 재확인, 사용자 결정 2026-07). 이 창 닫기는 보류(false)하고, 모달
+        // 확정 시 종료 경로(applicationWillTerminate→shutdownAppSession)가 창을 닫는다(취소면 창 유지). terminate는 다음
+        // run loop로 미뤄 should-close 질의 중 재진입을 피한다. quick은 windows에 없어 이 브랜치에 안 온다.
+        if windows.count <= 1 {
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+            return false
+        }
+        // 멀티 창의 비-마지막 창: 실행 중인 명령이 있으면 Zig가 확인 모달을 열고 1을 돌려준다 → false로 보류(데이터 손실
+        // 방지 — iTerm2/Terminal.app/Ghostty 관례). 모달 확정 시 tick의 session-ended가 closeWindowOrQuit으로 그 창만
+        // 닫는다(프로그래밍적 close()라 이 델리게이트 재호출 없음). 실행 중 명령이 없으면 true(평소 닫기 → windowWillClose).
         return maru_macos_app_session_request_window_close(session) == 0
     }
 
@@ -2270,6 +2278,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var toClose: [TerminalSurface] = []
         for surface in snapshot {
             explicitSurface = surface
+            // 마지막(유일) 일반 창 여부를 세션에 주입한다 — ⌘W/사이드바·탭바 ✕로 마지막 창 세션을 닫으면 Zig
+            // requestClose가 창 하나 닫기 대신 Cmd+Q와 동일한 종료 확인을 띄운다(is_last_window 분기). 키 경로는
+            // sendKeyEvent가 처리 직전 재주입해 창 생성 직후 프레임 갭까지 메우고, 마우스/메뉴 close는 이 tick 값을
+            // 쓴다(창 개수 변경 후 다음 tick이 먼저 돌아 실무상 최신).
+            if let s = surface.appSession {
+                maru_macos_app_session_set_last_window(s, windows.count <= 1 ? 1 : 0)
+            }
             let status = renderTick()
             explicitSurface = nil
             if status == Self.statusOK {
@@ -2292,6 +2307,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
+            // quick(스크래치 오버레이)은 앱 종료 단위가 아니다 — 항상 비-마지막(0). quick의 마지막 탭을 닫으면 종료
+            // 확인이 아니라 quick만 정리된다(tearDownQuickTerminal, 앱은 계속).
+            if let s = quick.appSession { maru_macos_app_session_set_last_window(s, 0) }
             let quickStatus = renderTick()
             explicitSurface = nil
             if quickStatus != Self.statusOK {
@@ -2379,20 +2397,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return status
     }
 
-    // Cmd+Q 종료 확인 모달의 결정을 host로 한 번 전달받아 처리한다(one-shot). applicationShouldTerminate가
-    // .terminateLater로 보류한 종료를, 사용자가 모달에서 "종료"/"취소"하면 다음 tick FrameSummary.quit_decision
-    // (1=accepted·2=cancelled)으로 와 NSApp.reply(toApplicationShouldTerminate:)로 종료를 마무리한다. 종료 확인이
-    // 떠 있는 활성 세션의 tick만 비-0을 싣고(다른 세션은 0), quitConfirmPending 가드가 단 한 번만 reply하게 한다.
+    // 종료 확인 모달의 결정을 host로 한 번 전달받아 처리한다(one-shot). 두 진입점이 같은 quit_decision을 공유한다:
+    //  (1) Cmd+Q/메뉴 Quit/Dock: applicationShouldTerminate가 .terminateLater로 종료를 보류(quitConfirmPending) →
+    //      결정이 오면 NSApp.reply로 그 보류를 마무리한다.
+    //  (2) 인앱 마지막 창 닫기(⌘W/사이드바·탭바 ✕): requestClose가 requestAppQuit으로 같은 모달을 띄웠지만 **보류된
+    //      terminate가 없다**(quitConfirmPending=false) → accept면 여기서 NSApp.terminate를 시작한다(이미 확정했으므로
+    //      bypassQuitConfirm으로 applicationShouldTerminate가 재확인 없이 .terminateNow). cancel이면 세션을 안 건드려 유지.
+    // quit_decision(1=accepted·2=cancelled)은 모달이 떠 있던 활성 세션의 tick만 비-0을 싣는다(다른 세션은 0=대기).
     private func drainQuitDecision(_ summary: MaruAppHostFrameSummary) {
-        guard quitConfirmPending else { return }
         switch summary.quit_decision {
         case 1: // accepted — 종료 진행
-            quitConfirmPending = false
-            bypassQuitConfirm = true // reply(true)가 부를 후속 terminate 경로에서 재확인 방지
-            NSApp.reply(toApplicationShouldTerminate: true)
+            if quitConfirmPending {
+                quitConfirmPending = false
+                bypassQuitConfirm = true // reply(true)가 부를 후속 terminate 경로에서 재확인 방지
+                NSApp.reply(toApplicationShouldTerminate: true)
+            } else {
+                bypassQuitConfirm = true // 이미 인앱 모달에서 종료 확정 — terminate 경로가 재확인하지 않게
+                NSApp.terminate(nil)
+            }
         case 2: // cancelled — 종료 취소, 앱 유지
-            quitConfirmPending = false
-            NSApp.reply(toApplicationShouldTerminate: false)
+            if quitConfirmPending {
+                quitConfirmPending = false
+                NSApp.reply(toApplicationShouldTerminate: false)
+            }
+            // 인앱 경로 취소: reply할 보류가 없다(Zig가 pending_quit만 내려놓고 세션은 그대로 — 앱·창 유지).
         default: // 0 = 아직 대기
             break
         }
@@ -3687,6 +3715,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
 
+        // ⌘W가 세션(창)을 닫는 판정은 동기다 — 키 처리 직전에 마지막 창 여부를 갱신해, 두 번째 창을 갓 연 직후
+        // (다음 tick이 아직 sibling 세션의 값을 0으로 갱신하기 전) ⌘W가 와도 stale=true로 잘못 종료 확인을 띄우지
+        // 않게 한다(tick 주입의 프레임 갭 보강). quick(활성일 때)은 앱 종료 단위가 아니라 항상 0.
+        maru_macos_app_session_set_last_window(appSession, (activeSurface !== quick && windows.count <= 1) ? 1 : 0)
         var keyEvent = event
         var summary = MaruAppHostFrameSummary()
         let status = maru_macos_app_session_key_down(appSession, &keyEvent, &summary)

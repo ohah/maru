@@ -101,13 +101,14 @@ pub const CellColors = struct {
     /// 배경·reverse)에 일률 적용돼 SGR/truecolor 색도 같이 흐려진다(default 배경 셀은 A=0 투명 유지 — fill과 같음).
     dim_milli: u32 = 0,
     /// per-cell 대비 하한 목표(WCAG 명암비, `theme.min-contrast`의 resolved 값). 0(기본)·1 이하 = 끔.
-    /// ANSI 16색은 resolve 시점에 선보정되지만(appearance.resolveTheme — 그쪽은 배경색·OSC 4로도 나가서
-    /// `.darken_only`), 여기 per-cell 하한은 **전경 전용이라 `.both`(양방향)**다: 밝은 배경에선 어둡게,
-    /// 어두운 배경에선 밝게. 프로그램이 직접 고른 색(256색·truecolor·ANSI16 전부)이 자기 셀 배경에서 안
-    /// 읽히는 두 방향을 모두 교정한다 — 다크용 밝은 회색 본문이 라이트 테마에서 안 보이는 경우와, 라이트용
-    /// 어두운 글자가 다크 테마에서 안 보이는 경우(실행 중 테마를 바꾼 Claude Code 세션 등 — 그 프로그램은
-    /// 시작 시 배경을 한 번 감지해 팔레트를 고정한다). packForeground가 자기 셀 배경(reverse-aware; 선택/검색
-    /// 하이라이트는 미반영 근사) 대비로 적용하고, conceal/blink-off(의도적 비표시)와 도형 글리프
+    /// packForeground가 그 셀에 **실제로 칠해지는 배경**(선택/검색 하이라이트가 있으면 그 색, 없으면
+    /// reverse-aware 자기 셀 배경) 대비로 적용한다. **어둡게** 하는 보정은 모든 전경에(라이트 배경에서 안
+    /// 보이는 밝은 색 — 다크용 밝은 회백색 본문 등), **밝히는** 보정은 좁게만 연다(metal_frame.allowLighten —
+    /// 명시 배경 없음 + truecolor/256색 cube + non-faint/non-reverse). 이 하한은 기본 3.0으로 **켜져 출고**되므로
+    /// (Ghostty의 minimum-contrast는 1=끔이 기본) 밝히는 방향을 넓게 열면 다크 테마의 ANSI 색·powerline 세그먼트·
+    /// faint가 전부 기본 설정에서 바뀐다. 좁힌 교집합이 겨냥하는 것은 라이트 전용 배색을 truecolor로 하드코딩한
+    /// 프로그램이 다크 터미널에서 본문이 묻히는 경우다(실행 중 테마를 바꾼 Claude Code 세션 등 — 그 프로그램은
+    /// 시작 시 배경을 한 번 감지해 팔레트를 고정한다). conceal/blink-off(의도적 비표시)와 도형 글리프
     /// (contrastFloorExempt — powerline/box/block 이음매)는 제외한다. app이 활성·비활성 pane CellColors에
     /// `appearance.theme.min_contrast`를 wiring한다(chrome/사이드바 텍스트는 theme 색이라 불필요).
     min_contrast: f32 = 0,
@@ -234,7 +235,7 @@ fn lerpHalf(a: color.Rgb, b: color.Rgb) color.Rgb {
 /// terminal cell의 전경 Color를 화면 RGB로 풀어 0x00RRGGBB로 packing한다. default는 theme
 /// 기본 전경, indexed는 xterm-256 팔레트, rgb는 그대로. SGR reverse(7)면 배경색을 전경으로 쓴다.
 /// SGR 2(faint)면 전경을 그 셀의 배경 쪽으로 0.5 보간해 intensity를 낮춘다.
-fn packForeground(style: terminal.Style, colors: CellColors) u32 {
+fn packForeground(style: terminal.Style, colors: CellColors, painted_bg: ?color.Rgb) u32 {
     // DECSCNM(화면 반전, G9)과 SGR reverse(7)를 XOR한다 — 둘 다 켜지면 상쇄(정상), 하나만 켜지면 스왑.
     const reverse = style.reverse != colors.screen_reverse;
     // conceal/blink-off는 "의도적 비표시"(글자=배경색)라 아래 per-cell 대비 하한을 적용하면 안 된다 —
@@ -268,27 +269,53 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
         }
         break :blk base;
     };
-    // per-cell 대비 하한(theme.min-contrast): 프로그램이 직접 고른 256색·truecolor 전경이 자기 셀 배경에서
-    // 안 읽히면 색상 보존한 채 최소한만 보정한다(color.contrastFloor — resolve 시점 ANSI16 선보정과 같은
-    // 단일 출처 수식). 방향은 **`.both`(양방향)**: 밝은 배경에선 어둡게, **어두운 배경에선 밝게**. 전경은
-    // 배경색으로 새지 않으므로 밝혀도 안전하다(팔레트 선보정은 배경·OSC 4로도 나가 `.darken_only` — appearance).
-    // 이로써 두 방향의 "테마 불일치"가 모두 교정된다: 다크용 밝은 글자가 라이트 테마에서 안 보이는 경우와,
-    // 라이트용 어두운 글자가 다크 테마에서 안 보이는 경우(예: 실행 중 테마를 바꾼 Claude Code 세션 — 그 프로그램은
-    // 시작 시 배경을 한 번 감지하고 팔레트를 고정하므로 종료 전까지 이전 테마용 색을 계속 쓴다).
-    // faint(SGR 2) 뒤에 적용한다 — 의도적 감쇠라도 "안 보임"까지는 허용하지 않는 가독성 하한이기 때문.
-    // 셀 배경은 reverse-aware 자기 셀 값(선택/검색 하이라이트는 미반영 근사 — 하이라이트 색은 theme 소유라 안전).
+    // per-cell 대비 하한(theme.min-contrast): 프로그램이 직접 고른 전경이 그 셀에서 안 읽히면 색상 보존한 채
+    // 최소한만 보정한다(color.contrastFloor — resolve 시점 ANSI16 선보정과 같은 단일 출처 수식).
+    //
+    // **기준 배경은 그 셀에 실제로 칠해지는 색**(painted_bg)이다: 선택/검색 하이라이트가 있으면 그 색, 없으면
+    // reverse-aware 자기 셀 배경. 하이라이트를 무시하고 셀 배경으로 판정하면 하이라이트 위 글자가 도리어 안
+    // 읽히게 된다(⌘F 매치 위 글자가 하이라이트 색 쪽으로 보정되던 근사 — code-review).
+    //
+    // **방향(중요)**: 어둡게 하는 방향은 늘 열려 있고(라이트 배경 — 기존 동작 그대로), **밝히는 방향은 좁게**만
+    // 연다. maru는 이 하한을 기본 3.0으로 **켜서 출고**하므로(Ghostty는 같은 기능이 minimum-contrast=1=끔이 기본),
+    // 밝히는 보정을 전 전경에 열면 그 여파가 전부 기본 설정에 떨어진다 — 다크 테마의 ANSI 색이 파스텔로 바뀌고
+    // (OSC 4는 원색을 보고해 화면-보고 계약이 깨진다), powerline 세그먼트의 검은 글자가 회색으로 뜨고, SGR 2
+    // faint가 하한에 붙어 무력화된다. 그래서 **정말로 안 보이는 곳에만** 닿게 아래 3조건을 모두 요구한다:
+    //   ① 셀 배경이 테마 기본 배경(명시 SGR 배경 셀 제외 — powerline/diff 블록의 의도한 색 조합 보존)
+    //   ② 전경이 ANSI 16색도 default도 아님(=truecolor·256색 cube만 — 번들 테마 팔레트와 OSC 4 응답 불변,
+    //      theme 전경/배경은 프리셋이 이미 조정한 값이라 안 건드린다)
+    //   ③ faint(SGR 2)가 아님(의도적 감쇠를 하한이 되돌리지 않게 — 흐린 글자는 흐린 채로 둔다)
+    // 이 교집합이 곧 목표 회귀다: 라이트 테마를 가정하고 truecolor로 색을 고른 프로그램이 다크 터미널에 놓여
+    // 본문이 배경에 묻히는 경우(실행 중 테마를 바꾼 Claude Code 세션 등 — 그런 프로그램은 시작 시 배경을 한 번
+    // 감지해 팔레트를 고정하므로 종료 전까지 이전 테마용 색을 계속 쓴다).
     const floored: color.Rgb = if (!concealed and colors.min_contrast > 1.0) flr: {
-        const cell_bg: color.Rgb = if (reverse)
+        const cell_bg: color.Rgb = painted_bg orelse if (reverse)
             resolveColor(style.foreground, colors.default_fg, colors.palette, colors.config_palette)
         else switch (style.background) {
             .default => colors.default_bg,
             else => resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette),
         };
-        break :flr color.contrastFloor(fg, color.relativeLuminance(cell_bg), colors.min_contrast, .both);
+        const dir: color.FloorDirection = if (allowLighten(style, reverse)) .both else .darken_only;
+        break :flr color.contrastFloor(fg, color.relativeLuminance(cell_bg), colors.min_contrast, dir);
     } else fg;
     // 비활성 split pane 디밍(F2-7): 최종 전경을 pane 배경 쪽으로 dim_milli만큼 흐리게(dim_milli=0이면 무변화).
     // 하한(floored) 뒤에 디밍 — 비활성 pane 감쇠는 pane 전체의 의도된 워시아웃이라 하한이 덮어쓰지 않는다.
     return packRgb(dimToward(floored, colors.default_bg, colors.dim_milli));
+}
+
+/// 이 셀에서 **밝히는 방향**(어두운 배경)의 하한을 열어도 되는가 — 근거는 packForeground의 방향 주석(①②③).
+/// 요약: 명시 SGR 배경·reverse 셀 제외(powerline/diff 블록의 의도한 색 조합 보존), ANSI 16색·default 전경 제외
+/// (번들 테마 팔레트·OSC 4 응답·theme 색 불변), faint 제외(SGR 2의 의도적 감쇠 보존). 어둡게 하는 방향은 이
+/// 게이트와 무관하게 늘 열려 있다(라이트 배경 — 기존 동작 그대로).
+fn allowLighten(style: terminal.Style, reverse: bool) bool {
+    if (reverse) return false; // 반전 셀은 전경/배경이 뒤바뀐 의도적 색 조합 — 건드리지 않는다
+    if (style.background != .default) return false; // 명시 배경 셀(SGR 4x/48) — powerline 세그먼트·diff 블록
+    if (style.dim) return false; // SGR 2 faint — 흐리게 하려는 의도를 하한이 되돌리지 않게
+    return switch (style.foreground) {
+        .rgb => true, // truecolor — 프로그램이 직접 고른 색(교정 대상)
+        .indexed => |i| i >= 16, // 256색 cube/grayscale만. 0~15(ANSI)는 테마 팔레트라 제외
+        .default => false, // theme 전경 — 프리셋이 이미 배경과 맞춰 고른 색
+    };
 }
 
 /// per-cell 대비 하한에서 제외할 "도형" 코드포인트. powerline 세그먼트·box/block 요소·legacy computing
@@ -305,13 +332,15 @@ fn contrastFloorExempt(cp: u21) bool {
 
 /// glyph 셀 전경 packing: 도형 코드포인트는 per-cell 대비 하한을 끄고(packForeground의 min_contrast
 /// 게이트 우회), 그 외는 packForeground 그대로. 셀 색 의미는 packForeground가 단일 출처다.
-fn packGlyphForeground(style: terminal.Style, colors: CellColors, codepoint: u21) u32 {
+/// `painted_bg`는 그 셀에 실제로 칠해지는 배경(선택/검색 하이라이트가 있으면 그 색) — 하한이 셀 배경이 아니라
+/// 눈에 보이는 배경 기준으로 판정하게 한다(호출자가 highlightBg로 구해 넘긴다).
+fn packGlyphForeground(style: terminal.Style, colors: CellColors, codepoint: u21, painted_bg: ?color.Rgb) u32 {
     if (colors.min_contrast > 1.0 and contrastFloorExempt(codepoint)) {
         var no_floor = colors;
         no_floor.min_contrast = 0;
-        return packForeground(style, no_floor);
+        return packForeground(style, no_floor, painted_bg);
     }
-    return packForeground(style, colors);
+    return packForeground(style, colors, painted_bg);
 }
 
 /// 텍스트 장식선(line overlay)의 화면 RGB. 전경색을 풀고, dim(SGR 2)이면 packForeground와 같은 규칙으로
@@ -327,8 +356,13 @@ fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
     // per-cell 대비 하한(theme.min-contrast): 글리프 전경(packForeground)과 같은 하한을 장식선에도 적용해
     // 보정된 글자와 그 밑줄/취소선 색이 어긋나지 않게 한다(overlay는 셀 배경을 캐리하지 않으므로 default
     // 배경 대비 — 위 dim 근사와 같은 한계·같은 이유로 허용).
+    // **방향은 `.darken_only`**: overlay가 셀 배경을 안 들고 있어서 밝히는 방향을 열면 글리프와 **어긋난다** —
+    // 예: `\e[47;30;4m`(흰 배경 + 검은 밑줄 글자)에서 글리프는 셀 배경(흰색) 기준이라 검정을 유지하는데,
+    // 장식선만 theme 배경(다크) 기준으로 밝아져 검은 글자 밑에 회색 밑줄이 그어진다(code-review). 어둡게 하는
+    // 방향은 두 경로가 같은 판정을 내므로(라이트 배경) 그대로 둔다. 한계: 다크 배경에서 밝히는 보정을 받은
+    // 글리프의 밑줄은 원색으로 남는다(글리프만 밝아짐) — 셀 배경을 overlay로 전달하는 후속에서 정리한다.
     const floored = if (colors.min_contrast > 1.0)
-        color.contrastFloor(faint, color.relativeLuminance(colors.default_bg), colors.min_contrast, .both)
+        color.contrastFloor(faint, color.relativeLuminance(colors.default_bg), colors.min_contrast, .darken_only)
     else
         faint;
     return dimToward(floored, colors.default_bg, colors.dim_milli);
@@ -411,6 +445,9 @@ pub fn buildNativeCellsSplit(
     //    있는 space는 아래 2)에서 배경 전용 cell로 처리한다.
     for (frame.glyphs) |glyph| {
         if (glyph.run.codepoint == ' ') continue;
+        // 이 셀에 실제로 칠해지는 배경(하이라이트가 있으면 그 색) — 배경 packing과 **대비 하한 판정**이
+        // 같은 색을 본다(하한이 셀 배경만 보면 하이라이트 위 글자가 도리어 안 읽히게 된다 — code-review).
+        const hl = highlightBg(colors, glyph.run.row, glyph.run.col);
         cells.appendAssumeCapacity(.{
             .row = glyph.run.row,
             .col = glyph.run.col,
@@ -425,9 +462,9 @@ pub fn buildNativeCellsSplit(
             .v0 = glyph.uv.v0,
             .u1 = colorUv(glyph.uv.u1, glyph.run.cache_key.color_glyph_kind),
             .v1 = glyph.uv.v1,
-            .foreground = packGlyphForeground(glyph.run.style, colors, glyph.run.codepoint),
-            .background = if (highlightBg(colors, glyph.run.row, glyph.run.col)) |hl|
-                0xFF00_0000 | packRgb(hl)
+            .foreground = packGlyphForeground(glyph.run.style, colors, glyph.run.codepoint, hl),
+            .background = if (hl) |bg|
+                0xFF00_0000 | packRgb(bg)
             else
                 packBackground(glyph.run.style, colors),
         });
@@ -1921,33 +1958,33 @@ test "packGlyphForeground: per-cell 대비 하한 — truecolor/256색 보정·�
     const bg_lum = color.relativeLuminance(light.default_bg);
     const near_white: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 235, .g = 235, .b = 235 } } };
     // truecolor 보정: 밝은 회색이 어두워져 배경 대비 3.0 이상 + 무채색(hue) 보존.
-    const floored = packGlyphForeground(near_white, light, 'A');
+    const floored = packGlyphForeground(near_white, light, 'A', null);
     try std.testing.expect(floored != 0xEBEBEB);
     const fr: color.Rgb = .{ .r = @intCast((floored >> 16) & 0xff), .g = @intCast((floored >> 8) & 0xff), .b = @intCast(floored & 0xff) };
     try std.testing.expect(color.contrastRatio(color.relativeLuminance(fr), bg_lum) >= 2.95);
     try std.testing.expect(fr.r == fr.g and fr.g == fr.b);
     // 256색(indexed 255 근백색 #EEEEEE)도 보정된다 — ANSI16 밖 인덱스가 게이트 밖이던 회귀의 다른 절반.
-    const idx_floored = packGlyphForeground(.{ .foreground = .{ .indexed = 255 } }, light, 'A');
+    const idx_floored = packGlyphForeground(.{ .foreground = .{ .indexed = 255 } }, light, 'A', null);
     const ir: color.Rgb = .{ .r = @intCast((idx_floored >> 16) & 0xff), .g = @intCast((idx_floored >> 8) & 0xff), .b = @intCast(idx_floored & 0xff) };
     try std.testing.expect(color.contrastRatio(color.relativeLuminance(ir), bg_lum) >= 2.95);
     // 도형 제외: powerline 세그먼트·box drawing은 원색 유지(전경=옆 셀 배경 이어붙임 이음매 보존).
-    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, light, 0xE0B0));
-    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, light, 0x2500));
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, light, 0xE0B0, null));
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, light, 0x2500, null));
     // braille(스피너)는 도형 제외가 아니라 보정 대상.
-    try std.testing.expect(packGlyphForeground(near_white, light, 0x280B) != 0xEBEBEB);
+    try std.testing.expect(packGlyphForeground(near_white, light, 0x280B, null) != 0xEBEBEB);
     // conceal(SGR 8): 글자=배경(의도적 비표시)이 하한으로 되살아나면 안 된다.
     const concealed: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 235, .g = 235, .b = 235 } }, .conceal = true };
-    try std.testing.expectEqual(packRgb(light.default_bg), packGlyphForeground(concealed, light, 'A'));
+    try std.testing.expectEqual(packRgb(light.default_bg), packGlyphForeground(concealed, light, 'A', null));
     // 끔(min_contrast=0 기본): 원색 그대로 — 기존 동작 100% 보존.
     var off_colors = light;
     off_colors.min_contrast = 0;
-    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, off_colors, 'A'));
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(near_white, off_colors, 'A', null));
     // 명시 어두운 배경 셀: 하한은 자기 셀 배경 기준이라 이미 대비 충분 → 무변경(라이트 default 배경과 무관).
     const on_dark_bg: terminal.Style = .{
         .foreground = .{ .rgb = .{ .r = 235, .g = 235, .b = 235 } },
         .background = .{ .rgb = .{ .r = 0x10, .g = 0x10, .b = 0x40 } },
     };
-    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(on_dark_bg, light, 'A'));
+    try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(on_dark_bg, light, 'A', null));
     // 다크 테마(#101010 배경) + **어두운 전경**: per-cell 하한은 양방향(.both)이라 이제 **밝히는 방향**으로
     // 보정한다 — 라이트 테마를 가정하고 색을 고른 프로그램(실행 중 테마를 바꾼 Claude Code 세션 등)의 어두운
     // 글자가 다크 배경에 묻혀 명암비 ≈1.0으로 안 보이던 회귀의 교정. 팔레트 선보정(.darken_only)과 달리
@@ -1958,14 +1995,69 @@ test "packGlyphForeground: per-cell 대비 하한 — truecolor/256색 보정·�
         .min_contrast = 3.0,
     };
     const dark_bg_lum = color.relativeLuminance(dark.default_bg);
-    const lifted = packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 'A');
+    const lifted = packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 'A', null);
     const lr: color.Rgb = .{ .r = @intCast((lifted >> 16) & 0xff), .g = @intCast((lifted >> 8) & 0xff), .b = @intCast(lifted & 0xff) };
     try std.testing.expect(lr.r > 0x1a); // 밝아졌다
     try std.testing.expect(color.contrastRatio(color.relativeLuminance(lr), dark_bg_lum) >= 2.95);
     // 다크 배경의 **밝은** 전경은 이미 대비 충분 → 무변경(양방향이어도 최소 개입 — 다크 테마 일반 텍스트 회귀 0).
-    try std.testing.expectEqual(@as(u32, 0xCCCCCC), packGlyphForeground(.{ .foreground = .default }, dark, 'A'));
+    try std.testing.expectEqual(@as(u32, 0xCCCCCC), packGlyphForeground(.{ .foreground = .default }, dark, 'A', null));
     // 다크 배경에서도 도형 글리프는 제외(이음매 보존) — 방향이 바뀌어도 면제 규칙은 그대로.
-    try std.testing.expectEqual(@as(u32, 0x1A1A1A), packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 0xE0B0));
+    try std.testing.expectEqual(@as(u32, 0x1A1A1A), packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 0xE0B0, null));
+}
+
+test "packGlyphForeground: 밝히는 방향은 좁게 — 다크 테마 기본 설정 회귀 0(ANSI16·명시 배경·faint·reverse 불변)" {
+    // 이 테스트가 증명하는 것: **밝히는 방향**(어두운 배경)이 "정말로 안 보이는 곳"에만 닿는다는 계약.
+    // maru는 min-contrast를 기본 3.0으로 **켜서** 출고하므로(Ghostty는 minimum-contrast=1=끔이 기본 —
+    // references/ghostty/src/config/Config.zig), 이 방향을 전 전경에 열면 그 여파가 전부 기본 설정에 떨어진다.
+    // 아래 네 축이 code-review가 잡은 회귀들이며, 각각 allowLighten이 막는다(metal_frame.allowLighten).
+    const dark: CellColors = .{
+        .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
+        .default_bg = .{ .r = 0x10, .g = 0x10, .b = 0x10 }, // maru 기본 다크 배경
+        .min_contrast = 3.0, // 기본값 — 사용자가 켠 게 아니라 출고 상태
+    };
+    // ① ANSI 16색 전경은 불변 — 번들 테마 팔레트 정체성과 OSC 4 질의 응답(원색 보고)이 화면과 계속 일치한다.
+    //    (blue #000080은 #101010 대비 명암비 1.19로 목표 미달이지만, 그건 테마 팔레트의 선택이라 렌더가 안 뒤집는다.)
+    try std.testing.expectEqual(packRgb(color.xterm256(4)), packGlyphForeground(.{ .foreground = .{ .indexed = 4 } }, dark, 'A', null));
+    try std.testing.expectEqual(packRgb(color.xterm256(0)), packGlyphForeground(.{ .foreground = .{ .indexed = 0 } }, dark, 'A', null));
+    // bold-is-bright로 8~15가 돼도 여전히 ANSI16 → 불변.
+    var bib = dark;
+    bib.bold_is_bright = true;
+    try std.testing.expectEqual(packRgb(color.xterm256(8)), packGlyphForeground(.{ .foreground = .{ .indexed = 0 }, .bold = true }, bib, 'A', null));
+    // ② 명시 SGR 배경 셀은 불변 — powerline/상태바의 "컬러 블록 위 검은 글자"(\e[44;30m)가 회색으로 뜨지 않는다.
+    const on_blue: terminal.Style = .{ .foreground = .{ .indexed = 0 }, .background = .{ .indexed = 4 } };
+    try std.testing.expectEqual(packRgb(color.xterm256(0)), packGlyphForeground(on_blue, dark, 'A', null));
+    // truecolor 전경이어도 명시 배경이면 마찬가지(diff 블록 등 프로그램이 의도한 색 조합 보존).
+    const dark_on_dark_bg: terminal.Style = .{
+        .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } },
+        .background = .{ .rgb = .{ .r = 0x20, .g = 0x20, .b = 0x20 } },
+    };
+    try std.testing.expectEqual(@as(u32, 0x1A1A1A), packGlyphForeground(dark_on_dark_bg, dark, 'A', null));
+    // ③ faint(SGR 2)는 불변 — 하한이 흐린 글자를 일반 글자와 같은 명암비로 끌어올려 SGR 2를 무력화하지 않는다.
+    const faint_rgb: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } }, .dim = true };
+    const faint_out = packGlyphForeground(faint_rgb, dark, 'A', null);
+    const normal_out = packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 'A', null);
+    try std.testing.expect(faint_out != normal_out); // faint가 하한에 붙어 일반과 같아지지 않는다
+    try std.testing.expectEqual(packRgb(lerpHalf(.{ .r = 0x1a, .g = 0x1a, .b = 0x1a }, dark.default_bg)), faint_out); // 순수 faint 보간 그대로
+    // ④ reverse 셀은 불변 — 전경/배경이 뒤바뀐 의도적 조합.
+    const rev: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } }, .reverse = true };
+    try std.testing.expectEqual(packRgb(dark.default_bg), packGlyphForeground(rev, dark, 'A', null)); // 전경=스왑된 배경, 하한 무동작
+}
+
+test "packGlyphForeground: 하한은 **실제로 칠해지는** 배경(선택/검색 하이라이트) 기준으로 판정한다" {
+    // 이 테스트가 증명하는 것: 하이라이트가 있는 셀에서 하한이 셀 배경이 아니라 **하이라이트 색** 대비로
+    // 판정한다는 계약. 예전엔 셀 배경만 봐서(근사), 다크 배경 기준으로 밝힌 글자가 밝은 앰버 하이라이트 위에
+    // 얹히며 오히려 안 읽히게 됐다(⌘F 매치 — code-review). 호출자(buildCells)가 highlightBg로 구해 넘긴다.
+    const dark: CellColors = .{
+        .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
+        .default_bg = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+        .min_contrast = 3.0,
+    };
+    const match_bg: color.Rgb = .{ .r = 0x99, .g = 0x77, .b = 0x22 }; // theme.search_match_current(앰버)
+    const style: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } };
+    const packed_fg = packGlyphForeground(style, dark, 'A', match_bg);
+    const rgb: color.Rgb = .{ .r = @intCast((packed_fg >> 16) & 0xff), .g = @intCast((packed_fg >> 8) & 0xff), .b = @intCast(packed_fg & 0xff) };
+    // 하이라이트(앰버) 대비로 목표를 만족해야 한다 — 그 위에 실제로 그려지는 색이므로.
+    try std.testing.expect(color.contrastRatio(color.relativeLuminance(rgb), color.relativeLuminance(match_bg)) >= 2.95);
 }
 
 test "packForeground halves a faint foreground toward the background (SGR 2)" {
@@ -1975,8 +2067,8 @@ test "packForeground halves a faint foreground toward the background (SGR 2)" {
         .default_fg = .{ .r = 255, .g = 255, .b = 255 },
         .default_bg = .{ .r = 16, .g = 16, .b = 16 },
     };
-    try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, colors));
-    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default, .dim = true }, colors));
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, colors, null));
+    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default, .dim = true }, colors, null));
 }
 
 test "unfocused dim interpolates fg and explicit bg toward default_bg, leaving default bg transparent (F2-7)" {
@@ -1986,10 +2078,10 @@ test "unfocused dim interpolates fg and explicit bg toward default_bg, leaving d
     const half: CellColors = .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 }, .default_bg = .{ .r = 16, .g = 16, .b = 16 }, .dim_milli = 500 };
 
     // dim 끔: 전경 그대로.
-    try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, off));
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), packForeground(.{ .foreground = .default }, off, null));
     // dim 50%: 흰 전경이 어두운 배경 쪽으로 절반 → 0x878787. SGR/truecolor도 같은 보간을 거친다.
-    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default }, half));
-    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } } }, half));
+    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .default }, half, null));
+    try std.testing.expectEqual(@as(u32, 0x878787), packForeground(.{ .foreground = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } } }, half, null));
 
     // 명시 배경도 디밍: 흰 배경 → 0x878787, A=0xFF 유지.
     try std.testing.expectEqual(@as(u32, 0xFF878787), packBackground(.{ .background = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } } }, half));
@@ -1998,7 +2090,7 @@ test "unfocused dim interpolates fg and explicit bg toward default_bg, leaving d
 
     // dim_milli=1000(완전): 전경이 배경색과 같아진다(완전히 사라짐).
     const full: CellColors = .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 }, .default_bg = .{ .r = 16, .g = 16, .b = 16 }, .dim_milli = 1000 };
-    try std.testing.expectEqual(@as(u32, 0x101010), packForeground(.{ .foreground = .default }, full));
+    try std.testing.expectEqual(@as(u32, 0x101010), packForeground(.{ .foreground = .default }, full, null));
 
     // 장식선(밑줄/취소선/윗줄)도 글리프와 같이 디밍돼야 한다(code-review max C3) — 안 그러면 디밍된 글자 위에서 선만 튄다.
     const line: renderer.LineOverlay = .{ .row = 0, .col = 0, .kind = .underline, .color = .default };
@@ -2012,22 +2104,22 @@ test "bold-is-bright: bold + indexed 0..7 전경만 bright(8..15)로, 그 외는
     const on: CellColors = .{ .default_fg = dfg, .bold_is_bright = true };
 
     // 끔(기본): bold여도 indexed 1은 그대로 풀린다(8로 안 올라감).
-    try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 }, .bold = true }, off));
+    try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 }, .bold = true }, off, null));
 
     // 켬 + bold + indexed 1 → bright 짝 9(=1+8).
-    try std.testing.expectEqual(packRgb(color.xterm256(9)), packForeground(.{ .foreground = .{ .indexed = 1 }, .bold = true }, on));
+    try std.testing.expectEqual(packRgb(color.xterm256(9)), packForeground(.{ .foreground = .{ .indexed = 1 }, .bold = true }, on, null));
     // 켬이지만 bold 아님 → 그대로 1(밝히지 않음).
-    try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 } }, on));
+    try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 } }, on, null));
     // 켬 + bold지만 index>=8(이미 bright/256색 cube) → 그대로(안 올림).
-    try std.testing.expectEqual(packRgb(color.xterm256(9)), packForeground(.{ .foreground = .{ .indexed = 9 }, .bold = true }, on));
-    try std.testing.expectEqual(packRgb(color.xterm256(200)), packForeground(.{ .foreground = .{ .indexed = 200 }, .bold = true }, on));
+    try std.testing.expectEqual(packRgb(color.xterm256(9)), packForeground(.{ .foreground = .{ .indexed = 9 }, .bold = true }, on, null));
+    try std.testing.expectEqual(packRgb(color.xterm256(200)), packForeground(.{ .foreground = .{ .indexed = 200 }, .bold = true }, on, null));
     // 켬 + bold지만 .default/.rgb 전경 → 안 건드림(분명한 부분집합만).
-    try std.testing.expectEqual(packRgb(dfg), packForeground(.{ .foreground = .default, .bold = true }, on));
-    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } }, .bold = true }, on));
+    try std.testing.expectEqual(packRgb(dfg), packForeground(.{ .foreground = .default, .bold = true }, on, null));
+    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } }, .bold = true }, on, null));
 
     // reverse(7) 경로엔 적용 안 함 — 배경(.default)을 전경으로 그리고 bold-is-bright는 끈다.
     const rev: CellColors = .{ .default_fg = dfg, .default_bg = .{ .r = 0x22, .g = 0x22, .b = 0x22 }, .bold_is_bright = true };
-    try std.testing.expectEqual(packRgb(.{ .r = 0x22, .g = 0x22, .b = 0x22 }), packForeground(.{ .background = .default, .bold = true, .reverse = true }, rev));
+    try std.testing.expectEqual(packRgb(.{ .r = 0x22, .g = 0x22, .b = 0x22 }), packForeground(.{ .background = .default, .bold = true, .reverse = true }, rev, null));
 }
 
 test "cursor over a space-codepoint glyph projects a solid block, not an inverted glyph" {
@@ -2071,9 +2163,9 @@ test "packRgb, packForeground, and packBackground pack channels in 0xRRGGBB orde
     try std.testing.expectEqual(@as(u32, 0x0A141E), packRgb(.{ .r = 10, .g = 20, .b = 30 }));
 
     // 전경: default는 default_fg, rgb는 그대로, indexed는 xterm256 팔레트.
-    try std.testing.expectEqual(@as(u32, 0xFF8040), packForeground(.{}, .{ .default_fg = .{ .r = 0xFF, .g = 0x80, .b = 0x40 } }));
-    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }));
-    try std.testing.expectEqual(packRgb(color.xterm256(5)), packForeground(.{ .foreground = .{ .indexed = 5 } }, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }));
+    try std.testing.expectEqual(@as(u32, 0xFF8040), packForeground(.{}, .{ .default_fg = .{ .r = 0xFF, .g = 0x80, .b = 0x40 } }, null));
+    try std.testing.expectEqual(@as(u32, 0x0A141E), packForeground(.{ .foreground = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } }, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, null));
+    try std.testing.expectEqual(packRgb(color.xterm256(5)), packForeground(.{ .foreground = .{ .indexed = 5 } }, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, null));
 
     // 배경: default는 0(A=0, "배경 없음"), indexed/rgb는 A=0xFF.
     try std.testing.expectEqual(@as(u32, 0), packBackground(.{}, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } }));
@@ -2085,18 +2177,18 @@ test "blink off-phase hides glyph (blink_on=false), shown on-phase" {
     const fg = color.Rgb{ .r = 0xFF, .g = 0xFF, .b = 0xFF };
     const bg = color.Rgb{ .r = 0x10, .g = 0x20, .b = 0x30 };
     // blink_on=false(off 위상): blink 셀의 전경을 배경색으로 → 숨김. 비-blink 셀은 영향 없음.
-    try std.testing.expectEqual(packRgb(bg), packForeground(.{ .blink = true }, .{ .default_fg = fg, .default_bg = bg, .blink_on = false }));
-    try std.testing.expectEqual(packRgb(fg), packForeground(.{}, .{ .default_fg = fg, .default_bg = bg, .blink_on = false }));
+    try std.testing.expectEqual(packRgb(bg), packForeground(.{ .blink = true }, .{ .default_fg = fg, .default_bg = bg, .blink_on = false }, null));
+    try std.testing.expectEqual(packRgb(fg), packForeground(.{}, .{ .default_fg = fg, .default_bg = bg, .blink_on = false }, null));
     // blink_on=true(on 위상, 기본): blink 셀도 정상 전경.
-    try std.testing.expectEqual(packRgb(fg), packForeground(.{ .blink = true }, .{ .default_fg = fg, .default_bg = bg, .blink_on = true }));
+    try std.testing.expectEqual(packRgb(fg), packForeground(.{ .blink = true }, .{ .default_fg = fg, .default_bg = bg, .blink_on = true }, null));
 }
 
 test "G1 conceal hides glyph by drawing foreground in the cell background color" {
     const colors: CellColors = .{ .default_fg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .default_bg = .{ .r = 0x10, .g = 0x20, .b = 0x30 } };
     // conceal: 전경을 default 배경색으로 → 안 보임.
-    try std.testing.expectEqual(packRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 }), packForeground(.{ .conceal = true }, colors));
+    try std.testing.expectEqual(packRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 }), packForeground(.{ .conceal = true }, colors, null));
     // conceal + 명시 배경: 그 배경색으로.
-    try std.testing.expectEqual(packRgb(.{ .r = 1, .g = 2, .b = 3 }), packForeground(.{ .conceal = true, .background = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } } }, colors));
+    try std.testing.expectEqual(packRgb(.{ .r = 1, .g = 2, .b = 3 }), packForeground(.{ .conceal = true, .background = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } } }, colors, null));
 }
 
 test "G9 DECSCNM screen_reverse swaps fg/bg globally (XOR with SGR reverse)" {
@@ -2106,10 +2198,10 @@ test "G9 DECSCNM screen_reverse swaps fg/bg globally (XOR with SGR reverse)" {
         .screen_reverse = true,
     };
     // 화면 반전 + default cell: 전경=배경색(0x102030), 배경=전경색(0xFFFFFF)으로 칠한다.
-    try std.testing.expectEqual(packRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 }), packForeground(.{}, colors));
+    try std.testing.expectEqual(packRgb(.{ .r = 0x10, .g = 0x20, .b = 0x30 }), packForeground(.{}, colors, null));
     try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF }), packBackground(.{}, colors));
     // SGR reverse + 화면 반전 = XOR 상쇄(정상으로 복귀): 전경=전경색, 배경=0(없음).
-    try std.testing.expectEqual(packRgb(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF }), packForeground(.{ .reverse = true }, colors));
+    try std.testing.expectEqual(packRgb(.{ .r = 0xFF, .g = 0xFF, .b = 0xFF }), packForeground(.{ .reverse = true }, colors, null));
     try std.testing.expectEqual(@as(u32, 0), packBackground(.{ .reverse = true }, colors));
 }
 
@@ -2118,8 +2210,8 @@ test "OSC 4 palette override: indexed colors resolve to override before xterm256
     palette[5] = .{ .r = 0x12, .g = 0x34, .b = 0x56 }; // 인덱스 5만 재정의
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .palette = &palette };
     // override된 인덱스 5는 그 색으로, override 없는 인덱스 6은 기본 xterm256으로(폴백).
-    try std.testing.expectEqual(packRgb(.{ .r = 0x12, .g = 0x34, .b = 0x56 }), packForeground(.{ .foreground = .{ .indexed = 5 } }, colors));
-    try std.testing.expectEqual(packRgb(color.xterm256(6)), packForeground(.{ .foreground = .{ .indexed = 6 } }, colors));
+    try std.testing.expectEqual(packRgb(.{ .r = 0x12, .g = 0x34, .b = 0x56 }), packForeground(.{ .foreground = .{ .indexed = 5 } }, colors, null));
+    try std.testing.expectEqual(packRgb(color.xterm256(6)), packForeground(.{ .foreground = .{ .indexed = 6 } }, colors, null));
     try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(.{ .r = 0x12, .g = 0x34, .b = 0x56 }), packBackground(.{ .background = .{ .indexed = 5 } }, colors));
 }
 
@@ -2135,9 +2227,9 @@ test "config palette base resolves between OSC4 override and xterm256 (OSC4 > co
     // (a) OSC4 override 없음 + config 있음 → config 색을 쓴다(xterm256 대신).
     {
         const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .config_palette = &config_palette };
-        try std.testing.expectEqual(packRgb(cfg_red), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors));
+        try std.testing.expectEqual(packRgb(cfg_red), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors, null));
         // config가 정의 안 한 인덱스 6 → 기본 xterm256으로 폴백.
-        try std.testing.expectEqual(packRgb(color.xterm256(6)), packForeground(.{ .foreground = .{ .indexed = 6 } }, colors));
+        try std.testing.expectEqual(packRgb(color.xterm256(6)), packForeground(.{ .foreground = .{ .indexed = 6 } }, colors, null));
         // 배경 경로도 config base를 쓴다(index 4).
         try std.testing.expectEqual(@as(u32, 0xFF00_0000) | packRgb(cfg_blue), packBackground(.{ .background = .{ .indexed = 4 } }, colors));
     }
@@ -2148,22 +2240,22 @@ test "config palette base resolves between OSC4 override and xterm256 (OSC4 > co
         const osc4_green: color.Rgb = .{ .r = 0x01, .g = 0x99, .b = 0x01 };
         osc4[1] = osc4_green; // OSC4가 인덱스 1을 재정의 — config(cfg_red)를 덮는다
         const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .palette = &osc4, .config_palette = &config_palette };
-        try std.testing.expectEqual(packRgb(osc4_green), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors)); // OSC4 우선
+        try std.testing.expectEqual(packRgb(osc4_green), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors, null)); // OSC4 우선
         // OSC4가 안 건드린 인덱스 4는 config base로 폴백(OSC4 없음 → config).
-        try std.testing.expectEqual(packRgb(cfg_blue), packForeground(.{ .foreground = .{ .indexed = 4 } }, colors));
+        try std.testing.expectEqual(packRgb(cfg_blue), packForeground(.{ .foreground = .{ .indexed = 4 } }, colors, null));
     }
 
     // (c) 둘 다 없으면 xterm256(기존 동작 — config_palette는 폴백 레이어일 뿐 기본 동작을 안 바꾼다).
     {
         const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } };
-        try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors));
+        try std.testing.expectEqual(packRgb(color.xterm256(1)), packForeground(.{ .foreground = .{ .indexed = 1 } }, colors, null));
     }
 
     // (d) config base는 index<16(ANSI 16색)에만 적용 — 256색 cube/grayscale(index>=16)엔 안 쓴다.
     // config_palette는 16칸이라 index>=16은 구조적으로 닿지 않지만, 그 인덱스가 xterm256으로 폴백함을 고정한다.
     {
         const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .config_palette = &config_palette };
-        try std.testing.expectEqual(packRgb(color.xterm256(200)), packForeground(.{ .foreground = .{ .indexed = 200 } }, colors));
+        try std.testing.expectEqual(packRgb(color.xterm256(200)), packForeground(.{ .foreground = .{ .indexed = 200 } }, colors, null));
     }
 }
 
@@ -2174,12 +2266,12 @@ test "SGR reverse swaps foreground and background, resolving defaults to theme c
     };
     var rev = terminal.Style{ .reverse = true };
     // default끼리 반전: 전경=theme 배경, 배경=theme 전경(A=0xFF로 실제 칠함 — 아니면 반전이 안 보임).
-    try std.testing.expectEqual(@as(u32, 0x101010), packForeground(rev, colors));
+    try std.testing.expectEqual(@as(u32, 0x101010), packForeground(rev, colors, null));
     try std.testing.expectEqual(@as(u32, 0xFFC8C8C8), packBackground(rev, colors));
     // 명시 색 반전: fg<->bg 스왑.
     rev.foreground = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } };
     rev.background = .{ .rgb = .{ .r = 9, .g = 8, .b = 7 } };
-    try std.testing.expectEqual(@as(u32, 0x090807), packForeground(rev, colors));
+    try std.testing.expectEqual(@as(u32, 0x090807), packForeground(rev, colors, null));
     try std.testing.expectEqual(@as(u32, 0xFF010203), packBackground(rev, colors));
 }
 

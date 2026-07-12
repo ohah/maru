@@ -176,10 +176,11 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
     // 대비가 약한 색을 색상 보존한 채 어둡게 보정해 가독성을 확보한다(근거·정책: docs/configuration.md theme.min-contrast).
     // **방향은 `.darken_only`** — 이 팔레트는 전경뿐 아니라 **배경**(SGR 40~47, metal_frame.packBackground)과 OSC 4 질의
     // 응답으로도 나가므로 밝히는 보정을 넣으면 다크 테마의 ANSI 배경색이 회색으로 뜬다. 어두운 배경에서 안 보이는
-    // **전경**은 렌더가 per-cell로 양방향(`.both`) 보정한다(metal_frame.packForeground — 전경은 배경으로 안 샌다).
+    // **전경**은 렌더가 per-cell로 보정하되, 그 밝히는 방향도 좁게만 연다(metal_frame.allowLighten — 명시 배경 없음 +
+    // truecolor/256색 cube + non-faint/non-reverse). **ANSI 16색은 렌더에서도 밝혀지지 않는다** — 팔레트는 프리셋의 선택이다.
     //
     // null 유지 규칙: config override가 **없고** floor가 실제로 아무것도 안 바꾼 인덱스는 null로 남긴다(그 인덱스는 렌더에서
-    // xterm256으로 폴백). 이렇게 하면 배경이 충분히 어두울 때(모든 번들 다크 프리셋 — contrastFloor 주석의 활성 경계)·
+    // xterm256으로 폴백). 이렇게 하면 배경이 충분히 어두울 때(모든 번들 다크 프리셋 — `.darken_only`의 도달 경계 밖)·
     // min_contrast=0(둘 다 floor 무동작)에선 미지정 인덱스가 전부 null로 남아 **기존 동작을 100% 보존**한다(회귀 0). floor가
     // 실제로 바꾼 default 색만 non-null로 seed해 렌더에 전달한다. 깨진 override 색은 여기서 막힌다(loader가 valid만 담지만,
     // resolve 단독 호출·테스트도 같은 게이트를 거치게 한다).

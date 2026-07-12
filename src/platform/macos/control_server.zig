@@ -1219,6 +1219,7 @@ test "§5-async stop: in-flight 요청을 cancel한다(콜백 영영 안 오는 
 // ── 전체 라이브 서버 왕복(accept 스레드 + marshal + 메인 drain + 응답) ──
 const cd = maru.session.control_dispatch;
 const cb = maru.session.control_browser; // 5f-0b-3b: browser.subscribe end-to-end 테스트(BrowserSubscribe·serializeSubscribeResponse)
+const cpg = maru.session.control_pane_grant; // 1e-confirm-1b: pane-bound confirm-grant store(drain 테스트는 빈 grant)
 const csurf = maru.session.control_surface;
 const wm = maru.session.window_membership;
 
@@ -1351,11 +1352,14 @@ fn clientReqPersistent(gpa: std.mem.Allocator, base: []const u8, key: []const u8
 /// 메인 drain 흉내(app_host_abi가 할 일): pending을 꺼내 fake snapshot + capability auth(1e `dispatchAuthenticated`)로
 /// 응답을 만들어 resolve. 실제 collector 대신 rt_snapshot, 실 CapabilityStore 대신 주입 store를 쓴다(라이브 배선은
 /// app_host_abi 테스트가 커버). store가 빈이면 nonce 없는 요청은 self, nonce 있는 요청은 default-deny(unauthorized).
+// 1e-confirm-1b: 이 fake drain 테스트는 browser 실행을 배선 안 하고 metadata/non-browser만 검증하므로 grant는 항상 빈.
+const test_no_grants: cpg.PaneGrantStore = .{};
+
 fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilityStore, snapshot: csurf.CollectorSnapshot) !usize {
     var handled: usize = 0;
     while (server.tryPopRequest()) |pending| {
         // 5f-4a-2: 세션 누적 cap 집합(serveConnection이 채운 슬라이스)을 그대로 넘긴다.
-        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, store, 0)) {
+        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, store, &test_no_grants, 0)) {
             .immediate => |resp| server.resolveRequest(pending, resp),
             // 이 fake drain은 browser 실행을 배선 안 함(라이브 marshal은 app_host_abi 5e-2a) — metadata 테스트는 .browser가
             // 안 온다. 방어: op.arg 해제 + null resolve(도달 시 test가 응답 없음으로 실패).

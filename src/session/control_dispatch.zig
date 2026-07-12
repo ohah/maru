@@ -45,6 +45,7 @@ const cs = @import("control_surface.zig");
 const wm = @import("window_membership.zig");
 const cap = @import("control_capability.zig");
 const cb = @import("control_browser.zig"); // 5e: browser.* op 산출(dispatchAuthenticated가 위임)
+const cpg = @import("control_pane_grant.zig"); // 1e-confirm-1b: pane-bound confirm-grant store(browser.* authz 가법)
 
 /// read-only 조회 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot으로 처리해 **응답 한 줄 바이트**를 만든다.
 /// 성공/에러 모두 유효한 JSON-RPC 응답 바이트(개행 없음, 프레이밍은 L4가 붙임)를 돌려준다 — OOM만 error로 전파한다
@@ -165,6 +166,7 @@ pub fn dispatchAuthenticated(
     selector: ?u64,
     cap_nonces: []const cap.Nonce, // 5f-4a: 세션 누적 cap 집합(§9.5.6 ③). 빈=cap 없음. 하나라도 인가하면 통과.
     store: *const cap.CapabilityStore,
+    grants: *const cpg.PaneGrantStore, // 1e-confirm-1b: pane-bound confirm-grant(§9.2 Model B). browser.* authz 가법 조회.
     now: u64,
 ) std.mem.Allocator.Error!AuthDispatch {
     // **먼저 파싱**한다 — browser.* 라우팅은 nonce 유무와 무관하게 method로 판정해야 한다(리뷰 [2]: cap_nonce 없는
@@ -195,7 +197,7 @@ pub fn dispatchAuthenticated(
                 }
             }
         }
-        return switch (try cb.browserOpFromRequest(gpa, req, snapshot, caps_buf[0..ncaps], now)) {
+        return switch (try cb.browserOpFromRequest(gpa, req, snapshot, caps_buf[0..ncaps], selector, grants, now)) {
             .err => |e| .{ .immediate = e },
             .op => |op| .{ .browser = op },
             .subscribe => |s| .{ .subscribe = s }, // 5f-0b-3b: 동기 구독 지시 — L4가 registry 등록
@@ -496,10 +498,13 @@ fn noncesSlice(buf: *[1]cap.Nonce, nonce: ?cap.Nonce) []const cap.Nonce {
     return &.{};
 }
 
+// 1e-confirm-1b: grant 없는 테스트용 빈 store(불변 공유). 이 파일 테스트는 cap 경로만 검증하므로 항상 빈 grant.
+const no_grants: cpg.PaneGrantStore = .{};
+
 // .immediate(응답 바이트) 기대 — 호출자 free. .browser면 op.arg free 후 실패(5e 라우팅 분리 검증).
 fn authDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *const cap.CapabilityStore) ![]u8 {
     var buf: [1]cap.Nonce = undefined;
-    switch (try dispatchAuthenticated(testing.allocator, bytes, fx, selector, noncesSlice(&buf, nonce), store, 0)) {
+    switch (try dispatchAuthenticated(testing.allocator, bytes, fx, selector, noncesSlice(&buf, nonce), store, &no_grants, 0)) {
         .immediate => |b| return b,
         .browser => |op| {
             testing.allocator.free(op.arg);
@@ -511,7 +516,7 @@ fn authDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *co
 // .browser(op) 기대 — 호출자 op.arg free. .immediate면 free 후 실패.
 fn authDispatchOp(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *const cap.CapabilityStore) !cb.BrowserOp {
     var buf: [1]cap.Nonce = undefined;
-    switch (try dispatchAuthenticated(testing.allocator, bytes, fx, selector, noncesSlice(&buf, nonce), store, 0)) {
+    switch (try dispatchAuthenticated(testing.allocator, bytes, fx, selector, noncesSlice(&buf, nonce), store, &no_grants, 0)) {
         .browser => |op| return op,
         .immediate => |b| {
             testing.allocator.free(b);
@@ -646,7 +651,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
     const nav = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"data:,x\"}}";
 
     // 집합 [metadata, browser] → browser cap이 navigate를 인가(앞의 metadata cap이 deny여도 다음 cap 시도) → .browser op.
-    switch (try dispatchAuthenticated(testing.allocator, nav, fx, null, &[_]cap.Nonce{ n_all, n_browser }, &store, 0)) {
+    switch (try dispatchAuthenticated(testing.allocator, nav, fx, null, &[_]cap.Nonce{ n_all, n_browser }, &store, &no_grants, 0)) {
         .browser => |op| testing.allocator.free(op.arg),
         .immediate => |b| {
             testing.allocator.free(b);
@@ -655,7 +660,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
         .subscribe => return error.ExpectedBrowser,
     }
     // 집합 [metadata only] → browser 인가 cap 없음 → 균일 unauthorized(.immediate 에러).
-    switch (try dispatchAuthenticated(testing.allocator, nav, fx, null, &[_]cap.Nonce{n_all}, &store, 0)) {
+    switch (try dispatchAuthenticated(testing.allocator, nav, fx, null, &[_]cap.Nonce{n_all}, &store, &no_grants, 0)) {
         .immediate => |b| {
             defer testing.allocator.free(b);
             try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(b));
@@ -668,7 +673,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
     }
     // metadata 경로도 누적: sessions.list는 metadata cap 필요. [browser, metadata:all(anchor 10)] + selector=10 → metadata 인가.
     const list = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"sessions.list\"}";
-    switch (try dispatchAuthenticated(testing.allocator, list, fx, 10, &[_]cap.Nonce{ n_browser, n_all }, &store, 0)) {
+    switch (try dispatchAuthenticated(testing.allocator, list, fx, 10, &[_]cap.Nonce{ n_browser, n_all }, &store, &no_grants, 0)) {
         .immediate => |b| {
             defer testing.allocator.free(b);
             var pm = try cp.parseMessage(testing.allocator, b);

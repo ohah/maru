@@ -11,6 +11,7 @@ const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이�
 const control_browser = maru.session.control_browser; // 5e: browser.* op·응답 직렬화(dispatchAuthenticated가 산출한 op을 marshal)
 const control_surface = maru.session.control_surface; // 1c: Surface DTO/CollectorSnapshot
 const control_capability = maru.session.control_capability; // 1e: capability fd resolve(라이브 auth 배선)
+const control_pane_grant = maru.session.control_pane_grant; // 1e-confirm: pane-bound confirm-grant store(Model B, §9.2)
 
 const c = @cImport({
     @cInclude("app_host_abi.h");
@@ -1757,6 +1758,11 @@ var control_server_active: bool = false;
 /// dispatchAuthenticated가 이 store로 nonce→scope를 resolve한다. 발급 경로가 붙으면 여기 issueForFd로 채운다.
 var control_cap_store: control_capability.CapabilityStore = .{};
 
+/// **1e-confirm(§9.2 Model B)**: pane-bound confirm-grant 라이브 store. 사용자가 확인 모달로 승인한 (pane, target,
+/// scope) grant를 저장하고, dispatchAuthenticated가 browser.* authz서 세션 cap과 **가법** 조회한다. 빈=grant 없음=
+/// (cap도 없으면) default-deny. grant 생성(확인 모달)·surface-close removeSurface 배선은 1e-confirm-1c/2. **메인 스레드 전용**(§8.8).
+var control_pane_grant_store: control_pane_grant.PaneGrantStore = .{};
+
 /// 5e-2b: browser op 큐 엔트리. `arg`는 cross_gpa 소유(method별 인자 — navigate=url·executeScript=script·getUrl=빈).
 const BrowserOpEntry = struct { async_id: u64, surface_id: u64, op_kind: u8, arg: []const u8 };
 
@@ -1853,7 +1859,7 @@ fn handleControlRequest(
     const now_ns: i128 = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
     // 5f-4a-2: 세션 누적 cap 집합(serveConnection이 auth.self+auth.grant로 채운 슬라이스, 연결 스레드 스택 소유·대기 동안 유효).
-    const disp = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, &control_cap_store, now) catch {
+    const disp = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
         server.resolveRequest(pending, null);
         return;
     };

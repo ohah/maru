@@ -1913,7 +1913,7 @@ pub export fn maru_macos_control_server_start() c_int {
         key,
         control_hello_version,
         &control_hello_caps,
-        16, // max_pending(accept 스레드 1개·in-flight ≤1이라 넉넉)
+        16, // max_pending(5f-0b-2a 연결당 스레드로 최대 max_connections=16개 동시 push 가능 → queue 용량 = 그 이상)
     ) catch |e| {
         if (std.c.getenv("MARU_DEBUG") != null) std.debug.print("[maru control] start failed base={s} key={s} err={s}\n", .{ base, key, @errorName(e) });
         return @intFromEnum(Status.create_failed);

@@ -228,13 +228,31 @@ pub fn contrastFloor(c: Rgb, bg_lum: f32, target: f32, dir: FloorDirection) Rgb 
     const darken_reaches = contrastRatio(0.0, bg_lum) >= target; // 검정까지 어둡게 하면 목표 도달(배경이 충분히 밝다)
     const lighten_reaches = dir == .both and contrastRatio(1.0, bg_lum) >= target; // 흰색까지 밝히면 도달(배경이 충분히 어둡다)
     if (!darken_reaches and !lighten_reaches) return c; // 어느 방향으로도 목표 미달 → 원본 유지
-    // 둘 다 가능한 중간 밝기 배경: 전경이 이미 있는 쪽으로(=변화가 작은 쪽). 한쪽만 가능하면 그 쪽.
-    const lighten = if (darken_reaches and lighten_reaches) c_lum >= bg_lum else lighten_reaches;
-    // 이진 탐색: amt∈[0,1](0=원본, 1=끝색). 술어("목표 충족")는 amt에 대해 false→true로 단조다 — 원본(amt=0)은
-    // 위 fast-path로 미충족이고 끝색(amt=1)은 위 가드로 충족이며, 그 사이 명암비는 교차점을 지나 단조 증가한다.
-    // lo=미충족, hi=충족을 유지하며 24회 좁히면 u8 해상도로 수렴한다.
+    // 한쪽만 가능하면 그 쪽. 둘 다 가능한 중간 밝기 배경은 **원색에서 실제로 덜 움직이는 쪽**을 고른다 —
+    // 두 후보를 다 구해 RGB 거리로 비교한다("최소 개입"을 방향 선택에도 관철; 밝기 비교로 어림하면
+    // 두 파라미터화(비율 스케일 vs 흰색 보간)의 이동량이 달라 더 크게 튀는 쪽을 고를 수 있다).
+    if (darken_reaches and lighten_reaches) {
+        const dk = searchFloor(c, bg_lum, target, false);
+        const lt = searchFloor(c, bg_lum, target, true);
+        return if (squaredDistance(c, lt) < squaredDistance(c, dk)) lt else dk;
+    }
+    return searchFloor(c, bg_lum, target, lighten_reaches);
+}
+
+/// 채널 제곱거리(색 이동량 비교용 — 방향 선택의 "덜 움직이는 쪽" 판정).
+fn squaredDistance(a: Rgb, b: Rgb) u32 {
+    const dr: i32 = @as(i32, a.r) - @as(i32, b.r);
+    const dg: i32 = @as(i32, a.g) - @as(i32, b.g);
+    const db: i32 = @as(i32, a.b) - @as(i32, b.b);
+    return @intCast(dr * dr + dg * dg + db * db);
+}
+
+/// 한 방향에서 목표 명암비에 **막 닿는 최소 변화량**을 이진 탐색한다. amt∈[0,1](0=원본, 1=끝색[검정/흰색]).
+/// 술어("목표 충족")는 amt에 대해 false→true로 단조다 — 원본(amt=0)은 호출자의 fast-path로 미충족이고
+/// 끝색(amt=1)은 도달 가드로 충족이며, 그 사이 명암비는 교차점을 지나 단조 증가한다. 24회면 u8 해상도로 수렴.
+fn searchFloor(c: Rgb, bg_lum: f32, target: f32, lighten: bool) Rgb {
     var lo: f32 = 0.0; // 원본 — 미충족
-    var hi: f32 = 1.0; // 끝색(검정/흰색) — 충족
+    var hi: f32 = 1.0; // 끝색 — 충족
     var iter: usize = 0;
     while (iter < 24) : (iter += 1) {
         const mid = (lo + hi) / 2.0;

@@ -906,8 +906,10 @@ pub const Config = struct {
     ///   ① **ANSI 16색 팔레트 선보정**(appearance.resolveTheme) — `.darken_only`. 이 팔레트는 ANSI **배경색**(SGR 40~47)과
     ///      OSC 4 질의 응답으로도 나가므로 밝히면 다크 테마 배경이 회색으로 뜬다. 그래서 다크 배경에선 무동작이다.
     ///      프리셋뿐 아니라 explicit `theme.palette.N`·xterm 기본색에도 적용된다.
-    ///   ② **렌더 per-cell 전경**(metal_frame.packForeground) — `.both`(양방향). 전경은 배경으로 안 새므로 밝혀도 안전해,
-    ///      다크 배경에서 어두운 전경(라이트 전용 배색 프로그램)도 교정한다.
+    ///   ② **렌더 per-cell 전경**(metal_frame.packForeground) — 어둡게는 모든 전경에, **밝히는 방향은 좁게**만
+    ///      (명시 배경 없음 + truecolor/256색 cube + non-faint/non-reverse — metal_frame.allowLighten). 이 게이트는
+    ///      기본 3.0으로 **켜져 출고**되므로(Ghostty의 minimum-contrast는 1=끔이 기본) 밝히는 보정을 넓게 열면 다크
+    ///      테마의 ANSI 색·powerline 세그먼트·faint가 전부 기본 설정에서 바뀐다.
     /// theme의 배경·전경(default)·커서·선택색 자체는 불변이다(그 색은 프리셋이 이미 조정). loader가 `theme.min-contrast`
     /// 파싱(스키마-주도). 근거·트레이드오프: docs/configuration.md `theme.min-contrast`.
     theme_min_contrast: f32 = theme_min_contrast_default,

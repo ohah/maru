@@ -2015,6 +2015,48 @@ pub export fn maru_macos_control_push_browser_navigated(surface_id: u64, url_ptr
     _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .{ .navigated = url });
 }
 
+/// 5f-3a: Swift가 WKWebView `isLoading` KVO(메인)에서 호출 — `browser.loadState` 이벤트(`loading`!=0 → loading, else idle)를
+/// 구독자에 push. navigated와 동형(coalescible KVO 이벤트). 서버 미시작/무구독이면 무비용. **메인 스레드 전용**.
+pub export fn maru_macos_control_push_browser_load_state(surface_id: u64, loading: u8) void {
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .{ .load_state = if (loading != 0) .loading else .idle });
+}
+
+/// 5f-3b: Swift `WKUIDelegate`(runJavaScript{Alert,Confirm,TextInput}Panel, 메인)에서 호출 — `browser.dialog` 이벤트
+/// (`kind`: 0=alert·1=confirm·2=prompt, `message`=JS 다이얼로그 메시지)를 구독자에 push. 이산 이벤트(비-coalescible). `message`는
+/// 이 호출 중만 유효(pushEvent가 복사). 미지 kind는 alert로 폴백. 서버 미시작/무구독이면 무비용. **메인 스레드 전용**.
+pub export fn maru_macos_control_push_browser_dialog(surface_id: u64, kind: u8, message_ptr: ?[*]const u8, message_len: usize) void {
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    const message: []const u8 = if (message_ptr) |p| p[0..message_len] else "";
+    const dk: maru.session.control_events.DialogKind = switch (kind) {
+        1 => .confirm,
+        2 => .prompt,
+        else => .alert,
+    };
+    _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .{ .dialog = .{ .kind = dk, .message = message } });
+}
+
+/// 5f-3c: Swift `WKNavigationDelegate.webViewWebContentProcessDidTerminate`(메인)에서 호출 — `browser.crashed` 이벤트를
+/// 구독자에 push(추가 payload 없음). 이산. 서버 미시작/무구독이면 무비용. **메인 스레드 전용**.
+pub export fn maru_macos_control_push_browser_crashed(surface_id: u64) void {
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .crashed);
+}
+
+/// 5f-3d: Swift가 web surface 소멸(패널 close) **직전**에 호출 — `browser.closed` 이벤트를 구독자에 push한 **뒤** 그 surface의
+/// 구독을 정리한다(§9.5.2 surface close). closed는 마지막 프레임이라 큐에 남아 배달되고(제거 전 push), 이후 `purgeSurface`가
+/// broker 구독 제거 + 잔여 이벤트 프레임 폐기(그 사이 push된 closed 프레임 포함될 수 있으나 outbound.close→writer drain이 배달).
+/// 서버 미시작이면 무동작. **메인 스레드 전용**.
+pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .closed); // 마지막 closed 이벤트(구독 제거 전)
+    _ = server.subscriber_reg.removeSurfaceSubs(surface_id); // 이후 그 surface 매칭 중단(broker만 — closed 프레임은 큐서 배달)
+}
+
 pub export fn maru_macos_control_server_stop() void {
     if (!control_server_active) return;
     control_server_active = false;

@@ -284,6 +284,7 @@ pub const Server = struct {
             break rc;
         };
         errdefer _ = c.close(cfd); // reject/실패 시 연결을 닫는다
+        setNoSigPipe(cfd); // 5f-3: 서버-발신 이벤트 write가 닫힌 소켓에 SIGPIPE 대신 EPIPE(프로세스 사망 방지). hello write 전에.
 
         // peer uid 검증(§8.2) — 파일 권한에만 의존하지 않는 하드 게이트. 불일치면 연결 종료.
         var euid: posix.uid_t = undefined;
@@ -345,6 +346,20 @@ pub const Server = struct {
 pub fn setReadTimeoutMs(fd: c.fd_t, ms: u32) void {
     var tv = posix.timeval{ .sec = @intCast(ms / 1000), .usec = @intCast((ms % 1000) * 1000) };
     _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, &tv, @sizeOf(posix.timeval));
+}
+
+/// accepted 연결 fd에 `SO_NOSIGPIPE`를 건다(5f-3 서버 SIGPIPE 방어). **왜 필요한가**: 5f-3부터 writer 스레드가 요청 없이도
+/// **서버-발신 이벤트**(browser.navigated/loadState/dialog/…)를 push하는데, 구독한 client가 이벤트 수집 후 연결을 닫으면
+/// 다음 write(2)가 **SIGPIPE**를 올려 프로세스가 죽는다(응답만 있던 5e까진 client가 항상 응답을 읽고 닫아 write-to-closed가
+/// 없었다). SO_NOSIGPIPE면 그 write가 SIGPIPE 대신 EPIPE를 돌려주고 `writeAll`이 `WriteFailed`로 접어 writer가 outbound를
+/// close(연결 teardown)한다. best-effort(실패 무시). acceptOne이 accept 직후 건다(hello·응답·이벤트 write 전부 보호).
+pub fn setNoSigPipe(fd: c.fd_t) void {
+    // SO_NOSIGPIPE는 **Darwin 전용**(Linux는 send()의 MSG_NOSIGNAL로 처리). 이 파일은 macOS 런타임 전용이나 `zig build test`가
+    // app_host_abi를 native(Linux) 컴파일하므로, comptime os 가드로 비-macOS서 c.SO.NOSIGPIPE 심볼 미해석(dead branch 미분석).
+    if (builtin.os.tag == .macos) {
+        var on: c_int = 1;
+        _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, &on, @sizeOf(c_int));
+    }
 }
 
 /// accepted 연결 fd에 write 타임아웃(SO_SNDTIMEO)을 건다 — read 타임아웃과 **대칭**인 correctness 요건(#2). **왜

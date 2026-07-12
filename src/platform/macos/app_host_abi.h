@@ -1149,4 +1149,16 @@ size_t maru_macos_control_socket_path(uint8_t *out, size_t out_cap);
    구독자 없으면 무비용 조기 반환(match-first). 서버 미시작이면 무동작. url은 이 호출 중만 유효(내부서 프레임에 복사). 메인 스레드만. */
 void maru_macos_control_push_browser_navigated(uint64_t surface_id, const uint8_t *url_ptr, size_t url_len);
 
+/* 5f-3a: isLoading KVO → browser.loadState(loading!=0 → loading, else idle). 메인 스레드만. */
+void maru_macos_control_push_browser_load_state(uint64_t surface_id, uint8_t loading);
+
+/* 5f-3b: WKUIDelegate JS 다이얼로그 → browser.dialog(kind: 0=alert·1=confirm·2=prompt, message). 메인 스레드만. */
+void maru_macos_control_push_browser_dialog(uint64_t surface_id, uint8_t kind, const uint8_t *message_ptr, size_t message_len);
+
+/* 5f-3c: webViewWebContentProcessDidTerminate → browser.crashed. 메인 스레드만. */
+void maru_macos_control_push_browser_crashed(uint64_t surface_id);
+
+/* 5f-3d: web surface 소멸 직전 → browser.closed 이벤트 push 후 그 surface 구독 정리. 메인 스레드만. */
+void maru_macos_control_push_browser_closed(uint64_t surface_id);
+
 #endif

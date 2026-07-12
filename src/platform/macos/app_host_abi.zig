@@ -1852,7 +1852,14 @@ fn handleControlRequest(
     // expires_at을 계산하면 정합한다(코드베이스가 이미 std.Io.Clock.awake를 uptime에 씀). store가 빈 지금은 TTL 미사용.
     const now_ns: i128 = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
-    const disp = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, &control_cap_store, now) catch {
+    // 5f-4a: 세션 cap 집합. 5f-4a-1은 단일 cap_nonce를 0/1-요소 슬라이스로(behavior-preserving) — 5f-4a-2가 serveConnection
+    // 누적으로 다중 cap 슬라이스를 채운다. buf는 이 함수 스택(dispatchAuthenticated 호출 중 유효).
+    var nonce_buf: [1]control_capability.Nonce = undefined;
+    const cap_nonces: []const control_capability.Nonce = if (pending.cap_nonce) |n| blk: {
+        nonce_buf[0] = n;
+        break :blk nonce_buf[0..1];
+    } else &.{};
+    const disp = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, cap_nonces, &control_cap_store, now) catch {
         server.resolveRequest(pending, null);
         return;
     };

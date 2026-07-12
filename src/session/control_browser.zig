@@ -344,7 +344,7 @@ pub fn dispatchBrowser(
     gpa: std.mem.Allocator,
     request_bytes: []const u8,
     snapshot: cs.CollectorSnapshot,
-    caller_cap: ?capmod.Capability,
+    caller_caps: []const capmod.Capability,
     now: u64,
 ) std.mem.Allocator.Error!BrowserDispatch {
     // ── 1. parse. 실패는 JSON-RPC 관례대로 id=null 에러 응답으로 접는다(OOM만 전파). ──
@@ -359,7 +359,7 @@ pub fn dispatchBrowser(
         .request => |r| r,
         else => return .{ .err = try errorResponse(gpa, .null, .invalid_request) },
     };
-    return browserOpFromRequest(gpa, req, snapshot, caller_cap, now);
+    return browserOpFromRequest(gpa, req, snapshot, caller_caps, now);
 }
 
 /// dispatchBrowser의 **파싱된 req** 버전(steps 2~8). `dispatchAuthenticated`(1e)가 이미 파싱한 req로 직접 호출해
@@ -369,7 +369,7 @@ pub fn browserOpFromRequest(
     gpa: std.mem.Allocator,
     req: cp.Request,
     snapshot: cs.CollectorSnapshot,
-    caller_cap: ?capmod.Capability,
+    caller_caps: []const capmod.Capability,
     now: u64,
 ) std.mem.Allocator.Error!BrowserDispatch {
     // ── 2. parseMethod 라우팅(§4.1). 방어: 라우터가 browser.* 만 이 함수로 보내지만, core != browser면 거부. ──
@@ -380,12 +380,20 @@ pub fn browserOpFromRequest(
     //       oracle이 아니라 요청 형식 오류다(session.get과 동일) → invalid_params. ──
     const target_id = readIdParam(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
 
-    // ── 4. authz(§8.3 균일 unauthorized — 존재검사 이전, deny 이유 절대 노출 금지). ──
-    const caller = caller_cap orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
-    switch (capmod.authorize(caller, target_id, caller.generation, req.method, now)) {
-        .granted => {},
-        .deny => return .{ .err = try errorResponse(gpa, req.id, .unauthorized) },
+    // ── 4. authz(§8.3 균일 unauthorized — 존재검사 이전, deny 이유 절대 노출 금지). **5f-4a cap 누적**(§9.5.6 ③):
+    //       세션 보유 cap 중 **하나라도** target+method를 인가하면 통과(각 cap은 single-scope이나 세션은 다중 cap 보유 —
+    //       navigate=browser·getCookies=browser_storage가 각기 다른 cap으로 인가). 아무 cap도 없으면 균일 unauthorized. ──
+    var authorized = false;
+    for (caller_caps) |cap| {
+        switch (capmod.authorize(cap, target_id, cap.generation, req.method, now)) {
+            .granted => {
+                authorized = true;
+                break;
+            },
+            .deny => {}, // 이 cap은 인가 못 함 → 다음 cap 시도(oracle 방지=이유 안 노출)
+        }
     }
+    if (!authorized) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
 
     // ── 5. BrowserMethod 파싱(authz 뒤 — 미인가 caller가 메서드 탐침 못 하게). 5a 미구현(screenshot 등) → method_not_found. ──
     const bmethod = parseBrowserMethod(method.rest) orelse return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
@@ -447,9 +455,20 @@ fn browserCap(sid: u64) capmod.Capability {
     return .{ .surface_id = sid, .generation = 0, .scope = .browser };
 }
 
+// 5f-4a: 단일 cap(또는 null)을 dispatchBrowser의 cap **집합** 슬라이스로(누적 시그니처 테스트 어댑터). 슬라이스는 `buf`
+// 수명 안에서만 유효(호출 중). null=빈 집합=cap 없음.
+fn capsSlice(buf: *[1]capmod.Capability, cap: ?capmod.Capability) []const capmod.Capability {
+    if (cap) |c| {
+        buf[0] = c;
+        return buf[0..1];
+    }
+    return &.{};
+}
+
 // 게이트 실패(.err) 기대 — 응답 바이트(호출자 free). .op면 op.arg free 후 실패.
 fn dispatchErr(bytes: []const u8, cap: ?capmod.Capability) ![]u8 {
-    switch (try dispatchBrowser(testing.allocator, bytes, fx, cap, 0)) {
+    var buf: [1]capmod.Capability = undefined;
+    switch (try dispatchBrowser(testing.allocator, bytes, fx, capsSlice(&buf, cap), 0)) {
         .err => |e| return e,
         .op => |op| {
             testing.allocator.free(op.arg);
@@ -460,7 +479,8 @@ fn dispatchErr(bytes: []const u8, cap: ?capmod.Capability) ![]u8 {
 }
 // 게이트 통과(.op) 기대 — op(호출자 op.arg free). .err면 free 후 실패.
 fn dispatchOp(bytes: []const u8, cap: ?capmod.Capability) !BrowserOp {
-    switch (try dispatchBrowser(testing.allocator, bytes, fx, cap, 0)) {
+    var buf: [1]capmod.Capability = undefined;
+    switch (try dispatchBrowser(testing.allocator, bytes, fx, capsSlice(&buf, cap), 0)) {
         .op => |op| return op,
         .err => |e| {
             testing.allocator.free(e);
@@ -539,7 +559,7 @@ test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
     var cap = browserCap(11);
     cap.expires_at = 100;
     // now=100 >= exp=100 → expired → unauthorized(균일, .err).
-    switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, cap, 100)) {
+    switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, &[_]capmod.Capability{cap}, 100)) {
         .err => |wire| {
             defer testing.allocator.free(wire);
             try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
@@ -551,7 +571,7 @@ test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
         .subscribe => unreachable, // navigate 요청이라 subscribe 안 옴
     }
     // 대조: now=99 < exp면 만료 아님 → 게이트 통과해 **op**라야 이 테스트가 만료를 실제로 검사.
-    switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, cap, 99)) {
+    switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, &[_]capmod.Capability{cap}, 99)) {
         .op => |op| testing.allocator.free(op.arg),
         .err => |wire| {
             testing.allocator.free(wire);
@@ -583,7 +603,7 @@ test "dispatchBrowser: 유효 browser cap + web surface → BrowserOp{surface_id
 // ── 5f-0b-3b: browser.subscribe — async op이 아니라 동기 `.subscribe`(surface + 필터). L4가 registry 등록. ──
 test "dispatchBrowser(5f-0b-3b): 유효 browser cap + web surface → .subscribe{surface, filter}" {
     // events 없음 → 전체 필터.
-    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11}}", fx, browserCap(11), 0)) {
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11}}", fx, &[_]capmod.Capability{browserCap(11)}, 0)) {
         .subscribe => |s| {
             try testing.expectEqual(@as(u64, 11), s.surface_id);
             try testing.expect(s.filter.wants(.navigated) and s.filter.wants(.load_state) and s.filter.wants(.dialog)); // all
@@ -598,7 +618,7 @@ test "dispatchBrowser(5f-0b-3b): 유효 browser cap + web surface → .subscribe
         },
     }
     // events=["navigated","dialog"] → 그 둘만(loadState 제외).
-    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"navigated\",\"dialog\"]}}", fx, browserCap(11), 0)) {
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"navigated\",\"dialog\"]}}", fx, &[_]capmod.Capability{browserCap(11)}, 0)) {
         .subscribe => |s| {
             try testing.expect(s.filter.wants(.navigated) and s.filter.wants(.dialog));
             try testing.expect(!s.filter.wants(.load_state)); // 필터됨
@@ -635,7 +655,7 @@ test "dispatchBrowser(5f-0b-3b): subscribe events:[] 빈 배열 → invalid_para
 
 test "dispatchBrowser(5f-0b-3b): subscribe events 중복 이름 → dedup되어 정상 .subscribe(길이 제한 없음, 20차 [1])" {
     // navigated 6회 반복(EventKind 5종보다 많음) — 옛 고정 5-버퍼면 invalid_params였으나 마스크 누적은 dedup해 정상.
-    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"navigated\",\"navigated\",\"navigated\",\"navigated\",\"navigated\",\"navigated\"]}}", fx, browserCap(11), 0)) {
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"navigated\",\"navigated\",\"navigated\",\"navigated\",\"navigated\",\"navigated\"]}}", fx, &[_]capmod.Capability{browserCap(11)}, 0)) {
         .subscribe => |s| {
             try testing.expect(s.filter.wants(.navigated));
             try testing.expect(!s.filter.wants(.dialog)); // navigated만

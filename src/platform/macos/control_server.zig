@@ -1329,7 +1329,12 @@ fn clientReqPersistent(gpa: std.mem.Allocator, base: []const u8, key: []const u8
 fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilityStore, snapshot: csurf.CollectorSnapshot) !usize {
     var handled: usize = 0;
     while (server.tryPopRequest()) |pending| {
-        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, store, 0)) {
+        var nonce_buf: [1]cap.Nonce = undefined; // 5f-4a: 단일 cap_nonce를 dispatchAuthenticated의 cap 집합 슬라이스로(5f-4a-1)
+        const cap_nonces: []const cap.Nonce = if (pending.cap_nonce) |n| blk: {
+            nonce_buf[0] = n;
+            break :blk nonce_buf[0..1];
+        } else &.{};
+        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, cap_nonces, store, 0)) {
             .immediate => |resp| server.resolveRequest(pending, resp),
             // 이 fake drain은 browser 실행을 배선 안 함(라이브 marshal은 app_host_abi 5e-2a) — metadata 테스트는 .browser가
             // 안 온다. 방어: op.arg 해제 + null resolve(도달 시 test가 응답 없음으로 실패).

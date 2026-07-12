@@ -447,11 +447,12 @@ pub fn serveReadOnly(
     }
 }
 
-/// 코드의 default message로 에러 응답 한 줄(+종단 `\n`)을 conn에 쓴다(1a `serializeError` 재사용). serveReadOnly의
-/// payload-too-large 경로 편의 — id를 아직 못 읽었으므로 `.null`(JSON-RPC 관례, 1a와 동일). A2b `control_server.readFrame`도
-/// PayloadTooLarge 시 이 함수로 같은 payload_too_large(-32001) 응답을 쓴다(§4.3 응답 계약 단일 출처 — pub, #3).
+/// 코드의 default message로 에러 응답 한 줄(+종단 `\n`)을 conn에 쓴다(1a `serializeErrorDefault` 재사용 — id 파싱 전
+/// 거부 응답의 단일 출처, 19차 [5]). serveReadOnly의 payload-too-large 경로 편의. A2b `control_server.readFrame`은 소켓
+/// 직접 write가 아니라 **outbound 큐에 push**하므로 이 함수가 아니라 같은 `cp.serializeErrorDefault`를 직접 호출한다(단일
+/// 출처는 바이트 직렬화 헬퍼이지 이 write 래퍼가 아님 — writer 스레드와의 단일 writer 불변 때문).
 pub fn writeErrorResponse(fd: c.fd_t, gpa: std.mem.Allocator, code: cp.ErrorCode) ServeError!void {
-    const bytes = cp.serializeError(gpa, .null, code, code.defaultMessage(), null) catch return error.OutOfMemory;
+    const bytes = cp.serializeErrorDefault(gpa, code) catch return error.OutOfMemory;
     defer gpa.free(bytes);
     try writeAll(fd, bytes);
     try writeAll(fd, "\n");

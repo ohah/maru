@@ -45,6 +45,10 @@ const wm = @import("window_membership.zig");
 /// 주입된 nonce를 hash·비교만 한다(테스트는 고정 nonce).
 pub const nonce_len = 32;
 pub const Nonce = [nonce_len]u8;
+
+/// 5f-4a 세션 cap 누적 상한(§9.5.6 ③). 한 지속 세션이 `auth.grant`로 축적할 수 있는 cap 수 — 실무상 scope 수만큼(browser·
+/// browser_storage·metadata 등 소수)이라 8이면 충분. 연결(serveConnection)이 이 상한으로 bound하고, dispatch의 resolve 버퍼도 이 크기.
+pub const max_session_caps: usize = 8;
 /// server-side 저장 키 = SHA-256(nonce). **raw nonce는 절대 저장하지 않는다**(§8.5).
 pub const Hash = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 
@@ -373,6 +377,27 @@ pub fn resolve(
         .granted => .{ .granted = .{ .surface_id = cap.surface_id, .generation = cap.generation, .scope = cap.scope } },
         .deny => .unauthorized, // 이유를 버리고 균일 unauthorized로 접는다(§8.3 oracle 방지).
     };
+}
+
+/// 5f-4a cap 누적(§9.5.6 ③): 세션이 보유한 **여러** nonce 중 **하나라도 인가하면 granted**(첫 granted 반환). 지속 세션이
+/// `auth.grant`로 cap을 누적해 다중 scope(navigate=`browser`+getCookies=`browser_storage`)를 쓰되, **각 cap은 single-scope
+/// 불변 유지**(union은 여전히 한 scope). 미인가는 **균일 unauthorized**(어느 cap이 왜 deny됐는지·존재 여부 노출 안 함 — §8.3
+/// oracle 방지, `resolve`와 동형). `nonces` 빈=cap 없음=unauthorized. anchor/gen/method/now는 모든 cap에 동일 적용.
+pub fn resolveAny(
+    store: *const CapabilityStore,
+    nonces: []const Nonce,
+    requested_surface_id: u64,
+    requested_generation: u64,
+    method: []const u8,
+    now: u64,
+) Resolution {
+    for (nonces) |nonce| {
+        switch (resolve(store, nonce, requested_surface_id, requested_generation, method, now)) {
+            .granted => |g| return .{ .granted = g },
+            .unauthorized => {}, // 이 cap은 인가 못 함 → 다음 cap 시도
+        }
+    }
+    return .unauthorized;
 }
 
 // ══ 테스트(헤드리스, Linux CI 포함 — 순수 로직·소켓/fd/실 crypto-random 0. 고정 nonce) ═════════════════════

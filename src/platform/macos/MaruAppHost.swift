@@ -764,7 +764,8 @@ enum BrowserControl {
 // main-actor 상태를 안 건드리는 순수 C 소켓 I/O라 파일 스코프 nonisolated 자유 함수다(배경 큐에서 실행 — 메인 tick이
 // 계속 돌며 marshal/complete해야 하므로 **메인을 블로킹하면 안 됨**). wire 포맷 단일 출처=Zig control_plane
 // (serializeAuthSelf)·control_browser(browser.* params) — 여기 문자열은 그 계약을 미러링한 테스트 클라이언트다.
-// **서버는 연결당 요청 1개**(control_server serveConnection: auth+요청 1개 → 응답 → close)라 요청마다 **새 연결**을 연다.
+// 서버는 지속 세션(5f-0b-2b-1: auth 1회+요청 루프)을 지원하지만, 이 테스트 클라는 **단순성 위해 요청마다 새 연결**을 연다
+// (한 요청 후 close → 서버 루프가 EOF로 그 연결 종료). 지속 연결 재사용은 후속(이 스모크엔 불요).
 // 반환: (navigateOk="true"/진단, getUrl=data: URL 또는 진단). 실패(connect/타임아웃)는 진단 문자열로 남긴다(스모크는
 // display 필요라 CI 비게이트 — 값 기록이 목적). socketPath=바인딩 경로, sid=web 패널 surface_id, nonceHex=cap nonce(64 hex).
 private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonceHex: String, navigateURL: String) -> (navigateOk: String, getUrl: String) {
@@ -810,7 +811,7 @@ private func browserCtlResult(_ line: String) -> [String: Any]? {
 private enum BrowserCtlReqResult { case ok(String); case err(String) }
 
 // 5e-2b-2(테스트 전용): 컨트롤 소켓에 **한 번** 붙어 auth 프레임 + 요청 프레임을 보내고 응답 한 줄(hello notification
-// 스킵)을 돌려준다. 서버가 연결당 요청 1개라 이 함수가 요청 하나 = 연결 하나. `SO_NOSIGPIPE`로 broken pipe가 앱을
+// 스킵)을 돌려준다. 이 함수는 요청 하나 = 연결 하나(테스트 단순성 — 서버는 지속 세션도 지원, 5f-0b-2b-1). `SO_NOSIGPIPE`로 broken pipe가 앱을
 // 죽이지 않게 한다(write는 -1/EPIPE로 접힘). 수신 타임아웃 2s. 실패는 `.err(진단)`.
 private func browserCtlOneRequest(socketPath: String, authFrame: String, requestFrame: String) -> BrowserCtlReqResult {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)

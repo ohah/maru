@@ -46,9 +46,9 @@ const cev = @import("control_events.zig"); // 5f-0b-3b: browser.subscribe params
 
 // ── ① browser.* wire 스키마(§9.1 ①) ──────────────────────────────────────────────────────────────────────
 
-/// `browser.*` 메서드(§9 표). **5a 구현 범위**(사용자 결정 2026-07-10)는 핵심 3개만 — 나머지(screenshot/back/
-/// forward/refresh/findElement/click/sendKeys/getCookies)는 5d에서 이 enum에 추가된다. `parseBrowserMethod`가
-/// 인식 못 하면(screenshot 등) dispatch가 `method_not_found`로 접는다.
+/// `browser.*` 메서드(§9 표). 5a=핵심 3개(navigate/getUrl/executeScript), 5f-0b-3b=subscribe, **5f-4c=getCookies**
+/// (§9.4 D5 `browser_storage` scope). 나머지(screenshot/back/forward/refresh/findElement/click/sendKeys)는 후속에서
+/// 이 enum에 추가된다. `parseBrowserMethod`가 인식 못 하면(screenshot 등) dispatch가 `method_not_found`로 접는다.
 pub const BrowserMethod = enum {
     /// `browser.navigate {id, url}` → 5d `load(URLRequest)`.
     navigate,
@@ -59,6 +59,10 @@ pub const BrowserMethod = enum {
     /// `browser.subscribe {id, events?}`(5f-0b-3b) → **동기 registry 구독**(async op 아님). L4가 SubscriberRegistry에
     /// 등록하고 `{subscriber_id}` 응답. events 없으면 전체, 있으면 그 종류만(§9.5.2).
     subscribe,
+    /// `browser.getCookies {id}`(5f-4c) → 5d/5f Swift `WKHTTPCookieStore.getAllCookies`(async). result=`{cookies:[...]}`.
+    /// **`browser`가 아니라 `browser_storage` scope 요구**(§9.4 D5 — 쿠키=인증 토큰, `methodRequiredScope`가 단일 출처).
+    /// **op_kind=4 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 새 async 메서드는 뒤에 추가).
+    get_cookies,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -69,6 +73,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "getUrl")) return .get_url;
     if (eq(rest, "executeScript")) return .execute_script;
     if (eq(rest, "subscribe")) return .subscribe;
+    if (eq(rest, "getCookies")) return .get_cookies;
     return null;
 }
 
@@ -225,6 +230,32 @@ fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.V
     try endResult(s);
 }
 
+/// `browser.getCookies` 성공 result: `{"jsonrpc":"2.0","id":<id>,"result":{"cookies":[...]}}`(5f-4c). `cookies_json`은
+/// Swift `BrowserControl.getCookies`가 직렬화한 **JSON 배열**(각 원소 `{name,value,domain,path,secure,httpOnly,
+/// expires?,sameSite?}` — `WKHTTPCookie` 프로퍼티 매핑, Swift가 단일 출처). L2는 이걸 **파싱해 구조화 embed**한다
+/// (executeScript의 문자열 wrap과 달리 진짜 JSON 배열로 실어 에이전트가 이중 파싱 불요). 파싱 실패(비-배열·malformed)면
+/// `InvalidCookiesJson` — L4가 `internal_error`로 접는다(Swift 직렬화 버그 방어, wire로 균일 에러). caller free.
+pub fn serializeGetCookiesResult(gpa: std.mem.Allocator, id: cp.Id, cookies_json: []const u8) (std.mem.Allocator.Error || error{InvalidCookiesJson})![]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, cookies_json, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidCookiesJson, // malformed JSON = Swift 직렬화 버그(방어)
+    };
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.InvalidCookiesJson; // 반드시 배열(빈 배열 [] 정상)
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (writeGetCookiesResult(&s, id, parsed.value)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeGetCookiesResult(s: *std.json.Stringify, id: cp.Id, cookies: std.json.Value) !void {
+    try beginResult(s, id);
+    try s.objectField("cookies");
+    try s.write(cookies);
+    try endResult(s);
+}
+
 /// `browser.subscribe` 성공 result: `{"jsonrpc":"2.0","id":<id>,"result":{"subscriber_id":<N>}}`(5f-0b-3b). client가
 /// 이 subscriber_id로 향후 unsubscribe한다(§9.5.2).
 pub fn serializeSubscribeResult(gpa: std.mem.Allocator, id: cp.Id, subscriber_id: u64) std.mem.Allocator.Error![]u8 {
@@ -286,6 +317,11 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
         .navigate => serializeNavigateResult(gpa, req.id),
         .get_url => serializeGetUrlResult(gpa, req.id, result),
         .execute_script => serializeExecuteScriptResult(gpa, req.id, .{ .string = result }),
+        .get_cookies => serializeGetCookiesResult(gpa, req.id, result) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Swift가 준 cookies_json이 malformed(배열 아님·손상) = 직렬화 버그 → 균일 internal_error(oracle 아님).
+            error.InvalidCookiesJson => return cp.serializeError(gpa, req.id, .internal_error, "invalid cookies payload", null),
+        },
         .subscribe => unreachable, // subscribe는 async op이 아니라 이 함수(op 완료 응답)로 안 온다 — serializeSubscribeResponse 사용
     };
 }
@@ -411,6 +447,7 @@ pub fn browserOpFromRequest(
     const arg: []const u8 = switch (bmethod) {
         .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
         .get_url => try gpa.dupe(u8, ""), // {id}만 — 인자 없음(빈 슬라이스도 dupe해 free 규약 일관)
+        .get_cookies => try gpa.dupe(u8, ""), // {id}만 — Swift가 surface의 WKHTTPCookieStore 전체를 읽음(인자 없음)
         .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
         .subscribe => unreachable, // 위에서 이미 분기
     };
@@ -453,6 +490,11 @@ const fx: cs.CollectorSnapshot = .{ .surfaces = &fx_surfaces, .windows = &fx_win
 // 유효 browser cap(web surface 11에 묶임). generation 0.
 fn browserCap(sid: u64) capmod.Capability {
     return .{ .surface_id = sid, .generation = 0, .scope = .browser };
+}
+
+// 5f-4c: browser_storage cap(getCookies 전용 scope, §9.4 D5). browserCap과 surface는 같고 scope만 다르다.
+fn browserStorageCap(sid: u64) capmod.Capability {
+    return .{ .surface_id = sid, .generation = 0, .scope = .browser_storage };
 }
 
 // 5f-4a: 단일 cap(또는 null)을 dispatchBrowser의 cap **집합** 슬라이스로(누적 시그니처 테스트 어댑터). 슬라이스는 `buf`
@@ -671,6 +713,32 @@ test "dispatchBrowser(5f-0b-3b): subscribe events 중복 이름 → dedup되어 
     }
 }
 
+// ── 5f-4c: browser.getCookies — D5 browser_storage scope 게이트(핵심). ──
+test "dispatchBrowser(5f-4c): browser_storage cap + getCookies → BrowserOp{get_cookies, arg=빈}" {
+    // getCookies는 methodRequiredScope=browser_storage(D5) → browser_storage cap이 인가 → op(arg 없음, {id}만).
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", browserStorageCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(@as(u64, 11), op.surface_id);
+    try testing.expectEqual(BrowserMethod.get_cookies, op.method);
+    try testing.expectEqualStrings("", op.arg);
+}
+
+test "dispatchBrowser(5f-4c) D5 게이트: browser cap은 getCookies 불인가 → 균일 unauthorized(쿠키=별도 scope)" {
+    // base browser cap으로 getCookies 시도 → authorize scope_insufficient(browser != browser_storage) → unauthorized.
+    // D5 핵심: 페이지를 몰 수 있는 cap이 쿠키(인증 토큰)까지 자동으로 새지 않는다.
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
+test "dispatchBrowser(5f-4c) D5 대칭: browser_storage cap은 navigate 불인가 → 균일 unauthorized(single-scope)" {
+    // 역방향: storage cap으로 navigate 시도 → browser_storage != browser → unauthorized. 각 cap은 single-scope라
+    // 세션이 둘 다 쓰려면 cap 2개 누적(§9.5.6 ③ auth.grant — 5f-4a).
+    const wire = try dispatchErr(req_navigate_11, browserStorageCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
 // ── 6) 유효 cap + browser.screenshot(5a 미구현) → method_not_found ── authz는 통과, method 파싱서 접힘
 test "dispatchBrowser: 유효 cap + browser.screenshot(5a 미구현) → method_not_found(-32601)" {
     // screenshot도 browser.* 라 methodRequiredScope=.browser → authz granted → parseBrowserMethod(null) → method_not_found.
@@ -728,7 +796,8 @@ test "parseBrowserMethod: navigate/getUrl/executeScript 인식, screenshot·미�
     try testing.expectEqual(BrowserMethod.navigate, parseBrowserMethod("navigate").?);
     try testing.expectEqual(BrowserMethod.get_url, parseBrowserMethod("getUrl").?);
     try testing.expectEqual(BrowserMethod.execute_script, parseBrowserMethod("executeScript").?);
-    // 5a 미구현/미지 → null.
+    try testing.expectEqual(BrowserMethod.get_cookies, parseBrowserMethod("getCookies").?); // 5f-4c
+    // 미구현/미지 → null.
     try testing.expect(parseBrowserMethod("screenshot") == null);
     try testing.expect(parseBrowserMethod("back") == null);
     try testing.expect(parseBrowserMethod("get_url") == null); // snake_case는 wire 이름 아님(camelCase 엄수)
@@ -817,6 +886,34 @@ test "result 직렬화: executeScript {result:<value>} — 불투명 JSON 반환
     try testing.expectEqual(@as(i64, 42), result.get("result").?.integer);
 }
 
+test "result 직렬화(5f-4c): getCookies {cookies:[...]} — Swift JSON 배열이 구조화 embed(문자열 wrap 아님)" {
+    // Swift가 준 쿠키 JSON 배열을 파싱해 result.cookies에 **진짜 배열**로 실린다(이중 파싱 불요).
+    const cookies_json = "[{\"name\":\"sid\",\"value\":\"abc\",\"domain\":\"x.test\",\"path\":\"/\",\"secure\":true,\"httpOnly\":false}]";
+    const wire = try serializeGetCookiesResult(testing.allocator, .{ .number = 9 }, cookies_json);
+    defer testing.allocator.free(wire);
+    try testing.expect(std.mem.indexOfScalar(u8, wire, '\n') == null); // 한 줄 불변식
+    var pm = try cp.parseMessage(testing.allocator, wire);
+    defer pm.deinit();
+    const arr = pm.message.response.result.?.object.get("cookies").?.array; // 문자열이 아니라 배열
+    try testing.expectEqual(@as(usize, 1), arr.items.len);
+    const c0 = arr.items[0].object;
+    try testing.expectEqualStrings("sid", c0.get("name").?.string);
+    try testing.expectEqualStrings("abc", c0.get("value").?.string);
+    try testing.expect(c0.get("secure").?.bool);
+    // 빈 배열도 정상(쿠키 0개).
+    const wire_empty = try serializeGetCookiesResult(testing.allocator, .{ .number = 1 }, "[]");
+    defer testing.allocator.free(wire_empty);
+    var pm2 = try cp.parseMessage(testing.allocator, wire_empty);
+    defer pm2.deinit();
+    try testing.expectEqual(@as(usize, 0), pm2.message.response.result.?.object.get("cookies").?.array.items.len);
+}
+
+test "result 직렬화(5f-4c): getCookies malformed/비-배열 payload → InvalidCookiesJson(Swift 버그 방어)" {
+    try testing.expectError(error.InvalidCookiesJson, serializeGetCookiesResult(testing.allocator, .{ .number = 1 }, "{not json"));
+    try testing.expectError(error.InvalidCookiesJson, serializeGetCookiesResult(testing.allocator, .{ .number = 1 }, "{\"cookies\":1}")); // 객체=비배열
+    try testing.expectError(error.InvalidCookiesJson, serializeGetCookiesResult(testing.allocator, .{ .number = 1 }, "\"str\"")); // 문자열=비배열
+}
+
 // ── 10) dispatch 라우팅 엣지: 비-browser 메서드·비-request·malformed ──
 test "dispatchBrowser: core != browser 방어 → method_not_found" {
     // 라우터가 browser.* 만 보내지만 방어적으로 확인 — session.get이 여기 오면 method_not_found.
@@ -885,6 +982,23 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer pm.deinit();
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
         try testing.expectEqualStrings("webView not found", pm.message.response.err.?.message);
+    }
+    // 5f-4c: getCookies ok → {result:{cookies:[...]}}(Swift JSON 배열을 result 재파싱해 embed).
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", true, "[{\"name\":\"sid\",\"value\":\"v\"}]");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        const arr = pm.message.response.result.?.object.get("cookies").?.array;
+        try testing.expectEqualStrings("sid", arr.items[0].object.get("name").?.string);
+    }
+    // 5f-4c: getCookies ok지만 payload malformed(Swift 버그) → internal_error(균일, oracle 아님).
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", true, "{not an array");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
 }
 

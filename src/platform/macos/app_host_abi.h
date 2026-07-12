@@ -1125,15 +1125,15 @@ void maru_macos_control_server_drain(const MaruControlSessionRef *refs, size_t c
 void maru_macos_control_server_stop(void);
 
 /* 5e-2b: 매 frame tick 호출 — (1) hung browser op timeout reap, (2) browser op 큐에서 하나 pop. 반환 1=op 있음·0=없음.
-   op 있으면 Swift가 out_surface_id의 webView를 찾아 BrowserControl(op_kind: 0=navigate·1=getUrl·2=executeScript)을
-   out_arg(navigate=url·executeScript=script·getUrl=빈)로 실행하고, 완료 시 complete_browser_op(out_async_id, ...)로
-   되돌린다. out_arg_ptr는 **이 호출 중에만** 유효(Swift가 즉시 복사). 서버 미시작이면 0. 메인 스레드에서만. */
+   op 있으면 Swift가 out_surface_id의 webView를 찾아 BrowserControl(op_kind: 0=navigate·1=getUrl·2=executeScript·
+   4=getCookies)을 out_arg(navigate=url·executeScript=script·getUrl/getCookies=빈)로 실행하고, 완료 시
+   complete_browser_op(out_async_id, ...)로 되돌린다. out_arg_ptr는 **이 호출 중에만** 유효(Swift가 즉시 복사). 서버 미시작이면 0. 메인 스레드에서만. */
 uint32_t maru_macos_control_take_browser_op(uint64_t *out_async_id, uint64_t *out_surface_id, uint8_t *out_op_kind,
                                             const uint8_t **out_arg_ptr, size_t *out_arg_len);
 
 /* 5e-2b: BrowserControl async 완료 콜백이 호출 — async_id 요청을 결과로 응답한다. status: 0=ok·非0=error. result:
-   method별(getUrl=url·executeScript=반환값 문자열·navigate=무시; error면 message). 미지/timeout된 async_id는 무시
-   (늦은 콜백). 메인 스레드에서만(WKWebView 콜백이 메인). */
+   method별(getUrl=url·executeScript=반환값 문자열·getCookies=쿠키 JSON 배열·navigate=무시; error면 message). 미지/
+   timeout된 async_id는 무시(늦은 콜백). 메인 스레드에서만(WKWebView 콜백이 메인). */
 void maru_macos_control_complete_browser_op(uint64_t async_id, uint32_t status, const uint8_t *result, size_t result_len);
 
 /* 5e-2b-2(테스트 전용): env MARU_TEST_BROWSER_CAP이 설정됐을 때만 surface_id에 묶인 browser cap을 라이브 store에

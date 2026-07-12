@@ -43,6 +43,7 @@ const cs = @import("control_socket.zig");
 const cp = maru.session.control_plane;
 const cap = maru.session.control_capability;
 const co = maru.session.control_outbound; // 5f-0b-2b: per-connection outbound 프레임 큐(순수 5f-0b-1)
+const cev = maru.session.control_events; // 5f-0b-3: browser 이벤트 채널 코어(EventBroker 구독 레지스트리·매칭·직렬화, §9.5.2)
 
 // auth 프레임 cap_nonce의 wire 길이(1a)와 capability nonce 길이(1e)가 어긋나면 fd payload↔auth 프레임이 안 맞는다.
 // 1a는 capability를 import하지 않으므로(레이어 base) 두 상수를 각자 두되, 둘 다 import하는 이 L4에서 comptime으로 못박는다.
@@ -256,6 +257,104 @@ pub const OutboundChannel = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.q.isFull();
+    }
+};
+
+/// 한 (surface,kind) 이벤트가 fan-out될 수 있는 구독자 수 상한(pushEvent의 매칭 버퍼). 각 연결=구독자 1이고 한 surface를
+/// 구독하는 연결 ≤ 동시 연결(≤ max_pending)이라 실질 상한은 max_connections다. 64는 그보다 훨씬 커 truncate가 구조적으로
+/// 안 일어난다(그래도 초과 시 matching이 조용히 자르지 않게 아래 pushEvent가 debug assert로 잡는다).
+const max_event_fanout: usize = 64;
+
+/// 5f-0b-3 **메인 전용·락 없는** 구독 레지스트리(§9.5.2 전제(v) — 라우팅 테이블=메인 전용). L2 순수 `EventBroker`(구독
+/// (subscriber_id, surface, filter)·매칭·수명)에, L4 전용인 **`subscriber_id → *OutboundChannel` 매핑**과 id 발급기를
+/// 더해 "이벤트를 매칭 구독자의 연결 outbound로 push"·"연결 drop/ surface close 시 정리"를 소유한다. **메인 스레드에서만**
+/// 접근한다(락 없음 = §5 "라우팅 테이블=락 없는 메인 전용", §8.8 lock-order 회피). 이벤트 소스(WKWebView KVO)는 5f-0b-3c가
+/// 메인에서 `pushEvent`로 주입하고, 연결 수명 배선(연결-drop 시 `purgeOutbound`)은 5f-0b-3a-2가 한다 — 이 구조체는 그
+/// **순수 로직**(헤드리스 테스트)만 소유한다. 구조체 자체 alloc(broker.subs·맵)은 메인 소유 `gpa`, 이벤트 프레임 **바이트**는
+/// writer 스레드가 free하므로 `pushEvent`가 별도 `cross_gpa`로 만든다(소유권 교차).
+pub const SubscriberRegistry = struct {
+    /// broker.subs + outbound_of 맵 alloc(메인 소유 — items_gpa 결). 이벤트 프레임 바이트는 이게 아니라 pushEvent의 cross_gpa.
+    gpa: std.mem.Allocator,
+    broker: cev.EventBroker = .{},
+    /// 각 연결(=구독자)의 outbound. subscribe가 outbound당 subscriber_id를 **1:1**로 잡아(재구독=id 재사용) 넣고, drop이 뺀다.
+    outbound_of: std.AutoHashMapUnmanaged(cev.SubscriberId, *OutboundChannel) = .empty,
+    id_alloc: cev.SubscriberIdAllocator = .{},
+
+    pub fn init(gpa: std.mem.Allocator) SubscriberRegistry {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *SubscriberRegistry) void {
+        self.broker.deinit(self.gpa);
+        self.outbound_of.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    /// 메인: `(surface_id, filter)`를 이 연결(`outbound`)로 구독한다. 한 연결은 subscriber_id **하나**를 재사용하므로
+    /// (재구독=필터 갱신, broker가 (id,surface)당 1개 유지), 이미 이 outbound에 발급된 id가 있으면 재사용하고 없으면 새로
+    /// 발급해 매핑한다. 반환=그 연결의 subscriber_id(5f-0b-3b가 응답에 실어 client가 unsubscribe에 쓴다). OOM만 error.
+    pub fn subscribe(self: *SubscriberRegistry, surface_id: u64, filter: cev.EventFilter, outbound: *OutboundChannel) std.mem.Allocator.Error!cev.SubscriberId {
+        const existing = self.idForOutbound(outbound);
+        const id = existing orelse self.id_alloc.next();
+        if (existing == null) try self.outbound_of.put(self.gpa, id, outbound);
+        errdefer if (existing == null) {
+            _ = self.outbound_of.remove(id); // 새 매핑을 넣었는데 broker.subscribe가 OOM이면 dangling 매핑 제거
+        };
+        try self.broker.subscribe(self.gpa, id, surface_id, filter);
+        return id;
+    }
+
+    /// 메인: 이벤트를 `(surface_id, kind)`에 매칭하는 구독자들의 연결 outbound에 push한다(§9.5.2 이벤트 흐름). 프레임 바이트는
+    /// **`cross_gpa`**로 구독자마다 직렬화(각 outbound 프레임이 bytes를 소유·writer가 free). coalescible(navigated·load_state)은
+    /// `(surface,kind)` coalesce_key로 같은 큐서 최신이 옛것을 대체(백프레셔), 이산(dialog)은 key 없음. tag=surface_id(§8.5
+    /// surface-close/revoke purge 대상). 개별 구독자 push 실패(Full=느린 구독자 drop·QueueClosed=닫히는 연결)는 그 구독자만
+    /// 건너뛴다. 반환=실제 push 성공 수. **메인 전용**(락 없음).
+    pub fn pushEvent(self: *SubscriberRegistry, cross_gpa: std.mem.Allocator, surface_id: u64, event: cev.Event) usize {
+        var buf: [max_event_fanout]cev.SubscriberId = undefined;
+        const kind = std.meta.activeTag(event);
+        const n = self.broker.matching(surface_id, kind, &buf);
+        std.debug.assert(n < max_event_fanout); // truncate=구독자 이벤트 유실. 실질 상한(≤max_connections)이라 도달 불가.
+        const coalesce_key: ?u64 = if (kind.isCoalescible()) coalesceKey(surface_id, kind) else null;
+        var pushed: usize = 0;
+        for (buf[0..n]) |id| {
+            const ch = self.outbound_of.get(id) orelse continue; // 매핑 없는 id(구조적 불가)면 skip
+            const bytes = cev.serializeEvent(cross_gpa, surface_id, event) catch continue; // OOM=이 구독자만 skip
+            ch.push(cross_gpa, .{ .bytes = bytes, .coalesce_key = coalesce_key, .tag = surface_id }) catch {
+                cross_gpa.free(bytes); // Full(느린 구독자)·QueueClosed(닫히는 연결) → 소유권 반환·해제 후 skip
+                continue;
+            };
+            pushed += 1;
+        }
+        return pushed;
+    }
+
+    /// 메인: 연결 drop(§9.5.6) — 이 `outbound`에 묶인 구독자의 **모든** 구독을 broker·매핑에서 제거한다. 반환=제거된
+    /// (surface별) 구독 수. 5f-0b-3a-2 연결 수명 배선이 outbound free **전에** 호출해 매핑 dangling을 막는다. **메인 전용**.
+    pub fn purgeOutbound(self: *SubscriberRegistry, outbound: *OutboundChannel) usize {
+        const id = self.idForOutbound(outbound) orelse return 0;
+        const removed = self.broker.removeSubscriber(id);
+        _ = self.outbound_of.remove(id);
+        return removed;
+    }
+
+    /// 메인: surface close(§9.5.2 수명) — 그 surface의 모든 구독 제거. 반환=제거 수. (browser.closed 브로드캐스트 후
+    /// 호출은 5f-0b-3c; outbound_of 매핑은 연결이 살아 있으면 유지 = 이 연결의 다른 surface 구독은 안 건드린다.)
+    pub fn purgeSurface(self: *SubscriberRegistry, surface_id: u64) usize {
+        return self.broker.removeSurface(surface_id);
+    }
+
+    fn idForOutbound(self: *SubscriberRegistry, outbound: *OutboundChannel) ?cev.SubscriberId {
+        var it = self.outbound_of.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.* == outbound) return e.key_ptr.*;
+        }
+        return null;
+    }
+
+    /// coalescible 이벤트의 큐 coalesce_key: 같은 (surface,kind)면 같은 값(최신이 옛것 대체), 다르면 다른 값. surface_id는
+    /// 앱-전역 순차 소형 정수라 3비트 kind와 겹쳐도 충돌 없다(surface_id ≥ 2^61이면 이론상 충돌이나 도달 불가).
+    fn coalesceKey(surface_id: u64, kind: cev.EventKind) u64 {
+        return (surface_id << 3) | @intFromEnum(kind);
     }
 };
 
@@ -693,6 +792,119 @@ test "OutboundChannel: writer가 popWait서 블록→메인 push로 소비·clos
     th.join();
     try testing.expect(w.done.load(.acquire));
     try testing.expectEqual(@as(usize, 3), w.got); // 3개 전부 소비
+}
+
+// ── SubscriberRegistry 단위(5f-0b-3a — 메인 전용·헤드리스, 스레드 없이 순수 로직) ──
+test "SubscriberRegistry: 매칭 fan-out + 필터 + 비매칭 surface 미전달 + notification 형태" {
+    var reg = SubscriberRegistry.init(testing.allocator);
+    defer reg.deinit();
+    var ch_a = OutboundChannel.init(std.testing.io, 8);
+    defer ch_a.deinit(testing.allocator);
+    var ch_b = OutboundChannel.init(std.testing.io, 8);
+    defer ch_b.deinit(testing.allocator);
+
+    // A는 surface 10을 navigated만, B는 surface 20을 전체 구독.
+    const id_a = try reg.subscribe(10, cev.EventFilter.only(&[_]cev.EventKind{.navigated}), &ch_a);
+    const id_b = try reg.subscribe(20, cev.EventFilter.all, &ch_b);
+    try testing.expect(id_a != id_b);
+
+    try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 10, .{ .navigated = "https://a" })); // A만
+    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 10, .{ .load_state = .idle })); // A 필터 제외 → 0
+    try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 20, .{ .load_state = .loading })); // B만
+    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 99, .{ .navigated = "x" })); // 구독 없는 surface → 0
+
+    try testing.expectEqual(@as(usize, 1), ch_a.q.len());
+    const fa = ch_a.popWait().?;
+    defer testing.allocator.free(fa.bytes);
+    try testing.expect(std.mem.indexOf(u8, fa.bytes, "browser.navigated") != null);
+    try testing.expect(std.mem.indexOf(u8, fa.bytes, "https://a") != null);
+    try testing.expect(std.mem.indexOf(u8, fa.bytes, "\"surface_id\":10") != null);
+
+    try testing.expectEqual(@as(usize, 1), ch_b.q.len());
+    const fb = ch_b.popWait().?;
+    defer testing.allocator.free(fb.bytes);
+    try testing.expect(std.mem.indexOf(u8, fb.bytes, "browser.loadState") != null);
+    try testing.expect(std.mem.indexOf(u8, fb.bytes, "loading") != null);
+}
+
+test "SubscriberRegistry: coalescible은 큐서 최신이 옛것 대체(coalesce), 이산(dialog)은 누적" {
+    var reg = SubscriberRegistry.init(testing.allocator);
+    defer reg.deinit();
+    var ch = OutboundChannel.init(std.testing.io, 8);
+    defer ch.deinit(testing.allocator);
+    _ = try reg.subscribe(10, cev.EventFilter.all, &ch);
+
+    // navigated 2연발(coalescible, coalesce_key=(10,navigated) 동일) → 큐엔 최신 1개.
+    _ = reg.pushEvent(testing.allocator, 10, .{ .navigated = "https://old" });
+    _ = reg.pushEvent(testing.allocator, 10, .{ .navigated = "https://new" });
+    try testing.expectEqual(@as(usize, 1), ch.q.len()); // coalesce
+    const f = ch.popWait().?;
+    defer testing.allocator.free(f.bytes);
+    try testing.expect(std.mem.indexOf(u8, f.bytes, "https://new") != null); // 최신 유지
+    try testing.expect(std.mem.indexOf(u8, f.bytes, "https://old") == null); // 옛것 대체됨
+
+    // dialog 2연발(비coalescible) → 2개 누적.
+    _ = reg.pushEvent(testing.allocator, 10, .{ .dialog = .{ .kind = .alert, .message = "m1" } });
+    _ = reg.pushEvent(testing.allocator, 10, .{ .dialog = .{ .kind = .confirm, .message = "m2" } });
+    try testing.expectEqual(@as(usize, 2), ch.q.len()); // 누적(coalesce 안 함)
+}
+
+test "SubscriberRegistry: 같은 outbound 재구독은 subscriber_id 재사용 + 필터 갱신 + 다중 surface 1매핑" {
+    var reg = SubscriberRegistry.init(testing.allocator);
+    defer reg.deinit();
+    var ch = OutboundChannel.init(std.testing.io, 8);
+    defer ch.deinit(testing.allocator);
+    const id1 = try reg.subscribe(10, cev.EventFilter.only(&[_]cev.EventKind{.navigated}), &ch);
+    const id2 = try reg.subscribe(10, cev.EventFilter.all, &ch); // 같은 (conn,surface) 재구독 → id 재사용·필터 갱신
+    try testing.expectEqual(id1, id2);
+    try testing.expectEqual(@as(usize, 1), reg.broker.len()); // 중복 엔트리 없음
+    try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 10, .{ .load_state = .idle })); // 필터 all로 갱신 → 전달
+    const f = ch.popWait().?;
+    testing.allocator.free(f.bytes);
+
+    // 같은 연결이 다른 surface도 구독 → 같은 id·매핑 1개(1 연결 다중 surface).
+    _ = try reg.subscribe(20, cev.EventFilter.all, &ch);
+    try testing.expectEqual(id1, reg.idForOutbound(&ch).?);
+    try testing.expectEqual(@as(u32, 1), reg.outbound_of.count()); // 1 연결 = 매핑 1
+    try testing.expectEqual(@as(usize, 2), reg.broker.len()); // (id,10)+(id,20)
+}
+
+test "SubscriberRegistry: purgeOutbound가 그 연결의 모든 구독·매핑 제거(다른 연결 무영향)" {
+    var reg = SubscriberRegistry.init(testing.allocator);
+    defer reg.deinit();
+    var ch_a = OutboundChannel.init(std.testing.io, 8);
+    defer ch_a.deinit(testing.allocator);
+    var ch_b = OutboundChannel.init(std.testing.io, 8);
+    defer ch_b.deinit(testing.allocator);
+    _ = try reg.subscribe(10, cev.EventFilter.all, &ch_a);
+    _ = try reg.subscribe(20, cev.EventFilter.all, &ch_a); // A: 2 surface
+    _ = try reg.subscribe(10, cev.EventFilter.all, &ch_b); // B: surface 10
+
+    try testing.expectEqual(@as(usize, 2), reg.purgeOutbound(&ch_a)); // A의 (10)+(20) 제거
+    try testing.expect(reg.idForOutbound(&ch_a) == null); // 매핑 제거
+    try testing.expectEqual(@as(usize, 1), reg.broker.len()); // B만 남음
+
+    try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 10, .{ .navigated = "x" })); // surface10엔 B 남아 1
+    const fb = ch_b.popWait().?;
+    testing.allocator.free(fb.bytes);
+    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 20, .{ .navigated = "y" })); // A 뺐으니 surface20 구독 0
+    try testing.expectEqual(@as(usize, 0), ch_a.q.len()); // A outbound엔 아무것도 안 옴
+}
+
+test "SubscriberRegistry: purgeSurface가 그 surface 구독만 제거(연결 매핑·다른 surface 유지)" {
+    var reg = SubscriberRegistry.init(testing.allocator);
+    defer reg.deinit();
+    var ch = OutboundChannel.init(std.testing.io, 8);
+    defer ch.deinit(testing.allocator);
+    _ = try reg.subscribe(10, cev.EventFilter.all, &ch);
+    _ = try reg.subscribe(20, cev.EventFilter.all, &ch);
+    try testing.expectEqual(@as(usize, 1), reg.purgeSurface(10)); // surface 10 구독만
+    try testing.expectEqual(@as(usize, 1), reg.broker.len()); // surface 20 남음
+    try testing.expect(reg.idForOutbound(&ch) != null); // 연결 매핑 유지(연결 살아 있음)
+    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 10, .{ .navigated = "x" })); // 10 제거됨
+    try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 20, .{ .navigated = "y" })); // 20 유지
+    const f = ch.popWait().?;
+    testing.allocator.free(f.bytes);
 }
 
 test "pending rendezvous: producer가 대기, consumer가 resolve하면 응답을 받는다(cross-thread)" {

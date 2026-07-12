@@ -79,8 +79,11 @@ pub const PanelKind = enum { markdown, browser };
 /// `TerminalMeta.agent`가 null(필드 생략)이라 kind가 항상 실제 에이전트다(collector가 none이면 null로 매핑).
 pub const AgentKind = enum { claude, codex };
 
-/// 에이전트 상태(wire). 내부 `agent_transcript.AgentState`와 같은 3상(collector가 매핑).
-pub const AgentState = enum { unknown, running, idle };
+/// 에이전트 상태(wire). 내부 `agent_transcript.AgentState`와 같은 4상(collector가 매핑 — agentInfoWire).
+/// `interrupted`(사용자 ESC 중단)를 **별도 값으로 싣는다**: idle로 접으면 클라이언트가 `running → idle` 전이를
+/// "턴 완료"로 읽어 **가짜 완료**를 보고한다(중단된 턴을 완료로 착각해 후속 단계를 진행 — code-review).
+/// `idle`=턴이 완료됨 / `interrupted`=사용자가 끊어서 멈춤(완료 아님) / `running`=진행 중 / `unknown`=판정 불가.
+pub const AgentState = enum { unknown, running, idle, interrupted };
 
 /// 포그라운드 에이전트 정보(§3 `agent(kind/state)`). 에이전트가 있을 때만 `TerminalMeta.agent`에 실린다.
 pub const AgentInfo = struct {
@@ -223,6 +226,7 @@ fn agentStateWire(s: AgentState) []const u8 {
         .unknown => "unknown",
         .running => "running",
         .idle => "idle",
+        .interrupted => "interrupted", // 사용자 ESC 중단 — idle(턴 완료)과 구분해 실어야 가짜 완료 보고가 없다
     };
 }
 

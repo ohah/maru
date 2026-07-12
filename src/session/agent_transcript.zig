@@ -67,6 +67,12 @@ pub const Status = struct {
 pub fn parseClaudeTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: []u8) Status {
     var state: AgentState = .unknown;
     var answer_len: usize = 0;
+    // **인터럽트 latch**: 인터럽트 마커를 본 뒤 따라오는 *꼬리* 엔트리가 상태를 도로 뒤집지 못하게 한다.
+    // 실측(이 머신 트랜스크립트): ESC 직후 claude가 `assistant` + `stop_reason:"stop_sequence"` +
+    // "No response requested." 를 붙이는 판이 있다(81건 중 5건). 그걸 그대로 접으면 **idle("✓ 완료")**이 되고
+    // **가짜 "에이전트 완료" 알림**까지 뜬다 — 사용자는 끊었는데 완료됐다고 통보받는다. latch는 **새 프롬프트
+    // 제출**(일반 user 엔트리)이 오면 풀린다 — 그때가 진짜 재개다.
+    var interrupt_latch = false;
 
     var lines = std.mem.splitScalar(u8, tail, '\n');
     while (lines.next()) |raw| {
@@ -81,6 +87,7 @@ pub fn parseClaudeTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf:
         const entry_type = asString(obj.get("type") orelse continue) orelse continue;
 
         if (std.mem.eql(u8, entry_type, "assistant")) {
+            if (interrupt_latch) continue; // 인터럽트 꼬리 응답 — 상태를 안 뒤집는다(위 latch 주석)
             const msg = asObject(obj.get("message") orelse continue) orelse continue;
             if (isTerminalStop(msg.get("stop_reason"))) {
                 state = .idle;
@@ -94,23 +101,54 @@ pub fn parseClaudeTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf:
             // isMeta=true user는 시스템 주입(local-command caveat·hook 등)이라 대화가 아니다 — 무시해야
             // 완료된 턴 뒤에 caveat 한 줄이 붙어도 false running으로 뒤집히지 않는다(실측 함정).
             if (isMetaTrue(obj.get("isMeta"))) continue;
-            // **사용자 인터럽트(ESC)**: claude가 `interruptedMessageId`를 단 user 엔트리를 append한다(본문은
-            // "[Request interrupted by user]"). 이걸 일반 user(=새 프롬프트 제출)로 보면 **running으로 접혀
-            // 스피너가 영영 안 풀린다** — 그 뒤 파일이 안 자라 mtime 게이트가 재파싱도 막기 때문이다.
-            // 판별자는 **필드 존재**로 한다(본문 텍스트 매칭보다 견고 — 실측 트랜스크립트에서 인터럽트 엔트리
-            // 전수에 있고 일반 user 엔트리엔 없다; 문구는 로케일·버전에 따라 바뀔 수 있다).
-            if (obj.get("interruptedMessageId") != null) {
+            // **사용자 인터럽트(ESC)** — 일반 user(=새 프롬프트)로 보면 running으로 접혀 스피너가 영영 안 풀린다
+            // (그 뒤 파일이 안 자라 mtime 게이트가 재파싱도 막는다). 판별은 isClaudeInterrupt가 단일 출처다.
+            if (isClaudeInterrupt(obj)) {
                 state = .interrupted;
                 answer_len = 0;
+                interrupt_latch = true;
                 continue;
             }
-            state = .running;
+            state = .running; // 새 프롬프트 제출 = 진짜 재개 → latch 해제
             answer_len = 0;
+            interrupt_latch = false;
         }
         // 그 밖의 타입은 메타 — 상태 불변(마지막 대화 엔트리만 의미를 갖는다).
     }
 
     return .{ .state = state, .answer = answer_buf[0..answer_len] };
+}
+
+/// 이 `user` 엔트리가 **사용자 인터럽트(ESC)** 마커인가. 두 신호를 **OR**로 본다:
+///   ① top-level `interruptedMessageId` 필드(구조적 판별자 — 있으면 확실).
+///   ② 본문 텍스트가 `[Request interrupted` 로 시작(필드가 **없는** 판 대비).
+/// ②가 필요한 이유(실측): 이 머신의 claude 트랜스크립트에서 메인체인 인터럽트 엔트리 109건 중 **12건(약 11%)이
+/// `interruptedMessageId` 없이** 본문만 남긴다 — 같은 claude 버전에서도 섞여 나오므로 버전 게이트로도 못 가른다.
+/// 필드만 보면 그 6~9회 중 1회꼴로 스피너가 그대로 고착된다(이 수정이 무효화되는 구멍). 반대로 본문만 보면
+/// 로케일·문구 변경에 취약하므로 **둘 다** 본다. 일반 user 엔트리(새 프롬프트)는 둘 중 어느 것도 없다.
+fn isClaudeInterrupt(obj: std.json.ObjectMap) bool {
+    if (obj.get("interruptedMessageId") != null) return true;
+    return messageTextStartsWith(obj.get("message"), "[Request interrupted");
+}
+
+/// `message.content`(문자열이거나 블록 배열)의 텍스트가 `prefix`로 시작하는지. 배열이면 첫 `text` 블록들을 본다.
+fn messageTextStartsWith(msg_val: ?std.json.Value, prefix: []const u8) bool {
+    const msg = asObject(msg_val orelse return false) orelse return false;
+    const content = msg.get("content") orelse return false;
+    switch (content) {
+        .string => |s| return std.mem.startsWith(u8, s, prefix),
+        .array => |arr| {
+            for (arr.items) |item| {
+                const o = asObject(item) orelse continue;
+                const t = asString(o.get("type") orelse continue) orelse continue;
+                if (!std.mem.eql(u8, t, "text")) continue;
+                const txt = asString(o.get("text") orelse continue) orelse continue;
+                if (std.mem.startsWith(u8, txt, prefix)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
 }
 
 /// stop_reason이 "턴 종료"(idle) 사유인지. tool_use/null/누락/모르는 값은 false(running)로 본다 — 모르는 값을
@@ -207,6 +245,9 @@ fn copyPreviewFlattened(dst: []u8, src: []const u8) usize {
 pub fn parseCodexTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: []u8) Status {
     var state: AgentState = .unknown;
     var answer_len: usize = 0;
+    // 인터럽트 latch — claude 파서와 같은 이유(아래 turn_aborted 분기 주석). 새 턴(user_message/task_started)이
+    // 오거나 턴이 완료(task_complete)되면 풀린다.
+    var interrupt_latch = false;
 
     var lines = std.mem.splitScalar(u8, tail, '\n');
     while (lines.next()) |raw| {
@@ -227,18 +268,31 @@ pub fn parseCodexTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: 
                 state = .idle;
                 // 최종 답변이 task_complete 엔트리에 직접 담긴다 — Value 해제 전에 buf로 복사.
                 answer_len = copyJsonStringPreview(answer_buf, payload.get("last_agent_message"));
+                interrupt_latch = false;
             } else if (std.mem.eql(u8, pt, "turn_aborted")) {
                 // **사용자 인터럽트(ESC)** — codex는 `turn_aborted`(reason:"interrupted")를 남긴다. task_complete가
                 // 아니므로 아래 else(=running)로 떨어지면 claude와 같은 "스피너 영구 고착"이 된다(같은 버그).
                 state = .interrupted;
                 answer_len = 0;
+                interrupt_latch = true;
             } else if (std.mem.eql(u8, pt, "token_count")) {
                 // 토큰 회계 — 상태 불변(무시).
+            } else if (std.mem.eql(u8, pt, "user_message") or std.mem.eql(u8, pt, "task_started")) {
+                state = .running; // **새 턴 시작** = 진짜 재개 → latch 해제
+                answer_len = 0;
+                interrupt_latch = false;
             } else {
-                state = .running; // user_message/agent_message/task_started/patch_apply_* 등 진행 신호.
+                // 그 밖의 진행 신호(agent_message/patch_apply_*/exec_command_* 등).
+                // **인터럽트 뒤 꼬리 이벤트는 상태를 안 뒤집는다**: 실측 rollout에서 `turn_aborted` **다음 줄**에
+                // 중단된 명령의 `exec_command_end`가 붙는다(ESC로 끊은 `gh pr checks --watch` 등 — 34건 중 3건).
+                // 그걸 running으로 접으면 codex 인터럽트 수정이 통째로 무효가 된다(파일이 더 안 자라 mtime
+                // 게이트가 재파싱도 막는다). 재개는 위 user_message/task_started가 명시적으로 푼다.
+                if (interrupt_latch) continue;
+                state = .running;
                 answer_len = 0;
             }
         } else if (std.mem.eql(u8, entry_type, "response_item")) {
+            if (interrupt_latch) continue; // 인터럽트 꼬리(중단된 도구 호출의 잔여 출력 등) — 상태 불변
             state = .running; // 모델 출력/도구 호출 — 턴 진행 중.
             answer_len = 0;
         }
@@ -359,6 +413,77 @@ test "parseClaudeTail: ESC 인터럽트(interruptedMessageId)는 interrupted —
     ;
     const s2 = parseClaudeTail(std.testing.allocator, resumed, &buf);
     try std.testing.expectEqual(AgentState.running, s2.state);
+}
+
+test "parseClaudeTail: interruptedMessageId **없는** 인터럽트(실측 ~11%)도 본문 prefix로 잡는다" {
+    // 실측 회귀: 이 머신의 claude 트랜스크립트에서 메인체인 인터럽트 엔트리 109건 중 12건(약 11%)이
+    // `interruptedMessageId` **없이** 본문만 남긴다(같은 버전에서도 섞여 나온다). 구조적 필드만 판별자로 쓰면
+    // 그 6~9회 중 1회꼴로 스피너가 그대로 고착된다 — 수정이 통째로 무효화되는 구멍(code-review).
+    const tail =
+        \\{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"실행 중"}]}}
+        \\{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
+    ;
+    var buf: [256]u8 = undefined;
+    const s = parseClaudeTail(std.testing.allocator, tail, &buf);
+    try std.testing.expectEqual(AgentState.interrupted, s.state);
+
+    // content가 **문자열**인 판도 있다(블록 배열이 아니라) — 둘 다 잡아야 한다.
+    const tail_str =
+        \\{"type":"user","message":{"role":"user","content":"[Request interrupted by user]"}}
+    ;
+    try std.testing.expectEqual(AgentState.interrupted, parseClaudeTail(std.testing.allocator, tail_str, &buf).state);
+
+    // 일반 프롬프트는 둘 중 어느 신호도 없다 → running(오탐 0).
+    const normal =
+        \\{"type":"user","message":{"role":"user","content":[{"type":"text","text":"인터럽트 얘기 좀 해줘"}]}}
+    ;
+    try std.testing.expectEqual(AgentState.running, parseClaudeTail(std.testing.allocator, normal, &buf).state);
+}
+
+test "parseClaudeTail: 인터럽트 뒤 꼬리 응답(stop_sequence \"No response requested.\")이 idle로 뒤집지 못한다" {
+    // 실측 회귀(81건 중 5건): ESC 직후 claude가 `assistant` + stop_reason:"stop_sequence" +
+    // "No response requested." 를 붙인다. latch가 없으면 isTerminalStop이 이걸 받아 **idle("✓ 완료")**이 되고,
+    // 한 poll 창에 둘 다 관측되면 running→idle 엣지로 **가짜 "에이전트 완료" 알림**까지 뜬다(사용자는 끊었는데).
+    const tail =
+        \\{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"작업 중"}]}}
+        \\{"type":"user","interruptedMessageId":"msg_01X","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"No response requested."}]}}
+    ;
+    var buf: [256]u8 = undefined;
+    const s = parseClaudeTail(std.testing.allocator, tail, &buf);
+    try std.testing.expectEqual(AgentState.interrupted, s.state); // ★ idle이 아니다
+    try std.testing.expectEqual(@as(usize, 0), s.answer.len); // "No response requested."가 답변으로 새지 않는다
+
+    // 그 뒤 사용자가 **새 프롬프트**를 내면 latch가 풀려 정상 재개(running) — 그 턴이 끝나면 idle + 완료 알림.
+    const resumed = tail ++
+        \\
+        \\{"type":"user","message":{"role":"user","content":[{"type":"text","text":"다시 해줘"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"완료했습니다"}]}}
+    ;
+    const s2 = parseClaudeTail(std.testing.allocator, resumed, &buf);
+    try std.testing.expectEqual(AgentState.idle, s2.state);
+    try std.testing.expectEqualStrings("완료했습니다", s2.answer);
+}
+
+test "parseCodexTail: turn_aborted 뒤 꼬리 이벤트(exec_command_end)가 running으로 되돌리지 못한다" {
+    // 실측 회귀: rollout 파일 **끝**이 `turn_aborted` → `exec_command_end`(ESC로 끊긴 명령의 뒤늦은 종료
+    // 이벤트) 순서인 경우가 있다(34건 중 3건). catch-all else가 그걸 running으로 접으면 codex 인터럽트
+    // 수정이 통째로 무효가 된다 — 파일이 더 안 자라 mtime 게이트가 재파싱도 막는다(code-review).
+    const tail =
+        \\{"type":"event_msg","payload":{"type":"exec_command_begin","command":"gh pr checks --watch"}}
+        \\{"type":"response_item","payload":{"type":"function_call"}}
+        \\{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","duration_ms":372476}}
+        \\{"type":"event_msg","payload":{"type":"exec_command_end","exit_code":130}}
+    ;
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqual(AgentState.interrupted, parseCodexTail(std.testing.allocator, tail, &buf).state);
+
+    // 새 턴(task_started)이 오면 latch가 풀려 running으로 정상 복귀(고착이 아니다).
+    const resumed = tail ++
+        \\
+        \\{"type":"event_msg","payload":{"type":"task_started"}}
+    ;
+    try std.testing.expectEqual(AgentState.running, parseCodexTail(std.testing.allocator, resumed, &buf).state);
 }
 
 test "parseCodexTail: turn_aborted(ESC 인터럽트)는 interrupted — else 분기로 새면 claude와 같은 고착" {

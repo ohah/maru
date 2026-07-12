@@ -98,24 +98,32 @@ Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hook
 - **running** = 에이전트 포그라운드 **AND** 세션의 마지막 *대화* 엔트리가 **미완료**(claude: user거나 end_turn 아닌
   assistant / codex: 마지막 `event_msg`가 `task_complete` 아님).
 - **idle** = 에이전트 포그라운드 **AND** 완료 마커가 마지막(claude end_turn / codex task_complete).
-- **interrupted** = 에이전트 포그라운드 **AND** 마지막 대화 엔트리가 **사용자 인터럽트(ESC)** — claude는
-  `interruptedMessageId`를 단 `user` 엔트리, codex는 `event_msg/turn_aborted`(reason `interrupted`). 진행 중이
+- **interrupted** = 에이전트 포그라운드 **AND** 마지막 대화 엔트리가 **사용자 인터럽트(ESC)**. 진행 중이
   **아니므로** 스피너·탭 ●는 꺼지고, **완료도 아니므로** "에이전트 완료" 알림은 쏘지 않는다(사용자가 직접 ESC를
-  눌러 이미 그 자리에 있다). 상태줄은 `· 중단됨`.
+  눌러 이미 그 자리에 있다). 상태줄은 `· 중단됨`. 판별(실측 기반, `agent_transcript.zig`가 단일 출처):
+  - **claude**: `user` 엔트리에 top-level `interruptedMessageId`가 있거나 **본문이 `[Request interrupted`로 시작**.
+    둘을 **OR**로 보는 이유: 실측 인터럽트 엔트리의 약 **11%가 필드 없이** 본문만 남긴다(같은 버전에서도 섞인다).
+    필드만 보면 그 비율만큼 고착이 그대로 재현되고, 본문만 보면 문구 변경에 취약하다.
+  - **codex**: `event_msg`/`turn_aborted`(reason `interrupted`).
+  - **인터럽트 latch**: 마커를 본 뒤 따라오는 *꼬리* 엔트리는 상태를 뒤집지 못한다. 실측상 claude는 ESC 직후
+    `assistant`/`stop_sequence`("No response requested.")를, codex는 `turn_aborted` 다음 줄에 중단된 명령의
+    `exec_command_end`를 붙이는 판이 있다 — latch가 없으면 각각 **가짜 완료**와 **running 복귀(고착)**가 된다.
+    latch는 **새 프롬프트/새 턴**(claude: 일반 `user` / codex: `user_message`·`task_started`)에서 풀린다.
 
 핵심: **mtime을 쓰지 않는다**(느린 API 중엔 파일이 안 써져서 false idle). 대신 **마지막 대화 엔트리의 의미**
 (턴 완료 여부)를 본다 — API가 44초든 5분이든 "턴 미완료"는 구조적 사실이라 false idle이 없다. **포그라운드 체크**를
 AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽음) false-running을 막는다.
 
-> **인터럽트를 별도 상태로 두는 이유(회귀)**: ESC는 에이전트 프로세스를 **죽이지 않는다** — 포그라운드 AND 체크가
-> 안 걸린다. 그런데 인터럽트 엔트리는 claude에선 `user` 타입(=새 프롬프트와 같은 모양), codex에선 `task_complete`가
-> 아닌 이벤트라, 옛 파서는 둘 다 **running**으로 접었다. 그 뒤로는 트랜스크립트가 더 자라지 않아 **mtime 게이트가
-> 재파싱조차 막아** 스피너가 영구 고착됐다(같은 위험을 "트랜스크립트 삭제" 케이스에선 이미 `missing` 자가정리로
-> 막아뒀는데, 인터럽트에선 놓쳤다). 판별자는 **필드 존재**(`interruptedMessageId` / `turn_aborted`)로 한다 — 본문
-> 문구(`[Request interrupted by user]`) 매칭보다 견고하다(로케일·버전 변화에 안 깨진다).
+> **인터럽트를 별도 상태로 두는 이유(회귀)**: **루트코즈는 파서의 오독**이다 — 인터럽트 엔트리가 claude에선 `user`
+> 타입(=새 프롬프트와 같은 모양), codex에선 `task_complete`가 아닌 이벤트라 옛 파서가 둘 다 **running**으로 접었다.
+> ESC는 에이전트 프로세스를 **죽이지 않으므로** 포그라운드 AND 체크(crash/Ctrl-C 방어)도 안 걸린다. mtime 게이트는
+> **루트코즈가 아니라 증상을 영구화하는 증폭기**다: 잘못 접힌 running 뒤로 트랜스크립트가 더 자라지 않아 재파싱조차
+> 막힌다(파서가 옳게 판정하면 mtime 게이트는 문제가 아니다 — 인터럽트 엔트리 append 자체가 mtime을 갱신해 그 시점에
+> 재파싱된다). 같은 위험을 "트랜스크립트 삭제" 케이스에선 이미 `missing` 자가정리로 막아뒀는데, 인터럽트에선 놓쳤다.
 >
-> 컨트롤 플레인 wire(`control_surface.AgentState`)는 **닫힌 열거**라 값을 늘리지 않고 `interrupted → idle`로 접는다 —
-> 외부가 보는 의미("진행 중이 아님")가 같아 손실이 없다.
+> 컨트롤 플레인 wire(`control_surface.AgentState`)는 **`interrupted`를 별도 값으로 싣는다**(4상). `idle`로 접으면
+> 클라이언트가 `running → idle` 전이를 "턴 완료"로 읽어 **가짜 완료**를 보고한다(끊은 턴을 완료로 착각해 후속 단계를
+> 진행). "진행 중이 아님"만 알고 싶으면 `state != running`을 보면 된다.
 
 ## 성능 (큰 파일 안전)
 

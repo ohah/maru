@@ -1728,6 +1728,122 @@ test "server 왕복(5f-0b-3b): browser.subscribe → subscriber_id 응답 + 연�
     try testing.expectEqual(@as(usize, 0), server.subscriber_reg.broker.len()); // 연결 drop → 구독 purge(연결 스레드 종료 후 무경합 read)
 }
 
+// 5f-0b-3c 라이브 e2e: 구독한 client가 메인의 pushEvent(browser.navigated)를 **서버-발신 notification**으로 실제 소켓에서
+// 받는지 — KVO→pushEvent→outbound→writer→소켓의 이벤트 전달 전 경로를 증명(KVO 소스만 fake=메인이 직접 pushEvent).
+// 요청 없이 서버가 먼저 프레임을 미는 것(재아키텍처 β writer의 목적)을 실 왕복으로 확인.
+test "server 왕복(5f-0b-3c): 구독 client가 pushEvent(navigated)를 browser.navigated notification으로 수신" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.heap.c_allocator;
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "event");
+    defer srvRmBase(base);
+
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    defer server.stop();
+
+    const cap_nonce: [cap.nonce_len]u8 = [_]u8{0x3E} ** cap.nonce_len;
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, cap_nonce, .{ .surface_id = 30, .generation = 0, .scope = .browser });
+
+    const Client = struct {
+        base: []const u8,
+        nonce: [cap.nonce_len]u8,
+        err: ?anyerror = null,
+        subscribed: std.atomic.Value(bool) = .init(false),
+        event_url: ?[]u8 = null,
+        got_event: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            var db: [512]u8 = undefined;
+            const dir = cs.controlDirPath(&db, self.base) catch return;
+            var sb: [512]u8 = undefined;
+            const sp = cs.socketPathIn(&sb, dir, "k1") catch return;
+            const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+            if (fd < 0) return;
+            defer _ = c.close(fd);
+            var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+            @memset(&addr.path, 0);
+            @memcpy(addr.path[0..sp.len], sp);
+            if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return;
+            cs.setReadTimeoutMs(fd, 5000);
+            const auth = cp.serializeAuthSelf(std.heap.c_allocator, 30, self.nonce) catch return;
+            defer std.heap.c_allocator.free(auth);
+            cs.writeAll(fd, auth) catch return;
+            cs.writeAll(fd, "\n") catch return;
+            cs.writeAll(fd, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":30,\"events\":[\"navigated\"]}}") catch return;
+            cs.writeAll(fd, "\n") catch return;
+            var framer: cp.Framer = .{};
+            defer framer.deinit(std.heap.c_allocator);
+            // phase 1: 구독 응답(response) 수신 → subscribed. phase 2: browser.navigated notification 수신 → event_url.
+            var phase2 = false;
+            while (true) {
+                const line = nextLine(fd, &framer) catch |e| {
+                    self.err = e;
+                    return;
+                } orelse return; // EOF
+                defer std.heap.c_allocator.free(line);
+                var pm = cp.parseMessage(std.heap.c_allocator, line) catch continue;
+                defer pm.deinit();
+                if (!phase2) {
+                    if (pm.message == .response) {
+                        self.subscribed.store(true, .release);
+                        phase2 = true;
+                    } // 그 외(hello notification)는 skip
+                } else if (pm.message == .notification and std.mem.eql(u8, pm.message.notification.method, "browser.navigated")) {
+                    if (pm.message.notification.params) |p| {
+                        if (p == .object) {
+                            if (p.object.get("url")) |u| {
+                                if (u == .string) self.event_url = std.heap.c_allocator.dupe(u8, u.string) catch null;
+                            }
+                        }
+                    }
+                    self.got_event.store(true, .release);
+                    break;
+                }
+            }
+            while (!self.release.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        }
+        fn nextLine(fd: c.fd_t, framer: *cp.Framer) !?[]u8 {
+            while (true) {
+                if (framer.next() catch null) |line| return try std.heap.c_allocator.dupe(u8, line);
+                var rb: [1024]u8 = undefined;
+                const n = c.read(fd, &rb, rb.len);
+                if (n <= 0) return null;
+                try framer.push(std.heap.c_allocator, rb[0..@intCast(n)]);
+            }
+        }
+    };
+    var ct = Client{ .base = base, .nonce = cap_nonce };
+    const th = try std.Thread.spawn(.{}, Client.run, .{&ct});
+
+    // drain until 구독 완료.
+    var guard: usize = 0;
+    while (!ct.subscribed.load(.acquire) and guard < 5000) : (guard += 1) {
+        _ = try drainWithFakeSnapshot(&server, &store, web_snapshot);
+        if (!ct.subscribed.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try testing.expect(ct.subscribed.load(.acquire));
+
+    // 메인이 KVO 대신 직접 pushEvent(navigated) — 구독 client에 서버-발신 notification으로 흘러야 한다.
+    var w: usize = 0;
+    while (!ct.got_event.load(.acquire) and w < 5000) : (w += 1) {
+        _ = server.subscriber_reg.pushEvent(gpa, 30, .{ .navigated = "https://newpage/" });
+        if (!ct.got_event.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try testing.expect(ct.got_event.load(.acquire));
+    try testing.expect(ct.err == null);
+    try testing.expect(ct.event_url != null);
+    defer if (ct.event_url) |u| std.heap.c_allocator.free(u);
+    try testing.expectEqualStrings("https://newpage/", ct.event_url.?); // 그 url이 실제로 실려 왔다
+
+    ct.release.store(true, .release);
+    th.join();
+}
+
 test "server: start 실패 없이 즉시 stop해도 accept 스레드가 깨끗이 join(요청 0건)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;

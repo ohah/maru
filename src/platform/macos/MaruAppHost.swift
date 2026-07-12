@@ -799,6 +799,76 @@ private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonce
     return (navigateOk, getUrl)
 }
 
+// 5f-0b-3c(테스트 전용): **지속 연결**로 subscribe→navigate(새 URL)→`browser.navigated` notification 수신을 검증한다.
+// KVO(실 WKWebView url 변경)→pushEvent→outbound→writer→소켓의 **서버-발신 이벤트** 파이프라인을 실 navigation으로 자동
+// 확인(3b 소켓 왕복·pushEvent 헤드리스에 더해 3c는 실 KVO 소스까지). 반환=받은 navigated url(성공)·"pending"(타임아웃)·
+// "error:...". `SO_NOSIGPIPE`로 broken pipe가 앱을 안 죽인다. 지속 세션(2b-1)이라 한 연결로 auth 1회+요청 다수.
+private func runBrowserEventSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> String {
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    if fd < 0 { return "error:socket" }
+    defer { close(fd) }
+    var noSigPipe: Int32 = 1
+    _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = Array(socketPath.utf8)
+    let pathCap = MemoryLayout.size(ofValue: addr.sun_path)
+    if pathBytes.count >= pathCap { return "error:path-too-long" }
+    withUnsafeMutablePointer(to: &addr.sun_path) { p in
+        p.withMemoryRebound(to: CChar.self, capacity: pathCap) { dst in
+            for (i, b) in pathBytes.enumerated() { dst[i] = CChar(bitPattern: b) }
+            dst[pathBytes.count] = 0
+        }
+    }
+    let connRc = withUnsafePointer(to: &addr) { ap in
+        ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+            connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    if connRc != 0 { return "error:connect" }
+    var tv = timeval(tv_sec: 3, tv_usec: 0)
+    _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+    func writeLine(_ s: String) -> Bool {
+        var bytes = Array(s.utf8); bytes.append(0x0A)
+        return bytes.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let n = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+                if n <= 0 { return false }
+                off += n
+            }
+            return true
+        }
+    }
+    // auth(cap) + subscribe(navigated) + navigate(새 URL — 현 fixture와 달라야 url KVO 발화). 지속 세션 = 한 연결.
+    let newUrl = "data:text/html,%3Ch1%3Eevt3c%3C/h1%3E"
+    let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid),\"cap_nonce\":\"\(nonceHex)\"}}"
+    let subReq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":\(sid),\"events\":[\"navigated\"]}}"
+    let navReq = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.navigate\",\"params\":{\"id\":\(sid),\"url\":\"\(newUrl)\"}}"
+    if !writeLine(auth) || !writeLine(subReq) || !writeLine(navReq) { return "error:write" }
+
+    // 스트림을 읽으며 browser.navigated notification을 찾는다(hello·구독 응답·navigate 응답은 skip). 그 params.url을 돌려준다.
+    var leftover = [UInt8]()
+    let deadline = Date().addingTimeInterval(3.0)
+    while Date() < deadline {
+        while let nl = leftover.firstIndex(of: 0x0A) {
+            let lineBytes = Array(leftover[0 ..< nl])
+            leftover.removeSubrange(0 ... nl)
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(lineBytes)) as? [String: Any] else { continue }
+            if obj["method"] as? String == "browser.navigated",
+               let params = obj["params"] as? [String: Any],
+               let url = params["url"] as? String { return url }
+        }
+        var buf = [UInt8](repeating: 0, count: 1024)
+        let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+        if n <= 0 { break } // 타임아웃/close
+        leftover.append(contentsOf: buf[0 ..< n])
+        if leftover.count > 64 * 1024 { return "error:overflow" }
+    }
+    return "pending" // 타임아웃 — 이벤트 못 받음
+}
+
 // 5e-2b-2(테스트 전용): JSON-RPC 응답 한 줄에서 `result` 객체를 파싱한다(hand-rolled 문자열 스캔 대신 — 17차 [5]:
 // escape 따옴표 있는 URL도 정확). 파싱 불가·result 없음이면 nil.
 private func browserCtlResult(_ line: String) -> [String: Any]? {
@@ -1032,8 +1102,15 @@ final class MaruWebPanelView: NSView {
         navObservers = [
             webView.observe(\.url, options: [.new]) { [weak self] wv, _ in
                 MainActor.assumeIsolated {
-                    self?.navUrl = wv.url?.absoluteString
-                    self?.navStateDirty = true
+                    guard let self else { return }
+                    self.navUrl = wv.url?.absoluteString
+                    self.navStateDirty = true
+                    // 5f-0b-3c: URL 변경 → browser.navigated 이벤트를 그 surface 구독자에게 push(구독 없으면 Zig서 조기 반환).
+                    // KVO=메인 스레드라 registry(leaf-mutex) 접근 안전. url 바이트는 이 호출 중만 유효(Zig가 프레임에 복사).
+                    let urlBytes = Array((wv.url?.absoluteString ?? "").utf8)
+                    urlBytes.withUnsafeBufferPointer { p in
+                        maru_macos_control_push_browser_navigated(self.surfaceId, p.baseAddress, p.count)
+                    }
                 }
             },
             webView.observe(\.canGoBack, options: [.new]) { [weak self] wv, _ in
@@ -1453,6 +1530,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private let browserCtlLock = NSLock()
     private nonisolated(unsafe) var browserCtlNavigateOkStore = "pending" // 소켓 browser.navigate 응답에 "ok":true 포함 여부.
     private nonisolated(unsafe) var browserCtlGetUrlStore = "pending" // 소켓 browser.getUrl 응답의 url(navigate한 data: URL 기대).
+    private nonisolated(unsafe) var browserCtlEventNavigatedStore = "pending" // 5f-0b-3c: 구독 후 navigate가 유발한 browser.navigated 이벤트의 url.
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
@@ -2672,34 +2750,37 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // cap 발급(메인) — 그 surface에 묶인 browser cap nonce(raw 32B). env 미설정/실패면 0 → 진단 남기고 종료.
         var nonce = [UInt8](repeating: 0, count: 32)
         let issued = nonce.withUnsafeMutableBufferPointer { maru_macos_control_test_issue_browser_cap(t.surfaceId, $0.baseAddress, $0.count) }
-        guard issued == 1 else { storeBrowserCtlResult(navigateOk: "error:cap-issue", getUrl: "error:cap-issue"); return }
+        guard issued == 1 else { storeBrowserCtlResult(navigateOk: "error:cap-issue", getUrl: "error:cap-issue", eventNavigated: "error:cap-issue"); return }
         let nonceHex = nonce.map { String(format: "%02x", $0) }.joined()
 
         // 소켓 경로 조회(메인).
         var pathBuf = [UInt8](repeating: 0, count: 512)
         let pathLen = pathBuf.withUnsafeMutableBufferPointer { maru_macos_control_socket_path($0.baseAddress, $0.count) }
-        guard pathLen > 0 else { storeBrowserCtlResult(navigateOk: "error:socket-path", getUrl: "error:socket-path"); return }
+        guard pathLen > 0 else { storeBrowserCtlResult(navigateOk: "error:socket-path", getUrl: "error:socket-path", eventNavigated: "error:socket-path"); return }
         let socketPath = String(decoding: pathBuf[0 ..< pathLen], as: UTF8.self)
 
         // 배경 큐에서 소켓 왕복 — 메인 tick은 계속 돌며 marshal/complete한다. 결과는 lock으로 저장.
         DispatchQueue.global().async { [weak self] in
             let r = runBrowserControlSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex, navigateURL: t.url)
-            self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl)
+            // 5f-0b-3c: 위 navigate 뒤(패널이 data: URL 커밋됨), 지속 연결로 subscribe→새 URL navigate→browser.navigated 수신 검증.
+            let evt = runBrowserEventSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
+            self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl, eventNavigated: evt)
         }
     }
 
     /// 5e-2b-2: 배경 소켓 클라이언트가 결과를 저장(lock 보호). nonisolated — 배경 큐에서 호출.
-    private nonisolated func storeBrowserCtlResult(navigateOk: String, getUrl: String) {
+    private nonisolated func storeBrowserCtlResult(navigateOk: String, getUrl: String, eventNavigated: String) {
         browserCtlLock.lock()
         browserCtlNavigateOkStore = navigateOk
         browserCtlGetUrlStore = getUrl
+        browserCtlEventNavigatedStore = eventNavigated
         browserCtlLock.unlock()
     }
 
     /// 5e-2b-2: writeSummary(메인)가 결과를 읽는다(lock 보호). 미완이면 "pending".
-    private func browserCtlResults() -> (navigateOk: String, getUrl: String) {
+    private func browserCtlResults() -> (navigateOk: String, getUrl: String, eventNavigated: String) {
         browserCtlLock.lock(); defer { browserCtlLock.unlock() }
-        return (browserCtlNavigateOkStore, browserCtlGetUrlStore)
+        return (browserCtlNavigateOkStore, browserCtlGetUrlStore, browserCtlEventNavigatedStore)
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
@@ -4898,6 +4979,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
             browser_ctl_navigate_ok=\(browserCtlResults().navigateOk)
             browser_ctl_get_url=\(browserCtlResults().getUrl)
+            browser_ctl_event_navigated=\(browserCtlResults().eventNavigated)
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

@@ -1145,4 +1145,8 @@ uint32_t maru_macos_control_test_issue_browser_cap(uint64_t surface_id, uint8_t 
    부족). smoke의 인-프로세스 소켓 클라이언트가 자기 앱 소켓에 connect하는 데 쓴다(경로는 비밀 아님). NUL 미포함 길이. */
 size_t maru_macos_control_socket_path(uint8_t *out, size_t out_cap);
 
+/* 5f-0b-3c: WKWebView url KVO(메인 스레드)에서 호출 — 그 web surface의 browser.navigated 이벤트를 구독자에게 push한다.
+   구독자 없으면 무비용 조기 반환(match-first). 서버 미시작이면 무동작. url은 이 호출 중만 유효(내부서 프레임에 복사). 메인 스레드만. */
+void maru_macos_control_push_browser_navigated(uint64_t surface_id, const uint8_t *url_ptr, size_t url_len);
+
 #endif

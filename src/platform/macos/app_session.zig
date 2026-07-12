@@ -140,7 +140,13 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 114;
+pub const abi_version: u32 = 115;
+// 115: focus_pane_at(드래그앤드롭 pane 라우팅 — 파일/이미지/텍스트 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
+// 들어가게 한다). Swift performDragOperation이 삽입 **전에** 드롭 지점(backing px)으로 부르면 Zig가 leaf rect
+// hit-test로 그 pane을 포커스하고, 뒤이은 paste_text/drop_files/drop_image가 기존 경로 그대로 새 활성 pane에 넣는다.
+// 대상 surface를 drop 함수마다 넘기지 않고 "포커스 이동"으로 표현하는 이유: paste는 붙여넣기 보호 모달을 거쳐
+// **비동기로** 확정될 수 있어(pasteNeedsConfirmation) 대상을 모달 너머까지 들고 가면 확정 시점 대상이 흔들린다.
+// 사이드바/pane 밖이면 0(무동작=활성 pane 폴백). export 1개 추가 — 구조체 offset 불변.
 // 114: Phase 4g-1 후속(14차 리뷰 [0][3]) — focus-sync override 단일 출처: addr_edit_surface를 terminal_owns_input getter로
 // 교체(모달[notice 제외]·주소창 편집·rename·사이드바 검색 중 하나라도면 1). 옛 getter는 rename·사이드바 검색을 빠뜨려
 // web pane 활성 중 그 편집이 웹뷰로 새고 notice까지 세는 버그. export 교체(개수 불변) — 구조체 offset 불변. §4.1.
@@ -12877,6 +12883,29 @@ pub const AppSession = struct {
         bytes: []u8,
     };
 
+    /// 드래그앤드롭 **지점의 pane**으로 포커스를 옮긴다(옮겼으면 true). Swift performDragOperation이 내용 삽입
+    /// **전에** 부른다 — 드롭이 활성 pane이 아니라 **떨어뜨린 pane**으로 들어가게 하는 라우팅의 유일한 진입점.
+    ///
+    /// 결정(대상 surface를 drop 함수마다 넘기지 않고 "포커스 이동"으로 표현하는 이유): paste는 붙여넣기 보호
+    /// 모달을 거쳐 **비동기로** 확정될 수 있어(pasteNeedsConfirmation → 확인 후 submitPaste), 대상 surface를 모달
+    /// 너머까지 들고 가면 확정 시점의 대상이 흔들린다(그 사이 pane이 닫히거나 포커스가 바뀔 수 있다). 드롭한
+    /// pane을 활성으로 만들면 확정 경로가 하나로 유지되고, 드롭 직후 Enter도 같은 pane으로 간다(사용자 결정).
+    ///
+    /// hit-test는 마우스 경로(pointOnChrome/renameTargetAt)와 같은 leaf rect 단일 출처를 쓴다 — pane rect는 탭 바를
+    /// 포함하므로 바 위에 떨어뜨려도 그 pane으로 간다. 사이드바·pane 밖이면 무동작(false) = 기존 활성 pane 폴백.
+    pub fn focusPaneAtPoint(self: *AppSession, x_px: f64, y_px: f64) bool {
+        if (!self.surface_initialized) return false;
+        if (self.inSidebar(x_px)) return false; // 사이드바 드롭은 범위 밖 — 활성 pane 폴백(기존 동작)
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return false;
+        for (leaf_rects.items) |lr| {
+            if (!layout_math.pointInRect(x_px, y_px, lr.rect)) continue;
+            return self.focusPaneByPtr(lr.leaf); // 이미 활성이면 focusPane이 무동작(true는 "그 pane이 대상"의 뜻)
+        }
+        return false;
+    }
+
     /// 드롭한 파일들(NUL 구분 경로)을 처리한다. maru ssh 원격 세션이면 각 파일을 control socket으로
     /// 백그라운드 업로드하고(완료 시 원격 경로 paste), 로컬 세션이면 기존처럼 경로를 셸 이스케이프해
     /// paste한다. Swift 드롭 핸들러(3d ABI)가 fileURL 드롭 시 부른다. 설계: docs/ssh-integration.md §4.
@@ -23556,6 +23585,51 @@ test "code-review #3: pane grip을 그룹 헤더에 드롭 → 새 워크스페�
     const below_y: f64 = @floatFromInt(past_end + @as(i64, @intCast(slot_h)));
     const dest2 = session.computePaneDropDest(x, below_y);
     try std.testing.expect(dest2 != null and dest2.? == .new_workspace);
+}
+
+test "드래그앤드롭 pane 라우팅: focusPaneAtPoint가 떨어뜨린 pane을 활성으로 (활성 pane 고정 회귀)" {
+    // 이 테스트가 증명하는 것: 파일/이미지 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로 들어간다는 계약.
+    // 실제 회귀: 어느 pane에 떨어뜨려도 항상 활성 pane에만 삽입됐다(Swift performDragOperation이 드롭 좌표를
+    // 버리고 pasteboard만 넘겼다). 삽입 자체는 기존 paste 경로(활성 surface 대상)를 그대로 쓰므로, 라우팅은
+    // "삽입 전에 그 pane을 활성으로 만든다"로 표현된다 — 이 함수가 그 유일한 진입점이다(ABI v115).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // split은 backing이 잡혀야 의미 있다(termRect 입력) — resized 창을 흉내(위 split 테스트와 같은 규율).
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+    try session.splitActivePane(.horizontal); // 좌우 2 pane, 활성 = 새로 생긴 pane
+    const tab = session.activeTab();
+    try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
+
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaf_rects);
+    try std.testing.expectEqual(@as(usize, 2), leaf_rects.items.len);
+
+    // 각 pane의 중앙에 "드롭"하면 그 pane이 활성이 된다 — 활성이 아니던 pane도 포함(핵심 회귀).
+    for (leaf_rects.items) |lr| {
+        const cx: f64 = @floatFromInt(lr.rect.x + @as(i64, @intCast(lr.rect.w / 2)));
+        const cy: f64 = @floatFromInt(lr.rect.y + @as(i64, @intCast(lr.rect.h / 2)));
+        try std.testing.expect(session.focusPaneAtPoint(cx, cy));
+        try std.testing.expectEqual(lr.leaf, session.activePane()); // 떨어뜨린 pane이 활성
+    }
+
+    // 사이드바 위 드롭 → 무동작(false) = 활성 pane 폴백(기존 동작 보존, 이번 범위 밖).
+    const before = session.activePane();
+    const sidebar_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    try std.testing.expect(!session.focusPaneAtPoint(sidebar_x, 100));
+    try std.testing.expectEqual(before, session.activePane()); // 활성 pane 불변
 }
 
 test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카드 드래그=그룹 통째 이동 + 드롭 하이라이트 (mouse 시뮬레이션)" {

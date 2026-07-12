@@ -393,6 +393,20 @@ pub export fn maru_macos_app_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
+// 드래그앤드롭 지점(backing px)의 pane으로 포커스를 옮긴다 — 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
+// 들어가게 하는 라우팅. Swift performDragOperation이 내용 삽입(paste_text/drop_files/drop_image) **전에** 부르면
+// 뒤이은 삽입이 기존 경로 그대로 새 활성 pane에 들어간다. 그 pane으로 갔으면 1, 사이드바/pane 밖이면 0(무동작=
+// 활성 pane 폴백). 대상을 drop 함수마다 넘기지 않는 이유는 app_session.focusPaneAtPoint 주석(비동기 paste 확인
+// 모달) 참조. (v115)
+pub export fn maru_macos_app_session_focus_pane_at(
+    session: ?*AppSession,
+    x_px: f64,
+    y_px: f64,
+) c_int {
+    const app_session = session orelse return 0;
+    return if (app_session.focusPaneAtPoint(x_px, y_px)) 1 else 0;
+}
+
 // 드래그앤드롭한 파일 경로들(NUL '\0' 구분). maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드
 // 업로드한 뒤 원격 절대경로를 paste하고, 로컬 세션이면 경로를 셸 이스케이프해 paste한다 — 분기는
 // Zig(app_session.handleDroppedFiles). Swift는 fileURL 드롭일 때만 부른다(웹 URL·텍스트는 paste_text). (v68)

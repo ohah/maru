@@ -407,8 +407,8 @@ pub const ControlServer = struct {
         }
     }
 
-    /// 5f-0b-2a: 한 연결을 서브하는 detached 스레드 본체. serve(한 요청·waitResolved — 5e async 경로 불변) 후 conn을
-    /// 닫고 wait-group 카운터를 내린다(broadcast로 stop() 대기 해제). conn은 값 소유(fd 하나).
+    /// 5f-0b-2a: 한 연결을 서브하는 detached 스레드 본체. serve(2b-1부터 지속 세션=auth 1회+요청 루프·waitResolved —
+    /// 5e async 경로 불변) 후 conn을 닫고 wait-group 카운터를 내린다(broadcast로 stop() 대기 해제). conn은 값 소유(fd 하나).
     fn connThread(self: *ControlServer, conn_in: cs.Connection) void {
         var conn = conn_in;
         self.serveConnection(&conn);
@@ -419,8 +419,10 @@ pub const ControlServer = struct {
         self.conns_mutex.unlock(self.io);
     }
 
-    /// 한 연결을 serve: read 타임아웃 → auth 셀렉터 프레임 + 요청 프레임 읽기 → marshal → 메인 응답 대기 → write.
-    /// 코어/트리/collector 접근 0(전부 메인 marshal). cross_gpa만 쓴다(thread-safe).
+    /// 한 연결을 serve: read 타임아웃 → auth 프레임 1회 → **요청 루프**(각 요청=frame 읽기 → marshal → 메인 응답 대기
+    /// → write, 순차). 5f-0b-2b-1 **지속 세션**(§9.5.1 D1): auth 1회 후 같은 연결로 다중 요청(매 메서드 재연결·재auth
+    /// 제거). 요청은 순차(현 요청 응답 후 다음 read) — 파이프라인·이벤트 push는 outbound 큐 배선(5f-0b-2b-2) 후. EOF/
+    /// 타임아웃/에러/종료면 루프를 나와 연결을 닫는다. 코어/트리/collector 접근 0(전부 메인 marshal). cross_gpa만 쓴다.
     fn serveConnection(self: *ControlServer, conn: *cs.Connection) void {
         cs.setReadTimeoutMs(conn.fd, self.read_timeout_ms);
         cs.setWriteTimeoutMs(conn.fd, self.read_timeout_ms); // #2: 응답을 안 읽는 client에 write가 무한 블록하지 않게(read와 대칭).
@@ -428,28 +430,32 @@ pub const ControlServer = struct {
         defer framer.deinit(self.cross_gpa);
 
         // 프레임 1 = auth.self 셀렉터 + 선택적 cap_nonce(§8.4·§8.5 1e). 없거나 손상이면 빈 AuthFrame(self 안 줌·cap 없음).
-        // AuthFrame은 값 타입(selector·cap_nonce 복사본)이라 framer 슬라이스 무효화와 무관하게 대기 동안 유효하다.
+        // AuthFrame은 값 타입(selector·cap_nonce 복사본)이라 framer 슬라이스 무효화와 무관하게 세션 내내 유효하다(auth 1회).
         const auth_line = self.readFrame(conn, &framer) orelse return;
         const auth = cp.parseAuthFrame(self.cross_gpa, auth_line);
 
-        // 프레임 2 = 요청. Framer 슬라이스는 다음 read에 무효화되므로 marshal 전에 dupe(대기 동안 유효 보장).
-        const req_line = self.readFrame(conn, &framer) orelse return;
-        const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
-        defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 스택 프레임 끝에서 해제(대기 후라 안전)
+        // 요청 루프(지속 세션): 각 iteration이 요청 한 개를 처리한다. readFrame null(EOF/타임아웃/에러/oversize)이면 종료.
+        while (true) {
+            // Framer 슬라이스는 다음 read에 무효화되므로 marshal 전에 dupe(대기 동안 유효 보장). defer로 iteration 끝에 해제.
+            const req_line = self.readFrame(conn, &framer) orelse return;
+            const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
+            defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 iteration 끝(대기 후)에 해제
 
-        var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonce = auth.cap_nonce, .io = self.io };
-        self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon
+            var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonce = auth.cap_nonce, .io = self.io };
+            self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon(req_copy는 defer가 해제)
 
-        switch (pending.waitResolved()) {
-            .cancelled => return, // 서버 종료 — 응답 없이 abandon
-            .pending => return, // 도달 불가(waitResolved는 pending에서 안 나감)
-            .done => {
-                if (pending.response) |resp| {
-                    defer self.cross_gpa.free(resp);
-                    cs.writeAll(conn.fd, resp) catch return;
-                    cs.writeAll(conn.fd, "\n") catch return;
-                }
-            },
+            switch (pending.waitResolved()) {
+                .cancelled => return, // 서버 종료 — 응답 없이 abandon
+                .pending => return, // 도달 불가(waitResolved는 pending에서 안 나감)
+                .done => {
+                    if (pending.response) |resp| {
+                        defer self.cross_gpa.free(resp);
+                        cs.writeAll(conn.fd, resp) catch return;
+                        cs.writeAll(conn.fd, "\n") catch return;
+                    }
+                    // 응답 완료 → 다음 요청 read(루프 계속). req_copy는 이 iteration defer가 해제.
+                },
+            }
         }
     }
 
@@ -685,6 +691,57 @@ fn clientReq(gpa: std.mem.Allocator, base: []const u8, key: []const u8, selector
     return error.NoResponse;
 }
 
+/// 지속 세션 테스트 client(5f-0b-2b-1): **한 연결**로 auth 1회 + 요청 N개 전송 → 응답 N개(hello skip) 수신. `out[i]`=
+/// owned 응답(요청 순서대로). 응답이 부족하면(연결 닫힘) NoResponse.
+fn clientReqPersistent(gpa: std.mem.Allocator, base: []const u8, key: []const u8, selector: ?u64, requests: []const []const u8, out: [][]u8) !void {
+    std.debug.assert(out.len == requests.len);
+    var db: [512]u8 = undefined;
+    const dir = try cs.controlDirPath(&db, base);
+    var sb: [512]u8 = undefined;
+    const sp = try cs.socketPathIn(&sb, dir, key);
+    const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    if (fd < 0) return error.ClientSocket;
+    defer _ = c.close(fd);
+    var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..sp.len], sp);
+    if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return error.ClientConnect;
+
+    const auth = try cp.serializeAuthSelf(gpa, selector, null);
+    defer gpa.free(auth);
+    try cs.writeAll(fd, auth);
+    try cs.writeAll(fd, "\n");
+    for (requests) |req| { // 요청 N개를 한 번에 보낸다(서버는 순차 처리·순서대로 응답)
+        try cs.writeAll(fd, req);
+        try cs.writeAll(fd, "\n");
+    }
+
+    var framer: cp.Framer = .{};
+    defer framer.deinit(gpa);
+    var got: usize = 0;
+    while (got < out.len) {
+        while (framer.next() catch null) |line| {
+            var pm = cp.parseMessage(gpa, line) catch {
+                out[got] = try gpa.dupe(u8, line); // parse 실패도 응답으로 취급(clientReq 결)
+                got += 1;
+                if (got == out.len) return;
+                continue;
+            };
+            const is_notif = pm.message == .notification;
+            pm.deinit();
+            if (!is_notif) { // hello(notification) skip, 응답만 수집
+                out[got] = try gpa.dupe(u8, line);
+                got += 1;
+                if (got == out.len) return;
+            }
+        }
+        var rb: [1024]u8 = undefined;
+        const n = c.read(fd, &rb, rb.len);
+        if (n <= 0) return error.NoResponse; // 응답 부족(연결 닫힘)
+        try framer.push(gpa, rb[0..@intCast(n)]);
+    }
+}
+
 /// 메인 drain 흉내(app_host_abi가 할 일): pending을 꺼내 fake snapshot + capability auth(1e `dispatchAuthenticated`)로
 /// 응답을 만들어 resolve. 실제 collector 대신 rt_snapshot, 실 CapabilityStore 대신 주입 store를 쓴다(라이브 배선은
 /// app_host_abi 테스트가 커버). store가 빈이면 nonce 없는 요청은 self, nonce 있는 요청은 default-deny(unauthorized).
@@ -804,6 +861,60 @@ test "server 동시 연결(5f-0b-2a): 여러 client가 동시에 붙어도 각�
         try testing.expect(cts[i].resp != null);
         defer std.heap.c_allocator.free(cts[i].resp.?);
         var pm = try cp.parseMessage(gpa, cts[i].resp.?);
+        defer pm.deinit();
+        try testing.expect(pm.message == .response);
+        try testing.expectEqual(@as(usize, 1), pm.message.response.result.?.array.items.len);
+    }
+}
+
+test "server 지속 세션(5f-0b-2b-1): 한 연결로 auth 1회 + 요청 2개 → 응답 2개(재연결·재auth 없이)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.heap.c_allocator;
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "persistent");
+    defer srvRmBase(base);
+
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    defer server.stop();
+
+    const ClientT = struct {
+        base: []const u8,
+        resps: [2][]u8 = undefined,
+        ok: bool = false,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            const reqs = [_][]const u8{
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}",
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"sessions.list\"}",
+            };
+            clientReqPersistent(std.heap.c_allocator, self.base, "k1", 10, &reqs, &self.resps) catch |e| {
+                self.err = e;
+                return;
+            };
+            self.ok = true;
+        }
+    };
+    var ct = ClientT{ .base = base };
+    const th = try std.Thread.spawn(.{}, ClientT.run, .{&ct});
+
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    var done = false;
+    var guard: usize = 0;
+    while (!done and guard < 5000) : (guard += 1) {
+        _ = try drainWithFakeSnapshot(&server, &store); // 순차 요청 2개를 메인 drain이 처리
+        done = ct.ok or ct.err != null;
+        if (!done) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    th.join();
+    try testing.expect(ct.err == null);
+    try testing.expect(ct.ok);
+
+    // 두 응답 모두 self scope(surface 10 하나) — 한 연결·재auth 없이 순차 2회 처리됐다.
+    for (0..2) |i| {
+        defer std.heap.c_allocator.free(ct.resps[i]);
+        var pm = try cp.parseMessage(gpa, ct.resps[i]);
         defer pm.deinit();
         try testing.expect(pm.message == .response);
         try testing.expectEqual(@as(usize, 1), pm.message.response.result.?.array.items.len);

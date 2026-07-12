@@ -295,6 +295,22 @@ pub fn serializeSubscribeResponse(gpa: std.mem.Allocator, request_bytes: []const
 const beginResult = cp.beginResult;
 const endResult = cp.endResult;
 
+/// **1e-confirm-1c: needs_grant를 균일 unauthorized 응답으로 접는다.** L4가 (1c-1) needs_grant를 held 흐름 없이
+/// 처리하거나 (1c-2) 확인 **거부**·timeout 시 부른다. op 완료 경로처럼 `request_bytes`(pending 소유·resolve 전 유효)를
+/// 재파싱해 id를 얻는다(§9.3 ⑥ — needs_grant는 id를 안 실음). 재파싱 실패/비-request는 방어적 내부오류(dispatch가 이미 검증).
+pub fn serializeUnauthorized(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    return errorResponse(gpa, req.id, .unauthorized);
+}
+
 /// **5e-2b: L4 completion이 Swift `BrowserControl` 결과를 browser.* 응답으로 직렬화한다.** op은 응답 id/method를 안
 /// 싣으므로(§9.3 ⑥) 원 `request_bytes`(in-flight pending이 아직 소유 — resolve 전이라 유효)를 재파싱해 id·method를
 /// 얻고, method별 result 헬퍼로 실는다. `ok=false`(webView 부재·evaluateJavaScript 에러 등)면 `internal_error`(+`result`
@@ -349,12 +365,23 @@ pub const BrowserSubscribe = struct {
     filter: cev.EventFilter,
 };
 
-/// dispatchBrowser 결과: 게이트 실패면 응답 바이트(`err`, gpa-owned), async op은 `op`, 동기 구독은 `subscribe`(5f-0b-3b).
-/// **정확히 하나**만 유효.
+/// 1e-confirm-1c: 세션 cap도 pane grant도 인가 못 했으나 **valid한**(존재하는 web surface + 유효 메서드) 요청이라,
+/// pane이 확인 모달로 grant받으면 통과 가능(§9.2 Model B). L4가 §5-async로 붙잡고 모달을 띄운다(1c-2) — 승인 시
+/// `grants.grant(이 셋)` 후 요청 재구동, 거부 시 unauthorized. **`pane_selector`가 있을 때만** 방출(grant는 pane
+/// 신원에 묶임 — self-origin 없는 caller는 prompt 대상 아님=균일 unauthorized로 접힘, prompt 스팸·§8.3 oracle 방지).
+pub const GrantRequest = struct {
+    pane: u64, // 요청 pane의 selector surface_id(grant 귀속)
+    target: u64, // 제어 대상 web surface_id
+    scope: capmod.ScopeClass, // browser | browser_storage(methodRequiredScope 판정)
+};
+
+/// dispatchBrowser 결과: 게이트 실패면 응답 바이트(`err`, gpa-owned), async op은 `op`, 동기 구독은 `subscribe`(5f-0b-3b),
+/// 미grant valid 요청은 `needs_grant`(1e-confirm-1c). **정확히 하나**만 유효.
 pub const BrowserDispatch = union(enum) {
     err: []u8,
     op: BrowserOp,
     subscribe: BrowserSubscribe,
+    needs_grant: GrantRequest,
 };
 
 /// `browser.*` 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot + 주입 `caller_caps`(세션 누적 cap **집합**)로 처리한다.
@@ -443,24 +470,33 @@ pub fn browserOpFromRequest(
     //       grant는 tty-검증 pane 신원(pane_selector)에 묶인 (pane, target, scope). scope는 methodRequiredScope로
     //       판정(browser.getCookies=browser_storage·나머지 browser.*=browser). **behavior-preserving**: grant 없으면
     //       (빈 store 포함) 기존과 동일 균일 unauthorized. needs_grant/held-request 흐름(미grant면 확인 대기)은 1e-confirm-1c. ──
+    const req_scope = capmod.methodRequiredScope(req.method); // cap authz·grant 조회·needs_grant 공용(browser.*=browser|browser_storage)
     if (!authorized) {
-        if (capmod.methodRequiredScope(req.method)) |sc| {
+        if (req_scope) |sc| {
             if (pane_selector) |pane| {
                 if (grants.isGranted(pane, target_id, sc)) authorized = true;
             }
         }
     }
-    if (!authorized) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+    // **1e-confirm-1c**: 여기서 !authorized여도 **즉시 unauthorized로 접지 않는다** — 유효 메서드·존재하는 web surface면
+    // needs_grant(확인 대기)를 방출해야 하므로, method 파싱(5)·surface 검증(7)까지 진행 후 최종 판정한다. authz 실패의
+    // 최종 처리는 각 분기 말미(subscribe·step 8)의 `ungrantedResult`(pane 있으면 needs_grant·없으면 균일 unauthorized).
+    // invalid 메서드→method_not_found·invalid surface→unauthorized는 authorized 무관하게 그대로 접힌다(oracle: 미grant도
+    // 존재하는 web surface에 대해서만 prompt·나머지는 균일 err — self-authenticated pane 한정, §9.2·§8.3 트레이드오프).
 
-    // ── 5. BrowserMethod 파싱(authz 뒤 — 미인가 caller가 메서드 탐침 못 하게). 5a 미구현(screenshot 등) → method_not_found. ──
+    // ── 5. BrowserMethod 파싱. 5a 미구현(screenshot 등) → method_not_found(authorized 무관 — 메서드명은 공개 API라 oracle 아님). ──
     const bmethod = parseBrowserMethod(method.rest) orelse return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
 
     // ── 5f-0b-3b: subscribe는 async op이 아니라 동기 registry 구독. 필터 파싱(6) + surface 검증(7) 후 `.subscribe` 반환
     //    (arg dupe 없음 — 필터는 값 타입). 나머지(navigate/getUrl/executeScript)는 아래 async-op 경로. ──
     if (bmethod == .subscribe) {
-        const filter = parseSubscribeFilter(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+        // surface 검증·authz-fail을 **필터 파싱 앞**으로(1e-confirm-1c): 미인가 caller가 events 값으로 invalid_params를
+        // 유도해 필터 vocabulary를 탐침 못 하게(§8.3 oracle — 20차 [0] "authz 뒤 필터 파싱" 불변식 유지). 존재 검증
+        // 먼저 → 없음/비-web=unauthorized, 미grant valid=needs_grant(확인 대기), 인가됨만 필터 파싱.
         const sub_dto = snapshot.find(target_id);
         if (sub_dto == null or sub_dto.?.kind() != .web) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope); // 미grant valid subscribe → 확인 대기(필터 미파싱)
+        const filter = parseSubscribeFilter(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
         return .{ .subscribe = .{ .surface_id = target_id, .filter = filter } };
     }
 
@@ -483,8 +519,23 @@ pub fn browserOpFromRequest(
         return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
     }
 
-    // ── 8. op 반환(5e). 여기까지 통과 = 인가·유효한 web surface 대상. L4가 §5-async marshal → Swift BrowserControl. ──
+    // ── 8. 여기까지 = 유효 메서드 + 존재하는 web surface. authorized면 op 반환(5e·L4 marshal). **미grant면 needs_grant**
+    //       (1e-confirm-1c — L4가 붙잡고 확인 모달; arg는 needs_grant가 안 실으므로 해제, 승인 후 재구동 시 재-dupe). ──
+    if (!authorized) {
+        gpa.free(arg);
+        return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
+    }
     return .{ .op = .{ .surface_id = target_id, .method = bmethod, .arg = arg } };
+}
+
+/// 인가 실패한 **valid**(유효 메서드·존재 web surface) browser 요청의 최종 판정(1e-confirm-1c). `pane_selector`가 있으면
+/// `needs_grant`(pane이 확인 모달로 grant받을 수 있음), 없으면(self-origin 없는 caller) 균일 `unauthorized`. `req_scope`
+/// null(방어 — browser.*는 항상 non-null)도 unauthorized. grant는 pane 신원에 묶이므로 pane 없이는 prompt 불가.
+fn ungrantedResult(gpa: std.mem.Allocator, id: cp.Id, pane_selector: ?u64, target: u64, req_scope: ?capmod.ScopeClass) std.mem.Allocator.Error!BrowserDispatch {
+    if (pane_selector) |pane| {
+        if (req_scope) |sc| return .{ .needs_grant = .{ .pane = pane, .target = target, .scope = sc } };
+    }
+    return .{ .err = try errorResponse(gpa, id, .unauthorized) };
 }
 
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용). 편의 wrapper(1d와 동일).
@@ -541,6 +592,7 @@ fn dispatchErr(bytes: []const u8, cap: ?capmod.Capability) ![]u8 {
             return error.ExpectedErrGotOp;
         },
         .subscribe => return error.ExpectedErrGotSubscribe, // 이 헬퍼는 subscribe 요청 안 씀(navigate 등)
+        .needs_grant => return error.ExpectedErrGotNeedsGrant, // pane_selector=null이라 needs_grant 안 나옴(균일 unauthorized로 접힘)
     }
 }
 // 게이트 통과(.op) 기대 — op(호출자 op.arg free). .err면 free 후 실패. cap-only(pane_selector=null·빈 grant).
@@ -553,6 +605,7 @@ fn dispatchOp(bytes: []const u8, cap: ?capmod.Capability) !BrowserOp {
             return error.ExpectedOpGotErr;
         },
         .subscribe => return error.ExpectedOpGotSubscribe,
+        .needs_grant => return error.ExpectedOpGotNeedsGrant,
     }
 }
 
@@ -635,6 +688,7 @@ test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
             return error.ExpectedErrGotOp;
         },
         .subscribe => unreachable, // navigate 요청이라 subscribe 안 옴
+        .needs_grant => unreachable, // cap 있으니(만료 판정 대상) needs_grant 아님·pane=null
     }
     // 대조: now=99 < exp면 만료 아님 → 게이트 통과해 **op**라야 이 테스트가 만료를 실제로 검사.
     switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, &[_]capmod.Capability{cap}, null, &no_grants, 99)) {
@@ -644,6 +698,7 @@ test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
             return error.ExpectedOpGotErr;
         },
         .subscribe => unreachable,
+        .needs_grant => unreachable, // cap 유효(now<exp) → .op·pane=null
     }
 }
 
@@ -682,6 +737,7 @@ test "dispatchBrowser(5f-0b-3b): 유효 browser cap + web surface → .subscribe
             testing.allocator.free(e);
             return error.ExpectedSubscribeGotErr;
         },
+        .needs_grant => return error.ExpectedSubscribeGotNeedsGrant, // cap 있으니 .subscribe(pane=null)
     }
     // events=["navigated","dialog"] → 그 둘만(loadState 제외).
     switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"navigated\",\"dialog\"]}}", fx, &[_]capmod.Capability{browserCap(11)}, null, &no_grants, 0)) {
@@ -697,6 +753,7 @@ test "dispatchBrowser(5f-0b-3b): 유효 browser cap + web surface → .subscribe
             testing.allocator.free(e);
             return error.ExpectedSubscribe;
         },
+        .needs_grant => return error.ExpectedSubscribe,
     }
 }
 
@@ -734,6 +791,7 @@ test "dispatchBrowser(5f-0b-3b): subscribe events 중복 이름 → dedup되어 
             testing.allocator.free(e);
             return error.ExpectedSubscribeGotErr;
         },
+        .needs_grant => return error.ExpectedSubscribeGotNeedsGrant,
     }
 }
 
@@ -769,6 +827,26 @@ fn dispatchGrant(bytes: []const u8, pane: ?u64, grants: *const cpg.PaneGrantStor
     return dispatchBrowser(testing.allocator, bytes, fx, &.{}, pane, grants, 0);
 }
 
+// 1e-confirm-1c: needs_grant 기대(+ pane·target·scope 확인). .err/.op/.subscribe면 실패(+정리).
+fn expectNeedsGrant(bytes: []const u8, pane: ?u64, grants: *const cpg.PaneGrantStore, want_target: u64, want_scope: capmod.ScopeClass) !void {
+    switch (try dispatchGrant(bytes, pane, grants)) {
+        .needs_grant => |g| {
+            try testing.expectEqual(pane.?, g.pane);
+            try testing.expectEqual(want_target, g.target);
+            try testing.expectEqual(want_scope, g.scope);
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedNeedsGrantGotErr;
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedNeedsGrantGotOp;
+        },
+        .subscribe => return error.ExpectedNeedsGrantGotSubscribe,
+    }
+}
+
 test "dispatchBrowser(1e-confirm-1b): cap 없어도 pane grant가 browser.navigate 인가(가법)" {
     var grants: cpg.PaneGrantStore = .{};
     try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser }); // pane 5 → web surface 11, browser
@@ -784,33 +862,34 @@ test "dispatchBrowser(1e-confirm-1b): cap 없어도 pane grant가 browser.naviga
             return error.ExpectedOpGotErr;
         },
         .subscribe => return error.ExpectedOp,
+        .needs_grant => return error.ExpectedOpGotNeedsGrant, // grant 있으니 .op(needs_grant 아님)
     }
 }
 
-test "dispatchBrowser(1e-confirm-1b): grant는 pane·target·scope 정확 일치만 인가(불일치=균일 unauthorized)" {
+// 1e-confirm-1c: 미grant(pane 있음·존재 web surface·유효 메서드)면 **needs_grant**(확인 대기). pane_selector 없거나
+// surface가 없음/비-web이면 균일 unauthorized(oracle: prompt는 self-authenticated pane + 존재 web surface에만).
+test "dispatchBrowser(1e-confirm-1c): 미grant valid 요청은 needs_grant, pane 없음/비-web은 unauthorized" {
     var grants: cpg.PaneGrantStore = .{};
-    try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser });
-    // 다른 pane(6)이 같은 요청 → grant 조회 실패 → unauthorized.
-    {
-        const w = (try dispatchGrant(req_navigate_11, 6, &grants)).err;
-        defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
-    }
-    // pane_selector null(self-origin 없음) → grant 조회 불가 → unauthorized.
+    try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser }); // pane 5만 grant 보유
+    // 다른 pane(6): 그 pane엔 grant 없음 but valid → needs_grant{pane 6, target 11, browser}(pane 6이 확인받을 수 있음).
+    try expectNeedsGrant(req_navigate_11, 6, &grants, 11, .browser);
+    // scope 불일치: pane 5의 browser grant로 getCookies(browser_storage 요구) → 미grant → needs_grant{browser_storage}.
+    try expectNeedsGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", 5, &grants, 11, .browser_storage);
+    // pane_selector null(self-origin 없음) → grant 대상 아님 → 균일 unauthorized(needs_grant 아님·prompt 스팸 방지).
     {
         const w = (try dispatchGrant(req_navigate_11, null, &grants)).err;
         defer testing.allocator.free(w);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
     }
-    // scope 불일치: browser grant로 getCookies(browser_storage 요구) → unauthorized(D5 게이트, grant도 scope 엄수).
+    // 미grant + **terminal surface(10, 비-web)** → surface 검증서 unauthorized(needs_grant 아님 — 존재하는 web에만 prompt).
     {
-        const w = (try dispatchGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", 5, &grants)).err;
+        const w = (try dispatchGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":10,\"url\":\"u\"}}", 6, &grants)).err;
         defer testing.allocator.free(w);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
     }
 }
 
-test "dispatchBrowser(1e-confirm-1b): browser_storage grant는 getCookies만 인가·navigate 거부(scope 대칭)" {
+test "dispatchBrowser(1e-confirm-1b): browser_storage grant는 getCookies만 인가·navigate는 needs_grant(scope 대칭)" {
     var grants: cpg.PaneGrantStore = .{};
     try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage }); // storage grant
     // getCookies(browser_storage) → 인가 → .op.
@@ -824,11 +903,10 @@ test "dispatchBrowser(1e-confirm-1b): browser_storage grant는 getCookies만 인
             return error.ExpectedOpGotErr;
         },
         .subscribe => return error.ExpectedOp,
+        .needs_grant => return error.ExpectedOpGotNeedsGrant,
     }
-    // navigate(browser) → storage grant로는 불인가 → unauthorized.
-    const w = (try dispatchGrant(req_navigate_11, 5, &grants)).err;
-    defer testing.allocator.free(w);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+    // navigate(browser) → storage grant로는 미grant(scope 불일치) → needs_grant{browser}(pane 5 확인 대기).
+    try expectNeedsGrant(req_navigate_11, 5, &grants, 11, .browser);
 }
 
 // ── 6) 유효 cap + browser.screenshot(5a 미구현) → method_not_found ── authz는 통과, method 파싱서 접힘

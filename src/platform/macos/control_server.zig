@@ -1379,6 +1379,11 @@ fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilitySto
                     server.resolveRequest(pending, resp);
                 } else server.resolveRequest(pending, null);
             },
+            // 1e-confirm-1c: 미grant valid 요청 — app_host_abi와 동형으로 균일 unauthorized collapse(1c-1, held는 1c-2).
+            .needs_grant => {
+                const resp = cb.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+                server.resolveRequest(pending, resp);
+            },
         }
         handled += 1;
     }

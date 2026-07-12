@@ -1889,6 +1889,12 @@ fn handleControlRequest(
         .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
         // 5f-0b-3b: 인가·유효한 browser.subscribe — 메인에서 SubscriberRegistry에 **동기 등록** + `{subscriber_id}` 응답.
         .subscribe => |s| handleSubscribe(server, pending, s),
+        // 1e-confirm-1c: 미grant valid 요청 — **1c-1은 우선 균일 unauthorized로 collapse**(behavior-preserving — 확인 모달
+        // 미배선). held-request(붙잡고 GrantPrompt→모달→승인 시 grant+재구동)는 1c-2. op.arg 없으므로 free 불요.
+        .needs_grant => {
+            const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+            server.resolveRequest(pending, resp);
+        },
     }
 }
 

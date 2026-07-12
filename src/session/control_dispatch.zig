@@ -157,6 +157,9 @@ pub const AuthDispatch = union(enum) {
     browser: cb.BrowserOp,
     /// L4가 동기 등록할 browser 구독(5f-0b-3b — SubscriberRegistry.subscribe + `{subscriber_id}` 응답). 연결 outbound는 L4가 주입.
     subscribe: cb.BrowserSubscribe,
+    /// **1e-confirm-1c**: 미grant valid browser 요청(§9.2 Model B). L4가 §5-async로 붙잡고 확인 모달을 띄운다(1c-2) —
+    /// 승인 시 grant 기록 후 재구동, 거부 시 unauthorized. 1c-1은 L4가 우선 unauthorized로 collapse(behavior-preserving).
+    needs_grant: cb.GrantRequest,
 };
 
 pub fn dispatchAuthenticated(
@@ -201,6 +204,7 @@ pub fn dispatchAuthenticated(
             .err => |e| .{ .immediate = e },
             .op => |op| .{ .browser = op },
             .subscribe => |s| .{ .subscribe = s }, // 5f-0b-3b: 동기 구독 지시 — L4가 registry 등록
+            .needs_grant => |g| .{ .needs_grant = g }, // 1e-confirm-1c: 확인 대기(L4가 held-request·모달)
         };
     }
 
@@ -511,6 +515,7 @@ fn authDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *co
             return error.ExpectedImmediateGotBrowser;
         },
         .subscribe => return error.ExpectedImmediateGotSubscribe, // 이 헬퍼는 subscribe 요청 안 씀
+        .needs_grant => return error.ExpectedImmediateGotNeedsGrant, // 이 헬퍼 테스트는 grant 조회 안 태움(selector+미grant browser는 별도 헬퍼)
     }
 }
 // .browser(op) 기대 — 호출자 op.arg free. .immediate면 free 후 실패.
@@ -523,6 +528,23 @@ fn authDispatchOp(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *
             return error.ExpectedBrowserGotImmediate;
         },
         .subscribe => return error.ExpectedBrowserGotSubscribe,
+        .needs_grant => return error.ExpectedBrowserGotNeedsGrant,
+    }
+}
+// 1e-confirm-1c: .needs_grant(미grant valid browser 요청) 기대 — GrantRequest 반환.
+fn authDispatchNeedsGrant(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *const cap.CapabilityStore) !cb.GrantRequest {
+    var buf: [1]cap.Nonce = undefined;
+    switch (try dispatchAuthenticated(testing.allocator, bytes, fx, selector, noncesSlice(&buf, nonce), store, &no_grants, 0)) {
+        .needs_grant => |g| return g,
+        .immediate => |b| {
+            testing.allocator.free(b);
+            return error.ExpectedNeedsGrantGotImmediate;
+        },
+        .browser => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedNeedsGrantGotBrowser;
+        },
+        .subscribe => return error.ExpectedNeedsGrantGotSubscribe,
     }
 }
 
@@ -593,7 +615,7 @@ test "dispatchAuthenticated(22차 [1]): cap surface≠anchor는 그 cap scope로
 // 5e: browser.*는 control_browser에 위임(anchor=target web surface, selector 무관) → 모든 게이트 통과면 **.browser op**.
 // metadata cap + browser.* = scope 불충족 unauthorized(.immediate). browser cap + 비-browser = scope 불충족 unauthorized.
 // browser 경로(target 앵커)와 metadata resolve 경로(selector 앵커)의 분리를 증명한다.
-test "dispatchAuthenticated 5e: browser cap + browser.navigate(web) → .browser op(selector 무관); metadata/cross → unauthorized" {
+test "dispatchAuthenticated 5e/1c: browser cap → .browser op; 미인가 cap+pane → needs_grant; browser cap+sessions.list → self-origin" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
     // cap은 **web surface 11**(fx: web/markdown)에 묶임 — browser cap의 anchor는 target이다.
@@ -607,10 +629,12 @@ test "dispatchAuthenticated 5e: browser cap + browser.navigate(web) → .browser
     try testing.expectEqual(@as(u64, 11), op.surface_id);
     try testing.expectEqual(cb.BrowserMethod.navigate, op.method);
     try testing.expectEqualStrings("https://x", op.arg);
-    // metadata cap으로 browser.navigate → browserOpFromRequest authz서 scope 불충족 → .immediate unauthorized.
-    const w_deny = try authDispatch(req, 11, n_all, &store);
-    defer testing.allocator.free(w_deny);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_deny));
+    // metadata cap으로 browser.navigate(selector=11=pane): scope 불충족이나 pane이 확인 모달로 grant받을 수 있음 →
+    // **needs_grant**(1e-confirm-1c — 옛 즉시 unauthorized 아님; self-authenticated pane은 prompt 대상).
+    const g_deny = try authDispatchNeedsGrant(req, 11, n_all, &store);
+    try testing.expectEqual(@as(u64, 11), g_deny.pane);
+    try testing.expectEqual(@as(u64, 11), g_deny.target);
+    try testing.expectEqual(cap.ScopeClass.browser, g_deny.scope);
     // browser cap으로 sessions.list(metadata, 비-browser 경로): cap이 metadata를 인가 못 하나 **ambient self-origin
     // 폴백**(22차 [1] — cap 제시가 self-access를 revoke하지 않음) → 자기 surface(selector=11)만 반환(성공, unauthorized 아님).
     const w_self = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 11, n_browser, &store);
@@ -658,6 +682,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
             return error.ExpectedBrowserGotImmediate;
         },
         .subscribe => return error.ExpectedBrowser,
+        .needs_grant => return error.ExpectedBrowser,
     }
     // 집합 [metadata only] → browser 인가 cap 없음 → 균일 unauthorized(.immediate 에러).
     switch (try dispatchAuthenticated(testing.allocator, nav, fx, null, &[_]cap.Nonce{n_all}, &store, &no_grants, 0)) {
@@ -670,6 +695,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
             return error.ExpectedUnauthorized;
         },
         .subscribe => return error.ExpectedUnauthorized,
+        .needs_grant => return error.ExpectedUnauthorized,
     }
     // metadata 경로도 누적: sessions.list는 metadata cap 필요. [browser, metadata:all(anchor 10)] + selector=10 → metadata 인가.
     const list = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"sessions.list\"}";
@@ -685,24 +711,26 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
             return error.ExpectedImmediate;
         },
         .subscribe => return error.ExpectedImmediate,
+        .needs_grant => return error.ExpectedImmediate,
     }
 }
 
-// 리뷰 [2]: cap_nonce **없는** browser.*도 균일 unauthorized여야 한다(옛날엔 self 경로로 새 method_not_found였음 —
-// §8.3 위배 + nonce 유무로 browser.* 존재가 갈리는 oracle). 대조: nonce 있으나 store 빈(미지 nonce)도 unauthorized라
-// 바이트까지 동일해야 nonce 유무가 안 샌다.
-test "dispatchAuthenticated 5e[2]: cap_nonce 없는 browser.navigate → 균일 unauthorized(method_not_found 아님·nonce 유무 무oracle)" {
+// 리뷰 [2]/1e-confirm-1c: cap_nonce **없는** browser.*와 **미지 nonce**가 응답이 안 갈려야 한다(§8.3 nonce 유무
+// oracle 방지). pane selector가 있으면 둘 다 **동일 needs_grant**(pane이 grant받을 수 있음 — 옛 즉시 unauthorized에서
+// Model B로 바뀜). 확인 대기라는 결과가 nonce 유무로 안 갈리므로 oracle은 여전히 없다.
+test "dispatchAuthenticated 5e[2]/1c: cap 없는/미지 nonce browser.navigate → 동일 needs_grant(nonce 유무 무oracle)" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"https://x\"}}";
-    // nonce 없음(cap fd 못 받은 shell) → 균일 unauthorized(옛 method_not_found 회귀).
-    const w_none = try authDispatch(req, 11, null, &store);
-    defer testing.allocator.free(w_none);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_none));
-    // 미지 nonce(빈 store) → 역시 unauthorized. nonce 유무로 응답이 안 갈린다(바이트 동일 = oracle 없음).
-    const w_unknown = try authDispatch(req, 11, n_unknown, &store);
-    defer testing.allocator.free(w_unknown);
-    try testing.expectEqualStrings(w_none, w_unknown);
+    // nonce 없음(cap fd 못 받은 pane) + 미지 nonce(빈 store) → 둘 다 needs_grant, 같은 GrantRequest(pane 11·target 11·browser).
+    const g_none = try authDispatchNeedsGrant(req, 11, null, &store);
+    const g_unknown = try authDispatchNeedsGrant(req, 11, n_unknown, &store);
+    try testing.expectEqual(g_none.pane, g_unknown.pane); // nonce 유무로 안 갈림
+    try testing.expectEqual(g_none.target, g_unknown.target);
+    try testing.expectEqual(g_none.scope, g_unknown.scope);
+    try testing.expectEqual(@as(u64, 11), g_none.pane);
+    try testing.expectEqual(@as(u64, 11), g_none.target);
+    try testing.expectEqual(cap.ScopeClass.browser, g_none.scope);
 }
 
 // 리뷰 [4] 회귀: read_output은 non-metadata지만 session.capture를 **실제로 인가**하는 유일한 scope다(다른 non-metadata

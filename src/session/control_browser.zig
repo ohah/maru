@@ -146,8 +146,10 @@ pub fn parseExecuteScriptParams(params: ?std.json.Value) ParamError!ExecuteScrip
 }
 
 /// `browser.subscribe {id, events?}`의 **필터**(id는 readIdParam로 별도). `events` 부재/null → 전체(`EventFilter.all`).
-/// 배열이면 각 원소가 이벤트 이름 문자열이어야 하고(`EventKind.fromWire`), 미지 이름·비-문자열·비-배열 → InvalidParams
-/// (형식 오류는 surface oracle 아님). 5f-0b-3b — §9.5.2 이벤트 vocabulary는 control_events가 단일 출처.
+/// 배열이면 각 원소가 이벤트 이름 문자열이어야 하고(`EventKind.fromWire`), 마스크로 **누적**한다(idempotent라 중복 이름을
+/// 자연히 dedup — 고정 버퍼/길이 제한 없이 임의 길이 허용, 20차 [1]). 미지 이름·비-문자열·비-배열 → InvalidParams. **빈 배열
+/// `events:[]` → InvalidParams**(구독할 이벤트 0 = 무의미. 성공시키면 client가 아무 이벤트도 못 받고 영영 대기하는 silent 트랩
+/// — 20차 [0]; 전체 구독은 events를 생략하거나 null). 형식 오류는 surface oracle 아님. §9.5.2 vocabulary는 control_events가 단일 출처.
 pub fn parseSubscribeFilter(params: ?std.json.Value) ParamError!cev.EventFilter {
     const obj = try paramsObject(params);
     const ev = obj.get("events") orelse return cev.EventFilter.all; // 부재 = 전체
@@ -156,18 +158,16 @@ pub fn parseSubscribeFilter(params: ?std.json.Value) ParamError!cev.EventFilter 
         .array => |a| a,
         else => return error.InvalidParams,
     };
-    var kinds: [@typeInfo(cev.EventKind).@"enum".fields.len]cev.EventKind = undefined;
-    if (arr.items.len > kinds.len) return error.InvalidParams; // 중복/과다 — 형식 오류
-    var n: usize = 0;
+    var filter = cev.EventFilter.none;
     for (arr.items) |item| {
         const name = switch (item) {
             .string => |s| s,
             else => return error.InvalidParams,
         };
-        kinds[n] = cev.EventKind.fromWire(name) orelse return error.InvalidParams;
-        n += 1;
+        filter = filter.with(cev.EventKind.fromWire(name) orelse return error.InvalidParams);
     }
-    return cev.EventFilter.only(kinds[0..n]);
+    if (filter.mask == 0) return error.InvalidParams; // 빈 배열 = 구독 이벤트 0 → silent 무한대기 트랩 방지(20차 [0])
+    return filter;
 }
 
 // ── result 직렬화(§9.1 ① — 5e-2 L4 completion이 값 채울 때 쓸 헬퍼, 여기선 단위 test) ─────────────────────────
@@ -625,6 +625,30 @@ test "dispatchBrowser(5f-0b-3b): subscribe도 cap 없으면 균일 unauthorized(
     defer testing.allocator.free(wire);
     // cap 없음 → authz(step 4)서 unauthorized. bogus event도 안 노출(필터 파싱은 authz 뒤라 도달 안 함) = oracle 방지.
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
+test "dispatchBrowser(5f-0b-3b): subscribe events:[] 빈 배열 → invalid_params(silent 무한대기 트랩 방지, 20차 [0])" {
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[]}}", browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+}
+
+test "dispatchBrowser(5f-0b-3b): subscribe events 중복 이름 → dedup되어 정상 .subscribe(길이 제한 없음, 20차 [1])" {
+    // navigated 6회 반복(EventKind 5종보다 많음) — 옛 고정 5-버퍼면 invalid_params였으나 마스크 누적은 dedup해 정상.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"navigated\",\"navigated\",\"navigated\",\"navigated\",\"navigated\",\"navigated\"]}}", fx, browserCap(11), 0)) {
+        .subscribe => |s| {
+            try testing.expect(s.filter.wants(.navigated));
+            try testing.expect(!s.filter.wants(.dialog)); // navigated만
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedSubscribe;
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedSubscribeGotErr;
+        },
+    }
 }
 
 // ── 6) 유효 cap + browser.screenshot(5a 미구현) → method_not_found ── authz는 통과, method 파싱서 접힘

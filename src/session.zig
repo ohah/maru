@@ -34,6 +34,7 @@ pub const control_capture = @import("session/control_capture.zig"); // Track C 1
 pub const control_browser = @import("session/control_browser.zig"); // Track C 5a: browser.* wire 스키마 + 디스패치 + browser capability authz(제어코어 skeleton, §9.1)
 pub const control_bridge = @import("session/control_bridge.zig"); // Track C 5b: 신뢰 웹 브리지(window.maru.*) 디스패치 코어(auth 없음=신뢰는 Swift origin/frame 검증, §8.1.1)
 pub const control_events = @import("session/control_events.zig"); // Track C 5f-0: browser 이벤트 채널 코어(EventBroker 구독 레지스트리·매칭·notification 직렬화·coalesce 분류, §9.5.2)
+pub const control_outbound = @import("session/control_outbound.zig"); // Track C 5f-0b: per-connection outbound 프레임 큐(응답+이벤트 통합 bounded FIFO·coalesce·purge, §9.5.1·9.5.6)
 pub const app_scheme = @import("session/app_scheme.zig"); // Phase 5c-1: maru-app:// 경로 샌드박스(traversal/whitelist, L2 순수) + CSP([web-panel.md] §7.1)
 pub const Capture = control_capture.Capture;
 pub const CaptureIdAllocator = control_capture.CaptureIdAllocator;

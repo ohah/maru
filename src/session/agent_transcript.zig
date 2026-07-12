@@ -33,6 +33,12 @@ pub const AgentState = enum {
     running,
     /// 마지막 대화 엔트리가 완료된 assistant 턴(stop_reason이 턴-종료 사유).
     idle,
+    /// 마지막 대화 엔트리가 **사용자 인터럽트**(ESC) — 턴이 완료된 게 아니라 사용자가 끊었다.
+    /// 에이전트는 프롬프트로 돌아와 대기하므로 **진행 중이 아니다**(스피너·탭 ● 는 꺼져야 한다). 다만 **완료도
+    /// 아니므로 "에이전트 완료" 알림은 쏘지 않는다** — 사용자가 직접 ESC를 눌러 이미 키보드 앞에 있다(사용자 결정).
+    /// 이 상태가 없으면 인터럽트 엔트리가 `user` 타입이라 running으로 접혀(claude) / else 분기라 running으로 접혀
+    /// (codex) **스피너가 영영 안 풀린다** — 게다가 그 뒤 파일 변화가 없어 mtime 게이트가 재파싱조차 막는다.
+    interrupted,
 };
 
 /// 상태 + (idle일 때) 마지막 답변 미리보기(여러 줄 평탄화 — copyPreviewFlattened).
@@ -88,6 +94,16 @@ pub fn parseClaudeTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf:
             // isMeta=true user는 시스템 주입(local-command caveat·hook 등)이라 대화가 아니다 — 무시해야
             // 완료된 턴 뒤에 caveat 한 줄이 붙어도 false running으로 뒤집히지 않는다(실측 함정).
             if (isMetaTrue(obj.get("isMeta"))) continue;
+            // **사용자 인터럽트(ESC)**: claude가 `interruptedMessageId`를 단 user 엔트리를 append한다(본문은
+            // "[Request interrupted by user]"). 이걸 일반 user(=새 프롬프트 제출)로 보면 **running으로 접혀
+            // 스피너가 영영 안 풀린다** — 그 뒤 파일이 안 자라 mtime 게이트가 재파싱도 막기 때문이다.
+            // 판별자는 **필드 존재**로 한다(본문 텍스트 매칭보다 견고 — 실측 트랜스크립트에서 인터럽트 엔트리
+            // 전수에 있고 일반 user 엔트리엔 없다; 문구는 로케일·버전에 따라 바뀔 수 있다).
+            if (obj.get("interruptedMessageId") != null) {
+                state = .interrupted;
+                answer_len = 0;
+                continue;
+            }
             state = .running;
             answer_len = 0;
         }
@@ -211,6 +227,11 @@ pub fn parseCodexTail(scratch: std.mem.Allocator, tail: []const u8, answer_buf: 
                 state = .idle;
                 // 최종 답변이 task_complete 엔트리에 직접 담긴다 — Value 해제 전에 buf로 복사.
                 answer_len = copyJsonStringPreview(answer_buf, payload.get("last_agent_message"));
+            } else if (std.mem.eql(u8, pt, "turn_aborted")) {
+                // **사용자 인터럽트(ESC)** — codex는 `turn_aborted`(reason:"interrupted")를 남긴다. task_complete가
+                // 아니므로 아래 else(=running)로 떨어지면 claude와 같은 "스피너 영구 고착"이 된다(같은 버그).
+                state = .interrupted;
+                answer_len = 0;
             } else if (std.mem.eql(u8, pt, "token_count")) {
                 // 토큰 회계 — 상태 불변(무시).
             } else {
@@ -315,6 +336,50 @@ test "parseClaudeTail: 마지막 대화가 user면 running (느린 API 갭 — �
     const s = parseClaudeTail(std.testing.allocator, tail, &buf);
     try std.testing.expectEqual(AgentState.running, s.state);
     try std.testing.expectEqual(@as(usize, 0), s.answer.len);
+}
+
+test "parseClaudeTail: ESC 인터럽트(interruptedMessageId)는 interrupted — running으로 접히면 스피너가 영영 안 풀린다" {
+    // 실제 회귀: 사용자가 ESC로 에이전트를 끊으면 claude가 `interruptedMessageId`를 단 **user** 엔트리를
+    // append한다. 옛 파서는 type=="user"를 무조건 running으로 봐서 상태가 진행 중에 고착됐다 — 게다가 그 뒤로
+    // 파일이 안 자라 mtime 게이트(agent_session.poll)가 재파싱조차 막아 영구화됐다. 판별자는 **필드 존재**다
+    // (본문 "[Request interrupted by user]" 문구 매칭보다 견고 — 실측 트랜스크립트 전수에 이 필드가 있다).
+    const tail =
+        \\{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"파일 읽는 중"}]}}
+        \\{"type":"user","interruptedMessageId":"msg_01ABC","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}
+    ;
+    var buf: [256]u8 = undefined;
+    const s = parseClaudeTail(std.testing.allocator, tail, &buf);
+    try std.testing.expectEqual(AgentState.interrupted, s.state);
+    try std.testing.expectEqual(@as(usize, 0), s.answer.len); // 인터럽트는 답변이 없다(완료가 아니다)
+
+    // 인터럽트 뒤 사용자가 새 프롬프트를 내면 **다시 running**(고착이 아니라 정상 전이).
+    const resumed = tail ++
+        \\
+        \\{"type":"user","message":{"role":"user","content":"다시 해줘"}}
+    ;
+    const s2 = parseClaudeTail(std.testing.allocator, resumed, &buf);
+    try std.testing.expectEqual(AgentState.running, s2.state);
+}
+
+test "parseCodexTail: turn_aborted(ESC 인터럽트)는 interrupted — else 분기로 새면 claude와 같은 고착" {
+    // codex는 인터럽트에 `event_msg/turn_aborted`(reason:"interrupted")를 남긴다. task_complete가 아니므로
+    // 옛 파서의 else(=running)로 떨어져 같은 버그가 됐다.
+    const tail =
+        \\{"type":"event_msg","payload":{"type":"task_started"}}
+        \\{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted","duration_ms":372476}}
+    ;
+    var buf: [256]u8 = undefined;
+    const s = parseCodexTail(std.testing.allocator, tail, &buf);
+    try std.testing.expectEqual(AgentState.interrupted, s.state);
+    try std.testing.expectEqual(@as(usize, 0), s.answer.len);
+
+    // 인터럽트 뒤 새 턴이 시작되면 다시 running.
+    const resumed = tail ++
+        \\
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"다시"}}
+    ;
+    const s2 = parseCodexTail(std.testing.allocator, resumed, &buf);
+    try std.testing.expectEqual(AgentState.running, s2.state);
 }
 
 test "parseClaudeTail: 마지막 assistant가 tool_use면 running (도구 실행 중)" {

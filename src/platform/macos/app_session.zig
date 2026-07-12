@@ -1311,6 +1311,10 @@ fn agentInfoWire(
         .unknown => .unknown,
         .running => .running,
         .idle => .idle,
+        // 인터럽트(ESC)는 wire에서 idle로 접는다 — control_surface.AgentState는 **공개 API의 닫힌 열거**라
+        // 값 추가가 기존 소비자를 깨뜨린다. 외부가 보는 의미("진행 중이 아님")는 idle과 같으므로 손실이 없다.
+        // 내부(스피너·완료 알림 게이트)는 4번째 상태를 그대로 구분한다(알림은 running→idle에만 — 아래).
+        .interrupted => .idle,
     };
     return .{ .kind = wire_kind, .state = wire_state };
 }
@@ -15195,6 +15199,8 @@ pub const AppSession = struct {
         term.agent_answer_len = new_answer_len;
         // 완료 알림: running→idle 전환을 처음 관측했고(전환 edge가 자연 디바운스 — idle 유지 중엔 mtime-skip으로
         // 재진입 안 함), "보고 있는" 탭이 아니며, config가 켜졌을 때만. unknown→idle(원래 idle이던 세션)은 알림 안 함.
+        // **running→interrupted는 알림 없음**(사용자 결정): 인터럽트는 완료가 아니고, 사용자가 직접 ESC를 눌러
+        // 이미 그 자리에 있다. 스피너·탭 ●는 `== .running` 판정이라 interrupted에서 자동으로 꺼진다(별도 처리 불필요).
         if (prev_state == .running and new_state == .idle and !is_current and self.loaded_config.config.notifications.agent_complete) {
             self.enqueueAgentCompletion(tab, term);
         }
@@ -17834,6 +17840,9 @@ pub const AppSession = struct {
                 std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{term.agent_answer_buf[0..term.agent_answer_len]}) // ✓ {답변}
             else
                 self.allocator.dupe(u8, "\u{2713} 완료"), // ✓ 완료(답변 텍스트 없음)
+            // 사용자 인터럽트(ESC) — 완료가 아니라 사용자가 끊었다. 진행 중이 아니므로 파형(스피너)을 걷고,
+            // "완료"라고 하지도 않는다(오해). 기호는 번들 폰트가 확실히 커버하는 ·(U+00B7)로 둔다.
+            .interrupted => self.allocator.dupe(u8, "\u{00b7} 중단됨"),
             .unknown => self.allocator.dupe(u8, ""), // 트랜스크립트 못 읽음 — 상태줄 생략(아이콘만)
         };
     }

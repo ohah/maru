@@ -2899,8 +2899,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// grant 기록+재구동→op→ok / deny면 unauthorized). 배경 큐(메인 tick이 계속 돌며 drainBrowserOps로 op 완료). env
     /// 미설정=무동작(프로덕션 무영향). MARU_TEST_BROWSER_CAP과 독립 — grant 스모크는 그 env 없이 이것만 켜고 돌린다.
     private func maybeRunGrantSmoke() {
-        guard smokeMode, !didKickGrantSmoke, controlServerStarted else { return }
-        guard ProcessInfo.processInfo.environment["MARU_TEST_GRANT_DECISION"] != nil else { return }
+        guard !didKickGrantSmoke, controlServerStarted else { return }
+        // 무-cap navigate를 보내 grant 흐름을 유발한다. MARU_TEST_GRANT_DECISION(스텁 auto 결정 — 스모크 게이트) 또는
+        // MARU_TEST_GRANT_PROMPT(**결정 env 없이 실 확인 모달**을 띄우는 손 테스트 트리거) 중 하나면 kick. 둘 다 없으면
+        // 무동작(프로덕션). PROMPT는 **일반 모드도 허용**(창이 떠 있는 채로 모달을 띄워 사용자가 클릭 — 스모크 60초 auto-quit 불필요).
+        let env = ProcessInfo.processInfo.environment
+        let hasDecision = env["MARU_TEST_GRANT_DECISION"] != nil
+        let hasPrompt = env["MARU_TEST_GRANT_PROMPT"] != nil
+        guard hasDecision || hasPrompt else { return }
+        guard smokeMode || hasPrompt else { return } // DECISION(auto)은 스모크 전용, PROMPT(모달 손테)는 일반 모드도
         var target: (surfaceId: UInt64, url: String)?
         for surface in windows + (quick.map { [$0] } ?? []) {
             if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 }) {

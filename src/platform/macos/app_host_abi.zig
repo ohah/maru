@@ -1932,21 +1932,18 @@ fn grantDecisionSource() GrantDecision {
     return .none;
 }
 
-/// 1e-confirm-2a: 미grant valid 요청(§9.2 Model B) — **확인 수단 있으면 붙잡고**(deferRequest → in-flight, 마감
+/// 1e-confirm-2a/2b: 미grant valid 요청(§9.2 Model B) — **항상 붙잡고**(deferRequest → in-flight, 마감
 /// grant_prompt_timeout) GrantPrompt 큐에 넣어 `drainGrantPrompts`가 결정하게 한다(틱 넘어 대기 = 모달이 사용자 응답을
-/// 기다릴 수 있음). **수단 없음(env 미설정=프로덕션·2b 모달 전)** → 즉시 unauthorized(1c-1 유지). deferRequest/큐 실패도
-/// unauthorized(붙잡기 실패). **메인 전용**.
+/// 기다림). 결정: env 스텁(스모크)·실 확인 모달(프로덕션)·창 없으면 deny. deferRequest 실패(붙잡기 불가)=unauthorized. **메인 전용**.
 fn handleNeedsGrant(
     server: *control_server_mod.ControlServer,
     pending: *control_server_mod.PendingRequest,
     g: control_browser.GrantRequest,
     now_ns: i128,
 ) void {
-    if (grantDecisionSource() == .none) {
-        const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
-        return server.resolveRequest(pending, resp);
-    }
-    // 확인 수단 있음 → 붙잡고(in-flight) 큐에 넣어 drain이 결정. deferRequest 실패(TooManyInFlight)=붙잡기 불가 → unauthorized.
+    // **항상 붙잡는다**(2b): 결정은 drainGrantPrompts가 한다 — env 스텁(스모크) or 실 확인 모달(프로덕션) or 창 없으면
+    // deny. 붙잡고 큐에 넣어 in-flight로 대기(마감 grant_prompt_timeout — 무응답 시 reap=연결 닫힘). deferRequest 실패
+    // (TooManyInFlight)=붙잡기 불가 → unauthorized. (1c-1의 "env 없으면 즉시 unauthorized"는 2b서 모달 경로로 대체됨.)
     const async_id = server.deferRequest(pending, now_ns + grant_prompt_timeout_ns) catch {
         const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
         return server.resolveRequest(pending, resp);
@@ -2019,17 +2016,61 @@ fn resolveHeldSubscribe(
     _ = server.completeInFlight(async_id, resp);
 }
 
-/// 1e-confirm-2a: 매 tick 대기 grant 확인을 결정+resolve(재-dispatch에 collector snapshot 필요라 server_drain이 refs와
-/// 호출). 2a=env 스텁 결정(즉시 전부). 2b=모달 latch(미결정 항목은 큐에 남김). 큐 비었으면 snapshot 조립도 안 함(핫패스 0-할당).
+/// 1e-confirm-2a/2b: 매 tick 대기 grant 확인을 처리(재-dispatch에 collector snapshot 필요라 server_drain이 refs와 호출).
+/// **env 스텁 설정 시(스모크·헤드리스)**=모달 없이 즉시 결정(전부). **env 미설정(프로덕션·2b)**=실 확인 모달: 큐 head만
+/// 처리(한 번에 한 모달), AppSession에 모달 띄우고 사용자 결정을 폴한다. 큐 비면 snapshot 조립 안 함(핫패스 0-할당).
 fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const ControlSessionRef, now: u64) void {
     if (grant_prompt_queue.items.items.len == 0) return;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const snapshot = collectSessionsInto(refs, arena.allocator()) catch return; // collect OOM → 다음 tick 재시도(항목 유지)
-    const decision = grantDecisionSource(); // 2a: env(approve/deny). 2b: 모달 결정.
-    while (grant_prompt_queue.take()) |e| {
-        resolveGrantPrompt(server, e, decision == .approve, snapshot, now);
+
+    // env 스텁(스모크·헤드리스): 설정됐으면 모달 우회 즉시 결정(전부).
+    const env = grantDecisionSource();
+    if (env != .none) {
+        while (grant_prompt_queue.take()) |e| resolveGrantPrompt(server, e, env == .approve, snapshot, now);
+        return;
     }
+
+    // 2b 실 모달: head 하나만(한 번에 한 모달). 모달 띄울 AppSession + 사용자 결정 폴.
+    const head = grant_prompt_queue.items.items[0];
+    const app = firstAppSession(refs) orelse {
+        // 모달 띄울 창 없음(헤드리스·프로덕션 아님) → deny(hang 방지, reap 대기 없이 즉시).
+        _ = grant_prompt_queue.take();
+        return resolveGrantPrompt(server, head, false, snapshot, now);
+    };
+    // (1) 이전 tick에 띄운 모달의 사용자 결정을 폴(있으면 head를 resolve).
+    if (app.takeGrantDecision()) |d| {
+        if (d.async_id == head.async_id) {
+            _ = grant_prompt_queue.take();
+            return resolveGrantPrompt(server, head, d.approved, snapshot, now);
+        }
+        // stale 결정(다른 async_id — 도달 어려움): 무시.
+    }
+    // (2) 미결정: 모달 표시(idempotent — 이미 이 grant 보여주면 no-op·다른 모달 점유면 false로 다음 tick 재시도).
+    var msg_buf: [256]u8 = undefined;
+    _ = app.showGrantConfirm(grantPromptMessage(&msg_buf, head, snapshot), head.async_id);
+}
+
+/// 1e-confirm-2b: grant 확인 모달을 띄울 AppSession. 현재는 **첫 창**(refs 중 첫 non-null) — 단일 창이 흔하고 모달은
+/// 창-종속이라 단순화. (후속 정교화: target web surface 소유 창에 띄우기.) 창 없으면 null(헤드리스).
+fn firstAppSession(refs: []const ControlSessionRef) ?*AppSession {
+    for (refs) |ref| if (ref.app_session) |app| return app;
+    return null;
+}
+
+/// 1e-confirm-2b: 확인 모달 메시지(scope별 + target URL). 세션 소유 버퍼로 복사되므로(showGrantConfirm→copyOverlayMessage)
+/// 여기선 transient 스택 버퍼. browser=제어·browser_storage=쿠키/스토리지 읽기(로그인 토큰) 구분. URL은 snapshot서 조회.
+fn grantPromptMessage(buf: []u8, e: GrantPromptEntry, snapshot: control_surface.CollectorSnapshot) []const u8 {
+    const url: []const u8 = if (snapshot.find(e.target)) |dto| (switch (dto.detail) {
+        .web => |w| w.url orelse "", // WebMeta.url은 ?[]const u8(로드 전 null)
+        else => "",
+    }) else "";
+    const action = switch (e.scope) {
+        .browser_storage => "이 사이트의 쿠키·스토리지(로그인 토큰 포함)를 읽으려",
+        else => "이 브라우저(이동·클릭·입력·읽기)를 제어하려",
+    };
+    return std.fmt.bufPrint(buf, "에이전트가 {s} 합니다. 대상: {s}. 허용하시겠습니까?", .{ action, url }) catch buf[0..0];
 }
 
 /// 5f-0b-3b: 인가·유효한 `browser.subscribe`를 메인에서 즉시 처리한다(async 아님). 연결 outbound(pending에 실림)를
@@ -2117,12 +2158,17 @@ pub export fn maru_macos_control_server_start() c_int {
     return @intFromEnum(Status.ok);
 }
 
-/// #4 값싼 per-tick 게이트: 대기 중인 컨트롤 요청이 하나라도 있으면 1, 없으면 0. Swift가 매 tick `drain` 전에 이걸 봐
-/// pending이 없으면 refs 배열(힙 할당 + 창별 copy)을 **아예 짓지 않고** early return한다(렌더 핫패스 0-할당). 서버
+/// #4 값싼 per-tick 게이트: 대기 중인 컨트롤 요청 **또는 held grant 확인**이 있으면 1, 없으면 0. Swift가 매 tick `drain`
+/// 전에 이걸 봐 없으면 refs 배열(힙 할당 + 창별 copy)을 **아예 짓지 않고** early return한다(렌더 핫패스 0-할당). 서버
 /// 미시작이면 0. `take_bell` 등 predicate와 같은 u32(1/0) 패턴 — bool은 .h에 stdbool을 끌어들이고 codebase 관례와도
 /// 어긋난다. (ABI 신규 export — 버전 bump 없음, drain과 동일 no-handle. 짧은 큐 락만 잡는다.)
+///
+/// **1e-confirm-2b**: 요청이 needs_grant로 held(in-flight)되면 요청 큐에서 빠지지만, `drainGrantPrompts`가 매 tick
+/// 모달 결정을 폴해야 하므로 **grant_prompt_queue 비어있지 않으면 계속 1** — 안 그러면 요청 held 후 server_drain이 안 불려
+/// 모달 클릭 결과를 영영 못 읽는다(승인해도 무반응 버그). grant는 메인 스레드 전용이라 락 불요(요청 큐만 락).
 pub export fn maru_macos_control_server_has_pending() u32 {
     if (!control_server_active) return 0;
+    if (grant_prompt_queue.items.items.len > 0) return 1; // held grant 확인 대기 — server_drain(drainGrantPrompts) 계속 돌게
     return if (control_server_storage.hasPendingRequest()) 1 else 0;
 }
 

@@ -101,11 +101,11 @@ pub const QueueError = error{ QueueClosed, ZeroCapacity, OutOfMemory };
 /// accept 스레드 → 메인 marshal 큐(bounded FIFO of `*PendingRequest`). `PtyEventQueue` 결. accept 스레드가 push,
 /// 메인이 `tryPop`. `close`는 대기 중 pending을 전부 cancel해 accept 스레드를 깨운다(종료 시 무한 대기 방지).
 ///
-/// **설계 노트(#6/#8 — 의도적 재사용, tracked follow-up)**: accept가 serial(단일 스레드가 한 연결을 끝까지 serve한 뒤
-/// 다음을 accept)이라 marshal in-flight는 항상 ≤1이다 → 이론상 단일 슬롯이면 충분하고 ring FIFO는 over-built다. 그럼에도
-/// (a) `PtyEventQueue`(docs/io-render-threading.md)의 **검증된** bounded-FIFO + Io.Mutex/Condition + close-cancel 스레딩
-/// 패턴을 재구현 없이 그대로 재사용하는 게 안전하고, (b) per-tick drain 예산(§5)이 여러 요청을 파이프라인할 여지를 남기며,
-/// (c) 재작성은 검증된 스레딩 코드를 흔드는 리스크라 **의도적으로** FIFO를 유지한다. `PtyEventQueue`를 generic
+/// **설계 노트(#6/#8)**: 옛 A2b는 accept가 serial(한 연결을 끝까지 serve 후 다음 accept)이라 marshal in-flight ≤1이었고
+/// ring FIFO는 그때 over-built였다. **5f-0b-2a부터 연결당 detached 스레드**(§9.5.1 — head-of-line 블로킹 폐기)라 **여러
+/// 연결 스레드가 동시에 push**할 수 있어(MPSC, 최대 max_connections) 이 bounded-FIFO가 이제 **정당하다**(포화 시 push가
+/// backpressure 대기). `PtyEventQueue`(docs/io-render-threading.md)의 검증된 bounded-FIFO + Io.Mutex/Condition +
+/// close-cancel 패턴을 그대로 재사용한다. `PtyEventQueue`를 generic
 /// `BoundedQueue(T)`로 일반화해 이 큐와 통합하는 것은 tracked follow-up이다(범위 밖 — docs/verification-matrix.md).
 pub const ControlRequestQueue = struct {
     io: std.Io,
@@ -129,8 +129,9 @@ pub const ControlRequestQueue = struct {
         self.* = undefined;
     }
 
-    /// accept 스레드: 포화면 backpressure 대기(§8.8: **core_mutex 미보유** 상태라 blocking push 안전 — accept 스레드는
-    /// 어떤 락도 안 쥔다). closed면 QueueClosed(호출자가 요청을 abandon).
+    /// 연결 스레드(5f-0b-2a): 포화면 backpressure 대기(§8.8: **core_mutex 미보유** 상태라 blocking push 안전 — 연결
+    /// 스레드는 어떤 락도 안 쥔다). 여러 연결 스레드가 동시에 push할 수 있다(MPSC — mutex가 직렬화). closed면
+    /// QueueClosed(호출자가 요청을 abandon).
     pub fn push(self: *ControlRequestQueue, pending: *PendingRequest) QueueError!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -213,7 +214,8 @@ pub const ControlServer = struct {
     poll_interval_ms: i32 = 200,
     // ── §5-async: deferred marshal(in-flight 레지스트리 — **메인 스레드 전용**, 락 없음: deferRequest·completeInFlight·
     //    reapExpiredInFlight·stop이 전부 메인. pending.resolve/cancel만 cross-thread지만 그건 이미 thread-safe) ──
-    /// in-flight async 요청 목록(items_gpa 소유). accept가 serial이라 실질 ≤1이지만 bounded로 견고성 유지.
+    /// in-flight async 요청 목록(items_gpa 소유). 5f-0b-2a 연결당 스레드로 여러 연결이 동시에 browser op을 defer할 수
+    /// 있어(최대 max_in_flight) bounded가 이제 실질적으로 쓰인다(초과=TooManyInFlight). **메인 전용**(아래 주석).
     in_flight: std.ArrayList(InFlight) = .empty,
     /// items/socket alloc(in_flight 리스트도 이걸로 — start가 채운다).
     items_gpa: std.mem.Allocator = undefined,
@@ -221,6 +223,15 @@ pub const ControlServer = struct {
     next_async_id: u64 = 1,
     /// 동시 in-flight 상한(§11 안정성 게이트 — bounded). 초과 defer는 TooManyInFlight(호출자가 에러 resolve).
     max_in_flight: usize = 8,
+    // ── 5f-0b-2a: 연결당 스레드 wait-group(§9.5.1 — head-of-line 블로킹 폐기). accept 루프가 연결마다 detached 스레드를
+    //    spawn하고, 이 카운터로 stop()이 self.*=undefined 전에 전부 끝날 때까지 대기한다(use-after-free 방지). handle을
+    //    저장·join하는 대신 카운터+condition = 무제한 handle 누적 없이 "전부 종료" 대기. accept 스레드(self.thread)와 별개. ──
+    conns_mutex: std.Io.Mutex = .init,
+    conns_done: std.Io.Condition = .init,
+    /// 현재 살아있는 연결 스레드 수(conns_mutex 아래). acceptOne 성공→spawn 전 +1, connThread 종료 시 -1+broadcast.
+    active_conns: usize = 0,
+    /// 동시 연결 상한(bounded — 스레드 폭주 방어). 초과 연결은 accept 후 즉시 close(reject). max_pending 이하로 둔다.
+    max_connections: usize = 16,
 
     /// 소켓을 bind하고 accept 스레드를 띄운다. **self는 이미 최종 주소에 있어야 한다.** bind 실패면 스레드 없이 에러.
     pub fn start(
@@ -338,9 +349,14 @@ pub const ControlServer = struct {
         // 스레드를 깨워 abandon시킨다). join 전에 해 blocked accept 스레드가 빠져나오게 한다.
         for (self.in_flight.items) |e| e.pending.cancel();
         if (self.thread) |thread| {
-            thread.join(); // poll_interval 안에 closing을 봐 루프를 나온다(mid-serve면 read_timeout까지)
+            thread.join(); // accept 루프: poll_interval 안에 closing을 봐 나온다 → 이후 새 연결 스레드 spawn 없음
             self.thread = null;
         }
+        // 5f-0b-2a: 살아있는 연결 스레드(detached)가 전부 끝날 때까지 대기 — self.*=undefined 전이라야 use-after-free
+        // 없음. queue.close()+in-flight cancel이 waitResolved 블로킹을 깨웠고, readFrame 블로킹은 read_timeout(5s)까지.
+        self.conns_mutex.lockUncancelable(self.io);
+        while (self.active_conns > 0) self.conns_done.waitUncancelable(self.io, &self.conns_mutex);
+        self.conns_mutex.unlock(self.io);
         self.server.deinit();
         self.queue.deinit();
         self.in_flight.deinit(self.items_gpa);
@@ -364,13 +380,43 @@ pub const ControlServer = struct {
             }
             if (self.closing.load(.acquire)) break;
             // acceptOne: peer-cred(same-uid, §8.2) + hello 전송. hello 직렬화는 transient cross_gpa.
-            var conn = self.server.acceptOne(self.cross_gpa, .{
+            const conn = self.server.acceptOne(self.cross_gpa, .{
                 .server_version = self.hello_version,
                 .capabilities = self.hello_caps,
             }) catch continue; // peer uid 불일치·accept 실패 등은 그 연결만 버리고 계속.
-            self.serveConnection(&conn);
-            conn.deinit();
+            // 5f-0b-2a: 연결당 detached 스레드에서 serve(§9.5.1 — 직렬 인라인 폐기로 head-of-line 블로킹 제거). bound
+            // 초과면 reject(즉시 close). 스레드가 conn 소유(값 복사=fd 하나라 안전, 스레드가 deinit=close; acceptLoop는
+            // 안 함). 카운터는 spawn 전에 올려 stop()이 잃지 않게 한다(spawn 실패면 되돌림).
+            self.conns_mutex.lockUncancelable(self.io);
+            if (self.active_conns >= self.max_connections) {
+                self.conns_mutex.unlock(self.io);
+                conn.deinit(); // reject: 연결만 닫고 계속(client는 EOF)
+                continue;
+            }
+            self.active_conns += 1;
+            self.conns_mutex.unlock(self.io);
+            const t = std.Thread.spawn(.{}, connThread, .{ self, conn }) catch {
+                self.conns_mutex.lockUncancelable(self.io);
+                self.active_conns -= 1;
+                self.conns_done.broadcast(self.io);
+                self.conns_mutex.unlock(self.io);
+                conn.deinit();
+                continue;
+            };
+            t.detach();
         }
+    }
+
+    /// 5f-0b-2a: 한 연결을 서브하는 detached 스레드 본체. serve(한 요청·waitResolved — 5e async 경로 불변) 후 conn을
+    /// 닫고 wait-group 카운터를 내린다(broadcast로 stop() 대기 해제). conn은 값 소유(fd 하나).
+    fn connThread(self: *ControlServer, conn_in: cs.Connection) void {
+        var conn = conn_in;
+        self.serveConnection(&conn);
+        conn.deinit();
+        self.conns_mutex.lockUncancelable(self.io);
+        self.active_conns -= 1;
+        self.conns_done.broadcast(self.io);
+        self.conns_mutex.unlock(self.io);
     }
 
     /// 한 연결을 serve: read 타임아웃 → auth 셀렉터 프레임 + 요청 프레임 읽기 → marshal → 메인 응답 대기 → write.
@@ -707,6 +753,61 @@ test "server 왕복: client가 auth.self(10)+sessions.list → 메인 drain이 �
     const arr = pm.message.response.result.?.array;
     try testing.expectEqual(@as(usize, 1), arr.items.len); // self scope(caller=10) → 10만
     try testing.expectEqual(@as(i64, 10), arr.items[0].object.get("id").?.object.get("surface_id").?.integer);
+}
+
+test "server 동시 연결(5f-0b-2a): 여러 client가 동시에 붙어도 각자 응답 + wait-group stop 깨끗" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.heap.c_allocator; // cross-thread
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "concurrent");
+    defer srvRmBase(base);
+
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    defer server.stop(); // wait-group이 3개 연결 스레드를 전부 join(use-after-free 없이)
+
+    const N = 3;
+    const ClientT = struct {
+        base: []const u8,
+        resp: ?[]u8 = null,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
+            self.resp = clientReq(std.heap.c_allocator, self.base, "k1", 10, null, req) catch |e| { // caller=10(self scope)
+                self.err = e;
+                return;
+            };
+        }
+    };
+    var cts: [N]ClientT = undefined;
+    var ths: [N]std.Thread = undefined;
+    for (0..N) |i| cts[i] = .{ .base = base };
+    for (0..N) |i| ths[i] = try std.Thread.spawn(.{}, ClientT.run, .{&cts[i]}); // 3개 동시 connect
+
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    var done: usize = 0;
+    var guard: usize = 0;
+    while (done < N and guard < 5000) : (guard += 1) {
+        _ = try drainWithFakeSnapshot(&server, &store); // 메인 drain이 여러 연결의 pending을 처리
+        done = 0;
+        for (0..N) |i| {
+            if (cts[i].resp != null or cts[i].err != null) done += 1;
+        }
+        if (done < N) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    for (0..N) |i| ths[i].join();
+
+    // 셋 다 self scope 응답(surface 10 하나) — 연결당 스레드가 각자 serve, head-of-line 블로킹 없음.
+    for (0..N) |i| {
+        try testing.expect(cts[i].err == null);
+        try testing.expect(cts[i].resp != null);
+        defer std.heap.c_allocator.free(cts[i].resp.?);
+        var pm = try cp.parseMessage(gpa, cts[i].resp.?);
+        defer pm.deinit();
+        try testing.expect(pm.message == .response);
+        try testing.expectEqual(@as(usize, 1), pm.message.response.result.?.array.items.len);
+    }
 }
 
 test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것도 안 보인다(빈 목록)" {

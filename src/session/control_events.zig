@@ -49,6 +49,17 @@ pub const EventKind = enum {
     pub fn isCoalescible(self: EventKind) bool {
         return self == .navigated or self == .load_state;
     }
+
+    /// `browser.subscribe {events:[...]}`의 이벤트 이름(method suffix — `method()`와 대칭: "browser.navigated"→"navigated")을
+    /// `EventKind`로 매핑한다(§9.5.2). 미지 이름 → null(호출자가 invalid_params). wire↔내부 격리(§3 정신).
+    pub fn fromWire(name: []const u8) ?EventKind {
+        if (std.mem.eql(u8, name, "navigated")) return .navigated;
+        if (std.mem.eql(u8, name, "loadState")) return .load_state;
+        if (std.mem.eql(u8, name, "dialog")) return .dialog;
+        if (std.mem.eql(u8, name, "crashed")) return .crashed;
+        if (std.mem.eql(u8, name, "closed")) return .closed;
+        return null;
+    }
 };
 
 /// 구독 이벤트 필터(관심 EventKind 비트마스크). `all`=전부. `wants`로 판정.

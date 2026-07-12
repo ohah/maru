@@ -1860,7 +1860,24 @@ fn handleControlRequest(
         .immediate => |resp| server.resolveRequest(pending, resp),
         // 5e-2b: 인가·유효한 browser op — §5-async로 defer(즉시 resolve 안 함) + browser op 큐에 enqueue(Swift가 실행).
         .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
+        // 5f-0b-3b: 인가·유효한 browser.subscribe — 메인에서 SubscriberRegistry에 **동기 등록** + `{subscriber_id}` 응답.
+        .subscribe => |s| handleSubscribe(server, pending, s),
     }
+}
+
+/// 5f-0b-3b: 인가·유효한 `browser.subscribe`를 메인에서 즉시 처리한다(async 아님). 연결 outbound(pending에 실림)를
+/// SubscriberRegistry에 등록하고 subscriber_id를 응답한다. outbound null(직접 구성 등 비정상)·registry OOM은 응답 없이
+/// resolve(null)로 연결 종료(§5-async null 계약과 동형 — accept 무한 대기 방지). **메인 스레드 전용**(registry=leaf-mutex).
+fn handleSubscribe(
+    server: *control_server_mod.ControlServer,
+    pending: *control_server_mod.PendingRequest,
+    s: control_browser.BrowserSubscribe,
+) void {
+    const outbound = pending.outbound orelse return server.resolveRequest(pending, null); // 라이브는 serveConnection이 항상 세팅
+    const subscriber_id = server.subscriber_reg.subscribe(s.surface_id, s.filter, outbound) catch
+        return server.resolveRequest(pending, null); // registry OOM → null(연결 닫힘, 기존 관례)
+    const resp = control_browser.serializeSubscribeResponse(server.cross_gpa, pending.request_bytes, subscriber_id) catch null;
+    server.resolveRequest(pending, resp);
 }
 
 /// 5e-2b: 인가·유효한 browser op을 §5-async `deferRequest`(pending 붙잡음) + browser op 큐에 enqueue(Swift가 매 tick

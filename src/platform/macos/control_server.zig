@@ -63,6 +63,10 @@ pub const PendingRequest = struct {
     /// self보다 넓은 scope를 발급한다(없으면 metadata:self만). 연결 스레드가 parseAuthFrame으로 채운다(값 복사 — 소켓
     /// 입력 lifetime과 분리). 실 fd 상속은 1e-core 범위 밖(CLI가 아직 안 실음)이라 라이브에선 늘 null·store 빈=default-deny.
     cap_nonce: ?[cp.auth_cap_nonce_len]u8 = null,
+    /// 이 요청을 낸 연결의 outbound(5f-0b-3b). `browser.subscribe` dispatch가 메인에서 SubscriberRegistry에 등록할 때
+    /// 이 연결을 식별·라우팅한다. serveConnection이 세팅(연결 스레드 스택 소유). subscribe 외 요청은 안 읽어 null 무방(직접
+    /// 구성 테스트는 기본 null). **연결 수명 안에서만 유효** — registry 등록은 메인이 하고, 연결 drop 시 purgeOutbound가 뺀다.
+    outbound: ?*OutboundChannel = null,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
@@ -689,7 +693,7 @@ pub const ControlServer = struct {
             const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
             defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 iteration 끝(대기 후)에 해제
 
-            var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonce = auth.cap_nonce, .io = self.io };
+            var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonce = auth.cap_nonce, .outbound = outbound, .io = self.io };
             self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon(req_copy는 defer가 해제)
 
             switch (pending.waitResolved()) {
@@ -1079,6 +1083,7 @@ test "§5-async stop: in-flight 요청을 cancel한다(콜백 영영 안 오는 
 
 // ── 전체 라이브 서버 왕복(accept 스레드 + marshal + 메인 drain + 응답) ──
 const cd = maru.session.control_dispatch;
+const cb = maru.session.control_browser; // 5f-0b-3b: browser.subscribe end-to-end 테스트(BrowserSubscribe·serializeSubscribeResponse)
 const csurf = maru.session.control_surface;
 const wm = maru.session.window_membership;
 
@@ -1109,6 +1114,14 @@ const rt_windows = [_]wm.WindowMembershipSnapshot{
 };
 const rt_snapshot: csurf.CollectorSnapshot = .{ .surfaces = &rt_surfaces, .windows = &rt_windows };
 const test_caps = [_][]const u8{ "sessions.list", "session.get" };
+
+// 5f-0b-3b: browser.subscribe 왕복용 web surface 스냅샷(browserOpFromRequest는 대상이 web이어야 authz 통과). surface 30=web.
+const web_surfaces = [_]csurf.SurfaceDto{
+    .{ .surface_id = 30, .title = "browser", .window = 3, .detail = .{ .web = .{ .url = "https://ex/", .panel_kind = .browser, .loading = false, .trust = .untrusted } } },
+};
+const web_ids = [_]u64{30};
+const web_windows = [_]wm.WindowMembershipSnapshot{.{ .window_id = 3, .window_kind = .normal, .surface_ids = &web_ids }};
+const web_snapshot: csurf.CollectorSnapshot = .{ .surfaces = &web_surfaces, .windows = &web_windows };
 
 /// 테스트 client: connect → auth.self(surface_id [+ cap_nonce]) → 요청 → hello skip → 응답 한 줄(owned).
 fn clientReq(gpa: std.mem.Allocator, base: []const u8, key: []const u8, selector: ?u64, cap_nonce: ?[cap.nonce_len]u8, request: []const u8) ![]u8 {
@@ -1203,16 +1216,28 @@ fn clientReqPersistent(gpa: std.mem.Allocator, base: []const u8, key: []const u8
 /// 메인 drain 흉내(app_host_abi가 할 일): pending을 꺼내 fake snapshot + capability auth(1e `dispatchAuthenticated`)로
 /// 응답을 만들어 resolve. 실제 collector 대신 rt_snapshot, 실 CapabilityStore 대신 주입 store를 쓴다(라이브 배선은
 /// app_host_abi 테스트가 커버). store가 빈이면 nonce 없는 요청은 self, nonce 있는 요청은 default-deny(unauthorized).
-fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilityStore) !usize {
+fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilityStore, snapshot: csurf.CollectorSnapshot) !usize {
     var handled: usize = 0;
     while (server.tryPopRequest()) |pending| {
-        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, rt_snapshot, pending.selector, pending.cap_nonce, store, 0)) {
+        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonce, store, 0)) {
             .immediate => |resp| server.resolveRequest(pending, resp),
-            // 이 fake drain은 browser 실행을 배선 안 함(라이브 marshal은 app_host_abi 5e-2a) — 이 테스트들은 metadata만
-            // 보내 .browser가 안 온다. 방어: op.arg 해제 + null resolve(도달 시 test가 응답 없음으로 실패).
+            // 이 fake drain은 browser 실행을 배선 안 함(라이브 marshal은 app_host_abi 5e-2a) — metadata 테스트는 .browser가
+            // 안 온다. 방어: op.arg 해제 + null resolve(도달 시 test가 응답 없음으로 실패).
             .browser => |op| {
                 server.cross_gpa.free(op.arg);
                 server.resolveRequest(pending, null);
+            },
+            // 5f-0b-3b: browser.subscribe — app_host_abi.handleSubscribe와 동형(연결 outbound를 registry에 등록 + 응답).
+            .subscribe => |s| {
+                if (pending.outbound) |ob| {
+                    const sid = server.subscriber_reg.subscribe(s.surface_id, s.filter, ob) catch {
+                        server.resolveRequest(pending, null);
+                        handled += 1;
+                        continue;
+                    };
+                    const resp = cb.serializeSubscribeResponse(server.cross_gpa, pending.request_bytes, sid) catch null;
+                    server.resolveRequest(pending, resp);
+                } else server.resolveRequest(pending, null);
             },
         }
         handled += 1;
@@ -1223,10 +1248,10 @@ fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilitySto
 /// 테스트 drain 루프(왕복 테스트 공통, 18차 [10] dedup): client 스레드가 완료를 `done`(atomic, release)로 알릴 때까지
 /// 메인 drain을 돌린다. **atomic으로 완료를 관측**해 client 상태의 무동기 cross-thread read UB를 피한다(18차 [4]). guard
 /// 상한으로 무한 방지. done 관측 뒤 caller가 join하고 결과 바이트를 읽는다(join happens-before라 그 read는 안전).
-fn drainUntil(server: *ControlServer, store: *const cap.CapabilityStore, done: *std.atomic.Value(bool)) !void {
+fn drainUntil(server: *ControlServer, store: *const cap.CapabilityStore, done: *std.atomic.Value(bool), snapshot: csurf.CollectorSnapshot) !void {
     var guard: usize = 0;
     while (!done.load(.acquire) and guard < 5000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(server, store);
+        _ = try drainWithFakeSnapshot(server, store, snapshot);
         if (!done.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
 }
@@ -1262,7 +1287,7 @@ test "server 왕복: client가 auth.self(10)+sessions.list → 메인 drain이 �
 
     var store: cap.CapabilityStore = .{}; // 빈 store — nonce 없는 요청은 self 경로.
     defer store.deinit(testing.allocator);
-    try drainUntil(&server, &store, &ct.done); // 응답이 나올 때까지 메인 drain(실제 앱은 frame tick이 부른다)
+    try drainUntil(&server, &store, &ct.done, rt_snapshot); // 응답이 나올 때까지 메인 drain(실제 앱은 frame tick이 부른다)
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.resp != null);
@@ -1312,7 +1337,7 @@ test "server 동시 연결(5f-0b-2a): 여러 client가 동시에 붙어도 각�
     var all_done = false;
     var guard: usize = 0;
     while (!all_done and guard < 5000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(&server, &store); // 메인 drain이 여러 연결의 pending을 처리
+        _ = try drainWithFakeSnapshot(&server, &store, rt_snapshot); // 메인 drain이 여러 연결의 pending을 처리
         all_done = true;
         for (0..N) |i| { // atomic acquire read(무동기 UB 없음)
             if (!cts[i].done.load(.acquire)) all_done = false;
@@ -1368,7 +1393,7 @@ test "server 지속 세션(5f-0b-2b-1): 한 연결로 auth 1회 + 요청 2개 �
 
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    try drainUntil(&server, &store, &ct.done); // 순차 요청 2개를 메인 drain이 처리(완료는 atomic)
+    try drainUntil(&server, &store, &ct.done, rt_snapshot); // 순차 요청 2개를 메인 drain이 처리(완료는 atomic)
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.ok);
@@ -1475,7 +1500,7 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
 
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    try drainUntil(&server, &store, &ct.done);
+    try drainUntil(&server, &store, &ct.done, rt_snapshot);
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.resp != null);
@@ -1524,7 +1549,7 @@ test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.lis
     defer store.deinit(testing.allocator);
     try store.issueForFd(testing.allocator, cap_nonce, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
 
-    try drainUntil(&server, &store, &ct.done);
+    try drainUntil(&server, &store, &ct.done, rt_snapshot);
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.resp != null);
@@ -1535,6 +1560,117 @@ test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.lis
     try testing.expect(pm.message == .response);
     const arr = pm.message.response.result.?.array;
     try testing.expectEqual(@as(usize, 2), arr.items.len); // metadata:all → rt_snapshot 전체(10,20)
+}
+
+// 5f-0b-3b 라이브 e2e: browser cap으로 auth한 client가 browser.subscribe → 서버가 SubscriberRegistry에 등록하고
+// {subscriber_id} 응답. 연결을 hold해 구독 살아있음(broker.len==1) 확인 후, client가 닫으면 연결 스레드가 purgeOutbound로
+// 구독을 정리(broker.len==0)한다 — subscribe dispatch + registry 등록 + 연결-drop purge의 전 경로를 실 소켓 왕복으로 증명.
+test "server 왕복(5f-0b-3b): browser.subscribe → subscriber_id 응답 + 연결 drop 시 registry purge" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.heap.c_allocator;
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "subscribe");
+    defer srvRmBase(base);
+
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    defer server.stop();
+
+    // 주입 store: surface 30(web_snapshot의 web surface)에 묶인 browser cap.
+    const cap_nonce: [cap.nonce_len]u8 = [_]u8{0x3C} ** cap.nonce_len;
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, cap_nonce, .{ .surface_id = 30, .generation = 0, .scope = .browser });
+
+    // Client: auth(browser cap) + subscribe(surface 30, events 없음=전체) → 응답 읽고 release까지 **hold**(구독 유지).
+    // clientReq는 응답 후 즉시 close라 hold를 못 해 소켓을 직접 다룬다(maxconn Holder 결).
+    const Client = struct {
+        base: []const u8,
+        nonce: [cap.nonce_len]u8,
+        resp: ?[]u8 = null,
+        err: ?anyerror = null,
+        subscribed: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            var db: [512]u8 = undefined;
+            const dir = cs.controlDirPath(&db, self.base) catch return;
+            var sb: [512]u8 = undefined;
+            const sp = cs.socketPathIn(&sb, dir, "k1") catch return;
+            const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+            if (fd < 0) return;
+            defer _ = c.close(fd);
+            var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+            @memset(&addr.path, 0);
+            @memcpy(addr.path[0..sp.len], sp);
+            if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return;
+            cs.setReadTimeoutMs(fd, 5000);
+            const auth = cp.serializeAuthSelf(std.heap.c_allocator, 30, self.nonce) catch return;
+            defer std.heap.c_allocator.free(auth);
+            cs.writeAll(fd, auth) catch return;
+            cs.writeAll(fd, "\n") catch return;
+            cs.writeAll(fd, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":30}}") catch return;
+            cs.writeAll(fd, "\n") catch return;
+            var framer: cp.Framer = .{};
+            defer framer.deinit(std.heap.c_allocator);
+            self.resp = readResp(fd, &framer) catch |e| {
+                self.err = e;
+                return;
+            };
+            self.subscribed.store(true, .release);
+            while (!self.release.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        }
+        fn readResp(fd: c.fd_t, framer: *cp.Framer) ![]u8 {
+            while (true) {
+                while (framer.next() catch null) |line| {
+                    var pm = cp.parseMessage(std.heap.c_allocator, line) catch return std.heap.c_allocator.dupe(u8, line);
+                    const is_notif = pm.message == .notification;
+                    pm.deinit();
+                    if (!is_notif) return std.heap.c_allocator.dupe(u8, line); // hello skip, 응답 반환
+                }
+                var rb: [1024]u8 = undefined;
+                const n = c.read(fd, &rb, rb.len);
+                if (n <= 0) return error.NoResponse;
+                try framer.push(std.heap.c_allocator, rb[0..@intCast(n)]);
+            }
+        }
+    };
+    var ct = Client{ .base = base, .nonce = cap_nonce };
+    const th = try std.Thread.spawn(.{}, Client.run, .{&ct});
+
+    // web_snapshot으로 drain(surface 30이 web이라야 browser authz 통과) — 응답이 client에 갈 때까지.
+    var guard: usize = 0;
+    while (!ct.subscribed.load(.acquire) and guard < 5000) : (guard += 1) {
+        _ = try drainWithFakeSnapshot(&server, &store, web_snapshot);
+        if (!ct.subscribed.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try testing.expect(ct.subscribed.load(.acquire));
+    try testing.expect(ct.err == null);
+    try testing.expect(ct.resp != null);
+
+    // 응답 = {subscriber_id: N>=1}.
+    var pm = try cp.parseMessage(gpa, ct.resp.?);
+    defer pm.deinit();
+    try testing.expect(pm.message == .response);
+    try testing.expect(pm.message.response.result.?.object.get("subscriber_id").?.integer >= 1);
+
+    // 연결 held → 구독 1개 살아있음(연결 스레드는 readFrame 블록 중 = purge 없음 → broker.len 무경합 read 안전).
+    try testing.expectEqual(@as(usize, 1), server.subscriber_reg.broker.len());
+
+    // release → client close → 연결 스레드 EOF → purgeOutbound → connDone. active_conns 0까지 폴링(purge 완료 보장).
+    ct.release.store(true, .release);
+    th.join();
+    std.heap.c_allocator.free(ct.resp.?);
+    var w: usize = 0;
+    while (w < 5000) : (w += 1) {
+        server.conns_mutex.lockUncancelable(server.io);
+        const active = server.active_conns;
+        server.conns_mutex.unlock(server.io);
+        if (active == 0) break;
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try testing.expectEqual(@as(usize, 0), server.subscriber_reg.broker.len()); // 연결 drop → 구독 purge(연결 스레드 종료 후 무경합 read)
 }
 
 test "server: start 실패 없이 즉시 stop해도 accept 스레드가 깨끗이 join(요청 0건)" {

@@ -33547,6 +33547,14 @@ test "collector atPromptWire: semantic_state(+alt) → at_prompt 3상(unknown≠
 }
 
 // ── 순수 매핑 2) agent 내부→wire(§3): none=null(생략), kind/state 조합 ──
+test "collector agentInfoWire: interrupted는 별도 wire 값(idle로 접지 않음 — 가짜 완료 방지)" {
+    const i = agentInfoWire(.claude, .interrupted).?;
+    try std.testing.expectEqual(control_surface.AgentState.interrupted, i.state); // ★ .idle이 아니다
+    const j = agentInfoWire(.codex, .interrupted).?;
+    try std.testing.expectEqual(control_surface.AgentState.interrupted, j.state);
+    try std.testing.expect(agentInfoWire(.none, .interrupted) == null); // none이면 여전히 wire 생략
+}
+
 test "collector agentInfoWire: none→null, claude/codex × running/idle/unknown 매핑(내부→wire 격리)" {
     try std.testing.expect(agentInfoWire(.none, .running) == null); // none이면 state 무관 null(wire 생략)
     try std.testing.expect(agentInfoWire(.none, .idle) == null);

@@ -84,17 +84,13 @@ pub fn poll(
     // mtime 안 바뀌었으면 tail read·재파싱을 건너뛴다(느린 API 중 잦은 헛 재파싱 회피).
     if (prev_mtime != 0 and mtime == prev_mtime) return .{ .state = null, .answer_len = 0, .mtime = mtime };
 
-    const status = switch (kind) {
-        // claude는 마지막 assistant 턴이 대량 메타 엔트리에 밀릴 수 있어 끝에서부터 지수 확장 스캔한다.
-        .claude => readTailScan(io, gpa, path, answer_buf) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime },
-        // codex는 마지막이 task_complete라 끝 tail_window로 충분(tick마다 alloc/free — 0.5s 간격이라 무시 가능).
-        .codex => brk: {
-            const sc = gpa.alloc(u8, tail_window) catch return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
-            defer gpa.free(sc);
-            const tail = readTail(io, sc, path) orelse return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
-            break :brk transcript.parseCodexTail(gpa, tail, answer_buf);
-        },
-    };
+    // **둘 다 지수 확장 스캔**한다. 예전엔 codex만 고정 64KB tail이었는데("마지막이 task_complete라 충분"),
+    // 실측 codex rollout의 **한 줄이 2.9MB**에 이른다(중단된 명령의 exec_command_end가 캡처 출력을 통째로 싣는다).
+    // 그러면 그 한 줄이 64KB 창을 통째로 밀어내 `turn_aborted` 마커가 창 밖으로 사라지고, 인터럽트 latch가 안 걸려
+    // 상태가 running으로 되돌아간다 — 파일은 더 안 자라니 mtime 게이트가 재파싱도 막아 **스피너가 영구 고착**된다
+    // (이 수정이 없애려던 바로 그 버그, code-review). claude가 같은 부류의 절단에서 안전한 이유가 이 스캔이다.
+    const status = readTailScan(io, gpa, kind, path, answer_buf) orelse
+        return .{ .state = .unknown, .answer_len = 0, .mtime = mtime };
     return .{ .state = status.state, .answer_len = status.answer.len, .mtime = mtime };
 }
 
@@ -153,7 +149,7 @@ fn readTail(io: std.Io, buf: []u8, path: []const u8) ?[]const u8 {
 /// unknown이 아니면 멈춘다. 파서가 잘린 선두 줄을 skip하므로(parseFromSlice 실패 = skip) 청크 경계가 줄을 잘라도
 /// 안전하다 — 다음 더 큰 window가 그 줄을 온전히 포함한다. 활성 세션의 흔한 경우는 첫 청크로 끝나고, 마지막 턴이
 /// 멀 때만 확장한다. 파일을 못 열면 null(호출자가 unknown 처리). 매 청크 gpa.alloc/free — tick 0.5s 간격이라 무시.
-fn readTailScan(io: std.Io, gpa: std.mem.Allocator, path: []const u8, answer_buf: []u8) ?transcript.Status {
+fn readTailScan(io: std.Io, gpa: std.mem.Allocator, kind: Kind, path: []const u8, answer_buf: []u8) ?transcript.Status {
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);
 
@@ -171,8 +167,11 @@ fn readTailScan(io: std.Io, gpa: std.mem.Allocator, path: []const u8, answer_buf
         var reader = file.reader(io, &rbuf);
         reader.seekTo(@intCast(start)) catch return null;
         const n = reader.interface.readSliceShort(buf) catch return null;
-        const status = transcript.parseClaudeTail(gpa, buf[0..n], answer_buf);
-        // 마지막 대화 엔트리를 찾았거나(non-unknown), 파일 전체를 봤거나, 상한 도달이면 멈춘다.
+        const status = switch (kind) {
+            .claude => transcript.parseClaudeTail(gpa, buf[0..n], answer_buf),
+            .codex => transcript.parseCodexTail(gpa, buf[0..n], answer_buf),
+        };
+        // 마지막 대화/turn 엔트리를 찾았거나(non-unknown), 파일 전체를 봤거나, 상한 도달이면 멈춘다.
         if (status.state != .unknown or read_len >= size or window >= tail_cap) return status;
         window = @min(window * 2, tail_cap);
     }

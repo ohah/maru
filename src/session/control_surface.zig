@@ -799,6 +799,19 @@ fn idEqlNum(id: cp.Id, n: i64) bool {
 // 모듈 헤더 계약: "wire 문자열은 exhaustive switch로 못박아(내부 rename이 wire를 안 흔들게) 고정한다". 기존
 // 테스트는 agent kind=claude·state=running만 실었다 — agentKindWire(.codex)·agentStateWire(.idle|.unknown)
 // 분기는 어떤 테스트도 안 밟아, 내부 enum rename이 이 wire 문자열을 조용히 바꿔도 잡히지 않았다. 그 wire 상수를 못박는다.
+test "wire enum 안정성: agent state=interrupted가 별도 문자열로 실린다(idle로 접히지 않음)" {
+    // 이 PR의 유일한 **외부 계약 변경**. idle로 접으면 클라이언트가 running→idle을 "턴 완료"로 읽어 사용자가
+    // 끊은 턴을 **가짜 완료**로 보고한다(자동화가 후속 단계를 진행) — 그래서 4번째 값으로 싣는다.
+    const dto = termSurface(7, "s", .{ .agent = .{ .kind = .claude, .state = .interrupted }, .at_prompt = .unknown });
+    const wire = try serializeSurface(testing.allocator, dto);
+    defer testing.allocator.free(wire);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
+    defer parsed.deinit();
+    const ag = parsed.value.object.get("agent").?.object;
+    try testing.expectEqualStrings("claude", ag.get("kind").?.string);
+    try testing.expectEqualStrings("interrupted", ag.get("state").?.string); // ★ "idle"이 아니다
+}
+
 test "wire enum 안정성: agent kind=codex, state=idle/unknown이 문서화된 wire 문자열로 직렬화된다" {
     // codex + idle.
     {

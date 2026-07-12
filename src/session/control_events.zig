@@ -192,6 +192,22 @@ pub const EventBroker = struct {
         return n;
     }
 
+    /// surface의 **모든** 구독자를 필터 **무관**하게 `out`에 채운다(5f-3d `browser.closed` — 구독 종료 마커라 filter로
+    /// opt-out 불가; `matching`과 달리 `filter.wants` 검사 안 함). 각 subscriber는 `(subscriber,surface)`당 1회라 중복 없음.
+    /// `out` 작으면 채운 만큼만(방어). 반환=개수.
+    pub fn matchingSurfaceAny(self: *const EventBroker, surface_id: u64, out: []SubscriberId) usize {
+        var n: usize = 0;
+        for (self.subs.items) |s| {
+            if (s.surface_id == surface_id) {
+                if (n < out.len) {
+                    out[n] = s.subscriber_id;
+                    n += 1;
+                }
+            }
+        }
+        return n;
+    }
+
     /// 현재 구독 수(테스트/버퍼 크기 산정용).
     pub fn len(self: *const EventBroker) usize {
         return self.subs.items.len;

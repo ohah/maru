@@ -805,43 +805,8 @@ private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonce
 // 헤드리스에 더해 실 KVO/delegate까지). 반환=정렬된 이벤트 suffix 콤마결합("dialog,loadState,navigated")·"pending"·"error:".
 // `SO_NOSIGPIPE`로 broken pipe가 앱을 안 죽인다. 지속 세션(2b-1)이라 한 연결로 auth 1회+요청 다수.
 private func runBrowserEventSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> String {
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    if fd < 0 { return "error:socket" }
+    guard let fd = connectControlSocket(socketPath, recvTimeoutSec: 3) else { return "error:connect" }
     defer { close(fd) }
-    var noSigPipe: Int32 = 1
-    _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-    var addr = sockaddr_un()
-    addr.sun_family = sa_family_t(AF_UNIX)
-    let pathBytes = Array(socketPath.utf8)
-    let pathCap = MemoryLayout.size(ofValue: addr.sun_path)
-    if pathBytes.count >= pathCap { return "error:path-too-long" }
-    withUnsafeMutablePointer(to: &addr.sun_path) { p in
-        p.withMemoryRebound(to: CChar.self, capacity: pathCap) { dst in
-            for (i, b) in pathBytes.enumerated() { dst[i] = CChar(bitPattern: b) }
-            dst[pathBytes.count] = 0
-        }
-    }
-    let connRc = withUnsafePointer(to: &addr) { ap in
-        ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-            connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-        }
-    }
-    if connRc != 0 { return "error:connect" }
-    var tv = timeval(tv_sec: 3, tv_usec: 0)
-    _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-    func writeLine(_ s: String) -> Bool {
-        var bytes = Array(s.utf8); bytes.append(0x0A)
-        return bytes.withUnsafeBytes { raw in
-            var off = 0
-            while off < raw.count {
-                let n = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
-                if n <= 0 { return false }
-                off += n
-            }
-            return true
-        }
-    }
     // auth(cap) + subscribe(전체 events) + navigate(새 URL=navigated+loadState 발화) + executeScript(alert=dialog 발화).
     // 지속 세션 = 한 연결. 5f-3: 여러 이벤트 종류가 실제로 흐르는지 집합으로 수집한다.
     let newUrl = "data:text/html,%3Ch1%3Eevt3c%3C/h1%3E"
@@ -849,7 +814,7 @@ private func runBrowserEventSmokeClient(socketPath: String, sid: UInt64, nonceHe
     let subReq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":\(sid)}}" // events 생략=전체
     let navReq = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.navigate\",\"params\":{\"id\":\(sid),\"url\":\"\(newUrl)\"}}"
     let jsReq = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.executeScript\",\"params\":{\"id\":\(sid),\"script\":\"alert('e3c')\"}}"
-    if !writeLine(auth) || !writeLine(subReq) || !writeLine(navReq) || !writeLine(jsReq) { return "error:write" }
+    if !socketWriteLine(fd, auth) || !socketWriteLine(fd, subReq) || !socketWriteLine(fd, navReq) || !socketWriteLine(fd, jsReq) { return "error:write" }
 
     // 스트림을 읽으며 browser.* notification 메서드를 집합으로 모은다(응답·hello는 skip). navigated/loadState/dialog가
     // 각 KVO·delegate에서 발화돼 오는지 확인. 반환=정렬된 suffix 콤마 결합(예 "dialog,loadState,navigated")·"pending".
@@ -884,23 +849,18 @@ private func browserCtlResult(_ line: String) -> [String: Any]? {
     return result
 }
 
-private enum BrowserCtlReqResult { case ok(String); case err(String) }
-
-// 5e-2b-2(테스트 전용): 컨트롤 소켓에 **한 번** 붙어 auth 프레임 + 요청 프레임을 보내고 응답 한 줄(hello notification
-// 스킵)을 돌려준다. 이 함수는 요청 하나 = 연결 하나(테스트 단순성 — 서버는 지속 세션도 지원, 5f-0b-2b-1). `SO_NOSIGPIPE`로 broken pipe가 앱을
-// 죽이지 않게 한다(write는 -1/EPIPE로 접힘). 수신 타임아웃 2s. 실패는 `.err(진단)`.
-private func browserCtlOneRequest(socketPath: String, authFrame: String, requestFrame: String) -> BrowserCtlReqResult {
+// 5f-3 [9]: 두 스모크 클라이언트 공통 소켓 헬퍼(중복 제거). connect + SO_NOSIGPIPE + SO_RCVTIMEO. 성공=연결된 fd(호출자가
+// close)·실패=nil(내부서 close). SO_NOSIGPIPE로 서버가 닫힌 소켓에 write해도(broken pipe) 앱이 안 죽는다(write -1/EPIPE).
+private func connectControlSocket(_ socketPath: String, recvTimeoutSec: Int) -> Int32? {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-    if fd < 0 { return .err("error:socket") }
-    defer { close(fd) }
+    if fd < 0 { return nil }
     var noSigPipe: Int32 = 1
     _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
     let pathBytes = Array(socketPath.utf8)
     let pathCap = MemoryLayout.size(ofValue: addr.sun_path) // 104
-    if pathBytes.count >= pathCap { return .err("error:path-too-long") }
+    if pathBytes.count >= pathCap { close(fd); return nil }
     withUnsafeMutablePointer(to: &addr.sun_path) { p in
         p.withMemoryRebound(to: CChar.self, capacity: pathCap) { dst in
             for (i, b) in pathBytes.enumerated() { dst[i] = CChar(bitPattern: b) }
@@ -912,23 +872,35 @@ private func browserCtlOneRequest(socketPath: String, authFrame: String, request
             connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
         }
     }
-    if connRc != 0 { return .err("error:connect") }
-    var tv = timeval(tv_sec: 2, tv_usec: 0)
+    if connRc != 0 { close(fd); return nil }
+    var tv = timeval(tv_sec: recvTimeoutSec, tv_usec: 0)
     _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    return fd
+}
 
-    func writeLine(_ s: String) -> Bool {
-        var bytes = Array(s.utf8); bytes.append(0x0A) // ndjson: 프레임 + 개행
-        return bytes.withUnsafeBytes { raw in
-            var off = 0
-            while off < raw.count {
-                let n = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
-                if n <= 0 { return false }
-                off += n
-            }
-            return true
+// ndjson 프레임(문자열 + 개행) 부분-write 처리 write. 실패=false.
+private func socketWriteLine(_ fd: Int32, _ s: String) -> Bool {
+    var bytes = Array(s.utf8); bytes.append(0x0A)
+    return bytes.withUnsafeBytes { raw in
+        var off = 0
+        while off < raw.count {
+            let n = write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+            if n <= 0 { return false }
+            off += n
         }
+        return true
     }
-    if !writeLine(authFrame) || !writeLine(requestFrame) { return .err("error:write") }
+}
+
+private enum BrowserCtlReqResult { case ok(String); case err(String) }
+
+// 5e-2b-2(테스트 전용): 컨트롤 소켓에 **한 번** 붙어 auth 프레임 + 요청 프레임을 보내고 응답 한 줄(hello notification
+// 스킵)을 돌려준다. 이 함수는 요청 하나 = 연결 하나(테스트 단순성 — 서버는 지속 세션도 지원, 5f-0b-2b-1). `SO_NOSIGPIPE`로 broken pipe가 앱을
+// 죽이지 않게 한다(write는 -1/EPIPE로 접힘). 수신 타임아웃 2s. 실패는 `.err(진단)`.
+private func browserCtlOneRequest(socketPath: String, authFrame: String, requestFrame: String) -> BrowserCtlReqResult {
+    guard let fd = connectControlSocket(socketPath, recvTimeoutSec: 2) else { return .err("error:connect") }
+    defer { close(fd) }
+    if !socketWriteLine(fd, authFrame) || !socketWriteLine(fd, requestFrame) { return .err("error:write") }
 
     // 응답 프레임(개행 종단, `"result"`/`"error"` 포함 = hello notification 아닌 응답)을 읽어 돌려준다. leftover로 프레임
     // 경계가 read 경계와 어긋나도 조립. 타임아웃/close/상한이면 .err.

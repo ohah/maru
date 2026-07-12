@@ -331,7 +331,8 @@ pub const SubscriberRegistry = struct {
         var buf: [max_event_fanout]cev.SubscriberId = undefined;
         const n = self.broker.matching(surface_id, kind, &buf);
         if (n == 0) return 0; // 구독자 없음 → 직렬화 없이 조기 반환(핫패스 alloc 회피, 20차 [4])
-        std.debug.assert(n < max_event_fanout); // truncate=구독자 이벤트 유실. max_pending≤max_event_fanout(start assert)이라 불가.
+        std.debug.assert(n <= max_event_fanout); // n은 matching이 out.len(=max_event_fanout)까지만 채움. 정확 상한=max_pending(≤
+        // max_event_fanout, start assert)이라 truncate 없음. 21차 [0]: max_pending=64서 n==64가 정상이라 `<`가 아니라 `<=`(경계 오abort 방지).
         const coalesce_key: ?u64 = if (kind.isCoalescible()) coalesceKey(surface_id, kind) else null;
         const template = cev.serializeEvent(cross_gpa, surface_id, event) catch return 0; // OOM=아무도 못 받음
         defer cross_gpa.free(template);
@@ -372,12 +373,37 @@ pub const SubscriberRegistry = struct {
         return self.broker.removeSurface(surface_id);
     }
 
-    /// 5f-3d **surface close**: 그 surface 구독을 **broker에서만** 제거한다(큐 잔여 프레임은 안 건드림 — 직전에 push한
-    /// `browser.closed`가 배달돼야 하므로). cap **revoke**의 `purgeSurface`(프레임까지 폐기=보안, §8.5)와 구분. 반환=제거 구독 수.
-    pub fn removeSurfaceSubs(self: *SubscriberRegistry, surface_id: u64) usize {
+    /// 5f-3d **surface close**: `browser.closed`를 그 surface의 **모든 구독자**(필터 **무관** — closed는 구독 종료 마커라
+    /// opt-out 불가; 21차 [0]/[3])에게 push한 **뒤** broker 구독을 제거한다(원자 — 락 아래 push+remove). closed 프레임은
+    /// 큐에 남아 writer가 배달하고, remove는 큐를 안 건드린다(cap revoke의 `purgeSurface`[프레임 폐기]와 구분). 개별 push가
+    /// **Full**(느린 구독자)/QueueClosed면 그 구독자 outbound를 `close`해 연결을 teardown한다(21차 [5]: 종료 마커를 silent
+    /// drop하면 구독자가 죽은 surface를 영영 살아있다 여김 → §9.5.2 subscriber-lagged=강제 해제, client는 EOF로 종료 인지).
+    /// 반환=closed push 성공 수. **메인 스레드 전용**.
+    pub fn pushSurfaceClosed(self: *SubscriberRegistry, cross_gpa: std.mem.Allocator, surface_id: u64) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.broker.removeSurface(surface_id);
+        var buf: [max_event_fanout]cev.SubscriberId = undefined;
+        const n = self.broker.matchingSurfaceAny(surface_id, &buf); // 필터 무관 전체 구독자
+        var pushed: usize = 0;
+        if (n > 0) {
+            const template = cev.serializeEvent(cross_gpa, surface_id, .closed) catch {
+                _ = self.broker.removeSurface(surface_id); // 직렬화 OOM이어도 구독은 정리(dangling 방지)
+                return 0;
+            };
+            defer cross_gpa.free(template);
+            for (buf[0..n]) |id| {
+                const ch = self.outbound_of.get(id) orelse continue;
+                const bytes = cross_gpa.dupe(u8, template) catch continue; // 이 구독자만 skip(OOM)
+                ch.push(cross_gpa, .{ .bytes = bytes, .coalesce_key = null, .tag = surface_id }) catch {
+                    cross_gpa.free(bytes);
+                    ch.close(); // Full/QueueClosed → 종료 마커 못 줌 → outbound close(subscriber-lagged teardown, client EOF)
+                    continue;
+                };
+                pushed += 1;
+            }
+        }
+        _ = self.broker.removeSurface(surface_id); // 구독 제거(closed 프레임은 큐에 남아 배달 — purge 안 함)
+        return pushed;
     }
 
     /// 비-locking 내부 헬퍼(호출처가 이미 mutex 보유) + 헤드리스 단위 테스트(단일 스레드)용. 라이브 경로는 절대 락 없이 안 부른다.
@@ -968,23 +994,25 @@ test "SubscriberRegistry: purgeSurface가 그 surface 구독만 제거(연결 �
     }
 }
 
-test "SubscriberRegistry(5f-3d): removeSurfaceSubs는 구독만 제거하고 큐 프레임은 유지(closed 배달 위해)" {
+test "SubscriberRegistry(21차 [0]/[3]): pushSurfaceClosed는 필터 무관 전체 구독자에 closed 배달 + 구독 제거(프레임 유지)" {
     var reg = SubscriberRegistry.init(std.testing.io, testing.allocator);
     defer reg.deinit();
     var ch = OutboundChannel.init(std.testing.io, 8);
     defer ch.deinit(testing.allocator);
-    _ = try reg.subscribe(10, cev.EventFilter.all, &ch);
+    // surface 10을 **navigated만** 구독(closed 필터 아웃). closed는 종료 마커라 필터로 opt-out 못 하고 배달돼야 한다.
+    _ = try reg.subscribe(10, cev.EventFilter.only(&[_]cev.EventKind{.navigated}), &ch);
     _ = try reg.subscribe(20, cev.EventFilter.all, &ch);
-    // surface 10에 closed를 push한 뒤 removeSurfaceSubs(10) — 그 프레임은 큐에 남아야(배달), purgeSurface와 대비.
-    try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 10, .closed));
-    try testing.expectEqual(@as(usize, 1), reg.removeSurfaceSubs(10)); // 구독만 제거(프레임 폐기 안 함)
-    try testing.expectEqual(@as(usize, 1), reg.broker.len()); // surface 20 남음
-    try testing.expectEqual(@as(usize, 1), ch.q.len()); // closed 프레임 **유지**(purgeSurface였다면 0)
-    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 10, .{ .navigated = "after" })); // 10 구독 제거됨 → 이후 이벤트 0
-    // 남은 closed 프레임이 browser.closed notification인지 확인 + drain.
+    // 대조(21차 [0] 버그): pushEvent(.closed)는 필터 존중이라 navigated-only 구독엔 0(closed 못 받음 → hang).
+    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 10, .closed));
+    // pushSurfaceClosed는 **필터 무관** → surface 10 구독자에 배달(1) + 구독 제거.
+    try testing.expectEqual(@as(usize, 1), reg.pushSurfaceClosed(testing.allocator, 10));
+    try testing.expectEqual(@as(usize, 1), reg.broker.len()); // surface 20만 남음(10 제거)
+    try testing.expect(reg.idForOutbound(&ch) != null); // 연결 매핑 유지(연결 살아 있음)
+    try testing.expectEqual(@as(usize, 1), ch.q.len()); // closed 프레임 **유지**(배달용 — remove는 프레임 안 건드림)
     const f = ch.popWait().?;
     defer testing.allocator.free(f.bytes);
     try testing.expect(std.mem.indexOf(u8, f.bytes, "browser.closed") != null);
+    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 10, .{ .navigated = "after" })); // 10 구독 제거됨 → 이후 이벤트 0
 }
 
 test "SubscriberRegistry(3a-2): 메인 pushEvent ∥ 연결 purgeOutbound/subscribe 동시 broker mutation 무크래시(leaf-mutex)" {

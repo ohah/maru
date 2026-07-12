@@ -2046,15 +2046,14 @@ pub export fn maru_macos_control_push_browser_crashed(surface_id: u64) void {
     _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .crashed);
 }
 
-/// 5f-3d: Swift가 web surface 소멸(패널 close) **직전**에 호출 — `browser.closed` 이벤트를 구독자에 push한 **뒤** 그 surface의
-/// 구독을 정리한다(§9.5.2 surface close). closed는 마지막 프레임이라 큐에 남아 배달되고(제거 전 push), 이후 `purgeSurface`가
-/// broker 구독 제거 + 잔여 이벤트 프레임 폐기(그 사이 push된 closed 프레임 포함될 수 있으나 outbound.close→writer drain이 배달).
-/// 서버 미시작이면 무동작. **메인 스레드 전용**.
+/// 5f-3d: Swift가 web surface 소멸(패널 close) **직전**에 호출 — `browser.closed`를 그 surface의 **모든 구독자**(필터 무관 —
+/// 종료 마커라 opt-out 불가, 21차 [0])에게 push한 **뒤** 구독을 제거한다(`pushSurfaceClosed`가 락 아래 원자로 push+remove).
+/// closed 프레임은 큐에 남아 writer가 배달하고(remove는 큐 안 건드림 — cap revoke의 `purgeSurface`[프레임 폐기]와 구분), Full인
+/// 구독자는 outbound close로 teardown(subscriber-lagged, 21차 [5]). 서버 미시작이면 무동작. **메인 스레드 전용**.
 pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
     if (!control_server_active) return;
     const server = &control_server_storage;
-    _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .closed); // 마지막 closed 이벤트(구독 제거 전)
-    _ = server.subscriber_reg.removeSurfaceSubs(surface_id); // 이후 그 surface 매칭 중단(broker만 — closed 프레임은 큐서 배달)
+    _ = server.subscriber_reg.pushSurfaceClosed(server.cross_gpa, surface_id);
 }
 
 pub export fn maru_macos_control_server_stop() void {

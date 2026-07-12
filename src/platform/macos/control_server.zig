@@ -372,6 +372,14 @@ pub const SubscriberRegistry = struct {
         return self.broker.removeSurface(surface_id);
     }
 
+    /// 5f-3d **surface close**: 그 surface 구독을 **broker에서만** 제거한다(큐 잔여 프레임은 안 건드림 — 직전에 push한
+    /// `browser.closed`가 배달돼야 하므로). cap **revoke**의 `purgeSurface`(프레임까지 폐기=보안, §8.5)와 구분. 반환=제거 구독 수.
+    pub fn removeSurfaceSubs(self: *SubscriberRegistry, surface_id: u64) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.broker.removeSurface(surface_id);
+    }
+
     /// 비-locking 내부 헬퍼(호출처가 이미 mutex 보유) + 헤드리스 단위 테스트(단일 스레드)용. 라이브 경로는 절대 락 없이 안 부른다.
     /// subscribe·purgeOutbound가 outbound→id 역참조에 쓴다. O(연결수) 선형 스캔이나 **유계 연결 상한(≤max_pending=16)에서
     /// 무시 가능**이라 유지한다(20차 [6] 검토): O(1) 대안(OutboundChannel에 subscriber_id 필드 저장)은 generic outbound
@@ -958,6 +966,25 @@ test "SubscriberRegistry: purgeSurface가 그 surface 구독만 제거(연결 �
         const f = ch.popWait().?;
         testing.allocator.free(f.bytes);
     }
+}
+
+test "SubscriberRegistry(5f-3d): removeSurfaceSubs는 구독만 제거하고 큐 프레임은 유지(closed 배달 위해)" {
+    var reg = SubscriberRegistry.init(std.testing.io, testing.allocator);
+    defer reg.deinit();
+    var ch = OutboundChannel.init(std.testing.io, 8);
+    defer ch.deinit(testing.allocator);
+    _ = try reg.subscribe(10, cev.EventFilter.all, &ch);
+    _ = try reg.subscribe(20, cev.EventFilter.all, &ch);
+    // surface 10에 closed를 push한 뒤 removeSurfaceSubs(10) — 그 프레임은 큐에 남아야(배달), purgeSurface와 대비.
+    try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 10, .closed));
+    try testing.expectEqual(@as(usize, 1), reg.removeSurfaceSubs(10)); // 구독만 제거(프레임 폐기 안 함)
+    try testing.expectEqual(@as(usize, 1), reg.broker.len()); // surface 20 남음
+    try testing.expectEqual(@as(usize, 1), ch.q.len()); // closed 프레임 **유지**(purgeSurface였다면 0)
+    try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 10, .{ .navigated = "after" })); // 10 구독 제거됨 → 이후 이벤트 0
+    // 남은 closed 프레임이 browser.closed notification인지 확인 + drain.
+    const f = ch.popWait().?;
+    defer testing.allocator.free(f.bytes);
+    try testing.expect(std.mem.indexOf(u8, f.bytes, "browser.closed") != null);
 }
 
 test "SubscriberRegistry(3a-2): 메인 pushEvent ∥ 연결 purgeOutbound/subscribe 동시 broker mutation 무크래시(leaf-mutex)" {

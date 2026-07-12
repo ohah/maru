@@ -799,10 +799,11 @@ private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonce
     return (navigateOk, getUrl)
 }
 
-// 5f-0b-3c(테스트 전용): **지속 연결**로 subscribe→navigate(새 URL)→`browser.navigated` notification 수신을 검증한다.
-// KVO(실 WKWebView url 변경)→pushEvent→outbound→writer→소켓의 **서버-발신 이벤트** 파이프라인을 실 navigation으로 자동
-// 확인(3b 소켓 왕복·pushEvent 헤드리스에 더해 3c는 실 KVO 소스까지). 반환=받은 navigated url(성공)·"pending"(타임아웃)·
-// "error:...". `SO_NOSIGPIPE`로 broken pipe가 앱을 안 죽인다. 지속 세션(2b-1)이라 한 연결로 auth 1회+요청 다수.
+// 5f-0b-3c/5f-3(테스트 전용): **지속 연결**로 subscribe→navigate(새 URL)→executeScript(alert)로 여러 이벤트 소스를 실제로
+// 발화시키고, 서버-발신 `browser.*` notification이 오는지 **집합으로 수집**한다. url KVO=navigated·isLoading KVO=loadState·
+// WKUIDelegate=dialog가 각 실 소스에서 pushEvent→outbound→writer→소켓 파이프라인을 타는지 자동 확인(3b 소켓·pushEvent
+// 헤드리스에 더해 실 KVO/delegate까지). 반환=정렬된 이벤트 suffix 콤마결합("dialog,loadState,navigated")·"pending"·"error:".
+// `SO_NOSIGPIPE`로 broken pipe가 앱을 안 죽인다. 지속 세션(2b-1)이라 한 연결로 auth 1회+요청 다수.
 private func runBrowserEventSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> String {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     if fd < 0 { return "error:socket" }
@@ -841,32 +842,37 @@ private func runBrowserEventSmokeClient(socketPath: String, sid: UInt64, nonceHe
             return true
         }
     }
-    // auth(cap) + subscribe(navigated) + navigate(새 URL — 현 fixture와 달라야 url KVO 발화). 지속 세션 = 한 연결.
+    // auth(cap) + subscribe(전체 events) + navigate(새 URL=navigated+loadState 발화) + executeScript(alert=dialog 발화).
+    // 지속 세션 = 한 연결. 5f-3: 여러 이벤트 종류가 실제로 흐르는지 집합으로 수집한다.
     let newUrl = "data:text/html,%3Ch1%3Eevt3c%3C/h1%3E"
     let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid),\"cap_nonce\":\"\(nonceHex)\"}}"
-    let subReq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":\(sid),\"events\":[\"navigated\"]}}"
+    let subReq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":\(sid)}}" // events 생략=전체
     let navReq = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.navigate\",\"params\":{\"id\":\(sid),\"url\":\"\(newUrl)\"}}"
-    if !writeLine(auth) || !writeLine(subReq) || !writeLine(navReq) { return "error:write" }
+    let jsReq = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.executeScript\",\"params\":{\"id\":\(sid),\"script\":\"alert('e3c')\"}}"
+    if !writeLine(auth) || !writeLine(subReq) || !writeLine(navReq) || !writeLine(jsReq) { return "error:write" }
 
-    // 스트림을 읽으며 browser.navigated notification을 찾는다(hello·구독 응답·navigate 응답은 skip). 그 params.url을 돌려준다.
+    // 스트림을 읽으며 browser.* notification 메서드를 집합으로 모은다(응답·hello는 skip). navigated/loadState/dialog가
+    // 각 KVO·delegate에서 발화돼 오는지 확인. 반환=정렬된 suffix 콤마 결합(예 "dialog,loadState,navigated")·"pending".
+    var seen = Set<String>()
     var leftover = [UInt8]()
     let deadline = Date().addingTimeInterval(3.0)
     while Date() < deadline {
         while let nl = leftover.firstIndex(of: 0x0A) {
             let lineBytes = Array(leftover[0 ..< nl])
             leftover.removeSubrange(0 ... nl)
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(lineBytes)) as? [String: Any] else { continue }
-            if obj["method"] as? String == "browser.navigated",
-               let params = obj["params"] as? [String: Any],
-               let url = params["url"] as? String { return url }
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(lineBytes)) as? [String: Any],
+                  let method = obj["method"] as? String, method.hasPrefix("browser.") else { continue }
+            seen.insert(String(method.dropFirst("browser.".count))) // suffix만(navigated/loadState/dialog/…)
+            if seen.contains("navigated"), seen.contains("loadState"), seen.contains("dialog") { break } // 3종 다 오면 조기 종료
         }
+        if seen.contains("navigated"), seen.contains("loadState"), seen.contains("dialog") { break }
         var buf = [UInt8](repeating: 0, count: 1024)
         let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
         if n <= 0 { break } // 타임아웃/close
         leftover.append(contentsOf: buf[0 ..< n])
         if leftover.count > 64 * 1024 { return "error:overflow" }
     }
-    return "pending" // 타임아웃 — 이벤트 못 받음
+    return seen.isEmpty ? "pending" : seen.sorted().joined(separator: ",")
 }
 
 // 5e-2b-2(테스트 전용): JSON-RPC 응답 한 줄에서 `result` 객체를 파싱한다(hand-rolled 문자열 스캔 대신 — 17차 [5]:
@@ -1125,6 +1131,13 @@ final class MaruWebPanelView: NSView {
                     self?.navStateDirty = true
                 }
             },
+            // 5f-3a: isLoading 변경 → browser.loadState 이벤트(구독자에 push, navigated와 동형 coalescible KVO). 무구독=무비용.
+            webView.observe(\.isLoading, options: [.new]) { [weak self] wv, _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    maru_macos_control_push_browser_load_state(self.surfaceId, wv.isLoading ? 1 : 0)
+                }
+            },
         ]
     }
 
@@ -1247,6 +1260,12 @@ extension MaruWebPanelView: WKNavigationDelegate {
             }
         }
     }
+
+    // 5f-3c: WebContent 프로세스 크래시 → browser.crashed 이벤트를 구독자에 push(추가 payload 없음). 실 크래시는
+    // 결정적 트리거 불가라 헤드리스/손 테스트 대상(§9.5.5). 메인 스레드(델리게이트 콜백).
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        maru_macos_control_push_browser_crashed(surfaceId)
+    }
 }
 
 // Phase 7f-1: 새 창/팝업(target=_blank·window.open) adopt.
@@ -1274,6 +1293,28 @@ extension MaruWebPanelView: WKUIDelegate {
             guard allowed else { return nil }
         }
         return controller?.adoptPopupWebView(configuration: configuration, openerSurfaceId: surfaceId)
+    }
+
+    // 5f-3b: JS 다이얼로그(alert/confirm/prompt) → browser.dialog 이벤트 push + **안전 기본값으로 즉시 dismiss**(비-블로킹).
+    // uiDelegate 미구현 시 WebKit이 다이얼로그를 조용히 억제(완료 즉시 호출)하던 현 동작을 유지하며 **관측만 추가**한다 —
+    // 즉 UX 회귀 없음(alert=무시·confirm=false·prompt=nil). 실 다이얼로그 표시/에이전트 응답(browser.dialog.respond)은 후속.
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        pushDialogEvent(kind: 0, message: message)
+        completionHandler()
+    }
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        pushDialogEvent(kind: 1, message: message)
+        completionHandler(false)
+    }
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+        pushDialogEvent(kind: 2, message: prompt)
+        completionHandler(nil)
+    }
+    private func pushDialogEvent(kind: UInt8, message: String) {
+        let bytes = Array(message.utf8)
+        bytes.withUnsafeBufferPointer { p in
+            maru_macos_control_push_browser_dialog(surfaceId, kind, p.baseAddress, p.count)
+        }
     }
 }
 
@@ -1530,7 +1571,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private let browserCtlLock = NSLock()
     private nonisolated(unsafe) var browserCtlNavigateOkStore = "pending" // 소켓 browser.navigate 응답에 "ok":true 포함 여부.
     private nonisolated(unsafe) var browserCtlGetUrlStore = "pending" // 소켓 browser.getUrl 응답의 url(navigate한 data: URL 기대).
-    private nonisolated(unsafe) var browserCtlEventNavigatedStore = "pending" // 5f-0b-3c: 구독 후 navigate가 유발한 browser.navigated 이벤트의 url.
+    private nonisolated(unsafe) var browserCtlEventsStore = "pending" // 5f-3: 구독 후 navigate+alert가 유발한 browser.* 이벤트 종류 집합(navigated/loadState/dialog).
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
@@ -2750,13 +2791,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // cap 발급(메인) — 그 surface에 묶인 browser cap nonce(raw 32B). env 미설정/실패면 0 → 진단 남기고 종료.
         var nonce = [UInt8](repeating: 0, count: 32)
         let issued = nonce.withUnsafeMutableBufferPointer { maru_macos_control_test_issue_browser_cap(t.surfaceId, $0.baseAddress, $0.count) }
-        guard issued == 1 else { storeBrowserCtlResult(navigateOk: "error:cap-issue", getUrl: "error:cap-issue", eventNavigated: "error:cap-issue"); return }
+        guard issued == 1 else { storeBrowserCtlResult(navigateOk: "error:cap-issue", getUrl: "error:cap-issue", events: "error:cap-issue"); return }
         let nonceHex = nonce.map { String(format: "%02x", $0) }.joined()
 
         // 소켓 경로 조회(메인).
         var pathBuf = [UInt8](repeating: 0, count: 512)
         let pathLen = pathBuf.withUnsafeMutableBufferPointer { maru_macos_control_socket_path($0.baseAddress, $0.count) }
-        guard pathLen > 0 else { storeBrowserCtlResult(navigateOk: "error:socket-path", getUrl: "error:socket-path", eventNavigated: "error:socket-path"); return }
+        guard pathLen > 0 else { storeBrowserCtlResult(navigateOk: "error:socket-path", getUrl: "error:socket-path", events: "error:socket-path"); return }
         let socketPath = String(decoding: pathBuf[0 ..< pathLen], as: UTF8.self)
 
         // 배경 큐에서 소켓 왕복 — 메인 tick은 계속 돌며 marshal/complete한다. 결과는 lock으로 저장.
@@ -2764,23 +2805,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let r = runBrowserControlSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex, navigateURL: t.url)
             // 5f-0b-3c: 위 navigate 뒤(패널이 data: URL 커밋됨), 지속 연결로 subscribe→새 URL navigate→browser.navigated 수신 검증.
             let evt = runBrowserEventSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
-            self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl, eventNavigated: evt)
+            self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl, events: evt)
         }
     }
 
     /// 5e-2b-2: 배경 소켓 클라이언트가 결과를 저장(lock 보호). nonisolated — 배경 큐에서 호출.
-    private nonisolated func storeBrowserCtlResult(navigateOk: String, getUrl: String, eventNavigated: String) {
+    private nonisolated func storeBrowserCtlResult(navigateOk: String, getUrl: String, events: String) {
         browserCtlLock.lock()
         browserCtlNavigateOkStore = navigateOk
         browserCtlGetUrlStore = getUrl
-        browserCtlEventNavigatedStore = eventNavigated
+        browserCtlEventsStore = events
         browserCtlLock.unlock()
     }
 
     /// 5e-2b-2: writeSummary(메인)가 결과를 읽는다(lock 보호). 미완이면 "pending".
-    private func browserCtlResults() -> (navigateOk: String, getUrl: String, eventNavigated: String) {
+    private func browserCtlResults() -> (navigateOk: String, getUrl: String, events: String) {
         browserCtlLock.lock(); defer { browserCtlLock.unlock() }
-        return (browserCtlNavigateOkStore, browserCtlGetUrlStore, browserCtlEventNavigatedStore)
+        return (browserCtlNavigateOkStore, browserCtlGetUrlStore, browserCtlEventsStore)
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
@@ -3566,6 +3607,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
             case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
+                    // 5f-3d: 소멸 직전 browser.closed 이벤트를 구독자에 push한 뒤 그 surface 구독을 정리(ABI 내부서 제거 전 push).
+                    maru_macos_control_push_browser_closed(t.surface_id)
                     v.removeFromSuperview()
                     surface.webPanels[t.surface_id] = nil
                 }
@@ -4979,7 +5022,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
             browser_ctl_navigate_ok=\(browserCtlResults().navigateOk)
             browser_ctl_get_url=\(browserCtlResults().getUrl)
-            browser_ctl_event_navigated=\(browserCtlResults().eventNavigated)
+            browser_ctl_events=\(browserCtlResults().events)
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

@@ -285,7 +285,9 @@ pub const ControlServer = struct {
     hello_caps: []const []const u8,
     thread: ?std.Thread = null,
     closing: std.atomic.Value(bool) = .init(false),
-    /// 연결 스레드가 stuck client에 무한 대기하지 않게 하는 read 타임아웃(2b-1 지속 세션 요청 루프의 inter-request read + 깨끗한 join; poll 루프 전환 후 idle 제거는 2b-2·§9.5.6④).
+    /// reader 스레드가 stuck client에 무한 대기하지 않게 하는 read 타임아웃(2b-1 지속 세션 요청 루프의 inter-request read +
+    /// stop() 시 readInto 블로킹의 ≤5s 깨끗한 join). 2b-2는 §9.5.6④의 poll-루프 전환을 채택하지 않고 **blocking read +
+    /// SO_RCVTIMEO를 유지**했다(reader+writer 2-스레드 realization, §9.5.6 realization note (b) — 이벤트는 writer로 독립해 흐름).
     read_timeout_ms: u32 = 5000,
     /// accept blocking을 gate하는 poll 간격(종료 시 이 간격 안에 closing 확인 → join). 짧을수록 종료 빠름·wakeup 잦음.
     poll_interval_ms: i32 = 200,
@@ -307,10 +309,11 @@ pub const ControlServer = struct {
     conns_done: std.Io.Condition = .init,
     /// 현재 살아있는 연결 스레드 수(conns_mutex 아래). acceptOne 성공→spawn 전 +1, connThread 종료 시 -1+broadcast.
     active_conns: usize = 0,
-    /// 동시 연결 상한(bounded — 스레드 폭주 방어). 초과 연결은 accept 후 즉시 close(reject). **`max_pending` 이하**여야
-    /// 한다(start의 assert — 큐 용량 부족 시 연결 스레드 push backpressure park 방지, 18차 [11]). 제어 플레인은 클라
-    /// 소수(에이전트 몇 + CLI)라 8이면 충분. 라이브(app_host_abi)는 max_pending=16이라 여유, 테스트는 max_pending=8.
-    max_connections: usize = 8,
+    /// 동시 연결 상한(bounded — 스레드 폭주 방어). 초과 연결은 accept 후 즉시 close(reject). **start()가 `max_pending`과
+    /// 동일하게 파생**(19차 [1][2][3][4]): 직렬 reader라 각 연결이 marshal 큐에 항목 ≤1개(push→waitResolved→pop 후에야
+    /// 다음 push)를 넣으므로, 동시 연결 = 큐 최대 점유다. 따라서 `max_connections == max_pending`이 tight·park-free 사이징
+    /// (초과 push backpressure park가 구조적으로 불가 — 옛 debug-assert 방어가 불필요해짐). 기본값은 start 전 잠깐만 유효.
+    max_connections: usize = 0,
     /// 5f-0b-2b-2: 연결당 outbound 큐(응답+이벤트) 용량. 직렬 reader라 응답은 depth ~1이고, 실 소비자는 5f-0b-3 이벤트
     /// 버스트다(초과 push=Full → 이벤트 drop=subscriber-lagged, §9.5.6; 응답은 Full이면 연결 abandon). 64면 여유.
     outbound_capacity: usize = 64,
@@ -341,10 +344,11 @@ pub const ControlServer = struct {
             .hello_version = hello_version,
             .hello_caps = hello_caps,
             .items_gpa = items_gpa, // §5-async in_flight 리스트 alloc
+            // 19차 [1][2][3][4]: 동시 연결 상한을 큐 용량과 동일하게 파생한다(직렬 reader라 연결당 큐 항목 ≤1 → tight·
+            // park-free, 위 필드 주석). 이 초기화가 유일한 max_connections 설정 지점 — start 후 필드 변경 금지(acceptLoop가
+            // conns_mutex 아래 읽으므로 무동기 변경은 데이터 레이스). 라이브=16(app_host_abi max_pending), 테스트=각자 max_pending.
+            .max_connections = max_pending,
         };
-        // 18차 [11]: 큐 용량 ≥ 동시 연결 상한. 어기면 연결 스레드가 queue.push backpressure로 park(=§9.5.1이 tryPush+
-        // server-busy로 피하려던 hang). max_connections는 struct 기본(16)이라 max_pending도 그 이상으로 넘겨야 한다.
-        std.debug.assert(self.max_connections <= max_pending);
         errdefer self.queue.deinit();
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
     }
@@ -481,10 +485,7 @@ pub const ControlServer = struct {
             self.active_conns += 1;
             self.conns_mutex.unlock(self.io);
             const t = std.Thread.spawn(.{}, connThread, .{ self, conn }) catch {
-                self.conns_mutex.lockUncancelable(self.io);
-                self.active_conns -= 1;
-                self.conns_done.broadcast(self.io);
-                self.conns_mutex.unlock(self.io);
+                self.connDone(); // spawn 실패 → +1한 카운터 되돌림(connThread 종료 경로와 동일 헬퍼 — 19차 [6])
                 conn.deinit();
                 continue;
             };
@@ -525,20 +526,16 @@ pub const ControlServer = struct {
 
     /// 5f-0b-2b-2 **writer 스레드**: 연결의 outbound 큐를 `popWait`로 블록-drain해 프레임(응답+이벤트)을 소켓에 write한다
     /// (**이 스레드가 유일한 소켓 writer** — reader는 절대 안 씀). 각 프레임 뒤에 `\n` 프레이밍을 붙이고 bytes를 free한다
-    /// (소유권=writer). write 실패(broken pipe/타임아웃)면 **draining만 계속**(free)해 큐가 안 차게 한다(reader의 push
-    /// Full 회피) — outbound close 시 popWait이 null을 반환하면 종료. conn.deinit(close)는 connThread가 join 후 한다.
+    /// (소유권=writer). **write 실패(broken pipe/SO_SNDTIMEO)면 `outbound.close()`로 즉시 teardown 신호**(19차 [0]):
+    /// close가 reader의 다음 `outbound.push`를 `QueueClosed`로 만들어 reader가 연결을 abandon한다(응답을 안 읽는 client에
+    /// 대해 옛 inline write `catch return`의 즉시-abandon 계약 복원 — sticky-broken drain은 최대 큐용량(64)사이클을 낭비하며
+    /// marshal한 뒤에야 접혔다). 현재 프레임은 defer가 free하고, close 시점에 큐에 남은 프레임은 connThread의 `outbound.deinit`이
+    /// free한다(close 후 reader는 push 불가라 누수 없음). conn.deinit(close)는 connThread가 join 후 한다.
     fn writerThread(self: *ControlServer, fd: c.fd_t, outbound: *OutboundChannel) void {
-        var broken = false;
         while (outbound.popWait()) |frame| {
             defer self.cross_gpa.free(frame.bytes);
-            if (broken) continue; // 이미 write 실패 → 남은 프레임은 free만(연결 곧 teardown)
-            cs.writeAll(fd, frame.bytes) catch {
-                broken = true;
-                continue;
-            };
-            cs.writeAll(fd, "\n") catch {
-                broken = true;
-            };
+            cs.writeAll(fd, frame.bytes) catch return outbound.close();
+            cs.writeAll(fd, "\n") catch return outbound.close();
         }
     }
 
@@ -596,9 +593,9 @@ pub const ControlServer = struct {
             const maybe = framer.next() catch {
                 // #3 §4.3: frame이 max를 초과하면 조용히 버리지 않고 payload_too_large(-32001) 응답을 보낸 뒤 연결을 버린다
                 // (serveReadOnly와 동일 계약). 5f-0b-2b-2: 직접 소켓 write는 writer 스레드의 write와 경합(단일 writer 불변
-                // 위반)하므로 **outbound에 push**(writer가 write). best-effort — 직렬화/push 실패는 무시(abandon 우선).
-                // id는 아직 못 읽었으므로 `.null`(JSON-RPC 관례). 응답 후에도 이 연결은 abandon한다(sticky too_large라 재조립 불가).
-                const err_bytes = cp.serializeError(self.cross_gpa, .null, .payload_too_large, cp.ErrorCode.payload_too_large.defaultMessage(), null) catch return null;
+                // 위반)하므로 **outbound에 push**(writer가 write). best-effort — 직렬화/push 실패는 무시(abandon 우선). 바이트는
+                // `serializeErrorDefault`(id 파싱 전 거부 응답 단일 출처, 19차 [5])로 — writeErrorResponse와 형태가 안 갈린다.
+                const err_bytes = cp.serializeErrorDefault(self.cross_gpa, .payload_too_large) catch return null;
                 outbound.push(self.cross_gpa, .{ .bytes = err_bytes, .coalesce_key = null, .tag = 0 }) catch self.cross_gpa.free(err_bytes);
                 return null;
             };
@@ -1116,8 +1113,10 @@ test "server max_connections(18차 [1]): 슬롯 초과 연결은 reject(hello �
     defer srvRmBase(base);
 
     var server: ControlServer = undefined;
-    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
-    server.max_connections = 1; // 슬롯 1개 — 둘째 연결은 reject 분기(391-395)를 탄다
+    // 19차 [3][4]: max_connections를 start 후 무동기 변경하면 acceptLoop(conns_mutex 아래 읽음)와 데이터 레이스다.
+    // max_connections는 max_pending에서 파생되므로(start), max_pending=1을 넘겨 슬롯 1개를 만든다 — 둘째 연결은 accept 후
+    // active_conns>=max_connections reject 분기를 탄다. Holder는 요청을 안 보내 큐(용량 1)를 안 쓰므로 pending=1이라도 무해.
+    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 1);
     defer server.stop(); // reject된 연결은 active_conns를 안 올렸어야 stop이 이 홀더 하나만 기다린다
 
     // Holder: connect + auth만 보내고 요청은 안 보내 hold(server connThread가 readFrame서 블록 → 슬롯 1개 점유). release
@@ -1270,9 +1269,10 @@ test "server: start 실패 없이 즉시 stop해도 accept 스레드가 깨끗�
     server.stop(); // poll_interval(200ms) 안에 join — 무한 대기 없음(테스트가 hang하면 실패)
 }
 
-test "readFrame(#3): oversize 프레임은 payload_too_large(-32001)를 outbound에 push한 뒤 null(연결 abandon)" {
+test "readFrame(#3): oversize 프레임 → payload_too_large를 outbound에 push, writer가 소켓에 전달(end-to-end 왕복)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    // socketpair로 양방향 연결(서버측=fds[0]) — accept-loop 없이 readFrame 계약만 결정론적으로 검증.
+    const gpa = std.heap.c_allocator; // writer 스레드가 cross-thread로 frame.bytes free
+    // socketpair로 양방향 연결(서버측=fds[0], 클라이언트측=fds[1]) — accept-loop 없이 readFrame+writer 계약을 결정론적 검증.
     var fds: [2]c.fd_t = undefined;
     try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
     defer _ = c.close(fds[0]);
@@ -1281,22 +1281,39 @@ test "readFrame(#3): oversize 프레임은 payload_too_large(-32001)를 outbound
     // 클라이언트측이 max_frame(16)을 넘는 완결 프레임을 보낸다(20B + \n).
     try cs.writeAll(fds[1], "0123456789abcdefghij\n");
 
-    // readFrame은 self.cross_gpa만 읽고, too_large 에러를 **outbound에 push**한다(5f-0b-2b-2 — 직접 소켓 write는 writer
-    // 스레드와 경합=단일 writer 불변 위반). 여기선 writer 없이 채널만 만들어 push된 프레임을 직접 검사한다(관측점=outbound).
+    // readFrame은 too_large 에러를 **outbound에 push**한다(직접 소켓 write는 writer 스레드와 경합=단일 writer 불변 위반).
     var srv: ControlServer = undefined;
-    srv.cross_gpa = testing.allocator;
+    srv.cross_gpa = gpa;
     var conn = cs.Connection{ .fd = fds[0] };
     var framer: cp.Framer = .{ .max_frame = 16 };
-    defer framer.deinit(testing.allocator);
+    defer framer.deinit(gpa);
     var outbound = OutboundChannel.init(std.testing.io, 8);
-    defer outbound.deinit(testing.allocator);
+    defer outbound.deinit(gpa);
     try testing.expect(srv.readFrame(&conn, &framer, &outbound) == null); // 프레임 버림(sticky too_large) + 에러 push
 
-    // outbound에 payload_too_large(-32001) 프레임이 들어갔다(조용히 abandon하지 않는다는 증거 — 라이브에선 writer가 write).
-    // push됐으므로 popWait은 즉시 반환(블록 없음). 에러 push 회귀(제거) 시 큐가 비어 이 test가 무한 블록 → hang으로 실패.
-    const frame = outbound.popWait().?;
-    defer testing.allocator.free(frame.bytes);
-    var pm = try cp.parseMessage(testing.allocator, frame.bytes);
+    // 19차 [oversize 왕복 복원]: writer 스레드가 outbound를 drain해 fds[0]에 write하면 클라이언트측 fds[1]이
+    // payload_too_large **한 줄(+개행 프레이밍)**을 받는다 — readFrame push → writer 직렬화·전달까지 end-to-end. close로
+    // writer가 1프레임 drain 후 종료하고, join으로 write 완료를 기다린 뒤 읽어 결정론적(타이밍 레이스 없음).
+    const writer = try std.Thread.spawn(.{}, ControlServer.writerThread, .{ &srv, fds[0], &outbound });
+    outbound.close();
+    writer.join();
+
+    cs.setReadTimeoutMs(fds[1], 1000); // 회귀(안 씀) 시 무한 블록 대신 즉시 실패
+    var cf: cp.Framer = .{};
+    defer cf.deinit(gpa);
+    var resp_line: ?[]const u8 = null;
+    var guard: usize = 0;
+    while (resp_line == null and guard < 100) : (guard += 1) {
+        if (try cf.next()) |line| {
+            resp_line = line;
+            break;
+        }
+        var rb: [512]u8 = undefined;
+        const n = c.read(fds[1], &rb, rb.len);
+        if (n <= 0) break;
+        try cf.push(gpa, rb[0..@intCast(n)]);
+    }
+    var pm = try cp.parseMessage(gpa, resp_line.?);
     defer pm.deinit();
     try testing.expect(pm.message == .response);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.payload_too_large)), pm.message.response.err.?.code);

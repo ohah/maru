@@ -363,6 +363,14 @@ pub fn serializeError(
     } });
 }
 
+/// id 미상(요청 id를 아직 못 읽음) + 코드 default message로 에러 응답 한 줄을 직렬화한다(개행 없음 — 프레이밍은 호출처).
+/// **payload_too_large 등 "id 파싱 전 거부" 응답의 단일 출처**(19차 [5]): L4의 `control_socket.writeErrorResponse`(직접
+/// 소켓 write)와 `control_server.readFrame`(outbound 큐 push)가 둘 다 이걸 써 바이트 형태가 갈리지 않게 한다. `.null` id는
+/// JSON-RPC 관례(§4.3).
+pub fn serializeErrorDefault(gpa: std.mem.Allocator, code: ErrorCode) std.mem.Allocator.Error![]u8 {
+    return serializeError(gpa, .null, code, code.defaultMessage(), null);
+}
+
 // ── hello notification(§4.1) ─────────────────────────────────────────────────────────────────────────────
 /// 핸드셰이크 hello의 params `{protocol, server_version, capabilities}`(§4.1). `server_version`·`capabilities`는
 /// L4(소켓 서버, 1b)가 실제 값을 주입한다 — 이 순수 코어는 스키마·직렬화만.

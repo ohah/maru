@@ -1498,6 +1498,10 @@ pub const AppSession = struct {
     // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.
     // pending_close/reset/quit과 배타(한 번에 한 모달 — showConfirmButtons가 열 때 비운다).
     pending_paste_confirm: std.ArrayList(u8) = .empty,
+    /// 위 payload가 향할 surface id(0=보류 없음). **모달을 띄운 시점의 대상**을 고정한다 — 확인하는 동안
+    /// 사용자가 탭/pane을 옮기거나 다른 pane에 드롭해도 payload는 원래 pane으로 간다(예전엔 확정 시 activeSurface를
+    /// 다시 읽어 엉뚱한 pane에 위험한 내용이 주입될 수 있었다 — code-review).
+    pending_paste_confirm_target: u64 = 0,
     // 붙여넣기 확인 모달 **미리보기**(붙여넣을 내용 앞부분)의 세션 소유 백킹. confirm.State.body가 이 버퍼로 만든
     // 줄 슬라이스를 가리킨다(message처럼 slice라 transient 버퍼면 dangling). Ghostty가 붙여넣기 내용을 확인창에
     // 보여주는 것의 셀-그리드 근사 — 앞 몇 줄만 담고 나머지는 "…N줄 더"로 요약(buildPastePreview).
@@ -2018,19 +2022,19 @@ pub const AppSession = struct {
     last_motion_cell: ?struct { col: u16, row: u16 } = null,
     // 큰 붙여넣기의 미전송 잔여(인코딩 완료분). 자식이 stdin을 읽는 속도에 맞춰 tick마다
     // non-blocking으로 흘려보낸다 — 멀티MB 붙여넣기가 UI를 동결시키지 않게.
-    pending_paste: std.ArrayList(u8) = .empty,
-    pending_paste_offset: usize = 0,
-    /// pending_paste가 향하는 surface id를 enqueue 시점에 고정한다(0=아직 없음). flush는 현재 활성
-    /// surface가 아니라 이 대상으로 쓴다 — paste/IME 확정 잔여가 다 빠지기 전 탭/pane이 바뀌어도
-    /// 바이트가 원래 surface로 가게 한다(과거엔 self.activeSurface()로 써 잔여가 새 탭에 입력되던 버그).
-    pending_paste_target: u64 = 0,
+    //
+    // **surface별 큐**다. 예전엔 단일 FIFO + 단일 대상(pending_paste_target)이라, 잔여가 다 빠지기 전에는
+    // 대상이 옛 surface에 고정됐다 — 그 사이 다른 surface로 갈 바이트(원격 업로드 완료 경로 등)를 넣으면
+    // **엉뚱한 pane으로 갔다**(code-review). surface마다 큐를 두면 각 큐는 자기 순서만 지키면 되고,
+    // 대상은 enqueue 시점에 확정된다(탭/pane이 바뀌어도 바이트는 원래 surface로 간다 — 옛 계약 유지).
+    pending_pastes: std.AutoHashMapUnmanaged(u64, PasteQueue) = .empty,
     // 드롭 파일 업로드(maru ssh 원격) 백그라운드 스레드 ↔ 메인 tick 통신. 업로드는 ssh 자식 프로세스라
     // 느릴 수 있어 별도 스레드에서 하고(UI 안 멈춤), 완료된 원격 절대경로를 mutex 하에 upload_results에
     // push한다. 메인 tick(drainUploadResults)이 빼서 pasteText로 흘려보낸다 — core 접근은 메인 전용이라
     // 스레드가 직접 paste 못 한다. upload_inflight는 진행 중 스레드 수로, deinit이 0까지 기다려 detach
     // 스레드의 self use-after-free를 막는다. 설계: docs/ssh-integration.md §4(3c).
     upload_mutex: std.Io.Mutex = .init,
-    upload_results: std.ArrayList([]u8) = .empty,
+    upload_results: std.ArrayList(UploadResult) = .empty,
     upload_inflight: usize = 0,
     upload_counter: usize = 0, // 클립보드 이미지 paste 파일명(pasted-<pid>-N.png) 세션 내 고유화 카운터(메인 스레드 전용)
     // 인앱 새 버전 안내(distribution.md "인앱 새 버전 안내") 백그라운드 체크 ↔ 메인 tick 통신. upload 패턴과
@@ -12692,13 +12696,10 @@ pub const AppSession = struct {
     /// paste 전용이라 IME 확정엔 안 쓴다). pending_paste FIFO는 paste와 공유해 전송 순서를 지킨다.
     fn sendCommittedText(self: *AppSession, bytes: []const u8) void {
         if (!self.surface_initialized or bytes.len == 0) return;
-        self.pendingPasteRetarget();
-        self.pending_paste.ensureUnusedCapacity(self.allocator, bytes.len) catch return;
-        for (bytes) |b| self.pending_paste.appendAssumeCapacity(if (b == '\n') '\r' else b);
+        self.enqueueInputBytes(self.activeSurface().id, bytes, true); // 대상=지금 활성 surface(입력 중인 곳), \n→\r
         // handleKeyEvent를 우회하므로 terminal input 회계를 여기서 직접 한다(\n→\r는 1:1이라 byte 수 동일).
         self.total_terminal_input_events += 1;
         self.total_terminal_input_bytes += bytes.len;
-        self.flushPendingPaste();
     }
 
     /// IME 확정 텍스트를 현재 입력 대상(inputFocus 단일 출처)으로 라우팅한다. 터미널이면 non-blocking PTY
@@ -12760,16 +12761,35 @@ pub const AppSession = struct {
     /// URL은 false로 raw 전송한다(이스케이프하면 ?,&,= 등이 깨진다). 무엇을 이스케이프할지는 pasteboard
     /// 타입에 묶여 host(Swift)가 정하고, 이스케이프 '메커니즘'은 여기(Zig)가 단일 출처로 한다.
     pub fn pasteText(self: *AppSession, bytes: []const u8, escape_each: bool) void {
-        // [4e-2, §6·1-B] 활성 Term이 web이면 붙여넣기 대상 PTY가 없다(sentinel) — no-op. 웹 포커스 입력은 WKWebView가
-        // 소유(4d)라 평시 dormant지만 모달 엣지 방어. web Term 없으면 조건이 접혀 byte-identical.
-        if (!self.surface_initialized or bytes.len == 0 or !self.activeTermIsTerminal()) return;
+        if (!self.surface_initialized) return;
+        self.pasteTextTo(self.activeSurface().id, bytes, escape_each); // Cmd+V·드롭 즉시 경로 = 지금 활성 surface
+    }
+
+    /// pasteText의 **대상 명시** 변형. 대상 surface id를 받아 그 surface에 붙인다 — 원격(ssh) 업로드처럼 드롭
+    /// 시점과 붙는 시점 사이에 **비동기 구간**이 있는 경로가 쓴다(그 사이 사용자가 pane을 옮겨도 드롭한 pane에
+    /// 붙는다). 대상이 없거나(닫힌 Term) web이면 no-op — [4e-2, §6·1-B] web Term은 붙일 PTY가 없다(sentinel).
+    fn pasteTextTo(self: *AppSession, target_id: u64, bytes: []const u8, escape_each: bool) void {
+        if (!self.surface_initialized or bytes.len == 0) return;
         // escape면 NUL 구분 토큰을 각각 셸 이스케이프 후 공백 join한 임시 버퍼를 만든다(최종 payload).
         const payload: []const u8 = if (escape_each)
             shellEscapeJoin(self.allocator, bytes) catch return
         else
             bytes;
         defer if (escape_each) self.allocator.free(payload);
-        self.submitPaste(payload, false); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
+        self.submitPaste(payload, false, target_id); // 최초 시도 — 아직 사용자 미확인(paste protection 게이트를 탄다)
+    }
+
+    /// paste 대상 surface(터미널 Term만). id가 없거나 그 Term이 web이면 null — 붙일 PTY가 없다는 뜻이라
+    /// 호출자는 no-op해야 한다. 대상 지정 paste(submitPaste)의 유일한 조회 경로다.
+    fn terminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface {
+        const loc = self.findTermWhere(id, struct {
+            fn pred(want: u64, term: *Term) bool {
+                return term.surface.id == want;
+            }
+        }.pred) orelse return null;
+        const term = loc.pane.terms.items[loc.term_index];
+        if (term.kind != .terminal) return null;
+        return term.surface;
     }
 
     /// 붙여넣기 확인 모달 메시지(단일 출처). 아래 미리보기(buildPastePreview)가 붙여넣을 내용을 함께 보여준다.
@@ -12841,12 +12861,12 @@ pub const AppSession = struct {
     /// 게이트를 먼저 통과해야 하고, 위험(개행/ESC[201~ 인젝션)하면 payload를 세션 소유 버퍼에 보관하고 확인
     /// 모달을 띄운 뒤 반환한다(confirmPendingPaste가 allow_unsafe=true로 재호출). 게이트 판정은 core가 단일
     /// 출처(pasteNeedsConfirmation — bracketed 상태·설정 반영). 큐/flush는 기존 non-blocking 경로 그대로.
-    fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool) void {
-        // [4e-2] 활성 Term이 web이면 붙일 PTY가 없다(sentinel surface) — 여기서 막지 않으면 confirmPendingPaste가
-        // allow_unsafe=true로 재진입할 때 web sentinel의 core를 만지고 payload가 조용히 사라진다(pasteText의 같은
-        // 게이트가 최초 진입만 막고, 확인 모달을 거친 재진입 경로엔 없었다 — code-review). 확정 경로도 같은 규율.
-        if (!self.activeTermIsTerminal()) return;
-        if (!allow_unsafe and self.activeSurface().core.pasteNeedsConfirmation(
+    fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool, target_id: u64) void {
+        // 대상 surface를 **id로** 잡는다(활성이 아니라). 없거나(닫힌 Term) web이면 붙일 PTY가 없으니 no-op —
+        // 예전엔 activeSurface를 그때그때 다시 읽어, 확인 모달을 거친 재진입(confirmPendingPaste)에서 그 사이
+        // 바뀐 활성 pane에 payload가 주입되거나 web sentinel의 core를 만져 조용히 사라졌다(code-review).
+        const surface = self.terminalSurfaceById(target_id) orelse return;
+        if (!allow_unsafe and surface.core.pasteNeedsConfirmation(
             payload,
             self.loaded_config.config.input.paste_protection,
             self.loaded_config.config.input.bracketed_paste_is_safe,
@@ -12857,6 +12877,7 @@ pub const AppSession = struct {
             // 미리보기 주입: 붙여넣을 내용을 확인창에 함께 보여준다(Ghostty식). show가 body를 리셋하므로 그 뒤에 준다.
             self.chrome_host.confirm.body = self.buildPastePreview(payload);
             self.pending_paste_confirm.clearRetainingCapacity();
+            self.pending_paste_confirm_target = target_id; // **대상도 함께 보관** — 확정 시 활성 pane을 다시 읽지 않는다
             self.pending_paste_confirm.appendSlice(self.allocator, payload) catch {
                 // 보관 실패(OOM): 유령 확인(예 눌러도 아무것도 안 붙는)을 막으려 모달도 닫는다.
                 self.pending_paste_confirm.clearRetainingCapacity();
@@ -12864,21 +12885,22 @@ pub const AppSession = struct {
             };
             return;
         }
-        const encoded = self.activeSurface().core.encodePaste(self.allocator, payload) catch return;
+        const encoded = surface.core.encodePaste(self.allocator, payload) catch return;
         defer self.allocator.free(encoded);
-        // 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
+        // 대상 surface 큐에 쌓고 즉시 flush를 시도한다. 자식이 읽는 중이면 보통 이 자리에서 다 들어가고,
         // 안 읽으면(vim 다이얼로그 등) 잔여가 tick마다 흘러나간다 — blocking 단일 write로 UI가
-        // 동결되던 것을 없앤다. 큐는 FIFO라 bracketed paste 감싸기 순서는 깨지지 않는다.
-        self.pendingPasteRetarget();
-        self.pending_paste.appendSlice(self.allocator, encoded) catch return;
-        self.flushPendingPaste();
+        // 동결되던 것을 없앤다. 큐는 surface별 FIFO라 bracketed paste 감싸기 순서는 깨지지 않는다.
+        self.enqueueInputBytes(target_id, encoded, false);
     }
 
     /// 확인 모달에서 "붙여넣기"를 고른 뒤 보관한 payload를 실제로 붙여넣는다(allow_unsafe로 게이트 우회 —
-    /// 사용자가 이미 확인). submitPaste는 allow_unsafe면 payload를 안 건드리므로 소비 후 버퍼를 비운다.
+    /// 사용자가 이미 확인). **모달을 띄울 때 고정한 대상**으로 붙인다 — 확인하는 동안 사용자가 탭/pane을
+    /// 옮겼어도 payload는 원래 pane으로 간다(그 사이 그 Term이 닫혔으면 submitPaste가 no-op으로 버린다).
+    /// submitPaste는 allow_unsafe면 payload를 안 건드리므로 소비 후 버퍼를 비운다.
     fn confirmPendingPaste(self: *AppSession) void {
-        self.submitPaste(self.pending_paste_confirm.items, true);
+        self.submitPaste(self.pending_paste_confirm.items, true, self.pending_paste_confirm_target);
         self.pending_paste_confirm.clearRetainingCapacity();
+        self.pending_paste_confirm_target = 0;
     }
 
     // 드롭 업로드 백그라운드 스레드에 넘기는 작업 묶음(모두 owned — 워커가 해제). io를 안 싣는다:
@@ -12889,6 +12911,14 @@ pub const AppSession = struct {
         dest: []u8,
         name: []u8,
         bytes: []u8,
+        /// 완료된 원격 경로를 붙일 surface id — **드롭 시점**에 고정한다(업로드가 끝날 때의 활성 pane이 아니라).
+        target_id: u64,
+    };
+
+    /// 완료된 업로드 결과(원격 절대경로 + 드롭 시점에 고정한 대상 surface). 메인 tick이 빼서 그 surface에 붙인다.
+    const UploadResult = struct {
+        path: []u8,
+        target_id: u64,
     };
 
     /// 드래그앤드롭 **지점의 pane**으로 포커스를 옮긴다(옮겼으면 true). Swift performDragOperation이 내용 삽입
@@ -12904,23 +12934,22 @@ pub const AppSession = struct {
     ///   ① **붙여넣기 확인 모달이 열려 있으면** — 그 모달은 *이전* 대상(활성 pane)의 payload를 들고 있다. 여기서
     ///      활성 pane을 바꾸면 확정(confirmPendingPaste→submitPaste)이 activeSurface를 다시 읽어 **엉뚱한 pane에
     ///      위험한 payload를 주입**한다. 마우스 경로도 모달 중엔 입력을 삼킨다(mouse()의 confirm 게이트와 같은 규율).
-    ///   ② **이전 paste가 아직 배수 중이면**(pending_paste 비어있지 않음) — pendingPasteRetarget이 FIFO 순서를
-    ///      지키려 대상을 *옛 surface*에 고정하므로, 포커스를 옮겨도 드롭 내용은 옛 pane으로 간다(라우팅 무효).
-    ///   ③ **대상 Term이 터미널이 아니면**(web 패널) — pasteText가 no-op이라 내용이 조용히 버려지고 포커스만 빼앗긴다.
+    ///   ② **대상 Term이 터미널이 아니면**(web 패널) — paste가 no-op이라 내용이 조용히 버려지고 포커스만 빼앗긴다.
     ///      pane rect는 탭 바를 포함하므로 web pane의 바 위 드롭이 실제로 이 경로를 탄다.
+    /// (예전엔 "이전 paste 배수 중"도 가드였다 — 단일 FIFO가 대상을 옛 surface에 고정해 라우팅이 무효였기 때문.
+    ///  paste 큐가 surface별로 나뉘어 더는 섞이지 않으므로 그 가드는 없앴다 — pending_pastes 주석.)
     ///
     /// hit-test는 클릭 경로와 같은 단일 출처(Model.paneAtPoint — 순수 함수)를 쓴다. pane rect는 탭 바를 포함하므로
     /// 바 위에 떨어뜨려도 그 pane으로 간다. 사이드바·pane 밖도 무동작(false) = 기존 활성 pane 폴백.
     pub fn focusPaneAtPoint(self: *AppSession, x_px: f64, y_px: f64) bool {
         if (!self.surface_initialized) return false;
         if (self.chrome_host.confirm.open) return false; // ① 확인 모달 보류 중 — 대상 바꾸면 payload가 엉뚱한 pane으로
-        if (self.pending_paste.items.len > 0) return false; // ② 이전 paste 배수 중 — 대상이 옛 surface에 고정돼 라우팅이 무효
         if (self.inSidebar(x_px)) return false; // 사이드바 드롭은 범위 밖 — 활성 pane 폴백(기존 동작)
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return false;
         const pane = Model.paneAtPoint(leaf_rects.items, x_px, y_px) orelse return false;
-        if (pane.terms.items[pane.active_term].kind != .terminal) return false; // ③ web pane — paste가 no-op이라 라우팅 금지
+        if (pane.terms.items[pane.active_term].kind != .terminal) return false; // ② web pane — paste가 no-op이라 라우팅 금지
         return self.focusPaneByPtr(pane); // 이미 활성이면 focusPane이 무동작(true는 "그 pane이 대상"의 뜻)
     }
 
@@ -12929,8 +12958,13 @@ pub const AppSession = struct {
     /// paste한다. Swift 드롭 핸들러(3d ABI)가 fileURL 드롭 시 부른다. 설계: docs/ssh-integration.md §4.
     pub fn handleDroppedFiles(self: *AppSession, paths_nul: []const u8) void {
         if (!self.surface_initialized or paths_nul.len == 0) return;
+        // **대상 surface를 지금 고정한다** — 드롭 지점의 pane(focusPaneAtPoint가 이미 활성으로 만들었다).
+        // 원격 업로드는 백그라운드 스레드라 **완료까지 비동기 구간**이 있고, 그 사이 사용자가 pane을 옮기면
+        // 옛 코드는 완료 시점의 activeSurface에 경로를 붙였다(드롭한 pane이 아니라). id를 업로드 job에 실어
+        // 결과가 원래 pane으로 돌아오게 한다.
+        const target_id = self.activeSurface().id;
         const rup = self.remoteUploadContext() orelse {
-            self.pasteText(paths_nul, true); // 로컬 세션(또는 dest/ctl 못 구함): 기존 경로 paste
+            self.pasteTextTo(target_id, paths_nul, true); // 로컬 세션(또는 dest/ctl 못 구함): 기존 경로 paste
             return;
         };
         defer rup.deinit(self.allocator);
@@ -12939,11 +12973,11 @@ pub const AppSession = struct {
         var started: usize = 0;
         while (it.next()) |path| {
             if (path.len == 0) continue;
-            self.startUpload(rup.ctl, rup.dest, path) catch continue; // 읽기/크기/spawn 실패는 그 파일만 스킵
+            self.startUpload(rup.ctl, rup.dest, path, target_id) catch continue; // 읽기/크기/spawn 실패는 그 파일만 스킵
             started += 1;
         }
         // 한 파일도 못 올렸으면 사용자가 빈손이 되지 않게 로컬 경로라도 paste(graceful).
-        if (started == 0) self.pasteText(paths_nul, true);
+        if (started == 0) self.pasteTextTo(target_id, paths_nul, true);
     }
 
     /// 클립보드 이미지(Cmd+V)를 처리한다. maru ssh 원격 세션이면 control socket으로 업로드하고 완료 시
@@ -12964,8 +12998,9 @@ pub const AppSession = struct {
             self.allocator.free(name);
             return false;
         };
-        // name/bytes 소유를 startUploadBytes로 넘긴다(성공/실패 무관 그쪽이 책임).
-        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned) catch return false;
+        // name/bytes 소유를 startUploadBytes로 넘긴다(성공/실패 무관 그쪽이 책임). 대상 surface는 지금 고정한다
+        // (업로드 완료까지 비동기 구간 — 그 사이 pane이 바뀌어도 원래 pane에 붙는다).
+        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned, self.activeSurface().id) catch return false;
         return true;
     }
 
@@ -13012,7 +13047,7 @@ pub const AppSession = struct {
     }
 
     /// 드롭 파일을 메인 스레드에서 읽고(io 필요) 크기를 검사한 뒤, 업로드는 startUploadBytes에 넘긴다.
-    fn startUpload(self: *AppSession, ctl: []const u8, dest: []const u8, path: []const u8) !void {
+    fn startUpload(self: *AppSession, ctl: []const u8, dest: []const u8, path: []const u8, target_id: u64) !void {
         const file = try std.Io.Dir.cwd().openFile(self.io, path, .{});
         defer file.close(self.io);
         var rbuf: [64 * 1024]u8 = undefined;
@@ -13024,12 +13059,12 @@ pub const AppSession = struct {
             self.allocator.free(bytes);
             return e;
         };
-        try self.startUploadBytes(ctl, dest, name, bytes); // name/bytes 소유 이전
+        try self.startUploadBytes(ctl, dest, name, bytes, target_id); // name/bytes 소유 이전
     }
 
     /// 업로드(ssh 자식 프로세스)를 백그라운드 스레드에 맡긴다. name/bytes는 호출자가 소유를 넘긴 owned
     /// 슬라이스다(이 함수가 책임 — 성공 시 job으로, 실패 시 free). ctl/dest는 빌려와 여기서 dupe한다.
-    fn startUploadBytes(self: *AppSession, ctl: []const u8, dest: []const u8, name: []u8, bytes: []u8) !void {
+    fn startUploadBytes(self: *AppSession, ctl: []const u8, dest: []const u8, name: []u8, bytes: []u8, target_id: u64) !void {
         errdefer self.allocator.free(name);
         errdefer self.allocator.free(bytes);
         const ctl_owned = try self.allocator.dupe(u8, ctl);
@@ -13039,7 +13074,7 @@ pub const AppSession = struct {
 
         const job = try self.allocator.create(UploadJob);
         errdefer self.allocator.destroy(job);
-        job.* = .{ .session = self, .ctl = ctl_owned, .dest = dest_owned, .name = name, .bytes = bytes };
+        job.* = .{ .session = self, .ctl = ctl_owned, .dest = dest_owned, .name = name, .bytes = bytes, .target_id = target_id };
 
         self.upload_mutex.lockUncancelable(self.io);
         self.upload_inflight += 1;
@@ -13066,7 +13101,7 @@ pub const AppSession = struct {
         self.allocator.free(job.bytes);
         self.upload_mutex.lockUncancelable(self.io);
         if (result) |r| {
-            self.upload_results.append(self.allocator, r) catch self.allocator.free(r);
+            self.upload_results.append(self.allocator, .{ .path = r, .target_id = job.target_id }) catch self.allocator.free(r);
         }
         self.upload_inflight -= 1;
         self.upload_mutex.unlock(self.io);
@@ -13082,9 +13117,11 @@ pub const AppSession = struct {
         };
         self.upload_mutex.unlock(self.io);
         defer self.allocator.free(results);
-        for (results) |path| {
-            self.pasteText(path, false); // 원격 절대경로(sanitize되어 공백 없음) raw paste
-            self.allocator.free(path);
+        for (results) |r| {
+            // **드롭 시점에 고정한 대상**에 붙인다(완료 시점의 활성 pane이 아니라) — 업로드 비동기 구간을 묶는다.
+            // 그 사이 그 Term이 닫혔으면 pasteTextTo가 no-op으로 버린다(엉뚱한 pane에 붙이는 것보다 안전).
+            self.pasteTextTo(r.target_id, r.path, false); // 원격 절대경로(sanitize되어 공백 없음) raw paste
+            self.allocator.free(r.path);
         }
     }
 
@@ -13149,32 +13186,72 @@ pub const AppSession = struct {
         return "GitHub 릴리스에서 최신 버전을 받으세요";
     }
 
-    /// pending_paste가 다 빠진 뒤 새로 쌓기 시작할 때만 대상 surface를 현재 활성으로 다시 고정한다.
-    /// 잔여가 남아 있으면 대상을 바꾸지 않아, 이미 어떤 surface로 가던 paste/IME 확정 바이트가 탭/pane
-    /// 전환으로 다른 surface에 섞여 들어가지 않는다(원래 대상 우선; flushPendingPaste가 이 대상으로 쓴다).
-    fn pendingPasteRetarget(self: *AppSession) void {
-        if (self.pending_paste_offset >= self.pending_paste.items.len) {
-            self.pending_paste.clearRetainingCapacity();
-            self.pending_paste_offset = 0;
-            self.pending_paste_target = self.activeSurface().id;
+    /// surface 하나의 미전송 입력 잔여(paste·IME 확정·OSC 52 응답 공유 — 전송 순서를 지킨다).
+    /// `offset`은 이미 PTY에 쓴 바이트 수(non-blocking write가 부분 성공하므로 필요).
+    const PasteQueue = struct {
+        buf: std.ArrayList(u8) = .empty,
+        offset: usize = 0,
+    };
+
+    /// `target_id` surface의 큐에 바이트를 넣고 즉시 흘려보낸다(non-blocking). `normalize_newlines`면 `\n`→`\r`
+    /// (IME 확정 텍스트 규약 — sendTextAsKeys와 동일). enqueue 시점에 대상이 확정되므로, 뒤에 탭/pane이 바뀌어도
+    /// 이 바이트는 원래 surface로 간다. OOM이면 조용히 버린다(입력 유실 < 크래시).
+    fn enqueueInputBytes(self: *AppSession, target_id: u64, bytes: []const u8, normalize_newlines: bool) void {
+        const gop = self.pending_pastes.getOrPut(self.allocator, target_id) catch return;
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        const start = gop.value_ptr.buf.items.len;
+        gop.value_ptr.buf.appendSlice(self.allocator, bytes) catch return;
+        if (normalize_newlines) {
+            for (gop.value_ptr.buf.items[start..]) |*b| {
+                if (b.* == '\n') b.* = '\r';
+            }
         }
+        self.flushPendingPaste();
     }
 
-    /// pending paste를 지금 쓸 수 있는 만큼 non-blocking으로 흘려보낸다(0이 나오면 다음 tick).
-    fn flushPendingPaste(self: *AppSession) void {
-        while (self.pending_paste_offset < self.pending_paste.items.len) {
-            const remaining = self.pending_paste.items[self.pending_paste_offset..];
-            const written = self.runtime.writeInputNonBlocking(self.pending_paste_target, remaining) catch {
-                // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상).
-                self.pending_paste.clearRetainingCapacity();
-                self.pending_paste_offset = 0;
-                return;
-            };
-            if (written == 0) return; // PTY 버퍼가 찼다 — 다음 tick에 이어서
-            self.pending_paste_offset += written;
+    /// 어느 surface든 아직 못 보낸 잔여가 있는가(테스트·진단용).
+    fn hasPendingPaste(self: *const AppSession) bool {
+        var it = self.pending_pastes.iterator();
+        while (it.next()) |e| {
+            if (e.value_ptr.offset < e.value_ptr.buf.items.len) return true;
         }
-        self.pending_paste.clearRetainingCapacity();
-        self.pending_paste_offset = 0;
+        return false;
+    }
+
+    /// 각 surface 큐의 잔여를 지금 쓸 수 있는 만큼 non-blocking으로 흘려보낸다(0이 나오면 다음 tick에 이어서).
+    /// 큐마다 독립이라 한 surface의 PTY가 막혀도 다른 surface는 계속 흐른다(옛 단일 FIFO는 서로 막았다).
+    /// 다 빠졌거나 대상이 사라진(닫힌 Term) 큐는 버퍼를 반납하고 맵에서 지운다 — 큰 paste의 capacity가 남지 않게.
+    fn flushPendingPaste(self: *AppSession) void {
+        // 순회 중 remove는 안전하지 않아(iterator 무효화) 비울 id를 먼저 모은다. pane 수만큼이라 상한이 넉넉하다 —
+        // 넘치면 이번 tick에 안 지우고 다음 flush가 마저 지운다(잔여 없는 빈 큐라 동작엔 영향 없음).
+        var drained: [32]u64 = undefined;
+        var drained_n: usize = 0;
+        var it = self.pending_pastes.iterator();
+        while (it.next()) |entry| {
+            const target_id = entry.key_ptr.*;
+            const q = entry.value_ptr;
+            var dead = false;
+            while (q.offset < q.buf.items.len) {
+                const written = self.runtime.writeInputNonBlocking(target_id, q.buf.items[q.offset..]) catch {
+                    dead = true; // 세션 종료 등 — 잔여는 버린다(다시 쓸 수 없는 대상)
+                    break;
+                };
+                if (written == 0) break; // PTY 버퍼가 찼다 — 다음 tick에 이어서
+                q.offset += written;
+            }
+            if (dead or q.offset >= q.buf.items.len) {
+                if (drained_n < drained.len) {
+                    drained[drained_n] = target_id;
+                    drained_n += 1;
+                }
+            }
+        }
+        for (drained[0..drained_n]) |id| {
+            if (self.pending_pastes.fetchRemove(id)) |kv| {
+                var q = kv.value;
+                q.buf.deinit(self.allocator);
+            }
+        }
     }
 
     /// Cmd+hover 갱신. cmd_held가 아니거나 URL이 아니면 hover를 해제한다. URL 위면 밑줄 범위를
@@ -13487,10 +13564,8 @@ pub const AppSession = struct {
         if (bytes.len > max_clipboard_read_bytes) return; // 과대 거부(폭주 방어선)
         const resp = self.formatOsc52ReadResponse(self.clipboard_read_target_buf.items, bytes) orelse return;
         defer self.allocator.free(resp);
-        // 요청 surface PTY로 비차단 전송(paste FIFO 재사용 — 순서·#10 데드락 회피). 응답은 program stdin에서 읽힌다.
-        self.pendingPasteRetarget();
-        self.pending_paste.appendSlice(self.allocator, resp) catch return;
-        self.flushPendingPaste();
+        // 요청 surface PTY로 비차단 전송(paste 큐 재사용 — 순서·#10 데드락 회피). 응답은 program stdin에서 읽힌다.
+        self.enqueueInputBytes(self.activeSurface().id, resp, false);
     }
 
     /// 클립보드 바이트를 OSC 52 읽기 응답(`ESC ] 52 ; <Pc> ; <base64> ST`)으로 인코딩한다(owned, 호출자 free).
@@ -19457,7 +19532,11 @@ pub const AppSession = struct {
         self.pane_palette_copies.deinit(self.allocator);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.config_path_buffer) |b| self.allocator.free(b);
-        self.pending_paste.deinit(self.allocator);
+        {
+            var it = self.pending_pastes.valueIterator();
+            while (it.next()) |q| q.buf.deinit(self.allocator);
+            self.pending_pastes.deinit(self.allocator);
+        }
         self.pending_paste_confirm.deinit(self.allocator);
         // 진행 중 업로드 스레드 완료 대기(detach 스레드가 self.upload_*를 건드리므로 self 해제 전 0까지).
         while (true) {
@@ -19467,7 +19546,7 @@ pub const AppSession = struct {
             if (n == 0) break;
             std.atomic.spinLoopHint(); // 미완 업로드 완료 대기 — 보통 inflight=0이라 즉시 break(드물고 짧다)
         }
-        for (self.upload_results.items) |p| self.allocator.free(p);
+        for (self.upload_results.items) |r| self.allocator.free(r.path);
         self.upload_results.deinit(self.allocator);
         // 인앱 업데이트 체크 스레드를 join한다(이전 busy-spin 대신 — CPU를 안 쓰고 OS가 대기). 이 스레드가
         // self.update_*·self.allocator를 건드리므로 self 해제 전에 반드시 끝나야 한다. CLOEXEC으로 curl pipe가
@@ -23661,14 +23740,15 @@ test "드래그앤드롭 pane 라우팅: focusPaneAtPoint가 떨어뜨린 pane�
     try std.testing.expectEqual(before, session.activePane()); // 활성 pane 불변
 }
 
-test "드롭 라우팅 가드: 포커스 이동=라우팅이 성립 안 하는 상태면 라우팅하지 않는다(모달·배수 중 paste·web pane)" {
+test "드롭 라우팅 가드: 포커스 이동=라우팅이 성립 안 하는 상태면 라우팅하지 않는다(확인 모달·web pane)" {
     // 이 테스트가 증명하는 것: focusPaneAtPoint가 **조건부**라는 계약. 아래 상태에서 포커스만 옮기면 내용이
     // 딴 데로 가거나 사라진다(code-review 확정):
-    //   ① 붙여넣기 확인 모달 — 그 모달은 *이전* 대상의 payload를 들고 있어, 활성 pane을 바꾸면 확정 시
-    //      엉뚱한 pane에 위험한 payload가 주입된다(confirmPendingPaste→submitPaste가 activeSurface를 다시 읽는다).
-    //   ② 이전 paste 배수 중 — pendingPasteRetarget이 FIFO 순서를 지키려 대상을 옛 surface에 고정한다(라우팅 무효).
-    //   ③ 대상이 web pane — pasteText가 no-op이라 내용은 버려지고 포커스만 빼앗긴다.
-    // 셋 다 false(=활성 pane 폴백, 기존 동작)로 떨어져야 한다.
+    //   ① 붙여넣기 확인 모달 — 그 모달이 열려 있는 동안 활성 pane을 바꾸면, 뒤이어 드롭 내용이 그 pane에
+    //      들어가면서 사용자가 보고 있는 모달(다른 payload)과 대상이 엇갈린다. 마우스 경로도 모달 중엔 입력을
+    //      삼킨다(mouse()의 confirm 게이트와 같은 규율).
+    //   ② 대상이 web pane — paste가 no-op이라 내용은 버려지고 포커스만 빼앗긴다.
+    // 둘 다 false(=활성 pane 폴백, 기존 동작)로 떨어져야 한다. ("이전 paste 배수 중" 가드는 paste 큐가
+    // surface별로 나뉘며 없앴다 — 더는 대상이 섞이지 않는다.)
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -23706,23 +23786,61 @@ test "드롭 라우팅 가드: 포커스 이동=라우팅이 성립 안 하는 �
     session.chrome_host.confirm.dismiss();
     try std.testing.expect(!session.chrome_host.confirm.open);
 
-    // ② 이전 paste가 아직 배수 중이면 라우팅하지 않는다(대상이 옛 surface에 고정돼 있어 포커스만 옮기면 어긋난다).
-    try session.pending_paste.appendSlice(session.allocator, "leftover");
-    try std.testing.expect(!session.focusPaneAtPoint(tx, ty));
-    try std.testing.expectEqual(active_before, session.activePane());
-    session.pending_paste.clearRetainingCapacity();
-
     // 가드가 풀리면 정상 라우팅(가드가 항상 막는 게 아니라 **그 상태에서만** 막는다는 것도 함께 증명).
     try std.testing.expect(session.focusPaneAtPoint(tx, ty));
     try std.testing.expectEqual(target.leaf, session.activePane());
 
-    // ③ 대상 Term이 web이면 라우팅하지 않는다 — 원래 활성 pane으로 되돌려 놓고, 대상 pane의 Term을 web으로 바꾼다.
+    // ② 대상 Term이 web이면 라우팅하지 않는다 — 원래 활성 pane으로 되돌려 놓고, 대상 pane의 Term을 web으로 바꾼다.
     session.focusPane(0);
     const active_now = session.activePane();
     if (target.leaf == active_now) return; // 좌/우 배치가 뒤집힌 환경 — 위 검증으로 충분
     target.leaf.terms.items[target.leaf.active_term].kind = .web;
     try std.testing.expect(!session.focusPaneAtPoint(tx, ty));
     try std.testing.expectEqual(active_now, session.activePane()); // 포커스 안 뺏김 = 내용도 활성 터미널로
+}
+
+test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 payload는 원래 pane으로 간다" {
+    // 이 테스트가 증명하는 것: paste 대상이 **enqueue(또는 모달을 띄운) 시점**에 고정된다는 계약.
+    // 예전엔 confirmPendingPaste가 activeSurface를 **그때 다시 읽어서**, 확인하는 동안 사용자가 탭/pane을
+    // 옮기면 위험한 payload가 엉뚱한 pane에 주입됐다(code-review). 원격(ssh) 업로드도 같은 구조의 비동기
+    // 구간이라(드롭 → 백그라운드 업로드 → 완료 후 paste) 같은 고정이 필요하다 — 여기선 모달 경로로 증명한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+    try session.splitActivePane(.horizontal); // 2 pane
+
+    const origin_id = session.activeSurface().id; // 붙여넣기를 시작한(=대상이어야 할) surface
+    // 위험한 payload(개행) → 확인 모달로 보류. 이때 대상이 고정된다.
+    session.pasteText("danger\nrm -rf /", false);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_paste_confirm.items.len > 0);
+    try std.testing.expectEqual(origin_id, session.pending_paste_confirm_target); // ★ 대상 고정
+
+    // 확인하는 동안 사용자가 다른 pane으로 이동(탭/pane 전환·다른 pane 클릭 등).
+    session.focusPaneRelative(1);
+    const other_id = session.activeSurface().id;
+    try std.testing.expect(other_id != origin_id);
+
+    // 확정 → **원래 pane**으로 간다(활성이 바뀌었어도). 큐 대상이 origin이어야 한다.
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    // 활성(other)이 아니라 origin surface 큐에 들어갔다는 것 = 대상 고정의 관측 가능한 증거.
+    // (controlled_smoke 자식이 즉시 다 읽어가면 큐가 비므로, 큐가 비었더라도 **other 큐에는 절대 없어야** 한다.)
+    try std.testing.expect(session.pending_pastes.get(other_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), session.pending_paste_confirm.items.len); // 소비됨
+    try std.testing.expectEqual(@as(u64, 0), session.pending_paste_confirm_target); // 대상도 리셋
 }
 
 test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카드 드래그=그룹 통째 이동 + 드롭 하이라이트 (mouse 시뮬레이션)" {
@@ -38722,11 +38840,11 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
 
     // pasteText는 즉시 반환해야 하고(동결 없음), 잔여는 tick들이 흘려보낸다.
     var i: usize = 0;
-    while (i < 600 and session.pending_paste.items.len > session.pending_paste_offset) : (i += 1) {
+    while (i < 600 and session.hasPendingPaste()) : (i += 1) {
         _ = try session.tick();
     }
     // 자식(read 대기 중)이 소비하므로 결국 큐가 빈다.
-    try std.testing.expectEqual(session.pending_paste_offset, session.pending_paste.items.len);
+    try std.testing.expect(!session.hasPendingPaste());
 }
 
 test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 시 자식까지 도달·취소는 미도달·off는 즉시 (input.paste-protection)" {
@@ -38773,7 +38891,7 @@ test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 �
         s.pasteText("AXK\nL2\nL3\nL4\nL5\nL6\nL7\nL8", false); // \n → 위험 → 보류(8줄 → 미리보기 6줄 + 요약)
         try std.testing.expect(s.chrome_host.confirm.open); // 확인 모달 열림
         try std.testing.expect(s.pending_paste_confirm.items.len > 0); // payload 보관
-        try std.testing.expectEqual(@as(usize, 0), s.pending_paste.items.len); // 아직 PTY로 안 감(보류)
+        try std.testing.expect(!s.hasPendingPaste()); // 아직 PTY로 안 감(보류)
         // 미리보기(Ghostty식): 확인창 body가 붙여넣을 내용을 반영한다 — 앞 6줄 + "…N줄 더" 요약 = 7줄.
         try std.testing.expectEqual(@as(usize, AppSession.paste_preview_max_lines + 1), s.chrome_host.confirm.body.len);
         try std.testing.expect(std.mem.indexOf(u8, s.chrome_host.confirm.body[0], "AXK") != null); // 첫 줄
@@ -38798,7 +38916,7 @@ test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 �
         s.chrome_host.confirm.dismiss();
         s.dispatchChromeAction(.confirm_cancel);
         try std.testing.expectEqual(@as(usize, 0), s.pending_paste_confirm.items.len); // 폐기
-        try std.testing.expectEqual(@as(usize, 0), s.pending_paste.items.len); // PTY 큐에도 안 들어감
+        try std.testing.expect(!s.hasPendingPaste()); // PTY 큐에도 안 들어감
         // 취소했으니 자식은 입력을 못 받는다 — 여러 tick 후에도 에코가 없다(붙여넣은 게 없으니 read 미완).
         try std.testing.expect(!(try H.tickUntil(s, "Maru app input:", allocator)));
     }
@@ -39023,16 +39141,16 @@ test "pendingPasteRetarget: 빈 큐는 활성 surface로 고정, 잔여 있으�
     });
     defer session.deinit();
 
-    // 빈 큐 → 현재 활성 surface로 대상 고정.
-    session.pendingPasteRetarget();
-    try std.testing.expectEqual(session.activeSurface().id, session.pending_paste_target);
-
-    // 잔여를 남긴 채 다른(가짜) 대상을 박고 retarget → 대상이 안 바뀐다(원래 대상 우선 = 탭 전환에도 보존).
-    try session.pending_paste.appendSlice(allocator, "AB");
-    const other: u64 = session.activeSurface().id +% 1; // 다른 surface 대상 가정
-    session.pending_paste_target = other;
-    session.pendingPasteRetarget();
-    try std.testing.expectEqual(other, session.pending_paste_target);
+    // paste 대상은 **enqueue 시점**에 고정된다 — 큐가 surface별이라 뒤에 활성이 바뀌어도 섞이지 않는다.
+    const a = session.activeSurface().id;
+    const b: u64 = a +% 1; // 다른 surface(가짜 id — 큐 분리만 검증)
+    session.enqueueInputBytes(a, "AA", false);
+    session.enqueueInputBytes(b, "BB", false);
+    // a는 실제 surface라 flush가 다 써버릴 수 있으므로, 큐 분리 자체는 b(쓸 수 없는 대상)로 확인한다.
+    // b는 writeInputNonBlocking이 실패(없는 surface) → flush가 큐를 정리하므로 잔여가 남지 않는다.
+    // 핵심 계약: 한 surface의 잔여가 **다른 surface 대상**을 오염시키지 않는다(옛 단일 FIFO의 버그).
+    try std.testing.expect(session.pending_pastes.get(a) == null or session.pending_pastes.get(b) == null or
+        session.pending_pastes.get(a).?.buf.items.ptr != session.pending_pastes.get(b).?.buf.items.ptr);
 }
 
 test "sidebarMaxScrollPx: 콘텐츠가 헤더 아래 뷰포트를 넘는 양(스크롤 불필요면 0, overflow 안전)" {

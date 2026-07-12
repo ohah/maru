@@ -101,12 +101,15 @@ pub const CellColors = struct {
     /// 배경·reverse)에 일률 적용돼 SGR/truecolor 색도 같이 흐려진다(default 배경 셀은 A=0 투명 유지 — fill과 같음).
     dim_milli: u32 = 0,
     /// per-cell 대비 하한 목표(WCAG 명암비, `theme.min-contrast`의 resolved 값). 0(기본)·1 이하 = 끔.
-    /// ANSI 16색은 resolve 시점에 이미 선보정되지만(appearance.resolveTheme), 256색(16~255)·truecolor
-    /// 전경은 프로그램이 직접 고르므로 여기서 셀 단위로 하한을 강제한다 — 다크 전용 색을 쓰는 프로그램
-    /// (예: truecolor 밝은 회색 본문)이 라이트 배경에서 안 보이는 것을 교정한다. packForeground가 자기 셀
-    /// 배경(reverse-aware; 선택/검색 하이라이트는 미반영 근사) 대비로 적용하고, conceal/blink-off(의도적
-    /// 비표시)와 도형 글리프(contrastFloorExempt — powerline/box/block 이음매)는 제외한다. app이 활성·비활성
-    /// pane CellColors에 `appearance.theme.min_contrast`를 wiring한다(chrome/사이드바 텍스트는 theme 색이라 불필요).
+    /// ANSI 16색은 resolve 시점에 선보정되지만(appearance.resolveTheme — 그쪽은 배경색·OSC 4로도 나가서
+    /// `.darken_only`), 여기 per-cell 하한은 **전경 전용이라 `.both`(양방향)**다: 밝은 배경에선 어둡게,
+    /// 어두운 배경에선 밝게. 프로그램이 직접 고른 색(256색·truecolor·ANSI16 전부)이 자기 셀 배경에서 안
+    /// 읽히는 두 방향을 모두 교정한다 — 다크용 밝은 회색 본문이 라이트 테마에서 안 보이는 경우와, 라이트용
+    /// 어두운 글자가 다크 테마에서 안 보이는 경우(실행 중 테마를 바꾼 Claude Code 세션 등 — 그 프로그램은
+    /// 시작 시 배경을 한 번 감지해 팔레트를 고정한다). packForeground가 자기 셀 배경(reverse-aware; 선택/검색
+    /// 하이라이트는 미반영 근사) 대비로 적용하고, conceal/blink-off(의도적 비표시)와 도형 글리프
+    /// (contrastFloorExempt — powerline/box/block 이음매)는 제외한다. app이 활성·비활성 pane CellColors에
+    /// `appearance.theme.min_contrast`를 wiring한다(chrome/사이드바 텍스트는 theme 색이라 불필요).
     min_contrast: f32 = 0,
 };
 
@@ -266,8 +269,12 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
         break :blk base;
     };
     // per-cell 대비 하한(theme.min-contrast): 프로그램이 직접 고른 256색·truecolor 전경이 자기 셀 배경에서
-    // 안 읽히면 색상 보존한 채 최소한만 어둡게 한다(color.contrastFloor — resolve 시점 ANSI16 선보정과 같은
-    // 단일 출처 수식). ANSI16(resolve에서 이미 보정)·다크 배경(floor의 활성 경계 밖)은 fast-path로 무변경.
+    // 안 읽히면 색상 보존한 채 최소한만 보정한다(color.contrastFloor — resolve 시점 ANSI16 선보정과 같은
+    // 단일 출처 수식). 방향은 **`.both`(양방향)**: 밝은 배경에선 어둡게, **어두운 배경에선 밝게**. 전경은
+    // 배경색으로 새지 않으므로 밝혀도 안전하다(팔레트 선보정은 배경·OSC 4로도 나가 `.darken_only` — appearance).
+    // 이로써 두 방향의 "테마 불일치"가 모두 교정된다: 다크용 밝은 글자가 라이트 테마에서 안 보이는 경우와,
+    // 라이트용 어두운 글자가 다크 테마에서 안 보이는 경우(예: 실행 중 테마를 바꾼 Claude Code 세션 — 그 프로그램은
+    // 시작 시 배경을 한 번 감지하고 팔레트를 고정하므로 종료 전까지 이전 테마용 색을 계속 쓴다).
     // faint(SGR 2) 뒤에 적용한다 — 의도적 감쇠라도 "안 보임"까지는 허용하지 않는 가독성 하한이기 때문.
     // 셀 배경은 reverse-aware 자기 셀 값(선택/검색 하이라이트는 미반영 근사 — 하이라이트 색은 theme 소유라 안전).
     const floored: color.Rgb = if (!concealed and colors.min_contrast > 1.0) flr: {
@@ -277,7 +284,7 @@ fn packForeground(style: terminal.Style, colors: CellColors) u32 {
             .default => colors.default_bg,
             else => resolveColor(style.background, colors.default_bg, colors.palette, colors.config_palette),
         };
-        break :flr color.contrastFloor(fg, color.relativeLuminance(cell_bg), colors.min_contrast);
+        break :flr color.contrastFloor(fg, color.relativeLuminance(cell_bg), colors.min_contrast, .both);
     } else fg;
     // 비활성 split pane 디밍(F2-7): 최종 전경을 pane 배경 쪽으로 dim_milli만큼 흐리게(dim_milli=0이면 무변화).
     // 하한(floored) 뒤에 디밍 — 비활성 pane 감쇠는 pane 전체의 의도된 워시아웃이라 하한이 덮어쓰지 않는다.
@@ -321,7 +328,7 @@ fn effectiveLineColor(l: renderer.LineOverlay, colors: CellColors) color.Rgb {
     // 보정된 글자와 그 밑줄/취소선 색이 어긋나지 않게 한다(overlay는 셀 배경을 캐리하지 않으므로 default
     // 배경 대비 — 위 dim 근사와 같은 한계·같은 이유로 허용).
     const floored = if (colors.min_contrast > 1.0)
-        color.contrastFloor(faint, color.relativeLuminance(colors.default_bg), colors.min_contrast)
+        color.contrastFloor(faint, color.relativeLuminance(colors.default_bg), colors.min_contrast, .both)
     else
         faint;
     return dimToward(floored, colors.default_bg, colors.dim_milli);
@@ -1941,13 +1948,24 @@ test "packGlyphForeground: per-cell 대비 하한 — truecolor/256색 보정·�
         .background = .{ .rgb = .{ .r = 0x10, .g = 0x10, .b = 0x40 } },
     };
     try std.testing.expectEqual(@as(u32, 0xEBEBEB), packGlyphForeground(on_dark_bg, light, 'A'));
-    // 다크 테마(#101010 배경): floor 활성 경계 밖 → 무동작(다크 프리셋 회귀 0).
+    // 다크 테마(#101010 배경) + **어두운 전경**: per-cell 하한은 양방향(.both)이라 이제 **밝히는 방향**으로
+    // 보정한다 — 라이트 테마를 가정하고 색을 고른 프로그램(실행 중 테마를 바꾼 Claude Code 세션 등)의 어두운
+    // 글자가 다크 배경에 묻혀 명암비 ≈1.0으로 안 보이던 회귀의 교정. 팔레트 선보정(.darken_only)과 달리
+    // 전경은 배경색으로 새지 않아 밝혀도 안전하다(color.FloorDirection).
     const dark: CellColors = .{
         .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
         .default_bg = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
         .min_contrast = 3.0,
     };
-    try std.testing.expectEqual(@as(u32, 0x1A1A1A), packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 'A'));
+    const dark_bg_lum = color.relativeLuminance(dark.default_bg);
+    const lifted = packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 'A');
+    const lr: color.Rgb = .{ .r = @intCast((lifted >> 16) & 0xff), .g = @intCast((lifted >> 8) & 0xff), .b = @intCast(lifted & 0xff) };
+    try std.testing.expect(lr.r > 0x1a); // 밝아졌다
+    try std.testing.expect(color.contrastRatio(color.relativeLuminance(lr), dark_bg_lum) >= 2.95);
+    // 다크 배경의 **밝은** 전경은 이미 대비 충분 → 무변경(양방향이어도 최소 개입 — 다크 테마 일반 텍스트 회귀 0).
+    try std.testing.expectEqual(@as(u32, 0xCCCCCC), packGlyphForeground(.{ .foreground = .default }, dark, 'A'));
+    // 다크 배경에서도 도형 글리프는 제외(이음매 보존) — 방향이 바뀌어도 면제 규칙은 그대로.
+    try std.testing.expectEqual(@as(u32, 0x1A1A1A), packGlyphForeground(.{ .foreground = .{ .rgb = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a } } }, dark, 0xE0B0));
 }
 
 test "packForeground halves a faint foreground toward the background (SGR 2)" {

@@ -162,6 +162,19 @@ pub fn contrastRatio(lum_a: f32, lum_b: f32) f32 {
     return (hi + 0.05) / (lo + 0.05);
 }
 
+/// 대비 하한의 **보정 방향** — 같은 수식(아래 contrastFloor)을 두 소비자가 방향만 달리 쓴다.
+pub const FloorDirection = enum {
+    /// 검은색 방향으로만(=밝은 배경에서만 동작, 어두운 배경은 무동작). **ANSI 16색 팔레트 선보정**
+    /// (appearance.resolveTheme)이 쓴다. 그 팔레트는 전경뿐 아니라 **배경**(SGR 40~47 — metal_frame.packBackground)
+    /// 과 OSC 4 질의 응답으로도 나가므로, 밝히는 보정을 넣으면 다크 테마에서 ANSI 배경색이 회색으로 떠버리고
+    /// 질의 응답까지 오염된다. 그래서 팔레트는 "안 보이는 밝은 색을 어둡게"만 한다.
+    darken_only,
+    /// 양방향 — 밝은 배경에선 어둡게, **어두운 배경에선 밝게**. 렌더 per-cell **전경**(metal_frame.packForeground)이
+    /// 쓴다: 전경은 배경으로 새지 않아 밝혀도 안전하다. 다크 테마에서 어두운 전경(라이트 테마를 가정하고 색을
+    /// 고른 프로그램 — 예: 다크 터미널로 옮겨온 Claude Code 세션)이 배경에 묻혀 안 보이던 것을 교정한다.
+    both,
+};
+
 /// 색을 검은색 쪽으로 k(0~1)배 스케일한다(각 채널 × k, 반올림). k=1이면 원본, k=0이면 검정. R:G:B 비를 유지하므로
 /// hue(색상)를 보존하고 명도(luminance)만 낮춘다 — "색은 그대로, 더 진하게"에 해당.
 fn scaleTowardBlack(c: Rgb, k: f32) Rgb {
@@ -172,39 +185,72 @@ fn scaleTowardBlack(c: Rgb, k: f32) Rgb {
     };
 }
 
-/// 색이 배경 대비 `target` 명암비에 못 미치면 **색상을 보존한 채 검은색 방향으로 최소한만** 어둡게 보정한다.
-/// `bg_lum`은 배경의 WCAG relative luminance(호출자가 재사용을 위해 계산해 넘긴다 — resolve는 16색에 1회,
-/// 렌더는 셀 배경마다). 밝은 배경에선 어둡게 할수록(k↓) 대비가 단조 증가하므로, 목표 명암비에 막 닿는 최대
-/// k(=최소 변화)를 이진 탐색으로 찾는다.
-/// **활성 경계**: 검정(luminance 0)으로도 목표 대비에 못 미치면 원본을 그대로 둔다(어둡게 해봐야 목표를 못
-/// 넘는다). 이는 배경이 어두울수록 성립한다 — 경계는 `contrastRatio(0, bg_lum) >= target`, 즉
-/// `bg_lum >= 0.05*(target−1)`이다(target=3.0이면 bg_lum≈0.10). **모든 번들 다크 프리셋**은 배경 bg_lum이
-/// 이보다 훨씬 낮아(#101010≈0.005 등) 무동작이다. 중간 밝기(회색) 배경은 목표 도달이 가능하면 보정한다.
-/// `target<=1.0`(끔)·이미 충분하면 원본 그대로. 단일 출처: 팔레트 선보정(appearance.resolveTheme)과 렌더
-/// per-cell 하한(metal_frame)이 모두 이 함수만 쓴다.
-pub fn contrastFloor(c: Rgb, bg_lum: f32, target: f32) Rgb {
+/// 색을 흰색 쪽으로 t(0~1) 보간한다(각 채널 + (255−채널)×t, 반올림). t=0이면 원본, t=1이면 흰색.
+/// 검은색 방향(비율 스케일)과 달리 흰색 방향엔 "비율 유지" 스케일이 없어(255가 상한) 선형 보간을 쓴다 —
+/// hue는 유지되지만 채도는 필연적으로 낮아진다(밝히면 흰색에 가까워지므로). 명도만 올리는 최소 개입.
+fn lerpTowardWhite(c: Rgb, t: f32) Rgb {
+    return .{
+        .r = channelTowardWhite(c.r, t),
+        .g = channelTowardWhite(c.g, t),
+        .b = channelTowardWhite(c.b, t),
+    };
+}
+
+fn channelTowardWhite(v: u8, t: f32) u8 {
+    const f: f32 = @floatFromInt(v);
+    return @intFromFloat(@round(f + (255.0 - f) * t));
+}
+
+/// 보정량 amt(0=원본, 1=끝색[검정 또는 흰색])를 색에 적용한다 — 두 방향의 이진 탐색이 같은 파라미터화를 쓰게 한다.
+fn applyFloorAmount(c: Rgb, amt: f32, lighten: bool) Rgb {
+    return if (lighten) lerpTowardWhite(c, amt) else scaleTowardBlack(c, 1.0 - amt);
+}
+
+/// 색이 배경 대비 `target` 명암비에 못 미치면 **색상을 보존한 채 최소한만** 보정한다. 밝은 배경에선 검은색
+/// 방향으로 어둡게, 어두운 배경에선(`dir == .both`일 때만) 흰색 방향으로 밝게 — 어느 쪽이든 목표 명암비에
+/// **막 닿는 최소 변화량**을 이진 탐색으로 찾는다(개입 최소화). `bg_lum`은 배경의 WCAG relative luminance
+/// (호출자가 재사용하려고 계산해 넘긴다 — resolve는 16색에 1회, 렌더는 셀 배경마다).
+///
+/// **방향 결정**: 끝색(검정/흰색)으로 갔을 때 목표에 도달할 수 있는 방향만 후보다 —
+///   - 어둡게 도달 가능 ⇔ `contrastRatio(0, bg_lum) >= target` ⇔ `bg_lum >= 0.05×(target−1)`(target 3.0이면 ≈0.10 이상 = 밝은 배경)
+///   - 밝게 도달 가능 ⇔ `contrastRatio(1, bg_lum) >= target` ⇔ `bg_lum <= 1.05/target − 0.05`(target 3.0이면 ≈0.30 이하 = 어두운 배경)
+/// 둘 다 가능한 **중간 밝기 배경**(bg_lum ≈0.10~0.30)에선 전경이 **이미 있는 쪽**으로 간다(변화가 더 작은 쪽).
+/// 어느 쪽으로도 목표에 못 미치면(중간 회색 + 높은 target) 원본 그대로 둔다 — 억지로 바꿔도 목표를 못 넘는다.
+///
+/// `dir == .darken_only`면 밝히는 방향을 아예 후보에서 뺀다 → **다크 배경에서 무동작**(팔레트 선보정의 기존
+/// 계약 그대로: 그 팔레트는 배경색·OSC 4 응답으로도 나가므로 밝히면 안 된다 — FloorDirection 주석).
+/// `target<=1.0`(끔)·이미 충분하면 원본 그대로. 수식 단일 출처: 팔레트 선보정(appearance.resolveTheme)과
+/// 렌더 per-cell 하한(metal_frame)이 모두 이 함수만 쓴다(방향만 다르게 넘긴다).
+pub fn contrastFloor(c: Rgb, bg_lum: f32, target: f32, dir: FloorDirection) Rgb {
     if (target <= 1.0) return c; // 끔(0 포함) — 업스트림 원색 그대로
-    if (contrastRatio(relativeLuminance(c), bg_lum) >= target) return c; // 이미 충분 → 무변경
-    if (contrastRatio(0.0, bg_lum) < target) return c; // 검정(luminance 0)으로도 미달=배경이 충분히 어두움 → 무동작
-    // 이진 탐색: k∈[0,1]에서 c×k. lo=목표 충족(더 어두움), hi=미충족(더 밝음). 24회면 u8 해상도로 수렴한다.
-    var lo: f32 = 0.0; // k=0(검정)은 위 가드로 항상 충족
-    var hi: f32 = 1.0; // k=1(원본)은 위 fast-path로 미충족
+    const c_lum = relativeLuminance(c);
+    if (contrastRatio(c_lum, bg_lum) >= target) return c; // 이미 충분 → 무변경
+    const darken_reaches = contrastRatio(0.0, bg_lum) >= target; // 검정까지 어둡게 하면 목표 도달(배경이 충분히 밝다)
+    const lighten_reaches = dir == .both and contrastRatio(1.0, bg_lum) >= target; // 흰색까지 밝히면 도달(배경이 충분히 어둡다)
+    if (!darken_reaches and !lighten_reaches) return c; // 어느 방향으로도 목표 미달 → 원본 유지
+    // 둘 다 가능한 중간 밝기 배경: 전경이 이미 있는 쪽으로(=변화가 작은 쪽). 한쪽만 가능하면 그 쪽.
+    const lighten = if (darken_reaches and lighten_reaches) c_lum >= bg_lum else lighten_reaches;
+    // 이진 탐색: amt∈[0,1](0=원본, 1=끝색). 술어("목표 충족")는 amt에 대해 false→true로 단조다 — 원본(amt=0)은
+    // 위 fast-path로 미충족이고 끝색(amt=1)은 위 가드로 충족이며, 그 사이 명암비는 교차점을 지나 단조 증가한다.
+    // lo=미충족, hi=충족을 유지하며 24회 좁히면 u8 해상도로 수렴한다.
+    var lo: f32 = 0.0; // 원본 — 미충족
+    var hi: f32 = 1.0; // 끝색(검정/흰색) — 충족
     var iter: usize = 0;
     while (iter < 24) : (iter += 1) {
         const mid = (lo + hi) / 2.0;
-        if (contrastRatio(relativeLuminance(scaleTowardBlack(c, mid)), bg_lum) >= target) {
-            lo = mid; // 충족 → 더 밝게(원본에 가깝게) 시도
+        if (contrastRatio(relativeLuminance(applyFloorAmount(c, mid, lighten)), bg_lum) >= target) {
+            hi = mid; // 충족 → 더 적게 바꿔본다(원본 쪽)
         } else {
-            hi = mid; // 미충족 → 더 어둡게
+            lo = mid; // 미충족 → 더 많이 바꾼다(끝색 쪽)
         }
     }
-    return scaleTowardBlack(c, lo); // lo는 항상 충족 지점(테스트한 값 그대로 반환)
+    return applyFloorAmount(c, hi, lighten); // hi는 항상 충족 지점(테스트한 값 그대로 반환)
 }
 
 test "contrast: LUT luminance 경계·단조, contrastFloor 라이트/다크 동작" {
     // 이 테스트가 증명하는 것: LUT 기반 luminance가 WCAG 정의(검정 0, 흰색 1, 단조 증가)를 지키고,
-    // contrastFloor가 밝은 배경에선 목표 명암비를 강제하며 어두운 배경에선 무동작이라는 계약 —
-    // 렌더 per-cell 하한과 팔레트 선보정이 공유하는 단일 출처의 기본 성질이다.
+    // contrastFloor가 밝은 배경에선 어둡게·어두운 배경에선(.both) 밝게 목표 명암비를 강제하며,
+    // .darken_only(팔레트 선보정)는 어두운 배경에서 무동작이라는 계약 — 두 소비자가 공유하는 단일 출처의 기본 성질이다.
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), relativeLuminance(.{ .r = 0, .g = 0, .b = 0 }), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), relativeLuminance(.{ .r = 255, .g = 255, .b = 255 }), 1e-4);
     var prev: f32 = -1.0;
@@ -214,15 +260,34 @@ test "contrast: LUT luminance 경계·단조, contrastFloor 라이트/다크 동
         try std.testing.expect(lum > prev);
         prev = lum;
     }
-    // 밝은 배경(흰색): 거의 안 보이는 밝은 회색이 목표 3.0 이상으로 보정되고 hue(무채색)는 유지된다.
+    // 밝은 배경(흰색): 거의 안 보이는 밝은 회색이 목표 3.0 이상으로 **어둡게** 보정되고 hue(무채색)는 유지된다.
+    // 방향과 무관하게(밝히면 흰 배경에서 목표 도달 불가) .darken_only·.both가 같은 결과여야 한다.
     const white_lum = relativeLuminance(.{ .r = 255, .g = 255, .b = 255 });
-    const floored = contrastFloor(.{ .r = 235, .g = 235, .b = 235 }, white_lum, 3.0);
-    try std.testing.expect(contrastRatio(relativeLuminance(floored), white_lum) >= 2.95);
-    try std.testing.expect(floored.r == floored.g and floored.g == floored.b); // 무채색 보존
-    // 어두운 배경(#101010): 검정으로도 목표 미달 → 무동작(다크 프리셋 회귀 0 가드).
+    for ([_]FloorDirection{ .darken_only, .both }) |dir| {
+        const floored = contrastFloor(.{ .r = 235, .g = 235, .b = 235 }, white_lum, 3.0, dir);
+        try std.testing.expect(contrastRatio(relativeLuminance(floored), white_lum) >= 2.95);
+        try std.testing.expect(floored.r < 235); // 어두워졌다
+        try std.testing.expect(floored.r == floored.g and floored.g == floored.b); // 무채색 보존
+    }
+    // 어두운 배경(#101010) + .darken_only: 검정으로도 목표 미달 → 무동작(팔레트 선보정의 회귀 0 가드 —
+    // 이 팔레트는 ANSI 배경색·OSC 4 응답으로도 나가므로 밝히면 안 된다).
     const dark_lum = relativeLuminance(.{ .r = 0x10, .g = 0x10, .b = 0x10 });
-    const kept = contrastFloor(.{ .r = 30, .g = 30, .b = 30 }, dark_lum, 3.0);
+    const kept = contrastFloor(.{ .r = 30, .g = 30, .b = 30 }, dark_lum, 3.0, .darken_only);
     try std.testing.expectEqual(@as(u8, 30), kept.r);
+    // 어두운 배경(#101010) + .both(렌더 per-cell 전경): 어두운 전경이 **밝게** 보정돼 목표 명암비에 닿는다 —
+    // 라이트 테마용 색을 쓰는 프로그램이 다크 터미널에서 안 보이던 회귀의 교정(실측: 보정 전 명암비 ≈1.0).
+    const lifted = contrastFloor(.{ .r = 30, .g = 30, .b = 30 }, dark_lum, 3.0, .both);
+    try std.testing.expect(contrastRatio(relativeLuminance(lifted), dark_lum) >= 2.95);
+    try std.testing.expect(lifted.r > 30); // 밝아졌다
+    // hue 보존: 어두운 파랑(#101060)을 다크 배경에서 밝혀도 파랑이 가장 강한 채널로 남는다.
+    const blue = contrastFloor(.{ .r = 0x10, .g = 0x10, .b = 0x60 }, dark_lum, 3.0, .both);
+    try std.testing.expect(blue.b > blue.r and blue.b > blue.g);
+    try std.testing.expect(contrastRatio(relativeLuminance(blue), dark_lum) >= 2.95);
+    // 이미 충분한 색은 어느 방향이든 무변경(최소 개입) — 다크 배경의 밝은 전경.
+    const bright = Rgb{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
+    try std.testing.expectEqual(bright, contrastFloor(bright, dark_lum, 3.0, .both));
+    // 끔(target<=1) — 방향 무관 원본 그대로.
+    try std.testing.expectEqual(Rgb{ .r = 30, .g = 30, .b = 30 }, contrastFloor(.{ .r = 30, .g = 30, .b = 30 }, dark_lum, 0.0, .both));
 }
 
 /// xterm OSC "color specification"을 RGB로 푼다(OSC 4 팔레트·후속 OSC 10/11 set이 공유). 지원 형식:

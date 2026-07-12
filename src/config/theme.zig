@@ -161,9 +161,10 @@ pub const ThemeConfig = struct {
 };
 
 /// `theme.min-contrast` 기본값·상한(단일 출처 — Config 필드 기본값과 schema range가 이 const를 공유한다).
-/// 단위는 WCAG contrast ratio(1.0~21.0). 기본 3.0 = WCAG 대형 텍스트/UI 컴포넌트 기준 — 라이트 배경에서 안 보이는
-/// 팔레트 색(밝은 노랑·초록·흰색)만 교정하고 테마 정체성은 보존하는 절충값이다(더 강하게 원하면 4.5=일반 텍스트 AA로
-/// 올린다). 상한 21.0 = 검정 대 흰색 최대 명암비. 0(또는 1 이하)이면 보정 끔. 적용·근거 단일 출처: docs/configuration.md.
+/// 단위는 WCAG contrast ratio(1.0~21.0). 기본 3.0 = WCAG 대형 텍스트/UI 컴포넌트 기준 — 배경에 묻혀 안 보이는 색만
+/// 교정하고(밝은 배경의 밝은 노랑·초록·흰색, 어두운 배경의 어두운 회색·남색) 테마 정체성은 보존하는 절충값이다
+/// (더 강하게 원하면 4.5=일반 텍스트 AA로 올린다). 상한 21.0 = 검정 대 흰색 최대 명암비. 0(또는 1 이하)이면 보정 끔.
+/// 적용·방향·근거 단일 출처: docs/configuration.md + color.FloorDirection.
 pub const theme_min_contrast_default: f32 = 3.0;
 pub const theme_min_contrast_max: f32 = 21.0;
 
@@ -335,7 +336,8 @@ const one_light_palette: [16]?[]const u8 = .{
 ///   일부 색(밝은 노랑·초록·흰색, one_light의 bright-white #ffffff 등)은 라이트 배경에서 대비가 약하다. 그 저대비를 여기서
 ///   손대(원색을 바꾸)지 않고, `theme.min-contrast`(기본 3.0)가 **렌더 해석 시점**(appearance.resolveTheme의 contrastFloor)에
 ///   배경 대비 하한을 강제해 읽히게 한다 — 파일의 원색 세트는 이 함수가 정의한 그대로 두고 가독성만 확보한다(표준값 보존과
-///   가독성 양립). 다크 프리셋은 팔레트가 이미 다크 배경 대비 충분해 그 게이트가 무동작이다.
+///   가독성 양립). 이 팔레트 선보정은 `.darken_only`라 다크 프리셋에선 무동작이다(팔레트가 ANSI 배경색·OSC 4 응답으로도
+///   나가 밝히면 안 되기 때문 — color.FloorDirection). 다크 배경에서 안 보이는 **전경**은 렌더 per-cell 하한이 양방향으로 잡는다.
 pub fn presetColors(preset: ThemePreset) ThemeConfig {
     return switch (preset) {
         .maru => .{}, // struct default가 곧 maru 테마.
@@ -898,13 +900,16 @@ pub const Config = struct {
     /// opt-in으로 둔다 — 폰트가 weight를 안 주는 환경에서 bold를 색으로도 구분하려는 사용자용. 적용은 render-only
     /// (코어 셀/SGR 상태 불변)라 packForeground 한 곳이 단일 출처다.
     bold_is_bright: bool = false,
-    /// ANSI 팔레트(0~15) **자동 대비 게이트**(WCAG 명암비 하한). 팔레트 색이 배경 대비 이 명암비에 못 미치면 색상(hue)을
-    /// 보존한 채 검은색 방향으로 최소한만 어둡게 보정해, 밝은 배경에서 안 읽히는 색(밝은 노랑·초록·흰색 등)을 읽히게 한다.
-    /// 기본 3.0. 0(또는 1 이하)=끔(업스트림 원색 그대로). **충분히 어두운 배경(모든 번들 다크 프리셋)에선 자동 무동작** —
-    /// 검정으로도 목표 대비에 못 미치면 원본을 유지한다(경계·근거는 appearance.contrastFloor 주석; 중간 회색 배경은 보정될 수
-    /// 있다). 프리셋뿐 아니라 explicit `theme.palette.N`·xterm 기본색에도 적용된다. **팔레트에만** 적용하고 배경·전경·커서·선택색은
-    /// 불변이다(그 색은 프리셋이 이미 조정). loader가 `theme.min-contrast` 파싱(스키마-주도), 적용은
-    /// appearance.resolveTheme의 contrastFloor 한 곳(단일 출처). 근거·트레이드오프: docs/configuration.md `theme.min-contrast`.
+    /// **자동 대비 게이트**(WCAG 명암비 하한). 전경이 배경 대비 이 명암비에 못 미치면 색상(hue)을 보존한 채 최소한만
+    /// 보정해 읽히게 한다 — 밝은 배경에선 어둡게, 어두운 배경에선 밝게(color.contrastFloor). 기본 3.0. 0(또는 1 이하)=끔.
+    /// 적용은 **두 겹이고 방향이 다르다**(단일 출처: color.FloorDirection):
+    ///   ① **ANSI 16색 팔레트 선보정**(appearance.resolveTheme) — `.darken_only`. 이 팔레트는 ANSI **배경색**(SGR 40~47)과
+    ///      OSC 4 질의 응답으로도 나가므로 밝히면 다크 테마 배경이 회색으로 뜬다. 그래서 다크 배경에선 무동작이다.
+    ///      프리셋뿐 아니라 explicit `theme.palette.N`·xterm 기본색에도 적용된다.
+    ///   ② **렌더 per-cell 전경**(metal_frame.packForeground) — `.both`(양방향). 전경은 배경으로 안 새므로 밝혀도 안전해,
+    ///      다크 배경에서 어두운 전경(라이트 전용 배색 프로그램)도 교정한다.
+    /// theme의 배경·전경(default)·커서·선택색 자체는 불변이다(그 색은 프리셋이 이미 조정). loader가 `theme.min-contrast`
+    /// 파싱(스키마-주도). 근거·트레이드오프: docs/configuration.md `theme.min-contrast`.
     theme_min_contrast: f32 = theme_min_contrast_default,
     /// 터미널 셀과 컨테이너(사이드바·탭 바 안쪽) 가장자리 사이의 빈 여백(논리 pt, DPI로 스케일). 4방 개별
     /// (top/right/bottom/left); x/y는 loader에서 alias(`window.padding-x`=left+right 동시, `window.padding-y`=top+bottom

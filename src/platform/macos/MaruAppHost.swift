@@ -3312,13 +3312,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return inserted
     }
 
-    /// 이 pasteboard에 **삽입할 내용이 있는가**(부수효과 없이 판정 — 임시 PNG를 만들지 않는다).
-    /// handleDrop의 우선순위(URL > 파일 URL > 평문 > 비트맵)와 같은 소스를 본다.
+    /// 이 pasteboard에 **삽입할 내용이 있는가** — 포커스를 옮기기 전에 값싸게 판정한다(빈 드롭이 pane 포커스만
+    /// 훔치던 것). 비트맵은 **타입 존재만** 본다: clipboardImagePng를 부르면 TIFF/JPEG→PNG 디코드+인코드가
+    /// 메인 스레드에서 돌고, 삽입 경로(pasteboardDropPayload)가 곧바로 **또 한 번** 같은 변환을 한다(code-review).
+    /// 타입은 있는데 디코드가 실패하는 극단(손상 비트맵)에선 삽입이 no-op이 되고 포커스만 옮겨지지만, 그건
+    /// 드롭 자체가 실패한 경우라 무해하다 — 중복 변환(멀티MB 이미지에서 수백 ms)이 더 나쁘다.
     private func dropHasPayload(_ pb: NSPasteboard) -> Bool {
         if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty { return true }
         if let url = pb.string(forType: .URL), !url.isEmpty { return true }
         if let text = pb.string(forType: .string), !text.isEmpty { return true }
-        return clipboardImagePng(pb) != nil
+        return pb.availableType(from: [.png, .tiff]) != nil // 디코드 없이 타입만(위 주석)
     }
 
     /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 삽입한다 — 위 오버로드가 창 스코프 안에서 부른다.

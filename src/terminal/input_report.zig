@@ -78,9 +78,16 @@ pub fn pasteNeedsConfirmation(self: *const TerminalCore, data: []const u8, prote
 /// bracketed paste(DECSET 2004)를 켰으면 ESC[200~ ... ESC[201~로 감싼다(타이핑과 구분돼 자동 들여쓰기/
 /// 즉시 실행 방지). 호출자가 free한다.
 pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    return encodePasteWith(self.bracketed_paste, allocator, bytes);
+}
+
+/// encodePaste의 **순수** 변형 — 코어에서 필요한 유일한 상태(bracketed paste 여부)를 값으로 받는다.
+/// app이 `core_mutex` **아래에서 그 bool만 읽고**, 실제 인코딩(할당 + payload 전체 복사)은 **락 밖에서** 하도록
+/// 쓴다: 멀티MB 붙여넣기를 코어 뮤텍스 안에서 인코딩하면 그동안 그 pane의 PTY reader 스레드가 막힌다(code-review).
+pub fn encodePasteWith(bracketed_paste: bool, allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    if (self.bracketed_paste) try out.appendSlice(allocator, "\x1b[200~");
+    if (bracketed_paste) try out.appendSlice(allocator, "\x1b[200~");
     var i: usize = 0;
     while (i < bytes.len) : (i += 1) {
         const b = bytes[i];
@@ -96,7 +103,7 @@ pub fn encodePaste(self: *const TerminalCore, allocator: std.mem.Allocator, byte
             try out.append(allocator, b);
         }
     }
-    if (self.bracketed_paste) try out.appendSlice(allocator, "\x1b[201~");
+    if (bracketed_paste) try out.appendSlice(allocator, "\x1b[201~");
     return try out.toOwnedSlice(allocator);
 }
 

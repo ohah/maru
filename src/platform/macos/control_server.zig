@@ -16,7 +16,7 @@
 //!    응답 바이트를 만들고 `resolveRequest`로 pending에 채워 그 연결 스레드를 깨운다.
 //!
 //! **범위 밖:** subscribeOutput 출력 직송(§5, 별도), full self-origin tty 검증(1g), capability fd 실 발급/상속
-//!  (1e-confirm — 이 서버는 auth 프레임의 `cap_nonce`를 `parseAuthFrame`으로 파싱해 `PendingRequest.cap_nonce`로 메인
+//!  (1e-confirm — 이 서버는 auth 프레임의 `cap_nonce`를 `parseAuthFrame`으로 파싱해 `PendingRequest.cap_nonces`로 메인
 //!  marshal까지만 하고, resolve·store는 app_host_abi가 소유), 실 collector 조립·auth 판정(그건 app_host_abi가
 //!  AppSession을 알기에 거기서 — 이 모듈은 AppSession 비의존 generic).
 //!
@@ -59,10 +59,11 @@ pub const PendingRequest = struct {
     request_bytes: []const u8,
     /// caller가 주장한 self surface_id(auth.self 셀렉터, §8.4). 없으면 null(maru 밖 shell 등).
     selector: ?u64,
-    /// 선택적 capability nonce(auth 프레임 `cap_nonce`, §8.5 1e). 있으면 메인 drain이 CapabilityStore로 resolve해
-    /// self보다 넓은 scope를 발급한다(없으면 metadata:self만). 연결 스레드가 parseAuthFrame으로 채운다(값 복사 — 소켓
-    /// 입력 lifetime과 분리). 실 fd 상속은 1e-core 범위 밖(CLI가 아직 안 실음)이라 라이브에선 늘 null·store 빈=default-deny.
-    cap_nonce: ?[cp.auth_cap_nonce_len]u8 = null,
+    /// 세션 누적 capability nonce **집합**(auth.self `cap_nonce` + 이후 `auth.grant` 프레임들, §9.5.6 ③ 5f-4a). 메인
+    /// drain(dispatchAuthenticated)이 각 nonce를 CapabilityStore로 resolve해 **하나라도** 인가하면 통과시킨다(빈=cap 없음=
+    /// metadata:self만). 연결 스레드의 **세션 cap 배열을 빌린 슬라이스**(serveConnection 스택 소유, 대기 동안 유효). 실 fd
+    /// 상속은 1e-core 범위 밖이라 라이브에선 대개 빈·store 빈=default-deny.
+    cap_nonces: []const [cp.auth_cap_nonce_len]u8 = &.{},
     /// 이 요청을 낸 연결의 outbound(5f-0b-3b). `browser.subscribe` dispatch가 메인에서 SubscriberRegistry에 등록할 때
     /// 이 연결을 식별·라우팅한다. serveConnection이 세팅(연결 스레드 스택 소유). subscribe 외 요청은 안 읽어 null 무방(직접
     /// 구성 테스트는 기본 null). **연결 수명 안에서만 유효** — registry 등록은 메인이 하고, 연결 drop 시 purgeOutbound가 뺀다.
@@ -734,14 +735,34 @@ pub const ControlServer = struct {
         const auth_line = self.readFrame(conn, &framer, outbound) orelse return;
         const auth = cp.parseAuthFrame(self.cross_gpa, auth_line);
 
+        // 5f-4a-2 **세션 cap 집합**(§9.5.6 ③): auth.self의 cap_nonce가 있으면 첫 원소. 이후 요청 루프서 `auth.grant` 프레임을
+        // 만나면 여기에 누적한다(bounded max_session_caps — 초과는 조용히 무시). serveConnection 스택 소유라 세션 내내 유효 →
+        // PendingRequest.cap_nonces가 `session_caps[0..n]` 슬라이스를 빌린다(대기 동안 유효). 값 복사(framer 무효화 무관).
+        var session_caps: [cap.max_session_caps][cp.auth_cap_nonce_len]u8 = undefined;
+        var n_caps: usize = 0;
+        if (auth.cap_nonce) |cn| {
+            session_caps[0] = cn;
+            n_caps = 1;
+        }
+
         // 요청 루프(지속 세션): 각 iteration이 요청 한 개를 처리한다. readFrame null(EOF/타임아웃/에러/oversize)이면 종료.
         while (true) {
             // Framer 슬라이스는 다음 read에 무효화되므로 marshal 전에 dupe(대기 동안 유효 보장). defer로 iteration 끝에 해제.
             const req_line = self.readFrame(conn, &framer, outbound) orelse return;
+
+            // 5f-4a-2: auth.grant 프레임이면 요청 아니라 **cap 누적** — 세션 집합에 추가하고 marshal 안 하고 다음 프레임으로.
+            if (cp.parseAuthGrant(self.cross_gpa, req_line)) |grant_nonce| {
+                if (n_caps < session_caps.len) {
+                    session_caps[n_caps] = grant_nonce;
+                    n_caps += 1;
+                } // 초과(>max_session_caps)는 조용히 무시(bounded — 실무상 scope 수만큼이라 도달 안 함)
+                continue;
+            }
+
             const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
             defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 iteration 끝(대기 후)에 해제
 
-            var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonce = auth.cap_nonce, .outbound = outbound, .io = self.io };
+            var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonces = session_caps[0..n_caps], .outbound = outbound, .io = self.io };
             self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon(req_copy는 defer가 해제)
 
             switch (pending.waitResolved()) {
@@ -1329,12 +1350,8 @@ fn clientReqPersistent(gpa: std.mem.Allocator, base: []const u8, key: []const u8
 fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilityStore, snapshot: csurf.CollectorSnapshot) !usize {
     var handled: usize = 0;
     while (server.tryPopRequest()) |pending| {
-        var nonce_buf: [1]cap.Nonce = undefined; // 5f-4a: 단일 cap_nonce를 dispatchAuthenticated의 cap 집합 슬라이스로(5f-4a-1)
-        const cap_nonces: []const cap.Nonce = if (pending.cap_nonce) |n| blk: {
-            nonce_buf[0] = n;
-            break :blk nonce_buf[0..1];
-        } else &.{};
-        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, cap_nonces, store, 0)) {
+        // 5f-4a-2: 세션 누적 cap 집합(serveConnection이 채운 슬라이스)을 그대로 넘긴다.
+        switch (try cd.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, store, 0)) {
             .immediate => |resp| server.resolveRequest(pending, resp),
             // 이 fake drain은 browser 실행을 배선 안 함(라이브 marshal은 app_host_abi 5e-2a) — metadata 테스트는 .browser가
             // 안 온다. 방어: op.arg 해제 + null resolve(도달 시 test가 응답 없음으로 실패).
@@ -1628,7 +1645,7 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
 }
 
 // 1e-core 라이브 e2e: auth 프레임에 cap_nonce를 실으면(주입 store에 metadata:all cap) 서버가 self보다 넓은 scope로
-// 응답한다 — 소켓→auth 프레임→parseAuthFrame→PendingRequest.cap_nonce→dispatchAuthenticated→resolve→scope 발급의
+// 응답한다 — 소켓→auth 프레임→parseAuthFrame→PendingRequest.cap_nonces→dispatchAuthenticated→resolve→scope 발급의
 // 전 경로를 실 소켓 왕복으로 증명. 대조(위 "auth.self(10)" 테스트)는 cap 없이 self만 봤다.
 test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.list가 전체(10,20) 조회" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -1675,6 +1692,90 @@ test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.lis
     try testing.expect(pm.message == .response);
     const arr = pm.message.response.result.?.array;
     try testing.expectEqual(@as(usize, 2), arr.items.len); // metadata:all → rt_snapshot 전체(10,20)
+}
+
+// 5f-4a-2 라이브 e2e: auth.self(**cap 없음**) + auth.grant(metadata:all) → 세션이 granted cap을 누적 → sessions.list가
+// 그 cap으로 인가돼 **전체**(rt_snapshot 10,20 두 개)를 반환한다. auth.grant가 없었다면 self-scope(selector 10)라 1개만.
+// 소켓→auth.self+auth.grant 축적→dispatchAuthenticated의 전 경로를 실 왕복으로 증명(navigate/browser cap 누적은 fake drain이
+// browser op을 실행 안 해 연결을 닫으므로 여기 대신 5f-4a-1 헤드리스가 dispatch any-cap을 커버).
+test "server 왕복(5f-4a-2): auth.grant로 metadata cap 누적 → sessions.list가 그 cap으로 전체 인가(누적)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.heap.c_allocator;
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "capgrant");
+    defer srvRmBase(base);
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    defer server.stop();
+
+    const meta_nonce: [cap.nonce_len]u8 = [_]u8{0x3A} ** cap.nonce_len;
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, meta_nonce, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
+
+    const Client = struct {
+        base: []const u8,
+        m_nonce: [cap.nonce_len]u8,
+        list_len: usize = 0,
+        err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            var db: [512]u8 = undefined;
+            const dir = cs.controlDirPath(&db, self.base) catch return;
+            var sb: [512]u8 = undefined;
+            const sp = cs.socketPathIn(&sb, dir, "k1") catch return;
+            const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+            if (fd < 0) return;
+            defer _ = c.close(fd);
+            var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+            @memset(&addr.path, 0);
+            @memcpy(addr.path[0..sp.len], sp);
+            if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return;
+            cs.setReadTimeoutMs(fd, 5000);
+            // auth.self(surface 10, **cap 없음**) + auth.grant(metadata:all cap) + sessions.list.
+            const auth = cp.serializeAuthSelf(gpa, 10, null) catch return;
+            defer gpa.free(auth);
+            const grant = cp.serializeAuthGrant(gpa, self.m_nonce) catch return;
+            defer gpa.free(grant);
+            for ([_][]const u8{ auth, grant, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}" }) |frame| {
+                cs.writeAll(fd, frame) catch return;
+                cs.writeAll(fd, "\n") catch return;
+            }
+            var framer: cp.Framer = .{};
+            defer framer.deinit(gpa);
+            while (true) {
+                while (framer.next() catch null) |line| {
+                    var pm = cp.parseMessage(gpa, line) catch continue;
+                    defer pm.deinit();
+                    if (pm.message != .response) continue; // hello notification skip
+                    if (pm.message.response.result) |r| {
+                        if (r == .array) self.list_len = r.array.items.len;
+                    }
+                    return; // sessions.list 응답 받음
+                }
+                var rb: [1024]u8 = undefined;
+                const n = c.read(fd, &rb, rb.len);
+                if (n <= 0) {
+                    self.err = error.NoResponse;
+                    return;
+                }
+                framer.push(gpa, rb[0..@intCast(n)]) catch return;
+            }
+        }
+    };
+    var ct = Client{ .base = base, .m_nonce = meta_nonce };
+    const th = try std.Thread.spawn(.{}, Client.run, .{&ct});
+
+    var guard: usize = 0;
+    while (!ct.done.load(.acquire) and guard < 5000) : (guard += 1) {
+        _ = try drainWithFakeSnapshot(&server, &store, rt_snapshot);
+        if (!ct.done.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    th.join();
+    try testing.expect(ct.err == null);
+    // metadata:all cap(auth.grant로 누적)이 sessions.list를 인가 → rt_snapshot 전체(10,20) 2개. 누적 없었으면 self=1개.
+    try testing.expectEqual(@as(usize, 2), ct.list_len);
 }
 
 // 5f-0b-3b 라이브 e2e: browser cap으로 auth한 client가 browser.subscribe → 서버가 SubscriberRegistry에 등록하고

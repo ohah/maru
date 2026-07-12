@@ -50,6 +50,7 @@
 - [파일 패널(마크다운·HTML 뷰어/편집기)](docs/file-panel.md)
 - [파일 탐색기(도크 트리·watcher·root)](docs/file-explorer.md)
 - [선택 영역을 에이전트에 보내기(파일 패널 → 터미널 CLI)](docs/send-selection-to-agent.md)
+- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md)
 
 ## 설계 문서
 
@@ -94,6 +95,7 @@
 - [Third-party 라이선스와 Attribution](docs/third-party-licenses.md)
 - [세션 컨트롤 플레인(CLI·웹뷰 IPC)](docs/control-plane.md)
 - [웹 패널 인프라(WKWebView 합성)](docs/web-panel.md)
+- [에디터 Surface(코드 에디터·git diff 뷰어·포맷/린트·LSP)](docs/editor-surface.md)
 - [메모리 전략](docs/architecture.md#메모리-전략)
 - [터미널 전략](terminal-strategy.md)
 - [디버깅/로그/리플레이 전략](terminal-strategy.md#12-디버깅로그리플레이-전략)

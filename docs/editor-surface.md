@@ -1,0 +1,203 @@
+# 에디터 Surface 전략 (코드 에디터·git diff 뷰어·포맷/린트·LSP)
+
+이 문서는 maru에 **코드 에디터 surface**(git diff 뷰어 → 인플레이스 편집 → 포맷/린트 → LSP)를 얹는 설계의 단일 출처다. "에이전트 워크벤치" 방향에서 **에이전트가 만든 변경을 사람이 터미널 안에서 리뷰·수정·커밋하는 루프**를 닫는 조각이다.
+
+핵심 재구성: **"git diff 뷰어"는 primitive가 아니다.** 실제로 짓는 것은 **에디터 surface(문서 모델 + 렌더 컴포넌트)**이고, git diff는 그 에디터의 한 가지 **뷰/모드**다. diff 뷰어를 독립적으로 만들면 편집·LSP를 얹을 때 통째로 리셰이프하게 되므로, 토대를 doc-first로 먼저 고정한다.
+
+경계·단일 출처:
+- WKWebView 합성·입력·`maru-app://` 신뢰 채널·CSP는 [web-panel.md](web-panel.md)가 소유한다(여기서 재서술하지 않는다).
+- 브리지 신뢰 게이트·capability·op 디스패치는 [control-plane.md](control-plane.md) §8이 소유한다.
+- 레이어 경계(L2 코어 / L4 host)는 [layering-and-portability.md](layering-and-portability.md), surface 생애주기는 [surface-runtime-api.md](surface-runtime-api.md)를 단일 출처로 둔다.
+- 이 문서는 "그 위에 에디터/문서/파일 I/O/포맷/LSP를 어떻게 얹는가"에 집중한다.
+
+> **PoC 실측 범위(2026-07-12, 헤드리스)**: ① Monaco+워커5개를 zntc로 번들(실 CLI/NAPI, 성공), ② Monaco 코어·diff 경로의 CSP 청정성(eval/wasm는 TS 워커에만), ③ git diff op 데이터 형태, ④ 포매터 stdin/에러 거동(zig fmt·rustfmt), ⑤ LSP 왕복(rust-analyzer). **런타임(WKWebView 안에서 실제 CSP·입력·폰트)은 미검증** — GUI 스파이크로만 확정(§12).
+
+---
+
+## 1. 확정 결정
+
+- **렌더 컴포넌트 = Monaco Editor(웹뷰), 셀 그리드 자작 아님.** diff editor + 편집기 + LSP 클라이언트가 한 컴포넌트의 세 모드다: git diff = `<DiffEditor>`(`IDiffEditorModel { original, modified }`), 편집 = editor, LSP = `monaco-languageclient`(후속). Metal 셀 그리드에 에디터를 자작하는 것은 diff·구문강조·LSP를 감안하면 비현실적이다.
+- **Monaco는 self-host 번들, CDN 금지.** `maru-app://` CSP가 외부 호스트를 차단하므로 CDN은 애초에 불가. **번들 경유 = zntc NAPI `@zntc/core.build()`**(§4). 워커는 정적 문자열 리터럴 `new Worker(new URL("...worker.js", import.meta.url), { type: "module" })` 5개(editor/ts/json/css/html)로 배선.
+- **에디터는 신뢰(trusted) surface다.** 로컬 저장소를 maru가 렌더하는 신뢰 콘텐츠라 `trust=trusted` + `maru-app://` 신뢰 채널(스킴 핸들러 + isolated-world MaruBridge)을 쓴다 — `browser`(임의 URL·untrusted)가 아니다. 즉 **현행 신뢰 markdown 패널의 호스팅 기계를 그대로 탄다**(§3).
+- **문서 모델은 버전 + 변경이벤트 형태로 day 1에 고정한다**(§5). LSP를 마지막에 하더라도, 버퍼를 "버전 번호 + `open/change/save` 이벤트"로 지어두면 v3 LSP·semantic token이 additive가 된다. 이건 LSP 때문이 아니라 **에이전트×사람 파일 경합 재조정**이 어차피 요구하는 배관이다(§7).
+- **파일 I/O는 신규 capability + op다**(§6). 현행 `write` scope는 **PTY 입력(`sendText`/`sendKeys`)**을 인가할 뿐 디스크 파일 쓰기가 아니다(control_capability.zig:121·498-499). 에디터의 파일 read/save는 별도 scope로 발급·게이트한다.
+- **하이라이팅은 3층 로드맵**(§8): Monarch(내장·즉시) → TextMate(VS Code 동급, WASM CSP 대가) → semantic tokens(LSP).
+- **포맷/린트는 LSP가 아닌 "외부 도구 레인"**(§9): 선언적 레지스트리 + `spawn stdin→stdout` op. LSP(§10)와 별개·경량.
+- **의존성 근거**: Monaco·zntc는 **maru 자체 소유 도구(zntc=`ohah/zntc`) + 웹 표준 패턴**으로, 신뢰 채널 안에서만 산다. clean-room: 웹 표준(`new Worker(new URL)`·Monaco 공개 API)에서 유도, reference 코드 이식 없음.
+
+---
+
+## 2. PoC로 확정된 토대 (실측)
+
+| 항목 | 결과 | 근거 |
+|---|---|---|
+| Monaco + 워커5개 zntc 번들 | ✅ exit 0, 115파일, 워커 5개 same-origin 해시청크 | `@zntc/core.build()`(NAPI)·실 CLI |
+| git diff 뷰어 = DiffEditor | ✅ `IDiffEditorModel { original: ITextModel; modified: ITextModel }` | monaco.d.ts + 빌드 |
+| Monaco 코어·diff CSP | ✅ `editor.worker`·`diffEditor` 소스 eval/wasm **0** | 소스 grep + 빌드. eval/wasm은 **TS 워커에만** |
+| git diff op 데이터 형태 | before/after **전체 blob**(unified 아님), rename=old/new 경로, binary=numstat `-` 제외 | git PoC(rename R096·binary .ttf 실측) |
+| 포매터 에러 정책 | 에러 시 stdout 공백 + exit≠0(zig=2·rust=1) | zig fmt·rustfmt stdin PoC |
+| LSP 프리미티브 | initialize 0.02s·진단 4.85s(콜드), 프레이밍=Content-Length(≠maru ndjson) | rust-analyzer 왕복 PoC |
+
+**zntc 쪽 미비 2건(이슈화 완료, `ohah/zntc`)**: [#4466](https://github.com/ohah/zntc/issues/4466) CSS `url()` 자산(codicon.ttf) 미방출 → 아이콘 깨짐, [#4467](https://github.com/ohah/zntc/issues/4467) Vite식 `?worker`/`?raw`/`?url` 접미사 미지원(표준 패턴으로 우회). 둘 다 에디터 계획의 리스크를 내려주며 #4466 수정 시 codicon 자동 해결.
+
+---
+
+## 3. 신뢰 채널과 PanelKind — 새 kind가 필요 없을 수 있다
+
+**실측 발견**: `PanelKind`(control_surface.zig:76 `{ markdown, browser }`)는 "패널 기능 종류"가 아니라 **신뢰/호스팅 판별자**다.
+- **신뢰(markdown)**: `maru-app://app/<path>`를 커스텀 스킴 핸들러로 서빙 + isolated-world `MaruBridge` 등록(MaruAppHost.swift:499·629, app_scheme.zig `validateAppPath`/`csp_header`).
+- **비신뢰(browser)**: 임의 URL을 `load(URLRequest)`, 스킴 핸들러·브리지 **미등록**(origin 위장 차단).
+
+에디터는 신뢰 콘텐츠이므로 **markdown과 같은 신뢰 기계**를 탄다. 스킴 핸들러가 `maru-app://app/<path>`를 경로별로 서빙하므로, **에디터/git diff는 신뢰 SPA의 라우트**(`maru-app://app/editor`)로 얹을 수 있다 — 즉 **새 PanelKind가 필수는 아니다**.
+
+- **권장(v1)**: 신뢰 SPA 단일 kind + 라우트(markdown 뷰·diff 뷰·editor 뷰). PanelKind 확장 불필요 → 닫힌 열거의 "사용자 승인" 게이트(control_surface.zig:74)를 회피.
+- **대안**: 탭/사이드바 라벨·생애주기를 kind별로 구분하고 싶으면 얇은 신규 kind 추가. 이때 건드릴 곳(체크리스트): `PanelKind` enum · `SurfaceDto.panel_kind`(control_surface.zig:109) · `panelKindWire`(229) · `session_model.web_panel_kind`(58)·`webPanelLabel`(90) · `web_panel_layout` wire · **ABI `panel_kind: u32` marshal(app_host_abi.zig:1229, 0/1 → 2 추가) + offset 계약 테스트(2166)** · Swift `panel_kind` 분기. → **이 선택은 사용자 결정(§13).**
+
+---
+
+## 4. 빌드 통합 — zntc NAPI, raw 바이너리 금지
+
+**현황(실측)**: 프런트 빌드 파이프라인은 **미배선**이다. build.zig:706-713은 placeholder `web/`를 `cp -R`만 하고, zntc/Bun은 build.zig·.mise.toml 어디에도 없다. 루트 `web/` Bun workspace·`package.json`·`zntc.config.*`도 없다. **즉 마크다운 뷰어(Phase 7 콘텐츠)와 그를 빌드할 툴체인은 결정만 됐고 미착수**다.
+
+함의: **에디터 스택이 Phase 7 프런트 툴체인을 처음 세우는 주체다.** "마크다운 뷰어 완성"을 전제로 두지 못한다(그게 없으므로).
+
+- **빌드 호출은 NAPI 경유**: `import { build } from "@zntc/core"`. maru 빌드/트레이스에 구조화된 `{ errors, warnings }`를 그대로 물릴 수 있다. **standalone `zig-out/bin/zntc`는 금지** — 정책(mainFields/conditions/node_modules 루트)이 빈 채라 bare import가 resolve 실패한다(PoC에서 이 함정으로 가짜 블로커 발생). config(`zntc.config.ts`)는 .ts라 로딩 자체가 JS 런타임 일이므로 CLI/NAPI를 통해야 한다.
+- **워커**: `MonacoEnvironment.getWorker`를 5개 정적 리터럴로. 헬퍼로 감싸면(변수 스페시파이어) 정적 분석이 깨져 워커가 emit되지 않는다(Vite/webpack 동일 제약, 실측).
+- **CSP**: Monaco 코어·diff는 `worker-src 'self'`로 충분(blob/eval 불필요, 실측). TS 언어워커나 TextMate(§8)를 로드하면 그때만 CSP 완화 검토(§13).
+
+---
+
+## 5. 문서(버퍼) 모델 — 신규, L2 소유, 버전+이벤트
+
+**현황(실측)**: 터미널 스크린 버퍼(`Screen`, screen.zig:257) 외에 **범용 편집 가능 텍스트 버퍼/문서 모델은 존재하지 않는다.** 파일 read(config/loader.zig:907 `readFileAlloc`)·write(workspace.zig `writeAll`) 프리미티브는 있으나 문서 추상이 아니다. → **문서 모델은 net-new.**
+
+설계:
+- **위치 = L2 코어**(session). 정본(canonical) 문서 레지스트리 `{ path, version, dirty, disk_mtime/hash }`를 L2가 소유해 재조정 권위로 둔다. WKWebView의 Monaco는 **라이브 편집 버퍼**를 쥐고, L2는 디스크 지속·변경 이벤트·경합 판정의 권위.
+- **버전 + 변경이벤트**: `open/change/save` 어휘(LSP `didOpen/didChange/didSave`와 동형). LSP는 한 줄도 안 쓰되 **모양만** 이렇게 잡으면 v3에서 additive.
+- **source-of-truth 규칙**: 열린 버퍼의 dirty 상태·최신 텍스트는 Monaco 소유, 디스크 반영은 save op(§6), 외부(에이전트) 디스크 변경은 file-watch→재조정(§7). 통짜 문자열 교체 금지 — 최소 diff edit로 Monaco undo 스택·커서 보존.
+
+---
+
+## 6. 파일 I/O capability와 op — 신규 scope
+
+**현황(실측)**: capability 6종(metadata/bind/read-output/write/lifecycle/browser) 중 **`write`는 세션 입력(`sendText`/`sendKeys`)을 인가**한다(control_capability.zig:121 `session + "send" → .write`, 498-499). **디스크 파일 read/write를 인가하는 scope는 없다.**
+
+설계:
+- **신규 scope `filesystem`(가칭)**: 파일 내용 read/save를 게이트. 발급 UX·fd 상속 정책은 control-plane.md §8·§9의 capability 발급 모델을 따른다(browser cap 발급 선례). 임의 파일 접근이므로 기본 거부 + 명시 발급.
+- **op 계열**(browser.* op 패턴 재사용 — deferred marshal/take/complete):
+  - `diff.read` — 저장소 변경 파일별 `{ status, old_path, new_path, original_blob, modified_blob, is_binary }`. **read만**(write cap 불필요). worktree/index/HEAD/범위 모드 선택. rename=두 경로, binary=numstat `-` 제외, 대용량 blob 페이로드 고려(실측: 10k줄 파일 실재).
+  - `file.read` / `file.write` — 편집 버퍼 열기/저장(`filesystem` cap). 저장은 exit·에러 처리 후 원자적 기록.
+  - `git.stage`/`unstage`/`discard` — 헝크/라인 스테이징(write 액션 계열, 별도 Phase).
+
+**전송 경로와 재사용/신규(실측)**:
+- **브리지(`window.maru.*`)에는 capability 모델이 없다** — 신뢰는 origin/frame으로만 확립되고(control_bridge.zig:5-7, 현재 노출 method=`hello` 1개), 세분 grant가 불가하다. 파일/git write 같은 민감 op를 브리지로 노출하면 신뢰 콘텐츠가 **무제한 접근**한다. → **민감 write op는 소켓 경로(capability-gated)로 흘리거나**, 브리지에 capability 모델을 얹는 결정이 필요(§13).
+- **비동기 골격은 generic이라 재사용**: `InFlight`/`deferRequest`/`completeInFlight`/`reapExpiredInFlight`(control_server.zig)는 메서드 무관. 단 `BrowserOpQueue` + take/complete ABI는 **browser 전용**(op_kind/arg 하드코딩)이라 새 async 계열(diff/file/git)은 병렬 큐 + ABI 또는 일반화가 필요(app_host_abi.zig).
+- **live capability 발급이 아직 미배선**: `control_cap_store`가 프로덕션에서 상시 빈 값이라(app_host_abi.zig:1754-1758) 실 fd 발급/상속(1e-confirm)은 test-only 훅뿐이다. 순수 코어(authz/resolve/store)는 완성·테스트됐으나, `filesystem` cap을 실제로 쓰려면 **이 라이브 발급 경로부터 지어야** 한다 — browser cap도 공유하는 선행조건이지 에디터 전용이 아니다.
+
+---
+
+## 7. 에이전트 × 사람 파일 경합 — 이 제품 고유의 난제
+
+VS Code는 "사람이 유일 writer"를 가정하지만 **maru는 아니다** — 에이전트가 디스크의 파일 X를 고치는 동안 사람이 X를 dirty 버퍼로 열어 둔다.
+
+**현황(실측)**: FSEvents/DispatchSource/kqueue 사용처가 코드에 **전무**하다. → **file-watch도 net-new.**
+
+설계:
+- **file-watch(신규, L4 host)**: FSEvents로 열린 문서의 디스크 변경 감지 → L2 문서 레지스트리에 `disk changed` 이벤트. 드래그 세션처럼 **디바운스**.
+- **재조정 정책**: dirty 아님 → 조용히 리로드. dirty → 충돌 UX(리로드/유지/머지 선택). LSP도 서버 뷰가 버퍼·디스크와 일치해야 하므로 이 동기화에 얹힌다.
+- **day 1 반영**: §5 문서 모델을 버전+이벤트로 지어야 이 재조정이 가능. 나중에 못 끼운다.
+
+---
+
+## 8. 하이라이팅 3층
+
+| 층 | 엔진 | 무게 | 시점 |
+|---|---|---|---|
+| 기본 | Monarch(Monaco 내장) | 가벼움·WASM 없음 | v1 즉시 |
+| VS Code 동급 | TextMate 문법 + VS Code 테마(vscode-textmate + Oniguruma) | **WASM** 필요 | 후속 |
+| 의미 기반 | semantic tokens | LSP 서버 필요 | LSP 단계 |
+
+- Monarch로 v1은 충분(내장 수십 개 언어). TextMate는 VS Code와 픽셀 동급이나 **Oniguruma가 WASM이라 CSP `script-src 'wasm-unsafe-eval'`을 열어야** 한다(신뢰 채널 CSP 약화 = §13 결정). 엔진 교체는 하이라이팅 레이어에 **격리**(에디터·문서 모델 무변경).
+- semantic tokens는 LSP `textDocument/semanticTokens`에서 옴 → LSP 단계에 additive(Monaco `registerDocumentSemanticTokensProvider`).
+
+---
+
+## 9. 외부 도구 레인 — 포맷/린트 (LSP 아님)
+
+oxc(oxfmt/oxlint)·prettier·zig fmt·rustfmt·gofmt·black 등은 **LSP 서버가 아니다** — 포매터·린터(CLI)다. LSP 래퍼로 감쌀 수도 있으나 **직접 호출이 훨씬 가볍다**.
+
+- **선언적 레지스트리**: `{ 언어 → command, args, input: stdin|file, output: stdout|inplace }`. stdin→stdout 우선. 새 포매터 = 코드가 아니라 설정 항목(conform.nvim·Helix·Zed 모델).
+- **에러 정책(실측 확정)**: **exit==0일 때만 버퍼 교체.** zig fmt(exit 2)·rustfmt(exit 1) 모두 에러 시 stdout 공백이라 안전. 코드값은 툴마다 다르므로 `==0` 기준. 적용은 Monaco 최소 diff edit(undo·커서 보존).
+- **린트**: `eslint`/`oxlint --format json` → 파싱 → Monaco 마커. 린트는 편집 불필요라 읽기 뷰에도 앞당길 수 있음.
+- op = §6의 `spawn stdin→stdout 캡처`(maru 기존 subprocess spawn 재사용, PTY 없음). LSP 전송(§10) 불필요.
+
+---
+
+## 10. LSP 미래 seam
+
+**맨 나중**(가장 무거움). 지금은 seam만 남긴다.
+
+- **호스트 spawn**: 언어서버 = stdio JSON-RPC 서브프로세스(PTY 없음). per-project 싱글턴·idle shutdown. rust-analyzer 실측: initialize 0.02s·진단 4.85s(콜드).
+- **전송 임피던스(실측)**: **LSP=Content-Length 프레이밍 ≠ maru 컨트롤 플레인 ndjson.** 그래서 passthrough는 단순 바이트 포워딩이 아니라 **프레이밍 브리지 + 2번째 JSON-RPC 스트림 멀티플렉싱**(per-server 채널 수명·백프레셔). browser.* op식 op-per-message는 고빈도라 부적합.
+- **push 채널(실측)**: 브리지는 **요청/응답 전용, 서버→클라이언트 push가 없다**(control_bridge.zig). LSP diagnostics 같은 서버 발신을 isolated-world로 밀려면 **push 채널 신규**. 다행히 소켓 경로엔 notification 스트림(`events.subscribe`·`session.subscribeOutput`, I/O 스레드 직송 + 백프레셔·slow-subscriber disconnect)이 **이미 있어 LSP 하부로 재사용 가능**하나, 그걸 `window.maru.*`에 잇는 게 신규다. browser op은 **1요청-1응답**(deferRequest↔completeInFlight 1:1)이라 1요청-다응답 스트림은 이 notification 경로를 써야 한다.
+- **보안**: 언어서버는 임의 로컬 코드 실행(rust-analyzer proc-macro/build script). 신규 `lsp` capability + 인지.
+- **감지**: 확장자/루트 마커(`Cargo.toml`·`package.json`·`go.mod`) → 서버 cmd + PATH probe.
+
+---
+
+## 11. 단계 계획
+
+전제 붕괴 정정: **"마크다운 뷰어 완성"이라는 전제는 실재하지 않는다(§4).** 따라서 에디터 스택이 **Phase 7 프런트 툴체인(zntc/Bun web workspace + build.zig 배선 + maru-app:// SPA asset 파이프라인)을 처음 세운다.** 이 툴체인 확립은 마크다운 뷰어와 **공유**되므로, 둘 중 무엇을 먼저 내든 이 토대를 함께 짓는다.
+
+```mermaid
+flowchart TD
+  P0["Phase 0: 이 설계 문서 (doc-first)"]
+  P05["Phase 0.5 스파이크: WKWebView 런타임 CSP + 모듈워커 + Monaco 스타일주입 (GUI)"]
+  P1["Phase 1: 프런트 툴체인 확립 + 읽기 diff 뷰 (Monaco DiffEditor)"]
+  P15["Phase 1.5: 린트 진단 (편집 불필요)"]
+  P2["Phase 2: 문서 모델 + 편집 + 저장 (filesystem cap + file.write)"]
+  P2b["Phase 2b: 에이전트x사람 파일 경합 재조정 (FSEvents 신규)"]
+  P25["Phase 2.5: 포맷 레인 (외부 도구 spawn)"]
+  P27["Phase 2.7: git 스테이징"]
+  P3["Phase 3: TextMate 하이라이팅 (WASM CSP 결정)"]
+  P4["Phase 4: LSP (프레이밍 브리지 전송 + lsp cap)"]
+  P0 --> P05 --> P1 --> P15 --> P2 --> P2b
+  P2b --> P25
+  P2b --> P27
+  P2b --> P3
+  P25 --> P4
+  P27 --> P4
+  P3 --> P4
+```
+
+- **Phase 0.5(스파이크·GUI 필수)**: WKWebView + `maru-app://` 커스텀 스킴에서 `{type:'module'}` 워커가 도는가, Monaco 런타임 스타일 주입 vs 엄격 `style-src`, codicon 폰트(#4466). red면 워커/CSP 전략 재검토.
+- **Phase 1**: zntc NAPI 빌드 배선 + PanelKind 라우트(§3) + `diff.read` op(§6) + `<DiffEditor>` + 접기/펼치기·파일트리 + Monarch. **읽기 전용 diff는 스냅샷+새로고침으로 punt**(경합은 Phase 2b).
+- **Phase 2 / 2b**: 문서 모델(§5) + `filesystem` cap·`file.*` op + 파일 열기(NSWorkspace.open 승격) / file-watch 재조정(§7).
+- **2.5·2.7·3 병렬 가능**(문서 모델 위, 서로 독립). **4는 최후.**
+
+---
+
+## 12. 관측 가능성·테스트 전략
+
+- **프런트 단위**: Monaco 통합·포매터 레지스트리·diff op 매핑은 `bun test`(Phase 7 툴체인)로.
+- **op 계약**: `diff.read`/`file.*`/`git.*`는 control-plane trace schema에 실어 snapshot/replay가 같은 데이터를 공유(control-plane.md 관측 원칙 유지).
+- **GUI 수동(불가피)**: WKWebView 입력/포커스/CSP/폰트/한글 IME는 web-panel.md §11이 이미 "헤드리스 자동화 불가"로 규정한 영역. 에디터는 그 위에 Monaco 상호작용·format-on-save를 더한다 — 각 Phase 게이트에 수동 검증 항목을 명시한다.
+
+---
+
+## 13. 사용자 논의 필요 (문서에 없는 결정)
+
+1. **PanelKind**: 신뢰 SPA 라우트(권장, 새 kind 불필요) vs 얇은 신규 kind(라벨/생애주기). §3.
+2. **CSP 완화 시점**: TS 언어워커·TextMate가 `wasm-unsafe-eval`을 요구 → 신뢰 채널 엄격 CSP를 언제/어디까지 여는가. §8.
+3. **신규 capability `filesystem`**: 임의 파일 read/write 발급 UX(기본 거부 + 명시 발급). §6.
+4. **외부 의존성**: Monaco를 핵심 UX 경로에 추가 = "가벼운 native shell" 포지션과의 트레이드오프(웹뷰에 제품 상당부가 산다). pr-checklist "핵심 경로 외부 의존성" 항목.
+5. **에디터 op 전송 경로**: 브리지(단순하나 capability 격리 없음) vs 소켓(capability-gated·push 스트림 보유). 민감 write·LSP diagnostics push를 어디로 흘릴지 — 브리지에 capability 모델을 얹을지, 소켓으로 흘릴지. §6·§10.
+
+---
+
+## 14. 한계·미검증
+
+- **런타임 전부 미검증**: Monaco가 WKWebView + 실제 CSP에서 실제로 렌더/동작하는지(§12·Phase 0.5). 모듈워커 커스텀 스킴 호환·Monaco 스타일 주입·codicon 폰트가 라이브 리스크.
+- **surface당 자원 비용 미측정**: pane N개 × (Monaco + 워커 5스레드). 성능 예산(performance-budget.md) 대비 측정 필요, Monaco 공유 전략 미결.
+- **문서 모델 경계·경합 재조정 메커니즘**은 설계만, 구현 미착수(가장 어려운 부분).
+- **전제 정정**: 마크다운 뷰어/프런트 툴체인 부재를 이 문서에서 처음 반영 — 기존 계획이 이를 전제했다면 함께 갱신 필요.

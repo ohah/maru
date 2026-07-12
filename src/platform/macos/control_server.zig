@@ -265,35 +265,43 @@ pub const OutboundChannel = struct {
 /// 안 일어난다(그래도 초과 시 matching이 조용히 자르지 않게 아래 pushEvent가 debug assert로 잡는다).
 const max_event_fanout: usize = 64;
 
-/// 5f-0b-3 **메인 전용·락 없는** 구독 레지스트리(§9.5.2 전제(v) — 라우팅 테이블=메인 전용). L2 순수 `EventBroker`(구독
-/// (subscriber_id, surface, filter)·매칭·수명)에, L4 전용인 **`subscriber_id → *OutboundChannel` 매핑**과 id 발급기를
-/// 더해 "이벤트를 매칭 구독자의 연결 outbound로 push"·"연결 drop/ surface close 시 정리"를 소유한다. **메인 스레드에서만**
-/// 접근한다(락 없음 = §5 "라우팅 테이블=락 없는 메인 전용", §8.8 lock-order 회피). 이벤트 소스(WKWebView KVO)는 5f-0b-3c가
-/// 메인에서 `pushEvent`로 주입하고, 연결 수명 배선(연결-drop 시 `purgeOutbound`)은 5f-0b-3a-2가 한다 — 이 구조체는 그
-/// **순수 로직**(헤드리스 테스트)만 소유한다. 구조체 자체 alloc(broker.subs·맵)은 메인 소유 `gpa`, 이벤트 프레임 **바이트**는
-/// writer 스레드가 free하므로 `pushEvent`가 별도 `cross_gpa`로 만든다(소유권 교차).
+/// 5f-0b-3 구독 레지스트리(§9.5.2). L2 순수 `EventBroker`(구독 (subscriber_id, surface, filter)·매칭·수명)에, L4 전용인
+/// **`subscriber_id → *OutboundChannel` 매핑**과 id 발급기를 더해 "이벤트를 매칭 구독자의 연결 outbound로 push"·"연결 drop/
+/// surface close 시 정리"를 소유한다. **leaf-mutex 보호**(§9.5.6 realization pivot — 전제(v)의 "메인 전용·락 없음"을
+/// leaf-mutex로 realize): 초판은 메인 전용 + 연결-drop 통지였으나, 연결 churn 시 outbound 무한 누적(same-uid DoS)/stop 교착
+/// 위험이라, **메인(pushEvent/subscribe)과 연결 스레드(종료 시 self-`purgeOutbound`)가 이 leaf lock서 직렬화**한다.
+/// UAF 없음: purge와 pushEvent가 같은 락서 배타 → purge 후 메인은 그 outbound를 다시 조회 못 하고(제거됨), free는 purge 후.
+/// **§8.8 준수**: 이 락=leaf(core_mutex 보유 중 미접근 — 이벤트=KVO·구독=요청 dispatch 둘 다 core_mutex 밖), lock 순서
+/// registry→outbound 단방향(pushEvent만 nested; writer/reader는 outbound만 잡음). 구조체 alloc(broker.subs·맵)은 소유
+/// `gpa`, 이벤트 프레임 **바이트**는 writer 스레드가 free하므로 `pushEvent`가 별도 `cross_gpa`로 만든다(소유권 교차).
 pub const SubscriberRegistry = struct {
-    /// broker.subs + outbound_of 맵 alloc(메인 소유 — items_gpa 결). 이벤트 프레임 바이트는 이게 아니라 pushEvent의 cross_gpa.
+    io: std.Io,
+    /// leaf lock — 메인 pushEvent/subscribe/purgeSurface ∥ 연결 스레드 purgeOutbound를 직렬화(§9.5.6 realization).
+    mutex: std.Io.Mutex = .init,
+    /// broker.subs + outbound_of 맵 alloc(소유 — items_gpa 결). 이벤트 프레임 바이트는 이게 아니라 pushEvent의 cross_gpa.
     gpa: std.mem.Allocator,
     broker: cev.EventBroker = .{},
     /// 각 연결(=구독자)의 outbound. subscribe가 outbound당 subscriber_id를 **1:1**로 잡아(재구독=id 재사용) 넣고, drop이 뺀다.
     outbound_of: std.AutoHashMapUnmanaged(cev.SubscriberId, *OutboundChannel) = .empty,
     id_alloc: cev.SubscriberIdAllocator = .{},
 
-    pub fn init(gpa: std.mem.Allocator) SubscriberRegistry {
-        return .{ .gpa = gpa };
+    pub fn init(io: std.Io, gpa: std.mem.Allocator) SubscriberRegistry {
+        return .{ .io = io, .gpa = gpa };
     }
 
+    /// stop 시 호출(모든 연결 스레드 join 후 = 동시 접근 없음)이라 락 없이 해제한다.
     pub fn deinit(self: *SubscriberRegistry) void {
         self.broker.deinit(self.gpa);
         self.outbound_of.deinit(self.gpa);
         self.* = undefined;
     }
 
-    /// 메인: `(surface_id, filter)`를 이 연결(`outbound`)로 구독한다. 한 연결은 subscriber_id **하나**를 재사용하므로
-    /// (재구독=필터 갱신, broker가 (id,surface)당 1개 유지), 이미 이 outbound에 발급된 id가 있으면 재사용하고 없으면 새로
-    /// 발급해 매핑한다. 반환=그 연결의 subscriber_id(5f-0b-3b가 응답에 실어 client가 unsubscribe에 쓴다). OOM만 error.
+    /// 메인(요청 dispatch): `(surface_id, filter)`를 이 연결(`outbound`)로 구독한다. 한 연결은 subscriber_id **하나**를
+    /// 재사용하므로(재구독=필터 갱신, broker가 (id,surface)당 1개 유지), 이미 이 outbound에 발급된 id가 있으면 재사용하고
+    /// 없으면 새로 발급해 매핑한다. 반환=그 연결의 subscriber_id(5f-0b-3b가 응답에 실어 client가 unsubscribe에 쓴다). OOM만 error.
     pub fn subscribe(self: *SubscriberRegistry, surface_id: u64, filter: cev.EventFilter, outbound: *OutboundChannel) std.mem.Allocator.Error!cev.SubscriberId {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const existing = self.idForOutbound(outbound);
         const id = existing orelse self.id_alloc.next();
         if (existing == null) try self.outbound_of.put(self.gpa, id, outbound);
@@ -304,21 +312,25 @@ pub const SubscriberRegistry = struct {
         return id;
     }
 
-    /// 메인: 이벤트를 `(surface_id, kind)`에 매칭하는 구독자들의 연결 outbound에 push한다(§9.5.2 이벤트 흐름). 프레임 바이트는
-    /// **`cross_gpa`**로 구독자마다 직렬화(각 outbound 프레임이 bytes를 소유·writer가 free). coalescible(navigated·load_state)은
-    /// `(surface,kind)` coalesce_key로 같은 큐서 최신이 옛것을 대체(백프레셔), 이산(dialog)은 key 없음. tag=surface_id(§8.5
-    /// surface-close/revoke purge 대상). 개별 구독자 push 실패(Full=느린 구독자 drop·QueueClosed=닫히는 연결)는 그 구독자만
-    /// 건너뛴다. 반환=실제 push 성공 수. **메인 전용**(락 없음).
+    /// 메인(KVO 이벤트): 이벤트를 `(surface_id, kind)`에 매칭하는 구독자들의 연결 outbound에 push한다(§9.5.2 이벤트 흐름).
+    /// 바이트는 **`cross_gpa`**로 락 밖에서 한 번 직렬화(구독자 무관 동일)하고, 락 아래선 구독자별 **dupe+push**만 한다(각
+    /// outbound 프레임이 bytes 소유·writer가 free). coalescible(navigated·loadState)은 `(surface,kind)` coalesce_key로 같은
+    /// 큐서 최신이 옛것 대체(백프레셔), 이산(dialog)은 key 없음. tag=surface_id(§8.5 surface-close/revoke purge 대상). 개별
+    /// push 실패(Full=느린 구독자 drop·QueueClosed=닫히는 연결)는 그 구독자만 건너뛴다. 반환=실제 push 성공 수.
     pub fn pushEvent(self: *SubscriberRegistry, cross_gpa: std.mem.Allocator, surface_id: u64, event: cev.Event) usize {
-        var buf: [max_event_fanout]cev.SubscriberId = undefined;
         const kind = std.meta.activeTag(event);
+        const coalesce_key: ?u64 = if (kind.isCoalescible()) coalesceKey(surface_id, kind) else null;
+        const template = cev.serializeEvent(cross_gpa, surface_id, event) catch return 0; // OOM=아무도 못 받음
+        defer cross_gpa.free(template);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var buf: [max_event_fanout]cev.SubscriberId = undefined;
         const n = self.broker.matching(surface_id, kind, &buf);
         std.debug.assert(n < max_event_fanout); // truncate=구독자 이벤트 유실. 실질 상한(≤max_connections)이라 도달 불가.
-        const coalesce_key: ?u64 = if (kind.isCoalescible()) coalesceKey(surface_id, kind) else null;
         var pushed: usize = 0;
         for (buf[0..n]) |id| {
             const ch = self.outbound_of.get(id) orelse continue; // 매핑 없는 id(구조적 불가)면 skip
-            const bytes = cev.serializeEvent(cross_gpa, surface_id, event) catch continue; // OOM=이 구독자만 skip
+            const bytes = cross_gpa.dupe(u8, template) catch continue; // 구독자별 소유 복사(OOM=이 구독자만 skip)
             ch.push(cross_gpa, .{ .bytes = bytes, .coalesce_key = coalesce_key, .tag = surface_id }) catch {
                 cross_gpa.free(bytes); // Full(느린 구독자)·QueueClosed(닫히는 연결) → 소유권 반환·해제 후 skip
                 continue;
@@ -328,9 +340,12 @@ pub const SubscriberRegistry = struct {
         return pushed;
     }
 
-    /// 메인: 연결 drop(§9.5.6) — 이 `outbound`에 묶인 구독자의 **모든** 구독을 broker·매핑에서 제거한다. 반환=제거된
-    /// (surface별) 구독 수. 5f-0b-3a-2 연결 수명 배선이 outbound free **전에** 호출해 매핑 dangling을 막는다. **메인 전용**.
+    /// **연결 스레드**(종료): 이 `outbound`에 묶인 구독자의 **모든** 구독을 broker·매핑에서 제거한다(§9.5.6). 반환=제거된
+    /// (surface별) 구독 수. 연결 스레드가 **outbound free 전에** leaf lock 아래 호출 → 메인 pushEvent와 배타라 dangling·UAF
+    /// 없음(purge 후 메인은 이 outbound를 못 찾음). 구독 없는 연결이면 no-op(0).
     pub fn purgeOutbound(self: *SubscriberRegistry, outbound: *OutboundChannel) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const id = self.idForOutbound(outbound) orelse return 0;
         const removed = self.broker.removeSubscriber(id);
         _ = self.outbound_of.remove(id);
@@ -340,9 +355,12 @@ pub const SubscriberRegistry = struct {
     /// 메인: surface close(§9.5.2 수명) — 그 surface의 모든 구독 제거. 반환=제거 수. (browser.closed 브로드캐스트 후
     /// 호출은 5f-0b-3c; outbound_of 매핑은 연결이 살아 있으면 유지 = 이 연결의 다른 surface 구독은 안 건드린다.)
     pub fn purgeSurface(self: *SubscriberRegistry, surface_id: u64) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.broker.removeSurface(surface_id);
     }
 
+    /// 비-locking 내부 헬퍼(호출처가 이미 mutex 보유) + 헤드리스 단위 테스트(단일 스레드)용. 라이브 경로는 절대 락 없이 안 부른다.
     fn idForOutbound(self: *SubscriberRegistry, outbound: *OutboundChannel) ?cev.SubscriberId {
         var it = self.outbound_of.iterator();
         while (it.next()) |e| {
@@ -416,6 +434,9 @@ pub const ControlServer = struct {
     /// 5f-0b-2b-2: 연결당 outbound 큐(응답+이벤트) 용량. 직렬 reader라 응답은 depth ~1이고, 실 소비자는 5f-0b-3 이벤트
     /// 버스트다(초과 push=Full → 이벤트 drop=subscriber-lagged, §9.5.6; 응답은 Full이면 연결 abandon). 64면 여유.
     outbound_capacity: usize = 64,
+    /// 5f-0b-3a-2: browser 이벤트 구독 레지스트리(leaf-mutex). 메인(pushEvent — 5f-0b-3c KVO 주입·subscribe — 5f-0b-3b
+    /// dispatch)과 연결 스레드(종료 시 self-`purgeOutbound`)가 공유한다. start가 init, connThread가 종료 시 purge, stop이 deinit.
+    subscriber_reg: SubscriberRegistry = undefined,
 
     /// 소켓을 bind하고 accept 스레드를 띄운다. **self는 이미 최종 주소에 있어야 한다.** bind 실패면 스레드 없이 에러.
     pub fn start(
@@ -447,6 +468,8 @@ pub const ControlServer = struct {
             // park-free, 위 필드 주석). 이 초기화가 유일한 max_connections 설정 지점 — start 후 필드 변경 금지(acceptLoop가
             // conns_mutex 아래 읽으므로 무동기 변경은 데이터 레이스). 라이브=16(app_host_abi max_pending), 테스트=각자 max_pending.
             .max_connections = max_pending,
+            // 5f-0b-3a-2: 이벤트 구독 레지스트리(leaf-mutex). 구조체 alloc은 items_gpa(메인 소유), 이벤트 바이트는 pushEvent가 cross_gpa로.
+            .subscriber_reg = SubscriberRegistry.init(io, items_gpa),
         };
         errdefer self.queue.deinit();
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
@@ -548,6 +571,7 @@ pub const ControlServer = struct {
         self.server.deinit();
         self.queue.deinit();
         self.in_flight.deinit(self.items_gpa);
+        self.subscriber_reg.deinit(); // 5f-0b-3a-2: 모든 연결 스레드 join 후(위) = 동시 접근 없음 → 락 없이 해제
         self.* = undefined;
     }
 
@@ -602,6 +626,7 @@ pub const ControlServer = struct {
         var outbound = OutboundChannel.init(self.io, self.outbound_capacity);
         const writer = std.Thread.spawn(.{}, writerThread, .{ self, conn.fd, &outbound }) catch {
             // writer spawn 실패 → 응답 write 경로 없음 → 이 연결 포기(reader 안 돌림). 정리 후 카운터 감소.
+            _ = self.subscriber_reg.purgeOutbound(&outbound); // serve 전이라 구독 0(no-op)이나 free 전 정리 불변식 유지
             outbound.deinit(self.cross_gpa);
             conn.deinit();
             self.connDone();
@@ -610,6 +635,9 @@ pub const ControlServer = struct {
         self.serveConnection(&conn, &outbound); // reader: auth 1회 + 요청 루프(응답을 outbound에 push)
         outbound.close(); // reader 종료 → writer가 남은 프레임 drain 후 popWait null로 종료
         writer.join(); // conn.fd write가 끝난 뒤에만 close(아래) — writer의 fd 사용과 경합 방지
+        // 5f-0b-3a-2: 연결 drop — 이 연결의 구독을 registry에서 제거(leaf lock). **outbound free 전에** 해야 메인
+        // pushEvent가 free된 outbound를 조회하는 UAF가 없다(purge와 pushEvent가 같은 leaf lock서 배타 — §9.5.6 realization).
+        _ = self.subscriber_reg.purgeOutbound(&outbound);
         outbound.deinit(self.cross_gpa); // writer가 다 drain했으면 no-op, 아니면 남은 프레임 bytes free
         conn.deinit();
         self.connDone();
@@ -796,7 +824,7 @@ test "OutboundChannel: writer가 popWait서 블록→메인 push로 소비·clos
 
 // ── SubscriberRegistry 단위(5f-0b-3a — 메인 전용·헤드리스, 스레드 없이 순수 로직) ──
 test "SubscriberRegistry: 매칭 fan-out + 필터 + 비매칭 surface 미전달 + notification 형태" {
-    var reg = SubscriberRegistry.init(testing.allocator);
+    var reg = SubscriberRegistry.init(std.testing.io, testing.allocator);
     defer reg.deinit();
     var ch_a = OutboundChannel.init(std.testing.io, 8);
     defer ch_a.deinit(testing.allocator);
@@ -828,7 +856,7 @@ test "SubscriberRegistry: 매칭 fan-out + 필터 + 비매칭 surface 미전달 
 }
 
 test "SubscriberRegistry: coalescible은 큐서 최신이 옛것 대체(coalesce), 이산(dialog)은 누적" {
-    var reg = SubscriberRegistry.init(testing.allocator);
+    var reg = SubscriberRegistry.init(std.testing.io, testing.allocator);
     defer reg.deinit();
     var ch = OutboundChannel.init(std.testing.io, 8);
     defer ch.deinit(testing.allocator);
@@ -850,7 +878,7 @@ test "SubscriberRegistry: coalescible은 큐서 최신이 옛것 대체(coalesce
 }
 
 test "SubscriberRegistry: 같은 outbound 재구독은 subscriber_id 재사용 + 필터 갱신 + 다중 surface 1매핑" {
-    var reg = SubscriberRegistry.init(testing.allocator);
+    var reg = SubscriberRegistry.init(std.testing.io, testing.allocator);
     defer reg.deinit();
     var ch = OutboundChannel.init(std.testing.io, 8);
     defer ch.deinit(testing.allocator);
@@ -870,7 +898,7 @@ test "SubscriberRegistry: 같은 outbound 재구독은 subscriber_id 재사용 +
 }
 
 test "SubscriberRegistry: purgeOutbound가 그 연결의 모든 구독·매핑 제거(다른 연결 무영향)" {
-    var reg = SubscriberRegistry.init(testing.allocator);
+    var reg = SubscriberRegistry.init(std.testing.io, testing.allocator);
     defer reg.deinit();
     var ch_a = OutboundChannel.init(std.testing.io, 8);
     defer ch_a.deinit(testing.allocator);
@@ -892,7 +920,7 @@ test "SubscriberRegistry: purgeOutbound가 그 연결의 모든 구독·매핑 �
 }
 
 test "SubscriberRegistry: purgeSurface가 그 surface 구독만 제거(연결 매핑·다른 surface 유지)" {
-    var reg = SubscriberRegistry.init(testing.allocator);
+    var reg = SubscriberRegistry.init(std.testing.io, testing.allocator);
     defer reg.deinit();
     var ch = OutboundChannel.init(std.testing.io, 8);
     defer ch.deinit(testing.allocator);
@@ -905,6 +933,44 @@ test "SubscriberRegistry: purgeSurface가 그 surface 구독만 제거(연결 �
     try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 20, .{ .navigated = "y" })); // 20 유지
     const f = ch.popWait().?;
     testing.allocator.free(f.bytes);
+}
+
+test "SubscriberRegistry(3a-2): 메인 pushEvent ∥ 연결 purgeOutbound/subscribe 동시 접근 무크래시(leaf-mutex, cross-thread)" {
+    const gpa = std.heap.c_allocator; // cross-thread
+    var reg = SubscriberRegistry.init(std.testing.io, gpa);
+    defer reg.deinit();
+    // 여러 outbound에 구독을 걸어두고(테스트 내내 살아있음), 한 스레드는 purge+재구독을 반복(연결 churn 모사), 메인은 계속
+    // 이벤트 push. leaf-mutex가 broker.subs·맵 mutation을 직렬화하지 못하면 데이터 레이스/크래시로 드러난다(여러 번 반복).
+    const N = 4;
+    var chans: [N]OutboundChannel = undefined;
+    for (0..N) |i| chans[i] = OutboundChannel.init(std.testing.io, 64);
+    defer for (0..N) |i| chans[i].deinit(gpa);
+    for (0..N) |i| _ = try reg.subscribe(@intCast(10 + i), cev.EventFilter.all, &chans[i]);
+
+    const Churner = struct {
+        reg: *SubscriberRegistry,
+        chans: [*]OutboundChannel,
+        n: usize,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            var r: usize = 0;
+            while (r < 3000) : (r += 1) {
+                const i = r % self.n;
+                _ = self.reg.purgeOutbound(&self.chans[i]); // 연결 drop 모사
+                _ = self.reg.subscribe(@intCast(10 + i), cev.EventFilter.all, &self.chans[i]) catch {}; // 재구독
+            }
+        }
+    };
+    var churner = Churner{ .reg = &reg, .chans = &chans, .n = N };
+    const th = try std.Thread.spawn(.{}, Churner.run, .{&churner});
+    // 메인: navigated(coalescible)를 계속 push → 각 큐는 coalesce로 ≤1 유지(Full 안 참). purge 사이엔 매칭 0(정상).
+    var k: usize = 0;
+    while (!churner.done.load(.acquire)) : (k += 1) {
+        _ = reg.pushEvent(gpa, @intCast(10 + (k % N)), .{ .navigated = "https://x" });
+    }
+    th.join();
+    try testing.expect(churner.done.load(.acquire)); // 무크래시 완주 = leaf-mutex 직렬화 성립
 }
 
 test "pending rendezvous: producer가 대기, consumer가 resolve하면 응답을 받는다(cross-thread)" {

@@ -854,6 +854,20 @@ private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonce
     return (navigateOk, getUrl)
 }
 
+// 1e-confirm-1c-2(테스트 전용 — 배경 스레드): **cap 없이** browser.navigate가 pane confirm-grant 흐름으로 성공하는지
+// 자동 증명한다. auth.self는 **cap_nonce 없이** selector(=surface_id)만 보내 self-origin으로 인증하고, browser.navigate를
+// 날린다 → 서버: 세션 cap 0 → needs_grant → handleNeedsGrant(env MARU_TEST_GRANT_DECISION 스텁) → approve면 grant 기록 +
+// 재-dispatch → op → drainBrowserOps 실행 → complete. 반환="true"(응답 ok)·"unexpected:…"·"error:…". 요청마다 새 연결(5e 스모크와 동형).
+private func runBrowserGrantSmokeClient(socketPath: String, sid: UInt64, navigateURL: String) -> String {
+    // cap_nonce 없는 auth.self(selector만) — 무-cap 세션. wire는 Zig parseAuthFrame(cap_nonce optional)을 미러링.
+    let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid)}}"
+    let navReq = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":\(sid),\"url\":\"\(navigateURL)\"}}"
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: navReq) {
+    case .ok(let line): return (browserCtlResult(line)?["ok"] as? Bool == true) ? "true" : "unexpected:\(line.prefix(120))"
+    case .err(let why): return why
+    }
+}
+
 // 5f-0b-3c/5f-3(테스트 전용): **지속 연결**로 subscribe→navigate(새 URL)→executeScript(alert)로 여러 이벤트 소스를 실제로
 // 발화시키고, 서버-발신 `browser.*` notification이 오는지 **집합으로 수집**한다. url KVO=navigated·isLoading KVO=loadState·
 // WKUIDelegate=dialog가 각 실 소스에서 pushEvent→outbound→writer→소켓 파이프라인을 타는지 자동 확인(3b 소켓·pushEvent
@@ -1620,6 +1634,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private nonisolated(unsafe) var browserCtlNavigateOkStore = "pending" // 소켓 browser.navigate 응답에 "ok":true 포함 여부.
     private nonisolated(unsafe) var browserCtlGetUrlStore = "pending" // 소켓 browser.getUrl 응답의 url(navigate한 data: URL 기대).
     private nonisolated(unsafe) var browserCtlEventsStore = "pending" // 5f-3: 구독 후 navigate+alert가 유발한 browser.* 이벤트 종류 집합(navigated/loadState/dialog).
+    // 1e-confirm-1c-2(MARU_TEST_GRANT_DECISION): **무-cap** browser.navigate가 pane confirm-grant 흐름(needs_grant→env approve→grant→op)으로 성공하는지("true"/진단).
+    private var didKickGrantSmoke = false
+    private nonisolated(unsafe) var browserGrantNavigateOkStore = "pending"
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
@@ -2737,6 +2754,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         drainControlServer()
         drainBrowserOps() // 5e-2b-2: 인가된 browser op을 WKWebView로 실행 + 완료 콜백(reap 포함, 매 tick).
         maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
+        maybeRunGrantSmoke() // 1e-confirm-1c-2 테스트 전용(MARU_TEST_GRANT_DECISION): 무-cap browser.navigate가 grant 흐름으로 성공하는지 1회 kick.
         restartFrameLoopTicksIfNeeded()
     }
 
@@ -2874,6 +2892,41 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func browserCtlResults() -> (navigateOk: String, getUrl: String, events: String) {
         browserCtlLock.lock(); defer { browserCtlLock.unlock() }
         return (browserCtlNavigateOkStore, browserCtlGetUrlStore, browserCtlEventsStore)
+    }
+
+    /// 1e-confirm-1c-2(**테스트 전용, MARU_TEST_GRANT_DECISION**): **무-cap** browser.navigate가 pane confirm-grant 흐름으로
+    /// 성공하는지 1회 kick한다. cap 발급 없이 auth.self(selector만)+navigate → 서버가 needs_grant → env 결정(approve면
+    /// grant 기록+재구동→op→ok / deny면 unauthorized). 배경 큐(메인 tick이 계속 돌며 drainBrowserOps로 op 완료). env
+    /// 미설정=무동작(프로덕션 무영향). MARU_TEST_BROWSER_CAP과 독립 — grant 스모크는 그 env 없이 이것만 켜고 돌린다.
+    private func maybeRunGrantSmoke() {
+        guard smokeMode, !didKickGrantSmoke, controlServerStarted else { return }
+        guard ProcessInfo.processInfo.environment["MARU_TEST_GRANT_DECISION"] != nil else { return }
+        var target: (surfaceId: UInt64, url: String)?
+        for surface in windows + (quick.map { [$0] } ?? []) {
+            if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 }) {
+                target = (wp.surfaceId, MaruWebPanelView.browserFixtureURL)
+                break
+            }
+        }
+        guard let t = target else { return } // 패널 아직 — 다음 tick 재시도.
+        didKickGrantSmoke = true
+        var pathBuf = [UInt8](repeating: 0, count: 512)
+        let pathLen = pathBuf.withUnsafeMutableBufferPointer { maru_macos_control_socket_path($0.baseAddress, $0.count) }
+        guard pathLen > 0 else { storeGrantSmokeResult("error:socket-path"); return }
+        let socketPath = String(decoding: pathBuf[0 ..< pathLen], as: UTF8.self)
+        DispatchQueue.global().async { [weak self] in
+            let r = runBrowserGrantSmokeClient(socketPath: socketPath, sid: t.surfaceId, navigateURL: t.url)
+            self?.storeGrantSmokeResult(r)
+        }
+    }
+
+    private nonisolated func storeGrantSmokeResult(_ v: String) {
+        browserCtlLock.lock(); browserGrantNavigateOkStore = v; browserCtlLock.unlock()
+    }
+
+    private func grantSmokeResult() -> String {
+        browserCtlLock.lock(); defer { browserCtlLock.unlock() }
+        return browserGrantNavigateOkStore
     }
 
     // 현재 activeSurface(= explicitSurface)를 한 번 tick하고 그린다. 세션별 forwarder만 쓰므로 호출자가
@@ -5109,6 +5162,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_fixture_url=\(wp?.browserFixtureUrl ?? "pending")
             browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
             browser_fixture_cookies=\(wp?.browserFixtureCookies ?? "pending")
+            browser_grant_navigate_ok=\(grantSmokeResult())
             browser_ctl_navigate_ok=\(browserCtlResults().navigateOk)
             browser_ctl_get_url=\(browserCtlResults().getUrl)
             browser_ctl_events=\(browserCtlResults().events)

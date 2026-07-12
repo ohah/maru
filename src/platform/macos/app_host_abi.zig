@@ -1889,9 +1889,57 @@ fn handleControlRequest(
         .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
         // 5f-0b-3b: 인가·유효한 browser.subscribe — 메인에서 SubscriberRegistry에 **동기 등록** + `{subscriber_id}` 응답.
         .subscribe => |s| handleSubscribe(server, pending, s),
-        // 1e-confirm-1c: 미grant valid 요청 — **1c-1은 우선 균일 unauthorized로 collapse**(behavior-preserving — 확인 모달
-        // 미배선). held-request(붙잡고 GrantPrompt→모달→승인 시 grant+재구동)는 1c-2. op.arg 없으므로 free 불요.
+        // 1e-confirm-1c-2: 미grant valid 요청 — 확인 결정(스텁 env)에 따라 grant 후 재구동 or unauthorized(§9.2 Model B).
+        .needs_grant => |g| handleNeedsGrant(server, pending, g, snapshot, now, now_ns),
+    }
+}
+
+/// 1e-confirm-1c-2: grant 확인 **결정 소스**. 스텁(env `MARU_TEST_GRANT_DECISION=approve|deny`)으로 held 흐름을 스모크
+/// 검증한다. 실 확인 모달(1e-confirm-2)이 이 자리를 대체한다. **env 미설정=`.none`**(확인 수단 없음 → needs_grant를
+/// unauthorized로 접음 = 1c-1 behavior-preserving·프로덕션 무영향 — grant 안 남).
+const GrantDecision = enum { none, approve, deny };
+fn stubGrantDecision() GrantDecision {
+    const v = std.c.getenv("MARU_TEST_GRANT_DECISION") orelse return .none;
+    const s = std.mem.span(v);
+    if (std.mem.eql(u8, s, "approve")) return .approve;
+    if (std.mem.eql(u8, s, "deny")) return .deny;
+    return .none;
+}
+
+/// 1e-confirm-1c-2: 미grant valid 요청(§9.2 Model B) 처리. **승인** → `control_pane_grant_store`에 grant 기록 후 요청을
+/// **재-dispatch**(이제 grant가 인가) → 그 결과를 기존 라우팅(op=`enqueueBrowserOp`[§5-async defer]·subscribe=
+/// `handleSubscribe`·immediate=resolve)으로 처리. **거부/수단없음** → 균일 unauthorized. 1c-2는 env 스텁으로 결정 —
+/// 실 확인 모달·held-across-ticks는 2. 재-dispatch가 defensively 또 needs_grant면(grant 직후라 도달 안 함) unauthorized로
+/// 접어 grant 루프를 막는다. **메인 스레드 전용**(grant store·dispatch·op 큐 전부 메인, §8.8).
+fn handleNeedsGrant(
+    server: *control_server_mod.ControlServer,
+    pending: *control_server_mod.PendingRequest,
+    g: control_browser.GrantRequest,
+    snapshot: control_surface.CollectorSnapshot,
+    now: u64,
+    now_ns: i128,
+) void {
+    if (stubGrantDecision() != .approve) {
+        // 거부 or 확인 수단 없음(env 미설정=프로덕션) → 균일 unauthorized(1c-1 유지).
+        const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+        return server.resolveRequest(pending, resp);
+    }
+    // 승인: grant 기록(용량 초과=Full이면 grant 못 남 → 방어적 unauthorized).
+    control_pane_grant_store.grant(.{ .pane = g.pane, .target = g.target, .scope = g.scope }) catch {
+        const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+        return server.resolveRequest(pending, resp);
+    };
+    // 재-dispatch: 이제 grant가 인가 → .browser/.subscribe/.immediate. 기존 라우팅 재사용.
+    const disp2 = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
+        server.resolveRequest(pending, null);
+        return;
+    };
+    switch (disp2) {
+        .immediate => |resp| server.resolveRequest(pending, resp),
+        .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
+        .subscribe => |s| handleSubscribe(server, pending, s),
         .needs_grant => {
+            // 방어(도달 안 함 — grant를 막 남김): grant 루프 방지로 unauthorized.
             const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
             server.resolveRequest(pending, resp);
         },
@@ -2087,6 +2135,9 @@ pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
     if (!control_server_active) return;
     const server = &control_server_storage;
     _ = server.subscriber_reg.pushSurfaceClosed(server.cross_gpa, surface_id);
+    // 1e-confirm-1c-2(§9.2 수명): 이 surface가 걸린 pane-bound grant를 무효화한다(pane이든 target이든). pane close=그
+    // 에이전트 소멸, target close=제어 대상 소멸 — 어느 쪽이든 grant 무의미. 재생성 surface(새 generation)는 재확인 필요.
+    control_pane_grant_store.removeSurface(surface_id);
 }
 
 pub export fn maru_macos_control_server_stop() void {

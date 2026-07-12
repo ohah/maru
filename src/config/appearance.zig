@@ -174,6 +174,9 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
     // ANSI 16색을 풀고 min_contrast(WCAG 명암비 하한)를 적용한다. 각 인덱스의 base는 config override(preset/theme.palette.N)가
     // 있으면 그 색, 없으면 xterm 표준색(color.xterm256)이다. 그 위에 contrastFloor로 배경 대비 하한을 강제한다 — 밝은 배경에서
     // 대비가 약한 색을 색상 보존한 채 어둡게 보정해 가독성을 확보한다(근거·정책: docs/configuration.md theme.min-contrast).
+    // **방향은 `.darken_only`** — 이 팔레트는 전경뿐 아니라 **배경**(SGR 40~47, metal_frame.packBackground)과 OSC 4 질의
+    // 응답으로도 나가므로 밝히는 보정을 넣으면 다크 테마의 ANSI 배경색이 회색으로 뜬다. 어두운 배경에서 안 보이는
+    // **전경**은 렌더가 per-cell로 양방향(`.both`) 보정한다(metal_frame.packForeground — 전경은 배경으로 안 샌다).
     //
     // null 유지 규칙: config override가 **없고** floor가 실제로 아무것도 안 바꾼 인덱스는 null로 남긴다(그 인덱스는 렌더에서
     // xterm256으로 폴백). 이렇게 하면 배경이 충분히 어두울 때(모든 번들 다크 프리셋 — contrastFloor 주석의 활성 경계)·
@@ -183,10 +186,10 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
     var palette: [16]?color.Rgb = .{null} ** 16;
     for (config.palette, 0..) |maybe, i| {
         if (maybe) |hex| {
-            palette[i] = contrastFloor(try parseHexColor(hex), bg_lum, min_contrast);
+            palette[i] = contrastFloor(try parseHexColor(hex), bg_lum, min_contrast, .darken_only);
         } else {
             const base = color.xterm256(@intCast(i));
-            const floored = contrastFloor(base, bg_lum, min_contrast);
+            const floored = contrastFloor(base, bg_lum, min_contrast, .darken_only);
             if (!std.meta.eql(floored, base)) palette[i] = floored; // floor가 바꾼 default만 seed(안 바뀌면 null=xterm256 폴백)
         }
     }
@@ -227,9 +230,10 @@ fn lighten(rgb: color.Rgb, delta: u8) color.Rgb {
 
 // ── ANSI 팔레트 대비 하한(theme.min-contrast) ─────────────────────────────────────────────────────────────
 // 라이트 테마·기본 xterm 팔레트는 밝은 배경에서 대비가 약한 색(밝은 노랑·초록·흰색 등)이 있어 안 읽힌다. contrastFloor가
-// 배경 대비 WCAG 명암비 하한을 강제해 그런 색을 색상 보존한 채 어둡게 보정한다. **수식·탐색의 단일 출처는
-// color.zig의 WCAG 대비 유틸**로 이동했다 — 렌더 per-cell 하한(metal_frame의 256색·truecolor 보정)과 이
-// resolve 시점 16색 선보정이 같은 함수를 공유한다(여기는 소비처, 기존 호출·테스트용 별칭만 유지).
+// 배경 대비 WCAG 명암비 하한을 강제해 그런 색을 색상 보존한 채 어둡게 보정한다(여기는 `.darken_only` — 이 팔레트는
+// ANSI 배경색·OSC 4 응답으로도 나가 밝히면 안 된다; color.FloorDirection). **수식·탐색의 단일 출처는
+// color.zig의 WCAG 대비 유틸**로 이동했다 — 렌더 per-cell 전경 하한(metal_frame, 방향은 `.both`)과 이
+// resolve 시점 16색 선보정이 같은 함수를 방향만 달리 공유한다(여기는 소비처, 기존 호출·테스트용 별칭만 유지).
 const relativeLuminance = color.relativeLuminance;
 const contrastRatio = color.contrastRatio;
 const contrastFloor = color.contrastFloor;

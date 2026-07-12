@@ -39,6 +39,7 @@ const maru = @import("maru");
 const cs = @import("control_socket.zig");
 const cp = maru.session.control_plane;
 const cap = maru.session.control_capability;
+const co = maru.session.control_outbound; // 5f-0b-2b: per-connection outbound 프레임 큐(순수 5f-0b-1)
 
 // auth 프레임 cap_nonce의 wire 길이(1a)와 capability nonce 길이(1e)가 어긋나면 fd payload↔auth 프레임이 안 맞는다.
 // 1a는 capability를 import하지 않으므로(레이어 base) 두 상수를 각자 두되, 둘 다 import하는 이 L4에서 comptime으로 못박는다.
@@ -183,6 +184,75 @@ pub const ControlRequestQueue = struct {
         self.head = 0;
         self.not_empty.broadcast(self.io);
         self.not_full.broadcast(self.io);
+    }
+};
+
+/// 5f-0b-2b-2: 연결당 **스레드-안전 outbound 채널**(응답 + 이벤트 통합, §9.5.1). 순수 `OutboundQueue`(5f-0b-1 —
+/// coalesce/purge/bounded mechanism)를 `Io.Mutex` + `not_empty` condition + `closed` 플래그로 감싼다. **메인**이 응답/
+/// 이벤트를 `push`(coalesce)·`purge`(revoke)하고, 연결의 **writer 스레드**가 `popWait`로 블록-대기하며 프레임을 꺼내
+/// 소켓에 write한다(β 배선). `close`가 대기 writer를 깨워 종료시킨다.
+///
+/// **설계(§9.5.1 realization)**: 초판 §9.5.1은 "연결 스레드 1개 + poll([socket, wakeup self-pipe])"을 스케치했으나,
+/// 구현은 **reader+writer 2-스레드**로 realize한다 — writer가 이 채널의 condition에 블록-대기(popWait)해 socket-read와
+/// outbound-write를 각 스레드가 나눠 맡는다. self-pipe/poll fd 저글링보다 **검증된 `ControlRequestQueue`의 Io.Mutex/
+/// Condition/close-cancel 패턴을 outbound 방향으로 재사용**하는 게 안전하다(2b-2-β가 두 스레드를 배선; α는 이 primitive만).
+/// 순수 `OutboundQueue`가 mechanism(coalesce/purge/bounded)을, 이 wrapper가 스레드 안전·블로킹 수명을 소유한다.
+pub const OutboundChannel = struct {
+    io: std.Io,
+    q: co.OutboundQueue,
+    mutex: std.Io.Mutex = .init,
+    not_empty: std.Io.Condition = .init,
+    closed: bool = false,
+
+    pub fn init(io: std.Io, max: usize) OutboundChannel {
+        return .{ .io = io, .q = co.OutboundQueue.init(max) };
+    }
+
+    pub fn deinit(self: *OutboundChannel, gpa: std.mem.Allocator) void {
+        self.q.deinit(gpa); // 남은 프레임 bytes free
+        self.* = undefined;
+    }
+
+    /// 메인: 프레임 push(coalesce). `closed`면 QueueClosed(호출처가 frame.bytes free). `Full`이면 error(호출처 정책:
+    /// 응답=연결 종료·이벤트=drop/subscriber-lagged, §9.5.6). 성공 시 대기 writer를 깨운다.
+    pub fn push(self: *OutboundChannel, gpa: std.mem.Allocator, frame: co.Frame) error{ Full, OutOfMemory, QueueClosed }!void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.QueueClosed;
+        try self.q.push(gpa, frame); // Full/OOM 전파(소유권은 호출자에 남음)
+        self.not_empty.signal(self.io);
+    }
+
+    /// 메인: revoke/surface-close 시 tag 매칭 프레임 폐기(§8.5). 폐기 개수 반환.
+    pub fn purge(self: *OutboundChannel, gpa: std.mem.Allocator, tag: u64) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.q.purge(gpa, tag);
+    }
+
+    /// writer 스레드: 프레임이 있으면 pop, 없으면 `not_empty` 대기. **closed + 빈** 이면 null(writer 종료 신호). 반환
+    /// Frame.bytes 소유권=writer(socket write 후 free). closed여도 남은 프레임은 다 drain한 뒤 null(응답 유실 방지).
+    pub fn popWait(self: *OutboundChannel) ?co.Frame {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        while (self.q.len() == 0 and !self.closed) self.not_empty.waitUncancelable(self.io, &self.mutex);
+        if (self.q.len() == 0) return null; // closed + 빈 → 종료
+        return self.q.pop();
+    }
+
+    /// 메인: 채널 종료 — 대기 writer를 깨워(broadcast) 남은 프레임 drain 후 종료(null)하게 한다.
+    pub fn close(self: *OutboundChannel) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.closed = true;
+        self.not_empty.broadcast(self.io);
+    }
+
+    /// 메인: push 전 정책 판단용(§9.5.6 — 응답 push 전 Full 임박이면 연결 종료 선제).
+    pub fn isFull(self: *OutboundChannel) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.q.isFull();
     }
 };
 
@@ -526,6 +596,56 @@ test "queue: close는 대기 pending을 cancel하고 이후 push를 거부한다
     try testing.expectEqual(PendingRequest.State.cancelled, p1.state); // 큐에 남아 있던 pending은 cancel됨
     var p2: PendingRequest = .{ .request_bytes = "b", .selector = null, .io = std.testing.io };
     try testing.expectError(error.QueueClosed, q.push(&p2)); // closed 후 push 거부
+}
+
+fn obFrame(gpa: std.mem.Allocator, s: []const u8, key: ?u64, tag: u64) !co.Frame {
+    return .{ .bytes = try gpa.dupe(u8, s), .coalesce_key = key, .tag = tag };
+}
+
+test "OutboundChannel: push/popWait FIFO + coalesce + push-after-close QueueClosed" {
+    var ch = OutboundChannel.init(std.testing.io, 8);
+    defer ch.deinit(testing.allocator);
+    try ch.push(testing.allocator, try obFrame(testing.allocator, "r1", null, 0)); // 응답(tag 0)
+    try ch.push(testing.allocator, try obFrame(testing.allocator, "url=a", 100, 5)); // 이벤트(coalesce 100)
+    try ch.push(testing.allocator, try obFrame(testing.allocator, "url=b", 100, 5)); // coalesce → 위치0 replace
+    const f1 = ch.popWait().?;
+    defer testing.allocator.free(f1.bytes);
+    try testing.expectEqualStrings("r1", f1.bytes); // FIFO
+    const f2 = ch.popWait().?;
+    defer testing.allocator.free(f2.bytes);
+    try testing.expectEqualStrings("url=b", f2.bytes); // coalesce된 최신
+    // close 후 push는 QueueClosed(frame 소유권 호출자 유지).
+    ch.close();
+    const f = try obFrame(testing.allocator, "x", null, 0);
+    try testing.expectError(error.QueueClosed, ch.push(testing.allocator, f));
+    testing.allocator.free(f.bytes);
+}
+
+test "OutboundChannel: writer가 popWait서 블록→메인 push로 소비·close시 남은 것 drain 후 종료(cross-thread)" {
+    const gpa = std.heap.c_allocator; // cross-thread
+    var ch = OutboundChannel.init(std.testing.io, 8);
+    defer ch.deinit(gpa);
+    const Writer = struct {
+        ch: *OutboundChannel,
+        got: usize = 0,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            while (self.ch.popWait()) |f| { // 프레임 있으면 소비, closed+빈이면 null로 종료
+                std.heap.c_allocator.free(f.bytes);
+                self.got += 1;
+            }
+        }
+    };
+    var w = Writer{ .ch = &ch };
+    const th = try std.Thread.spawn(.{}, Writer.run, .{&w});
+    try ch.push(gpa, try obFrame(gpa, "a", null, 0)); // writer가 블록서 깨어나 소비
+    try ch.push(gpa, try obFrame(gpa, "b", null, 0));
+    try ch.push(gpa, try obFrame(gpa, "c", null, 0));
+    ch.close(); // 남은 것 drain 후 null 종료(close가 큐 유실 안 함)
+    th.join();
+    try testing.expect(w.done.load(.acquire));
+    try testing.expectEqual(@as(usize, 3), w.got); // 3개 전부 소비
 }
 
 test "pending rendezvous: producer가 대기, consumer가 resolve하면 응답을 받는다(cross-thread)" {

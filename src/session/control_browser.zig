@@ -14,8 +14,9 @@
 //!      + 각 params 파서(navigate `{id,url}`·getUrl `{id}`·executeScript `{id,script}`) + result 직렬화
 //!      (navigate `{ok}`·getUrl `{url}`·executeScript `{result}`). W3C WebDriver 병렬 명령을 **자체 enum + DTO**로
 //!      정의해 내부 상태와 격리(§3 정신 — 내부 rename이 wire를 안 흔들게). `args`(executeScript)는 5d.
-//!   ② `dispatchBrowser`: 요청 한 줄 + 주입 snapshot + 주입 `caller_cap`(라이브 서버가 nonce→Capability lookup해
-//!      넘김, 1e) → `BrowserDispatch`(게이트 실패=`err` 응답 바이트 / 통과=`op` 실행 op). **정확한 보안 순서**(아래).
+//!   ② `dispatchBrowser`: 요청 한 줄 + 주입 snapshot + 주입 `caller_caps`(세션 누적 cap **집합** — 라이브 서버가 각
+//!      nonce→Capability lookup해 넘김, 1e·5f-4a) → `BrowserDispatch`(게이트 실패=`err` 응답 바이트 / 통과=`op` 실행 op).
+//!      집합 중 **하나라도** target+method 인가하면 통과(§9.5.6 ③). **정확한 보안 순서**(아래).
 //!      **5e**: 옛 skeleton(`internal_error "not implemented (5d)"`)을 **`BrowserOp` 반환**으로 교체 — 모든 게이트를
 //!      통과한 인가·유효 요청을 L4가 §5-async marshal → Swift `BrowserControl`이 WKWebView API 호출.
 //!   ③ authz(§8.3): `browser.*`→`ScopeClass.browser`(1e `methodRequiredScope`가 단일 출처). browser cap 없거나
@@ -355,11 +356,12 @@ pub const BrowserDispatch = union(enum) {
     subscribe: BrowserSubscribe,
 };
 
-/// `browser.*` 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot + 주입 `caller_cap`으로 처리한다. 게이트 실패면
-/// `.err`(응답 바이트, gpa-owned), 통과면 `.op`(인가·유효한 실행 op — L4가 marshal). OOM만 error로 전파. caller가
-/// `.err` 또는 `.op.arg`를 free한다.
+/// `browser.*` 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot + 주입 `caller_caps`(세션 누적 cap **집합**)로 처리한다.
+/// 게이트 실패면 `.err`(응답 바이트, gpa-owned), 통과면 `.op`(인가·유효한 실행 op — L4가 marshal). OOM만 error로 전파.
+/// caller가 `.err` 또는 `.op.arg`를 free한다.
 ///
-/// `caller_cap`은 라이브 서버(L4)가 소켓 auth frame의 nonce를 1e `lookupByNonce`해 넘긴 `Capability`(null=cap 없음).
+/// `caller_caps`는 라이브 서버(L4)가 소켓 세션의 각 nonce(auth.self + auth.grant 누적)를 1e `lookupByNonce`해 넘긴
+/// `Capability` **집합**(빈=cap 없음, 5f-4a §9.5.6 ③ — **하나라도** 인가하면 통과, 각 cap은 single-scope 유지).
 /// authz는 `requested_surface_id=target id`(cap이 이 web surface에 묶였는지), `requested_generation=cap.generation`.
 /// **browser cap의 anchor는 selector(에이전트 자기 surface)가 아니라 target(제어 대상 web surface)** — dispatchAuthenticated가
 /// browser.*를 이 함수로 위임하며 selector 앵커를 안 쓴다(§9.3). `now`는 TTL 판정 시각.
@@ -447,7 +449,7 @@ pub fn browserOpFromRequest(
     const arg: []const u8 = switch (bmethod) {
         .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
         .get_url => try gpa.dupe(u8, ""), // {id}만 — 인자 없음(빈 슬라이스도 dupe해 free 규약 일관)
-        .get_cookies => try gpa.dupe(u8, ""), // {id}만 — Swift가 surface의 WKHTTPCookieStore 전체를 읽음(인자 없음)
+        .get_cookies => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 surface 현재 문서 host의 쿠키를 읽음(22차 [0] host 필터, 인자 없음)
         .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
         .subscribe => unreachable, // 위에서 이미 분기
     };

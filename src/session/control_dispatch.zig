@@ -112,20 +112,27 @@ fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.
     return cp.serializeError(gpa, id, code, code.defaultMessage(), null);
 }
 
-/// **1e-core: capability 인가 배선.** auth 프레임의 `{selector, cap_nonce}`(1a `parseAuthFrame`)와 라이브
-/// `CapabilityStore`(L4가 소유·주입)로 요청의 `(caller_surface_id, scope)`를 판정한 뒤 read-only 라우터에 넘긴다.
-/// `dispatchReadOnly`가 auth를 **인자로 주입**받던 것을, 그 인자를 capability로 **발급**하는 상위 래퍼다(1d 헤더 §범위).
+/// **1e-core: capability 인가 배선.** auth 프레임의 selector + **세션 누적 cap 집합**(`cap_nonces`, 5f-4a — §9.5.6 ③
+/// `auth.self` cap + 반복 `auth.grant`)과 라이브 `CapabilityStore`(L4가 소유·주입)로 요청의 `(caller_surface_id, scope)`를
+/// 판정한 뒤 read-only 라우터에 넘긴다. `dispatchReadOnly`가 auth를 **인자로 주입**받던 것을, 그 인자를 capability로
+/// **발급**하는 상위 래퍼다(1d 헤더 §범위).
 ///
 /// 경로(먼저 파싱 → method로 분기):
-///  - **`browser.*`(nonce 유무 무관, 5e)**: `control_browser.browserOpFromRequest`에 위임(cap은 nonce면 lookup, 없으면
-///    null). browser cap의 anchor는 selector가 아니라 target web surface(params.id). cap 부재/nonce 부재/deny 전부
-///    **균일 unauthorized**(리뷰 [2] — nonce 유무로 갈리면 §8.3 위배 + browser.* 존재 oracle). 게이트 통과면 `.browser` op.
-///  - `cap_nonce == null`(비-browser): 기존 self-origin 경로 — `caller = selector orelse 0`, `scope = .self`
-///    (§8.4 A2b — maru 밖/no-cap shell은 자기 surface metadata만). 라이브 동작 불변(회귀 없음).
-///  - `cap_nonce` 제시(비-browser): `control_capability.resolve`(store lookup → authorize → 균일 unauthorized)로 판정.
-///    grant면 capability가 실은 `(surface_id, scope)`로 read-only 라우터를 태우고, deny면 **균일 `unauthorized`**
-///    (§8.3 oracle 방지 — resolve가 모든 deny 이유를 접는다). resolve는 method↔scope를 검사하므로 요청 method가
-///    필요해 1a로 한 번 파싱한다(라우터가 다시 파싱하지만 로컬 소켓이라 이 이중 파싱은 무시할 비용, 라우터 단일화 유지).
+///  - **`browser.*`(cap 유무 무관, 5e)**: 세션 cap 집합을 `Capability` 집합으로 lookup해 `control_browser.
+///    browserOpFromRequest`에 위임(**하나라도** target+method 인가하면 통과 — 5f-4a 누적). browser cap의 anchor는
+///    selector가 아니라 target web surface(params.id). cap 부재/deny 전부 **균일 unauthorized**(리뷰 [2] — §8.3 위배 +
+///    browser.* 존재 oracle 방지). 게이트 통과면 `.browser` op / `.subscribe`(5f-0b-3b).
+///  - **비-browser**: **ambient self-origin(§8.4 A2b — `scope=.self`, anchor=selector)은 세션 내내 항상 유효**하고, 누적
+///    cap이 권한을 *더한다*(cap 제시가 self-access를 revoke하지 않음 — **22차 [1]**; 옛 singular 모델은 cap 제시 시
+///    self 폴백을 잃었다). `resolveAny`(store lookup → authorize → 균일 unauthorized)로 집합 중 하나라도 이 method를
+///    인가하면 그 `(surface_id, scope)`로 라우팅(metadata=라우터·non-metadata 미배선=method_not_found), 아무 cap도
+///    인가 못 하면 **self-origin 폴백**(no-cap 세션과 바이트 동일 — over-grant 없음). deny 이유는 절대 노출 안 됨(§8.3).
+///    resolve는 method↔scope를 검사하므로 method가 필요해 1a로 한 번 파싱한다(라우터가 다시 파싱하지만 로컬 소켓이라 무시할 비용).
+///
+/// **⚠️ 22차 [2] 알려진 한계(미배선 게이트·fail-closed)**: `resolveAny`는 집합에서 **첫** 인가 cap의 scope를 반환한다
+/// (최광 아님). 한 세션이 metadata:all·metadata:self를 **둘 다** 누적하면(라이브 fd 다중발급 필요 — 미배선) grant 순서에
+/// 따라 좁은 scope가 이겨 sessions.list가 인가된 것보다 **적게** 반환할 수 있다. 방향이 **fail-closed**(절대 over-grant
+/// 아님)이고 다중 metadata cap 누적 경로가 아직 없어 지금 도달 불가라, 최광-선택은 라이브 발급 착수 시 함께 배선한다.
 ///
 /// **non-metadata cap(browser/write/read-output/bind)**: resolve는 인가하지만 그 method의 **라이브 dispatch가 아직
 /// 없다**(browser=5e·write=2a·read-output capture=1f 배선 대기). 이 경우 **균일 `method_not_found`**로 접는다 —
@@ -195,21 +202,24 @@ pub fn dispatchAuthenticated(
         };
     }
 
-    // ── 비-browser + cap 없음: 기존 self-origin 경로(회귀 없음). 파싱한 req를 routeReadOnly에 직접 넘긴다(재파싱 없음). ──
-    if (cap_nonces.len == 0)
-        return .{ .immediate = try routeReadOnly(gpa, req, snapshot, selector orelse 0, .self) };
-
-    // ── 비-browser + cap: metadata resolve 경로(anchor=selector). 5f-4a: 집합 중 하나라도 인가(resolveAny). ──
+    // ── 비-browser. **ambient self-origin(§8.4 A2b)은 세션 내내 항상 유효하고, 누적 cap이 권한을 *더한다*(cap 제시가
+    //    self-access를 revoke하지 않음 — 22차 [1]).** 누적 cap 중 하나가 이 method를 인가하면 그 (surface, scope)로
+    //    라우팅하고, 아무 cap도 인가 못 하면(빈 집합 포함) self-origin 폴백. 폴백은 no-cap 세션과 **바이트 동일** 동작
+    //    (anchor=selector·scope=.self — 자기 surface metadata만, §8.4 tty 게이트가 selector를 검증)이라 over-grant 없다. ──
     const anchor = selector orelse 0;
-    switch (cap.resolveAny(store, cap_nonces, anchor, 0, req.method, now)) {
-        .unauthorized => return .{ .immediate = try errorResponse(gpa, req.id, .unauthorized) },
-        .granted => |g| {
-            // metadata → 파싱한 req로 read-only 라우팅(재파싱 없음). non-metadata(write/read-output/bind) → 미배선이라
-            // method_not_found(라우터 우회 — capture unauthorized 특수처리 회피, 리뷰 [4]). browser는 위에서 이미 분기.
-            if (g.metadataScope()) |ms| return .{ .immediate = try routeReadOnly(gpa, req, snapshot, g.surface_id, ms) };
-            return .{ .immediate = try errorResponse(gpa, req.id, .method_not_found) };
-        },
+    if (cap_nonces.len > 0) {
+        switch (cap.resolveAny(store, cap_nonces, anchor, 0, req.method, now)) {
+            .granted => |g| {
+                // metadata → 파싱한 req로 read-only 라우팅(재파싱 없음). non-metadata(write/read-output/bind) → 미배선이라
+                // method_not_found(라우터 우회 — capture unauthorized 특수처리 회피, 리뷰 [4]). browser는 위에서 이미 분기.
+                if (g.metadataScope()) |ms| return .{ .immediate = try routeReadOnly(gpa, req, snapshot, g.surface_id, ms) };
+                return .{ .immediate = try errorResponse(gpa, req.id, .method_not_found) };
+            },
+            .unauthorized => {}, // 어떤 cap도 이 method를 인가 못 함 → ambient self-origin 폴백(아래). deny로 접지 않음(22차 [1]).
+        }
     }
+    // self-origin 폴백: no-cap이거나 누적 cap이 이 method를 인가 못 함. ambient §8.4 self-metadata(회귀 없음).
+    return .{ .immediate = try routeReadOnly(gpa, req, snapshot, anchor, .self) };
 }
 
 /// params 오류(shape/타입/범위)를 하나로 접는 sentinel — 호출자가 invalid_params로 매핑한다.
@@ -546,23 +556,33 @@ test "dispatchAuthenticated: metadata:window cap(surface 10) → 창 A(10,11)만
     try testing.expectEqualSlices(u64, &.{ 10, 11 }, ids.items);
 }
 
-test "dispatchAuthenticated: 미지 nonce → 균일 unauthorized(store 부재 = default-deny)" {
+test "dispatchAuthenticated(22차 [1]): 미지 nonce는 아무 권한도 안 더함 → ambient self-origin으로 폴백(자기 surface만)" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    // 빈 store(라이브 앱의 fd 발급 전 상태)에 nonce 제시 → unauthorized.
+    // 빈 store(라이브 앱의 fd 발급 전 상태)에 미지 nonce 제시 → cap이 아무것도 인가 못 함. 그러나 self-origin ambient
+    // access는 유지(22차 [1] — 유효 cap이 아니면 revoke도 elevate도 안 함) → 자기 surface(selector=10)만. **넓은 scope
+    // 상승 없음**(전체 리스트 아님 — 미지 cap이 default-deny인 건 그대로, 단 ambient self는 안 잃음).
     const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_unknown, &store);
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(testing.allocator);
+    try listIds(wire, &ids);
+    try testing.expectEqualSlices(u64, &.{10}, ids.items); // self scope만 — 미지 cap이 metadata:all로 elevate 안 함
 }
 
-test "dispatchAuthenticated: cap surface≠제시 anchor → unauthorized(surface_mismatch 균일 접힘)" {
+test "dispatchAuthenticated(22차 [1]): cap surface≠anchor는 그 cap scope로 상승 안 함 → self-origin 폴백(자기 surface만)" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    // cap은 surface 20에 묶였는데 caller가 anchor 10을 주장 → surface_mismatch → 균일 unauthorized.
+    // cap은 surface 20에 묶인 metadata:all인데 caller가 anchor 10을 주장 → surface_mismatch로 이 cap은 인가 못 함.
+    // self-origin 폴백 → 자기 surface(10)만. **핵심 보안**: surface 20용 cap이 anchor 10에서 metadata:all(전체 열거)로
+    // 새지 않는다(폴백은 self scope=[10]이지 all=[10,11,20,30]이 아님).
     try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 20, .generation = 0, .scope = .{ .metadata = .all } });
     const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 10, n_all, &store);
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(testing.allocator);
+    try listIds(wire, &ids);
+    try testing.expectEqualSlices(u64, &.{10}, ids.items); // self만 — surface_mismatch cap이 all로 elevate 안 함
 }
 
 // 5e: browser.*는 control_browser에 위임(anchor=target web surface, selector 무관) → 모든 게이트 통과면 **.browser op**.
@@ -586,10 +606,34 @@ test "dispatchAuthenticated 5e: browser cap + browser.navigate(web) → .browser
     const w_deny = try authDispatch(req, 11, n_all, &store);
     defer testing.allocator.free(w_deny);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_deny));
-    // browser cap으로 sessions.list(metadata, 비-browser 경로) → scope 불충족 → unauthorized.
-    const w_cross = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 11, n_browser, &store);
-    defer testing.allocator.free(w_cross);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_cross));
+    // browser cap으로 sessions.list(metadata, 비-browser 경로): cap이 metadata를 인가 못 하나 **ambient self-origin
+    // 폴백**(22차 [1] — cap 제시가 self-access를 revoke하지 않음) → 자기 surface(selector=11)만 반환(성공, unauthorized 아님).
+    const w_self = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 11, n_browser, &store);
+    defer testing.allocator.free(w_self);
+    var pm_self = try cp.parseMessage(testing.allocator, w_self);
+    defer pm_self.deinit();
+    try testing.expect(pm_self.message == .response and pm_self.message.response.result != null); // self-origin 성공
+}
+
+// 22차 [1] 회귀: auth.self(no cap, self-origin) 세션이 auth.grant로 cap을 **누적**해도 자기 surface metadata를 계속
+// 읽을 수 있어야 한다(옛 singular 모델은 cap 하나만 제시해도 self 폴백을 잃어 unauthorized였다 — cap은 권한을 *더함*).
+test "dispatchAuthenticated(22차 [1]): browser cap 누적 후에도 self-origin metadata 폴백 유지(revoke 아님)" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, n_browser, .{ .surface_id = 11, .generation = 0, .scope = .browser });
+    const list = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
+
+    // (a) cap 없음(no-cap shell): self-origin → 자기 surface(10)만.
+    const w_nocap = try authDispatch(list, 10, null, &store);
+    defer testing.allocator.free(w_nocap);
+    // (b) browser cap 누적: self-origin 폴백은 여전히 유효 → (a)와 **바이트 동일**(cap이 metadata를 안 건드림).
+    const w_cap = try authDispatch(list, 10, n_browser, &store);
+    defer testing.allocator.free(w_cap);
+    try testing.expectEqualStrings(w_nocap, w_cap); // 누적이 self-metadata를 revoke하지 않음
+    // 둘 다 성공 응답(자기 surface 10 포함).
+    var pm = try cp.parseMessage(testing.allocator, w_cap);
+    defer pm.deinit();
+    try testing.expect(pm.message == .response and pm.message.response.result != null);
 }
 
 // 5f-4a cap 누적(§9.5.6 ③): 세션이 cap 여러 개를 보유하면 요청은 그중 **하나라도** 인가하면 통과한다. navigate(browser)와

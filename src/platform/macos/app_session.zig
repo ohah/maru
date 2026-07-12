@@ -985,6 +985,10 @@ const QuitDecision = enum(u32) {
     cancelled = 2, // 사용자가 "취소" — host가 NSApp.reply(false)
 };
 
+/// 1e-confirm-2b: browser grant 확인 모달의 결정 latch(§9.2 Model B). named 타입이라 field·takeGrantDecision 반환이 같은
+/// 타입을 공유한다(익명 struct는 매 리터럴이 별개 타입이라 불가). app_host_abi.drainGrantPrompts가 async_id로 head와 대조.
+pub const GrantConfirmDecision = struct { async_id: u64, approved: bool };
+
 /// 닫기 진입점(PendingClose)을 실제로 teardown될 **범위**로 해석한 결과. resolveCloseScope가 cascade(Term>pane>탭>창)를
 /// 한 곳에서 풀어 이 값으로 돌려주고, scopeHasRunningJob(실행 중 명령 검사)과 executeClose(실제 닫기)가 같은 값을
 /// 소비한다 — 판정과 실행이 따로 인코딩돼 갈리지 않게 하는 단일 출처. term/pane은 항상 활성 대상(닫기 cascade가
@@ -1508,6 +1512,12 @@ pub const AppSession = struct {
     paste_preview_lines: [paste_preview_max_lines + 1][]const u8 = undefined,
     // Cmd+Q 종료 확인의 결정 latch. tick epilogue가 FrameSummary.quit_decision에 실어 host로 한 번 전달한 뒤 .none으로 리셋한다.
     quit_decision: QuitDecision = .none,
+    // 1e-confirm-2b: browser grant 확인 모달의 보류(§9.2 Model B). null=보류 없음, 값=확인 중인 grant의 async_id.
+    // 다른 확인 모달(close/reset/quit/paste)과 배타(한 번에 한 모달). confirm_accept/cancel이 grant_confirm_decision에
+    // latch하면 app_host_abi.drainGrantPrompts가 takeGrantDecision으로 폴해 grant 기록+재구동 or unauthorized한다.
+    pending_grant: ?u64 = null,
+    // grant 확인 결정 latch: {async_id, approved}. app_host_abi가 takeGrantDecision으로 한 번 읽고 비운다(one-shot).
+    grant_confirm_decision: ?GrantConfirmDecision = null,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -4570,6 +4580,13 @@ pub const AppSession = struct {
             self.pending_quit = false;
             self.quit_decision = .cancelled; // 다음 tick에 host가 NSApp.reply(false) → 앱 유지
         }
+        // 1e-confirm-2b: 보류 중이던 grant 확인이 있으면 **거부로 마무리**한다 — 새 모달(닫기/종료/리셋 등)이 그 자리를
+        // 차지하므로(한 번에 한 모달). 안 그러면 confirm_accept가 pending_grant를 최우선 분기해 사용자가 연 모달을
+        // 확정해도 엉뚱하게 grant가 승인된다(pending_quit supersede와 동형). showGrantConfirm은 이 호출 뒤 세우므로 자기 것을 안 지운다.
+        if (self.pending_grant) |aid| {
+            self.pending_grant = null;
+            self.grant_confirm_decision = .{ .async_id = aid, .approved = false };
+        }
         // 보류 중이던 붙여넣기 확인이 있으면 폐기한다 — 새 모달이 그 자리를 차지하므로(한 번에 한 모달). 붙여넣기
         // 확인 자신은 이 호출 *뒤에* payload를 보관하므로(submitPaste 순서) 자기 것을 지우지 않는다.
         self.pending_paste_confirm.clearRetainingCapacity();
@@ -4583,6 +4600,26 @@ pub const AppSession = struct {
     /// 닫기 확인 모달(라벨 "닫기"/"취소"). 보류 대상은 caller(requestClose/requestWindowClose)가 pending_close에 둔다.
     fn showConfirm(self: *AppSession, message: []const u8) void {
         self.showConfirmButtons(message, .{ .confirm = "닫기", .cancel = "취소" });
+    }
+
+    /// 1e-confirm-2b: browser grant 확인 모달을 연다(§9.2 Model B, 라벨 "허용"/"거부"). **비파괴**: 이미 다른 오버레이/확인
+    /// 모달이 열려 있으면 안 뜨고 false(app_host_abi.drainGrantPrompts가 다음 tick 재시도) — 사용자의 세팅/닫기확인 등을
+    /// 가로채지 않는다. 이미 이 async_id를 보여주는 중이면 true(재-show 안 함, idempotent). 성공 시 pending_grant=async_id +
+    /// 모달 표시 후 true. confirm_accept/cancel이 grant_confirm_decision에 latch → app_host_abi가 takeGrantDecision으로 폴.
+    pub fn showGrantConfirm(self: *AppSession, message: []const u8, async_id: u64) bool {
+        if (self.pending_grant) |cur| return cur == async_id; // grant 확인 중: 내 것=유지(true)·남의 것=대기(false)
+        // 다른 모달/오버레이 점유(닫기·종료·리셋·붙여넣기 확인 or 세팅/find/palette 등) → 안 뜸(비파괴). 다음 tick 재시도.
+        if (self.anyOverlayOpen() or self.pending_close != null or self.pending_reset or self.pending_quit or self.pending_paste_confirm.items.len > 0) return false;
+        self.showConfirmButtons(message, .{ .confirm = "허용", .cancel = "거부" });
+        self.pending_grant = async_id; // 모달 연 뒤 세움(showConfirmButtons가 supersede 로직 도므로 순서 — requestAppQuit 선례)
+        return true;
+    }
+
+    /// 1e-confirm-2b: 래치된 grant 확인 결정을 한 번 읽고 비운다(one-shot). app_host_abi.drainGrantPrompts가 매 tick 폴한다.
+    pub fn takeGrantDecision(self: *AppSession) ?GrantConfirmDecision {
+        const d = self.grant_confirm_decision orelse return null;
+        self.grant_confirm_decision = null;
+        return d;
     }
 
     /// "Reset All Settings to Defaults"(메뉴 reset_defaults·팝업 reset_settings) 확인 모달을 연다. config 파일을 기본
@@ -10151,7 +10188,10 @@ pub const AppSession = struct {
             .notifications_clear_all => self.clearNotifications(), // 하단 "모두 지우기"
             .confirm_accept => { // Enter/Y — 보류한 동작 실행. pending을 먼저 비워(재진입 방지) 실행.
                 self.metal_dirty = true;
-                if (self.pending_quit) {
+                if (self.pending_grant) |aid| { // 1e-confirm-2b: browser grant 승인 — app_host_abi가 폴해 grant 기록+재구동.
+                    self.pending_grant = null;
+                    self.grant_confirm_decision = .{ .async_id = aid, .approved = true };
+                } else if (self.pending_quit) {
                     self.pending_quit = false;
                     self.quit_decision = .accepted; // 다음 tick summary로 Swift에 전달 → NSApp.reply(true)
                 } else if (self.pending_reset) {
@@ -10165,7 +10205,11 @@ pub const AppSession = struct {
                     if (target) |t| self.executeClose(t);
                 }
             },
-            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기)을 버린다.
+            .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/grant)을 버린다.
+                if (self.pending_grant) |aid| { // 1e-confirm-2b: browser grant 거부 → app_host_abi가 unauthorized로 마침.
+                    self.pending_grant = null;
+                    self.grant_confirm_decision = .{ .async_id = aid, .approved = false };
+                }
                 if (self.pending_quit) {
                     self.pending_quit = false;
                     self.quit_decision = .cancelled; // 다음 tick summary로 Swift에 전달 → NSApp.reply(false)

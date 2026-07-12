@@ -67,12 +67,20 @@ pub const EventFilter = struct {
     mask: u8,
 
     pub const all: EventFilter = .{ .mask = 0xFF };
+    /// 아무 이벤트도 관심 없음(빈 필터). `with`로 종류를 누적하는 빌더 시작점(5f-0b-3b subscribe 파싱 — mask는 idempotent라
+    /// 중복 이름을 자연히 dedup, 고정 버퍼/길이 제한 없이 임의 길이 events 배열을 처리).
+    pub const none: EventFilter = .{ .mask = 0 };
 
     /// 지정한 종류만 관심.
     pub fn only(kinds: []const EventKind) EventFilter {
         var m: u8 = 0;
         for (kinds) |k| m |= bit(k);
         return .{ .mask = m };
+    }
+
+    /// 이 필터에 한 종류를 더한 새 필터(누적 빌더). 이미 있으면 무변(bitmask idempotent = 중복 dedup).
+    pub fn with(self: EventFilter, k: EventKind) EventFilter {
+        return .{ .mask = self.mask | bit(k) };
     }
 
     pub fn wants(self: EventFilter, k: EventKind) bool {
@@ -105,7 +113,10 @@ pub const Subscription = struct {
     filter: EventFilter,
 };
 
-/// 구독 레지스트리(§9.5.2 — 메인 전용, 락 없음). subscribe/매칭/수명 정리만. 실 전달은 L4.
+/// 구독 레지스트리(§9.5.2). subscribe/매칭/수명 정리만 — **자체는 thread-safe가 아니다**(락 없는 순수 자료구조). 5f-0b-3a-2
+/// 부터 메인(pushEvent/subscribe)과 **연결 스레드**(종료 시 self-purge)가 둘 다 호출하므로, L4 `SubscriberRegistry`가 이 broker를
+/// **leaf-mutex로 감싸 호출을 직렬화**한다(§9.5.6 realization). 즉 이 struct의 스레드 안전은 caller(SubscriberRegistry)가 소유 —
+/// broker에 메인-전용 가정을 새로 넣거나 그 leaf-mutex를 제거하면 pushEvent∥purgeOutbound 데이터 레이스가 재발한다. 실 전달은 L4.
 pub const EventBroker = struct {
     subs: std.ArrayList(Subscription) = .empty,
 

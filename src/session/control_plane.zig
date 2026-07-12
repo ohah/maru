@@ -490,6 +490,56 @@ pub fn parseAuthFrame(gpa: std.mem.Allocator, bytes: []const u8) AuthFrame {
     return frame;
 }
 
+// ── auth.grant(§9.5.6 ③ cap 누적) ─────────────────────────────────────────────────────────────────────────
+pub const auth_grant_method = "auth.grant";
+
+/// `auth.grant` 프레임 직렬화: `{"jsonrpc":"2.0","method":"auth.grant","params":{"cap_nonce":"<hex>"}}`(응답 없는
+/// notification). 지속 세션이 `auth.self` 뒤 이걸 반복해 **cap을 세션 집합에 누적**한다 — navigate(browser)+getCookies
+/// (browser_storage)처럼 다중 scope를 single-scope cap 여럿으로 쓰기 위함(§9.5.6 ③). client(에이전트/CLI)가 상속한 각
+/// capability fd의 nonce마다 한 번 보낸다.
+pub fn serializeAuthGrant(gpa: std.mem.Allocator, cap_nonce: [auth_cap_nonce_len]u8) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    (writeAuthGrant(&aw.writer, cap_nonce)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+fn writeAuthGrant(w: *std.Io.Writer, cap_nonce: [auth_cap_nonce_len]u8) !void {
+    var s: std.json.Stringify = .{ .writer = w, .options = .{} };
+    try s.beginObject();
+    try s.objectField("jsonrpc");
+    try s.write(jsonrpc_version);
+    try s.objectField("method");
+    try s.write(auth_grant_method);
+    try s.objectField("params");
+    try s.beginObject();
+    try s.objectField("cap_nonce");
+    const hex = std.fmt.bytesToHex(cap_nonce, .lower);
+    try s.write(&hex);
+    try s.endObject();
+    try s.endObject();
+}
+
+/// `auth.grant` 프레임에서 cap_nonce를 뽑는다(§9.5.6 ③). method가 `auth.grant`이고 `params.cap_nonce`가 유효 hex
+/// (`2*auth_cap_nonce_len`)면 그 바이트, 아니면 **null**(비-auth.grant·부재·잘못된 길이·비-hex 전부 null=무시). serveConnection이
+/// 요청 루프서 각 프레임을 이걸로 먼저 시험해, 매치되면 세션 cap 집합에 추가하고 요청으로 marshal하지 않는다(§8.3 관대 파싱).
+pub fn parseAuthGrant(gpa: std.mem.Allocator, bytes: []const u8) ?[auth_cap_nonce_len]u8 {
+    var pm = parseMessage(gpa, bytes) catch return null;
+    defer pm.deinit();
+    if (pm.message != .notification) return null;
+    if (!std.mem.eql(u8, pm.message.notification.method, auth_grant_method)) return null;
+    const params = switch (pm.message.notification.params orelse return null) {
+        .object => |o| o,
+        else => return null,
+    };
+    const nonce_v = params.get("cap_nonce") orelse return null;
+    if (nonce_v != .string or nonce_v.string.len != 2 * auth_cap_nonce_len) return null;
+    var out: [auth_cap_nonce_len]u8 = undefined;
+    if (std.fmt.hexToBytes(&out, nonce_v.string)) |decoded| {
+        if (decoded.len == auth_cap_nonce_len) return out;
+    } else |_| {}
+    return null;
+}
+
 // ── ndjson 프레이머(§4.3) ─────────────────────────────────────────────────────────────────────────────────
 /// ndjson 프레이머: 바이트 스트림(부분 읽기, 줄이 여러 read에 걸쳐 도착)을 개행 경계로 frame(한 줄)으로 조립한다.
 ///
@@ -964,6 +1014,21 @@ test "parseAuthFrame 관대 파싱: 다른 method·잘못된 모양·음수·비
     try testing.expect(parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\"x\"}}").selector == null);
     // 큰 값(u64 도메인)도 보존.
     try testing.expectEqual(@as(?u64, 9007199254740993), parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":9007199254740993}}").selector);
+}
+
+test "auth.grant(5f-4a-2): serialize→parse 왕복 + 관대 파싱(비-auth.grant·비-hex는 null)" {
+    const nonce: [auth_cap_nonce_len]u8 = [_]u8{0x7C} ** auth_cap_nonce_len;
+    const wire = try serializeAuthGrant(testing.allocator, nonce);
+    defer testing.allocator.free(wire);
+    const parsed = parseAuthGrant(testing.allocator, wire);
+    try testing.expect(parsed != null);
+    try testing.expect(std.mem.eql(u8, &parsed.?, &nonce)); // 왕복 값 보존
+    // 관대 파싱: 다른 method(auth.self)·요청·손상·cap_nonce 부재/비-hex/짧은 hex는 null.
+    try testing.expect(parseAuthGrant(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":1}}") == null);
+    try testing.expect(parseAuthGrant(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}") == null);
+    try testing.expect(parseAuthGrant(testing.allocator, "{not json") == null);
+    try testing.expect(parseAuthGrant(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.grant\",\"params\":{}}") == null);
+    try testing.expect(parseAuthGrant(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.grant\",\"params\":{\"cap_nonce\":\"zz\"}}") == null);
 }
 
 // ── 5c) auth 프레임 cap_nonce(1e — capability nonce 왕복·관대 파싱) ──

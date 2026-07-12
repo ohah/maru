@@ -1311,10 +1311,9 @@ fn agentInfoWire(
         .unknown => .unknown,
         .running => .running,
         .idle => .idle,
-        // 인터럽트(ESC)는 wire에서 idle로 접는다 — control_surface.AgentState는 **공개 API의 닫힌 열거**라
-        // 값 추가가 기존 소비자를 깨뜨린다. 외부가 보는 의미("진행 중이 아님")는 idle과 같으므로 손실이 없다.
-        // 내부(스피너·완료 알림 게이트)는 4번째 상태를 그대로 구분한다(알림은 running→idle에만 — 아래).
-        .interrupted => .idle,
+        // 인터럽트(ESC)는 **별도 wire 값**으로 싣는다(사용자 결정). idle로 접으면 클라이언트가 running→idle을
+        // "턴 완료"로 읽어 가짜 완료를 보고한다 — 사용자가 끊은 것을 완료로 착각해 후속 단계를 진행한다.
+        .interrupted => .interrupted,
     };
     return .{ .kind = wire_kind, .state = wire_state };
 }
@@ -15163,10 +15162,12 @@ pub const AppSession = struct {
         const r = agent_session.poll(self.io, self.allocator, kind, term.agent_session_mtime, &term.agent_answer_buf, transcript_path);
         if (r.missing) {
             // 매핑된 트랜스크립트가 삭제됨 = 세션 gone(경로는 세션 내내 고정이라 회전 아님 — docs/agent-session.md).
-            // 직전이 running/idle이었으면(살아있던 세션) stale 매핑을 파기하고 상태를 unknown으로 리셋한다 — 안 그러면
-            // unknown의 "직전 상태 보존" 계약 때문에 삭제된 running이 스피너가 영영 안 풀린다. 새 세션은 SessionStart 훅이
-            // 새 매핑을 쓰므로 자가회복. running→unknown이라 완료 알림은 안 뜬다(사라진 세션은 완료가 아님).
-            if (prev_state == .running or prev_state == .idle) {
+            // 직전이 **관측된 상태**(running/idle/interrupted 중 하나)였으면(=살아있던 세션) stale 매핑을 파기하고
+            // 상태를 unknown으로 리셋한다 — 안 그러면 unknown의 "직전 상태 보존" 계약 때문에 삭제된 세션의 표시가
+            // 영영 안 걷힌다. 새 세션은 SessionStart 훅이 새 매핑을 쓰므로 자가회복. →unknown이라 완료 알림은 안 뜬다.
+            // `!= .unknown`으로 쓴다 — 상태를 늘릴 때마다 or-체인을 손봐야 하면 또 빠뜨린다(interrupted를 실제로
+            // 빠뜨려 "· 중단됨"이 화면에 남고 stale 매핑도 안 지워졌다 — code-review).
+            if (prev_state != .unknown) {
                 agent_hooks.removeMapping(self.io, term.surface.id);
                 if (spinner_visible) self.metal_dirty = true; // 스피너/아이콘 표시 중이었으면 재렌더로 걷어냄
                 if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent transcript gone → 매핑 파기·상태 리셋", .{});
@@ -15201,7 +15202,11 @@ pub const AppSession = struct {
         // 재진입 안 함), "보고 있는" 탭이 아니며, config가 켜졌을 때만. unknown→idle(원래 idle이던 세션)은 알림 안 함.
         // **running→interrupted는 알림 없음**(사용자 결정): 인터럽트는 완료가 아니고, 사용자가 직접 ESC를 눌러
         // 이미 그 자리에 있다. 스피너·탭 ●는 `== .running` 판정이라 interrupted에서 자동으로 꺼진다(별도 처리 불필요).
-        if (prev_state == .running and new_state == .idle and !is_current and self.loaded_config.config.notifications.agent_complete) {
+        // 반대로 **interrupted→idle은 알림을 쏜다**: 인터럽트 뒤 사용자가 다시 프롬프트를 내고 그 턴이 완료됐는데
+        // running 관측이 poll 창(0.5s) 사이에 끼어 안 잡히면, prev가 interrupted라 알림이 통째로 사라진다
+        // (code-review — "끝나면 알려줘"가 조용히 실패). 완료 마커가 나온 것 자체가 완료 사실이다.
+        const completed_edge = (prev_state == .running or prev_state == .interrupted) and new_state == .idle;
+        if (completed_edge and !is_current and self.loaded_config.config.notifications.agent_complete) {
             self.enqueueAgentCompletion(tab, term);
         }
     }

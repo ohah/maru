@@ -757,16 +757,34 @@ enum BrowserControl {
         return String(describing: value)
     }
 
-    // 5f-4c: browser.getCookies → WKHTTPCookieStore.getAllCookies(async). 이 web 패널의 데이터스토어에 담긴 **쿠키
-    // 전체**를 JSON 배열 문자열로 직렬화해 completion으로 넘긴다. Zig serializeGetCookiesResult가 이 배열을 파싱해
-    // `{"result":{"cookies":[...]}}`로 싣는다. **§9.4 D5 browser_storage scope**(base browser로는 불인가 — authz가 거름).
-    // **범위 결정(clean-room)**: WebDriver getCookies는 "현재 문서에 보이는 쿠키"만 반환하나(브라우저 1개=쿠키 항아리
-    // 공유라 필터 필수), maru web 패널은 **패널마다 격리된 데이터스토어**(비신뢰=ephemeral nonPersistent, 7e-0)라 항아리가
-    // 이미 이 패널 전용이다 → 현재 host 필터 없이 **패널 항아리 전체**를 준다. per-document 필터는 후속(불요 시 안 함).
+    // 5f-4c: browser.getCookies → WKHTTPCookieStore.getAllCookies(async). **§9.4 D5 browser_storage scope**(base
+    // browser로는 불인가 — authz가 거름). Zig serializeGetCookiesResult가 배열을 파싱해 `{"result":{"cookies":[...]}}`로 싣는다.
+    // **범위 결정(clean-room, 22차 [0] 정정)**: 비신뢰 browser 패널들은 `browserDataStore`(static nonPersistent) **하나를
+    // 공유**한다(탭 간 로그인 유지 — 라인 1005~1008). 따라서 getAllCookies는 **모든 패널 origin의 쿠키**를 준다 →
+    // 대상 surface의 현재 문서 host로 **반드시 필터**해야 다른 패널(예: 은행 로그인 탭)의 세션 쿠키가 안 샌다(D5 교차-surface
+    // 격리 = §8.3 권한상승 차단). WebDriver getCookies의 "현재 문서에 보이는 쿠키" 시맨틱 그대로. (초판은 "패널마다 격리
+    // 항아리"라 전체 반환한다 했으나 그 전제가 **거짓** — store는 앱 전역 공유 — 이라 정정.) 잔여 한계: base browser+
+    // browser_storage cap을 둘 다 쥔 에이전트가 자기 surface를 다른 host로 navigate하면 그 host 쿠키를 읽을 수 있으나,
+    // 이는 공유 store + navigate cap의 성격이지 getCookies 유출이 아니다(별도 표면 — control-plane §9.4 D4/D5).
     @MainActor static func getCookies(_ webView: WKWebView, completion: @escaping (String) -> Void) {
+        let host = webView.url?.host
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
-            completion(serializeCookies(cookies))
+            let visible = cookies.filter { Self.cookieVisibleToHost($0, host: host) }
+            completion(serializeCookies(visible))
         }
+    }
+
+    // 22차 [0]: 쿠키가 `host`의 현재 문서에 보이는가(RFC 6265 domain-match). host nil/빈(data:/about:blank 등 opaque
+    // origin)=문서 origin 없음=아무 쿠키도 안 보임(빈 결과 — 공유 store의 타 패널 쿠키를 안 흘림). cookie.domain의 선행
+    // 점(`.example.com`=서브도메인 포함)을 벗기고 **exact 또는 부모 도메인(dot-suffix)** 매치. 대소문자 무시(도메인은 ASCII case-insensitive).
+    static func cookieVisibleToHost(_ cookie: HTTPCookie, host: String?) -> Bool {
+        guard let host = host, !host.isEmpty else { return false }
+        var d = cookie.domain
+        if d.hasPrefix(".") { d.removeFirst() }
+        if d.isEmpty { return false }
+        let hl = host.lowercased()
+        let dl = d.lowercased()
+        return hl == dl || hl.hasSuffix("." + dl)
     }
 
     // 5f-4c: [HTTPCookie]를 JSON 배열 문자열로. 각 원소={name,value,domain,path,secure,httpOnly,expires?,sameSite?}
@@ -1265,14 +1283,26 @@ extension MaruWebPanelView: WKNavigationDelegate {
                 browserFixtureUrl = BrowserControl.currentUrl(webView) // navigate한 data: URL이어야 함(getUrl 검증).
                 BrowserControl.executeScript(webView, "document.getElementById('t').textContent") { [weak self] result in
                     if case .success(let v) = result { self?.browserFixtureScript = v as? String } // "maru5d" 기대.
+                    // 22차 [0]: getCookies는 현재 문서 host로 필터하므로, host 있는 문서를 로드해 쿠키 필터를 실증한다.
+                    // data:는 opaque origin(host nil)이라, loadHTMLString(baseURL: https://maru.test/)로 host 문서를 만든다
+                    // (무-네트워크 — baseURL은 origin만 지정, fetch 안 함). executeScript 완료 후라 data: 문서와 레이스 없음.
+                    webView.loadHTMLString("<h1>maru cookie fixture</h1>", baseURL: URL(string: "https://maru.test/"))
                 }
-                // 5f-4c getCookies fixture: 쿠키 하나 seed(setCookie 완료 후) → BrowserControl.getCookies로 되읽어 실
-                // WKHTTPCookieStore.getAllCookies + serializeCookies 경로를 자동 증명(navigation 불요 — 스토어 직접 조작).
+            } else if browserFixtureStage == 2 {
+                browserFixtureStage = 3
+                // 5f-4c/22차 [0] getCookies fixture: maru.test 문서 로드 완료 → 쿠키 2개 seed(maru.test=현재 host,
+                // other.test=타 host) → getCookies가 현재 문서 host(maru.test)로 **필터**해 되읽는다. 결과에 sid(maru.test)는
+                // 포함, other(other.test)는 **제외**되어야 host 필터=교차-surface 격리를 실증한다(실 getAllCookies+필터+serialize).
                 let store = webView.configuration.websiteDataStore.httpCookieStore
-                if let cookie = HTTPCookie(properties: [.domain: "maru.test", .path: "/", .name: "sid", .value: "5f4c", .secure: "TRUE"]) {
-                    store.setCookie(cookie) { [weak self] in
-                        BrowserControl.getCookies(webView) { json in self?.browserFixtureCookies = json } // sid=5f4c 포함 기대.
+                let g = DispatchGroup()
+                for (dom, nm, val) in [("maru.test", "sid", "5f4c"), ("other.test", "other", "leak")] {
+                    if let cookie = HTTPCookie(properties: [.domain: dom, .path: "/", .name: nm, .value: val, .secure: "TRUE"]) {
+                        g.enter()
+                        store.setCookie(cookie) { g.leave() }
                     }
+                }
+                g.notify(queue: .main) { [weak self] in
+                    BrowserControl.getCookies(webView) { json in self?.browserFixtureCookies = json } // sid 포함·other 제외 기대.
                 }
             }
         }

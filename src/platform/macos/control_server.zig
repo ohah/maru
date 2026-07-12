@@ -755,7 +755,11 @@ pub const ControlServer = struct {
                 if (n_caps < session_caps.len) {
                     session_caps[n_caps] = grant_nonce;
                     n_caps += 1;
-                } // 초과(>max_session_caps)는 조용히 무시(bounded — 실무상 scope 수만큼이라 도달 안 함)
+                } // 초과(>max_session_caps=8)는 조용히 무시(bounded). **22차 [4] 한계**: cap은 per-(surface,scope)라
+                // 다중 surface 세션은 8을 넘을 수 있는데, 넘친 grant는 드롭돼 그 cap 대상 요청이 균일 unauthorized로
+                // 접혀 실 권한거부와 구별 안 된다. auth.grant는 **응답 없는 notification**이라 여기서 에러 회신도 불가.
+                // 지금은 라이브 fd 발급이 미배선(테스트 훅만 1개 발급)이라 도달 불가 — 라이브 발급 착수 시 상한 재검토
+                // (연결당 surface 수 기반 동적 상한 or auth.grant를 응답형으로 승격)한다. 단일 출처=control-plane §9.5.6 ④.
                 continue;
             }
 

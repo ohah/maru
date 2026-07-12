@@ -393,6 +393,12 @@ pub fn resolve(
 /// `auth.grant`로 cap을 누적해 다중 scope(navigate=`browser`+getCookies=`browser_storage`)를 쓰되, **각 cap은 single-scope
 /// 불변 유지**(union은 여전히 한 scope). 미인가는 **균일 unauthorized**(어느 cap이 왜 deny됐는지·존재 여부 노출 안 함 — §8.3
 /// oracle 방지, `resolve`와 동형). `nonces` 빈=cap 없음=unauthorized. anchor/gen/method/now는 모든 cap에 동일 적용.
+///
+/// **⚠️ 22차 [2] 한계**: 인가 cap이 여럿이면 **첫** granted를 반환한다(scope 넓이 비교 안 함). browser처럼 같은 surface의
+/// 동종 cap은 등가라 무해하나, metadata:all·metadata:self를 **둘 다** 누적한 세션은 grant 순서에 따라 좁은 sub-scope가
+/// 이겨 **인가된 것보다 좁은** 뷰를 받는다(order-dependent). 방향이 **fail-closed**(절대 over-grant 아님 — authorize는
+/// class만 보므로 어떤 granted든 그 method 자체는 정당히 인가됨)이고 다중 metadata cap 누적은 라이브 fd 다중발급(미배선)
+/// 이 있어야 도달하므로, 최광-선택(broadest sub-scope pick)은 그 발급 경로 착수 시 함께 배선한다(지금은 도달 불가).
 pub fn resolveAny(
     store: *const CapabilityStore,
     nonces: []const Nonce,

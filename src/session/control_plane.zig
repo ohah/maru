@@ -521,8 +521,14 @@ fn writeAuthGrant(w: *std.Io.Writer, cap_nonce: [auth_cap_nonce_len]u8) !void {
 
 /// `auth.grant` 프레임에서 cap_nonce를 뽑는다(§9.5.6 ③). method가 `auth.grant`이고 `params.cap_nonce`가 유효 hex
 /// (`2*auth_cap_nonce_len`)면 그 바이트, 아니면 **null**(비-auth.grant·부재·잘못된 길이·비-hex 전부 null=무시). serveConnection이
-/// 요청 루프서 각 프레임을 이걸로 먼저 시험해, 매치되면 세션 cap 집합에 추가하고 요청으로 marshal하지 않는다(§8.3 관대 파싱).
+/// 요청 루프서 **매 프레임**을 이걸로 먼저 시험해, 매치되면 세션 cap 집합에 추가하고 요청으로 marshal하지 않는다(§8.3 관대 파싱).
+///
+/// **값싼 prefilter(22차 [5])**: `auth.grant` 리터럴이 바이트에 **없으면** 즉시 null — 매 프레임 루프서 도는데 정상 요청
+/// (sessions.list·browser.navigate 등)은 이 리터럴이 없어 풀 `parseMessage`(Value 트리 alloc)를 건너뛴다(그 프레임은
+/// dispatchAuthenticated가 어차피 다시 파싱하므로 여기 풀 파싱은 순수 낭비였음). 리터럴이 params 등에 우연히 있으면
+/// 폴스루해 풀 파싱이 정확히 null 판정(안전 — auth.grant notification은 반드시 이 리터럴을 method로 포함).
 pub fn parseAuthGrant(gpa: std.mem.Allocator, bytes: []const u8) ?[auth_cap_nonce_len]u8 {
+    if (std.mem.indexOf(u8, bytes, auth_grant_method) == null) return null; // 값싼 fast-path(정상 프레임=풀 파싱 회피)
     var pm = parseMessage(gpa, bytes) catch return null;
     defer pm.deinit();
     if (pm.message != .notification) return null;

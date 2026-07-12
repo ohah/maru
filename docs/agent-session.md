@@ -93,15 +93,29 @@ Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hook
 
 ## 상태 모델 (느린 API 견딤)
 
-`agent_state(term) ∈ {none, running, idle}`:
+`agent_state(term) ∈ {none, running, idle, interrupted}`:
 - **none** = 그 Term 포그라운드가 에이전트가 아님(`agent_kind == .none`).
 - **running** = 에이전트 포그라운드 **AND** 세션의 마지막 *대화* 엔트리가 **미완료**(claude: user거나 end_turn 아닌
   assistant / codex: 마지막 `event_msg`가 `task_complete` 아님).
 - **idle** = 에이전트 포그라운드 **AND** 완료 마커가 마지막(claude end_turn / codex task_complete).
+- **interrupted** = 에이전트 포그라운드 **AND** 마지막 대화 엔트리가 **사용자 인터럽트(ESC)** — claude는
+  `interruptedMessageId`를 단 `user` 엔트리, codex는 `event_msg/turn_aborted`(reason `interrupted`). 진행 중이
+  **아니므로** 스피너·탭 ●는 꺼지고, **완료도 아니므로** "에이전트 완료" 알림은 쏘지 않는다(사용자가 직접 ESC를
+  눌러 이미 그 자리에 있다). 상태줄은 `· 중단됨`.
 
 핵심: **mtime을 쓰지 않는다**(느린 API 중엔 파일이 안 써져서 false idle). 대신 **마지막 대화 엔트리의 의미**
 (턴 완료 여부)를 본다 — API가 44초든 5분이든 "턴 미완료"는 구조적 사실이라 false idle이 없다. **포그라운드 체크**를
 AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽음) false-running을 막는다.
+
+> **인터럽트를 별도 상태로 두는 이유(회귀)**: ESC는 에이전트 프로세스를 **죽이지 않는다** — 포그라운드 AND 체크가
+> 안 걸린다. 그런데 인터럽트 엔트리는 claude에선 `user` 타입(=새 프롬프트와 같은 모양), codex에선 `task_complete`가
+> 아닌 이벤트라, 옛 파서는 둘 다 **running**으로 접었다. 그 뒤로는 트랜스크립트가 더 자라지 않아 **mtime 게이트가
+> 재파싱조차 막아** 스피너가 영구 고착됐다(같은 위험을 "트랜스크립트 삭제" 케이스에선 이미 `missing` 자가정리로
+> 막아뒀는데, 인터럽트에선 놓쳤다). 판별자는 **필드 존재**(`interruptedMessageId` / `turn_aborted`)로 한다 — 본문
+> 문구(`[Request interrupted by user]`) 매칭보다 견고하다(로케일·버전 변화에 안 깨진다).
+>
+> 컨트롤 플레인 wire(`control_surface.AgentState`)는 **닫힌 열거**라 값을 늘리지 않고 `interrupted → idle`로 접는다 —
+> 외부가 보는 의미("진행 중이 아님")가 같아 손실이 없다.
 
 ## 성능 (큰 파일 안전)
 

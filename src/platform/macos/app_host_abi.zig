@@ -1814,6 +1814,31 @@ var browser_op_take_buf: std.ArrayList(u8) = .empty;
 /// hung WKWebView op 마감(reap) — evaluateJavaScript/navigation이 영영 안 끝나는 op가 accept 스레드를 영구 붙잡는 것 방어.
 const browser_op_timeout_ns: i128 = 30 * std.time.ns_per_s;
 
+// ── 1e-confirm-2a: held-request grant 확인 흐름(§9.2 Model B) ──────────────────────────────────────────────
+/// needs_grant 요청을 **틱 넘어 붙잡고**(§5-async deferRequest) 확인 결정(2a=env 스텁·2b=모달)을 기다리는 대기 항목.
+/// `async_id`로 in-flight pending을 조회하고, 결정 시 grant 기록+재-dispatch(승인) or unauthorized(거부)한다.
+const GrantPromptEntry = struct { async_id: u64, pane: u64, target: u64, scope: control_capability.ScopeClass };
+/// 대기 중 grant 확인 FIFO(**메인 스레드 전용**). bounded — max_in_flight와 정렬(연결당 held ≤1). deferRequest가
+/// in-flight를 bound하므로 이 큐는 그 미러(항목=held 요청). 서버 drain이 매 tick 결정+resolve.
+const GrantPromptQueue = struct {
+    items: std.ArrayList(GrantPromptEntry) = .empty,
+    max: usize = 8,
+    fn push(self: *GrantPromptQueue, gpa: std.mem.Allocator, e: GrantPromptEntry) error{ Full, OutOfMemory }!void {
+        if (self.items.items.len >= self.max) return error.Full;
+        try self.items.append(gpa, e);
+    }
+    fn take(self: *GrantPromptQueue) ?GrantPromptEntry {
+        if (self.items.items.len == 0) return null;
+        return self.items.orderedRemove(0);
+    }
+    fn deinit(self: *GrantPromptQueue, gpa: std.mem.Allocator) void {
+        self.items.deinit(gpa);
+    }
+};
+var grant_prompt_queue: GrantPromptQueue = .{};
+/// 확인 응답 마감 — 사용자가 모달에 응답할 시간(2b). 2a 스텁은 즉시 결정하나, 이 마감이 reap 안전망(무응답 시 연결 닫힘).
+const grant_prompt_timeout_ns: i128 = 120 * std.time.ns_per_s;
+
 /// hello가 광고하는 read-only 메서드(현재 구현된 것만 — §11 help gate와 같은 정직성).
 const control_hello_caps = [_][]const u8{ "sessions.list", "session.get" };
 const control_hello_version = "0.1.0";
@@ -1889,16 +1914,17 @@ fn handleControlRequest(
         .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
         // 5f-0b-3b: 인가·유효한 browser.subscribe — 메인에서 SubscriberRegistry에 **동기 등록** + `{subscriber_id}` 응답.
         .subscribe => |s| handleSubscribe(server, pending, s),
-        // 1e-confirm-1c-2: 미grant valid 요청 — 확인 결정(스텁 env)에 따라 grant 후 재구동 or unauthorized(§9.2 Model B).
-        .needs_grant => |g| handleNeedsGrant(server, pending, g, snapshot, now, now_ns),
+        // 1e-confirm-2a: 미grant valid 요청 — 확인 수단 있으면 **틱 넘어 붙잡고**(deferRequest) 결정 대기(GrantPrompt 큐),
+        //     drainGrantPrompts가 결정 시 grant+재구동 or unauthorized(§9.2 Model B). 수단 없으면 즉시 unauthorized(1c-1).
+        .needs_grant => |g| handleNeedsGrant(server, pending, g, now_ns),
     }
 }
 
-/// 1e-confirm-1c-2: grant 확인 **결정 소스**. 스텁(env `MARU_TEST_GRANT_DECISION=approve|deny`)으로 held 흐름을 스모크
-/// 검증한다. 실 확인 모달(1e-confirm-2)이 이 자리를 대체한다. **env 미설정=`.none`**(확인 수단 없음 → needs_grant를
-/// unauthorized로 접음 = 1c-1 behavior-preserving·프로덕션 무영향 — grant 안 남).
+/// 1e-confirm: grant 확인 **결정 소스**. 2a=env 스텁(`MARU_TEST_GRANT_DECISION=approve|deny`)으로 held 흐름을 스모크
+/// 검증. 2b=실 확인 모달이 이 자리를 대체(latch). **env 미설정=`.none`**(확인 수단 없음 → needs_grant를 unauthorized로
+/// 접음 = 1c-1 behavior-preserving·프로덕션 무영향 — grant 안 남·요청 안 붙잡음).
 const GrantDecision = enum { none, approve, deny };
-fn stubGrantDecision() GrantDecision {
+fn grantDecisionSource() GrantDecision {
     const v = std.c.getenv("MARU_TEST_GRANT_DECISION") orelse return .none;
     const s = std.mem.span(v);
     if (std.mem.eql(u8, s, "approve")) return .approve;
@@ -1906,43 +1932,103 @@ fn stubGrantDecision() GrantDecision {
     return .none;
 }
 
-/// 1e-confirm-1c-2: 미grant valid 요청(§9.2 Model B) 처리. **승인** → `control_pane_grant_store`에 grant 기록 후 요청을
-/// **재-dispatch**(이제 grant가 인가) → 그 결과를 기존 라우팅(op=`enqueueBrowserOp`[§5-async defer]·subscribe=
-/// `handleSubscribe`·immediate=resolve)으로 처리. **거부/수단없음** → 균일 unauthorized. 1c-2는 env 스텁으로 결정 —
-/// 실 확인 모달·held-across-ticks는 2. 재-dispatch가 defensively 또 needs_grant면(grant 직후라 도달 안 함) unauthorized로
-/// 접어 grant 루프를 막는다. **메인 스레드 전용**(grant store·dispatch·op 큐 전부 메인, §8.8).
+/// 1e-confirm-2a: 미grant valid 요청(§9.2 Model B) — **확인 수단 있으면 붙잡고**(deferRequest → in-flight, 마감
+/// grant_prompt_timeout) GrantPrompt 큐에 넣어 `drainGrantPrompts`가 결정하게 한다(틱 넘어 대기 = 모달이 사용자 응답을
+/// 기다릴 수 있음). **수단 없음(env 미설정=프로덕션·2b 모달 전)** → 즉시 unauthorized(1c-1 유지). deferRequest/큐 실패도
+/// unauthorized(붙잡기 실패). **메인 전용**.
 fn handleNeedsGrant(
     server: *control_server_mod.ControlServer,
     pending: *control_server_mod.PendingRequest,
     g: control_browser.GrantRequest,
-    snapshot: control_surface.CollectorSnapshot,
-    now: u64,
     now_ns: i128,
 ) void {
-    if (stubGrantDecision() != .approve) {
-        // 거부 or 확인 수단 없음(env 미설정=프로덕션) → 균일 unauthorized(1c-1 유지).
+    if (grantDecisionSource() == .none) {
         const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
         return server.resolveRequest(pending, resp);
     }
-    // 승인: grant 기록(용량 초과=Full이면 grant 못 남 → 방어적 unauthorized).
-    control_pane_grant_store.grant(.{ .pane = g.pane, .target = g.target, .scope = g.scope }) catch {
+    // 확인 수단 있음 → 붙잡고(in-flight) 큐에 넣어 drain이 결정. deferRequest 실패(TooManyInFlight)=붙잡기 불가 → unauthorized.
+    const async_id = server.deferRequest(pending, now_ns + grant_prompt_timeout_ns) catch {
         const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
         return server.resolveRequest(pending, resp);
     };
-    // 재-dispatch: 이제 grant가 인가 → .browser/.subscribe/.immediate. 기존 라우팅 재사용.
+    grant_prompt_queue.push(allocator, .{ .async_id = async_id, .pane = g.pane, .target = g.target, .scope = g.scope }) catch {
+        // 큐 full(도달 어려움 — max=in-flight 상한) → 붙잡은 in-flight 취소(unauthorized).
+        const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+        _ = server.completeInFlight(async_id, resp);
+    };
+}
+
+/// 1e-confirm-2a: 한 GrantPrompt를 결정에 따라 resolve. **승인** → grant 기록 + 요청 **재-dispatch**(이제 인가) → 라우팅
+/// (op=`pushBrowserOp`[**grant async_id 재사용** — 이미 in-flight라 재-defer 금지]·subscribe·immediate=completeInFlight).
+/// **거부** → unauthorized. reap된 async_id(마감·무응답)는 `inFlightPending` null → skip(이미 정리됨). **메인 전용**.
+fn resolveGrantPrompt(
+    server: *control_server_mod.ControlServer,
+    e: GrantPromptEntry,
+    approved: bool,
+    snapshot: control_surface.CollectorSnapshot,
+    now: u64,
+) void {
+    const pending = server.inFlightPending(e.async_id) orelse return; // reaped(마감) — 이미 정리됨
+    if (!approved) {
+        const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+        _ = server.completeInFlight(e.async_id, resp);
+        return;
+    }
+    control_pane_grant_store.grant(.{ .pane = e.pane, .target = e.target, .scope = e.scope }) catch {
+        const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+        _ = server.completeInFlight(e.async_id, resp);
+        return;
+    };
+    // 재-dispatch: grant가 인가 → .browser/.subscribe/.immediate. grant async_id를 그대로 완료 상관자로 재사용.
     const disp2 = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
-        server.resolveRequest(pending, null);
+        _ = server.completeInFlight(e.async_id, null);
         return;
     };
     switch (disp2) {
-        .immediate => |resp| server.resolveRequest(pending, resp),
-        .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
-        .subscribe => |s| handleSubscribe(server, pending, s),
-        .needs_grant => {
-            // 방어(도달 안 함 — grant를 막 남김): grant 루프 방지로 unauthorized.
-            const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
-            server.resolveRequest(pending, resp);
+        .immediate => |resp| {
+            _ = server.completeInFlight(e.async_id, resp);
         },
+        // op은 grant in-flight(e.async_id)를 재사용해 push(재-defer 금지) — op 완료가 이 in-flight를 resolve.
+        .browser => |op| pushBrowserOp(server, e.async_id, op),
+        .subscribe => |s| resolveHeldSubscribe(server, e.async_id, pending, s),
+        .needs_grant => {
+            // 방어(grant 막 남겨 도달 안 함): grant 루프 방지로 unauthorized.
+            const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
+            _ = server.completeInFlight(e.async_id, resp);
+        },
+    }
+}
+
+/// 1e-confirm-2a: held 요청의 subscribe 완료 — `handleSubscribe`(resolveRequest)와 달리 **completeInFlight**로 마쳐야
+/// in-flight 레지스트리서 제거된다(그냥 resolveRequest면 stale in-flight가 남아 이중 resolve). outbound/registry 실패=null 종료.
+fn resolveHeldSubscribe(
+    server: *control_server_mod.ControlServer,
+    async_id: u64,
+    pending: *control_server_mod.PendingRequest,
+    s: control_browser.BrowserSubscribe,
+) void {
+    const outbound = pending.outbound orelse {
+        _ = server.completeInFlight(async_id, null);
+        return;
+    };
+    const subscriber_id = server.subscriber_reg.subscribe(s.surface_id, s.filter, outbound) catch {
+        _ = server.completeInFlight(async_id, null);
+        return;
+    };
+    const resp = control_browser.serializeSubscribeResponse(server.cross_gpa, pending.request_bytes, subscriber_id) catch null;
+    _ = server.completeInFlight(async_id, resp);
+}
+
+/// 1e-confirm-2a: 매 tick 대기 grant 확인을 결정+resolve(재-dispatch에 collector snapshot 필요라 server_drain이 refs와
+/// 호출). 2a=env 스텁 결정(즉시 전부). 2b=모달 latch(미결정 항목은 큐에 남김). 큐 비었으면 snapshot 조립도 안 함(핫패스 0-할당).
+fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const ControlSessionRef, now: u64) void {
+    if (grant_prompt_queue.items.items.len == 0) return;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const snapshot = collectSessionsInto(refs, arena.allocator()) catch return; // collect OOM → 다음 tick 재시도(항목 유지)
+    const decision = grantDecisionSource(); // 2a: env(approve/deny). 2b: 모달 결정.
+    while (grant_prompt_queue.take()) |e| {
+        resolveGrantPrompt(server, e, decision == .approve, snapshot, now);
     }
 }
 
@@ -1976,6 +2062,17 @@ fn enqueueBrowserOp(
         server.resolveRequest(pending, resp);
         return;
     };
+    pushBrowserOp(server, async_id, op);
+}
+
+/// 5e-2b/1e-confirm-2a: **이미 defer된** in-flight `async_id`로 op을 큐에 push한다(deferRequest 없이 — grant held 요청은
+/// 이미 in-flight라 재-defer하면 이중 등록). enqueueBrowserOp(신규 defer) + resolveGrantPrompt(grant async_id 재사용)
+/// 공용. 큐 실패=op.arg 해제 + completeInFlight(async_id, null)(그 in-flight 취소·연결 닫힘). op.arg 소유권은 큐가 인수.
+fn pushBrowserOp(
+    server: *control_server_mod.ControlServer,
+    async_id: u64,
+    op: control_browser.BrowserOp,
+) void {
     browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = op.arg }) catch {
         server.cross_gpa.free(op.arg);
         _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
@@ -2036,9 +2133,13 @@ pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSession
     var handled: usize = 0;
     while (handled < control_drain_budget) : (handled += 1) {
         const pending = server.tryPopRequest() orelse break;
-        // 팝한 pending은 **반드시** resolve 또는 defer(browser op)해야 accept 스레드가 무한 대기하지 않는다.
+        // 팝한 pending은 **반드시** resolve 또는 defer(browser op·grant 확인)해야 accept 스레드가 무한 대기하지 않는다.
         handleControlRequest(server, refs, pending);
     }
+    // 1e-confirm-2a: 위 요청 처리가 큐에 넣은 held grant 확인을 결정+resolve(재-dispatch snapshot=refs). 큐 비면 0-할당.
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    drainGrantPrompts(server, refs, now);
 }
 
 /// 5e-2b: Swift가 매 tick 호출 — (1) `reapExpiredInFlight`(hung browser op timeout), (2) browser op 큐에서 하나 pop해
@@ -2151,6 +2252,9 @@ pub export fn maru_macos_control_server_stop() void {
     browser_op_queue = .{};
     browser_op_take_buf.deinit(allocator);
     browser_op_take_buf = .empty;
+    // 1e-confirm-2a: 대기 grant 확인 큐 해제(엔트리는 값 타입 — arg 소유 없음, stop이 in-flight pending은 cancel).
+    grant_prompt_queue.deinit(allocator);
+    grant_prompt_queue = .{};
 }
 
 /// 5e-2b-2(**테스트 전용 훅**): env `MARU_TEST_BROWSER_CAP`이 설정됐을 때만 `surface_id`에 묶인 `browser` scope

@@ -332,7 +332,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 ### 9.4 에이전트 제어 프로토콜 리뷰 — 5f 선행 (설계, doc-first)
 
-**목적**: 5f(나머지 browser.* 메서드)를 착수하기 전에, 에이전트가 브라우저를 **제어·지각·관측·디버깅**하는 프로토콜의 전송·세션·이벤트·capability 모델을 확정한다. 지금 navigate/getUrl/executeScript 3개는 **연결당 요청 1개**(§4 `serveConnection`)로 돈다. 에이전트의 perceive-act 루프엔 지속 세션·이벤트 push·구조화 관측이 필요한데, 이걸 정하지 않고 8+개 메서드를 쌓으면 세션/이벤트 모델 변경 시 전부 리팩터해야 한다(5c를 5b보다 먼저 한 rework-회피 논리).
+**목적**: 5f(나머지 browser.* 메서드)를 착수하기 전에, 에이전트가 브라우저를 **제어·지각·관측·디버깅**하는 프로토콜의 전송·세션·이벤트·capability 모델을 확정한다. §9.4 작성 시점 navigate/getUrl/executeScript 3개는 **연결당 요청 1개**(§5 `serveConnection` — one-shot)로 돌았다(**5f-0b-2b-1에서 지속 세션=auth 1회+요청 루프로 전환됨**; 이벤트 push·outbound 큐는 5f-0b-2b-2). 에이전트의 perceive-act 루프엔 지속 세션·이벤트 push·구조화 관측이 필요한데, 이걸 정하지 않고 8+개 메서드를 쌓으면 세션/이벤트 모델 변경 시 전부 리팩터해야 한다(5c를 5b보다 먼저 한 rework-회피 논리).
 
 **전제(설계됨 vs 구현됨의 간극)**: 프로토콜 설계는 이미 **지속 연결 + 서버 push**를 상정한다 — §4.3 per-connection bounded outbound 큐·§5 `subscribeOutput` I/O 직송·§7 `events.subscribe` notification 스트림. 그러나 현 라이브 구현(A2b `serveConnection`)은 **auth+요청 1개→응답→close**의 일회성만 한다(`maru sessions list` one-shot 쿼리엔 충분했다). browser 제어가 이 **설계됐으나 미구현**인 지속연결·이벤트를 이제 실제로 요구한다. 즉 이 리뷰의 절반은 "새 설계"가 아니라 **기존 스트리밍 설계를 browser가 앞당겨 구현**하는 것이다.
 

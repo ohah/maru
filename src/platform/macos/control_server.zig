@@ -5,23 +5,24 @@
 //!
 //! **범위(A2b = 라이브 서버 + marshal, 이 파일):**
 //!  - 앱 전역 unix socket bind + accept 스레드(heap-pin — 스레드가 &self를 잡으므로 caller가 주소를 고정).
-//!  - accept 스레드는 **accept/parse/framing/write만**(§5): 연결마다 peer-cred(same-uid, 1b acceptOne) + hello →
-//!    auth 셀렉터 프레임 + 요청 프레임 읽기 → `PendingRequest`를 **메인 marshal 큐**에 push → 메인이 채운 응답을
-//!    기다렸다가 소켓에 write(락 밖). 코어·트리·collector·dispatch는 **절대 accept 스레드가 만지지 않는다**.
+//!  - **accept 스레드**(5f-0b-2a부터)는 **accept + peer-cred(same-uid, 1b acceptOne) + hello + 연결당 스레드 spawn만**
+//!    한다(직렬 인라인 serve 폐기 = head-of-line 블로킹 제거, §9.5.1). 연결당 **연결 스레드**가 **parse/framing/marshal/
+//!    write**(§5): auth 프레임 1회 + **요청 루프**(지속 세션 2b-1) → `PendingRequest`를 **메인 marshal 큐**에 push →
+//!    메인이 채운 응답을 기다렸다가 소켓에 write(락 밖). 코어·트리·collector·dispatch는 **절대 연결 스레드가 만지지 않는다**.
 //!  - 메인 drain(app_host_abi가 tick마다 호출): `tryPopRequest`로 요청을 꺼내 실 collector + auth + dispatch(1d)로
-//!    응답 바이트를 만들고 `resolveRequest`로 pending에 채워 accept 스레드를 깨운다.
+//!    응답 바이트를 만들고 `resolveRequest`로 pending에 채워 그 연결 스레드를 깨운다.
 //!
 //! **범위 밖:** subscribeOutput 출력 직송(§5, 별도), full self-origin tty 검증(1g), capability fd 실 발급/상속
 //!  (1e-confirm — 이 서버는 auth 프레임의 `cap_nonce`를 `parseAuthFrame`으로 파싱해 `PendingRequest.cap_nonce`로 메인
 //!  marshal까지만 하고, resolve·store는 app_host_abi가 소유), 실 collector 조립·auth 판정(그건 app_host_abi가
 //!  AppSession을 알기에 거기서 — 이 모듈은 AppSession 비의존 generic).
 //!
-//! **§8.8 lock-order 불변식 엄수:** accept 스레드는 `core_mutex`를 보유하지 않은 채로만 marshal 큐에 push/wait한다.
-//!  메인은 collectSessionInto 안에서만 core_mutex를 (짧게) 잡고, 그 락을 쥔 채 marshal 큐에 push/wait하지 않는다.
-//!  응답 write는 accept 스레드에서 락 없이 한다(§5). 교차-큐 순환대기 없음(요청 큐 drainer=메인, pending signal도
-//!  메인, accept 스레드는 아무 락도 안 쥔 채 대기).
+//! **§8.8 lock-order 불변식 엄수:** **연결 스레드**(및 wait-group `conns_mutex`)는 `core_mutex`를 보유하지 않은 채로만
+//!  marshal 큐에 push/wait한다. 메인은 collectSessionInto 안에서만 core_mutex를 (짧게) 잡고, 그 락을 쥔 채 marshal
+//!  큐에 push/wait하지 않는다. 응답 write는 연결 스레드에서 락 없이 한다(§5). 교차-큐 순환대기 없음(요청 큐 drainer=
+//!  메인, pending signal도 메인, 연결 스레드는 아무 코어 락도 안 쥔 채 대기; conns_mutex는 wait-group 전용 leaf lock).
 //!
-//! **cross-thread 할당:** 요청/응답 바이트는 accept 스레드↔메인을 오가므로 **thread-safe allocator**(`cross_gpa`,
+//! **cross-thread 할당:** 요청/응답 바이트는 연결 스레드↔메인을 오가므로 **thread-safe allocator**(`cross_gpa`,
 //!  제품은 `std.heap.c_allocator` — libc 링크됨)로만 다룬다. collector arena는 메인 전용(app allocator).
 //!
 //! **베이스와 결정(docs/document-basis-and-decision):**
@@ -45,28 +46,28 @@ comptime {
     std.debug.assert(cp.auth_cap_nonce_len == cap.nonce_len);
 }
 
-/// 메인이 accept 스레드에 응답을 돌려주는 rendezvous 단위. accept 스레드의 serve 스택에 살며(대기 동안 유효),
-/// marshal 큐는 `*PendingRequest`만 담는다. `request_bytes`는 accept 스레드가 `cross_gpa`로 소유(serve 끝에 해제),
-/// 메인 drain은 **빌려 읽기만** 한다. `response`는 메인 drain이 `cross_gpa`로 채우고 accept 스레드가 해제한다.
+/// 메인이 연결 스레드에 응답을 돌려주는 rendezvous 단위. 연결 스레드의 serve 스택에 살며(대기 동안 유효),
+/// marshal 큐는 `*PendingRequest`만 담는다. `request_bytes`는 연결 스레드가 `cross_gpa`로 소유(serve 끝에 해제),
+/// 메인 drain은 **빌려 읽기만** 한다. `response`는 메인 drain이 `cross_gpa`로 채우고 연결 스레드가 해제한다.
 pub const PendingRequest = struct {
-    /// 요청 프레임 바이트(개행 제외). accept 스레드 소유(cross_gpa), 메인은 read-only.
+    /// 요청 프레임 바이트(개행 제외). 연결 스레드 소유(cross_gpa), 메인은 read-only.
     request_bytes: []const u8,
     /// caller가 주장한 self surface_id(auth.self 셀렉터, §8.4). 없으면 null(maru 밖 shell 등).
     selector: ?u64,
     /// 선택적 capability nonce(auth 프레임 `cap_nonce`, §8.5 1e). 있으면 메인 drain이 CapabilityStore로 resolve해
-    /// self보다 넓은 scope를 발급한다(없으면 metadata:self만). accept 스레드가 parseAuthFrame으로 채운다(값 복사 — 소켓
+    /// self보다 넓은 scope를 발급한다(없으면 metadata:self만). 연결 스레드가 parseAuthFrame으로 채운다(값 복사 — 소켓
     /// 입력 lifetime과 분리). 실 fd 상속은 1e-core 범위 밖(CLI가 아직 안 실음)이라 라이브에선 늘 null·store 빈=default-deny.
     cap_nonce: ?[cp.auth_cap_nonce_len]u8 = null,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     state: State = .pending,
-    /// 메인 drain이 채우는 응답 바이트(cross_gpa 소유). accept 스레드가 write 후 해제. cancelled면 null.
+    /// 메인 drain이 채우는 응답 바이트(cross_gpa 소유). 연결 스레드가 write 후 해제. cancelled면 null.
     response: ?[]u8 = null,
 
     pub const State = enum { pending, done, cancelled };
 
-    /// accept 스레드: 메인이 resolve/cancel할 때까지 대기하고 최종 상태를 돌려준다.
+    /// 연결 스레드: 메인이 resolve/cancel할 때까지 대기하고 최종 상태를 돌려준다.
     fn waitResolved(self: *PendingRequest) State {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -74,9 +75,9 @@ pub const PendingRequest = struct {
         return self.state;
     }
 
-    /// 메인 drain: 응답을 채우고 accept 스레드를 깨운다(response = cross_gpa 소유, accept 스레드가 해제).
-    /// response=null이면 accept 스레드가 응답 없이 연결을 닫는다(예: 메인 drain의 OOM — pending을 반드시 깨워야
-    /// accept 스레드가 무한 대기하지 않는다).
+    /// 메인 drain: 응답을 채우고 연결 스레드를 깨운다(response = cross_gpa 소유, 연결 스레드가 해제).
+    /// response=null이면 연결 스레드가 응답 없이 연결을 닫는다(예: 메인 drain의 OOM — pending을 반드시 깨워야
+    /// 연결 스레드가 무한 대기하지 않는다).
     fn resolve(self: *PendingRequest, response: ?[]u8) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -87,7 +88,7 @@ pub const PendingRequest = struct {
         self.cond.broadcast(self.io);
     }
 
-    /// close: 서버 종료로 이 요청을 버린다(accept 스레드가 응답 없이 abandon). response는 안 채운다.
+    /// close: 서버 종료로 이 요청을 버린다(연결 스레드가 응답 없이 abandon). response는 안 채운다.
     fn cancel(self: *PendingRequest) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -98,13 +99,16 @@ pub const PendingRequest = struct {
 
 pub const QueueError = error{ QueueClosed, ZeroCapacity, OutOfMemory };
 
-/// accept 스레드 → 메인 marshal 큐(bounded FIFO of `*PendingRequest`). `PtyEventQueue` 결. accept 스레드가 push,
-/// 메인이 `tryPop`. `close`는 대기 중 pending을 전부 cancel해 accept 스레드를 깨운다(종료 시 무한 대기 방지).
+/// 연결 스레드 → 메인 marshal 큐(bounded FIFO of `*PendingRequest`). `PtyEventQueue` 결. 연결 스레드가 push,
+/// 메인이 `tryPop`. `close`는 대기 중 pending을 전부 cancel해 연결 스레드를 깨운다(종료 시 무한 대기 방지).
 ///
 /// **설계 노트(#6/#8)**: 옛 A2b는 accept가 serial(한 연결을 끝까지 serve 후 다음 accept)이라 marshal in-flight ≤1이었고
 /// ring FIFO는 그때 over-built였다. **5f-0b-2a부터 연결당 detached 스레드**(§9.5.1 — head-of-line 블로킹 폐기)라 **여러
-/// 연결 스레드가 동시에 push**할 수 있어(MPSC, 최대 max_connections) 이 bounded-FIFO가 이제 **정당하다**(포화 시 push가
-/// backpressure 대기). `PtyEventQueue`(docs/io-render-threading.md)의 검증된 bounded-FIFO + Io.Mutex/Condition +
+/// 연결 스레드가 동시에 push**하므로(MPSC) 이 bounded-FIFO가 이제 **정당하다** — mutex가 push를 직렬화하고 FIFO가 도착
+/// 순서를 보존한다. 용량은 `max_pending ≥ max_connections`로 잡아(app_host_abi.start) **포화가 실질적으로 안 일어나게**
+/// 한다(각 연결 스레드는 push→waitResolved 블로킹→메인 pop 후에야 다음 push라, len이 max_connections를 못 넘는다). 즉
+/// `not_full` backpressure 대기는 정상 사이징에선 도달 안 하는 안전망이다(오사이징 방어; 18차 [8]). `PtyEventQueue`(docs/
+/// io-render-threading.md)의 검증된 bounded-FIFO + Io.Mutex/Condition +
 /// close-cancel 패턴을 그대로 재사용한다. `PtyEventQueue`를 generic
 /// `BoundedQueue(T)`로 일반화해 이 큐와 통합하는 것은 tracked follow-up이다(범위 밖 — docs/verification-matrix.md).
 pub const ControlRequestQueue = struct {
@@ -157,14 +161,14 @@ pub const ControlRequestQueue = struct {
 
     /// 값싼 pending 유무 확인(짧은 락, #4). len>0이면 true. 메인이 매 tick refs 배열을 짓기 **전에** 이걸 봐 pending이
     /// 없으면 early return(렌더 핫패스 0-할당). drain 자체가 여전히 권위 있는 소비 지점이라, 확인 직후 pending이 도착해도
-    /// 다음 tick에서 처리된다(accept 스레드는 그동안 waitResolved에서 대기 — 손실 없음).
+    /// 다음 tick에서 처리된다(연결 스레드는 그동안 waitResolved에서 대기 — 손실 없음).
     pub fn hasPending(self: *ControlRequestQueue) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.len > 0;
     }
 
-    /// 종료: 새 push를 막고, **큐에 남은 pending을 전부 cancel**해 대기 중 accept 스레드를 깨운다. lock 순서는
+    /// 종료: 새 push를 막고, **큐에 남은 pending을 전부 cancel**해 대기 중 연결 스레드를 깨운다. lock 순서는
     /// queue.mutex → pending.mutex 단방향(pending.mutex를 쥔 채 queue.mutex를 잡는 경로는 없다 — 데드락 없음).
     pub fn close(self: *ControlRequestQueue) void {
         self.mutex.lockUncancelable(self.io);
@@ -185,18 +189,18 @@ pub const ControlRequestQueue = struct {
 pub const StartError = cs.BindError || std.Thread.SpawnError || QueueError;
 
 /// §5-async: async 응답을 나중에 되돌릴 **in-flight 요청** 하나(deferred marshal). 메인 drain이 즉시 resolve 대신
-/// `deferRequest`로 등록하면, 나중에 `completeInFlight`(콜백)이 resolve한다. `pending`은 accept 스레드 serve 스택에
+/// `deferRequest`로 등록하면, 나중에 `completeInFlight`(콜백)이 resolve한다. `pending`은 연결 스레드 serve 스택에
 /// 살며(waitResolved 대기 중) resolve/cancel까지 유효하다.
 pub const InFlight = struct {
     /// 이 async 요청의 상관 id(서버 발급, monotonic). Swift 콜백이 이 id로 complete한다.
     id: u64,
-    /// 붙잡은 pending(accept 스레드 소유, resolve/cancel 대상).
+    /// 붙잡은 pending(연결 스레드 소유, resolve/cancel 대상).
     pending: *PendingRequest,
     /// 모노토닉 awake ns 마감 — `reapExpiredInFlight`가 지나면 timeout으로 resolve(hung async op 방어).
     deadline_ns: i128,
 };
 
-/// A2b 라이브 서버. **start() 후 절대 이동/복사 금지**(accept 스레드가 `&self`를 잡는다 — LivePtySession 핀 선례).
+/// A2b 라이브 서버. **start() 후 절대 이동/복사 금지**(accept·연결 스레드가 `&self`를 잡는다 — LivePtySession 핀 선례).
 /// caller가 global static 또는 heap로 주소를 고정한다.
 pub const ControlServer = struct {
     io: std.Io,
@@ -208,7 +212,7 @@ pub const ControlServer = struct {
     hello_caps: []const []const u8,
     thread: ?std.Thread = null,
     closing: std.atomic.Value(bool) = .init(false),
-    /// accept 스레드가 stuck client에 무한 대기하지 않게 하는 read 타임아웃(serial serve + 깨끗한 join 요건).
+    /// 연결 스레드가 stuck client에 무한 대기하지 않게 하는 read 타임아웃(2b-1 지속 세션 요청 루프의 inter-request read + 깨끗한 join; poll 루프 전환 후 idle 제거는 2b-2·§9.5.6④).
     read_timeout_ms: u32 = 5000,
     /// accept blocking을 gate하는 poll 간격(종료 시 이 간격 안에 closing 확인 → join). 짧을수록 종료 빠름·wakeup 잦음.
     poll_interval_ms: i32 = 200,
@@ -230,8 +234,10 @@ pub const ControlServer = struct {
     conns_done: std.Io.Condition = .init,
     /// 현재 살아있는 연결 스레드 수(conns_mutex 아래). acceptOne 성공→spawn 전 +1, connThread 종료 시 -1+broadcast.
     active_conns: usize = 0,
-    /// 동시 연결 상한(bounded — 스레드 폭주 방어). 초과 연결은 accept 후 즉시 close(reject). max_pending 이하로 둔다.
-    max_connections: usize = 16,
+    /// 동시 연결 상한(bounded — 스레드 폭주 방어). 초과 연결은 accept 후 즉시 close(reject). **`max_pending` 이하**여야
+    /// 한다(start의 assert — 큐 용량 부족 시 연결 스레드 push backpressure park 방지, 18차 [11]). 제어 플레인은 클라
+    /// 소수(에이전트 몇 + CLI)라 8이면 충분. 라이브(app_host_abi)는 max_pending=16이라 여유, 테스트는 max_pending=8.
+    max_connections: usize = 8,
 
     /// 소켓을 bind하고 accept 스레드를 띄운다. **self는 이미 최종 주소에 있어야 한다.** bind 실패면 스레드 없이 에러.
     pub fn start(
@@ -260,6 +266,9 @@ pub const ControlServer = struct {
             .hello_caps = hello_caps,
             .items_gpa = items_gpa, // §5-async in_flight 리스트 alloc
         };
+        // 18차 [11]: 큐 용량 ≥ 동시 연결 상한. 어기면 연결 스레드가 queue.push backpressure로 park(=§9.5.1이 tryPush+
+        // server-busy로 피하려던 hang). max_connections는 struct 기본(16)이라 max_pending도 그 이상으로 넘겨야 한다.
+        std.debug.assert(self.max_connections <= max_pending);
         errdefer self.queue.deinit();
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
     }
@@ -277,8 +286,8 @@ pub const ControlServer = struct {
     }
 
     /// 메인 drain: 응답 바이트(`cross_gpa` 소유 — dispatchReadOnly에 `self.cross_gpa`를 넘겨 만든 것)를 pending에
-    /// 채우고 accept 스레드를 깨운다. accept 스레드가 소켓에 write 후 해제한다. response=null이면 응답 없이 종료
-    /// (메인 OOM 등 — pending은 반드시 resolve해야 accept 스레드가 무한 대기하지 않는다).
+    /// 채우고 연결 스레드를 깨운다. 연결 스레드가 소켓에 write 후 해제한다. response=null이면 응답 없이 종료
+    /// (메인 OOM 등 — pending은 반드시 resolve해야 연결 스레드가 무한 대기하지 않는다).
     pub fn resolveRequest(self: *ControlServer, pending: *PendingRequest, response: ?[]u8) void {
         _ = self;
         pending.resolve(response);
@@ -286,7 +295,7 @@ pub const ControlServer = struct {
 
     /// **§5-async(메인 전용)**: 응답이 나중에 오는 요청을 in-flight로 등록한다(즉시 resolve 안 함). drain이 async
     /// 메서드(browser.* — 5e)에 대해 `resolveRequest` 대신 이걸 호출해 pending을 붙잡으면, WKWebView 콜백 완료 시
-    /// `completeInFlight(반환 id, ...)`이 resolve한다. accept 스레드는 그동안 waitResolved에서 대기(pending 유효).
+    /// `completeInFlight(반환 id, ...)`이 resolve한다. 연결 스레드는 그동안 waitResolved에서 대기(pending 유효).
     /// bounded — `max_in_flight` 초과면 `TooManyInFlight`(호출자가 에러로 즉시 resolve해야 accept 무한 대기 방지).
     /// `deadline_ns`=모노토닉 awake ns 마감(호출자가 now+timeout 계산). 반환=async 상관 id(>=1). **메인 스레드 전용**.
     pub fn deferRequest(self: *ControlServer, pending: *PendingRequest, deadline_ns: i128) error{ TooManyInFlight, OutOfMemory }!u64 {
@@ -299,13 +308,13 @@ pub const ControlServer = struct {
 
     /// **§5-async(메인 전용)**: `async_id`의 in-flight 요청을 `response`(**cross_gpa 소유** 또는 null)로 resolve하고
     /// 레지스트리에서 제거한다. 찾으면 true, 없으면 false. **completeInFlight는 어느 경로든 `response` 소유권을
-    /// 인수**한다(대칭 소유 — 리뷰 [1]): 찾으면 `pending.resolve`가 accept 스레드로 넘겨 거기서 free, **못 찾으면**
+    /// 인수**한다(대칭 소유 — 리뷰 [1]): 찾으면 `pending.resolve`가 연결 스레드로 넘겨 거기서 free, **못 찾으면**
     /// (옛/이미 완료/reap된 id — 늦은/중복 콜백) 여기서 `cross_gpa.free`한다. 안 그러면 reap된 async op의 결과 버퍼가
     /// 누수한다(hit=이전, miss=drop의 비대칭 함정). Swift async 콜백이 ABI를 거쳐 부른다(메인 스레드).
     pub fn completeInFlight(self: *ControlServer, async_id: u64, response: ?[]u8) bool {
         for (self.in_flight.items, 0..) |e, i| {
             if (e.id == async_id) {
-                e.pending.resolve(response); // 소유권 이전 → accept 스레드가 write 후 free
+                e.pending.resolve(response); // 소유권 이전 → 연결 스레드가 write 후 free
                 _ = self.in_flight.swapRemove(i);
                 return true;
             }
@@ -325,8 +334,8 @@ pub const ControlServer = struct {
     }
 
     /// **§5-async(메인 전용)**: `now_ns`(모노토닉 awake) 기준 마감이 지난 in-flight를 timeout으로 정리한다 — 응답 없이
-    /// (`resolve(null)`) accept 스레드를 깨워 연결을 닫게 하고(client read 타임아웃이 받음, OOM 경로와 동형 계약)
-    /// 레지스트리에서 제거한다. drain이 매 tick 부른다(hung WKWebView async op가 accept 스레드를 영구 붙잡는 것 방어).
+    /// (`resolve(null)`) 연결 스레드를 깨워 연결을 닫게 하고(client read 타임아웃이 받음, OOM 경로와 동형 계약)
+    /// 레지스트리에서 제거한다. drain이 매 tick 부른다(hung WKWebView async op가 연결 스레드를 영구 붙잡는 것 방어).
     /// 반환=reap 개수. proper timeout **에러 응답**(요청 id 파싱 + 직렬화)은 후속 — 지금은 null 종료로 단순·일관.
     pub fn reapExpiredInFlight(self: *ControlServer, now_ns: i128) usize {
         var reaped: usize = 0;
@@ -344,9 +353,9 @@ pub const ControlServer = struct {
     /// 종료: accept 스레드에 closing을 알리고 join한 뒤 소켓/큐/in-flight를 해제한다(deinit 계약: 스레드 join·소켓 close).
     pub fn stop(self: *ControlServer) void {
         self.closing.store(true, .release);
-        self.queue.close(); // 대기 pending cancel → accept 스레드가 wait에서 깨어나 abandon
+        self.queue.close(); // 대기 pending cancel → 연결 스레드가 wait에서 깨어나 abandon
         // §5-async: in-flight로 붙잡힌 async 요청도 cancel(queue.close와 대칭 — 콜백이 영영 안 오는 요청의 accept
-        // 스레드를 깨워 abandon시킨다). join 전에 해 blocked accept 스레드가 빠져나오게 한다.
+        // 스레드를 깨워 abandon시킨다). join 전에 해 blocked 연결 스레드가 빠져나오게 한다.
         for (self.in_flight.items) |e| e.pending.cancel();
         if (self.thread) |thread| {
             thread.join(); // accept 루프: poll_interval 안에 closing을 봐 나온다 → 이후 새 연결 스레드 spawn 없음
@@ -363,7 +372,7 @@ pub const ControlServer = struct {
         self.* = undefined;
     }
 
-    // ── accept 스레드(§5: accept/parse/framing/write만) ──────────────────────────────────────────────────────
+    // ── accept 스레드(§5: accept + 연결당 스레드 spawn만; parse/framing/write는 연결 스레드) ──────────────────────────────────────────────────────
     fn acceptLoop(self: *ControlServer) void {
         while (!self.closing.load(.acquire)) {
             // blocking accept를 poll로 gate해 종료 시 poll_interval 안에 closing을 확인한다. #5: broken(listen fd가
@@ -448,11 +457,14 @@ pub const ControlServer = struct {
                 .cancelled => return, // 서버 종료 — 응답 없이 abandon
                 .pending => return, // 도달 불가(waitResolved는 pending에서 안 나감)
                 .done => {
-                    if (pending.response) |resp| {
-                        defer self.cross_gpa.free(resp);
-                        cs.writeAll(conn.fd, resp) catch return;
-                        cs.writeAll(conn.fd, "\n") catch return;
-                    }
+                    // **null 응답 = "종료" 계약(§5-async)**: reap timeout(hung browser op)·메인 collect OOM·browser
+                    // setup 실패가 `resolve(null)`로 온다 → 응답 없이 **연결을 닫는다**(옛 one-shot과 동형). 지속 루프에서
+                    // return 없이 다음 readFrame으로 falling through하면 client가 응답도 EOF도 못 받아 stream이 desync되고
+                    // (파이프라인한 후속 요청 응답을 timeout된 op에 오귀속), ~5s SO_RCVTIMEO까지 stranded된다(18차 [0]).
+                    const resp = pending.response orelse return;
+                    defer self.cross_gpa.free(resp);
+                    cs.writeAll(conn.fd, resp) catch return;
+                    cs.writeAll(conn.fd, "\n") catch return;
                     // 응답 완료 → 다음 요청 read(루프 계속). req_copy는 이 iteration defer가 해제.
                 },
             }
@@ -706,6 +718,7 @@ fn clientReqPersistent(gpa: std.mem.Allocator, base: []const u8, key: []const u8
     @memset(&addr.path, 0);
     @memcpy(addr.path[0..sp.len], sp);
     if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return error.ClientConnect;
+    cs.setReadTimeoutMs(fd, 5000); // 18차 [3]: 서버가 기대 응답을 안 보내면 read가 무한 hang(+ th.join 무한) 대신 ReadFailed로 접힘
 
     const auth = try cp.serializeAuthSelf(gpa, selector, null);
     defer gpa.free(auth);
@@ -762,6 +775,17 @@ fn drainWithFakeSnapshot(server: *ControlServer, store: *const cap.CapabilitySto
     return handled;
 }
 
+/// 테스트 drain 루프(왕복 테스트 공통, 18차 [10] dedup): client 스레드가 완료를 `done`(atomic, release)로 알릴 때까지
+/// 메인 drain을 돌린다. **atomic으로 완료를 관측**해 client 상태의 무동기 cross-thread read UB를 피한다(18차 [4]). guard
+/// 상한으로 무한 방지. done 관측 뒤 caller가 join하고 결과 바이트를 읽는다(join happens-before라 그 read는 안전).
+fn drainUntil(server: *ControlServer, store: *const cap.CapabilityStore, done: *std.atomic.Value(bool)) !void {
+    var guard: usize = 0;
+    while (!done.load(.acquire) and guard < 5000) : (guard += 1) {
+        _ = try drainWithFakeSnapshot(server, store);
+        if (!done.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+}
+
 test "server 왕복: client가 auth.self(10)+sessions.list → 메인 drain이 응답 → self scope로 10만" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const gpa = std.heap.c_allocator; // cross-thread — thread-safe
@@ -778,7 +802,9 @@ test "server 왕복: client가 auth.self(10)+sessions.list → 메인 drain이 �
         base: []const u8,
         resp: ?[]u8 = null,
         err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false), // 18차 [4]: 완료 atomic
         fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
             const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
             self.resp = clientReq(std.heap.c_allocator, self.base, "k1", 10, null, req) catch |e| { // cap_nonce 없음 = self
                 self.err = e;
@@ -791,14 +817,7 @@ test "server 왕복: client가 auth.self(10)+sessions.list → 메인 drain이 �
 
     var store: cap.CapabilityStore = .{}; // 빈 store — nonce 없는 요청은 self 경로.
     defer store.deinit(testing.allocator);
-    // 메인 drain 루프(응답이 나올 때까지 짧게 폴링 — 실제 앱은 frame tick이 부른다).
-    var got = false;
-    var guard: usize = 0;
-    while (!got and guard < 2000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(&server, &store);
-        got = ct.resp != null or ct.err != null;
-        if (!got) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-    }
+    try drainUntil(&server, &store, &ct.done); // 응답이 나올 때까지 메인 drain(실제 앱은 frame tick이 부른다)
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.resp != null);
@@ -828,7 +847,9 @@ test "server 동시 연결(5f-0b-2a): 여러 client가 동시에 붙어도 각�
         base: []const u8,
         resp: ?[]u8 = null,
         err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false), // 18차 [4]: 완료 atomic
         fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
             const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
             self.resp = clientReq(std.heap.c_allocator, self.base, "k1", 10, null, req) catch |e| { // caller=10(self scope)
                 self.err = e;
@@ -843,15 +864,15 @@ test "server 동시 연결(5f-0b-2a): 여러 client가 동시에 붙어도 각�
 
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    var done: usize = 0;
+    var all_done = false;
     var guard: usize = 0;
-    while (done < N and guard < 5000) : (guard += 1) {
+    while (!all_done and guard < 5000) : (guard += 1) {
         _ = try drainWithFakeSnapshot(&server, &store); // 메인 drain이 여러 연결의 pending을 처리
-        done = 0;
-        for (0..N) |i| {
-            if (cts[i].resp != null or cts[i].err != null) done += 1;
+        all_done = true;
+        for (0..N) |i| { // atomic acquire read(무동기 UB 없음)
+            if (!cts[i].done.load(.acquire)) all_done = false;
         }
-        if (done < N) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        if (!all_done) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     for (0..N) |i| ths[i].join();
 
@@ -883,7 +904,9 @@ test "server 지속 세션(5f-0b-2b-1): 한 연결로 auth 1회 + 요청 2개 �
         resps: [2][]u8 = undefined,
         ok: bool = false,
         err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false), // 18차 [4]: 완료를 atomic으로 알려 무동기 read UB 제거
         fn run(self: *@This()) void {
+            defer self.done.store(true, .release); // 성공/에러 모두 완료 표시(release=이후 join의 acquire와 짝)
             const reqs = [_][]const u8{
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}",
                 "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"sessions.list\"}",
@@ -900,13 +923,7 @@ test "server 지속 세션(5f-0b-2b-1): 한 연결로 auth 1회 + 요청 2개 �
 
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    var done = false;
-    var guard: usize = 0;
-    while (!done and guard < 5000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(&server, &store); // 순차 요청 2개를 메인 drain이 처리
-        done = ct.ok or ct.err != null;
-        if (!done) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-    }
+    try drainUntil(&server, &store, &ct.done); // 순차 요청 2개를 메인 drain이 처리(완료는 atomic)
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.ok);
@@ -919,6 +936,67 @@ test "server 지속 세션(5f-0b-2b-1): 한 연결로 auth 1회 + 요청 2개 �
         try testing.expect(pm.message == .response);
         try testing.expectEqual(@as(usize, 1), pm.message.response.result.?.array.items.len);
     }
+}
+
+test "server max_connections(18차 [1]): 슬롯 초과 연결은 reject(hello 후 close)·wait-group 카운터 정확·stop 깨끗" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.heap.c_allocator;
+    var bb: [256]u8 = undefined;
+    const base = srvTmpBase(&bb, "maxconn");
+    defer srvRmBase(base);
+
+    var server: ControlServer = undefined;
+    try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
+    server.max_connections = 1; // 슬롯 1개 — 둘째 연결은 reject 분기(391-395)를 탄다
+    defer server.stop(); // reject된 연결은 active_conns를 안 올렸어야 stop이 이 홀더 하나만 기다린다
+
+    // Holder: connect + auth만 보내고 요청은 안 보내 hold(server connThread가 readFrame서 블록 → 슬롯 1개 점유). release
+    // 후 fd close → server readFrame EOF → connThread 종료 → active_conns 0.
+    const Holder = struct {
+        base: []const u8,
+        release: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            var db: [512]u8 = undefined;
+            const dir = cs.controlDirPath(&db, self.base) catch return;
+            var sb: [512]u8 = undefined;
+            const sp = cs.socketPathIn(&sb, dir, "k1") catch return;
+            const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+            if (fd < 0) return;
+            defer _ = c.close(fd);
+            var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+            @memset(&addr.path, 0);
+            @memcpy(addr.path[0..sp.len], sp);
+            if (c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return;
+            const auth = cp.serializeAuthSelf(std.heap.c_allocator, 10, null) catch return;
+            defer std.heap.c_allocator.free(auth);
+            cs.writeAll(fd, auth) catch return;
+            cs.writeAll(fd, "\n") catch return; // 요청은 안 보냄 → 서버가 슬롯 점유한 채 readFrame 블록
+            while (!self.release.load(.acquire)) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        }
+    };
+    var holder = Holder{ .base = base };
+    const hth = try std.Thread.spawn(.{}, Holder.run, .{&holder});
+
+    // Holder가 슬롯을 잡을 때까지 대기(accept 순서 보장 — 그래야 다음 연결이 reject된다).
+    var w: usize = 0;
+    while (w < 1000) : (w += 1) {
+        server.conns_mutex.lockUncancelable(server.io);
+        const active = server.active_conns;
+        server.conns_mutex.unlock(server.io);
+        if (active >= 1) break;
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+
+    // B: 슬롯 없음 → reject(acceptOne이 hello 보낸 뒤 conn.deinit로 close) → clientReq는 hello skip 후 EOF = NoResponse.
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
+    try testing.expectError(error.NoResponse, clientReq(gpa, base, "k1", 10, null, req));
+
+    holder.release.store(true, .release); // Holder hold 해제 → run return → fd close → server connThread EOF 종료
+    hth.join();
+    // defer server.stop()이 남은 연결 스레드(Holder의 것)를 active_conns==0까지 기다려 join한다(reject된 B는 카운터
+    // 안 올렸으니 무한 대기 없음 — 카운터 정확성 검증).
 }
 
 test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것도 안 보인다(빈 목록)" {
@@ -935,7 +1013,9 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
         base: []const u8,
         resp: ?[]u8 = null,
         err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false), // 18차 [4]: 완료 atomic
         fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
             const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
             self.resp = clientReq(std.heap.c_allocator, self.base, "k1", null, null, req) catch |e| { // 셀렉터·cap 없음
                 self.err = e;
@@ -948,11 +1028,7 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
 
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    var guard: usize = 0;
-    while (ct.resp == null and ct.err == null and guard < 2000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(&server, &store);
-        if (ct.resp == null and ct.err == null) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-    }
+    try drainUntil(&server, &store, &ct.done);
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.resp != null);
@@ -983,7 +1059,9 @@ test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.lis
         nonce: [cap.nonce_len]u8,
         resp: ?[]u8 = null,
         err: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false), // 18차 [4]: 완료 atomic
         fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
             const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
             self.resp = clientReq(std.heap.c_allocator, self.base, "k1", 10, self.nonce, req) catch |e| { // anchor 10 + cap
                 self.err = e;
@@ -999,11 +1077,7 @@ test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.lis
     defer store.deinit(testing.allocator);
     try store.issueForFd(testing.allocator, cap_nonce, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
 
-    var guard: usize = 0;
-    while (ct.resp == null and ct.err == null and guard < 2000) : (guard += 1) {
-        _ = try drainWithFakeSnapshot(&server, &store);
-        if (ct.resp == null and ct.err == null) std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-    }
+    try drainUntil(&server, &store, &ct.done);
     th.join();
     try testing.expect(ct.err == null);
     try testing.expect(ct.resp != null);

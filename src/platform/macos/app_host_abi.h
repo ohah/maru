@@ -533,12 +533,15 @@ int32_t maru_macos_app_session_paste_text(
     size_t len,
     uint32_t escape_each
 );
-/* 드래그앤드롭 지점(backing px)의 pane으로 포커스를 옮긴다 — 드롭이 활성 pane이 아니라 **떨어뜨린 pane**으로
-   들어가게 하는 라우팅. Swift handleDrop이 내용 삽입(드래그 경로는 paste_text 또는 drop_files) **전에** 부르면
-   뒤이은 삽입이 기존 경로 그대로 새 활성 pane에 들어간다. pane rect는 탭 바를 포함한다. 그 pane으로 갔으면 1,
-   **라우팅하지 않으면 0**(=활성 pane 폴백): 사이드바/pane 밖, 붙여넣기 확인 모달 보류 중, 이전 paste 배수 중,
-   대상이 web pane(붙일 PTY 없음). 가드 근거는 Zig focusPaneAtPoint 주석. (v115) */
-int32_t maru_macos_app_session_focus_pane_at(
+/* 드래그앤드롭 지점(backing px)의 pane/Term으로 포커스를 옮긴다 — 드롭이 활성 pane이 아니라 **떨어뜨린 pane**으로
+   들어가게 하는 라우팅. Swift handleDrop이 내용 삽입(드래그 경로는 paste_text 또는 drop_files) **전에** 부른다.
+   pane rect는 탭 바를 포함하고, Term 탭 위 드롭이면 그 Term까지 활성으로 만든다.
+   반환은 **3-상태**이고 호스트는 반드시 구분해야 한다:
+     1  = routed(그 pane/Term으로 포커스 이동 — 뒤이은 삽입이 거기로 간다)
+     0  = not_applicable(사이드바·pane 밖 — 호스트는 기존대로 활성 pane에 삽입)
+    -1  = refused(**삽입 금지** — chrome 오버레이/모달이 열렸거나 대상이 web pane이라 붙일 PTY가 없다)
+   거부를 0으로 접으면 호스트가 활성 pane에 삽입해 막으려던 오삽입이 그대로 일어난다. (v115) */
+int32_t maru_macos_app_session_route_drop(
     MaruAppHostSession *session,
     double x_px,
     double y_px

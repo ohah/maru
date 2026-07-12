@@ -394,19 +394,24 @@ pub export fn maru_macos_app_session_paste_text(
     return @intFromEnum(Status.ok);
 }
 
-// 드래그앤드롭 지점(backing px)의 pane으로 포커스를 옮긴다 — 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
+// 드래그앤드롭 지점(backing px)의 pane/Term으로 포커스를 옮긴다 — 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
 // 들어가게 하는 라우팅. Swift handleDrop이 내용 삽입(드래그 경로는 paste_text 또는 drop_files — drop_image는 Cmd+V
-// 클립보드 이미지 전용이라 여기 안 온다) **전에** 부르면, 뒤이은 삽입이 기존 경로 그대로 새 활성 pane에 들어간다.
-// 그 pane으로 갔으면 1, **라우팅하지 않으면 0**(=활성 pane 폴백): 사이드바/pane 밖, 붙여넣기 확인 모달 보류 중,
-// 이전 paste 배수 중, 대상이 web pane. 가드 근거는 app_session.focusPaneAtPoint 주석("포커스 이동=라우팅"이
-// 성립하지 않는 상태) 참조. (v115)
-pub export fn maru_macos_app_session_focus_pane_at(
+// 클립보드 이미지 전용이라 여기 안 온다) **전에** 부른다.
+//
+// 반환은 **3-상태**다(호스트가 반드시 구분해야 한다 — 거부를 0으로 접으면 호스트가 그냥 활성 pane에 삽입해
+// 애초에 막으려던 오삽입이 그대로 일어난다):
+//   **1  routed**         = 그 pane(+Term)으로 포커스를 옮겼다 → 뒤이은 삽입이 거기로 간다.
+//   **0  not_applicable** = 라우팅 대상 아님(사이드바·pane 밖) → 호스트는 기존대로 활성 pane에 삽입한다.
+//   **-1 refused**        = 드롭 거부 → 호스트는 **내용을 삽입하면 안 된다**(chrome 오버레이/모달 열림, 또는 대상이
+//                           web pane이라 붙일 PTY가 없음). 포커스도 안 옮겼다.
+// 근거·가드는 app_session.routeDropAtPoint 주석. (v115)
+pub export fn maru_macos_app_session_route_drop(
     session: ?*AppSession,
     x_px: f64,
     y_px: f64,
 ) c_int {
     const app_session = session orelse return 0;
-    return if (app_session.focusPaneAtPoint(x_px, y_px)) 1 else 0;
+    return @intFromEnum(app_session.routeDropAtPoint(x_px, y_px));
 }
 
 // 드래그앤드롭한 파일 경로들(NUL '\0' 구분). maru ssh 원격 세션이면 각 파일을 control socket으로 백그라운드

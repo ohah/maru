@@ -3293,18 +3293,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 한다. 스코프가 없으면 forwarder(appSession)가 **key 창**을 가리키므로, 백그라운드 창에 떨어뜨린 드롭이 key
     /// 창의 pane 트리에 좌표를 hit-test하고 그 창에 붙여넣는다(quick 터미널이 key인 상태가 대표 — code-review).
     func handleDrop(_ pb: NSPasteboard, at windowPoint: NSPoint, in view: NSView) -> Bool {
+        // 삽입할 내용이 아예 없으면 포커스도 건드리지 않는다 — 빈 드롭이 pane 포커스만 훔치던 것(code-review).
+        guard dropHasPayload(pb) else { return false }
         var inserted = false
         withSurface(surfaceForView(view)) {
-            // **삽입 전에** 드롭 지점의 pane으로 포커스를 옮긴다(v115) — 안 그러면 어느 pane에 떨어뜨리든 활성
-            // pane에만 들어간다. 좌표는 창 좌표(draggingLocation)를 마우스 경로와 같은 backingPx로 환산해 넘기고,
-            // pane 판정·라우팅 가드(모달·배수 중 paste·web pane)는 좌표계 권위를 가진 Zig가 한다.
-            if let session = appSession {
-                let (xPx, yPx) = backingPx(view.convert(windowPoint, from: nil), in: view)
-                if maru_macos_app_session_focus_pane_at(session, xPx, yPx) != 0 { markMetalNeedsRedraw() }
-            }
+            guard let session = appSession else { return }
+            // **삽입 전에** 드롭 지점의 pane/Term으로 포커스를 옮긴다(v115) — 안 그러면 어느 pane에 떨어뜨리든
+            // 활성 pane에만 들어간다. 좌표는 창 좌표(draggingLocation)를 마우스 경로와 같은 backingPx로 환산해
+            // 넘기고, pane 판정·가드는 좌표계 권위를 가진 Zig가 한다(routeDropAtPoint).
+            let (xPx, yPx) = backingPx(view.convert(windowPoint, from: nil), in: view)
+            let route = maru_macos_app_session_route_drop(session, xPx, yPx)
+            // **-1 = 거부**(모달/오버레이 열림·대상이 web pane): 내용을 삽입하지 **않는다**. 거부를 무시하고
+            // 삽입하면 활성 pane에 들어가 — 애초에 막으려던 오삽입이 그대로 일어난다(code-review).
+            guard route >= 0 else { return }
+            if route > 0 { markMetalNeedsRedraw() } // 포커스가 실제로 옮겨졌을 때만 다시 그린다
             inserted = handleDrop(pb)
         }
         return inserted
+    }
+
+    /// 이 pasteboard에 **삽입할 내용이 있는가**(부수효과 없이 판정 — 임시 PNG를 만들지 않는다).
+    /// handleDrop의 우선순위(URL > 파일 URL > 평문 > 비트맵)와 같은 소스를 본다.
+    private func dropHasPayload(_ pb: NSPasteboard) -> Bool {
+        if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty { return true }
+        if let url = pb.string(forType: .URL), !url.isEmpty { return true }
+        if let text = pb.string(forType: .string), !text.isEmpty { return true }
+        return clipboardImagePng(pb) != nil
     }
 
     /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 삽입한다 — 위 오버로드가 창 스코프 안에서 부른다.

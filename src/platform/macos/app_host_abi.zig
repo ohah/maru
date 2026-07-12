@@ -2005,6 +2005,16 @@ pub export fn maru_macos_control_complete_browser_op(async_id: u64, status: u32,
     _ = server.completeInFlight(async_id, resp); // found → resolve(resp)(accept 스레드가 write 후 free)
 }
 
+/// 5f-0b-3c: Swift가 WKWebView `url` KVO(메인 스레드)에서 호출 — 그 web surface의 `browser.navigated` 이벤트를 그 surface
+/// 구독자들의 연결 outbound로 push한다(§9.5.2). 구독자 없으면 `pushEvent`가 match-first로 직렬화 없이 조기 반환(핫패스 무비용).
+/// 서버 미시작이면 무동작. `url`은 이 호출 중만 유효(pushEvent가 프레임에 복사). **메인 스레드 전용**(KVO=메인; registry=leaf-mutex).
+pub export fn maru_macos_control_push_browser_navigated(surface_id: u64, url_ptr: ?[*]const u8, url_len: usize) void {
+    if (!control_server_active) return;
+    const server = &control_server_storage;
+    const url: []const u8 = if (url_ptr) |p| p[0..url_len] else "";
+    _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .{ .navigated = url });
+}
+
 pub export fn maru_macos_control_server_stop() void {
     if (!control_server_active) return;
     control_server_active = false;

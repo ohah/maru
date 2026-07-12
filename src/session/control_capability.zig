@@ -62,7 +62,7 @@ pub fn hashNonce(nonce: Nonce) Hash {
 // ── scope 모델(§8.3) ──────────────────────────────────────────────────────────────────────────────────────
 /// capability scope 분류(§8.3). method↔scope 매핑(§6 line 111)이 이 category로 판정한다. metadata의 sub-scope
 /// (self|window|all)는 `Scope.metadata`가 `wm.MetadataScope`로 실어 나른다(1c/1d가 소비하는 그 타입).
-pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser };
+pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser, browser_storage };
 
 /// 단일 capability scope(§8.5 **single-scope 강제**: capability는 정확히 하나의 scope만 싣는다 — 이 union은 한
 /// 값이라 write+lifecycle 같은 복합 grant를 타입 수준에서 만들 수 없다). metadata는 `wm.MetadataScope`를 실어
@@ -78,8 +78,12 @@ pub const Scope = union(enum) {
     write,
     /// `lifecycle`(§8.3 `spawn`/`close`/`resize`/`focus`/`panel.open`). **상속 fd 경로로 발급 금지**(§8.5).
     lifecycle,
-    /// `browser`(§8.3 `browser.*`).
+    /// `browser`(§8.3 `browser.*` — navigate·loadUrl·screenshot·act·subscribe 등 **페이지 조작/관찰**).
     browser,
+    /// `browser-storage`(§8.3 D5 — `browser.getCookies` 등 **쿠키/스토리지 열람**). `browser`와 **분리된 peer
+    /// scope**(D5): 페이지를 몰 수 있는 cap이 쿠키(인증 토큰)까지 자동으로 새면 안 되므로 별도 grant를 강제한다.
+    /// single-scope(§8.5)라 세션이 둘 다 쓰려면 cap 두 개를 누적(§9.5.6 ③ auth.grant).
+    browser_storage,
 
     pub fn class(self: Scope) ScopeClass {
         return switch (self) {
@@ -89,16 +93,18 @@ pub const Scope = union(enum) {
             .write => .write,
             .lifecycle => .lifecycle,
             .browser => .browser,
+            .browser_storage => .browser_storage,
         };
     }
 
     /// §8.5 **핵심 정책**: 상속 fd 경로로 발급 가능한 scope인가. write/lifecycle은 **절대 금지**(상속 fd로 write가
     /// 새면 same-uid untrusted 코드가 셸에 키 주입 = macOS `TIOCSTI` 제거 후 새로 생기는 권한 — §8.5). 이 둘은
     /// per-request `SCM_RIGHTS` fd-passing 또는 명시 확인 UX로만(1e 범위 밖). metadata·read-output·bind·browser는
-    /// 허용하되 read-output은 짧은 TTL을 추가로 요구한다(`validateFdIssuance`).
+    /// 허용하되 read-output은 짧은 TTL을 추가로 요구한다(`validateFdIssuance`). **browser_storage는 금지**(D5):
+    /// 쿠키=인증 토큰이라 상속 fd로 새면 same-uid untrusted 코드가 세션 자격증명을 탈취(write/lifecycle과 동급 위험).
     pub fn allowedViaInheritedFd(self: Scope) bool {
         return switch (self.class()) {
-            .write, .lifecycle => false,
+            .write, .lifecycle, .browser_storage => false,
             .metadata, .read_output, .bind, .browser => true,
         };
     }
@@ -109,7 +115,8 @@ pub const Scope = union(enum) {
 /// (authorize가 `unknown_method` deny로 접는다 — 미지 method에 grant가 새지 않게). 1a `parseMethod`로 파싱한다.
 ///
 /// 매핑(§6 line 111): `list`/`get`/`subscribe`=metadata, `panel.bindSession`=bind, `capture`/`subscribeOutput`=
-/// read-output, `send*`=write, `resize`/`focus`/`close`/`spawn`/`panel.open`=lifecycle, `browser.*`=browser.
+/// read-output, `send*`=write, `resize`/`focus`/`close`/`spawn`/`panel.open`=lifecycle, `browser.getCookies`=
+/// browser-storage(D5), 나머지 `browser.*`=browser.
 pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     const m = cp.parseMethod(method);
     const rest = m.rest;
@@ -128,7 +135,10 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     if (m.core == .panel and eq(rest, "open")) return .lifecycle;
     // bind: panel.bindSession.
     if (m.core == .panel and eq(rest, "bindSession")) return .bind;
-    // browser.*(§6 line 111 와일드카드).
+    // browser-storage: browser.getCookies(D5 — 쿠키/스토리지는 browser와 분리된 peer scope). 아래 generic
+    // `browser.*`보다 **먼저** 검사해야 getCookies가 browser scope로 새지 않는다(§8.3 D5 laundering-hole 방지).
+    if (m.core == .browser and eq(rest, "getCookies")) return .browser_storage;
+    // browser.*(§6 line 111 와일드카드) — 나머지 페이지 조작/관찰.
     if (m.core == .browser) return .browser;
     return null;
 }
@@ -509,6 +519,11 @@ test "fd 발급 정책: metadata·bind·browser는 상속 fd 허용(§8.5 write/
     try validateFdIssuance(.browser, null);
 }
 
+test "fd 발급 정책: browser_storage는 상속 fd로 발급 금지(D5 쿠키=인증 토큰 탈취 위험)" {
+    try testing.expect(!Scope.allowedViaInheritedFd(.browser_storage));
+    try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_storage, null));
+}
+
 // ── 4) method↔scope 매핑 전수(§6 line 111 단일 출처) ──
 test "method↔scope 매핑: §6 line 111의 모든 메서드가 올바른 category로 매핑된다" {
     const cases = [_]struct { m: []const u8, want: ?ScopeClass }{
@@ -530,9 +545,11 @@ test "method↔scope 매핑: §6 line 111의 모든 메서드가 올바른 categ
         .{ .m = "panel.open", .want = .lifecycle },
         // bind
         .{ .m = "panel.bindSession", .want = .bind },
-        // browser.*
+        // browser.* (페이지 조작/관찰)
         .{ .m = "browser.navigate", .want = .browser },
         .{ .m = "browser.executeScript", .want = .browser },
+        // browser-storage(D5) — getCookies만 분리 scope, 나머지 browser.*는 browser 유지
+        .{ .m = "browser.getCookies", .want = .browser_storage },
         // 미지/미매핑 → null(grant 안 샘)
         .{ .m = "session.unknownVerb", .want = null },
         .{ .m = "sessions.foo", .want = null },
@@ -753,6 +770,15 @@ test "authorize grant: bind/lifecycle/browser cap이 각자 category method를 �
     const br_cap: Capability = .{ .surface_id = 10, .generation = 0, .scope = .browser };
     try testing.expect(authorize(br_cap, 10, 0, "browser.navigate", 0) == .granted);
     try testing.expect(authorize(br_cap, 10, 0, "browser.executeScript", 0) == .granted);
+    // D5: browser cap은 getCookies를 인가하지 **않는다**(쿠키=별도 browser_storage scope, laundering-hole 방지).
+    const bg = authorize(br_cap, 10, 0, "browser.getCookies", 0);
+    try testing.expect(bg == .deny and bg.deny == .scope_insufficient);
+
+    // 대칭: browser_storage cap은 getCookies만 인가, 페이지 조작(navigate)은 거부(single-scope §8.5).
+    const stor_cap: Capability = .{ .surface_id = 10, .generation = 0, .scope = .browser_storage };
+    try testing.expect(authorize(stor_cap, 10, 0, "browser.getCookies", 0) == .granted);
+    const sn = authorize(stor_cap, 10, 0, "browser.navigate", 0);
+    try testing.expect(sn == .deny and sn.deny == .scope_insufficient);
 }
 
 test "resolve: non-metadata grant(bind)는 metadataScope가 null(1c/1d가 metadata 아님을 구별)" {

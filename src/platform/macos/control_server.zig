@@ -6,9 +6,12 @@
 //! **범위(A2b = 라이브 서버 + marshal, 이 파일):**
 //!  - 앱 전역 unix socket bind + accept 스레드(heap-pin — 스레드가 &self를 잡으므로 caller가 주소를 고정).
 //!  - **accept 스레드**(5f-0b-2a부터)는 **accept + peer-cred(same-uid, 1b acceptOne) + hello + 연결당 스레드 spawn만**
-//!    한다(직렬 인라인 serve 폐기 = head-of-line 블로킹 제거, §9.5.1). 연결당 **연결 스레드**가 **parse/framing/marshal/
-//!    write**(§5): auth 프레임 1회 + **요청 루프**(지속 세션 2b-1) → `PendingRequest`를 **메인 marshal 큐**에 push →
-//!    메인이 채운 응답을 기다렸다가 소켓에 write(락 밖). 코어·트리·collector·dispatch는 **절대 연결 스레드가 만지지 않는다**.
+//!    한다(직렬 인라인 serve 폐기 = head-of-line 블로킹 제거, §9.5.1). 연결당 **reader+writer 2-스레드**(5f-0b-2b-2 §9.5.1):
+//!    **reader**(serveConnection)가 parse/framing/marshal(§5) — auth 프레임 1회 + **요청 루프**(지속 세션 2b-1) →
+//!    `PendingRequest`를 **메인 marshal 큐**에 push → 메인이 채운 응답을 기다렸다가(waitResolved) **연결의 outbound 큐에
+//!    push**(직접 소켓 write 안 함). **writer**(writerThread)가 그 outbound 큐(=응답+이벤트 통합)를 `popWait`로 drain해
+//!    **소켓에 write**(단일 writer 불변 — reader는 절대 소켓에 안 씀 → 이벤트 write와 경합 없음). 이벤트 push(메인→outbound)·
+//!    registry·revoke는 5f-0b-3. 코어·트리·collector·dispatch는 **절대 연결 스레드가 만지지 않는다**.
 //!  - 메인 drain(app_host_abi가 tick마다 호출): `tryPopRequest`로 요청을 꺼내 실 collector + auth + dispatch(1d)로
 //!    응답 바이트를 만들고 `resolveRequest`로 pending에 채워 그 연결 스레드를 깨운다.
 //!
@@ -308,6 +311,9 @@ pub const ControlServer = struct {
     /// 한다(start의 assert — 큐 용량 부족 시 연결 스레드 push backpressure park 방지, 18차 [11]). 제어 플레인은 클라
     /// 소수(에이전트 몇 + CLI)라 8이면 충분. 라이브(app_host_abi)는 max_pending=16이라 여유, 테스트는 max_pending=8.
     max_connections: usize = 8,
+    /// 5f-0b-2b-2: 연결당 outbound 큐(응답+이벤트) 용량. 직렬 reader라 응답은 depth ~1이고, 실 소비자는 5f-0b-3 이벤트
+    /// 버스트다(초과 push=Full → 이벤트 drop=subscriber-lagged, §9.5.6; 응답은 Full이면 연결 abandon). 64면 여유.
+    outbound_capacity: usize = 64,
 
     /// 소켓을 bind하고 accept 스레드를 띄운다. **self는 이미 최종 주소에 있어야 한다.** bind 실패면 스레드 없이 에러.
     pub fn start(
@@ -486,37 +492,76 @@ pub const ControlServer = struct {
         }
     }
 
-    /// 5f-0b-2a: 한 연결을 서브하는 detached 스레드 본체. serve(2b-1부터 지속 세션=auth 1회+요청 루프·waitResolved —
-    /// 5e async 경로 불변) 후 conn을 닫고 wait-group 카운터를 내린다(broadcast로 stop() 대기 해제). conn은 값 소유(fd 하나).
+    /// 5f-0b-2a: 한 연결을 서브하는 detached 스레드 본체. 5f-0b-2b-2부터 **reader+writer 2-스레드**(§9.5.1): 이 스레드가
+    /// **reader**(serveConnection)를 돌리고, **writer**(writerThread)를 spawn해 outbound 큐를 drain시킨다. serve(2b-1
+    /// 지속 세션=auth 1회+요청 루프·waitResolved — 5e async 경로 불변)가 끝나면 outbound를 close해 writer를 종료·join한
+    /// **뒤에** conn을 닫고(writer의 fd write와 close 경합 방지) wait-group 카운터를 내린다. conn은 값 소유(fd 하나).
     fn connThread(self: *ControlServer, conn_in: cs.Connection) void {
         var conn = conn_in;
-        self.serveConnection(&conn);
+        // 연결당 통합 outbound 큐(응답+이벤트). reader가 응답 push, writer가 drain→소켓 write(단일 writer 불변).
+        var outbound = OutboundChannel.init(self.io, self.outbound_capacity);
+        const writer = std.Thread.spawn(.{}, writerThread, .{ self, conn.fd, &outbound }) catch {
+            // writer spawn 실패 → 응답 write 경로 없음 → 이 연결 포기(reader 안 돌림). 정리 후 카운터 감소.
+            outbound.deinit(self.cross_gpa);
+            conn.deinit();
+            self.connDone();
+            return;
+        };
+        self.serveConnection(&conn, &outbound); // reader: auth 1회 + 요청 루프(응답을 outbound에 push)
+        outbound.close(); // reader 종료 → writer가 남은 프레임 drain 후 popWait null로 종료
+        writer.join(); // conn.fd write가 끝난 뒤에만 close(아래) — writer의 fd 사용과 경합 방지
+        outbound.deinit(self.cross_gpa); // writer가 다 drain했으면 no-op, 아니면 남은 프레임 bytes free
         conn.deinit();
+        self.connDone();
+    }
+
+    /// wait-group 카운터 감소 + stop() 대기 해제(connThread 종료 경로 공통).
+    fn connDone(self: *ControlServer) void {
         self.conns_mutex.lockUncancelable(self.io);
         self.active_conns -= 1;
         self.conns_done.broadcast(self.io);
         self.conns_mutex.unlock(self.io);
     }
 
-    /// 한 연결을 serve: read 타임아웃 → auth 프레임 1회 → **요청 루프**(각 요청=frame 읽기 → marshal → 메인 응답 대기
-    /// → write, 순차). 5f-0b-2b-1 **지속 세션**(§9.5.1 D1): auth 1회 후 같은 연결로 다중 요청(매 메서드 재연결·재auth
-    /// 제거). 요청은 순차(현 요청 응답 후 다음 read) — 파이프라인·이벤트 push는 outbound 큐 배선(5f-0b-2b-2) 후. EOF/
-    /// 타임아웃/에러/종료면 루프를 나와 연결을 닫는다. 코어/트리/collector 접근 0(전부 메인 marshal). cross_gpa만 쓴다.
-    fn serveConnection(self: *ControlServer, conn: *cs.Connection) void {
+    /// 5f-0b-2b-2 **writer 스레드**: 연결의 outbound 큐를 `popWait`로 블록-drain해 프레임(응답+이벤트)을 소켓에 write한다
+    /// (**이 스레드가 유일한 소켓 writer** — reader는 절대 안 씀). 각 프레임 뒤에 `\n` 프레이밍을 붙이고 bytes를 free한다
+    /// (소유권=writer). write 실패(broken pipe/타임아웃)면 **draining만 계속**(free)해 큐가 안 차게 한다(reader의 push
+    /// Full 회피) — outbound close 시 popWait이 null을 반환하면 종료. conn.deinit(close)는 connThread가 join 후 한다.
+    fn writerThread(self: *ControlServer, fd: c.fd_t, outbound: *OutboundChannel) void {
+        var broken = false;
+        while (outbound.popWait()) |frame| {
+            defer self.cross_gpa.free(frame.bytes);
+            if (broken) continue; // 이미 write 실패 → 남은 프레임은 free만(연결 곧 teardown)
+            cs.writeAll(fd, frame.bytes) catch {
+                broken = true;
+                continue;
+            };
+            cs.writeAll(fd, "\n") catch {
+                broken = true;
+            };
+        }
+    }
+
+    /// 한 연결의 **reader**를 serve(5f-0b-2b-2 2-스레드): read 타임아웃 → auth 프레임 1회 → **요청 루프**(각 요청=frame
+    /// 읽기 → marshal → 메인 응답 대기 → **outbound에 push**, 순차). 5f-0b-2b-1 **지속 세션**(§9.5.1 D1): auth 1회 후
+    /// 같은 연결로 다중 요청. 요청은 순차(현 요청 응답을 push한 뒤 다음 read) — 응답 소켓 write는 writer 스레드가 한다
+    /// (reader는 소켓에 안 씀 = 단일 writer 불변). EOF/타임아웃/에러/종료면 루프를 나오고, connThread가 outbound close→
+    /// writer join→conn close를 한다. 코어/트리/collector 접근 0(전부 메인 marshal). cross_gpa만 쓴다.
+    fn serveConnection(self: *ControlServer, conn: *cs.Connection, outbound: *OutboundChannel) void {
         cs.setReadTimeoutMs(conn.fd, self.read_timeout_ms);
-        cs.setWriteTimeoutMs(conn.fd, self.read_timeout_ms); // #2: 응답을 안 읽는 client에 write가 무한 블록하지 않게(read와 대칭).
+        cs.setWriteTimeoutMs(conn.fd, self.read_timeout_ms); // #2: 응답을 안 읽는 client에 writer write가 무한 블록하지 않게(read와 대칭).
         var framer: cp.Framer = .{};
         defer framer.deinit(self.cross_gpa);
 
         // 프레임 1 = auth.self 셀렉터 + 선택적 cap_nonce(§8.4·§8.5 1e). 없거나 손상이면 빈 AuthFrame(self 안 줌·cap 없음).
         // AuthFrame은 값 타입(selector·cap_nonce 복사본)이라 framer 슬라이스 무효화와 무관하게 세션 내내 유효하다(auth 1회).
-        const auth_line = self.readFrame(conn, &framer) orelse return;
+        const auth_line = self.readFrame(conn, &framer, outbound) orelse return;
         const auth = cp.parseAuthFrame(self.cross_gpa, auth_line);
 
         // 요청 루프(지속 세션): 각 iteration이 요청 한 개를 처리한다. readFrame null(EOF/타임아웃/에러/oversize)이면 종료.
         while (true) {
             // Framer 슬라이스는 다음 read에 무효화되므로 marshal 전에 dupe(대기 동안 유효 보장). defer로 iteration 끝에 해제.
-            const req_line = self.readFrame(conn, &framer) orelse return;
+            const req_line = self.readFrame(conn, &framer, outbound) orelse return;
             const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
             defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 iteration 끝(대기 후)에 해제
 
@@ -532,10 +577,13 @@ pub const ControlServer = struct {
                     // return 없이 다음 readFrame으로 falling through하면 client가 응답도 EOF도 못 받아 stream이 desync되고
                     // (파이프라인한 후속 요청 응답을 timeout된 op에 오귀속), ~5s SO_RCVTIMEO까지 stranded된다(18차 [0]).
                     const resp = pending.response orelse return;
-                    defer self.cross_gpa.free(resp);
-                    cs.writeAll(conn.fd, resp) catch return;
-                    cs.writeAll(conn.fd, "\n") catch return;
-                    // 응답 완료 → 다음 요청 read(루프 계속). req_copy는 이 iteration defer가 해제.
+                    // 응답 바이트 소유권을 outbound 프레임으로 이전(writer가 write 후 free). `\n` 프레이밍은 writer가 붙인다.
+                    // tag 0 = 응답(§8.5 purge 보호 — revoke는 이벤트만 지운다). 응답은 coalesce/유실 불가 → coalesce_key=null.
+                    outbound.push(self.cross_gpa, .{ .bytes = resp, .coalesce_key = null, .tag = 0 }) catch {
+                        self.cross_gpa.free(resp); // push 실패(Full=writer 정체/broken, QueueClosed=종료) → 소유권 반환·해제 후 abandon
+                        return;
+                    };
+                    // 응답 enqueue 완료 → 다음 요청 read(루프 계속). writer가 비동기로 소켓에 write. req_copy는 defer가 해제.
                 },
             }
         }
@@ -543,13 +591,15 @@ pub const ControlServer = struct {
 
     /// 완결 프레임 하나를 조립해 돌려준다(1a Framer + 1b Connection.readInto 재사용). 슬라이스는 다음 read/next까지
     /// 유효. null = EOF/read 에러(타임아웃 포함)/OOM/payload-too-large → serve 중단(연결 abandon).
-    fn readFrame(self: *ControlServer, conn: *cs.Connection, framer: *cp.Framer) ?[]const u8 {
+    fn readFrame(self: *ControlServer, conn: *cs.Connection, framer: *cp.Framer, outbound: *OutboundChannel) ?[]const u8 {
         while (true) {
             const maybe = framer.next() catch {
-                // #3 §4.3: frame이 max를 초과하면 조용히 버리지 않고 payload_too_large(-32001) 응답을 쓴 뒤 연결을 버린다
-                // (serveReadOnly와 동일 계약 — 응답 write는 cross_gpa·소켓 스레드, best-effort로 실패는 무시). id는 아직
-                // 못 읽었으므로 `.null`(JSON-RPC 관례). 응답 후에도 이 연결은 abandon한다(sticky too_large라 재조립 불가).
-                cs.writeErrorResponse(conn.fd, self.cross_gpa, .payload_too_large) catch {};
+                // #3 §4.3: frame이 max를 초과하면 조용히 버리지 않고 payload_too_large(-32001) 응답을 보낸 뒤 연결을 버린다
+                // (serveReadOnly와 동일 계약). 5f-0b-2b-2: 직접 소켓 write는 writer 스레드의 write와 경합(단일 writer 불변
+                // 위반)하므로 **outbound에 push**(writer가 write). best-effort — 직렬화/push 실패는 무시(abandon 우선).
+                // id는 아직 못 읽었으므로 `.null`(JSON-RPC 관례). 응답 후에도 이 연결은 abandon한다(sticky too_large라 재조립 불가).
+                const err_bytes = cp.serializeError(self.cross_gpa, .null, .payload_too_large, cp.ErrorCode.payload_too_large.defaultMessage(), null) catch return null;
+                outbound.push(self.cross_gpa, .{ .bytes = err_bytes, .coalesce_key = null, .tag = 0 }) catch self.cross_gpa.free(err_bytes);
                 return null;
             };
             if (maybe) |line| return line;
@@ -1220,9 +1270,9 @@ test "server: start 실패 없이 즉시 stop해도 accept 스레드가 깨끗�
     server.stop(); // poll_interval(200ms) 안에 join — 무한 대기 없음(테스트가 hang하면 실패)
 }
 
-test "readFrame(#3): oversize 프레임은 payload_too_large(-32001) 응답을 쓴 뒤 null(연결 abandon, 왕복)" {
+test "readFrame(#3): oversize 프레임은 payload_too_large(-32001)를 outbound에 push한 뒤 null(연결 abandon)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    // socketpair로 양방향 연결(서버측=fds[0], 클라이언트측=fds[1]) — accept-loop 없이 readFrame 계약만 결정론적으로 검증.
+    // socketpair로 양방향 연결(서버측=fds[0]) — accept-loop 없이 readFrame 계약만 결정론적으로 검증.
     var fds: [2]c.fd_t = undefined;
     try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
     defer _ = c.close(fds[0]);
@@ -1231,33 +1281,22 @@ test "readFrame(#3): oversize 프레임은 payload_too_large(-32001) 응답을 �
     // 클라이언트측이 max_frame(16)을 넘는 완결 프레임을 보낸다(20B + \n).
     try cs.writeAll(fds[1], "0123456789abcdefghij\n");
 
-    // readFrame은 self.cross_gpa만 읽으므로(나머지 필드 미접근) 최소 구성으로 계약만 태운다.
+    // readFrame은 self.cross_gpa만 읽고, too_large 에러를 **outbound에 push**한다(5f-0b-2b-2 — 직접 소켓 write는 writer
+    // 스레드와 경합=단일 writer 불변 위반). 여기선 writer 없이 채널만 만들어 push된 프레임을 직접 검사한다(관측점=outbound).
     var srv: ControlServer = undefined;
     srv.cross_gpa = testing.allocator;
     var conn = cs.Connection{ .fd = fds[0] };
     var framer: cp.Framer = .{ .max_frame = 16 };
     defer framer.deinit(testing.allocator);
-    try testing.expect(srv.readFrame(&conn, &framer) == null); // 프레임 버림(sticky too_large)
+    var outbound = OutboundChannel.init(std.testing.io, 8);
+    defer outbound.deinit(testing.allocator);
+    try testing.expect(srv.readFrame(&conn, &framer, &outbound) == null); // 프레임 버림(sticky too_large) + 에러 push
 
-    // 클라이언트측이 payload_too_large(-32001) 응답을 받는다(왕복 — 조용히 abandon하지 않는다는 증거). 응답도
-    // 2-write(bytes, `\n`)라 완결 프레임까지 read 루프로 재조립한다(단일 read가 개행 앞에서 끊길 수 있음). read
-    // 타임아웃을 걸어, 응답을 안 쓰는 회귀(수정 제거) 시 무한 블록 대신 read가 즉시 빠져 resp_line==null로 깨끗이 실패한다.
-    cs.setReadTimeoutMs(fds[1], 1000);
-    var cf: cp.Framer = .{};
-    defer cf.deinit(testing.allocator);
-    var resp_line: ?[]const u8 = null;
-    var guard: usize = 0;
-    while (resp_line == null and guard < 100) : (guard += 1) {
-        if (try cf.next()) |line| {
-            resp_line = line;
-            break;
-        }
-        var rb: [512]u8 = undefined;
-        const n = c.read(fds[1], &rb, rb.len);
-        if (n <= 0) break;
-        try cf.push(testing.allocator, rb[0..@intCast(n)]);
-    }
-    var pm = try cp.parseMessage(testing.allocator, resp_line.?);
+    // outbound에 payload_too_large(-32001) 프레임이 들어갔다(조용히 abandon하지 않는다는 증거 — 라이브에선 writer가 write).
+    // push됐으므로 popWait은 즉시 반환(블록 없음). 에러 push 회귀(제거) 시 큐가 비어 이 test가 무한 블록 → hang으로 실패.
+    const frame = outbound.popWait().?;
+    defer testing.allocator.free(frame.bytes);
+    var pm = try cp.parseMessage(testing.allocator, frame.bytes);
     defer pm.deinit();
     try testing.expect(pm.message == .response);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.payload_too_large)), pm.message.response.err.?.code);

@@ -147,6 +147,8 @@ pub const AuthDispatch = union(enum) {
     immediate: []u8,
     /// L4가 marshal할 browser 실행 op(op.arg는 gpa-owned — L4가 큐로 소유 이전 후 free).
     browser: cb.BrowserOp,
+    /// L4가 동기 등록할 browser 구독(5f-0b-3b — SubscriberRegistry.subscribe + `{subscriber_id}` 응답). 연결 outbound는 L4가 주입.
+    subscribe: cb.BrowserSubscribe,
 };
 
 pub fn dispatchAuthenticated(
@@ -179,6 +181,7 @@ pub fn dispatchAuthenticated(
         return switch (try cb.browserOpFromRequest(gpa, req, snapshot, caller_cap, now)) {
             .err => |e| .{ .immediate = e },
             .op => |op| .{ .browser = op },
+            .subscribe => |s| .{ .subscribe = s }, // 5f-0b-3b: 동기 구독 지시 — L4가 registry 등록
         };
     }
 
@@ -472,6 +475,7 @@ fn authDispatch(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *co
             testing.allocator.free(op.arg);
             return error.ExpectedImmediateGotBrowser;
         },
+        .subscribe => return error.ExpectedImmediateGotSubscribe, // 이 헬퍼는 subscribe 요청 안 씀
     }
 }
 // .browser(op) 기대 — 호출자 op.arg free. .immediate면 free 후 실패.
@@ -482,6 +486,7 @@ fn authDispatchOp(bytes: []const u8, selector: ?u64, nonce: ?cap.Nonce, store: *
             testing.allocator.free(b);
             return error.ExpectedBrowserGotImmediate;
         },
+        .subscribe => return error.ExpectedBrowserGotSubscribe,
     }
 }
 

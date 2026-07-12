@@ -35,13 +35,14 @@
 //!     deny 이유는 절대 wire로 안 나간다(`authorize`의 `.deny` reason을 버리고 message는 균일 "Unauthorized").
 //!   - id 형식 오류(순서 3)만 `invalid_params`다 — surface 존재 oracle이 아니라 요청 형식 오류라 session.get과 동일.
 //!
-//! **L2 순수:** std + control_plane(1a) + control_capability(1e) + control_surface(1c)만 import한다
-//! (app/pty/platform/chrome import 0 — tests/boundary/imports.zig가 강제). OS 타입 0.
+//! **L2 순수:** std + control_plane(1a) + control_capability(1e) + control_surface(1c) + control_events(5f-0a: browser.subscribe
+//! 이벤트 필터 vocabulary)만 import한다(app/pty/platform/chrome import 0 — tests/boundary/imports.zig가 강제). OS 타입 0.
 
 const std = @import("std");
 const cp = @import("control_plane.zig");
 const capmod = @import("control_capability.zig");
 const cs = @import("control_surface.zig");
+const cev = @import("control_events.zig"); // 5f-0b-3b: browser.subscribe params의 events 필터(EventKind/EventFilter)
 
 // ── ① browser.* wire 스키마(§9.1 ①) ──────────────────────────────────────────────────────────────────────
 
@@ -55,6 +56,9 @@ pub const BrowserMethod = enum {
     get_url,
     /// `browser.executeScript {id, script}` (args는 5d) → 5d `evaluateJavaScript`.
     execute_script,
+    /// `browser.subscribe {id, events?}`(5f-0b-3b) → **동기 registry 구독**(async op 아님). L4가 SubscriberRegistry에
+    /// 등록하고 `{subscriber_id}` 응답. events 없으면 전체, 있으면 그 종류만(§9.5.2).
+    subscribe,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -64,6 +68,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "navigate")) return .navigate;
     if (eq(rest, "getUrl")) return .get_url;
     if (eq(rest, "executeScript")) return .execute_script;
+    if (eq(rest, "subscribe")) return .subscribe;
     return null;
 }
 
@@ -140,6 +145,31 @@ pub fn parseExecuteScriptParams(params: ?std.json.Value) ParamError!ExecuteScrip
     return .{ .id = try idFromObj(obj), .script = try strFromObj(obj, "script") };
 }
 
+/// `browser.subscribe {id, events?}`의 **필터**(id는 readIdParam로 별도). `events` 부재/null → 전체(`EventFilter.all`).
+/// 배열이면 각 원소가 이벤트 이름 문자열이어야 하고(`EventKind.fromWire`), 미지 이름·비-문자열·비-배열 → InvalidParams
+/// (형식 오류는 surface oracle 아님). 5f-0b-3b — §9.5.2 이벤트 vocabulary는 control_events가 단일 출처.
+pub fn parseSubscribeFilter(params: ?std.json.Value) ParamError!cev.EventFilter {
+    const obj = try paramsObject(params);
+    const ev = obj.get("events") orelse return cev.EventFilter.all; // 부재 = 전체
+    const arr = switch (ev) {
+        .null => return cev.EventFilter.all, // 명시 null도 전체
+        .array => |a| a,
+        else => return error.InvalidParams,
+    };
+    var kinds: [@typeInfo(cev.EventKind).@"enum".fields.len]cev.EventKind = undefined;
+    if (arr.items.len > kinds.len) return error.InvalidParams; // 중복/과다 — 형식 오류
+    var n: usize = 0;
+    for (arr.items) |item| {
+        const name = switch (item) {
+            .string => |s| s,
+            else => return error.InvalidParams,
+        };
+        kinds[n] = cev.EventKind.fromWire(name) orelse return error.InvalidParams;
+        n += 1;
+    }
+    return cev.EventFilter.only(kinds[0..n]);
+}
+
 // ── result 직렬화(§9.1 ① — 5e-2 L4 completion이 값 채울 때 쓸 헬퍼, 여기선 단위 test) ─────────────────────────
 // serializeError처럼 gpa로 **완결 JSON-RPC 응답 한 줄**(`{jsonrpc, id, result:{...}}`)을 빌드한다. 5e-2에서 L4가
 // Swift BrowserControl 결과(url/script-result/ok)를 이 헬퍼로 실어 completeInFlight 응답한다(dispatchBrowser는 op만
@@ -195,6 +225,39 @@ fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.V
     try endResult(s);
 }
 
+/// `browser.subscribe` 성공 result: `{"jsonrpc":"2.0","id":<id>,"result":{"subscriber_id":<N>}}`(5f-0b-3b). client가
+/// 이 subscriber_id로 향후 unsubscribe한다(§9.5.2).
+pub fn serializeSubscribeResult(gpa: std.mem.Allocator, id: cp.Id, subscriber_id: u64) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (writeSubscribeResult(&s, id, subscriber_id)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeSubscribeResult(s: *std.json.Stringify, id: cp.Id, subscriber_id: u64) !void {
+    try beginResult(s, id);
+    try s.objectField("subscriber_id");
+    try s.write(subscriber_id);
+    try endResult(s);
+}
+
+/// **5f-0b-3b: L4가 동기 구독 등록 후 응답 직렬화.** subscribe는 async op이 아니므로(op 응답 경로 무관) L4가 원
+/// `request_bytes`(pending 소유, resolve 전 유효)를 재파싱해 id를 얻고 `subscriber_id`를 실는다(serializeBrowserResponse의
+/// subscribe 대응 — id 재파싱 규약 동일). 재파싱 실패/비-request/비-subscribe는 방어적 내부오류(dispatch가 이미 검증 → 도달 안 함).
+pub fn serializeSubscribeResponse(gpa: std.mem.Allocator, request_bytes: []const u8, subscriber_id: u64) std.mem.Allocator.Error![]u8 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    return serializeSubscribeResult(gpa, req.id, subscriber_id);
+}
+
 // result envelope open/close는 cp.beginResult/endResult 단일 출처 재사용(리뷰12 [4] — 브리지와 공유, 로컬 복제 제거).
 const beginResult = cp.beginResult;
 const endResult = cp.endResult;
@@ -223,6 +286,7 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
         .navigate => serializeNavigateResult(gpa, req.id),
         .get_url => serializeGetUrlResult(gpa, req.id, result),
         .execute_script => serializeExecuteScriptResult(gpa, req.id, .{ .string = result }),
+        .subscribe => unreachable, // subscribe는 async op이 아니라 이 함수(op 완료 응답)로 안 온다 — serializeSubscribeResponse 사용
     };
 }
 
@@ -240,10 +304,19 @@ pub const BrowserOp = struct {
     arg: []const u8,
 };
 
-/// dispatchBrowser 결과(5e): 게이트 실패면 응답 바이트(`err`, gpa-owned), 통과면 실행 `op`. **정확히 하나**만 유효.
+/// `browser.subscribe`의 인가·검증 통과 결과(5f-0b-3b): 대상 web surface + 이벤트 필터. async op이 아니라 L4가
+/// SubscriberRegistry에 **동기 등록**할 지시(연결 outbound는 L4가 pending에서 가져와 주입).
+pub const BrowserSubscribe = struct {
+    surface_id: u64,
+    filter: cev.EventFilter,
+};
+
+/// dispatchBrowser 결과: 게이트 실패면 응답 바이트(`err`, gpa-owned), async op은 `op`, 동기 구독은 `subscribe`(5f-0b-3b).
+/// **정확히 하나**만 유효.
 pub const BrowserDispatch = union(enum) {
     err: []u8,
     op: BrowserOp,
+    subscribe: BrowserSubscribe,
 };
 
 /// `browser.*` 요청 한 줄(ndjson frame, 개행 제외)을 주입 snapshot + 주입 `caller_cap`으로 처리한다. 게이트 실패면
@@ -317,11 +390,21 @@ pub fn browserOpFromRequest(
     // ── 5. BrowserMethod 파싱(authz 뒤 — 미인가 caller가 메서드 탐침 못 하게). 5a 미구현(screenshot 등) → method_not_found. ──
     const bmethod = parseBrowserMethod(method.rest) orelse return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
 
+    // ── 5f-0b-3b: subscribe는 async op이 아니라 동기 registry 구독. 필터 파싱(6) + surface 검증(7) 후 `.subscribe` 반환
+    //    (arg dupe 없음 — 필터는 값 타입). 나머지(navigate/getUrl/executeScript)는 아래 async-op 경로. ──
+    if (bmethod == .subscribe) {
+        const filter = parseSubscribeFilter(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+        const sub_dto = snapshot.find(target_id);
+        if (sub_dto == null or sub_dto.?.kind() != .web) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        return .{ .subscribe = .{ .surface_id = target_id, .filter = filter } };
+    }
+
     // ── 6. method별 params 파싱 + arg(url/script) dupe(파싱 arena와 수명 분리 — op는 pm.deinit 뒤에도 유효해야). ──
     const arg: []const u8 = switch (bmethod) {
         .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
         .get_url => try gpa.dupe(u8, ""), // {id}만 — 인자 없음(빈 슬라이스도 dupe해 free 규약 일관)
         .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
+        .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
     // (errdefer는 error 반환에만 걸려 .err union 반환은 안 잡는다 — free 후 errorResponse가 OOM나도 double-free 없음).
@@ -372,6 +455,7 @@ fn dispatchErr(bytes: []const u8, cap: ?capmod.Capability) ![]u8 {
             testing.allocator.free(op.arg);
             return error.ExpectedErrGotOp;
         },
+        .subscribe => return error.ExpectedErrGotSubscribe, // 이 헬퍼는 subscribe 요청 안 씀(navigate 등)
     }
 }
 // 게이트 통과(.op) 기대 — op(호출자 op.arg free). .err면 free 후 실패.
@@ -382,6 +466,7 @@ fn dispatchOp(bytes: []const u8, cap: ?capmod.Capability) !BrowserOp {
             testing.allocator.free(e);
             return error.ExpectedOpGotErr;
         },
+        .subscribe => return error.ExpectedOpGotSubscribe,
     }
 }
 
@@ -463,6 +548,7 @@ test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
             testing.allocator.free(op.arg);
             return error.ExpectedErrGotOp;
         },
+        .subscribe => unreachable, // navigate 요청이라 subscribe 안 옴
     }
     // 대조: now=99 < exp면 만료 아님 → 게이트 통과해 **op**라야 이 테스트가 만료를 실제로 검사.
     switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, cap, 99)) {
@@ -471,6 +557,7 @@ test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
             testing.allocator.free(wire);
             return error.ExpectedOpGotErr;
         },
+        .subscribe => unreachable,
     }
 }
 
@@ -491,6 +578,53 @@ test "dispatchBrowser: 유효 browser cap + web surface → BrowserOp{surface_id
     defer testing.allocator.free(op_js.arg);
     try testing.expectEqual(BrowserMethod.execute_script, op_js.method);
     try testing.expectEqualStrings("document.title", op_js.arg);
+}
+
+// ── 5f-0b-3b: browser.subscribe — async op이 아니라 동기 `.subscribe`(surface + 필터). L4가 registry 등록. ──
+test "dispatchBrowser(5f-0b-3b): 유효 browser cap + web surface → .subscribe{surface, filter}" {
+    // events 없음 → 전체 필터.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11}}", fx, browserCap(11), 0)) {
+        .subscribe => |s| {
+            try testing.expectEqual(@as(u64, 11), s.surface_id);
+            try testing.expect(s.filter.wants(.navigated) and s.filter.wants(.load_state) and s.filter.wants(.dialog)); // all
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedSubscribeGotOp;
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedSubscribeGotErr;
+        },
+    }
+    // events=["navigated","dialog"] → 그 둘만(loadState 제외).
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"navigated\",\"dialog\"]}}", fx, browserCap(11), 0)) {
+        .subscribe => |s| {
+            try testing.expect(s.filter.wants(.navigated) and s.filter.wants(.dialog));
+            try testing.expect(!s.filter.wants(.load_state)); // 필터됨
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedSubscribe;
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedSubscribe;
+        },
+    }
+}
+
+test "dispatchBrowser(5f-0b-3b): subscribe 미지 event 이름 → invalid_params(인가된 caller만 — authz 뒤)" {
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"bogus\"]}}", browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+}
+
+test "dispatchBrowser(5f-0b-3b): subscribe도 cap 없으면 균일 unauthorized(§8.3 — 필터 파싱 이전)" {
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"bogus\"]}}", null);
+    defer testing.allocator.free(wire);
+    // cap 없음 → authz(step 4)서 unauthorized. bogus event도 안 노출(필터 파싱은 authz 뒤라 도달 안 함) = oracle 방지.
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 // ── 6) 유효 cap + browser.screenshot(5a 미구현) → method_not_found ── authz는 통과, method 파싱서 접힘

@@ -756,6 +756,42 @@ enum BrowserControl {
         }
         return String(describing: value)
     }
+
+    // 5f-4c: browser.getCookies → WKHTTPCookieStore.getAllCookies(async). 이 web 패널의 데이터스토어에 담긴 **쿠키
+    // 전체**를 JSON 배열 문자열로 직렬화해 completion으로 넘긴다. Zig serializeGetCookiesResult가 이 배열을 파싱해
+    // `{"result":{"cookies":[...]}}`로 싣는다. **§9.4 D5 browser_storage scope**(base browser로는 불인가 — authz가 거름).
+    // **범위 결정(clean-room)**: WebDriver getCookies는 "현재 문서에 보이는 쿠키"만 반환하나(브라우저 1개=쿠키 항아리
+    // 공유라 필터 필수), maru web 패널은 **패널마다 격리된 데이터스토어**(비신뢰=ephemeral nonPersistent, 7e-0)라 항아리가
+    // 이미 이 패널 전용이다 → 현재 host 필터 없이 **패널 항아리 전체**를 준다. per-document 필터는 후속(불요 시 안 함).
+    @MainActor static func getCookies(_ webView: WKWebView, completion: @escaping (String) -> Void) {
+        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+            completion(serializeCookies(cookies))
+        }
+    }
+
+    // 5f-4c: [HTTPCookie]를 JSON 배열 문자열로. 각 원소={name,value,domain,path,secure,httpOnly,expires?,sameSite?}
+    // (WKHTTPCookie 프로퍼티 매핑 — 이 필드 스키마는 Swift가 단일 출처, control-plane §9.4 D4에 문서). JSONSerialization으로
+    // 직렬화해 name/value의 따옴표·제어문자를 정확히 escape(수동 문자열 조립 금지). 실패(비정상)면 빈 배열 "[]".
+    @MainActor static func serializeCookies(_ cookies: [HTTPCookie]) -> String {
+        var arr: [[String: Any]] = []
+        arr.reserveCapacity(cookies.count)
+        for c in cookies {
+            var obj: [String: Any] = [
+                "name": c.name,
+                "value": c.value,
+                "domain": c.domain,
+                "path": c.path,
+                "secure": c.isSecure,
+                "httpOnly": c.isHTTPOnly,
+            ]
+            if let exp = c.expiresDate { obj["expires"] = exp.timeIntervalSince1970 } // epoch 초(Double). 세션 쿠키=부재.
+            if let ss = c.sameSitePolicy { obj["sameSite"] = ss.rawValue } // "Strict"/"Lax"(HTTPCookieStringPolicy raw).
+            arr.append(obj)
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: arr),
+              let s = String(data: data, encoding: .utf8) else { return "[]" }
+        return s
+    }
 }
 
 // 5e-2b-2(**테스트 전용 — 배경 스레드**): 앱 자신의 컨트롤 소켓에 붙어 `browser.navigate`/`browser.getUrl`을 **소켓 전
@@ -961,6 +997,7 @@ final class MaruWebPanelView: NSView {
     var browserFixtureStage = 0
     var browserFixtureUrl: String? // BrowserControl.currentUrl 결과(navigate한 data: URL 기대).
     var browserFixtureScript: String? // BrowserControl.executeScript 결과(data: 문서의 #t 텍스트="maru5d" 기대).
+    var browserFixtureCookies: String? // 5f-4c: 쿠키 seed 후 BrowserControl.getCookies JSON(seed한 sid=5f4c 포함 기대).
     // 5d fixture가 navigate하는 무-네트워크 data: URL(외부 로드 없이 navigate/getUrl/executeScript를 검증). **percent-encode**
     // 필수(리뷰12 [0]): 공백·`<`·`>`가 raw면 macOS 11-13의 legacy CFURL 파서가 URL(string:)=nil로 거부해 navigate 실패·
     // fixture silent false-green. 인코딩하면 전 지원 OS에서 파싱된다. 디코드 결과=`<h1 id=t>maru5d</h1>`(id=t라 getElementById('t') 매칭).
@@ -1228,6 +1265,14 @@ extension MaruWebPanelView: WKNavigationDelegate {
                 browserFixtureUrl = BrowserControl.currentUrl(webView) // navigate한 data: URL이어야 함(getUrl 검증).
                 BrowserControl.executeScript(webView, "document.getElementById('t').textContent") { [weak self] result in
                     if case .success(let v) = result { self?.browserFixtureScript = v as? String } // "maru5d" 기대.
+                }
+                // 5f-4c getCookies fixture: 쿠키 하나 seed(setCookie 완료 후) → BrowserControl.getCookies로 되읽어 실
+                // WKHTTPCookieStore.getAllCookies + serializeCookies 경로를 자동 증명(navigation 불요 — 스토어 직접 조작).
+                let store = webView.configuration.websiteDataStore.httpCookieStore
+                if let cookie = HTTPCookie(properties: [.domain: "maru.test", .path: "/", .name: "sid", .value: "5f4c", .secure: "TRUE"]) {
+                    store.setCookie(cookie) { [weak self] in
+                        BrowserControl.getCookies(webView) { json in self?.browserFixtureCookies = json } // sid=5f4c 포함 기대.
+                    }
                 }
             }
         }
@@ -2716,6 +2761,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 maru_macos_control_complete_browser_op(asyncId, ok ? 0 : 1, nil, 0)
             case 1: // getUrl — 동기(현재 문서 URL, 로드 전엔 빈).
                 completeBrowserOp(asyncId, status: 0, result: BrowserControl.currentUrl(wp.webView) ?? "")
+            case 4: // getCookies(5f-4c) — async 콜백(WKHTTPCookieStore.getAllCookies). result=쿠키 JSON 배열 문자열.
+                BrowserControl.getCookies(wp.webView) { json in
+                    self.completeBrowserOp(asyncId, status: 0, result: json)
+                }
             case 2: // executeScript — async 콜백(evaluateJavaScript). 성공=값 문자열, 실패=에러 메시지.
                 BrowserControl.executeScript(wp.webView, arg) { result in
                     switch result {
@@ -4992,6 +5041,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             bridge_hello_version=\(wp?.bridgeHelloProbe ?? "pending")
             browser_fixture_url=\(wp?.browserFixtureUrl ?? "pending")
             browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
+            browser_fixture_cookies=\(wp?.browserFixtureCookies ?? "pending")
             browser_ctl_navigate_ok=\(browserCtlResults().navigateOk)
             browser_ctl_get_url=\(browserCtlResults().getUrl)
             browser_ctl_events=\(browserCtlResults().events)

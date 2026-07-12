@@ -4570,6 +4570,7 @@ pub const AppSession = struct {
         // 보류 중이던 붙여넣기 확인이 있으면 폐기한다 — 새 모달이 그 자리를 차지하므로(한 번에 한 모달). 붙여넣기
         // 확인 자신은 이 호출 *뒤에* payload를 보관하므로(submitPaste 순서) 자기 것을 지우지 않는다.
         self.pending_paste_confirm.clearRetainingCapacity();
+        self.pending_paste_confirm_target = 0; // payload를 폐기했으면 대상도 없다("0=보류 없음" 계약)
         self.dismissMessageOverlays();
         self.clearAllHover(); // 모달 뒤(중앙 패널 밖)에 stale 호버 강조가 얼어붙지 않게 — hoverCursor는 모달 중 호버를 안 갱신
         self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), buttons);
@@ -4736,6 +4737,14 @@ pub const AppSession = struct {
                     self.context_menu_target = null;
                     self.chrome_host.context_menu.hide();
                 };
+                // 미전송 입력 큐도 회수한다(destroyTerm 미러). 안 하면 **옮겨간 surface의 큐가 이 창에 남아**,
+                // 이 창의 tick이 계속 그 surface의 PTY로 잔여를 쓴다(runtime은 앱-전역이라 write가 성공한다).
+                // 그 사이 새 창에서 같은 pane에 붙여넣으면 두 창의 바이트가 한 PTY에서 뒤섞여 bracketed paste
+                // 괄호(ESC[200~ … ESC[201~)가 쪼개진다 — 셸이 이어붙은 명령을 실행할 수 있다(code-review).
+                if (self.pending_pastes.fetchRemove(term.surface.id)) |kv| {
+                    var q = kv.value;
+                    q.buf.deinit(self.allocator);
+                }
             }
         }
         // divider_drag가 이 탭 트리 소속 split이면 표적 null(무관한 탭 트리를 가리키면 유지 — destroyTabStandalone 동형).
@@ -10161,6 +10170,7 @@ pub const AppSession = struct {
                 self.pending_close = null;
                 self.pending_reset = false;
                 self.pending_paste_confirm.clearRetainingCapacity(); // 취소한 붙여넣기 payload 폐기
+                self.pending_paste_confirm_target = 0; // 대상도 함께 리셋(필드 계약 "0=보류 없음" — 폐기했으면 대상도 없다)
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
@@ -12690,12 +12700,13 @@ pub const AppSession = struct {
     }
 
     /// IME 확정 텍스트를 **non-blocking**으로 PTY에 보낸다 — paste와 같은 pending 큐 패턴
-    /// (`pending_paste` FIFO + `flushPendingPaste`의 `writeInputNonBlocking`). `windowLostKey` 등
+    /// (surface별 paste 큐 `pending_pastes` + `flushPendingPaste`의 `writeInputNonBlocking`). `windowLostKey` 등
     /// AppKit 동기 콜백 안에서 호출돼도 blocking enqueue로 메인 run loop(=tick)를 멈추지 않아 #10
     /// write_queue backpressure 데드락을 피한다(설계 전제 "입력 전송은 tick 안"에 코드를 맞춤 —
     /// P2-3b write_queue 구조는 그대로). 확정 텍스트는 완성된 평문이라 키 인코딩(handleKeyEvent)
     /// 없이 바이트로 보내되 개행만 \r로 정규화한다(sendTextAsKeys와 동일 규약; bracketed 감싸기는
-    /// paste 전용이라 IME 확정엔 안 쓴다). pending_paste FIFO는 paste와 공유해 전송 순서를 지킨다.
+    /// paste 전용이라 IME 확정엔 안 쓴다). 큐는 **surface별**이라 paste와 같은 큐를 공유해 그 surface 안에서 전송
+    /// 순서를 지킨다(다른 surface의 잔여와는 애초에 안 섞인다 — 옛 단일 FIFO는 서로 막고 섞였다).
     fn sendCommittedText(self: *AppSession, bytes: []const u8) void {
         if (!self.surface_initialized or bytes.len == 0) return;
         // 대상=지금 활성 surface(입력 중인 곳), \n→\r. 담기 실패(OOM)면 회계도 안 올린다(안 보낸 걸 보냈다고 세지 않게).
@@ -12878,8 +12889,11 @@ pub const AppSession = struct {
             self.loaded_config.config.input.paste_protection,
             self.loaded_config.config.input.bracketed_paste_is_safe,
         );
-        const encoded_opt: ?[]u8 = if (needs_confirm) null else (surface.core.encodePaste(self.allocator, payload) catch null);
+        const bracketed = surface.core.bracketedPasteEnabled(); // 인코딩에 필요한 유일한 코어 상태 — bool만 복사
         surface.unlockCore(self.io);
+        // **인코딩은 락 밖에서**: 멀티MB payload의 할당·복사를 코어 뮤텍스 안에서 하면 그동안 그 pane의 PTY
+        // reader 스레드가 막힌다(code-review). 순수 변형(encodePasteWith)이 bool 하나만 받는다.
+        const encoded_opt: ?[]u8 = if (needs_confirm) null else (maru.terminal.encodePasteWith(bracketed, self.allocator, payload) catch null);
         if (needs_confirm) {
             // 위험 → 바로 실행 대신 확인. showConfirmButtons가 (paste 포함) 다른 보류를 비우므로 그 호출
             // *뒤에* 보관한다(requestAppQuit의 pending_quit 순서와 동형 — 자기 payload를 자기가 안 지움).
@@ -12961,8 +12975,16 @@ pub const AppSession = struct {
     /// 까지 활성으로 만든다(탭 바는 Term 단위인데 pane까지만 라우팅하면, 특정 Term 탭에 떨어뜨려도 그 pane의 *현재*
     /// 활성 Term에 들어갔다 — code-review).
     pub fn routeDropAtPoint(self: *AppSession, x_px: f64, y_px: f64) DropRoute {
-        if (!self.surface_initialized) return .not_applicable;
-        if (self.anyOverlayOpen()) return .refused; // ① 모달/오버레이 중 — 클릭과 같은 규율로 드롭도 삼킨다
+        if (!self.surface_initialized or self.tabs.items.len == 0) return .not_applicable; // 탭 없음 = 활성 트리 없음
+        // notice(비-인터랙티브 토스트)는 **닫고 진행**한다 — 마우스/키가 그렇듯 아무 입력이나 토스트를 닫는다.
+        // 여기서 거부해 버리면 자동 닫힘 타이머가 없는 토스트 동안 드롭이 **영구 무동작**이 된다(code-review).
+        if (self.chrome_host.notice.open) {
+            self.chrome_host.notice.dismiss();
+            self.metal_dirty = true;
+        }
+        // 입력을 받는 모달(확인·설정·팔레트·컨텍스트 메뉴·알림·find)이 열려 있으면 **드롭을 거부**한다 —
+        // 마우스 클릭이 그 모달에 삼켜지는 것과 같은 규율(anyModalOverlayOpen 단일 판정 — notice만 제외).
+        if (self.anyModalOverlayOpen()) return .refused;
         if (self.inSidebar(x_px)) return .not_applicable; // 사이드바 드롭은 범위 밖 — 활성 pane 폴백(기존 동작)
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
@@ -12970,7 +12992,17 @@ pub const AppSession = struct {
         const pane = Model.paneAtPoint(leaf_rects.items, x_px, y_px) orelse return .not_applicable;
         // Term 탭 위면 그 Term, 아니면 그 pane의 현재 활성 Term이 대상이다.
         const term_index = self.dropTermIndexAt(pane, leaf_rects.items, x_px, y_px) orelse pane.active_term;
-        if (pane.terms.items[term_index].kind != .terminal) return .refused; // ② web pane/Term — 붙일 PTY 없음
+        if (pane.terms.items[term_index].kind != .terminal) return .refused; // web pane/Term — 붙일 PTY 없음
+
+        // **포커스를 옮기기 전에 인라인 편집을 정리한다** — 마우스 down(kind==1)이 하는 것과 같은 규율.
+        // 안 하면 rename 편집기가 **옛 Term에 바인딩된 채 열려 있고** 포커스만 새 pane으로 가서, 사용자가 붙여넣은
+        // 경로 뒤에 타이핑하면 그 키가 셸이 아니라 보이지 않는 편집기로 가고 Enter가 옛 탭 이름을 바꾼다(클릭
+        // 경로에서 이미 고쳤던 "rename 하이재킹"과 같은 상태 — code-review). 주소창 편집도 같다.
+        if (self.rename != null) self.commitRename(); // 포커스 상실 = 확정(docs/tabs-splits-layout.md)
+        if (self.addr_edit != null) {
+            self.cancelAddrEdit(false); // 클릭-어웨이와 같은 취소(현재 URL 복원) — focus-restore 안 함
+            self.metal_dirty = true;
+        }
         if (!self.focusPaneByPtr(pane)) return .not_applicable;
         self.focusTerm(term_index); // 같은 Term이면 무동작
         return .routed;
@@ -13138,13 +13170,17 @@ pub const AppSession = struct {
         self.allocator.free(job.dest);
         self.allocator.free(job.name);
         self.allocator.free(job.bytes);
+        const target_id = job.target_id;
+        self.allocator.destroy(job); // **inflight 감소 전에** job까지 정리한다 — 아래 참조
         self.upload_mutex.lockUncancelable(self.io);
         if (result) |r| {
-            self.upload_results.append(self.allocator, .{ .path = r, .target_id = job.target_id }) catch self.allocator.free(r);
+            self.upload_results.append(self.allocator, .{ .path = r, .target_id = target_id }) catch self.allocator.free(r);
         }
+        // inflight 감소는 **이 스레드가 self를 마지막으로 만지는 지점**이어야 한다: deinit이 "inflight==0"을 보면
+        // 곧바로 AppSession(과 그 allocator)을 해제하므로, 감소 뒤에 self.allocator를 또 만지면 use-after-free다
+        // (⌘Q/창 닫기가 업로드 완료와 겹치는 순간 — code-review). 그래서 free/destroy를 전부 위에서 끝냈다.
         self.upload_inflight -= 1;
         self.upload_mutex.unlock(self.io);
-        self.allocator.destroy(job);
     }
 
     /// 메인 tick: 완료된 업로드의 원격 경로를 paste 큐로 흘려보낸다(core 접근=메인 전용이라 여기서 paste).
@@ -13157,16 +13193,19 @@ pub const AppSession = struct {
         self.upload_mutex.unlock(self.io);
         defer self.allocator.free(results);
         for (results) |r| {
+            defer self.allocator.free(r.path);
             // **드롭 시점에 고정한 대상**에 붙인다(완료 시점의 활성 pane이 아니라) — 업로드 비동기 구간을 묶는다.
-            // 대상이 사라졌으면(그 Term이 닫혔거나 워크스페이스가 다른 창으로 옮겨감 — findTermWhere는 이 창의
-            // 탭 트리만 본다) **활성 surface로 폴백**한다: 파일은 이미 원격에 올라갔는데 경로를 버리면 사용자는
-            // 그 파일을 참조할 방법이 없다(조용한 유실 — code-review). 엉뚱한 pane이라도 보이는 게 낫다.
             if (self.terminalSurfaceById(r.target_id) != null) {
                 self.pasteTextTo(r.target_id, r.path, false); // 원격 절대경로(sanitize되어 공백 없음) raw paste
-            } else {
-                self.pasteText(r.path, false); // 폴백 — 최소한 사용자가 경로를 볼 수 있게
+                continue;
             }
-            self.allocator.free(r.path);
+            // 대상이 사라졌다(그 Term이 닫혔거나 워크스페이스가 다른 창으로 옮겨감 — findTermWhere는 이 창의 탭
+            // 트리만 본다). **다른 pane에 붙이지 않는다** — 사용자가 드롭하지도 않은 pane의 명령줄 한복판에 경로가
+            // 꽂히는 것이 이 PR이 없애려는 오삽입 그 자체다(code-review). 그렇다고 조용히 버리면 파일은 원격에
+            // 올라갔는데 경로를 참조할 방법이 없으니, **notice 토스트로 경로를 보여준다**(붙이지 않고 알린다).
+            const msg = std.fmt.allocPrint(self.allocator, "업로드 완료(드롭한 pane이 닫힘): {s}", .{r.path}) catch continue;
+            defer self.allocator.free(msg);
+            self.showNotice(msg);
         }
     }
 
@@ -23787,6 +23826,69 @@ test "드래그앤드롭 pane 라우팅: routeDropAtPoint가 떨어뜨린 pane�
     const sidebar_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     try std.testing.expectEqual(AppSession.DropRoute.not_applicable, session.routeDropAtPoint(sidebar_x, 100));
     try std.testing.expectEqual(before, session.activePane()); // 활성 pane 불변
+}
+
+test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (pane까지만 라우팅하면 엉뚱한 Term에 들어간다)" {
+    // 탭 바는 Term 단위인데 pane까지만 라우팅하면, 특정 Term 탭에 떨어뜨려도 그 pane의 *현재* 활성 Term에
+    // 들어간다(code-review). dropTermIndexAt이 클릭 경로(renameTargetAt)와 같은 기하로 그 Term을 집는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 60,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 900;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
+    // 한 pane에 Term 3개(탭 3개). 활성은 마지막에 만든 것.
+    session.dispatchAppAction(.new_term);
+    session.dispatchAppAction(.new_term);
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    session.focusTerm(2);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term);
+
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaf_rects);
+    const rect = leaf_rects.items[0].rect;
+    const pb = session.paneBar(rect, pane) orelse return error.SkipZigTest;
+    const bar_y: f64 = @floatFromInt(pb.tabs.y + pb.tabs.h / 2);
+
+    // 탭 바를 훑어 각 Term 탭의 한 지점을 찾는다(내부 기하에 의존하지 않고 hit-test 자체로 — 클릭 경로와 같은 함수).
+    var x0: ?f64 = null;
+    var x1: ?f64 = null;
+    var px: u32 = pb.tabs.x;
+    while (px < pb.tabs.x + pb.tabs.w) : (px += 2) {
+        const fx: f64 = @floatFromInt(px);
+        const hit = session.dropTermIndexAt(pane, leaf_rects.items, fx, bar_y) orelse continue;
+        if (hit == 0 and x0 == null) x0 = fx;
+        if (hit == 1 and x1 == null) x1 = fx;
+    }
+    const tab0_x = x0 orelse return error.SkipZigTest; // 바가 너무 좁으면(탭 미표시) 스킵
+    const tab1_x = x1 orelse return error.SkipZigTest;
+
+    // **0번 Term 탭**에 드롭 → 활성 Term이 0이 된다(활성이던 2가 아니라).
+    try std.testing.expectEqual(AppSession.DropRoute.routed, session.routeDropAtPoint(tab0_x, bar_y));
+    try std.testing.expectEqual(@as(usize, 0), pane.active_term); // ★ 떨어뜨린 Term이 활성
+
+    // 1번 Term 탭 → 1번이 활성.
+    try std.testing.expectEqual(AppSession.DropRoute.routed, session.routeDropAtPoint(tab1_x, bar_y));
+    try std.testing.expectEqual(@as(usize, 1), pane.active_term);
+
+    // pane **본문**(탭 바 아래) 드롭 → Term은 안 바뀐다(그 pane의 현재 활성 Term이 대상).
+    const body_y: f64 = @floatFromInt(rect.y + rect.h - 10);
+    const body_x: f64 = @floatFromInt(rect.x + rect.w / 2);
+    try std.testing.expect(session.dropTermIndexAt(pane, leaf_rects.items, body_x, body_y) == null);
+    try std.testing.expectEqual(AppSession.DropRoute.routed, session.routeDropAtPoint(body_x, body_y));
+    try std.testing.expectEqual(@as(usize, 1), pane.active_term); // 불변
 }
 
 test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused — 호스트가 삽입도 못 하게 한다" {
@@ -39197,23 +39299,41 @@ test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 �
     defer session.deinit();
 
     // paste 대상은 **enqueue 시점**에 고정된다 — 큐가 surface별이라 서로 섞이지 않는다(옛 단일 FIFO의 버그).
-    // queueInputBytes는 flush를 안 하므로 큐 상태를 그대로 관측할 수 있다(enqueue = queue + flush).
-    const a = session.activeSurface().id;
-    const b: u64 = a +% 1; // 다른(없는) surface — 대상 분리만 검증
-    try std.testing.expect(session.queueInputBytes(a, "AA", false));
-    try std.testing.expect(session.queueInputBytes(b, "BB", false));
-    // ★ 각 대상 큐가 **자기 바이트만** 갖는다(옛 구조는 하나의 FIFO에 둘 다 붙어 옛 대상으로 나갔다).
-    try std.testing.expectEqualStrings("AA", session.pending_pastes.get(a).?.buf.items);
-    try std.testing.expectEqualStrings("BB", session.pending_pastes.get(b).?.buf.items);
-    try std.testing.expectEqual(@as(usize, 2), session.pending_pastes.count());
+    // ★ 이 테스트의 핵심은 **각 큐가 자기 surface의 PTY로만 나간다**는 것이다. 가짜 id로는 그걸 못 잡는다
+    //   (flush가 entry.key_ptr 대신 activeSurface().id로 써도 통과했다 — 뮤테이션 생존, code-review).
+    //   그래서 **실제 surface 둘**(split)에 서로 다른 바이트를 넣고, 각 자식이 **자기 것만** 에코하는지 본다.
+    //   controlled_smoke 자식은 `read -r line` 한 줄을 읽어 `Maru app input:<line>`로 에코한다.
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+    try session.splitActivePane(.horizontal);
+    const tab = session.activeTab();
+    try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
+    const sa = tab.panes.items[0].terms.items[tab.panes.items[0].active_term].surface;
+    const sb = tab.panes.items[1].terms.items[tab.panes.items[1].active_term].surface;
+    try std.testing.expect(sa.id != sb.id);
 
-    // flush: a는 실제 surface라 PTY로 나가고, b는 대상이 없어(write 실패) 버려진다 — **서로 영향이 없다**.
-    session.flushPendingPaste();
-    try std.testing.expectEqual(@as(usize, 0), session.pending_pastes.get(b).?.buf.items.len); // dead → 비움
-    try std.testing.expect(!session.hasPendingPaste()); // 양쪽 다 잔여 없음
-    // 엔트리는 남는다(맵 순회 중 remove 불가 — destroyTerm이 회수). 이 성질이 "바이트가 어느 대상으로 갔었나"를
-    // 관측 가능하게 만든다(아래 대상-고정 테스트가 이걸 본다).
-    try std.testing.expect(session.pending_pastes.get(a) != null);
+    // 각 surface에 **다른** 텍스트를 대상 지정해 붙인다(활성은 둘 중 하나뿐이다 — 대상이 활성으로 접히면 실패).
+    // 자식이 `read -r line`이라 개행이 필요한데 개행은 paste protection에 걸리므로(모달 보류) 이 테스트에선 끈다
+    // — 여기서 검증하는 건 보호 게이트가 아니라 **큐의 대상 라우팅**이다(보호는 별도 테스트가 덮는다).
+    session.loaded_config.config.input.paste_protection = false;
+    session.pasteTextTo(sa.id, "AAA\n", false);
+    session.pasteTextTo(sb.id, "BBB\n", false);
+
+    // 자식들이 읽고 에코할 때까지 tick.
+    var i: usize = 0;
+    while (i < 400) : (i += 1) _ = try session.tick();
+
+    const dump_a = try sa.core.dumpUtf8(allocator);
+    defer allocator.free(dump_a);
+    const dump_b = try sb.core.dumpUtf8(allocator);
+    defer allocator.free(dump_b);
+    // ★ A의 자식은 AAA만, B의 자식은 BBB만 받았다 — 큐가 대상 surface의 PTY로만 나간다는 계약.
+    try std.testing.expect(std.mem.indexOf(u8, dump_a, "Maru app input:AAA") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dump_a, "BBB") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dump_b, "Maru app input:BBB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dump_b, "AAA") == null);
+    try std.testing.expect(!session.hasPendingPaste()); // 둘 다 다 나갔다
 }
 
 test "sidebarMaxScrollPx: 콘텐츠가 헤더 아래 뷰포트를 넘는 양(스크롤 불필요면 0, overflow 안전)" {

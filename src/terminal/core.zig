@@ -914,6 +914,13 @@ pub const TerminalCore = struct {
         return input_report.encodePaste(self, allocator, bytes);
     }
 
+    /// bracketed paste(DECSET 2004)가 켜졌는가 — 인코딩에 필요한 **유일한** 코어 상태다. app이 core_mutex 아래에서
+    /// 이 bool만 읽고, 실제 인코딩(할당 + payload 복사)은 락 밖에서 `input_report.encodePasteWith`로 한다
+    /// (멀티MB 붙여넣기를 락 안에서 인코딩하면 그 pane의 PTY reader가 그동안 막힌다 — code-review).
+    pub fn bracketedPasteEnabled(self: *const TerminalCore) bool {
+        return self.bracketed_paste;
+    }
+
     /// 이 붙여넣기가 paste protection 확인을 요구하는지(개행/ESC[201~ 인젝션 + bracketed 상태·설정 반영).
     /// 본문: input_report.pasteNeedsConfirmation. app이 확인 모달을 띄울지 결정하는 데 쓴다.
     pub fn pasteNeedsConfirmation(self: *const TerminalCore, data: []const u8, protection_enabled: bool, bracketed_safe: bool) bool {

@@ -81,11 +81,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         // 내용 추출·삽입은 paste 로직을 가진 controller에 위임한다(클립보드 paste와 같은 경로 재사용 — keyDown이
-        // handleKeyDown에 위임하는 것과 동형). 세션/PTY 접근은 controller가 소유한다.
-        // **삽입 전에** 드롭 지점의 pane으로 포커스를 옮긴다(v115) — 안 그러면 어느 pane에 떨어뜨리든 활성 pane에만
-        // 들어간다. 좌표 환산은 마우스 경로(handleMouse)와 같은 backingPx 단일 출처를 쓴다(창 좌표 → backing px).
-        controller?.focusPaneForDrop(at: sender.draggingLocation, in: self)
-        return controller?.handleDrop(sender.draggingPasteboard) ?? false
+        // handleKeyDown에 위임하는 것과 동형). 세션/PTY 접근은 controller가 소유한다. 드롭 지점(창 좌표)과 **이 뷰**를
+        // 함께 넘긴다 — controller가 그 뷰의 창 surface로 스코프해 pane 라우팅(v115)까지 한 곳에서 처리한다.
+        return controller?.handleDrop(sender.draggingPasteboard, at: sender.draggingLocation, in: self) ?? false
     }
 
     // Cmd+hover URL 하이라이트용 mouseMoved 추적. 보이는 영역 전체를 따라가게 inVisibleRect로 둔다.
@@ -3198,17 +3196,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    /// 드롭 지점의 pane으로 포커스를 옮긴다 — 뷰(performDragOperation)가 **handleDrop 직전에** 부른다(v115).
-    /// 이렇게 해야 드롭 내용이 활성 pane이 아니라 **떨어뜨린 pane**에 들어간다(Zig focusPaneAtPoint가 leaf rect
-    /// hit-test로 판정하고, 사이드바/pane 밖이면 무동작 → 기존 활성 pane 폴백). 좌표는 창 좌표(draggingLocation)를
-    /// 마우스와 같은 backingPx로 환산해 넘긴다 — 셀/pane 변환은 좌표계 권위를 가진 Zig가 한다.
-    func focusPaneForDrop(at windowPoint: NSPoint, in view: NSView) {
-        guard let session = appSession else { return }
-        let (xPx, yPx) = backingPx(view.convert(windowPoint, from: nil), in: view)
-        if maru_macos_app_session_focus_pane_at(session, xPx, yPx) != 0 { markMetalNeedsRedraw() }
+    /// 드롭을 처리한다 — 뷰(MaruMetalTerminalView.performDragOperation)가 위임한다. **드롭이 일어난 뷰의 창**
+    /// surface로 스코프해서(withSurface + surfaceForView) ① pane 라우팅과 ② 내용 삽입이 같은 세션을 대상으로 하게
+    /// 한다. 스코프가 없으면 forwarder(appSession)가 **key 창**을 가리키므로, 백그라운드 창에 떨어뜨린 드롭이 key
+    /// 창의 pane 트리에 좌표를 hit-test하고 그 창에 붙여넣는다(quick 터미널이 key인 상태가 대표 — code-review).
+    func handleDrop(_ pb: NSPasteboard, at windowPoint: NSPoint, in view: NSView) -> Bool {
+        var inserted = false
+        withSurface(surfaceForView(view)) {
+            // **삽입 전에** 드롭 지점의 pane으로 포커스를 옮긴다(v115) — 안 그러면 어느 pane에 떨어뜨리든 활성
+            // pane에만 들어간다. 좌표는 창 좌표(draggingLocation)를 마우스 경로와 같은 backingPx로 환산해 넘기고,
+            // pane 판정·라우팅 가드(모달·배수 중 paste·web pane)는 좌표계 권위를 가진 Zig가 한다.
+            if let session = appSession {
+                let (xPx, yPx) = backingPx(view.convert(windowPoint, from: nil), in: view)
+                if maru_macos_app_session_focus_pane_at(session, xPx, yPx) != 0 { markMetalNeedsRedraw() }
+            }
+            inserted = handleDrop(pb)
+        }
+        return inserted
     }
 
-    /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 삽입한다 — 뷰(MaruMetalTerminalView.performDragOperation)가 위임한다.
+    /// 드롭된 pasteboard 내용(경로/URL/텍스트)을 삽입한다 — 위 오버로드가 창 스코프 안에서 부른다.
     /// 드롭은 사용자 제스처라 URL/파일을 모두 이스케이프한다(Cmd+V paste는 웹 URL을 이스케이프하지 않는 별도 판정 —
     /// pastePasteboardText). 전송은 **paste 경로**(sendPasteText)다 — Ghostty도 드래그를 completeClipboardPaste로
     /// 보내 터미널이 DECSET 2004를 켜면(Claude Code 등 TUI) bracketed paste로 감싸지고, 그래야 경로가 한-덩어리로

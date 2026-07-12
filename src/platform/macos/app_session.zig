@@ -141,12 +141,13 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
 pub const abi_version: u32 = 115;
-// 115: focus_pane_at(드래그앤드롭 pane 라우팅 — 파일/이미지/텍스트 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
-// 들어가게 한다). Swift performDragOperation이 삽입 **전에** 드롭 지점(backing px)으로 부르면 Zig가 leaf rect
-// hit-test로 그 pane을 포커스하고, 뒤이은 paste_text/drop_files/drop_image가 기존 경로 그대로 새 활성 pane에 넣는다.
-// 대상 surface를 drop 함수마다 넘기지 않고 "포커스 이동"으로 표현하는 이유: paste는 붙여넣기 보호 모달을 거쳐
-// **비동기로** 확정될 수 있어(pasteNeedsConfirmation) 대상을 모달 너머까지 들고 가면 확정 시점 대상이 흔들린다.
-// 사이드바/pane 밖이면 0(무동작=활성 pane 폴백). export 1개 추가 — 구조체 offset 불변.
+// 115: focus_pane_at(드래그앤드롭 pane 라우팅 — 파일/텍스트 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
+// 들어가게 한다). Swift handleDrop이 삽입 **전에** 드롭 지점(backing px)으로 부르면 Zig가 Model.paneAtPoint로
+// 그 pane을 포커스하고, 뒤이은 paste_text/drop_files가 기존 경로 그대로 새 활성 pane에 넣는다. 대상 surface를
+// drop 함수마다 넘기지 않고 "포커스 이동"으로 표현하는 이유: paste는 붙여넣기 보호 모달을 거쳐 **비동기로**
+// 확정될 수 있어(pasteNeedsConfirmation) 대상을 모달 너머까지 들고 가면 확정 시점 대상이 흔들린다. 그 표현이
+// 성립하지 않는 상태에선 0(=활성 pane 폴백): 사이드바/pane 밖·확인 모달 보류 중·이전 paste 배수 중·web pane.
+// export 1개 추가 — 구조체 offset 불변.
 // 114: Phase 4g-1 후속(14차 리뷰 [0][3]) — focus-sync override 단일 출처: addr_edit_surface를 terminal_owns_input getter로
 // 교체(모달[notice 제외]·주소창 편집·rename·사이드바 검색 중 하나라도면 1). 옛 getter는 rename·사이드바 검색을 빠뜨려
 // web pane 활성 중 그 편집이 웹뷰로 새고 notice까지 세는 버그. export 교체(개수 불변) — 구조체 offset 불변. §4.1.
@@ -12838,6 +12839,10 @@ pub const AppSession = struct {
     /// 모달을 띄운 뒤 반환한다(confirmPendingPaste가 allow_unsafe=true로 재호출). 게이트 판정은 core가 단일
     /// 출처(pasteNeedsConfirmation — bracketed 상태·설정 반영). 큐/flush는 기존 non-blocking 경로 그대로.
     fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool) void {
+        // [4e-2] 활성 Term이 web이면 붙일 PTY가 없다(sentinel surface) — 여기서 막지 않으면 confirmPendingPaste가
+        // allow_unsafe=true로 재진입할 때 web sentinel의 core를 만지고 payload가 조용히 사라진다(pasteText의 같은
+        // 게이트가 최초 진입만 막고, 확인 모달을 거친 재진입 경로엔 없었다 — code-review). 확정 경로도 같은 규율.
+        if (!self.activeTermIsTerminal()) return;
         if (!allow_unsafe and self.activeSurface().core.pasteNeedsConfirmation(
             payload,
             self.loaded_config.config.input.paste_protection,
@@ -12891,19 +12896,29 @@ pub const AppSession = struct {
     /// 너머까지 들고 가면 확정 시점의 대상이 흔들린다(그 사이 pane이 닫히거나 포커스가 바뀔 수 있다). 드롭한
     /// pane을 활성으로 만들면 확정 경로가 하나로 유지되고, 드롭 직후 Enter도 같은 pane으로 간다(사용자 결정).
     ///
-    /// hit-test는 마우스 경로(pointOnChrome/renameTargetAt)와 같은 leaf rect 단일 출처를 쓴다 — pane rect는 탭 바를
-    /// 포함하므로 바 위에 떨어뜨려도 그 pane으로 간다. 사이드바·pane 밖이면 무동작(false) = 기존 활성 pane 폴백.
+    /// **다만 "포커스 이동 = 라우팅"이 성립하지 않는 상태에서는 라우팅하지 않는다**(false → 기존 활성 pane 폴백).
+    /// 아래 가드가 없으면 포커스만 옮기고 내용은 딴 데로 가거나 사라진다(code-review):
+    ///   ① **붙여넣기 확인 모달이 열려 있으면** — 그 모달은 *이전* 대상(활성 pane)의 payload를 들고 있다. 여기서
+    ///      활성 pane을 바꾸면 확정(confirmPendingPaste→submitPaste)이 activeSurface를 다시 읽어 **엉뚱한 pane에
+    ///      위험한 payload를 주입**한다. 마우스 경로도 모달 중엔 입력을 삼킨다(mouse()의 confirm 게이트와 같은 규율).
+    ///   ② **이전 paste가 아직 배수 중이면**(pending_paste 비어있지 않음) — pendingPasteRetarget이 FIFO 순서를
+    ///      지키려 대상을 *옛 surface*에 고정하므로, 포커스를 옮겨도 드롭 내용은 옛 pane으로 간다(라우팅 무효).
+    ///   ③ **대상 Term이 터미널이 아니면**(web 패널) — pasteText가 no-op이라 내용이 조용히 버려지고 포커스만 빼앗긴다.
+    ///      pane rect는 탭 바를 포함하므로 web pane의 바 위 드롭이 실제로 이 경로를 탄다.
+    ///
+    /// hit-test는 클릭 경로와 같은 단일 출처(Model.paneAtPoint — 순수 함수)를 쓴다. pane rect는 탭 바를 포함하므로
+    /// 바 위에 떨어뜨려도 그 pane으로 간다. 사이드바·pane 밖도 무동작(false) = 기존 활성 pane 폴백.
     pub fn focusPaneAtPoint(self: *AppSession, x_px: f64, y_px: f64) bool {
         if (!self.surface_initialized) return false;
+        if (self.chrome_host.confirm.open) return false; // ① 확인 모달 보류 중 — 대상 바꾸면 payload가 엉뚱한 pane으로
+        if (self.pending_paste.items.len > 0) return false; // ② 이전 paste 배수 중 — 대상이 옛 surface에 고정돼 라우팅이 무효
         if (self.inSidebar(x_px)) return false; // 사이드바 드롭은 범위 밖 — 활성 pane 폴백(기존 동작)
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return false;
-        for (leaf_rects.items) |lr| {
-            if (!layout_math.pointInRect(x_px, y_px, lr.rect)) continue;
-            return self.focusPaneByPtr(lr.leaf); // 이미 활성이면 focusPane이 무동작(true는 "그 pane이 대상"의 뜻)
-        }
-        return false;
+        const pane = Model.paneAtPoint(leaf_rects.items, x_px, y_px) orelse return false;
+        if (pane.terms.items[pane.active_term].kind != .terminal) return false; // ③ web pane — paste가 no-op이라 라우팅 금지
+        return self.focusPaneByPtr(pane); // 이미 활성이면 focusPane이 무동작(true는 "그 pane이 대상"의 뜻)
     }
 
     /// 드롭한 파일들(NUL 구분 경로)을 처리한다. maru ssh 원격 세션이면 각 파일을 control socket으로
@@ -23630,6 +23645,70 @@ test "드래그앤드롭 pane 라우팅: focusPaneAtPoint가 떨어뜨린 pane�
     const sidebar_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
     try std.testing.expect(!session.focusPaneAtPoint(sidebar_x, 100));
     try std.testing.expectEqual(before, session.activePane()); // 활성 pane 불변
+}
+
+test "드롭 라우팅 가드: 포커스 이동=라우팅이 성립 안 하는 상태면 라우팅하지 않는다(모달·배수 중 paste·web pane)" {
+    // 이 테스트가 증명하는 것: focusPaneAtPoint가 **조건부**라는 계약. 아래 상태에서 포커스만 옮기면 내용이
+    // 딴 데로 가거나 사라진다(code-review 확정):
+    //   ① 붙여넣기 확인 모달 — 그 모달은 *이전* 대상의 payload를 들고 있어, 활성 pane을 바꾸면 확정 시
+    //      엉뚱한 pane에 위험한 payload가 주입된다(confirmPendingPaste→submitPaste가 activeSurface를 다시 읽는다).
+    //   ② 이전 paste 배수 중 — pendingPasteRetarget이 FIFO 순서를 지키려 대상을 옛 surface에 고정한다(라우팅 무효).
+    //   ③ 대상이 web pane — pasteText가 no-op이라 내용은 버려지고 포커스만 빼앗긴다.
+    // 셋 다 false(=활성 pane 폴백, 기존 동작)로 떨어져야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+    try session.splitActivePane(.horizontal); // 좌우 2 pane
+
+    var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaf_rects.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaf_rects);
+    // 활성이 **아닌** pane을 대상으로 삼는다(라우팅이 실제로 일어나야 의미 있는 자리).
+    const target = for (leaf_rects.items) |lr| {
+        if (lr.leaf != session.activePane()) break lr;
+    } else return error.SkipZigTest;
+    const tx: f64 = @floatFromInt(target.rect.x + @as(i64, @intCast(target.rect.w / 2)));
+    const ty: f64 = @floatFromInt(target.rect.y + @as(i64, @intCast(target.rect.h / 2)));
+    const active_before = session.activePane();
+    try std.testing.expect(target.leaf != active_before);
+
+    // ① 붙여넣기 확인 모달이 열려 있으면 라우팅하지 않는다.
+    session.showConfirmButtons(AppSession.paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(!session.focusPaneAtPoint(tx, ty));
+    try std.testing.expectEqual(active_before, session.activePane()); // 활성 pane 불변 = payload 대상 불변
+    session.chrome_host.confirm.dismiss();
+    try std.testing.expect(!session.chrome_host.confirm.open);
+
+    // ② 이전 paste가 아직 배수 중이면 라우팅하지 않는다(대상이 옛 surface에 고정돼 있어 포커스만 옮기면 어긋난다).
+    try session.pending_paste.appendSlice(session.allocator, "leftover");
+    try std.testing.expect(!session.focusPaneAtPoint(tx, ty));
+    try std.testing.expectEqual(active_before, session.activePane());
+    session.pending_paste.clearRetainingCapacity();
+
+    // 가드가 풀리면 정상 라우팅(가드가 항상 막는 게 아니라 **그 상태에서만** 막는다는 것도 함께 증명).
+    try std.testing.expect(session.focusPaneAtPoint(tx, ty));
+    try std.testing.expectEqual(target.leaf, session.activePane());
+
+    // ③ 대상 Term이 web이면 라우팅하지 않는다 — 원래 활성 pane으로 되돌려 놓고, 대상 pane의 Term을 web으로 바꾼다.
+    session.focusPane(0);
+    const active_now = session.activePane();
+    if (target.leaf == active_now) return; // 좌/우 배치가 뒤집힌 환경 — 위 검증으로 충분
+    target.leaf.terms.items[target.leaf.active_term].kind = .web;
+    try std.testing.expect(!session.focusPaneAtPoint(tx, ty));
+    try std.testing.expectEqual(active_now, session.activePane()); // 포커스 안 뺏김 = 내용도 활성 터미널로
 }
 
 test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카드 드래그=그룹 통째 이동 + 드롭 하이라이트 (mouse 시뮬레이션)" {

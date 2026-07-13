@@ -2037,7 +2037,15 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
 
     // 2b 실 모달: head 하나만(한 번에 한 모달). 모달 띄울 AppSession + 사용자 결정 폴.
     const head = grant_prompt_queue.items.items[0];
-    const app = firstAppSession(refs) orelse {
+    // **dedup**(grant UX 경화): 이 (pane, target, scope)가 이미 grant됐으면(중복 요청·직전 결정) **모달 없이 승인 resolve**.
+    //   같은 triple 두 요청이 연달아 held되면, 첫 모달 승인이 grant를 남기고 → 둘째는 여기서 짧게 접혀 두 번째 모달이 안 뜬다.
+    if (control_pane_grant_store.isGranted(head.pane, head.target, head.scope)) {
+        _ = grant_prompt_queue.take();
+        return resolveGrantPrompt(server, head, true, snapshot, now);
+    }
+    // **target-window 모달**(grant UX 경화): 모달을 **대상 web surface를 소유한 창**에 띄운다(멀티창서 엉뚱한 창에
+    //   안 뜨게). 대상 surface가 어느 창에도 없으면(닫힘 등) firstAppSession 폴백. 둘 다 없으면(헤드리스) deny.
+    const app = (appSessionOwningSurface(refs, head.target) orelse firstAppSession(refs)) orelse {
         // 모달 띄울 창 없음(헤드리스·프로덕션 아님) → deny(hang 방지, reap 대기 없이 즉시).
         _ = grant_prompt_queue.take();
         return resolveGrantPrompt(server, head, false, snapshot, now);
@@ -2055,10 +2063,19 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
     _ = app.showGrantConfirm(grantPromptMessage(&msg_buf, head, snapshot), head.async_id);
 }
 
-/// 1e-confirm-2b: grant 확인 모달을 띄울 AppSession. 현재는 **첫 창**(refs 중 첫 non-null) — 단일 창이 흔하고 모달은
-/// 창-종속이라 단순화. (후속 정교화: target web surface 소유 창에 띄우기.) 창 없으면 null(헤드리스).
+/// grant 확인 모달을 띄울 폴백 AppSession — refs 중 첫 non-null 창. `appSessionOwningSurface`가 대상 창을 못 찾을 때
+/// (surface 닫힘 등)만 쓰인다. 창 없으면 null(헤드리스).
 fn firstAppSession(refs: []const ControlSessionRef) ?*AppSession {
     for (refs) |ref| if (ref.app_session) |app| return app;
+    return null;
+}
+
+/// grant UX 경화(target-window 모달): `surface_id`(대상 web surface)를 소유한 창의 AppSession. 멀티창에서 모달을
+/// **대상이 있는 창**에 띄우려는 것 — 엉뚱한 창에 뜨면 사용자가 어느 브라우저인지 헷갈린다. 없으면 null(호출자가 폴백).
+fn appSessionOwningSurface(refs: []const ControlSessionRef, surface_id: u64) ?*AppSession {
+    for (refs) |ref| if (ref.app_session) |app| {
+        if (app.ownsSurface(surface_id)) return app;
+    };
     return null;
 }
 

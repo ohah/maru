@@ -25,6 +25,7 @@ pub const browser_help =
     \\  get-url     --surface <id>             현재 문서 URL 출력
     \\  exec        --surface <id> <script>    JavaScript 실행, 결과 출력
     \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
+    \\  screenshot  --surface <id> [--out f]   현재 페이지를 PNG로 캡처(--out 파일, 생략=stdout)
     \\
 ;
 
@@ -48,8 +49,14 @@ pub const Request = union(enum) {
     }
 };
 
+/// screenshot(5f-1)은 단일 응답이 아니라 **chunk 스트림**(§9.5.7)이라 단일-응답 `Request`와 분리한다 — main이
+/// `ScreenshotAssembler`로 chunk를 재조립해 PNG를 `out`(nil=stdout)에 쓴다. surface_id=대상 web surface. named 타입이라
+/// main.zig 핸들러 인자로 그대로 전달된다(익명 struct는 별개 타입이 되어 안 맞음).
+pub const ScreenshotCmd = struct { surface_id: u64, out: ?[]const u8 };
+
 pub const Command = union(enum) {
     request: Request,
+    screenshot: ScreenshotCmd,
     help,
 };
 
@@ -62,6 +69,7 @@ pub const ParseError = error{
     MissingSurfaceValue, // `--surface`에 값 없음
     MissingUrl, // `navigate`에 url 없음
     MissingScript, // `exec`에 script 없음
+    MissingOutValue, // `screenshot --out`에 값 없음
     UnknownOption, // 알 수 없는 옵션(`--bogus`)
     UnexpectedArgument, // 남는 위치 인자
 };
@@ -97,6 +105,36 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const s = p.surface orelse return error.MissingSurface;
         if (p.arg != null) return error.UnexpectedArgument;
         return .{ .request = .{ .get_cookies = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "screenshot")) {
+        // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`(생략=stdout으로 raw PNG).
+        var surface: ?u64 = null;
+        var out: ?[]const u8 = null;
+        var i: usize = 1;
+        while (i < args.len) {
+            const a = args[i];
+            if (eq(a, "--surface")) {
+                if (i + 1 >= args.len) return error.MissingSurfaceValue;
+                surface = parseU64(args[i + 1]) catch return error.InvalidSurface;
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--surface=")) {
+                surface = parseU64(a["--surface=".len..]) catch return error.InvalidSurface;
+                i += 1;
+            } else if (eq(a, "--out")) {
+                if (i + 1 >= args.len) return error.MissingOutValue;
+                out = args[i + 1];
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--out=")) {
+                out = a["--out=".len..];
+                i += 1;
+            } else if (std.mem.startsWith(u8, a, "-")) {
+                return error.UnknownOption;
+            } else {
+                return error.UnexpectedArgument; // screenshot은 위치 인자 없음
+            }
+        }
+        const s = surface orelse return error.MissingSurface;
+        return .{ .screenshot = .{ .surface_id = s, .out = out } };
     }
     return error.UnknownSubcommand;
 }
@@ -177,6 +215,12 @@ fn idOnlyRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_
     return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
 }
 
+/// screenshot 요청 바이트(§9.5.7): `browser.screenshot {id}`. 응답은 단일이 아니라 chunk 스트림이라 렌더는
+/// `ScreenshotAssembler`가 맡는다(renderResponse 아님). main이 이 요청을 보내고 프레임을 assembler로 재조립. caller free.
+pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, surface_id: u64, id: cp.Id) std.mem.Allocator.Error![]u8 {
+    return idOnlyRequest(gpa, id, "browser.screenshot", surface_id);
+}
+
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
@@ -242,6 +286,113 @@ fn strField(v: ?std.json.Value) []const u8 {
         else => "",
     }) else "";
 }
+fn intField(v: ?std.json.Value) ?i64 {
+    return if (v) |val| (switch (val) {
+        .integer => |i| i,
+        else => null,
+    }) else null;
+}
+fn clampU32(v: i64) u32 {
+    if (v < 0) return 0;
+    if (v > std.math.maxInt(u32)) return std.math.maxInt(u32);
+    return @intCast(v);
+}
+
+// ══ screenshot(5f-1) chunk 재조립(L2 순수, §9.5.7) ═══════════════════════════════════════════════════════════
+
+/// screenshot chunk notification의 method(server→client push). control_browser의 wire 이름과 동일해야 한다(client측 상수).
+const screenshot_chunk_method = "browser.screenshotChunk";
+
+/// screenshot chunk 스트림(§9.5.7)을 프레임 단위로 재조립한다. CLI(main)가 소켓에서 읽은 프레임을 하나씩 `feed`하면
+/// chunk notification은 seq 순서로 PNG 버퍼에 누적하고, 최종 응답에서 완성(done)/에러(failed)를 판정한다. capture_id
+/// 일관성·seq 연속성·seq_total 일치를 검증(누락/재정렬 감지 — 서버 FIFO가 순서를 보장하나 방어적으로도 확인). L2 순수.
+pub const ScreenshotAssembler = struct {
+    gpa: std.mem.Allocator,
+    buf: std.ArrayList(u8) = .empty, // 누적 PNG 바이트
+    err_buf: std.ArrayList(u8) = .empty, // 실패 메시지(owned) — .failed 시 failureMessage()
+    next_seq: i64 = 0, // 다음 기대 seq(연속성)
+    capture_id: ?i64 = null,
+    width: u32 = 0,
+    height: u32 = 0,
+
+    /// feed 결과: need_more(계속 read)·done(완성 — png()·width·height 유효)·failed(실패 — failureMessage()).
+    pub const Step = enum { need_more, done, failed };
+
+    pub fn init(gpa: std.mem.Allocator) ScreenshotAssembler {
+        return .{ .gpa = gpa };
+    }
+    pub fn deinit(self: *ScreenshotAssembler) void {
+        self.buf.deinit(self.gpa);
+        self.err_buf.deinit(self.gpa);
+    }
+    pub fn png(self: *const ScreenshotAssembler) []const u8 {
+        return self.buf.items;
+    }
+    pub fn failureMessage(self: *const ScreenshotAssembler) []const u8 {
+        return self.err_buf.items;
+    }
+
+    fn fail(self: *ScreenshotAssembler, msg: []const u8) std.mem.Allocator.Error!Step {
+        self.err_buf.clearRetainingCapacity();
+        try self.err_buf.appendSlice(self.gpa, msg);
+        return .failed;
+    }
+
+    /// 소켓 프레임 하나(개행 제외) 소비. chunk notification/최종 응답/무관 프레임을 §9.5.7 계약대로 처리.
+    pub fn feed(self: *ScreenshotAssembler, frame_bytes: []const u8) std.mem.Allocator.Error!Step {
+        var pm = cp.parseMessage(self.gpa, frame_bytes) catch return self.fail("malformed frame from server");
+        defer pm.deinit();
+        switch (pm.message) {
+            .notification => |n| {
+                if (!eq(n.method, screenshot_chunk_method)) return .need_more; // hello 등 무관 notification 무시
+                return self.feedChunk(n.params);
+            },
+            .response => |r| return self.feedFinal(r),
+            .request => return .need_more, // 서버가 request 보낼 일 없음 — 무시
+        }
+    }
+
+    fn feedChunk(self: *ScreenshotAssembler, params: ?std.json.Value) std.mem.Allocator.Error!Step {
+        const obj = switch (params orelse return self.fail("chunk missing params")) {
+            .object => |o| o,
+            else => return self.fail("chunk params not object"),
+        };
+        const cid = intField(obj.get("capture_id")) orelse return self.fail("chunk missing capture_id");
+        const seq = intField(obj.get("seq")) orelse return self.fail("chunk missing seq");
+        const data = switch (obj.get("data") orelse return self.fail("chunk missing data")) {
+            .string => |s| s,
+            else => return self.fail("chunk data not string"),
+        };
+        if (self.capture_id) |c| {
+            if (c != cid) return self.fail("chunk capture_id mismatch");
+        } else self.capture_id = cid;
+        if (seq != self.next_seq) return self.fail("chunk out of order"); // FIFO 보장이나 방어
+        const decoder = std.base64.standard.Decoder;
+        const dlen = decoder.calcSizeForSlice(data) catch return self.fail("chunk bad base64");
+        const start = self.buf.items.len;
+        try self.buf.resize(self.gpa, start + dlen);
+        decoder.decode(self.buf.items[start..], data) catch return self.fail("chunk bad base64");
+        self.next_seq += 1;
+        return .need_more;
+    }
+
+    fn feedFinal(self: *ScreenshotAssembler, resp: cp.Response) std.mem.Allocator.Error!Step {
+        if (resp.err) |e| {
+            var tmp: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&tmp, "server error: {s} ({d})", .{ e.message, e.code }) catch e.message;
+            return self.fail(msg);
+        }
+        const obj = switch (resp.result orelse return self.fail("final missing result")) {
+            .object => |o| o,
+            else => return self.fail("final result not object"),
+        };
+        const seq_total = intField(obj.get("seq_total")) orelse return self.fail("final missing seq_total");
+        if (seq_total != self.next_seq) return self.fail("screenshot incomplete (chunk count mismatch)"); // 누락/과다
+        self.width = clampU32(intField(obj.get("width")) orelse 0);
+        self.height = clampU32(intField(obj.get("height")) orelse 0);
+        return .done;
+    }
+};
 
 // ══ 테스트(헤드리스, Linux CI 포함 — 순수 파싱·wire·렌더) ═══════════════════════════════════════════════════
 const testing = std.testing;
@@ -252,17 +403,17 @@ test "parse: navigate/get-url/exec/get-cookies + --surface" {
             try testing.expectEqual(@as(u64, 11), r.navigate.surface_id);
             try testing.expectEqualStrings("https://a/", r.navigate.url);
         },
-        .help => return error.Unexpected,
+        else => return error.Unexpected,
     }
     // --surface=N 형태 + 순서 무관(url 먼저).
     switch (try parse(&.{ "navigate", "https://b/", "--surface=7" })) {
         .request => |r| try testing.expectEqual(@as(u64, 7), r.navigate.surface_id),
-        .help => return error.Unexpected,
+        else => return error.Unexpected,
     }
     try testing.expectEqual(@as(u64, 3), (try parse(&.{ "get-url", "--surface", "3" })).request.get_url.surface_id);
     switch (try parse(&.{ "exec", "--surface", "5", "document.title" })) {
         .request => |r| try testing.expectEqualStrings("document.title", r.exec.script),
-        .help => return error.Unexpected,
+        else => return error.Unexpected,
     }
     try testing.expectEqual(@as(u64, 9), (try parse(&.{ "get-cookies", "--surface", "9" })).request.get_cookies.surface_id);
 }
@@ -357,6 +508,91 @@ test "renderResponse: navigate ok·getUrl url·exec result·getCookies 배열·e
         var w = std.Io.Writer.fixed(&buf);
         try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .navigate, &w);
         try testing.expectEqualStrings("error: Unauthorized (-32002)\n", w.buffered());
+    }
+}
+
+// ── screenshot(5f-1) 파서·wire·재조립 단위(§9.5.7) ──
+
+test "parse: screenshot --surface + --out(선택), 위치 인자 금지" {
+    switch (try parse(&.{ "screenshot", "--surface", "11" })) {
+        .screenshot => |s| {
+            try testing.expectEqual(@as(u64, 11), s.surface_id);
+            try testing.expect(s.out == null); // 생략=stdout
+        },
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "screenshot", "--surface=3", "--out", "p.png" })) {
+        .screenshot => |s| {
+            try testing.expectEqual(@as(u64, 3), s.surface_id);
+            try testing.expectEqualStrings("p.png", s.out.?);
+        },
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "screenshot", "--surface", "5", "--out=x.png" })) {
+        .screenshot => |s| try testing.expectEqualStrings("x.png", s.out.?),
+        else => return error.Unexpected,
+    }
+    try testing.expectError(error.MissingSurface, parse(&.{ "screenshot", "--out", "p.png" }));
+    try testing.expectError(error.MissingOutValue, parse(&.{ "screenshot", "--surface", "1", "--out" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "screenshot", "--surface", "1", "extra" })); // 위치 인자 금지
+    try testing.expectError(error.UnknownOption, parse(&.{ "screenshot", "--surface", "1", "--bogus" }));
+}
+
+test "buildScreenshotRequestBytes: browser.screenshot {id}" {
+    const b = try buildScreenshotRequestBytes(testing.allocator, 11, .{ .number = 1 });
+    defer testing.allocator.free(b);
+    var pm = try cp.parseMessage(testing.allocator, b);
+    defer pm.deinit();
+    try testing.expectEqualStrings("browser.screenshot", pm.message.request.method);
+    try testing.expectEqual(@as(i64, 11), pm.message.request.params.?.object.get("id").?.integer);
+}
+
+test "ScreenshotAssembler: chunk 재조립 → PNG, seq/capture/seq_total 검증, 서버 에러" {
+    const chunk0 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":7,\"seq\":0,\"encoding\":\"base64\",\"data\":\"SEVM\"}}"; // "HEL"
+    const chunk1 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":7,\"seq\":1,\"encoding\":\"base64\",\"data\":\"TE8=\"}}"; // "LO"
+    // 정상: 2 chunk → done, png()="HELLO", metadata.
+    {
+        var a = ScreenshotAssembler.init(testing.allocator);
+        defer a.deinit();
+        try testing.expectEqual(ScreenshotAssembler.Step.need_more, try a.feed(chunk0));
+        try testing.expectEqual(ScreenshotAssembler.Step.need_more, try a.feed(chunk1));
+        try testing.expectEqual(ScreenshotAssembler.Step.done, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capture_id\":7,\"seq_total\":2,\"width\":800,\"height\":600,\"format\":\"png\"}}"));
+        try testing.expectEqualStrings("HELLO", a.png());
+        try testing.expectEqual(@as(u32, 800), a.width);
+        try testing.expectEqual(@as(u32, 600), a.height);
+    }
+    // 무관 notification(hello 등)은 무시(need_more).
+    {
+        var a = ScreenshotAssembler.init(testing.allocator);
+        defer a.deinit();
+        try testing.expectEqual(ScreenshotAssembler.Step.need_more, try a.feed("{\"jsonrpc\":\"2.0\",\"method\":\"hello\",\"params\":{}}"));
+    }
+    // seq 재정렬(0 기대인데 5) → failed.
+    {
+        var a = ScreenshotAssembler.init(testing.allocator);
+        defer a.deinit();
+        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":7,\"seq\":5,\"data\":\"SEVM\"}}"));
+    }
+    // capture_id 불일치 → failed.
+    {
+        var a = ScreenshotAssembler.init(testing.allocator);
+        defer a.deinit();
+        _ = try a.feed(chunk0);
+        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":9,\"seq\":1,\"data\":\"TE8=\"}}"));
+    }
+    // seq_total 불일치(1개 받았는데 5) → failed(누락 감지).
+    {
+        var a = ScreenshotAssembler.init(testing.allocator);
+        defer a.deinit();
+        _ = try a.feed(chunk0);
+        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capture_id\":7,\"seq_total\":5,\"width\":1,\"height\":1}}"));
+    }
+    // 서버 에러 응답(screenshot too large) → failed, 메시지 전달.
+    {
+        var a = ScreenshotAssembler.init(testing.allocator);
+        defer a.deinit();
+        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"screenshot too large\"}}"));
+        try testing.expect(std.mem.indexOf(u8, a.failureMessage(), "screenshot too large") != null);
     }
 }
 

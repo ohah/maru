@@ -1809,6 +1809,9 @@ const BrowserOpQueue = struct {
     }
 };
 var browser_op_queue: BrowserOpQueue = .{};
+/// 5f-1: screenshot chunk 스트림의 `capture_id`(§9.5.7) 발급기 — 세션-로컬 단조(재사용 무관, client는 seq로 재조립).
+/// completeScreenshotOp이 각 스크린샷마다 하나 발급. `+%=`로 wrap(현실적 도달 불가, 단조성만 필요).
+var screenshot_capture_id_next: u64 = 1;
 /// take_browser_op이 pop한 op의 arg를 **다음 take까지** 살려 Swift가 이 호출 중 동기 복사하게 하는 안정 슬롯(app allocator).
 var browser_op_take_buf: std.ArrayList(u8) = .empty;
 /// hung WKWebView op 마감(reap) — evaluateJavaScript/navigation이 영영 안 끝나는 op가 accept 스레드를 영구 붙잡는 것 방어.
@@ -2229,8 +2232,72 @@ pub export fn maru_macos_control_complete_browser_op(async_id: u64, status: u32,
     const server = &control_server_storage;
     const result: []const u8 = if (result_ptr) |p| p[0..result_len] else &.{};
     const pending = server.inFlightPending(async_id) orelse return; // 늦은/미지 콜백 — 무시
+    // 5f-1: screenshot 완료는 단일 응답이 아니라 **chunk-streaming**(§9.5.7) — `result`=raw PNG 바이트. 감지해 chunk 경로로.
+    if (control_browser.isScreenshotRequest(server.cross_gpa, pending.request_bytes)) {
+        completeScreenshotOp(server, async_id, pending, status, result);
+        return;
+    }
     const resp = control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, status == 0, result) catch null;
     _ = server.completeInFlight(async_id, resp); // found → resolve(resp)(accept 스레드가 write 후 free)
+}
+
+/// 5f-1: screenshot op 완료(§9.5.7 chunk-streaming). `png`=Swift `takeSnapshot`이 만든 PNG 바이트(status 0). PNG를
+/// `screenshot_chunk_bytes` 조각으로 나눠 `browser.screenshotChunk` notification을 요청 연결 `pending.outbound`에 seq
+/// 순서로 push한 뒤 `completeInFlight`로 최종 응답(complete+metadata)을 resolve한다. **순서 보장**: 메인이 chunk를 먼저
+/// outbound에 넣고 completeInFlight가 reader(waitResolved)를 깨워 응답을 그 **뒤**에 push하므로, 단일 writer가 FIFO로
+/// chunk 0..N-1 → 최종 응답 순으로 write한다. 실패(status!=0·비-PNG·크기초과·push Full·OOM)는 chunk 없이 단일
+/// `internal_error` 응답으로 resolve(부분 push 후 실패면 client가 error 응답을 보고 폐기). **메인 스레드 전용**(WKWebView 콜백).
+fn completeScreenshotOp(
+    server: *control_server_mod.ControlServer,
+    async_id: u64,
+    pending: *control_server_mod.PendingRequest,
+    status: u32,
+    png: []const u8,
+) void {
+    // 실패 콜백(takeSnapshot 에러) → internal_error(serializeBrowserResponse의 ok=false 경로 재사용 — id 재파싱).
+    if (status != 0) {
+        _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, png) catch null);
+        return;
+    }
+    // metadata: PNG IHDR width/height. 비-PNG(스냅샷이 PNG가 아님)면 internal_error.
+    const dims = control_browser.pngDimensions(png) orelse {
+        _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "screenshot not png") catch null);
+        return;
+    };
+    // 크기 상한(§9.5.7) — 동기 push라 outbound_capacity 초과 방지. 초과=screenshot_too_large(에이전트가 축소 재시도, 후속 progressive pump).
+    const chunk_bytes = control_browser.screenshot_chunk_bytes;
+    const n_chunks = std.math.divCeil(usize, png.len, chunk_bytes) catch unreachable; // chunk_bytes는 nonzero 상수
+    if (n_chunks > control_browser.screenshot_max_chunks) {
+        _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "screenshot too large") catch null);
+        return;
+    }
+    // 요청 연결의 outbound(chunk push 대상). 정상 in-flight browser op은 serveConnection이 non-null로 세팅하나, 필드가
+    // optional이라 방어적 언랩 — null(도달 불가)이면 internal_error resolve(chunk 없이).
+    const outbound = pending.outbound orelse {
+        _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "screenshot no outbound") catch null);
+        return;
+    };
+    const capture_id = screenshot_capture_id_next;
+    screenshot_capture_id_next +%= 1;
+    const tag: u64 = control_browser.parseScreenshotTargetId(server.cross_gpa, pending.request_bytes) orelse 0; // surface tag(revoke/close purge)
+    // chunk 프레임을 seq 순서로 outbound에 push(coalesce=null[유실·병합 불가]·tag=surface). 실패면 error 응답으로 종료.
+    var seq: usize = 0;
+    var off: usize = 0;
+    while (off < png.len) : (seq += 1) {
+        const end = @min(off + chunk_bytes, png.len);
+        const frame = control_browser.serializeScreenshotChunk(server.cross_gpa, capture_id, seq, png[off..end]) catch {
+            _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "screenshot serialize failed") catch null);
+            return;
+        };
+        outbound.push(server.cross_gpa, .{ .bytes = frame, .coalesce_key = null, .tag = tag }) catch {
+            server.cross_gpa.free(frame); // push 실패(Full=writer 정체, QueueClosed=종료) → 소유권 반환·해제
+            _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "screenshot delivery congested") catch null);
+            return;
+        };
+        off = end;
+    }
+    // 최종 응답 = complete 마커 + metadata(seq_total=chunk 수). reader가 이 응답을 chunk 뒤에 outbound push(FIFO 순서).
+    _ = server.completeInFlight(async_id, control_browser.serializeScreenshotComplete(server.cross_gpa, pending.request_bytes, capture_id, seq, dims) catch null);
 }
 
 /// 5f-0b-3c: Swift가 WKWebView `url` KVO(메인 스레드)에서 호출 — 그 web surface의 `browser.navigated` 이벤트를 그 surface
@@ -2356,6 +2423,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u8, 1), @as(u8, @intFromEnum(control_browser.BrowserMethod.get_url)));
     try std.testing.expectEqual(@as(u8, 2), @as(u8, @intFromEnum(control_browser.BrowserMethod.execute_script)));
     try std.testing.expectEqual(@as(u8, 4), @as(u8, @intFromEnum(control_browser.BrowserMethod.get_cookies))); // 5f-4c
+    try std.testing.expectEqual(@as(u8, 5), @as(u8, @intFromEnum(control_browser.BrowserMethod.screenshot))); // 5f-1
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);

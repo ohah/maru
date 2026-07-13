@@ -741,6 +741,25 @@ enum BrowserControl {
     @MainActor static func goForward(_ webView: WKWebView) { webView.goForward() }
     @MainActor static func reload(_ webView: WKWebView) { webView.reload() }
 
+    // 5f-1: browser.screenshot → takeSnapshot으로 현재 표시 영역을 NSImage로 캡처한 뒤 **PNG Data**로 인코딩해 돌려준다
+    // (async 콜백 — getCookies/executeScript와 동형). rect 미지정=가시 뷰포트 전체(§9.5.7 첫 컷 — rect/scale 파라미터는
+    // 후속). 실패(스냅샷 에러·비트맵/PNG 변환 실패)면 nil. 라우팅·chunk 분할·metadata(IHDR)는 Zig, 여긴 WKWebView 스냅샷
+    // API + PNG 인코딩 어댑터만(네이티브 최소). PNG 변환은 clipboardImagePng과 같은 NSBitmapImageRep 경로.
+    @MainActor static func takeSnapshot(_ webView: WKWebView, completion: @escaping (Data?) -> Void) {
+        let config = WKSnapshotConfiguration()
+        webView.takeSnapshot(with: config) { image, error in
+            guard error == nil, let image = image,
+                let tiff = image.tiffRepresentation,
+                let rep = NSBitmapImageRep(data: tiff),
+                let png = rep.representation(using: .png, properties: [:])
+            else {
+                completion(nil)
+                return
+            }
+            completion(png)
+        }
+    }
+
     // 5e-2b-2: `executeScript` 반환값(evaluateJavaScript 결과, 불투명 Any)을 응답에 실을 **문자열**로 바꾼다. Zig
     // serializeBrowserResponse가 이 문자열을 `{"result":{"result":<문자열>}}`로 싣는다(진짜 JSON 값 embed는 후속 —
     // §9.3 ⑥ "스크립트 반환값을 문자열로"). 컨트롤 플레인 계약은 Zig, 여긴 WKWebView 값→문자열 매핑 어댑터만.
@@ -2823,6 +2842,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
                     }
                 }
+            case 5: // screenshot(5f-1) — async 콜백(takeSnapshot→PNG). 성공=PNG 바이트(Zig completeScreenshotOp이 chunk-stream), 실패=status 1.
+                BrowserControl.takeSnapshot(wp.webView) { png in
+                    if let png = png {
+                        self.completeBrowserOp(asyncId, status: 0, data: png)
+                    } else {
+                        self.completeBrowserOp(asyncId, status: 1, result: "screenshot failed")
+                    }
+                }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)
             }
@@ -2835,6 +2862,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let bytes = Array(result.utf8)
         bytes.withUnsafeBufferPointer { buf in
             maru_macos_control_complete_browser_op(asyncId, status, buf.baseAddress, buf.count)
+        }
+    }
+
+    /// 5f-1: `complete_browser_op`을 **raw 바이트**(screenshot PNG)로 부르는 헬퍼. String 헬퍼와 달리 UTF-8이 아닌 임의
+    /// 바이너리 — Zig `completeScreenshotOp`이 status 0이면 이 PNG를 chunk-stream한다(§9.5.7). 빈 Data면 baseAddress nil·
+    /// count 0(Zig가 비-PNG로 판정해 internal_error). `result:`(String)와 인자 레이블이 달라 오버로드 구분.
+    private func completeBrowserOp(_ asyncId: UInt64, status: UInt32, data: Data) {
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            maru_macos_control_complete_browser_op(asyncId, status, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
         }
     }
 

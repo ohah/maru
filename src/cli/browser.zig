@@ -341,7 +341,7 @@ fn clampU32(v: i64) u32 {
 // ══ screenshot(5f-1) chunk 재조립(L2 순수, §9.5.7) ═══════════════════════════════════════════════════════════
 
 /// screenshot chunk notification의 method(server→client push). control_browser의 wire 이름과 동일해야 한다(client측 상수).
-const screenshot_chunk_method = "browser.screenshotChunk";
+const screenshot_chunk_method = cp.browser_screenshot_chunk_method; // 22차 [8]: 단일 출처(control_plane)
 
 /// screenshot chunk 스트림(§9.5.7)을 프레임 단위로 재조립한다. CLI(main)가 소켓에서 읽은 프레임을 하나씩 `feed`하면
 /// chunk notification은 seq 순서로 PNG 버퍼에 누적하고, 최종 응답에서 완성(done)/에러(failed)를 판정한다. capture_id

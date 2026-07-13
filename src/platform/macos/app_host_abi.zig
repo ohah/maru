@@ -2193,7 +2193,7 @@ pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSession
 
 /// 5e-2b: Swift가 매 tick 호출 — (1) `reapExpiredInFlight`(hung browser op timeout), (2) browser op 큐에서 하나 pop해
 /// out으로 넘긴다. 반환 1=op 있음(Swift가 surface_id로 webView 찾아 `BrowserControl`[op_kind] 실행 → 완료 시
-/// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c). `arg_ptr`는 안정 슬롯
+/// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c)·5=screenshot(5f-1). `arg_ptr`는 안정 슬롯
 /// (`browser_op_take_buf`)을 가리켜 **이 호출 중 동기 읽기**만 유효(다음 take가 덮어씀 — Swift가 즉시 복사). 서버
 /// 미시작이면 0. **메인 스레드 전용**(reap·pop·in-flight 레지스트리는 메인).
 pub export fn maru_macos_control_take_browser_op(
@@ -2415,7 +2415,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(i32, 0), @intFromEnum(terminal.LinkKind.url));
     try std.testing.expectEqual(@as(i32, 1), @intFromEnum(terminal.LinkKind.file_path));
     // 5e-2b op_kind wire 계약: take_browser_op이 @intFromEnum(BrowserMethod)를 그대로 op_kind로 싣고 Swift
-    // drainBrowserOps가 0=navigate·1=getUrl·2=executeScript·4=getCookies로 디코드한다. BrowserMethod 순서를 바꾸면
+    // drainBrowserOps가 0=navigate·1=getUrl·2=executeScript·4=getCookies·5=screenshot로 디코드한다. BrowserMethod 순서를 바꾸면
     // op_kind가 silent하게 재매핑돼 navigate 요청이 다른 op을 구동하므로(컴파일·테스트 무경보) 태그 값을 고정한다
     // (LinkKind 선례 — .h 주석·Swift switch와 단일 계약). 신규 메서드는 **끝에** 추가한다(3=subscribe는 async op이
     // 아니라 op_kind로 안 실림 — get_cookies는 그 뒤 4).

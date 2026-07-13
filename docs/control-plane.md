@@ -230,7 +230,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 | `browser.getUrl` | `{id}` | `{url}` | `.url` |
 | `browser.back`/`forward`/`refresh` | `{id}` | `{ok}` | `goBack`/`goForward`/`reload` |
 | `browser.executeScript` | `{id, script, args?}` | `{result}` | `evaluateJavaScript` |
-| `browser.screenshot` | `{id}` | `{png_base64}` | `takeSnapshot` |
+| `browser.screenshot` | `{id, format?}` | `browser.screenshotChunk` notification×N → 최종 응답 `{capture_id, seq_total, width, height, format}` | `takeSnapshot`→PNG, **소켓 chunk-streaming**(§9.5.3·§9.5.7 — `{png_base64}` 단일 응답 폐기: >1MB 프레임 상한) |
 | `browser.findElement` | `{id, using, value}` | `{element}` | `evaluateJavaScript`(CSS/xpath) |
 | `browser.click` | `{id, element}` | `{ok}` | `evaluateJavaScript` |
 | `browser.sendKeys` | `{id, element, text}` | `{ok}` | `evaluateJavaScript` |
@@ -408,7 +408,32 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **registry 스레드 모델 pivot (5f-0b-3a-2 — 전제(v)·초판 drop-notify 대체)**: 초판은 "메인-전용 registry + 연결-drop 통지(연결 스레드가 메인에 알려 메인이 purge 후에만 free)"를 계획했으나, 이는 (1) 연결이 빠르게 churn하면 메인 tick 사이 outbound가 **무한 누적**(same-uid churn DoS 벡터)하거나 bounded ring이면 stop() 교착이고, (2) drop-notify rendezvous가 stop() 중 메인 미-tick과 얽힌다. 대신 **registry를 leaf-mutex로 보호**하고 **연결 스레드가 종료 시 자기 구독을 직접 `purgeOutbound`(leaf lock 아래)한 뒤 outbound를 free**한다 — 동기적이라 누적·rendezvous·reap이 전부 불요. UAF 없음: 메인 `pushEvent`(registry lock→매칭→outbound push)와 연결 스레드 `purgeOutbound`(registry lock→구독 제거)가 **같은 leaf lock서 직렬화**되므로, purge 후 메인은 그 outbound를 다시 조회 못 하고(제거됨), purge 전이면 outbound는 아직 살아 있다(free는 purge 후). **§8.8 준수**: registry=leaf lock, **core_mutex 보유 중 미접근**(이벤트=KVO·구독=요청 dispatch 둘 다 core_mutex 밖), lock 순서 registry→outbound 단방향(writer/reader는 outbound만, registry 안 잡음). 즉 전제(v)의 "메인 전용"은 leaf-mutex로 realize(§8.8의 실질 불변식=core_mutex-free는 유지, thread-safety 방식만 no-lock→leaf-lock). refcount-heap도 borrowed+drop-notify도 아닌 **leaf-mutex + 연결 스레드 self-deregister** 모델.
 
-**5f 재슬라이싱(§9.5 단일 출처 — §9.4의 슬라이싱 블록은 이걸 가리킴)**: **5f-0**=연결당 스레드+통합 outbound 큐+수명/소유권(9.5.1·9.5.6)+EventBroker 순수 코어(9.5.2)+`browser.subscribe`/`browser.navigated`(KVO 재사용, 5g 흡수)+cap 누적(auth.grant)+**두 스파이크(Web Inspector·네이티브 a11y)**. **5f-1**=screenshot(chunk)+metadata (snapshot=a11y 스파이크 gated). **5f-2**=act(**CSS-selector/좌표 기반** click/type/scroll, ref 기반은 snapshot gated)+wait. **5f-3(주입불요)**=dialog·loadState. **crash**=`browser.crashed`(손 테스트, 5f-3). **5f-4**=cookies+localStorage+clear+performance. **5f-5**=fidelity. **미룸(주입-world 보안심사+스파이크 후)**: network·console·pageError·(a11y 실패 시)snapshot·ref 기반 act.
+**9.5.7 — screenshot(5f-1) 구현 배선 (doc-first, 아키텍처 실측 후속)**. §9.5.3의 "소켓 chunk-streaming" 결정을 구현 지점으로 못박는다(라이브 아키텍처 코드 실측 2026-07-13 기반).
+
+**전달 프로토콜(무-ack, chunks→응답 FIFO)**:
+- 요청 `browser.screenshot {id, format?}`(format 생략=png; 현재 png만) → op_kind=5 async op으로 defer(navigate/getCookies와 동일 in-flight marshal, `deferRequest`→async_id).
+- Swift가 `WKWebView.takeSnapshot`(async 콜백)로 PNG 바이트를 만들어 `maru_macos_control_complete_browser_op(async_id, ok, png_ptr, png_len)`로 되돌린다(getCookies/executeScript와 동형 — 단 result가 UTF-8 문자열이 아니라 **raw PNG 바이트**).
+- Zig `completeBrowserOp`가 **request_bytes 재파싱으로 method=screenshot을 감지**하면 단일-응답 `serializeBrowserResponse` 대신 **chunk 경로**로 분기한다(메인 스레드):
+  1. `capture_id` 발급(세션-로컬 단조).
+  2. PNG를 `screenshot_chunk_bytes`(=512 KiB, base64 시 ~683 KiB < `default_max_frame` 1 MiB) 단위로 슬라이스 → 각 조각을 base64 → `browser.screenshotChunk` **notification** 프레임(`{capture_id, seq, data}`)으로 직렬화 → **요청 연결의 `pending.outbound`(=`inFlightPending(async_id).outbound`, OutboundChannel)에 seq 순서로 push**(`coalesce_key=null`[유실·병합 불가], `tag=surface_id`[surface-close purge]).
+  3. `completeInFlight(async_id, complete_resp)` — `complete_resp`=최종 응답 `{capture_id, seq_total, width, height, format}`(§9.5.7 metadata). reader가 `waitResolved`에서 깨어 이 응답을 `outbound.push(tag=0)`한다.
+- **FIFO 순서 보장(코드 실측)**: 메인이 chunk들을 outbound에 먼저 push한 뒤 `completeInFlight`가 reader를 깨우고, reader의 응답 push는 그 **뒤**에 일어난다(`control_server.zig` serveConnection `waitResolved`→`outbound.push` 경로). 단일 writer가 outbound를 FIFO drain하므로 클라이언트는 **chunk seq 0..N-1 → 최종 응답** 순으로 받는다. ack 프레임을 따로 두지 않는 이유=최종 응답이 곧 complete 마커+metadata라 중복 불요.
+
+**metadata**: width/height는 **PNG IHDR를 Zig가 파싱**(시그니처 8B + IHDR: len 4·"IHDR" 4·width 4 BE[offset 16]·height 4 BE[offset 20])해 얻는다 — ABI 확장 없이 Swift는 PNG 바이트만 넘긴다. format="png" 고정. PNG 시그니처 불일치/길이 부족이면 `internal_error`로 resolve(스냅샷 실패와 동형).
+
+**크기 상한(첫 컷 한계 — 명시)**: chunk를 **동기 push**(한 `completeBrowserOp` 호출 내)하므로 `outbound_capacity`(64 프레임)를 넘기면 안 된다. 상한 `screenshot_max_chunks`(=24 → 24×512 KiB=12 MiB PNG, 최종 응답 포함 25 프레임 ≤ 64)를 두고, 초과 PNG는 `screenshot_too_large` 에러로 resolve(에이전트는 `format`/rect로 축소 재시도 — rect/scale 파라미터는 후속). push 도중 `Full`(느린 클라이언트)이면 `internal_error` resolve 후 잔여 폐기. **progressive pump(무제한 크기 — Capture 상태머신 재사용해 tick마다 outbound 여유만큼 push→resume)는 후속 슬라이스**(첫 컷은 뷰포트 스크린샷 ~100 KiB~2 MiB를 12 MiB 상한으로 여유 커버). 이 한계는 §9.5.3 chunk-streaming 결정과 모순 아님(전달은 소켓 chunk 유지 — 파일-경로 미개방); 상한만 첫 컷 단순화.
+
+**보안(scope)**: screenshot은 `browser` base scope(navigate와 동일 — `methodRequiredScope(.screenshot)=.browser`). §9.4 D5의 "세탁 구멍"(executeScript·screenshot이 base browser면 storage 게이트 우회)은 **screenshot이 렌더 픽셀만 노출**(cookie/localStorage 값 아님)이라 storage sub-scope 대상이 아니다 — 렌더 결과는 D5가 "비밀 취급하는 렌더 토큰"이나 그 게이트는 `browser` cap 자체(=페이지 조작/관찰 인가)로 충분하다(별도 sub-scope 없음). 단 §9.5.3대로 **결과를 cap-게이트 소켓 안에 유지**(파일 미개방)해 same-uid 유출을 막는다.
+
+**op_kind·enum**: `BrowserMethod`에 `screenshot` **끝에 추가**(op_kind=5 — 3=subscribe가 op로 안 실려도 enum 값 유지; `app_host_abi.zig` 컴파일 assert에 `screenshot==5` 추가, 순서변경 금지 주석 준수). `parseBrowserMethod("screenshot")` 매핑은 **Swift case 5 배선과 같은 슬라이스에서** 추가한다(먼저 추가하면 screenshot 요청이 Swift 미처리 op으로 defer돼 reap timeout까지 hang — 그전엔 `method_not_found` 유지).
+
+**CLI(`maru browser screenshot --surface N --out FILE`)**: `fetchControlResponse`가 응답 1프레임만 읽으므로 **chunk-aware 읽기**로 확장 — `browser.screenshotChunk` notification을 seq별 누적하고, 최종 응답(id 매칭)에서 `seq_total` 확인 후 seq 0..N-1을 이어붙여 PNG를 `--out`(또는 stdout)로 쓴다. seq 누락/불일치=에러. 렌더는 cookies의 JSON 재직렬화와 다른 **바이너리 파일 출력** 경로.
+
+**슬라이스**: **5f-1-0**(이 문서). **5f-1-1**=서버측 전 경로(Zig `BrowserMethod.screenshot`+parser+scope+chunk/complete 직렬화 L2+PNG IHDR 파서+`completeBrowserOp` screenshot 분기+Swift `takeSnapshot`+case 5)+헤드리스 유닛(chunk 직렬화·IHDR·크기상한)+실앱 스모크(스모크 클라가 screenshot 구동→chunk 수신→PNG 헤더 `\x89PNG` 확인). **5f-1-2**=CLI(`cli/browser.zig` screenshot 서브커맨드+`main.zig` chunk-aware read+파일 출력)+헤드리스 파서 유닛+self-verify(`MARU_TEST_GRANT_DECISION=approve`→screenshot→PNG 파일 헤더).
+
+**테스트 경계(§9.5.5 준수)**: 헤드리스 CI=chunk 직렬화(seq·base64·프레임<1MB)·IHDR 파싱·크기상한 에러·CLI 재조립 파서. 스모크(display·비-CI)=실 WKWebView `takeSnapshot`→chunk 왕복→PNG 시그니처. self-verify=CLI 실 소켓 왕복→파일.
+
+**5f 재슬라이싱(§9.5 단일 출처 — §9.4의 슬라이싱 블록은 이걸 가리킴)**: **5f-0**=연결당 스레드+통합 outbound 큐+수명/소유권(9.5.1·9.5.6)+EventBroker 순수 코어(9.5.2)+`browser.subscribe`/`browser.navigated`(KVO 재사용, 5g 흡수)+cap 누적(auth.grant)+**두 스파이크(Web Inspector·네이티브 a11y)**. **5f-1**=screenshot(chunk)+metadata (snapshot=a11y 스파이크 gated; 구현 배선=§9.5.7). **5f-2**=act(**CSS-selector/좌표 기반** click/type/scroll, ref 기반은 snapshot gated)+wait. **5f-3(주입불요)**=dialog·loadState. **crash**=`browser.crashed`(손 테스트, 5f-3). **5f-4**=cookies+localStorage+clear+performance. **5f-5**=fidelity. **미룸(주입-world 보안심사+스파이크 후)**: network·console·pageError·(a11y 실패 시)snapshot·ref 기반 act.
 
 **베이스·의사결정(clean-room)**: 연결 모델 base=`ControlRequestQueue`/`PtyEventQueue`(bounded MPSC)+poll; outbound 큐 base=§4.3; 이벤트 백프레셔 base=§5 subscribeOutput; 순수 코어 base=`control_capture.zig` L2; chunk base=`control_capture` chunk 프로토콜; cap 누적 base=§8.5 single-scope 불변 + auth 프레임 반복. **결정 요약**: 연결당 스레드+통합 outbound 큐+heap pending/registry(9.5.1·6), 대용량=**소켓 chunk**(파일-경로 폐기, same-uid 노출 회피, 9.5.3), snapshot=a11y 스파이크 gated(9.5.4), single-scope×세션=cap 누적(9.5.6③), 서브스코프 fd=browser_storage/network는 `allowedViaInheritedFd=false`(민감·명시 확인만, §8.5 write/lifecycle 선례 — D5 확정). **후속 스파이크 2개(5f-0)**: Web Inspector 임베드 viability, 네이티브 a11y snapshot viability.
 

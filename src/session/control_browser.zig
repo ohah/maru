@@ -311,7 +311,7 @@ pub const screenshot_chunk_bytes: usize = 512 * 1024;
 /// 초과 PNG는 `screenshot_too_large`로 접는다(에이전트가 rect/scale로 축소 재시도 — 후속). progressive pump(무제한)는 후속.
 pub const screenshot_max_chunks: usize = 24;
 
-const screenshot_chunk_method = "browser.screenshotChunk";
+const screenshot_chunk_method = cp.browser_screenshot_chunk_method; // 22차 [8]: 단일 출처(control_plane)
 
 /// PNG IHDR의 width/height(§9.5.7 metadata). Swift가 넘긴 PNG 바이트에서 직접 읽어 ABI 확장을 피한다.
 pub const PngDims = struct { width: u32, height: u32 };
@@ -518,9 +518,11 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
             error.InvalidCookiesJson => return cp.serializeError(gpa, req.id, .internal_error, "invalid cookies payload", null),
         },
         .subscribe => unreachable, // subscribe는 async op이 아니라 이 함수(op 완료 응답)로 안 온다 — serializeSubscribeResponse 사용
-        // screenshot(ok=true)은 completeBrowserOp이 chunk 경로로 가로채므로 이 단일-응답 함수에 안 온다(§9.5.7). ok=false는
-        // 위 `if (!ok)`서 이미 internal_error로 반환됐다(switch 도달 전) — screenshot 에러도 그 경로라 여기 unreachable.
-        .screenshot => unreachable,
+        // screenshot(ok=true)은 통상 completeBrowserOp이 chunk 경로로 가로채 이 단일-응답 함수에 안 온다(§9.5.7). 단
+        // **isScreenshotRequest가 일시적 OOM으로 false**를 반환하면(app_host_abi) 여기로 falling through할 수 있다 — 그 사이
+        // OOM이 풀려 이 재파싱은 성공하면 bmethod=.screenshot, ok=true로 이 arm에 닿는다(22차 리뷰 [0]). `unreachable`이면
+        // 저확률이지만 앱이 크래시하므로 **균일 internal_error**로 접는다(ok=false 경로와 동형 — client는 에러 응답 수신).
+        .screenshot => cp.serializeError(gpa, req.id, .internal_error, "screenshot delivered out of band", null),
     };
 }
 
@@ -1106,6 +1108,17 @@ test "dispatchBrowser(5f-1) D5: browser_storage cap은 screenshot 불인가 → 
     const wire = try dispatchErr(req, browserStorageCap(11));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
+// 22차 리뷰 [1]: `parseBrowserMethod(rest) orelse method_not_found`(step 5) 경로 — screenshot 구현 후 dispatch 레벨
+//   테스트가 사라졌다(옛 "screenshot 미구현→method_not_found"를 op 테스트로 교체). browser.back/forward/refresh는 §9.4
+//   표엔 있으나 parseBrowserMethod 미구현(null)이라 에이전트가 부르면 method_not_found여야 한다(authorized 무관 — 메서드명은
+//   공개 API라 oracle 아님). 유효 cap이어도 이 접힘을 확인해 복원.
+test "dispatchBrowser: 유효 cap + 미구현 browser 메서드(back) → method_not_found(-32601)" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.back\",\"params\":{\"id\":11}}";
+    const wire = try dispatchErr(req, browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
 }
 
 // ── 7) 유효 cap + navigate params에 url 없음 → invalid_params ──

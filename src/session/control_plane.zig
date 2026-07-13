@@ -32,6 +32,9 @@ pub const jsonrpc_version = "2.0";
 pub const protocol_id = "maru.control.v1";
 /// `hello` notification의 method 이름(§4.1).
 pub const hello_method = "hello";
+/// `browser.screenshotChunk` notification의 method 이름(§9.5.7 — screenshot chunk-streaming). 생산(control_browser
+/// `serializeScreenshotChunk`)과 소비(cli/browser `ScreenshotAssembler`)가 이 **단일 출처**를 공유해 wire drift를 막는다(22차 [8]).
+pub const browser_screenshot_chunk_method = "browser.screenshotChunk";
 /// max frame 크기(≈ 1 MiB, §4.3). "frame 크기" = 종단 `\n`을 제외한 한 줄의 바이트 수(선행 `\r`이 있으면 포함).
 pub const default_max_frame: usize = 1024 * 1024;
 

@@ -13,6 +13,21 @@
 const std = @import("std");
 const cp = @import("../session/control_plane.zig");
 
+/// `maru browser --help`. 구현된 서브커맨드만 노출한다(§11 help gate — 정직성). 대상 surface는 `maru sessions list`로 발견.
+pub const browser_help =
+    \\usage: maru browser <command> --surface <id> [args]
+    \\
+    \\web surface(브라우저 패널)를 제어한다. <id>는 대상 web surface_id(maru sessions list로 발견).
+    \\권한이 없으면 사용자에게 확인 모달이 뜨고, 허용하면 실행된다(§9.2 Model B).
+    \\
+    \\commands:
+    \\  navigate    --surface <id> <url>       URL로 이동
+    \\  get-url     --surface <id>             현재 문서 URL 출력
+    \\  exec        --surface <id> <script>    JavaScript 실행, 결과 출력
+    \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
+    \\
+;
+
 // ── 명령 모델 ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// `browser.*` 요청(핵심 4개). id는 대상 web surface_id.

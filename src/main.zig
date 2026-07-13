@@ -97,6 +97,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "browser")) {
+        try runBrowserCli(io, allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "trace")) {
         try runTrace(io, allocator, &args, stdout, stderr);
         return;
@@ -516,10 +521,55 @@ fn runSessionCli(
     }
 }
 
-/// `sessions list`/`session get` 요청을 실제 컨트롤 소켓에 왕복한다(A2a). 소켓 발견(§4.2 결정론 경로 + 단일
-/// 인스턴스 자동 발견) → connect → `buildRequestBytes` 전송 → hello notification skip → 응답 프레임 수신 →
-/// `renderResponse`. 순수 정책(경로·발견 판정)은 `maru.cli.sessions`, 프레이밍/parse는 1a, 여긴 getenv/readdir/소켓
-/// syscall 접착만(§11 소켓 syscall L4). 살아있는 인스턴스가 없거나 connect 실패면 crash 없이 graceful 종료(exit 1).
+/// `maru browser <cmd>` CLI(§9.6 CLI-2). runSessionCli 동형 — 인자 수집 → `cli.browser.parse` → help/요청. 소켓 왕복은
+/// `runBrowserRequest`(공유 `fetchControlResponse`). browser 요청은 세션 cap 없이 §9.2 Model B로 확인 모달을 거친다.
+fn runBrowserCli(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |s| allocator.free(s);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
+
+    const parsed = maru.cli.browser.parse(collected.items) catch |err| {
+        try writeBrowserCliUsage(stderr, err);
+        return error.UnknownCommand;
+    };
+    switch (parsed) {
+        .help => {
+            try stdout.writeAll(maru.cli.browser.browser_help);
+            try stdout.flush();
+        },
+        .request => |req| try runBrowserRequest(io, allocator, req, stdout, stderr),
+    }
+}
+
+/// `maru browser` 파싱 실패 시 사유 + help를 stderr에 낸다(writeSessionCliUsage 동형).
+fn writeBrowserCliUsage(stderr: *std.Io.Writer, err: maru.cli.browser.ParseError) !void {
+    const reason = switch (err) {
+        error.MissingSubcommand => "서브커맨드가 필요합니다",
+        error.UnknownSubcommand => "알 수 없는 서브커맨드입니다",
+        error.MissingSurface => "--surface <id> 가 필요합니다",
+        error.InvalidSurface => "surface id는 음이 아닌 정수여야 합니다",
+        error.MissingSurfaceValue => "--surface 에는 값이 필요합니다",
+        error.MissingUrl => "navigate 에는 url이 필요합니다",
+        error.MissingScript => "exec 에는 script가 필요합니다",
+        error.UnknownOption => "알 수 없는 옵션입니다",
+        error.UnexpectedArgument => "인자가 너무 많습니다",
+    };
+    try stderr.print("maru browser: {s}\n\n", .{reason});
+    try stderr.writeAll(maru.cli.browser.browser_help);
+    try stderr.flush();
+}
+
+/// `sessions list`/`session get` 요청을 실제 컨트롤 소켓에 왕복한다(A2a). 소켓 흐름은 공유 `fetchControlResponse`,
+/// 요청 조립·응답 렌더만 `maru.cli.sessions`. 살아있는 인스턴스가 없거나 connect 실패면 crash 없이 graceful 종료(exit 1).
 fn runSessionRequest(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -527,14 +577,46 @@ fn runSessionRequest(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    const c = std.c;
-    const posix = std.posix;
-
     // 응답 렌더 모양(list=배열, get=단건)은 요청 종류로 정해진다(1d ResponseKind).
     const kind: maru.cli.sessions.ResponseKind = switch (req) {
         .list => .list,
         .get => .get,
     };
+    const request_bytes = try maru.cli.sessions.buildRequestBytes(allocator, req, .{ .number = 1 });
+    defer allocator.free(request_bytes);
+    const resp = try fetchControlResponse(io, allocator, request_bytes, stderr);
+    defer allocator.free(resp);
+    try maru.cli.sessions.renderResponse(allocator, resp, kind, stdout);
+    try stdout.flush();
+}
+
+/// `maru browser navigate/get-url/exec/get-cookies`를 컨트롤 소켓에 왕복한다(§9.6 CLI-2). sessions와 **동형**(같은
+/// `fetchControlResponse` 소켓 흐름 공유) — 요청 조립·응답 렌더만 `cli.browser`. **grant 대기**: browser 요청은
+/// 세션 cap 없어 needs_grant→서버 held→확인 모달. `fetchControlResponse`의 read가 사용자 클릭까지 블록한다(§9.2 Model B).
+fn runBrowserRequest(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    req: maru.cli.browser.Request,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const kind = req.kind();
+    const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, req, .{ .number = 1 });
+    defer allocator.free(request_bytes);
+    const resp = try fetchControlResponse(io, allocator, request_bytes, stderr);
+    defer allocator.free(resp);
+    try maru.cli.browser.renderResponse(allocator, resp, kind, stdout);
+    try stdout.flush();
+}
+
+/// **컨트롤 소켓 왕복(sessions/browser CLI 공유)**: 결정론 경로(§4.2)에서 살아있는 인스턴스 소켓 발견 → connect →
+/// `auth.self`(selector=`MARU_PANE_ID`·cap_nonce=null) → `request_bytes` 전송 → hello notification skip → **첫 응답 프레임**을
+/// alloc 소유 슬라이스로 반환(caller free·caller가 자기 kind로 render). 인스턴스 없음/connect 실패/EOF는 `sessionNoInstance`
+/// (graceful exit 1). browser 요청은 grant 모달로 held될 수 있어 read가 오래 블록될 수 있다(짧은 타임아웃 금지 — §9.6).
+/// 순수 정책(경로·발견 판정)은 `cli.sessions`, 프레이밍/parse는 1a, 여긴 getenv/readdir/소켓 syscall 접착만(§11 L4).
+fn fetchControlResponse(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer) ![]u8 {
+    const c = std.c;
+    const posix = std.posix;
 
     // ── 소켓 발견: 결정론 경로 <cache>/maru/control에서 살아있는 인스턴스 소켓 하나를 찾는다(§4.2) ──
     const home_z = c.getenv("HOME") orelse
@@ -584,47 +666,36 @@ fn runSessionRequest(
         return sessionNoInstance(stderr, null);
 
     // ── A2b auth 셀렉터 전송(§8.4 1단계): caller가 자기 surface를 주장한다. maru 팬 셸엔 MARU_PANE_ID=<surface.id>가
-    // 주입돼 있으므로(pty/macos appendParentEnv) 그 값을 self 셀렉터로 보낸다. 실제 env는 `$MARU_SESSION`이 아니라
-    // MARU_PANE_ID이고 그 값이 곧 surface_id다(문서 전제와의 drift — control-plane.md §8.4에 정정). maru 밖 shell엔
-    // 없어 null → 서버가 아무 surface도 self로 주지 않는다(§8.3 self 필터로 빈 목록). **한계**: same-uid면 임의
-    // surface_id를 주장할 수 있고 tty/pgrp 검증은 1g 후속(§8.4 경계 정직) — A2b는 그 한 surface의 metadata만 연다. ──
+    // 주입돼 있으므로(pty/macos appendParentEnv) 그 값을 self 셀렉터로 보낸다. maru 밖 shell엔 없어 null. cap_nonce=null:
+    // CLI는 상속 capability fd(§8.5)를 안 읽는다 — browser 요청은 세션 cap 없이 §9.2 Model B needs_grant→확인 모달로 인가받는다. ──
     const selector: ?u64 = if (c.getenv("MARU_PANE_ID")) |pane|
         (std.fmt.parseInt(u64, std.mem.span(pane), 10) catch null)
     else
         null;
-    // cap_nonce=null: CLI는 아직 상속 capability fd(§8.5, MARU_CONTROL_CAP_FD)를 안 읽는다(실 fd 상속은 1e-core 범위
-    // 밖 — 1e-confirm/후속). 지금은 selector만 보내 metadata:self만 요청한다(cap 없음).
     const auth_bytes = try maru.session.control_plane.serializeAuthSelf(allocator, selector, null);
     defer allocator.free(auth_bytes);
     if (!writeAllFd(fd, auth_bytes) or !writeAllFd(fd, "\n"))
         return sessionNoInstance(stderr, "auth 셀렉터 전송에 실패했습니다");
 
-    // ── 요청 전송(1d client wire) → 응답 프레임 수신(1a Framer) → hello skip → renderResponse(1d) ──
-    const request_bytes = try maru.cli.sessions.buildRequestBytes(allocator, req, .{ .number = 1 });
-    defer allocator.free(request_bytes);
+    // ── 요청 전송 → 응답 프레임 수신(1a Framer) → hello skip → 첫 응답 프레임 반환(caller가 render) ──
     if (!writeAllFd(fd, request_bytes) or !writeAllFd(fd, "\n"))
         return sessionNoInstance(stderr, "요청 전송에 실패했습니다");
 
     var framer: maru.session.control_plane.Framer = .{};
     defer framer.deinit(allocator);
     while (true) {
-        // 완결 프레임을 소비한다: hello(notification)는 서버가 accept 시 먼저 보내므로 skip, 그 밖(응답)이면 렌더 후 종료.
+        // 완결 프레임을 소비한다: hello(notification)는 서버가 accept 시 먼저 보내므로 skip, 그 밖(응답)이면 반환.
         while (framer.next() catch null) |line| {
-            var pm = maru.session.control_plane.parseMessage(allocator, line) catch {
-                try maru.cli.sessions.renderResponse(allocator, line, kind, stdout); // 손상 응답도 render가 안전하게 접는다
-                try stdout.flush();
-                return;
-            };
+            var pm = maru.session.control_plane.parseMessage(allocator, line) catch
+                return allocator.dupe(u8, line); // 손상 응답도 caller renderResponse가 안전하게 접는다
             const is_notification = pm.message == .notification;
             pm.deinit();
             if (is_notification) continue; // hello notification skip
-            try maru.cli.sessions.renderResponse(allocator, line, kind, stdout);
-            try stdout.flush();
-            return;
+            return allocator.dupe(u8, line); // 첫 응답(line은 framer 버퍼라 반환 전 복사)
         }
         var buf: [4096]u8 = undefined;
-        const n = c.read(fd, &buf, buf.len);
-        if (n <= 0) break; // EOF/에러 — 응답 없이 종료
+        const n = c.read(fd, &buf, buf.len); // browser grant held면 사용자 클릭까지 블록(§9.6)
+        if (n <= 0) break; // EOF/에러 — 응답 없이 종료(grant 무응답 timeout 서버 reap 포함)
         framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
     return sessionNoInstance(stderr, "서버가 응답하지 않았습니다");
@@ -707,6 +778,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
         \\  sessions   list running Maru sessions (surfaces) as read-only metadata (`sessions --help`)
         \\  session    read-only metadata for a single surface (`session get <id>`, `session --help`)
+        \\  browser    control a web surface (navigate/get-url/exec/get-cookies; asks for confirmation) (`browser --help`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\
     );

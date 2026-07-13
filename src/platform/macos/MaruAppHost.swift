@@ -895,6 +895,50 @@ enum BrowserControl {
         else { return nil }
         return obj
     }
+
+    // localStorage(§9.4 D4 storage): WKWebView에 네이티브 localStorage API가 없어 **eval 백엔드**로 실행한다(exec와 같은
+    // 도달=base browser scope, D5 laundering-hole 불변). key/value를 안전히 JS 문자열 리터럴로 만들어(jsStringLiteral)
+    // getItem/setItem/removeItem을 호출한다. get은 executeScript 결과(문자열, null=빈)를 그대로 반환, set/remove는 {ok}.
+    static func localStorageScript(_ obj: [String: Any], op: UInt8) -> String? {
+        guard let key = obj["key"] as? String else { return nil }
+        let k = jsStringLiteral(key)
+        switch op {
+        case 8: return "window.localStorage.getItem(\(k))" // get
+        case 9: // set — value 필수
+            guard let value = obj["value"] as? String else { return nil }
+            return "window.localStorage.setItem(\(k), \(jsStringLiteral(value)))"
+        case 10: return "window.localStorage.removeItem(\(k))" // remove
+        default: return nil
+        }
+    }
+
+    // 문자열을 안전한 JS 문자열 리터럴로(JSON string은 valid JS 리터럴 — 따옴표·제어문자·유니코드 escape). 수동 조립 금지.
+    static func jsStringLiteral(_ s: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [s]),
+            let arr = String(data: data, encoding: .utf8)
+        else { return "\"\"" }
+        return String(arr.dropFirst().dropLast()) // ["..."] → "..."
+    }
+
+    // clearStorage(§9.4 D4): 대상 문서 origin(host)의 쿠키+스토리지를 WKWebsiteDataStore로 comprehensive 삭제. host nil
+    // (opaque origin)=대상 없음=아무것도 안 지움(전체 삭제 방지). displayName(도메인)으로 매치(getCookies host 필터와 동형 정신).
+    @MainActor static func clearStorage(_ webView: WKWebView, completion: @escaping (Bool) -> Void) {
+        let host = webView.url?.host
+        let store = webView.configuration.websiteDataStore
+        let types = WKWebsiteDataStore.allWebsiteDataTypes()
+        store.fetchDataRecords(ofTypes: types) { records in
+            guard let host = host, !host.isEmpty else {
+                completion(true) // 대상 origin 없음 = 지울 것 없음(멱등, 전체 삭제 안 함)
+                return
+            }
+            let hl = host.lowercased()
+            let matches = records.filter { r in
+                let dn = r.displayName.lowercased()
+                return hl == dn || hl.hasSuffix("." + dn) || dn.hasSuffix("." + hl)
+            }
+            store.removeData(ofTypes: types, for: matches) { completion(true) }
+        }
+    }
 }
 
 // 5e-2b-2(**테스트 전용 — 배경 스레드**): 앱 자신의 컨트롤 소켓에 붙어 `browser.navigate`/`browser.getUrl`을 **소켓 전
@@ -2922,6 +2966,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case 7: // deleteCookie(§9.4 D4) — async 콜백(getAllCookies→delete). arg={name,domain?,path?}. 멱등(매치 0도 성공).
                 BrowserControl.deleteCookie(wp.webView, arg) { ok in
                     self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "deleteCookie failed")
+                }
+            case 8, 9, 10: // localStorage get/set/remove(§9.4 D4) — eval 백엔드(executeScript). get 결과=value 문자열, set/remove={ok}.
+                if let obj = BrowserControl.parseCookieArg(arg), let js = BrowserControl.localStorageScript(obj, op: opKind) {
+                    BrowserControl.executeScript(wp.webView, js) { result in
+                        switch result {
+                        case .success(let value):
+                            self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
+                        case .failure(let error):
+                            self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
+                        }
+                    }
+                } else {
+                    self.completeBrowserOp(asyncId, status: 1, result: "localStorage bad params")
+                }
+            case 11: // clearStorage(§9.4 D4) — WKWebsiteDataStore로 대상 origin 데이터 삭제(멱등). {ok}.
+                BrowserControl.clearStorage(wp.webView) { ok in
+                    self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "clearStorage failed")
                 }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)

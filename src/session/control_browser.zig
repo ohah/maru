@@ -78,6 +78,17 @@ pub const BrowserMethod = enum {
     /// `browser.deleteCookie {id, name, domain?, path?}`(cookie write) → Swift `WKHTTPCookieStore.delete`. `browser_storage` scope.
     /// op.arg=`{name, domain?, path?}` compact JSON. **op_kind=7 고정**.
     delete_cookie,
+    /// `browser.getLocalStorage {id, key}` → `{value}`. Swift `evaluateJavaScript("localStorage.getItem(...)")`(WKWebView에
+    /// 네이티브 localStorage API 없음 — eval 백엔드). **base `browser` scope**(exec와 같은 도달이라 D5 laundering-hole 불변).
+    /// op.arg=key. **op_kind=8 고정**.
+    get_local_storage,
+    /// `browser.setLocalStorage {id, key, value}` → `{ok}`. eval `localStorage.setItem`. base `browser`. op.arg=`{key,value}` JSON. **op_kind=9**.
+    set_local_storage,
+    /// `browser.removeLocalStorage {id, key}` → `{ok}`. eval `localStorage.removeItem`. base `browser`. op.arg=key. **op_kind=10**.
+    remove_local_storage,
+    /// `browser.clearStorage {id}` → `{ok}`. Swift `WKWebsiteDataStore`로 대상 origin 쿠키+스토리지 comprehensive 삭제.
+    /// **`browser_storage` scope**(쿠키=토큰 건드림). op.arg=빈. **op_kind=11 고정**.
+    clear_storage,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -92,6 +103,10 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "screenshot")) return .screenshot;
     if (eq(rest, "setCookie")) return .set_cookie;
     if (eq(rest, "deleteCookie")) return .delete_cookie;
+    if (eq(rest, "getLocalStorage")) return .get_local_storage;
+    if (eq(rest, "setLocalStorage")) return .set_local_storage;
+    if (eq(rest, "removeLocalStorage")) return .remove_local_storage;
+    if (eq(rest, "clearStorage")) return .clear_storage;
     return null;
 }
 
@@ -144,6 +159,12 @@ pub const DeleteCookieParams = struct {
     domain: ?[]const u8,
     path: ?[]const u8,
 };
+
+/// `browser.getLocalStorage`/`removeLocalStorage` params `{id, key}`. key 필수.
+pub const KeyParams = struct { id: u64, key: []const u8 };
+
+/// `browser.setLocalStorage` params `{id, key, value}`. 둘 다 필수.
+pub const SetLocalStorageParams = struct { id: u64, key: []const u8, value: []const u8 };
 
 fn paramsObject(params: ?std.json.Value) ParamError!std.json.ObjectMap {
     return switch (params orelse return error.InvalidParams) {
@@ -226,6 +247,36 @@ pub fn parseDeleteCookieParams(params: ?std.json.Value) ParamError!DeleteCookieP
         .domain = try optStrFromObj(obj, "domain"),
         .path = try optStrFromObj(obj, "path"),
     };
+}
+
+pub fn parseKeyParams(params: ?std.json.Value) ParamError!KeyParams {
+    const obj = try paramsObject(params);
+    return .{ .id = try idFromObj(obj), .key = try strFromObj(obj, "key") };
+}
+
+pub fn parseSetLocalStorageParams(params: ?std.json.Value) ParamError!SetLocalStorageParams {
+    const obj = try paramsObject(params);
+    return .{ .id = try idFromObj(obj), .key = try strFromObj(obj, "key"), .value = try strFromObj(obj, "value") };
+}
+
+/// localStorage op.arg — Swift가 파싱할 `{key}` 또는 `{key, value}` compact JSON(get/remove=key만, set=key+value).
+pub fn serializeKeyArg(gpa: std.mem.Allocator, key: []const u8, value: ?[]const u8) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeKeyArg(&s, key, value) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeKeyArg(s: *std.json.Stringify, key: []const u8, value: ?[]const u8) !void {
+    try s.beginObject();
+    try s.objectField("key");
+    try s.write(key);
+    if (value) |v| {
+        try s.objectField("value");
+        try s.write(v);
+    }
+    try s.endObject();
 }
 
 /// setCookie op.arg — Swift가 `JSONSerialization`으로 파싱할 쿠키 필드 compact JSON(§9.4 D4). domain/path 부재면 생략
@@ -341,6 +392,23 @@ fn writeGetUrlResult(s: *std.json.Stringify, id: cp.Id, url: []const u8) !void {
     try beginResult(s, id);
     try s.objectField("url");
     try s.write(url);
+    try endResult(s);
+}
+
+/// `browser.getLocalStorage` 성공 result: `{"jsonrpc":"2.0","id":<id>,"result":{"value":<value>}}`. `value`는 eval
+/// `localStorage.getItem`의 반환값(문자열; JS null=키 부재=빈 문자열, Swift scriptResultString). caller free.
+pub fn serializeValueResult(gpa: std.mem.Allocator, id: cp.Id, value: []const u8) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (writeValueResult(&s, id, value)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeValueResult(s: *std.json.Stringify, id: cp.Id, value: []const u8) !void {
+    try beginResult(s, id);
+    try s.objectField("value");
+    try s.write(value);
     try endResult(s);
 }
 
@@ -647,6 +715,9 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
         .screenshot => cp.serializeError(gpa, req.id, .internal_error, "screenshot delivered out of band", null),
         // setCookie/deleteCookie 성공 = {ok:true}(navigate와 동형 — write 성공 여부만). Swift가 status로 실패 전달(위 !ok 경로).
         .set_cookie, .delete_cookie => serializeNavigateResult(gpa, req.id),
+        // getLocalStorage → {value:<result>}(eval getItem 반환, JS null=빈 문자열). set/remove/clear → {ok:true}.
+        .get_local_storage => serializeValueResult(gpa, req.id, result),
+        .set_local_storage, .remove_local_storage, .clear_storage => serializeNavigateResult(gpa, req.id),
     };
 }
 
@@ -816,6 +887,13 @@ pub fn browserOpFromRequest(
         // cookie write: 쿠키 필드를 compact JSON으로 arg에 실어 Swift가 파싱(§9.4 D4). 파싱 슬라이스는 arena를 빌리나 serialize가 owned JSON 생성.
         .set_cookie => try serializeSetCookieArg(gpa, parseSetCookieParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .delete_cookie => try serializeDeleteCookieArg(gpa, parseDeleteCookieParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        // localStorage: get/remove arg=`{key}`, set arg=`{key,value}`(Swift가 eval 백엔드로 실행). clear는 {id}만=빈 arg.
+        .get_local_storage, .remove_local_storage => try serializeKeyArg(gpa, (parseKeyParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).key, null),
+        .set_local_storage => blk: {
+            const p = parseSetLocalStorageParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+            break :blk try serializeKeyArg(gpa, p.key, p.value);
+        },
+        .clear_storage => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 origin 데이터를 WKWebsiteDataStore로 삭제(인자 없음)
         .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
@@ -1300,6 +1378,10 @@ test "parseBrowserMethod: navigate/getUrl/executeScript/getCookies/screenshot �
     try testing.expectEqual(BrowserMethod.screenshot, parseBrowserMethod("screenshot").?); // 5f-1
     try testing.expectEqual(BrowserMethod.set_cookie, parseBrowserMethod("setCookie").?); // cookie write
     try testing.expectEqual(BrowserMethod.delete_cookie, parseBrowserMethod("deleteCookie").?);
+    try testing.expectEqual(BrowserMethod.get_local_storage, parseBrowserMethod("getLocalStorage").?); // localStorage/clear
+    try testing.expectEqual(BrowserMethod.set_local_storage, parseBrowserMethod("setLocalStorage").?);
+    try testing.expectEqual(BrowserMethod.remove_local_storage, parseBrowserMethod("removeLocalStorage").?);
+    try testing.expectEqual(BrowserMethod.clear_storage, parseBrowserMethod("clearStorage").?);
     // 미구현/미지 → null.
     try testing.expect(parseBrowserMethod("back") == null);
     try testing.expect(parseBrowserMethod("get_url") == null); // snake_case는 wire 이름 아님(camelCase 엄수)
@@ -1698,6 +1780,88 @@ test "serializeBrowserResponse(cookie write): setCookie → {ok:true}, id echo" 
     defer pm.deinit();
     try testing.expect(pm.message.response.result.?.object.get("ok").?.bool);
     try testing.expect(cp.idEql(pm.message.response.id, .{ .number = 3 }));
+}
+
+// ── localStorage/clear(§9.4 D4) params·arg·dispatch·응답 단위 ──
+
+test "params: getLocalStorage {id,key}·setLocalStorage {id,key,value}·오류" {
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getLocalStorage\",\"params\":{\"id\":11,\"key\":\"tok\"}}");
+        defer pm.deinit();
+        const p = try parseKeyParams(pm.message.request.params);
+        try testing.expectEqual(@as(u64, 11), p.id);
+        try testing.expectEqualStrings("tok", p.key);
+    }
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.setLocalStorage\",\"params\":{\"id\":11,\"key\":\"k\",\"value\":\"v\"}}");
+        defer pm.deinit();
+        const p = try parseSetLocalStorageParams(pm.message.request.params);
+        try testing.expectEqualStrings("k", p.key);
+        try testing.expectEqualStrings("v", p.value);
+    }
+    // key 없음·value 없음 오류.
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseKeyParams(parsed.value));
+    }
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"key\":\"k\"}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseSetLocalStorageParams(parsed.value)); // value 없음
+    }
+}
+
+test "serializeKeyArg: {key} 또는 {key,value}, 라운드트립" {
+    {
+        const a = try serializeKeyArg(testing.allocator, "tok", null);
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("tok", parsed.value.object.get("key").?.string);
+        try testing.expect(parsed.value.object.get("value") == null);
+    }
+    {
+        const a = try serializeKeyArg(testing.allocator, "k", "v");
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("v", parsed.value.object.get("value").?.string);
+    }
+}
+
+test "dispatchBrowser(localStorage): base browser cap + getLocalStorage → op{arg=key JSON}; clearStorage는 browser_storage" {
+    // getLocalStorage=base browser scope(eval 백엔드) → browser cap으로 인가.
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getLocalStorage\",\"params\":{\"id\":11,\"key\":\"tok\"}}", browserCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(BrowserMethod.get_local_storage, op.method);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("tok", parsed.value.object.get("key").?.string);
+    // clearStorage=browser_storage → browser_storage cap 인가, browser cap 불인가(D5 comprehensive clear=쿠키).
+    const op2 = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.clearStorage\",\"params\":{\"id\":11}}", browserStorageCap(11));
+    defer testing.allocator.free(op2.arg);
+    try testing.expectEqual(BrowserMethod.clear_storage, op2.method);
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.clearStorage\",\"params\":{\"id\":11}}", browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
+test "serializeBrowserResponse(localStorage): getLocalStorage → {value}, set/clear → {ok}" {
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getLocalStorage\",\"params\":{\"id\":11,\"key\":\"k\"}}", true, "hello");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqualStrings("hello", pm.message.response.result.?.object.get("value").?.string);
+    }
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.clearStorage\",\"params\":{\"id\":11}}", true, "");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expect(pm.message.response.result.?.object.get("ok").?.bool);
+    }
 }
 
 test {

@@ -231,7 +231,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 | `browser.getUrl` | `{id}` | `{url}` | `.url` |
 | `browser.back`/`forward`/`refresh` | `{id}` | `{ok}` | `goBack`/`goForward`/`reload` |
 | `browser.executeScript` | `{id, script, args?}` | `{result}` | `evaluateJavaScript` |
-| `browser.screenshot` | `{id, format?}` | `browser.screenshotChunk` notification×N → 최종 응답 `{capture_id, seq_total, width, height, format}` | `takeSnapshot`→PNG, **소켓 chunk-streaming**(§9.5.3·§9.5.7 — `{png_base64}` 단일 응답 폐기: >1MB 프레임 상한) |
+| `browser.screenshot` | `{id, format?, rect?, scale?}` | `browser.screenshotChunk` notification×N → 최종 응답 `{capture_id, seq_total, width, height, format}` | `takeSnapshot`→PNG, **소켓 chunk-streaming**(§9.5.3·§9.5.7 — `{png_base64}` 단일 응답 폐기: >1MB 프레임 상한). rect=`WKSnapshotConfiguration.rect`·scale=`.snapshotWidth` |
 | `browser.click` | `{id, selector}` | `{ok}` | eval `querySelector(sel).click()` — scope=`browser`(5f-2, ok=요소 발견+동작) |
 | `browser.type` | `{id, selector, text}` | `{ok}` | eval input `.value` + input/change 이벤트 — scope=`browser`(5f-2) |
 | `browser.scroll` | `{id, selector}` | `{ok}` | eval `querySelector(sel).scrollIntoView()` — scope=`browser`(5f-2) |
@@ -419,7 +419,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 **9.5.7 — screenshot(5f-1) 구현 배선 (doc-first, 아키텍처 실측 후속)**. §9.5.3의 "소켓 chunk-streaming" 결정을 구현 지점으로 못박는다(라이브 아키텍처 코드 실측 2026-07-13 기반).
 
 **전달 프로토콜(무-ack, chunks→응답 FIFO)**:
-- 요청 `browser.screenshot {id, format?}`(format 생략=png; 현재 png만) → op_kind=5 async op으로 defer(navigate/getCookies와 동일 in-flight marshal, `deferRequest`→async_id).
+- 요청 `browser.screenshot {id, format?, rect?, scale?}`(format 생략=png; 현재 png만) → op_kind=5 async op으로 defer(navigate/getCookies와 동일 in-flight marshal, `deferRequest`→async_id). **rect/scale(구현 완료 2026-07-13)**: `rect={x,y,width,height}`(CSS 포인트, 부분 rect·비양수 width/height=`invalid_params`)·`scale`(출력 배율, >0). Zig `serializeScreenshotArg`가 `{rect?,scale?}` compact JSON을 op.arg에 실어 Swift가 `WKSnapshotConfiguration.rect`(뷰 좌표계)·`.snapshotWidth`((rect.width|뷰 너비)×scale)로 구성한다. 둘 다 부재면 `{}`=전체 가시 뷰포트·기기 배율(첫 컷과 동일).
 - Swift가 `WKWebView.takeSnapshot`(async 콜백)로 PNG 바이트를 만들어 `maru_macos_control_complete_browser_op(async_id, ok, png_ptr, png_len)`로 되돌린다(getCookies/executeScript와 동형 — 단 result가 UTF-8 문자열이 아니라 **raw PNG 바이트**).
 - Zig `completeBrowserOp`가 **request_bytes 재파싱으로 method=screenshot을 감지**하면 단일-응답 `serializeBrowserResponse` 대신 **chunk 경로**로 분기한다(메인 스레드):
   1. `capture_id` 발급(세션-로컬 단조).
@@ -429,7 +429,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **metadata**: width/height는 **PNG IHDR를 Zig가 파싱**(시그니처 8B + IHDR: len 4·"IHDR" 4·width 4 BE[offset 16]·height 4 BE[offset 20])해 얻는다 — ABI 확장 없이 Swift는 PNG 바이트만 넘긴다. format="png" 고정. PNG 시그니처 불일치/길이 부족이면 `internal_error`로 resolve(스냅샷 실패와 동형).
 
-**크기 상한(첫 컷 한계 — 명시)**: chunk를 **동기 push**(한 `completeBrowserOp` 호출 내)하므로 `outbound_capacity`(64 프레임)를 넘기면 안 된다. 상한 `screenshot_max_chunks`(=24 → 24×512 KiB=12 MiB PNG, 최종 응답 포함 25 프레임 ≤ 64)를 두고, 초과 PNG는 `screenshot_too_large` 에러로 resolve(에이전트는 `format`/rect로 축소 재시도 — rect/scale 파라미터는 후속). push 도중 `Full`(느린 클라이언트)이면 `internal_error` resolve 후 잔여 폐기. **progressive pump(무제한 크기 — Capture 상태머신 재사용해 tick마다 outbound 여유만큼 push→resume)는 후속 슬라이스**(첫 컷은 뷰포트 스크린샷 ~100 KiB~2 MiB를 12 MiB 상한으로 여유 커버). 이 한계는 §9.5.3 chunk-streaming 결정과 모순 아님(전달은 소켓 chunk 유지 — 파일-경로 미개방); 상한만 첫 컷 단순화.
+**크기 상한(첫 컷 한계 — 명시)**: chunk를 **동기 push**(한 `completeBrowserOp` 호출 내)하므로 `outbound_capacity`(64 프레임)를 넘기면 안 된다. 상한 `screenshot_max_chunks`(=24 → 24×512 KiB=12 MiB PNG, 최종 응답 포함 25 프레임 ≤ 64)를 두고, 초과 PNG는 `screenshot_too_large` 에러로 resolve(에이전트는 `scale`을 낮추거나 `rect`로 영역을 좁혀 축소 재시도 — 둘 다 구현됨, 위 요청 스키마). push 도중 `Full`(느린 클라이언트)이면 `internal_error` resolve 후 잔여 폐기. **progressive pump(무제한 크기 — Capture 상태머신 재사용해 tick마다 outbound 여유만큼 push→resume)는 후속 슬라이스**(첫 컷은 뷰포트 스크린샷 ~100 KiB~2 MiB를 12 MiB 상한으로 여유 커버). 이 한계는 §9.5.3 chunk-streaming 결정과 모순 아님(전달은 소켓 chunk 유지 — 파일-경로 미개방); 상한만 첫 컷 단순화.
 
 **보안(scope)**: screenshot은 `browser` base scope(navigate와 동일 — `methodRequiredScope(.screenshot)=.browser`). §9.4 D5의 "세탁 구멍"(executeScript·screenshot이 base browser면 storage 게이트 우회)은 **screenshot이 렌더 픽셀만 노출**(cookie/localStorage 값 아님)이라 storage sub-scope 대상이 아니다 — 렌더 결과는 D5가 "비밀 취급하는 렌더 토큰"이나 그 게이트는 `browser` cap 자체(=페이지 조작/관찰 인가)로 충분하다(별도 sub-scope 없음). 단 §9.5.3대로 **결과를 cap-게이트 소켓 안에 유지**(파일 미개방)해 same-uid 유출을 막는다.
 
@@ -449,7 +449,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **목적**: 지금까지 배선한 `browser.*`(navigate/getUrl/executeScript/getCookies)·grant 모달(§9.2 Model B)을 **에이전트가 실제로 쓸 수 있는 클라이언트**로 노출한다. 현재 유일한 드라이버는 스모크의 인-프로세스 소켓 클라뿐 — CLI가 이 표면을 활성화한다. maru pane에서 돌던 에이전트(예: Claude Code)가 `maru browser navigate --surface N <url>`로 옆 브라우저를 제어하고, 미grant면 사용자에게 확인 모달이 떠 승인 후 실행된다.
 
-**설계(1d `sessions` CLI 패턴 미러링 — 재구현 금지)**: L2 순수(`src/cli/browser.zig` — 인자 파싱·`buildRequestBytes`(1a `serializeMessage` 재사용)·`renderResponse`(1a `parseMessage` 재사용)) + main.zig I/O(소켓 발견·connect·auth.self·프레임 왕복 — `runSessionCli`와 동형). **서브커맨드**: `list`(→`browser.list`, **대상 발견** — surface 불요)·`navigate --surface N <url>`(→`browser.navigate`)·`get-url --surface N`(→`getUrl`)·`exec --surface N <script>`(→`executeScript`)·`get-cookies --surface N`(→`getCookies`)·`screenshot --surface N [--out f]`(→`browser.screenshot`, chunk 재조립→PNG, §9.5.7). 확장은 서브커맨드 dispatch 테이블에 한 줄씩(act·set/delete는 후속).
+**설계(1d `sessions` CLI 패턴 미러링 — 재구현 금지)**: L2 순수(`src/cli/browser.zig` — 인자 파싱·`buildRequestBytes`(1a `serializeMessage` 재사용)·`renderResponse`(1a `parseMessage` 재사용)) + main.zig I/O(소켓 발견·connect·auth.self·프레임 왕복 — `runSessionCli`와 동형). **서브커맨드**: `list`(→`browser.list`, **대상 발견** — surface 불요)·`navigate --surface N <url>`(→`browser.navigate`)·`get-url --surface N`(→`getUrl`)·`exec --surface N <script>`(→`executeScript`)·`get-cookies --surface N`(→`getCookies`)·`screenshot --surface N [--out f] [--rect x,y,w,h] [--scale s]`(→`browser.screenshot`, chunk 재조립→PNG, §9.5.7; rect/scale 파싱은 CLI `parseRect`/`parseScale`). 확장은 서브커맨드 dispatch 테이블에 한 줄씩.
 
 **9.6.1 — web surface 발견 (`browser.list`, 사용자 결정 2026-07-13)**. **문제(실 테스트가 노출)**: 제어(navigate/screenshot 등)는 전부 대상 `--surface N`을 요구하는데, `maru sessions list`는 **metadata:self scope**라 호출 pane 자신만 보이고 **형제 web 패널이 안 나온다**(§8.4 self-only는 same-uid peer의 metadata 유출을 제한하는 의도적 선택). 즉 에이전트가 제어할 web surface_id를 발견할 방법이 없었다(초판 CLI의 "sessions list로 발견"이 실제로 안 됨). **결정: 전용 `browser.list`**. 인스턴스의 **web surface만**(터미널 제외) `{id, url, title, panel_kind}`로 나열한다. **ungated**(cap/grant/모달 불요) — 같은 uid는 사용자 자신의 브라우저라 URL 노출을 수용한다는 사용자 결정. 제어는 여전히 §9.2 Model B 모달 게이트를 거치므로, 발견≠제어(발견은 "무엇이 있나", 제어는 "허용받아 조작"). 라우팅: `dispatchAuthenticated`가 `browser.list`를 cap 로직 **진입 전에** 접어 `serializeBrowserListResult(snapshot)`로 응답(nonce·selector 무관 균일). CLI 흐름: `maru browser list` → web surface 목록 → 그 id로 `maru browser screenshot --surface N` 등. **후속(더 조일 때)**: self-origin 요구(실 maru pane만)·window scope 한정·민감 URL 마스킹은 필요 시 검토(§8.4 트레이드오프).
 

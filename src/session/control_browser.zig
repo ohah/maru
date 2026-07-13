@@ -183,6 +183,11 @@ pub const SelectorParams = struct { id: u64, selector: []const u8 };
 /// `browser.type` params `{id, selector, text}`. 둘 다 필수.
 pub const TypeParams = struct { id: u64, selector: []const u8, text: []const u8 };
 
+/// `browser.screenshot` 선택 params — rect(캡처 영역, CSS 포인트)·scale(출력 배율). 둘 다 부재 가능(=전체 뷰·기기 배율).
+/// id는 dispatch가 먼저 읽으므로(readIdParam) 여기선 rect/scale만 추출. 형식 오류는 invalid_params(surface oracle 아님).
+pub const ScreenshotRect = struct { x: f64, y: f64, width: f64, height: f64 };
+pub const ScreenshotOptParams = struct { rect: ?ScreenshotRect = null, scale: ?f64 = null };
+
 fn paramsObject(params: ?std.json.Value) ParamError!std.json.ObjectMap {
     return switch (params orelse return error.InvalidParams) {
         .object => |o| o,
@@ -286,6 +291,45 @@ pub fn parseTypeParams(params: ?std.json.Value) ParamError!TypeParams {
     return .{ .id = try idFromObj(obj), .selector = try strFromObj(obj, "selector"), .text = try strFromObj(obj, "text") };
 }
 
+/// JSON 수(integer 또는 float) → f64. 비수치 → InvalidParams. rect/scale 파싱 공용.
+fn numF64FromObj(obj: std.json.ObjectMap, name: []const u8) ParamError!f64 {
+    return switch (obj.get(name) orelse return error.InvalidParams) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => error.InvalidParams,
+    };
+}
+
+/// screenshot rect/scale 추출. rect 있으면 x/y/width/height 전부 필수(부분 rect=형식 오류). scale/width/height는 양수·유한.
+/// 둘 다 부재(=`{id}`만)면 빈 옵션(전체 뷰·기기 배율). scale 상한은 Swift(WKSnapshotConfiguration.snapshotWidth)가 클램프.
+pub fn parseScreenshotOptParams(params: ?std.json.Value) ParamError!ScreenshotOptParams {
+    const obj = try paramsObject(params);
+    var out: ScreenshotOptParams = .{};
+    if (obj.get("scale")) |v| {
+        if (v != .null) {
+            const s = try numF64FromObj(obj, "scale");
+            if (!std.math.isFinite(s) or !(s > 0)) return error.InvalidParams;
+            out.scale = s;
+        }
+    }
+    if (obj.get("rect")) |v| {
+        if (v != .null) {
+            const ro = switch (v) {
+                .object => |o| o,
+                else => return error.InvalidParams,
+            };
+            const x = try numF64FromObj(ro, "x");
+            const y = try numF64FromObj(ro, "y");
+            const w = try numF64FromObj(ro, "width");
+            const h = try numF64FromObj(ro, "height");
+            if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(w) or !std.math.isFinite(h)) return error.InvalidParams;
+            if (!(w > 0) or !(h > 0)) return error.InvalidParams;
+            out.rect = .{ .x = x, .y = y, .width = w, .height = h };
+        }
+    }
+    return out;
+}
+
 /// act op.arg — Swift가 eval로 쓸 `{selector}` 또는 `{selector, text}` compact JSON(click/scroll=selector, type=+text).
 pub fn serializeSelectorArg(gpa: std.mem.Allocator, selector: []const u8, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
@@ -302,6 +346,38 @@ fn writeSelectorArg(s: *std.json.Stringify, selector: []const u8, text: ?[]const
     if (text) |t| {
         try s.objectField("text");
         try s.write(t);
+    }
+    try s.endObject();
+}
+
+/// screenshot op.arg — Swift가 WKSnapshotConfiguration로 쓸 `{rect?, scale?}` compact JSON. 둘 다 부재면 `{}`(전체 뷰·기기 배율).
+/// rect={x,y,width,height}(CSS 포인트, config.rect)·scale(config.snapshotWidth 배율). caller free(op.arg 소유).
+pub fn serializeScreenshotArg(gpa: std.mem.Allocator, p: ScreenshotOptParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeScreenshotArg(&s, p) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeScreenshotArg(s: *std.json.Stringify, p: ScreenshotOptParams) !void {
+    try s.beginObject();
+    if (p.rect) |r| {
+        try s.objectField("rect");
+        try s.beginObject();
+        try s.objectField("x");
+        try s.write(r.x);
+        try s.objectField("y");
+        try s.write(r.y);
+        try s.objectField("width");
+        try s.write(r.width);
+        try s.objectField("height");
+        try s.write(r.height);
+        try s.endObject();
+    }
+    if (p.scale) |sc| {
+        try s.objectField("scale");
+        try s.write(sc);
     }
     try s.endObject();
 }
@@ -947,7 +1023,8 @@ pub fn browserOpFromRequest(
         .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
         .get_url => try gpa.dupe(u8, ""), // {id}만 — 인자 없음(빈 슬라이스도 dupe해 free 규약 일관)
         .get_cookies => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 surface 현재 문서 host의 쿠키를 읽음(22차 [0] host 필터, 인자 없음)
-        .screenshot => try gpa.dupe(u8, ""), // {id, format?}만 — Swift가 대상 surface WKWebView를 takeSnapshot→PNG(5f-1, format=png 고정·인자 없음)
+        // screenshot: rect/scale를 compact JSON으로 arg에 실어 Swift가 WKSnapshotConfiguration 구성(둘 다 부재면 `{}`=전체 뷰·기기 배율). PNG 고정.
+        .screenshot => try serializeScreenshotArg(gpa, parseScreenshotOptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
         // cookie write: 쿠키 필드를 compact JSON으로 arg에 실어 Swift가 파싱(§9.4 D4). 파싱 슬라이스는 arena를 빌리나 serialize가 owned JSON 생성.
         .set_cookie => try serializeSetCookieArg(gpa, parseSetCookieParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
@@ -1368,14 +1445,14 @@ test "dispatchBrowser(1e-confirm-1b): browser_storage grant는 getCookies만 인
     try expectNeedsGrant(req_navigate_11, 5, &grants, 11, .browser);
 }
 
-// ── 6) 유효 cap + browser.screenshot(5f-1) → BrowserOp{screenshot, arg=빈} ── screenshot도 browser scope, arg 없음.
-test "dispatchBrowser(5f-1): 유효 browser cap + web surface → BrowserOp{screenshot, arg=빈}" {
+// ── 6) 유효 cap + browser.screenshot(5f-1) → BrowserOp{screenshot, arg={}} ── screenshot도 browser scope, rect/scale 없으면 빈 옵션 `{}`.
+test "dispatchBrowser(5f-1): 유효 browser cap + web surface → BrowserOp{screenshot, arg={}}" {
     // screenshot=browser.* → methodRequiredScope=.browser → authz granted → op(op_kind=5). Swift takeSnapshot→chunk 경로.
     const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}", browserCap(11));
     defer testing.allocator.free(op.arg);
     try testing.expectEqual(@as(u64, 11), op.surface_id);
     try testing.expectEqual(BrowserMethod.screenshot, op.method);
-    try testing.expectEqualStrings("", op.arg); // {id, format?}만 — 인자 없음
+    try testing.expectEqualStrings("{}", op.arg); // rect/scale 부재 → 빈 옵션 객체(Swift가 전체 뷰·기기 배율)
 }
 
 // D5 대칭(방어): browser_storage cap은 screenshot 불인가(screenshot=browser scope). single-scope 유지 확인.
@@ -2009,6 +2086,75 @@ test "serializeBrowserResponse(act): click result true/false → {ok:bool}" {
         defer pm.deinit();
         try testing.expect(!pm.message.response.result.?.object.get("ok").?.bool);
     }
+}
+
+test "params/arg(§9.5.7): screenshot rect/scale 파싱·직렬화, 오류(부분 rect·비양수)" {
+    // rect+scale 있음 → ScreenshotOptParams + arg JSON에 {rect:{x,y,width,height}, scale}.
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11,\"rect\":{\"x\":10,\"y\":20,\"width\":300,\"height\":400},\"scale\":0.5}}");
+        defer pm.deinit();
+        const p = try parseScreenshotOptParams(pm.message.request.params);
+        try testing.expectEqual(@as(f64, 10), p.rect.?.x);
+        try testing.expectEqual(@as(f64, 400), p.rect.?.height);
+        try testing.expectEqual(@as(f64, 0.5), p.scale.?);
+        const a = try serializeScreenshotArg(testing.allocator, p);
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        // 정수값 f64(300)는 "300"으로 직렬화돼 .integer로 파싱되므로 numF64FromObj로 관대 비교.
+        try testing.expectEqual(@as(f64, 300), try numF64FromObj(parsed.value.object.get("rect").?.object, "width"));
+        try testing.expectEqual(@as(f64, 0.5), try numF64FromObj(parsed.value.object, "scale"));
+    }
+    // 부재(=id만) → 빈 옵션, arg="{}"(rect/scale 필드 없음).
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}");
+        defer pm.deinit();
+        const p = try parseScreenshotOptParams(pm.message.request.params);
+        try testing.expect(p.rect == null and p.scale == null);
+        const a = try serializeScreenshotArg(testing.allocator, p);
+        defer testing.allocator.free(a);
+        try testing.expectEqualStrings("{}", a);
+    }
+    // 정수 좌표도 허용(JSON integer → f64).
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"rect\":{\"x\":0,\"y\":0,\"width\":100,\"height\":50}}", .{});
+        defer parsed.deinit();
+        const p = try parseScreenshotOptParams(parsed.value);
+        try testing.expectEqual(@as(f64, 100), p.rect.?.width);
+    }
+    // 오류: 부분 rect(height 누락)·비양수 width·scale<=0.
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"rect\":{\"x\":0,\"y\":0,\"width\":10}}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseScreenshotOptParams(parsed.value));
+    }
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"rect\":{\"x\":0,\"y\":0,\"width\":0,\"height\":10}}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseScreenshotOptParams(parsed.value));
+    }
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"scale\":0}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseScreenshotOptParams(parsed.value));
+    }
+}
+
+test "dispatchBrowser(screenshot): base browser cap + rect/scale → op{screenshot, arg=rect/scale JSON}" {
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11,\"rect\":{\"x\":1,\"y\":2,\"width\":3,\"height\":4},\"scale\":2}}", browserCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(BrowserMethod.screenshot, op.method);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(f64, 4), try numF64FromObj(parsed.value.object.get("rect").?.object, "height"));
+    try testing.expectEqual(@as(f64, 2), try numF64FromObj(parsed.value.object, "scale"));
+}
+
+test "dispatchBrowser(screenshot): 형식 오류 rect → invalid_params(surface oracle 아님)" {
+    // 부분 rect는 invalid_params(-32602) — 존재 web surface에도 형식 오류는 균일 거부.
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11,\"rect\":{\"x\":0}}}", browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, -32602), try errCode(wire));
 }
 
 test {

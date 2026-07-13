@@ -562,6 +562,10 @@ fn writeBrowserCliUsage(stderr: *std.Io.Writer, err: maru.cli.browser.ParseError
         error.MissingUrl => "navigate 에는 url이 필요합니다",
         error.MissingScript => "exec 에는 script가 필요합니다",
         error.MissingOutValue => "screenshot --out 에는 값이 필요합니다",
+        error.MissingRectValue => "screenshot --rect 에는 값이 필요합니다",
+        error.MissingScaleValue => "screenshot --scale 에는 값이 필요합니다",
+        error.InvalidRect => "--rect 는 x,y,w,h (수치 4개, w/h>0) 형식이어야 합니다",
+        error.InvalidScale => "--scale 은 양수여야 합니다",
         error.MissingName => "--name 이 필요합니다",
         error.MissingKey => "--key 가 필요합니다",
         error.MissingSelector => "--selector 가 필요합니다",
@@ -628,7 +632,7 @@ fn runBrowserScreenshot(
     stderr: *std.Io.Writer,
 ) !void {
     const c = std.c;
-    const request_bytes = try maru.cli.browser.buildScreenshotRequestBytes(allocator, shot.surface_id, .{ .number = 1 });
+    const request_bytes = try maru.cli.browser.buildScreenshotRequestBytes(allocator, shot, .{ .number = 1 });
     defer allocator.free(request_bytes);
     const fd = try connectSendControl(io, allocator, request_bytes, stderr);
     defer _ = c.close(fd);

@@ -35,7 +35,7 @@ pub const browser_help =
     \\  click   --surface <id> --selector <css>                 셀렉터 요소 클릭
     \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
     \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
-    \\  screenshot  --surface <id> [--out f]   현재 페이지를 PNG로 캡처(--out 파일, 생략=stdout)
+    \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
     \\
 ;
 
@@ -86,7 +86,14 @@ pub const Request = union(enum) {
 /// screenshot(5f-1)은 단일 응답이 아니라 **chunk 스트림**(§9.5.7)이라 단일-응답 `Request`와 분리한다 — main이
 /// `ScreenshotAssembler`로 chunk를 재조립해 PNG를 `out`(nil=stdout)에 쓴다. surface_id=대상 web surface. named 타입이라
 /// main.zig 핸들러 인자로 그대로 전달된다(익명 struct는 별개 타입이 되어 안 맞음).
-pub const ScreenshotCmd = struct { surface_id: u64, out: ?[]const u8 };
+pub const ScreenshotCmd = struct {
+    surface_id: u64,
+    out: ?[]const u8,
+    /// 선택 캡처 영역 `[x, y, width, height]`(CSS 포인트, §9.5.7). null=전체 가시 뷰포트.
+    rect: ?[4]f64 = null,
+    /// 선택 출력 배율(>0). null=기기 배율.
+    scale: ?f64 = null,
+};
 
 pub const Command = union(enum) {
     request: Request,
@@ -104,6 +111,10 @@ pub const ParseError = error{
     MissingUrl, // `navigate`에 url 없음
     MissingScript, // `exec`에 script 없음
     MissingOutValue, // `screenshot --out`에 값 없음
+    MissingRectValue, // `screenshot --rect`에 값 없음
+    MissingScaleValue, // `screenshot --scale`에 값 없음
+    InvalidRect, // `--rect`가 `x,y,w,h`(4개 수치, w/h>0) 형식 아님
+    InvalidScale, // `--scale`이 양수 수치 아님
     MissingName, // `set-cookie`/`delete-cookie`에 `--name` 없음
     MissingKey, // `*-local-storage`에 `--key` 없음
     MissingSelector, // `click`/`type`/`scroll`에 `--selector` 없음
@@ -213,9 +224,11 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         return .{ .request = .{ .scroll = .{ .surface_id = s, .selector = sel } } };
     }
     if (eq(sub, "screenshot")) {
-        // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`(생략=stdout으로 raw PNG).
+        // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`/`--rect x,y,w,h`/`--scale f`(생략=stdout·전체 뷰·기기 배율).
         var surface: ?u64 = null;
         var out: ?[]const u8 = null;
+        var rect: ?[4]f64 = null;
+        var scale: ?f64 = null;
         var i: usize = 1;
         while (i < args.len) {
             const a = args[i];
@@ -233,6 +246,20 @@ pub fn parse(args: []const []const u8) ParseError!Command {
             } else if (std.mem.startsWith(u8, a, "--out=")) {
                 out = a["--out=".len..];
                 i += 1;
+            } else if (eq(a, "--rect")) {
+                if (i + 1 >= args.len) return error.MissingRectValue;
+                rect = parseRect(args[i + 1]) catch return error.InvalidRect;
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--rect=")) {
+                rect = parseRect(a["--rect=".len..]) catch return error.InvalidRect;
+                i += 1;
+            } else if (eq(a, "--scale")) {
+                if (i + 1 >= args.len) return error.MissingScaleValue;
+                scale = parseScale(args[i + 1]) catch return error.InvalidScale;
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--scale=")) {
+                scale = parseScale(a["--scale=".len..]) catch return error.InvalidScale;
+                i += 1;
             } else if (std.mem.startsWith(u8, a, "-")) {
                 return error.UnknownOption;
             } else {
@@ -240,7 +267,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
             }
         }
         const s = surface orelse return error.MissingSurface;
-        return .{ .screenshot = .{ .surface_id = s, .out = out } };
+        return .{ .screenshot = .{ .surface_id = s, .out = out, .rect = rect, .scale = scale } };
     }
     return error.UnknownSubcommand;
 }
@@ -342,6 +369,29 @@ inline fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
+/// `--rect` 값 `x,y,width,height`(쉼표 구분 4개 수치) → `[4]f64`. width/height는 양수, 전부 유한. 형식 오류 → error(InvalidRect).
+/// 서버(parseScreenshotOptParams)도 같은 검증을 하지만 CLI에서 명확한 에러(InvalidRect)를 주기 위해 먼저 검사한다.
+fn parseRect(s: []const u8) !([4]f64) {
+    var out: [4]f64 = undefined;
+    var it = std.mem.splitScalar(u8, s, ',');
+    var n: usize = 0;
+    while (it.next()) |part| : (n += 1) {
+        if (n >= 4) return error.InvalidRect; // 4개 초과
+        out[n] = std.fmt.parseFloat(f64, part) catch return error.InvalidRect;
+        if (!std.math.isFinite(out[n])) return error.InvalidRect;
+    }
+    if (n != 4) return error.InvalidRect; // 4개 미만
+    if (!(out[2] > 0) or !(out[3] > 0)) return error.InvalidRect; // width/height 양수
+    return out;
+}
+
+/// `--scale` 값 → f64. 양수·유한만. 형식 오류 → error(InvalidScale).
+fn parseScale(s: []const u8) !f64 {
+    const v = std.fmt.parseFloat(f64, s) catch return error.InvalidScale;
+    if (!std.math.isFinite(v) or !(v > 0)) return error.InvalidScale;
+    return v;
+}
+
 // ══ client wire ════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 파싱된 `Request` → JSON-RPC 요청 바이트 한 줄(1a `serializeMessage` 재사용). caller free. 메서드명은 camelCase
@@ -422,10 +472,26 @@ fn idOnlyRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_
     return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
 }
 
-/// screenshot 요청 바이트(§9.5.7): `browser.screenshot {id}`. 응답은 단일이 아니라 chunk 스트림이라 렌더는
-/// `ScreenshotAssembler`가 맡는다(renderResponse 아님). main이 이 요청을 보내고 프레임을 assembler로 재조립. caller free.
-pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, surface_id: u64, id: cp.Id) std.mem.Allocator.Error![]u8 {
-    return idOnlyRequest(gpa, id, "browser.screenshot", surface_id);
+/// screenshot 요청 바이트(§9.5.7): `browser.screenshot {id, rect?, scale?}`. rect=`{x,y,width,height}`·scale=수(둘 다
+/// 부재면 `{id}`만=전체 뷰·기기 배율). 응답은 단일이 아니라 chunk 스트림이라 렌더는 `ScreenshotAssembler`가 맡는다
+/// (renderResponse 아님). main이 이 요청을 보내고 프레임을 assembler로 재조립. caller free.
+pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, id: cp.Id) std.mem.Allocator.Error![]u8 {
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(gpa);
+    // 중첩 rect 객체는 **함수 스코프**로 둔다 — `if` 블록 안에서 defer deinit하면 serializeMessage 전에 free돼 obj가 든
+    // `.object = ro`가 UAF가 된다(ObjectMap.deinit은 top-level만 free하므로 함수 끝 deinit이 정확한 단일 free).
+    var ro: std.json.ObjectMap = .empty;
+    defer ro.deinit(gpa);
+    try obj.put(gpa, "id", .{ .integer = @intCast(cmd.surface_id) });
+    if (cmd.rect) |r| {
+        try ro.put(gpa, "x", .{ .float = r[0] });
+        try ro.put(gpa, "y", .{ .float = r[1] });
+        try ro.put(gpa, "width", .{ .float = r[2] });
+        try ro.put(gpa, "height", .{ .float = r[3] });
+        try obj.put(gpa, "rect", .{ .object = ro });
+    }
+    if (cmd.scale) |sc| try obj.put(gpa, "scale", .{ .float = sc });
+    return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.screenshot", .params = .{ .object = obj } } });
 }
 
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -769,19 +835,76 @@ test "parse: screenshot --surface + --out(선택), 위치 인자 금지" {
         .screenshot => |s| try testing.expectEqualStrings("x.png", s.out.?),
         else => return error.Unexpected,
     }
+    // rect/scale(§9.5.7): 없으면 null, 있으면 [4]f64/f64. w/h>0·양수 검증.
+    switch (try parse(&.{ "screenshot", "--surface", "3" })) {
+        .screenshot => |s| {
+            try testing.expect(s.rect == null);
+            try testing.expect(s.scale == null);
+        },
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "screenshot", "--surface", "3", "--rect", "10,20,300,400", "--scale", "0.5" })) {
+        .screenshot => |s| {
+            try testing.expectEqual(@as(f64, 10), s.rect.?[0]);
+            try testing.expectEqual(@as(f64, 20), s.rect.?[1]);
+            try testing.expectEqual(@as(f64, 300), s.rect.?[2]);
+            try testing.expectEqual(@as(f64, 400), s.rect.?[3]);
+            try testing.expectEqual(@as(f64, 0.5), s.scale.?);
+        },
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "screenshot", "--surface=3", "--rect=0,0,100,50", "--scale=2" })) {
+        .screenshot => |s| try testing.expectEqual(@as(f64, 2), s.scale.?),
+        else => return error.Unexpected,
+    }
     try testing.expectError(error.MissingSurface, parse(&.{ "screenshot", "--out", "p.png" }));
     try testing.expectError(error.MissingOutValue, parse(&.{ "screenshot", "--surface", "1", "--out" }));
+    try testing.expectError(error.MissingRectValue, parse(&.{ "screenshot", "--surface", "1", "--rect" }));
+    try testing.expectError(error.MissingScaleValue, parse(&.{ "screenshot", "--surface", "1", "--scale" }));
+    try testing.expectError(error.InvalidRect, parse(&.{ "screenshot", "--surface", "1", "--rect", "1,2,3" })); // 3개
+    try testing.expectError(error.InvalidRect, parse(&.{ "screenshot", "--surface", "1", "--rect", "0,0,0,100" })); // width 0
+    try testing.expectError(error.InvalidRect, parse(&.{ "screenshot", "--surface", "1", "--rect", "0,0,x,1" })); // 비수치
+    try testing.expectError(error.InvalidScale, parse(&.{ "screenshot", "--surface", "1", "--scale", "0" })); // 양수 아님
+    try testing.expectError(error.InvalidScale, parse(&.{ "screenshot", "--surface", "1", "--scale", "-1" }));
     try testing.expectError(error.UnexpectedArgument, parse(&.{ "screenshot", "--surface", "1", "extra" })); // 위치 인자 금지
     try testing.expectError(error.UnknownOption, parse(&.{ "screenshot", "--surface", "1", "--bogus" }));
 }
 
-test "buildScreenshotRequestBytes: browser.screenshot {id}" {
-    const b = try buildScreenshotRequestBytes(testing.allocator, 11, .{ .number = 1 });
-    defer testing.allocator.free(b);
-    var pm = try cp.parseMessage(testing.allocator, b);
-    defer pm.deinit();
-    try testing.expectEqualStrings("browser.screenshot", pm.message.request.method);
-    try testing.expectEqual(@as(i64, 11), pm.message.request.params.?.object.get("id").?.integer);
+// JSON 수치(integer/float)를 f64로 — 정수값 float가 .integer로 직렬화되는 round-trip 관대 비교(테스트 전용).
+fn jsonNum(v: std.json.Value) f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => std.math.nan(f64),
+    };
+}
+
+test "buildScreenshotRequestBytes: browser.screenshot {id} + rect/scale" {
+    // 기본(rect/scale 없음)=id만.
+    {
+        const b = try buildScreenshotRequestBytes(testing.allocator, .{ .surface_id = 11, .out = null }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.screenshot", pm.message.request.method);
+        const obj = pm.message.request.params.?.object;
+        try testing.expectEqual(@as(i64, 11), obj.get("id").?.integer);
+        try testing.expect(obj.get("rect") == null);
+        try testing.expect(obj.get("scale") == null);
+    }
+    // rect+scale → params에 {rect:{x,y,width,height}, scale}.
+    {
+        const b = try buildScreenshotRequestBytes(testing.allocator, .{ .surface_id = 3, .out = null, .rect = .{ 10, 20, 300, 400 }, .scale = 0.5 }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        const obj = pm.message.request.params.?.object;
+        const ro = obj.get("rect").?.object;
+        // 정수값 f64(10·400)는 "10"/"400"으로 직렬화돼 .integer로 파싱될 수 있어 관대 비교.
+        try testing.expectEqual(@as(f64, 10), jsonNum(ro.get("x").?));
+        try testing.expectEqual(@as(f64, 400), jsonNum(ro.get("height").?));
+        try testing.expectEqual(@as(f64, 0.5), jsonNum(obj.get("scale").?));
+    }
 }
 
 test "ScreenshotAssembler: chunk 재조립 → PNG, seq/capture/seq_total 검증, 서버 에러" {

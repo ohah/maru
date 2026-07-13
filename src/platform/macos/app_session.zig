@@ -39367,8 +39367,9 @@ test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 �
     // paste 대상은 **enqueue 시점**에 고정된다 — 큐가 surface별이라 서로 섞이지 않는다(옛 단일 FIFO의 버그).
     // ★ 이 테스트의 핵심은 **각 큐가 자기 surface의 PTY로만 나간다**는 것이다. 가짜 id로는 그걸 못 잡는다
     //   (flush가 entry.key_ptr 대신 activeSurface().id로 써도 통과했다 — 뮤테이션 생존, code-review).
-    //   그래서 **실제 surface 둘**(split)에 서로 다른 바이트를 넣고, 각 자식이 **자기 것만** 에코하는지 본다.
-    //   controlled_smoke 자식은 `read -r line` 한 줄을 읽어 `Maru app input:<line>`로 에코한다.
+    //   그래서 **실제 surface 둘**(split)에 서로 다른 바이트를 넣고, 각 surface의 grid에 **자기 것만** 나타나는지
+    //   본다. 라우팅 증거는 **PTY 라인 디서플린 에코**: 마스터에 쓴 입력 바이트를 슬레이브(ECHO on=기본값)가
+    //   그대로 마스터로 되돌리므로, 바이트가 어느 surface의 PTY로 나갔는지가 그 surface grid에 직접 드러난다.
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
     session.window_padding_px = .{};
@@ -39380,24 +39381,32 @@ test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 �
     try std.testing.expect(sa.id != sb.id);
 
     // 각 surface에 **다른** 텍스트를 대상 지정해 붙인다(활성은 둘 중 하나뿐이다 — 대상이 활성으로 접히면 실패).
-    // 자식이 `read -r line`이라 개행이 필요한데 개행은 paste protection에 걸리므로(모달 보류) 이 테스트에선 끈다
-    // — 여기서 검증하는 건 보호 게이트가 아니라 **큐의 대상 라우팅**이다(보호는 별도 테스트가 덮는다).
-    session.loaded_config.config.input.paste_protection = false;
-    session.pasteTextTo(sa.id, "AAA\n", false);
-    session.pasteTextTo(sb.id, "BBB\n", false);
+    // **개행을 붙이지 않는다**: 자식의 `read -r line`은 개행을 받아야 완료되는데, 완료되면 자식이 에코 후 곧장
+    // **exit**하고 tick의 reapTerminatedTerms가 먼저 죽은 pane의 Term을 destroyTerm으로 회수한다 → 여기서
+    // 캡처한 surface 포인터(sa/sb)가 dangling이 되어 아래 dump가 use-after-free다(seed 의존 간헐 crash,
+    // code-review 발견 — **테스트 전용** 결함, 프로덕션 렌더는 live 트리만 순회하므로 회수된 surface를 dump
+    // 안 함). 개행 없이 붙이면 자식은 `read`에서 계속 블록(생존)해 reap이 안 돌고 sa/sb가 유효하게 남는다.
+    // 라우팅 증거는 위에서 말한 라인 디서플린 에코라 자식이 읽어 되쳐주지 않아도 grid에 바이트가 나타난다.
+    // 제어문자가 없어 paste protection도 안 걸린다(개행 필요·보호 끄기 둘 다 불요).
+    session.pasteTextTo(sa.id, "AAA", false);
+    session.pasteTextTo(sb.id, "BBB", false);
 
-    // 자식들이 읽고 에코할 때까지 tick.
+    // flush + 에코 왕복까지 tick(자식 생존 → reap 없음). dump는 surface id 재조회로 얻는다 — 방어적으로,
+    // 예기치 않게 회수돼도 dangling 접근(UAF) 대신 명확한 오류가 난다. id는 세션-로컬 비재사용이라 stale 매치 없음.
+    const sa_id = sa.id;
+    const sb_id = sb.id;
     var i: usize = 0;
     while (i < 400) : (i += 1) _ = try session.tick();
-
-    const dump_a = try sa.core.dumpUtf8(allocator);
+    const surf_a = session.terminalSurfaceById(sa_id) orelse return error.SurfaceUnexpectedlyReaped;
+    const surf_b = session.terminalSurfaceById(sb_id) orelse return error.SurfaceUnexpectedlyReaped;
+    const dump_a = try surf_a.core.dumpUtf8(allocator);
     defer allocator.free(dump_a);
-    const dump_b = try sb.core.dumpUtf8(allocator);
+    const dump_b = try surf_b.core.dumpUtf8(allocator);
     defer allocator.free(dump_b);
-    // ★ A의 자식은 AAA만, B의 자식은 BBB만 받았다 — 큐가 대상 surface의 PTY로만 나간다는 계약.
-    try std.testing.expect(std.mem.indexOf(u8, dump_a, "Maru app input:AAA") != null);
+    // ★ A의 PTY엔 AAA만, B의 PTY엔 BBB만 나갔다 — 큐가 대상 surface의 PTY로만 나간다는 계약(에코가 증거).
+    try std.testing.expect(std.mem.indexOf(u8, dump_a, "AAA") != null);
     try std.testing.expect(std.mem.indexOf(u8, dump_a, "BBB") == null);
-    try std.testing.expect(std.mem.indexOf(u8, dump_b, "Maru app input:BBB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dump_b, "BBB") != null);
     try std.testing.expect(std.mem.indexOf(u8, dump_b, "AAA") == null);
     try std.testing.expect(!session.hasPendingPaste()); // 둘 다 다 나갔다
 }

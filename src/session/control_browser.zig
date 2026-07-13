@@ -89,6 +89,14 @@ pub const BrowserMethod = enum {
     /// `browser.clearStorage {id}` → `{ok}`. Swift `WKWebsiteDataStore`로 대상 origin 쿠키+스토리지 comprehensive 삭제.
     /// **`browser_storage` scope**(쿠키=토큰 건드림). op.arg=빈. **op_kind=11 고정**.
     clear_storage,
+    /// `browser.click {id, selector}` → `{ok}`(ok=요소 발견+클릭). eval `querySelector(sel).click()`. base `browser`.
+    /// op.arg=`{selector}` JSON. **op_kind=12 고정**.
+    click,
+    /// `browser.type {id, selector, text}` → `{ok}`. eval로 input/textarea .value 설정 + input/change 이벤트. base `browser`.
+    /// op.arg=`{selector, text}` JSON. **op_kind=13**.
+    type_text,
+    /// `browser.scroll {id, selector}` → `{ok}`. eval `querySelector(sel).scrollIntoView()`. base `browser`. op.arg=`{selector}`. **op_kind=14**.
+    scroll,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -107,6 +115,9 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "setLocalStorage")) return .set_local_storage;
     if (eq(rest, "removeLocalStorage")) return .remove_local_storage;
     if (eq(rest, "clearStorage")) return .clear_storage;
+    if (eq(rest, "click")) return .click;
+    if (eq(rest, "type")) return .type_text;
+    if (eq(rest, "scroll")) return .scroll;
     return null;
 }
 
@@ -165,6 +176,12 @@ pub const KeyParams = struct { id: u64, key: []const u8 };
 
 /// `browser.setLocalStorage` params `{id, key, value}`. 둘 다 필수.
 pub const SetLocalStorageParams = struct { id: u64, key: []const u8, value: []const u8 };
+
+/// `browser.click`/`scroll` params `{id, selector}`. selector 필수(CSS 셀렉터).
+pub const SelectorParams = struct { id: u64, selector: []const u8 };
+
+/// `browser.type` params `{id, selector, text}`. 둘 다 필수.
+pub const TypeParams = struct { id: u64, selector: []const u8, text: []const u8 };
 
 fn paramsObject(params: ?std.json.Value) ParamError!std.json.ObjectMap {
     return switch (params orelse return error.InvalidParams) {
@@ -257,6 +274,36 @@ pub fn parseKeyParams(params: ?std.json.Value) ParamError!KeyParams {
 pub fn parseSetLocalStorageParams(params: ?std.json.Value) ParamError!SetLocalStorageParams {
     const obj = try paramsObject(params);
     return .{ .id = try idFromObj(obj), .key = try strFromObj(obj, "key"), .value = try strFromObj(obj, "value") };
+}
+
+pub fn parseSelectorParams(params: ?std.json.Value) ParamError!SelectorParams {
+    const obj = try paramsObject(params);
+    return .{ .id = try idFromObj(obj), .selector = try strFromObj(obj, "selector") };
+}
+
+pub fn parseTypeParams(params: ?std.json.Value) ParamError!TypeParams {
+    const obj = try paramsObject(params);
+    return .{ .id = try idFromObj(obj), .selector = try strFromObj(obj, "selector"), .text = try strFromObj(obj, "text") };
+}
+
+/// act op.arg — Swift가 eval로 쓸 `{selector}` 또는 `{selector, text}` compact JSON(click/scroll=selector, type=+text).
+pub fn serializeSelectorArg(gpa: std.mem.Allocator, selector: []const u8, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeSelectorArg(&s, selector, text) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeSelectorArg(s: *std.json.Stringify, selector: []const u8, text: ?[]const u8) !void {
+    try s.beginObject();
+    try s.objectField("selector");
+    try s.write(selector);
+    if (text) |t| {
+        try s.objectField("text");
+        try s.write(t);
+    }
+    try s.endObject();
 }
 
 /// localStorage op.arg — Swift가 파싱할 `{key}` 또는 `{key, value}` compact JSON(get/remove=key만, set=key+value).
@@ -718,7 +765,25 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
         // getLocalStorage → {value:<result>}(eval getItem 반환, JS null=빈 문자열). set/remove/clear → {ok:true}.
         .get_local_storage => serializeValueResult(gpa, req.id, result),
         .set_local_storage, .remove_local_storage, .clear_storage => serializeNavigateResult(gpa, req.id),
+        // act(5f-2): click/type/scroll → {ok:<bool>} — Swift eval이 "true"(요소 발견+동작)/"false"(셀렉터 미매치)를 result로.
+        .click, .type_text, .scroll => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
     };
+}
+
+/// act 결과 `{"ok":<bool>}`(click/type/scroll — ok=요소 발견+동작). Swift eval의 boolean 반환을 실는다. caller free.
+pub fn serializeOkBoolResult(gpa: std.mem.Allocator, id: cp.Id, ok: bool) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (writeOkBoolResult(&s, id, ok)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeOkBoolResult(s: *std.json.Stringify, id: cp.Id, ok: bool) !void {
+    try beginResult(s, id);
+    try s.objectField("ok");
+    try s.write(ok);
+    try endResult(s);
 }
 
 // ── ② dispatchBrowser(§9.1 ②③ — 정확한 보안 순서) ─────────────────────────────────────────────────────────
@@ -894,6 +959,12 @@ pub fn browserOpFromRequest(
             break :blk try serializeKeyArg(gpa, p.key, p.value);
         },
         .clear_storage => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 origin 데이터를 WKWebsiteDataStore로 삭제(인자 없음)
+        // act(5f-2): click/scroll arg=`{selector}`, type arg=`{selector,text}`(Swift가 eval로 실행). base browser scope.
+        .click, .scroll => try serializeSelectorArg(gpa, (parseSelectorParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).selector, null),
+        .type_text => blk: {
+            const p = parseTypeParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+            break :blk try serializeSelectorArg(gpa, p.selector, p.text);
+        },
         .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
@@ -1382,6 +1453,9 @@ test "parseBrowserMethod: navigate/getUrl/executeScript/getCookies/screenshot �
     try testing.expectEqual(BrowserMethod.set_local_storage, parseBrowserMethod("setLocalStorage").?);
     try testing.expectEqual(BrowserMethod.remove_local_storage, parseBrowserMethod("removeLocalStorage").?);
     try testing.expectEqual(BrowserMethod.clear_storage, parseBrowserMethod("clearStorage").?);
+    try testing.expectEqual(BrowserMethod.click, parseBrowserMethod("click").?); // act 5f-2
+    try testing.expectEqual(BrowserMethod.type_text, parseBrowserMethod("type").?);
+    try testing.expectEqual(BrowserMethod.scroll, parseBrowserMethod("scroll").?);
     // 미구현/미지 → null.
     try testing.expect(parseBrowserMethod("back") == null);
     try testing.expect(parseBrowserMethod("get_url") == null); // snake_case는 wire 이름 아님(camelCase 엄수)
@@ -1861,6 +1935,79 @@ test "serializeBrowserResponse(localStorage): getLocalStorage → {value}, set/c
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
         try testing.expect(pm.message.response.result.?.object.get("ok").?.bool);
+    }
+}
+
+// ── act(5f-2) params·arg·dispatch·응답 단위 ──
+
+test "params/arg: click {selector}·type {selector,text}·serializeSelectorArg" {
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#btn\"}}");
+        defer pm.deinit();
+        const p = try parseSelectorParams(pm.message.request.params);
+        try testing.expectEqualStrings("#btn", p.selector);
+    }
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.type\",\"params\":{\"id\":11,\"selector\":\"#in\",\"text\":\"hi\"}}");
+        defer pm.deinit();
+        const p = try parseTypeParams(pm.message.request.params);
+        try testing.expectEqualStrings("#in", p.selector);
+        try testing.expectEqualStrings("hi", p.text);
+    }
+    // arg JSON: click={selector}, type={selector,text}.
+    {
+        const a = try serializeSelectorArg(testing.allocator, "#btn", null);
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("#btn", parsed.value.object.get("selector").?.string);
+        try testing.expect(parsed.value.object.get("text") == null);
+    }
+    {
+        const a = try serializeSelectorArg(testing.allocator, "#in", "hi");
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("hi", parsed.value.object.get("text").?.string);
+    }
+    // 오류: selector 없음, text 없음.
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseSelectorParams(parsed.value));
+    }
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"selector\":\"#x\"}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseTypeParams(parsed.value)); // text 없음
+    }
+}
+
+test "dispatchBrowser(act): base browser cap + click → op{click, arg=selector JSON}" {
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#btn\"}}", browserCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(BrowserMethod.click, op.method);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("#btn", parsed.value.object.get("selector").?.string);
+}
+
+test "serializeBrowserResponse(act): click result true/false → {ok:bool}" {
+    // eval "true"(발견+클릭) → ok:true.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#b\"}}", true, "true");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expect(pm.message.response.result.?.object.get("ok").?.bool);
+    }
+    // eval "false"(셀렉터 미매치) → ok:false.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#x\"}}", true, "false");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expect(!pm.message.response.result.?.object.get("ok").?.bool);
     }
 }
 

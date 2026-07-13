@@ -564,6 +564,8 @@ fn writeBrowserCliUsage(stderr: *std.Io.Writer, err: maru.cli.browser.ParseError
         error.MissingOutValue => "screenshot --out 에는 값이 필요합니다",
         error.MissingName => "--name 이 필요합니다",
         error.MissingKey => "--key 가 필요합니다",
+        error.MissingSelector => "--selector 가 필요합니다",
+        error.MissingText => "type 에는 --text 가 필요합니다",
         error.MissingValue => "--value 가 필요합니다",
         error.MissingOptionValue => "옵션에 값이 필요합니다",
         error.UnknownOption => "알 수 없는 옵션입니다",

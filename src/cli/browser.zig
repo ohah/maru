@@ -32,6 +32,9 @@ pub const browser_help =
     \\  set-local-storage    --surface <id> --key k --value v   localStorage 값 설정
     \\  remove-local-storage --surface <id> --key k             localStorage 항목 삭제
     \\  clear-storage        --surface <id>                     대상 origin 쿠키+스토리지 전부 삭제
+    \\  click   --surface <id> --selector <css>                 셀렉터 요소 클릭
+    \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
+    \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
     \\  screenshot  --surface <id> [--out f]   현재 페이지를 PNG로 캡처(--out 파일, 생략=stdout)
     \\
 ;
@@ -59,6 +62,12 @@ pub const Request = union(enum) {
     remove_local_storage: struct { surface_id: u64, key: []const u8 },
     /// `browser clear-storage`(§9.4 D4). surface만. 대상 origin 쿠키+스토리지 삭제. 응답 {ok}.
     clear_storage: struct { surface_id: u64 },
+    /// `browser click`(act 5f-2). selector 필수. 응답 {ok}(요소 발견+클릭).
+    click: struct { surface_id: u64, selector: []const u8 },
+    /// `browser type`(act 5f-2). selector/text 필수. 응답 {ok}.
+    type_text: struct { surface_id: u64, selector: []const u8, text: []const u8 },
+    /// `browser scroll`(act 5f-2). selector 필수(scrollIntoView). 응답 {ok}.
+    scroll: struct { surface_id: u64, selector: []const u8 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -68,7 +77,7 @@ pub const Request = union(enum) {
             .get_url => .get_url,
             .exec => .exec,
             .get_cookies => .get_cookies,
-            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage => .ok,
+            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll => .ok,
             .get_local_storage => .value,
         };
     }
@@ -97,6 +106,8 @@ pub const ParseError = error{
     MissingOutValue, // `screenshot --out`에 값 없음
     MissingName, // `set-cookie`/`delete-cookie`에 `--name` 없음
     MissingKey, // `*-local-storage`에 `--key` 없음
+    MissingSelector, // `click`/`type`/`scroll`에 `--selector` 없음
+    MissingText, // `type`에 `--text` 없음
     MissingValue, // `set-cookie`/`set-local-storage`에 `--value` 없음
     MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`에 값 없음
     UnknownOption, // 알 수 없는 옵션(`--bogus`)
@@ -182,6 +193,25 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         if (p.arg != null) return error.UnexpectedArgument;
         return .{ .request = .{ .clear_storage = .{ .surface_id = s } } };
     }
+    if (eq(sub, "click")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const sel = ca.selector orelse return error.MissingSelector;
+        return .{ .request = .{ .click = .{ .surface_id = s, .selector = sel } } };
+    }
+    if (eq(sub, "type")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const sel = ca.selector orelse return error.MissingSelector;
+        const text = ca.text orelse return error.MissingText;
+        return .{ .request = .{ .type_text = .{ .surface_id = s, .selector = sel, .text = text } } };
+    }
+    if (eq(sub, "scroll")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const sel = ca.selector orelse return error.MissingSelector;
+        return .{ .request = .{ .scroll = .{ .surface_id = s, .selector = sel } } };
+    }
     if (eq(sub, "screenshot")) {
         // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`(생략=stdout으로 raw PNG).
         var surface: ?u64 = null;
@@ -243,12 +273,12 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
     return .{ .surface = surface, .arg = arg };
 }
 
-const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, secure: bool };
+const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, selector: ?[]const u8, text: ?[]const u8, secure: bool };
 
 /// cookie/localStorage 명령 옵션(`--surface`·`--name`·`--key`·`--value`·`--domain`·`--path`·`--secure`)을 뽑는다. 위치
 /// 인자 금지, 알 수 없는 `-`옵션 에러. 각 값 옵션은 `--opt val`·`--opt=val` 양형태. 서브커맨드가 필요 필드만 검사(파서는 공유).
 fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
-    var r: CookieArgs = .{ .surface = null, .name = null, .key = null, .value = null, .domain = null, .path = null, .secure = false };
+    var r: CookieArgs = .{ .surface = null, .name = null, .key = null, .value = null, .domain = null, .path = null, .selector = null, .text = null, .secure = false };
     var i: usize = 0;
     while (i < rest.len) {
         const a = rest[i];
@@ -267,6 +297,10 @@ fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
             r.domain = try optValue(rest, &i, "--domain");
         } else if (matchOpt(a, "--path")) {
             r.path = try optValue(rest, &i, "--path");
+        } else if (matchOpt(a, "--selector")) {
+            r.selector = try optValue(rest, &i, "--selector");
+        } else if (matchOpt(a, "--text")) {
+            r.text = try optValue(rest, &i, "--text");
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
         } else {
@@ -355,7 +389,20 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
         .set_local_storage => |g| return keyRequest(gpa, id, "browser.setLocalStorage", g.surface_id, g.key, g.value),
         .remove_local_storage => |g| return keyRequest(gpa, id, "browser.removeLocalStorage", g.surface_id, g.key, null),
         .clear_storage => |g| return idOnlyRequest(gpa, id, "browser.clearStorage", g.surface_id),
+        .click => |c| return selectorRequest(gpa, id, "browser.click", c.surface_id, c.selector, null),
+        .type_text => |c| return selectorRequest(gpa, id, "browser.type", c.surface_id, c.selector, c.text),
+        .scroll => |c| return selectorRequest(gpa, id, "browser.scroll", c.surface_id, c.selector, null),
     }
+}
+
+/// act 요청 바이트: `{id, selector, text?}`. text null이면 selector만(click/scroll). caller free.
+fn selectorRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, selector: []const u8, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(gpa);
+    try obj.put(gpa, "id", .{ .integer = @intCast(surface_id) });
+    try obj.put(gpa, "selector", .{ .string = selector });
+    if (text) |t| try obj.put(gpa, "text", .{ .string = t });
+    return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
 }
 
 /// localStorage 요청 바이트: `{id, key, value?}`. value null이면 key만(get/remove). caller free.
@@ -947,6 +994,46 @@ test "renderResponse(value): getLocalStorage {value} → 값 출력" {
     var w = std.Io.Writer.fixed(&buf);
     try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"hello\"}}", .value, &w);
     try testing.expectEqualStrings("hello\n", w.buffered());
+}
+
+// ── act(5f-2) 파서·wire 단위 ──
+
+test "parse: click/type/scroll·에러" {
+    switch (try parse(&.{ "click", "--surface", "3", "--selector", "#btn" })) {
+        .request => |r| try testing.expectEqualStrings("#btn", r.click.selector),
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "type", "--surface=3", "--selector=#in", "--text=hi" })) {
+        .request => |r| {
+            try testing.expectEqualStrings("#in", r.type_text.selector);
+            try testing.expectEqualStrings("hi", r.type_text.text);
+        },
+        else => return error.Unexpected,
+    }
+    try testing.expectEqual(@as(u64, 5), (try parse(&.{ "scroll", "--surface", "5", "--selector", ".x" })).request.scroll.surface_id);
+    try testing.expectError(error.MissingSelector, parse(&.{ "click", "--surface", "1" }));
+    try testing.expectError(error.MissingText, parse(&.{ "type", "--surface", "1", "--selector", "#i" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "click", "--selector", "#b" }));
+}
+
+test "buildRequestBytes: act 메서드·params" {
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .click = .{ .surface_id = 11, .selector = "#btn" } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.click", pm.message.request.method);
+        try testing.expectEqualStrings("#btn", pm.message.request.params.?.object.get("selector").?.string);
+        try testing.expect(pm.message.request.params.?.object.get("text") == null);
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .type_text = .{ .surface_id = 11, .selector = "#in", .text = "hi" } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.type", pm.message.request.method);
+        try testing.expectEqualStrings("hi", pm.message.request.params.?.object.get("text").?.string);
+    }
 }
 
 test {

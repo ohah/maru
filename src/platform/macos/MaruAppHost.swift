@@ -1668,6 +1668,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private let artifactDirectory = "zig-out/maru-macos-app"
     private let summaryPath = "zig-out/maru-macos-app/app.summary.txt"
     private var capabilities = MaruAppHostCapabilities()
+    // "Browser Grants" 서브메뉴(§9.2 per-grant revoke UX) — 열릴 때마다 menuNeedsUpdate가 Zig grant store를 조회해
+    // 항목을 재생성한다(활성 grant 1개=1항목 + Revoke All). delegate=self·이 참조로 menuNeedsUpdate에서 식별한다.
+    private let browserGrantsMenu = NSMenu(title: "Browser Grants")
     // 일반 터미널 창들의 per-session 상태(단일 출처). 현재는 launch에 1개만 만들지만(동작 불변), New Window가
     // 여기에 append한다 — W1은 `primary` 단일 필드를 컬렉션으로 일반화하는 소유권 seam이다(split PR2a의
     // "Tab→tree seam, 단일 leaf, 동작 불변"과 같은 결). 창별 라우팅(surfaceForView/activeSurface)은 이
@@ -4196,9 +4199,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 종료해 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상(포커스마다 ^[[I·비프)의 수동 회복 — 셸 통합
         // 자동 리셋이 안 닿는 타 셸·hang 복구 직후용. 화면·스크롤백은 보존(Reset to Defaults=전체 설정 초기화와 다르다 — 입력 모드만 끈다).
         app.addItem(nativeMenuItem("Reset Terminal", #selector(menuResetTerminal(_:)), key: "r", mods: [.command, .shift], target: self))
-        // Revoke Browser Grants(§9.2 revoke UX) — 에이전트에게 부여한 모든 브라우저 제어 권한(pane-bound confirm-grant)을
-        // 취소한다. 이후 browser 요청은 다시 확인 모달을 거친다. 단축키 없음(메뉴 클릭 — 사용자가 신뢰를 물릴 때만).
-        app.addItem(nativeMenuItem("Revoke Browser Grants", #selector(menuRevokeBrowserGrants(_:)), key: "", target: self))
+        // Browser Grants ▸(§9.2 per-grant revoke UX) — 에이전트에게 부여한 브라우저 제어 권한(pane-bound confirm-grant)을
+        // **개별로** 나열·취소한다. 서브메뉴는 열릴 때마다 menuNeedsUpdate가 Zig grant store를 조회해 재생성한다(항목=활성
+        // grant 1건 + "Revoke All"). 단축키 없음(메뉴 클릭 — 사용자가 신뢰를 물릴 때만).
+        browserGrantsMenu.delegate = self
+        browserGrantsMenu.autoenablesItems = false // 명시 isEnabled 존중(빈 상태 disabled 항목·"Revoke All" 비활성)
+        let browserGrantsItem = NSMenuItem(title: "Browser Grants", action: nil, keyEquivalent: "")
+        browserGrantsItem.submenu = browserGrantsMenu
+        app.addItem(browserGrantsItem)
         app.addItem(.separator())
         app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))
         app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
@@ -4366,6 +4374,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 대상 열거가 동일하고 항목의 action selector(전체 merge vs 단일 이동)만 다르다. self는 이 두 서브메뉴에만 delegate라
     /// 다른 메뉴엔 안 불리지만, 방어적으로 우리 서브메뉴만 처리한다.
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === browserGrantsMenu {
+            rebuildBrowserGrantsMenu(menu) // §9.2 per-grant revoke — 열 때마다 grant store 스냅샷으로 재생성
+            return
+        }
         let action: Selector
         if menu === moveToWindowMenu {
             action = #selector(mergeIntoWindowAction(_:))
@@ -4540,11 +4552,66 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = maru_macos_app_session_reset_input_modes(session)
     }
 
-    /// Revoke Browser Grants(§9.2 revoke UX) — 부여한 모든 pane-bound 브라우저 제어 권한을 취소한다(앱-전역 grant
-    /// store, 세션 무관). 이후 browser 요청은 다시 확인 모달을 거친다. Zig가 단일 출처(control_pane_grant_store).
+    /// 서브메뉴 항목의 representedObject로 실을 grant 식별자(pane, target, scope wire). menuRevokeOneBrowserGrant가
+    /// 이걸 꺼내 그 grant 하나만 취소한다(값 기반 — 인덱스 시프트에 안전).
+    private struct GrantRef { let pane: UInt64; let target: UInt64; let scope: UInt8 }
+
+    /// "Revoke All"(§9.2 revoke UX) — 부여한 **모든** pane-bound 브라우저 제어 권한을 취소한다(앱-전역 grant store, 세션
+    /// 무관). 이후 browser 요청은 다시 확인 모달을 거친다. Zig가 단일 출처(control_pane_grant_store).
     @objc private func menuRevokeBrowserGrants(_ sender: Any?) {
         _ = sender
         _ = maru_macos_control_revoke_all_browser_grants()
+    }
+
+    /// 서브메뉴에서 grant **한 건**을 취소(§9.2 per-grant revoke). representedObject=GrantRef. 값 기반 revoke라 이미
+    /// 없어도(예: 그 사이 surface close로 무효화) 무해(0 반환). Zig가 단일 출처.
+    @objc private func menuRevokeOneBrowserGrant(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem, let ref = item.representedObject as? GrantRef else { return }
+        _ = maru_macos_control_revoke_browser_grant(ref.pane, ref.target, ref.scope)
+    }
+
+    /// "Browser Grants" 서브메뉴 재생성(menuNeedsUpdate가 열릴 때 호출) — Zig grant store를 조회해 항목을 새로 만든다.
+    /// count→grant_at으로 스냅샷을 읽어(revoke의 swap-remove로 인덱스가 바뀌므로 열 때마다 새로 읽음) 각 grant를 사람이
+    /// 읽을 레이블(pane→대상 URL·scope)로 나열하고, 비면 disabled "No active grants", 끝에 separator + "Revoke All".
+    private func rebuildBrowserGrantsMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let count = maru_macos_control_browser_grant_count()
+        if count == 0 {
+            let empty = NSMenuItem(title: "No active grants", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            var i: UInt32 = 0
+            while i < count {
+                var pane: UInt64 = 0
+                var target: UInt64 = 0
+                var scope: UInt8 = 0
+                guard maru_macos_control_browser_grant_at(i, &pane, &target, &scope) == 1 else { i += 1; continue }
+                let item = NSMenuItem(title: grantLabel(pane: pane, target: target, scope: scope), action: #selector(menuRevokeOneBrowserGrant(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = GrantRef(pane: pane, target: target, scope: scope)
+                menu.addItem(item)
+                i += 1
+            }
+        }
+        menu.addItem(.separator())
+        let all = NSMenuItem(title: "Revoke All", action: #selector(menuRevokeBrowserGrants(_:)), keyEquivalent: "")
+        all.target = self
+        all.isEnabled = count > 0
+        menu.addItem(all)
+    }
+
+    /// grant 한 건의 메뉴 레이블. 대상 web 패널 URL host(있으면)로 "무엇을 제어 중"인지 보이고, scope를 사람 말로
+    /// (browser=제어·browser_storage=쿠키·스토리지). pane은 요청 에이전트 pane surface_id(터미널이라 title 조회 없음=id).
+    private func grantLabel(pane: UInt64, target: UInt64, scope: UInt8) -> String {
+        let targetDesc: String
+        if let host = surfaceOwning(byId: target)?.webPanels[target]?.webView.url?.host, !host.isEmpty {
+            targetDesc = "\(host) (#\(target))"
+        } else {
+            targetDesc = "surface #\(target)"
+        }
+        let scopeDesc = scope == 1 ? "쿠키·스토리지" : "제어"
+        return "pane #\(pane) → \(targetDesc) · \(scopeDesc) 취소"
     }
 
     @objc private func menuToggleFullScreen(_ sender: Any?) {

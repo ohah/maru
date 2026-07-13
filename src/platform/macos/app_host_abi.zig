@@ -2380,6 +2380,49 @@ pub export fn maru_macos_control_revoke_all_browser_grants() u32 {
     return n;
 }
 
+// grant scope ABI wire(0=browser·1=browser_storage). @intFromEnum이 아니라 **명시 매핑** — ScopeClass 순서가 바뀌어도
+// Swift 메뉴가 잘못된 grant를 revoke하지 않게(grant에는 이 둘만 저장되나 방어로 browser에 접음/거부).
+fn grantScopeToWire(sc: control_capability.ScopeClass) u8 {
+    return switch (sc) {
+        .browser => 0,
+        .browser_storage => 1,
+        else => 0,
+    };
+}
+fn grantScopeFromWire(w: u8) ?control_capability.ScopeClass {
+    return switch (w) {
+        0 => .browser,
+        1 => .browser_storage,
+        else => null,
+    };
+}
+
+/// grant UX(per-grant revoke, §9.2 Model B): 현재 활성 pane-bound browser grant 수. Swift "Browser Grants" 서브메뉴가
+/// 열릴 때 이걸로 항목을 동적 생성한다(count → grant_at[0..count]). 메인 스레드 전용(store 소유 §8.8).
+pub export fn maru_macos_control_browser_grant_count() u32 {
+    return @intCast(control_pane_grant_store.len);
+}
+
+/// index `i`의 grant를 out에 채운다(1=ok·0=범위밖). scope=wire u8(grantScopeToWire). 인덱스는 **호출 시점 스냅샷**이라
+/// 메뉴 열 때마다 count→at로 새로 읽는다(revoke의 swap-remove로 인덱스가 바뀌므로 캐시 금지). 메인 스레드 전용.
+pub export fn maru_macos_control_browser_grant_at(index: u32, out_pane: ?*u64, out_target: ?*u64, out_scope: ?*u8) u32 {
+    if (index >= control_pane_grant_store.len) return 0;
+    const g = control_pane_grant_store.grants[index];
+    if (out_pane) |p| p.* = g.pane;
+    if (out_target) |p| p.* = g.target;
+    if (out_scope) |p| p.* = grantScopeToWire(g.scope);
+    return 1;
+}
+
+/// (pane, target, scope) grant **하나**만 취소(1=취소됨·0=없음/잘못된 scope). scope=wire u8. **값 기반**이라 인덱스
+/// 시프트에 안전(멱등 — 이미 없어도 0). 이후 그 (pane,target,scope) browser 요청은 다시 확인 모달을 거친다. 메인 스레드 전용.
+pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, scope: u8) u32 {
+    const sc = grantScopeFromWire(scope) orelse return 0;
+    const before = control_pane_grant_store.len;
+    control_pane_grant_store.revoke(pane, target, sc);
+    return if (control_pane_grant_store.len < before) 1 else 0;
+}
+
 pub export fn maru_macos_control_server_stop() void {
     if (!control_server_active) return;
     control_server_active = false;
@@ -2804,4 +2847,40 @@ test "5e-2b BrowserOpQueue: FIFO push/take + bounded(Full) + deinit이 남은 ar
     gpa.free(e1.arg);
     // 남은 1개(async_id 2)는 deinit이 arg 해제(누수 없음 — testing.allocator가 잡음).
     q.deinit(gpa, gpa);
+}
+
+test "grant scope wire round-trip: browser=0·browser_storage=1, 그 외 from-wire는 null" {
+    try std.testing.expectEqual(@as(u8, 0), grantScopeToWire(.browser));
+    try std.testing.expectEqual(@as(u8, 1), grantScopeToWire(.browser_storage));
+    try std.testing.expectEqual(control_capability.ScopeClass.browser, grantScopeFromWire(0).?);
+    try std.testing.expectEqual(control_capability.ScopeClass.browser_storage, grantScopeFromWire(1).?);
+    try std.testing.expect(grantScopeFromWire(2) == null); // 알 수 없는 wire → null(revoke가 0 반환)
+}
+
+test "per-grant revoke export: count/grant_at 스냅샷 + 값기반 revoke_browser_grant(멱등)" {
+    // 앱-전역 store라 테스트 격리 위해 시작·끝에 clear.
+    control_pane_grant_store.clearAll();
+    defer control_pane_grant_store.clearAll();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage });
+    try std.testing.expectEqual(@as(u32, 2), maru_macos_control_browser_grant_count());
+
+    // grant_at: index 0 읽기(값 반환·scope wire). 범위밖=0.
+    var pane: u64 = 0;
+    var target: u64 = 0;
+    var scope: u8 = 99;
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_browser_grant_at(0, &pane, &target, &scope));
+    try std.testing.expectEqual(@as(u64, 5), pane);
+    try std.testing.expectEqual(@as(u64, 11), target);
+    try std.testing.expect(scope == 0 or scope == 1); // 순서 무보장 — browser|browser_storage 둘 중 하나
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_grant_at(2, &pane, &target, &scope)); // 범위밖
+
+    // revoke_browser_grant: browser 하나만 취소(storage 보존). 값 기반이라 인덱스 무관.
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 11, 0));
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_browser_grant_count());
+    try std.testing.expect(!control_pane_grant_store.isGranted(5, 11, .browser));
+    try std.testing.expect(control_pane_grant_store.isGranted(5, 11, .browser_storage));
+    // 이미 없는 grant revoke = 0(멱등). 잘못된 scope wire도 0.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 11, 0));
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 11, 2));
 }

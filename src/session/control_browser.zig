@@ -65,6 +65,12 @@ pub const BrowserMethod = enum {
     /// **`browser`가 아니라 `browser_storage` scope 요구**(§9.4 D5 — 쿠키=인증 토큰, `methodRequiredScope`가 단일 출처).
     /// **op_kind=4 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 새 async 메서드는 뒤에 추가).
     get_cookies,
+    /// `browser.screenshot {id, format?}`(5f-1) → 5f Swift `WKWebView.takeSnapshot`(async)→PNG. 결과는 단일 응답이
+    /// 아니라 **소켓 chunk-streaming**: `browser.screenshotChunk` notification×N + 최종 응답(complete+metadata)
+    /// (§9.5.3·§9.5.7 — PNG는 프레임 상한 1MiB를 넘을 수 있어 단일 `{png_base64}` 폐기). completeBrowserOp이 이
+    /// method를 감지해 serializeBrowserResponse(단일) 대신 chunk 경로로 분기한다. scope=`browser`(base).
+    /// **op_kind=5 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 끝에 추가).
+    screenshot,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -76,6 +82,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "executeScript")) return .execute_script;
     if (eq(rest, "subscribe")) return .subscribe;
     if (eq(rest, "getCookies")) return .get_cookies;
+    if (eq(rest, "screenshot")) return .screenshot;
     return null;
 }
 
@@ -291,6 +298,133 @@ pub fn serializeSubscribeResponse(gpa: std.mem.Allocator, request_bytes: []const
     return serializeSubscribeResult(gpa, req.id, subscriber_id);
 }
 
+// ── screenshot(5f-1) chunk-streaming 직렬화(§9.5.3·§9.5.7) ────────────────────────────────────────────────
+// browser.screenshot 결과 PNG는 소켓 프레임 상한(default_max_frame 1MiB)을 넘을 수 있어 **단일 응답이 아니라**
+// chunk notification 여러 개 + 최종 응답(complete+metadata)으로 전달한다(파일-경로 폐기 — same-uid 유출, §9.5.3).
+// L4(completeBrowserOp)가 Swift가 넘긴 PNG 바이트를 이 헬퍼들로 프레임화해 요청 연결 pending.outbound에 seq
+// 순서로 push한 뒤 completeInFlight로 최종 응답을 resolve한다(FIFO로 chunk 0..N-1 → 최종 응답, §9.5.7).
+
+/// 한 screenshot chunk의 raw PNG 바이트 상한(§9.5.7). base64는 이 raw 경계 위에서 이뤄진다(512KiB→~683KiB base64 <
+/// default_max_frame 1MiB, JSON 오버헤드 포함해도 여유). control_capture의 64KiB보다 큰 값=동기 push 첫 컷의 chunk 수 억제.
+pub const screenshot_chunk_bytes: usize = 512 * 1024;
+/// 동기 push 첫 컷(§9.5.7)의 chunk 수 상한 — outbound_capacity(64 프레임)를 안 넘게(24 chunk + 최종 응답 = 25 ≤ 64).
+/// 초과 PNG는 `screenshot_too_large`로 접는다(에이전트가 rect/scale로 축소 재시도 — 후속). progressive pump(무제한)는 후속.
+pub const screenshot_max_chunks: usize = 24;
+
+const screenshot_chunk_method = "browser.screenshotChunk";
+
+/// PNG IHDR의 width/height(§9.5.7 metadata). Swift가 넘긴 PNG 바이트에서 직접 읽어 ABI 확장을 피한다.
+pub const PngDims = struct { width: u32, height: u32 };
+
+/// screenshot chunk notification(§9.5.7): `{"jsonrpc":"2.0","method":"browser.screenshotChunk","params":
+/// {"capture_id":N,"seq":K,"encoding":"base64","data":"<base64>"}}`. `data`=PNG 조각 base64(임의 바이트 안전 —
+/// §4.3 규율). generation 없음(스크린샷=pinned 스냅샷이라 torn-read 방어 불요, control_capture와 다른 점). caller free.
+pub fn serializeScreenshotChunk(gpa: std.mem.Allocator, capture_id: u64, seq: usize, data: []const u8) std.mem.Allocator.Error![]u8 {
+    const encoder = std.base64.standard.Encoder;
+    const b64 = try gpa.alloc(u8, encoder.calcSize(data.len));
+    defer gpa.free(b64);
+    _ = encoder.encode(b64, data);
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeScreenshotChunk(&s, capture_id, seq, b64) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeScreenshotChunk(s: *std.json.Stringify, capture_id: u64, seq: usize, b64_data: []const u8) !void {
+    try s.beginObject();
+    try s.objectField("jsonrpc");
+    try s.write(cp.jsonrpc_version);
+    try s.objectField("method");
+    try s.write(screenshot_chunk_method);
+    try s.objectField("params");
+    try s.beginObject();
+    try s.objectField("capture_id");
+    try s.write(capture_id);
+    try s.objectField("seq");
+    try s.write(seq);
+    try s.objectField("encoding");
+    try s.write("base64");
+    try s.objectField("data");
+    try s.write(b64_data);
+    try s.endObject();
+    try s.endObject();
+}
+
+/// screenshot 최종 응답(§9.5.7 — chunk 스트림의 complete 마커 + metadata를 겸함): `{"jsonrpc":"2.0","id":<id>,"result":
+/// {"capture_id":N,"seq_total":M,"width":W,"height":H,"format":"png"}}`. op은 id/method를 안 실으므로(§9.3 ⑥) 원
+/// `request_bytes`(in-flight pending 소유·resolve 전 유효) 재파싱해 id를 얻는다. 재파싱 실패/비-request는 방어적 내부오류. caller free.
+pub fn serializeScreenshotComplete(gpa: std.mem.Allocator, request_bytes: []const u8, capture_id: u64, seq_total: usize, dims: PngDims) std.mem.Allocator.Error![]u8 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeScreenshotComplete(&s, req.id, capture_id, seq_total, dims) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeScreenshotComplete(s: *std.json.Stringify, id: cp.Id, capture_id: u64, seq_total: usize, dims: PngDims) !void {
+    try beginResult(s, id);
+    try s.objectField("capture_id");
+    try s.write(capture_id);
+    try s.objectField("seq_total");
+    try s.write(seq_total);
+    try s.objectField("width");
+    try s.write(dims.width);
+    try s.objectField("height");
+    try s.write(dims.height);
+    try s.objectField("format");
+    try s.write("png");
+    try endResult(s);
+}
+
+/// PNG 시그니처(8B) + IHDR chunk(len 4·"IHDR" 4·width 4 BE[off 16]·height 4 BE[off 20])에서 width/height를 읽는다
+/// (§9.5.7). 시그니처 불일치·길이 부족·IHDR 부재면 null(비-PNG 스냅샷 → completeBrowserOp이 internal_error로 접음). 순수.
+pub fn pngDimensions(bytes: []const u8) ?PngDims {
+    const png_sig = [_]u8{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    if (bytes.len < 24) return null;
+    if (!std.mem.eql(u8, bytes[0..8], &png_sig)) return null;
+    if (!std.mem.eql(u8, bytes[12..16], "IHDR")) return null; // bytes[8..12]=IHDR length(=13)
+    return .{
+        .width = std.mem.readInt(u32, bytes[16..][0..4], .big),
+        .height = std.mem.readInt(u32, bytes[20..][0..4], .big),
+    };
+}
+
+/// op 완료가 screenshot인지(chunk 경로 분기, §9.5.7). request_bytes 재파싱해 method 확인. 비-request/미지 method는 false.
+pub fn isScreenshotRequest(gpa: std.mem.Allocator, request_bytes: []const u8) bool {
+    var pm = cp.parseMessage(gpa, request_bytes) catch return false;
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return false,
+    };
+    const bm = parseBrowserMethod(cp.parseMethod(req.method).rest) orelse return false;
+    return bm == .screenshot;
+}
+
+/// screenshot 요청의 대상 web surface_id(params.id) — chunk 프레임 tag(surface-close/revoke purge)용(§9.5.7). 재파싱
+/// 실패면 null(호출자가 tag=0 폴백). u64 값 복사라 pm.deinit 뒤에도 유효.
+pub fn parseScreenshotTargetId(gpa: std.mem.Allocator, request_bytes: []const u8) ?u64 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch return null;
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return null,
+    };
+    const obj = paramsObject(req.params) catch return null;
+    return idFromObj(obj) catch null;
+}
+
 // result envelope open/close는 cp.beginResult/endResult 단일 출처 재사용(리뷰12 [4] — 브리지와 공유, 로컬 복제 제거).
 const beginResult = cp.beginResult;
 const endResult = cp.endResult;
@@ -341,6 +475,9 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
             error.InvalidCookiesJson => return cp.serializeError(gpa, req.id, .internal_error, "invalid cookies payload", null),
         },
         .subscribe => unreachable, // subscribe는 async op이 아니라 이 함수(op 완료 응답)로 안 온다 — serializeSubscribeResponse 사용
+        // screenshot(ok=true)은 completeBrowserOp이 chunk 경로로 가로채므로 이 단일-응답 함수에 안 온다(§9.5.7). ok=false는
+        // 위 `if (!ok)`서 이미 internal_error로 반환됐다(switch 도달 전) — screenshot 에러도 그 경로라 여기 unreachable.
+        .screenshot => unreachable,
     };
 }
 
@@ -505,6 +642,7 @@ pub fn browserOpFromRequest(
         .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
         .get_url => try gpa.dupe(u8, ""), // {id}만 — 인자 없음(빈 슬라이스도 dupe해 free 규약 일관)
         .get_cookies => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 surface 현재 문서 host의 쿠키를 읽음(22차 [0] host 필터, 인자 없음)
+        .screenshot => try gpa.dupe(u8, ""), // {id, format?}만 — Swift가 대상 surface WKWebView를 takeSnapshot→PNG(5f-1, format=png 고정·인자 없음)
         .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
         .subscribe => unreachable, // 위에서 이미 분기
     };
@@ -909,13 +1047,22 @@ test "dispatchBrowser(1e-confirm-1b): browser_storage grant는 getCookies만 인
     try expectNeedsGrant(req_navigate_11, 5, &grants, 11, .browser);
 }
 
-// ── 6) 유효 cap + browser.screenshot(5a 미구현) → method_not_found ── authz는 통과, method 파싱서 접힘
-test "dispatchBrowser: 유효 cap + browser.screenshot(5a 미구현) → method_not_found(-32601)" {
-    // screenshot도 browser.* 라 methodRequiredScope=.browser → authz granted → parseBrowserMethod(null) → method_not_found.
+// ── 6) 유효 cap + browser.screenshot(5f-1) → BrowserOp{screenshot, arg=빈} ── screenshot도 browser scope, arg 없음.
+test "dispatchBrowser(5f-1): 유효 browser cap + web surface → BrowserOp{screenshot, arg=빈}" {
+    // screenshot=browser.* → methodRequiredScope=.browser → authz granted → op(op_kind=5). Swift takeSnapshot→chunk 경로.
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}", browserCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(@as(u64, 11), op.surface_id);
+    try testing.expectEqual(BrowserMethod.screenshot, op.method);
+    try testing.expectEqualStrings("", op.arg); // {id, format?}만 — 인자 없음
+}
+
+// D5 대칭(방어): browser_storage cap은 screenshot 불인가(screenshot=browser scope). single-scope 유지 확인.
+test "dispatchBrowser(5f-1) D5: browser_storage cap은 screenshot 불인가 → 균일 unauthorized" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}";
-    const wire = try dispatchErr(req, browserCap(11));
+    const wire = try dispatchErr(req, browserStorageCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 // ── 7) 유효 cap + navigate params에 url 없음 → invalid_params ──
@@ -962,13 +1109,13 @@ test "dispatchBrowser §8.3: cap 부재·scope 불충족·surface 불일치·rev
 }
 
 // ── 9a) parse/method 파서 단위 ──
-test "parseBrowserMethod: navigate/getUrl/executeScript 인식, screenshot·미지는 null" {
+test "parseBrowserMethod: navigate/getUrl/executeScript/getCookies/screenshot 인식, 미지는 null" {
     try testing.expectEqual(BrowserMethod.navigate, parseBrowserMethod("navigate").?);
     try testing.expectEqual(BrowserMethod.get_url, parseBrowserMethod("getUrl").?);
     try testing.expectEqual(BrowserMethod.execute_script, parseBrowserMethod("executeScript").?);
     try testing.expectEqual(BrowserMethod.get_cookies, parseBrowserMethod("getCookies").?); // 5f-4c
+    try testing.expectEqual(BrowserMethod.screenshot, parseBrowserMethod("screenshot").?); // 5f-1
     // 미구현/미지 → null.
-    try testing.expect(parseBrowserMethod("screenshot") == null);
     try testing.expect(parseBrowserMethod("back") == null);
     try testing.expect(parseBrowserMethod("get_url") == null); // snake_case는 wire 이름 아님(camelCase 엄수)
     try testing.expect(parseBrowserMethod("") == null);
@@ -1170,6 +1317,88 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer pm.deinit();
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
+}
+
+// ── 9d) screenshot(5f-1) chunk-streaming 직렬화·metadata·감지 단위(§9.5.7) ──
+
+// 최소 유효 PNG 헤더(시그니처 8B + IHDR: len 13·"IHDR"·width 800·height 600). pngDimensions는 24B만 읽는다.
+const test_png_800x600 = [_]u8{
+    0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, // 시그니처
+    0x00, 0x00, 0x00, 0x0d, // IHDR length=13
+    'I',  'H',  'D',  'R',
+    0x00, 0x00, 0x03, 0x20, // width=800(BE)
+    0x00, 0x00, 0x02, 0x58, // height=600(BE)
+};
+
+test "serializeScreenshotChunk: notification(capture_id·seq·base64), 한 줄·프레임<1MB, 라운드트립" {
+    const raw = "\x89PNG\x0d\x0a\x1a\x0a raw bytes \xff\x00\xfe"; // 비-UTF8 포함 임의 바이너리
+    const w = try serializeScreenshotChunk(testing.allocator, 42, 3, raw);
+    defer testing.allocator.free(w);
+    try testing.expect(std.mem.indexOfScalar(u8, w, '\n') == null); // 한 줄(ndjson frame 경계)
+    try testing.expect(w.len < 1024 * 1024); // default_max_frame 미만
+    var pm = try cp.parseMessage(testing.allocator, w);
+    defer pm.deinit();
+    const note = pm.message.notification; // id 없음 = notification
+    try testing.expectEqualStrings(screenshot_chunk_method, note.method);
+    const params = note.params.?.object;
+    try testing.expectEqual(@as(i64, 42), params.get("capture_id").?.integer);
+    try testing.expectEqual(@as(i64, 3), params.get("seq").?.integer);
+    try testing.expectEqualStrings("base64", params.get("encoding").?.string);
+    // data는 raw의 base64 — 디코드해 원문 복원(임의 바이트 안전 증명).
+    const b64 = params.get("data").?.string;
+    const decoder = std.base64.standard.Decoder;
+    const decoded = try testing.allocator.alloc(u8, try decoder.calcSizeForSlice(b64));
+    defer testing.allocator.free(decoded);
+    try decoder.decode(decoded, b64);
+    try testing.expectEqualSlices(u8, raw, decoded);
+}
+
+test "serializeScreenshotChunk: 512KiB raw 조각도 프레임<1MB(base64 팽창 여유)" {
+    const raw = try testing.allocator.alloc(u8, screenshot_chunk_bytes); // 512KiB
+    defer testing.allocator.free(raw);
+    @memset(raw, 0xAB);
+    const w = try serializeScreenshotChunk(testing.allocator, 1, 0, raw);
+    defer testing.allocator.free(w);
+    try testing.expect(w.len < 1024 * 1024); // 683KiB base64 + JSON 오버헤드 < 1MiB
+}
+
+test "serializeScreenshotComplete: 최종 응답(capture_id·seq_total·width·height·format), id 재파싱 echo" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}";
+    const w = try serializeScreenshotComplete(testing.allocator, req, 7, 5, .{ .width = 800, .height = 600 });
+    defer testing.allocator.free(w);
+    try testing.expect(std.mem.indexOfScalar(u8, w, '\n') == null);
+    var pm = try cp.parseMessage(testing.allocator, w);
+    defer pm.deinit();
+    try testing.expect(cp.idEql(pm.message.response.id, .{ .number = 9 })); // 요청 id echo
+    const r = pm.message.response.result.?.object;
+    try testing.expectEqual(@as(i64, 7), r.get("capture_id").?.integer);
+    try testing.expectEqual(@as(i64, 5), r.get("seq_total").?.integer);
+    try testing.expectEqual(@as(i64, 800), r.get("width").?.integer);
+    try testing.expectEqual(@as(i64, 600), r.get("height").?.integer);
+    try testing.expectEqualStrings("png", r.get("format").?.string);
+}
+
+test "pngDimensions: 유효 PNG IHDR width/height 파싱, 비-PNG/짧은 바이트는 null" {
+    const d = pngDimensions(&test_png_800x600).?;
+    try testing.expectEqual(@as(u32, 800), d.width);
+    try testing.expectEqual(@as(u32, 600), d.height);
+    try testing.expect(pngDimensions("not a png at all yo") == null); // 시그니처 불일치
+    try testing.expect(pngDimensions(test_png_800x600[0..20]) == null); // 24B 미만(IHDR 잘림)
+    try testing.expect(pngDimensions("") == null); // 빈
+    // 시그니처는 맞지만 IHDR 아님 → null.
+    var bad = test_png_800x600;
+    bad[12] = 'X'; // "IHDR" → "XHDR"
+    try testing.expect(pngDimensions(&bad) == null);
+}
+
+test "isScreenshotRequest·parseScreenshotTargetId: screenshot 요청 감지 + 대상 surface_id" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}";
+    try testing.expect(isScreenshotRequest(testing.allocator, req));
+    try testing.expectEqual(@as(?u64, 11), parseScreenshotTargetId(testing.allocator, req));
+    // 다른 browser 메서드·비-request는 false/null.
+    try testing.expect(!isScreenshotRequest(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}"));
+    try testing.expect(!isScreenshotRequest(testing.allocator, "not json"));
+    try testing.expectEqual(@as(?u64, null), parseScreenshotTargetId(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshot\"}")); // params 없음
 }
 
 test {

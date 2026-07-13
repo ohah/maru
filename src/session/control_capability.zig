@@ -135,9 +135,10 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     if (m.core == .panel and eq(rest, "open")) return .lifecycle;
     // bind: panel.bindSession.
     if (m.core == .panel and eq(rest, "bindSession")) return .bind;
-    // browser-storage: browser.getCookies(D5 — 쿠키/스토리지는 browser와 분리된 peer scope). 아래 generic
-    // `browser.*`보다 **먼저** 검사해야 getCookies가 browser scope로 새지 않는다(§8.3 D5 laundering-hole 방지).
-    if (m.core == .browser and eq(rest, "getCookies")) return .browser_storage;
+    // browser-storage: browser.getCookies/setCookie/deleteCookie(D4/D5 — 쿠키 read+write는 browser와 분리된 peer
+    // scope, 사용자 결정 2026-07-13 read+write 동일 scope). 아래 generic `browser.*`보다 **먼저** 검사해야 쿠키가
+    // browser scope로 새지 않는다(§8.3 D5 laundering-hole 방지).
+    if (m.core == .browser and (eq(rest, "getCookies") or eq(rest, "setCookie") or eq(rest, "deleteCookie"))) return .browser_storage;
     // browser.*(§6 line 111 와일드카드) — 나머지 페이지 조작/관찰.
     if (m.core == .browser) return .browser;
     return null;
@@ -554,8 +555,10 @@ test "method↔scope 매핑: §6 line 111의 모든 메서드가 올바른 categ
         // browser.* (페이지 조작/관찰)
         .{ .m = "browser.navigate", .want = .browser },
         .{ .m = "browser.executeScript", .want = .browser },
-        // browser-storage(D5) — getCookies만 분리 scope, 나머지 browser.*는 browser 유지
+        // browser-storage(D4/D5) — getCookies/setCookie/deleteCookie(쿠키 read+write) 분리 scope, 나머지 browser.*는 browser
         .{ .m = "browser.getCookies", .want = .browser_storage },
+        .{ .m = "browser.setCookie", .want = .browser_storage },
+        .{ .m = "browser.deleteCookie", .want = .browser_storage },
         // 미지/미매핑 → null(grant 안 샘)
         .{ .m = "session.unknownVerb", .want = null },
         .{ .m = "sessions.foo", .want = null },

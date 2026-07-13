@@ -993,6 +993,150 @@ enum BrowserControl {
         return String(arr.dropFirst().dropLast()) // ["..."] → "..."
     }
 
+    // browser.wait(§9.4): 메인 액터에서 한 번에 하나의 evaluateJavaScript만 진행하는 100ms 직렬 polling coordinator.
+    // selector는 **visible**(non-empty bounding box + display/visibility 허용)일 때 성공하고, load는 호출 시점의
+    // WKWebView.isLoading이 false면 즉시 성공한다(다음 navigation을 기다리는 API가 아님). deadline은 wall clock 변경에
+    // 영향받지 않는 systemUptime(monotonic). Zig active registry를 매 poll/콜백마다 확인해 surface close·grant revoke·
+    // outer in-flight reap 뒤 DOM 평가와 늦은 completion을 중단한다.
+    @MainActor private final class WaitCoordinator {
+        private weak var webView: WKWebView?
+        private let asyncId: UInt64
+        private let condition: String
+        private let selector: String?
+        private let deadline: TimeInterval
+        private let completion: (UInt32, String) -> Void
+        private var deadlineWorkItem: DispatchWorkItem?
+        private var completed = false
+        private var hasPolled = false
+
+        init(webView: WKWebView, asyncId: UInt64, condition: String, selector: String?, timeoutMs: UInt32,
+             completion: @escaping (UInt32, String) -> Void)
+        {
+            self.webView = webView
+            self.asyncId = asyncId
+            self.condition = condition
+            self.selector = selector
+            self.deadline = ProcessInfo.processInfo.systemUptime + (Double(timeoutMs) / 1000.0)
+            self.completion = completion
+        }
+
+        func start() {
+            // selector evaluation callback 자체가 멎어도 요청 timeout은 독립적으로 끝나야 한다. main queue의
+            // monotonic deadline task가 polling/callback과 같은 actor에서 단일 finish gate를 경합하므로 이중 완료가 없다.
+            let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+            let item = DispatchWorkItem { [weak self] in self?.deadlineReached() }
+            deadlineWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: item)
+            poll()
+        }
+
+        private func poll() {
+            guard !completed else { return }
+            guard maru_macos_control_browser_wait_is_active(asyncId) == 1 else {
+                abandon()
+                return
+            }
+            guard let webView = webView else {
+                finish(4, "browser surface closed") // BrowserCompletionStatus.process_exited
+                return
+            }
+            // 최초 호출은 이미 충족된 load를 즉시 성공시킨다. 그 뒤 재-poll은 deadline을 먼저 검사해, timeout 뒤
+            // 조건이 바뀌었다고 늦게 성공시키지 않는다(100ms interval 때문에 최대 한 tick 뒤집히는 경계 회귀 방지).
+            let firstPoll = !hasPolled
+            hasPolled = true
+            if !firstPoll && timedOut {
+                finish(2, "")
+                return
+            }
+            if condition == "load" {
+                if !webView.isLoading {
+                    finish(0, "")
+                } else if timedOut {
+                    finish(2, "")
+                } else {
+                    scheduleNext()
+                }
+                return
+            }
+            guard condition == "selector", let selector = selector, !selector.isEmpty else {
+                finish(3, "Invalid wait params")
+                return
+            }
+            let sel = BrowserControl.jsStringLiteral(selector)
+            let script = "(()=>{try{const e=document.querySelector(\(sel));if(!e)return 'missing';const s=getComputedStyle(e),r=e.getBoundingClientRect();return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'?'visible':'missing';}catch(_){return 'invalid';}})()"
+            webView.evaluateJavaScript(script) { [self] value, _ in
+                guard !completed else { return }
+                guard maru_macos_control_browser_wait_is_active(asyncId) == 1 else {
+                    abandon()
+                    return
+                }
+                let state = value as? String
+                if state == "invalid" {
+                    finish(3, "Invalid selector")
+                } else if timedOut {
+                    finish(2, "")
+                } else if state == "visible" {
+                    finish(0, "")
+                } else {
+                    scheduleNext()
+                }
+            }
+        }
+
+        private var timedOut: Bool { ProcessInfo.processInfo.systemUptime >= deadline }
+
+        private func scheduleNext() {
+            let interval = Double(MARU_BROWSER_WAIT_POLL_INTERVAL_MS) / 1000.0
+            let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+            DispatchQueue.main.asyncAfter(deadline: .now() + min(interval, remaining)) { [self] in poll() }
+        }
+
+        private func deadlineReached() {
+            guard !completed else { return }
+            guard maru_macos_control_browser_wait_is_active(asyncId) == 1 else {
+                abandon()
+                return
+            }
+            finish(2, "")
+        }
+
+        private func finish(_ status: UInt32, _ message: String) {
+            guard !completed else { return }
+            completed = true
+            deadlineWorkItem?.cancel()
+            deadlineWorkItem = nil
+            completion(status, message)
+        }
+
+        private func abandon() {
+            guard !completed else { return }
+            completed = true
+            deadlineWorkItem?.cancel()
+            deadlineWorkItem = nil
+        }
+    }
+
+    @MainActor static func wait(_ webView: WKWebView, asyncId: UInt64, argJson: String,
+                                completion: @escaping (UInt32, String) -> Void)
+    {
+        guard let obj = parseCookieArg(argJson),
+              let condition = obj["condition"] as? String,
+              let timeout = numberValue(obj["timeout_ms"]), timeout >= 1,
+              timeout <= Double(MARU_BROWSER_WAIT_MAX_TIMEOUT_MS)
+        else {
+            completion(3, "Invalid wait params")
+            return
+        }
+        let coordinator = WaitCoordinator(
+            webView: webView,
+            asyncId: asyncId,
+            condition: condition,
+            selector: obj["selector"] as? String,
+            timeoutMs: UInt32(timeout),
+            completion: completion)
+        coordinator.start()
+    }
+
     // clearStorage(§9.4 D4): 대상 문서 origin(host)의 쿠키+스토리지를 WKWebsiteDataStore로 comprehensive 삭제. host nil
     // (opaque origin)=대상 없음=아무것도 안 지움(전체 삭제 방지). displayName(도메인)으로 매치(getCookies host 필터와 동형).
     // 23차 [2]: 매치는 `hl == dn || hl.hasSuffix("."+dn)` — 대상 host이거나 **그 부모 도메인 레코드**만(getCookies의
@@ -1060,6 +1204,67 @@ private func runBrowserControlSmokeClient(socketPath: String, sid: UInt64, nonce
     return (navigateOk, getUrl)
 }
 
+// browser.wait 실 WKWebView/소켓 E2E: 처음부터 존재하지만 hidden인 요소를 첫 poll 150ms 뒤 visible로 바꿔 selector wait가
+// **존재가 아니라 visible box**를 기다리는지, idle 문서의 load wait가 즉시 성공하는지, deadline 뒤 visible이 되는 요소가
+// 늦은 성공 대신 전용 timeout(-32004)+data로 끝나는지, invalid CSS가 invalid_params인지
+// 검증한다. 각 요청은 기존 smoke helper처럼 새 연결을 써 수명/인가/wire/ABI/Swift polling/응답 직렬화를 전부 탄다.
+private func runBrowserWaitSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> (selector: String, load: String, timeout: String, invalidSelector: String, selectorElapsedMs: String) {
+    let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid),\"cap_nonce\":\"\(nonceHex)\"}}"
+    // getUrl은 navigation commit만 뜻하므로 DOM fixture를 넣기 전에 현재 load idle을 먼저 보장한다.
+    let loadReq = "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"browser.wait\",\"params\":{\"id\":\(sid),\"condition\":\"load\",\"timeout_ms\":1000}}"
+    let load: String
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: loadReq) {
+    case .ok(let line): load = (browserCtlResult(line)?["ok"] as? Bool == true) ? "true" : "unexpected:\(line.prefix(120))"
+    case .err(let why): load = why
+    }
+    guard load == "true" else { return (load, load, load, load, "0") }
+
+    // 각 요소의 첫 getBoundingClientRect가 reveal timer를 arm한다. 즉 wait가 실제 첫 poll을 시작하기 전에는 timer도
+    // 시작되지 않아 느린 머신에서도 fixture가 먼저 visible이 될 수 없고, 첫 poll은 반드시 hidden box를 관측한다.
+    let prepScript = "(()=>{const add=(id,delay)=>{const e=document.createElement('div');e.id=id;e.style.cssText='display:none;width:1px;height:1px';document.body.appendChild(e);const rect=e.getBoundingClientRect.bind(e);let armed=false;e.getBoundingClientRect=()=>{if(!armed){armed=true;setTimeout(()=>{e.style.display='block'},delay);}return rect();};};add('maru-wait-ready',150);add('maru-wait-late',150);return true;})()"
+    let prepEscaped = prepScript.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    let prep = "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"browser.executeScript\",\"params\":{\"id\":\(sid),\"script\":\"\(prepEscaped)\"}}"
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: prep) {
+    case .ok(let line):
+        guard browserCtlResult(line)?["result"] as? String == "true" else {
+            let why = "unexpected:\(line.prefix(120))"
+            return (why, load, why, why, "0")
+        }
+    case .err(let why): return (why, why, why, why, "0")
+    }
+
+    let selectorReq = "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"browser.wait\",\"params\":{\"id\":\(sid),\"condition\":\"selector\",\"selector\":\"#maru-wait-ready\",\"timeout_ms\":1000}}"
+    let selectorStarted = ProcessInfo.processInfo.systemUptime
+    let selectorResult = browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: selectorReq)
+    let elapsedMs = Int((ProcessInfo.processInfo.systemUptime - selectorStarted) * 1000)
+    let selector: String
+    switch selectorResult {
+    case .ok(let line): selector = (browserCtlResult(line)?["ok"] as? Bool == true && elapsedMs >= 100 && elapsedMs < 1000) ? "true" : "unexpected:\(line.prefix(120))"
+    case .err(let why): selector = why
+    }
+
+    // 첫 poll이 timer를 arm하고 150ms 뒤 visible이 되지만 deadline은 125ms다. 조건-first 회귀라면 ~200ms에 성공하므로
+    // 단순 미존재 selector보다 deadline 우선순위를 강하게 검증한다.
+    let timeoutReq = "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"browser.wait\",\"params\":{\"id\":\(sid),\"condition\":\"selector\",\"selector\":\"#maru-wait-late\",\"timeout_ms\":125}}"
+    let timeout: String
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: timeoutReq) {
+    case .ok(let line):
+        let e = browserCtlError(line)
+        let data = e?["data"] as? [String: Any]
+        timeout = (e?["code"] as? Int == -32004 && data?["condition"] as? String == "selector" && data?["timeout_ms"] as? Int == 125) ? "true" : "unexpected:\(line.prefix(120))"
+    case .err(let why): timeout = why
+    }
+
+    let invalidReq = "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"browser.wait\",\"params\":{\"id\":\(sid),\"condition\":\"selector\",\"selector\":\"[\",\"timeout_ms\":1000}}"
+    let invalidSelector: String
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: invalidReq) {
+    case .ok(let line):
+        invalidSelector = (browserCtlError(line)?["code"] as? Int == -32602) ? "true" : "unexpected:\(line.prefix(120))"
+    case .err(let why): invalidSelector = why
+    }
+    return (selector, load, timeout, invalidSelector, String(elapsedMs))
+}
+
 // 1e-confirm-1c-2(테스트 전용 — 배경 스레드): **cap 없이** browser.navigate가 pane confirm-grant 흐름으로 성공하는지
 // 자동 증명한다. auth.self는 **cap_nonce 없이** selector(=surface_id)만 보내 self-origin으로 인증하고, browser.navigate를
 // 날린다 → 서버: 세션 cap 0 → needs_grant → handleNeedsGrant(env MARU_TEST_GRANT_DECISION 스텁) → approve면 grant 기록 +
@@ -1122,6 +1327,13 @@ private func browserCtlResult(_ line: String) -> [String: Any]? {
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let result = obj["result"] as? [String: Any] else { return nil }
     return result
+}
+
+private func browserCtlError(_ line: String) -> [String: Any]? {
+    guard let data = line.data(using: .utf8),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    return obj["error"] as? [String: Any]
 }
 
 // 5f-3 [9]: 두 스모크 클라이언트 공통 소켓 헬퍼(중복 제거). connect + SO_NOSIGPIPE + SO_RCVTIMEO. 성공=연결된 fd(호출자가
@@ -1843,6 +2055,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private nonisolated(unsafe) var browserCtlNavigateOkStore = "pending" // 소켓 browser.navigate 응답에 "ok":true 포함 여부.
     private nonisolated(unsafe) var browserCtlGetUrlStore = "pending" // 소켓 browser.getUrl 응답의 url(navigate한 data: URL 기대).
     private nonisolated(unsafe) var browserCtlEventsStore = "pending" // 5f-3: 구독 후 navigate+alert가 유발한 browser.* 이벤트 종류 집합(navigated/loadState/dialog).
+    private nonisolated(unsafe) var browserCtlWaitSelectorStore = "pending"
+    private nonisolated(unsafe) var browserCtlWaitLoadStore = "pending"
+    private nonisolated(unsafe) var browserCtlWaitTimeoutStore = "pending"
+    private nonisolated(unsafe) var browserCtlWaitInvalidSelectorStore = "pending"
+    private nonisolated(unsafe) var browserCtlWaitElapsedStore = "pending"
     // 1e-confirm-1c-2(MARU_TEST_GRANT_DECISION): **무-cap** browser.navigate가 pane confirm-grant 흐름(needs_grant→env approve→grant→op)으로 성공하는지("true"/진단).
     private var didKickGrantSmoke = false
     private nonisolated(unsafe) var browserGrantNavigateOkStore = "pending"
@@ -3010,7 +3227,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let arg = (argPtr != nil && argLen > 0) ? String(decoding: UnsafeBufferPointer(start: argPtr, count: argLen), as: UTF8.self) : ""
             // surface_id로 그 web 패널을 소유한 창(일반 창·quick)을 찾는다. 없으면(패널이 닫힘 등) error로 완료.
             guard let surface = surfaceOwning(byId: surfaceId), let wp = surface.webPanels[surfaceId] else {
-                maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)
+                maru_macos_control_complete_browser_op(asyncId, opKind == 15 ? 4 : 1, nil, 0)
                 continue
             }
             switch opKind {
@@ -3078,6 +3295,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 } else {
                     self.completeBrowserOp(asyncId, status: 1, result: "act bad params")
                 }
+            case 15: // wait — selector visible 또는 현재 load idle까지 100ms 직렬 polling. status가 timeout/invalid/process-exited를 보존.
+                BrowserControl.wait(wp.webView, asyncId: asyncId, argJson: arg) { status, message in
+                    self.completeBrowserOp(asyncId, status: status, result: message)
+                }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)
             }
@@ -3137,9 +3358,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 배경 큐에서 소켓 왕복 — 메인 tick은 계속 돌며 marshal/complete한다. 결과는 lock으로 저장.
         DispatchQueue.global().async { [weak self] in
             let r = runBrowserControlSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex, navigateURL: t.url)
+            let wait = runBrowserWaitSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
             // 5f-0b-3c: 위 navigate 뒤(패널이 data: URL 커밋됨), 지속 연결로 subscribe→새 URL navigate→browser.navigated 수신 검증.
             let evt = runBrowserEventSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
             self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl, events: evt)
+            self?.storeBrowserWaitResult(wait)
         }
     }
 
@@ -3156,6 +3379,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func browserCtlResults() -> (navigateOk: String, getUrl: String, events: String) {
         browserCtlLock.lock(); defer { browserCtlLock.unlock() }
         return (browserCtlNavigateOkStore, browserCtlGetUrlStore, browserCtlEventsStore)
+    }
+
+    private nonisolated func storeBrowserWaitResult(_ result: (selector: String, load: String, timeout: String, invalidSelector: String, selectorElapsedMs: String)) {
+        browserCtlLock.lock()
+        browserCtlWaitSelectorStore = result.selector
+        browserCtlWaitLoadStore = result.load
+        browserCtlWaitTimeoutStore = result.timeout
+        browserCtlWaitInvalidSelectorStore = result.invalidSelector
+        browserCtlWaitElapsedStore = result.selectorElapsedMs
+        browserCtlLock.unlock()
+    }
+
+    private func browserWaitResults() -> (selector: String, load: String, timeout: String, invalidSelector: String, elapsed: String) {
+        browserCtlLock.lock(); defer { browserCtlLock.unlock() }
+        return (browserCtlWaitSelectorStore, browserCtlWaitLoadStore, browserCtlWaitTimeoutStore, browserCtlWaitInvalidSelectorStore, browserCtlWaitElapsedStore)
     }
 
     /// 1e-confirm-1c-2(**테스트 전용, MARU_TEST_GRANT_DECISION**): **무-cap** browser.navigate가 pane confirm-grant 흐름으로
@@ -5511,6 +5749,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_ctl_navigate_ok=\(browserCtlResults().navigateOk)
             browser_ctl_get_url=\(browserCtlResults().getUrl)
             browser_ctl_events=\(browserCtlResults().events)
+            browser_ctl_wait_selector=\(browserWaitResults().selector)
+            browser_ctl_wait_load=\(browserWaitResults().load)
+            browser_ctl_wait_timeout=\(browserWaitResults().timeout)
+            browser_ctl_wait_invalid_selector=\(browserWaitResults().invalidSelector)
+            browser_ctl_wait_selector_elapsed_ms=\(browserWaitResults().elapsed)
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

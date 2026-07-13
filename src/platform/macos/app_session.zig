@@ -989,6 +989,10 @@ const QuitDecision = enum(u32) {
 /// 타입을 공유한다(익명 struct는 매 리터럴이 별개 타입이라 불가). app_host_abi.drainGrantPrompts가 async_id로 head와 대조.
 pub const GrantConfirmDecision = struct { async_id: u64, approved: bool };
 
+/// surface teardown 관찰 훅. AppSession은 컨트롤 서버를 import하지 않고 surface 수명만 알리며, macOS ABI 계층이
+/// pane-bound browser grant/wait 취소에 연결한다. null이면 순수/헤드리스 세션 동작은 기존과 동일하다.
+pub const SurfaceClosedCallback = *const fn (context: ?*anyopaque, surface_id: u64) void;
+
 /// 닫기 진입점(PendingClose)을 실제로 teardown될 **범위**로 해석한 결과. resolveCloseScope가 cascade(Term>pane>탭>창)를
 /// 한 곳에서 풀어 이 값으로 돌려주고, scopeHasRunningJob(실행 중 명령 검사)과 executeClose(실제 닫기)가 같은 값을
 /// 소비한다 — 판정과 실행이 따로 인코딩돼 갈리지 않게 하는 단일 출처. term/pane은 항상 활성 대상(닫기 cascade가
@@ -1385,6 +1389,10 @@ pub const AppSession = struct {
     // `self.* = .{...}`·reset이 모두 같은 표를 가리킨다(surface_ids/live_registry 패턴과 동형). **주의**:
     // `var session: AppSession = undefined` 테스트가 라우팅을 타면 이 포인터를 명시 초기화해야 한다(attachTestRuntime).
     runtime: *app.SurfaceRuntime = &app_runtime.routing,
+    // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
+    // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
+    surface_closed_context: ?*anyopaque = null,
+    surface_closed_callback: ?SurfaceClosedCallback = null,
     // MARU_TRACE=<파일경로>면 세션의 base kind 이벤트(output/resize/process-exit)를 **파일로 증분 append**한다
     // (레코더는 이벤트마다 flush → 크래시 직전까지 디스크에 남음, observability replayTrace로 화면 재생). 미설정이면
     // null(오버헤드 0). 레코더는 self가 소유한 file writer(`trace_writer`, heap 버퍼 `trace_buf`)에 쓴다 — self가 안정
@@ -3957,9 +3965,11 @@ pub const AppSession = struct {
     /// 해제 + surface.deinit + 슬롯 해제, M3a) → destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·
     /// split 실패 정리에 쓴다. (deinit은 surface 정리를 config/appearance 해제 앞에 두려 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
     fn destroyTerm(self: *AppSession, term: *Term) void {
+        const surface_id = term.surface.id;
+        self.notifySurfaceClosed(surface_id);
         // 이 surface로 가던 미전송 입력 큐를 회수한다 — flush는 맵 순회 중이라 엔트리를 못 지우고 비우기만 한다
         // (pending_pastes 주석). 잔여 바이트는 대상이 사라졌으니 버린다(다시 쓸 수 없다).
-        if (self.pending_pastes.fetchRemove(term.surface.id)) |kv| {
+        if (self.pending_pastes.fetchRemove(surface_id)) |kv| {
             var q = kv.value;
             q.buf.deinit(self.allocator);
         }
@@ -3980,16 +3990,15 @@ pub const AppSession = struct {
             // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
             // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.
             // surface_id는 remove 실행 전에 읽는다(remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
-            self.live_registry.remove(term.surfaceId()) catch {};
+            self.live_registry.remove(surface_id) catch {};
         } else if (term.rt.live_initialized) {
             // M3a: detach(runtime routing) 선행 → registry.remove가 번들 소유를 teardown(deinit=live_pty reader join →
             // custom_name 해제 → surface.deinit → 슬롯 해제). remove는 surface_id로 키드 — Term은 슬롯을 참조만 하므로
             // 소유 해제는 registry가 단일 출처로 한다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던
             // `&surface.core`가 번들 deinit의 surface.deinit 순간까지 살아 있다. surface_id는 remove 실행 전에 읽는다
             // (remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
-            const sid = term.surface.id;
             if (self.runtime_initialized) term.rt.live_pty.closeAndDetach(self.runtime);
-            self.live_registry.remove(sid) catch {};
+            self.live_registry.remove(surface_id) catch {};
             term.rt.live_initialized = false;
         }
         // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
@@ -3997,6 +4006,17 @@ pub const AppSession = struct {
         if (term.git_branch_cwd) |c| self.allocator.free(c);
         term.auto_title.deinit(self.allocator);
         self.allocator.destroy(term);
+    }
+
+    /// platform 관찰 훅을 설치한다. 세션/Term 소유권은 바뀌지 않고, callback은 teardown을 시작한 같은 메인 스레드에서
+    /// 동기 호출된다. 테스트와 비-macOS 경로는 기본 null을 유지한다.
+    pub fn setSurfaceClosedCallback(self: *AppSession, context: ?*anyopaque, callback: ?SurfaceClosedCallback) void {
+        self.surface_closed_context = context;
+        self.surface_closed_callback = callback;
+    }
+
+    fn notifySurfaceClosed(self: *AppSession, surface_id: u64) void {
+        if (self.surface_closed_callback) |callback| callback(self.surface_closed_context, surface_id);
     }
 
     /// 4e-1: 한 **web Term**(WKWebView 패널의 first-class surface)을 heap-pin(`create`)으로 만든다 — registry가
@@ -19793,6 +19813,7 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
+                    self.notifySurfaceClosed(term.surface.id);
                     // git_branch 캐시 + auto_title 캐시(Term-owned) 해제 — destroyTerm과 같은 규율(deinit은 surface 정리를
                     // config/appearance 해제 앞에 두려 teardown을 직접 풀어 써서 destroyTerm을 못 부르므로 여기서도 해제).
                     // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
@@ -27917,6 +27938,19 @@ test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변
     });
     defer session.deinit();
 
+    const CloseRecorder = struct {
+        count: usize = 0,
+        last_surface_id: u64 = 0,
+
+        fn record(context: ?*anyopaque, surface_id: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.count += 1;
+            self.last_surface_id = surface_id;
+        }
+    };
+    var close_recorder: CloseRecorder = .{};
+    session.setSurfaceClosedCallback(&close_recorder, CloseRecorder.record);
+
     const keep = session.tabs.items[0].activePane().activeTerm();
     const keep_ptr = keep.rt.live_pty; // 번들 슬롯의 &live_pty
     const keep_surface = keep.surface; // 번들 슬롯의 &surface
@@ -27937,6 +27971,8 @@ test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변
     // 두 번째 워크스페이스를 닫는다 → 그 런타임 소유가 registry에서 사라진다(destroyTerm → remove).
     session.closeTab(1);
     try std.testing.expect(session.live_registry.findBySurface(closing_sid) == null);
+    try std.testing.expectEqual(@as(usize, 1), close_recorder.count);
+    try std.testing.expectEqual(closing_sid, close_recorder.last_surface_id);
     try std.testing.expectEqual(before + 1, session.live_registry.count());
     // 남은 번들(keep)은 포인터·소유가 온전(orderedRemove가 keep 슬롯을 안 건드림).
     const keep_bundle = session.live_registry.findBySurface(keep_sid).?;

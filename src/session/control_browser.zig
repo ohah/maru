@@ -425,6 +425,49 @@ pub fn parseScreenshotTargetId(gpa: std.mem.Allocator, request_bytes: []const u8
     return idFromObj(obj) catch null;
 }
 
+// ── browser.list(발견, §9.6) 직렬화 — ungated web surface 나열 ──────────────────────────────────────────────
+
+/// `browser.list` 성공 result(§9.6 발견): `{"jsonrpc":"2.0","id":<id>,"result":{"surfaces":[{"id":N,"url":"...",
+/// "title":"...","panel_kind":"browser|markdown"},...]}}`. snapshot에서 **web surface만** 필터(터미널 제외 — 제어 대상만).
+/// **ungated**(cap/grant/모달 무관 — 사용자 결정: 같은 uid=자신의 브라우저라 URL 노출 수용; 제어[navigate·screenshot 등]는
+/// 별도 §9.2 Model B 모달 게이트 유지). 에이전트가 이 id로 제어를 건다. dispatchAuthenticated이 browser.list를 이 경로로
+/// 라우팅(cap 로직 우회). caller free.
+pub fn serializeBrowserListResult(gpa: std.mem.Allocator, id: cp.Id, snapshot: cs.CollectorSnapshot) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeBrowserListResult(&s, id, snapshot) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.CollectorSnapshot) !void {
+    try beginResult(s, id);
+    try s.objectField("surfaces");
+    try s.beginArray();
+    for (snapshot.surfaces) |dto| {
+        switch (dto.detail) {
+            .web => |w| {
+                try s.beginObject();
+                try s.objectField("id");
+                try s.write(dto.surface_id);
+                try s.objectField("url");
+                try s.write(w.url orelse "");
+                try s.objectField("title");
+                try s.write(dto.title);
+                try s.objectField("panel_kind");
+                try s.write(switch (w.panel_kind) {
+                    .markdown => "markdown",
+                    .browser => "browser",
+                });
+                try s.endObject();
+            },
+            else => {}, // terminal surface 제외 — browser.list는 제어 가능한 web만
+        }
+    }
+    try s.endArray();
+    try endResult(s);
+}
+
 // result envelope open/close는 cp.beginResult/endResult 단일 출처 재사용(리뷰12 [4] — 브리지와 공유, 로컬 복제 제거).
 const beginResult = cp.beginResult;
 const endResult = cp.endResult;
@@ -1399,6 +1442,20 @@ test "isScreenshotRequest·parseScreenshotTargetId: screenshot 요청 감지 + �
     try testing.expect(!isScreenshotRequest(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}"));
     try testing.expect(!isScreenshotRequest(testing.allocator, "not json"));
     try testing.expectEqual(@as(?u64, null), parseScreenshotTargetId(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshot\"}")); // params 없음
+}
+
+test "serializeBrowserListResult(§9.6): web surface만 나열(터미널 제외), {id,url,title,panel_kind}" {
+    // fx = 터미널 10 + web 11(browser, https://example/). browser.list은 11만.
+    const w = try serializeBrowserListResult(testing.allocator, .{ .number = 1 }, fx);
+    defer testing.allocator.free(w);
+    var pm = try cp.parseMessage(testing.allocator, w);
+    defer pm.deinit();
+    const arr = pm.message.response.result.?.object.get("surfaces").?.array;
+    try testing.expectEqual(@as(usize, 1), arr.items.len); // 터미널(10) 제외
+    const o = arr.items[0].object;
+    try testing.expectEqual(@as(i64, 11), o.get("id").?.integer);
+    try testing.expectEqualStrings("https://example/", o.get("url").?.string);
+    try testing.expectEqualStrings("browser", o.get("panel_kind").?.string);
 }
 
 test {

@@ -15,12 +15,13 @@ const cp = @import("../session/control_plane.zig");
 
 /// `maru browser --help`. 구현된 서브커맨드만 노출한다(§11 help gate — 정직성). 대상 surface는 `maru sessions list`로 발견.
 pub const browser_help =
-    \\usage: maru browser <command> --surface <id> [args]
+    \\usage: maru browser <command> [--surface <id>] [args]
     \\
-    \\web surface(브라우저 패널)를 제어한다. <id>는 대상 web surface_id(maru sessions list로 발견).
-    \\권한이 없으면 사용자에게 확인 모달이 뜨고, 허용하면 실행된다(§9.2 Model B).
+    \\web surface(브라우저 패널)를 제어한다. 먼저 `maru browser list`로 대상 web surface_id를 발견하고,
+    \\나머지 명령에 --surface <id>로 지정한다. 권한이 없으면 확인 모달이 뜨고, 허용하면 실행된다(§9.2 Model B).
     \\
     \\commands:
+    \\  list                                   열린 web 패널을 나열(id·url·title — 대상 발견용)
     \\  navigate    --surface <id> <url>       URL로 이동
     \\  get-url     --surface <id>             현재 문서 URL 출력
     \\  exec        --surface <id> <script>    JavaScript 실행, 결과 출력
@@ -33,6 +34,9 @@ pub const browser_help =
 
 /// `browser.*` 요청(핵심 4개). id는 대상 web surface_id.
 pub const Request = union(enum) {
+    /// `browser list`(§9.6 발견) — **surface_id 불요**(인스턴스의 web surface 전부 나열). ungated 발견(제어는 별도 모달).
+    /// 다른 서브커맨드가 `--surface`로 대상을 지정하는 것과 달리 대상이 없다(에이전트가 이걸로 대상 id를 발견).
+    list,
     navigate: struct { surface_id: u64, url: []const u8 },
     get_url: struct { surface_id: u64 },
     exec: struct { surface_id: u64, script: []const u8 },
@@ -41,6 +45,7 @@ pub const Request = union(enum) {
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
         return switch (self) {
+            .list => .list,
             .navigate => .navigate,
             .get_url => .get_url,
             .exec => .exec,
@@ -82,6 +87,14 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.MissingSubcommand;
     const sub = args[0];
     const rest = args[1..];
+    if (eq(sub, "list")) {
+        // 발견 — 대상 surface 불요(전부 나열). 남는 인자(옵션/위치)는 에러(오타 방지).
+        if (rest.len != 0) {
+            if (std.mem.startsWith(u8, rest[0], "-")) return error.UnknownOption;
+            return error.UnexpectedArgument;
+        }
+        return .{ .request = .list };
+    }
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -189,6 +202,7 @@ inline fn eq(a: []const u8, b: []const u8) bool {
 /// (control_browser `parseBrowserMethod` 계약: navigate/getUrl/executeScript/getCookies).
 pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.mem.Allocator.Error![]u8 {
     switch (req) {
+        .list => return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.list", .params = null } }), // 발견 — params 없음
         .navigate => |n| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -224,7 +238,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, surface_id: u64, id: 
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { navigate, get_url, exec, get_cookies };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies };
 
 /// 응답 바이트 한 줄을 기계·사람 읽기 편한 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`
 /// (sessions.renderResponse 규율 — 미grant 거부는 `error: Unauthorized (-32002)`). result는 kind별 한 줄.
@@ -256,6 +270,32 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
     };
     switch (kind) {
+        .list => {
+            // {surfaces:[{id,url,title,panel_kind}]} → surface별 한 줄. 에이전트가 id를 골라 제어를 건다.
+            const surfaces = switch (result.get("surfaces") orelse std.json.Value{ .null = {} }) {
+                .array => |a| a,
+                else => {
+                    try w.writeAll("error: malformed surfaces\n");
+                    return;
+                },
+            };
+            if (surfaces.items.len == 0) {
+                try w.writeAll("(no web surfaces)\n");
+                return;
+            }
+            for (surfaces.items) |item| {
+                const o = switch (item) {
+                    .object => |oo| oo,
+                    else => continue,
+                };
+                try w.print("surface {d}  {s}  {s}  \"{s}\"\n", .{
+                    intField(o.get("id")) orelse 0,
+                    strField(o.get("panel_kind")),
+                    strField(o.get("url")),
+                    strField(o.get("title")),
+                });
+            }
+        },
         .navigate => {
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: navigate not ok\n");
         },
@@ -593,6 +633,42 @@ test "ScreenshotAssembler: chunk 재조립 → PNG, seq/capture/seq_total 검증
         defer a.deinit();
         try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"screenshot too large\"}}"));
         try testing.expect(std.mem.indexOf(u8, a.failureMessage(), "screenshot too large") != null);
+    }
+}
+
+// ── browser list(§9.6 발견) 파서·wire·렌더 단위 ──
+
+test "parse: list(surface 불요), 남는 인자는 에러" {
+    try testing.expect((try parse(&.{"list"})).request == .list);
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "list", "extra" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "list", "--surface", "1" })); // list는 surface 안 받음
+}
+
+test "buildRequestBytes: browser.list(params 없음)" {
+    const b = try buildRequestBytes(testing.allocator, .list, .{ .number = 1 });
+    defer testing.allocator.free(b);
+    var pm = try cp.parseMessage(testing.allocator, b);
+    defer pm.deinit();
+    try testing.expectEqualStrings("browser.list", pm.message.request.method);
+    try testing.expect(pm.message.request.params == null);
+}
+
+test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 목록 안내" {
+    // 정상: web surface 2개 → 각 한 줄.
+    {
+        var buf: [512]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://naver.com/\",\"title\":\"Browser\",\"panel_kind\":\"browser\"},{\"id\":7,\"url\":\"\",\"title\":\"docs\",\"panel_kind\":\"markdown\"}]}}", .list, &w);
+        const out = w.buffered();
+        try testing.expect(std.mem.indexOf(u8, out, "surface 3  browser  https://naver.com/  \"Browser\"") != null);
+        try testing.expect(std.mem.indexOf(u8, out, "surface 7  markdown  ") != null);
+    }
+    // 빈 목록.
+    {
+        var buf: [128]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[]}}", .list, &w);
+        try testing.expectEqualStrings("(no web surfaces)\n", w.buffered());
     }
 }
 

@@ -412,6 +412,16 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **베이스·의사결정(clean-room)**: 연결 모델 base=`ControlRequestQueue`/`PtyEventQueue`(bounded MPSC)+poll; outbound 큐 base=§4.3; 이벤트 백프레셔 base=§5 subscribeOutput; 순수 코어 base=`control_capture.zig` L2; chunk base=`control_capture` chunk 프로토콜; cap 누적 base=§8.5 single-scope 불변 + auth 프레임 반복. **결정 요약**: 연결당 스레드+통합 outbound 큐+heap pending/registry(9.5.1·6), 대용량=**소켓 chunk**(파일-경로 폐기, same-uid 노출 회피, 9.5.3), snapshot=a11y 스파이크 gated(9.5.4), single-scope×세션=cap 누적(9.5.6③), 서브스코프 fd=browser_storage/network는 `allowedViaInheritedFd=false`(민감·명시 확인만, §8.5 write/lifecycle 선례 — D5 확정). **후속 스파이크 2개(5f-0)**: Web Inspector 임베드 viability, 네이티브 a11y snapshot viability.
 
+### 9.6 `maru browser` CLI 클라이언트 (doc-first 2026-07-13)
+
+**목적**: 지금까지 배선한 `browser.*`(navigate/getUrl/executeScript/getCookies)·grant 모달(§9.2 Model B)을 **에이전트가 실제로 쓸 수 있는 클라이언트**로 노출한다. 현재 유일한 드라이버는 스모크의 인-프로세스 소켓 클라뿐 — CLI가 이 표면을 활성화한다. maru pane에서 돌던 에이전트(예: Claude Code)가 `maru browser navigate --surface N <url>`로 옆 브라우저를 제어하고, 미grant면 사용자에게 확인 모달이 떠 승인 후 실행된다.
+
+**설계(1d `sessions` CLI 패턴 미러링 — 재구현 금지)**: L2 순수(`src/cli/browser.zig` — 인자 파싱·`buildRequestBytes`(1a `serializeMessage` 재사용)·`renderResponse`(1a `parseMessage` 재사용)) + main.zig I/O(소켓 발견·connect·auth.self·프레임 왕복 — `runSessionCli`와 동형). **서브커맨드(핵심 먼저)**: `navigate --surface N <url>`(→`browser.navigate`)·`get-url --surface N`(→`getUrl`, url 출력)·`exec --surface N <script>`(→`executeScript`, 결과 출력)·`get-cookies --surface N`(→`getCookies`, JSON 출력). 대상 `--surface N`은 필수(에이전트는 `maru sessions list`로 web surface_id 발견). 확장은 서브커맨드 dispatch 테이블에 한 줄씩(screenshot·act·set/delete는 후속).
+
+**auth·grant 상호작용(핵심)**: CLI는 `auth.self`(selector=`MARU_PANE_ID`, **cap_nonce=null** — sessions CLI와 동일)만 보낸다. browser 요청은 세션 cap이 없으므로 §9.2 Model B로 **needs_grant→서버가 held→확인 모달**. **CLI는 응답을 블로킹 read로 기다린다** — 사용자가 모달을 클릭할 때까지(read가 블록). 승인→응답 렌더, 거부→`Unauthorized`, 무응답 timeout(`grant_prompt_timeout` 후 서버 reap→연결 닫힘)→EOF(응답 없음). sessions CLI가 hello skip 후 첫 응답에서 종료하는 것과 동형이되, browser는 held로 **응답이 늦을 수 있음**(read 타임아웃을 짧게 걸지 말 것 — 모달 대기).
+
+**슬라이스**: **CLI-0(doc, = 이 절)**. **CLI-1(L2 순수)**=`cli/browser.zig`(파싱·요청 바이트·렌더링) 헤드리스 TDD. **CLI-2(main 배선)**=main.zig `browser` 서브커맨드→소켓 왕복(runSessionCli 재사용/미러). 손 테스트(에이전트가 CLI로 브라우저 제어→모달→실행). **MCP 어댑터**는 CLI 검증 후 별도(§10 note — wire가 JSON-RPC 2.0이라 얇게 얹힘).
+
 ## 10. 베이스와 결정 (clean-room)
 
 - **메커니즘**: JSON-RPC 2.0 over 로컬 stdio/socket(LSP/DAP/CDP 공유). 메커니즘만 빌리고 LSP 스펙(textDocument/*)은 채택하지 않는다. 프레이밍은 ndjson(대형은 §4.3 chunk).

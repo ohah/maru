@@ -447,21 +447,22 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
 
 /// act 요청 바이트: `{id, selector, text?}`. text null이면 selector만(click/scroll). caller free.
 fn selectorRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, selector: []const u8, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
-    var obj: std.json.ObjectMap = .empty;
-    defer obj.deinit(gpa);
-    try obj.put(gpa, "id", .{ .integer = @intCast(surface_id) });
-    try obj.put(gpa, "selector", .{ .string = selector });
-    if (text) |t| try obj.put(gpa, "text", .{ .string = t });
-    return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
+    return twoFieldRequest(gpa, id, method, surface_id, "selector", selector, "text", text);
 }
 
 /// localStorage 요청 바이트: `{id, key, value?}`. value null이면 key만(get/remove). caller free.
 fn keyRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, key: []const u8, value: ?[]const u8) std.mem.Allocator.Error![]u8 {
+    return twoFieldRequest(gpa, id, method, surface_id, "key", key, "value", value);
+}
+
+/// 23차 [8]: `{id, <req_field>, <opt_field>?}` 모양 요청 빌더 공용(act=selector/text·localStorage=key/value가 필드명만
+/// 달랐다). opt_val null이면 opt_field 생략. wire-envelope 변경이 한 곳에만 반영되게 통합. caller free.
+fn twoFieldRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, req_field: []const u8, req_val: []const u8, opt_field: []const u8, opt_val: ?[]const u8) std.mem.Allocator.Error![]u8 {
     var obj: std.json.ObjectMap = .empty;
     defer obj.deinit(gpa);
     try obj.put(gpa, "id", .{ .integer = @intCast(surface_id) });
-    try obj.put(gpa, "key", .{ .string = key });
-    if (value) |v| try obj.put(gpa, "value", .{ .string = v });
+    try obj.put(gpa, req_field, .{ .string = req_val });
+    if (opt_val) |v| try obj.put(gpa, opt_field, .{ .string = v });
     return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
 }
 

@@ -301,7 +301,8 @@ fn numF64FromObj(obj: std.json.ObjectMap, name: []const u8) ParamError!f64 {
 }
 
 /// screenshot rect/scale 추출. rect 있으면 x/y/width/height 전부 필수(부분 rect=형식 오류). scale/width/height는 양수·유한.
-/// 둘 다 부재(=`{id}`만)면 빈 옵션(전체 뷰·기기 배율). scale 상한은 Swift(WKSnapshotConfiguration.snapshotWidth)가 클램프.
+/// 둘 다 부재(=`{id}`만)면 빈 옵션(전체 뷰·기기 배율). **rect 치수·scale 상한(렌더 자원 한계)은 Swift takeSnapshot가
+/// 클램프**(L2는 형식[유한·양수]만 검증 — 픽셀 버퍼 자원 한계는 WKWebView가 렌더하는 지점 소유, 23차 [5]/[6]).
 pub fn parseScreenshotOptParams(params: ?std.json.Value) ParamError!ScreenshotOptParams {
     const obj = try paramsObject(params);
     var out: ScreenshotOptParams = .{};

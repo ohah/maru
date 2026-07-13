@@ -12853,6 +12853,16 @@ pub const AppSession = struct {
         return term.surface;
     }
 
+    /// 이 세션(트리)이 `id` surface를 소유하는가(terminal·web 무관 — `terminalSurfaceById`와 달리 kind 필터 없음).
+    /// grant 확인 모달을 **대상 web surface 소유 창**에 띄우는 판정(§9.2 target-window 모달, app_host_abi가 소비).
+    pub fn ownsSurface(self: *AppSession, id: u64) bool {
+        return self.findTermWhere(id, struct {
+            fn pred(want: u64, term: *Term) bool {
+                return term.surface.id == want;
+            }
+        }.pred) != null;
+    }
+
     /// 붙여넣기 확인 모달 메시지(단일 출처). 아래 미리보기(buildPastePreview)가 붙여넣을 내용을 함께 보여준다.
     const paste_confirm_message = "붙여넣을 내용에 줄바꿈이나 제어 문자가 있어 명령이 바로 실행될 수 있습니다. 붙여넣을까요?";
     const paste_preview_max_lines = 6; // 미리보기에 보여줄 앞 줄 수(넘으면 "…N줄 더"로 요약 — Ghostty 스크롤 뷰의 근사)
@@ -33410,6 +33420,24 @@ test "collector: web Term url은 web_nav_states에서 채운다(§9.6 browser.li
         if (dto.surface_id == web_id) found = dto;
     }
     try std.testing.expectEqualStrings("https://www.naver.com/", found.?.detail.web.url.?);
+}
+
+// grant UX 경화(§9.2 target-window 모달): ownsSurface가 세션 소유 surface(terminal·web 무관)를 true, 미소유를 false로.
+// app_host_abi의 appSessionOwningSurface가 이걸로 grant 모달을 대상 web surface 소유 창에 띄운다.
+test "ownsSurface: 소유 terminal·web은 true, 미소유 id는 false (target-window 모달)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const term_id = session.activePane().activeTerm().surfaceId(); // 초기 터미널
+    session.dispatchAppAction(.new_web_tab); // web(browser) Term
+    const web_id = session.activePane().activeTerm().surfaceId();
+
+    try std.testing.expect(session.ownsSurface(term_id)); // 소유 terminal
+    try std.testing.expect(session.ownsSurface(web_id)); // 소유 web(kind 필터 없음)
+    try std.testing.expect(!session.ownsSurface(999_999)); // 미소유(다른 창·없는 id)
 }
 
 // [4e review 0] collectWebSurfaces seam inset 검증 헬퍼 — 각 web 본문 rect가 seam(형제 pane 경계) 가장자리서 `seam`만큼,

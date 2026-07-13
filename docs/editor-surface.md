@@ -10,14 +10,21 @@
 - 레이어 경계(L2 코어 / L4 host)는 [layering-and-portability.md](layering-and-portability.md), surface 생애주기는 [surface-runtime-api.md](surface-runtime-api.md)를 단일 출처로 둔다.
 - 이 문서는 "그 위에 에디터/문서/파일 I/O/포맷/LSP를 어떻게 얹는가"에 집중한다.
 
-> **PoC 실측 범위(2026-07-12, 헤드리스)**: ① Monaco+워커5개를 zntc로 번들(실 CLI/NAPI, 성공), ② Monaco 코어·diff 경로의 CSP 청정성(eval/wasm는 TS 워커에만), ③ git diff op 데이터 형태, ④ 포매터 stdin/에러 거동(zig fmt·rustfmt), ⑤ LSP 왕복(rust-analyzer). **런타임(WKWebView 안에서 실제 CSP·입력·폰트)은 미검증** — GUI 스파이크로만 확정(§12).
+> **PoC 실측 범위**
+> - **1차(2026-07-12, 정적)**: ① Monaco+워커5개를 zntc로 번들(성공), ② git diff op 데이터 형태, ③ 포매터 stdin/에러 거동(zig fmt·rustfmt), ④ LSP 왕복(rust-analyzer).
+> - **2차(2026-07-13, 헤드리스 Chrome 런타임)**: 산출물을 **엄격 CSP 하에서 실제로 실행**. Monaco DiffEditor 렌더·diff 계산·codicon 폰트·워커 5종 기동·TS 언어서비스 진단까지 확인. **`script-src 'unsafe-eval'` 불필요를 측정으로 확정**(§2·§4). 이 과정에서 zntc 버그 3건을 추가 발견·수정(누적 6건, §2).
+>
+> **여전히 미검증: WKWebView(WebKit) 런타임.** 2차는 Chrome(Blink)이다. "코드가 `unsafe-eval`을 실제로 요구하는가"는 엔진 무관한 강한 신호지만, **커스텀 스킴(`maru-app://`) 위의 모듈 워커·스타일 주입·IME는 WebKit 고유 영역**이라 Phase 0.5 GUI 스파이크가 여전히 필요하다(§11·§14).
+>
+> **교훈(설계에 반영)**: zntc 버그 6건 중 3건이 **"빌드 exit 0 + 산출물이 파싱 불가"**, 5건이 **"빌드 green인데 런타임 실패"** 였다. 빌드 green은 동작 증거가 아니다 → 프런트 빌드 파이프라인에 **산출물 재파싱 게이트 + 헤드리스 런타임 스모크**를 넣는다(§12).
 
 ---
 
 ## 1. 확정 결정
 
 - **렌더 컴포넌트 = Monaco Editor(웹뷰), 셀 그리드 자작 아님.** diff editor + 편집기 + LSP 클라이언트가 한 컴포넌트의 세 모드다: git diff = `<DiffEditor>`(`IDiffEditorModel { original, modified }`), 편집 = editor, LSP = `monaco-languageclient`(후속). Metal 셀 그리드에 에디터를 자작하는 것은 diff·구문강조·LSP를 감안하면 비현실적이다.
-- **Monaco는 self-host 번들, CDN 금지.** `maru-app://` CSP가 외부 호스트를 차단하므로 CDN은 애초에 불가. **번들 경유 = zntc NAPI `@zntc/core.build()`**(§4). 워커는 정적 문자열 리터럴 `new Worker(new URL("...worker.js", import.meta.url), { type: "module" })`로 배선(변수 스페시파이어는 정적 분석이 깨져 emit 안 됨). **전체 에디터는 5개(editor/ts/json/css/html), v1 git diff는 `editor.worker` 하나로 충분**하고 언어워커를 빼면 CSP도 더 좁다(§4).
+- **Monaco는 self-host 번들, CDN 금지.** `maru-app://` CSP가 외부 호스트를 차단하므로 CDN은 애초에 불가. **번들 경유 = zntc NAPI `@zntc/core.build()`**(§4). 워커는 정적 문자열 리터럴 `new Worker(new URL("...worker.js", import.meta.url), { type: "module" })`로 배선(변수 스페시파이어는 정적 분석이 깨져 emit 안 됨). **전체 에디터는 5개(editor/ts/json/css/html), v1 git diff는 `editor.worker` 하나로 충분.**
+- **엄격 CSP를 유지한다 — `unsafe-eval`도 `wasm-unsafe-eval`도 열지 않는다(실측 확정).** Monaco 코어·DiffEditor·**TS 언어워커까지** `script-src 'self'`만으로 동작한다(§2). 신뢰 채널 CSP를 약화시키지 않아도 되므로 **§13의 열린 결정 하나가 닫혔다.** 유일한 추가 완화는 **`img-src 'self' data:`**(오류 물결선이 `data:` SVG). TextMate(§8)를 도입할 때만 `wasm-unsafe-eval` 논의가 되살아난다.
 - **에디터는 신뢰(trusted) surface다.** 로컬 저장소를 maru가 렌더하는 신뢰 콘텐츠라 `trust=trusted` + `maru-app://` 신뢰 채널(스킴 핸들러 + isolated-world MaruBridge)을 쓴다 — `browser`(임의 URL·untrusted)가 아니다. 즉 **현행 신뢰 markdown 패널의 호스팅 기계를 그대로 탄다**(§3).
 - **문서 모델은 버전 + 변경이벤트 형태로 day 1에 고정한다**(§5). LSP를 마지막에 하더라도, 버퍼를 "버전 번호 + `open/change/save` 이벤트"로 지어두면 v3 LSP·semantic token이 additive가 된다. 이건 LSP 때문이 아니라 **에이전트×사람 파일 경합 재조정**이 어차피 요구하는 배관이다(§7).
 - **파일 I/O는 신규 capability + op다**(§6). 현행 `write` scope는 **PTY 입력(`sendText`/`sendKeys`)**을 인가할 뿐 디스크 파일 쓰기가 아니다(control_capability.zig:121·498-499). 에디터의 파일 read/save는 별도 scope로 발급·게이트한다.
@@ -31,14 +38,34 @@
 
 | 항목 | 결과 | 근거 |
 |---|---|---|
-| Monaco + 워커5개 zntc 번들 | ✅ exit 0, 115파일, 워커 5개 same-origin 해시청크 | `@zntc/core.build()`(NAPI)·실 CLI |
+| Monaco + 워커5개 zntc 번들 | ✅ exit 0, 116파일, 워커 5개 same-origin 해시청크. 산출물 95개 전수 재파싱 통과 | zntc CLI/NAPI + acorn 재파싱 |
 | git diff 뷰어 = DiffEditor | ✅ `IDiffEditorModel { original: ITextModel; modified: ITextModel }` | monaco.d.ts + 빌드 |
-| Monaco 코어·diff CSP | ⚠️ diff 전용 빌드에 `eval(`·`WebAssembly`·`blob:` **0**(→ `wasm-unsafe-eval` 불필요). **단 `new Function`·`importScripts`가 가드된 globalThis/feature-detect 폴백으로 잔존** | diff-only 빌드 grep. `script-src 'unsafe-eval'` 뺄 수 있는지는 **런타임(GUI) 확정 대상**(§14) |
+| **Monaco 런타임 (엄격 CSP)** | ✅ **DiffEditor 렌더 + diff 계산(데코 11) + codicon 폰트 로드. CSP 위반 0 · 워커 에러 0 · 404 0** | 헤드리스 Chrome, `script-src 'self'`(unsafe-eval **없음**) |
+| **`script-src 'unsafe-eval'`** | ✅ **불필요 — 측정 확정.** 코어의 `new Function`은 실행되지 않는 가드된 폴백 | 위와 동일(위반 0건) |
+| **`img-src 'self' data:`** | ⚠️ **필요.** 진단 마커의 오류 물결선을 Monaco가 `data:` SVG로 그림 | 마커 표시 시 CSP 위반 1건 → `img-src` 개방 후 0건 |
+| **TS 언어워커(ts.worker)** | ✅ 기동 + **201ms 만에 진단 마커**. **WASM 미사용 → `wasm-unsafe-eval` 불필요** | 오류 있는 JS 모델 → `getModelMarkers` end-to-end |
 | git diff op 데이터 형태 | before/after **전체 blob**(unified 아님), rename=old/new 경로, binary=numstat `-` 제외 | git PoC(rename R096·binary .ttf 실측) |
 | 포매터 에러 정책 | 에러 시 stdout 공백 + exit≠0(zig=2·rust=1) | zig fmt·rustfmt stdin PoC |
 | LSP 프리미티브 | initialize 0.02s·진단 4.85s(콜드), 프레이밍=Content-Length(≠maru ndjson) | rust-analyzer 왕복 PoC |
 
-**zntc 쪽 미비 2건(이슈화 완료, `ohah/zntc`)**: [#4466](https://github.com/ohah/zntc/issues/4466) CSS `url()` 자산(codicon.ttf) 미방출 → 아이콘 깨짐, [#4467](https://github.com/ohah/zntc/issues/4467) Vite식 `?worker`/`?raw`/`?url` 접미사 미지원(표준 패턴으로 우회). 둘 다 에디터 계획의 리스크를 내려주며 #4466 수정 시 codicon 자동 해결.
+### zntc 쪽 결함 6건 — 전부 수정됨
+
+에디터 스택이 zntc의 **첫 대형 소비자**라 미탐색 경로를 6건 밟았다. 모두 `ohah/zntc`에 이슈화·수정 완료.
+
+| 이슈 | 내용 | 상태 |
+|---|---|---|
+| [#4466](https://github.com/ohah/zntc/issues/4466) | CSS `url()` 자산(codicon.ttf) 미방출 → dangling | 0.1.3 릴리스 |
+| [#4467](https://github.com/ohah/zntc/issues/4467) | Vite식 `?worker`/`?raw`/`?url` 접미사 미지원 | 0.1.3 릴리스 |
+| [#4472](https://github.com/ohah/zntc/issues/4472) | minify comma-fold 시 구조분해 할당 괄호 소실 | 0.1.3 릴리스 |
+| [#4481](https://github.com/ohah/zntc/issues/4481) | `if(c) ({…}=o)` → `c&&{…}=o` (`&&`-fold 괄호 소실) | **수정 완료·미릴리스** |
+| [#4482](https://github.com/ohah/zntc/issues/4482) | 단항 토큰 병합(`-(--t)`→`---t`) + `**` 좌변 괄호 소실 | **수정 완료·미릴리스** |
+| [#4483](https://github.com/ohah/zntc/issues/4483) | `new URL("x.js", import.meta.url)`의 `./` 없는 지정자 미재작성 → 404 | **수정 완료·미릴리스** |
+
+**#4481·#4483이 `ts.worker`를 죽이고 있었다** — 전자는 TS 컴파일러를 파싱 불가로 만들고, 후자는 Monaco 내장 워커 팩토리의 참조를 404로 만든다. 둘 다 **빌드는 exit 0**이었고, 모듈 워커의 로드 실패는 `message`가 `undefined`인 **불투명 `Event`**(ErrorEvent 아님)로만 새어나와 CDP로도 안 잡혔다.
+
+**의존성 함의**: 에디터 스택은 **미릴리스 zntc 수정 3건에 의존**한다. Phase 1 착수 전에 zntc 릴리스가 선행되어야 하며, 그때까지 lockfile을 로컬/프리릴리스에 고정할지는 결정 사항(§13).
+
+**회귀 스윕(2026-07-13)**: 인기 라이브러리 21개(react·vue·rxjs·zod·three·d3·codemirror·highlight.js·prettier·@xterm/xterm·mermaid 등)를 `--minify`로 번들 → 산출물 124개 전수 재파싱 **실패 0**. 미니파이어 위험지점 20종(`**`·optional chaining·문자열→템플릿 이스케이프·정규식/나눗셈·ASI·getter `this`·try/finally·private field)을 **실행값까지 원본과 대조 → 불일치 0**.
 
 ---
 
@@ -62,8 +89,18 @@
 함의: **에디터 스택이 Phase 7 프런트 툴체인을 처음 세우는 주체다.** "마크다운 뷰어 완성"을 전제로 두지 못한다(그게 없으므로).
 
 - **빌드 호출은 NAPI 경유**: `import { build } from "@zntc/core"`. maru 빌드/트레이스에 구조화된 `{ errors, warnings }`를 그대로 물릴 수 있다. **standalone `zig-out/bin/zntc`는 금지** — 정책(mainFields/conditions/node_modules 루트)이 빈 채라 bare import가 resolve 실패한다(PoC에서 이 함정으로 가짜 블로커 발생). config(`zntc.config.ts`)는 .ts라 로딩 자체가 JS 런타임 일이므로 CLI/NAPI를 통해야 한다.
+- **app 빌드 모드는 `@zntc/web`을 별도 요구한다(0.1.3~)**: HTML 엔트리(`--entry-html`) 경로는 `@zntc/core`만으로는 안 되고 `@zntc/web`이 설치돼 있어야 한다. maru 프런트 workspace의 devDependency에 포함한다.
 - **워커**: `MonacoEnvironment.getWorker`를 5개 정적 리터럴로. 헬퍼로 감싸면(변수 스페시파이어) 정적 분석이 깨져 워커가 emit되지 않는다(Vite/webpack 동일 제약, 실측).
-- **CSP(정정·실측)**: diff 전용 빌드(editor.worker만)는 워커가 same-origin이라 `worker-src 'self'`로 충분하고, `eval(`·`WebAssembly`·`blob:`가 **0**이라 `wasm-unsafe-eval`은 불필요하다. **단 `new Function`(globalThis 폴백 추정)·`importScripts`(feature-detect) 문자열이 코어 chunk에 잔존**하므로, `script-src`에서 `'unsafe-eval'`을 뺄 수 있는지는 **런타임 GUI CSP 스파이크로만 확정**한다 — 정적 grep으로 청정 단언 불가(이 문서 초판이 이 지점을 과장했고 적대 검증으로 정정). TS 언어워커·TextMate(§8)를 로드하면 추가로 `wasm-unsafe-eval` 검토(§13).
+- **CSP(실측 확정)**: 아래 정책으로 Monaco 코어·DiffEditor·워커 5종·TS 언어서비스가 **CSP 위반 0건**으로 동작한다(헤드리스 Chrome).
+  ```
+  default-src 'self'; script-src 'self'; worker-src 'self';
+  style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:
+  ```
+  - **`'unsafe-eval'` 불필요**: 코어에 `new Function` 문자열이 잔존하나 **실행되지 않는 가드된 폴백**임이 런타임으로 확인됐다(위반 0건). 초판이 정적 grep으로 "청정"을 단언했다가 적대 검증으로 정정했고, 이제 **런타임 측정으로 결론이 뒤집히지 않았다.**
+  - **`'wasm-unsafe-eval'` 불필요**: TS 언어워커도 WASM을 쓰지 않는다. **TextMate(§8) 도입 시에만** 재검토.
+  - **`img-src ... data:` 필요**: 진단 마커의 오류 물결선이 `data:` SVG. 이건 마커가 실제로 뜨는 상태에서만 관측되므로, `ts.worker`가 죽어 있던 동안엔 보이지 않던 조건이다.
+  - **잔여 리스크는 엔진 차이뿐**: 위는 Blink 측정이다. WebKit + `maru-app://` 커스텀 스킴 위의 모듈 워커·스타일 주입은 Phase 0.5에서 확인한다(§11).
+- **산출물 재파싱 게이트(필수)**: zntc 결함 6건 중 3건이 **빌드 exit 0 + 산출물 파싱 불가**였다. 빌드 성공을 동작 증거로 삼지 않는다 — 번들 산출물을 파서로 다시 읽는 스모크를 빌드 파이프라인에 넣는다(§12).
 
 ---
 
@@ -117,7 +154,9 @@ VS Code는 "사람이 유일 writer"를 가정하지만 **maru는 아니다** �
 | VS Code 동급 | TextMate 문법 + VS Code 테마(vscode-textmate + Oniguruma) | **WASM** 필요 | 후속 |
 | 의미 기반 | semantic tokens | LSP 서버 필요 | LSP 단계 |
 
-- Monarch로 v1은 충분(내장 수십 개 언어). TextMate는 VS Code와 픽셀 동급이나 **Oniguruma가 WASM이라 CSP `script-src 'wasm-unsafe-eval'`을 열어야** 한다(신뢰 채널 CSP 약화 = §13 결정). 엔진 교체는 하이라이팅 레이어에 **격리**(에디터·문서 모델 무변경).
+- Monarch로 v1은 충분(내장 수십 개 언어). **Monarch는 WASM을 쓰지 않으므로 엄격 CSP 그대로 간다**(§2 실측).
+- TextMate는 VS Code와 픽셀 동급이나 **Oniguruma가 WASM이라 CSP `script-src 'wasm-unsafe-eval'`을 열어야** 한다 — **CSP 약화를 요구하는 유일한 항목**이다(§13 결정). 엔진 교체는 하이라이팅 레이어에 **격리**(에디터·문서 모델 무변경)되므로, 이 결정은 Phase 3까지 미룰 수 있다.
+- **정정**: 초판은 "TS 언어워커도 `wasm-unsafe-eval`을 요구할 수 있다"고 적었으나 **틀렸다** — ts.worker는 WASM을 쓰지 않고 엄격 CSP에서 진단까지 정상 동작한다(§2).
 - semantic tokens는 LSP `textDocument/semanticTokens`에서 옴 → LSP 단계에 additive(Monaco `registerDocumentSemanticTokensProvider`).
 
 ---
@@ -170,8 +209,8 @@ flowchart TD
   P3 --> P4
 ```
 
-- **Phase 0.5(스파이크·GUI 필수)**: WKWebView + `maru-app://` 커스텀 스킴에서 `{type:'module'}` 워커가 도는가, **코어 `new Function` 폴백이 `script-src 'unsafe-eval'` 없이 도는가**, Monaco 런타임 스타일 주입 vs 엄격 `style-src`, codicon 폰트(#4466). red면 워커/CSP 전략 재검토.
-- **Phase 1**: zntc NAPI 빌드 배선 + PanelKind 라우트(§3) + `diff.read` op(§6) + `<DiffEditor>` + 접기/펼치기·파일트리 + Monarch. **읽기 전용 diff는 스냅샷+새로고침으로 punt**(경합은 Phase 2b).
+- **Phase 0.5(스파이크·GUI 필수, 범위 축소됨)**: 헤드리스 Chrome 실측(§2)이 **CSP·워커·폰트·TS 워커 질문을 이미 닫았으므로**, 스파이크에 남는 것은 **WebKit 고유 영역뿐**이다 — ① `maru-app://` 커스텀 스킴 위에서 `{type:'module'}` 워커가 도는가(WKURLSchemeHandler + 워커 로딩 상호작용), ② Monaco 런타임 스타일 주입 vs 엄격 `style-src`, ③ 한글 IME. red면 워커 전략 재검토. **CSP 정책은 §4의 실측값을 그대로 적용하고 위반 여부만 확인한다.**
+- **Phase 1**: zntc NAPI 빌드 배선(+`@zntc/web`, +산출물 재파싱 게이트) + PanelKind 라우트(§3) + `diff.read` op(§6) + `<DiffEditor>` + 접기/펼치기·파일트리 + Monarch. **읽기 전용 diff는 스냅샷+새로고침으로 punt**(경합은 Phase 2b). **선행조건: zntc 릴리스**(#4481·#4482·#4483 수정분, §2).
 - **Phase 2 / 2b**: 문서 모델(§5) + `filesystem` cap·`file.*` op + 파일 열기(NSWorkspace.open 승격) / file-watch 재조정(§7).
 - **2.5·2.7·3 병렬 가능**(문서 모델 위, 서로 독립). **4는 최후.**
 
@@ -179,25 +218,30 @@ flowchart TD
 
 ## 12. 관측 가능성·테스트 전략
 
+- **산출물 재파싱 게이트(신규·필수)**: 프런트 빌드 후 **방출된 모든 `.js`를 파서로 다시 읽어** 실패 시 빌드를 깬다. 근거: zntc 결함 6건 중 3건이 "빌드 exit 0 + 산출물 파싱 불가"였고, 이 게이트 하나로 전부 잡혔을 것이다(§2·§4). 비용이 사실상 0이라 CI 상시 게이트로 둔다.
+- **헤드리스 브라우저 스모크(신규)**: 빌드 산출물을 **엄격 CSP를 실은 로컬 서버 + 헤드리스 Chrome**에 띄워 ① 렌더 ② CSP 위반 0 ③ 워커 에러 0 ④ 404 0을 검사. §2의 2차 실측이 그대로 이 하니스다. **WKWebView는 아니지만**, "빌드 green ≠ 런타임 green" 갭의 대부분을 CI에서 잡아준다 — 실제로 이번에 `ts.worker` DOA를 잡아낸 것이 이 하니스다.
 - **프런트 단위**: Monaco 통합·포매터 레지스트리·diff op 매핑은 `bun test`(Phase 7 툴체인)로.
 - **op 계약**: `diff.read`/`file.*`/`git.*`는 control-plane trace schema에 실어 snapshot/replay가 같은 데이터를 공유(control-plane.md 관측 원칙 유지).
-- **GUI 수동(불가피)**: WKWebView 입력/포커스/CSP/폰트/한글 IME는 web-panel.md §11이 이미 "헤드리스 자동화 불가"로 규정한 영역. 에디터는 그 위에 Monaco 상호작용·format-on-save를 더한다 — 각 Phase 게이트에 수동 검증 항목을 명시한다.
+- **GUI 수동(불가피)**: WKWebView 입력/포커스/폰트/한글 IME는 web-panel.md §11이 이미 "헤드리스 자동화 불가"로 규정한 영역. 에디터는 그 위에 Monaco 상호작용·format-on-save를 더한다 — 각 Phase 게이트에 수동 검증 항목을 명시한다.
 
 ---
 
 ## 13. 사용자 논의 필요 (문서에 없는 결정)
 
 1. **PanelKind**: 신뢰 SPA 라우트(권장, 새 kind 불필요) vs 얇은 신규 kind(라벨/생애주기). §3.
-2. **CSP 완화**: (a) 코어 Monaco의 `new Function` 폴백이 `script-src 'unsafe-eval'`을 요구할 수 있고(런타임 확정 대상), (b) TS 언어워커·TextMate는 `wasm-unsafe-eval`을 요구 → 신뢰 채널 엄격 CSP를 언제/어디까지 여는가. §4·§8·§14.
+2. ~~**CSP 완화**~~ → **해소(2026-07-13 실측).** `unsafe-eval`·`wasm-unsafe-eval` **모두 불필요**하고, `img-src 'self' data:`만 추가하면 된다(§2·§4). **잔여 결정은 TextMate뿐** — VS Code 동급 하이라이팅을 위해 `wasm-unsafe-eval`을 열 것인가(Phase 3까지 유예 가능, §8).
 3. **신규 capability `filesystem`**: 임의 파일 read/write 발급 UX(기본 거부 + 명시 발급). §6.
 4. **외부 의존성**: Monaco를 핵심 UX 경로에 추가 = "가벼운 native shell" 포지션과의 트레이드오프(웹뷰에 제품 상당부가 산다). pr-checklist "핵심 경로 외부 의존성" 항목.
 5. **에디터 op 전송 경로**: 브리지(단순하나 capability 격리 없음) vs 소켓(capability-gated·push 스트림 보유). 민감 write·LSP diagnostics push를 어디로 흘릴지 — 브리지에 capability 모델을 얹을지, 소켓으로 흘릴지. §6·§10.
+6. **zntc 버전 고정(신규)**: 에디터 스택은 **미릴리스 zntc 수정 3건**(#4481·#4482·#4483)에 의존한다(§2). Phase 1을 zntc 릴리스까지 기다릴지, 그 전까지 lockfile을 로컬/프리릴리스 버전에 고정할지.
 
 ---
 
 ## 14. 한계·미검증
 
-- **런타임 전부 미검증**: Monaco가 WKWebView + 실제 CSP에서 실제로 렌더/동작하는지(§12·Phase 0.5). 모듈워커 커스텀 스킴 호환·**코어 `new Function` 폴백의 `script-src 'unsafe-eval'` 필요 여부**·Monaco 스타일 주입·codicon 폰트가 라이브 리스크. **정적 grep으로 "CSP 청정" 단언 불가 — 초판이 이 지점을 과장했고 적대 검증으로 정정(§2·§4).**
-- **surface당 자원 비용 미측정**: pane N개 × (Monaco + 워커 5스레드). 성능 예산(performance-budget.md) 대비 측정 필요, Monaco 공유 전략 미결.
+- **WKWebView(WebKit) 런타임 미검증** — 남은 최대 갭. §2의 런타임 실측은 **헤드리스 Chrome(Blink)**이다. "코드가 `unsafe-eval`을 실제로 요구하는가"는 엔진 무관한 강한 신호라 CSP 결론은 유지될 가능성이 높지만, **`maru-app://` 커스텀 스킴 위의 모듈 워커 로딩·Monaco 스타일 주입·한글 IME는 WebKit 고유**라 Phase 0.5에서 확인해야 한다.
+- **정적 분석의 한계(기록)**: 초판은 정적 grep으로 "CSP 청정"을 단언했다가 적대 검증에서 정정했고, 이번 런타임 측정으로 비로소 결론이 났다. **grep은 CSP 질문에 답할 수 없다** — 문자열의 존재는 실행의 증거가 아니다(코어의 `new Function`은 실제로 죽은 폴백이었다).
+- **`--minify` 경로에 결함이 몰려 있다**: zntc 결함 6건 중 3건(#4472·#4481·#4482)이 **minify에서만** 재현됐다(비-minify 빌드는 정상). 프로덕션 빌드가 곧 minify 빌드이므로, 재파싱 게이트는 **minify 산출물을 대상으로** 돌려야 한다.
+- **surface당 자원 비용 미측정**: pane N개 × (Monaco + 워커 5스레드). 성능 예산(performance-budget.md) 대비 측정 필요, Monaco 공유 전략 미결. **번들 크기도 미최적화** — all-language barrel import 기준이라 targeted import로 줄여야 한다.
 - **문서 모델 경계·경합 재조정 메커니즘**은 설계만, 구현 미착수(가장 어려운 부분).
 - **전제 정정**: 마크다운 뷰어/프런트 툴체인 부재를 이 문서에서 처음 반영 — 기존 계획이 이를 전제했다면 함께 갱신 필요.

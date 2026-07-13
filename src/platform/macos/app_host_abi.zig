@@ -8,6 +8,7 @@ const command_catalog = @import("command_catalog.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
 const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터 + 1e dispatchAuthenticated
+const control_plane = maru.session.control_plane; // 1a: hello capability method namespace 파싱
 const control_browser = maru.session.control_browser; // 5e: browser.* op·응답 직렬화(dispatchAuthenticated가 산출한 op을 marshal)
 const control_surface = maru.session.control_surface; // 1c: Surface DTO/CollectorSnapshot
 const control_capability = maru.session.control_capability; // 1e: capability fd resolve(라이브 auth 배선)
@@ -169,6 +170,9 @@ pub export fn maru_macos_app_session_create(
         allocator.destroy(session);
         return @intFromEnum(Status.create_failed);
     };
+    // AppSession의 terminal/web Term teardown 단일 훅을 컨트롤 수명에 연결한다. terminal pane이 닫힐 때도 그 pane이
+    // 발급한 grant-origin wait를 즉시 unauthorized로 끝내야 하므로 WKWebView destroy 전이만 관찰해서는 부족하다.
+    session.setSurfaceClosedCallback(null, onAppSessionSurfaceClosed);
 
     out.* = session;
     return @intFromEnum(Status.ok);
@@ -1817,6 +1821,98 @@ var browser_op_take_buf: std.ArrayList(u8) = .empty;
 /// hung WKWebView op 마감(reap) — evaluateJavaScript/navigation이 영영 안 끝나는 op가 accept 스레드를 영구 붙잡는 것 방어.
 const browser_op_timeout_ns: i128 = 30 * std.time.ns_per_s;
 
+/// 5f-2 wait는 최대 25초짜리 장기 op라 surface close·pane grant revoke에 즉시 취소한다. capability-origin wait를
+/// pane grant revoke가 잘못 끊지 않도록 dispatch가 보존한 provenance를 같이 둔다. 메인 스레드 전용, max_in_flight(8)로 bounded.
+const ActiveBrowserWait = struct {
+    async_id: u64,
+    surface_id: u64,
+    pane_grant: ?control_browser.GrantProvenance,
+};
+var active_browser_waits: std.ArrayList(ActiveBrowserWait) = .empty;
+
+fn removeActiveBrowserWait(async_id: u64) bool {
+    for (active_browser_waits.items, 0..) |e, i| {
+        if (e.async_id == async_id) {
+            _ = active_browser_waits.swapRemove(i);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn activeBrowserWait(async_id: u64) bool {
+    for (active_browser_waits.items) |e| if (e.async_id == async_id) return true;
+    return false;
+}
+
+fn cancelActiveBrowserWait(server: *control_server_mod.ControlServer, async_id: u64, status: control_browser.BrowserCompletionStatus) void {
+    const pending = server.inFlightPending(async_id) orelse {
+        _ = removeActiveBrowserWait(async_id);
+        return;
+    };
+    _ = removeActiveBrowserWait(async_id);
+    const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, status, "") catch null;
+    _ = server.completeInFlight(async_id, resp);
+}
+
+fn waitStatusForClosedSurface(e: ActiveBrowserWait, surface_id: u64) ?control_browser.BrowserCompletionStatus {
+    if (e.surface_id == surface_id) return .process_exited;
+    const grant = e.pane_grant orelse return null;
+    if (grant.pane == surface_id) return .unauthorized;
+    return null;
+}
+
+fn cancelBrowserWaitsForClosedSurface(server: *control_server_mod.ControlServer, surface_id: u64) void {
+    var matches: [8]struct { id: u64, status: control_browser.BrowserCompletionStatus } = undefined; // active≤8
+    var count: usize = 0;
+    for (active_browser_waits.items) |e| if (waitStatusForClosedSurface(e, surface_id)) |status| {
+        matches[count] = .{ .id = e.async_id, .status = status };
+        count += 1;
+    };
+    for (matches[0..count]) |match| cancelActiveBrowserWait(server, match.id, match.status);
+}
+
+/// AppSession teardown 훅: target surface close는 process_exited, pane-grant origin close는 unauthorized로 진행 중 wait를
+/// 끝낸 뒤 그 surface가 pane/target으로 걸린 grant를 모두 제거한다. capability-origin wait는 origin pane 수명과 무관하다.
+fn onAppSessionSurfaceClosed(_: ?*anyopaque, surface_id: u64) void {
+    if (control_server_active) cancelBrowserWaitsForClosedSurface(&control_server_storage, surface_id);
+    control_pane_grant_store.removeSurface(surface_id);
+}
+
+fn cancelBrowserWaitsForGrant(server: *control_server_mod.ControlServer, pane: u64, target: u64, scope: control_capability.ScopeClass) void {
+    var ids: [8]u64 = undefined;
+    var count: usize = 0;
+    for (active_browser_waits.items) |e| if (waitOriginMatchesGrant(e, pane, target, scope)) {
+        ids[count] = e.async_id;
+        count += 1;
+    };
+    for (ids[0..count]) |id| cancelActiveBrowserWait(server, id, .unauthorized);
+}
+
+fn waitOriginMatchesGrant(e: ActiveBrowserWait, pane: u64, target: u64, scope: control_capability.ScopeClass) bool {
+    const g = e.pane_grant orelse return false;
+    return g.pane == pane and g.target == target and g.scope == scope;
+}
+
+fn cancelAllPaneGrantBrowserWaits(server: *control_server_mod.ControlServer) void {
+    var ids: [8]u64 = undefined;
+    var count: usize = 0;
+    for (active_browser_waits.items) |e| if (e.pane_grant != null) {
+        ids[count] = e.async_id;
+        count += 1;
+    };
+    for (ids[0..count]) |id| cancelActiveBrowserWait(server, id, .unauthorized);
+}
+
+fn pruneInactiveBrowserWaits(server: *control_server_mod.ControlServer) void {
+    var i: usize = 0;
+    while (i < active_browser_waits.items.len) {
+        if (server.inFlightPending(active_browser_waits.items[i].async_id) == null) {
+            _ = active_browser_waits.swapRemove(i);
+        } else i += 1;
+    }
+}
+
 // ── 1e-confirm-2a: held-request grant 확인 흐름(§9.2 Model B) ──────────────────────────────────────────────
 /// needs_grant 요청을 **틱 넘어 붙잡고**(§5-async deferRequest) 확인 결정(2a=env 스텁·2b=모달)을 기다리는 대기 항목.
 /// `async_id`로 in-flight pending을 조회하고, 결정 시 grant 기록+재-dispatch(승인) or unauthorized(거부)한다.
@@ -1842,8 +1938,28 @@ var grant_prompt_queue: GrantPromptQueue = .{};
 /// 확인 응답 마감 — 사용자가 모달에 응답할 시간(2b). 2a 스텁은 즉시 결정하나, 이 마감이 reap 안전망(무응답 시 연결 닫힘).
 const grant_prompt_timeout_ns: i128 = 120 * std.time.ns_per_s;
 
-/// hello가 광고하는 read-only 메서드(현재 구현된 것만 — §11 help gate와 같은 정직성).
-const control_hello_caps = [_][]const u8{ "sessions.list", "session.get" };
+/// hello가 광고하는 현재 라이브 메서드(§4.1). browser method가 추가될 때 parseBrowserMethod와 함께 갱신하며, 아래
+/// 테스트가 모든 browser 항목이 실제 parser에 존재하는지와 `browser.wait` 발견성을 고정한다.
+const control_hello_caps = [_][]const u8{
+    "sessions.list",
+    "session.get",
+    "browser.navigate",
+    "browser.getUrl",
+    "browser.executeScript",
+    "browser.subscribe",
+    "browser.getCookies",
+    "browser.screenshot",
+    "browser.setCookie",
+    "browser.deleteCookie",
+    "browser.getLocalStorage",
+    "browser.setLocalStorage",
+    "browser.removeLocalStorage",
+    "browser.clearStorage",
+    "browser.click",
+    "browser.type",
+    "browser.scroll",
+    "browser.wait",
+};
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
 const control_drain_budget: usize = 32;
@@ -2134,7 +2250,19 @@ fn pushBrowserOp(
     async_id: u64,
     op: control_browser.BrowserOp,
 ) void {
+    if (op.method == .wait) {
+        active_browser_waits.append(allocator, .{
+            .async_id = async_id,
+            .surface_id = op.surface_id,
+            .pane_grant = op.pane_grant,
+        }) catch {
+            server.cross_gpa.free(op.arg);
+            _ = server.completeInFlight(async_id, null);
+            return;
+        };
+    }
     browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = op.arg }) catch {
+        if (op.method == .wait) _ = removeActiveBrowserWait(async_id);
         server.cross_gpa.free(op.arg);
         _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
     };
@@ -2210,7 +2338,7 @@ pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSession
 
 /// 5e-2b: Swift가 매 tick 호출 — (1) `reapExpiredInFlight`(hung browser op timeout), (2) browser op 큐에서 하나 pop해
 /// out으로 넘긴다. 반환 1=op 있음(Swift가 surface_id로 webView 찾아 `BrowserControl`[op_kind] 실행 → 완료 시
-/// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c)·5=screenshot(5f-1)·6=setCookie·7=deleteCookie·8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll. `arg_ptr`는 안정 슬롯
+/// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c)·5=screenshot(5f-1)·6=setCookie·7=deleteCookie·8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll·15=wait. `arg_ptr`는 안정 슬롯
 /// (`browser_op_take_buf`)을 가리켜 **이 호출 중 동기 읽기**만 유효(다음 take가 덮어씀 — Swift가 즉시 복사). 서버
 /// 미시작이면 0. **메인 스레드 전용**(reap·pop·in-flight 레지스트리는 메인).
 pub export fn maru_macos_control_take_browser_op(
@@ -2222,9 +2350,17 @@ pub export fn maru_macos_control_take_browser_op(
 ) u32 {
     if (!control_server_active) return 0;
     const server = &control_server_storage;
-    // §5-async reap: 매 tick hung op timeout(evaluateJavaScript/navigation이 안 끝나는 op가 accept를 영구 붙잡는 것 방어).
+    // §5-async reap: 매 tick hung op timeout(evaluateJavaScript/navigation/wait가 안 끝나는 op가 accept를 영구 붙잡는 것 방어).
     _ = server.reapExpiredInFlight(std.Io.Clock.awake.now(appHostIo()).nanoseconds);
-    const e = browser_op_queue.take() orelse return 0;
+    pruneInactiveBrowserWaits(server);
+    const e: BrowserOpEntry = while (browser_op_queue.take()) |candidate| {
+        // revoke/close/reap가 Swift drain 전에 wait를 끝냈다면 큐의 늦은 엔트리를 실행하지 않는다.
+        if (candidate.op_kind == @intFromEnum(control_browser.BrowserMethod.wait) and !activeBrowserWait(candidate.async_id)) {
+            server.cross_gpa.free(candidate.arg);
+            continue;
+        }
+        break candidate;
+    } else return 0;
     // arg를 안정 슬롯에 복사(Swift가 이 호출 중 동기 읽음), 엔트리 arg(cross_gpa) 해제.
     browser_op_take_buf.clearRetainingCapacity();
     browser_op_take_buf.appendSlice(allocator, e.arg) catch {
@@ -2241,7 +2377,7 @@ pub export fn maru_macos_control_take_browser_op(
 }
 
 /// 5e-2b: Swift `BrowserControl` async 완료 콜백이 호출 — `async_id`의 in-flight 요청을 결과로 응답한다. `status`:
-/// 0=ok·非0=error(webView 부재·evaluateJavaScript 에러 등). `result`: method별(getUrl=url·executeScript=반환값
+/// status는 `control_browser.BrowserCompletionStatus` 숫자 계약. `result`: method별(getUrl=url·executeScript=반환값
 /// 문자열·navigate=무시; error면 message). 미지/reap된 async_id는 무시(늦은 콜백 — inFlightPending null). **메인 스레드
 /// 전용**(WKWebView 콜백이 메인). serializeBrowserResponse가 pending.request_bytes 재파싱해 id·method로 응답 직렬화.
 pub export fn maru_macos_control_complete_browser_op(async_id: u64, status: u32, result_ptr: ?[*]const u8, result_len: usize) void {
@@ -2249,13 +2385,22 @@ pub export fn maru_macos_control_complete_browser_op(async_id: u64, status: u32,
     const server = &control_server_storage;
     const result: []const u8 = if (result_ptr) |p| p[0..result_len] else &.{};
     const pending = server.inFlightPending(async_id) orelse return; // 늦은/미지 콜백 — 무시
+    _ = removeActiveBrowserWait(async_id); // wait 아니면 no-op. 늦은 timer는 is_active=0을 보고 멈춘다.
     // 5f-1: screenshot 완료는 단일 응답이 아니라 **chunk-streaming**(§9.5.7) — `result`=raw PNG 바이트. 감지해 chunk 경로로.
     if (control_browser.isScreenshotRequest(server.cross_gpa, pending.request_bytes)) {
         completeScreenshotOp(server, async_id, pending, status, result);
         return;
     }
-    const resp = control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, status == 0, result) catch null;
+    const completion = std.enums.fromInt(control_browser.BrowserCompletionStatus, status) orelse .failed;
+    const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, completion, result) catch null;
     _ = server.completeInFlight(async_id, resp); // found → resolve(resp)(accept 스레드가 write 후 free)
+}
+
+/// Swift wait coordinator가 다음 poll 전에 async_id가 여전히 유효한지 확인한다. revoke/close/reap/완료 뒤 0이라 timer가
+/// DOM eval을 더 수행하지 않는다. 메인 스레드 전용(호출도 @MainActor wait coordinator).
+pub export fn maru_macos_control_browser_wait_is_active(async_id: u64) u32 {
+    if (!control_server_active) return 0;
+    return if (activeBrowserWait(async_id) and control_server_storage.inFlightPending(async_id) != null) 1 else 0;
 }
 
 /// 5f-1: screenshot op 완료(§9.5.7 chunk-streaming). `png`=Swift `takeSnapshot`이 만든 PNG 바이트(status 0). PNG를
@@ -2365,10 +2510,10 @@ pub export fn maru_macos_control_push_browser_crashed(surface_id: u64) void {
 pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
     if (!control_server_active) return;
     const server = &control_server_storage;
+    // AppSession destroyTerm 훅이 먼저 호출하는 정상 경로에선 멱등이다. popup/adopt 등 별도 host 경로도 이 export 하나로
+    // target wait·pane-origin grant 수명을 함께 닫도록 재호출한다.
+    onAppSessionSurfaceClosed(null, surface_id);
     _ = server.subscriber_reg.pushSurfaceClosed(server.cross_gpa, surface_id);
-    // 1e-confirm-1c-2(§9.2 수명): 이 surface가 걸린 pane-bound grant를 무효화한다(pane이든 target이든). pane close=그
-    // 에이전트 소멸, target close=제어 대상 소멸 — 어느 쪽이든 grant 무의미. 재생성 surface(새 generation)는 재확인 필요.
-    control_pane_grant_store.removeSurface(surface_id);
 }
 
 /// grant UX(revoke, §9.2 Model B): 사용자가 부여한 **모든** pane-bound browser grant를 취소한다 — 메뉴 "Revoke Browser
@@ -2377,6 +2522,7 @@ pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
 pub export fn maru_macos_control_revoke_all_browser_grants() u32 {
     const n: u32 = @intCast(control_pane_grant_store.len);
     control_pane_grant_store.clearAll();
+    if (control_server_active) cancelAllPaneGrantBrowserWaits(&control_server_storage);
     return n;
 }
 
@@ -2420,7 +2566,9 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
     const sc = grantScopeFromWire(scope) orelse return 0;
     const before = control_pane_grant_store.len;
     control_pane_grant_store.revoke(pane, target, sc);
-    return if (control_pane_grant_store.len < before) 1 else 0;
+    const removed = control_pane_grant_store.len < before;
+    if (removed and control_server_active) cancelBrowserWaitsForGrant(&control_server_storage, pane, target, sc);
+    return if (removed) 1 else 0;
 }
 
 pub export fn maru_macos_control_server_stop() void {
@@ -2434,6 +2582,8 @@ pub export fn maru_macos_control_server_stop() void {
     browser_op_queue = .{};
     browser_op_take_buf.deinit(allocator);
     browser_op_take_buf = .empty;
+    active_browser_waits.deinit(allocator);
+    active_browser_waits = .empty;
     // 1e-confirm-2a: 대기 grant 확인 큐 해제(엔트리는 값 타입 — arg 소유 없음, stop이 in-flight pending은 cancel).
     grant_prompt_queue.deinit(allocator);
     grant_prompt_queue = .{};
@@ -2479,12 +2629,15 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
     try std.testing.expectEqual(@as(u32, c.MARU_MACOS_APP_HOST_ABI_VERSION), abi_version);
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS)), control_browser.wait_default_timeout_ms);
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_MAX_TIMEOUT_MS)), control_browser.wait_max_timeout_ms);
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_POLL_INTERVAL_MS)), control_browser.wait_poll_interval_ms);
     // url_at out_kind 계약: @intFromEnum(LinkKind)를 그대로 싣고 Swift handleUrlClick이 kind==1=file_path로 분기한다.
     // LinkKind 순서를 바꾸면 분기가 silent하게 뒤집히므로(웹↔파일) 태그 값을 고정한다(C typedef 없는 enum 가드 — Status/EventKind 선례).
     try std.testing.expectEqual(@as(i32, 0), @intFromEnum(terminal.LinkKind.url));
     try std.testing.expectEqual(@as(i32, 1), @intFromEnum(terminal.LinkKind.file_path));
     // 5e-2b op_kind wire 계약: take_browser_op이 @intFromEnum(BrowserMethod)를 그대로 op_kind로 싣고 Swift
-    // drainBrowserOps가 0=navigate·1=getUrl·2=executeScript·4=getCookies·5=screenshot·6=setCookie·7=deleteCookie·8~11=localStorage/clear·12=click·13=type·14=scroll로 디코드한다. BrowserMethod 순서를 바꾸면
+    // drainBrowserOps가 0=navigate·1=getUrl·2=executeScript·4=getCookies·5=screenshot·6=setCookie·7=deleteCookie·8~11=localStorage/clear·12=click·13=type·14=scroll·15=wait로 디코드한다. BrowserMethod 순서를 바꾸면
     // op_kind가 silent하게 재매핑돼 navigate 요청이 다른 op을 구동하므로(컴파일·테스트 무경보) 태그 값을 고정한다
     // (LinkKind 선례 — .h 주석·Swift switch와 단일 계약). 신규 메서드는 **끝에** 추가한다(3=subscribe는 async op이
     // 아니라 op_kind로 안 실림 — get_cookies는 그 뒤 4).
@@ -2502,6 +2655,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u8, 12), @as(u8, @intFromEnum(control_browser.BrowserMethod.click))); // act 5f-2
     try std.testing.expectEqual(@as(u8, 13), @as(u8, @intFromEnum(control_browser.BrowserMethod.type_text)));
     try std.testing.expectEqual(@as(u8, 14), @as(u8, @intFromEnum(control_browser.BrowserMethod.scroll)));
+    try std.testing.expectEqual(@as(u8, 15), @as(u8, @intFromEnum(control_browser.BrowserMethod.wait)));
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
@@ -2634,6 +2788,37 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpReframe), @intFromEnum(session_mod.WebSurfaceOp.reframe));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpHide), @intFromEnum(session_mod.WebSurfaceOp.hide));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpShow), @intFromEnum(session_mod.WebSurfaceOp.show));
+}
+
+test "browser wait revoke/close matching preserves capability-origin and isolates pane grant key" {
+    const capability_origin: ActiveBrowserWait = .{ .async_id = 1, .surface_id = 11, .pane_grant = null };
+    try std.testing.expect(!waitOriginMatchesGrant(capability_origin, 5, 11, .browser));
+    try std.testing.expectEqual(control_browser.BrowserCompletionStatus.process_exited, waitStatusForClosedSurface(capability_origin, 11).?);
+    try std.testing.expect(waitStatusForClosedSurface(capability_origin, 5) == null); // capability-origin은 pane close와 무관
+
+    const pane_origin: ActiveBrowserWait = .{
+        .async_id = 2,
+        .surface_id = 11,
+        .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser },
+    };
+    try std.testing.expect(waitOriginMatchesGrant(pane_origin, 5, 11, .browser));
+    try std.testing.expect(!waitOriginMatchesGrant(pane_origin, 6, 11, .browser));
+    try std.testing.expect(!waitOriginMatchesGrant(pane_origin, 5, 12, .browser));
+    try std.testing.expect(!waitOriginMatchesGrant(pane_origin, 5, 11, .browser_storage));
+    try std.testing.expectEqual(control_browser.BrowserCompletionStatus.process_exited, waitStatusForClosedSurface(pane_origin, 11).?);
+    try std.testing.expectEqual(control_browser.BrowserCompletionStatus.unauthorized, waitStatusForClosedSurface(pane_origin, 5).?);
+    try std.testing.expect(waitStatusForClosedSurface(pane_origin, 6) == null);
+}
+
+test "live hello capabilities advertise browser.wait and only parsed browser methods" {
+    var wait_count: usize = 0;
+    for (control_hello_caps) |method| {
+        const parsed = control_plane.parseMethod(method);
+        if (parsed.core != .browser) continue;
+        try std.testing.expect(control_browser.parseBrowserMethod(parsed.rest) != null);
+        if (std.mem.eql(u8, method, "browser.wait")) wait_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), wait_count);
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

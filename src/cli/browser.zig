@@ -35,6 +35,7 @@ pub const browser_help =
     \\  click   --surface <id> --selector <css>                 셀렉터 요소 클릭
     \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
     \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
+    \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
     \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
     \\
 ;
@@ -68,6 +69,8 @@ pub const Request = union(enum) {
     type_text: struct { surface_id: u64, selector: []const u8, text: []const u8 },
     /// `browser scroll`(act 5f-2). selector 필수(scrollIntoView). 응답 {ok}.
     scroll: struct { surface_id: u64, selector: []const u8 },
+    /// `browser wait`: visible selector 또는 현재 load idle까지 polling. timeout은 1..25_000ms. 응답 {ok}.
+    wait: struct { surface_id: u64, condition: WaitCondition, selector: ?[]const u8, timeout_ms: u32 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -77,11 +80,26 @@ pub const Request = union(enum) {
             .get_url => .get_url,
             .exec => .exec,
             .get_cookies => .get_cookies,
-            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll => .ok,
+            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll, .wait => .ok,
             .get_local_storage => .value,
         };
     }
 };
+
+pub const WaitCondition = enum {
+    selector,
+    load,
+
+    fn wire(self: WaitCondition) []const u8 {
+        return switch (self) {
+            .selector => "selector",
+            .load => "load",
+        };
+    }
+};
+
+pub const wait_default_timeout_ms: u32 = 25_000;
+pub const wait_max_timeout_ms: u32 = 25_000;
 
 /// screenshot(5f-1)은 단일 응답이 아니라 **chunk 스트림**(§9.5.7)이라 단일-응답 `Request`와 분리한다 — main이
 /// `ScreenshotAssembler`로 chunk를 재조립해 PNG를 `out`(nil=stdout)에 쓴다. surface_id=대상 web surface. named 타입이라
@@ -118,6 +136,10 @@ pub const ParseError = error{
     MissingName, // `set-cookie`/`delete-cookie`에 `--name` 없음
     MissingKey, // `*-local-storage`에 `--key` 없음
     MissingSelector, // `click`/`type`/`scroll`에 `--selector` 없음
+    MissingWaitCondition, // `wait`에 `--selector` 또는 `--load` 없음
+    ConflictingWaitCondition, // `wait` 조건을 둘 이상 지정
+    MissingTimeoutValue, // `wait --timeout`에 값 없음
+    InvalidTimeout, // timeout이 1..25_000 정수가 아님
     MissingText, // `type`에 `--text` 없음
     MissingValue, // `set-cookie`/`set-local-storage`에 `--value` 없음
     MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`에 값 없음
@@ -223,6 +245,18 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const sel = ca.selector orelse return error.MissingSelector;
         return .{ .request = .{ .scroll = .{ .surface_id = s, .selector = sel } } };
     }
+    if (eq(sub, "wait")) {
+        const wa = try parseWaitArgs(rest);
+        const s = wa.surface orelse return error.MissingSurface;
+        const condition = wa.condition orelse return error.MissingWaitCondition;
+        if (condition == .selector and (wa.selector == null or wa.selector.?.len == 0)) return error.MissingSelector;
+        return .{ .request = .{ .wait = .{
+            .surface_id = s,
+            .condition = condition,
+            .selector = wa.selector,
+            .timeout_ms = wa.timeout_ms,
+        } } };
+    }
     if (eq(sub, "screenshot")) {
         // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`/`--rect x,y,w,h`/`--scale f`(생략=stdout·전체 뷰·기기 배율).
         var surface: ?u64 = null;
@@ -301,6 +335,51 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
 }
 
 const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, selector: ?[]const u8, text: ?[]const u8, secure: bool };
+
+const WaitArgs = struct {
+    surface: ?u64 = null,
+    condition: ?WaitCondition = null,
+    selector: ?[]const u8 = null,
+    timeout_ms: u32 = wait_default_timeout_ms,
+};
+
+fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
+    var r: WaitArgs = .{};
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            const value = optValue(rest, &i, "--surface") catch |err| switch (err) {
+                error.MissingOptionValue => return error.MissingSurfaceValue,
+                else => return err,
+            };
+            r.surface = parseU64(value) catch return error.InvalidSurface;
+        } else if (matchOpt(a, "--selector")) {
+            if (r.condition != null) return error.ConflictingWaitCondition;
+            const value = try optValue(rest, &i, "--selector");
+            if (value.len == 0) return error.MissingSelector;
+            r.condition = .selector;
+            r.selector = value;
+        } else if (eq(a, "--load")) {
+            if (r.condition != null) return error.ConflictingWaitCondition;
+            r.condition = .load;
+            i += 1;
+        } else if (matchOpt(a, "--timeout")) {
+            const value = optValue(rest, &i, "--timeout") catch |err| switch (err) {
+                error.MissingOptionValue => return error.MissingTimeoutValue,
+                else => return err,
+            };
+            const timeout = std.fmt.parseInt(u32, value, 10) catch return error.InvalidTimeout;
+            if (timeout == 0 or timeout > wait_max_timeout_ms) return error.InvalidTimeout;
+            r.timeout_ms = timeout;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else {
+            return error.UnexpectedArgument;
+        }
+    }
+    return r;
+}
 
 /// cookie/localStorage 명령 옵션(`--surface`·`--name`·`--key`·`--value`·`--domain`·`--path`·`--secure`)을 뽑는다. 위치
 /// 인자 금지, 알 수 없는 `-`옵션 에러. 각 값 옵션은 `--opt val`·`--opt=val` 양형태. 서브커맨드가 필요 필드만 검사(파서는 공유).
@@ -442,6 +521,15 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
         .click => |c| return selectorRequest(gpa, id, "browser.click", c.surface_id, c.selector, null),
         .type_text => |c| return selectorRequest(gpa, id, "browser.type", c.surface_id, c.selector, c.text),
         .scroll => |c| return selectorRequest(gpa, id, "browser.scroll", c.surface_id, c.selector, null),
+        .wait => |w| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(w.surface_id) });
+            try obj.put(gpa, "condition", .{ .string = w.condition.wire() });
+            if (w.selector) |selector| try obj.put(gpa, "selector", .{ .string = selector });
+            try obj.put(gpa, "timeout_ms", .{ .integer = w.timeout_ms });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.wait", .params = .{ .object = obj } } });
+        },
     }
 }
 
@@ -1157,6 +1245,104 @@ test "buildRequestBytes: act 메서드·params" {
         defer pm.deinit();
         try testing.expectEqualStrings("browser.type", pm.message.request.method);
         try testing.expectEqualStrings("hi", pm.message.request.params.?.object.get("text").?.string);
+    }
+}
+
+// ── wait 파서·wire·렌더 단위 ──
+
+test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
+    try testing.expectEqualStrings(
+        \\usage: maru browser <command> [--surface <id>] [args]
+        \\
+        \\web surface(브라우저 패널)를 제어한다. 먼저 `maru browser list`로 대상 web surface_id를 발견하고,
+        \\나머지 명령에 --surface <id>로 지정한다. 권한이 없으면 확인 모달이 뜨고, 허용하면 실행된다(§9.2 Model B).
+        \\
+        \\commands:
+        \\  list                                   열린 web 패널을 나열(id·url·title — 대상 발견용)
+        \\  navigate    --surface <id> <url>       URL로 이동
+        \\  get-url     --surface <id>             현재 문서 URL 출력
+        \\  exec        --surface <id> <script>    JavaScript 실행, 결과 출력
+        \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
+        \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
+        \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제
+        \\  get-local-storage    --surface <id> --key k             localStorage 값 출력
+        \\  set-local-storage    --surface <id> --key k --value v   localStorage 값 설정
+        \\  remove-local-storage --surface <id> --key k             localStorage 항목 삭제
+        \\  clear-storage        --surface <id>                     대상 origin 쿠키+스토리지 전부 삭제
+        \\  click   --surface <id> --selector <css>                 셀렉터 요소 클릭
+        \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
+        \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
+        \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
+        \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
+        \\
+    ,
+        browser_help,
+    );
+    // 첫 wait slice에서 명시적으로 제외한 조건은 help에도 노출하지 않는다.
+    for ([_][]const u8{ "networkidle", "wait --url", "wait --text", "--function", "--hidden", "--detached" }) |future| {
+        try testing.expect(std.mem.indexOf(u8, browser_help, future) == null);
+    }
+}
+
+test "parse: wait selector/load·timeout 기본값·상한·상호배타" {
+    switch (try parse(&.{ "wait", "--surface", "3", "--selector", "#ready" })) {
+        .request => |r| {
+            try testing.expectEqual(@as(u64, 3), r.wait.surface_id);
+            try testing.expectEqual(WaitCondition.selector, r.wait.condition);
+            try testing.expectEqualStrings("#ready", r.wait.selector.?);
+            try testing.expectEqual(wait_default_timeout_ms, r.wait.timeout_ms);
+        },
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "wait", "--surface=7", "--load", "--timeout=125" })) {
+        .request => |r| {
+            try testing.expectEqual(WaitCondition.load, r.wait.condition);
+            try testing.expect(r.wait.selector == null);
+            try testing.expectEqual(@as(u32, 125), r.wait.timeout_ms);
+        },
+        else => return error.Unexpected,
+    }
+    try testing.expectError(error.MissingSurface, parse(&.{ "wait", "--load" }));
+    try testing.expectError(error.MissingWaitCondition, parse(&.{ "wait", "--surface", "1" }));
+    try testing.expectError(error.ConflictingWaitCondition, parse(&.{ "wait", "--surface", "1", "--load", "--selector", "#x" }));
+    try testing.expectError(error.MissingSelector, parse(&.{ "wait", "--surface", "1", "--selector=" }));
+    try testing.expectError(error.MissingTimeoutValue, parse(&.{ "wait", "--surface", "1", "--load", "--timeout" }));
+    try testing.expectError(error.InvalidTimeout, parse(&.{ "wait", "--surface", "1", "--load", "--timeout", "0" }));
+    try testing.expectError(error.InvalidTimeout, parse(&.{ "wait", "--surface", "1", "--load", "--timeout", "25001" }));
+    try testing.expectError(error.InvalidTimeout, parse(&.{ "wait", "--surface", "1", "--load", "--timeout", "abc" }));
+}
+
+test "buildRequestBytes: browser.wait selector/load params" {
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .wait = .{
+            .surface_id = 11,
+            .condition = .selector,
+            .selector = "#ready",
+            .timeout_ms = 500,
+        } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.wait", pm.message.request.method);
+        const p = pm.message.request.params.?.object;
+        try testing.expectEqual(@as(i64, 11), p.get("id").?.integer);
+        try testing.expectEqualStrings("selector", p.get("condition").?.string);
+        try testing.expectEqualStrings("#ready", p.get("selector").?.string);
+        try testing.expectEqual(@as(i64, 500), p.get("timeout_ms").?.integer);
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .wait = .{
+            .surface_id = 11,
+            .condition = .load,
+            .selector = null,
+            .timeout_ms = wait_default_timeout_ms,
+        } }, .{ .number = 2 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        const p = pm.message.request.params.?.object;
+        try testing.expectEqualStrings("load", p.get("condition").?.string);
+        try testing.expect(p.get("selector") == null);
     }
 }
 

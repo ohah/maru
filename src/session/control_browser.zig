@@ -48,9 +48,9 @@ const cpg = @import("control_pane_grant.zig"); // 1e-confirm-1b: pane-bound conf
 
 // ── ① browser.* wire 스키마(§9.1 ①) ──────────────────────────────────────────────────────────────────────
 
-/// `browser.*` 메서드(§9 표). 5a=핵심 3개(navigate/getUrl/executeScript), 5f-0b-3b=subscribe, **5f-4c=getCookies**
-/// (§9.4 D5 `browser_storage` scope). 나머지(screenshot/back/forward/refresh/findElement/click/sendKeys)는 후속에서
-/// 이 enum에 추가된다. `parseBrowserMethod`가 인식 못 하면(screenshot 등) dispatch가 `method_not_found`로 접는다.
+/// 구현된 `browser.*` 메서드(§9 표). async op의 enum tag는 Swift `drainBrowserOps` op_kind wire이므로 끝에만 추가하고
+/// `app_host_abi.zig` 숫자 assert를 같이 갱신한다. 아직 없는 back/forward/refresh/findElement/sendKeys 등은
+/// `parseBrowserMethod`가 null을 반환해 `method_not_found`로 접는다.
 pub const BrowserMethod = enum {
     /// `browser.navigate {id, url}` → 5d `load(URLRequest)`.
     navigate,
@@ -97,6 +97,9 @@ pub const BrowserMethod = enum {
     type_text,
     /// `browser.scroll {id, selector}` → `{ok}`. eval `querySelector(sel).scrollIntoView()`. base `browser`. op.arg=`{selector}`. **op_kind=14**.
     scroll,
+    /// `browser.wait {id, condition, selector?, timeout_ms?}`(5f-2) → `{ok}`. selector=visible DOM 조건, load=현재
+    /// `WKWebView.isLoading == false`. base `browser`. **op_kind=15 고정**.
+    wait,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -118,6 +121,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "click")) return .click;
     if (eq(rest, "type")) return .type_text;
     if (eq(rest, "scroll")) return .scroll;
+    if (eq(rest, "wait")) return .wait;
     return null;
 }
 
@@ -182,6 +186,31 @@ pub const SelectorParams = struct { id: u64, selector: []const u8 };
 
 /// `browser.type` params `{id, selector, text}`. 둘 다 필수.
 pub const TypeParams = struct { id: u64, selector: []const u8, text: []const u8 };
+
+/// `browser.wait` 조건. 첫 슬라이스는 명시적 selector visible·현재 load 완료만 지원한다. URL/text/fn/network-idle과
+/// click/type auto-wait는 후속(§9.4 D3·§9.5).
+pub const WaitCondition = enum {
+    selector,
+    load,
+
+    pub fn wire(self: WaitCondition) []const u8 {
+        return switch (self) {
+            .selector => "selector",
+            .load => "load",
+        };
+    }
+};
+
+pub const wait_default_timeout_ms: u32 = 25_000;
+pub const wait_max_timeout_ms: u32 = 25_000;
+pub const wait_poll_interval_ms: u32 = 100;
+
+pub const WaitParams = struct {
+    id: u64,
+    condition: WaitCondition,
+    selector: ?[]const u8,
+    timeout_ms: u32,
+};
 
 /// `browser.screenshot` 선택 params — rect(캡처 영역, CSS 포인트)·scale(출력 배율). 둘 다 부재 가능(=전체 뷰·기기 배율).
 /// id는 dispatch가 먼저 읽으므로(readIdParam) 여기선 rect/scale만 추출. 형식 오류는 invalid_params(surface oracle 아님).
@@ -291,6 +320,29 @@ pub fn parseTypeParams(params: ?std.json.Value) ParamError!TypeParams {
     return .{ .id = try idFromObj(obj), .selector = try strFromObj(obj, "selector"), .text = try strFromObj(obj, "text") };
 }
 
+/// `browser.wait` params. condition은 tagged string이라 후속 URL/text 조건을 기존 필드 의미 변경 없이 확장할 수 있다.
+/// selector 조건은 non-empty selector가 필수, load 조건은 selector를 금지한다. timeout은 1..25_000ms bounded.
+pub fn parseWaitParams(params: ?std.json.Value) ParamError!WaitParams {
+    const obj = try paramsObject(params);
+    const condition_wire = try strFromObj(obj, "condition");
+    const condition: WaitCondition = if (eq(condition_wire, "selector"))
+        .selector
+    else if (eq(condition_wire, "load"))
+        .load
+    else
+        return error.InvalidParams;
+    const selector = try optStrFromObj(obj, "selector");
+    switch (condition) {
+        .selector => if (selector == null or selector.?.len == 0) return error.InvalidParams,
+        .load => if (selector != null) return error.InvalidParams,
+    }
+    const timeout_ms: u32 = if (obj.get("timeout_ms")) |v| switch (v) {
+        .integer => |i| if (i < 1 or i > @as(i64, wait_max_timeout_ms)) return error.InvalidParams else @intCast(i),
+        else => return error.InvalidParams,
+    } else wait_default_timeout_ms;
+    return .{ .id = try idFromObj(obj), .condition = condition, .selector = selector, .timeout_ms = timeout_ms };
+}
+
 /// JSON 수(integer 또는 float) → f64. 비수치 → InvalidParams. rect/scale 파싱 공용.
 fn numF64FromObj(obj: std.json.ObjectMap, name: []const u8) ParamError!f64 {
     return switch (obj.get(name) orelse return error.InvalidParams) {
@@ -349,6 +401,24 @@ fn writeSelectorArg(s: *std.json.Stringify, selector: []const u8, text: ?[]const
         try s.write(t);
     }
     try s.endObject();
+}
+
+/// wait op.arg — Swift wait coordinator가 소비할 compact JSON. id는 L4 routing 필드라 제외한다.
+pub fn serializeWaitArg(gpa: std.mem.Allocator, p: WaitParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    s.beginObject() catch return error.OutOfMemory;
+    s.objectField("condition") catch return error.OutOfMemory;
+    s.write(p.condition.wire()) catch return error.OutOfMemory;
+    if (p.selector) |selector| {
+        s.objectField("selector") catch return error.OutOfMemory;
+        s.write(selector) catch return error.OutOfMemory;
+    }
+    s.objectField("timeout_ms") catch return error.OutOfMemory;
+    s.write(p.timeout_ms) catch return error.OutOfMemory;
+    s.endObject() catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
 }
 
 /// screenshot op.arg — Swift가 WKSnapshotConfiguration로 쓸 `{rect?, scale?}` compact JSON. 둘 다 부재면 `{}`(전체 뷰·기기 배율).
@@ -807,7 +877,21 @@ pub fn serializeUnauthorized(gpa: std.mem.Allocator, request_bytes: []const u8) 
 /// 얻고, method별 result 헬퍼로 실는다. `ok=false`(webView 부재·evaluateJavaScript 에러 등)면 `internal_error`(+`result`
 /// 를 message로). `result`는 method별: navigate=무시·getUrl=url·executeScript=스크립트 반환값을 **문자열로** 싣는다
 /// (JS 값 → 문자열; 진짜 JSON 값 embed는 후속). 재파싱 실패·비-browser는 방어적 내부오류(dispatch가 이미 검증했으므로 도달 안 함).
+/// Swift→Zig browser op 완료 status. ABI는 u32지만 L2가 숫자 의미의 단일 출처를 소유한다.
+pub const BrowserCompletionStatus = enum(u32) {
+    success = 0,
+    failed = 1,
+    timeout = 2,
+    invalid_params = 3,
+    process_exited = 4,
+    unauthorized = 5,
+};
+
 pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u8, ok: bool, result: []const u8) std.mem.Allocator.Error![]u8 {
+    return serializeBrowserResponseStatus(gpa, request_bytes, if (ok) .success else .failed, result);
+}
+
+pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []const u8, status: BrowserCompletionStatus, result: []const u8) std.mem.Allocator.Error![]u8 {
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errorResponse(gpa, .null, .internal_error),
@@ -818,7 +902,17 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
         else => return errorResponse(gpa, .null, .internal_error),
     };
     const bmethod = parseBrowserMethod(cp.parseMethod(req.method).rest) orelse return errorResponse(gpa, req.id, .internal_error);
-    if (!ok) {
+    if (status != .success) {
+        if (bmethod == .wait) {
+            return switch (status) {
+                .timeout => serializeWaitTimeoutError(gpa, req),
+                .invalid_params => cp.serializeError(gpa, req.id, .invalid_params, if (result.len > 0) result else "Invalid selector", null),
+                .process_exited => cp.serializeError(gpa, req.id, .process_exited, cp.ErrorCode.process_exited.defaultMessage(), null),
+                .unauthorized => cp.serializeError(gpa, req.id, .unauthorized, cp.ErrorCode.unauthorized.defaultMessage(), null),
+                .success => unreachable,
+                .failed => cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else "browser wait failed", null),
+            };
+        }
         const msg = if (result.len > 0) result else "browser op failed";
         return cp.serializeError(gpa, req.id, .internal_error, msg, null);
     }
@@ -844,7 +938,17 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
         .set_local_storage, .remove_local_storage, .clear_storage => serializeNavigateResult(gpa, req.id),
         // act(5f-2): click/type/scroll → {ok:<bool>} — Swift eval이 "true"(요소 발견+동작)/"false"(셀렉터 미매치)를 result로.
         .click, .type_text, .scroll => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
+        .wait => serializeNavigateResult(gpa, req.id),
     };
+}
+
+fn serializeWaitTimeoutError(gpa: std.mem.Allocator, req: cp.Request) std.mem.Allocator.Error![]u8 {
+    const p = parseWaitParams(req.params) catch return cp.serializeError(gpa, req.id, .internal_error, "invalid wait request state", null);
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "condition", .{ .string = p.condition.wire() });
+    try data.put(gpa, "timeout_ms", .{ .integer = p.timeout_ms });
+    return cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), .{ .object = data });
 }
 
 /// act 결과 `{"ok":<bool>}`(click/type/scroll — ok=요소 발견+동작). Swift eval의 boolean 반환을 실는다. caller free.
@@ -875,6 +979,15 @@ pub const BrowserOp = struct {
     method: BrowserMethod,
     /// gpa-owned(caller가 free). navigate=url·executeScript=script·getUrl=빈("").
     arg: []const u8,
+    /// null=capability가 직접 인가. non-null=pane-bound confirm grant가 인가한 op. 장기 wait revoke가 capability-origin
+    /// 요청을 잘못 취소하지 않도록 provenance를 보존한다(짧은 기존 op의 실행 의미는 바꾸지 않음).
+    pane_grant: ?GrantProvenance = null,
+};
+
+pub const GrantProvenance = struct {
+    pane: u64,
+    target: u64,
+    scope: capmod.ScopeClass,
 };
 
 /// `browser.subscribe`의 인가·검증 통과 결과(5f-0b-3b): 대상 web surface + 이벤트 필터. async op이 아니라 L4가
@@ -976,6 +1089,7 @@ pub fn browserOpFromRequest(
     //       세션 보유 cap 중 **하나라도** target+method를 인가하면 통과(각 cap은 single-scope이나 세션은 다중 cap 보유 —
     //       navigate=browser·getCookies=browser_storage가 각기 다른 cap으로 인가). 아무 cap도 없으면 균일 unauthorized. ──
     var authorized = false;
+    var pane_grant: ?GrantProvenance = null;
     for (caller_caps) |cap| {
         switch (capmod.authorize(cap, target_id, cap.generation, req.method, now)) {
             .granted => {
@@ -993,7 +1107,10 @@ pub fn browserOpFromRequest(
     if (!authorized) {
         if (req_scope) |sc| {
             if (pane_selector) |pane| {
-                if (grants.isGranted(pane, target_id, sc)) authorized = true;
+                if (grants.isGranted(pane, target_id, sc)) {
+                    authorized = true;
+                    pane_grant = .{ .pane = pane, .target = target_id, .scope = sc };
+                }
             }
         }
     }
@@ -1043,6 +1160,7 @@ pub fn browserOpFromRequest(
             const p = parseTypeParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
             break :blk try serializeSelectorArg(gpa, p.selector, p.text);
         },
+        .wait => try serializeWaitArg(gpa, parseWaitParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
@@ -1062,7 +1180,7 @@ pub fn browserOpFromRequest(
         gpa.free(arg);
         return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
     }
-    return .{ .op = .{ .surface_id = target_id, .method = bmethod, .arg = arg } };
+    return .{ .op = .{ .surface_id = target_id, .method = bmethod, .arg = arg, .pane_grant = pane_grant } };
 }
 
 /// 인가 실패한 **valid**(유효 메서드·존재 web surface) browser 요청의 최종 판정(1e-confirm-1c). `pane_selector`가 있으면
@@ -1393,6 +1511,9 @@ test "dispatchBrowser(1e-confirm-1b): cap 없어도 pane grant가 browser.naviga
             defer testing.allocator.free(op.arg);
             try testing.expectEqual(@as(u64, 11), op.surface_id);
             try testing.expectEqual(BrowserMethod.navigate, op.method);
+            try testing.expectEqual(@as(u64, 5), op.pane_grant.?.pane);
+            try testing.expectEqual(@as(u64, 11), op.pane_grant.?.target);
+            try testing.expectEqual(capmod.ScopeClass.browser, op.pane_grant.?.scope);
         },
         .err => |e| {
             testing.allocator.free(e);
@@ -1519,7 +1640,7 @@ test "dispatchBrowser §8.3: cap 부재·scope 불충족·surface 불일치·rev
 }
 
 // ── 9a) parse/method 파서 단위 ──
-test "parseBrowserMethod: navigate/getUrl/executeScript/getCookies/screenshot 인식, 미지는 null" {
+test "parseBrowserMethod: 구현된 browser method 인식, 미지는 null" {
     try testing.expectEqual(BrowserMethod.navigate, parseBrowserMethod("navigate").?);
     try testing.expectEqual(BrowserMethod.get_url, parseBrowserMethod("getUrl").?);
     try testing.expectEqual(BrowserMethod.execute_script, parseBrowserMethod("executeScript").?);
@@ -1534,6 +1655,7 @@ test "parseBrowserMethod: navigate/getUrl/executeScript/getCookies/screenshot �
     try testing.expectEqual(BrowserMethod.click, parseBrowserMethod("click").?); // act 5f-2
     try testing.expectEqual(BrowserMethod.type_text, parseBrowserMethod("type").?);
     try testing.expectEqual(BrowserMethod.scroll, parseBrowserMethod("scroll").?);
+    try testing.expectEqual(BrowserMethod.wait, parseBrowserMethod("wait").?);
     // 미구현/미지 → null.
     try testing.expect(parseBrowserMethod("back") == null);
     try testing.expect(parseBrowserMethod("get_url") == null); // snake_case는 wire 이름 아님(camelCase 엄수)
@@ -2156,6 +2278,110 @@ test "dispatchBrowser(screenshot): 형식 오류 rect → invalid_params(surface
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11,\"rect\":{\"x\":0}}}", browserCap(11));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, -32602), try errCode(wire));
+}
+
+// ── browser.wait: params/dispatch/provenance/completion ──
+
+test "parseWaitParams: selector/load·기본 timeout·경계·형식 오류" {
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"condition\":\"selector\",\"selector\":\"#ready\"}}");
+        defer pm.deinit();
+        const p = try parseWaitParams(pm.message.request.params);
+        try testing.expectEqual(@as(u64, 11), p.id);
+        try testing.expectEqual(WaitCondition.selector, p.condition);
+        try testing.expectEqualStrings("#ready", p.selector.?);
+        try testing.expectEqual(wait_default_timeout_ms, p.timeout_ms);
+    }
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"condition\":\"load\",\"timeout_ms\":1}}");
+        defer pm.deinit();
+        const p = try parseWaitParams(pm.message.request.params);
+        try testing.expectEqual(WaitCondition.load, p.condition);
+        try testing.expect(p.selector == null);
+        try testing.expectEqual(@as(u32, 1), p.timeout_ms);
+    }
+    const invalid = [_][]const u8{
+        "{\"id\":11,\"condition\":\"selector\"}",
+        "{\"id\":11,\"condition\":\"selector\",\"selector\":\"\"}",
+        "{\"id\":11,\"condition\":\"load\",\"selector\":\"#x\"}",
+        "{\"id\":11,\"condition\":\"networkidle\"}",
+        "{\"id\":11,\"condition\":\"load\",\"timeout_ms\":0}",
+        "{\"id\":11,\"condition\":\"load\",\"timeout_ms\":25001}",
+        "{\"id\":11,\"condition\":\"load\",\"timeout_ms\":1.5}",
+    };
+    for (invalid) |params_json| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, params_json, .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseWaitParams(parsed.value));
+    }
+}
+
+test "dispatchBrowser(wait): cap과 pane grant provenance를 구분하고 compact arg 생성" {
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"condition\":\"selector\",\"selector\":\"#ready\",\"timeout_ms\":500}}";
+    {
+        const op = try dispatchOp(request, browserCap(11));
+        defer testing.allocator.free(op.arg);
+        try testing.expectEqual(BrowserMethod.wait, op.method);
+        try testing.expect(op.pane_grant == null); // capability-origin wait는 pane grant revoke 대상 아님
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("selector", parsed.value.object.get("condition").?.string);
+        try testing.expectEqualStrings("#ready", parsed.value.object.get("selector").?.string);
+        try testing.expectEqual(@as(i64, 500), parsed.value.object.get("timeout_ms").?.integer);
+    }
+    {
+        var grants: cpg.PaneGrantStore = .{};
+        try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+        switch (try dispatchGrant(request, 5, &grants)) {
+            .op => |op| {
+                defer testing.allocator.free(op.arg);
+                try testing.expectEqual(@as(u64, 5), op.pane_grant.?.pane);
+                try testing.expectEqual(@as(u64, 11), op.pane_grant.?.target);
+                try testing.expectEqual(capmod.ScopeClass.browser, op.pane_grant.?.scope);
+            },
+            .err => |e| {
+                testing.allocator.free(e);
+                return error.ExpectedOpGotErr;
+            },
+            else => return error.ExpectedOp,
+        }
+    }
+}
+
+test "serializeBrowserResponseStatus(wait): success·timeout data·invalid selector·surface close·grant revoke" {
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"condition\":\"load\",\"timeout_ms\":125}}";
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, request, .success, "");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expect(pm.message.response.result.?.object.get("ok").?.bool);
+    }
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, request, .timeout, "");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        const e = pm.message.response.err.?;
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.timeout)), e.code);
+        try testing.expectEqualStrings("load", e.data.?.object.get("condition").?.string);
+        try testing.expectEqual(@as(i64, 125), e.data.?.object.get("timeout_ms").?.integer);
+    }
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, request, .invalid_params, "Invalid selector");
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(w));
+    }
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, request, .process_exited, "");
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.process_exited)), try errCode(w));
+    }
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, request, .unauthorized, "");
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+    }
 }
 
 test {

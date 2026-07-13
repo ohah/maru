@@ -9,6 +9,11 @@
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
 #define MARU_MACOS_APP_HOST_ABI_VERSION 115u
 
+/* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
+#define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
+#define MARU_BROWSER_WAIT_MAX_TIMEOUT_MS 25000u
+#define MARU_BROWSER_WAIT_POLL_INTERVAL_MS 100u
+
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
 #define MARU_WORKSPACE_HEADER "maru.workspace.v1"
@@ -1138,16 +1143,23 @@ void maru_macos_control_server_drain(const MaruControlSessionRef *refs, size_t c
 void maru_macos_control_server_stop(void);
 
 /* 5e-2b: 매 frame tick 호출 — (1) hung browser op timeout reap, (2) browser op 큐에서 하나 pop. 반환 1=op 있음·0=없음.
-   op 있으면 Swift가 out_surface_id의 webView를 찾아 BrowserControl(op_kind: 0=navigate·1=getUrl·2=executeScript·
-   4=getCookies)을 out_arg(navigate=url·executeScript=script·getUrl/getCookies=빈)로 실행하고, 완료 시
-   complete_browser_op(out_async_id, ...)로 되돌린다. out_arg_ptr는 **이 호출 중에만** 유효(Swift가 즉시 복사). 서버 미시작이면 0. 메인 스레드에서만. */
+   op 있으면 Swift가 out_surface_id의 webView를 찾아 BrowserControl에서 실행한다. op_kind:
+   0=navigate·1=getUrl·2=executeScript·4=getCookies·5=screenshot·6=setCookie·7=deleteCookie·
+   8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll·15=wait.
+   완료 시 complete_browser_op(out_async_id, ...)로 되돌린다. out_arg_ptr는 **이 호출 중에만** 유효(Swift가 즉시 복사).
+   서버 미시작이면 0. 메인 스레드에서만. */
 uint32_t maru_macos_control_take_browser_op(uint64_t *out_async_id, uint64_t *out_surface_id, uint8_t *out_op_kind,
                                             const uint8_t **out_arg_ptr, size_t *out_arg_len);
 
-/* 5e-2b: BrowserControl async 완료 콜백이 호출 — async_id 요청을 결과로 응답한다. status: 0=ok·非0=error. result:
-   method별(getUrl=url·executeScript=반환값 문자열·getCookies=쿠키 JSON 배열·navigate=무시; error면 message). 미지/
-   timeout된 async_id는 무시(늦은 콜백). 메인 스레드에서만(WKWebView 콜백이 메인). */
+/* 5e-2b: BrowserControl async 완료 콜백이 호출 — async_id 요청을 결과로 응답한다. status:
+   0=success·1=failed·2=timeout·3=invalid_params·4=process_exited·5=unauthorized. result는 method별
+   (getUrl=url·executeScript=반환값 문자열·getCookies=쿠키 JSON 배열·navigate/wait=무시; error면 message).
+   미지/timeout된 async_id는 무시(늦은 콜백). 메인 스레드에서만(WKWebView 콜백이 메인). */
 void maru_macos_control_complete_browser_op(uint64_t async_id, uint32_t status, const uint8_t *result, size_t result_len);
+
+/* browser.wait polling이 다음 DOM 평가 전에 요청 생존 여부를 확인한다. revoke/close/reap/완료 후 0.
+   서버 미시작이면 0. 메인 스레드에서만. */
+uint32_t maru_macos_control_browser_wait_is_active(uint64_t async_id);
 
 /* 5e-2b-2(테스트 전용): env MARU_TEST_BROWSER_CAP이 설정됐을 때만 surface_id에 묶인 browser cap을 라이브 store에
    발급하고 nonce(raw 32B)를 out_nonce로 넘긴다. 반환 1=발급·0=env 미설정/용량 부족/실패. macos smoke가 소켓

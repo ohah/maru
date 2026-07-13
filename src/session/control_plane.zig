@@ -61,6 +61,9 @@ pub const ErrorCode = enum(i64) {
     /// 그 surface가 없을 때만 반환하므로 oracle이 아니다(호출자는 이미 그 surface를 볼 권한이 있다). 코드값 -32003도
     /// impl-defined server-error 범위에서 maru가 택한 값.
     process_exited = -32003,
+    /// 조건 기반 browser wait가 요청한 제한 시간 안에 충족되지 않음(§9.4/§9.5). 일반 transport timeout과 달리
+    /// 서버가 정상 응답한 **도메인 실패**라 연결을 유지할 수 있다. data에 condition/timeout_ms를 싣는다.
+    timeout = -32004,
 
     /// 이 코드의 표준 짧은 message(JSON-RPC §5.1의 관례). 에러 응답 build 편의.
     pub fn defaultMessage(self: ErrorCode) []const u8 {
@@ -73,6 +76,7 @@ pub const ErrorCode = enum(i64) {
             .payload_too_large => "Payload too large",
             .unauthorized => "Unauthorized",
             .process_exited => "Process exited",
+            .timeout => "Timeout",
         };
     }
 };
@@ -783,26 +787,28 @@ test "id 매칭: response.id가 request.id와 값으로 일치(number·string), 
 }
 
 // ── 3) 에러 모델 ──
-test "에러 코드: 표준 5개 + payload-too-large 코드값과 default message" {
+test "에러 코드: 표준 5개 + maru 확장 코드값과 default message" {
     try testing.expectEqual(@as(i64, -32700), @intFromEnum(ErrorCode.parse_error));
     try testing.expectEqual(@as(i64, -32600), @intFromEnum(ErrorCode.invalid_request));
     try testing.expectEqual(@as(i64, -32601), @intFromEnum(ErrorCode.method_not_found));
     try testing.expectEqual(@as(i64, -32602), @intFromEnum(ErrorCode.invalid_params));
     try testing.expectEqual(@as(i64, -32603), @intFromEnum(ErrorCode.internal_error));
     // maru 확장 코드는 전부 impl-defined server-error 범위(-32000~-32099)에 있어야 한다.
-    for ([_]ErrorCode{ .payload_too_large, .unauthorized, .process_exited }) |ext| {
+    for ([_]ErrorCode{ .payload_too_large, .unauthorized, .process_exited, .timeout }) |ext| {
         const v = @intFromEnum(ext);
         try testing.expect(v >= -32099 and v <= -32000);
     }
     try testing.expectEqual(@as(i64, -32002), @intFromEnum(ErrorCode.unauthorized));
     try testing.expectEqual(@as(i64, -32003), @intFromEnum(ErrorCode.process_exited));
+    try testing.expectEqual(@as(i64, -32004), @intFromEnum(ErrorCode.timeout));
     try testing.expectEqualStrings("Method not found", ErrorCode.method_not_found.defaultMessage());
     try testing.expectEqualStrings("Unauthorized", ErrorCode.unauthorized.defaultMessage());
     try testing.expectEqualStrings("Process exited", ErrorCode.process_exited.defaultMessage());
+    try testing.expectEqualStrings("Timeout", ErrorCode.timeout.defaultMessage());
 }
 
 test "에러 모델: 각 표준 코드가 에러 응답으로 직렬화된다" {
-    for ([_]ErrorCode{ .parse_error, .invalid_request, .method_not_found, .invalid_params, .internal_error, .payload_too_large, .unauthorized, .process_exited }) |code| {
+    for ([_]ErrorCode{ .parse_error, .invalid_request, .method_not_found, .invalid_params, .internal_error, .payload_too_large, .unauthorized, .process_exited, .timeout }) |code| {
         const wire = try serializeError(testing.allocator, .{ .number = 1 }, code, code.defaultMessage(), null);
         defer testing.allocator.free(wire);
         var pm = try parseMessage(testing.allocator, wire);

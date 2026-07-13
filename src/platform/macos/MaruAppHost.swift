@@ -912,6 +912,25 @@ enum BrowserControl {
         }
     }
 
+    // act(5f-2): CSS-selector 기반 click/type/scroll을 eval 스크립트로 만든다(base browser scope). querySelector가 null이면
+    // false(요소 미발견) 반환 → Zig가 {ok:false}로 실는다. type은 input/textarea면 .value, 아니면 textContent에 넣고
+    // input/change 이벤트 발화(프레임워크 반응). scroll은 scrollIntoView(요소로 스크롤). selector/text는 jsStringLiteral로 escape.
+    static func actScript(_ obj: [String: Any], op: UInt8) -> String? {
+        guard let selector = obj["selector"] as? String else { return nil }
+        let sel = jsStringLiteral(selector)
+        switch op {
+        case 12: // click
+            return "(()=>{const e=document.querySelector(\(sel));if(!e)return false;e.click();return true;})()"
+        case 13: // type
+            guard let text = obj["text"] as? String else { return nil }
+            let txt = jsStringLiteral(text)
+            return "(()=>{const e=document.querySelector(\(sel));if(!e)return false;if(e.focus)e.focus();if('value'in e){e.value=\(txt);}else{e.textContent=\(txt);}e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;})()"
+        case 14: // scroll
+            return "(()=>{const e=document.querySelector(\(sel));if(!e)return false;e.scrollIntoView();return true;})()"
+        default: return nil
+        }
+    }
+
     // 문자열을 안전한 JS 문자열 리터럴로(JSON string은 valid JS 리터럴 — 따옴표·제어문자·유니코드 escape). 수동 조립 금지.
     static func jsStringLiteral(_ s: String) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: [s]),
@@ -2983,6 +3002,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case 11: // clearStorage(§9.4 D4) — WKWebsiteDataStore로 대상 origin 데이터 삭제(멱등). {ok}.
                 BrowserControl.clearStorage(wp.webView) { ok in
                     self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "clearStorage failed")
+                }
+            case 12, 13, 14: // click/type/scroll(act 5f-2) — eval(querySelector). result="true"(발견+동작)/"false"(미매치)→Zig {ok:bool}.
+                if let obj = BrowserControl.parseCookieArg(arg), let js = BrowserControl.actScript(obj, op: opKind) {
+                    BrowserControl.executeScript(wp.webView, js) { result in
+                        switch result {
+                        case .success(let value):
+                            self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
+                        case .failure(let error):
+                            self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
+                        }
+                    }
+                } else {
+                    self.completeBrowserOp(asyncId, status: 1, result: "act bad params")
                 }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)

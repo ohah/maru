@@ -232,9 +232,10 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 | `browser.back`/`forward`/`refresh` | `{id}` | `{ok}` | `goBack`/`goForward`/`reload` |
 | `browser.executeScript` | `{id, script, args?}` | `{result}` | `evaluateJavaScript` |
 | `browser.screenshot` | `{id, format?}` | `browser.screenshotChunk` notification×N → 최종 응답 `{capture_id, seq_total, width, height, format}` | `takeSnapshot`→PNG, **소켓 chunk-streaming**(§9.5.3·§9.5.7 — `{png_base64}` 단일 응답 폐기: >1MB 프레임 상한) |
-| `browser.findElement` | `{id, using, value}` | `{element}` | `evaluateJavaScript`(CSS/xpath) |
-| `browser.click` | `{id, element}` | `{ok}` | `evaluateJavaScript` |
-| `browser.sendKeys` | `{id, element, text}` | `{ok}` | `evaluateJavaScript` |
+| `browser.click` | `{id, selector}` | `{ok}` | eval `querySelector(sel).click()` — scope=`browser`(5f-2, ok=요소 발견+동작) |
+| `browser.type` | `{id, selector, text}` | `{ok}` | eval input `.value` + input/change 이벤트 — scope=`browser`(5f-2) |
+| `browser.scroll` | `{id, selector}` | `{ok}` | eval `querySelector(sel).scrollIntoView()` — scope=`browser`(5f-2) |
+| `browser.findElement`/`sendKeys` | — | — | 노드-ref snapshot gated(§9.5.4) — 미룸(CSS-selector click/type/scroll이 대체) |
 | `browser.getCookies` | `{id}` | `{cookies}` | `WKHTTPCookieStore.getAllCookies` |
 | `browser.setCookie` | `{id, name, value, domain?, path?, secure?}` | `{ok}` | `WKHTTPCookieStore.setCookie` — scope=`browser_storage`(§9.4 D4). httpOnly 미지원(WKWebView 한계) |
 | `browser.deleteCookie` | `{id, name, domain?, path?}` | `{ok}` | `WKHTTPCookieStore.delete` — scope=`browser_storage` |
@@ -405,7 +406,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **9.5.3 — 대용량 결과 (스크린샷 1MB 초과 — ⚠️ 초판 파일-경로안 폐기)**. **결정: 소켓 chunk-streaming**. 스크린샷/PDF 등 1MB 초과 바이너리는 **cap-게이트 소켓 위 chunk 스트리밍**(`control_capture.zig`의 chunk 프로토콜 재사용 — chunk/complete/invalidated notification, 이미 순수 코드)으로 전달, base64 chunk 프레임. **초판의 "파일 0600+경로 반환" 폐기 이유(3차 감사)**: control dir은 0700 소유자만이나 **같은 uid 프로세스는 통과**해 `artifacts/`를 readdir+read → cap 없이 스크린샷(=D5가 비밀 취급하는 렌더 토큰) 유출 → §8.3/§8.5가 소켓에서 닫은 **same-uid 위협을 재개방**. chunk-streaming은 결과를 cap-게이트 소켓 안에 유지해 이 구멍을 안 연다. (파일이 꼭 필요하면 §8.5 nonce 패턴=0600 write→read-only fd 재오픈→**즉시 unlink**→`SCM_RIGHTS` fd-pass가 유일한 안전 형태 — 단순 경로 반환은 금지.) chunk 배선은 subscribeOutput과 공유 토대라 낭비 아님.
 
-**9.5.4 — snapshot fork (노드-ref 출처 = 주입 함정)**. click/type가 참조할 snapshot 노드-ref를 **네이티브 WebKit a11y(NSAccessibility)** 로 뽑으면 주입 불요지만 **안정 ref 어렵다**(NSAccessibility 안정 id 없음, CDP backend-node-id는 CDP 전용). **주입 JS DOM walk**는 안정 ref 쉬우나 **비신뢰 콘텐츠 주입=console/network와 같은 보안 표면→미룸**. **결정: 5f-0에 "네이티브 a11y snapshot viability 스파이크"**(Web Inspector 스파이크와 병렬) — 성공=네이티브 snapshot을 5f-1에, 실패=snapshot을 **주입-gated 버킷으로 미룸**. **연쇄(3차 감사)**: snapshot이 미뤄지면 **ref 기반 act(click-by-ref)도 함께 미룸**; 그동안 **5f-2 act는 CSS-selector/좌표 기반**(executeScript-backed·snapshot 무관)으로 착수.
+**9.5.4 — snapshot fork (노드-ref 출처 = 주입 함정)**. click/type가 참조할 snapshot 노드-ref를 **네이티브 WebKit a11y(NSAccessibility)** 로 뽑으면 주입 불요지만 **안정 ref 어렵다**(NSAccessibility 안정 id 없음, CDP backend-node-id는 CDP 전용). **주입 JS DOM walk**는 안정 ref 쉬우나 **비신뢰 콘텐츠 주입=console/network와 같은 보안 표면→미룸**. **결정: 5f-0에 "네이티브 a11y snapshot viability 스파이크"**(Web Inspector 스파이크와 병렬) — 성공=네이티브 snapshot을 5f-1에, 실패=snapshot을 **주입-gated 버킷으로 미룸**. **연쇄(3차 감사)**: snapshot이 미뤄지면 **ref 기반 act(click-by-ref)도 함께 미룸**; 그동안 **5f-2 act는 CSS-selector/좌표 기반**(executeScript-backed·snapshot 무관)으로 착수. **구현(5f-2, 2026-07-13)**: `browser.click {id,selector}`·`type {id,selector,text}`·`scroll {id,selector}` → `{ok:<bool>}`(op_kind 12/13/14, **base `browser` scope**). WKWebView에 네이티브 act API 없어 **eval 백엔드**(`querySelector(sel)` null이면 `ok:false`=요소 미발견; click=`.click()`·type=input/textarea `.value` 설정+input/change 이벤트·scroll=`scrollIntoView()`). selector/text는 Swift `jsStringLiteral`로 escape. exec가 같은 도달이라 base browser scope 일관. **범위 밖(후속)**: 좌표 기반 scroll(x/y)·ref 기반 act(snapshot gated)·wait·contenteditable type.
 
 **9.5.5 — 테스트 경계**. **헤드리스(CI 게이트)**: EventBroker(fake 소스로 구독·필터·coalesce/drop·revocation·purge)·지속세션 멀티요청 왕복(`control_server` 왕복 테스트 확장)·outbound 큐 응답/이벤트 포화 정책·chunk 결과 직렬화·D5 서브스코프 게이트(`control_capability` 순수)·연결 수명(heap pending free·drop 통지). **스모크(display·비-CI)**: 실 WKWebView 이벤트(navigate→`browser.navigated`, `alert()`→`dialog`)·스크린샷 chunk 왕복+PNG 헤더·쿠키/localStorage 실 read. **fixture 페이지**(maru-app:// or data:)+**scripted-agent**(5e 소켓 클라 확장)가 subscribe→op 구동→이벤트/결과 단언. **손 테스트 only**: crash 이벤트(결정적 트리거 불가), 실 에이전트+실 로그인.
 

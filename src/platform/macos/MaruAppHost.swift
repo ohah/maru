@@ -4077,6 +4077,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 종료해 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상(포커스마다 ^[[I·비프)의 수동 회복 — 셸 통합
         // 자동 리셋이 안 닿는 타 셸·hang 복구 직후용. 화면·스크롤백은 보존(Reset to Defaults=전체 설정 초기화와 다르다 — 입력 모드만 끈다).
         app.addItem(nativeMenuItem("Reset Terminal", #selector(menuResetTerminal(_:)), key: "r", mods: [.command, .shift], target: self))
+        // Revoke Browser Grants(§9.2 revoke UX) — 에이전트에게 부여한 모든 브라우저 제어 권한(pane-bound confirm-grant)을
+        // 취소한다. 이후 browser 요청은 다시 확인 모달을 거친다. 단축키 없음(메뉴 클릭 — 사용자가 신뢰를 물릴 때만).
+        app.addItem(nativeMenuItem("Revoke Browser Grants", #selector(menuRevokeBrowserGrants(_:)), key: "", target: self))
         app.addItem(.separator())
         app.addItem(nativeMenuItem("Hide maru", #selector(NSApplication.hide(_:)), key: "h"))
         app.addItem(nativeMenuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", mods: [.command, .option]))
@@ -4416,6 +4419,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = sender
         guard let session = appSession else { return }
         _ = maru_macos_app_session_reset_input_modes(session)
+    }
+
+    /// Revoke Browser Grants(§9.2 revoke UX) — 부여한 모든 pane-bound 브라우저 제어 권한을 취소한다(앱-전역 grant
+    /// store, 세션 무관). 이후 browser 요청은 다시 확인 모달을 거친다. Zig가 단일 출처(control_pane_grant_store).
+    @objc private func menuRevokeBrowserGrants(_ sender: Any?) {
+        _ = sender
+        _ = maru_macos_control_revoke_all_browser_grants()
     }
 
     @objc private func menuToggleFullScreen(_ sender: Any?) {

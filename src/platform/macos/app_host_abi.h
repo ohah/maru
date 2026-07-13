@@ -1174,4 +1174,7 @@ void maru_macos_control_push_browser_crashed(uint64_t surface_id);
 /* 5f-3d: web surface 소멸 직전 → browser.closed 이벤트 push 후 그 surface 구독 정리. 메인 스레드만. */
 void maru_macos_control_push_browser_closed(uint64_t surface_id);
 
+// grant UX(revoke, §9.2): 부여한 모든 pane-bound browser grant를 취소하고 취소 수를 반환한다(메뉴 "Revoke Browser Grants").
+uint32_t maru_macos_control_revoke_all_browser_grants(void);
+
 #endif

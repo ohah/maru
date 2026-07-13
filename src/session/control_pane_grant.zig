@@ -71,6 +71,12 @@ pub const PaneGrantStore = struct {
         }
     }
 
+    /// 부여한 grant를 **전부 취소**한다(§9.2 revoke UX — 메뉴 "Revoke Browser Grants"). len=0 리셋(PaneGrant는 값
+    /// 타입·고정 배열이라 원소 free 불요). 이후 isGranted는 전부 false → browser 요청이 다시 확인 모달을 거친다.
+    pub fn clearAll(self: *PaneGrantStore) void {
+        self.len = 0;
+    }
+
     /// surface close/generation 변경 시: 그 surface가 **pane이든 target이든** 걸린 grant 전부 제거(§9.2 수명).
     /// pane close=그 에이전트 사라짐, target close=제어 대상 사라짐 — 어느 쪽이든 grant 무의미. swap-remove라
     /// 제거 후 i를 안 늘려(swap해 온 원소 재검사) 여러 매칭도 한 패스에 정리.
@@ -129,6 +135,21 @@ test "revoke: 특정 grant만 제거, 나머지 유지" {
     try testing.expectEqual(@as(usize, 1), store.len);
     store.revoke(5, 99, .browser); // 없는 grant revoke = 무동작
     try testing.expectEqual(@as(usize, 1), store.len);
+}
+
+test "clearAll: 부여한 grant 전부 취소(§9.2 revoke UX), 이후 isGranted 전부 false" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try store.grant(.{ .pane = 5, .target = 12, .scope = .browser_storage });
+    try store.grant(.{ .pane = 7, .target = 20, .scope = .browser });
+    store.clearAll();
+    try testing.expectEqual(@as(usize, 0), store.len);
+    try testing.expect(!store.isGranted(5, 11, .browser));
+    try testing.expect(!store.isGranted(5, 12, .browser_storage));
+    try testing.expect(!store.isGranted(7, 20, .browser));
+    // clearAll 후 새 grant 정상.
+    try store.grant(.{ .pane = 1, .target = 2, .scope = .browser });
+    try testing.expect(store.isGranted(1, 2, .browser));
 }
 
 test "removeSurface: surface가 pane이든 target이든 걸린 grant 전부 제거(무관 grant 보존)" {

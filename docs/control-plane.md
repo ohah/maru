@@ -226,6 +226,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 | 메서드 | params | result | → WKWebView(5d) |
 |---|---|---|---|
+| `browser.list` | `{}` | `{surfaces:[{id, url, title, panel_kind}]}` | collector snapshot 필터(web만) — **ungated 발견**(§9.6, cap/grant/모달 불요; 제어는 게이트) |
 | `browser.navigate` | `{id, url}` | `{ok}` | `load(URLRequest)` |
 | `browser.getUrl` | `{id}` | `{url}` | `.url` |
 | `browser.back`/`forward`/`refresh` | `{id}` | `{ok}` | `goBack`/`goForward`/`reload` |
@@ -441,7 +442,9 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **목적**: 지금까지 배선한 `browser.*`(navigate/getUrl/executeScript/getCookies)·grant 모달(§9.2 Model B)을 **에이전트가 실제로 쓸 수 있는 클라이언트**로 노출한다. 현재 유일한 드라이버는 스모크의 인-프로세스 소켓 클라뿐 — CLI가 이 표면을 활성화한다. maru pane에서 돌던 에이전트(예: Claude Code)가 `maru browser navigate --surface N <url>`로 옆 브라우저를 제어하고, 미grant면 사용자에게 확인 모달이 떠 승인 후 실행된다.
 
-**설계(1d `sessions` CLI 패턴 미러링 — 재구현 금지)**: L2 순수(`src/cli/browser.zig` — 인자 파싱·`buildRequestBytes`(1a `serializeMessage` 재사용)·`renderResponse`(1a `parseMessage` 재사용)) + main.zig I/O(소켓 발견·connect·auth.self·프레임 왕복 — `runSessionCli`와 동형). **서브커맨드(핵심 먼저)**: `navigate --surface N <url>`(→`browser.navigate`)·`get-url --surface N`(→`getUrl`, url 출력)·`exec --surface N <script>`(→`executeScript`, 결과 출력)·`get-cookies --surface N`(→`getCookies`, JSON 출력). 대상 `--surface N`은 필수(에이전트는 `maru sessions list`로 web surface_id 발견). 확장은 서브커맨드 dispatch 테이블에 한 줄씩(screenshot·act·set/delete는 후속).
+**설계(1d `sessions` CLI 패턴 미러링 — 재구현 금지)**: L2 순수(`src/cli/browser.zig` — 인자 파싱·`buildRequestBytes`(1a `serializeMessage` 재사용)·`renderResponse`(1a `parseMessage` 재사용)) + main.zig I/O(소켓 발견·connect·auth.self·프레임 왕복 — `runSessionCli`와 동형). **서브커맨드**: `list`(→`browser.list`, **대상 발견** — surface 불요)·`navigate --surface N <url>`(→`browser.navigate`)·`get-url --surface N`(→`getUrl`)·`exec --surface N <script>`(→`executeScript`)·`get-cookies --surface N`(→`getCookies`)·`screenshot --surface N [--out f]`(→`browser.screenshot`, chunk 재조립→PNG, §9.5.7). 확장은 서브커맨드 dispatch 테이블에 한 줄씩(act·set/delete는 후속).
+
+**9.6.1 — web surface 발견 (`browser.list`, 사용자 결정 2026-07-13)**. **문제(실 테스트가 노출)**: 제어(navigate/screenshot 등)는 전부 대상 `--surface N`을 요구하는데, `maru sessions list`는 **metadata:self scope**라 호출 pane 자신만 보이고 **형제 web 패널이 안 나온다**(§8.4 self-only는 same-uid peer의 metadata 유출을 제한하는 의도적 선택). 즉 에이전트가 제어할 web surface_id를 발견할 방법이 없었다(초판 CLI의 "sessions list로 발견"이 실제로 안 됨). **결정: 전용 `browser.list`**. 인스턴스의 **web surface만**(터미널 제외) `{id, url, title, panel_kind}`로 나열한다. **ungated**(cap/grant/모달 불요) — 같은 uid는 사용자 자신의 브라우저라 URL 노출을 수용한다는 사용자 결정. 제어는 여전히 §9.2 Model B 모달 게이트를 거치므로, 발견≠제어(발견은 "무엇이 있나", 제어는 "허용받아 조작"). 라우팅: `dispatchAuthenticated`가 `browser.list`를 cap 로직 **진입 전에** 접어 `serializeBrowserListResult(snapshot)`로 응답(nonce·selector 무관 균일). CLI 흐름: `maru browser list` → web surface 목록 → 그 id로 `maru browser screenshot --surface N` 등. **후속(더 조일 때)**: self-origin 요구(실 maru pane만)·window scope 한정·민감 URL 마스킹은 필요 시 검토(§8.4 트레이드오프).
 
 **auth·grant 상호작용(핵심)**: CLI는 `auth.self`(selector=`MARU_PANE_ID`, **cap_nonce=null** — sessions CLI와 동일)만 보낸다. browser 요청은 세션 cap이 없으므로 §9.2 Model B로 **needs_grant→서버가 held→확인 모달**. **CLI는 응답을 블로킹 read로 기다린다** — 사용자가 모달을 클릭할 때까지(read가 블록). 승인→응답 렌더, 거부→`Unauthorized`, 무응답 timeout(`grant_prompt_timeout` 후 서버 reap→연결 닫힘)→EOF(응답 없음). sessions CLI가 hello skip 후 첫 응답에서 종료하는 것과 동형이되, browser는 held로 **응답이 늦을 수 있음**(read 타임아웃을 짧게 걸지 말 것 — 모달 대기).
 

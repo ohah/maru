@@ -190,6 +190,11 @@ pub fn dispatchAuthenticated(
     //       집합의 각 nonce를 lookup해 **Capability 집합**을 만들고(5f-4a 누적), browserOpFromRequest가 그중 하나라도
     //       인가하면 통과·아니면 **균일 unauthorized**(cap 부재도 동일). ──
     if (cp.parseMethod(req.method).core == .browser) {
+        // **browser.list — ungated 발견(§9.6)**: 인스턴스의 web surface를 나열한다. 제어 op(navigate/screenshot 등)과
+        //   달리 cap/grant/모달이 필요 없다(사용자 결정: 같은 uid = 사용자 자신의 브라우저라 URL 노출 수용). control은
+        //   여전히 §9.2 Model B 모달 게이트를 거친다. cap 로직 진입 전에 접어 nonce 유무와 무관하게 균일 동작.
+        if (std.mem.eql(u8, cp.parseMethod(req.method).rest, "list"))
+            return .{ .immediate = try cb.serializeBrowserListResult(gpa, req.id, snapshot) };
         var caps_buf: [cap.max_session_caps]cap.Capability = undefined;
         var ncaps: usize = 0;
         for (cap_nonces) |n| {
@@ -557,6 +562,23 @@ test "dispatchAuthenticated: nonce 없음 → 기존 self 경로(회귀 없음) 
     defer ids.deinit(testing.allocator);
     try listIds(wire, &ids);
     try testing.expectEqualSlices(u64, &.{10}, ids.items); // cap 없음 = self only(기존 동작)
+}
+
+test "dispatchAuthenticated(§9.6): browser.list → cap·selector 없이 web surface만(ungated 발견, 터미널 제외)" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    // 발견은 ungated — nonce null·selector null이어도 통과(제어와 달리 cap/grant/모달 불요). fx의 web은 surface 11(markdown)뿐.
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.list\"}", null, null, &store);
+    defer testing.allocator.free(wire);
+    var pm = try cp.parseMessage(testing.allocator, wire);
+    defer pm.deinit();
+    const arr = pm.message.response.result.?.object.get("surfaces").?.array;
+    try testing.expectEqual(@as(usize, 1), arr.items.len); // web 11만(터미널 10/20/30 제외)
+    const o = arr.items[0].object;
+    try testing.expectEqual(@as(i64, 11), o.get("id").?.integer);
+    try testing.expectEqualStrings("https://x/y", o.get("url").?.string);
+    try testing.expectEqualStrings("docs", o.get("title").?.string);
+    try testing.expectEqualStrings("markdown", o.get("panel_kind").?.string);
 }
 
 test "dispatchAuthenticated: metadata:all cap(surface 10) → sessions.list 전체(10,11,20,30)" {

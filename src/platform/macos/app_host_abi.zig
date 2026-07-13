@@ -2371,6 +2371,15 @@ pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
     control_pane_grant_store.removeSurface(surface_id);
 }
 
+/// grant UX(revoke, §9.2 Model B): 사용자가 부여한 **모든** pane-bound browser grant를 취소한다 — 메뉴 "Revoke Browser
+/// Grants"가 호출. 이후 browser 요청은 다시 확인 모달을 거친다. grant store는 앱-전역(control_pane_grant_store)이라 세션
+/// 무관. 서버 미시작이어도 store는 살아 있으므로 게이트 없이 클리어. 취소된 grant 수 반환(Swift가 사용자 피드백에 쓸 수 있음).
+pub export fn maru_macos_control_revoke_all_browser_grants() u32 {
+    const n: u32 = @intCast(control_pane_grant_store.len);
+    control_pane_grant_store.clearAll();
+    return n;
+}
+
 pub export fn maru_macos_control_server_stop() void {
     if (!control_server_active) return;
     control_server_active = false;

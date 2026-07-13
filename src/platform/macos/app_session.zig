@@ -14104,10 +14104,16 @@ pub const AppSession = struct {
             for (tab.panes.items, 0..) |pane, pi| {
                 for (pane.terms.items) |term| {
                     // 4e web Term: sentinel core라 cwd/git/at_prompt를 읽으면 안 된다(활성 render gate와 같은 이유) —
-                    // core lock을 건너뛰고 `.web` detail을 emit한다(§3 web 전용 메타). url은 콘텐츠 영속이 없어 null,
+                    // core lock을 건너뛰고 `.web` detail을 emit한다(§3 web 전용 메타). url은 Phase 7e-1a nav 상태
+                    // (web_nav_states, Swift KVO가 upsert·메인 스레드 소유)에서 읽는다 — 없거나 빈 문자열이면 null(로드 전).
                     // trust는 §8.1(browser=임의 URL=untrusted, markdown=trusted).
                     if (term.kind == .web) {
                         const web_sid = term.surface.id;
+                        // 콘텐츠 URL: nav 상태 맵에서 조회(§9.6 browser.list·주소창이 같은 출처). arena 복사(snapshot 수명).
+                        const web_url: ?[]const u8 = if (self.web_nav_states.get(web_sid)) |ns|
+                            (if (ns.url.len == 0) null else try arena.dupe(u8, ns.url))
+                        else
+                            null;
                         try member_ids.append(arena, web_sid);
                         try surfaces.append(arena, .{
                             .surface_id = web_sid,
@@ -14119,7 +14125,7 @@ pub const AppSession = struct {
                             .focused = (focused_surface_id != null and web_sid == focused_surface_id.?),
                             .detail = .{
                                 .web = .{
-                                    .url = null, // 콘텐츠 URL 미영속(Phase 5)
+                                    .url = web_url, // Phase 7e-1a nav 상태(로드 전엔 null)
                                     .panel_kind = switch (term.web_panel_kind) {
                                         .markdown => .markdown,
                                         .browser => .browser,
@@ -33378,9 +33384,32 @@ test "collector: web Term은 .web detail(panel_kind=browser·trust=untrusted)로
     try std.testing.expectEqual(control_surface.SurfaceKind.web, w.kind());
     try std.testing.expectEqual(control_surface.PanelKind.browser, w.detail.web.panel_kind);
     try std.testing.expectEqual(control_surface.TrustLevel.untrusted, w.detail.web.trust);
-    try std.testing.expect(w.detail.web.url == null);
+    try std.testing.expect(w.detail.web.url == null); // nav 상태 없음(로드 전) → null
     try std.testing.expect(!w.detail.web.loading);
     try std.testing.expectEqualStrings("Browser", w.title);
+}
+
+// §9.6 browser.list url: collector가 web Term의 URL을 web_nav_states(Phase 7e-1a, Swift KVO가 채움)에서 읽어 DTO에
+// 실어야 한다 — 수정 전엔 항상 null이라 `maru browser list`/session.get이 주소를 빈칸으로 보고했다("주소 안 나옴").
+test "collector: web Term url은 web_nav_states에서 채운다(§9.6 browser.list 주소)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.dispatchAppAction(.new_web_tab); // web(browser) Term
+    const web_id = session.activePane().activeTerm().surfaceId();
+    // Swift KVO가 하던 nav 상태 upsert를 직접 — collector가 이 url을 DTO에 실어야 한다.
+    session.setWebNavState(web_id, false, false, "https://www.naver.com/");
+
+    const c = try session.collectSession(allocator, 7, .normal);
+    defer c.deinit();
+    var found: ?control_surface.SurfaceDto = null;
+    for (c.snapshot.surfaces) |dto| {
+        if (dto.surface_id == web_id) found = dto;
+    }
+    try std.testing.expectEqualStrings("https://www.naver.com/", found.?.detail.web.url.?);
 }
 
 // [4e review 0] collectWebSurfaces seam inset 검증 헬퍼 — 각 web 본문 rect가 seam(형제 pane 경계) 가장자리서 `seam`만큼,

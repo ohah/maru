@@ -742,11 +742,29 @@ enum BrowserControl {
     @MainActor static func reload(_ webView: WKWebView) { webView.reload() }
 
     // 5f-1: browser.screenshot → takeSnapshot으로 현재 표시 영역을 NSImage로 캡처한 뒤 **PNG Data**로 인코딩해 돌려준다
-    // (async 콜백 — getCookies/executeScript와 동형). rect 미지정=가시 뷰포트 전체(§9.5.7 첫 컷 — rect/scale 파라미터는
-    // 후속). 실패(스냅샷 에러·비트맵/PNG 변환 실패)면 nil. 라우팅·chunk 분할·metadata(IHDR)는 Zig, 여긴 WKWebView 스냅샷
-    // API + PNG 인코딩 어댑터만(네이티브 최소). PNG 변환은 clipboardImagePng과 같은 NSBitmapImageRep 경로.
-    @MainActor static func takeSnapshot(_ webView: WKWebView, completion: @escaping (Data?) -> Void) {
+    // (async 콜백 — getCookies/executeScript와 동형). 실패(스냅샷 에러·비트맵/PNG 변환 실패)면 nil. 라우팅·chunk 분할·
+    // metadata(IHDR)는 Zig, 여긴 WKWebView 스냅샷 API + PNG 인코딩 어댑터만(네이티브 최소). PNG 변환은 clipboardImagePng과
+    // 같은 NSBitmapImageRep 경로.
+    //
+    // rect/scale(§9.5.7): arg가 `{rect?:{x,y,width,height}, scale?}` compact JSON(Zig serializeScreenshotArg). 둘 다 부재면
+    // `{}`=전체 가시 뷰포트·기기 배율. rect=`config.rect`(CSS 포인트, 뷰 좌표계). scale=출력 배율 → `config.snapshotWidth`를
+    // (rect 있으면 rect.width, 없으면 뷰 너비)×scale 포인트로 지정(WKWebKit이 비율 유지 리샘플). scale<=0/rect 형식 오류는
+    // Zig(parseScreenshotOptParams)가 이미 걸러 여기 도달 arg는 유효 — 방어로 유한/양수만 반영, 아니면 무시(전체 캡처).
+    @MainActor static func takeSnapshot(_ webView: WKWebView, _ arg: String, completion: @escaping (Data?) -> Void) {
         let config = WKSnapshotConfiguration()
+        let opts = arg.isEmpty ? nil : parseCookieArg(arg)
+        var captureWidth = webView.bounds.width
+        if let r = opts?["rect"] as? [String: Any],
+            let x = numberValue(r["x"]), let y = numberValue(r["y"]),
+            let w = numberValue(r["width"]), let h = numberValue(r["height"]),
+            w > 0, h > 0
+        {
+            config.rect = CGRect(x: x, y: y, width: w, height: h)
+            captureWidth = CGFloat(w)
+        }
+        if let scale = numberValue(opts?["scale"]), scale.isFinite, scale > 0, captureWidth > 0 {
+            config.snapshotWidth = NSNumber(value: Double(captureWidth) * scale)
+        }
         webView.takeSnapshot(with: config) { image, error in
             guard error == nil, let image = image,
                 let tiff = image.tiffRepresentation,
@@ -758,6 +776,14 @@ enum BrowserControl {
             }
             completion(png)
         }
+    }
+
+    // JSON 수치(NSNumber로 파싱된 정수/실수)를 Double로. rect/scale 필드 공용. 문자열·null·부재 → nil(형식 오류로 무시).
+    static func numberValue(_ v: Any?) -> Double? {
+        guard let n = v as? NSNumber else { return nil }
+        // JS boolean(__NSCFBoolean)은 NSNumber 하위형 — 좌표/배율로 오독 금지(scriptResultString과 같은 방어).
+        if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
+        return n.doubleValue
     }
 
     // 5e-2b-2: `executeScript` 반환값(evaluateJavaScript 결과, 불투명 Any)을 응답에 실을 **문자열**로 바꾼다. Zig
@@ -2970,8 +2996,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
                     }
                 }
-            case 5: // screenshot(5f-1) — async 콜백(takeSnapshot→PNG). 성공=PNG 바이트(Zig completeScreenshotOp이 chunk-stream), 실패=status 1.
-                BrowserControl.takeSnapshot(wp.webView) { png in
+            case 5: // screenshot(5f-1) — async 콜백(takeSnapshot→PNG). arg={rect?,scale?}(§9.5.7). 성공=PNG 바이트(Zig completeScreenshotOp이 chunk-stream), 실패=status 1.
+                BrowserControl.takeSnapshot(wp.webView, arg) { png in
                     if let png = png {
                         self.completeBrowserOp(asyncId, status: 0, data: png)
                     } else {

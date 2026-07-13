@@ -547,6 +547,7 @@ fn runBrowserCli(
             try stdout.flush();
         },
         .request => |req| try runBrowserRequest(io, allocator, req, stdout, stderr),
+        .screenshot => |shot| try runBrowserScreenshot(io, allocator, shot, stdout, stderr),
     }
 }
 
@@ -560,6 +561,7 @@ fn writeBrowserCliUsage(stderr: *std.Io.Writer, err: maru.cli.browser.ParseError
         error.MissingSurfaceValue => "--surface 에는 값이 필요합니다",
         error.MissingUrl => "navigate 에는 url이 필요합니다",
         error.MissingScript => "exec 에는 script가 필요합니다",
+        error.MissingOutValue => "screenshot --out 에는 값이 필요합니다",
         error.UnknownOption => "알 수 없는 옵션입니다",
         error.UnexpectedArgument => "인자가 너무 많습니다",
     };
@@ -609,12 +611,70 @@ fn runBrowserRequest(
     try stdout.flush();
 }
 
-/// **컨트롤 소켓 왕복(sessions/browser CLI 공유)**: 결정론 경로(§4.2)에서 살아있는 인스턴스 소켓 발견 → connect →
-/// `auth.self`(selector=`MARU_PANE_ID`·cap_nonce=null) → `request_bytes` 전송 → hello notification skip → **첫 응답 프레임**을
-/// alloc 소유 슬라이스로 반환(caller free·caller가 자기 kind로 render). 인스턴스 없음/connect 실패/EOF는 `sessionNoInstance`
-/// (graceful exit 1). browser 요청은 grant 모달로 held될 수 있어 read가 오래 블록될 수 있다(짧은 타임아웃 금지 — §9.6).
-/// 순수 정책(경로·발견 판정)은 `cli.sessions`, 프레이밍/parse는 1a, 여긴 getenv/readdir/소켓 syscall 접착만(§11 L4).
-fn fetchControlResponse(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer) ![]u8 {
+/// `maru browser screenshot`을 컨트롤 소켓에 왕복한다(§9.6·§9.5.7). 단일 응답이 아니라 **chunk 스트림**이라
+/// `fetchControlResponse`(첫 응답만)와 달리 `connectSendControl`로 열고 프레임을 `ScreenshotAssembler`에 흘려 넣어 PNG를
+/// 재조립한 뒤 `--out`(파일) 또는 stdout(raw 바이너리)으로 쓴다. grant 대기(§9.2 Model B)로 read가 오래 블록될 수 있다.
+fn runBrowserScreenshot(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    shot: maru.cli.browser.ScreenshotCmd,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const c = std.c;
+    const request_bytes = try maru.cli.browser.buildScreenshotRequestBytes(allocator, shot.surface_id, .{ .number = 1 });
+    defer allocator.free(request_bytes);
+    const fd = try connectSendControl(io, allocator, request_bytes, stderr);
+    defer _ = c.close(fd);
+
+    var assembler = maru.cli.browser.ScreenshotAssembler.init(allocator);
+    defer assembler.deinit();
+    var framer: maru.session.control_plane.Framer = .{};
+    defer framer.deinit(allocator);
+    done: while (true) {
+        while (framer.next() catch null) |line| {
+            switch (assembler.feed(line) catch return error.OutOfMemory) {
+                .need_more => {},
+                .done => break :done,
+                .failed => return browserScreenshotError(stderr, assembler.failureMessage()),
+            }
+        }
+        var buf: [4096]u8 = undefined;
+        const n = c.read(fd, &buf, buf.len); // grant held면 사용자 클릭까지 블록(§9.6)
+        if (n <= 0) return browserScreenshotError(stderr, "서버가 응답을 끝내지 않았습니다 (불완전한 스트림)");
+        framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
+    }
+
+    // 완성 → PNG를 파일(--out) 또는 stdout(raw 바이너리 — `> page.png` 리다이렉트)으로.
+    const png = assembler.png();
+    if (shot.out) |path| {
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = png, .flags = .{ .truncate = true } }) catch |e| {
+            var msgbuf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msgbuf, "파일을 쓸 수 없습니다: {s} ({s})", .{ path, @errorName(e) }) catch "파일을 쓸 수 없습니다";
+            return browserScreenshotError(stderr, msg);
+        };
+        try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ assembler.width, assembler.height, png.len, path });
+        try stdout.flush();
+    } else {
+        try stdout.writeAll(png);
+        try stdout.flush();
+    }
+}
+
+/// screenshot 실패(재조립 오류·서버 에러·불완전 스트림)를 stderr에 내고 graceful exit 1 sentinel을 돌려준다(sessionNoInstance 동형).
+fn browserScreenshotError(stderr: *std.Io.Writer, msg: []const u8) error{UnknownCommand} {
+    stderr.print("maru browser screenshot: {s}\n", .{msg}) catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
+}
+
+/// **컨트롤 소켓 발견→connect→auth→요청 전송(sessions/browser/screenshot CLI 공유)**: 결정론 경로(§4.2)에서 살아있는
+/// 인스턴스 소켓 하나를 찾아 connect → `auth.self`(selector=`MARU_PANE_ID`·cap_nonce=null) → `request_bytes` 전송까지 한다.
+/// 성공 시 **열린 fd**를 반환한다 — caller가 응답/chunk를 읽고 **close**한다(단일 응답=`fetchControlResponse`, chunk
+/// 스트림=screenshot). 인스턴스 없음/connect 실패는 `sessionNoInstance`(graceful exit 1); 에러 반환 전 이미 만든 fd는
+/// `errdefer`로 닫는다(성공 반환 시엔 caller 소유). 순수 정책(경로·발견 판정)은 `cli.sessions`, 여긴 getenv/readdir/소켓
+/// syscall 접착만(§11 L4).
+fn connectSendControl(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer) !std.c.fd_t {
     const c = std.c;
     const posix = std.posix;
 
@@ -656,7 +716,7 @@ fn fetchControlResponse(io: std.Io, allocator: std.mem.Allocator, request_bytes:
     // ── connect(L4 syscall — 1b가 std.c로 소켓을 쓰는 선례) ──
     const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     if (fd < 0) return sessionNoInstance(stderr, "소켓을 만들 수 없습니다");
-    defer _ = c.close(fd);
+    errdefer _ = c.close(fd); // 에러 반환 시 닫는다 — 성공 반환(return fd) 시엔 caller가 소유·close
     var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
     @memset(&addr.path, 0);
     if (socket_path.len >= addr.path.len) return sessionNoInstance(stderr, null); // 경로가 sun_path 초과(비정상) → graceful
@@ -677,9 +737,19 @@ fn fetchControlResponse(io: std.Io, allocator: std.mem.Allocator, request_bytes:
     if (!writeAllFd(fd, auth_bytes) or !writeAllFd(fd, "\n"))
         return sessionNoInstance(stderr, "auth 셀렉터 전송에 실패했습니다");
 
-    // ── 요청 전송 → 응답 프레임 수신(1a Framer) → hello skip → 첫 응답 프레임 반환(caller가 render) ──
+    // ── 요청 전송(응답/chunk 읽기는 caller) ──
     if (!writeAllFd(fd, request_bytes) or !writeAllFd(fd, "\n"))
         return sessionNoInstance(stderr, "요청 전송에 실패했습니다");
+    return fd; // 성공 — caller가 읽고 close(errdefer 미발동)
+}
+
+/// **단일 응답 소켓 왕복(sessions/browser 단일-응답 CLI 공유)**: `connectSendControl`로 열고 hello notification skip 후
+/// **첫 응답 프레임**을 alloc 소유 슬라이스로 반환(caller free·자기 kind로 render). EOF는 `sessionNoInstance`(graceful).
+/// browser 요청은 grant 모달로 held될 수 있어 read가 오래 블록될 수 있다(짧은 타임아웃 금지 — §9.6).
+fn fetchControlResponse(io: std.Io, allocator: std.mem.Allocator, request_bytes: []const u8, stderr: *std.Io.Writer) ![]u8 {
+    const c = std.c;
+    const fd = try connectSendControl(io, allocator, request_bytes, stderr);
+    defer _ = c.close(fd);
 
     var framer: maru.session.control_plane.Framer = .{};
     defer framer.deinit(allocator);

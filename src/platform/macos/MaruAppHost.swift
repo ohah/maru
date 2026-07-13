@@ -750,20 +750,27 @@ enum BrowserControl {
     // `{}`=전체 가시 뷰포트·기기 배율. rect=`config.rect`(CSS 포인트, 뷰 좌표계). scale=출력 배율 → `config.snapshotWidth`를
     // (rect 있으면 rect.width, 없으면 뷰 너비)×scale 포인트로 지정(WKWebKit이 비율 유지 리샘플). scale<=0/rect 형식 오류는
     // Zig(parseScreenshotOptParams)가 이미 걸러 여기 도달 arg는 유효 — 방어로 유한/양수만 반영, 아니면 무시(전체 캡처).
+    //
+    // 23차 [5]/[6]: **렌더 자원 상한은 여기서 클램프**(L2 파서는 형식[유한·양수]만 검증, 픽셀 버퍼 자원 한계는 WKWebView가
+    // 실제 렌더하는 이 지점 소유 = 계층 정합). 에이전트 지정 rect 치수·scale이 거대 픽셀 버퍼를 요구하면(예: rect 1e12·scale 50)
+    // 메모리 폭발 → rect 치수와 출력 폭을 `maxSnapshotPt`로 접는다. 실 디스플레이/페이지는 이 한계 미만이라 정상 사용엔 무영향.
     @MainActor static func takeSnapshot(_ webView: WKWebView, _ arg: String, completion: @escaping (Data?) -> Void) {
         let config = WKSnapshotConfiguration()
         let opts = arg.isEmpty ? nil : parseCookieArg(arg)
+        let maxSnapshotPt: CGFloat = 8000 // 렌더 자원 상한(pt) — 실 화면/페이지 초과, 거대 rect/scale만 접음
         var captureWidth = webView.bounds.width
         if let r = opts?["rect"] as? [String: Any],
             let x = numberValue(r["x"]), let y = numberValue(r["y"]),
             let w = numberValue(r["width"]), let h = numberValue(r["height"]),
             w > 0, h > 0
         {
-            config.rect = CGRect(x: x, y: y, width: w, height: h)
-            captureWidth = CGFloat(w)
+            let cw = min(CGFloat(w), maxSnapshotPt)
+            let ch = min(CGFloat(h), maxSnapshotPt)
+            config.rect = CGRect(x: x, y: y, width: cw, height: ch)
+            captureWidth = cw
         }
         if let scale = numberValue(opts?["scale"]), scale.isFinite, scale > 0, captureWidth > 0 {
-            config.snapshotWidth = NSNumber(value: Double(captureWidth) * scale)
+            config.snapshotWidth = NSNumber(value: min(Double(captureWidth) * scale, Double(maxSnapshotPt)))
         }
         webView.takeSnapshot(with: config) { image, error in
             guard error == nil, let image = image,
@@ -824,8 +831,20 @@ enum BrowserControl {
     // origin)=문서 origin 없음=아무 쿠키도 안 보임(빈 결과 — 공유 store의 타 패널 쿠키를 안 흘림). cookie.domain의 선행
     // 점(`.example.com`=서브도메인 포함)을 벗기고 **exact 또는 부모 도메인(dot-suffix)** 매치. 대소문자 무시(도메인은 ASCII case-insensitive).
     static func cookieVisibleToHost(_ cookie: HTTPCookie, host: String?) -> Bool {
+        return domainMatches(host, cookie.domain)
+    }
+
+    // 23차 [0]/[1]: 현재 문서 `host`가 `domain`으로 쿠키를 쓰거나 지울 수 있는가(RFC 6265 §5.3.6 domain-match) — host가
+    // domain이거나 그 서브도메인일 때만. write(setCookie)·delete(deleteCookie) 격리 = read(getCookies) 격리 대칭이라
+    // cookieVisibleToHost와 **같은 판정을 공유**(그건 cookie.domain을, 이건 인자 domain을 넘길 뿐). host nil/빈(opaque)=불가.
+    static func hostMayUseDomain(_ host: String?, _ domain: String) -> Bool {
+        return domainMatches(host, domain)
+    }
+
+    // domain-match 코어(선행 점 제거 후 exact 또는 부모 dot-suffix, ASCII case-insensitive). host/domain 빈=불가.
+    private static func domainMatches(_ host: String?, _ domain: String) -> Bool {
         guard let host = host, !host.isEmpty else { return false }
-        var d = cookie.domain
+        var d = domain
         if d.hasPrefix(".") { d.removeFirst() }
         if d.isEmpty { return false }
         let hl = host.lowercased()
@@ -873,6 +892,13 @@ enum BrowserControl {
             completion(false)
             return
         } // 대상 도메인 없음(로드 전 opaque origin)
+        // 23차 [0]: **교차-origin 쿠키 주입 차단**. 공유 store라 임의 domain을 쓰면 다른 패널(예: 은행 탭) origin에
+        // 세션 쿠키를 심을 수 있다(session fixation). domain은 현재 문서 host이거나 그 부모여야만(RFC 6265 §5.3.6
+        // domain-match) — getCookies의 host 필터(cookieVisibleToHost)와 대칭. 부적격이면 거부(write 격리 = read 격리).
+        guard Self.hostMayUseDomain(webView.url?.host, dom) else {
+            completion(false)
+            return
+        }
         let path = (obj["path"] as? String) ?? "/"
         var props: [HTTPCookiePropertyKey: Any] = [.name: name, .value: value, .domain: dom, .path: path]
         if (obj["secure"] as? Bool) == true { props[.secure] = "TRUE" }
@@ -883,8 +909,9 @@ enum BrowserControl {
         webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { completion(true) }
     }
 
-    // deleteCookie(§9.4 D4): argJson={name,domain?,path?}. getAllCookies서 name(+domain/path 지정 시 매치) 쿠키를 찾아
-    // delete. domain 생략=대상 문서 host 필터(getCookies와 동형 격리). 매치 0이어도 성공(멱등 — 이미 없음).
+    // deleteCookie(§9.4 D4): argJson={name,domain?,path?}. getAllCookies서 name 쿠키를 찾아 delete. **대상 문서 host
+    // 격리를 항상 적용**(getCookies와 동형 — 23차 [1]); domain/path는 가시 쿠키 안에서 추가로 좁힌다(path 생략=`/`). 매치
+    // 0이어도 성공(멱등 — 이미 없음).
     @MainActor static func deleteCookie(_ webView: WKWebView, _ argJson: String, completion: @escaping (Bool) -> Void) {
         guard let obj = Self.parseCookieArg(argJson), let name = obj["name"] as? String else {
             completion(false)
@@ -897,12 +924,13 @@ enum BrowserControl {
         store.getAllCookies { cookies in
             let matches = cookies.filter { c in
                 guard c.name == name else { return false }
-                if let rd = reqDomain {
-                    if c.domain != rd && c.domain != "." + rd { return false }
-                } else if !Self.cookieVisibleToHost(c, host: host) {
-                    return false // domain 미지정 = 대상 문서 host로만(교차-surface 유출 차단)
-                }
-                if let rp = reqPath, c.path != rp { return false }
+                // 23차 [1]: 대상 문서 host 격리를 **항상** 적용(공유 store — 명시 domain이어도 타 origin[예: 은행 탭]
+                // 쿠키 삭제 = 로그아웃 DoS 차단). 이전엔 명시 domain이면 host 체크를 건너뛰어 교차-surface 삭제가 가능했다.
+                guard Self.cookieVisibleToHost(c, host: host) else { return false }
+                // 명시 domain/path는 **가시 쿠키 안에서 추가로 좁힌다**(격리를 넘어서 넓히지 않음).
+                if let rd = reqDomain, c.domain != rd && c.domain != "." + rd { return false }
+                // 23차 [3]: path 생략=`/`(문서 §9.4 D4 계약·setCookie 대칭) — 이전엔 생략 시 모든 path를 지워 계약보다 넓었다.
+                if c.path != (reqPath ?? "/") { return false }
                 return true
             }
             let group = DispatchGroup()
@@ -966,7 +994,12 @@ enum BrowserControl {
     }
 
     // clearStorage(§9.4 D4): 대상 문서 origin(host)의 쿠키+스토리지를 WKWebsiteDataStore로 comprehensive 삭제. host nil
-    // (opaque origin)=대상 없음=아무것도 안 지움(전체 삭제 방지). displayName(도메인)으로 매치(getCookies host 필터와 동형 정신).
+    // (opaque origin)=대상 없음=아무것도 안 지움(전체 삭제 방지). displayName(도메인)으로 매치(getCookies host 필터와 동형).
+    // 23차 [2]: 매치는 `hl == dn || hl.hasSuffix("."+dn)` — 대상 host이거나 **그 부모 도메인 레코드**만(getCookies의
+    // cookieVisibleToHost와 대칭). 이전엔 `dn.hasSuffix("."+hl)` 역방향도 매치해 **자식/형제 서브도메인**(cdn.example.com
+    // 등) 레코드까지 지웠다(교차-origin 과삭제). **잔여 한계(WebKit 모델)**: WKWebsiteDataRecord는 registrable-domain
+    // (eTLD+1) 단위로 그룹돼 example.com 레코드 삭제가 그 도메인의 다른 서브도메인 데이터도 포함할 수 있다 — 부모 레코드를
+    // 지우는 건 대상 host 데이터가 거기 있어 불가피(host 격리의 상한). 역방향 자식 삭제만 제거해 과삭제를 줄인다.
     @MainActor static func clearStorage(_ webView: WKWebView, completion: @escaping (Bool) -> Void) {
         let host = webView.url?.host
         let store = webView.configuration.websiteDataStore
@@ -979,7 +1012,7 @@ enum BrowserControl {
             let hl = host.lowercased()
             let matches = records.filter { r in
                 let dn = r.displayName.lowercased()
-                return hl == dn || hl.hasSuffix("." + dn) || dn.hasSuffix("." + hl)
+                return hl == dn || hl.hasSuffix("." + dn) // 대상 host이거나 그 부모 도메인만(역방향 자식 매치 제거)
             }
             store.removeData(ofTypes: types, for: matches) { completion(true) }
         }

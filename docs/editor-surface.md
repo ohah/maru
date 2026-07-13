@@ -12,11 +12,11 @@
 
 > **PoC 실측 범위**
 > - **1차(2026-07-12, 정적)**: ① Monaco+워커5개를 zntc로 번들(성공), ② git diff op 데이터 형태, ③ 포매터 stdin/에러 거동(zig fmt·rustfmt), ④ LSP 왕복(rust-analyzer).
-> - **2차(2026-07-13, 헤드리스 Chrome 런타임)**: 산출물을 **엄격 CSP 하에서 실제로 실행**. Monaco DiffEditor 렌더·diff 계산·codicon 폰트·워커 5종 기동·TS 언어서비스 진단까지 확인. **`script-src 'unsafe-eval'` 불필요를 측정으로 확정**(§2·§4). 이 과정에서 zntc 버그 3건을 추가 발견·수정(누적 6건, §2).
+> - **2차(2026-07-13, 런타임·시각)**: 산출물을 **엄격 CSP 하에서 실제로 실행하고 화면을 찍었다**. Monaco DiffEditor가 diff·문자단위 하이라이트·구문강조·codicon까지 정상 렌더하고, 워커 5종이 기동하며, TS 언어서비스가 201ms 만에 진단을 낸다. **기준 번들러(Vite) 산출물과 픽셀 0개 차이.** **`script-src 'unsafe-eval'` 불필요를 측정으로 확정**(§2·§4).
 >
 > **여전히 미검증: WKWebView(WebKit) 런타임.** 2차는 Chrome(Blink)이다. "코드가 `unsafe-eval`을 실제로 요구하는가"는 엔진 무관한 강한 신호지만, **커스텀 스킴(`maru-app://`) 위의 모듈 워커·스타일 주입·IME는 WebKit 고유 영역**이라 Phase 0.5 GUI 스파이크가 여전히 필요하다(§11·§14).
 >
-> **교훈(설계에 반영)**: zntc 버그 6건 중 3건이 **"빌드 exit 0 + 산출물이 파싱 불가"**, 5건이 **"빌드 green인데 런타임 실패"** 였다. 빌드 green은 동작 증거가 아니다 → 프런트 빌드 파이프라인에 **산출물 재파싱 게이트 + 헤드리스 런타임 스모크**를 넣는다(§12).
+> **교훈(설계에 반영)**: 이 PoC 과정에서 번들러 결함을 여러 건 밟았는데, **전부 빌드가 exit 0으로 통과한 채** 뒤늦게 드러났다. 어떤 결함은 산출물이 파싱조차 안 됐고, 어떤 결함은 파싱·모듈평가까지 통과한 뒤 **API를 실제로 호출·렌더할 때만** 터졌다. **빌드 green은 동작 증거가 아니다** → 프런트 빌드 파이프라인에 **4층 검증 게이트**를 넣는다(§12).
 
 ---
 
@@ -38,9 +38,10 @@
 
 | 항목 | 결과 | 근거 |
 |---|---|---|
-| Monaco + 워커5개 zntc 번들 | ✅ exit 0, 116파일, 워커 5개 same-origin 해시청크. 산출물 95개 전수 재파싱 통과 | zntc CLI/NAPI + acorn 재파싱 |
+| Monaco + 워커5개 zntc 번들 | ✅ exit 0, 116파일, 워커 5개 same-origin 해시청크 | zntc CLI/NAPI |
 | git diff 뷰어 = DiffEditor | ✅ `IDiffEditorModel { original: ITextModel; modified: ITextModel }` | monaco.d.ts + 빌드 |
-| **Monaco 런타임 (엄격 CSP)** | ✅ **DiffEditor 렌더 + diff 계산(데코 11) + codicon 폰트 로드. CSP 위반 0 · 워커 에러 0 · 404 0** | 헤드리스 Chrome, `script-src 'self'`(unsafe-eval **없음**) |
+| **Monaco 렌더 (엄격 CSP)** | ✅ **DiffEditor 정상 렌더 — 라인 diff·문자단위 하이라이트·구문강조(토큰 7종)·codicon·오버뷰 룰러. 에러 0 · CSP 위반 0 · 404 0** | Playwright 헤드리스, `script-src 'self'`(unsafe-eval **없음**), 스크린샷 확인 |
+| **Vite 대비 픽셀 동일성** | ✅ **0px 차이(0.000%)** — 조용한 오컴파일 없음 | 동일 앱을 zntc/Vite로 빌드 → 스크린샷 pixelmatch |
 | **`script-src 'unsafe-eval'`** | ✅ **불필요 — 측정 확정.** 코어의 `new Function`은 실행되지 않는 가드된 폴백 | 위와 동일(위반 0건) |
 | **`img-src 'self' data:`** | ⚠️ **필요.** 진단 마커의 오류 물결선을 Monaco가 `data:` SVG로 그림 | 마커 표시 시 CSP 위반 1건 → `img-src` 개방 후 0건 |
 | **TS 언어워커(ts.worker)** | ✅ 기동 + **201ms 만에 진단 마커**. **WASM 미사용 → `wasm-unsafe-eval` 불필요** | 오류 있는 JS 모델 → `getModelMarkers` end-to-end |
@@ -48,24 +49,13 @@
 | 포매터 에러 정책 | 에러 시 stdout 공백 + exit≠0(zig=2·rust=1) | zig fmt·rustfmt stdin PoC |
 | LSP 프리미티브 | initialize 0.02s·진단 4.85s(콜드), 프레이밍=Content-Length(≠maru ndjson) | rust-analyzer 왕복 PoC |
 
-### zntc 쪽 결함 6건 — 전부 수정됨
+**결론: Monaco 경로는 end-to-end로 검증됐다.** 번들 → 파싱 → 모듈평가 → 실제 렌더까지 통과하고, 기준 번들러(Vite)와 픽셀이 완전히 같다.
 
-에디터 스택이 zntc의 **첫 대형 소비자**라 미탐색 경로를 6건 밟았다. 모두 `ohah/zntc`에 이슈화·수정 완료.
+### 툴체인 전제 — zntc 최소 버전
 
-| 이슈 | 내용 | 상태 |
-|---|---|---|
-| [#4466](https://github.com/ohah/zntc/issues/4466) | CSS `url()` 자산(codicon.ttf) 미방출 → dangling | 0.1.3 릴리스 |
-| [#4467](https://github.com/ohah/zntc/issues/4467) | Vite식 `?worker`/`?raw`/`?url` 접미사 미지원 | 0.1.3 릴리스 |
-| [#4472](https://github.com/ohah/zntc/issues/4472) | minify comma-fold 시 구조분해 할당 괄호 소실 | 0.1.3 릴리스 |
-| [#4481](https://github.com/ohah/zntc/issues/4481) | `if(c) ({…}=o)` → `c&&{…}=o` (`&&`-fold 괄호 소실) | **수정 완료·미릴리스** |
-| [#4482](https://github.com/ohah/zntc/issues/4482) | 단항 토큰 병합(`-(--t)`→`---t`) + `**` 좌변 괄호 소실 | **수정 완료·미릴리스** |
-| [#4483](https://github.com/ohah/zntc/issues/4483) | `new URL("x.js", import.meta.url)`의 `./` 없는 지정자 미재작성 → 404 | **수정 완료·미릴리스** |
+에디터 스택은 zntc의 **첫 대형 소비자**라 PoC 과정에서 코드젠·자산·워커 해석 결함을 여러 건 밟았고, 전부 `ohah/zntc`에 보고·수정됐다. **Phase 1 착수 시점의 zntc 릴리스가 이 수정들을 포함해야 한다** — 프런트 workspace의 `@zntc/core`·`@zntc/web` 최소 버전을 그 릴리스로 못박는다(§13).
 
-**#4481·#4483이 `ts.worker`를 죽이고 있었다** — 전자는 TS 컴파일러를 파싱 불가로 만들고, 후자는 Monaco 내장 워커 팩토리의 참조를 404로 만든다. 둘 다 **빌드는 exit 0**이었고, 모듈 워커의 로드 실패는 `message`가 `undefined`인 **불투명 `Event`**(ErrorEvent 아님)로만 새어나와 CDP로도 안 잡혔다.
-
-**의존성 함의**: 에디터 스택은 **미릴리스 zntc 수정 3건에 의존**한다. Phase 1 착수 전에 zntc 릴리스가 선행되어야 하며, 그때까지 lockfile을 로컬/프리릴리스에 고정할지는 결정 사항(§13).
-
-**회귀 스윕(2026-07-13)**: 인기 라이브러리 21개(react·vue·rxjs·zod·three·d3·codemirror·highlight.js·prettier·@xterm/xterm·mermaid 등)를 `--minify`로 번들 → 산출물 124개 전수 재파싱 **실패 0**. 미니파이어 위험지점 20종(`**`·optional chaining·문자열→템플릿 이스케이프·정규식/나눗셈·ASI·getter `this`·try/finally·private field)을 **실행값까지 원본과 대조 → 불일치 0**.
+세부 결함 목록은 zntc 이슈 트래커가 단일 출처다. 이 문서는 그것을 재서술하지 않고, **거기서 얻은 설계 교훈(§12의 검증 게이트)만** 가져간다.
 
 ---
 
@@ -100,7 +90,7 @@
   - **`'wasm-unsafe-eval'` 불필요**: TS 언어워커도 WASM을 쓰지 않는다. **TextMate(§8) 도입 시에만** 재검토.
   - **`img-src ... data:` 필요**: 진단 마커의 오류 물결선이 `data:` SVG. 이건 마커가 실제로 뜨는 상태에서만 관측되므로, `ts.worker`가 죽어 있던 동안엔 보이지 않던 조건이다.
   - **잔여 리스크는 엔진 차이뿐**: 위는 Blink 측정이다. WebKit + `maru-app://` 커스텀 스킴 위의 모듈 워커·스타일 주입은 Phase 0.5에서 확인한다(§11).
-- **산출물 재파싱 게이트(필수)**: zntc 결함 6건 중 3건이 **빌드 exit 0 + 산출물 파싱 불가**였다. 빌드 성공을 동작 증거로 삼지 않는다 — 번들 산출물을 파서로 다시 읽는 스모크를 빌드 파이프라인에 넣는다(§12).
+- **빌드 성공을 동작 증거로 삼지 않는다**: PoC에서 밟은 번들러 결함은 전부 빌드 exit 0을 통과했다. 프런트 빌드 파이프라인은 **4층 게이트**(재파싱 → 모듈평가 → 렌더/픽셀비교)를 함께 세운다(§12).
 
 ---
 
@@ -210,7 +200,7 @@ flowchart TD
 ```
 
 - **Phase 0.5(스파이크·GUI 필수, 범위 축소됨)**: 헤드리스 Chrome 실측(§2)이 **CSP·워커·폰트·TS 워커 질문을 이미 닫았으므로**, 스파이크에 남는 것은 **WebKit 고유 영역뿐**이다 — ① `maru-app://` 커스텀 스킴 위에서 `{type:'module'}` 워커가 도는가(WKURLSchemeHandler + 워커 로딩 상호작용), ② Monaco 런타임 스타일 주입 vs 엄격 `style-src`, ③ 한글 IME. red면 워커 전략 재검토. **CSP 정책은 §4의 실측값을 그대로 적용하고 위반 여부만 확인한다.**
-- **Phase 1**: zntc NAPI 빌드 배선(+`@zntc/web`, +산출물 재파싱 게이트) + PanelKind 라우트(§3) + `diff.read` op(§6) + `<DiffEditor>` + 접기/펼치기·파일트리 + Monarch. **읽기 전용 diff는 스냅샷+새로고침으로 punt**(경합은 Phase 2b). **선행조건: zntc 릴리스**(#4481·#4482·#4483 수정분, §2).
+- **Phase 1**: zntc NAPI 빌드 배선(+`@zntc/web`, +§12 4층 게이트) + PanelKind 라우트(§3) + `diff.read` op(§6) + `<DiffEditor>` + 접기/펼치기·파일트리 + Monarch. **읽기 전용 diff는 스냅샷+새로고침으로 punt**(경합은 Phase 2b). **선행조건: PoC 수정분을 담은 zntc 릴리스**(§2).
 - **Phase 2 / 2b**: 문서 모델(§5) + `filesystem` cap·`file.*` op + 파일 열기(NSWorkspace.open 승격) / file-watch 재조정(§7).
 - **2.5·2.7·3 병렬 가능**(문서 모델 위, 서로 독립). **4는 최후.**
 
@@ -218,8 +208,25 @@ flowchart TD
 
 ## 12. 관측 가능성·테스트 전략
 
-- **산출물 재파싱 게이트(신규·필수)**: 프런트 빌드 후 **방출된 모든 `.js`를 파서로 다시 읽어** 실패 시 빌드를 깬다. 근거: zntc 결함 6건 중 3건이 "빌드 exit 0 + 산출물 파싱 불가"였고, 이 게이트 하나로 전부 잡혔을 것이다(§2·§4). 비용이 사실상 0이라 CI 상시 게이트로 둔다.
-- **헤드리스 브라우저 스모크(신규)**: 빌드 산출물을 **엄격 CSP를 실은 로컬 서버 + 헤드리스 Chrome**에 띄워 ① 렌더 ② CSP 위반 0 ③ 워커 에러 0 ④ 404 0을 검사. §2의 2차 실측이 그대로 이 하니스다. **WKWebView는 아니지만**, "빌드 green ≠ 런타임 green" 갭의 대부분을 CI에서 잡아준다 — 실제로 이번에 `ts.worker` DOA를 잡아낸 것이 이 하니스다.
+### 프런트 빌드 검증 — 4층 게이트 (신규·필수)
+
+PoC에서 밟은 번들러 결함은 **전부 빌드 exit 0**이었다. 각 결함이 어느 층에서야 처음 드러났는지를 그대로 게이트로 만든다. **위 층을 통과했다고 아래 층이 통과하는 게 아니다** — 실제로 각 층에서만 잡히는 결함이 따로 있었다.
+
+| 층 | 검사 | 잡는 것 | 비용 |
+|---|---|---|---|
+| 1 | **빌드 exit code** | (거의 아무것도) — 모든 결함이 여기를 통과했다 | 0 |
+| 2 | **산출물 재파싱** — 방출된 모든 `.js`를 파서로 재독 | 문법이 깨진 산출물. **빌드는 green인데 브라우저가 파싱조차 못 하는** 코드젠 결함 | ~0 |
+| 3 | **모듈평가 스모크** — 헤드리스 브라우저에 띄워 엔트리 모듈이 끝까지 평가되는지 | 문법은 유효하나 **평가 중 죽는** 결함(식별자 섀도잉·미링크 바인딩). 2층은 통과한다 | 낮음 |
+| 4 | **렌더 + 픽셀 비교** — 실제 API를 호출·렌더하고 **기준 번들러(Vite) 산출물과 스크린샷 픽셀 비교** | 평가는 통과하고 **API를 실제로 호출할 때만** 죽는 결함, 그리고 **조용한 오컴파일**(에러 없이 다른 픽셀) | 중간 |
+
+- **4층이 필수인 이유**: 1~3층을 전부 통과하고 4층에서만 잡힌 결함이 실재했다. `import * as X from "lib"`만으로는 모듈 평가가 성공하고, **실제로 그려봐야** 드러난다.
+- **픽셀 비교의 값어치**: Monaco를 zntc/Vite 양쪽으로 빌드해 렌더하면 **0px 차이**다. 이건 "에러가 없다"보다 훨씬 강한 진술 — **번들러가 의미를 바꾸지 않았다**는 증거다. 기준 번들러를 devDependency로 두는 비용은 이 보증에 비하면 싸다.
+- Monaco는 CI 렌더 픽스처(고정 diff 입력·`automaticLayout:false`·애니메이션 off·고정 폰트)로 결정론적으로 찍는다. 회귀 시 diff 이미지를 artifact로 남긴다.
+- **CSP도 이 게이트에 얹는다**: 3·4층 서버가 §4의 실측 CSP 헤더를 실어, 위반 0건을 상시 확인한다. CSP 회귀가 조용히 들어오는 걸 막는다.
+- **한계**: 헤드리스 Chrome은 **WKWebView가 아니다**. 이 4층은 "빌드 green ≠ 동작 green" 갭의 대부분을 CI에서 잡아줄 뿐, WebKit 고유 리스크는 Phase 0.5·수동 GUI가 담당한다(§14).
+
+### 그 외
+
 - **프런트 단위**: Monaco 통합·포매터 레지스트리·diff op 매핑은 `bun test`(Phase 7 툴체인)로.
 - **op 계약**: `diff.read`/`file.*`/`git.*`는 control-plane trace schema에 실어 snapshot/replay가 같은 데이터를 공유(control-plane.md 관측 원칙 유지).
 - **GUI 수동(불가피)**: WKWebView 입력/포커스/폰트/한글 IME는 web-panel.md §11이 이미 "헤드리스 자동화 불가"로 규정한 영역. 에디터는 그 위에 Monaco 상호작용·format-on-save를 더한다 — 각 Phase 게이트에 수동 검증 항목을 명시한다.
@@ -233,7 +240,7 @@ flowchart TD
 3. **신규 capability `filesystem`**: 임의 파일 read/write 발급 UX(기본 거부 + 명시 발급). §6.
 4. **외부 의존성**: Monaco를 핵심 UX 경로에 추가 = "가벼운 native shell" 포지션과의 트레이드오프(웹뷰에 제품 상당부가 산다). pr-checklist "핵심 경로 외부 의존성" 항목.
 5. **에디터 op 전송 경로**: 브리지(단순하나 capability 격리 없음) vs 소켓(capability-gated·push 스트림 보유). 민감 write·LSP diagnostics push를 어디로 흘릴지 — 브리지에 capability 모델을 얹을지, 소켓으로 흘릴지. §6·§10.
-6. **zntc 버전 고정(신규)**: 에디터 스택은 **미릴리스 zntc 수정 3건**(#4481·#4482·#4483)에 의존한다(§2). Phase 1을 zntc 릴리스까지 기다릴지, 그 전까지 lockfile을 로컬/프리릴리스 버전에 고정할지.
+6. **zntc 최소 버전(신규)**: 에디터 스택은 PoC에서 나온 zntc 수정분에 의존한다(§2). Phase 1을 그 릴리스까지 기다릴지, 그 전까지 lockfile을 프리릴리스에 고정할지.
 
 ---
 
@@ -241,7 +248,7 @@ flowchart TD
 
 - **WKWebView(WebKit) 런타임 미검증** — 남은 최대 갭. §2의 런타임 실측은 **헤드리스 Chrome(Blink)**이다. "코드가 `unsafe-eval`을 실제로 요구하는가"는 엔진 무관한 강한 신호라 CSP 결론은 유지될 가능성이 높지만, **`maru-app://` 커스텀 스킴 위의 모듈 워커 로딩·Monaco 스타일 주입·한글 IME는 WebKit 고유**라 Phase 0.5에서 확인해야 한다.
 - **정적 분석의 한계(기록)**: 초판은 정적 grep으로 "CSP 청정"을 단언했다가 적대 검증에서 정정했고, 이번 런타임 측정으로 비로소 결론이 났다. **grep은 CSP 질문에 답할 수 없다** — 문자열의 존재는 실행의 증거가 아니다(코어의 `new Function`은 실제로 죽은 폴백이었다).
-- **`--minify` 경로에 결함이 몰려 있다**: zntc 결함 6건 중 3건(#4472·#4481·#4482)이 **minify에서만** 재현됐다(비-minify 빌드는 정상). 프로덕션 빌드가 곧 minify 빌드이므로, 재파싱 게이트는 **minify 산출물을 대상으로** 돌려야 한다.
+- **결함이 `--minify` 경로에 몰린다**: PoC에서 밟은 번들러 결함 상당수가 **minify에서만** 재현됐다(비-minify 빌드는 정상). 프로덕션 빌드가 곧 minify 빌드이므로, §12 게이트는 **minify 산출물을 대상으로** 돌려야 한다 — 개발 빌드가 통과했다는 건 아무 보증도 아니다.
 - **surface당 자원 비용 미측정**: pane N개 × (Monaco + 워커 5스레드). 성능 예산(performance-budget.md) 대비 측정 필요, Monaco 공유 전략 미결. **번들 크기도 미최적화** — all-language barrel import 기준이라 targeted import로 줄여야 한다.
 - **문서 모델 경계·경합 재조정 메커니즘**은 설계만, 구현 미착수(가장 어려운 부분).
 - **전제 정정**: 마크다운 뷰어/프런트 툴체인 부재를 이 문서에서 처음 반영 — 기존 계획이 이를 전제했다면 함께 갱신 필요.

@@ -28,6 +28,10 @@ pub const browser_help =
     \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
     \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
     \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제
+    \\  get-local-storage    --surface <id> --key k             localStorage 값 출력
+    \\  set-local-storage    --surface <id> --key k --value v   localStorage 값 설정
+    \\  remove-local-storage --surface <id> --key k             localStorage 항목 삭제
+    \\  clear-storage        --surface <id>                     대상 origin 쿠키+스토리지 전부 삭제
     \\  screenshot  --surface <id> [--out f]   현재 페이지를 PNG로 캡처(--out 파일, 생략=stdout)
     \\
 ;
@@ -47,6 +51,14 @@ pub const Request = union(enum) {
     set_cookie: struct { surface_id: u64, name: []const u8, value: []const u8, domain: ?[]const u8, path: ?[]const u8, secure: bool },
     /// `browser delete-cookie`(§9.4 D4 write). name 필수, domain/path 선택. 응답 {ok}.
     delete_cookie: struct { surface_id: u64, name: []const u8, domain: ?[]const u8, path: ?[]const u8 },
+    /// `browser get-local-storage`(§9.4 D4). key 필수. 응답 {value}.
+    get_local_storage: struct { surface_id: u64, key: []const u8 },
+    /// `browser set-local-storage`(§9.4 D4). key/value 필수. 응답 {ok}.
+    set_local_storage: struct { surface_id: u64, key: []const u8, value: []const u8 },
+    /// `browser remove-local-storage`(§9.4 D4). key 필수. 응답 {ok}.
+    remove_local_storage: struct { surface_id: u64, key: []const u8 },
+    /// `browser clear-storage`(§9.4 D4). surface만. 대상 origin 쿠키+스토리지 삭제. 응답 {ok}.
+    clear_storage: struct { surface_id: u64 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -56,7 +68,8 @@ pub const Request = union(enum) {
             .get_url => .get_url,
             .exec => .exec,
             .get_cookies => .get_cookies,
-            .set_cookie, .delete_cookie => .ok, // 둘 다 {ok}
+            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage => .ok,
+            .get_local_storage => .value,
         };
     }
 };
@@ -83,7 +96,8 @@ pub const ParseError = error{
     MissingScript, // `exec`에 script 없음
     MissingOutValue, // `screenshot --out`에 값 없음
     MissingName, // `set-cookie`/`delete-cookie`에 `--name` 없음
-    MissingValue, // `set-cookie`에 `--value` 없음
+    MissingKey, // `*-local-storage`에 `--key` 없음
+    MissingValue, // `set-cookie`/`set-local-storage`에 `--value` 없음
     MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`에 값 없음
     UnknownOption, // 알 수 없는 옵션(`--bogus`)
     UnexpectedArgument, // 남는 위치 인자
@@ -142,6 +156,31 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const name = ca.name orelse return error.MissingName;
         // --value/--secure는 delete엔 무의미 — 관대하게 무시(파서가 받아도 안 씀).
         return .{ .request = .{ .delete_cookie = .{ .surface_id = s, .name = name, .domain = ca.domain, .path = ca.path } } };
+    }
+    if (eq(sub, "get-local-storage")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const key = ca.key orelse return error.MissingKey;
+        return .{ .request = .{ .get_local_storage = .{ .surface_id = s, .key = key } } };
+    }
+    if (eq(sub, "set-local-storage")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const key = ca.key orelse return error.MissingKey;
+        const value = ca.value orelse return error.MissingValue;
+        return .{ .request = .{ .set_local_storage = .{ .surface_id = s, .key = key, .value = value } } };
+    }
+    if (eq(sub, "remove-local-storage")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const key = ca.key orelse return error.MissingKey;
+        return .{ .request = .{ .remove_local_storage = .{ .surface_id = s, .key = key } } };
+    }
+    if (eq(sub, "clear-storage")) {
+        const p = try parseSurfaceArg(rest);
+        const s = p.surface orelse return error.MissingSurface;
+        if (p.arg != null) return error.UnexpectedArgument;
+        return .{ .request = .{ .clear_storage = .{ .surface_id = s } } };
     }
     if (eq(sub, "screenshot")) {
         // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`(생략=stdout으로 raw PNG).
@@ -204,12 +243,12 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
     return .{ .surface = surface, .arg = arg };
 }
 
-const CookieArgs = struct { surface: ?u64, name: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, secure: bool };
+const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, secure: bool };
 
-/// set-cookie/delete-cookie 옵션(`--surface`·`--name`·`--value`·`--domain`·`--path`·`--secure`)을 뽑는다. 위치 인자
-/// 금지, 알 수 없는 `-`옵션 에러. 각 값 옵션은 `--opt val`·`--opt=val` 양형태. delete는 value/secure를 안 쓰지만 파서는 공유.
+/// cookie/localStorage 명령 옵션(`--surface`·`--name`·`--key`·`--value`·`--domain`·`--path`·`--secure`)을 뽑는다. 위치
+/// 인자 금지, 알 수 없는 `-`옵션 에러. 각 값 옵션은 `--opt val`·`--opt=val` 양형태. 서브커맨드가 필요 필드만 검사(파서는 공유).
 fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
-    var r: CookieArgs = .{ .surface = null, .name = null, .value = null, .domain = null, .path = null, .secure = false };
+    var r: CookieArgs = .{ .surface = null, .name = null, .key = null, .value = null, .domain = null, .path = null, .secure = false };
     var i: usize = 0;
     while (i < rest.len) {
         const a = rest[i];
@@ -220,6 +259,8 @@ fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
             r.surface = parseU64(try optValue(rest, &i, "--surface")) catch return error.InvalidSurface;
         } else if (matchOpt(a, "--name")) {
             r.name = try optValue(rest, &i, "--name");
+        } else if (matchOpt(a, "--key")) {
+            r.key = try optValue(rest, &i, "--key");
         } else if (matchOpt(a, "--value")) {
             r.value = try optValue(rest, &i, "--value");
         } else if (matchOpt(a, "--domain")) {
@@ -229,7 +270,7 @@ fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
         } else {
-            return error.UnexpectedArgument; // cookie 명령은 위치 인자 없음
+            return error.UnexpectedArgument; // cookie/localStorage 명령은 위치 인자 없음
         }
     }
     return r;
@@ -310,7 +351,21 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
             if (c.path) |p| try obj.put(gpa, "path", .{ .string = p });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.deleteCookie", .params = .{ .object = obj } } });
         },
+        .get_local_storage => |g| return keyRequest(gpa, id, "browser.getLocalStorage", g.surface_id, g.key, null),
+        .set_local_storage => |g| return keyRequest(gpa, id, "browser.setLocalStorage", g.surface_id, g.key, g.value),
+        .remove_local_storage => |g| return keyRequest(gpa, id, "browser.removeLocalStorage", g.surface_id, g.key, null),
+        .clear_storage => |g| return idOnlyRequest(gpa, id, "browser.clearStorage", g.surface_id),
     }
+}
+
+/// localStorage 요청 바이트: `{id, key, value?}`. value null이면 key만(get/remove). caller free.
+fn keyRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, key: []const u8, value: ?[]const u8) std.mem.Allocator.Error![]u8 {
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(gpa);
+    try obj.put(gpa, "id", .{ .integer = @intCast(surface_id) });
+    try obj.put(gpa, "key", .{ .string = key });
+    if (value) |v| try obj.put(gpa, "value", .{ .string = v });
+    return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
 }
 
 fn idOnlyRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64) std.mem.Allocator.Error![]u8 {
@@ -329,7 +384,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, surface_id: u64, id: 
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value };
 
 /// 응답 바이트 한 줄을 기계·사람 읽기 편한 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`
 /// (sessions.renderResponse 규율 — 미grant 거부는 `error: Unauthorized (-32002)`). result는 kind별 한 줄.
@@ -390,9 +445,10 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         .navigate => {
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: navigate not ok\n");
         },
-        .ok => { // set-cookie/delete-cookie 성공 = {ok:true}
+        .ok => { // set-cookie/delete-cookie/set·remove-local-storage/clear-storage 성공 = {ok:true}
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: not ok\n");
         },
+        .value => try w.print("{s}\n", .{strField(result.get("value"))}), // get-local-storage → {value}
         .get_url => try w.print("{s}\n", .{strField(result.get("url"))}),
         .exec => try w.print("{s}\n", .{strField(result.get("result"))}),
         .get_cookies => {
@@ -832,6 +888,65 @@ test "renderResponse(ok): setCookie {ok:true} → ok" {
     var w = std.Io.Writer.fixed(&buf);
     try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .ok, &w);
     try testing.expectEqualStrings("ok\n", w.buffered());
+}
+
+// ── localStorage/clear(§9.4 D4) 파서·wire·렌더 단위 ──
+
+test "parse: get/set/remove-local-storage·clear-storage·에러" {
+    switch (try parse(&.{ "get-local-storage", "--surface", "3", "--key", "tok" })) {
+        .request => |r| {
+            try testing.expectEqual(@as(u64, 3), r.get_local_storage.surface_id);
+            try testing.expectEqualStrings("tok", r.get_local_storage.key);
+        },
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "set-local-storage", "--surface=3", "--key=k", "--value=v" })) {
+        .request => |r| {
+            try testing.expectEqualStrings("k", r.set_local_storage.key);
+            try testing.expectEqualStrings("v", r.set_local_storage.value);
+        },
+        else => return error.Unexpected,
+    }
+    try testing.expectEqual(@as(u64, 5), (try parse(&.{ "remove-local-storage", "--surface", "5", "--key", "k" })).request.remove_local_storage.surface_id);
+    try testing.expectEqual(@as(u64, 7), (try parse(&.{ "clear-storage", "--surface", "7" })).request.clear_storage.surface_id);
+    try testing.expectError(error.MissingKey, parse(&.{ "get-local-storage", "--surface", "1" }));
+    try testing.expectError(error.MissingValue, parse(&.{ "set-local-storage", "--surface", "1", "--key", "k" }));
+    try testing.expectError(error.MissingSurface, parse(&.{"clear-storage"})); // --surface 없음
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "clear-storage", "--surface", "1", "extra" }));
+}
+
+test "buildRequestBytes: localStorage/clear 메서드·params" {
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .get_local_storage = .{ .surface_id = 11, .key = "tok" } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.getLocalStorage", pm.message.request.method);
+        try testing.expectEqualStrings("tok", pm.message.request.params.?.object.get("key").?.string);
+        try testing.expect(pm.message.request.params.?.object.get("value") == null); // get엔 value 없음
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .set_local_storage = .{ .surface_id = 11, .key = "k", .value = "v" } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.setLocalStorage", pm.message.request.method);
+        try testing.expectEqualStrings("v", pm.message.request.params.?.object.get("value").?.string);
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .clear_storage = .{ .surface_id = 11 } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.clearStorage", pm.message.request.method);
+    }
+}
+
+test "renderResponse(value): getLocalStorage {value} → 값 출력" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"hello\"}}", .value, &w);
+    try testing.expectEqualStrings("hello\n", w.buffered());
 }
 
 test {

@@ -138,7 +138,9 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     // browser-storage: browser.getCookies/setCookie/deleteCookie(D4/D5 — 쿠키 read+write는 browser와 분리된 peer
     // scope, 사용자 결정 2026-07-13 read+write 동일 scope). 아래 generic `browser.*`보다 **먼저** 검사해야 쿠키가
     // browser scope로 새지 않는다(§8.3 D5 laundering-hole 방지).
-    if (m.core == .browser and (eq(rest, "getCookies") or eq(rest, "setCookie") or eq(rest, "deleteCookie"))) return .browser_storage;
+    // clearStorage도 browser_storage(쿠키=토큰까지 comprehensive 삭제라 민감). localStorage(get/set/remove)는 eval 백엔드라
+    // exec와 같은 도달=base browser(D5 laundering-hole 불변)로 아래 catch-all에 떨어진다 — 여기 안 넣는다.
+    if (m.core == .browser and (eq(rest, "getCookies") or eq(rest, "setCookie") or eq(rest, "deleteCookie") or eq(rest, "clearStorage"))) return .browser_storage;
     // browser.*(§6 line 111 와일드카드) — 나머지 페이지 조작/관찰.
     if (m.core == .browser) return .browser;
     return null;
@@ -559,6 +561,10 @@ test "method↔scope 매핑: §6 line 111의 모든 메서드가 올바른 categ
         .{ .m = "browser.getCookies", .want = .browser_storage },
         .{ .m = "browser.setCookie", .want = .browser_storage },
         .{ .m = "browser.deleteCookie", .want = .browser_storage },
+        .{ .m = "browser.clearStorage", .want = .browser_storage }, // comprehensive clear=쿠키 건드림
+        // localStorage는 eval 백엔드=base browser(exec와 동일 도달, D5 laundering-hole 불변)
+        .{ .m = "browser.getLocalStorage", .want = .browser },
+        .{ .m = "browser.setLocalStorage", .want = .browser },
         // 미지/미매핑 → null(grant 안 샘)
         .{ .m = "session.unknownVerb", .want = null },
         .{ .m = "sessions.foo", .want = null },

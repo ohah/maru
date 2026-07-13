@@ -830,6 +830,71 @@ enum BrowserControl {
               let s = String(data: data, encoding: .utf8) else { return "[]" }
         return s
     }
+
+    // cookie write(§9.4 D4): argJson={name,value,domain?,path?,secure?}. domain 생략=대상 문서 host·path 생략="/".
+    // HTTPCookie(properties:) 구성 후 WKHTTPCookieStore.setCookie(async 콜백). host·domain 둘 다 없으면 실패(어느 도메인?).
+    // httpOnly는 HTTPCookiePropertyKey에 공개 키가 없어(Set-Cookie 헤더 전용) 주입 쿠키는 항상 non-HttpOnly(문서화 한계).
+    @MainActor static func setCookie(_ webView: WKWebView, _ argJson: String, completion: @escaping (Bool) -> Void) {
+        guard let obj = Self.parseCookieArg(argJson),
+            let name = obj["name"] as? String,
+            let value = obj["value"] as? String
+        else {
+            completion(false)
+            return
+        }
+        let domain = (obj["domain"] as? String) ?? webView.url?.host
+        guard let dom = domain, !dom.isEmpty else {
+            completion(false)
+            return
+        } // 대상 도메인 없음(로드 전 opaque origin)
+        let path = (obj["path"] as? String) ?? "/"
+        var props: [HTTPCookiePropertyKey: Any] = [.name: name, .value: value, .domain: dom, .path: path]
+        if (obj["secure"] as? Bool) == true { props[.secure] = "TRUE" }
+        guard let cookie = HTTPCookie(properties: props) else {
+            completion(false)
+            return
+        }
+        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { completion(true) }
+    }
+
+    // deleteCookie(§9.4 D4): argJson={name,domain?,path?}. getAllCookies서 name(+domain/path 지정 시 매치) 쿠키를 찾아
+    // delete. domain 생략=대상 문서 host 필터(getCookies와 동형 격리). 매치 0이어도 성공(멱등 — 이미 없음).
+    @MainActor static func deleteCookie(_ webView: WKWebView, _ argJson: String, completion: @escaping (Bool) -> Void) {
+        guard let obj = Self.parseCookieArg(argJson), let name = obj["name"] as? String else {
+            completion(false)
+            return
+        }
+        let host = webView.url?.host
+        let reqDomain = obj["domain"] as? String
+        let reqPath = obj["path"] as? String
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        store.getAllCookies { cookies in
+            let matches = cookies.filter { c in
+                guard c.name == name else { return false }
+                if let rd = reqDomain {
+                    if c.domain != rd && c.domain != "." + rd { return false }
+                } else if !Self.cookieVisibleToHost(c, host: host) {
+                    return false // domain 미지정 = 대상 문서 host로만(교차-surface 유출 차단)
+                }
+                if let rp = reqPath, c.path != rp { return false }
+                return true
+            }
+            let group = DispatchGroup()
+            for c in matches {
+                group.enter()
+                store.delete(c) { group.leave() }
+            }
+            group.notify(queue: .main) { completion(true) }
+        }
+    }
+
+    // cookie write op.arg JSON({name,value,domain?,...})을 dict로 파싱. 실패면 nil.
+    static func parseCookieArg(_ json: String) -> [String: Any]? {
+        guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return obj
+    }
 }
 
 // 5e-2b-2(**테스트 전용 — 배경 스레드**): 앱 자신의 컨트롤 소켓에 붙어 `browser.navigate`/`browser.getUrl`을 **소켓 전
@@ -2849,6 +2914,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     } else {
                         self.completeBrowserOp(asyncId, status: 1, result: "screenshot failed")
                     }
+                }
+            case 6: // setCookie(§9.4 D4) — async 콜백(WKHTTPCookieStore.setCookie). arg=쿠키 필드 JSON. 성공=ok, 실패=status 1.
+                BrowserControl.setCookie(wp.webView, arg) { ok in
+                    self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "setCookie failed")
+                }
+            case 7: // deleteCookie(§9.4 D4) — async 콜백(getAllCookies→delete). arg={name,domain?,path?}. 멱등(매치 0도 성공).
+                BrowserControl.deleteCookie(wp.webView, arg) { ok in
+                    self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "deleteCookie failed")
                 }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)

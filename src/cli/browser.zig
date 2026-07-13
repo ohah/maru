@@ -26,6 +26,8 @@ pub const browser_help =
     \\  get-url     --surface <id>             현재 문서 URL 출력
     \\  exec        --surface <id> <script>    JavaScript 실행, 결과 출력
     \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
+    \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
+    \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제
     \\  screenshot  --surface <id> [--out f]   현재 페이지를 PNG로 캡처(--out 파일, 생략=stdout)
     \\
 ;
@@ -41,6 +43,10 @@ pub const Request = union(enum) {
     get_url: struct { surface_id: u64 },
     exec: struct { surface_id: u64, script: []const u8 },
     get_cookies: struct { surface_id: u64 },
+    /// `browser set-cookie`(§9.4 D4 write). name/value 필수, domain/path/secure 선택. 응답 {ok}.
+    set_cookie: struct { surface_id: u64, name: []const u8, value: []const u8, domain: ?[]const u8, path: ?[]const u8, secure: bool },
+    /// `browser delete-cookie`(§9.4 D4 write). name 필수, domain/path 선택. 응답 {ok}.
+    delete_cookie: struct { surface_id: u64, name: []const u8, domain: ?[]const u8, path: ?[]const u8 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -50,6 +56,7 @@ pub const Request = union(enum) {
             .get_url => .get_url,
             .exec => .exec,
             .get_cookies => .get_cookies,
+            .set_cookie, .delete_cookie => .ok, // 둘 다 {ok}
         };
     }
 };
@@ -75,6 +82,9 @@ pub const ParseError = error{
     MissingUrl, // `navigate`에 url 없음
     MissingScript, // `exec`에 script 없음
     MissingOutValue, // `screenshot --out`에 값 없음
+    MissingName, // `set-cookie`/`delete-cookie`에 `--name` 없음
+    MissingValue, // `set-cookie`에 `--value` 없음
+    MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`에 값 없음
     UnknownOption, // 알 수 없는 옵션(`--bogus`)
     UnexpectedArgument, // 남는 위치 인자
 };
@@ -118,6 +128,20 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const s = p.surface orelse return error.MissingSurface;
         if (p.arg != null) return error.UnexpectedArgument;
         return .{ .request = .{ .get_cookies = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "set-cookie")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const name = ca.name orelse return error.MissingName;
+        const value = ca.value orelse return error.MissingValue;
+        return .{ .request = .{ .set_cookie = .{ .surface_id = s, .name = name, .value = value, .domain = ca.domain, .path = ca.path, .secure = ca.secure } } };
+    }
+    if (eq(sub, "delete-cookie")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const name = ca.name orelse return error.MissingName;
+        // --value/--secure는 delete엔 무의미 — 관대하게 무시(파서가 받아도 안 씀).
+        return .{ .request = .{ .delete_cookie = .{ .surface_id = s, .name = name, .domain = ca.domain, .path = ca.path } } };
     }
     if (eq(sub, "screenshot")) {
         // screenshot은 위치 인자 없음 — `--surface <id>` + 선택 `--out <file>`(생략=stdout으로 raw PNG).
@@ -180,6 +204,53 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
     return .{ .surface = surface, .arg = arg };
 }
 
+const CookieArgs = struct { surface: ?u64, name: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, secure: bool };
+
+/// set-cookie/delete-cookie 옵션(`--surface`·`--name`·`--value`·`--domain`·`--path`·`--secure`)을 뽑는다. 위치 인자
+/// 금지, 알 수 없는 `-`옵션 에러. 각 값 옵션은 `--opt val`·`--opt=val` 양형태. delete는 value/secure를 안 쓰지만 파서는 공유.
+fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
+    var r: CookieArgs = .{ .surface = null, .name = null, .value = null, .domain = null, .path = null, .secure = false };
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (eq(a, "--secure")) {
+            r.secure = true;
+            i += 1;
+        } else if (matchOpt(a, "--surface")) {
+            r.surface = parseU64(try optValue(rest, &i, "--surface")) catch return error.InvalidSurface;
+        } else if (matchOpt(a, "--name")) {
+            r.name = try optValue(rest, &i, "--name");
+        } else if (matchOpt(a, "--value")) {
+            r.value = try optValue(rest, &i, "--value");
+        } else if (matchOpt(a, "--domain")) {
+            r.domain = try optValue(rest, &i, "--domain");
+        } else if (matchOpt(a, "--path")) {
+            r.path = try optValue(rest, &i, "--path");
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else {
+            return error.UnexpectedArgument; // cookie 명령은 위치 인자 없음
+        }
+    }
+    return r;
+}
+
+fn matchOpt(a: []const u8, opt: []const u8) bool {
+    return eq(a, opt) or (std.mem.startsWith(u8, a, opt) and a.len > opt.len and a[opt.len] == '=');
+}
+
+/// `--opt val`(공백) 또는 `--opt=val`의 값. `i`를 소비만큼 전진. 값 없으면 MissingOptionValue.
+fn optValue(rest: []const []const u8, i: *usize, opt: []const u8) ParseError![]const u8 {
+    const a = rest[i.*];
+    if (eq(a, opt)) {
+        if (i.* + 1 >= rest.len) return error.MissingOptionValue;
+        i.* += 2;
+        return rest[i.* - 1];
+    }
+    i.* += 1; // `--opt=val` 형태
+    return a[opt.len + 1 ..];
+}
+
 fn hasHelpFlag(args: []const []const u8) bool {
     for (args) |a| if (eq(a, "--help") or eq(a, "-h")) return true;
     return false;
@@ -219,6 +290,26 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.executeScript", .params = .{ .object = obj } } });
         },
         .get_cookies => |g| return idOnlyRequest(gpa, id, "browser.getCookies", g.surface_id),
+        .set_cookie => |c| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(c.surface_id) });
+            try obj.put(gpa, "name", .{ .string = c.name });
+            try obj.put(gpa, "value", .{ .string = c.value });
+            if (c.domain) |d| try obj.put(gpa, "domain", .{ .string = d });
+            if (c.path) |p| try obj.put(gpa, "path", .{ .string = p });
+            if (c.secure) try obj.put(gpa, "secure", .{ .bool = true });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.setCookie", .params = .{ .object = obj } } });
+        },
+        .delete_cookie => |c| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(c.surface_id) });
+            try obj.put(gpa, "name", .{ .string = c.name });
+            if (c.domain) |d| try obj.put(gpa, "domain", .{ .string = d });
+            if (c.path) |p| try obj.put(gpa, "path", .{ .string = p });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.deleteCookie", .params = .{ .object = obj } } });
+        },
     }
 }
 
@@ -238,7 +329,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, surface_id: u64, id: 
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok };
 
 /// 응답 바이트 한 줄을 기계·사람 읽기 편한 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`
 /// (sessions.renderResponse 규율 — 미grant 거부는 `error: Unauthorized (-32002)`). result는 kind별 한 줄.
@@ -298,6 +389,9 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
         .navigate => {
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: navigate not ok\n");
+        },
+        .ok => { // set-cookie/delete-cookie 성공 = {ok:true}
+            if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: not ok\n");
         },
         .get_url => try w.print("{s}\n", .{strField(result.get("url"))}),
         .exec => try w.print("{s}\n", .{strField(result.get("result"))}),
@@ -670,6 +764,74 @@ test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 
         try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[]}}", .list, &w);
         try testing.expectEqualStrings("(no web surfaces)\n", w.buffered());
     }
+}
+
+// ── cookie write(§9.4 D4) 파서·wire·렌더 단위 ──
+
+test "parse: set-cookie/delete-cookie 옵션·양형태·에러" {
+    switch (try parse(&.{ "set-cookie", "--surface", "3", "--name", "sid", "--value", "abc", "--domain", "x.com", "--path", "/a", "--secure" })) {
+        .request => |r| {
+            try testing.expectEqual(@as(u64, 3), r.set_cookie.surface_id);
+            try testing.expectEqualStrings("sid", r.set_cookie.name);
+            try testing.expectEqualStrings("abc", r.set_cookie.value);
+            try testing.expectEqualStrings("x.com", r.set_cookie.domain.?);
+            try testing.expectEqualStrings("/a", r.set_cookie.path.?);
+            try testing.expect(r.set_cookie.secure);
+        },
+        else => return error.Unexpected,
+    }
+    // --opt=val 형태 + 최소(name/value).
+    switch (try parse(&.{ "set-cookie", "--surface=5", "--name=n", "--value=v" })) {
+        .request => |r| {
+            try testing.expectEqual(@as(u64, 5), r.set_cookie.surface_id);
+            try testing.expect(r.set_cookie.domain == null and !r.set_cookie.secure);
+        },
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "delete-cookie", "--surface", "3", "--name", "sid" })) {
+        .request => |r| {
+            try testing.expectEqualStrings("sid", r.delete_cookie.name);
+            try testing.expect(r.delete_cookie.domain == null);
+        },
+        else => return error.Unexpected,
+    }
+    try testing.expectError(error.MissingSurface, parse(&.{ "set-cookie", "--name", "n", "--value", "v" }));
+    try testing.expectError(error.MissingName, parse(&.{ "set-cookie", "--surface", "1", "--value", "v" }));
+    try testing.expectError(error.MissingValue, parse(&.{ "set-cookie", "--surface", "1", "--name", "n" }));
+    try testing.expectError(error.MissingName, parse(&.{ "delete-cookie", "--surface", "1" }));
+    try testing.expectError(error.MissingOptionValue, parse(&.{ "set-cookie", "--surface", "1", "--name" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "set-cookie", "--surface", "1", "--name", "n", "--value", "v", "--bogus" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "set-cookie", "--surface", "1", "--name", "n", "--value", "v", "extra" }));
+}
+
+test "buildRequestBytes: setCookie/deleteCookie params(선택 필드 생략)" {
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .set_cookie = .{ .surface_id = 11, .name = "n", .value = "v", .domain = "x.com", .path = null, .secure = true } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.setCookie", pm.message.request.method);
+        const p = pm.message.request.params.?.object;
+        try testing.expectEqualStrings("n", p.get("name").?.string);
+        try testing.expectEqualStrings("x.com", p.get("domain").?.string);
+        try testing.expect(p.get("secure").?.bool);
+        try testing.expect(p.get("path") == null); // 생략
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .delete_cookie = .{ .surface_id = 11, .name = "n", .domain = null, .path = null } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.deleteCookie", pm.message.request.method);
+        try testing.expect(pm.message.request.params.?.object.get("secure") == null); // delete엔 secure 없음
+    }
+}
+
+test "renderResponse(ok): setCookie {ok:true} → ok" {
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .ok, &w);
+    try testing.expectEqualStrings("ok\n", w.buffered());
 }
 
 test {

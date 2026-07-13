@@ -71,6 +71,13 @@ pub const BrowserMethod = enum {
     /// method를 감지해 serializeBrowserResponse(단일) 대신 chunk 경로로 분기한다. scope=`browser`(base).
     /// **op_kind=5 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 끝에 추가).
     screenshot,
+    /// `browser.setCookie {id, name, value, domain?, path?, secure?, httpOnly?}`(cookie write) → Swift `WKHTTPCookieStore.setCookie`.
+    /// **`browser_storage` scope**(getCookies와 동일 — §9.4 D4 사용자 결정 read+write 동일 scope). op.arg=쿠키 필드 compact JSON.
+    /// **op_kind=6 고정**(app_host_abi 컴파일 assert — 끝에 추가).
+    set_cookie,
+    /// `browser.deleteCookie {id, name, domain?, path?}`(cookie write) → Swift `WKHTTPCookieStore.delete`. `browser_storage` scope.
+    /// op.arg=`{name, domain?, path?}` compact JSON. **op_kind=7 고정**.
+    delete_cookie,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -83,6 +90,8 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "subscribe")) return .subscribe;
     if (eq(rest, "getCookies")) return .get_cookies;
     if (eq(rest, "screenshot")) return .screenshot;
+    if (eq(rest, "setCookie")) return .set_cookie;
+    if (eq(rest, "deleteCookie")) return .delete_cookie;
     return null;
 }
 
@@ -116,6 +125,26 @@ pub const ExecuteScriptParams = struct {
     script: []const u8,
 };
 
+/// `browser.setCookie` params(§9.4 D4). name/value 필수, 나머지 선택(domain 생략=대상 문서 host·path 생략=`/`·secure
+/// 생략=false는 Swift가 적용). **httpOnly는 미지원**: `HTTPCookie(properties:)`가 HttpOnly를 설정 못 함(Set-Cookie 헤더
+/// 전용)이라 WKWebView 주입 쿠키는 항상 non-HttpOnly(문서화된 한계). expires/sameSite는 후속. 슬라이스는 파싱 arena를 빌린다.
+pub const SetCookieParams = struct {
+    id: u64,
+    name: []const u8,
+    value: []const u8,
+    domain: ?[]const u8,
+    path: ?[]const u8,
+    secure: bool,
+};
+
+/// `browser.deleteCookie` params(§9.4 D4). name 필수, domain/path 선택(대상 문서 host·`/` 기본).
+pub const DeleteCookieParams = struct {
+    id: u64,
+    name: []const u8,
+    domain: ?[]const u8,
+    path: ?[]const u8,
+};
+
 fn paramsObject(params: ?std.json.Value) ParamError!std.json.ObjectMap {
     return switch (params orelse return error.InvalidParams) {
         .object => |o| o,
@@ -139,6 +168,24 @@ fn strFromObj(obj: std.json.ObjectMap, name: []const u8) ParamError![]const u8 {
     };
 }
 
+/// 선택 문자열 필드(domain/path). 부재/null → null, 문자열 → 값, 비문자열 → InvalidParams(형식 오류는 surface oracle 아님).
+fn optStrFromObj(obj: std.json.ObjectMap, name: []const u8) ParamError!?[]const u8 {
+    return switch (obj.get(name) orelse return null) {
+        .string => |s| s,
+        .null => null,
+        else => error.InvalidParams,
+    };
+}
+
+/// 선택 bool 필드(secure/httpOnly). 부재/null → default, bool → 값, 비-bool → InvalidParams.
+fn optBoolFromObj(obj: std.json.ObjectMap, name: []const u8, default: bool) ParamError!bool {
+    return switch (obj.get(name) orelse return default) {
+        .bool => |b| b,
+        .null => default,
+        else => error.InvalidParams,
+    };
+}
+
 /// authz(순서 4)가 target surface를 알아야 하므로 dispatch가 메서드 확정 전에 `id`만 먼저 읽는 공유 파서. 모든
 /// browser.* 메서드의 params가 `{id, ...}` 모양이라 메서드 무관하게 id를 뽑는다(형식 오류는 surface oracle이 아님).
 fn readIdParam(params: ?std.json.Value) ParamError!u64 {
@@ -157,6 +204,81 @@ pub fn parseGetUrlParams(params: ?std.json.Value) ParamError!GetUrlParams {
 pub fn parseExecuteScriptParams(params: ?std.json.Value) ParamError!ExecuteScriptParams {
     const obj = try paramsObject(params);
     return .{ .id = try idFromObj(obj), .script = try strFromObj(obj, "script") };
+}
+
+pub fn parseSetCookieParams(params: ?std.json.Value) ParamError!SetCookieParams {
+    const obj = try paramsObject(params);
+    return .{
+        .id = try idFromObj(obj),
+        .name = try strFromObj(obj, "name"),
+        .value = try strFromObj(obj, "value"),
+        .domain = try optStrFromObj(obj, "domain"),
+        .path = try optStrFromObj(obj, "path"),
+        .secure = try optBoolFromObj(obj, "secure", false),
+    };
+}
+
+pub fn parseDeleteCookieParams(params: ?std.json.Value) ParamError!DeleteCookieParams {
+    const obj = try paramsObject(params);
+    return .{
+        .id = try idFromObj(obj),
+        .name = try strFromObj(obj, "name"),
+        .domain = try optStrFromObj(obj, "domain"),
+        .path = try optStrFromObj(obj, "path"),
+    };
+}
+
+/// setCookie op.arg — Swift가 `JSONSerialization`으로 파싱할 쿠키 필드 compact JSON(§9.4 D4). domain/path 부재면 생략
+/// (Swift가 대상 문서 host·`/` 기본 적용). caller free(op.arg 소유). 파싱 슬라이스를 읽어 owned JSON을 만든다(arena 분리).
+pub fn serializeSetCookieArg(gpa: std.mem.Allocator, p: SetCookieParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeSetCookieArg(&s, p) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeSetCookieArg(s: *std.json.Stringify, p: SetCookieParams) !void {
+    try s.beginObject();
+    try s.objectField("name");
+    try s.write(p.name);
+    try s.objectField("value");
+    try s.write(p.value);
+    if (p.domain) |d| {
+        try s.objectField("domain");
+        try s.write(d);
+    }
+    if (p.path) |pa| {
+        try s.objectField("path");
+        try s.write(pa);
+    }
+    try s.objectField("secure");
+    try s.write(p.secure);
+    try s.endObject();
+}
+
+/// deleteCookie op.arg — `{name, domain?, path?}` compact JSON(§9.4 D4). caller free.
+pub fn serializeDeleteCookieArg(gpa: std.mem.Allocator, p: DeleteCookieParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeDeleteCookieArg(&s, p) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeDeleteCookieArg(s: *std.json.Stringify, p: DeleteCookieParams) !void {
+    try s.beginObject();
+    try s.objectField("name");
+    try s.write(p.name);
+    if (p.domain) |d| {
+        try s.objectField("domain");
+        try s.write(d);
+    }
+    if (p.path) |pa| {
+        try s.objectField("path");
+        try s.write(pa);
+    }
+    try s.endObject();
 }
 
 /// `browser.subscribe {id, events?}`의 **필터**(id는 readIdParam로 별도). `events` 부재/null → 전체(`EventFilter.all`).
@@ -523,6 +645,8 @@ pub fn serializeBrowserResponse(gpa: std.mem.Allocator, request_bytes: []const u
         // OOM이 풀려 이 재파싱은 성공하면 bmethod=.screenshot, ok=true로 이 arm에 닿는다(22차 리뷰 [0]). `unreachable`이면
         // 저확률이지만 앱이 크래시하므로 **균일 internal_error**로 접는다(ok=false 경로와 동형 — client는 에러 응답 수신).
         .screenshot => cp.serializeError(gpa, req.id, .internal_error, "screenshot delivered out of band", null),
+        // setCookie/deleteCookie 성공 = {ok:true}(navigate와 동형 — write 성공 여부만). Swift가 status로 실패 전달(위 !ok 경로).
+        .set_cookie, .delete_cookie => serializeNavigateResult(gpa, req.id),
     };
 }
 
@@ -689,6 +813,9 @@ pub fn browserOpFromRequest(
         .get_cookies => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 surface 현재 문서 host의 쿠키를 읽음(22차 [0] host 필터, 인자 없음)
         .screenshot => try gpa.dupe(u8, ""), // {id, format?}만 — Swift가 대상 surface WKWebView를 takeSnapshot→PNG(5f-1, format=png 고정·인자 없음)
         .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
+        // cookie write: 쿠키 필드를 compact JSON으로 arg에 실어 Swift가 파싱(§9.4 D4). 파싱 슬라이스는 arena를 빌리나 serialize가 owned JSON 생성.
+        .set_cookie => try serializeSetCookieArg(gpa, parseSetCookieParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        .delete_cookie => try serializeDeleteCookieArg(gpa, parseDeleteCookieParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
@@ -1171,6 +1298,8 @@ test "parseBrowserMethod: navigate/getUrl/executeScript/getCookies/screenshot �
     try testing.expectEqual(BrowserMethod.execute_script, parseBrowserMethod("executeScript").?);
     try testing.expectEqual(BrowserMethod.get_cookies, parseBrowserMethod("getCookies").?); // 5f-4c
     try testing.expectEqual(BrowserMethod.screenshot, parseBrowserMethod("screenshot").?); // 5f-1
+    try testing.expectEqual(BrowserMethod.set_cookie, parseBrowserMethod("setCookie").?); // cookie write
+    try testing.expectEqual(BrowserMethod.delete_cookie, parseBrowserMethod("deleteCookie").?);
     // 미구현/미지 → null.
     try testing.expect(parseBrowserMethod("back") == null);
     try testing.expect(parseBrowserMethod("get_url") == null); // snake_case는 wire 이름 아님(camelCase 엄수)
@@ -1469,6 +1598,106 @@ test "serializeBrowserListResult(§9.6): web surface만 나열(터미널 제외)
     try testing.expectEqual(@as(i64, 11), o.get("id").?.integer);
     try testing.expectEqualStrings("https://example/", o.get("url").?.string);
     try testing.expectEqualStrings("browser", o.get("panel_kind").?.string);
+}
+
+// ── cookie write(§9.4 D4) params·arg·dispatch·응답 단위 ──
+
+fn setCookieFromWire(params_json: []const u8) !SetCookieParams {
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, params_json, .{});
+    defer parsed.deinit();
+    return parseSetCookieParams(parsed.value);
+}
+fn deleteCookieFromWire(params_json: []const u8) !DeleteCookieParams {
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, params_json, .{});
+    defer parsed.deinit();
+    return parseDeleteCookieParams(parsed.value);
+}
+
+test "params: setCookie(필수 name/value·선택 domain/path/secure)·deleteCookie(name)·오류" {
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.setCookie\",\"params\":{\"id\":11,\"name\":\"sid\",\"value\":\"abc\",\"domain\":\"x.com\",\"path\":\"/a\",\"secure\":true}}");
+        defer pm.deinit();
+        const p = try parseSetCookieParams(pm.message.request.params);
+        try testing.expectEqual(@as(u64, 11), p.id);
+        try testing.expectEqualStrings("sid", p.name);
+        try testing.expectEqualStrings("abc", p.value);
+        try testing.expectEqualStrings("x.com", p.domain.?);
+        try testing.expectEqualStrings("/a", p.path.?);
+        try testing.expect(p.secure);
+    }
+    // 최소(name/value) → domain/path null·secure false.
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.setCookie\",\"params\":{\"id\":11,\"name\":\"n\",\"value\":\"v\"}}");
+        defer pm.deinit();
+        const p = try parseSetCookieParams(pm.message.request.params);
+        try testing.expect(p.domain == null and p.path == null and !p.secure);
+    }
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.deleteCookie\",\"params\":{\"id\":11,\"name\":\"n\"}}");
+        defer pm.deinit();
+        const p = try parseDeleteCookieParams(pm.message.request.params);
+        try testing.expectEqualStrings("n", p.name);
+        try testing.expect(p.domain == null);
+    }
+    try testing.expectError(error.InvalidParams, setCookieFromWire("{\"id\":1,\"value\":\"v\"}")); // name 없음
+    try testing.expectError(error.InvalidParams, setCookieFromWire("{\"id\":1,\"name\":\"n\"}")); // value 없음
+    try testing.expectError(error.InvalidParams, setCookieFromWire("{\"id\":1,\"name\":\"n\",\"value\":\"v\",\"secure\":\"yes\"}")); // secure 비-bool
+    try testing.expectError(error.InvalidParams, deleteCookieFromWire("{\"id\":1}")); // name 없음
+}
+
+test "serializeSetCookieArg/DeleteCookieArg: compact JSON, 선택 필드 생략" {
+    {
+        const a = try serializeSetCookieArg(testing.allocator, .{ .id = 11, .name = "sid", .value = "abc", .domain = "x.com", .path = "/a", .secure = true });
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        const o = parsed.value.object;
+        try testing.expectEqualStrings("sid", o.get("name").?.string);
+        try testing.expectEqualStrings("abc", o.get("value").?.string);
+        try testing.expectEqualStrings("x.com", o.get("domain").?.string);
+        try testing.expect(o.get("secure").?.bool);
+    }
+    // domain/path 생략 → 키 부재.
+    {
+        const a = try serializeSetCookieArg(testing.allocator, .{ .id = 11, .name = "n", .value = "v", .domain = null, .path = null, .secure = false });
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        try testing.expect(parsed.value.object.get("domain") == null);
+        try testing.expect(!parsed.value.object.get("secure").?.bool);
+    }
+    {
+        const a = try serializeDeleteCookieArg(testing.allocator, .{ .id = 11, .name = "n", .domain = "x.com", .path = null });
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("n", parsed.value.object.get("name").?.string);
+        try testing.expectEqualStrings("x.com", parsed.value.object.get("domain").?.string);
+        try testing.expect(parsed.value.object.get("path") == null);
+    }
+}
+
+test "dispatchBrowser(cookie write): browser_storage cap + setCookie → op{set_cookie, arg JSON}; browser cap 불인가(D5)" {
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.setCookie\",\"params\":{\"id\":11,\"name\":\"n\",\"value\":\"v\"}}", browserStorageCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(BrowserMethod.set_cookie, op.method);
+    try testing.expectEqual(@as(u64, 11), op.surface_id);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("n", parsed.value.object.get("name").?.string); // arg=쿠키 필드 JSON
+    // D5: browser cap은 setCookie 불인가(쿠키=browser_storage, laundering-hole 방지).
+    const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.setCookie\",\"params\":{\"id\":11,\"name\":\"n\",\"value\":\"v\"}}", browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+}
+
+test "serializeBrowserResponse(cookie write): setCookie → {ok:true}, id echo" {
+    const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.setCookie\",\"params\":{\"id\":11,\"name\":\"n\",\"value\":\"v\"}}", true, "");
+    defer testing.allocator.free(w);
+    var pm = try cp.parseMessage(testing.allocator, w);
+    defer pm.deinit();
+    try testing.expect(pm.message.response.result.?.object.get("ok").?.bool);
+    try testing.expect(cp.idEql(pm.message.response.id, .{ .number = 3 }));
 }
 
 test {

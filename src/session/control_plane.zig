@@ -35,6 +35,7 @@ pub const hello_method = "hello";
 /// `browser.screenshotChunk` notification의 method 이름(§9.5.7 — screenshot chunk-streaming). 생산(control_browser
 /// `serializeScreenshotChunk`)과 소비(cli/browser `ScreenshotAssembler`)가 이 **단일 출처**를 공유해 wire drift를 막는다(22차 [8]).
 pub const browser_screenshot_chunk_method = "browser.screenshotChunk";
+pub const browser_execute_script_chunk_method = "browser.executeScriptChunk";
 /// max frame 크기(≈ 1 MiB, §4.3). "frame 크기" = 종단 `\n`을 제외한 한 줄의 바이트 수(선행 `\r`이 있으면 포함).
 pub const default_max_frame: usize = 1024 * 1024;
 
@@ -64,6 +65,9 @@ pub const ErrorCode = enum(i64) {
     /// 조건 기반 browser wait가 요청한 제한 시간 안에 충족되지 않음(§9.4/§9.5). 일반 transport timeout과 달리
     /// 서버가 정상 응답한 **도메인 실패**라 연결을 유지할 수 있다. data에 condition/timeout_ms를 싣는다.
     timeout = -32004,
+    result_too_large = -32005,
+    script_error = -32006,
+    resource_busy = -32007,
 
     /// 이 코드의 표준 짧은 message(JSON-RPC §5.1의 관례). 에러 응답 build 편의.
     pub fn defaultMessage(self: ErrorCode) []const u8 {
@@ -77,6 +81,9 @@ pub const ErrorCode = enum(i64) {
             .unauthorized => "Unauthorized",
             .process_exited => "Process exited",
             .timeout => "Timeout",
+            .result_too_large => "Result too large",
+            .script_error => "Script error",
+            .resource_busy => "Resource busy",
         };
     }
 };

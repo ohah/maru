@@ -694,6 +694,112 @@ fn clampU32(v: i64) u32 {
 
 /// screenshot chunk notification의 method(server→client push). control_browser의 wire 이름과 동일해야 한다(client측 상수).
 const screenshot_chunk_method = cp.browser_screenshot_chunk_method; // 22차 [8]: 단일 출처(control_plane)
+const execute_script_chunk_method = cp.browser_execute_script_chunk_method;
+
+/// executeScript chunk 재조립기(5f-5b L2). 전체 결과는 max_bytes를 넘지 않으며,
+/// chunk는 request/result id·encoding·seq·최종 bytes를 모두 검증한다.
+pub const ExecuteScriptAssembler = struct {
+    gpa: std.mem.Allocator,
+    request_id: cp.Id,
+    result_id: ?i64 = null,
+    max_bytes: usize,
+    buf: std.ArrayList(u8) = .empty,
+    next_seq: i64 = 0,
+    done: bool = false,
+
+    pub const Step = enum { need_more, done, failed };
+
+    pub fn init(gpa: std.mem.Allocator, request_id: cp.Id, max_bytes: usize) ExecuteScriptAssembler {
+        return .{ .gpa = gpa, .request_id = request_id, .max_bytes = max_bytes };
+    }
+    pub fn deinit(self: *ExecuteScriptAssembler) void {
+        self.buf.deinit(self.gpa);
+    }
+    pub fn bytes(self: *const ExecuteScriptAssembler) []const u8 {
+        return self.buf.items;
+    }
+
+    pub fn feed(self: *ExecuteScriptAssembler, frame: []const u8) std.mem.Allocator.Error!Step {
+        if (self.done) return .failed;
+        var pm = cp.parseMessage(self.gpa, frame) catch {
+            self.done = true;
+            return .failed;
+        };
+        defer pm.deinit();
+        const step = try switch (pm.message) {
+            .notification => |n| if (std.mem.eql(u8, n.method, execute_script_chunk_method)) self.feedChunk(n.params) else .need_more,
+            .response => |r| self.feedFinal(r),
+            else => .failed,
+        };
+        if (step == .failed) self.done = true;
+        return step;
+    }
+
+    fn feedChunk(self: *ExecuteScriptAssembler, params: ?std.json.Value) std.mem.Allocator.Error!Step {
+        const obj = switch (params orelse return .failed) {
+            .object => |o| o,
+            else => return .failed,
+        };
+        const rid = intField(obj.get("result_id")) orelse return .failed;
+        const seq = intField(obj.get("seq")) orelse return .failed;
+        if (rid < 0 or seq != self.next_seq) return .failed;
+        if (self.result_id) |bound| {
+            if (rid != bound) return .failed;
+        } else self.result_id = rid;
+        const encoding = switch (obj.get("encoding") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        if (!std.mem.eql(u8, encoding, "base64-json")) return .failed;
+        const req = obj.get("request_id") orelse return .failed;
+        const chunk_request_id = valueAsId(req) orelse return .failed;
+        if (!cp.idEql(chunk_request_id, self.request_id)) return .failed;
+        const encoded = switch (obj.get("data") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        const decoder = std.base64.standard.Decoder;
+        const n = decoder.calcSizeForSlice(encoded) catch return .failed;
+        if (n > 512 * 1024 or n > self.max_bytes -| self.buf.items.len) return .failed;
+        const start = self.buf.items.len;
+        self.buf.resize(self.gpa, start + n) catch |err| {
+            self.done = true;
+            return err;
+        };
+        decoder.decode(self.buf.items[start..], encoded) catch return .failed;
+        self.next_seq += 1;
+        return .need_more;
+    }
+
+    fn feedFinal(self: *ExecuteScriptAssembler, resp: cp.Response) std.mem.Allocator.Error!Step {
+        if (!cp.idEql(resp.id, self.request_id) or resp.err != null) return .failed;
+        const obj = switch (resp.result orelse return .failed) {
+            .object => |o| o,
+            else => return .failed,
+        };
+        const transfer = switch (obj.get("transfer") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        if (!std.mem.eql(u8, transfer, "chunked")) return .failed;
+        const final_result_id = intField(obj.get("result_id")) orelse return .failed;
+        const final_seq_total = intField(obj.get("seq_total")) orelse return .failed;
+        const final_bytes = intField(obj.get("bytes")) orelse return .failed;
+        if (self.result_id == null or final_result_id != self.result_id.? or final_seq_total != self.next_seq or final_bytes != self.buf.items.len) return .failed;
+        const parsed = std.json.parseFromSlice(std.json.Value, self.gpa, self.buf.items, .{}) catch return .failed;
+        defer parsed.deinit();
+        self.done = true;
+        return .done;
+    }
+};
+
+fn valueAsId(v: std.json.Value) ?cp.Id {
+    return switch (v) {
+        .integer => |n| .{ .number = n },
+        .string => |s| .{ .string = s },
+        else => null,
+    };
+}
 
 /// screenshot chunk 스트림(§9.5.7)을 프레임 단위로 재조립한다. CLI(main)가 소켓에서 읽은 프레임을 하나씩 `feed`하면
 /// chunk notification은 seq 순서로 PNG 버퍼에 누적하고, 최종 응답에서 완성(done)/에러(failed)를 판정한다. capture_id
@@ -1043,6 +1149,42 @@ test "ScreenshotAssembler: chunk 재조립 → PNG, seq/capture/seq_total 검증
         try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"screenshot too large\"}}"));
         try testing.expect(std.mem.indexOf(u8, a.failureMessage(), "screenshot too large") != null);
     }
+}
+
+test "ExecuteScriptAssembler: id·seq·bytes 검증 후 strict JSON 재조립" {
+    const chunk0 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJh\"}}";
+    const chunk1 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":1,\"encoding\":\"base64-json\",\"data\":\"IjoxfQ==\"}}";
+    const final = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"transfer\":\"chunked\",\"result_id\":9,\"seq_total\":2,\"bytes\":7}}";
+    var a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 32);
+    defer a.deinit();
+    try testing.expectEqual(ExecuteScriptAssembler.Step.need_more, try a.feed(chunk0));
+    try testing.expectEqual(ExecuteScriptAssembler.Step.need_more, try a.feed(chunk1));
+    try testing.expectEqual(ExecuteScriptAssembler.Step.done, try a.feed(final));
+    try testing.expectEqualStrings("{\"a\":1}", a.bytes());
+    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try a.feed(final)); // terminal latch
+}
+
+test "ExecuteScriptAssembler: mismatch·잘못된 encoding·상한·invalid JSON 거부" {
+    const bad_id = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":8,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"e30=\"}}";
+    var id_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 8);
+    defer id_a.deinit();
+    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try id_a.feed(bad_id));
+
+    const bad_encoding = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64\",\"data\":\"e30=\"}}";
+    var enc_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 8);
+    defer enc_a.deinit();
+    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try enc_a.feed(bad_encoding));
+
+    const oversized = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"e30=\"}}";
+    var size_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 1);
+    defer size_a.deinit();
+    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try size_a.feed(oversized));
+
+    var json_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 8);
+    defer json_a.deinit();
+    const invalid_json = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"bm9wZQ==\"}}";
+    _ = try json_a.feed(invalid_json);
+    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try json_a.feed("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"transfer\":\"chunked\",\"result_id\":9,\"seq_total\":1,\"bytes\":4}}"));
 }
 
 // ── browser list(§9.6 발견) 파서·wire·렌더 단위 ──

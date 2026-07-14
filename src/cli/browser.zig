@@ -24,7 +24,7 @@ pub const browser_help =
     \\  list                                   열린 web 패널을 나열(id·url·title — 대상 발견용)
     \\  navigate    --surface <id> <url>       URL로 이동
     \\  get-url     --surface <id>             현재 문서 URL 출력
-    \\  exec        --surface <id> [--max-result-bytes n] [--out f] <script>   JavaScript 실행, 구조화 결과 출력
+    \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   JavaScript 표현식 실행·await
     \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
     \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
     \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제
@@ -46,6 +46,7 @@ pub const browser_help =
 pub const ExecCmd = struct {
     surface_id: u64,
     script: []const u8,
+    args_json: ?[]const u8 = null,
     max_result_bytes: usize = 16 * 1024 * 1024,
     out: ?[]const u8 = null,
 };
@@ -135,6 +136,8 @@ pub const ParseError = error{
     MissingSurfaceValue, // `--surface`에 값 없음
     MissingUrl, // `navigate`에 url 없음
     MissingScript, // `exec`에 script 없음
+    MissingArgsValue,
+    InvalidArgs,
     MissingMaxResultBytesValue,
     InvalidMaxResultBytes,
     MissingOutValue, // `screenshot --out`에 값 없음
@@ -315,6 +318,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
     var surface: ?u64 = null;
     var script: ?[]const u8 = null;
+    var args_json: ?[]const u8 = null;
     var max_result_bytes: usize = 16 * 1024 * 1024;
     var out: ?[]const u8 = null;
     var i: usize = 0;
@@ -326,6 +330,14 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
             i += 2;
         } else if (std.mem.startsWith(u8, arg, "--surface=")) {
             surface = parseU64(arg["--surface=".len..]) catch return error.InvalidSurface;
+            i += 1;
+        } else if (eq(arg, "--args")) {
+            if (i + 1 >= rest.len) return error.MissingArgsValue;
+            args_json = rest[i + 1];
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--args=")) {
+            args_json = arg["--args=".len..];
+            if (args_json.?.len == 0) return error.MissingArgsValue;
             i += 1;
         } else if (eq(arg, "--max-result-bytes")) {
             if (i + 1 >= rest.len) return error.MissingMaxResultBytesValue;
@@ -354,6 +366,7 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
     return .{
         .surface_id = surface orelse return error.MissingSurface,
         .script = script orelse return error.MissingScript,
+        .args_json = args_json,
         .max_result_bytes = max_result_bytes,
         .out = out,
     };
@@ -528,7 +541,7 @@ fn parseScale(s: []const u8) !f64 {
 
 /// 파싱된 `Request` → JSON-RPC 요청 바이트 한 줄(1a `serializeMessage` 재사용). caller free. 메서드명은 camelCase
 /// (control_browser `parseBrowserMethod` 계약: navigate/getUrl/executeScript/getCookies).
-pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.mem.Allocator.Error![]u8 {
+pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.mem.Allocator.Error || error{InvalidArgs})![]u8 {
     switch (req) {
         .list => return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.list", .params = null } }), // 발견 — params 없음
         .navigate => |n| {
@@ -545,6 +558,18 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
             try obj.put(gpa, "id", .{ .integer = @intCast(e.surface_id) });
             try obj.put(gpa, "script", .{ .string = e.script });
             try obj.put(gpa, "max_result_bytes", .{ .integer = @intCast(e.max_result_bytes) });
+            var parsed_args: ?std.json.Parsed(std.json.Value) = null;
+            defer if (parsed_args) |*parsed| parsed.deinit();
+            if (e.args_json) |raw| {
+                // Preserve number lexemes through the CLI request. The server validates -0 and the JS safe-number
+                // boundary against the original spelling before WebKit receives NSNumber values.
+                parsed_args = std.json.parseFromSlice(std.json.Value, gpa, raw, .{ .parse_numbers = false }) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.InvalidArgs,
+                };
+                if (parsed_args.?.value != .array) return error.InvalidArgs;
+                try obj.put(gpa, "args", parsed_args.?.value);
+            }
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.executeScript", .params = .{ .object = obj } } });
         },
         .get_cookies => |g| return idOnlyRequest(gpa, id, "browser.getCookies", g.surface_id),
@@ -1188,18 +1213,20 @@ test "parse: navigate/get-url/exec/get-cookies + --surface" {
     try testing.expectEqual(@as(u64, 9), (try parse(&.{ "get-cookies", "--surface", "9" })).request.get_cookies.surface_id);
 }
 
-test "parse exec: max result와 out을 순서 무관하게 적용하고 16 MiB 밖은 거부" {
-    switch (try parse(&.{ "exec", "--out", "result.json", "--max-result-bytes", "524289", "--surface", "5", "({ok:true})" })) {
+test "parse exec: args와 max result와 out을 순서 무관하게 적용" {
+    switch (try parse(&.{ "exec", "--out", "result.json", "--args", "[40,2]", "--max-result-bytes", "524289", "--surface", "5", "Promise.resolve(args[0]+args[1])" })) {
         .request => |request| {
             try testing.expectEqual(@as(u64, 5), request.exec.surface_id);
             try testing.expectEqual(@as(usize, 524289), request.exec.max_result_bytes);
             try testing.expectEqualStrings("result.json", request.exec.out.?);
-            try testing.expectEqualStrings("({ok:true})", request.exec.script);
+            try testing.expectEqualStrings("[40,2]", request.exec.args_json.?);
+            try testing.expectEqualStrings("Promise.resolve(args[0]+args[1])", request.exec.script);
         },
         else => return error.Unexpected,
     }
     try testing.expectError(error.InvalidMaxResultBytes, parse(&.{ "exec", "--surface", "5", "--max-result-bytes", "0", "1" }));
     try testing.expectError(error.InvalidMaxResultBytes, parse(&.{ "exec", "--surface", "5", "--max-result-bytes", "16777217", "1" }));
+    try testing.expectError(error.MissingArgsValue, parse(&.{ "exec", "--surface", "5", "--args" }));
 }
 
 test "parse: --help → .help(파싱보다 우선)" {
@@ -1242,14 +1269,24 @@ test "buildRequestBytes: browser.* 메서드·params(camelCase 계약)" {
         try testing.expectEqualStrings("browser.getUrl", pm.message.request.method);
         try testing.expectEqual(@as(i64, 3), pm.message.request.params.?.object.get("id").?.integer);
     }
-    // executeScript {id, script}.
+    // executeScript {id, script, args?, max_result_bytes}.
     {
-        const b = try buildRequestBytes(testing.allocator, .{ .exec = .{ .surface_id = 5, .script = "1+1" } }, .{ .number = 1 });
+        const b = try buildRequestBytes(testing.allocator, .{ .exec = .{ .surface_id = 5, .script = "Promise.resolve(args[0]+1)", .args_json = "[41]" } }, .{ .number = 1 });
         defer testing.allocator.free(b);
         var pm = try cp.parseMessage(testing.allocator, b);
         defer pm.deinit();
         try testing.expectEqualStrings("browser.executeScript", pm.message.request.method);
-        try testing.expectEqualStrings("1+1", pm.message.request.params.?.object.get("script").?.string);
+        const params = pm.message.request.params.?.object;
+        try testing.expectEqualStrings("Promise.resolve(args[0]+1)", params.get("script").?.string);
+        try testing.expectEqual(@as(i64, 41), params.get("args").?.array.items[0].integer);
+        try testing.expectEqual(@as(i64, 16 * 1024 * 1024), params.get("max_result_bytes").?.integer);
+    }
+    try testing.expectError(error.InvalidArgs, buildRequestBytes(testing.allocator, .{ .exec = .{ .surface_id = 5, .script = "1", .args_json = "{}" } }, .{ .number = 1 }));
+    try testing.expectError(error.InvalidArgs, buildRequestBytes(testing.allocator, .{ .exec = .{ .surface_id = 5, .script = "1", .args_json = "[" } }, .{ .number = 1 }));
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .exec = .{ .surface_id = 5, .script = "args[0]", .args_json = "[-0,9007199254740993.0,1e-400]" } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        try testing.expect(std.mem.indexOf(u8, b, "[-0,9007199254740993.0,1e-400]") != null);
     }
     // getCookies {id}.
     {
@@ -1745,7 +1782,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  list                                   열린 web 패널을 나열(id·url·title — 대상 발견용)
         \\  navigate    --surface <id> <url>       URL로 이동
         \\  get-url     --surface <id>             현재 문서 URL 출력
-        \\  exec        --surface <id> [--max-result-bytes n] [--out f] <script>   JavaScript 실행, 구조화 결과 출력
+        \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   JavaScript 표현식 실행·await
         \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
         \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
         \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제

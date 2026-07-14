@@ -140,7 +140,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 118;
+pub const abi_version: u32 = 119;
+// 119: off-main executeScript syntax validation 뒤 page 실행 직전 running+pending+현재 인가+timeout을 재검사하는
+// maru_macos_control_browser_execution_may_start 추가. 취소된 expression의 page side effect 시작을 막는다.
 // 118: executeScript와 screenshot의 Swift-owned Data를 공통 progressive result pump로 전송하는 ABI.
 // tick당 최대 512 KiB copy 또는 terminal 하나를 처리하고 terminal/cancel에서 registry Data를 해제한다.
 // 117: executeScript page-process bounded serializer의 typed script-error callback ABI. Swift가 bounded diagnostic

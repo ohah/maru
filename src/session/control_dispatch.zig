@@ -205,7 +205,7 @@ pub fn dispatchAuthenticated(
                 }
             }
         }
-        return switch (try cb.browserOpFromRequest(gpa, req, snapshot, caps_buf[0..ncaps], selector, grants, now)) {
+        return switch (try cb.browserOpFromRequest(gpa, req, request_bytes, snapshot, caps_buf[0..ncaps], selector, grants, now)) {
             .err => |e| .{ .immediate = e },
             .op => |raw_op| blk: {
                 var op = raw_op;

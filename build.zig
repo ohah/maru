@@ -646,6 +646,10 @@ pub fn build(b: *std.Build) void {
             // 의존성 0(docs/web-panel.md §13). 콘텐츠·브리지·보안은 Phase 5.
             "-framework",
             "WebKit",
+            // browser.executeScript raw expression은 page wrapper에 넣기 전에 JavaScriptCore syntax-only parser로
+            // 독립 expression 경계를 검증한다(eval/Function 실행 없음).
+            "-framework",
+            "JavaScriptCore",
             // Retina HiDPI: bare 실행파일(.app 번들 없음)에 Info.plist를 __TEXT,__info_plist
             // 섹션으로 임베드해 NSHighResolutionCapable을 켠다. 없으면 macOS가 창을 1x backing
             // store로 렌더해 window.backingScaleFactor가 1.0이 되고 Retina에서 흐려진다.
@@ -848,6 +852,7 @@ pub fn build(b: *std.Build) void {
         });
         browser_result_registry_tests.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         browser_result_registry_tests.addFileArg(b.path("tests/macos_browser_result_registry.swift"));
+        browser_result_registry_tests.addArgs(&.{ "-framework", "JavaScriptCore" });
         browser_result_registry_tests.addArg("-o");
         const browser_result_registry_test_bin = browser_result_registry_tests.addOutputFileArg("maru-browser-result-registry-tests");
         const run_browser_result_registry_tests = b.addSystemCommand(&.{"/usr/bin/env"});

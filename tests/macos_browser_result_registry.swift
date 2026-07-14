@@ -52,11 +52,28 @@ struct BrowserResultTransferRegistryTests {
             } catch {}
         }
 
-        let bounded = try BrowserResultTransferRegistry.boundedPageScript("({text: '\"한글\\n', value: undefined})", maxBytes: 64)
-        precondition(bounded.hasSuffix(",64)"))
+        let bounded = try BrowserResultTransferRegistry.boundedPageScript("Promise.resolve({text: '\"한글\\n', value: args[0]})", maxBytes: 64)
+        precondition(bounded.contains("return await __maruBoundedScriptV1"))
+        precondition(bounded.contains("Promise.resolve({text:"))
+        precondition(bounded.contains("64"))
+        precondition(!bounded.contains("eval("))
         precondition(!BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("JSON.stringify"))
         precondition(!BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("TextEncoder"))
+        precondition(!BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("pageEval"))
+        precondition(BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("await thunk()"))
         precondition(BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("writable:false"))
+        _ = try BrowserResultTransferRegistry.boundedPageScript("function(){return 1}", maxBytes: 64)
+        _ = try BrowserResultTransferRegistry.boundedPageScript("class {}", maxBytes: 64)
+        for escaping in [
+            "'x'.repeat(20000000)),25000000,(0",
+            "'x'.repeat(100000000)), 999999999); (()=>{})((0",
+            "1 /*",
+        ] {
+            do {
+                _ = try BrowserResultTransferRegistry.boundedPageScript(escaping, maxBytes: 64)
+                preconditionFailure("source must not escape the bounded wrapper")
+            } catch {}
+        }
         switch BrowserResultTransferRegistry.decodeBoundedPageResult("maru-json:{\"ok\":true}", maxBytes: 64) {
         case .json(let data): precondition(String(decoding: data, as: UTF8.self) == "{\"ok\":true}")
         default: preconditionFailure("bounded JSON prefix must decode")
@@ -82,6 +99,9 @@ struct BrowserResultTransferRegistryTests {
         precondition(native.count <= BrowserResultTransferRegistry.maxScriptErrorPayloadBytes)
         let nativeObject = try JSONSerialization.jsonObject(with: native) as? [String: Any]
         precondition(nativeObject?["diagnostics_truncated"] as? Bool == true)
+        let navigation = BrowserResultTransferRegistry.nativeScriptErrorPayload(NSError(domain: "Maru.Browser", code: 8), kind: "navigation")
+        let navigationObject = try JSONSerialization.jsonObject(with: navigation) as? [String: Any]
+        precondition(navigationObject?["kind"] as? String == "navigation")
 
         let chunkRegistry = BrowserResultTransferRegistry(
             maxEntries: 1,

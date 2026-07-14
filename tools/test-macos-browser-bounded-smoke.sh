@@ -11,6 +11,9 @@ rm -f zig-out/maru-macos-app/app.summary.txt
 summary=zig-out/maru-macos-app/app.summary.txt
 for field in \
     browser_ctl_bounded_structured \
+    browser_ctl_bounded_await_args \
+    browser_ctl_bounded_strict_csp \
+    browser_ctl_bounded_navigation \
     browser_ctl_bounded_tamper \
     browser_ctl_bounded_byte_boundary \
     browser_ctl_bounded_too_large \

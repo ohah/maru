@@ -2421,6 +2421,7 @@ fn pushBrowserOp(
     async_id: u64,
     op: control_browser.BrowserOp,
 ) void {
+    var backend_arg = op.arg;
     if (op.method == .execute_script) {
         const provenance: ExecutionProvenance = if (op.pane_grant) |g|
             .{ .pane_grant = g }
@@ -2456,6 +2457,13 @@ fn pushBrowserOp(
             _ = server.completeInFlight(async_id, resp);
             return;
         };
+        backend_arg = control_browser.serializeExecuteScriptBackendArg(server.cross_gpa, op.arg, op.max_result_bytes) catch {
+            _ = active_browser_executions.finish(async_id);
+            server.cross_gpa.free(op.arg);
+            _ = server.completeInFlight(async_id, null);
+            return;
+        };
+        server.cross_gpa.free(op.arg);
     }
     if (op.method == .wait) {
         active_browser_waits.append(allocator, .{
@@ -2468,10 +2476,10 @@ fn pushBrowserOp(
             return;
         };
     }
-    browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = op.arg }) catch {
+    browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = backend_arg }) catch {
         if (op.method == .wait) _ = removeActiveBrowserWait(async_id);
         if (op.method == .execute_script) _ = active_browser_executions.finish(async_id);
-        server.cross_gpa.free(op.arg);
+        server.cross_gpa.free(backend_arg);
         _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
     };
 }
@@ -2714,6 +2722,30 @@ pub export fn maru_macos_control_complete_browser_result_too_large(async_id: u64
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
     const resp = if (browserExecutionAuthorized(execution, now))
         control_browser.serializeExecuteScriptObservedTooLarge(server.cross_gpa, pending.request_bytes, observed_len) catch null
+    else
+        control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .unauthorized, "") catch null;
+    _ = active_browser_executions.finish(async_id);
+    _ = server.completeInFlight(async_id, resp);
+}
+
+/// executeScript page/native 진단 terminal. payload는 page/Swift에서 bounded되지만 Zig가 schema·24 KiB payload·32 KiB
+/// 최종 frame을 다시 검증한 뒤 stable `script-error(-32006)`로 직렬화한다.
+pub export fn maru_macos_control_complete_browser_script_error(async_id: u64, error_json_ptr: ?[*]const u8, error_json_len: usize) void {
+    const execution = active_browser_executions.get(async_id) orelse return;
+    if (!control_server_active or execution.phase == .abandoned) {
+        _ = active_browser_executions.finish(async_id);
+        return;
+    }
+    const server = &control_server_storage;
+    const pending = server.inFlightPending(async_id) orelse {
+        _ = active_browser_executions.finish(async_id);
+        return;
+    };
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    const payload: []const u8 = if (error_json_ptr) |p| p[0..error_json_len] else &.{};
+    const resp = if (browserExecutionAuthorized(execution, now))
+        control_browser.serializeExecuteScriptScriptError(server.cross_gpa, pending.request_bytes, payload) catch null
     else
         control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .unauthorized, "") catch null;
     _ = active_browser_executions.finish(async_id);
@@ -3645,6 +3677,43 @@ test "5f-5b pull ABI: request and inline bounds reject without copying" {
     try std.testing.expect(active_browser_executions.markRunning(host_oversize_id));
     maru_macos_control_complete_browser_result_too_large(host_oversize_id, max_entry + 1);
     try expectPendingErrorCode(&host_oversize, .result_too_large);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+}
+
+test "5f-5a script-error ABI: typed terminal, revoke override, abandoned late callback release reservation" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const provenance: control_browser.GrantProvenance = .{ .pane = 5, .target = 11, .scope = .browser };
+    try control_pane_grant_store.grant(.{ .pane = provenance.pane, .target = provenance.target, .scope = provenance.scope });
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
+    const payload = "{\"kind\":\"serialization\",\"name\":\"TypeError\",\"message\":\"cycle\",\"stack\":\"\",\"diagnostics_truncated\":false}";
+
+    var typed: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const typed_id = try control_server_storage.deferRequest(&typed, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = typed_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = provenance } });
+    try std.testing.expect(active_browser_executions.markRunning(typed_id));
+    maru_macos_control_complete_browser_script_error(typed_id, payload.ptr, payload.len);
+    try expectPendingErrorCode(&typed, .script_error);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+
+    var revoked: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const revoked_id = try control_server_storage.deferRequest(&revoked, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = revoked_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = provenance } });
+    try std.testing.expect(active_browser_executions.markRunning(revoked_id));
+    control_pane_grant_store.revoke(provenance.pane, provenance.target, provenance.scope);
+    maru_macos_control_complete_browser_script_error(revoked_id, payload.ptr, payload.len);
+    try expectPendingErrorCode(&revoked, .unauthorized);
+
+    var abandoned: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const abandoned_id = try control_server_storage.deferRequest(&abandoned, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = abandoned_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = provenance } });
+    try std.testing.expect(active_browser_executions.markRunning(abandoned_id));
+    active_browser_executions.get(abandoned_id).?.phase = .abandoned;
+    maru_macos_control_complete_browser_script_error(abandoned_id, payload.ptr, payload.len);
+    try std.testing.expect(abandoned.response == null);
+    try std.testing.expect(active_browser_executions.get(abandoned_id) == null);
     try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
 }
 

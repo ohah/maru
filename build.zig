@@ -811,6 +811,13 @@ pub fn build(b: *std.Build) void {
         macos_app_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("src/platform/macos/web"));
         macos_app_smoke.step.dependOn(&macos_app_compile.step);
         macos_app_smoke_step.dependOn(&macos_app_smoke.step);
+
+        const macos_browser_bounded_smoke_step = b.step("macos-browser-bounded-smoke", "Run and assert the bounded browser.executeScript WKWebView/socket smoke");
+        const macos_browser_bounded_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-browser-bounded-smoke.sh" });
+        macos_browser_bounded_smoke.setCwd(b.path("."));
+        macos_browser_bounded_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("src/platform/macos/web"));
+        macos_browser_bounded_smoke.step.dependOn(&macos_app_compile.step);
+        macos_browser_bounded_smoke_step.dependOn(&macos_browser_bounded_smoke.step);
     }
 
     const test_step = b.step("test", "Run all Zig tests");

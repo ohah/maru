@@ -157,8 +157,26 @@ pub const ExecuteScriptParams = struct {
     max_result_bytes: usize,
 };
 
+/// Zig→Swift backend 전용 arg. 사용자 script와 page-process serializer byte cap을 한 JSON object로 묶어 ABI 필드
+/// 추가 없이 전달한다. Swift는 이 object를 파싱한 뒤에만 WKWebView를 호출한다.
+pub fn serializeExecuteScriptBackendArg(gpa: std.mem.Allocator, script: []const u8, max_result_bytes: usize) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    s.beginObject() catch return error.OutOfMemory;
+    s.objectField("script") catch return error.OutOfMemory;
+    s.write(script) catch return error.OutOfMemory;
+    s.objectField("max_result_bytes") catch return error.OutOfMemory;
+    s.write(max_result_bytes) catch return error.OutOfMemory;
+    s.endObject() catch return error.OutOfMemory;
+    return aw.toOwnedSlice() catch return error.OutOfMemory;
+}
+
 pub const execute_script_default_max_result_bytes: usize = 16 * 1024 * 1024;
 pub const execute_script_protocol_max_result_bytes: usize = 256 * 1024 * 1024;
+pub const execute_script_error_payload_max_bytes: usize = 24 * 1024;
+pub const execute_script_error_frame_max_bytes: usize = 32 * 1024;
+pub const execute_script_request_id_max_bytes: usize = 1024;
 
 /// `browser.setCookie` params(§9.4 D4). name/value 필수, 나머지 선택(domain 생략=대상 문서 host·path 생략=`/`·secure
 /// 생략=false는 Swift가 적용). **httpOnly는 미지원**: `HTTPCookie(properties:)`가 HttpOnly를 설정 못 함(Set-Cookie 헤더
@@ -662,6 +680,10 @@ fn parseExecuteScriptRequestForCompletion(gpa: std.mem.Allocator, request_bytes:
         pm.deinit();
         return error.InvalidRequestState;
     }
+    if (req.id == .string and req.id.string.len > execute_script_request_id_max_bytes) {
+        pm.deinit();
+        return error.InvalidRequestState;
+    }
     _ = parseExecuteScriptParams(req.params) catch {
         pm.deinit();
         return error.InvalidRequestState;
@@ -689,6 +711,55 @@ pub fn serializeExecuteScriptInlineTooLarge(gpa: std.mem.Allocator, request_byte
     };
     defer pm.deinit();
     return cp.serializeError(gpa, pm.message.request.id, .payload_too_large, "executeScript result exceeds inline frame", null);
+}
+
+/// page wrapper/Swift가 이미 bounded한 executeScript 진단을 stable `script-error`로 옮긴다. 입력은 신뢰하지 않고
+/// 24 KiB·필수 kind를 재검증하며, 최종 JSON-RPC frame이 32 KiB를 넘으면 작은 고정 fallback으로 교체한다.
+pub fn serializeExecuteScriptScriptError(gpa: std.mem.Allocator, request_bytes: []const u8, error_json: []const u8) std.mem.Allocator.Error![]u8 {
+    var pm = parseExecuteScriptRequestForCompletion(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return cp.serializeError(gpa, .null, .internal_error, "invalid executeScript request state", null),
+    };
+    defer pm.deinit();
+    const id = pm.message.request.id;
+
+    if (error_json.len <= execute_script_error_payload_max_bytes) {
+        var parsed = std.json.parseFromSlice(std.json.Value, gpa, error_json, .{}) catch null;
+        if (parsed) |*payload| {
+            defer payload.deinit();
+            if (payload.value == .object) {
+                const object = payload.value.object;
+                const kind = object.get("kind") orelse .null;
+                const name = object.get("name") orelse .null;
+                const message = object.get("message") orelse .null;
+                const stack = object.get("stack") orelse .null;
+                const truncated = object.get("diagnostics_truncated") orelse .null;
+                if (object.count() == 5 and kind == .string and name == .string and message == .string and stack == .string and truncated == .bool and
+                    (std.mem.eql(u8, kind.string, "execution") or std.mem.eql(u8, kind.string, "serialization") or std.mem.eql(u8, kind.string, "navigation")) and
+                    escapedJsonStringBytes(name.string) <= 258 and escapedJsonStringBytes(message.string) <= 16 * 1024 + 2)
+                {
+                    const wire = try cp.serializeError(gpa, id, .script_error, cp.ErrorCode.script_error.defaultMessage(), payload.value);
+                    if (wire.len <= execute_script_error_frame_max_bytes) return wire;
+                    gpa.free(wire);
+                }
+            }
+        }
+    }
+
+    var fallback: std.json.ObjectMap = .empty;
+    defer fallback.deinit(gpa);
+    try fallback.put(gpa, "kind", .{ .string = "execution" });
+    try fallback.put(gpa, "name", .{ .string = "Error" });
+    try fallback.put(gpa, "message", .{ .string = "executeScript failed" });
+    try fallback.put(gpa, "stack", .{ .string = "" });
+    try fallback.put(gpa, "diagnostics_truncated", .{ .bool = true });
+    return cp.serializeError(gpa, id, .script_error, cp.ErrorCode.script_error.defaultMessage(), .{ .object = fallback });
+}
+
+fn escapedJsonStringBytes(value: []const u8) usize {
+    var total: usize = 2; // surrounding quotes
+    for (value) |byte| total += if (byte < 0x20) 6 else if (byte == '"' or byte == '\\') 2 else 1;
+    return total;
 }
 
 fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.Value) !void {
@@ -1312,6 +1383,9 @@ pub fn browserOpFromRequest(
 
     // ── 5. BrowserMethod 파싱. 5a 미구현(screenshot 등) → method_not_found(authorized 무관 — 메서드명은 공개 API라 oracle 아님). ──
     const bmethod = parseBrowserMethod(method.rest) orelse return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
+    if (bmethod == .execute_script and req.id == .string and req.id.string.len > execute_script_request_id_max_bytes) {
+        return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+    }
 
     // ── 5f-0b-3b: subscribe는 async op이 아니라 동기 registry 구독. 필터 파싱(6) + surface 검증(7) 후 `.subscribe` 반환
     //    (arg dupe 없음 — 필터는 값 타입). 나머지(navigate/getUrl/executeScript)는 아래 async-op 경로. ──
@@ -2182,6 +2256,63 @@ test "serializeExecuteScriptChunk: request/result id·seq·base64-json과 frame 
     const oversized = try testing.allocator.alloc(u8, execute_script_chunk_bytes + 1);
     defer testing.allocator.free(oversized);
     try testing.expectError(error.ChunkTooLarge, serializeExecuteScriptChunk(testing.allocator, .{ .number = 1 }, 1, 0, oversized));
+}
+
+test "serializeExecuteScriptBackendArg: script와 page byte cap을 손실 없이 전달" {
+    const wire = try serializeExecuteScriptBackendArg(testing.allocator, "(()=>\"한글\\n\")()", 1234);
+    defer testing.allocator.free(wire);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("(()=>\"한글\\n\")()", parsed.value.object.get("script").?.string);
+    try testing.expectEqual(@as(i64, 1234), parsed.value.object.get("max_result_bytes").?.integer);
+}
+
+test "executeScript script-error: typed data와 32 KiB frame 상한, malformed fallback" {
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":\"req-1\",\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\"}}";
+    const payload = "{\"kind\":\"serialization\",\"name\":\"TypeError\",\"message\":\"cycle\",\"stack\":\"s\",\"diagnostics_truncated\":false}";
+    const wire = try serializeExecuteScriptScriptError(testing.allocator, request, payload);
+    defer testing.allocator.free(wire);
+    try testing.expect(wire.len <= execute_script_error_frame_max_bytes);
+    var parsed = try cp.parseMessage(testing.allocator, wire);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.script_error)), parsed.message.response.err.?.code);
+    try testing.expectEqualStrings("serialization", parsed.message.response.err.?.data.?.object.get("kind").?.string);
+
+    const malformed = try serializeExecuteScriptScriptError(testing.allocator, request, "[]");
+    defer testing.allocator.free(malformed);
+    var fallback = try cp.parseMessage(testing.allocator, malformed);
+    defer fallback.deinit();
+    const data = fallback.message.response.err.?.data.?.object;
+    try testing.expectEqualStrings("execution", data.get("kind").?.string);
+    try testing.expect(data.get("diagnostics_truncated").?.bool);
+}
+
+test "executeScript request id는 bounded diagnostic frame을 위해 1024 bytes로 제한" {
+    const escaped_id = try testing.allocator.alloc(u8, execute_script_request_id_max_bytes * 6);
+    defer testing.allocator.free(escaped_id);
+    for (0..execute_script_request_id_max_bytes) |i| @memcpy(escaped_id[i * 6 ..][0..6], "\\u0001");
+    const accepted_request = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"method\":\"browser.executeScript\",\"params\":{{\"id\":11,\"script\":\"1\"}}}}", .{escaped_id});
+    defer testing.allocator.free(accepted_request);
+    const op = try dispatchOp(accepted_request, browserCap(11));
+    testing.allocator.free(op.arg);
+
+    const stack = try testing.allocator.alloc(u8, 23 * 1024);
+    defer testing.allocator.free(stack);
+    @memset(stack, 's');
+    const diagnostic = try std.fmt.allocPrint(testing.allocator, "{{\"kind\":\"execution\",\"name\":\"Error\",\"message\":\"m\",\"stack\":\"{s}\",\"diagnostics_truncated\":false}}", .{stack});
+    defer testing.allocator.free(diagnostic);
+    const accepted_wire = try serializeExecuteScriptScriptError(testing.allocator, accepted_request, diagnostic);
+    defer testing.allocator.free(accepted_wire);
+    try testing.expect(accepted_wire.len <= execute_script_error_frame_max_bytes);
+
+    const id = try testing.allocator.alloc(u8, execute_script_request_id_max_bytes + 1);
+    defer testing.allocator.free(id);
+    @memset(id, 'a');
+    const request = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"method\":\"browser.executeScript\",\"params\":{{\"id\":11,\"script\":\"1\"}}}}", .{id});
+    defer testing.allocator.free(request);
+    const wire = try dispatchErr(request, browserCap(11));
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
 }
 
 test "serializeExecuteScriptChunkedComplete: 원 request id와 result/seq/bytes를 terminal에 고정" {

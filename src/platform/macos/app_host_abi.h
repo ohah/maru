@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 116u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 117u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -1172,6 +1172,8 @@ uint32_t maru_macos_control_complete_browser_result(uint64_t async_id, uint64_t 
 /* Registry per-entry cap보다 큰 strict JSON Data는 Swift가 먼저 폐기한 뒤 길이만 전달한다. Zig가 재인가하고
    request의 max_result_bytes를 사용해 result-too-large terminal을 만든다. 메인 스레드 전용. */
 void maru_macos_control_complete_browser_result_too_large(uint64_t async_id, size_t observed_len);
+
+void maru_macos_control_complete_browser_script_error(uint64_t async_id, const uint8_t *error_json_ptr, size_t error_json_len);
 
 /* browser.wait polling이 다음 DOM 평가 전에 요청 생존 여부를 확인한다. revoke/close/reap/완료 후 0.
    서버 미시작이면 0. 메인 스레드에서만. */

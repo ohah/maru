@@ -1807,6 +1807,16 @@ const BrowserOpQueue = struct {
         if (self.items.items.len == 0) return null;
         return self.items.orderedRemove(0);
     }
+    /// queued client terminal(close/revoke/timeout)이 먼저 확정되면 물리 엔트리도 즉시 제거해 다른 surface의 다음 push가
+    /// stale capacity 때문에 거짓 Full이 되지 않게 한다. running op은 이미 take됐으므로 no-op이다.
+    fn remove(self: *BrowserOpQueue, arg_gpa: std.mem.Allocator, async_id: u64) bool {
+        for (self.items.items, 0..) |e, i| if (e.async_id == async_id) {
+            const removed = self.items.orderedRemove(i);
+            arg_gpa.free(removed.arg);
+            return true;
+        };
+        return false;
+    }
     /// 남은 op의 arg 해제 + 리스트 해제(서버 종료 시).
     fn deinit(self: *BrowserOpQueue, gpa: std.mem.Allocator, arg_gpa: std.mem.Allocator) void {
         for (self.items.items) |e| arg_gpa.free(e.arg);
@@ -1816,6 +1826,58 @@ const BrowserOpQueue = struct {
 var browser_op_queue: BrowserOpQueue = .{};
 
 const execution_result_budget_bytes: usize = 256 * 1024 * 1024;
+
+/// queue에 들어간 browser op은 Swift가 take하기 전에도 target surface close·grant revoke·timeout과 경합한다.
+/// 자체 polling registry를 쓰는 wait와 queue를 쓰지 않는 동기 subscribe만 제외하고 공통 수명주기로 추적한다.
+fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool {
+    return switch (method) {
+        .navigate,
+        .get_url,
+        .execute_script,
+        .get_cookies,
+        .screenshot,
+        .set_cookie,
+        .delete_cookie,
+        .get_local_storage,
+        .set_local_storage,
+        .remove_local_storage,
+        .clear_storage,
+        .click,
+        .type_text,
+        .scroll,
+        => true,
+        .subscribe, .wait => false,
+    };
+}
+
+fn browserMethodReservedBytes(method: control_browser.BrowserMethod, declared: usize) usize {
+    return switch (method) {
+        .execute_script => declared,
+        .screenshot => control_browser.screenshot_max_result_bytes,
+        else => 0,
+    };
+}
+
+fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
+    return switch (method) {
+        .navigate => "browser.navigate",
+        .get_url => "browser.getUrl",
+        .execute_script => "browser.executeScript",
+        .subscribe => "browser.subscribe",
+        .get_cookies => "browser.getCookies",
+        .screenshot => "browser.screenshot",
+        .set_cookie => "browser.setCookie",
+        .delete_cookie => "browser.deleteCookie",
+        .get_local_storage => "browser.getLocalStorage",
+        .set_local_storage => "browser.setLocalStorage",
+        .remove_local_storage => "browser.removeLocalStorage",
+        .clear_storage => "browser.clearStorage",
+        .click => "browser.click",
+        .type_text => "browser.type",
+        .scroll => "browser.scroll",
+        .wait => "browser.wait",
+    };
+}
 
 const ExecutionProvenance = union(enum) {
     capability: struct { nonce: control_capability.Nonce, generation: u64 },
@@ -1835,8 +1897,9 @@ const ActiveBrowserExecution = struct {
     transfer_total_bytes: usize = 0,
 };
 
-/// executeScript backend와 client terminal을 분리해 추적한다. queued 취소는 즉시 반환하고, running 취소는 WebKit
-/// callback(backend terminal)까지 예약을 유지한다. 메인 스레드 전용이며 budget 주소가 안정되도록 전역에서 이동하지 않는다.
+/// async browser backend와 client terminal을 분리해 추적한다. queued 취소는 즉시 반환하고, running 취소는 WebKit
+/// callback(backend terminal)까지 슬롯(대용량 결과면 예약도)을 유지한다. 메인 스레드 전용이며 budget 주소가 안정되도록
+/// 전역에서 이동하지 않는다.
 const ActiveBrowserExecutions = struct {
     budget: control_result.ByteBudget,
     items: std.ArrayList(ActiveBrowserExecution) = .empty,
@@ -2029,10 +2092,12 @@ fn cancelActiveBrowserExecution(server: *control_server_mod.ControlServer, async
         cancelBrowserTransfer(server, index, status);
         return;
     }
+    const queued = if (active_browser_executions.get(async_id)) |execution| execution.phase == .queued else false;
     if (server.inFlightPending(async_id)) |pending| {
         const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, status, "") catch null;
         _ = server.completeInFlight(async_id, resp);
     }
+    if (queued) _ = browser_op_queue.remove(server.cross_gpa, async_id);
     active_browser_executions.abandon(async_id);
 }
 
@@ -2052,6 +2117,24 @@ fn cancelBrowserExecutionsForClosedSurface(server: *control_server_mod.ControlSe
         count += 1;
     };
     for (matches[0..count]) |match| cancelActiveBrowserExecution(server, match.id, match.status);
+}
+
+fn cancelBrowserOpsForCrashedSurface(server: *control_server_mod.ControlServer, surface_id: u64) void {
+    var wait_ids: [8]u64 = undefined;
+    var wait_count: usize = 0;
+    for (active_browser_waits.items) |e| if (e.surface_id == surface_id) {
+        wait_ids[wait_count] = e.async_id;
+        wait_count += 1;
+    };
+    for (wait_ids[0..wait_count]) |id| cancelActiveBrowserWait(server, id, .process_exited);
+
+    var execution_ids: [8]u64 = undefined;
+    var execution_count: usize = 0;
+    for (active_browser_executions.items.items) |e| if (e.surface_id == surface_id) {
+        execution_ids[execution_count] = e.async_id;
+        execution_count += 1;
+    };
+    for (execution_ids[0..execution_count]) |id| cancelActiveBrowserExecution(server, id, .process_exited);
 }
 
 /// AppSession teardown 훅: target surface close는 process_exited, pane-grant origin close는 unauthorized로 진행 중 wait를
@@ -2470,7 +2553,7 @@ fn pushBrowserOp(
     op: control_browser.BrowserOp,
 ) void {
     const backend_arg = op.arg;
-    if (op.method == .execute_script or op.method == .screenshot) {
+    if (browserMethodHasTrackedLifecycle(op.method)) {
         const provenance: ExecutionProvenance = if (op.pane_grant) |g|
             .{ .pane_grant = g }
         else if (op.capability_nonce) |nonce|
@@ -2494,7 +2577,7 @@ fn pushBrowserOp(
             .async_id = async_id,
             .surface_id = op.surface_id,
             .method = op.method,
-            .reserved_bytes = if (op.method == .execute_script) op.max_result_bytes else control_browser.screenshot_max_result_bytes,
+            .reserved_bytes = browserMethodReservedBytes(op.method, op.max_result_bytes),
             .provenance = provenance,
         }) catch |err| {
             server.cross_gpa.free(op.arg);
@@ -2522,7 +2605,7 @@ fn pushBrowserOp(
     }
     browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = backend_arg }) catch {
         if (op.method == .wait) _ = removeActiveBrowserWait(async_id);
-        if (op.method == .execute_script or op.method == .screenshot) _ = active_browser_executions.finish(async_id);
+        if (browserMethodHasTrackedLifecycle(op.method)) _ = active_browser_executions.finish(async_id);
         server.cross_gpa.free(backend_arg);
         _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
     };
@@ -2601,31 +2684,37 @@ fn expireActiveBrowserExecutions(server: *control_server_mod.ControlServer, now_
     const expired = server.expiredInFlightIds(now_ns, &expired_ids);
     for (expired_ids[0..expired]) |id| {
         if (active_browser_executions.get(id) == null) continue;
-        if (active_browser_transfers.indexOf(id)) |index| {
-            cancelBrowserTransfer(server, index, .timeout);
-            continue;
-        }
-        if (server.inFlightPending(id)) |pending| {
-            const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .timeout, "") catch null;
-            _ = server.completeInFlight(id, resp);
-        }
-        active_browser_executions.abandon(id);
+        // queued timeout도 close/revoke와 같은 공통 취소 경로를 써서 client terminal뿐 아니라 물리 queue entry와 arg를
+        // 같은 tick에 회수한다. running/transfer는 기존대로 backend terminal까지 tombstone/예약을 유지한다.
+        cancelActiveBrowserExecution(server, id, .timeout);
     }
 }
 
-fn queuedExecutionReady(server: *control_server_mod.ControlServer, async_id: u64) bool {
+fn queuedExecutionReady(server: *control_server_mod.ControlServer, async_id: u64, now: u64) bool {
     const execution = active_browser_executions.get(async_id) orelse return false;
-    return execution.phase == .queued and server.inFlightPending(async_id) != null;
+    return execution.phase == .queued and server.inFlightPending(async_id) != null and browserExecutionAuthorized(execution, now);
+}
+
+fn rejectUnreadyBrowserExecution(server: *control_server_mod.ControlServer, async_id: u64, now: u64) void {
+    const execution = active_browser_executions.get(async_id) orelse return;
+    // pending은 살아 있지만 authority만 사라진 queued op이면 timeout까지 매달지 않고 즉시 typed unauthorized로 끝낸다.
+    // close/revoke가 이미 client terminal을 commit했거나 pending reap가 먼저면 abandon은 queued slot만 정리한다.
+    if (execution.phase == .queued and server.inFlightPending(async_id) != null and !browserExecutionAuthorized(execution, now)) {
+        cancelActiveBrowserExecution(server, async_id, .unauthorized);
+    } else {
+        active_browser_executions.abandon(async_id);
+    }
 }
 
 fn browserExecutionAuthorized(execution: *const ActiveBrowserExecution, now: u64) bool {
-    const method = if (execution.method == .screenshot) "browser.screenshot" else "browser.executeScript";
+    const method = browserMethodWireName(execution.method);
     return switch (execution.provenance) {
         .capability => |identity| if (control_cap_store.lookupByNonce(identity.nonce)) |cap|
             control_capability.authorize(cap, execution.surface_id, identity.generation, method, now) == .granted
         else
             false,
-        .pane_grant => |g| control_pane_grant_store.isGranted(g.pane, g.target, g.scope),
+        .pane_grant => |g| control_capability.methodRequiredScope(method) == g.scope and
+            control_pane_grant_store.isGranted(g.pane, g.target, g.scope),
     };
 }
 
@@ -2645,6 +2734,7 @@ pub export fn maru_macos_control_take_browser_op(
     const server = &control_server_storage;
     // §5-async reap: 매 tick hung op timeout(evaluateJavaScript/navigation/wait가 안 끝나는 op가 accept를 영구 붙잡는 것 방어).
     const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
     expireActiveBrowserExecutions(server, now_ns);
     var reaped_ids: [8]u64 = undefined;
     const reaped = server.reapExpiredInFlightIds(now_ns, &reaped_ids);
@@ -2656,11 +2746,10 @@ pub export fn maru_macos_control_take_browser_op(
             server.cross_gpa.free(candidate.arg);
             continue;
         }
-        if (candidate.op_kind == @intFromEnum(control_browser.BrowserMethod.execute_script) or
-            candidate.op_kind == @intFromEnum(control_browser.BrowserMethod.screenshot))
-        {
-            if (!queuedExecutionReady(server, candidate.async_id)) {
-                active_browser_executions.abandon(candidate.async_id);
+        const method: control_browser.BrowserMethod = @enumFromInt(candidate.op_kind);
+        if (browserMethodHasTrackedLifecycle(method)) {
+            if (!queuedExecutionReady(server, candidate.async_id, now)) {
+                rejectUnreadyBrowserExecution(server, candidate.async_id, now);
                 server.cross_gpa.free(candidate.arg);
                 continue;
             }
@@ -2671,18 +2760,16 @@ pub export fn maru_macos_control_take_browser_op(
     browser_op_take_buf.clearRetainingCapacity();
     browser_op_take_buf.appendSlice(allocator, e.arg) catch {
         server.cross_gpa.free(e.arg);
-        if (e.op_kind == @intFromEnum(control_browser.BrowserMethod.execute_script) or
-            e.op_kind == @intFromEnum(control_browser.BrowserMethod.screenshot))
-        {
+        const method: control_browser.BrowserMethod = @enumFromInt(e.op_kind);
+        if (browserMethodHasTrackedLifecycle(method)) {
             _ = active_browser_executions.finish(e.async_id);
             _ = server.completeInFlight(e.async_id, null);
         }
         return 0;
     };
     server.cross_gpa.free(e.arg);
-    if ((e.op_kind == @intFromEnum(control_browser.BrowserMethod.execute_script) or
-        e.op_kind == @intFromEnum(control_browser.BrowserMethod.screenshot)) and
-        !active_browser_executions.markRunning(e.async_id)) return 0;
+    const method: control_browser.BrowserMethod = @enumFromInt(e.op_kind);
+    if (browserMethodHasTrackedLifecycle(method) and !active_browser_executions.markRunning(e.async_id)) return 0;
     if (out_async_id) |p| p.* = e.async_id;
     if (out_surface_id) |p| p.* = e.surface_id;
     if (out_op_kind) |p| p.* = e.op_kind;
@@ -3321,6 +3408,9 @@ pub export fn maru_macos_control_push_browser_dialog(surface_id: u64, kind: u8, 
 pub export fn maru_macos_control_push_browser_crashed(surface_id: u64) void {
     if (!control_server_active) return;
     const server = &control_server_storage;
+    // crash는 logical surface close가 아니므로 cap/grant/subscription은 보존하지만, 그 WebContent realm에 걸린 현재 op은
+    // 더는 완료를 신뢰할 수 없다. event보다 먼저 process-exited terminal을 commit하고 Swift가 backend registry를 비운다.
+    cancelBrowserOpsForCrashedSurface(server, surface_id);
     _ = server.subscriber_reg.pushEvent(server.cross_gpa, surface_id, .crashed);
 }
 
@@ -3861,9 +3951,9 @@ test "Option+Backspace chains through ABI to meta-DEL (\\e\\x7f, word delete)" {
     try std.testing.expectEqualStrings("\x1b\x7f", try terminal.input.encodeKey(ev, &buf, .{}));
 }
 
-// 5e-2b: BrowserOpQueue FIFO push/take + bounded + deinit(남은 arg 해제). arg 소유권 이전 규약을 testing.allocator로
+// 5e-2b: BrowserOpQueue FIFO push/take + bounded + cancel-remove/deinit(arg 해제). arg 소유권 이전 규약을 testing.allocator로
 // 검증(누수/이중free 없음). ABI take/complete_browser_op 글루·handleControlRequest defer는 5e-2b-2 macos smoke가 e2e로.
-test "5e-2b BrowserOpQueue: FIFO push/take + bounded(Full) + deinit이 남은 arg 해제" {
+test "5e-2b BrowserOpQueue: FIFO push/take + bounded(Full) + cancel remove가 capacity/arg 회수" {
     const gpa = std.testing.allocator;
     var q: BrowserOpQueue = .{ .max = 2 };
     // push 2개(각 arg는 gpa 소유 — 큐가 인수).
@@ -3871,13 +3961,17 @@ test "5e-2b BrowserOpQueue: FIFO push/take + bounded(Full) + deinit이 남은 ar
     try q.push(gpa, .{ .async_id = 2, .surface_id = 11, .op_kind = 2, .arg = try gpa.dupe(u8, "1+1") });
     // 3번째는 bounded → Full(호출자가 arg free 책임 — 여기선 dupe 안 하고 바로 검사).
     try std.testing.expectError(error.Full, q.push(gpa, .{ .async_id = 3, .surface_id = 12, .op_kind = 1, .arg = "" }));
+    // close/revoke terminal이 queued 2번을 취소하면 물리 entry와 arg를 즉시 회수해 다른 surface push를 막지 않는다.
+    try std.testing.expect(q.remove(gpa, 2));
+    try std.testing.expect(!q.remove(gpa, 2));
+    try q.push(gpa, .{ .async_id = 3, .surface_id = 12, .op_kind = 1, .arg = try gpa.dupe(u8, "") });
     // FIFO take: 1번 먼저. arg 소유권 이전 → 호출자 free.
     const e1 = q.take().?;
     try std.testing.expectEqual(@as(u64, 1), e1.async_id);
     try std.testing.expectEqual(@as(u8, 0), e1.op_kind);
     try std.testing.expectEqualStrings("https://a", e1.arg);
     gpa.free(e1.arg);
-    // 남은 1개(async_id 2)는 deinit이 arg 해제(누수 없음 — testing.allocator가 잡음).
+    // 남은 1개(async_id 3)는 deinit이 arg 해제(누수 없음 — testing.allocator가 잡음).
     q.deinit(gpa, gpa);
 }
 
@@ -3930,6 +4024,33 @@ test "5f-5b ActiveBrowserExecutions: busy, queued cancel, running abandon, shrin
     defer slots.deinit(gpa);
     try slots.admit(gpa, .{ .async_id = 8, .surface_id = 11, .reserved_bytes = 1, .provenance = provenance });
     try std.testing.expectError(error.ExecutionSlotsFull, slots.admit(gpa, .{ .async_id = 9, .surface_id = 11, .reserved_bytes = 1, .provenance = provenance }));
+}
+
+test "browser op lifecycle classification and exact authorization method stay exhaustive" {
+    const Case = struct { method: control_browser.BrowserMethod, scope: control_capability.ScopeClass, reserved: usize };
+    const cases = [_]Case{
+        .{ .method = .navigate, .scope = .browser, .reserved = 0 },
+        .{ .method = .get_url, .scope = .browser, .reserved = 0 },
+        .{ .method = .execute_script, .scope = .browser, .reserved = 123 },
+        .{ .method = .get_cookies, .scope = .browser_storage, .reserved = 0 },
+        .{ .method = .screenshot, .scope = .browser, .reserved = control_browser.screenshot_max_result_bytes },
+        .{ .method = .set_cookie, .scope = .browser_storage, .reserved = 0 },
+        .{ .method = .delete_cookie, .scope = .browser_storage, .reserved = 0 },
+        .{ .method = .get_local_storage, .scope = .browser, .reserved = 0 },
+        .{ .method = .set_local_storage, .scope = .browser, .reserved = 0 },
+        .{ .method = .remove_local_storage, .scope = .browser, .reserved = 0 },
+        .{ .method = .clear_storage, .scope = .browser_storage, .reserved = 0 },
+        .{ .method = .click, .scope = .browser, .reserved = 0 },
+        .{ .method = .type_text, .scope = .browser, .reserved = 0 },
+        .{ .method = .scroll, .scope = .browser, .reserved = 0 },
+    };
+    for (cases) |case| {
+        try std.testing.expect(browserMethodHasTrackedLifecycle(case.method));
+        try std.testing.expectEqual(case.scope, control_capability.methodRequiredScope(browserMethodWireName(case.method)).?);
+        try std.testing.expectEqual(case.reserved, browserMethodReservedBytes(case.method, 123));
+    }
+    try std.testing.expect(!browserMethodHasTrackedLifecycle(.subscribe));
+    try std.testing.expect(!browserMethodHasTrackedLifecycle(.wait));
 }
 
 fn lifecycleTestServer() control_server_mod.ControlServer {
@@ -4028,6 +4149,69 @@ fn uninstallTransferTestServer() void {
     control_server_active = false;
     control_server_storage.in_flight.deinit(std.testing.allocator);
     control_pane_grant_store.clearAll();
+}
+
+test "generic async browser op: target close wins once and late callback only releases lifecycle slot" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    pushBrowserOp(&control_server_storage, id, .{
+        .surface_id = 11,
+        .method = .get_cookies,
+        .arg = try allocator.dupe(u8, ""),
+        .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser_storage },
+    });
+    const execution = active_browser_executions.get(id) orelse return error.ExpectedActiveExecution;
+    try std.testing.expectEqual(control_browser.BrowserMethod.get_cookies, execution.method);
+    try std.testing.expectEqual(@as(usize, 0), execution.reserved_bytes);
+    try std.testing.expect(active_browser_executions.markRunning(id));
+
+    cancelBrowserExecutionsForClosedSurface(&control_server_storage, 11);
+    try expectPendingErrorCode(&pending, .process_exited);
+    try std.testing.expectEqual(ExecutionPhase.abandoned, active_browser_executions.get(id).?.phase);
+
+    const secret = "[{\"name\":\"sid\",\"value\":\"secret\"}]";
+    maru_macos_control_complete_browser_op(id, @intFromEnum(control_browser.BrowserCompletionStatus.success), secret.ptr, secret.len);
+    try std.testing.expect(active_browser_executions.get(id) == null);
+    try std.testing.expectEqual(control_server_mod.PendingRequest.State.done, pending.state);
+    // 중복 backend callback도 client terminal을 되살리거나 새 response를 만들지 않는다.
+    maru_macos_control_complete_browser_op(id, @intFromEnum(control_browser.BrowserCompletionStatus.success), secret.ptr, secret.len);
+    try std.testing.expect(pending.response == null);
+
+    var revoked_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const revoked_id = try control_server_storage.deferRequest(&revoked_pending, std.math.maxInt(i128));
+    pushBrowserOp(&control_server_storage, revoked_id, .{
+        .surface_id = 11,
+        .method = .get_cookies,
+        .arg = try allocator.dupe(u8, ""),
+        .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser_storage },
+    });
+    try std.testing.expect(!queuedExecutionReady(&control_server_storage, revoked_id, 0));
+    rejectUnreadyBrowserExecution(&control_server_storage, revoked_id, 0);
+    try expectPendingErrorCode(&revoked_pending, .unauthorized);
+    try std.testing.expect(active_browser_executions.get(revoked_id) == null);
+
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 12, .scope = .browser_storage });
+    const crash_request = "{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"browser.getCookies\",\"params\":{\"id\":12}}";
+    var crash_pending: control_server_mod.PendingRequest = .{ .request_bytes = crash_request, .selector = null, .io = std.testing.io };
+    const crash_id = try control_server_storage.deferRequest(&crash_pending, std.math.maxInt(i128));
+    pushBrowserOp(&control_server_storage, crash_id, .{
+        .surface_id = 12,
+        .method = .get_cookies,
+        .arg = try allocator.dupe(u8, ""),
+        .pane_grant = .{ .pane = 5, .target = 12, .scope = .browser_storage },
+    });
+    try std.testing.expect(active_browser_executions.markRunning(crash_id));
+    cancelBrowserOpsForCrashedSurface(&control_server_storage, 12);
+    try expectPendingErrorCode(&crash_pending, .process_exited);
+    try std.testing.expect(control_pane_grant_store.isGranted(5, 12, .browser_storage)); // crash는 logical surface/grant close 아님
+    maru_macos_control_complete_browser_op(crash_id, @intFromEnum(control_browser.BrowserCompletionStatus.failed), null, 0);
+    try std.testing.expect(active_browser_executions.get(crash_id) == null);
 }
 
 test "5f-5b pull ABI: partial copy reconstructs JSON and releases Data before reservation" {
@@ -4513,7 +4697,17 @@ test "5f-5b glue: queue Full rollback과 queued/running typed timeout" {
     expireActiveBrowserExecutions(&server, 101);
     try expectPendingErrorCode(&queued, .timeout);
     try std.testing.expect(active_browser_executions.get(queued_id) == null);
-    try std.testing.expect(!queuedExecutionReady(&server, queued_id)); // take loop가 stale candidate를 실행하지 않음
+    try std.testing.expectEqual(@as(usize, 0), browser_op_queue.items.items.len); // 같은 tick에 arg/capacity까지 회수
+    // max=1 큐에서도 timeout 직후 새 요청이 stale entry 때문에 Full이 되지 않는다.
+    browser_op_queue.max = 1;
+    try browser_op_queue.push(allocator, .{
+        .async_id = queued_id + 1,
+        .surface_id = 12,
+        .op_kind = @intFromEnum(control_browser.BrowserMethod.get_url),
+        .arg = try allocator.dupe(u8, ""),
+    });
+    const replacement = browser_op_queue.take().?;
+    allocator.free(replacement.arg);
     try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
 
     var running: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };

@@ -69,6 +69,8 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고 combined도 함께 남긴다. 16 MiB fixture는 큰 string 하나만 쓰지 않고 flat array와 nested object를 포함하며 cap+1 bounded failure도 실제 WKWebView에서 잰다. callback 내부 시간만으로는 callback 전에 생기는 IPC materialization stall을 놓치므로 operation 구간의 frame tick gap도 함께 귀속한다.
 
+**PID 귀속 조사 결론(2026-07-14)**: public `libproc`의 PID identity/RSS 읽기 자체는 가능했다. 반면 공개 WebKit API는 WKWebView별 WebContent PID를 주지 않고, 조사에 사용한 `launchctl print pid/<pid>`의 resource coalition은 출력 포맷이 안정 API가 아니며 여러 webview/workspace/window churn에서도 후보 집합이 실행 중 바뀌었다. 따라서 coalition 후보 합은 후보 완전성이나 특정 WKWebView 귀속을 증명하지 못하고, 위 `app+WebContent RSS delta`의 실패 gate로 승격하지 않는다. 조사용 POC 코드와 test-only 훅은 결론을 얻은 뒤 제거했으며 제품/CI 계약으로 남기지 않는다. 정식 Track 5는 private WebKit PID API나 불안정한 `launchctl` 파싱을 채택하지 않고, 공개·안정된 귀속 수단이 생기기 전에는 app-host RSS만으로 combined 예산을 통과했다고 간주하거나 hello 16 MiB capability를 열지 않는다.
+
 ### 16 MiB 초과 후속 연구 gate
 
 정상 workload의 12/16 MiB 초과 또는 base64/copy 병목이 §4.4 trigger를 만족한 경우에만 64/128/256 MiB를 순서대로 연구한다. 현재 parser와 hello는 이 tier를 허용하지 않으므로 stress 하니스는 production capability를 조용히 변경하지 않고 **test-only effective-max override**를 명시해야 한다. 각 tier와 cap+1을 실제 WKWebView에서 실행해 위 표의 tick·queue·RSS·lifecycle 예산을 그대로 적용하고, reserved 256 MiB ceiling을 실제 parser/admission에 연결한다면 hard-ceiling unit도 함께 추가한다. 연구 통과는 상한 확대나 binary/fd attachment의 자동 채택이 아니며 별도 설계 결정이 필요하다.

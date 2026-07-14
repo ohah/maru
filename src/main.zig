@@ -646,13 +646,13 @@ fn runBrowserExecuteScript(
     const fd = try connectSendControl(io, allocator, request_bytes, stderr);
     defer _ = std.c.close(fd);
 
-    const spool_target = exec_cmd.out orelse "/tmp/.maru-browser-exec-spool";
-    var spool = createBrowserSpool(std.Io.Dir.cwd(), io, spool_target) catch
-        return browserExecuteError(stderr, "secure spool을 만들 수 없습니다");
-    defer spool.deinit(io);
-
     var validator = maru.cli.browser.ExecuteScriptStreamValidator.init(allocator, request_id, exec_cmd.max_result_bytes);
     defer validator.deinit();
+    // 결과를 메모리에 누적한다(validator가 ≤max_result_bytes로 상한). 이전엔 write-only atomic spool에 스트리밍한 뒤
+    // 되읽어 검증/출력했으나, macOS는 `createFileAtomic` 핸들이 O_WRONLY(O_TMPFILE는 Linux 전용)라 pread가 EBADF로
+    // 실패해 exec가 항상 에러였다. 버퍼링으로 read-back을 없앤다 — 공개는 검증 후 원자적 write로.
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(allocator);
     var framer: maru.session.control_plane.Framer = .{};
     defer framer.deinit(allocator);
     var decode_scratch: [512 * 1024]u8 = undefined;
@@ -661,10 +661,10 @@ fn runBrowserExecuteScript(
             switch (try validator.feed(line, &decode_scratch)) {
                 .need_more => {},
                 .chunk => |bytes| {
-                    spool.file.writeStreamingAll(io, bytes) catch return browserExecuteError(stderr, "secure spool 쓰기에 실패했습니다");
+                    result.appendSlice(allocator, bytes) catch return error.OutOfMemory;
                 },
                 .inline_result => |bytes| {
-                    spool.file.writeStreamingAll(io, bytes) catch return browserExecuteError(stderr, "secure spool 쓰기에 실패했습니다");
+                    result.appendSlice(allocator, bytes) catch return error.OutOfMemory;
                     break :done;
                 },
                 .done => break :done,
@@ -676,57 +676,45 @@ fn runBrowserExecuteScript(
         if (n <= 0) return browserExecuteError(stderr, "서버가 응답을 끝내지 않았습니다");
         framer.push(allocator, read_buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
-    if (!validateJsonSpool(io, allocator, spool.file, validator.total_bytes))
+    if (!validateJsonSlice(allocator, result.items))
         return browserExecuteError(stderr, "executeScript 결과가 strict JSON이 아닙니다");
-    spool.file.sync(io) catch return browserExecuteError(stderr, "secure spool 동기화에 실패했습니다");
 
     if (exec_cmd.out) |path| {
-        spool.link(io) catch |err| {
-            const message = if (err == error.PathAlreadyExists) "출력 파일이 이미 존재합니다" else "출력 파일을 원자적으로 게시할 수 없습니다";
-            return browserExecuteError(stderr, message);
-        };
-        try stdout.print("executeScript: {d} bytes → {s}\n", .{ validator.total_bytes, path });
+        publishBrowserResult(std.Io.Dir.cwd(), io, path, result.items) catch
+            return browserExecuteError(stderr, "출력 파일을 원자적으로 게시할 수 없습니다");
+        try stdout.print("executeScript: {d} bytes → {s}\n", .{ result.items.len, path });
     } else {
-        var offset: u64 = 0;
-        var output_buf: [64 * 1024]u8 = undefined;
-        while (offset < validator.total_bytes) {
-            const wanted = @min(output_buf.len, validator.total_bytes - @as(usize, @intCast(offset)));
-            const n = spool.file.readPositionalAll(io, output_buf[0..wanted], offset) catch return browserExecuteError(stderr, "secure spool 읽기에 실패했습니다");
-            if (n == 0) return browserExecuteError(stderr, "secure spool이 불완전합니다");
-            try stdout.writeAll(output_buf[0..n]);
-            offset += n;
-        }
+        try stdout.writeAll(result.items);
         try stdout.writeAll("\n");
     }
     try stdout.flush();
 }
 
-fn validateJsonSpool(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, total_bytes: usize) bool {
-    var scanner = std.json.Scanner.initStreaming(allocator);
+/// 결과 바이트가 완결 strict JSON인지 **메모리 슬라이스로** 검증한다(write-only spool read-back 회피). 깊이
+/// 깊이 128 상한(중첩 폭발 DoS 방어). 빈 입력은 유효 JSON이 아니므로 false.
+fn validateJsonSlice(allocator: std.mem.Allocator, bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    var scanner = std.json.Scanner.initCompleteInput(allocator, bytes);
     defer scanner.deinit();
-    var offset: u64 = 0;
-    var input: [64 * 1024]u8 = undefined;
-    while (offset < total_bytes) {
-        const wanted = @min(input.len, total_bytes - @as(usize, @intCast(offset)));
-        const n = file.readPositionalAll(io, input[0..wanted], offset) catch return false;
-        if (n == 0) return false;
-        scanner.feedInput(input[0..n]);
-        while (true) {
-            const token = scanner.next() catch |err| switch (err) {
-                error.BufferUnderrun => break,
-                else => return false,
-            };
-            if (scanner.stackHeight() > 128) return false;
-            if (token == .end_of_document) return offset + n == total_bytes;
-        }
-        offset += n;
-    }
-    scanner.endInput();
     while (true) {
         const token = scanner.next() catch return false;
         if (scanner.stackHeight() > 128) return false;
         if (token == .end_of_document) return true;
     }
+}
+
+/// 검증된 결과를 `target`에 **0600 원자적으로** 공개한다(검증-전-미노출 보존). 임시 파일 핸들이 write-only여도(macOS)
+/// 되읽지 않으므로 무방. `.replace=true`+`Atomic.replace`라 기존 target을 **덮어쓴다**(폴링/재실행 정상화 —
+/// 옛 `.link` no-clobber 회귀 수정). caller가 에러를 사용자 메시지로 매핑.
+fn publishBrowserResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const u8) !void {
+    var af = try dir.createFileAtomic(io, target, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+        .replace = true,
+    });
+    defer af.deinit(io);
+    try af.file.writeStreamingAll(io, bytes);
+    try af.file.sync(io);
+    try af.replace(io);
 }
 
 fn browserExecuteError(stderr: *std.Io.Writer, message: []const u8) error{UnknownCommand} {
@@ -735,18 +723,9 @@ fn browserExecuteError(stderr: *std.Io.Writer, message: []const u8) error{Unknow
     return error.UnknownCommand;
 }
 
-/// executeScript와 screenshot이 공유하는 파일 공개 경계. 임시 파일도 처음부터 0600이고 `link`는 기존 경로를
-/// 덮어쓰지 않는다. 결과 검증이 끝나기 전에는 target 이름에 나타나지 않으며, 실패 시 Atomic.deinit이 임시 파일을 지운다.
-fn createBrowserSpool(dir: std.Io.Dir, io: std.Io, target: []const u8) std.Io.File.Atomic.InitError!std.Io.File.Atomic {
-    return dir.createFileAtomic(io, target, .{
-        .permissions = std.Io.File.Permissions.fromMode(0o600),
-        .replace = false,
-    });
-}
-
 /// `maru browser screenshot`을 컨트롤 소켓에 왕복한다(§9.6·§9.5.7). 단일 응답이 아니라 **chunk 스트림**이라
-/// `fetchControlResponse`(첫 응답만)와 달리 `connectSendControl`로 열고 프레임을 고정 scratch로 검증·decode해 secure
-/// spool에 쓴다. 최종 metadata와 PNG header까지 검증한 뒤에만 원자적 `--out` 또는 stdout을 공개한다.
+/// `fetchControlResponse`(첫 응답만)와 달리 `connectSendControl`로 열고 프레임을 고정 scratch로 검증·decode해 메모리에
+/// 누적한다. 최종 metadata와 PNG header까지 검증한 뒤에만 `publishBrowserResult`(원자적 `--out`) 또는 stdout으로 공개한다.
 fn runBrowserScreenshot(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -761,12 +740,10 @@ fn runBrowserScreenshot(
     defer _ = c.close(fd);
 
     const request_id: maru.session.control_plane.Id = .{ .number = 1 };
-    const spool_target = shot.out orelse "/tmp/.maru-browser-screenshot-spool";
-    var spool = createBrowserSpool(std.Io.Dir.cwd(), io, spool_target) catch
-        return browserScreenshotError(stderr, "secure spool을 만들 수 없습니다");
-    defer spool.deinit(io);
-
     var validator = maru.cli.browser.ScreenshotStreamValidator.init(request_id);
+    // PNG를 메모리에 누적(validator가 chunk 상한 강제). write-only spool read-back 회피(exec와 동일 이유).
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(allocator);
     var framer: maru.session.control_plane.Framer = .{};
     defer framer.deinit(allocator);
     var decode_scratch: [512 * 1024]u8 = undefined;
@@ -775,7 +752,7 @@ fn runBrowserScreenshot(
             switch (validator.feed(allocator, line, &decode_scratch) catch return error.OutOfMemory) {
                 .need_more => {},
                 .chunk => |bytes| {
-                    spool.file.writeStreamingAll(io, bytes) catch return browserScreenshotError(stderr, "secure spool 쓰기에 실패했습니다");
+                    result.appendSlice(allocator, bytes) catch return error.OutOfMemory;
                 },
                 .done => break :done,
                 .failed => return browserScreenshotError(stderr, "서버가 잘못된 screenshot stream을 반환했습니다"),
@@ -787,24 +764,13 @@ fn runBrowserScreenshot(
         framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
 
-    spool.file.sync(io) catch return browserScreenshotError(stderr, "secure spool 동기화에 실패했습니다");
     if (shot.out) |path| {
-        spool.link(io) catch |err| {
-            const message = if (err == error.PathAlreadyExists) "출력 파일이 이미 존재합니다" else "출력 파일을 원자적으로 게시할 수 없습니다";
-            return browserScreenshotError(stderr, message);
-        };
-        try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ validator.width, validator.height, validator.total_bytes, path });
+        publishBrowserResult(std.Io.Dir.cwd(), io, path, result.items) catch
+            return browserScreenshotError(stderr, "출력 파일을 원자적으로 게시할 수 없습니다");
+        try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ validator.width, validator.height, result.items.len, path });
         try stdout.flush();
     } else {
-        var offset: u64 = 0;
-        var output_buf: [64 * 1024]u8 = undefined;
-        while (offset < validator.total_bytes) {
-            const wanted = @min(output_buf.len, validator.total_bytes - @as(usize, @intCast(offset)));
-            const n = spool.file.readPositionalAll(io, output_buf[0..wanted], offset) catch return browserScreenshotError(stderr, "secure spool 읽기에 실패했습니다");
-            if (n == 0) return browserScreenshotError(stderr, "secure spool이 불완전합니다");
-            try stdout.writeAll(output_buf[0..n]);
-            offset += n;
-        }
+        try stdout.writeAll(result.items);
         try stdout.flush();
     }
 }
@@ -1007,26 +973,20 @@ test "development CLI imports maru module" {
     try std.testing.expectEqual(@as(u16, 80), maru.terminal.Size.default.cols);
 }
 
-test "browser secure spool은 0600으로 원자 공개하고 기존 파일을 덮어쓰지 않는다" {
+test "publishBrowserResult: 0600 원자 공개 + 기존 파일 덮어쓰기(폴링 재실행 정상화)" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var first = try createBrowserSpool(tmp.dir, io, "result.bin");
-    defer first.deinit(io);
-    try first.file.writeStreamingAll(io, "first");
-    try first.link(io);
+    try publishBrowserResult(tmp.dir, io, "result.bin", "first");
     const stat = try tmp.dir.statFile(io, "result.bin", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
 
-    var second = try createBrowserSpool(tmp.dir, io, "result.bin");
-    defer second.deinit(io);
-    try second.file.writeStreamingAll(io, "second");
-    try std.testing.expectError(error.PathAlreadyExists, second.link(io));
-
-    var buf: [5]u8 = undefined;
+    // 같은 경로에 재공개 = **덮어쓰기 성공**(옛 no-clobber 회귀 수정). 내용은 최신("second").
+    try publishBrowserResult(tmp.dir, io, "result.bin", "second");
+    var buf: [6]u8 = undefined;
     const file = try tmp.dir.openFile(io, "result.bin", .{});
     defer file.close(io);
-    try std.testing.expectEqual(@as(usize, 5), try file.readPositionalAll(io, &buf, 0));
-    try std.testing.expectEqualStrings("first", &buf);
+    const n = try file.readPositionalAll(io, &buf, 0);
+    try std.testing.expectEqualStrings("second", buf[0..n]);
 }

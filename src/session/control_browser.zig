@@ -45,7 +45,6 @@ const capmod = @import("control_capability.zig");
 const cs = @import("control_surface.zig");
 const cev = @import("control_events.zig"); // 5f-0b-3b: browser.subscribe params의 events 필터(EventKind/EventFilter)
 const cpg = @import("control_pane_grant.zig"); // 1e-confirm-1b: pane-bound confirm-grant 조회(§9.2 Model B — 세션 cap OR pane grant 가법)
-pub const result_budget = @import("control_result.zig"); // 5f-5b: executeScript reservation/outbound byte accounting
 
 // ── ① browser.* wire 스키마(§9.1 ①) ──────────────────────────────────────────────────────────────────────
 
@@ -478,7 +477,7 @@ fn numF64FromObj(obj: std.json.ObjectMap, name: []const u8) ParamError!f64 {
 
 /// screenshot rect/scale 추출. rect 있으면 x/y/width/height 전부 필수(부분 rect=형식 오류). scale/width/height는 양수·유한.
 /// 둘 다 부재(=`{id}`만)면 빈 옵션(전체 뷰·기기 배율). **rect 치수·scale 상한(렌더 자원 한계)은 Swift takeSnapshot가
-/// 클램프**(L2는 형식[유한·양수]만 검증 — 픽셀 버퍼 자원 한계는 WKWebView가 렌더하는 지점 소유, 23차 [5]/[6]).
+/// 클램프**(L2는 형식[유한·양수]만 검증 — 픽셀 버퍼 자원 한계는 WKWebView가 렌더하는 지점 소유).
 pub fn parseScreenshotOptParams(params: ?std.json.Value) ParamError!ScreenshotOptParams {
     const obj = try paramsObject(params);
     var out: ScreenshotOptParams = .{};
@@ -956,7 +955,10 @@ pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, re
     _ = encoder.encode(b64, data);
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":") catch return error.OutOfMemory;
+    // method 이름은 SSOT 상수(cp.browser_execute_script_chunk_method) — CLI 소비자와 같은 출처라 wire drift 방지.
+    aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"") catch return error.OutOfMemory;
+    aw.writer.writeAll(execute_script_chunk_method) catch return error.OutOfMemory;
+    aw.writer.writeAll("\",\"params\":{\"request_id\":") catch return error.OutOfMemory;
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     cp.writeId(&s, request_id) catch return error.OutOfMemory;
     aw.writer.print(",\"result_id\":{d},\"seq\":{d},\"encoding\":\"base64-json\",\"data\":\"", .{ result_id, seq }) catch return error.OutOfMemory;
@@ -1026,8 +1028,10 @@ pub fn serializeExecuteScriptChunkedComplete(
 
 const screenshot_chunk_method = cp.browser_screenshot_chunk_method; // 22차 [8]: 단일 출처(control_plane)
 
-/// PNG IHDR의 width/height(§9.5.7 metadata). Swift가 넘긴 PNG 바이트에서 직접 읽어 ABI 확장을 피한다.
-pub const PngDims = struct { width: u32, height: u32 };
+/// PNG IHDR의 width/height(§9.5.7 metadata). **단일 출처=control_plane**(서버·CLI 클라이언트가 같은 파서 공유 — cli는
+/// cp만 import). 여기선 alias만 재노출(app_host_abi·serializeScreenshotComplete가 control_browser.PngDims/pngDimensions로 참조).
+pub const PngDims = cp.PngDims;
+pub const pngDimensions = cp.pngDimensions;
 
 /// screenshot chunk notification(§9.5.7): `{"jsonrpc":"2.0","method":"browser.screenshotChunk","params":
 /// {"capture_id":N,"seq":K,"encoding":"base64","data":"<base64>"}}`. `data`=PNG 조각 base64(임의 바이트 안전 —
@@ -1085,17 +1089,6 @@ fn writeScreenshotComplete(s: *std.json.Stringify, id: cp.Id, capture_id: u64, s
 
 /// PNG 시그니처(8B) + IHDR chunk(len 4·"IHDR" 4·width 4 BE[off 16]·height 4 BE[off 20])에서 width/height를 읽는다
 /// (§9.5.7). 시그니처 불일치·길이 부족·IHDR 부재면 null(비-PNG 스냅샷 → completeBrowserOp이 internal_error로 접음). 순수.
-pub fn pngDimensions(bytes: []const u8) ?PngDims {
-    const png_sig = [_]u8{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
-    if (bytes.len < 24) return null;
-    if (!std.mem.eql(u8, bytes[0..8], &png_sig)) return null;
-    if (!std.mem.eql(u8, bytes[12..16], "IHDR")) return null; // bytes[8..12]=IHDR length(=13)
-    const width = std.mem.readInt(u32, bytes[16..][0..4], .big);
-    const height = std.mem.readInt(u32, bytes[20..][0..4], .big);
-    if (width == 0 or height == 0) return null;
-    return .{ .width = width, .height = height };
-}
-
 /// op 완료가 screenshot인지(chunk 경로 분기, §9.5.7). request_bytes 재파싱해 method 확인. 비-request/미지 method는 false.
 pub fn isScreenshotRequest(gpa: std.mem.Allocator, request_bytes: []const u8) bool {
     var pm = cp.parseMessage(gpa, request_bytes) catch return false;
@@ -1475,6 +1468,9 @@ pub fn browserOpFromRequest(
     }
 
     // ── 6. method별 params 파싱 + arg(url/script) dupe(파싱 arena와 수명 분리 — op는 pm.deinit 뒤에도 유효해야). ──
+    // execute_script의 max_result_bytes는 arg 파싱(아래) 때 함께 잡아 재파싱을 피한다(이전엔 여기·step 8·
+    // 서버 재파싱 3번). execute_script가 아니면 0.
+    var exec_max_result_bytes: usize = 0;
     const arg: []const u8 = switch (bmethod) {
         .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
         .get_url => try gpa.dupe(u8, ""), // {id}만 — 인자 없음(빈 슬라이스도 dupe해 free 규약 일관)
@@ -1483,6 +1479,7 @@ pub fn browserOpFromRequest(
         .screenshot => try serializeScreenshotArg(gpa, parseScreenshotOptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .execute_script => blk: {
             const p = parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+            exec_max_result_bytes = p.max_result_bytes; // 아래 step 8에서 재파싱 없이 재사용
             break :blk try serializeExecuteScriptBackendArg(gpa, p.script, p.args, p.max_result_bytes);
         },
         // cookie write: 쿠키 필드를 compact JSON으로 arg에 실어 Swift가 파싱(§9.4 D4). 파싱 슬라이스는 arena를 빌리나 serialize가 owned JSON 생성.
@@ -1521,10 +1518,7 @@ pub fn browserOpFromRequest(
         gpa.free(arg);
         return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
     }
-    const max_result_bytes = if (bmethod == .execute_script)
-        (parseExecuteScriptParams(req.params) catch unreachable).max_result_bytes
-    else
-        0;
+    const max_result_bytes = exec_max_result_bytes; // 위 arg 파싱서 이미 잡음(execute_script 아니면 0)
     return .{ .op = .{
         .surface_id = target_id,
         .method = bmethod,

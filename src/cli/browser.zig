@@ -110,7 +110,7 @@ pub const wait_default_timeout_ms: u32 = 25_000;
 pub const wait_max_timeout_ms: u32 = 25_000;
 
 /// screenshot(5f-1)은 단일 응답이 아니라 **chunk 스트림**(§9.5.7)이라 단일-응답 `Request`와 분리한다 — main이
-/// `ScreenshotAssembler`로 chunk를 재조립해 PNG를 `out`(nil=stdout)에 쓴다. surface_id=대상 web surface. named 타입이라
+/// `ScreenshotStreamValidator`로 chunk를 검증·decode해 PNG를 `out`(nil=stdout)에 쓴다. surface_id=대상 web surface. named 타입이라
 /// main.zig 핸들러 인자로 그대로 전달된다(익명 struct는 별개 타입이 되어 안 맞음).
 pub const ScreenshotCmd = struct {
     surface_id: u64,
@@ -622,7 +622,7 @@ fn keyRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id:
     return twoFieldRequest(gpa, id, method, surface_id, "key", key, "value", value);
 }
 
-/// 23차 [8]: `{id, <req_field>, <opt_field>?}` 모양 요청 빌더 공용(act=selector/text·localStorage=key/value가 필드명만
+/// `{id, <req_field>, <opt_field>?}` 모양 요청 빌더 공용(act=selector/text·localStorage=key/value가 필드명만
 /// 달랐다). opt_val null이면 opt_field 생략. wire-envelope 변경이 한 곳에만 반영되게 통합. caller free.
 fn twoFieldRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, req_field: []const u8, req_val: []const u8, opt_field: []const u8, opt_val: ?[]const u8) std.mem.Allocator.Error![]u8 {
     var obj: std.json.ObjectMap = .empty;
@@ -641,7 +641,7 @@ fn idOnlyRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_
 }
 
 /// screenshot 요청 바이트(§9.5.7): `browser.screenshot {id, rect?, scale?}`. rect=`{x,y,width,height}`·scale=수(둘 다
-/// 부재면 `{id}`만=전체 뷰·기기 배율). 응답은 단일이 아니라 chunk 스트림이라 렌더는 `ScreenshotAssembler`가 맡는다
+/// 부재면 `{id}`만=전체 뷰·기기 배율). 응답은 단일이 아니라 chunk 스트림이라 렌더는 `ScreenshotStreamValidator`가 맡는다
 /// (renderResponse 아님). main이 이 요청을 보내고 프레임을 assembler로 재조립. caller free.
 pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, id: cp.Id) std.mem.Allocator.Error![]u8 {
     var obj: std.json.ObjectMap = .empty;
@@ -777,101 +777,6 @@ const execute_script_chunk_method = cp.browser_execute_script_chunk_method;
 
 /// executeScript chunk 재조립기(5f-5b L2). 전체 결과는 max_bytes를 넘지 않으며,
 /// chunk는 request/result id·encoding·seq·최종 bytes를 모두 검증한다.
-pub const ExecuteScriptAssembler = struct {
-    gpa: std.mem.Allocator,
-    request_id: cp.Id,
-    result_id: ?i64 = null,
-    max_bytes: usize,
-    buf: std.ArrayList(u8) = .empty,
-    next_seq: i64 = 0,
-    done: bool = false,
-
-    pub const Step = enum { need_more, done, failed };
-
-    pub fn init(gpa: std.mem.Allocator, request_id: cp.Id, max_bytes: usize) ExecuteScriptAssembler {
-        return .{ .gpa = gpa, .request_id = request_id, .max_bytes = max_bytes };
-    }
-    pub fn deinit(self: *ExecuteScriptAssembler) void {
-        self.buf.deinit(self.gpa);
-    }
-    pub fn bytes(self: *const ExecuteScriptAssembler) []const u8 {
-        return self.buf.items;
-    }
-
-    pub fn feed(self: *ExecuteScriptAssembler, frame: []const u8) std.mem.Allocator.Error!Step {
-        if (self.done) return .failed;
-        var pm = cp.parseMessage(self.gpa, frame) catch {
-            self.done = true;
-            return .failed;
-        };
-        defer pm.deinit();
-        const step = try switch (pm.message) {
-            .notification => |n| if (std.mem.eql(u8, n.method, execute_script_chunk_method)) self.feedChunk(n.params) else .need_more,
-            .response => |r| self.feedFinal(r),
-            else => .failed,
-        };
-        if (step == .failed) self.done = true;
-        return step;
-    }
-
-    fn feedChunk(self: *ExecuteScriptAssembler, params: ?std.json.Value) std.mem.Allocator.Error!Step {
-        const obj = switch (params orelse return .failed) {
-            .object => |o| o,
-            else => return .failed,
-        };
-        const rid = intField(obj.get("result_id")) orelse return .failed;
-        const seq = intField(obj.get("seq")) orelse return .failed;
-        if (rid < 0 or seq != self.next_seq) return .failed;
-        if (self.result_id) |bound| {
-            if (rid != bound) return .failed;
-        } else self.result_id = rid;
-        const encoding = switch (obj.get("encoding") orelse return .failed) {
-            .string => |s| s,
-            else => return .failed,
-        };
-        if (!std.mem.eql(u8, encoding, "base64-json")) return .failed;
-        const req = obj.get("request_id") orelse return .failed;
-        const chunk_request_id = valueAsId(req) orelse return .failed;
-        if (!cp.idEql(chunk_request_id, self.request_id)) return .failed;
-        const encoded = switch (obj.get("data") orelse return .failed) {
-            .string => |s| s,
-            else => return .failed,
-        };
-        const decoder = std.base64.standard.Decoder;
-        const n = decoder.calcSizeForSlice(encoded) catch return .failed;
-        if (n > 512 * 1024 or n > self.max_bytes -| self.buf.items.len) return .failed;
-        const start = self.buf.items.len;
-        self.buf.resize(self.gpa, start + n) catch |err| {
-            self.done = true;
-            return err;
-        };
-        decoder.decode(self.buf.items[start..], encoded) catch return .failed;
-        self.next_seq += 1;
-        return .need_more;
-    }
-
-    fn feedFinal(self: *ExecuteScriptAssembler, resp: cp.Response) std.mem.Allocator.Error!Step {
-        if (!cp.idEql(resp.id, self.request_id) or resp.err != null) return .failed;
-        const obj = switch (resp.result orelse return .failed) {
-            .object => |o| o,
-            else => return .failed,
-        };
-        const transfer = switch (obj.get("transfer") orelse return .failed) {
-            .string => |s| s,
-            else => return .failed,
-        };
-        if (!std.mem.eql(u8, transfer, "chunked")) return .failed;
-        const final_result_id = intField(obj.get("result_id")) orelse return .failed;
-        const final_seq_total = intField(obj.get("seq_total")) orelse return .failed;
-        const final_bytes = intField(obj.get("bytes")) orelse return .failed;
-        if (self.result_id == null or final_result_id != self.result_id.? or final_seq_total != self.next_seq or final_bytes != self.buf.items.len) return .failed;
-        const parsed = std.json.parseFromSlice(std.json.Value, self.gpa, self.buf.items, .{}) catch return .failed;
-        defer parsed.deinit();
-        self.done = true;
-        return .done;
-    }
-};
-
 /// main CLI가 전체 결과를 메모리에 모으지 않고 secure spool로 쓰기 위한 프레임 검증기. decoded chunk는 caller의
 /// 고정 512 KiB scratch를 빌리고, inline만 계약상 최대 512 KiB owned buffer에 직렬화한다.
 pub const ExecuteScriptStreamValidator = struct {
@@ -992,94 +897,6 @@ fn valueAsId(v: std.json.Value) ?cp.Id {
 /// screenshot chunk 스트림(§9.5.7)을 프레임 단위로 재조립한다. CLI(main)가 소켓에서 읽은 프레임을 하나씩 `feed`하면
 /// chunk notification은 seq 순서로 PNG 버퍼에 누적하고, 최종 응답에서 완성(done)/에러(failed)를 판정한다. capture_id
 /// 일관성·seq 연속성·seq_total 일치를 검증(누락/재정렬 감지 — 서버 FIFO가 순서를 보장하나 방어적으로도 확인). L2 순수.
-pub const ScreenshotAssembler = struct {
-    gpa: std.mem.Allocator,
-    buf: std.ArrayList(u8) = .empty, // 누적 PNG 바이트
-    err_buf: std.ArrayList(u8) = .empty, // 실패 메시지(owned) — .failed 시 failureMessage()
-    next_seq: i64 = 0, // 다음 기대 seq(연속성)
-    capture_id: ?i64 = null,
-    width: u32 = 0,
-    height: u32 = 0,
-
-    /// feed 결과: need_more(계속 read)·done(완성 — png()·width·height 유효)·failed(실패 — failureMessage()).
-    pub const Step = enum { need_more, done, failed };
-
-    pub fn init(gpa: std.mem.Allocator) ScreenshotAssembler {
-        return .{ .gpa = gpa };
-    }
-    pub fn deinit(self: *ScreenshotAssembler) void {
-        self.buf.deinit(self.gpa);
-        self.err_buf.deinit(self.gpa);
-    }
-    pub fn png(self: *const ScreenshotAssembler) []const u8 {
-        return self.buf.items;
-    }
-    pub fn failureMessage(self: *const ScreenshotAssembler) []const u8 {
-        return self.err_buf.items;
-    }
-
-    fn fail(self: *ScreenshotAssembler, msg: []const u8) std.mem.Allocator.Error!Step {
-        self.err_buf.clearRetainingCapacity();
-        try self.err_buf.appendSlice(self.gpa, msg);
-        return .failed;
-    }
-
-    /// 소켓 프레임 하나(개행 제외) 소비. chunk notification/최종 응답/무관 프레임을 §9.5.7 계약대로 처리.
-    pub fn feed(self: *ScreenshotAssembler, frame_bytes: []const u8) std.mem.Allocator.Error!Step {
-        var pm = cp.parseMessage(self.gpa, frame_bytes) catch return self.fail("malformed frame from server");
-        defer pm.deinit();
-        switch (pm.message) {
-            .notification => |n| {
-                if (!eq(n.method, screenshot_chunk_method)) return .need_more; // hello 등 무관 notification 무시
-                return self.feedChunk(n.params);
-            },
-            .response => |r| return self.feedFinal(r),
-            .request => return .need_more, // 서버가 request 보낼 일 없음 — 무시
-        }
-    }
-
-    fn feedChunk(self: *ScreenshotAssembler, params: ?std.json.Value) std.mem.Allocator.Error!Step {
-        const obj = switch (params orelse return self.fail("chunk missing params")) {
-            .object => |o| o,
-            else => return self.fail("chunk params not object"),
-        };
-        const cid = intField(obj.get("capture_id")) orelse return self.fail("chunk missing capture_id");
-        const seq = intField(obj.get("seq")) orelse return self.fail("chunk missing seq");
-        const data = switch (obj.get("data") orelse return self.fail("chunk missing data")) {
-            .string => |s| s,
-            else => return self.fail("chunk data not string"),
-        };
-        if (self.capture_id) |c| {
-            if (c != cid) return self.fail("chunk capture_id mismatch");
-        } else self.capture_id = cid;
-        if (seq != self.next_seq) return self.fail("chunk out of order"); // FIFO 보장이나 방어
-        const decoder = std.base64.standard.Decoder;
-        const dlen = decoder.calcSizeForSlice(data) catch return self.fail("chunk bad base64");
-        const start = self.buf.items.len;
-        try self.buf.resize(self.gpa, start + dlen);
-        decoder.decode(self.buf.items[start..], data) catch return self.fail("chunk bad base64");
-        self.next_seq += 1;
-        return .need_more;
-    }
-
-    fn feedFinal(self: *ScreenshotAssembler, resp: cp.Response) std.mem.Allocator.Error!Step {
-        if (resp.err) |e| {
-            var tmp: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&tmp, "server error: {s} ({d})", .{ e.message, e.code }) catch e.message;
-            return self.fail(msg);
-        }
-        const obj = switch (resp.result orelse return self.fail("final missing result")) {
-            .object => |o| o,
-            else => return self.fail("final result not object"),
-        };
-        const seq_total = intField(obj.get("seq_total")) orelse return self.fail("final missing seq_total");
-        if (seq_total != self.next_seq) return self.fail("screenshot incomplete (chunk count mismatch)"); // 누락/과다
-        self.width = clampU32(intField(obj.get("width")) orelse 0);
-        self.height = clampU32(intField(obj.get("height")) orelse 0);
-        return .done;
-    }
-};
-
 /// screenshot 결과를 전체 메모리 재조립 없이 검증한다. chunk는 caller의 512 KiB scratch로 decode하고,
 /// PNG header·누적 byte 수·capture/seq/final metadata만 보존한다.
 pub const ScreenshotStreamValidator = struct {
@@ -1172,7 +989,7 @@ pub const ScreenshotStreamValidator = struct {
         };
         if (self.capture_id == null or final_capture_id != self.capture_id.? or seq_total != self.next_seq or total_bytes != self.total_bytes) return .failed;
         if (!eq(format, "png") or width <= 0 or height <= 0 or width > std.math.maxInt(u32) or height > std.math.maxInt(u32)) return .failed;
-        const dims = pngHeaderDimensions(self.header[0..self.header_len]) orelse return .failed;
+        const dims = cp.pngDimensions(self.header[0..self.header_len]) orelse return .failed;
         if (dims.width != width or dims.height != height) return .failed;
         self.width = dims.width;
         self.height = dims.height;
@@ -1181,15 +998,6 @@ pub const ScreenshotStreamValidator = struct {
     }
 };
 
-fn pngHeaderDimensions(bytes: []const u8) ?struct { width: u32, height: u32 } {
-    if (bytes.len < 24 or !std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n") or !std.mem.eql(u8, bytes[12..16], "IHDR")) return null;
-    const width = std.mem.readInt(u32, bytes[16..20], .big);
-    const height = std.mem.readInt(u32, bytes[20..24], .big);
-    if (width == 0 or height == 0) return null;
-    return .{ .width = width, .height = height };
-}
-
-// ══ 테스트(헤드리스, Linux CI 포함 — 순수 파싱·wire·렌더) ═══════════════════════════════════════════════════
 const testing = std.testing;
 
 test "parse: navigate/get-url/exec/get-cookies + --surface" {
@@ -1425,55 +1233,6 @@ test "buildScreenshotRequestBytes: browser.screenshot {id} + rect/scale" {
     }
 }
 
-test "ScreenshotAssembler: chunk 재조립 → PNG, seq/capture/seq_total 검증, 서버 에러" {
-    const chunk0 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":7,\"seq\":0,\"encoding\":\"base64\",\"data\":\"SEVM\"}}"; // "HEL"
-    const chunk1 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":7,\"seq\":1,\"encoding\":\"base64\",\"data\":\"TE8=\"}}"; // "LO"
-    // 정상: 2 chunk → done, png()="HELLO", metadata.
-    {
-        var a = ScreenshotAssembler.init(testing.allocator);
-        defer a.deinit();
-        try testing.expectEqual(ScreenshotAssembler.Step.need_more, try a.feed(chunk0));
-        try testing.expectEqual(ScreenshotAssembler.Step.need_more, try a.feed(chunk1));
-        try testing.expectEqual(ScreenshotAssembler.Step.done, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capture_id\":7,\"seq_total\":2,\"width\":800,\"height\":600,\"format\":\"png\"}}"));
-        try testing.expectEqualStrings("HELLO", a.png());
-        try testing.expectEqual(@as(u32, 800), a.width);
-        try testing.expectEqual(@as(u32, 600), a.height);
-    }
-    // 무관 notification(hello 등)은 무시(need_more).
-    {
-        var a = ScreenshotAssembler.init(testing.allocator);
-        defer a.deinit();
-        try testing.expectEqual(ScreenshotAssembler.Step.need_more, try a.feed("{\"jsonrpc\":\"2.0\",\"method\":\"hello\",\"params\":{}}"));
-    }
-    // seq 재정렬(0 기대인데 5) → failed.
-    {
-        var a = ScreenshotAssembler.init(testing.allocator);
-        defer a.deinit();
-        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":7,\"seq\":5,\"data\":\"SEVM\"}}"));
-    }
-    // capture_id 불일치 → failed.
-    {
-        var a = ScreenshotAssembler.init(testing.allocator);
-        defer a.deinit();
-        _ = try a.feed(chunk0);
-        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":9,\"seq\":1,\"data\":\"TE8=\"}}"));
-    }
-    // seq_total 불일치(1개 받았는데 5) → failed(누락 감지).
-    {
-        var a = ScreenshotAssembler.init(testing.allocator);
-        defer a.deinit();
-        _ = try a.feed(chunk0);
-        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capture_id\":7,\"seq_total\":5,\"width\":1,\"height\":1}}"));
-    }
-    // 서버 에러 응답(screenshot too large) → failed, 메시지 전달.
-    {
-        var a = ScreenshotAssembler.init(testing.allocator);
-        defer a.deinit();
-        try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"screenshot too large\"}}"));
-        try testing.expect(std.mem.indexOf(u8, a.failureMessage(), "screenshot too large") != null);
-    }
-}
-
 test "ExecuteScriptStreamValidator: chunked와 inline 결과를 bounded 검증" {
     const request_id: cp.Id = .{ .number = 1 };
     var scratch: [512 * 1024]u8 = undefined;
@@ -1528,42 +1287,6 @@ test "ScreenshotStreamValidator: PNG header와 terminal byte metadata를 검증"
 
     var empty = ScreenshotStreamValidator.init(.{ .number = 1 });
     try testing.expect((try empty.feed(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":9,\"seq\":0,\"encoding\":\"base64\",\"data\":\"\"}}", &scratch)) == .failed);
-}
-
-test "ExecuteScriptAssembler: id·seq·bytes 검증 후 strict JSON 재조립" {
-    const chunk0 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJh\"}}";
-    const chunk1 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":1,\"encoding\":\"base64-json\",\"data\":\"IjoxfQ==\"}}";
-    const final = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"transfer\":\"chunked\",\"result_id\":9,\"seq_total\":2,\"bytes\":7}}";
-    var a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 32);
-    defer a.deinit();
-    try testing.expectEqual(ExecuteScriptAssembler.Step.need_more, try a.feed(chunk0));
-    try testing.expectEqual(ExecuteScriptAssembler.Step.need_more, try a.feed(chunk1));
-    try testing.expectEqual(ExecuteScriptAssembler.Step.done, try a.feed(final));
-    try testing.expectEqualStrings("{\"a\":1}", a.bytes());
-    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try a.feed(final)); // terminal latch
-}
-
-test "ExecuteScriptAssembler: mismatch·잘못된 encoding·상한·invalid JSON 거부" {
-    const bad_id = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":8,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"e30=\"}}";
-    var id_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 8);
-    defer id_a.deinit();
-    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try id_a.feed(bad_id));
-
-    const bad_encoding = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64\",\"data\":\"e30=\"}}";
-    var enc_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 8);
-    defer enc_a.deinit();
-    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try enc_a.feed(bad_encoding));
-
-    const oversized = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"e30=\"}}";
-    var size_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 1);
-    defer size_a.deinit();
-    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try size_a.feed(oversized));
-
-    var json_a = ExecuteScriptAssembler.init(testing.allocator, .{ .number = 7 }, 8);
-    defer json_a.deinit();
-    const invalid_json = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":7,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"bm9wZQ==\"}}";
-    _ = try json_a.feed(invalid_json);
-    try testing.expectEqual(ExecuteScriptAssembler.Step.failed, try json_a.feed("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"transfer\":\"chunked\",\"result_id\":9,\"seq_total\":1,\"bytes\":4}}"));
 }
 
 // ── browser list(§9.6 발견) 파서·wire·렌더 단위 ──

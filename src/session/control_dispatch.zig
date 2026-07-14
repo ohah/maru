@@ -207,7 +207,20 @@ pub fn dispatchAuthenticated(
         }
         return switch (try cb.browserOpFromRequest(gpa, req, snapshot, caps_buf[0..ncaps], selector, grants, now)) {
             .err => |e| .{ .immediate = e },
-            .op => |op| .{ .browser = op },
+            .op => |raw_op| blk: {
+                var op = raw_op;
+                if (op.pane_grant == null) {
+                    for (cap_nonces) |nonce| {
+                        const c = store.lookupByNonce(nonce) orelse continue;
+                        if (cap.authorize(c, op.surface_id, c.generation, req.method, now) == .granted) {
+                            op.capability_nonce = nonce;
+                            op.capability_generation = c.generation;
+                            break;
+                        }
+                    }
+                }
+                break :blk .{ .browser = op };
+            },
             .subscribe => |s| .{ .subscribe = s }, // 5f-0b-3b: 동기 구독 지시 — L4가 registry 등록
             .needs_grant => |g| .{ .needs_grant = g }, // 1e-confirm-1c: 확인 대기(L4가 held-request·모달)
         };
@@ -651,6 +664,8 @@ test "dispatchAuthenticated 5e/1c: browser cap → .browser op; 미인가 cap+pa
     try testing.expectEqual(@as(u64, 11), op.surface_id);
     try testing.expectEqual(cb.BrowserMethod.navigate, op.method);
     try testing.expectEqualStrings("https://x", op.arg);
+    try testing.expectEqual(n_browser, op.capability_nonce.?); // callback 재인가용 실제 선택 nonce 값 복사
+    try testing.expectEqual(@as(u64, 0), op.capability_generation.?);
     // metadata cap으로 browser.navigate(selector=11=pane): scope 불충족이나 pane이 확인 모달로 grant받을 수 있음 →
     // **needs_grant**(1e-confirm-1c — 옛 즉시 unauthorized 아님; self-authenticated pane은 prompt 대상).
     const g_deny = try authDispatchNeedsGrant(req, 11, n_all, &store);

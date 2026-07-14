@@ -219,6 +219,8 @@ pub const FdIssueError = error{
     ScopeForbiddenViaInheritedFd,
     /// read-output을 TTL 없이 발급 시도(§8.5 read-output은 짧은 TTL one-shot만 — 과거 스크롤백 history 유출 방어).
     ReadOutputRequiresTtl,
+    /// nonce는 capability identity다. 같은 nonce 재발급은 stale in-flight가 새 authority로 재인가되는 ABA를 만든다.
+    DuplicateNonce,
 };
 
 /// §8.5 fd 발급 정책을 한 곳에서 강제한다(store `issueForFd`의 유일한 게이트). (1) write/lifecycle은 상속 fd로
@@ -250,7 +252,13 @@ pub const CapabilityStore = struct {
         cap: Capability,
     ) (FdIssueError || std.mem.Allocator.Error)!void {
         try validateFdIssuance(cap.scope, cap.expires_at);
-        try self.entries.append(gpa, .{ .hash = hashNonce(nonce), .cap = cap });
+        const hash = hashNonce(nonce);
+        var duplicate = false;
+        for (self.entries.items) |e| {
+            if (std.crypto.timing_safe.eql(Hash, hash, e.hash)) duplicate = true;
+        }
+        if (duplicate) return error.DuplicateNonce;
+        try self.entries.append(gpa, .{ .hash = hash, .cap = cap });
     }
 
     /// nonce로 capability를 constant-time 조회한다(§8.5). nonce의 SHA-256을 모든 엔트리 hash와 `timing_safe.eql`로
@@ -585,6 +593,15 @@ test "lookupByNonce: 발급된 nonce는 찾고 미지 nonce는 null(constant-tim
     try testing.expectEqual(@as(u64, 10), found.surface_id);
     try testing.expectEqual(@as(u64, 3), found.generation);
     try testing.expect(store.lookupByNonce(nonce_unknown) == null);
+}
+
+test "issueForFd: 같은 nonce 재발급은 capability identity ABA 방지로 거부" {
+    var store: CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    try store.issueForFd(testing.allocator, nonce_a, metaCap(10, 3, .self));
+    try testing.expectError(error.DuplicateNonce, store.issueForFd(testing.allocator, nonce_a, metaCap(11, 4, .all)));
+    try testing.expectEqual(@as(usize, 1), store.len());
+    try testing.expectEqual(@as(u64, 10), store.lookupByNonce(nonce_a).?.surface_id);
 }
 
 // ── 6) authorize grant(정상) ──

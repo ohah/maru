@@ -28,10 +28,20 @@ pub const ByteBudget = struct {
 
     pub fn transfer(self: *ByteBudget, from: *Reservation, to: *Reservation) BudgetError!void {
         if (from.budget != self or to.budget != self) return error.Underflow;
-        if (from.released or to.active) return error.Underflow;
+        if (!from.active or from.released or to.active or to.released) return error.Underflow;
         to.amount = from.amount;
         to.active = true;
+        to.released = false;
+        from.active = false;
         from.released = true;
+    }
+
+    pub fn usedBytes(self: *const ByteBudget) usize {
+        return self.used;
+    }
+
+    pub fn limitBytes(self: *const ByteBudget) usize {
+        return self.limit;
     }
 };
 
@@ -126,8 +136,22 @@ test "ByteBudget: exact reserve, busy, release and transfer" {
     var transfer_reservation = Reservation{ .budget = &budget, .amount = 0, .active = false };
     try budget.transfer(&execution, &transfer_reservation);
     try std.testing.expect(execution.released);
+    try std.testing.expect(!execution.active);
+    try std.testing.expect(transfer_reservation.active);
     try transfer_reservation.release();
     try std.testing.expectEqual(@as(usize, 0), budget.used);
+}
+
+test "ByteBudget transfer rejects inactive source and released destination" {
+    var budget = ByteBudget.init(4);
+    try budget.reserve(4);
+    var inactive = Reservation{ .budget = &budget, .amount = 4, .active = false };
+    var destination = Reservation{ .budget = &budget, .amount = 0, .active = false };
+    try std.testing.expectError(error.Underflow, budget.transfer(&inactive, &destination));
+    inactive.active = true;
+    destination.released = true;
+    try std.testing.expectError(error.Underflow, budget.transfer(&inactive, &destination));
+    try inactive.release();
 }
 
 test "OutboundAccounting: queued와 writer-owned를 완료 전까지 합산" {

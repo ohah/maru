@@ -43,6 +43,7 @@
 - [config GUI(스키마-주도 세팅 화면)](docs/config-gui.md)
 - [세션 컨트롤 플레인(CLI·웹뷰 IPC)](docs/control-plane.md)
 - [웹 패널 인프라(WKWebView 합성)](docs/web-panel.md)
+- [텍스트 필드 에디터(주소창 caret·선택·마우스 편집)](docs/text-field-editor.md)
 
 ## 설계 문서
 

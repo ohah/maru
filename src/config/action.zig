@@ -12,7 +12,7 @@ pub const Action = union(enum) {
     new_term,
     // 활성 pane에 web(브라우저) Term을 생성한다 — new_term의 web 버전(PTY/셸 없이 WKWebView surface). 4c/4e의 디버그
     // env 훅 MARU_WEB_PANEL을 사용자 command/메뉴로 승격(docs/web-panel.md §10 4e-5). panel_kind는 .browser(markdown은
-    // 후속). 기본 키바인딩 없음(⌘T=new_term 선점 — 발견성은 메뉴 File·커맨드 팔릿, move_pane_to_new_workspace류 선례).
+    // 후속). 기본 키바인딩 **⌘⌥T**(⌘T=new_term의 web 버전, ⌥로 구분 — ⌘⇧T=new_tab 워크스페이스와도 구분). 메뉴 File·커맨드 팔릿에도 노출.
     new_web_tab,
     close_term,
     previous_term,

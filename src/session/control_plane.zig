@@ -33,9 +33,24 @@ pub const protocol_id = "maru.control.v1";
 /// `hello` notification의 method 이름(§4.1).
 pub const hello_method = "hello";
 /// `browser.screenshotChunk` notification의 method 이름(§9.5.7 — screenshot chunk-streaming). 생산(control_browser
-/// `serializeScreenshotChunk`)과 소비(cli/browser `ScreenshotAssembler`)가 이 **단일 출처**를 공유해 wire drift를 막는다(22차 [8]).
+/// `serializeScreenshotChunk`)과 소비(cli/browser `ScreenshotStreamValidator`)가 이 **단일 출처**를 공유해 wire drift를 막는다.
 pub const browser_screenshot_chunk_method = "browser.screenshotChunk";
 pub const browser_execute_script_chunk_method = "browser.executeScriptChunk";
+
+/// PNG IHDR width/height(§9.5.7 screenshot metadata). **단일 출처**: 서버(control_browser)와 CLI 클라이언트가 같은
+/// 파서를 써야 유효 PNG 판정이 어긋나지 않는다(cli는 cp만 import하므로 여기 둔다). 시그니처 8B + IHDR(len 4·"IHDR" 4·
+/// width 4 BE[16]·height 4 BE[20])만 읽는다. 24B 미만·시그니처 불일치·0 크기 → null.
+pub const PngDims = struct { width: u32, height: u32 };
+pub fn pngDimensions(bytes: []const u8) ?PngDims {
+    const png_sig = [_]u8{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    if (bytes.len < 24) return null;
+    if (!std.mem.eql(u8, bytes[0..8], &png_sig)) return null;
+    if (!std.mem.eql(u8, bytes[12..16], "IHDR")) return null; // bytes[8..12]=IHDR length(=13)
+    const width = std.mem.readInt(u32, bytes[16..][0..4], .big);
+    const height = std.mem.readInt(u32, bytes[20..][0..4], .big);
+    if (width == 0 or height == 0) return null;
+    return .{ .width = width, .height = height };
+}
 /// max frame 크기(≈ 1 MiB, §4.3). "frame 크기" = 종단 `\n`을 제외한 한 줄의 바이트 수(선행 `\r`이 있으면 포함).
 pub const default_max_frame: usize = 1024 * 1024;
 

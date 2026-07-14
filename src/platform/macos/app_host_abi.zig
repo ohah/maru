@@ -3224,7 +3224,13 @@ pub export fn maru_macos_control_pump_browser_result() u32 {
             cancelBrowserTransfer(server, index, .failed);
             return 1;
         }
-        switch (entry.progress.plan(now_ns, control_browser.execute_script_chunk_bytes, .{
+        // chunk 크기는 **kind별**로 — screenshot의 seq_total은 screenshot_chunk_bytes로 계산되므로(3116) 펌프도
+        // 같은 상수로 조각내야 두 상수가 갈라져도 client의 seq_total 검증이 안 깨진다(이전엔 둘 다 execute_script_chunk_bytes).
+        const chunk_bytes = switch (entry.kind) {
+            .screenshot => control_browser.screenshot_chunk_bytes,
+            .execute_script => control_browser.execute_script_chunk_bytes,
+        };
+        switch (entry.progress.plan(now_ns, chunk_bytes, .{
             .should_pause = outbound.shouldPause(),
             .should_resume = outbound.shouldResume(),
         })) {

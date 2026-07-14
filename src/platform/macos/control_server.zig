@@ -207,17 +207,25 @@ pub const ControlRequestQueue = struct {
 /// Condition/close-cancel 패턴을 outbound 방향으로 재사용**하는 게 안전하다(2b-2-β가 두 스레드를 배선; α는 이 primitive만).
 /// 순수 `OutboundQueue`가 mechanism(coalesce/purge/bounded)을, 이 wrapper가 스레드 안전·블로킹 수명을 소유한다.
 pub const OutboundChannel = struct {
+    pub const default_max_wire_bytes: usize = 4 * 1024 * 1024;
     io: std.Io,
     q: co.OutboundQueue,
     mutex: std.Io.Mutex = .init,
     not_empty: std.Io.Condition = .init,
     closed: bool = false,
+    writer_owned_wire_bytes: usize = 0,
+    max_wire_bytes: usize,
 
     pub fn init(io: std.Io, max: usize) OutboundChannel {
-        return .{ .io = io, .q = co.OutboundQueue.init(max) };
+        return .{ .io = io, .q = co.OutboundQueue.init(max), .max_wire_bytes = std.math.maxInt(usize) };
+    }
+
+    pub fn initWithByteLimit(io: std.Io, max: usize, max_wire_bytes: usize) OutboundChannel {
+        return .{ .io = io, .q = co.OutboundQueue.initWithByteLimit(max, max_wire_bytes), .max_wire_bytes = max_wire_bytes };
     }
 
     pub fn deinit(self: *OutboundChannel, gpa: std.mem.Allocator) void {
+        std.debug.assert(self.writer_owned_wire_bytes == 0);
         self.q.deinit(gpa); // 남은 프레임 bytes free
         self.* = undefined;
     }
@@ -228,15 +236,16 @@ pub const OutboundChannel = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.QueueClosed;
+        if (self.q.prospectiveQueuedWireBytes(frame) > self.max_wire_bytes -| self.writer_owned_wire_bytes) return error.Full;
         try self.q.push(gpa, frame); // Full/OOM 전파(소유권은 호출자에 남음)
         self.not_empty.signal(self.io);
     }
 
     /// 메인: revoke/surface-close 시 tag 매칭 프레임 폐기(§8.5). 폐기 개수 반환.
-    pub fn purge(self: *OutboundChannel, gpa: std.mem.Allocator, tag: u64) usize {
+    pub fn purge(self: *OutboundChannel, gpa: std.mem.Allocator, key: co.PurgeKey) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.q.purge(gpa, tag);
+        return self.q.purge(gpa, key);
     }
 
     /// writer 스레드: 프레임이 있으면 pop, 없으면 `not_empty` 대기. **closed + 빈** 이면 null(writer 종료 신호). 반환
@@ -246,7 +255,23 @@ pub const OutboundChannel = struct {
         defer self.mutex.unlock(self.io);
         while (self.q.len() == 0 and !self.closed) self.not_empty.waitUncancelable(self.io, &self.mutex);
         if (self.q.len() == 0) return null; // closed + 빈 → 종료
-        return self.q.pop();
+        const frame = self.q.pop().?;
+        self.writer_owned_wire_bytes += co.wireBytes(frame.bytes);
+        return frame;
+    }
+
+    pub fn writeComplete(self: *OutboundChannel, frame_bytes: []const u8) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const wire = co.wireBytes(frame_bytes);
+        std.debug.assert(wire <= self.writer_owned_wire_bytes);
+        self.writer_owned_wire_bytes -= wire;
+    }
+
+    pub fn totalWireBytes(self: *OutboundChannel) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.q.queuedWireBytes() + self.writer_owned_wire_bytes;
     }
 
     /// 메인: 채널 종료 — 대기 writer를 깨워(broadcast) 남은 프레임 drain 후 종료(null)하게 한다.
@@ -341,7 +366,7 @@ pub const SubscriberRegistry = struct {
         for (buf[0..n]) |id| {
             const ch = self.outbound_of.get(id) orelse continue; // 매핑 없는 id(구조적 불가)면 skip
             const bytes = cross_gpa.dupe(u8, template) catch continue; // 구독자별 소유 복사(OOM=이 구독자만 skip)
-            ch.push(cross_gpa, .{ .bytes = bytes, .coalesce_key = coalesce_key, .tag = surface_id }) catch {
+            ch.push(cross_gpa, .{ .bytes = bytes, .coalesce_key = coalesce_key, .purge_key = .{ .surface_event = surface_id } }) catch {
                 cross_gpa.free(bytes); // Full(느린 구독자)·QueueClosed(닫히는 연결) → 소유권 반환·해제 후 skip
                 continue;
             };
@@ -370,7 +395,7 @@ pub const SubscriberRegistry = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         var it = self.outbound_of.iterator();
-        while (it.next()) |e| _ = e.value_ptr.*.purge(cross_gpa, surface_id); // 그 surface 잔여 이벤트 프레임 폐기
+        while (it.next()) |e| _ = e.value_ptr.*.purge(cross_gpa, .{ .surface_event = surface_id }); // 그 surface 잔여 이벤트 프레임 폐기
         return self.broker.removeSurface(surface_id);
     }
 
@@ -395,7 +420,7 @@ pub const SubscriberRegistry = struct {
             for (buf[0..n]) |id| {
                 const ch = self.outbound_of.get(id) orelse continue;
                 const bytes = cross_gpa.dupe(u8, template) catch continue; // 이 구독자만 skip(OOM)
-                ch.push(cross_gpa, .{ .bytes = bytes, .coalesce_key = null, .tag = surface_id }) catch {
+                ch.push(cross_gpa, .{ .bytes = bytes, .coalesce_key = null, .purge_key = .{ .surface_event = surface_id } }) catch {
                     cross_gpa.free(bytes);
                     ch.close(); // Full/QueueClosed → 종료 마커 못 줌 → outbound close(subscriber-lagged teardown, client EOF)
                     continue;
@@ -714,6 +739,7 @@ pub const ControlServer = struct {
     fn writerThread(self: *ControlServer, fd: c.fd_t, outbound: *OutboundChannel) void {
         while (outbound.popWait()) |frame| {
             defer self.cross_gpa.free(frame.bytes);
+            defer outbound.writeComplete(frame.bytes);
             cs.writeAll(fd, frame.bytes) catch return outbound.close();
             cs.writeAll(fd, "\n") catch return outbound.close();
         }
@@ -780,7 +806,7 @@ pub const ControlServer = struct {
                     const resp = pending.response orelse return;
                     // 응답 바이트 소유권을 outbound 프레임으로 이전(writer가 write 후 free). `\n` 프레이밍은 writer가 붙인다.
                     // tag 0 = 응답(§8.5 purge 보호 — revoke는 이벤트만 지운다). 응답은 coalesce/유실 불가 → coalesce_key=null.
-                    outbound.push(self.cross_gpa, .{ .bytes = resp, .coalesce_key = null, .tag = 0 }) catch {
+                    outbound.push(self.cross_gpa, .{ .bytes = resp, .coalesce_key = null, .purge_key = .none }) catch {
                         self.cross_gpa.free(resp); // push 실패(Full=writer 정체/broken, QueueClosed=종료) → 소유권 반환·해제 후 abandon
                         return;
                     };
@@ -800,7 +826,7 @@ pub const ControlServer = struct {
                 // 위반)하므로 **outbound에 push**(writer가 write). best-effort — 직렬화/push 실패는 무시(abandon 우선). 바이트는
                 // `serializeErrorDefault`(id 파싱 전 거부 응답 단일 출처, 19차 [5])로 — writeErrorResponse와 형태가 안 갈린다.
                 const err_bytes = cp.serializeErrorDefault(self.cross_gpa, .payload_too_large) catch return null;
-                outbound.push(self.cross_gpa, .{ .bytes = err_bytes, .coalesce_key = null, .tag = 0 }) catch self.cross_gpa.free(err_bytes);
+                outbound.push(self.cross_gpa, .{ .bytes = err_bytes, .coalesce_key = null, .purge_key = .none }) catch self.cross_gpa.free(err_bytes);
                 return null;
             };
             if (maybe) |line| return line;
@@ -850,7 +876,7 @@ test "queue: close는 대기 pending을 cancel하고 이후 push를 거부한다
 }
 
 fn obFrame(gpa: std.mem.Allocator, s: []const u8, key: ?u64, tag: u64) !co.Frame {
-    return .{ .bytes = try gpa.dupe(u8, s), .coalesce_key = key, .tag = tag };
+    return .{ .bytes = try gpa.dupe(u8, s), .coalesce_key = key, .purge_key = if (tag == 0) .none else .{ .surface_event = tag } };
 }
 
 test "OutboundChannel: push/popWait FIFO + coalesce + push-after-close QueueClosed" {
@@ -861,9 +887,11 @@ test "OutboundChannel: push/popWait FIFO + coalesce + push-after-close QueueClos
     try ch.push(testing.allocator, try obFrame(testing.allocator, "url=b", 100, 5)); // coalesce → 위치0 replace
     const f1 = ch.popWait().?;
     defer testing.allocator.free(f1.bytes);
+    ch.writeComplete(f1.bytes);
     try testing.expectEqualStrings("r1", f1.bytes); // FIFO
     const f2 = ch.popWait().?;
     defer testing.allocator.free(f2.bytes);
+    ch.writeComplete(f2.bytes);
     try testing.expectEqualStrings("url=b", f2.bytes); // coalesce된 최신
     // close 후 push는 QueueClosed(frame 소유권 호출자 유지).
     ch.close();
@@ -883,6 +911,7 @@ test "OutboundChannel: writer가 popWait서 블록→메인 push로 소비·clos
         fn run(self: *@This()) void {
             defer self.done.store(true, .release);
             while (self.ch.popWait()) |f| { // 프레임 있으면 소비, closed+빈이면 null로 종료
+                self.ch.writeComplete(f.bytes);
                 std.heap.c_allocator.free(f.bytes);
                 self.got += 1;
             }
@@ -897,6 +926,20 @@ test "OutboundChannel: writer가 popWait서 블록→메인 push로 소비·clos
     th.join();
     try testing.expect(w.done.load(.acquire));
     try testing.expectEqual(@as(usize, 3), w.got); // 3개 전부 소비
+}
+
+test "OutboundChannel: queued→writer-owned 이동은 writeComplete 전까지 byte cap을 유지" {
+    var ch = OutboundChannel.initWithByteLimit(std.testing.io, 8, 6);
+    defer ch.deinit(testing.allocator);
+    try ch.push(testing.allocator, try obFrame(testing.allocator, "12345", null, 0)); // newline 포함 6
+    const frame = ch.popWait().?;
+    defer testing.allocator.free(frame.bytes);
+    try testing.expectEqual(@as(usize, 6), ch.totalWireBytes());
+    const blocked = try obFrame(testing.allocator, "x", null, 0);
+    try testing.expectError(error.Full, ch.push(testing.allocator, blocked));
+    testing.allocator.free(blocked.bytes);
+    ch.writeComplete(frame.bytes);
+    try testing.expectEqual(@as(usize, 0), ch.totalWireBytes());
 }
 
 // ── SubscriberRegistry 단위(5f-0b-3a — 메인 전용·헤드리스, 스레드 없이 순수 로직) ──
@@ -921,6 +964,7 @@ test "SubscriberRegistry: 매칭 fan-out + 필터 + 비매칭 surface 미전달 
     try testing.expectEqual(@as(usize, 1), ch_a.q.len());
     const fa = ch_a.popWait().?;
     defer testing.allocator.free(fa.bytes);
+    ch_a.writeComplete(fa.bytes);
     try testing.expect(std.mem.indexOf(u8, fa.bytes, "browser.navigated") != null);
     try testing.expect(std.mem.indexOf(u8, fa.bytes, "https://a") != null);
     try testing.expect(std.mem.indexOf(u8, fa.bytes, "\"surface_id\":10") != null);
@@ -928,6 +972,7 @@ test "SubscriberRegistry: 매칭 fan-out + 필터 + 비매칭 surface 미전달 
     try testing.expectEqual(@as(usize, 1), ch_b.q.len());
     const fb = ch_b.popWait().?;
     defer testing.allocator.free(fb.bytes);
+    ch_b.writeComplete(fb.bytes);
     try testing.expect(std.mem.indexOf(u8, fb.bytes, "browser.loadState") != null);
     try testing.expect(std.mem.indexOf(u8, fb.bytes, "loading") != null);
 }
@@ -945,6 +990,7 @@ test "SubscriberRegistry: coalescible은 큐서 최신이 옛것 대체(coalesce
     try testing.expectEqual(@as(usize, 1), ch.q.len()); // coalesce
     const f = ch.popWait().?;
     defer testing.allocator.free(f.bytes);
+    ch.writeComplete(f.bytes);
     try testing.expect(std.mem.indexOf(u8, f.bytes, "https://new") != null); // 최신 유지
     try testing.expect(std.mem.indexOf(u8, f.bytes, "https://old") == null); // 옛것 대체됨
 
@@ -965,6 +1011,7 @@ test "SubscriberRegistry: 같은 outbound 재구독은 subscriber_id 재사용 +
     try testing.expectEqual(@as(usize, 1), reg.broker.len()); // 중복 엔트리 없음
     try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 10, .{ .load_state = .idle })); // 필터 all로 갱신 → 전달
     const f = ch.popWait().?;
+    ch.writeComplete(f.bytes);
     testing.allocator.free(f.bytes);
 
     // 같은 연결이 다른 surface도 구독 → 같은 id·매핑 1개(1 연결 다중 surface).
@@ -991,6 +1038,7 @@ test "SubscriberRegistry: purgeOutbound가 그 연결의 모든 구독·매핑 �
 
     try testing.expectEqual(@as(usize, 1), reg.pushEvent(testing.allocator, 10, .{ .navigated = "x" })); // surface10엔 B 남아 1
     const fb = ch_b.popWait().?;
+    ch_b.writeComplete(fb.bytes);
     testing.allocator.free(fb.bytes);
     try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 20, .{ .navigated = "y" })); // A 뺐으니 surface20 구독 0
     try testing.expectEqual(@as(usize, 0), ch_a.q.len()); // A outbound엔 아무것도 안 옴
@@ -1015,6 +1063,7 @@ test "SubscriberRegistry: purgeSurface가 그 surface 구독만 제거(연결 �
     // 남은 프레임(surface 20의 keep→y coalesce 최신 1개) drain.
     while (ch.q.len() > 0) {
         const f = ch.popWait().?;
+        ch.writeComplete(f.bytes);
         testing.allocator.free(f.bytes);
     }
 }
@@ -1036,6 +1085,7 @@ test "SubscriberRegistry(21차 [0]/[3]): pushSurfaceClosed는 필터 무관 전�
     try testing.expectEqual(@as(usize, 1), ch.q.len()); // closed 프레임 **유지**(배달용 — remove는 프레임 안 건드림)
     const f = ch.popWait().?;
     defer testing.allocator.free(f.bytes);
+    ch.writeComplete(f.bytes);
     try testing.expect(std.mem.indexOf(u8, f.bytes, "browser.closed") != null);
     try testing.expectEqual(@as(usize, 0), reg.pushEvent(testing.allocator, 10, .{ .navigated = "after" })); // 10 구독 제거됨 → 이후 이벤트 0
 }

@@ -1078,6 +1078,88 @@ enum BrowserControl {
         }
     }
 
+    // snapshot(§9.5.4): 페이지 ARIA 트리를 **read-only DOM walk**로 계산하는 eval 스크립트. 각 노드 {role,name,ref?,children?}.
+    // role=명시 role 속성 또는 태그별 implicit role(W3C accname 정신 — 완전 구현은 후속). name=aria-label>aria-labelledby>
+    // 연결 label>placeholder>alt>title>textContent. 상호작용 요소엔 임시 `data-maru-ref="eN"` 부여(ref act가 querySelector로
+    // 해소) — **maru가 이미 executeScript/act로 주입하는 것과 같은 표면, read-only+maru-namespaced라 능력 부여 없음**(§8.1 정합).
+    // interactive_only=상호작용 role만·max_depth=깊이 제한·selector=하위트리 루트. argJson은 Zig가 준 유효 JSON(그대로 IIFE 인자).
+    static func snapshotScript(_ argJson: String) -> String {
+        let body = """
+        (function(opts){
+          try {
+            var root = opts.selector ? document.querySelector(opts.selector) : document.body;
+            if (!root) return JSON.stringify({tree:[]});
+            var interactiveOnly = opts.interactive_only === true;
+            var maxDepth = (typeof opts.max_depth === 'number') ? opts.max_depth : -1;
+            var old = document.querySelectorAll('[data-maru-ref]');
+            for (var i=0;i<old.length;i++) old[i].removeAttribute('data-maru-ref');
+            var seq = 0;
+            var INTER = {button:1,link:1,textbox:1,checkbox:1,radio:1,combobox:1,listbox:1,menuitem:1,menuitemcheckbox:1,menuitemradio:1,option:1,searchbox:1,slider:1,switch:1,tab:1};
+            function implicitRole(el){
+              var tag = el.tagName.toLowerCase();
+              if (tag==='button') return 'button';
+              if (tag==='a') return el.hasAttribute('href') ? 'link' : null;
+              if (tag==='input'){ var t=(el.getAttribute('type')||'text').toLowerCase();
+                if (t==='checkbox') return 'checkbox'; if (t==='radio') return 'radio';
+                if (t==='button'||t==='submit'||t==='reset') return 'button';
+                if (t==='search') return 'searchbox'; if (t==='range') return 'slider';
+                if (t==='hidden') return null; return 'textbox'; }
+              if (tag==='textarea') return 'textbox';
+              if (tag==='select') return 'combobox';
+              if (tag==='img') return 'img';
+              if (tag==='nav') return 'navigation';
+              if (tag==='main') return 'main';
+              if (tag==='ul'||tag==='ol') return 'list';
+              if (tag==='li') return 'listitem';
+              if (tag==='table') return 'table';
+              if (tag==='form') return 'form';
+              if (/^h[1-6]$/.test(tag)) return 'heading';
+              return null;
+            }
+            function role(el){ return el.getAttribute('role') || implicitRole(el); }
+            function accName(el){
+              var n = el.getAttribute('aria-label'); if (n && n.trim()) return n.trim();
+              var lb = el.getAttribute('aria-labelledby');
+              if (lb){ var ps=[]; lb.split(/\\s+/).forEach(function(id){var e=document.getElementById(id); if(e) ps.push((e.textContent||'').trim());}); var joined=ps.join(' ').trim(); if (joined) return joined; }
+              var tag = el.tagName.toLowerCase();
+              if (tag==='input'||tag==='textarea'||tag==='select'){
+                if (el.labels && el.labels.length){ var l=(el.labels[0].textContent||'').trim(); if(l) return l; }
+                var ph = el.getAttribute('placeholder'); if (ph && ph.trim()) return ph.trim();
+              }
+              var alt = el.getAttribute('alt'); if (alt && alt.trim()) return alt.trim();
+              var title = el.getAttribute('title'); if (title && title.trim()) return title.trim();
+              var txt = (el.textContent||'').replace(/\\s+/g,' ').trim();
+              if (txt.length>160) txt = txt.slice(0,160);
+              return txt;
+            }
+            function visible(el){
+              var s = window.getComputedStyle(el);
+              if (!s || s.display==='none' || s.visibility==='hidden') return false;
+              if (el.getAttribute('aria-hidden')==='true') return false;
+              return true;
+            }
+            function walk(el, depth){
+              if (el.nodeType!==1 || !visible(el)) return [];
+              var r = role(el);
+              var kids = [];
+              if (maxDepth<0 || depth<maxDepth){
+                var ch = el.children;
+                for (var i=0;i<ch.length;i++){ var a = walk(ch[i], depth+1); for (var j=0;j<a.length;j++) kids.push(a[j]); }
+              }
+              var isInter = r && INTER[r];
+              if (!r || (interactiveOnly && !isInter)) return kids;
+              var node = { role: r, name: accName(el) };
+              if (isInter){ var ref='e'+(++seq); el.setAttribute('data-maru-ref', ref); node.ref = ref; }
+              if (kids.length) node.children = kids;
+              return [node];
+            }
+            return JSON.stringify({ tree: walk(root, 0) });
+          } catch (e) { return JSON.stringify({tree:[], error: String(e)}); }
+        })
+        """
+        return body + "(" + argJson + ")"
+    }
+
     // 문자열을 안전한 JS 문자열 리터럴로(JSON string은 valid JS 리터럴 — 따옴표·제어문자·유니코드 escape). 수동 조립 금지.
     static func jsStringLiteral(_ s: String) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: [s]),
@@ -3800,6 +3882,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case 15: // wait — selector visible 또는 현재 load idle까지 100ms 직렬 polling. status가 timeout/invalid/process-exited를 보존.
                 BrowserControl.wait(wp.webView, asyncId: asyncId, argJson: arg) { status, message in
                     self.completeBrowserOp(asyncId, status: status, result: message)
+                }
+            case 16: // snapshot(§9.5.4) — read-only accname DOM walk eval. result=ARIA 트리 JSON 문자열(Zig가 {snapshot} 구조화 embed).
+                registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .webContentRealm)
+                BrowserControl.executeScript(wp.webView, BrowserControl.snapshotScript(arg)) { [weak self] result in
+                    guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
+                    switch result {
+                    case .success(let value):
+                        self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
+                    case .failure(let error):
+                        self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
+                    }
                 }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)

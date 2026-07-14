@@ -36,6 +36,7 @@ pub const browser_help =
     \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
     \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
+    \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   페이지 ARIA 트리(role/name/ref) 출력
     \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
     \\
 ;
@@ -79,6 +80,8 @@ pub const Request = union(enum) {
     scroll: struct { surface_id: u64, selector: []const u8 },
     /// `browser wait`: visible selector 또는 현재 load idle까지 polling. timeout은 1..25_000ms. 응답 {ok}.
     wait: struct { surface_id: u64, condition: WaitCondition, selector: ?[]const u8, timeout_ms: u32 },
+    /// `browser snapshot`(§9.5.4): 페이지 ARIA 트리(role/name/ref). interactive_only/max_depth/selector 선택. 응답 {snapshot}.
+    snapshot: struct { surface_id: u64, interactive_only: bool, max_depth: ?u32, selector: ?[]const u8 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -90,6 +93,7 @@ pub const Request = union(enum) {
             .get_cookies => .get_cookies,
             .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll, .wait => .ok,
             .get_local_storage => .value,
+            .snapshot => .snapshot,
         };
     }
 };
@@ -154,7 +158,9 @@ pub const ParseError = error{
     InvalidTimeout, // timeout이 1..25_000 정수가 아님
     MissingText, // `type`에 `--text` 없음
     MissingValue, // `set-cookie`/`set-local-storage`에 `--value` 없음
-    MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`에 값 없음
+    MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`/`--selector`에 값 없음
+    MissingMaxDepthValue, // `snapshot --max-depth`에 값 없음
+    InvalidMaxDepth, // `--max-depth`가 비음수 정수(u32)가 아님
     UnknownOption, // 알 수 없는 옵션(`--bogus`)
     UnexpectedArgument, // 남는 위치 인자
 };
@@ -311,6 +317,48 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         }
         const s = surface orelse return error.MissingSurface;
         return .{ .screenshot = .{ .surface_id = s, .out = out, .rect = rect, .scale = scale } };
+    }
+    if (eq(sub, "snapshot")) {
+        // `--surface <id>` + 선택 `--interactive`(상호작용 role만 flag)·`--max-depth <n>`·`--selector <css>`(하위트리 scope).
+        var surface: ?u64 = null;
+        var interactive = false;
+        var max_depth: ?u32 = null;
+        var selector: ?[]const u8 = null;
+        var i: usize = 1;
+        while (i < args.len) {
+            const a = args[i];
+            if (eq(a, "--surface")) {
+                if (i + 1 >= args.len) return error.MissingSurfaceValue;
+                surface = parseU64(args[i + 1]) catch return error.InvalidSurface;
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--surface=")) {
+                surface = parseU64(a["--surface=".len..]) catch return error.InvalidSurface;
+                i += 1;
+            } else if (eq(a, "--interactive")) {
+                interactive = true;
+                i += 1;
+            } else if (eq(a, "--max-depth")) {
+                if (i + 1 >= args.len) return error.MissingMaxDepthValue;
+                max_depth = std.fmt.parseInt(u32, args[i + 1], 10) catch return error.InvalidMaxDepth;
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--max-depth=")) {
+                max_depth = std.fmt.parseInt(u32, a["--max-depth=".len..], 10) catch return error.InvalidMaxDepth;
+                i += 1;
+            } else if (eq(a, "--selector")) {
+                if (i + 1 >= args.len) return error.MissingOptionValue;
+                selector = args[i + 1];
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--selector=")) {
+                selector = a["--selector=".len..];
+                i += 1;
+            } else if (std.mem.startsWith(u8, a, "-")) {
+                return error.UnknownOption;
+            } else {
+                return error.UnexpectedArgument;
+            }
+        }
+        const s = surface orelse return error.MissingSurface;
+        return .{ .request = .{ .snapshot = .{ .surface_id = s, .interactive_only = interactive, .max_depth = max_depth, .selector = selector } } };
     }
     return error.UnknownSubcommand;
 }
@@ -609,6 +657,15 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             try obj.put(gpa, "timeout_ms", .{ .integer = w.timeout_ms });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.wait", .params = .{ .object = obj } } });
         },
+        .snapshot => |sn| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(sn.surface_id) });
+            if (sn.interactive_only) try obj.put(gpa, "interactive_only", .{ .bool = true });
+            if (sn.max_depth) |d| try obj.put(gpa, "max_depth", .{ .integer = d });
+            if (sn.selector) |selector| try obj.put(gpa, "selector", .{ .string = selector });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.snapshot", .params = .{ .object = obj } } });
+        },
     }
 }
 
@@ -665,7 +722,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot };
 
 /// 응답 바이트 한 줄을 기계·사람 읽기 편한 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`
 /// (sessions.renderResponse 규율 — 미grant 거부는 `error: Unauthorized (-32002)`). result는 kind별 한 줄.
@@ -745,6 +802,48 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             s.write(std.json.Value{ .array = cookies }) catch return error.WriteFailed;
             try w.writeAll("\n");
         },
+        .snapshot => {
+            // {snapshot:{tree:[{role,name,ref?,children?}]}} → compact 들여쓰기 텍스트(§9.5.4). 에이전트가 role/name/ref를 읽고 ref로 조작.
+            const snap = switch (result.get("snapshot") orelse std.json.Value{ .null = {} }) {
+                .object => |o| o,
+                else => {
+                    try w.writeAll("error: malformed snapshot\n");
+                    return;
+                },
+            };
+            const tree = switch (snap.get("tree") orelse std.json.Value{ .null = {} }) {
+                .array => |a| a,
+                else => {
+                    try w.writeAll("error: malformed snapshot tree\n");
+                    return;
+                },
+            };
+            if (tree.items.len == 0) {
+                try w.writeAll("(empty snapshot)\n");
+                return;
+            }
+            for (tree.items) |node| try renderSnapshotNode(node, 0, w);
+        },
+    }
+}
+
+/// snapshot 트리 노드 한 줄 + 자식 재귀(들여쓰기 2칸). `<role> "<name>" [ref=<ref>]`(name/ref 없으면 생략).
+fn renderSnapshotNode(node: std.json.Value, depth: usize, w: *std.Io.Writer) !void {
+    const o = switch (node) {
+        .object => |oo| oo,
+        else => return,
+    };
+    var i: usize = 0;
+    while (i < depth) : (i += 1) try w.writeAll("  ");
+    try w.print("{s}", .{strField(o.get("role"))});
+    const name = strField(o.get("name"));
+    if (name.len > 0) try w.print(" \"{s}\"", .{name});
+    const ref = strField(o.get("ref"));
+    if (ref.len > 0) try w.print(" [ref={s}]", .{ref});
+    try w.writeAll("\n");
+    switch (o.get("children") orelse std.json.Value{ .null = {} }) {
+        .array => |kids| for (kids.items) |kid| try renderSnapshotNode(kid, depth + 1, w),
+        else => {},
     }
 }
 
@@ -1517,6 +1616,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
         \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
+        \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   페이지 ARIA 트리(role/name/ref) 출력
         \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
         \\
     ,
@@ -1587,6 +1687,57 @@ test "buildRequestBytes: browser.wait selector/load params" {
         const p = pm.message.request.params.?.object;
         try testing.expectEqualStrings("load", p.get("condition").?.string);
         try testing.expect(p.get("selector") == null);
+    }
+}
+
+test "parse/build/render: snapshot(§9.5.4) — 기본·옵션·에러·트리 렌더" {
+    // 기본(surface만).
+    switch (try parse(&.{ "snapshot", "--surface", "11" })) {
+        .request => |r| switch (r) {
+            .snapshot => |sn| {
+                try testing.expectEqual(@as(u64, 11), sn.surface_id);
+                try testing.expect(!sn.interactive_only and sn.max_depth == null and sn.selector == null);
+            },
+            else => return error.Unexpected,
+        },
+        else => return error.Unexpected,
+    }
+    // 전체 옵션.
+    switch (try parse(&.{ "snapshot", "--surface=3", "--interactive", "--max-depth", "5", "--selector", "#app" })) {
+        .request => |r| switch (r) {
+            .snapshot => |sn| {
+                try testing.expect(sn.interactive_only);
+                try testing.expectEqual(@as(u32, 5), sn.max_depth.?);
+                try testing.expectEqualStrings("#app", sn.selector.?);
+            },
+            else => return error.Unexpected,
+        },
+        else => return error.Unexpected,
+    }
+    try testing.expectError(error.MissingSurface, parse(&.{"snapshot"}));
+    try testing.expectError(error.InvalidMaxDepth, parse(&.{ "snapshot", "--surface", "1", "--max-depth", "x" }));
+    try testing.expectError(error.MissingMaxDepthValue, parse(&.{ "snapshot", "--surface", "1", "--max-depth" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "snapshot", "--surface", "1", "--bogus" }));
+
+    // build: interactive_only=false면 생략, max_depth/selector 실림.
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .snapshot = .{ .surface_id = 3, .interactive_only = false, .max_depth = 2, .selector = "#x" } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        const o = pm.message.request.params.?.object;
+        try testing.expectEqualStrings("browser.snapshot", pm.message.request.method);
+        try testing.expect(o.get("interactive_only") == null); // false=생략
+        try testing.expectEqual(@as(i64, 2), o.get("max_depth").?.integer);
+        try testing.expectEqualStrings("#x", o.get("selector").?.string);
+    }
+
+    // render: {snapshot:{tree:[...]}} → 들여쓰기 텍스트(role "name" [ref=eN] + 자식 2칸).
+    {
+        var buf: [256]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[{\"role\":\"navigation\",\"name\":\"\",\"children\":[{\"role\":\"link\",\"name\":\"Home\",\"ref\":\"e1\"}]}]}}}", .snapshot, &w);
+        try testing.expectEqualStrings("navigation\n  link \"Home\" [ref=e1]\n", w.buffered());
     }
 }
 

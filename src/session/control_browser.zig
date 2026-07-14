@@ -100,6 +100,11 @@ pub const BrowserMethod = enum {
     /// `browser.wait {id, condition, selector?, timeout_ms?}`(5f-2) → `{ok}`. selector=visible DOM 조건, load=현재
     /// `WKWebView.isLoading == false`. base `browser`. **op_kind=15 고정**.
     wait,
+    /// `browser.snapshot {id, interactive_only?, max_depth?, selector?}`(§9.5.4) → `{snapshot:{tree:[...]}}`. eval read-only
+    /// DOM walk + W3C accname로 ARIA 트리(role/name/ref) 계산, 상호작용 요소에 임시 `data-maru-ref` 부여(ref act가 해소).
+    /// base `browser` scope(executeScript/act와 같은 eval 도달). op.arg=`{interactive_only?,max_depth?,selector?}` JSON.
+    /// **op_kind=16 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 끝에 추가).
+    snapshot,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -122,6 +127,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "type")) return .type_text;
     if (eq(rest, "scroll")) return .scroll;
     if (eq(rest, "wait")) return .wait;
+    if (eq(rest, "snapshot")) return .snapshot;
     return null;
 }
 
@@ -327,6 +333,10 @@ pub const WaitParams = struct {
 pub const ScreenshotRect = struct { x: f64, y: f64, width: f64, height: f64 };
 pub const ScreenshotOptParams = struct { rect: ?ScreenshotRect = null, scale: ?f64 = null };
 
+/// `browser.snapshot` 선택 params(§9.5.4). interactive_only=상호작용 role만·max_depth=트리 깊이 제한·selector=하위트리 scope.
+/// 전부 부재 가능(=전체 트리·전 요소·루트=body). id는 dispatch가 먼저 읽음. 형식 오류는 invalid_params(surface oracle 아님).
+pub const SnapshotParams = struct { interactive_only: bool = false, max_depth: ?u32 = null, selector: ?[]const u8 = null };
+
 fn paramsObject(params: ?std.json.Value) ParamError!std.json.ObjectMap {
     return switch (params orelse return error.InvalidParams) {
         .object => |o| o,
@@ -506,6 +516,25 @@ pub fn parseScreenshotOptParams(params: ?std.json.Value) ParamError!ScreenshotOp
     return out;
 }
 
+/// 선택 비음수 u32 필드(snapshot max_depth). 부재/null→null, 음수/범위밖/비정수→InvalidParams.
+fn optU32FromObj(obj: std.json.ObjectMap, name: []const u8) ParamError!?u32 {
+    return switch (obj.get(name) orelse return null) {
+        .integer => |i| if (i < 0 or i > std.math.maxInt(u32)) error.InvalidParams else @intCast(i),
+        .null => null,
+        else => error.InvalidParams,
+    };
+}
+
+/// `browser.snapshot` params 파싱(§9.5.4). 전부 선택 — 부재면 기본(전 요소·무제한 깊이·루트=body).
+pub fn parseSnapshotParams(params: ?std.json.Value) ParamError!SnapshotParams {
+    const obj = try paramsObject(params);
+    return .{
+        .interactive_only = try optBoolFromObj(obj, "interactive_only", false),
+        .max_depth = try optU32FromObj(obj, "max_depth"),
+        .selector = try optStrFromObj(obj, "selector"),
+    };
+}
+
 /// act op.arg — Swift가 eval로 쓸 `{selector}` 또는 `{selector, text}` compact JSON(click/scroll=selector, type=+text).
 pub fn serializeSelectorArg(gpa: std.mem.Allocator, selector: []const u8, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
@@ -572,6 +601,31 @@ fn writeScreenshotArg(s: *std.json.Stringify, p: ScreenshotOptParams) !void {
     if (p.scale) |sc| {
         try s.objectField("scale");
         try s.write(sc);
+    }
+    try s.endObject();
+}
+
+/// snapshot op.arg — Swift가 accname DOM walk JS에 넘길 `{interactive_only, max_depth?, selector?}` compact JSON(§9.5.4).
+/// selector/max_depth 부재면 생략(Swift 기본=body 루트·무제한 깊이). caller free.
+pub fn serializeSnapshotArg(gpa: std.mem.Allocator, p: SnapshotParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeSnapshotArg(&s, p) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeSnapshotArg(s: *std.json.Stringify, p: SnapshotParams) !void {
+    try s.beginObject();
+    try s.objectField("interactive_only");
+    try s.write(p.interactive_only);
+    if (p.max_depth) |d| {
+        try s.objectField("max_depth");
+        try s.write(d);
+    }
+    if (p.selector) |sel| {
+        try s.objectField("selector");
+        try s.write(sel);
     }
     try s.endObject();
 }
@@ -888,6 +942,29 @@ fn writeGetCookiesResult(s: *std.json.Stringify, id: cp.Id, cookies: std.json.Va
     try beginResult(s, id);
     try s.objectField("cookies");
     try s.write(cookies);
+    try endResult(s);
+}
+
+/// Swift `BrowserControl.snapshot`가 직렬화한 **JSON**(`{tree:[...]}` 또는 selector 미발견/루트 없음 시 `null`)을 파싱해
+/// `{result:{snapshot:<value>}}`로 구조화 embed(§9.5.4 — getCookies와 동형, 에이전트 이중 파싱 불요). 파싱 실패(malformed)=
+/// `InvalidSnapshotJson`(L4가 internal_error로 접음 — Swift 직렬화 버그 방어). caller free.
+pub fn serializeSnapshotResult(gpa: std.mem.Allocator, id: cp.Id, snapshot_json: []const u8) (std.mem.Allocator.Error || error{InvalidSnapshotJson})![]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, snapshot_json, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidSnapshotJson,
+    };
+    defer parsed.deinit();
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (writeSnapshotResult(&s, id, parsed.value)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeSnapshotResult(s: *std.json.Stringify, id: cp.Id, snap: std.json.Value) !void {
+    try beginResult(s, id);
+    try s.objectField("snapshot");
+    try s.write(snap);
     try endResult(s);
 }
 
@@ -1249,6 +1326,11 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         // act(5f-2): click/type/scroll → {ok:<bool>} — Swift eval이 "true"(요소 발견+동작)/"false"(셀렉터 미매치)를 result로.
         .click, .type_text, .scroll => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         .wait => serializeNavigateResult(gpa, req.id),
+        // snapshot(§9.5.4) → {snapshot:<tree JSON>}. Swift가 준 JSON을 구조화 embed(malformed=internal_error 방어).
+        .snapshot => serializeSnapshotResult(gpa, req.id, result) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidSnapshotJson => return cp.serializeError(gpa, req.id, .internal_error, "invalid snapshot payload", null),
+        },
     };
 }
 
@@ -1499,6 +1581,8 @@ pub fn browserOpFromRequest(
             break :blk try serializeSelectorArg(gpa, p.selector, p.text);
         },
         .wait => try serializeWaitArg(gpa, parseWaitParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        // snapshot(§9.5.4): interactive_only/max_depth/selector를 arg에 실어 Swift accname JS가 소비. base browser scope.
+        .snapshot => try serializeSnapshotArg(gpa, parseSnapshotParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
@@ -2991,6 +3075,72 @@ test "executeScript lifecycle errors: resource-busy와 timeout은 stable wire co
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.timeout)), pm.message.response.err.?.code);
+    }
+}
+
+test "params/arg(§9.5.4): snapshot 기본·선택 필드 파싱·직렬화" {
+    // 기본(id만) → interactive_only=false, max_depth/selector 부재. arg={"interactive_only":false}.
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.snapshot\",\"params\":{\"id\":11}}");
+        defer pm.deinit();
+        const p = try parseSnapshotParams(pm.message.request.params);
+        try testing.expect(!p.interactive_only and p.max_depth == null and p.selector == null);
+        const a = try serializeSnapshotArg(testing.allocator, p);
+        defer testing.allocator.free(a);
+        try testing.expectEqualStrings("{\"interactive_only\":false}", a);
+    }
+    // 전체 지정 → arg에 세 필드.
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.snapshot\",\"params\":{\"id\":11,\"interactive_only\":true,\"max_depth\":3,\"selector\":\"#main\"}}");
+        defer pm.deinit();
+        const p = try parseSnapshotParams(pm.message.request.params);
+        try testing.expect(p.interactive_only);
+        try testing.expectEqual(@as(u32, 3), p.max_depth.?);
+        try testing.expectEqualStrings("#main", p.selector.?);
+        const a = try serializeSnapshotArg(testing.allocator, p);
+        defer testing.allocator.free(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
+        defer parsed.deinit();
+        try testing.expect(parsed.value.object.get("interactive_only").?.bool);
+        try testing.expectEqual(@as(i64, 3), parsed.value.object.get("max_depth").?.integer);
+        try testing.expectEqualStrings("#main", parsed.value.object.get("selector").?.string);
+    }
+    // 음수 max_depth → invalid_params.
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"max_depth\":-1}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseSnapshotParams(parsed.value));
+    }
+}
+
+test "dispatchBrowser(snapshot): base browser cap → op{snapshot, arg}" {
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.snapshot\",\"params\":{\"id\":11,\"interactive_only\":true}}", browserCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(BrowserMethod.snapshot, op.method);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("interactive_only").?.bool);
+}
+
+test "serializeBrowserResponse(snapshot): 트리 JSON을 {snapshot} 구조화 embed·malformed→internal_error" {
+    // Swift가 준 {tree:[...]} → {result:{snapshot:{tree:[...]}}}.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.snapshot\",\"params\":{\"id\":11}}", true, "{\"tree\":[{\"role\":\"button\",\"name\":\"OK\",\"ref\":\"e1\"}]}");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        const snap = pm.message.response.result.?.object.get("snapshot").?.object;
+        const tree = snap.get("tree").?.array;
+        try testing.expectEqualStrings("button", tree.items[0].object.get("role").?.string);
+        try testing.expectEqualStrings("e1", tree.items[0].object.get("ref").?.string);
+    }
+    // malformed(비-JSON) → internal_error(Swift 버그 방어).
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.snapshot\",\"params\":{\"id\":11}}", true, "not json");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
 }
 

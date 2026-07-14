@@ -153,7 +153,11 @@ pub const GetUrlParams = struct {
 pub const ExecuteScriptParams = struct {
     id: u64,
     script: []const u8,
+    max_result_bytes: usize,
 };
+
+pub const execute_script_default_max_result_bytes: usize = 16 * 1024 * 1024;
+pub const execute_script_protocol_max_result_bytes: usize = 256 * 1024 * 1024;
 
 /// `browser.setCookie` params(§9.4 D4). name/value 필수, 나머지 선택(domain 생략=대상 문서 host·path 생략=`/`·secure
 /// 생략=false는 Swift가 적용). **httpOnly는 미지원**: `HTTPCookie(properties:)`가 HttpOnly를 설정 못 함(Set-Cookie 헤더
@@ -275,7 +279,13 @@ pub fn parseGetUrlParams(params: ?std.json.Value) ParamError!GetUrlParams {
 
 pub fn parseExecuteScriptParams(params: ?std.json.Value) ParamError!ExecuteScriptParams {
     const obj = try paramsObject(params);
-    return .{ .id = try idFromObj(obj), .script = try strFromObj(obj, "script") };
+    const max = if (obj.get("max_result_bytes")) |v| switch (v) {
+        // 5f-5a effective capability is the conservative 16 MiB tier. The 256 MiB
+        // protocol ceiling is reserved for the later bounded/chunked gate.
+        .integer => |n| if (n > 0 and n <= execute_script_default_max_result_bytes) @as(usize, @intCast(n)) else return error.InvalidParams,
+        else => return error.InvalidParams,
+    } else execute_script_default_max_result_bytes;
+    return .{ .id = try idFromObj(obj), .script = try strFromObj(obj, "script"), .max_result_bytes = max };
 }
 
 pub fn parseSetCookieParams(params: ?std.json.Value) ParamError!SetCookieParams {
@@ -616,6 +626,21 @@ pub fn serializeExecuteScriptResult(gpa: std.mem.Allocator, id: cp.Id, value: st
     return aw.toOwnedSlice();
 }
 
+const ExecuteScriptResultError = error{InvalidJson, ResultTooLarge};
+
+fn serializeExecuteScriptResponse(gpa: std.mem.Allocator, id: cp.Id, raw: []const u8) std.mem.Allocator.Error![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, raw, .{}) catch {
+        return cp.serializeError(gpa, id, .internal_error, "invalid executeScript result", null);
+    };
+    defer parsed.deinit();
+    const wire = try serializeExecuteScriptResult(gpa, id, parsed.value);
+    if (wire.len > cp.default_max_frame) {
+        gpa.free(wire);
+        return cp.serializeError(gpa, id, .payload_too_large, "executeScript result exceeds inline frame", null);
+    }
+    return wire;
+}
+
 fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.Value) !void {
     try beginResult(s, id);
     try s.objectField("result");
@@ -919,7 +944,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
     return switch (bmethod) {
         .navigate => serializeNavigateResult(gpa, req.id),
         .get_url => serializeGetUrlResult(gpa, req.id, result),
-        .execute_script => serializeExecuteScriptResult(gpa, req.id, .{ .string = result }),
+        .execute_script => serializeExecuteScriptResponse(gpa, req.id, result),
         .get_cookies => serializeGetCookiesResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             // Swift가 준 cookies_json이 malformed(배열 아님·손상) = 직렬화 버그 → 균일 internal_error(oracle 아님).
@@ -1687,12 +1712,15 @@ test "params 파서: navigate {id,url}·getUrl {id}·executeScript {id,script} �
         const p = try parseExecuteScriptParams(pm.message.request.params);
         try testing.expectEqual(@as(u64, 3), p.id);
         try testing.expectEqualStrings("1+1", p.script);
+        try testing.expectEqual(execute_script_default_max_result_bytes, p.max_result_bytes);
     }
     // 오류: url 없음, id 비정수, script 비문자열, params 부재/비객체.
     try testing.expectError(error.InvalidParams, parseNavigateParamsFromWire("{\"id\":11}")); // url 없음
     try testing.expectError(error.InvalidParams, parseNavigateParamsFromWire("{\"id\":\"x\",\"url\":\"u\"}")); // id 비정수
     try testing.expectError(error.InvalidParams, parseNavigateParamsFromWire("{\"id\":-1,\"url\":\"u\"}")); // id 음수
     try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":5}")); // script 비문자열
+    try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"max_result_bytes\":0}"));
+    try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"max_result_bytes\":268435457}"));
     try testing.expectError(error.InvalidParams, parseGetUrlParamsFromWire("{}")); // id 없음
 }
 
@@ -1824,13 +1852,27 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer pm.deinit();
         try testing.expectEqualStrings("https://x/y", pm.message.response.result.?.object.get("url").?.string);
     }
-    // executeScript ok → {result:{result:"<result 문자열>"}}.
+    // executeScript ok → 구조화 JSON 결과를 그대로 embed한다.
     {
-        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"document.title\"}}", true, "My Page");
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"document.title\"}}", true, "\"My Page\"");
         defer testing.allocator.free(w);
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
         try testing.expectEqualStrings("My Page", pm.message.response.result.?.object.get("result").?.string);
+    }
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"({a:1})\"}}", true, "{\"a\":1}");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqual(@as(i64, 1), pm.message.response.result.?.object.get("result").?.object.get("a").?.integer);
+    }
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"bad\"}}", true, "not-json");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
     // ok=false → internal_error + result를 message로.
     {

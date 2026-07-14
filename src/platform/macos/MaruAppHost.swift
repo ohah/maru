@@ -798,8 +798,11 @@ enum BrowserControl {
     // §9.3 ⑥ "스크립트 반환값을 문자열로"). 컨트롤 플레인 계약은 Zig, 여긴 WKWebView 값→문자열 매핑 어댑터만.
     // 매핑: 문자열=그대로, 불리언="true"/"false", 숫자=NSNumber description, null/undefined(NSNull)=빈 문자열, 그 외(배열·객체)=description.
     @MainActor static func scriptResultString(_ value: Any) -> String {
-        if value is NSNull { return "" }
-        if let s = value as? String { return s }
+        let normalized: Any = value is NSNull ? NSNull() : value
+        if let data = try? JSONSerialization.data(withJSONObject: normalized, options: [.fragmentsAllowed, .sortedKeys]) {
+            return String(decoding: data, as: UTF8.self)
+        }
+        if let s = value as? String { return (try? JSONSerialization.data(withJSONObject: s, options: [.fragmentsAllowed])).map { String(decoding: $0, as: UTF8.self) } ?? "null" }
         if let n = value as? NSNumber {
             // JS boolean(__NSCFBoolean)은 NSNumber 하위형이라 `as? NSNumber`가 먼저 잡는다 → boolean을 여기서 먼저
             // 가려내지 않으면 true/false가 "1"/"0"으로 나와 숫자 1/0과 구분 불가(에이전트가 페이지 boolean 상태 오독,

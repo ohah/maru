@@ -626,7 +626,7 @@ pub fn serializeExecuteScriptResult(gpa: std.mem.Allocator, id: cp.Id, value: st
     return aw.toOwnedSlice();
 }
 
-const ExecuteScriptResultError = error{InvalidJson, ResultTooLarge};
+const ExecuteScriptResultError = error{ InvalidJson, ResultTooLarge };
 
 fn serializeExecuteScriptResponse(gpa: std.mem.Allocator, id: cp.Id, raw: []const u8) std.mem.Allocator.Error![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, raw, .{}) catch {

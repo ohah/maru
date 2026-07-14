@@ -2451,7 +2451,7 @@ fn completeScreenshotOp(
             _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "screenshot serialize failed") catch null);
             return;
         };
-        outbound.push(server.cross_gpa, .{ .bytes = frame, .coalesce_key = null, .tag = tag }) catch {
+        outbound.push(server.cross_gpa, .{ .bytes = frame, .coalesce_key = null, .purge_key = if (tag == 0) .none else .{ .surface_event = tag } }) catch {
             server.cross_gpa.free(frame); // push 실패(Full=writer 정체, QueueClosed=종료) → 소유권 반환·해제
             _ = server.completeInFlight(async_id, control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "screenshot delivery congested") catch null);
             return;

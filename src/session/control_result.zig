@@ -46,6 +46,13 @@ pub const Reservation = struct {
         try self.budget.release(self.amount);
         self.released = true;
     }
+
+    pub fn shrinkTo(self: *Reservation, actual: usize) BudgetError!void {
+        if (!self.active or self.released or actual > self.amount) return error.Underflow;
+        const delta = self.amount - actual;
+        try self.budget.release(delta);
+        self.amount = actual;
+    }
 };
 
 pub const OutboundAccounting = struct {
@@ -131,4 +138,16 @@ test "OutboundAccounting: queued와 writer-owned를 완료 전까지 합산" {
     try std.testing.expectEqual(@as(usize, 7), accounting.total());
     try accounting.writeComplete(7);
     try std.testing.expectEqual(@as(usize, 0), accounting.total());
+}
+
+test "Reservation: actual bytes 축소 후 transfer·release는 정확히 한 번" {
+    var budget = ByteBudget.init(16);
+    try budget.reserve(16);
+    var execution = Reservation{ .budget = &budget, .amount = 16 };
+    try execution.shrinkTo(3);
+    try std.testing.expectEqual(@as(usize, 3), budget.used);
+    var transfer_reservation = Reservation{ .budget = &budget, .amount = 0, .active = false };
+    try budget.transfer(&execution, &transfer_reservation);
+    try transfer_reservation.release();
+    try std.testing.expectEqual(@as(usize, 0), budget.used);
 }

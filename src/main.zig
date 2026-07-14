@@ -561,6 +561,8 @@ fn writeBrowserCliUsage(stderr: *std.Io.Writer, err: maru.cli.browser.ParseError
         error.MissingSurfaceValue => "--surface 에는 값이 필요합니다",
         error.MissingUrl => "navigate 에는 url이 필요합니다",
         error.MissingScript => "exec 에는 script가 필요합니다",
+        error.MissingArgsValue => "exec --args 에는 JSON 배열 값이 필요합니다",
+        error.InvalidArgs => "exec --args 는 유효한 JSON 배열이어야 합니다",
         error.MissingMaxResultBytesValue => "exec --max-result-bytes 에는 값이 필요합니다",
         error.InvalidMaxResultBytes => "exec --max-result-bytes 는 1..16777216 범위의 정수여야 합니다",
         error.MissingOutValue => "screenshot --out 에는 값이 필요합니다",
@@ -636,7 +638,10 @@ fn runBrowserExecuteScript(
     stderr: *std.Io.Writer,
 ) !void {
     const request_id: maru.session.control_plane.Id = .{ .number = 1 };
-    const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, .{ .exec = exec_cmd }, request_id);
+    const request_bytes = maru.cli.browser.buildRequestBytes(allocator, .{ .exec = exec_cmd }, request_id) catch |err| switch (err) {
+        error.InvalidArgs => return browserExecuteError(stderr, "--args 는 유효한 JSON 배열이어야 합니다"),
+        else => return err,
+    };
     defer allocator.free(request_bytes);
     const fd = try connectSendControl(io, allocator, request_bytes, stderr);
     defer _ = std.c.close(fd);

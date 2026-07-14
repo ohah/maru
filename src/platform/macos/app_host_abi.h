@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 118u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 119u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -1183,6 +1183,10 @@ void maru_macos_control_complete_browser_script_error(uint64_t async_id, const u
 /* browser.wait polling이 다음 DOM 평가 전에 요청 생존 여부를 확인한다. revoke/close/reap/완료 후 0.
    서버 미시작이면 0. 메인 스레드에서만. */
 uint32_t maru_macos_control_browser_wait_is_active(uint64_t async_id);
+
+/* off-main executeScript syntax validation 뒤 page 실행 직전에 running+pending+인가를 재확인한다.
+   revoke/expiry/timeout/server stop 뒤 0. 메인 스레드에서만. */
+uint32_t maru_macos_control_browser_execution_may_start(uint64_t async_id);
 
 /* 5e-2b-2(테스트 전용): env MARU_TEST_BROWSER_CAP이 설정됐을 때만 surface_id에 묶인 browser cap을 라이브 store에
    발급하고 nonce(raw 32B)를 out_nonce로 넘긴다. 반환 1=발급·0=env 미설정/용량 부족/실패. macos smoke가 소켓

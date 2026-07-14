@@ -57,7 +57,7 @@ pub const BrowserMethod = enum {
     navigate,
     /// `browser.getUrl {id}` → 5d `.url`.
     get_url,
-    /// `browser.executeScript {id, script}` (args는 5d) → 5d `evaluateJavaScript`.
+    /// `browser.executeScript {id, script, args?, max_result_bytes?}` → 5f-5c `callAsyncJavaScript` expression/await.
     execute_script,
     /// `browser.subscribe {id, events?}`(5f-0b-3b) → **동기 registry 구독**(async op 아님). L4가 SubscriberRegistry에
     /// 등록하고 `{subscriber_id}` 응답. events 없으면 전체, 있으면 그 종류만(§9.5.2).
@@ -150,22 +150,28 @@ pub const GetUrlParams = struct {
     id: u64,
 };
 
-/// `browser.executeScript` params(§9 표 `{id, script, args?}`). **5a는 script만**(args는 5d — §9.1 ①).
+/// `browser.executeScript` params. `script`는 callAsyncJavaScript가 CSP-safe하게 실행할 JavaScript 표현식이고,
+/// `args`는 그 표현식에 동일 이름으로 주입하는 strict-JSON 배열이다.
 pub const ExecuteScriptParams = struct {
     id: u64,
     script: []const u8,
+    args: []const std.json.Value,
     max_result_bytes: usize,
 };
 
-/// Zig→Swift backend 전용 arg. 사용자 script와 page-process serializer byte cap을 한 JSON object로 묶어 ABI 필드
-/// 추가 없이 전달한다. Swift는 이 object를 파싱한 뒤에만 WKWebView를 호출한다.
-pub fn serializeExecuteScriptBackendArg(gpa: std.mem.Allocator, script: []const u8, max_result_bytes: usize) std.mem.Allocator.Error![]u8 {
+/// Zig→Swift backend 전용 arg. 표현식·JSON args·page-process serializer byte cap을 한 object로 묶어 ABI 필드
+/// 추가 없이 전달한다. args는 파싱 arena를 빌리므로 이 함수 안에서 즉시 owned JSON으로 복사한다.
+pub fn serializeExecuteScriptBackendArg(gpa: std.mem.Allocator, script: []const u8, args: []const std.json.Value, max_result_bytes: usize) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     s.beginObject() catch return error.OutOfMemory;
     s.objectField("script") catch return error.OutOfMemory;
     s.write(script) catch return error.OutOfMemory;
+    s.objectField("args") catch return error.OutOfMemory;
+    s.beginArray() catch return error.OutOfMemory;
+    for (args) |arg| s.write(arg) catch return error.OutOfMemory;
+    s.endArray() catch return error.OutOfMemory;
     s.objectField("max_result_bytes") catch return error.OutOfMemory;
     s.write(max_result_bytes) catch return error.OutOfMemory;
     s.endObject() catch return error.OutOfMemory;
@@ -179,6 +185,86 @@ pub const execute_script_protocol_max_result_bytes: usize = 256 * 1024 * 1024;
 pub const execute_script_error_payload_max_bytes: usize = 24 * 1024;
 pub const execute_script_error_frame_max_bytes: usize = 32 * 1024;
 pub const execute_script_request_id_max_bytes: usize = 1024;
+pub const execute_script_args_max_depth: usize = 128;
+const javascript_max_safe_integer: i64 = 9_007_199_254_740_991;
+const javascript_max_safe_number: f64 = 9_007_199_254_740_991.0;
+
+/// callAsyncJavaScript가 NSNumber를 JavaScript Number로 옮길 때 의미가 바뀌지 않는 strict-JSON input만 허용한다.
+/// request frame 자체가 node/byte 총량을 제한하고, 여기서는 중첩 폭발과 i64→double silent rounding을 막는다.
+fn validExecuteScriptArg(value: std.json.Value, depth: usize) bool {
+    if (depth > execute_script_args_max_depth) return false;
+    return switch (value) {
+        .null, .bool, .string => true,
+        .integer => |n| n >= -javascript_max_safe_integer and n <= javascript_max_safe_integer,
+        .float => |n| std.math.isFinite(n) and @abs(n) <= javascript_max_safe_number and !(n == 0 and std.math.signbit(n)),
+        // Public request validation reparses the original wire with parse_numbers=false, so a number_string reaching
+        // this typed path is never trusted by itself.
+        .number_string => false,
+        .array => |a| for (a.items) |child| {
+            if (!validExecuteScriptArg(child, depth + 1)) break false;
+        } else true,
+        .object => |o| for (o.values()) |child| {
+            if (!validExecuteScriptArg(child, depth + 1)) break false;
+        } else true,
+    };
+}
+
+/// Dynamic JSON parsing normally canonicalizes `-0` to integer 0 and can round a float-form integer before params
+/// validation. Reparse the original request with number lexemes preserved so JSON→NSNumber→JavaScript does not silently
+/// change argument meaning. This is called only after browser method routing/authz, preserving the existing oracle order.
+fn validExecuteScriptArgLexeme(value: std.json.Value, depth: usize) bool {
+    if (depth > execute_script_args_max_depth) return false;
+    return switch (value) {
+        .null, .bool, .string => true,
+        .number_string => |raw| blk: {
+            const n = std.fmt.parseFloat(f64, raw) catch break :blk false;
+            if (!std.math.isFinite(n) or @abs(n) > javascript_max_safe_number) break :blk false;
+            if (n == 0) {
+                // parseFloat가 `1e-400`을 +0으로 underflow시키거나 JSON parser가 `-0`을 integer 0으로
+                // canonicalize하기 전에, 원 significand가 실제 0인지와 음수 부호를 lexeme에서 판정한다.
+                if (std.mem.startsWith(u8, raw, "-") or !numberLexemeHasZeroSignificand(raw)) break :blk false;
+            }
+            break :blk true;
+        },
+        .array => |a| for (a.items) |child| {
+            if (!validExecuteScriptArgLexeme(child, depth + 1)) break false;
+        } else true,
+        .object => |o| for (o.values()) |child| {
+            if (!validExecuteScriptArgLexeme(child, depth + 1)) break false;
+        } else true,
+        .integer, .float => false,
+    };
+}
+
+fn numberLexemeHasZeroSignificand(raw: []const u8) bool {
+    var i: usize = if (std.mem.startsWith(u8, raw, "-")) 1 else 0;
+    while (i < raw.len and raw[i] != 'e' and raw[i] != 'E') : (i += 1) {
+        if (raw[i] >= '1' and raw[i] <= '9') return false;
+    }
+    return true;
+}
+
+fn validExecuteScriptArgsWire(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error!bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, request_bytes, .{ .parse_numbers = false }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return false,
+    };
+    const params = switch (root.get("params") orelse return false) {
+        .object => |o| o,
+        else => return false,
+    };
+    const args = switch (params.get("args") orelse return true) {
+        .array => |a| a,
+        else => return false,
+    };
+    for (args.items) |arg| if (!validExecuteScriptArgLexeme(arg, 0)) return false;
+    return true;
+}
 
 /// `browser.setCookie` params(§9.4 D4). name/value 필수, 나머지 선택(domain 생략=대상 문서 host·path 생략=`/`·secure
 /// 생략=false는 Swift가 적용). **httpOnly는 미지원**: `HTTPCookie(properties:)`가 HttpOnly를 설정 못 함(Set-Cookie 헤더
@@ -306,7 +392,14 @@ pub fn parseExecuteScriptParams(params: ?std.json.Value) ParamError!ExecuteScrip
         .integer => |n| if (n > 0 and n <= execute_script_default_max_result_bytes) @as(usize, @intCast(n)) else return error.InvalidParams,
         else => return error.InvalidParams,
     } else execute_script_default_max_result_bytes;
-    return .{ .id = try idFromObj(obj), .script = try strFromObj(obj, "script"), .max_result_bytes = max };
+    const args = if (obj.get("args")) |v| switch (v) {
+        .array => |a| blk: {
+            for (a.items) |arg| if (!validExecuteScriptArg(arg, 0)) return error.InvalidParams;
+            break :blk a.items;
+        },
+        else => return error.InvalidParams,
+    } else &.{};
+    return .{ .id = try idFromObj(obj), .script = try strFromObj(obj, "script"), .args = args, .max_result_bytes = max };
 }
 
 pub fn parseSetCookieParams(params: ?std.json.Value) ParamError!SetCookieParams {
@@ -1207,13 +1300,13 @@ fn writeOkBoolResult(s: *std.json.Stringify, id: cp.Id, ok: bool) !void {
 
 /// **5e: 모든 게이트(authz·params·surface)를 통과한 인가된 browser 요청의 실행 op.** L4가 main-loop marshal
 /// (§5-async deferRequest) → Swift `BrowserControl`이 `webPanels[surface_id]`의 WKWebView API를 호출한다. `arg`는
-/// method별 인자(navigate=url·executeScript=script·getUrl=빈) — `gpa`로 **dupe한 소유 슬라이스**라(파싱 arena와
+/// method별 인자(navigate=url·executeScript=`{script,args,max_result_bytes}` JSON·getUrl=빈) — `gpa` 소유 슬라이스라(파싱 arena와
 /// 수명 분리) caller가 op를 소비할 때 free한다(§9.3 "arg는 cross_gpa 복사"). 응답 id/method는 L4가 완료 시
 /// pending.request_bytes를 재파싱해 얻으므로(§9.3 ⑥) op엔 실행에 필요한 surface_id·method·arg만 싣는다.
 pub const BrowserOp = struct {
     surface_id: u64,
     method: BrowserMethod,
-    /// gpa-owned(caller가 free). navigate=url·executeScript=script·getUrl=빈("").
+    /// gpa-owned(caller가 free). navigate=url·executeScript=backend JSON·getUrl=빈("").
     arg: []const u8,
     /// null=capability가 직접 인가. non-null=pane-bound confirm grant가 인가한 op. 장기 wait revoke가 capability-origin
     /// 요청을 잘못 취소하지 않도록 provenance를 보존한다(짧은 기존 op의 실행 의미는 바꾸지 않음).
@@ -1302,7 +1395,7 @@ pub fn dispatchBrowser(
         .request => |r| r,
         else => return .{ .err = try errorResponse(gpa, .null, .invalid_request) },
     };
-    return browserOpFromRequest(gpa, req, snapshot, caller_caps, pane_selector, grants, now);
+    return browserOpFromRequest(gpa, req, request_bytes, snapshot, caller_caps, pane_selector, grants, now);
 }
 
 /// dispatchBrowser의 **파싱된 req** 버전(steps 2~8). `dispatchAuthenticated`(1e)가 이미 파싱한 req로 직접 호출해
@@ -1311,6 +1404,7 @@ pub fn dispatchBrowser(
 pub fn browserOpFromRequest(
     gpa: std.mem.Allocator,
     req: cp.Request,
+    request_bytes: []const u8,
     snapshot: cs.CollectorSnapshot,
     caller_caps: []const capmod.Capability,
     /// 요청 pane의 selector surface_id(§8.4 tty-검증). pane confirm-grant 조회 키. null=self-origin 없음=grant 조회 불가.
@@ -1367,6 +1461,9 @@ pub fn browserOpFromRequest(
     if (bmethod == .execute_script and req.id == .string and req.id.string.len > execute_script_request_id_max_bytes) {
         return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
     }
+    if (bmethod == .execute_script and !try validExecuteScriptArgsWire(gpa, request_bytes)) {
+        return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+    }
 
     // ── 5f-0b-3b: subscribe는 async op이 아니라 동기 registry 구독. 필터 파싱(6) + surface 검증(7) 후 `.subscribe` 반환
     //    (arg dupe 없음 — 필터는 값 타입). 나머지(navigate/getUrl/executeScript)는 아래 async-op 경로. ──
@@ -1388,7 +1485,10 @@ pub fn browserOpFromRequest(
         .get_cookies => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 surface 현재 문서 host의 쿠키를 읽음(22차 [0] host 필터, 인자 없음)
         // screenshot: rect/scale를 compact JSON으로 arg에 실어 Swift가 WKSnapshotConfiguration 구성(둘 다 부재면 `{}`=전체 뷰·기기 배율). PNG 고정.
         .screenshot => try serializeScreenshotArg(gpa, parseScreenshotOptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
-        .execute_script => try gpa.dupe(u8, (parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).script),
+        .execute_script => blk: {
+            const p = parseExecuteScriptParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+            break :blk try serializeExecuteScriptBackendArg(gpa, p.script, p.args, p.max_result_bytes);
+        },
         // cookie write: 쿠키 필드를 compact JSON으로 arg에 실어 Swift가 파싱(§9.4 D4). 파싱 슬라이스는 arena를 빌리나 serialize가 owned JSON 생성.
         .set_cookie => try serializeSetCookieArg(gpa, parseSetCookieParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .delete_cookie => try serializeDeleteCookieArg(gpa, parseDeleteCookieParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
@@ -1642,11 +1742,14 @@ test "dispatchBrowser: 유효 browser cap + web surface → BrowserOp{surface_id
     defer testing.allocator.free(op_url.arg);
     try testing.expectEqual(BrowserMethod.get_url, op_url.method);
     try testing.expectEqualStrings("", op_url.arg);
-    // executeScript arg = script.
-    const op_js = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"document.title\"}}", browserCap(11));
+    // executeScript arg = Swift backend가 그대로 소비할 expression/args/cap JSON.
+    const op_js = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"Promise.resolve(args[0])\",\"args\":[\"document.title\"]}}", browserCap(11));
     defer testing.allocator.free(op_js.arg);
     try testing.expectEqual(BrowserMethod.execute_script, op_js.method);
-    try testing.expectEqualStrings("document.title", op_js.arg);
+    const parsed_arg = try std.json.parseFromSlice(std.json.Value, testing.allocator, op_js.arg, .{});
+    defer parsed_arg.deinit();
+    try testing.expectEqualStrings("Promise.resolve(args[0])", parsed_arg.value.object.get("script").?.string);
+    try testing.expectEqualStrings("document.title", parsed_arg.value.object.get("args").?.array.items[0].string);
     try testing.expectEqual(execute_script_default_max_result_bytes, op_js.max_result_bytes);
 }
 
@@ -1940,7 +2043,7 @@ test "parseBrowserMethod: 구현된 browser method 인식, 미지는 null" {
 }
 
 // ── 9b) params 파서 단위(유효·오류) ──
-test "params 파서: navigate {id,url}·getUrl {id}·executeScript {id,script} 유효/오류" {
+test "params 파서: navigate·getUrl·executeScript expression와 args 유효/오류" {
     // 유효 파싱은 파싱된 Value에서 슬라이스를 빌리므로 pm(arena) 안에서 검증한다.
     {
         var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"https://a/b\"}}");
@@ -1956,11 +2059,14 @@ test "params 파서: navigate {id,url}·getUrl {id}·executeScript {id,script} �
         try testing.expectEqual(@as(u64, 7), p.id);
     }
     {
-        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":3,\"script\":\"1+1\"}}");
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":3,\"script\":\"Promise.resolve(args[0]+1)\",\"args\":[41,{\"ok\":true}]}}");
         defer pm.deinit();
         const p = try parseExecuteScriptParams(pm.message.request.params);
         try testing.expectEqual(@as(u64, 3), p.id);
-        try testing.expectEqualStrings("1+1", p.script);
+        try testing.expectEqualStrings("Promise.resolve(args[0]+1)", p.script);
+        try testing.expectEqual(@as(usize, 2), p.args.len);
+        try testing.expectEqual(@as(i64, 41), p.args[0].integer);
+        try testing.expect(p.args[1].object.get("ok").?.bool);
         try testing.expectEqual(execute_script_default_max_result_bytes, p.max_result_bytes);
     }
     // 오류: url 없음, id 비정수, script 비문자열, params 부재/비객체.
@@ -1968,9 +2074,49 @@ test "params 파서: navigate {id,url}·getUrl {id}·executeScript {id,script} �
     try testing.expectError(error.InvalidParams, parseNavigateParamsFromWire("{\"id\":\"x\",\"url\":\"u\"}")); // id 비정수
     try testing.expectError(error.InvalidParams, parseNavigateParamsFromWire("{\"id\":-1,\"url\":\"u\"}")); // id 음수
     try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":5}")); // script 비문자열
+    try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"args\":{}}"));
+    try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"args\":[9007199254740992]}"));
+    try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"args\":[9007199254740993.0]}"));
+    try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"args\":[9.007199254740993e15]}"));
+    try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"args\":[1e400]}"));
     try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"max_result_bytes\":0}"));
     try testing.expectError(error.InvalidParams, parseExecuteScriptParamsFromWire("{\"id\":3,\"script\":\"x\",\"max_result_bytes\":268435457}"));
     try testing.expectError(error.InvalidParams, parseGetUrlParamsFromWire("{}")); // id 없음
+}
+
+test "executeScript args wire: float-form unsafe integer, negative zero, depth 129 거부" {
+    const prefix = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":3,\"script\":\"args\",\"args\":";
+    const suffix = "}}";
+    for ([_][]const u8{
+        "[9007199254740993.0]",
+        "[9.007199254740993e15]",
+        "[-0]",
+        "[-0.0]",
+        "[-1e-400]",
+        "[1e-400]",
+    }) |args| {
+        const wire = try std.mem.concat(testing.allocator, u8, &.{ prefix, args, suffix });
+        defer testing.allocator.free(wire);
+        try testing.expect(!try validExecuteScriptArgsWire(testing.allocator, wire));
+    }
+    const safe = try std.mem.concat(testing.allocator, u8, &.{ prefix, "[9007199254740991,9.007199254740991e15,0,0.5]", suffix });
+    defer testing.allocator.free(safe);
+    try testing.expect(try validExecuteScriptArgsWire(testing.allocator, safe));
+
+    for ([_]struct { nesting: usize, valid: bool }{
+        // 첫 `[`는 args 컨테이너라 depth에 포함하지 않는다. 그 안의 단일 arg가 128중첩이면 허용, 129면 거부.
+        .{ .nesting = execute_script_args_max_depth + 1, .valid = true },
+        .{ .nesting = execute_script_args_max_depth + 2, .valid = false },
+    }) |case| {
+        var deep: std.ArrayList(u8) = .empty;
+        defer deep.deinit(testing.allocator);
+        try deep.appendSlice(testing.allocator, prefix);
+        try deep.appendNTimes(testing.allocator, '[', case.nesting);
+        try deep.append(testing.allocator, '0');
+        try deep.appendNTimes(testing.allocator, ']', case.nesting);
+        try deep.appendSlice(testing.allocator, suffix);
+        try testing.expectEqual(case.valid, try validExecuteScriptArgsWire(testing.allocator, deep.items));
+    }
 }
 
 // params-only wire(객체 한 줄)를 파싱해 각 파서에 넘기는 테스트 헬퍼(arena 수명 안에서 파서 실행).
@@ -2239,12 +2385,15 @@ test "serializeExecuteScriptChunk: request/result id·seq·base64-json과 frame 
     try testing.expectError(error.ChunkTooLarge, serializeExecuteScriptChunk(testing.allocator, .{ .number = 1 }, 1, 0, oversized));
 }
 
-test "serializeExecuteScriptBackendArg: script와 page byte cap을 손실 없이 전달" {
-    const wire = try serializeExecuteScriptBackendArg(testing.allocator, "(()=>\"한글\\n\")()", 1234);
+test "serializeExecuteScriptBackendArg: expression과 args와 page byte cap을 손실 없이 전달" {
+    const args = [_]std.json.Value{ .{ .integer = 41 }, .{ .string = "한글" } };
+    const wire = try serializeExecuteScriptBackendArg(testing.allocator, "Promise.resolve(args[0]+1)", &args, 1234);
     defer testing.allocator.free(wire);
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
     defer parsed.deinit();
-    try testing.expectEqualStrings("(()=>\"한글\\n\")()", parsed.value.object.get("script").?.string);
+    try testing.expectEqualStrings("Promise.resolve(args[0]+1)", parsed.value.object.get("script").?.string);
+    try testing.expectEqual(@as(i64, 41), parsed.value.object.get("args").?.array.items[0].integer);
+    try testing.expectEqualStrings("한글", parsed.value.object.get("args").?.array.items[1].string);
     try testing.expectEqual(@as(i64, 1234), parsed.value.object.get("max_result_bytes").?.integer);
 }
 

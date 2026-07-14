@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import JavaScriptCore
 
 enum BrowserPageScriptResult {
     case json(Data)
@@ -106,13 +107,13 @@ final class BrowserResultTransferRegistry {
           const root = globalThis, runnerName = '\(pageRunnerName)';
           if (typeof root[runnerName] === 'function') return;
           const objectDefineProperty = Object.defineProperty, depthLimit = \(maxSerializationDepth), nodeLimit = \(maxSerializationNodes);
-          const pageEval = eval, arrayIsArray = Array.isArray, objectKeys = Object.keys, numberIsFinite = Number.isFinite, objectIs = Object.is, stringFrom = String, typeError = TypeError, weakSetCtor = WeakSet;
+          const arrayIsArray = Array.isArray, objectKeys = Object.keys, numberIsFinite = Number.isFinite, objectIs = Object.is, stringFrom = String, typeError = TypeError, weakSetCtor = WeakSet;
           const call = Function.prototype.call, bind = Function.prototype.bind;
           const numberToString = call.bind(Number.prototype.toString), charCodeAt = call.bind(String.prototype.charCodeAt);
           const stringSlice = call.bind(String.prototype.slice), arrayJoin = call.bind(Array.prototype.join), bindTo = call.bind(bind);
           const weakSetHas = WeakSet.prototype.has, weakSetAdd = WeakSet.prototype.add, weakSetDelete = WeakSet.prototype.delete;
           const arrayPush = Array.prototype.push, arrayJoinMethod = Array.prototype.join;
-          const run = (source, limit) => {
+          const run = async (thunk, limit) => {
           const seen = new weakSetCtor(), out = [];
           const seenHas = bindTo(weakSetHas, seen), seenAdd = bindTo(weakSetAdd, seen), seenDelete = bindTo(weakSetDelete, seen);
           const outPush = bindTo(arrayPush, out), outJoin = bindTo(arrayJoinMethod, out);
@@ -214,7 +215,7 @@ final class BrowserResultTransferRegistry {
             } finally { seenDelete(value); }
           };
           let value;
-          try { value = pageEval(source); } catch (error) { return 'maru-script-error:' + diagnostic(error, 'execution'); }
+          try { value = await thunk(); } catch (error) { return 'maru-script-error:' + diagnostic(error, 'execution'); }
           try { write(value, 0); flush(); return 'maru-json:' + outJoin(''); }
           catch (error) {
             if (error === TOO_LARGE) return 'maru-too-large:' + (limit + 1);
@@ -226,12 +227,37 @@ final class BrowserResultTransferRegistry {
         """
     }()
 
-    /// `evaluateJavaScript`가 raw object graph를 host로 materialize하기 전에 document-start runner를 호출한다.
-    /// 결과 prefix는 host가 작은 terminal과 성공 JSON을 구분하기 위한 private backend 계약이다.
+    /// `callAsyncJavaScript`의 function body. 사용자 source는 표현식 위치에 직접 컴파일되므로 strict CSP에서 eval 없이
+    /// 실행되고, Promise/thenable은 async thunk가 await한다. 여러 statement는 사용자가 async IIFE 표현식으로 감싼다.
+    /// 결과는 document-start runner가 page process 안에서 bounded JSON text로 만든 뒤에만 host로 넘어온다.
     nonisolated static func boundedPageScript(_ script: String, maxBytes: Int) throws -> String {
-        let literalData = try JSONSerialization.data(withJSONObject: script, options: [.fragmentsAllowed])
-        let literal = String(decoding: literalData, as: UTF8.self)
-        return "\(pageRunnerName)(\(literal),\(maxBytes))"
+        guard maxBytes > 0, maxBytes <= defaultMaxEntryBytes else { throw CocoaError(.coderInvalidValue) }
+        // Raw source를 wrapper 안에 넣기 전에 (1) 독립 script와 (2) 괄호식 양쪽으로 syntax-check한다. wrapper만
+        // 검사하면 `value), largerLimit, (0`처럼 바깥 괄호를 닫고 고정 limit 인자를 바꾸는 source도 유효해진다.
+        // 반대로 독립 source까지 유효해야 그런 unmatched delimiter/comment 탈출이 거부된다. JavaScriptCore 검사는
+        // 파싱만 하며 코드를 실행하지 않으므로 strict-CSP의 no-eval/Function 계약도 유지한다.
+        guard isStandaloneExpression(script) else { throw CocoaError(.coderInvalidValue) }
+        return """
+        return await \(pageRunnerName)(
+          async () => await (
+        \(script)
+          ),
+          \(maxBytes)
+        )
+        """
+    }
+
+    nonisolated private static func isStandaloneExpression(_ source: String) -> Bool {
+        guard let context = JSGlobalContextCreate(nil) else { return false }
+        defer { JSGlobalContextRelease(context) }
+        func syntaxOK(_ candidate: String) -> Bool {
+            guard let js = JSStringCreateWithCFString(candidate as CFString) else { return false }
+            defer { JSStringRelease(js) }
+            return JSCheckScriptSyntax(context, js, nil, 1, nil)
+        }
+        // `void` 뒤의 source는 바깥 delimiter 없이 독립 파싱되므로 wrapper 탈출에 필요한 unmatched close/open을
+        // 허용하지 않으면서, Script goal에서 단독으로는 declaration 취급되는 익명 function/class expression도 받는다.
+        return syntaxOK("void \n\(source)") && syntaxOK("(\n\(source)\n)")
     }
 
     nonisolated static func decodeBoundedPageResult(_ text: String, maxBytes: Int) -> BrowserPageScriptResult {
@@ -253,7 +279,7 @@ final class BrowserResultTransferRegistry {
         return .scriptError(nativeScriptErrorPayload(NSError(domain: "Maru.Browser", code: 2)))
     }
 
-    nonisolated static func nativeScriptErrorPayload(_ error: Error) -> Data {
+    nonisolated static func nativeScriptErrorPayload(_ error: Error, kind: String = "execution") -> Data {
         let ns = error as NSError
         let name = "\(ns.domain)(\(ns.code))"
         let message = ns.localizedDescription
@@ -276,10 +302,11 @@ final class BrowserResultTransferRegistry {
         let n = clipped(name, maxBytes: 256)
         let m = clipped(message, maxBytes: 16 * 1024)
         let object: [String: Any] = [
-            "kind": "execution", "name": n.0, "message": m.0, "stack": "",
+            "kind": kind, "name": n.0, "message": m.0, "stack": "",
             "diagnostics_truncated": n.1 || m.1,
         ]
-        let fallback = Data("{\"kind\":\"execution\",\"name\":\"Error\",\"message\":\"WebKit error\",\"stack\":\"\",\"diagnostics_truncated\":true}".utf8)
+        let fallbackKind = kind == "navigation" ? "navigation" : "execution"
+        let fallback = Data("{\"kind\":\"\(fallbackKind)\",\"name\":\"Error\",\"message\":\"WebKit error\",\"stack\":\"\",\"diagnostics_truncated\":true}".utf8)
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]),
               data.count <= maxScriptErrorPayloadBytes else { return fallback }
         return data

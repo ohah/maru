@@ -1788,7 +1788,7 @@ var control_cap_store: control_capability.CapabilityStore = .{};
 /// (cap도 없으면) default-deny. grant 생성(확인 모달)·surface-close removeSurface 배선은 1e-confirm-1c/2. **메인 스레드 전용**(§8.8).
 var control_pane_grant_store: control_pane_grant.PaneGrantStore = .{};
 
-/// 5e-2b: browser op 큐 엔트리. `arg`는 cross_gpa 소유(method별 인자 — navigate=url·executeScript=script·getUrl=빈).
+/// 5e-2b: browser op 큐 엔트리. `arg`는 cross_gpa 소유(method별 인자 — navigate=url·executeScript=backend JSON·getUrl=빈).
 const BrowserOpEntry = struct { async_id: u64, surface_id: u64, op_kind: u8, arg: []const u8 };
 
 /// 5e-2b: browser op FIFO 큐(**메인 스레드 전용** — handleControlRequest가 push, take_browser_op가 pop해 Swift가
@@ -2469,7 +2469,7 @@ fn pushBrowserOp(
     async_id: u64,
     op: control_browser.BrowserOp,
 ) void {
-    var backend_arg = op.arg;
+    const backend_arg = op.arg;
     if (op.method == .execute_script or op.method == .screenshot) {
         const provenance: ExecutionProvenance = if (op.pane_grant) |g|
             .{ .pane_grant = g }
@@ -2506,15 +2506,8 @@ fn pushBrowserOp(
             _ = server.completeInFlight(async_id, resp);
             return;
         };
-        if (op.method == .execute_script) {
-            backend_arg = control_browser.serializeExecuteScriptBackendArg(server.cross_gpa, op.arg, op.max_result_bytes) catch {
-                _ = active_browser_executions.finish(async_id);
-                server.cross_gpa.free(op.arg);
-                _ = server.completeInFlight(async_id, null);
-                return;
-            };
-            server.cross_gpa.free(op.arg);
-        }
+        // executeScript arg는 L2가 이미 `{script,args,max_result_bytes}` owned JSON으로 직렬화했다. 여기서 다시
+        // 감싸면 args를 잃거나 사용자 script를 이중 escape하므로 ABI queue가 그대로 인수한다.
     }
     if (op.method == .wait) {
         active_browser_waits.append(allocator, .{
@@ -3215,6 +3208,20 @@ pub export fn maru_macos_control_pump_browser_result() u32 {
 pub export fn maru_macos_control_browser_wait_is_active(async_id: u64) u32 {
     if (!control_server_active) return 0;
     return if (activeBrowserWait(async_id) and control_server_storage.inFlightPending(async_id) != null) 1 else 0;
+}
+
+/// Swift가 off-main syntax validation을 끝낸 뒤 page script를 실제 시작하기 직전 재검사한다. running execution,
+/// live client pending, 현재 capability/grant 인가를 모두 만족해야 1이다. timeout도 이 경계에서 먼저 reap해
+/// revoke/expiry/timeout 뒤 사용자 expression의 page side effect가 실행되는 창을 닫는다. 메인 스레드 전용.
+pub export fn maru_macos_control_browser_execution_may_start(async_id: u64) u32 {
+    if (!control_server_active) return 0;
+    const server = &control_server_storage;
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    expireActiveBrowserExecutions(server, now_ns);
+    const execution = active_browser_executions.get(async_id) orelse return 0;
+    if (execution.phase != .running or server.inFlightPending(async_id) == null) return 0;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    return if (browserExecutionAuthorized(execution, now)) 1 else 0;
 }
 
 /// 5f-1: screenshot op 완료(§9.5.7 chunk-streaming). `png`=Swift `takeSnapshot`이 만든 PNG 바이트(status 0). PNG를
@@ -4402,7 +4409,9 @@ test "5f-5b pull ABI: revoke and inactive late callback release without copying"
     const revoked_id = try control_server_storage.deferRequest(&revoked_pending, std.math.maxInt(i128));
     try active_browser_executions.admit(allocator, .{ .async_id = revoked_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
     try std.testing.expect(active_browser_executions.markRunning(revoked_id));
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_browser_execution_may_start(revoked_id));
     control_pane_grant_store.clearAll();
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_execution_may_start(revoked_id));
     var revoked = FakeBrowserResultProvider{ .data = "null" };
     _ = maru_macos_control_complete_browser_result(revoked_id, 106, revoked.data.len, &revoked, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release);
     try std.testing.expectEqual(@as(usize, 0), revoked.copy_calls);
@@ -4418,6 +4427,47 @@ test "5f-5b pull ABI: revoke and inactive late callback release without copying"
     control_server_active = true;
     try std.testing.expectEqual(@as(usize, 0), inactive.copy_calls);
     try std.testing.expectEqual(@as(usize, 1), inactive.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+}
+
+test "5f-5c execution may-start ABI: running pending authorized만 허용하고 timeout·phase·server stop 거부" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":78,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
+
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_execution_may_start(id)); // queued
+    try std.testing.expect(active_browser_executions.markRunning(id));
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_browser_execution_may_start(id));
+    control_server_active = false;
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_execution_may_start(id));
+    control_server_active = true;
+    active_browser_executions.abandon(id);
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_execution_may_start(id));
+    try std.testing.expect(active_browser_executions.finish(id));
+    _ = control_server_storage.completeInFlight(id, null);
+
+    var missing_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const missing_id = try control_server_storage.deferRequest(&missing_pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = missing_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(missing_id));
+    _ = control_server_storage.completeInFlight(missing_id, null);
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_execution_may_start(missing_id));
+    try std.testing.expect(active_browser_executions.finish(missing_id));
+
+    var expired: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const expired_id = try control_server_storage.deferRequest(&expired, 0);
+    try active_browser_executions.admit(allocator, .{ .async_id = expired_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(expired_id));
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_execution_may_start(expired_id));
+    try expectPendingErrorCode(&expired, .timeout);
+    try std.testing.expectEqual(ExecutionPhase.abandoned, active_browser_executions.get(expired_id).?.phase);
+    try std.testing.expect(active_browser_executions.finish(expired_id));
     try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
 }
 

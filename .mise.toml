@@ -91,7 +91,7 @@ run = "zig build macos-app-smoke"
 
 [tasks.macos-browser-bounded-smoke]
 description = "Run and assert the bounded browser.executeScript WKWebView/socket smoke"
-run = "zig build macos-browser-bounded-smoke"
+run = "zig build -Doptimize=ReleaseSafe macos-browser-bounded-smoke"
 
 [tasks.macos-dmg]
 description = "Sign+notarize+staple a distributable .dmg (needs keychain cert + notarytool profile)"

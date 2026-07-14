@@ -168,6 +168,12 @@ pub fn writeAll(fd: c.fd_t, bytes: []const u8) error{WriteFailed}!void {
     }
 }
 
+/// 보안 취소에서 partial writer를 즉시 깨운다. fd의 close 소유권은 connection thread에 남겨 fd 재사용
+/// 경합을 피하고, shutdown 실패는 이미 닫힌 peer와 동형이라 best-effort로 처리한다.
+pub fn shutdownBoth(fd: c.fd_t) void {
+    _ = c.shutdown(fd, c.SHUT.RDWR);
+}
+
 /// hello notification에 실을 서버측 값(§4.1). 순수 스키마·직렬화는 1a `control_plane`가 소유.
 pub const HelloConfig = struct {
     server_version: []const u8,

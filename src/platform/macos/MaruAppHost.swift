@@ -1331,7 +1331,7 @@ private func runBrowserWaitSmokeClient(socketPath: String, sid: UInt64, nonceHex
 // 5f-5a: 실제 WKWebView page realm에서 bounded strict-JSON wrapper를 실행하고 소켓 응답까지 검증한다. 값 fidelity,
 // user script가 serializer가 피해야 할 globals를 바꾸는 경우, escaped UTF-8 byte 경계, result-too-large, 실행/직렬화
 // error taxonomy와 32 KiB 진단 frame, depth 128/129를 모두 GUI 입력 없이 자동화한다.
-private func runBrowserBoundedResultSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String) {
+private func runBrowserBoundedResultSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String, stream: String) {
     let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid),\"cap_nonce\":\"\(nonceHex)\"}}"
     func request(_ id: Int, _ script: String, maxBytes: Int = 1024 * 1024) -> BrowserCtlReqResult {
         let object: [String: Any] = [
@@ -1388,7 +1388,27 @@ private func runBrowserBoundedResultSmokeClient(socketPath: String, sid: UInt64,
     let depth129 = "(()=>{let x=null;for(let i=0;i<129;i++)x=[x];return x;})()"
     let depthOK = line(request(38, depth128)).flatMap(browserCtlResult)?["result"] != nil
     let depthFail = errorOK(request(39, depth129), code: -32006, kind: "serialization")
-    return (structured, tamper, byteBoundary, tooLarge, executionError, serializationError, depthOK && depthFail ? "true" : "false")
+    func streamRequest(_ id: Int, jsonBytes: Int) -> BrowserCtlStreamResult {
+        let script = "'x'.repeat(\(jsonBytes - 2))"
+        let object: [String: Any] = [
+            "jsonrpc": "2.0", "id": id, "method": "browser.executeScript",
+            "params": ["id": sid, "script": script, "max_result_bytes": jsonBytes],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let frame = String(data: data, encoding: .utf8) else {
+            return BrowserCtlStreamResult(ok: false, transfer: "", bytes: 0, chunks: 0)
+        }
+        return browserCtlExecuteScriptStream(socketPath: socketPath, authFrame: auth, requestFrame: frame, requestId: id, expectedJsonBytes: jsonBytes)
+    }
+    let exactInline = streamRequest(40, jsonBytes: 512 * 1024)
+    let firstChunked = streamRequest(41, jsonBytes: 512 * 1024 + 1)
+    let maxChunked = streamRequest(42, jsonBytes: 16 * 1024 * 1024)
+    print("browser bounded stream: inline=\(exactInline) first=\(firstChunked) max=\(maxChunked)")
+    let stream = exactInline.ok && exactInline.transfer == "inline" && exactInline.chunks == 0
+        && firstChunked.ok && firstChunked.transfer == "chunked" && firstChunked.chunks == 2
+        && maxChunked.ok && maxChunked.transfer == "chunked" && maxChunked.chunks == 32
+        ? "true" : "false"
+    return (structured, tamper, byteBoundary, tooLarge, executionError, serializationError, depthOK && depthFail ? "true" : "false", stream)
 }
 
 // 1e-confirm-1c-2(테스트 전용 — 배경 스레드): **cap 없이** browser.navigate가 pane confirm-grant 흐름으로 성공하는지
@@ -1530,6 +1550,94 @@ private func browserCtlOneRequest(socketPath: String, authFrame: String, request
         if n <= 0 { return .err("error:no-response") } // 타임아웃(EAGAIN)·close
         leftover.append(contentsOf: buf[0 ..< n])
         if leftover.count > 64 * 1024 { return .err("error:overflow") } // 폭주 방어
+    }
+}
+
+private struct BrowserCtlStreamResult {
+    let ok: Bool
+    let transfer: String
+    let bytes: Int
+    let chunks: Int
+}
+
+// 5f-5b 자동 smoke 전용: executeScript chunk notification을 전체 재조립하지 않고 id/seq/base64/final byte 수와
+// 생성 fixture의 JSON string 모양을 streaming 검증한다. app client 메모리가 결과 크기만큼 늘어나는 것을 피한다.
+private func browserCtlExecuteScriptStream(
+    socketPath: String,
+    authFrame: String,
+    requestFrame: String,
+    requestId: Int,
+    expectedJsonBytes: Int
+) -> BrowserCtlStreamResult {
+    let failed = BrowserCtlStreamResult(ok: false, transfer: "", bytes: 0, chunks: 0)
+    guard let fd = connectControlSocket(socketPath, recvTimeoutSec: 45) else { return failed }
+    defer { close(fd) }
+    guard socketWriteLine(fd, authFrame), socketWriteLine(fd, requestFrame) else { return failed }
+    var leftover = [UInt8]()
+    var resultId: Int?
+    var nextSeq = 0
+    var total = 0
+    func validFixtureBytes(_ bytes: Data) -> Bool {
+        guard !bytes.isEmpty, total + bytes.count <= expectedJsonBytes else { return false }
+        if total == 0, bytes.first != 0x22 { return false }
+        if total + bytes.count == expectedJsonBytes, bytes.last != 0x22 { return false }
+        // 전체 16 MiB를 Swift -Onone client에서 다시 byte-scan하면 server writer 5초 timeout을 왜곡한다.
+        // 경계와 각 chunk 중앙을 표본 검사하고, wire fidelity의 전수 검증은 Zig base64 round-trip unit이 맡는다.
+        let sample = bytes[bytes.startIndex + bytes.count / 2]
+        let samplePosition = total + bytes.count / 2
+        if samplePosition != 0 && samplePosition != expectedJsonBytes - 1 && sample != 0x78 { return false }
+        total += bytes.count
+        return true
+    }
+    while true {
+        while let nl = leftover.firstIndex(of: 0x0A) {
+            let frame = Data(leftover[0 ..< nl])
+            leftover.removeSubrange(0 ... nl)
+            guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any] else {
+                print("browser stream malformed frame bytes=\(frame.count)")
+                return failed
+            }
+            if object["method"] as? String == "browser.executeScriptChunk" {
+                guard let params = object["params"] as? [String: Any], params["request_id"] as? Int == requestId,
+                      let rid = params["result_id"] as? Int, rid >= 0,
+                      params["seq"] as? Int == nextSeq, params["encoding"] as? String == "base64-json",
+                      let encoded = params["data"] as? String, let decoded = Data(base64Encoded: encoded),
+                      decoded.count <= BrowserResultTransferRegistry.maxCopyBytes,
+                      resultId == nil || resultId == rid, validFixtureBytes(decoded)
+                else {
+                    print("browser stream invalid chunk seq=\(nextSeq) total=\(total) object=\(object)")
+                    return failed
+                }
+                resultId = rid
+                nextSeq += 1
+                continue
+            }
+            if object["id"] as? Int == requestId, let error = object["error"] {
+                print("browser stream server error request=\(requestId): \(error)")
+                return failed
+            }
+            guard object["id"] as? Int == requestId, object["error"] == nil,
+                  let result = object["result"] as? [String: Any], let transfer = result["transfer"] as? String
+            else { continue } // hello 등 notification
+            if transfer == "inline" {
+                guard nextSeq == 0, let value = result["result"] as? String,
+                      Data(value.utf8).count + 2 == expectedJsonBytes,
+                      value.utf8.allSatisfy({ $0 == 0x78 }) else { return failed }
+                return BrowserCtlStreamResult(ok: true, transfer: transfer, bytes: expectedJsonBytes, chunks: 0)
+            }
+            guard transfer == "chunked", let rid = result["result_id"] as? Int, rid == resultId,
+                  result["seq_total"] as? Int == nextSeq, result["bytes"] as? Int == total,
+                  total == expectedJsonBytes else { return failed }
+            return BrowserCtlStreamResult(ok: true, transfer: transfer, bytes: total, chunks: nextSeq)
+        }
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+        if n <= 0 {
+            print("browser stream read ended request=\(requestId) seq=\(nextSeq) total=\(total) errno=\(errno)")
+            return failed
+        }
+        leftover.append(contentsOf: buffer[0 ..< n])
+        if leftover.count > 1024 * 1024 { return failed }
     }
 }
 
@@ -2203,6 +2311,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private nonisolated(unsafe) var browserCtlBoundedExecutionErrorStore = "pending"
     private nonisolated(unsafe) var browserCtlBoundedSerializationErrorStore = "pending"
     private nonisolated(unsafe) var browserCtlBoundedDepthStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedStreamStore = "pending"
+    // ReleaseSafe bounded smoke에서만 채우는 pump 기여 시간. 제품 실행은 배열 append조차 하지 않는다.
+    private var browserResultPumpSamplesMs: [Double] = []
     // 1e-confirm-1c-2(MARU_TEST_GRANT_DECISION): **무-cap** browser.navigate가 pane confirm-grant 흐름(needs_grant→env approve→grant→op)으로 성공하는지("true"/진단).
     private var didKickGrantSmoke = false
     private nonisolated(unsafe) var browserGrantNavigateOkStore = "pending"
@@ -2403,6 +2514,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 이미 멈춰(위) 더 이상 drain되지 않는다. idempotent(미시작이면 무동작).
         if controlServerStarted {
             maru_macos_control_server_stop()
+            BrowserResultTransferRegistry.shared.releaseAll() // ABI stop callback 실패까지 포함한 마지막 Data 소유권 backstop.
             controlServerStarted = false
         }
         // workspace를 '정상 종료'에 저장한다 — applicationWillTerminate는 크래시에선 안 불리므로(자동 충족),
@@ -3321,6 +3433,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 컨트롤 플레인 요청을 메인에서 drain한다(§5 단일 디스패치=메인 marshal). 살아있는 세션 목록(일반 창 + quick)을
         // 넘겨 Zig가 창마다 collectSessionInto로 스냅샷을 조립·auth·dispatch한다(§2 Swift는 열거만). 요청이 없으면 무동작.
         drainControlServer()
+        let pumpStarted = ProcessInfo.processInfo.systemUptime
+        let pumpAction = maru_macos_control_pump_browser_result() // 5f-5b: 앱 전체 tick당 progressive 결과 최대 1청크.
+        if pumpAction != 0 && ProcessInfo.processInfo.environment["MARU_TEST_BROWSER_CAP"] != nil {
+            browserResultPumpSamplesMs.append((ProcessInfo.processInfo.systemUptime - pumpStarted) * 1000.0)
+        }
         drainBrowserOps() // 5e-2b-2: 인가된 browser op을 WKWebView로 실행 + 완료 콜백(reap 포함, 매 tick).
         maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
         maybeRunGrantSmoke() // 1e-confirm-1c-2 테스트 전용(MARU_TEST_GRANT_DECISION): 무-cap browser.navigate가 grant 흐름으로 성공하는지 1회 kick.
@@ -3395,7 +3512,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case 5: // screenshot(5f-1) — async 콜백(takeSnapshot→PNG). arg={rect?,scale?}(§9.5.7). 성공=PNG 바이트(Zig completeScreenshotOp이 chunk-stream), 실패=status 1.
                 BrowserControl.takeSnapshot(wp.webView, arg) { png in
                     if let png = png {
-                        self.completeBrowserOp(asyncId, status: 0, data: png)
+                        self.completeBrowserScreenshotResult(asyncId, data: png)
                     } else {
                         self.completeBrowserOp(asyncId, status: 1, result: "screenshot failed")
                     }
@@ -3505,6 +3622,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    private func completeBrowserScreenshotResult(_ asyncId: UInt64, data: Data) {
+        let registry = BrowserResultTransferRegistry.shared
+        guard let transferId = registry.insert(data) else {
+            completeBrowserOp(asyncId, status: 1, result: "screenshot registry full")
+            return
+        }
+        let context = Unmanaged.passUnretained(registry).toOpaque()
+        let accepted = maru_macos_control_complete_browser_screenshot_result(
+            asyncId,
+            transferId,
+            data.count,
+            context,
+            browserResultCopyCallback,
+            browserResultReleaseCallback
+        )
+        if accepted == 0 {
+            registry.release(transferId)
+            completeBrowserOp(asyncId, status: 1, result: "screenshot transfer rejected")
+        }
+    }
+
     /// 5e-2b-2(**테스트 전용, MARU_TEST_BROWSER_CAP**): 소켓 browser.* E2E를 딱 1회 kick한다(one-shot). 스모크 + env
     /// 설정 + 서버 기동 + browser(비신뢰) web 패널 존재가 전부 충족될 때만 동작하고, 그 외(프로덕션 포함)는 즉시 반환한다.
     /// 순서: (메인) cap 발급(그 패널 surface에 묶인 browser cap nonce) + 소켓 경로 조회 → (배경 큐) 소켓 클라이언트가
@@ -3580,7 +3718,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return (browserCtlWaitSelectorStore, browserCtlWaitLoadStore, browserCtlWaitTimeoutStore, browserCtlWaitInvalidSelectorStore, browserCtlWaitElapsedStore)
     }
 
-    private nonisolated func storeBrowserBoundedResult(_ result: (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String)) {
+    private nonisolated func storeBrowserBoundedResult(_ result: (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String, stream: String)) {
         browserCtlLock.lock()
         browserCtlBoundedStructuredStore = result.structured
         browserCtlBoundedTamperStore = result.tamper
@@ -3589,12 +3727,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         browserCtlBoundedExecutionErrorStore = result.executionError
         browserCtlBoundedSerializationErrorStore = result.serializationError
         browserCtlBoundedDepthStore = result.depth
+        browserCtlBoundedStreamStore = result.stream
         browserCtlLock.unlock()
     }
 
-    private func browserBoundedResults() -> (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String) {
+    private func browserBoundedResults() -> (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String, stream: String) {
         browserCtlLock.lock(); defer { browserCtlLock.unlock() }
-        return (browserCtlBoundedStructuredStore, browserCtlBoundedTamperStore, browserCtlBoundedByteBoundaryStore, browserCtlBoundedTooLargeStore, browserCtlBoundedExecutionErrorStore, browserCtlBoundedSerializationErrorStore, browserCtlBoundedDepthStore)
+        return (browserCtlBoundedStructuredStore, browserCtlBoundedTamperStore, browserCtlBoundedByteBoundaryStore, browserCtlBoundedTooLargeStore, browserCtlBoundedExecutionErrorStore, browserCtlBoundedSerializationErrorStore, browserCtlBoundedDepthStore, browserCtlBoundedStreamStore)
     }
 
     /// 1e-confirm-1c-2(**테스트 전용, MARU_TEST_GRANT_DECISION**): **무-cap** browser.navigate가 pane confirm-grant 흐름으로
@@ -5846,6 +5985,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let glyphUvReady = latestFrameSummary.glyph_uv_ready != 0
         let glyphRasterReady = latestFrameSummary.glyph_raster_ready != 0
         let frameEnded = latestFrameSummary.ended != 0
+        let sortedPumpMs = browserResultPumpSamplesMs.sorted()
+        let pumpP95Ms = sortedPumpMs.isEmpty ? 0 : sortedPumpMs[max(0, Int(ceil(Double(sortedPumpMs.count) * 0.95)) - 1)]
+        let pumpMaxMs = sortedPumpMs.last ?? 0
         var summary = """
         maru.macos-app.v1
         visible_ui=\(visibleUI)
@@ -5962,6 +6104,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_ctl_bounded_execution_error=\(browserBoundedResults().executionError)
             browser_ctl_bounded_serialization_error=\(browserBoundedResults().serializationError)
             browser_ctl_bounded_depth=\(browserBoundedResults().depth)
+            browser_ctl_bounded_stream=\(browserBoundedResults().stream)
+            browser_result_pump_actions=\(sortedPumpMs.count)
+            browser_result_pump_p95_ms=\(pumpP95Ms)
+            browser_result_pump_max_ms=\(pumpMaxMs)
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

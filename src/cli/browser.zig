@@ -24,7 +24,7 @@ pub const browser_help =
     \\  list                                   열린 web 패널을 나열(id·url·title — 대상 발견용)
     \\  navigate    --surface <id> <url>       URL로 이동
     \\  get-url     --surface <id>             현재 문서 URL 출력
-    \\  exec        --surface <id> <script>    JavaScript 실행, 결과 출력
+    \\  exec        --surface <id> [--max-result-bytes n] [--out f] <script>   JavaScript 실행, 구조화 결과 출력
     \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
     \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
     \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제
@@ -43,13 +43,20 @@ pub const browser_help =
 // ── 명령 모델 ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// `browser.*` 요청(핵심 4개). id는 대상 web surface_id.
+pub const ExecCmd = struct {
+    surface_id: u64,
+    script: []const u8,
+    max_result_bytes: usize = 16 * 1024 * 1024,
+    out: ?[]const u8 = null,
+};
+
 pub const Request = union(enum) {
     /// `browser list`(§9.6 발견) — **surface_id 불요**(인스턴스의 web surface 전부 나열). ungated 발견(제어는 별도 모달).
     /// 다른 서브커맨드가 `--surface`로 대상을 지정하는 것과 달리 대상이 없다(에이전트가 이걸로 대상 id를 발견).
     list,
     navigate: struct { surface_id: u64, url: []const u8 },
     get_url: struct { surface_id: u64 },
-    exec: struct { surface_id: u64, script: []const u8 },
+    exec: ExecCmd,
     get_cookies: struct { surface_id: u64 },
     /// `browser set-cookie`(§9.4 D4 write). name/value 필수, domain/path/secure 선택. 응답 {ok}.
     set_cookie: struct { surface_id: u64, name: []const u8, value: []const u8, domain: ?[]const u8, path: ?[]const u8, secure: bool },
@@ -128,6 +135,8 @@ pub const ParseError = error{
     MissingSurfaceValue, // `--surface`에 값 없음
     MissingUrl, // `navigate`에 url 없음
     MissingScript, // `exec`에 script 없음
+    MissingMaxResultBytesValue,
+    InvalidMaxResultBytes,
     MissingOutValue, // `screenshot --out`에 값 없음
     MissingRectValue, // `screenshot --rect`에 값 없음
     MissingScaleValue, // `screenshot --scale`에 값 없음
@@ -176,10 +185,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         return .{ .request = .{ .get_url = .{ .surface_id = s } } };
     }
     if (eq(sub, "exec")) {
-        const p = try parseSurfaceArg(rest);
-        const s = p.surface orelse return error.MissingSurface;
-        const script = p.arg orelse return error.MissingScript;
-        return .{ .request = .{ .exec = .{ .surface_id = s, .script = script } } };
+        return .{ .request = .{ .exec = try parseExecArgs(rest) } };
     }
     if (eq(sub, "get-cookies")) {
         const p = try parseSurfaceArg(rest);
@@ -304,6 +310,53 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         return .{ .screenshot = .{ .surface_id = s, .out = out, .rect = rect, .scale = scale } };
     }
     return error.UnknownSubcommand;
+}
+
+fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
+    var surface: ?u64 = null;
+    var script: ?[]const u8 = null;
+    var max_result_bytes: usize = 16 * 1024 * 1024;
+    var out: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const arg = rest[i];
+        if (eq(arg, "--surface")) {
+            if (i + 1 >= rest.len) return error.MissingSurfaceValue;
+            surface = parseU64(rest[i + 1]) catch return error.InvalidSurface;
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--surface=")) {
+            surface = parseU64(arg["--surface=".len..]) catch return error.InvalidSurface;
+            i += 1;
+        } else if (eq(arg, "--max-result-bytes")) {
+            if (i + 1 >= rest.len) return error.MissingMaxResultBytesValue;
+            max_result_bytes = std.fmt.parseInt(usize, rest[i + 1], 10) catch return error.InvalidMaxResultBytes;
+            if (max_result_bytes == 0 or max_result_bytes > 16 * 1024 * 1024) return error.InvalidMaxResultBytes;
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--max-result-bytes=")) {
+            max_result_bytes = std.fmt.parseInt(usize, arg["--max-result-bytes=".len..], 10) catch return error.InvalidMaxResultBytes;
+            if (max_result_bytes == 0 or max_result_bytes > 16 * 1024 * 1024) return error.InvalidMaxResultBytes;
+            i += 1;
+        } else if (eq(arg, "--out")) {
+            if (i + 1 >= rest.len) return error.MissingOutValue;
+            out = rest[i + 1];
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--out=")) {
+            out = arg["--out=".len..];
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownOption;
+        } else {
+            if (script != null) return error.UnexpectedArgument;
+            script = arg;
+            i += 1;
+        }
+    }
+    return .{
+        .surface_id = surface orelse return error.MissingSurface,
+        .script = script orelse return error.MissingScript,
+        .max_result_bytes = max_result_bytes,
+        .out = out,
+    };
 }
 
 const Parsed = struct { surface: ?u64, arg: ?[]const u8 };
@@ -491,6 +544,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
             defer obj.deinit(gpa);
             try obj.put(gpa, "id", .{ .integer = @intCast(e.surface_id) });
             try obj.put(gpa, "script", .{ .string = e.script });
+            try obj.put(gpa, "max_result_bytes", .{ .integer = @intCast(e.max_result_bytes) });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.executeScript", .params = .{ .object = obj } } });
         },
         .get_cookies => |g| return idOnlyRequest(gpa, id, "browser.getCookies", g.surface_id),
@@ -793,6 +847,115 @@ pub const ExecuteScriptAssembler = struct {
     }
 };
 
+/// main CLI가 전체 결과를 메모리에 모으지 않고 secure spool로 쓰기 위한 프레임 검증기. decoded chunk는 caller의
+/// 고정 512 KiB scratch를 빌리고, inline만 계약상 최대 512 KiB owned buffer에 직렬화한다.
+pub const ExecuteScriptStreamValidator = struct {
+    gpa: std.mem.Allocator,
+    request_id: cp.Id,
+    result_id: ?i64 = null,
+    max_bytes: usize,
+    total_bytes: usize = 0,
+    next_seq: i64 = 0,
+    saw_short_chunk: bool = false,
+    terminal: bool = false,
+    inline_buf: std.ArrayList(u8) = .empty,
+
+    pub const Step = union(enum) {
+        need_more,
+        chunk: []const u8,
+        inline_result: []const u8,
+        done,
+        failed,
+    };
+
+    pub fn init(gpa: std.mem.Allocator, request_id: cp.Id, max_bytes: usize) ExecuteScriptStreamValidator {
+        return .{ .gpa = gpa, .request_id = request_id, .max_bytes = max_bytes };
+    }
+
+    pub fn deinit(self: *ExecuteScriptStreamValidator) void {
+        self.inline_buf.deinit(self.gpa);
+    }
+
+    pub fn feed(self: *ExecuteScriptStreamValidator, frame: []const u8, scratch: []u8) std.mem.Allocator.Error!Step {
+        if (self.terminal) return .failed;
+        var pm = cp.parseMessage(self.gpa, frame) catch return .failed;
+        defer pm.deinit();
+        return switch (pm.message) {
+            .notification => |note| if (std.mem.eql(u8, note.method, execute_script_chunk_method))
+                self.feedChunk(note.params, scratch)
+            else
+                .need_more,
+            .response => |response| self.feedResponse(response),
+            else => .failed,
+        };
+    }
+
+    fn feedChunk(self: *ExecuteScriptStreamValidator, params: ?std.json.Value, scratch: []u8) Step {
+        const obj = switch (params orelse return .failed) {
+            .object => |o| o,
+            else => return .failed,
+        };
+        const result_id = intField(obj.get("result_id")) orelse return .failed;
+        const seq = intField(obj.get("seq")) orelse return .failed;
+        if (result_id < 0 or seq != self.next_seq) return .failed;
+        if (self.result_id) |bound| {
+            if (bound != result_id) return .failed;
+        } else self.result_id = result_id;
+        const request_id = valueAsId(obj.get("request_id") orelse return .failed) orelse return .failed;
+        if (!cp.idEql(request_id, self.request_id)) return .failed;
+        const encoding = switch (obj.get("encoding") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        if (!eq(encoding, "base64-json")) return .failed;
+        const encoded = switch (obj.get("data") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return .failed;
+        const max_chunks = std.math.divCeil(usize, self.max_bytes, scratch.len) catch return .failed;
+        if (decoded_len == 0 or self.saw_short_chunk or self.next_seq >= @as(i64, @intCast(max_chunks)) or decoded_len > scratch.len or decoded_len > self.max_bytes -| self.total_bytes) return .failed;
+        std.base64.standard.Decoder.decode(scratch[0..decoded_len], encoded) catch return .failed;
+        self.total_bytes += decoded_len;
+        self.next_seq += 1;
+        self.saw_short_chunk = decoded_len < scratch.len;
+        return .{ .chunk = scratch[0..decoded_len] };
+    }
+
+    fn feedResponse(self: *ExecuteScriptStreamValidator, response: cp.Response) std.mem.Allocator.Error!Step {
+        if (!cp.idEql(response.id, self.request_id) or response.err != null) return .failed;
+        const obj = switch (response.result orelse return .failed) {
+            .object => |o| o,
+            else => return .failed,
+        };
+        const transfer = switch (obj.get("transfer") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        if (eq(transfer, "inline")) {
+            if (self.next_seq != 0) return .failed;
+            const value = obj.get("result") orelse return .failed;
+            self.inline_buf.clearRetainingCapacity();
+            var writer = std.Io.Writer.Allocating.fromArrayList(self.gpa, &self.inline_buf);
+            defer self.inline_buf = writer.toArrayList();
+            var stringify: std.json.Stringify = .{ .writer = &writer.writer, .options = .{} };
+            stringify.write(value) catch return error.OutOfMemory;
+            const bytes = writer.writer.buffered();
+            if (bytes.len > 512 * 1024 or bytes.len > self.max_bytes) return .failed;
+            self.total_bytes = bytes.len;
+            self.terminal = true;
+            return .{ .inline_result = bytes };
+        }
+        if (!eq(transfer, "chunked")) return .failed;
+        const final_result_id = intField(obj.get("result_id")) orelse return .failed;
+        const final_seq = intField(obj.get("seq_total")) orelse return .failed;
+        const final_bytes = intField(obj.get("bytes")) orelse return .failed;
+        if (self.result_id == null or final_result_id != self.result_id.? or final_seq != self.next_seq or final_bytes != self.total_bytes) return .failed;
+        self.terminal = true;
+        return .done;
+    }
+};
+
 fn valueAsId(v: std.json.Value) ?cp.Id {
     return switch (v) {
         .integer => |n| .{ .number = n },
@@ -892,6 +1055,115 @@ pub const ScreenshotAssembler = struct {
     }
 };
 
+/// screenshot 결과를 전체 메모리 재조립 없이 검증한다. chunk는 caller의 512 KiB scratch로 decode하고,
+/// PNG header·누적 byte 수·capture/seq/final metadata만 보존한다.
+pub const ScreenshotStreamValidator = struct {
+    request_id: cp.Id,
+    capture_id: ?i64 = null,
+    next_seq: i64 = 0,
+    saw_short_chunk: bool = false,
+    total_bytes: usize = 0,
+    header: [24]u8 = undefined,
+    header_len: usize = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    terminal: bool = false,
+
+    pub const max_bytes: usize = 12 * 1024 * 1024;
+    pub const Step = union(enum) {
+        need_more,
+        chunk: []const u8,
+        done,
+        failed,
+    };
+
+    pub fn init(request_id: cp.Id) ScreenshotStreamValidator {
+        return .{ .request_id = request_id };
+    }
+
+    pub fn feed(self: *ScreenshotStreamValidator, gpa: std.mem.Allocator, frame: []const u8, scratch: []u8) std.mem.Allocator.Error!Step {
+        if (self.terminal) return .failed;
+        var pm = cp.parseMessage(gpa, frame) catch return .failed;
+        defer pm.deinit();
+        return switch (pm.message) {
+            .notification => |note| if (eq(note.method, screenshot_chunk_method))
+                self.feedChunk(note.params, scratch)
+            else
+                .need_more,
+            .response => |response| self.feedResponse(response),
+            .request => .need_more,
+        };
+    }
+
+    fn feedChunk(self: *ScreenshotStreamValidator, params: ?std.json.Value, scratch: []u8) Step {
+        const obj = switch (params orelse return .failed) {
+            .object => |o| o,
+            else => return .failed,
+        };
+        const capture_id = intField(obj.get("capture_id")) orelse return .failed;
+        const seq = intField(obj.get("seq")) orelse return .failed;
+        if (capture_id < 0 or seq != self.next_seq) return .failed;
+        if (self.capture_id) |bound| {
+            if (bound != capture_id) return .failed;
+        } else self.capture_id = capture_id;
+        const encoding = switch (obj.get("encoding") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        if (!eq(encoding, "base64")) return .failed;
+        const encoded = switch (obj.get("data") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return .failed;
+        const max_chunks = std.math.divCeil(usize, max_bytes, scratch.len) catch return .failed;
+        if (decoded_len == 0 or self.saw_short_chunk or self.next_seq >= @as(i64, @intCast(max_chunks)) or decoded_len > scratch.len or decoded_len > max_bytes -| self.total_bytes) return .failed;
+        std.base64.standard.Decoder.decode(scratch[0..decoded_len], encoded) catch return .failed;
+        const header_copy_len = @min(decoded_len, self.header.len - self.header_len);
+        if (header_copy_len > 0) {
+            @memcpy(self.header[self.header_len .. self.header_len + header_copy_len], scratch[0..header_copy_len]);
+            self.header_len += header_copy_len;
+        }
+        self.total_bytes += decoded_len;
+        self.next_seq += 1;
+        self.saw_short_chunk = decoded_len < scratch.len;
+        return .{ .chunk = scratch[0..decoded_len] };
+    }
+
+    fn feedResponse(self: *ScreenshotStreamValidator, response: cp.Response) Step {
+        if (!cp.idEql(response.id, self.request_id) or response.err != null) return .failed;
+        const obj = switch (response.result orelse return .failed) {
+            .object => |o| o,
+            else => return .failed,
+        };
+        const final_capture_id = intField(obj.get("capture_id")) orelse return .failed;
+        const seq_total = intField(obj.get("seq_total")) orelse return .failed;
+        const total_bytes = intField(obj.get("bytes")) orelse return .failed;
+        const width = intField(obj.get("width")) orelse return .failed;
+        const height = intField(obj.get("height")) orelse return .failed;
+        const format = switch (obj.get("format") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        if (self.capture_id == null or final_capture_id != self.capture_id.? or seq_total != self.next_seq or total_bytes != self.total_bytes) return .failed;
+        if (!eq(format, "png") or width <= 0 or height <= 0 or width > std.math.maxInt(u32) or height > std.math.maxInt(u32)) return .failed;
+        const dims = pngHeaderDimensions(self.header[0..self.header_len]) orelse return .failed;
+        if (dims.width != width or dims.height != height) return .failed;
+        self.width = dims.width;
+        self.height = dims.height;
+        self.terminal = true;
+        return .done;
+    }
+};
+
+fn pngHeaderDimensions(bytes: []const u8) ?struct { width: u32, height: u32 } {
+    if (bytes.len < 24 or !std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n") or !std.mem.eql(u8, bytes[12..16], "IHDR")) return null;
+    const width = std.mem.readInt(u32, bytes[16..20], .big);
+    const height = std.mem.readInt(u32, bytes[20..24], .big);
+    if (width == 0 or height == 0) return null;
+    return .{ .width = width, .height = height };
+}
+
 // ══ 테스트(헤드리스, Linux CI 포함 — 순수 파싱·wire·렌더) ═══════════════════════════════════════════════════
 const testing = std.testing;
 
@@ -914,6 +1186,20 @@ test "parse: navigate/get-url/exec/get-cookies + --surface" {
         else => return error.Unexpected,
     }
     try testing.expectEqual(@as(u64, 9), (try parse(&.{ "get-cookies", "--surface", "9" })).request.get_cookies.surface_id);
+}
+
+test "parse exec: max result와 out을 순서 무관하게 적용하고 16 MiB 밖은 거부" {
+    switch (try parse(&.{ "exec", "--out", "result.json", "--max-result-bytes", "524289", "--surface", "5", "({ok:true})" })) {
+        .request => |request| {
+            try testing.expectEqual(@as(u64, 5), request.exec.surface_id);
+            try testing.expectEqual(@as(usize, 524289), request.exec.max_result_bytes);
+            try testing.expectEqualStrings("result.json", request.exec.out.?);
+            try testing.expectEqualStrings("({ok:true})", request.exec.script);
+        },
+        else => return error.Unexpected,
+    }
+    try testing.expectError(error.InvalidMaxResultBytes, parse(&.{ "exec", "--surface", "5", "--max-result-bytes", "0", "1" }));
+    try testing.expectError(error.InvalidMaxResultBytes, parse(&.{ "exec", "--surface", "5", "--max-result-bytes", "16777217", "1" }));
 }
 
 test "parse: --help → .help(파싱보다 우선)" {
@@ -1149,6 +1435,62 @@ test "ScreenshotAssembler: chunk 재조립 → PNG, seq/capture/seq_total 검증
         try testing.expectEqual(ScreenshotAssembler.Step.failed, try a.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"screenshot too large\"}}"));
         try testing.expect(std.mem.indexOf(u8, a.failureMessage(), "screenshot too large") != null);
     }
+}
+
+test "ExecuteScriptStreamValidator: chunked와 inline 결과를 bounded 검증" {
+    const request_id: cp.Id = .{ .number = 1 };
+    var scratch: [512 * 1024]u8 = undefined;
+    {
+        var validator = ExecuteScriptStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        defer validator.deinit();
+        const chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
+        switch (try validator.feed(chunk, &scratch)) {
+            .chunk => |bytes| try testing.expectEqualStrings("{\"a\":1}", bytes),
+            else => return error.Unexpected,
+        }
+        try testing.expect((try validator.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"transfer\":\"chunked\",\"result_id\":7,\"seq_total\":1,\"bytes\":7}}", &scratch)) == .done);
+    }
+    {
+        var validator = ExecuteScriptStreamValidator.init(testing.allocator, request_id, 512 * 1024);
+        defer validator.deinit();
+        switch (try validator.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"transfer\":\"inline\",\"result\":[1,true,null]}}", &scratch)) {
+            .inline_result => |bytes| try testing.expectEqualStrings("[1,true,null]", bytes),
+            else => return error.Unexpected,
+        }
+    }
+    {
+        var empty = ExecuteScriptStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        defer empty.deinit();
+        const empty_chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"\"}}";
+        try testing.expect((try empty.feed(empty_chunk, &scratch)) == .failed);
+
+        var short = ExecuteScriptStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        defer short.deinit();
+        const short0 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"e30=\"}}";
+        const short1 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":1,\"encoding\":\"base64-json\",\"data\":\"e30=\"}}";
+        try testing.expect((try short.feed(short0, &scratch)) == .chunk);
+        try testing.expect((try short.feed(short1, &scratch)) == .failed);
+    }
+}
+
+test "ScreenshotStreamValidator: PNG header와 terminal byte metadata를 검증" {
+    var validator = ScreenshotStreamValidator.init(.{ .number = 1 });
+    var scratch: [512 * 1024]u8 = undefined;
+    const chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":9,\"seq\":0,\"encoding\":\"base64\",\"data\":\"iVBORw0KGgoAAAANSUhEUgAAAAMAAAAE\"}}";
+    switch (try validator.feed(testing.allocator, chunk, &scratch)) {
+        .chunk => |bytes| try testing.expectEqual(@as(usize, 24), bytes.len),
+        else => return error.Unexpected,
+    }
+    try testing.expect((try validator.feed(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capture_id\":9,\"seq_total\":1,\"bytes\":24,\"width\":3,\"height\":4,\"format\":\"png\"}}", &scratch)) == .done);
+    try testing.expectEqual(@as(u32, 3), validator.width);
+    try testing.expectEqual(@as(u32, 4), validator.height);
+
+    var mismatch = ScreenshotStreamValidator.init(.{ .number = 1 });
+    _ = try mismatch.feed(testing.allocator, chunk, &scratch);
+    try testing.expect((try mismatch.feed(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capture_id\":9,\"seq_total\":1,\"bytes\":23,\"width\":3,\"height\":4,\"format\":\"png\"}}", &scratch)) == .failed);
+
+    var empty = ScreenshotStreamValidator.init(.{ .number = 1 });
+    try testing.expect((try empty.feed(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":9,\"seq\":0,\"encoding\":\"base64\",\"data\":\"\"}}", &scratch)) == .failed);
 }
 
 test "ExecuteScriptAssembler: id·seq·bytes 검증 후 strict JSON 재조립" {
@@ -1403,7 +1745,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  list                                   열린 web 패널을 나열(id·url·title — 대상 발견용)
         \\  navigate    --surface <id> <url>       URL로 이동
         \\  get-url     --surface <id>             현재 문서 URL 출력
-        \\  exec        --surface <id> <script>    JavaScript 실행, 결과 출력
+        \\  exec        --surface <id> [--max-result-bytes n] [--out f] <script>   JavaScript 실행, 구조화 결과 출력
         \\  get-cookies --surface <id>             현재 문서 host의 쿠키를 JSON으로 출력
         \\  set-cookie  --surface <id> --name n --value v [--domain d] [--path p] [--secure]   쿠키 설정
         \\  delete-cookie --surface <id> --name n [--domain d] [--path p]                      쿠키 삭제

@@ -131,7 +131,8 @@ pub const OutboundAccounting = struct {
 pub const TransferError = error{ InvalidResultId, InvalidDeadline, InvalidCommit };
 
 /// ABI나 socket을 모르는 순수 progressive-result 상태. `plan`은 관찰만 하고, 실제 outbound push가 성공한 뒤
-/// `commit`해야 offset/seq가 전진한다. Full/OOM 재시도에서 chunk 중복·누락이 생기지 않는 경계다.
+/// `commit`해야 offset/seq와 무진행 deadline이 함께 전진한다. Full/OOM 재시도에서 chunk 중복·누락이 생기거나
+/// 진전 없이 deadline만 늘어나는 것을 막는 경계다.
 pub const BrowserResultTransfer = struct {
     result_id: i64,
     total_bytes: usize,
@@ -157,6 +158,9 @@ pub const BrowserResultTransfer = struct {
 
     pub fn plan(self: *BrowserResultTransfer, now_ns: i128, max_chunk_bytes: usize, pressure: Pressure) Plan {
         if (now_ns >= self.deadline_ns) return .expired;
+        // 마지막 raw byte가 이미 enqueue됐으면 일반 chunk watermark보다 terminal carve-out을 우선한다.
+        // 여기서 paused를 먼저 보면 unrelated queued bytes 때문에 final이 굶어 carve-out을 둔 목적이 사라진다.
+        if (self.offset == self.total_bytes) return .complete;
         if (self.paused) {
             if (!pressure.should_resume) return .paused;
             self.paused = false;
@@ -164,7 +168,6 @@ pub const BrowserResultTransfer = struct {
             self.paused = true;
             return .paused;
         }
-        if (self.offset == self.total_bytes) return .complete;
         if (max_chunk_bytes == 0) return .paused;
         if (self.planned) |slice| return .{ .ready = slice };
         const slice: Slice = .{
@@ -176,12 +179,14 @@ pub const BrowserResultTransfer = struct {
         return .{ .ready = slice };
     }
 
-    pub fn commit(self: *BrowserResultTransfer, slice: Slice) TransferError!void {
+    pub fn commit(self: *BrowserResultTransfer, slice: Slice, next_deadline_ns: i128) TransferError!void {
         const planned = self.planned orelse return error.InvalidCommit;
         if (!std.meta.eql(planned, slice)) return error.InvalidCommit;
         if (slice.len > self.total_bytes - self.offset) return error.InvalidCommit;
+        if (next_deadline_ns <= 0) return error.InvalidDeadline;
         self.offset += slice.len;
         self.seq += 1;
+        self.deadline_ns = next_deadline_ns;
         self.planned = null;
     }
 };
@@ -257,12 +262,27 @@ test "BrowserResultTransfer: push 성공 commit 전에는 offset과 seq가 바�
     try std.testing.expectEqual(@as(usize, 0), first.seq);
     const retry = (transfer.plan(2, 4, pressure)).ready;
     try std.testing.expectEqualDeep(first, retry);
-    try std.testing.expectError(error.InvalidCommit, transfer.commit(.{ .offset = 0, .len = 3, .seq = 0 }));
-    try transfer.commit(first);
+    try std.testing.expectError(error.InvalidCommit, transfer.commit(.{ .offset = 0, .len = 3, .seq = 0 }, 101));
+    try std.testing.expectError(error.InvalidDeadline, transfer.commit(first, 0));
+    try transfer.commit(first, 101);
     const second = (transfer.plan(3, 4, pressure)).ready;
     try std.testing.expectEqual(@as(usize, 4), second.offset);
     try std.testing.expectEqual(@as(usize, 1), second.seq);
-    try std.testing.expectError(error.InvalidCommit, transfer.commit(first));
+    try std.testing.expectError(error.InvalidCommit, transfer.commit(first, 102));
+}
+
+test "BrowserResultTransfer: 성공한 chunk만 무진행 deadline을 연장한다" {
+    var transfer = try BrowserResultTransfer.init(8, 8, 10);
+    const pressure: BrowserResultTransfer.Pressure = .{ .should_pause = false, .should_resume = true };
+    const first = (transfer.plan(9, 4, pressure)).ready;
+
+    // enqueue 실패를 가정해 commit하지 않으면 원래 deadline에서 만료된다.
+    try std.testing.expect(transfer.plan(10, 4, pressure) == .expired);
+
+    // 같은 slice를 성공적으로 재시도해 commit하면 새 무진행 구간이 열린다.
+    try transfer.commit(first, 20);
+    try std.testing.expect(transfer.plan(19, 4, pressure) == .ready);
+    try std.testing.expect(transfer.plan(20, 4, pressure) == .expired);
 }
 
 test "BrowserResultTransfer: high에서 멈추고 low 이하에서만 재개하며 deadline은 우선한다" {
@@ -277,11 +297,11 @@ test "BrowserResultTransfer: 마지막 slice와 round-robin 선택은 bounded다
     var transfer = try BrowserResultTransfer.init(2, 5, 100);
     const pressure: BrowserResultTransfer.Pressure = .{ .should_pause = false, .should_resume = true };
     const first = (transfer.plan(1, 4, pressure)).ready;
-    try transfer.commit(first);
+    try transfer.commit(first, 101);
     const last = (transfer.plan(2, 4, pressure)).ready;
     try std.testing.expectEqual(@as(usize, 1), last.len);
-    try transfer.commit(last);
-    try std.testing.expect(transfer.plan(3, 4, pressure) == .complete);
+    try transfer.commit(last, 102);
+    try std.testing.expect(transfer.plan(3, 4, .{ .should_pause = true, .should_resume = false }) == .complete);
 
     var cursor: RoundRobinCursor = .{};
     try std.testing.expectEqual(@as(?usize, 0), cursor.take(3));

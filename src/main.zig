@@ -561,6 +561,8 @@ fn writeBrowserCliUsage(stderr: *std.Io.Writer, err: maru.cli.browser.ParseError
         error.MissingSurfaceValue => "--surface 에는 값이 필요합니다",
         error.MissingUrl => "navigate 에는 url이 필요합니다",
         error.MissingScript => "exec 에는 script가 필요합니다",
+        error.MissingMaxResultBytesValue => "exec --max-result-bytes 에는 값이 필요합니다",
+        error.InvalidMaxResultBytes => "exec --max-result-bytes 는 1..16777216 범위의 정수여야 합니다",
         error.MissingOutValue => "screenshot --out 에는 값이 필요합니다",
         error.MissingRectValue => "screenshot --rect 에는 값이 필요합니다",
         error.MissingScaleValue => "screenshot --scale 에는 값이 필요합니다",
@@ -616,6 +618,7 @@ fn runBrowserRequest(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
+    if (req == .exec) return runBrowserExecuteScript(io, allocator, req.exec, stdout, stderr);
     const kind = req.kind();
     const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, req, .{ .number = 1 });
     defer allocator.free(request_bytes);
@@ -625,9 +628,120 @@ fn runBrowserRequest(
     try stdout.flush();
 }
 
+fn runBrowserExecuteScript(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    exec_cmd: maru.cli.browser.ExecCmd,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const request_id: maru.session.control_plane.Id = .{ .number = 1 };
+    const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, .{ .exec = exec_cmd }, request_id);
+    defer allocator.free(request_bytes);
+    const fd = try connectSendControl(io, allocator, request_bytes, stderr);
+    defer _ = std.c.close(fd);
+
+    const spool_target = exec_cmd.out orelse "/tmp/.maru-browser-exec-spool";
+    var spool = createBrowserSpool(std.Io.Dir.cwd(), io, spool_target) catch
+        return browserExecuteError(stderr, "secure spool을 만들 수 없습니다");
+    defer spool.deinit(io);
+
+    var validator = maru.cli.browser.ExecuteScriptStreamValidator.init(allocator, request_id, exec_cmd.max_result_bytes);
+    defer validator.deinit();
+    var framer: maru.session.control_plane.Framer = .{};
+    defer framer.deinit(allocator);
+    var decode_scratch: [512 * 1024]u8 = undefined;
+    done: while (true) {
+        while (framer.next() catch null) |line| {
+            switch (try validator.feed(line, &decode_scratch)) {
+                .need_more => {},
+                .chunk => |bytes| {
+                    spool.file.writeStreamingAll(io, bytes) catch return browserExecuteError(stderr, "secure spool 쓰기에 실패했습니다");
+                },
+                .inline_result => |bytes| {
+                    spool.file.writeStreamingAll(io, bytes) catch return browserExecuteError(stderr, "secure spool 쓰기에 실패했습니다");
+                    break :done;
+                },
+                .done => break :done,
+                .failed => return browserExecuteError(stderr, "서버가 잘못된 executeScript stream을 반환했습니다"),
+            }
+        }
+        var read_buf: [4096]u8 = undefined;
+        const n = std.c.read(fd, &read_buf, read_buf.len);
+        if (n <= 0) return browserExecuteError(stderr, "서버가 응답을 끝내지 않았습니다");
+        framer.push(allocator, read_buf[0..@intCast(n)]) catch return error.OutOfMemory;
+    }
+    if (!validateJsonSpool(io, allocator, spool.file, validator.total_bytes))
+        return browserExecuteError(stderr, "executeScript 결과가 strict JSON이 아닙니다");
+    spool.file.sync(io) catch return browserExecuteError(stderr, "secure spool 동기화에 실패했습니다");
+
+    if (exec_cmd.out) |path| {
+        spool.link(io) catch |err| {
+            const message = if (err == error.PathAlreadyExists) "출력 파일이 이미 존재합니다" else "출력 파일을 원자적으로 게시할 수 없습니다";
+            return browserExecuteError(stderr, message);
+        };
+        try stdout.print("executeScript: {d} bytes → {s}\n", .{ validator.total_bytes, path });
+    } else {
+        var offset: u64 = 0;
+        var output_buf: [64 * 1024]u8 = undefined;
+        while (offset < validator.total_bytes) {
+            const wanted = @min(output_buf.len, validator.total_bytes - @as(usize, @intCast(offset)));
+            const n = spool.file.readPositionalAll(io, output_buf[0..wanted], offset) catch return browserExecuteError(stderr, "secure spool 읽기에 실패했습니다");
+            if (n == 0) return browserExecuteError(stderr, "secure spool이 불완전합니다");
+            try stdout.writeAll(output_buf[0..n]);
+            offset += n;
+        }
+        try stdout.writeAll("\n");
+    }
+    try stdout.flush();
+}
+
+fn validateJsonSpool(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, total_bytes: usize) bool {
+    var scanner = std.json.Scanner.initStreaming(allocator);
+    defer scanner.deinit();
+    var offset: u64 = 0;
+    var input: [64 * 1024]u8 = undefined;
+    while (offset < total_bytes) {
+        const wanted = @min(input.len, total_bytes - @as(usize, @intCast(offset)));
+        const n = file.readPositionalAll(io, input[0..wanted], offset) catch return false;
+        if (n == 0) return false;
+        scanner.feedInput(input[0..n]);
+        while (true) {
+            const token = scanner.next() catch |err| switch (err) {
+                error.BufferUnderrun => break,
+                else => return false,
+            };
+            if (scanner.stackHeight() > 128) return false;
+            if (token == .end_of_document) return offset + n == total_bytes;
+        }
+        offset += n;
+    }
+    scanner.endInput();
+    while (true) {
+        const token = scanner.next() catch return false;
+        if (scanner.stackHeight() > 128) return false;
+        if (token == .end_of_document) return true;
+    }
+}
+
+fn browserExecuteError(stderr: *std.Io.Writer, message: []const u8) error{UnknownCommand} {
+    stderr.print("maru browser exec: {s}\n", .{message}) catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
+}
+
+/// executeScript와 screenshot이 공유하는 파일 공개 경계. 임시 파일도 처음부터 0600이고 `link`는 기존 경로를
+/// 덮어쓰지 않는다. 결과 검증이 끝나기 전에는 target 이름에 나타나지 않으며, 실패 시 Atomic.deinit이 임시 파일을 지운다.
+fn createBrowserSpool(dir: std.Io.Dir, io: std.Io, target: []const u8) std.Io.File.Atomic.InitError!std.Io.File.Atomic {
+    return dir.createFileAtomic(io, target, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+        .replace = false,
+    });
+}
+
 /// `maru browser screenshot`을 컨트롤 소켓에 왕복한다(§9.6·§9.5.7). 단일 응답이 아니라 **chunk 스트림**이라
-/// `fetchControlResponse`(첫 응답만)와 달리 `connectSendControl`로 열고 프레임을 `ScreenshotAssembler`에 흘려 넣어 PNG를
-/// 재조립한 뒤 `--out`(파일) 또는 stdout(raw 바이너리)으로 쓴다. grant 대기(§9.2 Model B)로 read가 오래 블록될 수 있다.
+/// `fetchControlResponse`(첫 응답만)와 달리 `connectSendControl`로 열고 프레임을 고정 scratch로 검증·decode해 secure
+/// spool에 쓴다. 최종 metadata와 PNG header까지 검증한 뒤에만 원자적 `--out` 또는 stdout을 공개한다.
 fn runBrowserScreenshot(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -641,16 +755,25 @@ fn runBrowserScreenshot(
     const fd = try connectSendControl(io, allocator, request_bytes, stderr);
     defer _ = c.close(fd);
 
-    var assembler = maru.cli.browser.ScreenshotAssembler.init(allocator);
-    defer assembler.deinit();
+    const request_id: maru.session.control_plane.Id = .{ .number = 1 };
+    const spool_target = shot.out orelse "/tmp/.maru-browser-screenshot-spool";
+    var spool = createBrowserSpool(std.Io.Dir.cwd(), io, spool_target) catch
+        return browserScreenshotError(stderr, "secure spool을 만들 수 없습니다");
+    defer spool.deinit(io);
+
+    var validator = maru.cli.browser.ScreenshotStreamValidator.init(request_id);
     var framer: maru.session.control_plane.Framer = .{};
     defer framer.deinit(allocator);
+    var decode_scratch: [512 * 1024]u8 = undefined;
     done: while (true) {
         while (framer.next() catch null) |line| {
-            switch (assembler.feed(line) catch return error.OutOfMemory) {
+            switch (validator.feed(allocator, line, &decode_scratch) catch return error.OutOfMemory) {
                 .need_more => {},
+                .chunk => |bytes| {
+                    spool.file.writeStreamingAll(io, bytes) catch return browserScreenshotError(stderr, "secure spool 쓰기에 실패했습니다");
+                },
                 .done => break :done,
-                .failed => return browserScreenshotError(stderr, assembler.failureMessage()),
+                .failed => return browserScreenshotError(stderr, "서버가 잘못된 screenshot stream을 반환했습니다"),
             }
         }
         var buf: [4096]u8 = undefined;
@@ -659,18 +782,24 @@ fn runBrowserScreenshot(
         framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
 
-    // 완성 → PNG를 파일(--out) 또는 stdout(raw 바이너리 — `> page.png` 리다이렉트)으로.
-    const png = assembler.png();
+    spool.file.sync(io) catch return browserScreenshotError(stderr, "secure spool 동기화에 실패했습니다");
     if (shot.out) |path| {
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = png, .flags = .{ .truncate = true } }) catch |e| {
-            var msgbuf: [512]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msgbuf, "파일을 쓸 수 없습니다: {s} ({s})", .{ path, @errorName(e) }) catch "파일을 쓸 수 없습니다";
-            return browserScreenshotError(stderr, msg);
+        spool.link(io) catch |err| {
+            const message = if (err == error.PathAlreadyExists) "출력 파일이 이미 존재합니다" else "출력 파일을 원자적으로 게시할 수 없습니다";
+            return browserScreenshotError(stderr, message);
         };
-        try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ assembler.width, assembler.height, png.len, path });
+        try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ validator.width, validator.height, validator.total_bytes, path });
         try stdout.flush();
     } else {
-        try stdout.writeAll(png);
+        var offset: u64 = 0;
+        var output_buf: [64 * 1024]u8 = undefined;
+        while (offset < validator.total_bytes) {
+            const wanted = @min(output_buf.len, validator.total_bytes - @as(usize, @intCast(offset)));
+            const n = spool.file.readPositionalAll(io, output_buf[0..wanted], offset) catch return browserScreenshotError(stderr, "secure spool 읽기에 실패했습니다");
+            if (n == 0) return browserScreenshotError(stderr, "secure spool이 불완전합니다");
+            try stdout.writeAll(output_buf[0..n]);
+            offset += n;
+        }
         try stdout.flush();
     }
 }
@@ -871,4 +1000,28 @@ fn printUsage(writer: *std.Io.Writer) !void {
 
 test "development CLI imports maru module" {
     try std.testing.expectEqual(@as(u16, 80), maru.terminal.Size.default.cols);
+}
+
+test "browser secure spool은 0600으로 원자 공개하고 기존 파일을 덮어쓰지 않는다" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var first = try createBrowserSpool(tmp.dir, io, "result.bin");
+    defer first.deinit(io);
+    try first.file.writeStreamingAll(io, "first");
+    try first.link(io);
+    const stat = try tmp.dir.statFile(io, "result.bin", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+
+    var second = try createBrowserSpool(tmp.dir, io, "result.bin");
+    defer second.deinit(io);
+    try second.file.writeStreamingAll(io, "second");
+    try std.testing.expectError(error.PathAlreadyExists, second.link(io));
+
+    var buf: [5]u8 = undefined;
+    const file = try tmp.dir.openFile(io, "result.bin", .{});
+    defer file.close(io);
+    try std.testing.expectEqual(@as(usize, 5), try file.readPositionalAll(io, &buf, 0));
+    try std.testing.expectEqualStrings("first", &buf);
 }

@@ -57,6 +57,10 @@ comptime {
 /// marshal 큐는 `*PendingRequest`만 담는다. `request_bytes`는 연결 스레드가 `cross_gpa`로 소유(serve 끝에 해제),
 /// 메인 drain은 **빌려 읽기만** 한다. `response`는 메인 drain이 `cross_gpa`로 채우고 연결 스레드가 해제한다.
 pub const PendingRequest = struct {
+    /// 프로세스 수명 동안 재사용하지 않는 연결 ID. async registry는 연결 스택 주소 대신 이 값으로
+    /// 결과가 원래 요청 연결에 남아 있는지 교차 확인한다.
+    connection_id: u64 = 0,
+    connection_fd: c.fd_t = -1,
     /// 요청 프레임 바이트(개행 제외). 연결 스레드 소유(cross_gpa), 메인은 read-only.
     request_bytes: []const u8,
     /// caller가 주장한 self surface_id(auth.self 셀렉터, §8.4). 없으면 null(maru 밖 shell 등).
@@ -77,7 +81,7 @@ pub const PendingRequest = struct {
     /// 메인 drain이 채우는 응답 바이트(cross_gpa 소유). 연결 스레드가 write 후 해제. cancelled면 null.
     response: ?[]u8 = null,
 
-    pub const State = enum { pending, done, cancelled };
+    pub const State = enum { pending, done, enqueued, cancelled };
 
     /// 연결 스레드: 메인이 resolve/cancel할 때까지 대기하고 최종 상태를 돌려준다.
     fn waitResolved(self: *PendingRequest) State {
@@ -109,6 +113,17 @@ pub const PendingRequest = struct {
         defer self.mutex.unlock(self.io);
         if (self.state == .pending) self.state = .cancelled;
         self.cond.broadcast(self.io);
+    }
+
+    /// 메인이 terminal frame을 요청 연결 outbound에 직접 enqueue한 뒤 reader를 깨운다. reader는 같은 응답을
+    /// 다시 push하지 않고 다음 요청으로 넘어간다.
+    fn resolveEnqueued(self: *PendingRequest) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.state != .pending) return false;
+        self.state = .enqueued;
+        self.cond.broadcast(self.io);
+        return true;
     }
 };
 
@@ -273,6 +288,7 @@ pub const OutboundChannel = struct {
     mutex: std.Io.Mutex = .init,
     not_empty: std.Io.Condition = .init,
     closed: bool = false,
+    aborted: bool = false,
     writer_owned: ?WriterOwned = null,
     max_wire_bytes: usize,
     terminal_wire_reserve: usize = 0,
@@ -394,11 +410,32 @@ pub const OutboundChannel = struct {
         return self.accountingLocked().total_bytes;
     }
 
+    pub fn isClosed(self: *OutboundChannel) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.closed;
+    }
+
     /// 메인: 채널 종료 — 대기 writer를 깨워(broadcast) 남은 프레임 drain 후 종료(null)하게 한다.
     pub fn close(self: *OutboundChannel) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.closed = true;
+        self.not_empty.broadcast(self.io);
+    }
+
+    /// graceful close와 달리 queued frame을 즉시 폐기한다. writer-owned는 writer defer가 반환하므로 여기서
+    /// 해제하지 않는다. caller가 이어서 socket shutdown을 호출해 partial write를 끝낸다.
+    pub fn abort(self: *OutboundChannel, gpa: std.mem.Allocator) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.aborted) return;
+        const before = self.accountingLocked();
+        self.aborted = true;
+        self.closed = true;
+        _ = self.q.purgeAll(gpa);
+        const after = self.accountingLocked();
+        if (self.process_budget) |budget| budget.replace(before, after) catch unreachable;
         self.not_empty.broadcast(self.io);
     }
 
@@ -412,11 +449,15 @@ pub const OutboundChannel = struct {
     pub fn shouldPause(self: *OutboundChannel) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const local = self.accountingLocked().total_bytes;
-        if (local >= self.max_wire_bytes - self.max_wire_bytes / 4) return true;
+        const local = self.accountingLocked();
+        const local_general_bytes = self.max_wire_bytes - self.terminal_wire_reserve;
+        const local_general_frames = self.q.max - self.terminal_frame_reserve;
+        if (local.generalBytes() >= local_general_bytes - local_general_bytes / 4) return true;
+        if (local.generalFrames() >= local_general_frames) return true;
         if (self.process_budget) |budget| {
-            const global = budget.snapshot().total_bytes;
-            return global >= budget.max_wire_bytes - budget.max_wire_bytes / 4;
+            const global = budget.snapshot();
+            const global_general_bytes = budget.max_wire_bytes - budget.terminal_reserve_bytes;
+            return global.generalBytes() >= global_general_bytes - global_general_bytes / 4;
         }
         return false;
     }
@@ -424,8 +465,15 @@ pub const OutboundChannel = struct {
     pub fn shouldResume(self: *OutboundChannel) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.accountingLocked().total_bytes > self.max_wire_bytes / 2) return false;
-        if (self.process_budget) |budget| return budget.snapshot().total_bytes <= budget.max_wire_bytes / 2;
+        const local = self.accountingLocked();
+        const local_general_bytes = self.max_wire_bytes - self.terminal_wire_reserve;
+        const local_general_frames = self.q.max - self.terminal_frame_reserve;
+        if (local.generalBytes() > local_general_bytes / 2 or local.generalFrames() > local_general_frames / 2) return false;
+        if (self.process_budget) |budget| {
+            const global = budget.snapshot();
+            const global_general_bytes = budget.max_wire_bytes - budget.terminal_reserve_bytes;
+            return global.generalBytes() <= global_general_bytes / 2;
+        }
         return true;
     }
 
@@ -620,10 +668,18 @@ pub const StartError = cs.BindError || std.Thread.SpawnError || QueueError;
 /// Swift callback id는 서버 stop/start를 넘어 재사용하지 않는다. 예전 WebKit callback이 재시작한 서버의 새 요청을
 /// 완료하는 ABA를 막기 위한 process-lifetime 원자 발급기다(0은 sentinel이라 건너뜀).
 var process_next_async_id: std.atomic.Value(u64) = .init(1);
+var process_next_connection_id: std.atomic.Value(u64) = .init(1);
 
 fn nextAsyncId() u64 {
     while (true) {
         const id = process_next_async_id.fetchAdd(1, .monotonic);
+        if (id != 0) return id;
+    }
+}
+
+fn nextConnectionId() u64 {
+    while (true) {
+        const id = process_next_connection_id.fetchAdd(1, .monotonic);
         if (id != 0) return id;
     }
 }
@@ -782,6 +838,28 @@ pub const ControlServer = struct {
         return false;
     }
 
+    /// terminal을 caller가 같은 outbound FIFO에 직접 넣은 경우 pending 수명만 끝낸다.
+    pub fn completeInFlightEnqueued(self: *ControlServer, async_id: u64) bool {
+        for (self.in_flight.items, 0..) |e, i| {
+            if (e.id == async_id) {
+                if (!e.pending.resolveEnqueued()) return false;
+                _ = self.in_flight.swapRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// 현재 in-flight가 붙잡은 안정 연결을 abort한다. pending이 resolve되기 전에는 connection stack/fd가
+    /// 살아 있으므로 raw 포인터를 tick 사이 저장하지 않고 이 호출 안에서만 사용한다.
+    pub fn abortInFlightConnection(self: *ControlServer, async_id: u64) bool {
+        const pending = self.inFlightPending(async_id) orelse return false;
+        const outbound = pending.outbound orelse return false;
+        outbound.abort(self.cross_gpa);
+        if (pending.connection_fd >= 0) cs.shutdownBoth(pending.connection_fd);
+        return true;
+    }
+
     /// **§5-async/5e-2b(메인 전용)**: `async_id`의 in-flight pending을 **제거 없이** 돌려준다(없으면 null). 5e-2b
     /// complete가 응답 직렬화에 필요한 원 `request_bytes`(pending 소유, resolve 전이라 유효)를 재파싱하려고 조회한다.
     pub fn inFlightPending(self: *ControlServer, async_id: u64) ?*PendingRequest {
@@ -911,10 +989,10 @@ pub const ControlServer = struct {
     fn connThread(self: *ControlServer, conn_in: cs.Connection) void {
         var conn = conn_in;
         // 연결당 통합 outbound 큐(응답+이벤트). reader가 응답 push, writer가 drain→소켓 write(단일 writer 불변).
-        // 5f-5b activation 전에는 기존 screenshot이 한 callback에서 최대 24 chunk를 동기 enqueue한다. 여기서 4 MiB를
-        // 먼저 켜면 partial screenshot 뒤 terminal 없는 회귀가 생기므로, screenshot/executeScript pump와 함께 다음
-        // activation slice에서 initWithProcessBudget으로 원자 전환한다.
-        var outbound = OutboundChannel.init(self.io, self.outbound_capacity);
+        // screenshot/executeScript가 같은 progressive pump를 쓰므로 queued+writer-owned를 connection/process
+        // byte cap 아래 원자 회계한다. terminal carve-out은 취소/완료가 일반 chunk에 막히지 않게 남긴다.
+        var outbound = OutboundChannel.initWithProcessBudget(self.io, self.outbound_capacity, &self.process_outbound_budget);
+        const connection_id = nextConnectionId();
         const writer = std.Thread.spawn(.{}, writerThread, .{ self, conn.fd, &outbound }) catch {
             // writer spawn 실패 → 응답 write 경로 없음 → 이 연결 포기(reader 안 돌림). 정리 후 카운터 감소.
             _ = self.subscriber_reg.purgeOutbound(&outbound); // serve 전이라 구독 0(no-op)이나 free 전 정리 불변식 유지
@@ -923,7 +1001,7 @@ pub const ControlServer = struct {
             self.connDone();
             return;
         };
-        self.serveConnection(&conn, &outbound); // reader: auth 1회 + 요청 루프(응답을 outbound에 push)
+        self.serveConnection(&conn, connection_id, &outbound); // reader: auth 1회 + 요청 루프(응답을 outbound에 push)
         outbound.close(); // reader 종료 → writer가 남은 프레임 drain 후 popWait null로 종료
         writer.join(); // conn.fd write가 끝난 뒤에만 close(아래) — writer의 fd 사용과 경합 방지
         // 5f-0b-3a-2: 연결 drop — 이 연결의 구독을 registry에서 제거(leaf lock). **outbound free 전에** 해야 메인
@@ -963,7 +1041,7 @@ pub const ControlServer = struct {
     /// 같은 연결로 다중 요청. 요청은 순차(현 요청 응답을 push한 뒤 다음 read) — 응답 소켓 write는 writer 스레드가 한다
     /// (reader는 소켓에 안 씀 = 단일 writer 불변). EOF/타임아웃/에러/종료면 루프를 나오고, connThread가 outbound close→
     /// writer join→conn close를 한다. 코어/트리/collector 접근 0(전부 메인 marshal). cross_gpa만 쓴다.
-    fn serveConnection(self: *ControlServer, conn: *cs.Connection, outbound: *OutboundChannel) void {
+    fn serveConnection(self: *ControlServer, conn: *cs.Connection, connection_id: u64, outbound: *OutboundChannel) void {
         cs.setReadTimeoutMs(conn.fd, self.read_timeout_ms);
         cs.setWriteTimeoutMs(conn.fd, self.read_timeout_ms); // #2: 응답을 안 읽는 client에 writer write가 무한 블록하지 않게(read와 대칭).
         var framer: cp.Framer = .{};
@@ -1005,12 +1083,13 @@ pub const ControlServer = struct {
             const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
             defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 iteration 끝(대기 후)에 해제
 
-            var pending: PendingRequest = .{ .request_bytes = req_copy, .selector = auth.selector, .cap_nonces = session_caps[0..n_caps], .outbound = outbound, .io = self.io };
+            var pending: PendingRequest = .{ .connection_id = connection_id, .connection_fd = conn.fd, .request_bytes = req_copy, .selector = auth.selector, .cap_nonces = session_caps[0..n_caps], .outbound = outbound, .io = self.io };
             self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon(req_copy는 defer가 해제)
 
             switch (pending.waitResolved()) {
                 .cancelled => return, // 서버 종료 — 응답 없이 abandon
                 .pending => return, // 도달 불가(waitResolved는 pending에서 안 나감)
+                .enqueued => continue, // 메인이 terminal을 같은 FIFO에 직접 넣음 — 중복 push 금지
                 .done => {
                     // **null 응답 = "종료" 계약(§5-async)**: reap timeout(hung browser op)·메인 collect OOM·browser
                     // setup 실패가 `resolve(null)`로 온다 → 응답 없이 **연결을 닫는다**(옛 one-shot과 동형). 지속 루프에서
@@ -1217,6 +1296,49 @@ test "OutboundChannel: writer-owned purge key는 queued purge와 별도로 연�
     try testing.expectEqual(co.wireBytes(writing.bytes), process.snapshot().total_bytes);
     ch.writeComplete(writing.bytes);
     try testing.expectEqual(@as(usize, 0), process.snapshot().total_bytes);
+}
+
+test "OutboundChannel: abort는 queued를 즉시 버리고 writer-owned 회계만 writeComplete까지 유지" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 64, 16);
+    var ch = OutboundChannel.initWithLimits(std.testing.io, 8, 32, 8, 2, &process);
+    defer ch.deinit(testing.allocator);
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "writing") });
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "queued") });
+    const writing = ch.popWait().?;
+    defer testing.allocator.free(writing.bytes);
+
+    ch.abort(testing.allocator);
+    try testing.expect(ch.isClosed());
+    try testing.expectEqual(@as(usize, 0), ch.q.len());
+    try testing.expectEqual(co.wireBytes(writing.bytes), ch.totalWireBytes());
+    const rejected = co.Frame{ .bytes = try testing.allocator.dupe(u8, "rejected") };
+    try testing.expectError(error.QueueClosed, ch.push(testing.allocator, rejected));
+    testing.allocator.free(rejected.bytes);
+    ch.writeComplete(writing.bytes);
+    try testing.expectEqual(@as(usize, 0), process.snapshot().total_bytes);
+    try testing.expect(ch.popWait() == null);
+}
+
+test "OutboundChannel: chunk watermark는 terminal byte와 frame carve-out을 미리 보존" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 200, 40);
+    var frames = OutboundChannel.initWithLimits(std.testing.io, 8, 100, 20, 2, &process);
+    defer frames.deinit(testing.allocator);
+    for (0..6) |_| try frames.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "x") });
+    try testing.expect(frames.shouldPause()); // general frame cap=8-2
+    for (0..4) |_| {
+        const frame = frames.popWait().?;
+        frames.writeComplete(frame.bytes);
+        testing.allocator.free(frame.bytes);
+    }
+    try testing.expect(frames.shouldResume()); // general frames=2 <= cap/2
+
+    var bytes = OutboundChannel.initWithLimits(std.testing.io, 8, 100, 20, 2, &process);
+    defer bytes.deinit(testing.allocator);
+    try bytes.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ12345678") });
+    try testing.expect(bytes.shouldPause()); // wire 61 >= 75% of general byte cap 80
+    const frame = bytes.popWait().?;
+    bytes.writeComplete(frame.bytes);
+    testing.allocator.free(frame.bytes);
 }
 
 test "ProcessOutboundBudget: 동시 연결 push도 global hard cap을 넘지 않는다" {
@@ -1558,6 +1680,17 @@ test "§5-async deferRequest→completeInFlight: 응답을 나중에 되돌린�
     // 리뷰 [1]: 미발견 경로가 넘긴 **response 버퍼를 소유 인수해 free**한다(안 하면 누수 — testing.allocator가 잡음).
     const late = try testing.allocator.dupe(u8, "late-callback-result");
     try testing.expect(!srv.completeInFlight(id, late)); // reap/완료된 id에 늦은 콜백 → false + late free됨(누수 없음)
+}
+
+test "§5-async 직접 enqueue 완료는 pending을 enqueued로 깨우고 registry에서 한 번만 제거" {
+    var srv = inflightSrv(8);
+    defer srv.in_flight.deinit(testing.allocator);
+    var pending: PendingRequest = .{ .connection_id = 17, .request_bytes = "req", .selector = null, .io = std.testing.io };
+    const id = try srv.deferRequest(&pending, std.math.maxInt(i128));
+    try testing.expect(srv.completeInFlightEnqueued(id));
+    try testing.expectEqual(PendingRequest.State.enqueued, pending.state);
+    try testing.expectEqual(@as(usize, 0), srv.in_flight.items.len);
+    try testing.expect(!srv.completeInFlightEnqueued(id));
 }
 
 test "§5-async deferRequest bounded: max_in_flight 초과 → TooManyInFlight(호출자가 에러 resolve)" {

@@ -971,14 +971,17 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
     };
     const bmethod = parseBrowserMethod(cp.parseMethod(req.method).rest) orelse return errorResponse(gpa, req.id, .internal_error);
     if (status != .success) {
-        if (bmethod == .wait) {
+        if (bmethod == .wait or bmethod == .execute_script) {
             return switch (status) {
-                .timeout => serializeWaitTimeoutError(gpa, req),
+                .timeout => if (bmethod == .wait)
+                    serializeWaitTimeoutError(gpa, req)
+                else
+                    cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), null),
                 .invalid_params => cp.serializeError(gpa, req.id, .invalid_params, if (result.len > 0) result else "Invalid selector", null),
                 .process_exited => cp.serializeError(gpa, req.id, .process_exited, cp.ErrorCode.process_exited.defaultMessage(), null),
                 .unauthorized => cp.serializeError(gpa, req.id, .unauthorized, cp.ErrorCode.unauthorized.defaultMessage(), null),
                 .success => unreachable,
-                .failed => cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else "browser wait failed", null),
+                .failed => cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
             };
         }
         const msg = if (result.len > 0) result else "browser op failed";
@@ -1064,6 +1067,12 @@ pub const BrowserOp = struct {
     /// null=capability가 직접 인가. non-null=pane-bound confirm grant가 인가한 op. 장기 wait revoke가 capability-origin
     /// 요청을 잘못 취소하지 않도록 provenance를 보존한다(짧은 기존 op의 실행 의미는 바꾸지 않음).
     pane_grant: ?GrantProvenance = null,
+    /// capability-origin이면 실제 인가에 사용된 raw nonce의 값 복사. 장기 실행 callback에서 현재 revoke/TTL을
+    /// 재검사한다. pane grant origin이면 null이다.
+    capability_nonce: ?capmod.Nonce = null,
+    capability_generation: ?u64 = null,
+    /// executeScript가 실행 전에 예약할 선언 결과 바이트. 다른 method는 0.
+    max_result_bytes: usize = 0,
 };
 
 pub const GrantProvenance = struct {
@@ -1262,7 +1271,35 @@ pub fn browserOpFromRequest(
         gpa.free(arg);
         return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
     }
-    return .{ .op = .{ .surface_id = target_id, .method = bmethod, .arg = arg, .pane_grant = pane_grant } };
+    const max_result_bytes = if (bmethod == .execute_script)
+        (parseExecuteScriptParams(req.params) catch unreachable).max_result_bytes
+    else
+        0;
+    return .{ .op = .{
+        .surface_id = target_id,
+        .method = bmethod,
+        .arg = arg,
+        .pane_grant = pane_grant,
+        .max_result_bytes = max_result_bytes,
+    } };
+}
+
+/// 실행 전 aggregate 예산 부족. 정확한 사용량은 load oracle이 되므로 노출하지 않는다.
+pub fn serializeResourceBusy(gpa: std.mem.Allocator, request_bytes: []const u8, resource: []const u8) std.mem.Allocator.Error![]u8 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "resource", .{ .string = resource });
+    try data.put(gpa, "retryable", .{ .bool = true });
+    return cp.serializeError(gpa, req.id, .resource_busy, cp.ErrorCode.resource_busy.defaultMessage(), .{ .object = data });
 }
 
 /// 인가 실패한 **valid**(유효 메서드·존재 web surface) browser 요청의 최종 판정(1e-confirm-1c). `pane_selector`가 있으면
@@ -1456,6 +1493,7 @@ test "dispatchBrowser: 유효 browser cap + web surface → BrowserOp{surface_id
     defer testing.allocator.free(op_js.arg);
     try testing.expectEqual(BrowserMethod.execute_script, op_js.method);
     try testing.expectEqualStrings("document.title", op_js.arg);
+    try testing.expectEqual(execute_script_default_max_result_bytes, op_js.max_result_bytes);
 }
 
 // ── 5f-0b-3b: browser.subscribe — async op이 아니라 동기 `.subscribe`(surface + 필터). L4가 registry 등록. ──
@@ -2508,6 +2546,28 @@ test "serializeBrowserResponseStatus(wait): success·timeout data·invalid selec
         const w = try serializeBrowserResponseStatus(testing.allocator, request, .unauthorized, "");
         defer testing.allocator.free(w);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+    }
+}
+
+test "executeScript lifecycle errors: resource-busy와 timeout은 stable wire code/data" {
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
+    {
+        const wire = try serializeResourceBusy(testing.allocator, request, "browser-result-bytes");
+        defer testing.allocator.free(wire);
+        var pm = try cp.parseMessage(testing.allocator, wire);
+        defer pm.deinit();
+        const e = pm.message.response.err.?;
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.resource_busy)), e.code);
+        try testing.expectEqualStrings("browser-result-bytes", e.data.?.object.get("resource").?.string);
+        try testing.expect(e.data.?.object.get("retryable").?.bool);
+        try testing.expect(e.data.?.object.get("used_bytes") == null);
+    }
+    {
+        const wire = try serializeBrowserResponseStatus(testing.allocator, request, .timeout, "");
+        defer testing.allocator.free(wire);
+        var pm = try cp.parseMessage(testing.allocator, wire);
+        defer pm.deinit();
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.timeout)), pm.message.response.err.?.code);
     }
 }
 

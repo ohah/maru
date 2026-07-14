@@ -45,6 +45,7 @@ const capmod = @import("control_capability.zig");
 const cs = @import("control_surface.zig");
 const cev = @import("control_events.zig"); // 5f-0b-3b: browser.subscribe params의 events 필터(EventKind/EventFilter)
 const cpg = @import("control_pane_grant.zig"); // 1e-confirm-1b: pane-bound confirm-grant 조회(§9.2 Model B — 세션 cap OR pane grant 가법)
+pub const result_budget = @import("control_result.zig"); // 5f-5b: executeScript reservation/outbound byte accounting
 
 // ── ① browser.* wire 스키마(§9.1 ①) ──────────────────────────────────────────────────────────────────────
 

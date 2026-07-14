@@ -759,6 +759,41 @@ enum BrowserControl {
         }
     }
 
+    /// Public browser.executeScript 전용: backend arg에서 script/cap을 읽고 page-process bounded wrapper만 실행한다.
+    @MainActor static func executeScriptBounded(
+        _ webView: WKWebView,
+        _ arg: String,
+        completion: @escaping (Result<BrowserPageScriptResult, Error>) -> Void
+    ) {
+        do {
+            guard let data = arg.data(using: .utf8),
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let script = object["script"] as? String,
+                  let maxBytes = object["max_result_bytes"] as? Int,
+                  maxBytes > 0,
+                  maxBytes <= BrowserResultTransferRegistry.defaultMaxEntryBytes else {
+                throw CocoaError(.coderInvalidValue)
+            }
+            let wrapper = try BrowserResultTransferRegistry.boundedPageScript(script, maxBytes: maxBytes)
+            webView.evaluateJavaScript(wrapper) { value, error in
+                if let error {
+                    completion(.success(.scriptError(BrowserResultTransferRegistry.nativeScriptErrorPayload(error))))
+                    return
+                }
+                guard let pageText = value as? String else {
+                    completion(.success(.scriptError(BrowserResultTransferRegistry.nativeScriptErrorPayload(NSError(domain: "Maru.Browser", code: 1)))))
+                    return
+                }
+                // 최대 16 MiB String의 UTF-8 scan/Data 변환은 main actor/frame tick을 막지 않게 worker에서 수행한다.
+                // registry insert와 Zig terminal은 completion을 main으로 되돌린 뒤에만 실행된다.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let decoded = BrowserResultTransferRegistry.decodeBoundedPageResult(pageText, maxBytes: maxBytes)
+                    DispatchQueue.main.async { completion(.success(decoded)) }
+                }
+            }
+        } catch { completion(.failure(error)) }
+    }
+
     // Phase 7e-3: 주소창 nav 버튼(back/forward/reload) 실행. 정책(활성 판정·surface 매핑)은 Zig(take_web_nav_action)가
     // 하고, 여기는 WKWebView 히스토리 API를 부르는 얇은 어댑터다. goBack/goForward는 히스토리가 없으면 WebKit이 no-op
     // (canGoBack/Forward가 false면 Zig가 애초에 pending을 안 세우지만, 이중 안전). reload는 로드된 페이지가 없으면 no-op.
@@ -1293,6 +1328,69 @@ private func runBrowserWaitSmokeClient(socketPath: String, sid: UInt64, nonceHex
     return (selector, load, timeout, invalidSelector, String(elapsedMs))
 }
 
+// 5f-5a: 실제 WKWebView page realm에서 bounded strict-JSON wrapper를 실행하고 소켓 응답까지 검증한다. 값 fidelity,
+// user script가 serializer가 피해야 할 globals를 바꾸는 경우, escaped UTF-8 byte 경계, result-too-large, 실행/직렬화
+// error taxonomy와 32 KiB 진단 frame, depth 128/129를 모두 GUI 입력 없이 자동화한다.
+private func runBrowserBoundedResultSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String) {
+    let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid),\"cap_nonce\":\"\(nonceHex)\"}}"
+    func request(_ id: Int, _ script: String, maxBytes: Int = 1024 * 1024) -> BrowserCtlReqResult {
+        let object: [String: Any] = [
+            "jsonrpc": "2.0", "id": id, "method": "browser.executeScript",
+            "params": ["id": sid, "script": script, "max_result_bytes": maxBytes],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let line = String(data: data, encoding: .utf8) else { return .err("error:request-json") }
+        return browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: line)
+    }
+    func line(_ response: BrowserCtlReqResult) -> String? {
+        if case .ok(let value) = response { return value }
+        return nil
+    }
+    func errorOK(_ response: BrowserCtlReqResult, code: Int, kind: String) -> Bool {
+        guard let wire = line(response), let error = browserCtlError(wire), error["code"] as? Int == code,
+              let data = error["data"] as? [String: Any], data["kind"] as? String == kind else { return false }
+        return Data(wire.utf8).count <= 32 * 1024
+    }
+
+    var structured = "false"
+    if let wire = line(request(31, "({n:null,b:true,x:1.5,s:'한글',a:[undefined,2],o:{u:undefined}})")),
+       let value = browserCtlResult(wire)?["result"] as? [String: Any],
+       value["n"] is NSNull, value["b"] as? Bool == true, value["x"] as? Double == 1.5,
+       value["s"] as? String == "한글", let array = value["a"] as? [Any], array.count == 2,
+       array[0] is NSNull, array[1] as? Int == 2, let object = value["o"] as? [String: Any], object["u"] is NSNull {
+        structured = "true"
+    }
+
+    let tamperScript = "(()=>{const a=Array.isArray,k=Object.keys,f=Number.isFinite;JSON.stringify=()=>{throw 1};globalThis.TextEncoder=class{constructor(){throw 1}};Array.prototype.push=function(){this[0]='x'.repeat(1000000);return 1};Array.isArray=()=>false;Object.keys=()=>{throw 1};Number.isFinite=()=>false;const v={ok:true};Array.isArray=a;Object.keys=k;Number.isFinite=f;return v;})()"
+    let tamper: String
+    if let wire = line(request(32, tamperScript)), let value = browserCtlResult(wire)?["result"] as? [String: Any], value["ok"] as? Bool == true { tamper = "true" } else { tamper = "false" }
+
+    let byteBoundary: String
+    let exact = line(request(33, "'é'", maxBytes: 4)).flatMap { browserCtlResult($0)?["result"] as? String } == "é"
+    let overWire = line(request(34, "'é'", maxBytes: 3))
+    let over = overWire.flatMap { browserCtlError($0)?["code"] as? Int } == -32005
+    byteBoundary = exact && over ? "true" : "false"
+
+    let tooLargeResponse = request(35, "'xxxxxxxxxxxxxxxx'", maxBytes: 8)
+    var tooLarge = "false"
+    if let wire = line(tooLargeResponse), let error = browserCtlError(wire), error["code"] as? Int == -32005,
+       let data = error["data"] as? [String: Any], data["limit_bytes"] as? Int == 8,
+       data["observed_bytes_at_least"] as? Int == 9 { tooLarge = "true" }
+
+    let executionResponse = request(36, "throw new Error('x'.repeat(100000))")
+    var executionError = errorOK(executionResponse, code: -32006, kind: "execution") ? "true" : "false"
+    if let wire = line(executionResponse), let data = browserCtlError(wire)?["data"] as? [String: Any], data["diagnostics_truncated"] as? Bool != true { executionError = "false" }
+
+    let serializationResponse = request(37, "(()=>{const x={};x.self=x;return x;})()")
+    let serializationError = errorOK(serializationResponse, code: -32006, kind: "serialization") ? "true" : "false"
+
+    let depth128 = "(()=>{let x=null;for(let i=0;i<128;i++)x=[x];return x;})()"
+    let depth129 = "(()=>{let x=null;for(let i=0;i<129;i++)x=[x];return x;})()"
+    let depthOK = line(request(38, depth128)).flatMap(browserCtlResult)?["result"] != nil
+    let depthFail = errorOK(request(39, depth129), code: -32006, kind: "serialization")
+    return (structured, tamper, byteBoundary, tooLarge, executionError, serializationError, depthOK && depthFail ? "true" : "false")
+}
+
 // 1e-confirm-1c-2(테스트 전용 — 배경 스레드): **cap 없이** browser.navigate가 pane confirm-grant 흐름으로 성공하는지
 // 자동 증명한다. auth.self는 **cap_nonce 없이** selector(=surface_id)만 보내 self-origin으로 인증하고, browser.navigate를
 // 날린다 → 서버: 세션 cap 0 → needs_grant → handleNeedsGrant(env MARU_TEST_GRANT_DECISION 스텁) → approve면 grant 기록 +
@@ -1515,6 +1613,11 @@ final class MaruWebPanelView: NSView {
         // browser(1)=비신뢰엔 스킴 핸들러를 **애초에 등록하지 않는다**(origin 위장 탈취 1차 차단, §7 ④). 핸들러는
         // WKWebView 생성 **전에** config에 심어야 하므로 여기서 결정한다.
         let config = WKWebViewConfiguration()
+        config.userContentController.addUserScript(WKUserScript(
+            source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page))
         let trusted = (panelKind == 0)
         var appURL: URL?
         var bridgeWorldLocal: WKContentWorld?
@@ -1573,6 +1676,11 @@ final class MaruWebPanelView: NSView {
         self.surfaceId = surfaceId
         self.panelKind = 1
         self.bridgeWorld = nil // browser=브리지 없음(신뢰 전용)
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page))
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: configuration)
         super.init(frame: frameRect)
         webView.autoresizingMask = [.width, .height]
@@ -2088,6 +2196,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private nonisolated(unsafe) var browserCtlWaitTimeoutStore = "pending"
     private nonisolated(unsafe) var browserCtlWaitInvalidSelectorStore = "pending"
     private nonisolated(unsafe) var browserCtlWaitElapsedStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedStructuredStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedTamperStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedByteBoundaryStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedTooLargeStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedExecutionErrorStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedSerializationErrorStore = "pending"
+    private nonisolated(unsafe) var browserCtlBoundedDepthStore = "pending"
     // 1e-confirm-1c-2(MARU_TEST_GRANT_DECISION): **무-cap** browser.navigate가 pane confirm-grant 흐름(needs_grant→env approve→grant→op)으로 성공하는지("true"/진단).
     private var didKickGrantSmoke = false
     private nonisolated(unsafe) var browserGrantNavigateOkStore = "pending"
@@ -3268,8 +3383,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 BrowserControl.getCookies(wp.webView) { json in
                     self.completeBrowserOp(asyncId, status: 0, result: json)
                 }
-            case 2: // executeScript — 성공 JSON Data는 Swift registry가 소유하고 Zig가 bounded pull/release한다.
-                BrowserControl.executeScript(wp.webView, arg) { result in
+            case 2: // executeScript — page realm에서 bounded JSON을 만든 뒤 Swift registry가 Data를 소유한다.
+                BrowserControl.executeScriptBounded(wp.webView, arg) { result in
                     switch result {
                     case .success(let value):
                         self.completeBrowserScriptResult(asyncId, value: value)
@@ -3345,15 +3460,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// executeScript 성공 값은 fallback 문자열 없이 strict JSON으로 만들고 registry에 소유권을 둔다. Zig가 1을
     /// 반환하면 ID를 인수해 release까지 끝낸 상태다. ABI 거부 또는 release 미확인의 0 반환은 Swift가 직접 release한 뒤 실패로
     /// 마감해 pending request가 남지 않게 한다.
-    private func completeBrowserScriptResult(_ asyncId: UInt64, value: Any) {
-        do {
-            var data = try BrowserResultTransferRegistry.encodeScriptResult(value)
-            let totalLen = data.count
-            if totalLen > BrowserResultTransferRegistry.defaultMaxEntryBytes {
-                data = Data() // full-size Data를 없앤 뒤에만 Zig execution 예약을 반환한다.
-                maru_macos_control_complete_browser_result_too_large(asyncId, totalLen)
-                return
+    private func completeBrowserScriptResult(_ asyncId: UInt64, value: BrowserPageScriptResult) {
+        switch value {
+        case .tooLarge(let observedAtLeast):
+            maru_macos_control_complete_browser_result_too_large(asyncId, observedAtLeast)
+        case .scriptError(let data):
+            data.withUnsafeBytes { raw in
+                maru_macos_control_complete_browser_script_error(
+                    asyncId,
+                    raw.bindMemory(to: UInt8.self).baseAddress,
+                    data.count
+                )
             }
+        case .json(var data):
+            let totalLen = data.count
             let registry = BrowserResultTransferRegistry.shared
             guard let transferId = registry.insert(data) else {
                 completeBrowserOp(asyncId, status: 1, result: "browser result registry full")
@@ -3373,8 +3493,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 registry.release(transferId)
                 completeBrowserOp(asyncId, status: 1, result: "browser result transfer rejected")
             }
-        } catch {
-            completeBrowserOp(asyncId, status: 1, result: "executeScript result is not JSON-serializable")
         }
     }
 
@@ -3423,10 +3541,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         DispatchQueue.global().async { [weak self] in
             let r = runBrowserControlSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex, navigateURL: t.url)
             let wait = runBrowserWaitSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
+            let bounded = runBrowserBoundedResultSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
             // 5f-0b-3c: 위 navigate 뒤(패널이 data: URL 커밋됨), 지속 연결로 subscribe→새 URL navigate→browser.navigated 수신 검증.
             let evt = runBrowserEventSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
             self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl, events: evt)
             self?.storeBrowserWaitResult(wait)
+            self?.storeBrowserBoundedResult(bounded)
         }
     }
 
@@ -3458,6 +3578,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func browserWaitResults() -> (selector: String, load: String, timeout: String, invalidSelector: String, elapsed: String) {
         browserCtlLock.lock(); defer { browserCtlLock.unlock() }
         return (browserCtlWaitSelectorStore, browserCtlWaitLoadStore, browserCtlWaitTimeoutStore, browserCtlWaitInvalidSelectorStore, browserCtlWaitElapsedStore)
+    }
+
+    private nonisolated func storeBrowserBoundedResult(_ result: (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String)) {
+        browserCtlLock.lock()
+        browserCtlBoundedStructuredStore = result.structured
+        browserCtlBoundedTamperStore = result.tamper
+        browserCtlBoundedByteBoundaryStore = result.byteBoundary
+        browserCtlBoundedTooLargeStore = result.tooLarge
+        browserCtlBoundedExecutionErrorStore = result.executionError
+        browserCtlBoundedSerializationErrorStore = result.serializationError
+        browserCtlBoundedDepthStore = result.depth
+        browserCtlLock.unlock()
+    }
+
+    private func browserBoundedResults() -> (structured: String, tamper: String, byteBoundary: String, tooLarge: String, executionError: String, serializationError: String, depth: String) {
+        browserCtlLock.lock(); defer { browserCtlLock.unlock() }
+        return (browserCtlBoundedStructuredStore, browserCtlBoundedTamperStore, browserCtlBoundedByteBoundaryStore, browserCtlBoundedTooLargeStore, browserCtlBoundedExecutionErrorStore, browserCtlBoundedSerializationErrorStore, browserCtlBoundedDepthStore)
     }
 
     /// 1e-confirm-1c-2(**테스트 전용, MARU_TEST_GRANT_DECISION**): **무-cap** browser.navigate가 pane confirm-grant 흐름으로
@@ -5818,6 +5955,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_ctl_wait_timeout=\(browserWaitResults().timeout)
             browser_ctl_wait_invalid_selector=\(browserWaitResults().invalidSelector)
             browser_ctl_wait_selector_elapsed_ms=\(browserWaitResults().elapsed)
+            browser_ctl_bounded_structured=\(browserBoundedResults().structured)
+            browser_ctl_bounded_tamper=\(browserBoundedResults().tamper)
+            browser_ctl_bounded_byte_boundary=\(browserBoundedResults().byteBoundary)
+            browser_ctl_bounded_too_large=\(browserBoundedResults().tooLarge)
+            browser_ctl_bounded_execution_error=\(browserBoundedResults().executionError)
+            browser_ctl_bounded_serialization_error=\(browserBoundedResults().serializationError)
+            browser_ctl_bounded_depth=\(browserBoundedResults().depth)
             web_panel_frame_x=\(f.origin.x)
             web_panel_frame_y=\(f.origin.y)
             web_panel_frame_w=\(f.size.width)

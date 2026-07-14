@@ -52,6 +52,37 @@ struct BrowserResultTransferRegistryTests {
             } catch {}
         }
 
+        let bounded = try BrowserResultTransferRegistry.boundedPageScript("({text: '\"한글\\n', value: undefined})", maxBytes: 64)
+        precondition(bounded.hasSuffix(",64)"))
+        precondition(!BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("JSON.stringify"))
+        precondition(!BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("TextEncoder"))
+        precondition(BrowserResultTransferRegistry.boundedPageBootstrapScript.contains("writable:false"))
+        switch BrowserResultTransferRegistry.decodeBoundedPageResult("maru-json:{\"ok\":true}", maxBytes: 64) {
+        case .json(let data): precondition(String(decoding: data, as: UTF8.self) == "{\"ok\":true}")
+        default: preconditionFailure("bounded JSON prefix must decode")
+        }
+        switch BrowserResultTransferRegistry.decodeBoundedPageResult("maru-too-large:65", maxBytes: 64) {
+        case .tooLarge(let observed): precondition(observed == 65)
+        default: preconditionFailure("bounded overflow prefix must decode")
+        }
+        switch BrowserResultTransferRegistry.decodeBoundedPageResult("maru-json:\(String(repeating: "x", count: 65))", maxBytes: 64) {
+        case .tooLarge(let observed): precondition(observed == 65)
+        default: preconditionFailure("host must recheck page result cap")
+        }
+        switch BrowserResultTransferRegistry.decodeBoundedPageResult("maru-too-large:999", maxBytes: 64) {
+        case .scriptError: break
+        default: preconditionFailure("host must reject forged overflow markers")
+        }
+        switch BrowserResultTransferRegistry.decodeBoundedPageResult("maru-json:null", maxBytes: BrowserResultTransferRegistry.defaultMaxEntryBytes + 1) {
+        case .scriptError: break
+        default: preconditionFailure("host must enforce the independent 16 MiB hard cap")
+        }
+        let native = BrowserResultTransferRegistry.nativeScriptErrorPayload(
+            NSError(domain: String(repeating: "\\", count: 1_000), code: 7, userInfo: [NSLocalizedDescriptionKey: String(repeating: "\u{0001}", count: 100_000)]))
+        precondition(native.count <= BrowserResultTransferRegistry.maxScriptErrorPayloadBytes)
+        let nativeObject = try JSONSerialization.jsonObject(with: native) as? [String: Any]
+        precondition(nativeObject?["diagnostics_truncated"] as? Bool == true)
+
         let chunkRegistry = BrowserResultTransferRegistry(
             maxEntries: 1,
             maxEntryBytes: BrowserResultTransferRegistry.maxCopyBytes,

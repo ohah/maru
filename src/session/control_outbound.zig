@@ -26,6 +26,26 @@ pub const Frame = struct {
     /// 그 프레임을 **replace**(옛 bytes free, 위치 유지=기아 방지) — 상태 이벤트(navigated·loadState) "최신만".
     coalesce_key: ?u64 = null,
     purge_key: PurgeKey = .none,
+    /// 일반 payload가 final/error용 비상 여유를 먹지 못하게 admission class를 분리한다.
+    /// terminal은 executeScript final/error처럼 진행 중 transfer를 끝내는 작은 프레임에만 쓴다.
+    class: FrameClass = .general,
+};
+
+pub const FrameClass = enum { general, terminal };
+
+pub const QueueAccounting = struct {
+    total_bytes: usize = 0,
+    terminal_bytes: usize = 0,
+    total_frames: usize = 0,
+    terminal_frames: usize = 0,
+
+    pub fn generalBytes(self: QueueAccounting) usize {
+        return self.total_bytes - self.terminal_bytes;
+    }
+
+    pub fn generalFrames(self: QueueAccounting) usize {
+        return self.total_frames - self.terminal_frames;
+    }
 };
 
 pub const PurgeKey = union(enum) {
@@ -39,7 +59,7 @@ pub const PurgeKey = union(enum) {
     }
 };
 
-pub const PushError = error{ Full, OutOfMemory };
+pub const PushError = error{ Full, InvalidFrame, OutOfMemory };
 
 /// 연결당 bounded outbound FIFO. `ControlRequestQueue`/`BrowserOpQueue` 선례(ArrayList + orderedRemove(0)).
 pub const OutboundQueue = struct {
@@ -66,6 +86,7 @@ pub const OutboundQueue = struct {
     /// 성공(큐 크기 불변). 아니면 append — `max` 도달 시 `error.Full`(호출처가 정책: 응답=연결종료·이벤트=drop).
     /// 성공 시 `frame.bytes` 소유권을 큐가 인수한다. **Full/OOM 시 frame.bytes 소유권은 호출자에 남는다**(호출자 free).
     pub fn push(self: *OutboundQueue, gpa: std.mem.Allocator, frame: Frame) PushError!void {
+        if (frame.class == .terminal and frame.coalesce_key != null) return error.InvalidFrame;
         if (frame.coalesce_key) |k| {
             for (self.items.items) |*f| {
                 if (f.coalesce_key != null and f.coalesce_key.? == k) {
@@ -75,6 +96,7 @@ pub const OutboundQueue = struct {
                     gpa.free(f.bytes);
                     f.bytes = frame.bytes;
                     f.purge_key = frame.purge_key;
+                    f.class = frame.class;
                     self.queued_wire_bytes = self.queued_wire_bytes - old_wire + new_wire;
                     return;
                 }
@@ -136,6 +158,50 @@ pub const OutboundQueue = struct {
             }
         }
         return self.queued_wire_bytes + new_wire;
+    }
+
+    pub fn accounting(self: *const OutboundQueue) QueueAccounting {
+        var result: QueueAccounting = .{};
+        for (self.items.items) |frame| {
+            const wire = wireBytes(frame.bytes);
+            result.total_bytes += wire;
+            result.total_frames += 1;
+            if (frame.class == .terminal) {
+                result.terminal_bytes += wire;
+                result.terminal_frames += 1;
+            }
+        }
+        std.debug.assert(result.total_bytes == self.queued_wire_bytes);
+        return result;
+    }
+
+    pub fn prospectiveAccounting(self: *const OutboundQueue, frame: Frame) QueueAccounting {
+        var result = self.accounting();
+        const new_wire = wireBytes(frame.bytes);
+        if (frame.coalesce_key) |key| {
+            for (self.items.items) |old| {
+                if (old.coalesce_key != null and old.coalesce_key.? == key) {
+                    const old_wire = wireBytes(old.bytes);
+                    result.total_bytes = result.total_bytes - old_wire + new_wire;
+                    if (old.class == .terminal) {
+                        result.terminal_bytes -= old_wire;
+                        result.terminal_frames -= 1;
+                    }
+                    if (frame.class == .terminal) {
+                        result.terminal_bytes += new_wire;
+                        result.terminal_frames += 1;
+                    }
+                    return result;
+                }
+            }
+        }
+        result.total_bytes += new_wire;
+        result.total_frames += 1;
+        if (frame.class == .terminal) {
+            result.terminal_bytes += new_wire;
+            result.terminal_frames += 1;
+        }
+        return result;
     }
 };
 
@@ -256,4 +322,14 @@ test "OutboundQueue: typed purge key는 같은 숫자의 surface/result를 격�
     const remaining = q.pop().?;
     defer testing.allocator.free(remaining.bytes);
     try testing.expectEqualStrings("result", remaining.bytes);
+}
+
+test "OutboundQueue: terminal frame은 lossless라 coalesce를 거부한다" {
+    var q = OutboundQueue.init(4);
+    defer q.deinit(testing.allocator);
+    const frame = try mkFrame(testing.allocator, "final", 1, .{ .browser_result = 7 });
+    var terminal = frame;
+    terminal.class = .terminal;
+    try testing.expectError(error.InvalidFrame, q.push(testing.allocator, terminal));
+    testing.allocator.free(terminal.bytes);
 }

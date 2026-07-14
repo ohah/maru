@@ -53,6 +53,22 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 이 숫자는 최종 제품 목표가 아니다. 현재 core가 실수로 극단적으로 느려지는 것을 막는 최소 guardrail이다. 각 예산·반복 수의 상세 근거 주석은 `tools/perf/core.zig`를 단일 출처로 둔다.
 
+## executeScript 대용량 결과 활성화 gate (5f-5)
+
+아래 값은 아직 `mise run perf`에 들어간 현재 자동 예산이 아니라 [control-plane.md §9.5.8](control-plane.md)의 256 MiB opt-in을 열기 위한 **출시 전 opt-in macOS stress gate**다. 5f-5b의 16 MiB 기본 경로부터 같은 counter를 남기고, 5f-5d가 실제 WKWebView 16/64/128/256 MiB 계단을 모두 통과해야 256 MiB를 활성화한다.
+
+| 항목 | 활성화 예산 | 실패 시 |
+| --- | --- | --- |
+| main tick pump | pump 기여 p95 ≤ 0.5ms, max ≤ 1.0ms, pump 귀속 120Hz frame deadline miss 0 | chunk 축소 또는 base64/frame 준비를 off-main으로 이동 |
+| WebKit result bridge | completion callback→worker handoff max ≤ 1.0ms, executeScript 전체 귀속 120Hz frame deadline miss 0 | WK IPC/Swift String materialization 포함 bridge 방식 재설계; 해당 tier 비활성 |
+| result 예약 | process-global reserved result bytes ≤ 256 MiB, 256 MiB 요청 동시 실행 1 | 초과 요청은 실행 전 `resource-busy`; 예산 상향 금지 |
+| outbound queue | 연결당 queued+writer-owned wire hard cap ≤ 4 MiB, process-global hard cap ≤ 32 MiB; 그 안에 terminal carve-out 연결별 2 frame/64 KiB·전역 1 MiB; 75%에서 pump stop·50% 아래 resume | byte watermark/typed purge/write-complete 회계 구현 전 대용량 경로 비활성 |
+| host RSS delta | transient peak ≤ `2 × actual_bytes + 64 MiB`, pin 이후 steady ≤ `actual_bytes + 64 MiB` | full-size host copy를 줄이기 전 해당 tier 비활성 |
+| app+WebContent RSS delta | peak ≤ `4 × actual_bytes + 128 MiB` | page preflight/bridge 방식 재설계; 256 MiB 비활성 |
+| 수명·복사 | Zig/CLI에 full-size in-memory copy 0, backend terminal/final별 reservation/Data release 정확히 1회, abandoned pre-pin 실행은 backend terminal 전 조기 반환 0, WebContent crash 0 | execution/transfer registry/cancel/file sink 수정 전 비활성 |
+
+RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고 combined도 함께 남긴다. fixture는 큰 string 하나만 쓰지 않고 flat array와 nested object를 포함하며 각 16/64/128/256 MiB tier의 **cap+1 bounded failure**도 실제 WKWebView에서 잰다. callback 내부 시간만으로는 callback 전에 생기는 IPC materialization stall을 놓치므로, operation 구간의 frame tick gap도 함께 귀속한다. 수치는 기능 수용을 위해 자동으로 늘리지 않으며, 완화하려면 측정 artifact와 별도 설계 결정을 요구한다.
+
 ## 아직 예산이 없는 영역
 
 | 영역 | 이유 | 예정 측정 |
@@ -61,7 +77,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | 입력 지연 | PTY·GUI input path는 있지만 왕복 지연을 재는 하니스가 아직 없다. | key event -> PTY write, PTY output -> snapshot update |
 | frame budget | DrawList 빌드(락-보유 구간)는 위 `render_build_*` 예산으로 재지만, snapshot -> GPU frame submit 전체 frame 예산은 아직 없다. future WebGPU backend도 같은 기준을 따른다. | snapshot -> GPU frame submit |
 | font/glyph atlas | smoke 수준의 CoreText CPU raster와 Metal texture upload 검증, CoreText smoke의 제품 후보 `coretext_raster.zig` wrapper + smoke native bridge raster bytes 검증, Metal smoke의 제품 `GlyphRasterFrame.uploads/pixels` CoreText bytes -> Metal atlas upload/readback -> shader sampling 검증은 있지만, 제품 renderer의 CoreText raster·atlas grow/eviction/upload **성능** 예산은 아직 없다. 현재 제품 경계는 `GlyphCacheKey -> AtlasSlot -> GlyphFrame -> GlyphQuadFrame -> GlyphRasterFrame` 도메인 계약이다. 기본 성능 경로의 `GlyphRasterFrame`은 test rasterizer로 upload byte/skip/sample contract를 고정하고, macOS CoreText/Metal smoke만 native bridge를 주입하므로 제품 CoreText raster 성능을 아직 측정하지 않는다. 경계 밖 slot은 byte buffer를 만들지 않고 skip해 oversized 입력의 메모리 증폭을 막는다. 세부 정책은 [폰트 전략](font-strategy.md)을 따른다. | first glyph resolve, frame당 atlas miss, atlas grow count, atlas upload bytes, raster upload bytes, raster skip count, font size 변경 후 첫 frame |
-| control-plane dispatch/backpressure | 세션 컨트롤 플레인 socket/dispatcher/collector가 아직 없다. 제어 요청은 main frame loop로 marshal하지만 `subscribeOutput`은 I/O 스레드 직송이라 서로 다른 예산이 필요하다. | JSON-RPC parse/dispatch latency, per-tick processed request count, capture chunk copy time, outbound queue drop/coalesce count, `subscribeOutput` queue latency, slow subscriber disconnect count |
+| control-plane dispatch/backpressure | socket/dispatcher/collector와 browser outbound queue는 구현됐지만 대용량 `executeScript`의 위 opt-in stress 하니스·artifact는 아직 없다. 제어 요청은 main frame loop로 marshal하고 stream은 writer/outbound를 쓰므로 tick·queue·copy를 따로 재야 한다. | JSON-RPC parse/dispatch latency, per-tick processed request count, capture/executeScript chunk copy time, `result_serialized_bytes`, `result_chunk_count`, `result_transfer_ticks`, `result_peak_owned_bytes`, app/WebContent RSS delta, tick당 pump bytes/time, reserved/queued bytes, outbound queue drop/coalesce count, `subscribeOutput` queue latency, slow subscriber disconnect count |
 | RSS/memory baseline | platform별 측정 API가 필요하다. | cold start RSS, one tab RSS, scrollback RSS |
 | PTY backpressure | opt-in correctness stress는 있지만 대량 stdout 성능 예산은 아직 없다. | large stdout producer -> queue drain latency, UI responsiveness |
 

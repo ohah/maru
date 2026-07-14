@@ -3883,13 +3883,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 BrowserControl.wait(wp.webView, asyncId: asyncId, argJson: arg) { status, message in
                     self.completeBrowserOp(asyncId, status: status, result: message)
                 }
-            case 16: // snapshot(§9.5.4) — read-only accname DOM walk eval. result=ARIA 트리 JSON 문자열(Zig가 {snapshot} 구조화 embed).
+            case 16: // snapshot(§9.5.4) — read-only accname DOM walk eval. snapshotScript는 JSON 문자열을 반환하므로
+                // **scriptResultString을 거치지 않고**(그건 bool/문자열 값 매핑용 — JSON을 이중 인코딩함) JS String 반환값을
+                // 그대로 결과로 쓴다. Zig serializeSnapshotResult가 이 JSON을 {snapshot} 구조화 embed(malformed→internal_error).
                 registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .webContentRealm)
                 BrowserControl.executeScript(wp.webView, BrowserControl.snapshotScript(arg)) { [weak self] result in
                     guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                     switch result {
                     case .success(let value):
-                        self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
+                        self.completeBrowserOp(asyncId, status: 0, result: (value as? String) ?? "{\"tree\":[]}")
                     case .failure(let error):
                         self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
                     }

@@ -43,12 +43,14 @@ const cs = @import("control_socket.zig");
 const cp = maru.session.control_plane;
 const cap = maru.session.control_capability;
 const co = maru.session.control_outbound; // 5f-0b-2b: per-connection outbound 프레임 큐(순수 5f-0b-1)
+const control_browser = maru.session.control_browser;
 const cev = maru.session.control_events; // 5f-0b-3: browser 이벤트 채널 코어(EventBroker 구독 레지스트리·매칭·직렬화, §9.5.2)
 
 // auth 프레임 cap_nonce의 wire 길이(1a)와 capability nonce 길이(1e)가 어긋나면 fd payload↔auth 프레임이 안 맞는다.
 // 1a는 capability를 import하지 않으므로(레이어 base) 두 상수를 각자 두되, 둘 다 import하는 이 L4에서 comptime으로 못박는다.
 comptime {
     std.debug.assert(cp.auth_cap_nonce_len == cap.nonce_len);
+    std.debug.assert(OutboundChannel.terminal_reserve_bytes == control_browser.execute_script_terminal_wire_bytes);
 }
 
 /// 메인이 연결 스레드에 응답을 돌려주는 rendezvous 단위. 연결 스레드의 serve 스택에 살며(대기 동안 유효),
@@ -208,16 +210,80 @@ pub const ControlRequestQueue = struct {
 /// 구현은 **reader+writer 2-스레드**로 realize한다 — writer가 이 채널의 condition에 블록-대기(popWait)해 socket-read와
 /// outbound-write를 각 스레드가 나눠 맡는다. self-pipe/poll fd 저글링보다 **검증된 `ControlRequestQueue`의 Io.Mutex/
 /// Condition/close-cancel 패턴을 outbound 방향으로 재사용**하는 게 안전하다(2b-2-β가 두 스레드를 배선; α는 이 primitive만).
-/// 순수 `OutboundQueue`가 mechanism(coalesce/purge/bounded)을, 이 wrapper가 스레드 안전·블로킹 수명을 소유한다.
+/// 순수 `OutboundQueue`가 mechanism(coalesce/purge/bounded)을, wrapper가 스레드 안전·블로킹 수명을 소유한다.
+/// 아래 process budget은 여러 wrapper의 admission을 한 hard cap 아래 직렬화한다.
+pub const ProcessOutboundBudget = struct {
+    pub const default_max_wire_bytes: usize = 32 * 1024 * 1024;
+    pub const default_terminal_reserve_bytes: usize = 1024 * 1024;
+
+    io: std.Io,
+    max_wire_bytes: usize,
+    terminal_reserve_bytes: usize,
+    used_wire_bytes: usize = 0,
+    terminal_wire_bytes: usize = 0,
+    mutex: std.Io.Mutex = .init,
+
+    pub fn init(io: std.Io, max_wire_bytes: usize, terminal_reserve_bytes: usize) ProcessOutboundBudget {
+        std.debug.assert(terminal_reserve_bytes <= max_wire_bytes);
+        return .{ .io = io, .max_wire_bytes = max_wire_bytes, .terminal_reserve_bytes = terminal_reserve_bytes };
+    }
+
+    fn replace(self: *ProcessOutboundBudget, old: co.QueueAccounting, new: co.QueueAccounting) error{Full}!void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const base_total = self.used_wire_bytes - old.total_bytes;
+        const base_terminal = self.terminal_wire_bytes - old.terminal_bytes;
+        if (new.total_bytes > self.max_wire_bytes -| base_total) return error.Full;
+        if (new.terminal_bytes > self.terminal_reserve_bytes -| base_terminal) return error.Full;
+        const base_general = base_total - base_terminal;
+        const max_general = self.max_wire_bytes - self.terminal_reserve_bytes;
+        if (new.generalBytes() > max_general -| base_general) return error.Full;
+        self.used_wire_bytes = base_total + new.total_bytes;
+        self.terminal_wire_bytes = base_terminal + new.terminal_bytes;
+    }
+
+    fn release(self: *ProcessOutboundBudget, accounting: co.QueueAccounting) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        std.debug.assert(accounting.total_bytes <= self.used_wire_bytes);
+        std.debug.assert(accounting.terminal_bytes <= self.terminal_wire_bytes);
+        self.used_wire_bytes -= accounting.total_bytes;
+        self.terminal_wire_bytes -= accounting.terminal_bytes;
+    }
+
+    pub fn snapshot(self: *ProcessOutboundBudget) co.QueueAccounting {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return .{ .total_bytes = self.used_wire_bytes, .terminal_bytes = self.terminal_wire_bytes };
+    }
+};
+
+pub const PurgeResult = struct {
+    queued_frames: usize,
+    writer_owned: bool,
+};
+
+/// 한 연결의 queue와 writer-owned frame을 같은 byte-accounting 수명으로 묶는 thread-safe wrapper.
 pub const OutboundChannel = struct {
     pub const default_max_wire_bytes: usize = 4 * 1024 * 1024;
+    pub const terminal_reserve_bytes: usize = 64 * 1024;
+    pub const terminal_reserve_frames: usize = 2;
     io: std.Io,
     q: co.OutboundQueue,
     mutex: std.Io.Mutex = .init,
     not_empty: std.Io.Condition = .init,
     closed: bool = false,
-    writer_owned_wire_bytes: usize = 0,
+    writer_owned: ?WriterOwned = null,
     max_wire_bytes: usize,
+    terminal_wire_reserve: usize = 0,
+    terminal_frame_reserve: usize = 0,
+    process_budget: ?*ProcessOutboundBudget = null,
+
+    const WriterOwned = struct {
+        wire_bytes: usize,
+        purge_key: co.PurgeKey,
+        class: co.FrameClass,
+    };
 
     pub fn init(io: std.Io, max: usize) OutboundChannel {
         return .{ .io = io, .q = co.OutboundQueue.init(max), .max_wire_bytes = std.math.maxInt(usize) };
@@ -227,28 +293,75 @@ pub const OutboundChannel = struct {
         return .{ .io = io, .q = co.OutboundQueue.initWithByteLimit(max, max_wire_bytes), .max_wire_bytes = max_wire_bytes };
     }
 
+    pub fn initWithProcessBudget(io: std.Io, max: usize, process_budget: *ProcessOutboundBudget) OutboundChannel {
+        return initWithLimits(io, max, default_max_wire_bytes, terminal_reserve_bytes, terminal_reserve_frames, process_budget);
+    }
+
+    fn initWithLimits(
+        io: std.Io,
+        max: usize,
+        max_wire_bytes: usize,
+        terminal_wire_reserve: usize,
+        terminal_frame_reserve: usize,
+        process_budget: *ProcessOutboundBudget,
+    ) OutboundChannel {
+        std.debug.assert(terminal_wire_reserve <= max_wire_bytes);
+        std.debug.assert(terminal_frame_reserve <= max);
+        return .{
+            .io = io,
+            .q = co.OutboundQueue.init(max),
+            .max_wire_bytes = max_wire_bytes,
+            .terminal_wire_reserve = terminal_wire_reserve,
+            .terminal_frame_reserve = terminal_frame_reserve,
+            .process_budget = process_budget,
+        };
+    }
+
     pub fn deinit(self: *OutboundChannel, gpa: std.mem.Allocator) void {
-        std.debug.assert(self.writer_owned_wire_bytes == 0);
+        std.debug.assert(self.writer_owned == null);
+        if (self.process_budget) |budget| budget.release(self.q.accounting());
         self.q.deinit(gpa); // 남은 프레임 bytes free
         self.* = undefined;
     }
 
     /// 메인: 프레임 push(coalesce). `closed`면 QueueClosed(호출처가 frame.bytes free). `Full`이면 error(호출처 정책:
     /// 응답=연결 종료·이벤트=drop/subscriber-lagged, §9.5.6). 성공 시 대기 writer를 깨운다.
-    pub fn push(self: *OutboundChannel, gpa: std.mem.Allocator, frame: co.Frame) error{ Full, OutOfMemory, QueueClosed }!void {
+    pub fn push(self: *OutboundChannel, gpa: std.mem.Allocator, frame: co.Frame) error{ Full, InvalidFrame, OutOfMemory, QueueClosed }!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.QueueClosed;
-        if (self.q.prospectiveQueuedWireBytes(frame) > self.max_wire_bytes -| self.writer_owned_wire_bytes) return error.Full;
-        try self.q.push(gpa, frame); // Full/OOM 전파(소유권은 호출자에 남음)
+        // Queue가 거부할 deterministic validation은 global reservation을 바꾸기 전에 끝낸다. 특히 더 작은 invalid
+        // coalesce replacement로 budget을 잠깐 풀었다 rollback하면 다른 연결 push와 경합해 복원이 실패할 수 있다.
+        if (frame.class == .terminal and frame.coalesce_key != null) return error.InvalidFrame;
+        const old = self.accountingLocked();
+        const queued_new = self.q.prospectiveAccounting(frame);
+        var new = queued_new;
+        if (self.writer_owned) |owned| addWriterOwned(&new, owned);
+        if (!fitsConnection(self.q.max, self.max_wire_bytes, self.terminal_wire_reserve, self.terminal_frame_reserve, new)) return error.Full;
+        if (self.process_budget) |budget| try budget.replace(old, new);
+        self.q.push(gpa, frame) catch |err| {
+            if (self.process_budget) |budget| budget.replace(new, old) catch unreachable;
+            return err;
+        };
         self.not_empty.signal(self.io);
     }
 
     /// 메인: revoke/surface-close 시 tag 매칭 프레임 폐기(§8.5). 폐기 개수 반환.
     pub fn purge(self: *OutboundChannel, gpa: std.mem.Allocator, key: co.PurgeKey) usize {
+        return self.purgeDetailed(gpa, key).queued_frames;
+    }
+
+    pub fn purgeDetailed(self: *OutboundChannel, gpa: std.mem.Allocator, key: co.PurgeKey) PurgeResult {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.q.purge(gpa, key);
+        const before = self.accountingLocked();
+        const removed = self.q.purge(gpa, key);
+        const after = self.accountingLocked();
+        if (self.process_budget) |budget| budget.replace(before, after) catch unreachable;
+        return .{
+            .queued_frames = removed,
+            .writer_owned = if (self.writer_owned) |owned| owned.purge_key.eql(key) else false,
+        };
     }
 
     /// writer 스레드: 프레임이 있으면 pop, 없으면 `not_empty` 대기. **closed + 빈** 이면 null(writer 종료 신호). 반환
@@ -259,22 +372,26 @@ pub const OutboundChannel = struct {
         while (self.q.len() == 0 and !self.closed) self.not_empty.waitUncancelable(self.io, &self.mutex);
         if (self.q.len() == 0) return null; // closed + 빈 → 종료
         const frame = self.q.pop().?;
-        self.writer_owned_wire_bytes += co.wireBytes(frame.bytes);
+        std.debug.assert(self.writer_owned == null);
+        self.writer_owned = .{ .wire_bytes = co.wireBytes(frame.bytes), .purge_key = frame.purge_key, .class = frame.class };
         return frame;
     }
 
     pub fn writeComplete(self: *OutboundChannel, frame_bytes: []const u8) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const wire = co.wireBytes(frame_bytes);
-        std.debug.assert(wire <= self.writer_owned_wire_bytes);
-        self.writer_owned_wire_bytes -= wire;
+        const owned = self.writer_owned orelse unreachable;
+        std.debug.assert(owned.wire_bytes == co.wireBytes(frame_bytes));
+        const before = self.accountingLocked();
+        self.writer_owned = null;
+        const after = self.accountingLocked();
+        if (self.process_budget) |budget| budget.replace(before, after) catch unreachable;
     }
 
     pub fn totalWireBytes(self: *OutboundChannel) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.q.queuedWireBytes() + self.writer_owned_wire_bytes;
+        return self.accountingLocked().total_bytes;
     }
 
     /// 메인: 채널 종료 — 대기 writer를 깨워(broadcast) 남은 프레임 drain 후 종료(null)하게 한다.
@@ -290,6 +407,50 @@ pub const OutboundChannel = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.q.isFull();
+    }
+
+    pub fn shouldPause(self: *OutboundChannel) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const local = self.accountingLocked().total_bytes;
+        if (local >= self.max_wire_bytes - self.max_wire_bytes / 4) return true;
+        if (self.process_budget) |budget| {
+            const global = budget.snapshot().total_bytes;
+            return global >= budget.max_wire_bytes - budget.max_wire_bytes / 4;
+        }
+        return false;
+    }
+
+    pub fn shouldResume(self: *OutboundChannel) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.accountingLocked().total_bytes > self.max_wire_bytes / 2) return false;
+        if (self.process_budget) |budget| return budget.snapshot().total_bytes <= budget.max_wire_bytes / 2;
+        return true;
+    }
+
+    fn accountingLocked(self: *OutboundChannel) co.QueueAccounting {
+        var result = self.q.accounting();
+        if (self.writer_owned) |owned| addWriterOwned(&result, owned);
+        return result;
+    }
+
+    fn addWriterOwned(accounting: *co.QueueAccounting, owned: WriterOwned) void {
+        accounting.total_bytes += owned.wire_bytes;
+        accounting.total_frames += 1;
+        if (owned.class == .terminal) {
+            accounting.terminal_bytes += owned.wire_bytes;
+            accounting.terminal_frames += 1;
+        }
+    }
+
+    fn fitsConnection(max_frames: usize, max_wire_bytes: usize, terminal_bytes: usize, terminal_frames: usize, accounting: co.QueueAccounting) bool {
+        if (accounting.total_frames > max_frames) return false;
+        if (accounting.total_bytes > max_wire_bytes) return false;
+        if (accounting.terminal_bytes > terminal_bytes) return false;
+        if (accounting.terminal_frames > terminal_frames) return false;
+        if (accounting.generalFrames() > max_frames -| terminal_frames) return false;
+        return accounting.generalBytes() <= max_wire_bytes - terminal_bytes;
     }
 };
 
@@ -521,6 +682,8 @@ pub const ControlServer = struct {
     /// 5f-0b-2b-2: 연결당 outbound 큐(응답+이벤트) 용량. 직렬 reader라 응답은 depth ~1이고, 실 소비자는 5f-0b-3 이벤트
     /// 버스트다(초과 push=Full → 이벤트 drop=subscriber-lagged, §9.5.6; 응답은 Full이면 연결 abandon). 64면 여유.
     outbound_capacity: usize = 64,
+    /// activation 뒤 모든 연결이 공유할 wire-byte 상한. 채널 락→이 budget 락 순서만 허용하며 역방향 호출은 없다.
+    process_outbound_budget: ProcessOutboundBudget = undefined,
     /// 5f-0b-3a-2: browser 이벤트 구독 레지스트리(leaf-mutex). 메인(pushEvent — 5f-0b-3c KVO 주입·subscribe — 5f-0b-3b
     /// dispatch)과 연결 스레드(종료 시 self-`purgeOutbound`)가 공유한다. start가 init, connThread가 종료 시 purge, stop이 deinit.
     subscriber_reg: SubscriberRegistry = undefined,
@@ -555,6 +718,11 @@ pub const ControlServer = struct {
             // park-free, 위 필드 주석). 이 초기화가 유일한 max_connections 설정 지점 — start 후 필드 변경 금지(acceptLoop가
             // conns_mutex 아래 읽으므로 무동기 변경은 데이터 레이스). 라이브=16(app_host_abi max_pending), 테스트=각자 max_pending.
             .max_connections = max_pending,
+            .process_outbound_budget = ProcessOutboundBudget.init(
+                io,
+                ProcessOutboundBudget.default_max_wire_bytes,
+                ProcessOutboundBudget.default_terminal_reserve_bytes,
+            ),
             // 5f-0b-3a-2: 이벤트 구독 레지스트리(leaf-mutex). 구조체 alloc은 items_gpa(메인 소유), 이벤트 바이트는 pushEvent가 cross_gpa로.
             .subscriber_reg = SubscriberRegistry.init(io, items_gpa),
         };
@@ -691,6 +859,7 @@ pub const ControlServer = struct {
         self.queue.deinit();
         self.in_flight.deinit(self.items_gpa);
         self.subscriber_reg.deinit(); // 5f-0b-3a-2: 모든 연결 스레드 join 후(위) = 동시 접근 없음 → 락 없이 해제
+        std.debug.assert(self.process_outbound_budget.snapshot().total_bytes == 0);
         self.* = undefined;
     }
 
@@ -742,6 +911,9 @@ pub const ControlServer = struct {
     fn connThread(self: *ControlServer, conn_in: cs.Connection) void {
         var conn = conn_in;
         // 연결당 통합 outbound 큐(응답+이벤트). reader가 응답 push, writer가 drain→소켓 write(단일 writer 불변).
+        // 5f-5b activation 전에는 기존 screenshot이 한 callback에서 최대 24 chunk를 동기 enqueue한다. 여기서 4 MiB를
+        // 먼저 켜면 partial screenshot 뒤 terminal 없는 회귀가 생기므로, screenshot/executeScript pump와 함께 다음
+        // activation slice에서 initWithProcessBudget으로 원자 전환한다.
         var outbound = OutboundChannel.init(self.io, self.outbound_capacity);
         const writer = std.Thread.spawn(.{}, writerThread, .{ self, conn.fd, &outbound }) catch {
             // writer spawn 실패 → 응답 write 경로 없음 → 이 연결 포기(reader 안 돌림). 정리 후 카운터 감소.
@@ -981,6 +1153,135 @@ test "OutboundChannel: queued→writer-owned 이동은 writeComplete 전까지 b
     testing.allocator.free(blocked.bytes);
     ch.writeComplete(frame.bytes);
     try testing.expectEqual(@as(usize, 0), ch.totalWireBytes());
+}
+
+test "OutboundChannel: general 프레임은 연결 terminal carve-out을 침범하지 않는다" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 64, 16);
+    var ch = OutboundChannel.initWithLimits(std.testing.io, 8, 10, 3, 2, &process);
+    defer ch.deinit(testing.allocator);
+
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "123456") }); // wire 7 = general exact
+    const blocked = co.Frame{ .bytes = try testing.allocator.dupe(u8, "") }; // wire 1 would consume reserve
+    try testing.expectError(error.Full, ch.push(testing.allocator, blocked));
+    testing.allocator.free(blocked.bytes);
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "xy"), .class = .terminal }); // wire 3
+    try testing.expectEqual(@as(usize, 10), ch.totalWireBytes());
+}
+
+test "OutboundChannel: general frame은 terminal 두 슬롯을 실제로 남긴다" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 64, 16);
+    var ch = OutboundChannel.initWithLimits(std.testing.io, 4, 32, 8, 2, &process);
+    defer ch.deinit(testing.allocator);
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "") });
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "") });
+    const third_general: co.Frame = .{ .bytes = try testing.allocator.dupe(u8, "") };
+    try testing.expectError(error.Full, ch.push(testing.allocator, third_general));
+    testing.allocator.free(third_general.bytes);
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, ""), .class = .terminal });
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, ""), .class = .terminal });
+    const third_terminal: co.Frame = .{ .bytes = try testing.allocator.dupe(u8, ""), .class = .terminal };
+    try testing.expectError(error.Full, ch.push(testing.allocator, third_terminal));
+    testing.allocator.free(third_terminal.bytes);
+}
+
+test "OutboundChannel: 여러 연결은 process general/terminal carve-out을 함께 지킨다" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 12, 4); // general 8 + terminal 4
+    var a = OutboundChannel.initWithLimits(std.testing.io, 8, 12, 4, 2, &process);
+    defer a.deinit(testing.allocator);
+    var b = OutboundChannel.initWithLimits(std.testing.io, 8, 12, 4, 2, &process);
+    defer b.deinit(testing.allocator);
+
+    try a.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "123456") }); // general wire 7
+    try b.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "") }); // general wire 1 = global exact
+    const general_overflow = co.Frame{ .bytes = try testing.allocator.dupe(u8, "") };
+    try testing.expectError(error.Full, b.push(testing.allocator, general_overflow));
+    testing.allocator.free(general_overflow.bytes);
+    try b.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "abc"), .class = .terminal }); // terminal wire 4
+    try testing.expectEqual(@as(usize, 12), process.snapshot().total_bytes);
+    try testing.expectEqual(@as(usize, 4), process.snapshot().terminal_bytes);
+}
+
+test "OutboundChannel: writer-owned purge key는 queued purge와 별도로 연결 중단 필요를 알린다" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 64, 16);
+    var ch = OutboundChannel.initWithLimits(std.testing.io, 8, 32, 8, 2, &process);
+    defer ch.deinit(testing.allocator);
+    const key: co.PurgeKey = .{ .browser_result = 9 };
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "first"), .purge_key = key });
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "second"), .purge_key = key });
+    const writing = ch.popWait().?;
+    defer testing.allocator.free(writing.bytes);
+
+    const purged = ch.purgeDetailed(testing.allocator, key);
+    try testing.expectEqual(@as(usize, 1), purged.queued_frames);
+    try testing.expect(purged.writer_owned);
+    try testing.expectEqual(co.wireBytes(writing.bytes), process.snapshot().total_bytes);
+    ch.writeComplete(writing.bytes);
+    try testing.expectEqual(@as(usize, 0), process.snapshot().total_bytes);
+}
+
+test "ProcessOutboundBudget: 동시 연결 push도 global hard cap을 넘지 않는다" {
+    const N = 8;
+    const gpa = std.heap.c_allocator;
+    var process = ProcessOutboundBudget.init(std.testing.io, 10, 2); // general 8 bytes
+    var channels: [N]OutboundChannel = undefined;
+    for (&channels) |*channel| channel.* = OutboundChannel.initWithLimits(std.testing.io, 2, 8, 2, 1, &process);
+    defer for (&channels) |*channel| channel.deinit(gpa);
+    var successes = std.atomic.Value(usize).init(0);
+    const Worker = struct {
+        fn run(allocator: std.mem.Allocator, channel: *OutboundChannel, count: *std.atomic.Value(usize)) void {
+            const frame: co.Frame = .{ .bytes = allocator.dupe(u8, "x") catch return }; // wire 2
+            channel.push(allocator, frame) catch {
+                allocator.free(frame.bytes);
+                return;
+            };
+            _ = count.fetchAdd(1, .acq_rel);
+        }
+    };
+    var threads: [N]std.Thread = undefined;
+    for (&threads, &channels) |*thread, *channel| thread.* = try std.Thread.spawn(.{}, Worker.run, .{ gpa, channel, &successes });
+    for (threads) |thread| thread.join();
+    try testing.expectEqual(@as(usize, 4), successes.load(.acquire));
+    try testing.expectEqual(@as(usize, 8), process.snapshot().total_bytes);
+}
+
+test "OutboundChannel: queue append OOM은 process reservation과 frame 소유권을 rollback한다" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 16, 4);
+    var ch = OutboundChannel.initWithLimits(std.testing.io, 4, 12, 4, 1, &process);
+    defer ch.deinit(testing.allocator);
+    const frame: co.Frame = .{ .bytes = try testing.allocator.dupe(u8, "abc") };
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, ch.push(failing.allocator(), frame));
+    try testing.expectEqual(@as(usize, 0), ch.q.len());
+    try testing.expectEqual(@as(usize, 0), process.snapshot().total_bytes);
+    // 실패 시 bytes는 호출자 소유 그대로라 정상 allocator로 같은 frame을 재시도할 수 있다.
+    try ch.push(testing.allocator, frame);
+    try testing.expectEqual(@as(usize, 4), process.snapshot().total_bytes);
+}
+
+test "OutboundChannel: invalid terminal coalesce는 process budget을 건드리기 전에 거부한다" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 32, 8);
+    var ch = OutboundChannel.initWithLimits(std.testing.io, 4, 24, 8, 2, &process);
+    defer ch.deinit(testing.allocator);
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "123456"), .coalesce_key = 1 });
+    const before = process.snapshot();
+    const invalid: co.Frame = .{ .bytes = try testing.allocator.dupe(u8, ""), .coalesce_key = 1, .class = .terminal };
+    try testing.expectError(error.InvalidFrame, ch.push(testing.allocator, invalid));
+    testing.allocator.free(invalid.bytes);
+    try testing.expectEqualDeep(before, process.snapshot());
+    try testing.expectEqual(@as(usize, 1), ch.q.len());
+}
+
+test "OutboundChannel: local/global 75 percent pause와 50 percent resume 경계" {
+    var process = ProcessOutboundBudget.init(std.testing.io, 16, 4);
+    var ch = OutboundChannel.initWithLimits(std.testing.io, 8, 16, 4, 2, &process);
+    defer ch.deinit(testing.allocator);
+    try ch.push(testing.allocator, .{ .bytes = try testing.allocator.dupe(u8, "12345678901") }); // wire 12 = 75%
+    try testing.expect(ch.shouldPause());
+    try testing.expect(!ch.shouldResume());
+    const frame = ch.popWait().?;
+    defer testing.allocator.free(frame.bytes);
+    ch.writeComplete(frame.bytes);
+    try testing.expect(ch.shouldResume());
 }
 
 // ── SubscriberRegistry 단위(5f-0b-3a — 메인 전용·헤드리스, 스레드 없이 순수 로직) ──

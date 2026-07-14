@@ -772,8 +772,11 @@ pub const screenshot_max_chunks: usize = 24;
 
 /// executeScript chunk은 base64 팽창과 JSON envelope를 포함해 1MiB frame 아래에 머물도록 raw 512KiB로 나눈다.
 pub const execute_script_chunk_bytes: usize = 512 * 1024;
+/// final/error가 일반 chunk에 막히지 않도록 예약한 연결별 terminal wire 상한(개행 포함).
+pub const execute_script_terminal_wire_bytes: usize = 64 * 1024;
 const execute_script_chunk_method = cp.browser_execute_script_chunk_method;
 pub const ExecuteScriptChunkError = error{ InvalidResultId, ChunkTooLarge, FrameTooLarge };
+pub const ExecuteScriptCompleteError = error{ InvalidResultId, TerminalFrameTooLarge };
 
 pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
     if (result_id < 0) return error.InvalidResultId;
@@ -808,6 +811,53 @@ pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, re
     if (wire.len > cp.default_max_frame) {
         gpa.free(wire);
         return error.FrameTooLarge;
+    }
+    return wire;
+}
+
+/// progressive chunk를 모두 enqueue한 뒤 같은 FIFO에 놓는 작은 terminal 응답. request id는 원 요청에서 다시 읽어
+/// notification의 request_id와 최종 응답 id가 갈라지지 않게 한다. 실제 16 MiB 경로는 pump+CLI sink와 함께 후속에서 연다.
+pub fn serializeExecuteScriptChunkedComplete(
+    gpa: std.mem.Allocator,
+    request_bytes: []const u8,
+    result_id: i64,
+    seq_total: usize,
+    bytes: usize,
+) (std.mem.Allocator.Error || ExecuteScriptCompleteError)![]u8 {
+    if (result_id < 0) return error.InvalidResultId;
+    var pm = cp.parseMessage(gpa, request_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    defer pm.deinit();
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => return errorResponse(gpa, .null, .internal_error),
+    };
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    s.beginObject() catch return error.OutOfMemory;
+    s.objectField("jsonrpc") catch return error.OutOfMemory;
+    s.write(cp.jsonrpc_version) catch return error.OutOfMemory;
+    s.objectField("id") catch return error.OutOfMemory;
+    cp.writeId(&s, req.id) catch return error.OutOfMemory;
+    s.objectField("result") catch return error.OutOfMemory;
+    s.beginObject() catch return error.OutOfMemory;
+    s.objectField("transfer") catch return error.OutOfMemory;
+    s.write("chunked") catch return error.OutOfMemory;
+    s.objectField("result_id") catch return error.OutOfMemory;
+    s.write(result_id) catch return error.OutOfMemory;
+    s.objectField("seq_total") catch return error.OutOfMemory;
+    s.write(seq_total) catch return error.OutOfMemory;
+    s.objectField("bytes") catch return error.OutOfMemory;
+    s.write(bytes) catch return error.OutOfMemory;
+    s.endObject() catch return error.OutOfMemory;
+    s.endObject() catch return error.OutOfMemory;
+    const wire = aw.toOwnedSlice() catch return error.OutOfMemory;
+    if (wire.len + 1 > execute_script_terminal_wire_bytes) {
+        gpa.free(wire);
+        return error.TerminalFrameTooLarge;
     }
     return wire;
 }
@@ -2132,6 +2182,33 @@ test "serializeExecuteScriptChunk: request/result id·seq·base64-json과 frame 
     const oversized = try testing.allocator.alloc(u8, execute_script_chunk_bytes + 1);
     defer testing.allocator.free(oversized);
     try testing.expectError(error.ChunkTooLarge, serializeExecuteScriptChunk(testing.allocator, .{ .number = 1 }, 1, 0, oversized));
+}
+
+test "serializeExecuteScriptChunkedComplete: 원 request id와 result/seq/bytes를 terminal에 고정" {
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"browser.executeScript\",\"params\":{\"surface_id\":1,\"script\":\"1\"}}";
+    const wire = try serializeExecuteScriptChunkedComplete(testing.allocator, request, 99, 3, 1048577);
+    defer testing.allocator.free(wire);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 12), parsed.value.object.get("id").?.integer);
+    const result = parsed.value.object.get("result").?.object;
+    try testing.expectEqualStrings("chunked", result.get("transfer").?.string);
+    try testing.expectEqual(@as(i64, 99), result.get("result_id").?.integer);
+    try testing.expectEqual(@as(i64, 3), result.get("seq_total").?.integer);
+    try testing.expectEqual(@as(i64, 1048577), result.get("bytes").?.integer);
+    try testing.expectError(error.InvalidResultId, serializeExecuteScriptChunkedComplete(testing.allocator, request, -1, 0, 0));
+
+    const prefix = "{\"jsonrpc\":\"2.0\",\"id\":\"";
+    const suffix = "\",\"method\":\"browser.executeScript\",\"params\":{\"surface_id\":1,\"script\":\"1\"}}";
+    const huge_request = try testing.allocator.alloc(u8, prefix.len + execute_script_terminal_wire_bytes + suffix.len);
+    defer testing.allocator.free(huge_request);
+    @memcpy(huge_request[0..prefix.len], prefix);
+    @memset(huge_request[prefix.len .. prefix.len + execute_script_terminal_wire_bytes], 'x');
+    @memcpy(huge_request[prefix.len + execute_script_terminal_wire_bytes ..], suffix);
+    try testing.expectError(
+        error.TerminalFrameTooLarge,
+        serializeExecuteScriptChunkedComplete(testing.allocator, huge_request, 1, 1, 1),
+    );
 }
 
 test "serializeScreenshotComplete: 최종 응답(capture_id·seq_total·width·height·format), id 재파싱 echo" {

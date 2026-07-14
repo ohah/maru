@@ -642,6 +642,55 @@ fn serializeExecuteScriptResponse(gpa: std.mem.Allocator, id: cp.Id, raw: []cons
     return wire;
 }
 
+fn parseExecuteScriptRequestForCompletion(gpa: std.mem.Allocator, request_bytes: []const u8) !cp.ParsedMessage {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidRequestState,
+    };
+    const req = switch (pm.message) {
+        .request => |r| r,
+        else => {
+            pm.deinit();
+            return error.InvalidRequestState;
+        },
+    };
+    const method = parseBrowserMethod(cp.parseMethod(req.method).rest) orelse {
+        pm.deinit();
+        return error.InvalidRequestState;
+    };
+    if (method != .execute_script) {
+        pm.deinit();
+        return error.InvalidRequestState;
+    }
+    _ = parseExecuteScriptParams(req.params) catch {
+        pm.deinit();
+        return error.InvalidRequestState;
+    };
+    return pm;
+}
+
+/// Swift registry가 알려 준 실제 JSON byte 길이만으로 request limit 오류를 만든다. 결과 bytes를 Zig로 복사하지 않는다.
+pub fn serializeExecuteScriptObservedTooLarge(gpa: std.mem.Allocator, request_bytes: []const u8, observed_bytes: usize) std.mem.Allocator.Error![]u8 {
+    var pm = parseExecuteScriptRequestForCompletion(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return cp.serializeError(gpa, .null, .internal_error, "invalid executeScript request state", null),
+    };
+    defer pm.deinit();
+    const req = pm.message.request;
+    const params = parseExecuteScriptParams(req.params) catch unreachable;
+    return serializeResultTooLarge(gpa, req.id, params.max_result_bytes, observed_bytes);
+}
+
+/// 현재 live transport가 inline frame만 지원할 때 registry의 큰 결과를 복사하지 않고 물리-frame 오류로 끝낸다.
+pub fn serializeExecuteScriptInlineTooLarge(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
+    var pm = parseExecuteScriptRequestForCompletion(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return cp.serializeError(gpa, .null, .internal_error, "invalid executeScript request state", null),
+    };
+    defer pm.deinit();
+    return cp.serializeError(gpa, pm.message.request.id, .payload_too_large, "executeScript result exceeds inline frame", null);
+}
+
 fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.Value) !void {
     try beginResult(s, id);
     try s.objectField("result");
@@ -2006,6 +2055,23 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer pm.deinit();
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
+}
+
+test "executeScript length-only errors retain string JSON-RPC id ownership through serialization" {
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":\"req-1\",\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":8}}";
+    const too_large = try serializeExecuteScriptObservedTooLarge(testing.allocator, request, 9);
+    defer testing.allocator.free(too_large);
+    var parsed_too_large = try cp.parseMessage(testing.allocator, too_large);
+    defer parsed_too_large.deinit();
+    try testing.expectEqualStrings("req-1", parsed_too_large.message.response.id.string);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.result_too_large)), parsed_too_large.message.response.err.?.code);
+
+    const inline_wire = try serializeExecuteScriptInlineTooLarge(testing.allocator, request);
+    defer testing.allocator.free(inline_wire);
+    var parsed_inline = try cp.parseMessage(testing.allocator, inline_wire);
+    defer parsed_inline.deinit();
+    try testing.expectEqualStrings("req-1", parsed_inline.message.response.id.string);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.payload_too_large)), parsed_inline.message.response.err.?.code);
 }
 
 // ── 9d) screenshot(5f-1) chunk-streaming 직렬화·metadata·감지 단위(§9.5.7) ──

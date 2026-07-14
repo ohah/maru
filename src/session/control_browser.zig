@@ -1215,21 +1215,17 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
     };
     const bmethod = parseBrowserMethod(cp.parseMethod(req.method).rest) orelse return errorResponse(gpa, req.id, .internal_error);
     if (status != .success) {
-        if (bmethod == .wait or bmethod == .execute_script) {
-            return switch (status) {
-                .timeout => if (bmethod == .wait)
-                    serializeWaitTimeoutError(gpa, req)
-                else
-                    cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), null),
-                .invalid_params => cp.serializeError(gpa, req.id, .invalid_params, if (result.len > 0) result else "Invalid selector", null),
-                .process_exited => cp.serializeError(gpa, req.id, .process_exited, cp.ErrorCode.process_exited.defaultMessage(), null),
-                .unauthorized => cp.serializeError(gpa, req.id, .unauthorized, cp.ErrorCode.unauthorized.defaultMessage(), null),
-                .success => unreachable,
-                .failed => cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
-            };
-        }
-        const msg = if (result.len > 0) result else "browser op failed";
-        return cp.serializeError(gpa, req.id, .internal_error, msg, null);
+        return switch (status) {
+            .timeout => if (bmethod == .wait)
+                serializeWaitTimeoutError(gpa, req)
+            else
+                cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), null),
+            .invalid_params => cp.serializeError(gpa, req.id, .invalid_params, if (result.len > 0) result else "Invalid selector", null),
+            .process_exited => cp.serializeError(gpa, req.id, .process_exited, cp.ErrorCode.process_exited.defaultMessage(), null),
+            .unauthorized => cp.serializeError(gpa, req.id, .unauthorized, cp.ErrorCode.unauthorized.defaultMessage(), null),
+            .success => unreachable,
+            .failed => cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
+        };
     }
     return switch (bmethod) {
         .navigate => serializeNavigateResult(gpa, req.id),
@@ -2960,6 +2956,26 @@ test "serializeBrowserResponseStatus(wait): success·timeout data·invalid selec
         defer testing.allocator.free(w);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
     }
+}
+
+test "all browser methods preserve typed lifecycle terminal codes" {
+    const requests = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"about:blank\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.setCookie\",\"params\":{\"id\":11,\"name\":\"a\",\"value\":\"b\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"button\"}}",
+    };
+    const statuses = [_]struct { status: BrowserCompletionStatus, code: cp.ErrorCode }{
+        .{ .status = .timeout, .code = .timeout },
+        .{ .status = .process_exited, .code = .process_exited },
+        .{ .status = .unauthorized, .code = .unauthorized },
+    };
+    for (requests) |request| for (statuses) |expected| {
+        const wire = try serializeBrowserResponseStatus(testing.allocator, request, expected.status, "");
+        defer testing.allocator.free(wire);
+        try testing.expectEqual(@as(i64, @intFromEnum(expected.code)), try errCode(wire));
+    };
 }
 
 test "executeScript lifecycle errors: resource-busy와 timeout은 stable wire code/data" {

@@ -2100,6 +2100,7 @@ extension MaruWebPanelView: WKNavigationDelegate {
     // 결정적 트리거 불가라 헤드리스/손 테스트 대상(§9.5.5). 메인 스레드(델리게이트 콜백).
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         maru_macos_control_push_browser_crashed(surfaceId)
+        controller?.browserDidTerminateWebContent(surfaceId)
     }
 }
 
@@ -2429,6 +2430,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // callback이 navigation에서 영원히 오지 않을 수 있으므로 surface별 running executeScript를 Swift에서도 추적한다.
     // didStartProvisionalNavigation이 선제 terminal을 보내고, 늦은 callback은 set 부재로 폐기해 중복 완료를 막는다.
     private var runningBrowserScripts: [UInt64: Set<UInt64>] = [:]
+    /// executeScript 외 WebKit async callback도 surface close 뒤 성공/비밀 결과를 되살리지 않게 surface 수명에 묶는다.
+    /// WebContent realm op만 close/crash를 backend terminal로 보며, data-store op은 NetworkProcess의 실제 callback까지 슬롯을
+    /// 유지한다. 둘 다 Zig client terminal 뒤 결과는 폐기한다.
+    private enum BrowserCallbackLifetime {
+        case webContentRealm // crash/close가 backend terminal: snapshot/evaluateJavaScript
+        case dataStore // NetworkProcess/data-store op: 실제 callback 전에는 backend terminal 아님
+    }
+    private var runningBrowserCallbacks: [UInt64: [UInt64: BrowserCallbackLifetime]] = [:]
     // ReleaseSafe bounded smoke에서만 채우는 pump 기여 시간. 제품 실행은 배열 append조차 하지 않는다.
     private var browserResultPumpSamplesMs: [Double] = []
     // 1e-confirm-1c-2(MARU_TEST_GRANT_DECISION): **무-cap** browser.navigate가 pane confirm-grant 흐름(needs_grant→env approve→grant→op)으로 성공하는지("true"/진단).
@@ -2643,12 +2652,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 종료 요약 기준 surface(메인=첫 창)를 shutdown '전에' 잡는다 — shutdownAppSession이 컬렉션을 비우므로
         // 그 뒤엔 primary(=windows.first)가 nil이 된다. surface 객체는 캡처로 살아 있어 close가 채운 요약을 읽는다.
         let mainSurface = windows.first
-        shutdownAppSession()
+        shutdownAppSession(preserveWebPanelsFor: mainSurface)
         if let mainSurface {
             // quick 패널이 key인 채 종료해도 forwarder가 quick으로 새지 않게 메인 창을 명시 대상으로.
             withSurface(mainSurface) {
                 writeSummary(visibleUI: mainSurface.window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
             }
+            // 기존 summary가 panel-derived 필드를 읽은 뒤 native view/dict를 해제한다. app session/control server는
+            // 이미 종료되어 closed push는 no-op이고 ARC cleanup만 남는다.
+            teardownWebPanels(mainSurface)
         } else {
             writeSummary(visibleUI: false, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
         }
@@ -3377,7 +3389,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 한 일반 창의 세션·렌더러를 닫고(요약은 surface.latestFrameSummary에 남긴다) 컬렉션에서 뺀다. NSWindow는
     /// 건드리지 않는다 — windowWillClose는 이미 닫히는 중이고, 그 외 경로(tick 셸 종료·팩토리 실패)는 호출자가
     /// delegate를 끊고 window를 닫는다(재진입 없이). 앱 quit에선 shutdownAppSession이 남은 창마다 순회 호출.
-    private func teardownWindowSurface(_ surface: TerminalSurface) {
+    private func teardownWindowSurface(_ surface: TerminalSurface, preserveWebPanelsForSummary: Bool = false) {
+        if !preserveWebPanelsForSummary { teardownWebPanels(surface) }
         if let session = surface.appSession {
             var summary = MaruAppHostFrameSummary()
             let status = maru_macos_app_session_close(session, &summary)
@@ -3391,6 +3404,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.metalRenderer = nil
         }
         windows.removeAll { $0 === surface }
+    }
+
+    /// 창 전체 teardown은 다음 web-surface transition tick이 없으므로, 살아 있는 panel을 여기서 명시적으로 종료한다.
+    /// 개별 destroy 전이와 같은 browser.closed → 실행 중 script terminal → view/dict 해제 순서를 창 단위로 적용한다.
+    private func teardownWebPanels(_ surface: TerminalSurface) {
+        for (surfaceId, panel) in surface.webPanels {
+            maru_macos_control_push_browser_closed(surfaceId)
+            browserDidCloseSurface(surfaceId)
+            panel.removeFromSuperview()
+            panel.controller = nil
+        }
+        surface.webPanels.removeAll()
+        surface.lastFocusedWebSurfaceId = nil
     }
 
     /// 셸 종료/fault로 한 창을 닫는다(tick 경로). 마지막 일반 창이면 앱 종료(정리·요약은 applicationWillTerminate —
@@ -3586,12 +3612,43 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func browserDidStartNavigation(_ surfaceId: UInt64) {
         finishRunningBrowserScriptsForRealmChange(surfaceId, code: 1)
+        // snapshot/evaluateJavaScript 계열도 이전 document realm의 callback을 신뢰할 수 없다. navigation 시작 시 client에는
+        // execution error를 보내고 registry에서 제거해, 새 문서가 뜬 뒤 늦은 success가 이전 요청을 완료하지 못하게 한다.
+        finishRunningBrowserRealmCallbacks(surfaceId, result: "browser navigation interrupted operation")
+    }
+
+    func browserDidTerminateWebContent(_ surfaceId: UInt64) {
+        // push_browser_crashed가 먼저 client process-exited를 commit한다. WebContent realm op만 process death를 실제 backend
+        // terminal로 보며, cookie/data-store op은 NetworkProcess callback까지 슬롯을 유지해 max=8 backend bound를 지킨다.
+        finishRunningBrowserScriptsForRealmChange(surfaceId, code: 3)
+        finishRunningBrowserRealmCallbacks(surfaceId, result: "browser web content process terminated")
     }
 
     private func browserDidCloseSurface(_ surfaceId: UInt64) {
         // Zig는 먼저 client terminal=process_exited로 mark한다. 이 backend terminal은 abandoned execution의
         // reservation/slot만 회수하며, 이미 보낸 client 결과를 바꾸지 않는다.
         finishRunningBrowserScriptsForRealmChange(surfaceId, code: 2)
+        finishRunningBrowserRealmCallbacks(surfaceId, result: "browser surface closed")
+    }
+
+    private func finishRunningBrowserRealmCallbacks(_ surfaceId: UInt64, result: String) {
+        guard let entries = runningBrowserCallbacks[surfaceId] else { return }
+        let ids = entries.compactMap { asyncId, lifetime in lifetime == .webContentRealm ? asyncId : nil }
+        for asyncId in ids {
+            runningBrowserCallbacks[surfaceId]?.removeValue(forKey: asyncId)
+            completeBrowserOp(asyncId, status: 1, result: result)
+        }
+        if runningBrowserCallbacks[surfaceId]?.isEmpty == true { runningBrowserCallbacks.removeValue(forKey: surfaceId) }
+    }
+
+    private func registerRunningBrowserCallback(_ asyncId: UInt64, surfaceId: UInt64, lifetime: BrowserCallbackLifetime) {
+        runningBrowserCallbacks[surfaceId, default: [:]][asyncId] = lifetime
+    }
+
+    private func takeRunningBrowserCallback(_ asyncId: UInt64, surfaceId: UInt64) -> Bool {
+        guard runningBrowserCallbacks[surfaceId]?.removeValue(forKey: asyncId) != nil else { return false }
+        if runningBrowserCallbacks[surfaceId]?.isEmpty == true { runningBrowserCallbacks.removeValue(forKey: surfaceId) }
+        return true
     }
 
     private func finishRunningBrowserScriptsForRealmChange(_ surfaceId: UInt64, code: Int) {
@@ -3649,7 +3706,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case 1: // getUrl — 동기(현재 문서 URL, 로드 전엔 빈).
                 completeBrowserOp(asyncId, status: 0, result: BrowserControl.currentUrl(wp.webView) ?? "")
             case 4: // getCookies(5f-4c) — async 콜백(WKHTTPCookieStore.getAllCookies). result=쿠키 JSON 배열 문자열.
-                BrowserControl.getCookies(wp.webView) { json in
+                registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .dataStore)
+                BrowserControl.getCookies(wp.webView) { [weak self] json in
+                    guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                     self.completeBrowserOp(asyncId, status: 0, result: json)
                 }
             case 2: // executeScript — page realm에서 bounded JSON을 만든 뒤 Swift registry가 Data를 소유한다.
@@ -3682,7 +3741,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     }
                 }
             case 5: // screenshot(5f-1) — async 콜백(takeSnapshot→PNG). arg={rect?,scale?}(§9.5.7). 성공=PNG 바이트(Zig completeScreenshotOp이 chunk-stream), 실패=status 1.
-                BrowserControl.takeSnapshot(wp.webView, arg) { png in
+                registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .webContentRealm)
+                BrowserControl.takeSnapshot(wp.webView, arg) { [weak self] png in
+                    guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                     if let png = png {
                         self.completeBrowserScreenshotResult(asyncId, data: png)
                     } else {
@@ -3690,16 +3751,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     }
                 }
             case 6: // setCookie(§9.4 D4) — async 콜백(WKHTTPCookieStore.setCookie). arg=쿠키 필드 JSON. 성공=ok, 실패=status 1.
-                BrowserControl.setCookie(wp.webView, arg) { ok in
+                registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .dataStore)
+                BrowserControl.setCookie(wp.webView, arg) { [weak self] ok in
+                    guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                     self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "setCookie failed")
                 }
             case 7: // deleteCookie(§9.4 D4) — async 콜백(getAllCookies→delete). arg={name,domain?,path?}. 멱등(매치 0도 성공).
-                BrowserControl.deleteCookie(wp.webView, arg) { ok in
+                registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .dataStore)
+                BrowserControl.deleteCookie(wp.webView, arg) { [weak self] ok in
+                    guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                     self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "deleteCookie failed")
                 }
             case 8, 9, 10: // localStorage get/set/remove(§9.4 D4) — eval 백엔드(executeScript). get 결과=value 문자열, set/remove={ok}.
                 if let obj = BrowserControl.parseCookieArg(arg), let js = BrowserControl.localStorageScript(obj, op: opKind) {
-                    BrowserControl.executeScript(wp.webView, js) { result in
+                    registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .webContentRealm)
+                    BrowserControl.executeScript(wp.webView, js) { [weak self] result in
+                        guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                         switch result {
                         case .success(let value):
                             self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
@@ -3711,12 +3778,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     self.completeBrowserOp(asyncId, status: 1, result: "localStorage bad params")
                 }
             case 11: // clearStorage(§9.4 D4) — WKWebsiteDataStore로 대상 origin 데이터 삭제(멱등). {ok}.
-                BrowserControl.clearStorage(wp.webView) { ok in
+                registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .dataStore)
+                BrowserControl.clearStorage(wp.webView) { [weak self] ok in
+                    guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                     self.completeBrowserOp(asyncId, status: ok ? 0 : 1, result: ok ? "" : "clearStorage failed")
                 }
             case 12, 13, 14: // click/type/scroll(act 5f-2) — eval(querySelector). result="true"(발견+동작)/"false"(미매치)→Zig {ok:bool}.
                 if let obj = BrowserControl.parseCookieArg(arg), let js = BrowserControl.actScript(obj, op: opKind) {
-                    BrowserControl.executeScript(wp.webView, js) { result in
+                    registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .webContentRealm)
+                    BrowserControl.executeScript(wp.webView, js) { [weak self] result in
+                        guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                         switch result {
                         case .success(let value):
                             self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
@@ -3824,7 +3895,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func maybeRunBrowserControlSmoke() {
         guard smokeMode, !didKickBrowserCtlSmoke, controlServerStarted else { return }
         guard ProcessInfo.processInfo.environment["MARU_TEST_BROWSER_CAP"] != nil else { return }
-        // browser(untrusted, panelKind==1) web 패널을 찾는다(5d fixture가 쓰는 그 패널 — cap을 이 surface에 묶는다).
+        // browser(untrusted, panelKind==1) 활성 web 패널을 찾는다(5d fixture가 쓰는 그 패널 — cap을 이 surface에 묶는다).
         var target: (surfaceId: UInt64, url: String)?
         for surface in windows + (quick.map { [$0] } ?? []) {
             if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 }) {
@@ -6042,6 +6113,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: panel)
         }
         surface.window?.orderOut(nil)
+        teardownWebPanels(surface)
         if let session = surface.appSession {
             var summary = MaruAppHostFrameSummary()
             _ = maru_macos_app_session_close(session, &summary)
@@ -6123,7 +6195,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         try? (MARU_WORKSPACE_HEADER + "\n" + blocks).data(using: .utf8)?.write(to: url, options: .atomic)
     }
 
-    private func shutdownAppSession() {
+    private func shutdownAppSession(preserveWebPanelsFor summarySurface: TerminalSurface? = nil) {
         // 전역 단축키를 먼저 OS에서 해제한다(세션이 사라져도 stale hot-key가 남지 않게). 이미 비었으면 no-op.
         unregisterGlobalHotkeys()
         // quick terminal(있으면)도 함께 정리한다.
@@ -6134,7 +6206,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 각 close/destroy + 컬렉션에서 제거(요약은 surface.latestFrameSummary에). 변형 중 순회를 피해 snapshot으로.
         let snapshot = windows
         for surface in snapshot {
-            teardownWindowSurface(surface)
+            teardownWindowSurface(surface, preserveWebPanelsForSummary: surface === summarySurface)
         }
     }
 

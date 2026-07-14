@@ -140,7 +140,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 115;
+pub const abi_version: u32 = 116;
+// 116: executeScript 결과용 Swift-owned Data registry pull/release callback ABI. Zig가 512 KiB 이하 조각으로
+// 현재 inline 가능 결과만 복사하고, terminal에서 Data 제거를 확인한 뒤 execution byte 예약을 반환한다.
+// 향후 progressive chunk pump가 같은 소유권 경계를 재사용한다. 기존 fixed-width struct layout은 불변.
 // 115: route_drop(드래그앤드롭 pane/Term 라우팅 — 파일/텍스트 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
 // 들어가게 한다). Swift handleDrop이 삽입 **전에** 드롭 지점(backing px)으로 부르면 Zig가 Model.paneAtPoint로
 // 그 pane을(Term 탭 위면 그 Term까지) 포커스하고, 뒤이은 paste_text/drop_files가 기존 경로 그대로 거기에 넣는다.

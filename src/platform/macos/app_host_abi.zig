@@ -1822,7 +1822,7 @@ const ExecutionProvenance = union(enum) {
     pane_grant: control_browser.GrantProvenance,
 };
 
-const ExecutionPhase = enum { queued, running, abandoned };
+const ExecutionPhase = enum { queued, running, transferring, abandoned };
 
 const ActiveBrowserExecution = struct {
     async_id: u64,
@@ -1830,6 +1830,8 @@ const ActiveBrowserExecution = struct {
     reserved_bytes: usize,
     provenance: ExecutionProvenance,
     phase: ExecutionPhase = .queued,
+    transfer_id: u64 = 0,
+    transfer_total_bytes: usize = 0,
 };
 
 /// executeScript backend와 client terminal을 분리해 추적한다. queued 취소는 즉시 반환하고, running 취소는 WebKit
@@ -1874,11 +1876,16 @@ const ActiveBrowserExecutions = struct {
         self.items.items[i].phase = .abandoned;
     }
 
-    fn shrinkTo(self: *ActiveBrowserExecutions, async_id: u64, actual: usize) bool {
+    /// running execution의 같은 슬롯·예약을 transfer로 원자 전환한다. 실제 길이 차액만 반환하며 예약을 0으로
+    /// 내렸다가 다시 잡는 창은 없다.
+    fn beginTransfer(self: *ActiveBrowserExecutions, async_id: u64, transfer_id: u64, actual: usize) bool {
         const e = self.get(async_id) orelse return false;
-        if (actual > e.reserved_bytes) return false;
+        if (e.phase != .running or transfer_id == 0 or actual > e.reserved_bytes) return false;
         self.budget.release(e.reserved_bytes - actual) catch return false;
         e.reserved_bytes = actual;
+        e.transfer_id = transfer_id;
+        e.transfer_total_bytes = actual;
+        e.phase = .transferring;
         return true;
     }
 
@@ -2555,6 +2562,16 @@ fn queuedExecutionReady(server: *control_server_mod.ControlServer, async_id: u64
     return execution.phase == .queued and server.inFlightPending(async_id) != null;
 }
 
+fn browserExecutionAuthorized(execution: *const ActiveBrowserExecution, now: u64) bool {
+    return switch (execution.provenance) {
+        .capability => |identity| if (control_cap_store.lookupByNonce(identity.nonce)) |cap|
+            control_capability.authorize(cap, execution.surface_id, identity.generation, "browser.executeScript", now) == .granted
+        else
+            false,
+        .pane_grant => |g| control_pane_grant_store.isGranted(g.pane, g.target, g.scope),
+    };
+}
+
 /// 5e-2b: Swift가 매 tick 호출 — (1) `reapExpiredInFlight`(hung browser op timeout), (2) browser op 큐에서 하나 pop해
 /// out으로 넘긴다. 반환 1=op 있음(Swift가 surface_id로 webView 찾아 `BrowserControl`[op_kind] 실행 → 완료 시
 /// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c)·5=screenshot(5f-1)·6=setCookie·7=deleteCookie·8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll·15=wait. `arg_ptr`는 안정 슬롯
@@ -2635,20 +2652,12 @@ pub export fn maru_macos_control_complete_browser_op(async_id: u64, status: u32,
         };
         const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
         const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
-        const authorized = switch (execution.provenance) {
-            .capability => |identity| if (control_cap_store.lookupByNonce(identity.nonce)) |cap|
-                control_capability.authorize(cap, execution.surface_id, identity.generation, "browser.executeScript", now) == .granted
-            else
-                false,
-            .pane_grant => |g| control_pane_grant_store.isGranted(g.pane, g.target, g.scope),
-        };
+        const authorized = browserExecutionAuthorized(execution, now);
         const completion = if (authorized)
             (std.enums.fromInt(control_browser.BrowserCompletionStatus, status) orelse .failed)
         else
             .unauthorized;
         const result: []const u8 = if (result_ptr) |p| p[0..result_len] else &.{};
-        if (completion == .success and result_len <= execution.reserved_bytes)
-            _ = active_browser_executions.shrinkTo(async_id, result_len);
         const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, completion, if (authorized) result else "") catch null;
         _ = active_browser_executions.finish(async_id);
         _ = server.completeInFlight(async_id, resp);
@@ -2667,6 +2676,127 @@ pub export fn maru_macos_control_complete_browser_op(async_id: u64, status: u32,
     const completion = std.enums.fromInt(control_browser.BrowserCompletionStatus, status) orelse .failed;
     const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, completion, result) catch null;
     _ = server.completeInFlight(async_id, resp); // found → resolve(resp)(accept 스레드가 write 후 free)
+}
+
+const BrowserResultCopyFn = *const fn (?*anyopaque, u64, u64, ?[*]u8, usize) callconv(.c) i64;
+const BrowserResultReleaseFn = *const fn (?*anyopaque, u64) callconv(.c) u32;
+
+fn releaseBrowserResultAndFinishExecution(
+    async_id: u64,
+    transfer_id: u64,
+    context: ?*anyopaque,
+    release_result: BrowserResultReleaseFn,
+) bool {
+    const status = release_result(context, transfer_id);
+    if (status == 1 or status == 2) {
+        _ = active_browser_executions.finish(async_id);
+        return true;
+    }
+    // Provider가 Data 제거를 확인하지 못하면 caller의 동기 fallback까지 예약 tombstone을 유지한다.
+    if (active_browser_executions.get(async_id)) |execution| execution.phase = .abandoned;
+    return false;
+}
+
+/// Swift가 registry per-entry cap 초과 Data를 먼저 폐기한 뒤 실제 길이만 알린다. result bytes를 Zig로 복사하지 않고
+/// request별 논리 상한 오류를 만든다.
+pub export fn maru_macos_control_complete_browser_result_too_large(async_id: u64, observed_len: usize) void {
+    const execution = active_browser_executions.get(async_id) orelse return;
+    if (!control_server_active or execution.phase == .abandoned) {
+        _ = active_browser_executions.finish(async_id);
+        return;
+    }
+    const server = &control_server_storage;
+    const pending = server.inFlightPending(async_id) orelse {
+        _ = active_browser_executions.finish(async_id);
+        return;
+    };
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    const resp = if (browserExecutionAuthorized(execution, now))
+        control_browser.serializeExecuteScriptObservedTooLarge(server.cross_gpa, pending.request_bytes, observed_len) catch null
+    else
+        control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .unauthorized, "") catch null;
+    _ = active_browser_executions.finish(async_id);
+    _ = server.completeInFlight(async_id, resp);
+}
+
+/// executeScript success 전용 Swift-owned Data pull terminal. Swift registry ID는 이 호출이 1을 반환하기 전에 항상
+/// release한다. execution 예약은 그 뒤에만 반환하므로 Data와 byte budget이 동시에 사라지는 무회계 창이 없다.
+/// 현재 live transport는 inline만 지원해 1 MiB보다 큰 JSON은 복사하지 않고 payload-too-large로 끝낸다.
+pub export fn maru_macos_control_complete_browser_result(
+    async_id: u64,
+    transfer_id: u64,
+    total_len: usize,
+    context: ?*anyopaque,
+    copy_result: BrowserResultCopyFn,
+    release_result: BrowserResultReleaseFn,
+) u32 {
+    if (transfer_id == 0) return 0;
+
+    const execution = active_browser_executions.get(async_id) orelse {
+        const status = release_result(context, transfer_id);
+        return if (status == 1 or status == 2) 1 else 0;
+    };
+    if (!control_server_active or execution.phase == .abandoned) {
+        return if (releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result)) 1 else 0;
+    }
+    const server = &control_server_storage;
+    const pending = server.inFlightPending(async_id) orelse {
+        return if (releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result)) 1 else 0;
+    };
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    if (!browserExecutionAuthorized(execution, now)) {
+        const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .unauthorized, "") catch null;
+        const released = releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result);
+        _ = server.completeInFlight(async_id, resp);
+        return if (released) 1 else 0;
+    }
+    if (total_len > execution.reserved_bytes) {
+        const resp = control_browser.serializeExecuteScriptObservedTooLarge(server.cross_gpa, pending.request_bytes, total_len) catch null;
+        const released = releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result);
+        _ = server.completeInFlight(async_id, resp);
+        return if (released) 1 else 0;
+    }
+    if (!active_browser_executions.beginTransfer(async_id, transfer_id, total_len)) {
+        const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .failed, "browser result transfer state invalid") catch null;
+        const released = releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result);
+        _ = server.completeInFlight(async_id, resp);
+        return if (released) 1 else 0;
+    }
+    if (total_len > control_plane.default_max_frame) {
+        const resp = control_browser.serializeExecuteScriptInlineTooLarge(server.cross_gpa, pending.request_bytes) catch null;
+        const released = releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result);
+        _ = server.completeInFlight(async_id, resp);
+        return if (released) 1 else 0;
+    }
+
+    const result = server.cross_gpa.alloc(u8, total_len) catch {
+        const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .failed, "browser result allocation failed") catch null;
+        const released = releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result);
+        _ = server.completeInFlight(async_id, resp);
+        return if (released) 1 else 0;
+    };
+    defer server.cross_gpa.free(result);
+    @memset(result, 0);
+    var offset: usize = 0;
+    var copy_failed = false;
+    while (offset < result.len) {
+        const cap = @min(control_browser.execute_script_chunk_bytes, result.len - offset);
+        const copied = copy_result(context, transfer_id, offset, result.ptr + offset, cap);
+        if (copied <= 0 or copied > @as(i64, @intCast(cap))) {
+            copy_failed = true;
+            break;
+        }
+        offset += @intCast(copied);
+    }
+    const resp = if (copy_failed)
+        control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .failed, "browser result copy failed") catch null
+    else
+        control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .success, result) catch null;
+    const released = releaseBrowserResultAndFinishExecution(async_id, transfer_id, context, release_result);
+    _ = server.completeInFlight(async_id, resp);
+    return if (released) 1 else 0;
 }
 
 /// Swift wait coordinator가 다음 poll 전에 async_id가 여전히 유효한지 확인한다. revoke/close/reap/완료 뒤 0이라 timer가
@@ -3340,7 +3470,9 @@ test "5f-5b ActiveBrowserExecutions: busy, queued cancel, running abandon, shrin
 
     try executions.admit(gpa, .{ .async_id = 4, .surface_id = 11, .reserved_bytes = 10, .provenance = provenance });
     try std.testing.expect(executions.markRunning(4));
-    try std.testing.expect(executions.shrinkTo(4, 3));
+    try std.testing.expect(executions.beginTransfer(4, 44, 3));
+    try std.testing.expectEqual(ExecutionPhase.transferring, executions.get(4).?.phase);
+    try std.testing.expectEqual(@as(u64, 44), executions.get(4).?.transfer_id);
     try std.testing.expectEqual(@as(usize, 3), executions.budget.usedBytes());
     try std.testing.expect(executions.finish(4));
     try std.testing.expectEqual(@as(usize, 0), executions.budget.usedBytes());
@@ -3401,6 +3533,210 @@ fn expectPendingErrorCode(pending: *control_server_mod.PendingRequest, code: con
     var pm = try control_plane.parseMessage(std.testing.allocator, response);
     defer pm.deinit();
     try std.testing.expectEqual(@as(i64, @intFromEnum(code)), pm.message.response.err.?.code);
+}
+
+const FakeBrowserResultProvider = struct {
+    data: []const u8,
+    max_copy: usize = std.math.maxInt(usize),
+    fail_at_offset: ?usize = null,
+    write_bytes: bool = true,
+    release_status: u32 = 1,
+    copy_calls: usize = 0,
+    release_calls: usize = 0,
+    budget_at_release: usize = 0,
+
+    fn copy(context: ?*anyopaque, _: u64, offset: u64, dst: ?[*]u8, cap: usize) callconv(.c) i64 {
+        const self: *FakeBrowserResultProvider = @ptrCast(@alignCast(context.?));
+        self.copy_calls += 1;
+        const start: usize = @intCast(offset);
+        if (self.fail_at_offset) |fail_at| if (start >= fail_at) return 0;
+        if (start >= self.data.len or dst == null) return -1;
+        const n = @min(@min(cap, self.max_copy), self.data.len - start);
+        if (self.write_bytes) @memcpy(dst.?[0..n], self.data[start..][0..n]);
+        return @intCast(n);
+    }
+
+    fn release(context: ?*anyopaque, _: u64) callconv(.c) u32 {
+        const self: *FakeBrowserResultProvider = @ptrCast(@alignCast(context.?));
+        self.release_calls += 1;
+        self.budget_at_release = active_browser_executions.budget.usedBytes();
+        return self.release_status;
+    }
+};
+
+fn installTransferTestServer() void {
+    std.debug.assert(!control_server_active);
+    control_server_storage = lifecycleTestServer();
+    control_server_active = true;
+    control_pane_grant_store.clearAll();
+}
+
+fn uninstallTransferTestServer() void {
+    control_server_active = false;
+    control_server_storage.in_flight.deinit(std.testing.allocator);
+    control_pane_grant_store.clearAll();
+}
+
+test "5f-5b pull ABI: partial copy reconstructs JSON and releases Data before reservation" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{
+        .async_id = id,
+        .surface_id = 11,
+        .reserved_bytes = 64,
+        .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } },
+    });
+    try std.testing.expect(active_browser_executions.markRunning(id));
+    var provider = FakeBrowserResultProvider{ .data = "{\"answer\":42}", .max_copy = 3 };
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_complete_browser_result(id, 99, provider.data.len, &provider, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release));
+    try std.testing.expect(provider.copy_calls > 1);
+    try std.testing.expectEqual(@as(usize, 1), provider.release_calls);
+    try std.testing.expectEqual(provider.data.len, provider.budget_at_release);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"answer\":42") != null);
+}
+
+test "5f-5b pull ABI: request and inline bounds reject without copying" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+
+    const request_limit = "{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":8}}";
+    var limited: control_server_mod.PendingRequest = .{ .request_bytes = request_limit, .selector = null, .io = std.testing.io };
+    const limited_id = try control_server_storage.deferRequest(&limited, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = limited_id, .surface_id = 11, .reserved_bytes = 8, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(limited_id));
+    var limited_provider = FakeBrowserResultProvider{ .data = "ignored" };
+    _ = maru_macos_control_complete_browser_result(limited_id, 100, 9, &limited_provider, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release);
+    try std.testing.expectEqual(@as(usize, 0), limited_provider.copy_calls);
+    try std.testing.expectEqual(@as(usize, 1), limited_provider.release_calls);
+    try std.testing.expectEqual(@as(usize, 8), limited_provider.budget_at_release);
+    try expectPendingErrorCode(&limited, .result_too_large);
+
+    const inline_total = control_plane.default_max_frame + 1;
+    const request_inline = "{\"jsonrpc\":\"2.0\",\"id\":73,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":2097152}}";
+    var inline_pending: control_server_mod.PendingRequest = .{ .request_bytes = request_inline, .selector = null, .io = std.testing.io };
+    const inline_id = try control_server_storage.deferRequest(&inline_pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = inline_id, .surface_id = 11, .reserved_bytes = 2 * 1024 * 1024, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(inline_id));
+    var inline_provider = FakeBrowserResultProvider{ .data = "ignored" };
+    _ = maru_macos_control_complete_browser_result(inline_id, 101, inline_total, &inline_provider, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release);
+    try std.testing.expectEqual(@as(usize, 0), inline_provider.copy_calls);
+    try std.testing.expectEqual(@as(usize, 1), inline_provider.release_calls);
+    try std.testing.expectEqual(inline_total, inline_provider.budget_at_release);
+    try expectPendingErrorCode(&inline_pending, .payload_too_large);
+
+    const max_entry = control_browser.execute_script_default_max_result_bytes;
+    const request_host_oversize = "{\"jsonrpc\":\"2.0\",\"id\":76,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\"}}";
+    var host_oversize: control_server_mod.PendingRequest = .{ .request_bytes = request_host_oversize, .selector = null, .io = std.testing.io };
+    const host_oversize_id = try control_server_storage.deferRequest(&host_oversize, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = host_oversize_id, .surface_id = 11, .reserved_bytes = max_entry, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(host_oversize_id));
+    maru_macos_control_complete_browser_result_too_large(host_oversize_id, max_entry + 1);
+    try expectPendingErrorCode(&host_oversize, .result_too_large);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+}
+
+test "5f-5b pull ABI: premature EOF and duplicate terminal release exactly once" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":74,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(id));
+    var provider = FakeBrowserResultProvider{ .data = "1234", .max_copy = 2, .fail_at_offset = 2 };
+    _ = maru_macos_control_complete_browser_result(id, 102, provider.data.len, &provider, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release);
+    try std.testing.expectEqual(@as(usize, 2), provider.copy_calls);
+    try std.testing.expectEqual(@as(usize, 1), provider.release_calls);
+    try std.testing.expectEqual(provider.data.len, provider.budget_at_release);
+    try expectPendingErrorCode(&pending, .internal_error);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+
+    var duplicate = FakeBrowserResultProvider{ .data = "null" };
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_complete_browser_result(id, 103, duplicate.data.len, &duplicate, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release));
+    try std.testing.expectEqual(@as(usize, 0), duplicate.copy_calls);
+    try std.testing.expectEqual(@as(usize, 1), duplicate.release_calls);
+    var unknown_release_failure = FakeBrowserResultProvider{ .data = "null", .release_status = 0 };
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_complete_browser_result(id, 108, unknown_release_failure.data.len, &unknown_release_failure, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release));
+    try std.testing.expectEqual(@as(usize, 1), unknown_release_failure.release_calls);
+}
+
+test "5f-5b pull ABI: lying copy cannot expose heap and release failure pins reservation" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":75,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
+
+    var lying_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const lying_id = try control_server_storage.deferRequest(&lying_pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = lying_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(lying_id));
+    var liar = FakeBrowserResultProvider{ .data = "null", .write_bytes = false };
+    _ = maru_macos_control_complete_browser_result(lying_id, 104, liar.data.len, &liar, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release);
+    try expectPendingErrorCode(&lying_pending, .internal_error); // zero-initialized bytes는 valid JSON/heap content가 아니다.
+
+    var failed_release_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const failed_release_id = try control_server_storage.deferRequest(&failed_release_pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = failed_release_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(failed_release_id));
+    var failed_release = FakeBrowserResultProvider{ .data = "null", .release_status = 0 };
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_complete_browser_result(failed_release_id, 105, failed_release.data.len, &failed_release, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release));
+    try std.testing.expectEqual(ExecutionPhase.abandoned, active_browser_executions.get(failed_release_id).?.phase);
+    try std.testing.expectEqual(failed_release.data.len, active_browser_executions.budget.usedBytes());
+    // Swift fallback은 registry를 직접 release한 뒤 old completion을 불러 pinned reservation을 반환한다.
+    maru_macos_control_complete_browser_op(failed_release_id, @intFromEnum(control_browser.BrowserCompletionStatus.failed), null, 0);
+    try std.testing.expect(active_browser_executions.get(failed_release_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+    const success_response = failed_release_pending.response orelse return error.ExpectedResponse;
+    allocator.free(success_response);
+    failed_release_pending.response = null;
+}
+
+test "5f-5b pull ABI: revoke and inactive late callback release without copying" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
+    var revoked_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const revoked_id = try control_server_storage.deferRequest(&revoked_pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = revoked_id, .surface_id = 11, .reserved_bytes = 64, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(revoked_id));
+    control_pane_grant_store.clearAll();
+    var revoked = FakeBrowserResultProvider{ .data = "null" };
+    _ = maru_macos_control_complete_browser_result(revoked_id, 106, revoked.data.len, &revoked, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release);
+    try std.testing.expectEqual(@as(usize, 0), revoked.copy_calls);
+    try std.testing.expectEqual(@as(usize, 64), revoked.budget_at_release);
+    try expectPendingErrorCode(&revoked_pending, .unauthorized);
+
+    const inactive_id: u64 = 9_999_991;
+    try active_browser_executions.admit(allocator, .{ .async_id = inactive_id, .surface_id = 11, .reserved_bytes = 32, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(inactive_id));
+    control_server_active = false;
+    var inactive = FakeBrowserResultProvider{ .data = "null" };
+    _ = maru_macos_control_complete_browser_result(inactive_id, 107, inactive.data.len, &inactive, FakeBrowserResultProvider.copy, FakeBrowserResultProvider.release);
+    control_server_active = true;
+    try std.testing.expectEqual(@as(usize, 0), inactive.copy_calls);
+    try std.testing.expectEqual(@as(usize, 1), inactive.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
 }
 
 test "5f-5b glue: queue Full rollback과 queued/running typed timeout" {

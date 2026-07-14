@@ -8,6 +8,31 @@ import UniformTypeIdentifiers // NSOpenPanel.allowedContentTypes = [.png] (배�
 import UserNotifications
 import WebKit // Phase 4c: 빈 WKWebView를 pane 본문에 부착(터미널<웹뷰<오버레이 z-order). 콘텐츠·브리지·보안은 Phase 5.
 
+private let browserResultCopyCallback: @convention(c) (
+    UnsafeMutableRawPointer?, UInt64, UInt64, UnsafeMutablePointer<UInt8>?, Int
+) -> Int64 = { context, transferId, offset, destination, capacity in
+    precondition(Thread.isMainThread && context != nil, "browser result copy callback must run on main thread with context")
+    return MainActor.assumeIsolated {
+        let registry = Unmanaged<BrowserResultTransferRegistry>.fromOpaque(context!).takeUnretainedValue()
+        let copied = registry.copy(
+            id: transferId,
+            offset: offset,
+            destination: destination.map(UnsafeMutableRawPointer.init),
+            capacity: capacity
+        )
+        return Int64(copied)
+    }
+}
+
+private let browserResultReleaseCallback: @convention(c) (UnsafeMutableRawPointer?, UInt64) -> UInt32 = {
+    context, transferId in
+    precondition(Thread.isMainThread && context != nil, "browser result release callback must run on main thread with context")
+    return MainActor.assumeIsolated {
+        let registry = Unmanaged<BrowserResultTransferRegistry>.fromOpaque(context!).takeUnretainedValue()
+        return registry.release(transferId) ? 1 : 2
+    }
+}
+
 // MARK: - CGS 비공개 API (창 뒤 배경 블러, F3-1)
 //
 // macOS에서 "창 뒤(데스크톱) 블러"는 공개 API가 없다 — Metal은 backdrop 픽셀을 못 읽으므로 GPU로 못 하고,
@@ -793,9 +818,9 @@ enum BrowserControl {
         return n.doubleValue
     }
 
-    // 5e-2b-2: `executeScript` 반환값(evaluateJavaScript 결과, 불투명 Any)을 응답에 실을 **문자열**로 바꾼다. Zig
-    // serializeBrowserResponse가 이 문자열을 `{"result":{"result":<문자열>}}`로 싣는다(진짜 JSON 값 embed는 후속 —
-    // §9.3 ⑥ "스크립트 반환값을 문자열로"). 컨트롤 플레인 계약은 Zig, 여긴 WKWebView 값→문자열 매핑 어댑터만.
+    // localStorage/act/wait 내부 evaluateJavaScript 결과를 기존 문자열 기반 helper 응답에 맞춘다. public
+    // browser.executeScript 성공은 이 fallback을 쓰지 않고 `BrowserResultTransferRegistry.encodeScriptResult`의 strict JSON
+    // Data 경로를 탄다. 이 함수는 그 보조 op들의 호환 어댑터만 소유한다.
     // 매핑: 문자열=그대로, 불리언="true"/"false", 숫자=NSNumber description, null/undefined(NSNull)=빈 문자열, 그 외(배열·객체)=description.
     @MainActor static func scriptResultString(_ value: Any) -> String {
         let normalized: Any = value is NSNull ? NSNull() : value
@@ -1229,7 +1254,7 @@ private func runBrowserWaitSmokeClient(socketPath: String, sid: UInt64, nonceHex
     let prep = "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"browser.executeScript\",\"params\":{\"id\":\(sid),\"script\":\"\(prepEscaped)\"}}"
     switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: prep) {
     case .ok(let line):
-        guard browserCtlResult(line)?["result"] as? String == "true" else {
+        guard browserCtlResult(line)?["result"] as? Bool == true else {
             let why = "unexpected:\(line.prefix(120))"
             return (why, load, why, why, "0")
         }
@@ -3243,11 +3268,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 BrowserControl.getCookies(wp.webView) { json in
                     self.completeBrowserOp(asyncId, status: 0, result: json)
                 }
-            case 2: // executeScript — async 콜백(evaluateJavaScript). 성공=값 문자열, 실패=에러 메시지.
+            case 2: // executeScript — 성공 JSON Data는 Swift registry가 소유하고 Zig가 bounded pull/release한다.
                 BrowserControl.executeScript(wp.webView, arg) { result in
                     switch result {
                     case .success(let value):
-                        self.completeBrowserOp(asyncId, status: 0, result: BrowserControl.scriptResultString(value))
+                        self.completeBrowserScriptResult(asyncId, value: value)
                     case .failure(let error):
                         self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
                     }
@@ -3314,6 +3339,42 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let bytes = Array(result.utf8)
         bytes.withUnsafeBufferPointer { buf in
             maru_macos_control_complete_browser_op(asyncId, status, buf.baseAddress, buf.count)
+        }
+    }
+
+    /// executeScript 성공 값은 fallback 문자열 없이 strict JSON으로 만들고 registry에 소유권을 둔다. Zig가 1을
+    /// 반환하면 ID를 인수해 release까지 끝낸 상태다. ABI 거부 또는 release 미확인의 0 반환은 Swift가 직접 release한 뒤 실패로
+    /// 마감해 pending request가 남지 않게 한다.
+    private func completeBrowserScriptResult(_ asyncId: UInt64, value: Any) {
+        do {
+            var data = try BrowserResultTransferRegistry.encodeScriptResult(value)
+            let totalLen = data.count
+            if totalLen > BrowserResultTransferRegistry.defaultMaxEntryBytes {
+                data = Data() // full-size Data를 없앤 뒤에만 Zig execution 예약을 반환한다.
+                maru_macos_control_complete_browser_result_too_large(asyncId, totalLen)
+                return
+            }
+            let registry = BrowserResultTransferRegistry.shared
+            guard let transferId = registry.insert(data) else {
+                completeBrowserOp(asyncId, status: 1, result: "browser result registry full")
+                return
+            }
+            data = Data() // registry를 backing의 유일한 의도적 owner로 만든 뒤 Zig가 release/회계한다.
+            let context = Unmanaged.passUnretained(registry).toOpaque()
+            let consumed = maru_macos_control_complete_browser_result(
+                asyncId,
+                transferId,
+                totalLen,
+                context,
+                browserResultCopyCallback,
+                browserResultReleaseCallback
+            )
+            if consumed == 0 {
+                registry.release(transferId)
+                completeBrowserOp(asyncId, status: 1, result: "browser result transfer rejected")
+            }
+        } catch {
+            completeBrowserOp(asyncId, status: 1, result: "executeScript result is not JSON-serializable")
         }
     }
 

@@ -55,7 +55,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
-[control-plane.md §4.4](control-plane.md)가 구현 상태와 채택 계약의 단일 출처다. 현재 live executeScript는 NDJSON JSON-RPC inline 1 MiB 이하이며 process-global 실행 예약과 lifecycle registry까지만 연결됐다. 아래 표는 **5f-5b가 JSON-RPC progressive chunk로 16 MiB를 열기 전에 반드시 만족할 구현·correctness·성능 gate**다. 아직 live에 없는 4/32 MiB outbound byte accounting, progressive pump, transfer registry, secure CLI spool을 현재 기능으로 간주하지 않는다.
+[control-plane.md §4.4](control-plane.md)가 구현 상태와 채택 계약의 단일 출처다. 현재 live executeScript는 NDJSON JSON-RPC inline 1 MiB 이하이며 process-global 실행 예약, Swift `Data` transfer registry, Zig pull/release ABI와 execution→transferring 원자 이관까지 연결됐다. 현재 예약은 Swift registry 수명까지만 회계하고 serialized response의 queued/writer-owned 수명은 아직 live byte cap에 연결되지 않았다. 아래 표는 **5f-5b가 JSON-RPC progressive chunk로 16 MiB를 열기 전에 반드시 만족할 구현·correctness·성능 gate**다. 아직 live에 없는 4/32 MiB outbound byte limit 활성화, progressive pump, secure CLI spool을 현재 기능으로 간주하지 않는다.
 
 | 항목 | 5f-5b 16 MiB 완료 예산 | 실패 시 |
 | --- | --- | --- |

@@ -298,6 +298,7 @@ pub fn build(b: *std.Build) void {
             "-import-objc-header",
         });
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -624,6 +625,7 @@ pub fn build(b: *std.Build) void {
             "-import-objc-header",
         });
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -830,6 +832,21 @@ pub fn build(b: *std.Build) void {
     // xucred/LOCAL_PEERPID를 더하므로 **macOS에서만** test step에 배선한다(ubuntu CI에 미검증 Linux 소켓
     // 경로를 걸지 않는다 — un-gate는 Linux 호스트 검증 후 후속). maru 모듈(1a control_plane)을 import한다.
     if (target.result.os.tag == .macos) {
+        const browser_result_registry_tests = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        browser_result_registry_tests.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
+        browser_result_registry_tests.addFileArg(b.path("tests/macos_browser_result_registry.swift"));
+        browser_result_registry_tests.addArg("-o");
+        const browser_result_registry_test_bin = browser_result_registry_tests.addOutputFileArg("maru-browser-result-registry-tests");
+        const run_browser_result_registry_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_browser_result_registry_tests.addFileArg(browser_result_registry_test_bin);
+        test_step.dependOn(&run_browser_result_registry_tests.step);
+
         const control_socket_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/control_socket.zig"),

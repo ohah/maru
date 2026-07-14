@@ -223,6 +223,7 @@ pub const default_app_bindings = [_]AppBinding{
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_term }, // Cmd+T: 활성 pane에 새 Term
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+Shift+T: 새 워크스페이스
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'T' } }, .action = .new_web_tab }, // Cmd+Option+T: 활성 pane에 새 브라우저 Term(⌘T=new_term의 web 버전, ⌥로 구분)
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_term }, // Cmd+W: 활성 Term 닫기(마지막이면 pane→워크스페이스 cascade)
     // split(pane) 순환: ⌘]=다음, ⌘[=이전(활성 워크스페이스 안에서 wrap, 분할 없으면 무동작). shift 없는 대괄호라
     // char는 ]/[ 그대로다(브레이스 }/{ 는 shift일 때만). 워크스페이스 ⌘⇧]/⌘⇧[ · Term ⌘⌥]/⌘⌥[ 와 modifier로
@@ -622,6 +623,9 @@ test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (tab model)" {
     try std.testing.expectEqual(action_mod.Action.new_term, t.app_action);
     const st = try resolver.resolve(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.new_tab, st.app_action);
+    // ⌘⌥T → 활성 pane에 새 브라우저 Term(new_term의 web 버전). ⌘T·⌘⇧T와 modifier로 갈린다.
+    const ot = try resolver.resolve(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true, .option = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.new_web_tab, ot.app_action);
 
     // 안 묶인 Cmd 조합은 그대로 ignored(셸로 글자 안 샘).
     try std.testing.expect((try resolver.resolve(.{

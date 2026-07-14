@@ -48,6 +48,7 @@ config는 다음 범주를 분리한다. 실제 형식은 `keybind = <chord> = <
 
 앱 단축키 — keybind = <chord> = <action>:
   - new_tab
+  - new_web_tab (기본 ⌘⌥T — 활성 pane에 브라우저 Term)
   - close_tab
   - split_horizontal / split_vertical
   - next_pane / focus_pane_left …

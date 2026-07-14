@@ -173,6 +173,8 @@ pub fn serializeExecuteScriptBackendArg(gpa: std.mem.Allocator, script: []const 
 }
 
 pub const execute_script_default_max_result_bytes: usize = 16 * 1024 * 1024;
+/// 5f-5b: 이 크기까지는 한 tick의 단일 pull로 inline 응답을 만들고, 초과는 progressive chunk로 전환한다.
+pub const execute_script_inline_max_result_bytes: usize = 512 * 1024;
 pub const execute_script_protocol_max_result_bytes: usize = 256 * 1024 * 1024;
 pub const execute_script_error_payload_max_bytes: usize = 24 * 1024;
 pub const execute_script_error_frame_max_bytes: usize = 32 * 1024;
@@ -764,6 +766,8 @@ fn escapedJsonStringBytes(value: []const u8) usize {
 
 fn writeExecuteScriptResult(s: *std.json.Stringify, id: cp.Id, value: std.json.Value) !void {
     try beginResult(s, id);
+    try s.objectField("transfer");
+    try s.write("inline");
     try s.objectField("result");
     try s.write(value);
     try endResult(s);
@@ -837,6 +841,7 @@ pub fn serializeSubscribeResponse(gpa: std.mem.Allocator, request_bytes: []const
 /// 한 screenshot chunk의 raw PNG 바이트 상한(§9.5.7). base64는 이 raw 경계 위에서 이뤄진다(512KiB→~683KiB base64 <
 /// default_max_frame 1MiB, JSON 오버헤드 포함해도 여유). control_capture의 64KiB보다 큰 값=동기 push 첫 컷의 chunk 수 억제.
 pub const screenshot_chunk_bytes: usize = 512 * 1024;
+pub const screenshot_max_result_bytes: usize = 12 * 1024 * 1024;
 /// 동기 push 첫 컷(§9.5.7)의 chunk 수 상한 — outbound_capacity(64 프레임)를 안 넘게(24 chunk + 최종 응답 = 25 ≤ 64).
 /// 초과 PNG는 `screenshot_too_large`로 접는다(에이전트가 rect/scale로 축소 재시도 — 후속). progressive pump(무제한)는 후속.
 pub const screenshot_max_chunks: usize = 24;
@@ -858,32 +863,25 @@ pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, re
     _ = encoder.encode(b64, data);
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
+    aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":") catch return error.OutOfMemory;
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    s.beginObject() catch return error.OutOfMemory;
-    s.objectField("jsonrpc") catch return error.OutOfMemory;
-    s.write(cp.jsonrpc_version) catch return error.OutOfMemory;
-    s.objectField("method") catch return error.OutOfMemory;
-    s.write(execute_script_chunk_method) catch return error.OutOfMemory;
-    s.objectField("params") catch return error.OutOfMemory;
-    s.beginObject() catch return error.OutOfMemory;
-    s.objectField("request_id") catch return error.OutOfMemory;
     cp.writeId(&s, request_id) catch return error.OutOfMemory;
-    s.objectField("result_id") catch return error.OutOfMemory;
-    s.write(result_id) catch return error.OutOfMemory;
-    s.objectField("seq") catch return error.OutOfMemory;
-    s.write(seq) catch return error.OutOfMemory;
-    s.objectField("encoding") catch return error.OutOfMemory;
-    s.write("base64-json") catch return error.OutOfMemory;
-    s.objectField("data") catch return error.OutOfMemory;
-    s.write(b64) catch return error.OutOfMemory;
-    s.endObject() catch return error.OutOfMemory;
-    s.endObject() catch return error.OutOfMemory;
+    aw.writer.print(",\"result_id\":{d},\"seq\":{d},\"encoding\":\"base64-json\",\"data\":\"", .{ result_id, seq }) catch return error.OutOfMemory;
+    // 표준 base64 alphabet에는 JSON escape 대상이 없으므로 Stringify로 byte마다 재검증하지 않고 그대로 쓴다.
+    aw.writer.writeAll(b64) catch return error.OutOfMemory;
+    aw.writer.writeAll("\"}}") catch return error.OutOfMemory;
     const wire = aw.toOwnedSlice() catch return error.OutOfMemory;
     if (wire.len > cp.default_max_frame) {
         gpa.free(wire);
         return error.FrameTooLarge;
     }
     return wire;
+}
+
+pub fn serializeExecuteScriptChunkForRequest(gpa: std.mem.Allocator, request_bytes: []const u8, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
+    var pm = parseExecuteScriptRequestForCompletion(gpa, request_bytes) catch return error.OutOfMemory;
+    defer pm.deinit();
+    return serializeExecuteScriptChunk(gpa, pm.message.request.id, result_id, seq, data);
 }
 
 /// progressive chunk를 모두 enqueue한 뒤 같은 FIFO에 놓는 작은 terminal 응답. request id는 원 요청에서 다시 읽어
@@ -949,35 +947,16 @@ pub fn serializeScreenshotChunk(gpa: std.mem.Allocator, capture_id: u64, seq: us
 
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    writeScreenshotChunk(&s, capture_id, seq, b64) catch return error.OutOfMemory;
+    aw.writer.print("{{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{{\"capture_id\":{d},\"seq\":{d},\"encoding\":\"base64\",\"data\":\"", .{ capture_id, seq }) catch return error.OutOfMemory;
+    aw.writer.writeAll(b64) catch return error.OutOfMemory;
+    aw.writer.writeAll("\"}}") catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeScreenshotChunk(s: *std.json.Stringify, capture_id: u64, seq: usize, b64_data: []const u8) !void {
-    try s.beginObject();
-    try s.objectField("jsonrpc");
-    try s.write(cp.jsonrpc_version);
-    try s.objectField("method");
-    try s.write(screenshot_chunk_method);
-    try s.objectField("params");
-    try s.beginObject();
-    try s.objectField("capture_id");
-    try s.write(capture_id);
-    try s.objectField("seq");
-    try s.write(seq);
-    try s.objectField("encoding");
-    try s.write("base64");
-    try s.objectField("data");
-    try s.write(b64_data);
-    try s.endObject();
-    try s.endObject();
-}
-
 /// screenshot 최종 응답(§9.5.7 — chunk 스트림의 complete 마커 + metadata를 겸함): `{"jsonrpc":"2.0","id":<id>,"result":
-/// {"capture_id":N,"seq_total":M,"width":W,"height":H,"format":"png"}}`. op은 id/method를 안 실으므로(§9.3 ⑥) 원
+/// {"capture_id":N,"seq_total":M,"bytes":B,"width":W,"height":H,"format":"png"}}`. op은 id/method를 안 실으므로(§9.3 ⑥) 원
 /// `request_bytes`(in-flight pending 소유·resolve 전 유효) 재파싱해 id를 얻는다. 재파싱 실패/비-request는 방어적 내부오류. caller free.
-pub fn serializeScreenshotComplete(gpa: std.mem.Allocator, request_bytes: []const u8, capture_id: u64, seq_total: usize, dims: PngDims) std.mem.Allocator.Error![]u8 {
+pub fn serializeScreenshotComplete(gpa: std.mem.Allocator, request_bytes: []const u8, capture_id: u64, seq_total: usize, total_bytes: usize, dims: PngDims) std.mem.Allocator.Error![]u8 {
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errorResponse(gpa, .null, .internal_error),
@@ -990,16 +969,18 @@ pub fn serializeScreenshotComplete(gpa: std.mem.Allocator, request_bytes: []cons
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    writeScreenshotComplete(&s, req.id, capture_id, seq_total, dims) catch return error.OutOfMemory;
+    writeScreenshotComplete(&s, req.id, capture_id, seq_total, total_bytes, dims) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeScreenshotComplete(s: *std.json.Stringify, id: cp.Id, capture_id: u64, seq_total: usize, dims: PngDims) !void {
+fn writeScreenshotComplete(s: *std.json.Stringify, id: cp.Id, capture_id: u64, seq_total: usize, total_bytes: usize, dims: PngDims) !void {
     try beginResult(s, id);
     try s.objectField("capture_id");
     try s.write(capture_id);
     try s.objectField("seq_total");
     try s.write(seq_total);
+    try s.objectField("bytes");
+    try s.write(total_bytes);
     try s.objectField("width");
     try s.write(dims.width);
     try s.objectField("height");
@@ -1016,10 +997,10 @@ pub fn pngDimensions(bytes: []const u8) ?PngDims {
     if (bytes.len < 24) return null;
     if (!std.mem.eql(u8, bytes[0..8], &png_sig)) return null;
     if (!std.mem.eql(u8, bytes[12..16], "IHDR")) return null; // bytes[8..12]=IHDR length(=13)
-    return .{
-        .width = std.mem.readInt(u32, bytes[16..][0..4], .big),
-        .height = std.mem.readInt(u32, bytes[20..][0..4], .big),
-    };
+    const width = std.mem.readInt(u32, bytes[16..][0..4], .big);
+    const height = std.mem.readInt(u32, bytes[20..][0..4], .big);
+    if (width == 0 or height == 0) return null;
+    return .{ .width = width, .height = height };
 }
 
 /// op 완료가 screenshot인지(chunk 경로 분기, §9.5.7). request_bytes 재파싱해 method 확인. 비-request/미지 method는 false.
@@ -2342,9 +2323,9 @@ test "serializeExecuteScriptChunkedComplete: 원 request id와 result/seq/bytes�
     );
 }
 
-test "serializeScreenshotComplete: 최종 응답(capture_id·seq_total·width·height·format), id 재파싱 echo" {
+test "serializeScreenshotComplete: 최종 응답(capture_id·seq_total·bytes·width·height·format), id 재파싱 echo" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}";
-    const w = try serializeScreenshotComplete(testing.allocator, req, 7, 5, .{ .width = 800, .height = 600 });
+    const w = try serializeScreenshotComplete(testing.allocator, req, 7, 5, 1234, .{ .width = 800, .height = 600 });
     defer testing.allocator.free(w);
     try testing.expect(std.mem.indexOfScalar(u8, w, '\n') == null);
     var pm = try cp.parseMessage(testing.allocator, w);
@@ -2353,9 +2334,18 @@ test "serializeScreenshotComplete: 최종 응답(capture_id·seq_total·width·h
     const r = pm.message.response.result.?.object;
     try testing.expectEqual(@as(i64, 7), r.get("capture_id").?.integer);
     try testing.expectEqual(@as(i64, 5), r.get("seq_total").?.integer);
+    try testing.expectEqual(@as(i64, 1234), r.get("bytes").?.integer);
     try testing.expectEqual(@as(i64, 800), r.get("width").?.integer);
     try testing.expectEqual(@as(i64, 600), r.get("height").?.integer);
     try testing.expectEqualStrings("png", r.get("format").?.string);
+}
+
+test "pngDimensions: 0 크기 IHDR은 등록 전에 거부" {
+    var header = [_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R', 0, 0, 0, 0, 0, 0, 0, 4 };
+    try testing.expect(pngDimensions(&header) == null);
+    header[19] = 3;
+    header[23] = 0;
+    try testing.expect(pngDimensions(&header) == null);
 }
 
 test "pngDimensions: 유효 PNG IHDR width/height 파싱, 비-PNG/짧은 바이트는 null" {

@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 117u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 118u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -1161,14 +1161,19 @@ void maru_macos_control_complete_browser_op(uint64_t async_id, uint32_t status, 
    copy는 0..dst_cap bytes, EOF=0, 오류=-1. release는 1=released, 2=already absent, 0=failure이며
    1/2 뒤에는 Data가 반드시 없어야 한다. release 0이면 함수도 0을 반환하고, Swift가 직접 release한 뒤 일반
    complete_browser_op을 호출할 때까지 Zig가 execution 예약을 유지한다.
-   이 함수가 1을 반환하면 transfer_id를 인수해 release callback까지 호출했으며, 0이면 Swift가 직접 release하고
-   일반 실패 완료를 보내야 한다. 메인 스레드에서만 호출하며 copy 요청은 최대 512 KiB다. */
+   이 함수가 1을 반환하면 transfer_id를 인수했거나 inline release까지 마쳤다. progressive 결과는 이후 pump terminal에서
+   release하며, 0이면 Swift가 직접 release하고 일반 실패 완료를 보내야 한다. 메인 스레드에서만 호출한다. */
 typedef int64_t (*MaruBrowserResultCopyFn)(void *context, uint64_t transfer_id, uint64_t offset,
                                            uint8_t *dst, size_t dst_cap);
 typedef uint32_t (*MaruBrowserResultReleaseFn)(void *context, uint64_t transfer_id);
 uint32_t maru_macos_control_complete_browser_result(uint64_t async_id, uint64_t transfer_id, size_t total_len,
                                                      void *context, MaruBrowserResultCopyFn copy_result,
                                                      MaruBrowserResultReleaseFn release_result);
+uint32_t maru_macos_control_complete_browser_screenshot_result(uint64_t async_id, uint64_t transfer_id, size_t total_len,
+                                                                void *context, MaruBrowserResultCopyFn copy_result,
+                                                                MaruBrowserResultReleaseFn release_result);
+/* 앱 전체 frame tick당 executeScript/screenshot progressive 청크 또는 terminal 최대 하나를 처리한다. */
+uint32_t maru_macos_control_pump_browser_result(void);
 /* Registry per-entry cap보다 큰 strict JSON Data는 Swift가 먼저 폐기한 뒤 길이만 전달한다. Zig가 재인가하고
    request의 max_result_bytes를 사용해 result-too-large terminal을 만든다. 메인 스레드 전용. */
 void maru_macos_control_complete_browser_result_too_large(uint64_t async_id, size_t observed_len);

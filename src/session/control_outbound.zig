@@ -135,6 +135,16 @@ pub const OutboundQueue = struct {
         return removed;
     }
 
+    /// 보안 취소/연결 abort용 전량 폐기. writer가 이미 소유한 프레임은 이 큐 밖이므로 호출자가 별도로
+    /// socket shutdown 뒤 writeComplete하게 둔다.
+    pub fn purgeAll(self: *OutboundQueue, gpa: std.mem.Allocator) usize {
+        const removed = self.items.items.len;
+        for (self.items.items) |frame| gpa.free(frame.bytes);
+        self.items.clearRetainingCapacity();
+        self.queued_wire_bytes = 0;
+        return removed;
+    }
+
     pub fn len(self: *const OutboundQueue) usize {
         return self.items.items.len;
     }

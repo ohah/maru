@@ -721,6 +721,48 @@ pub const screenshot_chunk_bytes: usize = 512 * 1024;
 /// 초과 PNG는 `screenshot_too_large`로 접는다(에이전트가 rect/scale로 축소 재시도 — 후속). progressive pump(무제한)는 후속.
 pub const screenshot_max_chunks: usize = 24;
 
+/// executeScript chunk은 base64 팽창과 JSON envelope를 포함해 1MiB frame 아래에 머물도록 raw 512KiB로 나눈다.
+pub const execute_script_chunk_bytes: usize = 512 * 1024;
+const execute_script_chunk_method = cp.browser_execute_script_chunk_method;
+pub const ExecuteScriptChunkError = error{ InvalidResultId, ChunkTooLarge, FrameTooLarge };
+
+pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
+    if (result_id < 0) return error.InvalidResultId;
+    if (data.len > execute_script_chunk_bytes) return error.ChunkTooLarge;
+    const encoder = std.base64.standard.Encoder;
+    const b64 = try gpa.alloc(u8, encoder.calcSize(data.len));
+    defer gpa.free(b64);
+    _ = encoder.encode(b64, data);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    s.beginObject() catch return error.OutOfMemory;
+    s.objectField("jsonrpc") catch return error.OutOfMemory;
+    s.write(cp.jsonrpc_version) catch return error.OutOfMemory;
+    s.objectField("method") catch return error.OutOfMemory;
+    s.write(execute_script_chunk_method) catch return error.OutOfMemory;
+    s.objectField("params") catch return error.OutOfMemory;
+    s.beginObject() catch return error.OutOfMemory;
+    s.objectField("request_id") catch return error.OutOfMemory;
+    cp.writeId(&s, request_id) catch return error.OutOfMemory;
+    s.objectField("result_id") catch return error.OutOfMemory;
+    s.write(result_id) catch return error.OutOfMemory;
+    s.objectField("seq") catch return error.OutOfMemory;
+    s.write(seq) catch return error.OutOfMemory;
+    s.objectField("encoding") catch return error.OutOfMemory;
+    s.write("base64-json") catch return error.OutOfMemory;
+    s.objectField("data") catch return error.OutOfMemory;
+    s.write(b64) catch return error.OutOfMemory;
+    s.endObject() catch return error.OutOfMemory;
+    s.endObject() catch return error.OutOfMemory;
+    const wire = aw.toOwnedSlice() catch return error.OutOfMemory;
+    if (wire.len > cp.default_max_frame) {
+        gpa.free(wire);
+        return error.FrameTooLarge;
+    }
+    return wire;
+}
+
 const screenshot_chunk_method = cp.browser_screenshot_chunk_method; // 22차 [8]: 단일 출처(control_plane)
 
 /// PNG IHDR의 width/height(§9.5.7 metadata). Swift가 넘긴 PNG 바이트에서 직접 읽어 ABI 확장을 피한다.
@@ -945,7 +987,13 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
     return switch (bmethod) {
         .navigate => serializeNavigateResult(gpa, req.id),
         .get_url => serializeGetUrlResult(gpa, req.id, result),
-        .execute_script => serializeExecuteScriptResponse(gpa, req.id, result),
+        .execute_script => blk: {
+            const params = parseExecuteScriptParams(req.params) catch return cp.serializeError(gpa, req.id, .internal_error, "invalid executeScript request state", null);
+            if (result.len > params.max_result_bytes) {
+                break :blk serializeResultTooLarge(gpa, req.id, params.max_result_bytes, params.max_result_bytes + 1);
+            }
+            break :blk serializeExecuteScriptResponse(gpa, req.id, result);
+        },
         .get_cookies => serializeGetCookiesResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             // Swift가 준 cookies_json이 malformed(배열 아님·손상) = 직렬화 버그 → 균일 internal_error(oracle 아님).
@@ -966,6 +1014,14 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         .click, .type_text, .scroll => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         .wait => serializeNavigateResult(gpa, req.id),
     };
+}
+
+fn serializeResultTooLarge(gpa: std.mem.Allocator, id: cp.Id, limit_bytes: usize, observed_at_least: usize) std.mem.Allocator.Error![]u8 {
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "limit_bytes", .{ .integer = @intCast(limit_bytes) });
+    try data.put(gpa, "observed_bytes_at_least", .{ .integer = @intCast(observed_at_least) });
+    return cp.serializeError(gpa, id, .result_too_large, cp.ErrorCode.result_too_large.defaultMessage(), .{ .object = data });
 }
 
 fn serializeWaitTimeoutError(gpa: std.mem.Allocator, req: cp.Request) std.mem.Allocator.Error![]u8 {
@@ -1875,6 +1931,17 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer pm.deinit();
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
+    // 요청별 max_result_bytes는 완료 경로에서 실제 JSON bytes에 적용된다.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":1}}", true, "123");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        const err = pm.message.response.err.?;
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.result_too_large)), err.code);
+        try testing.expectEqual(@as(i64, 1), err.data.?.object.get("limit_bytes").?.integer);
+        try testing.expectEqual(@as(i64, 2), err.data.?.object.get("observed_bytes_at_least").?.integer);
+    }
     // ok=false → internal_error + result를 message로.
     {
         const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}", false, "webView not found");
@@ -1944,6 +2011,23 @@ test "serializeScreenshotChunk: 512KiB raw 조각도 프레임<1MB(base64 팽창
     const w = try serializeScreenshotChunk(testing.allocator, 1, 0, raw);
     defer testing.allocator.free(w);
     try testing.expect(w.len < 1024 * 1024); // 683KiB base64 + JSON 오버헤드 < 1MiB
+}
+
+test "serializeExecuteScriptChunk: request/result id·seq·base64-json과 frame 상한" {
+    const raw = "{\"한글\":true}";
+    const wire = try serializeExecuteScriptChunk(testing.allocator, .{ .number = 12 }, 99, 0, raw);
+    defer testing.allocator.free(wire);
+    try testing.expect(wire.len < cp.default_max_frame);
+    var pm = try cp.parseMessage(testing.allocator, wire);
+    defer pm.deinit();
+    const p = pm.message.notification.params.?.object;
+    try testing.expectEqual(@as(i64, 12), p.get("request_id").?.integer);
+    try testing.expectEqual(@as(i64, 99), p.get("result_id").?.integer);
+    try testing.expectEqual(@as(i64, 0), p.get("seq").?.integer);
+    try testing.expectEqualStrings("base64-json", p.get("encoding").?.string);
+    const oversized = try testing.allocator.alloc(u8, execute_script_chunk_bytes + 1);
+    defer testing.allocator.free(oversized);
+    try testing.expectError(error.ChunkTooLarge, serializeExecuteScriptChunk(testing.allocator, .{ .number = 1 }, 1, 0, oversized));
 }
 
 test "serializeScreenshotComplete: 최종 응답(capture_id·seq_total·width·height·format), id 재파싱 echo" {

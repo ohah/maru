@@ -89,13 +89,13 @@ pub const BrowserMethod = enum {
     /// `browser.clearStorage {id}` → `{ok}`. Swift `WKWebsiteDataStore`로 대상 origin 쿠키+스토리지 comprehensive 삭제.
     /// **`browser_storage` scope**(쿠키=토큰 건드림). op.arg=빈. **op_kind=11 고정**.
     clear_storage,
-    /// `browser.click {id, selector}` → `{ok}`(ok=요소 발견+클릭). eval `querySelector(sel).click()`. base `browser`.
-    /// op.arg=`{selector}` JSON. **op_kind=12 고정**.
+    /// `browser.click {id, selector|ref}` → `{ok}`(ok=요소 발견+클릭). eval `querySelector(...).click()`. base `browser`.
+    /// op.arg=`{selector}` 또는 `{ref}` JSON(§9.5.4 — ref=snapshot이 부여한 data-maru-ref, 배타). **op_kind=12 고정**.
     click,
-    /// `browser.type {id, selector, text}` → `{ok}`. eval로 input/textarea .value 설정 + input/change 이벤트. base `browser`.
-    /// op.arg=`{selector, text}` JSON. **op_kind=13**.
+    /// `browser.type {id, selector|ref, text}` → `{ok}`. eval로 input/textarea .value 설정 + input/change 이벤트. base `browser`.
+    /// op.arg=`{selector|ref, text}` JSON. **op_kind=13**.
     type_text,
-    /// `browser.scroll {id, selector}` → `{ok}`. eval `querySelector(sel).scrollIntoView()`. base `browser`. op.arg=`{selector}`. **op_kind=14**.
+    /// `browser.scroll {id, selector|ref}` → `{ok}`. eval `querySelector(...).scrollIntoView()`. base `browser`. op.arg=`{selector|ref}`. **op_kind=14**.
     scroll,
     /// `browser.wait {id, condition, selector?, timeout_ms?}`(5f-2) → `{ok}`. selector=visible DOM 조건, load=현재
     /// `WKWebView.isLoading == false`. base `browser`. **op_kind=15 고정**.
@@ -297,11 +297,19 @@ pub const KeyParams = struct { id: u64, key: []const u8 };
 /// `browser.setLocalStorage` params `{id, key, value}`. 둘 다 필수.
 pub const SetLocalStorageParams = struct { id: u64, key: []const u8, value: []const u8 };
 
-/// `browser.click`/`scroll` params `{id, selector}`. selector 필수(CSS 셀렉터).
-pub const SelectorParams = struct { id: u64, selector: []const u8 };
+/// act(click/type/scroll) 대상 지시자 — CSS selector 또는 snapshot ref(§9.5.4) 중 **정확히 하나**.
+/// ref는 wire에서 **불투명 토큰**이다: `[data-maru-ref]` 바인딩 해소는 L4(엔진) 소관이라(현 WKWebView=주입 data 속성,
+/// 미래 CDP 엔진=backendNodeId) L2는 selector/ref를 구분만 해 arg에 실어 넘기고 의미는 부여하지 않는다.
+pub const Locator = union(enum) {
+    selector: []const u8,
+    ref: []const u8,
+};
 
-/// `browser.type` params `{id, selector, text}`. 둘 다 필수.
-pub const TypeParams = struct { id: u64, selector: []const u8, text: []const u8 };
+/// `browser.click`/`scroll` params `{id, selector | ref}`. locator=selector 또는 ref 정확히 하나.
+pub const ActParams = struct { id: u64, locator: Locator };
+
+/// `browser.type` params `{id, selector | ref, text}`. locator + text 필수.
+pub const TypeParams = struct { id: u64, locator: Locator, text: []const u8 };
 
 /// `browser.wait` 조건. 첫 슬라이스는 명시적 selector visible·현재 load 완료만 지원한다. URL/text/fn/network-idle과
 /// click/type auto-wait는 후속(§9.4 D3·§9.5).
@@ -443,14 +451,25 @@ pub fn parseSetLocalStorageParams(params: ?std.json.Value) ParamError!SetLocalSt
     return .{ .id = try idFromObj(obj), .key = try strFromObj(obj, "key"), .value = try strFromObj(obj, "value") };
 }
 
-pub fn parseSelectorParams(params: ?std.json.Value) ParamError!SelectorParams {
+/// act locator 파싱 — `selector`와 `ref` 중 **정확히 하나**여야 한다(둘 다=배타 위반, 둘 다 없음=대상 미지정, 모두
+/// `invalid_params`). ref는 여기서 형식 검증 없이 그대로 통과(불투명 토큰 — L4가 해소, 미발견은 정직하게 `ok:false`).
+fn parseLocator(obj: std.json.ObjectMap) ParamError!Locator {
+    const selector = try optStrFromObj(obj, "selector");
+    const ref = try optStrFromObj(obj, "ref");
+    if (selector != null and ref != null) return error.InvalidParams;
+    if (selector) |s| return .{ .selector = s };
+    if (ref) |r| return .{ .ref = r };
+    return error.InvalidParams;
+}
+
+pub fn parseActParams(params: ?std.json.Value) ParamError!ActParams {
     const obj = try paramsObject(params);
-    return .{ .id = try idFromObj(obj), .selector = try strFromObj(obj, "selector") };
+    return .{ .id = try idFromObj(obj), .locator = try parseLocator(obj) };
 }
 
 pub fn parseTypeParams(params: ?std.json.Value) ParamError!TypeParams {
     const obj = try paramsObject(params);
-    return .{ .id = try idFromObj(obj), .selector = try strFromObj(obj, "selector"), .text = try strFromObj(obj, "text") };
+    return .{ .id = try idFromObj(obj), .locator = try parseLocator(obj), .text = try strFromObj(obj, "text") };
 }
 
 /// `browser.wait` params. condition은 tagged string이라 후속 URL/text 조건을 기존 필드 의미 변경 없이 확장할 수 있다.
@@ -535,19 +554,28 @@ pub fn parseSnapshotParams(params: ?std.json.Value) ParamError!SnapshotParams {
     };
 }
 
-/// act op.arg — Swift가 eval로 쓸 `{selector}` 또는 `{selector, text}` compact JSON(click/scroll=selector, type=+text).
-pub fn serializeSelectorArg(gpa: std.mem.Allocator, selector: []const u8, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
+/// act op.arg — Swift가 eval로 쓸 compact JSON. locator에 따라 `{selector}` 또는 `{ref}`(type은 +`text`). ref는
+/// 불투명 토큰 그대로 실어 넘기고 `[data-maru-ref]` 해소는 Swift actScript가 한다(§9.5.4 — 엔진별 바인딩이 L4 소관).
+pub fn serializeActArg(gpa: std.mem.Allocator, locator: Locator, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    writeSelectorArg(&s, selector, text) catch return error.OutOfMemory;
+    writeActArg(&s, locator, text) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeSelectorArg(s: *std.json.Stringify, selector: []const u8, text: ?[]const u8) !void {
+fn writeActArg(s: *std.json.Stringify, locator: Locator, text: ?[]const u8) !void {
     try s.beginObject();
-    try s.objectField("selector");
-    try s.write(selector);
+    switch (locator) {
+        .selector => |sel| {
+            try s.objectField("selector");
+            try s.write(sel);
+        },
+        .ref => |ref| {
+            try s.objectField("ref");
+            try s.write(ref);
+        },
+    }
     if (text) |t| {
         try s.objectField("text");
         try s.write(t);
@@ -1574,11 +1602,11 @@ pub fn browserOpFromRequest(
             break :blk try serializeKeyArg(gpa, p.key, p.value);
         },
         .clear_storage => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 origin 데이터를 WKWebsiteDataStore로 삭제(인자 없음)
-        // act(5f-2): click/scroll arg=`{selector}`, type arg=`{selector,text}`(Swift가 eval로 실행). base browser scope.
-        .click, .scroll => try serializeSelectorArg(gpa, (parseSelectorParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).selector, null),
+        // act(5f-2·snapshot-2): click/scroll arg=`{selector|ref}`, type arg=`{selector|ref,text}`(Swift가 eval로 실행). base browser scope.
+        .click, .scroll => try serializeActArg(gpa, (parseActParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).locator, null),
         .type_text => blk: {
             const p = parseTypeParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
-            break :blk try serializeSelectorArg(gpa, p.selector, p.text);
+            break :blk try serializeActArg(gpa, p.locator, p.text);
         },
         .wait => try serializeWaitArg(gpa, parseWaitParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // snapshot(§9.5.4): interactive_only/max_depth/selector를 arg에 실어 Swift accname JS가 소비. base browser scope.
@@ -2792,41 +2820,56 @@ test "serializeBrowserResponse(localStorage): getLocalStorage → {value}, set/c
 
 // ── act(5f-2) params·arg·dispatch·응답 단위 ──
 
-test "params/arg: click {selector}·type {selector,text}·serializeSelectorArg" {
+test "params/arg: click/type locator selector·ref 배타·serializeActArg" {
     {
         var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#btn\"}}");
         defer pm.deinit();
-        const p = try parseSelectorParams(pm.message.request.params);
-        try testing.expectEqualStrings("#btn", p.selector);
+        const p = try parseActParams(pm.message.request.params);
+        try testing.expectEqualStrings("#btn", p.locator.selector);
+    }
+    // ref locator(§9.5.4 snapshot-2) — selector 대안.
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"ref\":\"e3\"}}");
+        defer pm.deinit();
+        const p = try parseActParams(pm.message.request.params);
+        try testing.expectEqualStrings("e3", p.locator.ref);
     }
     {
-        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.type\",\"params\":{\"id\":11,\"selector\":\"#in\",\"text\":\"hi\"}}");
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.type\",\"params\":{\"id\":11,\"ref\":\"e5\",\"text\":\"hi\"}}");
         defer pm.deinit();
         const p = try parseTypeParams(pm.message.request.params);
-        try testing.expectEqualStrings("#in", p.selector);
+        try testing.expectEqualStrings("e5", p.locator.ref);
         try testing.expectEqualStrings("hi", p.text);
     }
-    // arg JSON: click={selector}, type={selector,text}.
+    // arg JSON: selector locator={selector}, ref locator={ref}(+text).
     {
-        const a = try serializeSelectorArg(testing.allocator, "#btn", null);
+        const a = try serializeActArg(testing.allocator, .{ .selector = "#btn" }, null);
         defer testing.allocator.free(a);
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
         defer parsed.deinit();
         try testing.expectEqualStrings("#btn", parsed.value.object.get("selector").?.string);
+        try testing.expect(parsed.value.object.get("ref") == null);
         try testing.expect(parsed.value.object.get("text") == null);
     }
     {
-        const a = try serializeSelectorArg(testing.allocator, "#in", "hi");
+        const a = try serializeActArg(testing.allocator, .{ .ref = "e7" }, "hi");
         defer testing.allocator.free(a);
         var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, a, .{});
         defer parsed.deinit();
+        try testing.expectEqualStrings("e7", parsed.value.object.get("ref").?.string);
+        try testing.expect(parsed.value.object.get("selector") == null);
         try testing.expectEqualStrings("hi", parsed.value.object.get("text").?.string);
     }
-    // 오류: selector 없음, text 없음.
+    // 오류: locator 없음(selector·ref 둘 다 부재), 둘 다 지정(배타 위반), text 없음.
     {
         const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1}", .{});
         defer parsed.deinit();
-        try testing.expectError(error.InvalidParams, parseSelectorParams(parsed.value));
+        try testing.expectError(error.InvalidParams, parseActParams(parsed.value));
+    }
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"selector\":\"#x\",\"ref\":\"e1\"}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseActParams(parsed.value)); // selector+ref 배타
     }
     {
         const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"selector\":\"#x\"}", .{});
@@ -2835,13 +2878,25 @@ test "params/arg: click {selector}·type {selector,text}·serializeSelectorArg" 
     }
 }
 
-test "dispatchBrowser(act): base browser cap + click → op{click, arg=selector JSON}" {
-    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#btn\"}}", browserCap(11));
-    defer testing.allocator.free(op.arg);
-    try testing.expectEqual(BrowserMethod.click, op.method);
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
-    defer parsed.deinit();
-    try testing.expectEqualStrings("#btn", parsed.value.object.get("selector").?.string);
+test "dispatchBrowser(act): base browser cap + click → op{click, arg=selector|ref JSON}" {
+    {
+        const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#btn\"}}", browserCap(11));
+        defer testing.allocator.free(op.arg);
+        try testing.expectEqual(BrowserMethod.click, op.method);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("#btn", parsed.value.object.get("selector").?.string);
+    }
+    // ref locator(§9.5.4 snapshot-2) → op.arg에 {ref}(selector 없음). 같은 op_kind(12) 재사용.
+    {
+        const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"ref\":\"e2\"}}", browserCap(11));
+        defer testing.allocator.free(op.arg);
+        try testing.expectEqual(BrowserMethod.click, op.method);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("e2", parsed.value.object.get("ref").?.string);
+        try testing.expect(parsed.value.object.get("selector") == null);
+    }
 }
 
 test "serializeBrowserResponse(act): click result true/false → {ok:bool}" {

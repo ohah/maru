@@ -573,6 +573,8 @@ fn writeBrowserCliUsage(stderr: *std.Io.Writer, err: maru.cli.browser.ParseError
         error.MissingName => "--name 이 필요합니다",
         error.MissingKey => "--key 가 필요합니다",
         error.MissingSelector => "--selector 가 필요합니다",
+        error.MissingLocator => "click/type/scroll 에는 --selector 또는 --ref 중 하나가 필요합니다",
+        error.ConflictingLocator => "click/type/scroll 에는 --selector와 --ref 중 하나만 지정할 수 있습니다",
         error.MissingWaitCondition => "wait 에는 --selector 또는 --load 중 하나가 필요합니다",
         error.ConflictingWaitCondition => "wait 에는 --selector와 --load 중 하나만 지정할 수 있습니다",
         error.MissingTimeoutValue => "wait --timeout 에는 값이 필요합니다",

@@ -32,9 +32,9 @@ pub const browser_help =
     \\  set-local-storage    --surface <id> --key k --value v   localStorage 값 설정
     \\  remove-local-storage --surface <id> --key k             localStorage 항목 삭제
     \\  clear-storage        --surface <id>                     대상 origin 쿠키+스토리지 전부 삭제
-    \\  click   --surface <id> --selector <css>                 셀렉터 요소 클릭
-    \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
-    \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
+    \\  click   --surface <id> (--selector <css> | --ref <e#>)          요소 클릭(selector 또는 snapshot ref)
+    \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   요소(input)에 값 입력
+    \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          요소로 스크롤
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   페이지 ARIA 트리(role/name/ref) 출력
     \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
@@ -72,12 +72,12 @@ pub const Request = union(enum) {
     remove_local_storage: struct { surface_id: u64, key: []const u8 },
     /// `browser clear-storage`(§9.4 D4). surface만. 대상 origin 쿠키+스토리지 삭제. 응답 {ok}.
     clear_storage: struct { surface_id: u64 },
-    /// `browser click`(act 5f-2). selector 필수. 응답 {ok}(요소 발견+클릭).
-    click: struct { surface_id: u64, selector: []const u8 },
-    /// `browser type`(act 5f-2). selector/text 필수. 응답 {ok}.
-    type_text: struct { surface_id: u64, selector: []const u8, text: []const u8 },
-    /// `browser scroll`(act 5f-2). selector 필수(scrollIntoView). 응답 {ok}.
-    scroll: struct { surface_id: u64, selector: []const u8 },
+    /// `browser click`(act 5f-2·snapshot-2). locator=--selector 또는 --ref 하나. 응답 {ok}(요소 발견+클릭).
+    click: struct { surface_id: u64, locator: Locator },
+    /// `browser type`(act 5f-2·snapshot-2). locator + text 필수. 응답 {ok}.
+    type_text: struct { surface_id: u64, locator: Locator, text: []const u8 },
+    /// `browser scroll`(act 5f-2·snapshot-2). locator 필수(scrollIntoView). 응답 {ok}.
+    scroll: struct { surface_id: u64, locator: Locator },
     /// `browser wait`: visible selector 또는 현재 load idle까지 polling. timeout은 1..25_000ms. 응답 {ok}.
     wait: struct { surface_id: u64, condition: WaitCondition, selector: ?[]const u8, timeout_ms: u32 },
     /// `browser snapshot`(§9.5.4): 페이지 ARIA 트리(role/name/ref). interactive_only/max_depth/selector 선택. 응답 {snapshot}.
@@ -108,6 +108,13 @@ pub const WaitCondition = enum {
             .load => "load",
         };
     }
+};
+
+/// act(click/type/scroll) 대상 지시자 — `--selector <css>` 또는 `--ref <e#>`(§9.5.4 snapshot) 중 정확히 하나.
+/// ref는 snapshot이 매긴 불투명 토큰이라 CLI는 값을 그대로 wire에 실을 뿐 해석하지 않는다. parse가 배타성을 강제한다.
+pub const Locator = union(enum) {
+    selector: []const u8,
+    ref: []const u8,
 };
 
 pub const wait_default_timeout_ms: u32 = 25_000;
@@ -151,7 +158,9 @@ pub const ParseError = error{
     InvalidScale, // `--scale`이 양수 수치 아님
     MissingName, // `set-cookie`/`delete-cookie`에 `--name` 없음
     MissingKey, // `*-local-storage`에 `--key` 없음
-    MissingSelector, // `click`/`type`/`scroll`에 `--selector` 없음
+    MissingSelector, // `wait --selector`에 값 없음(selector 조건)
+    MissingLocator, // `click`/`type`/`scroll`에 `--selector`/`--ref` 둘 다 없음
+    ConflictingLocator, // `click`/`type`/`scroll`에 `--selector`와 `--ref` 동시 지정
     MissingWaitCondition, // `wait`에 `--selector` 또는 `--load` 없음
     ConflictingWaitCondition, // `wait` 조건을 둘 이상 지정
     MissingTimeoutValue, // `wait --timeout`에 값 없음
@@ -244,21 +253,19 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (eq(sub, "click")) {
         const ca = try parseCookieArgs(rest);
         const s = ca.surface orelse return error.MissingSurface;
-        const sel = ca.selector orelse return error.MissingSelector;
-        return .{ .request = .{ .click = .{ .surface_id = s, .selector = sel } } };
+        return .{ .request = .{ .click = .{ .surface_id = s, .locator = try locatorFromArgs(ca) } } };
     }
     if (eq(sub, "type")) {
         const ca = try parseCookieArgs(rest);
         const s = ca.surface orelse return error.MissingSurface;
-        const sel = ca.selector orelse return error.MissingSelector;
+        const loc = try locatorFromArgs(ca);
         const text = ca.text orelse return error.MissingText;
-        return .{ .request = .{ .type_text = .{ .surface_id = s, .selector = sel, .text = text } } };
+        return .{ .request = .{ .type_text = .{ .surface_id = s, .locator = loc, .text = text } } };
     }
     if (eq(sub, "scroll")) {
         const ca = try parseCookieArgs(rest);
         const s = ca.surface orelse return error.MissingSurface;
-        const sel = ca.selector orelse return error.MissingSelector;
-        return .{ .request = .{ .scroll = .{ .surface_id = s, .selector = sel } } };
+        return .{ .request = .{ .scroll = .{ .surface_id = s, .locator = try locatorFromArgs(ca) } } };
     }
     if (eq(sub, "wait")) {
         const wa = try parseWaitArgs(rest);
@@ -448,7 +455,16 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
     return .{ .surface = surface, .arg = arg };
 }
 
-const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, selector: ?[]const u8, text: ?[]const u8, secure: bool };
+const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, selector: ?[]const u8, ref: ?[]const u8, text: ?[]const u8, secure: bool };
+
+/// act(click/type/scroll)의 locator를 옵션에서 만든다 — `--selector` xor `--ref`(§9.5.4). 둘 다=배타 위반,
+/// 둘 다 없음=대상 미지정. ref는 값 검증 없이 그대로(불투명 토큰 — 미발견은 서버가 정직하게 ok:false).
+fn locatorFromArgs(ca: CookieArgs) ParseError!Locator {
+    if (ca.selector != null and ca.ref != null) return error.ConflictingLocator;
+    if (ca.selector) |s| return .{ .selector = s };
+    if (ca.ref) |r| return .{ .ref = r };
+    return error.MissingLocator;
+}
 
 const WaitArgs = struct {
     surface: ?u64 = null,
@@ -498,7 +514,7 @@ fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
 /// cookie/localStorage 명령 옵션(`--surface`·`--name`·`--key`·`--value`·`--domain`·`--path`·`--secure`)을 뽑는다. 위치
 /// 인자 금지, 알 수 없는 `-`옵션 에러. 각 값 옵션은 `--opt val`·`--opt=val` 양형태. 서브커맨드가 필요 필드만 검사(파서는 공유).
 fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
-    var r: CookieArgs = .{ .surface = null, .name = null, .key = null, .value = null, .domain = null, .path = null, .selector = null, .text = null, .secure = false };
+    var r: CookieArgs = .{ .surface = null, .name = null, .key = null, .value = null, .domain = null, .path = null, .selector = null, .ref = null, .text = null, .secure = false };
     var i: usize = 0;
     while (i < rest.len) {
         const a = rest[i];
@@ -519,6 +535,8 @@ fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
             r.path = try optValue(rest, &i, "--path");
         } else if (matchOpt(a, "--selector")) {
             r.selector = try optValue(rest, &i, "--selector");
+        } else if (matchOpt(a, "--ref")) {
+            r.ref = try optValue(rest, &i, "--ref");
         } else if (matchOpt(a, "--text")) {
             r.text = try optValue(rest, &i, "--text");
         } else if (std.mem.startsWith(u8, a, "-")) {
@@ -645,9 +663,9 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
         .set_local_storage => |g| return keyRequest(gpa, id, "browser.setLocalStorage", g.surface_id, g.key, g.value),
         .remove_local_storage => |g| return keyRequest(gpa, id, "browser.removeLocalStorage", g.surface_id, g.key, null),
         .clear_storage => |g| return idOnlyRequest(gpa, id, "browser.clearStorage", g.surface_id),
-        .click => |c| return selectorRequest(gpa, id, "browser.click", c.surface_id, c.selector, null),
-        .type_text => |c| return selectorRequest(gpa, id, "browser.type", c.surface_id, c.selector, c.text),
-        .scroll => |c| return selectorRequest(gpa, id, "browser.scroll", c.surface_id, c.selector, null),
+        .click => |c| return actRequest(gpa, id, "browser.click", c.surface_id, c.locator, null),
+        .type_text => |c| return actRequest(gpa, id, "browser.type", c.surface_id, c.locator, c.text),
+        .scroll => |c| return actRequest(gpa, id, "browser.scroll", c.surface_id, c.locator, null),
         .wait => |w| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -669,9 +687,13 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
     }
 }
 
-/// act 요청 바이트: `{id, selector, text?}`. text null이면 selector만(click/scroll). caller free.
-fn selectorRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, selector: []const u8, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
-    return twoFieldRequest(gpa, id, method, surface_id, "selector", selector, "text", text);
+/// act 요청 바이트: `{id, selector|ref, text?}`(§9.5.4). locator=selector 또는 ref 하나, text null이면 locator만(click/scroll).
+/// ref는 wire 불투명 토큰(서버가 [data-maru-ref]로 해소). caller free.
+fn actRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, locator: Locator, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
+    return switch (locator) {
+        .selector => |s| twoFieldRequest(gpa, id, method, surface_id, "selector", s, "text", text),
+        .ref => |r| twoFieldRequest(gpa, id, method, surface_id, "ref", r, "text", text),
+    };
 }
 
 /// localStorage 요청 바이트: `{id, key, value?}`. value null이면 key만(get/remove). caller free.
@@ -1553,40 +1575,58 @@ test "renderResponse(value): getLocalStorage {value} → 값 출력" {
 
 // ── act(5f-2) 파서·wire 단위 ──
 
-test "parse: click/type/scroll·에러" {
+test "parse: click/type/scroll locator selector·ref·에러" {
     switch (try parse(&.{ "click", "--surface", "3", "--selector", "#btn" })) {
-        .request => |r| try testing.expectEqualStrings("#btn", r.click.selector),
+        .request => |r| try testing.expectEqualStrings("#btn", r.click.locator.selector),
         else => return error.Unexpected,
     }
-    switch (try parse(&.{ "type", "--surface=3", "--selector=#in", "--text=hi" })) {
+    // --ref(§9.5.4 snapshot-2) — selector 대안.
+    switch (try parse(&.{ "click", "--surface", "3", "--ref", "e4" })) {
+        .request => |r| try testing.expectEqualStrings("e4", r.click.locator.ref),
+        else => return error.Unexpected,
+    }
+    switch (try parse(&.{ "type", "--surface=3", "--ref=e2", "--text=hi" })) {
         .request => |r| {
-            try testing.expectEqualStrings("#in", r.type_text.selector);
+            try testing.expectEqualStrings("e2", r.type_text.locator.ref);
             try testing.expectEqualStrings("hi", r.type_text.text);
         },
         else => return error.Unexpected,
     }
     try testing.expectEqual(@as(u64, 5), (try parse(&.{ "scroll", "--surface", "5", "--selector", ".x" })).request.scroll.surface_id);
-    try testing.expectError(error.MissingSelector, parse(&.{ "click", "--surface", "1" }));
+    // locator 미지정·배타 위반.
+    try testing.expectError(error.MissingLocator, parse(&.{ "click", "--surface", "1" }));
+    try testing.expectError(error.ConflictingLocator, parse(&.{ "click", "--surface", "1", "--selector", "#b", "--ref", "e1" }));
     try testing.expectError(error.MissingText, parse(&.{ "type", "--surface", "1", "--selector", "#i" }));
     try testing.expectError(error.MissingSurface, parse(&.{ "click", "--selector", "#b" }));
 }
 
-test "buildRequestBytes: act 메서드·params" {
+test "buildRequestBytes: act 메서드·params(selector|ref)" {
     {
-        const b = try buildRequestBytes(testing.allocator, .{ .click = .{ .surface_id = 11, .selector = "#btn" } }, .{ .number = 1 });
+        const b = try buildRequestBytes(testing.allocator, .{ .click = .{ .surface_id = 11, .locator = .{ .selector = "#btn" } } }, .{ .number = 1 });
         defer testing.allocator.free(b);
         var pm = try cp.parseMessage(testing.allocator, b);
         defer pm.deinit();
         try testing.expectEqualStrings("browser.click", pm.message.request.method);
         try testing.expectEqualStrings("#btn", pm.message.request.params.?.object.get("selector").?.string);
+        try testing.expect(pm.message.request.params.?.object.get("ref") == null);
         try testing.expect(pm.message.request.params.?.object.get("text") == null);
     }
+    // ref locator → params에 {ref}(selector 없음).
     {
-        const b = try buildRequestBytes(testing.allocator, .{ .type_text = .{ .surface_id = 11, .selector = "#in", .text = "hi" } }, .{ .number = 1 });
+        const b = try buildRequestBytes(testing.allocator, .{ .click = .{ .surface_id = 11, .locator = .{ .ref = "e9" } } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("e9", pm.message.request.params.?.object.get("ref").?.string);
+        try testing.expect(pm.message.request.params.?.object.get("selector") == null);
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .type_text = .{ .surface_id = 11, .locator = .{ .ref = "e1" }, .text = "hi" } }, .{ .number = 1 });
         defer testing.allocator.free(b);
         var pm = try cp.parseMessage(testing.allocator, b);
         defer pm.deinit();
         try testing.expectEqualStrings("browser.type", pm.message.request.method);
+        try testing.expectEqualStrings("e1", pm.message.request.params.?.object.get("ref").?.string);
         try testing.expectEqualStrings("hi", pm.message.request.params.?.object.get("text").?.string);
     }
 }
@@ -1612,9 +1652,9 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  set-local-storage    --surface <id> --key k --value v   localStorage 값 설정
         \\  remove-local-storage --surface <id> --key k             localStorage 항목 삭제
         \\  clear-storage        --surface <id>                     대상 origin 쿠키+스토리지 전부 삭제
-        \\  click   --surface <id> --selector <css>                 셀렉터 요소 클릭
-        \\  type    --surface <id> --selector <css> --text <t>      셀렉터 요소(input)에 값 입력
-        \\  scroll  --surface <id> --selector <css>                 셀렉터 요소로 스크롤
+        \\  click   --surface <id> (--selector <css> | --ref <e#>)          요소 클릭(selector 또는 snapshot ref)
+        \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   요소(input)에 값 입력
+        \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          요소로 스크롤
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   페이지 ARIA 트리(role/name/ref) 출력
         \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)

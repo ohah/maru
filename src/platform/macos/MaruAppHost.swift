@@ -1059,21 +1059,31 @@ enum BrowserControl {
         }
     }
 
-    // act(5f-2): CSS-selector 기반 click/type/scroll을 eval 스크립트로 만든다(base browser scope). querySelector가 null이면
-    // false(요소 미발견) 반환 → Zig가 {ok:false}로 실는다. type은 input/textarea면 .value, 아니면 textContent에 넣고
-    // input/change 이벤트 발화(프레임워크 반응). scroll은 scrollIntoView(요소로 스크롤). selector/text는 jsStringLiteral로 escape.
+    // act(5f-2·snapshot-2): selector 또는 ref로 요소를 찾아 click/type/scroll을 eval 스크립트로 만든다(base browser scope).
+    // querySelector가 null이면 false(요소 미발견) 반환 → Zig가 {ok:false}로 실는다. type은 input/textarea면 .value, 아니면
+    // textContent에 넣고 input/change 이벤트 발화(프레임워크 반응). scroll은 scrollIntoView(요소로 스크롤).
+    // **locator(§9.5.4)**: selector면 그대로 querySelector; ref면 snapshot이 부여한 `[data-maru-ref]` 속성으로 해소한다
+    // (ref는 wire 불투명 토큰이라 이 바인딩이 L4[엔진] 소관 — 미래 CDP 엔진은 같은 op을 backendNodeId로 해소). ref 값은
+    // JSON.stringify로 CSS 속성 셀렉터 문자열에 안전 임베드(따옴표·역슬래시 escape — 조작된 ref는 미매치=ok:false로 정직 실패).
+    // selector/text/ref는 jsStringLiteral로 JS 문자열 escape.
     static func actScript(_ obj: [String: Any], op: UInt8) -> String? {
-        guard let selector = obj["selector"] as? String else { return nil }
-        let sel = jsStringLiteral(selector)
+        let locator: String
+        if let selector = obj["selector"] as? String {
+            locator = "document.querySelector(\(jsStringLiteral(selector)))"
+        } else if let ref = obj["ref"] as? String {
+            locator = "document.querySelector('[data-maru-ref='+JSON.stringify(\(jsStringLiteral(ref)))+']')"
+        } else {
+            return nil
+        }
         switch op {
         case 12: // click
-            return "(()=>{const e=document.querySelector(\(sel));if(!e)return false;e.click();return true;})()"
+            return "(()=>{const e=\(locator);if(!e)return false;e.click();return true;})()"
         case 13: // type
             guard let text = obj["text"] as? String else { return nil }
             let txt = jsStringLiteral(text)
-            return "(()=>{const e=document.querySelector(\(sel));if(!e)return false;if(e.focus)e.focus();if('value'in e){e.value=\(txt);}else{e.textContent=\(txt);}e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;})()"
+            return "(()=>{const e=\(locator);if(!e)return false;if(e.focus)e.focus();if('value'in e){e.value=\(txt);}else{e.textContent=\(txt);}e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;})()"
         case 14: // scroll
-            return "(()=>{const e=document.querySelector(\(sel));if(!e)return false;e.scrollIntoView();return true;})()"
+            return "(()=>{const e=\(locator);if(!e)return false;e.scrollIntoView();return true;})()"
         default: return nil
         }
     }

@@ -36,6 +36,7 @@ pub const hello_method = "hello";
 /// `serializeScreenshotChunk`)과 소비(cli/browser `ScreenshotStreamValidator`)가 이 **단일 출처**를 공유해 wire drift를 막는다.
 pub const browser_screenshot_chunk_method = "browser.screenshotChunk";
 pub const browser_execute_script_chunk_method = "browser.executeScriptChunk";
+pub const browser_snapshot_chunk_method = "browser.snapshotChunk"; // §9.5.10 통일-1: snapshot 대형 결과 chunk 스트림(executeScript와 같은 transfer)
 
 /// PNG IHDR width/height(§9.5.7 screenshot metadata). **단일 출처**: 서버(control_browser)와 CLI 클라이언트가 같은
 /// 파서를 써야 유효 PNG 판정이 어긋나지 않는다(cli는 cp만 import하므로 여기 둔다). 시그니처 8B + IHDR(len 4·"IHDR" 4·

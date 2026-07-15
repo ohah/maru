@@ -625,6 +625,7 @@ fn runBrowserRequest(
     stderr: *std.Io.Writer,
 ) !void {
     if (req == .exec) return runBrowserExecuteScript(io, allocator, req.exec, stdout, stderr);
+    if (req == .snapshot) return runBrowserSnapshot(io, allocator, req, stdout, stderr); // §9.5.10 통일-1: 대형 트리 chunk 재조립
     const kind = req.kind();
     const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, req, .{ .number = 1 });
     defer allocator.free(request_bytes);
@@ -692,6 +693,77 @@ fn runBrowserExecuteScript(
         try stdout.writeAll("\n");
     }
     try stdout.flush();
+}
+
+/// §9.5.10 통일-1: snapshot 응답을 스트리밍으로 받는다. 결과가 512 KiB 이하면 inline 단일 응답(`{result:{snapshot:tree}}`)이라
+/// 그대로 renderResponse하고, 초과면 `browser.snapshotChunk` notification×N을 base64 재조립해 트리를 복원한 뒤 synthetic 응답으로
+/// 렌더한다(대형 트리가 프레임 상한을 넘던 결함 해소 — executeScript와 같은 transfer). 검증·재조립은 `SnapshotStreamValidator`(L2
+/// 순수, executeScript와 동형 bounded 검증). error 응답도 그대로 렌더. GUI 손 테스트로 대형 왕복 확인.
+fn runBrowserSnapshot(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    req: maru.cli.browser.Request,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const request_id: maru.session.control_plane.Id = .{ .number = 1 };
+    const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, req, request_id);
+    defer allocator.free(request_bytes);
+    const fd = try connectSendControl(io, allocator, request_bytes, stderr);
+    defer _ = std.c.close(fd);
+
+    var validator = maru.cli.browser.SnapshotStreamValidator.init(allocator, request_id, maru.session.control_browser.snapshot_max_result_bytes);
+    var reassembled: std.ArrayList(u8) = .empty; // chunked면 재조립한 트리 JSON 바이트
+    defer reassembled.deinit(allocator);
+    var terminal_line: ?[]u8 = null; // inline/error 응답 그대로 렌더용(chunked면 null → synthetic)
+    defer if (terminal_line) |l| allocator.free(l);
+    var chunked = false;
+    var framer: maru.session.control_plane.Framer = .{};
+    defer framer.deinit(allocator);
+    var decode_scratch: [512 * 1024]u8 = undefined;
+
+    done: while (true) {
+        while (framer.next() catch null) |line| {
+            switch (validator.feed(line, &decode_scratch)) {
+                .need_more => {},
+                .chunk => |bytes| reassembled.appendSlice(allocator, bytes) catch return error.OutOfMemory,
+                .inline_terminal => {
+                    terminal_line = try allocator.dupe(u8, line); // inline `{snapshot}` 또는 에러 — 그대로 렌더
+                    break :done;
+                },
+                .done => {
+                    chunked = true;
+                    break :done;
+                },
+                .failed => return snapshotStreamError(stderr),
+            }
+        }
+        var read_buf: [4096]u8 = undefined;
+        const n = std.c.read(fd, &read_buf, read_buf.len);
+        if (n <= 0) return snapshotStreamError(stderr);
+        framer.push(allocator, read_buf[0..@intCast(n)]) catch return error.OutOfMemory;
+    }
+
+    if (chunked) {
+        // 재조립한 트리를 synthetic 응답 `{result:{snapshot:<tree>}}`로 감싸 기존 렌더러 재사용(inline과 같은 렌더 경로).
+        var synth: std.ArrayList(u8) = .empty;
+        defer synth.deinit(allocator);
+        synth.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":") catch return error.OutOfMemory;
+        synth.appendSlice(allocator, reassembled.items) catch return error.OutOfMemory;
+        synth.appendSlice(allocator, "}}") catch return error.OutOfMemory;
+        try maru.cli.browser.renderResponse(allocator, synth.items, .snapshot, stdout);
+    } else if (terminal_line) |line| {
+        try maru.cli.browser.renderResponse(allocator, line, .snapshot, stdout);
+    } else {
+        return snapshotStreamError(stderr);
+    }
+    try stdout.flush();
+}
+
+fn snapshotStreamError(stderr: *std.Io.Writer) error{UnknownCommand} {
+    stderr.print("maru browser snapshot: 서버가 잘못된 snapshot stream을 반환했습니다\n", .{}) catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
 }
 
 /// 결과 바이트가 완결 strict JSON인지 **메모리 슬라이스로** 검증한다(write-only spool read-back 회피). 깊이

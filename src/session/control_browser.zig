@@ -910,6 +910,21 @@ pub fn serializeExecuteScriptObservedTooLarge(gpa: std.mem.Allocator, request_by
     return serializeResultTooLarge(gpa, req.id, params.max_result_bytes, observed_bytes);
 }
 
+/// §9.5.10: method-generic result-too-large. executeScript는 자기 max_result_bytes를 쓰는 위 함수를 유지하고, snapshot/console은
+/// 결과가 예약 상한(=`browserMethodReservedBytes`)을 넘을 때 이걸 쓴다(limit=상한). error envelope는 필드 없어 method-중립. request id만 파싱.
+pub fn serializeBrowserResultTooLarge(gpa: std.mem.Allocator, request_bytes: []const u8, limit_bytes: usize, observed_bytes: usize) std.mem.Allocator.Error![]u8 {
+    var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return cp.serializeError(gpa, .null, .internal_error, "invalid browser request state", null),
+    };
+    defer pm.deinit();
+    const req_id: cp.Id = switch (pm.message) {
+        .request => |r| r.id,
+        else => return cp.serializeError(gpa, .null, .internal_error, "invalid browser request state", null),
+    };
+    return serializeResultTooLarge(gpa, req_id, limit_bytes, observed_bytes);
+}
+
 /// 현재 live transport가 inline frame만 지원할 때 registry의 큰 결과를 복사하지 않고 물리-frame 오류로 끝낸다.
 pub fn serializeExecuteScriptInlineTooLarge(gpa: std.mem.Allocator, request_bytes: []const u8) std.mem.Allocator.Error![]u8 {
     var pm = parseExecuteScriptRequestForCompletion(gpa, request_bytes) catch |e| switch (e) {
@@ -1097,6 +1112,9 @@ pub const screenshot_max_result_bytes: usize = 12 * 1024 * 1024;
 /// 초과 PNG는 `screenshot_too_large`로 접는다(에이전트가 rect/scale로 축소 재시도 — 후속). progressive pump(무제한)는 후속.
 pub const screenshot_max_chunks: usize = 24;
 
+/// §9.5.10 통일-1: snapshot 결과 예약 상한(executeScript 16 MiB 선례). transfer가 초과 시 chunk-stream하고 이 상한
+/// 초과면 result-too-large. 예약은 op 시작 시 aggregate budget서 잡고 beginTransfer가 실제 크기로 낮춘다(executeScript 동형).
+pub const snapshot_max_result_bytes: usize = 16 * 1024 * 1024;
 /// executeScript chunk은 base64 팽창과 JSON envelope를 포함해 1MiB frame 아래에 머물도록 raw 512KiB로 나눈다.
 pub const execute_script_chunk_bytes: usize = 512 * 1024;
 /// final/error가 일반 chunk에 막히지 않도록 예약한 연결별 terminal wire 상한(개행 포함).
@@ -1105,7 +1123,9 @@ const execute_script_chunk_method = cp.browser_execute_script_chunk_method;
 pub const ExecuteScriptChunkError = error{ InvalidResultId, ChunkTooLarge, FrameTooLarge };
 pub const ExecuteScriptCompleteError = error{ InvalidResultId, TerminalFrameTooLarge };
 
-pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
+/// §9.5.10 통일: base64-json chunk notification을 **method-generic**하게 직렬화한다. executeScript/snapshot/console이 같은
+/// transfer 기계를 쓰되 `chunk_method`(`browser.<m>Chunk` SSOT 상수)만 다르다. chunk body 구조·frame 상한은 동일.
+pub fn serializeResultChunk(gpa: std.mem.Allocator, chunk_method: []const u8, request_id: cp.Id, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
     if (result_id < 0) return error.InvalidResultId;
     if (data.len > execute_script_chunk_bytes) return error.ChunkTooLarge;
     const encoder = std.base64.standard.Encoder;
@@ -1114,9 +1134,9 @@ pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, re
     _ = encoder.encode(b64, data);
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    // method 이름은 SSOT 상수(cp.browser_execute_script_chunk_method) — CLI 소비자와 같은 출처라 wire drift 방지.
+    // method 이름은 SSOT 상수(cp.browser_*_chunk_method) — CLI 소비자와 같은 출처라 wire drift 방지.
     aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"") catch return error.OutOfMemory;
-    aw.writer.writeAll(execute_script_chunk_method) catch return error.OutOfMemory;
+    aw.writer.writeAll(chunk_method) catch return error.OutOfMemory;
     aw.writer.writeAll("\",\"params\":{\"request_id\":") catch return error.OutOfMemory;
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     cp.writeId(&s, request_id) catch return error.OutOfMemory;
@@ -1132,10 +1152,27 @@ pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, re
     return wire;
 }
 
-pub fn serializeExecuteScriptChunkForRequest(gpa: std.mem.Allocator, request_bytes: []const u8, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
-    var pm = parseExecuteScriptRequestForCompletion(gpa, request_bytes) catch return error.OutOfMemory;
+/// executeScript chunk — generic core에 executeScript 메서드명을 넘긴 delegate(byte-identical, 기존 호출처·테스트 계약 유지).
+pub fn serializeExecuteScriptChunk(gpa: std.mem.Allocator, request_id: cp.Id, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
+    return serializeResultChunk(gpa, execute_script_chunk_method, request_id, result_id, seq, data);
+}
+
+/// §9.5.10: op은 id/method를 안 실으므로 원 request_bytes 재파싱해 request id를 얻고 chunk를 만든다(method-generic — pump가
+/// kind별 chunk 메서드를 넘긴다). executeScript/snapshot/console 공용.
+pub fn serializeResultChunkForRequest(gpa: std.mem.Allocator, chunk_method: []const u8, request_bytes: []const u8, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
+    // method-generic: 원 request의 id만 필요하다(executeScript/snapshot/console 공용). 비-request는 방어(dispatch가 이미
+    // request 검증 — 도달 안 함), 파싱 실패와 함께 실패 취급(pump가 cancelBrowserTransfer). id는 pm 소유라 deinit 전에 쓴다.
+    var pm = cp.parseMessage(gpa, request_bytes) catch return error.OutOfMemory;
     defer pm.deinit();
-    return serializeExecuteScriptChunk(gpa, pm.message.request.id, result_id, seq, data);
+    const req_id: cp.Id = switch (pm.message) {
+        .request => |r| r.id,
+        else => return error.InvalidResultId,
+    };
+    return serializeResultChunk(gpa, chunk_method, req_id, result_id, seq, data);
+}
+
+pub fn serializeExecuteScriptChunkForRequest(gpa: std.mem.Allocator, request_bytes: []const u8, result_id: i64, seq: usize, data: []const u8) (std.mem.Allocator.Error || ExecuteScriptChunkError)![]u8 {
+    return serializeResultChunkForRequest(gpa, execute_script_chunk_method, request_bytes, result_id, seq, data);
 }
 
 /// progressive chunk를 모두 enqueue한 뒤 같은 FIFO에 놓는 작은 terminal 응답. request id는 원 요청에서 다시 읽어
@@ -2546,6 +2583,37 @@ test "serializeExecuteScriptChunk: request/result id·seq·base64-json과 frame 
     const oversized = try testing.allocator.alloc(u8, execute_script_chunk_bytes + 1);
     defer testing.allocator.free(oversized);
     try testing.expectError(error.ChunkTooLarge, serializeExecuteScriptChunk(testing.allocator, .{ .number = 1 }, 1, 0, oversized));
+}
+
+test "serializeResultChunk(§9.5.10): method-generic — snapshot은 browser.snapshotChunk, executeScript delegate는 executeScriptChunk 유지" {
+    const raw = "{\"tree\":[{\"role\":\"button\"}]}";
+    // snapshot 메서드로 직렬화 → browser.snapshotChunk notification, body는 동일(request_id/result_id/seq/base64-json).
+    {
+        const wire = try serializeResultChunk(testing.allocator, cp.browser_snapshot_chunk_method, .{ .number = 7 }, 3, 1, raw);
+        defer testing.allocator.free(wire);
+        try testing.expect(wire.len < cp.default_max_frame);
+        var pm = try cp.parseMessage(testing.allocator, wire);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.snapshotChunk", pm.message.notification.method);
+        const p = pm.message.notification.params.?.object;
+        try testing.expectEqual(@as(i64, 7), p.get("request_id").?.integer);
+        try testing.expectEqual(@as(i64, 3), p.get("result_id").?.integer);
+        try testing.expectEqual(@as(i64, 1), p.get("seq").?.integer);
+        // base64 라운드트립.
+        const b64 = p.get("data").?.string;
+        const dec = try testing.allocator.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(b64));
+        defer testing.allocator.free(dec);
+        try std.base64.standard.Decoder.decode(dec, b64);
+        try testing.expectEqualSlices(u8, raw, dec);
+    }
+    // executeScript delegate는 여전히 executeScriptChunk(byte-identical 유지 — 무회귀).
+    {
+        const wire = try serializeExecuteScriptChunk(testing.allocator, .{ .number = 7 }, 3, 1, raw);
+        defer testing.allocator.free(wire);
+        var pm = try cp.parseMessage(testing.allocator, wire);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.executeScriptChunk", pm.message.notification.method);
+    }
 }
 
 test "serializeExecuteScriptBackendArg: expression과 args와 page byte cap을 손실 없이 전달" {

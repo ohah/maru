@@ -953,6 +953,7 @@ fn clampU32(v: i64) u32 {
 /// screenshot chunk notification의 method(server→client push). control_browser의 wire 이름과 동일해야 한다(client측 상수).
 const screenshot_chunk_method = cp.browser_screenshot_chunk_method; // 22차 [8]: 단일 출처(control_plane)
 const execute_script_chunk_method = cp.browser_execute_script_chunk_method;
+const snapshot_chunk_method = cp.browser_snapshot_chunk_method; // §9.5.10 통일-1: snapshot 대형 결과 chunk 스트림 method(client측 상수)
 
 /// executeScript chunk 재조립기(5f-5b L2). 전체 결과는 max_bytes를 넘지 않으며,
 /// chunk는 request/result id·encoding·seq·최종 bytes를 모두 검증한다.
@@ -1062,6 +1063,113 @@ pub const ExecuteScriptStreamValidator = struct {
         if (self.result_id == null or final_result_id != self.result_id.? or final_seq != self.next_seq or final_bytes != self.total_bytes) return .failed;
         self.terminal = true;
         return .done;
+    }
+};
+
+/// §9.5.10 통일-1: snapshot 응답 스트림을 bounded 검증·재조립한다. snapshot은 executeScript와 **같은 transfer 기계**를 쓰되
+/// (a) chunk method가 `browser.snapshotChunk`이고 (b) inline은 method-특화 serializer라 `{result:{snapshot:tree}}`(transfer
+/// envelope 없음)로 온다. 그래서 chunk 검증부는 executeScript와 동형(base64-json·result_id/seq/request_id 일관·short-chunk·
+/// max_bytes/max_chunks 상한)이되, 종단 판정만 다르다: `transfer:"chunked"` final이면 raw 트리를 재조립(`.done`), 아니면
+/// (inline `{snapshot}` 또는 에러 응답) 그대로 렌더하도록 `.inline_terminal`. screenshot은 capture_id 기반이라 별도 validator.
+pub const SnapshotStreamValidator = struct {
+    gpa: std.mem.Allocator,
+    request_id: cp.Id,
+    result_id: ?i64 = null,
+    max_bytes: usize,
+    total_bytes: usize = 0,
+    next_seq: i64 = 0,
+    saw_short_chunk: bool = false,
+    terminal: bool = false,
+
+    pub const Step = union(enum) {
+        need_more,
+        chunk: []const u8,
+        inline_terminal, // inline `{snapshot}` 또는 에러 응답 — caller가 원 응답 라인을 renderResponse
+        done, // chunked final — caller가 재조립한 트리를 `{result:{snapshot:tree}}`로 감싸 렌더
+        failed,
+    };
+
+    pub fn init(gpa: std.mem.Allocator, request_id: cp.Id, max_bytes: usize) SnapshotStreamValidator {
+        return .{ .gpa = gpa, .request_id = request_id, .max_bytes = max_bytes };
+    }
+
+    pub fn feed(self: *SnapshotStreamValidator, frame: []const u8, scratch: []u8) Step {
+        if (self.terminal) return .failed;
+        var pm = cp.parseMessage(self.gpa, frame) catch return .failed;
+        defer pm.deinit();
+        return switch (pm.message) {
+            .notification => |note| if (eq(note.method, snapshot_chunk_method))
+                self.feedChunk(note.params, scratch)
+            else
+                .need_more,
+            .response => |response| self.feedResponse(response),
+            else => .failed,
+        };
+    }
+
+    // executeScript와 동형 bounded chunk 검증(base64-json wire 공유). scratch에 decode해 slice를 돌려준다.
+    fn feedChunk(self: *SnapshotStreamValidator, params: ?std.json.Value, scratch: []u8) Step {
+        const obj = switch (params orelse return .failed) {
+            .object => |o| o,
+            else => return .failed,
+        };
+        const result_id = intField(obj.get("result_id")) orelse return .failed;
+        const seq = intField(obj.get("seq")) orelse return .failed;
+        if (result_id < 0 or seq != self.next_seq) return .failed;
+        if (self.result_id) |bound| {
+            if (bound != result_id) return .failed;
+        } else self.result_id = result_id;
+        const request_id = valueAsId(obj.get("request_id") orelse return .failed) orelse return .failed;
+        if (!cp.idEql(request_id, self.request_id)) return .failed;
+        const encoding = switch (obj.get("encoding") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        if (!eq(encoding, "base64-json")) return .failed;
+        const encoded = switch (obj.get("data") orelse return .failed) {
+            .string => |s| s,
+            else => return .failed,
+        };
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return .failed;
+        const max_chunks = std.math.divCeil(usize, self.max_bytes, scratch.len) catch return .failed;
+        if (decoded_len == 0 or self.saw_short_chunk or self.next_seq >= @as(i64, @intCast(max_chunks)) or decoded_len > scratch.len or decoded_len > self.max_bytes -| self.total_bytes) return .failed;
+        std.base64.standard.Decoder.decode(scratch[0..decoded_len], encoded) catch return .failed;
+        self.total_bytes += decoded_len;
+        self.next_seq += 1;
+        self.saw_short_chunk = decoded_len < scratch.len;
+        return .{ .chunk = scratch[0..decoded_len] };
+    }
+
+    fn feedResponse(self: *SnapshotStreamValidator, response: cp.Response) Step {
+        if (!cp.idEql(response.id, self.request_id)) return .failed;
+        // 에러 응답(surface 없음 등)은 그대로 렌더한다 — renderResponse가 error envelope를 접는다.
+        if (response.err != null) {
+            self.terminal = true;
+            return .inline_terminal;
+        }
+        const obj = switch (response.result orelse std.json.Value{ .null = {} }) {
+            .object => |o| o,
+            else => {
+                self.terminal = true;
+                return .inline_terminal;
+            },
+        };
+        // transfer 필드가 있으면 chunked final(method-중립)이어야 한다. 없으면 inline `{snapshot:tree}`.
+        if (obj.get("transfer")) |tv| {
+            const transfer = switch (tv) {
+                .string => |s| s,
+                else => return .failed,
+            };
+            if (!eq(transfer, "chunked")) return .failed;
+            const final_result_id = intField(obj.get("result_id")) orelse return .failed;
+            const final_seq = intField(obj.get("seq_total")) orelse return .failed;
+            const final_bytes = intField(obj.get("bytes")) orelse return .failed;
+            if (self.result_id == null or final_result_id != self.result_id.? or final_seq != self.next_seq or final_bytes != self.total_bytes) return .failed;
+            self.terminal = true;
+            return .done;
+        }
+        self.terminal = true;
+        return .inline_terminal;
     }
 };
 
@@ -1445,6 +1553,50 @@ test "ExecuteScriptStreamValidator: chunked와 inline 결과를 bounded 검증" 
         const short1 = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":1,\"encoding\":\"base64-json\",\"data\":\"e30=\"}}";
         try testing.expect((try short.feed(short0, &scratch)) == .chunk);
         try testing.expect((try short.feed(short1, &scratch)) == .failed);
+    }
+}
+
+test "SnapshotStreamValidator(§9.5.10): chunked 재조립·inline·에러·실패 경로" {
+    const request_id: cp.Id = .{ .number = 1 };
+    var scratch: [512 * 1024]u8 = undefined;
+    // chunked: snapshotChunk(base64-json) → .chunk(raw 트리 바이트), transfer:"chunked" final → .done.
+    {
+        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        const chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
+        switch (v.feed(chunk, &scratch)) {
+            .chunk => |bytes| try testing.expectEqualStrings("{\"a\":1}", bytes), // 7 bytes
+            else => return error.Unexpected,
+        }
+        try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"transfer\":\"chunked\",\"result_id\":7,\"seq_total\":1,\"bytes\":7}}", &scratch) == .done);
+    }
+    // inline `{result:{snapshot:...}}`(transfer envelope 없음) → .inline_terminal(caller가 그대로 렌더).
+    {
+        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[]}}}", &scratch) == .inline_terminal);
+    }
+    // 에러 응답도 그대로 렌더 대상 → .inline_terminal(프로토콜 위반 아님).
+    {
+        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"no surface\"}}", &scratch) == .inline_terminal);
+    }
+    // 실패: 빈 chunk data.
+    {
+        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        const empty = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"\"}}";
+        try testing.expect(v.feed(empty, &scratch) == .failed);
+    }
+    // 실패: final bytes가 누적과 불일치(누락/변조 감지).
+    {
+        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        const chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
+        try testing.expect(v.feed(chunk, &scratch) == .chunk);
+        try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"transfer\":\"chunked\",\"result_id\":7,\"seq_total\":1,\"bytes\":8}}", &scratch) == .failed);
+    }
+    // 실패: seq 불연속(첫 조각이 seq=1).
+    {
+        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        const bad_seq = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":1,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
+        try testing.expect(v.feed(bad_seq, &scratch) == .failed);
     }
 }
 

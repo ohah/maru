@@ -4097,15 +4097,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 BrowserControl.wait(wp.webView, asyncId: asyncId, argJson: arg) { status, message in
                     self.completeBrowserOp(asyncId, status: status, result: message)
                 }
-            case 16: // snapshot(§9.5.4) — read-only accname DOM walk eval. snapshotScript는 JSON 문자열을 반환하므로
-                // **scriptResultString을 거치지 않고**(그건 bool/문자열 값 매핑용 — JSON을 이중 인코딩함) JS String 반환값을
-                // 그대로 결과로 쓴다. Zig serializeSnapshotResult가 이 JSON을 {snapshot} 구조화 embed(malformed→internal_error).
+            case 16: // snapshot(§9.5.4·9.5.10 통일) — read-only accname DOM walk eval. snapshotScript는 JSON 문자열(tree)을 반환한다.
+                // 결과를 **bounded-result transfer**(executeScript와 같은 기계)로 보낸다: registry에 raw 트리 JSON을 등록하면
+                // complete_browser_result가 크기별로 inline(≤512 KiB, Zig serializeSnapshotResult가 {snapshot} embed)/chunk(초과,
+                // browser.snapshotChunk 스트림) 자동 선택 → 대형 트리도 프레임 상한 안 넘김(옛 complete_browser_op inline-전용 결함 해소).
+                // scriptResultString 우회 유지(JSON 이중 인코딩 방지). 실패는 complete_browser_op(status 1)로 예약 반환(executeScript 동형).
                 registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .webContentRealm)
                 BrowserControl.executeScript(wp.webView, BrowserControl.snapshotScript(arg)) { [weak self] result in
                     guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
                     switch result {
                     case .success(let value):
-                        self.completeBrowserOp(asyncId, status: 0, result: (value as? String) ?? "{\"tree\":[]}")
+                        let treeJson = (value as? String) ?? "{\"tree\":[]}"
+                        self.completeBrowserScriptResult(asyncId, value: .json(Data(treeJson.utf8)))
                     case .failure(let error):
                         self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
                     }

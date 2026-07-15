@@ -954,6 +954,7 @@ fn clampU32(v: i64) u32 {
 const screenshot_chunk_method = cp.browser_screenshot_chunk_method; // 22차 [8]: 단일 출처(control_plane)
 const execute_script_chunk_method = cp.browser_execute_script_chunk_method;
 const snapshot_chunk_method = cp.browser_snapshot_chunk_method; // §9.5.10 통일-1: snapshot 대형 결과 chunk 스트림 method(client측 상수)
+const console_chunk_method = cp.browser_console_chunk_method; // §9.5.10 통일-2: console 대형 결과 chunk 스트림 method(client측 상수)
 
 /// executeScript chunk 재조립기(5f-5b L2). 전체 결과는 max_bytes를 넘지 않으며,
 /// chunk는 request/result id·encoding·seq·최종 bytes를 모두 검증한다.
@@ -1066,14 +1067,17 @@ pub const ExecuteScriptStreamValidator = struct {
     }
 };
 
-/// §9.5.10 통일-1: snapshot 응답 스트림을 bounded 검증·재조립한다. snapshot은 executeScript와 **같은 transfer 기계**를 쓰되
-/// (a) chunk method가 `browser.snapshotChunk`이고 (b) inline은 method-특화 serializer라 `{result:{snapshot:tree}}`(transfer
-/// envelope 없음)로 온다. 그래서 chunk 검증부는 executeScript와 동형(base64-json·result_id/seq/request_id 일관·short-chunk·
-/// max_bytes/max_chunks 상한)이되, 종단 판정만 다르다: `transfer:"chunked"` final이면 raw 트리를 재조립(`.done`), 아니면
-/// (inline `{snapshot}` 또는 에러 응답) 그대로 렌더하도록 `.inline_terminal`. screenshot은 capture_id 기반이라 별도 validator.
-pub const SnapshotStreamValidator = struct {
+/// §9.5.10 통일: **inline이 method-특화 serializer로 감싸지는**(transfer envelope 없이 `{result:{<field>:value}}`) browser
+/// 메서드의 응답 스트림을 bounded 검증·재조립한다. snapshot(`{snapshot:tree}`)·console(`{console:[…]}`)이 공유한다 — 둘은
+/// executeScript와 **같은 transfer 기계**를 쓰되 chunk method(`browser.snapshotChunk`/`browser.consoleChunk`)만 다르고 나머지는
+/// 동형이라 하나의 validator로 통일했다(chunk method는 `init`으로 주입). chunk 검증부는 executeScript와 동형(base64-json·
+/// result_id/seq/request_id 일관·short-chunk·max_bytes/max_chunks 상한)이되, 종단 판정만 다르다: `transfer:"chunked"` final이면
+/// raw 값을 재조립(`.done`), 아니면(inline `{<field>}` 또는 에러 응답) 그대로 렌더하도록 `.inline_terminal`. executeScript는
+/// inline이 `{transfer:"inline",result:value}`라 shape가 달라 별도 `ExecuteScriptStreamValidator`, screenshot은 capture_id 기반.
+pub const WrappedResultStreamValidator = struct {
     gpa: std.mem.Allocator,
     request_id: cp.Id,
+    chunk_method: []const u8, // browser.snapshotChunk / browser.consoleChunk (SSOT 상수, init 주입)
     result_id: ?i64 = null,
     max_bytes: usize,
     total_bytes: usize = 0,
@@ -1084,21 +1088,21 @@ pub const SnapshotStreamValidator = struct {
     pub const Step = union(enum) {
         need_more,
         chunk: []const u8,
-        inline_terminal, // inline `{snapshot}` 또는 에러 응답 — caller가 원 응답 라인을 renderResponse
-        done, // chunked final — caller가 재조립한 트리를 `{result:{snapshot:tree}}`로 감싸 렌더
+        inline_terminal, // inline `{<field>}` 또는 에러 응답 — caller가 원 응답 라인을 renderResponse
+        done, // chunked final — caller가 재조립한 raw 값을 `{result:{<field>:value}}`로 감싸 렌더
         failed,
     };
 
-    pub fn init(gpa: std.mem.Allocator, request_id: cp.Id, max_bytes: usize) SnapshotStreamValidator {
-        return .{ .gpa = gpa, .request_id = request_id, .max_bytes = max_bytes };
+    pub fn init(gpa: std.mem.Allocator, request_id: cp.Id, chunk_method: []const u8, max_bytes: usize) WrappedResultStreamValidator {
+        return .{ .gpa = gpa, .request_id = request_id, .chunk_method = chunk_method, .max_bytes = max_bytes };
     }
 
-    pub fn feed(self: *SnapshotStreamValidator, frame: []const u8, scratch: []u8) Step {
+    pub fn feed(self: *WrappedResultStreamValidator, frame: []const u8, scratch: []u8) Step {
         if (self.terminal) return .failed;
         var pm = cp.parseMessage(self.gpa, frame) catch return .failed;
         defer pm.deinit();
         return switch (pm.message) {
-            .notification => |note| if (eq(note.method, snapshot_chunk_method))
+            .notification => |note| if (eq(note.method, self.chunk_method))
                 self.feedChunk(note.params, scratch)
             else
                 .need_more,
@@ -1108,7 +1112,7 @@ pub const SnapshotStreamValidator = struct {
     }
 
     // executeScript와 동형 bounded chunk 검증(base64-json wire 공유). scratch에 decode해 slice를 돌려준다.
-    fn feedChunk(self: *SnapshotStreamValidator, params: ?std.json.Value, scratch: []u8) Step {
+    fn feedChunk(self: *WrappedResultStreamValidator, params: ?std.json.Value, scratch: []u8) Step {
         const obj = switch (params orelse return .failed) {
             .object => |o| o,
             else => return .failed,
@@ -1140,7 +1144,7 @@ pub const SnapshotStreamValidator = struct {
         return .{ .chunk = scratch[0..decoded_len] };
     }
 
-    fn feedResponse(self: *SnapshotStreamValidator, response: cp.Response) Step {
+    fn feedResponse(self: *WrappedResultStreamValidator, response: cp.Response) Step {
         if (!cp.idEql(response.id, self.request_id)) return .failed;
         // 에러 응답(surface 없음 등)은 그대로 렌더한다 — renderResponse가 error envelope를 접는다.
         if (response.err != null) {
@@ -1154,7 +1158,7 @@ pub const SnapshotStreamValidator = struct {
                 return .inline_terminal;
             },
         };
-        // transfer 필드가 있으면 chunked final(method-중립)이어야 한다. 없으면 inline `{snapshot:tree}`.
+        // transfer 필드가 있으면 chunked final(method-중립)이어야 한다. 없으면 inline `{<field>:value}`.
         if (obj.get("transfer")) |tv| {
             const transfer = switch (tv) {
                 .string => |s| s,
@@ -1556,12 +1560,12 @@ test "ExecuteScriptStreamValidator: chunked와 inline 결과를 bounded 검증" 
     }
 }
 
-test "SnapshotStreamValidator(§9.5.10): chunked 재조립·inline·에러·실패 경로" {
+test "WrappedResultStreamValidator(§9.5.10): snapshot/console chunked 재조립·inline·에러·실패 경로" {
     const request_id: cp.Id = .{ .number = 1 };
     var scratch: [512 * 1024]u8 = undefined;
     // chunked: snapshotChunk(base64-json) → .chunk(raw 트리 바이트), transfer:"chunked" final → .done.
     {
-        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, snapshot_chunk_method, 16 * 1024 * 1024);
         const chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
         switch (v.feed(chunk, &scratch)) {
             .chunk => |bytes| try testing.expectEqualStrings("{\"a\":1}", bytes), // 7 bytes
@@ -1571,32 +1575,52 @@ test "SnapshotStreamValidator(§9.5.10): chunked 재조립·inline·에러·실�
     }
     // inline `{result:{snapshot:...}}`(transfer envelope 없음) → .inline_terminal(caller가 그대로 렌더).
     {
-        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, snapshot_chunk_method, 16 * 1024 * 1024);
         try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[]}}}", &scratch) == .inline_terminal);
     }
     // 에러 응답도 그대로 렌더 대상 → .inline_terminal(프로토콜 위반 아님).
     {
-        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, snapshot_chunk_method, 16 * 1024 * 1024);
         try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"no surface\"}}", &scratch) == .inline_terminal);
     }
     // 실패: 빈 chunk data.
     {
-        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, snapshot_chunk_method, 16 * 1024 * 1024);
         const empty = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"\"}}";
         try testing.expect(v.feed(empty, &scratch) == .failed);
     }
     // 실패: final bytes가 누적과 불일치(누락/변조 감지).
     {
-        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, snapshot_chunk_method, 16 * 1024 * 1024);
         const chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
         try testing.expect(v.feed(chunk, &scratch) == .chunk);
         try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"transfer\":\"chunked\",\"result_id\":7,\"seq_total\":1,\"bytes\":8}}", &scratch) == .failed);
     }
     // 실패: seq 불연속(첫 조각이 seq=1).
     {
-        var v = SnapshotStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, snapshot_chunk_method, 16 * 1024 * 1024);
         const bad_seq = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.snapshotChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":1,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
         try testing.expect(v.feed(bad_seq, &scratch) == .failed);
+    }
+    // 통일-2: 같은 validator를 console_chunk_method로 — consoleChunk 재조립 + inline `{console:[…]}` → .inline_terminal.
+    {
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, console_chunk_method, 16 * 1024 * 1024);
+        const chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.consoleChunk\",\"params\":{\"request_id\":1,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
+        switch (v.feed(chunk, &scratch)) {
+            .chunk => |bytes| try testing.expectEqualStrings("{\"a\":1}", bytes),
+            else => return error.Unexpected,
+        }
+        try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"transfer\":\"chunked\",\"result_id\":9,\"seq_total\":1,\"bytes\":7}}", &scratch) == .done);
+    }
+    {
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, console_chunk_method, 16 * 1024 * 1024);
+        try testing.expect(v.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[]}}", &scratch) == .inline_terminal);
+    }
+    // chunk_method 게이팅: snapshot 검증기는 consoleChunk를 자기 chunk로 안 봄 → .need_more(무시).
+    {
+        var v = WrappedResultStreamValidator.init(testing.allocator, request_id, snapshot_chunk_method, 16 * 1024 * 1024);
+        const console_chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.consoleChunk\",\"params\":{\"request_id\":1,\"result_id\":9,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"eyJhIjoxfQ==\"}}";
+        try testing.expect(v.feed(console_chunk, &scratch) == .need_more);
     }
 }
 

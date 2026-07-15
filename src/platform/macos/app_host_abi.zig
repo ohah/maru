@@ -1865,6 +1865,7 @@ fn browserMethodReservedBytes(method: control_browser.BrowserMethod, declared: u
         .execute_script => declared,
         .screenshot => control_browser.screenshot_max_result_bytes,
         .snapshot => control_browser.snapshot_max_result_bytes, // §9.5.10 통일-1: transfer 경로 예약(inline/chunk 자동)
+        .console => control_browser.console_max_result_bytes, // §9.5.10 통일-2: 동일 transfer 예약(512 KiB 절단 제거)
         else => 0,
     };
 }
@@ -2013,6 +2014,7 @@ const ActiveBrowserTransfer = struct {
         execute_script,
         screenshot: struct { capture_id: u64 },
         snapshot, // §9.5.10 통일-1: raw 값(tree JSON) chunk-stream, pump가 browser.snapshotChunk로 직렬화
+        console, // §9.5.10 통일-2: raw 값(`[{level,text}]` 배열) chunk-stream, pump가 browser.consoleChunk로 직렬화
     } = .execute_script,
 };
 
@@ -3024,8 +3026,12 @@ pub export fn maru_macos_control_complete_browser_result(
             .release_result = release_result,
             .progress = progress,
             .terminal = terminal_frame,
-            // §9.5.10: kind가 pump의 chunk 메서드를 정한다(executeScript↔snapshot). screenshot은 별도 complete 경로라 여기 안 옴.
-            .kind = if (execution.method == .snapshot) .snapshot else .execute_script,
+            // §9.5.10: kind가 pump의 chunk 메서드를 정한다(executeScript↔snapshot↔console). screenshot은 별도 complete 경로라 여기 안 옴.
+            .kind = switch (execution.method) {
+                .snapshot => .snapshot,
+                .console => .console,
+                else => .execute_script,
+            },
         }) catch {
             server.cross_gpa.free(terminal_frame);
             const resp = control_browser.serializeResourceBusy(server.cross_gpa, pending.request_bytes, "browser-transfer-slots") catch null;
@@ -3251,6 +3257,7 @@ pub export fn maru_macos_control_pump_browser_result() u32 {
             .screenshot => control_browser.screenshot_chunk_bytes,
             .execute_script => control_browser.execute_script_chunk_bytes,
             .snapshot => control_browser.execute_script_chunk_bytes, // §9.5.10: seq_total도 이 상수로 계산(complete_browser_result) — 일치 필수
+            .console => control_browser.execute_script_chunk_bytes, // §9.5.10 통일-2: 동일
         };
         switch (entry.progress.plan(now_ns, chunk_bytes, .{
             .should_pause = outbound.shouldPause(),
@@ -3293,6 +3300,7 @@ pub export fn maru_macos_control_pump_browser_result() u32 {
                     .execute_script => control_browser.serializeExecuteScriptChunkForRequest(server.cross_gpa, pending.request_bytes, entry.result_id, slice.seq, browser_transfer_scratch.items),
                     .screenshot => |shot| control_browser.serializeScreenshotChunk(server.cross_gpa, shot.capture_id, slice.seq, browser_transfer_scratch.items),
                     .snapshot => control_browser.serializeResultChunkForRequest(server.cross_gpa, control_plane.browser_snapshot_chunk_method, pending.request_bytes, entry.result_id, slice.seq, browser_transfer_scratch.items), // §9.5.10 통일-1
+                    .console => control_browser.serializeResultChunkForRequest(server.cross_gpa, control_plane.browser_console_chunk_method, pending.request_bytes, entry.result_id, slice.seq, browser_transfer_scratch.items), // §9.5.10 통일-2
                 } catch {
                     cancelBrowserTransfer(server, index, .failed);
                     return 1;

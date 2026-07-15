@@ -4203,16 +4203,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // 배경 큐에서 소켓 왕복 — 메인 tick은 계속 돌며 marshal/complete한다. 결과는 lock으로 저장.
         DispatchQueue.global().async { [weak self] in
+            // 각 스모크 결과를 **끝나는 즉시 저장**한다(옛 블록-끝 일괄 저장 폐기) — 뒤 스모크가 느리거나 smoke 시간이
+            // 다 돼 앱이 종료돼도 이미 끝난 결과는 summary에 남는다(부분 완료 관측). console은 무거운 bounded(16 MiB)보다
+            // **먼저** 돌려(navigate 직후) 부하 상황에서도 시간 예산에 굶지 않게 한다(§9.5.9).
             let r = runBrowserControlSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex, navigateURL: t.url)
-            let wait = runBrowserWaitSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
-            let bounded = runBrowserBoundedResultSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
-            // 5f-0b-3c: 위 navigate 뒤(패널이 data: URL 커밋됨), 지속 연결로 subscribe→새 URL navigate→browser.navigated 수신 검증.
+            self?.storeBrowserConsoleResult(runBrowserConsoleSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex))
+            self?.storeBrowserWaitResult(runBrowserWaitSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex))
+            self?.storeBrowserBoundedResult(runBrowserBoundedResultSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex))
+            // 5f-0b-3c: navigate 뒤(패널이 data: URL 커밋됨), 지속 연결로 subscribe→새 URL navigate→browser.navigated 수신 검증.
             let evt = runBrowserEventSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
-            let console = runBrowserConsoleSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
             self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl, events: evt)
-            self?.storeBrowserWaitResult(wait)
-            self?.storeBrowserBoundedResult(bounded)
-            self?.storeBrowserConsoleResult(console)
         }
     }
 

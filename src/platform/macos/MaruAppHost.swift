@@ -1188,7 +1188,7 @@ enum BrowserControl {
           try {
             if (typeof a === 'string') parts.push(a);
             else if (a instanceof Error) parts.push(a.stack || (a.name + ': ' + a.message));
-            else parts.push(JSON.stringify(a));
+            else { var s = JSON.stringify(a); parts.push(s === undefined ? String(a) : s); } // undefined/function/symbol은 stringify가 undefined 반환 → String 폴백(symbol은 throw→catch)
           } catch (e) { try { parts.push(String(a)); } catch (_) { parts.push('[unserializable]'); } }
         }
         return parts.join(' ');
@@ -2030,10 +2030,24 @@ final class MaruWebPanelView: NSView {
         }
     }
 
-    // 서버 버퍼를 `[{level,text},...]` JSON으로(pull 응답 result — Zig serializeConsoleResult가 {console} embed). 안전 인코딩.
+    // pull 응답 result 크기 상한(§9.5.9). 콘솔 응답은 **단일 프레임**(≤ 1 MiB = control_plane `default_max_frame`)으로 나가는데
+    // 서버 버퍼는 최대 500×8 KiB로 이를 넘을 수 있어, 넘으면 CLI Framer가 `payload_too_large`로 프레임을 거부해 연결이 깨진다
+    // (executeScript inline 경로의 프레임 가드와 같은 부류). 그래서 총 직렬화 크기를 **512 KiB**(executeScript inline 임계와 동일)
+    // 아래로 bound하고, 초과분은 **최신 우선**으로 유지(오래된 것부터 제외 — 에이전트가 원하는 건 최신 로그). caller는 §9.5.9 한계로 문서화.
+    static let consoleResultBudget = 512 * 1024
     func consoleBufferJSON() -> String {
-        let arr: [[String: String]] = consoleBuffer.map { ["level": $0.level, "text": $0.text] }
-        if let data = try? JSONSerialization.data(withJSONObject: arr), let s = String(data: data, encoding: .utf8) {
+        var selected: [[String: String]] = [] // 최신→오래된 순으로 채운 뒤 뒤집어 시간순 복원
+        var total = 2 // "[]"
+        for entry in consoleBuffer.reversed() {
+            let obj = ["level": entry.level, "text": entry.text]
+            guard let d = try? JSONSerialization.data(withJSONObject: obj) else { continue }
+            let addend = d.count + 1 // 항목 + 구분자(",") — 상한 판정은 보수적으로 과대 계산
+            if !selected.isEmpty, total + addend > Self.consoleResultBudget { break } // 최소 1개(최신)는 항상 포함
+            total += addend
+            selected.append(obj)
+        }
+        let ordered = Array(selected.reversed())
+        if let data = try? JSONSerialization.data(withJSONObject: ordered), let s = String(data: data, encoding: .utf8) {
             return s
         }
         return "[]"
@@ -2120,6 +2134,13 @@ final class MaruWebPanelView: NSView {
         self.bridgeWorld = nil // browser=브리지 없음(신뢰 전용)
         configuration.userContentController.addUserScript(WKUserScript(
             source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page))
+        // §9.5.9 console: 팝업(untrusted browser 패널)도 console override를 받아야 `browser.console` pull이 동작한다
+        // (adopt된 config는 부모의 user script를 안 물려받아 위 bootstrap처럼 재주입 필요 — 안 넣으면 팝업 콘솔이 항상 빔).
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: BrowserControl.consoleCaptureScript,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true,
             in: .page))

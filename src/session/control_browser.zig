@@ -105,6 +105,10 @@ pub const BrowserMethod = enum {
     /// base `browser` scope(executeScript/act와 같은 eval 도달). op.arg=`{interactive_only?,max_depth?,selector?}` JSON.
     /// **op_kind=16 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 끝에 추가).
     snapshot,
+    /// `browser.console {id, clear?}`(§9.5.9) → `{console:[{level,text}]}`. page-world 주입 override가 쌓은 콘솔을 Swift
+    /// 서버 버퍼(네비 넘어 보존)에서 회수. `clear`=반환 후 버퍼 비움. base `browser` scope(콘솔 텍스트=executeScript 결과
+    /// 등급). op.arg=`{clear?}` JSON. **op_kind=17 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 끝에 추가).
+    console,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -128,6 +132,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "scroll")) return .scroll;
     if (eq(rest, "wait")) return .wait;
     if (eq(rest, "snapshot")) return .snapshot;
+    if (eq(rest, "console")) return .console;
     return null;
 }
 
@@ -345,6 +350,10 @@ pub const ScreenshotOptParams = struct { rect: ?ScreenshotRect = null, scale: ?f
 /// 전부 부재 가능(=전체 트리·전 요소·루트=body). id는 dispatch가 먼저 읽음. 형식 오류는 invalid_params(surface oracle 아님).
 pub const SnapshotParams = struct { interactive_only: bool = false, max_depth: ?u32 = null, selector: ?[]const u8 = null };
 
+/// `browser.console` 선택 params(§9.5.9). clear=반환 후 서버 버퍼 비움(read-and-clear 소비). 부재=false(비파괴 읽기).
+/// id는 dispatch가 먼저 읽음(readIdParam). 형식 오류는 invalid_params.
+pub const ConsoleParams = struct { clear: bool = false };
+
 fn paramsObject(params: ?std.json.Value) ParamError!std.json.ObjectMap {
     return switch (params orelse return error.InvalidParams) {
         .object => |o| o,
@@ -554,6 +563,12 @@ pub fn parseSnapshotParams(params: ?std.json.Value) ParamError!SnapshotParams {
     };
 }
 
+/// `browser.console` params 파싱(§9.5.9). clear만 선택(부재=false, 비파괴 읽기).
+pub fn parseConsoleParams(params: ?std.json.Value) ParamError!ConsoleParams {
+    const obj = try paramsObject(params);
+    return .{ .clear = try optBoolFromObj(obj, "clear", false) };
+}
+
 /// act op.arg — Swift가 eval로 쓸 compact JSON. locator에 따라 `{selector}` 또는 `{ref}`(type은 +`text`). ref는
 /// 불투명 토큰 그대로 실어 넘기고 `[data-maru-ref]` 해소는 Swift actScript가 한다(§9.5.4 — 엔진별 바인딩이 L4 소관).
 pub fn serializeActArg(gpa: std.mem.Allocator, locator: Locator, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
@@ -655,6 +670,22 @@ fn writeSnapshotArg(s: *std.json.Stringify, p: SnapshotParams) !void {
         try s.objectField("selector");
         try s.write(sel);
     }
+    try s.endObject();
+}
+
+/// console op.arg — Swift가 pull 시 소비할 `{clear}` compact JSON(§9.5.9). clear=true면 반환 후 서버 버퍼 비움. caller free.
+pub fn serializeConsoleArg(gpa: std.mem.Allocator, p: ConsoleParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (writeConsoleArg(&s, p)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeConsoleArg(s: *std.json.Stringify, p: ConsoleParams) !void {
+    try s.beginObject();
+    try s.objectField("clear");
+    try s.write(p.clear);
     try s.endObject();
 }
 
@@ -993,6 +1024,29 @@ fn writeSnapshotResult(s: *std.json.Stringify, id: cp.Id, snap: std.json.Value) 
     try beginResult(s, id);
     try s.objectField("snapshot");
     try s.write(snap);
+    try endResult(s);
+}
+
+/// Swift `BrowserControl.console`가 직렬화한 **JSON**(`[{level,text},...]` 배열)을 파싱해 `{result:{console:<value>}}`로
+/// 구조화 embed(§9.5.9 — snapshot과 동형, 에이전트 이중 파싱 불요). 파싱 실패(malformed)=`InvalidConsoleJson`(L4가
+/// internal_error로 접음 — Swift 직렬화 버그 방어). caller free.
+pub fn serializeConsoleResult(gpa: std.mem.Allocator, id: cp.Id, console_json: []const u8) (std.mem.Allocator.Error || error{InvalidConsoleJson})![]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, console_json, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidConsoleJson,
+    };
+    defer parsed.deinit();
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (writeConsoleResult(&s, id, parsed.value)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeConsoleResult(s: *std.json.Stringify, id: cp.Id, console: std.json.Value) !void {
+    try beginResult(s, id);
+    try s.objectField("console");
+    try s.write(console);
     try endResult(s);
 }
 
@@ -1359,6 +1413,11 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidSnapshotJson => return cp.serializeError(gpa, req.id, .internal_error, "invalid snapshot payload", null),
         },
+        // console(§9.5.9) → {console:<[{level,text}] JSON>}. Swift 서버 버퍼 JSON을 구조화 embed(malformed=internal_error 방어).
+        .console => serializeConsoleResult(gpa, req.id, result) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidConsoleJson => return cp.serializeError(gpa, req.id, .internal_error, "invalid console payload", null),
+        },
     };
 }
 
@@ -1611,6 +1670,8 @@ pub fn browserOpFromRequest(
         .wait => try serializeWaitArg(gpa, parseWaitParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // snapshot(§9.5.4): interactive_only/max_depth/selector를 arg에 실어 Swift accname JS가 소비. base browser scope.
         .snapshot => try serializeSnapshotArg(gpa, parseSnapshotParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        // console(§9.5.9): clear 플래그를 arg에 실어 Swift가 pull(서버 버퍼 반환 + clear면 비움). base browser scope.
+        .console => try serializeConsoleArg(gpa, parseConsoleParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
@@ -3192,6 +3253,65 @@ test "serializeBrowserResponse(snapshot): 트리 JSON을 {snapshot} 구조화 em
     // malformed(비-JSON) → internal_error(Swift 버그 방어).
     {
         const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.snapshot\",\"params\":{\"id\":11}}", true, "not json");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
+    }
+}
+
+test "params/arg(§9.5.9): console clear 파싱·직렬화" {
+    // 기본(id만) → clear=false. arg={"clear":false}.
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":11}}");
+        defer pm.deinit();
+        const p = try parseConsoleParams(pm.message.request.params);
+        try testing.expect(!p.clear);
+        const a = try serializeConsoleArg(testing.allocator, p);
+        defer testing.allocator.free(a);
+        try testing.expectEqualStrings("{\"clear\":false}", a);
+    }
+    // clear=true → arg={"clear":true}.
+    {
+        var pm = try cp.parseMessage(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":11,\"clear\":true}}");
+        defer pm.deinit();
+        const p = try parseConsoleParams(pm.message.request.params);
+        try testing.expect(p.clear);
+        const a = try serializeConsoleArg(testing.allocator, p);
+        defer testing.allocator.free(a);
+        try testing.expectEqualStrings("{\"clear\":true}", a);
+    }
+    // 비-bool clear → invalid_params.
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"id\":1,\"clear\":\"x\"}", .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseConsoleParams(parsed.value));
+    }
+}
+
+test "dispatchBrowser(console): base browser cap → op{console, arg=clear JSON}" {
+    const op = try dispatchOp("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":11,\"clear\":true}}", browserCap(11));
+    defer testing.allocator.free(op.arg);
+    try testing.expectEqual(BrowserMethod.console, op.method);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, op.arg, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("clear").?.bool);
+}
+
+test "serializeBrowserResponse(console): 배열 JSON을 {console} 구조화 embed·malformed→internal_error" {
+    // Swift가 준 [{level,text},...] → {result:{console:[...]}}.
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":11}}", true, "[{\"level\":\"error\",\"text\":\"boom\"}]");
+        defer testing.allocator.free(w);
+        var pm = try cp.parseMessage(testing.allocator, w);
+        defer pm.deinit();
+        const arr = pm.message.response.result.?.object.get("console").?.array;
+        try testing.expectEqualStrings("error", arr.items[0].object.get("level").?.string);
+        try testing.expectEqualStrings("boom", arr.items[0].object.get("text").?.string);
+    }
+    // malformed(비-JSON) → internal_error(Swift 버그 방어).
+    {
+        const w = try serializeBrowserResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":11}}", true, "not json");
         defer testing.allocator.free(w);
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();

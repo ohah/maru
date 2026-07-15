@@ -1846,6 +1846,7 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .type_text,
         .scroll,
         .snapshot,
+        .console,
         => true,
         .subscribe, .wait => false,
     };
@@ -1878,6 +1879,7 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .scroll => "browser.scroll",
         .wait => "browser.wait",
         .snapshot => "browser.snapshot",
+        .console => "browser.console",
     };
 }
 
@@ -2722,7 +2724,7 @@ fn browserExecutionAuthorized(execution: *const ActiveBrowserExecution, now: u64
 
 /// 5e-2b: Swift가 매 tick 호출 — (1) `reapExpiredInFlight`(hung browser op timeout), (2) browser op 큐에서 하나 pop해
 /// out으로 넘긴다. 반환 1=op 있음(Swift가 surface_id로 webView 찾아 `BrowserControl`[op_kind] 실행 → 완료 시
-/// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c)·5=screenshot(5f-1)·6=setCookie·7=deleteCookie·8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll·15=wait·16=snapshot(§9.5.4). `arg_ptr`는 안정 슬롯
+/// `complete_browser_op`)·0=없음. `op_kind`: 0=navigate·1=getUrl·2=executeScript·4=getCookies(5f-4c)·5=screenshot(5f-1)·6=setCookie·7=deleteCookie·8=getLocalStorage·9=setLocalStorage·10=removeLocalStorage·11=clearStorage·12=click·13=type·14=scroll·15=wait·16=snapshot(§9.5.4)·17=console(§9.5.9). `arg_ptr`는 안정 슬롯
 /// (`browser_op_take_buf`)을 가리켜 **이 호출 중 동기 읽기**만 유효(다음 take가 덮어씀 — Swift가 즉시 복사). 서버
 /// 미시작이면 0. **메인 스레드 전용**(reap·pop·in-flight 레지스트리는 메인).
 pub export fn maru_macos_control_take_browser_op(
@@ -3602,6 +3604,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u8, 14), @as(u8, @intFromEnum(control_browser.BrowserMethod.scroll)));
     try std.testing.expectEqual(@as(u8, 15), @as(u8, @intFromEnum(control_browser.BrowserMethod.wait)));
     try std.testing.expectEqual(@as(u8, 16), @as(u8, @intFromEnum(control_browser.BrowserMethod.snapshot))); // §9.5.4
+    try std.testing.expectEqual(@as(u8, 17), @as(u8, @intFromEnum(control_browser.BrowserMethod.console))); // §9.5.9
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);

@@ -12,8 +12,9 @@
 //! **coalesce(§9.5.2)**: 상태-스냅샷 이벤트(navigated·loadState)는 최신만 의미 있어 `isCoalescible`로 분류한다. 실
 //! coalesce 버퍼링은 outbound 큐(L4)가 이 분류로 수행 — 이 코어는 **정책만** 소유한다.
 //!
-//! **범위 밖(구현 금지)**: console/network/pageError 이벤트(비신뢰 콘텐츠 주입 world 필요 = §9.4 D3 미룸), outbound
+//! **범위 밖(구현 금지)**: network/pageError 이벤트(비신뢰 콘텐츠 주입 world 필요 = §9.4 D3 미룸), outbound
 //! 큐·연결 스레드·실 WKWebView 소스(L4), backpressure drop 실행(큐). 여긴 레지스트리·매칭·직렬화·분류만.
+//! (**console은 이벤트가 아니라 pull 메서드** `browser.console`로 구현 — 서버 버퍼+proactive drain, §9.5.9. 여기 EventKind 아님.)
 //!
 //! **L2 순수**: std + control_plane(1a)만 import(app/pty/platform 0 — tests/boundary/imports.zig 강제). OS 타입 0.
 
@@ -21,7 +22,8 @@ const std = @import("std");
 const cp = @import("control_plane.zig");
 
 // ── 이벤트 종류(§9.4 관측 축, 5f-0/5f-3 주입불요분) ──────────────────────────────────────────────────────────
-/// server→client push 이벤트 종류. console/network/pageError는 비신뢰 콘텐츠 주입 world가 필요해 여기 없다(§9.4 D3 미룸).
+/// server→client push 이벤트 종류. network/pageError는 비신뢰 콘텐츠 주입 world가 필요해 여기 없다(§9.4 D3 미룸).
+/// console은 이벤트가 아니라 pull 메서드(`browser.console`, §9.5.9)라 여기 없다.
 pub const EventKind = enum {
     /// 상태: 새 문서 URL(KVO `\.url`). coalescible.
     navigated,

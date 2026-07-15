@@ -1170,6 +1170,59 @@ enum BrowserControl {
         return body + "(" + argJson + ")"
     }
 
+    // console(§9.5.9): document-start 주입 override. 페이지 월드에서 console.log/info/warn/debug/error를 wrap하고
+    // window.onerror/unhandledrejection을 리슨해 각 항목을 bounded 페이지 ring `window.__maruConsole`(cap 200, oldest drop)에
+    // {level,text}로 push한 뒤 **원 console을 그대로 호출**(페이지 로깅 무변). **메시지 핸들러 없음**(수신 능력 0인 in-page
+    // override뿐 — §8.1(c) 유지, 페이지에 브리지 능력 안 줌). 콘솔 텍스트는 executeScript 결과와 같은 비신뢰 등급. host는
+    // consoleDrainScript로 read-and-clear해 Swift 서버 버퍼로 옮긴다(proactive drain). 한 번만 설치(navigation마다 재실행돼도 멱등).
+    static let consoleCaptureScript = """
+    (function(){
+      if (window.__maruConsoleInstalled) return;
+      window.__maruConsoleInstalled = true;
+      window.__maruConsole = [];
+      var CAP = 200;
+      function fmt(args){
+        var parts = [];
+        for (var i=0;i<args.length;i++){
+          var a = args[i];
+          try {
+            if (typeof a === 'string') parts.push(a);
+            else if (a instanceof Error) parts.push(a.stack || (a.name + ': ' + a.message));
+            else parts.push(JSON.stringify(a));
+          } catch (e) { try { parts.push(String(a)); } catch (_) { parts.push('[unserializable]'); } }
+        }
+        return parts.join(' ');
+      }
+      function push(level, text){
+        var b = window.__maruConsole;
+        b.push({ level: level, text: String(text).slice(0, 8192) });
+        if (b.length > CAP) b.splice(0, b.length - CAP);
+      }
+      var levels = ['log','info','warn','debug','error'];
+      for (var i=0;i<levels.length;i++){
+        (function(lv){
+          var orig = console[lv];
+          console[lv] = function(){
+            try { push(lv, fmt(arguments)); } catch (e) {}
+            if (orig) return orig.apply(console, arguments);
+          };
+        })(levels[i]);
+      }
+      window.addEventListener('error', function(ev){
+        try { push('error', ev && ev.message ? (ev.message + (ev.filename ? (' (' + ev.filename + ':' + ev.lineno + ')') : '')) : 'error'); } catch (e) {}
+      });
+      window.addEventListener('unhandledrejection', function(ev){
+        try { var r = ev ? ev.reason : null; push('error', 'Unhandled rejection: ' + (r && r.stack ? r.stack : String(r))); } catch (e) {}
+      });
+    })();
+    """
+
+    // console(§9.5.9): 페이지 ring을 read-and-clear해 `[{level,text},...]` 배열을 반환(evaluateJavaScript가 `[[String:Any]]`로
+    // 준다). 아직 override 설치 전이면 빈 배열. Swift가 appendDrainedConsole로 서버 버퍼에 옮긴다.
+    static let consoleDrainScript = """
+    (function(){ var b = window.__maruConsole; if (!b || !b.length) return []; return b.splice(0, b.length); })()
+    """
+
     // 문자열을 안전한 JS 문자열 리터럴로(JSON string은 valid JS 리터럴 — 따옴표·제어문자·유니코드 escape). 수동 조립 금지.
     static func jsStringLiteral(_ s: String) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: [s]),
@@ -1448,6 +1501,48 @@ private func runBrowserWaitSmokeClient(socketPath: String, sid: UInt64, nonceHex
     case .err(let why): invalidSelector = why
     }
     return (selector, load, timeout, invalidSelector, String(elapsedMs))
+}
+
+// §9.5.9 console: 실제 WKWebView page world에서 console.log/error를 발화(executeScript)한 뒤 `browser.console` pull이
+// 서버 버퍼로부터 [log]/[error] 항목을 회수하는지, clear=true 뒤 재-pull이 비는지 소켓 왕복으로 검증한다(GUI 입력 없이).
+// 캡처=페이지 월드 override→page ring→pull 최종 drain→서버 버퍼→응답 파이프라인 전체를 자동 증명.
+private func runBrowserConsoleSmokeClient(socketPath: String, sid: UInt64, nonceHex: String) -> (capture: String, clear: String) {
+    let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid),\"cap_nonce\":\"\(nonceHex)\"}}"
+    // 현재 load idle 보장(fixture 문서 커밋 완료 — override가 document-start에 설치된 상태).
+    let loadReq = "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"browser.wait\",\"params\":{\"id\":\(sid),\"condition\":\"load\",\"timeout_ms\":1000}}"
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: loadReq) {
+    case .ok(let line): guard browserCtlResult(line)?["ok"] as? Bool == true else { let w = "unexpected-load:\(line.prefix(80))"; return (w, w) }
+    case .err(let why): return (why, why)
+    }
+    // 페이지 월드에서 console.log/error 발화 → override가 window.__maruConsole ring에 push(executeScript도 page world라 가로채짐).
+    let logScript = "(()=>{console.log('maru-console-smoke');console.error('boom');return true;})()"
+    let logEscaped = logScript.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    let logReq = "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"browser.executeScript\",\"params\":{\"id\":\(sid),\"script\":\"\(logEscaped)\"}}"
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: logReq) {
+    case .ok(let line): guard browserCtlResult(line)?["result"] as? Bool == true else { let w = "unexpected-log:\(line.prefix(80))"; return (w, w) }
+    case .err(let why): return (why, why)
+    }
+    // browser.console pull → console 배열에 [log] maru-console-smoke + [error] boom 회수 단언(pull이 최종 drain).
+    let capture: String
+    let pullReq = "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"browser.console\",\"params\":{\"id\":\(sid)}}"
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: pullReq) {
+    case .ok(let line):
+        let entries = browserCtlResult(line)?["console"] as? [[String: Any]] ?? []
+        let hasLog = entries.contains { ($0["level"] as? String) == "log" && (($0["text"] as? String) ?? "").contains("maru-console-smoke") }
+        let hasErr = entries.contains { ($0["level"] as? String) == "error" && (($0["text"] as? String) ?? "").contains("boom") }
+        capture = (hasLog && hasErr) ? "true" : "unexpected:\(line.prefix(120))"
+    case .err(let why): capture = why
+    }
+    // clear=true pull(반환 후 버퍼 비움) → 재-pull이 빈 배열(정적 fixture라 새 로그 없음). clear 동작 검증.
+    _ = browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: "{\"jsonrpc\":\"2.0\",\"id\":33,\"method\":\"browser.console\",\"params\":{\"id\":\(sid),\"clear\":true}}")
+    let clear: String
+    switch browserCtlOneRequest(socketPath: socketPath, authFrame: auth, requestFrame: "{\"jsonrpc\":\"2.0\",\"id\":34,\"method\":\"browser.console\",\"params\":{\"id\":\(sid)}}") {
+    case .ok(let line):
+        let entries = browserCtlResult(line)?["console"] as? [[String: Any]] ?? []
+        clear = entries.isEmpty ? "true" : "unexpected:\(entries.count) left"
+    case .err(let why): clear = why
+    }
+    return (capture, clear)
 }
 
 // 5f-5a: 실제 WKWebView page realm에서 bounded strict-JSON wrapper를 실행하고 소켓 응답까지 검증한다. 값 fidelity,
@@ -1911,6 +2006,41 @@ final class MaruWebPanelView: NSView {
     // 자동 invalidate). browser 패널만 등록한다.
     private var navObservers: [NSKeyValueObservation] = []
 
+    // §9.5.9 console: 서버측 콘솔 버퍼(앱 프로세스 소유 — 페이지 문서와 별개라 **네비게이션에도 보존**). page-world override가
+    // 쌓는 `window.__maruConsole`를 host가 proactive drain해 여기 누적하고, `browser.console` pull이 회수한다.
+    static let serverConsoleCap = 500 // bounded ring(oldest drop) — §9.5.9 server_console_cap
+    static let consoleDrainInterval: TimeInterval = 0.3 // proactive drain throttle(§9.5.9 console_drain_interval_ms=300)
+    var consoleBuffer: [(level: String, text: String)] = []
+    // capture-active=첫 `browser.console` pull에서 true(surface close까지 유지) → 그 전엔 proactive drain 0비용(미사용 패널
+    // 에 매 tick eval 안 검). override 주입 자체는 항상 있어 페이지 ring은 쌓이므로 첫 pull이 그간 로그도 회수한다.
+    var consoleCaptureActive = false
+    var lastConsoleDrainAt: TimeInterval = 0
+
+    // proactive drain / pull이 얻은 `[{level,text},...]`(evaluateJavaScript `[[String:Any]]`)를 서버 버퍼에 append(cap 초과=oldest drop).
+    func appendDrainedConsole(_ value: Any?) {
+        guard let arr = value as? [Any] else { return }
+        for item in arr {
+            guard let d = item as? [String: Any] else { continue }
+            let level = (d["level"] as? String) ?? "log"
+            let text = (d["text"] as? String) ?? ""
+            consoleBuffer.append((level: level, text: text))
+        }
+        if consoleBuffer.count > Self.serverConsoleCap {
+            consoleBuffer.removeFirst(consoleBuffer.count - Self.serverConsoleCap)
+        }
+    }
+
+    // 서버 버퍼를 `[{level,text},...]` JSON으로(pull 응답 result — Zig serializeConsoleResult가 {console} embed). 안전 인코딩.
+    func consoleBufferJSON() -> String {
+        let arr: [[String: String]] = consoleBuffer.map { ["level": $0.level, "text": $0.text] }
+        if let data = try? JSONSerialization.data(withJSONObject: arr), let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return "[]"
+    }
+
+    func clearConsoleBuffer() { consoleBuffer.removeAll() }
+
     init(frame frameRect: NSRect, surfaceId: UInt64, panelKind: UInt32) {
         self.surfaceId = surfaceId
         self.panelKind = panelKind
@@ -1920,6 +2050,13 @@ final class MaruWebPanelView: NSView {
         let config = WKWebViewConfiguration()
         config.userContentController.addUserScript(WKUserScript(
             source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page))
+        // §9.5.9 console: page-world console.*/onerror override(bounded ring `window.__maruConsole`). 메시지 핸들러 없음
+        // (§8.1(c) 유지). host가 proactive drain으로 Swift 서버 버퍼에 옮긴다. 첫 pull(browser.console)에서 capture-active.
+        config.userContentController.addUserScript(WKUserScript(
+            source: BrowserControl.consoleCaptureScript,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true,
             in: .page))
@@ -2518,6 +2655,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private nonisolated(unsafe) var browserCtlBoundedSerializationErrorStore = "pending"
     private nonisolated(unsafe) var browserCtlBoundedDepthStore = "pending"
     private nonisolated(unsafe) var browserCtlBoundedStreamStore = "pending"
+    private nonisolated(unsafe) var browserCtlConsoleCaptureStore = "pending" // §9.5.9: console.log/error 발화 후 browser.console pull이 [log]/[error] 회수.
+    private nonisolated(unsafe) var browserCtlConsoleClearStore = "pending" // §9.5.9: clear=true pull 후 재-pull이 빈 배열(버퍼 비움 검증).
     // callback이 navigation에서 영원히 오지 않을 수 있으므로 surface별 running executeScript를 Swift에서도 추적한다.
     // didStartProvisionalNavigation이 선제 terminal을 보내고, 늦은 callback은 set 부재로 폐기해 중복 완료를 막는다.
     private var runningBrowserScripts: [UInt64: Set<UInt64>] = [:]
@@ -3673,6 +3812,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browserResultPumpSamplesMs.append((ProcessInfo.processInfo.systemUptime - pumpStarted) * 1000.0)
         }
         drainBrowserOps() // 5e-2b-2: 인가된 browser op을 WKWebView로 실행 + 완료 콜백(reap 포함, 매 tick).
+        drainConsoleBuffers() // §9.5.9: capture-active 패널의 page ring을 throttled로 서버 버퍼에 옮김(네비 넘어 보존).
         maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
         maybeRunGrantSmoke() // 1e-confirm-1c-2 테스트 전용(MARU_TEST_GRANT_DECISION): 무-cap browser.navigate가 grant 흐름으로 성공하는지 1회 kick.
         restartFrameLoopTicksIfNeeded()
@@ -3906,9 +4046,48 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         self.completeBrowserOp(asyncId, status: 1, result: error.localizedDescription)
                     }
                 }
+            case 17: // console(§9.5.9) — 서버 버퍼 pull. capture-active로 전환(첫 pull, 이후 proactive drain 시작) + 페이지 ring
+                // 최종 drain(pull 시점 최신 반영) 후 서버 버퍼를 `[{level,text}]` JSON으로 반환. arg.clear=true면 반환 뒤 비움.
+                // drain eval 실패(네비 외 JS 오류)여도 이미 버퍼된 로그는 반환(로그 유실 방지) — 서버 버퍼가 값의 원천.
+                wp.consoleCaptureActive = true
+                let consoleClear = (BrowserControl.parseCookieArg(arg)?["clear"] as? Bool) ?? false
+                registerRunningBrowserCallback(asyncId, surfaceId: surfaceId, lifetime: .webContentRealm)
+                BrowserControl.executeScript(wp.webView, BrowserControl.consoleDrainScript) { [weak self, weak wp] result in
+                    guard let self, self.takeRunningBrowserCallback(asyncId, surfaceId: surfaceId) else { return }
+                    guard let wp = wp else { self.completeBrowserOp(asyncId, status: 0, result: "[]"); return }
+                    if case .success(let value) = result { wp.appendDrainedConsole(value) }
+                    let json = wp.consoleBufferJSON()
+                    if consoleClear { wp.clearConsoleBuffer() }
+                    self.completeBrowserOp(asyncId, status: 0, result: json)
+                }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)
             }
+        }
+    }
+
+    /// §9.5.9: capture-active(첫 `browser.console` pull에서 켜짐) 웹 패널의 page-world console ring을 throttled(300ms)로
+    /// read-and-clear해 서버 버퍼에 옮긴다(네비게이션이 페이지 문서를 리셋하기 전에 서버로 보존). 일반 창 + quick 전부 순회.
+    /// capture-active 아닌 패널은 건너뛰어(0비용) 아무도 안 쓰는 패널에 매 tick eval을 걸지 않는다. drainBrowserOps 뒤 매 tick.
+    private func drainConsoleBuffers() {
+        guard controlServerStarted else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        for surface in windows {
+            for (_, wp) in surface.webPanels { maybeDrainConsole(wp, now: now) }
+        }
+        if let quick {
+            for (_, wp) in quick.webPanels { maybeDrainConsole(wp, now: now) }
+        }
+    }
+
+    private func maybeDrainConsole(_ wp: MaruWebPanelView, now: TimeInterval) {
+        guard wp.consoleCaptureActive else { return }
+        guard now - wp.lastConsoleDrainAt >= MaruWebPanelView.consoleDrainInterval else { return }
+        // eval 발행 전에 시각을 찍어(async 콜백을 기다리지 않고) 다음 tick의 중복 발행을 막는다 — 인플라이트 누적 방지.
+        wp.lastConsoleDrainAt = now
+        BrowserControl.executeScript(wp.webView, BrowserControl.consoleDrainScript) { [weak wp] result in
+            guard let wp = wp else { return }
+            if case .success(let value) = result { wp.appendDrainedConsole(value) }
         }
     }
 
@@ -4029,10 +4208,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let bounded = runBrowserBoundedResultSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
             // 5f-0b-3c: 위 navigate 뒤(패널이 data: URL 커밋됨), 지속 연결로 subscribe→새 URL navigate→browser.navigated 수신 검증.
             let evt = runBrowserEventSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
+            let console = runBrowserConsoleSmokeClient(socketPath: socketPath, sid: t.surfaceId, nonceHex: nonceHex)
             self?.storeBrowserCtlResult(navigateOk: r.navigateOk, getUrl: r.getUrl, events: evt)
             self?.storeBrowserWaitResult(wait)
             self?.storeBrowserBoundedResult(bounded)
+            self?.storeBrowserConsoleResult(console)
         }
+    }
+
+    private nonisolated func storeBrowserConsoleResult(_ result: (capture: String, clear: String)) {
+        browserCtlLock.lock()
+        browserCtlConsoleCaptureStore = result.capture
+        browserCtlConsoleClearStore = result.clear
+        browserCtlLock.unlock()
+    }
+
+    private func browserConsoleResults() -> (capture: String, clear: String) {
+        browserCtlLock.lock(); defer { browserCtlLock.unlock() }
+        return (browserCtlConsoleCaptureStore, browserCtlConsoleClearStore)
     }
 
     /// 5e-2b-2: 배경 소켓 클라이언트가 결과를 저장(lock 보호). nonisolated — 배경 큐에서 호출.
@@ -6460,6 +6653,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             browser_ctl_bounded_serialization_error=\(browserBoundedResults().serializationError)
             browser_ctl_bounded_depth=\(browserBoundedResults().depth)
             browser_ctl_bounded_stream=\(browserBoundedResults().stream)
+            browser_ctl_console_capture=\(browserConsoleResults().capture)
+            browser_ctl_console_clear=\(browserConsoleResults().clear)
             browser_result_pump_actions=\(sortedPumpMs.count)
             browser_result_pump_p95_ms=\(pumpP95Ms)
             browser_result_pump_max_ms=\(pumpMaxMs)

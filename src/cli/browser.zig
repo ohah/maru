@@ -37,6 +37,7 @@ pub const browser_help =
     \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          요소로 스크롤
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   페이지 ARIA 트리(role/name/ref) 출력
+    \\  console --surface <id> [--clear]                        페이지 콘솔 로그(level·text) 출력, --clear=회수 후 비움
     \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
     \\
 ;
@@ -82,6 +83,8 @@ pub const Request = union(enum) {
     wait: struct { surface_id: u64, condition: WaitCondition, selector: ?[]const u8, timeout_ms: u32 },
     /// `browser snapshot`(§9.5.4): 페이지 ARIA 트리(role/name/ref). interactive_only/max_depth/selector 선택. 응답 {snapshot}.
     snapshot: struct { surface_id: u64, interactive_only: bool, max_depth: ?u32, selector: ?[]const u8 },
+    /// `browser console`(§9.5.9): 서버 버퍼에 쌓인 콘솔을 회수. clear=반환 후 버퍼 비움. 응답 {console:[{level,text}]}.
+    console: struct { surface_id: u64, clear: bool },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -94,6 +97,7 @@ pub const Request = union(enum) {
             .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll, .wait => .ok,
             .get_local_storage => .value,
             .snapshot => .snapshot,
+            .console => .console,
         };
     }
 };
@@ -366,6 +370,32 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         }
         const s = surface orelse return error.MissingSurface;
         return .{ .request = .{ .snapshot = .{ .surface_id = s, .interactive_only = interactive, .max_depth = max_depth, .selector = selector } } };
+    }
+    if (eq(sub, "console")) {
+        // `--surface <id>` + 선택 `--clear`(반환 후 서버 버퍼 비움 flag, §9.5.9).
+        var surface: ?u64 = null;
+        var clear = false;
+        var i: usize = 1;
+        while (i < args.len) {
+            const a = args[i];
+            if (eq(a, "--surface")) {
+                if (i + 1 >= args.len) return error.MissingSurfaceValue;
+                surface = parseU64(args[i + 1]) catch return error.InvalidSurface;
+                i += 2;
+            } else if (std.mem.startsWith(u8, a, "--surface=")) {
+                surface = parseU64(a["--surface=".len..]) catch return error.InvalidSurface;
+                i += 1;
+            } else if (eq(a, "--clear")) {
+                clear = true;
+                i += 1;
+            } else if (std.mem.startsWith(u8, a, "-")) {
+                return error.UnknownOption;
+            } else {
+                return error.UnexpectedArgument;
+            }
+        }
+        const s = surface orelse return error.MissingSurface;
+        return .{ .request = .{ .console = .{ .surface_id = s, .clear = clear } } };
     }
     return error.UnknownSubcommand;
 }
@@ -684,6 +714,13 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             if (sn.selector) |selector| try obj.put(gpa, "selector", .{ .string = selector });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.snapshot", .params = .{ .object = obj } } });
         },
+        .console => |c| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(c.surface_id) });
+            if (c.clear) try obj.put(gpa, "clear", .{ .bool = true });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.console", .params = .{ .object = obj } } });
+        },
     }
 }
 
@@ -744,7 +781,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console };
 
 /// 응답 바이트 한 줄을 기계·사람 읽기 편한 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`
 /// (sessions.renderResponse 규율 — 미grant 거부는 `error: Unauthorized (-32002)`). result는 kind별 한 줄.
@@ -845,6 +882,27 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 return;
             }
             for (tree.items) |node| try renderSnapshotNode(node, 0, w);
+        },
+        .console => {
+            // {console:[{level,text},...]} → 각 항목 `[level] text` 한 줄(§9.5.9). 배열 아니면 에러, 비면 안내.
+            const entries = switch (result.get("console") orelse std.json.Value{ .null = {} }) {
+                .array => |a| a,
+                else => {
+                    try w.writeAll("error: malformed console\n");
+                    return;
+                },
+            };
+            if (entries.items.len == 0) {
+                try w.writeAll("(empty console)\n");
+                return;
+            }
+            for (entries.items) |entry| {
+                const o = switch (entry) {
+                    .object => |oo| oo,
+                    else => continue,
+                };
+                try w.print("[{s}] {s}\n", .{ strField(o.get("level")), strField(o.get("text")) });
+            }
         },
     }
 }
@@ -1657,6 +1715,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          요소로 스크롤
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   조건 충족까지 대기(기본·최대 25000ms)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   페이지 ARIA 트리(role/name/ref) 출력
+        \\  console --surface <id> [--clear]                        페이지 콘솔 로그(level·text) 출력, --clear=회수 후 비움
         \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   PNG 캡처(--rect 영역·--scale 배율, 생략=전체·기기배율)
         \\
     ,
@@ -1778,6 +1837,58 @@ test "parse/build/render: snapshot(§9.5.4) — 기본·옵션·에러·트리 �
         var w = std.Io.Writer.fixed(&buf);
         try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[{\"role\":\"navigation\",\"name\":\"\",\"children\":[{\"role\":\"link\",\"name\":\"Home\",\"ref\":\"e1\"}]}]}}}", .snapshot, &w);
         try testing.expectEqualStrings("navigation\n  link \"Home\" [ref=e1]\n", w.buffered());
+    }
+}
+
+test "parse/build/render: console(§9.5.9) — 기본·clear·에러·항목 렌더" {
+    // 기본(surface만) → clear=false.
+    switch (try parse(&.{ "console", "--surface", "11" })) {
+        .request => |r| switch (r) {
+            .console => |c| {
+                try testing.expectEqual(@as(u64, 11), c.surface_id);
+                try testing.expect(!c.clear);
+            },
+            else => return error.Unexpected,
+        },
+        else => return error.Unexpected,
+    }
+    // --clear flag.
+    switch (try parse(&.{ "console", "--surface=3", "--clear" })) {
+        .request => |r| try testing.expect(r.console.clear),
+        else => return error.Unexpected,
+    }
+    try testing.expectError(error.MissingSurface, parse(&.{"console"}));
+    try testing.expectError(error.UnknownOption, parse(&.{ "console", "--surface", "1", "--bogus" }));
+
+    // build: clear=false면 생략, true면 실림.
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .console = .{ .surface_id = 3, .clear = false } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.console", pm.message.request.method);
+        try testing.expect(pm.message.request.params.?.object.get("clear") == null); // false=생략
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, .{ .console = .{ .surface_id = 3, .clear = true } }, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expect(pm.message.request.params.?.object.get("clear").?.bool);
+    }
+
+    // render: {console:[{level,text}]} → `[level] text` 줄. 비면 안내.
+    {
+        var buf: [256]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"log\",\"text\":\"hi\"},{\"level\":\"error\",\"text\":\"boom\"}]}}", .console, &w);
+        try testing.expectEqualStrings("[log] hi\n[error] boom\n", w.buffered());
+    }
+    {
+        var buf: [64]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[]}}", .console, &w);
+        try testing.expectEqualStrings("(empty console)\n", w.buffered());
     }
 }
 

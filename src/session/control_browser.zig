@@ -1112,9 +1112,11 @@ pub const screenshot_max_result_bytes: usize = 12 * 1024 * 1024;
 /// 초과 PNG는 `screenshot_too_large`로 접는다(에이전트가 rect/scale로 축소 재시도 — 후속). progressive pump(무제한)는 후속.
 pub const screenshot_max_chunks: usize = 24;
 
-/// §9.5.10 통일-1: snapshot 결과 예약 상한(executeScript 16 MiB 선례). transfer가 초과 시 chunk-stream하고 이 상한
+/// §9.5.10 통일: snapshot·console 결과 예약 상한(executeScript 16 MiB 선례). transfer가 초과 시 chunk-stream하고 이 상한
 /// 초과면 result-too-large. 예약은 op 시작 시 aggregate budget서 잡고 beginTransfer가 실제 크기로 낮춘다(executeScript 동형).
+/// console(통일-2): 서버 버퍼(cap 500 entries)를 **전량** 반환 — bounded ring은 메모리 상한이지 더는 wire 절단이 아니다.
 pub const snapshot_max_result_bytes: usize = 16 * 1024 * 1024;
+pub const console_max_result_bytes: usize = 16 * 1024 * 1024;
 /// executeScript chunk은 base64 팽창과 JSON envelope를 포함해 1MiB frame 아래에 머물도록 raw 512KiB로 나눈다.
 pub const execute_script_chunk_bytes: usize = 512 * 1024;
 /// final/error가 일반 chunk에 막히지 않도록 예약한 연결별 terminal wire 상한(개행 포함).

@@ -2030,23 +2030,12 @@ final class MaruWebPanelView: NSView {
         }
     }
 
-    // pull 응답 result 크기 상한(§9.5.9). 콘솔 응답은 **단일 프레임**(≤ 1 MiB = control_plane `default_max_frame`)으로 나가는데
-    // 서버 버퍼는 최대 500×8 KiB로 이를 넘을 수 있어, 넘으면 CLI Framer가 `payload_too_large`로 프레임을 거부해 연결이 깨진다
-    // (executeScript inline 경로의 프레임 가드와 같은 부류). 그래서 총 직렬화 크기를 **512 KiB**(executeScript inline 임계와 동일)
-    // 아래로 bound하고, 초과분은 **최신 우선**으로 유지(오래된 것부터 제외 — 에이전트가 원하는 건 최신 로그). caller는 §9.5.9 한계로 문서화.
-    static let consoleResultBudget = 512 * 1024
+    // §9.5.10 통일-2: 서버 버퍼(cap 500 entries)를 **시간순 전량** `[{level,text}]` JSON으로 반환한다. 예전엔 콘솔 응답이
+    // 단일 프레임(≤ 1 MiB)으로만 나가 서버 버퍼가 이를 넘으면 CLI Framer가 `payload_too_large`로 연결을 깼기에 512 KiB로 wire
+    // 절단(최신 우선)했으나, 이제 snapshot과 같은 bounded-result transfer(inline ≤512 KiB·초과 chunk·>16 MiB clean 에러)로 나가므로
+    // wire 절단을 없앤다 — bounded ring(500 entries)은 **메모리 상한**이지 더는 wire 절단이 아니다.
     func consoleBufferJSON() -> String {
-        var selected: [[String: String]] = [] // 최신→오래된 순으로 채운 뒤 뒤집어 시간순 복원
-        var total = 2 // "[]"
-        for entry in consoleBuffer.reversed() {
-            let obj = ["level": entry.level, "text": entry.text]
-            guard let d = try? JSONSerialization.data(withJSONObject: obj) else { continue }
-            let addend = d.count + 1 // 항목 + 구분자(",") — 상한 판정은 보수적으로 과대 계산
-            if !selected.isEmpty, total + addend > Self.consoleResultBudget { break } // 최소 1개(최신)는 항상 포함
-            total += addend
-            selected.append(obj)
-        }
-        let ordered = Array(selected.reversed())
+        let ordered = consoleBuffer.map { ["level": $0.level, "text": $0.text] }
         if let data = try? JSONSerialization.data(withJSONObject: ordered), let s = String(data: data, encoding: .utf8) {
             return s
         }
@@ -4125,7 +4114,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     if case .success(let value) = result { wp.appendDrainedConsole(value) }
                     let json = wp.consoleBufferJSON()
                     if consoleClear { wp.clearConsoleBuffer() }
-                    self.completeBrowserOp(asyncId, status: 0, result: json)
+                    // §9.5.10 통일-2: snapshot과 같은 bounded-result transfer로 반환한다. 원본 `[{level,text}]` 배열 JSON을
+                    // registry에 넣으면 complete_browser_result가 크기별로 inline(≤512 KiB, serializeConsoleResult가 {console}
+                    // embed)/chunk(초과, browser.consoleChunk)를 자동 선택 → 큰 로그도 프레임 상한을 안 넘김(옛 512 KiB 절단 제거).
+                    self.completeBrowserScriptResult(asyncId, value: .json(Data(json.utf8)))
                 }
             default: // 알 수 없는 op_kind(Zig BrowserMethod와 어긋남 — 방어) — error 완료.
                 maru_macos_control_complete_browser_op(asyncId, 1, nil, 0)

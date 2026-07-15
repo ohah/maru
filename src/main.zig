@@ -625,7 +625,10 @@ fn runBrowserRequest(
     stderr: *std.Io.Writer,
 ) !void {
     if (req == .exec) return runBrowserExecuteScript(io, allocator, req.exec, stdout, stderr);
-    if (req == .snapshot) return runBrowserSnapshot(io, allocator, req, stdout, stderr); // §9.5.10 통일-1: 대형 트리 chunk 재조립
+    const cp = maru.session.control_plane;
+    // §9.5.10 통일: inline이 method-특화 wrapper인 메서드(snapshot·console)는 bounded transfer라 chunk 재조립 러너로 간다.
+    if (req == .snapshot) return runBrowserWrappedResult(io, allocator, req, cp.browser_snapshot_chunk_method, "snapshot", .snapshot, stdout, stderr);
+    if (req == .console) return runBrowserWrappedResult(io, allocator, req, cp.browser_console_chunk_method, "console", .console, stdout, stderr);
     const kind = req.kind();
     const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, req, .{ .number = 1 });
     defer allocator.free(request_bytes);
@@ -695,25 +698,35 @@ fn runBrowserExecuteScript(
     try stdout.flush();
 }
 
-/// §9.5.10 통일-1: snapshot 응답을 스트리밍으로 받는다. 결과가 512 KiB 이하면 inline 단일 응답(`{result:{snapshot:tree}}`)이라
-/// 그대로 renderResponse하고, 초과면 `browser.snapshotChunk` notification×N을 base64 재조립해 트리를 복원한 뒤 synthetic 응답으로
-/// 렌더한다(대형 트리가 프레임 상한을 넘던 결함 해소 — executeScript와 같은 transfer). 검증·재조립은 `SnapshotStreamValidator`(L2
-/// 순수, executeScript와 동형 bounded 검증). error 응답도 그대로 렌더. GUI 손 테스트로 대형 왕복 확인.
-fn runBrowserSnapshot(
+/// §9.5.10 통일: inline이 method-특화 wrapper(`{result:{<wrap_field>:value}}`)인 browser 메서드(snapshot·console)의 응답을
+/// 스트리밍으로 받는다. 결과가 512 KiB 이하면 inline 단일 응답이라 그대로 renderResponse하고, 초과면 `chunk_method`
+/// notification×N을 base64 재조립해 raw 값을 복원한 뒤 synthetic 응답 `{result:{<wrap_field>:value}}`로 감싸 렌더한다(대형
+/// 결과가 프레임 상한을 넘던 결함 해소 — executeScript와 같은 transfer). 검증·재조립은 `WrappedResultStreamValidator`(L2 순수,
+/// executeScript와 동형 bounded 검증). error 응답도 그대로 렌더. GUI 손 테스트로 대형 왕복 확인. `wrap_field`는 서버 잘못된
+/// 스트림 에러 메시지 라벨도 겸한다.
+fn runBrowserWrappedResult(
     io: std.Io,
     allocator: std.mem.Allocator,
     req: maru.cli.browser.Request,
+    chunk_method: []const u8,
+    wrap_field: []const u8,
+    kind: maru.cli.browser.ResponseKind,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
+    const max_bytes = switch (req) {
+        .snapshot => maru.session.control_browser.snapshot_max_result_bytes,
+        .console => maru.session.control_browser.console_max_result_bytes,
+        else => unreachable, // 라우터가 snapshot·console만 이리로 보냄
+    };
     const request_id: maru.session.control_plane.Id = .{ .number = 1 };
     const request_bytes = try maru.cli.browser.buildRequestBytes(allocator, req, request_id);
     defer allocator.free(request_bytes);
     const fd = try connectSendControl(io, allocator, request_bytes, stderr);
     defer _ = std.c.close(fd);
 
-    var validator = maru.cli.browser.SnapshotStreamValidator.init(allocator, request_id, maru.session.control_browser.snapshot_max_result_bytes);
-    var reassembled: std.ArrayList(u8) = .empty; // chunked면 재조립한 트리 JSON 바이트
+    var validator = maru.cli.browser.WrappedResultStreamValidator.init(allocator, request_id, chunk_method, max_bytes);
+    var reassembled: std.ArrayList(u8) = .empty; // chunked면 재조립한 raw 값(트리/배열) JSON 바이트
     defer reassembled.deinit(allocator);
     var terminal_line: ?[]u8 = null; // inline/error 응답 그대로 렌더용(chunked면 null → synthetic)
     defer if (terminal_line) |l| allocator.free(l);
@@ -728,40 +741,42 @@ fn runBrowserSnapshot(
                 .need_more => {},
                 .chunk => |bytes| reassembled.appendSlice(allocator, bytes) catch return error.OutOfMemory,
                 .inline_terminal => {
-                    terminal_line = try allocator.dupe(u8, line); // inline `{snapshot}` 또는 에러 — 그대로 렌더
+                    terminal_line = try allocator.dupe(u8, line); // inline `{<wrap_field>}` 또는 에러 — 그대로 렌더
                     break :done;
                 },
                 .done => {
                     chunked = true;
                     break :done;
                 },
-                .failed => return snapshotStreamError(stderr),
+                .failed => return wrappedStreamError(stderr, wrap_field),
             }
         }
         var read_buf: [4096]u8 = undefined;
         const n = std.c.read(fd, &read_buf, read_buf.len);
-        if (n <= 0) return snapshotStreamError(stderr);
+        if (n <= 0) return wrappedStreamError(stderr, wrap_field);
         framer.push(allocator, read_buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
 
     if (chunked) {
-        // 재조립한 트리를 synthetic 응답 `{result:{snapshot:<tree>}}`로 감싸 기존 렌더러 재사용(inline과 같은 렌더 경로).
+        // 재조립한 raw 값을 synthetic 응답 `{result:{<wrap_field>:value}}`로 감싸 기존 렌더러 재사용(inline과 같은 렌더 경로).
         var synth: std.ArrayList(u8) = .empty;
         defer synth.deinit(allocator);
-        synth.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":") catch return error.OutOfMemory;
+        synth.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"") catch return error.OutOfMemory;
+        synth.appendSlice(allocator, wrap_field) catch return error.OutOfMemory;
+        synth.appendSlice(allocator, "\":") catch return error.OutOfMemory;
         synth.appendSlice(allocator, reassembled.items) catch return error.OutOfMemory;
         synth.appendSlice(allocator, "}}") catch return error.OutOfMemory;
-        try maru.cli.browser.renderResponse(allocator, synth.items, .snapshot, stdout);
+        try maru.cli.browser.renderResponse(allocator, synth.items, kind, stdout);
     } else if (terminal_line) |line| {
-        try maru.cli.browser.renderResponse(allocator, line, .snapshot, stdout);
+        try maru.cli.browser.renderResponse(allocator, line, kind, stdout);
     } else {
-        return snapshotStreamError(stderr);
+        return wrappedStreamError(stderr, wrap_field);
     }
     try stdout.flush();
 }
 
-fn snapshotStreamError(stderr: *std.Io.Writer) error{UnknownCommand} {
-    stderr.print("maru browser snapshot: 서버가 잘못된 snapshot stream을 반환했습니다\n", .{}) catch {};
+fn wrappedStreamError(stderr: *std.Io.Writer, cmd_label: []const u8) error{UnknownCommand} {
+    stderr.print("maru browser {s}: 서버가 잘못된 {s} stream을 반환했습니다\n", .{ cmd_label, cmd_label }) catch {};
     stderr.flush() catch {};
     return error.UnknownCommand;
 }

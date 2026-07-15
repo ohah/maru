@@ -11354,10 +11354,14 @@ pub const AppSession = struct {
         // 드물어 매번 한 frame 재빌드는 무시할 비용이고, 향후 포커스 의존 렌더에도 동일 보장. [[active-surface-render-path-trap]]
         self.metal_dirty = true;
         if (!self.surface_initialized) return;
+        // 빈 세션(merge/move로 워크스페이스가 전부 다른 창으로 빠져나간 원본)은 활성 surface가 없다 — 보고할 focus가 없으므로
+        // 스킵한다(`activeSurface()`는 non-null assert=unwrapNull 패닉). merge/move → makeKeyAndOrderFront(dst) → 원본 창
+        // windowDidResignKey → focus_changed가 비워진 원본 세션을 만지던 크래시 방어(commitComposition와 같은 resign 경로).
+        const active = self.app_window.active() orelse return;
         // Phase 3 위임(docs/io-render-threading.md §9 P3-3): reportFocus는 코어 mutate(+response 생성)라 메인이
         // 직접 안 하고 reader로 위임한다 — reader가 적용 후 pendingResponse를 PTY로 흘린다(non-interactive 폴백은
         // enqueueCoreCommand가 직접 흘림). focus→응답 인과는 그 명령 처리 시 응답 생성으로 보존.
-        self.runtime.enqueueCoreCommand(self.activeSurface().id, .{ .report_focus = gained }, self.io) catch {};
+        self.runtime.enqueueCoreCommand(active.id, .{ .report_focus = gained }, self.io) catch {};
     }
 
     /// 스크린 점(backing px) 아래 panel의 활성 Term surface + 그 터미널 본문 rect(탭 바 제외 = 셀 origin).
@@ -39975,10 +39979,13 @@ test "commitComposition/setFocused: 빈 세션(merge/move로 비워진 원본)�
     try std.testing.expect(src.surface_initialized); // 크래시 조건: 초기화됐으나 활성 surface 없음
     try std.testing.expect(src.app_window.active() == null);
 
-    // resignKey → windowLostKey → commitComposition/setFocused 경로. 옛 `activeSurface().?` unwrap이 여기서 unwrapNull
-    // 패닉했다(SIGABRT). 이제 optional 스킵이라 no-op이어야 한다(패닉하면 이 테스트가 크래시=fail로 실증).
+    // resign 경로 두 콜백(windowLostKey→commitComposition/setFocused, windowDidResignKey→focusChanged) 모두 옛
+    // `activeSurface().?` unwrap이 여기서 unwrapNull 패닉했다(SIGABRT×2회 손 테스트 발견). 이제 optional 스킵이라
+    // 무패닉 no-op이어야 한다(하나라도 패닉하면 이 테스트가 크래시=fail로 실증). resign·become 양방향 다 건다.
     src.commitComposition();
     src.setFocused(false);
+    src.focusChanged(false);
+    src.focusChanged(true);
 }
 
 test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스페이스 이동 시 source_window_closed·ended_seen·0탭·deinit 무패닉" {

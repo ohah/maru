@@ -12718,7 +12718,11 @@ pub const AppSession = struct {
                 // self-deadlock이다(std.Io.Mutex는 비재진입). 과거 PTY 직접 쓰기(sendCommittedText)는 락
                 // 안에서 안전했지만 sendTextAsKeys 공유(#2, bd5fd14)로 그 가정이 깨졌다 — 한글 조합 중
                 // 창 포커스 상실 시 메인 스레드가 ulock_wait에 박혀 hang으로 드러난 회귀.
-                const s = self.activeSurface();
+                // 빈 세션(merge로 워크스페이스가 전부 다른 창으로 빠져나간 원본 등)은 활성 surface가 없다 — 확정할 터미널
+                // 조합이 없으므로 스킵한다. `activeSurface()`는 non-null을 assert(unwrapNull 패닉)하므로 여기선 optional로
+                // 받는다: merge → `makeKeyAndOrderFront(dst)` → 원본 창 resignKey → windowLostKey → commitComposition이
+                // 비워진 원본 세션을 만지던 크래시(코드리뷰 후속 손 테스트 발견) 방어.
+                const s = self.app_window.active() orelse return;
                 const core = &s.core;
                 var committed: ?[]u8 = null;
                 {
@@ -39951,6 +39955,30 @@ test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동�
     // src엔 부재(포인터 relocate라 원본 트리서 사라짐). 워크스페이스 전환(같은 창)과 달리 다른 창서 검출됨.
     try std.testing.expect(dst.hasWebSurface(sid));
     try std.testing.expect(!src.hasWebSurface(sid));
+}
+
+test "commitComposition/setFocused: 빈 세션(merge/move로 비워진 원본)서 패닉 없이 no-op (resignKey IME commit 크래시 방어)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    // src의 유일 워크스페이스를 dst로 옮겨 src를 **빈 세션**으로 만든다(0탭). surface_initialized는 유지, 활성 surface는 없음
+    // = merge → makeKeyAndOrderFront(dst) → 원본 창 resignKey 시점의 상태.
+    var buf: [8]u64 = undefined;
+    _ = try src.moveWorkspaceToSession(dst, 0, &buf);
+    try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
+    try std.testing.expect(src.surface_initialized); // 크래시 조건: 초기화됐으나 활성 surface 없음
+    try std.testing.expect(src.app_window.active() == null);
+
+    // resignKey → windowLostKey → commitComposition/setFocused 경로. 옛 `activeSurface().?` unwrap이 여기서 unwrapNull
+    // 패닉했다(SIGABRT). 이제 optional 스킵이라 no-op이어야 한다(패닉하면 이 테스트가 크래시=fail로 실증).
+    src.commitComposition();
+    src.setFocused(false);
 }
 
 test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스페이스 이동 시 source_window_closed·ended_seen·0탭·deinit 무패닉" {

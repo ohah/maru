@@ -20,7 +20,9 @@ for field in \
     browser_ctl_bounded_execution_error \
     browser_ctl_bounded_serialization_error \
     browser_ctl_bounded_depth \
-    browser_ctl_bounded_stream
+    browser_ctl_bounded_stream \
+    browser_ctl_console_capture \
+    browser_ctl_console_clear
 do
     grep -qx "$field=true" "$summary" || {
         echo "bounded browser smoke failed: $field" >&2

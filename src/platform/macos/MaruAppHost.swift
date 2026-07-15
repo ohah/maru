@@ -3129,15 +3129,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return nil
     }
 
-    // 4e-4: 원본 창의 web surface destroy 전이가 "이동(다른 창에 아직 live)↔닫힘(어디에도 없음)"을 구분하는 판정. `except`(원본
-    // 창)를 뺀 나머지 창(quick 포함) 세션 모델에 그 surface_id가 있으면 true=이동(파괴/browser.closed 억제). has_web_surface ABI
-    // (세션 트리 조회)를 쓴다 — webPanels dict가 아니라 **모델**을 봐야 워크스페이스 전환(같은 창 비활성 탭)과 안 헷갈린다.
-    private func isWebSurfaceLiveInOtherWindow(_ surfaceId: UInt64, except: TerminalSurface) -> Bool {
+    // 4e-4: 이 창(except)을 떠나지만 **다른 창 모델에 아직 live**인 web surface의 소유 창을 찾는다(quick 포함) — 이동↔닫힘 판정.
+    // has_web_surface ABI(세션 트리 조회)를 쓴다: webPanels dict가 아니라 **모델**을 봐야 워크스페이스 전환(같은 창 비활성 탭)과
+    // 안 헷갈린다. **다른 창이 없으면 아래 루프가 0-FFI**(단일-창 탭 close 경로 = 흔한 경우, cleanup [3]). 없으면 nil=진짜 닫힘.
+    // (count 가드는 안 둔다 — teardown 시점엔 닫히는 창이 `windows`서 이미 빠져 count==1이어도 대상 창이 있을 수 있어 오판됨.)
+    private func windowOwningWebSurfaceModel(_ surfaceId: UInt64, except: TerminalSurface) -> TerminalSurface? {
         for w in windows where w !== except {
-            if let s = w.appSession, maru_macos_app_session_has_web_surface(s, surfaceId) == 1 { return true }
+            if let s = w.appSession, maru_macos_app_session_has_web_surface(s, surfaceId) == 1 { return w }
         }
-        if let q = quick, q !== except, let s = q.appSession, maru_macos_app_session_has_web_surface(s, surfaceId) == 1 { return true }
-        return false
+        if let q = quick, q !== except, let s = q.appSession, maru_macos_app_session_has_web_surface(s, surfaceId) == 1 { return q }
+        return nil
+    }
+
+    // 4e-4: 이 창(from)을 떠나지만 다른 창 모델에 live인 web surface의 WKWebView를 그 대상 창 webPanels dict로 **이관**한다 —
+    // 파괴·browser.closed 없이 상태 보존. removeFromSuperview로 from서 떼고 대상 dict에 등록(대상의 후속 create/show가 adopt
+    // 브랜치로 컨테이너 insert+reframe). **merge는 옮긴 워크스페이스를 대상 *비활성* 탭으로 착지**시켜 create-steal이 안 도므로
+    // (대상은 자기 활성 워크스페이스 유지), 원본 창 teardown·destroy 경로가 이 이관으로 상태를 보존한다(코드리뷰 [1] HIGH 수정).
+    // 대상 창을 못 찾으면(=진짜 닫힘) false — 호출처가 파괴한다. from dict서는 제거하고 대상 dict에 넣는다.
+    @discardableResult
+    private func reparentWebPanelToOwningWindow(_ surfaceId: UInt64, _ panel: MaruWebPanelView, from: TerminalSurface) -> Bool {
+        guard let dst = windowOwningWebSurfaceModel(surfaceId, except: from) else { return false }
+        panel.removeFromSuperview()
+        from.webPanels[surfaceId] = nil
+        dst.webPanels[surfaceId] = panel
+        return true
     }
 
     // 이 웹 패널이 속한 창의 chrome 오버레이(모달/녹음)가 열려 있는가 — hitTest가 열림이면 nil을 돌려 클릭을 아래
@@ -3682,11 +3697,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 창 전체 teardown은 다음 web-surface transition tick이 없으므로, 살아 있는 panel을 여기서 명시적으로 종료한다.
     /// 개별 destroy 전이와 같은 browser.closed → 실행 중 script terminal → view/dict 해제 순서를 창 단위로 적용한다.
     private func teardownWebPanels(_ surface: TerminalSurface) {
-        for (surfaceId, panel) in surface.webPanels {
+        // 키 스냅샷 — reparentWebPanelToOwningWindow가 dict를 변형(from서 제거)하므로 순회 중 변형 방지.
+        for surfaceId in Array(surface.webPanels.keys) {
+            guard let panel = surface.webPanels[surfaceId] else { continue }
+            // 4e-4(코드리뷰 [1] HIGH): 이 창이 닫히지만 그 surface가 **다른 창으로 이동**했으면(merge 시 대상 *비활성* 탭 착지 →
+            // create-steal 미발생), 파괴/browser.closed 대신 대상 창으로 이관해 상태를 보존한다(대상의 후속 create/show가 adopt로 재부모화).
+            if reparentWebPanelToOwningWindow(surfaceId, panel, from: surface) { continue }
             maru_macos_control_push_browser_closed(surfaceId)
             browserDidCloseSurface(surfaceId)
             panel.removeFromSuperview()
             panel.controller = nil
+            surface.webPanels[surfaceId] = nil
         }
         surface.webPanels.removeAll()
         surface.lastFocusedWebSurfaceId = nil
@@ -5192,10 +5213,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
             case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
-                    if isWebSurfaceLiveInOtherWindow(t.surface_id, except: surface) {
-                        // 4e-4: 창 간 이동 — 파괴 않고 뷰를 살려둔다(대상 창 create가 detachWebPanelForReparent로 훔쳐 재부모화).
-                        // 원본 창에선 즉시 removeFromSuperview로 숨기되 dict엔 유지(create가 훔칠 때까지). browser.closed 억제(닫힘 아님).
-                        v.removeFromSuperview()
+                    if reparentWebPanelToOwningWindow(t.surface_id, v, from: surface) {
+                        // 4e-4: 창 간 이동 — 파괴 않고 **대상 창 dict로 이관**(대상의 후속 create/show가 adopt로 재부모화). 원본 dict서 제거돼
+                        // nav-state 루프가 이 패널을 원본 세션에 push하지 않는다(코드리뷰 [2] 오라우팅 회피). browser.closed 억제(닫힘 아님).
+                        // create-steal이 안 먼저 도는 경로(미래 drag M5)를 위한 순서 독립 안전장치 — 주 경로는 대상 create-steal/teardown 이관.
                     } else {
                         // 5f-3d: 진짜 닫힘 — 소멸 직전 browser.closed 이벤트를 구독자에 push한 뒤 그 surface 구독을 정리(ABI 내부서 제거 전 push).
                         maru_macos_control_push_browser_closed(t.surface_id)

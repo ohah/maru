@@ -3118,6 +3118,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return nil
     }
 
+    // 4e-4(web-panel §10): 창 간 이동 시 대상 창의 create 전이가 다른 창의 기존 WKWebView를 훔쳐 재부모화한다. 어느 창(quick 포함)의
+    // webPanels dict에 이 surface_id가 있으면 그 dict에서 **떼어내(dict만 제거)** 반환한다(호출처가 새 컨테이너에 insert+dict 등록).
+    // 없으면 nil(=진짜 신규 → fresh 생성). superview 이동(removeFromSuperview→insertWebPanel)은 호출처가 한다.
+    private func detachWebPanelForReparent(_ surfaceId: UInt64) -> MaruWebPanelView? {
+        if let src = surfaceOwning(byId: surfaceId), let v = src.webPanels[surfaceId] {
+            src.webPanels[surfaceId] = nil
+            return v
+        }
+        return nil
+    }
+
+    // 4e-4: 원본 창의 web surface destroy 전이가 "이동(다른 창에 아직 live)↔닫힘(어디에도 없음)"을 구분하는 판정. `except`(원본
+    // 창)를 뺀 나머지 창(quick 포함) 세션 모델에 그 surface_id가 있으면 true=이동(파괴/browser.closed 억제). has_web_surface ABI
+    // (세션 트리 조회)를 쓴다 — webPanels dict가 아니라 **모델**을 봐야 워크스페이스 전환(같은 창 비활성 탭)과 안 헷갈린다.
+    private func isWebSurfaceLiveInOtherWindow(_ surfaceId: UInt64, except: TerminalSurface) -> Bool {
+        for w in windows where w !== except {
+            if let s = w.appSession, maru_macos_app_session_has_web_surface(s, surfaceId) == 1 { return true }
+        }
+        if let q = quick, q !== except, let s = q.appSession, maru_macos_app_session_has_web_surface(s, surfaceId) == 1 { return true }
+        return false
+    }
+
     // 이 웹 패널이 속한 창의 chrome 오버레이(모달/녹음)가 열려 있는가 — hitTest가 열림이면 nil을 돌려 클릭을 아래
     // 터미널로 통과시킨다(모달 dismiss·요소 클릭이 Zig로). anyOverlayOpen(활성 창)과 달리 그 웹 패널의 **자기 창**
     // 세션을 조회한다(멀티 창 오라우팅 방지, code-review [9]). 소유 surface를 못 찾으면 false(통과 안 함=평소 focusable).
@@ -5151,6 +5173,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     adopted.frame = frame
                     adopted.seamEdges = t.seam_edges
                     adopted.isHidden = (t.visible == 0)
+                } else if let moved = detachWebPanelForReparent(t.surface_id) {
+                    // 4e-4(web-panel §10): 다른 창에 살아있던 WKWebView를 훔쳐 **재부모화**(destroy+recreate 대신 = 스크롤·페이지·폼
+                    // 상태 보존). 같은 view라 controller·navObservers·delegate 불변, 컨테이너·frame·가시성만 이 창 것으로 옮긴다.
+                    moved.removeFromSuperview()
+                    container.insertWebPanel(moved)
+                    moved.frame = frame
+                    moved.seamEdges = t.seam_edges
+                    moved.isHidden = (t.visible == 0)
+                    surface.webPanels[t.surface_id] = moved
                 } else {
                     let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id, panelKind: t.panel_kind)
                     v.controller = self // Phase 4d: hitTest·performKeyEquivalent override가 anyOverlayOpen·keyDown 라우팅을 읽는다.
@@ -5161,11 +5192,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
             case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
-                    // 5f-3d: 소멸 직전 browser.closed 이벤트를 구독자에 push한 뒤 그 surface 구독을 정리(ABI 내부서 제거 전 push).
-                    maru_macos_control_push_browser_closed(t.surface_id)
-                    browserDidCloseSurface(t.surface_id)
-                    v.removeFromSuperview()
-                    surface.webPanels[t.surface_id] = nil
+                    if isWebSurfaceLiveInOtherWindow(t.surface_id, except: surface) {
+                        // 4e-4: 창 간 이동 — 파괴 않고 뷰를 살려둔다(대상 창 create가 detachWebPanelForReparent로 훔쳐 재부모화).
+                        // 원본 창에선 즉시 removeFromSuperview로 숨기되 dict엔 유지(create가 훔칠 때까지). browser.closed 억제(닫힘 아님).
+                        v.removeFromSuperview()
+                    } else {
+                        // 5f-3d: 진짜 닫힘 — 소멸 직전 browser.closed 이벤트를 구독자에 push한 뒤 그 surface 구독을 정리(ABI 내부서 제거 전 push).
+                        maru_macos_control_push_browser_closed(t.surface_id)
+                        browserDidCloseSurface(t.surface_id)
+                        v.removeFromSuperview()
+                        surface.webPanels[t.surface_id] = nil
+                    }
                 }
             case Int(MaruAppHostWebSurfaceOpReframe.rawValue):
                 if let v = surface.webPanels[t.surface_id] {

@@ -1436,6 +1436,14 @@ pub export fn maru_macos_app_session_create_adopted_web_term(session: ?*AppSessi
     return app_session.createAdoptedWebTermInActivePane() catch 0;
 }
 
+/// 4e-4(web-panel §10): 이 세션 트리에 그 web surface_id가 존재하면 1, 아니면 0. Swift `drainWebSurfaceTransition`이 원본 창
+/// web surface destroy 전이 시 **다른 창** 세션들에 이걸 물어 "이동(다른 창에 live)↔닫힘(어디에도 없음)"을 구분한다 —
+/// live면 WKWebView를 파괴하지 않고 대상 창 create가 재부모화하도록 살려두고 `browser.closed`를 억제한다. additive export(버전 불변).
+pub export fn maru_macos_app_session_has_web_surface(session: ?*AppSession, surface_id: u64) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.hasWebSurface(surface_id)) 1 else 0;
+}
+
 // ── Phase 5c-2: maru-app:// asset resolve (경로 샌드박스 5c-1 + realpath symlink 탈출 방어, platform I/O) ──────
 //
 // 신뢰 패널의 WKURLSchemeHandler(5c-2b Swift)가 `maru-app://<host>/<path>` 요청을 받으면 이 함수로 **번들 asset root

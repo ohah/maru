@@ -3678,6 +3678,17 @@ pub const AppSession = struct {
         return null;
     }
 
+    /// 이 세션 트리(모든 탭·pane)에 그 web surface_id를 가진 web Term이 존재하는지. 창 간 이동 재부모화(4e-4·web-panel §10)
+    /// 판정용 — Swift가 원본 창 web surface destroy 전이 시 "이 surface가 **다른 창** 세션에 아직 live인가"로 이동↔닫기를
+    /// 구분한다(live=이동→WKWebView 재부모화·`browser.closed` 억제, 부재=진짜 닫힘→파괴). 순수 트리 조회(할당 없음).
+    pub fn hasWebSurface(self: *AppSession, surface_id: u64) bool {
+        return self.findTermWhere(surface_id, struct {
+            fn pred(id: u64, term: *Term) bool {
+                return term.kind == .web and term.surfaceId() == id;
+            }
+        }.pred) != null;
+    }
+
     /// 모든 탭/panel을 훑어 첫 'terminated'(셸 exit 관측 완료) Term의 위치를 찾는다(reap 대상). 없으면 null.
     fn findTerminatedTerm(self: *AppSession) ?TermLoc {
         return self.findTermWhere({}, struct {
@@ -39912,6 +39923,34 @@ test "web Term 워크스페이스 창 간 이동: 무크래시 + 양 창 activeT
     // tick 신호도 양 창 정합(epilogue가 각 세션 활성 탭 트리에서 파생).
     try std.testing.expectEqual(@as(u32, 1), (try dst.tick()).web_surfaces_present);
     try std.testing.expectEqual(@as(u32, 0), (try src.tick()).web_surfaces_present);
+}
+
+test "hasWebSurface: 창 간 이동 후 대상=live·원본=부재 (4e-4 이동↔닫힘 판정)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    // src 워크스페이스 1(활성)의 활성 pane에 web Term을 만들고 그 surface_id를 잡는다.
+    try addMoveTestWorkspace(src, "web-ws");
+    src.dispatchAppAction(.new_web_tab);
+    const sid = src.activePane().activeTerm().surfaceId();
+    // 이동 전: src에 live, dst엔 없음, 없는 id는 false(이동 판정 3케이스의 기준).
+    try std.testing.expect(src.hasWebSurface(sid));
+    try std.testing.expect(!dst.hasWebSurface(sid));
+    try std.testing.expect(!src.hasWebSurface(sid +% 987654));
+
+    var buf: [8]u64 = undefined;
+    _ = try src.moveWorkspaceToSession(dst, 1, &buf);
+
+    // 이동 후: dst에 live(=원본 destroy 전이가 "다른 창 live"로 이동 판정 → 재부모화·browser.closed 억제),
+    // src엔 부재(포인터 relocate라 원본 트리서 사라짐). 워크스페이스 전환(같은 창)과 달리 다른 창서 검출됨.
+    try std.testing.expect(dst.hasWebSurface(sid));
+    try std.testing.expect(!src.hasWebSurface(sid));
 }
 
 test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스페이스 이동 시 source_window_closed·ended_seen·0탭·deinit 무패닉" {

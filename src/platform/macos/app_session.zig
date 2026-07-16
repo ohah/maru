@@ -16341,8 +16341,16 @@ pub const AppSession = struct {
                 // per-cell 대비 하한 — 활성 pane(cell_colors)과 동일 규칙(비활성 pane의 256색·truecolor도 보정).
                 .min_contrast = self.appearance.theme.min_contrast,
             };
-            // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
-            const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+            // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명). cursor는 주소창 **편집 밴드**의 반전 블록
+            // 커서용(터미널 커서와 같은 색·경로 재활용, 16162와 동일) — 탭 바/grip은 DrawList.cursor.visible=false라 무영향,
+            // 편집 밴드만 caret 열에 cursor.visible=true라 이 색으로 렌더된다(사용자 요청 "터미널 커서와 동일").
+            const tabbar_colors: metal_frame.CellColors = .{
+                .default_fg = self.appearance.theme.foreground,
+                .cursor = .{
+                    .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
+                    .text = self.appearance.cursor.text orelse self.appearance.theme.background,
+                },
+            };
             if (builtin.os.tag == .macos) {
                 // grip/label/탭바/비활성/floating/활성 collect가 공유하는 finishPane용 builder(단일 출처 paneFrameBuilder).
                 const pane_frame_builder = self.paneFrameBuilder();
@@ -16450,25 +16458,19 @@ pub const AppSession = struct {
                             // nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성 판정(payload 통째 복사 회피). 텍스트는 셀
                             // 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만. muted 색.
                             const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
-                            // 슬라이스 3/4: 편집 중이면 fieldLayout(렌더 텍스트와 같은 단일 소스)으로 (a) 선택 하이라이트 배경 quad,
-                            // (b) **반투명 블록 caret**을 그린다. caret을 불투명 블록으로 그리면 그 자리 글자를 가리므로(사용자 제보),
-                            // 블록 모양은 유지하되 반투명(straight-alpha, 셰이더 rgb*=a)으로 그려 글자가 비쳐 보이게 한다. 색=theme.cursor.
+                            // 슬라이스 3: 편집 중 선택이 있으면 하이라이트 배경 quad(fieldLayout selection span — 편집 텍스트와 같은
+                            // 단일 소스라 하이라이트가 글자와 정렬). 밴드 배경 위·텍스트 셀 아래(나중 append = 위 layer). 색=theme.selection.
+                            // caret은 별도로 안 그린다 — buildPaneAddressBarDrawList가 DrawList.cursor를 켜 renderer가 **터미널과 같은
+                            // 반전 블록 커서**(tabbar_colors.cursor 색·blink 재활용)로 그린다(사용자 요청 "터미널 커서와 동일").
                             if (editing and self.cell_width_px > 0) {
                                 const sel_cw = self.cell_width_px;
                                 const band_cols: u32 = @min(band_rect.w / sel_cw, @as(u32, std.math.maxInt(u16)));
                                 const sel_nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
                                 const sel_lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(band_cols), .nav_end = @intCast(sel_nav_end) });
-                                // (a) 선택 하이라이트(밴드 배경 위·텍스트 셀 아래 = 나중 append = 위 layer). 색=theme.selection.
                                 if (sel_lay.selection) |sel| if (sel.end_col > sel.start_col) {
                                     const sel_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel.start_col * sel_cw, .y = band_rect.y, .w = (sel.end_col - sel.start_col) * sel_cw, .h = band_rect.h };
                                     self.appendBarBgQuad(sel_rect, self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.selection)));
                                 };
-                                // (b) caret 반투명 블록(caret_col 한 셀, 밴드 안일 때만). 알파≈60% × window.opacity — 글자가 비침.
-                                if (sel_lay.caret_col < band_cols) {
-                                    const caret_a: u8 = @intCast((@as(u32, 0x99) * self.windowOpacityByte()) / 255);
-                                    const caret_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel_lay.caret_col * sel_cw, .y = band_rect.y, .w = sel_cw, .h = band_rect.h };
-                                    self.appendBarBgQuad(caret_rect, packStraightRgbU32(packOpaqueRgb(self.appearance.theme.cursor), caret_a));
-                                }
                             }
                             // Phase 7e-3: nav 버튼(back/forward) 활성 여부는 이 surface의 저장된 nav 상태에서 온다(없으면 false —
                             // 첫 frame nav 미도착 시 비활성으로 보임). reload는 늘 활성(builder 내부). URL(읽기전용)도 같은 상태에서 읽어

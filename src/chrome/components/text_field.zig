@@ -133,6 +133,13 @@ pub const TextField = struct {
         self.caret = start;
     }
 
+    /// ⌘⌫ — caret 앞부터 줄 시작까지 삭제(선택 있으면 선택 삭제). 단일행 필드라 줄 시작=0. macOS deleteToBeginningOfLine.
+    pub fn deleteToLineStart(self: *TextField) void {
+        if (self.dropSelection()) return;
+        self.text.replaceRangeAssumeCapacity(0, self.caret, &.{});
+        self.caret = 0;
+    }
+
     // ── 이동 ops (extend=true면 shift-선택 확장) ──────────────────────────────────────────
 
     /// 이동 공통: extend면 anchor를 고정하고 focus=새 caret, 아니면 선택 해제. new_caret로 caret 갱신.
@@ -616,6 +623,27 @@ test "단어 이동/삭제: URL 구분자 정책" {
     f.moveEnd(false);
     f.deleteWordBackward(url_seps); // "path" 삭제
     try testing.expectEqualStrings("https://example.com/", f.text.items);
+}
+
+test "deleteToLineStart: ⌘⌫ caret 앞부터 줄 시작까지(선택 있으면 선택)" {
+    const a = testing.allocator;
+    var f = try mk(a, "https://example.com");
+    defer f.deinit(a);
+    // caret 중간(16='c' 앞)에서 ⌘⌫ → [0,16) 삭제, caret=0.
+    f.moveEnd(false);
+    f.moveLeft(false);
+    f.moveLeft(false);
+    f.moveLeft(false); // caret=16
+    f.deleteToLineStart();
+    try testing.expectEqualStrings("com", f.text.items);
+    try testing.expectEqual(@as(usize, 0), f.caret);
+    // caret=0에서 ⌘⌫ → no-op(앞에 텍스트 없음).
+    f.deleteToLineStart();
+    try testing.expectEqualStrings("com", f.text.items);
+    // 선택이 있으면 선택만 삭제(줄 시작 무관 — deleteBackward류와 동형).
+    f.selectWordAt(1, ""); // "com" 전체 선택(separators 비어 전부 단어)
+    f.deleteToLineStart();
+    try testing.expectEqualStrings("", f.text.items);
 }
 
 test "selectWordAt: 더블클릭 단어 선택" {

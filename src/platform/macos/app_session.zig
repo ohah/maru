@@ -7872,7 +7872,8 @@ pub const AppSession = struct {
                     else if (k.mods.option) self.addr_field.moveWordRight(addr_word_separators, k.mods.shift) else self.addr_field.moveRight(k.mods.shift);
                 },
                 .backspace => {
-                    if (k.mods.option) self.addr_field.deleteWordBackward(addr_word_separators) // ⌥⌫ = 단어 삭제
+                    if (k.mods.command) self.addr_field.deleteToLineStart() // ⌘⌫ = 줄 시작까지 삭제(macOS deleteToBeginningOfLine)
+                    else if (k.mods.option) self.addr_field.deleteWordBackward(addr_word_separators) // ⌥⌫ = 단어 삭제
                     else self.addrEditBackspace();
                 },
                 .char => {
@@ -11001,14 +11002,15 @@ pub const AppSession = struct {
             // 먹음 — 브라우저 URL 바에서도 앱 단축키는 동작해야). 단축키가 pane/탭 컨텍스트를 바꾸므로 편집을 취소한다
             // (navigate 안 함). fall-through라 return 안 함. **단 텍스트 편집 chord는 제외** — pane/탭 컨텍스트를 안 바꾸고
             // handleAddrEditKey가 편집으로 처리하므로 취소·fall-through 대상이 아니다. 제외 대상: ⌘A/C/V/X/Z(선택·복붙),
-            // **⌘←/→·⌘⇧←/→(줄 시작/끝 이동·선택)·⌃A/⌃E(줄 시작/끝)** — 화살표는 .char가 아니라 .left/.right라 옛 `command
-            // and .char` 화이트리스트에 안 걸려 편집이 통째로 취소되던 버그(리뷰 #1, 데이터 손실). ⌘V가 편집을 날리던
-            // 회귀 수정(14차 리뷰 [1])의 확장.
+            // **⌘←/→·⌘⇧←/→(줄 시작/끝 이동·선택)·⌃A/⌃E(줄 시작/끝)·⌘⌫(줄 시작까지 삭제)** — 화살표·백스페이스는 .char가
+            // 아니라 .left/.right/.backspace라 옛 `command and .char` 화이트리스트에 안 걸려 편집이 통째로 취소·포커스가
+            // 웹 패널로 튕기던 버그(리뷰 #1 계열, 데이터 손실). ⌘V가 편집을 날리던 회귀 수정(14차 리뷰 [1])의 확장.
             const is_shortcut_chord = switch (ie) {
                 .key => |k| blk: {
                     if (!(k.mods.command or k.mods.control)) break :blk false;
                     switch (k.key) {
                         .left, .right, .up, .down => break :blk false, // caret 이동/선택(⌘←/→ 등) — 편집기 소유
+                        .backspace => if (k.mods.command) break :blk false, // ⌘⌫ 줄 시작까지 삭제 — 편집기 소유(⌥⌫는 command/control 없어 위서 이미 false)
                         .char => {
                             const c = k.codepoint | 0x20; // ASCII 소문자화(비-letter는 비교서 자연 탈락)
                             if (k.mods.command and (c == 'a' or c == 'c' or c == 'v' or c == 'x' or c == 'z')) break :blk false;
@@ -28751,6 +28753,33 @@ test "리뷰 #1: ⌘←/⌘→가 편집을 취소하지 않고 caret을 이동�
     try std.testing.expect(session.addr_field.selection != null);
     try std.testing.expectEqual(@as(usize, 0), session.addr_field.selection.?.lo());
     try std.testing.expectEqual(@as(usize, 19), session.addr_field.selection.?.hi());
+}
+
+test "제보: ⌘⌫가 편집을 취소하거나 웹 포커스로 튕기지 않고 줄 시작까지 삭제한다 (is_shortcut_chord 게이트)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term 필요(session.init)
+    const allocator = std.testing.allocator;
+    const session = try initRenameCaretTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.backing_width_px = 800;
+    session.backing_height_px = 400;
+    session.titlebar_strip_px = 0;
+
+    const sid = try session.createAdoptedWebTermInActivePane();
+    session.enterAddrEdit(sid, "https://example.com"); // caret=끝(19)
+
+    // caret을 'c'(16) 앞으로 이동(← 3회 = "com" 앞). 화살표는 command/control 없어 게이트서 chord 아님 → moveLeft.
+    _ = session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} }) catch return error.KeyFailed;
+    _ = session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} }) catch return error.KeyFailed;
+    _ = session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} }) catch return error.KeyFailed;
+    try std.testing.expectEqual(@as(usize, 16), session.addr_field.caret);
+
+    // ⌘⌫ : 옛 버그면 게이트가 .backspace를 chord로 보고 cancelAddrEdit → 웹 포커스로 튕김(addr_edit=null). 이제
+    // 편집기가 줄 시작까지 삭제(deleteToLineStart) — 편집 유지.
+    _ = session.handleKeyEvent(.{ .key = .backspace, .modifiers = .{ .command = true } }) catch return error.KeyFailed;
+    try std.testing.expect(session.addr_edit != null); // 편집 유지(포커스 안 튕김 — 제보 수정)
+    try std.testing.expectEqualStrings("com", session.addr_field.text.items); // [0,16) 삭제
+    try std.testing.expectEqual(@as(usize, 0), session.addr_field.caret);
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {

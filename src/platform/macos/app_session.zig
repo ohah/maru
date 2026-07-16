@@ -2529,9 +2529,10 @@ pub const AppSession = struct {
     }
 
     /// 주소창 편집 caret의 셀 rect(backing px, 좌상단 원점) — IME 후보창 위치(imeCursorRect .addr_edit)에 쓴다. 렌더 "1c"
-    /// 와 같은 셈법: 밴드 y(full.y+bar_h) + text pad_y, caret_col = nav_end(버튼 존) + 편집 표시폭(query EAW + preedit EAW).
-    /// tail 앵커라 넘치면 URL 영역 우경계(cols-1)로 clamp(렌더 caret과 정합). 편집 surface가 활성 탭인 leaf를 못 찾거나
-    /// cell 미상이면 null(imeCursorRect가 본문 origin으로 폴백). px 정확도는 헤드리스로 검증 어려움 — 밴드 근처 non-null만 확인.
+    /// 와 같은 셈법: 밴드 y(full.y+bar_h) + text pad_y, caret_col은 fieldLayout(렌더 emitEditBand 단일 소스, mid-string
+    /// caret·가로 스크롤·ellipsis 반영). 극단적으로 좁은 밴드(cols≤nav_end로 text_area==0=스크롤 없음)면 fieldLayout이
+    /// caret_col을 하한만 클램프해 cols를 넘을 수 있으므로 **cols-1로 상한 클램프**(후보창이 밴드 밖에 뜨는 것 방지). 편집
+    /// surface가 활성 탭인 leaf를 못 찾거나 cell 미상이면 null(imeCursorRect가 본문 origin으로 폴백).
     fn addrEditCaretRect(self: *AppSession) ?chrome.draw.Rect {
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
@@ -2542,7 +2543,7 @@ pub const AppSession = struct {
         const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)(navButtonAt·렌더 단일 소스)
         // caret 열 = fieldLayout(렌더 emitEditBand와 **같은 단일 소스**) — mid-string caret·가로 스크롤·ellipsis 반영.
         const lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(cols), .nav_end = @intCast(nav_end) });
-        const caret_col: u32 = lay.caret_col;
+        const caret_col: u32 = @min(lay.caret_col, cols -| 1); // 밴드 밖(cols 초과)이면 우경계로 상한 클램프
         const bar_h = pb.full.h;
         const text_origin_y = pb.full.y + bar_h + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 렌더 band_text_origin_y와 동일
         return .{
@@ -7770,8 +7771,8 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
                 return true;
             },
-            5 => { // 트리플클릭 → 전체 선택.
-                if (!layout_math.pointInRect(x_px, y_px, band)) return false;
+            5 => { // 트리플클릭 → 전체 선택(URL 존만 — 더블클릭과 동일 게이트라 nav 버튼 존 트리플클릭이 전체선택 안 하게).
+                if (!in_url_zone) return false;
                 self.addr_field.selectAll();
                 self.metal_dirty = true;
                 return true;
@@ -7864,6 +7865,8 @@ pub const AppSession = struct {
                 },
                 .char => {
                     if (k.mods.command and (k.codepoint == 'a' or k.codepoint == 'A')) return self.addr_field.selectAll(); // ⌘A 전체 선택
+                    if (k.mods.control and (k.codepoint == 'a' or k.codepoint == 'A')) return self.addr_field.moveHome(k.mods.shift); // ⌃A 줄 시작(emacs)
+                    if (k.mods.control and (k.codepoint == 'e' or k.codepoint == 'E')) return self.addr_field.moveEnd(k.mods.shift); // ⌃E 줄 끝
                     if (k.mods.command or k.mods.control or k.mods.option) return; // 그 외 단축키 조합은 편집기에 안 쌓음
                     self.addrEditAppend(k.codepoint);
                 },
@@ -10983,16 +10986,22 @@ pub const AppSession = struct {
             const ie = chromeInputFromKeyEvent(event);
             // cmd/ctrl 단축키(⌘[·⌘T 등)는 편집기가 삼키지 않고 **아래 keybinding 경로로 흘린다**(제보: 주소창서 단축키 안
             // 먹음 — 브라우저 URL 바에서도 앱 단축키는 동작해야). 단축키가 pane/탭 컨텍스트를 바꾸므로 편집을 취소한다
-            // (navigate 안 함). fall-through라 return 안 함. **단 텍스트 편집 chord(⌘A/C/V/X/Z)는 제외** — pane/탭
-            // 컨텍스트를 안 바꾸므로 취소·fall-through 대상이 아니고, 아래 else(handleAddrEditKey)의 `.char` 핸들러가
-            // command/control mods를 보고 early-return하는 소비 no-op이 되어 **편집을 보존**한다(OverlayInput이 chord 편집
-            // 미지원이라 실제 붙여넣기는 후속). ⌘V가 주소창 편집을 통째 날리던 회귀 수정(14차 리뷰 [1]).
+            // (navigate 안 함). fall-through라 return 안 함. **단 텍스트 편집 chord는 제외** — pane/탭 컨텍스트를 안 바꾸고
+            // handleAddrEditKey가 편집으로 처리하므로 취소·fall-through 대상이 아니다. 제외 대상: ⌘A/C/V/X/Z(선택·복붙),
+            // **⌘←/→·⌘⇧←/→(줄 시작/끝 이동·선택)·⌃A/⌃E(줄 시작/끝)** — 화살표는 .char가 아니라 .left/.right라 옛 `command
+            // and .char` 화이트리스트에 안 걸려 편집이 통째로 취소되던 버그(리뷰 #1, 데이터 손실). ⌘V가 편집을 날리던
+            // 회귀 수정(14차 리뷰 [1])의 확장.
             const is_shortcut_chord = switch (ie) {
                 .key => |k| blk: {
                     if (!(k.mods.command or k.mods.control)) break :blk false;
-                    if (k.mods.command and k.key == .char) {
-                        const c = k.codepoint | 0x20; // ASCII 소문자화(비-letter는 비교서 자연 탈락)
-                        if (c == 'a' or c == 'c' or c == 'v' or c == 'x' or c == 'z') break :blk false;
+                    switch (k.key) {
+                        .left, .right, .up, .down => break :blk false, // caret 이동/선택(⌘←/→ 등) — 편집기 소유
+                        .char => {
+                            const c = k.codepoint | 0x20; // ASCII 소문자화(비-letter는 비교서 자연 탈락)
+                            if (k.mods.command and (c == 'a' or c == 'c' or c == 'v' or c == 'x' or c == 'z')) break :blk false;
+                            if (k.mods.control and (c == 'a' or c == 'e')) break :blk false; // ⌃A/⌃E 줄 시작/끝
+                        },
+                        else => {},
                     }
                     break :blk true;
                 },
@@ -16460,24 +16469,29 @@ pub const AppSession = struct {
                             const band_rect: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + addr_bar_h, .w = pb.full.w, .h = addr_bar_h };
                             // 밴드 배경 = 탭 바와 같은 chrome 배경(sidebarBg, window.opacity 반영) — 주소창이 하나의 밴드로 이어져 보이게(quad).
                             self.appendBarBgQuad(band_rect, self.chromeQuadBg(self.sidebarBg()));
-                            // Phase 7e-2a: 이 surface를 편집 중이면 URL 대신 **편집 버퍼 + 끝 block caret**을, 아니면 읽기전용
-                            // nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성 판정(payload 통째 복사 회피). 텍스트는 셀
-                            // 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만. muted 색.
+                            // Phase 7e-2a/슬라이스 2·3: 이 surface를 편집 중이면 URL 대신 **편집 텍스트 + mid-string caret**(정적
+                            // 반전 블록 셀, emitEditBand)을, 아니면 읽기전용 nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성
+                            // 판정. 텍스트·caret은 셀 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만.
                             const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
-                            // 슬라이스 3: 편집 중 선택이 있으면 하이라이트 배경 quad(fieldLayout selection span — 편집 텍스트와 같은
-                            // 단일 소스라 하이라이트가 글자와 정렬). 밴드 배경 위·텍스트 셀 아래(나중 append = 위 layer). 색=theme.selection.
-                            // caret은 별도로 안 그린다 — buildPaneAddressBarDrawList가 DrawList.cursor를 켜 renderer가 **터미널과 같은
-                            // 반전 블록 커서**(tabbar_colors.cursor 색·blink 재활용)로 그린다(사용자 요청 "터미널 커서와 동일").
-                            if (editing and self.cell_width_px > 0) {
-                                const sel_cw = self.cell_width_px;
-                                const band_cols: u32 = @min(band_rect.w / sel_cw, @as(u32, std.math.maxInt(u16)));
-                                const sel_nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
-                                const sel_lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(band_cols), .nav_end = @intCast(sel_nav_end) });
-                                if (sel_lay.selection) |sel| if (sel.end_col > sel.start_col) {
+                            const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
+                            const addr_nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)
+                            // 리뷰 #9: fieldLayout을 프레임당 **한 번만** 계산해 선택 quad와 emitEditBand가 공유한다(옛 코드는 여기와
+                            // buildPaneAddressBarDrawList 내부에서 두 번 계산했다). 편집 아님이면 null.
+                            const edit_layout: ?chrome.components.text_field.FieldLayout = if (editing and self.cell_width_px > 0)
+                                chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(addr_cols), .nav_end = @intCast(addr_nav_end) })
+                            else
+                                null;
+                            // 편집 중 선택이 있으면 하이라이트 배경 quad(fieldLayout selection span — 편집 텍스트와 같은 단일 소스라
+                            // 글자와 정렬). 밴드 배경 위·텍스트 셀 아래(나중 append). 색=theme.selection. caret은 emitEditBand가 반전
+                            // 블록 셀로 그린다(별도 quad 아님). **리뷰 #5**: 텍스트가 그려질 조건(emitEditBand의 nav_end < cols-1)과
+                            // **같은 가드**를 적용 — 극단적으로 좁은 밴드(nav_end==cols-1)서 텍스트 없이 선택 quad만 뜨는 것 방지.
+                            if (edit_layout) |lay| if (addr_cols > addr_nav_end + 1) {
+                                if (lay.selection) |sel| if (sel.end_col > sel.start_col) {
+                                    const sel_cw = self.cell_width_px;
                                     const sel_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel.start_col * sel_cw, .y = band_rect.y, .w = (sel.end_col - sel.start_col) * sel_cw, .h = band_rect.h };
                                     self.appendBarBgQuad(sel_rect, self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.selection)));
                                 };
-                            }
+                            };
                             // Phase 7e-3: nav 버튼(back/forward) 활성 여부는 이 surface의 저장된 nav 상태에서 온다(없으면 false —
                             // 첫 frame nav 미도착 시 비활성으로 보임). reload는 늘 활성(builder 내부). URL(읽기전용)도 같은 상태에서 읽어
                             // 버튼·URL이 한 번의 조회를 공유한다.
@@ -16508,12 +16522,9 @@ pub const AppSession = struct {
                                     }
                                 }
                             }
-                            // 슬라이스 2/3: 편집 밴드는 fieldLayout(단일 레이아웃 소스)로 그린다 — addr_field(TextField)의 **빌린
-                            // View**를 넘겨 mid-string caret·선택·가로 스크롤·preedit를 반영한다(caret은 addr_field.caret 실오프셋).
-                            // View 슬라이스는 addr_field.text/preedit.items라 렌더 중 안정. 읽기전용이면 nav URL(appendEllipsizedTitle .head).
-                            const edit_view: ?chrome.components.text_field.View = if (editing) self.addr_field.view() else null;
+                            // 슬라이스 2/3: 편집 밴드는 위에서 한 번 계산한 edit_layout(fieldLayout 단일 소스)을 그대로 넘겨 그린다
+                            // (mid-string caret·선택·가로 스크롤·preedit 반영). 읽기전용이면 nav URL(appendEllipsizedTitle .head).
                             const url: []const u8 = if (editing) "" else (if (nav_state) |st| st.url else "");
-                            const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
                                 const addr_fg: terminal.Color = .{ .rgb = self.mutedForeground() }; // 읽기전용 URL — 비활성 탭과 같은 muted 톤
                                 // 편집 caret = 터미널 커서와 같은 색: 반전 블록 배경=cursor.color(없으면 theme.cursor), 그 위 글자=
@@ -16525,7 +16536,7 @@ pub const AppSession = struct {
                                 const button_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                                 const button_dim_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
                                 const band_text_origin_y = band_rect.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 탭 바 text_origin_y와 같은 pad_y
-                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_view, caret_color, caret_text, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
+                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_layout, caret_color, caret_text, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
                                     self.collectShaped(&collected, adl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = band_text_origin_y, .colors = tabbar_colors } });
                                 } else |_| {} // draw 생성 OOM은 탭 바처럼 무시(밴드 배경만이라도)
                             }
@@ -19876,7 +19887,7 @@ pub const AppSession = struct {
         var nav_it = self.web_nav_states.valueIterator();
         while (nav_it.next()) |v| self.allocator.free(v.url);
         self.web_nav_states.deinit(self.allocator);
-        self.addr_field.deinit(self.allocator); // 7e-2: 주소창 편집 OverlayInput(query/preedit ArrayList) 해제
+        self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
@@ -28537,11 +28548,48 @@ test "슬라이스 3: 주소창 밴드 마우스 — 클릭 caret 배치·더블
     try std.testing.expectEqual(@as(usize, 5), sel.hi());
     try std.testing.expectEqualStrings("bb", session.addr_field.text.items[sel.lo()..sel.hi()]);
 
-    // 트리플클릭(kind 5) → 전체 선택.
+    // 트리플클릭(kind 5) URL 존 → 전체 선택.
     session.mouse(5, colX(band_x, nav_end + 2, cw), band_y, 0, 0);
     const all = session.addr_field.selection orelse return error.NoSelectionAll;
     try std.testing.expectEqual(@as(usize, 0), all.lo());
     try std.testing.expectEqual(@as(usize, 8), all.hi());
+
+    // 리뷰 #4: 트리플클릭이 **nav 버튼 존**(URL 존 밖, col < nav_end)이면 전체선택 안 함(더블클릭과 같은 in_url_zone 게이트).
+    session.addr_field.clearSelection();
+    session.mouse(5, @floatFromInt(pb.full.x + 1 * cw), band_y, 0, 0); // 버튼 존(col 1 = back 버튼)
+    try std.testing.expect(session.addr_field.selection == null);
+}
+
+test "리뷰 #1: ⌘←/⌘→가 편집을 취소하지 않고 caret을 이동한다 (is_shortcut_chord 게이트)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term 필요(session.init)
+    const allocator = std.testing.allocator;
+    const session = try initRenameCaretTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.backing_width_px = 800;
+    session.backing_height_px = 400;
+    session.titlebar_strip_px = 0;
+
+    const sid = try session.createAdoptedWebTermInActivePane();
+    session.enterAddrEdit(sid, "https://example.com"); // caret=끝(19)
+    try std.testing.expectEqual(@as(usize, 19), session.addr_field.caret);
+
+    // ⌘← : handleKeyEvent 게이트가 편집을 취소하던 버그(리뷰 #1) — 이제 handleAddrEditKey로 흘러 moveHome. 편집 유지.
+    _ = session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .command = true } }) catch return error.KeyFailed;
+    try std.testing.expect(session.addr_edit != null); // 편집 취소 안 됨(옛 버그면 null)
+    try std.testing.expectEqual(@as(usize, 0), session.addr_field.caret); // 줄 시작으로
+
+    // ⌘→ : 줄 끝으로.
+    _ = session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .command = true } }) catch return error.KeyFailed;
+    try std.testing.expect(session.addr_edit != null);
+    try std.testing.expectEqual(@as(usize, 19), session.addr_field.caret);
+
+    // ⌘⇧← : 줄 시작까지 선택 확장(편집 유지).
+    _ = session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .command = true, .shift = true } }) catch return error.KeyFailed;
+    try std.testing.expect(session.addr_edit != null);
+    try std.testing.expect(session.addr_field.selection != null);
+    try std.testing.expectEqual(@as(usize, 0), session.addr_field.selection.?.lo());
+    try std.testing.expectEqual(@as(usize, 19), session.addr_field.selection.?.hi());
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {

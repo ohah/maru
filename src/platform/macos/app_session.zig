@@ -12979,7 +12979,29 @@ pub const AppSession = struct {
     /// 타입에 묶여 host(Swift)가 정하고, 이스케이프 '메커니즘'은 여기(Zig)가 단일 출처로 한다.
     pub fn pasteText(self: *AppSession, bytes: []const u8, escape_each: bool) void {
         if (!self.surface_initialized) return;
+        // 슬라이스 4: 주소창 편집 중이면 클립보드 텍스트를 **필드 caret에 삽입**(선택 있으면 대체)한다 — PTY로 안 보낸다.
+        // 현재 ⌘V가 Swift에서 이 경로(pastePasteboardText→sendPasteText→paste_text)로 오는데, web Term은 PTY가 없어
+        // 소멸하던 것을 필드로 라우팅(§5.3). 개행은 strip(단일행 URL). paste protection(submitPaste) 우회 = 직접 삽입.
+        if (self.addr_edit != null) {
+            self.addrEditPaste(bytes);
+            self.metal_dirty = true;
+            return;
+        }
         self.pasteTextTo(self.activeSurface().id, bytes, escape_each); // Cmd+V·드롭 즉시 경로 = 지금 활성 surface
+    }
+
+    /// 슬라이스 4: 클립보드 텍스트를 주소창 편집 필드에 삽입(⌘V) — 개행·NUL·제어문자(단일행 URL 오염) strip 후 caret에
+    /// insertText(선택 있으면 대체). 편집 아님이면 무동작. 큰 붙여넣기도 URL이라 상한 없이 그대로(필드는 동적 버퍼).
+    fn addrEditPaste(self: *AppSession, bytes: []const u8) void {
+        if (self.addr_edit == null) return;
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        buf.ensureTotalCapacity(self.allocator, bytes.len) catch return;
+        for (bytes) |b| {
+            if (b == '\r' or b == '\n' or b == 0 or b == '\t') continue; // 단일행 위생 처리(개행·NUL·탭 제거)
+            buf.append(self.allocator, b) catch return;
+        }
+        if (buf.items.len > 0) self.addr_field.insertText(self.allocator, buf.items) catch {};
     }
 
     /// pasteText의 **대상 명시** 변형. 대상 surface id를 받아 그 surface에 붙인다 — 원격(ssh) 업로드처럼 드롭
@@ -13800,6 +13822,15 @@ pub const AppSession = struct {
         if (self.copy_buffer.len > 0) {
             self.allocator.free(self.copy_buffer);
             self.copy_buffer = &.{};
+        }
+        // 슬라이스 4: 주소창 편집 중이면 **필드 선택**을 복사한다(⌘C/⌘X). 편집 중이나 선택 없으면 빈 값(터미널 선택으로
+        // 안 샘 — 편집 컨텍스트에선 주소창이 클립보드 주체). copy_buffer로 dup해 다음 copy_text까지 안정(Swift가 즉시 씀).
+        if (self.addr_edit != null) {
+            const sel = self.addr_field.selection orelse return &.{};
+            const slice = self.addr_field.text.items[sel.lo()..sel.hi()];
+            if (slice.len == 0) return &.{};
+            self.copy_buffer = self.allocator.dupe(u8, slice) catch return &.{};
+            return self.copy_buffer;
         }
         // extractSelection은 선택 + 스크롤백을 읽는다 — 락 아래(docs/io-render-threading.md §9.1). full (a)에서 선택이
         // 이제 reader 스레드가 async로 mutate하므로, 락 없이 읽으면 드래그-선택 직후 Cmd+C가 torn/stale 선택을 본다
@@ -27714,6 +27745,36 @@ test "슬라이스 4: 주소창 키보드 편집 — 화살표·shift 선택·�
     // 타이핑(선택 대체): 'X' → 선택 전체가 "X"로.
     session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'X' } });
     try std.testing.expectEqualStrings("X", session.addr_field.text.items);
+}
+
+test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C), pasteText는 caret 삽입·개행 strip(⌘V)" {
+    // copyText/pasteText는 addr_edit 분기에서 addr_field만 만진다(터미널 경로 안 탐). minimal init로 충분하되
+    // surface_initialized·copy_buffer는 명시 초기화([[devsession-undefined-test-field-trap]]).
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.surface_initialized = true;
+    session.copy_buffer = &.{};
+    session.metal_dirty = false;
+    session.addr_edit = 1; // 편집 활성 → copy/paste가 필드 분기
+    session.addr_field = .{};
+    defer session.addr_field.deinit(std.testing.allocator);
+    defer if (session.copy_buffer.len > 0) std.testing.allocator.free(session.copy_buffer);
+
+    try session.addr_field.setText(std.testing.allocator, "abcdef"); // caret=끝(6)
+    // ⌘C: 선택 [1,4)="bcd"를 복사(필드 선택).
+    session.addr_field.selection = .{ .anchor = 1, .focus = 4 };
+    try std.testing.expectEqualStrings("bcd", session.copyText());
+    // 선택 없으면 빈(터미널 선택으로 안 샘 — 편집 컨텍스트는 주소창이 클립보드 주체).
+    session.addr_field.selection = null;
+    try std.testing.expectEqualStrings("", session.copyText());
+
+    // ⌘V: 클립보드 텍스트를 caret에 삽입(개행·NUL strip → 단일행). caret=끝 → "abcdef"+"XYZ".
+    session.pasteText("X\nY\r\nZ", false);
+    try std.testing.expectEqualStrings("abcdefXYZ", session.addr_field.text.items);
+    // 선택 대체 붙여넣기: 전체 선택 후 → 선택이 붙여넣기로 대체.
+    session.addr_field.selectAll();
+    session.pasteText("hello", false);
+    try std.testing.expectEqualStrings("hello", session.addr_field.text.items);
 }
 
 test "navButtonAt: 밴드 좌측 존을 back/forward/reload로 가르고 URL 존은 null (7e-3 hit-test)" {

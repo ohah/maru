@@ -338,7 +338,7 @@ fn appendEllipsizedTitle(
 /// 주소창 **편집 밴드**를 `text_field.fieldLayout`(L3 단일 레이아웃 소스, docs/text-field-editor.md §3)로 셀 방출한다.
 /// fieldLayout이 준 run(pre/preedit/post)·가로 스크롤·lead/tail "…"를 [nav_end, cols) 창에 클립해 깐다. **caret은 여기서
 /// 안 그린다** — mid-string caret을 불투명 블록 셀로 그리면 그 자리 글자를 가리므로(사용자 제보), caret은 app_session이
-/// **얇은 세로 막대 quad**(insertion bar, 글자 안 가림)로 `fieldLayout.caret_col`에 그린다. 그 caret 열이 hit-test
+/// **반투명 블록 quad**(글자 비침)로 `fieldLayout.caret_col`에 그린다. 그 caret 열이 hit-test
 /// (caretAtColumn)와 같은 fieldLayout 소스라 그려진 caret과 클릭 caret이 어긋나지 않는다(§2.3 벽②). fieldLayout의 폭 규약
 /// (displayCols=Σ max(1,cellWidth))이 titleCellWidth(widen=false)와 같아, 읽기전용(appendEllipsizedTitle .head)과 편집 사이
 /// 열 점프가 없다(§3.2 전환 일치). codepoint당 셀(appendEllipsizedTitle와 같은 방출 단위 — 폭 max(1,cellWidth)).
@@ -650,7 +650,7 @@ pub fn buildPaneAddressBarDrawList(
     url: []const u8,
     cols: u16,
     fg: terminal.Color,
-    edit_view: ?text_field.View, // 슬라이스 2: 편집 중이면 fieldLayout(단일 레이아웃 소스)로 밴드 방출, null=읽기전용 URL. caret은 app_session이 세로 막대 quad로(글자 안 가림)
+    edit_view: ?text_field.View, // 슬라이스 2: 편집 중이면 fieldLayout(단일 레이아웃 소스)로 밴드 방출, null=읽기전용 URL. caret은 app_session이 반투명 블록 quad로(글자 비침)
     can_go_back: bool, // Phase 7e-3: back 버튼 활성(WKWebView.canGoBack) — webNavState에서 옴
     can_go_forward: bool, // forward 버튼 활성(WKWebView.canGoForward)
     button_fg: terminal.Color, // 활성 버튼 글리프 색
@@ -1424,7 +1424,7 @@ test "buildPaneAddressBarDrawList: reload는 항상 활성, back/forward는 canG
 test "buildPaneAddressBarDrawList: 편집 중이면 fieldLayout으로 텍스트 + 끝 block caret(배경=caret_color) (슬라이스 2)" {
     const allocator = std.testing.allocator;
     // nav_end=9 → 텍스트 영역 [9,23). "abc"(3칸)이 col 9~11에 들어간다. caret은 coretext 셀이 아니라 app_session 세로
-    // 막대 quad라(글자 안 가림), 여기선 **caret 셀이 없어야** 한다(불투명 블록 회귀 방지 — 사용자 제보 "커서가 글자 가림").
+    // 반투명 블록 quad라(글자 비침), 여기선 **caret 셀이 없어야** 한다(불투명 블록 회귀 방지 — 사용자 제보 "커서가 글자 가림").
     var dl = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.View{ .text = "abc", .caret = 3 }, false, false, .default, .default, 3, 3);
     defer dl.deinit(allocator);
     var text_cells: usize = 0;
@@ -1435,7 +1435,7 @@ test "buildPaneAddressBarDrawList: 편집 중이면 fieldLayout으로 텍스트 
     }
     try std.testing.expectEqual(@as(usize, 3), text_cells); // "abc" 3글자만(caret 셀 없음)
 
-    // 빈 편집 버퍼면 버튼 3개만(텍스트 셀·caret 셀 0). caret 막대는 app_session이 별도로 그린다.
+    // 빈 편집 버퍼면 버튼 3개만(텍스트 셀·caret 셀 0). caret 블록은 app_session이 별도로 그린다.
     var empty_edit = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.View{ .text = "", .caret = 0 }, false, false, .default, .default, 3, 3);
     defer empty_edit.deinit(allocator);
     for (empty_edit.cells) |c| try std.testing.expect(!(c.style.background == .rgb and c.codepoint == ' ')); // caret 셀 없음
@@ -1444,14 +1444,14 @@ test "buildPaneAddressBarDrawList: 편집 중이면 fieldLayout으로 텍스트 
 test "buildPaneAddressBarDrawList: 긴 편집 URL은 fieldLayout 가로 스크롤 — 선두 …(lead) (슬라이스 2)" {
     const allocator = std.testing.allocator;
     // nav_end=9, cols=24 → 텍스트 영역 15칸. 긴 URL(caret=끝)은 텍스트 존을 넘쳐 fieldLayout이 가로 스크롤 →
-    // 선두 "…"(lead ellipsis, col 9)로 앞을 자른다. caret(막대)은 app_session이 그리므로 여기선 lead "…"만 확인.
+    // 선두 "…"(lead ellipsis, col 9)로 앞을 자른다. caret(블록)은 app_session이 그리므로 여기선 lead "…"만 확인.
     const long = "https://example.com/very/long/path/segment";
     var dl = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.View{ .text = long, .caret = long.len }, false, false, .default, .default, 3, 3);
     defer dl.deinit(allocator);
     var lead_ellipsis: ?renderer.DrawCell = null;
     for (dl.cells) |c| {
         if (c.codepoint == title_ellipsis_glyph) lead_ellipsis = c;
-        try std.testing.expect(!(c.style.background == .rgb and c.codepoint == ' ')); // caret 셀 없음(막대는 app_session)
+        try std.testing.expect(!(c.style.background == .rgb and c.codepoint == ' ')); // caret 셀 없음(블록은 app_session)
     }
     try std.testing.expect(lead_ellipsis != null); // 선두 "…"(앞이 스크롤로 잘림)
     try std.testing.expectEqual(@as(u16, 9), lead_ellipsis.?.col); // nav_end 자리에 lead "…"

@@ -16341,16 +16341,8 @@ pub const AppSession = struct {
                 // per-cell 대비 하한 — 활성 pane(cell_colors)과 동일 규칙(비활성 pane의 256색·truecolor도 보정).
                 .min_contrast = self.appearance.theme.min_contrast,
             };
-            // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명). cursor는 주소창 **편집 밴드**의 반전 블록
-            // 커서용(터미널 커서와 같은 색·경로 재활용, 16162와 동일) — 탭 바/grip은 DrawList.cursor.visible=false라 무영향,
-            // 편집 밴드만 caret 열에 cursor.visible=true라 이 색으로 렌더된다(사용자 요청 "터미널 커서와 동일").
-            const tabbar_colors: metal_frame.CellColors = .{
-                .default_fg = self.appearance.theme.foreground,
-                .cursor = .{
-                    .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
-                    .text = self.appearance.cursor.text orelse self.appearance.theme.background,
-                },
-            };
+            // 탭 바 제목 색: 전경=테마 글자색, 배경은 chrome이 이미 깔아 둠(투명).
+            const tabbar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
             if (builtin.os.tag == .macos) {
                 // grip/label/탭바/비활성/floating/활성 collect가 공유하는 finishPane용 builder(단일 출처 paneFrameBuilder).
                 const pane_frame_builder = self.paneFrameBuilder();
@@ -16510,12 +16502,16 @@ pub const AppSession = struct {
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
                                 const addr_fg: terminal.Color = .{ .rgb = self.mutedForeground() }; // 읽기전용 URL — 비활성 탭과 같은 muted 톤
+                                // 편집 caret = 터미널 커서와 같은 색: 반전 블록 배경=cursor.color(없으면 theme.cursor), 그 위 글자=
+                                // cursor.text(없으면 theme.background). 정적 반전 블록 셀(§6)이라 그 칸 글자가 반전색으로 또렷이 보인다.
+                                const caret_color: terminal.Color = .{ .rgb = self.appearance.cursor.color orelse self.appearance.theme.cursor };
+                                const caret_text: terminal.Color = .{ .rgb = self.appearance.cursor.text orelse self.appearance.theme.background };
                                 // Phase 7e-3: 활성 버튼 = 활성 탭 전경(sidebar_foreground, muted URL보다 밝아 클릭 가능함이 드러남),
                                 // 비활성 버튼 = dimRgb(grip 손잡이와 같은 흐린 톤). 렌더가 쓰는 nav_button_w/count는 hit-test와 같은 단일 소스.
                                 const button_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                                 const button_dim_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
                                 const band_text_origin_y = band_rect.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 탭 바 text_origin_y와 같은 pad_y
-                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_view, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
+                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_view, caret_color, caret_text, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
                                     self.collectShaped(&collected, adl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = band_text_origin_y, .colors = tabbar_colors } });
                                 } else |_| {} // draw 생성 OOM은 탭 바처럼 무시(밴드 배경만이라도)
                             }

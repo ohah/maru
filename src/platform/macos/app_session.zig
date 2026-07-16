@@ -1905,13 +1905,17 @@ pub const AppSession = struct {
     // 7e-1b 주소창이 webNavState로 읽는다. url은 gpa 소유(dup) — deinit이 모든 url + 맵을 해제한다. `.empty` 기본
     // 초기화라 init(self.* = .{...}) 경로가 자동으로 세운다(별도 대입 불요).
     web_nav_states: std.AutoHashMapUnmanaged(u64, WebNavState) = .empty,
-    // Phase 7e-2a: browser 웹 패널 주소창 편집 상태(한 번에 하나). `addr_edit`=편집 중인 web surface_id(null=편집 아님=읽기전용
-    // URL 밴드). 텍스트 입력은 **find/palette/rename과 같은 공유 `OverlayInput`**(`addr_input`)이 담당한다 — query/preedit(IME
-    // 조합)·caret·가로 스크롤·EAW 폭을 단일 출처로 제공(별도 버퍼 재구현 안 함, DRY). 밴드 클릭(enterAddrEdit)이 addr_edit을
-    // 세우고 addr_input에 현재 URL을 시드하며, 활성이면 keyDown이 handleKeyEvent 인터셉트로·평문 IME 확정이 inputFocus=.addr_edit
-    // 라우팅으로 addr_input에 들어간다. teardown 시 stale surface면 addr_edit=null + addr_input.clear(dropAddrEditIfSurface).
+    // Phase 7e-2a/슬라이스 3: browser 웹 패널 주소창 편집 상태(한 번에 하나). `addr_edit`=편집 중인 web surface_id(null=편집
+    // 아님=읽기전용 URL 밴드). 텍스트 편집은 **주소창 전용 `TextField`**(`addr_field`, docs/text-field-editor.md)가 담당한다 —
+    // text/preedit(IME 조합)·**mid-string caret**·선택·가로 스크롤을 소유한다(끝-caret 전용 OverlayInput에서 교체, 슬라이스 3).
+    // 밴드 클릭(enterAddrEdit)이 addr_edit을 세우고 addr_field에 현재 URL을 시드하며, 클릭 위치에 caret을 놓고(caretAtColumn)
+    // 드래그로 선택한다. 활성이면 keyDown이 handleKeyEvent 인터셉트로·평문 IME 확정이 inputFocus=.addr_edit 라우팅으로
+    // addr_field에 들어간다. teardown 시 stale surface면 addr_edit=null + addr_field.clear(dropAddrEditIfSurface).
     addr_edit: ?u64 = null,
-    addr_input: chrome.components.overlay_input.OverlayInput = .{},
+    addr_field: chrome.components.text_field.TextField = .{},
+    // 슬라이스 3: 주소창 밴드 드래그 선택 중인가(터미널 선택용 mouse_drag_selecting과 **별도** — §5.1). down(1)이 URL 존에서
+    // 시작하면 true, drag(2)가 selectTo로 선택 확장, up(3)이 false. 드래그가 밴드를 벗어나도 addr_edit은 유지(포커스 불변식).
+    addr_dragging: bool = false,
     // 7e-2a 신호 3종(1회성 take 패턴 — takeBell/takeClipboardAction 동형, 7e-2b Swift가 ABI로 drain). 편집 진입/커밋/취소가
     // 세우고 Swift가 매 tick take해 WKWebView 포커스 전이·navigate를 실행한다(정책·타이밍은 Zig, 실행은 platform).
     //  ① focus-pull: 편집 진입 시 세움 — 키 포커스를 WKWebView에서 뺏어 타이핑이 주소창(Zig)으로 오게(값=surface_id, 관련 없음).
@@ -2536,9 +2540,9 @@ pub const AppSession = struct {
         const cols: u32 = pb.full.w / cw;
         if (cols == 0) return null;
         const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)(navButtonAt·렌더 단일 소스)
-        // 편집 표시폭(확정 query + 조합 preedit) — caret은 그 끝. tail 앵커라 URL 영역 우경계(cols-1)로 clamp(렌더 정합).
-        const edit_cols: u32 = self.addr_input.queryCols() + chrome.components.overlay_input.displayCols(self.addr_input.preedit.items);
-        const caret_col: u32 = @min(nav_end + edit_cols, cols -| 1);
+        // caret 열 = fieldLayout(렌더 emitEditBand와 **같은 단일 소스**) — mid-string caret·가로 스크롤·ellipsis 반영.
+        const lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(cols), .nav_end = @intCast(nav_end) });
+        const caret_col: u32 = lay.caret_col;
         const bar_h = pb.full.h;
         const text_origin_y = pb.full.y + bar_h + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 렌더 band_text_origin_y와 동일
         return .{
@@ -7690,8 +7694,7 @@ pub const AppSession = struct {
     /// 편집 진입(밴드 클릭). 현재 URL을 초기 버퍼로 시드(UTF-8 경계 절단) + focus-pull pending 세움(키 포커스를 WKWebView
     /// 에서 뺏어 타이핑이 주소창으로 오게 — 7e-2b Swift가 실행). 이미 편집 중이면 대상을 교체한다(한 번에 하나).
     fn enterAddrEdit(self: *AppSession, surface_id: u64, current_url: []const u8) void {
-        self.addr_input.clear(); // 이전 편집 잔재 제거
-        self.addr_input.query.appendSlice(self.allocator, current_url) catch {}; // 현재 URL을 편집 초기값으로(OOM이면 빈 편집)
+        self.addr_field.setText(self.allocator, current_url) catch self.addr_field.clear(); // 현재 URL 시드(caret=끝)·OOM이면 빈 편집
         self.addr_edit = surface_id;
         self.addr_focus_pull_pending = surface_id;
     }
@@ -7702,38 +7705,95 @@ pub const AppSession = struct {
         return self.addr_edit;
     }
 
-    /// 현재 편집 확정 텍스트(OverlayInput query, 없으면 빈). 렌더가 URL 대신 이걸(+preedit) 그린다.
+    /// 현재 편집 확정 텍스트(TextField text, 없으면 빈). 렌더가 URL 대신 이걸(+preedit) 그린다.
     fn addrEditText(self: *const AppSession) []const u8 {
-        return self.addr_input.query.items;
+        return self.addr_field.text.items;
     }
-    /// IME 조합 중(preedit) 텍스트 — 렌더가 query 뒤에 붙여 조합 중 글자를 보인다(find/palette와 동형).
+    /// IME 조합 중(preedit) 텍스트 — 렌더가 caret 위치에 겹쳐 조합 중 글자를 보인다(fieldLayout run).
     fn addrEditPreedit(self: *const AppSession) []const u8 {
-        return self.addr_input.preedit.items;
+        return self.addr_field.preedit.items;
     }
 
     fn addrEditAppend(self: *AppSession, cp: u21) void {
         if (self.addr_edit == null) return;
-        self.addr_input.appendChar(self.allocator, cp) catch {}; // 동적 버퍼(OOM이면 무시)
+        self.addr_field.insertCp(self.allocator, cp) catch {}; // caret에 삽입(선택 있으면 대체) — 동적 버퍼, OOM이면 무시
     }
 
     fn addrEditBackspace(self: *AppSession) void {
         if (self.addr_edit == null) return;
-        self.addr_input.backspace();
+        self.addr_field.deleteBackward(); // caret 앞 그래핌 하나(선택 있으면 선택 삭제)
+    }
+
+    /// 슬라이스 3: 주소창 URL 단어 구분자(더블클릭·⌥이동 — 컴포넌트에 주입하는 정책). URL 구조 경계(scheme·host·path·
+    /// query)를 단어로 끊어 더블클릭이 세그먼트를 잡게 한다. 공백은 TextField가 항상 구분자로 친다.
+    const addr_word_separators = "/:.?&#=@~";
+
+    /// 슬라이스 3: 밴드 클릭 x_px → text 바이트 오프셋(fieldLayout 역함수 caretAtColumn — 렌더 emitEditBand와 같은 단일
+    /// 소스라 그려진 caret == 클릭 caret). 클릭 열은 셀 경계로 반올림(좌반=글자 앞·우반=글자 뒤). 밴드 밖 x는 caretAtColumn이
+    /// 창 경계로 clamp(드래그가 밴드를 벗어나면 시작/끝 방향으로 확장). cw==0이면 현재 caret 유지.
+    fn addrBandOffsetAt(self: *const AppSession, pb: PaneBar, x_px: f64) usize {
+        const cw = self.cell_width_px;
+        if (cw == 0) return self.addr_field.caret;
+        const cols: u32 = pb.full.w / cw;
+        const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
+        const rel = (x_px - @as(f64, @floatFromInt(pb.full.x))) / @as(f64, @floatFromInt(cw));
+        const click_col: i32 = if (rel < 0) 0 else @intFromFloat(@round(rel));
+        return chrome.components.text_field.caretAtColumn(self.addr_field.view(), .{ .cols = @intCast(cols), .nav_end = @intCast(nav_end) }, click_col);
+    }
+
+    /// 슬라이스 3: 편집 중 주소창 밴드 마우스 — 드래그 선택(kind 2/3 캡처)·더블클릭 단어(4)·트리플클릭 전체(5). down(1)의
+    /// caret 배치·드래그 시작은 클릭 핸들러 ①b가 한다(여기선 false 반환). 소비했으면 true(호출자 return). 드래그는 밴드를
+    /// 벗어나도 addr_dragging으로 캡처를 유지한다(스크롤바 드래그와 동형·포커스 불변식 §5.1). 편집 아니면 밴드 없음 → false.
+    fn addrBandMouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64) bool {
+        const pb = self.addrEditPaneBar() orelse return false;
+        const cw = self.cell_width_px;
+        if (cw == 0) return false;
+        const bar_h = pb.full.h;
+        const band: maru.session.SplitRect = .{ .x = pb.full.x, .y = pb.full.y + bar_h, .w = pb.full.w, .h = bar_h };
+        const nav_end_x: f64 = @floatFromInt(pb.full.x + @as(u32, nav_button_count) * nav_button_w * cw); // URL 존 시작 px(버튼 존 뒤)
+        const in_url_zone = layout_math.pointInRect(x_px, y_px, band) and x_px >= nav_end_x;
+        switch (kind) {
+            2 => { // drag → 선택 확장(anchor=down 지점, focus=현재). 밴드 밖이면 clamp된 경계로.
+                if (!self.addr_dragging) return false;
+                self.addr_field.selectTo(self.addrBandOffsetAt(pb, x_px));
+                self.metal_dirty = true;
+                return true;
+            },
+            3 => { // up → 드래그 종료.
+                if (!self.addr_dragging) return false;
+                self.addr_dragging = false;
+                return true;
+            },
+            4 => { // 더블클릭 → 단어 선택(URL 존만).
+                if (!in_url_zone) return false;
+                self.addr_field.selectWordAt(self.addrBandOffsetAt(pb, x_px), addr_word_separators);
+                self.metal_dirty = true;
+                return true;
+            },
+            5 => { // 트리플클릭 → 전체 선택.
+                if (!layout_math.pointInRect(x_px, y_px, band)) return false;
+                self.addr_field.selectAll();
+                self.metal_dirty = true;
+                return true;
+            },
+            else => return false, // down(1)은 ①b가 처리(caret 배치·드래그 시작)
+        }
     }
 
     /// Enter — 편집 텍스트(query)를 resolveNavUrl로 검증. 유효(허용 스킴/프리픽스 가능)하면 navigate pending(surface_id +
-    /// resolved url)을 세우고 편집을 종료(addr_input.clear)+focus-restore를 세운다. **무효(null)면 로드하지 않고 편집을
+    /// resolved url)을 세우고 편집을 종료(addr_field.clear)+focus-restore를 세운다. **무효(null)면 로드하지 않고 편집을
     /// 그대로 유지**한다(clear·focus-restore 안 함) — 조용히 지워 무시하지 않고 사용자가 고쳐 재-Enter하거나 Esc로 취소하게
     /// 한다(제보 "잘못된 주소가 그냥 무시됨"). 상세는 아래 else 분기 주석 참조.
     fn commitAddrEdit(self: *AppSession) void {
         if (self.addr_edit) |sid| {
             // query(편집)에서 읽어 addr_navigate_url_buf(별도 세션 필드)로 쓴다 — aliasing 없음. resolved는 그 버퍼 슬라이스라
             // 아래 clear/null 후에도 유효(url 바이트는 세션 필드에 남음).
-            if (maru.session.app_scheme.resolveNavUrl(self.addr_input.query.items, &self.addr_navigate_url_buf)) |resolved| {
+            if (maru.session.app_scheme.resolveNavUrl(self.addr_field.text.items, &self.addr_navigate_url_buf)) |resolved| {
                 self.addr_navigate_url_len = resolved.len;
                 self.addr_navigate_pending = sid;
                 self.addr_edit = null;
-                self.addr_input.clear();
+                self.addr_field.clear();
+                self.addr_dragging = false;
                 self.addr_focus_restore_pending = sid;
             }
             // else: 잘못된 주소(허용 스킴 아님 — file://·javascript:// 등, 또는 빈 입력). **편집을 유지**한다 — 입력을 지우고
@@ -7750,7 +7810,8 @@ pub const AppSession = struct {
         if (self.addr_edit) |sid| {
             if (restore_focus) self.addr_focus_restore_pending = sid;
             self.addr_edit = null;
-            self.addr_input.clear();
+            self.addr_field.clear();
+            self.addr_dragging = false;
         }
     }
 
@@ -7759,7 +7820,8 @@ pub const AppSession = struct {
     fn dropAddrEditIfSurface(self: *AppSession, surface_id: u64) void {
         if (self.addr_edit) |sid| if (sid == surface_id) {
             self.addr_edit = null;
-            self.addr_input.clear();
+            self.addr_field.clear();
+            self.addr_dragging = false;
         };
         if (self.addr_focus_pull_pending) |sid| {
             if (sid == surface_id) self.addr_focus_pull_pending = null;
@@ -7778,7 +7840,7 @@ pub const AppSession = struct {
 
     /// 편집 활성 중 키 처리(handleKeyEvent 래퍼가 호출 — 활성이면 모든 키 소비). handleRenameKey 동형: Enter=확정·
     /// Esc=취소·Backspace=삭제·평문 글자=추가, 모디파이어 조합·기타 키(↑↓ 등)는 무시(편집기 유지). 시각(metal_dirty·
-    /// blink)은 래퍼가 세운다(순수 코어 분리). IME 조합은 inputFocus=.addr_edit 라우팅으로 addr_input.setPreedit가 처리한다.
+    /// blink)은 래퍼가 세운다(순수 코어 분리). IME 조합은 inputFocus=.addr_edit 라우팅으로 addr_field.setPreedit가 처리한다.
     fn handleAddrEditKey(self: *AppSession, ev: chrome.input.InputEvent) void {
         switch (ev) {
             .key => |k| switch (k.key) {
@@ -11858,6 +11920,9 @@ pub const AppSession = struct {
             }
             return;
         }
+        // 슬라이스 3: 주소창 편집 밴드 드래그 선택(2/3 캡처)·더블클릭 단어(4)·트리플 전체(5) — 스크롤바 드래그와 같은 조기
+        // 캡처(down(1) caret 배치·드래그 시작은 아래 ①b가). 편집 중일 때만. 소비하면 여기서 끝(터미널 선택/사이드바로 안 샘).
+        if (self.addr_edit != null and self.addrBandMouse(kind, x_px, y_px)) return;
         // 접힘 상태 좌상단 알림 종(🔔) 클릭 → 알림 패널(◧ 펼치기보다 먼저 — 별개 영역, 접힘에도 알림 유지).
         if (kind == 1) {
             if (self.collapsedNotificationRect()) |r| {
@@ -12070,14 +12135,18 @@ pub const AppSession = struct {
                                     self.mouse_drag_selecting = false;
                                     return;
                                 }
-                                // URL 존 클릭 → 편집 진입. 이미 이 surface를 편집 중이면 재진입하지 않고 클릭만 소비한다(MVP —
-                                // caret 재배치 없음, 타이핑 초안 보존). 편집 아님/다른 대상이면 현재 nav URL을 초기값으로 새 편집 진입.
+                                // URL 존 클릭 → 편집 진입/재배치. 편집 아님/다른 대상이면 현재 nav URL로 새 편집 진입. 슬라이스 3:
+                                // 이미 편집 중이어도 **클릭 위치에 caret 재배치**(caretAtColumn)하고, 드래그 선택을 arm한다(addr_dragging).
                                 const already = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
                                 if (!already) {
                                     const cur_url: []const u8 = if (self.webNavState(addr_term.surfaceId())) |st| st.url else "";
                                     self.enterAddrEdit(addr_term.surfaceId(), cur_url);
                                     self.resetCursorBlink();
                                 }
+                                // 클릭 위치에 caret(선택 해제) + 드래그 선택 시작(이어지는 drag(2)가 selectTo, up(3)이 종료).
+                                self.addr_field.caret = self.addrBandOffsetAt(pb, x_px);
+                                self.addr_field.clearSelection();
+                                self.addr_dragging = true;
                                 self.metal_dirty = true;
                                 self.drag_autoscroll = 0;
                                 self.mouse_drag_selecting = false;
@@ -12475,7 +12544,7 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
-            .addr_edit => self.addr_input.setPreedit(self.allocator, bytes) catch {}, // 조합 중 텍스트를 addr_input에(밴드가 query 뒤에 표시; imeMarked가 metal_dirty)
+            .addr_edit => self.addr_field.setPreedit(self.allocator, bytes) catch {}, // 조합 중 텍스트를 addr_field에(밴드가 query 뒤에 표시; imeMarked가 metal_dirty)
             .terminal => {
                 // Phase 3 위임(docs/io-render-threading.md §9 P3-2): setPreedit는 코어 mutate라 메인이 직접 하지
                 // 않고 reader로 위임한다 — IME 조합 확정 중 포커스 상실 재진입 데드락(#700)을 구조적으로 없앤다.
@@ -12497,7 +12566,7 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
             .palette => self.chrome_host.palette.input.preedit.items.len > 0,
-            .addr_edit => self.addr_input.preedit.items.len > 0, // 주소창 조합 중이면 true
+            .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
             .terminal => self.activeSurfaceConst().core.preedit != null,
         };
     }
@@ -12712,7 +12781,7 @@ pub const AppSession = struct {
                 self.rebuildSidebar() catch {}; // 확정 글자로 필터 재적용
                 self.metal_dirty = true;
             },
-            .addr_edit => if (self.addr_input.commitPreedit(self.allocator)) {
+            .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
             },
             .terminal => {
@@ -16365,6 +16434,18 @@ pub const AppSession = struct {
                             // nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성 판정(payload 통째 복사 회피). 텍스트는 셀
                             // 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만. muted 색.
                             const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
+                            // 슬라이스 3: 편집 중 선택이 있으면 하이라이트 배경 quad(fieldLayout selection span — 편집 텍스트와 같은
+                            // 단일 소스라 하이라이트가 글자와 정렬). 밴드 배경 위·텍스트 셀 아래(나중 append = 위 layer). 색=theme.selection.
+                            if (editing and self.cell_width_px > 0) {
+                                const sel_cw = self.cell_width_px;
+                                const band_cols: u32 = @min(band_rect.w / sel_cw, @as(u32, std.math.maxInt(u16)));
+                                const sel_nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
+                                const sel_lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(band_cols), .nav_end = @intCast(sel_nav_end) });
+                                if (sel_lay.selection) |sel| if (sel.end_col > sel.start_col) {
+                                    const sel_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel.start_col * sel_cw, .y = band_rect.y, .w = (sel.end_col - sel.start_col) * sel_cw, .h = band_rect.h };
+                                    self.appendBarBgQuad(sel_rect, self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.selection)));
+                                };
+                            }
                             // Phase 7e-3: nav 버튼(back/forward) 활성 여부는 이 surface의 저장된 nav 상태에서 온다(없으면 false —
                             // 첫 frame nav 미도착 시 비활성으로 보임). reload는 늘 활성(builder 내부). URL(읽기전용)도 같은 상태에서 읽어
                             // 버튼·URL이 한 번의 조회를 공유한다.
@@ -16395,15 +16476,10 @@ pub const AppSession = struct {
                                     }
                                 }
                             }
-                            // 슬라이스 2: 편집 밴드는 fieldLayout(단일 레이아웃 소스)로 그린다 — query/preedit를 병합·절단하지
-                            // 않고 **빌린 View**로 넘겨(caret=끝), fieldLayout의 가로 스크롤 창이 caret(끝)+preedit를 시야에
-                            // 유지한다(옛 disp_buf tail 병합을 대체). View 슬라이스는 addr_input.query/preedit.items라 렌더 중 안정.
-                            // 읽기전용이면 nav URL(appendEllipsizedTitle .head).
-                            const edit_view: ?chrome.components.text_field.View = if (editing) .{
-                                .text = self.addrEditText(),
-                                .preedit = self.addrEditPreedit(),
-                                .caret = self.addrEditText().len, // 끝-caret(모델 교체는 슬라이스 3 — mid-string caret은 그때)
-                            } else null;
+                            // 슬라이스 2/3: 편집 밴드는 fieldLayout(단일 레이아웃 소스)로 그린다 — addr_field(TextField)의 **빌린
+                            // View**를 넘겨 mid-string caret·선택·가로 스크롤·preedit를 반영한다(caret은 addr_field.caret 실오프셋).
+                            // View 슬라이스는 addr_field.text/preedit.items라 렌더 중 안정. 읽기전용이면 nav URL(appendEllipsizedTitle .head).
+                            const edit_view: ?chrome.components.text_field.View = if (editing) self.addr_field.view() else null;
                             const url: []const u8 = if (editing) "" else (if (nav_state) |st| st.url else "");
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
@@ -19765,7 +19841,7 @@ pub const AppSession = struct {
         var nav_it = self.web_nav_states.valueIterator();
         while (nav_it.next()) |v| self.allocator.free(v.url);
         self.web_nav_states.deinit(self.allocator);
-        self.addr_input.deinit(self.allocator); // 7e-2: 주소창 편집 OverlayInput(query/preedit ArrayList) 해제
+        self.addr_field.deinit(self.allocator); // 7e-2: 주소창 편집 OverlayInput(query/preedit ArrayList) 해제
         self.metal_buffer.deinit(self.allocator);
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
@@ -26657,6 +26733,8 @@ test "P4(음성): 고정 탭을 그룹 뒤로 드래그해도 그룹에 흡수 �
 
 test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(마스킹 회귀 가드)" {
     var session: AppSession = undefined;
+    session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.addr_dragging = false;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io();
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 8, .rows = 4 });
@@ -27481,9 +27559,9 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     // web_nav_action_pending도 그중 하나라 초기화하지 않으면 undefined read(UB)다(리뷰 [6]; 옛 주석 "나머지 필드 안 읽음"은
     // 틀렸음). 시각(metal_dirty·blink)은 순수 코어 밖(handleKeyEvent 래퍼/클릭 핸들러)이라 여기서 안 탄다 = 헤드리스 검증 가능.
     var session: AppSession = undefined;
-    session.allocator = std.testing.allocator; // OverlayInput(addr_input)이 self.allocator를 쓴다(query/preedit 동적)
-    session.addr_input = .{};
-    defer session.addr_input.deinit(std.testing.allocator);
+    session.allocator = std.testing.allocator; // TextField(addr_field)가 self.allocator를 쓴다(text/preedit 동적)
+    session.addr_field = .{};
+    defer session.addr_field.deinit(std.testing.allocator);
     session.addr_edit = null;
     session.addr_focus_pull_pending = null;
     session.addr_navigate_pending = null;
@@ -27601,7 +27679,7 @@ test "takeWebNavAction: 활성 버튼 클릭이 세운 pending을 1회 drain + t
     const act2 = session.takeWebNavAction() orelse return error.TestUnexpectedNull;
     try std.testing.expectEqual(@as(u8, 2), act2.code);
 
-    // teardown: pending을 세운 채 그 surface가 닫히면 dropAddrEditIfSurface가 비운다(stale 방지). addr_input은 이 경로가
+    // teardown: pending을 세운 채 그 surface가 닫히면 dropAddrEditIfSurface가 비운다(stale 방지). addr_field은 이 경로가
     // 안 만지므로(대상 addr_edit=null) init 불요 — web_nav_action_pending 정리만 검증.
     session.web_nav_action_pending = 11;
     session.web_nav_action_code = 1;
@@ -28327,13 +28405,63 @@ test "addrEditCaretRect: 주소창 편집 caret이 밴드 안(y) + nav_end 뒤(x
     const cw = session.cell_width_px;
     const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존(렌더·hit-test 단일 소스)
     const cols: u32 = pb.full.w / cw;
-    const expect_col = @min(nav_end + session.addr_input.queryCols(), cols -| 1); // caret = nav_end + 편집폭(tail clamp)
+    const edit_w = chrome.components.text_field.displayCols(session.addr_field.text.items); // 편집 표시폭(EAW)
+    const expect_col = @min(nav_end + edit_w, cols -| 1); // caret = nav_end + 편집폭(끝-caret·밴드 안이면 안 넘침)
     try std.testing.expectEqual(@as(i32, @intCast(pb.full.x + expect_col * cw)), r.x); // x = 밴드 origin + caret col
     // y는 주소창 밴드([full.y+bar_h, +2·bar_h]) 안 — 탭 바 아래 URL 밴드에 후보창이 뜬다(터미널 본문 origin 폴백 아님).
     const band_y = pb.full.y + pb.full.h;
     try std.testing.expect(r.y >= @as(i32, @intCast(band_y)) and r.y < @as(i32, @intCast(band_y + pb.full.h)));
     try std.testing.expectEqual(cw, r.w);
     try std.testing.expectEqual(session.cell_height_px, r.h);
+}
+
+test "슬라이스 3: 주소창 밴드 마우스 — 클릭 caret 배치·더블클릭 단어 선택 (mouse 배선)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term/셀 메트릭 필요(session.init)
+    const allocator = std.testing.allocator;
+    const session = try initRenameCaretTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.backing_width_px = 800;
+    session.backing_height_px = 400;
+    session.titlebar_strip_px = 0;
+
+    const sid = try session.createAdoptedWebTermInActivePane();
+    // 편집 진입 후 URL을 알기 쉬운 값으로 교체(구분자 있는 8글자 ASCII — 컬럼=바이트).
+    session.enterAddrEdit(sid, "aa/bb/cc");
+    try std.testing.expectEqual(@as(usize, 8), session.addr_field.caret); // 시드 후 끝-caret
+
+    const pb = session.addrEditPaneBar() orelse return error.NoBar;
+    const cw = session.cell_width_px;
+    const bar_h = pb.full.h;
+    const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
+    const band_x: f64 = @floatFromInt(pb.full.x);
+    const band_y: f64 = @floatFromInt(pb.full.y + bar_h + bar_h / 2); // 밴드 세로 중앙
+    const colX = struct {
+        fn at(bx: f64, col: u32, cwp: u32) f64 {
+            return bx + @as(f64, @floatFromInt(col * cwp)) + 1.0; // 셀 좌측 근처(round→그 열)
+        }
+    }.at;
+
+    // 클릭(down) col nav_end+3('b' 앞) → caret=byte 3(중간, 끝 아님). 마우스 배선이 caretAtColumn을 관통.
+    session.mouse(1, colX(band_x, nav_end + 3, cw), band_y, 0, 0);
+    try std.testing.expectEqual(@as(usize, 3), session.addr_field.caret);
+    try std.testing.expect(session.addr_field.selection == null);
+    try std.testing.expect(session.addr_dragging); // down이 드래그 arm
+    session.mouse(3, colX(band_x, nav_end + 3, cw), band_y, 0, 0); // up → 드래그 종료
+    try std.testing.expect(!session.addr_dragging);
+
+    // 더블클릭(kind 4) col nav_end+4('b' 중) → 단어 "bb"(byte 3..5) 선택. URL 구분자 '/'가 단어 경계.
+    session.mouse(4, colX(band_x, nav_end + 4, cw), band_y, 0, 0);
+    const sel = session.addr_field.selection orelse return error.NoSelection;
+    try std.testing.expectEqual(@as(usize, 3), sel.lo());
+    try std.testing.expectEqual(@as(usize, 5), sel.hi());
+    try std.testing.expectEqualStrings("bb", session.addr_field.text.items[sel.lo()..sel.hi()]);
+
+    // 트리플클릭(kind 5) → 전체 선택.
+    session.mouse(5, colX(band_x, nav_end + 2, cw), band_y, 0, 0);
+    const all = session.addr_field.selection orelse return error.NoSelectionAll;
+    try std.testing.expectEqual(@as(usize, 0), all.lo());
+    try std.testing.expectEqual(@as(usize, 8), all.hi());
 }
 
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
@@ -28362,6 +28490,8 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 
 test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘다 (audit MEDIUM)" {
     var session: AppSession = undefined;
+    session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.addr_dragging = false;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -28399,6 +28529,8 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
 
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
     var session: AppSession = undefined;
+    session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.addr_dragging = false;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -28455,6 +28587,8 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     // 게이트해, 같은 호출 횟수라도 고프레임일수록 호출당 적게 스크롤한다(120Hz: msPerTick=8, step=33 → ~4콜당 한 줄).
     // 8콜이면 옛 모델은 8줄(과속)이지만 ms 게이트는 1~2줄에 그친다.
     var session: AppSession = undefined;
+    session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.addr_dragging = false;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -39072,6 +39206,8 @@ test "closeTab tears down a tab and reselects, last tab closes the session" {
 
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
     var session: AppSession = undefined;
+    session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.addr_dragging = false;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });

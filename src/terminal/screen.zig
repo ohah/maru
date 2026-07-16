@@ -18,7 +18,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const core = @import("core.zig"); // 활성 화면 연산이 *TerminalCore를 받는다(Scrollback struct는 여전히 types만 의존)
 const width = @import("../width.zig"); // EAW 셀 폭(중립 top-level 유틸) — wide 이모지 판정에 쓴다
-const grapheme = @import("grapheme.zig"); // UAX#29 한글 cluster 분절(writeCodepoint가 호출)
+const grapheme = @import("../grapheme.zig"); // UAX#29 한글 cluster 분절(writeCodepoint가 호출) — 최상위 중립 유틸
 
 // grapheme.zig의 HG1 단위 테스트를 빌드에 끌어오는 수집 앵커. writeCodepoint가 grapheme
 // 함수를 호출해도, Zig는 import한 파일의 함수만 analyze하고 그 파일의 `test` 블록은 끌어오지

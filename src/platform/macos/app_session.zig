@@ -12560,7 +12560,14 @@ pub const AppSession = struct {
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
-            .addr_edit => self.addr_field.setPreedit(self.allocator, bytes) catch {}, // 조합 중 텍스트를 addr_field에(밴드가 query 뒤에 표시; imeMarked가 metal_dirty)
+            .addr_edit => {
+                // 조합 중 텍스트를 addr_field에. **NFC 조합**: macOS IME가 NFD conjoining 자모(ㄱ+ㅏ)를 주면 주소창은
+                // codepoint당 단일 셀이라 안 합쳐지므로(터미널·find는 클러스터/shaping) 저장 경계서 완성형으로 합친다.
+                if (maru.grapheme.composeHangul(self.allocator, bytes)) |composed| {
+                    defer self.allocator.free(composed);
+                    self.addr_field.setPreedit(self.allocator, composed) catch {};
+                } else |_| self.addr_field.setPreedit(self.allocator, bytes) catch {};
+            },
             .terminal => {
                 // Phase 3 위임(docs/io-render-threading.md §9 P3-2): setPreedit는 코어 mutate라 메인이 직접 하지
                 // 않고 reader로 위임한다 — IME 조합 확정 중 포커스 상실 재진입 데드락(#700)을 구조적으로 없앤다.
@@ -12911,6 +12918,13 @@ pub const AppSession = struct {
             // 베이스: Ghostty mouse-hide-while-typing(press+utf8.len>0) — utf8 텍스트 produce가 곧 IME 확정이다(F1-6).
             if (self.loaded_config.config.input.mouse_hide_while_typing and bytes.len > 0) self.mouse_hide_pending = true;
             self.sendCommittedText(bytes);
+        } else if (self.inputFocus() == .addr_edit) {
+            // 주소창 확정 텍스트는 **NFC 조합** 후 키 경로로(codepoint당 셀이라 NFD 자모 미조합 — imeSetPreedit과 동일 사유).
+            // find/palette/rename/sidebar_search는 shaping/클러스터라 이 분기 밖(무해하나 불필요).
+            if (maru.grapheme.composeHangul(self.allocator, bytes)) |composed| {
+                defer self.allocator.free(composed);
+                self.sendTextAsKeys(composed);
+            } else |_| self.sendTextAsKeys(bytes);
         } else {
             self.sendTextAsKeys(bytes);
         }

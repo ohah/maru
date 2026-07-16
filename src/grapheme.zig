@@ -9,9 +9,14 @@
 //! 유도한다(clean-room — 레퍼런스 터미널의 코드/자료구조를 옮기지 않는다). 이 파일은 순수
 //! 함수만 두어 저장·렌더와 무관하게 단위 테스트로 닫힌다(HG1). 코어 print 경로 통합과 셀
 //! 다중 코드포인트 저장은 HG2에서 한다. 설계 단일 출처: docs/grapheme-clustering.md.
+//!
+//! **위상**: `width.zig`와 같은 **최상위 레이어-무관 중립 유틸**이다(의존은 width.zig+std뿐).
+//! terminal(코어 print)·chrome(주소창 TextField caret 그래핌 스냅, docs/text-field-editor.md)이
+//! 공유한다 — chrome은 terminal을 import할 수 없으므로(tests/boundary/imports.zig) 순수 Unicode
+//! 분절을 여기 최상위 중립에 둔다. terminal/에서 승격(원래 위치는 terminal/grapheme.zig).
 
 const std = @import("std");
-const width = @import("../width.zig"); // EAW 셀 폭·combining 판정을 단일 출처로 재사용
+const width = @import("width.zig"); // EAW 셀 폭·combining 판정을 단일 출처로 재사용
 
 /// UAX#29 Hangul_Syllable_Type. NFD 자모(conjoining)와 완성형(precomposed) 음절을 분류해
 /// 아래 GB6/GB7/GB8 cluster 규칙의 입력으로 쓴다.

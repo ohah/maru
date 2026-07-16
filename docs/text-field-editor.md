@@ -42,7 +42,7 @@
 ### 2.4 상호작용·경계 베이스
 
 - **선택 상호작용 모델**은 터미널 [selection.zig]에서 가져온다 — 드래그(down=`select_start`, drag=`select_extend`, 밖=autoscroll), 더블클릭 단어(`select_word`), 트리플클릭 줄(`select_line`), 이동 없는 클릭=해제. 단 **데이터 모델(그리드 절대행 vs 문자열 오프셋)과 실행 스레드는 다르다** — 터미널 선택은 `enqueueCoreCommand`로 reader 스레드에 위임([core_command.zig])하지만, **이 필드 에디터는 메인 chrome 스레드에서 `AppSession` 상태를 직접 mutate한다(core mutate·위임 아님)** — `addr_input` 전이와 동형(§4). 시맨틱만 차용, 위임 경로는 차용 금지. ([read-reference-terminals-early]: Ghostty 선택 모델 참조.)
-- **그래핌 경계**는 [grapheme-clustering.md] 단일 출처(caret 이동·삭제는 코드포인트가 아니라 그래핌 클러스터 단위 — 이모지 ZWJ·결합 문자 안전).
+- **그래핌 경계**는 [grapheme-clustering.md] 단일 출처(caret 이동·삭제는 코드포인트가 아니라 그래핌 클러스터 단위 — 이모지 ZWJ·결합 문자 안전). **코드 단일 출처는 `grapheme.zig`**인데, 이 모듈은 원래 `terminal/grapheme.zig`(L1)에 있었고 **chrome은 terminal을 import할 수 없다**(tests/boundary/imports.zig). grapheme.zig는 `width.zig`(최상위 중립)만 의존하는 순수 UAX#29 분절이라 width.zig와 동격이므로, 슬라이스 1에서 **최상위 중립 `src/grapheme.zig`로 승격**해 terminal(코어 print)·chrome(TextField) 공용으로 만든다(유일 importer였던 screen.zig repoint, [full-removal-no-legacy-shims]대로 shim 없이 이동). 설계 검증이 놓친 경계 결함을 슬라이스 1 착수 시 정정한 것.
 - **키 바인딩**은 [key-input-and-shortcuts.md] "기본 제공 macOS 줄 편집 단축키"와 정합(⌘←/→·⌥←/→·⌃A/⌃E 등)하고, IME 조합 중 판정은 같은 문서 "레이아웃 독립 단축키와 IME"를 따른다.
 
 ## 3. 레이어 배치 — L3 순수 모델 + L4 렌더/hit-test, **단일 레이아웃 소스**

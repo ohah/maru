@@ -78,6 +78,66 @@ pub fn isConjoiningJamo(cp: u21) bool {
     return cp >= 0x1100 and cp <= 0x11FF;
 }
 
+// ── Hangul NFC 조합(UAX#15 Hangul Composition — 알고리즘·테이블 불요) ────────────────────────
+// conjoining 자모(NFD: L U+1100.. + V U+1161.. [+ T U+11A8..])를 완성형 음절(U+AC00..)로 합친다. 완성형/비-한글은
+// 무변. 클러스터 렌더(멀티-codepoint 셀·run shaping)가 없는 소비자(주소창 emitEditBand = codepoint당 단일 셀)가
+// macOS IME의 NFD 조합 자모를 합쳐 보이게 하는 데 쓴다(터미널·find는 클러스터/shaping이라 불요).
+
+const hangul_s_base: u21 = 0xAC00;
+const hangul_l_base: u21 = 0x1100;
+const hangul_v_base: u21 = 0x1161;
+const hangul_t_base: u21 = 0x11A7;
+const hangul_l_count: u21 = 19;
+const hangul_v_count: u21 = 21;
+const hangul_t_count: u21 = 28;
+const hangul_n_count: u21 = hangul_v_count * hangul_t_count; // 588
+
+fn isLeadingJamo(cp: u21) bool {
+    return cp >= hangul_l_base and cp < hangul_l_base + hangul_l_count; // U+1100..U+1112
+}
+fn isVowelJamo(cp: u21) bool {
+    return cp >= hangul_v_base and cp < hangul_v_base + hangul_v_count; // U+1161..U+1175
+}
+fn isTrailingJamo(cp: u21) bool {
+    return cp > hangul_t_base and cp < hangul_t_base + hangul_t_count; // U+11A8..U+11C2(11A7 자체는 T 없음)
+}
+fn isLvSyllable(cp: u21) bool { // 종성 없는 완성형(LV) — T 결합 가능
+    return cp >= hangul_s_base and cp < hangul_s_base + hangul_l_count * hangul_n_count and (cp - hangul_s_base) % hangul_t_count == 0;
+}
+
+/// `bytes`의 NFD conjoining 한글 자모를 완성형으로 NFC 조합해 돌려준다(arena 소유). 조합할 게 없으면(완성형·비-한글)
+/// 원본과 같은 내용. UTF-8 손상은 원본 반환. **주소창처럼 클러스터 렌더가 없는 셀 소비자용** — 저장/입력 경계에서
+/// 적용해 caret 바이트 오프셋이 조합 결과와 일치하게 한다(표시-only 조합은 caret 어긋남).
+pub fn composeHangul(arena: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const view = std.unicode.Utf8View.init(bytes) catch return arena.dupe(u8, bytes);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(arena);
+    var it = view.iterator();
+    var last: ?u21 = null; // 직전에 낸(아직 flush 안 한) codepoint — 조합 후보
+    while (it.nextCodepoint()) |cp| {
+        if (last) |p| {
+            if (isLeadingJamo(p) and isVowelJamo(cp)) { // L + V → LV 음절
+                last = hangul_s_base + (p - hangul_l_base) * hangul_n_count + (cp - hangul_v_base) * hangul_t_count;
+                continue;
+            }
+            if (isLvSyllable(p) and isTrailingJamo(cp)) { // LV + T → LVT 음절
+                last = p + (cp - hangul_t_base);
+                continue;
+            }
+            try appendCp(arena, &out, p); // 조합 불가 → 확정하고 새로 시작
+        }
+        last = cp;
+    }
+    if (last) |p| try appendCp(arena, &out, p);
+    return out.toOwnedSlice(arena);
+}
+
+fn appendCp(arena: std.mem.Allocator, out: *std.ArrayList(u8), cp: u21) !void {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch return; // 인코딩 불가(비정상)면 건너뛴다
+    try out.appendSlice(arena, buf[0..n]);
+}
+
 /// UAX#29 GB11(이모지 ZWJ 시퀀스: `\p{Extended_Pictographic} Extend* ZWJ × \p{Extended_Pictographic}`)
 /// 판정용 그림문자 근사. ZWJ로 이어지는 base가 그림문자인지, ZWJ 뒤 글자가 그림문자인지 본다.
 /// width.zig "small first table" 철학대로 **흔한 이모지 블록만 큐레이션**한다 — 완전한 Extended_Pictographic
@@ -95,6 +155,46 @@ pub fn isExtendedPictographic(cp: u21) bool {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+
+test "composeHangul: NFD conjoining 자모를 완성형 NFC로 조합(완성형·비-한글 무변)" {
+    const a = std.testing.allocator;
+    // NFD "가"(U+1100 초성ㄱ + U+1161 중성ㅏ) → 완성형 "가"(U+AC00).
+    {
+        const r = try composeHangul(a, "\u{1100}\u{1161}");
+        defer a.free(r);
+        try std.testing.expectEqualStrings("가", r);
+    }
+    // NFD "한"(U+1112 ㅎ + U+1161 ㅏ + U+11AB ㄴ) → 완성형 "한"(U+D55C, LVT).
+    {
+        const r = try composeHangul(a, "\u{1112}\u{1161}\u{11AB}");
+        defer a.free(r);
+        try std.testing.expectEqualStrings("한", r);
+    }
+    // NFD "가나다라" → 완성형 4음절.
+    {
+        const r = try composeHangul(a, "\u{1100}\u{1161}\u{1102}\u{1161}\u{1103}\u{1161}\u{1105}\u{1161}");
+        defer a.free(r);
+        try std.testing.expectEqualStrings("가나다라", r);
+    }
+    // 이미 완성형이면 무변(idempotent).
+    {
+        const r = try composeHangul(a, "가나다");
+        defer a.free(r);
+        try std.testing.expectEqualStrings("가나다", r);
+    }
+    // 비-한글·혼합은 자모만 조합, 나머지 그대로.
+    {
+        const r = try composeHangul(a, "a\u{1100}\u{1161}b");
+        defer a.free(r);
+        try std.testing.expectEqualStrings("a가b", r);
+    }
+    // 결합 안 되는 자모 시퀀스(L 없이 V, T 없이 등)는 그대로 보존.
+    {
+        const r = try composeHangul(a, "\u{1161}\u{1100}"); // V 다음 L — 조합 안 됨
+        defer a.free(r);
+        try std.testing.expectEqualStrings("\u{1161}\u{1100}", r);
+    }
+}
 
 test "hangulClass: 현대 자모·완성형 음절을 L/V/T/LV/LVT로 분류" {
     // 왜 중요: macOS 파일명 NFD는 자모를 그대로 보낸다. 이 분류가 GB6/7/8로 자모를 한 음절

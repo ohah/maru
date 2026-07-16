@@ -6881,6 +6881,15 @@ pub const AppSession = struct {
             .move_pane_to_workspace => |n| if (!self.tabsBlocked()) self.mergePaneIntoWorkspace(self.activePane(), n),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => {
+                // 주소창 편집 중이면 터미널이 아니라 편집 중인 주소 필드를 전체 선택한다(⌘C/⌘V가 copyText/pasteText로
+                // addr-aware인 것과 동형). ⌘A는 Edit 메뉴 "Select All" 카탈로그 항목의 keyEquivalent라 keyDown이 아니라
+                // runCatalogAction→run_action→여기로 온다(⌘X는 메뉴 항목이 없어 keyDown→handleAddrEditKey로 감). 게이트는
+                // addr_edit — anyOverlayOpen엔 addr_edit이 없어 runAction이 이 경로를 그대로 태운다(제보: 주소창서 ⌘A 안 먹음).
+                if (self.addr_edit != null) {
+                    self.addr_field.selectAll();
+                    self.metal_dirty = true; // 선택 하이라이트 재빌드(주소 필드는 chrome 오버레이)
+                    return;
+                }
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/io-render-threading.md §9 P3-4).
                 self.runtime.enqueueCoreCommand(self.activeSurface().id, .select_all, self.io) catch {};
             },
@@ -27785,6 +27794,28 @@ test "슬라이스 4: 주소창 키보드 편집 — 화살표·shift 선택·�
     // 타이핑(선택 대체): 'X' → 선택 전체가 "X"로.
     session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'X' } });
     try std.testing.expectEqualStrings("X", session.addr_field.text.items);
+}
+
+test "리뷰: 주소창 편집 중 ⌘A(select_all 액션)는 터미널이 아니라 주소 필드를 전체 선택한다" {
+    // ⌘A는 Edit 메뉴 "Select All" 카탈로그 항목의 keyEquivalent라 keyDown이 아니라 runCatalogAction→run_action→
+    // dispatchAppAction으로 온다(제보: 주소창서 ⌘A 안 먹음 — 옛 코드가 addr_edit 무시하고 터미널만 선택). addr_edit
+    // 활성이면 터미널 코어(enqueueCoreCommand·activeSurface)로 안 새고 addr_field.selectAll만 만지므로 runtime/
+    // activeSurface/chrome_host 없이 minimal init로 충분하다([[devsession-undefined-test-field-trap]]).
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.metal_dirty = false;
+    session.addr_edit = 1; // 편집 활성 → select_all이 필드 분기(터미널 경로 안 탐)
+    session.addr_field = .{};
+    defer session.addr_field.deinit(std.testing.allocator);
+
+    try session.addr_field.setText(std.testing.allocator, "example.com"); // caret=끝, 선택 없음
+    try std.testing.expect(session.addr_field.selection == null);
+    session.dispatchAppAction(.select_all);
+    // 필드 전체 [0, len)가 선택됨(터미널 select_all이 아니라). metal_dirty=하이라이트 재빌드 신호.
+    try std.testing.expect(session.addr_field.selection != null);
+    try std.testing.expectEqual(@as(usize, 0), session.addr_field.selection.?.anchor);
+    try std.testing.expectEqual(@as(usize, "example.com".len), session.addr_field.selection.?.focus);
+    try std.testing.expect(session.metal_dirty);
 }
 
 test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C), pasteText는 caret 삽입·개행 strip(⌘V)" {

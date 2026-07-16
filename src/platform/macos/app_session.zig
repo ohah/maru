@@ -13008,16 +13008,29 @@ pub const AppSession = struct {
         _ = self.addr_field.deleteSelection();
     }
 
-    /// 슬라이스 4: 클립보드 텍스트를 주소창 편집 필드에 삽입(⌘V) — 개행·NUL·제어문자(단일행 URL 오염) strip 후 caret에
-    /// insertText(선택 있으면 대체). 편집 아님이면 무동작. 큰 붙여넣기도 URL이라 상한 없이 그대로(필드는 동적 버퍼).
+    /// 슬라이스 4: 클립보드 텍스트를 주소창 편집 필드에 삽입(⌘V) — 위생 처리 후 caret에 insertText(선택 있으면 대체).
+    /// 편집 아님이면 무동작. 큰 붙여넣기도 URL이라 상한 없이 그대로(필드는 동적 버퍼). 위생 처리(리뷰 #3·#7):
+    ///  - **모든 C0 제어문자(<0x20)·DEL(0x7F) 제거** — 단일행 URL 오염 방지(옛 코드는 \r\n\0\t만 걸러 ESC·FF·VT 등이 샜다).
+    ///  - **유효 UTF-8만 삽입**(손상 바이트 skip) — addr_field.text를 항상 유효 UTF-8로 유지해 displayCols(바이트-폴백)와
+    ///    emitEditBand(codepoint 폭)가 어긋나 caret/선택/hit-test가 밀리는 것을 막는다.
     fn addrEditPaste(self: *AppSession, bytes: []const u8) void {
         if (self.addr_edit == null) return;
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
         buf.ensureTotalCapacity(self.allocator, bytes.len) catch return;
-        for (bytes) |b| {
-            if (b == '\r' or b == '\n' or b == 0 or b == '\t') continue; // 단일행 위생 처리(개행·NUL·탭 제거)
-            buf.append(self.allocator, b) catch return;
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch {
+                i += 1; // 손상 lead 바이트 skip
+                continue;
+            };
+            if (i + n > bytes.len) break; // 잘린 멀티바이트(끝) — 버린다
+            const cp = std.unicode.utf8Decode(bytes[i .. i + n]) catch {
+                i += 1; // 손상 시퀀스 skip
+                continue;
+            };
+            if (cp >= 0x20 and cp != 0x7F) buf.appendSlice(self.allocator, bytes[i .. i + n]) catch return; // C0·DEL 제외
+            i += n;
         }
         if (buf.items.len > 0) self.addr_field.insertText(self.allocator, buf.items) catch {};
     }
@@ -27806,6 +27819,17 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     session.addr_field.selectAll();
     session.pasteText("hello", false);
     try std.testing.expectEqualStrings("hello", session.addr_field.text.items);
+
+    // 리뷰 #3: 모든 C0 제어문자(ESC 0x1B·FF 0x0C·VT 0x0B·BS 0x08)·DEL(0x7F) 제거(옛 코드는 \r\n\0\t만 걸렀다).
+    session.addr_field.selectAll();
+    session.pasteText("a\x1bb\x0cc\x0bd\x08e\x7ff", false);
+    try std.testing.expectEqualStrings("abcdef", session.addr_field.text.items);
+    // 리뷰 #7: 손상 UTF-8 바이트는 건너뛰고 유효 UTF-8만 삽입(text가 항상 유효 UTF-8 — 폭 드리프트 방지).
+    session.addr_field.selectAll();
+    session.pasteText("가\xffab", false); // 0xFF는 유효 UTF-8 아님 → 건너뜀
+    try std.testing.expectEqualStrings("가ab", session.addr_field.text.items);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(session.addr_field.text.items));
+    try session.addr_field.setText(std.testing.allocator, "hello"); // 아래 ⌘X 테스트 상태 복원
 
     // ⌘X: 전체 선택 잘라내기 → text에서 제거 + 클립보드-쓰기 큐에 **먼저 캡처**(삭제와 순서 무관). pendingClipboard가
     // 그 바이트를 반환(Swift가 NSPasteboard에 씀 — OSC52 write와 같은 drain). addr_clipboard_write set이라 터미널 경로 안 탐.

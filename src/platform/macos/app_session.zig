@@ -28782,6 +28782,40 @@ test "제보: ⌘⌫가 편집을 취소하거나 웹 포커스로 튕기지 않
     try std.testing.expectEqual(@as(usize, 0), session.addr_field.caret);
 }
 
+test "제보: 주소창 IME 한글 — conjoining 자모 마크드/커밋이 완성형(NFC)으로 조합된다 (end-to-end)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 pane 트리/web Term·IME 트랜잭션 필요
+    const allocator = std.testing.allocator;
+    const session = try initRenameCaretTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.backing_width_px = 800;
+    session.backing_height_px = 400;
+    session.titlebar_strip_px = 0;
+
+    const sid = try session.createAdoptedWebTermInActivePane();
+    session.enterAddrEdit(sid, ""); // 빈 주소창 편집 시작
+
+    // macOS IME는 NFD conjoining 자모(초성 U+1100.. + 중성 U+1161..)를 준다(터미널 클러스터가 증명). 주소창은 셀당
+    // codepoint라 저장 경계서 완성형으로 합쳐야 한다. 이 테스트는 imeMarked(preedit)·imeInsert/imeEnd(commit) 두
+    // composeHangul 호출처를 실제 IME 진입점으로 구동해 완성형이 나오는지 고정한다(제보: ㄱㅏㄴㅏㄷㅏ 분해 표시).
+
+    // 조합 중 마크드 "가"(U+1100 U+1161) → preedit에 완성형 "가"(U+AC00, 3바이트) 저장.
+    session.imeMarked("\u{1100}\u{1161}");
+    try std.testing.expectEqualStrings("가", session.addr_field.preedit.items);
+
+    // 확정 커밋(imeBegin→imeInsert(conjoining)→imeEnd) → routeCommittedText → composeHangul → text에 완성형 "가".
+    session.imeBegin();
+    session.imeInsert("\u{1100}\u{1161}");
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("가", session.addr_field.text.items);
+
+    // LVT(받침) 음절도: "한"(ㅎ U+1112 + ㅏ U+1161 + ㄴ U+11AB) 커밋 → 완성형 "한"(U+D55C).
+    session.imeBegin();
+    session.imeInsert("\u{1112}\u{1161}\u{11AB}");
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("가한", session.addr_field.text.items);
+}
+
 test "scrollPage scrolls one screen (rows-1) per page using the core's authoritative rows" {
     var session: AppSession = undefined;
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 5 });

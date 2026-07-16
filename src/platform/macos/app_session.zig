@@ -7846,12 +7846,28 @@ pub const AppSession = struct {
             .key => |k| switch (k.key) {
                 .escape => self.cancelAddrEdit(true), // Esc = 편집 취소 후 브라우저(webView)로 포커스 복귀
                 .enter => self.commitAddrEdit(),
-                .backspace => self.addrEditBackspace(),
+                // 슬라이스 4: caret 이동/선택([key-input-and-shortcuts.md] macOS 줄 편집 정합). shift=선택 확장·option=단어·
+                // command=줄 시작/끝(⌘←/→ — Key enum에 home/end 없어 command+화살표로). Key enum에 delete(⌦)·home·end가
+                // 없어 그 키는 아직 미지원(백스페이스·⌘←/→가 커버).
+                .left => {
+                    if (k.mods.command) self.addr_field.moveHome(k.mods.shift) // ⌘← = 줄 시작(⇧면 선택)
+                    else if (k.mods.option) self.addr_field.moveWordLeft(addr_word_separators, k.mods.shift) // ⌥← = 단어
+                    else self.addr_field.moveLeft(k.mods.shift); // ← / ⇧←
+                },
+                .right => {
+                    if (k.mods.command) self.addr_field.moveEnd(k.mods.shift) // ⌘→ = 줄 끝
+                    else if (k.mods.option) self.addr_field.moveWordRight(addr_word_separators, k.mods.shift) else self.addr_field.moveRight(k.mods.shift);
+                },
+                .backspace => {
+                    if (k.mods.option) self.addr_field.deleteWordBackward(addr_word_separators) // ⌥⌫ = 단어 삭제
+                    else self.addrEditBackspace();
+                },
                 .char => {
-                    if (k.mods.command or k.mods.control or k.mods.option) return; // 단축키 조합은 편집기에 안 쌓음
+                    if (k.mods.command and (k.codepoint == 'a' or k.codepoint == 'A')) return self.addr_field.selectAll(); // ⌘A 전체 선택
+                    if (k.mods.command or k.mods.control or k.mods.option) return; // 그 외 단축키 조합은 편집기에 안 쌓음
                     self.addrEditAppend(k.codepoint);
                 },
-                else => {}, // up/down/tab/other — 무시(편집기 유지)
+                .up, .down, .tab, .other => {}, // 무시(편집기 유지)
             },
             .pointer => {}, // 주소창 편집기는 포인터를 안 받는다(밴드 클릭 진입은 mouse-down 핸들러가 처리).
         }
@@ -16434,17 +16450,25 @@ pub const AppSession = struct {
                             // nav URL을 그린다. addrEditSurfaceId 비교로 편집 활성 판정(payload 통째 복사 회피). 텍스트는 셀
                             // 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만. muted 색.
                             const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
-                            // 슬라이스 3: 편집 중 선택이 있으면 하이라이트 배경 quad(fieldLayout selection span — 편집 텍스트와 같은
-                            // 단일 소스라 하이라이트가 글자와 정렬). 밴드 배경 위·텍스트 셀 아래(나중 append = 위 layer). 색=theme.selection.
+                            // 슬라이스 3/4: 편집 중이면 fieldLayout(렌더 텍스트와 같은 단일 소스)으로 (a) 선택 하이라이트 배경 quad,
+                            // (b) **얇은 세로 막대 caret**(insertion bar)을 그린다. caret을 불투명 블록 셀로 그리면 그 자리 글자를
+                            // 가리므로(사용자 제보) 세로 막대 quad로 — caret_col 왼쪽 경계에 세워 글자를 안 가린다. 색=theme.cursor.
                             if (editing and self.cell_width_px > 0) {
                                 const sel_cw = self.cell_width_px;
                                 const band_cols: u32 = @min(band_rect.w / sel_cw, @as(u32, std.math.maxInt(u16)));
                                 const sel_nav_end: u32 = @as(u32, nav_button_count) * nav_button_w;
                                 const sel_lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(band_cols), .nav_end = @intCast(sel_nav_end) });
+                                // (a) 선택 하이라이트(밴드 배경 위·텍스트 셀 아래 = 나중 append = 위 layer). 색=theme.selection.
                                 if (sel_lay.selection) |sel| if (sel.end_col > sel.start_col) {
                                     const sel_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel.start_col * sel_cw, .y = band_rect.y, .w = (sel.end_col - sel.start_col) * sel_cw, .h = band_rect.h };
                                     self.appendBarBgQuad(sel_rect, self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.selection)));
                                 };
+                                // (b) caret 세로 막대(caret_col 왼쪽 경계, 밴드 안일 때만). 폭은 얇게(≈cell/6, 최소 2px backing).
+                                if (sel_lay.caret_col < band_cols) {
+                                    const caret_w: u32 = @max(sel_cw / 6, 2);
+                                    const caret_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel_lay.caret_col * sel_cw, .y = band_rect.y, .w = caret_w, .h = band_rect.h };
+                                    self.appendBarBgQuad(caret_rect, self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.cursor)));
+                                }
                             }
                             // Phase 7e-3: nav 버튼(back/forward) 활성 여부는 이 surface의 저장된 nav 상태에서 온다(없으면 false —
                             // 첫 frame nav 미도착 시 비활성으로 보임). reload는 늘 활성(builder 내부). URL(읽기전용)도 같은 상태에서 읽어
@@ -16484,13 +16508,12 @@ pub const AppSession = struct {
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
                                 const addr_fg: terminal.Color = .{ .rgb = self.mutedForeground() }; // 읽기전용 URL — 비활성 탭과 같은 muted 톤
-                                const caret_color: terminal.Color = .{ .rgb = self.appearance.theme.cursor }; // 편집 caret = 커서 색(block caret 셀 배경)
                                 // Phase 7e-3: 활성 버튼 = 활성 탭 전경(sidebar_foreground, muted URL보다 밝아 클릭 가능함이 드러남),
                                 // 비활성 버튼 = dimRgb(grip 손잡이와 같은 흐린 톤). 렌더가 쓰는 nav_button_w/count는 hit-test와 같은 단일 소스.
                                 const button_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                                 const button_dim_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
                                 const band_text_origin_y = band_rect.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 탭 바 text_origin_y와 같은 pad_y
-                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_view, caret_color, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
+                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_view, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
                                     self.collectShaped(&collected, adl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = band_text_origin_y, .colors = tabbar_colors } });
                                 } else |_| {} // draw 생성 OOM은 탭 바처럼 무시(밴드 배경만이라도)
                             }
@@ -27623,6 +27646,51 @@ test "AddrEdit 흐름: enter→append→commit(navigate)·cancel·teardown 정�
     session.dropAddrEditIfSurface(11); // 대상 surface → 정리
     try std.testing.expect(session.addr_edit == null);
     try std.testing.expect(session.addr_focus_pull_pending == null); // enter가 세운 pull도 대상 일치라 정리
+}
+
+test "슬라이스 4: 주소창 키보드 편집 — 화살표·shift 선택·단어·⌘A (handleAddrEditKey 배선)" {
+    // handleAddrEditKey는 addr_field(TextField)만 만지므로 minimal init로 충분([[devsession-undefined-test-field-trap]]).
+    var session: AppSession = undefined;
+    session.allocator = std.testing.allocator;
+    session.addr_field = .{};
+    defer session.addr_field.deinit(std.testing.allocator);
+    session.addr_edit = 1; // 편집 활성(addrEditAppend/Backspace가 읽음)
+    try session.addr_field.setText(std.testing.allocator, "abc/def"); // caret=끝(7)
+
+    const key = struct {
+        fn ev(k: chrome.input.Key, mods: chrome.input.Mods) chrome.input.InputEvent {
+            return .{ .key = .{ .key = k, .mods = mods } };
+        }
+    }.ev;
+
+    // ← : 그래핌 이동(7→6). 선택 없음.
+    session.handleAddrEditKey(key(.left, .{}));
+    try std.testing.expectEqual(@as(usize, 6), session.addr_field.caret);
+    try std.testing.expect(session.addr_field.selection == null);
+
+    // ⇧← : 선택 확장(anchor=6, focus=5).
+    session.handleAddrEditKey(key(.left, .{ .shift = true }));
+    try std.testing.expectEqual(@as(usize, 5), session.addr_field.caret);
+    try std.testing.expectEqual(@as(usize, 5), session.addr_field.selection.?.lo());
+    try std.testing.expectEqual(@as(usize, 6), session.addr_field.selection.?.hi());
+
+    // → (no shift, 선택 있음): 선택 끝으로 collapse(6).
+    session.handleAddrEditKey(key(.right, .{}));
+    try std.testing.expectEqual(@as(usize, 6), session.addr_field.caret);
+    try std.testing.expect(session.addr_field.selection == null);
+
+    // ⌥← : 단어 시작으로("def" 시작=byte 4). URL 구분자 '/'가 경계.
+    session.handleAddrEditKey(key(.left, .{ .option = true }));
+    try std.testing.expectEqual(@as(usize, 4), session.addr_field.caret);
+
+    // ⌘A : 전체 선택.
+    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'a', .mods = .{ .command = true } } });
+    try std.testing.expectEqual(@as(usize, 0), session.addr_field.selection.?.lo());
+    try std.testing.expectEqual(@as(usize, 7), session.addr_field.selection.?.hi());
+
+    // 타이핑(선택 대체): 'X' → 선택 전체가 "X"로.
+    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'X' } });
+    try std.testing.expectEqualStrings("X", session.addr_field.text.items);
 }
 
 test "navButtonAt: 밴드 좌측 존을 back/forward/reload로 가르고 URL 존은 null (7e-3 hit-test)" {

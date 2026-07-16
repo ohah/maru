@@ -78,6 +78,53 @@ pub fn isConjoiningJamo(cp: u21) bool {
     return cp >= 0x1100 and cp <= 0x11FF;
 }
 
+// ── 바이트 슬라이스 grapheme 경계 walk (extendsCluster 기반) ──────────────────────────────────
+// UAX#29 cluster 경계를 UTF-8 바이트 슬라이스 위에서 순회하는 순수 헬퍼. 터미널(코어는 셀 그리드로 클러스터하지만
+// 바이트-오프셋 caret/삭제가 필요한 소비자)과 chrome(주소창 TextField)이 공유하도록 여기 최상위 중립에 둔다.
+
+/// `bytes[start..]`에서 시작하는 grapheme cluster 하나의 **끝 바이트 오프셋**. `start`는 cluster 경계여야 한다.
+/// `start >= len`이면 len. 손상 UTF-8은 1바이트를 한 cluster로 본다(width.displayCols의 바이트 폴백과 정합).
+pub fn clusterEnd(bytes: []const u8, start: usize) usize {
+    if (start >= bytes.len) return bytes.len;
+    const rest = bytes[start..];
+    var it = (std.unicode.Utf8View.init(rest) catch return start + 1).iterator();
+    var prev = it.nextCodepoint() orelse return bytes.len;
+    var end_in_rest = it.i; // 첫 코드포인트 끝
+    while (it.nextCodepoint()) |cp| {
+        if (!extendsCluster(prev, cp)) break; // 이 cp는 다음 cluster 시작 — 소비 안 함(idx가 앞에 머묾)
+        prev = cp;
+        end_in_rest = it.i;
+    }
+    return start + end_in_rest;
+}
+
+/// `bytes`에서 `i`(cluster 경계) **직전**의 cluster 경계 바이트 오프셋. `i==0`이면 0. `i`에서 끝나는 cluster의 시작.
+pub fn prevBoundary(bytes: []const u8, i: usize) usize {
+    if (i == 0) return 0;
+    var b: usize = 0;
+    while (b < i) {
+        const e = clusterEnd(bytes, b);
+        if (e >= i) return b; // b에서 시작해 i에서(또는 그 뒤에서) 끝나는 cluster — b가 직전 경계
+        b = e;
+    }
+    return b;
+}
+
+/// 임의 바이트 오프셋을 가장 가까운(내림) grapheme 경계로 스냅 — 폭 산술·단어 walk가 cluster 중간을 가리키면 보정한다.
+/// offset 이하의 마지막 경계를 돌려준다.
+pub fn snapToBoundary(bytes: []const u8, offset: usize) usize {
+    if (offset >= bytes.len) return bytes.len;
+    if (offset == 0) return 0;
+    var b: usize = 0;
+    while (b < bytes.len) {
+        const e = clusterEnd(bytes, b);
+        if (e > offset) return b; // offset이 [b, e) cluster 안 → 그 시작으로 내림
+        if (e == offset) return e;
+        b = e;
+    }
+    return b;
+}
+
 // ── Hangul NFC 조합(UAX#15 Hangul Composition — 알고리즘·테이블 불요) ────────────────────────
 // conjoining 자모(NFD: L U+1100.. + V U+1161.. [+ T U+11A8..])를 완성형 음절(U+AC00..)로 합친다. 완성형/비-한글은
 // 무변. 클러스터 렌더(멀티-codepoint 셀·run shaping)가 없는 소비자(주소창 emitEditBand = codepoint당 단일 셀)가
@@ -155,6 +202,24 @@ pub fn isExtendedPictographic(cp: u21) bool {
 
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+
+test "clusterEnd/prevBoundary/snapToBoundary: 바이트 슬라이스 grapheme 경계" {
+    const s = "a한b"; // 'a'(1) '한'(EA B0 80, 3바이트) 'b'(1)
+    try expectEqual(@as(usize, 1), clusterEnd(s, 0)); // 'a' 끝
+    try expectEqual(@as(usize, 4), clusterEnd(s, 1)); // '한'(완성형 1 cluster) 끝
+    try expectEqual(@as(usize, 5), clusterEnd(s, 4)); // 'b' 끝
+    try expectEqual(@as(usize, 5), clusterEnd(s, 5)); // 끝
+    try expectEqual(@as(usize, 1), prevBoundary(s, 4)); // '한' 직전 경계 = 1
+    try expectEqual(@as(usize, 4), prevBoundary(s, 5)); // 'b' 직전 = 4
+    try expectEqual(@as(usize, 0), prevBoundary(s, 0));
+    // NFD '한'(ㅎ U+1112 + ㅏ U+1161 + ㄴ U+11AB)은 한 cluster.
+    const nfd = "\u{1112}\u{1161}\u{11AB}";
+    try expectEqual(nfd.len, clusterEnd(nfd, 0));
+    // snapToBoundary: cluster 중간(1,2,3바이트)은 '한' 시작(1)으로 내림.
+    try expectEqual(@as(usize, 1), snapToBoundary(s, 2));
+    try expectEqual(@as(usize, 1), snapToBoundary(s, 3));
+    try expectEqual(@as(usize, 4), snapToBoundary(s, 4)); // 경계는 그대로
+}
 
 test "composeHangul: NFD conjoining 자모를 완성형 NFC로 조합(완성형·비-한글 무변)" {
     const a = std.testing.allocator;

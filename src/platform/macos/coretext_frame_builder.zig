@@ -346,14 +346,13 @@ fn appendEllipsizedTitle(
 fn emitEditBand(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),
-    view: text_field.View,
+    lay: text_field.FieldLayout, // 호출자가 프레임당 한 번 계산해 넘긴다(선택 quad와 공유, 리뷰 #9)
     nav_end: u16,
     cols: u16,
     style: terminal.Style,
     caret_color: terminal.Color, // 반전 블록 배경(=theme.cursor)
     caret_text: terminal.Color, // 반전 블록 위 글자색(=theme.background) — 글자가 "파여" 보임
 ) !void {
-    const lay = text_field.fieldLayout(view, .{ .cols = cols, .nav_end = nav_end });
     const content_lo: i32 = @as(i32, nav_end) + @as(i32, if (lay.lead_ellipsis) 1 else 0);
     const content_hi: i32 = @as(i32, cols) - @as(i32, if (lay.tail_ellipsis) 1 else 0);
     const caret_bc: i32 = @intCast(lay.caret_block_col); // 반전 블록을 씌울 밴드 열
@@ -662,8 +661,8 @@ pub fn buildPaneAddressBarDrawList(
     url: []const u8,
     cols: u16,
     fg: terminal.Color,
-    edit_view: ?text_field.View, // 슬라이스 2: 편집 중이면 fieldLayout(단일 레이아웃 소스)로 밴드 방출, null=읽기전용 URL. caret은 정적 반전 블록 셀(§6)
-    caret_color: terminal.Color, // 편집 caret 반전 블록 배경(=theme.cursor) — edit_view==null이면 미사용
+    edit_layout: ?text_field.FieldLayout, // 슬라이스 2: 편집 중이면 fieldLayout(호출자가 한 번 계산·선택 quad와 공유)로 밴드 방출, null=읽기전용 URL. caret은 정적 반전 블록 셀(§6)
+    caret_color: terminal.Color, // 편집 caret 반전 블록 배경(=theme.cursor) — edit_layout==null이면 미사용
     caret_text: terminal.Color, // caret 반전 블록 위 글자색(=theme.background)
     can_go_back: bool, // Phase 7e-3: back 버튼 활성(WKWebView.canGoBack) — webNavState에서 옴
     can_go_forward: bool, // forward 버튼 활성(WKWebView.canGoForward)
@@ -692,13 +691,13 @@ pub fn buildPaneAddressBarDrawList(
             }
         }
         // [nav_end, cols-1): 버튼 존 뒤부터 URL/편집 텍스트(마지막 칸 = 우측 여백). 밴드가 버튼 존 + 최소 1칸을 못 담으면
-        // (nav_end >= cols-1) URL은 생략(버튼만). 편집 중이면 tail 앵커로 문자열 **끝**(caret 위치)을 늘 보이게(넘치면 앞을
-        // …로 — rename 편집기와 동형), 읽기전용은 head 앵커로 앞부분(scheme·host) 보존.
+        // (nav_end >= cols-1) URL/편집 텍스트는 생략(버튼만). 편집 중이면 fieldLayout으로 mid-string caret·가로 스크롤
+        // (넘치면 앞·뒤를 …로), 읽기전용은 head 앵커로 앞부분(scheme·host) 보존.
         if (nav_end < cols - 1) {
-            if (edit_view) |v| {
+            if (edit_layout) |lay| {
                 // 슬라이스 2: 편집 밴드는 fieldLayout(단일 레이아웃 소스)로 방출 — caret 위치가 hit-test(caretAtColumn)와
                 // 같은 소스라 드리프트 0(§2.3 벽②, chrome-strategy §5.4 MUST). 읽기전용 URL은 아래 appendEllipsizedTitle(.head).
-                try emitEditBand(allocator, &cells, v, nav_end, cols, .{ .foreground = fg }, caret_color, caret_text);
+                try emitEditBand(allocator, &cells, lay, nav_end, cols, .{ .foreground = fg }, caret_color, caret_text);
             } else {
                 _ = try appendEllipsizedTitle(allocator, &cells, url, 0, nav_end, cols - 1, .{ .foreground = fg }, false, .head); // 읽기전용 URL(head 앵커로 scheme·host 보존)
             }
@@ -1440,7 +1439,7 @@ test "buildPaneAddressBarDrawList: 편집 caret은 정적 반전 블록 셀(글�
     const caret: terminal.Color = .{ .rgb = .{ .r = 9, .g = 8, .b = 7 } }; // 반전 블록 배경
     const ctext: terminal.Color = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }; // 반전 블록 위 글자색
     // nav_end=9 → 텍스트 영역 [9,23). "abc"(3칸)이 col 9~11, caret=끝(col 12)엔 글자 없어 **반전 공백(솔리드 블록)**.
-    var dl = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.View{ .text = "abc", .caret = 3 }, caret, ctext, false, false, .default, .default, 3, 3);
+    var dl = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.fieldLayout(.{ .text = "abc", .caret = 3 }, .{ .cols = 24, .nav_end = 9 }), caret, ctext, false, false, .default, .default, 3, 3);
     defer dl.deinit(allocator);
     var caret_cell: ?renderer.DrawCell = null;
     var text_cells: usize = 0;
@@ -1455,7 +1454,7 @@ test "buildPaneAddressBarDrawList: 편집 caret은 정적 반전 블록 셀(글�
     try std.testing.expect(std.meta.eql(caret_cell.?.style.foreground, ctext)); // 위 글자색
 
     // caret이 글자 위(중간)면 그 글자를 반전색으로(공백 아님) — "abc"에서 caret=1이면 col 10의 'b'가 반전.
-    var mid = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.View{ .text = "abc", .caret = 1 }, caret, ctext, false, false, .default, .default, 3, 3);
+    var mid = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.fieldLayout(.{ .text = "abc", .caret = 1 }, .{ .cols = 24, .nav_end = 9 }), caret, ctext, false, false, .default, .default, 3, 3);
     defer mid.deinit(allocator);
     var mid_caret: ?renderer.DrawCell = null;
     for (mid.cells) |c| if (std.meta.eql(c.style.background, caret)) {
@@ -1469,6 +1468,19 @@ test "buildPaneAddressBarDrawList: 편집 caret은 정적 반전 블록 셀(글�
     var ro = try buildPaneAddressBarDrawList(allocator, "abc", 24, .default, null, .default, .default, false, false, .default, .default, 3, 3);
     defer ro.deinit(allocator);
     for (ro.cells) |c| try std.testing.expect(!std.meta.eql(c.style.background, caret));
+
+    // 리뷰 #2: caret 아래 **넓은(한글=2칸) 글자**가 가로 스크롤 우측 경계에 걸려도 통째로 잘리지 않는다(scrollWindow가 caret
+    // 글자 폭 2칸을 예약). text="0..9가", caret=10(가 앞) → 좁은 밴드(cols=16, nav_end=9→text_area 7)로 스크롤. 가가 반전 caret
+    // 셀로 방출되어야(옛 1칸 예약이면 2칸 가가 클립돼 caret 아래가 빈 셀이던 회귀).
+    var wide = try buildPaneAddressBarDrawList(allocator, "", 16, .default, text_field.fieldLayout(.{ .text = "0123456789가", .caret = 10 }, .{ .cols = 16, .nav_end = 9 }), caret, ctext, false, false, .default, .default, 3, 3);
+    defer wide.deinit(allocator);
+    var wide_caret: ?renderer.DrawCell = null;
+    for (wide.cells) |c| if (std.meta.eql(c.style.background, caret)) {
+        wide_caret = c;
+    };
+    try std.testing.expect(wide_caret != null);
+    try std.testing.expectEqual(@as(u21, '가'), wide_caret.?.codepoint); // 공백(잘림)이 아니라 '가' 그대로
+    try std.testing.expectEqual(@as(u2, 2), wide_caret.?.width); // 2칸(넓은 글자)
 }
 
 test "buildPaneAddressBarDrawList: 긴 편집 URL은 fieldLayout 가로 스크롤 — 선두 …(lead) (슬라이스 2)" {
@@ -1476,7 +1488,7 @@ test "buildPaneAddressBarDrawList: 긴 편집 URL은 fieldLayout 가로 스크�
     // nav_end=9, cols=24 → 텍스트 영역 15칸. 긴 URL(caret=끝)은 텍스트 존을 넘쳐 fieldLayout이 가로 스크롤 →
     // 선두 "…"(lead ellipsis, col 9)로 앞을 자른다. caret=끝(반전 공백)이라 여기선 lead "…"만 확인.
     const long = "https://example.com/very/long/path/segment";
-    var dl = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.View{ .text = long, .caret = long.len }, .default, .default, false, false, .default, .default, 3, 3);
+    var dl = try buildPaneAddressBarDrawList(allocator, "", 24, .default, text_field.fieldLayout(.{ .text = long, .caret = long.len }, .{ .cols = 24, .nav_end = 9 }), .default, .default, false, false, .default, .default, 3, 3);
     defer dl.deinit(allocator);
     var lead_ellipsis: ?renderer.DrawCell = null;
     for (dl.cells) |c| {

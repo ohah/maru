@@ -28,53 +28,8 @@ const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시 �
 /// (복제 금지 — §2.2). Σ max(1, cellWidth(cp)): 한글/CJK=2, 결합 문자=1.
 pub const displayCols = overlay_input.displayCols;
 
-// ── 그래핌 경계 walk (UAX#29, grapheme.extendsCluster 기반) ────────────────────────────────
-
-/// `bytes[start..]`에서 시작하는 grapheme cluster 하나의 **끝 바이트 오프셋**. `start`는 cluster 경계여야 한다.
-/// `start >= len`이면 len. 손상 UTF-8은 1바이트를 한 cluster로 본다(displayCols의 바이트 폴백과 정합).
-fn clusterEnd(bytes: []const u8, start: usize) usize {
-    if (start >= bytes.len) return bytes.len;
-    const rest = bytes[start..];
-    var it = (std.unicode.Utf8View.init(rest) catch return start + 1).iterator();
-    var prev = it.nextCodepoint() orelse return bytes.len;
-    var end_in_rest = it.i; // 첫 코드포인트 끝
-    while (it.nextCodepoint()) |cp| {
-        if (!grapheme.extendsCluster(prev, cp)) break; // 이 cp는 다음 cluster 시작 — 소비 안 함(idx가 앞에 머묾)
-        prev = cp;
-        end_in_rest = it.i;
-    }
-    return start + end_in_rest;
-}
-
-/// `bytes`에서 `i`(cluster 경계) **직전**의 cluster 경계 바이트 오프셋. `i==0`이면 0. `i`에서 끝나는 cluster의 시작.
-fn prevBoundary(bytes: []const u8, i: usize) usize {
-    if (i == 0) return 0;
-    var b: usize = 0;
-    while (b < i) {
-        const e = clusterEnd(bytes, b);
-        if (e >= i) return b; // b에서 시작해 i에서(또는 그 뒤에서) 끝나는 cluster — b가 직전 경계
-        b = e;
-    }
-    return b;
-}
-
-/// `bytes`의 모든 grapheme cluster 경계를 순서대로 순회(0..len 포함). caretAtColumn·fieldLayout가 공유.
-const BoundaryIter = struct {
-    bytes: []const u8,
-    at: usize = 0,
-    done_last: bool = false,
-    fn next(self: *BoundaryIter) ?usize {
-        if (self.at > self.bytes.len) return null;
-        if (self.at == self.bytes.len) {
-            if (self.done_last) return null;
-            self.done_last = true;
-            return self.at;
-        }
-        const b = self.at;
-        self.at = clusterEnd(self.bytes, self.at);
-        return b;
-    }
-};
+// 바이트 슬라이스 grapheme 경계 walk(clusterEnd·prevBoundary·snapToBoundary)는 최상위 중립 grapheme.zig로 이동했다
+// (터미널도 재사용 가능하게 — chrome-terminal 경계로 여기 두면 터미널이 못 씀). 아래에서 grapheme.* 로 호출한다.
 
 // ── 모델 ──────────────────────────────────────────────────────────────────────────────────
 
@@ -157,7 +112,7 @@ pub const TextField = struct {
     pub fn deleteBackward(self: *TextField) void {
         if (self.dropSelection()) return;
         if (self.caret == 0) return;
-        const start = prevBoundary(self.text.items, self.caret);
+        const start = grapheme.prevBoundary(self.text.items, self.caret);
         self.text.replaceRangeAssumeCapacity(start, self.caret - start, &.{});
         self.caret = start;
     }
@@ -166,7 +121,7 @@ pub const TextField = struct {
     pub fn deleteForward(self: *TextField) void {
         if (self.dropSelection()) return;
         if (self.caret >= self.text.items.len) return;
-        const end = clusterEnd(self.text.items, self.caret);
+        const end = grapheme.clusterEnd(self.text.items, self.caret);
         self.text.replaceRangeAssumeCapacity(self.caret, end - self.caret, &.{});
     }
 
@@ -205,7 +160,7 @@ pub const TextField = struct {
                 return;
             }
         }
-        self.moveTo(prevBoundary(self.text.items, self.caret), extend);
+        self.moveTo(grapheme.prevBoundary(self.text.items, self.caret), extend);
     }
 
     pub fn moveRight(self: *TextField, extend: bool) void {
@@ -216,7 +171,7 @@ pub const TextField = struct {
                 return;
             }
         }
-        self.moveTo(clusterEnd(self.text.items, self.caret), extend);
+        self.moveTo(grapheme.clusterEnd(self.text.items, self.caret), extend);
     }
 
     pub fn moveWordLeft(self: *TextField, separators: []const u8, extend: bool) void {
@@ -253,7 +208,7 @@ pub const TextField = struct {
 
     /// 드래그/shift+클릭 — focus를 offset으로(anchor는 기존, 없으면 현재 caret). offset은 그래핌 경계로 스냅.
     pub fn selectTo(self: *TextField, offset: usize) void {
-        const off = snapToBoundary(self.text.items, offset);
+        const off = grapheme.snapToBoundary(self.text.items, offset);
         const anchor = if (self.selection) |s| s.anchor else self.caret;
         self.caret = off;
         self.selection = if (anchor == off) null else .{ .anchor = anchor, .focus = off };
@@ -261,10 +216,11 @@ pub const TextField = struct {
 
     /// 더블클릭 — offset이 든 단어를 선택. separators는 정책 인자. caret은 단어 끝.
     pub fn selectWordAt(self: *TextField, offset: usize, separators: []const u8) void {
-        const off = snapToBoundary(self.text.items, offset);
-        const lo = wordLeft(self.text.items, wordRight(self.text.items, off, separators), separators);
-        // wordRight로 단어 끝을 잡고 wordLeft로 그 단어 시작을 잡는다(구분자 위 클릭이면 인접 단어).
-        const hi = wordRight(self.text.items, lo, separators);
+        const off = grapheme.snapToBoundary(self.text.items, offset);
+        // wordRight로 단어 끝(hi)을 잡고 wordLeft로 그 단어 시작(lo)을 잡는다(구분자 위 클릭이면 인접 단어). lo..hi가 한
+        // 단어이므로 wordRight(lo)==hi라 두 번째 스캔은 불필요 — hi를 재사용한다.
+        const hi = wordRight(self.text.items, off, separators);
+        const lo = wordLeft(self.text.items, hi, separators);
         if (lo == hi) {
             self.selection = null;
             self.caret = off;
@@ -349,7 +305,7 @@ fn wordLeft(bytes: []const u8, from: usize, separators: []const u8) usize {
         if (isSeparator(b.cp, separators)) break;
         i = b.start;
     }
-    return snapToBoundary(bytes, i);
+    return grapheme.snapToBoundary(bytes, i);
 }
 
 /// caret 뒤 단어 끝(⌥→) — 구분자를 건너뛴 뒤 단어 문자를 건너뛴다. 그래핌 경계로 스냅.
@@ -363,22 +319,7 @@ fn wordRight(bytes: []const u8, from: usize, separators: []const u8) usize {
         if (isSeparator(a.cp, separators)) break;
         i = a.next;
     }
-    return snapToBoundary(bytes, i);
-}
-
-/// 임의 바이트 오프셋을 가장 가까운(내림) grapheme 경계로 스냅 — 폭 산술·단어 walk가 cluster 중간을 가리키면
-/// 보정한다(§3.1 그래핌 스냅). offset 이하의 마지막 경계를 돌려준다.
-fn snapToBoundary(bytes: []const u8, offset: usize) usize {
-    if (offset >= bytes.len) return bytes.len;
-    if (offset == 0) return 0;
-    var b: usize = 0;
-    while (b < bytes.len) {
-        const e = clusterEnd(bytes, b);
-        if (e > offset) return b; // offset이 [b, e) cluster 안 → 그 시작으로 내림
-        if (e == offset) return e;
-        b = e;
-    }
-    return b;
+    return grapheme.snapToBoundary(bytes, i);
 }
 
 // ── 레이아웃 (draw ↔ hit-test 단일 소스, §3) ────────────────────────────────────────────────
@@ -438,9 +379,13 @@ fn scrollWindow(v: View, metrics: Metrics) ScrollWindow {
     const content = pre_cols + mid_cols + post_cols;
     const text_area = metrics.cols -| metrics.nav_end;
 
-    // caret 삽입점 콘텐츠 열=pre_cols, 블록 caret 셀 우측 경계=pre_cols+mid_cols+1(끝 caret 1칸 포함).
+    // caret 삽입점 콘텐츠 열=pre_cols, 블록 caret 셀 우측 경계=pre_cols+mid_cols+caret_glyph_w. **폭은 caret 아래 글자
+    // 폭**(끝이면 1)이라 넓은(CJK/한글=2칸) 글자가 창 우측 경계에 반쯤 걸려 emitEditBand 클립에 통째로 잘리는 것을 막는다
+    // (1칸만 예약하면 2칸 글자가 잘려 caret 아래가 빈 셀이 되던 회귀).
+    const post = text[v.caret..];
+    const caret_glyph_w: u32 = if (post.len == 0) 1 else @max(displayCols(post[0..grapheme.clusterEnd(post, 0)]), 1);
     const caret_lo = pre_cols;
-    const caret_hi = pre_cols + mid_cols + 1;
+    const caret_hi = pre_cols + mid_cols + caret_glyph_w;
 
     // 전부(끝 caret 1칸 포함) 들어가면 스크롤 없음.
     if (content + 1 <= text_area or text_area == 0) {
@@ -532,18 +477,25 @@ pub fn caretAtColumn(v: View, metrics: Metrics, band_col: i32) usize {
     const rel = band_col - @as(i32, @intCast(metrics.nav_end)) - lead_col + @as(i32, @intCast(w.view));
     const target: u32 = if (rel < 0) w.view else @intCast(rel);
 
-    // 모든 그래핌 경계 중 콘텐츠 열이 target에 가장 가까운 것(tie→뒤). preedit는 text에 없으므로 조합 영역
-    // 클릭은 인접 경계로 스냅된다(조합 중 hit-test는 §7에서 잠금).
-    var it = BoundaryIter{ .bytes = v.text };
+    // 그래핌 경계를 **한 번만** 전진하며 콘텐츠 열을 누적한다(O(n) — 옛 BoundaryIter+contentColOf는 경계마다
+    // displayCols를 처음부터 재계산해 O(n²)였다). 각 경계 b의 콘텐츠 열 = 누적폭 + (b>caret? mid_cols:0)(§3.3 preedit
+    // 우측 이동). target에 가장 가까운 경계를 고른다(tie→뒤, 셀 경계 클릭 시 다음 글자 앞). preedit는 text에 없어 조합
+    // 영역 클릭은 인접 경계로 스냅(조합 중 hit-test는 §7에서 잠금).
     var best: usize = 0;
     var best_dist: u32 = std.math.maxInt(u32);
-    while (it.next()) |b| {
-        const col = contentColOf(v, w, b);
+    var b: usize = 0;
+    var acc: u32 = 0; // displayCols(text[0..b]) 누적
+    while (true) {
+        const col = acc + (if (b > v.caret) w.mid_cols else 0);
         const dist = if (col > target) col - target else target - col;
         if (dist <= best_dist) { // <= 로 tie 시 뒤(더 큰 오프셋) 채택
             best_dist = dist;
             best = b;
         }
+        if (b >= v.text.len) break;
+        const e = grapheme.clusterEnd(v.text, b);
+        acc += displayCols(v.text[b..e]); // 이 cluster 폭만 더한다(전체 O(n))
+        b = e;
     }
     return best;
 }
@@ -804,7 +756,7 @@ test "fieldLayout: preedit run — caret에 조합 삽입(§3.3 3-run)" {
 
 test "snapToBoundary: cluster 중간 오프셋을 경계로 내림" {
     // "한"(EA B0 80) — 오프셋 1,2는 cluster 안 → 0으로 내림, 3은 경계.
-    try testing.expectEqual(@as(usize, 0), snapToBoundary("\xea\xb0\x80", 1));
-    try testing.expectEqual(@as(usize, 0), snapToBoundary("\xea\xb0\x80", 2));
-    try testing.expectEqual(@as(usize, 3), snapToBoundary("\xea\xb0\x80", 3));
+    try testing.expectEqual(@as(usize, 0), grapheme.snapToBoundary("\xea\xb0\x80", 1));
+    try testing.expectEqual(@as(usize, 0), grapheme.snapToBoundary("\xea\xb0\x80", 2));
+    try testing.expectEqual(@as(usize, 3), grapheme.snapToBoundary("\xea\xb0\x80", 3));
 }

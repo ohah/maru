@@ -16451,8 +16451,8 @@ pub const AppSession = struct {
                             // 정렬 DrawCell(quad 금지) — 없으면 빈 문자열 = 밴드 배경만. muted 색.
                             const editing = if (self.addrEditSurfaceId()) |sid| sid == addr_term.surfaceId() else false;
                             // 슬라이스 3/4: 편집 중이면 fieldLayout(렌더 텍스트와 같은 단일 소스)으로 (a) 선택 하이라이트 배경 quad,
-                            // (b) **얇은 세로 막대 caret**(insertion bar)을 그린다. caret을 불투명 블록 셀로 그리면 그 자리 글자를
-                            // 가리므로(사용자 제보) 세로 막대 quad로 — caret_col 왼쪽 경계에 세워 글자를 안 가린다. 색=theme.cursor.
+                            // (b) **반투명 블록 caret**을 그린다. caret을 불투명 블록으로 그리면 그 자리 글자를 가리므로(사용자 제보),
+                            // 블록 모양은 유지하되 반투명(straight-alpha, 셰이더 rgb*=a)으로 그려 글자가 비쳐 보이게 한다. 색=theme.cursor.
                             if (editing and self.cell_width_px > 0) {
                                 const sel_cw = self.cell_width_px;
                                 const band_cols: u32 = @min(band_rect.w / sel_cw, @as(u32, std.math.maxInt(u16)));
@@ -16463,11 +16463,11 @@ pub const AppSession = struct {
                                     const sel_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel.start_col * sel_cw, .y = band_rect.y, .w = (sel.end_col - sel.start_col) * sel_cw, .h = band_rect.h };
                                     self.appendBarBgQuad(sel_rect, self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.selection)));
                                 };
-                                // (b) caret 세로 막대(caret_col 왼쪽 경계, 밴드 안일 때만). 폭은 얇게(≈cell/6, 최소 2px backing).
+                                // (b) caret 반투명 블록(caret_col 한 셀, 밴드 안일 때만). 알파≈60% × window.opacity — 글자가 비침.
                                 if (sel_lay.caret_col < band_cols) {
-                                    const caret_w: u32 = @max(sel_cw / 6, 2);
-                                    const caret_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel_lay.caret_col * sel_cw, .y = band_rect.y, .w = caret_w, .h = band_rect.h };
-                                    self.appendBarBgQuad(caret_rect, self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.cursor)));
+                                    const caret_a: u8 = @intCast((@as(u32, 0x99) * self.windowOpacityByte()) / 255);
+                                    const caret_rect: maru.session.SplitRect = .{ .x = band_rect.x + sel_lay.caret_col * sel_cw, .y = band_rect.y, .w = sel_cw, .h = band_rect.h };
+                                    self.appendBarBgQuad(caret_rect, packStraightRgbU32(packOpaqueRgb(self.appearance.theme.cursor), caret_a));
                                 }
                             }
                             // Phase 7e-3: nav 버튼(back/forward) 활성 여부는 이 surface의 저장된 nav 상태에서 온다(없으면 false —

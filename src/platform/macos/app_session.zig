@@ -16395,23 +16395,16 @@ pub const AppSession = struct {
                                     }
                                 }
                             }
-                            // 편집 중이면 확정 텍스트(query) + IME 조합(preedit)을 이어 그린다(조합 중 한글이 보이게). 읽기전용이면
-                            // nav URL. disp_buf는 렌더 임시(query 실질<4096·preedit<256). 초과분은 잘라도 tail 앵커라 끝이 보인다.
-                            var disp_buf: [addr_nav_url_cap + 512]u8 = undefined;
-                            const url: []const u8 = if (editing) blk: {
-                                const q = self.addrEditText();
-                                const p = self.addrEditPreedit();
-                                // preedit(조합 중, 항상 뒤·작음)를 head 경계로 먼저 확보하고, query는 **tail**(caret 끝)이
-                                // 보이게 남는 자리에 넣는다. 초장문 URL(q.len>disp_buf)이면 head를 버리고 tail을 UTF-8
-                                // 경계에서 잘라 caret 끝이 보이게 한다 — 렌더 .tail 앵커와 정합(옛 head @memcpy는 caret이
-                                // 있는 끝을 잘라 멀티바이트를 쪼갰다, 리뷰 [5]).
-                                const pn = terminal.width.truncateToBoundary(p, disp_buf.len);
-                                const q_start = terminal.width.tailToBoundary(q, disp_buf.len - pn);
-                                const q_tail = q[q_start..]; // ≤ disp_buf.len - pn(tailToBoundary 보장), UTF-8 경계 정렬
-                                @memcpy(disp_buf[0..q_tail.len], q_tail);
-                                @memcpy(disp_buf[q_tail.len..][0..pn], p[0..pn]);
-                                break :blk disp_buf[0 .. q_tail.len + pn];
-                            } else (if (nav_state) |st| st.url else "");
+                            // 슬라이스 2: 편집 밴드는 fieldLayout(단일 레이아웃 소스)로 그린다 — query/preedit를 병합·절단하지
+                            // 않고 **빌린 View**로 넘겨(caret=끝), fieldLayout의 가로 스크롤 창이 caret(끝)+preedit를 시야에
+                            // 유지한다(옛 disp_buf tail 병합을 대체). View 슬라이스는 addr_input.query/preedit.items라 렌더 중 안정.
+                            // 읽기전용이면 nav URL(appendEllipsizedTitle .head).
+                            const edit_view: ?chrome.components.text_field.View = if (editing) .{
+                                .text = self.addrEditText(),
+                                .preedit = self.addrEditPreedit(),
+                                .caret = self.addrEditText().len, // 끝-caret(모델 교체는 슬라이스 3 — mid-string caret은 그때)
+                            } else null;
+                            const url: []const u8 = if (editing) "" else (if (nav_state) |st| st.url else "");
                             const addr_cols = @min(pb.full.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))); // cell_width_px>0(paneBar가 이미 가드)
                             if (addr_cols > 0) {
                                 const addr_fg: terminal.Color = .{ .rgb = self.mutedForeground() }; // 읽기전용 URL — 비활성 탭과 같은 muted 톤
@@ -16421,7 +16414,7 @@ pub const AppSession = struct {
                                 const button_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                                 const button_dim_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
                                 const band_text_origin_y = band_rect.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 탭 바 text_origin_y와 같은 pad_y
-                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, editing, caret_color, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
+                                if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_view, caret_color, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
                                     self.collectShaped(&collected, adl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = band_text_origin_y, .colors = tabbar_colors } });
                                 } else |_| {} // draw 생성 OOM은 탭 바처럼 무시(밴드 배경만이라도)
                             }

@@ -1997,6 +1997,9 @@ pub const AppSession = struct {
     copy_buffer: []u8 = &.{},
     // pendingClipboard()가 돌려준 OSC 52 클립보드 데이터의 소유 버퍼(다음 pendingClipboard/destroy까지 유효).
     clipboard_out_buffer: []u8 = &.{},
+    // 슬라이스 4: 주소창 ⌘X(cut)가 넣은 클립보드 쓰기 대기 바이트(소유). pendingClipboard가 OSC52 write와 같은 drain으로
+    // 우선 반환 → Swift가 NSPasteboard에 씀. 선택 바이트를 **먼저 캡처**해 deleteSelection과 순서 무관(cut 표준). drain 시 비움.
+    addr_clipboard_write: []u8 = &.{},
     // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
     notification_title_out: []u8 = &.{},
     notification_body_out: []u8 = &.{},
@@ -7865,6 +7868,7 @@ pub const AppSession = struct {
                 },
                 .char => {
                     if (k.mods.command and (k.codepoint == 'a' or k.codepoint == 'A')) return self.addr_field.selectAll(); // ⌘A 전체 선택
+                    if (k.mods.command and (k.codepoint == 'x' or k.codepoint == 'X')) return self.addrEditCut(); // ⌘X 잘라내기(⌘C/⌘V는 Swift가 인터셉트)
                     if (k.mods.control and (k.codepoint == 'a' or k.codepoint == 'A')) return self.addr_field.moveHome(k.mods.shift); // ⌃A 줄 시작(emacs)
                     if (k.mods.control and (k.codepoint == 'e' or k.codepoint == 'E')) return self.addr_field.moveEnd(k.mods.shift); // ⌃E 줄 끝
                     if (k.mods.command or k.mods.control or k.mods.option) return; // 그 외 단축키 조합은 편집기에 안 쌓음
@@ -12990,6 +12994,20 @@ pub const AppSession = struct {
         self.pasteTextTo(self.activeSurface().id, bytes, escape_each); // Cmd+V·드롭 즉시 경로 = 지금 활성 surface
     }
 
+    /// 슬라이스 4: ⌘X 잘라내기 — 선택 바이트를 **먼저 클립보드-쓰기 큐에 캡처**한 뒤 선택을 지운다(cut 표준: 바이트를 넘기지
+    /// "지금 선택을 복사해"가 아니라 → 비동기 순서 문제 없음). Swift가 pendingClipboard drain에서 그 바이트를 NSPasteboard에
+    /// 쓴다(OSC52 write와 같은 경로 — 새 ABI 불요). 편집 아님/선택 없음/OOM이면 무동작(선택 보존).
+    fn addrEditCut(self: *AppSession) void {
+        if (self.addr_edit == null) return;
+        const sel = self.addr_field.selection orelse return;
+        const slice = self.addr_field.text.items[sel.lo()..sel.hi()];
+        if (slice.len == 0) return;
+        const captured = self.allocator.dupe(u8, slice) catch return; // OOM이면 cut 안 함(선택 보존)
+        if (self.addr_clipboard_write.len > 0) self.allocator.free(self.addr_clipboard_write);
+        self.addr_clipboard_write = captured; // Swift가 다음 tick pendingClipboard drain에서 NSPasteboard에 씀
+        _ = self.addr_field.deleteSelection();
+    }
+
     /// 슬라이스 4: 클립보드 텍스트를 주소창 편집 필드에 삽입(⌘V) — 개행·NUL·제어문자(단일행 URL 오염) strip 후 caret에
     /// insertText(선택 있으면 대체). 편집 아님이면 무동작. 큰 붙여넣기도 URL이라 상한 없이 그대로(필드는 동적 버퍼).
     fn addrEditPaste(self: *AppSession, bytes: []const u8) void {
@@ -13850,6 +13868,14 @@ pub const AppSession = struct {
     /// 코어 pending을 비워(한 번 쓰고 소비) 같은 데이터가 다음 tick에 또 쓰이지 않게 한다. ask(요청별 확인 UI)는 후속.
     pub fn pendingClipboard(self: *AppSession) []const u8 {
         if (!self.surface_initialized) return &.{};
+        // 슬라이스 4: 주소창 ⌘X가 넣은 클립보드 쓰기가 있으면 우선 반환(OSC52 write와 같은 drain 경로 — Swift가 NSPasteboard에
+        // 씀). 소유권을 clipboard_out_buffer로 이전해 반환 수명(다음 pendingClipboard까지) 계약을 그대로 만족한다.
+        if (self.addr_clipboard_write.len > 0) {
+            if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
+            self.clipboard_out_buffer = self.addr_clipboard_write;
+            self.addr_clipboard_write = &.{};
+            return self.clipboard_out_buffer;
+        }
         const pending = self.activeSurface().core.pendingClipboardWrite();
         if (pending.len == 0) return &.{};
         if (self.clipboard_out_buffer.len > 0) {
@@ -19871,6 +19897,7 @@ pub const AppSession = struct {
 
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
+        if (self.addr_clipboard_write.len > 0) self.allocator.free(self.addr_clipboard_write); // 슬라이스 4: 미-drain 주소창 cut 버퍼
         self.clipboard_read_target_buf.deinit(self.allocator);
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
         if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
@@ -27754,11 +27781,15 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     session.allocator = std.testing.allocator;
     session.surface_initialized = true;
     session.copy_buffer = &.{};
+    session.clipboard_out_buffer = &.{}; // pendingClipboard가 drain 시 free(undefined면 UB) — [[devsession-undefined-test-field-trap]]
     session.metal_dirty = false;
     session.addr_edit = 1; // 편집 활성 → copy/paste가 필드 분기
     session.addr_field = .{};
+    session.addr_clipboard_write = &.{};
     defer session.addr_field.deinit(std.testing.allocator);
     defer if (session.copy_buffer.len > 0) std.testing.allocator.free(session.copy_buffer);
+    defer if (session.clipboard_out_buffer.len > 0) std.testing.allocator.free(session.clipboard_out_buffer);
+    defer if (session.addr_clipboard_write.len > 0) std.testing.allocator.free(session.addr_clipboard_write);
 
     try session.addr_field.setText(std.testing.allocator, "abcdef"); // caret=끝(6)
     // ⌘C: 선택 [1,4)="bcd"를 복사(필드 선택).
@@ -27775,6 +27806,20 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     session.addr_field.selectAll();
     session.pasteText("hello", false);
     try std.testing.expectEqualStrings("hello", session.addr_field.text.items);
+
+    // ⌘X: 전체 선택 잘라내기 → text에서 제거 + 클립보드-쓰기 큐에 **먼저 캡처**(삭제와 순서 무관). pendingClipboard가
+    // 그 바이트를 반환(Swift가 NSPasteboard에 씀 — OSC52 write와 같은 drain). addr_clipboard_write set이라 터미널 경로 안 탐.
+    session.addr_field.selectAll();
+    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
+    try std.testing.expectEqualStrings("", session.addr_field.text.items); // 잘려서 비었음
+    try std.testing.expect(session.addr_field.selection == null);
+    try std.testing.expectEqualStrings("hello", session.pendingClipboard()); // 잘라낸 바이트가 클립보드로
+
+    // ⌘X 선택 없으면 무동작(클립보드 큐 안 채움).
+    try session.addr_field.setText(std.testing.allocator, "abc");
+    session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
+    try std.testing.expectEqualStrings("abc", session.addr_field.text.items); // 선택 없어 그대로
+    try std.testing.expectEqual(@as(usize, 0), session.addr_clipboard_write.len);
 }
 
 test "navButtonAt: 밴드 좌측 존을 back/forward/reload로 가르고 URL 존은 null (7e-3 hit-test)" {

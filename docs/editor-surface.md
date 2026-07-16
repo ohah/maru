@@ -1,289 +1,429 @@
-# 에디터 Surface 전략 (코드 에디터·git diff 뷰어·포맷/린트·LSP)
+# 에디터 Surface 전략 (코드 에디터·git diff·저장·도구·LSP)
 
-이 문서는 maru에 **코드 에디터 surface**(git diff 뷰어 → 인플레이스 편집 → 포맷/린트 → LSP)를 얹는 설계의 단일 출처다. "에이전트 워크벤치" 방향에서 **에이전트가 만든 변경을 사람이 터미널 안에서 리뷰·수정·커밋하는 루프**를 닫는 조각이다.
+이 문서는 Maru에 코드 에디터 surface를 추가하는 계획의 단일 출처다. 첫 제품 가치는 에이전트가 만든 변경을 사용자가 Maru 안에서 검토하는 것이고, 이후 같은 문서 모델 위에 편집·저장·포맷/린트·LSP를 얹는다.
 
-핵심 재구성: **"git diff 뷰어"는 primitive가 아니다.** 실제로 짓는 것은 **에디터 surface(문서 모델 + 렌더 컴포넌트)**이고, git diff는 그 에디터의 한 가지 **뷰/모드**다. diff 뷰어를 독립적으로 만들면 편집·LSP를 얹을 때 통째로 리셰이프하게 되므로, 토대를 doc-first로 먼저 고정한다.
+경계:
 
-경계·단일 출처:
-- WKWebView 합성·입력·`maru-app://` 신뢰 채널·CSP는 [web-panel.md](web-panel.md)가 소유한다(여기서 재서술하지 않는다).
-- 브리지 신뢰 게이트·capability·op 디스패치는 [control-plane.md](control-plane.md) §8이 소유한다.
-- 레이어 경계(L2 코어 / L4 host)는 [layering-and-portability.md](layering-and-portability.md), surface 생애주기는 [surface-runtime-api.md](surface-runtime-api.md)를 단일 출처로 둔다.
-- 이 문서는 "그 위에 에디터/문서/파일 I/O/포맷/LSP를 어떻게 얹는가"에 집중한다.
+- WKWebView 합성·입력·`maru-app://`·CSP는 [web-panel.md](web-panel.md)가 소유한다.
+- 외부 프로세스의 Unix socket 인증과 capability 발급은 [control-plane.md](control-plane.md)가 소유한다.
+- 레이어 경계는 [layering-and-portability.md](layering-and-portability.md), surface 생애주기는 [surface-runtime-api.md](surface-runtime-api.md)를 따른다.
+- 이 문서는 editor 전용 bridge/grant, 문서 revision, 파일 저장·감시, diff/도구/LSP API와 단계 gate를 소유한다.
 
-> **PoC 실측 범위**
-> - **1차(2026-07-12, 정적)**: ① Monaco+워커5개를 zntc로 번들(성공), ② git diff op 데이터 형태, ③ 포매터 stdin/에러 거동(zig fmt·rustfmt), ④ LSP 왕복(rust-analyzer).
-> - **2차(2026-07-13, 런타임·시각)**: 산출물을 **엄격 CSP 하에서 실제로 실행하고 화면을 찍었다**. Monaco DiffEditor가 diff·문자단위 하이라이트·구문강조·codicon까지 정상 렌더하고, TS 언어서비스가 201ms 만에 진단을 낸다. **기준 번들러(Vite) 산출물과 픽셀 0개 차이.** 자동완성·호버·찾기·커맨드팔레트·Monarch 14개 언어까지 두드려도 **`new Function`·`eval`·`WebAssembly` 호출 0회, CSP 위반 0건** → **`script-src 'unsafe-eval'` 불필요를 측정으로 확정**(§2·§4).
->
-> **여전히 미검증: WKWebView(WebKit) 런타임.** 2차는 Chrome(Blink)이다. "코드가 `unsafe-eval`을 실제로 요구하는가"는 엔진 무관한 강한 신호지만, **커스텀 스킴(`maru-app://`) 위의 모듈 워커·스타일 주입·IME는 WebKit 고유 영역**이라 Phase 0.5 GUI 스파이크가 여전히 필요하다(§11·§14).
->
-> **교훈(설계에 반영)**: 이 PoC 과정에서 번들러 결함을 여러 건 밟았는데, **전부 빌드가 exit 0으로 통과한 채** 뒤늦게 드러났다. 어떤 결함은 산출물이 파싱조차 안 됐고, 어떤 결함은 파싱·모듈평가까지 통과한 뒤 **API를 실제로 호출·렌더할 때만** 터졌다. **빌드 green은 동작 증거가 아니다** → 프런트 빌드 파이프라인에 **4층 검증 게이트**를 넣는다(§12).
+## 1. 2026-07-16 적대적 PoC 결론
 
----
+이번 PoC는 임시 로컬 하니스로 수행했다. 결과 자체는 설계 근거지만 아직 저장소의 반복 가능한 자동 테스트가 아니다. Phase 0.5의 첫 PR은 같은 검증을 제품 하니스로 커밋해야 한다.
 
-## 1. 확정 결정
+| 가정 | 결과 | 설계 반영 |
+| --- | --- | --- |
+| zntc가 Monaco를 번들할 수 있다 | **부분 통과.** zntc `16f1fda0055f844b77520cbdc4dc329cb294fef4`에서 NAPI/core/web 빌드와 Monaco semantic parity 테스트 통과. npm 최신 `0.1.3`에는 해당 수정이 모두 릴리스되지 않았다. | 아직 최소 릴리스 버전을 확정하지 않는다. 수정 포함 릴리스를 기다리거나 commit pin을 별도 승인한다. |
+| Chrome에서 Vite와 픽셀이 같으면 제품에서도 된다 | **기각.** zntc 자체도 CI pixel flake 때문에 Monaco 필수 oracle을 semantic comparison으로 바꿨다. Chrome 결과는 WebKit 증거가 아니다. | 일반 CI는 semantic oracle, pixel은 선택 artifact/툴체인 qualification. 제품 gate는 별도 WKWebView E2E다. |
+| 현행 엄격 CSP에서 Monaco가 동작한다 | **실패.** `style-src 'self'`에서 Monaco가 삽입한 inline `<style>`과 style attribute가 차단됐다. `unsafe-inline`을 열면 CSP 위반은 사라지고 worker/diff 계산은 동작했다. | editor 전용 CSP 결정이 필요하다. markdown CSP를 전역으로 약화하지 않는다. |
+| custom scheme + module worker가 WebKit에서 된다 | **부분 통과.** `maru-poc://`에서 module 평가, worker, diff decoration 계산은 성공했다. | worker/asset 배선은 가능성이 높지만 편집기 전체 통과로 간주하지 않는다. |
+| Monaco가 WKWebView에서 정상 표시·입력된다 | **실패/미해결.** window에 붙인 하니스에서도 view-line layout/text가 정상 렌더되지 않았다. Vite와 zntc 산출물이 같은 증상을 보여 zntc 고유 문제로 좁혀지지 않았다. caret·편집·한글 IME도 미검증이다. | **Phase 0.5A RED blocker.** 텍스트·caret·ASCII 편집·한글 조합/NFD·backspace가 제품 WKWebView에서 통과하기 전 Monaco 채택과 Phase 1을 확정하지 않는다. |
+| isolated content world의 bridge를 page가 호출할 수 있다 | **부분 통과.** `CustomEvent`는 world를 넘지 않았지만 DOM attribute mailbox+`MutationObserver` 왕복은 성공했고 page의 `window.maru`는 계속 `undefined`였다. | 기술적으로 가능하지만 DOM은 보안 경계가 아니다. native allowlist/grant가 필수다. editor에는 더 단순한 전용 page-world shim을 권장한다. |
+| 기존 atomic helper를 저장에 재사용하면 안전하다 | **기각.** `createFileAtomic(.replace=true,.make_path=true)` PoC에서 기존 mode `0640`이 `0644`로 바뀌었고 symlink 자체를 regular file로 교체했다. | editor 전용 safe-save를 구현한다. mode/symlink/xattr/ACL/fsync 정책과 CAS가 선행돼야 한다. |
+| 열린 파일 FD를 감시하면 atomic replace도 계속 잡힌다 | **기각.** file-FD `DispatchSource`는 replace 때 delete만 받고 새 inode의 후속 write를 놓쳤다. directory-FD는 replace와 후속 write를 모두 신호했다. | 디렉터리 단위 감시 후 열린 문서를 재-stat/hash한다. watcher 이벤트는 힌트이고 hash가 권위다. |
+| 포맷/린트는 가벼운 비신뢰 실행이다 | **기각.** Prettier config import가 임의 JS를 실행함을 실측했다. | LSP와 동일한 workspace tool-execution 신뢰 경계를 적용한다. |
+| 저장 ack 하나로 dirty를 지울 수 있다 | **기각.** save 중 추가 편집이 있으면 이전 revision ack가 최신 dirty를 지우면 안 된다. 외부 disk hash 변경도 별도 충돌이다. | `editor_revision`, `persisted_editor_revision`, `disk_fingerprint` 3축 CAS를 사용한다. |
+| diff before/after 전체 blob을 JSON-RPC로 보낼 수 있다 | **기각.** socket frame 상한은 1 MiB이고 현재 bridge 결과 버퍼는 8 KiB다. `app_session.zig` 한 파일만 약 2.78 MiB다. | metadata 목록과 파일별 bounded open으로 분리한다. UI는 socket을 우회해 공통 L2 dispatcher를 직접 호출한다. |
 
-- **렌더 컴포넌트 = Monaco Editor(웹뷰), 셀 그리드 자작 아님.** diff editor + 편집기 + LSP 클라이언트가 한 컴포넌트의 세 모드다: git diff = `<DiffEditor>`(`IDiffEditorModel { original, modified }`), 편집 = editor, LSP = `monaco-languageclient`(후속). Metal 셀 그리드에 에디터를 자작하는 것은 diff·구문강조·LSP를 감안하면 비현실적이다.
-- **Monaco는 self-host 번들, CDN 금지.** `maru-app://` CSP가 외부 호스트를 차단하므로 CDN은 애초에 불가. **번들 경유 = zntc NAPI `@zntc/core.build()`**(§4). 워커는 정적 문자열 리터럴 `new Worker(new URL("...worker.js", import.meta.url), { type: "module" })`로 배선(변수 스페시파이어는 정적 분석이 깨져 emit 안 됨).
-- **번들은 barrel이 아니라 targeted import다** — `editor.api` + 쓸 언어의 `basic-languages/*.contribution`만(§2 레시피 ③). **4.2MB·워커 1종**으로 barrel(13.9MB·워커 5종) 대비 70% 작고 구문강조는 같다. **주의: barrel을 쓰면 JS/TS 모델이 TS 언어서비스를 자동 등록해 `ts.worker`를 요구한다** — "diff는 워커 하나면 된다"는 targeted import 전제에서만 참이다(실측).
-- **엄격 CSP를 유지한다 — `unsafe-eval`도 `wasm-unsafe-eval`도 열지 않는다(실측 확정).** Monaco 코어·DiffEditor·**TS 언어워커까지** `script-src 'self'`만으로 동작한다(§2). 신뢰 채널 CSP를 약화시키지 않아도 되므로 **§13의 열린 결정 하나가 닫혔다.** 유일한 추가 완화는 **`img-src 'self' data:`**(오류 물결선이 `data:` SVG). TextMate(§8)를 도입할 때만 `wasm-unsafe-eval` 논의가 되살아난다.
-- **에디터는 신뢰(trusted) surface다.** 로컬 저장소를 maru가 렌더하는 신뢰 콘텐츠라 `trust=trusted` + `maru-app://` 신뢰 채널(스킴 핸들러 + isolated-world MaruBridge)을 쓴다 — `browser`(임의 URL·untrusted)가 아니다. 즉 **현행 신뢰 markdown 패널의 호스팅 기계를 그대로 탄다**(§3).
-- **문서 모델은 버전 + 변경이벤트 형태로 day 1에 고정한다**(§5). LSP를 마지막에 하더라도, 버퍼를 "버전 번호 + `open/change/save` 이벤트"로 지어두면 v3 LSP·semantic token이 additive가 된다. 이건 LSP 때문이 아니라 **에이전트×사람 파일 경합 재조정**이 어차피 요구하는 배관이다(§7).
-- **파일 I/O는 신규 capability + op다**(§6). 현행 `write` scope는 **PTY 입력(`sendText`/`sendKeys`)**을 인가할 뿐 디스크 파일 쓰기가 아니다(control_capability.zig:121·498-499). 에디터의 파일 read/save는 별도 scope로 발급·게이트한다.
-- **하이라이팅은 3층 로드맵**(§8): Monarch(내장·즉시) → TextMate(VS Code 동급, WASM CSP 대가) → semantic tokens(LSP).
-- **포맷/린트는 LSP가 아닌 "외부 도구 레인"**(§9): 선언적 레지스트리 + `spawn stdin→stdout` op. LSP(§10)와 별개·경량.
-- **의존성 근거**: Monaco·zntc는 **maru 자체 소유 도구(zntc=`ohah/zntc`) + 웹 표준 패턴**으로, 신뢰 채널 안에서만 산다. clean-room: 웹 표준(`new Worker(new URL)`·Monaco 공개 API)에서 유도, reference 코드 이식 없음.
+## 2. 현재 코드에서 확인한 경계
 
----
+- `PanelKind`는 단순 trust bit가 아니다. label·DTO·layout·host config·복원 모델에 관여하는 의미 있는 종류다. 현재 `{ markdown, browser }`뿐이므로 editor를 markdown 라우트로 위장하면 권한과 lifecycle이 결합된다.
+- 현행 trusted markdown bridge는 named `WKContentWorld`에만 존재하고 page world의 `window.maru`는 의도적으로 없다. 제품 smoke에서도 isolated probe=`object`, page-world probe=`undefined`, bridge hello=`0.1.0`을 확인했다.
+- control dispatcher에는 metadata뿐 아니라 browser 전용 authenticated/deferred 경로가 이미 있다. 그러나 editor/file용 generic dispatcher와 제품 capability fd 발급 경로는 없다.
+- 현행 CSP는 `default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'`다.
+- control socket 최대 frame은 1 MiB다. 브리지 응답도 현재 fixed 8 KiB라 큰 문서 전송 경로로 사용할 수 없다.
 
-## 2. PoC로 확정된 토대 (실측)
+## 3. 권장 구조
 
-| 항목 | 결과 | 근거 |
-|---|---|---|
-| Monaco zntc 번들 | ✅ exit 0. 워커는 same-origin 해시청크로 **방출**됨 | zntc CLI/NAPI |
-| git diff 뷰어 = DiffEditor | ✅ `IDiffEditorModel { original: ITextModel; modified: ITextModel }` | monaco.d.ts + 빌드 |
-| **Monaco 렌더 (엄격 CSP)** | ✅ **DiffEditor 정상 렌더 — 라인 diff·문자단위 하이라이트·구문강조(토큰 7종)·codicon·오버뷰 룰러. 에러 0 · CSP 위반 0 · 404 0** | Playwright 헤드리스, `script-src 'self'`(unsafe-eval **없음**), 스크린샷 확인 |
-| **Vite 대비 픽셀 동일성** | ✅ **0px 차이(0.000%)** — 렌더한 시나리오 한정이지만, 번들러가 의미를 바꾸지 않았다는 강한 증거 | 동일 앱을 zntc/Vite로 빌드 → 스크린샷 pixelmatch |
-| **`script-src 'unsafe-eval'`** | ✅ **불필요 — 측정 확정.** 자동완성·호버·찾기·커맨드팔레트·접기·포맷·Monarch 14개 언어까지 두드려도 **Monaco의 `new Function`·`eval`·`WebAssembly` 호출 0회, CSP 위반 0건** | 위 하니스 + 동적코드실행 API 후킹 |
-| **`img-src 'self' data:`** | ⚠️ **필요.** 진단 마커의 오류 물결선을 Monaco가 `data:` SVG로 그림 | 마커 표시 시 CSP 위반 1건 → `img-src` 개방 후 0건 |
-| **TS 언어워커(ts.worker)** | ✅ 기동 + **201ms 만에 진단 마커**. **WASM 미사용 → `wasm-unsafe-eval` 불필요** | 오류 있는 JS 모델 → `getModelMarkers` end-to-end |
-| **v1 번들 레시피** | ✅ **`editor.api` + 필요한 Monarch contribution만** → 15파일·**4.2MB**·**워커 1종**·에러 0·구문강조 동일. barrel(`import * as monaco from "monaco-editor"`)은 116파일·13.9MB·워커 5종 | 3구성 실측 비교(아래) |
-| git diff op 데이터 형태 | before/after **전체 blob**(unified 아님), rename=old/new 경로, binary=numstat `-` 제외 | git PoC(rename R096·binary .ttf 실측) |
-| 포매터 에러 정책 | 에러 시 stdout 공백 + exit≠0(zig=2·rust=1) | zig fmt·rustfmt stdin PoC |
-| LSP 프리미티브 | initialize 0.02s·진단 4.85s(콜드), 프레이밍=Content-Length(≠maru ndjson) | rust-analyzer 왕복 PoC |
+```text
+editor WKWebView (Monaco, current text/undo/cursor)
+  -> editor-only page shim (bounded request/event DTO)
+  -> native editor bridge (method allowlist + EditorGrant)
+  -> L2 EditorDispatcher / EditorCore
+       |- DocumentRegistry (identity/revision/disk fingerprint/conflict)
+       |- path/grant/CAS/diff DTO policy
+       `- injected adapter interfaces
+            |- L4 FileAdapter (descriptor-safe read/save/stat/hash)
+            |- L4 WatchAdapter (DispatchSource/FSEvents)
+            |- L4 GitAdapter (bounded read-only git invocation)
+            `- L4 ToolAdapter (formatter/linter/LSP process)
 
-**결론: Monaco 경로는 end-to-end로 검증됐다.** 번들 → 파싱 → 모듈평가 → 실제 렌더까지 통과하고, 기준 번들러(Vite)와 픽셀이 완전히 같다.
-
-**측정 범위(정직한 경계)**: 실제로 **기동한 워커는 `editor.worker`와 `ts.worker` 2종**이다. `css`/`json`/`html` 워커는 **방출은 되지만** 해당 언어 모델을 열지 않아 인스턴스화되지 않았다 — **미검증**이다. v1(diff·JS/TS 편집)은 이 2종이면 되고, CSS/JSON/HTML 파일 편집을 붙이는 시점에 그 워커들을 같은 하니스로 확인한다.
-
-### v1 번들 레시피 (실측)
-
-| 구성 | 파일 | 크기 | 워커 | diff | 구문강조 | page 에러 |
-|---|---|---|---|---|---|---|
-| ① barrel `import * as monaco from "monaco-editor"` | 116 | 13.9MB | 5종 | ✅ | 토큰 7 | — |
-| ② `editor.api`만 | 4 | 2.9MB | 1종 | ✅ | **토큰 3(강조 사실상 없음)** | 0 |
-| ③ **`editor.api` + 필요한 `basic-languages/*.contribution`** | 15 | **4.2MB** | **1종** | ✅ | **토큰 7(①과 동일)** | **0** |
-
-**③을 v1 레시피로 확정한다** — barrel 대비 **70% 작고 워커 1종**인데 구문강조는 동일하다.
-
-**함정(실측)**: barrel을 쓰면 JS/TS 모델이 **TS 언어서비스를 자동 등록**해 `ts.worker`를 요구한다. 이때 `editor.worker` 하나만 배선하면 `Missing requestHandler` 에러가 쏟아진다(diff 자체는 그려지지만). 즉 **"diff는 워커 하나면 된다"는 명제는 targeted import 전제에서만 참**이고, barrel에서는 거짓이다. Monarch 문법은 `editor.api`에 없으므로(②가 토큰 3인 이유) **쓸 언어의 contribution을 명시 임포트**해야 한다.
-
-### 툴체인 전제 — zntc 최소 버전
-
-에디터 스택은 zntc의 **첫 대형 소비자**라 PoC 과정에서 코드젠·자산·워커 해석 결함을 여러 건 밟았고, 전부 `ohah/zntc`에 보고·수정됐다. **Phase 1 착수 시점의 zntc 릴리스가 이 수정들을 포함해야 한다** — 프런트 workspace의 `@zntc/core`·`@zntc/web` 최소 버전을 그 릴리스로 못박는다(§13).
-
-세부 결함 목록은 zntc 이슈 트래커가 단일 출처다. 이 문서는 그것을 재서술하지 않고, **거기서 얻은 설계 교훈(§12의 검증 게이트)만** 가져간다.
-
----
-
-## 3. 신뢰 채널과 PanelKind — 새 kind가 필요 없을 수 있다
-
-**실측 발견**: `PanelKind`(control_surface.zig:76 `{ markdown, browser }`)는 "패널 기능 종류"가 아니라 **신뢰/호스팅 판별자**다. 집행 지점은 `MaruAppHost.swift:937-951`(`MaruWebPanelView` init)이다.
-- **신뢰(markdown)**: `let trusted = (panelKind == 0)` → `setURLSchemeHandler(MaruAppSchemeHandler…)`로 `maru-app://app/<path>` 서빙 + `WKContentWorld.world(name:"MaruBridge")` isolated-world 브리지 등록(:944-951). 경로 샌드박스·CSP는 app_scheme.zig `validateAppPath`/`csp_header`.
-- **비신뢰(browser)**: ephemeral 데이터스토어로 격리 + 스킴 핸들러·브리지 **미등록**(:940-943, origin 위장 차단).
-
-에디터는 신뢰 콘텐츠이므로 **markdown과 같은 신뢰 기계**를 탄다. 스킴 핸들러가 `maru-app://app/<path>`를 경로별로 서빙하므로, **에디터/git diff는 신뢰 SPA의 라우트**(`maru-app://app/editor`)로 얹을 수 있다 — 즉 **새 PanelKind가 필수는 아니다**.
-
-- **권장(v1)**: 신뢰 SPA 단일 kind + 라우트(markdown 뷰·diff 뷰·editor 뷰). PanelKind 확장 불필요 → 닫힌 열거의 "사용자 승인" 게이트(control_surface.zig:74)를 회피.
-- **대안**: 탭/사이드바 라벨·생애주기를 kind별로 구분하고 싶으면 얇은 신규 kind 추가. 이때 건드릴 곳(체크리스트): `PanelKind` enum(control_surface.zig:76) · **`WebMeta.panel_kind`**(:109 — `SurfaceDto`가 아니라 `WebMeta`(:105) 필드다. `SurfaceDto`(:125)는 `detail` tagged union으로 간접 포함) · `panelKindWire`(:229) · `session_model.web_panel_kind`(:58)·`webPanelLabel`(:89) · `web_panel_layout` wire · **ABI `panel_kind: u32` marshal(app_host_abi.zig:1229, 0/1 → 2 추가) + offset 계약 테스트(:2166)** · Swift `panel_kind` 분기(MaruAppHost.swift:937). → **이 선택은 사용자 결정(§13).**
-
----
-
-## 4. 빌드 통합 — zntc NAPI, raw 바이너리 금지
-
-**현황(실측)**: 프런트 빌드 파이프라인은 **미배선**이다. build.zig:706-713은 placeholder asset(`src/platform/macos/web/` — index.html·app.css·app.js 3개)을 `cp -R`만 한다. **번들러 빌드 스텝이 없다** — `.mise.toml`은 `zig` 하나뿐(node/bun/zntc 없음)이고, 루트 `web/` Bun workspace·`package.json`·`zntc.config.*`도 없다. (build.zig:708 주석은 "Phase 7 실 UI(zntc/Bun 빌드)가 이 소스 asset을 대체한다"고 **예고**할 뿐 실행 스텝이 아니다 — 초판이 "zntc는 build.zig 어디에도 없다"고 쓴 건 자기 인용 범위와 모순이라 정정.) **즉 마크다운 뷰어(Phase 7 콘텐츠)와 그를 빌드할 툴체인은 결정만 됐고 미착수**다.
-
-함의: **에디터 스택이 Phase 7 프런트 툴체인을 처음 세우는 주체다.** "마크다운 뷰어 완성"을 전제로 두지 못한다(그게 없으므로).
-
-- **빌드 호출은 NAPI 경유**: `import { build } from "@zntc/core"`. maru 빌드/트레이스에 구조화된 `{ errors, warnings }`를 그대로 물릴 수 있다. **standalone `zig-out/bin/zntc`는 금지** — 정책(mainFields/conditions/node_modules 루트)이 빈 채라 bare import가 resolve 실패한다(PoC에서 이 함정으로 가짜 블로커 발생). config(`zntc.config.ts`)는 .ts라 로딩 자체가 JS 런타임 일이므로 CLI/NAPI를 통해야 한다.
-- **app 빌드 모드는 `@zntc/web`을 별도 요구한다(0.1.3 기준)**: HTML 엔트리(`--entry-html`) 경로는 `@zntc/core`만으로는 안 되고 `@zntc/web`이 설치돼 있어야 한다. maru 프런트 workspace의 devDependency에 포함한다.
-- **워커**: `MonacoEnvironment.getWorker`를 정적 리터럴로. 헬퍼로 감싸면(변수 스페시파이어) 정적 분석이 깨져 워커가 emit되지 않는다(Vite/webpack 동일 제약, 실측). v1 레시피(§2 ③)에서는 `editor.worker` 하나다.
-- **CSP(실측 확정)**: 아래 정책으로 Monaco 코어·DiffEditor·TS 언어서비스가 **CSP 위반 0건**으로 동작한다(헤드리스 Chrome).
-  ```
-  default-src 'self'; script-src 'self'; worker-src 'self';
-  style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:
-  ```
-  - **`'unsafe-eval'` 불필요**: 코어에 `new Function` 문자열이 잔존하지만 **실행되지 않는 폴백**이다. 적대 스트레스(자동완성·호버·파라미터힌트·찾기/바꾸기·커맨드팔레트·접기·포맷·Monarch 14개 언어)를 걸고 `Function`/`eval`/`WebAssembly`를 후킹해 세었더니 **Monaco의 호출 0회, CSP 위반 0건**이었다. 초판이 정적 grep으로 "청정"을 단언했다가 적대 검증으로 정정했고, 이제 **런타임 측정이 그 결론을 지지한다.**
-  - **`'wasm-unsafe-eval'` 불필요**: TS 언어워커도 WASM을 쓰지 않는다. **TextMate(§8) 도입 시에만** 재검토.
-  - **`img-src ... data:` 필요**: 진단 마커의 오류 물결선이 `data:` SVG. 이건 마커가 실제로 뜨는 상태에서만 관측되므로, `ts.worker`가 죽어 있던 동안엔 보이지 않던 조건이다.
-  - **미검증 워커**: 위 측정에서 실제 기동한 건 `editor.worker`·`ts.worker` 2종이다. `css`/`json`/`html` 워커는 해당 언어 모델을 열어야 인스턴스화되므로 **아직 CSP 확인 대상이 아니다** — 그 파일 타입 편집을 붙일 때 같은 하니스로 확인한다.
-  - **잔여 리스크는 엔진 차이**: 위는 Blink 측정이다. WebKit + `maru-app://` 커스텀 스킴 위의 모듈 워커·스타일 주입은 Phase 0.5에서 확인한다(§11).
-- **빌드 성공을 동작 증거로 삼지 않는다**: PoC에서 밟은 번들러 결함은 전부 빌드 exit 0을 통과했다. 프런트 빌드 파이프라인은 **4층 게이트**(재파싱 → 모듈평가 → 렌더/픽셀비교)를 함께 세운다(§12).
-
----
-
-## 5. 문서(버퍼) 모델 — 신규, L2 소유, 버전+이벤트
-
-**현황(실측)**: 터미널 스크린 버퍼(`Screen`, screen.zig:257 — 셀 그리드) 외에 **범용 편집 가능 텍스트 버퍼/문서 모델은 존재하지 않는다**(rope·piece table·TextBuffer 류 0건). → **문서 모델은 net-new.**
-
-파일 I/O 프리미티브는 있다: read = `config/loader.zig:907 readFileAlloc`, **원자적 write = `agent_hooks.zig:336`·`app_session.zig:10484`의 `createFileAtomic(.{ .replace = true, .make_path = true })`**. §6의 "저장은 원자적 기록"은 **신규 발명이 아니라 이 선례를 재사용**하면 된다. (초판이 근거로 든 `workspace.zig`의 `writeAll`은 **디스크가 아니라 메모리 `std.Io.Writer`에 직렬화**하는 호출이라 오인이었다 — 정정.)
-
-설계:
-- **위치 = L2 코어**(session). 정본(canonical) 문서 레지스트리 `{ path, version, dirty, disk_mtime/hash }`를 L2가 소유해 재조정 권위로 둔다. WKWebView의 Monaco는 **라이브 편집 버퍼**를 쥐고, L2는 디스크 지속·변경 이벤트·경합 판정의 권위.
-- **버전 + 변경이벤트**: `open/change/save` 어휘(LSP `didOpen/didChange/didSave`와 동형). LSP는 한 줄도 안 쓰되 **모양만** 이렇게 잡으면 v3에서 additive.
-- **source-of-truth 규칙**: 열린 버퍼의 dirty 상태·최신 텍스트는 Monaco 소유, 디스크 반영은 save op(§6), 외부(에이전트) 디스크 변경은 file-watch→재조정(§7). 통짜 문자열 교체 금지 — 최소 diff edit로 Monaco undo 스택·커서 보존.
-
----
-
-## 6. 파일 I/O capability와 op — 신규 scope
-
-**현황(실측)**: capability 6종(metadata/bind/read-output/write/lifecycle/browser) 중 **`write`는 세션 입력(`sendText`/`sendKeys`)을 인가**한다(control_capability.zig:121 `session + "send" → .write`, 498-499). **디스크 파일 read/write를 인가하는 scope는 없다.**
-
-설계:
-- **신규 scope `filesystem`(가칭)**: 파일 내용 read/save를 게이트. 발급 UX·fd 상속 정책은 control-plane.md §8·§9의 capability 발급 모델을 따른다(browser cap 발급 선례). 임의 파일 접근이므로 기본 거부 + 명시 발급.
-- **op 계열**(browser.* op 패턴 재사용 — deferred marshal/take/complete):
-  - `diff.read` — 저장소 변경 파일별 `{ status, old_path, new_path, original_blob, modified_blob, is_binary }`. **read만**(write cap 불필요). worktree/index/HEAD/범위 모드 선택. rename=두 경로, binary=numstat `-` 제외, 대용량 blob 페이로드 고려(실측: 10k줄 파일 실재).
-  - `file.read` / `file.write` — 편집 버퍼 열기/저장(`filesystem` cap). 저장은 `createFileAtomic`(§5의 기존 선례 재사용)으로 원자적 기록.
-  - `git.stage`/`unstage`/`discard` — 헝크/라인 스테이징(write 액션 계열, 별도 Phase).
-
-**전송 경로와 재사용/신규(실측)**:
-- **브리지(`window.maru.*`)에는 capability 모델이 없다** — 신뢰는 origin/frame으로만 확립되고(control_bridge.zig:5-7, 현재 노출 method=`hello` 1개), 세분 grant가 불가하다. 파일/git write 같은 민감 op를 브리지로 노출하면 신뢰 콘텐츠가 **무제한 접근**한다.
-- **비동기 골격은 generic이라 재사용**: `InFlight`/`deferRequest`/`completeInFlight`/`reapExpiredInFlight`(control_server.zig)는 메서드 무관. 단 `BrowserOpQueue` + take/complete ABI는 **browser 전용**(op_kind/arg 하드코딩)이라 새 async 계열(diff/file/git)은 병렬 큐 + ABI 또는 일반화가 필요(app_host_abi.zig).
-- **소켓 경로도 오늘은 껍데기다(정정·실측)**: "소켓 = capability-gated니까 그쪽으로 흘리면 된다"는 초판의 전제가 과장이었다. 소켓으로 에디터 op를 나르려면 **세 가지를 다 지어야** 한다.
-  1. **live capability 발급** — `control_cap_store`가 프로덕션에서 상시 빈 값이라(app_host_abi.zig:1758) 실 fd 발급/상속은 test-only 훅뿐이다. 순수 코어(authz/resolve/store)는 완성·테스트됨.
-  2. **non-metadata 라이브 dispatch** — 디스패처는 metadata 3개만 처리하고 **cap이 인가해도** non-metadata는 `method_not_found`로 접는다(control_dispatch.zig:88-107). 즉 `file.*`/`diff.read`를 라우팅할 자리 자체가 없다.
-  3. **notification(push) 스트림** — 존재하지 않는다(§10). LSP diagnostics·file-watch 이벤트에 필요.
-
-  이 셋은 browser cap도 공유하는 선행조건이지 에디터 전용이 아니다. 다만 **전송 경로 결정(§13 #5)의 비용 계산이 바뀐다** — 소켓은 "이미 있는 것"이 아니라 "제대로 지어야 하는 것"이다.
-
----
-
-## 7. 에이전트 × 사람 파일 경합 — 이 제품 고유의 난제
-
-VS Code는 "사람이 유일 writer"를 가정하지만 **maru는 아니다** — 에이전트가 디스크의 파일 X를 고치는 동안 사람이 X를 dirty 버퍼로 열어 둔다.
-
-**현황(실측·정정)**: **파일 감시는 없다** — FSEvents·DispatchSource 사용처가 repo 전체에 0건이다. → **file-watch는 net-new.**
-
-단, 초판의 "kqueue도 전무"는 **틀렸다**: `pty/macos.zig:657-699`가 kqueue를 쓴다(자식 종료 수거 — `EVFILT.PROC`/`NOTE_EXIT` + self-pipe wake `EVFILT.READ`). 파일 감시(`EVFILT_VNODE`)는 아니지만 **kqueue 배관과 그 스레딩 패턴은 이미 있다** — file-watch를 FSEvents로 갈지 kqueue를 확장할지는 구현 시 선택지다.
-
-설계:
-- **file-watch(신규, L4 host)**: 열린 문서의 디스크 변경 감지 → L2 문서 레지스트리에 `disk changed` 이벤트. 드래그 세션처럼 **디바운스**.
-- **재조정 정책**: dirty 아님 → 조용히 리로드. dirty → 충돌 UX(리로드/유지/머지 선택). LSP도 서버 뷰가 버퍼·디스크와 일치해야 하므로 이 동기화에 얹힌다.
-- **day 1 반영**: §5 문서 모델을 버전+이벤트로 지어야 이 재조정이 가능. 나중에 못 끼운다.
-
----
-
-## 8. 하이라이팅 3층
-
-| 층 | 엔진 | 무게 | 시점 |
-|---|---|---|---|
-| 기본 | Monarch(Monaco 내장) | 가벼움·WASM 없음 | v1 즉시 |
-| VS Code 동급 | TextMate 문법 + VS Code 테마(vscode-textmate + Oniguruma) | **WASM** 필요 | 후속 |
-| 의미 기반 | semantic tokens | LSP 서버 필요 | LSP 단계 |
-
-- Monarch로 v1은 충분(내장 수십 개 언어). **Monarch는 WASM을 쓰지 않으므로 엄격 CSP 그대로 간다**(§2 실측).
-- TextMate는 VS Code와 픽셀 동급이나 **Oniguruma가 WASM이라 CSP `script-src 'wasm-unsafe-eval'`을 열어야** 한다 — **CSP 약화를 요구하는 유일한 항목**이다(§13 결정). 엔진 교체는 하이라이팅 레이어에 **격리**(에디터·문서 모델 무변경)되므로, 이 결정은 Phase 3까지 미룰 수 있다.
-- **정정**: 초판은 "TS 언어워커도 `wasm-unsafe-eval`을 요구할 수 있다"고 적었으나 **틀렸다** — ts.worker는 WASM을 쓰지 않고 엄격 CSP에서 진단까지 정상 동작한다(§2).
-- semantic tokens는 LSP `textDocument/semanticTokens`에서 옴 → LSP 단계에 additive(Monaco `registerDocumentSemanticTokensProvider`).
-
----
-
-## 9. 외부 도구 레인 — 포맷/린트 (LSP 아님)
-
-oxc(oxfmt/oxlint)·prettier·zig fmt·rustfmt·gofmt·black 등은 **LSP 서버가 아니다** — 포매터·린터(CLI)다. LSP 래퍼로 감쌀 수도 있으나 **직접 호출이 훨씬 가볍다**.
-
-- **선언적 레지스트리**: `{ 언어 → command, args, input: stdin|file, output: stdout|inplace }`. stdin→stdout 우선. 새 포매터 = 코드가 아니라 설정 항목(conform.nvim·Helix·Zed 모델).
-- **에러 정책(실측 확정)**: **exit==0일 때만 버퍼 교체.** zig fmt(exit 2)·rustfmt(exit 1) 모두 에러 시 stdout 공백이라 안전. 코드값은 툴마다 다르므로 `==0` 기준. 적용은 Monaco 최소 diff edit(undo·커서 보존).
-- **린트**: `eslint`/`oxlint --format json` → 파싱 → Monaco 마커. 린트는 편집 불필요라 읽기 뷰에도 앞당길 수 있음.
-- op = §6의 `spawn stdin→stdout 캡처`(maru 기존 subprocess spawn 재사용, PTY 없음). LSP 전송(§10) 불필요.
-
----
-
-## 10. LSP 미래 seam
-
-**맨 나중**(가장 무거움). 지금은 seam만 남긴다.
-
-- **호스트 spawn**: 언어서버 = stdio JSON-RPC 서브프로세스(PTY 없음). per-project 싱글턴·idle shutdown. rust-analyzer 실측: initialize 0.02s·진단 4.85s(콜드).
-- **전송 임피던스(실측)**: **LSP=Content-Length 프레이밍 ≠ maru 컨트롤 플레인 ndjson.** 그래서 passthrough는 단순 바이트 포워딩이 아니라 **프레이밍 브리지 + 2번째 JSON-RPC 스트림 멀티플렉싱**(per-server 채널 수명·백프레셔). browser.* op식 op-per-message는 고빈도라 부적합.
-- **push 채널 — 어느 경로에도 없다(정정·실측)**: 브리지는 요청/응답 전용이고(control_bridge.zig), **소켓도 마찬가지다.**
-  - **초판 오류**: 이 문서는 "소켓 경로엔 notification 스트림(`events.subscribe`·`session.subscribeOutput`)이 **이미 있어** 재사용 가능"이라 적었다. **틀렸다** — 그건 [control-plane.md](control-plane.md)의 **설계 규범**이지 구현이 아니다. 적대 검증에서 드러났다.
-  - 근거: 소켓 디스패처는 `sessions.list`/`session.get`/`session.capture`(균일 unauthorized) **셋만** 처리하고 나머지는 `method_not_found`로 접는다(control_dispatch.zig:88-107). 주석이 못박는다 — *"non-metadata granted는 method_not_found로 접음"*(:99-104). `subscribeOutput`은 서버 헤더에 **"범위 밖"**으로 명시돼 있고(control_server.zig:14), capture chunk 기계(control_capture.zig)는 **라이브 서버에 미배선**이다(app_host_abi·control_server 어디서도 import·호출 0건).
-  - **결과**: "브리지엔 push가 없지만 소켓엔 있다"는 대비가 성립하지 않는다. **LSP diagnostics push는 어느 경로를 택하든 신규 구축**이다. browser op은 1요청-1응답(deferRequest↔completeInFlight 1:1)이라 1요청-다응답 스트림을 나를 수 없다는 점만 그대로다.
-- **보안**: 언어서버는 임의 로컬 코드 실행(rust-analyzer proc-macro/build script). 신규 `lsp` capability + 인지.
-- **감지**: 확장자/루트 마커(`Cargo.toml`·`package.json`·`go.mod`) → 서버 cmd + PATH probe.
-
----
-
-## 11. 단계 계획
-
-전제 붕괴 정정: **"마크다운 뷰어 완성"이라는 전제는 실재하지 않는다(§4).** 따라서 에디터 스택이 **Phase 7 프런트 툴체인(zntc/Bun web workspace + build.zig 배선 + maru-app:// SPA asset 파이프라인)을 처음 세운다.** 이 툴체인 확립은 마크다운 뷰어와 **공유**되므로, 둘 중 무엇을 먼저 내든 이 토대를 함께 짓는다.
-
-```mermaid
-flowchart TD
-  P0["Phase 0: 이 설계 문서 (doc-first)"]
-  P05["Phase 0.5 스파이크 (GUI): WebKit 고유 영역만 — 커스텀 스킴 위 모듈워커 / 스타일 주입 / IME"]
-  ZR["선행조건: PoC 수정분을 담은 zntc 릴리스"]
-  P1["Phase 1: 프런트 툴체인 + 4층 게이트 + 읽기 diff 뷰 (Monaco DiffEditor)"]
-  P15["Phase 1.5: 린트 진단 (편집 불필요)"]
-  P2["Phase 2: 문서 모델 + 편집 + 저장 (filesystem cap + file.write)"]
-  P2b["Phase 2b: 에이전트x사람 파일 경합 재조정 (FSEvents 신규)"]
-  P25["Phase 2.5: 포맷 레인 (외부 도구 spawn)"]
-  P27["Phase 2.7: git 스테이징"]
-  P3["Phase 3: TextMate 하이라이팅 (WASM CSP 결정 — 유일한 잔여 CSP 완화)"]
-  P4["Phase 4: LSP (프레이밍 브리지 전송 + push 채널 + lsp cap)"]
-  P0 --> P05 --> P1 --> P15 --> P2 --> P2b
-  ZR --> P1
-  P2b --> P25
-  P2b --> P27
-  P2b --> P3
-  P25 --> P4
-  P27 --> P4
-  P3 --> P4
+external CLI/agent
+  -> Unix socket + capability nonce
+  -> same L2 policy/services
 ```
 
-- **Phase 0.5(스파이크·GUI 필수, 범위 축소됨)**: 헤드리스 Chrome 실측(§2)이 **CSP·워커·폰트·TS 워커 질문을 이미 닫았으므로**, 스파이크에 남는 것은 **WebKit 고유 영역뿐**이다 — ① `maru-app://` 커스텀 스킴 위에서 `{type:'module'}` 워커가 도는가(WKURLSchemeHandler + 워커 로딩 상호작용), ② Monaco 런타임 스타일 주입 vs 엄격 `style-src`, ③ 한글 IME. red면 워커 전략 재검토. **CSP 정책은 §4의 실측값을 그대로 적용하고 위반 여부만 확인한다.**
-- **Phase 1**: zntc NAPI 빌드 배선(+`@zntc/web`, +§12 4층 게이트) + PanelKind 라우트(§3) + `diff.read` op(§6) + `<DiffEditor>` + 접기/펼치기·파일트리 + Monarch. **읽기 전용 diff는 스냅샷+새로고침으로 punt**(경합은 Phase 2b). **선행조건: PoC 수정분을 담은 zntc 릴리스**(§2).
-- **Phase 2 / 2b**: 문서 모델(§5) + `filesystem` cap·`file.*` op + 파일 열기(NSWorkspace.open 승격) / file-watch 재조정(§7). **여기서 전송 경로 결정(§13 #5)이 현금화된다** — 소켓을 택하면 live cap 발급 + non-metadata dispatch를 먼저 지어야 하고(§6), 브리지를 택하면 capability 모델을 브리지에 이식해야 한다. **읽기 전용인 Phase 1은 이 결정을 피해 갈 수 있다**(브리지로 `diff.read`만 노출하면 민감 write가 없다) — 그래서 결정을 Phase 2로 미룰 수 있다.
-- **2.5·2.7·3 병렬 가능**(문서 모델 위, 서로 독립). **4는 최후** — LSP는 push 채널이 필요한데 **어느 경로에도 없어서 신규 구축**이다(§10). 이게 4를 최후로 두는 이유를 하나 더 늘린다.
+제품 UI 요청을 자기 Unix socket으로 되돌려 보내지 않는다. socket 인증은 외부 프로세스 경계용이고, in-process bridge는 host가 surface에 결합한 grant를 검증한 뒤 같은 L2 dispatcher를 직접 호출한다. 이 구분으로 payload 복사·deadlock·자기 인증 우회를 피한다.
 
----
+L2는 file descriptor, DispatchSource, FSEvents, child process, AppKit/WebKit 타입을 몰라야 한다. grant 판정·문서 상태·CAS 전이·DTO/error mapping은 `src/session/`의 순수 코어가 소유하고, 실제 파일·git·watch·process I/O는 `src/app` 공통 runtime 또는 `src/platform/macos` adapter가 주입한다. `check-boundaries`에 editor 코어의 platform import 금지를 추가한다.
 
-## 12. 관측 가능성·테스트 전략
+### 3.1 전용 `PanelKind.editor`
 
-### 프런트 빌드 검증 — 4층 게이트 (신규·필수)
+권장은 `.editor` 추가다. 이는 구현 전 사용자 승인이 필요한 닫힌 enum 변경이다. 승인되면 다음을 한 PR에서 함께 바꾼다.
 
-PoC에서 밟은 번들러 결함은 **전부 빌드 exit 0**이었다. 각 결함이 어느 층에서야 처음 드러났는지를 그대로 게이트로 만든다. **위 층을 통과했다고 아래 층이 통과하는 게 아니다** — 실제로 각 층에서만 잡히는 결함이 따로 있었다.
+- L2 `PanelKind`, wire mapping, session model label/detail, layout/restore serialization
+- macOS ABI `panel_kind` 상수·layout 계약과 Swift 분기
+- editor 전용 exact origin(권장 `maru-app://editor`), asset root, CSP, process-pool/data-store 정책
+- lifecycle/close/crash/reload와 surface별 `EditorGrant` 회수
 
-| 층 | 검사 | 잡는 것 | 비용 |
-|---|---|---|---|
-| 1 | **빌드 exit code** | (거의 아무것도) — 모든 결함이 여기를 통과했다 | 0 |
-| 2 | **산출물 재파싱** — 방출된 모든 `.js`를 파서로 재독 | 문법이 깨진 산출물. **빌드는 green인데 브라우저가 파싱조차 못 하는** 코드젠 결함 | ~0 |
-| 3 | **모듈평가 스모크** — 헤드리스 브라우저에 띄워 엔트리 모듈이 끝까지 평가되는지 | 문법은 유효하나 **평가 중 죽는** 결함(식별자 섀도잉·미링크 바인딩). 2층은 통과한다 | 낮음 |
-| 4 | **렌더 + 픽셀 비교** — 실제 API를 호출·렌더하고 **기준 번들러(Vite) 산출물과 스크린샷 픽셀 비교** | 평가는 통과하고 **API를 실제로 호출할 때만** 죽는 결함, 그리고 **조용한 오컴파일**(에러 없이 다른 픽셀) | 중간 |
+`markdown`은 sanitized 문서 표시 권한만 유지한다. editor 파일 작업을 markdown route에 추가하지 않는다. `browser`는 계속 untrusted이며 editor bridge와 `maru-app://` asset에 접근하지 못한다.
 
-- **4층이 필수인 이유**: 1~3층을 전부 통과하고 4층에서만 잡힌 결함이 실재했다. `import * as X from "lib"`만으로는 모듈 평가가 성공하고, **실제로 그려봐야** 드러난다.
-- **픽셀 비교의 값어치**: Monaco를 zntc/Vite 양쪽으로 빌드해 렌더하면 **0px 차이**다. 이건 "에러가 없다"보다 훨씬 강한 진술 — **번들러가 의미를 바꾸지 않았다**는 증거다. 기준 번들러를 devDependency로 두는 비용은 이 보증에 비하면 싸다.
-- Monaco는 CI 렌더 픽스처(고정 diff 입력·`automaticLayout:false`·애니메이션 off·고정 폰트)로 결정론적으로 찍는다. 회귀 시 diff 이미지를 artifact로 남긴다.
-- **CSP도 이 게이트에 얹는다**: 3·4층 서버가 §4의 실측 CSP 헤더를 실어, 위반 0건을 상시 확인한다. CSP 회귀가 조용히 들어오는 걸 막는다.
-- **한계**: 헤드리스 Chrome은 **WKWebView가 아니다**. 이 4층은 "빌드 green ≠ 동작 green" 갭의 대부분을 CI에서 잡아줄 뿐, WebKit 고유 리스크는 Phase 0.5·수동 GUI가 담당한다(§14).
+editor가 markdown과 같은 `maru-app://app` origin을 공유하면 origin pin만으로 두 콘텐츠의 권한을 구분할 수 없다. editor bridge는 main frame + editor exact origin + 해당 `surface_id`의 `.editor` kind를 모두 확인하고, remote/top-level navigation을 거부한다. editor page에서 markdown asset route로 이동해도 grant가 유지되는 구조는 허용하지 않는다.
 
-### 그 외
+### 3.2 editor bridge와 grant
 
-- **프런트 단위**: Monaco 통합·포매터 레지스트리·diff op 매핑은 `bun test`(Phase 7 툴체인)로.
-- **op 계약**: `diff.read`/`file.*`/`git.*`는 control-plane trace schema에 실어 snapshot/replay가 같은 데이터를 공유(control-plane.md 관측 원칙 유지).
-- **GUI 수동(불가피)**: WKWebView 입력/포커스/폰트/한글 IME는 web-panel.md §11이 이미 "헤드리스 자동화 불가"로 규정한 영역. 에디터는 그 위에 Monaco 상호작용·format-on-save를 더한다 — 각 Phase 게이트에 수동 검증 항목을 명시한다.
+Monaco page가 네이티브 API를 호출해야 하므로 editor에는 좁은 page-world shim을 둔다. isolated-world DOM mailbox도 가능하나 page가 mailbox를 쓸 수 있어 보안상 더 강하지 않고 구현 복잡도만 늘어난다.
 
----
+`EditorGrant`는 JS가 고르는 bearer nonce가 아니라 native host가 editor surface 생성 시 결합하는 리소스 권한이다.
 
-## 13. 사용자 논의 필요 (문서에 없는 결정)
+```text
+EditorGrant {
+  surface_id,
+  root_id,
+  file_read,
+  file_write,
+  git_read,
+  tool_execute,
+}
+```
 
-1. **PanelKind**: 신뢰 SPA 라우트(권장, 새 kind 불필요) vs 얇은 신규 kind(라벨/생애주기). §3.
-2. ~~**CSP 완화**~~ → **해소(2026-07-13 실측).** `unsafe-eval`·`wasm-unsafe-eval` **모두 불필요**하고, `img-src 'self' data:`만 추가하면 된다(§2·§4). **잔여 결정은 TextMate뿐** — VS Code 동급 하이라이팅을 위해 `wasm-unsafe-eval`을 열 것인가(Phase 3까지 유예 가능, §8).
-3. **신규 capability `filesystem`**: 임의 파일 read/write 발급 UX(기본 거부 + 명시 발급). §6.
-4. **외부 의존성**: Monaco를 핵심 UX 경로에 추가 = "가벼운 native shell" 포지션과의 트레이드오프(웹뷰에 제품 상당부가 산다). pr-checklist "핵심 경로 외부 의존성" 항목.
-5. **에디터 op 전송 경로**(비용 재산정됨): 초판은 "소켓 = capability-gated + push 스트림 보유"라 적었으나 **적대 검증에서 틀린 것으로 드러났다** — 소켓에는 오늘 **push 스트림도, non-metadata 라이브 dispatch도, live cap 발급도 없다**(§6·§10). 따라서 선택지는 "있는 것 vs 없는 것"이 아니라 **어느 쪽을 지을 것인가**다.
-   - (a) **브리지에 capability 모델 + push를 얹는다** — 신뢰 채널이라 origin 기반 신뢰는 이미 있고, 웹뷰 in-process라 지연이 낮다. 대신 control-plane의 capability 설계를 브리지에 이식해야 한다.
-   - (b) **소켓을 제대로 완성한다**(live cap 발급 + non-metadata dispatch + notification 스트림) — control-plane 설계와 정합하고 CLI/외부 에이전트도 같은 문을 쓴다. 대신 셋 다 신규다.
-   - **분리 배치도 가능**: 읽기(diff.read)는 브리지, 민감 write·LSP push는 소켓. §6·§10.
-6. **zntc 최소 버전(신규)**: 에디터 스택은 PoC에서 나온 zntc 수정분에 의존한다(§2). Phase 1을 그 릴리스까지 기다릴지, 그 전까지 lockfile을 프리릴리스에 고정할지.
+규칙:
 
----
+- 모든 요청은 bridge가 가진 `surface_id`와 native grant를 사용한다. JS가 root나 scope를 확대할 수 없다.
+- `root_id`는 native가 열린 canonical root descriptor와 매핑하는 opaque id다. page에는 root 절대 경로나 descriptor를 권한 토큰처럼 주지 않는다.
+- 경로는 root 기준 상대 경로만 받고 NUL, absolute path, `..`, symlink escape를 거부한다.
+- `file_write`, `git_read`, `tool_execute`는 각각 분리한다. repo를 읽을 수 있다고 명령 실행까지 허용하지 않는다.
+- request/result의 byte·item·time 상한, cancellation, surface close/revoke 시 terminal completion을 정의한다.
+- push는 bounded editor event channel로만 전달한다. unbounded `evaluateJavaScript` 문자열 조립을 프로토콜로 삼지 않는다.
 
-## 14. 한계·미검증
+외부 CLI/agent가 같은 op를 쓸 때만 control-plane capability nonce를 사용한다. 제품 capability fd 실발급이 붙기 전에는 외부 file/tool op를 열지 않는다.
 
-- **WKWebView(WebKit) 런타임 미검증** — 남은 최대 갭. §2의 런타임 실측은 **헤드리스 Chrome(Blink)**이다. "코드가 `unsafe-eval`을 실제로 요구하는가"는 엔진 무관한 강한 신호라 CSP 결론은 유지될 가능성이 높지만, **`maru-app://` 커스텀 스킴 위의 모듈 워커 로딩·Monaco 스타일 주입·한글 IME는 WebKit 고유**라 Phase 0.5에서 확인해야 한다.
-- **컨트롤 플레인 선행 인프라가 생각보다 크다**: 소켓 경로에는 오늘 **live cap 발급·non-metadata dispatch·notification 스트림이 셋 다 없다**(§6·§10). 초판은 소켓을 "이미 capability-gated + push 보유"로 오인했다. 에디터가 소켓을 쓰려면 이 셋이 선행이고, 이는 **에디터 전용이 아니라 컨트롤 플레인의 미완 부분**이다 — 일정 산정에 반영해야 한다.
-- **이 문서가 두 번 저지른 실수(기록)**: ① 정적 grep으로 "CSP 청정"을 단언 → 런타임 측정으로 정정. ② **`control-plane.md`의 설계 규범을 구현된 코드로 오인**(소켓 notification 스트림) → 코드 검증으로 정정. 둘 다 **"문서에 적혀 있다 ≠ 코드에 있다", "문자열이 있다 ≠ 실행된다"**는 같은 뿌리다. 이 문서의 "실측" 표기는 **코드/런타임을 직접 확인한 것만** 뜻하도록 유지한다.
-- **결함이 `--minify` 경로에 몰린다**: PoC에서 밟은 번들러 결함 상당수가 **minify에서만** 재현됐다(비-minify 빌드는 정상). 프로덕션 빌드가 곧 minify 빌드이므로, §12 게이트는 **minify 산출물을 대상으로** 돌려야 한다 — 개발 빌드가 통과했다는 건 아무 보증도 아니다.
-- **surface당 자원 비용 미측정**: pane N개 × (Monaco + 워커 5스레드). 성능 예산(performance-budget.md) 대비 측정 필요, Monaco 공유 전략 미결. **번들 크기도 미최적화** — all-language barrel import 기준이라 targeted import로 줄여야 한다.
-- **문서 모델 경계·경합 재조정 메커니즘**은 설계만, 구현 미착수(가장 어려운 부분).
-- **전제 정정**: 마크다운 뷰어/프런트 툴체인 부재를 이 문서에서 처음 반영 — 기존 계획이 이를 전제했다면 함께 갱신 필요.
+### 3.3 bridge 프로토콜과 생애주기
+
+bridge는 임의 JS 객체 호출 모음이 아니라 버전 있는 protocol로 고정한다.
+
+```text
+EditorRequest {
+  protocol_version,
+  request_id,
+  surface_id,
+  method,
+  params,
+}
+
+EditorResult = success | typed_error
+```
+
+- `surface_id`는 page 입력을 신뢰하지 않고 handler가 자신에게 결합된 값을 덮어쓴다.
+- `request_id`는 surface 안에서 단조 증가하며 중복·이미 완료·취소 후 완료를 거부한다.
+- method별 request/result byte, item, page, timeout 상한을 스키마와 테스트에 함께 둔다. E1 착수 전 실제 숫자를 확정한다.
+- error는 최소 `invalid_request`, `unauthorized`, `outside_root`, `not_found`, `unsupported_encoding`, `too_large`, `binary`, `conflict`, `cancelled`, `tool_failed`, `internal_error`로 구분한다. 내부 경로·errno·프로세스 환경은 page에 그대로 노출하지 않는다.
+- surface close, navigation, web-content process crash, workspace revoke 때 모든 pending request를 정확히 한 번 `cancelled`로 끝내고 adapter 작업도 취소한다. 늦은 callback은 새 surface/grant에 적용하지 않는다.
+- page reload마다 bridge epoch를 새로 발급한다. 이전 epoch의 response/event는 버린다.
+- push queue는 bounded이며 coalesce 가능한 diagnostic/watch 상태와 유실 불가 save completion을 구분한다. overflow를 조용히 drop하지 않는다.
+- bridge DTO는 UTF-8 JSON을 쓰되 문서 bytes를 JSON string에 무제한 인라인하지 않는다. 상한 이하 UTF-8 text만 인라인하고, 이후 큰 payload transport는 별도 설계 전까지 거부한다.
+
+### 3.4 예상 코드 배치
+
+구현이 다시 `app_session.zig`와 `MaruAppHost.swift` 한 파일에 누적되지 않도록 첫 slice부터 책임별 파일로 나눈다.
+
+```text
+src/session/editor/
+  protocol.zig           version/error/DTO/limit
+  grant.zig              EditorGrant/path scope policy
+  document_registry.zig  revision/owner/conflict/recovery state
+  diff_model.zig         stable snapshot/status DTO
+
+src/app/
+  editor_runtime.zig     adapter orchestration/cancel/queue
+
+src/platform/macos/
+  editor_file.zig        descriptor-relative file adapter
+  editor_watch.zig       DispatchSource/FSEvents adapter
+  editor_tool.zig        git/tool/LSP process adapter
+  MaruEditorBridge.swift WKWebView bridge/epoch/main-frame/origin adapter
+
+web/editor/
+  entry/assets/tests     editor app와 semantic oracle
+```
+
+`src/session.zig`는 editor L2 facade만 export하고 Swift 새 파일은 `build.zig`의 `swiftc` 입력과 swift-check에 함께 연결한다. 실제 디렉터리를 추가하는 PR은 [project-structure.md](project-structure.md)도 같은 PR에서 갱신한다. app-global `DocumentRegistry`의 runtime owner는 per-window `AppSession`이 아니라 전 창이 공유하는 `AppRuntime` 계층에 둔다.
+
+## 4. 문서 권위와 저장 CAS
+
+Monaco가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
+
+native가 전체 text 정본을 보유하지 않는 v1에서는 한 document에 **writable Monaco owner surface 하나**만 둔다. 두 번째 open은 기존 owner를 focus하거나 명시적 read-only snapshot을 연다. owner close/move/crash 때 dirty 여부를 확인한 뒤 owner를 transfer/recover하며, 두 page의 editable model을 실시간 동기화하는 것은 native canonical text 또는 CRDT/OT가 필요하므로 v1 범위 밖이다.
+
+L2 `DocumentRegistry`는 동일 text의 두 번째 정본을 상시 유지하지 않고 다음 상태를 소유한다.
+
+```text
+DocumentState {
+  document_id,
+  document_key,
+  editor_revision,
+  persisted_editor_revision,
+  disk_fingerprint,
+  conflict,
+  subscribers,
+  recovery_state,
+}
+```
+
+- `document_key`는 단순 path 문자열이 아니라 grant `root_id` + 상대 경로 + 열린 시점 file identity를 포함한다. rename/replace 뒤에는 정책에 따라 같은 문서 identity를 유지하거나 명시적으로 새 문서로 전환한다.
+- page는 `document_id`와 path의 대응을 선택할 수 없다. native가 `file.open`에서 결합하고 이후 save/change 요청은 그 결합을 사용한다.
+- page의 content change마다 `editor_revision`이 단조 증가한다.
+- save 요청은 `{document_id, editor_revision, expected_disk_fingerprint, bytes}`를 보낸다. 초기 버전은 bounded full text를 허용하되 큰 파일 상한을 둔다. 증분 edit 프로토콜은 필요가 측정될 때 추가한다.
+- native는 write 직전에 disk fingerprint를 다시 비교한다. 다르면 쓰지 않고 conflict를 반환한다.
+- save ack는 저장된 revision과 새 disk fingerprint를 돌려준다. ack 뒤 현재 editor revision이 더 크면 dirty는 유지한다.
+- 외부 변경을 받아들일 때 통짜 model 교체로 undo/cursor를 깨지 않는다. clean 문서는 최소 edit로 갱신하고, dirty 문서는 reload/keep/compare를 사용자에게 선택하게 한다.
+- fingerprint는 적어도 file identity, size, mtime, content hash를 포함하되 최종 authority는 content hash다.
+- watcher가 자기 save를 다시 외부 변경으로 보고하지 않도록 save operation id와 결과 fingerprint를 기록한다. 단 operation id만으로 무시하지 않고 실제 hash가 예상값과 같을 때만 self-write로 접는다.
+- dirty owner surface를 닫거나 workspace/window를 종료할 때 save/discard/cancel을 묻는다. discard는 메모리 buffer 폐기이지 `git discard`가 아니다. app 종료 중 여러 dirty document의 순서·일괄 취소·save 실패 후 종료 중단을 상태머신 테스트로 고정한다.
+
+### 4.1 텍스트 포맷 계약
+
+Monaco 문자열과 디스크 bytes 사이 변환을 암묵적으로 UTF-8이라고 가정하지 않는다.
+
+- v1 지원 범위는 UTF-8(선택적 BOM) 텍스트로 제한하는 것을 권장한다. invalid UTF-8, UTF-16/32, binary는 읽기 전용 hex/external-open 또는 typed `unsupported_encoding`으로 거부한다.
+- open 결과는 `encoding`, `bom`, `line_ending`(`lf|crlf|mixed`), `has_final_newline`을 함께 반환한다.
+- save 기본은 원본 BOM·우세 개행·마지막 newline 상태 보존이다. 사용자가 명시적으로 바꾸지 않은 포맷을 formatter 결과 때문에 조용히 바꾸지 않는다.
+- mixed line ending을 정규화할지 보존할지는 최초 저장 UX 전에 결정한다.
+- Monaco UTF-16 offset과 LSP UTF-16 position, 디스크 UTF-8 byte offset을 별도 타입으로 다룬다. byte offset을 editor/LSP position으로 재사용하지 않는다.
+- NUL 포함 파일, 매우 긴 한 줄, combining/NFD, lone CR, final newline 없음 fixture를 둔다.
+
+### 4.2 unsaved recovery와 restore
+
+“crash recovery green”만으로는 완료 조건이 아니다. 복구 데이터의 수명과 민감정보 정책을 먼저 정한다.
+
+- 기본 workspace restore에는 editor 원문을 넣지 않는다. dirty buffer recovery는 별도 local-only journal 또는 native shadow checkpoint로 설계한다.
+- recovery record는 `document_id`가 아니라 root의 익명화 가능한 identity, 상대 경로, base fingerprint, editor revision, content 또는 edit log, schema version을 가진다.
+- 주기/최대 용량/보존 기간/정상 save 후 삭제/web-content crash 후 복원/app crash 후 안내를 정의한다.
+- journal은 source code·token을 포함할 수 있으므로 fixture나 일반 trace에 원문을 복제하지 않는다. 권한 mode, backup exclusion, purge UX를 검증한다.
+- recovery가 base fingerprint와 맞지 않으면 자동 덮어쓰기하지 않고 recovered-vs-disk 비교를 연다.
+- native가 canonical text를 상시 갖지 않는 구조에서 recovery checkpoint까지 없으면 WKWebView process crash가 dirty buffer를 전부 잃는다. 따라서 E2 편집 기능은 journal/shadow 중 하나가 실제 crash restore를 통과하기 전 완료 처리하지 않는다. 복구 저장을 원하지 않는 정책이면 E1 read-only까지만 제공한다.
+
+## 5. 파일 I/O와 감시
+
+### 5.1 safe-save
+
+기존 `createFileAtomic(.replace=true,.make_path=true)`를 직접 재사용하지 않는다. editor 전용 저장은 다음 순서를 만족해야 한다.
+
+1. grant root를 열린 directory descriptor로 고정하고 상대 path segment를 descriptor-relative로 순회한다. 문자열 `canonicalize → 검사 → 다시 path로 open`하는 TOCTOU 구조는 사용하지 않는다.
+2. expected disk fingerprint를 비교한다.
+3. 같은 디렉터리에 `O_EXCL` temp를 만들고 정상 save에서는 parent 자동 생성을 금지한다.
+4. 기존 mode를 보존하고 ACL/xattr 보존 정책을 명시한다. 보존 실패는 조용히 무시하지 않는다.
+5. write-all, file flush/fsync, atomic rename, directory fsync 순으로 완료한다.
+6. 오류·취소 시 temp를 정리하고 원본을 유지한다.
+
+경로 순회는 각 segment에서 symlink 정책을 강제하고, 검사 뒤 공격자가 symlink/parent를 교체하는 race를 red test로 둔다. hard link는 in-place write면 root 밖 같은 inode까지 바꾸고 atomic replace면 기존 link 관계를 끊으므로, v1에서 link count>1 저장을 거부할지 사용자 확인할지 결정한다. file type은 regular file만 허용하고 device/FIFO/socket은 거부한다. ownership, mode, ACL, xattr, quarantine/backup metadata 중 무엇을 보존하는지 명시한다.
+
+기존 파일 저장과 새 파일 생성은 같은 op로 암묵 처리하지 않는다. `file.save`는 이미 열린 document identity만 갱신하고, `file.create`는 별도 확인·충돌 검사·기본 mode·부모 존재 조건을 가진다. rename/delete도 E2 기본 범위에 넣지 않고 별도 capability/UX가 정해질 때까지 거부한다.
+
+최소 테스트: 기존 mode/ownership, 새 파일, 내부·외부 symlink, symlink swap race, parent rename race, hard link, 특수 파일, read-only dir, xattr/ACL 정책, disk-full/short-write 주입, fsync/rename 실패, temp cleanup, CAS 충돌, save 중 추가 편집.
+
+### 5.2 외부 변경 감시
+
+L4 macOS host가 open document를 디렉터리별로 묶어 `DispatchSource` 또는 규모가 커질 때 FSEvents로 감시한다. 기존 PTY kqueue 구현은 lifecycle/threading 참고만 하고 file watcher로 일반화해 억지 재사용하지 않는다.
+
+- event를 debounce/coalesce한 뒤 그 directory의 열린 문서를 모두 재-stat/hash한다.
+- rename/delete로 directory watch 자체가 무효화되면 re-arm한다.
+- watcher 이벤트 종류나 횟수는 정합성 authority가 아니다.
+- close/revoke/workspace 변경 때 watch와 in-flight hash를 취소한다.
+- v1은 directory watcher 수에 hard cap을 두고 초과 시 명시적으로 기능을 제한한다. FSEvents 전환은 실제 cap 압력이 측정될 때 후속으로 둔다. sleep/wake, volume unmount, case-only rename, rapid replace storm 뒤에도 최종 hash로 수렴하는 soak는 유지한다.
+
+## 6. bounded diff/git API
+
+전체 저장소의 before/after blob을 한 응답에 싣는 `diff.read`는 사용하지 않는다.
+
+- `diff.list`: `{path, old_path?, status, binary, before_size, after_size, hunk_summary?}` metadata를 pagination해서 반환한다.
+- `diff.list` 첫 응답은 `diff_snapshot_id`와 stable cursor를 발급한다. pagination 중 index/worktree가 바뀌면 서로 다른 시점의 목록을 섞지 않고 `stale_snapshot`으로 다시 시작하게 한다.
+- `diff.open`: `{diff_snapshot_id, path}`로 한 파일의 original/modified를 명시적 byte 상한 안에서 반환한다. 너무 크거나 binary면 typed `too_large`/`binary` 결과와 external-open fallback을 준다.
+- UI bridge와 외부 socket은 같은 의미 DTO를 쓰되 각각의 transport 상한 안에서 chunk/page한다.
+- `git.stage`/`unstage`는 저장·conflict 모델이 안정된 후 별도 write capability로 추가한다.
+- `git discard`는 파괴적이고 복구 의미가 달라 초기 roadmap에서 제외한다. 후속으로 하더라도 명시 확인·복구 경로를 별도 설계한다.
+
+상한은 raw blob뿐 아니라 UTF-8 decode와 JSON escape 뒤 전송 bytes, 파일 수, hunk 수, line length를 각각 센다. 압축/escape 전 크기만 검사해 메모리 증폭을 허용하지 않는다.
+
+Git read도 workspace 내용을 노출하므로 `git_read` grant 없이는 허용하지 않는다.
+
+Git 의미와 실행 안전도 E1 전에 고정한다.
+
+- 비교 기준을 `HEAD↔index`, `index↔worktree`, `HEAD↔worktree`로 명시하고 staged/unstaged/untracked를 한 상태로 뭉개지 않는다.
+- rename/copy, type change, mode-only change, symlink blob, deleted file, unmerged conflict(stage 1/2/3), submodule gitlink, empty/unborn repository를 typed status로 표현한다.
+- `.git` directory뿐 아니라 worktree의 `.git` file과 bare/unborn 상태를 처리한다. 현재 sidebar branch 탐색의 best-effort 구현을 diff root 탐색에 재사용하지 않는다.
+- `GitAdapter`는 shell이나 사용자 alias를 거치지 않고 승인된 git executable을 argv로 직접 실행한다. executable path/version을 기록하고 PATH hijack, pager/editor prompt, credential/network 접근이 없는 read-only 명령만 `git_read`로 허용한다.
+- read-only diff 호출은 repository config가 외부 프로세스를 실행하지 못하도록 external diff/textconv/pager와 interactive prompt를 명시적으로 끈다. config·attributes·filter가 실행되는 각 명령을 adversarial repo fixture로 확인한다.
+- git stderr에는 path/user/repo 정보가 있으므로 raw로 page/trace에 전달하지 않는다.
+- 이후 stage/unstage는 clean/smudge filter, index lock, partial hunk stale context를 별도 보안·CAS 문제로 다룬다.
+
+## 7. 빌드·Monaco·CSP gate
+
+### 7.1 툴체인
+
+- self-host asset만 사용하고 CDN은 금지한다.
+- zntc는 raw standalone binary가 아니라 `@zntc/core` NAPI와 `@zntc/web` workspace를 사용한다.
+- Monaco는 barrel 대신 `editor.api`와 실제 지원 언어 contribution만 import한다.
+- worker URL은 정적 literal로 배선하고 output asset/worker manifest를 검증한다.
+- zntc 최소 버전은 `16f1fda...`의 Monaco 수정이 포함된 릴리스가 나온 뒤 고정한다. 그 전 commit pin은 의존성/재현성 결정을 사용자에게 먼저 보고한다.
+
+Monaco와 새 JS toolchain은 아직 프로젝트 의존성으로 승인된 것이 아니다. Phase 0.5A가 green이어도 의존성·license·bundle/RSS 측정 승인을 거쳐야 Phase 1에 들어간다.
+
+### 7.2 CSP
+
+`script-src 'unsafe-eval'`이나 remote source는 열지 않는다. 그러나 현재 Monaco는 WebKit PoC에서 inline style을 사용했다. 가능한 선택은 다음 둘이며 Phase 0.5A에서 결정한다.
+
+1. **권장 후보:** editor origin에만 `style-src 'self' 'unsafe-inline'`을 허용하고 markdown/browser 정책은 유지한다. style 완화가 script 실행 권한으로 번지지 않는지 adversarial fixture로 고정한다.
+2. Monaco style injection을 제거/nonce화할 수 있는 지원 경로를 찾아 엄격 style CSP를 유지한다.
+
+전역 `csp_header` 하나로 editor 때문에 markdown 정책을 약화하지 않는다. editor별 CSP가 불가능한 현재 구조라면 `.editor` kind/asset resolver와 함께 먼저 분리한다.
+
+### 7.3 필수 semantic oracle
+
+각 프런트 빌드의 자동 gate는 다음이다.
+
+1. 산출물 재파싱과 asset/worker 누락·404 검사
+2. module evaluation과 CSP violation 0 검사
+3. Monaco semantic probe: model text, tokenization, diff line/character decoration, marker, worker roundtrip
+4. request/result 크기와 worker/process cleanup 검사
+
+Vite는 개발/비교 기준일 뿐 제품 runtime에 포함되지 않는다. Chromium도 제품에 추가하지 않는다. zntc↔Vite pixel 1:1 비교는 릴리스 qualification이나 디버그 artifact로만 사용하며 모든 PR의 필수 gate로 두지 않는다.
+
+### 7.4 제품 WKWebView gate
+
+Phase 0.5A 종료 조건은 실제 Maru `WKWebView`, `maru-app://`, editor CSP, 제품 asset resolver로 다음을 자동/수동 artifact와 함께 통과하는 것이다.
+
+- editor text가 non-zero layout으로 실제 표시되고 screenshot에 포함됨
+- caret/selection, ASCII insert/delete, undo/redo
+- 한글 조합 중 preedit, 완성, NFD 입력 fixture, caret 이동, backspace/delete
+- paste/copy, find, `Cmd+S`, Maru 전역 shortcut과 Monaco shortcut 충돌, first-responder 이동
+- resize, backing scale, theme 전환, hide/show와 tab/window 이동 뒤 model·selection 보존
+- module worker, diff decoration, marker, syntax token
+- page-world editor bridge allowlist, markdown/browser에서 bridge 부재
+- CSP violation/console error/404 0, close/reload/crash 후 worker와 pending request 정리
+
+E0.5A PR은 계획 명령 `mise run test-macos-editor-smoke`와 display opt-in `mise run macos-editor-smoke`를 실제 `.mise.toml`/development-commands에 추가한다. artifact는 `zig-out/maru-macos-editor-smoke/` 아래 최소 `editor.summary.txt`, `editor-dom.json`, `editor-snapshot.png`를 남긴다. summary는 engine/build identifier, CSP violations, console errors, worker count, text/caret/edit/IME/cleanup 결과를 machine-readable key로 기록한다. DOM artifact는 크기·role·상태만 담고 source text는 넣지 않으며, screenshot은 저장소의 synthetic fixture만 사용한다. 기존 Metal PPM은 WKWebView pixel을 포함하지 않으므로 WebKit `takeSnapshot` 또는 동등한 WKWebView snapshot 경로를 사용한다.
+
+IME는 synthetic JS/AppKit event만으로 통과 처리하지 않는다. 자동 하니스는 DOM/model 상태를 고정하고, 종료 gate에는 실제 macOS 한글 입력기로 preedit→완성→caret→backspace를 수행한 수동 summary를 함께 요구한다.
+
+현재 이 gate는 **RED**다. 실패 원인을 WebKit 지원 문제, custom-scheme origin/worker 문제, CSS/layout 문제, 하니스 문제로 좁히기 전 Monaco 경로를 “가능”으로 확정하지 않는다. 해결되지 않으면 CodeMirror 6 등 대안을 같은 gate로 비교한다.
+
+## 8. 포맷·린트·LSP
+
+### 8.1 workspace tool execution
+
+formatter/linter와 LSP는 모두 저장소의 config/plugin/binary를 실행할 수 있다. `tool_execute`가 없는 workspace에서는 자동 실행하지 않는다.
+
+- trusted workspace 확인과 도구별 allowlist/해결된 executable 표시
+- shell 없이 argv 실행, canonical cwd=root, 최소화한 environment
+- timeout, stdout/stderr byte 상한, child/process-group 상한, cancellation/kill/reap
+- config discovery 결과와 실제 executable/version을 사용자 및 trace에 노출
+- 포맷 결과는 곧바로 저장하지 않고 현재 revision에 대한 text edits로 반환
+- tool이 root 밖 파일을 읽거나 쓰는 것을 OS 수준에서 sandbox하지 못하는 초기 버전의 한계를 확인 UX에 명시
+
+포맷/린트를 “LSP보다 가볍다”는 이유로 보안 단계를 앞당기지 않는다. 필요성이 확인되면 저장 Phase 뒤 선택적으로 연다.
+
+### 8.2 LSP seam
+
+LSP는 다음 최소 seam만 요구한다.
+
+- `didOpen/didChange/didSave/didClose`로 매핑 가능한 document revision event
+- Content-Length framing을 control-plane ndjson과 분리한 transport
+- server request/notification/response correlation, cancellation, restart/backoff
+- diagnostic/completion/hover/definition/semantic-token의 bounded push
+- workspace tool execution grant
+- server→client `workspace/applyEdit`, `workspace/executeCommand`, file create/rename/delete, `window/showDocument`, 임의 URI open은 기본 거부하고 method별 사용자 승인/allowlist를 둔다.
+- diagnostics/result에 root 밖 URI가 들어오면 표시와 파일 접근 권한을 분리한다. URI를 받았다는 이유로 grant가 확대되지 않는다.
+
+TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 syntax는 Monarch로 시작하고 LSP semantic token이 부족하다는 측정이 있을 때만 TextMate/WASM을 재검토한다.
+
+### 8.3 관측 가능성과 민감정보
+
+editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.
+
+- 최소 event: `editor.opened`, `editor.changed`(revision/byte count만), `editor.save-started`, `editor.save-completed`, `editor.conflict`, `editor.watch-invalidated`, `editor.tool-started/completed`, `editor.bridge-overflow`.
+- path는 grant-relative 또는 익명화한 값만 artifact에 남기고 capability, full text, diff blob, diagnostic message 원문, tool stdout/stderr는 기본 제외한다.
+- control-plane/bridge event를 trace에 넣는 PR은 먼저 [facade-contracts.md](facade-contracts.md)와 [trace-replay.md](trace-replay.md)의 event/redaction/replay 의미를 갱신한다.
+- failure artifact를 fixture로 승격할 때 [project-rules.md](project-rules.md)의 공통 redaction guard를 사용한다. source code에 token이 bare text로 들어갈 수 있어 자동 guard만으로 충분하다고 간주하지 않고 사람 검토를 요구한다.
+- E2E artifact는 semantic summary와 redacted screenshot을 기본으로 하고, 실제 사용자 repository를 자동 캡처하지 않는다.
+
+## 9. 단계 계획과 종료 gate
+
+기존 [control-plane.md](control-plane.md)의 Phase 7 웹 toolchain/markdown 계획과 번호가 충돌하지 않도록 editor는 `E` prefix를 쓴다. 구현 PR 하나가 단계 전체를 끝내는 것을 기본값으로 보지 않는다.
+
+### E0.5A — 제품 WebKit feasibility (현재 RED)
+
+- committed editor smoke asset/harness, debug-only 전용 origin/CSP 실험. 사용자 승인 전 production `PanelKind`/ABI/wire는 바꾸지 않는다.
+- Monaco와 비교 후보를 동일 gate로 실행
+- text/caret/edit/IME/worker/diff/marker/cleanup artifact
+- 1/2/4 editor surface에서 web-process RSS, worker 수, hidden/background CPU와 close 뒤 회수 측정
+- **종료:** §7.4 전부 green + dependency/bundle/RSS·surface resource scaling 보고. 실패하면 Monaco 채택 중단 또는 대안 선택.
+
+### E0.5B — 순수 계약
+
+- `EditorGrant`, versioned bridge protocol/error/cancel/epoch, DTO size/page limits
+- app-global DocumentState, multi-surface 구독, revision/CAS 상태머신
+- encoding/newline model, descriptor-relative path policy, safe-save failure injection, directory watcher policy 단위 테스트
+- dirty recovery의 journal 대 native shadow 선택과 schema/redaction/보존 정책
+- **종료:** 구체적인 상한 숫자와 파일 포맷 지원 범위를 포함해 UI 없이 auth/path/revision/save/watch/recovery 불변식 green.
+
+### E1 — web toolchain + read-only diff
+
+- 승인된 zntc/Monaco 버전 pin과 reproducible build
+- `.editor` surface/asset/CSP/bridge, `diff.list`/`diff.open`
+- semantic oracle + 제품 WKWebView regression
+- git comparison/status matrix와 external diff/textconv 실행 차단
+- **종료:** grant root 밖 접근·큰 파일·binary·rename·worktree `.git` file·untracked/conflict/submodule·close/revoke를 포함한 read-only review loop green.
+
+### E2 — 편집·저장·외부 변경
+
+- DocumentRegistry, editor change event, safe-save CAS
+- directory watcher, clean reload, dirty conflict UX
+- **종료:** 동일 파일 재오픈 focus/read-only/owner-transfer, save 중 재편집, 외부 atomic replace, symlink swap/hard-link, encoding/newline 보존, mode/ownership/xattr 정책, 실제 web-content/app crash recovery restore/purge green.
+
+### E3 — 선택적 도구 실행
+
+- formatter/linter registry와 explicit trust UX
+- timeout/output/process cleanup, edit application
+- **종료:** 악성 config fixture와 취소/폭주/종료 cleanup green.
+
+### E4 — LSP
+
+- transport/supervisor와 document sync
+- diagnostics부터 vertical slice, 이후 completion/hover/definition/semantic token
+- **종료:** stale response, restart, cancellation, large diagnostics/backpressure, workspace revoke green.
+
+### 후속 backlog
+
+- git stage/unstage, 파괴적 discard UX
+- TextMate/WASM
+- 증분 대형 문서 전송과 virtualized diff
+- 다중 root·동시 여러 repository, remote/SSH workspace. 단일 linked worktree의 `.git` file 처리는 E1 범위다.
+
+## 10. 구현 전 사용자 결정
+
+다음은 문서만으로 승인된 것으로 간주하지 않는다.
+
+1. `PanelKind.editor`와 ABI/wire 확장
+2. Monaco 및 zntc 의존성, 수정 포함 릴리스 대기 대 commit pin
+3. editor origin 한정 `style-src 'unsafe-inline'` 허용 여부
+4. 최초 workspace/file/git grant UX와 native `root_id`/root descriptor 발급·회수
+5. 새 파일의 기본 mode 및 기존 ownership/ACL/xattr/hard-link 보존·거부·실패 정책
+6. 최초 지원 파일 크기·diff page·bridge/socket payload 상한
+7. v1 지원 encoding/BOM/mixed-newline 정책과 binary/invalid UTF-8 UX
+8. 동일 파일을 여러 surface에서 여는 UX와 app-global document session 공유 방식
+9. dirty recovery의 journal 대 native shadow, 기본 활성/opt-out UX, 최대 용량, 보존 기간, purge UX
+10. git diff 기준(HEAD/index/worktree) 기본값과 untracked/conflict/submodule 표시 범위
+
+## 11. 현재 한계
+
+- 제품 WKWebView에서 Monaco의 텍스트 표시·편집·IME는 아직 실패/미검증이다.
+- 임시 PoC 하니스와 결과 artifact가 저장소에 없으므로 재현성은 E0.5A가 닫아야 한다.
+- zntc current main 성공은 릴리스/장기 재현성을 보장하지 않는다.
+- safe-save는 요구사항만 검증됐고 구현되지 않았다.
+- 제품 file capability 발급, editor bridge, DocumentRegistry, watcher, diff service는 모두 미구현이다.
+- bundle size 외 실제 WKWebView web-process RSS, first interactive, large-file latency 예산은 미측정이다.
+- 파일 encoding/newline, multi-surface 동시 편집, crash recovery, hard-link/TOCTOU, git worktree/conflict 의미는 이번 문서에서 구현 gate로 추가됐지만 아직 PoC가 없다.
+- editor domain event/trace schema와 민감정보 artifact 형식은 미정이며 E0.5B에서 facade/trace 문서와 함께 닫아야 한다.

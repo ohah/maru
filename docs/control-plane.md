@@ -631,7 +631,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 - Phase 4는 1~3과 병행 가능하지만, WKWebView hosting을 짓기 전에 M0a/M0b(`SurfaceIdAllocator`·`WindowMembershipSnapshot`)와 이동성 foundation(M1–M2: `WindowGraph`·`LiveSurfaceRegistry`, [window-surface-mobility.md](window-surface-mobility.md))이 **모두** 완료됐는지 확인한다(착수 순서 무관). Phase 1보다 먼저 Phase 4를 착수하면 M0a/M0b를 그 시점에 먼저 닫는다. 그다음 공통 외부 ID·collector seam·socket bootstrap 계약이 바뀌지 않았는지 확인하고 웹뷰 껍데기용 별도 plan을 사용자에게 설명한다.
 - Phase 5는 Phase 1과 Phase 4의 합류 지점이므로, bridge 구현 전에 control-plane authz gate와 WKWebView frame/z-order/input gate를 모두 재검증한다.
 - Phase 6은 외부 자동화가 목표가 되는 시점에만 시작하고, Phase 5의 `browser.*`/bridge 신뢰 gate가 유지되는지 확인한다.
-- Phase 7은 7a/7b/7c/7d로 나눠 각각 시작 gate를 둔다. 특히 7a는 toolchain/lockfile/CI cache 계획을, 7b는 sanitizer red fixture를, 7c는 viewer/editor harness를, 7d는 `bind` capability와 링크 라우팅 권한 경계를 사용자에게 먼저 설명한다.
+- Phase 7은 7a/7b/7c/7d로 나눠 각각 시작 gate를 둔다. 여기서 7c의 editor는 **markdown source editor**이며 범용 코드 에디터 surface가 아니다. 7a는 공용 web toolchain/lockfile/CI cache 계획을, 7b는 sanitizer red fixture를, 7c는 markdown viewer/source-editor harness를, 7d는 `bind` capability와 링크 라우팅 권한 경계를 사용자에게 먼저 설명한다. 범용 코드 에디터의 WebKit feasibility·file grant·safe-save·diff/LSP 단계는 [editor-surface.md](editor-surface.md)의 `E` 단계가 소유하고, 7a 결과만 재사용한다.
 
 | Phase | 내용 | 서드파티 |
 |---|---|---|
@@ -642,7 +642,7 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 | **4. 웹 패널 껍데기** | 컨테이너 contentView + **입력 responder 재편 + 모달 레이어 분리(2패스)** + per-pane rect·surface 생애주기 ABI + `kind=web` + z-order. 규모·선행은 [web-panel.md] §2·§4·§6 단일 출처(가벼운 작업 아님). **선행: M0 완료 확인 + 이동성 M1–M2**([window-surface-mobility.md]) | 0 |
 | **5. 제어 코어 + browser.* + JS 브리지** | WKWebView 제어 코어, `browser.*`, `window.maru.*`(신뢰 게이트·isolated world). CLI에서 노출하는 `panel`/`browser` 명령이 있으면 같은 PR에서 `--help`까지 갱신. 1·4 합류 | 0 |
 | **6. WebDriver 어댑터** | 외부 자동화가 필요할 때 제어 코어 위 ~15 명령 + 인증(§8.6). CLI에서 외부 자동화 endpoint를 노출하면 `--help` fixture 포함. 첫 마크다운 콘텐츠의 필수 선행은 아님 | 0 |
-| **7. 첫 콘텐츠** | 마크다운 뷰어+소스편집(zntc dev/build/bundle) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 + CLI `--help`(`panel open --kind markdown`, `panel bind-session`) | §13 |
+| **7. 첫 콘텐츠** | 마크다운 뷰어+마크다운 소스편집(zntc dev/build/bundle) + md 링크 라우팅 + `panel.bindSession` + `bind` capability 인가 + CLI `--help`(`panel open --kind markdown`, `panel bind-session`). 범용 코드 에디터·파일 저장·git diff·LSP는 포함하지 않는다. | §13 |
 
 Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 독립 축이라 병행 가능하다. 단 M0a/M0b ID/scope foundation은 Phase 1 live collector와 Phase 4 hosting의 공통 선행조건이므로, 어느 축을 먼저 시작하든 먼저 닫는다. Phase 7은 한 PR로 묶지 않는다. 아래 micro-slice는 권장 PR 절단선이며, 더 잘게 쪼개도 된다.
 
@@ -722,8 +722,8 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 테스트 가능성:
 - **순수 로직**(프로토콜·디스패치·제어 명령·보안 판정): Zig 단위(TDD).
 - **소켓·collector**: 실제 unix socket bind/connect 통합 E2E + fake `Rt` 유닛.
-- **웹 콘텐츠(JS/TS)**: Phase 7의 렌더러·sanitizer·라우팅·runtime notice graph는 Bun 내장 test runner로 검증한다. FP4 viewer는 DOM mailbox 전송 뒤 byte node 제거, bounded asset schema, bridge-free renderer와 SVG 재-sanitize까지 고정한다.
-- **웹 패널**(콘텐츠·`browser.*`·브리지·신뢰 게이트): `evaluateJavaScript` 하니스를 기본 자동 E2E로 쓴다. FP4 macOS smoke는 실제 `maru-app://app` shell과 sandboxed `maru-app://render` iframe에서 fixture 본문·SVG를 렌더하고 renderer의 `window.maru`/message handler 부재와 부모 DOM 접근 거부를 단언한다. frame 값·NSView 계층은 코드 단언한다.
+- **웹 콘텐츠(JS/TS)**: Phase 7의 렌더러·sanitizer·라우팅·runtime notice graph는 Bun 내장 test runner로 검증한다. FP4 viewer는 DOM mailbox 전송 뒤 byte node 제거, bounded asset schema, bridge-free renderer와 SVG 재-sanitize까지 고정한다. 범용 코드 에디터는 build/semantic oracle 외에 실제 제품 WKWebView text·caret·IME gate를 별도로 통과해야 한다([editor-surface.md](editor-surface.md)).
+- **웹 패널**(콘텐츠·`browser.*`·브리지·신뢰 게이트): `evaluateJavaScript` 하니스를 기본 자동 E2E로 쓴다. FP4 macOS smoke는 실제 `maru-app://app` shell과 sandboxed `maru-app://render` iframe에서 fixture 본문·SVG를 렌더하고 renderer의 `window.maru`/message handler 부재와 부모 DOM 접근 거부를 단언한다. frame 값·NSView 계층은 코드 단언한다. Phase 6 WebDriver 어댑터가 붙으면 같은 명령 subset을 표준 WebDriver 클라이언트로 다시 검증한다.
 - **렌더 사전 회귀 gate**: Phase 4가 모달 2-pass/overlay layer를 건드리기 전 `mise run test`, `mise run check-boundaries`, `mise run test-macos-coretext-smoke`, `mise run test-macos-metal-smoke`를 먼저 재실행한다. display가 있는 macOS 환경이면 `mise run macos-coretext-smoke`와 `mise run macos-metal-smoke`도 실행해 `renderer_frame_prepared=true`, `drawlist_frame_prepared=true`, `product_atlas_uploaded=true`, `product_atlas_sampled=true`, `atlas_sample_missing_cells=0`, `screenshot_artifact=true`를 확인한다. 이 gate는 현재 렌더러 계약(자연폭/2-quad/role 기반 cover-fit/atlas sampling)이 시작 전 깨져 있지 않은지 보는 사전조건이며, WKWebView 합성 자체를 증명하지는 않는다.
 - **픽셀 시각 정합**(z-order·frame이 눈에 맞는가): web-panel.md §11을 단일 출처로 둔다. 현재 CI 자동화는 불가(`CGWindowListCreateImage` 제거, ScreenCaptureKit은 TCC/GUI 필요)라 Phase 4 종료 게이트는 GUI 골든 1 frame 수동 확인이다. 이 골든은 단순 z-order뿐 아니라 최근 렌더 계약도 같이 깨본다: Hack `workspace` baseline, `①②③` role-based fit, 음수 `font.letter-spacing`, SGR48/selection/block cursor 아래 2-quad 자연폭 글리프, split divider 경계 bleed.
 

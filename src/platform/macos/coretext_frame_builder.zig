@@ -6,6 +6,8 @@ const renderer = maru.renderer;
 const terminal = maru.terminal;
 const tabbar = maru.chrome.components.tabbar; // C4b-4: 탭 셀 경계 단일 소스(제목·✕가 hit-test·밴드와 같은 분할)
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
+const dock_layout = maru.session.dock_layout;
+const dock_panel = maru.session.dock_panel;
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
@@ -743,6 +745,9 @@ pub fn buildFileDockChromeDrawList(
     titles: []const []const u8,
     active: ?usize,
     active_path: []const u8,
+    active_kind: dock_panel.EntryKind,
+    active_mode: dock_panel.Mode,
+    active_dirty: bool,
     cols: u16,
     fg: terminal.Color,
     active_fg: terminal.Color,
@@ -761,7 +766,22 @@ pub fn buildFileDockChromeDrawList(
             _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), end, style, false, .head);
         }
         try cells.append(allocator, .{ .row = 0, .col = cols - 1, .codepoint = 0x25E7, .width = 1, .style = .{ .foreground = active_fg } }); // ◧
-        _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, cols - 1, .{ .foreground = fg }, false, .head);
+        const control_cols: u16 = @intCast(@min(dock_layout.header_control_cols, cols));
+        const control_start = cols - control_cols;
+        if (control_start > 1)
+            _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, control_start, .{ .foreground = fg }, false, .head);
+        const mode_label = switch (active_kind) {
+            .html => "읽기",
+            .markdown => switch (active_mode) {
+                .read => "[읽기]  소스 편집",
+                .source_edit => "읽기  [소스 편집]",
+            },
+        };
+        const mode_end = if (active_dirty and cols > control_start + 2) cols - 2 else cols;
+        if (mode_end > control_start)
+            _ = try appendEllipsizedTitle(allocator, &cells, mode_label, 1, control_start, mode_end, .{ .foreground = active_fg, .bold = active_kind == .markdown }, false, .tail);
+        if (active_dirty and cols >= 2)
+            try cells.append(allocator, .{ .row = 1, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●
     }
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 2 },
@@ -1816,6 +1836,34 @@ test "long titles are ellipsized with U+2026 at the last cell; short titles are 
         }
         try std.testing.expect(saw_ellipsis);
     }
+}
+
+test "file dock header draws source mode and dirty marker in the reserved control band" {
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    const titles = [_][]const u8{"doc.md"};
+    var dl = try buildFileDockChromeDrawList(
+        allocator,
+        &titles,
+        0,
+        "/tmp/doc.md",
+        .markdown,
+        .source_edit,
+        true,
+        48,
+        dim,
+        bright,
+    );
+    defer dl.deinit(allocator);
+    var saw_dirty = false;
+    var saw_mode_text = false;
+    for (dl.cells) |cell| {
+        if (cell.row != 1) continue;
+        if (cell.codepoint == 0x25CF and cell.col == 46) saw_dirty = true;
+        if (cell.col >= 30 and cell.codepoint != 0x25CF) saw_mode_text = true;
+    }
+    try std.testing.expect(saw_dirty and saw_mode_text);
 }
 
 // 활성 탭(행/세그먼트) 제목은 active_fg + bold, 나머지는 fg + regular로 그려지는지 — 활성 탭 글자 강조.

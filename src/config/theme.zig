@@ -861,6 +861,8 @@ pub const Config = struct {
     cursor: CursorConfig = .{},
     input: InputConfig = .{},
     quick_terminal: QuickTerminalConfig = .{},
+    /// 파일 도크에서 동시에 유지할 WKWebView 상한. 탭 metadata는 남기고 non-dirty LRU view만 해제한다.
+    file_panel: FilePanelConfig = .{},
     /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 rich(둥근 모서리·분리 색 팔레트 룩 — 사용자
     /// 요청으로 기본값을 tui에서 rich로 변경). cell-grid 룩을 원하면 `chrome.theme = tui`. loader가 `chrome.theme` 키로 파싱.
     chrome_theme: ChromeTheme = .rich,
@@ -1019,6 +1021,14 @@ pub const Config = struct {
         .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = "비활성 split pane 디밍(0~1)", .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
         .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = "split 경계선 두께(pt, 0=숨김)", .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },
         .term = Meta{ .key = "term", .doc = "$TERM 값", .widget = .text, .section = .terminal },
+    };
+};
+
+pub const FilePanelConfig = struct {
+    max_live_views: u32 = 8,
+
+    pub const schema = .{
+        .max_live_views = Meta{ .doc = "파일 패널 live WKWebView 상한", .range = .{ 1, 256 }, .widget = .number, .section = .workspace },
     };
 };
 

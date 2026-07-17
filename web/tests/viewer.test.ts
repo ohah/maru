@@ -32,6 +32,28 @@ describe("file viewer bridge boundary", () => {
     expect(document.querySelector("[data-maru-file-request]")).toBeNull();
   });
 
+  test("write and dirty mailbox requests expose no path parameter", async () => {
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    const document = dom.window.document;
+    const requests: unknown[] = [];
+    document.addEventListener("maru:file-request", () => {
+      const node = document.querySelector<HTMLElement>('[data-maru-file-request="pending"]');
+      if (node === null) return;
+      requests.push(JSON.parse(node.textContent ?? "null"));
+      node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } });
+      node.dataset.maruFileRequest = "done";
+      document.dispatchEvent(new dom.window.Event("maru:file-response"));
+    });
+
+    await requestFileBridge(document, "write", "# 저장", 100);
+    await requestFileBridge(document, "setDirty", true, 100);
+    expect(requests).toEqual([
+      { method: "write", content: "# 저장" },
+      { method: "setDirty", dirty: true },
+    ]);
+    expect(JSON.stringify(requests)).not.toContain("path");
+  });
+
   test("asset request schema accepts only normalized bounded paths and ids", () => {
     expect(
       isAssetRequest({

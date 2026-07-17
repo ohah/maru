@@ -22,8 +22,15 @@ export async function emitZntcBundle(entry: string, outdir: string): Promise<Emi
     format: "esm",
     platform: "browser",
     target: ["safari16"],
+    jobs: 1,
     outdir,
-    minify: true,
+    // zntc 0.1.3 syntax minifier can emit a bundle that its own safari16 target accepts but the macOS
+    // JavaScriptCore parser rejects once the CM6 graph is present. Identifier/whitespace minification remains
+    // deterministic; syntax rewriting stays off and the real WKWebView smoke is the executable compatibility gate.
+    minify: false,
+    minifyIdentifiers: true,
+    minifyWhitespace: true,
+    minifySyntax: false,
     sourcemap: false,
     write: false,
   });

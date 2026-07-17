@@ -22,6 +22,8 @@ const file_policy = @import("file_panel_bridge.zig");
 pub const hello_method = "hello";
 pub const file_read_method = "maru.file.read";
 pub const file_read_asset_method = "maru.file.readAsset";
+pub const file_write_method = "maru.file.write";
+pub const file_set_dirty_method = "maru.file.setDirty";
 
 /// 실제 파일 시스템 접근을 platform 계층에서 주입한다. 반환 slice는 `gpa` 소유이며 dispatch가 해제한다.
 /// callback error는 경로/존재 정보를 노출하지 않는 균일 `internal_error`로 접는다.
@@ -29,6 +31,8 @@ pub const FileAccess = struct {
     context: *anyopaque,
     read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8,
     read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
+    write_fn: *const fn (context: *anyopaque, content: []const u8) anyerror!void,
+    set_dirty_fn: *const fn (context: *anyopaque, dirty: bool) anyerror!void,
 
     fn read(self: FileAccess, gpa: std.mem.Allocator) anyerror![]u8 {
         return self.read_fn(self.context, gpa);
@@ -36,6 +40,14 @@ pub const FileAccess = struct {
 
     fn readAsset(self: FileAccess, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8 {
         return self.read_asset_fn(self.context, gpa, normalized_path);
+    }
+
+    fn write(self: FileAccess, content: []const u8) anyerror!void {
+        return self.write_fn(self.context, content);
+    }
+
+    fn setDirty(self: FileAccess, dirty: bool) anyerror!void {
+        return self.set_dirty_fn(self.context, dirty);
     }
 };
 
@@ -112,7 +124,43 @@ pub fn dispatchBridgeWithFileAccess(
         defer gpa.free(bytes);
         return serializeFileAssetResult(gpa, req.id, file_policy.mimeForPath(normalized), bytes);
     }
+    if (std.mem.eql(u8, req.method, file_write_method)) {
+        const content = singleStringParam(req.params, "content") catch return errorResponse(gpa, req.id, .invalid_params);
+        if (content.len > file_policy.max_file_bytes or !std.unicode.utf8ValidateSlice(content))
+            return errorResponse(gpa, req.id, .invalid_params);
+        access.write(content) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "written_bytes", content.len);
+    }
+    if (std.mem.eql(u8, req.method, file_set_dirty_method)) {
+        const dirty = singleBoolParam(req.params, "dirty") catch return errorResponse(gpa, req.id, .invalid_params);
+        access.setDirty(dirty) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "dirty", dirty);
+    }
     return errorResponse(gpa, req.id, .method_not_found);
+}
+
+fn singleStringParam(params: ?std.json.Value, key: []const u8) error{InvalidParams}![]const u8 {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 1) return error.InvalidParams;
+    return switch (obj.get(key) orelse return error.InvalidParams) {
+        .string => |value| value,
+        else => error.InvalidParams,
+    };
+}
+
+fn singleBoolParam(params: ?std.json.Value, key: []const u8) error{InvalidParams}!bool {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 1) return error.InvalidParams;
+    return switch (obj.get(key) orelse return error.InvalidParams) {
+        .bool => |value| value,
+        else => error.InvalidParams,
+    };
 }
 
 fn readAssetPath(params: ?std.json.Value) error{InvalidParams}![]const u8 {
@@ -161,6 +209,17 @@ fn serializeFileAssetResult(
     return aw.toOwnedSlice();
 }
 
+fn serializeFileMutationResult(gpa: std.mem.Allocator, id: cp.Id, key: []const u8, value: anytype) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    cp.beginResult(&s, id) catch return error.OutOfMemory;
+    s.objectField(key) catch return error.OutOfMemory;
+    s.write(value) catch return error.OutOfMemory;
+    cp.endResult(&s) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용 — control_browser/1d와 동일 패턴).
 fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.Allocator.Error![]u8 {
     return cp.serializeError(gpa, id, code, code.defaultMessage(), null);
@@ -194,6 +253,9 @@ const FakeFileAccess = struct {
     last_asset_path: [128]u8 = undefined,
     last_asset_path_len: usize = 0,
     fail: bool = false,
+    last_write: [256]u8 = undefined,
+    last_write_len: usize = 0,
+    dirty: bool = false,
 
     fn read(context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
@@ -211,8 +273,21 @@ const FakeFileAccess = struct {
         return gpa.dupe(u8, &.{ 0x89, 0x50, 0x4e, 0x47 });
     }
 
+    fn write(context: *anyopaque, content: []const u8) anyerror!void {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail or content.len > self.last_write.len) return error.WriteFailed;
+        @memcpy(self.last_write[0..content.len], content);
+        self.last_write_len = content.len;
+    }
+
+    fn setDirty(context: *anyopaque, dirty: bool) anyerror!void {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail) return error.DirtyFailed;
+        self.dirty = dirty;
+    }
+
     fn access(self: *FakeFileAccess) FileAccess {
-        return .{ .context = self, .read_fn = read, .read_asset_fn = readAsset };
+        return .{ .context = self, .read_fn = read, .read_asset_fn = readAsset, .write_fn = write, .set_dirty_fn = setDirty };
     }
 };
 
@@ -269,6 +344,27 @@ test "dispatchBridge: file.readAsset rejects malformed and traversal params befo
         try testing.expectEqual(@as(i64, -32602), p.value.object.get("error").?.object.get("code").?.integer);
     }
     try testing.expectEqual(@as(usize, 0), fake.asset_calls);
+}
+
+test "dispatchBridge: file.write and dirty are pinned provider mutations with exact params" {
+    var fake: FakeFileAccess = .{};
+    const dirty_req = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true}}";
+    const dirty_resp = try dispatchBridgeWithFileAccess(testing.allocator, dirty_req, "0.1.0", fake.access());
+    defer testing.allocator.free(dirty_resp);
+    try testing.expect(fake.dirty);
+
+    const write_req = "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"maru.file.write\",\"params\":{\"content\":\"# 저장\\n\"}}";
+    const write_resp = try dispatchBridgeWithFileAccess(testing.allocator, write_req, "0.1.0", fake.access());
+    defer testing.allocator.free(write_resp);
+    try testing.expectEqualStrings("# 저장\n", fake.last_write[0..fake.last_write_len]);
+    try testing.expect(fake.dirty); // write와 dirty ack는 별도 직렬 mutation이다.
+
+    const bad = "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"maru.file.write\",\"params\":{\"content\":\"x\",\"path\":\"/tmp/escape.md\"}}";
+    const bad_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad, "0.1.0", fake.access());
+    defer testing.allocator.free(bad_resp);
+    var parsed = try parseValue(testing.allocator, bad_resp);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, -32602), parsed.value.object.get("error").?.object.get("code").?.integer);
 }
 
 test "dispatchBridge: provider failures are uniform internal errors" {

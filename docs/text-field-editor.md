@@ -141,7 +141,19 @@ TextField = struct {
 ## 7. IME (§2.3 벽① — v1 범위와 후속 분리)
 
 - **v1 (이 이니셔티브)**: preedit를 **caret 위치에** 렌더(model이 preedit+caret 소유, `fieldLayout`이 run으로 배치 §3.3) + 확정 텍스트를 **caret에 삽입**(committed-text 라우팅을 `addrEditAppend`(끝, `sendTextAsKeys`→`handleAddrEditKey` 경유)에서 `insertText`(caret)로 교체). `addrEditCaretRect`(IME 후보창)를 끝에서 caret 열로. 조합 중 caret 이동은 잠금(조합 취소 후 이동). 조합 중 block caret은 §3.3 규칙(preedit 안 가림).
-- **후속 슬라이스 (별도)**: macOS marked-text **완전 프로토콜** — Swift `NSTextInputClient.selectedRange`/`markedRange`를 실 문서 오프셋으로 반환 + `insertText(_:replacementRange:)`/`setMarkedText(_:selectedRange:replacementRange:)`의 `replacementRange` 처리 → 선택 대체 조합·정확한 후보창. Swift↔Zig ABI 확장 동반.
+- **후속 슬라이스 (별도)**: macOS marked-text **완전 프로토콜** — Swift `NSTextInputClient.selectedRange`/`markedRange`를 실 문서 오프셋으로 반환 + `insertText(_:replacementRange:)`/`setMarkedText(_:selectedRange:replacementRange:)`의 `replacementRange` 처리 → 선택 대체 조합·정확한 후보창. Swift↔Zig ABI 확장 동반. 원리·이득·벽·착수 적기를 아래에 남긴다([document-basis-and-decision]).
+  - **원리(양방향 대화)**: macOS IME는 별도 상태기계이고 앱은 그 **문서**다 — `NSTextInputClient` 계약으로 양방향 대화한다. 입력기는 조작(`setMarkedText`/`insertText`) **전에** 앱에게 상태를 되묻고(`selectedRange`/`markedRange`/`attributedSubstring`/`firstRect`/`characterIndex`), 그 답에 따라 조작을 결정한다. 앱이 거짓(빈 range·location 0)을 답하면 입력기가 **틀린 문서 모델** 위에서 조작한다. 끝-caret·무선택에서만 "틀린 모델 == 현실"이 우연히 겹쳐 현행 stub이 동작한다(Zig가 입력기 주장 위치를 무시하고 자기 caret에 넣기 때문). 그 밖(중간 caret·선택)은 어긋난다.
+  - **이득(질의 메서드 → 여는 기능)**:
+    - `selectedRange()` 실 선택 반환 → **선택 대체 조합**(선택 후 조합 시작 시 선택이 조합으로 교체; §2.3 벽① "미지원" 해소).
+    - `markedRange()` 실 location 반환 → **정확한 후보창** + 조합 중 편집(자모 교정) 위치.
+    - `attributedSubstring(forProposedRange:)` 실 텍스트 반환 → **재변환(reconversion)** — 확정 글자를 선택해 다시 입력기로 여는 것(한자 변환·일본어 kanji 재변환). 입력기가 선택된 실 글자를 읽어야 후보를 낸다.
+    - `insertText`/`setMarkedText`의 `replacementRange` 처리 → 받아쓰기·자동수정의 **범위 교체**(caret 삽입이 아니라 지정 범위 교정).
+    - `characterIndex(for:)` 실 매핑 반환 → 마크드 텍스트/후보 위 **마우스 조작**.
+  - **벽(왜 별도 이니셔티브인가)**:
+    1. **좌표계 변환(UTF-16 ↔ UTF-8/그래핌)**: `NSTextInputClient` range는 전부 **UTF-16 코드 유닛** 단위인데 `TextField`는 **UTF-8 바이트 + 그래핌 클러스터** 단위다. 매 질의/답에 변환 레이어가 필요하다 — 한글(BMP=1 유닛)·이모지(surrogate pair=2 유닛)·결합 문자에서 오프셋이 어긋나면 조합·커서가 **조용히** 틀어진다(가장 큰 버그 원천).
+    2. **양방향 ABI**: 현행은 Zig가 자기 caret에 넣는 **단방향**이라 ABI가 단순하다. 완전 구현은 Swift가 매 질의마다 Zig에 주소 필드의 caret/선택/조합 오프셋을 **UTF-16으로 묻는 읽기 ABI** + `replacementRange`로 특정 범위를 교체하는 **쓰기 ABI**를 새로 뚫어야 한다.
+    3. **엣지 회귀(현 stub은 의도된 최소값)**: 지금 stub은 순진한 게 아니라 엣지를 피하려 최소로 둔 것이다 — `markedRange()`가 `NSNotFound` 대신 빈 range를 주는 건 NSNotFound 시 한글 마지막 자모 Backspace가 삭제 대신 확정(insertText)으로 처리되던 버그 때문이라고 [MaruAppHost.swift] 주석에 못박혀 있다. 완전 구현은 이런 IME별(한/일/중)·자모별 엣지를 전수 재검증해야 한다.
+  - **착수 적기**: 주소창은 짧은 URL 입력이라 위 이득의 실수요가 낮다. **2번째 `TextField` 소비자**(예: 향후 코드 에디터 surface — 긴 한글 문서 편집)가 등장해 선택-대체·재변환 수요가 오를 때 함께 착수하는 게 비용 대비 효율이다(§8 후속의 "향후 2번째 소비자 등장 시 보편 추출 검토"와 동시).
 - **회귀 방지**: [overlay_input.zig] 모듈 주석이 못박은 "커밋 N + 조합 N+1이 다음 조합을 지움" 회귀가 caret 전진과 preedit 앵커 동기에서 재발할 수 있다. v1은 그 흐름(imeInsert→imeMarked 순서)의 헤드리스 IME 테스트를 caret-aware로 **확장**한다([devsession-undefined-test-field-trap]: 새 필드는 기본값 필수).
 
 ## 8. 슬라이스 계획

@@ -90,15 +90,16 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
     const box_h = @as(u32, @intCast(items.len)) * ch;
     var x = state.anchor_x;
     var y = state.anchor_y;
-    const bw_px: i32 = @intCast(m.backing_width_px);
-    const bh_px: i32 = @intCast(m.backing_height_px);
+    const workspace = props.workspaceRect(m);
+    const bw_px: i32 = @intCast(workspace.x + workspace.w);
+    const bh_px: i32 = @intCast(workspace.y + workspace.h);
     if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
     if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로
     // 좌단은 사이드바 오른쪽으로 — 메뉴는 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다(좁은 창에서
     // anchor가 작거나 box가 클 때). 사이드바 슬롯 우클릭이면 anchor가 사이드바 안이라 메뉴가 그 오른쪽 가장자리에 붙는다.
-    const sidebar: i32 = @intCast(m.sidebar_width_px);
+    const sidebar: i32 = @intCast(workspace.x);
     if (x < sidebar) x = sidebar;
-    if (y < 0) y = 0;
+    if (y < @as(i32, @intCast(workspace.y))) y = @intCast(workspace.y);
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
 }
 

@@ -50,7 +50,8 @@ pub fn gridFromRectPx(cell_width_px: u32, cell_height_px: u32, w_px: u32, h_px: 
 /// 논리 pt → backing 정수 px(분수 scale milli, ×scale_milli/1000). sidebar 폭·window padding 4방 같은 정수
 /// pt 환산의 단일 출처다(letter-spacing의 f32 경로는 분수 정밀이 필요해 applyFontSpacing이 별도로 처리한다).
 pub fn ptToPx(pt: u32, scale_milli: u32) u32 {
-    return pt * scale_milli / 1000;
+    const scaled = @as(u64, pt) * @as(u64, scale_milli) / 1000;
+    return @intCast(@min(scaled, std.math.maxInt(u32)));
 }
 
 /// 점(backing px)이 사각형 안인가([x, x+w) × [y, y+h) 반열린). 탭 바 클릭 hit-test에 쓴다. 비유한은 false.
@@ -140,6 +141,12 @@ test "gridFromBacking divides backing pixels by cell size with placeholder + cla
     try std.testing.expectEqual(terminal.Size{ .cols = 116, .rows = 32 }, gridFromBacking(960, 600, 8, 18, 0, .{ .left = 10, .right = 20, .top = 4, .bottom = 8 }));
     // 비정상 큰 padding도 언더플로 없이 최소 grid로 saturate.
     try std.testing.expectEqual(terminal.Size{ .cols = 2, .rows = 1 }, gridFromBacking(960, 600, 8, 18, 0, .{ .left = 10000, .right = 10000, .top = 10000, .bottom = 10000 }));
+}
+
+test "ptToPx uses a wide intermediate and saturates damaged persisted values" {
+    try std.testing.expectEqual(@as(u32, 600), ptToPx(300, 2000));
+    try std.testing.expectEqual(std.math.maxInt(u32), ptToPx(std.math.maxInt(u32), 1000));
+    try std.testing.expectEqual(std.math.maxInt(u32), ptToPx(std.math.maxInt(u32), std.math.maxInt(u32)));
 }
 
 test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)" {

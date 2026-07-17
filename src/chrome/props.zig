@@ -17,6 +17,11 @@ pub const CellMetrics = struct {
     // 더한다 — 밴드 view는 슬롯 상대 좌표라 상단 헤더를 모른다(lowerSidebar의 rect.y/slot_h 행 역산과 일치).
     backing_width_px: u32,
     backing_height_px: u32,
+    // 사이드바·titlebar·전역 파일 도크를 뺀 workspace rect. 0이면 레거시 backing-sidebar로 폴백.
+    workspace_x_px: u32 = 0,
+    workspace_y_px: u32 = 0,
+    workspace_width_px: u32 = 0,
+    workspace_height_px: u32 = 0,
     // minimal 세션(사이드바·pane 탭 바 숨김)인지. C2/C3 사이드바·탭바 컴포넌트가 렌더 게이트로 읽는다
     // (chrome-strategy.md §5.5 계획). sidebar_width_px==0으로 완전 파생되진 않는다(탭 바도 숨기므로) — 별도 신호.
     chrome_minimal: bool = false,
@@ -40,6 +45,16 @@ pub const ShapeTokens = struct {
 /// (전역 명령이라 창 중앙 유지 — overlay_input.panelLayout). w==0이면 미초기화 → findLayout이 창 전체(사이드바
 /// 오른쪽 터미널 영역)로 폴백해 단일-pane·헤드리스 테스트에서도 안전하다. 좌표·크기는 split_tree.Rect와 같은 u32.
 pub const PaneRect = struct { x: u32 = 0, y: u32 = 0, w: u32 = 0, h: u32 = 0 };
+
+pub fn workspaceRect(m: CellMetrics) PaneRect {
+    if (m.workspace_width_px > 0 and m.workspace_height_px > 0) return .{
+        .x = m.workspace_x_px,
+        .y = m.workspace_y_px,
+        .w = m.workspace_width_px,
+        .h = m.workspace_height_px,
+    };
+    return .{ .x = m.sidebar_width_px, .y = 0, .w = m.backing_width_px -| m.sidebar_width_px, .h = m.backing_height_px };
+}
 
 pub const ChromeProps = struct {
     metrics: CellMetrics,

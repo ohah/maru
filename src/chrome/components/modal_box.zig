@@ -37,7 +37,8 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
     const m = p.metrics;
     const cw = @max(m.cell_width_px, 1);
     const ch = @max(m.cell_height_px, 1);
-    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
+    const workspace = props.workspaceRect(m);
+    const term_w_px = workspace.w;
     const term_cols = term_w_px / cw;
     if (term_cols == 0) return null;
     // C4b 패딩: rich lowering이 배경 quad를 ±pad 확장하므로, 그만큼 줄인 가용 칸으로 clamp(tui=0이면 무변화).
@@ -47,12 +48,11 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
     const box_cols = @max(@min(content_cols + 2 * margin, avail_cols), 1);
     const box_w = box_cols * cw;
     const box_h = (content_rows + 2) * ch; // 위/아래 여백 한 줄씩 + 콘텐츠 행
-    const sidebar = @as(i32, @intCast(m.sidebar_width_px));
-    const x = sidebar + @as(i32, @intCast((term_w_px - box_w) / 2));
+    const x = @as(i32, @intCast(workspace.x)) + @as(i32, @intCast((term_w_px - box_w) / 2));
     // 세로 중앙. 단 box_h가 뷰포트보다 크면(예: 세팅 섹션이 많고 창이 짧음) 중앙값이 음수가 돼 제목/상단이 화면 위로
     // 잘렸다(리뷰 #823) — y를 0 이상으로 clamp해 상단을 항상 보이게 한다(하단 초과분은 framebuffer가 클립, 네비
     // 스크롤은 후속). 폭 clamp(box_cols)와 같은 "모달을 화면 안에" 취지.
-    const y = @max(@as(i32, 0), @divTrunc(@as(i32, @intCast(m.backing_height_px)) - @as(i32, @intCast(box_h)), 2));
+    const y = @as(i32, @intCast(workspace.y)) + @max(@as(i32, 0), @divTrunc(@as(i32, @intCast(workspace.h)) - @as(i32, @intCast(box_h)), 2));
     return .{
         .rect = .{ .x = x, .y = y, .w = box_w, .h = box_h },
         .inner_x = x + @as(i32, @intCast(margin * cw)),

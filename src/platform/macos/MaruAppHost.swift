@@ -1985,7 +1985,7 @@ final class MaruWebPanelView: NSView {
     static let browserDataStore = WKWebsiteDataStore.nonPersistent()
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
-    // 이 web 본문 rect가 split divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
+    // 이 web 본문 rect가 split/dock divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
     // show 전이가 갱신한다. hitTest가 그 가장자리 margin 안 클릭/hover를 통과시켜 아래 터미널 뷰의 divider 드래그·resize
     // 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭 분리 — 4e review 0 후속). 0이면 통과 없음(모든 가장자리 바깥 경계).
     var seamEdges: UInt32 = 0

@@ -23,6 +23,8 @@ pub const Entry = struct {
     kind: EntryKind,
     mode: Mode = .read,
     dirty: bool = false,
+    /// FP3 runtime handle. workspace.v1에는 저장하지 않고 복원/재소환 때 앱 전역 allocator에서 새 id를 발급한다.
+    surface_id: u64 = 0,
 };
 
 /// workspace.v1에 들어가는 entry 부분집합. dirty는 파일 내용이 아니라 휘발성 편집 상태라 의도적으로 빠진다.
@@ -121,6 +123,17 @@ pub const DockPanel = struct {
             .leaf => |group| group,
             .split => null,
         };
+    }
+
+    pub fn singleGroupConst(self: *const DockPanel) ?*const DockGroup {
+        return switch (self.tree) {
+            .leaf => |group| group,
+            .split => null,
+        };
+    }
+
+    pub fn entryCountTotal(self: *const DockPanel) usize {
+        return entryCount(self.tree);
     }
 
     pub const OpenResult = struct {

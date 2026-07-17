@@ -319,18 +319,21 @@ pub fn paneRegion(p: props.ChromeProps) Region {
     const m = p.metrics;
     return if (p.active_pane.w > 0)
         .{ .x = p.active_pane.x, .y = p.active_pane.y, .w = p.active_pane.w, .h = p.active_pane.h }
-    else
-        .{ .x = m.sidebar_width_px, .y = 0, .w = m.backing_width_px -| m.sidebar_width_px, .h = m.backing_height_px };
+    else blk: {
+        const workspace = props.workspaceRect(m);
+        break :blk .{ .x = workspace.x, .y = workspace.y, .w = workspace.w, .h = workspace.h };
+    };
 }
 
 /// palette 패널 가로 레이아웃(사이드바 오른쪽, 상단-중앙) — **palette 전용**(find는 활성 pane 우상단 findLayout으로
 /// 분리). 폭은 panelSize 공유. clamp로 panel_w ≤ term_w_px라 중앙배치 뺄셈이 안전. y는 상단에서 두 줄 아래.
 pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
     const m = p.metrics;
-    const term_w_px = m.backing_width_px -| m.sidebar_width_px;
+    const workspace = props.workspaceRect(m);
+    const term_w_px = workspace.w;
     const sz = panelSize(p, term_w_px) orelse return null;
-    const x = @as(i32, @intCast(m.sidebar_width_px)) + @as(i32, @intCast((term_w_px - sz.panel_w) / 2));
-    const y = 2 * @as(i32, @intCast(sz.ch)); // 상단에서 두 줄 내려(기존 오버레이와 같은 위치)
+    const x = @as(i32, @intCast(workspace.x)) + @as(i32, @intCast((term_w_px - sz.panel_w) / 2));
+    const y = @as(i32, @intCast(workspace.y)) + 2 * @as(i32, @intCast(sz.ch)); // workspace 상단에서 두 줄 내려
     return .{ .x = x, .y = y, .panel_cols = sz.panel_cols, .cw = sz.cw, .ch = sz.ch };
 }
 

@@ -130,13 +130,14 @@ fn popupRect(anchor: draw.Rect, items: []const []const u8, p: props.ChromeProps)
     const box_h = @as(u32, @intCast(items.len)) * ch;
     var x = anchor.x;
     var y = anchor.y + @as(i32, @intCast(anchor.h)); // control 아래로 드롭
-    const bw_px: i32 = @intCast(m.backing_width_px);
-    const bh_px: i32 = @intCast(m.backing_height_px);
+    const workspace = props.workspaceRect(m);
+    const bw_px: i32 = @intCast(workspace.x + workspace.w);
+    const bh_px: i32 = @intCast(workspace.y + workspace.h);
     if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
     if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로(당겨 fit)
-    const sidebar: i32 = @intCast(m.sidebar_width_px);
+    const sidebar: i32 = @intCast(workspace.x);
     if (x < sidebar) x = sidebar; // 사이드바 chrome 위로 안 겹치게
-    if (y < 0) y = 0;
+    if (y < @as(i32, @intCast(workspace.y))) y = @intCast(workspace.y);
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
 }
 

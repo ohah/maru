@@ -1564,12 +1564,15 @@ pub const BrowserDispatch = union(enum) {
 ///   3. `id` 파싱(params `id`=u64). 형식 오류 → `invalid_params`(authz가 target을 알아야 먼저; 형식 오류는 oracle 아님).
 ///   4. **authz** — 세션 cap 중 하나라도 `authorize(cap, id, cap.generation, method, now)` granted면 통과. 아니면
 ///      **4b. pane confirm-grant 조회**(§9.2 Model B, 1e-confirm — `grants.isGranted(pane_selector, id, scope)`, 가법).
-///      둘 다 아니면 **균일 `unauthorized`**(존재검사보다 먼저 — oracle 방지). deny 이유 노출 금지.
+///      둘 다 아니면 authorized=false로 두고 **최종 판정은 순서 6**으로 미룬다(valid web surface면 needs_grant, 아니면
+///      균일 `unauthorized`). deny 이유 노출 금지.
 ///   5. `parseBrowserMethod(method.rest)`. null(screenshot 등 5a 미구현) → `method_not_found`(authz 뒤 — 미인가
-///      caller가 메서드 탐침 못 하게).
-///   6. method별 params 파싱(url/script). 오류 → `invalid_params`. url/script는 gpa로 dupe(op.arg).
-///   7. **surface 검증(방어)** — snapshot에서 `id`로 SurfaceDto 찾기. 없으면 `unauthorized`(존재 누설 금지), 있으나
-///      `detail != .web`이면 `unauthorized`(browser cap은 web surface 전용).
+///      caller가 메서드 탐침 못 하게). subscribe는 여기서 분기(surface·authz 뒤 필터 파싱).
+///   6. **surface 검증 + authz 최종 판정 — params 파싱 앞**(§8.3 oracle 방지, subscribe 분기와 동일 불변식). snapshot에서
+///      `id`로 SurfaceDto 찾기: 없거나 `detail != .web`이면 `unauthorized`(존재 누설 금지·browser cap은 web 전용).
+///      미grant valid(존재 web surface)면 needs_grant(확인 대기), 미인가면 균일 `unauthorized`. **미인가 caller는 여기서
+///      접혀 params를 파싱당하지 않는다**(malformed params로 스키마를 탐침하는 oracle 차단).
+///   7. method별 params 파싱(url/script). 오류 → `invalid_params`(인가된 caller만 도달 — oracle 아님). url/script는 gpa로 dupe(op.arg).
 ///   8. **op 반환(5e)** — 여기까지 통과 = 인가·유효. `BrowserOp{surface_id, method, arg(dupe)}`. L4가 실행.
 pub fn dispatchBrowser(
     gpa: std.mem.Allocator,
@@ -1654,13 +1657,9 @@ pub fn browserOpFromRequest(
     // 존재하는 web surface에 대해서만 prompt·나머지는 균일 err — self-authenticated pane 한정, §9.2·§8.3 트레이드오프).
 
     // ── 5. BrowserMethod 파싱. 5a 미구현(screenshot 등) → method_not_found(authorized 무관 — 메서드명은 공개 API라 oracle 아님). ──
+    // execute_script params 사전 검증(id 길이·args wire)은 surface·authz 게이트 **뒤**(step 7)로 미룬다 — 미인가 caller가
+    // malformed params로 invalid_params를 유도해 파라미터 스키마를 탐침하지 못하게(§8.3 oracle, subscribe와 같은 규율).
     const bmethod = parseBrowserMethod(method.rest) orelse return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
-    if (bmethod == .execute_script and req.id == .string and req.id.string.len > execute_script_request_id_max_bytes) {
-        return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
-    }
-    if (bmethod == .execute_script and !try validExecuteScriptArgsWire(gpa, request_bytes)) {
-        return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
-    }
 
     // ── 5f-0b-3b: subscribe는 async op이 아니라 동기 registry 구독. 필터 파싱(6) + surface 검증(7) 후 `.subscribe` 반환
     //    (arg dupe 없음 — 필터는 값 타입). 나머지(navigate/getUrl/executeScript)는 아래 async-op 경로. ──
@@ -1675,9 +1674,26 @@ pub fn browserOpFromRequest(
         return .{ .subscribe = .{ .surface_id = target_id, .filter = filter } };
     }
 
-    // ── 6. method별 params 파싱 + arg(url/script) dupe(파싱 arena와 수명 분리 — op는 pm.deinit 뒤에도 유효해야). ──
-    // execute_script의 max_result_bytes는 arg 파싱(아래) 때 함께 잡아 재파싱을 피한다(이전엔 여기·step 8·
-    // 서버 재파싱 3번). execute_script가 아니면 0.
+    // ── 6. surface 검증 + authz 최종 판정을 **params 파싱 앞**으로(subscribe 분기와 동일 불변식 — §8.3 oracle 방지).
+    //       없음/비-web → 균일 unauthorized(존재 누설 금지). 미grant valid(존재하는 web surface)면 needs_grant(확인 대기,
+    //       params 미파싱 — 1e-confirm-1c). 인가된 caller만 아래 params 파싱에 도달하므로 그 형식 오류(invalid_params)는
+    //       인가된 자에게만 보여 oracle이 아니다. 예전엔 이 게이트가 params 파싱 **뒤**라, 미인가 caller의 malformed params가
+    //       invalid_params로 답해 파라미터 스키마를 탐침당했다(리뷰 — subscribe는 막았으나 일반 경로가 규율을 놓침). ──
+    const dto = snapshot.find(target_id);
+    if (dto == null or dto.?.kind() != .web) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+    if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
+
+    // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
+    if (bmethod == .execute_script and req.id == .string and req.id.string.len > execute_script_request_id_max_bytes) {
+        return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+    }
+    if (bmethod == .execute_script and !try validExecuteScriptArgsWire(gpa, request_bytes)) {
+        return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+    }
+
+    // ── 8. method별 params 파싱 + arg(url/script) dupe(파싱 arena와 수명 분리 — op는 pm.deinit 뒤에도 유효해야). ──
+    // execute_script의 max_result_bytes는 arg 파싱(아래) 때 함께 잡아 재파싱을 피한다(이전엔 여기·op 반환·서버 재파싱 3번).
+    // execute_script가 아니면 0. 여기까지 왔으면 인가·유효 web surface라 파싱 실패만 남는다.
     var exec_max_result_bytes: usize = 0;
     const arg: []const u8 = switch (bmethod) {
         .navigate => try gpa.dupe(u8, (parseNavigateParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).url),
@@ -1713,23 +1729,10 @@ pub fn browserOpFromRequest(
         .console => try serializeConsoleArg(gpa, parseConsoleParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .subscribe => unreachable, // 위에서 이미 분기
     };
-    // arg는 이제 gpa-owned. 아래 surface 검증 실패(.err 정상 반환)면 op를 안 만들므로 여기서 명시 free해야 누수 없음
-    // (errdefer는 error 반환에만 걸려 .err union 반환은 안 잡는다 — free 후 errorResponse가 OOM나도 double-free 없음).
+    // arg는 이제 gpa-owned. surface·authz는 step 6에서 이미 접혔으므로(op 반환만 남음) 여기서 free할 실패 경로가 없다
+    // — 파싱 실패는 switch 각 arm이 arg 할당 전 return하고, 여기 도달하면 곧장 op에 arg 소유권을 넘긴다.
 
-    // ── 7. surface 검증(방어, §9.1 ②·⑧). cap이 이 surface에 묶였는데 snapshot에 없으면 respawn/닫힘 → 존재 누설
-    //       금지로 균일 unauthorized. 있으나 web이 아니면(terminal) browser cap을 terminal에 쓰는 것이라 unauthorized. ──
-    const dto = snapshot.find(target_id);
-    if (dto == null or dto.?.kind() != .web) {
-        gpa.free(arg); // op 미생성 → arg 해제
-        return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
-    }
-
-    // ── 8. 여기까지 = 유효 메서드 + 존재하는 web surface. authorized면 op 반환(5e·L4 marshal). **미grant면 needs_grant**
-    //       (1e-confirm-1c — L4가 붙잡고 확인 모달; arg는 needs_grant가 안 실으므로 해제, 승인 후 재구동 시 재-dupe). ──
-    if (!authorized) {
-        gpa.free(arg);
-        return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
-    }
+    // ── 9. op 반환(5e·L4 marshal). 여기까지 = 인가·존재하는 web surface·유효 params. ──
     const max_result_bytes = exec_max_result_bytes; // 위 arg 파싱서 이미 잡음(execute_script 아니면 0)
     return .{ .op = .{
         .surface_id = target_id,
@@ -2181,6 +2184,29 @@ test "dispatchBrowser: 유효 cap + navigate params에 url 없음 → invalid_pa
     const wire = try dispatchErr(req, browserCap(11));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+}
+
+// ── §8.3 oracle: 미인가 caller는 params가 malformed여도 invalid_params가 아니라 균일 unauthorized여야 한다. 위 테스트와
+//    같은 malformed 요청이라도 cap이 없으면(미인가) surface·authz 게이트에서 접혀 params를 파싱당하지 않는다 — 미인가
+//    caller가 malformed params/args로 파라미터 스키마를 탐침하는 oracle 차단(params 파싱을 authz 뒤로 옮긴 수정; subscribe
+//    분기의 규율을 일반 경로에도 적용). 예전엔 params 파싱이 authz 앞이라 invalid_params가 새 스키마가 노출됐다(리뷰). ──
+test "dispatchBrowser §8.3: 미인가 caller의 malformed params/args는 invalid_params가 아니라 균일 unauthorized(oracle 차단)" {
+    // navigate: url 없음(위 테스트와 동일한 malformed navigate params) + cap 없음 → invalid_params가 아니라 unauthorized.
+    {
+        const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11}}", null);
+        defer testing.allocator.free(wire);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        const msg = try errMessage(wire);
+        defer testing.allocator.free(msg);
+        try testing.expectEqualStrings("Unauthorized", msg); // 균일(deny 사유·존재 미노출)
+    }
+    // executeScript: args wire 부적합(unsafe integer -0). 인가됐다면 invalid_params(args wire 사전검증)지만, 미인가면 그
+    // 사전검증 이전에 균일 unauthorized여야 한다(사전검증도 authz 뒤로 이동).
+    {
+        const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"args\":[-0]}}", null);
+        defer testing.allocator.free(wire);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    }
 }
 
 // ── 8) 유효 cap + target이 terminal surface(cap도 그 terminal id에 묶임) → unauthorized(surface 검증 detail!=.web) ──

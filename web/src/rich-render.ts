@@ -11,8 +11,29 @@ export const mermaidConfig: MermaidConfig = {
   suppressErrorRendering: true,
 };
 
+function normalizeCssEscapes(value: string): string {
+  return value
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\\([0-9a-f]{1,6})\s?/gi, (_match, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16)),
+    )
+    .replace(/\\([^\n\r\f])/g, "$1");
+}
+
+function hasUnsafeSvgUrl(value: string): boolean {
+  const normalized = normalizeCssEscapes(value).trim();
+  if (!/url\s*\(/i.test(normalized)) return false;
+
+  // Mermaid가 만드는 paint/filter 참조는 같은 SVG document의 fragment만 필요하다.
+  // fallback을 포함한 복합 CSS 값은 해석 차이를 피하려고 fail-closed로 제거한다.
+  return !/^url\(\s*(["']?)#[A-Za-z0-9_.:-]+\1\s*\)$/i.test(normalized);
+}
+
 export function sanitizeMermaidSvg(svg: string, targetWindow: Window): string {
   const purifier = createDOMPurify(targetWindow);
+  purifier.addHook("uponSanitizeAttribute", (_node, data) => {
+    if (hasUnsafeSvgUrl(data.attrValue)) data.keepAttr = false;
+  });
   return purifier.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true },
     // strict Mermaid mode disables click links, so these URL-bearing elements have

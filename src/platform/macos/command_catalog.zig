@@ -32,6 +32,7 @@ pub const entries = [_]Entry{
     .{ .action = .new_tab, .key = "new_tab", .title = "New Workspace" },
     // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 MARU_WEB_PANEL 대체). 기본 키바인딩 ⌘⌥T(default_app_bindings 역스캔으로 메뉴·팔릿에 자동 표시).
     .{ .action = .new_web_tab, .key = "new_web_tab", .title = "New Browser Tab" },
+    .{ .action = .open_file_panel, .key = "open_file_panel", .title = "Open File Panel…" },
     .{ .action = .close_term, .key = "close_term", .title = "Close Terminal" },
     .{ .action = .close_tab, .key = "close_tab", .title = "Close Workspace" },
     .{ .action = .next_term, .key = "next_term", .title = "Next Terminal" },
@@ -283,6 +284,9 @@ test "chordForAction: 빌트인·사용자·unbind" {
     const new_term_chord = chordForAction(builtin_resolver, .new_term).?;
     try std.testing.expect(new_term_chord.modifiers.command and !new_term_chord.modifiers.shift);
     try std.testing.expect(new_term_chord.key.eql(.{ .char = 'T' }));
+    const open_file_chord = chordForAction(builtin_resolver, .open_file_panel).?;
+    try std.testing.expect(open_file_chord.modifiers.command and !open_file_chord.modifiers.shift);
+    try std.testing.expect(open_file_chord.key.eql(.{ .char = 'O' }));
 
     // 기본 바인딩 없는 액션(close_tab)은 null.
     try std.testing.expect(chordForAction(builtin_resolver, .close_tab) == null);

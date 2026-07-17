@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 120u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 121u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -731,6 +731,19 @@ uint32_t maru_macos_app_session_take_file_pick_request(MaruAppHostSession *sessi
 /* take_file_pick_request가 1을 준 뒤 Swift가 NSOpenPanel에서 고른 파일의 절대경로를 넘긴다 — Zig가 window.background-image에
    setText + 라이브 반영 + dirty(영속). bytes/len 0(취소 등)이면 무동작. 지우기는 행 Backspace가 담당. v81. */
 int32_t maru_macos_app_session_provide_picked_file(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
+/* open_file_panel(Cmd+O/팔릿/메뉴)이 요청한 Markdown/HTML NSOpenPanel one-shot. v121. */
+uint32_t maru_macos_app_session_take_file_panel_pick_request(MaruAppHostSession *session);
+/* 절대경로를 현재 창 도크에 연다. 반환 0=지원하지 않는 확장자(외부 열기 유지), 1=열림/기존 탭 활성화,
+   2=지원 확장자지만 경로·파일·용량/할당 실패. 종류·regular-file·중복 정책은 Zig 단일 출처. v121. */
+uint32_t maru_macos_app_session_open_file_panel_path(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
+/* surface가 도크 entry면 path와 kind를 반환한다(0=도크 아님, 1=markdown, 2=html). path는 Zig 소유이며 호출 중
+   복사해서 쓴다. Swift create 전이가 HTML loadFileURL 핀 경로를 얻는 용도. v121. */
+uint32_t maru_macos_app_session_file_panel_entry(
+    MaruAppHostSession *session,
+    uint64_t surface_id,
+    const uint8_t **out_path,
+    size_t *out_len
+);
 /* HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
    NSColorSampler(OS 화면 색 추출기)를 열고 고른 색을 provide_sampled_color로 되돌린다. take_bell과 같은 1회성. session null=0. v83. */
 uint32_t maru_macos_app_session_take_color_sample_request(MaruAppHostSession *session);

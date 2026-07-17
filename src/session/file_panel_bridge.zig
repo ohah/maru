@@ -9,6 +9,17 @@ const std = @import("std");
 /// Markdown 본문과 상대 asset에 공통으로 적용하는 단일 파일 읽기 상한. base64 응답은 이보다 커질 수 있다.
 pub const max_file_bytes: usize = 8 * 1024 * 1024;
 
+/// 사용자가 도크로 열 수 있는 v1 파일 종류. 확장자 분류를 Zig 한 곳에 두어 터미널 링크와 NSOpenPanel이
+/// 서로 다른 파일 집합을 열지 않게 한다.
+pub const OpenKind = enum { markdown, html };
+
+pub fn openKindForPath(path: []const u8) ?OpenKind {
+    const ext = std.fs.path.extension(path);
+    if (std.ascii.eqlIgnoreCase(ext, ".md")) return .markdown;
+    if (std.ascii.eqlIgnoreCase(ext, ".html")) return .html;
+    return null;
+}
+
 pub const PathError = error{
     Empty,
     Absolute,
@@ -93,4 +104,12 @@ test "mimeForPath: known image extensions and inert fallback" {
     try testing.expectEqualStrings("image/jpeg", mimeForPath("a.jpeg"));
     try testing.expectEqualStrings("image/svg+xml", mimeForPath("a.svg"));
     try testing.expectEqualStrings("application/octet-stream", mimeForPath("a.html"));
+}
+
+test "openKindForPath: md and html only, case-insensitive" {
+    try testing.expectEqual(OpenKind.markdown, openKindForPath("/tmp/readme.MD").?);
+    try testing.expectEqual(OpenKind.html, openKindForPath("/tmp/page.HTML").?);
+    try testing.expect(openKindForPath("/tmp/page.htm") == null);
+    try testing.expect(openKindForPath("/tmp/readme.md.txt") == null);
+    try testing.expect(openKindForPath("/tmp/.md") == null);
 }

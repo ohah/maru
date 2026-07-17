@@ -838,7 +838,36 @@ pub fn build(b: *std.Build) void {
         });
         macos_app_smoke_assert.setCwd(b.path("."));
         macos_app_smoke_assert.step.dependOn(&macos_app_smoke.step);
-        macos_app_smoke_step.dependOn(&macos_app_smoke_assert.step);
+
+        // FP5: 같은 smoke summary 경로를 쓰므로 FP4 assertion 뒤에 순차 실행한다. 로컬 HTML은 browser와 분리된
+        // ephemeral store, 부모 디렉터리 read scope, pinned top-level navigation을 실제 WKWebView로 검증한다.
+        const macos_app_html_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app"});
+        macos_app_html_smoke.setCwd(b.path("."));
+        macos_app_html_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "6000");
+        macos_app_html_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("tests/fixtures/file-panel/fp5-viewer.html"));
+        macos_app_html_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        macos_app_html_smoke.step.dependOn(&macos_app_smoke_assert.step);
+        const macos_app_html_smoke_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "test -f \"$summary\"; " ++
+                "rg -q '^web_panel_present=true$' \"$summary\"; " ++
+                "rg -q '^web_panel_kind=1$' \"$summary\"; " ++
+                "rg -q '^web_panel_scheme_handler_registered=false$' \"$summary\"; " ++
+                "rg -q '^web_panel_data_store_persistent=false$' \"$summary\"; " ++
+                "rg -q '^bridge_world_registered=false$' \"$summary\"; " ++
+                "rg -q '^file_html_kind=2$' \"$summary\"; " ++
+                "rg -q '^file_html_read_access=.*/tests/fixtures/file-panel$' \"$summary\"; " ++
+                "rg -q '^file_html_data_store_isolated=true$' \"$summary\"; " ++
+                "rg -q '^file_html_script=true$' \"$summary\"; " ++
+                "rg -q '^file_html_asset=true$' \"$summary\"; " ++
+                "rg -q '^file_html_outside_asset=false$' \"$summary\"; " ++
+                "rg -q '^file_html_about_attempt=true$' \"$summary\"; " ++
+                "rg -q '^file_html_pinned=true$' \"$summary\"",
+        });
+        macos_app_html_smoke_assert.setCwd(b.path("."));
+        macos_app_html_smoke_assert.step.dependOn(&macos_app_html_smoke.step);
+        macos_app_smoke_step.dependOn(&macos_app_html_smoke_assert.step);
 
         const macos_browser_bounded_smoke_step = b.step("macos-browser-bounded-smoke", "Run and assert the bounded browser.executeScript WKWebView/socket smoke");
         const macos_browser_bounded_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-browser-bounded-smoke.sh" });

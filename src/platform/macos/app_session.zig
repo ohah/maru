@@ -147,7 +147,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 120;
+pub const abi_version: u32 = 121;
+// 121: FP5 파일 패널 열기 라우팅. open_file_panel 1회성 picker 신호 + 경로 열기 + surface→entry path 조회 export를
+// 추가한다. Swift는 NSOpenPanel/터미널 링크의 절대경로를 Zig 정책으로 보내고, HTML WKWebView 생성 시 핀 경로를 즉시
+// 조회해 loadFileURL에 넘긴다. 신규 export만 — struct offset 불변.
 // 120: 파일 패널 surface에 핀된 `maru.file.read`/`readAsset` provider를 쓰는 session bridge dispatch 추가.
 // 응답은 8 MiB 원문+base64를 수용하도록 size-query/fill 2단계이며 기존 고정 hello export는 유지한다.
 // 119: off-main executeScript syntax validation 뒤 page 실행 직전 running+pending+현재 인가+timeout을 재검사하는
@@ -1494,6 +1497,9 @@ pub const AppSession = struct {
     // 세팅에서 window.background-image 행을 활성화하면 켜는 1회성 신호 — Swift가 tick마다 takeFilePickRequest로 drain해
     // NSOpenPanel(PNG)을 열고, 고른 경로를 providePickedFile로 되돌린다. "경로 타이핑 대신 파일 선택창"(사용자 요청).
     file_pick_pending: bool = false,
+    // `open_file_panel` 액션(Cmd+O·팔릿·메뉴)이 요청한 Markdown/HTML NSOpenPanel. 배경 PNG picker와 목적/필터가
+    // 다르므로 별도 one-shot으로 두되 take/provide ABI 패턴은 재사용한다.
+    file_panel_pick_pending: bool = false,
     // HSV picker에서 `i`(스포이드)를 누르면 켜는 1회성 신호 — Swift가 tick마다 takeColorSampleRequest로 drain해 1이면
     // NSColorSampler(OS 화면 색 추출기)를 열고, 사용자가 고른 화면 픽셀 색을 provideSampledColor로 되돌린다(비동기 콜백).
     color_sample_pending: bool = false,
@@ -6957,6 +6963,7 @@ pub const AppSession = struct {
             .new_web_tab => if (!self.tabsBlocked()) {
                 self.newWebTermInActivePane(.browser) catch {};
             },
+            .open_file_panel => self.file_panel_pick_pending = true,
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
             .close_term => self.requestClose(.term_or_pane),
             .next_term => self.focusTermRelative(1),
@@ -7622,6 +7629,89 @@ pub const AppSession = struct {
         }
     }
 
+    pub const FilePanelOpenPathResult = enum(u32) {
+        unsupported = 0,
+        opened = 1,
+        failed = 2,
+    };
+
+    /// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
+    /// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
+    pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
+        if (!self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
+            !std.unicode.utf8ValidateSlice(path)) return .failed;
+        const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
+        const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
+        if (stat.kind != .file) return .failed;
+        const group = self.dock.singleGroup() orelse return .failed;
+        const kind: dock_panel.EntryKind = switch (open_kind) {
+            .markdown => .markdown,
+            .html => .html,
+        };
+        _ = self.dock.open(group, path, kind) catch return .failed;
+        self.assignDockSurfaceIds(&self.dock);
+        self.dock.collapsed = false;
+        if (self.surface_initialized) {
+            for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+            self.recomputeActivePaneRect();
+            self.last_resize_size = null;
+        }
+        self.metal_dirty = true;
+        return .opened;
+    }
+
+    pub const FilePanelEntryInfo = struct {
+        path: []const u8,
+        kind: dock_panel.EntryKind,
+    };
+
+    /// Swift가 create 전이의 surface가 도크 파일인지, HTML이면 어느 핀 경로를 loadFileURL로 열지 즉시 조회한다.
+    /// 반환 path는 DockPanel entry 소유이며 호출 중 복사해 쓰는 borrowed slice다.
+    pub fn filePanelEntryInfo(self: *AppSession, surface_id: u64) ?FilePanelEntryInfo {
+        if (!self.dock_initialized) return null;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return null;
+        return .{ .path = entry.path, .kind = entry.kind };
+    }
+
+    /// workspace.v1은 외부 입력이므로, DockPanel의 구조 검증 뒤에도 라이브 open과 같은 파일 capability 검증을 다시
+    /// 적용한다. kind↔확장자·절대 UTF-8 경로·regular-file을 모두 만족하지 않는 entry만 버리고 terminal workspace는
+    /// 계속 복원한다. 원래 active entry가 버려지면 첫 유효 entry를 활성화하며, 전부 버려지면 빈 도크다.
+    fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_panel.DockPanel) void {
+        const group = panel.singleGroup() orelse return;
+        const old_active = group.active;
+        const original_len = group.entries.items.len;
+        var original_index: usize = 0;
+        var current_index: usize = 0;
+        var new_active: ?usize = null;
+        while (original_index < original_len) : (original_index += 1) {
+            const entry = group.entries.items[current_index];
+            const open_kind = file_panel_bridge.openKindForPath(entry.path) orelse {
+                const removed = group.entries.orderedRemove(current_index);
+                self.allocator.free(removed.path);
+                continue;
+            };
+            const expected_kind: dock_panel.EntryKind = switch (open_kind) {
+                .markdown => .markdown,
+                .html => .html,
+            };
+            const valid = std.fs.path.isAbsolute(entry.path) and
+                std.unicode.utf8ValidateSlice(entry.path) and
+                expected_kind == entry.kind and
+                blk: {
+                    const stat = std.Io.Dir.cwd().statFile(self.io, entry.path, .{}) catch break :blk false;
+                    break :blk stat.kind == .file;
+                };
+            if (!valid) {
+                const removed = group.entries.orderedRemove(current_index);
+                self.allocator.free(removed.path);
+                continue;
+            }
+            if (old_active == original_index) new_active = current_index;
+            current_index += 1;
+        }
+        group.active = if (group.entries.items.len == 0) null else new_active orelse 0;
+    }
+
     /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
     /// 열어 WKWebView surface diff·크롬·resize를 실제 app-host 경로로 검증한다. FP4 전이라 본문은 placeholder다.
     pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
@@ -7629,18 +7719,11 @@ pub const AppSession = struct {
         const raw = std.c.getenv("MARU_FILE_PANEL") orelse return;
         const path = std.mem.span(raw);
         if (path.len == 0) return;
-        const group = self.dock.singleGroup() orelse return;
-        const kind: dock_panel.EntryKind = if (std.mem.endsWith(u8, path, ".html") or std.mem.endsWith(u8, path, ".htm")) .html else .markdown;
-        _ = self.dock.open(group, path, kind) catch return;
-        self.assignDockSurfaceIds(&self.dock);
+        if (self.openFilePanelPath(path) != .opened) return;
         if (std.c.getenv("MARU_FILE_PANEL_DOCK")) |side| {
             if (std.mem.eql(u8, std.mem.span(side), "bottom")) self.dock.side = .bottom;
         }
-        self.dock.collapsed = false;
         self.debug_file_panel_opened = true;
-        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
-        self.recomputeActivePaneRect();
-        self.last_resize_size = null;
         self.metal_dirty = true;
     }
 
@@ -14587,6 +14670,13 @@ pub const AppSession = struct {
         return pending;
     }
 
+    /// `open_file_panel` 액션이 요청한 Markdown/HTML 파일 선택창 one-shot.
+    pub fn takeFilePanelPickRequest(self: *AppSession) bool {
+        const pending = self.file_panel_pick_pending;
+        self.file_panel_pick_pending = false;
+        return pending;
+    }
+
     /// Swift NSOpenPanel이 고른 파일의 절대경로를 받아 window.background-image에 적용한다 — config arena에 dupe해 setText,
     /// 라이브 반영(reapplyLoadedConfig가 metal_dirty → 다음 frame ensureBackgroundImage가 새 경로 디코드) + 영속 예약
     /// (markConfigKeyDirty). 빈 경로(취소 등)면 무동작 — 지우기는 행 Backspace가 담당. (배경 이미지 파일 선택)
@@ -15534,6 +15624,7 @@ pub const AppSession = struct {
         var new_dock = try dock_panel.DockPanel.restore(self.allocator, win.dock);
         var new_dock_owned = true;
         errdefer if (new_dock_owned) new_dock.deinit();
+        self.pruneInvalidRestoredFilePanelEntries(&new_dock);
         self.assignDockSurfaceIds(&new_dock);
 
         // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
@@ -32427,6 +32518,115 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
     try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
     try std.testing.expect(win.dock.entries[1].active);
+}
+
+test "FP5 file panel routing: picker one-shot, md/html open, duplicate activation, and invalid targets" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "one.md", .data = "# one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "two.html", .data = "<p>two</p>" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "three.txt", .data = "three" });
+    try tmp.dir.createDir(io, "folder.md", .default_dir);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const md_path = try std.fmt.allocPrint(allocator, "{s}/one.md", .{root});
+    defer allocator.free(md_path);
+    const html_path = try std.fmt.allocPrint(allocator, "{s}/two.html", .{root});
+    defer allocator.free(html_path);
+    const text_path = try std.fmt.allocPrint(allocator, "{s}/three.txt", .{root});
+    defer allocator.free(text_path);
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/folder.md", .{root});
+    defer allocator.free(dir_path);
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.dispatchAppAction(.open_file_panel);
+    try std.testing.expect(session.takeFilePanelPickRequest());
+    try std.testing.expect(!session.takeFilePanelPickRequest());
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
+    const group = session.dock.singleGroup().?;
+    try std.testing.expectEqual(@as(usize, 1), group.entries.items.len);
+    const md_surface_id = group.entries.items[0].surface_id;
+    try std.testing.expect(md_surface_id != 0);
+    try std.testing.expectEqualStrings(md_path, session.filePanelEntryInfo(md_surface_id).?.path);
+    try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.filePanelEntryInfo(md_surface_id).?.kind);
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(html_path));
+    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    const html_surface_id = group.entries.items[1].surface_id;
+    try std.testing.expectEqual(dock_panel.EntryKind.html, session.filePanelEntryInfo(html_surface_id).?.kind);
+    try std.testing.expectEqual(@as(?usize, 1), group.active);
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
+    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), group.active);
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.unsupported, session.openFilePanelPath(text_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(dir_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath("relative.md"));
+    try std.testing.expect(session.filePanelEntryInfo(999_999) == null);
+}
+
+test "FP5 workspace restore prunes invalid file panel capabilities and degrades to an empty dock" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "valid.md", .data = "# valid" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "mismatch.md", .data = "<script>bad()</script>" });
+    try tmp.dir.createDir(io, "folder.html", .default_dir);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const valid_path = try std.fmt.allocPrint(allocator, "{s}/valid.md", .{root});
+    defer allocator.free(valid_path);
+    const mismatch_path = try std.fmt.allocPrint(allocator, "{s}/mismatch.md", .{root});
+    defer allocator.free(mismatch_path);
+    const missing_path = try std.fmt.allocPrint(allocator, "{s}/missing.html", .{root});
+    defer allocator.free(missing_path);
+    const directory_path = try std.fmt.allocPrint(allocator, "{s}/folder.html", .{root});
+    defer allocator.free(directory_path);
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const captured = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const entries = [_]dock_panel.PersistedEntry{
+        .{ .path = valid_path, .kind = .markdown },
+        .{ .path = mismatch_path, .kind = .html, .active = true },
+        .{ .path = "relative.html", .kind = .html },
+        .{ .path = missing_path, .kind = .html },
+        .{ .path = directory_path, .kind = .html },
+    };
+    var restored = captured;
+    restored.dock = .{ .entries = &entries };
+    try session.applyWorkspaceWindow(restored);
+
+    const group = session.dock.singleGroup().?;
+    try std.testing.expectEqual(@as(usize, 1), group.entries.items.len);
+    try std.testing.expectEqualStrings(valid_path, group.entries.items[0].path);
+    try std.testing.expectEqual(dock_panel.EntryKind.markdown, group.entries.items[0].kind);
+    try std.testing.expectEqual(@as(?usize, 0), group.active); // invalid active entry 제거 → 첫 유효 entry
+    try std.testing.expect(group.entries.items[0].surface_id != 0);
+
+    var arena2 = std.heap.ArenaAllocator.init(allocator);
+    defer arena2.deinit();
+    const captured2 = try session.captureWorkspaceWindow(arena2.allocator(), false, null);
+    const invalid_only = [_]dock_panel.PersistedEntry{
+        .{ .path = directory_path, .kind = .html, .active = true },
+    };
+    var restored2 = captured2;
+    restored2.dock = .{ .entries = &invalid_only };
+    try session.applyWorkspaceWindow(restored2);
+    try std.testing.expectEqual(@as(usize, 0), session.dock.entryCountTotal());
+    try std.testing.expect(session.dock.singleGroup().?.active == null);
 }
 
 test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 시 이전 버퍼 해제" {

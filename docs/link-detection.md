@@ -120,7 +120,7 @@
 ## 보안
 
 - **휴리스틱 파일 경로**(절대/홈/상대/bare)는 명시 제스처(수식키+클릭)에서만, cwd/`$HOME` resolve 후 **존재를
-  확인**한 경로만 `NSWorkspace.open`(기본 앱으로 열기)으로 연다. `std.fs.path.resolve`는 lexical 정규화라 `../`로
+  확인**한 경로만 연다. `.md`/`.html` regular file은 현재 창 파일 도크로, 그 외는 `NSWorkspace.open`(기본 앱)으로 보낸다. 도크 경로는 ABI에서 종류와 regular-file을 재검증하고, 지원 확장자 검증 실패를 외부 앱으로 우회하지 않는다. `std.fs.path.resolve`는 lexical 정규화라 `../`로
   cwd 밖을 가리킬 수 있으나, 결과는 "기본 앱으로 열기"지 **명령 실행이 아니다**(사용자가 직접 `open <path>` 하는
   것과 같은 권한, 권한 상승 없음). 절대 경로도 stat 게이트를 거치므로 Ghostty(절대 경로를 raw로 여는)보다 엄격하다.
 - **스킴 URL·OSC 8 명시 링크**(`file://` 포함)는 존재 검증 없이 `URL(string:)`로 그대로 연다 — 프로그램이 지정한
@@ -148,7 +148,7 @@
 
 - 순수 분류: `src/terminal/selection.zig` — `linkSpanInWord`(구 `urlSpanInWord`), `LinkKind`/`LinkScopes`/`LinkSpan`.
 - resolve+stat·facade: `src/terminal/core.zig` — `extractUrlAt`, `resolveClickedPath`, `currentCwd`(OSC 7).
-- 플랫폼: `src/platform/macos/app_session.zig`(`urlAt`·scopes 빌드·kind), `app_host_abi.{zig,h}`(`url_at` out_kind),
-  `MaruAppHost.swift`(`handleUrlClick` — kind로 `URL(fileURLWithPath:)` vs `URL(string:)` 분기). ABI 경계는
+- 플랫폼: `src/platform/macos/app_session.zig`(`urlAt`·scopes 빌드·kind·`openFilePanelPath`), `app_host_abi.{zig,h}`(`url_at` out_kind·파일 패널 ABI),
+  `MaruAppHost.swift`(`handleUrlClick` — `.md`/`.html`은 도크, 그 외는 `URL(fileURLWithPath:)`/`URL(string:)`). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).
 - config: `src/config/theme.zig`(`InputConfig.link_detection`), `docs/configuration.md` 키 표.

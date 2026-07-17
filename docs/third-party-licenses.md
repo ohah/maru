@@ -32,11 +32,11 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 ## 파일 패널 웹 런타임
 
-FP4부터 `web/dist/bundle.js`가 앱 `Resources/web/`에 포함된다. 직접 런타임 의존성은 DOMPurify, Mermaid, remark/unified·rehype 계열, KaTeX, Prism 계열이며 exact 버전은 `web/package.json`·`bun.lock`이 단일 출처다. 실제 번들에 들어갈 수 있는 transitive production graph의 이름·버전·SPDX와 license/notice 전문은 build가 `Resources/web/THIRD_PARTY_NOTICES.txt`로 생성한다.
+FP4부터 `web/dist/bundle.js`가 앱 `Resources/web/`에 포함된다. 직접 런타임 의존성은 DOMPurify, Mermaid, remark/unified·rehype 계열, KaTeX, Prism 계열과 CodeMirror 6이며 exact 버전은 `web/package.json`·`bun.lock`이 단일 출처다. 실제 번들에 들어갈 수 있는 transitive production graph의 이름·버전·SPDX와 license/notice 전문은 build가 `Resources/web/THIRD_PARTY_NOTICES.txt`로 생성한다.
 
 - walker는 root `dependencies`에서 시작해 production dependency/optionalDependency만 Node resolution 규칙으로 추적하고 devDependencies(`@zntc/core`, Oxc, Bun types, jsdom)는 제외한다.
 - 새 runtime package의 manifest·license 판정·전문이 없으면 build가 실패한다. npm workspace 배포본에 전문이 없는 `rehype-katex@7.0.1`·`remark-math@6.0.0`은 해당 remark-math 릴리스의 MIT 전문을 `web/licenses/remark-math-MIT.txt`에 고정한 exact-version fallback만 사용한다.
-- `web:licenses`는 설치된 전체 lock graph의 SPDX allowlist를 별도로 감사하고, runtime notice test는 production 포함/dev 제외와 전문 누락 fail-closed를 고정한다.
+- `web:licenses`는 설치된 전체 lock graph의 SPDX allowlist를 별도로 감사하고 GPL/LGPL/AGPL 계열을 허용하지 않는다. runtime notice test는 production 포함/dev 제외와 전문 누락 fail-closed를 고정한다.
 
 ## 라이선스별 의무와 충족 방법
 

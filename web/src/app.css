@@ -39,6 +39,41 @@ body {
   background: Canvas;
 }
 
+#editor {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: Canvas;
+}
+
+#editor[hidden] {
+  display: none;
+}
+
+#editor .cm-editor,
+#editor .cm-scroller {
+  height: 100%;
+}
+
+#editor .cm-editor {
+  color: CanvasText;
+  background: Canvas;
+}
+
+#editor .cm-content {
+  padding: 1rem 1.25rem 4rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  line-height: 1.55;
+  caret-color: CanvasText;
+}
+
+#editor .cm-gutters {
+  color: color-mix(in srgb, CanvasText 48%, Canvas);
+  background: color-mix(in srgb, CanvasText 4%, Canvas);
+  border-right-color: color-mix(in srgb, CanvasText 14%, Canvas);
+}
+
 #app {
   box-sizing: border-box;
   max-width: 76rem;

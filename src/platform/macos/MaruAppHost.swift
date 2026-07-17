@@ -715,7 +715,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         // ── 요청(JS 객체) → JSON-RPC 한 줄 → Zig dispatchBridge(정책) → 응답 파싱해 Promise 해소. ──
         guard let body = message.body as? [String: Any],
               let reqData = try? JSONSerialization.data(withJSONObject: body),
-              let replyBytes = callBridge(reqData),
+              let replyBytes = callBridge(reqData, method: body["method"] as? String),
               let replyObj = try? JSONSerialization.jsonObject(with: replyBytes)
         else {
             replyHandler(nil, "bad request")
@@ -725,9 +725,21 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
     }
 
     // Zig dispatchBridge C-ABI 마샬링(단일 출처). 요청 바이트 → 응답 바이트(nil=음수 코드=NULL/용량/OOM 실패).
-    private func callBridge(_ req: Data) -> Data? {
+    private func callBridge(_ req: Data, method: String?) -> Data? {
         let reqBytes = [UInt8](req)
         guard let session = controller?.bridgeSession(for: surfaceId) else { return nil }
+        // write/dirty는 side effect라 size-query가 dispatch를 두 번 실행하면 안 된다. 이 둘의 응답은 작은 고정 JSON이므로
+        // 단일 1 KiB fill 호출로 끝낸다. read/readAsset만 아래 query/fill 재계산 경로를 쓴다.
+        if method == "maru.file.write" || method == "maru.file.setDirty" {
+            var out = [UInt8](repeating: 0, count: 1024)
+            let written = reqBytes.withUnsafeBufferPointer { rp in
+                out.withUnsafeMutableBufferPointer { op in
+                    maru_macos_app_session_bridge_dispatch(session, surfaceId, rp.baseAddress, rp.count, op.baseAddress, op.count)
+                }
+            }
+            guard written > 0, written <= Int64(out.count) else { return nil }
+            return Data(out[0 ..< Int(written)])
+        }
         // 응답은 최대 8 MiB 파일(+base64)을 담으므로 고정 버퍼를 쓰지 않는다. query와 fill 사이 파일 변경으로 길이가
         // 늘 수 있어 최대 2회 재시도한다. 두 번째에도 변하면 요청을 실패시켜 무한 루프를 막는다.
         for _ in 0 ..< 2 {
@@ -766,7 +778,9 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         hello: function () { return window.maru.request("hello"); },
         file: {
           read: function () { return window.maru.request("maru.file.read"); },
-          readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); }
+          readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); },
+          write: function (content) { return window.maru.request("maru.file.write", { content: content }); },
+          setDirty: function (dirty) { return window.maru.request("maru.file.setDirty", { dirty: dirty }); }
         }
       };
       function flushFileRequests() {
@@ -779,6 +793,10 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           if (request.method === "read") { promise = window.maru.file.read(); }
           else if (request.method === "readAsset" && typeof request.path === "string" && request.path.length <= 4096) {
             promise = window.maru.file.readAsset(request.path);
+          } else if (request.method === "write" && typeof request.content === "string" && request.content.length <= 8388608) {
+            promise = window.maru.file.write(request.content);
+          } else if (request.method === "setDirty" && typeof request.dirty === "boolean") {
+            promise = window.maru.file.setDirty(request.dirty);
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);
@@ -2059,6 +2077,9 @@ final class MaruWebPanelView: NSView {
     var fileViewerTextProbe: String?
     var fileViewerImagesProbe: String?
     var fileViewerLoadedImagesProbe: String?
+    var fileViewerEditorProbe: String?
+    var fileViewerWriteProbe: String?
+    private var fileEditingProbeStarted = false
     var rendererBridgeProbe: String?
     var rendererHandlerProbe: String?
     var rendererParentAccessProbe: String?
@@ -2068,6 +2089,7 @@ final class MaruWebPanelView: NSView {
     var fileHTMLAboutAttemptProbe: String?
     var fileHTMLPinnedProbe: String?
     private var fileHTMLProbeStarted = false
+    private var requestedFileMode: Int32 = 0 // 0=read, 1=source-edit. Zig dock entry가 단일 출처.
     // 5d BrowserControl fixture E2E(스모크, browser 패널): 0=초기 로드 대기, 1=data: URL navigate 완료 대기, 2=probe 완료.
     var browserFixtureStage = 0
     // executeScript 시작 뒤 top-level navigation/reload가 시작되면 callback의 WebKit error를 execution이 아니라
@@ -2237,6 +2259,26 @@ final class MaruWebPanelView: NSView {
         webView.loadFileURL(url, allowingReadAccessTo: access)
     }
 
+    func applyFilePanelMode(_ rawMode: Int32) {
+        guard filePanelKind == 1 else { return }
+        requestedFileMode = rawMode == 1 ? 1 : 0
+        guard webView.url?.scheme == MaruAppSchemeHandler.scheme, webView.url?.host == "app" else { return }
+        let mode = requestedFileMode == 1 ? "source-edit" : "read"
+        webView.evaluateJavaScript(
+            "window.dispatchEvent(new CustomEvent('maru:file-mode',{detail:{mode:'\(mode)'}}))",
+            completionHandler: nil
+        )
+    }
+
+    func requestFileDirtySync() {
+        guard filePanelKind == 1, webView.url?.scheme == MaruAppSchemeHandler.scheme,
+              webView.url?.host == "app" else { return }
+        webView.evaluateJavaScript(
+            "window.dispatchEvent(new CustomEvent('maru:file-sync-dirty'))",
+            completionHandler: nil
+        )
+    }
+
     /// 실제 viewer의 비동기 단계(iframe load→read→render→asset)를 최대 4초 동안 250ms 간격으로 관측한다. 제품
     /// 동작에는 영향을 주지 않고 smokeMode의 didFinish에서만 호출한다. ready면 즉시 끝내고 실패면 마지막 단계값을 남긴다.
     private func captureFileViewerProbe(attemptsRemaining: Int) {
@@ -2270,9 +2312,50 @@ final class MaruWebPanelView: NSView {
             self.rendererBridgeProbe = obj["bridge"]
             self.rendererHandlerProbe = obj["handler"]
             self.rendererParentAccessProbe = obj["parentAccess"]
-            guard obj["ready"] != "true", attemptsRemaining > 1 else { return }
+            if obj["ready"] == "true" {
+                self.startFileEditingProbe()
+                return
+            }
+            guard attemptsRemaining > 1 else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.captureFileViewerProbe(attemptsRemaining: attemptsRemaining - 1)
+            }
+        }
+    }
+
+    /// FP6 실 WKWebView gate. 기존 renderer-ready를 먼저 고정한 다음 실제 사용자 순서대로 source mode로 전환해
+    /// CM6 hydration을 관측하고, isolated bridge에서 dirty→동일 bytes atomic write를 실행한다.
+    private func startFileEditingProbe() {
+        guard !fileEditingProbeStarted, let world = bridgeWorld else { return }
+        fileEditingProbeStarted = true
+        applyFilePanelMode(1)
+        webView.callAsyncJavaScript(
+            """
+            const read = await window.maru.file.read();
+            const content = read?.result?.content;
+            if (typeof content !== 'string') return false;
+            const dirty = await window.maru.file.setDirty(true);
+            const written = await window.maru.file.write(content);
+            return dirty?.result?.dirty === true && written?.result?.written_bytes === new TextEncoder().encode(content).length;
+            """,
+            arguments: [:],
+            in: nil,
+            in: world
+        ) { [weak self] result in
+            if case .success(let v) = result { self?.fileViewerWriteProbe = String(v as? Bool ?? false) }
+        }
+        captureFileEditorProbe(attemptsRemaining: 12)
+    }
+
+    private func captureFileEditorProbe(attemptsRemaining: Int) {
+        let script = "document.querySelector('.cm-content')?.textContent?.includes('FP4 viewer fixture') === true"
+        webView.evaluateJavaScript(script) { [weak self] value, _ in
+            guard let self else { return }
+            let ready = value as? Bool ?? false
+            self.fileViewerEditorProbe = String(ready)
+            guard !ready, attemptsRemaining > 1 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.captureFileEditorProbe(attemptsRemaining: attemptsRemaining - 1)
             }
         }
     }
@@ -2440,7 +2523,9 @@ final class MaruWebPanelView: NSView {
         // Terminal keyEquivalent, keyCode 15)·⌘⌥←/→까지 back/forward/reload로 삼켜 그 조합들을 가로챈다(리뷰 [8]). Cmd+C/V
         // 등 다른 exact-cmd 게이트(chordMods)와 같은 intersection 규약.
         if event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
-           panelKind == 1, filePanelKind == 0, surfaceId != 0, controller?.activeWebSurfaceId() == surfaceId {
+           panelKind == 1, filePanelKind == 0, surfaceId != 0,
+           controller?.focusedFilePanelSurfaceId() == 0,
+           controller?.activeWebSurfaceId() == surfaceId {
             switch event.keyCode {
             case 123: controller?.dispatchBrowserNav(surfaceId, 0); return true // ← back
             case 124: controller?.dispatchBrowserNav(surfaceId, 1); return true // → forward
@@ -2451,6 +2536,14 @@ final class MaruWebPanelView: NSView {
         // 그 외 앱 액션 Cmd 조합(⌘T 등)은 웹 포커스일 때만 maru keyDown 경로로 라우팅한다(Zig resolver가 판정).
         guard controller?.isWebPanelFocused(self) == true else { return false }
         guard event.modifierFlags.contains(.command) else { return false }
+        // FP6 Markdown source editor owns standard document chords that Maru normally binds. 닫힌 keyCode 목록만
+        // 양보해 Cmd+T/팔릿/세팅 같은 앱 chrome은 계속 Maru가 처리한다. 사용자가 unbind한 조합은 아래 resolver가
+        // false라 원래처럼 WebKit에 양보된다.
+        if filePanelKind == 1, controller?.filePanelIsSourceEditing(surfaceId) == true,
+           event.modifierFlags.intersection([.command, .shift, .option, .control]).subtracting(.shift) == .command,
+           [UInt16(0), 2, 3, 5, 40].contains(event.keyCode) { // A/D/F/G/K
+            return false
+        }
         guard controller?.isWebPanelAppChord(self, event) == true else { return false }
         controller?.handleWebPanelChord(event)
         return true
@@ -2521,6 +2614,7 @@ extension MaruWebPanelView: WKNavigationDelegate {
     // (리뷰12 [3] — bridgeWorld nil-ness가 아니라): 신뢰(0)=브리지 격리 probe, 비신뢰(1)=5d BrowserControl fixture.
     // asset root 부재로 신뢰 패널에 bridgeWorld가 없어도 5d fixture로 오구동하지 않는다. 정상 런은 안 돈다(isSmokeMode 게이트).
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if filePanelKind == 1 { applyFilePanelMode(requestedFileMode) }
         guard controller?.isSmokeMode == true else { return }
         if filePanelKind == 2 {
             guard fileHTMLProbeStarted == false else { return }
@@ -2731,6 +2825,10 @@ final class TerminalSurface {
     // 포커스인 경우와 싸워 브라우저로 되돌아간다 — edge 추적으로 "새 클릭"만 반영한다. (옛 lastOverlayOpen·
     // stashedWebFocusSurfaceId는 reconcileWebFocus 불변식이 복원을 D1로 흡수해 불요 — 4g-1서 제거.)
     var lastFocusedWebSurfaceId: UInt64?
+    // FP6 도크는 workspace pane 활성축과 직교한다. 클릭한 도크 WKWebView를 별도 입력 소유자로 기억해 pane D1이
+    // 즉시 포커스를 회수하지 않게 하고, 모달 override 뒤에는 같은 도크로 복원한다.
+    var focusedFilePanelSurfaceId: UInt64?
+    var filePanelFocusOverridden = false
 }
 
 // quick terminal용 떠 있는 패널. borderless NSWindow/NSPanel은 기본적으로 key가 될 수 없어 타이핑을 못
@@ -3445,6 +3543,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return maru_macos_app_session_active_web_surface_id(session)
     }
 
+    func filePanelIsSourceEditing(_ surfaceId: UInt64) -> Bool {
+        guard let session = surfaceOwning(byId: surfaceId)?.appSession ?? appSession else { return false }
+        return maru_macos_app_session_file_panel_mode(session, surfaceId) == 1
+    }
+
+    func focusedFilePanelSurfaceId() -> UInt64 {
+        guard let surface = activeSurface else { return 0 }
+        let actual = surface.webPanels.values.first(where: {
+            $0.filePanelKind != 0 && isWebPanelFocused($0)
+        })?.surfaceId
+        // 모달/rename override가 TerminalView를 잠시 firstResponder로 바꾼 동안에도 retained 도크 입력 축을 돌려줘
+        // workspace browser의 포커스-무관 Cmd+R/←/→ 특례가 역방향으로 발화하지 못하게 한다.
+        return actual ?? (surface.filePanelFocusOverridden ? surface.focusedFilePanelSurfaceId ?? 0 : 0)
+    }
+
     // Phase 7f-1: 팝업 adopt — MaruWebPanelView.createWebViewWith(WKUIDelegate)가 넘긴 config로 새 WKWebView를 만들어
     // 붙일 browser web Term을 Zig에 등록(7f-0 create_adopted_web_term)하고, adopt 패널로 감싸 **opener가 속한 창**의
     // 컨테이너에 즉시 삽입한 뒤 그 webview를 돌려준다. WebKit은 반환된 webview로 새 페이지를 로드하며, 이 webview가
@@ -3494,14 +3607,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // rename·사이드바 검색을 빠뜨려 web pane 활성 중 그 편집이 웹뷰로 샜다(14차 리뷰 [0]) + notice까지 세었다([3]).
         if maru_macos_app_session_terminal_owns_input(session) != 0 {
             if window.firstResponder !== tv { window.makeFirstResponder(tv) } // tv 이미 바인딩(재downcast 회피, 리뷰 [8])
+            if surface.focusedFilePanelSurfaceId != nil { surface.filePanelFocusOverridden = true }
             surface.lastFocusedWebSurfaceId = nil // override 중 rising-edge 추적 리셋(해제 후 재평가)
             return
         }
 
         // Direction 2: webview 새 포커스(클릭 rising edge) → Zig 활성 동기.
-        let focusedId = surface.webPanels.values.first(where: { isWebPanelFocused($0) })?.surfaceId
+        let focusedPanel = surface.webPanels.values.first(where: { isWebPanelFocused($0) })
+        let focusedId = focusedPanel?.surfaceId
         let rising = focusedId != nil && focusedId != surface.lastFocusedWebSurfaceId
         surface.lastFocusedWebSurfaceId = focusedId
+        if let focusedPanel, focusedPanel.filePanelKind != 0 {
+            surface.focusedFilePanelSurfaceId = focusedPanel.surfaceId
+            surface.filePanelFocusOverridden = false
+            return // 도크 축 소유: workspace pane 활성화/D1 회수 대상이 아니다.
+        }
+        if surface.filePanelFocusOverridden,
+           let dockId = surface.focusedFilePanelSurfaceId,
+           let dock = surface.webPanels[dockId], dock.superview != nil, !dock.isHidden {
+            surface.filePanelFocusOverridden = false
+            window.makeFirstResponder(dock.webView)
+            surface.lastFocusedWebSurfaceId = dockId
+            return
+        }
+        // 모달 override가 아닌 상태에서 terminal/browser가 포커스를 얻었으면 명시적인 축 전환이다.
+        surface.focusedFilePanelSurfaceId = nil
+        surface.filePanelFocusOverridden = false
         if rising, let focusedId, maru_macos_app_session_active_web_surface_id_any_kind(session) != focusedId {
             _ = maru_macos_app_session_activate_surface(session, focusedId)
         }
@@ -3960,6 +4091,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         surface.webPanels.removeAll()
         surface.lastFocusedWebSurfaceId = nil
+        surface.focusedFilePanelSurfaceId = nil
+        surface.filePanelFocusOverridden = false
     }
 
     /// 셸 종료/fault로 한 창을 닫는다(tick 경로). 마지막 일반 창이면 앱 종료(정리·요약은 applicationWillTerminate —
@@ -5493,6 +5626,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     container.insertWebPanel(v)
                     v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
                     surface.webPanels[t.surface_id] = v
+                    v.applyFilePanelMode(maru_macos_app_session_file_panel_mode(session, t.surface_id))
                     v.startInitialLoad() // dict 등록 뒤 load — bridge surface→session lookup race 차단(FP4), HTML pin 적용(FP5).
                 }
             case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
@@ -5517,7 +5651,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     v.seamEdges = t.seam_edges // split 변화로 맞닿는 divider 가장자리가 바뀔 수 있어 reframe서 갱신.
                 }
             case Int(MaruAppHostWebSurfaceOpHide.rawValue):
-                surface.webPanels[t.surface_id]?.isHidden = true
+                if let v = surface.webPanels[t.surface_id] {
+                    v.requestFileDirtySync()
+                    v.isHidden = true
+                }
             case Int(MaruAppHostWebSurfaceOpShow.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
                     v.isHidden = false
@@ -5576,6 +5713,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case 2: BrowserControl.reload(wp.webView)
             default: break
             }
+        }
+
+        var fileModeSid: UInt64 = 0
+        let fileMode = maru_macos_app_session_take_file_panel_mode_action(session, &fileModeSid)
+        if fileMode >= 0, let wp = surface.webPanels[fileModeSid] {
+            wp.applyFilePanelMode(fileMode)
+            // GPU 헤더 토글/탭 선택 직후 TerminalView가 mouse-down의 firstResponder다. JS focus만으로 AppKit
+            // responder가 넘어오지 않으므로 사용자 동작에서 발생한 one-shot에 한해 read/HTML/source 모두 도크
+            // 입력 축을 명시적으로 넘긴다(복원/초기 create는 포커스를 훔치지 않음).
+            if !wp.isHidden, let window = surface.window {
+                window.makeFirstResponder(wp.webView)
+                surface.focusedFilePanelSurfaceId = fileModeSid
+                surface.filePanelFocusOverridden = false
+                surface.lastFocusedWebSurfaceId = fileModeSid
+            }
+        }
+        while true {
+            let dirtySyncSid = maru_macos_app_session_take_file_panel_dirty_sync_action(session)
+            guard dirtySyncSid != 0 else { break }
+            surface.webPanels[dirtySyncSid]?.requestFileDirtySync()
         }
     }
 
@@ -7024,6 +7181,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_text=\(wp?.fileViewerTextProbe ?? "pending")
             file_viewer_images=\(wp?.fileViewerImagesProbe ?? "pending")
             file_viewer_loaded_images=\(wp?.fileViewerLoadedImagesProbe ?? "pending")
+            file_viewer_editor_hydrated=\(wp?.fileViewerEditorProbe ?? "pending")
+            file_viewer_write=\(wp?.fileViewerWriteProbe ?? "pending")
             renderer_bridge_type=\(wp?.rendererBridgeProbe ?? "pending")
             renderer_handler_type=\(wp?.rendererHandlerProbe ?? "pending")
             renderer_parent_accessible=\(wp?.rendererParentAccessProbe ?? "pending")

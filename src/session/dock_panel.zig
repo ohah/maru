@@ -23,8 +23,13 @@ pub const Entry = struct {
     kind: EntryKind,
     mode: Mode = .read,
     dirty: bool = false,
+    /// FP6 two-phase dirty mirror. source editor가 비활성/읽기 모드로 넘어갈 때 true로 세우고 shell의 강제
+    /// setDirty snapshot ack에서만 내린다. ack 전에는 non-dirty라도 live view eviction 대상이 아니다.
+    dirty_sync_pending: bool = false,
     /// FP3 runtime handle. workspace.v1에는 저장하지 않고 복원/재소환 때 앱 전역 allocator에서 새 id를 발급한다.
     surface_id: u64 = 0,
+    /// FP6 live-view LRU clock. workspace에는 저장하지 않는 런타임 값이며 값이 작을수록 오래 안 본 entry다.
+    last_seen: u64 = 0,
 };
 
 /// workspace.v1에 들어가는 entry 부분집합. dirty는 파일 내용이 아니라 휘발성 편집 상태라 의도적으로 빠진다.

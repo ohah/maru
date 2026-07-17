@@ -1,6 +1,8 @@
 import { normalizeAssetReference } from "./asset-path";
 import { renderMarkdown } from "./markdown";
 import { sanitizeMermaidSvg } from "./rich-render";
+import { createMarkdownEditor } from "./editor";
+import type { EditorView } from "@codemirror/view";
 
 export const viewerChannel = "maru.file.viewer.v1";
 export const maxAssetRequests = 64;
@@ -20,7 +22,7 @@ export function assetBase64BudgetAllowed(currentBytes: number, nextBytes: number
   );
 }
 
-type FileMethod = "read" | "readAsset";
+type FileMethod = "read" | "readAsset" | "write" | "setDirty";
 
 type BridgeResult = Record<string, unknown>;
 
@@ -148,7 +150,7 @@ function isRendererReady(value: unknown): value is RendererReady {
 export function requestFileBridge(
   document: Document,
   method: FileMethod,
-  path?: string,
+  value?: string | boolean,
   timeoutMs = 15_000,
 ): Promise<BridgeResult> {
   return new Promise((resolve, reject) => {
@@ -156,7 +158,15 @@ export function requestFileBridge(
     node.hidden = true;
     node.dataset.maruFileRequest = "pending";
     node.dataset.maruFileRequestId = String(++bridgeRequestId);
-    node.textContent = JSON.stringify(method === "read" ? { method } : { method, path });
+    const request =
+      method === "read"
+        ? { method }
+        : method === "readAsset"
+          ? { method, path: value }
+          : method === "write"
+            ? { method, content: value }
+            : { method, dirty: value };
+    node.textContent = JSON.stringify(request);
     document.documentElement.append(node);
 
     const cleanup = () => {
@@ -220,8 +230,110 @@ export function assetDataUrl(
 
 export function bootShell(document: Document, targetWindow: Window): void {
   const frame = document.querySelector<HTMLIFrameElement>("#renderer");
+  const editorHost = document.querySelector<HTMLElement>("#editor");
   const status = document.querySelector<HTMLElement>("#viewer-status");
-  if (frame === null) return;
+  if (frame === null || editorHost === null) return;
+
+  let editor: EditorView | null = null;
+  let savedContent = "";
+  let contentLoaded = false;
+  let dirty = false;
+  let mode: "read" | "source-edit" = "read";
+  let mutationQueue = Promise.resolve();
+
+  const syncDirty = async (next: boolean) => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await requestFileBridge(document, "setDirty", next);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  };
+
+  const reportDirty = (next: boolean, force = false) => {
+    if (!force && next === dirty) return;
+    dirty = next;
+    mutationQueue = mutationQueue
+      .then(async () => {
+        // save가 queue 앞에서 savedContent 기준점을 바꿀 수 있으므로 예약 당시의 boolean을 재사용하지 않고
+        // 실행 시점 문서로 다시 계산한다. 그러면 save 중 입력/undo가 어떤 순서여도 마지막 native dirty가 맞다.
+        const actual = editor?.state.doc.toString() !== savedContent;
+        dirty = actual;
+        await syncDirty(actual);
+      })
+      .catch(() => {
+        if (status !== null) status.textContent = "편집 상태를 동기화할 수 없습니다.";
+      });
+  };
+
+  const save = async (): Promise<boolean> => {
+    if (editor === null) return false;
+    const content = editor.state.doc.toString();
+    const operation = mutationQueue.then(async () => {
+      await requestFileBridge(document, "write", content);
+      savedContent = content;
+      // Native write는 dirty를 임의로 내리지 않는다. 저장 중 문서가 다시 바뀌었는지 같은 직렬 queue에서 판정해
+      // 최종 값 하나를 보내므로 write 완료와 재편집 사이에 eviction 가능한 false 구간이 생기지 않는다.
+      const nextDirty = editor?.state.doc.toString() !== savedContent;
+      dirty = nextDirty;
+      await syncDirty(nextDirty);
+    });
+    mutationQueue = operation.catch(() => {});
+    try {
+      await operation;
+      if (status !== null) status.textContent = "";
+      return true;
+    } catch {
+      if (status !== null) status.textContent = "파일을 저장할 수 없습니다.";
+      return false;
+    }
+  };
+
+  const ensureEditor = (): EditorView => {
+    if (editor !== null) return editor;
+    editor = createMarkdownEditor(
+      editorHost,
+      savedContent,
+      (content) => reportDirty(content !== savedContent),
+      () => void save(),
+    );
+    return editor;
+  };
+
+  const applyMode = (next: "read" | "source-edit") => {
+    mode = next;
+    if (mode === "source-edit") {
+      frame.hidden = true;
+      editorHost.hidden = false;
+      if (contentLoaded) ensureEditor().focus();
+    } else {
+      if (editor !== null) reportDirty(editor.state.doc.toString() !== savedContent, true);
+      frame.hidden = false;
+      editorHost.hidden = true;
+      frame.contentWindow?.postMessage(
+        {
+          channel: viewerChannel,
+          type: "render",
+          markdown: editor?.state.doc.toString() ?? savedContent,
+        },
+        "*",
+      );
+    }
+    document.body.dataset.fileMode = mode;
+  };
+
+  targetWindow.addEventListener("maru:file-mode", (event) => {
+    const detail = (event as CustomEvent<unknown>).detail;
+    if (!isRecord(detail)) return;
+    if (detail.mode === "read" || detail.mode === "source-edit") applyMode(detail.mode);
+  });
+  targetWindow.addEventListener("maru:file-sync-dirty", () => {
+    if (editor !== null) reportDirty(editor.state.doc.toString() !== savedContent, true);
+  });
 
   let started = false;
   const start = async () => {
@@ -231,11 +343,21 @@ export function bootShell(document: Document, targetWindow: Window): void {
     try {
       const result = await requestFileBridge(document, "read");
       if (typeof result.content !== "string") throw new Error("invalid file content");
+      savedContent = result.content;
+      contentLoaded = true;
+      // didFinish의 mode 신호가 read 응답보다 먼저 와 editor가 빈 문서로 생성됐을 수 있다. 초기 파일 내용을
+      // 기존 view에 주입하되 savedContent를 먼저 갱신해 update listener가 이를 사용자 편집으로 오인하지 않게 한다.
+      if (editor !== null) {
+        editor.dispatch({
+          changes: { from: 0, to: editor.state.doc.length, insert: result.content },
+        });
+      }
       if (status !== null) status.dataset.fileRead = "true";
       frame.contentWindow?.postMessage(
         { channel: viewerChannel, type: "render", markdown: result.content },
         "*",
       );
+      if (mode === "source-edit") applyMode(mode);
       if (status !== null) status.textContent = "";
     } catch {
       if (status !== null) status.dataset.fileRead = "false";

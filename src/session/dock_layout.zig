@@ -27,6 +27,17 @@ pub const TabMetrics = struct {
     tab_width: u16,
 };
 
+/// 헤더 우측의 읽기/소스 편집 토글+dirty 표시 영역. 경로는 이 rect 왼쪽까지만 그린다. 폭이 너무 좁으면
+/// 최소 6칸으로 줄여도 토글 hit target은 유지한다.
+pub const header_control_cols: u32 = 18;
+
+pub fn headerControlRect(g: Geometry, cell_width_px: u32) ?Rect {
+    if (cell_width_px == 0 or g.header.w < cell_width_px * 6) return null;
+    const cols = @min(header_control_cols, g.header.w / cell_width_px);
+    const width = cols * cell_width_px;
+    return .{ .x = g.header.x + g.header.w - width, .y = g.header.y, .w = width, .h = g.header.h };
+}
+
 pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetrics {
     if (cell_width_px == 0 or entry_count == 0 or g.tab_bar.w == 0) return null;
     const cols: u16 = @intCast(@min(g.tab_bar.w / cell_width_px, @as(u32, std.math.maxInt(u16))));
@@ -200,4 +211,11 @@ test "dock tab metrics reserve a collapse control and share render hit rects" {
     const second = tabRect(g, 10, 3, 1).?;
     try std.testing.expectEqual(@as(?usize, 1), tabIndexAt(g, 10, 3, @floatFromInt(second.x + 1), @floatFromInt(second.y + 1)));
     try std.testing.expect(collapseAt(g, 10, 3, @floatFromInt(g.tab_bar.x + g.tab_bar.w - 1), @floatFromInt(g.tab_bar.y + 1)));
+}
+
+test "dock header control rect is right-aligned and bounded on narrow docks" {
+    const g = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
+    const control = headerControlRect(g, 10).?;
+    try std.testing.expectEqual(g.header.x + g.header.w, control.x + control.w);
+    try std.testing.expectEqual(@as(u32, header_control_cols * 10), control.w);
 }

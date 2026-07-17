@@ -899,6 +899,31 @@ pub export fn maru_macos_app_session_file_panel_entry(
     };
 }
 
+pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surface_id: u64) i32 {
+    const app_session = session orelse return -1;
+    const mode = app_session.filePanelMode(surface_id) orelse return -1;
+    return switch (mode) {
+        .read => 0,
+        .source_edit => 1,
+    };
+}
+
+pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppSession, surface_id_out: ?*u64) i32 {
+    const app_session = session orelse return -1;
+    const out = surface_id_out orelse return -1;
+    const action = app_session.takeFilePanelModeAction() orelse return -1;
+    out.* = action.surface_id;
+    return switch (action.mode) {
+        .read => 0,
+        .source_edit => 1,
+    };
+}
+
+pub export fn maru_macos_app_session_take_file_panel_dirty_sync_action(session: ?*AppSession) u64 {
+    const app_session = session orelse return 0;
+    return app_session.takeFilePanelDirtySyncAction() orelse 0;
+}
+
 // HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
 // NSColorSampler(OS 화면 색 추출기)를 열고 고른 색을 provide_sampled_color로 되돌린다. take_bell과 같은 1회성. session null=0. (v83)
 pub export fn maru_macos_app_session_take_color_sample_request(session: ?*AppSession) u32 {
@@ -1635,6 +1660,16 @@ const FileBridgeContext = struct {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         return self.session.readFilePanelAsset(gpa, self.surface_id, path);
     }
+
+    fn write(raw: *anyopaque, content: []const u8) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.writeFilePanel(self.surface_id, content);
+    }
+
+    fn setDirty(raw: *anyopaque, dirty: bool) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.setFilePanelDirty(self.surface_id, dirty);
+    }
 };
 
 // FP4: surface-pinned file provider를 넣는 session-scoped bridge. query/fill 모두 같은 정책을 다시 계산하므로 파일이
@@ -1655,6 +1690,8 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .context = &context,
         .read_fn = FileBridgeContext.read,
         .read_asset_fn = FileBridgeContext.readAsset,
+        .write_fn = FileBridgeContext.write,
+        .set_dirty_fn = FileBridgeContext.setDirty,
     };
     const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
         allocator,

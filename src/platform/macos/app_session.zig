@@ -147,7 +147,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 121;
+pub const abi_version: u32 = 122;
+// 122: FP6 파일 패널 source edit. surface-pinned write/dirty 브리지와 GPU 헤더 mode 전이 getter/take export를
+// 추가한다. 신규 export만 — fixed-width struct offset 불변.
 // 121: FP5 파일 패널 열기 라우팅. open_file_panel 1회성 picker 신호 + 경로 열기 + surface→entry path 조회 export를
 // 추가한다. Swift는 NSOpenPanel/터미널 링크의 절대경로를 Zig 정책으로 보내고, HTML WKWebView 생성 시 핀 경로를 즉시
 // 조회해 loadFileURL에 넘긴다. 신규 export만 — struct offset 불변.
@@ -1907,6 +1909,15 @@ pub const AppSession = struct {
     dock: dock_panel.DockPanel = undefined,
     dock_initialized: bool = false,
     dock_resize_drag_active: bool = false,
+    // FP6 GPU 헤더 토글이 바꾼 Markdown 모드를 Swift WKWebView에 전달하는 1회성 신호. entry.mode가 단일
+    // 상태 출처이며 pending은 surface_id만 보관한다(take 시 현재 mode를 함께 반환).
+    file_panel_mode_pending: ?u64 = null,
+    // source editor를 숨기기 전에 현재 dirty snapshot을 강제 요청하는 별도 FIFO. mode action은 새 활성 탭을
+    // 가리키므로 이전 탭의 snapshot 전달에 재사용할 수 없다. 도크 entry 상한 크기의 고정 큐라 입력 hot path에서
+    // 할당 실패로 dirty_sync_pending이 영구 고착되지 않는다.
+    file_panel_dirty_sync_actions: [dock_panel.max_entries]u64 = undefined,
+    file_panel_dirty_sync_actions_len: usize = 0,
+    file_panel_seen_generation: u64 = 0,
     debug_file_panel_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
     // 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(cur)을 만들고 이 prev와 4a surfaceDiff한 뒤 cur로 전진시킨다
@@ -2178,6 +2189,8 @@ pub const AppSession = struct {
             .chrome_minimal = config.chrome_minimal,
             .minimal_tabs = config.minimal_tabs,
         };
+        // fixed dirty-sync queue의 storage는 미초기화가 의도지만 길이는 모든 init 경로에서 반드시 0이어야 한다.
+        self.file_panel_dirty_sync_actions_len = 0;
         errdefer self.deinit();
 
         self.dock = try dock_panel.DockPanel.init(allocator);
@@ -5084,7 +5097,103 @@ pub const AppSession = struct {
     pub fn totalSurfaceCount(self: *AppSession) usize {
         var n: usize = 0;
         for (self.tabs.items) |tab| n += tabSurfaceCount(tab);
+        if (self.dock_initialized) if (self.dock.singleGroupConst()) |group|
+            for (group.entries.items) |entry| if (entry.surface_id != 0) {
+                n += 1;
+            };
         return n;
+    }
+
+    fn appendDockSurfaceIds(self: *AppSession, out: []u64, start: usize) usize {
+        var n = start;
+        if (!self.dock_initialized) return n;
+        const group = self.dock.singleGroupConst() orelse return n;
+        for (group.entries.items) |entry| if (entry.surface_id != 0) {
+            if (n < out.len) out[n] = entry.surface_id;
+            n += 1;
+        };
+        return @min(n, out.len);
+    }
+
+    fn filePanelEntryNeedsDirtyProtection(entry: dock_panel.Entry) bool {
+        return entry.dirty or entry.dirty_sync_pending or entry.mode == .source_edit;
+    }
+
+    /// 창 병합 전에 트리 밖 도크 모델을 대상 창으로 옮긴다. dst 활성/layout을 우선하되 dst가 비었으면 src 값을
+    /// 채택한다. 같은 경로가 양쪽 dirty면 무경고 유실을 피하려 병합 자체를 거부하고, 한쪽만 dirty면 그 편집 surface를
+    /// 보존한다. 모든 신규 path 복사를 먼저 끝낸 뒤 모델을 바꿔 OOM에서 양쪽이 불변이다.
+    fn mergeDockInto(src: *AppSession, dst: *AppSession) !void {
+        if (!src.dock_initialized or !dst.dock_initialized) return;
+        const sg = src.dock.singleGroup() orelse return error.UnsupportedMove;
+        const dg = dst.dock.singleGroup() orelse return error.UnsupportedMove;
+        var unique: usize = 0;
+        for (sg.entries.items) |entry| {
+            if (dg.findPath(entry.path)) |i| {
+                if (filePanelEntryNeedsDirtyProtection(entry) and
+                    filePanelEntryNeedsDirtyProtection(dg.entries.items[i])) return error.UnsupportedMove;
+            } else unique += 1;
+        }
+        if (dg.entries.items.len + unique > dock_panel.max_entries) return error.UnsupportedMove;
+        try dg.entries.ensureUnusedCapacity(dst.allocator, unique);
+
+        var staged: std.ArrayList(dock_panel.Entry) = .empty;
+        defer {
+            for (staged.items) |entry| dst.allocator.free(entry.path);
+            staged.deinit(dst.allocator);
+        }
+        try staged.ensureTotalCapacity(dst.allocator, unique);
+        for (sg.entries.items) |entry| if (dg.findPath(entry.path) == null) {
+            staged.appendAssumeCapacity(.{
+                .path = try dst.allocator.dupe(u8, entry.path),
+                .kind = entry.kind,
+                .mode = entry.mode,
+                .dirty = entry.dirty,
+                .dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit,
+                .surface_id = entry.surface_id,
+                .last_seen = entry.last_seen,
+            });
+        };
+
+        const dst_was_empty = dg.entries.items.len == 0;
+        const src_active_path: ?[]const u8 = if (sg.active) |i| if (i < sg.entries.items.len) sg.entries.items[i].path else null else null;
+        for (sg.entries.items) |entry| if (dg.findPath(entry.path)) |i| {
+            if (filePanelEntryNeedsDirtyProtection(entry)) {
+                const owned_path = dg.entries.items[i].path;
+                dg.entries.items[i] = .{
+                    .path = owned_path,
+                    .kind = entry.kind,
+                    .mode = entry.mode,
+                    .dirty = entry.dirty,
+                    .dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit,
+                    .surface_id = entry.surface_id,
+                    .last_seen = entry.last_seen,
+                };
+            }
+        };
+        for (staged.items) |entry| dg.entries.appendAssumeCapacity(entry);
+        staged.clearRetainingCapacity(); // path 소유권이 dg로 이동했다.
+        if (dst_was_empty) {
+            dst.dock.side = src.dock.side;
+            dst.dock.size = src.dock.size;
+            dst.dock.collapsed = src.dock.collapsed;
+            dg.active = if (src_active_path) |path| dg.findPath(path) else if (dg.entries.items.len > 0) 0 else null;
+        }
+
+        for (sg.entries.items) |entry| src.allocator.free(entry.path);
+        sg.entries.clearRetainingCapacity();
+        sg.active = null;
+        src.file_panel_mode_pending = null;
+        src.file_panel_dirty_sync_actions_len = 0;
+        // last_seen은 session-local clock이라 원값을 섞으면 작은 generation의 source entry가 즉시 LRU가 된다.
+        // 병합 뒤 destination tab 순서로 한 clock에 재기록하고 active를 마지막에 touch해 비교 가능성을 복원한다.
+        for (dg.entries.items) |*entry| dst.touchFilePanelEntry(entry);
+        if (dg.active) |i| if (i < dg.entries.items.len) dst.touchFilePanelEntry(&dg.entries.items[i]);
+        for (dg.entries.items) |*entry| if (entry.dirty_sync_pending) {
+            dst.queueFilePanelDirtySyncAction(entry.surface_id);
+        };
+        dst.enforceFilePanelLiveViewLimit();
+        src.metal_dirty = true;
+        dst.metal_dirty = true;
     }
 
     /// M3d-2a-i 이동 **범위 게이트**(code-review [1]) — 이 워크스페이스가 라이브 이동 지원 범위 안인가. M3d-2a-i는
@@ -5135,8 +5244,8 @@ pub const AppSession = struct {
 
     /// 라이브 전체 window merge(M3d-2a-i, §1·§4) — src의 **모든** 워크스페이스를 dst로 옮기고 src를 비운다(source_window_closed
     /// 항상 true). 각 워크스페이스를 순서대로 detach(0)→adopt한다(detach가 앞에서 빼므로 항상 idx 0). moved_surfaces는 수술
-    /// 전 src 전체 surface_id(out_ids backing, 초과분 조용히 절단). src==dst(자기 merge)면 no-op. dst OOM은 부분-완료로 전파
-    /// (§9 bulk merge partial 허용 — 각 단일 이동은 pre-reserve로 원자적).
+    /// 전 src 전체 surface_id(out_ids backing, 초과분 조용히 절단). src==dst(자기 merge)면 no-op. FP6 dirty 도크가 먼저
+    /// 이관된 뒤 workspace capacity OOM으로 반쪽 병합되지 않도록 두 병렬 배열 전체 capacity를 모델 수술 전에 예약한다.
     pub fn mergeSessionInto(src: *AppSession, dst: *AppSession, out_ids: []u64) !surface_move.MoveOutcome {
         if (src == dst) {
             // 자기 merge = no-op(모든 워크스페이스가 이미 dst). src는 안 닫힌다.
@@ -5147,20 +5256,22 @@ pub const AppSession = struct {
         for (0..src.tabs.items.len) |i| {
             if (!src.isMovableWorkspace(i)) return error.UnsupportedMove;
         }
+        try dst.tabs.ensureUnusedCapacity(dst.allocator, src.tabs.items.len);
+        try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, src.tabs.items.len);
         const from_kind = src.windowKind();
         const to_kind = dst.windowKind();
         var moved_n: usize = 0;
         for (src.tabs.items) |tab| moved_n = appendTabSurfaceIds(tab, out_ids, moved_n);
+        moved_n = src.appendDockSurfaceIds(out_ids, moved_n);
         const moved = out_ids[0..moved_n];
+        try mergeDockInto(src, dst);
         // [3] merge는 dst가 **보던** 워크스페이스를 유지한다(L2 WindowGraph.mergeWindow — target의 active_workspace 보존).
         // adoptTab이 매 이동마다 active_tab=insert_at로 덮으므로, 병합 전 dst 활성 *Tab을 포인터로 캡처해 병합 뒤 그 탭의
         // (insert로 밀린) 새 인덱스로 복원한다. dst가 비어 있으면(비정상) 복원 대상 없음 → 마지막 adopt 활성이 남는다.
         const keep_active: ?*Tab = if (dst.app_window.active_tab < dst.tabs.items.len) dst.tabs.items[dst.app_window.active_tab] else null;
         while (src.tabs.items.len > 0) {
-            try dst.tabs.ensureUnusedCapacity(dst.allocator, 1);
-            try dst.surface_ptrs.ensureUnusedCapacity(dst.allocator, 1);
             const tab = src.detachTabForMove(0, true).?; // len>0 → non-null. defer_rebuild: 사이드바는 아래 1회로([4]).
-            try dst.adoptTab(tab, true);
+            try dst.adoptTab(tab, true); // 전체 capacity 예약됨 → 내부 ensure는 no-op이고 이후 모델 수술은 무실패.
         }
         src.ended_seen = true; // §1.6 merge는 src를 항상 비우고 닫는다(실제 close는 M3d-2b)
         // [3] dst 포커스 복원 + [4] 배치된 dst 사이드바 재빌드 1회. keep_active를 포인터로 재탐색(인덱스는 insert로 밀림).
@@ -7624,9 +7735,75 @@ pub const AppSession = struct {
 
     fn assignDockSurfaceIds(self: *AppSession, panel: *dock_panel.DockPanel) void {
         const group = panel.singleGroup() orelse return;
-        for (group.entries.items) |*entry| {
+        const limit: usize = @intCast(@max(self.loaded_config.config.file_panel.max_live_views, 1));
+        if (group.active) |active| if (active < group.entries.items.len) {
+            const entry = &group.entries.items[active];
             if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+            self.touchFilePanelEntry(entry);
+        };
+        var live: usize = 0;
+        for (group.entries.items) |entry| if (entry.surface_id != 0) {
+            live += 1;
+        };
+        for (group.entries.items) |*entry| {
+            if (live >= limit) break;
+            if (entry.surface_id == 0) {
+                entry.surface_id = self.surface_ids.next();
+                live += 1;
+            }
         }
+    }
+
+    fn touchFilePanelEntry(self: *AppSession, entry: *dock_panel.Entry) void {
+        self.file_panel_seen_generation +%= 1;
+        if (self.file_panel_seen_generation == 0) self.file_panel_seen_generation = 1;
+        entry.last_seen = self.file_panel_seen_generation;
+    }
+
+    fn enforceFilePanelLiveViewLimit(self: *AppSession) void {
+        if (!self.dock_initialized) return;
+        const group = self.dock.singleGroup() orelse return;
+        const limit: usize = @intCast(@max(self.loaded_config.config.file_panel.max_live_views, 1));
+        while (true) {
+            var live: usize = 0;
+            var candidate: ?*dock_panel.Entry = null;
+            for (group.entries.items, 0..) |*entry, i| {
+                if (entry.surface_id == 0) continue;
+                live += 1;
+                if (entry.dirty or entry.dirty_sync_pending or group.active == i) continue;
+                if (candidate == null or entry.last_seen < candidate.?.last_seen) candidate = entry;
+            }
+            if (live <= limit) return;
+            const evicted = candidate orelse return; // dirty/active는 상한보다 많아도 절대 해제하지 않는다.
+            evicted.surface_id = 0;
+        }
+    }
+
+    fn queueFilePanelDirtySyncAction(self: *AppSession, surface_id: u64) void {
+        if (surface_id == 0) return;
+        for (self.file_panel_dirty_sync_actions[0..self.file_panel_dirty_sync_actions_len]) |queued| {
+            if (queued == surface_id) return;
+        }
+        if (self.file_panel_dirty_sync_actions_len >= self.file_panel_dirty_sync_actions.len) return;
+        self.file_panel_dirty_sync_actions[self.file_panel_dirty_sync_actions_len] = surface_id;
+        self.file_panel_dirty_sync_actions_len += 1;
+    }
+
+    fn removeFilePanelDirtySyncAction(self: *AppSession, surface_id: u64) void {
+        var i: usize = 0;
+        while (i < self.file_panel_dirty_sync_actions_len) : (i += 1) {
+            if (self.file_panel_dirty_sync_actions[i] != surface_id) continue;
+            const last = self.file_panel_dirty_sync_actions_len - 1;
+            self.file_panel_dirty_sync_actions[i] = self.file_panel_dirty_sync_actions[last];
+            self.file_panel_dirty_sync_actions_len = last;
+            return;
+        }
+    }
+
+    fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) void {
+        if (entry.kind != .markdown or entry.mode != .source_edit or entry.surface_id == 0) return;
+        entry.dirty_sync_pending = true;
+        self.queueFilePanelDirtySyncAction(entry.surface_id);
     }
 
     pub const FilePanelOpenPathResult = enum(u32) {
@@ -7644,12 +7821,18 @@ pub const AppSession = struct {
         const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
         if (stat.kind != .file) return .failed;
         const group = self.dock.singleGroup() orelse return .failed;
+        if (group.active) |i| if (i < group.entries.items.len and
+            !std.mem.eql(u8, group.entries.items[i].path, path))
+        {
+            self.markFilePanelDirtySyncPending(&group.entries.items[i]);
+        };
         const kind: dock_panel.EntryKind = switch (open_kind) {
             .markdown => .markdown,
             .html => .html,
         };
         _ = self.dock.open(group, path, kind) catch return .failed;
         self.assignDockSurfaceIds(&self.dock);
+        self.enforceFilePanelLiveViewLimit();
         self.dock.collapsed = false;
         if (self.surface_initialized) {
             for (self.tabs.items) |tab| self.resizeTabPanes(tab);
@@ -7795,6 +7978,83 @@ pub const AppSession = struct {
         errdefer gpa.free(bytes);
         if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
         return bytes;
+    }
+
+    pub const FilePanelWriteError = error{
+        SurfaceNotFound,
+        WrongKind,
+        InvalidContent,
+        NotFound,
+        NotRegularFile,
+        TooLarge,
+        WriteFailed,
+    };
+
+    /// 신뢰 shell이 핀한 Markdown 파일 하나만 원자 교체한다. 웹 요청에는 경로 인자가 없고 surface→entry 경로를
+    /// 여기서 다시 해소한다. 원본 권한을 보존한 동일 디렉터리 임시 파일을 fsync한 뒤 rename-replace하므로 실패 시
+    /// 기존 파일이 부분 내용으로 노출되지 않는다. dirty 최종값은 저장 중 재편집과 직렬화한 shell의 setDirty가 내리며,
+    /// write 자체는 true를 false로 바꾸지 않아 저장 완료와 재편집 사이 eviction race를 만들지 않는다.
+    pub fn writeFilePanel(self: *AppSession, surface_id: u64, content: []const u8) FilePanelWriteError!void {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .markdown) return error.WrongKind;
+        if (content.len > file_panel_bridge.max_file_bytes) return error.TooLarge;
+        if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
+
+        const cwd = std.Io.Dir.cwd();
+        var original = openFilePanelRead(cwd, entry.path, false) catch return error.NotFound;
+        defer original.close(self.io);
+        const stat = original.stat(self.io) catch return error.NotFound;
+        if (stat.kind != .file) return error.NotRegularFile;
+
+        var atomic = cwd.createFileAtomic(self.io, entry.path, .{
+            .permissions = stat.permissions,
+            .replace = true,
+        }) catch return error.WriteFailed;
+        defer atomic.deinit(self.io);
+        // rename-replace는 새 inode가 되므로 macOS에서 원본 ACL/xattr/owner를 temp fd로 먼저 복사한다. metadata
+        // 복사가 실패하면 원본을 그대로 두고 저장 자체를 실패시켜 quarantine·Finder tag 등을 조용히 잃지 않는다.
+        if (builtin.os.tag == .macos and std.c.fcopyfile(original.handle, atomic.file.handle, null, .{
+            .ACL = true,
+            .STAT = true,
+            .XATTR = true,
+        }) != 0) return error.WriteFailed;
+        atomic.file.writeStreamingAll(self.io, content) catch return error.WriteFailed;
+        atomic.file.sync(self.io) catch return error.WriteFailed;
+        atomic.replace(self.io) catch return error.WriteFailed;
+        self.metal_dirty = true;
+    }
+
+    /// CM6 문서 변경 상태를 도크 모델에 미러한다. Markdown surface만 허용하고 값이 바뀔 때만 redraw한다.
+    pub fn setFilePanelDirty(self: *AppSession, surface_id: u64, dirty: bool) FilePanelWriteError!void {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .markdown) return error.WrongKind;
+        const changed = entry.dirty != dirty or entry.dirty_sync_pending;
+        entry.dirty = dirty;
+        entry.dirty_sync_pending = false;
+        self.removeFilePanelDirtySyncAction(surface_id);
+        if (changed) self.metal_dirty = true;
+    }
+
+    pub fn filePanelMode(self: *AppSession, surface_id: u64) ?dock_panel.Mode {
+        if (!self.dock_initialized) return null;
+        return (self.dock.entryForSurfaceId(surface_id) orelse return null).mode;
+    }
+
+    pub fn takeFilePanelModeAction(self: *AppSession) ?struct { surface_id: u64, mode: dock_panel.Mode } {
+        const surface_id = self.file_panel_mode_pending orelse return null;
+        self.file_panel_mode_pending = null;
+        const mode = self.filePanelMode(surface_id) orelse return null;
+        return .{ .surface_id = surface_id, .mode = mode };
+    }
+
+    pub fn takeFilePanelDirtySyncAction(self: *AppSession) ?u64 {
+        if (self.file_panel_dirty_sync_actions_len == 0) return null;
+        const i = self.file_panel_dirty_sync_actions_len - 1;
+        const surface_id = self.file_panel_dirty_sync_actions[i];
+        self.file_panel_dirty_sync_actions_len = i;
+        return surface_id;
     }
 
     /// 핀된 Markdown 경로의 lexical parent를 directory handle로 연 뒤, 상대 asset의 모든 하위 component를
@@ -8302,6 +8562,7 @@ pub const AppSession = struct {
     /// 수집·marshal 중 OOM이면 transitions를 비우고 prev도 **안 전진**해 다음 tick이 같은 상태로 재시도한다(부분 적용 없음).
     fn computeWebSurfaceTransitions(self: *AppSession) void {
         self.web_surface_transitions.clearRetainingCapacity();
+        self.enforceFilePanelLiveViewLimit(); // config reload로 상한이 낮아진 경우도 다음 tick에 LRU 해제.
 
         // 영속 scratch 재사용(매 tick fresh 할당 회피). collect 실패(OOM/미초기화)면 batch 빔·prev 불변(재시도) —
         // scratch에 남은 부분 데이터는 다음 tick clearRetainingCapacity가 리셋하므로 무해.
@@ -12370,10 +12631,32 @@ pub const AppSession = struct {
                 }
                 if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
                     if (group.active != index) {
+                        if (group.active) |old| if (old < group.entries.items.len) {
+                            self.markFilePanelDirtySyncPending(&group.entries.items[old]);
+                        };
                         group.active = index;
+                        const entry = &group.entries.items[index];
+                        if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+                        self.touchFilePanelEntry(entry);
+                        self.enforceFilePanelLiveViewLimit();
+                        self.file_panel_mode_pending = entry.surface_id;
                         self.metal_dirty = true;
                     }
                     return;
+                }
+                if (dock_layout.headerControlRect(g, self.cell_width_px)) |control| {
+                    if (layout_math.pointInRect(x_px, y_px, control)) {
+                        if (group.active) |index| if (index < group.entries.items.len) {
+                            const entry = &group.entries.items[index];
+                            if (entry.kind == .markdown) {
+                                self.markFilePanelDirtySyncPending(entry);
+                                entry.mode = if (entry.mode == .read) .source_edit else .read;
+                                self.file_panel_mode_pending = entry.surface_id;
+                                self.metal_dirty = true;
+                            }
+                        };
+                        return;
+                    }
                 }
                 if (layout_math.pointInRect(x_px, y_px, g.tab_bar) or layout_math.pointInRect(x_px, y_px, g.header)) return;
             }
@@ -17098,7 +17381,19 @@ pub const AppSession = struct {
                             const active_path: []const u8 = if (group.active) |i| if (i < group.entries.items.len) group.entries.items[i].path else "" else "";
                             const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                             const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-                            if (coretext_frame_builder.buildFileDockChromeDrawList(self.allocator, titles.items, group.active, active_path, @intCast(cols), dock_fg, dock_active_fg)) |ddl| {
+                            const active_entry = if (group.active) |i| if (i < group.entries.items.len) &group.entries.items[i] else null else null;
+                            if (coretext_frame_builder.buildFileDockChromeDrawList(
+                                self.allocator,
+                                titles.items,
+                                group.active,
+                                active_path,
+                                if (active_entry) |entry| entry.kind else .markdown,
+                                if (active_entry) |entry| entry.mode else .read,
+                                if (active_entry) |entry| entry.dirty else false,
+                                @intCast(cols),
+                                dock_fg,
+                                dock_active_fg,
+                            )) |ddl| {
                                 self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = dg.tab_bar.x, .origin_y = dg.tab_bar.y, .colors = tabbar_colors } });
                             } else |_| {}
                         }
@@ -41614,4 +41909,216 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
     try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape-dir/secret.png"));
     try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802));
     try std.testing.expectError(error.WrongKind, session.readFilePanelAsset(allocator, 802, "escape.png"));
+}
+
+test "FP6 file panel write atomically replaces only the pinned markdown and preserves dirty until shell ack" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "before" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "page.html", .data = "<p>before</p>" });
+    try tmp.dir.symLink(io, "doc.md", "link.md", .{});
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const doc_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
+    defer allocator.free(doc_path);
+    const html_path = try std.fmt.allocPrint(allocator, "{s}/page.html", .{root});
+    defer allocator.free(html_path);
+    const link_path = try std.fmt.allocPrint(allocator, "{s}/link.md", .{root});
+    defer allocator.free(link_path);
+
+    var session: AppSession = undefined;
+    session.io = io;
+    // 부분 초기화 하니스: setFilePanelDirty가 fixed action queue를 정리하므로 길이 불변식도 명시한다.
+    session.file_panel_dirty_sync_actions_len = 0;
+    session.dock = try dock_panel.DockPanel.init(allocator);
+    session.dock_initialized = true;
+    defer session.dock.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, doc_path, .markdown);
+    group.entries.items[0].surface_id = 901;
+    _ = try session.dock.open(group, html_path, .html);
+    group.entries.items[1].surface_id = 902;
+    _ = try session.dock.open(group, link_path, .markdown);
+    group.entries.items[2].surface_id = 903;
+
+    try session.setFilePanelDirty(901, true);
+    try std.testing.expect(group.entries.items[0].dirty);
+    try session.writeFilePanel(901, "# 저장\n한글");
+    try std.testing.expect(group.entries.items[0].dirty); // shell ack 전 write가 eviction 보호를 내리지 않는다.
+    try session.setFilePanelDirty(901, false);
+    try std.testing.expect(!group.entries.items[0].dirty);
+    const after = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings("# 저장\n한글", after);
+    try std.testing.expectError(error.WrongKind, session.writeFilePanel(902, "escape"));
+    const html_after = try tmp.dir.readFileAlloc(io, "page.html", allocator, .limited(1024));
+    defer allocator.free(html_after);
+    try std.testing.expectEqualStrings("<p>before</p>", html_after);
+    try std.testing.expectError(error.NotFound, session.writeFilePanel(903, "symlink replacement"));
+    const target_after = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
+    defer allocator.free(target_after);
+    try std.testing.expectEqualStrings("# 저장\n한글", target_after);
+}
+
+test "FP6 file panel header toggles markdown mode and drains one action" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/fp6-mode.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const entry = &group.entries.items[0];
+    const surface_id = entry.surface_id;
+    try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
+
+    const control = dock_layout.headerControlRect(session.dockGeometry(), session.cell_width_px).?;
+    session.mouse(
+        1,
+        @floatFromInt(control.x + control.w / 2),
+        @floatFromInt(control.y + control.h / 2),
+        0,
+        0,
+    );
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, entry.mode);
+    const action = session.takeFilePanelModeAction().?;
+    try std.testing.expectEqual(surface_id, action.surface_id);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, action.mode);
+    try std.testing.expect(session.takeFilePanelModeAction() == null);
+}
+
+test "FP6 file panel live view LRU protects dirty entries and recreates with a fresh surface id" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.loaded_config.config.file_panel.max_live_views = 2;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.md", .data = "a" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.md", .data = "b" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "c.md", .data = "c" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    const a = try std.fmt.allocPrint(allocator, "{s}/a.md", .{root});
+    defer allocator.free(a);
+    const b = try std.fmt.allocPrint(allocator, "{s}/b.md", .{root});
+    defer allocator.free(b);
+    const c = try std.fmt.allocPrint(allocator, "{s}/c.md", .{root});
+    defer allocator.free(c);
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a));
+    const group = session.dock.singleGroup().?;
+    const a_sid = group.entries.items[group.findPath(a).?].surface_id;
+    try session.setFilePanelDirty(a_sid, true);
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
+    const b_sid = group.entries.items[group.findPath(b).?].surface_id;
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(c));
+    try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // dirty 보호
+    try std.testing.expectEqual(@as(u64, 0), group.entries.items[group.findPath(b).?].surface_id); // non-dirty LRU
+    try std.testing.expect(group.entries.items[group.findPath(c).?].surface_id != 0);
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
+    const recreated = group.entries.items[group.findPath(b).?].surface_id;
+    try std.testing.expect(recreated != 0 and recreated != b_sid); // 앱 전역 id 비재사용
+    try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // 재선택 뒤에도 dirty 보호
+
+    // source editor를 떠나는 순간에는 async setDirty snapshot ack 전까지 pending이 fail-closed 보호한다.
+    try session.setFilePanelDirty(a_sid, false);
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a));
+    const a_entry = &group.entries.items[group.findPath(a).?];
+    a_entry.mode = .source_edit;
+    a_entry.dirty_sync_pending = false;
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(c));
+    try std.testing.expect(a_entry.dirty_sync_pending);
+    // 실제 adapter가 drain할 이전 surface 전용 action이 있어야 한다. action 전달 자체나 JS 전송 실패는 ack가
+    // 아니므로 pending을 해제하지 않고, 성공한 setDirty만 아래에서 보호를 끝낸다.
+    try std.testing.expectEqual(a_sid, session.takeFilePanelDirtySyncAction().?);
+    try std.testing.expect(session.takeFilePanelDirtySyncAction() == null);
+    try std.testing.expect(a_entry.dirty_sync_pending);
+    try std.testing.expectEqual(a_sid, a_entry.surface_id);
+    try std.testing.expectEqual(@as(u64, 0), group.entries.items[group.findPath(b).?].surface_id);
+
+    // shell의 clean snapshot ack 뒤에는 다시 일반 non-dirty LRU 후보가 된다.
+    try session.setFilePanelDirty(a_sid, false);
+    try std.testing.expect(!a_entry.dirty_sync_pending);
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
+    try std.testing.expectEqual(@as(u64, 0), a_entry.surface_id);
+}
+
+test "FP6 merge transfers dock dirty state and live surface ownership before source teardown" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src.md", .data = "src" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dst.md", .data = "dst" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    const src_path = try std.fmt.allocPrint(allocator, "{s}/src.md", .{root});
+    defer allocator.free(src_path);
+    const dst_path = try std.fmt.allocPrint(allocator, "{s}/dst.md", .{root});
+    defer allocator.free(dst_path);
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, src.openFilePanelPath(src_path));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, dst.openFilePanelPath(dst_path));
+    const src_group = src.dock.singleGroup().?;
+    const moved_sid = src_group.entries.items[src_group.findPath(src_path).?].surface_id;
+    try src.setFilePanelDirty(moved_sid, true);
+    src_group.entries.items[src_group.findPath(src_path).?].mode = .source_edit;
+
+    var moved_buf: [16]u64 = undefined;
+    const outcome = try src.mergeSessionInto(dst, &moved_buf);
+    try std.testing.expect(outcome.source_window_closed);
+    try std.testing.expectEqual(@as(usize, 0), src.dock.entryCountTotal());
+    try std.testing.expect(!src.hasWebSurface(moved_sid));
+    try std.testing.expect(dst.hasWebSurface(moved_sid));
+    const moved_entry = dst.dock.entryForSurfaceId(moved_sid).?;
+    try std.testing.expect(moved_entry.dirty);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, moved_entry.mode);
+    try std.testing.expect(std.mem.indexOfScalar(u64, outcome.moved_surfaces, moved_sid) != null);
+}
+
+test "FP6 merge rejects duplicate dirty file panels without mutating either dock" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const path = "/tmp/fp6-duplicate-dirty.md";
+    _ = try src.dock.open(src.dock.singleGroup().?, path, .markdown);
+    _ = try dst.dock.open(dst.dock.singleGroup().?, path, .markdown);
+    src.assignDockSurfaceIds(&src.dock);
+    dst.assignDockSurfaceIds(&dst.dock);
+    const src_entry = &src.dock.singleGroup().?.entries.items[0];
+    const dst_entry = &dst.dock.singleGroup().?.entries.items[0];
+    src_entry.dirty = true;
+    dst_entry.dirty = true;
+    const src_surface_id = src_entry.surface_id;
+    const dst_surface_id = dst_entry.surface_id;
+
+    var moved_buf: [16]u64 = undefined;
+    try std.testing.expectError(error.UnsupportedMove, src.mergeSessionInto(dst, &moved_buf));
+    try std.testing.expectEqual(@as(usize, 1), src.dock.entryCountTotal());
+    try std.testing.expectEqual(@as(usize, 1), dst.dock.entryCountTotal());
+    try std.testing.expectEqual(src_surface_id, src.dock.singleGroup().?.entries.items[0].surface_id);
+    try std.testing.expectEqual(dst_surface_id, dst.dock.singleGroup().?.entries.items[0].surface_id);
+    try std.testing.expect(src.dock.singleGroup().?.entries.items[0].dirty);
+    try std.testing.expect(dst.dock.singleGroup().?.entries.items[0].dirty);
 }

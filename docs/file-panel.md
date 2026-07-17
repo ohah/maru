@@ -14,13 +14,13 @@
 - **웹 브라우저(⌘⌥T)는 현행 워크스페이스 term 유지.** 브라우징의 용례(터미널 옆 미리보기·팝업/OAuth[7f]·에이전트 제어)가 워크스페이스 맥락이고, 출하·손테스트 완료된 7e/7f/4e-4/4g를 재작업하지 않는다. 단 워크스페이스 전환 시 흰 페이지가 되는 현행 동작(위 검증)은 **URL 기억·재로드 얕은 수정**을 web-panel 백로그로 별도 제안(§13).
 - **도크 배관은 kind-무관으로 설계**(entries가 kind를 든다) — 후속 "브라우저 탭을 도크로 보내기"(참조용 웹페이지 고정)를 additive로 열어둔다(§13).
 - **편집기 = CodeMirror 6** (control-plane §13 열린 질문 해소 — 사용자 결정). 근거: 마크다운이 SSOT(항상 텍스트, 왕복 손실 0), 한글 IME 조합이 WebKit 네이티브 IME 위에서 가장 안정, sanitize 파이프와 렌더 공유. 문서모델 기반(왕복 손실·조합 엣지)은 기각. **마크다운 렌더 = markdown-it 또는 remark + 새니타이즈**(FP2에서 락파일 고정과 함께 확정).
-- **기본 모드**: md = 렌더(토글로 편집), html = 렌더(소스 편집은 후속 — §2).
+- **기본 모드(v1) = 읽기 ↔ 소스 편집 토글**: md는 읽기(렌더 뷰) 기본·토글로 소스 편집(CM6 생 마크다운), html은 읽기 기본(소스 편집은 후속 — §2). **이 2모드 토글은 v1 징검다리**다 — 옵시디언식 Live Preview(편집=인라인 렌더 통합)가 최종형이고 소스 편집을 상위 대체하지만, CM6 커스텀 + 보안 모델 재검토(§13)라 후속으로 미룬다.
 - **write 스코프 = 열린 파일만**(§3). **트리 루트 = git repo 루트 우선**(§7).
 - **WKWebView 상한**: 도크 탭마다 WKWebView 1개(비활성 hidden·상태 유지 — Swift hide=isHidden만, 2차 검증). 상한 N(기본 8, config `file-panel.max-live-views`) 초과 시 가장 오래 안 본 **non-dirty** 탭의 웹뷰만 해제(탭은 스트립에 유지, 재선택 시 재로드) — dirty는 해제하지 않는다. 이 상한이 메모리 bound([performance-budget.md]에 WKWebView RSS 예산 부재). 해제=기존 전이 `destroyed` op·재선택=`created` op(새 op 불필요 — 2차 검증). 단 surface_id는 앱 전역 **비재사용** 불변식이라 재소환 시 **새 id 발급**하고, destroy 경로의 `browser.closed` push는 eviction 의미와 충돌하므로 도크 destroy에선 미발행한다(§4 destroy 판정과 같은 도크-aware 분기).
 
 ## 2. kind 분기 (.md vs .html)
 
-| 파일 | 콘텐츠 뷰 | 렌더 | 소스 편집 |
+| 파일 | 콘텐츠 뷰 | 읽기(렌더 뷰) | 소스 편집 |
 |---|---|---|---|
 | `.md` | 신뢰 웹앱(markdown config) | 새니타이즈 렌더 | CM6(같은 웹앱, 토글) |
 | `.html` | browser config(비신뢰 격리) | `loadFileURL(_:allowingReadAccessTo: 파일 디렉터리)` — WebKit 표준 API로 읽기 범위를 그 디렉터리에 한정 | **v1 범위 밖**(후속 §13) |
@@ -42,7 +42,7 @@
 
 ### 3.1 도크 헤더 밴드
 
-도크 탭 스트립 아래 밴드 = **경로 + [렌더|편집] 토글 + dirty ●**(GPU 셀). 주소창이 아니다 — `←`/`→`(WebKit 백스택)는 단일 파일 문서에 무의미해서 없다("열었던 파일"은 트리의 열린 파일 하이라이트 + 최근 파일 섹션이 흡수 — §7). 렌더는 7e-1b 주소창 밴드 코드 구조 미러(전용 draw-list 빌더 신규 — `buildPaneAddressBarDrawList`는 browser 3버튼 시그니처). 토글 상태는 L2 도크 entry 필드, Zig→웹 신호는 take/drain 패턴(`take_web_nav_action` v106 동형).
+도크 탭 스트립 아래 밴드 = **경로 + [읽기|소스 편집] 토글 + dirty ●**(GPU 셀). 주소창이 아니다 — `←`/`→`(WebKit 백스택)는 단일 파일 문서에 무의미해서 없다("열었던 파일"은 트리의 열린 파일 하이라이트 + 최근 파일 섹션이 흡수 — §7). 밴드 렌더는 7e-1b 주소창 밴드 코드 구조 미러(전용 draw-list 빌더 신규 — `buildPaneAddressBarDrawList`는 browser 3버튼 시그니처). 토글 상태는 L2 도크 entry 필드, Zig→웹 신호는 take/drain 패턴(`take_web_nav_action` v106 동형).
 
 ## 4. 생명주기 (도크 = 워크스페이스 무영향)
 
@@ -120,8 +120,9 @@ control-plane §12 Phase 7 행 대응: 7a·7b ⊂ FP2, 7c ⊂ FP4+FP6, **7d는 m
 - **"브라우저 탭을 도크로 보내기"** — 참조용 웹페이지 고정(도크 kind-무관 배관이 전제, §1 헤지).
 - **웹 브라우저 URL 기억·재로드** — 워크스페이스 전환 흰 페이지 완화(web-panel 백로그 — Term에 URL 저장 후 재생성 시 reload).
 - `.html` 소스 편집 토글(신뢰 편집기·격리 렌더 두-webview 스왑 설계).
-- 새 파일 생성·다른 이름 저장·rename/삭제(트리 조작), Live Preview(커서 주변만 소스), CLI `panel open` 연동.
-- **주석(annotation)** — 문서 텍스트 범위에 코멘트: 앵커 = 텍스트 인용+전후 문맥 재앵커링(오프셋 저장 아님 — 파일 편집에 견딤), 저장 = 사이드카(원본 `.md` 무오염), 표시 = 렌더 뷰는 신뢰 shell 오버레이(주석은 콘텐츠가 아니라 shell UI라 sanitize 무충돌)·편집 뷰는 CM6 decoration(내장), 브리지 `maru.annotation.*` additive, 에이전트 열람은 control plane op. **선행 헤지는 FP2 소스 위치 매핑뿐**(이미 FP2 확정 기준에 포함) — 그 외 전 층이 additive라 지금 미고려로 무해.
+- **Live Preview(옵시디언식 통합 편집 — v1 소스 편집을 상위 대체)**: 편집 중 그 자리에서 인라인 렌더(커서 주변만 마크다운 기호 노출) = "읽기/소스 편집" 토글의 편집 쪽이 렌더와 하나로 합쳐진 최종형. 두 선행: ⑴ CM6 decoration/widget 커스텀(CM6 기본 아님 — 옵시디언이 직접 구현), ⑵ **보안 모델 재검토** — Live Preview는 md를 CM6 편집기(=브리지 있는 신뢰 shell origin)에서 인라인 렌더하므로, "md 파생 콘텐츠는 브리지 없는 격리 origin"(§3·web-panel §7)이 무너진다. 켜기 전 편집기 origin 격리 또는 인라인 렌더 fragment의 신뢰 경계를 재설계한다.
+- 새 파일 생성·다른 이름 저장·rename/삭제(트리 조작), CLI `panel open` 연동.
+- **주석(annotation)** — 문서 텍스트 범위에 코멘트: 앵커 = 텍스트 인용+전후 문맥 재앵커링(오프셋 저장 아님 — 파일 편집에 견딤), 저장 = 사이드카(원본 `.md` 무오염), 표시 = 읽기 뷰는 신뢰 shell 오버레이(주석은 콘텐츠가 아니라 shell UI라 sanitize 무충돌)·소스 편집 뷰는 CM6 decoration(내장), 브리지 `maru.annotation.*` additive, 에이전트 열람은 control plane op. **선행 헤지는 FP2 소스 위치 매핑뿐**(이미 FP2 확정 기준에 포함) — 그 외 전 층이 additive라 지금 미고려로 무해.
 - **재시작 미저장 편집 보호** — ⌘Q 종료 확인 모달(기존 인프라)에 dirty 도크 entry 게이트 합류 또는 자동 임시저장(현행 §5는 무경고 유실 — 명시 수용 상태).
 - **도크 html 스코프 내 file: 네비 허용 + 헤더 밴드 추종**(v1은 top-level 네비 전부 차단 — §2).
 - **readAsset 스코프의 트리 루트 확장**(§3 `../` 비대칭 해소 — v1은 파일 디렉터리 한정 수용).

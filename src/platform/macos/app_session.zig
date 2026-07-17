@@ -19536,7 +19536,11 @@ pub const AppSession = struct {
             const view = std.unicode.Utf8View.init(run.text) catch continue; // 잘못된 UTF-8 run은 건너뜀
             var it = view.iterator();
             while (it.nextCodepoint()) |c| {
-                const w = @max(1, terminal.width.cellWidth(c)); // 결합 문자(0)는 1칸으로 — frame builder와 동일
+                // 세팅 리셋 ↺(icon_glyph PUA 0xF000B)만 **2칸(~16px)** 으로 그린다 — 사이드바/카드 아이콘(titleCellWidth
+                // widen)과 같은 취지로, width-1(~8px)이면 coverage 실루엣이 뭉개져 작다(사용자 요청). 등록 아이콘 **전체**를
+                // 넓히면 사용자 config 값(font.family·env·keybind 등)에 그 PUA(Nerd Fonts MDI 겹침 U+F0001~)가 들어올 때
+                // displayCols(=1칸) 기반 caret/truncate와 어긋나므로, 리셋 어포던스 cp 하나로 한정한다(리뷰).
+                const w: u2 = if (c == chrome.components.settings.reset_glyph_cp) 2 else @max(1, terminal.width.cellWidth(c)); // 결합 문자(0)는 1칸으로 — frame builder와 동일
                 if (col_i >= 0 and col_i < cols) {
                     const idx = row * @as(usize, cols) + @as(usize, @intCast(col_i));
                     cp[idx] = c;

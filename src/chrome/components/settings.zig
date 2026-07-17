@@ -36,7 +36,8 @@ pub const FieldRow = struct {
     // 활성이면 색·팔레트 행을 잠근다). 값은 config 비소유 — 매 프레임 platform이 판정해 주입(palette 선례와 같은 규율).
     disabled: bool = false,
     // 이 행이 기본값과 같은가(§6.11) — platform이 theme.Config{} 대비로 판정해 주입(neutral: 컴포넌트는 config 무지).
-    // false(=override됨)면 view가 control 열 좌측에 ↺(되돌리기) 어포던스를 그리고, 그 셀 클릭/행 Backspace로 항목 리셋.
+    // false(=override됨)면 view가 폼 행 **맨 오른쪽**(값 오른쪽 reset_gutter, resetGlyphX)에 ↺(되돌리기) 어포던스를
+    // 그리고, 그 셀 클릭/행 Backspace로 항목 리셋.
     is_default: bool = true,
 
     pub const Kind = union(enum) {
@@ -373,6 +374,14 @@ pub const State = struct {
 pub const Action = enum { close, toggle, dropdown_accept, dropdown_preview, dropdown_cancel, slider_set, adjust_left, adjust_right, selection_changed, section_changed, text_commit, search_changed, delete_row, reset_field, reset_all, color_picked, eyedropper, consumed };
 
 const label_gap_cols: u32 = 2; // 라벨과 우측 위젯 사이 최소 간격(칸)
+// 항목별 리셋(↺) 아이콘 렌더 폭(칸) — placeText가 등록 icon_glyph를 2칸(~16px)으로 그려 폰트 글리프(~8px)보다 크고
+// 또렷하게(사용자 요청 "너무 작다"). resetGlyphX 배치·hit-test 밴드가 이 폭을 공유한다.
+const reset_icon_cols: u32 = 2;
+// 항목별 리셋(↺) 어포던스가 차지하는 폼 우측 여백(칸) — 값(control) **오른쪽**에 ↺ 전용 열을 둬, 변경된 행마다
+// 항상 같은 자리(폼 행 맨 오른쪽)에 뜨게 한다(사용자 요청 — 예전엔 값 왼쪽 label_gap에 얹혀 작고 눈에 안 띔).
+// = 아이콘 2칸 + 값과의 간격 1칸. control/palette 열은 이 폭만큼 좌측으로 물러나 값과 안 겹친다. 박스 폭(form_content)에
+// 이 여백을 더해 값·라벨 가용 폭은 그대로 유지한다(모달만 3칸 넓어짐).
+const reset_gutter_cols: u32 = reset_icon_cols + 1;
 
 /// control 열 폭(칸) — 모든 행이 같은 우측 열을 공유한다(숫자 입력 박스 폭 기준). 픽셀 폭을 cw로 ceil. view/hitTest
 /// 단일 출처. toggle은 이 열 안에서 좌측정렬(입력 박스·dropdown과 같은 시작 x). text/dropdown 값(폰트 패밀리·테마
@@ -441,8 +450,8 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     // 밖으로 삐져나가 깨졌다. form_label_reserve(가장 긴 라벨 담는 고정 칸) + control/palette 폭으로 못 박는다.
     // 라벨은 reserve로, 값은 view에서 control 폭으로 truncate해 항상 박스 안에 가둔다(palette/find 고정 폭과 같은 취지).
     const form_content: u32 = @max(
-        form_label_reserve + label_gap_cols + ctrl_cols, // 스칼라 행: 라벨 예약 + control 열
-        palette_label_reserve + label_gap_cols + paletteGridCols(), // palette 행: 16 스와치 + hex 블록
+        form_label_reserve + label_gap_cols + ctrl_cols + reset_gutter_cols, // 스칼라 행: 라벨 예약 + control 열 + ↺ 여백
+        palette_label_reserve + label_gap_cols + paletteGridCols() + reset_gutter_cols, // palette 행: 16 스와치 + hex 블록 + ↺ 여백
     );
     const title_need = overlay_input.displayCols(title_text) + 12; // 제목 + 스크롤 위치 표식 여유
     const content_cols = @max(nav_cols + nav_gap_cols + form_content, title_need);
@@ -457,11 +466,20 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     const box = modal_box.layout(content_cols, content_rows, p, tk) orelse return null;
     const form_x = box.inner_x + @as(i32, @intCast((nav_cols + nav_gap_cols) * box.cw));
     const form_cols = box.inner_cols -| (nav_cols + nav_gap_cols);
-    // 창이 너무 좁아 modal_box가 박스를 nav+gap+control보다 좁게 clamp하면 form_cols가 control 열보다 작아져
-    // fieldControlRect의 (form_cols -| ctrl_cols)가 0으로 saturate → 위젯이 라벨 위로 겹쳐 그려졌다(리뷰 #823).
-    // 그 경우 레이아웃 불가로 보고 null(view/handlePointer가 그리지 않음 — 창을 넓히면 보임). modal_box가 폭 부족 시
-    // 그리는 것과 같은 "안 되면 안 그림" 규율.
-    if (form_cols <= ctrl_cols) return null;
+    // 창이 너무 좁아 modal_box가 박스를 nav+gap+content보다 좁게 clamp하면 form_cols가 우측 블록보다 작아져
+    // fieldControlRect·paletteGridRect의 (form_cols -| 우측블록 -| gutter)가 0으로 saturate → 위젯/그리드가 라벨 위로
+    // 겹쳐 그려지거나(리뷰 #823), 라벨 truncate 폭이 0이 돼 라벨이 통째 사라졌다(리뷰). 그 경우 레이아웃 불가로 보고
+    // null(view/handlePointer가 그리지 않음 — 창을 넓히면 보임). modal_box가 폭 부족 시 그리는 것과 같은 "안 되면 안 그림".
+    // 우측 블록은 **이 섹션의 최대**(palette_grid 행이 있으면 그 그리드, 아니면 control 열) + ↺ 여백 + 라벨 간격을
+    // 확보해야 라벨이 최소 1칸이라도 남고 그리드가 라벨을 안 덮는다(ctrl_cols만 보면 palette 섹션에서 그리드가 삐짐).
+    var max_right_cols: u32 = ctrl_cols;
+    for (rows) |r| {
+        if (std.meta.activeTag(r.kind) == .palette_grid) {
+            max_right_cols = @max(max_right_cols, paletteGridCols());
+            break;
+        }
+    }
+    if (form_cols <= max_right_cols + reset_gutter_cols + label_gap_cols) return null;
     return .{ .box = box, .ctrl_cols = ctrl_cols, .first_field_row = title_rows, .win_start = win_start, .win_len = win_len, .nav_cols = nav_cols, .form_x = form_x, .form_cols = form_cols, .body_rows = @intCast(body_rows) };
 }
 
@@ -470,8 +488,16 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
 fn fieldControlRect(l: Layout, vi: usize) draw.Rect {
     const box = l.box;
     const row = l.first_field_row + @as(u32, @intCast(vi));
-    const ctrl_x = l.form_x + @as(i32, @intCast((l.form_cols -| l.ctrl_cols) * box.cw));
+    // control 열은 폼 우측에 정렬하되, 맨 오른쪽 reset_gutter_cols칸은 ↺ 어포던스 몫으로 비워 그 왼쪽에 붙인다.
+    const ctrl_x = l.form_x + @as(i32, @intCast((l.form_cols -| l.ctrl_cols -| reset_gutter_cols) * box.cw));
     return .{ .x = ctrl_x, .y = modal_box.rowY(box, row), .w = l.ctrl_cols * box.cw, .h = box.ch };
+}
+
+/// 항목별 리셋 ↺를 그릴(그리고 hit-test할) 셀의 좌단 x — 폼 영역 **맨 오른쪽 칸**(control/palette 값 오른쪽,
+/// reset_gutter 안, reset_icon_cols(2칸) 폭). view의 렌더와 handlePointer의 히트 밴드가 이 단일 출처를 공유해
+/// 정렬이 어긋나지 않는다. 2칸 아이콘이라 우단에서 reset_icon_cols만큼 안쪽에 두어 박스 밖으로 안 넘는다.
+fn resetGlyphX(l: Layout) i32 {
+    return l.form_x + @as(i32, @intCast((l.form_cols -| reset_icon_cols) * l.box.cw));
 }
 
 /// 숫자 현재 값을 입력 박스에 표시할 문자열로 포맷한다. 소수 2자리로 굽고 뒤따르는 0(과 점)을 떼
@@ -492,7 +518,8 @@ fn paletteGridRect(l: Layout, vi: usize) draw.Rect {
     const box = l.box;
     const row = l.first_field_row + @as(u32, @intCast(vi));
     const cols = paletteGridCols();
-    const gx = l.form_x + @as(i32, @intCast((l.form_cols -| cols) * box.cw));
+    // control 열과 마찬가지로 맨 오른쪽 reset_gutter_cols칸은 ↺ 몫으로 비워 그리드를 그 왼쪽에 정렬한다.
+    const gx = l.form_x + @as(i32, @intCast((l.form_cols -| cols -| reset_gutter_cols) * box.cw));
     return .{ .x = gx, .y = modal_box.rowY(box, row), .w = cols * box.cw, .h = box.ch };
 }
 
@@ -514,10 +541,20 @@ fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
 }
 
 const title_text = "Settings";
-/// 되돌리기(기본값 리셋) 어포던스 글리프(§6.11 폼 행 ↺·§6.4 네비 "↺ 초기화" 라벨의 단일 출처). U+21BA는 번들 폰트
-/// (JetBrains Mono/Fira/Cascadia) 미커버지만, CoreText 셰이퍼가 시스템 기본 cascade(`CTFontCopyDefaultCascadeListForLanguages`,
-/// coretext_smoke.m)를 폴백 뒤에 이어 macOS 시스템 폰트로 렌더한다(GUI는 macOS 전용). 만약 tofu로 보이면 이 상수만 교체하면 된다.
-pub const reset_glyph = "↺";
+/// 되돌리기(기본값 리셋) 어포던스 글리프(§6.11 폼 행·§6.4 네비 "초기화" 라벨의 단일 출처). **빌드타임 SVG→coverage
+/// 합성 아이콘**(`assets/icons/reset.svg`, Plane-15 PUA `0xF000B`) — `renderer.synthesizeGlyph`/`icon_glyph`가 셀을
+/// **꽉 채워** 그리므로(chrome ⚙🔔 등과 같은 경로) 폰트 ↺(U+21BA, 번들 폰트 미커버 → 작은 시스템 폴백)보다 크고
+/// 또렷하며 테마색이 자동 적용된다(사용자 요청 "너무 작다"). 미등록 PUA면 폰트 폴백이라 tofu는 안 난다. 아이콘 교체는
+/// reset.svg를 고치고 `tools/svg_to_coverage.py`를 재실행하면 된다([[icon-svg-coverage-status]]).
+/// **codepoint(u21)**: platform `placeText`가 chrome 오버레이 텍스트에서 **이 cp만** width-2(~16px)로 넓힌다 —
+/// 등록 아이콘 전체(git_branch 등 Nerd Fonts MDI 겹침 범위)를 넓히면 사용자 config 값에 그런 PUA가 들어올 때
+/// displayCols(=1칸)와 어긋나 caret/truncate가 오정렬되므로, 리셋 어포던스 cp 하나로 한정한다(리뷰).
+pub const reset_glyph_cp: u21 = 0xF000B;
+pub const reset_glyph = "\u{F000B}"; // reset_glyph_cp의 UTF-8(폼 행 ↺·네비 "초기화" 라벨 공용)
+comptime {
+    // reset_glyph 문자열이 reset_glyph_cp와 같은 코드포인트인지 못박는다(어긋나면 placeText가 안 넓힘).
+    std.debug.assert((std.unicode.utf8Decode(reset_glyph) catch 0) == reset_glyph_cp);
+}
 /// 검색 입력줄 프롬프트 접두 — view의 제목 렌더와 searchCaretRect(IME 후보창 위치)가 같은 폭을 쓰게 하는 단일 출처.
 const search_prompt = "검색: ";
 
@@ -626,27 +663,25 @@ pub fn view(
                 .toggle, .number => true,
                 else => false,
             };
-            const hl_cols = if (quad_widget) l.form_cols -| row_right_cols else l.form_cols;
+            // quad 위젯 행은 위젯 좌단(= 폼폭 - control - ↺여백)까지만 칠해 위젯을 덮지 않는다. 비-quad 행은 ↺ 여백
+            // 까지 포함해 행 전체(form_cols)를 칠하므로 맨 오른쪽 ↺도 선택 하이라이트 위에 놓인다.
+            const hl_cols = if (quad_widget) l.form_cols -| row_right_cols -| reset_gutter_cols else l.form_cols;
             try modal_box.fillCells(box, l.form_x, content_row, hl_cols, .tab_hover_bg, arena, out);
         }
         // 비활성 행(프리셋 잠금)이거나 **네비 포커스**(폼이 비활성 영역)면 라벨을 muted로 — 지금 키가 폼에 없음을 흐림으로 보인다.
         const label_role: tokens.ColorRole = if (r.disabled or state.nav_focused) .muted_fg else .surface_fg;
-        // 라벨도 control/palette 열을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
-        const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| label_gap_cols) catch r.label;
+        // 라벨도 control/palette 열과 ↺ 여백을 침범하지 않게 폼 라벨 영역 폭으로 truncate(고정 폭 안에 가둠 — rich quad 밖 삐짐 방지).
+        const label_shown = overlay_input.truncateToCols(arena, r.label, l.form_cols -| row_right_cols -| reset_gutter_cols -| label_gap_cols) catch r.label;
         try modal_box.text(box, l.form_x, content_row, label_shown, label_role, arena, out);
         const ctrl = fieldControlRect(l, vi);
-        // 항목별 리셋 어포던스(§6.11): 기본값과 다른(override된) 행은 control/grid 열 좌단 **바로 왼쪽 셀**에 ↺를 얹는다.
-        // 폼 고정 폭·control rect를 안 건드리게 라벨↔control 사이 label_gap(2칸) 안에 그린다(라벨은 그 폭만큼 truncate돼 겹치지
-        // 않음). 잠금(프리셋) 행은 편집 자체가 막혀 생략. 선택 행은 accent(강조), 그 외 muted. handlePointer가 이 셀을 hit-test.
+        // 항목별 리셋 어포던스(§6.11): 기본값과 다른(override된) 행은 폼 행 **맨 오른쪽 칸**(값 오른쪽 reset_gutter 안)에
+        // ↺를 얹는다 — 변경된 행마다 같은 자리에 뜨게 해 발견성을 높인다(예전엔 값 왼쪽 label_gap이라 작고 눈에 안 띔).
+        // 잠금(프리셋) 행은 편집 자체가 막혀 생략. 선택 행은 accent(강조), 그 외도 surface_fg로 또렷하게. handlePointer가 이 셀을 hit-test.
         if (!r.is_default and !r.disabled) {
-            const block_x = switch (r.kind) {
-                .palette_grid => paletteGridRect(l, vi).x, // palette는 control 열 비공유(그리드 블록 좌단 기준)
-                else => ctrl.x,
-            };
             const runs = try arena.alloc(draw.Run, 1);
             runs[0] = .{ .text = reset_glyph };
-            const rrole: tokens.ColorRole = if (actual == state.selected) .accent_bar else .muted_fg;
-            try out.append(arena, .{ .text = .{ .origin = .{ .x = block_x - cw_i, .y = ctrl.y }, .runs = runs, .role = rrole } });
+            const rrole: tokens.ColorRole = if (actual == state.selected) .accent_bar else .surface_fg;
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = resetGlyphX(l), .y = ctrl.y }, .runs = runs, .role = rrole } });
         }
         switch (r.kind) {
             .toggle => |v| {
@@ -1208,15 +1243,11 @@ pub fn handlePointer(
         if (ev.y_px >= ry and ev.y_px < ry + @as(f64, @floatFromInt(ctrl.h))) {
             state.selected = actual;
             state.nav_focused = false; // 폼 행 클릭 → 폼 포커스(↑↓가 행 이동)
-            // ↺ 리셋 어포던스 셀(control/grid 좌단 왼쪽 1칸, view와 같은 위치) 클릭 → 그 항목만 기본값 복원(§6.11).
-            // 변경된(!is_default)·잠금 아닌(!disabled) 행만. 위젯 hit보다 먼저 검사(↺ 셀은 gap이라 위젯 영역과 안 겹침).
+            // ↺ 리셋 어포던스 셀(폼 행 맨 오른쪽 1칸, view의 resetGlyphX와 같은 위치) 클릭 → 그 항목만 기본값 복원(§6.11).
+            // 변경된(!is_default)·잠금 아닌(!disabled) 행만. 위젯 hit보다 먼저 검사(↺ 셀은 reset_gutter라 위젯 영역과 안 겹침).
             if (!r.is_default and !r.disabled) {
-                const block_x: i32 = switch (r.kind) {
-                    .palette_grid => paletteGridRect(l, vi).x,
-                    else => ctrl.x,
-                };
-                const rx: f64 = @floatFromInt(block_x - @as(i32, @intCast(box.cw)));
-                if (ev.x_px >= rx and ev.x_px < rx + @as(f64, @floatFromInt(box.cw))) return .reset_field;
+                const rx: f64 = @floatFromInt(resetGlyphX(l));
+                if (ev.x_px >= rx and ev.x_px < rx + @as(f64, @floatFromInt(reset_icon_cols * box.cw))) return .reset_field;
             }
             switch (r.kind) {
                 .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,

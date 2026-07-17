@@ -21,6 +21,7 @@ static inline bool maru_is_registered_icon_cp(uint32_t cp) {
         case 0xF0008u:
         case 0xF0009u:
         case 0xF000Au:
+        case 0xF000Bu:
             return true;
         default:
             return false;

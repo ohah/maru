@@ -28,6 +28,24 @@
 | 저장 ack 하나로 dirty를 지울 수 있다 | **기각.** save 중 추가 편집이 있으면 이전 revision ack가 최신 dirty를 지우면 안 된다. 외부 disk hash 변경도 별도 충돌이다. | `editor_revision`, `persisted_editor_revision`, `disk_fingerprint` 3축 CAS를 사용한다. |
 | diff before/after 전체 blob을 JSON-RPC로 보낼 수 있다 | **기각.** socket frame 상한은 1 MiB이고 현재 bridge 결과 버퍼는 8 KiB다. `app_session.zig` 한 파일만 약 2.78 MiB다. | metadata 목록과 파일별 bounded open으로 분리한다. UI는 socket을 우회해 공통 L2 dispatcher를 직접 호출한다. |
 
+### 1.1 엔진 결정 (2026-07-17) — CodeMirror 6
+
+위 표의 Monaco RED와 이후 실측을 근거로 **에디터 엔진을 CodeMirror 6(CM6)로 확정한다.** git diff는 `@codemirror/merge`의 `MergeView`(side-by-side)/`unifiedMergeView`(inline)로 구현한다. 근거:
+
+- **WebKit.** Monaco의 RED(§1)는 view-line 텍스트 렌더 실패였고, DiffEditor도 같은 view-line으로 그리므로 **Monaco diff 표시에도 그대로 걸린다**(계산만 되고 화면엔 안 나옴). CM6는 [file-panel.md](file-panel.md)가 이미 WebKit에서 채택·검증한 엔진이다.
+- **엔진 단일화.** 마크다운 편집·코드 편집·diff·hunk staging을 **CM6 하나**로 덮는다. Monaco를 diff에만 써도 마크다운은 CM6라 엔진이 둘이 된다.
+- **hunk staging 적합.** `@codemirror/merge`는 `acceptChunk`/`rejectChunk`가 내장이라 git 헝크 stage/unstage(§단계 계획)에 그대로 맞는다. Monaco DiffEditor는 읽기 중심이라 이게 없다.
+- **크기.** CM6 MergeView diff = **0.38 MB · 워커 0개** (targeted Monaco 4.2 MB · 워커 1개의 1/11). Chrome 실측.
+- **한글 IME.** file-panel이 CM6를 고른 핵심 이유(WebKit 네이티브 IME 위 조합 안정)를 그대로 물려받는다.
+
+**해소되지 않는 것(정직):**
+
+- **`style-src 'unsafe-inline'`은 여전히 필요하다.** CM6도 인라인 style 속성을 쓴다(엄격 `style-src 'self'`에서 위반 4건, `unsafe-inline`에서 0 — Chrome 실측). §7.2 결정은 엔진 무관하게 남되, file-panel이 이미 CM6를 돌리므로 그 CSP 처리를 **공유**한다(editor 때문에 markdown 전역을 새로 약화하는 게 아니다).
+- **CM6 MergeView의 WebKit 직접 검증은 남았다.** file-panel이 검증한 건 CM6 **편집** 경로다. MergeView는 CM6 view 위 얇은 층이라 GREEN 가능성이 높지만 §7.4 gate가 확인한다(바는 훨씬 낮아졌다).
+- **위 실측은 Chrome(Blink)이다.** 제품 gate는 WebKit(§7.4).
+
+**연쇄 정정:** 아래 §3~§11에서 "Monaco"라 쓰인 엔진 소유·probe·gate·의존성 항목은 CM6 기준으로 읽는다. Monaco 전용 zntc 수정 의존은 해소된다(CM6는 file-panel이 이미 번들 중). §1 표는 이 결정에 이른 **기록**으로 남긴다.
+
 ## 2. 현재 코드에서 확인한 경계
 
 - `PanelKind`는 단순 trust bit가 아니다. label·DTO·layout·host config·복원 모델에 관여하는 의미 있는 종류다. 현재 `{ markdown, browser }`뿐이므로 editor를 markdown 라우트로 위장하면 권한과 lifecycle이 결합된다.
@@ -39,7 +57,7 @@
 ## 3. 권장 구조
 
 ```text
-editor WKWebView (Monaco, current text/undo/cursor)
+editor WKWebView (CM6, current text/undo/cursor)
   -> editor-only page shim (bounded request/event DTO)
   -> native editor bridge (method allowlist + EditorGrant)
   -> L2 EditorDispatcher / EditorCore
@@ -79,13 +97,13 @@ L2는 file descriptor, DispatchSource, FSEvents, child process, AppKit/WebKit �
 
 그러므로 **editor 파일 write op를 markdown/뷰어 route에 얹지 않는다**(범위 확대 금지). `browser`는 계속 untrusted이며 editor bridge와 `maru-app://` asset에 접근하지 못한다.
 
-**레이아웃은 공유, trust는 분리(사용자 방향).** git diff·editor는 [file-panel.md](file-panel.md)의 전역 도크와 **동일한 시각 shell**(탭 스트립·헤더 밴드·파일 트리 = GPU chrome, 콘텐츠 rect = WKWebView)을 공유해 UX 일관성과 코드 재사용을 얻는다. 실제로 git diff는 도크의 **또 다른 콘텐츠 kind**(현행 `.md`/`.html` 옆)로 보는 게 자연스럽다. **다만 레이아웃 재사용이 trust 재사용을 뜻하지 않는다** — 같은 도크 안에서도 kind별 origin/CSP/grant는 위 계단대로 분리한다. 이 도크 정합·엔진(CM6/Monaco) 정합은 §10 결정 항목이다.
+**레이아웃은 공유, trust는 분리(사용자 방향).** git diff·editor는 [file-panel.md](file-panel.md)의 전역 도크와 **동일한 시각 shell**(탭 스트립·헤더 밴드·파일 트리 = GPU chrome, 콘텐츠 rect = WKWebView)을 공유해 UX 일관성과 코드 재사용을 얻는다. 실제로 git diff는 도크의 **또 다른 콘텐츠 kind**(현행 `.md`/`.html` 옆)로 보는 게 자연스럽다. **다만 레이아웃 재사용이 trust 재사용을 뜻하지 않는다** — 같은 도크 안에서도 kind별 origin/CSP/grant는 위 계단대로 분리한다. 엔진은 CM6로 확정됐고(§1.1), 도크 정합(a/b)만 §10.0 결정 항목이다.
 
 editor가 markdown과 같은 `maru-app://app` origin을 공유하면 origin pin만으로 두 콘텐츠의 권한을 구분할 수 없다. editor bridge는 main frame + editor exact origin + 해당 `surface_id`의 `.editor` kind를 모두 확인하고, remote/top-level navigation을 거부한다. editor page에서 markdown asset route로 이동해도 grant가 유지되는 구조는 허용하지 않는다.
 
 ### 3.2 editor bridge와 grant
 
-Monaco page가 네이티브 API를 호출해야 하므로 editor에는 좁은 page-world shim을 둔다. isolated-world DOM mailbox도 가능하나 page가 mailbox를 쓸 수 있어 보안상 더 강하지 않고 구현 복잡도만 늘어난다.
+CM6 page가 네이티브 API를 호출해야 하므로 editor에는 좁은 page-world shim을 둔다. isolated-world DOM mailbox도 가능하나 page가 mailbox를 쓸 수 있어 보안상 더 강하지 않고 구현 복잡도만 늘어난다.
 
 `EditorGrant`는 JS가 고르는 bearer nonce가 아니라 native host가 editor surface 생성 시 결합하는 리소스 권한이다.
 
@@ -164,9 +182,9 @@ web/editor/
 
 ## 4. 문서 권위와 저장 CAS
 
-Monaco가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
+CM6가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
 
-native가 전체 text 정본을 보유하지 않는 v1에서는 한 document에 **writable Monaco owner surface 하나**만 둔다. 두 번째 open은 기존 owner를 focus하거나 명시적 read-only snapshot을 연다. owner close/move/crash 때 dirty 여부를 확인한 뒤 owner를 transfer/recover하며, 두 page의 editable model을 실시간 동기화하는 것은 native canonical text 또는 CRDT/OT가 필요하므로 v1 범위 밖이다.
+native가 전체 text 정본을 보유하지 않는 v1에서는 한 document에 **writable CM6 owner surface 하나**만 둔다. 두 번째 open은 기존 owner를 focus하거나 명시적 read-only snapshot을 연다. owner close/move/crash 때 dirty 여부를 확인한 뒤 owner를 transfer/recover하며, 두 page의 editable model을 실시간 동기화하는 것은 native canonical text 또는 CRDT/OT가 필요하므로 v1 범위 밖이다.
 
 L2 `DocumentRegistry`는 동일 text의 두 번째 정본을 상시 유지하지 않고 다음 상태를 소유한다.
 
@@ -196,13 +214,13 @@ DocumentState {
 
 ### 4.1 텍스트 포맷 계약
 
-Monaco 문자열과 디스크 bytes 사이 변환을 암묵적으로 UTF-8이라고 가정하지 않는다.
+CM6 문자열(JS UTF-16 code unit)과 디스크 bytes 사이 변환을 암묵적으로 UTF-8이라고 가정하지 않는다.
 
 - v1 지원 범위는 UTF-8(선택적 BOM) 텍스트로 제한하는 것을 권장한다. invalid UTF-8, UTF-16/32, binary는 읽기 전용 hex/external-open 또는 typed `unsupported_encoding`으로 거부한다.
 - open 결과는 `encoding`, `bom`, `line_ending`(`lf|crlf|mixed`), `has_final_newline`을 함께 반환한다.
 - save 기본은 원본 BOM·우세 개행·마지막 newline 상태 보존이다. 사용자가 명시적으로 바꾸지 않은 포맷을 formatter 결과 때문에 조용히 바꾸지 않는다.
 - mixed line ending을 정규화할지 보존할지는 최초 저장 UX 전에 결정한다.
-- Monaco UTF-16 offset과 LSP UTF-16 position, 디스크 UTF-8 byte offset을 별도 타입으로 다룬다. byte offset을 editor/LSP position으로 재사용하지 않는다.
+- CM6 UTF-16 offset과 LSP UTF-16 position, 디스크 UTF-8 byte offset을 별도 타입으로 다룬다. byte offset을 editor/LSP position으로 재사용하지 않는다.
 - NUL 포함 파일, 매우 긴 한 줄, combining/NFD, lone CR, final newline 없음 fixture를 둔다.
 
 ### 4.2 unsaved recovery와 restore
@@ -270,25 +288,25 @@ Git 의미와 실행 안전도 E1 전에 고정한다.
 - git stderr에는 path/user/repo 정보가 있으므로 raw로 page/trace에 전달하지 않는다.
 - 이후 stage/unstage는 clean/smudge filter, index lock, partial hunk stale context를 별도 보안·CAS 문제로 다룬다.
 
-## 7. 빌드·Monaco·CSP gate
+## 7. 빌드·에디터 엔진·CSP gate
 
 ### 7.1 툴체인
 
 - self-host asset만 사용하고 CDN은 금지한다.
 - **UI 프레임워크를 도입하지 않는다.** editor/git diff는 [file-panel.md](file-panel.md) §2.1이 이미 확정한 **vanilla TS 웹앱 스택**을 공유한다(React/Svelte 런타임은 반응형 트리·라우팅이 없는 이 표면에 과하다 — file-panel §2.1의 근거 그대로). Monaco/CM6·remark류는 프레임워크가 아니라 **DOM 마운트 라이브러리**라 이 결정과 직교한다.
-- **에디터 엔진은 file-panel과 정합해야 한다(미결).** file-panel은 CM6를 이미 확정했고(마크다운 SSOT·한글 IME가 WebKit 네이티브 위에서 가장 안정·sanitize 파이프 공유), 이 문서는 Monaco를 후보로 뒀다. 그런데 **§1·§7.4의 Monaco WKWebView RED가 정확히 file-panel이 CM6를 고른 이유(WebKit 렌더·한글 IME)와 겹친다.** git diff 뷰는 Monaco DiffEditor가 강점이지만, 채택 결정은 §7.4 gate와 file-panel 정합(§10)에 종속된다. **Monaco가 RED로 남으면 CM6 + diff/merge extension을 같은 gate로 비교한다.**
-- Monaco를 쓸 경우 barrel 대신 `editor.api`와 실제 지원 언어 contribution만 import한다.
-- worker URL은 정적 literal로 배선하고 output asset/worker manifest를 검증한다.
-- zntc 최소 버전은 `16f1fda...`의 Monaco 수정이 포함된 릴리스가 나온 뒤 고정한다. 그 전 commit pin은 의존성/재현성 결정을 사용자에게 먼저 보고한다. (엔진이 CM6로 확정되면 Monaco 전용 zntc 수정 의존은 해소된다 — CM6는 file-panel이 이미 번들 중.)
+- **에디터 엔진 = CodeMirror 6 (§1.1 확정).** git diff는 `@codemirror/merge` `MergeView`/`unifiedMergeView`로 구현한다. file-panel이 이미 CM6를 번들·검증하므로 editor/diff는 그 스택을 공유한다(별도 Monaco 엔진·별도 번들 없음).
+- CM6는 필요한 lang/merge/theme extension만 import하고, output asset을 검증한다. (Monaco의 `editor.api`/언어 contribution/worker 배선·barrel 회피는 CM6를 택하며 무의미해졌다.)
+- **worker.** CM6 MergeView diff는 워커가 없다(§1.1 실측). 향후 LSP/무거운 계산에 워커를 붙이면 URL을 정적 literal로 배선하고 manifest를 검증한다.
+- zntc는 file-panel과 같은 버전을 공유한다. Monaco 전용 수정(`16f1fda...`) 의존은 해소됐다. 최소 버전 pin은 file-panel/공용 web workspace 결정을 따른다.
 
-Monaco를 쓸 경우 새 JS toolchain은 아직 프로젝트 의존성으로 승인된 것이 아니다. Phase 0.5A가 green이어도 의존성·license·bundle/RSS 측정 승인을 거쳐야 Phase 1에 들어간다.
+JS toolchain(zntc/web workspace)은 file-panel이 이미 도입 중이므로 editor는 신규 의존을 추가하지 않는다(CM6 merge extension 하나가 증분). bundle/RSS 예산 측정은 §7.4·§9에서 CM6 기준으로 확인한다.
 
 ### 7.2 CSP
 
-`script-src 'unsafe-eval'`이나 remote source는 열지 않는다. 그러나 현재 Monaco는 WebKit PoC에서 inline style을 사용했다. 가능한 선택은 다음 둘이며 Phase 0.5A에서 결정한다.
+`script-src 'unsafe-eval'`이나 remote source는 열지 않는다. 그러나 **CM6도 인라인 style 속성을 쓴다**(§1.1 실측 — 엄격 `style-src 'self'`에서 위반, `unsafe-inline`에서 0). 이건 엔진 무관한 리치 에디터의 성질이라 Monaco를 CM6로 바꿔도 남는다. file-panel이 이미 CM6를 돌리므로 이 CSP 처리는 **공유**하되, 다음 둘 중 하나를 Phase 0.5A에서 확정한다.
 
 1. **권장 후보:** editor origin에만 `style-src 'self' 'unsafe-inline'`을 허용하고 markdown/browser 정책은 유지한다. style 완화가 script 실행 권한으로 번지지 않는지 adversarial fixture로 고정한다.
-2. Monaco style injection을 제거/nonce화할 수 있는 지원 경로를 찾아 엄격 style CSP를 유지한다.
+2. CM6 style을 nonce화/외부화할 수 있는지 검토해 엄격 style CSP를 유지한다. (인라인 `style=` 속성은 nonce가 안 통하므로 실효성은 낮다 — 1안이 유력.)
 
 전역 `csp_header` 하나로 editor 때문에 markdown 정책을 약화하지 않는다. editor별 CSP가 불가능한 현재 구조라면 `.editor` kind/asset resolver와 함께 먼저 분리한다.
 
@@ -298,7 +316,7 @@ Monaco를 쓸 경우 새 JS toolchain은 아직 프로젝트 의존성으로 승
 
 1. 산출물 재파싱과 asset/worker 누락·404 검사
 2. module evaluation과 CSP violation 0 검사
-3. Monaco semantic probe: model text, tokenization, diff line/character decoration, marker, worker roundtrip
+3. CM6 semantic probe: 문서 text, 구문 highlight, MergeView diff chunk/문자 하이라이트, 진단 marker(있으면)
 4. request/result 크기와 worker/process cleanup 검사
 
 Vite는 개발/비교 기준일 뿐 제품 runtime에 포함되지 않는다. Chromium도 제품에 추가하지 않는다. zntc↔Vite pixel 1:1 비교는 릴리스 qualification이나 디버그 artifact로만 사용하며 모든 PR의 필수 gate로 두지 않는다.
@@ -310,7 +328,7 @@ Phase 0.5A 종료 조건은 실제 Maru `WKWebView`, `maru-app://`, editor CSP, 
 - editor text가 non-zero layout으로 실제 표시되고 screenshot에 포함됨
 - caret/selection, ASCII insert/delete, undo/redo
 - 한글 조합 중 preedit, 완성, NFD 입력 fixture, caret 이동, backspace/delete
-- paste/copy, find, `Cmd+S`, Maru 전역 shortcut과 Monaco shortcut 충돌, first-responder 이동
+- paste/copy, find, `Cmd+S`, Maru 전역 shortcut과 CM6 shortcut 충돌, first-responder 이동
 - resize, backing scale, theme 전환, hide/show와 tab/window 이동 뒤 model·selection 보존
 - module worker, diff decoration, marker, syntax token
 - page-world editor bridge allowlist, markdown/browser에서 bridge 부재
@@ -320,7 +338,7 @@ E0.5A PR은 계획 명령 `mise run test-macos-editor-smoke`와 display opt-in `
 
 IME는 synthetic JS/AppKit event만으로 통과 처리하지 않는다. 자동 하니스는 DOM/model 상태를 고정하고, 종료 gate에는 실제 macOS 한글 입력기로 preedit→완성→caret→backspace를 수행한 수동 summary를 함께 요구한다.
 
-현재 이 gate는 **RED**다. 실패 원인을 WebKit 지원 문제, custom-scheme origin/worker 문제, CSS/layout 문제, 하니스 문제로 좁히기 전 Monaco 경로를 “가능”으로 확정하지 않는다. 해결되지 않으면 CodeMirror 6 등 대안을 같은 gate로 비교한다.
+이 gate는 이제 **CM6 MergeView 기준**이다. Monaco RED는 엔진을 CM6로 바꾸며 무효가 됐고(§1.1), CM6 편집 경로는 file-panel이 이미 WebKit에서 통과했다. 남은 건 **CM6 MergeView(diff)를 제품 WebKit에서 직접** 확인하는 것뿐이라 바가 낮다. 만약 MergeView가 WebKit에서 예상 밖으로 막히면 그때 대안(예: 커스텀 vanilla diff 렌더)을 같은 gate로 비교한다.
 
 ## 8. 포맷·린트·LSP
 
@@ -368,10 +386,10 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 ### E0.5A — 제품 WebKit feasibility (현재 RED)
 
 - committed editor smoke asset/harness, debug-only 전용 origin/CSP 실험. 사용자 승인 전 production `PanelKind`/ABI/wire는 바꾸지 않는다.
-- Monaco와 비교 후보를 동일 gate로 실행
+- CM6 MergeView(diff) 제품 WebKit 통과 확인 (편집 경로는 file-panel 재사용)
 - text/caret/edit/IME/worker/diff/marker/cleanup artifact
 - 1/2/4 editor surface에서 web-process RSS, worker 수, hidden/background CPU와 close 뒤 회수 측정
-- **종료:** §7.4 전부 green + dependency/bundle/RSS·surface resource scaling 보고. 실패하면 Monaco 채택 중단 또는 대안 선택.
+- **종료:** §7.4(CM6 MergeView WebKit) green + dependency/bundle/RSS·surface resource scaling 보고. MergeView가 WebKit에서 막히면 대안 diff 렌더를 같은 gate로 비교.
 
 ### E0.5B — 순수 계약
 
@@ -383,7 +401,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 ### E1 — web toolchain + read-only diff
 
-- 승인된 zntc/Monaco 버전 pin과 reproducible build
+- file-panel과 공유하는 zntc/web workspace 버전 pin과 reproducible build (Monaco 전용 pin 없음)
 - `.editor` surface/asset/CSP/bridge, `diff.list`/`diff.open`
 - semantic oracle + 제품 WKWebView regression
 - git comparison/status matrix와 external diff/textconv 실행 차단
@@ -418,10 +436,10 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 다음은 문서만으로 승인된 것으로 간주하지 않는다.
 
-0. **[file-panel.md](file-panel.md)와의 정합 — 가장 상위 결정.** git diff·editor를 (a) 파일 패널 도크의 새 콘텐츠 kind로 넣을지, (b) 별도 `.editor` surface로 둘지. 사용자 방향은 "마크다운 뷰어와 동일 레이아웃"이라 (a)로 기운다. (a)면 이 문서의 `.editor` 전용 kind/origin/bridge 상당 부분이 파일 패널 shell·`maru.file.*` 채널 위 **확장**으로 재작성된다.
-0b. **에디터 엔진 CM6 대 Monaco.** file-panel은 CM6 확정(§7.1). Monaco는 §7.4 WKWebView gate가 RED. git diff는 Monaco DiffEditor가 강하나, RED가 안 풀리거나 도크 정합을 택하면 **CM6 + diff/merge extension**이 유력하다. 이 결정이 §7.1·§7.4·본 §10의 여러 하위 항목(zntc 의존·CSP inline style·번들/RSS)을 연쇄로 바꾼다.
+0b. **에디터 엔진 = CM6 (확정, 2026-07-17 · §1.1).** git diff는 `@codemirror/merge` MergeView/unifiedMergeView, hunk staging은 acceptChunk/rejectChunk. Monaco는 채택하지 않는다(WebKit RED가 diff 표시에도 걸리고, 마크다운이 CM6라 엔진 이원화). 이 확정이 §7.1·§7.4·§9의 Monaco 조건부 항목을 CM6 기준으로 바꿨다. **남은 엔진 관련 결정은 없다** — 아래는 도크 정합과 구현 파라미터.
+0. **[file-panel.md](file-panel.md)와의 도크 정합.** git diff·editor를 (a) 파일 패널 도크의 새 콘텐츠 kind로 넣을지, (b) 별도 `.editor` surface로 둘지. **사용자 방향 = (a)** ("마크다운 뷰어와 동일 레이아웃"). (a)면 이 문서의 `.editor` 전용 kind/origin/bridge 상당 부분이 파일 패널 shell·`maru.file.*` 채널 위 **확장**으로 재작성된다 — 이 구조 재작성이 §3~§8의 후속 편집이다. (b)를 택할 특별한 이유가 없으면 (a)로 확정한다.
 1. `PanelKind.editor`와 ABI/wire 확장 (0에서 (b)를 택할 때만)
-2. Monaco 및 zntc 의존성, 수정 포함 릴리스 대기 대 commit pin (0b에서 Monaco를 택할 때만)
+2. CM6 merge/lang extension 의존 추가와 file-panel 공유 zntc/web workspace 버전 pin (엔진은 §1.1에서 CM6 확정 — Monaco/전용 릴리스 대기 항목은 해소)
 3. editor origin 한정 `style-src 'unsafe-inline'` 허용 여부
 4. 최초 workspace/file/git grant UX와 native `root_id`/root descriptor 발급·회수
 5. 새 파일의 기본 mode 및 기존 ownership/ACL/xattr/hard-link 보존·거부·실패 정책
@@ -433,8 +451,8 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 ## 11. 현재 한계
 
-- **이 문서는 [file-panel.md](file-panel.md)와 아직 완전히 정합되지 않았다.** 파일 패널은 도크 레이아웃·CM6·vanilla 스택·핀 파일 read/write를 이미 확정했고, git diff/editor는 그 위 확장으로 재작성될 가능성이 높다(§10.0). 아래 Monaco 관련 한계는 그 정합에서 CM6를 택하면 상당수 소멸한다.
-- 제품 WKWebView에서 Monaco의 텍스트 표시·편집·IME는 아직 실패/미검증이다.
+- **엔진은 CM6로 확정(§1.1)됐으나 이 문서의 §3~§8은 아직 CM6 세부(MergeView API·acceptChunk staging·CM6 인코딩)로 완전히 재작성되지 않았다.** 도크 정합(§10.0 a/b)도 미결이라, file-panel 확장으로의 구조 재작성이 남았다. 아래 Monaco RED 한계는 채택 안 하므로 해소됐다.
+- 제품 WKWebView에서 **CM6 MergeView(diff)** 직접 검증은 남았다(CM6 편집은 file-panel이 검증). Monaco 텍스트/IME RED는 엔진 교체로 무효.
 - 임시 PoC 하니스와 결과 artifact가 저장소에 없으므로 재현성은 E0.5A가 닫아야 한다.
 - zntc current main 성공은 릴리스/장기 재현성을 보장하지 않는다.
 - safe-save는 요구사항만 검증됐고 구현되지 않았다.

@@ -98,12 +98,16 @@ test("Mermaid SVG sanitizer removes executable and network-capable sinks", () =>
       <use href="https://evil.test/icons.svg#x" />
       <use href="//evil.test/protocol-relative.svg#x" />
       <filter><feImage href="https://evil.test/filter.png" /></filter>
+      <defs><linearGradient id="safe-gradient" /></defs>
+      <rect id="local" fill="url(#safe-gradient)" />
+      <rect id="external" fill="url(https://evil.test/paint.svg#x)" stroke="url(//evil.test/stroke.svg#x)" filter="url(relative.svg#x)" clip-path="url(data:image/svg+xml,x)" mask="u/**/rl(https://evil.test/mask.svg#x)" marker-start="u\\72l(https://evil.test/marker.svg#x)" />
       <text>plain label</text>
     </svg>`,
     testWindow as unknown as Window,
   );
 
   expect(svg).toContain("plain label");
+  expect(svg).toContain('fill="url(#safe-gradient)"');
   expect(svg).not.toContain("onload");
   expect(svg).not.toContain("style");
   expect(svg).not.toContain("foreignObject");
@@ -114,4 +118,9 @@ test("Mermaid SVG sanitizer removes executable and network-capable sinks", () =>
   expect(svg).not.toContain("<use");
   expect(svg).not.toContain("<a ");
   expect(svg).not.toContain("feImage");
+  expect(svg).not.toContain("//evil.test");
+  expect(svg).not.toContain("relative.svg");
+  expect(svg).not.toContain("data:image");
+  expect(svg).not.toContain("u/**/rl");
+  expect(svg).not.toContain("u\\72l");
 });

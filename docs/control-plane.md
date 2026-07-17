@@ -746,7 +746,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - `events.subscribe {filter?}` 필터 스키마.
 - ~~surface 이동(이동성 M3+) 이벤트 어휘: `metadata:window` 구독자의 scope 재평가 동작(구독 유지/해제/removed 중 무엇)~~ **확정([window-surface-mobility.md] §8A.3)**: window-scope 구독은 **유지**하고, 옮겨진 surface에 대해 `session.movedOut`/`movedIn`(membership-changed) notification을 방출한다(`removed`/`closed` 아님 — surface 생존). 재평가는 이동 원자 트랜잭션 안에서 동기 수행. `metadata:self`는 surface_id 불변이라 무영향(응답 메타 window 필드만 갱신). **event 이름·params 확정·구현(M3d-1)**: `session.movedOut{surface_id, from_window, to_window}`·`session.movedIn{surface_id, from_window, to_window}` — `src/session/surface_move.zig`가 이동 원자 트랜잭션 안에서 방출하고 control_plane notification으로 직렬화한다(cross-window일 때만, 옮겨진 surface마다 out+in 둘). 라이브 구독자 fan-out 배선은 M3d-2.
 - 세션 이름/별칭, 영속/재연결(전역 UUID 도입 여부).
-- ~~마크다운 편집 WYSIWYG 시점/방식(뷰어+소스편집은 확정)~~ **방향 확정(2026-07-17)**: v1 = 렌더 토글 + CodeMirror 6 소스 편집([file-panel.md](file-panel.md) FP4·FP6), 인라인 Live Preview(커서 주변만 소스)는 후속([file-panel.md] §13). 호스팅은 워크스페이스 term이 아니라 **창 레벨 전역 도크**(file-panel.md §1). Phase 7 상세 분해는 file-panel.md §10(7a·7b⊂FP2, 7c⊂FP4+FP6, **7d는 md 클릭 라우팅만 FP5** — `panel.bindSession`·`bind` capability·CLI `panel open`은 file-panel §13 후속).
+- ~~마크다운 편집 WYSIWYG 시점/방식(뷰어+소스편집은 확정)~~ **방향 확정(2026-07-17)**: v1 = **읽기 ↔ 소스 편집 토글**(CodeMirror 6 — [file-panel.md](file-panel.md) FP4·FP6), 옵시디언식 인라인 Live Preview(편집=렌더 통합, 소스 편집의 상위 대체)는 후속([file-panel.md] §13 — CM6 커스텀 + 보안 모델 재검토 동반). 호스팅은 워크스페이스 term이 아니라 **창 레벨 전역 도크**(file-panel.md §1). Phase 7 상세 분해는 file-panel.md §10(7a·7b⊂FP2, 7c⊂FP4+FP6, **7d는 md 클릭 라우팅만 FP5** — `panel.bindSession`·`bind` capability·CLI `panel open`은 file-panel §13 후속).
 
 ## 14. 리스크
 

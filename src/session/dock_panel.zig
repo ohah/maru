@@ -5,6 +5,11 @@ const split_tree = @import("split_tree.zig");
 /// 런타임 기본을 사용한다는 뜻이다. FP1이 아직 정해지지 않은 픽셀/point 정책을 선점하지 않게 하는 sentinel이다.
 pub const Side = enum { right, bottom };
 
+/// 창 하나가 보존하는 파일 entry 상한. workspace.v1이 window 한 줄에 반복 키를 두는 FP1 포맷이므로 reader의
+/// 손상-input 작업량 bound와 live 모델의 저장 가능 상태를 같은 계약으로 맞춘다. 비활성 WKWebView 해제 상한(기본 8)과
+/// 달리 이 값은 가벼운 탭 metadata 수 상한이다.
+pub const max_entries: usize = 256;
+
 /// 콘텐츠 종류는 WebKit 구성 선택에 쓰이는 L2 정책 값이다. 브라우저 탭을 도크로 보내는 후속 확장은 이 닫힌 목록에
 /// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1).
 pub const EntryKind = enum { markdown, html };
@@ -60,7 +65,7 @@ pub const DockGroup = struct {
     }
 
     /// 파일 경로는 한 그룹에서 유일하다. 이미 열린 경로면 entry를 늘리지 않고 기존 탭만 활성화한다.
-    pub fn open(self: *DockGroup, path: []const u8, kind: EntryKind) !usize {
+    fn openLocal(self: *DockGroup, path: []const u8, kind: EntryKind) !usize {
         if (path.len == 0) return error.InvalidPath;
         if (self.findPath(path)) |i| {
             self.active = i;
@@ -118,6 +123,47 @@ pub const DockPanel = struct {
         };
     }
 
+    pub const OpenResult = struct {
+        group: *DockGroup,
+        index: usize,
+        created: bool,
+    };
+
+    /// 경로 유일성은 그룹이 아니라 창 도크 전체 불변식이다. FP8 분할 뒤에도 같은 파일을 다른 그룹 target으로 다시
+    /// 열면 원래 entry를 활성화하고 그 group/index를 돌려 UI가 해당 그룹에 focus를 옮길 수 있게 한다.
+    pub fn open(self: *DockPanel, target: *DockGroup, path: []const u8, kind: EntryKind) !OpenResult {
+        if (path.len == 0) return error.InvalidPath;
+        if (!containsGroup(self.tree, target)) return error.GroupNotFound;
+        if (findPath(self.tree, path)) |found| {
+            found.group.active = found.index;
+            return .{ .group = found.group, .index = found.index, .created = false };
+        }
+        if (entryCount(self.tree) >= max_entries) return error.TooManyEntries;
+        const index = try target.openLocal(path, kind);
+        return .{ .group = target, .index = index, .created = true };
+    }
+
+    fn containsGroup(node: DockTree.Node, target: *DockGroup) bool {
+        return switch (node) {
+            .leaf => |group| group == target,
+            .split => |sp| containsGroup(sp.a, target) or containsGroup(sp.b, target),
+        };
+    }
+
+    fn findPath(node: DockTree.Node, path: []const u8) ?struct { group: *DockGroup, index: usize } {
+        return switch (node) {
+            .leaf => |group| if (group.findPath(path)) |index| .{ .group = group, .index = index } else null,
+            .split => |sp| findPath(sp.a, path) orelse findPath(sp.b, path),
+        };
+    }
+
+    fn entryCount(node: DockTree.Node) usize {
+        return switch (node) {
+            .leaf => |group| group.entries.items.len,
+            .split => |sp| entryCount(sp.a) + entryCount(sp.b),
+        };
+    }
+
     /// FP8 UI가 쓸 additive 연산을 FP1 모델에서 먼저 고정한다. target leaf는 a에 남고 새 빈 그룹은 b가 된다.
     pub fn splitGroup(self: *DockPanel, target: *DockGroup, direction: split_tree.SplitDirection, ratio: f32) !*DockGroup {
         const group = try self.allocator.create(DockGroup);
@@ -149,6 +195,7 @@ pub const DockPanel = struct {
 
     /// workspace.v1의 단일 그룹 DTO에서 라이브 소유 모델을 복구한다. dirty는 persisted DTO에 없으므로 항상 false다.
     pub fn restore(allocator: std.mem.Allocator, state: PersistedState) !DockPanel {
+        if (state.entries.len > max_entries) return error.InvalidPersistedState;
         var panel = try DockPanel.init(allocator);
         errdefer panel.deinit();
         panel.side = state.side;
@@ -159,7 +206,7 @@ pub const DockPanel = struct {
         var active: ?usize = null;
         for (state.entries) |entry| {
             if (entry.path.len == 0 or group.findPath(entry.path) != null) return error.InvalidPersistedState;
-            const i = try group.open(entry.path, entry.kind);
+            const i = try group.openLocal(entry.path, entry.kind);
             group.entries.items[i].mode = entry.mode;
             group.entries.items[i].dirty = false;
             if (entry.active) {
@@ -177,7 +224,8 @@ pub const DockPanel = struct {
     pub fn persistedState(self: *DockPanel, allocator: std.mem.Allocator) !PersistedState {
         const group = self.singleGroup() orelse return error.MultipleGroupsNotPersistable;
         if ((group.entries.items.len > 0 and group.active == null) or
-            (group.active != null and group.active.? >= group.entries.items.len)) return error.InvalidPersistedState;
+            (group.active != null and group.active.? >= group.entries.items.len) or
+            group.entries.items.len > max_entries) return error.InvalidPersistedState;
         const entries = try allocator.alloc(PersistedEntry, group.entries.items.len);
         for (group.entries.items, 0..) |entry, i| entries[i] = .{
             .path = entry.path,
@@ -204,10 +252,10 @@ test "dock panel: single group owns entries and reopening a path activates inste
     try std.testing.expect(!panel.collapsed);
     try std.testing.expectEqual(@as(usize, 1), DockTree.leafCount(panel.tree));
 
-    try std.testing.expectEqual(@as(usize, 0), try group.open("/tmp/a.md", .markdown));
-    try std.testing.expectEqual(@as(usize, 1), try group.open("/tmp/b.html", .html));
+    try std.testing.expectEqual(@as(usize, 0), (try panel.open(group, "/tmp/a.md", .markdown)).index);
+    try std.testing.expectEqual(@as(usize, 1), (try panel.open(group, "/tmp/b.html", .html)).index);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
-    try std.testing.expectEqual(@as(usize, 0), try group.open("/tmp/a.md", .markdown));
+    try std.testing.expectEqual(@as(usize, 0), (try panel.open(group, "/tmp/a.md", .markdown)).index);
     try std.testing.expectEqual(@as(?usize, 0), group.active);
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
 
@@ -222,9 +270,9 @@ test "dock panel: replaceLeaf split lays out two file groups in the dock rect" {
     defer panel.deinit();
 
     const first = panel.singleGroup().?;
-    _ = try first.open("/tmp/a.md", .markdown);
+    _ = try panel.open(first, "/tmp/a.md", .markdown);
     const second = try panel.splitGroup(first, .horizontal, 0.5);
-    _ = try second.open("/tmp/b.md", .markdown);
+    _ = try panel.open(second, "/tmp/b.md", .markdown);
 
     var out: std.ArrayList(DockTree.LeafRect) = .empty;
     defer out.deinit(std.testing.allocator);
@@ -243,9 +291,9 @@ test "dock panel: nested three-group tree emits dividers and removeLeaf restores
     const a = panel.singleGroup().?;
     const b = try panel.splitGroup(a, .horizontal, 0.5);
     const c = try panel.splitGroup(b, .vertical, 0.25);
-    _ = try a.open("/tmp/a.md", .markdown);
-    _ = try b.open("/tmp/b.md", .markdown);
-    _ = try c.open("/tmp/c.html", .html);
+    _ = try panel.open(a, "/tmp/a.md", .markdown);
+    _ = try panel.open(b, "/tmp/b.md", .markdown);
+    _ = try panel.open(c, "/tmp/c.html", .html);
 
     var dividers: std.ArrayList(DockTree.DividerSeg) = .empty;
     defer dividers.deinit(std.testing.allocator);
@@ -310,8 +358,8 @@ test "dock panel: live single group exports workspace DTO and rejects unrepresen
     panel.size = 480;
 
     const group = panel.singleGroup().?;
-    _ = try group.open("/tmp/a.md", .markdown);
-    _ = try group.open("/tmp/b.html", .html);
+    _ = try panel.open(group, "/tmp/a.md", .markdown);
+    _ = try panel.open(group, "/tmp/b.html", .html);
     group.entries.items[0].dirty = true;
     group.entries.items[0].mode = .source_edit;
     group.active = 0;
@@ -337,4 +385,39 @@ test "dock panel: live single group exports workspace DTO and rejects unrepresen
         .{ .path = "/tmp/a.md", .kind = .markdown, .active = false },
     };
     try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, .{ .entries = &ambiguous }));
+}
+
+test "dock panel: reopening a path in another group activates the original entry without duplicating it" {
+    var panel = try DockPanel.init(std.testing.allocator);
+    defer panel.deinit();
+
+    const first = panel.singleGroup().?;
+    const created = try panel.open(first, "/tmp/a.md", .markdown);
+    try std.testing.expect(created.created);
+    const second = try panel.splitGroup(first, .horizontal, 0.5);
+
+    const reopened = try panel.open(second, "/tmp/a.md", .markdown);
+    try std.testing.expect(!reopened.created);
+    try std.testing.expectEqual(first, reopened.group);
+    try std.testing.expectEqual(@as(usize, 0), reopened.index);
+    try std.testing.expectEqual(@as(?usize, 0), first.active);
+    try std.testing.expectEqual(@as(usize, 0), second.entries.items.len);
+}
+
+test "dock panel: live entry bound matches workspace persistence at 256 and rejects 257" {
+    var panel = try DockPanel.init(std.testing.allocator);
+    defer panel.deinit();
+    const group = panel.singleGroup().?;
+
+    var path_buf: [64]u8 = undefined;
+    for (0..max_entries) |i| {
+        const path = try std.fmt.bufPrint(&path_buf, "/tmp/{d}.md", .{i});
+        _ = try panel.open(group, path, .markdown);
+    }
+    try std.testing.expectEqual(max_entries, group.entries.items.len);
+    try std.testing.expectError(error.TooManyEntries, panel.open(group, "/tmp/overflow.md", .markdown));
+
+    var state = try panel.persistedState(std.testing.allocator);
+    defer freePersistedState(std.testing.allocator, &state);
+    try std.testing.expectEqual(max_entries, state.entries.len);
 }

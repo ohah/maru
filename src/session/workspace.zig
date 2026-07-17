@@ -37,7 +37,7 @@ pub const max_line_fields = max_agent_argv + 256;
 /// 한 창에 영속할 파일 도크 entry sanity 상한. 라이브 WKWebView 상한(기본 8)과 달리 해제된 탭 metadata는 남으므로
 /// 더 넉넉해야 하지만, window 한 줄의 반복 키가 손상 파일에서 무한히 늘어나는 것은 막아야 한다. 256은 실제 열린 파일
 /// 수보다 충분히 크고 max_line_fields의 반복 키 예산 안에 있다.
-pub const max_dock_entries = 256;
+pub const max_dock_entries = dock_panel.max_entries;
 
 pub const SplitDirection = split_tree.SplitDirection;
 
@@ -365,21 +365,33 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
         .h = try f.getInt("win-h", i32, 0),
     } else null;
 
+    var dock_supported = true;
     const dock_side: dock_panel.Side = if (f.find("dock-side")) |field| blk: {
         if (field.is_quoted) return error.BadLine;
         if (std.mem.eql(u8, field.raw, "right")) break :blk .right;
         if (std.mem.eql(u8, field.raw, "bottom")) break :blk .bottom;
-        return error.BadLine;
+        // 미래 side는 이 버전이 도크를 해석할 수 없다는 뜻이다. terminal workspace 전체를 버리지 않고 도크만 기본값으로.
+        dock_supported = false;
+        break :blk .right;
     } else .right;
     const dock_size = try f.getUint("dock-size", u32, 0);
     const dock_collapsed = (try f.getUint("dock-collapsed", u8, 0)) != 0;
     var dock_entries: std.ArrayList(dock_panel.PersistedEntry) = .empty;
     var active_entries: usize = 0;
+    var dock_entry_fields: usize = 0;
     for (f.fields) |field| {
         if (!std.mem.eql(u8, field.key, "dock-entry")) continue;
-        if (!field.is_quoted or dock_entries.items.len >= max_dock_entries) return error.BadLine;
+        if (!field.is_quoted or dock_entry_fields >= max_dock_entries) return error.BadLine;
+        dock_entry_fields += 1;
         const encoded = try unescapeQuoted(a, field.raw);
-        const entry = try parseDockEntry(encoded);
+        const entry = parseDockEntry(encoded) catch |err| switch (err) {
+            error.UnsupportedDockValue => {
+                dock_supported = false;
+                continue;
+            },
+            error.BadLine => return error.BadLine,
+        };
+        if (!dock_supported) continue;
         for (dock_entries.items) |existing| {
             if (std.mem.eql(u8, existing.path, entry.path)) return error.BadLine;
         }
@@ -387,13 +399,18 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
         try dock_entries.append(a, entry);
     }
     // 비어 있으면 active 0, entry가 있으면 정확히 하나. 도크 탭 스트립이 복원 직후 표시할 파일을 모호하게 두지 않는다.
-    if ((dock_entries.items.len == 0 and active_entries != 0) or
-        (dock_entries.items.len > 0 and active_entries != 1)) return error.BadLine;
-    const dock: dock_panel.PersistedState = .{
-        .side = dock_side,
-        .size = dock_size,
-        .collapsed = dock_collapsed,
-        .entries = try dock_entries.toOwnedSlice(a),
+    const dock: dock_panel.PersistedState = if (!dock_supported)
+        .{}
+    else blk: {
+        // 비어 있으면 active 0, entry가 있으면 정확히 하나. 도크 탭 스트립이 복원 직후 표시할 파일을 모호하게 두지 않는다.
+        if ((dock_entries.items.len == 0 and active_entries != 0) or
+            (dock_entries.items.len > 0 and active_entries != 1)) return error.BadLine;
+        break :blk .{
+            .side = dock_side,
+            .size = dock_size,
+            .collapsed = dock_collapsed,
+            .entries = try dock_entries.toOwnedSlice(a),
+        };
     };
 
     var tabs: std.ArrayList(Tab) = .empty;
@@ -402,7 +419,9 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
     return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock, .tabs = try tabs.toOwnedSlice(a) };
 }
 
-fn parseDockEntry(encoded: []const u8) ParseError!dock_panel.PersistedEntry {
+const DockEntryParseError = error{ BadLine, UnsupportedDockValue };
+
+fn parseDockEntry(encoded: []const u8) DockEntryParseError!dock_panel.PersistedEntry {
     var pos: usize = 0;
     const kind_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
     const mode_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
@@ -415,13 +434,13 @@ fn parseDockEntry(encoded: []const u8) ParseError!dock_panel.PersistedEntry {
     else if (std.mem.eql(u8, kind_raw, "html"))
         .html
     else
-        return error.BadLine;
+        return error.UnsupportedDockValue;
     const mode: dock_panel.Mode = if (std.mem.eql(u8, mode_raw, "read"))
         .read
     else if (std.mem.eql(u8, mode_raw, "source-edit"))
         .source_edit
     else
-        return error.BadLine;
+        return error.UnsupportedDockValue;
     const active = if (std.mem.eql(u8, active_raw, "0"))
         false
     else if (std.mem.eql(u8, active_raw, "1"))
@@ -1597,5 +1616,46 @@ test "workspace dock FP1: window 라인 flat 키는 legacy key reader가 skip �
         .{ .path = "/tmp/a.md", .kind = .markdown, .active = false },
     };
     const invalid_windows = [_]Window{.{ .dock = .{ .entries = &invalid_entries }, .tabs = &.{} }};
+    try std.testing.expectError(error.InvalidDockState, serialize(std.testing.allocator, .{ .windows = &invalid_windows }));
+}
+
+test "workspace dock FP1: 미래 kind나 mode는 도크만 기본값으로 강등하고 terminal workspace는 복원한다" {
+    const future_kind = header ++ "\n" ++
+        "window tabs=1 active-tab=0 dock-side=bottom dock-entry=\"browser:read:1:19:https://example.com\"\n" ++
+        "tab panes=1 custom-name=\"kept\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/work\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    var parsed_kind = try parse(std.testing.allocator, future_kind);
+    defer parsed_kind.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed_kind.workspace.windows[0].tabs.len);
+    try std.testing.expectEqualStrings("kept", parsed_kind.workspace.windows[0].tabs[0].custom_name);
+    try std.testing.expectEqualStrings("/work", parsed_kind.workspace.windows[0].tabs[0].panes[0].surfaces[0].cwd);
+    try std.testing.expectEqual(dock_panel.Side.right, parsed_kind.workspace.windows[0].dock.side);
+    try std.testing.expectEqual(@as(usize, 0), parsed_kind.workspace.windows[0].dock.entries.len);
+
+    const future_mode = header ++ "\n" ++
+        "window tabs=0 active-tab=0 dock-entry=\"markdown:live-preview:1:9:/tmp/a.md\"\n";
+    var parsed_mode = try parse(std.testing.allocator, future_mode);
+    defer parsed_mode.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed_mode.workspace.windows[0].dock.entries.len);
+}
+
+test "workspace dock FP1: 공유 entry 상한 256은 writer-reader 왕복하고 257은 writer가 거부한다" {
+    var path_storage: [max_dock_entries + 1][32]u8 = undefined;
+    var entries: [max_dock_entries + 1]dock_panel.PersistedEntry = undefined;
+    for (&entries, 0..) |*entry, i| {
+        const path = try std.fmt.bufPrint(&path_storage[i], "/tmp/{d}.md", .{i});
+        entry.* = .{ .path = path, .kind = .markdown, .active = i == 0 };
+    }
+
+    const valid_windows = [_]Window{.{ .dock = .{ .entries = entries[0..max_dock_entries] }, .tabs = &.{} }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &valid_windows });
+    defer std.testing.allocator.free(text);
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(max_dock_entries, parsed.workspace.windows[0].dock.entries.len);
+
+    const invalid_windows = [_]Window{.{ .dock = .{ .entries = &entries }, .tabs = &.{} }};
     try std.testing.expectError(error.InvalidDockState, serialize(std.testing.allocator, .{ .windows = &invalid_windows }));
 }

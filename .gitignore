@@ -2,5 +2,7 @@ references/
 .zig-cache/
 zig-out/
 dist/
+web/node_modules/
+web/dist/
 .DS_Store
 tests/oracle/alacritty-dumper/target/

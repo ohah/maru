@@ -1,5 +1,6 @@
 [tools]
 zig = "0.16.0"
+bun = "1.3.11"
 
 [tasks.build]
 description = "Build Maru"
@@ -172,6 +173,34 @@ run = "zig build check-boundaries"
 [tasks.check]
 description = "Check format, tests, boundaries, and build"
 depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "build"]
+
+[tasks."web:build"]
+description = "Build the file-panel web bundle and verify its SRI"
+run = "bun run --cwd web web:build"
+
+[tasks."web:test"]
+description = "Run file-panel renderer and sanitizer tests"
+run = "bun run --cwd web web:test"
+
+[tasks."web:lint"]
+description = "Lint file-panel TypeScript with oxlint"
+run = "bun run --cwd web web:lint"
+
+[tasks."web:fmt"]
+description = "Format file-panel TypeScript with oxfmt"
+run = "bun run --cwd web web:fmt"
+
+[tasks."web:fmt-check"]
+description = "Check file-panel TypeScript formatting"
+run = "bun run --cwd web web:fmt-check"
+
+[tasks."web:licenses"]
+description = "Audit the locked web dependency license set"
+run = "bun run --cwd web web:licenses"
+
+[tasks."web:check"]
+description = "Run the opt-in file-panel web build, tests, lint, format, and license gates"
+run = "bun run --cwd web web:check"
 
 [tasks.vttest]
 description = "Launch the Maru app for local vttest visual conformance (BSD tool; run `vttest` inside)"

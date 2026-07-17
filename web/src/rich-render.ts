@@ -15,8 +15,11 @@ export function sanitizeMermaidSvg(svg: string, targetWindow: Window): string {
   const purifier = createDOMPurify(targetWindow);
   return purifier.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true },
-    FORBID_TAGS: ["script", "foreignObject", "style"],
-    FORBID_ATTR: ["style"],
+    // strict Mermaid mode disables click links, so these URL-bearing elements have
+    // no allowed use. Removing the element and href forms also blocks SVG image,
+    // external <use>, filter image, and anchor navigation after render.
+    FORBID_TAGS: ["script", "foreignObject", "style", "image", "use", "feImage", "a"],
+    FORBID_ATTR: ["style", "href", "xlink:href", "xlinkHref", "src"],
     ALLOW_UNKNOWN_PROTOCOLS: false,
   });
 }

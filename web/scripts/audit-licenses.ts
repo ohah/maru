@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { reviewedLicense } from "./license-policy";
 
 const allowed = new Set([
   "MIT",
@@ -58,14 +59,16 @@ for (const manifest of manifests) {
     version?: string;
     license?: string;
   };
-  if (pkg.name === undefined || pkg.version === undefined) continue;
-
-  let license = pkg.license;
-  // khroma@2.1.0 omits the package.json field but ships a standard MIT license file.
-  if (license === undefined && pkg.name === "khroma") {
-    const text = await readFile(join(dirname(manifest), "license"), "utf8");
-    if (text.startsWith("The MIT License")) license = "MIT";
+  if (pkg.name === undefined || pkg.version === undefined) {
+    rejected.push("package-manifest:missing-name-or-version");
+    continue;
   }
+
+  let bundledLicense: Uint8Array | undefined;
+  if (pkg.name === "khroma" && pkg.version === "2.1.0" && pkg.license === undefined) {
+    bundledLicense = await readFile(join(dirname(manifest), "license"));
+  }
+  const license = reviewedLicense(pkg, bundledLicense);
 
   const key = `${pkg.name}@${pkg.version}`;
   if (license === undefined || !allowed.has(license))

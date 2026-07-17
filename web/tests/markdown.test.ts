@@ -71,6 +71,19 @@ flowchart TD
     expect(mermaidConfig.securityLevel).toBe("strict");
     expect(mermaidConfig.htmlLabels).toBe(false);
   });
+
+  test("removes resource sinks emitted by untrusted KaTeX input after the sanitizer boundary", () => {
+    const html = renderMarkdown(`${String.raw`$\color{url(https://evil.test/a.css)}{x}$`}
+
+${String.raw`$\href{https://evil.test/link}{x}$`}
+
+${String.raw`$\includegraphics{https://evil.test/image.png}$`}`);
+
+    expect(html).toContain("katex-error");
+    expect(html).not.toContain("style=");
+    expect(html).not.toContain('href="https://evil.test');
+    expect(html).not.toContain("src=");
+  });
 });
 
 test("Mermaid SVG sanitizer removes executable and network-capable sinks", () => {
@@ -80,15 +93,25 @@ test("Mermaid SVG sanitizer removes executable and network-capable sinks", () =>
       <style>@import url(https://example.com/leak.css)</style>
       <foreignObject><iframe src="https://example.com"></iframe></foreignObject>
       <a href="javascript:alert(2)"><text>safe label</text></a>
+      <a href="https://evil.test/link"><text>remote link</text></a>
+      <image href="https://evil.test/image.png" />
+      <use href="https://evil.test/icons.svg#x" />
+      <use href="//evil.test/protocol-relative.svg#x" />
+      <filter><feImage href="https://evil.test/filter.png" /></filter>
+      <text>plain label</text>
     </svg>`,
     testWindow as unknown as Window,
   );
 
-  expect(svg).toContain("safe label");
+  expect(svg).toContain("plain label");
   expect(svg).not.toContain("onload");
   expect(svg).not.toContain("style");
   expect(svg).not.toContain("foreignObject");
   expect(svg).not.toContain("iframe");
   expect(svg).not.toContain("javascript:");
   expect(svg).not.toContain("https://");
+  expect(svg).not.toContain("<image");
+  expect(svg).not.toContain("<use");
+  expect(svg).not.toContain("<a ");
+  expect(svg).not.toContain("feImage");
 });

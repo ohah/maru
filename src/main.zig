@@ -676,6 +676,14 @@ fn runBrowserExecuteScript(
                     break :done;
                 },
                 .done => break :done,
+                .error_response => {
+                    // 서버가 정상 JSON-RPC error(script_error·result_too_large·timeout·unauthorized 등) 반환 — 일반 "잘못된
+                    // stream" 대신 실제 code/message를 stderr에 내고 exit 1(부분 result는 안 쓴다). renderResponse는 error
+                    // 응답에서 kind를 안 쓴다(.exec는 표식일 뿐). 성공 결과만 stdout으로 나간다(계약 유지).
+                    maru.cli.browser.renderResponse(allocator, line, .exec, stderr) catch {};
+                    stderr.flush() catch {};
+                    return error.UnknownCommand;
+                },
                 .failed => return browserExecuteError(stderr, "서버가 잘못된 executeScript stream을 반환했습니다"),
             }
         }
@@ -846,6 +854,13 @@ fn runBrowserScreenshot(
                     result.appendSlice(allocator, bytes) catch return error.OutOfMemory;
                 },
                 .done => break :done,
+                .error_response => {
+                    // 서버가 정상 JSON-RPC error(unauthorized·surface 없음 등) 반환 — 일반 "잘못된 stream" 대신 실제
+                    // code/message를 stderr에 내고 exit 1. renderResponse는 error 응답에서 kind를 안 쓴다(.ok는 표식일 뿐).
+                    maru.cli.browser.renderResponse(allocator, line, .ok, stderr) catch {};
+                    stderr.flush() catch {};
+                    return error.UnknownCommand;
+                },
                 .failed => return browserScreenshotError(stderr, "서버가 잘못된 screenshot stream을 반환했습니다"),
             }
         }

@@ -975,6 +975,7 @@ pub const ExecuteScriptStreamValidator = struct {
         need_more,
         chunk: []const u8,
         inline_result: []const u8,
+        error_response, // 서버가 정상 JSON-RPC error(script_error·result_too_large·timeout·unauthorized 등) 반환 — caller가 원 응답을 renderResponse해 실제 code/message를 보임
         done,
         failed,
     };
@@ -1034,7 +1035,14 @@ pub const ExecuteScriptStreamValidator = struct {
     }
 
     fn feedResponse(self: *ExecuteScriptStreamValidator, response: cp.Response) std.mem.Allocator.Error!Step {
-        if (!cp.idEql(response.id, self.request_id) or response.err != null) return .failed;
+        if (!cp.idEql(response.id, self.request_id)) return .failed;
+        // 정상 JSON-RPC error 응답은 stream 손상이 아니라 **실제 결과**다(script_error·result_too_large·timeout·unauthorized).
+        // .failed로 뭉개 일반 "잘못된 stream" 메시지로 감추면 에이전트가 실패 원인을 못 본다 — caller가 원 응답 라인을
+        // renderResponse해 실제 code/message를 내게 terminal error 신호를 준다(WrappedResultStreamValidator와 동형 — 리뷰).
+        if (response.err != null) {
+            self.terminal = true;
+            return .error_response;
+        }
         const obj = switch (response.result orelse return .failed) {
             .object => |o| o,
             else => return .failed,
@@ -1206,6 +1214,7 @@ pub const ScreenshotStreamValidator = struct {
     pub const Step = union(enum) {
         need_more,
         chunk: []const u8,
+        error_response, // 서버가 정상 JSON-RPC error(unauthorized·surface 없음 등) 반환 — caller가 원 응답을 renderResponse해 실제 code/message를 보임
         done,
         failed,
     };
@@ -1264,7 +1273,13 @@ pub const ScreenshotStreamValidator = struct {
     }
 
     fn feedResponse(self: *ScreenshotStreamValidator, response: cp.Response) Step {
-        if (!cp.idEql(response.id, self.request_id) or response.err != null) return .failed;
+        if (!cp.idEql(response.id, self.request_id)) return .failed;
+        // 정상 JSON-RPC error 응답(unauthorized·surface 없음 등)은 stream 손상이 아니라 실제 결과다 — .failed로 일반
+        // 메시지에 감추지 말고 caller가 원 응답을 renderResponse해 실제 code/message를 내게 한다(exec/wrapped와 동형 — 리뷰).
+        if (response.err != null) {
+            self.terminal = true;
+            return .error_response;
+        }
         const obj = switch (response.result orelse return .failed) {
             .object => |o| o,
             else => return .failed,
@@ -1546,6 +1561,17 @@ test "ExecuteScriptStreamValidator: chunked와 inline 결과를 bounded 검증" 
         }
     }
     {
+        // 정상 JSON-RPC error 응답(script_error 등, id 일치)은 stream 손상(.failed) 아니라 **실제 결과** → .error_response
+        // (caller가 원 응답을 renderResponse해 실제 code/message를 냄 — 일반 "잘못된 stream"으로 감추던 회귀 가드, 리뷰).
+        var errv = ExecuteScriptStreamValidator.init(testing.allocator, request_id, 512 * 1024);
+        defer errv.deinit();
+        try testing.expect((try errv.feed("{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32006,\"message\":\"script error\"}}", &scratch)) == .error_response);
+        // id 불일치 error는 여전히 stream 손상 → .failed(엉뚱한 응답을 정상 error로 오인 금지).
+        var mism = ExecuteScriptStreamValidator.init(testing.allocator, request_id, 512 * 1024);
+        defer mism.deinit();
+        try testing.expect((try mism.feed("{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32006,\"message\":\"x\"}}", &scratch)) == .failed);
+    }
+    {
         var empty = ExecuteScriptStreamValidator.init(testing.allocator, request_id, 16 * 1024 * 1024);
         defer empty.deinit();
         const empty_chunk = "{\"jsonrpc\":\"2.0\",\"method\":\"browser.executeScriptChunk\",\"params\":{\"request_id\":1,\"result_id\":7,\"seq\":0,\"encoding\":\"base64-json\",\"data\":\"\"}}";
@@ -1642,6 +1668,13 @@ test "ScreenshotStreamValidator: PNG header와 terminal byte metadata를 검증"
 
     var empty = ScreenshotStreamValidator.init(.{ .number = 1 });
     try testing.expect((try empty.feed(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"browser.screenshotChunk\",\"params\":{\"capture_id\":9,\"seq\":0,\"encoding\":\"base64\",\"data\":\"\"}}", &scratch)) == .failed);
+
+    // 정상 JSON-RPC error 응답(id 일치, unauthorized·surface 없음 등)은 stream 손상 아니라 실제 결과 → .error_response
+    // (caller가 renderResponse해 실제 code/message를 냄 — 리뷰 회귀 가드). id 불일치 error는 여전히 .failed.
+    var errv = ScreenshotStreamValidator.init(.{ .number = 1 });
+    try testing.expect((try errv.feed(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", &scratch)) == .error_response);
+    var errmis = ScreenshotStreamValidator.init(.{ .number = 1 });
+    try testing.expect((try errmis.feed(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", &scratch)) == .failed);
 }
 
 // ── browser list(§9.6 발견) 파서·wire·렌더 단위 ──

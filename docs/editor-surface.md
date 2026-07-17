@@ -288,6 +288,18 @@ Git 의미와 실행 안전도 E1 전에 고정한다.
 - git stderr에는 path/user/repo 정보가 있으므로 raw로 page/trace에 전달하지 않는다.
 - 이후 stage/unstage는 clean/smudge filter, index lock, partial hunk stale context를 별도 보안·CAS 문제로 다룬다.
 
+### 6.1 에이전트 턴 diff (agent-turn base)
+
+git 기준(HEAD/index/worktree) 외에 **"에이전트가 방금 바꾼 것"**을 diff base로 제공한다. 이는 git 개념이 아니라 **턴 경계 스냅샷**이 필요하다. Codex가 "Last turn"을 쉽게 하는 건 자기가 에이전트 런타임이라서인데, **maru는 에이전트를 소유하지 않고도** [agent_transcript.zig](../src/session/agent_transcript.zig)로 **claude·codex 양쪽 세션 transcript를 이미 파싱**해 턴 경계(working/idle/interrupted)를 안다. 따라서 maru의 turn-base는 **호스팅하는 아무 에이전트에나** 적용되는, Codex보다 넓은 기능이 될 수 있다.
+
+- **필요한 신규 조각은 "턴 시작 시점의 트리 스냅샷" 하나**다. 턴 감지(idle→working 전이)는 이미 있으므로, 그 경계에서 작업트리 baseline을 캡처한다. `diff.list`의 base로 `turn:<n>`을 받으면 현재 worktree ↔ 그 스냅샷을 비교한다.
+- **스냅샷 = 턴별 ring buffer.** 매 턴 경계마다 하나씩 쌓이므로 "마지막 턴"뿐 아니라 **N턴 전·임의 턴·턴 범위**가 전부 같은 메커니즘으로 나온다(UI는 턴 타임라인 스크러버). transcript가 이미 전체 턴을 enumerate하므로 각 스냅샷은 transcript 턴 identity와 짝지어 둔다.
+- **스냅샷 방식(비용순 결정 대상)**: ① `git write-tree`(변경 blob만 기록, tree OID만 보관 — 값쌈) vs ② 에이전트가 만진 파일만(transcript 편집 경로/FSEvents로 좁힘 — 대용량 repo 유리). tree OID는 git 히스토리와 무관한 content 스냅샷이라 그 사이 commit/rebase가 있어도 유효하다.
+- **경계·정직**: (a) maru가 그 순간 transcript를 추적 중이어야 스냅샷이 찍힌다(상시 추적하므로 전이마다 캡처 가능하나 배관은 신규). (b) "턴"=한 assistant 응답 단위라 그 안의 여러 편집이 한 turn diff로 묶인다(Codex "Last turn"과 동형). (c) 보관 개수(ring buffer 크기)·세션 경계·저장 위치(git object store vs maru shadow)는 결정 사항.
+- 이 base는 **read 전용**이라 `git_read`와 무관한 별도 위험이 없다(스냅샷 캡처는 write-tree/파일 read뿐, 작업트리 변형 없음). 다만 tree OID 캡처가 index를 건드리지 않도록 **임시 index**(`GIT_INDEX_FILE`)로 격리한다.
+
+**결정(§10에 추가)**: 턴 경계 스냅샷을 ①write-tree vs ②touched-files로 할지, ring buffer 보관 정책(개수·세션 수명·저장 위치), 그리고 turn-base를 v1에 넣을지(리뷰 UX의 핵심이라 기본 base 후보) 아니면 E2 후속으로 둘지.
+
 ## 7. 빌드·에디터 엔진·CSP gate
 
 ### 7.1 툴체인
@@ -448,6 +460,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 8. 동일 파일을 여러 surface에서 여는 UX와 app-global document session 공유 방식
 9. dirty recovery의 journal 대 native shadow, 기본 활성/opt-out UX, 최대 용량, 보존 기간, purge UX
 10. git diff 기준(HEAD/index/worktree) 기본값과 untracked/conflict/submodule 표시 범위
+11. **에이전트 턴 diff base(§6.1)**: 턴 경계 스냅샷을 write-tree vs touched-files로 할지, ring buffer 보관 정책(개수·수명·저장 위치), turn-base를 v1 기본 base로 넣을지 대 E2 후속. (리뷰 UI가 "마지막 턴"을 기본 base로 상정 — 목업 참조)
 
 ## 11. 현재 한계
 

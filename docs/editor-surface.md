@@ -7,7 +7,8 @@
 - WKWebView 합성·입력·`maru-app://`·CSP는 [web-panel.md](web-panel.md)가 소유한다.
 - 외부 프로세스의 Unix socket 인증과 capability 발급은 [control-plane.md](control-plane.md)가 소유한다.
 - 레이어 경계는 [layering-and-portability.md](layering-and-portability.md), surface 생애주기는 [surface-runtime-api.md](surface-runtime-api.md)를 따른다.
-- 이 문서는 editor 전용 bridge/grant, 문서 revision, 파일 저장·감시, diff/도구/LSP API와 단계 gate를 소유한다.
+- **전역 도크 레이아웃·`.md`/`.html` 뷰어·CM6 편집기·파일 read/write 채널·vanilla 웹 스택은 [file-panel.md](file-panel.md)가 소유한다.** git diff·editor는 그 위 확장으로 정합한다(§3.1·§10.0). 여기서 재서술하지 않는다.
+- 이 문서는 editor 전용 bridge/grant, 문서 revision, safe-save CAS, 외부 변경 감시, diff/도구/LSP API와 단계 gate를 소유한다.
 
 ## 1. 2026-07-16 적대적 PoC 결론
 
@@ -59,16 +60,26 @@ external CLI/agent
 
 L2는 file descriptor, DispatchSource, FSEvents, child process, AppKit/WebKit 타입을 몰라야 한다. grant 판정·문서 상태·CAS 전이·DTO/error mapping은 `src/session/`의 순수 코어가 소유하고, 실제 파일·git·watch·process I/O는 `src/app` 공통 runtime 또는 `src/platform/macos` adapter가 주입한다. `check-boundaries`에 editor 코어의 platform import 금지를 추가한다.
 
-### 3.1 전용 `PanelKind.editor`
+### 3.1 kind와 trust 경계 (도크 정합 종속)
 
-권장은 `.editor` 추가다. 이는 구현 전 사용자 승인이 필요한 닫힌 enum 변경이다. 승인되면 다음을 한 PR에서 함께 바꾼다.
+**먼저 §10.0을 정한다.** git diff·editor를 (a) 파일 패널 도크의 새 콘텐츠 kind로 넣을지, (b) 별도 `.editor` surface로 둘지가 이 절의 형태를 정한다. 사용자 방향("마크다운 뷰어와 동일 레이아웃")은 (a)로 기운다.
 
-- L2 `PanelKind`, wire mapping, session model label/detail, layout/restore serialization
-- macOS ABI `panel_kind` 상수·layout 계약과 Swift 분기
-- editor 전용 exact origin(권장 `maru-app://editor`), asset root, CSP, process-pool/data-store 정책
-- lifecycle/close/crash/reload와 surface별 `EditorGrant` 회수
+- **(a) 도크 확장이면**: 파일 패널의 kind 분기([file-panel.md](file-panel.md) §2)에 diff/code 콘텐츠 kind를 additive로 더한다. 새 top-level `PanelKind`가 아니라 도크 내부 kind이며, origin/CSP/grant만 아래 trust 계단대로 분리한다.
+- **(b) 별도 surface면**: `.editor`를 닫힌 enum에 추가한다(구현 전 사용자 승인 필요). 그 경우 한 PR에서: L2 `PanelKind`·wire·session model label/detail·layout/restore, macOS ABI `panel_kind` 상수·layout 계약·Swift 분기, editor 전용 exact origin(`maru-app://editor`)·asset root·CSP·data-store, lifecycle/close/crash/reload와 surface별 `EditorGrant` 회수.
 
-`markdown`은 sanitized 문서 표시 권한만 유지한다. editor 파일 작업을 markdown route에 추가하지 않는다. `browser`는 계속 untrusted이며 editor bridge와 `maru-app://` asset에 접근하지 못한다.
+어느 쪽이든 아래 trust 경계는 동일하게 적용한다.
+
+**정정: 마크다운 뷰어도 파일시스템을 만진다.** [file-panel.md](file-panel.md)의 파일 패널은 `.md`/`.html`을 `loadFileURL(allowingReadAccessTo:)`로 **읽고**(디렉터리 스코프), 열린 핀 경로 하나에만 `maru.file.write`로 **쓴다**(§3, write 스코프=열린 파일만). 즉 markdown은 "표시 전용/파일시스템 0"이 아니라 **경로가 고정된 읽기 + 좁은 쓰기**다. 여기서 진짜 신뢰 경계는 read/write 유무가 아니라 **범위**다.
+
+신뢰 등급(범위 기준):
+
+- **마크다운 뷰어(file-panel)**: 핀 파일 read(+ 좁은 write). 파일별로 열 때 확정, JS가 확대 불가.
+- **read-only git diff**: 파일 write 없음. worktree/HEAD blob **read** + bounded `git_read`. → 신뢰 수준이 full editor보다 마크다운 뷰어에 가깝다.
+- **editor(편집)**: 여기서 `file_write`가 붙는다. 이게 계단의 실제 단차다.
+
+그러므로 **editor 파일 write op를 markdown/뷰어 route에 얹지 않는다**(범위 확대 금지). `browser`는 계속 untrusted이며 editor bridge와 `maru-app://` asset에 접근하지 못한다.
+
+**레이아웃은 공유, trust는 분리(사용자 방향).** git diff·editor는 [file-panel.md](file-panel.md)의 전역 도크와 **동일한 시각 shell**(탭 스트립·헤더 밴드·파일 트리 = GPU chrome, 콘텐츠 rect = WKWebView)을 공유해 UX 일관성과 코드 재사용을 얻는다. 실제로 git diff는 도크의 **또 다른 콘텐츠 kind**(현행 `.md`/`.html` 옆)로 보는 게 자연스럽다. **다만 레이아웃 재사용이 trust 재사용을 뜻하지 않는다** — 같은 도크 안에서도 kind별 origin/CSP/grant는 위 계단대로 분리한다. 이 도크 정합·엔진(CM6/Monaco) 정합은 §10 결정 항목이다.
 
 editor가 markdown과 같은 `maru-app://app` origin을 공유하면 origin pin만으로 두 콘텐츠의 권한을 구분할 수 없다. editor bridge는 main frame + editor exact origin + 해당 `surface_id`의 `.editor` kind를 모두 확인하고, remote/top-level navigation을 거부한다. editor page에서 markdown asset route로 이동해도 grant가 유지되는 구조는 허용하지 않는다.
 
@@ -264,12 +275,13 @@ Git 의미와 실행 안전도 E1 전에 고정한다.
 ### 7.1 툴체인
 
 - self-host asset만 사용하고 CDN은 금지한다.
-- zntc는 raw standalone binary가 아니라 `@zntc/core` NAPI와 `@zntc/web` workspace를 사용한다.
-- Monaco는 barrel 대신 `editor.api`와 실제 지원 언어 contribution만 import한다.
+- **UI 프레임워크를 도입하지 않는다.** editor/git diff는 [file-panel.md](file-panel.md) §2.1이 이미 확정한 **vanilla TS 웹앱 스택**을 공유한다(React/Svelte 런타임은 반응형 트리·라우팅이 없는 이 표면에 과하다 — file-panel §2.1의 근거 그대로). Monaco/CM6·remark류는 프레임워크가 아니라 **DOM 마운트 라이브러리**라 이 결정과 직교한다.
+- **에디터 엔진은 file-panel과 정합해야 한다(미결).** file-panel은 CM6를 이미 확정했고(마크다운 SSOT·한글 IME가 WebKit 네이티브 위에서 가장 안정·sanitize 파이프 공유), 이 문서는 Monaco를 후보로 뒀다. 그런데 **§1·§7.4의 Monaco WKWebView RED가 정확히 file-panel이 CM6를 고른 이유(WebKit 렌더·한글 IME)와 겹친다.** git diff 뷰는 Monaco DiffEditor가 강점이지만, 채택 결정은 §7.4 gate와 file-panel 정합(§10)에 종속된다. **Monaco가 RED로 남으면 CM6 + diff/merge extension을 같은 gate로 비교한다.**
+- Monaco를 쓸 경우 barrel 대신 `editor.api`와 실제 지원 언어 contribution만 import한다.
 - worker URL은 정적 literal로 배선하고 output asset/worker manifest를 검증한다.
-- zntc 최소 버전은 `16f1fda...`의 Monaco 수정이 포함된 릴리스가 나온 뒤 고정한다. 그 전 commit pin은 의존성/재현성 결정을 사용자에게 먼저 보고한다.
+- zntc 최소 버전은 `16f1fda...`의 Monaco 수정이 포함된 릴리스가 나온 뒤 고정한다. 그 전 commit pin은 의존성/재현성 결정을 사용자에게 먼저 보고한다. (엔진이 CM6로 확정되면 Monaco 전용 zntc 수정 의존은 해소된다 — CM6는 file-panel이 이미 번들 중.)
 
-Monaco와 새 JS toolchain은 아직 프로젝트 의존성으로 승인된 것이 아니다. Phase 0.5A가 green이어도 의존성·license·bundle/RSS 측정 승인을 거쳐야 Phase 1에 들어간다.
+Monaco를 쓸 경우 새 JS toolchain은 아직 프로젝트 의존성으로 승인된 것이 아니다. Phase 0.5A가 green이어도 의존성·license·bundle/RSS 측정 승인을 거쳐야 Phase 1에 들어간다.
 
 ### 7.2 CSP
 
@@ -406,8 +418,10 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 다음은 문서만으로 승인된 것으로 간주하지 않는다.
 
-1. `PanelKind.editor`와 ABI/wire 확장
-2. Monaco 및 zntc 의존성, 수정 포함 릴리스 대기 대 commit pin
+0. **[file-panel.md](file-panel.md)와의 정합 — 가장 상위 결정.** git diff·editor를 (a) 파일 패널 도크의 새 콘텐츠 kind로 넣을지, (b) 별도 `.editor` surface로 둘지. 사용자 방향은 "마크다운 뷰어와 동일 레이아웃"이라 (a)로 기운다. (a)면 이 문서의 `.editor` 전용 kind/origin/bridge 상당 부분이 파일 패널 shell·`maru.file.*` 채널 위 **확장**으로 재작성된다.
+0b. **에디터 엔진 CM6 대 Monaco.** file-panel은 CM6 확정(§7.1). Monaco는 §7.4 WKWebView gate가 RED. git diff는 Monaco DiffEditor가 강하나, RED가 안 풀리거나 도크 정합을 택하면 **CM6 + diff/merge extension**이 유력하다. 이 결정이 §7.1·§7.4·본 §10의 여러 하위 항목(zntc 의존·CSP inline style·번들/RSS)을 연쇄로 바꾼다.
+1. `PanelKind.editor`와 ABI/wire 확장 (0에서 (b)를 택할 때만)
+2. Monaco 및 zntc 의존성, 수정 포함 릴리스 대기 대 commit pin (0b에서 Monaco를 택할 때만)
 3. editor origin 한정 `style-src 'unsafe-inline'` 허용 여부
 4. 최초 workspace/file/git grant UX와 native `root_id`/root descriptor 발급·회수
 5. 새 파일의 기본 mode 및 기존 ownership/ACL/xattr/hard-link 보존·거부·실패 정책
@@ -419,6 +433,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 ## 11. 현재 한계
 
+- **이 문서는 [file-panel.md](file-panel.md)와 아직 완전히 정합되지 않았다.** 파일 패널은 도크 레이아웃·CM6·vanilla 스택·핀 파일 read/write를 이미 확정했고, git diff/editor는 그 위 확장으로 재작성될 가능성이 높다(§10.0). 아래 Monaco 관련 한계는 그 정합에서 CM6를 택하면 상당수 소멸한다.
 - 제품 WKWebView에서 Monaco의 텍스트 표시·편집·IME는 아직 실패/미검증이다.
 - 임시 PoC 하니스와 결과 artifact가 저장소에 없으므로 재현성은 E0.5A가 닫아야 한다.
 - zntc current main 성공은 릴리스/장기 재현성을 보장하지 않는다.

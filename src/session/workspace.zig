@@ -10,6 +10,7 @@
 //! 탭→pane→Term 풀 모델·멀티 창에 맞춰 window-aware로 확장.
 
 const std = @import("std");
+const dock_panel = @import("dock_panel.zig");
 const split_tree = @import("split_tree.zig");
 const writeEscaped = @import("../text_escape.zig").writeEscaped; // 따옴표 값 escape 단일 출처(trace/snapshot과 공유)
 
@@ -32,6 +33,11 @@ pub const max_agent_argv = 256;
 /// + agent-argv(≤max_agent_argv). scalar 키가 미래에 늘어도 한 라인에 256개(=max_agent_argv 여유)를 넘길 일은 없으므로,
 /// 이 여유면 순수 손상만 거르고 정상 확장은 통과한다(code-review high: 여유가 좁으면 미래 포맷을 통째 폴백시킬 수 있음).
 pub const max_line_fields = max_agent_argv + 256;
+
+/// 한 창에 영속할 파일 도크 entry sanity 상한. 라이브 WKWebView 상한(기본 8)과 달리 해제된 탭 metadata는 남으므로
+/// 더 넉넉해야 하지만, window 한 줄의 반복 키가 손상 파일에서 무한히 늘어나는 것은 막아야 한다. 256은 실제 열린 파일
+/// 수보다 충분히 크고 max_line_fields의 반복 키 예산 안에 있다.
+pub const max_dock_entries = 256;
 
 pub const SplitDirection = split_tree.SplitDirection;
 
@@ -145,6 +151,9 @@ pub const Window = struct {
     // 넷 다 생략(round-trip 고정점·옛 파일 flat 정상), 옛 리더가 미지 키 skip(forward-compat). 넷 다 있어야 frame,
     // 하나라도 없으면 null(부분=손상 방어). 전역 좌표라 어느 모니터인지 자동 인코딩. 기본 null.
     frame: ?Frame = null,
+    // 창 레벨 파일 도크(FP1 — docs/file-panel.md §5). workspace pane 트리 밖 상태이며, v1은 단일 그룹 entries만
+    // window 라인의 flat/repeated 키로 보존한다. 기본값은 키를 전부 생략해 옛 파일 고정점과 양방향 호환을 유지한다.
+    dock: dock_panel.PersistedState = .{},
     tabs: []const Tab,
 };
 
@@ -189,6 +198,7 @@ pub fn windowFrame(ws: Workspace, index: usize) ?Frame {
 }
 
 fn writeWindow(w: *std.Io.Writer, win: Window) !void {
+    try validateDockState(win.dock);
     try w.print("window tabs={d} active-tab={d}", .{ win.tabs.len, win.active_tab });
     // 활성(key) 창 마커(M3e §8A.8). false면 키 생략(additive·key-addressed — 옛 파일/비활성 창의 라인 문자열을 안
     // 바꿔 round-trip 고정점·양쪽 호환, group-collapsed와 동일). true면 active-window=1 스칼라로 쓴다.
@@ -197,8 +207,41 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     // 안 바꿔 round-trip 고정점·양쪽 호환, active-window와 동일 패턴). 있으면 win-x/y/w/h를 넷 다 방출(전역 좌표, x/y는
     // 음수 가능 → {d}가 부호 포함). reader는 넷 다 있어야 frame으로 읽고 하나라도 없으면 null(부분=손상 방어).
     if (win.frame) |fr| try w.print(" win-x={d} win-y={d} win-w={d} win-h={d}", .{ fr.x, fr.y, fr.w, fr.h });
+    // 도크는 새 line kind가 아니라 window 라인의 옵션/반복 키다. 옛 reader는 모르는 key를 skip하므로 뒤 창을
+    // 잃지 않고, 기본값은 생략돼 기존 파일 byte 고정점도 유지된다(file-panel.md §5).
+    if (win.dock.side != .right) try w.print(" dock-side={s}", .{@tagName(win.dock.side)});
+    if (win.dock.size != 0) try w.print(" dock-size={d}", .{win.dock.size});
+    if (win.dock.collapsed) try w.writeAll(" dock-collapsed=1");
+    for (win.dock.entries) |entry| try writeDockEntry(w, entry);
     try w.writeByte('\n');
     for (win.tabs) |tab| try writeTab(w, tab);
+}
+
+fn validateDockState(dock: dock_panel.PersistedState) !void {
+    if (dock.entries.len > max_dock_entries) return error.InvalidDockState;
+    var active_entries: usize = 0;
+    for (dock.entries, 0..) |entry, i| {
+        if (entry.path.len == 0) return error.InvalidDockState;
+        active_entries += @intFromBool(entry.active);
+        for (dock.entries[0..i]) |existing| {
+            if (std.mem.eql(u8, existing.path, entry.path)) return error.InvalidDockState;
+        }
+    }
+    if ((dock.entries.len == 0 and active_entries != 0) or
+        (dock.entries.len > 0 and active_entries != 1)) return error.InvalidDockState;
+}
+
+fn writeDockEntry(w: *std.Io.Writer, entry: dock_panel.PersistedEntry) !void {
+    // 외부 quoted 값 안의 self-delimiting payload: kind:mode:active:path-byte-len:path. path를 마지막에 두고 길이를
+    // 앞에 써 `:`·공백·개행·따옴표가 들어간 macOS 파일명도 별도 delimiter escape 없이 정확히 왕복한다. 바깥
+    // writeEscaped가 workspace 라인 문법만 보호한다.
+    const mode = switch (entry.mode) {
+        .read => "read",
+        .source_edit => "source-edit",
+    };
+    try w.print(" dock-entry=\"{s}:{s}:{d}:{d}:", .{ @tagName(entry.kind), mode, @intFromBool(entry.active), entry.path.len });
+    try writeEscaped(w, entry.path);
+    try w.writeByte('"');
 }
 
 fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
@@ -322,10 +365,81 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
         .h = try f.getInt("win-h", i32, 0),
     } else null;
 
+    const dock_side: dock_panel.Side = if (f.find("dock-side")) |field| blk: {
+        if (field.is_quoted) return error.BadLine;
+        if (std.mem.eql(u8, field.raw, "right")) break :blk .right;
+        if (std.mem.eql(u8, field.raw, "bottom")) break :blk .bottom;
+        return error.BadLine;
+    } else .right;
+    const dock_size = try f.getUint("dock-size", u32, 0);
+    const dock_collapsed = (try f.getUint("dock-collapsed", u8, 0)) != 0;
+    var dock_entries: std.ArrayList(dock_panel.PersistedEntry) = .empty;
+    var active_entries: usize = 0;
+    for (f.fields) |field| {
+        if (!std.mem.eql(u8, field.key, "dock-entry")) continue;
+        if (!field.is_quoted or dock_entries.items.len >= max_dock_entries) return error.BadLine;
+        const encoded = try unescapeQuoted(a, field.raw);
+        const entry = try parseDockEntry(encoded);
+        for (dock_entries.items) |existing| {
+            if (std.mem.eql(u8, existing.path, entry.path)) return error.BadLine;
+        }
+        active_entries += @intFromBool(entry.active);
+        try dock_entries.append(a, entry);
+    }
+    // 비어 있으면 active 0, entry가 있으면 정확히 하나. 도크 탭 스트립이 복원 직후 표시할 파일을 모호하게 두지 않는다.
+    if ((dock_entries.items.len == 0 and active_entries != 0) or
+        (dock_entries.items.len > 0 and active_entries != 1)) return error.BadLine;
+    const dock: dock_panel.PersistedState = .{
+        .side = dock_side,
+        .size = dock_size,
+        .collapsed = dock_collapsed,
+        .entries = try dock_entries.toOwnedSlice(a),
+    };
+
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
     while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines));
-    return .{ .active_tab = active_tab, .active = active, .frame = frame, .tabs = try tabs.toOwnedSlice(a) };
+    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock, .tabs = try tabs.toOwnedSlice(a) };
+}
+
+fn parseDockEntry(encoded: []const u8) ParseError!dock_panel.PersistedEntry {
+    var pos: usize = 0;
+    const kind_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const mode_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const active_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const path_len_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const path = encoded[pos..];
+
+    const kind: dock_panel.EntryKind = if (std.mem.eql(u8, kind_raw, "markdown"))
+        .markdown
+    else if (std.mem.eql(u8, kind_raw, "html"))
+        .html
+    else
+        return error.BadLine;
+    const mode: dock_panel.Mode = if (std.mem.eql(u8, mode_raw, "read"))
+        .read
+    else if (std.mem.eql(u8, mode_raw, "source-edit"))
+        .source_edit
+    else
+        return error.BadLine;
+    const active = if (std.mem.eql(u8, active_raw, "0"))
+        false
+    else if (std.mem.eql(u8, active_raw, "1"))
+        true
+    else
+        return error.BadLine;
+    const path_len = std.fmt.parseInt(usize, path_len_raw, 10) catch return error.BadLine;
+    if (path.len == 0 or path.len != path_len) return error.BadLine;
+    return .{ .path = path, .kind = kind, .mode = mode, .active = active };
+}
+
+fn dockEntryPart(encoded: []const u8, pos: *usize) ?[]const u8 {
+    if (pos.* >= encoded.len) return null;
+    const end = std.mem.indexOfScalarPos(u8, encoded, pos.*, ':') orelse return null;
+    if (end == pos.*) return null;
+    const part = encoded[pos.*..end];
+    pos.* = end + 1;
+    return part;
 }
 
 fn parseTab(a: std.mem.Allocator, lines: *LineIter) ParseError!Tab {
@@ -1408,4 +1522,80 @@ test "workspace parse: 라인 필드 수 상한 초과는 BadLine(key-addressed 
     while (k < max_line_fields + 8) : (k += 1) try buf.appendSlice(a, " agent-arg=\"x\""); // 기본 9키 + 이만큼 → 상한 초과
     try buf.appendSlice(a, "\n");
     try std.testing.expectError(error.BadLine, parse(a, buf.items));
+}
+
+test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기본 도크로 읽힌다" {
+    const windows = [_]Window{.{ .tabs = &.{} }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(header ++ "\nwindow tabs=0 active-tab=0\n", text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-") == null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const dock = parsed.workspace.windows[0].dock;
+    try std.testing.expectEqual(dock_panel.Side.right, dock.side);
+    try std.testing.expectEqual(@as(u32, 0), dock.size);
+    try std.testing.expect(!dock.collapsed);
+    try std.testing.expectEqual(@as(usize, 0), dock.entries.len);
+}
+
+test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하고 트리 dirty는 쓰지 않는다" {
+    const dock_entries = [_]dock_panel.PersistedEntry{
+        .{ .path = "/Users/me/a:b \"한글\".md", .kind = .markdown, .mode = .source_edit, .active = true },
+        .{ .path = "/Users/me/line\nname.html", .kind = .html, .mode = .read, .active = false },
+    };
+    const windows = [_]Window{.{
+        .dock = .{ .side = .bottom, .size = 420, .collapsed = true, .entries = &dock_entries },
+        .tabs = &.{},
+    }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-side=bottom") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-size=420") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-collapsed=1") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "dock-entry=\""));
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-tree") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dirty") == null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const dock = parsed.workspace.windows[0].dock;
+    try std.testing.expectEqual(dock_panel.Side.bottom, dock.side);
+    try std.testing.expectEqual(@as(u32, 420), dock.size);
+    try std.testing.expect(dock.collapsed);
+    try std.testing.expectEqual(@as(usize, 2), dock.entries.len);
+    try std.testing.expectEqualStrings(dock_entries[0].path, dock.entries[0].path);
+    try std.testing.expectEqual(dock_panel.EntryKind.markdown, dock.entries[0].kind);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, dock.entries[0].mode);
+    try std.testing.expect(dock.entries[0].active);
+    try std.testing.expectEqualStrings(dock_entries[1].path, dock.entries[1].path);
+    try std.testing.expect(!dock.entries[1].active);
+
+    const text2 = try serialize(std.testing.allocator, parsed.workspace);
+    defer std.testing.allocator.free(text2);
+    try std.testing.expectEqualStrings(text, text2);
+}
+
+test "workspace dock FP1: window 라인 flat 키는 legacy key reader가 skip 가능하고 손상 entry는 거부한다" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const legacy = try LineFields.parse(arena.allocator(), "window dock-entry=\"markdown:read:1:9:/tmp/a.md\" tabs=0 dock-side=bottom active-tab=0");
+    try std.testing.expectEqual(@as(usize, 0), try legacy.requireUint("tabs", usize));
+    try std.testing.expectEqual(@as(usize, 0), try legacy.getUint("active-tab", usize, 0));
+
+    const bad_length = header ++ "\n" ++
+        "window tabs=0 active-tab=0 dock-entry=\"markdown:read:1:99:/tmp/a.md\"\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, bad_length));
+
+    const two_active = header ++ "\n" ++
+        "window tabs=0 active-tab=0 dock-entry=\"markdown:read:1:9:/tmp/a.md\" dock-entry=\"html:read:1:11:/tmp/b.html\"\n";
+    try std.testing.expectError(error.BadLine, parse(std.testing.allocator, two_active));
+
+    const invalid_entries = [_]dock_panel.PersistedEntry{
+        .{ .path = "/tmp/a.md", .kind = .markdown, .active = false },
+    };
+    const invalid_windows = [_]Window{.{ .dock = .{ .entries = &invalid_entries }, .tabs = &.{} }};
+    try std.testing.expectError(error.InvalidDockState, serialize(std.testing.allocator, .{ .windows = &invalid_windows }));
 }

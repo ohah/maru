@@ -38,6 +38,24 @@ function rehypeBlockResourceLoads() {
   };
 }
 
+// KaTeX/Prism은 sanitizer 뒤에 trusted markup을 만든다. 특히 KaTeX의 error
+// fallback은 MathML-only에서도 inline color style을 붙이므로, 최종 경계에서
+// 실행·네트워크 가능 속성을 다시 제거해야 style-src 'self' 계약이 유지된다.
+function rehypeHardenTrustedOutput() {
+  return (tree: Root) => {
+    visit(tree, "element", (node: Element) => {
+      delete node.properties.style;
+      delete node.properties.src;
+      delete node.properties.srcSet;
+      delete node.properties.poster;
+
+      for (const property of Object.keys(node.properties)) {
+        if (property.toLowerCase().startsWith("on")) delete node.properties[property];
+      }
+    });
+  };
+}
+
 function encodePoint(point: { line: number; column: number; offset?: number }): string {
   return `${point.line}:${point.column}:${point.offset ?? -1}`;
 }
@@ -70,6 +88,7 @@ const processor = unified()
   // MathML-only는 KaTeX HTML의 inline style을 피해서 현재 style-src 'self' CSP를 지킨다.
   .use(rehypeKatex, { output: "mathml", strict: "error", throwOnError: false })
   .use(rehypePrism, { ignoreMissing: true })
+  .use(rehypeHardenTrustedOutput)
   .use(rehypeStringify);
 
 export function renderMarkdown(markdown: string): string {

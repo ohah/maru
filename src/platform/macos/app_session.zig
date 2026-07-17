@@ -8,6 +8,8 @@ const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
+const dock_layout = maru.session.dock_layout;
+const dock_panel = maru.session.dock_panel;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
 
@@ -1887,6 +1889,12 @@ pub const AppSession = struct {
     debug_settings_opened: bool = false,
     // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.
     debug_web_term_opened: bool = false,
+    // FP3: 파일 패널은 workspace 탭 트리와 독립적인 창-로컬 도크다. 실패 중 deinit을 위해
+    // init 가드를 두고, entry의 surface_id는 이 live 모델에만 발급한다(workspace 저장에서 제외).
+    dock: dock_panel.DockPanel = undefined,
+    dock_initialized: bool = false,
+    dock_resize_drag_active: bool = false,
+    debug_file_panel_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
     // 활성 워크스페이스 탭 pane 트리를 walk해 web Term 집합(cur)을 만들고 이 prev와 4a surfaceDiff한 뒤 cur로 전진시킨다
     // (Swift가 batch를 적용했다는 전제). 비어 있으면 직전 tick에 web Term이 없었음.
@@ -2159,6 +2167,9 @@ pub const AppSession = struct {
         };
         errdefer self.deinit();
 
+        self.dock = try dock_panel.DockPanel.init(allocator);
+        self.dock_initialized = true;
+
         // 사용자 config(~/.config/maru/config 또는 $MARU_CONFIG)를 가장 먼저 로드한다 — PTY를 띄울 때
         // 셸에 줄 TERM 값(`term =`)이 필요하기 때문이다(셸 설정/통합이 $TERM에 따라 키바인딩을 다르게
         // 잡는다). 단위 테스트에서는 개발자의 실제 config를 읽으면 비결정적이라 빈 config로 고정한다
@@ -2328,7 +2339,45 @@ pub const AppSession = struct {
         return self.activeTab().activePane();
     }
 
-    /// 사이드바를 뺀 터미널 영역 사각형(backing px, 좌상단 = (사이드바 폭, 0)). split 레이아웃·resize·렌더가
+    fn dockVisible(self: *const AppSession) bool {
+        return self.dock_initialized and !self.chrome_minimal and !self.dock.collapsed and self.dock.entryCountTotal() > 0;
+    }
+
+    fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
+        return dock_layout.compute(.{
+            .backing_width_px = self.backing_width_px,
+            .backing_height_px = self.backing_height_px,
+            .sidebar_width_px = self.sidebar_width_px,
+            .titlebar_height_px = self.titlebar_strip_px,
+            .cell_width_px = self.cell_width_px,
+            .cell_height_px = self.cell_height_px,
+            .scale_milli = self.scale_milli,
+            .divider_px = self.dividerThicknessPx(),
+            .side = if (self.dock_initialized) self.dock.side else .right,
+            .size_pt = if (self.dock_initialized) self.dock.size else 0,
+            .visible = self.dockVisible(),
+        });
+    }
+
+    fn dockCollapsedToggleRect(self: *const AppSession) ?maru.session.SplitRect {
+        if (!self.dock_initialized or self.chrome_minimal or !self.dock.collapsed or self.dock.entryCountTotal() == 0 or self.cell_width_px == 0) return null;
+        const w = @min(2 * self.cell_width_px, self.backing_width_px);
+        const h = @min(@max(self.cell_height_px, self.titlebar_strip_px), self.backing_height_px);
+        if (w == 0 or h == 0) return null;
+        return .{ .x = self.backing_width_px - w, .y = 0, .w = w, .h = h };
+    }
+
+    fn toggleDockCollapsed(self: *AppSession) void {
+        if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return;
+        self.dock.collapsed = !self.dock.collapsed;
+        self.dock_resize_drag_active = false;
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        self.recomputeActivePaneRect();
+        self.last_resize_size = null;
+        self.metal_dirty = true;
+    }
+
+    /// 사이드바와 파일 도크를 뺀 터미널 영역. split 레이아웃·resize·렌더·hit-test가
     /// 공유하는 단일 출처. window padding은 여기서 빼지 않는다 — 탭 바·divider·pane 배경 같은 chrome은 사이드바
     /// 경계/창 가장자리까지 꽉 차고, padding은 paneTermRect가 셀 그리드 영역에만 inset한다. backing 크기는 마지막
     /// resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일 leaf가 origin에만 그려진다(무해).
@@ -2336,12 +2385,7 @@ pub const AppSession = struct {
         // 상단 타이틀바 띠(titlebar_strip_px)만큼 터미널 영역을 아래로 들인다 — 신호등·헤더 아이콘 줄과 pane 탭 바·
         // 서페이스가 안 겹친다(cmux식). 사이드바는 별도(좌측 전체 높이) — 띠는 터미널 영역에만. 단일 출처라 grid·
         // 렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합한다.
-        return .{
-            .x = self.sidebar_width_px,
-            .y = self.titlebar_strip_px,
-            .w = self.backing_width_px -| self.sidebar_width_px,
-            .h = self.backing_height_px -| self.titlebar_strip_px,
-        };
+        return self.dockGeometry().terminal;
     }
 
     /// layout_math.gridFromBacking(spawn grid)용 padding — window padding에 상단 타이틀바 띠를 top으로 더해 termRect.y 들임과
@@ -2349,6 +2393,11 @@ pub const AppSession = struct {
     fn gridPadding(self: *const AppSession) layout_math.PaddingPx {
         var p = self.window_padding_px;
         p.top +|= self.titlebar_strip_px;
+        const g = self.dockGeometry();
+        if (g.dock.w > 0) switch (self.dock.side) {
+            .right => p.right +|= g.divider.w + g.dock.w,
+            .bottom => p.bottom +|= g.divider.h + g.dock.h,
+        };
         return p;
     }
 
@@ -3040,6 +3089,36 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    fn dockDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
+        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
+        const g = self.dockGeometry();
+        if (g.divider.w == 0 or g.divider.h == 0) return false;
+        const grab: f64 = @floatFromInt(@max(self.cell_width_px, self.cell_height_px) / 2 + 2);
+        const x0: f64 = @floatFromInt(g.divider.x);
+        const y0: f64 = @floatFromInt(g.divider.y);
+        const x1: f64 = @floatFromInt(g.divider.x + g.divider.w);
+        const y1: f64 = @floatFromInt(g.divider.y + g.divider.h);
+        return switch (self.dock.side) {
+            .right => x_px >= x0 - grab and x_px < x1 + grab and y_px >= y0 and y_px < y1,
+            .bottom => y_px >= y0 - grab and y_px < y1 + grab and x_px >= x0 and x_px < x1,
+        };
+    }
+
+    fn setDockSizeFromPointer(self: *AppSession, x_px: f64, y_px: f64) void {
+        if (!self.dock_initialized or self.scale_milli == 0) return;
+        const candidate = dock_layout.sizePtForPointer(self.dockGeometry(), self.dock.side, x_px, y_px, self.scale_milli) orelse return;
+        const before = self.dock.size;
+        self.dock.size = candidate;
+        // 손상·과대 입력은 순수 layout이 보장하는 terminal floor로 clamp한 실효 크기를 저장한다.
+        const effective_px = self.dockGeometry().dock_size_px;
+        self.dock.size = @intCast((@as(u64, effective_px) * 1000) / self.scale_milli);
+        if (self.dock.size == before) return;
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        self.recomputeActivePaneRect();
+        self.last_resize_size = null;
+        self.metal_dirty = true;
+    }
+
     /// 사이드바 접기/펼치기 토글 — 헤더 토글 아이콘·접힘 시 좌상단 펼치기 버튼이 부른다. 접으면 effective 폭이 0(카드·
     /// 검색 숨김, 터미널이 그 자리까지 확장)이고 폭(pt)은 sidebar_width_pt에 보존돼 펼치면 복원된다. 폭이 모든 탭 term을
     /// 바꾸므로 setSidebarWidthPx와 같은 재배치(전 탭 resize + 활성 rect + 사이드바 재빌드)를 한다.
@@ -3690,11 +3769,15 @@ pub const AppSession = struct {
     /// 판정용 — Swift가 원본 창 web surface destroy 전이 시 "이 surface가 **다른 창** 세션에 아직 live인가"로 이동↔닫기를
     /// 구분한다(live=이동→WKWebView 재부모화·`browser.closed` 억제, 부재=진짜 닫힘→파괴). 순수 트리 조회(할당 없음).
     pub fn hasWebSurface(self: *AppSession, surface_id: u64) bool {
-        return self.findTermWhere(surface_id, struct {
+        if (self.findTermWhere(surface_id, struct {
             fn pred(id: u64, term: *Term) bool {
                 return term.kind == .web and term.surfaceId() == id;
             }
-        }.pred) != null;
+        }.pred) != null) return true;
+        if (!self.dock_initialized) return false;
+        const group = self.dock.singleGroupConst() orelse return false;
+        for (group.entries.items) |entry| if (entry.surface_id == surface_id) return true;
+        return false;
     }
 
     /// 모든 탭/panel을 훑어 첫 'terminated'(셸 exit 관측 완료) Term의 위치를 찾는다(reap 대상). 없으면 null.
@@ -7525,6 +7608,35 @@ pub const AppSession = struct {
         self.debug_web_term_opened = true;
     }
 
+    fn assignDockSurfaceIds(self: *AppSession, panel: *dock_panel.DockPanel) void {
+        const group = panel.singleGroup() orelse return;
+        for (group.entries.items) |*entry| {
+            if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+        }
+    }
+
+    /// FP3 시각 픽스처. `MARU_FILE_PANEL=/absolute/path.md|html`이면 창-로컬 도크에 한 번만
+    /// 열어 WKWebView surface diff·크롬·resize를 실제 app-host 경로로 검증한다. FP4 전이라 본문은 placeholder다.
+    pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
+        if (self.debug_file_panel_opened or !self.dock_initialized) return;
+        const raw = std.c.getenv("MARU_FILE_PANEL") orelse return;
+        const path = std.mem.span(raw);
+        if (path.len == 0) return;
+        const group = self.dock.singleGroup() orelse return;
+        const kind: dock_panel.EntryKind = if (std.mem.endsWith(u8, path, ".html") or std.mem.endsWith(u8, path, ".htm")) .html else .markdown;
+        _ = self.dock.open(group, path, kind) catch return;
+        self.assignDockSurfaceIds(&self.dock);
+        if (std.c.getenv("MARU_FILE_PANEL_DOCK")) |side| {
+            if (std.mem.eql(u8, std.mem.span(side), "bottom")) self.dock.side = .bottom;
+        }
+        self.dock.collapsed = false;
+        self.debug_file_panel_opened = true;
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        self.recomputeActivePaneRect();
+        self.last_resize_size = null;
+        self.metal_dirty = true;
+    }
+
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
     /// content view의 backing 높이(backing_height_px)를 y-flip 기준으로 쓴다(§3 — OS 타이틀바 포함 전체 창이 아니라
     /// pane rect가 사는 그 좌표 공간의 높이).
@@ -7547,64 +7659,103 @@ pub const AppSession = struct {
         return PaneTree.anyLeaf(self.activeTab().tree, paneHasWebTerm);
     }
 
+    fn dockHasLiveSurface(self: *const AppSession) bool {
+        if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return false;
+        const group = self.dock.singleGroupConst() orelse return false;
+        for (group.entries.items) |entry| if (entry.surface_id != 0) return true;
+        return false;
+    }
+
+    fn webSurfacesPresent(self: *AppSession) bool {
+        return self.activeTabHasWebTerm() or self.dockHasLiveSurface();
+    }
+
     /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
     /// **자기 pane leaf rect**에서 탭 바(top inset)를 뺀 본문 rect(4a `contentRect`, §5 탭 바 노출)에 고정되고, visible은
     /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). 비활성 워크스페이스
     /// 탭은 walk 대상이 아니라 그 탭의 web Term은 집합 밖(→ destroy). OOM/미초기화면 error(호출자가 prev 불변 유지).
     fn collectWebSurfaces(self: *AppSession, out: *std.ArrayList(web_panel_layout.SurfaceLayout)) !void {
-        if (!self.surface_initialized or self.tabs.items.len == 0) return; // 활성 탭 없음 = web Term 0개(cur 빈 채로).
-        self.web_leaf_rects_scratch.clearRetainingCapacity(); // 영속 scratch 재사용(hot path 재할당 회피, layout이 append만 함)
-        try self.activeTabLeafRects(self.allocator, self.termRect(), &self.web_leaf_rects_scratch);
-        const bar_h = self.paneBarHeightPx();
-        const dt = self.dividerThicknessPx();
-        // seam inset: WKWebView는 native NSView라 자기 frame 안 클릭을 **삼킨다**(터미널처럼 mouse handler가
-        // dividerAtPoint를 먼저 가로챌 수 없다) → 형제 pane과 맞닿는 seam 가장자리서 divider를 **물리적으로 노출**해야
-        // 마우스가 seam에 닿아 드래그 리사이즈된다(web-panel.md §5). 이전 `dt/2`는 기본 dt=1px에서 **0**이라 아무 효과
-        // 없었다(세로·가로 divider가 안 잡히던 회귀 — [4e review 0] 재수정). `divider.hitTest` 허용폭
-        // (chrome/components/divider.zig: cell/2+2)이 넉넉해 divider 선 밖 아주 작은 밴드만 있으면 보이는 선을 겨냥해
-        // 잡히므로, gap을 **최소화**한다 — divider 선(dt) + 1pt 클릭 여유(scale 인지)만 들인다(사용자 요청: 공백 최대 축소).
-        // dt==0(divider 숨김)이면 seam=0(무-inset, 웹뷰가 seam까지 채움).
-        const seam: u32 = if (dt == 0) 0 else dt + @max(@as(u32, 1), self.scale_milli / 1000);
-        const tr = self.termRect();
-        for (self.web_leaf_rects_scratch.items) |lr| {
-            for (lr.leaf.terms.items, 0..) |term, i| {
-                if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
-                // 각 leaf 가장자리가 바깥 경계(termRect)가 아니면 형제 pane과 맞닿는 **seam** → seam만큼 본문 rect를 들여
-                // WKWebView가 분할선을 덮지 않게 한다(작은 시각 gap). top seam은 탭 바(bar_h ≫ seam)가 이미 덮으므로 불요.
-                // seam_edges 비트마스크(L=1·R=2·B=4)를 함께 실어 Swift가 그 가장자리 근처 클릭/hover를 통과시키게 한다
-                // (넓은 grab 폭 — 시각 gap과 분리). left/right는 x축, bottom은 top-left px 기준 아래(y 큰 쪽).
-                // **`seam > 0`으로 게이트**: divider 숨김(split.divider-thickness=0 → seam=0)이면 잡을 divider가 없어
-                // inset도 seam_edges도 0으로 둔다 — 안 그러면 Swift hitTest가 잡을 것 없는 가장자리서 클릭을 헛통과한다
-                // (10차 review 기각 항목이나 정합상 게이트). seam==0이라 inset.left=seam이 0이어도 비트는 안 세운다.
-                // 7e-1b: browser(비신뢰) 웹 패널은 탭 바 바로 아래에 읽기전용 주소창 밴드(현재 URL)를 두므로 top inset을
-                // bar_h + addr_h로 늘려 WKWebView 본문을 그만큼 더 내린다 → 밴드 영역이 웹뷰에서 비워지고, 탭 바 collect
-                // 루프가 그 밴드에 배경 quad + URL 셀을 그린다(밴드 y = [bar_h, bar_h+addr_h]가 웹뷰 top과 정확히 abut).
-                // addr_h는 탭 바 높이(paneBarHeightPx) 재사용 — 단일 소스, 별도 상수 없음. markdown web Term은 주소창이
-                // 없어 top=bar_h 유지(byte-identical). bar_h==0(chrome_minimal)이면 addr_h도 0이라 밴드 없음(탭 바와 동조).
-                const addr_h: u32 = if (term.web_panel_kind == .browser) bar_h else 0;
-                var inset: web_panel_layout.ChromeInset = .{ .top = bar_h + addr_h };
-                var seam_edges: u8 = 0;
-                if (seam > 0 and lr.rect.x > tr.x) {
-                    inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
-                    seam_edges |= 1;
+        if (self.surface_initialized and self.tabs.items.len > 0) {
+            self.web_leaf_rects_scratch.clearRetainingCapacity(); // 영속 scratch 재사용(hot path 재할당 회피, layout이 append만 함)
+            try self.activeTabLeafRects(self.allocator, self.termRect(), &self.web_leaf_rects_scratch);
+            const bar_h = self.paneBarHeightPx();
+            const dt = self.dividerThicknessPx();
+            // seam inset: WKWebView는 native NSView라 자기 frame 안 클릭을 **삼킨다**(터미널처럼 mouse handler가
+            // dividerAtPoint를 먼저 가로챌 수 없다) → 형제 pane과 맞닿는 seam 가장자리서 divider를 **물리적으로 노출**해야
+            // 마우스가 seam에 닿아 드래그 리사이즈된다(web-panel.md §5). 이전 `dt/2`는 기본 dt=1px에서 **0**이라 아무 효과
+            // 없었다(세로·가로 divider가 안 잡히던 회귀 — [4e review 0] 재수정). `divider.hitTest` 허용폭
+            // (chrome/components/divider.zig: cell/2+2)이 넉넉해 divider 선 밖 아주 작은 밴드만 있으면 보이는 선을 겨냥해
+            // 잡히므로, gap을 **최소화**한다 — divider 선(dt) + 1pt 클릭 여유(scale 인지)만 들인다(사용자 요청: 공백 최대 축소).
+            // dt==0(divider 숨김)이면 seam=0(무-inset, 웹뷰가 seam까지 채움).
+            const seam: u32 = if (dt == 0) 0 else dt + @max(@as(u32, 1), self.scale_milli / 1000);
+            const tr = self.termRect();
+            const dg = self.dockGeometry();
+            for (self.web_leaf_rects_scratch.items) |lr| {
+                for (lr.leaf.terms.items, 0..) |term, i| {
+                    if (term.kind != .web) continue; // terminal Term은 WKWebView 없음(Metal 렌더).
+                    // 각 leaf 가장자리가 바깥 경계(termRect)가 아니면 형제 pane과 맞닿는 **seam** → seam만큼 본문 rect를 들여
+                    // WKWebView가 분할선을 덮지 않게 한다(작은 시각 gap). top seam은 탭 바(bar_h ≫ seam)가 이미 덮으므로 불요.
+                    // seam_edges 비트마스크(L=1·R=2·B=4)를 함께 실어 Swift가 그 가장자리 근처 클릭/hover를 통과시키게 한다
+                    // (넓은 grab 폭 — 시각 gap과 분리). left/right는 x축, bottom은 top-left px 기준 아래(y 큰 쪽).
+                    // **`seam > 0`으로 게이트**: divider 숨김(split.divider-thickness=0 → seam=0)이면 잡을 divider가 없어
+                    // inset도 seam_edges도 0으로 둔다 — 안 그러면 Swift hitTest가 잡을 것 없는 가장자리서 클릭을 헛통과한다
+                    // (10차 review 기각 항목이나 정합상 게이트). seam==0이라 inset.left=seam이 0이어도 비트는 안 세운다.
+                    // 7e-1b: browser(비신뢰) 웹 패널은 탭 바 바로 아래에 읽기전용 주소창 밴드(현재 URL)를 두므로 top inset을
+                    // bar_h + addr_h로 늘려 WKWebView 본문을 그만큼 더 내린다 → 밴드 영역이 웹뷰에서 비워지고, 탭 바 collect
+                    // 루프가 그 밴드에 배경 quad + URL 셀을 그린다(밴드 y = [bar_h, bar_h+addr_h]가 웹뷰 top과 정확히 abut).
+                    // addr_h는 탭 바 높이(paneBarHeightPx) 재사용 — 단일 소스, 별도 상수 없음. markdown web Term은 주소창이
+                    // 없어 top=bar_h 유지(byte-identical). bar_h==0(chrome_minimal)이면 addr_h도 0이라 밴드 없음(탭 바와 동조).
+                    const addr_h: u32 = if (term.web_panel_kind == .browser) bar_h else 0;
+                    var inset: web_panel_layout.ChromeInset = .{ .top = bar_h + addr_h };
+                    var seam_edges: u8 = 0;
+                    if (seam > 0 and lr.rect.x > tr.x) {
+                        inset.left = seam; // 왼쪽에 형제 pane(세로 divider)
+                        seam_edges |= 1;
+                    }
+                    const at_right_dock = self.dockVisible() and self.dock.side == .right and
+                        lr.rect.x + lr.rect.w == tr.x + tr.w and dg.divider.w > 0;
+                    if (seam > 0 and (lr.rect.x + lr.rect.w < tr.x + tr.w or at_right_dock)) {
+                        inset.right = seam; // 오른쪽 세로 divider
+                        seam_edges |= 2;
+                    }
+                    const at_bottom_dock = self.dockVisible() and self.dock.side == .bottom and
+                        lr.rect.y + lr.rect.h == tr.y + tr.h and dg.divider.h > 0;
+                    if (seam > 0 and (lr.rect.y + lr.rect.h < tr.y + tr.h or at_bottom_dock)) {
+                        inset.bottom = seam; // 아래 가로 divider
+                        seam_edges |= 4;
+                    }
+                    try out.append(self.allocator, .{
+                        .surface_id = term.surfaceId(),
+                        .panel_kind = term.web_panel_kind,
+                        .seam_edges = seam_edges,
+                        .content_rect = web_panel_layout.contentRect(lr.rect, inset),
+                        .visible = (i == lr.leaf.active_term) and !self.dock_resize_drag_active, // 도크 resize 중 native view 전체 hide.
+                    });
                 }
-                if (seam > 0 and lr.rect.x + lr.rect.w < tr.x + tr.w) {
-                    inset.right = seam; // 오른쪽 세로 divider
-                    seam_edges |= 2;
-                }
-                if (seam > 0 and lr.rect.y + lr.rect.h < tr.y + tr.h) {
-                    inset.bottom = seam; // 아래 가로 divider
-                    seam_edges |= 4;
-                }
-                try out.append(self.allocator, .{
-                    .surface_id = term.surfaceId(),
-                    .panel_kind = term.web_panel_kind,
-                    .seam_edges = seam_edges,
-                    .content_rect = web_panel_layout.contentRect(lr.rect, inset),
-                    .visible = (i == lr.leaf.active_term), // 자기 pane의 활성 Term만 show(§6).
-                });
             }
         }
+
+        // 도크 entry는 비활성이어도 집합에 남겨 WKWebView 상태를 보존하고 active entry만 show한다.
+        if (self.dock_initialized) if (self.dock.singleGroup()) |group| {
+            const g = self.dockGeometry();
+            for (group.entries.items, 0..) |entry, i| {
+                if (entry.surface_id == 0) continue;
+                try out.append(self.allocator, .{
+                    .surface_id = entry.surface_id,
+                    .panel_kind = switch (entry.kind) {
+                        .markdown => .markdown,
+                        .html => .browser,
+                    },
+                    .seam_edges = if (g.content.w == 0 or g.content.h == 0) 0 else switch (self.dock.side) {
+                        .right => 1,
+                        // bottom content 위에는 tab/header 두 행이 있어 divider와 맞닿지 않는다.
+                        .bottom => 0,
+                    },
+                    .content_rect = g.content,
+                    .visible = self.dockVisible() and !self.dock_resize_drag_active and group.active != null and group.active.? == i,
+                });
+            }
+        };
         // Phase 7e-1a: 이번 tick 활성 탭 web surface 집합(out)에 없는 nav 상태 키를 제거한다 — surface 닫힘/이동/비활성
         // 탭 이동 시 소유 url 메모리가 세션 끝까지 새지 않게(id는 앱 전역 비재사용이라 stale 오인은 없으나 소유 자원은
         // 즉시 회수). 흔한 경우 stale 0이라 바깥 while은 1회(스캔서 못 찾으면 break). fetchRemove로 iterator 무효화 없이
@@ -11926,6 +12077,17 @@ pub const AppSession = struct {
             }
             return;
         }
+        // 파일 도크 divider는 workspace split과 독립적으로 캡처한다. drag 중엔 모든 native webview를
+        // surfaceDiff로 hide해 AppKit과 Metal hit-test가 섞이지 않게 하고, up 다음 diff가 active view를 다시 show한다.
+        if (self.dock_resize_drag_active and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                self.setDockSizeFromPointer(x_px, y_px);
+            } else {
+                self.dock_resize_drag_active = false;
+                self.metal_dirty = true;
+            }
+            return;
+        }
         // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(PR6) — drag는 마우스를 bounds 안 ratio로 매핑해
         // split.ratio를 live 변경(panel 재배치), up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그 시작.
         if (self.divider_drag != null and (kind == 2 or kind == 3)) {
@@ -11986,6 +12148,37 @@ pub const AppSession = struct {
                 self.toggleSidebarCollapsed();
                 return;
             }
+        }
+        if (kind == 1 and button == 0) {
+            if (self.dockCollapsedToggleRect()) |r| {
+                if (layout_math.pointInRect(x_px, y_px, r)) {
+                    self.toggleDockCollapsed();
+                    return;
+                }
+            }
+            if (self.dockVisible()) {
+                const g = self.dockGeometry();
+                const group = self.dock.singleGroup().?;
+                if (dock_layout.collapseAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) {
+                    self.toggleDockCollapsed();
+                    return;
+                }
+                if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
+                    if (group.active != index) {
+                        group.active = index;
+                        self.metal_dirty = true;
+                    }
+                    return;
+                }
+                if (layout_math.pointInRect(x_px, y_px, g.tab_bar) or layout_math.pointInRect(x_px, y_px, g.header)) return;
+            }
+        }
+        if (kind == 1 and button == 0 and self.dockDividerAtPoint(x_px, y_px)) {
+            self.dock_resize_drag_active = true;
+            self.drag_autoscroll = 0;
+            self.mouse_drag_selecting = false;
+            self.metal_dirty = true;
+            return;
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
         // 사이드바가 없어(폭 0) 경계 드래그 비활성(onResizeEdge가 x=0 근처를 잡아 의도치 않게 트리거되는 것 방지).
@@ -13759,6 +13952,37 @@ pub const AppSession = struct {
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         self.setHoveredHeaderRegion(.none); // 사이드바 밖 → 헤더 아이콘 호버 배경 지움
+        if (self.dockCollapsedToggleRect()) |r| {
+            if (layout_math.pointInRect(x_px, y_px, r)) {
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                return .link;
+            }
+        }
+        if (self.dockVisible()) {
+            const dg = self.dockGeometry();
+            const entry_count = self.dock.entryCountTotal();
+            if (dock_layout.collapseAt(dg, self.cell_width_px, entry_count, x_px, y_px) or
+                dock_layout.tabIndexAt(dg, self.cell_width_px, entry_count, x_px, y_px) != null)
+            {
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                return .link;
+            }
+            if (layout_math.pointInRect(x_px, y_px, dg.header)) {
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                return .default;
+            }
+        }
+        if (self.dockDividerAtPoint(x_px, y_px)) {
+            self.setHoveredTab(null);
+            self.clearHoverUrlAnchor();
+            return switch (self.dock.side) {
+                .right => .resize_h,
+                .bottom => .resize_v,
+            };
+        }
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
         const bar_hover = self.updateHoveredTab(x_px, y_px);
         if (bar_hover != .none) {
@@ -14887,7 +15111,8 @@ pub const AppSession = struct {
     pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool, frame: ?maru.session.workspace.Frame) !maru.session.workspace.Window {
         var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
         for (self.tabs.items) |tab| try tabs.append(arena, try self.captureWorkspaceTab(arena, tab));
-        return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena) };
+        const dock = if (self.dock_initialized) try self.dock.persistedState(arena) else dock_panel.PersistedState{};
+        return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock };
     }
 
     fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !maru.session.workspace.Tab {
@@ -15184,6 +15409,11 @@ pub const AppSession = struct {
     pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
         if (win.tabs.len == 0) return;
 
+        var new_dock = try dock_panel.DockPanel.restore(self.allocator, win.dock);
+        var new_dock_owned = true;
+        errdefer if (new_dock_owned) new_dock.deinit();
+        self.assignDockSurfaceIds(&new_dock);
+
         // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
         var new_tabs: std.ArrayList(*Tab) = .empty;
         defer new_tabs.deinit(self.allocator);
@@ -15207,6 +15437,10 @@ pub const AppSession = struct {
         }
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
+        if (self.dock_initialized) self.dock.deinit();
+        self.dock = new_dock;
+        self.dock_initialized = true;
+        new_dock_owned = false;
         // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
         // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
         // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부
@@ -15964,7 +16198,7 @@ pub const AppSession = struct {
             );
             self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
             self.quit_decision = .none;
-            self.last_summary.web_surfaces_present = if (self.activeTabHasWebTerm()) 1 else 0; // 4e-5(0탭이면 activeTabHasWebTerm=false → 0)
+            self.last_summary.web_surfaces_present = if (self.webSurfacesPresent()) 1 else 0;
             return self.last_summary;
         }
         if (!self.update_started) { // 첫 tick에서 인앱 새 버전 안내 백그라운드 체크를 1회 띄운다(config로 끔)
@@ -16384,6 +16618,20 @@ pub const AppSession = struct {
                 // 앰버 사각 ring(pane rect 둘레 border quad)은 제거. chrome_minimal은 아래 appendActivePaneBorder(셀 테두리)가 따로 담당.
             }
 
+            // FP3 창-로컬 파일 도크 chrome. 순수 dockGeometry의 tab/header/divider rect를 그대로 쓴다.
+            if (self.dockVisible()) {
+                const dg = self.dockGeometry();
+                self.appendBarBgQuad(dg.tab_bar, self.chromeQuadBg(self.sidebarBg()));
+                self.appendBarBgQuad(dg.header, self.chromeQuadBg(self.sidebarBg()));
+                self.appendBarBgQuad(dg.divider, self.dividerColor());
+                if (self.dock.singleGroupConst()) |group| if (group.active) |active| {
+                    if (dock_layout.tabRect(dg, self.cell_width_px, group.entries.items.len, active)) |r|
+                        self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarActiveBg()));
+                };
+            } else if (self.dockCollapsedToggleRect()) |r| {
+                self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarBg()));
+            }
+
             // panel 사이 divider 선(PR6) — split이면 각 경계에 seam 중심 셀 strip을 깐다. chrome(맨 아래)이 아니라
             // overlay로 넘겨 터미널 위·커서 아래에 그린다(seam 위라 터미널에 안 가리게). 단일 panel이면 빈 리스트.
             var pane_overlay: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
@@ -16623,6 +16871,30 @@ pub const AppSession = struct {
                             }
                         }
                     }
+                }
+
+                // FP3 파일 도크 탭 제목+활성 파일 경로. 배경 quad와 같은 geometry origin에 2행을 배치한다.
+                if (self.dockVisible()) {
+                    const dg = self.dockGeometry();
+                    if (self.dock.singleGroupConst()) |group| {
+                        const cols = @min(dg.tab_bar.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
+                        if (cols > 0) {
+                            var titles: std.ArrayList([]const u8) = .empty;
+                            defer titles.deinit(self.allocator);
+                            for (group.entries.items) |entry| titles.append(self.allocator, std.fs.path.basename(entry.path)) catch break;
+                            const active_path: []const u8 = if (group.active) |i| if (i < group.entries.items.len) group.entries.items[i].path else "" else "";
+                            const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
+                            const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+                            if (coretext_frame_builder.buildFileDockChromeDrawList(self.allocator, titles.items, group.active, active_path, @intCast(cols), dock_fg, dock_active_fg)) |ddl| {
+                                self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = dg.tab_bar.x, .origin_y = dg.tab_bar.y, .colors = tabbar_colors } });
+                            } else |_| {}
+                        }
+                    }
+                } else if (self.dockCollapsedToggleRect()) |r| {
+                    const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+                    if (coretext_frame_builder.buildFileDockToggleDrawList(self.allocator, dock_active_fg)) |ddl| {
+                        self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = r.x, .origin_y = r.y, .colors = tabbar_colors } });
+                    } else |_| {}
                 }
 
                 // 2) 비활성 panel 터미널 frame(자기 활성 Term surface, 바 아래 origin). split일 때만 여럿이다.
@@ -16934,7 +17206,7 @@ pub const AppSession = struct {
         // 4e-5: 활성 탭 web Term 존재 신호(Swift drain 게이트용). 매 tick 활성 탭 트리에서 계산(유지 카운터 아님 —
         // 창 간 이동 드리프트 없음, collectWebSurfaces와 같은 활성-탭 범위). writeSummaryFromState가 이 필드를 안
         // 건드리므로(last_summary는 매 tick 덮어쓰기가 아니라 필드별 갱신) epilogue가 quit_decision과 같은 단일 출처로 실는다.
-        self.last_summary.web_surfaces_present = if (self.activeTabHasWebTerm()) 1 else 0;
+        self.last_summary.web_surfaces_present = if (self.webSurfacesPresent()) 1 else 0;
         return self.last_summary;
     }
 
@@ -19196,6 +19468,7 @@ pub const AppSession = struct {
     /// 셀/화면 메트릭만(토큰·shape 없이) — 휠/키 스크롤처럼 metrics만 필요한 경로가 buildChromeProps의 토큰 빌드를
     /// 피하게 한다. buildChromeProps도 이걸 재사용해 metrics를 단일 출처로 둔다.
     fn buildCellMetrics(self: *const AppSession) chrome.props.CellMetrics {
+        const workspace = self.termRect();
         return .{
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
@@ -19204,6 +19477,10 @@ pub const AppSession = struct {
             .sidebar_header_row_h_px = self.sidebar_header_row_h_px,
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
+            .workspace_x_px = workspace.x,
+            .workspace_y_px = workspace.y,
+            .workspace_width_px = workspace.w,
+            .workspace_height_px = workspace.h,
             .chrome_minimal = self.chrome_minimal,
         };
     }
@@ -19964,6 +20241,10 @@ pub const AppSession = struct {
         if (self.update_thread) |t| t.join();
         self.ime_inserted.deinit(self.allocator);
 
+        if (self.dock_initialized) {
+            self.dock.deinit();
+            self.dock_initialized = false;
+        }
         self.web_panel_prev.deinit(self.allocator); // Phase 4e-3: web surface diff prev 집합
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
         self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
@@ -31936,6 +32217,94 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
+}
+
+test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit-test·workspace 캡처" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    try session.newWebTermInActivePane(.browser); // 도크 경계에 맞닿는 workspace WKWebView seam도 함께 검증.
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/alpha.md", .markdown);
+    _ = try session.dock.open(group, "/tmp/beta.html", .html);
+    session.assignDockSurfaceIds(&session.dock);
+
+    const right = session.dockGeometry();
+    try std.testing.expect(right.dock.w > 0 and right.terminal.w + right.divider.w + right.dock.w == 1400 - session.sidebar_width_px);
+    try std.testing.expectEqual(right.terminal, session.termRect());
+    const gp = session.gridPadding();
+    try std.testing.expectEqual(session.window_padding_px.right + right.divider.w + right.dock.w, gp.right);
+
+    var surfaces: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+    defer surfaces.deinit(allocator);
+    try session.collectWebSurfaces(&surfaces);
+    try std.testing.expectEqual(@as(usize, 3), surfaces.items.len);
+    try std.testing.expect(surfaces.items[0].visible); // workspace browser
+    try std.testing.expectEqual(@as(u8, 2), surfaces.items[0].seam_edges); // workspace 우측이 dock divider에 맞닿음
+    try std.testing.expect(!surfaces.items[1].visible and surfaces.items[2].visible);
+    try std.testing.expectEqual(web_panel_layout.PanelKind.browser, surfaces.items[2].panel_kind);
+    try std.testing.expectEqual(@as(u8, 1), surfaces.items[2].seam_edges); // right dock 콘텐츠 좌측 seam
+    try std.testing.expect(session.webSurfacesPresent());
+    try std.testing.expect(session.hasWebSurface(group.entries.items[1].surface_id));
+
+    session.metal_dirty = true;
+    _ = try session.tick();
+    var saw_dock_toggle = false;
+    for (session.metal_buffer.cells) |cell| {
+        if (cell.codepoint == 0x25E7 and cell.origin_x == right.tab_bar.x and cell.origin_y == right.tab_bar.y) {
+            saw_dock_toggle = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_dock_toggle); // 실제 CoreText→Metal 셀 스트림에 도크 크롬 글리프가 들어감.
+
+    session.dock_resize_drag_active = true;
+    surfaces.clearRetainingCapacity();
+    try session.collectWebSurfaces(&surfaces);
+    for (surfaces.items) |surface| try std.testing.expect(!surface.visible); // drag 세션 단위 native view hide
+    session.dock_resize_drag_active = false;
+
+    session.dock.side = .bottom;
+    session.dock.size = 220;
+    const bottom = session.dockGeometry();
+    try std.testing.expect(bottom.dock.h > 0 and bottom.terminal.h + bottom.divider.h + bottom.dock.h == 900 - session.titlebar_strip_px);
+    const chrome_workspace = chrome.props.workspaceRect(session.buildCellMetrics());
+    try std.testing.expectEqual(bottom.terminal.x, chrome_workspace.x);
+    try std.testing.expectEqual(bottom.terminal.y, chrome_workspace.y);
+    try std.testing.expectEqual(bottom.terminal.w, chrome_workspace.w);
+    try std.testing.expectEqual(bottom.terminal.h, chrome_workspace.h);
+    surfaces.clearRetainingCapacity();
+    try session.collectWebSurfaces(&surfaces);
+    try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
+    try std.testing.expectEqual(@as(u8, 0), surfaces.items[2].seam_edges); // dock 본문은 tab/header 아래라 divider와 비인접
+
+    // 보이는 접기 버튼→titlebar 토글 순서로 닫고 다시 열며, termRect가 즉시 회수/복구된다.
+    const collapse_x: f64 = @floatFromInt(bottom.tab_bar.x + bottom.tab_bar.w - 1);
+    const collapse_y: f64 = @floatFromInt(bottom.tab_bar.y + 1);
+    session.mouse(1, collapse_x, collapse_y, 0, 0);
+    try std.testing.expect(session.dock.collapsed);
+    try std.testing.expectEqual(@as(u32, 0), session.dockGeometry().dock.h);
+    const toggle = session.dockCollapsedToggleRect().?;
+    session.mouse(1, @floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1), 0, 0);
+    try std.testing.expect(!session.dock.collapsed);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
+    try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
+    try std.testing.expect(win.dock.entries[1].active);
 }
 
 test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 시 이전 버퍼 해제" {

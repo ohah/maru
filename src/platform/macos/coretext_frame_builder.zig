@@ -736,6 +736,55 @@ pub fn buildPaneGripDrawList(
     };
 }
 
+/// FP3 파일 도크 크롬. 0행은 균등 탭+우측 2칸 접기 버튼, 1행은 활성 파일 경로다.
+/// 탭 분할은 session/dock_layout.tabMetrics와 동일한 `tab_cols=cols-2`, `tab_width=max(1, tab_cols/count)`다.
+pub fn buildFileDockChromeDrawList(
+    allocator: std.mem.Allocator,
+    titles: []const []const u8,
+    active: ?usize,
+    active_path: []const u8,
+    cols: u16,
+    fg: terminal.Color,
+    active_fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    if (cols >= 3 and titles.len > 0) {
+        const tab_cols: u16 = cols - 2;
+        const count: u16 = @intCast(@min(titles.len, std.math.maxInt(u16)));
+        const tab_width = @max(@as(u16, 1), tab_cols / count);
+        for (titles, 0..) |title, i| {
+            const start = std.math.mul(u32, @intCast(i), tab_width) catch break;
+            if (start >= tab_cols) break;
+            const end: u16 = @intCast(@min(start + tab_width, tab_cols));
+            const style: terminal.Style = if (active != null and active.? == i) .{ .foreground = active_fg, .bold = true } else .{ .foreground = fg };
+            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), end, style, false, .head);
+        }
+        try cells.append(allocator, .{ .row = 0, .col = cols - 1, .codepoint = 0x25E7, .width = 1, .style = .{ .foreground = active_fg } }); // ◧
+        _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, cols - 1, .{ .foreground = fg }, false, .head);
+    }
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 2 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 1 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
+pub fn buildFileDockToggleDrawList(allocator: std.mem.Allocator, fg: terminal.Color) !renderer.DrawList {
+    const cells = try allocator.alloc(renderer.DrawCell, 1);
+    errdefer allocator.free(cells);
+    cells[0] = .{ .row = 0, .col = 1, .codepoint = 0x25E7, .width = 1, .style = .{ .foreground = fg } };
+    return .{
+        .size = .{ .cols = 2, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = cells,
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 pub fn buildPaneTabBarDrawList(
     allocator: std.mem.Allocator,
     titles: []const []const u8,

@@ -240,7 +240,7 @@ fn scrollWindow(total: usize, m: props.CellMetrics) ScrollWindow {
     const ch = @max(m.cell_height_px, 1);
     const card_h = ch * card_rows;
     const header_h = ch * header_rows; // 상단 sticky 헤더는 늘 예약
-    const avail_h = @max(card_h + header_h, m.backing_height_px -| 2 * ch); // 위아래 1칸 여백
+    const avail_h = @max(card_h + header_h, props.workspaceRect(m).h -| 2 * ch); // workspace 위아래 1칸 여백
     const max_card_area = avail_h -| header_h;
     const max_visible: usize = @intCast(@max(@as(u32, 1), max_card_area / card_h));
     const visible: usize = if (total == 0) 0 else @min(total, max_visible);
@@ -289,7 +289,8 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
 
     const total = items.len;
     const sw = scrollWindow(total, m); // 보이는 카드 수·스크롤 여부·max_offset(단일 출처)
-    const bh = m.backing_height_px;
+    const workspace = props.workspaceRect(m);
+    const bh = workspace.h;
     const first = @min(state.scroll_offset, sw.max_offset);
 
     // 높이 — 빈 목록은 헤더 + 일러스트 영역, 아니면 헤더 + 보이는 카드. 스크롤 안 하는(항목 적은) 경우엔 min_panel_rows를
@@ -308,12 +309,12 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
     // 위치 clamp.
     var x = state.anchor_x;
     var y = state.anchor_y;
-    const bw_px: i32 = @intCast(m.backing_width_px);
-    const bh_px: i32 = @intCast(bh);
+    const bw_px: i32 = @intCast(workspace.x + workspace.w);
+    const bh_px: i32 = @intCast(workspace.y + workspace.h);
     if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
     if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로
     if (x < 0) x = 0;
-    if (y < 0) y = 0;
+    if (y < @as(i32, @intCast(workspace.y))) y = @intCast(workspace.y);
 
     return .{
         .rect = .{ .x = x, .y = y, .w = box_w, .h = box_h },

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { emitZntcBundle } from "./zntc-bundle";
+import { buildRuntimeNotices } from "./runtime-notices";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
@@ -15,11 +16,14 @@ const emitted = await emitZntcBundle(entry, dist);
 const scriptName = emitted.name;
 const script = emitted.bytes;
 const sri = `sha384-${createHash("sha384").update(script).digest("base64")}`;
-const sourceHtml = await readFile(join(root, "src", "index.html"), "utf8");
 const scriptTag = `<script type="module" src="${scriptName}" integrity="${sri}"></script>`;
-const html = sourceHtml.replace("</body>", `  ${scriptTag}\n  </body>`);
-
-await writeFile(join(dist, "index.html"), html);
+for (const page of ["index.html", "render.html"]) {
+  const sourceHtml = await readFile(join(root, "src", page), "utf8");
+  const html = sourceHtml.replace("</body>", `  ${scriptTag}\n  </body>`);
+  await writeFile(join(dist, page), html);
+}
+await copyFile(join(root, "src", "app.css"), join(dist, "app.css"));
+await writeFile(join(dist, "THIRD_PARTY_NOTICES.txt"), await buildRuntimeNotices(root));
 await writeFile(
   join(dist, "integrity.json"),
   `${JSON.stringify({ [scriptName]: sri }, null, 2)}\n`,

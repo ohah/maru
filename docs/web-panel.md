@@ -114,15 +114,15 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 브리지 신뢰 게이트(isolated world·per-surface capability·forMainFrameOnly)는 **[control-plane.md] §8.1이 단일 출처**다. 여기서는 web 레이어에서만 발생하는 위협을 다룬다:
 
 - **`.md`는 신뢰 콘텐츠가 아니라 "신뢰 렌더러가 그리는 비신뢰 데이터"**다. raw HTML/script 비활성 새니타이즈(`<script>`·`on*`·`javascript:` 제거)가 기본. maru가 빌드해 번들하는 렌더러 JS는 해시 핀(SRI)·락파일로 공급망 고정.
-- **`maru-app://` 스킴**(이름 문법·등록 가능성 근거는 §9): 엄격 CSP 응답 헤더로 외부 네트워크·iframe·`<base>`·form-action exfil 차단(정확한 문자열 단일 출처=코드 `app_scheme.csp_header`, §7.1 ③). 스킴 핸들러는 **경로 정규화 후 허용 루트 prefix 검증**(realpath·symlink 거부·`..` 차단). 단 기존 `sanitizeDropFilename`(`cli/ssh.zig`)은 basename+문자 필터만 하고 realpath/symlink 거부는 **하지 않으므로 이 경로 샌드박스는 신규 코드**다(선례는 부분 참고). 스킴 핸들러는 **maru가 번들한 asset root만** 서빙하고 뷰되는 파일 자신의 디렉터리는 서빙하지 않는다(`script-src 'self'` 아래 공격자 디렉터리의 `<script src=./x.js>`가 same-origin으로 로드되는 것 차단).
-- **브리지 origin 격리(sanitizer 단독 의존 금지)**: `.md`는 비신뢰 데이터(위)라, 브리지를 md 콘텐츠 origin에 두면 sanitizer 한 번 우회로 브리지에 도달한다. 그리고 `frame-src 'none'`이라 "`.md`마다 uuid iframe origin" 분리는 **불가능**하다 — md를 top document로 로드하면 `isMainFrame=true`라 프레임 체크를 통과해 버린다. 따라서 **브리지는 신뢰 viewer shell origin에만 붙이고, md-derived 문서는 브리지가 없는 별도 origin**에 둔다(sanitizer 우회 = script 실행까지, 브리지 미도달). 신뢰 UI와 md 콘텐츠를 origin으로 분리하되, 그 분리는 iframe이 아니라 별도 top-level document(또는 shadow-DOM 격리)로 구현한다.
-- **브리지 호출부 프레임 검증**: 메시지 핸들러 등록은 world-scope(frame 무관)라, 핸들러 진입에서 `frameInfo.isMainFrame` + `securityOrigin`이 **정확한 신뢰 shell origin과 일치**하는지 검사한다(scheme(`maru-app://`) 수준 매칭이 아니라 exact-origin — 어떤 `maru-app://` origin이든 통과시키면 md의 sanitizer 우회가 신뢰 UI와 같은 브리지에 닿는다). `browser`(untrusted) 패널 `WKWebViewConfiguration`에는 scheme handler·message handler를 **애초에 등록하지 않고** `maru-app://` 네비게이션을 `decidePolicyForNavigationAction`에서 차단해 origin 위장 탈취를 1차로 막는다(securityOrigin 검사는 2차 방어).
+- **`maru-app://` 스킴**(이름 문법·등록 가능성 근거는 §9): 엄격 CSP 응답 헤더로 외부 네트워크·`<base>`·form-action exfil을 차단하고, frame은 번들 renderer origin `maru-app://render` 하나만 허용한다(정확한 문자열 단일 출처=코드 `app_scheme.csp_header`, §7.1 ③). 스킴 핸들러는 **경로 정규화 후 허용 루트 prefix 검증**(realpath·symlink 거부·`..` 차단)하며 maru가 번들한 asset root만 서빙한다.
+- **브리지 origin 격리(sanitizer 단독 의존 금지, FP4 실구현)**: 브리지는 신뢰 viewer shell `maru-app://app` main frame에만 붙이고, md-derived 문서는 `sandbox="allow-scripts allow-same-origin"`인 `maru-app://render/render.html` iframe에서 처리한다. app/render의 host가 달라 서로 same-origin이 아니며 renderer에는 user script/message handler를 주입하지 않는다. actual WKWebView smoke가 renderer의 `window.maru`와 `window.webkit.messageHandlers.maru`가 `undefined`, `parent.document` 접근이 실패함을 단언한다. `allow-same-origin`은 custom-scheme ESM+SRI 실행에 필요하지만 host 분리와 이 런타임 gate 없이는 허용하지 않는다.
+- **브리지 호출부 프레임 검증**: 메시지 핸들러 등록은 world-scope(frame 무관)라, 핸들러 진입에서 `frameInfo.isMainFrame` + `securityOrigin`이 **scheme=`maru-app`, host=`app`, 명시 port 없음**과 일치하는지 검사한다. 같은 Zig `appOriginAllowed` 정책을 scheme handler(assets=app|render)·navigation(main=app/subframe=render)·bridge(main=app)가 역할별로 소비한다. `browser` config에는 scheme/message handler를 등록하지 않고 `maru-app://` 네비게이션을 차단한다.
 - **untrusted 패널 격리**: `browser` 패널은 신뢰 콘텐츠와 데이터스토어를 분리한다 — **실구현(7e-0·2026-07-17 정정)**: browser 탭들은 **공유 ephemeral `browserDataStore`**(탭 간 공유 = 로그인 연속성·팝업 OAuth 근거, §7e-0)이고 신뢰 persistent store와 격리된다. 초판의 "별도 WKProcessPool + per-surface ephemeral"은 stale — WKProcessPool은 최신 WebKit 자동 관리(deprecated)라 명시하지 않고, per-surface 격리는 안 하기로 결정됐다([control-plane.md] §9 동일 정정). 파일 도크의 로컬 html은 이 공유 store를 쓰지 **않는다**([file-panel.md](file-panel.md) §2 — 도크 전용 별도 ephemeral).
 - **링크 라우팅**: 웹 패널 링크 클릭은 `decidePolicyForNavigationAction`에서 인터셉트해 [링크 감지](link-detection.md)의 존재검증·스킴 화이트리스트·명시 제스처 정책을 재사용한다(`file:///X.app` 실행 등 차단).
 
 ### 7.1 5c — `maru-app://` 스킴 + 엄격 CSP + 경로 샌드박스 설계
 
-Phase 5 세 번째 슬라이스(신뢰 UI 경로). maru **자기 웹 UI**(설정·md 뷰어·대시보드 — Phase 7)를 서빙할 신뢰 콘텐츠 채널 `maru-app://`를 **안정적 origin + 강한 격리**로 확립한다. 5b 브리지가 pin할 **신뢰 origin을 여기서 정의**하므로 **5b보다 먼저**(사용자 결정 2026-07-10: 신뢰 UI + 코드 안정성 → rework 회피 순서). 실 UI asset은 Phase 7 — 5c는 스킴·CSP·샌드박스 메커니즘을 **placeholder asset**으로 확립한다.
+Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 origin으로 확립했고, FP4가 실제 file-panel shell/renderer asset과 제한된 iframe 정책을 연결했다.
 
 **의존성**: 소켓 write-경로·capability 발급(1e)·1g와 **무관**(자족적 — 스킴은 in-WKWebView 콘텐츠 서빙이라 컨트롤 소켓 경로를 안 탄다). 안정적으로 독립 진전.
 
@@ -132,19 +132,19 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로). maru **자기 웹 UI**(설정
 
 **② 스킴 핸들러(`WKURLSchemeHandler`, platform)**: 신뢰 config에만 `setURLSchemeHandler(_, forURLScheme:"maru-app")` 등록. 요청 → ① 샌드박스 검증 → 통과면 **maru 번들 asset root**의 바이트를 읽어 **엄격 CSP 헤더**와 함께 응답, 거부면 차단(404). **뷰되는 파일 자신의 디렉터리는 안 서빙**(§7 — `script-src 'self'` 아래 공격자 디렉터리 스크립트 same-origin 로드 차단). 스킴 이름 근거=§9(RFC 3986, `WKURLSchemeHandler` 커스텀 스킴 등록 가능·소문자 고정).
 
-**③ CSP(응답 헤더)**: 엄격 CSP를 응답에 항상 부착 — 외부 네트워크(`connect-src 'none'`)·iframe(`frame-src 'none'`)·`<base>` 하이재킹(`base-uri 'none'`)·form-action exfil(`form-action 'none'`) 차단. **문자열 단일 출처는 코드 `app_scheme.csp_header`**(app_scheme.zig): `default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'`. 변경은 그 상수에서 하고 이 문서를 맞춘다(리뷰 [1] — doc↔code 정합).
+**③ CSP(응답 헤더)**: 엄격 CSP를 응답에 항상 부착 — 외부 네트워크(`connect-src 'none'`)·임의 frame·`<base>` 하이재킹·form-action exfil 차단. **문자열 단일 출처는 코드 `app_scheme.csp_header`**: `default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'`. frame 예외는 FP4의 번들 renderer exact origin 하나뿐이다.
 
-**④ 트러스트 분기**: `markdown`(신뢰) config만 스킴 핸들러 등록. `browser`(untrusted) config엔 **미등록** + `maru-app://` 네비 `decidePolicyForNavigationAction`에서 차단(origin 위장 방지 — §8.1 (c)). 현재 실 신뢰 콘텐츠(Phase 7) 전이라 5c는 **fixture 신뢰 패널 + placeholder asset**(최소 test HTML)으로 메커니즘·보안을 확립.
+**④ 트러스트 분기**: `markdown`(신뢰) config만 스킴 핸들러·브리지를 등록한다. `browser`(untrusted) config엔 **미등록** + `maru-app://` 네비 차단. FP4부터 markdown config는 `web/dist`의 실 shell/renderer를 로드한다.
 
 **⑤ 자동 검증**: 경로 샌드박스 adversarial(헤드리스 Zig) + macos smoke(`maru-app://…/index.html` 로드·CSP 존재·asset 서빙; `maru-app://…/../etc/passwd`·symlink→거부; browser 패널서 `maru-app://` 네비 차단).
 
-**⑥ 슬라이스 경계** — 5c=스킴·CSP·샌드박스·placeholder asset. **5b**(다음)=브리지가 이 `maru-app://` origin을 exact-pin(§8.1.1). **Phase 7**=실 UI asset(zntc/Bun 빌드).
+**⑥ 슬라이스 경계** — 5c=스킴·경로 샌드박스, 5b=exact app-origin bridge, FP2=실 UI build, FP4=제품 asset·read bridge·격리 renderer 결합.
 
 **⑦ 구현 완료(5c-1·5c-2a/b/c)** — 세 번째 슬라이스를 세 조각으로 나눠 각각 헤드리스 게이트 후 머지했다:
 - **5c-1(경로 샌드박스, L2 순수)**: `src/session/app_scheme.zig` — `validateAppPath`(traversal `..` segment·whitelist `[a-zA-Z0-9._/-]`로 `%`·backslash·null·제어문자 거부·정규화 불변식) + `csp_header` 상수(③ 단일 출처). adversarial 헤드리스 테스트 6개.
 - **5c-2a(realpath 탈출 방어 보안 코어, L4 platform I/O)**: `app_host_abi.zig` `resolveAppAsset(io, root, req, out)` — 5c-1 문자열 검증 후 candidate·root를 각각 `realPathFile`로 canonicalize해 candidate가 root **아래**(`pathIsUnder`)인지 확인(symlink가 root 밖을 가리키면 거부). `statFile.kind != .file`→NotFound. tmpDir adversarial 4개(정상·traversal·symlink 탈출·부재/디렉터리).
 - **5c-2b(C-ABI export)**: `maru_macos_app_resolve_app_asset`(>=0=경로 길이, 음수=−1 Reject/−2 NotFound/−3 OutsideRoot/−4 NULL) + `maru_macos_app_csp_header`(CSP 단일 출처를 Swift가 읽음). 정책=Zig, 어댑터=Swift 경계를 시그니처로 고정.
-- **5c-2c(Swift 스킴 핸들러 + 트러스트 분기 + placeholder + smoke)**: `MaruAppHost.swift` `MaruAppSchemeHandler`(WKURLSchemeHandler — resolve export로 안전 경로 얻어 파일 바이트를 CSP 헤더와 서빙, 거부=404, MIME는 확장자). `MaruWebPanelView`가 `panelKind`로 분기 — markdown(신뢰)만 `setURLSchemeHandler` + `maru-app://app/index.html` 로드, browser(비신뢰)는 인라인 흰 HTML + `WKNavigationDelegate`로 `maru-app://` 네비 cancel(2차 방어). asset root=`Bundle.main.resourceURL/web`(+dev/smoke `MARU_WEB_APP_ROOT` override). placeholder = `src/platform/macos/web/{index.html,app.css,app.js}`(build.zig가 번들 `Resources/web/`에 복사; app.css/app.js 링크로 `style-src`/`script-src 'self'` 검증). 신뢰 origin = `maru-app://app`(5b가 pin). macos-app-smoke가 resolve export 링크(index>0·traversal −1·부재 −2) + 트러스트 분기(markdown=핸들러 등록, browser=미등록)를 값으로 단언. **GUI 손 테스트**: `MARU_WEB_PANEL=1 MARU_WEB_PANEL_MARKDOWN=1`로 신뢰 패널이 흰 placeholder + `app.js 로드됨 · maru-app://app`를 그리는지, browser 패널(markdown env 없음)은 흰 HTML만.
+- **5c-2c + FP4 제품 연결**: `MaruAppSchemeHandler`가 안전 경로의 번들 asset을 CSP와 서빙하고 `MaruWebPanelView`는 markdown config에서만 scheme handler + exact-origin bridge를 등록한다. FP4는 placeholder `src/platform/macos/web/*`를 제거하고 zntc 생성물 `web/dist`를 `Resources/web/`에 복사한다. `maru-app://app/index.html` shell은 `maru-app://render/render.html` iframe을 오케스트레이션하며, macos smoke가 실제 fixture와 bridge/renderer 격리를 자동 단언한다.
 
 ## 8. 빠진 기능 (구현 시 필수)
 
@@ -340,6 +340,6 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
   Zig가 pane 트리 walk + `surfaceDiff`로 계산한 batch를 marshaling만 하고(NSView 연산은 Swift), struct size/offset(visible 포함)·
   op enum 값을 헤드리스 계약 테스트가 강제한다.
 - 모달 레이어 분리: `src/platform/macos/maru_metal_renderer.{h,m}`(별도 오버레이 layer·2패스), `src/renderer/metal_frame.zig`
-- `maru-app://` OS 어댑터(**5c-2c 구현 완료**): `src/platform/macos/MaruAppHost.swift`의 `MaruAppSchemeHandler`(WKURLSchemeHandler — 파일 읽기·응답 조립·MIME) + `MaruWebPanelView`의 트러스트 분기(panelKind로 신뢰만 핸들러 등록·`maru-app://app/index.html` 로드, 비신뢰는 인라인 HTML + maru-app:// 네비 cancel). ABI marshaling·CSP getter는 `app_host_abi.{zig,h}`(`maru_macos_app_resolve_app_asset`·`maru_macos_app_csp_header`, **5c-2b**). placeholder asset = `src/platform/macos/web/{index.html,app.css,app.js}`(build.zig가 번들 `Resources/web/`에 복사). (별도 `web_panel.swift` 파일은 만들지 않고 기존 host 파일에 어댑터를 두었다.)
+- `maru-app://` OS 어댑터: `MaruAppHost.swift`의 `MaruAppSchemeHandler` + `MaruWebPanelView` trust 분기·surface-pinned bridge. ABI marshaling·CSP getter·FP4 dynamic bridge dispatch는 `app_host_abi.{zig,h}`(ABI v120). 제품 asset은 `web/src`→zntc `web/dist`→`Resources/web/` 경로이며 생성물은 커밋하지 않는다.
 - `maru-app://` 보안 정책(**5c-1·5c-2a 구현 완료**): CSP 상수·경로 문자열 검증(traversal·whitelist·정규화 불변식)은 L2 순수 `src/session/app_scheme.zig`(`csp_header`·`validateAppPath`)가 단일 출처. realpath/symlink 탈출 거부는 실 FS I/O라 `src/platform/macos/app_host_abi.zig`의 `resolveAppAsset`(5c-1 문자열 검증을 소비 + realpath canonical containment). origin/frame allowlist(exact-origin pin)는 5b 브리지가 더한다.
 - markdown sanitizer·웹 콘텐츠 보안: `web/` 패키지(zntc build, Bun `web:test`). sanitizer fixture와 렌더러 순수 로직은 Swift가 아니라 웹 패키지가 소유한다.

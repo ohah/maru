@@ -16,11 +16,18 @@ if (entries.length !== 1) throw new Error("integrity manifest must contain exact
 const [bundleName, pinnedSri] = entries[0];
 const bundle = await readFile(join(dist, bundleName));
 const actualSri = `sha384-${createHash("sha384").update(bundle).digest("base64")}`;
-const html = await readFile(join(dist, "index.html"), "utf8");
+const pages = await Promise.all(
+  ["index.html", "render.html"].map((page) => readFile(join(dist, page), "utf8")),
+);
+await readFile(join(dist, "app.css"), "utf8");
+const notices = await readFile(join(dist, "THIRD_PARTY_NOTICES.txt"), "utf8");
 
 if (actualSri !== pinnedSri) throw new Error("bundle bytes do not match integrity.json");
-if (!html.includes(`src="${bundleName}" integrity="${pinnedSri}"`)) {
-  throw new Error("index.html does not pin the emitted bundle SRI");
+if (pages.some((html) => !html.includes(`src="${bundleName}" integrity="${pinnedSri}"`))) {
+  throw new Error("every HTML entry must pin the emitted bundle SRI");
+}
+if (!notices.includes("dompurify@3.4.12") || notices.includes("@zntc/core@0.1.3")) {
+  throw new Error("runtime notices must cover production dependencies only");
 }
 
 console.log(

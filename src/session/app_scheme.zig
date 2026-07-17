@@ -14,10 +14,28 @@
 
 const std = @import("std");
 
-/// `maru-app://` 응답에 항상 붙이는 엄격 CSP(§7.1 ③). 외부 네트워크(`connect-src 'none'`)·iframe(`frame-src 'none'`)을
-/// 막아 exfil을 차단하고, 스크립트/이미지는 same-origin(+data: 이미지)만 허용한다. 신뢰 UI가 maru 번들 asset만 쓰므로
-/// `'unsafe-inline'`·외부 CDN을 열지 않는다. 문자열은 소문자 스킴과 정합(§9 스킴 이름 확정).
-pub const csp_header = "default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
+/// `maru-app://` 응답에 항상 붙이는 엄격 CSP(§7.1 ③). 외부 네트워크는 닫고, iframe은 FP4의 bridge-free renderer
+/// exact origin(`maru-app://render`) 하나만 허용한다. renderer frame은
+/// `sandbox=allow-scripts allow-same-origin`이지만 app/render host가 달라 shell과 cross-origin이고,
+/// 브리지 handler는 main-frame `maru-app://app`의 port 없는 origin만 받는다. `'unsafe-inline'`·외부 CDN은 열지 않는다.
+pub const csp_header = "default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
+
+pub const AppOriginRole = enum(u32) {
+    shell = 0,
+    renderer = 1,
+    asset = 2,
+};
+
+/// 신뢰 custom-scheme origin은 scheme+host+명시 port 부재를 함께 고정한다. `asset`은 scheme handler가
+/// shell/renderer 두 번들 host를 서빙할 때만 쓰며, bridge는 반드시 `shell`만 요청한다.
+pub fn appOriginAllowed(scheme: []const u8, host: []const u8, has_explicit_port: bool, role: AppOriginRole) bool {
+    if (has_explicit_port or !std.ascii.eqlIgnoreCase(scheme, "maru-app")) return false;
+    return switch (role) {
+        .shell => std.ascii.eqlIgnoreCase(host, "app"),
+        .renderer => std.ascii.eqlIgnoreCase(host, "render"),
+        .asset => std.ascii.eqlIgnoreCase(host, "app") or std.ascii.eqlIgnoreCase(host, "render"),
+    };
+}
 
 /// 경로 샌드박스 거부 사유(§7.1 ①). 전부 "안 서빙"으로 귀결되나, 진단·테스트용으로 구분한다. wire로 나가는 건
 /// platform이 균일하게 접는다(404/blocked — 존재 여부 oracle 최소화).
@@ -69,6 +87,17 @@ pub fn validateAppPath(path: []const u8, out: []u8) SandboxError![]const u8 {
     }
     if (w == 0) return SandboxError.Empty; // `""`·`/`·`///`·`/./` → 호출자가 index 문서로
     return out[0..w];
+}
+
+test "appOriginAllowed: exact shell/render hosts and no explicit port" {
+    try std.testing.expect(appOriginAllowed("maru-app", "app", false, .shell));
+    try std.testing.expect(appOriginAllowed("MARU-APP", "RENDER", false, .renderer));
+    try std.testing.expect(appOriginAllowed("maru-app", "app", false, .asset));
+    try std.testing.expect(appOriginAllowed("maru-app", "render", false, .asset));
+    try std.testing.expect(!appOriginAllowed("maru-app", "render", false, .shell));
+    try std.testing.expect(!appOriginAllowed("maru-app", "app", true, .shell));
+    try std.testing.expect(!appOriginAllowed("https", "app", false, .shell));
+    try std.testing.expect(!appOriginAllowed("maru-app", "app.evil", false, .shell));
 }
 
 // ── Phase 7e-2a: browser 웹 패널 주소창 스킴 정책(L2 순수 — 헤드리스·이식성) ────────────────────────────────
@@ -249,6 +278,15 @@ test "validateAppPath: 반환 경로는 절대 `..`·선행 `/`를 포함하지 
 test "validateAppPath: TooLong(out 버퍼 초과) 방어" {
     var small: [4]u8 = undefined;
     try testing.expectError(SandboxError.TooLong, validateAppPath("abcdefgh", &small));
+}
+
+test "CSP: network stays closed and only the dedicated renderer frame origin is allowed" {
+    try testing.expect(std.mem.indexOf(u8, csp_header, "connect-src 'none'") != null);
+    try testing.expect(std.mem.indexOf(u8, csp_header, "frame-src maru-app://render") != null);
+    try testing.expect(std.mem.indexOf(u8, csp_header, "frame-src 'none'") == null);
+    try testing.expect(std.mem.indexOf(u8, csp_header, "unsafe-inline") == null);
+    try testing.expect(std.mem.indexOf(u8, csp_header, "http:") == null);
+    try testing.expect(std.mem.indexOf(u8, csp_header, "https:") == null);
 }
 
 // ── resolveNavUrl(7e-2a 주소창 스킴 정책) adversarial ───────────────────────────────────────────────────────

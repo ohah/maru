@@ -1,0 +1,71 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow-wrap: anywhere;
+}
+
+.viewer-shell {
+  height: 100vh;
+  overflow: hidden;
+}
+
+#viewer-status {
+  position: absolute;
+  z-index: 1;
+  margin: 1rem;
+  color: color-mix(in srgb, CanvasText 65%, Canvas);
+}
+
+#viewer-status:empty {
+  display: none;
+}
+
+#renderer {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: Canvas;
+}
+
+#app {
+  box-sizing: border-box;
+  max-width: 76rem;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 1.5rem 2rem 4rem;
+  line-height: 1.6;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+pre {
+  overflow: auto;
+  padding: 0.9rem 1rem;
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, CanvasText 8%, Canvas);
+}
+
+table {
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid color-mix(in srgb, CanvasText 24%, Canvas);
+}

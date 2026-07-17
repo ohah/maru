@@ -4,9 +4,16 @@
     <meta charset="utf-8" />
     <meta name="color-scheme" content="light dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="app.css" />
     <title>Maru file panel</title>
   </head>
-  <body>
-    <main id="app" aria-live="polite">파일 패널 웹 툴체인 로딩 중</main>
+  <body class="viewer-shell">
+    <p id="viewer-status" role="status">파일을 읽는 중</p>
+    <iframe
+      id="renderer"
+      title="Markdown 미리보기"
+      src="maru-app://render/render.html"
+      sandbox="allow-scripts allow-same-origin"
+    ></iframe>
   </body>
 </html>

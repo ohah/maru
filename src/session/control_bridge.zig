@@ -14,11 +14,30 @@
 
 const std = @import("std");
 const cp = @import("control_plane.zig");
+const file_policy = @import("file_panel_bridge.zig");
 
 /// 브리지 method 이름(5b 최소: `hello` 1개). `window.maru` shim의 `maru.hello()`가 이 method 요청으로 매핑된다.
 /// 소켓 핸드셰이크의 `hello` notification(cp.hello_method)과 이름은 같지만 문맥이 다르다 — 이건 id 있는 **request**로
 /// reply를 받고, 소켓 hello는 id 없는 notification이다(별개 dispatch라 충돌 없음).
 pub const hello_method = "hello";
+pub const file_read_method = "maru.file.read";
+pub const file_read_asset_method = "maru.file.readAsset";
+
+/// 실제 파일 시스템 접근을 platform 계층에서 주입한다. 반환 slice는 `gpa` 소유이며 dispatch가 해제한다.
+/// callback error는 경로/존재 정보를 노출하지 않는 균일 `internal_error`로 접는다.
+pub const FileAccess = struct {
+    context: *anyopaque,
+    read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8,
+    read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
+
+    fn read(self: FileAccess, gpa: std.mem.Allocator) anyerror![]u8 {
+        return self.read_fn(self.context, gpa);
+    }
+
+    fn readAsset(self: FileAccess, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8 {
+        return self.read_asset_fn(self.context, gpa, normalized_path);
+    }
+};
 
 /// bridge `hello` 성공 result 한 줄: `{"jsonrpc":"2.0","id":<id>,"result":{"protocol":..,"server_version":..}}`.
 /// minified 한 줄(1a·1c·control_browser와 동일 — ndjson frame 경계 안전). 종단 `\n`은 프레이밍(L4)이 붙인다. caller free.
@@ -51,6 +70,17 @@ pub fn dispatchBridge(
     request_bytes: []const u8,
     server_version: []const u8,
 ) std.mem.Allocator.Error![]u8 {
+    return dispatchBridgeWithFileAccess(gpa, request_bytes, server_version, null);
+}
+
+/// `file_access != null`인 도크 markdown surface에서만 file method를 연다. 일반 신뢰 UI/기존 hello fixture는
+/// provider를 넘기지 않아 file method가 `method_not_found`로 닫힌다.
+pub fn dispatchBridgeWithFileAccess(
+    gpa: std.mem.Allocator,
+    request_bytes: []const u8,
+    server_version: []const u8,
+    file_access: ?FileAccess,
+) std.mem.Allocator.Error![]u8 {
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errorResponse(gpa, .null, cp.parseFailureCode(e)),
@@ -63,8 +93,72 @@ pub fn dispatchBridge(
         else => return errorResponse(gpa, .null, .invalid_request),
     };
 
-    if (!std.mem.eql(u8, req.method, hello_method)) return errorResponse(gpa, req.id, .method_not_found);
-    return serializeHelloResult(gpa, req.id, server_version);
+    if (std.mem.eql(u8, req.method, hello_method)) return serializeHelloResult(gpa, req.id, server_version);
+
+    const access = file_access orelse return errorResponse(gpa, req.id, .method_not_found);
+    if (std.mem.eql(u8, req.method, file_read_method)) {
+        if (req.params != null) return errorResponse(gpa, req.id, .invalid_params);
+        const content = access.read(gpa) catch return errorResponse(gpa, req.id, .internal_error);
+        defer gpa.free(content);
+        if (!std.unicode.utf8ValidateSlice(content)) return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileReadResult(gpa, req.id, content);
+    }
+    if (std.mem.eql(u8, req.method, file_read_asset_method)) {
+        const raw_path = readAssetPath(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        var normalized_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const normalized = file_policy.normalizeAssetPath(raw_path, &normalized_buf) catch
+            return errorResponse(gpa, req.id, .invalid_params);
+        const bytes = access.readAsset(gpa, normalized) catch return errorResponse(gpa, req.id, .internal_error);
+        defer gpa.free(bytes);
+        return serializeFileAssetResult(gpa, req.id, file_policy.mimeForPath(normalized), bytes);
+    }
+    return errorResponse(gpa, req.id, .method_not_found);
+}
+
+fn readAssetPath(params: ?std.json.Value) error{InvalidParams}![]const u8 {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 1) return error.InvalidParams;
+    return switch (obj.get("path") orelse return error.InvalidParams) {
+        .string => |path| if (path.len > 0) path else error.InvalidParams,
+        else => error.InvalidParams,
+    };
+}
+
+fn serializeFileReadResult(gpa: std.mem.Allocator, id: cp.Id, content: []const u8) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    cp.beginResult(&s, id) catch return error.OutOfMemory;
+    s.objectField("content") catch return error.OutOfMemory;
+    s.write(content) catch return error.OutOfMemory;
+    cp.endResult(&s) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn serializeFileAssetResult(
+    gpa: std.mem.Allocator,
+    id: cp.Id,
+    mime: []const u8,
+    bytes: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    const encoded_len = std.base64.standard.Encoder.calcSize(bytes.len);
+    const encoded = try gpa.alloc(u8, encoded_len);
+    defer gpa.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, bytes);
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    cp.beginResult(&s, id) catch return error.OutOfMemory;
+    s.objectField("mime") catch return error.OutOfMemory;
+    s.write(mime) catch return error.OutOfMemory;
+    s.objectField("data_base64") catch return error.OutOfMemory;
+    s.write(encoded) catch return error.OutOfMemory;
+    cp.endResult(&s) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
 }
 
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용 — control_browser/1d와 동일 패턴).
@@ -92,6 +186,99 @@ test "dispatchBridge: hello round-trip → protocol + server_version" {
     try testing.expectEqualStrings("maru.control.v1", result.get("protocol").?.string);
     try testing.expectEqualStrings("9.9.9", result.get("server_version").?.string);
     try testing.expect(obj.get("error") == null);
+}
+
+const FakeFileAccess = struct {
+    read_calls: usize = 0,
+    asset_calls: usize = 0,
+    last_asset_path: [128]u8 = undefined,
+    last_asset_path_len: usize = 0,
+    fail: bool = false,
+
+    fn read(context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        self.read_calls += 1;
+        if (self.fail) return error.ReadFailed;
+        return gpa.dupe(u8, "# fixture\n\n안전한 본문");
+    }
+
+    fn readAsset(context: *anyopaque, gpa: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        self.asset_calls += 1;
+        if (self.fail) return error.ReadFailed;
+        @memcpy(self.last_asset_path[0..path.len], path);
+        self.last_asset_path_len = path.len;
+        return gpa.dupe(u8, &.{ 0x89, 0x50, 0x4e, 0x47 });
+    }
+
+    fn access(self: *FakeFileAccess) FileAccess {
+        return .{ .context = self, .read_fn = read, .read_asset_fn = readAsset };
+    }
+};
+
+test "dispatchBridge: file.read is no-arg, provider-scoped, and returns UTF-8 content" {
+    var fake: FakeFileAccess = .{};
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"maru.file.read\"}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    try testing.expectEqualStrings("# fixture\n\n안전한 본문", p.value.object.get("result").?.object.get("content").?.string);
+    try testing.expectEqual(@as(usize, 1), fake.read_calls);
+
+    const with_params = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"maru.file.read\",\"params\":{}}";
+    const bad = try dispatchBridgeWithFileAccess(testing.allocator, with_params, "0.1.0", fake.access());
+    defer testing.allocator.free(bad);
+    var bp = try parseValue(testing.allocator, bad);
+    defer bp.deinit();
+    try testing.expectEqual(@as(i64, -32602), bp.value.object.get("error").?.object.get("code").?.integer);
+    try testing.expectEqual(@as(usize, 1), fake.read_calls);
+
+    const absent = try dispatchBridge(testing.allocator, req, "0.1.0");
+    defer testing.allocator.free(absent);
+    var ap = try parseValue(testing.allocator, absent);
+    defer ap.deinit();
+    try testing.expectEqual(@as(i64, -32601), ap.value.object.get("error").?.object.get("code").?.integer);
+}
+
+test "dispatchBridge: file.readAsset normalizes path and base64 encodes bytes" {
+    var fake: FakeFileAccess = .{};
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"maru.file.readAsset\",\"params\":{\"path\":\"./images//diagram.PNG\"}}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    const result = p.value.object.get("result").?.object;
+    try testing.expectEqualStrings("image/png", result.get("mime").?.string);
+    try testing.expectEqualStrings("iVBORw==", result.get("data_base64").?.string);
+    try testing.expectEqualStrings("images/diagram.PNG", fake.last_asset_path[0..fake.last_asset_path_len]);
+}
+
+test "dispatchBridge: file.readAsset rejects malformed and traversal params before provider" {
+    var fake: FakeFileAccess = .{};
+    const cases = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"maru.file.readAsset\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"maru.file.readAsset\",\"params\":{\"path\":\"../secret\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"maru.file.readAsset\",\"params\":{\"path\":\"a.png\",\"extra\":true}}",
+    };
+    for (cases) |req| {
+        const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+        defer testing.allocator.free(resp);
+        var p = try parseValue(testing.allocator, resp);
+        defer p.deinit();
+        try testing.expectEqual(@as(i64, -32602), p.value.object.get("error").?.object.get("code").?.integer);
+    }
+    try testing.expectEqual(@as(usize, 0), fake.asset_calls);
+}
+
+test "dispatchBridge: provider failures are uniform internal errors" {
+    var fake: FakeFileAccess = .{ .fail = true };
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"maru.file.read\"}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    try testing.expectEqual(@as(i64, -32603), p.value.object.get("error").?.object.get("code").?.integer);
 }
 
 test "dispatchBridge: 미지원 method → method_not_found(요청 id 보존)" {

@@ -50,7 +50,7 @@ src/
   plugin/               future action/plugin/Wasm boundary
 ```
 
-파일 패널의 웹 콘텐츠는 루트 `web/`에 둔다. `web/src/`는 vanilla TypeScript renderer·sanitizer, `web/scripts/`는 zntc bundle/SRI·license audit, `web/tests/`는 Bun adversarial fixture를 소유한다. 생성물 `web/dist/`와 `web/node_modules/`는 커밋하지 않으며, FP4에서 제품 asset으로 연결하기 전까지 기존 `src/platform/macos/web/` placeholder와 분리한다.
+파일 패널의 웹 콘텐츠는 루트 `web/`에 둔다. `web/src/`는 vanilla TypeScript shell·격리 renderer·sanitizer, `web/scripts/`는 zntc bundle/SRI·runtime notice/license audit, `web/tests/`는 Bun adversarial fixture를 소유한다. 생성물 `web/dist/`와 `web/node_modules/`는 커밋하지 않는다. `build.zig`가 `web:build`를 선행해 `web/dist`를 앱 `Resources/web/`에 복사하므로 옛 `src/platform/macos/web/` placeholder는 FP4에서 제거했다. 파일 read/asset 경로 정책은 L2 `src/session/file_panel_bridge.zig`, 실 surface-pinned FS I/O와 Swift ABI는 `src/platform/macos/app_session.zig`·`app_host_abi.{zig,h}`가 소유한다.
 
 루트의 `*.zig` 파일은 외부 import 경로를 안정화하는 facade다. 실제 구현은 위 하위 폴더에 목적별로 둔다.
 

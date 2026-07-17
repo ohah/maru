@@ -25,7 +25,7 @@
 | `.md` | 신뢰 웹앱(markdown config) | 새니타이즈 렌더 | CM6(같은 웹앱, 토글) |
 | `.html` | browser config(비신뢰 격리) | `loadFileURL(_:allowingReadAccessTo: 파일 디렉터리)` — WebKit 표준 API로 읽기 범위를 그 디렉터리에 한정 | **v1 범위 밖**(후속 §13) |
 
-- `.html`은 살아있는 스크립트라 신뢰 origin 인라인 렌더 불가(`frame-src 'none'` — [web-panel.md] §7). 도크 안에서도 browser config(공유 ephemeral store) WKWebView로 격리 렌더한다.
+- `.html`은 살아있는 스크립트라 신뢰 shell/markdown renderer에 인라인 렌더할 수 없다. 신뢰 CSP의 `frame-src` 예외는 정확히 `maru-app://render`인 번들 renderer 한 곳뿐이며 임의 문서·`file:` iframe은 허용하지 않는다([web-panel.md] §7). 도크 안에서도 `.html`은 browser config(도크 전용 ephemeral store) WKWebView로 격리 렌더한다.
 - 현행 스킴 화이트리스트는 http/https만(`resolveNavUrl`·`popupTargetAllowed` — file: 거부)이므로 **도크의 .html 열기 경로만** `loadFileURL`을 쓴다. 주소창 네비게이션의 file: 거부는 불변.
 - **`loadFileURL(allowingReadAccessTo:)` 정밀 시맨틱(2차 검증)**: 디렉터리 스코프는 **하위 트리 전체 재귀** 읽기 + 스코프 내 file: 네비·서브리소스 로드를 허용하고 스코프 **밖만** WebKit이 차단한다. 서브리소스 없는 단독 html이면 단일-파일 스코프(파일 자체를 readAccessURL로)가 더 좁다 — FP5에서 케이스 분기 검토.
 - **도크 html 네비게이션 정책(신규 — 현행 갭 실측)**: 현행 browser `decidePolicyForNavigationAction`은 maru-app 차단 외 **전 스킴 허용**(file: 포함)이라, 도크 html 안 링크가 스코프 내 형제 파일로 이동해 헤더 밴드 핀 경로와 표시 문서가 어긋날 수 있다. 도크 html webview는 전용 네비 분기를 신설한다: **top-level 네비 전부 차단**(핀 파일 고정 — reload만), http(s) 링크는 링크 감지 정책 재사용(외부 브라우저). 스코프 내 네비 허용+밴드 추종은 후속(§13). [web-panel.md] §7 "링크 라우팅" 계획의 도크 케이스가 이 항목이다.
@@ -45,14 +45,14 @@
 | 수식 | KaTeX(경량 권장) / MathJax | 격리 origin, 수식→마크업 |
 | 코드 하이라이트 | Shiki / Prism | 렌더·빌드타임, XSS 표면 작음 |
 
-- **두 web 컨텍스트**(§3·web-panel §7): ① **격리 렌더 origin** = 새니타이즈 HTML + 리치 렌더 JS(Mermaid 등 — maru 번들·SRI 핀. 콘텐츠 **자체** 스크립트는 제거되나 신뢰 렌더러는 실행). 브리지 없음. ② **신뢰 shell origin** = CM6 + 브리지 + 오케스트레이션. **untrusted 콘텐츠를 처리하는 리치 렌더 라이브러리는 반드시 ①에서** 돌려 shell 침해를 구조로 차단한다(Mermaid에 버그가 있어도 브리지 origin 밖).
+- **두 web 컨텍스트**(§3·web-panel §7, FP4 실구현): ① **격리 렌더 origin `maru-app://render`** = `sandbox="allow-scripts allow-same-origin"` iframe 안에서 새니타이즈 HTML + 리치 렌더 JS를 실행한다. shell과 host가 달라 same-origin이 아니며, `window.maru`/WebKit message handler가 없고 부모 DOM 접근도 실패하는지를 실제 WKWebView smoke가 고정한다. ② **신뢰 shell origin `maru-app://app`** = 브리지 + 오케스트레이션. 번들·SRI는 공유하되 브리지는 main-frame exact app origin에만 주입한다. **untrusted 콘텐츠를 처리하는 리치 렌더 라이브러리는 반드시 ①에서** 돌려 shell 침해를 구조로 차단한다.
 - **번들(FP2 완료)**: `web/` Bun workspace(`package.json` + `bun.lock`) + `@zntc/core@0.1.3` bundle + oxlint/oxfmt(Oxc), SHA-384 SRI 생성 후 실제 bundle bytes 재검증. vanilla 단일 앱에는 PostCSS/Sass/HMR controller가 불필요해 `@zntc/web`은 넣지 않았다. `bun install --frozen-lockfile`과 별도 path-filtered CI로 재현하고 기존 dependency-free Zig `mise run check`에는 합치지 않는다.
 
 ## 3. 콘텐츠 채널 (read/write)
 
-브리지가 유일한 채널 — CSP `connect-src 'none'`(app_scheme.zig:22) + 스킴 핸들러는 번들 asset root만 서빙([web-panel.md] §7 명시 금지). 현행 브리지 표면은 `hello` 1개(control_bridge.zig:21,66 — capability auth 없음이 신뢰 모델의 명시적 결과)라 아래는 전부 신규 method. 정책 판정은 Zig(L2), Swift는 어댑터([control-plane.md] §11 게이트).
+브리지가 유일한 채널 — CSP `connect-src 'none'` + 스킴 핸들러는 번들 asset root만 서빙([web-panel.md] §7 명시 금지). FP4에서 `hello`와 함께 `maru.file.read`/`readAsset`을 신뢰 shell main frame에만 열었다. 정책 판정은 Zig(L2), Swift는 현재 surface를 소유한 `AppSession`을 매 요청 다시 찾아 ABI로 전달하는 어댑터만 맡는다([control-plane.md] §11 게이트).
 
-- **read**: `maru.file.read()` — **인자 없음**. Zig가 그 도크 entry에 핀된 경로를 읽어 reply(웹앱은 경로 지정 불가 = allowlist 논쟁 제거). md 상대 리소스(이미지)는 `maru.file.readAsset(relpath)` — 정규화 + 핀 디렉터리 밖 거부(app_scheme.validateAppPath 패턴, adversarial 테스트). **`../` 상위-상대 리소스는 거부되어 이미지가 깨진다**(md 생태계에 흔한 패턴) — §7 트리(repo 루트 표시)와 스코프 비대칭이지만 v1은 피해 반경 bound를 우선해 수용하고, readAsset 스코프의 트리 루트 확장은 후속(§13).
+- **read(FP4 완료)**: `maru.file.read()` — **인자 없음**. Zig가 그 도크 entry에 핀된 경로를 읽어 reply(웹앱은 경로 지정 불가). UTF-8 markdown·파일 크기는 8 MiB 이하만 허용한다. md 상대 이미지용 `maru.file.readAsset({path})`는 핀 디렉터리 handle 아래를 component별 descriptor-relative/no-follow로 연다. 최종 파일은 nonblocking으로 open한 같은 fd에서 stat/read하며 정규 파일만 허용해 경로 TOCTOU·symlink 탈출뿐 아니라 FIFO/device/socket open 대기도 막는다. 파일별 8 MiB·viewer당 최대 64개·base64 응답 합계 48 MiB로 제한하며 `../`·절대경로·backslash·제어문자·모든 asset symlink·외부 URL은 거부한다. raster는 검증된 `data:` URL, SVG는 UTF-8 decode 후 URL/event sink를 다시 sanitize한 `data:` URL만 renderer에 전달한다. **`../` 상위-상대 리소스는 거부되어 이미지가 깨진다** — v1은 피해 반경 bound를 우선하고 트리 루트 확장은 후속(§13).
 - **write**: `maru.file.write(content)` — **경로 인자 없음**, 핀 경로에만. 열 때 확정·이후 변경 불가. sanitizer 우회 성공 시 피해 반경 = 열려 있던 그 파일 1개.
 - **선행(보안 코어)**: [web-panel.md] §7 "md-derived 문서는 브리지 없는 별도 origin" — write 전에 렌더된 md 콘텐츠와 편집 shell의 격리(shadow-DOM 격리 또는 별도 top-level document)를 실물 구현하고 `file.*` 호출부가 shell 컨텍스트 전용임을 고정. FP6 착수 전 이 절 설계 code-review 게이트.
 - dirty(미저장)는 브리지 신호로 Zig 도크 entry에 미러(§1 상한 보호·탭 ●·닫기 확인에 사용).
@@ -107,8 +107,8 @@ control-plane §12 Phase 7 행 대응: 7a·7b ⊂ FP2, 7c ⊂ FP4+FP6, **7d는 m
 - **FP0 — 이 문서(+cross-doc 정합)**: 완료(2026-07-17, 도크 개정 포함).
 - **FP1 — 도크 모델(L2) + 직렬화: 완료(2026-07-17).** `src/session/dock_panel.zig`의 `DockPanel` 상태 = **그룹 트리**(`SplitTree(*DockGroup)` — v1은 leaf 1개) + 그룹(entries[path·kind·mode·dirty]·active) + side·size·collapsed. 주소 안정 leaf 소유·도크 전역 중복 경로 활성화·`splitGroup`/`removeGroup`·단일 그룹 `PersistedState` 복원을 순수 모듈로 구현했고, workspace.v1은 §5 flat/repeated wire로 왕복한다(tree·dirty 미저장). §1 PoC 4시나리오를 정식 헤드리스 테스트로 승격하고 옛 파일/default 고정점·legacy key skip·특수 경로·손상 entry·256/257 경계·미래 kind/mode 도크-only 강등을 함께 고정했다.
 - **FP2 — web 툴체인 + 렌더러·sanitizer: 완료(2026-07-17).** `web/` Bun workspace, exact `bun.lock`, `@zntc/core@0.1.3` minified Safari 16 ESM hello bundle, SHA-384 SRI 생성/재대조, oxlint/oxfmt, path-filtered Linux CI를 추가했다. zntc는 `write:false` 뒤 diagnostics=0·output=`bundle.js` 하나를 확인해야 disk에 쓰므로 오류와 깨진 bundle이 함께 반환돼도 fail-closed다. remark/unified를 최종 선택하고 raw HTML 폐기→renderer-owned 문자 위치 attribute→rehype allowlist→KaTeX MathML-only/Prism→최종 inline-style/event/resource hardening 순서로 고정했다. `<script>`·`on*`·`javascript:`·iframe/srcdoc·외부 resource·위조 위치 attribute·KaTeX error style과 Mermaid SVG의 direct element URL 및 presentation attribute 외부 `url(...)` sink를 Bun fixture로 검증한다(`url(#fragment)`만 보존). Mermaid `11.16.0`은 핀했지만 untrusted render 중 출력 sanitize보다 앞선 외부 요청 가능성이 있어 FP2에서는 fence를 inert code로 유지하고, 실제 실행은 FP4의 bridge 없는 격리 origin+CSP 뒤에만 연다. `web:licenses`는 설치된 전체 lock graph의 SPDX license를 allowlist 감사하며 nested 오류는 전파하고 symlink를 realpath+cycle guard로 포함하며 khroma 예외는 name+version+license digest를 모두 핀한다. `@zntc/web`은 단일 앱에 불필요한 PostCSS/Sass/HMR 계층이라 제외했다. `mise run web:check`가 독립 게이트다.
-- **FP3 — 도크 슬롯 배관: 완료(2026-07-17).** `dock_layout.zig`이 right 420pt/bottom 300pt 기본·동적 terminal floor·tab/header/content/divider rect를 한 번에 파생하고, `AppSession` termRect+gridPadding·전 탭 PTY resize·ChromeProps·workspace capture/apply가 그 모델을 소비한다. 도크 entry는 앱 전역 비재사용 surface id를 발급받아 기존 WKWebView `surfaceDiff` batch에 합류하며, presence/destroy 판정·workspace right/bottom dock-edge seam·right dock content left seam·resize 중 전 웹뷰 hide를 함께 고정했다. 손상된 최대 `dock-size`도 포화 pt→px 변환 뒤 terminal floor로 clamp한다. Metal 탭/경로 밴드·접기 토글·탭 전환·divider 드래그 hit-test가 같은 rect를 쓴다. 헤드리스 통합 테스트가 right/bottom·surface visibility·seam·presence·접기·workspace 캡처·실제 Metal 글리프를 검증하고, `MARU_FILE_PANEL`(+`MARU_FILE_PANEL_DOCK=bottom`)로 제품 Metal 스크린샷 픽스처를 남긴다. FP4 전이라 본문은 기존 신뢰 WKWebView placeholder다.
-- **FP4 — 브리지 read + 뷰어 배선**: `maru.file.read`/`readAsset`(§3) + 웹앱 렌더. **최소 뷰어 가치 성립** — 파일픽커/env로 열어 검증.
+- **FP3 — 도크 슬롯 배관: 완료(2026-07-17).** `dock_layout.zig`이 right 420pt/bottom 300pt 기본·동적 terminal floor·tab/header/content/divider rect를 한 번에 파생하고, `AppSession` termRect+gridPadding·전 탭 PTY resize·ChromeProps·workspace capture/apply가 그 모델을 소비한다. 도크 entry는 앱 전역 비재사용 surface id를 발급받아 기존 WKWebView `surfaceDiff` batch에 합류하며, presence/destroy 판정·workspace right/bottom dock-edge seam·right dock content left seam·resize 중 전 웹뷰 hide를 함께 고정했다. 손상된 최대 `dock-size`도 포화 pt→px 변환 뒤 terminal floor로 clamp한다. Metal 탭/경로 밴드·접기 토글·탭 전환·divider 드래그 hit-test가 같은 rect를 쓴다. 헤드리스 통합 테스트가 right/bottom·surface visibility·seam·presence·접기·workspace 캡처·실제 Metal 글리프를 검증하고, `MARU_FILE_PANEL`(+`MARU_FILE_PANEL_DOCK=bottom`)로 제품 Metal 스크린샷 픽스처를 남긴다. 본문은 FP4의 실 viewer가 이어받는다.
+- **FP4 — 브리지 read + 뷰어 배선: 완료(2026-07-17).** ABI v120의 surface-pinned `maru.file.read`/`readAsset`과 8 MiB 파일·64 asset/48 MiB aggregate 한도를 추가했다. asset은 descriptor-relative/no-follow fd에서 읽는다. `web/dist`를 앱 `Resources/web`에 패키징하고 port 없는 `maru-app://app` shell → sandboxed `maru-app://render` iframe 고정 채널로 sanitized Markdown/로컬 이미지를 렌더한다. renderer에는 브리지/message handler가 없고 부모 DOM 접근도 불가하다. `MARU_FILE_PANEL` macOS smoke가 실제 fixture 본문+SVG, bridge round-trip, iframe load/ready, renderer 격리까지 자동 단언한다. 뷰어 단계의 키보드 포커스는 §6대로 FP6 전까지 범위 밖이다.
 - **FP5 — 열기 라우팅**: `.md`/`.html` 클릭 → 도크(§6) + `.html` `loadFileURL` 정책(§2) + `open_file_panel` 단축키 + 중복 경로 활성화.
 - **FP6 — CM6 편집 + write + 폴리시**: origin 격리(§3 선행·code-review 게이트) + `maru.file.write` + dirty 미러 + 키 양보(§8) + 모드 토글 배선(§3.1) + 상한 웹뷰 해제(§1) + **도크 포커스 4g 확장(§6 — 편집의 선행 필수) + ⌘R 게이트 도크-aware 분기(§8) + merge 도크 이관(§4 — 편집 도입 전 필수)**.
 - **FP7 — 파일 트리**: L2 트리 모델 + FS 백엔드/watcher + 멀티루트·하이라이트·최근 파일(§7).
@@ -117,8 +117,8 @@ control-plane §12 Phase 7 행 대응: 7a·7b ⊂ FP2, 7c ⊂ FP4+FP6, **7d는 m
 ## 11. 테스트·검증
 
 - **헤드리스(Zig)**: 도크 모델·직렬화 왕복(옛 파일 호환·트리 키 생략 고정점), 그룹 트리 layout/divider/닫기 복원(§1 PoC 승격), 도크 기하(right/bottom termRect·접힘), 도크 소스 surfaceDiff 전이, `readAsset` 경로 adversarial, 상한 웹뷰 해제(dirty 보호), 트리 L2 스냅샷, 밴드 draw-list, 중복 경로 활성화.
-- **bun test(web/)**: 렌더러·sanitizer adversarial fixture, 브리지 shim 단위.
-- **스모크(macos)**: 브리지 read/write 왕복(신뢰 fixture), `.html` file:// 정책(허용 파일/거부 임의 경로), 도크 계층 단언.
+- **bun test(web/)**: 렌더러·sanitizer adversarial fixture, DOM mailbox byte 제거, bridge-free renderer, asset path/response bound, runtime dependency notice graph.
+- **스모크(macos)**: FP4는 `read`/`readAsset` 실제 WKWebView 왕복, sanitized fixture 본문+SVG 1개 로드, renderer bridge/message-handler 부재와 부모 DOM 접근 거부, 도크 계층을 자동 단언한다. write와 `.html` file 정책은 각각 FP6·FP5에서 추가한다.
 - **GUI 손 테스트(자동 불가)**: CM6 한글 IME(조합·확정·caret·후보창), 워크스페이스 왕복에 도크 화면·편집 유지, 도크 포커스 전이(4g 확장 무회귀 — 모달 Enter·pane 전환), right↔bottom 전환, WKWebView 픽셀 전반.
 - **성능 artifact**: watcher debounce/bounded, 상한 준수, frame tick FS I/O 0.
 
@@ -130,7 +130,7 @@ control-plane §12 Phase 7 행 대응: 7a·7b ⊂ FP2, 7c ⊂ FP4+FP6, **7d는 m
 - FS watcher가 첫 파일 감시 코드 — 성능 게이트.
 - 도크 렌더 배관(사이드바 급)이 FP3에 몰림 — 슬라이스 내 재분할 여지.
 - ~~**zntc 실체·공급망 미확정**~~ **FP2에서 해소** — `@zntc/core@0.1.3` MIT/prebuilt NAPI를 exact lock하고 macOS local+Linux CI에서 bundle한다. postinstall은 Bun 기본 차단 상태로도 prebuilt가 동작하고 `@zntc/web`은 불필요해 제외했다. SRI·lock graph license audit·CI cache까지 고정했다. 단 아직 pre-release 도구이므로 upgrade는 별도 PR에서 bundle/security fixture 전체를 재실행한다.
-- **리치 렌더 라이브러리(Mermaid 등)가 untrusted 콘텐츠를 처리** — 격리 렌더 origin 배치(§2.1)로 브리지 침해를 구조 차단한다. FP2 재검증에서 Mermaid는 출력 SVG sanitize 전에 레이아웃 DOM을 만들며 외부 resource 요청 가능성이 있어, `securityLevel:'strict'`+출력 sanitize만으로 충분하다고 보지 않는다. FP2는 fence를 inert code로 유지하며 FP4가 bridge 없는 별도 top-level origin과 `default-src 'none'` CSP를 제공하기 전 실행 금지다. KaTeX는 MathML-only로 inline style을 만들지 않는다.
+- **리치 렌더 라이브러리(Mermaid 등)가 untrusted 콘텐츠를 처리** — FP4가 격리 renderer origin과 `default-src 'none'` CSP를 실물로 제공해 브리지 침해는 구조 차단됐다. 다만 Mermaid는 출력 SVG sanitize 전에 레이아웃 DOM을 만들므로 FP4에서도 fence를 inert code로 유지한다. 실제 Mermaid 실행은 외부 요청 0을 별도 fixture로 증명한 뒤 연다. KaTeX는 MathML-only로 inline style을 만들지 않는다.
 - [text-field-editor.md] 이니셔티브와 시퀀싱은 별개 사용자 결정(양쪽 대기).
 
 ## 13. 후속(비목표)

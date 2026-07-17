@@ -1535,6 +1535,32 @@ pub export fn maru_macos_app_csp_header(out_ptr: ?[*]u8, out_cap: usize) i64 {
     return @intCast(csp.len);
 }
 
+/// Swift의 WKSecurityOrigin/URL 구성요소를 L2 exact-origin 정책으로 판정한다. role은
+/// app_scheme.AppOriginRole(shell=0, renderer=1, asset=2), has_explicit_port는 0/1이다.
+pub export fn maru_macos_app_origin_allowed(
+    scheme_ptr: ?[*]const u8,
+    scheme_len: usize,
+    host_ptr: ?[*]const u8,
+    host_len: usize,
+    has_explicit_port: c_int,
+    role_raw: u32,
+) c_int {
+    const sp = scheme_ptr orelse return 0;
+    const hp = host_ptr orelse return 0;
+    const role: maru.session.app_scheme.AppOriginRole = switch (role_raw) {
+        0 => .shell,
+        1 => .renderer,
+        2 => .asset,
+        else => return 0,
+    };
+    return if (maru.session.app_scheme.appOriginAllowed(
+        sp[0..scheme_len],
+        hp[0..host_len],
+        has_explicit_port != 0,
+        role,
+    )) 1 else 0;
+}
+
 // Phase 7f-2: 새 창/팝업(WKUIDelegate.createWebViewWith) 대상 URL 정책 게이트. Swift가 navigationAction.request.url을
 // 넘기면 app_scheme.popupTargetAllowed(허용 = about·http·https·빈만, javascript·file·data·blob·maru-app 등 거부)로
 // 판정한다 — 정책 단일 출처=Zig, 어댑터=Swift(url 추출·차단). 반환: 1=허용, 0=거부, -1=url_ptr null. 세션리스 순수
@@ -1564,6 +1590,53 @@ pub export fn maru_macos_app_bridge_dispatch(
     return @intCast(reply.len);
 }
 
+const FileBridgeContext = struct {
+    session: *AppSession,
+    surface_id: u64,
+
+    fn read(raw: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.readFilePanel(gpa, self.surface_id);
+    }
+
+    fn readAsset(raw: *anyopaque, gpa: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.readFilePanelAsset(gpa, self.surface_id, path);
+    }
+};
+
+// FP4: surface-pinned file provider를 넣는 session-scoped bridge. query/fill 모두 같은 정책을 다시 계산하므로 파일이
+// 그 사이 바뀌어 fill cap을 넘으면 필요한 새 길이를 양수로 돌려 Swift가 한 번 더 query/fill할 수 있다.
+pub export fn maru_macos_app_session_bridge_dispatch(
+    session: ?*AppSession,
+    surface_id: u64,
+    req_ptr: ?[*]const u8,
+    req_len: usize,
+    out_ptr: ?[*]u8,
+    out_cap: usize,
+) i64 {
+    const app_session = session orelse return -2;
+    const rp = req_ptr orelse return -2;
+    if (out_ptr == null and out_cap != 0) return -2;
+    var context: FileBridgeContext = .{ .session = app_session, .surface_id = surface_id };
+    const access: maru.session.control_bridge.FileAccess = .{
+        .context = &context,
+        .read_fn = FileBridgeContext.read,
+        .read_asset_fn = FileBridgeContext.readAsset,
+    };
+    const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
+        allocator,
+        rp[0..req_len],
+        control_hello_version,
+        access,
+    ) catch return -3;
+    defer allocator.free(reply);
+    const op = out_ptr orelse return @intCast(reply.len);
+    if (reply.len > out_cap) return @intCast(reply.len);
+    @memcpy(op[0..reply.len], reply);
+    return @intCast(reply.len);
+}
+
 test "maru_macos_app_bridge_dispatch export: hello=len>0, 미지원=method_not_found 응답, null=-2" {
     var out: [512]u8 = undefined;
     const hello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}";
@@ -1579,6 +1652,22 @@ test "maru_macos_app_bridge_dispatch export: hello=len>0, 미지원=method_not_f
     try std.testing.expectEqual(@as(i64, -2), maru_macos_app_bridge_dispatch(null, 0, &out, out.len));
 }
 
+test "maru_macos_app_session_bridge_dispatch export: size query + fill and insufficient cap" {
+    var session: AppSession = undefined;
+    const hello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}";
+    const needed = maru_macos_app_session_bridge_dispatch(&session, 7, hello.ptr, hello.len, null, 0);
+    try std.testing.expect(needed > 0);
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqual(needed, maru_macos_app_session_bridge_dispatch(&session, 7, hello.ptr, hello.len, &tiny, tiny.len));
+    const out = try std.testing.allocator.alloc(u8, @intCast(needed));
+    defer std.testing.allocator.free(out);
+    const written = maru_macos_app_session_bridge_dispatch(&session, 7, hello.ptr, hello.len, out.ptr, out.len);
+    try std.testing.expectEqual(needed, written);
+    try std.testing.expect(std.mem.indexOf(u8, out, "server_version") != null);
+    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_session_bridge_dispatch(null, 7, hello.ptr, hello.len, null, 0));
+    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_session_bridge_dispatch(&session, 7, hello.ptr, hello.len, null, 1));
+}
+
 test "maru_macos_app_csp_header export: 단일출처 복사 + cap 부족 -1 + null -2" {
     var buf: [512]u8 = undefined;
     const n = maru_macos_app_csp_header(&buf, buf.len);
@@ -1587,6 +1676,15 @@ test "maru_macos_app_csp_header export: 단일출처 복사 + cap 부족 -1 + nu
     var tiny: [4]u8 = undefined; // csp_header보다 작음 → -1
     try std.testing.expectEqual(@as(i64, -1), maru_macos_app_csp_header(&tiny, tiny.len));
     try std.testing.expectEqual(@as(i64, -2), maru_macos_app_csp_header(null, 512));
+}
+
+test "maru_macos_app_origin_allowed export: role and explicit port are exact" {
+    try std.testing.expectEqual(@as(c_int, 1), maru_macos_app_origin_allowed("maru-app", 8, "app", 3, 0, 0));
+    try std.testing.expectEqual(@as(c_int, 1), maru_macos_app_origin_allowed("maru-app", 8, "render", 6, 0, 1));
+    try std.testing.expectEqual(@as(c_int, 1), maru_macos_app_origin_allowed("maru-app", 8, "render", 6, 0, 2));
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_origin_allowed("maru-app", 8, "app", 3, 1, 0));
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_origin_allowed("maru-app", 8, "render", 6, 0, 0));
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_app_origin_allowed(null, 0, "app", 3, 0, 0));
 }
 
 test "maru_macos_app_resolve_app_asset export: 정상=len>0, traversal=-1, 부재=-2, null=-4" {

@@ -10,6 +10,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
+const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
 
@@ -57,6 +58,10 @@ const PaneTree = Model.PaneTree;
 const Tab = Model.Tab;
 const group_normalize = maru.session.group_normalize; // M3c: 그룹 정규화 순수 함수(L2 리프트) — 아래 L4 메서드가 self.tabs.items로 위임(재구현 금지)
 const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 정책 어휘(MoveOutcome·crossesTrustBoundary·WindowKind) 재사용 — 라이브 수술이 outcome을 직접 채운다(§1.3·§8A.8)
+
+const FilePanelTestC = struct {
+    extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;
+};
 
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
@@ -142,7 +147,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 119;
+pub const abi_version: u32 = 120;
+// 120: 파일 패널 surface에 핀된 `maru.file.read`/`readAsset` provider를 쓰는 session bridge dispatch 추가.
+// 응답은 8 MiB 원문+base64를 수용하도록 size-query/fill 2단계이며 기존 고정 hello export는 유지한다.
 // 119: off-main executeScript syntax validation 뒤 page 실행 직전 running+pending+현재 인가+timeout을 재검사하는
 // maru_macos_control_browser_execution_may_start 추가. 취소된 expression의 page side effect 시작을 막는다.
 // 118: executeScript와 screenshot의 Swift-owned Data를 공통 progressive result pump로 전송하는 ABI.
@@ -7635,6 +7642,121 @@ pub const AppSession = struct {
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
         self.metal_dirty = true;
+    }
+
+    pub const FilePanelReadError = error{
+        SurfaceNotFound,
+        WrongKind,
+        InvalidPath,
+        NotFound,
+        OutsideRoot,
+        NotRegularFile,
+        TooLarge,
+        InvalidUtf8,
+        OutOfMemory,
+    };
+
+    /// FIFO/device/socket가 open 자체에서 대기하지 않도록 nonblocking으로 descriptor를 얻는다.
+    /// 호출자는 같은 fd를 fstat한 뒤 정규 파일일 때만 읽으므로, 일반 파일에서는 NONBLOCK이 의미를 바꾸지 않는다.
+    fn openFilePanelRead(dir: std.Io.Dir, path: []const u8, follow_symlinks: bool) FilePanelReadError!std.Io.File {
+        const fd = std.posix.openat(dir.handle, path, .{
+            .ACCMODE = .RDONLY,
+            .NONBLOCK = true,
+            .NOFOLLOW = !follow_symlinks,
+            .CLOEXEC = true,
+        }, 0) catch |err| switch (err) {
+            error.FileNotFound => return error.NotFound,
+            error.IsDir => return error.NotRegularFile,
+            error.SymLinkLoop => return error.OutsideRoot,
+            else => return error.NotFound,
+        };
+        return .{
+            .handle = fd,
+            .flags = .{ .nonblocking = true },
+        };
+    }
+
+    /// nonblocking으로 연 file descriptor에서 kind/크기 확인과 읽기를 끝내 경로 검사와 사용 사이의 재-open 경쟁을 없앤다.
+    fn readOpenedFile(self: *AppSession, gpa: std.mem.Allocator, file: std.Io.File) FilePanelReadError![]u8 {
+        const stat = file.stat(self.io) catch return error.NotFound;
+        if (stat.kind != .file) return error.NotRegularFile;
+        if (stat.size > file_panel_bridge.max_file_bytes) return error.TooLarge;
+
+        var read_buf: [64 * 1024]u8 = undefined;
+        var reader = file.reader(self.io, &read_buf);
+        const bytes = reader.interface.allocRemaining(
+            gpa,
+            .limited(file_panel_bridge.max_file_bytes + 1),
+        ) catch |err| switch (err) {
+            error.StreamTooLong => return error.TooLarge,
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NotFound,
+        };
+        if (bytes.len > file_panel_bridge.max_file_bytes) {
+            gpa.free(bytes);
+            return error.TooLarge;
+        }
+        return bytes;
+    }
+
+    /// surface가 핀한 Markdown 파일을 읽는다. web 쪽에서 경로를 지정할 수 없고, 단일 파일 상한은 8 MiB다.
+    pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64) FilePanelReadError![]u8 {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .markdown) return error.WrongKind;
+
+        const cwd = std.Io.Dir.cwd();
+        const file = try openFilePanelRead(cwd, entry.path, true);
+        defer file.close(self.io);
+        const bytes = try self.readOpenedFile(gpa, file);
+        errdefer gpa.free(bytes);
+        if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+        return bytes;
+    }
+
+    /// 핀된 Markdown 경로의 lexical parent를 directory handle로 연 뒤, 상대 asset의 모든 하위 component를
+    /// descriptor-relative + no-follow로 순회한다. 같은 fd에서 stat/read하므로 symlink/rename TOCTOU 탈출이 없다.
+    pub fn readFilePanelAsset(
+        self: *AppSession,
+        gpa: std.mem.Allocator,
+        surface_id: u64,
+        raw_path: []const u8,
+    ) FilePanelReadError![]u8 {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .markdown) return error.WrongKind;
+
+        var normalized_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const normalized = file_panel_bridge.normalizeAssetPath(raw_path, &normalized_buf) catch return error.InvalidPath;
+        const parent = std.fs.path.dirname(entry.path) orelse ".";
+        const cwd = std.Io.Dir.cwd();
+        const parent_dir = cwd.openDir(self.io, parent, .{}) catch return error.NotFound;
+        defer parent_dir.close(self.io);
+
+        var opened_dirs: [std.fs.max_path_bytes / 2]std.Io.Dir = undefined;
+        var opened_count: usize = 0;
+        defer while (opened_count > 0) {
+            opened_count -= 1;
+            opened_dirs[opened_count].close(self.io);
+        };
+
+        var current = parent_dir;
+        if (std.fs.path.dirname(normalized)) |subdir| {
+            var components = std.mem.splitScalar(u8, subdir, '/');
+            while (components.next()) |component| {
+                const next = current.openDir(self.io, component, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                    error.FileNotFound => return error.NotFound,
+                    else => return error.OutsideRoot,
+                };
+                opened_dirs[opened_count] = next;
+                opened_count += 1;
+                current = next;
+            }
+        }
+
+        const file = try openFilePanelRead(current, std.fs.path.basename(normalized), false);
+        defer file.close(self.io);
+        return self.readOpenedFile(gpa, file);
     }
 
     /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame·컨테이너 좌표)으로 변환한다(4a 순수 함수 소비). 컨테이너
@@ -41156,4 +41278,140 @@ test "M3d-2a-i 결함[3] mergeSessionInto: dst 활성 워크스페이스 보존(
     try std.testing.expectEqual(@as(usize, 4), dst.tabs.items.len);
     try std.testing.expect(dst.app_window.active_tab < dst.tabs.items.len);
     try std.testing.expectEqual(dst_active_tab, dst.tabs.items[dst.app_window.active_tab]);
+}
+
+test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "images");
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "# FP4\n\n![diagram](images/a.png)\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "images/a.png", .data = "PNG" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const doc_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
+    defer allocator.free(doc_path);
+
+    var session: AppSession = undefined;
+    session.io = io;
+    session.dock = try dock_panel.DockPanel.init(allocator);
+    session.dock_initialized = true;
+    defer session.dock.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, doc_path, .markdown);
+    group.entries.items[0].surface_id = 701;
+
+    const content = try session.readFilePanel(allocator, 701);
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("# FP4\n\n![diagram](images/a.png)\n", content);
+    const asset = try session.readFilePanelAsset(allocator, 701, "./images//a.png");
+    defer allocator.free(asset);
+    try std.testing.expectEqualStrings("PNG", asset);
+    try std.testing.expectError(error.InvalidPath, session.readFilePanelAsset(allocator, 701, "../secret"));
+    try std.testing.expectError(error.SurfaceNotFound, session.readFilePanel(allocator, 999));
+}
+
+test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const payload = try allocator.alloc(u8, file_panel_bridge.max_file_bytes + 1);
+    defer allocator.free(payload);
+    @memset(payload, 'x');
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = payload[0..file_panel_bridge.max_file_bytes] });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const doc_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
+    defer allocator.free(doc_path);
+
+    var session: AppSession = undefined;
+    session.io = io;
+    session.dock = try dock_panel.DockPanel.init(allocator);
+    session.dock_initialized = true;
+    defer session.dock.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, doc_path, .markdown);
+    group.entries.items[0].surface_id = 751;
+
+    const exact = try session.readFilePanel(allocator, 751);
+    defer allocator.free(exact);
+    try std.testing.expectEqual(file_panel_bridge.max_file_bytes, exact.len);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = payload });
+    try std.testing.expectError(error.TooLarge, session.readFilePanel(allocator, 751));
+}
+
+test "FP4 file panel read: FIFOs are rejected without blocking" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "# doc" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const fifo_doc_path = try std.fmt.allocPrintSentinel(allocator, "{s}/pipe.md", .{root}, 0);
+    defer allocator.free(fifo_doc_path);
+    const fifo_asset_path = try std.fmt.allocPrintSentinel(allocator, "{s}/pipe.png", .{root}, 0);
+    defer allocator.free(fifo_asset_path);
+    try std.testing.expectEqual(@as(c_int, 0), FilePanelTestC.mkfifo(fifo_doc_path, 0o600));
+    try std.testing.expectEqual(@as(c_int, 0), FilePanelTestC.mkfifo(fifo_asset_path, 0o600));
+    const doc_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
+    defer allocator.free(doc_path);
+
+    var session: AppSession = undefined;
+    session.io = io;
+    session.dock = try dock_panel.DockPanel.init(allocator);
+    session.dock_initialized = true;
+    defer session.dock.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, fifo_doc_path, .markdown);
+    group.entries.items[0].surface_id = 776;
+    _ = try session.dock.open(group, doc_path, .markdown);
+    group.entries.items[1].surface_id = 777;
+
+    try std.testing.expectError(error.NotRegularFile, session.readFilePanel(allocator, 776));
+    try std.testing.expectError(error.NotRegularFile, session.readFilePanelAsset(allocator, 777, "pipe.png"));
+}
+
+test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    var outside_tmp = std.testing.tmpDir(.{});
+    defer outside_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "# doc" });
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "page.html", .data = "<p>x</p>" });
+    try outside_tmp.dir.writeFile(io, .{ .sub_path = "secret.png", .data = "SECRET" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var secret_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const secret = secret_buf[0..try outside_tmp.dir.realPathFile(io, "secret.png", &secret_buf)];
+    var outside_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const outside_root = outside_root_buf[0..try outside_tmp.dir.realPath(io, &outside_root_buf)];
+    try root_tmp.dir.symLink(io, secret, "escape.png", .{});
+    try root_tmp.dir.symLink(io, outside_root, "escape-dir", .{});
+    const doc_path = try std.fmt.allocPrint(allocator, "{s}/doc.md", .{root});
+    defer allocator.free(doc_path);
+    const html_path = try std.fmt.allocPrint(allocator, "{s}/page.html", .{root});
+    defer allocator.free(html_path);
+
+    var session: AppSession = undefined;
+    session.io = io;
+    session.dock = try dock_panel.DockPanel.init(allocator);
+    session.dock_initialized = true;
+    defer session.dock.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, doc_path, .markdown);
+    group.entries.items[0].surface_id = 801;
+    _ = try session.dock.open(group, html_path, .html);
+    group.entries.items[1].surface_id = 802;
+
+    try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape.png"));
+    try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape-dir/secret.png"));
+    try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802));
+    try std.testing.expectError(error.WrongKind, session.readFilePanelAsset(allocator, 802, "escape.png"));
 }

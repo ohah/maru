@@ -1,7 +1,4 @@
-import { renderMarkdown } from "./markdown";
+import { bootRenderer, bootShell } from "./viewer";
 
-const root = document.querySelector<HTMLElement>("#app");
-
-if (root !== null) {
-  root.innerHTML = renderMarkdown("# Maru file panel\n\nFP2 renderer ready.");
-}
+if (window.location.host === "app") bootShell(document, window);
+else if (window.location.host === "render") bootRenderer(document, window);

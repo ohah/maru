@@ -1,6 +1,6 @@
 # File-panel web package
 
-`web/`는 파일 패널의 프레임워크 없는 TypeScript 패키지다. Zig/Swift 제품 경로와 별개로 zntc 번들, Markdown 렌더러, sanitizer를 먼저 결정적으로 검증한다.
+`web/`는 파일 패널의 프레임워크 없는 TypeScript 패키지다. zntc 번들, 신뢰 shell, 격리 Markdown renderer, sanitizer를 결정적으로 검증하고 앱 bundle의 `Resources/web/`로 패키징한다.
 
 ## 명령
 
@@ -14,7 +14,7 @@ mise run web:licenses
 mise run web:check
 ```
 
-`web:build`는 `@zntc/core` NAPI API를 `write:false`로 호출하고 diagnostics가 하나라도 있거나 output이 정확히 `bundle.js` 하나가 아니면 bytes를 쓰기 전에 실패한다. 성공한 Safari 16 대상 ESM만 `web/dist/`에 쓴 뒤 SHA-384 SRI를 `index.html`과 `integrity.json`에 기록하고 실제 bundle bytes와 다시 대조한다. `dist/`는 생성물이라 커밋하지 않는다. 이 패키지는 별도 path-filtered CI를 가지며 기존 의존성 없는 `mise run check`에는 들어가지 않는다.
+`web:build`는 `@zntc/core` NAPI API를 `write:false`로 호출하고 diagnostics가 하나라도 있거나 output이 정확히 `bundle.js` 하나가 아니면 bytes를 쓰기 전에 실패한다. 성공한 Safari 16 대상 ESM만 `web/dist/`에 쓴 뒤 SHA-384 SRI를 `index.html`·`render.html`과 `integrity.json`에 기록하고 실제 bundle bytes와 다시 대조한다. production dependency graph만 순회한 `THIRD_PARTY_NOTICES.txt`도 생성하며, 고지 전문이 없는 새 runtime package는 fail-closed다. `dist/`는 생성물이라 커밋하지 않고 `build.zig`가 앱 bundle 전에 재생성한다.
 
 ## 고정된 선택
 
@@ -22,6 +22,7 @@ mise run web:check
 - vanilla TS 단일 앱에는 `@zntc/web`의 PostCSS/Sass/HMR 계층이 필요하지 않아 넣지 않는다. core CLI/API가 bundle과 단순 serve를 맡는다.
 - Markdown은 remark/unified + rehype-sanitize를 쓴다. raw HTML은 HAST 변환 전에 버리고, renderer가 만든 `data-maru-source-start/end`만 allowlist로 보존한다.
 - KaTeX는 MathML-only로 출력하고 KaTeX/Prism 뒤 최종 hardening pass가 error fallback의 inline style·event/resource 속성도 제거해 현재 `style-src 'self'` CSP에 예외를 만들지 않는다. 코드는 Prism 계열 `rehype-prism-plus`로 강조한다.
-- Mermaid 소스는 FP2에서 inert code로 남긴다. 설정은 `securityLevel: strict`, `htmlLabels: false`로 고정하고 SVG sanitizer가 URL-bearing element와 presentation attribute의 외부 `url(...)`을 제거하되 같은 문서의 `url(#fragment)`만 보존한다. 실제 untrusted diagram render는 FP4의 bridge 없는 격리 origin+CSP 전에는 실행하지 않는다.
+- shell은 `maru-app://app`, renderer는 `sandbox="allow-scripts allow-same-origin"`인 `maru-app://render` iframe이다. host 분리로 same-origin이 아니며 renderer에는 bridge/message handler가 없다. 실제 WKWebView smoke가 부모 DOM 접근도 거부되는지 확인한다.
+- Mermaid 소스는 FP4에서도 inert code로 남긴다. 격리 origin/CSP는 갖췄지만 출력 sanitize 전 외부 요청 0을 별도 증명하기 전에는 실행하지 않는다.
 
-`web:licenses`는 현재 플랫폼에 설치된 전체 lock graph의 SPDX license를 allowlist로 검사하고 감사한 패키지 수·라이선스별 수를 출력한다. nested `node_modules` 부재만 허용하고 manifest/IO 오류는 전파하며, symlink package는 realpath 기준 cycle 없이 감사한다. 이름/버전 없는 manifest는 실패한다. `khroma@2.1.0`은 `package.json`에 license 필드가 없지만 패키지에 MIT 전문을 동봉하므로 이름+버전+전문 SHA-256이 모두 맞는 정확한 예외만 허용한다. 현재 `web/dist`는 앱/DMG에 포함되지 않으므로 배포 고지 대상은 아니다. FP4에서 제품 bundle에 연결할 때 [third-party 라이선스](../docs/third-party-licenses.md)를 갱신하고 실제 포함 graph의 고지 파일을 동봉한다.
+`web:licenses`는 현재 플랫폼에 설치된 전체 lock graph의 SPDX license를 allowlist로 검사한다. 별도로 build의 runtime notice walker는 root production dependencies에서 Node resolution 규칙으로 transitive graph를 따라가 dev tool을 제외하고 각 license/notice 전문을 동봉한다. `khroma@2.1.0` 예외는 이름+버전+전문 SHA-256을 모두 핀한다. 배포 정책은 [third-party 라이선스](../docs/third-party-licenses.md)를 따른다.

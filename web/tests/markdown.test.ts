@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { JSDOM } from "jsdom";
 import { renderMarkdown } from "../src/markdown";
+import { normalizeAssetReference } from "../src/asset-path";
 import { mermaidConfig, sanitizeMermaidSvg } from "../src/rich-render";
 
 describe("markdown trust boundary", () => {
@@ -33,6 +34,21 @@ describe("markdown trust boundary", () => {
     expect(html).not.toContain("javascript:");
     expect(html).toContain('href="https://example.com/docs"');
     expect(html).not.toContain('src="https://example.com/tracker.png"');
+    expect(html).not.toContain("data-maru-asset-path");
+  });
+
+  test("retains only normalized local image paths as renderer-owned metadata", () => {
+    const html = renderMarkdown(`
+![local](./images//hello%20world.png?cache=1#preview)
+
+![traversal](images/%2e%2e/secret.png)
+
+![absolute](/tmp/secret.png)
+`);
+
+    expect(html).toContain('data-maru-asset-path="images/hello world.png"');
+    expect(html).not.toContain("secret.png");
+    expect(html).not.toContain("src=");
   });
 
   test("emits renderer-owned source positions with character offsets", () => {
@@ -83,6 +99,26 @@ ${String.raw`$\includegraphics{https://evil.test/image.png}$`}`);
     expect(html).not.toContain("style=");
     expect(html).not.toContain('href="https://evil.test');
     expect(html).not.toContain("src=");
+  });
+});
+
+describe("asset path policy", () => {
+  test("normalizes local references and rejects URL, traversal, backslash, controls, and malformed percent encoding", () => {
+    expect(normalizeAssetReference("./images//한글%20그림.png?x=1#y")).toBe("images/한글 그림.png");
+    for (const path of [
+      "../secret.png",
+      "images/%2e%2e/secret.png",
+      "/absolute.png",
+      "https://example.com/a.png",
+      "data:image/png,x",
+      "//example.com/a.png",
+      "images\\a.png",
+      "images/%00a.png",
+      "images/%zz.png",
+      ".",
+    ]) {
+      expect(normalizeAssetReference(path)).toBeNull();
+    }
   });
 });
 

@@ -136,6 +136,12 @@ pub const DockPanel = struct {
         return entryCount(self.tree);
     }
 
+    /// runtime surface id로 파일 entry를 찾는다. FP8 다중 그룹에서도 같은 API가 재귀 tree 전체를 찾는다.
+    pub fn entryForSurfaceId(self: *DockPanel, surface_id: u64) ?*Entry {
+        if (surface_id == 0) return null;
+        return findSurfaceId(self.tree, surface_id);
+    }
+
     pub const OpenResult = struct {
         group: *DockGroup,
         index: usize,
@@ -174,6 +180,18 @@ pub const DockPanel = struct {
         return switch (node) {
             .leaf => |group| group.entries.items.len,
             .split => |sp| entryCount(sp.a) + entryCount(sp.b),
+        };
+    }
+
+    fn findSurfaceId(node: DockTree.Node, surface_id: u64) ?*Entry {
+        return switch (node) {
+            .leaf => |group| blk: {
+                for (group.entries.items) |*entry| {
+                    if (entry.surface_id == surface_id) break :blk entry;
+                }
+                break :blk null;
+            },
+            .split => |sp| findSurfaceId(sp.a, surface_id) orelse findSurfaceId(sp.b, surface_id),
         };
     }
 
@@ -276,6 +294,22 @@ test "dock panel: single group owns entries and reopening a path activates inste
     group.entries.items[0].dirty = true;
     try std.testing.expectEqual(Mode.source_edit, group.entries.items[0].mode);
     try std.testing.expect(group.entries.items[0].dirty);
+}
+
+test "dock panel: entryForSurfaceId searches nested groups and rejects zero" {
+    var panel = try DockPanel.init(std.testing.allocator);
+    defer panel.deinit();
+    const first = panel.singleGroup().?;
+    _ = try panel.open(first, "/tmp/a.md", .markdown);
+    first.entries.items[0].surface_id = 41;
+    const second = try panel.splitGroup(first, .horizontal, 0.5);
+    _ = try panel.open(second, "/tmp/b.md", .markdown);
+    second.entries.items[0].surface_id = 42;
+
+    try std.testing.expect(panel.entryForSurfaceId(0) == null);
+    try std.testing.expect(panel.entryForSurfaceId(99) == null);
+    try std.testing.expectEqualStrings("/tmp/a.md", panel.entryForSurfaceId(41).?.path);
+    try std.testing.expectEqualStrings("/tmp/b.md", panel.entryForSurfaceId(42).?.path);
 }
 
 test "dock panel: replaceLeaf split lays out two file groups in the dock rect" {

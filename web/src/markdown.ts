@@ -9,9 +9,11 @@ import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import { unified } from "unified";
 import { visit } from "unist-util-visit";
+import { normalizeAssetReference } from "./asset-path";
 
 const sourceStartProperty = "dataMaruSourceStart";
 const sourceEndProperty = "dataMaruSourceEnd";
+const assetPathProperty = "dataMaruAssetPath";
 
 // 위치 attribute는 raw HTML을 HAST로 승격하기 전에가 아니라, raw HTML을 버린 뒤
 // renderer가 직접 붙인다. 그래서 문서가 같은 이름을 위조해도 sanitize allowlist에 닿지 않는다.
@@ -31,6 +33,12 @@ function rehypeSourcePositions() {
 function rehypeBlockResourceLoads() {
   return (tree: Root) => {
     visit(tree, "element", (node: Element) => {
+      // Markdown image의 원래 src를 네트워크 sink로 남기지 않고, 검증된 상대 경로만 renderer-owned data attribute로
+      // 옮긴다. FP4 viewer가 readAsset 결과를 data URL로 바꿀 때 이 값만 소비한다.
+      if (node.tagName === "img" && typeof node.properties.src === "string") {
+        const normalized = normalizeAssetReference(node.properties.src);
+        if (normalized !== null) node.properties[assetPathProperty] = normalized;
+      }
       delete node.properties.src;
       delete node.properties.srcSet;
       delete node.properties.poster;
@@ -64,7 +72,12 @@ const schema = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
-    "*": [...(defaultSchema.attributes?.["*"] ?? []), sourceStartProperty, sourceEndProperty],
+    "*": [
+      ...(defaultSchema.attributes?.["*"] ?? []),
+      sourceStartProperty,
+      sourceEndProperty,
+      assetPathProperty,
+    ],
   },
   protocols: {
     ...defaultSchema.protocols,

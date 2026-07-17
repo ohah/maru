@@ -673,6 +673,11 @@ pub fn build(b: *std.Build) void {
         const macos_app_build_step = b.step("macos-app-build", "Build the runnable macOS Swift app host app shell");
         macos_app_build_step.dependOn(&macos_app_compile.step);
 
+        // web/dist는 생성물이라 git에 넣지 않는다. 앱 bundle/smoke가 stale 또는 빈 asset을 복사하지 않도록 zntc+SRI
+        // 검증을 명시적 선행 step으로 둔다. Bun 버전은 .mise.toml, lock graph는 web/bun.lock이 고정한다.
+        const file_panel_web_build = b.addSystemCommand(&.{ "bun", "run", "--cwd", "web", "web:build" });
+        file_panel_web_build.setCwd(b.path("."));
+
         // bare 터미널 실행파일은 HiDPI(NSHighResolutionCapable)를 신뢰성 있게 못 켠다. 정식
         // .app 번들을 만들고 그 안의 바이너리를 직접 실행하면, AppKit이 실행파일 경로에서
         // Contents/Info.plist를 찾아 HiDPI를 켜고(Retina에서 또렷), open과 달리 CWD가 유지돼
@@ -709,18 +714,18 @@ pub fn build(b: *std.Build) void {
                 "done; " ++
                 "[ \"$lic_found\" = 1 ] || { echo \"error: font family $fam has .ttf but no license (OFL.txt/LICENSE.md/LICENSE.txt) — 재배포 의무\" >&2; exit 1; }; " ++
                 "done; " ++
-                // Phase 5c-2c: maru-app:// 신뢰 UI asset(placeholder index.html·app.css·app.js)을 Resources/web/에 복사한다.
+                // FP4: zntc가 만든 실 file-panel bundle(index/render HTML·SRI bundle·CSS)을 Resources/web/에 복사한다.
                 // 스킴 핸들러가 Bundle.main.resourceURL/web 아래만 서빙한다(경로 샌드박스·realpath 탈출 방어=Zig 정책).
-                // Phase 7 실 UI(zntc/Bun 빌드)가 이 소스 asset을 대체한다. docs/web-panel.md §7.1.
                 "mkdir -p zig-out/Maru.app/Contents/Resources/web; " ++
                 // `-R` + `web/.`: 중첩 하위 디렉터리까지 복사한다. resolveAppAsset는 `sub/page.html` 같은 중첩 경로를
                 // 서빙하도록 구현·테스트돼 있으므로(리뷰11 [5]), Phase 7이 `web/assets/…`를 추가해도 번들에 담기게 한다
                 // (flat `cp web/*`는 서브디렉터리서 'is a directory' 에러로 번들 실패·누락).
-                "cp -R src/platform/macos/web/. zig-out/Maru.app/Contents/Resources/web/; " ++
+                "cp -R web/dist/. zig-out/Maru.app/Contents/Resources/web/; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
+        macos_app_bundle.step.dependOn(&file_panel_web_build.step);
         macos_app_bundle.step.dependOn(b.getInstallStep()); // zig-out/bin/maru(CLI) 빌드·설치 보장 — 번들 cp의 선행조건
 
         const macos_app_bundle_step = b.step("macos-app-bundle", "Package the macOS app shell as a HiDPI .app bundle");
@@ -807,20 +812,40 @@ pub fn build(b: *std.Build) void {
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app"});
         macos_app_smoke.setCwd(b.path("."));
-        macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "1500");
+        macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "6000");
+        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("tests/fixtures/file-panel/fp4-viewer.md"));
         // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
         // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.
         // **절대 경로**로 준다(리뷰11 [4]) — resolveAppAsset는 cwd 기준으로 realpath하므로 상대 경로는 실행 cwd가 repo
         // 루트가 아니면 404가 된다. b.pathFromRoot가 build 루트 기준 절대 경로를 만든다(스모크 cwd와 무관하게 견고).
-        macos_app_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("src/platform/macos/web"));
+        macos_app_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         macos_app_smoke.step.dependOn(&macos_app_compile.step);
-        macos_app_smoke_step.dependOn(&macos_app_smoke.step);
+        macos_app_smoke.step.dependOn(&file_panel_web_build.step);
+        const macos_app_smoke_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "test -f \"$summary\"; " ++
+                "rg -q '^file_viewer_ready=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_renderer_loaded=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_renderer_script=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_read=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_text=.*FP4 viewer fixture' \"$summary\"; " ++
+                "rg -q '^file_viewer_images=1$' \"$summary\"; " ++
+                "rg -q '^file_viewer_loaded_images=1$' \"$summary\"; " ++
+                "rg -q '^renderer_bridge_type=undefined$' \"$summary\"; " ++
+                "rg -q '^renderer_handler_type=undefined$' \"$summary\"; " ++
+                "rg -q '^renderer_parent_accessible=false$' \"$summary\"",
+        });
+        macos_app_smoke_assert.setCwd(b.path("."));
+        macos_app_smoke_assert.step.dependOn(&macos_app_smoke.step);
+        macos_app_smoke_step.dependOn(&macos_app_smoke_assert.step);
 
         const macos_browser_bounded_smoke_step = b.step("macos-browser-bounded-smoke", "Run and assert the bounded browser.executeScript WKWebView/socket smoke");
         const macos_browser_bounded_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-browser-bounded-smoke.sh" });
         macos_browser_bounded_smoke.setCwd(b.path("."));
-        macos_browser_bounded_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("src/platform/macos/web"));
+        macos_browser_bounded_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         macos_browser_bounded_smoke.step.dependOn(&macos_app_compile.step);
+        macos_browser_bounded_smoke.step.dependOn(&file_panel_web_build.step);
         macos_browser_bounded_smoke_step.dependOn(&macos_browser_bounded_smoke.step);
     }
 

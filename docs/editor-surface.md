@@ -54,15 +54,24 @@
 - 현행 CSP는 `default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'`다.
 - control socket 최대 frame은 1 MiB다. 브리지 응답도 현재 fixed 8 KiB라 큰 문서 전송 경로로 사용할 수 없다.
 
-## 3. 권장 구조
+## 3. 권장 구조 — file-panel 도크 확장
+
+**editor/git diff는 별도 surface를 새로 만들지 않고 [file-panel.md](file-panel.md)의 전역 도크·CM6 웹앱·신뢰 shell 브리지를 확장한다**(§10.0 = (a)). file-panel이 이미 소유·검증한 것 위에, editor는 diff/git·다중 파일·grant-root 범위 write·턴 base·tool/LSP만 더한다.
 
 ```text
-editor WKWebView (CM6, current text/undo/cursor)
-  -> editor-only page shim (bounded request/event DTO)
-  -> native editor bridge (method allowlist + EditorGrant)
-  -> L2 EditorDispatcher / EditorCore
-       |- DocumentRegistry (identity/revision/disk fingerprint/conflict)
-       |- path/grant/CAS/diff DTO policy
+전역 도크  ── file-panel.md 소유(공유) ──────────────────────
+  탭 스트립 · 헤더밴드 · (트리 ↔ 변경목록) = Zig + GPU chrome
+  콘텐츠 rect = WKWebView, 두 web 컨텍스트(file-panel §2.1):
+    ├ 격리 렌더 origin  = 새니타이즈 md/rich-render(Mermaid 등). 브리지 없음.
+    └ 신뢰 shell origin = CM6 마운트 + 브리지 + 오케스트레이션
+         maru.file.read()/write(content)     ← file-panel: **핀 경로** read/write
+       + editor.* / diff.* / git.*            ← editor 확장, EditorGrant 게이트
+
+신뢰 shell 브리지(확장) ── in-process, host가 surface에 결합한 grant 검증 후 직접 호출
+  -> L2: file-panel 정책 + editor 코어(신규)
+       |- DocumentRegistry (identity/revision/disk fingerprint/conflict/recovery)
+       |- EditorGrant/path scope  (핀 단일 경로 → grant-root 상대 = 의도적 escalation, §3.2)
+       |- diff/turn-base model (§6·§6.1)
        `- injected adapter interfaces
             |- L4 FileAdapter (descriptor-safe read/save/stat/hash)
             |- L4 WatchAdapter (DispatchSource/FSEvents)
@@ -71,8 +80,10 @@ editor WKWebView (CM6, current text/undo/cursor)
 
 external CLI/agent
   -> Unix socket + capability nonce
-  -> same L2 policy/services
+  -> 같은 L2 policy/services
 ```
+
+**재사용 vs 신규(정합):** 도크 shell·두 web 컨텍스트·CM6 마운트·`maru.file.*` 브리지 트랜스포트·dirty 보고는 **file-panel이 이미 가졌다**(재사용). editor가 신규로 짓는 것은 L2 editor 코어(grant·registry·CAS·diff/turn model)와 그것을 부르는 **브리지 method 확장**(diff/git/multi-file/save)뿐이다. 별도 `.editor` PanelKind·별도 origin·별도 브리지를 만들지 않는다(§10.0 (b)를 택할 때만).
 
 제품 UI 요청을 자기 Unix socket으로 되돌려 보내지 않는다. socket 인증은 외부 프로세스 경계용이고, in-process bridge는 host가 surface에 결합한 grant를 검증한 뒤 같은 L2 dispatcher를 직접 호출한다. 이 구분으로 payload 복사·deadlock·자기 인증 우회를 피한다.
 
@@ -99,13 +110,15 @@ L2는 file descriptor, DispatchSource, FSEvents, child process, AppKit/WebKit �
 
 **레이아웃은 공유, trust는 분리(사용자 방향).** git diff·editor는 [file-panel.md](file-panel.md)의 전역 도크와 **동일한 시각 shell**(탭 스트립·헤더 밴드·파일 트리 = GPU chrome, 콘텐츠 rect = WKWebView)을 공유해 UX 일관성과 코드 재사용을 얻는다. 실제로 git diff는 도크의 **또 다른 콘텐츠 kind**(현행 `.md`/`.html` 옆)로 보는 게 자연스럽다. **다만 레이아웃 재사용이 trust 재사용을 뜻하지 않는다** — 같은 도크 안에서도 kind별 origin/CSP/grant는 위 계단대로 분리한다. 엔진은 CM6로 확정됐고(§1.1), 도크 정합(a/b)만 §10.0 결정 항목이다.
 
-editor가 markdown과 같은 `maru-app://app` origin을 공유하면 origin pin만으로 두 콘텐츠의 권한을 구분할 수 없다. editor bridge는 main frame + editor exact origin + 해당 `surface_id`의 `.editor` kind를 모두 확인하고, remote/top-level navigation을 거부한다. editor page에서 markdown asset route로 이동해도 grant가 유지되는 구조는 허용하지 않는다.
+**origin 공유의 함정**: (a) 도크 확장에서 editor가 markdown과 같은 `maru-app://app` origin·같은 신뢰 shell 브리지를 공유하므로, **origin pin만으로는 "이 요청이 diff 리뷰냐 md 뷰어냐"를 구분할 수 없다**. 그래서 브리지 method가 `EditorGrant`를 요구하고, 그 grant는 native가 **도크 entry(surface_id)에 결합**한다 — md 뷰어 entry에는 `file_write`/`git_read`가 없고 editor entry에만 있다. 즉 권한 구분은 origin이 아니라 **entry별 grant**가 한다. main frame + 신뢰 origin + top-level navigation 거부는 그대로 강제하고, md asset route로 이동해도 editor grant가 따라붙지 않게 한다.
 
-### 3.2 editor bridge와 grant
+### 3.2 브리지 확장과 grant — 핀 경로에서 grant-root로
 
-CM6 page가 네이티브 API를 호출해야 하므로 editor에는 좁은 page-world shim을 둔다. isolated-world DOM mailbox도 가능하나 page가 mailbox를 쓸 수 있어 보안상 더 강하지 않고 구현 복잡도만 늘어난다.
+editor는 file-panel의 **신뢰 shell origin 브리지를 그대로 쓴다**(새 page-world shim을 따로 두지 않는다 — 브리지는 이미 신뢰 shell 컨텍스트에만 있고 page-world엔 없다). editor op는 그 브리지의 **새 method**이고, 정책은 file-panel과 동일하게 Zig(L2)가 판정한다(control_bridge 현행 표면=`hello` 1개, 나머지는 전부 신규 — file-panel과 공유하는 신규 계약).
 
-`EditorGrant`는 JS가 고르는 bearer nonce가 아니라 native host가 editor surface 생성 시 결합하는 리소스 권한이다.
+**핵심 escalation**: file-panel의 `maru.file.*`는 **경로 인자가 없다** — 도크 entry에 열 때 핀된 **단일 경로** 하나에만 read/write한다(웹앱이 경로를 못 고르는 게 안전장치). 그런데 git diff 리뷰·편집은 **변경 세트의 여러 파일**을 열고 그 안에서 write해야 하므로, editor는 핀-단일-경로를 **`EditorGrant`(grant-root + 상대 경로)**로 넓힌다. 이게 §3.1 신뢰 계단의 실제 단차이며, 넓힌 만큼 경로 안전 규칙(아래)을 강제한다.
+
+`EditorGrant`는 JS가 고르는 bearer nonce가 아니라 native host가 도크 editor entry 생성 시 결합하는 리소스 권한이다.
 
 ```text
 EditorGrant {
@@ -129,16 +142,16 @@ EditorGrant {
 
 외부 CLI/agent가 같은 op를 쓸 때만 control-plane capability nonce를 사용한다. 제품 capability fd 실발급이 붙기 전에는 외부 file/tool op를 열지 않는다.
 
-### 3.3 bridge 프로토콜과 생애주기
+### 3.3 브리지 프로토콜과 생애주기
 
-bridge는 임의 JS 객체 호출 모음이 아니라 버전 있는 protocol로 고정한다.
+file-panel 브리지의 editor method도 임의 JS 객체 호출이 아니라 버전 있는 protocol로 고정한다(file-panel `maru.file.*`와 같은 규율을 공유하되, editor는 다중 파일·grant-root라 request가 무거워 상한·취소·epoch를 명시한다).
 
 ```text
 EditorRequest {
   protocol_version,
   request_id,
   surface_id,
-  method,
+  method,       // file.open / file.save / diff.list / diff.open / git.* …
   params,
 }
 
@@ -154,35 +167,35 @@ EditorResult = success | typed_error
 - push queue는 bounded이며 coalesce 가능한 diagnostic/watch 상태와 유실 불가 save completion을 구분한다. overflow를 조용히 drop하지 않는다.
 - bridge DTO는 UTF-8 JSON을 쓰되 문서 bytes를 JSON string에 무제한 인라인하지 않는다. 상한 이하 UTF-8 text만 인라인하고, 이후 큰 payload transport는 별도 설계 전까지 거부한다.
 
-### 3.4 예상 코드 배치
+### 3.4 예상 코드 배치 — L2 코어는 신규, 웹앱·브리지는 file-panel 확장
 
-구현이 다시 `app_session.zig`와 `MaruAppHost.swift` 한 파일에 누적되지 않도록 첫 slice부터 책임별 파일로 나눈다.
+editor **L2 코어**(정책·상태)는 신규 파일로 나눠 `app_session.zig`/`MaruAppHost.swift` 재누적을 막되, **웹앱·브리지·도크 chrome은 file-panel 코드를 확장**한다(별도 트리를 새로 만들지 않는다).
 
 ```text
-src/session/editor/
-  protocol.zig           version/error/DTO/limit
-  grant.zig              EditorGrant/path scope policy
-  document_registry.zig  revision/owner/conflict/recovery state
-  diff_model.zig         stable snapshot/status DTO
+신규 — editor L2 코어 (엔진·플랫폼 무관)
+  src/session/editor/
+    protocol.zig           version/error/DTO/limit
+    grant.zig              EditorGrant/path scope policy (핀→grant-root escalation)
+    document_registry.zig  revision/owner/conflict/recovery state
+    diff_model.zig         stable snapshot/status DTO + turn-base(§6.1)
+  src/app/
+    editor_runtime.zig     adapter orchestration/cancel/queue
+  src/platform/macos/
+    editor_file.zig        descriptor-relative file adapter (safe-save §5.1)
+    editor_watch.zig       DispatchSource/FSEvents adapter
+    editor_tool.zig        git/tool/LSP process adapter
 
-src/app/
-  editor_runtime.zig     adapter orchestration/cancel/queue
-
-src/platform/macos/
-  editor_file.zig        descriptor-relative file adapter
-  editor_watch.zig       DispatchSource/FSEvents adapter
-  editor_tool.zig        git/tool/LSP process adapter
-  MaruEditorBridge.swift WKWebView bridge/epoch/main-frame/origin adapter
-
-web/editor/
-  entry/assets/tests     editor app와 semantic oracle
+확장 — file-panel 소유 코드에 method/kind 추가 (신규 병렬 파일 아님)
+  file-panel 신뢰 shell 브리지  += editor.*/diff.*/git.* method + EditorGrant 검증
+  file-panel 웹앱(web/, vanilla TS) += diff 뷰(CM6 MergeView)·변경목록·턴 타임라인
+  도크 kind 분기(file-panel §2) += diff/code content kind
 ```
 
-`src/session.zig`는 editor L2 facade만 export하고 Swift 새 파일은 `build.zig`의 `swiftc` 입력과 swift-check에 함께 연결한다. 실제 디렉터리를 추가하는 PR은 [project-structure.md](project-structure.md)도 같은 PR에서 갱신한다. app-global `DocumentRegistry`의 runtime owner는 per-window `AppSession`이 아니라 전 창이 공유하는 `AppRuntime` 계층에 둔다.
+`src/session.zig`는 editor L2 facade만 export한다. 브리지 method를 더하는 Swift 변경은 file-panel 브리지 어댑터에 얹고 `build.zig` swiftc·swift-check에 이미 연결돼 있다. 실제 디렉터리를 추가하는 PR은 [project-structure.md](project-structure.md)와 [file-panel.md](file-panel.md)(브리지 method 표)를 같은 PR에서 갱신한다. app-global `DocumentRegistry`의 runtime owner는 per-window `AppSession`이 아니라 전 창이 공유하는 `AppRuntime` 계층에 둔다(file-panel 도크가 전역이므로 정합).
 
 ## 4. 문서 권위와 저장 CAS
 
-CM6가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
+CM6가 열린 문서의 현재 text, undo stack, selection/cursor를 소유한다(file-panel의 CM6 소스 편집과 같은 엔진). file-panel은 이미 **dirty를 브리지 신호로 Zig에 미러**하는데(file-panel §3), editor는 그 dirty 신호를 **revision/fingerprint/conflict가 있는 `DocumentRegistry`로 확장**한다 — 단일 핀 파일이 아니라 grant-root 안 여러 문서를 다루므로 identity·CAS가 필요하다. `DocumentRegistry`는 앱 전역으로 하나를 두어 window/surface가 달라도 같은 파일 identity를 공유한다. 같은 파일을 독립 model 두 개로 열어 각자 저장하게 두는 구조는 CAS 충돌을 정상 UX로 가장하므로 허용하지 않는다.
 
 native가 전체 text 정본을 보유하지 않는 v1에서는 한 document에 **writable CM6 owner surface 하나**만 둔다. 두 번째 open은 기존 owner를 focus하거나 명시적 read-only snapshot을 연다. owner close/move/crash 때 dirty 여부를 확인한 뒤 owner를 transfer/recover하며, 두 page의 editable model을 실시간 동기화하는 것은 native canonical text 또는 CRDT/OT가 필요하므로 v1 범위 밖이다.
 
@@ -238,7 +251,7 @@ CM6 문자열(JS UTF-16 code unit)과 디스크 bytes 사이 변환을 암묵적
 
 ### 5.1 safe-save
 
-기존 `createFileAtomic(.replace=true,.make_path=true)`를 직접 재사용하지 않는다. editor 전용 저장은 다음 순서를 만족해야 한다.
+file-panel의 `maru.file.write(content)`는 **핀 단일 경로**에만 쓰므로 피해 반경이 그 파일 하나로 bound된다(file-panel §3). editor는 grant-root 안 **임의 상대 경로**로 넓히므로(§3.2 escalation) 그 좁은 write로는 부족하고, 아래 safe-save가 그 넓힌 범위의 안전을 책임진다. 기존 `createFileAtomic(.replace=true,.make_path=true)`를 직접 재사용하지 않는다 — editor 전용 저장은 다음 순서를 만족해야 한다.
 
 1. grant root를 열린 directory descriptor로 고정하고 상대 path segment를 descriptor-relative로 순회한다. 문자열 `canonicalize → 검사 → 다시 path로 open`하는 TOCTOU 구조는 사용하지 않는다.
 2. expected disk fingerprint를 비교한다.

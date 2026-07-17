@@ -1,0 +1,46 @@
+name: Web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/web.yml"
+      - ".mise.toml"
+      - "web/**"
+      - "docs/file-panel.md"
+      - "docs/web-panel.md"
+  pull_request:
+    paths:
+      - ".github/workflows/web.yml"
+      - ".mise.toml"
+      - "web/**"
+      - "docs/file-panel.md"
+      - "docs/web-panel.md"
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: web build and security fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('web/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - run: bun install --cwd web --frozen-lockfile
+      - run: mise run web:check
+      - name: Upload zntc bundle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maru-web-build
+          path: web/dist/**
+          if-no-files-found: error
+          retention-days: 14

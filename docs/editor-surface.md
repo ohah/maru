@@ -489,7 +489,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 ## 11. 현재 한계
 
-- **엔진은 CM6로 확정(§1.1)됐으나 이 문서의 §3~§8은 아직 CM6 세부(MergeView API·acceptChunk staging·CM6 인코딩)로 완전히 재작성되지 않았다.** 도크 정합(§10.0 a/b)도 미결이라, file-panel 확장으로의 구조 재작성이 남았다. 아래 Monaco RED 한계는 채택 안 하므로 해소됐다.
+- **§3~§8은 CM6 + file-panel 도크 확장 구조로 재작성됐다**(구조·정합 층). 남은 것은 **구현 층 세부** — MergeView/unifiedMergeView·acceptChunk 정확한 배선, CM6↔디스크 인코딩 매핑, file-panel 브리지 method 표의 실제 스키마 — 로, E0.5B/E1 slice에서 코드와 함께 고정한다. 도크 정합(§10.0)은 사용자 방향 (a)로 상정하되 최종 승인 대기. Monaco RED 한계는 채택 안 하므로 해소.
 - 제품 WKWebView에서 **CM6 MergeView(diff)** 직접 검증은 남았다(CM6 편집은 file-panel이 검증). Monaco 텍스트/IME RED는 엔진 교체로 무효.
 - 임시 PoC 하니스와 결과 artifact가 저장소에 없으므로 재현성은 E0.5A가 닫아야 한다.
 - zntc current main 성공은 릴리스/장기 재현성을 보장하지 않는다.

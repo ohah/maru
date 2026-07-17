@@ -292,10 +292,22 @@ Git 의미와 실행 안전도 E1 전에 고정한다.
 
 git 기준(HEAD/index/worktree) 외에 **"에이전트가 방금 바꾼 것"**을 diff base로 제공한다. 이는 git 개념이 아니라 **턴 경계 스냅샷**이 필요하다. Codex가 "Last turn"을 쉽게 하는 건 자기가 에이전트 런타임이라서인데, **maru는 에이전트를 소유하지 않고도** [agent_transcript.zig](../src/session/agent_transcript.zig)로 **claude·codex 양쪽 세션 transcript를 이미 파싱**해 턴 경계(working/idle/interrupted)를 안다. 따라서 maru의 turn-base는 **호스팅하는 아무 에이전트에나** 적용되는, Codex보다 넓은 기능이 될 수 있다.
 
-- **필요한 신규 조각은 "턴 시작 시점의 트리 스냅샷" 하나**다. 턴 감지(idle→working 전이)는 이미 있으므로, 그 경계에서 작업트리 baseline을 캡처한다. `diff.list`의 base로 `turn:<n>`을 받으면 현재 worktree ↔ 그 스냅샷을 비교한다.
-- **스냅샷 = 턴별 ring buffer.** 매 턴 경계마다 하나씩 쌓이므로 "마지막 턴"뿐 아니라 **N턴 전·임의 턴·턴 범위**가 전부 같은 메커니즘으로 나온다(UI는 턴 타임라인 스크러버). transcript가 이미 전체 턴을 enumerate하므로 각 스냅샷은 transcript 턴 identity와 짝지어 둔다.
-- **스냅샷 방식(비용순 결정 대상)**: ① `git write-tree`(변경 blob만 기록, tree OID만 보관 — 값쌈) vs ② 에이전트가 만진 파일만(transcript 편집 경로/FSEvents로 좁힘 — 대용량 repo 유리). tree OID는 git 히스토리와 무관한 content 스냅샷이라 그 사이 commit/rebase가 있어도 유효하다.
-- **경계·정직**: (a) maru가 그 순간 transcript를 추적 중이어야 스냅샷이 찍힌다(상시 추적하므로 전이마다 캡처 가능하나 배관은 신규). (b) "턴"=한 assistant 응답 단위라 그 안의 여러 편집이 한 turn diff로 묶인다(Codex "Last turn"과 동형). (c) 보관 개수(ring buffer 크기)·세션 경계·저장 위치(git object store vs maru shadow)는 결정 사항.
+**검증된 토대(실측):**
+
+- **턴 인식은 이미 있다(프로덕션).** `agent_transcript.zig`의 `parseClaudeTail`/`parseCodexTail`이 `AgentState{running, idle, interrupted, unknown}`를 내고, `agent_session.zig`가 상태줄·idle 알림에 쓴다. working→idle 전이 = "턴 완료" 감지는 그대로 얻는다.
+- **턴 스냅샷 메커니즘도 실증됨.** `git stash`가 쓰는 기법 — 임시 index로 `GIT_INDEX_FILE=… git read-tree HEAD && git add -A && git write-tree` → tree OID 하나(변경 blob만 기록·값쌈). 이후 `git diff <tree>`가 그 턴 이후 변경. **실제 index·작업트리 무변형**을 별도 fixture로 확인했다. tree OID는 git 히스토리 무관 content 스냅샷이라 중간 commit/rebase가 있어도 유효.
+
+**신규 구현 필요(정직 — "공짜 재사용"이 아니다):**
+
+- **⚠️ 현행 파서는 tail(끝 64KB)만 읽어 "현재 상태 하나"만 낸다** — 성능상 전체를 안 읽는 게 설계 의도(agent_session.zig `tail_window`/`tail_cap`). 따라서 **턴 타임라인(1턴 전·2턴 전…)은 전체 transcript를 파싱해 턴을 열거하는 신규 코드가 필요**하다. 단 jsonl은 모든 턴이 쌓인 append-only 로그라 **데이터는 이미 있다**(데이터 부재가 아니라 코드 부재).
+- **턴 경계에서 스냅샷 캡처 배관** — 전이 감지는 폴링으로 있으나 "그 순간 write-tree"는 신규.
+- **스냅샷 = 턴별 ring buffer** → "마지막 턴"뿐 아니라 N턴 전·임의 턴·범위가 같은 메커니즘(UI는 턴 타임라인 스크러버). 각 스냅샷을 전체-파싱으로 얻은 턴 identity와 짝짓는다.
+
+**경계·정직:**
+
+- **스냅샷 방식(결정 대상)**: ① `git write-tree`(값쌈, 전체 트리) vs ② 에이전트가 만진 파일만(transcript 편집 경로/FSEvents로 좁힘 — 대용량 repo 유리). 임시 index는 repo 밖(maru shadow)에 둔다(repo 안에 두면 그 파일이 diff에 잡힌다 — fixture에서 확인).
+- (a) maru가 그 순간 transcript를 추적 중이어야 스냅샷이 찍힌다(상시 추적하나 캡처 배관은 신규). (b) "턴"=한 assistant 응답 단위라 그 안의 여러 편집이 한 turn diff로 묶인다(Codex "Last turn"과 동형). (c) 보관 개수·세션 경계·저장 위치는 결정 사항.
+- **실현성 판정**: showstopper가 될 뻔한 두 관문(에이전트 턴 인식·스냅샷 안전성)이 실측으로 닫혔으므로 **불확실한 연구가 아니라 평범한 구현**이다.
 - 이 base는 **read 전용**이라 `git_read`와 무관한 별도 위험이 없다(스냅샷 캡처는 write-tree/파일 read뿐, 작업트리 변형 없음). 다만 tree OID 캡처가 index를 건드리지 않도록 **임시 index**(`GIT_INDEX_FILE`)로 격리한다.
 
 **결정(§10에 추가)**: 턴 경계 스냅샷을 ①write-tree vs ②touched-files로 할지, ring buffer 보관 정책(개수·세션 수명·저장 위치), 그리고 turn-base를 v1에 넣을지(리뷰 UX의 핵심이라 기본 base 후보) 아니면 E2 후속으로 둘지.

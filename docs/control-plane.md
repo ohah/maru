@@ -738,7 +738,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 ## 13. 열린 질문
 
 - 웹 asset repo/tooling 구성: 프론트엔드 dev server/preview/build/bundle은 zntc로 확정. 기본 방향은 `web/` 하위 Bun workspace(`package.json`+`bun.lock`)로 패키지 설치·script 실행·`bun test` 실행을 고정하는 것이다. JS/TS lint·format은 `oxlint`·`oxfmt`로 확정한다. Vite+는 모노레포 config·task runner를 제공하지만 전체 도입은 zntc의 프론트엔드 개발환경과 Bun의 test runner와 역할이 겹치므로 기본값에서 제외한다. Phase 7 착수 시 lockfile·CI cache·라이선스·offline/reproducible build와 함께 `web:dev`/`web:build`(zntc), `web:test`(Bun 내장 test runner), `web:lint`/`web:fmt`/`web:fmt-check`(Oxc), `oxlint` rule set, `oxfmt` 적용 범위, Vite Task만 도입할 필요가 있는지를 결정한다([project-rules.md] §의존성, 사용자 논의).
-- 서드파티 JS 라이브러리(마크다운/편집: TipTap 등 vs 자체). Phase 7 착수 시 결정([project-rules.md] §의존성, 사용자 논의).
+- ~~서드파티 JS 라이브러리(마크다운/편집: TipTap 등 vs 자체). Phase 7 착수 시 결정~~ **확정(2026-07-17 사용자 결정)**: 편집기 = **CodeMirror 6**, 렌더 = markdown-it 또는 remark(FP2에서 락파일 고정과 함께 확정). 근거·공급망 고정(SRI·락파일)은 [file-panel.md](file-panel.md) §1·§9 단일 출처.
 - 비-자식 CLI의 인스턴스 선택 어휘(§4.2).
 - 비-자식 CLI에 read-output 권한을 주는 UX(일회성 GUI 확인, 짧은 TTL grant, 설정 allowlist 중 선택).
 - login shell에서 read-output 권한을 줄 UX(일회성 GUI 확인, 짧은 TTL grant, 별도 verified channel). 현재 login wrapper는 fd를 닫는 것으로 실측됐다(§8.5).
@@ -746,7 +746,7 @@ Phase 0~6은 서드파티 0. 1~3(컨트롤 플레인)과 4(웹뷰 껍데기)는 
 - `events.subscribe {filter?}` 필터 스키마.
 - ~~surface 이동(이동성 M3+) 이벤트 어휘: `metadata:window` 구독자의 scope 재평가 동작(구독 유지/해제/removed 중 무엇)~~ **확정([window-surface-mobility.md] §8A.3)**: window-scope 구독은 **유지**하고, 옮겨진 surface에 대해 `session.movedOut`/`movedIn`(membership-changed) notification을 방출한다(`removed`/`closed` 아님 — surface 생존). 재평가는 이동 원자 트랜잭션 안에서 동기 수행. `metadata:self`는 surface_id 불변이라 무영향(응답 메타 window 필드만 갱신). **event 이름·params 확정·구현(M3d-1)**: `session.movedOut{surface_id, from_window, to_window}`·`session.movedIn{surface_id, from_window, to_window}` — `src/session/surface_move.zig`가 이동 원자 트랜잭션 안에서 방출하고 control_plane notification으로 직렬화한다(cross-window일 때만, 옮겨진 surface마다 out+in 둘). 라이브 구독자 fan-out 배선은 M3d-2.
 - 세션 이름/별칭, 영속/재연결(전역 UUID 도입 여부).
-- 마크다운 편집 WYSIWYG 시점/방식(뷰어+소스편집은 확정).
+- ~~마크다운 편집 WYSIWYG 시점/방식(뷰어+소스편집은 확정)~~ **방향 확정(2026-07-17)**: v1 = 렌더 토글 + CodeMirror 6 소스 편집([file-panel.md](file-panel.md) FP4·FP6), 인라인 Live Preview(커서 주변만 소스)는 후속([file-panel.md] §13). 호스팅은 워크스페이스 term이 아니라 **창 레벨 전역 도크**(file-panel.md §1). Phase 7 상세 분해는 file-panel.md §10(7a·7b⊂FP2, 7c⊂FP4+FP6, **7d는 md 클릭 라우팅만 FP5** — `panel.bindSession`·`bind` capability·CLI `panel open`은 file-panel §13 후속).
 
 ## 14. 리스크
 

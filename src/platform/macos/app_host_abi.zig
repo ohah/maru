@@ -867,6 +867,38 @@ pub export fn maru_macos_app_session_provide_picked_file(session: ?*AppSession, 
     return @intFromEnum(Status.ok);
 }
 
+// open_file_panel(Cmd+O/팔릿/메뉴)이 요청한 Markdown/HTML NSOpenPanel one-shot. (v121)
+pub export fn maru_macos_app_session_take_file_panel_pick_request(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeFilePanelPickRequest()) 1 else 0;
+}
+
+// 절대경로를 현재 창 도크에 연다. 0=지원하지 않는 확장자, 1=열림/기존 탭 활성화, 2=지원 확장자지만 실패. (v121)
+pub export fn maru_macos_app_session_open_file_panel_path(session: ?*AppSession, bytes: ?[*]const u8, len: usize) u32 {
+    const app_session = session orelse return @intFromEnum(AppSession.FilePanelOpenPathResult.failed);
+    const ptr = bytes orelse return @intFromEnum(AppSession.FilePanelOpenPathResult.failed);
+    return @intFromEnum(app_session.openFilePanelPath(ptr[0..len]));
+}
+
+// surface가 도크 entry면 borrowed path와 kind(1=markdown, 2=html)를 돌려준다. 0=도크 아님. (v121)
+pub export fn maru_macos_app_session_file_panel_entry(
+    session: ?*AppSession,
+    surface_id: u64,
+    out_path: ?*?[*]const u8,
+    out_len: ?*usize,
+) u32 {
+    if (out_path) |p| p.* = null;
+    if (out_len) |p| p.* = 0;
+    const app_session = session orelse return 0;
+    const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
+    if (out_path) |p| p.* = info.path.ptr;
+    if (out_len) |p| p.* = info.path.len;
+    return switch (info.kind) {
+        .markdown => 1,
+        .html => 2,
+    };
+}
+
 // HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
 // NSColorSampler(OS 화면 색 추출기)를 열고 고른 색을 provide_sampled_color로 되돌린다. take_bell과 같은 1회성. session null=0. (v83)
 pub export fn maru_macos_app_session_take_color_sample_request(session: ?*AppSession) u32 {
@@ -3977,6 +4009,14 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_active_web_surface_id_any_kind(null));
     // v114 Phase 4g-1 후속 terminal_owns_input: null session은 0.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_terminal_owns_input(null));
+    // v121 FP5 파일 패널: null session은 one-shot 없음, open 실패, entry 없음으로 안전하게 접힌다.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_panel_pick_request(null));
+    try std.testing.expectEqual(@as(u32, 2), maru_macos_app_session_open_file_panel_path(null, "x", 1));
+    var file_panel_path: ?[*]const u8 = undefined;
+    var file_panel_path_len: usize = 99;
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_file_panel_entry(null, 1, &file_panel_path, &file_panel_path_len));
+    try std.testing.expect(file_panel_path == null);
+    try std.testing.expectEqual(@as(usize, 0), file_panel_path_len);
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
     // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.

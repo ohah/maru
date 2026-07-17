@@ -281,6 +281,13 @@ Ghostty 기본 keybind와 동작이 같다.
 `KeyChord.eql`이 modifier를 정확히 비교하므로 `Cmd+Backspace`만 매칭한다(`Cmd+Shift+Backspace`는
 빌트인이 아니라 `.ignored`). 사용자가 `keybind`로 같은 조합을 다시 묶으면 그게 우선한다.
 
+## 파일 패널 열기 (⌘O, open_file_panel)
+
+`⌘O`는 `open_file_panel` 앱 액션의 기본 바인딩이다. 현재 창에서 macOS 파일 선택창을 열고 `.md` 또는 `.html`
+정규 파일 하나를 선택해 전역 파일 도크에 연다. 이미 열린 경로면 새 탭을 만들지 않고 기존 탭을 활성화한다. 메뉴와
+커맨드 팔릿도 같은 액션을 쓰며, 사용자 `keybind`로 이동하거나 `unbind`할 수 있다. 파일 형식·경로 판정은 Zig가,
+`NSOpenPanel` 표시만 Swift가 맡는다([file-panel.md](file-panel.md) §6).
+
 ## 화면 비우기 (⌘K, clear_screen)
 
 `⌘K`는 활성 터미널의 화면과 스크롤백을 비운다(빌트인 app 바인딩 → `Action.clear_screen` →

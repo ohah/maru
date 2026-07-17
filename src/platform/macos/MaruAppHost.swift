@@ -2039,6 +2039,11 @@ final class MaruWebPanelView: NSView {
     // 패널 종류(ABI panel_kind: 0=markdown=신뢰, 1=browser=비신뢰). 신뢰만 maru-app:// 스킴 핸들러를 등록하고 신뢰 UI를
     // 로드한다(5c-2c). 비신뢰는 인라인 placeholder + maru-app:// 네비 차단(외부 URL 로딩은 5d).
     let panelKind: UInt32
+    // FP5 도크 파일 종류: 0=워크스페이스 browser, 1=도크 markdown, 2=도크 html. panelKind은 기존 trust ABI를
+    // 유지하고, 이 값이 browser와 같은 untrusted panelKind을 쓰는 로컬 HTML을 구별한다.
+    let filePanelKind: UInt32
+    let pinnedFileHTMLURL: URL?
+    private(set) var fileHTMLReadAccessURL: URL?
     // 5b: 신뢰 패널의 브리지 isolated world(page-world와 격리, window.maru 주입처). 비신뢰=nil. 스모크 격리 probe에 쓴다.
     var bridgeWorld: WKContentWorld?
     // 5b 격리 E2E probe 결과(스모크, MARU_WEB_PANEL): isolated world의 typeof window.maru("object" 기대) / page-world("undefined" 기대).
@@ -2057,6 +2062,12 @@ final class MaruWebPanelView: NSView {
     var rendererBridgeProbe: String?
     var rendererHandlerProbe: String?
     var rendererParentAccessProbe: String?
+    var fileHTMLScriptProbe: String?
+    var fileHTMLAssetProbe: String?
+    var fileHTMLOutsideAssetProbe: String?
+    var fileHTMLAboutAttemptProbe: String?
+    var fileHTMLPinnedProbe: String?
+    private var fileHTMLProbeStarted = false
     // 5d BrowserControl fixture E2E(스모크, browser 패널): 0=초기 로드 대기, 1=data: URL navigate 완료 대기, 2=probe 완료.
     var browserFixtureStage = 0
     // executeScript 시작 뒤 top-level navigation/reload가 시작되면 callback의 WebKit error를 execution이 아니라
@@ -2073,6 +2084,9 @@ final class MaruWebPanelView: NSView {
     // 안 남고(비영속, 종료 시 소멸) 신뢰 콘텐츠(maru-app://, 기본 persistent store)와 **격리**된다(§7 untrusted 격리). browser
     // 탭들끼리는 공유(브라우저 세션 시맨틱 — 탭 간 로그인 유지). 앱 전역 1개(static lazy). 임의 웹 로드(7e-2) 전 안전 확보.
     static let browserDataStore = WKWebsiteDataStore.nonPersistent()
+    // 로컬 HTML은 살아있는 스크립트+CSP 없음이므로 browser 탭의 쿠키 세션과 공유하지 않는다. 도크 HTML끼리만
+    // 공유하는 별도 ephemeral store라 디스크 영속도 없고 browser credential도 보이지 않는다.
+    static let filePanelDataStore = WKWebsiteDataStore.nonPersistent()
     // 4d 입력 라우팅용(약참조 — controller가 이 뷰를 강참조하는 surface.webPanels dict를 소유하므로 retain cycle 방지).
     weak var controller: MaruAppHostController?
     // 이 web 본문 rect가 split/dock divider에 맞닿는 가장자리 비트마스크(Zig seam_edges: left=1·right=2·bottom=4). create/reframe/
@@ -2135,29 +2149,35 @@ final class MaruWebPanelView: NSView {
 
     func clearConsoleBuffer() { consoleBuffer.removeAll() }
 
-    init(frame frameRect: NSRect, surfaceId: UInt64, panelKind: UInt32, controller: MaruAppHostController) {
+    init(frame frameRect: NSRect, surfaceId: UInt64, panelKind: UInt32, filePanelKind: UInt32, filePanelPath: String?, controller: MaruAppHostController) {
         self.surfaceId = surfaceId
         self.panelKind = panelKind
+        self.filePanelKind = filePanelKind
+        self.pinnedFileHTMLURL = filePanelKind == 2 ? filePanelPath.map { URL(fileURLWithPath: $0) } : nil
         // 트러스트 분기(5c-2c): markdown(0)=신뢰만 maru-app:// 스킴 핸들러를 config에 등록하고 신뢰 UI를 로드한다.
         // browser(1)=비신뢰엔 스킴 핸들러를 **애초에 등록하지 않는다**(origin 위장 탈취 1차 차단, §7 ④). 핸들러는
         // WKWebView 생성 **전에** config에 심어야 하므로 여기서 결정한다.
         let config = WKWebViewConfiguration()
-        config.userContentController.addUserScript(WKUserScript(
-            source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true,
-            in: .page))
-        // §9.5.9 console: page-world console.*/onerror override(bounded ring `window.__maruConsole`). 메시지 핸들러 없음
-        // (§8.1(c) 유지). host가 proactive drain으로 Swift 서버 버퍼에 옮긴다. 첫 pull(browser.console)에서 capture-active.
-        config.userContentController.addUserScript(WKUserScript(
-            source: BrowserControl.consoleCaptureScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true,
-            in: .page))
+        if filePanelKind != 2 {
+            config.userContentController.addUserScript(WKUserScript(
+                source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true,
+                in: .page))
+            // §9.5.9 console: page-world console.*/onerror override(bounded ring `window.__maruConsole`). 메시지 핸들러 없음
+            // (§8.1(c) 유지). 로컬 HTML에는 제품 페이지 변형을 피하려고 이 browser-control script를 주입하지 않는다.
+            config.userContentController.addUserScript(WKUserScript(
+                source: BrowserControl.consoleCaptureScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true,
+                in: .page))
+        }
         let trusted = (panelKind == 0)
         var appURL: URL?
         var bridgeWorldLocal: WKContentWorld?
-        if !trusted {
+        if filePanelKind == 2 {
+            config.websiteDataStore = Self.filePanelDataStore
+        } else if !trusted {
             // 7e-0: 비신뢰(browser) 패널은 ephemeral 데이터스토어로 격리(비영속 + 신뢰 persistent store와 분리). 스킴
             // 핸들러·브리지는 미등록(신뢰 전용). 임의 웹 로딩은 7e-2, 스킴 화이트리스트는 그때 navigate 경로(Zig)에.
             config.websiteDataStore = Self.browserDataStore
@@ -2183,8 +2203,8 @@ final class MaruWebPanelView: NSView {
         webView.navigationDelegate = self
         // Phase 7f-1: browser(비신뢰) 패널만 팝업(target=_blank·window.open)을 연다 — uiDelegate로 createWebViewWith를
         // 받는다. 신뢰(maru-app UI) 패널은 uiDelegate 미설정이라 WKWebView 기본 동작(새 창 안 열림)으로 창 생성이 막힌다.
-        if trusted == false { webView.uiDelegate = self }
-        if appURL == nil {
+        if trusted == false && filePanelKind == 0 { webView.uiDelegate = self }
+        if appURL == nil && pinnedFileHTMLURL == nil {
             // 비신뢰(browser) 또는 asset root 부재: 인라인 흰 HTML placeholder(외부 URL 로딩은 5d). **about:blank를 쓰지
             // 않는 이유**: WKWebView는 배경 미지정 문서(about:blank)를 시스템 appearance로 렌더해 macOS 다크 모드에선
             // 다크가 되어 아래 다크 터미널과 구분되지 않는다("흰 화면 안 뜸"의 루트 코즈). CSS로 배경을 명시 흰색으로
@@ -2203,10 +2223,18 @@ final class MaruWebPanelView: NSView {
 
     /// 소유 surface dict 등록 뒤 호출한다. 브리지 handler가 surface→session을 해소하기 전에 document-start 요청이
     /// 달리는 race를 막기 위해 신뢰 문서 load를 init에서 분리한다. reparent 때는 다시 부르지 않는다.
-    func startTrustedLoad() {
-        guard let url = initialTrustedURL else { return }
-        initialTrustedURL = nil
-        webView.load(URLRequest(url: url))
+    func startInitialLoad() {
+        if let url = initialTrustedURL {
+            initialTrustedURL = nil
+            webView.load(URLRequest(url: url))
+            return
+        }
+        guard let url = pinnedFileHTMLURL else { return }
+        // 정적 HTML만 보고 상대 resource 유무를 완전 판정할 수 없다(JS 동적 import/fetch 포함). 문서 계약대로 부모
+        // 디렉터리를 read scope로 주고, WebKit이 그 밖의 file: 접근을 차단하게 한다.
+        let access = url.deletingLastPathComponent()
+        fileHTMLReadAccessURL = access
+        webView.loadFileURL(url, allowingReadAccessTo: access)
     }
 
     /// 실제 viewer의 비동기 단계(iframe load→read→render→asset)를 최대 4초 동안 250ms 간격으로 관측한다. 제품
@@ -2257,6 +2285,8 @@ final class MaruWebPanelView: NSView {
     init(adoptingConfiguration configuration: WKWebViewConfiguration, surfaceId: UInt64, frame frameRect: NSRect) {
         self.surfaceId = surfaceId
         self.panelKind = 1
+        self.filePanelKind = 0
+        self.pinnedFileHTMLURL = nil
         self.bridgeWorld = nil // browser=브리지 없음(신뢰 전용)
         configuration.userContentController.addUserScript(WKUserScript(
             source: BrowserResultTransferRegistry.boundedPageBootstrapScript,
@@ -2289,7 +2319,7 @@ final class MaruWebPanelView: NSView {
     // dispatch(main)로 바꾸면 이질적, ⑶ 근거 없는 방어 코드 지양([[no-defensive-code-without-consult]]). 실제 off-main
     // 크래시가 관측되면 그때 dispatch로 전환한다(그 시점엔 증거 있음).
     private func installNavObservers() {
-        guard panelKind == 1 else { return }
+        guard panelKind == 1, filePanelKind == 0 else { return }
         navObservers = [
             webView.observe(\.url, options: [.new]) { [weak self] wv, _ in
                 MainActor.assumeIsolated {
@@ -2349,6 +2379,48 @@ final class MaruWebPanelView: NSView {
         return super.hitTest(point)
     }
 
+    private func pinnedFileURLMatches(_ candidate: URL) -> Bool {
+        guard let pinned = pinnedFileHTMLURL, candidate.isFileURL else { return false }
+        return candidate.standardizedFileURL.path == pinned.standardizedFileURL.path
+    }
+
+    // FP5 HTML 스모크: 페이지 script 실행, 부모 read scope 안 asset 성공, scope 밖 asset 차단을 읽은 뒤 로컬 링크와
+    // programmatic about:blank 이동을 차례로 시도한다. delegate가 둘 다 취소해 URL이 pinned 파일에 남는지 확인한다.
+    private func captureFileHTMLProbe() {
+        let script = """
+        (() => {
+          const inside = document.getElementById('inside');
+          const outside = document.getElementById('outside');
+          const link = document.getElementById('local-nav');
+          const result = JSON.stringify({
+            script: document.documentElement.dataset.fp5Script || 'false',
+            inside: String(Boolean(inside && inside.complete && inside.naturalWidth > 0)),
+            outside: String(Boolean(outside && outside.complete && outside.naturalWidth > 0))
+          });
+          link?.click();
+          setTimeout(() => {
+            window.__fp5AboutAttempt = true;
+            window.location.href = 'about:blank';
+          }, 50);
+          return result;
+        })()
+        """
+        webView.evaluateJavaScript(script) { [weak self] value, _ in
+            guard let self, let raw = value as? String, let data = raw.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return }
+            self.fileHTMLScriptProbe = obj["script"]
+            self.fileHTMLAssetProbe = obj["inside"]
+            self.fileHTMLOutsideAssetProbe = obj["outside"]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self, let current = self.webView.url else { return }
+                self.fileHTMLPinnedProbe = String(self.pinnedFileURLMatches(current))
+                self.webView.evaluateJavaScript("String(window.__fp5AboutAttempt === true)") { [weak self] value, _ in
+                    self?.fileHTMLAboutAttemptProbe = value as? String
+                }
+            }
+        }
+    }
+
     // 4d 키바인딩: 웹 포커스 중일 때만, **maru 앱 바인딩(app_action)인 Cmd-조합만** 가로채 maru로 라우팅한다(Zig
     // resolver가 앱 액션·모달 토글을 소유). 앱 바인딩이 아닌 Cmd-조합(⌘Q 종료·⌘H 숨김·⌘M 최소화=메뉴 전용, ⌘C/⌘V/
     // ⌘A=WebKit 편집, ⌘Backspace/←/→=terminal 매크로)은 false로 양보해 메뉴바 keyEquivalent → WebKit이 받게 한다 —
@@ -2368,7 +2440,7 @@ final class MaruWebPanelView: NSView {
         // Terminal keyEquivalent, keyCode 15)·⌘⌥←/→까지 back/forward/reload로 삼켜 그 조합들을 가로챈다(리뷰 [8]). Cmd+C/V
         // 등 다른 exact-cmd 게이트(chordMods)와 같은 intersection 규약.
         if event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
-           panelKind == 1, surfaceId != 0, controller?.activeWebSurfaceId() == surfaceId {
+           panelKind == 1, filePanelKind == 0, surfaceId != 0, controller?.activeWebSurfaceId() == surfaceId {
             switch event.keyCode {
             case 123: controller?.dispatchBrowserNav(surfaceId, 0); return true // ← back
             case 124: controller?.dispatchBrowserNav(surfaceId, 1); return true // → forward
@@ -2394,7 +2466,9 @@ final class MaruWebPanelView: NSView {
 extension MaruWebPanelView: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         navigationGeneration &+= 1
-        controller?.browserDidStartNavigation(surfaceId)
+        if panelKind == 1, filePanelKind == 0 {
+            controller?.browserDidStartNavigation(surfaceId)
+        }
     }
 
     func webView(
@@ -2402,10 +2476,31 @@ extension MaruWebPanelView: WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
-        let scheme = navigationAction.request.url?.scheme?.lowercased()
+        let url = navigationAction.request.url
+        let scheme = url?.scheme?.lowercased()
+        // FP5 로컬 HTML은 최초 pinned 파일과 같은 URL의 top-level 로드/새로고침만 허용한다. iframe·이미지·CSS 등
+        // subframe/subresource는 loadFileURL read scope 안에서 WebKit이 판정한다. 문서의 http(s) 링크는 시스템
+        // 브라우저로 넘기고, 다른 file:·about:·data:·javascript: top-level 이동은 취소한다. 이 분기는 공통
+        // about:blank placeholder 허용보다 먼저여야 로컬 HTML script/meta refresh가 핀을 우회하지 못한다.
+        if filePanelKind == 2 {
+            if navigationAction.targetFrame?.isMainFrame == false {
+                decisionHandler(.allow)
+                return
+            }
+            if let url, pinnedFileURLMatches(url) {
+                decisionHandler(.allow)
+                return
+            }
+            // 로컬 script/redirect가 앱 실행 직후 외부 브라우저를 강제로 띄우지 못하게 실제 링크 활성화만 넘긴다.
+            if let url, (scheme == "http" || scheme == "https"), navigationAction.navigationType == .linkActivated {
+                NSWorkspace.shared.open(url)
+            }
+            decisionHandler(.cancel)
+            return
+        }
         // about:blank/nil = loadHTMLString 인라인 폴백(신뢰·비신뢰 공통, 실제 네비 아님) → 항상 허용(리뷰12 [1]). 이게
         // 없으면 신뢰 패널(trusted)의 흰 placeholder 폴백(about:blank)이 `trusted != isMaruApp`으로 cancel돼 다크로 떠
-        // 다크모드 blank 회귀가 재발한다(비대칭 정정).
+        // 다크모드 blank 회귀가 재발한다(비대칭 정정). 로컬 HTML은 위 전용 분기에서 top-level about을 막는다.
         if scheme == nil || scheme == "about" {
             decisionHandler(.allow)
             return
@@ -2417,7 +2512,7 @@ extension MaruWebPanelView: WKNavigationDelegate {
         }
         // 신뢰 main frame은 app shell만, subframe은 render host만 허용한다. 둘 다 명시 port가 없어야 한다.
         // targetFrame=nil(새 browsing context)은 main-frame 취급으로 shell 외 전부 막는다.
-        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
+        guard let url else { decisionHandler(.cancel); return }
         let role: UInt32 = navigationAction.targetFrame?.isMainFrame == false ? 1 : 0
         decisionHandler(MaruAppSchemeHandler.originAllowed(url, role: role) ? .allow : .cancel)
     }
@@ -2427,7 +2522,11 @@ extension MaruWebPanelView: WKNavigationDelegate {
     // asset root 부재로 신뢰 패널에 bridgeWorld가 없어도 5d fixture로 오구동하지 않는다. 정상 런은 안 돈다(isSmokeMode 게이트).
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard controller?.isSmokeMode == true else { return }
-        if panelKind == 0 {
+        if filePanelKind == 2 {
+            guard fileHTMLProbeStarted == false else { return }
+            fileHTMLProbeStarted = true
+            captureFileHTMLProbe()
+        } else if panelKind == 0 {
             // 5b 신뢰 브리지 격리 probe. 브리지가 등록됐을 때만(asset root 부재면 bridgeWorld=nil=브리지 미등록 → probe 스킵).
             guard let world = bridgeWorld else { return }
             webView.evaluateJavaScript("typeof window.maru", in: nil, in: world) { [weak self] result in
@@ -2481,6 +2580,7 @@ extension MaruWebPanelView: WKNavigationDelegate {
     // 5f-3c: WebContent 프로세스 크래시 → browser.crashed 이벤트를 구독자에 push(추가 payload 없음). 실 크래시는
     // 결정적 트리거 불가라 헤드리스/손 테스트 대상(§9.5.5). 메인 스레드(델리게이트 콜백).
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard panelKind == 1, filePanelKind == 0 else { return }
         maru_macos_control_push_browser_crashed(surfaceId)
         controller?.browserDidTerminateWebContent(surfaceId)
     }
@@ -2499,7 +2599,7 @@ extension MaruWebPanelView: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        guard panelKind == 1 else { return nil } // 신뢰 패널은 창 생성 차단
+        guard panelKind == 1, filePanelKind == 0 else { return nil } // 신뢰/로컬 HTML 패널은 창 생성 차단
         // Phase 7f-2: 팝업 대상 스킴 정책(정책 단일 출처=Zig app_scheme.popupTargetAllowed) — about/http/https/빈만
         // 허용, javascript:/file:/data:/blob:/maru-app: 등 위험 스킴 팝업은 차단(nil이면 WebKit이 창 생성 취소).
         // 빈 target(window.open() 빈 팝업)은 허용이라 ABI 호출을 건너뛴다(빈 배열 baseAddress=nil 회피).
@@ -3850,8 +3950,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 4e-4(코드리뷰 [1] HIGH): 이 창이 닫히지만 그 surface가 **다른 창으로 이동**했으면(merge 시 대상 *비활성* 탭 착지 →
             // create-steal 미발생), 파괴/browser.closed 대신 대상 창으로 이관해 상태를 보존한다(대상의 후속 create/show가 adopt로 재부모화).
             if reparentWebPanelToOwningWindow(surfaceId, panel, from: surface) { continue }
-            maru_macos_control_push_browser_closed(surfaceId)
-            browserDidCloseSurface(surfaceId)
+            if panel.panelKind == 1, panel.filePanelKind == 0 {
+                maru_macos_control_push_browser_closed(surfaceId)
+                browserDidCloseSurface(surfaceId)
+            }
             panel.removeFromSuperview()
             panel.controller = nil
             surface.webPanels[surfaceId] = nil
@@ -4138,7 +4240,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // arg는 이 호출 중에만 유효(다음 take가 덮어씀) — 즉시 복사한다.
             let arg = (argPtr != nil && argLen > 0) ? String(decoding: UnsafeBufferPointer(start: argPtr, count: argLen), as: UTF8.self) : ""
             // surface_id로 그 web 패널을 소유한 창(일반 창·quick)을 찾는다. 없으면(패널이 닫힘 등) error로 완료.
-            guard let surface = surfaceOwning(byId: surfaceId), let wp = surface.webPanels[surfaceId] else {
+            guard let surface = surfaceOwning(byId: surfaceId), let wp = surface.webPanels[surfaceId],
+                  wp.panelKind == 1, wp.filePanelKind == 0 else {
                 maru_macos_control_complete_browser_op(asyncId, opKind == 15 ? 4 : 1, nil, 0)
                 continue
             }
@@ -4399,7 +4502,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // browser(untrusted, panelKind==1) 활성 web 패널을 찾는다(5d fixture가 쓰는 그 패널 — cap을 이 surface에 묶는다).
         var target: (surfaceId: UInt64, url: String)?
         for surface in windows + (quick.map { [$0] } ?? []) {
-            if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 }) {
+            if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 && $0.filePanelKind == 0 }) {
                 target = (wp.surfaceId, MaruWebPanelView.browserFixtureURL)
                 break
             }
@@ -4513,7 +4616,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard smokeMode || hasPrompt else { return } // DECISION(auto)은 스모크 전용, PROMPT(모달 손테)는 일반 모드도
         var target: (surfaceId: UInt64, url: String)?
         for surface in windows + (quick.map { [$0] } ?? []) {
-            if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 }) {
+            if let wp = surface.webPanels.values.first(where: { $0.panelKind == 1 && $0.filePanelKind == 0 }) {
                 target = (wp.surfaceId, MaruWebPanelView.browserFixtureURL)
                 break
             }
@@ -4582,6 +4685,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
+            drainFilePanelPick() // open_file_panel(Cmd+O/메뉴/팔릿): Markdown/HTML을 현재 창 도크에 연다(FP5).
             drainColorSample() // HSV picker `i`(스포이드): NSColorSampler로 화면 색을 추출해 picker에 반영(비동기).
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
             drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
@@ -4907,8 +5011,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len, &kind) == Self.statusOK,
               let bytes = ptr, len > 0 else { return false }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
-        // kind==1=파일 경로(Zig가 cwd/$HOME로 resolve·존재 확인한 절대 경로) → URL(fileURLWithPath:)로 공백·비ASCII
-        // 경로를 무손실 처리(URL(string:)은 그런 경로에 nil). 그 외(웹/스킴 URL)는 URL(string:). 둘 다 기본 앱/브라우저로.
+        // FP5: 파일 경로 중 .md/.html은 현재 창 도크로 라우팅한다. Zig가 확장자·regular-file·중복 활성화를 단일
+        // 출처로 판정한다. 1=열림, 2=지원 형식이지만 실패(외부 앱 우회 금지)라 둘 다 클릭을 소비한다.
+        if kind == 1 {
+            let pathBytes = Array(text.utf8)
+            let result = pathBytes.withUnsafeBufferPointer { p in
+                maru_macos_app_session_open_file_panel_path(session, p.baseAddress, p.count)
+            }
+            if result != 0 {
+                if result == 2 { NSSound.beep() }
+                return true
+            }
+        }
+        // 나머지 파일 경로는 기존 기본 앱, 웹/스킴 URL은 기본 브라우저로 연다.
         let url: URL? = (kind == 1) ? URL(fileURLWithPath: text) : URL(string: text)
         guard let url else { return false }
         NSWorkspace.shared.open(url)
@@ -5358,12 +5473,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     moved.isHidden = (t.visible == 0)
                     surface.webPanels[t.surface_id] = moved
                 } else {
-                    let v = MaruWebPanelView(frame: frame, surfaceId: t.surface_id, panelKind: t.panel_kind, controller: self)
+                    var filePathPtr: UnsafePointer<UInt8>? = nil
+                    var filePathLen: size_t = 0
+                    let filePanelKind = maru_macos_app_session_file_panel_entry(
+                        session, t.surface_id, &filePathPtr, &filePathLen
+                    )
+                    let filePanelPath = filePathPtr.map {
+                        String(decoding: UnsafeBufferPointer(start: $0, count: filePathLen), as: UTF8.self)
+                    }
+                    let v = MaruWebPanelView(
+                        frame: frame,
+                        surfaceId: t.surface_id,
+                        panelKind: t.panel_kind,
+                        filePanelKind: filePanelKind,
+                        filePanelPath: filePanelPath,
+                        controller: self
+                    )
                     v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
                     container.insertWebPanel(v)
                     v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
                     surface.webPanels[t.surface_id] = v
-                    v.startTrustedLoad() // dict 등록 뒤 load — bridge surface→session lookup race 차단(FP4).
+                    v.startInitialLoad() // dict 등록 뒤 load — bridge surface→session lookup race 차단(FP4), HTML pin 적용(FP5).
                 }
             case Int(MaruAppHostWebSurfaceOpDestroy.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
@@ -5373,8 +5503,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         // create-steal이 안 먼저 도는 경로(미래 drag M5)를 위한 순서 독립 안전장치 — 주 경로는 대상 create-steal/teardown 이관.
                     } else {
                         // 5f-3d: 진짜 닫힘 — 소멸 직전 browser.closed 이벤트를 구독자에 push한 뒤 그 surface 구독을 정리(ABI 내부서 제거 전 push).
-                        maru_macos_control_push_browser_closed(t.surface_id)
-                        browserDidCloseSurface(t.surface_id)
+                        if v.panelKind == 1, v.filePanelKind == 0 {
+                            maru_macos_control_push_browser_closed(t.surface_id)
+                            browserDidCloseSurface(t.surface_id)
+                        }
                         v.removeFromSuperview()
                         surface.webPanels[t.surface_id] = nil
                     }
@@ -5465,6 +5597,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_provide_picked_file(session, buf.baseAddress, buf.count)
         }
+    }
+
+    // open_file_panel 액션의 AppKit 어댑터. 확장자 필터는 UX용이고 최종 허용·파일 종류 판정은 Zig
+    // open_file_panel_path가 맡는다. 취소는 one-shot을 이미 비웠으므로 무동작이다.
+    private func drainFilePanelPick() {
+        guard let session = appSession else { return }
+        guard maru_macos_app_session_take_file_panel_pick_request(session) != 0 else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = ["md", "html"].compactMap { UTType(filenameExtension: $0) }
+        panel.message = "도크에서 열 Markdown 또는 HTML 파일을 고르세요"
+        guard panel.runModal() == .OK, let path = panel.url?.path else { return }
+        let bytes = Array(path.utf8)
+        let result = bytes.withUnsafeBufferPointer { p in
+            maru_macos_app_session_open_file_panel_path(session, p.baseAddress, p.count)
+        }
+        if result != 1 { NSSound.beep() }
     }
 
     // NSColorSampler를 show 동안 살려둔다(비동기 콜백까지 retain — 지역 변수면 콜백 전에 해제될 수 있음).
@@ -6837,6 +6988,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 5c-2c 트러스트 분기 단언: 신뢰(markdown, panelKind==0) 패널만 maru-app:// 스킴 핸들러가 config에 등록돼야
             // 한다. 비신뢰(browser)면 미등록(nil). MARU_WEB_PANEL_MARKDOWN=1이면 markdown 패널이라 registered=true 기대.
             let schemeRegistered = wp?.webView.configuration.urlSchemeHandler(forURLScheme: MaruAppSchemeHandler.scheme) != nil
+            let fileHTMLDataStoreIsolated = wp.map {
+                $0.filePanelKind != 2 || $0.webView.configuration.websiteDataStore !== MaruWebPanelView.browserDataStore
+            } ?? false
             // Phase 7e-1a: browser 패널 nav 상태 왕복 검증 — Swift KVO 관측값(navUrl)과 Zig 저장 getter 결과가
             // 5d fixture의 data: URL로 채워지는지(url KVO → tick push(set_web_nav_state) → Zig 저장 → web_nav_url_at
             // 왕복). 세션 핸들=activeSurface.appSession, out 버퍼 4096. len>0이면 문자열, 아니면 "pending"(아직 push 전).
@@ -6873,6 +7027,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             renderer_bridge_type=\(wp?.rendererBridgeProbe ?? "pending")
             renderer_handler_type=\(wp?.rendererHandlerProbe ?? "pending")
             renderer_parent_accessible=\(wp?.rendererParentAccessProbe ?? "pending")
+            file_html_kind=\(wp?.filePanelKind ?? 99)
+            file_html_read_access=\(wp?.fileHTMLReadAccessURL?.path ?? "pending")
+            file_html_data_store_isolated=\(fileHTMLDataStoreIsolated)
+            file_html_script=\(wp?.fileHTMLScriptProbe ?? "pending")
+            file_html_asset=\(wp?.fileHTMLAssetProbe ?? "pending")
+            file_html_outside_asset=\(wp?.fileHTMLOutsideAssetProbe ?? "pending")
+            file_html_about_attempt=\(wp?.fileHTMLAboutAttemptProbe ?? "pending")
+            file_html_pinned=\(wp?.fileHTMLPinnedProbe ?? "pending")
             browser_fixture_url=\(wp?.browserFixtureUrl ?? "pending")
             browser_fixture_script=\(wp?.browserFixtureScript ?? "pending")
             browser_fixture_cookies=\(wp?.browserFixtureCookies ?? "pending")

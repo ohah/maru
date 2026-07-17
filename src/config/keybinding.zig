@@ -224,6 +224,7 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_term }, // Cmd+T: 활성 pane에 새 Term
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+Shift+T: 새 워크스페이스
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'T' } }, .action = .new_web_tab }, // Cmd+Option+T: 활성 pane에 새 브라우저 Term(⌘T=new_term의 web 버전, ⌥로 구분)
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'O' } }, .action = .open_file_panel }, // Cmd+O: Markdown/HTML을 현재 창 도크에 열기(macOS Open 관례)
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_term }, // Cmd+W: 활성 Term 닫기(마지막이면 pane→워크스페이스 cascade)
     // split(pane) 순환: ⌘]=다음, ⌘[=이전(활성 워크스페이스 안에서 wrap, 분할 없으면 무동작). shift 없는 대괄호라
     // char는 ]/[ 그대로다(브레이스 }/{ 는 shift일 때만). 워크스페이스 ⌘⇧]/⌘⇧[ · Term ⌘⌥]/⌘⌥[ 와 modifier로
@@ -632,6 +633,16 @@ test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (tab model)" {
         .key = .{ .char = 's' },
         .modifiers = .{ .command = true },
     }, &buffer, .{})) == .ignored);
+}
+
+test "built-in app binding resolves Cmd+O to open_file_panel" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+    const resolved = try resolver.resolve(.{
+        .key = .{ .char = 'o' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.open_file_panel, resolved.app_action);
 }
 
 test "built-in app binding resolves Cmd+K to clear_screen without user config" {

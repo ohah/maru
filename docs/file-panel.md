@@ -13,7 +13,7 @@
 - **도크 내 분할(여러 파일 동시 표시) = 모델은 처음부터 트리, UI는 FP8.** 도크 콘텐츠는 **에디터 그룹 트리**다 — 그룹(파일 탭 스트립 + 활성 entry)을 leaf로 `SplitTree(*DockGroup)` 인스턴스화(워크스페이스 `SplitTree(*Pane)`과 동형, 기존 L2 generic 재사용). v1은 그룹 1개(분할 UI 없음)지만 모델·직렬화가 트리라 FP8이 additive다. **PoC 실측(2026-07-17)**: 프로덕션 무변경으로 `SplitTree(*DockGroup)` 4 시나리오(단일 그룹 / `replaceLeaf` 분할 → 두 파일 rect 동시 분배 / 중첩 3그룹 + `removeLeaf` 닫기 복원 / 하단 도크 가로 rect 동일 트리) 첫 실행 전부 통과 + `layoutDividers`가 divider 드래그 좌표까지 제공 — **"새 수학 없음" 확정**. 남는 실비용은 UI 배관(그룹별 탭바 렌더·도크 divider 마우스 라우팅·그룹 포커스·분할 생성 UX)뿐.
 - **웹 브라우저(⌘⌥T)는 현행 워크스페이스 term 유지.** 브라우징의 용례(터미널 옆 미리보기·팝업/OAuth[7f]·에이전트 제어)가 워크스페이스 맥락이고, 출하·손테스트 완료된 7e/7f/4e-4/4g를 재작업하지 않는다. 단 워크스페이스 전환 시 흰 페이지가 되는 현행 동작(위 검증)은 **URL 기억·재로드 얕은 수정**을 web-panel 백로그로 별도 제안(§13).
 - **도크 배관은 kind-무관으로 설계**(entries가 kind를 든다) — 후속 "브라우저 탭을 도크로 보내기"(참조용 웹페이지 고정)를 additive로 열어둔다(§13).
-- **편집기 = CodeMirror 6** (control-plane §13 열린 질문 해소 — 사용자 결정). 근거: 마크다운이 SSOT(항상 텍스트, 왕복 손실 0), 한글 IME 조합이 WebKit 네이티브 IME 위에서 가장 안정, sanitize 파이프와 렌더 공유. 문서모델 기반(왕복 손실·조합 엣지)은 기각. **마크다운 렌더 = markdown-it 또는 remark + 새니타이즈**(FP2에서 락파일 고정과 함께 확정).
+- **편집기 = CodeMirror 6** (control-plane §13 열린 질문 해소 — 사용자 결정). 근거: 마크다운이 SSOT(항상 텍스트, 왕복 손실 0), 한글 IME 조합이 WebKit 네이티브 IME 위에서 가장 안정, sanitize 파이프와 렌더 공유. 문서모델 기반(왕복 손실·조합 엣지)은 기각. **프론트엔드 = vanilla TS**(프레임워크 없음 — B로 웹앱 최소화), **렌더 = remark/unified 우선**(markdown-it 경량 대안·최종 택1 FP2) + Mermaid·수식·하이라이트 리치 렌더 — 스택·근거·보안 배치는 §2.1.
 - **기본 모드(v1) = 읽기 ↔ 소스 편집 토글**: md는 읽기(렌더 뷰) 기본·토글로 소스 편집(CM6 생 마크다운), html은 읽기 기본(소스 편집은 후속 — §2). **이 2모드 토글은 v1 징검다리**다 — 옵시디언식 Live Preview(편집=인라인 렌더 통합)가 최종형이고 소스 편집을 상위 대체하지만, CM6 커스텀 + 보안 모델 재검토(§13)라 후속으로 미룬다.
 - **write 스코프 = 열린 파일만**(§3). **트리 루트 = git repo 루트 우선**(§7).
 - **WKWebView 상한**: 도크 탭마다 WKWebView 1개(비활성 hidden·상태 유지 — Swift hide=isHidden만, 2차 검증). 상한 N(기본 8, config `file-panel.max-live-views`) 초과 시 가장 오래 안 본 **non-dirty** 탭의 웹뷰만 해제(탭은 스트립에 유지, 재선택 시 재로드) — dirty는 해제하지 않는다. 이 상한이 메모리 bound([performance-budget.md]에 WKWebView RSS 예산 부재). 해제=기존 전이 `destroyed` op·재선택=`created` op(새 op 불필요 — 2차 검증). 단 surface_id는 앱 전역 **비재사용** 불변식이라 재소환 시 **새 id 발급**하고, destroy 경로의 `browser.closed` push는 eviction 의미와 충돌하므로 도크 destroy에선 미발행한다(§4 destroy 판정과 같은 도크-aware 분기).
@@ -30,6 +30,23 @@
 - **`loadFileURL(allowingReadAccessTo:)` 정밀 시맨틱(2차 검증)**: 디렉터리 스코프는 **하위 트리 전체 재귀** 읽기 + 스코프 내 file: 네비·서브리소스 로드를 허용하고 스코프 **밖만** WebKit이 차단한다. 서브리소스 없는 단독 html이면 단일-파일 스코프(파일 자체를 readAccessURL로)가 더 좁다 — FP5에서 케이스 분기 검토.
 - **도크 html 네비게이션 정책(신규 — 현행 갭 실측)**: 현행 browser `decidePolicyForNavigationAction`은 maru-app 차단 외 **전 스킴 허용**(file: 포함)이라, 도크 html 안 링크가 스코프 내 형제 파일로 이동해 헤더 밴드 핀 경로와 표시 문서가 어긋날 수 있다. 도크 html webview는 전용 네비 분기를 신설한다: **top-level 네비 전부 차단**(핀 파일 고정 — reload만), http(s) 링크는 링크 감지 정책 재사용(외부 브라우저). 스코프 내 네비 허용+밴드 추종은 후속(§13). [web-panel.md] §7 "링크 라우팅" 계획의 도크 케이스가 이 항목이다.
 - **도크 html은 브라우저 탭과 dataStore 비공유(결정)**: browser 탭들의 공유 `browserDataStore`(7e-0)가 아니라 **도크 전용 별도 ephemeral store**를 쓴다 — 로컬 html은 살아있는 스크립트+CSP 없음+네트워크 무제한이라 공유 시 브라우저 세션 쿠키로 credentialed 요청(CSRF류)을 탈 수 있고, 로컬 파일 뷰엔 로그인 연속성 근거가 없어 격리가 무비용이다.
+
+### 2.1 웹 스택 (프론트엔드·렌더러·리치 렌더)
+
+아키텍처 B로 WKWebView 웹앱의 일은 최소다(트리·탭·도크 chrome = 네이티브 Zig+GPU). 그래서:
+
+- **프론트엔드 = vanilla TS(프레임워크 없음).** 웹앱 책임 = 새니타이즈 HTML 표시(읽기) + CM6 마운트(소스 편집) + 브리지 모드/테마 신호 수신 + dirty 보고뿐 — 반응형 UI 트리·라우팅이 없어 React/Svelte 런타임이 과하다. CM6·ProseMirror류는 프레임워크가 아니라 **DOM 마운트 에디터 라이브러리**라 이 결정과 직교(에디터를 바꿔도 vanilla 불변). 검증: Obsidian도 코어 UI를 오픈소스 컴포넌트의 바닐라 glue로 만든다(Electron·CM6·markdown-it/remark·Prism·Mermaid·MathJax).
+- **렌더러 = remark/unified 우선**(markdown-it은 경량 대안, 최종 택1은 FP2 실측). remark 근거: ⑴ **rehype-sanitize = AST 단계 스키마 allowlist**(문자열 사후 DOMPurify보다 감사 쉬움 — §7 adversarial 자세 정합, FP2의 "위치 attribute 특정 이름만 allowlist"가 곧 그 스키마), ⑵ 리치 렌더가 rehype 플러그인으로 정연, ⑶ unist position 문자 오프셋(주석 앵커 §13). markdown-it 장점(가볍고 단순)은 로컬 단일 파일 뷰라 덜 중요.
+- **리치 렌더 기능**(각 = 라이브러리 + 보안 배치):
+
+| 기능 | 라이브러리(후보) | 보안 배치 |
+|---|---|---|
+| 다이어그램 | Mermaid.js | **격리 렌더 origin 실행**(브리지 없음 → 버그가 브리지 못 닿음) + `securityLevel: 'strict'` + 출력 SVG 새니타이즈(label XSS CVE 이력) |
+| 수식 | KaTeX(경량 권장) / MathJax | 격리 origin, 수식→마크업 |
+| 코드 하이라이트 | Shiki / Prism | 렌더·빌드타임, XSS 표면 작음 |
+
+- **두 web 컨텍스트**(§3·web-panel §7): ① **격리 렌더 origin** = 새니타이즈 HTML + 리치 렌더 JS(Mermaid 등 — maru 번들·SRI 핀. 콘텐츠 **자체** 스크립트는 제거되나 신뢰 렌더러는 실행). 브리지 없음. ② **신뢰 shell origin** = CM6 + 브리지 + 오케스트레이션. **untrusted 콘텐츠를 처리하는 리치 렌더 라이브러리는 반드시 ①에서** 돌려 shell 침해를 구조로 차단한다(Mermaid에 버그가 있어도 브리지 origin 밖).
+- **번들**: `web/` Bun workspace(package.json + bun.lock) + zntc 번들 + oxlint/oxfmt(Oxc), SRI 해시 핀·락파일. "모노레포"라기보단 Zig 코어 + `web/` 서브패키지 1개(v1 — 다중 패키지 불요). **zntc 실체·공급망 재확인이 FP2 선행**(§12).
 
 ## 3. 콘텐츠 채널 (read/write)
 
@@ -80,16 +97,16 @@
 
 - WKWebView·`WKContentWorld` 브리지·`loadFileURL(_:allowingReadAccessTo:)`는 WebKit 표준 API.
 - 수명(전역 도크)과 배치(right|bottom)의 분리는 maru 결정 — 단일 모델로 가로/세로 모니터 사용 습관을 모두 만족시키기 위함(§1).
-- CodeMirror 6·markdown-it/remark는 외부 라이브러리 채택(§1 근거·SRI/락파일 고정). 도크 탭바·헤더 밴드·트리는 maru 기존 chrome 인프라(per-pane 탭바·주소창 밴드·사이드바 카드) 미러로 독립 설계.
+- CodeMirror 6·remark/rehype·Mermaid·KaTeX(또는 MathJax)·Shiki(또는 Prism)는 외부 라이브러리 채택(§2.1 근거·SRI/락파일 고정), 프론트엔드는 프레임워크 없이 vanilla TS(Obsidian 코어와 동형). 도크 탭바·헤더 밴드·트리는 maru 기존 chrome 인프라(per-pane 탭바·주소창 밴드·사이드바 카드) 미러로 독립 설계.
 - read/write "인자 없는 핀 경로" 형태는 maru 결정 — capability auth 없는 브리지 신뢰 모델(control_bridge.zig:5-7) 위에서 피해 반경을 구조로 bound.
 
-## 10. 슬라이스 (FP0~FP7)
+## 10. 슬라이스 (FP0~FP8)
 
 control-plane §12 Phase 7 행 대응: 7a·7b ⊂ FP2, 7c ⊂ FP4+FP6, **7d는 md/html 클릭 라우팅만 FP5**(`panel.bindSession`·`bind` capability·CLI `panel open`은 후속 §13 — 7d의 나머지 절반은 어느 FP에도 없음). **초판의 "FP5 생명주기 수술"은 도크 피벗으로 소멸**했다. FP1·FP2는 병행 가능. 도크 내 분할은 모델(FP1)과 UI(FP8)로 나뉜다(§1 PoC 근거).
 
 - **FP0 — 이 문서(+cross-doc 정합)**: 완료(2026-07-17, 도크 개정 포함).
 - **FP1 — 도크 모델(L2) + 직렬화**: `DockPanel` 상태 = **그룹 트리**(`SplitTree(*DockGroup)` — v1은 leaf 1개) + 그룹(entries[path·kind·mode·dirty]·active) + side·size·collapsed, 순수 모듈 + workspace.v1 도크 블록(§5 — v1은 트리 키 생략). 헤드리스 TDD(§1 PoC 시나리오를 정식 테스트로 승격).
-- **FP2 — web 툴체인 + 렌더러·sanitizer**: `web/` Bun workspace + zntc 번들(hello) + oxlint/oxfmt + 락파일·SRI, md 렌더러 확정 + sanitizer(adversarial fixture — [web-panel.md] §11 최소 red 목록). **렌더러 확정 기준에 소스 위치 매핑 포함**(markdown-it `token.map`은 블록 **행 범위**·remark position은 문자 오프셋 — §13 주석 앵커는 인용+문맥 재앵커링이라 블록 정밀도로 충분, 오프셋 필요 시 remark 경로; 후속 주석 앵커링의 유일 전제) + sanitizer는 위치 attribute를 **특정 이름만 allowlist**로 보존하고 **렌더러 emit만 신뢰**(raw HTML 비활성[web-panel §7] 전제와 명시 결합 — 콘텐츠의 위치 attribute 위조 차단). `bun test` 단독 게이트.
+- **FP2 — web 툴체인 + 렌더러·sanitizer**: `web/` Bun workspace + zntc 번들(hello) + oxlint/oxfmt + 락파일·SRI, md 렌더러 확정 + sanitizer(adversarial fixture — [web-panel.md] §11 최소 red 목록). **렌더러 확정 기준에 소스 위치 매핑 포함**(markdown-it `token.map`은 블록 **행 범위**·remark position은 문자 오프셋 — §13 주석 앵커는 인용+문맥 재앵커링이라 블록 정밀도로 충분, 오프셋 필요 시 remark 경로; 후속 주석 앵커링의 유일 전제) + sanitizer는 위치 attribute를 **특정 이름만 allowlist**로 보존하고 **렌더러 emit만 신뢰**(raw HTML 비활성[web-panel §7] 전제와 명시 결합 — 콘텐츠의 위치 attribute 위조 차단). 프론트엔드 = vanilla TS 스캐폴드(§2.1), 리치 렌더(Mermaid·KaTeX·하이라이트) 라이브러리 도입. **선행: zntc 실체·공급망 재확인**(§12 — 저장소엔 문서 언급뿐). `bun test` 단독 게이트.
 - **FP3 — 도크 슬롯 배관**: termRect+gridPadding 도크 기하(right·bottom — §7 두 곳 동기 규율) + 도크 소스 WKWebView 수집/전이 + **drain 진입 게이트·destroy 판정 도크-aware 확장(§4 — 없으면 첫 웹뷰 미표시/오파괴)** + 탭바·헤더 밴드 GPU 렌더 + 접기/리사이즈/hit-test + ChromeProps 반영 + **도크 edge seam 비트·리사이즈 드래그 중 웹뷰 가림(§7 추가 표면 2개)**. placeholder 콘텐츠로 스크린샷 검증.
 - **FP4 — 브리지 read + 뷰어 배선**: `maru.file.read`/`readAsset`(§3) + 웹앱 렌더. **최소 뷰어 가치 성립** — 파일픽커/env로 열어 검증.
 - **FP5 — 열기 라우팅**: `.md`/`.html` 클릭 → 도크(§6) + `.html` `loadFileURL` 정책(§2) + `open_file_panel` 단축키 + 중복 경로 활성화.
@@ -112,6 +129,8 @@ control-plane §12 Phase 7 행 대응: 7a·7b ⊂ FP2, 7c ⊂ FP4+FP6, **7d는 m
 - CM6 IME는 WebKit 내부라 maru 제어 불가 — 손 테스트.
 - FS watcher가 첫 파일 감시 코드 — 성능 게이트.
 - 도크 렌더 배관(사이드바 급)이 FP3에 몰림 — 슬라이스 내 재분할 여지.
+- **zntc 실체·공급망 미확정** — 저장소엔 문서 언급 + build.zig 주석뿐, 외부 npm `@zntc/core`(MIT 확인)의 공급망 재확인(lockfile·offline/reproducible·`@zntc/web` 포함 여부)이 미완(control-plane §14). FP2 착수 전 확정, 부적합 판정 시 대안 번들러(Vite/Rolldown 등) 재검토.
+- **리치 렌더 라이브러리(Mermaid 등)가 untrusted 콘텐츠를 처리** — 격리 렌더 origin 배치(§2.1)로 브리지 침해는 구조 차단되나, Mermaid 자체 XSS(label CVE 이력)는 `securityLevel:'strict'`+출력 새니타이즈로 별도 방어. FP2 sanitizer fixture에 diagram/math 벡터 포함.
 - [text-field-editor.md] 이니셔티브와 시퀀싱은 별개 사용자 결정(양쪽 대기).
 
 ## 13. 후속(비목표)

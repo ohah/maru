@@ -3287,9 +3287,10 @@ pub const AppSession = struct {
         const candidate = dock_layout.sizePtForPointer(self.dockGeometry(), self.dock.side, adjusted_x, adjusted_y, self.scale_milli) orelse return;
         const before = self.dock.size;
         self.dock.size = candidate;
-        // 손상·과대 입력은 순수 layout이 보장하는 terminal floor로 clamp한 실효 크기를 저장한다.
+        // 손상·과대 입력은 순수 layout이 보장하는 terminal floor로 clamp한 실효 크기를 저장한다. tree write-back과
+        // 같은 sizePtForEffectiveWidth로 올림해 max clamp 경계에서 저장/복원 1px 드리프트를 없앤다(내림 회귀 수정).
         const effective_px = self.dockGeometry().dock_size_px;
-        self.dock.size = @intCast((@as(u64, effective_px) * 1000) / self.scale_milli);
+        self.dock.size = dock_layout.sizePtForEffectiveWidth(effective_px, 0, self.scale_milli);
         if (self.dock.size == before) return;
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
@@ -3297,12 +3298,13 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn dockTreeDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
+    fn dockTreeDividerAtPoint(self: *const AppSession, g: dock_layout.Geometry, x_px: f64, y_px: f64) bool {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px) or !self.dockVisible()) return false;
         // MaruWebPanelView.dividerGrabBand=10pt가 editor 쪽 이벤트를 Metal로 통과시키므로 Zig target도 같은 backing
         // 폭을 받아야 한다. 더 좁으면 WebView는 nil을 반환했지만 resize는 시작하지 않는 dead band가 생긴다.
+        // geometry는 호출자가 이미 계산한 것을 받아 hover/mouse-down에서 이중 compute를 피한다.
         const webview_grab_px = @max(@as(u32, 1), (@as(u64, self.scale_milli) * 10 + 999) / 1000);
-        const hit = dock_layout.treeDividerHitRect(self.dockGeometry(), @intCast(webview_grab_px));
+        const hit = dock_layout.treeDividerHitRect(g, @intCast(webview_grab_px));
         return hit.w > 0 and layout_math.pointInRect(x_px, y_px, hit);
     }
 
@@ -3312,9 +3314,11 @@ pub const AppSession = struct {
         const candidate = dock_layout.treeSizePtForPointer(self.dockGeometry(), adjusted_x, self.scale_milli) orelse return;
         const before = self.dock.tree_size;
         self.dock.tree_size = candidate;
-        // compute가 editor 28셀·tree 12셀 하한을 적용한 뒤의 실효 폭을 pt 권위값으로 되돌린다.
+        // compute가 editor 28셀·tree 12셀 하한을 적용한 뒤의 실효 폭을 pt 권위값으로 되돌린다. min 경계는 내림해
+        // 12셀 하한에 정확히 도달하고(올림이면 분수 배율서 1px 더 넓게 멈춤), 그 외는 올림해 저장/복원 고정점.
         const effective_px = self.dockGeometry().tree.w;
-        self.dock.tree_size = dock_layout.treeSizePtForEffectiveWidth(effective_px, self.scale_milli);
+        const min_tree_px = dock_layout.min_tree_cols * self.cell_width_px;
+        self.dock.tree_size = dock_layout.sizePtForEffectiveWidth(effective_px, min_tree_px, self.scale_milli);
         if (self.dock.tree_size == before) return;
         self.metal_dirty = true;
     }
@@ -8798,6 +8802,11 @@ pub const AppSession = struct {
                     // Dock WKWebView의 넓은 native hit 영역 안에서도 outer/group/tree divider가 Metal view로 통과해야
                     // 한다. 각 leaf가 실제로 맞닿는 경계만 표시해 일반 본문 클릭을 잃지 않는다.
                     if (leaf_rect.x > parent.editor.x or self.dock.side == .right) seam_edges |= 1;
+                    // 우측 seam(project-tree divider)은 **의도적 유지**다. divider를 웹뷰 쪽에서 잡으려면 이 통과가
+                    // 필요하고, 그 대가로 웹뷰 오른쪽 ~grab band(스크롤바 마지막 폭)가 리사이즈에 먹힌다 — 문서 §5의
+                    // "WKWebView 위 divider grab" 알려진 트레이드오프이며, 시각 gap 없이 붙이는 쪽(A)을 택했다
+                    // (code-review max #3, 사용자 결정 2026-07-18). 스크롤바 정확 클릭을 살리려면 웹뷰를 grab band만큼
+                    // 들여 네이티브 gap을 두고 이 비트를 끄는 B안으로 전환한다.
                     if (leaf_rect.x + leaf_rect.w < parent.editor.x + parent.editor.w or parent.tree_divider.w > 0) seam_edges |= 2;
                     if (leaf_rect.y + leaf_rect.h < parent.editor.y + parent.editor.h) seam_edges |= 4;
                 }
@@ -13277,10 +13286,10 @@ pub const AppSession = struct {
                 return;
             }
             if (self.dockVisible()) {
-                if (self.dockTreeDividerAtPoint(x_px, y_px)) {
-                    const g = self.dockGeometry();
+                const dg = self.dockGeometry();
+                if (self.dockTreeDividerAtPoint(dg, x_px, y_px)) {
                     self.dock_tree_resize_drag_active = true;
-                    self.dock_tree_resize_drag_offset_px = @as(f64, @floatFromInt(g.tree_divider.x)) - x_px;
+                    self.dock_tree_resize_drag_offset_px = @as(f64, @floatFromInt(dg.tree_divider.x)) - x_px;
                     self.mouse_drag_selecting = false;
                     self.metal_dirty = true;
                     return;
@@ -15145,7 +15154,7 @@ pub const AppSession = struct {
         }
         if (self.dockVisible()) {
             const dg = self.dockGeometry();
-            if (self.dockTreeDividerAtPoint(x_px, y_px)) {
+            if (self.dockTreeDividerAtPoint(dg, x_px, y_px)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
                 return .resize_h;

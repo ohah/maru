@@ -24,6 +24,7 @@ pub const file_read_method = "maru.file.read";
 pub const file_read_asset_method = "maru.file.readAsset";
 pub const file_write_method = "maru.file.write";
 pub const file_set_dirty_method = "maru.file.setDirty";
+pub const file_resolve_external_change_method = "maru.file.resolveExternalChange";
 
 /// 실제 파일 시스템 접근을 platform 계층에서 주입한다. 반환 slice는 `gpa` 소유이며 dispatch가 해제한다.
 /// callback error는 경로/존재 정보를 노출하지 않는 균일 `internal_error`로 접는다.
@@ -33,6 +34,7 @@ pub const FileAccess = struct {
     read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
     write_fn: *const fn (context: *anyopaque, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, dirty: bool) anyerror!void,
+    resolve_external_change_fn: *const fn (context: *anyopaque, success: bool) anyerror!void,
 
     fn read(self: FileAccess, gpa: std.mem.Allocator) anyerror![]u8 {
         return self.read_fn(self.context, gpa);
@@ -48,6 +50,10 @@ pub const FileAccess = struct {
 
     fn setDirty(self: FileAccess, dirty: bool) anyerror!void {
         return self.set_dirty_fn(self.context, dirty);
+    }
+
+    fn resolveExternalChange(self: FileAccess, success: bool) anyerror!void {
+        return self.resolve_external_change_fn(self.context, success);
     }
 };
 
@@ -135,6 +141,11 @@ pub fn dispatchBridgeWithFileAccess(
         const dirty = singleBoolParam(req.params, "dirty") catch return errorResponse(gpa, req.id, .invalid_params);
         access.setDirty(dirty) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "dirty", dirty);
+    }
+    if (std.mem.eql(u8, req.method, file_resolve_external_change_method)) {
+        const success = singleBoolParam(req.params, "success") catch return errorResponse(gpa, req.id, .invalid_params);
+        access.resolveExternalChange(success) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "success", success);
     }
     return errorResponse(gpa, req.id, .method_not_found);
 }
@@ -256,6 +267,7 @@ const FakeFileAccess = struct {
     last_write: [256]u8 = undefined,
     last_write_len: usize = 0,
     dirty: bool = false,
+    external_change_resolved: ?bool = null,
 
     fn read(context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
@@ -286,8 +298,21 @@ const FakeFileAccess = struct {
         self.dirty = dirty;
     }
 
+    fn resolveExternalChange(context: *anyopaque, success: bool) anyerror!void {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail) return error.ResolveFailed;
+        self.external_change_resolved = success;
+    }
+
     fn access(self: *FakeFileAccess) FileAccess {
-        return .{ .context = self, .read_fn = read, .read_asset_fn = readAsset, .write_fn = write, .set_dirty_fn = setDirty };
+        return .{
+            .context = self,
+            .read_fn = read,
+            .read_asset_fn = readAsset,
+            .write_fn = write,
+            .set_dirty_fn = setDirty,
+            .resolve_external_change_fn = resolveExternalChange,
+        };
     }
 };
 
@@ -359,12 +384,24 @@ test "dispatchBridge: file.write and dirty are pinned provider mutations with ex
     try testing.expectEqualStrings("# 저장\n", fake.last_write[0..fake.last_write_len]);
     try testing.expect(fake.dirty); // write와 dirty ack는 별도 직렬 mutation이다.
 
+    const resolve_req = "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"success\":false}}";
+    const resolve_resp = try dispatchBridgeWithFileAccess(testing.allocator, resolve_req, "0.1.0", fake.access());
+    defer testing.allocator.free(resolve_resp);
+    try testing.expectEqual(@as(?bool, false), fake.external_change_resolved);
+
     const bad = "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"maru.file.write\",\"params\":{\"content\":\"x\",\"path\":\"/tmp/escape.md\"}}";
     const bad_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad, "0.1.0", fake.access());
     defer testing.allocator.free(bad_resp);
     var parsed = try parseValue(testing.allocator, bad_resp);
     defer parsed.deinit();
     try testing.expectEqual(@as(i64, -32602), parsed.value.object.get("error").?.object.get("code").?.integer);
+
+    const bad_resolve = "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"success\":true,\"extra\":false}}";
+    const bad_resolve_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad_resolve, "0.1.0", fake.access());
+    defer testing.allocator.free(bad_resolve_resp);
+    var bad_resolve_parsed = try parseValue(testing.allocator, bad_resolve_resp);
+    defer bad_resolve_parsed.deinit();
+    try testing.expectEqual(@as(i64, -32602), bad_resolve_parsed.value.object.get("error").?.object.get("code").?.integer);
 }
 
 test "dispatchBridge: provider failures are uniform internal errors" {

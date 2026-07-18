@@ -26,6 +26,19 @@ pub const Entry = struct {
     /// FP6 two-phase dirty mirror. source editor가 비활성/읽기 모드로 넘어갈 때 true로 세우고 shell의 강제
     /// setDirty snapshot ack에서만 내린다. ack 전에는 non-dirty라도 live view eviction 대상이 아니다.
     dirty_sync_pending: bool = false,
+    /// FSEvents가 디스크 변경을 알렸는데 source editor가 dirty라 자동 reload하지 못한 상태. 사용자의 buffer를
+    /// 덮지 않으며 트리/헤더에 conflict를 표시하고 저장도 명시적 해결 전까지 거부한다.
+    external_change: bool = false,
+    external_change_generation: u64 = 0,
+    /// 사용자 승인 뒤 실제 web read/replace 성공 ack를 기다리는 2-phase reload. 완료 전에는 dirty/conflict 보호를
+    /// 유지하며 workspace에는 저장하지 않는다.
+    conflict_reload_pending: bool = false,
+    conflict_reload_generation: u64 = 0,
+    /// atomic write 직후 dirty ack/FSEvents 순서가 뒤집혀 자기 저장을 외부 충돌로 오인하지 않게 하는 bounded latch.
+    /// 첫 exact-path event가 소비하거나 grace tick이 만료하며 workspace에는 저장하지 않는다.
+    self_write_grace_ticks: u16 = 0,
+    self_write_hash: u64 = 0,
+    self_write_verifications: u8 = 0,
     /// FP3 runtime handle. workspace.v1에는 저장하지 않고 복원/재소환 때 앱 전역 allocator에서 새 id를 발급한다.
     surface_id: u64 = 0,
     /// FP6 live-view LRU clock. workspace에는 저장하지 않는 런타임 값이며 값이 작을수록 오래 안 본 entry다.

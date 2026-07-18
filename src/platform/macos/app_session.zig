@@ -10,6 +10,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
+const file_tree = maru.session.file_tree;
 const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
@@ -28,6 +29,7 @@ const pageScrollDelta = input_math.pageScrollDelta;
 const imeDecide = maru.session.ime.decide;
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
+const file_tree_backend = @import("file_tree_backend.zig");
 const agent_session = @import("agent_session.zig"); // L4 — 에이전트 세션 트랜스크립트 파일 찾기 + tail read
 const agent_hooks = @import("agent_hooks.zig"); // 에이전트 SessionStart 훅으로 팬↔세션 트랜스크립트 경로 매핑
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
@@ -147,7 +149,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 122;
+pub const abi_version: u32 = 123;
+// 123: FP7 파일 트리. background snapshot scanner와 Swift FSEvents 사이 root reset/add·changed path,
+// clean Markdown/HTML reload, unsupported file external-open one-shot export를 추가한다. fixed-width struct 불변.
 // 122: FP6 파일 패널 source edit. surface-pinned write/dirty 브리지와 GPU 헤더 mode 전이 getter/take export를
 // 추가한다. 신규 export만 — fixed-width struct offset 불변.
 // 121: FP5 파일 패널 열기 라우팅. open_file_panel 1회성 picker 신호 + 경로 열기 + surface→entry path 조회 export를
@@ -1539,6 +1543,9 @@ pub const AppSession = struct {
     /// 사용자가 탭/pane을 옮기거나 다른 pane에 드롭해도 payload는 원래 pane으로 간다(예전엔 확정 시 activeSurface를
     /// 다시 읽어 엉뚱한 pane에 위험한 내용이 주입될 수 있었다 — code-review).
     pending_paste_confirm_target: u64 = 0,
+    // FP7 외부 변경 충돌에서 사용자가 헤더 `!`를 눌러 "disk 내용으로 다시 읽기"를 확인 중인 도크 surface.
+    // surface id는 비재사용이고 entry lookup을 확정 시 다시 하므로 탭 전환과 무관하며, 취소/다른 모달 선점 시 null.
+    pending_file_conflict_reload: ?u64 = null,
     // 붙여넣기 확인 모달 **미리보기**(붙여넣을 내용 앞부분)의 세션 소유 백킹. confirm.State.body가 이 버퍼로 만든
     // 줄 슬라이스를 가리킨다(message처럼 slice라 transient 버퍼면 dangling). Ghostty가 붙여넣기 내용을 확인창에
     // 보여주는 것의 셀-그리드 근사 — 앞 몇 줄만 담고 나머지는 "…N줄 더"로 요약(buildPastePreview).
@@ -1909,6 +1916,22 @@ pub const AppSession = struct {
     dock: dock_panel.DockPanel = undefined,
     dock_initialized: bool = false,
     dock_resize_drag_active: bool = false,
+    // FP7: Zed project panel 규칙을 따르는 L2 snapshot tree + L4 background scanner. tick은 아래 backend의
+    // 메모리 result queue만 drain하며 readdir/stat을 호출하지 않는다. FSEvents root/event는 Swift ABI adapter가 맡는다.
+    file_tree: file_tree.Tree = undefined,
+    file_tree_backend: file_tree_backend.Backend = undefined,
+    file_tree_initialized: bool = false,
+    file_tree_rows: std.ArrayList(file_tree.Row) = .empty,
+    file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
+    file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty,
+    file_tree_scroll_rows: usize = 0,
+    // fileTreeRowAt과 같은 visible-row index. hoverCursor가 갱신하고 GPU row 배경이 소비한다.
+    file_tree_hovered_row: ?usize = null,
+    file_tree_rows_dirty: bool = true,
+    file_tree_reload_actions: [dock_panel.max_entries]FileTreeReloadAction = undefined,
+    file_tree_reload_actions_len: usize = 0,
+    file_tree_watch_reset_pending: bool = false,
+    file_tree_external_open: ?[]u8 = null,
     // FP6 GPU 헤더 토글이 바꾼 Markdown 모드를 Swift WKWebView에 전달하는 1회성 신호. entry.mode가 단일
     // 상태 출처이며 pending은 surface_id만 보관한다(take 시 현재 mode를 함께 반환).
     file_panel_mode_pending: ?u64 = null,
@@ -2195,6 +2218,10 @@ pub const AppSession = struct {
 
         self.dock = try dock_panel.DockPanel.init(allocator);
         self.dock_initialized = true;
+        self.file_tree = file_tree.Tree.init(allocator);
+        self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
+        self.file_tree_initialized = true;
+        self.file_tree_reload_actions_len = 0;
 
         // 사용자 config(~/.config/maru/config 또는 $MARU_CONFIG)를 가장 먼저 로드한다 — PTY를 띄울 때
         // 셸에 줄 TERM 값(`term =`)이 필요하기 때문이다(셸 설정/통합이 $TERM에 따라 키바인딩을 다르게
@@ -4748,6 +4775,7 @@ pub const AppSession = struct {
         // 확인 자신은 이 호출 *뒤에* payload를 보관하므로(submitPaste 순서) 자기 것을 지우지 않는다.
         self.pending_paste_confirm.clearRetainingCapacity();
         self.pending_paste_confirm_target = 0; // payload를 폐기했으면 대상도 없다("0=보류 없음" 계약)
+        self.pending_file_conflict_reload = null; // 새 확인 모달이 기존 conflict reload 확인을 선점한다.
         self.dismissMessageOverlays();
         self.clearAllHover(); // 모달 뒤(중앙 패널 밖)에 stale 호버 강조가 얼어붙지 않게 — hoverCursor는 모달 중 호버를 안 갱신
         self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), buttons);
@@ -5116,7 +5144,8 @@ pub const AppSession = struct {
     }
 
     fn filePanelEntryNeedsDirtyProtection(entry: dock_panel.Entry) bool {
-        return entry.dirty or entry.dirty_sync_pending or entry.mode == .source_edit;
+        return entry.dirty or entry.dirty_sync_pending or entry.external_change or
+            entry.conflict_reload_pending or entry.mode == .source_edit;
     }
 
     /// 창 병합 전에 트리 밖 도크 모델을 대상 창으로 옮긴다. dst 활성/layout을 우선하되 dst가 비었으면 src 값을
@@ -5149,6 +5178,10 @@ pub const AppSession = struct {
                 .mode = entry.mode,
                 .dirty = entry.dirty,
                 .dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit,
+                .external_change = entry.external_change,
+                .external_change_generation = entry.external_change_generation,
+                // queued web action은 source session 수명에 묶여 있으므로 이동하지 않는다. conflict는 유지해 사용자가 재시도한다.
+                .conflict_reload_pending = false,
                 .surface_id = entry.surface_id,
                 .last_seen = entry.last_seen,
             });
@@ -5165,6 +5198,9 @@ pub const AppSession = struct {
                     .mode = entry.mode,
                     .dirty = entry.dirty,
                     .dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit,
+                    .external_change = entry.external_change,
+                    .external_change_generation = entry.external_change_generation,
+                    .conflict_reload_pending = false,
                     .surface_id = entry.surface_id,
                     .last_seen = entry.last_seen,
                 };
@@ -5184,6 +5220,7 @@ pub const AppSession = struct {
         sg.active = null;
         src.file_panel_mode_pending = null;
         src.file_panel_dirty_sync_actions_len = 0;
+        src.file_tree_reload_actions_len = 0;
         // last_seen은 session-local clock이라 원값을 섞으면 작은 generation의 source entry가 즉시 LRU가 된다.
         // 병합 뒤 destination tab 순서로 한 clock에 재기록하고 active를 마지막에 touch해 비교 가능성을 복원한다.
         for (dg.entries.items) |*entry| dst.touchFilePanelEntry(entry);
@@ -5192,6 +5229,8 @@ pub const AppSession = struct {
             dst.queueFilePanelDirtySyncAction(entry.surface_id);
         };
         dst.enforceFilePanelLiveViewLimit();
+        src.rebuildFileTreeFromDock() catch {};
+        dst.rebuildFileTreeFromDock() catch {};
         src.metal_dirty = true;
         dst.metal_dirty = true;
     }
@@ -7770,7 +7809,8 @@ pub const AppSession = struct {
             for (group.entries.items, 0..) |*entry, i| {
                 if (entry.surface_id == 0) continue;
                 live += 1;
-                if (entry.dirty or entry.dirty_sync_pending or group.active == i) continue;
+                if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
+                    entry.conflict_reload_pending or group.active == i) continue;
                 if (candidate == null or entry.last_seen < candidate.?.last_seen) candidate = entry;
             }
             if (live <= limit) return;
@@ -7812,6 +7852,327 @@ pub const AppSession = struct {
         failed = 2,
     };
 
+    pub const FileTreeReloadAction = struct { surface_id: u64, conflict: bool };
+
+    fn queueFileTreeReload(self: *AppSession, surface_id: u64, conflict: bool) void {
+        if (surface_id == 0) return;
+        for (self.file_tree_reload_actions[0..self.file_tree_reload_actions_len]) |*queued| {
+            if (queued.surface_id == surface_id) {
+                queued.conflict = queued.conflict or conflict;
+                return;
+            }
+        }
+        if (self.file_tree_reload_actions_len >= self.file_tree_reload_actions.len) return;
+        self.file_tree_reload_actions[self.file_tree_reload_actions_len] = .{ .surface_id = surface_id, .conflict = conflict };
+        self.file_tree_reload_actions_len += 1;
+    }
+
+    pub fn takeFileTreeReloadAction(self: *AppSession) ?FileTreeReloadAction {
+        while (self.file_tree_reload_actions_len != 0) {
+            self.file_tree_reload_actions_len -= 1;
+            const action = self.file_tree_reload_actions[self.file_tree_reload_actions_len];
+            if (action.conflict) return action;
+            const entry = self.dock.entryForSurfaceId(action.surface_id) orelse continue;
+            if (entry.dirty or entry.dirty_sync_pending or entry.external_change) {
+                self.markExternalFileChange(entry);
+                continue;
+            }
+            return action;
+        }
+        return null;
+    }
+
+    fn bumpExternalFileChange(entry: *dock_panel.Entry) void {
+        entry.external_change_generation +%= 1;
+        if (entry.external_change_generation == 0) entry.external_change_generation = 1;
+    }
+
+    fn latchExternalFileChange(self: *AppSession, entry: *dock_panel.Entry) void {
+        bumpExternalFileChange(entry);
+        entry.external_change = true;
+        self.metal_dirty = true;
+        self.file_tree_rows_dirty = true;
+    }
+
+    fn markExternalFileChange(self: *AppSession, entry: *dock_panel.Entry) void {
+        bumpExternalFileChange(entry);
+        if (entry.dirty or entry.dirty_sync_pending or entry.external_change) {
+            entry.external_change = true;
+        } else {
+            self.queueFileTreeReload(entry.surface_id, false);
+        }
+        self.metal_dirty = true;
+        self.file_tree_rows_dirty = true;
+    }
+
+    fn verifySelfWriteEvent(self: *AppSession, entry: *dock_panel.Entry) bool {
+        const owned = self.allocator.dupe(u8, entry.path) catch return false;
+        if (!self.file_tree_backend.submitFileHash(owned)) {
+            self.allocator.free(owned);
+            return false;
+        }
+        entry.self_write_verifications +|= 1;
+        return true;
+    }
+
+    /// Swift FSEvents callback(메인 queue)이 넘긴 file-level 변경. tree refresh를 예약하고 clean 문서는 자동 reload,
+    /// dirty 문서는 buffer를 보존한 채 conflict만 latch한다. 실제 디렉터리 scan은 다음 background worker가 맡는다.
+    pub fn fileTreeChanged(self: *AppSession, changed_path: []const u8) void {
+        if (!self.file_tree_initialized or changed_path.len == 0 or !std.fs.path.isAbsolute(changed_path) or
+            !std.unicode.utf8ValidateSlice(changed_path)) return;
+        self.file_tree.invalidatePath(changed_path) catch {};
+        const coarse = self.file_tree.containsRootPath(changed_path);
+        if (self.dock_initialized) if (self.dock.singleGroup()) |group| {
+            for (group.entries.items) |*entry| {
+                if (!std.mem.eql(u8, entry.path, changed_path) and
+                    !(coarse and file_tree.Tree.pathWithinRoot(entry.path, changed_path))) continue;
+                if (entry.self_write_grace_ticks != 0) {
+                    if (!self.verifySelfWriteEvent(entry)) {
+                        entry.self_write_grace_ticks = 0;
+                        entry.self_write_verifications = 0;
+                        self.markExternalFileChange(entry);
+                    }
+                } else {
+                    self.markExternalFileChange(entry);
+                }
+                if (!coarse) break;
+            }
+        };
+    }
+
+    pub fn takeFileTreeWatchRoot(self: *AppSession) ?[]u8 {
+        if (!self.file_tree_initialized) return null;
+        return self.file_tree.takeWatchRequest();
+    }
+
+    pub fn peekFileTreeWatchRoot(self: *const AppSession) ?[]const u8 {
+        if (!self.file_tree_initialized) return null;
+        return self.file_tree.peekWatchRequest();
+    }
+
+    pub fn takeFileTreeWatchReset(self: *AppSession) bool {
+        const pending = self.file_tree_watch_reset_pending;
+        self.file_tree_watch_reset_pending = false;
+        return pending;
+    }
+
+    fn requestFileConflictReload(self: *AppSession, surface_id: u64) void {
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return;
+        if (!entry.external_change) return;
+        self.pending_close = null;
+        self.pending_reset = false;
+        self.showConfirmButtons(
+            "외부에서 파일이 변경되었습니다. 편집 중인 내용을 버리고 디스크에서 다시 읽을까요?",
+            .{ .confirm = "다시 읽기", .cancel = "취소" },
+        );
+        self.pending_file_conflict_reload = surface_id;
+    }
+
+    fn beginFileConflictReload(self: *AppSession, surface_id: u64) void {
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return;
+        if (!entry.external_change or entry.conflict_reload_pending) return;
+        entry.conflict_reload_pending = true;
+        entry.conflict_reload_generation = entry.external_change_generation;
+        self.queueFileTreeReload(surface_id, true);
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+    }
+
+    /// web shell이 실제 read + editor replacement를 마친 뒤에만 conflict 보호를 해제한다. 실패 ack는 pending만
+    /// 내리고 원래 dirty buffer/conflict/save guard를 그대로 둬 사용자가 재시도하거나 복사할 수 있게 한다.
+    pub fn completeFileConflictReload(self: *AppSession, surface_id: u64, success: bool) FilePanelWriteError!void {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.conflict_reload_pending) {
+            if (!success) self.latchExternalFileChange(entry); // clean auto-reload가 편집 중단/실패를 보고한 보수적 latch.
+            return;
+        }
+        entry.conflict_reload_pending = false;
+        const unchanged = entry.external_change_generation == entry.conflict_reload_generation;
+        entry.conflict_reload_generation = 0;
+        if (success and unchanged) {
+            entry.dirty = false;
+            entry.dirty_sync_pending = false;
+            entry.external_change = false;
+            self.removeFilePanelDirtySyncAction(surface_id);
+        }
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+    }
+
+    fn ageFilePanelSelfWriteLatches(self: *AppSession) void {
+        if (!self.dock_initialized) return;
+        if (self.dock.singleGroup()) |group| for (group.entries.items) |*entry| {
+            if (entry.self_write_verifications == 0) {
+                entry.self_write_grace_ticks -|= 1;
+                if (entry.self_write_grace_ticks == 0) entry.self_write_hash = 0;
+            }
+        };
+    }
+
+    fn rebuildFileTreeFromDock(self: *AppSession) !void {
+        if (!self.file_tree_initialized) return;
+        self.file_tree_backend.deinit();
+        self.file_tree.deinit();
+        self.file_tree = file_tree.Tree.init(self.allocator);
+        self.file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
+        self.file_tree_rows.clearRetainingCapacity();
+        self.file_tree_rows_dirty = true;
+        self.file_tree_watch_reset_pending = true;
+        if (self.dock_initialized) if (self.dock.singleGroupConst()) |group| {
+            for (group.entries.items) |entry| {
+                const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
+                defer self.allocator.free(root);
+                try self.file_tree.recordOpened(entry.path, root);
+            }
+        };
+    }
+
+    /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 여기서 하는
+    /// 작업은 mutex 아래 owned queue 이동 + 메모리 정렬/row projection뿐이며 FS API는 worker에만 있다.
+    fn updateFileTree(self: *AppSession) !void {
+        if (!self.file_tree_initialized) return;
+        var changed = false;
+        while (self.file_tree_backend.takeResult()) |owned_result| {
+            var result = owned_result;
+            defer result.deinit(self.allocator);
+            if (result.kind == .file_hash) {
+                if (self.dock_initialized) if (self.dock.singleGroup()) |group| for (group.entries.items) |*entry| {
+                    if (!std.mem.eql(u8, entry.path, result.path) or entry.self_write_verifications == 0) continue;
+                    if (!result.ok or result.file_hash != entry.self_write_hash) {
+                        entry.self_write_verifications = 0;
+                        entry.self_write_grace_ticks = 0;
+                        entry.self_write_hash = 0;
+                        self.markExternalFileChange(entry);
+                    } else {
+                        entry.self_write_verifications -= 1;
+                        if (entry.self_write_verifications == 0) {
+                            entry.self_write_grace_ticks = 0;
+                            entry.self_write_hash = 0;
+                        }
+                    }
+                    break;
+                };
+                changed = true;
+                continue;
+            }
+            if (!result.ok) {
+                self.file_tree.failSnapshot(result.path);
+                changed = true;
+                continue;
+            }
+            self.file_tree_entry_inputs.clearRetainingCapacity();
+            self.file_tree_entry_inputs.ensureTotalCapacity(self.allocator, result.entries.items.len) catch |err| {
+                self.file_tree.failSnapshot(result.path);
+                self.file_tree.requeueScan(result.path) catch {};
+                self.file_tree_rows_dirty = true;
+                return err;
+            };
+            for (result.entries.items) |entry| self.file_tree_entry_inputs.appendAssumeCapacity(.{
+                .name = entry.name,
+                .kind = entry.kind,
+            });
+            self.file_tree.applySnapshot(result.path, self.file_tree_entry_inputs.items) catch |err| switch (err) {
+                error.NotFound => {}, // watcher refresh 중 부모가 사라졌거나 root가 이관된 정상 race.
+                else => {
+                    self.file_tree.failSnapshot(result.path);
+                    self.file_tree.requeueScan(result.path) catch {};
+                    self.file_tree_rows_dirty = true;
+                    return err;
+                },
+            };
+            changed = true;
+        }
+
+        var submitted: usize = 0;
+        while (submitted < file_tree_backend.max_inflight) {
+            const path = self.file_tree.takeScanRequest() orelse break;
+            if (!self.file_tree_backend.submit(path)) {
+                self.file_tree.requeueScan(path) catch {};
+                self.allocator.free(path);
+                break;
+            }
+            submitted += 1;
+        }
+
+        if (changed) self.file_tree_rows_dirty = true;
+        if (self.file_tree_rows_dirty) {
+            self.file_tree_open_states.clearRetainingCapacity();
+            if (self.dock_initialized) if (self.dock.singleGroupConst()) |group| {
+                try self.file_tree_open_states.ensureTotalCapacity(self.allocator, group.entries.items.len);
+                for (group.entries.items, 0..) |entry, i| self.file_tree_open_states.appendAssumeCapacity(.{
+                    .path = entry.path,
+                    .active = group.active != null and group.active.? == i,
+                    .dirty = entry.dirty,
+                    .external_change = entry.external_change,
+                });
+            };
+            try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
+            const visible_rows = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree.h / self.cell_height_px;
+            self.file_tree_scroll_rows = @min(
+                self.file_tree_scroll_rows,
+                self.file_tree_rows.items.len -| @as(usize, visible_rows),
+            );
+            self.file_tree_hovered_row = null;
+            self.file_tree_rows_dirty = false;
+            self.metal_dirty = true;
+        }
+    }
+
+    fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+        if (!self.dockVisible() or self.cell_height_px == 0) return null;
+        const tree_rect = self.dockGeometry().tree;
+        if (!layout_math.pointInRect(x_px, y_px, tree_rect)) return null;
+        const local: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(tree_rect.y))) /
+            @as(f64, @floatFromInt(self.cell_height_px)));
+        const visible_rows = tree_rect.h / self.cell_height_px;
+        if (local >= visible_rows) return null; // renderer가 그리지 않는 bottom partial row는 hit-test에서도 제외한다.
+        const index = self.fileTreeEffectiveScroll() + local;
+        return if (index < self.file_tree_rows.items.len) index else null;
+    }
+
+    fn fileTreeEffectiveScroll(self: *const AppSession) usize {
+        const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree.h / self.cell_height_px;
+        return @min(self.file_tree_scroll_rows, self.file_tree_rows.items.len -| @as(usize, visible));
+    }
+
+    fn activateFileTreeRow(self: *AppSession, index: usize) void {
+        if (index >= self.file_tree_rows.items.len) return;
+        const row = self.file_tree_rows.items[index];
+        switch (row) {
+            .recent_header => self.file_tree.toggleRecent(),
+            .root => |v| _ = self.file_tree.toggleDirectory(v.path) catch false,
+            .directory => |v| _ = self.file_tree.toggleDirectory(v.path) catch false,
+            .recent_file => |v| self.openFileTreePath(v.path, v.supported),
+            .file => |v| self.openFileTreePath(v.path, v.supported),
+            .empty => {},
+        }
+        self.file_tree_rows_dirty = true;
+        self.updateFileTree() catch {};
+        self.metal_dirty = true;
+    }
+
+    fn openFileTreePath(self: *AppSession, path: []const u8, supported: bool) void {
+        if (supported) {
+            _ = self.openFilePanelPath(path);
+            return;
+        }
+        const owned = self.allocator.dupe(u8, path) catch return;
+        if (self.file_tree_external_open) |old| self.allocator.free(old);
+        self.file_tree_external_open = owned;
+    }
+
+    pub fn takeFileTreeExternalOpen(self: *AppSession) ?[]u8 {
+        const path = self.file_tree_external_open orelse return null;
+        self.file_tree_external_open = null;
+        return path;
+    }
+
+    pub fn peekFileTreeExternalOpen(self: *const AppSession) ?[]const u8 {
+        return self.file_tree_external_open;
+    }
+
     /// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
     /// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
     pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
@@ -7820,6 +8181,12 @@ pub const AppSession = struct {
         const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
         const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
         if (stat.kind != .file) return .failed;
+        if (self.file_tree_initialized) {
+            const root = file_tree_backend.projectRootForFile(self.allocator, self.io, path) catch return .failed;
+            defer self.allocator.free(root);
+            self.file_tree.recordOpened(path, root) catch return .failed;
+            self.file_tree_rows_dirty = true;
+        }
         const group = self.dock.singleGroup() orelse return .failed;
         if (group.active) |i| if (i < group.entries.items.len and
             !std.mem.eql(u8, group.entries.items[i].path, path))
@@ -7988,6 +8355,8 @@ pub const AppSession = struct {
         NotRegularFile,
         TooLarge,
         WriteFailed,
+        ExternalConflict,
+        InvalidReloadState,
     };
 
     /// 신뢰 shell이 핀한 Markdown 파일 하나만 원자 교체한다. 웹 요청에는 경로 인자가 없고 surface→entry 경로를
@@ -7998,6 +8367,7 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
+        if (entry.external_change) return error.ExternalConflict;
         if (content.len > file_panel_bridge.max_file_bytes) return error.TooLarge;
         if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
 
@@ -8022,6 +8392,9 @@ pub const AppSession = struct {
         atomic.file.writeStreamingAll(self.io, content) catch return error.WriteFailed;
         atomic.file.sync(self.io) catch return error.WriteFailed;
         atomic.replace(self.io) catch return error.WriteFailed;
+        entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
+        entry.self_write_hash = std.hash.Wyhash.hash(0, content);
+        entry.self_write_verifications = 0;
         self.metal_dirty = true;
     }
 
@@ -8030,11 +8403,13 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
-        const changed = entry.dirty != dirty or entry.dirty_sync_pending;
-        entry.dirty = dirty;
+        const protected_clean_ack = entry.external_change and !dirty;
+        const changed = (!protected_clean_ack and entry.dirty != dirty) or entry.dirty_sync_pending;
+        if (!protected_clean_ack) entry.dirty = dirty;
         entry.dirty_sync_pending = false;
         self.removeFilePanelDirtySyncAction(surface_id);
         if (changed) self.metal_dirty = true;
+        if (changed) self.file_tree_rows_dirty = true;
     }
 
     pub fn filePanelMode(self: *AppSession, surface_id: u64) ?dock_panel.Mode {
@@ -10946,6 +11321,9 @@ pub const AppSession = struct {
                 } else if (self.pending_quit) {
                     self.pending_quit = false;
                     self.quit_decision = .accepted; // 다음 tick summary로 Swift에 전달 → NSApp.reply(true)
+                } else if (self.pending_file_conflict_reload) |surface_id| {
+                    self.pending_file_conflict_reload = null;
+                    self.beginFileConflictReload(surface_id);
                 } else if (self.pending_reset) {
                     self.pending_reset = false;
                     self.resetAllSettings(); // 리셋 확인 — 전체 기본값 + config 파일 덮어쓰기
@@ -10970,6 +11348,7 @@ pub const AppSession = struct {
                 self.pending_reset = false;
                 self.pending_paste_confirm.clearRetainingCapacity(); // 취소한 붙여넣기 payload 폐기
                 self.pending_paste_confirm_target = 0; // 대상도 함께 리셋(필드 계약 "0=보류 없음" — 폐기했으면 대상도 없다)
+                self.pending_file_conflict_reload = null;
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
@@ -11963,6 +12342,18 @@ pub const AppSession = struct {
         // tab_wheel_accum 경로는 원본 delta_x). 방향 판정(위 wheel_accum 부호)은 배수>0이라 부호 불변이라 영향 없다.
         const scaled_delta_y = delta_y * @as(f64, self.appearance.scroll_multiplier);
         const lines = wheelDeltaToLines(&self.wheel_accum, scaled_delta_y, precise, self.cell_height_px, self.scale_milli);
+        if (self.dockVisible() and layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree)) {
+            const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree.h / self.cell_height_px;
+            const max_scroll = self.file_tree_rows.items.len -| @as(usize, visible);
+            const next = @as(i64, @intCast(self.fileTreeEffectiveScroll())) - @as(i64, lines);
+            const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
+            if (clamped != self.file_tree_scroll_rows) {
+                self.file_tree_scroll_rows = clamped;
+                self.setHoveredFileTreeRow(self.fileTreeRowAt(x_px, y_px));
+                self.metal_dirty = true;
+            }
+            return;
+        }
         // 사이드바 위 휠 = 사이드바 세로 스크롤이 **통째로 소비**한다(커서 아래 소유 원칙을 사이드바로 확장 — 터미널/
         // 스크롤백으로 안 흘린다). 카드가 헤더 아래 뷰포트를 안 넘으면 clamp가 no-op이라 무동작이지만, 그래도 소비해
         // 사이드바 위 휠이 뒤 터미널을 굴리는 위화감을 막는다. 한 줄(cell 높이)을 픽셀 단위로 환산해 스무스 스크롤한다 —
@@ -12625,6 +13016,19 @@ pub const AppSession = struct {
             if (self.dockVisible()) {
                 const g = self.dockGeometry();
                 const group = self.dock.singleGroup().?;
+                if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
+                    self.activateFileTreeRow(row_index);
+                    return;
+                }
+                if (group.active) |index| if (index < group.entries.items.len) {
+                    const entry = &group.entries.items[index];
+                    if (entry.external_change) if (dock_layout.headerConflictRect(g, self.cell_width_px)) |conflict| {
+                        if (layout_math.pointInRect(x_px, y_px, conflict)) {
+                            self.requestFileConflictReload(entry.surface_id);
+                            return;
+                        }
+                    };
+                };
                 if (dock_layout.collapseAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) {
                     self.toggleDockCollapsed();
                     return;
@@ -12640,6 +13044,7 @@ pub const AppSession = struct {
                         self.touchFilePanelEntry(entry);
                         self.enforceFilePanelLiveViewLimit();
                         self.file_panel_mode_pending = entry.surface_id;
+                        self.file_tree_rows_dirty = true;
                         self.metal_dirty = true;
                     }
                     return;
@@ -14382,6 +14787,7 @@ pub const AppSession = struct {
         // 사이드바/탭 바로 나가면 밴드 밖이라 null이 되어 stale 하이라이트가 안 남는다). 밴드는 chrome 영역이라 어느
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
         self.setHoveredNavButton(self.navButtonHoverAt(x_px, y_px));
+        self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -14449,6 +14855,11 @@ pub const AppSession = struct {
         }
         if (self.dockVisible()) {
             const dg = self.dockGeometry();
+            if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                return if (self.fileTreeRowAt(x_px, y_px) != null) .link else .default;
+            }
             const entry_count = self.dock.entryCountTotal();
             if (dock_layout.collapseAt(dg, self.cell_width_px, entry_count, x_px, y_px) or
                 dock_layout.tabIndexAt(dg, self.cell_width_px, entry_count, x_px, y_px) != null)
@@ -14460,6 +14871,12 @@ pub const AppSession = struct {
             if (layout_math.pointInRect(x_px, y_px, dg.header)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
+                if (self.dock.singleGroupConst()) |group| if (group.active) |index| if (index < group.entries.items.len and
+                    group.entries.items[index].external_change)
+                {
+                    if (dock_layout.headerConflictRect(dg, self.cell_width_px)) |conflict|
+                        if (layout_math.pointInRect(x_px, y_px, conflict)) return .link;
+                };
                 return .default;
             }
         }
@@ -15937,6 +16354,7 @@ pub const AppSession = struct {
         self.dock = new_dock;
         self.dock_initialized = true;
         new_dock_owned = false;
+        self.rebuildFileTreeFromDock() catch {};
         // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
         // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
         // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부
@@ -16705,6 +17123,8 @@ pub const AppSession = struct {
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
+        self.ageFilePanelSelfWriteLatches();
+        self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
@@ -17119,6 +17539,33 @@ pub const AppSession = struct {
                 const dg = self.dockGeometry();
                 self.appendBarBgQuad(dg.tab_bar, self.chromeQuadBg(self.sidebarBg()));
                 self.appendBarBgQuad(dg.header, self.chromeQuadBg(self.sidebarBg()));
+                self.appendBarBgQuad(dg.tree, self.chromeQuadBg(self.sidebarBg()));
+                if (dg.tree.w > 0 and self.cell_height_px > 0) {
+                    const start = self.fileTreeEffectiveScroll();
+                    const visible: usize = @intCast(dg.tree.h / self.cell_height_px);
+                    const end = @min(self.file_tree_rows.items.len, start + visible);
+                    for (self.file_tree_rows.items[start..end], start..) |row, index| {
+                        const active = switch (row) {
+                            .recent_file => |v| v.active,
+                            .file => |v| v.active,
+                            else => false,
+                        };
+                        const hovered = self.file_tree_hovered_row == index;
+                        if (!active and !hovered) continue;
+                        self.appendBarBgQuad(.{
+                            .x = dg.tree.x,
+                            .y = dg.tree.y + @as(u32, @intCast(index - start)) * self.cell_height_px,
+                            .w = dg.tree.w,
+                            .h = self.cell_height_px,
+                        }, self.chromeQuadBg(if (active) self.sidebarActiveBg() else self.sidebarHoverBg()));
+                    }
+                }
+                if (dg.tree.w > 0) self.appendBarBgQuad(.{
+                    .x = dg.tree.x,
+                    .y = dg.tree.y,
+                    .w = @min(@as(u32, 1), dg.tree.w),
+                    .h = dg.tree.h,
+                }, self.dividerColor());
                 self.appendBarBgQuad(dg.divider, self.dividerColor());
                 if (self.dock.singleGroupConst()) |group| if (group.active) |active| {
                     if (dock_layout.tabRect(dg, self.cell_width_px, group.entries.items.len, active)) |r|
@@ -17390,11 +17837,35 @@ pub const AppSession = struct {
                                 if (active_entry) |entry| entry.kind else .markdown,
                                 if (active_entry) |entry| entry.mode else .read,
                                 if (active_entry) |entry| entry.dirty else false,
+                                if (active_entry) |entry| entry.external_change else false,
                                 @intCast(cols),
                                 dock_fg,
                                 dock_active_fg,
                             )) |ddl| {
                                 self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = dg.tab_bar.x, .origin_y = dg.tab_bar.y, .colors = tabbar_colors } });
+                            } else |_| {}
+                        }
+                    }
+                    if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
+                        const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+                        const visible_rows: u16 = @intCast(@min(dg.tree.h / self.cell_height_px, @as(u32, std.math.maxInt(u16))));
+                        if (tree_cols > 0 and visible_rows > 0) {
+                            const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
+                            const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+                            if (coretext_frame_builder.buildFileTreeDrawList(
+                                self.allocator,
+                                self.file_tree_rows.items,
+                                self.fileTreeEffectiveScroll(),
+                                visible_rows,
+                                tree_cols,
+                                dock_fg,
+                                dock_active_fg,
+                            )) |tdl| {
+                                self.collectShaped(&collected, tdl, pane_frame_builder, .{ .pane = .{
+                                    .origin_x = dg.tree.x,
+                                    .origin_y = dg.tree.y,
+                                    .colors = tabbar_colors,
+                                } });
                             } else |_| {}
                         }
                     }
@@ -17901,6 +18372,12 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    fn setHoveredFileTreeRow(self: *AppSession, row: ?usize) void {
+        if (usizeOptEql(self.file_tree_hovered_row, row)) return;
+        self.file_tree_hovered_row = row;
+        self.metal_dirty = true;
+    }
+
     /// #5b: 호버 중인 ‹/› 스크롤 버튼을 갱신한다. 바뀌면 재드로우(버튼이 밝아져 클릭 가능 표시). 같으면 무동작.
     fn setHoveredScroll(self: *AppSession, s: ?ScrollRef) void {
         const same = (self.hovered_scroll == null and s == null) or
@@ -17941,6 +18418,7 @@ pub const AppSession = struct {
     fn clearAllHover(self: *AppSession) void {
         self.setHoveredSlot(null);
         self.setHoveredTab(null);
+        self.setHoveredFileTreeRow(null);
         self.setHoveredNavButton(null); // Phase 7e-4: 밴드 nav 버튼 호버(모달/알림 패널 열림 시 stale 하이라이트 방지)
         self.setHoveredHeaderRegion(.none);
         self.setHoveredCollapsedToggle(false);
@@ -20726,6 +21204,7 @@ pub const AppSession = struct {
         self.notification_history.deinit(self.allocator);
         self.pane_palette_copies.deinit(self.allocator);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
+        if (self.file_tree_external_open) |path| self.allocator.free(path);
         if (self.config_path_buffer) |b| self.allocator.free(b);
         {
             var it = self.pending_pastes.valueIterator();
@@ -20748,6 +21227,15 @@ pub const AppSession = struct {
         // 다른 fork에 새지 않아 readAllFd가 매달리지 않으므로, join은 curl -m 타임아웃 안에 수렴한다.
         if (self.update_thread) |t| t.join();
         self.ime_inserted.deinit(self.allocator);
+
+        if (self.file_tree_initialized) {
+            self.file_tree_backend.deinit();
+            self.file_tree.deinit();
+            self.file_tree_rows.deinit(self.allocator);
+            self.file_tree_entry_inputs.deinit(self.allocator);
+            self.file_tree_open_states.deinit(self.allocator);
+            self.file_tree_initialized = false;
+        }
 
         if (self.dock_initialized) {
             self.dock.deinit();
@@ -32865,6 +33353,145 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(dir_path));
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath("relative.md"));
     try std.testing.expect(session.filePanelEntryInfo(999_999) == null);
+}
+
+test "FP7 file tree watches project root and protects dirty buffers from external writes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, ".git", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "dirty.md", .data = "# disk" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "clean.md", .data = "# clean" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const dirty_path = try std.fs.path.join(allocator, &.{ root, "dirty.md" });
+    defer allocator.free(dirty_path);
+    const clean_path = try std.fs.path.join(allocator, &.{ root, "clean.md" });
+    defer allocator.free(clean_path);
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(dirty_path));
+    const watched = session.takeFileTreeWatchRoot().?;
+    defer allocator.free(watched);
+    try std.testing.expectEqualStrings(root, watched);
+    const dirty_sid = session.dock.singleGroup().?.entries.items[0].surface_id;
+    try session.setFilePanelDirty(dirty_sid, true);
+    session.fileTreeChanged(dirty_path);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].external_change);
+    try std.testing.expect(session.takeFileTreeReloadAction() == null);
+    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(dirty_sid, "# mine"));
+
+    session.requestFileConflictReload(dirty_sid);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_cancel);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].external_change);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].dirty);
+    try std.testing.expect(session.takeFileTreeReloadAction() == null);
+
+    session.requestFileConflictReload(dirty_sid);
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].external_change);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].dirty);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].conflict_reload_pending);
+    const failed_reload = session.takeFileTreeReloadAction().?;
+    try std.testing.expectEqual(dirty_sid, failed_reload.surface_id);
+    try std.testing.expect(failed_reload.conflict);
+    try session.completeFileConflictReload(dirty_sid, false); // read 실패면 원래 buffer 보호를 유지한다.
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].external_change);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].dirty);
+    try std.testing.expect(!session.dock.singleGroup().?.entries.items[0].conflict_reload_pending);
+    try session.setFilePanelDirty(dirty_sid, false); // 일반 clean ack로 conflict를 우회할 수도 없다.
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].dirty);
+
+    session.requestFileConflictReload(dirty_sid);
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    _ = session.takeFileTreeReloadAction();
+    session.fileTreeChanged(dirty_path); // read와 성공 ack 사이 새 외부 event는 이전 generation 성공으로 지우지 않는다.
+    try session.completeFileConflictReload(dirty_sid, true);
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[0].external_change);
+    session.requestFileConflictReload(dirty_sid);
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    _ = session.takeFileTreeReloadAction();
+    try session.completeFileConflictReload(dirty_sid, true);
+    try std.testing.expect(!session.dock.singleGroup().?.entries.items[0].external_change);
+    try std.testing.expect(!session.dock.singleGroup().?.entries.items[0].dirty);
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(clean_path));
+    const clean_sid = session.dock.singleGroup().?.entries.items[1].surface_id;
+    try session.setFilePanelDirty(clean_sid, true);
+    try session.writeFilePanel(clean_sid, "# saved");
+    try session.setFilePanelDirty(clean_sid, false); // 정상 순서: clean ack가 200ms FSEvent보다 먼저 도착한다.
+    try session.setFilePanelDirty(clean_sid, true); // 그 사이 재편집해도 자기 저장 event는 conflict가 아니다.
+    session.fileTreeChanged(clean_path);
+    try std.testing.expect(!session.dock.singleGroup().?.entries.items[1].external_change);
+    try std.testing.expect(session.takeFileTreeReloadAction() == null);
+    var verify_attempts: usize = 0;
+    while (session.dock.singleGroup().?.entries.items[1].self_write_verifications != 0 and verify_attempts < 100) : (verify_attempts += 1) {
+        try session.updateFileTree();
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(u8, 0), session.dock.singleGroup().?.entries.items[1].self_write_verifications);
+    try std.testing.expect(!session.dock.singleGroup().?.entries.items[1].external_change);
+    try session.setFilePanelDirty(clean_sid, false);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clean_path, .data = "# externally changed" });
+    session.fileTreeChanged(clean_path);
+    const clean_reload = session.takeFileTreeReloadAction().?;
+    try std.testing.expectEqual(clean_sid, clean_reload.surface_id);
+    try std.testing.expect(!clean_reload.conflict);
+    try session.completeFileConflictReload(clean_sid, true); // clean auto-reload 성공 ack는 no-op 성공이다.
+    try std.testing.expect(!session.dock.singleGroup().?.entries.items[1].external_change);
+    session.fileTreeChanged(clean_path);
+    _ = session.takeFileTreeReloadAction();
+    try session.completeFileConflictReload(clean_sid, false); // read 실패는 무한 재queue 대신 conflict로 latch한다.
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[1].external_change);
+    try std.testing.expect(session.takeFileTreeReloadAction() == null);
+    session.requestFileConflictReload(clean_sid);
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    _ = session.takeFileTreeReloadAction();
+    try session.completeFileConflictReload(clean_sid, true);
+    try session.writeFilePanel(clean_sid, "# saved again");
+    try session.setFilePanelDirty(clean_sid, false);
+    try session.setFilePanelDirty(clean_sid, true);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clean_path, .data = "# external inside grace" });
+    session.fileTreeChanged(clean_path); // own event와 외부 overwrite가 coalesce돼도 hash mismatch가 진짜 변경을 보존한다.
+    verify_attempts = 0;
+    while (session.dock.singleGroup().?.entries.items[1].self_write_verifications != 0 and verify_attempts < 100) : (verify_attempts += 1) {
+        try session.updateFileTree();
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[1].external_change);
+    session.requestFileConflictReload(clean_sid);
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    _ = session.takeFileTreeReloadAction();
+    try session.completeFileConflictReload(clean_sid, true);
+    try session.setFilePanelDirty(clean_sid, true);
+    session.fileTreeChanged(root); // dropped-event coarse recovery는 열린 하위 dirty entry도 conflict로 승격한다.
+    try std.testing.expect(session.dock.singleGroup().?.entries.items[1].external_change);
+
+    // renderer가 full row만 그리는 비정렬 높이에서 맨 아래 remainder 픽셀이 보이지 않는 다음 row를 누르지 않는다.
+    var height: u32 = 901;
+    var geometry = session.dockGeometry();
+    while (height < 940) : (height += 1) {
+        _ = try session.resize(1400, height, 1000);
+        geometry = session.dockGeometry();
+        if (geometry.tree.h % session.cell_height_px != 0) break;
+    }
+    const visible_rows = geometry.tree.h / session.cell_height_px;
+    while (session.file_tree_rows.items.len <= visible_rows) try session.file_tree_rows.append(allocator, .{ .empty = {} });
+    try std.testing.expect(session.fileTreeRowAt(
+        @floatFromInt(geometry.tree.x + 1),
+        @floatFromInt(geometry.tree.y + visible_rows * session.cell_height_px),
+    ) == null);
 }
 
 test "FP5 workspace restore prunes invalid file panel capabilities and degrades to an empty dock" {

@@ -32,7 +32,7 @@ describe("file viewer bridge boundary", () => {
     expect(document.querySelector("[data-maru-file-request]")).toBeNull();
   });
 
-  test("write and dirty mailbox requests expose no path parameter", async () => {
+  test("write, dirty, and external reload ack mailbox requests expose no path parameter", async () => {
     const dom = new JSDOM("<!doctype html><html><body></body></html>");
     const document = dom.window.document;
     const requests: unknown[] = [];
@@ -47,9 +47,11 @@ describe("file viewer bridge boundary", () => {
 
     await requestFileBridge(document, "write", "# 저장", 100);
     await requestFileBridge(document, "setDirty", true, 100);
+    await requestFileBridge(document, "resolveExternalChange", false, 100);
     expect(requests).toEqual([
       { method: "write", content: "# 저장" },
       { method: "setDirty", dirty: true },
+      { method: "resolveExternalChange", success: false },
     ]);
     expect(JSON.stringify(requests)).not.toContain("path");
   });

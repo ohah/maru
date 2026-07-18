@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 122u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 123u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -750,6 +750,13 @@ int32_t maru_macos_app_session_file_panel_mode(MaruAppHostSession *session, uint
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* source editor 이탈 전에 이전 surface의 dirty snapshot을 강제 요청한다. 0=없음, 그 외=surface id. v122. */
 uint64_t maru_macos_app_session_take_file_panel_dirty_sync_action(MaruAppHostSession *session);
+/* FP7 project tree: FSEvents root lifecycle/event + clean file reload/external open one-shots. v123.
+   path outputs return required length without consuming when out==NULL or cap is short. */
+uint32_t maru_macos_app_session_take_file_tree_watch_reset(MaruAppHostSession *session);
+size_t maru_macos_app_session_take_file_tree_watch_root(MaruAppHostSession *session, uint8_t *out, size_t cap);
+void maru_macos_app_session_file_tree_changed(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
+uint64_t maru_macos_app_session_take_file_tree_reload_action(MaruAppHostSession *session, uint32_t *conflict_out);
+size_t maru_macos_app_session_take_file_tree_external_open(MaruAppHostSession *session, uint8_t *out, size_t cap);
 /* HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
    NSColorSampler(OS 화면 색 추출기)를 열고 고른 색을 provide_sampled_color로 되돌린다. take_bell과 같은 1회성. session null=0. v83. */
 uint32_t maru_macos_app_session_take_color_sample_request(MaruAppHostSession *session);

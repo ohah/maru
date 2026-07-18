@@ -69,6 +69,13 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고 combined도 함께 남긴다. 16 MiB fixture는 큰 string 하나만 쓰지 않고 flat array와 nested object를 포함하며 cap+1 bounded failure도 실제 WKWebView에서 잰다. callback 내부 시간만으로는 callback 전에 생기는 IPC materialization stall을 놓치므로 operation 구간의 frame tick gap도 함께 귀속한다.
 
+## 파일 트리 FP7 예산
+
+- render tick의 파일시스템 호출(`open`/`stat`/`readdir`) = **0**. tick은 background 완료 queue drain, L2 snapshot 교체, row projection만 한다.
+- background directory scan 동시 실행 ≤ 4, 고정 완료 queue ≤ 16, scan request queue ≤ 1,024. directory child ≤ 4,096, 전체 materialized node ≤ 16,384, root ≤ 256, recent ≤ 32. backend retirement는 main actor에서 worker 완료를 기다리지 않는다.
+- FSEvents latency/debounce = 200ms. 세부 scan queue overflow와 native dropped/must-scan/root-change flag는 event를 조용히 잃지 않고 root 전체 rescan으로 coalesce하며 stream 재구성은 마지막 event ID를 이어받는다.
+- 결정적 gate는 L2 bounds/natural-sort/lazy subtree 보존, L4 tmpDir exclusion/symlink/root 탐색, clean reload/dirty conflict 통합 테스트다. GUI wall-clock/FSEvents delivery latency artifact는 수치 예산이 아직 없으므로 후속 macOS smoke에서 event→snapshot p95와 tick queue-drain 시간을 추가한다.
+
 **PID 귀속 조사 결론(2026-07-14)**: public `libproc`의 PID identity/RSS 읽기 자체는 가능했다. 반면 공개 WebKit API는 WKWebView별 WebContent PID를 주지 않고, 조사에 사용한 `launchctl print pid/<pid>`의 resource coalition은 출력 포맷이 안정 API가 아니며 여러 webview/workspace/window churn에서도 후보 집합이 실행 중 바뀌었다. 따라서 coalition 후보 합은 후보 완전성이나 특정 WKWebView 귀속을 증명하지 못하고, 위 `app+WebContent RSS delta`의 실패 gate로 승격하지 않는다. 조사용 POC 코드와 test-only 훅은 결론을 얻은 뒤 제거했으며 제품/CI 계약으로 남기지 않는다. 정식 Track 5는 private WebKit PID API나 불안정한 `launchctl` 파싱을 채택하지 않고, 공개·안정된 귀속 수단이 생기기 전에는 app-host RSS만으로 combined 예산을 통과했다고 간주하거나 hello 16 MiB capability를 열지 않는다.
 
 ### 16 MiB 초과 후속 연구 gate

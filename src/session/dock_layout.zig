@@ -10,6 +10,8 @@ pub const default_right_pt: u32 = 420;
 pub const default_bottom_pt: u32 = 300;
 pub const min_right_pt: u32 = 240;
 pub const min_bottom_pt: u32 = 160;
+pub const default_tree_cols: u32 = 18;
+pub const min_editor_cols: u32 = 12;
 
 pub const Geometry = struct {
     terminal: Rect,
@@ -17,6 +19,7 @@ pub const Geometry = struct {
     divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     tab_bar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    tree: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     content: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     dock_size_px: u32 = 0,
 };
@@ -36,6 +39,18 @@ pub fn headerControlRect(g: Geometry, cell_width_px: u32) ?Rect {
     const cols = @min(header_control_cols, g.header.w / cell_width_px);
     const width = cols * cell_width_px;
     return .{ .x = g.header.x + g.header.w - width, .y = g.header.y, .w = width, .h = g.header.h };
+}
+
+/// 헤더 draw-list의 external-change `!` 한 칸과 같은 rect. mode 토글의 넓은 control rect보다 먼저
+/// hit-test해, 충돌 표식을 누르면 편집 모드가 바뀌는 대신 명시적 disk reload 확인으로 라우팅한다.
+pub fn headerConflictRect(g: Geometry, cell_width_px: u32) ?Rect {
+    if (cell_width_px == 0 or g.header.w < cell_width_px * 4) return null;
+    return .{
+        .x = g.header.x + g.header.w - cell_width_px * 4,
+        .y = g.header.y,
+        .w = cell_width_px,
+        .h = g.header.h,
+    };
 }
 
 pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetrics {
@@ -123,6 +138,7 @@ pub fn compute(in: Input) Geometry {
                 .{ .x = available.x + term_w, .y = available.y, .w = divider, .h = available.h },
                 chrome_h,
                 dock_w,
+                in.cell_width_px,
             );
         },
         .bottom => bottom: {
@@ -140,21 +156,28 @@ pub fn compute(in: Input) Geometry {
                 .{ .x = available.x, .y = available.y + term_h, .w = available.w, .h = divider },
                 chrome_h,
                 dock_h,
+                in.cell_width_px,
             );
         },
     };
 }
 
-fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32) Geometry {
+fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32) Geometry {
     const tab_h = @min(chrome_h, dock.h);
     const header_h = @min(chrome_h, dock.h -| tab_h);
+    const body_y = dock.y + tab_h + header_h;
+    const body_h = dock.h -| tab_h -| header_h;
+    const max_tree_w = dock.w -| min_editor_cols * cell_width_px;
+    const tree_w = @min(default_tree_cols * cell_width_px, max_tree_w);
+    const content_w = dock.w -| tree_w;
     return .{
         .terminal = terminal,
         .dock = dock,
         .divider = divider,
         .tab_bar = .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = tab_h },
         .header = .{ .x = dock.x, .y = dock.y + tab_h, .w = dock.w, .h = header_h },
-        .content = .{ .x = dock.x, .y = dock.y + tab_h + header_h, .w = dock.w, .h = dock.h -| tab_h -| header_h },
+        .tree = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = body_h },
+        .content = .{ .x = dock.x, .y = body_y, .w = content_w, .h = body_h },
         .dock_size_px = dock_size_px,
     };
 }
@@ -218,4 +241,8 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     const control = headerControlRect(g, 10).?;
     try std.testing.expectEqual(g.header.x + g.header.w, control.x + control.w);
     try std.testing.expectEqual(@as(u32, header_control_cols * 10), control.w);
+    const conflict = headerConflictRect(g, 10).?;
+    try std.testing.expectEqual(g.header.x + g.header.w - 40, conflict.x);
+    try std.testing.expectEqual(@as(u32, 10), conflict.w);
+    try std.testing.expect(conflict.x >= control.x);
 }

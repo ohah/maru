@@ -49,7 +49,9 @@ config는 다음 범주를 분리한다. 실제 형식은 `keybind = <chord> = <
 앱 단축키 — keybind = <chord> = <action>:
   - new_tab
   - new_web_tab (기본 ⌘⌥T — 활성 pane에 브라우저 Term)
-  - close_tab
+  - close_tab (워크스페이스 cascade, 기본 없음)
+  - close_focused (기본 Cmd+W — 입력 포커스 기준 파일 entry 또는 Term close cascade)
+  - close_term (기본 없음 — 명시적 사용자 바인딩 호환용 terminal 전용)
   - split_horizontal / split_vertical
   - next_pane / focus_pane_left …
 
@@ -150,6 +152,33 @@ Command+B      -> 초기에는 오류
 - app keybinding과 terminal input override가 같은 조합이면 config validation에서 오류로 보고한다.
 - OS나 다른 앱이 이미 선점한 global shortcut은 등록 실패로 보고하고, 조용히 무시하지 않는다.
 - 사용자가 명시적으로 `send_text` 또는 `send_escape_sequence`를 설정한 조합은 app action과 동시에 사용할 수 없다.
+
+### 파일 도크·트리 키 소유권과 우선순위
+
+Zig의 단일 `FocusOwner` tagged union이 어느 계층이 키를 소비하는지 판정한다. `.workspace`, `.dock_surface { surface_id, generation }`, `.file_tree { restore_target }`, confirm·rename 등 overlay owner를 표현하고 `file_tree_focus`는 파생 getter로만 노출한다. 구조 포커스인 `DockPanel.focused_group`은 입력 owner가 아니다. Swift/AppKit은 물리 keyCode와 firstResponder 전이만 ABI로 전달하고 도크/트리 정책을 중복 판정하지 않는다. 우선순위는 다음과 같다.
+
+1. confirm·notice·palette·rename 같은 modal/overlay input owner가 자신의 Enter/Esc/편집 키를 먼저 소비한다.
+2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveForContext(.file_tree)`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
+3. `file_tree_focus`가 켜져 있으면 modifier 없는 `↑/↓/←/→`, `Enter`, `Home/End`, `PageUp/PageDown`, `Esc`, `F2`와 `⌘Backspace`를 트리가 소비한다. 이때 terminal key encoding과 CM6/WebKit에는 전달하지 않는다.
+4. 도크 WKWebView가 first responder면 편집기 허용 키는 WebKit에 양보하고, Zig app action으로 확정된 키만 소비한다.
+5. 나머지는 활성 terminal/browser pane의 기존 app-action/browser-nav/terminal encoding 경로로 간다.
+
+기본 바인딩과 의미:
+
+| 키 | action/소유자 | 의미 |
+|---|---|---|
+| `⌘W` | `close_focused` | 도크 본문·트리 포커스면 포커스 group의 active 파일 탭, terminal/browser pane이면 기존 Term close cascade. dirty close는 [file-panel.md](file-panel.md) §3.2를 따른다. |
+| `⌘⇧E` | `focus_file_tree` | project tree에 keyboard focus를 주고 Metal view를 first responder로 만든다. WebView에서 호출해도 Zig focus가 권위다. |
+| `↑/↓` | file tree | 이전/다음 조작 가능한 row. |
+| `←/→` | file tree | 접기/부모 또는 펼치기/첫 자식. |
+| `Enter` | file tree | directory toggle 또는 파일 열기. |
+| `Home/End` | file tree | 첫/마지막 조작 가능한 row. |
+| `PageUp/PageDown` | file tree | tree viewport 단위 이동. tree focus가 아니면 기존 terminal/browser 의미를 유지한다. |
+| `Esc` | file tree | 진입 전 도크 WebView, 없으면 활성 terminal/browser pane으로 복귀. |
+| `F2` | file tree | 허용된 project row의 inline rename 시작. |
+| `⌘Backspace` | file tree | 허용된 project row를 확인 뒤 macOS 휴지통으로 이동. |
+
+`⌘Backspace`는 tree focus에서만 `delete_file_tree_entry`가 이기며, 그 밖의 terminal focus에서는 기존 빌트인 `Ctrl+U` 바이트를 유지한다. `close_term`은 명시적 사용자 binding 호환을 위해 남지만 기본 `⌘W`는 `close_focused` 하나만 소유한다. Esc 복원은 저장된 `{surface_id, generation}`을 재검증하고 stale이면 활성 terminal/browser pane으로 fallback한다. selection과 focus는 transient라 workspace restore 입력이 아니다.
 
 ## 터미널 입력 매크로
 

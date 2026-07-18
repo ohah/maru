@@ -79,10 +79,11 @@ pub const SpawnRequest = struct {
     // 함수를 정의한다(없으면 평범한 ssh 그대로). 이 단일 optional이 "기능 on + 바이너리 경로"를 함께
     // 인코딩한다(null이면 주입 안 함). env를 명시로 넘기면(테스트) 무시된다.
     ssh_integration_bin: ?[]const u8 = null,
-    // 이 팬(Term)의 고유 식별자(surface.id). 설정되면 셸에 MARU_PANE_ID=<이 값>을 주입한다 — 에이전트(claude/codex)
-    // SessionStart 훅이 이 값을 키로 세션 트랜스크립트 경로를 <config>/maru/agent-sessions/<id>에 남기고, maru가
-    // 그 팬의 id로 정확한 세션을 되읽는다(같은 cwd 다중 세션도 팬별 정확 매칭). null이면 주입 안 함(테스트/비-팬 spawn).
+    // 컨트롤 플레인 self selector인 surface.id. 셸에 MARU_PANE_ID=<surface.id>로 주입한다.
     pane_id: ?u64 = null,
+    // 에이전트 훅 전용의 Term별 임의 매핑 id. 셸에 MARU_AGENT_MAPPING_ID=<이 값>으로 주입한다. surface.id와
+    // 분리되어 별도 maru 프로세스가 같은 surface 숫자를 발급해도 매핑 파일이 충돌하지 않는다.
+    agent_mapping_id: ?u64 = null,
     size: terminal.Size = terminal.Size.default,
 };
 

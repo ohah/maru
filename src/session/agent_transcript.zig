@@ -331,8 +331,8 @@ fn parseCodexMetaField(scratch: std.mem.Allocator, first_line: []const u8, field
     return out[0..val.len];
 }
 
-/// codex rollout 첫 줄(`session_meta`)에서 `payload.id`(세션 UUID)를 뽑는다. `codex resume <id>`의 대상 식별자다
-/// (UUIDv7 — docs/workspace-restore.md "에이전트 세션 자동 resume"). session_meta가 아니면 null(회전/잘못된 첫 줄 보호).
+/// codex rollout 첫 줄(`session_meta`)에서 `payload.id`(세션 UUID)를 뽑는다. `codex fork <id>`의 source 식별자다
+/// (UUIDv7 — docs/workspace-restore.md "에이전트 세션 자동 fork 복원"). session_meta가 아니면 null(회전/잘못된 첫 줄 보호).
 pub fn parseCodexId(scratch: std.mem.Allocator, first_line: []const u8, out: []u8) ?[]const u8 {
     return parseCodexMetaField(scratch, first_line, "id", out);
 }

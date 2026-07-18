@@ -60,7 +60,8 @@ fn missingPoll() Poll {
 }
 
 /// 에이전트 세션 트랜스크립트 파일(`transcript_path`)의 tail을 읽어 상태·마지막 답변을 계산한다. 경로는
-/// **agent_hooks.readMapping**이 준다 — 에이전트 SessionStart 훅이 `MARU_PANE_ID`로 남긴 정확한 경로라, 같은
+/// **agent_hooks.readMapping**이 준다 — Claude SessionStart 또는 Codex UserPromptSubmit/Stop 훅이 `MARU_AGENT_MAPPING_ID`로
+/// 남긴 정확한 경로라, 같은
 /// cwd 다중 세션도 팬별 정확 매칭이다(cwd 추측·mtime 폴백 없음 — docs/agent-session.md "훅 매핑"). `gpa`는 tail
 /// 버퍼·줄 파싱용 임시 할당(즉시 해제), `answer_buf`엔 idle일 때 답변을 쓴다. `transcript_path`가 null(훅 매핑 없음)
 /// 이거나 파일이 없으면 state=unknown.
@@ -95,10 +96,10 @@ pub fn poll(
 }
 
 /// 훅 매핑이 준 **정확한 트랜스크립트 경로**에서 그 세션의 **세션 id**를 뽑아 `out`에 복사해 돌려준다 — workspace
-/// restore가 종료 시점에 resume 대상 id를 캡처하는 용도(docs/workspace-restore.md "에이전트 세션 자동 resume").
+/// restore가 종료 시점에 fork source id를 캡처하는 용도(docs/workspace-restore.md "에이전트 세션 자동 fork 복원").
 /// 라이브 poll과 같은 훅 경로를 쓰므로 **cwd+mtime 추측이 없다** → 같은 폴더 다중 세션도 팬별 정확. claude는 파일명이
 /// 곧 `<uuid>.jsonl`이라 확장자만 떼고, codex는 rollout 첫 줄 `session_meta.payload.id`를 읽는다(파일명의 uuid와 별개일
-/// 수 있어 첫 줄이 정본). 경로가 비정상이거나 id를 못 구하면 null(호출자는 폴백 resume으로 degrade). tick이 멈춘 종료
+/// 수 있어 첫 줄이 정본). 경로가 비정상이거나 id를 못 구하면 null(호출자는 일반 셸로 복원). tick이 멈춘 종료
 /// 시점 호출. `gpa`는 codex 첫 줄 read·JSON 파싱용 임시 할당(즉시 해제).
 pub fn sessionIdFromTranscript(io: std.Io, gpa: std.mem.Allocator, kind: Kind, transcript_path: []const u8, out: []u8) ?[]const u8 {
     switch (kind) {
@@ -114,7 +115,7 @@ pub fn sessionIdFromTranscript(io: std.Io, gpa: std.mem.Allocator, kind: Kind, t
             return out[0..id.len];
         },
         .codex => {
-            // codex resume id = 첫 줄 session_meta.payload.id. readFirstLine이 full path로 직접 열어 첫 줄을 읽는다
+            // codex fork source id = 첫 줄 session_meta.payload.id. readFirstLine이 full path로 직접 열어 첫 줄을 읽는다
             // (파일 없으면 null → 삭제·회전 매핑 자연 차단). 옛 dir/name 쪼개기+openDir 제거.
             const scratch = gpa.alloc(u8, tail_window) catch return null;
             defer gpa.free(scratch);
@@ -178,7 +179,7 @@ fn readTailScan(io: std.Io, gpa: std.mem.Allocator, kind: Kind, path: []const u8
 }
 
 /// `path` 파일의 첫 줄(개행 전까지)을 `buf`로 읽어 돌려준다. 첫 줄이 `buf`보다 길어 개행을 못 찾으면 null(거대 첫 줄은
-/// 건너뜀). codex resume id용 session_meta 첫 줄(~22KB)을 읽는다. readTail처럼 full path로 직접 연다(호출자 dir 쪼개기 불요).
+/// 건너뜀). codex fork source id용 session_meta 첫 줄(~22KB)을 읽는다. readTail처럼 full path로 직접 연다.
 fn readFirstLine(io: std.Io, buf: []u8, path: []const u8) ?[]const u8 {
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
     defer file.close(io);

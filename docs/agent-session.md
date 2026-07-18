@@ -16,37 +16,51 @@
 라이브 상태 poll이 "이 팬의 세션 트랜스크립트가 어느 파일인가"를 아는 방법은 **에이전트 공식 훅**이다
 (`src/platform/macos/agent_hooks.zig`):
 
-1. maru가 각 팬 셸에 `MARU_PANE_ID=<surface.id>`를 주입한다(`pty/macos.zig` `appendParentEnv`, `MARU_BIN`과 동형).
+1. maru가 각 Term 셸에 control-plane selector `MARU_PANE_ID=<surface.id>`와 훅 전용
+   `MARU_AGENT_MAPPING_ID=<Term별 random id>`를 따로 주입한다. 후자는 별도 Maru 프로세스끼리도 충돌하지 않는다.
 2. maru가 시작 시 claude(`~/.claude/settings.json`)·codex(`~/.codex/hooks.json`)의 `hooks`에 **SessionStart·
-   UserPromptSubmit·Stop** 훅을 등록한다(원자적·idempotent·백업; 파싱 실패 시 무접촉). 훅 command는 인라인 셸
-   한 줄 — stdin(JSON payload = `transcript_path` 포함)을 `<config>/maru/agent-sessions/$MARU_PANE_ID`로 덤프한다
-   (jq 등 의존성 0). **매 턴 이벤트(UserPromptSubmit/Stop)** 덕에 등록 이전부터 돌던 세션도 다음 활동에 매핑된다.
-3. `pollAgentState`가 `term.surface.id`로 그 파일을 읽어(`readMapping`) `transcript_path`를 뽑아 `poll`이 **그 파일을
+   UserPromptSubmit·Stop** 훅을 등록한다(원자적·idempotent·백업; 파싱 실패 시 무접촉). Claude는 SessionStart에서
+   즉시 매핑하지만, Codex 0.144.5 무프롬프트 fork는 첫 UserPromptSubmit/Stop에서 새 id를 알렸다. 훅 command는 인라인 셸
+   한 줄 — stdin(JSON payload = `transcript_path` 포함)을 `<config>/maru/agent-sessions/$MARU_AGENT_MAPPING_ID`로
+   덤프한다(jq 등 의존성 0). v1 `MARU_PANE_MAP_HOOK`은 Codex의 positional hook state를 깨지 않도록 **같은 배열
+   index에서** v2로 한 번 교체하고, 구버전 Maru 프로세스는
+   `MARU_PANE_ID` 폴백으로 계속 동작한다. **매 턴 이벤트(UserPromptSubmit/Stop)** 덕에 등록 이전 세션도 다음 활동에 매핑된다.
+3. `pollAgentState`가 `term.rt.agent_mapping_id`로 그 파일을 읽어 `transcript_path`를 뽑아 `poll`이 **그 파일을
    직접** tail-read한다. 매핑이 없으면 state=unknown(**cwd 추측·mtime 폴백 없음** — 훅-only 결정).
 
 **왜 훅인가**: cwd+mtime 추측은 같은 폴더 다중 세션에서 섞이고, `CLAUDE_CODE_SESSION_ID` env는 상속·`CHILD_SESSION`
 상시라 취약하며 codex는 세션 id를 env로 아예 안 낸다(전부 실측 확인). Anthropic·OpenAI 문서 모두 "트랜스크립트
 포맷은 internal, 버전마다 바뀐다"고 경고 → 직접 추측은 근본적으로 취약. 훅은 에이전트가 `transcript_path`를 **공식
-채널로** 알려주고 maru가 자기 키(`MARU_PANE_ID`)로 정확히 잇는다(읽기→쓰기). 토큰·오염 0. cmux·Claude Squad가
+채널로** 알려주고 maru가 자기 키(`MARU_AGENT_MAPPING_ID`)로 정확히 잇는다(읽기→쓰기). 토큰·오염 0. cmux·Claude Squad가
 쓰는 "런치 제어/워크트리 격리"의 passive-터미널 판본. 자동등록이 실패하거나 훅이 stale하면 커맨드 팔레트 **Re-register Agent
 Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hooks.reregister` — **force 재등록, 매핑은 안 지움**;
 시작 시 `agent_hooks.setup`은 stale 매핑도 정리(pruneStaleMappings — 아래)하므로 복구엔 안 쓴다). 전역 config에서 떼려면 **Unregister**(`agent_hooks.unregister`).
 
-**restore도 훅 경로**: workspace restore가 종료 시점에 resume 대상 **session id**를 캡처하는 것도 이제 **훅 매핑**을 쓴다
-(`captureAgentSessionId` → `readMapping(surface.id)` → `sessionIdFromTranscript` — claude=파일명 uuid, codex=첫 줄
-`session_meta.payload.id`). cwd+mtime 추측이 없어 **같은 폴더 다중 세션도 팬별 정확히 resume**한다. 옛 cwd+mtime/날짜-스캔
-탐색(`resolveClaude`/`resolveCodex`/`resolveSessionId`)은 훅으로 대체돼 **제거**됐다([workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 resume").
+**restore도 훅 경로**: workspace restore가 종료 시점에 fork source **session id**를 캡처하는 것도 **훅 매핑**을 쓴다
+(`captureAgentSessionId` → `readMapping(term.rt.agent_mapping_id)` → `sessionIdFromTranscript` — claude=파일명 uuid, codex=첫 줄
+`session_meta.payload.id`). cwd+mtime 추측이 없어 **같은 폴더 다중 세션도 팬별 source가 정확하다**. 옛 cwd+mtime/날짜-스캔
+탐색(`resolveClaude`/`resolveCodex`/`resolveSessionId`)은 훅으로 대체돼 **제거**됐다. 복원은 같은 id를 직접 resume하지 않고
+Claude `--resume <source-id> --fork-session` / Codex `fork <source-id>`로 새 id를 만든다. 정확한 source id가 없으면
+`--continue`/`--last`로 추측하지 않고 일반 셸로 복원한다([workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 fork 복원").
+
+**restore fork의 훅 대기**: 새 Term의 random mapping key에는 과거 파일이 없으므로 provider 훅이 source와 **다른 id**를
+쓸 때까지 상태는 unknown이다. 원본 session이 다른 터미널에서 계속 running/idle로 바뀌어도 복원 카드에 섞이지 않는다.
+Claude는 SessionStart, Codex는 첫 프롬프트 제출에서 풀린다. 첫 훅 전 종료는 source를 유지하고, poll-confirmed fork id는
+runtime에 남겨 OSC 7이 없는 direct-exec agent도 다음 source로 저장한다. 최초 fork 확인 뒤에는 random mapping을 현재
+세션의 단일 출처로 보므로 사용자가 같은 Term에서 원본 source를 직접 resume해도 그 최신 세션을 저장한다. provider가 종료돼
+셸로 돌아가거나 agent 종류가 바뀌면 이전 kind의 pending id를 버린다.
 
 **안전·한계(코드리뷰 반영)**:
-- **config 편집 안전**: 첫 등록만 재정렬(백업 `<config>.maru-backup`), 이후 마커로 skip해 무접촉. **읽기 오류**(EACCES·>4MB)와 파일 없음을 구분해 — 읽을 수 없으면 손대지 않는다(minimal로 덮어쓰지 않음). 파싱 실패·최상위 비-object도 무접촉.
-- **복구/제거**: 자동등록 실패·**경로가 바뀐 stale 훅**은 팔릿 **Re-register**(force — 기존 maru 훅 제거 후 재추가, **매핑은 안 지움**)로 고친다. 전역 config에서 떼려면 **Unregister**(maru 훅만 제거). 훅은 전역 `~/.claude`·`~/.codex`에 남아 maru 밖에서도 발화하나, `MARU_PANE_ID` 없으면 stdin만 소비(`/dev/null`)해 무해.
+- **config 편집 안전**: 첫 등록만 JSON을 병합(백업 `<config>.maru-backup`), 이후 마커로 skip해 무접촉. v1→v2와 force 재등록도 기존 Maru hook의 배열 index에서 교체해 뒤 사용자 hook의 Codex state key를 보존한다. **읽기 오류**(EACCES·>4MB)와 파일 없음을 구분해 — 읽을 수 없으면 손대지 않는다(minimal로 덮어쓰지 않음). 파싱 실패·최상위 비-object도 무접촉.
+- **복구/제거**: 자동등록 실패·**경로가 바뀐 stale 훅**은 팔릿 **Re-register**(force — 기존 maru 훅을 같은 위치에서 교체, **매핑은 안 지움**)로 고친다. 전역 config에서 떼려면 **Unregister**(maru 훅만 제거). 훅은 전역 `~/.claude`·`~/.codex`에 남아 maru 밖에서도 발화하나, 두 mapping env가 없으면 stdin만 소비(`/dev/null`)해 무해.
 - **경로 방어**: `transcript_path`는 매핑 파일(팬 셸 아무 프로세스나 쓸 수 있음)에서 오므로 **절대경로+`.jsonl`+`..` 없음**만 허용(traversal 방지, 옛 `isBasenameSafe` 대체).
-- **중첩 에이전트 한계**: 한 팬 안에서 claude 안 claude(중첩)를 띄우면 자식이 `MARU_PANE_ID`를 상속해 그 팬 매핑을 자기 트랜스크립트로 덮는다. 바깥 에이전트의 다음 활동(UserPromptSubmit/Stop)에 매핑이 다시 올바르게 쓰이므로 **일시적**이지만, 중첩이 도는 동안엔 카드가 중첩 세션 상태를 보일 수 있다(드문 엣지).
-- **Codex 훅 신뢰(trust) 게이트 — codex 진행중이 "잘 안 뜨는" 흔한 원인**: Codex(OpenAI)는 보안상 사용자 훅(`~/.codex/hooks.json`)을 **내용 해시로 신뢰 검토**하고, **신뢰 전엔 훅을 발화하지 않는다**(references/codex `hooks/src/engine/discovery.rs` `hook_trust_status`: 비관리 사용자 훅은 `trusted_hash == current_hash`일 때만 실행; 신뢰는 `config.toml`의 `[hooks.state]`에 저장, 프로젝트별 startup 리뷰). 그래서 maru가 훅을 정확히 등록해도(이벤트명·`transcript_path` payload 모두 codex가 지원 — 소스 확인) **사용자가 그 프로젝트에서 훅을 신뢰하기 전엔** 매핑이 안 써져 `agent_state=unknown` → 진행중이 안 뜬다. **claude에는 이 게이트가 없어** claude는 바로 뜬다. maru가 훅을 매 실행마다 덮어쓰면 해시가 바뀌어 신뢰가 깨지므로(→재리뷰) **`setup`은 `add_if_absent`(마커 있으면 무접촉)로 내용을 바이트 안정**하게 유지한다 — 한 번 신뢰하면 유지된다. maru는 codex-kind Term을 감지했는데 훅이 미신뢰면(`agent_hooks.codexHookNeedsTrust`: 훅 등록됨 + config에 `trusted_hash` 전무) **세션당 1회 안내 notice**를 띄운다("Codex에서 maru 훅을 신뢰하세요"). maru가 신뢰를 대신 기록하지 않는 이유: 그건 Codex 내부 해시(`command_hook_hash`)를 재현해야 해 버전 취약하고, 셸 실행 훅을 사용자 검토 없이 신뢰시키는 **보안 게이트 우회**라 부적절(사용자 결정). managed 훅(리뷰 우회)은 `/etc/codex`·MDM 시스템 범위라 per-user 불가.
-- **훅-only 창**: 팬 spawn 직후 첫 훅 발화 전, 또는 훅 미발화 세션은 state=unknown(cwd 추측 폴백 없음 — 훅-only 결정). 매 턴 이벤트로 곧 채워진다.
-- **매핑된 트랜스크립트 부재 = 세션 gone(stale 매핑 자가정리)**: `transcript_path`는 **세션 내내 고정**이다(claude 확인: auto-compaction·`/compact`·`--continue`/`--resume` 모두 같은 파일에 append; 새 파일은 **새 세션·`/clear`**만). 따라서 매핑이 가리키는 파일이 **없어졌다(`FileNotFound`)**는 건 회전이 아니라 **그 세션이 사라진 것**(수동 삭제·30일 retention·`/clear`로 옛 UUID 유기 등)이다. `poll`은 이 경우를 일반 unknown(불완전 tail — 일시적, 직전 상태 보존)과 **구분**해 `missing`으로 신호하고, `pollAgentState`는 직전이 running/idle이었으면 그 팬의 **stale 매핑 파일을 파기**(`removeMapping`)하고 상태를 unknown으로 **리셋**한다 — 안 그러면 unknown의 "직전 상태 보존" 계약 때문에 삭제된 running 세션이 **스피너가 영영 안 풀린다**. 새 세션은 SessionStart 훅이 새 UUID로 매핑을 다시 쓰므로 자가회복. running→unknown 리셋이라 **완료 알림은 안 뜬다**(사라진 세션은 완료가 아님).
-  - **SessionEnd 훅은 안 쓴다(결정)**: 세션 종료 시 매핑을 훅으로 지우는 대안도 있으나, 깨끗한 종료는 **포그라운드=셸 감지(kind=none)** 로 이미 카드가 안 뜨고, 시작 시 stale 매핑 정리(pruneStaleMappings)와 위 `missing` 자가정리가 파일 삭제까지 덮는다. per-event 삭제 command를 위해 `buildCommand`를 event별로 나눠 사용자 `settings.json` 접촉면을 넓히는 비용 대비 이득이 없어 **maru-side 자가정리로 일원화**한다.
-- **매핑 dir은 인스턴스 공유 → 통째 wipe 금지**: 매핑 dir(`<config>/maru/agent-sessions`)은 **모든 maru 인스턴스가 공유**한다. 시작 시 정리는 **`pruneStaleMappings`**로 — 매핑을 순회해 **가리킨 트랜스크립트가 없어진(세션 gone)·손상된 것만** 지우고 **트랜스크립트가 살아있는 매핑은 보존**한다. 옛 `clearMappings`는 dir을 통째 `deleteTree`해, 두 번째 maru 창이 뜨면 **첫 창에서 도는 라이브 세션의 매핑을 파괴**했다(관측된 "4번째 줄 사라짐" 원인). surface.id 재사용(재시작 시 1부터)로 인한 옛 세션 오독은 SessionStart 훅 재작성 + `missing` 자가정리로 처리되므로, 통째 wipe 없이도 안전하다.
+- **중첩 에이전트 한계**: 한 팬 안에서 claude 안 claude(중첩)를 띄우면 자식이 `MARU_AGENT_MAPPING_ID`를 상속해 그 팬 매핑을 자기 트랜스크립트로 덮는다. 바깥 에이전트의 다음 활동(UserPromptSubmit/Stop)에 매핑이 다시 올바르게 쓰이므로 **일시적**이지만, 중첩이 도는 동안엔 카드가 중첩 세션 상태를 보일 수 있다(드문 엣지).
+- **Codex 훅 신뢰(trust) 게이트 — codex 진행중이 "잘 안 뜨는" 흔한 원인**: Codex(OpenAI)는 보안상 사용자 훅(`~/.codex/hooks.json`)을 **내용 해시로 신뢰 검토**하고, **신뢰 전엔 훅을 발화하지 않는다**. 고정된 upstream 소스에서 hook key가 현재 event/group/handler **배열 index 기반**이고([discovery.rs L511-L523](https://github.com/openai/codex/blob/56395bddaf26eb2829387ca6a417bf9128e5b239/codex-rs/hooks/src/engine/discovery.rs#L511-L523)), 비관리 훅은 `trusted_hash == current_hash`일 때만 trusted다([L627-L638](https://github.com/openai/codex/blob/56395bddaf26eb2829387ca6a417bf9128e5b239/codex-rs/hooks/src/engine/discovery.rs#L627-L638)). 그래서 maru가 훅을 정확히 등록해도 **사용자가 그 프로젝트에서 훅을 신뢰하기 전엔** 매핑이 안 써져 `agent_state=unknown`이다. **claude에는 이 게이트가 없다**. `setup`은 현재 v2 마커가 있으면 무접촉이라 한 번 신뢰한 hash를 유지한다. 단, surface-id를 쓰던 v1 훅은 random mapping id v2로 **한 번 교체**되므로 그 업데이트 직후에는 Codex가 재검토를 요구할 수 있다. maru의 세션당 1회 안내는 config 전체에 `trusted_hash`가 전혀 없는지만 보는 **coarse hint**다. 현재 Maru 훅의 hash/key를 계산하지 않으므로 다른 훅의 hash나 v1 stale hash가 있으면 감지하지 못하며, 정확한 Modified/Untrusted 판정과 재검토는 Codex 자체 UI에 맡긴다. maru는 내부 hash를 대신 기록해 보안 게이트를 우회하지 않는다. managed 훅은 `/etc/codex`·MDM 시스템 범위라 per-user로 만들지 않는다.
+- **훅-only 창**: 팬 spawn 직후 첫 훅 발화 전, 또는 훅 미발화 세션은 state=unknown(cwd 추측 폴백 없음 — 훅-only 결정).
+  특히 Codex 무프롬프트 fork는 첫 UserPromptSubmit 전까지 의도적으로 unknown이며, 그 이벤트부터 새 transcript를 읽는다.
+- **매핑된 트랜스크립트 부재 = 세션 gone(stale 매핑 자가정리)**: `transcript_path`는 **세션 내내 고정**이다(claude 확인: auto-compaction·`/compact`·`--continue`/`--resume` 모두 같은 파일에 append; 새 파일은 **새 세션·`/clear`**만). 따라서 매핑이 가리키는 파일이 **없어졌다(`FileNotFound`)**는 건 회전이 아니라 **그 세션이 사라진 것**(수동 삭제·30일 retention·`/clear`로 옛 UUID 유기 등)이다. `poll`은 이 경우를 일반 unknown(불완전 tail — 일시적, 직전 상태 보존)과 **구분**해 `missing`으로 신호하고, `pollAgentState`는 직전이 running/idle이었으면 그 팬의 **stale 매핑 파일을 파기**(`removeMapping`)하고 상태를 unknown으로 **리셋**한다 — 안 그러면 unknown의 "직전 상태 보존" 계약 때문에 삭제된 running 세션이 **스피너가 영영 안 풀린다**. 새 세션은 다음 provider 훅(Claude SessionStart, Codex UserPromptSubmit/Stop)이 새 UUID로 매핑을 다시 쓰므로 자가회복. running→unknown 리셋이라 **완료 알림은 안 뜬다**(사라진 세션은 완료가 아님).
+  - **SessionEnd 훅은 안 쓴다(결정)**: 세션 종료 시 매핑을 훅으로 지우는 대안도 있으나, 깨끗한 종료는 **포그라운드=셸 감지(kind=none)** 로 이미 카드가 안 뜬다. Term teardown은 PTY join 뒤 자기 random mapping 파일을 지우고, 비정상 종료 잔여물은 시작 시 `pruneStaleMappings`와 위 `missing` 자가정리가 처리한다. per-event 삭제 command를 위해 `buildCommand`를 event별로 나눠 사용자 `settings.json` 접촉면을 넓히는 비용 대비 이득이 없어 **maru-side 자가정리로 일원화**한다.
+- **매핑 dir은 인스턴스 공유 → 통째 wipe 금지**: 매핑 dir(`<config>/maru/agent-sessions`)은 **모든 maru 인스턴스가 공유**하지만 파일 key는 Term별 random id라 별도 프로세스의 같은 surface 숫자도 충돌하지 않는다. `MARU_PANE_ID`와 `MARU_AGENT_MAPPING_ID`는 내부 예약 env라 사용자 `env.*`가 덮어쓸 수 없다. 정상 Term teardown은 자기 파일만 지우고, 시작 시 **`pruneStaleMappings`**는 crash 뒤 남은 파일 중 가리킨 트랜스크립트가 없어진·손상된 것만 지우며 살아있는 매핑은 보존한다. 옛 `clearMappings`처럼 dir을 통째 지우면 다른 프로세스의 라이브 세션을 파괴하므로 금지한다.
 
 ## 왜 JSONL인가 (방식 결정)
 
@@ -216,7 +230,7 @@ AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽
   파일 I/O(세션 찾기·tail read·디렉터리 나열)와 사이드바 배선은 PR3(platform).
 - **PR2**: **codex 어댑터** ✅ **완료** — 같은 `src/session/agent_transcript.zig`에 `parseCodexTail`(완료=명시적
   `event_msg`/`task_complete`, 답변=`last_agent_message`, `token_count` 무시, 그 밖 turn 엔트리=running),
-  `parseCodexId`(첫 줄 `session_meta.payload.id` — resume 대상). **⚠️ cwd로 세션을 찾던 `parseCodexCwd`/날짜-스캔은 훅
+  `parseCodexId`(첫 줄 `session_meta.payload.id` — fork source). **⚠️ cwd로 세션을 찾던 `parseCodexCwd`/날짜-스캔은 훅
   매핑으로 대체돼 제거됨**(위 Context). claude와 `AgentState`/`Status`·tail 규약·헬퍼 공유. fixture 테스트(idle/token_count 무시/진행 신호/메타뿐/잘린 선두 줄).
 - **PR3**: platform tail-read + 사이드바 **상태 표시** ✅ **완료** — `src/platform/macos/agent_session.zig`(L4:
   세션 파일 찾기·디렉터리 나열·tail read; claude=enc(cwd) 디렉터리 최신 .jsonl을 `readTailScan`(끝 256KB→8MB 지수

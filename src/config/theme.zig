@@ -1075,12 +1075,12 @@ pub const WorkspaceConfig = struct {
     /// (Ghostty `split-inherit-working-directory` 기본과 동일; tmux `split-window`·iTerm2 새 split도 현재 디렉터리
     /// 상속). `false`면 `root`에서 연다(상속할 cwd 없으면 마찬가지). loader가 `workspace.split-inherit-cwd` 키로 파싱.
     split_inherit_cwd: bool = true,
-    /// 종료 시 각 페인에서 돌던 claude 세션을 재시작 때 자동으로 다시 연다(`claude --resume <id>`). **기본 false
+    /// 종료 시 각 페인에서 돌던 claude 대화를 재시작 때 새 분기로 연다(`claude --resume <source-id> --fork-session`). **기본 false
     /// (opt-in)** — workspace restore가 임의 명령을 자동 재실행하지 않는다는 정책의 allowlist 예외라, 위험모드
     /// (`--dangerously-skip-permissions`) 재현을 사용자가 명시적으로 켜게 한다. 단일 출처: docs/workspace-restore.md
-    /// "에이전트 세션 자동 resume". loader가 `workspace.restore-claude` 키로 파싱.
+    /// "에이전트 세션 자동 fork 복원". loader가 `workspace.restore-claude` 키로 파싱.
     restore_claude: bool = false,
-    /// 종료 시 각 페인에서 돌던 codex 세션을 재시작 때 자동으로 다시 연다(`codex resume <id>`). **기본 false(opt-in)**,
+    /// 종료 시 각 페인에서 돌던 codex 대화를 재시작 때 새 분기로 연다(`codex fork <id>`). **기본 false(opt-in)**,
     /// restore_claude와 같은 정책. loader가 `workspace.restore-codex` 키로 파싱.
     restore_codex: bool = false,
     /// 첫(유일) 셸이 spawn 직후 **비정상 종료**해 usable 세션에 도달하지 못하면 앱을 종료하지 않고 **창을 유지**할지
@@ -1093,8 +1093,8 @@ pub const WorkspaceConfig = struct {
     pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / restore-claude / restore-codex / hold-on-startup-failure
         .tab_inherit_cwd = Meta{ .doc = "새 탭/Term이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
         .split_inherit_cwd = Meta{ .doc = "새 분할이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
-        .restore_claude = Meta{ .doc = "종료 후 claude 세션 자동 resume 복원", .widget = .toggle, .section = .workspace },
-        .restore_codex = Meta{ .doc = "종료 후 codex 세션 자동 resume 복원", .widget = .toggle, .section = .workspace },
+        .restore_claude = Meta{ .doc = "종료 후 claude 대화를 새 fork로 복원", .widget = .toggle, .section = .workspace },
+        .restore_codex = Meta{ .doc = "종료 후 codex 대화를 새 fork로 복원", .widget = .toggle, .section = .workspace },
         .hold_on_startup_failure = Meta{ .doc = "셸이 시작 직후 비정상 종료 시 창 유지(닫지 않음)", .widget = .toggle, .section = .workspace },
     };
 };

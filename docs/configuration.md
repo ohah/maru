@@ -112,8 +112,8 @@ file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app |
 | `workspace.root` | 경로 | (없음) | 고정 시작 디렉터리(Ghostty `working-directory` 대응). 첫 창 + 상속이 꺼졌거나 상속할 cwd가 없을 때 폴백. 비어 있으면 maru cwd 상속(단 `/`면 `~`). `~`·`~/…`는 $HOME으로 확장. 아래 참조 |
 | `workspace.tab-inherit-cwd` | `true`\|`false` | `true` | 새 워크스페이스 탭(`new_tab`)·새 Term(`new_term`)이 포커스 Term의 현재 cwd(OSC 7)를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `tab-inherit-working-directory`). 아래 참조 |
 | `workspace.split-inherit-cwd` | `true`\|`false` | `true` | 새 분할(`split_*`, 팬)이 포커스 Term의 현재 cwd를 상속할지. `false`면 `workspace.root`에서 연다(Ghostty `split-inherit-working-directory`). 아래 참조 |
-| `workspace.restore-claude` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 claude 세션을 자동 resume(`claude --resume <id>`). **opt-in** — 위험모드(`--dangerously-skip-permissions`) 재현을 명시적으로 켠다. 아래 참조 |
-| `workspace.restore-codex` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 codex 세션을 자동 resume(`codex resume <id>`). **opt-in**, restore-claude와 같은 정책. 아래 참조 |
+| `workspace.restore-claude` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 claude 대화를 새 session으로 fork(`claude --resume <source-id> --fork-session`). **opt-in** — 위험모드(`--dangerously-skip-permissions`) 재현을 명시적으로 켠다. 아래 참조 |
+| `workspace.restore-codex` | `true`\|`false` | `false` | 종료 후 재시작 시 각 페인의 codex 대화를 새 session으로 fork(`codex fork <source-id>`). **opt-in**, restore-claude와 같은 정책. 아래 참조 |
 | `workspace.hold-on-startup-failure` | `true`\|`false` | `true` | 첫(유일) 셸이 시작 직후 **비정상 종료**해 usable 세션에 도달 못 하면 앱을 종료하지 않고 창을 유지(원인·복구 표시, ⏎로 재시작). 잘못된 `shell.command`/`shell.args`로 앱이 시작하자마자 꺼지던 것 방지. `false`면 기존처럼 종료(Terminal.app "shell 종료 시 닫기" 취향) |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `file-panel.max-live-views` | 정수(1~256) | `8` | 파일 도크에서 동시에 유지할 WKWebView 상한. 초과하면 가장 오래 안 본 non-dirty view만 해제하고 탭 metadata는 유지한다. dirty이거나 source editor 이탈 snapshot ack가 대기 중인 view는 해제하지 않으며 재선택한 탭은 새 surface id로 다시 생성한다. |
@@ -160,7 +160,7 @@ file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app |
 | `sidebar.width` | 정수(120~480) | `180` | 세로 사이드바 폭(논리 pt, DPI 스케일). 사이드바 우측 경계를 드래그하면 이 키에 양방향 반영(드래그 종료 시 앱→config 파일 atomic write, 주석 보존). 범위 밖/비정수는 무시(기본 유지). 런타임은 헤더 아이콘(신호등·⚙ 등)이 겹치지 않게 폰트 크기에 비례한 **동적 하한**으로 다시 끌어올릴 수 있어, 작은 값을 저장해도 실제 폭은 그 하한 이상이 된다 |
 | `term` | 문자열 | `xterm-maru` | 셸에 줄 `$TERM`(컴파일 실패 시 `xterm-256color` 폴백). 아래 참조 |
 | `shell-integration.ssh` | `true`\|`false` | `false` | 평범한 `ssh`를 `maru ssh`로 라우팅해 원격에 `xterm-maru` terminfo를 전파할지(opt-in). 기본 off(다운그레이드로 원격 안 깨짐). 아래 [셸 통합 ssh 라우팅](#셸-통합-ssh-라우팅-shell-integrationssh) 참조 |
-| `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
+| `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 단 내부 selector `MARU_PANE_ID`·`MARU_AGENT_MAPPING_ID`는 spawn 값이 최종 우선한다. 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
 | `shell.command` | 경로 | (없음) | 대화형 셸 실행 파일 경로(절대경로). 비어 있으면(기본) `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 자동 결정(현행). 새로 여는 셸에만 적용. 아래 참조 |
 | `shell.args` | 문자열 | `-i` | 셸 인자(argv, command 제외). 공백으로 토큰 분리(`shell.args = -i -l`). 따옴표 미지원. 빈 값(`shell.args =`)이면 인자 없음. 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
@@ -340,9 +340,9 @@ workspace.root = ~/projects
 workspace.tab-inherit-cwd   = true   # 새 워크스페이스 탭(⌘⇧T) + 새 Term(⌘T)
 workspace.split-inherit-cwd = true   # 새 분할(⌘D, 팬)
 
-# 에이전트 세션 자동 resume(기본 둘 다 false = opt-in). 종료 후 재시작 시 claude/codex 세션을 이어 연다.
-workspace.restore-claude = false   # claude --resume <id>
-workspace.restore-codex  = false   # codex resume <id>
+# 에이전트 대화 자동 fork 복원(기본 둘 다 false = opt-in). 원본과 분리된 새 session으로 이어 연다.
+workspace.restore-claude = false   # claude --resume <source-id> --fork-session
+workspace.restore-codex  = false   # codex fork <source-id>
 ```
 
 - **`workspace.root`** — 고정 시작 디렉터리. **절대경로 또는 `~`/`~/…`만** 받는다 — 상대경로나 `~user`(다른
@@ -362,11 +362,13 @@ workspace.restore-codex  = false   # codex resume <id>
   상속, `false`면 `root`.
 
 - **`workspace.restore-claude`** / **`workspace.restore-codex`** — 종료 후 재시작 시 각 페인에서 돌던
-  claude/codex 세션을 자동으로 다시 연다(`claude --resume <id>` / `codex resume <id>`). 각각 독립, **기본
-  false(opt-in)**. workspace restore가 임의 명령을 자동 재실행하지 않는다는 정책의 allowlist 예외라(claude/codex는
-  자체 resume이 안전한 정상 경로), 위험모드(`--dangerously-skip-permissions`) 재현을 사용자가 명시적으로 켜게
-  한다. 세션 식별·redaction·다중세션 처리는 [Workspace Restore 전략](workspace-restore.md) "에이전트 세션 자동
-  resume" 단일 출처.
+  claude/codex 대화를 원본과 분리된 새 session으로 연다(`claude --resume <source-id> --fork-session` /
+  `codex fork <source-id>`). 다른 터미널이 원본 session을 계속 사용해도 transcript가 섞이지 않는다. 각각 독립, **기본
+  false(opt-in)**. workspace restore가 임의 명령을 자동 재실행하지 않는다는 정책의 allowlist 예외라(claude/codex의
+  provider-native fork만 실행), 위험모드(`--dangerously-skip-permissions`) 재현을 사용자가 명시적으로 켜게
+  한다. 정확한 source id가 없으면 최근 세션을 추측하지 않고 일반 셸로 복원한다. 저장 argv에서 positional prompt와
+  미인식/variadic 옵션은 재실행하지 않고 권한·모델·실행 위치 restore allowlist만 보존한다. 세션 식별·redaction·다중세션 처리는
+  [Workspace Restore 전략](workspace-restore.md) "에이전트 세션 자동 fork 복원" 단일 출처.
 
 > **베이스/결정**: 동작·기본값·키 의미를 모두 **Ghostty**(`working-directory`,
 > `window/tab/split-inherit-working-directory`, 모두 기본 `true`)에 맞췄다(레퍼런스는 동작만 비교, 코드
@@ -483,10 +485,12 @@ env.MY_FLAG = a b c   # 값 내부 공백은 보존(양끝만 다듬는다), 빈
 
 - **병합 정책**: 부모(maru를 띄운) 환경을 상속한 뒤, maru가 관리하는 변수(`TERM`/`COLORTERM`/`TERM_PROGRAM` 등)를
   덮어쓰고, **그 위에** 이 `env.*` 값을 upsert한다 — 같은 KEY가 이미 있으면 덮어쓰고 없으면 추가한다. 즉 `env.*`가
-  가장 마지막에 적용돼 우선한다(부모 상속을 끊지 않는 "부모 + 사용자" 모델 — Ghostty `env`와 같은 결).
+  일반 변수에는 우선한다(부모 상속을 끊지 않는 "부모 + 사용자" 모델 — Ghostty `env`와 같은 결).
+- **내부 예약 키**: control-plane selector `MARU_PANE_ID`와 에이전트 훅용 random `MARU_AGENT_MAPPING_ID`는 Term identity의
+  단일 출처라 `env.*` 적용 뒤 spawn request 값으로 최종 upsert한다. 두 키의 사용자 설정은 적용되지 않는다.
 - **TERM은 `term` 키로**: `$TERM`은 `term =`이 단일 출처다. `env.TERM = ...`으로도 덮을 수 있으나(마지막 적용이라
   이김) terminfo 해석과 어긋날 수 있어 권장하지 않는다.
-- 같은 `env.KEY`를 여러 줄 쓰면 **나중 줄이 이긴다**(spawn 시 순서대로 upsert). 빈 KEY(`env. =`)는 무시(diagnostic).
+- 같은 일반 `env.KEY`를 여러 줄 쓰면 **나중 줄이 이긴다**(spawn 시 순서대로 upsert). 빈 KEY(`env. =`)는 무시(diagnostic).
 - **적용 시점**: 새로 여는 셸(첫 창·새 탭/Term·분할)에만 적용된다. 런타임 **Reload Config**는 이미 떠 있는 셸의
   환경을 바꾸지 않는다(프로세스 env는 spawn 후 불변 — 이후 연 셸부터 반영).
 - **베이스/결정**: 상속 + override 모델은 Ghostty `env`(부모 상속 위에 사용자 값 추가)를 베이스로 했다. 저장은

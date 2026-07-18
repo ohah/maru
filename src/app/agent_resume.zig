@@ -1,7 +1,7 @@
-//! 에이전트(claude/codex) 세션 resume용 순수 argv 로직 — workspace restore가 종료 시점에 캡처한 argv를 저장
-//! 가능하게 redact하고(redactArgv), 복원 시점에 정확한 session id로 resume 명령을 재구성한다(rebuildAgentArgv).
+//! 에이전트(claude/codex) 세션 복원용 순수 argv 로직 — workspace restore가 종료 시점에 캡처한 argv를 저장
+//! 가능하게 redact하고(redactArgv), 복원 시점에 정확한 source session id로 새 fork 명령을 재구성한다(rebuildAgentArgv).
 //! macOS 무관 순수 함수(Linux CI에서도 테스트). 정책 단일 출처: docs/workspace-restore.md "에이전트 세션 자동
-//! resume", redaction 토큰은 docs/project-rules.md "민감정보 redaction 기준".
+//! fork 복원", redaction 토큰은 docs/project-rules.md "민감정보 redaction 기준".
 
 const std = @import("std");
 const redact = @import("../redact.zig"); // 민감정보 redaction 단일 출처(중립 leaf) — 토큰 목록·key 판정을 공유
@@ -77,15 +77,73 @@ pub fn redactArgv(argv: []const []const u8, out: [][]const u8) []const []const u
     return out[0..n];
 }
 
-// ── resume 재구성 (복원 시) ──────────────────────────────────────────────────────────
+// ── fork 재구성 (복원 시) ────────────────────────────────────────────────────────────
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
+const RestoreOption = enum { flag, one_value };
+
+/// provider의 전체 CLI 문법을 복제하지 않고, 새 fork에서도 의미가 명확한 권한·모델·실행 위치 옵션만 보존한다.
+/// 미인식/variadic 옵션은 값과 positional prompt의 경계를 안전하게 복원할 수 없으므로 통째로 버린다. 이 작은
+/// allowlist가 provider `--help` 변경 때 malformed argv를 만드는 수동 전체 옵션 파서보다 유지보수 가능한 경계다.
+fn restoreOption(kind: Kind, tok: []const u8) ?RestoreOption {
+    const key = if (std.mem.indexOfScalar(u8, tok, '=')) |eq_pos| tok[0..eq_pos] else tok;
+    return switch (kind) {
+        .claude => if (eql(key, "--dangerously-skip-permissions"))
+            .flag
+        else if (eql(key, "--effort") or
+            eql(key, "--fallback-model") or
+            eql(key, "--model") or
+            eql(key, "--permission-mode"))
+            .one_value
+        else
+            null,
+        .codex => if (eql(key, "--dangerously-bypass-approvals-and-sandbox") or
+            eql(key, "--no-alt-screen") or
+            eql(key, "--oss") or
+            eql(key, "--search"))
+            .flag
+        else if (eql(key, "-a") or
+            eql(key, "--ask-for-approval") or
+            eql(key, "-C") or
+            eql(key, "--cd") or
+            eql(key, "-c") or
+            eql(key, "--config") or
+            eql(key, "--local-provider") or
+            eql(key, "-m") or
+            eql(key, "--model") or
+            eql(key, "-p") or
+            eql(key, "--profile") or
+            eql(key, "-s") or
+            eql(key, "--sandbox"))
+            .one_value
+        else
+            null,
+    };
+}
+
+fn appendRestoreOption(kind: Kind, real: []const []const u8, i: *usize, out: [][]const u8, n: *usize) void {
+    const tok = real[i.*];
+    if (!std.mem.startsWith(u8, tok, "-")) return; // positional prompt/command는 재실행하지 않는다.
+    const option = restoreOption(kind, tok) orelse return;
+    if (option == .flag or std.mem.indexOfScalar(u8, tok, '=') != null) {
+        if (n.* >= out.len) return;
+        out[n.*] = tok;
+        n.* += 1;
+        return;
+    }
+    if (i.* + 1 >= real.len or std.mem.startsWith(u8, real[i.* + 1], "-") or n.* + 2 > out.len) return;
+    out[n.*] = tok;
+    out[n.* + 1] = real[i.* + 1];
+    n.* += 2;
+    i.* += 1;
+}
+
 /// node 등 스크립트 인터프리터 basename — 에이전트가 `#!/usr/bin/env node` 래퍼로 돌면 exec_path가 인터프리터고
 /// argv[1]이 실제 에이전트 스크립트다(codex가 그렇다). pty/macos.zig `isInterpreterName`과 같은 목록을 단일 규칙으로
-/// 둔다(그쪽은 감지, 여기는 resume 재구성 — 둘이 어긋나면 감지된 에이전트의 복원이 깨진다).
+/// 둔다(그쪽은 감지, 여기는 fork 재구성 — 둘이 어긋나면 감지된 에이전트의 복원이 깨진다).
 const interpreters = [_][]const u8{ "node", "deno", "bun", "python", "python3", "ruby" };
 
 pub fn isInterpreterPath(p: []const u8) bool {
@@ -94,12 +152,12 @@ pub fn isInterpreterPath(p: []const u8) bool {
     return false;
 }
 
-/// 복원 시점에 저장된 argv를 정확한 session id로 resume하도록 재구성한다. argv[0]은 호출자가 exec_path(=command)로
+/// 복원 시점에 저장된 argv를 정확한 source session id에서 fork하도록 재구성한다. argv[0]은 호출자가 exec_path(=command)로
 /// 따로 쓴다. **node 래퍼**(argv[0]=node, argv[1]=스크립트)면 그 스크립트를 args 맨 앞에 보존하고 실인자는 argv[2]
-/// 부터다(`node /codex resume <id>`); native면 실인자는 argv[1]부터다. session_id가 비면 폴백 resume(claude
-/// `--continue` / codex `resume --last`). out에 토큰을 채워 그 슬라이스를 돌려준다(입력/session_id 참조 — 호출자 수명).
+/// 부터다(`node /codex fork <id>`); native면 실인자는 argv[1]부터다. source id가 비면 최근 세션을 추측하지 않고 빈
+/// args를 돌려준다(호출자는 일반 셸로 복원). out은 입력/session_id를 참조하므로 호출자 수명 동안만 유효하다.
 pub fn rebuildAgentArgv(kind: Kind, argv: []const []const u8, session_id: []const u8, out: [][]const u8) []const []const u8 {
-    if (argv.len == 0) return out[0..0];
+    if (argv.len == 0 or session_id.len == 0) return out[0..0];
     // node 래퍼면 argv[1]=스크립트도 "프로그램"이라 보존하고, 에이전트 실인자는 argv[2]부터.
     const wrapped = argv.len >= 2 and isInterpreterPath(argv[0]);
     var n: usize = 0;
@@ -115,62 +173,55 @@ pub fn rebuildAgentArgv(kind: Kind, argv: []const []const u8, session_id: []cons
     };
 }
 
-/// claude: 실인자(`real`)에서 `--resume`/`-r`(+값)·`--continue`/`-c`를 제거하고 정확한 id로 `--resume <id>`(없으면
-/// `--continue`)를 끝에 더한다. 나머지 플래그(`--dangerously-skip-permissions` 등)는 보존. `start_n`은 호출자가 이미
-/// out에 채운 래퍼 스크립트 prefix 다음 인덱스.
+/// claude: 실인자(`real`)에서 기존 resume/continue/fork 옵션을 제거하고 정확한 source id로
+/// `--resume <id> --fork-session`을 끝에 더한다. 같은 원본이 다른 터미널에서 열려 있어도 새 transcript가 되게 하는
+/// provider-native 분기다. 복원 allowlist의 권한·모델 옵션만 보존한다.
 fn rebuildClaude(real: []const []const u8, session_id: []const u8, out: [][]const u8, start_n: usize) []const []const u8 {
     var n = start_n;
     var i: usize = 0;
     while (i < real.len) : (i += 1) {
         const tok = real[i];
+        if (std.mem.startsWith(u8, tok, "--resume=") or
+            std.mem.startsWith(u8, tok, "-r=") or
+            std.mem.startsWith(u8, tok, "--session-id=")) continue;
         if (eql(tok, "--resume") or eql(tok, "-r")) {
             // --resume [value] — 다음 토큰이 값(플래그가 아니면)이면 같이 건너뛴다.
             if (i + 1 < real.len and !std.mem.startsWith(u8, real[i + 1], "-")) i += 1;
             continue;
         }
-        if (eql(tok, "--continue") or eql(tok, "-c")) continue;
-        if (n >= out.len) break;
-        out[n] = tok;
-        n += 1;
-    }
-    if (session_id.len > 0) {
-        if (n + 2 <= out.len) {
-            out[n] = "--resume";
-            out[n + 1] = session_id;
-            n += 2;
+        if (eql(tok, "--continue") or eql(tok, "-c") or eql(tok, "--fork-session")) continue;
+        // --session-id는 새 fork의 provider-generated id와 충돌하므로 값까지 제거한다.
+        if (eql(tok, "--session-id")) {
+            if (i + 1 < real.len and !std.mem.startsWith(u8, real[i + 1], "-")) i += 1;
+            continue;
         }
-    } else if (n < out.len) {
-        out[n] = "--continue";
-        n += 1;
+        appendRestoreOption(.claude, real, &i, out, &n);
+    }
+    if (n + 3 <= out.len) {
+        out[n] = "--resume";
+        out[n + 1] = session_id;
+        out[n + 2] = "--fork-session";
+        n += 3;
     }
     return out[0..n];
 }
 
-/// codex: 서브커맨드 구조라 `resume <id>`(없으면 `resume --last`)를 더하고, 실인자(`real`)에서 resume 서브커맨드·
-/// 세션 토큰(uuid/`--last`)을 빼고 나머지 글로벌 플래그를 보존한다. `start_n`은 래퍼 스크립트 prefix 다음 인덱스.
+/// codex: `fork <source-id>`를 앞에 두고, 저장 argv의 기존 resume/fork 서브커맨드와 source 토큰을 제거한다.
+/// 복원 allowlist의 권한·모델·실행 위치 옵션만 보존한다. 직접 `resume`은 두 클라이언트가 같은 session head를
+/// 공유하므로 쓰지 않는다.
 fn rebuildCodex(real: []const []const u8, session_id: []const u8, out: [][]const u8, start_n: usize) []const []const u8 {
     var n = start_n;
-    if (n >= out.len) return out[0..n];
-    out[n] = "resume";
-    n += 1;
-    if (session_id.len > 0) {
-        if (n < out.len) {
-            out[n] = session_id;
-            n += 1;
-        }
-    } else if (n < out.len) {
-        out[n] = "--last";
-        n += 1;
-    }
+    if (n + 2 > out.len) return out[0..n];
+    out[n] = "fork";
+    out[n + 1] = session_id;
+    n += 2;
     var i: usize = 0;
-    if (i < real.len and eql(real[i], "resume")) {
+    if (i < real.len and (eql(real[i], "resume") or eql(real[i], "fork"))) {
         i += 1;
         if (i < real.len and (eql(real[i], "--last") or !std.mem.startsWith(u8, real[i], "-"))) i += 1;
     }
     while (i < real.len) : (i += 1) {
-        if (n >= out.len) break;
-        out[n] = real[i];
-        n += 1;
+        appendRestoreOption(.codex, real, &i, out, &n);
     }
     return out[0..n];
 }
@@ -200,75 +251,130 @@ test "redactArgv: 공백분리 비밀(--api-key <v>)도 플래그+값 함께 드
     try std.testing.expectEqualStrings("opus", r[3]);
 }
 
-test "rebuildAgentArgv claude: 기존 resume 제거 + 정확한 id 주입, 위험모드 보존" {
-    const argv = [_][]const u8{ "claude", "--dangerously-skip-permissions", "--resume", "old-id" };
+test "rebuildAgentArgv claude: 기존 resume/fork 제거 + 정확한 id의 새 fork, 위험모드 보존" {
+    const argv = [_][]const u8{ "claude", "--dangerously-skip-permissions", "--resume", "old-id", "--fork-session" };
     var out: [8][]const u8 = undefined;
     const r = rebuildAgentArgv(.claude, &argv, "new-id", &out);
-    try std.testing.expectEqual(@as(usize, 3), r.len);
+    try std.testing.expectEqual(@as(usize, 4), r.len);
     try std.testing.expectEqualStrings("--dangerously-skip-permissions", r[0]);
     try std.testing.expectEqualStrings("--resume", r[1]);
     try std.testing.expectEqualStrings("new-id", r[2]);
+    try std.testing.expectEqualStrings("--fork-session", r[3]);
 }
 
-test "rebuildAgentArgv claude: session_id 없으면 --continue 폴백" {
+test "rebuildAgentArgv claude: session_id 없으면 추측하지 않는다" {
     const argv = [_][]const u8{ "claude", "--dangerously-skip-permissions" };
     var out: [8][]const u8 = undefined;
     const r = rebuildAgentArgv(.claude, &argv, "", &out);
-    try std.testing.expectEqual(@as(usize, 2), r.len);
-    try std.testing.expectEqualStrings("--dangerously-skip-permissions", r[0]);
-    try std.testing.expectEqualStrings("--continue", r[1]);
+    try std.testing.expectEqual(@as(usize, 0), r.len);
 }
 
-test "rebuildAgentArgv codex: resume <id> 서브커맨드 + 기존 세션 토큰 제거" {
+test "rebuildAgentArgv claude: 원래 positional prompt는 재제출하지 않고 옵션 값은 보존" {
+    const argv = [_][]const u8{ "claude", "--dangerously-skip-permissions", "old prompt", "--model", "opus" };
+    var out: [8][]const u8 = undefined;
+    const r = rebuildAgentArgv(.claude, &argv, "source-id", &out);
+    try std.testing.expectEqual(@as(usize, 6), r.len);
+    try std.testing.expectEqualStrings("--dangerously-skip-permissions", r[0]);
+    try std.testing.expectEqualStrings("--model", r[1]);
+    try std.testing.expectEqualStrings("opus", r[2]);
+    try std.testing.expectEqualStrings("--resume", r[3]);
+    try std.testing.expectEqualStrings("source-id", r[4]);
+    try std.testing.expectEqualStrings("--fork-session", r[5]);
+}
+
+test "rebuildAgentArgv claude: 인라인 resume/session-id도 제거하고 provider가 새 id를 발급" {
+    const argv = [_][]const u8{ "claude", "--resume=old", "-r=older", "--session-id=fixed", "--model=opus" };
+    var out: [8][]const u8 = undefined;
+    const r = rebuildAgentArgv(.claude, &argv, "source-id", &out);
+    try std.testing.expectEqual(@as(usize, 4), r.len);
+    try std.testing.expectEqualStrings("--model=opus", r[0]);
+    try std.testing.expectEqualStrings("--resume", r[1]);
+    try std.testing.expectEqualStrings("source-id", r[2]);
+    try std.testing.expectEqualStrings("--fork-session", r[3]);
+}
+
+test "rebuildAgentArgv claude: 모호한 variadic 옵션과 값은 보존하지 않아 fork 인자를 삼키지 않는다" {
+    const argv = [_][]const u8{ "claude", "--add-dir", "/tmp/a", "/tmp/b", "old prompt", "--permission-mode", "bypassPermissions" };
+    var out: [8][]const u8 = undefined;
+    const r = rebuildAgentArgv(.claude, &argv, "source-id", &out);
+    try std.testing.expectEqual(@as(usize, 5), r.len);
+    try std.testing.expectEqualStrings("--permission-mode", r[0]);
+    try std.testing.expectEqualStrings("bypassPermissions", r[1]);
+    try std.testing.expectEqualStrings("--resume", r[2]);
+    try std.testing.expectEqualStrings("source-id", r[3]);
+    try std.testing.expectEqualStrings("--fork-session", r[4]);
+}
+
+test "rebuildAgentArgv codex: fork <id> 서브커맨드 + 기존 resume 세션 토큰 제거" {
     const argv = [_][]const u8{ "codex", "resume", "old-id" };
     var out: [8][]const u8 = undefined;
     const r = rebuildAgentArgv(.codex, &argv, "new-id", &out);
     try std.testing.expectEqual(@as(usize, 2), r.len);
-    try std.testing.expectEqualStrings("resume", r[0]);
+    try std.testing.expectEqualStrings("fork", r[0]);
     try std.testing.expectEqualStrings("new-id", r[1]);
 }
 
-test "rebuildAgentArgv codex: 새 세션(서브커맨드 없음)이면 resume <id> 앞에 붙이고 플래그 보존" {
-    const argv = [_][]const u8{ "codex", "--model", "gpt-5" };
+test "rebuildAgentArgv codex: 기존 fork도 제거하고 새 fork <id>와 플래그만 보존" {
+    const argv = [_][]const u8{ "codex", "fork", "old-id", "old prompt", "--model", "gpt-5" };
     var out: [8][]const u8 = undefined;
     const r = rebuildAgentArgv(.codex, &argv, "new-id", &out);
     try std.testing.expectEqual(@as(usize, 4), r.len);
-    try std.testing.expectEqualStrings("resume", r[0]);
+    try std.testing.expectEqualStrings("fork", r[0]);
     try std.testing.expectEqualStrings("new-id", r[1]);
     try std.testing.expectEqualStrings("--model", r[2]);
     try std.testing.expectEqualStrings("gpt-5", r[3]);
 }
 
-test "rebuildAgentArgv codex: session_id 없으면 resume --last 폴백" {
+test "rebuildAgentArgv codex: 새 세션(서브커맨드 없음)이면 fork <id> 앞에 붙이고 플래그 보존" {
+    const argv = [_][]const u8{ "codex", "--model", "gpt-5" };
+    var out: [8][]const u8 = undefined;
+    const r = rebuildAgentArgv(.codex, &argv, "new-id", &out);
+    try std.testing.expectEqual(@as(usize, 4), r.len);
+    try std.testing.expectEqualStrings("fork", r[0]);
+    try std.testing.expectEqualStrings("new-id", r[1]);
+    try std.testing.expectEqualStrings("--model", r[2]);
+    try std.testing.expectEqualStrings("gpt-5", r[3]);
+}
+
+test "rebuildAgentArgv codex: image variadic은 제거하고 권한 플래그만 새 fork에 보존" {
+    const argv = [_][]const u8{ "codex", "-i", "shot.png", "--dangerously-bypass-approvals-and-sandbox", "old prompt" };
+    var out: [8][]const u8 = undefined;
+    const r = rebuildAgentArgv(.codex, &argv, "source-id", &out);
+    try std.testing.expectEqual(@as(usize, 3), r.len);
+    try std.testing.expectEqualStrings("fork", r[0]);
+    try std.testing.expectEqualStrings("source-id", r[1]);
+    try std.testing.expectEqualStrings("--dangerously-bypass-approvals-and-sandbox", r[2]);
+}
+
+test "rebuildAgentArgv codex: session_id 없으면 추측하지 않는다" {
     const argv = [_][]const u8{"codex"};
     var out: [8][]const u8 = undefined;
     const r = rebuildAgentArgv(.codex, &argv, "", &out);
-    try std.testing.expectEqual(@as(usize, 2), r.len);
-    try std.testing.expectEqualStrings("resume", r[0]);
-    try std.testing.expectEqualStrings("--last", r[1]);
+    try std.testing.expectEqual(@as(usize, 0), r.len);
 }
 
 test "rebuildAgentArgv codex: node 래퍼(exec_path=node, argv[1]=script)는 스크립트를 보존" {
     // codex는 #!/usr/bin/env node 래퍼라 캡처 argv=[node, /codex, resume, old]. command=argv[0]=node이고 args는
-    // 스크립트(/codex)를 맨 앞에 보존해 `node /codex resume <id>`가 돼야 한다(스크립트 앞에 resume이 끼면 깨진다).
+    // 스크립트(/codex)를 맨 앞에 보존해 `node /codex fork <id>`가 돼야 한다(스크립트 앞에 fork가 끼면 깨진다).
     const argv = [_][]const u8{ "/Users/me/.local/bin/node", "/Users/me/.local/bin/codex", "resume", "old-id" };
     var out: [8][]const u8 = undefined;
     const r = rebuildAgentArgv(.codex, &argv, "new-id", &out);
     try std.testing.expectEqual(@as(usize, 3), r.len);
     try std.testing.expectEqualStrings("/Users/me/.local/bin/codex", r[0]); // 스크립트 prefix 보존
-    try std.testing.expectEqualStrings("resume", r[1]);
+    try std.testing.expectEqualStrings("fork", r[1]);
     try std.testing.expectEqualStrings("new-id", r[2]);
 }
 
-test "rebuildAgentArgv claude: node 래퍼는 스크립트 보존하고 위험모드 + --resume 재구성" {
+test "rebuildAgentArgv claude: node 래퍼는 스크립트 보존하고 위험모드 + fork 재구성" {
     const argv = [_][]const u8{ "/usr/bin/node", "/opt/claude/cli.js", "--dangerously-skip-permissions", "--resume", "old" };
     var out: [8][]const u8 = undefined;
     const r = rebuildAgentArgv(.claude, &argv, "new", &out);
-    try std.testing.expectEqual(@as(usize, 4), r.len);
+    try std.testing.expectEqual(@as(usize, 5), r.len);
     try std.testing.expectEqualStrings("/opt/claude/cli.js", r[0]);
     try std.testing.expectEqualStrings("--dangerously-skip-permissions", r[1]);
     try std.testing.expectEqualStrings("--resume", r[2]);
     try std.testing.expectEqualStrings("new", r[3]);
+    try std.testing.expectEqualStrings("--fork-session", r[4]);
 }
 
 test "Kind.fromString: claude/codex 인식, 그 외 null" {

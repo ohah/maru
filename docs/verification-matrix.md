@@ -106,6 +106,19 @@ GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/a
 
 호환성/보안 기본값(`TERM`, OSC52, bracketed paste, shell integration, command restore, plugin permission, update/telemetry, global shortcut)은 [터미널 호환성/보안 정책](terminal-compatibility-policy.md)의 검증 계획을 따른다. 새 구현 PR이 이 기본값을 바꾸려면 사용자와 먼저 논의하고, 이 매트릭스의 자동/수동 검증 경로도 함께 갱신한다.
 
+### 에이전트 workspace restore fork gate
+
+필수 자동 gate는 `mise run test`의 `rebuildAgentArgv`·`agentRestoreRequest`·`restoredForkMappedSession`·
+`restoredForkSessionForSave`, `EnvStorage`의 selector/mapping-id 분리와 override 차단, `computeMergedJson`의 index-preserving
+v1→v2 훅 업그레이드, Term-owned mapping 제거다.
+provider-native fork argv, exact source id 부재 시 일반 셸, positional prompt·미인식/variadic 옵션 제거, 권한/model
+allowlist, 첫 훅 전 source→poll-confirmed fork→source 재매핑/최신 mapping 저장 순서, provider 종료·kind 불일치 차단을 각각의 순수/구성 경계에서
+고정한다. 이는 실제 provider 동시성이나 GUI 종료→재시작 전체를 하나의 헤드리스 E2E로 증명한다는 뜻은 아니다.
+
+provider 자체 동시성은 네트워크·계정 사용이라 기본 CI에 넣지 않는다. 릴리스 후보 CLI 변경 시
+[workspace-restore.md](workspace-restore.md)의 번호 매긴 실 CLI 절차(원본 TUI 생존 → direct resume 동일 id 확인 → A/B fork의
+서로 다른 id와 고유 marker 격리 → 무프롬프트 user/task 부재 → 훅 id 대조)를 opt-in 수동 gate로 실행한다.
+
 ## 구현 전 TDD 절단 원칙
 
 세션 컨트롤 플레인과 웹 패널은 [control-plane.md](control-plane.md) §11의 micro-slice를 기본 구현 단위로 삼는다. Phase 1~7은 제품 milestone이고, 구현 PR 하나가 통째로 한 Phase를 끝내는 것을 기본값으로 보지 않는다.

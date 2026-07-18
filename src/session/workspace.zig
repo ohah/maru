@@ -70,9 +70,9 @@ pub const Surface = struct {
     command: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
-    // claude/codex 세션 자동 resume(opt-in allowlist 예외 — docs/workspace-restore.md "에이전트 세션 자동 resume").
-    // agent_kind=""면 일반 셸 복원. agent_session=""면 폴백 resume(--continue/resume --last). agent_argv는 종료
-    // 시점 보존 argv(redact 후)로, 복원 spawn이 세션지정 플래그를 갈아끼워 재구성한다.
+    // claude/codex 세션 자동 fork 복원(opt-in allowlist 예외 — docs/workspace-restore.md "에이전트 세션 자동 fork 복원").
+    // agent_kind="" 또는 agent_session=""면 일반 셸 복원(최근 세션 추측 없음). agent_argv는 종료
+    // 시점 보존 argv(redact 후)로, 복원 spawn이 restore allowlist 옵션만 남겨 fork argv를 재구성한다.
     agent_kind: []const u8 = "",
     agent_session: []const u8 = "",
     agent_argv: []const []const u8 = &.{},
@@ -1636,7 +1636,7 @@ test "workspace serialize: 선언적 — env/fd/pid/last-observed 필드 없음(
 }
 
 test "workspace round-trip: agent_kind·agent_session·agent_argv 보존(escape 포함)" {
-    // claude/codex 세션 resume 정보가 serialize→parse를 통해 그대로 round-trip되는지. argv 토큰은 공백·따옴표를
+    // claude/codex fork source 정보가 serialize→parse를 통해 그대로 round-trip되는지. argv 토큰은 공백·따옴표를
     // 포함해도 한 줄·토큰별로 안전히 인코딩돼야 한다(agent-argc=N + agent-arg="..." 패턴, docs/workspace-restore.md).
     const argv = [_][]const u8{ "claude", "--dangerously-skip-permissions", "--resume", "id a\"b" };
     const surfaces = [_]Surface{.{

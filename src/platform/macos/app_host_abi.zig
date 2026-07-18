@@ -914,6 +914,37 @@ pub export fn maru_macos_app_session_focus_file_panel_surface(session: ?*AppSess
     return if (app_session.focusFilePanelSurface(surface_id)) 1 else 0;
 }
 
+pub export fn maru_macos_app_session_open_file_panel_link(
+    session: ?*AppSession,
+    surface_id: u64,
+    url: ?[*]const u8,
+    url_len: usize,
+    force_system: u32,
+) u32 {
+    const app_session = session orelse return 0;
+    const ptr = url orelse return 0;
+    if (url_len == 0 or url_len > std.fs.max_path_bytes) return 0;
+    app_session.openFilePanelLink(surface_id, ptr[0..url_len], force_system != 0) catch return 0;
+    return 1;
+}
+
+pub export fn maru_macos_app_session_take_file_panel_external_link_action(
+    session: ?*AppSession,
+    url_out: ?[*]u8,
+    url_cap: usize,
+    surface_id_out: ?*u64,
+    kind_out: ?*u32,
+) usize {
+    const app_session = session orelse return 0;
+    const out = url_out orelse return 0;
+    const sid = surface_id_out orelse return 0;
+    const kind = kind_out orelse return 0;
+    const action = app_session.takeFilePanelExternalLinkAction(out[0..url_cap]) orelse return 0;
+    sid.* = action.surface_id;
+    kind.* = @intFromEnum(action.kind);
+    return action.url.len;
+}
+
 pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppSession, surface_id_out: ?*u64) i32 {
     const app_session = session orelse return -1;
     const out = surface_id_out orelse return -1;
@@ -1737,9 +1768,9 @@ const FileBridgeContext = struct {
         return self.session.completeFileConflictReload(self.surface_id, success);
     }
 
-    fn openLink(raw: *anyopaque, href: []const u8) anyerror!void {
+    fn openLink(raw: *anyopaque, href: []const u8, force_system: bool) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.openFilePanelLink(self.surface_id, href);
+        return self.session.openFilePanelLink(self.surface_id, href, force_system);
     }
 };
 
@@ -4162,6 +4193,21 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(usize, 0), file_panel_path_len);
     // v124 FP8 native file-panel focus sync: null session은 파일 surface가 아니므로 0.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_focus_file_panel_surface(null, 1));
+    // v125 외부 링크 action: null/stale ABI 입력은 열기·action 모두 0으로 닫는다.
+    var external_link_buf: [8]u8 = undefined;
+    var external_link_sid: u64 = 99;
+    var external_link_kind: u32 = 99;
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_open_file_panel_link(null, 1, "https://example.com", 19, 0));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        maru_macos_app_session_take_file_panel_external_link_action(
+            null,
+            &external_link_buf,
+            external_link_buf.len,
+            &external_link_sid,
+            &external_link_kind,
+        ),
+    );
     // v123 FP7 파일 트리: null session은 watcher/reload/external-open 신호 없음이며 changed event는 무동작.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_watch_reset(null));
     var file_tree_buf: [8]u8 = undefined;

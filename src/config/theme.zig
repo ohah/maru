@@ -1025,11 +1025,15 @@ pub const Config = struct {
     };
 };
 
+pub const ExternalLinkTarget = enum { in_app, system };
+
 pub const FilePanelConfig = struct {
     max_live_views: u32 = 8,
+    external_link_target: ExternalLinkTarget = .in_app,
 
     pub const schema = .{
         .max_live_views = Meta{ .doc = "파일 패널 live WKWebView 상한", .range = .{ 1, 256 }, .widget = .number, .section = .workspace },
+        .external_link_target = Meta{ .doc = "파일 패널 외부 링크 열기 대상", .widget = .dropdown, .section = .workspace },
     };
 };
 

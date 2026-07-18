@@ -65,6 +65,7 @@ window.blur           = 0     # 창 뒤 데스크톱 블러 반경(px) — 0=끔
 window.unfocused-dim  = 0.0   # 비활성 split pane 디밍(0~1) — 0=끔, 클수록 흐림
 split.divider-thickness = 1.0 # split 경계선 두께(pt) — 0=숨김, 폰트 크기와 무관한 고정 pt
 file-panel.max-live-views = 8 # 파일 도크에서 동시에 유지할 WKWebView 수(1~256)
+file-panel.external-link-target = in-app # 파일 패널 외부 링크: in-app | system
 ```
 
 ## 키
@@ -116,6 +117,7 @@ file-panel.max-live-views = 8 # 파일 도크에서 동시에 유지할 WKWebVie
 | `workspace.hold-on-startup-failure` | `true`\|`false` | `true` | 첫(유일) 셸이 시작 직후 **비정상 종료**해 usable 세션에 도달 못 하면 앱을 종료하지 않고 창을 유지(원인·복구 표시, ⏎로 재시작). 잘못된 `shell.command`/`shell.args`로 앱이 시작하자마자 꺼지던 것 방지. `false`면 기존처럼 종료(Terminal.app "shell 종료 시 닫기" 취향) |
 | `scrollback.lines` | 정수(0~100000) | `1000` | 가시 화면 위로 보관할 과거 줄 수. `0`이면 스크롤백 비활성(과거 줄 안 보관). 범위 밖/비정수는 무시(기본 유지) |
 | `file-panel.max-live-views` | 정수(1~256) | `8` | 파일 도크에서 동시에 유지할 WKWebView 상한. 초과하면 가장 오래 안 본 non-dirty view만 해제하고 탭 metadata는 유지한다. dirty이거나 source editor 이탈 snapshot ack가 대기 중인 view는 해제하지 않으며 재선택한 탭은 새 surface id로 다시 생성한다. |
+| `file-panel.external-link-target` | `in-app`\|`system` | `in-app` | Markdown/HTML 파일 패널에서 사용자가 직접 누른 `http(s)` 링크의 기본 열기 대상. `in-app`은 현재 창의 새 browser 탭, `system`은 macOS 기본 브라우저로 연다. 어느 설정이든 `⌘⇧`+클릭은 이번 한 번만 시스템 브라우저를 강제한다. fragment는 현재 문서에 남고 로컬 `.md`/`.html` 링크는 파일 도크로 연다. |
 | `scrollback.sticky-command` | 불리언 | `true` | sticky command — 스크롤백을 위로 올리면 지금 보이는 출력을 만든 **명령줄을 뷰포트 최상단에 고정** 표시(✓/✗ 종료상태 포함). OSC 133 semantic prompt 마커에 의존하므로 셸 통합(현재 zsh)이 켜진 세션에서만 동작하고, 마커가 없으면 그냥 안 뜬다. `false`면 끔 |
 | `scroll.multiplier` | 실수(0.1~10.0) | `1.0` | 휠/트랙패드 **세로** 스크롤 속도 배수. `1.0`=OS 기본, `>1`=빠르게(예: `3`이면 한 틱에 3배 줄), `<1`=느리게. 가로(탭 바) 스크롤엔 적용 안 함. 배수는 maru 스크롤백뿐 아니라 **마우스 트래킹 앱(vim/tmux 등)에도 적용**된다(한 휠 틱이 더 많은 휠 이벤트로 전달 — Ghostty `mouse-scroll-multiplier`와 같은 동작). 범위 밖/비실수는 무시(기본 유지). `scrollback`(보관 줄 수)과 별개 |
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |

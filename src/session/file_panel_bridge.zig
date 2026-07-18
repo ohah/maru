@@ -30,6 +30,44 @@ fn hasUriScheme(path: []const u8) bool {
     return true;
 }
 
+/// 파일 패널이 앱 내부 browser 또는 시스템 브라우저로 넘길 수 있는 외부 목적지. literal `http(s)://`만
+/// 허용해 percent-encoded scheme, protocol-relative URL, WebKit 특수 scheme이 native 경계를 넘지 못하게 한다.
+pub fn isExplicitHttpLink(href: []const u8) bool {
+    if (href.len == 0 or href.len > std.fs.max_path_bytes or !std.unicode.utf8ValidateSlice(href)) return false;
+    const rest = if (std.ascii.startsWithIgnoreCase(href, "https://"))
+        href["https://".len..]
+    else if (std.ascii.startsWithIgnoreCase(href, "http://"))
+        href["http://".len..]
+    else
+        return false;
+    for (href) |byte| if (byte == '\\' or byte <= 0x20 or byte == 0x7f) return false;
+
+    const authority_end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    const authority = rest[0..authority_end];
+    if (authority.len == 0) return false;
+    const host_port = if (std.mem.lastIndexOfScalar(u8, authority, '@')) |i| authority[i + 1 ..] else authority;
+    if (host_port.len == 0) return false;
+    if (host_port[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, host_port, ']') orelse return false;
+        if (close == 1) return false;
+        const tail = host_port[close + 1 ..];
+        if (tail.len != 0 and !validHttpPort(tail)) return false;
+    } else {
+        const host_end = std.mem.indexOfScalar(u8, host_port, ':') orelse host_port.len;
+        if (host_end == 0) return false;
+        const tail = host_port[host_end..];
+        if (tail.len != 0 and !validHttpPort(tail)) return false;
+    }
+    return true;
+}
+
+fn validHttpPort(tail: []const u8) bool {
+    if (tail.len < 2 or tail[0] != ':') return false;
+    for (tail[1..]) |byte| if (!std.ascii.isDigit(byte)) return false;
+    _ = std.fmt.parseInt(u16, tail[1..], 10) catch return false;
+    return true;
+}
+
 /// Markdown URI의 로컬 `.md`/`.html` 링크를 현재 핀 파일 기준 절대 경로로 바꾼다. 외부 scheme과
 /// protocol-relative URL은 받지 않으며, fragment/query는 파일 선택에 관여하지 않으므로 제거한다.
 pub fn resolveMarkdownFileLink(
@@ -216,4 +254,32 @@ test "resolveMarkdownFileLink: rejects non-file, malformed, and unsupported targ
             resolveMarkdownFileLink(testing.allocator, "/workspace/docs/current.md", href),
         );
     }
+}
+
+test "isExplicitHttpLink: accepts only literal absolute HTTP(S) destinations" {
+    for ([_][]const u8{
+        "http://example.com",
+        "HTTPS://example.com/guide?q=1#usage",
+        "https://localhost:8443/",
+        "https://[::1]/",
+    }) |href| try testing.expect(isExplicitHttpLink(href));
+
+    for ([_][]const u8{
+        "",
+        "http://",
+        "https:///missing-host",
+        "https:example.com",
+        "https%3A//example.com",
+        "//example.com",
+        "javascript:alert(1)",
+        "data:text/html,unsafe",
+        "file:///tmp/page.html",
+        "https://example.com\\redirect",
+        "https://example.com/has space",
+        "https://example.com:bad/",
+        "https://example.com:443:444/",
+        "https://[::1]:bad/",
+        "https://example.com/\x1funsafe",
+        "../guide/next.md",
+    }) |href| try testing.expect(!isExplicitHttpLink(href));
 }

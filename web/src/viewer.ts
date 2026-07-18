@@ -22,7 +22,7 @@ export function assetBase64BudgetAllowed(currentBytes: number, nextBytes: number
   );
 }
 
-type FileMethod = "read" | "readAsset" | "write" | "setDirty";
+type FileMethod = "read" | "readAsset" | "write" | "setDirty" | "resolveExternalChange";
 
 type BridgeResult = Record<string, unknown>;
 
@@ -165,7 +165,9 @@ export function requestFileBridge(
           ? { method, path: value }
           : method === "write"
             ? { method, content: value }
-            : { method, dirty: value };
+            : method === "setDirty"
+              ? { method, dirty: value }
+              : { method, success: value };
     node.textContent = JSON.stringify(request);
     document.documentElement.append(node);
 
@@ -238,6 +240,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let savedContent = "";
   let contentLoaded = false;
   let dirty = false;
+  let editorRevision = 0;
   let mode: "read" | "source-edit" = "read";
   let mutationQueue = Promise.resolve();
 
@@ -298,7 +301,10 @@ export function bootShell(document: Document, targetWindow: Window): void {
     editor = createMarkdownEditor(
       editorHost,
       savedContent,
-      (content) => reportDirty(content !== savedContent),
+      (content) => {
+        editorRevision += 1;
+        reportDirty(content !== savedContent);
+      },
       () => void save(),
     );
     return editor;
@@ -335,29 +341,66 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (editor !== null) reportDirty(editor.state.doc.toString() !== savedContent, true);
   });
 
+  const loadFromDisk = async (
+    syncNative: boolean,
+    abortIfDirty = false,
+    abortIfEditedDuringRead = false,
+  ) => {
+    const revisionBeforeRead = editorRevision;
+    const result = await requestFileBridge(document, "read");
+    if (typeof result.content !== "string") throw new Error("invalid file content");
+    // clean auto-reload를 bridge read 대기 중 사용자가 편집하기 시작했다면 buffer를 절대 덮지 않는다.
+    if (abortIfDirty && dirty) throw new Error("file became dirty during external reload");
+    if (abortIfEditedDuringRead && editorRevision !== revisionBeforeRead) {
+      throw new Error("file was edited during external reload");
+    }
+    savedContent = result.content;
+    contentLoaded = true;
+    if (editor !== null) {
+      editor.dispatch({
+        changes: { from: 0, to: editor.state.doc.length, insert: result.content },
+      });
+    }
+    dirty = false;
+    if (syncNative) await syncDirty(false);
+    frame.contentWindow?.postMessage(
+      { channel: viewerChannel, type: "render", markdown: result.content },
+      "*",
+    );
+    if (mode === "source-edit") applyMode(mode);
+  };
+
+  targetWindow.addEventListener("maru:file-reload", (event) => {
+    const detail = (event as CustomEvent<unknown>).detail;
+    const conflict = isRecord(detail) && detail.conflict === true;
+    mutationQueue = mutationQueue
+      .then(async () => {
+        await loadFromDisk(false, !conflict, true);
+        if (conflict) await requestFileBridge(document, "resolveExternalChange", true);
+        if (status !== null) {
+          status.dataset.fileRead = "true";
+          status.textContent = "";
+        }
+      })
+      .catch(async () => {
+        try {
+          await requestFileBridge(document, "resolveExternalChange", false);
+        } catch {}
+        if (status !== null) {
+          status.dataset.fileRead = "false";
+          status.textContent = "외부 변경을 다시 읽을 수 없습니다.";
+        }
+      });
+  });
+
   let started = false;
   const start = async () => {
     if (started) return;
     started = true;
     if (status !== null) status.dataset.rendererLoaded = "true";
     try {
-      const result = await requestFileBridge(document, "read");
-      if (typeof result.content !== "string") throw new Error("invalid file content");
-      savedContent = result.content;
-      contentLoaded = true;
-      // didFinish의 mode 신호가 read 응답보다 먼저 와 editor가 빈 문서로 생성됐을 수 있다. 초기 파일 내용을
-      // 기존 view에 주입하되 savedContent를 먼저 갱신해 update listener가 이를 사용자 편집으로 오인하지 않게 한다.
-      if (editor !== null) {
-        editor.dispatch({
-          changes: { from: 0, to: editor.state.doc.length, insert: result.content },
-        });
-      }
+      await loadFromDisk(false);
       if (status !== null) status.dataset.fileRead = "true";
-      frame.contentWindow?.postMessage(
-        { channel: viewerChannel, type: "render", markdown: result.content },
-        "*",
-      );
-      if (mode === "source-edit") applyMode(mode);
       if (status !== null) status.textContent = "";
     } catch {
       if (status !== null) status.dataset.fileRead = "false";

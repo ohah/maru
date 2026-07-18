@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import CoreServices
 import Darwin
 import Foundation
 import Metal
@@ -2279,6 +2280,20 @@ final class MaruWebPanelView: NSView {
         )
     }
 
+    func requestFileReload(conflict: Bool) {
+        if filePanelKind == 2 {
+            // 핀된 local HTML의 clean 외부 변경. navigation delegate가 같은 top-level URL의 reload만 허용한다.
+            webView.reload()
+            return
+        }
+        guard filePanelKind == 1, webView.url?.scheme == MaruAppSchemeHandler.scheme,
+              webView.url?.host == "app" else { return }
+        webView.evaluateJavaScript(
+            "window.dispatchEvent(new CustomEvent('maru:file-reload', {detail:{conflict:\(conflict ? "true" : "false")}}))",
+            completionHandler: nil
+        )
+    }
+
     /// 실제 viewer의 비동기 단계(iframe load→read→render→asset)를 최대 4초 동안 250ms 간격으로 관측한다. 제품
     /// 동작에는 영향을 주지 않고 smokeMode의 didFinish에서만 호출한다. ready면 즉시 끝내고 실패면 마지막 단계값을 남긴다.
     private func captureFileViewerProbe(attemptsRemaining: Int) {
@@ -2774,6 +2789,137 @@ final class MaruTerminalContainerView: NSView {
 // 한 터미널 세션의 per-session 상태 — 창/PTY(appSession)/Metal 렌더러 + 렌더 캐시 메트릭을 묶는다.
 // 컨트롤러가 메인 창을 `primary`로 들고, quick terminal(후속)이 두 번째 인스턴스가 된다. 세션별 로직은
 // 컨트롤러 메서드가 이 surface의 상태를 읽고 쓰며 수행한다(상태만 여기 — 두 세션이 같은 메서드를 공유).
+private let maruFileTreeFSEventCallback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, eventIds in
+    guard let info else { return }
+    let watcher = Unmanaged<MaruFileTreeWatcher>.fromOpaque(info).takeUnretainedValue()
+    let array = unsafeBitCast(eventPaths, to: NSArray.self)
+    let paths = array.compactMap { $0 as? String }
+    let flags = Array(UnsafeBufferPointer(start: eventFlags, count: count))
+    let ids = Array(UnsafeBufferPointer(start: eventIds, count: count))
+    DispatchQueue.main.async { watcher.handle(paths, flags: flags, eventIds: ids) }
+}
+
+/// FP7 native FSEvents adapter. root set 변경 때만 stream을 재구성하고 200ms latency로 file-level 이벤트를
+/// main queue에 coalesce한다. 디렉터리 열거는 하지 않고 Zig에 변경 path만 알린다.
+@MainActor
+final class MaruFileTreeWatcher {
+    private weak var surface: TerminalSurface?
+    private var roots: Set<String> = []
+    private var stream: FSEventStreamRef?
+    private var lastEventID = FSEventStreamEventId(kFSEventStreamEventIdSinceNow)
+    private var pathBuffer = [UInt8](repeating: 0, count: 4096)
+
+    init(surface: TerminalSurface) { self.surface = surface }
+
+    func drain(_ session: OpaquePointer) {
+        var changed = false
+        if maru_macos_app_session_take_file_tree_watch_reset(session) != 0 {
+            roots.removeAll(keepingCapacity: true)
+            changed = true
+        }
+        while true {
+            let len = pathBuffer.withUnsafeMutableBufferPointer {
+                maru_macos_app_session_take_file_tree_watch_root(session, $0.baseAddress, $0.count)
+            }
+            guard len > 0 else { break }
+            guard len <= pathBuffer.count else { break } // ABI required-length 응답; oversized one-shot은 소비하지 않는다.
+            let root = String(decoding: pathBuffer[0 ..< len], as: UTF8.self)
+            if roots.insert(root).inserted { changed = true }
+        }
+        if changed {
+            // 새 root의 최초 scan은 Zig recordOpened가 이미 예약했다. 기존 root의 stop/start 사이 event는 아래
+            // lastEventID 재생이 회수하므로 synthetic content-change를 보내 dirty buffer를 오탐하지 않는다.
+            rebuild()
+        }
+    }
+
+    func handle(
+        _ paths: [String],
+        flags: [FSEventStreamEventFlags],
+        eventIds: [FSEventStreamEventId]
+    ) {
+        guard let session = surface?.appSession else { return }
+        if let newest = eventIds.max() {
+            lastEventID = lastEventID == FSEventStreamEventId(kFSEventStreamEventIdSinceNow)
+                ? newest
+                : max(lastEventID, newest)
+        }
+        let coarseMask = FSEventStreamEventFlags(
+            kFSEventStreamEventFlagMustScanSubDirs |
+                kFSEventStreamEventFlagUserDropped |
+                kFSEventStreamEventFlagKernelDropped |
+                kFSEventStreamEventFlagEventIdsWrapped |
+                kFSEventStreamEventFlagRootChanged
+        )
+        let coarse = flags.contains { ($0 & coarseMask) != 0 }
+        if flags.contains(where: { ($0 & FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped)) != 0 }) {
+            lastEventID = FSEventsGetCurrentEventId()
+        }
+        let changedPaths = coarse ? Array(roots) : paths
+        for path in changedPaths {
+            let bytes = Array(path.utf8)
+            bytes.withUnsafeBufferPointer {
+                maru_macos_app_session_file_tree_changed(session, $0.baseAddress, $0.count)
+            }
+        }
+        if flags.contains(where: { ($0 & FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged)) != 0 }) {
+            rebuild()
+        }
+    }
+
+    func stop() {
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+        }
+        roots.removeAll(keepingCapacity: false)
+    }
+
+    private func rebuild() {
+        if lastEventID == FSEventStreamEventId(kFSEventStreamEventIdSinceNow) {
+            // 최초 stream도 stop/start 경계 전에 global journal checkpoint를 잡아 SinceNow의 유실 창을 없앤다.
+            lastEventID = FSEventsGetCurrentEventId()
+        }
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+        }
+        guard !roots.isEmpty else { return }
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        let flags = FSEventStreamCreateFlags(
+            kFSEventStreamCreateFlagUseCFTypes |
+                kFSEventStreamCreateFlagFileEvents |
+                kFSEventStreamCreateFlagWatchRoot
+        )
+        guard let created = FSEventStreamCreate(
+            kCFAllocatorDefault,
+            maruFileTreeFSEventCallback,
+            &context,
+            Array(roots).sorted() as CFArray,
+            lastEventID,
+            0.2,
+            flags
+        ) else { return }
+        FSEventStreamSetDispatchQueue(created, DispatchQueue.main)
+        guard FSEventStreamStart(created) else {
+            FSEventStreamInvalidate(created)
+            FSEventStreamRelease(created)
+            return
+        }
+        stream = created
+    }
+}
+
 @MainActor
 final class TerminalSurface {
     var window: NSWindow?
@@ -2829,6 +2975,7 @@ final class TerminalSurface {
     // 즉시 포커스를 회수하지 않게 하고, 모달 override 뒤에는 같은 도크로 복원한다.
     var focusedFilePanelSurfaceId: UInt64?
     var filePanelFocusOverridden = false
+    lazy var fileTreeWatcher = MaruFileTreeWatcher(surface: self)
 }
 
 // quick terminal용 떠 있는 패널. borderless NSWindow/NSPanel은 기본적으로 key가 될 수 없어 타이핑을 못
@@ -2892,6 +3039,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 시에만이라, tick마다 4KB 새로 할당·zero-fill하지 않고 이 버퍼를 재사용한다(리뷰 [9]). Zig가 navLen만 쓰고 반환 길이로
     // 슬라이스하므로 zero-fill 불필요. addr_nav_url_cap(4096, app_scheme)과 정합.
     private var webNavigateUrlBuf = [UInt8](repeating: 0, count: 4096)
+    private var fileTreePathBuf = [UInt8](repeating: 0, count: 4096)
     // 세션별 forwarder의 대상. tick 중에는 explicitSurface, 그 외(입력/IME/hover)에는 key 창의 surface
     // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
     private var activeSurface: TerminalSurface? {
@@ -4057,6 +4205,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// delegate를 끊고 window를 닫는다(재진입 없이). 앱 quit에선 shutdownAppSession이 남은 창마다 순회 호출.
     private func teardownWindowSurface(_ surface: TerminalSurface, preserveWebPanelsForSummary: Bool = false) {
         if !preserveWebPanelsForSummary { teardownWebPanels(surface) }
+        surface.fileTreeWatcher.stop()
         if let session = surface.appSession {
             var summary = MaruAppHostFrameSummary()
             let status = maru_macos_app_session_close(session, &summary)
@@ -4819,6 +4968,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
             drainFilePanelPick() // open_file_panel(Cmd+O/메뉴/팔릿): Markdown/HTML을 현재 창 도크에 연다(FP5).
+            drainFileTreeActions() // FP7 FSEvents roots + clean reload + unsupported external open.
             drainColorSample() // HSV picker `i`(스포이드): NSColorSampler로 화면 색을 추출해 picker에 반영(비동기).
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
             drainGlobalHotkeys() // 글로벌 핫키가 라이브로 바뀌었으면(녹음/해제·reload·reset) OS에 재등록(unregister 후 register).
@@ -5773,6 +5923,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_macos_app_session_open_file_panel_path(session, p.baseAddress, p.count)
         }
         if result != 1 { NSSound.beep() }
+    }
+
+    private func drainFileTreeActions() {
+        guard let session = appSession, let surface = activeSurface else { return }
+        surface.fileTreeWatcher.drain(session)
+        while true {
+            var conflict: UInt32 = 0
+            let sid = maru_macos_app_session_take_file_tree_reload_action(session, &conflict)
+            guard sid != 0 else { break }
+            surface.webPanels[sid]?.requestFileReload(conflict: conflict != 0)
+        }
+        let len = fileTreePathBuf.withUnsafeMutableBufferPointer {
+            maru_macos_app_session_take_file_tree_external_open(session, $0.baseAddress, $0.count)
+        }
+        if len > 0, len <= fileTreePathBuf.count {
+            NSWorkspace.shared.open(URL(fileURLWithPath: String(decoding: fileTreePathBuf[0 ..< len], as: UTF8.self)))
+        }
     }
 
     // NSColorSampler를 show 동안 살려둔다(비동기 콜백까지 retain — 지역 변수면 콜백 전에 해제될 수 있음).
@@ -6952,6 +7119,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         surface.window?.orderOut(nil)
         teardownWebPanels(surface)
+        surface.fileTreeWatcher.stop()
         if let session = surface.appSession {
             var summary = MaruAppHostFrameSummary()
             _ = maru_macos_app_session_close(session, &summary)

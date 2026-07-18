@@ -8,6 +8,7 @@ const tabbar = maru.chrome.components.tabbar; // C4b-4: 탭 셀 경계 단일 �
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
+const file_tree = maru.session.file_tree;
 const coretext_probe = @import("coretext_probe.zig");
 const coretext_raster = @import("coretext_raster.zig");
 const coretext_shaper = @import("coretext_shaper.zig");
@@ -748,6 +749,7 @@ pub fn buildFileDockChromeDrawList(
     active_kind: dock_panel.EntryKind,
     active_mode: dock_panel.Mode,
     active_dirty: bool,
+    active_external_change: bool,
     cols: u16,
     fg: terminal.Color,
     active_fg: terminal.Color,
@@ -777,16 +779,97 @@ pub fn buildFileDockChromeDrawList(
                 .source_edit => "읽기  [소스 편집]",
             },
         };
-        const mode_end = if (active_dirty and cols > control_start + 2) cols - 2 else cols;
+        const state_cols: u16 = (if (active_dirty) @as(u16, 2) else 0) + (if (active_external_change) @as(u16, 2) else 0);
+        const mode_end = cols -| state_cols;
         if (mode_end > control_start)
             _ = try appendEllipsizedTitle(allocator, &cells, mode_label, 1, control_start, mode_end, .{ .foreground = active_fg, .bold = active_kind == .markdown }, false, .tail);
         if (active_dirty and cols >= 2)
             try cells.append(allocator, .{ .row = 1, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●
+        if (active_external_change and cols >= 4)
+            try cells.append(allocator, .{ .row = 1, .col = cols - 4, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg, .bold = true } });
     }
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 2 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 1 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
+/// FP7 project tree snapshot projection. rows는 이미 L2에서 natural-sort/open/dirty 상태를 결합한 immutable view다.
+/// 이 함수는 보이는 row만 셀로 바꾸며 path나 filesystem을 읽지 않는다.
+pub fn buildFileTreeDrawList(
+    allocator: std.mem.Allocator,
+    rows: []const file_tree.Row,
+    scroll_rows: usize,
+    visible_rows: u16,
+    cols: u16,
+    fg: terminal.Color,
+    active_fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    const count = @min(@as(usize, visible_rows), rows.len -| @min(scroll_rows, rows.len));
+    for (rows[@min(scroll_rows, rows.len)..][0..count], 0..) |row, screen_row| {
+        const r: u16 = @intCast(screen_row);
+        var label: []const u8 = "";
+        var depth: u16 = 0;
+        var marker: u21 = ' ';
+        var style: terminal.Style = .{ .foreground = fg };
+        var dirty = false;
+        var conflict = false;
+        switch (row) {
+            .recent_header => |v| {
+                label = "최근 파일";
+                marker = if (v.collapsed) '>' else 'v';
+                style = .{ .foreground = active_fg, .bold = true };
+            },
+            .recent_file => |v| {
+                label = v.label;
+                depth = v.depth;
+                marker = if (v.active) '*' else ' ';
+                style = .{ .foreground = if (v.active) active_fg else fg, .bold = v.active };
+                dirty = v.dirty;
+                conflict = v.external_change;
+            },
+            .root => |v| {
+                label = v.label;
+                marker = if (v.loading) '~' else if (v.expanded) 'v' else '>';
+                style = .{ .foreground = active_fg, .bold = true };
+            },
+            .directory => |v| {
+                label = v.label;
+                depth = v.depth;
+                marker = if (v.loading) '~' else if (v.expanded) 'v' else '>';
+            },
+            .file => |v| {
+                label = v.label;
+                depth = v.depth;
+                marker = if (v.active) '*' else if (v.open) '+' else ' ';
+                style = .{ .foreground = if (v.active) active_fg else fg, .bold = v.active };
+                dirty = v.dirty;
+                conflict = v.external_change;
+            },
+            .empty => {
+                label = "파일을 열면 트리가 표시됩니다";
+            },
+        }
+        const indent: u16 = @min(depth *| 2, cols -| 1);
+        if (indent < cols) try cells.append(allocator, .{ .row = r, .col = indent, .codepoint = marker, .width = 1, .style = style });
+        const state_cols: u16 = (if (dirty) @as(u16, 2) else 0) + (if (conflict) @as(u16, 2) else 0);
+        const end = cols -| state_cols;
+        if (indent +| 2 < end)
+            _ = try appendEllipsizedTitle(allocator, &cells, label, r, indent + 2, end, style, false, .head);
+        if (dirty and cols >= 2)
+            try cells.append(allocator, .{ .row = r, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } });
+        if (conflict and cols >= 4)
+            try cells.append(allocator, .{ .row = r, .col = cols - 4, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg, .bold = true } });
+    }
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = @max(visible_rows, 1) },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = visible_rows -| 1 },
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
@@ -1851,6 +1934,7 @@ test "file dock header draws source mode and dirty marker in the reserved contro
         .markdown,
         .source_edit,
         true,
+        false,
         48,
         dim,
         bright,
@@ -1864,6 +1948,39 @@ test "file dock header draws source mode and dirty marker in the reserved contro
         if (cell.col >= 30 and cell.codepoint != 0x25CF) saw_mode_text = true;
     }
     try std.testing.expect(saw_dirty and saw_mode_text);
+}
+
+test "file tree draw list clips to visible rows and marks active dirty conflicts" {
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    const rows = [_]file_tree.Row{
+        .{ .recent_header = .{ .collapsed = false, .count = 1 } },
+        .{ .file = .{
+            .path = "/tmp/doc.md",
+            .label = "doc.md",
+            .depth = 1,
+            .supported = true,
+            .open = true,
+            .active = true,
+            .dirty = true,
+            .external_change = true,
+            .symlink = false,
+        } },
+        .empty,
+    };
+    var dl = try buildFileTreeDrawList(allocator, &rows, 1, 1, 18, dim, bright);
+    defer dl.deinit(allocator);
+    var saw_active = false;
+    var saw_dirty = false;
+    var saw_conflict = false;
+    for (dl.cells) |cell| {
+        try std.testing.expectEqual(@as(u16, 0), cell.row);
+        if (cell.codepoint == '*') saw_active = cell.style.bold and std.meta.eql(cell.style.foreground, bright);
+        if (cell.codepoint == 0x25CF and cell.col == 16) saw_dirty = true;
+        if (cell.codepoint == '!' and cell.col == 14) saw_conflict = true;
+    }
+    try std.testing.expect(saw_active and saw_dirty and saw_conflict);
 }
 
 // 활성 탭(행/세그먼트) 제목은 active_fg + bold, 나머지는 fg + regular로 그려지는지 — 활성 탭 글자 강조.

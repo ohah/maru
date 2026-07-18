@@ -924,6 +924,61 @@ pub export fn maru_macos_app_session_take_file_panel_dirty_sync_action(session: 
     return app_session.takeFilePanelDirtySyncAction() orelse 0;
 }
 
+// FP7 FSEvents adapter: restore가 root set을 교체했으면 1회 reset. 새 root는 아래 take_root로 drain한다. (v123)
+pub export fn maru_macos_app_session_take_file_tree_watch_reset(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeFileTreeWatchReset()) 1 else 0;
+}
+
+pub export fn maru_macos_app_session_take_file_tree_watch_root(
+    session: ?*AppSession,
+    out: ?[*]u8,
+    cap: usize,
+) usize {
+    const app_session = session orelse return 0;
+    const pending = app_session.peekFileTreeWatchRoot() orelse return 0;
+    if (out == null or pending.len > cap) return pending.len;
+    const root = app_session.takeFileTreeWatchRoot() orelse return 0;
+    defer app_session.allocator.free(root);
+    const ptr = out.?;
+    @memcpy(ptr[0..root.len], root);
+    return root.len;
+}
+
+pub export fn maru_macos_app_session_file_tree_changed(
+    session: ?*AppSession,
+    bytes: ?[*]const u8,
+    len: usize,
+) void {
+    const app_session = session orelse return;
+    const ptr = bytes orelse return;
+    app_session.fileTreeChanged(ptr[0..len]);
+}
+
+pub export fn maru_macos_app_session_take_file_tree_reload_action(session: ?*AppSession, conflict_out: ?*u32) u64 {
+    const out = conflict_out orelse return 0;
+    out.* = 0;
+    const app_session = session orelse return 0;
+    const action = app_session.takeFileTreeReloadAction() orelse return 0;
+    out.* = if (action.conflict) 1 else 0;
+    return action.surface_id;
+}
+
+pub export fn maru_macos_app_session_take_file_tree_external_open(
+    session: ?*AppSession,
+    out: ?[*]u8,
+    cap: usize,
+) usize {
+    const app_session = session orelse return 0;
+    const pending = app_session.peekFileTreeExternalOpen() orelse return 0;
+    if (out == null or pending.len > cap) return pending.len;
+    const path = app_session.takeFileTreeExternalOpen() orelse return 0;
+    defer app_session.allocator.free(path);
+    const ptr = out.?;
+    @memcpy(ptr[0..path.len], path);
+    return path.len;
+}
+
 // HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
 // NSColorSampler(OS 화면 색 추출기)를 열고 고른 색을 provide_sampled_color로 되돌린다. take_bell과 같은 1회성. session null=0. (v83)
 pub export fn maru_macos_app_session_take_color_sample_request(session: ?*AppSession) u32 {
@@ -1670,6 +1725,11 @@ const FileBridgeContext = struct {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         return self.session.setFilePanelDirty(self.surface_id, dirty);
     }
+
+    fn resolveExternalChange(raw: *anyopaque, success: bool) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.completeFileConflictReload(self.surface_id, success);
+    }
 };
 
 // FP4: surface-pinned file provider를 넣는 session-scoped bridge. query/fill 모두 같은 정책을 다시 계산하므로 파일이
@@ -1692,6 +1752,7 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .read_asset_fn = FileBridgeContext.readAsset,
         .write_fn = FileBridgeContext.write,
         .set_dirty_fn = FileBridgeContext.setDirty,
+        .resolve_external_change_fn = FileBridgeContext.resolveExternalChange,
     };
     const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
         allocator,
@@ -3989,6 +4050,39 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 176), @sizeOf(AppFrameSummary)); // quit_decision(u32,v90)+web_surfaces_present(u32,v102)가 168→176 정렬 패딩을 채워 176 불변
     try std.testing.expectEqual(@as(usize, 8), @alignOf(AppFrameSummary));
 }
+
+test "FP7 watch-root ABI short output reports required length without consuming one-shot" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "page.md", .data = "# page" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root, "page.md" });
+    defer std.testing.allocator.free(path);
+
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_app_session_open_file_panel_path(session, path.ptr, path.len));
+
+    const required = maru_macos_app_session_take_file_tree_watch_root(session, null, 0);
+    try std.testing.expect(required > 1);
+    var short: [1]u8 = undefined;
+    try std.testing.expectEqual(required, maru_macos_app_session_take_file_tree_watch_root(session, &short, short.len));
+    const out = try std.testing.allocator.alloc(u8, required);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(required, maru_macos_app_session_take_file_tree_watch_root(session, out.ptr, out.len));
+    try std.testing.expectEqual(@as(usize, 0), maru_macos_app_session_take_file_tree_watch_root(session, out.ptr, out.len));
+}
 test "macOS app exported session API reports null outputs as ABI errors" {
     const config: AppSessionConfig = .{
         .abi_version = abi_version,
@@ -4054,6 +4148,15 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_file_panel_entry(null, 1, &file_panel_path, &file_panel_path_len));
     try std.testing.expect(file_panel_path == null);
     try std.testing.expectEqual(@as(usize, 0), file_panel_path_len);
+    // v123 FP7 파일 트리: null session은 watcher/reload/external-open 신호 없음이며 changed event는 무동작.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_watch_reset(null));
+    var file_tree_buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), maru_macos_app_session_take_file_tree_watch_root(null, &file_tree_buf, file_tree_buf.len));
+    maru_macos_app_session_file_tree_changed(null, "/tmp/a", 6);
+    var file_tree_conflict: u32 = 99;
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_tree_reload_action(null, &file_tree_conflict));
+    try std.testing.expectEqual(@as(u32, 0), file_tree_conflict);
+    try std.testing.expectEqual(@as(usize, 0), maru_macos_app_session_take_file_tree_external_open(null, &file_tree_buf, file_tree_buf.len));
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
     // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.

@@ -90,8 +90,8 @@ pub fn headerConflictRect(g: Geometry, cell_width_px: u32) ?Rect {
 pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetrics {
     if (cell_width_px == 0 or entry_count == 0 or g.tab_bar.w == 0) return null;
     const cols: u16 = @intCast(@min(g.tab_bar.w / cell_width_px, @as(u32, std.math.maxInt(u16))));
-    if (cols < 3) return null;
-    const tab_cols = cols - 2; // 우측 2칸은 접기 버튼.
+    if (cols < 1) return null;
+    const tab_cols = cols; // 접기 버튼은 titlebar 띠 우측 dock 토글로 일원화 — 탭바는 예약 없이 전폭.
     const count: u16 = @intCast(@min(entry_count, std.math.maxInt(u16)));
     const tab_width = @min(default_tab_cols, @max(@as(u16, 1), tab_cols / count));
     return .{ .cols = cols, .tab_cols = tab_cols, .tab_width = tab_width };
@@ -112,13 +112,6 @@ pub fn tabIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64
     if (col >= m.tab_cols) return null;
     const index: usize = @intCast(col / m.tab_width);
     return if (index < entry_count) index else null;
-}
-
-pub fn collapseAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64) bool {
-    if (!layout_math.pointInRect(x_px, y_px, g.tab_bar)) return false;
-    const m = tabMetrics(g, cell_width_px, entry_count) orelse return false;
-    const control_x = g.tab_bar.x + @as(u32, m.tab_cols) * cell_width_px;
-    return x_px >= @as(f64, @floatFromInt(control_x));
 }
 
 pub const Input = struct {
@@ -214,7 +207,10 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
         layout_math.ptToPx(tree_size_pt, scale_milli);
     const tree_w = if (max_tree_w < min_tree_w) 0 else std.math.clamp(requested_tree_w, min_tree_w, max_tree_w);
     const content_w = dock.w -| tree_w;
-    const tree_header_h = @min(chrome_h, body_h);
+    // 탐색기(트리) 열은 에디터의 tab_bar+header 아래(body_y)가 아니라 **도크 최상단(dock.y)부터 전체 높이**로 둔다 —
+    // VSCode식으로 "탐색기" 헤더가 에디터 탭 바("파일명")·터미널과 같은 높이(띠 바로 아래)에 붙는다. 트리는 별도 열
+    // (x=dock.x+content_w)이라 에디터 chrome과 세로로 겹치지 않는다(사용자 피드백: 트리가 갭 없이 위로 올라와야).
+    const tree_header_h = @min(chrome_h, dock.h);
     return .{
         .terminal = terminal,
         .dock = dock,
@@ -224,10 +220,10 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
         // byte-level 호출 형태를 유지하면서 project tree 위 빈 chrome을 잘못 클릭하지 않는다.
         .tab_bar = .{ .x = dock.x, .y = dock.y, .w = content_w, .h = tab_h },
         .header = .{ .x = dock.x, .y = dock.y + tab_h, .w = content_w, .h = header_h },
-        .tree = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = body_h },
-        .tree_divider = .{ .x = dock.x + content_w, .y = body_y, .w = @min(@as(u32, 1), tree_w), .h = body_h },
-        .tree_header = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = tree_header_h },
-        .tree_content = .{ .x = dock.x + content_w, .y = body_y + tree_header_h, .w = tree_w, .h = body_h -| tree_header_h },
+        .tree = .{ .x = dock.x + content_w, .y = dock.y, .w = tree_w, .h = dock.h },
+        .tree_divider = .{ .x = dock.x + content_w, .y = dock.y, .w = @min(@as(u32, 1), tree_w), .h = dock.h },
+        .tree_header = .{ .x = dock.x + content_w, .y = dock.y, .w = tree_w, .h = tree_header_h },
+        .tree_content = .{ .x = dock.x + content_w, .y = dock.y + tree_header_h, .w = tree_w, .h = dock.h -| tree_header_h },
         .content = .{ .x = dock.x, .y = body_y, .w = content_w, .h = body_h },
         .dock_size_px = dock_size_px,
     };
@@ -358,11 +354,11 @@ test "resize pointer maps backing pixels to persisted points and rejects non-fin
     try std.testing.expectEqual(@as(?u32, null), sizePtForPointer(g, .right, std.math.nan(f64), 0, 2000));
 }
 
-test "dock tab metrics reserve a collapse control and share render hit rects" {
+test "dock tab metrics use the full tab bar and share render hit rects" {
     const g = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
     const second = tabRect(g, 10, 3, 1).?;
     try std.testing.expectEqual(@as(?usize, 1), tabIndexAt(g, 10, 3, @floatFromInt(second.x + 1), @floatFromInt(second.y + 1)));
-    try std.testing.expect(collapseAt(g, 10, 3, @floatFromInt(g.tab_bar.x + g.tab_bar.w - 1), @floatFromInt(g.tab_bar.y + 1)));
+    // 접기 버튼은 탭바에서 제거(titlebar 띠 dock 토글로 일원화) — 우측 끝도 탭 영역이다.
     const one = tabRect(g, 10, 1, 0).?;
     try std.testing.expectEqual(@as(u32, default_tab_cols * 10), one.w);
     try std.testing.expectEqual(@as(?usize, null), tabIndexAt(g, 10, 1, @floatFromInt(one.x + one.w + 1), @floatFromInt(one.y + 1)));

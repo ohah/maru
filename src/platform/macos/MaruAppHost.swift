@@ -3768,6 +3768,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if let focusedPanel, focusedPanel.filePanelKind != 0 {
             surface.focusedFilePanelSurfaceId = focusedPanel.surfaceId
             surface.filePanelFocusOverridden = false
+            _ = maru_macos_app_session_focus_file_panel_surface(session, focusedPanel.surfaceId)
             return // 도크 축 소유: workspace pane 활성화/D1 회수 대상이 아니다.
         }
         if surface.filePanelFocusOverridden,

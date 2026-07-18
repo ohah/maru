@@ -17,6 +17,11 @@ pub const Action = union(enum) {
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와
     // 사용자 keybind에서도 같은 액션을 쓴다. 파일 선택/경로 I/O는 Swift, 종류·도크 라우팅 정책은 Zig가 소유한다.
     open_file_panel,
+    // FP8 도크 editor group 전용 커맨드. 일반 pane split과 구분해 팔릿에서 포커스와 무관하게 명시 실행할 수 있고,
+    // 기본 키바인딩은 두지 않는다. 새 group은 빈 leaf로 생성되어 다음 파일 열기/트리 클릭의 target이 된다.
+    split_file_panel_horizontal,
+    split_file_panel_vertical,
+    close_file_panel_group,
     close_term,
     previous_term,
     next_term,
@@ -155,6 +160,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
     if (std.mem.eql(u8, value, "new_web_tab")) return .new_web_tab;
     if (std.mem.eql(u8, value, "open_file_panel")) return .open_file_panel;
+    if (std.mem.eql(u8, value, "split_file_panel_horizontal")) return .split_file_panel_horizontal;
+    if (std.mem.eql(u8, value, "split_file_panel_vertical")) return .split_file_panel_vertical;
+    if (std.mem.eql(u8, value, "close_file_panel_group")) return .close_file_panel_group;
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
     if (std.mem.eql(u8, value, "next_term")) return .next_term;
@@ -233,6 +241,9 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.new_term, parseAction("new_term").?);
     try std.testing.expectEqual(Action.new_web_tab, parseAction("new_web_tab").?);
     try std.testing.expectEqual(Action.open_file_panel, parseAction("open_file_panel").?);
+    try std.testing.expectEqual(Action.split_file_panel_horizontal, parseAction("split_file_panel_horizontal").?);
+    try std.testing.expectEqual(Action.split_file_panel_vertical, parseAction("split_file_panel_vertical").?);
+    try std.testing.expectEqual(Action.close_file_panel_group, parseAction("close_file_panel_group").?);
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);
     try std.testing.expectEqual(Action.previous_term, parseAction("previous_term").?);

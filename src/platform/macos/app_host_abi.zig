@@ -908,6 +908,12 @@ pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surf
     };
 }
 
+// native WKWebView firstResponder surface를 FP8 DockPanel.focused_group에 반영한다. 1=파일 surface, 0=아님/null. (v124)
+pub export fn maru_macos_app_session_focus_file_panel_surface(session: ?*AppSession, surface_id: u64) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.focusFilePanelSurface(surface_id)) 1 else 0;
+}
+
 pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppSession, surface_id_out: ?*u64) i32 {
     const app_session = session orelse return -1;
     const out = surface_id_out orelse return -1;
@@ -4148,6 +4154,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_file_panel_entry(null, 1, &file_panel_path, &file_panel_path_len));
     try std.testing.expect(file_panel_path == null);
     try std.testing.expectEqual(@as(usize, 0), file_panel_path_len);
+    // v124 FP8 native file-panel focus sync: null session은 파일 surface가 아니므로 0.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_focus_file_panel_surface(null, 1));
     // v123 FP7 파일 트리: null session은 watcher/reload/external-open 신호 없음이며 changed event는 무동작.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_watch_reset(null));
     var file_tree_buf: [8]u8 = undefined;

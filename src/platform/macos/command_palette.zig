@@ -58,9 +58,9 @@ test "filter: 빈 쿼리=전부·부분일치·actionAt 해석" {
     try filter(allocator, "", &out);
     try std.testing.expectEqual(command_catalog.entries.len, out.items.len); // 빈 쿼리 = 전부
 
-    // "split" → Split Right / Split Down 2개. 첫 항목 = split_horizontal.
+    // "split" → terminal pane 2개 + file panel group 2개. 첫 항목은 기존 split_horizontal 순서를 유지한다.
     try filter(allocator, "split", &out);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqual(@as(usize, 4), out.items.len);
     try std.testing.expect(actionAt(out.items, 0).? == .split_horizontal);
     try std.testing.expect(actionAt(out.items, 1).? == .split_vertical);
     // 선택이 범위 밖이면 null(크래시 없음).

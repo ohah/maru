@@ -1134,6 +1134,22 @@ fn dimRgb(c: maru.color.Rgb) maru.color.Rgb {
     };
 }
 
+/// Artifact 헤더는 절대경로(`/Users/...`)를 좁은 밴드에 밀어 넣지 않고 문맥 있는 마지막 두 component를
+/// breadcrumb로 보인다(`docs / web-panel.md`). 파일 capability의 실제 절대경로는 DockEntry에 그대로 남는다.
+fn fileDockBreadcrumbAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = std.fs.path.basename(path);
+    const parent_path = std.fs.path.dirname(path) orelse return allocator.dupe(u8, file);
+    const parent = std.fs.path.basename(parent_path);
+    if (parent.len == 0 or std.mem.eql(u8, parent, std.fs.path.sep_str)) return allocator.dupe(u8, file);
+    return std.fmt.allocPrint(allocator, "{s} / {s}", .{ parent, file });
+}
+
+test "file dock breadcrumb keeps the useful parent instead of the absolute home prefix" {
+    const text = try fileDockBreadcrumbAlloc(std.testing.allocator, "/Users/user/project/docs/web-panel.md");
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("docs / web-panel.md", text);
+}
+
 /// haystack이 prefix로 시작하는가(대소문자 무시). 프로세스명 분류용 — 부분일치(claudia·mycodex 오탐)를 피하면서
 /// 변종("claude-code"·"codex-cli")은 잡는다.
 fn startsWithCi(haystack: []const u8, prefix: []const u8) bool {
@@ -2479,6 +2495,25 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// 세로 폭이 좁은 창에서는 Artifact의 우측 column 대신 하단 band가 더 읽기 쉽다. 파일 도크의
+    /// tree/entry 상태는 그대로 두고 side만 바꾸며, side별 기본 크기를 다시 쓰도록 명시 크기는 비운다.
+    /// 커맨드 팔릿에서 실행하므로 색/테마와 무관한 구조 전환이고, 모든 terminal pane의 grid를 즉시 갱신한다.
+    fn toggleFilePanelDockSide(self: *AppSession) void {
+        if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return;
+        self.dock.side = switch (self.dock.side) {
+            .right => .bottom,
+            .bottom => .right,
+        };
+        self.dock.size = 0;
+        self.dock_resize_drag_active = false;
+        self.dock_group_divider_drag = null;
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        self.recomputeActivePaneRect();
+        self.last_resize_size = null;
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+    }
+
     fn dockCollapsedToggleRect(self: *const AppSession) ?maru.session.SplitRect {
         if (!self.dock_initialized or self.chrome_minimal or !self.dock.collapsed or self.dock.entryCountTotal() == 0 or self.cell_width_px == 0) return null;
         const w = @min(2 * self.cell_width_px, self.backing_width_px);
@@ -3220,7 +3255,9 @@ pub const AppSession = struct {
         const y1: f64 = @floatFromInt(g.divider.y + g.divider.h);
         return switch (self.dock.side) {
             .right => x_px >= x0 - grab and x_px < x1 + grab and y_px >= y0 and y_px < y1,
-            .bottom => y_px >= y0 - grab and y_px < y1 + grab and x_px >= x0 and x_px < x1,
+            // bottom dock의 안쪽(+y)은 곧 파일 탭바라 확장하면 탭/접기 클릭을 전부 resize가 삼킨다. WKWebView
+            // 본문은 tab+header 아래라 outer seam에 직접 닿지 않으므로 terminal 쪽(-y)+실제 divider까지만 잡는다.
+            .bottom => y_px >= y0 - grab and y_px < y1 and x_px >= x0 and x_px < x1,
         };
     }
 
@@ -7203,6 +7240,7 @@ pub const AppSession = struct {
             .split_file_panel_horizontal => self.splitFocusedDockGroup(.horizontal),
             .split_file_panel_vertical => self.splitFocusedDockGroup(.vertical),
             .close_file_panel_group => self.closeFocusedDockGroup(),
+            .toggle_file_panel_dock_side => self.toggleFilePanelDockSide(),
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
             .close_term => self.requestClose(.term_or_pane),
             .next_term => self.focusTermRelative(1),
@@ -8214,7 +8252,7 @@ pub const AppSession = struct {
                 }
             }
             try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
-            const visible_rows = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree.h / self.cell_height_px;
+            const visible_rows = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
             self.file_tree_scroll_rows = @min(
                 self.file_tree_scroll_rows,
                 self.file_tree_rows.items.len -| @as(usize, visible_rows),
@@ -8227,7 +8265,7 @@ pub const AppSession = struct {
 
     fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
         if (!self.dockVisible() or self.cell_height_px == 0) return null;
-        const tree_rect = self.dockGeometry().tree;
+        const tree_rect = self.dockGeometry().tree_content;
         if (!layout_math.pointInRect(x_px, y_px, tree_rect)) return null;
         const local: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(tree_rect.y))) /
             @as(f64, @floatFromInt(self.cell_height_px)));
@@ -8238,7 +8276,7 @@ pub const AppSession = struct {
     }
 
     fn fileTreeEffectiveScroll(self: *const AppSession) usize {
-        const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree.h / self.cell_height_px;
+        const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
         return @min(self.file_tree_scroll_rows, self.file_tree_rows.items.len -| @as(usize, visible));
     }
 
@@ -12470,8 +12508,8 @@ pub const AppSession = struct {
         // tab_wheel_accum 경로는 원본 delta_x). 방향 판정(위 wheel_accum 부호)은 배수>0이라 부호 불변이라 영향 없다.
         const scaled_delta_y = delta_y * @as(f64, self.appearance.scroll_multiplier);
         const lines = wheelDeltaToLines(&self.wheel_accum, scaled_delta_y, precise, self.cell_height_px, self.scale_milli);
-        if (self.dockVisible() and layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree)) {
-            const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree.h / self.cell_height_px;
+        if (self.dockVisible() and layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content)) {
+            const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
             const max_scroll = self.file_tree_rows.items.len -| @as(usize, visible);
             const next = @as(i64, @intCast(self.fileTreeEffectiveScroll())) - @as(i64, lines);
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
@@ -13153,6 +13191,16 @@ pub const AppSession = struct {
                     return;
                 }
             }
+            // outer divider의 확장 grab band는 dock editor/tree 안쪽과 겹친다. 내부 hit-test보다 먼저 잡아야
+            // 정확한 divider 선이 dockGroupAtPoint의 null 조기 반환에 막히지 않고, WKWebView가 통과시킨 안쪽
+            // seam 클릭도 파일/그룹 클릭으로 오인되지 않는다.
+            if (self.dockDividerAtPoint(x_px, y_px)) {
+                self.dock_resize_drag_active = true;
+                self.drag_autoscroll = 0;
+                self.mouse_drag_selecting = false;
+                self.metal_dirty = true;
+                return;
+            }
             if (self.dockVisible()) {
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
                     self.activateFileTreeRow(row_index);
@@ -13198,29 +13246,22 @@ pub const AppSession = struct {
                     }
                     return;
                 }
-                if (dock_layout.headerControlRect(g, self.cell_width_px)) |control| {
-                    if (layout_math.pointInRect(x_px, y_px, control)) {
-                        if (group.active) |index| if (index < group.entries.items.len) {
-                            const entry = &group.entries.items[index];
-                            if (entry.kind == .markdown) {
+                if (dock_layout.headerModeAt(g, self.cell_width_px, x_px, y_px)) |requested_mode| {
+                    if (group.active) |index| if (index < group.entries.items.len) {
+                        const entry = &group.entries.items[index];
+                        if (entry.kind == .markdown) {
+                            if (entry.mode != requested_mode) {
                                 self.markFilePanelDirtySyncPending(entry);
-                                entry.mode = if (entry.mode == .read) .source_edit else .read;
+                                entry.mode = requested_mode;
                                 self.file_panel_mode_pending = entry.surface_id;
                                 self.metal_dirty = true;
                             }
-                        };
-                        return;
-                    }
+                        }
+                    };
+                    return;
                 }
                 if (layout_math.pointInRect(x_px, y_px, g.tab_bar) or layout_math.pointInRect(x_px, y_px, g.header)) return;
             }
-        }
-        if (kind == 1 and button == 0 and self.dockDividerAtPoint(x_px, y_px)) {
-            self.dock_resize_drag_active = true;
-            self.drag_autoscroll = 0;
-            self.mouse_drag_selecting = false;
-            self.metal_dirty = true;
-            return;
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
         // 사이드바가 없어(폭 0) 경계 드래그 비활성(onResizeEdge가 x=0 근처를 잡아 의도치 않게 트리거되는 것 방지).
@@ -15002,6 +15043,16 @@ pub const AppSession = struct {
                 return .link;
             }
         }
+        // outer dock divider의 grab band는 일부가 dock/WKWebView 안쪽으로 겹친다. 내부 tree/group보다 먼저
+        // 판정해야 그 겹친 구간도 resize cursor가 되고, 정확한 1px divider 위가 group miss로 사라지지 않는다.
+        if (self.dockDividerAtPoint(x_px, y_px)) {
+            self.setHoveredTab(null);
+            self.clearHoverUrlAnchor();
+            return switch (self.dock.side) {
+                .right => .resize_h,
+                .bottom => .resize_v,
+            };
+        }
         if (self.dockVisible()) {
             const dg = self.dockGeometry();
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
@@ -15031,17 +15082,10 @@ pub const AppSession = struct {
                         if (dock_layout.headerConflictRect(g, self.cell_width_px)) |conflict|
                             if (layout_math.pointInRect(x_px, y_px, conflict)) return .link;
                     };
+                    if (dock_layout.headerModeAt(g, self.cell_width_px, x_px, y_px) != null) return .link;
                 }
                 return .default;
             }
-        }
-        if (self.dockDividerAtPoint(x_px, y_px)) {
-            self.setHoveredTab(null);
-            self.clearHoverUrlAnchor();
-            return switch (self.dock.side) {
-                .right => .resize_h,
-                .bottom => .resize_v,
-            };
         }
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
         const bar_hover = self.updateHoveredTab(x_px, y_px);
@@ -17698,14 +17742,22 @@ pub const AppSession = struct {
                         const gg = dock_layout.groupGeometry(dg, leaf.rect);
                         self.appendBarBgQuad(gg.tab_bar, self.chromeQuadBg(self.sidebarBg()));
                         self.appendBarBgQuad(gg.header, self.chromeQuadBg(self.sidebarBg()));
-                        if (group.active) |active| if (dock_layout.tabRect(gg, self.cell_width_px, group.entries.items.len, active)) |r|
+                        if (group.active) |active| if (active < group.entries.items.len) {
+                            const entry = group.entries.items[active];
+                            if (entry.kind == .markdown) if (dock_layout.headerModeRect(gg, self.cell_width_px, entry.mode)) |mode_rect|
+                                self.appendBarBgQuad(mode_rect, self.chromeQuadBg(self.sidebarActiveBg()));
+                        };
+                        if (group.active) |active| if (dock_layout.tabRect(gg, self.cell_width_px, group.entries.items.len, active)) |r| {
                             self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarActiveBg()));
-                        if (group == self.dock.focusedGroupConst() and gg.tab_bar.h > 0) self.appendBarBgQuad(.{
-                            .x = gg.tab_bar.x,
-                            .y = gg.tab_bar.y,
-                            .w = gg.tab_bar.w,
-                            .h = @min(@as(u32, 1), gg.tab_bar.h),
-                        }, self.dividerColor());
+                            // Artifact처럼 활성 파일 탭의 **해당 세그먼트만** accent top strip을 갖는다. 옛 구현은
+                            // focused group 전체 위에 1px 중립선을 그려 어떤 파일이 활성인지 약했다.
+                            self.appendBarBgQuad(.{
+                                .x = r.x,
+                                .y = r.y,
+                                .w = r.w,
+                                .h = @min(@as(u32, 2), r.h),
+                            }, packOpaqueRgb(self.appearance.theme.accent));
+                        };
                     }
                     for (self.dock_dividers_scratch.items) |seg| self.appendBarBgQuad(switch (seg.direction) {
                         .horizontal => .{ .x = seg.pos, .y = seg.bounds.y, .w = @min(@as(u32, 1), seg.bounds.x + seg.bounds.w -| seg.pos), .h = seg.bounds.h },
@@ -17713,9 +17765,15 @@ pub const AppSession = struct {
                     }, self.dividerColor());
                 }
                 self.appendBarBgQuad(dg.tree, self.chromeQuadBg(self.sidebarBg()));
-                if (dg.tree.w > 0 and self.cell_height_px > 0) {
+                if (dg.tree_header.w > 0 and dg.tree_header.h > 0) self.appendBarBgQuad(.{
+                    .x = dg.tree_header.x,
+                    .y = dg.tree_header.y + dg.tree_header.h -| 1,
+                    .w = dg.tree_header.w,
+                    .h = 1,
+                }, self.dividerColor());
+                if (dg.tree_content.w > 0 and self.cell_height_px > 0) {
                     const start = self.fileTreeEffectiveScroll();
-                    const visible: usize = @intCast(dg.tree.h / self.cell_height_px);
+                    const visible: usize = @intCast(dg.tree_content.h / self.cell_height_px);
                     const end = @min(self.file_tree_rows.items.len, start + visible);
                     for (self.file_tree_rows.items[start..end], start..) |row, index| {
                         const active = switch (row) {
@@ -17726,9 +17784,9 @@ pub const AppSession = struct {
                         const hovered = self.file_tree_hovered_row == index;
                         if (!active and !hovered) continue;
                         self.appendBarBgQuad(.{
-                            .x = dg.tree.x,
-                            .y = dg.tree.y + @as(u32, @intCast(index - start)) * self.cell_height_px,
-                            .w = dg.tree.w,
+                            .x = dg.tree_content.x,
+                            .y = dg.tree_content.y + @as(u32, @intCast(index - start)) * self.cell_height_px,
+                            .w = dg.tree_content.w,
                             .h = self.cell_height_px,
                         }, self.chromeQuadBg(if (active) self.sidebarActiveBg() else self.sidebarHoverBg()));
                     }
@@ -17997,6 +18055,9 @@ pub const AppSession = struct {
                             defer titles.deinit(self.allocator);
                             for (group.entries.items) |entry| titles.append(self.allocator, std.fs.path.basename(entry.path)) catch break;
                             const active_path: []const u8 = if (group.active) |i| if (i < group.entries.items.len) group.entries.items[i].path else "" else "";
+                            const breadcrumb_owned = if (active_path.len > 0) fileDockBreadcrumbAlloc(self.allocator, active_path) catch null else null;
+                            defer if (breadcrumb_owned) |owned| self.allocator.free(owned);
+                            const display_path = breadcrumb_owned orelse active_path;
                             const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                             const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                             const active_entry = if (group.active) |i| if (i < group.entries.items.len) &group.entries.items[i] else null else null;
@@ -18004,7 +18065,7 @@ pub const AppSession = struct {
                                 self.allocator,
                                 titles.items,
                                 group.active,
-                                active_path,
+                                display_path,
                                 if (active_entry) |entry| entry.kind else .markdown,
                                 if (active_entry) |entry| entry.mode else .read,
                                 if (active_entry) |entry| entry.dirty else false,
@@ -18019,10 +18080,19 @@ pub const AppSession = struct {
                     };
                     if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
                         const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
-                        const visible_rows: u16 = @intCast(@min(dg.tree.h / self.cell_height_px, @as(u32, std.math.maxInt(u16))));
+                        const visible_rows: u16 = @intCast(@min(dg.tree_content.h / self.cell_height_px, @as(u32, std.math.maxInt(u16))));
+                        const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
+                        const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+                        if (tree_cols > 0 and dg.tree_header.h > 0) {
+                            if (coretext_frame_builder.buildFileTreeHeaderDrawList(self.allocator, tree_cols, dock_active_fg)) |hdl| {
+                                self.collectShaped(&collected, hdl, pane_frame_builder, .{ .pane = .{
+                                    .origin_x = dg.tree_header.x,
+                                    .origin_y = dg.tree_header.y,
+                                    .colors = tabbar_colors,
+                                } });
+                            } else |_| {}
+                        }
                         if (tree_cols > 0 and visible_rows > 0) {
-                            const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
-                            const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                             if (coretext_frame_builder.buildFileTreeDrawList(
                                 self.allocator,
                                 self.file_tree_rows.items,
@@ -18033,8 +18103,8 @@ pub const AppSession = struct {
                                 dock_active_fg,
                             )) |tdl| {
                                 self.collectShaped(&collected, tdl, pane_frame_builder, .{ .pane = .{
-                                    .origin_x = dg.tree.x,
-                                    .origin_y = dg.tree.y,
+                                    .origin_x = dg.tree_content.x,
+                                    .origin_y = dg.tree_content.y,
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
@@ -33443,6 +33513,28 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try session.collectWebSurfaces(&surfaces);
     for (surfaces.items) |surface| try std.testing.expect(!surface.visible); // drag 세션 단위 native view hide
     session.dock_resize_drag_active = false;
+
+    // 정확한 1px outer divider와 dock 안쪽 grab band 모두 내부 group/tree보다 먼저 resize를 시작한다.
+    // 수정 전에는 divider 선이 dockGroupAtPoint(null)의 조기 return에 막혀 mouse down이 사라졌다.
+    const dock_size_before_drag = session.dock.size;
+    const outer_divider_y: f64 = @floatFromInt(right.divider.y + right.divider.h / 2);
+    session.mouse(1, @floatFromInt(right.divider.x), outer_divider_y, 0, 0);
+    try std.testing.expect(session.dock_resize_drag_active);
+    session.mouse(2, @floatFromInt(right.divider.x -| 80), outer_divider_y, 0, 0);
+    try std.testing.expect(session.dock.size > dock_size_before_drag);
+    session.mouse(3, @floatFromInt(right.divider.x -| 80), outer_divider_y, 0, 0);
+    try std.testing.expect(!session.dock_resize_drag_active);
+
+    // 세로 모니터/좁은 창용 구조 전환: 같은 파일 상태를 유지한 채 right↔bottom을 오가고
+    // 각 방향의 기본 크기를 다시 계산한다. 커맨드 실행 즉시 terminal 영역도 재배치된다.
+    session.dispatchAppAction(.toggle_file_panel_dock_side);
+    try std.testing.expectEqual(dock_panel.Side.bottom, session.dock.side);
+    try std.testing.expectEqual(@as(u32, 0), session.dock.size);
+    try std.testing.expect(session.dockGeometry().dock.h > 0);
+    session.dispatchAppAction(.toggle_file_panel_dock_side);
+    try std.testing.expectEqual(dock_panel.Side.right, session.dock.side);
+    try std.testing.expectEqual(@as(u32, 0), session.dock.size);
+    try std.testing.expect(session.dockGeometry().dock.w > 0);
 
     session.dock.side = .bottom;
     session.dock.size = 220;

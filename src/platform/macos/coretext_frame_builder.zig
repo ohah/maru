@@ -739,8 +739,8 @@ pub fn buildPaneGripDrawList(
     };
 }
 
-/// FP3 파일 도크 크롬. 0행은 균등 탭+우측 2칸 접기 버튼, 1행은 활성 파일 경로다.
-/// 탭 분할은 session/dock_layout.tabMetrics와 동일한 `tab_cols=cols-2`, `tab_width=max(1, tab_cols/count)`다.
+/// FP3 파일 도크 크롬. 0행은 고정폭 우선 탭+우측 2칸 접기 버튼, 1행은 breadcrumb와 모드 선택이다.
+/// 탭 분할은 session/dock_layout.tabMetrics와 동일하게 18칸 상한을 쓰고, 넘칠 때만 균등 축소한다.
 pub fn buildFileDockChromeDrawList(
     allocator: std.mem.Allocator,
     titles: []const []const u8,
@@ -759,7 +759,7 @@ pub fn buildFileDockChromeDrawList(
     if (cols >= 3 and titles.len > 0) {
         const tab_cols: u16 = cols - 2;
         const count: u16 = @intCast(@min(titles.len, std.math.maxInt(u16)));
-        const tab_width = @max(@as(u16, 1), tab_cols / count);
+        const tab_width = @min(dock_layout.default_tab_cols, @max(@as(u16, 1), tab_cols / count));
         for (titles, 0..) |title, i| {
             const start = std.math.mul(u32, @intCast(i), tab_width) catch break;
             if (start >= tab_cols) break;
@@ -772,17 +772,13 @@ pub fn buildFileDockChromeDrawList(
         const control_start = cols - control_cols;
         if (control_start > 1)
             _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, control_start, .{ .foreground = fg }, false, .head);
-        const mode_label = switch (active_kind) {
-            .html => "읽기",
-            .markdown => switch (active_mode) {
-                .read => "[읽기]  소스 편집",
-                .source_edit => "읽기  [소스 편집]",
-            },
-        };
         const state_cols: u16 = (if (active_dirty) @as(u16, 2) else 0) + (if (active_external_change) @as(u16, 2) else 0);
         const mode_end = cols -| state_cols;
-        if (mode_end > control_start)
-            _ = try appendEllipsizedTitle(allocator, &cells, mode_label, 1, control_start, mode_end, .{ .foreground = active_fg, .bold = active_kind == .markdown }, false, .tail);
+        const mode_mid = control_start + (cols - control_start) / 2;
+        if (mode_mid > control_start + 1)
+            _ = try appendEllipsizedTitle(allocator, &cells, "렌더", 1, control_start + 1, mode_mid, .{ .foreground = active_fg, .bold = active_kind == .markdown and active_mode == .read }, false, .head);
+        if (active_kind == .markdown and mode_end > mode_mid + 1)
+            _ = try appendEllipsizedTitle(allocator, &cells, "편집", 1, mode_mid + 1, mode_end, .{ .foreground = active_fg, .bold = active_mode == .source_edit }, false, .head);
         if (active_dirty and cols >= 2)
             try cells.append(allocator, .{ .row = 1, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●
         if (active_external_change and cols >= 4)
@@ -799,6 +795,27 @@ pub fn buildFileDockChromeDrawList(
 
 /// FP7 project tree snapshot projection. rows는 이미 L2에서 natural-sort/open/dirty 상태를 결합한 immutable view다.
 /// 이 함수는 보이는 row만 셀로 바꾸며 path나 filesystem을 읽지 않는다.
+pub const file_tree_inset_cols: u16 = 1;
+
+/// Artifact의 우측 독립 탐색기 제목 행. 실제 tree rows와 별도 draw list라 스크롤·클릭 인덱스에 섞이지 않는다.
+pub fn buildFileTreeHeaderDrawList(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    if (cols > file_tree_inset_cols)
+        _ = try appendEllipsizedTitle(allocator, &cells, "탐색기", 0, file_tree_inset_cols, cols, .{ .foreground = fg, .bold = true }, false, .head);
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 pub fn buildFileTreeDrawList(
     allocator: std.mem.Allocator,
     rows: []const file_tree.Row,
@@ -855,7 +872,7 @@ pub fn buildFileTreeDrawList(
                 label = "파일을 열면 트리가 표시됩니다";
             },
         }
-        const indent: u16 = @min(depth *| 2, cols -| 1);
+        const indent: u16 = @min(file_tree_inset_cols +| depth *| 2, cols -| 1);
         if (indent < cols) try cells.append(allocator, .{ .row = r, .col = indent, .codepoint = marker, .width = 1, .style = style });
         const state_cols: u16 = (if (dirty) @as(u16, 2) else 0) + (if (conflict) @as(u16, 2) else 0);
         const end = cols -| state_cols;

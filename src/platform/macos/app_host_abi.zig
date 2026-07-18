@@ -3992,6 +3992,15 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
     try std.testing.expectEqual(@as(u32, c.MARU_MACOS_APP_HOST_ABI_VERSION), abi_version);
+    try std.testing.expectEqual(@as(u16, @intCast(c.MaruAppHostMetalCellRoleDockToggle)), maru.renderer.metal_frame.native_cell_role_dock_toggle);
+    const dock_policy = c.maru_metal_cell_glyph_policy(c.MaruAppHostMetalCellRoleDockToggle, 13, 30, 8, 18);
+    try std.testing.expectEqual(@as(u32, 1), dock_policy.is_dock_toggle);
+    try std.testing.expectApproxEqAbs(@as(f32, 13.0 / 8.0), dock_policy.scale_x, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 30.0 / 18.0), dock_policy.scale_y, 0.0001);
+    const normal_pua_policy = c.maru_metal_cell_glyph_policy(0, 13, 30, 8, 18);
+    try std.testing.expectEqual(@as(u32, 0), normal_pua_policy.is_dock_toggle);
+    try std.testing.expectEqual(@as(f32, 1), normal_pua_policy.scale_x);
+    try std.testing.expectEqual(@as(f32, 1), normal_pua_policy.scale_y);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_REGULAR)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.regular)));
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_DIRECTORY)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.directory)));
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_SYMLINK)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.symlink)));

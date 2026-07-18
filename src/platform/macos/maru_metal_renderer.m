@@ -332,7 +332,8 @@ static void maru_fill_cell_quad(
     float cell_h,
     float drawable_w,
     float drawable_h,
-    float glyph_scale, // 글리프 확대 배율(1.0=무확대). 헤더 줄0 아이콘(1.7×)·사이드바 에이전트 심볼(1.1×)이 >1.
+    float glyph_scale_x, // 글리프 가로 확대 배율(1.0=무확대). 도크 토글은 producer atlas extent에서 파생.
+    float glyph_scale_y, // 글리프 세로 확대 배율. x와 분리해 정수 px로 굳힌 atlas 크기를 그대로 소비한다.
     uint32_t divider_thickness_px // pane divider(reserved 30 세로·31 가로)의 device px 두께(config split.divider-thickness → app_session). seam 중앙정렬·셀 clamp. 0=안 보임.
 ) {
     const float span = (float)(cell.width == 0 ? 1 : cell.width);
@@ -410,13 +411,13 @@ static void maru_fill_cell_quad(
     // 글리프 확대: 셀 quad를 중앙 기준으로 키운다. 헤더 줄0 아이콘(1.7×)은 slot도 목표 px(raster_*_px)라 큰
     // 텍스처를 큰 quad에 1:1로 그려 선명; 사이드바 에이전트 심볼(1.1×)은 slot이 셀 크기라 stretch한다(약간
     // 부드러우나 보조 심볼이라 무방). UV는 그대로라 글리프만 커진다. glyph_scale=1.0이면 무동작(일반 셀·커서).
-    if (glyph_scale != 1.0f) {
+    if (glyph_scale_x != 1.0f || glyph_scale_y != 1.0f) {
         const float cx = (px_left + px_right) * 0.5f;
         const float cy = (px_top + px_bottom) * 0.5f;
-        px_left = cx + (px_left - cx) * glyph_scale;
-        px_right = cx + (px_right - cx) * glyph_scale;
-        px_top = cy + (px_top - cy) * glyph_scale;
-        px_bottom = cy + (px_bottom - cy) * glyph_scale;
+        px_left = cx + (px_left - cx) * glyph_scale_x;
+        px_right = cx + (px_right - cx) * glyph_scale_x;
+        px_top = cy + (px_top - cy) * glyph_scale_y;
+        px_bottom = cy + (px_bottom - cy) * glyph_scale_y;
     }
     const float left = (px_left / drawable_w) * 2.0f - 1.0f;
     const float right = (px_right / drawable_w) * 2.0f - 1.0f;
@@ -1005,7 +1006,15 @@ bool maru_metal_renderer_draw(
             //   줄0이 창 top에 붙어 위로 쏠리므로 신호등 수직 중앙에 맞춰 py_nudge=ch×0.30만큼 내린다. 🔍(검색)은 검색
             //   텍스트와 같은 크기라 확대 안 함. row 0으로 한정해 검색 줄(row≥1)의 아이콘을 오확대하지 않는다.
             const bool is_header = (tc.origin_x == 0u && tc.origin_y == 0u);
-            const bool is_corner_icon = is_header && tc.row == 0u && (tc.codepoint == 0xF0002u || tc.codepoint == 0xF0003u || tc.codepoint == 0xF0006u); // gear·plus·sidebar(PUA icon_glyph)
+            // 파일 도크 토글은 자유 배치 pane frame이라 왼쪽 헤더처럼 origin=(0,0)이 아니다. Zig의
+            // explicit PaneFrame role이 NativeMetalCell.reserved=32로 lower되므로 codepoint·좌표를 보고
+            // 역할을 재추론하지 않는다. 일반 pane이 같은 PUA를 출력해도 확대되지 않는다.
+            const MaruMetalCellGlyphPolicy glyph_policy = maru_metal_cell_glyph_policy(
+                tc.reserved, tc.atlas_width_px, tc.atlas_height_px, cell_width_px, cell_height_px);
+            const bool is_dock_toggle = glyph_policy.is_dock_toggle != 0u;
+            const bool is_corner_icon = tc.row == 0u &&
+                ((is_header && (tc.codepoint == 0xF0002u || tc.codepoint == 0xF0003u || tc.codepoint == 0xF0006u)) ||
+                 is_dock_toggle); // gear·plus·sidebar(PUA icon_glyph), including the freely placed dock toggle
             // 알림 종(🔔)도 PUA 단색 합성 아이콘(0xF0005)이라 코너 아이콘(◧⚙+)과 같은 1.7×로 통일한다. 예전엔 컬러
             // 이모지(width=2, fallback)라 1.7×면 과대해 1.0×로 두고 maru_center_ink_vertically로 보이는 ink를 슬롯 중앙에
             // 맞췄으나(폰트/DPI마다 틀어지는 근사), 단색 합성은 fillCoverage가 슬롯 중앙에 직접 그려 그 보정이 불필요하다.
@@ -1016,7 +1025,8 @@ bool maru_metal_renderer_draw(
             // 유지하면서 종/배지도 같은 정렬이 필요해 헤더 줄0 전체로 일반화(사용자 피드백). 펼침 헤더(◧/⚙/+/종)는
             // origin_x>0이라 신호등과 안 겹쳐 아래 py_nudge 경로(무영향).
             const bool is_collapsed_header = is_header && tc.row == 0u && terminal_origin_x_px == 0u;
-            const float hscale = (is_corner_icon || is_bell_icon) ? 1.7f : 1.0f;
+            const float glyph_scale_x = is_dock_toggle ? glyph_policy.scale_x : ((is_corner_icon || is_bell_icon) ? 1.7f : 1.0f);
+            const float glyph_scale_y = is_dock_toggle ? glyph_policy.scale_y : ((is_corner_icon || is_bell_icon) ? 1.7f : 1.0f);
             float py_top;
             if (is_collapsed_header && titlebar_strip_px > 0u) {
                 const float strip = (float)titlebar_strip_px;
@@ -1024,7 +1034,7 @@ bool maru_metal_renderer_draw(
             } else {
                 // 헤더 줄0 아이콘(◧⚙+🔔)은 창 top에 붙어 위로 쏠리므로 같은 0.30ch만큼 아래로 내려 신호등/타이틀바
                 // 수직 중앙에 맞춘다. PUA 합성이라 모두 슬롯 중앙에 그려져 글리프별 보정 없이 같은 nudge로 정렬된다.
-                const float py_nudge = (is_corner_icon || is_bell_icon) ? ch * 0.30f : 0.0f;
+                const float py_nudge = ((is_corner_icon || is_bell_icon) && !is_dock_toggle) ? ch * 0.30f : 0.0f;
                 py_top = (float)tc.origin_y + (float)tc.row * ch + py_nudge;
             }
             // PUA 합성 아이콘은 fillCoverage가 슬롯(EAW width 폭) 중앙에 그리므로, 이모지 시절 종(width 2)의 슬롯 중심이
@@ -1037,22 +1047,25 @@ bool maru_metal_renderer_draw(
             // (배경은 별도 배경 quad가 셀폭으로 그림). box-drawing은 glyph_id==0로 slot=셀폭이라 자연폭=셀폭으로 타일링 보존.
             MaruRendererVertex *bg_p = &vertices[(quad_index + i * 2) * vertices_per_cell];
             MaruRendererVertex *fg_p = &vertices[(quad_index + i * 2 + 1) * vertices_per_cell];
-            if (tc.reserved != 0u) {
+            if (tc.reserved != 0u && !is_dock_toggle) {
                 // reserved 부분-사각형 셀(커서 bar/underline·hollow 변·SGR 장식선·OSC 거터·pane divider/테두리): 색을
                 // background에 담은 sentinel(uv<0) 셀이라 글리프가 없다. A(자간 자연폭)의 2-quad 분리는 **글리프 셀 전용** —
                 // 여기서 배경 quad가 reserved를 무시하면(옛 bgc.reserved=0) strip이 셀 전체로 번져 divider·커서 바·밑줄이
                 // 셀폭 블록으로 굵어진다(c351a19 회귀). 그래서 reserved 셀은 셀당 **1 quad**로 그 reserved strip만 bg_p에
                 // 그리고 fg_p는 비운다 — painter 순서·오프셋(셀당 ×2)은 불변. reserved!=0 셀은 hscale==1(확대는 아이콘=reserved 0뿐).
-                maru_fill_cell_quad(bg_p, tc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f, divider_thickness_px);
+                maru_fill_cell_quad(bg_p, tc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f, 1.0f, divider_thickness_px);
                 memset(fg_p, 0, sizeof(MaruRendererVertex) * vertices_per_cell);
             } else {
                 // 배경 quad: 셀 전체 배경색, UV=-1(글리프 안 샘플 → 셰이더가 배경만). 투명 bg면 no-op.
+                // semantic role은 여기서 이미 소비했다. generic quad helper는 reserved=2..31 부분
+                // 사각형만 이해하므로 dock-toggle glyph는 normal full-cell 입력으로 정규화한다.
                 MaruAppHostMetalCell bgc = tc;
+                if (is_dock_toggle) bgc.reserved = 0u;
                 bgc.u0 = -1.0f;
                 bgc.u1 = -1.0f;
-                maru_fill_cell_quad(bg_p, bgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f, divider_thickness_px);
+                maru_fill_cell_quad(bg_p, bgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, 1.0f, 1.0f, divider_thickness_px);
                 // 전경 quad(투명 bg — 배경은 위 배경 quad가 담당).
-                if (tc.u0 >= 0.0f && hscale == 1.0f) {
+                if (tc.u0 >= 0.0f && glyph_scale_x == 1.0f && glyph_scale_y == 1.0f) {
                     // 일반 텍스트 글리프 → 자연폭(atlas_width_px, 좌측정렬). 셀 좌단 = panel origin + col×cw.
                     const uint32_t span_u = (tc.width == 0u) ? 1u : tc.width;
                     const float gw = (tc.atlas_width_px > 0u) ? (float)tc.atlas_width_px : cw * (float)span_u;
@@ -1064,12 +1077,13 @@ bool maru_metal_renderer_draw(
                     MaruAppHostMetalCell bell = tc;
                     bell.width = 1;
                     bell.background = 0u;
-                    maru_fill_cell_quad(fg_p, bell, (float)tc.origin_x + cw * 0.5f, cw, py_top, ch, drawable_w, drawable_h, hscale, divider_thickness_px);
+                    maru_fill_cell_quad(fg_p, bell, (float)tc.origin_x + cw * 0.5f, cw, py_top, ch, drawable_w, drawable_h, glyph_scale_x, glyph_scale_y, divider_thickness_px);
                 } else {
                     // 헤더 아이콘(◧⚙+ hscale=1.7 glyph): 그 글리프를 전경으로(투명 bg).
                     MaruAppHostMetalCell fgc = tc;
+                    if (is_dock_toggle) fgc.reserved = 0u;
                     fgc.background = 0u;
-                    maru_fill_cell_quad(fg_p, fgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, hscale, divider_thickness_px);
+                    maru_fill_cell_quad(fg_p, fgc, (float)tc.origin_x, cw, py_top, ch, drawable_w, drawable_h, glyph_scale_x, glyph_scale_y, divider_thickness_px);
                 }
             }
         }
@@ -1120,7 +1134,7 @@ bool maru_metal_renderer_draw(
                 const float sgw = (sc.atlas_width_px > 0u) ? (float)sc.atlas_width_px : cw * (float)sspan;
                 maru_fill_glyph_quad(sp, sc, sx_origin + (float)sc.col * cw, sgw, py_top, cell_h, drawable_w, drawable_h);
             } else {
-                maru_fill_cell_quad(sp, sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale, divider_thickness_px);
+                maru_fill_cell_quad(sp, sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale, gscale, divider_thickness_px);
             }
         }
     }

@@ -10,6 +10,10 @@ pub const Side = enum { right, bottom };
 /// 달리 이 값은 가벼운 탭 metadata 수 상한이다.
 pub const max_entries: usize = 256;
 
+/// 한 창 도크의 editor group 상한. 분할 UI는 보통 한 자릿수지만 workspace 입력이 빈 leaf를 무한히 만들지
+/// 못하게 모델과 reader가 같은 bound를 쓴다. 64 groups면 preorder node도 최대 127개로 고정된다.
+pub const max_groups: usize = 64;
+
 /// 콘텐츠 종류는 WebKit 구성 선택에 쓰이는 L2 정책 값이다. 브라우저 탭을 도크로 보내는 후속 확장은 이 닫힌 목록에
 /// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1).
 pub const EntryKind = enum { markdown, html };
@@ -53,13 +57,32 @@ pub const PersistedEntry = struct {
     active: bool = false,
 };
 
-/// FP1 workspace.v1 DTO. 그룹 트리는 FP8 전까지 직렬화하지 않으므로 entries는 암묵적인 단일 그룹에 속한다.
-/// 기본값이면 window 라인에 어떤 dock 키도 쓰지 않아 옛 파일의 byte 고정점이 유지된다.
+pub const PersistedGroup = struct {
+    entries: []const PersistedEntry = &.{},
+};
+
+/// FP8 다중 그룹 split tree의 preorder DTO. terminal pane tree와 같은 full-binary/self-delimiting 규칙을 쓰되
+/// leaf는 `PersistedState.groups` 인덱스를 가리킨다. ratio는 결정적 텍스트 왕복을 위해 천분율로 저장한다.
+pub const PersistedTreeNode = union(enum) {
+    leaf: usize,
+    split: Split,
+
+    pub const Split = struct {
+        direction: split_tree.SplitDirection,
+        ratio_milli: u16,
+    };
+};
+
+/// 단일 그룹은 기존 `entries`만 써 byte-compatible하게 유지한다. FP8 다중 그룹만 `groups/tree/focused_group`을
+/// 채운다. 두 표현을 동시에 허용하지 않아 reader/writer가 어느 트리를 복원할지 모호해지지 않게 한다.
 pub const PersistedState = struct {
     side: Side = .right,
     size: u32 = 0,
     collapsed: bool = false,
     entries: []const PersistedEntry = &.{},
+    groups: []const PersistedGroup = &.{},
+    tree: []const PersistedTreeNode = &.{},
+    focused_group: usize = 0,
 };
 
 pub const DockGroup = struct {
@@ -110,11 +133,12 @@ pub const DockPanel = struct {
     side: Side = .right,
     size: u32 = 0,
     collapsed: bool = false,
+    focused_group: *DockGroup,
 
     pub fn init(allocator: std.mem.Allocator) !DockPanel {
         const group = try allocator.create(DockGroup);
         group.* = DockGroup.init(allocator);
-        return .{ .allocator = allocator, .tree = .{ .leaf = group } };
+        return .{ .allocator = allocator, .tree = .{ .leaf = group }, .focused_group = group };
     }
 
     pub fn deinit(self: *DockPanel) void {
@@ -154,6 +178,45 @@ pub const DockPanel = struct {
         return entryCount(self.tree);
     }
 
+    pub fn groupCount(self: *const DockPanel) usize {
+        return DockTree.leafCount(self.tree);
+    }
+
+    pub fn focusedGroup(self: *DockPanel) *DockGroup {
+        return self.focused_group;
+    }
+
+    pub fn focusedGroupConst(self: *const DockPanel) *const DockGroup {
+        return self.focused_group;
+    }
+
+    pub fn focusGroup(self: *DockPanel, group: *DockGroup) bool {
+        if (!containsGroup(self.tree, group)) return false;
+        self.focused_group = group;
+        return true;
+    }
+
+    /// preorder group index. workspace serialization과 L4 scratch layout이 같은 안정된 순서를 공유한다.
+    pub fn groupAt(self: *DockPanel, index: usize) ?*DockGroup {
+        var cursor: usize = 0;
+        return groupAtIndex(self.tree, index, &cursor);
+    }
+
+    pub fn groupAtConst(self: *const DockPanel, index: usize) ?*const DockGroup {
+        var cursor: usize = 0;
+        return groupAtIndexConst(self.tree, index, &cursor);
+    }
+
+    pub fn groupIndex(self: *const DockPanel, target: *const DockGroup) ?usize {
+        var cursor: usize = 0;
+        return indexOfGroup(self.tree, target, &cursor);
+    }
+
+    pub fn groupForSurfaceId(self: *DockPanel, surface_id: u64) ?*DockGroup {
+        if (surface_id == 0) return null;
+        return findGroupForSurfaceId(self.tree, surface_id);
+    }
+
     /// runtime surface id로 파일 entry를 찾는다. FP8 다중 그룹에서도 같은 API가 재귀 tree 전체를 찾는다.
     pub fn entryForSurfaceId(self: *DockPanel, surface_id: u64) ?*Entry {
         if (surface_id == 0) return null;
@@ -164,7 +227,14 @@ pub const DockPanel = struct {
         group: *DockGroup,
         index: usize,
         created: bool,
+        previous_active: ?usize,
     };
+
+    pub const PathLocation = struct { group: *DockGroup, index: usize };
+
+    pub fn pathLocation(self: *DockPanel, path: []const u8) ?PathLocation {
+        return findPath(self.tree, path);
+    }
 
     /// 경로 유일성은 그룹이 아니라 창 도크 전체 불변식이다. FP8 분할 뒤에도 같은 파일을 다른 그룹 target으로 다시
     /// 열면 원래 entry를 활성화하고 그 group/index를 돌려 UI가 해당 그룹에 focus를 옮길 수 있게 한다.
@@ -172,12 +242,16 @@ pub const DockPanel = struct {
         if (path.len == 0) return error.InvalidPath;
         if (!containsGroup(self.tree, target)) return error.GroupNotFound;
         if (findPath(self.tree, path)) |found| {
+            const previous_active = found.group.active;
             found.group.active = found.index;
-            return .{ .group = found.group, .index = found.index, .created = false };
+            self.focused_group = found.group;
+            return .{ .group = found.group, .index = found.index, .created = false, .previous_active = previous_active };
         }
         if (entryCount(self.tree) >= max_entries) return error.TooManyEntries;
+        const previous_active = target.active;
         const index = try target.openLocal(path, kind);
-        return .{ .group = target, .index = index, .created = true };
+        self.focused_group = target;
+        return .{ .group = target, .index = index, .created = true, .previous_active = previous_active };
     }
 
     fn containsGroup(node: DockTree.Node, target: *DockGroup) bool {
@@ -187,7 +261,7 @@ pub const DockPanel = struct {
         };
     }
 
-    fn findPath(node: DockTree.Node, path: []const u8) ?struct { group: *DockGroup, index: usize } {
+    fn findPath(node: DockTree.Node, path: []const u8) ?PathLocation {
         return switch (node) {
             .leaf => |group| if (group.findPath(path)) |index| .{ .group = group, .index = index } else null,
             .split => |sp| findPath(sp.a, path) orelse findPath(sp.b, path),
@@ -201,6 +275,46 @@ pub const DockPanel = struct {
         };
     }
 
+    fn groupAtIndex(node: DockTree.Node, target_index: usize, cursor: *usize) ?*DockGroup {
+        return switch (node) {
+            .leaf => |group| blk: {
+                const current = cursor.*;
+                cursor.* += 1;
+                break :blk if (current == target_index) group else null;
+            },
+            .split => |sp| groupAtIndex(sp.a, target_index, cursor) orelse groupAtIndex(sp.b, target_index, cursor),
+        };
+    }
+
+    fn groupAtIndexConst(node: DockTree.Node, target_index: usize, cursor: *usize) ?*const DockGroup {
+        return switch (node) {
+            .leaf => |group| blk: {
+                const current = cursor.*;
+                cursor.* += 1;
+                break :blk if (current == target_index) group else null;
+            },
+            .split => |sp| groupAtIndexConst(sp.a, target_index, cursor) orelse groupAtIndexConst(sp.b, target_index, cursor),
+        };
+    }
+
+    fn indexOfGroup(node: DockTree.Node, target: *const DockGroup, cursor: *usize) ?usize {
+        return switch (node) {
+            .leaf => |group| blk: {
+                const current = cursor.*;
+                cursor.* += 1;
+                break :blk if (group == target) current else null;
+            },
+            .split => |sp| indexOfGroup(sp.a, target, cursor) orelse indexOfGroup(sp.b, target, cursor),
+        };
+    }
+
+    fn firstGroup(node: DockTree.Node) *DockGroup {
+        return switch (node) {
+            .leaf => |group| group,
+            .split => |sp| firstGroup(sp.a),
+        };
+    }
+
     fn findSurfaceId(node: DockTree.Node, surface_id: u64) ?*Entry {
         return switch (node) {
             .leaf => |group| blk: {
@@ -210,6 +324,16 @@ pub const DockPanel = struct {
                 break :blk null;
             },
             .split => |sp| findSurfaceId(sp.a, surface_id) orelse findSurfaceId(sp.b, surface_id),
+        };
+    }
+
+    fn findGroupForSurfaceId(node: DockTree.Node, surface_id: u64) ?*DockGroup {
+        return switch (node) {
+            .leaf => |group| blk: {
+                for (group.entries.items) |entry| if (entry.surface_id == surface_id) break :blk group;
+                break :blk null;
+            },
+            .split => |sp| findGroupForSurfaceId(sp.a, surface_id) orelse findGroupForSurfaceId(sp.b, surface_id),
         };
     }
 
@@ -229,6 +353,7 @@ pub const DockPanel = struct {
             .b = .{ .leaf = group },
         };
         if (!DockTree.replaceLeaf(&self.tree, target, .{ .split = split })) return error.GroupNotFound;
+        self.focused_group = group;
         return group;
     }
 
@@ -236,24 +361,77 @@ pub const DockPanel = struct {
     /// 호출자가 정확히 한 번 destroy하고, 제거된 그룹의 entry/path도 함께 정리한다.
     pub fn removeGroup(self: *DockPanel, target: *DockGroup) bool {
         const freed = DockTree.removeLeaf(&self.tree, target) orelse return false;
+        const was_focused = self.focused_group == target;
         target.deinit();
         self.allocator.destroy(target);
         self.allocator.destroy(freed);
+        if (was_focused) self.focused_group = firstGroup(self.tree);
         return true;
     }
 
-    /// workspace.v1의 단일 그룹 DTO에서 라이브 소유 모델을 복구한다. dirty는 persisted DTO에 없으므로 항상 false다.
+    /// workspace.v1 DTO에서 라이브 소유 모델을 복구한다. 단일 그룹 legacy 표현과 FP8 preorder 표현은 상호 배타다.
+    /// dirty/runtime handle은 persisted DTO에 없으므로 항상 초기값으로 돌아온다.
     pub fn restore(allocator: std.mem.Allocator, state: PersistedState) !DockPanel {
-        if (state.entries.len > max_entries) return error.InvalidPersistedState;
+        if (state.entries.len > max_entries or state.groups.len > max_groups) return error.InvalidPersistedState;
+        if (state.groups.len != 0 and state.entries.len != 0) return error.InvalidPersistedState;
         var panel = try DockPanel.init(allocator);
         errdefer panel.deinit();
         panel.side = state.side;
         panel.size = state.size;
         panel.collapsed = state.collapsed;
 
+        if (state.groups.len != 0) {
+            if (state.tree.len != state.groups.len * 2 - 1 or state.focused_group >= state.groups.len) return error.InvalidPersistedState;
+
+            const groups = try allocator.alloc(*DockGroup, state.groups.len);
+            defer allocator.free(groups);
+            var initialized: usize = 0;
+            errdefer for (groups[0..initialized]) |group| {
+                group.deinit();
+                allocator.destroy(group);
+            };
+            var total_entries: usize = 0;
+            for (state.groups, 0..) |persisted_group, group_index| {
+                total_entries = std.math.add(usize, total_entries, persisted_group.entries.len) catch return error.InvalidPersistedState;
+                if (total_entries > max_entries) return error.InvalidPersistedState;
+                const group = try allocator.create(DockGroup);
+                group.* = DockGroup.init(allocator);
+                groups[group_index] = group;
+                initialized += 1;
+                try restoreEntries(group, persisted_group.entries);
+                for (groups[0..group_index]) |prior_group| {
+                    for (group.entries.items) |entry| if (prior_group.findPath(entry.path) != null) return error.InvalidPersistedState;
+                }
+            }
+
+            const seen = try allocator.alloc(bool, groups.len);
+            defer allocator.free(seen);
+            @memset(seen, false);
+            var node_index: usize = 0;
+            const new_tree = try restoreTree(allocator, state.tree, &node_index, groups, seen);
+            errdefer DockTree.deinit(allocator, new_tree);
+            if (node_index != state.tree.len) return error.InvalidPersistedState;
+            for (seen) |value| if (!value) return error.InvalidPersistedState;
+
+            const old_group = panel.singleGroup().?;
+            old_group.deinit();
+            allocator.destroy(old_group);
+            panel.tree = new_tree;
+            panel.focused_group = groups[state.focused_group];
+            initialized = 0; // ownership moved into panel.tree
+            return panel;
+        }
+
+        if (state.tree.len != 0) return error.InvalidPersistedState;
         const group = panel.singleGroup().?;
+        try restoreEntries(group, state.entries);
+        panel.focused_group = group;
+        return panel;
+    }
+
+    fn restoreEntries(group: *DockGroup, entries: []const PersistedEntry) !void {
         var active: ?usize = null;
-        for (state.entries) |entry| {
+        for (entries) |entry| {
             if (entry.path.len == 0 or group.findPath(entry.path) != null) return error.InvalidPersistedState;
             const i = try group.openLocal(entry.path, entry.kind);
             group.entries.items[i].mode = entry.mode;
@@ -263,15 +441,81 @@ pub const DockPanel = struct {
                 active = i;
             }
         }
-        if (state.entries.len > 0 and active == null) return error.InvalidPersistedState;
+        if (entries.len > 0 and active == null) return error.InvalidPersistedState;
         group.active = active;
-        return panel;
     }
 
-    /// 현재 FP1 포맷이 표현할 수 있는 단일 그룹만 빌려온 path slice로 투영한다. 반환 entries 컨테이너만 호출자가
-    /// `freePersistedState`로 해제하며 path bytes는 계속 DockPanel 소유다.
+    fn restoreTree(
+        allocator: std.mem.Allocator,
+        nodes: []const PersistedTreeNode,
+        index: *usize,
+        groups: []const *DockGroup,
+        seen: []bool,
+    ) !DockTree.Node {
+        if (index.* >= nodes.len) return error.InvalidPersistedState;
+        const node = nodes[index.*];
+        index.* += 1;
+        return switch (node) {
+            .leaf => |group_index| blk: {
+                if (group_index >= groups.len or seen[group_index]) return error.InvalidPersistedState;
+                seen[group_index] = true;
+                break :blk .{ .leaf = groups[group_index] };
+            },
+            .split => |persisted_split| blk: {
+                if (persisted_split.ratio_milli < 50 or persisted_split.ratio_milli > 950) return error.InvalidPersistedState;
+                const a = try restoreTree(allocator, nodes, index, groups, seen);
+                errdefer DockTree.deinit(allocator, a);
+                const b = try restoreTree(allocator, nodes, index, groups, seen);
+                errdefer DockTree.deinit(allocator, b);
+                const split = try allocator.create(DockTree.Split);
+                split.* = .{
+                    .direction = persisted_split.direction,
+                    .ratio = @as(f32, @floatFromInt(persisted_split.ratio_milli)) / 1000.0,
+                    .a = a,
+                    .b = b,
+                };
+                break :blk .{ .split = split };
+            },
+        };
+    }
+
+    /// 단일 그룹은 legacy entries, 다중 그룹은 preorder groups/tree로 투영한다. path bytes는 계속 DockPanel
+    /// 소유이고 DTO 컨테이너만 `freePersistedState`가 해제한다.
     pub fn persistedState(self: *DockPanel, allocator: std.mem.Allocator) !PersistedState {
-        const group = self.singleGroup() orelse return error.MultipleGroupsNotPersistable;
+        if (self.singleGroup()) |group| {
+            const entries = try persistEntries(allocator, group);
+            return .{ .side = self.side, .size = self.size, .collapsed = self.collapsed, .entries = entries };
+        }
+
+        const group_count = self.groupCount();
+        if (group_count > max_groups) return error.InvalidPersistedState;
+        const groups = try allocator.alloc(PersistedGroup, group_count);
+        errdefer allocator.free(groups);
+        var completed: usize = 0;
+        errdefer for (groups[0..completed]) |group| if (group.entries.len > 0) allocator.free(group.entries);
+        for (groups, 0..) |*persisted_group, index| {
+            const group = self.groupAt(index) orelse return error.InvalidPersistedState;
+            persisted_group.* = .{ .entries = try persistEntries(allocator, group) };
+            completed += 1;
+        }
+        if (entryCount(self.tree) > max_entries) return error.InvalidPersistedState;
+        const nodes = try allocator.alloc(PersistedTreeNode, group_count * 2 - 1);
+        errdefer allocator.free(nodes);
+        var node_index: usize = 0;
+        try persistTree(self, self.tree, nodes, &node_index);
+        if (node_index != nodes.len) return error.InvalidPersistedState;
+        const focused_group = self.groupIndex(self.focused_group) orelse return error.InvalidPersistedState;
+        return .{
+            .side = self.side,
+            .size = self.size,
+            .collapsed = self.collapsed,
+            .groups = groups,
+            .tree = nodes,
+            .focused_group = focused_group,
+        };
+    }
+
+    fn persistEntries(allocator: std.mem.Allocator, group: *const DockGroup) ![]PersistedEntry {
         if ((group.entries.items.len > 0 and group.active == null) or
             (group.active != null and group.active.? >= group.entries.items.len) or
             group.entries.items.len > max_entries) return error.InvalidPersistedState;
@@ -282,12 +526,32 @@ pub const DockPanel = struct {
             .mode = entry.mode,
             .active = group.active != null and group.active.? == i,
         };
-        return .{ .side = self.side, .size = self.size, .collapsed = self.collapsed, .entries = entries };
+        return entries;
+    }
+
+    fn persistTree(self: *const DockPanel, node: DockTree.Node, out: []PersistedTreeNode, index: *usize) !void {
+        if (index.* >= out.len) return error.InvalidPersistedState;
+        switch (node) {
+            .leaf => |group| {
+                out[index.*] = .{ .leaf = self.groupIndex(group) orelse return error.InvalidPersistedState };
+                index.* += 1;
+            },
+            .split => |split| {
+                const ratio_milli: u16 = @intFromFloat(@round(split_tree.clampRatio(split.ratio) * 1000.0));
+                out[index.*] = .{ .split = .{ .direction = split.direction, .ratio_milli = ratio_milli } };
+                index.* += 1;
+                try persistTree(self, split.a, out, index);
+                try persistTree(self, split.b, out, index);
+            },
+        }
     }
 };
 
 pub fn freePersistedState(allocator: std.mem.Allocator, state: *PersistedState) void {
     if (state.entries.len > 0) allocator.free(state.entries);
+    for (state.groups) |group| if (group.entries.len > 0) allocator.free(group.entries);
+    if (state.groups.len > 0) allocator.free(state.groups);
+    if (state.tree.len > 0) allocator.free(state.tree);
     state.* = .{};
 }
 
@@ -416,7 +680,7 @@ test "dock panel: persisted single group restores entries but deliberately reset
     try std.testing.expect(!group.entries.items[1].dirty);
 }
 
-test "dock panel: live single group exports workspace DTO and rejects unrepresentable or ambiguous state" {
+test "dock panel: live state exports legacy single group and FP8 multi-group preorder DTO" {
     var panel = try DockPanel.init(std.testing.allocator);
     defer panel.deinit();
     panel.side = .bottom;
@@ -440,7 +704,17 @@ test "dock panel: live single group exports workspace DTO and rejects unrepresen
     try std.testing.expect(!state.entries[1].active);
 
     const second = try panel.splitGroup(group, .horizontal, 0.5);
-    try std.testing.expectError(error.MultipleGroupsNotPersistable, panel.persistedState(std.testing.allocator));
+    _ = try panel.open(second, "/tmp/c.md", .markdown);
+    var split_state = try panel.persistedState(std.testing.allocator);
+    defer freePersistedState(std.testing.allocator, &split_state);
+    try std.testing.expectEqual(@as(usize, 0), split_state.entries.len);
+    try std.testing.expectEqual(@as(usize, 2), split_state.groups.len);
+    try std.testing.expectEqual(@as(usize, 3), split_state.tree.len);
+    try std.testing.expectEqual(@as(usize, 1), split_state.focused_group);
+    try std.testing.expectEqual(split_tree.SplitDirection.horizontal, split_state.tree[0].split.direction);
+    try std.testing.expectEqual(@as(u16, 500), split_state.tree[0].split.ratio_milli);
+    try std.testing.expectEqual(@as(usize, 0), split_state.tree[1].leaf);
+    try std.testing.expectEqual(@as(usize, 1), split_state.tree[2].leaf);
     try std.testing.expect(panel.removeGroup(second));
 
     group.active = 99;
@@ -450,6 +724,57 @@ test "dock panel: live single group exports workspace DTO and rejects unrepresen
         .{ .path = "/tmp/a.md", .kind = .markdown, .active = false },
     };
     try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, .{ .entries = &ambiguous }));
+}
+
+test "dock panel: nested multi-group persistence restores focus entries and split ratios" {
+    var panel = try DockPanel.init(std.testing.allocator);
+    defer panel.deinit();
+    const a = panel.singleGroup().?;
+    _ = try panel.open(a, "/tmp/a.md", .markdown);
+    const b = try panel.splitGroup(a, .horizontal, 0.4);
+    _ = try panel.open(b, "/tmp/b.html", .html);
+    const c = try panel.splitGroup(b, .vertical, 0.7);
+    _ = try panel.open(c, "/tmp/c.md", .markdown);
+    b.entries.items[0].mode = .source_edit;
+    try std.testing.expectEqual(c, panel.focusedGroup());
+
+    var state = try panel.persistedState(std.testing.allocator);
+    defer freePersistedState(std.testing.allocator, &state);
+    var restored = try DockPanel.restore(std.testing.allocator, state);
+    defer restored.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), restored.groupCount());
+    try std.testing.expectEqualStrings("/tmp/a.md", restored.groupAt(0).?.entries.items[0].path);
+    try std.testing.expectEqual(Mode.source_edit, restored.groupAt(1).?.entries.items[0].mode);
+    try std.testing.expectEqualStrings("/tmp/c.md", restored.groupAt(2).?.entries.items[0].path);
+    try std.testing.expectEqual(restored.groupAt(2).?, restored.focusedGroup());
+    try std.testing.expect(!restored.groupAt(1).?.entries.items[0].dirty);
+
+    var roundtrip = try restored.persistedState(std.testing.allocator);
+    defer freePersistedState(std.testing.allocator, &roundtrip);
+    try std.testing.expectEqual(@as(u16, 400), roundtrip.tree[0].split.ratio_milli);
+    try std.testing.expectEqual(@as(u16, 700), roundtrip.tree[2].split.ratio_milli);
+}
+
+test "dock panel: multi-group restore rejects duplicate path and duplicate leaf" {
+    const a_entries = [_]PersistedEntry{.{ .path = "/tmp/a.md", .kind = .markdown, .active = true }};
+    const b_entries = [_]PersistedEntry{.{ .path = "/tmp/a.md", .kind = .markdown, .active = true }};
+    const groups = [_]PersistedGroup{ .{ .entries = &a_entries }, .{ .entries = &b_entries } };
+    const tree = [_]PersistedTreeNode{
+        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
+        .{ .leaf = 0 },
+        .{ .leaf = 1 },
+    };
+    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, .{ .groups = &groups, .tree = &tree }));
+
+    const distinct_b = [_]PersistedEntry{.{ .path = "/tmp/b.md", .kind = .markdown, .active = true }};
+    const distinct_groups = [_]PersistedGroup{ .{ .entries = &a_entries }, .{ .entries = &distinct_b } };
+    const duplicate_leaf = [_]PersistedTreeNode{
+        .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } },
+        .{ .leaf = 0 },
+        .{ .leaf = 0 },
+    };
+    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, .{ .groups = &distinct_groups, .tree = &duplicate_leaf }));
 }
 
 test "dock panel: reopening a path in another group activates the original entry without duplicating it" {

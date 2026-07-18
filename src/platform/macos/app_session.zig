@@ -149,7 +149,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 123;
+pub const abi_version: u32 = 124;
+// 124: FP8 다중 파일 그룹. native WKWebView firstResponder surface를 Zig DockPanel.focused_group에 동기하는
+// focus_file_panel_surface export를 추가한다(그룹별 split command target 단일 출처).
 // 123: FP7 파일 트리. background snapshot scanner와 Swift FSEvents 사이 root reset/add·changed path,
 // clean Markdown/HTML reload, unsupported file external-open one-shot export를 추가한다. fixed-width struct 불변.
 // 122: FP6 파일 패널 source edit. surface-pinned write/dirty 브리지와 GPU 헤더 mode 전이 getter/take export를
@@ -1916,6 +1918,12 @@ pub const AppSession = struct {
     dock: dock_panel.DockPanel = undefined,
     dock_initialized: bool = false,
     dock_resize_drag_active: bool = false,
+    // FP8: editor-group leaf/divider 기하 scratch. frame/mouse마다 같은 ArrayList capacity를 재사용해 split UI가
+    // frame tick에 새 할당이나 FS I/O를 만들지 않는다.
+    dock_leaf_rects_scratch: std.ArrayList(dock_panel.DockTree.LeafRect) = .empty,
+    dock_dividers_scratch: std.ArrayList(dock_panel.DockTree.DividerSeg) = .empty,
+    dock_group_divider_drag: ?*dock_panel.DockTree.Split = null,
+    dock_group_divider_drag_seg: dock_panel.DockTree.DividerSeg = undefined,
     // FP7: Zed project panel 규칙을 따르는 L2 snapshot tree + L4 background scanner. tick은 아래 backend의
     // 메모리 result queue만 drain하며 readdir/stat을 호출하지 않는다. FSEvents root/event는 Swift ABI adapter가 맡는다.
     file_tree: file_tree.Tree = undefined,
@@ -2218,6 +2226,10 @@ pub const AppSession = struct {
 
         self.dock = try dock_panel.DockPanel.init(allocator);
         self.dock_initialized = true;
+        // FP8 frame/mouse layout은 append-only scratch를 쓴다. group 상한만큼 init에서 한 번 예약해 frame tick에서
+        // allocator를 호출하지 않는다(leaf=N, divider=N-1).
+        try self.dock_leaf_rects_scratch.ensureTotalCapacity(allocator, dock_panel.max_groups);
+        try self.dock_dividers_scratch.ensureTotalCapacity(allocator, dock_panel.max_groups - 1);
         self.file_tree = file_tree.Tree.init(allocator);
         self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
         self.file_tree_initialized = true;
@@ -2410,6 +2422,61 @@ pub const AppSession = struct {
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
             .visible = self.dockVisible(),
         });
+    }
+
+    fn refreshDockGroupLayout(self: *AppSession) bool {
+        self.dock_leaf_rects_scratch.clearRetainingCapacity();
+        self.dock_dividers_scratch.clearRetainingCapacity();
+        if (!self.dockVisible()) return false;
+        const editor = self.dockGeometry().editor;
+        dock_panel.DockTree.layout(self.allocator, self.dock.tree, editor, &self.dock_leaf_rects_scratch) catch return false;
+        dock_panel.DockTree.layoutDividers(self.allocator, self.dock.tree, editor, &self.dock_dividers_scratch) catch return false;
+        return true;
+    }
+
+    const DockGroupHit = struct {
+        group: *dock_panel.DockGroup,
+        geometry: dock_layout.Geometry,
+    };
+
+    fn dockGroupAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?DockGroupHit {
+        if (!self.refreshDockGroupLayout()) return null;
+        const parent = self.dockGeometry();
+        for (self.dock_leaf_rects_scratch.items) |leaf| if (layout_math.pointInRect(x_px, y_px, leaf.rect)) return .{
+            .group = leaf.leaf,
+            .geometry = dock_layout.groupGeometry(parent, leaf.rect),
+        };
+        return null;
+    }
+
+    fn dockGroupDividerAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?dock_panel.DockTree.DividerSeg {
+        if (!self.refreshDockGroupLayout()) return null;
+        const slop = @max(@as(u32, 3), self.dividerThicknessPx());
+        // 중첩 경계가 교차하면 더 깊은 split(뒤에 append)이 좁은 실제 target이라 역순 우선한다.
+        var i = self.dock_dividers_scratch.items.len;
+        while (i > 0) {
+            i -= 1;
+            const seg = self.dock_dividers_scratch.items[i];
+            if (layout_math.pointInRect(x_px, y_px, dock_layout.groupDividerHitRect(seg, slop))) return seg;
+        }
+        return null;
+    }
+
+    fn splitFocusedDockGroup(self: *AppSession, direction: maru.session.SplitDirection) void {
+        if (!self.dock_initialized or self.dock.groupCount() >= dock_panel.max_groups) return;
+        _ = self.dock.splitGroup(self.dock.focusedGroup(), direction, 0.5) catch return;
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+    }
+
+    fn closeFocusedDockGroup(self: *AppSession) void {
+        if (!self.dock_initialized or self.dock.groupCount() <= 1) return;
+        const target = self.dock.focusedGroup();
+        for (target.entries.items) |entry| if (filePanelEntryNeedsDirtyProtection(entry)) return;
+        if (!self.dock.removeGroup(target)) return;
+        self.dock_group_divider_drag = null;
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
     }
 
     fn dockCollapsedToggleRect(self: *const AppSession) ?maru.session.SplitRect {
@@ -3828,8 +3895,10 @@ pub const AppSession = struct {
             }
         }.pred) != null) return true;
         if (!self.dock_initialized) return false;
-        const group = self.dock.singleGroupConst() orelse return false;
-        for (group.entries.items) |entry| if (entry.surface_id == surface_id) return true;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| if (entry.surface_id == surface_id) return true;
+        }
         return false;
     }
 
@@ -5125,21 +5194,25 @@ pub const AppSession = struct {
     pub fn totalSurfaceCount(self: *AppSession) usize {
         var n: usize = 0;
         for (self.tabs.items) |tab| n += tabSurfaceCount(tab);
-        if (self.dock_initialized) if (self.dock.singleGroupConst()) |group|
+        if (self.dock_initialized) for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
             for (group.entries.items) |entry| if (entry.surface_id != 0) {
                 n += 1;
             };
+        };
         return n;
     }
 
     fn appendDockSurfaceIds(self: *AppSession, out: []u64, start: usize) usize {
         var n = start;
         if (!self.dock_initialized) return n;
-        const group = self.dock.singleGroupConst() orelse return n;
-        for (group.entries.items) |entry| if (entry.surface_id != 0) {
-            if (n < out.len) out[n] = entry.surface_id;
-            n += 1;
-        };
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| if (entry.surface_id != 0) {
+                if (n < out.len) out[n] = entry.surface_id;
+                n += 1;
+            };
+        }
         return @min(n, out.len);
     }
 
@@ -5153,16 +5226,18 @@ pub const AppSession = struct {
     /// 보존한다. 모든 신규 path 복사를 먼저 끝낸 뒤 모델을 바꿔 OOM에서 양쪽이 불변이다.
     fn mergeDockInto(src: *AppSession, dst: *AppSession) !void {
         if (!src.dock_initialized or !dst.dock_initialized) return;
-        const sg = src.dock.singleGroup() orelse return error.UnsupportedMove;
-        const dg = dst.dock.singleGroup() orelse return error.UnsupportedMove;
+        const dg = dst.dock.focusedGroup();
         var unique: usize = 0;
-        for (sg.entries.items) |entry| {
-            if (dg.findPath(entry.path)) |i| {
-                if (filePanelEntryNeedsDirtyProtection(entry) and
-                    filePanelEntryNeedsDirtyProtection(dg.entries.items[i])) return error.UnsupportedMove;
-            } else unique += 1;
+        for (0..src.dock.groupCount()) |group_index| {
+            const sg = src.dock.groupAt(group_index).?;
+            for (sg.entries.items) |entry| {
+                if (dst.dock.pathLocation(entry.path)) |existing| {
+                    if (filePanelEntryNeedsDirtyProtection(entry) and
+                        filePanelEntryNeedsDirtyProtection(existing.group.entries.items[existing.index])) return error.UnsupportedMove;
+                } else unique += 1;
+            }
         }
-        if (dg.entries.items.len + unique > dock_panel.max_entries) return error.UnsupportedMove;
+        if (dst.dock.entryCountTotal() + unique > dock_panel.max_entries) return error.UnsupportedMove;
         try dg.entries.ensureUnusedCapacity(dst.allocator, unique);
 
         var staged: std.ArrayList(dock_panel.Entry) = .empty;
@@ -5171,63 +5246,74 @@ pub const AppSession = struct {
             staged.deinit(dst.allocator);
         }
         try staged.ensureTotalCapacity(dst.allocator, unique);
-        for (sg.entries.items) |entry| if (dg.findPath(entry.path) == null) {
-            staged.appendAssumeCapacity(.{
-                .path = try dst.allocator.dupe(u8, entry.path),
-                .kind = entry.kind,
-                .mode = entry.mode,
-                .dirty = entry.dirty,
-                .dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit,
-                .external_change = entry.external_change,
-                .external_change_generation = entry.external_change_generation,
-                // queued web action은 source session 수명에 묶여 있으므로 이동하지 않는다. conflict는 유지해 사용자가 재시도한다.
-                .conflict_reload_pending = false,
-                .surface_id = entry.surface_id,
-                .last_seen = entry.last_seen,
-            });
-        };
+        for (0..src.dock.groupCount()) |group_index| {
+            const sg = src.dock.groupAt(group_index).?;
+            for (sg.entries.items) |entry| if (dst.dock.pathLocation(entry.path) == null) {
+                var cloned = entry;
+                cloned.path = try dst.allocator.dupe(u8, entry.path);
+                // queued reload/hash action은 source backend 수명에 묶인다. conflict/dirty 자체는 보존하되 pending만 재시도 상태로.
+                cloned.dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit;
+                cloned.conflict_reload_pending = false;
+                cloned.conflict_reload_generation = 0;
+                cloned.self_write_grace_ticks = 0;
+                cloned.self_write_hash = 0;
+                cloned.self_write_verifications = 0;
+                staged.appendAssumeCapacity(cloned);
+            };
+        }
 
-        const dst_was_empty = dg.entries.items.len == 0;
-        const src_active_path: ?[]const u8 = if (sg.active) |i| if (i < sg.entries.items.len) sg.entries.items[i].path else null else null;
-        for (sg.entries.items) |entry| if (dg.findPath(entry.path)) |i| {
-            if (filePanelEntryNeedsDirtyProtection(entry)) {
-                const owned_path = dg.entries.items[i].path;
-                dg.entries.items[i] = .{
-                    .path = owned_path,
-                    .kind = entry.kind,
-                    .mode = entry.mode,
-                    .dirty = entry.dirty,
-                    .dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit,
-                    .external_change = entry.external_change,
-                    .external_change_generation = entry.external_change_generation,
-                    .conflict_reload_pending = false,
-                    .surface_id = entry.surface_id,
-                    .last_seen = entry.last_seen,
-                };
-            }
-        };
+        const dst_was_empty = dst.dock.entryCountTotal() == 0;
+        const target_was_empty = dg.entries.items.len == 0;
+        const src_focused = src.dock.focusedGroup();
+        const src_active_path: ?[]const u8 = if (src_focused.active) |i| if (i < src_focused.entries.items.len) src_focused.entries.items[i].path else null else null;
+        for (0..src.dock.groupCount()) |group_index| {
+            const sg = src.dock.groupAt(group_index).?;
+            for (sg.entries.items) |entry| if (dst.dock.pathLocation(entry.path)) |existing| {
+                if (filePanelEntryNeedsDirtyProtection(entry)) {
+                    const owned_path = existing.group.entries.items[existing.index].path;
+                    var replacement = entry;
+                    replacement.path = owned_path;
+                    replacement.dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit;
+                    replacement.conflict_reload_pending = false;
+                    replacement.conflict_reload_generation = 0;
+                    replacement.self_write_grace_ticks = 0;
+                    replacement.self_write_hash = 0;
+                    replacement.self_write_verifications = 0;
+                    existing.group.entries.items[existing.index] = replacement;
+                }
+            };
+        }
         for (staged.items) |entry| dg.entries.appendAssumeCapacity(entry);
         staged.clearRetainingCapacity(); // path 소유권이 dg로 이동했다.
+        if (target_was_empty) dg.active = if (src_active_path) |path| dg.findPath(path) else if (dg.entries.items.len > 0) 0 else null;
         if (dst_was_empty) {
             dst.dock.side = src.dock.side;
             dst.dock.size = src.dock.size;
             dst.dock.collapsed = src.dock.collapsed;
-            dg.active = if (src_active_path) |path| dg.findPath(path) else if (dg.entries.items.len > 0) 0 else null;
         }
 
-        for (sg.entries.items) |entry| src.allocator.free(entry.path);
-        sg.entries.clearRetainingCapacity();
-        sg.active = null;
+        for (0..src.dock.groupCount()) |group_index| {
+            const sg = src.dock.groupAt(group_index).?;
+            for (sg.entries.items) |entry| src.allocator.free(entry.path);
+            sg.entries.clearRetainingCapacity();
+            sg.active = null;
+        }
         src.file_panel_mode_pending = null;
         src.file_panel_dirty_sync_actions_len = 0;
         src.file_tree_reload_actions_len = 0;
         // last_seen은 session-local clock이라 원값을 섞으면 작은 generation의 source entry가 즉시 LRU가 된다.
-        // 병합 뒤 destination tab 순서로 한 clock에 재기록하고 active를 마지막에 touch해 비교 가능성을 복원한다.
-        for (dg.entries.items) |*entry| dst.touchFilePanelEntry(entry);
-        if (dg.active) |i| if (i < dg.entries.items.len) dst.touchFilePanelEntry(&dg.entries.items[i]);
-        for (dg.entries.items) |*entry| if (entry.dirty_sync_pending) {
-            dst.queueFilePanelDirtySyncAction(entry.surface_id);
-        };
+        // 병합 뒤 destination group preorder로 한 clock에 재기록하고 각 active를 마지막에 touch한다.
+        for (0..dst.dock.groupCount()) |group_index| {
+            const group = dst.dock.groupAt(group_index).?;
+            for (group.entries.items) |*entry| {
+                dst.touchFilePanelEntry(entry);
+                if (entry.dirty_sync_pending) dst.queueFilePanelDirtySyncAction(entry.surface_id);
+            }
+        }
+        for (0..dst.dock.groupCount()) |group_index| {
+            const group = dst.dock.groupAt(group_index).?;
+            if (group.active) |i| if (i < group.entries.items.len) dst.touchFilePanelEntry(&group.entries.items[i]);
+        }
         dst.enforceFilePanelLiveViewLimit();
         src.rebuildFileTreeFromDock() catch {};
         dst.rebuildFileTreeFromDock() catch {};
@@ -7114,6 +7200,9 @@ pub const AppSession = struct {
                 self.newWebTermInActivePane(.browser) catch {};
             },
             .open_file_panel => self.file_panel_pick_pending = true,
+            .split_file_panel_horizontal => self.splitFocusedDockGroup(.horizontal),
+            .split_file_panel_vertical => self.splitFocusedDockGroup(.vertical),
+            .close_file_panel_group => self.closeFocusedDockGroup(),
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
             .close_term => self.requestClose(.term_or_pane),
             .next_term => self.focusTermRelative(1),
@@ -7773,22 +7862,27 @@ pub const AppSession = struct {
     }
 
     fn assignDockSurfaceIds(self: *AppSession, panel: *dock_panel.DockPanel) void {
-        const group = panel.singleGroup() orelse return;
         const limit: usize = @intCast(@max(self.loaded_config.config.file_panel.max_live_views, 1));
-        if (group.active) |active| if (active < group.entries.items.len) {
-            const entry = &group.entries.items[active];
-            if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-            self.touchFilePanelEntry(entry);
-        };
         var live: usize = 0;
-        for (group.entries.items) |entry| if (entry.surface_id != 0) {
-            live += 1;
-        };
-        for (group.entries.items) |*entry| {
-            if (live >= limit) break;
-            if (entry.surface_id == 0) {
-                entry.surface_id = self.surface_ids.next();
+        for (0..panel.groupCount()) |group_index| {
+            const group = panel.groupAt(group_index).?;
+            if (group.active) |active| if (active < group.entries.items.len) {
+                const entry = &group.entries.items[active];
+                if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+                self.touchFilePanelEntry(entry);
+            };
+            for (group.entries.items) |entry| if (entry.surface_id != 0) {
                 live += 1;
+            };
+        }
+        for (0..panel.groupCount()) |group_index| {
+            const group = panel.groupAt(group_index).?;
+            for (group.entries.items) |*entry| {
+                if (live >= limit) return;
+                if (entry.surface_id == 0) {
+                    entry.surface_id = self.surface_ids.next();
+                    live += 1;
+                }
             }
         }
     }
@@ -7801,17 +7895,19 @@ pub const AppSession = struct {
 
     fn enforceFilePanelLiveViewLimit(self: *AppSession) void {
         if (!self.dock_initialized) return;
-        const group = self.dock.singleGroup() orelse return;
         const limit: usize = @intCast(@max(self.loaded_config.config.file_panel.max_live_views, 1));
         while (true) {
             var live: usize = 0;
             var candidate: ?*dock_panel.Entry = null;
-            for (group.entries.items, 0..) |*entry, i| {
-                if (entry.surface_id == 0) continue;
-                live += 1;
-                if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
-                    entry.conflict_reload_pending or group.active == i) continue;
-                if (candidate == null or entry.last_seen < candidate.?.last_seen) candidate = entry;
+            for (0..self.dock.groupCount()) |group_index| {
+                const group = self.dock.groupAt(group_index).?;
+                for (group.entries.items, 0..) |*entry, i| {
+                    if (entry.surface_id == 0) continue;
+                    live += 1;
+                    if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
+                        entry.conflict_reload_pending or group.active == i) continue;
+                    if (candidate == null or entry.last_seen < candidate.?.last_seen) candidate = entry;
+                }
             }
             if (live <= limit) return;
             const evicted = candidate orelse return; // dirty/active는 상한보다 많아도 절대 해제하지 않는다.
@@ -7922,7 +8018,8 @@ pub const AppSession = struct {
             !std.unicode.utf8ValidateSlice(changed_path)) return;
         self.file_tree.invalidatePath(changed_path) catch {};
         const coarse = self.file_tree.containsRootPath(changed_path);
-        if (self.dock_initialized) if (self.dock.singleGroup()) |group| {
+        if (self.dock_initialized) for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
             for (group.entries.items) |*entry| {
                 if (!std.mem.eql(u8, entry.path, changed_path) and
                     !(coarse and file_tree.Tree.pathWithinRoot(entry.path, changed_path))) continue;
@@ -8003,12 +8100,13 @@ pub const AppSession = struct {
 
     fn ageFilePanelSelfWriteLatches(self: *AppSession) void {
         if (!self.dock_initialized) return;
-        if (self.dock.singleGroup()) |group| for (group.entries.items) |*entry| {
-            if (entry.self_write_verifications == 0) {
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            for (group.entries.items) |*entry| if (entry.self_write_verifications == 0) {
                 entry.self_write_grace_ticks -|= 1;
                 if (entry.self_write_grace_ticks == 0) entry.self_write_hash = 0;
-            }
-        };
+            };
+        }
     }
 
     fn rebuildFileTreeFromDock(self: *AppSession) !void {
@@ -8020,7 +8118,8 @@ pub const AppSession = struct {
         self.file_tree_rows.clearRetainingCapacity();
         self.file_tree_rows_dirty = true;
         self.file_tree_watch_reset_pending = true;
-        if (self.dock_initialized) if (self.dock.singleGroupConst()) |group| {
+        if (self.dock_initialized) for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
             for (group.entries.items) |entry| {
                 const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
                 defer self.allocator.free(root);
@@ -8038,21 +8137,24 @@ pub const AppSession = struct {
             var result = owned_result;
             defer result.deinit(self.allocator);
             if (result.kind == .file_hash) {
-                if (self.dock_initialized) if (self.dock.singleGroup()) |group| for (group.entries.items) |*entry| {
-                    if (!std.mem.eql(u8, entry.path, result.path) or entry.self_write_verifications == 0) continue;
-                    if (!result.ok or result.file_hash != entry.self_write_hash) {
-                        entry.self_write_verifications = 0;
-                        entry.self_write_grace_ticks = 0;
-                        entry.self_write_hash = 0;
-                        self.markExternalFileChange(entry);
-                    } else {
-                        entry.self_write_verifications -= 1;
-                        if (entry.self_write_verifications == 0) {
+                if (self.dock_initialized) hash_groups: for (0..self.dock.groupCount()) |group_index| {
+                    const group = self.dock.groupAt(group_index).?;
+                    for (group.entries.items) |*entry| {
+                        if (!std.mem.eql(u8, entry.path, result.path) or entry.self_write_verifications == 0) continue;
+                        if (!result.ok or result.file_hash != entry.self_write_hash) {
+                            entry.self_write_verifications = 0;
                             entry.self_write_grace_ticks = 0;
                             entry.self_write_hash = 0;
+                            self.markExternalFileChange(entry);
+                        } else {
+                            entry.self_write_verifications -= 1;
+                            if (entry.self_write_verifications == 0) {
+                                entry.self_write_grace_ticks = 0;
+                                entry.self_write_hash = 0;
+                            }
                         }
+                        break :hash_groups;
                     }
-                    break;
                 };
                 changed = true;
                 continue;
@@ -8099,15 +8201,18 @@ pub const AppSession = struct {
         if (changed) self.file_tree_rows_dirty = true;
         if (self.file_tree_rows_dirty) {
             self.file_tree_open_states.clearRetainingCapacity();
-            if (self.dock_initialized) if (self.dock.singleGroupConst()) |group| {
-                try self.file_tree_open_states.ensureTotalCapacity(self.allocator, group.entries.items.len);
-                for (group.entries.items, 0..) |entry, i| self.file_tree_open_states.appendAssumeCapacity(.{
-                    .path = entry.path,
-                    .active = group.active != null and group.active.? == i,
-                    .dirty = entry.dirty,
-                    .external_change = entry.external_change,
-                });
-            };
+            if (self.dock_initialized) {
+                try self.file_tree_open_states.ensureTotalCapacity(self.allocator, self.dock.entryCountTotal());
+                for (0..self.dock.groupCount()) |group_index| {
+                    const group = self.dock.groupAt(group_index).?;
+                    for (group.entries.items, 0..) |entry, i| self.file_tree_open_states.appendAssumeCapacity(.{
+                        .path = entry.path,
+                        .active = group.active != null and group.active.? == i,
+                        .dirty = entry.dirty,
+                        .external_change = entry.external_change,
+                    });
+                }
+            }
             try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
             const visible_rows = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree.h / self.cell_height_px;
             self.file_tree_scroll_rows = @min(
@@ -8187,17 +8292,14 @@ pub const AppSession = struct {
             self.file_tree.recordOpened(path, root) catch return .failed;
             self.file_tree_rows_dirty = true;
         }
-        const group = self.dock.singleGroup() orelse return .failed;
-        if (group.active) |i| if (i < group.entries.items.len and
-            !std.mem.eql(u8, group.entries.items[i].path, path))
-        {
-            self.markFilePanelDirtySyncPending(&group.entries.items[i]);
-        };
+        const group = self.dock.focusedGroup();
         const kind: dock_panel.EntryKind = switch (open_kind) {
             .markdown => .markdown,
             .html => .html,
         };
-        _ = self.dock.open(group, path, kind) catch return .failed;
+        const opened = self.dock.open(group, path, kind) catch return .failed;
+        if (opened.previous_active) |i| if (i < opened.group.entries.items.len and i != opened.index)
+            self.markFilePanelDirtySyncPending(&opened.group.entries.items[i]);
         self.assignDockSurfaceIds(&self.dock);
         self.enforceFilePanelLiveViewLimit();
         self.dock.collapsed = false;
@@ -8223,11 +8325,24 @@ pub const AppSession = struct {
         return .{ .path = entry.path, .kind = entry.kind };
     }
 
+    /// native WKWebView가 firstResponder가 된 파일 surface를 그룹 포커스로 승격한다. 본문 클릭은 AppKit이 먼저
+    /// 소비하므로 Swift→Zig ABI가 이 경계를 되돌려 줘 split/close command가 눈앞의 그룹을 대상으로 삼는다.
+    pub fn focusFilePanelSurface(self: *AppSession, surface_id: u64) bool {
+        if (!self.dock_initialized) return false;
+        const group = self.dock.groupForSurfaceId(surface_id) orelse return false;
+        if (!self.dock.focusGroup(group)) return false;
+        self.metal_dirty = true;
+        return true;
+    }
+
     /// workspace.v1은 외부 입력이므로, DockPanel의 구조 검증 뒤에도 라이브 open과 같은 파일 capability 검증을 다시
     /// 적용한다. kind↔확장자·절대 UTF-8 경로·regular-file을 모두 만족하지 않는 entry만 버리고 terminal workspace는
     /// 계속 복원한다. 원래 active entry가 버려지면 첫 유효 entry를 활성화하며, 전부 버려지면 빈 도크다.
     fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_panel.DockPanel) void {
-        const group = panel.singleGroup() orelse return;
+        for (0..panel.groupCount()) |group_index| self.pruneInvalidRestoredFilePanelGroup(panel.groupAt(group_index).?);
+    }
+
+    fn pruneInvalidRestoredFilePanelGroup(self: *AppSession, group: *dock_panel.DockGroup) void {
         const old_active = group.active;
         const original_len = group.entries.items.len;
         var original_index: usize = 0;
@@ -8501,8 +8616,10 @@ pub const AppSession = struct {
 
     fn dockHasLiveSurface(self: *const AppSession) bool {
         if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return false;
-        const group = self.dock.singleGroupConst() orelse return false;
-        for (group.entries.items) |entry| if (entry.surface_id != 0) return true;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| if (entry.surface_id != 0) return true;
+        }
         return false;
     }
 
@@ -8575,27 +8692,38 @@ pub const AppSession = struct {
             }
         }
 
-        // 도크 entry는 비활성이어도 집합에 남겨 WKWebView 상태를 보존하고 active entry만 show한다.
-        if (self.dock_initialized) if (self.dock.singleGroup()) |group| {
-            const g = self.dockGeometry();
-            for (group.entries.items, 0..) |entry, i| {
-                if (entry.surface_id == 0) continue;
-                try out.append(self.allocator, .{
-                    .surface_id = entry.surface_id,
-                    .panel_kind = switch (entry.kind) {
-                        .markdown => .markdown,
-                        .html => .browser,
-                    },
-                    .seam_edges = if (g.content.w == 0 or g.content.h == 0) 0 else switch (self.dock.side) {
-                        .right => 1,
-                        // bottom content 위에는 tab/header 두 행이 있어 divider와 맞닿지 않는다.
-                        .bottom => 0,
-                    },
-                    .content_rect = g.content,
-                    .visible = self.dockVisible() and !self.dock_resize_drag_active and group.active != null and group.active.? == i,
-                });
+        // 도크 entry는 비활성이거나 도크 전체가 접혀도 집합에 남겨 WKWebView/JS 편집 상태를 보존한다.
+        // 접힌 도크는 기하가 없으므로 zero rect + hidden으로만 유지하고, 다시 펼칠 때 shown 전이가 최신 rect를 싣는다.
+        // 가시성을 surface 존재와 결합하면 collapse 한 tick이 destroy를 만들어 미저장 source-edit 버퍼를 잃는다.
+        if (self.dock_initialized) {
+            const has_layout = self.refreshDockGroupLayout();
+            const parent = self.dockGeometry();
+            var group_index: usize = 0;
+            while (group_index < self.dock.groupCount()) : (group_index += 1) {
+                const group = self.dock.groupAt(group_index) orelse continue;
+                const content_rect: web_panel_layout.Rect = if (has_layout)
+                    dock_layout.groupGeometry(parent, self.dock_leaf_rects_scratch.items[group_index].rect).content
+                else
+                    .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+                for (group.entries.items, 0..) |entry, i| {
+                    if (entry.surface_id == 0) continue;
+                    try out.append(self.allocator, .{
+                        .surface_id = entry.surface_id,
+                        .panel_kind = switch (entry.kind) {
+                            .markdown => .markdown,
+                            .html => .browser,
+                        },
+                        .seam_edges = if (content_rect.w == 0 or content_rect.h == 0) 0 else switch (self.dock.side) {
+                            .right => 1,
+                            // bottom content 위에는 tab/header 두 행이 있어 divider와 맞닿지 않는다.
+                            .bottom => 0,
+                        },
+                        .content_rect = content_rect,
+                        .visible = self.dockVisible() and !self.dock_resize_drag_active and self.dock_group_divider_drag == null and group.active != null and group.active.? == i,
+                    });
+                }
             }
-        };
+        }
         // Phase 7e-1a: 이번 tick 활성 탭 web surface 집합(out)에 없는 nav 상태 키를 제거한다 — surface 닫힘/이동/비활성
         // 탭 이동 시 소유 url 메모리가 세션 끝까지 새지 않게(id는 앱 전역 비재사용이라 stale 오인은 없으나 소유 자원은
         // 즉시 회수). 흔한 경우 stale 0이라 바깥 while은 1회(스캔서 못 찾으면 break). fetchRemove로 iterator 무효화 없이
@@ -12945,6 +13073,18 @@ pub const AppSession = struct {
             }
             return;
         }
+        if (self.dock_initialized and self.dock_group_divider_drag != null and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                if (dock_layout.groupDividerRatio(self.dock_group_divider_drag_seg, x_px, y_px)) |ratio| {
+                    self.dock_group_divider_drag.?.ratio = ratio;
+                    self.metal_dirty = true;
+                }
+            } else {
+                self.dock_group_divider_drag = null;
+                self.metal_dirty = true;
+            }
+            return;
+        }
         // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(PR6) — drag는 마우스를 bounds 안 ratio로 매핑해
         // split.ratio를 live 변경(panel 재배치), up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그 시작.
         if (self.divider_drag != null and (kind == 2 or kind == 3)) {
@@ -13014,12 +13154,21 @@ pub const AppSession = struct {
                 }
             }
             if (self.dockVisible()) {
-                const g = self.dockGeometry();
-                const group = self.dock.singleGroup().?;
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
                     self.activateFileTreeRow(row_index);
                     return;
                 }
+                if (self.dockGroupDividerAtPoint(x_px, y_px)) |seg| {
+                    self.dock_group_divider_drag = seg.split;
+                    self.dock_group_divider_drag_seg = seg;
+                    self.mouse_drag_selecting = false;
+                    self.metal_dirty = true;
+                    return;
+                }
+                const hit = self.dockGroupAtPoint(x_px, y_px) orelse return;
+                const g = hit.geometry;
+                const group = hit.group;
+                _ = self.dock.focusGroup(group);
                 if (group.active) |index| if (index < group.entries.items.len) {
                     const entry = &group.entries.items[index];
                     if (entry.external_change) if (dock_layout.headerConflictRect(g, self.cell_width_px)) |conflict| {
@@ -14860,23 +15009,29 @@ pub const AppSession = struct {
                 self.clearHoverUrlAnchor();
                 return if (self.fileTreeRowAt(x_px, y_px) != null) .link else .default;
             }
-            const entry_count = self.dock.entryCountTotal();
-            if (dock_layout.collapseAt(dg, self.cell_width_px, entry_count, x_px, y_px) or
-                dock_layout.tabIndexAt(dg, self.cell_width_px, entry_count, x_px, y_px) != null)
-            {
+            if (self.dockGroupDividerAtPoint(x_px, y_px)) |seg| {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
-                return .link;
-            }
-            if (layout_math.pointInRect(x_px, y_px, dg.header)) {
-                self.setHoveredTab(null);
-                self.clearHoverUrlAnchor();
-                if (self.dock.singleGroupConst()) |group| if (group.active) |index| if (index < group.entries.items.len and
-                    group.entries.items[index].external_change)
-                {
-                    if (dock_layout.headerConflictRect(dg, self.cell_width_px)) |conflict|
-                        if (layout_math.pointInRect(x_px, y_px, conflict)) return .link;
+                return switch (seg.direction) {
+                    .horizontal => .resize_h,
+                    .vertical => .resize_v,
                 };
+            }
+            if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
+                const group = hit.group;
+                const g = hit.geometry;
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                if (dock_layout.collapseAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px) or
+                    dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px) != null) return .link;
+                if (layout_math.pointInRect(x_px, y_px, g.header)) {
+                    if (group.active) |index| if (index < group.entries.items.len and
+                        group.entries.items[index].external_change)
+                    {
+                        if (dock_layout.headerConflictRect(g, self.cell_width_px)) |conflict|
+                            if (layout_math.pointInRect(x_px, y_px, conflict)) return .link;
+                    };
+                }
                 return .default;
             }
         }
@@ -17537,8 +17692,26 @@ pub const AppSession = struct {
             // FP3 창-로컬 파일 도크 chrome. 순수 dockGeometry의 tab/header/divider rect를 그대로 쓴다.
             if (self.dockVisible()) {
                 const dg = self.dockGeometry();
-                self.appendBarBgQuad(dg.tab_bar, self.chromeQuadBg(self.sidebarBg()));
-                self.appendBarBgQuad(dg.header, self.chromeQuadBg(self.sidebarBg()));
+                if (self.refreshDockGroupLayout()) {
+                    for (self.dock_leaf_rects_scratch.items) |leaf| {
+                        const group = leaf.leaf;
+                        const gg = dock_layout.groupGeometry(dg, leaf.rect);
+                        self.appendBarBgQuad(gg.tab_bar, self.chromeQuadBg(self.sidebarBg()));
+                        self.appendBarBgQuad(gg.header, self.chromeQuadBg(self.sidebarBg()));
+                        if (group.active) |active| if (dock_layout.tabRect(gg, self.cell_width_px, group.entries.items.len, active)) |r|
+                            self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarActiveBg()));
+                        if (group == self.dock.focusedGroupConst() and gg.tab_bar.h > 0) self.appendBarBgQuad(.{
+                            .x = gg.tab_bar.x,
+                            .y = gg.tab_bar.y,
+                            .w = gg.tab_bar.w,
+                            .h = @min(@as(u32, 1), gg.tab_bar.h),
+                        }, self.dividerColor());
+                    }
+                    for (self.dock_dividers_scratch.items) |seg| self.appendBarBgQuad(switch (seg.direction) {
+                        .horizontal => .{ .x = seg.pos, .y = seg.bounds.y, .w = @min(@as(u32, 1), seg.bounds.x + seg.bounds.w -| seg.pos), .h = seg.bounds.h },
+                        .vertical => .{ .x = seg.bounds.x, .y = seg.pos, .w = seg.bounds.w, .h = @min(@as(u32, 1), seg.bounds.y + seg.bounds.h -| seg.pos) },
+                    }, self.dividerColor());
+                }
                 self.appendBarBgQuad(dg.tree, self.chromeQuadBg(self.sidebarBg()));
                 if (dg.tree.w > 0 and self.cell_height_px > 0) {
                     const start = self.fileTreeEffectiveScroll();
@@ -17567,10 +17740,6 @@ pub const AppSession = struct {
                     .h = dg.tree.h,
                 }, self.dividerColor());
                 self.appendBarBgQuad(dg.divider, self.dividerColor());
-                if (self.dock.singleGroupConst()) |group| if (group.active) |active| {
-                    if (dock_layout.tabRect(dg, self.cell_width_px, group.entries.items.len, active)) |r|
-                        self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarActiveBg()));
-                };
             } else if (self.dockCollapsedToggleRect()) |r| {
                 self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarBg()));
             }
@@ -17819,8 +17988,10 @@ pub const AppSession = struct {
                 // FP3 파일 도크 탭 제목+활성 파일 경로. 배경 quad와 같은 geometry origin에 2행을 배치한다.
                 if (self.dockVisible()) {
                     const dg = self.dockGeometry();
-                    if (self.dock.singleGroupConst()) |group| {
-                        const cols = @min(dg.tab_bar.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
+                    if (self.refreshDockGroupLayout()) for (self.dock_leaf_rects_scratch.items) |leaf| {
+                        const group = leaf.leaf;
+                        const gg = dock_layout.groupGeometry(dg, leaf.rect);
+                        const cols = @min(gg.tab_bar.w / self.cell_width_px, @as(u32, std.math.maxInt(u16)));
                         if (cols > 0) {
                             var titles: std.ArrayList([]const u8) = .empty;
                             defer titles.deinit(self.allocator);
@@ -17842,10 +18013,10 @@ pub const AppSession = struct {
                                 dock_fg,
                                 dock_active_fg,
                             )) |ddl| {
-                                self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = dg.tab_bar.x, .origin_y = dg.tab_bar.y, .colors = tabbar_colors } });
+                                self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = gg.tab_bar.x, .origin_y = gg.tab_bar.y, .colors = tabbar_colors } });
                             } else |_| {}
                         }
-                    }
+                    };
                     if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
                         const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
                         const visible_rows: u16 = @intCast(@min(dg.tree.h / self.cell_height_px, @as(u32, std.math.maxInt(u16))));
@@ -21241,6 +21412,8 @@ pub const AppSession = struct {
             self.dock.deinit();
             self.dock_initialized = false;
         }
+        self.dock_leaf_rects_scratch.deinit(self.allocator);
+        self.dock_dividers_scratch.deinit(self.allocator);
         self.web_panel_prev.deinit(self.allocator); // Phase 4e-3: web surface diff prev 집합
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
         self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
@@ -33288,9 +33461,24 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     // 보이는 접기 버튼→titlebar 토글 순서로 닫고 다시 열며, termRect가 즉시 회수/복구된다.
     const collapse_x: f64 = @floatFromInt(bottom.tab_bar.x + bottom.tab_bar.w - 1);
     const collapse_y: f64 = @floatFromInt(bottom.tab_bar.y + 1);
+    const dirty_surface_id = group.entries.items[1].surface_id;
+    group.entries.items[1].mode = .source_edit;
+    group.entries.items[1].dirty = true;
     session.mouse(1, collapse_x, collapse_y, 0, 0);
     try std.testing.expect(session.dock.collapsed);
     try std.testing.expectEqual(@as(u32, 0), session.dockGeometry().dock.h);
+    surfaces.clearRetainingCapacity();
+    try session.collectWebSurfaces(&surfaces);
+    try std.testing.expectEqual(@as(usize, 3), surfaces.items.len);
+    var preserved_dirty_surface = false;
+    for (surfaces.items) |surface| {
+        if (surface.surface_id != dirty_surface_id) continue;
+        preserved_dirty_surface = true;
+        try std.testing.expect(!surface.visible);
+        try std.testing.expectEqual(@as(u32, 0), surface.content_rect.w);
+        try std.testing.expectEqual(@as(u32, 0), surface.content_rect.h);
+    }
+    try std.testing.expect(preserved_dirty_surface);
     const toggle = session.dockCollapsedToggleRect().?;
     session.mouse(1, @floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1), 0, 0);
     try std.testing.expect(!session.dock.collapsed);
@@ -33301,6 +33489,74 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
     try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
     try std.testing.expect(win.dock.entries[1].active);
+}
+
+test "FP8 file panel groups render simultaneously drag divider persist tree and close dirty-safe" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const first = session.dock.singleGroup().?;
+    _ = try session.dock.open(first, "/tmp/fp8-a.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    session.dispatchAppAction(.split_file_panel_horizontal);
+    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
+    const second = session.dock.focusedGroup();
+    try std.testing.expect(second != first);
+    _ = try session.dock.open(second, "/tmp/fp8-b.html", .html);
+    session.assignDockSurfaceIds(&session.dock);
+
+    try std.testing.expect(session.refreshDockGroupLayout());
+    try std.testing.expectEqual(@as(usize, 2), session.dock_leaf_rects_scratch.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.dock_dividers_scratch.items.len);
+    const parent = session.dockGeometry();
+    const left_g = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[0].rect);
+    const right_g = dock_layout.groupGeometry(parent, session.dock_leaf_rects_scratch.items[1].rect);
+    try std.testing.expectEqual(left_g.dock.x + left_g.dock.w, right_g.dock.x);
+    try std.testing.expectEqual(left_g.header.y + left_g.header.h, left_g.content.y);
+
+    var surfaces: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+    defer surfaces.deinit(allocator);
+    try session.collectWebSurfaces(&surfaces);
+    try std.testing.expectEqual(@as(usize, 2), surfaces.items.len);
+    try std.testing.expect(surfaces.items[0].visible and surfaces.items[1].visible);
+    try std.testing.expectEqual(left_g.content, surfaces.items[0].content_rect);
+    try std.testing.expectEqual(right_g.content, surfaces.items[1].content_rect);
+    try std.testing.expect(session.focusFilePanelSurface(first.entries.items[0].surface_id));
+    try std.testing.expectEqual(first, session.dock.focusedGroup());
+    try std.testing.expect(session.focusFilePanelSurface(second.entries.items[0].surface_id));
+    try std.testing.expectEqual(second, session.dock.focusedGroup());
+
+    const divider = session.dock_dividers_scratch.items[0];
+    const y: f64 = @floatFromInt(divider.bounds.y + divider.bounds.h / 2);
+    session.mouse(1, @floatFromInt(divider.pos), y, 0, 0);
+    try std.testing.expect(session.dock_group_divider_drag != null);
+    session.mouse(2, @floatFromInt(divider.bounds.x + divider.bounds.w * 3 / 4), y, 0, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), divider.split.ratio, 0.01);
+    surfaces.clearRetainingCapacity();
+    try session.collectWebSurfaces(&surfaces);
+    for (surfaces.items) |surface| try std.testing.expect(!surface.visible);
+    session.mouse(3, @floatFromInt(divider.pos), y, 0, 0);
+    try std.testing.expect(session.dock_group_divider_drag == null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    try std.testing.expectEqual(@as(usize, 2), win.dock.groups.len);
+    try std.testing.expectEqual(@as(usize, 3), win.dock.tree.len);
+    try std.testing.expectEqual(@as(usize, 1), win.dock.focused_group);
+    try std.testing.expectEqual(@as(u16, 750), win.dock.tree[0].split.ratio_milli);
+
+    second.entries.items[0].dirty = true;
+    session.dispatchAppAction(.close_file_panel_group);
+    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
+    second.entries.items[0].dirty = false;
+    second.entries.items[0].mode = .read;
+    session.dispatchAppAction(.close_file_panel_group);
+    try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
+    try std.testing.expectEqual(first, session.dock.focusedGroup());
 }
 
 test "FP5 file panel routing: picker one-shot, md/html open, duplicate activation, and invalid targets" {
@@ -40289,7 +40545,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     const cf = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(@as(usize, 0), cf.enums.len); // "split" 미매칭
     try std.testing.expect(cf.bools.len >= 1); // 교차 섹션: workspace.split-inherit-cwd(다른 섹션) 매칭
-    try std.testing.expectEqual(@as(usize, 2), cf.keybind_entries.len); // Split Right, Split Down
+    try std.testing.expectEqual(@as(usize, 4), cf.keybind_entries.len); // pane 2개 + file panel group 2개
     for (cf.keybind_entries) |e| try std.testing.expect(std.ascii.indexOfIgnoreCase(e.title, "split") != null);
 
     // keybindRowStart는 앞선 schema 행(여기선 split bool 등) 다음. 그 행 녹음→캡처가 **필터된 첫 keybind 엔트리**(Split Right)를
@@ -42716,6 +42972,41 @@ test "FP6 merge transfers dock dirty state and live surface ownership before sou
     try std.testing.expect(moved_entry.dirty);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, moved_entry.mode);
     try std.testing.expect(std.mem.indexOfScalar(u64, outcome.moved_surfaces, moved_sid) != null);
+}
+
+test "FP8 merge flattens source split entries into destination focused group without losing live surfaces" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const src_a = src.dock.singleGroup().?;
+    _ = try src.dock.open(src_a, "/tmp/fp8-merge-a.md", .markdown);
+    const src_b = try src.dock.splitGroup(src_a, .horizontal, 0.5);
+    _ = try src.dock.open(src_b, "/tmp/fp8-merge-b.html", .html);
+    src.assignDockSurfaceIds(&src.dock);
+    const sid_a = src_a.entries.items[0].surface_id;
+    const sid_b = src_b.entries.items[0].surface_id;
+
+    const dst_a = dst.dock.singleGroup().?;
+    _ = try dst.dock.open(dst_a, "/tmp/fp8-merge-dst.md", .markdown);
+    const dst_b = try dst.dock.splitGroup(dst_a, .vertical, 0.6);
+    _ = dst.dock.focusGroup(dst_b);
+    dst.assignDockSurfaceIds(&dst.dock);
+
+    var moved_buf: [16]u64 = undefined;
+    _ = try src.mergeSessionInto(dst, &moved_buf);
+    try std.testing.expectEqual(@as(usize, 0), src.dock.entryCountTotal());
+    try std.testing.expectEqual(@as(usize, 3), dst.dock.entryCountTotal());
+    try std.testing.expectEqual(@as(usize, 2), dst.dock.groupCount()); // destination layout wins.
+    try std.testing.expect(dst_b.findPath("/tmp/fp8-merge-a.md") != null);
+    try std.testing.expect(dst_b.findPath("/tmp/fp8-merge-b.html") != null);
+    try std.testing.expect(dst.hasWebSurface(sid_a));
+    try std.testing.expect(dst.hasWebSurface(sid_b));
 }
 
 test "FP6 merge rejects duplicate dirty file panels without mutating either dock" {

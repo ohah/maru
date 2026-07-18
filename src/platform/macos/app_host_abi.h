@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 123u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 124u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -746,6 +746,8 @@ uint32_t maru_macos_app_session_file_panel_entry(
 );
 /* 도크 entry의 mode(0=read, 1=source-edit). 도크가 아니면 -1. v122. */
 int32_t maru_macos_app_session_file_panel_mode(MaruAppHostSession *session, uint64_t surface_id);
+/* native WKWebView firstResponder surface를 FP8 도크 focused group으로 동기한다. 1=파일 surface, 0=아님. v124. */
+uint32_t maru_macos_app_session_focus_file_panel_surface(MaruAppHostSession *session, uint64_t surface_id);
 /* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit. v122. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* source editor 이탈 전에 이전 surface의 dirty snapshot을 강제 요청한다. 0=없음, 그 외=surface id. v122. */

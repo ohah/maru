@@ -17,6 +17,9 @@ pub const Geometry = struct {
     terminal: Rect,
     dock: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// 그룹 split tree가 차지하는 도크 좌측 영역. 우측 project tree와 독립이며 각 leaf가 자기 tab/header/content
+    /// chrome을 파생한다. 단일 그룹에서도 같은 함수를 써 렌더와 hit-test 좌표를 일치시킨다.
+    editor: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     tab_bar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     tree: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -174,12 +177,57 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
         .terminal = terminal,
         .dock = dock,
         .divider = divider,
-        .tab_bar = .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = tab_h },
-        .header = .{ .x = dock.x, .y = dock.y + tab_h, .w = dock.w, .h = header_h },
+        .editor = .{ .x = dock.x, .y = dock.y, .w = content_w, .h = dock.h },
+        // 단일 그룹의 기존 geometry도 FP8 editor 영역과 같게 둔다. 그래서 기존 single-group hit-test/테스트는
+        // byte-level 호출 형태를 유지하면서 project tree 위 빈 chrome을 잘못 클릭하지 않는다.
+        .tab_bar = .{ .x = dock.x, .y = dock.y, .w = content_w, .h = tab_h },
+        .header = .{ .x = dock.x, .y = dock.y + tab_h, .w = content_w, .h = header_h },
         .tree = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = body_h },
         .content = .{ .x = dock.x, .y = body_y, .w = content_w, .h = body_h },
         .dock_size_px = dock_size_px,
     };
+}
+
+/// 한 DockTree leaf rect의 그룹별 chrome. global project tree 폭은 이미 `Geometry.editor`에서 빠졌으므로
+/// leaf 전체 폭을 tab/header/content가 공유한다. 이 함수 결과를 기존 tab/header hit-test에 그대로 넘긴다.
+pub fn groupGeometry(parent: Geometry, leaf: Rect) Geometry {
+    const tab_h = @min(parent.tab_bar.h, leaf.h);
+    const header_h = @min(parent.header.h, leaf.h -| tab_h);
+    return .{
+        .terminal = parent.terminal,
+        .dock = leaf,
+        .editor = leaf,
+        .tab_bar = .{ .x = leaf.x, .y = leaf.y, .w = leaf.w, .h = tab_h },
+        .header = .{ .x = leaf.x, .y = leaf.y + tab_h, .w = leaf.w, .h = header_h },
+        .content = .{ .x = leaf.x, .y = leaf.y + tab_h + header_h, .w = leaf.w, .h = leaf.h -| tab_h -| header_h },
+        .dock_size_px = parent.dock_size_px,
+    };
+}
+
+/// 1px 경계선을 포인터로 잡기 쉽게 양쪽 hit_slop만큼 확장한다. 실제 divider draw는 pos 한 줄이고 hit rect만
+/// 넓다. bounds 밖으로는 saturating clamp해 인접 도크/terminal 입력을 훔치지 않는다.
+pub fn groupDividerHitRect(seg: dock_panel.DockTree.DividerSeg, hit_slop: u32) Rect {
+    return switch (seg.direction) {
+        .horizontal => blk: {
+            const start = @max(seg.bounds.x, seg.pos -| hit_slop);
+            const end = @min(seg.bounds.x + seg.bounds.w, seg.pos +| hit_slop +| 1);
+            break :blk .{ .x = start, .y = seg.bounds.y, .w = end -| start, .h = seg.bounds.h };
+        },
+        .vertical => blk: {
+            const start = @max(seg.bounds.y, seg.pos -| hit_slop);
+            const end = @min(seg.bounds.y + seg.bounds.h, seg.pos +| hit_slop +| 1);
+            break :blk .{ .x = seg.bounds.x, .y = start, .w = seg.bounds.w, .h = end -| start };
+        },
+    };
+}
+
+pub fn groupDividerRatio(seg: dock_panel.DockTree.DividerSeg, x_px: f64, y_px: f64) ?f32 {
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+    const raw: f64 = switch (seg.direction) {
+        .horizontal => if (seg.bounds.w == 0) return null else (x_px - @as(f64, @floatFromInt(seg.bounds.x))) / @as(f64, @floatFromInt(seg.bounds.w)),
+        .vertical => if (seg.bounds.h == 0) return null else (y_px - @as(f64, @floatFromInt(seg.bounds.y))) / @as(f64, @floatFromInt(seg.bounds.h)),
+    };
+    return @floatCast(@import("split_tree.zig").clampRatio(@floatCast(raw)));
 }
 
 pub fn sizePtForPointer(g: Geometry, side: dock_panel.Side, x_px: f64, y_px: f64, scale_milli: u32) ?u32 {
@@ -245,4 +293,29 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     try std.testing.expectEqual(g.header.x + g.header.w - 40, conflict.x);
     try std.testing.expectEqual(@as(u32, 10), conflict.w);
     try std.testing.expect(conflict.x >= control.x);
+}
+
+test "dock group geometry gives every split leaf its own tab header and content" {
+    const parent = compute(.{ .backing_width_px = 1400, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 420, .visible = true });
+    try std.testing.expectEqual(parent.content.w, parent.editor.w);
+    try std.testing.expectEqual(parent.dock.h, parent.editor.h);
+    const left = groupGeometry(parent, .{ .x = parent.editor.x, .y = parent.editor.y, .w = parent.editor.w / 2, .h = parent.editor.h });
+    try std.testing.expectEqual(left.dock.w, left.tab_bar.w);
+    try std.testing.expectEqual(left.tab_bar.y + left.tab_bar.h, left.header.y);
+    try std.testing.expectEqual(left.header.y + left.header.h, left.content.y);
+    try std.testing.expectEqual(left.dock.h, left.tab_bar.h + left.header.h + left.content.h);
+}
+
+test "dock group divider hit target and pointer ratio share split bounds" {
+    var split: dock_panel.DockTree.Split = undefined;
+    const horizontal = dock_panel.DockTree.DividerSeg{
+        .split = &split,
+        .direction = .horizontal,
+        .bounds = .{ .x = 100, .y = 40, .w = 600, .h = 400 },
+        .pos = 340,
+    };
+    try std.testing.expectEqual(Rect{ .x = 335, .y = 40, .w = 11, .h = 400 }, groupDividerHitRect(horizontal, 5));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), groupDividerRatio(horizontal, 400, 100).?, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.05), groupDividerRatio(horizontal, -1000, 100).?, 0.0001);
+    try std.testing.expectEqual(@as(?f32, null), groupDividerRatio(horizontal, std.math.nan(f64), 0));
 }

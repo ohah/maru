@@ -78,6 +78,9 @@ pub const PersistedTreeNode = union(enum) {
 pub const PersistedState = struct {
     side: Side = .right,
     size: u32 = 0,
+    /// project tree 열 폭(pt). 0은 현재 폰트 기준 기본 18셀을 뜻한다. 실제 배치는 editor 최소 28셀·tree 최소
+    /// 12셀로 clamp하며, 창이 좁으면 tree를 숨긴다.
+    tree_size: u32 = 0,
     collapsed: bool = false,
     entries: []const PersistedEntry = &.{},
     groups: []const PersistedGroup = &.{},
@@ -132,6 +135,7 @@ pub const DockPanel = struct {
     tree: DockTree.Node,
     side: Side = .right,
     size: u32 = 0,
+    tree_size: u32 = 0,
     collapsed: bool = false,
     focused_group: *DockGroup,
 
@@ -378,6 +382,7 @@ pub const DockPanel = struct {
         errdefer panel.deinit();
         panel.side = state.side;
         panel.size = state.size;
+        panel.tree_size = state.tree_size;
         panel.collapsed = state.collapsed;
 
         if (state.groups.len != 0) {
@@ -484,7 +489,7 @@ pub const DockPanel = struct {
     pub fn persistedState(self: *DockPanel, allocator: std.mem.Allocator) !PersistedState {
         if (self.singleGroup()) |group| {
             const entries = try persistEntries(allocator, group);
-            return .{ .side = self.side, .size = self.size, .collapsed = self.collapsed, .entries = entries };
+            return .{ .side = self.side, .size = self.size, .tree_size = self.tree_size, .collapsed = self.collapsed, .entries = entries };
         }
 
         const group_count = self.groupCount();
@@ -508,6 +513,7 @@ pub const DockPanel = struct {
         return .{
             .side = self.side,
             .size = self.size,
+            .tree_size = self.tree_size,
             .collapsed = self.collapsed,
             .groups = groups,
             .tree = nodes,
@@ -665,6 +671,7 @@ test "dock panel: persisted single group restores entries but deliberately reset
     var panel = try DockPanel.restore(std.testing.allocator, .{
         .side = .bottom,
         .size = 360,
+        .tree_size = 190,
         .collapsed = true,
         .entries = &entries,
     });
@@ -673,6 +680,7 @@ test "dock panel: persisted single group restores entries but deliberately reset
     const group = panel.singleGroup().?;
     try std.testing.expectEqual(Side.bottom, panel.side);
     try std.testing.expectEqual(@as(u32, 360), panel.size);
+    try std.testing.expectEqual(@as(u32, 190), panel.tree_size);
     try std.testing.expect(panel.collapsed);
     try std.testing.expectEqual(@as(?usize, 0), group.active);
     try std.testing.expectEqual(Mode.source_edit, group.entries.items[0].mode);
@@ -685,6 +693,7 @@ test "dock panel: live state exports legacy single group and FP8 multi-group pre
     defer panel.deinit();
     panel.side = .bottom;
     panel.size = 480;
+    panel.tree_size = 210;
 
     const group = panel.singleGroup().?;
     _ = try panel.open(group, "/tmp/a.md", .markdown);
@@ -697,6 +706,7 @@ test "dock panel: live state exports legacy single group and FP8 multi-group pre
     defer freePersistedState(std.testing.allocator, &state);
     try std.testing.expectEqual(Side.bottom, state.side);
     try std.testing.expectEqual(@as(u32, 480), state.size);
+    try std.testing.expectEqual(@as(u32, 210), state.tree_size);
     try std.testing.expectEqual(@as(usize, 2), state.entries.len);
     try std.testing.expectEqualStrings("/tmp/a.md", state.entries[0].path);
     try std.testing.expectEqual(Mode.source_edit, state.entries[0].mode);
@@ -711,6 +721,7 @@ test "dock panel: live state exports legacy single group and FP8 multi-group pre
     try std.testing.expectEqual(@as(usize, 2), split_state.groups.len);
     try std.testing.expectEqual(@as(usize, 3), split_state.tree.len);
     try std.testing.expectEqual(@as(usize, 1), split_state.focused_group);
+    try std.testing.expectEqual(@as(u32, 210), split_state.tree_size);
     try std.testing.expectEqual(split_tree.SplitDirection.horizontal, split_state.tree[0].split.direction);
     try std.testing.expectEqual(@as(u16, 500), split_state.tree[0].split.ratio_milli);
     try std.testing.expectEqual(@as(usize, 0), split_state.tree[1].leaf);

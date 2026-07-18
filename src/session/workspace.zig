@@ -212,6 +212,7 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     // 잃지 않고, 기본값은 생략돼 기존 파일 byte 고정점도 유지된다(file-panel.md §5).
     if (win.dock.side != .right) try w.print(" dock-side={s}", .{@tagName(win.dock.side)});
     if (win.dock.size != 0) try w.print(" dock-size={d}", .{win.dock.size});
+    if (win.dock.tree_size != 0) try w.print(" dock-tree-size={d}", .{win.dock.tree_size});
     if (win.dock.collapsed) try w.writeAll(" dock-collapsed=1");
     for (win.dock.entries) |entry| try writeDockEntry(w, entry);
     if (win.dock.groups.len != 0) {
@@ -444,6 +445,7 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
         break :blk .right;
     } else .right;
     const dock_size = try f.getUint("dock-size", u32, 0);
+    const dock_tree_size = try f.getUint("dock-tree-size", u32, 0);
     const dock_collapsed = (try f.getUint("dock-collapsed", u8, 0)) != 0;
     const dock: dock_panel.PersistedState = dock_parse: {
         if (f.find("dock-group-count") != null) {
@@ -493,6 +495,7 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
             const parsed_state: dock_panel.PersistedState = .{
                 .side = dock_side,
                 .size = dock_size,
+                .tree_size = dock_tree_size,
                 .collapsed = dock_collapsed,
                 .groups = groups,
                 .tree = try nodes.toOwnedSlice(a),
@@ -524,6 +527,7 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
         const parsed_state: dock_panel.PersistedState = .{
             .side = dock_side,
             .size = dock_size,
+            .tree_size = dock_tree_size,
             .collapsed = dock_collapsed,
             .entries = try dock_entries.toOwnedSlice(a),
         };
@@ -1704,6 +1708,7 @@ test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기
     const dock = parsed.workspace.windows[0].dock;
     try std.testing.expectEqual(dock_panel.Side.right, dock.side);
     try std.testing.expectEqual(@as(u32, 0), dock.size);
+    try std.testing.expectEqual(@as(u32, 0), dock.tree_size);
     try std.testing.expect(!dock.collapsed);
     try std.testing.expectEqual(@as(usize, 0), dock.entries.len);
 }
@@ -1714,7 +1719,7 @@ test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하�
         .{ .path = "/Users/me/line\nname.html", .kind = .html, .mode = .read, .active = false },
     };
     const windows = [_]Window{.{
-        .dock = .{ .side = .bottom, .size = 420, .collapsed = true, .entries = &dock_entries },
+        .dock = .{ .side = .bottom, .size = 420, .tree_size = 188, .collapsed = true, .entries = &dock_entries },
         .tabs = &.{},
     }};
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
@@ -1722,9 +1727,9 @@ test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하�
 
     try std.testing.expect(std.mem.indexOf(u8, text, "dock-side=bottom") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "dock-size=420") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-tree-size=188") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "dock-collapsed=1") != null);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "dock-entry=\""));
-    try std.testing.expect(std.mem.indexOf(u8, text, "dock-tree") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "dirty") == null);
 
     var parsed = try parse(std.testing.allocator, text);
@@ -1732,6 +1737,7 @@ test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하�
     const dock = parsed.workspace.windows[0].dock;
     try std.testing.expectEqual(dock_panel.Side.bottom, dock.side);
     try std.testing.expectEqual(@as(u32, 420), dock.size);
+    try std.testing.expectEqual(@as(u32, 188), dock.tree_size);
     try std.testing.expect(dock.collapsed);
     try std.testing.expectEqual(@as(usize, 2), dock.entries.len);
     try std.testing.expectEqualStrings(dock_entries[0].path, dock.entries[0].path);
@@ -1749,7 +1755,7 @@ test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하�
 test "workspace dock FP1: window 라인 flat 키는 legacy key reader가 skip 가능하고 손상 entry는 거부한다" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const legacy = try LineFields.parse(arena.allocator(), "window dock-entry=\"markdown:read:1:9:/tmp/a.md\" tabs=0 dock-side=bottom active-tab=0");
+    const legacy = try LineFields.parse(arena.allocator(), "window dock-entry=\"markdown:read:1:9:/tmp/a.md\" tabs=0 dock-side=bottom dock-tree-size=188 active-tab=0");
     try std.testing.expectEqual(@as(usize, 0), try legacy.requireUint("tabs", usize));
     try std.testing.expectEqual(@as(usize, 0), try legacy.getUint("active-tab", usize, 0));
 
@@ -1826,7 +1832,7 @@ test "workspace dock FP8: nested group tree and focused group round-trip on one 
         .{ .leaf = 2 },
     };
     const windows = [_]Window{.{
-        .dock = .{ .side = .bottom, .groups = &groups, .tree = &dock_tree, .focused_group = 2 },
+        .dock = .{ .side = .bottom, .tree_size = 196, .groups = &groups, .tree = &dock_tree, .focused_group = 2 },
         .tabs = &.{},
     }};
 
@@ -1843,6 +1849,7 @@ test "workspace dock FP8: nested group tree and focused group round-trip on one 
     try std.testing.expectEqual(@as(usize, 3), dock.groups.len);
     try std.testing.expectEqual(@as(usize, 5), dock.tree.len);
     try std.testing.expectEqual(@as(usize, 2), dock.focused_group);
+    try std.testing.expectEqual(@as(u32, 196), dock.tree_size);
     try std.testing.expectEqualStrings("/tmp/b: x.html", dock.groups[1].entries[0].path);
     try std.testing.expectEqual(@as(u16, 700), dock.tree[2].split.ratio_milli);
 

@@ -29,6 +29,8 @@ pub const Geometry = struct {
     tab_bar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     tree: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// editor와 project tree 사이의 1px 시각 경계. hit target은 `treeDividerHitRect`가 별도로 넓힌다.
+    tree_divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// Artifact의 독립 탐색기 chrome. tree 전체 배경 안에서 제목 한 행과 실제 스크롤 rows를 분리해,
     /// 첫 project root가 제목처럼 보이거나 최근 파일에 밀리지 않게 한다.
     tree_header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -130,6 +132,7 @@ pub const Input = struct {
     divider_px: u32,
     side: dock_panel.Side,
     size_pt: u32,
+    tree_size_pt: u32 = 0,
     visible: bool,
 };
 
@@ -171,6 +174,8 @@ pub fn compute(in: Input) Geometry {
                 chrome_h,
                 dock_w,
                 in.cell_width_px,
+                scale,
+                in.tree_size_pt,
             );
         },
         .bottom => bottom: {
@@ -189,18 +194,25 @@ pub fn compute(in: Input) Geometry {
                 chrome_h,
                 dock_h,
                 in.cell_width_px,
+                scale,
+                in.tree_size_pt,
             );
         },
     };
 }
 
-fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32) Geometry {
+fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32, tree_size_pt: u32) Geometry {
     const tab_h = @min(chrome_h, dock.h);
     const header_h = @min(chrome_h, dock.h -| tab_h);
     const body_y = dock.y + tab_h + header_h;
     const body_h = dock.h -| tab_h -| header_h;
     const max_tree_w = dock.w -| min_editor_cols * cell_width_px;
-    const tree_w = if (max_tree_w < min_tree_cols * cell_width_px) 0 else @min(default_tree_cols * cell_width_px, max_tree_w);
+    const min_tree_w = min_tree_cols * cell_width_px;
+    const requested_tree_w = if (tree_size_pt == 0)
+        default_tree_cols * cell_width_px
+    else
+        layout_math.ptToPx(tree_size_pt, scale_milli);
+    const tree_w = if (max_tree_w < min_tree_w) 0 else std.math.clamp(requested_tree_w, min_tree_w, max_tree_w);
     const content_w = dock.w -| tree_w;
     const tree_header_h = @min(chrome_h, body_h);
     return .{
@@ -213,11 +225,39 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
         .tab_bar = .{ .x = dock.x, .y = dock.y, .w = content_w, .h = tab_h },
         .header = .{ .x = dock.x, .y = dock.y + tab_h, .w = content_w, .h = header_h },
         .tree = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = body_h },
+        .tree_divider = .{ .x = dock.x + content_w, .y = body_y, .w = @min(@as(u32, 1), tree_w), .h = body_h },
         .tree_header = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = tree_header_h },
         .tree_content = .{ .x = dock.x + content_w, .y = body_y + tree_header_h, .w = tree_w, .h = body_h -| tree_header_h },
         .content = .{ .x = dock.x, .y = body_y, .w = content_w, .h = body_h },
         .dock_size_px = dock_size_px,
     };
+}
+
+/// 탐색기 열의 실제 1px 경계를 양쪽으로 넓힌 마우스 target. tree가 좁은 창에서 숨겨졌으면 빈 rect다.
+pub fn treeDividerHitRect(g: Geometry, hit_slop: u32) Rect {
+    if (g.tree_divider.w == 0 or g.tree_divider.h == 0) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    const start = @max(g.dock.x, g.tree_divider.x -| hit_slop);
+    const end = @min(g.dock.x + g.dock.w, g.tree_divider.x +| g.tree_divider.w +| hit_slop);
+    return .{ .x = start, .y = g.tree_divider.y, .w = end -| start, .h = g.tree_divider.h };
+}
+
+/// 포인터 x를 도크 오른쪽 경계에서 잰 탐색기 폭(pt)으로 바꾼다. min/max clamp는 `compute`가 editor/tree
+/// 가독성 하한과 함께 단일 적용하므로, 호출자는 후보를 저장한 뒤 계산된 실효 폭을 다시 권위값으로 삼는다.
+pub fn treeSizePtForPointer(g: Geometry, x_px: f64, scale_milli: u32) ?u32 {
+    if (!std.math.isFinite(x_px)) return null;
+    const raw = @as(f64, @floatFromInt(g.dock.x + g.dock.w)) - x_px;
+    const px: u32 = if (raw <= 0) 0 else @intFromFloat(@min(raw, @as(f64, @floatFromInt(std.math.maxInt(u32)))));
+    const scale = if (scale_milli == 0) 1000 else scale_milli;
+    return @intCast((@as(u64, px) * 1000) / scale);
+}
+
+/// clamp 뒤 backing-px 폭을 다시 영속 pt로 만들 때는 올림한다. 내림하면 1.5x처럼 px/pt가 나누어떨어지지 않는
+/// 배율에서 `compute -> 저장 -> compute`마다 최대 1px씩 줄어든다. 올림값이 max를 1px 넘더라도 다음 compute의 같은
+/// max clamp가 원래 실효 폭을 복원하므로 고정점이다.
+pub fn treeSizePtForEffectiveWidth(width_px: u32, scale_milli: u32) u32 {
+    const scale = if (scale_milli == 0) 1000 else scale_milli;
+    const numerator = @as(u64, width_px) * 1000 + (scale - 1);
+    return @intCast(@min(numerator / scale, std.math.maxInt(u32)));
 }
 
 /// 한 DockTree leaf rect의 그룹별 chrome. global project tree 폭은 이미 `Geometry.editor`에서 빠졌으므로
@@ -357,6 +397,26 @@ test "narrow right dock preserves a readable editor and hides an unusable tree s
     const artifact_width = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .visible = true });
     try std.testing.expectEqual(default_tree_cols * 10, artifact_width.tree.w);
     try std.testing.expect(artifact_width.editor.w > artifact_width.tree.w);
+
+    const resized = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 150, .visible = true });
+    try std.testing.expectEqual(@as(u32, 150), resized.tree.w);
+    try std.testing.expectEqual(resized.tree.x, resized.tree_divider.x);
+    try std.testing.expectEqual(Rect{ .x = resized.tree.x - 5, .y = resized.tree.y, .w = 11, .h = resized.tree.h }, treeDividerHitRect(resized, 5));
+    try std.testing.expectEqual(@as(u32, 150), treeSizePtForPointer(resized, @floatFromInt(resized.tree.x), 1000).?);
+
+    const too_wide = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 9999, .visible = true });
+    try std.testing.expectEqual(min_editor_cols * 10, too_wide.editor.w);
+    const too_narrow = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 1, .visible = true });
+    try std.testing.expectEqual(min_tree_cols * 10, too_narrow.tree.w);
+
+    // 1.5x에서 max clamp된 470px은 313.33pt다. 313pt로 내리면 다음 frame에 469px로 줄지만, 314pt 올림은
+    // 다시 같은 max 470px로 clamp되어 저장/복원 고정점을 만든다.
+    const scaled_max = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1500, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 9999, .visible = true });
+    const stable_pt = treeSizePtForEffectiveWidth(scaled_max.tree.w, 1500);
+    const scaled_restored = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1500, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = stable_pt, .visible = true });
+    try std.testing.expectEqual(@as(u32, 470), scaled_max.tree.w);
+    try std.testing.expectEqual(@as(u32, 314), stable_pt);
+    try std.testing.expectEqual(scaled_max.tree.w, scaled_restored.tree.w);
 }
 
 test "dock group divider hit target and pointer ratio share split bounds" {

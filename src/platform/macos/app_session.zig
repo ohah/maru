@@ -169,9 +169,13 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 128;
-// 128: project-tree mutation worker + recoverable Trash adapter. Zig stages a descriptor-relative, no-follow
-// rename and exposes a staged-path one-shot; Swift only invokes NSWorkspace recycle and returns success/failure.
+pub const abi_version: u32 = 129;
+// 129: Trash completion splits not-moved / moved-verified / moved-unverified and carries an optional last-known
+// destination path, so a post-move identity failure never triggers rollback of a nonexistent staged source.
+// New export signature only; fixed-width struct layouts stay unchanged.
+// 128: project-tree mutation worker + recoverable Trash adapter. Zig exposes a descriptor-relative, no-follow
+// identity-validated visible staging path one-shot; Swift revalidates it, invokes NSWorkspace recycle, then
+// validates the returned destination identity before per-item success. The wire layout is unchanged.
 // New exports only, so fixed-width struct offsets stay unchanged.
 // 127: file tree keyboard focus. Metal firstResponder pull과 Esc의 dock surface restore one-shot을 추가한다.
 // focus/selection 정책은 Zig FocusOwner가 소유하고 Swift는 responder 전이만 실행한다. fixed-width struct offset 불변.
@@ -1363,6 +1367,11 @@ pub const FileTreeTrashAction = struct {
     path: []const u8,
     identity: file_tree_mutation_backend.Identity,
 };
+pub const FileTreeTrashOutcome = enum(u32) {
+    not_moved = 0,
+    moved_verified = 1,
+    moved_unverified = 2,
+};
 const PendingTrash = struct {
     id: u64,
     root: []u8,
@@ -2201,8 +2210,8 @@ pub const AppSession = struct {
     file_tree_external_open: ?[]u8 = null,
     file_tree_mutation_request_id: u64 = 0,
     pending_file_tree_delete: ?PendingFileTreeDelete = null,
-    file_tree_delete_inflight: bool = false,
     pending_delete_root: ?PendingDeleteRoot = null,
+    file_tree_delete_inflight: bool = false,
     file_tree_edit_inflight: bool = false,
     file_tree_rename_rollback_id: ?u64 = null,
     pending_rename_remap: ?PendingRenameRemap = null,
@@ -2212,10 +2221,11 @@ pub const AppSession = struct {
     file_tree_mutation_editor_locks_len: usize = 0,
     file_tree_trash_queue: [file_tree_trash_capacity]PendingTrash = undefined,
     file_tree_trash_queue_len: usize = 0,
-    // Catastrophic restore failure is fail-closed: retain the exact hidden path for the session lifetime
+    // Catastrophic restore failure is fail-closed: retain the exact staged path for the session lifetime
     // and keep normal exit blocked so a transient notice/result deallocation cannot erase recovery data.
     file_tree_manual_recovery_paths: [file_tree_trash_capacity][]u8 = undefined,
     file_tree_manual_recovery_paths_len: usize = 0,
+    file_tree_manual_recovery_unknown: bool = false,
     // FP6 GPU 헤더 토글이 바꾼 Markdown 모드를 Swift WKWebView에 전달하는 1회성 신호. entry.mode가 단일
     // 상태 출처이며 pending은 surface_id만 보관한다(take 시 현재 mode를 함께 반환).
     file_panel_mode_pending: ?u64 = null,
@@ -5663,6 +5673,7 @@ pub const AppSession = struct {
         if (self.file_tree_mutation_waiting_request != null or self.file_tree_edit_inflight or
             self.file_tree_delete_inflight or (self.file_tree_initialized and self.file_tree_mutation_backend.pendingCount() != 0) or
             self.file_tree_trash_queue_len != 0 or self.file_tree_manual_recovery_paths_len != 0 or
+            self.file_tree_manual_recovery_unknown or
             self.file_tree_mutation_editor_locks_len != 0) return true;
         if (!self.dock_initialized) return false;
         for (0..self.dock.groupCount()) |group_index| {
@@ -9198,15 +9209,30 @@ pub const AppSession = struct {
         return .{ .id = pending.id, .path = pending.staged, .identity = pending.identity };
     }
 
-    pub fn completeFileTreeTrash(self: *AppSession, id: u64, success: bool) void {
+    pub fn completeFileTreeTrash(
+        self: *AppSession,
+        id: u64,
+        outcome: FileTreeTrashOutcome,
+        recovery_path: ?[]const u8,
+    ) void {
         if (self.file_tree_trash_queue_len == 0) return;
         const pending = self.file_tree_trash_queue[0];
-        if (pending.id != id or pending.restoring) return;
-        const commit_success = success and !self.fileTreePathProtectedNow(pending.original, pending.id);
-        if (commit_success) {
+        // Only the native adapter that took the head action may acknowledge it. This rejects stale,
+        // guessed, or duplicate callbacks without releasing the namespace reservation early.
+        if (pending.id != id or !pending.taken or pending.restoring) return;
+        if (outcome == .moved_verified) {
             self.clearFileTreeMutationReservation(pending.id);
-            self.removeDeletedDockEntries(pending.original);
-            self.releaseFileTreeMutationEditorLocks(pending.id, false);
+            const protected_now = self.fileTreePathProtectedNow(pending.original, pending.id);
+            if (protected_now) {
+                // The native destination mapping proves the staged object reached Trash, but a
+                // late editor/external-change signal means closing the buffer could lose data. Reflect
+                // the filesystem removal while keeping the protected tab available for recovery/save.
+                self.releaseFileTreeMutationEditorLocks(pending.id, true);
+                self.showNotice("휴지통 이동은 완료됐지만 편집 상태가 바뀌어 열린 탭은 유지합니다.");
+            } else {
+                self.removeDeletedDockEntries(pending.original);
+                self.releaseFileTreeMutationEditorLocks(pending.id, false);
+            }
             self.file_tree.removeRecentWithin(pending.original);
             if (std.fs.path.dirname(pending.original)) |parent| self.file_tree.invalidatePath(parent) catch {};
             if (self.file_tree_selection.generation == pending.selection_generation) {
@@ -9214,7 +9240,7 @@ pub const AppSession = struct {
                 if (self.file_tree_selection.kind == pending.row_kind and selected_path != null and
                     std.mem.eql(u8, selected_path.?, pending.original)) self.clearFileTreeSelection();
             }
-        } else {
+        } else if (outcome == .not_moved) {
             if (!self.enqueueFileTreeDeleteRestore(
                 pending.id,
                 pending.root,
@@ -9233,6 +9259,23 @@ pub const AppSession = struct {
             }
             self.file_tree_trash_queue[0].restoring = true;
             self.file_tree_mutation_backend.pump();
+            return;
+        } else {
+            // The OS moved some directory entry but its destination identity could not be proven. Never
+            // roll back the now-ambiguous staged path: preserve the destination if known and keep the
+            // session fail-closed without pretending a nonexistent source is recoverable.
+            const owned_recovery = if (recovery_path) |path|
+                if (path.len != 0) self.allocator.dupe(u8, path) catch null else null
+            else
+                null;
+            self.finishPendingTrashRecord(pending.id);
+            if (owned_recovery) |path| {
+                self.retainFileTreeRecoveryPath(path);
+            } else {
+                self.retainFileTreeUnknownRecovery();
+            }
+            self.file_tree_rows_dirty = true;
+            self.metal_dirty = true;
             return;
         }
         self.finishPendingTrashRecord(pending.id);
@@ -9264,17 +9307,23 @@ pub const AppSession = struct {
         return null;
     }
 
-    fn retainFileTreeRecoveryPath(self: *AppSession, staged: []u8) void {
-        std.log.err("file tree mutation requires manual recovery: {s}", .{staged});
+    fn retainFileTreeRecoveryPath(self: *AppSession, recovery_path: []u8) void {
+        if (!builtin.is_test) std.log.err("file tree mutation requires manual recovery: {s}", .{recovery_path});
         // Namespace mutations are globally blocked once any manual recovery exists, so admission
         // guarantees this preallocated slot is available. Transfer existing ownership: no OOM gap.
         std.debug.assert(self.file_tree_manual_recovery_paths_len < self.file_tree_manual_recovery_paths.len);
-        self.file_tree_manual_recovery_paths[self.file_tree_manual_recovery_paths_len] = staged;
+        self.file_tree_manual_recovery_paths[self.file_tree_manual_recovery_paths_len] = recovery_path;
         self.file_tree_manual_recovery_paths_len += 1;
         var message_buf: [std.fs.max_path_bytes + 96]u8 = undefined;
-        const message = std.fmt.bufPrint(&message_buf, "자동 복원에 실패했습니다. 이 경로의 파일을 수동 복구하세요: {s}", .{staged}) catch
-            "자동 복원에 실패했습니다. 로그의 staging 경로에서 파일을 수동 복구하세요.";
+        const message = std.fmt.bufPrint(&message_buf, "자동 복구가 필요합니다. 이 경로의 파일을 확인하세요: {s}", .{recovery_path}) catch
+            "자동 복구가 필요합니다. 로그의 recovery 경로에서 파일을 확인하세요.";
         self.showNotice(message);
+    }
+
+    fn retainFileTreeUnknownRecovery(self: *AppSession) void {
+        if (!builtin.is_test) std.log.err("file tree Trash mutation requires manual recovery; destination path unavailable", .{});
+        self.file_tree_manual_recovery_unknown = true;
+        self.showNotice("휴지통 이동 결과를 검증할 수 없습니다. 휴지통을 확인하세요. 정상 종료와 파일 변경을 차단했습니다.");
     }
 
     fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
@@ -9292,7 +9341,7 @@ pub const AppSession = struct {
     fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
         return self.file_tree_edit_inflight or self.file_tree_delete_inflight or
             self.file_tree_mutation_waiting_request != null or self.file_tree_trash_queue_len != 0 or
-            self.file_tree_manual_recovery_paths_len != 0;
+            self.file_tree_manual_recovery_paths_len != 0 or self.file_tree_manual_recovery_unknown;
     }
 
     fn fileTreeEffectiveScroll(self: *const AppSession) usize {
@@ -9810,7 +9859,7 @@ pub const AppSession = struct {
 
     fn requestDeleteSelectedFileTreeEntry(self: *AppSession) void {
         if (self.fileTreeNamespaceMutationBusy()) {
-            self.showNotice("이전 삭제 staging이 끝날 때까지 기다려 주세요.");
+            self.showNotice("이전 휴지통 이동이 끝날 때까지 기다려 주세요.");
             return;
         }
         if (self.file_tree_trash_queue_len >= self.file_tree_trash_queue.len) {
@@ -20167,6 +20216,15 @@ pub const AppSession = struct {
                 // 앰버 사각 ring(pane rect 둘레 border quad)은 제거. chrome_minimal은 아래 appendActivePaneBorder(셀 테두리)가 따로 담당.
             }
 
+            // Resolve the identity-backed selection once for this projected frame. Both the background
+            // quad and the glyph paint below consume this exact index, including after async row rebuilds.
+            const file_tree_selected_index = self.selectedFileTreeRow();
+            const file_tree_selection_paint: ?coretext_frame_builder.FileTreeSelectionPaint =
+                if (self.fileTreeFocused()) if (file_tree_selected_index) |index| .{
+                    .index = index,
+                    .foreground = .{ .rgb = self.appearance.theme.accent_foreground },
+                } else null else null;
+
             // FP3 창-로컬 파일 도크 chrome. 순수 dockGeometry의 tab/header/divider rect를 그대로 쓴다.
             if (self.dockVisible()) {
                 const dg = self.dockGeometry();
@@ -20209,7 +20267,6 @@ pub const AppSession = struct {
                     const start = self.fileTreeEffectiveScroll();
                     const visible: usize = @intCast(dg.tree_content.h / self.cell_height_px);
                     const end = @min(self.file_tree_rows.items.len, start + visible);
-                    const selected_index = self.selectedFileTreeRow();
                     for (self.file_tree_rows.items[start..end], start..) |row, index| {
                         const active = switch (row) {
                             .recent_file => |v| v.active,
@@ -20217,7 +20274,7 @@ pub const AppSession = struct {
                             else => false,
                         };
                         const hovered = self.file_tree_hovered_row == index;
-                        const selected = selected_index != null and selected_index.? == index;
+                        const selected = file_tree_selected_index != null and file_tree_selected_index.? == index;
                         if (!active and !hovered and !selected) continue;
                         self.appendBarBgQuad(.{
                             .x = dg.tree_content.x,
@@ -20557,6 +20614,7 @@ pub const AppSession = struct {
                                 tree_cols,
                                 dock_fg,
                                 dock_active_fg,
+                                file_tree_selection_paint,
                             )) |tdl| {
                                 self.collectShaped(&collected, tdl, pane_frame_builder, .{ .pane = .{
                                     .origin_x = dg.tree_content.x,
@@ -23956,6 +24014,8 @@ pub const AppSession = struct {
         if (self.file_tree_initialized) {
             if (self.pending_rename_remap) |*plan| plan.deinit(self.allocator);
             self.pending_rename_remap = null;
+            if (self.pending_delete_root) |pending| self.allocator.free(pending.root);
+            self.pending_delete_root = null;
             if (self.file_tree_mutation_waiting_request) |*request| request.deinit(self.allocator);
             self.file_tree_mutation_waiting_request = null;
             if (self.file_tree_mutation_queue_reserved) self.file_tree_mutation_backend.cancelReservation();
@@ -23977,6 +24037,7 @@ pub const AppSession = struct {
         self.file_tree_trash_queue_len = 0;
         for (self.file_tree_manual_recovery_paths[0..self.file_tree_manual_recovery_paths_len]) |path| self.allocator.free(path);
         self.file_tree_manual_recovery_paths_len = 0;
+        self.file_tree_manual_recovery_unknown = false;
 
         self.clearFilePanelCloseWithoutUnlock();
         if (self.dock_initialized) {
@@ -36691,7 +36752,7 @@ fn testFileTreeIdentity(path: []const u8) !file_tree.Identity {
     };
 }
 
-test "file tree mutations create rename protect dirty and roll back failed Trash" {
+test "file tree mutations create rename protect dirty and use a visible staged Trash handoff" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -36785,7 +36846,7 @@ test "file tree mutations create rename protect dirty and roll back failed Trash
     try std.testing.expect(renamed_sid != 0 and renamed_sid != created_sid);
     try std.testing.expect(session.dock.pathLocation(created) == null);
 
-    // Dirty state blocks both file and containing-directory destructive operations before staging.
+    // Dirty state blocks both file and containing-directory destructive operations before Trash handoff.
     try session.setFilePanelDirty(renamed_sid, true);
     // A scanner result can legitimately race this test's manually applied snapshot. Build the same L2 row
     // projection directly so the destructive-policy assertions are independent of detached scan timing.
@@ -36816,8 +36877,8 @@ test "file tree mutations create rename protect dirty and roll back failed Trash
     try std.testing.expect(!session.chrome_host.confirm.open);
     try session.setFilePanelDirty(renamed_sid, false);
 
-    // Clean delete stages the exact entry. A short/native consumer can peek without consuming; failed
-    // NSWorkspace recycle is acknowledged and the worker restores the original name.
+    // Clean delete stages the exact identity under a non-dot sibling name so Finder shows the Trash item.
+    // A failed recycle restores the original path and keeps its open tab.
     session.requestDeleteSelectedFileTreeEntry();
     try std.testing.expect(session.pending_confirm == .file_tree_delete);
     session.chrome_host.confirm.dismiss();
@@ -36836,16 +36897,27 @@ test "file tree mutations create rename protect dirty and roll back failed Trash
     }
     const peeked = session.peekFileTreeTrashAction().?;
     try std.testing.expect(session.hasProtectedFilePanelsForExit());
+    // A completion that precedes native ownership, or names another operation, cannot commit model state.
+    session.completeFileTreeTrash(peeked.id, .not_moved, null);
+    session.completeFileTreeTrash(peeked.id +% 1, .moved_verified, null);
+    try std.testing.expect(session.peekFileTreeTrashAction() != null);
+    _ = try std.Io.Dir.cwd().statFile(io, peeked.path, .{});
+    try std.testing.expect(std.fs.path.basename(peeked.path)[0] != '.');
+    try std.testing.expect(session.dock.pathLocation(renamed) != null);
     const taken = session.takeFileTreeTrashAction().?;
     try std.testing.expectEqual(peeked.id, taken.id);
     try std.testing.expectEqualStrings(peeked.path, taken.path);
+    try std.testing.expect(std.mem.startsWith(u8, std.fs.path.basename(taken.path), "renamed.md.maru-trash-"));
+    _ = try std.Io.Dir.cwd().statFile(io, taken.path, .{});
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, renamed, .{}));
     try std.testing.expect(session.takeFileTreeTrashAction() == null);
-    // Until the native terminal ack, the original/staged namespace is reserved globally. This keeps
-    // a replacement opened at the original path or an ancestor rename from invalidating Trash identity.
+    // Until the native terminal ack, the original namespace is reserved globally. This keeps an app-side
+    // replacement open or ancestor rename from invalidating the file-reference identity handoff.
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(anchor));
     session.dispatchAppAction(.new_file);
     try std.testing.expect(session.rename == null);
-    session.completeFileTreeTrash(taken.id, false);
+    session.completeFileTreeTrash(taken.id, .not_moved, null);
+    session.completeFileTreeTrash(taken.id, .moved_verified, null); // duplicate late callback is a no-op
     attempts = 0;
     while (attempts < 500) : (attempts += 1) {
         session.updateFileTreeMutations();
@@ -36872,8 +36944,35 @@ test "file tree mutations create rename protect dirty and roll back failed Trash
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     const success_action = session.takeFileTreeTrashAction().?;
-    session.completeFileTreeTrash(success_action.id, true);
+    const success_staged_for_test = try allocator.dupe(u8, success_action.path);
+    defer allocator.free(success_staged_for_test);
+    // Simulate the one-entry, identity-matched destination reported by NSWorkspace: the staged object is
+    // already absent from the project before Zig commits tree/recent/tab state.
+    try std.Io.Dir.cwd().deleteFile(io, success_action.path);
+    session.completeFileTreeTrash(success_action.id, .moved_verified, null);
     try std.testing.expect(session.dock.pathLocation(renamed) == null);
+
+    // A destination mapping with an unverified identity is already an OS move, not a rollback case.
+    // Preserve its last-known destination and do not invent a nonexistent staged recovery path.
+    const unverified_id: u64 = success_action.id + 1;
+    session.file_tree_trash_queue[0] = .{
+        .id = unverified_id,
+        .root = try allocator.dupe(u8, root),
+        .original = try allocator.dupe(u8, renamed),
+        .staged = try allocator.dupe(u8, success_staged_for_test),
+        .identity = success_action.identity,
+        .parent_identity = null,
+        .root_identity = null,
+        .row_kind = .file,
+        .selection_generation = 0,
+        .taken = true,
+    };
+    session.file_tree_trash_queue_len = 1;
+    const last_known_destination = "/Users/user/.Trash/renamed.md.maru-trash-test";
+    session.completeFileTreeTrash(unverified_id, .moved_unverified, last_known_destination);
+    try std.testing.expectEqual(@as(usize, 0), session.file_tree_trash_queue_len);
+    try std.testing.expectEqual(@as(usize, 1), session.file_tree_manual_recovery_paths_len);
+    try std.testing.expectEqualStrings(last_known_destination, session.file_tree_manual_recovery_paths[0]);
 }
 
 test "file tree rename changes supported panel kind and removes unsupported panel" {

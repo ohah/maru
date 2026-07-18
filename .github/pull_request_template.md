@@ -17,7 +17,7 @@
      아래 예시를 이 PR의 실제 흐름으로 교체하세요. 기준: docs/pr-checklist.md "서술 수준과 다이어그램". -->
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[입력/이벤트] --> B[변경한 책임 영역] --> C[결과/출력]
 ```
 

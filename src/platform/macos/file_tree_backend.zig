@@ -5,6 +5,7 @@
 //! 메모리를 무제한 점유하지 않게 한다(docs/file-panel.md §7).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const file_tree = maru.session.file_tree;
 const c = std.c;
@@ -17,6 +18,7 @@ pub const max_results: usize = 16;
 pub const OwnedEntry = struct {
     name: []u8,
     kind: file_tree.Kind,
+    identity: file_tree.Identity,
 };
 
 pub const Result = struct {
@@ -24,6 +26,7 @@ pub const Result = struct {
     path: []u8,
     entries: std.ArrayList(OwnedEntry) = .empty,
     file_hash: u64 = 0,
+    identity: ?file_tree.Identity = null,
     ok: bool = false,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -182,6 +185,8 @@ fn scanDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Res
     var result = Result{ .path = owned_path };
     var dir = std.Io.Dir.cwd().openDir(io, owned_path, .{ .iterate = true }) catch return result;
     defer dir.close(io);
+    const dir_identity = directoryIdentity(io, dir) catch return result;
+    result.identity = dir_identity;
 
     result.entries.ensureTotalCapacity(allocator, file_tree.max_children_per_directory) catch return result;
     var it = dir.iterate();
@@ -190,10 +195,53 @@ fn scanDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Res
         if (file_tree.Tree.shouldExcludeName(entry.name) or !std.unicode.utf8ValidateSlice(entry.name)) continue;
         const name = allocator.dupe(u8, entry.name) catch return result;
         const kind = kindForEntry(allocator, io, owned_path, entry.name, entry.kind);
-        result.entries.appendAssumeCapacity(.{ .name = name, .kind = kind });
+        result.entries.appendAssumeCapacity(.{
+            .name = name,
+            .kind = kind,
+            .identity = .{
+                .device = dir_identity.device,
+                .inode = @intCast(entry.inode),
+                .kind = kindTag(entry.kind),
+            },
+        });
     }
     result.ok = true;
     return result;
+}
+
+fn directoryIdentity(io: std.Io, dir: std.Io.Dir) !file_tree.Identity {
+    if (comptime builtin.os.tag == .macos) {
+        var stat: std.posix.Stat = undefined;
+        if (std.c.fstat(dir.handle, &stat) != 0) return error.StatFailed;
+        return identityFromStat(stat);
+    }
+    const stat = try dir.stat(io);
+    return .{ .device = 0, .inode = @intCast(stat.inode), .kind = @intFromEnum(file_tree.IdentityKind.directory) };
+}
+
+fn kindTag(kind: std.Io.File.Kind) u8 {
+    return @intFromEnum(switch (kind) {
+        .file => file_tree.IdentityKind.regular,
+        .directory => file_tree.IdentityKind.directory,
+        .sym_link => file_tree.IdentityKind.symlink,
+        else => file_tree.IdentityKind.other,
+    });
+}
+
+fn identityFromStat(stat: std.posix.Stat) file_tree.Identity {
+    const kind: file_tree.IdentityKind = if (std.posix.S.ISREG(stat.mode))
+        .regular
+    else if (std.posix.S.ISDIR(stat.mode))
+        .directory
+    else if (std.posix.S.ISLNK(stat.mode))
+        .symlink
+    else
+        .other;
+    return .{
+        .device = @intCast(stat.dev),
+        .inode = @intCast(stat.ino),
+        .kind = @intFromEnum(kind),
+    };
 }
 
 fn hashFile(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Result {

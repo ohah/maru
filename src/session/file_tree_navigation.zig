@@ -9,11 +9,19 @@ pub const Selection = struct {
     path_buf: [std.fs.max_path_bytes]u8 = undefined,
     path_len: usize = 0,
     index_hint: usize = 0,
+    generation: u64 = 0,
+
+    fn changed(self: *Selection) void {
+        self.generation +%= 1;
+        if (self.generation == 0) self.generation = 1;
+    }
 
     pub fn clear(self: *Selection) void {
+        const had_selection = self.kind != null;
         self.kind = null;
         self.path_len = 0;
         self.index_hint = 0;
+        if (had_selection) self.changed();
     }
 
     pub fn path(self: *const Selection) ?[]const u8 {
@@ -25,10 +33,27 @@ pub const Selection = struct {
         if (row_index >= rows.len) return false;
         const identity = file_tree.rowIdentity(rows[row_index]) orelse return false;
         if (identity.path.len > self.path_buf.len) return false;
+        const identity_changed = self.kind != identity.kind or self.path_len != identity.path.len or
+            !std.mem.eql(u8, self.path_buf[0..self.path_len], identity.path);
         @memcpy(self.path_buf[0..identity.path.len], identity.path);
         self.path_len = identity.path.len;
         self.kind = identity.kind;
         self.index_hint = row_index;
+        if (identity_changed) self.changed();
+        return true;
+    }
+
+    /// Queue-completion paths know the new identity before the async scanner has projected its row.
+    /// Store that identity now; `reconcile` will resolve it after the snapshot arrives.
+    pub fn setIdentity(self: *Selection, kind: file_tree.RowKind, identity_path: []const u8, index_hint: usize) bool {
+        if (identity_path.len > self.path_buf.len) return false;
+        const identity_changed = self.kind != kind or self.path_len != identity_path.len or
+            !std.mem.eql(u8, self.path_buf[0..self.path_len], identity_path);
+        @memcpy(self.path_buf[0..identity_path.len], identity_path);
+        self.path_len = identity_path.len;
+        self.kind = kind;
+        self.index_hint = index_hint;
+        if (identity_changed) self.changed();
         return true;
     }
 

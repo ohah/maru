@@ -36,7 +36,11 @@ pub const Kind = enum(u8) {
 pub const EntryInput = struct {
     name: []const u8,
     kind: Kind,
+    identity: ?Identity = null,
 };
+
+pub const IdentityKind = enum(u8) { regular = 1, directory = 2, symlink = 3, other = 4 };
+pub const Identity = struct { device: u64, inode: u64, kind: u8 };
 
 pub const OpenState = struct {
     path: []const u8,
@@ -48,7 +52,7 @@ pub const OpenState = struct {
 pub const Row = union(enum) {
     recent_header: struct { collapsed: bool, count: u8 },
     recent_file: FileRow,
-    root: struct { path: []const u8, label: []const u8, expanded: bool, loading: bool },
+    root: struct { path: []const u8, label: []const u8, expanded: bool, loading: bool, identity: ?Identity = null },
     directory: DirectoryRow,
     file: FileRow,
     empty: void,
@@ -60,6 +64,7 @@ pub const Row = union(enum) {
         expanded: bool,
         loading: bool,
         symlink: bool,
+        identity: ?Identity = null,
     };
 
     pub const FileRow = struct {
@@ -72,6 +77,7 @@ pub const Row = union(enum) {
         dirty: bool,
         external_change: bool,
         symlink: bool,
+        identity: ?Identity = null,
     };
 };
 
@@ -217,6 +223,7 @@ const Node = struct {
     name: []u8,
     path: []u8,
     kind: Kind,
+    identity: ?Identity = null,
     children: std.ArrayList(Node) = .empty,
     loaded: bool = false,
     expanded: bool = false,
@@ -430,12 +437,72 @@ pub const Tree = struct {
         return false;
     }
 
+    /// Deepest project root containing a mutation target. Returned bytes remain Tree-owned.
+    pub fn rootForMutation(self: *const Tree, path: []const u8) ?[]const u8 {
+        var best: ?[]const u8 = null;
+        for (self.roots.items) |root| {
+            if (!pathWithin(path, root.path)) continue;
+            if (best == null or root.path.len > best.?.len) best = root.path;
+        }
+        return best;
+    }
+
+    /// Rename/delete post-commit maintenance for the bounded recent list. Project nodes are refreshed
+    /// through the existing background snapshot path; recent paths have no scanner owner, so the model
+    /// updates them explicitly and atomically with respect to row projection.
+    pub fn remapRecent(self: *Tree, old_prefix: []const u8, new_prefix: []const u8) !void {
+        var staged: [max_recent]?[]u8 = .{null} ** max_recent;
+        errdefer for (staged) |path| if (path) |owned| self.allocator.free(owned);
+        for (self.recent.items, 0..) |path, i| {
+            if (!pathWithin(path, old_prefix)) continue;
+            staged[i] = try std.mem.concat(self.allocator, u8, &.{ new_prefix, path[old_prefix.len..] });
+        }
+        for (self.recent.items, 0..) |*path, i| if (staged[i]) |owned| {
+            self.allocator.free(path.*);
+            path.* = owned;
+            staged[i] = null;
+        };
+    }
+
+    pub fn recentCount(self: *const Tree) usize {
+        return self.recent.items.len;
+    }
+
+    pub fn recentAt(self: *const Tree, index: usize) ?[]const u8 {
+        return if (index < self.recent.items.len) self.recent.items[index] else null;
+    }
+
+    /// Caller preallocates the replacement off the completion path. The swap is allocation-free and
+    /// rejects a stale index/path so recent and dock can share one rename commit.
+    pub fn replaceRecentOwned(self: *Tree, index: usize, expected: []const u8, replacement: []u8) bool {
+        if (index >= self.recent.items.len or !std.mem.eql(u8, self.recent.items[index], expected)) return false;
+        self.allocator.free(self.recent.items[index]);
+        self.recent.items[index] = replacement;
+        return true;
+    }
+
+    pub fn removeRecentWithin(self: *Tree, removed_prefix: []const u8) void {
+        var i: usize = 0;
+        while (i < self.recent.items.len) {
+            if (!pathWithin(self.recent.items[i], removed_prefix)) {
+                i += 1;
+                continue;
+            }
+            self.allocator.free(self.recent.orderedRemove(i));
+        }
+    }
+
     pub fn pathWithinRoot(path: []const u8, root: []const u8) bool {
         return pathWithin(path, root);
     }
 
     pub fn applySnapshot(self: *Tree, directory_path: []const u8, inputs: []const EntryInput) !void {
-        return self.applySnapshotLimited(directory_path, inputs, max_materialized_nodes);
+        return self.applySnapshotWithIdentity(directory_path, null, inputs);
+    }
+
+    pub fn applySnapshotWithIdentity(self: *Tree, directory_path: []const u8, identity: ?Identity, inputs: []const EntryInput) !void {
+        try self.applySnapshotLimited(directory_path, inputs, max_materialized_nodes);
+        if (identity) |value| (self.findNode(directory_path) orelse return error.NotFound).identity = value;
     }
 
     fn applySnapshotLimited(self: *Tree, directory_path: []const u8, inputs: []const EntryInput, node_limit: usize) !void {
@@ -467,7 +534,7 @@ pub const Tree = struct {
             errdefer self.allocator.free(name);
             const path = try std.fs.path.join(self.allocator, &.{ directory_path, input.name });
             errdefer self.allocator.free(path);
-            staged.appendAssumeCapacity(.{ .name = name, .path = path, .kind = input.kind });
+            staged.appendAssumeCapacity(.{ .name = name, .path = path, .kind = input.kind, .identity = input.identity });
             accepted += 1;
             staged_node_count += node_weight;
         }
@@ -512,6 +579,7 @@ pub const Tree = struct {
                     .label = if (root.name.len > 0) root.name else root.path,
                     .expanded = root.expanded,
                     .loading = root.loading,
+                    .identity = root.identity,
                 } });
                 if (root.expanded) try appendChildrenRows(allocator, root.children.items, 1, open, out);
             }
@@ -540,10 +608,13 @@ pub const Tree = struct {
                     .expanded = node.expanded,
                     .loading = node.loading,
                     .symlink = node.kind.isSymlink(),
+                    .identity = node.identity,
                 } });
                 if (node.expanded) try appendChildrenRows(allocator, node.children.items, depth +| 1, open, out);
             } else {
-                try out.append(allocator, .{ .file = fileRow(node.path, node.name, depth, node.kind.isSymlink(), open) });
+                var row = fileRow(node.path, node.name, depth, node.kind.isSymlink(), open);
+                row.identity = node.identity;
+                try out.append(allocator, .{ .file = row });
             }
         }
     }

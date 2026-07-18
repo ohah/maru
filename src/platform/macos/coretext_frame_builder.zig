@@ -815,9 +815,12 @@ pub fn buildFileTreeHeaderDrawList(
     };
 }
 
+pub const FileTreeEdit = struct { identity: file_tree.RowIdentity, text: []const u8 };
+
 pub fn buildFileTreeDrawList(
     allocator: std.mem.Allocator,
     rows: []const file_tree.Row,
+    edit: ?FileTreeEdit,
     scroll_rows: usize,
     visible_rows: u16,
     cols: u16,
@@ -871,6 +874,12 @@ pub fn buildFileTreeDrawList(
                 label = "파일을 열면 트리가 표시됩니다";
             },
         }
+        if (edit) |active_edit| if (file_tree.rowIdentity(row)) |identity| {
+            if (identity.eql(active_edit.identity)) {
+                label = active_edit.text;
+                style = .{ .foreground = active_fg, .bold = true };
+            }
+        };
         const indent: u16 = @min(file_tree_inset_cols +| depth *| 2, cols -| 1);
         if (indent < cols) try cells.append(allocator, .{ .row = r, .col = indent, .codepoint = marker, .width = 1, .style = style });
         const state_cols: u16 = (if (dirty) @as(u16, 2) else 0) + (if (conflict) @as(u16, 2) else 0);
@@ -1988,7 +1997,7 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
         } },
         .empty,
     };
-    var dl = try buildFileTreeDrawList(allocator, &rows, 1, 1, 18, dim, bright);
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 1, 1, 18, dim, bright);
     defer dl.deinit(allocator);
     var saw_active = false;
     var saw_dirty = false;
@@ -2000,6 +2009,20 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
         if (cell.codepoint == '!' and cell.col == 14) saw_conflict = true;
     }
     try std.testing.expect(saw_active and saw_dirty and saw_conflict);
+
+    var editing = try buildFileTreeDrawList(allocator, &rows, .{
+        .identity = .{ .kind = .file, .path = "/tmp/doc.md" },
+        .text = "renamed.md|",
+    }, 1, 1, 18, dim, bright);
+    defer editing.deinit(allocator);
+    var saw_rename_r = false;
+    var saw_old_o = false;
+    for (editing.cells) |cell| {
+        if (cell.codepoint == 'r') saw_rename_r = true;
+        if (cell.codepoint == 'o') saw_old_o = true;
+    }
+    try std.testing.expect(saw_rename_r);
+    try std.testing.expect(!saw_old_o);
 }
 
 // 활성 탭(행/세그먼트) 제목은 active_fg + bold, 나머지는 fg + regular로 그려지는지 — 활성 탭 글자 강조.

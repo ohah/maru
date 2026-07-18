@@ -3077,6 +3077,9 @@ final class TerminalSurface {
     // 즉시 포커스를 회수하지 않게 하고, 모달 override 뒤에는 같은 도크로 복원한다.
     var focusedFilePanelSurfaceId: UInt64?
     var filePanelFocusOverridden = false
+    // Trash adapter ownership is session/surface-local. An active-window change must not redirect an
+    // asynchronous recycle completion to a different Zig AppSession.
+    var fileTreeTrashInFlight = false
     lazy var fileTreeWatcher = MaruFileTreeWatcher(surface: self)
 }
 
@@ -3141,7 +3144,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 시에만이라, tick마다 4KB 새로 할당·zero-fill하지 않고 이 버퍼를 재사용한다(리뷰 [9]). Zig가 navLen만 쓰고 반환 길이로
     // 슬라이스하므로 zero-fill 불필요. addr_nav_url_cap(4096, app_scheme)과 정합.
     private var webNavigateUrlBuf = [UInt8](repeating: 0, count: 4096)
-    private var fileTreePathBuf = [UInt8](repeating: 0, count: 4096)
+    private var fileTreePathBuf = [UInt8](repeating: 0, count: Int(MARU_FILE_TREE_PATH_CAPACITY))
     // 세션별 forwarder의 대상. tick 중에는 explicitSurface, 그 외(입력/IME/hover)에는 key 창의 surface
     // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
     private var activeSurface: TerminalSurface? {
@@ -6223,6 +6226,73 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         if len > 0, len <= fileTreePathBuf.count {
             NSWorkspace.shared.open(URL(fileURLWithPath: String(decoding: fileTreePathBuf[0 ..< len], as: UTF8.self)))
+        }
+        if !surface.fileTreeTrashInFlight {
+            var requestId: UInt64 = 0
+            var expectedDevice: UInt64 = 0
+            var expectedInode: UInt64 = 0
+            var expectedKind: UInt32 = 0
+            let trashLen = fileTreePathBuf.withUnsafeMutableBufferPointer {
+                maru_macos_app_session_take_file_tree_trash_action(
+                    session,
+                    $0.baseAddress,
+                    $0.count,
+                    &requestId,
+                    &expectedDevice,
+                    &expectedInode,
+                    &expectedKind
+                )
+            }
+            if trashLen > 0, trashLen <= fileTreePathBuf.count {
+                let stagedPath = String(decoding: fileTreePathBuf[0 ..< trashLen], as: UTF8.self)
+                let requestSessionBits = UInt(bitPattern: session)
+                surface.fileTreeTrashInFlight = true
+                DispatchQueue.global(qos: .utility).async { [weak surface] in
+                    let stagedURL = URL(fileURLWithPath: stagedPath)
+                    // Bind the file reference first, then validate the object reached through that reference.
+                    // Falling back to a path URL would reopen the replacement race, so nil is a hard failure.
+                    let trashURL = (stagedURL as NSURL).fileReferenceURL()
+                    var stagedStat = Darwin.stat()
+                    let statResult = trashURL?.path.withCString { Darwin.lstat($0, &stagedStat) } ?? -1
+                    let actualKind: UInt32
+                    switch stagedStat.st_mode & mode_t(S_IFMT) {
+                    case mode_t(S_IFREG): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_REGULAR)
+                    case mode_t(S_IFDIR): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_DIRECTORY)
+                    case mode_t(S_IFLNK): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_SYMLINK)
+                    default: actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_OTHER)
+                    }
+                    let identityMatches = statResult == 0
+                        && UInt64(stagedStat.st_dev) == expectedDevice
+                        && UInt64(stagedStat.st_ino) == expectedInode
+                        && actualKind == expectedKind
+                    Task { @MainActor [weak surface] in
+                        guard let surface else { return }
+                        guard let currentSession = surface.appSession,
+                              UInt(bitPattern: currentSession) == requestSessionBits,
+                              let requestSession = OpaquePointer(bitPattern: requestSessionBits)
+                        else {
+                            surface.fileTreeTrashInFlight = false
+                            return
+                        }
+                        guard identityMatches, let trashURL else {
+                            surface.fileTreeTrashInFlight = false
+                            maru_macos_app_session_complete_file_tree_trash(requestSession, requestId, 0)
+                            return
+                        }
+                        NSWorkspace.shared.recycle([trashURL]) { [weak surface] _, error in
+                            MainActor.assumeIsolated {
+                                guard let surface else { return }
+                                surface.fileTreeTrashInFlight = false
+                                guard let currentSession = surface.appSession,
+                                      UInt(bitPattern: currentSession) == requestSessionBits,
+                                      let requestSession = OpaquePointer(bitPattern: requestSessionBits)
+                                else { return }
+                                maru_macos_app_session_complete_file_tree_trash(requestSession, requestId, error == nil ? 1 : 0)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

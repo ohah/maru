@@ -12,6 +12,7 @@ const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
 const file_tree = maru.session.file_tree;
 const file_tree_navigation = maru.session.file_tree_navigation;
+const file_tree_mutation = maru.session.file_tree_mutation;
 const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
@@ -31,6 +32,7 @@ const imeDecide = maru.session.ime.decide;
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
+const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const agent_session = @import("agent_session.zig"); // L4 — 에이전트 세션 트랜스크립트 파일 찾기 + tail read
 const agent_hooks = @import("agent_hooks.zig"); // provider 훅으로 팬↔세션 트랜스크립트 경로 매핑
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
@@ -167,7 +169,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 127;
+pub const abi_version: u32 = 128;
+// 128: project-tree mutation worker + recoverable Trash adapter. Zig stages a descriptor-relative, no-follow
+// rename and exposes a staged-path one-shot; Swift only invokes NSWorkspace recycle and returns success/failure.
+// New exports only, so fixed-width struct offsets stay unchanged.
 // 127: file tree keyboard focus. Metal firstResponder pull과 Esc의 dock surface restore one-shot을 추가한다.
 // focus/selection 정책은 Zig FocusOwner가 소유하고 Swift는 responder 전이만 실행한다. fixed-width struct offset 불변.
 // 126: 파일 탭 닫기. focus 기반 Cmd+W를 위해 workspace focus 동기 export를 추가하고, dirty 저장-후-닫기의
@@ -1126,6 +1131,7 @@ const PendingConfirm = union(enum) {
     file_conflict_reload: u64,
     grant: u64,
     file_panel_close,
+    file_tree_delete,
 };
 
 pub const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
@@ -1317,7 +1323,98 @@ const RenameTarget = union(enum) {
     /// 사이드바 그룹 이름 편집(SG3c) — group=그룹 시작 마커를 든 탭. custom_name이 아니라 `group_start`(위치 파생 그룹
     /// 마커)를 편집한다. 빈 이름은 마커를 지우지 않고 빈 문자열로 둔다(그룹 유지, 폴백 "그룹" 표시). docs/sidebar-groups.md §7.
     group: *Tab,
+    /// Project-tree inline editor. The path bytes are copied into the target because async scan/FSEvents may
+    /// rebuild every borrowed Row slice while the editor is open.
+    file_tree: FileTreeEditTarget,
 };
+
+const FileTreeEditKind = enum { create_file, create_directory, rename };
+const FileTreeEditTarget = struct {
+    path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+    row_kind: file_tree.RowKind,
+    symlink: bool = false,
+    edit_kind: FileTreeEditKind,
+    identity: ?file_tree.Identity = null,
+    parent_identity: ?file_tree.Identity = null,
+    root_identity: ?file_tree.Identity = null,
+
+    fn path(self: *const FileTreeEditTarget) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
+};
+
+const PendingFileTreeDelete = struct {
+    path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+    row_kind: file_tree.RowKind,
+    symlink: bool = false,
+    identity: ?file_tree.Identity = null,
+    parent_identity: ?file_tree.Identity = null,
+    root_identity: ?file_tree.Identity = null,
+
+    fn path(self: *const PendingFileTreeDelete) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
+};
+
+pub const FileTreeTrashAction = struct {
+    id: u64,
+    path: []const u8,
+    identity: file_tree_mutation_backend.Identity,
+};
+const PendingTrash = struct {
+    id: u64,
+    root: []u8,
+    original: []u8,
+    staged: []u8,
+    identity: file_tree_mutation_backend.Identity,
+    parent_identity: ?file_tree.Identity,
+    root_identity: ?file_tree.Identity,
+    row_kind: file_tree.RowKind,
+    selection_generation: u64,
+    taken: bool = false,
+    restoring: bool = false,
+};
+const PendingDeleteRoot = struct { id: u64, root: []u8 };
+const FileTreeMutationEditorLock = struct {
+    const Phase = enum { waiting, submitted };
+    mutation_id: u64,
+    surface_id: u64,
+    request_id: u64,
+    acknowledged: bool = false,
+    phase: Phase = .waiting,
+};
+const PendingRenameRemap = struct {
+    const DockItem = struct {
+        group: *dock_panel.DockGroup,
+        index: usize,
+        expected: []u8,
+        replacement: []u8,
+        new_kind: ?dock_panel.EntryKind,
+    };
+    const RecentItem = struct { index: usize, expected: []u8, replacement: []u8 };
+
+    id: u64,
+    dock_items: [dock_panel.max_entries]DockItem = undefined,
+    dock_len: usize = 0,
+    recent_items: [file_tree.max_recent]RecentItem = undefined,
+    recent_len: usize = 0,
+    committed: bool = false,
+
+    fn deinit(self: *PendingRenameRemap, allocator: std.mem.Allocator) void {
+        for (self.dock_items[0..self.dock_len]) |item| {
+            allocator.free(item.expected);
+            if (!self.committed) allocator.free(item.replacement);
+        }
+        for (self.recent_items[0..self.recent_len]) |item| {
+            allocator.free(item.expected);
+            if (!self.committed) allocator.free(item.replacement);
+        }
+        self.* = undefined;
+    }
+};
+const file_tree_trash_capacity: usize = 16;
 
 /// OS 클립보드 1회성 동작 신호(input.right-click paste·menu). Zig가 우클릭/터미널 메뉴에서 세우고, Swift가 매 tick
 /// take_clipboard_action으로 drain해 실행한다(copy=copySelectionToPasteboard, paste=pastePasteboardText). ABI는
@@ -2003,6 +2100,9 @@ pub const AppSession = struct {
     // chrome_host.context_menu(중립)에, 라이브 포인터 대상은 여기에 둔다(rename과 같은 분리). 메뉴 "Rename" 선택
     // 시 이 대상으로 startRename. 대상 teardown 시 null로 비운다(stale 포인터 방지, rename과 같은 funnel).
     context_menu_target: ?RenameTarget = null,
+    // File-tree rows are rebuildable, so this context target stores the same copied identity used by the
+    // inline editor rather than a Row pointer/index. The shared chrome menu is selected by this flag.
+    file_tree_context_target: ?PendingFileTreeDelete = null,
     // view options(⚙) 메뉴 — chrome_host.context_menu 상태를 공유하되, 이게 true면 rename 컨텍스트 메뉴가 아니라
     // 사이드바 표시 토글(브랜치·폴더) 메뉴다(buildContextMenuItems/acceptContextMenu가 이 플래그로 분기). 체크박스
     // 패널처럼 토글해도 닫히지 않고 열린 채 라벨(체크마크)만 갱신한다 — 바깥 클릭/Esc로 닫는다(closeContextMenu).
@@ -2084,6 +2184,7 @@ pub const AppSession = struct {
     // 메모리 result queue만 drain하며 readdir/stat을 호출하지 않는다. FSEvents root/event는 Swift ABI adapter가 맡는다.
     file_tree: file_tree.Tree = undefined,
     file_tree_backend: file_tree_backend.Backend = undefined,
+    file_tree_mutation_backend: file_tree_mutation_backend.Backend = undefined,
     file_tree_initialized: bool = false,
     file_tree_rows: std.ArrayList(file_tree.Row) = .empty,
     file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
@@ -2098,6 +2199,23 @@ pub const AppSession = struct {
     file_tree_reload_actions_len: usize = 0,
     file_tree_watch_reset_pending: bool = false,
     file_tree_external_open: ?[]u8 = null,
+    file_tree_mutation_request_id: u64 = 0,
+    pending_file_tree_delete: ?PendingFileTreeDelete = null,
+    file_tree_delete_inflight: bool = false,
+    pending_delete_root: ?PendingDeleteRoot = null,
+    file_tree_edit_inflight: bool = false,
+    file_tree_rename_rollback_id: ?u64 = null,
+    pending_rename_remap: ?PendingRenameRemap = null,
+    file_tree_mutation_waiting_request: ?file_tree_mutation_backend.Request = null,
+    file_tree_mutation_queue_reserved: bool = false,
+    file_tree_mutation_editor_locks: [dock_panel.max_entries]FileTreeMutationEditorLock = undefined,
+    file_tree_mutation_editor_locks_len: usize = 0,
+    file_tree_trash_queue: [file_tree_trash_capacity]PendingTrash = undefined,
+    file_tree_trash_queue_len: usize = 0,
+    // Catastrophic restore failure is fail-closed: retain the exact hidden path for the session lifetime
+    // and keep normal exit blocked so a transient notice/result deallocation cannot erase recovery data.
+    file_tree_manual_recovery_paths: [file_tree_trash_capacity][]u8 = undefined,
+    file_tree_manual_recovery_paths_len: usize = 0,
     // FP6 GPU 헤더 토글이 바꾼 Markdown 모드를 Swift WKWebView에 전달하는 1회성 신호. entry.mode가 단일
     // 상태 출처이며 pending은 surface_id만 보관한다(take 시 현재 mode를 함께 반환).
     file_panel_mode_pending: ?u64 = null,
@@ -2396,8 +2514,13 @@ pub const AppSession = struct {
         // allocator를 호출하지 않는다(leaf=N, divider=N-1).
         try self.dock_leaf_rects_scratch.ensureTotalCapacity(allocator, dock_panel.max_groups);
         try self.dock_dividers_scratch.ensureTotalCapacity(allocator, dock_panel.max_groups - 1);
-        self.file_tree = file_tree.Tree.init(allocator);
-        self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
+        {
+            self.file_tree = file_tree.Tree.init(allocator);
+            errdefer self.file_tree.deinit();
+            self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
+            errdefer self.file_tree_backend.deinit();
+            self.file_tree_mutation_backend = try file_tree_mutation_backend.Backend.init(allocator, io);
+        }
         self.file_tree_initialized = true;
         self.file_tree_reload_actions_len = 0;
 
@@ -3085,6 +3208,22 @@ pub const AppSession = struct {
                 const block_off: i64 = @intCast((hdr_h -| ch) / 2); // 헤더 1줄 세로 중앙
                 const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
                 return .{ .x = @intCast(caret_col * cw), .y = @intCast(caret_y), .w = @intCast(cw), .h = @intCast(ch) };
+            },
+            .file_tree => |edit| {
+                const index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = edit.row_kind, .path = edit.path() }) orelse
+                    self.selectedFileTreeRow() orelse return null;
+                const dg = self.dockGeometry();
+                const visible_index = index -| self.fileTreeEffectiveScroll();
+                if (visible_index >= self.fileTreeVisibleRows()) return null;
+                const depth = file_tree.rowDepth(self.file_tree_rows.items[index]) orelse 0;
+                const start_col: u32 = @min(@as(u32, 4) + @as(u32, depth) * 2, dg.tree_content.w / cw -| 1);
+                const max_col = dg.tree_content.w / cw -| 1;
+                return .{
+                    .x = @intCast(dg.tree_content.x + @min(start_col + qcols, max_col) * cw),
+                    .y = @intCast(dg.tree_content.y + visible_index * ch),
+                    .w = @intCast(cw),
+                    .h = @intCast(ch),
+                };
             },
         }
     }
@@ -5105,6 +5244,7 @@ pub const AppSession = struct {
         self.chrome_host.palette.hide();
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
+        self.file_tree_context_target = null;
         self.view_options_menu = false;
         self.terminal_context_menu = false;
         // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayFrame이 둘을 한 오버레이
@@ -5122,6 +5262,7 @@ pub const AppSession = struct {
             .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = false },
             .paste => self.pending_paste_confirm.clearRetainingCapacity(),
             .file_panel_close => self.cancelFilePanelClose(),
+            .file_tree_delete => self.pending_file_tree_delete = null,
             .none, .close, .reset, .file_conflict_reload => {},
         }
         self.pending_confirm = .none;
@@ -5511,7 +5652,7 @@ pub const AppSession = struct {
 
     fn filePanelEntryNeedsDirtyProtection(entry: dock_panel.Entry) bool {
         return entry.dirty or entry.dirty_sync_pending or entry.external_change or
-            entry.conflict_reload_pending or entry.mode == .source_edit;
+            entry.conflict_reload_pending or entry.mode == .source_edit or entry.mutation_pending_id != 0;
     }
 
     /// 창/세션 종료 전에 해소해야 하는 파일 편집 상태가 하나라도 있는지. source-edit는 native dirty가 최신 CM6
@@ -5519,6 +5660,10 @@ pub const AppSession = struct {
     /// 각 세션을 순회하고, 확정 직전에도 다시 검사한다.
     pub fn hasProtectedFilePanelsForExit(self: *const AppSession) bool {
         if (self.pending_file_panel_close != null or self.file_panel_save_close_pending != null) return true;
+        if (self.file_tree_mutation_waiting_request != null or self.file_tree_edit_inflight or
+            self.file_tree_delete_inflight or (self.file_tree_initialized and self.file_tree_mutation_backend.pendingCount() != 0) or
+            self.file_tree_trash_queue_len != 0 or self.file_tree_manual_recovery_paths_len != 0 or
+            self.file_tree_mutation_editor_locks_len != 0) return true;
         if (!self.dock_initialized) return false;
         for (0..self.dock.groupCount()) |group_index| {
             const group = self.dock.groupAtConst(group_index).?;
@@ -5721,6 +5866,7 @@ pub const AppSession = struct {
         // close lock/snapshot/save/unlock callback은 session pointer에 핀된다. reparent 중 이관하면 old callback이
         // destination과 불일치해 사라지므로, 모든 입력 전이가 terminal ack로 끝날 때까지 모델 수술을 거부한다.
         if (src.hasFilePanelCloseTransition() or dst.hasFilePanelCloseTransition()) return error.UnsupportedMove;
+        if (src.fileTreeNamespaceMutationBusy() or dst.fileTreeNamespaceMutationBusy()) return error.UnsupportedMove;
         // 범위 게이트(code-review [1]): merge는 src **모든** 워크스페이스를 옮기므로, 하나라도 범위 밖(pinned·그룹 마커·그룹
         // 멤버)이면 detach(비가역) **전에** 거부한다 → source·dst 완전 불변(그룹/pinned window merge는 M3d-2a-ii).
         for (0..src.tabs.items.len) |i| {
@@ -7550,6 +7696,10 @@ pub const AppSession = struct {
             .close_file_panel_group => self.closeFocusedDockGroup(),
             .toggle_file_panel_dock_side => self.toggleFilePanelDockSide(),
             .focus_file_tree => self.focusFileTree(),
+            .new_file => self.startFileTreeEdit(.create_file),
+            .new_directory => self.startFileTreeEdit(.create_directory),
+            .rename_file_tree_entry => self.startFileTreeEdit(.rename),
+            .delete_file_tree_entry => self.requestDeleteSelectedFileTreeEntry(),
             .close_focused => switch (self.focus_owner) {
                 .workspace => self.requestClose(.term_or_pane),
                 .dock_surface => |surface_id| if (self.dock.groupForSurfaceId(surface_id)) |group| {
@@ -8251,6 +8401,27 @@ pub const AppSession = struct {
         }
     }
 
+    /// Rename can invalidate several path-pinned WebViews at once. Recreate at most one visible group
+    /// per frame; inactive entries stay surface-less until normal activation assigns them.
+    fn assignOneVisibleDockSurfaceId(self: *AppSession) void {
+        if (!self.dock_initialized) return;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            const active = group.active orelse continue;
+            if (active >= group.entries.items.len) continue;
+            const entry = &group.entries.items[active];
+            if (entry.surface_id != 0 or entry.mutation_pending_id != 0) continue;
+            entry.surface_id = self.surface_ids.next();
+            self.touchFilePanelEntry(entry);
+            self.file_panel_mode_pending = entry.surface_id;
+            if (group == self.dock.focusedGroup() and self.focus_owner == .file_tree and
+                self.focus_owner.file_tree.restore_surface == null)
+                self.focus_owner.file_tree.restore_surface = entry.surface_id;
+            self.metal_dirty = true;
+            return;
+        }
+    }
+
     fn touchFilePanelEntry(self: *AppSession, entry: *dock_panel.Entry) void {
         self.file_panel_seen_generation +%= 1;
         if (self.file_panel_seen_generation == 0) self.file_panel_seen_generation = 1;
@@ -8270,7 +8441,7 @@ pub const AppSession = struct {
                     live += 1;
                     const close_reserved = if (self.pending_file_panel_close) |pending| pending.surface_id == entry.surface_id else false;
                     if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
-                        entry.conflict_reload_pending or close_reserved or group.active == i) continue;
+                        entry.conflict_reload_pending or entry.mutation_pending_id != 0 or close_reserved or group.active == i) continue;
                     if (candidate == null or entry.last_seen < candidate.?.last_seen) candidate = entry;
                 }
             }
@@ -8547,8 +8718,9 @@ pub const AppSession = struct {
             for (result.entries.items) |entry| self.file_tree_entry_inputs.appendAssumeCapacity(.{
                 .name = entry.name,
                 .kind = entry.kind,
+                .identity = entry.identity,
             });
-            self.file_tree.applySnapshot(result.path, self.file_tree_entry_inputs.items) catch |err| switch (err) {
+            self.file_tree.applySnapshotWithIdentity(result.path, result.identity, self.file_tree_entry_inputs.items) catch |err| switch (err) {
                 error.NotFound => {}, // watcher refresh 중 부모가 사라졌거나 root가 이관된 정상 race.
                 else => {
                     self.file_tree.failSnapshot(result.path);
@@ -8599,6 +8771,512 @@ pub const AppSession = struct {
         }
     }
 
+    fn openCreatedFilePanel(self: *AppSession, path: []const u8, root: []const u8) void {
+        const open_kind = file_panel_bridge.openKindForPath(path) orelse return;
+        self.file_tree.recordOpened(path, root) catch return;
+        const kind: dock_panel.EntryKind = switch (open_kind) {
+            .markdown => .markdown,
+            .html => .html,
+        };
+        const opened = self.dock.open(self.dock.focusedGroup(), path, kind) catch return;
+        if (opened.previous_active) |i| if (i < opened.group.entries.items.len and i != opened.index)
+            self.markFilePanelDirtySyncPending(&opened.group.entries.items[i]);
+        const entry = &opened.group.entries.items[opened.index];
+        if (entry.surface_id == 0) {
+            entry.surface_id = self.surface_ids.next();
+            self.touchFilePanelEntry(entry);
+        }
+        self.enforceFilePanelLiveViewLimit();
+        // Creation was initiated from the tree: keep tree keyboard ownership while the new WebView is
+        // created, so subsequent arrows/F2 do not unexpectedly type into CM6.
+        self.focus_owner = .{ .file_tree = .{ .restore_surface = entry.surface_id } };
+        self.file_tree_focus_pending = true;
+        self.file_panel_mode_pending = entry.surface_id;
+        self.dock.collapsed = false;
+    }
+
+    fn prepareFileTreeRenameRemap(self: *AppSession, id: u64, old_path: []const u8, new_path: []const u8) !void {
+        var plan = PendingRenameRemap{ .id = id };
+        errdefer plan.deinit(self.allocator);
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            for (group.entries.items, 0..) |entry, entry_index| {
+                const replacement = (try file_tree_mutation.remapPath(self.allocator, entry.path, old_path, new_path)) orelse continue;
+                const expected = try self.allocator.dupe(u8, entry.path);
+                const new_kind: ?dock_panel.EntryKind = if (file_panel_bridge.openKindForPath(replacement)) |kind| switch (kind) {
+                    .markdown => .markdown,
+                    .html => .html,
+                } else null;
+                plan.dock_items[plan.dock_len] = .{
+                    .group = group,
+                    .index = entry_index,
+                    .expected = expected,
+                    .replacement = replacement,
+                    .new_kind = new_kind,
+                };
+                plan.dock_len += 1;
+            }
+        }
+        // No supported open can enter while the mutation is in flight, so conflicts only need to be
+        // rejected once at admission. Completion can then validate each stable group/index in O(N).
+        for (plan.dock_items[0..plan.dock_len]) |item| if (self.dock.pathLocation(item.replacement) != null)
+            return error.PathConflict;
+        for (0..self.file_tree.recentCount()) |index| {
+            const recent = self.file_tree.recentAt(index).?;
+            const replacement = (try file_tree_mutation.remapPath(self.allocator, recent, old_path, new_path)) orelse continue;
+            const expected = try self.allocator.dupe(u8, recent);
+            plan.recent_items[plan.recent_len] = .{ .index = index, .expected = expected, .replacement = replacement };
+            plan.recent_len += 1;
+        }
+        if (self.pending_rename_remap) |*old| old.deinit(self.allocator);
+        self.pending_rename_remap = plan;
+    }
+
+    fn applyFileTreeRename(self: *AppSession, id: u64, new_path: []const u8) bool {
+        const plan = if (self.pending_rename_remap) |*pending| pending else return false;
+        if (plan.id != id) return false;
+        // Validate the exact admission snapshot before the first swap. Open is globally blocked while a
+        // rename is in flight; unrelated close/reorder is tolerated because lookup is by expected path.
+        for (plan.dock_items[0..plan.dock_len]) |item| {
+            if (item.index >= item.group.entries.items.len) return false;
+            const entry = item.group.entries.items[item.index];
+            if (!std.mem.eql(u8, entry.path, item.expected) or entry.mutation_pending_id != id) return false;
+        }
+        for (plan.recent_items[0..plan.recent_len]) |item| {
+            const current = self.file_tree.recentAt(item.index) orelse return false;
+            if (!std.mem.eql(u8, current, item.expected)) return false;
+        }
+
+        var retired_focus = false;
+        for (plan.recent_items[0..plan.recent_len]) |item|
+            std.debug.assert(self.file_tree.replaceRecentOwned(item.index, item.expected, item.replacement));
+        for (plan.dock_items[0..plan.dock_len]) |item| {
+            const entry = &item.group.entries.items[item.index];
+            const old_surface = entry.surface_id;
+            const old_owned = entry.path;
+            entry.path = item.replacement;
+            self.allocator.free(old_owned);
+            if (item.new_kind) |kind| if (entry.kind != kind) {
+                entry.kind = kind;
+                entry.mode = .read;
+            };
+            if (old_surface != 0) {
+                retired_focus = retired_focus or switch (self.focus_owner) {
+                    .dock_surface => |surface_id| surface_id == old_surface,
+                    .file_tree => |owner| owner.restore_surface == old_surface,
+                    .workspace => false,
+                };
+                self.removeFilePanelQueuedActions(old_surface);
+                self.notifySurfaceClosed(old_surface);
+                entry.surface_id = 0;
+            }
+        }
+        // A supported file renamed to an unsupported extension remains on disk and selected in the
+        // project tree, but no longer has a file-panel capability. Remove only those clean reserved
+        // entries after every allocation and path swap has succeeded.
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            var index = group.entries.items.len;
+            while (index > 0) {
+                index -= 1;
+                const entry = &group.entries.items[index];
+                if (!file_tree_mutation.pathWithin(entry.path, new_path) or file_panel_bridge.openKindForPath(entry.path) != null) continue;
+                if (group.remove(index)) |removed| self.allocator.free(removed.path);
+            }
+        }
+        if (retired_focus) {
+            const restore_surface = if (self.dock.focusedGroup().active) |active|
+                if (active < self.dock.focusedGroup().entries.items.len)
+                    if (self.dock.focusedGroup().entries.items[active].surface_id != 0)
+                        self.dock.focusedGroup().entries.items[active].surface_id
+                    else
+                        null
+                else
+                    null
+            else
+                null;
+            self.focus_owner = .{ .file_tree = .{ .restore_surface = restore_surface } };
+            self.file_tree_focus_pending = true;
+        }
+        self.enforceFilePanelLiveViewLimit();
+        plan.committed = true;
+        plan.deinit(self.allocator);
+        self.pending_rename_remap = null;
+        return true;
+    }
+
+    fn discardPendingRenameRemap(self: *AppSession, id: u64) void {
+        if (self.pending_rename_remap) |*plan| {
+            if (plan.id != id) return;
+            plan.deinit(self.allocator);
+            self.pending_rename_remap = null;
+        }
+    }
+
+    fn fileTreePathProtectedNow(self: *const AppSession, path: []const u8, request_id: u64) bool {
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| {
+                if (!file_tree_mutation.pathWithin(entry.path, path)) continue;
+                if (entry.mutation_pending_id != 0 and entry.mutation_pending_id != request_id) return true;
+                const editor_locked = if (entry.mode == .source_edit) blk: {
+                    for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
+                        if (lock.mutation_id == request_id and lock.surface_id == entry.surface_id and lock.acknowledged) break :blk true;
+                    }
+                    break :blk false;
+                } else true;
+                if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
+                    entry.conflict_reload_pending or !editor_locked) return true;
+            }
+        }
+        return false;
+    }
+
+    fn enqueueFileTreeRenameRollback(self: *AppSession, result: file_tree_mutation_backend.Result) bool {
+        const root = self.file_tree.rootForMutation(result.source) orelse return false;
+        const plan: file_tree_mutation.Plan = .{
+            .operation = .rename,
+            .root = root,
+            .source = result.target,
+            .parent = std.fs.path.dirname(result.source) orelse return false,
+            .name = std.fs.path.basename(result.source),
+        };
+        var request = file_tree_mutation_backend.Request.init(self.allocator, result.id, plan) catch return false;
+        const identity = result.identity orelse {
+            request.deinit(self.allocator);
+            return false;
+        };
+        request.identity = .{ .device = identity.device, .inode = identity.inode, .kind = @intCast(identity.kind) };
+        request.parent_identity = result.parent_identity;
+        request.root_identity = result.root_identity;
+        request.row_kind = result.row_kind;
+        request.selection_generation = result.selection_generation;
+        if (!self.file_tree_mutation_backend.submit(request)) {
+            request.deinit(self.allocator);
+            return false;
+        }
+        self.file_tree_rename_rollback_id = result.id;
+        self.file_tree_mutation_backend.pump();
+        return true;
+    }
+
+    fn enqueueFileTreeDeleteRestore(
+        self: *AppSession,
+        id: u64,
+        root: []const u8,
+        staged: []const u8,
+        original: []const u8,
+        identity: file_tree_mutation_backend.Identity,
+        parent_identity: ?file_tree.Identity,
+        root_identity: ?file_tree.Identity,
+    ) bool {
+        var restore = file_tree_mutation_backend.Request.initRestore(
+            self.allocator,
+            id,
+            root,
+            staged,
+            original,
+            identity,
+            parent_identity,
+            root_identity,
+        ) catch return false;
+        if (!self.file_tree_mutation_backend.submit(restore)) {
+            restore.deinit(self.allocator);
+            return false;
+        }
+        self.file_tree_mutation_backend.pump();
+        return true;
+    }
+
+    fn removeDeletedDockEntries(self: *AppSession, removed_path: []const u8) void {
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            var i = group.entries.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (!file_tree_mutation.pathWithin(group.entries.items[i].path, removed_path)) continue;
+                const sid = group.entries.items[i].surface_id;
+                if (sid != 0) {
+                    _ = self.closeFilePanelSurfaceNow(sid);
+                } else if (group.remove(i)) |removed| {
+                    self.allocator.free(removed.path);
+                }
+            }
+        }
+    }
+
+    fn updateFileTreeMutations(self: *AppSession) void {
+        self.file_tree_mutation_backend.pump();
+        var result = self.file_tree_mutation_backend.takeResult() orelse return; // max one completion per frame
+        defer result.deinit(self.allocator);
+        if (!result.ok) {
+            if (result.recovery_required) {
+                if (result.operation == .stage_delete) {
+                    self.file_tree_delete_inflight = false;
+                    self.discardPendingDeleteRoot(result.id);
+                }
+                self.retainFileTreeRecoveryPath(result.target);
+                result.target_transferred = true;
+                return;
+            }
+            if (result.operation == .rename and self.file_tree_rename_rollback_id == result.id) {
+                // The filesystem remains at the post-rename path. Keep reservation/editor locks and
+                // exact model plan fail-closed; transfer the worker-owned path without allocating.
+                self.file_tree_rename_rollback_id = null;
+                self.retainFileTreeRecoveryPath(result.source);
+                result.source_transferred = true;
+                return;
+            }
+            if (result.operation == .stage_delete) {
+                self.file_tree_delete_inflight = false;
+                self.discardPendingDeleteRoot(result.id);
+            }
+            if (result.operation == .create_file or result.operation == .create_directory or result.operation == .rename)
+                self.file_tree_edit_inflight = false;
+            if (result.operation == .rename) self.discardPendingRenameRemap(result.id);
+            if (self.file_tree_rename_rollback_id == result.id) self.file_tree_rename_rollback_id = null;
+            if (result.operation == .stage_delete or result.operation == .restore_delete or result.operation == .rename) {
+                self.clearFileTreeMutationReservation(result.id);
+                self.releaseFileTreeMutationEditorLocks(result.id, true);
+            }
+            if (result.operation == .restore_delete) {
+                self.finishPendingTrashRecord(result.id);
+                self.retainFileTreeRecoveryPath(result.source);
+                result.source_transferred = true;
+                return;
+            }
+            self.showNotice(switch (result.failure) {
+                .collision => "같은 이름의 항목이 이미 있습니다.",
+                .not_found => "대상이 사라져 파일 변경을 완료하지 못했습니다.",
+                .denied => "권한이 없어 파일을 변경할 수 없습니다.",
+                else => "파일 변경에 실패했습니다. 트리와 열린 탭은 유지됩니다.",
+            });
+            return;
+        }
+        const parent = std.fs.path.dirname(if (result.operation == .stage_delete) result.source else result.target) orelse return;
+        switch (result.operation) {
+            .create_file, .create_directory => {
+                self.file_tree_edit_inflight = false;
+                self.file_tree.invalidatePath(parent) catch {};
+                const kind: file_tree.RowKind = if (result.operation == .create_directory) .directory else .file;
+                if (self.file_tree_selection.generation == result.selection_generation)
+                    _ = self.file_tree_selection.setIdentity(kind, result.target, self.file_tree_selection.index_hint);
+                if (result.operation == .create_file) if (self.file_tree.rootForMutation(result.target)) |root|
+                    self.openCreatedFilePanel(result.target, root);
+            },
+            .rename => {
+                if (self.file_tree_rename_rollback_id == result.id) {
+                    self.file_tree_rename_rollback_id = null;
+                    self.file_tree_edit_inflight = false;
+                    self.clearFileTreeMutationReservation(result.id);
+                    self.releaseFileTreeMutationEditorLocks(result.id, true);
+                    self.discardPendingRenameRemap(result.id);
+                    self.file_tree.invalidatePath(std.fs.path.dirname(result.target) orelse result.target) catch {};
+                    self.showNotice("편집 상태가 바뀌어 이름 변경을 취소했습니다.");
+                    return;
+                }
+                if (self.fileTreePathProtectedNow(result.source, result.id)) {
+                    if (!self.enqueueFileTreeRenameRollback(result)) {
+                        self.retainFileTreeRecoveryPath(result.target);
+                        result.target_transferred = true;
+                    }
+                    return;
+                }
+                if (!self.applyFileTreeRename(result.id, result.target)) {
+                    if (!self.enqueueFileTreeRenameRollback(result)) {
+                        self.retainFileTreeRecoveryPath(result.target);
+                        result.target_transferred = true;
+                    }
+                    return;
+                }
+                self.file_tree_edit_inflight = false;
+                self.clearFileTreeMutationReservation(result.id);
+                self.releaseFileTreeMutationEditorLocks(result.id, false);
+                self.file_tree.invalidatePath(parent) catch {};
+                if (self.file_tree_selection.generation == result.selection_generation)
+                    _ = self.file_tree_selection.setIdentity(result.row_kind, result.target, self.file_tree_selection.index_hint);
+            },
+            .stage_delete => {
+                self.file_tree_delete_inflight = false;
+                const owned_root = self.takePendingDeleteRoot(result.id) orelse {
+                    self.clearFileTreeMutationReservation(result.id);
+                    self.releaseFileTreeMutationEditorLocks(result.id, true);
+                    self.retainFileTreeRecoveryPath(result.target);
+                    result.target_transferred = true;
+                    return;
+                };
+                const identity = result.identity orelse {
+                    self.allocator.free(owned_root);
+                    self.clearFileTreeMutationReservation(result.id);
+                    self.releaseFileTreeMutationEditorLocks(result.id, true);
+                    self.retainFileTreeRecoveryPath(result.target);
+                    result.target_transferred = true;
+                    return;
+                };
+                // A source editor may have become dirty while the worker was pinning/staging. Restore instead
+                // of handing the staged URL to AppKit in that case.
+                if (self.fileTreePathProtectedNow(result.source, result.id)) {
+                    const restoring = self.enqueueFileTreeDeleteRestore(
+                        result.id,
+                        owned_root,
+                        result.target,
+                        result.source,
+                        identity,
+                        result.parent_identity,
+                        result.root_identity,
+                    );
+                    self.allocator.free(owned_root);
+                    if (restoring) {
+                        self.showNotice("편집 상태가 바뀌어 휴지통 이동을 취소했습니다.");
+                    } else {
+                        self.clearFileTreeMutationReservation(result.id);
+                        self.releaseFileTreeMutationEditorLocks(result.id, true);
+                        self.retainFileTreeRecoveryPath(result.target);
+                        result.target_transferred = true;
+                    }
+                    return;
+                }
+                if (self.file_tree_trash_queue_len >= self.file_tree_trash_queue.len) {
+                    const restoring = self.enqueueFileTreeDeleteRestore(
+                        result.id,
+                        owned_root,
+                        result.target,
+                        result.source,
+                        identity,
+                        result.parent_identity,
+                        result.root_identity,
+                    );
+                    self.allocator.free(owned_root);
+                    if (restoring) {
+                        self.showNotice("휴지통 어댑터 큐가 가득 차 원래 위치로 복원합니다.");
+                    } else {
+                        self.clearFileTreeMutationReservation(result.id);
+                        self.releaseFileTreeMutationEditorLocks(result.id, true);
+                        self.retainFileTreeRecoveryPath(result.target);
+                        result.target_transferred = true;
+                    }
+                    return;
+                }
+                self.file_tree_trash_queue[self.file_tree_trash_queue_len] = .{
+                    .id = result.id,
+                    .root = owned_root,
+                    .original = result.source,
+                    .staged = result.target,
+                    .identity = identity,
+                    .parent_identity = result.parent_identity,
+                    .root_identity = result.root_identity,
+                    .row_kind = result.row_kind,
+                    .selection_generation = result.selection_generation,
+                };
+                self.file_tree_trash_queue_len += 1;
+                result.source_transferred = true;
+                result.target_transferred = true;
+            },
+            .restore_delete => {
+                self.clearFileTreeMutationReservation(result.id);
+                self.releaseFileTreeMutationEditorLocks(result.id, true);
+                self.finishPendingTrashRecord(result.id);
+                self.showNotice("휴지통 이동에 실패해 원래 위치로 복원했습니다.");
+            },
+        }
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+    }
+
+    pub fn peekFileTreeTrashAction(self: *const AppSession) ?FileTreeTrashAction {
+        if (self.file_tree_trash_queue_len == 0) return null;
+        const pending = self.file_tree_trash_queue[0];
+        if (pending.taken) return null;
+        return .{ .id = pending.id, .path = pending.staged, .identity = pending.identity };
+    }
+
+    pub fn takeFileTreeTrashAction(self: *AppSession) ?FileTreeTrashAction {
+        if (self.file_tree_trash_queue_len == 0) return null;
+        const pending = &self.file_tree_trash_queue[0];
+        if (pending.taken) return null;
+        pending.taken = true;
+        return .{ .id = pending.id, .path = pending.staged, .identity = pending.identity };
+    }
+
+    pub fn completeFileTreeTrash(self: *AppSession, id: u64, success: bool) void {
+        if (self.file_tree_trash_queue_len == 0) return;
+        const pending = self.file_tree_trash_queue[0];
+        if (pending.id != id or pending.restoring) return;
+        const commit_success = success and !self.fileTreePathProtectedNow(pending.original, pending.id);
+        if (commit_success) {
+            self.clearFileTreeMutationReservation(pending.id);
+            self.removeDeletedDockEntries(pending.original);
+            self.releaseFileTreeMutationEditorLocks(pending.id, false);
+            self.file_tree.removeRecentWithin(pending.original);
+            if (std.fs.path.dirname(pending.original)) |parent| self.file_tree.invalidatePath(parent) catch {};
+            if (self.file_tree_selection.generation == pending.selection_generation) {
+                const selected_path = self.file_tree_selection.path();
+                if (self.file_tree_selection.kind == pending.row_kind and selected_path != null and
+                    std.mem.eql(u8, selected_path.?, pending.original)) self.clearFileTreeSelection();
+            }
+        } else {
+            if (!self.enqueueFileTreeDeleteRestore(
+                pending.id,
+                pending.root,
+                pending.staged,
+                pending.original,
+                pending.identity,
+                pending.parent_identity,
+                pending.root_identity,
+            )) {
+                self.clearFileTreeMutationReservation(pending.id);
+                self.releaseFileTreeMutationEditorLocks(pending.id, true);
+                const retained = self.takePendingTrashStaged(pending.id) orelse return;
+                self.finishPendingTrashRecord(pending.id);
+                self.retainFileTreeRecoveryPath(retained);
+                return;
+            }
+            self.file_tree_trash_queue[0].restoring = true;
+            self.file_tree_mutation_backend.pump();
+            return;
+        }
+        self.finishPendingTrashRecord(pending.id);
+        self.file_tree_mutation_backend.pump();
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+    }
+
+    fn finishPendingTrashRecord(self: *AppSession, id: u64) void {
+        var index: usize = 0;
+        while (index < self.file_tree_trash_queue_len and self.file_tree_trash_queue[index].id != id) : (index += 1) {}
+        if (index >= self.file_tree_trash_queue_len) return;
+        const pending = self.file_tree_trash_queue[index];
+        self.allocator.free(pending.root);
+        self.allocator.free(pending.original);
+        self.allocator.free(pending.staged);
+        var i = index + 1;
+        while (i < self.file_tree_trash_queue_len) : (i += 1) self.file_tree_trash_queue[i - 1] = self.file_tree_trash_queue[i];
+        self.file_tree_trash_queue_len -= 1;
+    }
+
+    fn takePendingTrashStaged(self: *AppSession, id: u64) ?[]u8 {
+        for (self.file_tree_trash_queue[0..self.file_tree_trash_queue_len]) |*pending| {
+            if (pending.id != id) continue;
+            const staged = pending.staged;
+            pending.staged = staged[0..0];
+            return staged;
+        }
+        return null;
+    }
+
+    fn retainFileTreeRecoveryPath(self: *AppSession, staged: []u8) void {
+        std.log.err("file tree mutation requires manual recovery: {s}", .{staged});
+        // Namespace mutations are globally blocked once any manual recovery exists, so admission
+        // guarantees this preallocated slot is available. Transfer existing ownership: no OOM gap.
+        std.debug.assert(self.file_tree_manual_recovery_paths_len < self.file_tree_manual_recovery_paths.len);
+        self.file_tree_manual_recovery_paths[self.file_tree_manual_recovery_paths_len] = staged;
+        self.file_tree_manual_recovery_paths_len += 1;
+        var message_buf: [std.fs.max_path_bytes + 96]u8 = undefined;
+        const message = std.fmt.bufPrint(&message_buf, "자동 복원에 실패했습니다. 이 경로의 파일을 수동 복구하세요: {s}", .{staged}) catch
+            "자동 복원에 실패했습니다. 로그의 staging 경로에서 파일을 수동 복구하세요.";
+        self.showNotice(message);
+    }
+
     fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
         if (!self.dockVisible() or self.cell_height_px == 0) return null;
         const tree_rect = self.dockGeometry().tree_content;
@@ -8609,6 +9287,12 @@ pub const AppSession = struct {
         if (local >= visible_rows) return null; // renderer가 그리지 않는 bottom partial row는 hit-test에서도 제외한다.
         const index = self.fileTreeEffectiveScroll() + local;
         return if (index < self.file_tree_rows.items.len) index else null;
+    }
+
+    fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
+        return self.file_tree_edit_inflight or self.file_tree_delete_inflight or
+            self.file_tree_mutation_waiting_request != null or self.file_tree_trash_queue_len != 0 or
+            self.file_tree_manual_recovery_paths_len != 0;
     }
 
     fn fileTreeEffectiveScroll(self: *const AppSession) usize {
@@ -8739,6 +9423,499 @@ pub const AppSession = struct {
         return pending;
     }
 
+    fn fileTreeMutationTarget(row: file_tree.Row) ?file_tree_mutation.Target {
+        return switch (row) {
+            .root => |v| .{ .kind = .root, .path = v.path, .identity = v.identity },
+            .directory => |v| .{ .kind = .directory, .path = v.path, .symlink = v.symlink, .identity = v.identity },
+            .file => |v| .{ .kind = .file, .path = v.path, .symlink = v.symlink, .identity = v.identity },
+            .recent_header, .recent_file, .empty => null,
+        };
+    }
+
+    fn copyFileTreeEditTarget(target: file_tree_mutation.Target, edit_kind: FileTreeEditKind) ?FileTreeEditTarget {
+        if (target.path.len > std.fs.max_path_bytes) return null;
+        var out = FileTreeEditTarget{
+            .row_kind = target.kind,
+            .symlink = target.symlink,
+            .edit_kind = edit_kind,
+            .identity = target.identity,
+            .parent_identity = target.parent_identity,
+            .root_identity = target.root_identity,
+        };
+        @memcpy(out.path_buf[0..target.path.len], target.path);
+        out.path_len = target.path.len;
+        return out;
+    }
+
+    fn copyPendingFileTreeDelete(target: file_tree_mutation.Target) ?PendingFileTreeDelete {
+        if (target.path.len > std.fs.max_path_bytes) return null;
+        var out = PendingFileTreeDelete{
+            .row_kind = target.kind,
+            .symlink = target.symlink,
+            .identity = target.identity,
+            .parent_identity = target.parent_identity,
+            .root_identity = target.root_identity,
+        };
+        @memcpy(out.path_buf[0..target.path.len], target.path);
+        out.path_len = target.path.len;
+        return out;
+    }
+
+    fn selectedFileTreeMutationTarget(self: *const AppSession) ?file_tree_mutation.Target {
+        const index = self.selectedFileTreeRow() orelse return null;
+        if (index >= self.file_tree_rows.items.len) return null;
+        var target = fileTreeMutationTarget(self.file_tree_rows.items[index]) orelse return null;
+        if (file_tree.parentIndex(self.file_tree_rows.items, index)) |parent_index|
+            target.parent_identity = rowFileIdentity(self.file_tree_rows.items[parent_index]);
+        if (self.file_tree.rootForMutation(target.path)) |root_path| {
+            for (self.file_tree_rows.items) |row| switch (row) {
+                .root => |root| if (std.mem.eql(u8, root.path, root_path)) {
+                    target.root_identity = root.identity;
+                    break;
+                },
+                else => {},
+            };
+        }
+        return target;
+    }
+
+    fn rowFileIdentity(row: file_tree.Row) ?file_tree.Identity {
+        return switch (row) {
+            .root => |v| v.identity,
+            .directory => |v| v.identity,
+            .file => |v| v.identity,
+            else => null,
+        };
+    }
+
+    fn startFileTreeEdit(self: *AppSession, edit_kind: FileTreeEditKind) void {
+        if (self.fileTreeNamespaceMutationBusy()) {
+            self.showNotice("이전 파일 변경이 끝날 때까지 기다려 주세요.");
+            return;
+        }
+        const target = self.selectedFileTreeMutationTarget() orelse {
+            self.showNotice("프로젝트 파일 또는 폴더를 먼저 선택해 주세요.");
+            return;
+        };
+        if (edit_kind == .rename and target.kind == .root) {
+            self.showNotice("프로젝트 루트 자체는 이름을 바꿀 수 없습니다.");
+            return;
+        }
+        if (edit_kind != .rename and target.symlink and (target.kind == .root or target.kind == .directory)) {
+            self.showNotice("심볼릭 링크 폴더 안에는 항목을 만들 수 없습니다.");
+            return;
+        }
+        const copied = copyFileTreeEditTarget(target, edit_kind) orelse {
+            self.showNotice("경로가 너무 길어 변경할 수 없습니다.");
+            return;
+        };
+        self.startRename(.{ .file_tree = copied });
+    }
+
+    fn fillFileTreeProtections(self: *const AppSession, out: []file_tree_mutation.Protection) usize {
+        var n: usize = 0;
+        if (!self.dock_initialized) return 0;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| {
+                if (n >= out.len) return n;
+                out[n] = .{
+                    .path = entry.path,
+                    .dirty = entry.dirty,
+                    // A native-clean source editor is not trusted yet: enqueueFileTreeEdit/delete reserve it,
+                    // acquire a request-scoped CM6 read-only lock and only submit after the matching snapshot.
+                    .dirty_sync_pending = entry.dirty_sync_pending or entry.mutation_pending_id != 0,
+                    .external_change = entry.external_change,
+                    .conflict_reload_pending = entry.conflict_reload_pending,
+                };
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// A dirty/source-edit file opened through a symlink alias can be outside the target's lexical
+    /// prefix while still residing below the target directory by inode. Until dock entries persist a
+    /// canonical ancestor chain, fail closed for directory mutations when any protected file panel
+    /// exists in any project root. Cross-root symlinks make a lexical-root restriction unsafe.
+    fn fileTreeDirectoryAliasRisk(self: *const AppSession, target_path: []const u8, root: []const u8) bool {
+        _ = target_path;
+        _ = root;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| {
+                if (filePanelEntryNeedsDirtyProtection(entry)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn reserveFileTreeMutation(self: *AppSession, request_id: u64, source: []const u8) bool {
+        var reserved: [dock_panel.max_entries]*dock_panel.Entry = undefined;
+        var n: usize = 0;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            for (group.entries.items) |*entry| {
+                if (!file_tree_mutation.pathWithin(entry.path, source)) continue;
+                if (entry.mutation_pending_id != 0) {
+                    for (reserved[0..n]) |prior| prior.mutation_pending_id = 0;
+                    return false;
+                }
+                entry.mutation_pending_id = request_id;
+                reserved[n] = entry;
+                n += 1;
+            }
+        }
+        return true;
+    }
+
+    fn clearFileTreeMutationReservation(self: *AppSession, request_id: u64) void {
+        if (!self.dock_initialized or request_id == 0) return;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            for (group.entries.items) |*entry| {
+                if (entry.mutation_pending_id == request_id) entry.mutation_pending_id = 0;
+            }
+        }
+    }
+
+    fn takePendingDeleteRoot(self: *AppSession, id: u64) ?[]u8 {
+        const pending = self.pending_delete_root orelse return null;
+        if (pending.id != id) return null;
+        self.pending_delete_root = null;
+        return pending.root;
+    }
+
+    fn discardPendingDeleteRoot(self: *AppSession, id: u64) void {
+        if (self.takePendingDeleteRoot(id)) |root| self.allocator.free(root);
+    }
+
+    fn nextFileTreeMutationRequestId(self: *AppSession) ?u64 {
+        if (self.file_tree_mutation_request_id == std.math.maxInt(u64)) return null;
+        self.file_tree_mutation_request_id += 1;
+        return self.file_tree_mutation_request_id;
+    }
+
+    fn releaseFileTreeMutationEditorLocks(self: *AppSession, mutation_id: u64, unlock: bool) void {
+        var write: usize = 0;
+        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
+            if (lock.mutation_id == mutation_id) {
+                self.removeFilePanelDirtySyncAction(lock.surface_id);
+                if (self.dock.entryForSurfaceId(lock.surface_id)) |entry| entry.dirty_sync_pending = false;
+                if (unlock) self.queueFilePanelCloseUnlock(lock.surface_id, lock.request_id);
+                continue;
+            }
+            self.file_tree_mutation_editor_locks[write] = lock;
+            write += 1;
+        }
+        self.file_tree_mutation_editor_locks_len = write;
+    }
+
+    fn abortWaitingFileTreeMutation(self: *AppSession, mutation_id: u64, message: []const u8) void {
+        if (self.file_tree_mutation_waiting_request) |*request| {
+            if (request.id == mutation_id) {
+                request.deinit(self.allocator);
+                self.file_tree_mutation_waiting_request = null;
+            }
+        }
+        if (self.file_tree_mutation_queue_reserved) {
+            self.file_tree_mutation_backend.cancelReservation();
+            self.file_tree_mutation_queue_reserved = false;
+        }
+        self.clearFileTreeMutationReservation(mutation_id);
+        self.discardPendingDeleteRoot(mutation_id);
+        self.releaseFileTreeMutationEditorLocks(mutation_id, true);
+        self.file_tree_edit_inflight = false;
+        self.file_tree_delete_inflight = false;
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+        self.showNotice(message);
+    }
+
+    fn beginFileTreeMutationEditorLocks(self: *AppSession, mutation_id: u64, source: []const u8) !bool {
+        var needed: usize = 0;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| {
+                if (file_tree_mutation.pathWithin(entry.path, source) and entry.mode == .source_edit) {
+                    if (entry.surface_id == 0) return error.SurfaceMissing;
+                    needed += 1;
+                }
+            }
+        }
+        if (needed == 0) return false;
+        if (self.file_tree_mutation_editor_locks_len + needed > self.file_tree_mutation_editor_locks.len or
+            self.file_panel_dirty_sync_actions_len + needed > self.file_panel_dirty_sync_actions.len or
+            self.file_panel_close_request_id + needed > max_file_panel_close_request_id) return error.Capacity;
+
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAt(group_index).?;
+            for (group.entries.items) |*entry| {
+                if (!file_tree_mutation.pathWithin(entry.path, source) or entry.mode != .source_edit) continue;
+                self.file_panel_close_request_id += 1;
+                const request_id = self.file_panel_close_request_id;
+                self.file_tree_mutation_editor_locks[self.file_tree_mutation_editor_locks_len] = .{
+                    .mutation_id = mutation_id,
+                    .surface_id = entry.surface_id,
+                    .request_id = request_id,
+                };
+                self.file_tree_mutation_editor_locks_len += 1;
+                entry.dirty_sync_pending = true;
+                self.queueFilePanelDirtySyncAction(entry.surface_id, request_id);
+            }
+        }
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+        return true;
+    }
+
+    fn fileTreeMutationEditorLock(self: *AppSession, surface_id: u64, request_id: u64) ?*FileTreeMutationEditorLock {
+        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |*lock| {
+            if (lock.surface_id == surface_id and lock.request_id == request_id and lock.phase == .waiting) return lock;
+        }
+        return null;
+    }
+
+    fn mutationEditorLocksAcknowledged(self: *const AppSession, mutation_id: u64) bool {
+        var found = false;
+        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
+            if (lock.mutation_id != mutation_id) continue;
+            found = true;
+            if (!lock.acknowledged) return false;
+        }
+        return found;
+    }
+
+    fn submitWaitingFileTreeMutation(self: *AppSession, mutation_id: u64) bool {
+        if (!self.mutationEditorLocksAcknowledged(mutation_id)) return false;
+        const request = self.file_tree_mutation_waiting_request orelse return false;
+        if (request.id != mutation_id) return false;
+        self.file_tree_mutation_waiting_request = null;
+        std.debug.assert(self.file_tree_mutation_queue_reserved);
+        self.file_tree_mutation_backend.submitReserved(request);
+        self.file_tree_mutation_queue_reserved = false;
+        for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |*lock| {
+            if (lock.mutation_id == mutation_id) lock.phase = .submitted;
+        }
+        self.file_tree_mutation_backend.pump();
+        return true;
+    }
+
+    fn enqueueFileTreeEdit(self: *AppSession, target: FileTreeEditTarget, name: []const u8) bool {
+        if (self.fileTreeNamespaceMutationBusy()) {
+            self.showNotice("이전 파일 변경이 끝날 때까지 기다려 주세요.");
+            return false;
+        }
+        const root = self.file_tree.rootForMutation(target.path()) orelse {
+            self.showNotice("프로젝트 루트 밖의 항목은 변경할 수 없습니다.");
+            return false;
+        };
+        const roots = [_][]const u8{root};
+        var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
+        const protection_len = self.fillFileTreeProtections(&protections);
+        const policy_target: file_tree_mutation.Target = .{
+            .kind = target.row_kind,
+            .path = target.path(),
+            .symlink = target.symlink,
+            .identity = target.identity,
+            .parent_identity = target.parent_identity,
+            .root_identity = target.root_identity,
+        };
+        if (target.edit_kind == .rename and policy_target.kind == .directory and
+            self.fileTreeDirectoryAliasRisk(policy_target.path, root))
+        {
+            self.showNotice("같은 프로젝트의 편집 중 파일이 symlink alias일 수 있어 폴더 이름 변경을 차단했습니다.");
+            return false;
+        }
+        const plan = switch (target.edit_kind) {
+            .create_file => file_tree_mutation.planCreate(&roots, policy_target, name, false),
+            .create_directory => file_tree_mutation.planCreate(&roots, policy_target, name, true),
+            .rename => file_tree_mutation.planRename(&roots, policy_target, name, protections[0..protection_len]),
+        } catch |err| {
+            self.showNotice(switch (err) {
+                error.InvalidName => "이름은 비어 있거나 '.', '..'일 수 없고 '/'를 포함할 수 없습니다.",
+                error.ProtectedEntry => "저장되지 않았거나 동기화·충돌 처리 중인 파일을 포함해 변경할 수 없습니다.",
+                error.SymlinkContainer => "심볼릭 링크 폴더 안에는 항목을 만들 수 없습니다.",
+                error.Unchanged => "같은 이름입니다.",
+                else => "이 항목은 변경할 수 없습니다.",
+            });
+            return false;
+        };
+        if (plan.root_identity == null or plan.parent_identity == null or
+            (plan.operation == .rename and plan.identity == null))
+        {
+            self.showNotice("파일 identity가 아직 준비되지 않았습니다. 트리 새로고침 뒤 다시 시도해 주세요.");
+            return false;
+        }
+        if (!self.file_tree_mutation_backend.tryReserve()) {
+            self.showNotice("파일 변경 요청 큐가 가득 찼습니다. 잠시 후 다시 시도해 주세요.");
+            return false;
+        }
+        self.file_tree_mutation_queue_reserved = true;
+        var keep_queue_reservation = false;
+        defer if (self.file_tree_mutation_queue_reserved and !keep_queue_reservation) {
+            self.file_tree_mutation_backend.cancelReservation();
+            self.file_tree_mutation_queue_reserved = false;
+        };
+        const id = self.nextFileTreeMutationRequestId() orelse {
+            self.showNotice("파일 변경 요청 번호를 더 발급할 수 없습니다.");
+            return false;
+        };
+        var request = file_tree_mutation_backend.Request.init(self.allocator, id, plan) catch {
+            self.showNotice("파일 변경 요청을 준비할 수 없습니다.");
+            return false;
+        };
+        request.selection_generation = self.file_tree_selection.generation;
+        const reserved = target.edit_kind == .rename;
+        if (reserved) {
+            const new_path = std.fs.path.join(self.allocator, &.{ plan.parent, plan.name }) catch {
+                request.deinit(self.allocator);
+                self.showNotice("이름 변경 경로 계획을 준비할 수 없습니다.");
+                return false;
+            };
+            defer self.allocator.free(new_path);
+            self.prepareFileTreeRenameRemap(id, target.path(), new_path) catch {
+                request.deinit(self.allocator);
+                self.showNotice("이름 변경 경로 계획을 준비할 수 없습니다.");
+                return false;
+            };
+        }
+        if (reserved and !self.reserveFileTreeMutation(id, target.path())) {
+            request.deinit(self.allocator);
+            self.discardPendingRenameRemap(id);
+            self.showNotice("다른 파일 변경이 같은 항목을 사용 중입니다.");
+            return false;
+        }
+        if (reserved) {
+            const waiting = self.beginFileTreeMutationEditorLocks(id, target.path()) catch {
+                request.deinit(self.allocator);
+                self.clearFileTreeMutationReservation(id);
+                self.discardPendingRenameRemap(id);
+                self.showNotice("편집기를 잠글 수 없어 이름 변경을 시작하지 않았습니다.");
+                return false;
+            };
+            if (waiting) {
+                self.file_tree_mutation_waiting_request = request;
+                self.file_tree_edit_inflight = true;
+                keep_queue_reservation = true;
+                return true;
+            }
+        }
+        self.file_tree_mutation_backend.submitReserved(request);
+        self.file_tree_mutation_queue_reserved = false;
+        self.file_tree_edit_inflight = true;
+        self.file_tree_mutation_backend.pump();
+        return true;
+    }
+
+    fn requestDeleteSelectedFileTreeEntry(self: *AppSession) void {
+        if (self.fileTreeNamespaceMutationBusy()) {
+            self.showNotice("이전 삭제 staging이 끝날 때까지 기다려 주세요.");
+            return;
+        }
+        if (self.file_tree_trash_queue_len >= self.file_tree_trash_queue.len) {
+            self.showNotice("휴지통 요청 큐가 가득 찼습니다. 이전 작업이 끝난 뒤 다시 시도해 주세요.");
+            return;
+        }
+        const target = self.selectedFileTreeMutationTarget() orelse {
+            self.showNotice("삭제할 프로젝트 파일 또는 폴더를 먼저 선택해 주세요.");
+            return;
+        };
+        if (target.kind == .root) {
+            self.showNotice("프로젝트 루트 자체는 삭제할 수 없습니다.");
+            return;
+        }
+        var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
+        const protection_len = self.fillFileTreeProtections(&protections);
+        const root = self.file_tree.rootForMutation(target.path) orelse return;
+        if (target.kind == .directory and self.fileTreeDirectoryAliasRisk(target.path, root)) {
+            self.showNotice("같은 프로젝트의 편집 중 파일이 symlink alias일 수 있어 폴더 삭제를 차단했습니다.");
+            return;
+        }
+        const roots = [_][]const u8{root};
+        _ = file_tree_mutation.planDelete(&roots, target, protections[0..protection_len]) catch |err| {
+            self.showNotice(if (err == error.ProtectedEntry)
+                "저장되지 않았거나 동기화·충돌 처리 중인 파일을 포함해 삭제할 수 없습니다."
+            else
+                "이 항목은 삭제할 수 없습니다.");
+            return;
+        };
+        self.pending_file_tree_delete = copyPendingFileTreeDelete(target) orelse return;
+        self.showConfirmButtons(.file_tree_delete, "선택한 항목을 macOS 휴지통으로 이동할까요?", .{ .confirm = "휴지통으로 이동", .cancel = "취소" });
+    }
+
+    fn confirmFileTreeDelete(self: *AppSession) void {
+        const pending = self.pending_file_tree_delete orelse return;
+        self.pending_file_tree_delete = null;
+        const target: file_tree_mutation.Target = .{
+            .kind = pending.row_kind,
+            .path = pending.path(),
+            .symlink = pending.symlink,
+            .identity = pending.identity,
+            .parent_identity = pending.parent_identity,
+            .root_identity = pending.root_identity,
+        };
+        const root = self.file_tree.rootForMutation(target.path) orelse return;
+        if (target.kind == .directory and self.fileTreeDirectoryAliasRisk(target.path, root)) {
+            self.showNotice("상태가 바뀌어 폴더 삭제를 취소했습니다.");
+            return;
+        }
+        const roots = [_][]const u8{root};
+        var protections: [dock_panel.max_entries]file_tree_mutation.Protection = undefined;
+        const protection_len = self.fillFileTreeProtections(&protections);
+        const plan = file_tree_mutation.planDelete(&roots, target, protections[0..protection_len]) catch {
+            self.showNotice("상태가 바뀌어 삭제를 취소했습니다.");
+            return;
+        };
+        if (plan.identity == null or plan.parent_identity == null or plan.root_identity == null) {
+            self.showNotice("파일 identity가 아직 준비되지 않았습니다. 트리 새로고침 뒤 다시 시도해 주세요.");
+            return;
+        }
+        if (!self.file_tree_mutation_backend.tryReserve()) {
+            self.showNotice("파일 변경 요청 큐가 가득 찼습니다. 잠시 후 다시 시도해 주세요.");
+            return;
+        }
+        self.file_tree_mutation_queue_reserved = true;
+        var keep_queue_reservation = false;
+        defer if (self.file_tree_mutation_queue_reserved and !keep_queue_reservation) {
+            self.file_tree_mutation_backend.cancelReservation();
+            self.file_tree_mutation_queue_reserved = false;
+        };
+        const id = self.nextFileTreeMutationRequestId() orelse return;
+        var request = file_tree_mutation_backend.Request.init(self.allocator, id, plan) catch return;
+        request.selection_generation = self.file_tree_selection.generation;
+        const owned_root = self.allocator.dupe(u8, root) catch {
+            request.deinit(self.allocator);
+            self.showNotice("삭제 복구 경로를 준비할 수 없어 시작하지 않았습니다.");
+            return;
+        };
+        std.debug.assert(self.pending_delete_root == null);
+        self.pending_delete_root = .{ .id = id, .root = owned_root };
+        if (!self.reserveFileTreeMutation(id, target.path)) {
+            request.deinit(self.allocator);
+            self.discardPendingDeleteRoot(id);
+            self.showNotice("다른 파일 변경이 같은 항목을 사용 중입니다.");
+            return;
+        }
+        const waiting = self.beginFileTreeMutationEditorLocks(id, target.path) catch {
+            request.deinit(self.allocator);
+            self.clearFileTreeMutationReservation(id);
+            self.discardPendingDeleteRoot(id);
+            self.showNotice("편집기를 잠글 수 없어 휴지통 이동을 시작하지 않았습니다.");
+            return;
+        };
+        if (waiting) {
+            self.file_tree_mutation_waiting_request = request;
+            self.file_tree_delete_inflight = true;
+            keep_queue_reservation = true;
+            return;
+        }
+        self.file_tree_mutation_backend.submitReserved(request);
+        self.file_tree_mutation_queue_reserved = false;
+        self.file_tree_delete_inflight = true;
+        self.file_tree_mutation_backend.pump();
+    }
+
     fn isFileTreeDefaultKey(event: terminal.KeyEvent) bool {
         const no_modifiers = !event.modifiers.command and !event.modifiers.control and
             !event.modifiers.option and !event.modifiers.shift;
@@ -8771,8 +9948,14 @@ pub const AppSession = struct {
             self.restoreFileTreeFocus();
             return;
         }
-        if ((event.key == .function and event.key.function == 2) or
-            (event.key == .backspace and event.modifiers.command)) return; // mutation actions are implemented in the next slice.
+        if (event.key == .function and event.key.function == 2) {
+            self.dispatchAppAction(.rename_file_tree_entry);
+            return;
+        }
+        if (event.key == .backspace and event.modifiers.command) {
+            self.dispatchAppAction(.delete_file_tree_entry);
+            return;
+        }
         if (self.selectedFileTreeRow() == null) self.selectFirstFileTreeRow();
         const selected = self.selectedFileTreeRow() orelse return;
         const intent = fileTreeNavigationIntent(event) orelse return;
@@ -8837,7 +10020,7 @@ pub const AppSession = struct {
     /// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
     /// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
     pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
-        if (!self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
+        if (self.fileTreeNamespaceMutationBusy() or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
             !std.unicode.utf8ValidateSlice(path)) return .failed;
         const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
         const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
@@ -9130,6 +10313,10 @@ pub const AppSession = struct {
     fn requestFilePanelClose(self: *AppSession, surface_id: u64) void {
         if (self.pending_file_panel_close != null) return;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return;
+        if (entry.mutation_pending_id != 0) {
+            self.showNotice("파일 변경이 끝난 뒤 탭을 닫을 수 있습니다.");
+            return;
+        }
         // HTML과 안정된 native-clean Markdown read entry만 즉시 닫는다. source editor를 떠나도 CM6 buffer는 살아
         // 있으므로 dirty/pending/conflict Markdown은 mode와 무관하게 revision-pinned coordinator를 거친다.
         if (entry.kind == .markdown and filePanelEntryNeedsDirtyProtection(entry.*)) {
@@ -9275,6 +10462,7 @@ pub const AppSession = struct {
         NotRegularFile,
         TooLarge,
         InvalidUtf8,
+        MutationPending,
         OutOfMemory,
     };
 
@@ -9326,6 +10514,7 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
+        if (entry.mutation_pending_id != 0) return error.MutationPending;
 
         const cwd = std.Io.Dir.cwd();
         const file = try openFilePanelRead(cwd, entry.path, true);
@@ -9346,6 +10535,7 @@ pub const AppSession = struct {
         WriteFailed,
         ExternalConflict,
         InvalidReloadState,
+        MutationPending,
     };
 
     const PinnedFilePanelParent = struct {
@@ -9511,6 +10701,7 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
+        if (entry.mutation_pending_id != 0) return error.MutationPending;
         if (entry.external_change) return error.ExternalConflict;
         if (content.len > file_panel_bridge.max_file_bytes) return error.TooLarge;
         if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
@@ -9538,8 +10729,10 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
+        const mutation_lock = if (report.request_id != 0) self.fileTreeMutationEditorLock(surface_id, report.request_id) else null;
+        if (entry.mutation_pending_id != 0 and mutation_lock == null) return error.MutationPending;
         var close_pending: ?PendingFilePanelClose = null;
-        if (report.request_id != 0) {
+        if (report.request_id != 0 and mutation_lock == null) {
             const pending = self.pending_file_panel_close orelse return;
             if (pending.surface_id != surface_id or pending.phase != .syncing or pending.request_id != report.request_id) return;
             if (self.filePanelCloseEntry(pending) == null) {
@@ -9560,6 +10753,16 @@ pub const AppSession = struct {
         }
         if (changed) self.metal_dirty = true;
         if (changed) self.file_tree_rows_dirty = true;
+        if (mutation_lock) |lock| {
+            if (entry.external_change or report.dirty) {
+                const mutation_id = lock.mutation_id;
+                self.abortWaitingFileTreeMutation(mutation_id, "저장되지 않은 편집 내용이 있어 파일 변경을 취소했습니다.");
+                return;
+            }
+            lock.acknowledged = true;
+            _ = self.submitWaitingFileTreeMutation(lock.mutation_id);
+            return;
+        }
         if (close_pending) |pending| {
             var pinned = pending;
             pinned.revision = report.revision;
@@ -9572,6 +10775,11 @@ pub const AppSession = struct {
     }
 
     pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u64) void {
+        if (self.fileTreeMutationEditorLock(surface_id, request_id)) |lock| {
+            const mutation_id = lock.mutation_id;
+            self.abortWaitingFileTreeMutation(mutation_id, "편집 상태를 확인할 수 없어 파일 변경을 취소했습니다.");
+            return;
+        }
         const pending = self.pending_file_panel_close orelse return;
         if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .syncing) return;
         self.cancelFilePanelClose();
@@ -11623,6 +12831,7 @@ pub const AppSession = struct {
             .pane => |p| p.custom_name,
             .term => |t| t.surface.custom_name,
             .group => |t| t.group_start, // 그룹 이름 = group_start 마커
+            .file_tree => |t| if (t.edit_kind == .rename) std.fs.path.basename(t.path()) else null,
         };
         if (seed) |s| self.rename_input.query.appendSlice(self.allocator, s) catch {};
         self.rename = target;
@@ -11637,6 +12846,10 @@ pub const AppSession = struct {
         const target = self.rename orelse return;
         _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 query로
         const text = self.rename_input.query.items;
+        if (target == .file_tree) {
+            if (self.enqueueFileTreeEdit(target.file_tree, text)) self.closeRename();
+            return;
+        }
         // 빈 텍스트(의도적 삭제) → null. 비어있지 않은데 dupe가 OOM이면 **기존 이름을 보존**하고 편집기만 닫는다 —
         // catch null로 흡수하면 OOM과 '빈 이름'을 구분 못 해 입력한 이름이 통째로 사라진다(기존 이름까지 free).
         const new_name: ?[]const u8 = if (text.len == 0) null else (self.allocator.dupe(u8, text) catch {
@@ -11663,6 +12876,7 @@ pub const AppSession = struct {
                 t.group_start = new_name orelse (self.allocator.dupe(u8, "") catch null);
                 self.rebuildSidebar() catch {}; // 헤더 라벨 즉시 갱신
             },
+            .file_tree => unreachable,
         }
         self.closeRename();
     }
@@ -12254,6 +13468,10 @@ pub const AppSession = struct {
     /// 터미널 본문을 구분한다(renameTargetAt는 둘 다 null이라 구분 불가).
     fn pointOnChrome(self: *AppSession, x_px: f64, y_px: f64) bool {
         if (self.inSidebar(x_px)) return true;
+        if (self.dockVisible()) {
+            const dg = self.dockGeometry();
+            if (layout_math.pointInRect(x_px, y_px, dg.dock)) return true;
+        }
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return false;
@@ -12365,6 +13583,25 @@ pub const AppSession = struct {
         return self.context_menu_items_buf[0..2];
     }
 
+    fn buildFileTreeContextMenuItems(self: *AppSession) []const []const u8 {
+        const target = self.file_tree_context_target orelse return &.{};
+        var n: usize = 0;
+        if (!(target.symlink and (target.row_kind == .root or target.row_kind == .directory))) {
+            self.context_menu_items_buf[n] = "새 파일…";
+            n += 1;
+            self.context_menu_items_buf[n] = "새 폴더…";
+            n += 1;
+        }
+        if (target.row_kind == .file or target.row_kind == .directory) {
+            self.context_menu_items_buf[n] = "이름 변경";
+            n += 1;
+            self.context_menu_items_buf[n] = "휴지통으로 이동";
+            n += 1;
+        }
+        self.context_menu_items_len = n;
+        return self.context_menu_items_buf[0..n];
+    }
+
     /// 터미널 본문 (x,y backing px)에 복사/붙여넣기 컨텍스트 메뉴를 띄운다(input.right-click=menu). 항목 선택은
     /// acceptContextMenu가 terminal_context_menu 분기로 pending_clipboard_action을 세운다(Swift가 OS 클립보드 실행).
     fn showTerminalContextMenu(self: *AppSession, x_px: f64, y_px: f64) void {
@@ -12385,6 +13622,7 @@ pub const AppSession = struct {
     fn closeContextMenu(self: *AppSession) void {
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
+        self.file_tree_context_target = null;
         self.view_options_menu = false;
         self.terminal_context_menu = false;
         self.metal_dirty = true;
@@ -12418,6 +13656,25 @@ pub const AppSession = struct {
             // config 파일 persist 예약(앱→config) — 두 사이드바 표시 키를 dirty 집합에 넣는다(옛 동작과 동일하게 둘 다 기록).
             self.markConfigKeyDirty("sidebar.show-branch");
             self.markConfigKeyDirty("sidebar.show-folder");
+            self.metal_dirty = true;
+            return;
+        }
+        if (self.file_tree_context_target) |target| {
+            const sel = self.chrome_host.context_menu.selected;
+            const create_allowed = !(target.symlink and (target.row_kind == .root or target.row_kind == .directory));
+            self.file_tree_context_target = null;
+            self.chrome_host.context_menu.hide();
+            const current_index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = target.row_kind, .path = target.path() }) orelse {
+                self.showNotice("선택한 항목이 변경되어 명령을 취소했습니다.");
+                return;
+            };
+            _ = self.setFileTreeSelection(current_index);
+            if (create_allowed and sel == 0) self.startFileTreeEdit(.create_file) else if (create_allowed and sel == 1)
+                self.startFileTreeEdit(.create_directory)
+            else {
+                const base: usize = if (create_allowed) 2 else 0;
+                if (sel == base) self.startFileTreeEdit(.rename) else if (sel == base + 1) self.requestDeleteSelectedFileTreeEntry();
+            }
             self.metal_dirty = true;
             return;
         }
@@ -12499,6 +13756,7 @@ pub const AppSession = struct {
             .context_menu_accept => self.acceptContextMenu(), // selected 항목 실행(현재 "Rename" → 대상 rename)
             .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·view_options 플래그만 비운다
                 self.context_menu_target = null;
+                self.file_tree_context_target = null;
                 self.view_options_menu = false;
                 self.metal_dirty = true;
             },
@@ -12536,6 +13794,7 @@ pub const AppSession = struct {
                         },
                         .syncing, .saving => {},
                     },
+                    .file_tree_delete => self.confirmFileTreeDelete(),
                     .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
                     .quit => self.quit_decision = .accepted,
                     .file_conflict_reload => |surface_id| self.beginFileConflictReload(surface_id),
@@ -13986,6 +15245,21 @@ pub const AppSession = struct {
         //  - 터미널 본문이면 **fall through** — 아래 mouse-reporting 경로(DECSET 1000~1003)가 우버튼을 트래킹 앱에
         //    리포트한다. 무조건 return하면 우-down은 안 가고 우-drag/up(kind 2/3)만 리포트돼 비대칭이 된다(회귀).
         if (kind == 1 and button == 2) {
+            if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
+                if (fileTreeMutationTarget(self.file_tree_rows.items[row_index])) |tree_target| {
+                    _ = self.setFileTreeSelection(row_index);
+                    self.focusFileTree();
+                    if (copyPendingFileTreeDelete(tree_target)) |copied| {
+                        self.file_tree_context_target = copied;
+                        const items = self.buildFileTreeContextMenuItems();
+                        if (items.len > 0) {
+                            self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
+                            self.metal_dirty = true;
+                        }
+                    }
+                    return;
+                }
+            }
             if (self.renameTargetAt(x_px, y_px)) |target| {
                 self.context_menu_target = target;
                 const items = self.buildContextMenuItems(); // 대상 타입에 맞는 항목(workspace=Rename+Pin+배경, pane/term=Rename)
@@ -18482,6 +19756,8 @@ pub const AppSession = struct {
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         self.ageFilePanelSelfWriteLatches();
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
+        self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame
+        self.assignOneVisibleDockSurfaceId(); // path-pinned rename recreation is bounded to one visible WebView per frame
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
@@ -19260,9 +20536,22 @@ pub const AppSession = struct {
                             } else |_| {}
                         }
                         if (tree_cols > 0 and visible_rows > 0) {
+                            const tree_edit_text = if (self.rename) |renaming|
+                                if (renaming == .file_tree) self.renameEditText(self.allocator) catch null else null
+                            else
+                                null;
+                            defer if (tree_edit_text) |owned| self.allocator.free(owned);
+                            const tree_edit: ?coretext_frame_builder.FileTreeEdit = if (self.rename) |renaming|
+                                if (renaming == .file_tree and tree_edit_text != null) .{
+                                    .identity = .{ .kind = renaming.file_tree.row_kind, .path = renaming.file_tree.path() },
+                                    .text = tree_edit_text.?,
+                                } else null
+                            else
+                                null;
                             if (coretext_frame_builder.buildFileTreeDrawList(
                                 self.allocator,
                                 self.file_tree_rows.items,
+                                tree_edit,
                                 self.fileTreeEffectiveScroll(),
                                 visible_rows,
                                 tree_cols,
@@ -22665,6 +23954,14 @@ pub const AppSession = struct {
         self.ime_inserted.deinit(self.allocator);
 
         if (self.file_tree_initialized) {
+            if (self.pending_rename_remap) |*plan| plan.deinit(self.allocator);
+            self.pending_rename_remap = null;
+            if (self.file_tree_mutation_waiting_request) |*request| request.deinit(self.allocator);
+            self.file_tree_mutation_waiting_request = null;
+            if (self.file_tree_mutation_queue_reserved) self.file_tree_mutation_backend.cancelReservation();
+            self.file_tree_mutation_queue_reserved = false;
+            self.file_tree_mutation_editor_locks_len = 0;
+            self.file_tree_mutation_backend.deinit();
             self.file_tree_backend.deinit();
             self.file_tree.deinit();
             self.file_tree_rows.deinit(self.allocator);
@@ -22672,6 +23969,14 @@ pub const AppSession = struct {
             self.file_tree_open_states.deinit(self.allocator);
             self.file_tree_initialized = false;
         }
+        for (self.file_tree_trash_queue[0..self.file_tree_trash_queue_len]) |pending| {
+            self.allocator.free(pending.root);
+            self.allocator.free(pending.original);
+            self.allocator.free(pending.staged);
+        }
+        self.file_tree_trash_queue_len = 0;
+        for (self.file_tree_manual_recovery_paths[0..self.file_tree_manual_recovery_paths_len]) |path| self.allocator.free(path);
+        self.file_tree_manual_recovery_paths_len = 0;
 
         self.clearFilePanelCloseWithoutUnlock();
         if (self.dock_initialized) {
@@ -35365,6 +36670,258 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     session.handleFileTreeDefaultKey(.{ .key = .escape });
     try std.testing.expectEqual(@as(?usize, 0), group.active);
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
+}
+
+fn testFileTreeIdentity(path: []const u8) !file_tree.Identity {
+    const path_z = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(path_z);
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstatat(std.posix.AT.FDCWD, path_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;
+    return .{
+        .device = @intCast(stat.dev),
+        .inode = @intCast(stat.ino),
+        .kind = @intFromEnum(if (std.posix.S.ISREG(stat.mode))
+            file_tree.IdentityKind.regular
+        else if (std.posix.S.ISDIR(stat.mode))
+            file_tree.IdentityKind.directory
+        else if (std.posix.S.ISLNK(stat.mode))
+            file_tree.IdentityKind.symlink
+        else
+            file_tree.IdentityKind.other),
+    };
+}
+
+test "file tree mutations create rename protect dirty and roll back failed Trash" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, ".git", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "anchor.md", .data = "# anchor" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const anchor = try std.fs.path.join(allocator, &.{ root, "anchor.md" });
+    defer allocator.free(anchor);
+    const created = try std.fs.path.join(allocator, &.{ root, ".new.md" });
+    defer allocator.free(created);
+    const renamed = try std.fs.path.join(allocator, &.{ root, "renamed.md" });
+    defer allocator.free(renamed);
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(anchor));
+    const scan = session.file_tree.takeScanRequest().?;
+    allocator.free(scan);
+    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{.{
+        .name = "anchor.md",
+        .kind = .file,
+        .identity = try testFileTreeIdentity(anchor),
+    }});
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+    session.focusFileTree();
+    _ = session.setFileTreeSelection(file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .root, .path = root }).?);
+
+    // Palette/context/F2 share startRename + commitRename. A dotfile is valid and a successful Markdown
+    // create opens in the focused dock group without synchronous frame-tick stat/root discovery.
+    session.dispatchAppAction(.new_file);
+    try std.testing.expect(session.rename != null and session.rename.? == .file_tree);
+    try session.rename_input.query.appendSlice(allocator, ".new.md");
+    session.commitRename();
+    try std.testing.expect(session.rename == null);
+    var attempts: usize = 0;
+    while (session.dock.pathLocation(created) == null and attempts < 500) : (attempts += 1) {
+        session.updateFileTreeMutations();
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(session.dock.pathLocation(created) != null);
+    const created_sid = session.dock.pathLocation(created).?.group.entries.items[session.dock.pathLocation(created).?.index].surface_id;
+
+    // Reproject the worker result, then F2 edits the copied path identity. Rename remaps the live dock path
+    // and retires/recreates its path-pinned WebView surface id.
+    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{
+        .{ .name = ".new.md", .kind = .file, .identity = try testFileTreeIdentity(created) },
+        .{ .name = "anchor.md", .kind = .file, .identity = try testFileTreeIdentity(anchor) },
+    });
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+    _ = session.setFileTreeSelection(file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = created }).?);
+    const created_location = session.dock.pathLocation(created).?;
+    created_location.group.entries.items[created_location.index].mode = .source_edit;
+    session.handleFileTreeDefaultKey(.{ .key = .{ .function = 2 } });
+    try std.testing.expect(session.rename != null and session.rename.? == .file_tree);
+    session.rename_input.clear();
+    try session.rename_input.query.appendSlice(allocator, "renamed.md");
+    session.commitRename();
+    // Clean source-edit is not trusted from native state alone. The worker remains unsubmitted until the
+    // request-scoped CM6 lock reports its latest revision as clean.
+    try std.testing.expect(session.file_tree_mutation_waiting_request != null);
+    const editor_lock = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(editor_lock.surface_id, .{
+        .dirty = false,
+        .revision = 1,
+        .request_id = editor_lock.request_id,
+    });
+    try std.testing.expect(session.file_tree_mutation_waiting_request == null);
+    try std.testing.expect(session.hasProtectedFilePanelsForExit());
+    // A duplicate/late CM6 acknowledgement cannot reacquire the waiting lock after submission and
+    // therefore cannot clear the mutation reservation or unlock the editor while the worker runs.
+    try std.testing.expectError(error.MutationPending, session.reportFilePanelDirty(editor_lock.surface_id, .{
+        .dirty = false,
+        .revision = 1,
+        .request_id = editor_lock.request_id,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), session.file_panel_close_unlock_actions_len);
+    attempts = 0;
+    while (session.dock.pathLocation(renamed) == null and attempts < 500) : (attempts += 1) {
+        session.updateFileTreeMutations();
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    session.assignOneVisibleDockSurfaceId();
+    const renamed_location = session.dock.pathLocation(renamed).?;
+    const renamed_sid = renamed_location.group.entries.items[renamed_location.index].surface_id;
+    try std.testing.expect(renamed_sid != 0 and renamed_sid != created_sid);
+    try std.testing.expect(session.dock.pathLocation(created) == null);
+
+    // Dirty state blocks both file and containing-directory destructive operations before staging.
+    try session.setFilePanelDirty(renamed_sid, true);
+    // A scanner result can legitimately race this test's manually applied snapshot. Build the same L2 row
+    // projection directly so the destructive-policy assertions are independent of detached scan timing.
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.append(allocator, .{ .root = .{
+        .path = root,
+        .label = std.fs.path.basename(root),
+        .expanded = true,
+        .loading = false,
+        .identity = try testFileTreeIdentity(root),
+    } });
+    try session.file_tree_rows.append(allocator, .{ .file = .{
+        .path = renamed,
+        .label = "renamed.md",
+        .depth = 1,
+        .supported = true,
+        .open = true,
+        .active = true,
+        .dirty = true,
+        .external_change = false,
+        .symlink = false,
+        .identity = try testFileTreeIdentity(renamed),
+    } });
+    session.file_tree_rows_dirty = false;
+    _ = session.setFileTreeSelection(1);
+    session.requestDeleteSelectedFileTreeEntry();
+    try std.testing.expect(session.pending_file_tree_delete == null);
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try session.setFilePanelDirty(renamed_sid, false);
+
+    // Clean delete stages the exact entry. A short/native consumer can peek without consuming; failed
+    // NSWorkspace recycle is acknowledged and the worker restores the original name.
+    session.requestDeleteSelectedFileTreeEntry();
+    try std.testing.expect(session.pending_confirm == .file_tree_delete);
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    const delete_lock = session.takeFilePanelDirtySyncActionV2().?;
+    const delete_revision = session.dock.entryForSurfaceId(delete_lock.surface_id).?.editor_revision + 1;
+    try session.reportFilePanelDirty(delete_lock.surface_id, .{
+        .dirty = false,
+        .revision = delete_revision,
+        .request_id = delete_lock.request_id,
+    });
+    attempts = 0;
+    while (session.peekFileTreeTrashAction() == null and attempts < 500) : (attempts += 1) {
+        session.updateFileTreeMutations();
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    const peeked = session.peekFileTreeTrashAction().?;
+    try std.testing.expect(session.hasProtectedFilePanelsForExit());
+    const taken = session.takeFileTreeTrashAction().?;
+    try std.testing.expectEqual(peeked.id, taken.id);
+    try std.testing.expectEqualStrings(peeked.path, taken.path);
+    try std.testing.expect(session.takeFileTreeTrashAction() == null);
+    // Until the native terminal ack, the original/staged namespace is reserved globally. This keeps
+    // a replacement opened at the original path or an ancestor rename from invalidating Trash identity.
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, session.openFilePanelPath(anchor));
+    session.dispatchAppAction(.new_file);
+    try std.testing.expect(session.rename == null);
+    session.completeFileTreeTrash(taken.id, false);
+    attempts = 0;
+    while (attempts < 500) : (attempts += 1) {
+        session.updateFileTreeMutations();
+        if (std.Io.Dir.cwd().statFile(io, renamed, .{})) |_| break else |_| {}
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    _ = try std.Io.Dir.cwd().statFile(io, renamed, .{});
+    try std.testing.expect(session.dock.pathLocation(renamed) != null);
+
+    // A successful native Trash ack commits the model only after the OS operation and closes clean tabs.
+    session.requestDeleteSelectedFileTreeEntry();
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    const success_delete_lock = session.takeFilePanelDirtySyncActionV2().?;
+    const success_delete_revision = session.dock.entryForSurfaceId(success_delete_lock.surface_id).?.editor_revision + 1;
+    try session.reportFilePanelDirty(success_delete_lock.surface_id, .{
+        .dirty = false,
+        .revision = success_delete_revision,
+        .request_id = success_delete_lock.request_id,
+    });
+    attempts = 0;
+    while (session.peekFileTreeTrashAction() == null and attempts < 500) : (attempts += 1) {
+        session.updateFileTreeMutations();
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    const success_action = session.takeFileTreeTrashAction().?;
+    session.completeFileTreeTrash(success_action.id, true);
+    try std.testing.expect(session.dock.pathLocation(renamed) == null);
+}
+
+test "file tree rename changes supported panel kind and removes unsupported panel" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "kind.md", .data = "# kind" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const markdown = try std.fs.path.join(allocator, &.{ root, "kind.md" });
+    defer allocator.free(markdown);
+    const html = try std.fs.path.join(allocator, &.{ root, "kind.html" });
+    defer allocator.free(html);
+    const unsupported = try std.fs.path.join(allocator, &.{ root, "kind.txt" });
+    defer allocator.free(unsupported);
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(markdown));
+    const markdown_location = session.dock.pathLocation(markdown).?;
+    const old_surface = markdown_location.group.entries.items[markdown_location.index].surface_id;
+
+    try session.prepareFileTreeRenameRemap(1, markdown, html);
+    try std.testing.expect(session.reserveFileTreeMutation(1, markdown));
+    try std.testing.expect(session.applyFileTreeRename(1, html));
+    session.clearFileTreeMutationReservation(1);
+    session.assignOneVisibleDockSurfaceId();
+    const html_location = session.dock.pathLocation(html).?;
+    const html_entry = html_location.group.entries.items[html_location.index];
+    try std.testing.expectEqual(dock_panel.EntryKind.html, html_entry.kind);
+    try std.testing.expectEqual(dock_panel.Mode.read, html_entry.mode);
+    try std.testing.expect(html_entry.surface_id != 0 and html_entry.surface_id != old_surface);
+    try std.testing.expect(session.dock.pathLocation(markdown) == null);
+
+    try session.prepareFileTreeRenameRemap(2, html, unsupported);
+    try std.testing.expect(session.reserveFileTreeMutation(2, html));
+    try std.testing.expect(session.applyFileTreeRename(2, unsupported));
+    session.clearFileTreeMutationReservation(2);
+    try std.testing.expect(session.dock.pathLocation(html) == null);
+    try std.testing.expect(session.dock.pathLocation(unsupported) == null);
+    try std.testing.expectEqual(@as(usize, 0), session.dock.entryCountTotal());
+    try std.testing.expect(switch (session.focus_owner) {
+        .file_tree => true,
+        else => false,
+    });
 }
 
 test "FP5 workspace restore prunes invalid file panel capabilities and degrades to an empty dock" {

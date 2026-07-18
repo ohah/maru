@@ -25,6 +25,12 @@ pub const Action = union(enum) {
     toggle_file_panel_dock_side,
     // project tree에 transient keyboard focus를 주고 Metal view를 first responder로 만든다. 기본 Cmd+Shift+E.
     focus_file_tree,
+    // project tree mutations. 생성은 선택한 directory 또는 file의 parent에, rename/delete는 project
+    // directory/file row에만 적용된다. F2/Cmd+Backspace와 context menu도 이 action funnel을 공유한다.
+    new_file,
+    new_directory,
+    rename_file_tree_entry,
+    delete_file_tree_entry,
     // 기본 Cmd+W. Zig가 소유한 입력 focus가 파일 도크면 활성 파일 탭, 아니면 기존 Term cascade를 닫는다.
     // close_term은 사용자 명시 바인딩 호환을 위해 terminal 전용으로 남긴다.
     close_focused,
@@ -171,6 +177,10 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "close_file_panel_group")) return .close_file_panel_group;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "focus_file_tree")) return .focus_file_tree;
+    if (std.mem.eql(u8, value, "new_file")) return .new_file;
+    if (std.mem.eql(u8, value, "new_directory")) return .new_directory;
+    if (std.mem.eql(u8, value, "rename_file_tree_entry")) return .rename_file_tree_entry;
+    if (std.mem.eql(u8, value, "delete_file_tree_entry")) return .delete_file_tree_entry;
     if (std.mem.eql(u8, value, "close_focused")) return .close_focused;
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
@@ -255,6 +265,10 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.close_file_panel_group, parseAction("close_file_panel_group").?);
     try std.testing.expectEqual(Action.toggle_file_panel_dock_side, parseAction("toggle_file_panel_dock_side").?);
     try std.testing.expectEqual(Action.focus_file_tree, parseAction("focus_file_tree").?);
+    try std.testing.expectEqual(Action.new_file, parseAction("new_file").?);
+    try std.testing.expectEqual(Action.new_directory, parseAction("new_directory").?);
+    try std.testing.expectEqual(Action.rename_file_tree_entry, parseAction("rename_file_tree_entry").?);
+    try std.testing.expectEqual(Action.delete_file_tree_entry, parseAction("delete_file_tree_entry").?);
     try std.testing.expectEqual(Action.close_focused, parseAction("close_focused").?);
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);

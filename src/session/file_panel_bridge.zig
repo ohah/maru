@@ -20,6 +20,16 @@ pub fn openKindForPath(path: []const u8) ?OpenKind {
     return null;
 }
 
+fn hasUriScheme(path: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, path, ':') orelse return false;
+    const slash = std.mem.indexOfScalar(u8, path, '/') orelse path.len;
+    if (colon >= slash or colon == 0 or !std.ascii.isAlphabetic(path[0])) return false;
+    for (path[1..colon]) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.')) return false;
+    }
+    return true;
+}
+
 /// Markdown URI의 로컬 `.md`/`.html` 링크를 현재 핀 파일 기준 절대 경로로 바꾼다. 외부 scheme과
 /// protocol-relative URL은 받지 않으며, fragment/query는 파일 선택에 관여하지 않으므로 제거한다.
 pub fn resolveMarkdownFileLink(
@@ -36,17 +46,8 @@ pub fn resolveMarkdownFileLink(
     const encoded = href[0..suffix];
     if (encoded.len == 0 or encoded.len > std.fs.max_path_bytes) return error.InvalidLink;
 
-    // `scheme:`은 로컬 파일 링크가 아니다. ':'가 첫 slash보다 앞에 있고 RFC 3986 scheme 문법이면 거부한다.
-    if (std.mem.indexOfScalar(u8, encoded, ':')) |colon| {
-        const slash = std.mem.indexOfScalar(u8, encoded, '/') orelse encoded.len;
-        if (colon < slash and colon > 0 and std.ascii.isAlphabetic(encoded[0])) {
-            var valid_scheme = true;
-            for (encoded[1..colon]) |c| {
-                if (!(std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.')) valid_scheme = false;
-            }
-            if (valid_scheme) return error.InvalidLink;
-        }
-    }
+    // `scheme:`은 로컬 파일 링크가 아니다. percent-encoded colon으로 우회할 수 있으므로 decode 전후 모두 검사한다.
+    if (hasUriScheme(encoded)) return error.InvalidLink;
 
     const decoded_buf = try gpa.alloc(u8, encoded.len);
     defer gpa.free(decoded_buf);
@@ -71,7 +72,8 @@ pub fn resolveMarkdownFileLink(
         written += 1;
     }
     const decoded = decoded_buf[0..written];
-    if (!std.unicode.utf8ValidateSlice(decoded) or std.mem.startsWith(u8, decoded, "//")) return error.InvalidLink;
+    if (!std.unicode.utf8ValidateSlice(decoded) or std.mem.startsWith(u8, decoded, "//") or hasUriScheme(decoded))
+        return error.InvalidLink;
 
     const absolute = if (std.fs.path.isAbsolute(decoded))
         try std.fs.path.resolve(gpa, &.{decoded})
@@ -201,6 +203,7 @@ test "resolveMarkdownFileLink: rejects non-file, malformed, and unsupported targ
         "",
         "#section",
         "https://example.com/next.md",
+        "https%3A//example.com/next.md",
         "//example.com/next.md",
         "next.txt",
         "next%2.md",

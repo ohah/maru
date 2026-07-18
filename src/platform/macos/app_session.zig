@@ -33916,10 +33916,14 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expectEqualStrings(md_path, session.filePanelEntryInfo(md_surface_id).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.filePanelEntryInfo(md_surface_id).?.kind);
 
+    session.dispatchAppAction(.split_file_panel_horizontal);
+    try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
+    try std.testing.expect(session.dock.focusedGroup() != group); // 전역 focus가 다른 group이어도 source group으로 열어야 한다.
     try session.openFilePanelLink(md_surface_id, "two.html#preview");
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
     try std.testing.expectEqualStrings(html_path, group.entries.items[1].path);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
+    try std.testing.expectEqual(group, session.dock.focusedGroup());
     try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "three.txt"));
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(html_path));
@@ -33927,6 +33931,10 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     const html_surface_id = group.entries.items[1].surface_id;
     try std.testing.expectEqual(dock_panel.EntryKind.html, session.filePanelEntryInfo(html_surface_id).?.kind);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
+    try std.testing.expectError(error.WrongKind, session.openFilePanelLink(html_surface_id, "one.md"));
+    try std.testing.expectError(error.SurfaceNotFound, session.openFilePanelLink(999_999, "one.md"));
+    try std.testing.expectError(error.OpenFailed, session.openFilePanelLink(md_surface_id, "missing.md"));
+    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);

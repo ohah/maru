@@ -5,6 +5,8 @@ import {
   assetDataUrl,
   assetRequestCountAllowed,
   bootRenderer,
+  bootShell,
+  isLinkActivation,
   isAssetRequest,
   isRendererReport,
   requestFileBridge,
@@ -124,6 +126,70 @@ describe("file viewer bridge boundary", () => {
     expect(assetBase64BudgetAllowed(0, maxAssetBase64Bytes)).toBe(true);
     expect(assetBase64BudgetAllowed(1, maxAssetBase64Bytes)).toBe(false);
     expect(assetBase64BudgetAllowed(maxAssetBase64Bytes, 1)).toBe(false);
+  });
+
+  test("link activation accepts only bounded local document references", () => {
+    expect(
+      isLinkActivation({
+        channel: viewerChannel,
+        type: "link-activate",
+        href: "../guide/next.md#usage",
+      }),
+    ).toBe(true);
+    for (const href of [
+      "https://example.com/next.md",
+      "https%3A//example.com/next.md",
+      "//example.com/next.md",
+      "next.txt",
+      "next%2.md",
+    ]) {
+      expect(isLinkActivation({ channel: viewerChannel, type: "link-activate", href })).toBe(false);
+    }
+  });
+
+  test("trusted shell forwards only its renderer frame link activation to the pinned bridge", async () => {
+    const dom = new JSDOM(
+      '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
+      { url: "maru-app://app/index.html" },
+    );
+    const requests: unknown[] = [];
+    dom.window.document.addEventListener("maru:file-request", () => {
+      const node = dom.window.document.querySelector<HTMLElement>(
+        '[data-maru-file-request="pending"]',
+      );
+      if (node === null) return;
+      requests.push(JSON.parse(node.textContent ?? "null"));
+      node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { opened: true } });
+      node.dataset.maruFileRequest = "done";
+      dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
+    });
+    bootShell(dom.window.document, dom.window as unknown as Window);
+    const frame = dom.window.document.querySelector<HTMLIFrameElement>("#renderer");
+    expect(frame?.contentWindow).not.toBeNull();
+
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window,
+        data: {
+          channel: viewerChannel,
+          type: "link-activate",
+          href: "wrong-source.md",
+        },
+      }),
+    );
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: frame?.contentWindow,
+        data: {
+          channel: viewerChannel,
+          type: "link-activate",
+          href: "../guide/next.md#usage",
+        },
+      }),
+    );
+    await Promise.resolve();
+
+    expect(requests).toEqual([{ method: "openLink", href: "../guide/next.md#usage" }]);
   });
 });
 

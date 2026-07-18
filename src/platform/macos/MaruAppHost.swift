@@ -2496,10 +2496,6 @@ final class MaruWebPanelView: NSView {
             outside: String(Boolean(outside && outside.complete && outside.naturalWidth > 0))
           });
           link?.click();
-          setTimeout(() => {
-            window.__fp5AboutAttempt = true;
-            window.location.href = 'about:blank';
-          }, 50);
           return result;
         })()
         """
@@ -2509,11 +2505,25 @@ final class MaruWebPanelView: NSView {
             self.fileHTMLScriptProbe = obj["script"]
             self.fileHTMLAssetProbe = obj["inside"]
             self.fileHTMLOutsideAssetProbe = obj["outside"]
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                guard let self, let current = self.webView.url else { return }
-                self.fileHTMLPinnedProbe = String(self.pinnedFileURLMatches(current))
-                self.webView.evaluateJavaScript("String(window.__fp5AboutAttempt === true)") { [weak self] value, _ in
-                    self?.fileHTMLAboutAttemptProbe = value as? String
+            // local link 취소와 page timer를 경합시키면 간헐적으로 timer가 아직 안 돈 채 smoke summary가 false를
+            // 관측한다. 첫 navigation 취소 뒤 native가 두 번째 script 시도를 명시적으로 순서화하고, 같은 evaluation의
+            // 반환값으로 "시도함"을 확정한 다음 별도 지연에서 URL pin을 확인한다.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self else { return }
+                let aboutAttempt = """
+                (() => {
+                  window.__fp5AboutAttempt = true;
+                  window.location.href = 'about:blank';
+                  return String(window.__fp5AboutAttempt === true);
+                })()
+                """
+                self.webView.evaluateJavaScript(aboutAttempt) { [weak self] value, _ in
+                    guard let self else { return }
+                    self.fileHTMLAboutAttemptProbe = value as? String
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                        guard let self, let current = self.webView.url else { return }
+                        self.fileHTMLPinnedProbe = String(self.pinnedFileURLMatches(current))
+                    }
                 }
             }
         }

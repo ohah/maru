@@ -1937,6 +1937,10 @@ pub const AppSession = struct {
     /// 확장 grab band 안에서 divider의 정확한 선이 아닌 곳을 눌러도 첫 drag에서 경계가 포인터로 점프하지 않게,
     /// mouse-down 시 실제 dock 시작점과 포인터 사이 signed backing-px 간격을 drag 세션 동안 보존한다.
     dock_resize_drag_offset_px: f64 = 0,
+    /// editor와 project tree 사이 경계 드래그. tree 폭은 pt로 DockPanel에 저장하고 pointer↔divider offset은
+    /// outer divider와 동일하게 보존해 넓은 grab band에서도 첫 이동 점프를 막는다.
+    dock_tree_resize_drag_active: bool = false,
+    dock_tree_resize_drag_offset_px: f64 = 0,
     // FP8: editor-group leaf/divider 기하 scratch. frame/mouse마다 같은 ArrayList capacity를 재사용해 split UI가
     // frame tick에 새 할당이나 FS I/O를 만들지 않는다.
     dock_leaf_rects_scratch: std.ArrayList(dock_panel.DockTree.LeafRect) = .empty,
@@ -2440,6 +2444,7 @@ pub const AppSession = struct {
             .divider_px = self.dividerThicknessPx(),
             .side = if (self.dock_initialized) self.dock.side else .right,
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
+            .tree_size_pt = if (self.dock_initialized) self.dock.tree_size else 0,
             .visible = self.dockVisible(),
         });
     }
@@ -2512,6 +2517,8 @@ pub const AppSession = struct {
         self.dock.size = 0;
         self.dock_resize_drag_active = false;
         self.dock_resize_drag_offset_px = 0;
+        self.dock_tree_resize_drag_active = false;
+        self.dock_tree_resize_drag_offset_px = 0;
         self.dock_group_divider_drag = null;
         self.dock_group_divider_drag_offset_px = 0;
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
@@ -2534,6 +2541,8 @@ pub const AppSession = struct {
         self.dock.collapsed = !self.dock.collapsed;
         self.dock_resize_drag_active = false;
         self.dock_resize_drag_offset_px = 0;
+        self.dock_tree_resize_drag_active = false;
+        self.dock_tree_resize_drag_offset_px = 0;
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
@@ -3285,6 +3294,28 @@ pub const AppSession = struct {
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
+        self.metal_dirty = true;
+    }
+
+    fn dockTreeDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
+        if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px) or !self.dockVisible()) return false;
+        // MaruWebPanelView.dividerGrabBand=10pt가 editor 쪽 이벤트를 Metal로 통과시키므로 Zig target도 같은 backing
+        // 폭을 받아야 한다. 더 좁으면 WebView는 nil을 반환했지만 resize는 시작하지 않는 dead band가 생긴다.
+        const webview_grab_px = @max(@as(u32, 1), (@as(u64, self.scale_milli) * 10 + 999) / 1000);
+        const hit = dock_layout.treeDividerHitRect(self.dockGeometry(), @intCast(webview_grab_px));
+        return hit.w > 0 and layout_math.pointInRect(x_px, y_px, hit);
+    }
+
+    fn setDockTreeSizeFromPointer(self: *AppSession, x_px: f64) void {
+        if (!self.dock_initialized or self.scale_milli == 0) return;
+        const adjusted_x = x_px + self.dock_tree_resize_drag_offset_px;
+        const candidate = dock_layout.treeSizePtForPointer(self.dockGeometry(), adjusted_x, self.scale_milli) orelse return;
+        const before = self.dock.tree_size;
+        self.dock.tree_size = candidate;
+        // compute가 editor 28셀·tree 12셀 하한을 적용한 뒤의 실효 폭을 pt 권위값으로 되돌린다.
+        const effective_px = self.dockGeometry().tree.w;
+        self.dock.tree_size = dock_layout.treeSizePtForEffectiveWidth(effective_px, self.scale_milli);
+        if (self.dock.tree_size == before) return;
         self.metal_dirty = true;
     }
 
@@ -5338,6 +5369,7 @@ pub const AppSession = struct {
         if (dst_was_empty) {
             dst.dock.side = src.dock.side;
             dst.dock.size = src.dock.size;
+            dst.dock.tree_size = src.dock.tree_size;
             dst.dock.collapsed = src.dock.collapsed;
         }
 
@@ -8753,10 +8785,22 @@ pub const AppSession = struct {
             var group_index: usize = 0;
             while (group_index < self.dock.groupCount()) : (group_index += 1) {
                 const group = self.dock.groupAt(group_index) orelse continue;
-                const content_rect: web_panel_layout.Rect = if (has_layout)
-                    dock_layout.groupGeometry(parent, self.dock_leaf_rects_scratch.items[group_index].rect).content
+                const leaf_rect: web_panel_layout.Rect = if (has_layout)
+                    self.dock_leaf_rects_scratch.items[group_index].rect
                 else
                     .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+                const content_rect: web_panel_layout.Rect = if (has_layout)
+                    dock_layout.groupGeometry(parent, leaf_rect).content
+                else
+                    .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+                var seam_edges: u8 = 0;
+                if (content_rect.w > 0 and content_rect.h > 0) {
+                    // Dock WKWebView의 넓은 native hit 영역 안에서도 outer/group/tree divider가 Metal view로 통과해야
+                    // 한다. 각 leaf가 실제로 맞닿는 경계만 표시해 일반 본문 클릭을 잃지 않는다.
+                    if (leaf_rect.x > parent.editor.x or self.dock.side == .right) seam_edges |= 1;
+                    if (leaf_rect.x + leaf_rect.w < parent.editor.x + parent.editor.w or parent.tree_divider.w > 0) seam_edges |= 2;
+                    if (leaf_rect.y + leaf_rect.h < parent.editor.y + parent.editor.h) seam_edges |= 4;
+                }
                 for (group.entries.items, 0..) |entry, i| {
                     if (entry.surface_id == 0) continue;
                     try out.append(self.allocator, .{
@@ -8765,11 +8809,7 @@ pub const AppSession = struct {
                             .markdown => .markdown,
                             .html => .browser,
                         },
-                        .seam_edges = if (content_rect.w == 0 or content_rect.h == 0) 0 else switch (self.dock.side) {
-                            .right => 1,
-                            // bottom content 위에는 tab/header 두 행이 있어 divider와 맞닿지 않는다.
-                            .bottom => 0,
-                        },
+                        .seam_edges = seam_edges,
                         .content_rect = content_rect,
                         .visible = self.dockVisible() and group.active != null and group.active.? == i,
                     });
@@ -13126,6 +13166,16 @@ pub const AppSession = struct {
             }
             return;
         }
+        if (self.dock_tree_resize_drag_active and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                self.setDockTreeSizeFromPointer(x_px);
+            } else {
+                self.dock_tree_resize_drag_active = false;
+                self.dock_tree_resize_drag_offset_px = 0;
+                self.metal_dirty = true;
+            }
+            return;
+        }
         if (self.dock_initialized and self.dock_group_divider_drag != null and (kind == 2 or kind == 3)) {
             if (kind == 2) {
                 const adjusted_x = if (self.dock_group_divider_drag_seg.direction == .horizontal) x_px + self.dock_group_divider_drag_offset_px else x_px;
@@ -13227,6 +13277,14 @@ pub const AppSession = struct {
                 return;
             }
             if (self.dockVisible()) {
+                if (self.dockTreeDividerAtPoint(x_px, y_px)) {
+                    const g = self.dockGeometry();
+                    self.dock_tree_resize_drag_active = true;
+                    self.dock_tree_resize_drag_offset_px = @as(f64, @floatFromInt(g.tree_divider.x)) - x_px;
+                    self.mouse_drag_selecting = false;
+                    self.metal_dirty = true;
+                    return;
+                }
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
                     self.activateFileTreeRow(row_index);
                     return;
@@ -13242,54 +13300,57 @@ pub const AppSession = struct {
                     self.metal_dirty = true;
                     return;
                 }
-                const hit = self.dockGroupAtPoint(x_px, y_px) orelse return;
-                const g = hit.geometry;
-                const group = hit.group;
-                _ = self.dock.focusGroup(group);
-                if (group.active) |index| if (index < group.entries.items.len) {
-                    const entry = &group.entries.items[index];
-                    if (entry.external_change) if (dock_layout.headerConflictRect(g, self.cell_width_px)) |conflict| {
-                        if (layout_math.pointInRect(x_px, y_px, conflict)) {
-                            self.requestFileConflictReload(entry.surface_id);
-                            return;
-                        }
-                    };
-                };
-                if (dock_layout.collapseAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) {
-                    self.toggleDockCollapsed();
-                    return;
-                }
-                if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
-                    if (group.active != index) {
-                        if (group.active) |old| if (old < group.entries.items.len) {
-                            self.markFilePanelDirtySyncPending(&group.entries.items[old]);
-                        };
-                        group.active = index;
-                        const entry = &group.entries.items[index];
-                        if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
-                        self.touchFilePanelEntry(entry);
-                        self.enforceFilePanelLiveViewLimit();
-                        self.file_panel_mode_pending = entry.surface_id;
-                        self.file_tree_rows_dirty = true;
-                        self.metal_dirty = true;
-                    }
-                    return;
-                }
-                if (dock_layout.headerModeAt(g, self.cell_width_px, x_px, y_px)) |requested_mode| {
+                if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
+                    const g = hit.geometry;
+                    const group = hit.group;
+                    _ = self.dock.focusGroup(group);
                     if (group.active) |index| if (index < group.entries.items.len) {
                         const entry = &group.entries.items[index];
-                        if (entry.kind == .markdown) {
-                            if (entry.mode != requested_mode) {
-                                self.markFilePanelDirtySyncPending(entry);
-                                entry.mode = requested_mode;
-                                self.file_panel_mode_pending = entry.surface_id;
-                                self.metal_dirty = true;
+                        if (entry.external_change) if (dock_layout.headerConflictRect(g, self.cell_width_px)) |conflict| {
+                            if (layout_math.pointInRect(x_px, y_px, conflict)) {
+                                self.requestFileConflictReload(entry.surface_id);
+                                return;
                             }
-                        }
+                        };
                     };
-                    return;
+                    if (dock_layout.collapseAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) {
+                        self.toggleDockCollapsed();
+                        return;
+                    }
+                    if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
+                        if (group.active != index) {
+                            if (group.active) |old| if (old < group.entries.items.len) {
+                                self.markFilePanelDirtySyncPending(&group.entries.items[old]);
+                            };
+                            group.active = index;
+                            const entry = &group.entries.items[index];
+                            if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+                            self.touchFilePanelEntry(entry);
+                            self.enforceFilePanelLiveViewLimit();
+                            self.file_panel_mode_pending = entry.surface_id;
+                            self.file_tree_rows_dirty = true;
+                            self.metal_dirty = true;
+                        }
+                        return;
+                    }
+                    if (dock_layout.headerModeAt(g, self.cell_width_px, x_px, y_px)) |requested_mode| {
+                        if (group.active) |index| if (index < group.entries.items.len) {
+                            const entry = &group.entries.items[index];
+                            if (entry.kind == .markdown) {
+                                if (entry.mode != requested_mode) {
+                                    self.markFilePanelDirtySyncPending(entry);
+                                    entry.mode = requested_mode;
+                                    self.file_panel_mode_pending = entry.surface_id;
+                                    self.metal_dirty = true;
+                                }
+                            }
+                        };
+                        return;
+                    }
                 }
-                if (layout_math.pointInRect(x_px, y_px, g.tab_bar) or layout_math.pointInRect(x_px, y_px, g.header)) return;
+                // tree header/빈 row, editor 본문의 WebView seam처럼 도크 안에서 Metal까지 내려온 클릭은 도크가 소비한다.
+                // 반대로 도크 밖(workspace)은 여기서 return하지 않고 아래 pane 주소창·탭·터미널 hit-test로 흘러야 한다.
+                if (layout_math.pointInRect(x_px, y_px, self.dockGeometry().dock)) return;
             }
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
@@ -15084,6 +15145,11 @@ pub const AppSession = struct {
         }
         if (self.dockVisible()) {
             const dg = self.dockGeometry();
+            if (self.dockTreeDividerAtPoint(x_px, y_px)) {
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                return .resize_h;
+            }
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
@@ -17820,12 +17886,7 @@ pub const AppSession = struct {
                         }, self.chromeQuadBg(if (active) self.sidebarActiveBg() else self.sidebarHoverBg()));
                     }
                 }
-                if (dg.tree.w > 0) self.appendBarBgQuad(.{
-                    .x = dg.tree.x,
-                    .y = dg.tree.y,
-                    .w = @min(@as(u32, 1), dg.tree.w),
-                    .h = dg.tree.h,
-                }, self.dividerColor());
+                if (dg.tree_divider.w > 0) self.appendBarBgQuad(dg.tree_divider, self.dividerColor());
                 self.appendBarBgQuad(dg.divider, self.dividerColor());
             } else if (self.dockCollapsedToggleRect()) |r| {
                 self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarBg()));
@@ -33523,9 +33584,64 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(@as(u8, 2), surfaces.items[0].seam_edges); // workspace 우측이 dock divider에 맞닿음
     try std.testing.expect(!surfaces.items[1].visible and surfaces.items[2].visible);
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, surfaces.items[2].panel_kind);
-    try std.testing.expectEqual(@as(u8, 1), surfaces.items[2].seam_edges); // right dock 콘텐츠 좌측 seam
+    try std.testing.expectEqual(@as(u8, 3), surfaces.items[2].seam_edges); // outer dock 좌측 + project-tree 우측 seam
     try std.testing.expect(session.webSurfacesPresent());
     try std.testing.expect(session.hasWebSurface(group.entries.items[1].surface_id));
+
+    // 파일 도크가 열린 상태에서도 workspace 브라우저 주소창 클릭은 도크 hit-test를 통과해 편집으로 들어가야 한다.
+    // 수정 전에는 아래 도크 분기가 dockGroupAtPoint(null)을 함수 전체 return으로 처리해, 도크 밖인 workspace 클릭까지
+    // 삼켰다. 따라서 브라우저는 보이지만 주소창·탭·터미널 등 왼쪽 영역을 전혀 조작할 수 없었다.
+    const browser_sid = session.activeWebSurfaceId();
+    const browser_bar = session.paneBarForLeaf(session.activePane()) orelse return error.NoBrowserBar;
+    const address_y: f64 = @floatFromInt(browser_bar.full.y + browser_bar.full.h + browser_bar.full.h / 2);
+    const address_x: f64 = @floatFromInt(browser_bar.full.x +
+        (@as(u32, nav_button_count) * nav_button_w + 2) * session.cell_width_px);
+    session.mouse(1, address_x, address_y, 0, 0);
+    try std.testing.expectEqual(@as(?u64, browser_sid), session.addrEditSurfaceId());
+    try std.testing.expect(session.terminalOwnsInput());
+    try std.testing.expectEqual(@as(?u64, browser_sid), session.takeWebAddrFocusPull());
+    session.routeCommittedText("example.com");
+    try std.testing.expectEqualStrings("example.com", session.addrEditText());
+    session.mouse(3, address_x, address_y, 0, 0);
+
+    // Artifact의 project tree 열은 editor와 독립적으로 폭을 조절한다. 넓힌 hit band 안쪽에서 시작해도 첫 move는
+    // 점프하지 않고, 이후 pointer delta만큼 tree 폭이 변하며 live WKWebView는 계속 visible이다.
+    const tree_width_before = right.tree.w;
+    const dock_sid = group.entries.items[1].surface_id;
+    var dock_content_width_before: ?u32 = null;
+    for (surfaces.items) |surface| {
+        if (surface.surface_id == dock_sid and surface.visible) dock_content_width_before = surface.content_rect.w;
+    }
+    try std.testing.expect(dock_content_width_before != null);
+    // 선의 editor 쪽(-x) WebView 내부에서 시작한다. Swift의 10pt seam pass-through와 Zig target이 어긋나면 이
+    // 위치는 WebView도 Metal도 소비하지 않는 dead band가 되어 드래그가 시작되지 않는다.
+    const tree_grab_x = @as(f64, @floatFromInt(right.tree_divider.x)) - 8;
+    const tree_grab_y: f64 = @floatFromInt(right.tree_divider.y + right.tree_divider.h / 2);
+    try std.testing.expectEqual(CursorKind.resize_h, session.hoverCursor(tree_grab_x, tree_grab_y, 0));
+    session.mouse(1, tree_grab_x, tree_grab_y, 0, 0);
+    try std.testing.expect(session.dock_tree_resize_drag_active);
+    session.mouse(2, tree_grab_x, tree_grab_y, 0, 0);
+    try std.testing.expectEqual(tree_width_before, session.dockGeometry().tree.w);
+    session.mouse(2, tree_grab_x - 40, tree_grab_y, 0, 0);
+    try std.testing.expectEqual(tree_width_before + 40, session.dockGeometry().tree.w);
+    surfaces.clearRetainingCapacity();
+    try session.collectWebSurfaces(&surfaces);
+    var workspace_browser_visible = false;
+    var dock_editor_visible = false;
+    var dock_content_width_after: ?u32 = null;
+    for (surfaces.items) |surface| {
+        if (surface.surface_id == browser_sid) workspace_browser_visible = surface.visible;
+        if (surface.surface_id == dock_sid) {
+            dock_editor_visible = surface.visible;
+            dock_content_width_after = surface.content_rect.w;
+        }
+    }
+    try std.testing.expect(workspace_browser_visible and dock_editor_visible);
+    try std.testing.expectEqual(dock_content_width_before.? - 40, dock_content_width_after.?);
+    session.mouse(3, tree_grab_x - 40, tree_grab_y, 0, 0);
+    try std.testing.expect(!session.dock_tree_resize_drag_active);
+    try std.testing.expectEqual(@as(f64, 0), session.dock_tree_resize_drag_offset_px);
+    try std.testing.expect(session.dock.tree_size > 0);
 
     session.metal_dirty = true;
     _ = try session.tick();
@@ -33583,7 +33699,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
     try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
-    try std.testing.expectEqual(@as(u8, 0), surfaces.items[2].seam_edges); // dock 본문은 tab/header 아래라 divider와 비인접
+    try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges); // dock 본문 우측은 project-tree divider
 
     // 보이는 접기 버튼→titlebar 토글 순서로 닫고 다시 열며, termRect가 즉시 회수/복구된다.
     const collapse_x: f64 = @floatFromInt(bottom.tab_bar.x + bottom.tab_bar.w - 1);
@@ -33614,6 +33730,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     defer arena.deinit();
     const win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
     try std.testing.expectEqual(dock_panel.Side.bottom, win.dock.side);
+    try std.testing.expectEqual(session.dock.tree_size, win.dock.tree_size);
     try std.testing.expectEqual(@as(usize, 2), win.dock.entries.len);
     try std.testing.expect(win.dock.entries[1].active);
 }
@@ -33651,6 +33768,8 @@ test "FP8 file panel groups render simultaneously drag divider persist tree and 
     try std.testing.expect(surfaces.items[0].visible and surfaces.items[1].visible);
     try std.testing.expectEqual(left_g.content, surfaces.items[0].content_rect);
     try std.testing.expectEqual(right_g.content, surfaces.items[1].content_rect);
+    try std.testing.expectEqual(@as(u8, 3), surfaces.items[0].seam_edges); // outer-left + internal-right divider
+    try std.testing.expectEqual(@as(u8, 3), surfaces.items[1].seam_edges); // internal-left + project-tree-right divider
     try std.testing.expect(session.focusFilePanelSurface(first.entries.items[0].surface_id));
     try std.testing.expectEqual(first, session.dock.focusedGroup());
     try std.testing.expect(session.focusFilePanelSurface(second.entries.items[0].surface_id));
@@ -33915,7 +34034,7 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
         .{ .path = directory_path, .kind = .html },
     };
     var restored = captured;
-    restored.dock = .{ .entries = &entries };
+    restored.dock = .{ .tree_size = 207, .entries = &entries };
     try session.applyWorkspaceWindow(restored);
 
     const group = session.dock.singleGroup().?;
@@ -33924,6 +34043,7 @@ test "FP5 workspace restore prunes invalid file panel capabilities and degrades 
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, group.entries.items[0].kind);
     try std.testing.expectEqual(@as(?usize, 0), group.active); // invalid active entry 제거 → 첫 유효 entry
     try std.testing.expect(group.entries.items[0].surface_id != 0);
+    try std.testing.expectEqual(@as(u32, 207), session.dock.tree_size);
 
     var arena2 = std.heap.ArenaAllocator.init(allocator);
     defer arena2.deinit();

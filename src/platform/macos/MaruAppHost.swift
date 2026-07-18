@@ -729,9 +729,9 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
     private func callBridge(_ req: Data, method: String?) -> Data? {
         let reqBytes = [UInt8](req)
         guard let session = controller?.bridgeSession(for: surfaceId) else { return nil }
-        // write/dirty는 side effect라 size-query가 dispatch를 두 번 실행하면 안 된다. 이 둘의 응답은 작은 고정 JSON이므로
+        // write/dirty/openLink는 side effect라 size-query가 dispatch를 두 번 실행하면 안 된다. 응답은 작은 고정 JSON이므로
         // 단일 1 KiB fill 호출로 끝낸다. read/readAsset만 아래 query/fill 재계산 경로를 쓴다.
-        if method == "maru.file.write" || method == "maru.file.setDirty" {
+        if method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.openLink" {
             var out = [UInt8](repeating: 0, count: 1024)
             let written = reqBytes.withUnsafeBufferPointer { rp in
                 out.withUnsafeMutableBufferPointer { op in
@@ -781,7 +781,8 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           read: function () { return window.maru.request("maru.file.read"); },
           readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); },
           write: function (content) { return window.maru.request("maru.file.write", { content: content }); },
-          setDirty: function (dirty) { return window.maru.request("maru.file.setDirty", { dirty: dirty }); }
+          setDirty: function (dirty) { return window.maru.request("maru.file.setDirty", { dirty: dirty }); },
+          openLink: function (href) { return window.maru.request("maru.file.openLink", { href: href }); }
         }
       };
       function flushFileRequests() {
@@ -798,6 +799,8 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
             promise = window.maru.file.write(request.content);
           } else if (request.method === "setDirty" && typeof request.dirty === "boolean") {
             promise = window.maru.file.setDirty(request.dirty);
+          } else if (request.method === "openLink" && typeof request.href === "string" && request.href.length <= 4096) {
+            promise = window.maru.file.openLink(request.href);
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);

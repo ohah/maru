@@ -20,6 +20,70 @@ pub fn openKindForPath(path: []const u8) ?OpenKind {
     return null;
 }
 
+/// Markdown URI의 로컬 `.md`/`.html` 링크를 현재 핀 파일 기준 절대 경로로 바꾼다. 외부 scheme과
+/// protocol-relative URL은 받지 않으며, fragment/query는 파일 선택에 관여하지 않으므로 제거한다.
+pub fn resolveMarkdownFileLink(
+    gpa: std.mem.Allocator,
+    source_path: []const u8,
+    href: []const u8,
+) (std.mem.Allocator.Error || error{InvalidLink})![]u8 {
+    if (!std.fs.path.isAbsolute(source_path) or openKindForPath(source_path) != .markdown or href.len == 0 or
+        href.len > std.fs.max_path_bytes or std.mem.startsWith(u8, href, "//")) return error.InvalidLink;
+
+    var suffix = href.len;
+    if (std.mem.indexOfScalar(u8, href, '?')) |i| suffix = @min(suffix, i);
+    if (std.mem.indexOfScalar(u8, href, '#')) |i| suffix = @min(suffix, i);
+    const encoded = href[0..suffix];
+    if (encoded.len == 0 or encoded.len > std.fs.max_path_bytes) return error.InvalidLink;
+
+    // `scheme:`은 로컬 파일 링크가 아니다. ':'가 첫 slash보다 앞에 있고 RFC 3986 scheme 문법이면 거부한다.
+    if (std.mem.indexOfScalar(u8, encoded, ':')) |colon| {
+        const slash = std.mem.indexOfScalar(u8, encoded, '/') orelse encoded.len;
+        if (colon < slash and colon > 0 and std.ascii.isAlphabetic(encoded[0])) {
+            var valid_scheme = true;
+            for (encoded[1..colon]) |c| {
+                if (!(std.ascii.isAlphanumeric(c) or c == '+' or c == '-' or c == '.')) valid_scheme = false;
+            }
+            if (valid_scheme) return error.InvalidLink;
+        }
+    }
+
+    const decoded_buf = try gpa.alloc(u8, encoded.len);
+    defer gpa.free(decoded_buf);
+    var read: usize = 0;
+    var written: usize = 0;
+    while (read < encoded.len) {
+        const byte = encoded[read];
+        if (byte == '\\' or byte < 0x20 or byte == 0x7f) return error.InvalidLink;
+        if (byte != '%') {
+            decoded_buf[written] = byte;
+            read += 1;
+            written += 1;
+            continue;
+        }
+        if (read + 2 >= encoded.len) return error.InvalidLink;
+        const hi = std.fmt.charToDigit(encoded[read + 1], 16) catch return error.InvalidLink;
+        const lo = std.fmt.charToDigit(encoded[read + 2], 16) catch return error.InvalidLink;
+        const decoded = hi * 16 + lo;
+        if (decoded == '\\' or decoded < 0x20 or decoded == 0x7f) return error.InvalidLink;
+        decoded_buf[written] = decoded;
+        read += 3;
+        written += 1;
+    }
+    const decoded = decoded_buf[0..written];
+    if (!std.unicode.utf8ValidateSlice(decoded) or std.mem.startsWith(u8, decoded, "//")) return error.InvalidLink;
+
+    const absolute = if (std.fs.path.isAbsolute(decoded))
+        try std.fs.path.resolve(gpa, &.{decoded})
+    else
+        try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(source_path) orelse "/", decoded });
+    errdefer gpa.free(absolute);
+    if (openKindForPath(absolute) == null) {
+        return error.InvalidLink;
+    }
+    return absolute;
+}
+
 pub const PathError = error{
     Empty,
     Absolute,
@@ -112,4 +176,41 @@ test "openKindForPath: md and html only, case-insensitive" {
     try testing.expect(openKindForPath("/tmp/page.htm") == null);
     try testing.expect(openKindForPath("/tmp/readme.md.txt") == null);
     try testing.expect(openKindForPath("/tmp/.md") == null);
+}
+
+test "resolveMarkdownFileLink: resolves relative and absolute supported links with URI suffixes" {
+    const relative = try resolveMarkdownFileLink(
+        testing.allocator,
+        "/workspace/docs/current.md",
+        "../guide/next%20step.md#usage",
+    );
+    defer testing.allocator.free(relative);
+    try testing.expectEqualStrings("/workspace/guide/next step.md", relative);
+
+    const absolute = try resolveMarkdownFileLink(
+        testing.allocator,
+        "/workspace/docs/current.md",
+        "/tmp/page.HTML?mode=preview",
+    );
+    defer testing.allocator.free(absolute);
+    try testing.expectEqualStrings("/tmp/page.HTML", absolute);
+}
+
+test "resolveMarkdownFileLink: rejects non-file, malformed, and unsupported targets" {
+    const cases = [_][]const u8{
+        "",
+        "#section",
+        "https://example.com/next.md",
+        "//example.com/next.md",
+        "next.txt",
+        "next%2.md",
+        "next\\file.md",
+        "next\x00file.md",
+    };
+    for (cases) |href| {
+        try testing.expectError(
+            error.InvalidLink,
+            resolveMarkdownFileLink(testing.allocator, "/workspace/docs/current.md", href),
+        );
+    }
 }

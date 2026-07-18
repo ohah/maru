@@ -8406,6 +8406,29 @@ pub const AppSession = struct {
         return .opened;
     }
 
+    pub const FilePanelLinkError = std.mem.Allocator.Error || error{
+        SurfaceNotFound,
+        WrongKind,
+        InvalidLink,
+        OpenFailed,
+    };
+
+    /// 격리 Markdown renderer가 활성화한 로컬 문서 링크를 source surface의 핀 파일 기준으로 연다. target group은
+    /// 전역 focus 추정이 아니라 클릭을 보낸 source group으로 고정하고, 최종 regular-file 검증은 공용 open 경로가 맡는다.
+    pub fn openFilePanelLink(self: *AppSession, surface_id: u64, href: []const u8) FilePanelLinkError!void {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const source = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (source.kind != .markdown) return error.WrongKind;
+        const source_group = self.dock.groupForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        const target = file_panel_bridge.resolveMarkdownFileLink(self.allocator, source.path, href) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidLink => return error.InvalidLink,
+        };
+        defer self.allocator.free(target);
+        _ = self.dock.focusGroup(source_group);
+        if (self.openFilePanelPath(target) != .opened) return error.OpenFailed;
+    }
+
     pub const FilePanelEntryInfo = struct {
         path: []const u8,
         kind: dock_panel.EntryKind,
@@ -33892,6 +33915,12 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     try std.testing.expect(md_surface_id != 0);
     try std.testing.expectEqualStrings(md_path, session.filePanelEntryInfo(md_surface_id).?.path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, session.filePanelEntryInfo(md_surface_id).?.kind);
+
+    try session.openFilePanelLink(md_surface_id, "two.html#preview");
+    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    try std.testing.expectEqualStrings(html_path, group.entries.items[1].path);
+    try std.testing.expectEqual(@as(?usize, 1), group.active);
+    try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "three.txt"));
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(html_path));
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);

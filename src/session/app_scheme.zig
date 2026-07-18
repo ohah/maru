@@ -18,7 +18,7 @@ const std = @import("std");
 /// exact origin(`maru-app://render`) 하나만 허용한다. renderer frame은
 /// `sandbox=allow-scripts allow-same-origin`이지만 app/render host가 달라 shell과 cross-origin이고,
 /// 브리지 handler는 main-frame `maru-app://app`의 port 없는 origin만 받는다. `'unsafe-inline'`·외부 CDN은 열지 않는다.
-pub const csp_header = "default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
+pub const csp_header = "default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
 
 pub const AppOriginRole = enum(u32) {
     shell = 0,
@@ -284,6 +284,7 @@ test "CSP: network stays closed and only the dedicated renderer frame origin is 
     try testing.expect(std.mem.indexOf(u8, csp_header, "connect-src 'none'") != null);
     try testing.expect(std.mem.indexOf(u8, csp_header, "frame-src maru-app://render") != null);
     try testing.expect(std.mem.indexOf(u8, csp_header, "frame-src 'none'") == null);
+    try testing.expect(std.mem.indexOf(u8, csp_header, "'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='") != null);
     try testing.expect(std.mem.indexOf(u8, csp_header, "unsafe-inline") == null);
     try testing.expect(std.mem.indexOf(u8, csp_header, "http:") == null);
     try testing.expect(std.mem.indexOf(u8, csp_header, "https:") == null);

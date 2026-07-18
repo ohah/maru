@@ -134,7 +134,7 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 
 **② 스킴 핸들러(`WKURLSchemeHandler`, platform)**: 신뢰 config에만 `setURLSchemeHandler(_, forURLScheme:"maru-app")` 등록. 요청 → ① 샌드박스 검증 → 통과면 **maru 번들 asset root**의 바이트를 읽어 **엄격 CSP 헤더**와 함께 응답, 거부면 차단(404). **뷰되는 파일 자신의 디렉터리는 안 서빙**(§7 — `script-src 'self'` 아래 공격자 디렉터리 스크립트 same-origin 로드 차단). 스킴 이름 근거=§9(RFC 3986, `WKURLSchemeHandler` 커스텀 스킴 등록 가능·소문자 고정).
 
-**③ CSP(응답 헤더)**: 엄격 CSP를 응답에 항상 부착 — 외부 네트워크(`connect-src 'none'`)·임의 frame·`<base>` 하이재킹·form-action exfil 차단. **문자열 단일 출처는 코드 `app_scheme.csp_header`**: `default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'`. frame 예외는 FP4의 번들 renderer exact origin 하나뿐이다.
+**③ CSP(응답 헤더)**: 엄격 CSP를 응답에 항상 부착 — 외부 네트워크(`connect-src 'none'`)·임의 frame·`<base>` 하이재킹·form-action exfil 차단. **문자열 단일 출처는 코드 `app_scheme.csp_header`**: `default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'`. style hash는 [file-panel.md](file-panel.md) §1의 두 신뢰 HTML에 공통인 초기 `Canvas` critical style bytes 하나만 허용하며 `unsafe-inline`은 계속 금지한다. frame 예외는 FP4의 번들 renderer exact origin 하나뿐이다.
 
 **④ 트러스트 분기**: `markdown`(신뢰) config만 스킴 핸들러·브리지를 등록한다. `browser`(untrusted) config엔 **미등록** + `maru-app://` 네비 차단. FP4부터 markdown config는 `web/dist`의 실 shell/renderer를 로드한다.
 
@@ -176,7 +176,7 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 
   **에이전트 제어와의 연결**: 팝업을 1급 surface(`surface_id`)로 adopt하는 것이 곧 **에이전트가 팝업까지 제어**할 수 있는 전제다 — host-mediated 브라우저 MCP가 각 surface(팝업 adopt 포함)를 `surface_id`로 주소지정한다. 프로토콜 결정·구현 완료 상태·남은 5f 재슬라이싱은 [control-plane.md](control-plane.md) §9.2~§9.5를 **단일 출처**로 따르며, 이 문단에서 진행 상태를 복제하지 않는다. §13의 host-mediated vs Web Inspector 분기도 같은 경계를 따른다.
 - **파일 패널(마크다운·HTML 뷰어/편집기 — 전역 도크)**: 로컬 `.md`/`.html`을 여는 파일 패널 — 창 레벨 전역 도크 슬롯(우측|하단), 파일 탭·헤더 밴드·파일 트리 = GPU chrome, 브리지 `file.read/write`, CodeMirror 6 편집 — 은 [file-panel.md](file-panel.md)를 단일 출처로 둔다(워크스페이스 pane 트리 밖이라 §2 destroy 규칙 비대상; §7 브리지 origin 격리·§4 포커스 불변식[도크 축 확장]과 상호작용). 웹 브라우저(`browser` kind)는 이 문서 그대로 워크스페이스 term이며, 전환 시 URL 기억·재로드 완화는 백로그([file-panel.md] §13).
-- **window.opacity 정합**: 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 WKWebView 본문 rect만 불투명하면 시각 부정합(데스크톱이 비치는 chrome 옆에 불투명 웹 패널). WKWebView 배경 처리 또는 "웹 패널이 있는 창은 opacity 무시" 중 Phase 4c에서 결정. 배경 투명화는 공개 API `underPageBackgroundColor`(macOS 12+)를 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
+- **배경 정합**: 신뢰 Markdown 파일 패널의 **초기 paint**는 [file-panel.md](file-panel.md) §1 계약대로 생성 시 공개 API `underPageBackgroundColor`와 hash-pinned critical CSS를 함께 써 기본 흰 backing을 노출하지 않는다. 반면 터미널·chrome이 반투명(`window.opacity<1`)인 창에서 임의 browser/로컬 HTML 본문까지 투명화할지는 여전히 별도 결정이다. 그 경우에도 공개 API `underPageBackgroundColor`(macOS 12+)만 쓰고, `drawsBackground`는 비공개 KVC 키라 의존하지 않는다.
 - **테마/다크모드 동기화**: 터미널은 `viewDidChangeEffectiveAppearance`로 테마 교체. 웹 패널 콘텐츠(maru-app:// UI)가 maru 테마·다크/라이트를 따르도록 브리지로 CSS 변수/토큰 주입.
 - **⌘F 분기**: 포커스가 터미널이면 maru find(스크롤백), 웹 패널이면 페이지 내 find. 포커스 기준 라우팅 명시.
 - **컨텍스트 메뉴**: WKWebView 기본 우클릭 메뉴(Inspect Element 포함)는 "chrome는 Zig" 원칙·보안과 충돌 → 억제 또는 maru 메뉴로 대체.

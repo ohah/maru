@@ -21,7 +21,7 @@ mise run web:check
 - Bun `1.3.11`, `@zntc/core` `0.1.3`, oxlint `1.74.0`, oxfmt `0.59.0`을 exact version과 `bun.lock`으로 고정한다.
 - vanilla TS 단일 앱에는 `@zntc/web`의 PostCSS/Sass/HMR 계층이 필요하지 않아 넣지 않는다. core CLI/API가 bundle과 단순 serve를 맡는다.
 - Markdown은 remark/unified + rehype-sanitize를 쓴다. raw HTML은 HAST 변환 전에 버리고, renderer가 만든 `data-maru-source-start/end`만 allowlist로 보존한다.
-- KaTeX는 MathML-only로 출력하고 KaTeX/Prism 뒤 최종 hardening pass가 error fallback의 inline style·event/resource 속성도 제거해 현재 `style-src 'self'` CSP에 예외를 만들지 않는다. 코드는 Prism 계열 `rehype-prism-plus`로 강조한다.
+- KaTeX는 MathML-only로 출력하고 KaTeX/Prism 뒤 최종 hardening pass가 error fallback의 inline style·event/resource 속성도 제거한다. CSP의 유일한 inline style 예외는 두 entry HTML에 공통인 초기 배경의 exact SHA-256이며, Markdown 파생 markup에는 적용되지 않는다. 코드는 Prism 계열 `rehype-prism-plus`로 강조한다.
 - shell은 `maru-app://app`, renderer는 `sandbox="allow-scripts allow-same-origin"`인 `maru-app://render` iframe이다. host 분리로 same-origin이 아니며 renderer에는 bridge/message handler가 없다. 실제 WKWebView smoke가 부모 DOM 접근도 거부되는지 확인한다.
 - Mermaid 소스는 FP4에서도 inert code로 남긴다. 격리 origin/CSP는 갖췄지만 출력 sanitize 전 외부 요청 0을 별도 증명하기 전에는 실행하지 않는다.
 

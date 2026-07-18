@@ -605,8 +605,9 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         else {
             // 거부(샌드박스·탈출·부재) → 404. 정보 노출 없이 균일 실패하되, **흰 HTML**로 응답해 신뢰 패널이 다크모드
             // 에서 다크 사각형이 아니라 흰 페이지를 그리게 한다(리뷰11 [1] — 인라인 흰 placeholder 제거로 생긴 회귀).
-            // error page엔 엄격 CSP를 붙이지 않는다(리뷰12 [2]): CSP의 style-src 'self'가 error page의 인라인 흰 배경
-            // (`body style="background:#fff"`)을 차단해 color-scheme만 남으면 다크모드서 흰색이 안 보장된다. error page는
+            // error page엔 엄격 CSP를 붙이지 않는다(리뷰12 [2]): CSP의 style hash는 viewer critical background bytes만
+            // 허용해 error page의 인라인 흰 배경(`body style="background:#fff"`)을 차단한다. color-scheme만 남으면
+            // 다크모드서 흰색이 안 보장된다. error page는
             // 고정 maru HTML(스크립트·외부 리소스·리플렉션 0)이라 샌드박스가 불필요 → CSP 생략이 안전하고 흰 배경을 보장.
             respond(urlSchemeTask, url: url, status: 404, mime: "text/html; charset=utf-8", data: Data(Self.errorPageHTML("요청한 리소스를 찾을 수 없습니다 (404).").utf8), attachCSP: false)
             return
@@ -2089,6 +2090,7 @@ final class MaruWebPanelView: NSView {
     var fileViewerLoadedImagesProbe: String?
     var fileViewerEditorProbe: String?
     var fileViewerWriteProbe: String?
+    var fileViewerCriticalStyleProbe: String?
     private var fileEditingProbeStarted = false
     var rendererBridgeProbe: String?
     var rendererHandlerProbe: String?
@@ -2224,6 +2226,11 @@ final class MaruWebPanelView: NSView {
             appURL = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html") // 신뢰 origin = maru-app://app(5b가 pin).
         }
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
+        if filePanelKind == 1, #available(macOS 12.0, *) {
+            // 빈 WKWebView가 view hierarchy에 들어간 뒤 첫 document paint가 오기 전에도 Markdown의
+            // CSS Canvas와 같은 light/dark semantic 배경을 보여 기본 흰 backing frame을 노출하지 않는다.
+            self.webView.underPageBackgroundColor = NSColor.textBackgroundColor
+        }
         self.bridgeWorld = bridgeWorldLocal
         self.initialTrustedURL = appURL
         super.init(frame: frameRect)
@@ -2375,6 +2382,12 @@ final class MaruWebPanelView: NSView {
         let script = """
         (() => {
           const s = document.getElementById('viewer-status');
+          const critical = document.querySelector('style[data-maru-critical-background]');
+          const external = document.querySelector('link[rel="stylesheet"][href="app.css"]');
+          const criticalStyle = critical instanceof HTMLStyleElement
+            && critical.sheet !== null
+            && external !== null
+            && Boolean(critical.compareDocumentPosition(external) & Node.DOCUMENT_POSITION_FOLLOWING);
           return JSON.stringify({
             rendererLoaded: s?.dataset.rendererLoaded || 'pending',
             rendererScript: s?.dataset.rendererScriptReady || 'pending',
@@ -2385,7 +2398,8 @@ final class MaruWebPanelView: NSView {
             loaded: s?.dataset.viewerLoadedImages || 'pending',
             bridge: s?.dataset.rendererBridgeType || 'pending',
             handler: s?.dataset.rendererHandlerType || 'pending',
-            parentAccess: s?.dataset.rendererParentAccessible || 'pending'
+            parentAccess: s?.dataset.rendererParentAccessible || 'pending',
+            criticalStyle: String(criticalStyle)
           });
         })()
         """
@@ -2402,6 +2416,7 @@ final class MaruWebPanelView: NSView {
             self.rendererBridgeProbe = obj["bridge"]
             self.rendererHandlerProbe = obj["handler"]
             self.rendererParentAccessProbe = obj["parentAccess"]
+            self.fileViewerCriticalStyleProbe = obj["criticalStyle"]
             if obj["ready"] == "true" {
                 self.startFileEditingProbe()
                 return
@@ -7584,6 +7599,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let fileHTMLDataStoreIsolated = wp.map {
                 $0.filePanelKind != 2 || $0.webView.configuration.websiteDataStore !== MaruWebPanelView.browserDataStore
             } ?? false
+            let fileViewerUnderPageBackground = wp.map { panel in
+                guard panel.filePanelKind == 1 else { return false }
+                if #available(macOS 12.0, *) {
+                    var matches = false
+                    panel.webView.effectiveAppearance.performAsCurrentDrawingAppearance {
+                        guard
+                            let actual = panel.webView.underPageBackgroundColor?.usingColorSpace(.sRGB),
+                            let expected = NSColor.textBackgroundColor.usingColorSpace(.sRGB)
+                        else { return }
+                        let tolerance = CGFloat(1.0 / 255.0)
+                        matches = abs(actual.redComponent - expected.redComponent) <= tolerance
+                            && abs(actual.greenComponent - expected.greenComponent) <= tolerance
+                            && abs(actual.blueComponent - expected.blueComponent) <= tolerance
+                            && abs(actual.alphaComponent - expected.alphaComponent) <= tolerance
+                    }
+                    return matches
+                }
+                return false
+            } ?? false
             // Phase 7e-1a: browser 패널 nav 상태 왕복 검증 — Swift KVO 관측값(navUrl)과 Zig 저장 getter 결과가
             // 5d fixture의 data: URL로 채워지는지(url KVO → tick push(set_web_nav_state) → Zig 저장 → web_nav_url_at
             // 왕복). 세션 핸들=activeSurface.appSession, out 버퍼 4096. len>0이면 문자열, 아니면 "pending"(아직 push 전).
@@ -7619,6 +7653,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_loaded_images=\(wp?.fileViewerLoadedImagesProbe ?? "pending")
             file_viewer_editor_hydrated=\(wp?.fileViewerEditorProbe ?? "pending")
             file_viewer_write=\(wp?.fileViewerWriteProbe ?? "pending")
+            file_viewer_under_page_background=\(fileViewerUnderPageBackground)
+            file_viewer_critical_style=\(wp?.fileViewerCriticalStyleProbe ?? "pending")
             renderer_bridge_type=\(wp?.rendererBridgeProbe ?? "pending")
             renderer_handler_type=\(wp?.rendererHandlerProbe ?? "pending")
             renderer_parent_accessible=\(wp?.rendererParentAccessProbe ?? "pending")

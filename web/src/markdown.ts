@@ -48,7 +48,8 @@ function rehypeBlockResourceLoads() {
 
 // KaTeX/Prism은 sanitizer 뒤에 trusted markup을 만든다. 특히 KaTeX의 error
 // fallback은 MathML-only에서도 inline color style을 붙이므로, 최종 경계에서
-// 실행·네트워크 가능 속성을 다시 제거해야 style-src 'self' 계약이 유지된다.
+// 실행·네트워크 가능 속성을 다시 제거해야 Markdown 파생 markup의 inline style 금지 계약이 유지된다
+// (CSP hash는 entry HTML의 고정 critical background bytes 하나에만 일치한다).
 function rehypeHardenTrustedOutput() {
   return (tree: Root) => {
     visit(tree, "element", (node: Element) => {
@@ -98,7 +99,7 @@ const processor = unified()
   .use(rehypeBlockResourceLoads)
   .use(rehypeSanitize, schema)
   // sanitizer 뒤에는 사용자 AST가 아니라 핀된 renderer만 마크업을 만든다.
-  // MathML-only는 KaTeX HTML의 inline style을 피해서 현재 style-src 'self' CSP를 지킨다.
+  // MathML-only는 KaTeX HTML의 inline style을 피해서 Markdown 파생 markup의 inline style 금지를 지킨다.
   .use(rehypeKatex, { output: "mathml", strict: "error", throwOnError: false })
   .use(rehypePrism, { ignoreMissing: true })
   .use(rehypeHardenTrustedOutput)

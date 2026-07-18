@@ -836,6 +836,8 @@ pub fn build(b: *std.Build) void {
                 "rg -q '^file_viewer_loaded_images=1$' \"$summary\"; " ++
                 "rg -q '^file_viewer_editor_hydrated=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_write=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_under_page_background=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_critical_style=true$' \"$summary\"; " ++
                 "rg -q '^renderer_bridge_type=undefined$' \"$summary\"; " ++
                 "rg -q '^renderer_handler_type=undefined$' \"$summary\"; " ++
                 "rg -q '^renderer_parent_accessible=false$' \"$summary\"",

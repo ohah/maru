@@ -514,14 +514,11 @@ test "schema cycleFontFamily: 번들 목록 순환 + 목록 밖 진입" {
     try std.testing.expectEqualStrings("JetBrains Mono", config.font.family);
     // +1 → 다음 항목.
     try std.testing.expect(cycleFontFamily(&config, 1));
-    try std.testing.expectEqualStrings("Fira Code", config.font.family);
+    try std.testing.expectEqualStrings("Jetendard", config.font.family);
     // -1 → 이전(첫 항목 복귀).
     try std.testing.expect(cycleFontFamily(&config, -1));
     try std.testing.expectEqualStrings("JetBrains Mono", config.font.family);
     // 첫 항목에서 -1 → 마지막으로 wrap.
-    try std.testing.expect(cycleFontFamily(&config, -1));
-    try std.testing.expectEqualStrings("Jetendard", config.font.family);
-    // 다시 -1 → 마지막 앞 항목.
     try std.testing.expect(cycleFontFamily(&config, -1));
     try std.testing.expectEqualStrings("Hack", config.font.family);
     // 목록 밖(직접입력/시스템 폰트)이면 ←→ **무동작**(데이터 손실 방지) — 값 유지 + false 반환.

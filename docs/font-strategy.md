@@ -140,10 +140,10 @@ font.family-italic = ""
 | 패밀리명(`font.family`에 그대로) | 변종 | 라이선스 | 특징 |
 | --- | --- | --- | --- |
 | `JetBrains Mono` | Regular/Bold/Italic/BoldItalic | OFL 1.1 | **기본값**. 모던·고가독성 |
+| `Jetendard` | Regular/Bold/Italic/BoldItalic | OFL 1.1 (RFN "Jetendard") | JetBrains Mono Nerd Font Mono 라틴 글리프 + Pretendard 한글/CJK를 결합한 균형형 모노스페이스 |
 | `Fira Code` | Regular/Bold | OFL 1.1 | 합자(ligature) 매니아층 — 단, maru는 합자 렌더 보류라 모양만 쓰임(아래 "Ligature" 참고) |
 | `Cascadia Code` | Regular/Bold/Italic/BoldItalic | OFL 1.1 | Windows Terminal 출신, 크로스플랫폼 친화 |
 | `Hack` | Regular/Bold/Italic/BoldItalic | MIT(+DejaVu/Bitstream Vera) | 합자 없는 순수 가독성, `0/O`·`1/l/I` 구분 명확 |
-| `Jetendard` | Regular/Bold/Italic/BoldItalic | OFL 1.1 (RFN "Jetendard") | JetBrains Mono Nerd Font Mono 라틴 글리프 + Pretendard 한글/CJK를 결합한 균형형 모노스페이스 |
 
 동봉/등록 메커니즘:
 

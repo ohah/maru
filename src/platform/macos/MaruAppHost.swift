@@ -782,7 +782,9 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); },
           write: function (content) { return window.maru.request("maru.file.write", { content: content }); },
           setDirty: function (dirty) { return window.maru.request("maru.file.setDirty", { dirty: dirty }); },
-          openLink: function (href) { return window.maru.request("maru.file.openLink", { href: href }); }
+          openLink: function (href, forceSystem) {
+            return window.maru.request("maru.file.openLink", { href: href, forceSystem: forceSystem });
+          }
         }
       };
       function flushFileRequests() {
@@ -799,8 +801,8 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
             promise = window.maru.file.write(request.content);
           } else if (request.method === "setDirty" && typeof request.dirty === "boolean") {
             promise = window.maru.file.setDirty(request.dirty);
-          } else if (request.method === "openLink" && typeof request.href === "string" && request.href.length <= 4096) {
-            promise = window.maru.file.openLink(request.href);
+          } else if (request.method === "openLink" && typeof request.href === "string" && request.href.length <= 4096 && typeof request.forceSystem === "boolean") {
+            promise = window.maru.file.openLink(request.href, request.forceSystem);
           } else {
             node.textContent = JSON.stringify({ error: "invalid request" });
             finish(node);
@@ -2614,7 +2616,8 @@ extension MaruWebPanelView: WKNavigationDelegate {
             }
             // 로컬 script/redirect가 앱 실행 직후 외부 브라우저를 강제로 띄우지 못하게 실제 링크 활성화만 넘긴다.
             if let url, (scheme == "http" || scheme == "https"), navigationAction.navigationType == .linkActivated {
-                NSWorkspace.shared.open(url)
+                let forceSystem = navigationAction.modifierFlags.contains([.command, .shift])
+                _ = controller?.openFilePanelLink(surfaceId, url: url.absoluteString, forceSystem: forceSystem)
             }
             decisionHandler(.cancel)
             return
@@ -3694,6 +3697,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func dispatchBrowserNav(_ surfaceId: UInt64, _ code: UInt32) {
         guard let session = surfaceOwning(byId: surfaceId)?.appSession ?? appSession else { return }
         _ = maru_macos_app_session_browser_nav(session, surfaceId, code)
+    }
+
+    /// 로컬 HTML delegate의 실제 사용자 클릭을 Markdown bridge와 같은 Zig 정책 경계로 보낸다. surface 소유 세션을
+    /// 다시 해소하므로 창 이동 뒤에도 config와 새 browser Term이 올바른 창에 적용된다.
+    func openFilePanelLink(_ surfaceId: UInt64, url: String, forceSystem: Bool) -> Bool {
+        guard let session = surfaceOwning(byId: surfaceId)?.appSession ?? appSession else { return false }
+        let bytes = Array(url.utf8)
+        return bytes.withUnsafeBufferPointer { p in
+            maru_macos_app_session_open_file_panel_link(
+                session, surfaceId, p.baseAddress, p.count, forceSystem ? 1 : 0
+            ) == 1
+        }
     }
 
     // Phase 7e-4 후속: 활성 창의 활성 pane 활성 term이 browser web이면 그 surface_id, 아니면 0. web 패널
@@ -5826,6 +5841,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     v.seamEdges = t.seam_edges
                 }
             default: break // None — 무동작
+            }
+        }
+        // v125: 파일 패널 외부 링크 정책 결과. in-app은 위 transition batch가 방금 생성한 browser surface에 load하고,
+        // system은 사용자 click one-shot만 NSWorkspace로 넘긴다. script/meta redirect는 delegate/renderer에서 이 경계에
+        // 도달하지 않으며 Zig도 literal HTTP(S)를 재검증한다.
+        var externalLinkSid: UInt64 = 0
+        var externalLinkKind: UInt32 = 0
+        let externalLinkLen = webNavigateUrlBuf.withUnsafeMutableBufferPointer { p in
+            maru_macos_app_session_take_file_panel_external_link_action(
+                session, p.baseAddress, p.count, &externalLinkSid, &externalLinkKind
+            )
+        }
+        if externalLinkLen > 0 {
+            let target = String(decoding: webNavigateUrlBuf[0 ..< Int(externalLinkLen)], as: UTF8.self)
+            if externalLinkKind == 1, let wp = surface.webPanels[externalLinkSid] {
+                _ = BrowserControl.navigate(wp.webView, url: target)
+            } else if externalLinkKind == 2, let url = URL(string: target) {
+                NSWorkspace.shared.open(url)
             }
         }
         // Phase 7e-1a: dirty한 browser 패널의 nav 상태(KVO 관측값)를 Zig에 push한다 — 핫패스라 navStateDirty만 push하고

@@ -36,7 +36,7 @@ pub const FileAccess = struct {
     write_fn: *const fn (context: *anyopaque, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, dirty: bool) anyerror!void,
     resolve_external_change_fn: *const fn (context: *anyopaque, success: bool) anyerror!void,
-    open_link_fn: *const fn (context: *anyopaque, href: []const u8) anyerror!void,
+    open_link_fn: *const fn (context: *anyopaque, href: []const u8, force_system: bool) anyerror!void,
 
     fn read(self: FileAccess, gpa: std.mem.Allocator) anyerror![]u8 {
         return self.read_fn(self.context, gpa);
@@ -58,8 +58,8 @@ pub const FileAccess = struct {
         return self.resolve_external_change_fn(self.context, success);
     }
 
-    fn openLink(self: FileAccess, href: []const u8) anyerror!void {
-        return self.open_link_fn(self.context, href);
+    fn openLink(self: FileAccess, href: []const u8, force_system: bool) anyerror!void {
+        return self.open_link_fn(self.context, href, force_system);
     }
 };
 
@@ -154,13 +154,31 @@ pub fn dispatchBridgeWithFileAccess(
         return serializeFileMutationResult(gpa, req.id, "success", success);
     }
     if (std.mem.eql(u8, req.method, file_open_link_method)) {
-        const href = singleStringParam(req.params, "href") catch return errorResponse(gpa, req.id, .invalid_params);
+        const params = openLinkParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        const href = params.href;
         if (href.len == 0 or href.len > std.fs.max_path_bytes)
             return errorResponse(gpa, req.id, .invalid_params);
-        access.openLink(href) catch return errorResponse(gpa, req.id, .internal_error);
+        access.openLink(href, params.force_system) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "opened", true);
     }
     return errorResponse(gpa, req.id, .method_not_found);
+}
+
+fn openLinkParams(params: ?std.json.Value) error{InvalidParams}!struct { href: []const u8, force_system: bool } {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 2) return error.InvalidParams;
+    const href = switch (obj.get("href") orelse return error.InvalidParams) {
+        .string => |value| value,
+        else => return error.InvalidParams,
+    };
+    const force_system = switch (obj.get("forceSystem") orelse return error.InvalidParams) {
+        .bool => |value| value,
+        else => return error.InvalidParams,
+    };
+    return .{ .href = href, .force_system = force_system };
 }
 
 fn singleStringParam(params: ?std.json.Value, key: []const u8) error{InvalidParams}![]const u8 {
@@ -283,6 +301,7 @@ const FakeFileAccess = struct {
     external_change_resolved: ?bool = null,
     last_open_link: [std.fs.max_path_bytes]u8 = undefined,
     last_open_link_len: usize = 0,
+    last_open_link_force_system: bool = false,
 
     fn read(context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
@@ -319,11 +338,12 @@ const FakeFileAccess = struct {
         self.external_change_resolved = success;
     }
 
-    fn openLink(context: *anyopaque, href: []const u8) anyerror!void {
+    fn openLink(context: *anyopaque, href: []const u8, force_system: bool) anyerror!void {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
         if (self.fail or href.len > self.last_open_link.len) return error.OpenFailed;
         @memcpy(self.last_open_link[0..href.len], href);
         self.last_open_link_len = href.len;
+        self.last_open_link_force_system = force_system;
     }
 
     fn access(self: *FakeFileAccess) FileAccess {
@@ -429,20 +449,32 @@ test "dispatchBridge: file.write and dirty are pinned provider mutations with ex
 
 test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutation" {
     var fake: FakeFileAccess = .{};
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"../guide/next.md#usage\"}}";
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"https://example.com/guide\",\"forceSystem\":true}}";
     const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
     defer testing.allocator.free(resp);
     var parsed = try parseValue(testing.allocator, resp);
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("result") != null);
-    try testing.expectEqualStrings("../guide/next.md#usage", fake.last_open_link[0..fake.last_open_link_len]);
+    try testing.expectEqualStrings("https://example.com/guide", fake.last_open_link[0..fake.last_open_link_len]);
+    try testing.expect(fake.last_open_link_force_system);
 
-    const bad = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"next.md\",\"path\":\"/tmp/escape.md\"}}";
+    const bad = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"next.md\",\"forceSystem\":false,\"path\":\"/tmp/escape.md\"}}";
     const bad_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad, "0.1.0", fake.access());
     defer testing.allocator.free(bad_resp);
     var bad_parsed = try parseValue(testing.allocator, bad_resp);
     defer bad_parsed.deinit();
     try testing.expectEqual(@as(i64, -32602), bad_parsed.value.object.get("error").?.object.get("code").?.integer);
+
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"https://example.com\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"https://example.com\",\"forceSystem\":\"true\"}}",
+    }) |invalid| {
+        const invalid_resp = try dispatchBridgeWithFileAccess(testing.allocator, invalid, "0.1.0", fake.access());
+        defer testing.allocator.free(invalid_resp);
+        var invalid_parsed = try parseValue(testing.allocator, invalid_resp);
+        defer invalid_parsed.deinit();
+        try testing.expectEqual(@as(i64, -32602), invalid_parsed.value.object.get("error").?.object.get("code").?.integer);
+    }
 }
 
 test "dispatchBridge: provider failures are uniform internal errors" {

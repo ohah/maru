@@ -52,7 +52,10 @@ type LinkActivation = {
   channel: typeof viewerChannel;
   type: "link-activate";
   href: string;
+  forceSystem: boolean;
 };
+
+type OpenLinkRequest = { href: string; forceSystem: boolean };
 
 type RendererReport = {
   channel: typeof viewerChannel;
@@ -102,6 +105,24 @@ function isLocalDocumentHref(href: string): boolean {
   }
 }
 
+function isExplicitHttpHref(href: string): boolean {
+  if (!/^https?:\/\//i.test(href) || href.includes("\\")) return false;
+  if (
+    Array.from(href).some((char) => {
+      const code = char.codePointAt(0) ?? 0;
+      return code <= 0x20 || code === 0x7f;
+    })
+  ) {
+    return false;
+  }
+  try {
+    const url = new URL(href);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function isLinkActivation(value: unknown): value is LinkActivation {
   return (
     isRecord(value) &&
@@ -110,7 +131,8 @@ export function isLinkActivation(value: unknown): value is LinkActivation {
     typeof value.href === "string" &&
     value.href.length > 0 &&
     value.href.length <= 4096 &&
-    isLocalDocumentHref(value.href)
+    typeof value.forceSystem === "boolean" &&
+    (isLocalDocumentHref(value.href) || isExplicitHttpHref(value.href))
   );
 }
 
@@ -197,7 +219,7 @@ function isRendererReady(value: unknown): value is RendererReady {
 export function requestFileBridge(
   document: Document,
   method: FileMethod,
-  value?: string | boolean,
+  value?: string | boolean | OpenLinkRequest,
   timeoutMs = 15_000,
 ): Promise<BridgeResult> {
   return new Promise((resolve, reject) => {
@@ -216,7 +238,11 @@ export function requestFileBridge(
               ? { method, dirty: value }
               : method === "resolveExternalChange"
                 ? { method, success: value }
-                : { method, href: value };
+                : {
+                    method,
+                    href: (value as OpenLinkRequest).href,
+                    forceSystem: (value as OpenLinkRequest).forceSystem,
+                  };
     node.textContent = JSON.stringify(request);
     document.documentElement.append(node);
 
@@ -493,7 +519,10 @@ export function bootShell(document: Document, targetWindow: Window): void {
       return;
     }
     if (isLinkActivation(event.data)) {
-      void requestFileBridge(document, "openLink", event.data.href).catch(() => {
+      void requestFileBridge(document, "openLink", {
+        href: event.data.href,
+        forceSystem: event.data.forceSystem,
+      }).catch(() => {
         if (status !== null) status.textContent = "링크 파일을 열 수 없습니다.";
       });
       return;
@@ -540,10 +569,20 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     if (!(target instanceof targetWindow.Element)) return;
     const link = target.closest<HTMLAnchorElement>("a[href]");
     const href = link?.getAttribute("href");
-    if (link === null || href === null || !root.contains(link) || !isLocalDocumentHref(href))
+    if (
+      link === null ||
+      href === null ||
+      !root.contains(link) ||
+      (!isLocalDocumentHref(href) && !isExplicitHttpHref(href))
+    )
       return;
     event.preventDefault();
-    const activation: LinkActivation = { channel: viewerChannel, type: "link-activate", href };
+    const activation: LinkActivation = {
+      channel: viewerChannel,
+      type: "link-activate",
+      href,
+      forceSystem: event.metaKey && event.shiftKey,
+    };
     targetWindow.parent.postMessage(activation, "*");
   });
 

@@ -1028,6 +1028,21 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
+test "parse: file panel external link target defaults in-app and accepts system" {
+    var defaults = try parse(std.testing.allocator, "font.size = 14");
+    defer defaults.deinit();
+    try std.testing.expectEqual(theme.ExternalLinkTarget.in_app, defaults.config.file_panel.external_link_target);
+
+    var system = try parse(std.testing.allocator, "file-panel.external-link-target = system");
+    defer system.deinit();
+    try std.testing.expectEqual(theme.ExternalLinkTarget.system, system.config.file_panel.external_link_target);
+
+    var invalid = try parse(std.testing.allocator, "file-panel.external-link-target = embedded");
+    defer invalid.deinit();
+    try std.testing.expectEqual(theme.ExternalLinkTarget.in_app, invalid.config.file_panel.external_link_target);
+    try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
+}
+
 test "parse: window.background-image — 경로 파싱, 미설정 시 빈 문자열(배경 없음)" {
     // F2-1: 설정하면 절대경로를 그대로 보관(loader는 디코드·존재 확인 안 함 — app_session이 frame에서 디코드).
     var p = try parse(std.testing.allocator,

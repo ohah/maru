@@ -49,12 +49,17 @@ describe("file viewer bridge boundary", () => {
 
     await requestFileBridge(document, "write", "# 저장", 100);
     await requestFileBridge(document, "setDirty", true, 100);
-    await requestFileBridge(document, "openLink", "../guide/next.md#usage", 100);
+    await requestFileBridge(
+      document,
+      "openLink",
+      { href: "../guide/next.md#usage", forceSystem: false },
+      100,
+    );
     await requestFileBridge(document, "resolveExternalChange", false, 100);
     expect(requests).toEqual([
       { method: "write", content: "# 저장" },
       { method: "setDirty", dirty: true },
-      { method: "openLink", href: "../guide/next.md#usage" },
+      { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
       { method: "resolveExternalChange", success: false },
     ]);
     expect(JSON.stringify(requests)).not.toContain("path");
@@ -128,23 +133,50 @@ describe("file viewer bridge boundary", () => {
     expect(assetBase64BudgetAllowed(maxAssetBase64Bytes, 1)).toBe(false);
   });
 
-  test("link activation accepts only bounded local document references", () => {
+  test("link activation accepts bounded local documents and explicit http links only", () => {
     expect(
       isLinkActivation({
         channel: viewerChannel,
         type: "link-activate",
         href: "../guide/next.md#usage",
+        forceSystem: false,
+      }),
+    ).toBe(true);
+    expect(
+      isLinkActivation({
+        channel: viewerChannel,
+        type: "link-activate",
+        href: "HTTPS://example.com/guide?q=1#usage",
+        forceSystem: true,
       }),
     ).toBe(true);
     for (const href of [
-      "https://example.com/next.md",
       "https%3A//example.com/next.md",
       "//example.com/next.md",
+      "javascript:alert(1)",
+      "data:text/html,unsafe",
+      "file:///tmp/next.md",
+      "https://example.com/has space",
+      "https://example.com:bad/",
       "next.txt",
       "next%2.md",
     ]) {
-      expect(isLinkActivation({ channel: viewerChannel, type: "link-activate", href })).toBe(false);
+      expect(
+        isLinkActivation({
+          channel: viewerChannel,
+          type: "link-activate",
+          href,
+          forceSystem: false,
+        }),
+      ).toBe(false);
     }
+    expect(
+      isLinkActivation({
+        channel: viewerChannel,
+        type: "link-activate",
+        href: "https://example.com",
+      }),
+    ).toBe(false);
   });
 
   test("trusted shell forwards only its renderer frame link activation to the pinned bridge", async () => {
@@ -174,6 +206,7 @@ describe("file viewer bridge boundary", () => {
           channel: viewerChannel,
           type: "link-activate",
           href: "wrong-source.md",
+          forceSystem: false,
         },
       }),
     );
@@ -184,12 +217,15 @@ describe("file viewer bridge boundary", () => {
           channel: viewerChannel,
           type: "link-activate",
           href: "../guide/next.md#usage",
+          forceSystem: false,
         },
       }),
     );
     await Promise.resolve();
 
-    expect(requests).toEqual([{ method: "openLink", href: "../guide/next.md#usage" }]);
+    expect(requests).toEqual([
+      { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
+    ]);
   });
 });
 
@@ -262,7 +298,65 @@ describe("bridge-free renderer", () => {
       channel: viewerChannel,
       type: "link-activate",
       href: "../guide/next.md#usage",
+      forceSystem: false,
     });
     expect(dom.window.location.href).toBe("maru-app://render/render.html");
+  });
+
+  test("routes http links by click disposition while leaving document fragments in place", () => {
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    const messages: unknown[] = [];
+    dom.window.postMessage = ((message: unknown) =>
+      messages.push(message)) as typeof dom.window.postMessage;
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: {
+          channel: viewerChannel,
+          type: "render",
+          markdown: "[web](https://example.com/guide) [section](#usage)",
+        },
+      }),
+    );
+
+    const links = dom.window.document.querySelectorAll<HTMLAnchorElement>("a");
+    expect(links.length).toBe(2);
+    expect(
+      links[0]?.dispatchEvent(
+        new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+      ),
+    ).toBe(false);
+    expect(
+      links[0]?.dispatchEvent(
+        new dom.window.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          metaKey: true,
+          shiftKey: true,
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      links[1]?.dispatchEvent(
+        new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+      ),
+    ).toBe(true);
+
+    expect(messages).toContainEqual({
+      channel: viewerChannel,
+      type: "link-activate",
+      href: "https://example.com/guide",
+      forceSystem: false,
+    });
+    expect(messages).toContainEqual({
+      channel: viewerChannel,
+      type: "link-activate",
+      href: "https://example.com/guide",
+      forceSystem: true,
+    });
   });
 });

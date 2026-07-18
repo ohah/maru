@@ -109,6 +109,14 @@ pub const WebNavState = struct {
     url: []u8, // gpa 소유(빈 문자열이면 len 0)
 };
 
+pub const FilePanelExternalLinkActionKind = enum(u8) { in_app = 1, system = 2 };
+
+pub const FilePanelExternalLinkAction = struct {
+    kind: FilePanelExternalLinkActionKind,
+    surface_id: u64,
+    url: []const u8,
+};
+
 /// resolveNavUrl 결과(https:// 프리픽스 포함)를 담는 navigate pending 버퍼 크기 — 편집 버퍼(cap) + "https://"(8) 여유.
 const addr_nav_url_cap: usize = 4096;
 
@@ -149,7 +157,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 124;
+pub const abi_version: u32 = 125;
+// 125: 파일 패널 외부 HTTP(S) 링크의 설정 기반 in-app/system 라우팅. open_file_panel_link +
+// take_file_panel_external_link_action export를 추가한다(구조체 layout 불변).
 // 124: FP8 다중 파일 그룹. native WKWebView firstResponder surface를 Zig DockPanel.focused_group에 동기하는
 // focus_file_panel_surface export를 추가한다(그룹별 split command target 단일 출처).
 // 123: FP7 파일 트리. background snapshot scanner와 Swift FSEvents 사이 root reset/add·changed path,
@@ -1524,6 +1534,13 @@ pub const AppSession = struct {
     // `open_file_panel` 액션(Cmd+O·팔릿·메뉴)이 요청한 Markdown/HTML NSOpenPanel. 배경 PNG picker와 목적/필터가
     // 다르므로 별도 one-shot으로 두되 take/provide ABI 패턴은 재사용한다.
     file_panel_pick_pending: bool = false,
+    // Markdown/HTML 파일 패널의 사용자 클릭 외부 링크를 platform에 넘기는 단일 pending. 정책(config·강제 열기)과
+    // browser Term 생성은 Zig가 결정하고, Swift는 system open 또는 새 WKWebView navigate만 수행한다. drain 전 연속
+    // 요청은 Busy로 거부해 URL 덮어쓰기나 목적지 없는 빈 browser 탭을 만들지 않는다.
+    file_panel_external_link_kind: ?FilePanelExternalLinkActionKind = null,
+    file_panel_external_link_surface_id: u64 = 0,
+    file_panel_external_link_url_buf: [std.fs.max_path_bytes]u8 = undefined,
+    file_panel_external_link_url_len: usize = 0,
     // HSV picker에서 `i`(스포이드)를 누르면 켜는 1회성 신호 — Swift가 tick마다 takeColorSampleRequest로 drain해 1이면
     // NSColorSampler(OS 화면 색 추출기)를 열고, 사용자가 고른 화면 픽셀 색을 provideSampledColor로 되돌린다(비동기 콜백).
     color_sample_pending: bool = false,
@@ -4086,13 +4103,18 @@ pub const AppSession = struct {
     /// 미러링하되 PTY spawn/셸 없이 `createWebTerm(panel_kind)`로 sentinel surface를 만든다(WKWebView는
     /// computeWebSurfaceTransitions가 walk해 Swift가 붙인다, §6). create→append→focus 3단계 + append 실패 errdefer
     /// 롤백이 web Term 생성의 **단일 출처**다(debug 훅이 이 시퀀스를 재구현하지 않게).
-    fn newWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !void {
+    fn appendWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !u64 {
         const pane = self.activePane();
         const term = try self.createWebTerm(panel_kind);
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1); // web Term으로 포커스(surface 재바인딩·활성 web은 렌더 skip, 4e-2)
         self.metal_dirty = true; // focusTerm도 세우지만 명시(탭바에 web Term 탭 추가 + 활성 전환 재그림)
+        return term.surfaceId();
+    }
+
+    fn newWebTermInActivePane(self: *AppSession, panel_kind: web_panel_layout.PanelKind) !void {
+        _ = try self.appendWebTermInActivePane(panel_kind);
     }
 
     /// Phase 7f-0: 팝업(`WKUIDelegate.createWebViewWith`) adopt용 — Swift가 WebKit이 넘긴 config로 **이미 만든**
@@ -8411,13 +8433,40 @@ pub const AppSession = struct {
         WrongKind,
         InvalidLink,
         OpenFailed,
+        LinkBusy,
     };
 
-    /// 격리 Markdown renderer가 활성화한 로컬 문서 링크를 source surface의 핀 파일 기준으로 연다. target group은
-    /// 전역 focus 추정이 아니라 클릭을 보낸 source group으로 고정하고, 최종 regular-file 검증은 공용 open 경로가 맡는다.
-    pub fn openFilePanelLink(self: *AppSession, surface_id: u64, href: []const u8) FilePanelLinkError!void {
+    fn queueFilePanelExternalLink(
+        self: *AppSession,
+        href: []const u8,
+        force_system: bool,
+    ) FilePanelLinkError!void {
+        if (!file_panel_bridge.isExplicitHttpLink(href)) return error.InvalidLink;
+        if (self.file_panel_external_link_kind != null) return error.LinkBusy;
+        @memcpy(self.file_panel_external_link_url_buf[0..href.len], href);
+
+        const use_system = force_system or self.loaded_config.config.file_panel.external_link_target == .system;
+        const surface_id = if (use_system) 0 else self.appendWebTermInActivePane(.browser) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.OpenFailed,
+        };
+        self.file_panel_external_link_url_len = href.len;
+        self.file_panel_external_link_surface_id = surface_id;
+        self.file_panel_external_link_kind = if (use_system) .system else .in_app;
+    }
+
+    /// 격리 Markdown renderer 또는 로컬 HTML delegate가 활성화한 링크를 source surface에 고정해 처리한다.
+    /// 명시적 HTTP(S)는 config/⌘⇧ disposition에 따라 browser Term 또는 시스템 브라우저 action으로 보내고,
+    /// Markdown의 로컬 문서 링크는 source group에서 연다. 최종 regular-file 검증은 공용 open 경로가 맡는다.
+    pub fn openFilePanelLink(
+        self: *AppSession,
+        surface_id: u64,
+        href: []const u8,
+        force_system: bool,
+    ) FilePanelLinkError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const source = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (file_panel_bridge.isExplicitHttpLink(href)) return self.queueFilePanelExternalLink(href, force_system);
         if (source.kind != .markdown) return error.WrongKind;
         const source_group = self.dock.groupForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         const target = file_panel_bridge.resolveMarkdownFileLink(self.allocator, source.path, href) catch |err| switch (err) {
@@ -8427,6 +8476,26 @@ pub const AppSession = struct {
         defer self.allocator.free(target);
         _ = self.dock.focusGroup(source_group);
         if (self.openFilePanelPath(target) != .opened) return error.OpenFailed;
+    }
+
+    /// 외부 링크 action을 caller-owned 버퍼로 복사한 뒤 1회 소비한다. 버퍼가 작으면 pending을 보존해 재시도할 수 있다.
+    pub fn takeFilePanelExternalLinkAction(
+        self: *AppSession,
+        out: []u8,
+    ) ?FilePanelExternalLinkAction {
+        const kind = self.file_panel_external_link_kind orelse return null;
+        if (self.file_panel_external_link_url_len > out.len) return null;
+        const len = self.file_panel_external_link_url_len;
+        @memcpy(out[0..len], self.file_panel_external_link_url_buf[0..len]);
+        const action: FilePanelExternalLinkAction = .{
+            .kind = kind,
+            .surface_id = self.file_panel_external_link_surface_id,
+            .url = out[0..len],
+        };
+        self.file_panel_external_link_kind = null;
+        self.file_panel_external_link_url_len = 0;
+        self.file_panel_external_link_surface_id = 0;
+        return action;
     }
 
     pub const FilePanelEntryInfo = struct {
@@ -33919,22 +33988,42 @@ test "FP5 file panel routing: picker one-shot, md/html open, duplicate activatio
     session.dispatchAppAction(.split_file_panel_horizontal);
     try std.testing.expectEqual(@as(usize, 2), session.dock.groupCount());
     try std.testing.expect(session.dock.focusedGroup() != group); // 전역 focus가 다른 group이어도 source group으로 열어야 한다.
-    try session.openFilePanelLink(md_surface_id, "two.html#preview");
+    try session.openFilePanelLink(md_surface_id, "two.html#preview", false);
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
     try std.testing.expectEqualStrings(html_path, group.entries.items[1].path);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
     try std.testing.expectEqual(group, session.dock.focusedGroup());
-    try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "three.txt"));
+    try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "three.txt", false));
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(html_path));
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
     const html_surface_id = group.entries.items[1].surface_id;
     try std.testing.expectEqual(dock_panel.EntryKind.html, session.filePanelEntryInfo(html_surface_id).?.kind);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
-    try std.testing.expectError(error.WrongKind, session.openFilePanelLink(html_surface_id, "one.md"));
-    try std.testing.expectError(error.SurfaceNotFound, session.openFilePanelLink(999_999, "one.md"));
-    try std.testing.expectError(error.OpenFailed, session.openFilePanelLink(md_surface_id, "missing.md"));
+    try std.testing.expectError(error.WrongKind, session.openFilePanelLink(html_surface_id, "one.md", false));
+    try std.testing.expectError(error.SurfaceNotFound, session.openFilePanelLink(999_999, "one.md", false));
+    try std.testing.expectError(error.OpenFailed, session.openFilePanelLink(md_surface_id, "missing.md", false));
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+
+    var external_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try session.openFilePanelLink(md_surface_id, "https://example.com/guide?q=1#usage", false);
+    try std.testing.expect(session.takeFilePanelExternalLinkAction(external_buf[0..8]) == null); // 작은 버퍼는 소비하지 않는다.
+    const in_app = session.takeFilePanelExternalLinkAction(&external_buf).?;
+    try std.testing.expectEqual(FilePanelExternalLinkActionKind.in_app, in_app.kind);
+    try std.testing.expect(in_app.surface_id != 0);
+    try std.testing.expectEqualStrings("https://example.com/guide?q=1#usage", in_app.url);
+
+    try session.openFilePanelLink(html_surface_id, "http://example.com", true);
+    const forced = session.takeFilePanelExternalLinkAction(&external_buf).?;
+    try std.testing.expectEqual(FilePanelExternalLinkActionKind.system, forced.kind);
+    try std.testing.expectEqual(@as(u64, 0), forced.surface_id);
+
+    session.loaded_config.config.file_panel.external_link_target = .system;
+    try session.openFilePanelLink(md_surface_id, "https://example.com", false);
+    try std.testing.expectError(error.LinkBusy, session.openFilePanelLink(md_surface_id, "https://example.org", false));
+    const configured = session.takeFilePanelExternalLinkAction(&external_buf).?;
+    try std.testing.expectEqual(FilePanelExternalLinkActionKind.system, configured.kind);
+    try std.testing.expectError(error.InvalidLink, session.openFilePanelLink(md_surface_id, "javascript:alert(1)", false));
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(md_path));
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);

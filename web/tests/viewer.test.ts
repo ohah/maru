@@ -7,6 +7,8 @@ import {
   bootRenderer,
   bootShell,
   isLinkActivation,
+  closeLockCanAcquire,
+  closeUnlockOwnsLock,
   isAssetRequest,
   isRendererReport,
   requestFileBridge,
@@ -16,6 +18,22 @@ import {
 } from "../src/viewer";
 
 describe("file viewer bridge boundary", () => {
+  test("close lock acquisition is monotonic and same-request idempotent", () => {
+    expect(closeLockCanAcquire(null, 1)).toBe(true);
+    expect(closeLockCanAcquire(2, 2)).toBe(true);
+    expect(closeLockCanAcquire(2, 3)).toBe(true);
+    expect(closeLockCanAcquire(2, 1)).toBe(false);
+    expect(closeLockCanAcquire(null, 0)).toBe(false);
+    expect(closeLockCanAcquire(null, Number.MAX_SAFE_INTEGER + 1)).toBe(false);
+  });
+
+  test("close unlock ignores stale owners and lets a newer cancelled request retire an older lock", () => {
+    expect(closeUnlockOwnsLock(2, 1)).toBe(false);
+    expect(closeUnlockOwnsLock(2, 2)).toBe(true);
+    expect(closeUnlockOwnsLock(2, 3)).toBe(true);
+    expect(closeUnlockOwnsLock(null, 3)).toBe(false);
+  });
+
   test("page-world DOM mailbox receives a result and removes transferred bytes", async () => {
     const dom = new JSDOM("<!doctype html><html><body></body></html>");
     const document = dom.window.document;
@@ -48,18 +66,25 @@ describe("file viewer bridge boundary", () => {
     });
 
     await requestFileBridge(document, "write", "# 저장", 100);
-    await requestFileBridge(document, "setDirty", true, 100);
+    await requestFileBridge(document, "setDirty", { dirty: true, revision: 1, request_id: 0 }, 100);
     await requestFileBridge(
       document,
       "openLink",
       { href: "../guide/next.md#usage", forceSystem: false },
       100,
     );
+    await requestFileBridge(
+      document,
+      "setDirty",
+      { dirty: false, revision: 7, request_id: 11 },
+      100,
+    );
     await requestFileBridge(document, "resolveExternalChange", false, 100);
     expect(requests).toEqual([
       { method: "write", content: "# 저장" },
-      { method: "setDirty", dirty: true },
+      { method: "setDirty", dirty: true, revision: 1, request_id: 0 },
       { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
+      { method: "setDirty", dirty: false, revision: 7, request_id: 11 },
       { method: "resolveExternalChange", success: false },
     ]);
     expect(JSON.stringify(requests)).not.toContain("path");

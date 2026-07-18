@@ -27,6 +27,12 @@ pub const file_set_dirty_method = "maru.file.setDirty";
 pub const file_resolve_external_change_method = "maru.file.resolveExternalChange";
 pub const file_open_link_method = "maru.file.openLink";
 
+pub const DirtyReport = struct {
+    dirty: bool,
+    revision: u64,
+    request_id: u64 = 0,
+};
+
 /// 실제 파일 시스템 접근을 platform 계층에서 주입한다. 반환 slice는 `gpa` 소유이며 dispatch가 해제한다.
 /// callback error는 경로/존재 정보를 노출하지 않는 균일 `internal_error`로 접는다.
 pub const FileAccess = struct {
@@ -34,7 +40,7 @@ pub const FileAccess = struct {
     read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8,
     read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
     write_fn: *const fn (context: *anyopaque, content: []const u8) anyerror!void,
-    set_dirty_fn: *const fn (context: *anyopaque, dirty: bool) anyerror!void,
+    set_dirty_fn: *const fn (context: *anyopaque, report: DirtyReport) anyerror!void,
     resolve_external_change_fn: *const fn (context: *anyopaque, success: bool) anyerror!void,
     open_link_fn: *const fn (context: *anyopaque, href: []const u8, force_system: bool) anyerror!void,
 
@@ -50,8 +56,8 @@ pub const FileAccess = struct {
         return self.write_fn(self.context, content);
     }
 
-    fn setDirty(self: FileAccess, dirty: bool) anyerror!void {
-        return self.set_dirty_fn(self.context, dirty);
+    fn setDirty(self: FileAccess, report: DirtyReport) anyerror!void {
+        return self.set_dirty_fn(self.context, report);
     }
 
     fn resolveExternalChange(self: FileAccess, success: bool) anyerror!void {
@@ -144,9 +150,9 @@ pub fn dispatchBridgeWithFileAccess(
         return serializeFileMutationResult(gpa, req.id, "written_bytes", content.len);
     }
     if (std.mem.eql(u8, req.method, file_set_dirty_method)) {
-        const dirty = singleBoolParam(req.params, "dirty") catch return errorResponse(gpa, req.id, .invalid_params);
-        access.setDirty(dirty) catch return errorResponse(gpa, req.id, .internal_error);
-        return serializeFileMutationResult(gpa, req.id, "dirty", dirty);
+        const report = dirtyReportParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        access.setDirty(report) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "dirty", report.dirty);
     }
     if (std.mem.eql(u8, req.method, file_resolve_external_change_method)) {
         const success = singleBoolParam(req.params, "success") catch return errorResponse(gpa, req.id, .invalid_params);
@@ -179,6 +185,30 @@ fn openLinkParams(params: ?std.json.Value) error{InvalidParams}!struct { href: [
         else => return error.InvalidParams,
     };
     return .{ .href = href, .force_system = force_system };
+}
+
+fn dirtyReportParam(params: ?std.json.Value) error{InvalidParams}!DirtyReport {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 3) return error.InvalidParams;
+    const dirty = switch (obj.get("dirty") orelse return error.InvalidParams) {
+        .bool => |value| value,
+        else => return error.InvalidParams,
+    };
+    return .{
+        .dirty = dirty,
+        .revision = try nonNegativeInteger(obj.get("revision") orelse return error.InvalidParams),
+        .request_id = try nonNegativeInteger(obj.get("request_id") orelse return error.InvalidParams),
+    };
+}
+
+fn nonNegativeInteger(value: std.json.Value) error{InvalidParams}!u64 {
+    return switch (value) {
+        .integer => |integer| if (integer >= 0) @intCast(integer) else error.InvalidParams,
+        else => error.InvalidParams,
+    };
 }
 
 fn singleStringParam(params: ?std.json.Value, key: []const u8) error{InvalidParams}![]const u8 {
@@ -298,6 +328,7 @@ const FakeFileAccess = struct {
     last_write: [256]u8 = undefined,
     last_write_len: usize = 0,
     dirty: bool = false,
+    last_dirty_report: ?DirtyReport = null,
     external_change_resolved: ?bool = null,
     last_open_link: [std.fs.max_path_bytes]u8 = undefined,
     last_open_link_len: usize = 0,
@@ -326,10 +357,11 @@ const FakeFileAccess = struct {
         self.last_write_len = content.len;
     }
 
-    fn setDirty(context: *anyopaque, dirty: bool) anyerror!void {
+    fn setDirty(context: *anyopaque, report: DirtyReport) anyerror!void {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
         if (self.fail) return error.DirtyFailed;
-        self.dirty = dirty;
+        self.dirty = report.dirty;
+        self.last_dirty_report = report;
     }
 
     fn resolveExternalChange(context: *anyopaque, success: bool) anyerror!void {
@@ -414,12 +446,13 @@ test "dispatchBridge: file.readAsset rejects malformed and traversal params befo
     try testing.expectEqual(@as(usize, 0), fake.asset_calls);
 }
 
-test "dispatchBridge: file.write and dirty are pinned provider mutations with exact params" {
+test "dispatchBridge: file.write and revision-scoped dirty are pinned provider mutations with exact params" {
     var fake: FakeFileAccess = .{};
-    const dirty_req = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true}}";
+    const dirty_req = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":7,\"request_id\":9}}";
     const dirty_resp = try dispatchBridgeWithFileAccess(testing.allocator, dirty_req, "0.1.0", fake.access());
     defer testing.allocator.free(dirty_resp);
     try testing.expect(fake.dirty);
+    try testing.expectEqual(DirtyReport{ .dirty = true, .revision = 7, .request_id = 9 }, fake.last_dirty_report.?);
 
     const write_req = "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"maru.file.write\",\"params\":{\"content\":\"# 저장\\n\"}}";
     const write_resp = try dispatchBridgeWithFileAccess(testing.allocator, write_req, "0.1.0", fake.access());
@@ -438,6 +471,20 @@ test "dispatchBridge: file.write and dirty are pinned provider mutations with ex
     var parsed = try parseValue(testing.allocator, bad_resp);
     defer parsed.deinit();
     try testing.expectEqual(@as(i64, -32602), parsed.value.object.get("error").?.object.get("code").?.integer);
+
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":7}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":-1,\"request_id\":0}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":7,\"request_id\":0,\"extra\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":7.5,\"request_id\":0}}",
+    }) |invalid| {
+        const invalid_resp = try dispatchBridgeWithFileAccess(testing.allocator, invalid, "0.1.0", fake.access());
+        defer testing.allocator.free(invalid_resp);
+        var invalid_parsed = try parseValue(testing.allocator, invalid_resp);
+        defer invalid_parsed.deinit();
+        try testing.expectEqual(@as(i64, -32602), invalid_parsed.value.object.get("error").?.object.get("code").?.integer);
+    }
 
     const bad_resolve = "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"success\":true,\"extra\":false}}";
     const bad_resolve_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad_resolve, "0.1.0", fake.access());

@@ -298,6 +298,7 @@ pub fn build(b: *std.Build) void {
             "-import-objc-header",
         });
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
@@ -625,6 +626,7 @@ pub fn build(b: *std.Build) void {
             "-import-objc-header",
         });
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
@@ -899,6 +901,21 @@ pub fn build(b: *std.Build) void {
     // xucred/LOCAL_PEERPID를 더하므로 **macOS에서만** test step에 배선한다(ubuntu CI에 미검증 Linux 소켓
     // 경로를 걸지 않는다 — un-gate는 Linux 호스트 검증 후 후속). maru 모듈(1a control_plane)을 import한다.
     if (target.result.os.tag == .macos) {
+        const file_panel_termination_policy_tests = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        file_panel_termination_policy_tests.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
+        file_panel_termination_policy_tests.addFileArg(b.path("tests/macos_file_panel_termination_policy.swift"));
+        file_panel_termination_policy_tests.addArg("-o");
+        const file_panel_termination_policy_test_bin = file_panel_termination_policy_tests.addOutputFileArg("maru-file-panel-termination-policy-tests");
+        const run_file_panel_termination_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_file_panel_termination_policy_tests.addFileArg(file_panel_termination_policy_test_bin);
+        test_step.dependOn(&run_file_panel_termination_policy_tests.step);
+
         const browser_result_registry_tests = b.addSystemCommand(&.{
             "xcrun",
             "swiftc",

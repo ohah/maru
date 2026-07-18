@@ -745,6 +745,7 @@ pub fn buildFileDockChromeDrawList(
     allocator: std.mem.Allocator,
     titles: []const []const u8,
     active: ?usize,
+    hovered: ?usize,
     active_path: []const u8,
     active_kind: dock_panel.EntryKind,
     active_mode: dock_panel.Mode,
@@ -758,14 +759,13 @@ pub fn buildFileDockChromeDrawList(
     errdefer cells.deinit(allocator);
     if (cols >= 1 and titles.len > 0) {
         const tab_cols: u16 = cols;
-        const count: u16 = @intCast(@min(titles.len, std.math.maxInt(u16)));
-        const tab_width = @min(dock_layout.default_tab_cols, @max(@as(u16, 1), tab_cols / count));
         for (titles, 0..) |title, i| {
-            const start = std.math.mul(u32, @intCast(i), tab_width) catch break;
-            if (start >= tab_cols) break;
-            const end: u16 = @intCast(@min(start + tab_width, tab_cols));
+            const tab = dock_layout.tabCellLayout(tab_cols, titles.len, i) orelse break;
             const style: terminal.Style = if (active != null and active.? == i) .{ .foreground = active_fg, .bold = true } else .{ .foreground = fg };
-            _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), end, style, false, .head);
+            if (tab.title_end > tab.title_start)
+                _ = try appendEllipsizedTitle(allocator, &cells, title, 0, tab.title_start, tab.title_end, style, false, .head);
+            if ((active != null and active.? == i) or (hovered != null and hovered.? == i))
+                try cells.append(allocator, .{ .row = 0, .col = tab.close_col, .codepoint = 0x00D7, .width = 1, .style = style });
         }
         const control_cols: u16 = @intCast(@min(dock_layout.header_control_cols, cols));
         const control_start = cols - control_cols;
@@ -1946,6 +1946,7 @@ test "file dock header draws source mode and dirty marker in the reserved contro
         allocator,
         &titles,
         0,
+        null,
         "/tmp/doc.md",
         .markdown,
         .source_edit,
@@ -1957,13 +1958,15 @@ test "file dock header draws source mode and dirty marker in the reserved contro
     );
     defer dl.deinit(allocator);
     var saw_dirty = false;
+    var saw_close = false;
     var saw_mode_text = false;
     for (dl.cells) |cell| {
+        if (cell.row == 0 and cell.codepoint == 0x00D7) saw_close = true;
         if (cell.row != 1) continue;
         if (cell.codepoint == 0x25CF and cell.col == 46) saw_dirty = true;
         if (cell.col >= 30 and cell.codepoint != 0x25CF) saw_mode_text = true;
     }
-    try std.testing.expect(saw_dirty and saw_mode_text);
+    try std.testing.expect(saw_dirty and saw_mode_text and saw_close);
 }
 
 test "file tree draw list clips to visible rows and marks active dirty conflicts" {

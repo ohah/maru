@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 125u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 126u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -436,6 +436,11 @@ int32_t maru_macos_app_session_request_window_close(
 void maru_macos_app_session_request_app_quit(
     MaruAppHostSession *session
 );
+/* 현재 세션에 종료 전에 해소해야 할 dirty/pending/source-edit 파일 도크 entry가 있으면 1, 아니면 0.
+   Cmd+Q는 모든 일반 창과 quick session을 요청 시점·확정 시점에 순회해 다른 창의 미저장 버퍼도 보호한다. v126. */
+uint32_t maru_macos_app_session_has_protected_file_panels(
+    MaruAppHostSession *session
+);
 /* 호스트가 매 tick 주입하는 "이 세션이 앱의 마지막(유일) 일반 창인가"(1=마지막·0=아님). Zig 리프는 형제 NSWindow를
    모르므로 Swift가 windows.count로 알려준다. 마지막 창일 때 ⌘W/사이드바·탭바 ✕로 세션을 닫으면 requestClose가 창
    하나 닫기 대신 Cmd+Q와 동일한 "maru를 종료할까요?" 종료 확인을 띄운다(마지막 창 닫기=앱 종료). quick·멀티 창의
@@ -766,10 +771,20 @@ size_t maru_macos_app_session_take_file_panel_external_link_action(
     uint64_t *surface_id_out,
     uint32_t *kind_out
 );
+/* terminal/browser firstResponder가 입력 축을 되찾았음을 Zig focus owner에 반영한다. v126. */
+void maru_macos_app_session_focus_workspace_input(MaruAppHostSession *session);
+uint32_t maru_macos_app_session_take_workspace_focus_action(MaruAppHostSession *session);
 /* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit. v122. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* source editor 이탈 전에 이전 surface의 dirty snapshot을 강제 요청한다. 0=없음, 그 외=surface id. v122. */
 uint64_t maru_macos_app_session_take_file_panel_dirty_sync_action(MaruAppHostSession *session);
+uint64_t maru_macos_app_session_take_file_panel_dirty_sync_action_v2(MaruAppHostSession *session, uint64_t *request_id_out);
+void maru_macos_app_session_fail_file_panel_dirty_sync(MaruAppHostSession *session, uint64_t surface_id, uint64_t request_id);
+/* dirty 파일 닫기의 request-scoped 저장/unlock one-shot과 완료·실패 ack. Zig가 request/revision/dirty/conflict를 재검증한다. v126. */
+uint64_t maru_macos_app_session_take_file_panel_save_close_action(MaruAppHostSession *session, uint64_t *request_id_out);
+void maru_macos_app_session_complete_file_panel_save_close(MaruAppHostSession *session, uint64_t surface_id, uint64_t request_id, uint64_t revision, uint32_t success);
+uint64_t maru_macos_app_session_take_file_panel_close_unlock_action(MaruAppHostSession *session, uint64_t *request_id_out);
+void maru_macos_app_session_fail_file_panel_close_unlock(MaruAppHostSession *session, uint64_t surface_id, uint64_t request_id);
 /* FP7 project tree: FSEvents root lifecycle/event + clean file reload/external open one-shots. v123.
    path outputs return required length without consuming when out==NULL or cap is short. */
 uint32_t maru_macos_app_session_take_file_tree_watch_reset(MaruAppHostSession *session);
@@ -1170,10 +1185,11 @@ int64_t maru_macos_app_bridge_dispatch(
     size_t out_cap
 );
 
-/* 파일 패널용 session-scoped bridge. surface_id가 핀한 markdown entry에 file.read/readAsset과 FP6의
-   pathless file.write/setDirty를 제공한다. read 계열은 out=NULL,out_cap=0 size query 뒤 exact buffer로 재호출한다.
+/* 파일 패널용 session-scoped bridge. surface_id가 핀한 markdown entry에 file.read/readAsset, pathless file.write,
+   request-scoped file.setDirty{dirty,revision,request_id}, file.openLink{href,forceSystem}를 제공한다. read 계열은
+   out=NULL,out_cap=0 size query 뒤 exact buffer로 재호출한다.
    mutation 계열은 side effect 중복을 막기 위해 충분한 고정 buffer로 한 번만 호출한다. 기존 hello도 처리한다.
-   음수: -2=NULL/잘못된 query, -3=OOM. v122. */
+   음수: -2=NULL/잘못된 query, -3=OOM. v122/v125/v126. */
 int64_t maru_macos_app_session_bridge_dispatch(
     MaruAppHostSession *session,
     uint64_t surface_id,

@@ -20,6 +20,7 @@ pub const layer = modal_box.layer;
 /// 버튼에 표시하는 단축키 마커 — TUI 관례의 Y/N(Enter/Esc도 handle이 받지만, 표시는 짧은 Y/N로 통일해 영어
 /// 단어를 안 섞는다). 버튼 라벨 앞에 "[Y] "/"[N] "로 붙여 어느 키가 어느 버튼인지 보인다(키는 handle이 고정).
 const key_confirm = "Y";
+const key_alternate = "D";
 const key_cancel = "N";
 
 /// show가 받는 버튼 라벨(기본값 있음). 호출자는 `.{}`(기본 확인/취소)나 `.{ .confirm = "삭제", .cancel = "취소" }`처럼
@@ -29,8 +30,16 @@ pub const Buttons = struct {
     cancel: []const u8 = "취소",
 };
 
+/// 세 갈래 확인 descriptor. `primary`/`alternate`/`cancel`은 표시 순서와 무관한 안정적인 choice id이며,
+/// 기존 두 버튼 호출자는 `Buttons`/`show`를 그대로 쓴다.
+pub const Choices = struct {
+    primary: []const u8,
+    alternate: []const u8,
+    cancel: []const u8 = "취소",
+};
+
 /// 어느 버튼에 포커스가 있나(←/→로 이동). Enter가 포커스된 버튼을 실행한다. 열 때마다 기본 = confirm(Enter=확정 유지).
-pub const Focus = enum { confirm, cancel };
+pub const Focus = enum { confirm, alternate, cancel };
 
 /// 순수 상태 — message + (선택) 본문 미리보기 + 버튼 라벨 + 포커스 + open 플래그. host가 보류(pending)하며 show를
 /// 부른다. 라벨은 show가 채우고, body는 show 뒤 host가 따로 주입한다(대부분의 확인엔 없음 — 붙여넣기 미리보기 전용).
@@ -40,7 +49,9 @@ pub const State = struct {
     // 기본값은 빈 문자열 — 실제 라벨은 show(message, Buttons)가 채운다(기본 "확인"/"취소"는 Buttons 단일 출처).
     // view는 open일 때만 그리고 show 없이는 열리지 않으므로 빈 기본값이 렌더되는 일은 없다.
     confirm_label: []const u8 = "",
+    alternate_label: []const u8 = "",
     cancel_label: []const u8 = "",
+    has_alternate: bool = false,
     focused: Focus = .confirm,
     // 메시지와 버튼 사이에 그릴 **본문 미리보기 줄들**(비면 없음 — 기존 동작). Ghostty의 붙여넣기 확인창이 내용을
     // 스크롤 뷰로 보여주는 것의 셀-그리드 근사(앞 몇 줄 + 요약). 슬라이스는 host가 세션 소유 버퍼로 준다(message와 동형).
@@ -49,9 +60,22 @@ pub const State = struct {
     pub fn show(self: *State, message: []const u8, buttons: Buttons) void {
         self.message = message;
         self.confirm_label = buttons.confirm;
+        self.alternate_label = "";
         self.cancel_label = buttons.cancel;
+        self.has_alternate = false;
         self.focused = .confirm; // 열 때마다 기본 포커스 = 확정 버튼(Enter=확정, ←/→로 이동)
         self.body = &.{}; // 이전 확인이 남긴 미리보기가 새 모달에 새지 않게 리셋(붙여넣기 경로가 show 뒤 다시 주입)
+        self.open = true;
+    }
+
+    pub fn showChoices(self: *State, message: []const u8, choices: Choices) void {
+        self.message = message;
+        self.confirm_label = choices.primary;
+        self.alternate_label = choices.alternate;
+        self.cancel_label = choices.cancel;
+        self.has_alternate = true;
+        self.focused = .confirm;
+        self.body = &.{};
         self.open = true;
     }
 
@@ -62,7 +86,7 @@ pub const State = struct {
 
 /// handle이 돌려주는 intent. host가 받아 후처리한다 — confirmed면 보류한 동작을 실행, cancelled면 버린다.
 /// (notice는 dismissed 하나뿐이지만 confirm은 파괴적 동작 분기라 둘로 나뉜다.)
-pub const Action = enum { confirmed, cancelled };
+pub const Action = enum { confirmed, alternate, cancelled };
 
 /// 키 이벤트 처리. 열려 있을 때만 동작:
 ///   ←/→ : 두 버튼 사이 포커스 이동(소비, intent 없음 → host가 재렌더). Enter : **포커스된** 버튼 실행
@@ -72,14 +96,29 @@ pub const Action = enum { confirmed, cancelled };
 pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
     if (!state.open) return null;
     switch (k.key) {
-        .left, .right => {
-            // 버튼이 둘뿐이라 좌/우 모두 토글. 포커스만 바꾸고 소비(host가 재렌더, 결정은 아직).
-            state.focused = if (state.focused == .confirm) .cancel else .confirm;
+        .left => {
+            state.focused = switch (state.focused) {
+                .confirm => .cancel,
+                .alternate => .confirm,
+                .cancel => if (state.has_alternate) .alternate else .confirm,
+            };
+            return null;
+        },
+        .right => {
+            state.focused = switch (state.focused) {
+                .confirm => if (state.has_alternate) .alternate else .cancel,
+                .alternate => .cancel,
+                .cancel => .confirm,
+            };
             return null;
         },
         .enter => {
             state.dismiss();
-            return if (state.focused == .confirm) .confirmed else .cancelled; // 포커스된 버튼 실행
+            return switch (state.focused) {
+                .confirm => .confirmed,
+                .alternate => .alternate,
+                .cancel => .cancelled,
+            };
         },
         .escape => {
             state.dismiss();
@@ -94,6 +133,10 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) ?Action {
                 state.dismiss();
                 return .cancelled;
             },
+            'd', 'D' => if (state.has_alternate) {
+                state.dismiss();
+                return .alternate;
+            } else return null,
             else => return null, // 다른 글자는 소비만(모달 — 뒤로 안 샘)
         },
         else => return null,
@@ -138,10 +181,17 @@ pub fn view(
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_confirm, state.confirm_label });
         try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
     }
+    if (state.has_alternate and g.alternate_fit > 0) {
+        const focused = state.focused == .alternate;
+        try modal_box.fillCells(box, g.alternate_x, g.btn_row, g.alternate_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
+        const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_alternate, state.alternate_label });
+        try modal_box.text(box, g.alternate_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
+    }
     if (g.cancel_fit > 0) {
-        try modal_box.fillCells(box, g.cancel_x, g.btn_row, g.cancel_fit, if (confirm_focused) .tab_hover_bg else .focus_accent, arena, out);
+        const focused = state.focused == .cancel;
+        try modal_box.fillCells(box, g.cancel_x, g.btn_row, g.cancel_fit, if (focused) .focus_accent else .tab_hover_bg, arena, out);
         const t = try std.fmt.allocPrint(arena, "[{s}] {s}", .{ key_cancel, state.cancel_label });
-        try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (confirm_focused) .surface_fg else .surface_bg, arena, out);
+        try modal_box.text(box, g.cancel_x + @as(i32, @intCast(btn_pad * box.cw)), g.btn_row, t, if (focused) .surface_bg else .surface_fg, arena, out);
     }
 }
 
@@ -156,6 +206,8 @@ const ButtonGeom = struct {
     btn_row: u32, // 버튼 콘텐츠 행 — 미리보기(body) 줄 수만큼 아래로 내려간다(view↔hitTest 공유)
     confirm_x: i32,
     confirm_fit: u32,
+    alternate_x: i32,
+    alternate_fit: u32,
     cancel_x: i32,
     cancel_fit: u32,
 };
@@ -167,10 +219,12 @@ fn markerCols(key: []const u8) u32 {
 
 fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Tokens) ?ButtonGeom {
     const confirm_cols = markerCols(key_confirm) + overlay_input.displayCols(state.confirm_label);
+    const alternate_cols = if (state.has_alternate) markerCols(key_alternate) + overlay_input.displayCols(state.alternate_label) else 0;
     const cancel_cols = markerCols(key_cancel) + overlay_input.displayCols(state.cancel_label);
     const default_btn_cols = confirm_cols + 2 * btn_pad;
+    const alternate_btn_cols = if (state.has_alternate) alternate_cols + 2 * btn_pad else 0;
     const cancel_btn_cols = cancel_cols + 2 * btn_pad;
-    const btn_row_cols = default_btn_cols + btn_gap + cancel_btn_cols;
+    const btn_row_cols = default_btn_cols + btn_gap + alternate_btn_cols + (if (state.has_alternate) btn_gap else 0) + cancel_btn_cols;
     var content_cols = @max(overlay_input.displayCols(state.message), btn_row_cols);
     for (state.body) |line| content_cols = @max(content_cols, overlay_input.displayCols(line)); // 미리보기 줄도 폭에 반영
     // 콘텐츠 행: 미리보기 없으면 3행(0=메시지·1=빈줄·2=버튼); 있으면 0=메시지·1=빈줄·[2..2+n)=본문·2+n=빈줄·3+n=버튼.
@@ -182,12 +236,15 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     // 버튼이 박스 안쪽 우측 끝을 넘으면(좁은 창/긴 라벨) fill이 rasterize bbox를 패널 밖으로 키운다 → 폭을 clamp하고
     // 0이면(완전히 밖) 호출자가 버튼을 생략(그땐 키보드 Esc/Y/N). 정상 창은 무변화. inner=[inner_x, inner_x+inner_cols×cw).
     const inner_right = box.inner_x + @as(i32, @intCast(box.inner_cols * box.cw));
-    const cancel_x = group_x + @as(i32, @intCast((default_btn_cols + btn_gap) * box.cw));
+    const alternate_x = group_x + @as(i32, @intCast((default_btn_cols + btn_gap) * box.cw));
+    const cancel_x = alternate_x + @as(i32, @intCast((alternate_btn_cols + (if (state.has_alternate) btn_gap else 0)) * box.cw));
     return .{
         .box = box,
         .btn_row = btn_row,
         .confirm_x = group_x,
         .confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right),
+        .alternate_x = alternate_x,
+        .alternate_fit = if (state.has_alternate) fitButtonCols(alternate_x, alternate_btn_cols, box.cw, inner_right) else 0,
         .cancel_x = cancel_x,
         .cancel_fit = fitButtonCols(cancel_x, cancel_btn_cols, box.cw, inner_right),
     };
@@ -215,6 +272,8 @@ pub fn buttonAtPoint(state: *const State, p: props.ChromeProps, tk: *const token
     if (y_px >= ry and y_px < ry + @as(f64, @floatFromInt(g.box.ch))) {
         const cfx = @as(f64, @floatFromInt(g.confirm_x));
         if (g.confirm_fit > 0 and x_px >= cfx and x_px < cfx + @as(f64, @floatFromInt(g.confirm_fit)) * cw_f) return .confirmed;
+        const afx = @as(f64, @floatFromInt(g.alternate_x));
+        if (g.alternate_fit > 0 and x_px >= afx and x_px < afx + @as(f64, @floatFromInt(g.alternate_fit)) * cw_f) return .alternate;
         const xcx = @as(f64, @floatFromInt(g.cancel_x));
         if (g.cancel_fit > 0 and x_px >= xcx and x_px < xcx + @as(f64, @floatFromInt(g.cancel_fit)) * cw_f) return .cancelled;
     }
@@ -303,6 +362,23 @@ test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 
     s.show("x", .{});
     _ = handle(.{ .key = .right }, &s); // cancel 포커스로 옮겨도
     s.focused = .confirm; // 다시 confirm 포커스라도
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
+}
+
+test "confirm three choices expose stable primary alternate cancel actions" {
+    var s = State{};
+    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기", .cancel = "취소" });
+    try std.testing.expect(s.has_alternate);
+    try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter }, &s).?);
+
+    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기" });
+    try std.testing.expect(handle(.{ .key = .right }, &s) == null);
+    try std.testing.expectEqual(Focus.alternate, s.focused);
+    try std.testing.expectEqual(Action.alternate, handle(.{ .key = .enter }, &s).?);
+
+    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기" });
+    try std.testing.expectEqual(Action.alternate, handle(.{ .key = .char, .codepoint = 'd' }, &s).?);
+    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기" });
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
 }
 

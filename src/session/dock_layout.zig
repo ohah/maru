@@ -45,6 +45,32 @@ pub const TabMetrics = struct {
     tab_width: u16,
 };
 
+pub const TabCellLayout = struct {
+    start: u16,
+    end: u16,
+    title_start: u16,
+    title_end: u16,
+    close_col: u16,
+};
+
+/// cell-space 탭 레이아웃의 단일 출처. CoreText title/X와 px-space tabRect/tabCloseRect가 같은 결과를 쓴다.
+pub fn tabCellLayout(tab_cols: u16, entry_count: usize, index: usize) ?TabCellLayout {
+    if (tab_cols == 0 or entry_count == 0 or index >= entry_count) return null;
+    const count: u16 = @intCast(@min(entry_count, std.math.maxInt(u16)));
+    const tab_width = @min(default_tab_cols, @max(@as(u16, 1), tab_cols / count));
+    const start_u32 = std.math.mul(u32, @intCast(index), tab_width) catch return null;
+    if (start_u32 >= tab_cols) return null;
+    const start: u16 = @intCast(start_u32);
+    const end: u16 = @intCast(@min(start_u32 + tab_width, tab_cols));
+    return .{
+        .start = start,
+        .end = end,
+        .title_start = @min(start +| 1, end),
+        .title_end = end -| 1,
+        .close_col = end - 1,
+    };
+}
+
 /// 헤더 우측의 읽기/소스 편집 토글+dirty 표시 영역. 경로는 이 rect 왼쪽까지만 그린다. 폭이 너무 좁으면
 /// 최소 6칸으로 줄여도 토글 hit target은 유지한다.
 pub const header_control_cols: u32 = 18;
@@ -99,10 +125,22 @@ pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetri
 
 pub fn tabRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize) ?Rect {
     const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
-    const start = std.math.mul(u32, @intCast(index), m.tab_width) catch return null;
-    if (start >= m.tab_cols) return null;
-    const end = @min(start + m.tab_width, m.tab_cols);
-    return .{ .x = g.tab_bar.x + start * cell_width_px, .y = g.tab_bar.y, .w = (end - start) * cell_width_px, .h = g.tab_bar.h };
+    const cell = tabCellLayout(m.tab_cols, entry_count, index) orelse return null;
+    return .{ .x = g.tab_bar.x + @as(u32, cell.start) * cell_width_px, .y = g.tab_bar.y, .w = @as(u32, cell.end - cell.start) * cell_width_px, .h = g.tab_bar.h };
+}
+
+/// 탭 제목·hover·hit-test가 공유하는 닫기 영역. 한 칸 탭은 전체를 닫기 버튼으로 쓰고, 그보다 넓으면 우측
+/// 한 칸을 예약한다. tabRect 밖을 절대 벗어나지 않는다.
+pub fn tabCloseRect(g: Geometry, cell_width_px: u32, entry_count: usize, index: usize) ?Rect {
+    const m = tabMetrics(g, cell_width_px, entry_count) orelse return null;
+    const cell = tabCellLayout(m.tab_cols, entry_count, index) orelse return null;
+    return .{ .x = g.tab_bar.x + @as(u32, cell.close_col) * cell_width_px, .y = g.tab_bar.y, .w = cell_width_px, .h = g.tab_bar.h };
+}
+
+pub fn tabCloseIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64) ?usize {
+    const index = tabIndexAt(g, cell_width_px, entry_count, x_px, y_px) orelse return null;
+    const r = tabCloseRect(g, cell_width_px, entry_count, index) orelse return null;
+    return if (layout_math.pointInRect(x_px, y_px, r)) index else null;
 }
 
 pub fn tabIndexAt(g: Geometry, cell_width_px: u32, entry_count: usize, x_px: f64, y_px: f64) ?usize {
@@ -362,6 +400,25 @@ test "dock tab metrics use the full tab bar and share render hit rects" {
     const one = tabRect(g, 10, 1, 0).?;
     try std.testing.expectEqual(@as(u32, default_tab_cols * 10), one.w);
     try std.testing.expectEqual(@as(?usize, null), tabIndexAt(g, 10, 1, @floatFromInt(one.x + one.w + 1), @floatFromInt(one.y + 1)));
+}
+
+test "dock close rect stays inside normal and one-column tabs" {
+    const g = Geometry{
+        .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+        .tab_bar = .{ .x = 100, .y = 20, .w = 60, .h = 18 },
+    };
+    const normal = tabCloseRect(g, 10, 2, 0).?;
+    try std.testing.expectEqual(Rect{ .x = 120, .y = 20, .w = 10, .h = 18 }, normal);
+    try std.testing.expectEqual(@as(?usize, 0), tabCloseIndexAt(g, 10, 2, 125, 25));
+    try std.testing.expectEqual(@as(?usize, null), tabCloseIndexAt(g, 10, 2, 105, 25));
+
+    const narrow = Geometry{
+        .terminal = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+        .tab_bar = .{ .x = 4, .y = 8, .w = 20, .h = 18 },
+    };
+    const one = tabCloseRect(narrow, 10, 2, 1).?;
+    try std.testing.expectEqual(Rect{ .x = 14, .y = 8, .w = 10, .h = 18 }, one);
+    try std.testing.expectEqual(@as(?usize, 1), tabCloseIndexAt(narrow, 10, 2, 15, 9));
 }
 
 test "dock header control rect is right-aligned and bounded on narrow docks" {

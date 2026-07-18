@@ -33,6 +33,7 @@ pub const entries = [_]Entry{
     // 활성 pane에 web(브라우저) Term 생성(4e-5 command 승격 — env 훅 MARU_WEB_PANEL 대체). 기본 키바인딩 ⌘⌥T(default_app_bindings 역스캔으로 메뉴·팔릿에 자동 표시).
     .{ .action = .new_web_tab, .key = "new_web_tab", .title = "New Browser Tab" },
     .{ .action = .open_file_panel, .key = "open_file_panel", .title = "Open File Panel…" },
+    .{ .action = .close_focused, .key = "close_focused", .title = "Close" },
     .{ .action = .close_term, .key = "close_term", .title = "Close Terminal" },
     .{ .action = .close_tab, .key = "close_tab", .title = "Close Workspace" },
     .{ .action = .next_term, .key = "next_term", .title = "Next Terminal" },

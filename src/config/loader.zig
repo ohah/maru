@@ -1633,6 +1633,18 @@ test "parse: comments and blank lines are ignored; family keeps internal spaces"
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
 }
 
+test "parse: bundled Jetendard family is accepted by font.family" {
+    var p = try parse(std.testing.allocator,
+        \\font.family = Jetendard
+    );
+    defer p.deinit();
+
+    // 이 테스트가 증명하는 것: 번들 목록에 등록한 Jetendard를 사용자가 config 파일에
+    // 직접 지정해도 일반적인 자유 문자열 font.family 경로가 값을 보존한다.
+    try std.testing.expectEqualStrings("Jetendard", p.config.font.family);
+    try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+}
+
 test "parse: forgiving — unknown key and bad values keep defaults with diagnostics" {
     const defaults: theme.Config = .{};
     var p = try parse(std.testing.allocator,

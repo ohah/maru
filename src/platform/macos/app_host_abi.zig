@@ -1106,9 +1106,31 @@ pub export fn maru_macos_app_session_take_file_tree_trash_action(
     return action.path.len;
 }
 
-pub export fn maru_macos_app_session_complete_file_tree_trash(session: ?*AppSession, request_id: u64, success: u32) void {
+pub export fn maru_macos_app_session_complete_file_tree_trash(
+    session: ?*AppSession,
+    request_id: u64,
+    outcome_raw: u32,
+    recovery_path_ptr: ?[*]const u8,
+    recovery_path_len: usize,
+) void {
     const app_session = session orelse return;
-    app_session.completeFileTreeTrash(request_id, success != 0);
+    const outcome: session_mod.FileTreeTrashOutcome = switch (outcome_raw) {
+        @intFromEnum(session_mod.FileTreeTrashOutcome.not_moved) => .not_moved,
+        @intFromEnum(session_mod.FileTreeTrashOutcome.moved_verified) => .moved_verified,
+        @intFromEnum(session_mod.FileTreeTrashOutcome.moved_unverified) => .moved_unverified,
+        else => return,
+    };
+    const recovery_path: ?[]const u8 = if (recovery_path_len == 0)
+        null
+    else if (recovery_path_ptr != null and recovery_path_len <= file_tree_mutation_backend.trash_path_capacity)
+        recovery_path_ptr.?[0..recovery_path_len]
+    else
+        null;
+    const validated_recovery = if (recovery_path) |path|
+        if (std.fs.path.isAbsolute(path) and std.unicode.utf8ValidateSlice(path)) path else null
+    else
+        null;
+    app_session.completeFileTreeTrash(request_id, outcome, validated_recovery);
 }
 
 // HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
@@ -3974,6 +3996,9 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_DIRECTORY)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.directory)));
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_SYMLINK)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.symlink)));
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_OTHER)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.other)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_NOT_MOVED)), @as(u32, @intFromEnum(session_mod.FileTreeTrashOutcome.not_moved)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_MOVED_VERIFIED)), @as(u32, @intFromEnum(session_mod.FileTreeTrashOutcome.moved_verified)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_MOVED_UNVERIFIED)), @as(u32, @intFromEnum(session_mod.FileTreeTrashOutcome.moved_unverified)));
     try std.testing.expectEqual(@as(usize, @intCast(c.MARU_FILE_TREE_PATH_CAPACITY)), file_tree_mutation_backend.trash_path_capacity);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS)), control_browser.wait_default_timeout_ms);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_MAX_TIMEOUT_MS)), control_browser.wait_max_timeout_ms);
@@ -4344,7 +4369,7 @@ test "macOS app exported session API reports null outputs as ABI errors" {
         &trash_inode,
         &trash_kind,
     ));
-    maru_macos_app_session_complete_file_tree_trash(null, 1, 1);
+    maru_macos_app_session_complete_file_tree_trash(null, 1, c.MARU_FILE_TREE_TRASH_OUTCOME_MOVED_VERIFIED, null, 0);
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
     // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.

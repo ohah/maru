@@ -3,8 +3,8 @@
 //! The frame thread only enqueues owned requests, starts at most one detached worker and drains
 //! completed values. Every filesystem operation is performed relative to a no-follow pinned
 //! parent directory. Rename uses the platform's non-replacing primitive, and delete first stages
-//! the selected entry in the same parent before the AppKit host moves that exact staged URL to
-//! Trash.
+//! the selected entry under a visible, unpredictable sibling name before the AppKit host moves
+//! that exact staged object to Trash.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -420,11 +420,14 @@ fn execute(allocator: std.mem.Allocator, io: std.Io, request: Request) !Result {
                 allocator.free(target_owned);
                 var nonce: u64 = undefined;
                 try io.randomSecure(std.mem.asBytes(&nonce));
-                const stage_name = try std.fmt.allocPrint(allocator, ".maru-trash-{x}-{x}", .{ request.id, nonce });
+                // A leading dot made successful items disappear from Finder's normal Trash view. Keep the
+                // unpredictable sibling staging capability, but retain the original basename as a visible
+                // prefix so users can see and identify the recoverable item.
+                const stage_name = try std.fmt.allocPrint(allocator, "{s}.maru-trash-{x}-{x}", .{ source.leaf, request.id, nonce });
                 defer allocator.free(stage_name);
                 target_owned = try std.fs.path.join(allocator, &.{ request.parent, stage_name });
                 // Reject before the first filesystem mutation. Otherwise the fixed-width ABI could never
-                // hand the staged path to AppKit, leaving the entry hidden indefinitely.
+                // hand the staged path to AppKit, leaving the entry stranded under its staging name.
                 if (target_owned.len > trash_path_capacity) {
                     failure = .invalid_path;
                     return .{ .id = request.id, .operation = request.operation, .source = source_owned, .target = target_owned, .ok = false, .failure = failure };
@@ -699,40 +702,74 @@ test "mutation backend rejects source parent and root identity replacement" {
     try std.testing.expectEqualStrings("replacement", root_replacement);
 }
 
-test "mutation backend restore refuses a replacement staged object" {
+test "mutation backend stages a visible Trash name, restores it, and rejects replacement identity" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = ".maru-trash-test", .data = "staged-original" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.md", .data = "original" });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    const staged = try std.fs.path.join(allocator, &.{ root, ".maru-trash-test" });
-    defer allocator.free(staged);
     const original = try std.fs.path.join(allocator, &.{ root, "original.md" });
     defer allocator.free(original);
-    const expected = try testIdentityForAbsolute(allocator, staged);
-    var request = try Request.initRestore(
-        allocator,
-        30,
-        root,
-        staged,
-        original,
-        .{ .device = expected.device, .inode = expected.inode, .kind = expected.kind },
-        try testIdentityForAbsolute(allocator, root),
-        try testIdentityForAbsolute(allocator, root),
-    );
-    try tmp.dir.deleteFile(io, ".maru-trash-test");
-    try tmp.dir.writeFile(io, .{ .sub_path = ".maru-trash-test", .data = "replacement" });
-    var result = try execute(allocator, io, request);
+    const expected = try testIdentityForAbsolute(allocator, original);
+    var request = try Request.init(allocator, 30, .{
+        .operation = .delete,
+        .root = root,
+        .source = original,
+        .parent = root,
+        .name = "original.md",
+        .identity = expected,
+        .parent_identity = try testIdentityForAbsolute(allocator, root),
+        .root_identity = try testIdentityForAbsolute(allocator, root),
+    });
+    var staged = try execute(allocator, io, request);
     request.deinit(allocator);
+    defer staged.deinit(allocator);
+    try std.testing.expect(staged.ok);
+    try std.testing.expectEqual(Operation.stage_delete, staged.operation);
+    try std.testing.expect(std.mem.startsWith(u8, std.fs.path.basename(staged.target), "original.md.maru-trash-"));
+    try std.testing.expect(std.fs.path.basename(staged.target)[0] != '.');
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "original.md", .{}));
+
+    var restore = try Request.initRestore(
+        allocator,
+        staged.id,
+        root,
+        staged.target,
+        original,
+        staged.identity.?,
+        staged.parent_identity,
+        staged.root_identity,
+    );
+    var restored = try execute(allocator, io, restore);
+    restore.deinit(allocator);
+    defer restored.deinit(allocator);
+    try std.testing.expect(restored.ok);
+    const restored_bytes = try tmp.dir.readFileAlloc(io, "original.md", allocator, .limited(32));
+    defer allocator.free(restored_bytes);
+    try std.testing.expectEqualStrings("original", restored_bytes);
+
+    var replaced_request = try Request.init(allocator, 31, .{
+        .operation = .delete,
+        .root = root,
+        .source = original,
+        .parent = root,
+        .name = "original.md",
+        .identity = expected,
+        .parent_identity = try testIdentityForAbsolute(allocator, root),
+        .root_identity = try testIdentityForAbsolute(allocator, root),
+    });
+    try tmp.dir.deleteFile(io, "original.md");
+    try tmp.dir.writeFile(io, .{ .sub_path = "original.md", .data = "replacement" });
+    var result = try execute(allocator, io, replaced_request);
+    replaced_request.deinit(allocator);
     defer result.deinit(allocator);
     try std.testing.expect(!result.ok);
-    const replacement = try tmp.dir.readFileAlloc(io, ".maru-trash-test", allocator, .limited(32));
+    const replacement = try tmp.dir.readFileAlloc(io, "original.md", allocator, .limited(32));
     defer allocator.free(replacement);
     try std.testing.expectEqualStrings("replacement", replacement);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "original.md", .{}));
 }
 
 test "mutation backend request queue is bounded and rejected ownership stays with caller" {

@@ -45,6 +45,9 @@ pub const ResolvedTheme = struct {
     // maru accent 색(chrome `accent_bar` 역할 — 탭/포커스 언더바·활성 카드 좌측 막대·세팅 강조). config.accent가 null이면
     // maru 브랜드 앰버(accent_default)로 폴백한다. 프리셋마다 시그니처 색을 줘 탭 색이 테마별로 달라진다(예전엔 고정 앰버).
     accent: color.Rgb,
+    // accent를 full-row/button 배경으로 쓸 때의 작은 글자 전경. sidebar_foreground를 가능한 한 보존하되
+    // resolve 시점에 WCAG 4.5 대비를 보장한다. 렌더 hot path가 contrastFloor를 반복하지 않는 단일 출처다.
+    accent_foreground: color.Rgb = .{ .r = 0, .g = 0, .b = 0 },
     // ANSI 16색(0~15) config override. null=그 인덱스는 기본 xterm 표준색(color.ansi16/xterm256). 렌더(metal_frame)가
     // `.indexed` 색을 풀 때 OSC4 override → 이 config base → xterm256 순으로 폴백한다(OSC4가 없을 때만 이 값이 보인다).
     // 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
@@ -194,6 +197,8 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
             if (!std.meta.eql(floored, base)) palette[i] = floored; // floor가 바꾼 default만 seed(안 바뀌면 null=xterm256 폴백)
         }
     }
+    const sidebar_foreground = if (config.sidebar_foreground) |s| try parseHexColor(s) else foreground;
+    const accent = if (config.accent) |a| try parseHexColor(a) else accent_default;
     return .{
         .background = background,
         .foreground = foreground,
@@ -206,9 +211,10 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
         .sidebar_background = if (config.sidebar_background) |s| try parseHexColor(s) else lighten(background, 24),
         .sidebar_active = if (config.sidebar_active) |s| try parseHexColor(s) else lighten(background, 48),
         // 사이드바 글자색: 명시하면 그 색, null이면 foreground(터미널 글자색)와 같게 — 기본은 기존 동작 보존.
-        .sidebar_foreground = if (config.sidebar_foreground) |s| try parseHexColor(s) else foreground,
+        .sidebar_foreground = sidebar_foreground,
         // accent: 명시하면 그 색, null이면 maru 브랜드 앰버(accent_default) — 프리셋 없는/사용자 지정 테마는 기존 앰버 유지.
-        .accent = if (config.accent) |a| try parseHexColor(a) else accent_default,
+        .accent = accent,
+        .accent_foreground = contrastFloor(sidebar_foreground, relativeLuminance(accent), chrome_accent_text_min_contrast, .both),
         .palette = palette,
         .min_contrast = min_contrast,
     };
@@ -218,6 +224,10 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
 /// 시그니처 accent를 주지만(테마별 탭 색), maru 프리셋·사용자 지정 테마는 이 앰버를 그대로 쓴다. 예전 chrome
 /// tokens.zig가 하드코딩하던 값(#dda15e)을 resolve 단일 출처로 옮긴 것 — chrome은 이제 resolved accent를 받는다.
 pub const accent_default = color.Rgb{ .r = 0xdd, .g = 0xa1, .b = 0x5e };
+
+/// Focused chrome selection rows use small text, so resolve their foreground to the WCAG AA floor.
+/// Keeping the policy beside the resolved theme prevents platform renderers from inventing their own threshold.
+pub const chrome_accent_text_min_contrast: f32 = 4.5;
 
 /// 각 채널을 delta만큼 더해 255로 saturate한다(테마 배경에서 사이드바 톤을 파생할 때 기본값 계산).
 /// 같은 톤을 유지하며 단계적으로 밝게 — 미묘한 사이드바 배경(+24)·활성 하이라이트(+48).
@@ -319,6 +329,16 @@ test "appearance resolver derives sidebar colors from background and honors expl
     const acc = try resolve(.{ .theme = .{ .accent = "#ff9ec9" } });
     try std.testing.expectEqual(color.Rgb{ .r = 0xff, .g = 0x9e, .b = 0xc9 }, acc.theme.accent);
     try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .accent = "#zzzzzz" } }));
+
+    // accent를 선택 행 배경으로 쓸 때는 light/dark 어느 테마에서도 작은 글자 기준 4.5 대비를
+    // resolve 한 번으로 보장한다. 렌더 frame마다 대비 계산을 반복하지 않는다.
+    for ([_][]const u8{ "#75c6f2", "#283258" }) |accent| {
+        const themed = try resolve(.{ .theme = .{ .sidebar_foreground = "#88919a", .accent = accent } });
+        try std.testing.expect(contrastRatio(
+            relativeLuminance(themed.theme.accent_foreground),
+            relativeLuminance(themed.theme.accent),
+        ) >= chrome_accent_text_min_contrast - 0.01);
+    }
 
     // 명시 사이드바 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 여기서 막힌다).
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .sidebar_background = "bad" } }));

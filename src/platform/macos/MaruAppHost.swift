@@ -6249,22 +6249,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 surface.fileTreeTrashInFlight = true
                 DispatchQueue.global(qos: .utility).async { [weak surface] in
                     let stagedURL = URL(fileURLWithPath: stagedPath)
-                    // Bind the file reference first, then validate the object reached through that reference.
-                    // Falling back to a path URL would reopen the replacement race, so nil is a hard failure.
-                    let trashURL = (stagedURL as NSURL).fileReferenceURL()
-                    var stagedStat = Darwin.stat()
-                    let statResult = trashURL?.path.withCString { Darwin.lstat($0, &stagedStat) } ?? -1
-                    let actualKind: UInt32
-                    switch stagedStat.st_mode & mode_t(S_IFMT) {
-                    case mode_t(S_IFREG): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_REGULAR)
-                    case mode_t(S_IFDIR): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_DIRECTORY)
-                    case mode_t(S_IFLNK): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_SYMLINK)
-                    default: actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_OTHER)
-                    }
-                    let identityMatches = statResult == 0
-                        && UInt64(stagedStat.st_dev) == expectedDevice
-                        && UInt64(stagedStat.st_ino) == expectedInode
-                        && actualKind == expectedKind
+                    // Foundation may return the same path URL instead of a true file-reference URL on APFS.
+                    // The worker already moved the selected identity to an unpredictable, visible staging
+                    // sibling, so this adapter may use that staged capability path and verifies both ends.
+                    let referenceCandidate = (stagedURL as NSURL).fileReferenceURL()
+                    let trashURL = referenceCandidate.map { ($0 as NSURL).isFileReferenceURL() ? $0 : stagedURL } ?? stagedURL
+                    let identityMatches = fileTreeTrashIdentityMatches(
+                        trashURL,
+                        expectedDevice: expectedDevice,
+                        expectedInode: expectedInode,
+                        expectedKind: expectedKind
+                    )
                     Task { @MainActor [weak surface] in
                         guard let surface else { return }
                         guard let currentSession = surface.appSession,
@@ -6274,20 +6269,31 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                             surface.fileTreeTrashInFlight = false
                             return
                         }
-                        guard identityMatches, let trashURL else {
+                        guard identityMatches else {
                             surface.fileTreeTrashInFlight = false
-                            maru_macos_app_session_complete_file_tree_trash(requestSession, requestId, 0)
+                            reportFileTreeTrashOutcome(requestSession, requestId: requestId, outcome: .notMoved)
                             return
                         }
-                        NSWorkspace.shared.recycle([trashURL]) { [weak surface] _, error in
-                            MainActor.assumeIsolated {
-                                guard let surface else { return }
-                                surface.fileTreeTrashInFlight = false
-                                guard let currentSession = surface.appSession,
-                                      UInt(bitPattern: currentSession) == requestSessionBits,
-                                      let requestSession = OpaquePointer(bitPattern: requestSessionBits)
-                                else { return }
-                                maru_macos_app_session_complete_file_tree_trash(requestSession, requestId, error == nil ? 1 : 0)
+                        NSWorkspace.shared.recycle([trashURL]) { [weak surface] destinationURLs, _ in
+                            DispatchQueue.global(qos: .utility).async {
+                                // The destination mapping proves per-input success; the destination identity
+                                // additionally prevents a path replacement from being committed as our item.
+                                let outcome = fileTreeTrashMoveOutcome(
+                                    destinationURLs,
+                                    stagedURL: stagedURL,
+                                    expectedDevice: expectedDevice,
+                                    expectedInode: expectedInode,
+                                    expectedKind: expectedKind
+                                )
+                                Task { @MainActor [weak surface] in
+                                    guard let surface else { return }
+                                    surface.fileTreeTrashInFlight = false
+                                    guard let currentSession = surface.appSession,
+                                          UInt(bitPattern: currentSession) == requestSessionBits,
+                                          let requestSession = OpaquePointer(bitPattern: requestSessionBits)
+                                    else { return }
+                                    reportFileTreeTrashOutcome(requestSession, requestId: requestId, outcome: outcome)
+                                }
                             }
                         }
                     }
@@ -7838,6 +7844,85 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         } catch {
             exitCode = 1
             fputs("failed to write \(summaryPath): \(error)\n", stderr)
+        }
+    }
+}
+
+private enum FileTreeTrashMoveOutcome: Sendable {
+    case notMoved
+    case movedVerified
+    case movedUnverified(String?)
+}
+
+/// `NSWorkspace.recycle` may move an item even when its destination cannot be verified. Keep that
+/// state distinct from not-moved so Zig never attempts rollback against an already-consumed path.
+private func fileTreeTrashMoveOutcome(
+    _ destinationURLs: [URL: URL],
+    stagedURL: URL,
+    expectedDevice: UInt64,
+    expectedInode: UInt64,
+    expectedKind: UInt32
+) -> FileTreeTrashMoveOutcome {
+    guard destinationURLs.count == 1, let destination = destinationURLs.values.first else {
+        return fileTreeTrashIdentityMatches(
+            stagedURL,
+            expectedDevice: expectedDevice,
+            expectedInode: expectedInode,
+            expectedKind: expectedKind
+        ) ? .notMoved : .movedUnverified(nil)
+    }
+    return fileTreeTrashIdentityMatches(
+        destination,
+        expectedDevice: expectedDevice,
+        expectedInode: expectedInode,
+        expectedKind: expectedKind
+    ) ? .movedVerified : .movedUnverified(destination.path)
+}
+
+private func fileTreeTrashIdentityMatches(
+    _ url: URL,
+    expectedDevice: UInt64,
+    expectedInode: UInt64,
+    expectedKind: UInt32
+) -> Bool {
+    var destinationStat = Darwin.stat()
+    guard url.path.withCString({ Darwin.lstat($0, &destinationStat) }) == 0 else { return false }
+    let actualKind: UInt32
+    switch destinationStat.st_mode & mode_t(S_IFMT) {
+    case mode_t(S_IFREG): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_REGULAR)
+    case mode_t(S_IFDIR): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_DIRECTORY)
+    case mode_t(S_IFLNK): actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_SYMLINK)
+    default: actualKind = UInt32(MARU_FILE_TREE_TRASH_KIND_OTHER)
+    }
+    return UInt64(destinationStat.st_dev) == expectedDevice
+        && UInt64(destinationStat.st_ino) == expectedInode
+        && actualKind == expectedKind
+}
+
+private func reportFileTreeTrashOutcome(
+    _ session: OpaquePointer,
+    requestId: UInt64,
+    outcome: FileTreeTrashMoveOutcome
+) {
+    switch outcome {
+    case .notMoved:
+        maru_macos_app_session_complete_file_tree_trash(
+            session, requestId, UInt32(MARU_FILE_TREE_TRASH_OUTCOME_NOT_MOVED), nil, 0
+        )
+    case .movedVerified:
+        maru_macos_app_session_complete_file_tree_trash(
+            session, requestId, UInt32(MARU_FILE_TREE_TRASH_OUTCOME_MOVED_VERIFIED), nil, 0
+        )
+    case let .movedUnverified(path):
+        let bytes = Array((path ?? "").utf8)
+        bytes.withUnsafeBufferPointer { buffer in
+            maru_macos_app_session_complete_file_tree_trash(
+                session,
+                requestId,
+                UInt32(MARU_FILE_TREE_TRASH_OUTCOME_MOVED_UNVERIFIED),
+                buffer.baseAddress,
+                buffer.count
+            )
         }
     }
 }

@@ -816,6 +816,12 @@ pub fn buildFileTreeHeaderDrawList(
 }
 
 pub const FileTreeEdit = struct { identity: file_tree.RowIdentity, text: []const u8 };
+pub const FileTreeSelectionPaint = struct {
+    /// Absolute index in `rows`; the background renderer resolves the same transient selection index.
+    index: usize,
+    /// Theme-derived foreground with guaranteed contrast against the focused accent background.
+    foreground: terminal.Color,
+};
 
 pub fn buildFileTreeDrawList(
     allocator: std.mem.Allocator,
@@ -826,12 +832,14 @@ pub fn buildFileTreeDrawList(
     cols: u16,
     fg: terminal.Color,
     active_fg: terminal.Color,
+    selection: ?FileTreeSelectionPaint,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
     const count = @min(@as(usize, visible_rows), rows.len -| @min(scroll_rows, rows.len));
     for (rows[@min(scroll_rows, rows.len)..][0..count], 0..) |row, screen_row| {
         const r: u16 = @intCast(screen_row);
+        const selected = if (selection) |v| v.index == scroll_rows + screen_row else false;
         var label: []const u8 = "";
         var depth: u16 = 0;
         var marker: u21 = ' ';
@@ -880,6 +888,10 @@ pub fn buildFileTreeDrawList(
                 style = .{ .foreground = active_fg, .bold = true };
             }
         };
+        // Focused selection paints the whole row with the theme accent in AppSession. Every glyph on
+        // that row (marker, title, dirty/conflict state) must therefore use the paired contrast color;
+        // retaining per-row muted/active colors makes light accents unreadable.
+        if (selected) style.foreground = selection.?.foreground;
         const indent: u16 = @min(file_tree_inset_cols +| depth *| 2, cols -| 1);
         if (indent < cols) try cells.append(allocator, .{ .row = r, .col = indent, .codepoint = marker, .width = 1, .style = style });
         const state_cols: u16 = (if (dirty) @as(u16, 2) else 0) + (if (conflict) @as(u16, 2) else 0);
@@ -887,9 +899,9 @@ pub fn buildFileTreeDrawList(
         if (indent +| 2 < end)
             _ = try appendEllipsizedTitle(allocator, &cells, label, r, indent + 2, end, style, false, .head);
         if (dirty and cols >= 2)
-            try cells.append(allocator, .{ .row = r, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } });
+            try cells.append(allocator, .{ .row = r, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = if (selected) selection.?.foreground else active_fg } });
         if (conflict and cols >= 4)
-            try cells.append(allocator, .{ .row = r, .col = cols - 4, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg, .bold = true } });
+            try cells.append(allocator, .{ .row = r, .col = cols - 4, .codepoint = '!', .width = 1, .style = .{ .foreground = if (selected) selection.?.foreground else active_fg, .bold = true } });
     }
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = @max(visible_rows, 1) },
@@ -1997,7 +2009,7 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
         } },
         .empty,
     };
-    var dl = try buildFileTreeDrawList(allocator, &rows, null, 1, 1, 18, dim, bright);
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 1, 1, 18, dim, bright, null);
     defer dl.deinit(allocator);
     var saw_active = false;
     var saw_dirty = false;
@@ -2013,7 +2025,7 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
     var editing = try buildFileTreeDrawList(allocator, &rows, .{
         .identity = .{ .kind = .file, .path = "/tmp/doc.md" },
         .text = "renamed.md|",
-    }, 1, 1, 18, dim, bright);
+    }, 1, 1, 18, dim, bright, null);
     defer editing.deinit(allocator);
     var saw_rename_r = false;
     var saw_old_o = false;
@@ -2023,6 +2035,41 @@ test "file tree draw list clips to visible rows and marks active dirty conflicts
     }
     try std.testing.expect(saw_rename_r);
     try std.testing.expect(!saw_old_o);
+}
+
+test "file tree focused selection applies its theme contrast color to every row glyph" {
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xEE, .g = 0xEE, .b = 0xEE } };
+    const on_accent: terminal.Color = .{ .rgb = .{ .r = 0x12, .g = 0x18, .b = 0x20 } };
+    const rows = [_]file_tree.Row{.{ .file = .{
+        .path = "/tmp/selected.md",
+        .label = "selected.md",
+        .depth = 1,
+        .supported = true,
+        .open = true,
+        .active = false,
+        .dirty = true,
+        .external_change = true,
+        .symlink = false,
+    } }};
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 24, dim, bright, .{
+        .index = 0,
+        .foreground = on_accent,
+    });
+    defer dl.deinit(allocator);
+    var saw_marker = false;
+    var saw_label = false;
+    var saw_dirty = false;
+    var saw_conflict = false;
+    for (dl.cells) |cell| {
+        try std.testing.expectEqual(on_accent, cell.style.foreground);
+        if (cell.col == 3) saw_marker = true;
+        if (cell.codepoint == 's') saw_label = true;
+        if (cell.codepoint == 0x25CF) saw_dirty = true;
+        if (cell.codepoint == '!') saw_conflict = true;
+    }
+    try std.testing.expect(saw_marker and saw_label and saw_dirty and saw_conflict);
 }
 
 // 활성 탭(행/세그먼트) 제목은 active_fg + bold, 나머지는 fg + regular로 그려지는지 — 활성 탭 글자 강조.

@@ -85,6 +85,17 @@ function isLocalDocumentHref(href: string): boolean {
   if (/^[a-z][a-z0-9+.-]*:/i.test(path)) return false;
   try {
     const decoded = decodeURIComponent(path);
+    if (
+      decoded.startsWith("//") ||
+      decoded.includes("\\") ||
+      /^[a-z][a-z0-9+.-]*:/i.test(decoded) ||
+      Array.from(decoded).some((char) => {
+        const code = char.codePointAt(0) ?? 0;
+        return code < 0x20 || code === 0x7f;
+      })
+    ) {
+      return false;
+    }
     return /\.(?:md|html)$/i.test(decoded);
   } catch {
     return false;

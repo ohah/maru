@@ -326,6 +326,21 @@ pub const Tree = struct {
 
     pub fn buildRows(self: *const Tree, allocator: std.mem.Allocator, open: []const OpenState, out: *std.ArrayList(Row)) !void {
         out.clearRetainingCapacity();
+        if (self.roots.items.len == 0) {
+            try out.append(allocator, .{ .empty = {} });
+        } else {
+            // Artifact 기준: 탐색의 주 대상인 project roots를 먼저, MRU는 보조 섹션으로 맨 아래에 둔다.
+            // 최근 파일이 위에서 긴 목록을 차지해 실제 tree를 밀어내던 기존 순서를 뒤집되 Row/클릭 계약은 유지한다.
+            for (self.roots.items) |root| {
+                try out.append(allocator, .{ .root = .{
+                    .path = root.path,
+                    .label = if (root.name.len > 0) root.name else root.path,
+                    .expanded = root.expanded,
+                    .loading = root.loading,
+                } });
+                if (root.expanded) try appendChildrenRows(allocator, root.children.items, 1, open, out);
+            }
+        }
         try out.append(allocator, .{ .recent_header = .{
             .collapsed = self.recent_collapsed,
             .count = @intCast(@min(self.recent.items.len, std.math.maxInt(u8))),
@@ -337,19 +352,6 @@ pub const Tree = struct {
                 const path = self.recent.items[i];
                 try out.append(allocator, .{ .recent_file = fileRow(path, std.fs.path.basename(path), 1, false, open) });
             }
-        }
-        if (self.roots.items.len == 0) {
-            try out.append(allocator, .{ .empty = {} });
-            return;
-        }
-        for (self.roots.items) |root| {
-            try out.append(allocator, .{ .root = .{
-                .path = root.path,
-                .label = if (root.name.len > 0) root.name else root.path,
-                .expanded = root.expanded,
-                .loading = root.loading,
-            } });
-            if (root.expanded) try appendChildrenRows(allocator, root.children.items, 1, open, out);
         }
     }
 
@@ -564,12 +566,13 @@ test "file tree lazy scan preserves expanded descendants across watcher snapshot
     var rows: std.ArrayList(Row) = .empty;
     defer rows.deinit(allocator);
     try tree.buildRows(allocator, &.{.{ .path = "/repo/docs/guide.md", .active = true, .dirty = true }}, &rows);
-    try std.testing.expectEqual(@as(usize, 7), rows.items.len); // recent header/file + root + docs + guide + sorted files
-    try std.testing.expect(rows.items[2] == .root);
-    try std.testing.expect(rows.items[3] == .directory and rows.items[3].directory.expanded);
-    try std.testing.expect(rows.items[4] == .file and rows.items[4].file.active and rows.items[4].file.dirty);
-    try std.testing.expectEqualStrings("file2.md", rows.items[5].file.label);
-    try std.testing.expectEqualStrings("file10.md", rows.items[6].file.label);
+    try std.testing.expectEqual(@as(usize, 7), rows.items.len); // root + docs + guide + sorted files + recent header/file
+    try std.testing.expect(rows.items[0] == .root);
+    try std.testing.expect(rows.items[1] == .directory and rows.items[1].directory.expanded);
+    try std.testing.expect(rows.items[2] == .file and rows.items[2].file.active and rows.items[2].file.dirty);
+    try std.testing.expectEqualStrings("file2.md", rows.items[3].file.label);
+    try std.testing.expectEqualStrings("file10.md", rows.items[4].file.label);
+    try std.testing.expect(rows.items[5] == .recent_header);
 }
 
 test "file tree multi-root MRU is deduplicated and symlink directories scan only on expansion" {

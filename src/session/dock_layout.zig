@@ -11,7 +11,13 @@ pub const default_bottom_pt: u32 = 300;
 pub const min_right_pt: u32 = 240;
 pub const min_bottom_pt: u32 = 160;
 pub const default_tree_cols: u32 = 18;
-pub const min_editor_cols: u32 = 12;
+pub const min_tree_cols: u32 = 12;
+/// Artifact에서 Markdown 본문은 tree보다 우선하는 주 surface다. 12칸짜리 세로 띠까지 줄이던 기존 하한은
+/// 문서/편집기를 사실상 못 쓰게 하므로 28칸을 보장하고, 공간이 모자라면 tree를 먼저 숨긴다.
+pub const min_editor_cols: u32 = 28;
+/// Artifact의 editor tab처럼 파일 수가 적을 때 바 전체를 균등분할하지 않고 읽을 수 있는 고정폭 세그먼트를 쓴다.
+/// 탭이 많아 공간이 모자랄 때만 균등 축소한다(가로 스크롤은 후속).
+pub const default_tab_cols: u16 = 18;
 
 pub const Geometry = struct {
     terminal: Rect,
@@ -23,6 +29,10 @@ pub const Geometry = struct {
     tab_bar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     tree: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// Artifact의 독립 탐색기 chrome. tree 전체 배경 안에서 제목 한 행과 실제 스크롤 rows를 분리해,
+    /// 첫 project root가 제목처럼 보이거나 최근 파일에 밀리지 않게 한다.
+    tree_header: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    tree_content: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     content: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     dock_size_px: u32 = 0,
 };
@@ -44,6 +54,25 @@ pub fn headerControlRect(g: Geometry, cell_width_px: u32) ?Rect {
     return .{ .x = g.header.x + g.header.w - width, .y = g.header.y, .w = width, .h = g.header.h };
 }
 
+/// Markdown 헤더의 Artifact식 `렌더 | 편집` 두 선택지. 전체 control을 토글 버튼 하나로 취급하지 않고
+/// 보이는 절반과 클릭되는 절반이 같은 rect를 공유한다.
+pub fn headerModeRect(g: Geometry, cell_width_px: u32, mode: dock_panel.Mode) ?Rect {
+    const control = headerControlRect(g, cell_width_px) orelse return null;
+    const half = control.w / 2;
+    if (half == 0) return null;
+    return switch (mode) {
+        .read => .{ .x = control.x, .y = control.y, .w = half, .h = control.h },
+        .source_edit => .{ .x = control.x + half, .y = control.y, .w = control.w - half, .h = control.h },
+    };
+}
+
+pub fn headerModeAt(g: Geometry, cell_width_px: u32, x_px: f64, y_px: f64) ?dock_panel.Mode {
+    inline for (.{ dock_panel.Mode.read, dock_panel.Mode.source_edit }) |mode| {
+        if (headerModeRect(g, cell_width_px, mode)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return mode;
+    }
+    return null;
+}
+
 /// 헤더 draw-list의 external-change `!` 한 칸과 같은 rect. mode 토글의 넓은 control rect보다 먼저
 /// hit-test해, 충돌 표식을 누르면 편집 모드가 바뀌는 대신 명시적 disk reload 확인으로 라우팅한다.
 pub fn headerConflictRect(g: Geometry, cell_width_px: u32) ?Rect {
@@ -62,7 +91,7 @@ pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetri
     if (cols < 3) return null;
     const tab_cols = cols - 2; // 우측 2칸은 접기 버튼.
     const count: u16 = @intCast(@min(entry_count, std.math.maxInt(u16)));
-    const tab_width = @max(@as(u16, 1), tab_cols / count);
+    const tab_width = @min(default_tab_cols, @max(@as(u16, 1), tab_cols / count));
     return .{ .cols = cols, .tab_cols = tab_cols, .tab_width = tab_width };
 }
 
@@ -171,8 +200,9 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
     const body_y = dock.y + tab_h + header_h;
     const body_h = dock.h -| tab_h -| header_h;
     const max_tree_w = dock.w -| min_editor_cols * cell_width_px;
-    const tree_w = @min(default_tree_cols * cell_width_px, max_tree_w);
+    const tree_w = if (max_tree_w < min_tree_cols * cell_width_px) 0 else @min(default_tree_cols * cell_width_px, max_tree_w);
     const content_w = dock.w -| tree_w;
+    const tree_header_h = @min(chrome_h, body_h);
     return .{
         .terminal = terminal,
         .dock = dock,
@@ -183,6 +213,8 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
         .tab_bar = .{ .x = dock.x, .y = dock.y, .w = content_w, .h = tab_h },
         .header = .{ .x = dock.x, .y = dock.y + tab_h, .w = content_w, .h = header_h },
         .tree = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = body_h },
+        .tree_header = .{ .x = dock.x + content_w, .y = body_y, .w = tree_w, .h = tree_header_h },
+        .tree_content = .{ .x = dock.x + content_w, .y = body_y + tree_header_h, .w = tree_w, .h = body_h -| tree_header_h },
         .content = .{ .x = dock.x, .y = body_y, .w = content_w, .h = body_h },
         .dock_size_px = dock_size_px,
     };
@@ -249,6 +281,8 @@ test "right and bottom dock geometry share terminal and chrome boundaries" {
     try std.testing.expectEqual(right.tab_bar.y + right.tab_bar.h, right.header.y);
     try std.testing.expectEqual(right.header.y + right.header.h, right.content.y);
     try std.testing.expectEqual(@as(u32, 2 * 20), right.tab_bar.h + right.header.h);
+    try std.testing.expectEqual(right.tree.y + right.tree_header.h, right.tree_content.y);
+    try std.testing.expectEqual(right.tree.h, right.tree_header.h + right.tree_content.h);
 
     const bottom = compute(.{ .backing_width_px = base.backing_width_px, .backing_height_px = base.backing_height_px, .sidebar_width_px = base.sidebar_width_px, .titlebar_height_px = base.titlebar_height_px, .cell_width_px = base.cell_width_px, .cell_height_px = base.cell_height_px, .scale_milli = base.scale_milli, .divider_px = base.divider_px, .side = .bottom, .size_pt = 200, .visible = true });
     try std.testing.expectEqual(@as(u32, 400), bottom.dock.h);
@@ -282,6 +316,9 @@ test "dock tab metrics reserve a collapse control and share render hit rects" {
     const second = tabRect(g, 10, 3, 1).?;
     try std.testing.expectEqual(@as(?usize, 1), tabIndexAt(g, 10, 3, @floatFromInt(second.x + 1), @floatFromInt(second.y + 1)));
     try std.testing.expect(collapseAt(g, 10, 3, @floatFromInt(g.tab_bar.x + g.tab_bar.w - 1), @floatFromInt(g.tab_bar.y + 1)));
+    const one = tabRect(g, 10, 1, 0).?;
+    try std.testing.expectEqual(@as(u32, default_tab_cols * 10), one.w);
+    try std.testing.expectEqual(@as(?usize, null), tabIndexAt(g, 10, 1, @floatFromInt(one.x + one.w + 1), @floatFromInt(one.y + 1)));
 }
 
 test "dock header control rect is right-aligned and bounded on narrow docks" {
@@ -293,6 +330,12 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     try std.testing.expectEqual(g.header.x + g.header.w - 40, conflict.x);
     try std.testing.expectEqual(@as(u32, 10), conflict.w);
     try std.testing.expect(conflict.x >= control.x);
+    const read = headerModeRect(g, 10, .read).?;
+    const edit = headerModeRect(g, 10, .source_edit).?;
+    try std.testing.expectEqual(control.x, read.x);
+    try std.testing.expectEqual(read.x + read.w, edit.x);
+    try std.testing.expectEqual(control.x + control.w, edit.x + edit.w);
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(g, 10, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
 }
 
 test "dock group geometry gives every split leaf its own tab header and content" {
@@ -304,6 +347,16 @@ test "dock group geometry gives every split leaf its own tab header and content"
     try std.testing.expectEqual(left.tab_bar.y + left.tab_bar.h, left.header.y);
     try std.testing.expectEqual(left.header.y + left.header.h, left.content.y);
     try std.testing.expectEqual(left.dock.h, left.tab_bar.h + left.header.h + left.content.h);
+}
+
+test "narrow right dock preserves a readable editor and hides an unusable tree sliver" {
+    const narrow = compute(.{ .backing_width_px = 1000, .backing_height_px = 800, .sidebar_width_px = 160, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 330, .visible = true });
+    try std.testing.expect(narrow.editor.w >= min_editor_cols * 10);
+    try std.testing.expectEqual(@as(u32, 0), narrow.tree.w);
+
+    const artifact_width = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .visible = true });
+    try std.testing.expectEqual(default_tree_cols * 10, artifact_width.tree.w);
+    try std.testing.expect(artifact_width.editor.w > artifact_width.tree.w);
 }
 
 test "dock group divider hit target and pointer ratio share split bounds" {

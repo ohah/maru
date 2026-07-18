@@ -22,7 +22,13 @@ export function assetBase64BudgetAllowed(currentBytes: number, nextBytes: number
   );
 }
 
-type FileMethod = "read" | "readAsset" | "write" | "setDirty" | "resolveExternalChange";
+type FileMethod =
+  | "read"
+  | "readAsset"
+  | "write"
+  | "setDirty"
+  | "resolveExternalChange"
+  | "openLink";
 
 type BridgeResult = Record<string, unknown>;
 
@@ -40,6 +46,12 @@ type AssetResult = {
   mime?: string;
   dataBase64?: string;
   error?: string;
+};
+
+type LinkActivation = {
+  channel: typeof viewerChannel;
+  type: "link-activate";
+  href: string;
 };
 
 type RendererReport = {
@@ -65,6 +77,30 @@ let bridgeRequestId = 0;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isLocalDocumentHref(href: string): boolean {
+  const path = href.split(/[?#]/, 1)[0];
+  if (path.length === 0 || path.startsWith("//") || path.includes("\\")) return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path)) return false;
+  try {
+    const decoded = decodeURIComponent(path);
+    return /\.(?:md|html)$/i.test(decoded);
+  } catch {
+    return false;
+  }
+}
+
+export function isLinkActivation(value: unknown): value is LinkActivation {
+  return (
+    isRecord(value) &&
+    value.channel === viewerChannel &&
+    value.type === "link-activate" &&
+    typeof value.href === "string" &&
+    value.href.length > 0 &&
+    value.href.length <= 4096 &&
+    isLocalDocumentHref(value.href)
+  );
 }
 
 export function isAssetRequest(value: unknown): value is AssetRequest {
@@ -167,7 +203,9 @@ export function requestFileBridge(
             ? { method, content: value }
             : method === "setDirty"
               ? { method, dirty: value }
-              : { method, success: value };
+              : method === "resolveExternalChange"
+                ? { method, success: value }
+                : { method, href: value };
     node.textContent = JSON.stringify(request);
     document.documentElement.append(node);
 
@@ -443,6 +481,12 @@ export function bootShell(document: Document, targetWindow: Window): void {
       }
       return;
     }
+    if (isLinkActivation(event.data)) {
+      void requestFileBridge(document, "openLink", event.data.href).catch(() => {
+        if (status !== null) status.textContent = "링크 파일을 열 수 없습니다.";
+      });
+      return;
+    }
     if (!isAssetRequest(event.data)) return;
     const request = event.data;
     assetQueue = assetQueue.then(async () => {
@@ -478,6 +522,19 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
   let generation = 0;
   let requestSequence = 0;
   const pending = new Map<string, (value: AssetResult) => void>();
+
+  root.addEventListener("click", (event) => {
+    if (!(event instanceof targetWindow.MouseEvent) || event.button !== 0) return;
+    const target = event.target;
+    if (!(target instanceof targetWindow.Element)) return;
+    const link = target.closest<HTMLAnchorElement>("a[href]");
+    const href = link?.getAttribute("href");
+    if (link === null || href === null || !root.contains(link) || !isLocalDocumentHref(href))
+      return;
+    event.preventDefault();
+    const activation: LinkActivation = { channel: viewerChannel, type: "link-activate", href };
+    targetWindow.parent.postMessage(activation, "*");
+  });
 
   const requestAsset = (path: string): Promise<AssetResult> => {
     const requestId = `${generation}:${++requestSequence}`;

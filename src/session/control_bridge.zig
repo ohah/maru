@@ -25,6 +25,7 @@ pub const file_read_asset_method = "maru.file.readAsset";
 pub const file_write_method = "maru.file.write";
 pub const file_set_dirty_method = "maru.file.setDirty";
 pub const file_resolve_external_change_method = "maru.file.resolveExternalChange";
+pub const file_open_link_method = "maru.file.openLink";
 
 /// 실제 파일 시스템 접근을 platform 계층에서 주입한다. 반환 slice는 `gpa` 소유이며 dispatch가 해제한다.
 /// callback error는 경로/존재 정보를 노출하지 않는 균일 `internal_error`로 접는다.
@@ -35,6 +36,7 @@ pub const FileAccess = struct {
     write_fn: *const fn (context: *anyopaque, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, dirty: bool) anyerror!void,
     resolve_external_change_fn: *const fn (context: *anyopaque, success: bool) anyerror!void,
+    open_link_fn: *const fn (context: *anyopaque, href: []const u8) anyerror!void,
 
     fn read(self: FileAccess, gpa: std.mem.Allocator) anyerror![]u8 {
         return self.read_fn(self.context, gpa);
@@ -54,6 +56,10 @@ pub const FileAccess = struct {
 
     fn resolveExternalChange(self: FileAccess, success: bool) anyerror!void {
         return self.resolve_external_change_fn(self.context, success);
+    }
+
+    fn openLink(self: FileAccess, href: []const u8) anyerror!void {
+        return self.open_link_fn(self.context, href);
     }
 };
 
@@ -146,6 +152,13 @@ pub fn dispatchBridgeWithFileAccess(
         const success = singleBoolParam(req.params, "success") catch return errorResponse(gpa, req.id, .invalid_params);
         access.resolveExternalChange(success) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "success", success);
+    }
+    if (std.mem.eql(u8, req.method, file_open_link_method)) {
+        const href = singleStringParam(req.params, "href") catch return errorResponse(gpa, req.id, .invalid_params);
+        if (href.len == 0 or href.len > std.fs.max_path_bytes)
+            return errorResponse(gpa, req.id, .invalid_params);
+        access.openLink(href) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "opened", true);
     }
     return errorResponse(gpa, req.id, .method_not_found);
 }
@@ -268,6 +281,8 @@ const FakeFileAccess = struct {
     last_write_len: usize = 0,
     dirty: bool = false,
     external_change_resolved: ?bool = null,
+    last_open_link: [std.fs.max_path_bytes]u8 = undefined,
+    last_open_link_len: usize = 0,
 
     fn read(context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
@@ -304,6 +319,13 @@ const FakeFileAccess = struct {
         self.external_change_resolved = success;
     }
 
+    fn openLink(context: *anyopaque, href: []const u8) anyerror!void {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail or href.len > self.last_open_link.len) return error.OpenFailed;
+        @memcpy(self.last_open_link[0..href.len], href);
+        self.last_open_link_len = href.len;
+    }
+
     fn access(self: *FakeFileAccess) FileAccess {
         return .{
             .context = self,
@@ -312,6 +334,7 @@ const FakeFileAccess = struct {
             .write_fn = write,
             .set_dirty_fn = setDirty,
             .resolve_external_change_fn = resolveExternalChange,
+            .open_link_fn = openLink,
         };
     }
 };
@@ -402,6 +425,24 @@ test "dispatchBridge: file.write and dirty are pinned provider mutations with ex
     var bad_resolve_parsed = try parseValue(testing.allocator, bad_resolve_resp);
     defer bad_resolve_parsed.deinit();
     try testing.expectEqual(@as(i64, -32602), bad_resolve_parsed.value.object.get("error").?.object.get("code").?.integer);
+}
+
+test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutation" {
+    var fake: FakeFileAccess = .{};
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"../guide/next.md#usage\"}}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+    defer testing.allocator.free(resp);
+    var parsed = try parseValue(testing.allocator, resp);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("result") != null);
+    try testing.expectEqualStrings("../guide/next.md#usage", fake.last_open_link[0..fake.last_open_link_len]);
+
+    const bad = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"maru.file.openLink\",\"params\":{\"href\":\"next.md\",\"path\":\"/tmp/escape.md\"}}";
+    const bad_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad, "0.1.0", fake.access());
+    defer testing.allocator.free(bad_resp);
+    var bad_parsed = try parseValue(testing.allocator, bad_resp);
+    defer bad_parsed.deinit();
+    try testing.expectEqual(@as(i64, -32602), bad_parsed.value.object.get("error").?.object.get("code").?.integer);
 }
 
 test "dispatchBridge: provider failures are uniform internal errors" {

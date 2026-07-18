@@ -32,7 +32,7 @@ describe("file viewer bridge boundary", () => {
     expect(document.querySelector("[data-maru-file-request]")).toBeNull();
   });
 
-  test("write, dirty, and external reload ack mailbox requests expose no path parameter", async () => {
+  test("write, dirty, link, and external reload ack mailbox requests expose only their exact parameters", async () => {
     const dom = new JSDOM("<!doctype html><html><body></body></html>");
     const document = dom.window.document;
     const requests: unknown[] = [];
@@ -47,10 +47,12 @@ describe("file viewer bridge boundary", () => {
 
     await requestFileBridge(document, "write", "# 저장", 100);
     await requestFileBridge(document, "setDirty", true, 100);
+    await requestFileBridge(document, "openLink", "../guide/next.md#usage", 100);
     await requestFileBridge(document, "resolveExternalChange", false, 100);
     expect(requests).toEqual([
       { method: "write", content: "# 저장" },
       { method: "setDirty", dirty: true },
+      { method: "openLink", href: "../guide/next.md#usage" },
       { method: "resolveExternalChange", success: false },
     ]);
     expect(JSON.stringify(requests)).not.toContain("path");
@@ -162,5 +164,39 @@ describe("bridge-free renderer", () => {
     expect(sanitized).toContain("safe");
     expect(sanitized).not.toContain("onload");
     expect(assetDataUrl("text/html", encoded, targetWindow)).toBeNull();
+  });
+
+  test("routes activated markdown file links to the trusted shell instead of navigating the renderer", () => {
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    const messages: unknown[] = [];
+    dom.window.postMessage = ((message: unknown) =>
+      messages.push(message)) as typeof dom.window.postMessage;
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: {
+          channel: viewerChannel,
+          type: "render",
+          markdown: "[next](../guide/next.md#usage)",
+        },
+      }),
+    );
+
+    const link = dom.window.document.querySelector<HTMLAnchorElement>("a");
+    expect(link).not.toBeNull();
+    const navigated = link?.dispatchEvent(
+      new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+    );
+
+    expect(navigated).toBe(false);
+    expect(messages).toContainEqual({
+      channel: viewerChannel,
+      type: "link-activate",
+      href: "../guide/next.md#usage",
+    });
+    expect(dom.window.location.href).toBe("maru-app://render/render.html");
   });
 });

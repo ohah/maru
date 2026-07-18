@@ -1736,6 +1736,11 @@ const FileBridgeContext = struct {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         return self.session.completeFileConflictReload(self.surface_id, success);
     }
+
+    fn openLink(raw: *anyopaque, href: []const u8) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.openFilePanelLink(self.surface_id, href);
+    }
 };
 
 // FP4: surface-pinned file provider를 넣는 session-scoped bridge. query/fill 모두 같은 정책을 다시 계산하므로 파일이
@@ -1759,6 +1764,7 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .write_fn = FileBridgeContext.write,
         .set_dirty_fn = FileBridgeContext.setDirty,
         .resolve_external_change_fn = FileBridgeContext.resolveExternalChange,
+        .open_link_fn = FileBridgeContext.openLink,
     };
     const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
         allocator,

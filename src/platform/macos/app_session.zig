@@ -1934,12 +1934,16 @@ pub const AppSession = struct {
     dock: dock_panel.DockPanel = undefined,
     dock_initialized: bool = false,
     dock_resize_drag_active: bool = false,
+    /// 확장 grab band 안에서 divider의 정확한 선이 아닌 곳을 눌러도 첫 drag에서 경계가 포인터로 점프하지 않게,
+    /// mouse-down 시 실제 dock 시작점과 포인터 사이 signed backing-px 간격을 drag 세션 동안 보존한다.
+    dock_resize_drag_offset_px: f64 = 0,
     // FP8: editor-group leaf/divider 기하 scratch. frame/mouse마다 같은 ArrayList capacity를 재사용해 split UI가
     // frame tick에 새 할당이나 FS I/O를 만들지 않는다.
     dock_leaf_rects_scratch: std.ArrayList(dock_panel.DockTree.LeafRect) = .empty,
     dock_dividers_scratch: std.ArrayList(dock_panel.DockTree.DividerSeg) = .empty,
     dock_group_divider_drag: ?*dock_panel.DockTree.Split = null,
     dock_group_divider_drag_seg: dock_panel.DockTree.DividerSeg = undefined,
+    dock_group_divider_drag_offset_px: f64 = 0,
     // FP7: Zed project panel 규칙을 따르는 L2 snapshot tree + L4 background scanner. tick은 아래 backend의
     // 메모리 result queue만 drain하며 readdir/stat을 호출하지 않는다. FSEvents root/event는 Swift ABI adapter가 맡는다.
     file_tree: file_tree.Tree = undefined,
@@ -2491,6 +2495,7 @@ pub const AppSession = struct {
         for (target.entries.items) |entry| if (filePanelEntryNeedsDirtyProtection(entry)) return;
         if (!self.dock.removeGroup(target)) return;
         self.dock_group_divider_drag = null;
+        self.dock_group_divider_drag_offset_px = 0;
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
     }
@@ -2506,7 +2511,9 @@ pub const AppSession = struct {
         };
         self.dock.size = 0;
         self.dock_resize_drag_active = false;
+        self.dock_resize_drag_offset_px = 0;
         self.dock_group_divider_drag = null;
+        self.dock_group_divider_drag_offset_px = 0;
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
@@ -2526,6 +2533,7 @@ pub const AppSession = struct {
         if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return;
         self.dock.collapsed = !self.dock.collapsed;
         self.dock_resize_drag_active = false;
+        self.dock_resize_drag_offset_px = 0;
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
@@ -3263,7 +3271,11 @@ pub const AppSession = struct {
 
     fn setDockSizeFromPointer(self: *AppSession, x_px: f64, y_px: f64) void {
         if (!self.dock_initialized or self.scale_milli == 0) return;
-        const candidate = dock_layout.sizePtForPointer(self.dockGeometry(), self.dock.side, x_px, y_px, self.scale_milli) orelse return;
+        // grab band의 어느 지점에서 시작했든 `pointer delta == divider delta`가 되게 down 때 저장한 간격을 더한다.
+        // right는 x, bottom은 y 한 축만 보정한다. 이 보정이 없으면 첫 mouseDragged에서 최대 grab-band 폭만큼 점프한다.
+        const adjusted_x = if (self.dock.side == .right) x_px + self.dock_resize_drag_offset_px else x_px;
+        const adjusted_y = if (self.dock.side == .bottom) y_px + self.dock_resize_drag_offset_px else y_px;
+        const candidate = dock_layout.sizePtForPointer(self.dockGeometry(), self.dock.side, adjusted_x, adjusted_y, self.scale_milli) orelse return;
         const before = self.dock.size;
         self.dock.size = candidate;
         // 손상·과대 입력은 순수 layout이 보장하는 terminal floor로 clamp한 실효 크기를 저장한다.
@@ -8724,7 +8736,9 @@ pub const AppSession = struct {
                         .panel_kind = term.web_panel_kind,
                         .seam_edges = seam_edges,
                         .content_rect = web_panel_layout.contentRect(lr.rect, inset),
-                        .visible = (i == lr.leaf.active_term) and !self.dock_resize_drag_active, // 도크 resize 중 native view 전체 hide.
+                        // AppKit은 mouse-down을 받은 Metal view에 drag/up을 계속 전달한다. 따라서 도크 resize 중에도
+                        // WKWebView를 숨길 필요 없이 surfaceDiff의 reframe으로 라이브 추종할 수 있다.
+                        .visible = i == lr.leaf.active_term,
                     });
                 }
             }
@@ -8757,7 +8771,7 @@ pub const AppSession = struct {
                             .bottom => 0,
                         },
                         .content_rect = content_rect,
-                        .visible = self.dockVisible() and !self.dock_resize_drag_active and self.dock_group_divider_drag == null and group.active != null and group.active.? == i,
+                        .visible = self.dockVisible() and group.active != null and group.active.? == i,
                     });
                 }
             }
@@ -13100,25 +13114,29 @@ pub const AppSession = struct {
             }
             return;
         }
-        // 파일 도크 divider는 workspace split과 독립적으로 캡처한다. drag 중엔 모든 native webview를
-        // surfaceDiff로 hide해 AppKit과 Metal hit-test가 섞이지 않게 하고, up 다음 diff가 active view를 다시 show한다.
+        // 파일 도크 divider는 workspace split과 독립적으로 캡처한다. mouse-down을 Metal view가 받았으므로 AppKit이
+        // 후속 drag/up을 같은 responder에 보내고, visible WKWebView는 surfaceDiff reframe으로 경계를 라이브 추종한다.
         if (self.dock_resize_drag_active and (kind == 2 or kind == 3)) {
             if (kind == 2) {
                 self.setDockSizeFromPointer(x_px, y_px);
             } else {
                 self.dock_resize_drag_active = false;
+                self.dock_resize_drag_offset_px = 0;
                 self.metal_dirty = true;
             }
             return;
         }
         if (self.dock_initialized and self.dock_group_divider_drag != null and (kind == 2 or kind == 3)) {
             if (kind == 2) {
-                if (dock_layout.groupDividerRatio(self.dock_group_divider_drag_seg, x_px, y_px)) |ratio| {
+                const adjusted_x = if (self.dock_group_divider_drag_seg.direction == .horizontal) x_px + self.dock_group_divider_drag_offset_px else x_px;
+                const adjusted_y = if (self.dock_group_divider_drag_seg.direction == .vertical) y_px + self.dock_group_divider_drag_offset_px else y_px;
+                if (dock_layout.groupDividerRatio(self.dock_group_divider_drag_seg, adjusted_x, adjusted_y)) |ratio| {
                     self.dock_group_divider_drag.?.ratio = ratio;
                     self.metal_dirty = true;
                 }
             } else {
                 self.dock_group_divider_drag = null;
+                self.dock_group_divider_drag_offset_px = 0;
                 self.metal_dirty = true;
             }
             return;
@@ -13195,7 +13213,14 @@ pub const AppSession = struct {
             // 정확한 divider 선이 dockGroupAtPoint의 null 조기 반환에 막히지 않고, WKWebView가 통과시킨 안쪽
             // seam 클릭도 파일/그룹 클릭으로 오인되지 않는다.
             if (self.dockDividerAtPoint(x_px, y_px)) {
+                const g = self.dockGeometry();
                 self.dock_resize_drag_active = true;
+                // sizePtForPointer의 권위 경계는 dock 본문 시작점이다(divider의 dock 쪽 edge). 포인터가 확장
+                // hit band 어디에 있든 이 간격을 보존해 경계가 클릭점으로 순간 이동하지 않게 한다.
+                self.dock_resize_drag_offset_px = switch (self.dock.side) {
+                    .right => @as(f64, @floatFromInt(g.dock.x)) - x_px,
+                    .bottom => @as(f64, @floatFromInt(g.dock.y)) - y_px,
+                };
                 self.drag_autoscroll = 0;
                 self.mouse_drag_selecting = false;
                 self.metal_dirty = true;
@@ -13209,6 +13234,10 @@ pub const AppSession = struct {
                 if (self.dockGroupDividerAtPoint(x_px, y_px)) |seg| {
                     self.dock_group_divider_drag = seg.split;
                     self.dock_group_divider_drag_seg = seg;
+                    self.dock_group_divider_drag_offset_px = switch (seg.direction) {
+                        .horizontal => @as(f64, @floatFromInt(seg.pos)) - x_px,
+                        .vertical => @as(f64, @floatFromInt(seg.pos)) - y_px,
+                    };
                     self.mouse_drag_selecting = false;
                     self.metal_dirty = true;
                     return;
@@ -33478,6 +33507,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     _ = try session.dock.open(group, "/tmp/alpha.md", .markdown);
     _ = try session.dock.open(group, "/tmp/beta.html", .html);
     session.assignDockSurfaceIds(&session.dock);
+    session.dock.size = dock_layout.default_right_pt;
 
     const right = session.dockGeometry();
     try std.testing.expect(right.dock.w > 0 and right.terminal.w + right.divider.w + right.dock.w == 1400 - session.sidebar_width_px);
@@ -33511,19 +33541,24 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.dock_resize_drag_active = true;
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
-    for (surfaces.items) |surface| try std.testing.expect(!surface.visible); // drag 세션 단위 native view hide
+    try std.testing.expect(surfaces.items[0].visible); // workspace WKWebView도 사라지지 않고 live reframe한다.
+    try std.testing.expect(!surfaces.items[1].visible and surfaces.items[2].visible); // dock active 상태도 보존한다.
     session.dock_resize_drag_active = false;
 
-    // 정확한 1px outer divider와 dock 안쪽 grab band 모두 내부 group/tree보다 먼저 resize를 시작한다.
-    // 수정 전에는 divider 선이 dockGroupAtPoint(null)의 조기 return에 막혀 mouse down이 사라졌다.
+    // 확장 grab band 안쪽에서 시작해도 첫 drag가 경계를 클릭점으로 순간 이동시키지 않고 pointer delta만 반영한다.
+    // 수정 전에는 divider 선 우선순위 문제를 고친 뒤에도 sizePtForPointer가 포인터를 경계로 간주해 최대 band 폭만큼 점프했다.
     const dock_size_before_drag = session.dock.size;
     const outer_divider_y: f64 = @floatFromInt(right.divider.y + right.divider.h / 2);
-    session.mouse(1, @floatFromInt(right.divider.x), outer_divider_y, 0, 0);
+    const outer_grab_x = @as(f64, @floatFromInt(right.divider.x)) - 5;
+    session.mouse(1, outer_grab_x, outer_divider_y, 0, 0);
     try std.testing.expect(session.dock_resize_drag_active);
-    session.mouse(2, @floatFromInt(right.divider.x -| 80), outer_divider_y, 0, 0);
-    try std.testing.expect(session.dock.size > dock_size_before_drag);
-    session.mouse(3, @floatFromInt(right.divider.x -| 80), outer_divider_y, 0, 0);
+    session.mouse(2, outer_grab_x, outer_divider_y, 0, 0);
+    try std.testing.expectEqual(dock_size_before_drag, session.dock.size);
+    session.mouse(2, outer_grab_x - 80, outer_divider_y, 0, 0);
+    try std.testing.expectEqual(dock_size_before_drag + 80, session.dock.size);
+    session.mouse(3, outer_grab_x - 80, outer_divider_y, 0, 0);
     try std.testing.expect(!session.dock_resize_drag_active);
+    try std.testing.expectEqual(@as(f64, 0), session.dock_resize_drag_offset_px);
 
     // 세로 모니터/좁은 창용 구조 전환: 같은 파일 상태를 유지한 채 right↔bottom을 오가고
     // 각 방향의 기본 크기를 다시 계산한다. 커맨드 실행 즉시 terminal 영역도 재배치된다.
@@ -33623,15 +33658,19 @@ test "FP8 file panel groups render simultaneously drag divider persist tree and 
 
     const divider = session.dock_dividers_scratch.items[0];
     const y: f64 = @floatFromInt(divider.bounds.y + divider.bounds.h / 2);
-    session.mouse(1, @floatFromInt(divider.pos), y, 0, 0);
+    const grab_x = @as(f64, @floatFromInt(divider.pos)) + 3;
+    session.mouse(1, grab_x, y, 0, 0);
     try std.testing.expect(session.dock_group_divider_drag != null);
-    session.mouse(2, @floatFromInt(divider.bounds.x + divider.bounds.w * 3 / 4), y, 0, 0);
+    session.mouse(2, grab_x, y, 0, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), divider.split.ratio, 0.01);
+    session.mouse(2, @as(f64, @floatFromInt(divider.bounds.x + divider.bounds.w * 3 / 4)) + 3, y, 0, 0);
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), divider.split.ratio, 0.01);
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
-    for (surfaces.items) |surface| try std.testing.expect(!surface.visible);
+    for (surfaces.items) |surface| try std.testing.expect(surface.visible); // group divider도 live reframe, hide/show 깜빡임 없음.
     session.mouse(3, @floatFromInt(divider.pos), y, 0, 0);
     try std.testing.expect(session.dock_group_divider_drag == null);
+    try std.testing.expectEqual(@as(f64, 0), session.dock_group_divider_drag_offset_px);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();

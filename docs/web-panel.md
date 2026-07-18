@@ -41,8 +41,8 @@
 - **기하는 이미 Zig에 있다.** 셀별 `origin_x/origin_y`·`terminal_origin_x_px`로 split pane별 픽셀 origin을 export하고, pane rect(w,h)는 `paneTermRect`가 내부 보유. per-pane rect는 새 수학이 아니라 **기존 내부값 노출 + surface 생애주기**다(§6).
 - **좌표계**: 모든 ABI 좌표는 **backing-px·좌상단 원점**이고 WKWebView `frame`은 **포인트·좌하단 원점**이다. ABI는 px로 export하고, **Swift가 `firstRect` 선례대로 px→pt + y-flip**을 한다(기존 관행). backing-scale 변경 시 rect + drawable을 원자적으로 갱신.
 - **frame 동기화 트리거**: resize·split·사이드바 폭·탭 스크롤뿐 아니라 **divider 드래그 live-resize·pane zoom·pane/Term 드래그·워크스페이스 전환**까지. 매 변경 시 본문 rect → WKWebView frame.
-- **async desync**: 터미널 Metal은 tick(기본 60Hz·30~120 config — [io-render-threading.md] §10, "30Hz"로 굳히지 않는다)에 동기 repaint하지만 WKWebView frame은 AppKit 레이아웃 + WebKit **비동기** 재레이아웃을 거쳐 라이브 resize 중 한 박자 늦는다(jitter). 라이브 resize/divider 드래그 중에는 WKWebView를 `isHidden` 또는 스냅샷으로 가린다.
-- **가림은 tick 단위가 아니라 드래그 세션 단위**: per-tick rect diff로 hide/show를 토글하면 divider를 빠르게 흔들 때 매 tick `isHidden`+`frame` set이 WebKit 재레이아웃·컴포지팅 flush 폭주를 일으킨다(§3의 "diff 있을 때만 sync"는 무변경 tick만 거르지 매 tick 변하는 드래그는 못 거른다). 규범: `dragBegin`에서 hide(+스냅샷 1회), 드래그 **중에는 frame set 금지 또는 throttle**, `dragEnd`에서 최종 rect 1회 set 후 show. `takeSnapshot`은 비동기라 캡처 시점을 드래그 시작 1회로 고정한다.
+- **async desync와 사용자 피드백 반영(2026-07-18)**: 터미널 Metal은 tick(기본 60Hz·30~120 config — [io-render-threading.md] §10, "30Hz"로 굳히지 않는다)에 동기 repaint하고 WKWebView frame은 AppKit/WebKit 비동기 재레이아웃을 거치므로 한 프레임 jitter 가능성은 있다. 그러나 실제 제품 피드백에서 drag 전체 동안 문서가 사라지는 비용이 훨씬 컸으므로 **가림 대신 live reframe**을 정식 정책으로 택한다. `surfaceDiff`가 rect 변화가 있을 때만 `reframe`을 내고 `visible`은 유지한다.
+- **입력 안전성과 정확한 anchor**: outer/group divider mouse-down은 WebView seam이 통과시킨 뒤 Metal view가 받으며, AppKit은 그 responder에 후속 drag/up을 계속 전달하므로 이동 중 WKWebView가 보여도 gesture 소유가 바뀌지 않는다. 확장 grab band 안에서 실제 divider 선이 아닌 곳을 눌렀다면 down 시 `divider - pointer` signed offset을 저장하고 모든 drag 좌표에 더한다. 따라서 첫 이동에서 경계가 포인터로 점프하지 않고 `pointer delta == divider delta`가 유지된다. snapshot 가림은 live reframe 성능이 실제 계측 예산을 넘을 때만 후속 옵션으로 재검토한다.
 
 ## 4. 입력·firstResponder·키 라우팅 (BLOCKER 해소)
 

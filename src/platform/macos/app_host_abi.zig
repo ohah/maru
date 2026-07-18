@@ -5,6 +5,7 @@ const session_mod = @import("app_session.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
+const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
 const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터 + 1e dispatchAuthenticated
@@ -1081,6 +1082,33 @@ pub export fn maru_macos_app_session_take_file_tree_external_open(
     const ptr = out.?;
     @memcpy(ptr[0..path.len], path);
     return path.len;
+}
+
+pub export fn maru_macos_app_session_take_file_tree_trash_action(
+    session: ?*AppSession,
+    out: ?[*]u8,
+    cap: usize,
+    request_id_out: ?*u64,
+    device_out: ?*u64,
+    inode_out: ?*u64,
+    kind_out: ?*u32,
+) usize {
+    const app_session = session orelse return 0;
+    const pending = app_session.peekFileTreeTrashAction() orelse return 0;
+    if (out == null or request_id_out == null or device_out == null or inode_out == null or kind_out == null or pending.path.len > cap)
+        return pending.path.len;
+    const action = app_session.takeFileTreeTrashAction() orelse return 0;
+    @memcpy(out.?[0..action.path.len], action.path);
+    request_id_out.?.* = action.id;
+    device_out.?.* = action.identity.device;
+    inode_out.?.* = action.identity.inode;
+    kind_out.?.* = action.identity.kind;
+    return action.path.len;
+}
+
+pub export fn maru_macos_app_session_complete_file_tree_trash(session: ?*AppSession, request_id: u64, success: u32) void {
+    const app_session = session orelse return;
+    app_session.completeFileTreeTrash(request_id, success != 0);
 }
 
 // HSV picker `i`(스포이드)로 화면 색 추출 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면
@@ -3942,6 +3970,11 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
     try std.testing.expectEqual(@as(u32, c.MARU_MACOS_APP_HOST_ABI_VERSION), abi_version);
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_REGULAR)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.regular)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_DIRECTORY)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.directory)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_SYMLINK)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.symlink)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_OTHER)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.other)));
+    try std.testing.expectEqual(@as(usize, @intCast(c.MARU_FILE_TREE_PATH_CAPACITY)), file_tree_mutation_backend.trash_path_capacity);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS)), control_browser.wait_default_timeout_ms);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_MAX_TIMEOUT_MS)), control_browser.wait_max_timeout_ms);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_POLL_INTERVAL_MS)), control_browser.wait_poll_interval_ms);
@@ -4298,6 +4331,20 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_tree_reload_action(null, &file_tree_conflict));
     try std.testing.expectEqual(@as(u32, 0), file_tree_conflict);
     try std.testing.expectEqual(@as(usize, 0), maru_macos_app_session_take_file_tree_external_open(null, &file_tree_buf, file_tree_buf.len));
+    var trash_request_id: u64 = 99;
+    var trash_device: u64 = 99;
+    var trash_inode: u64 = 99;
+    var trash_kind: u32 = 99;
+    try std.testing.expectEqual(@as(usize, 0), maru_macos_app_session_take_file_tree_trash_action(
+        null,
+        &file_tree_buf,
+        file_tree_buf.len,
+        &trash_request_id,
+        &trash_device,
+        &trash_inode,
+        &trash_kind,
+    ));
+    maru_macos_app_session_complete_file_tree_trash(null, 1, 1);
     // v109 Phase 7f-0 create_adopted_web_term: null session은 0(생성 실패 sentinel).
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_create_adopted_web_term(null));
     // v111 Phase 7f-2 popup_target_allowed: null url_ptr는 -1(정책 판정 전 방어). 실 정책은 app_scheme 헤드리스 테스트.

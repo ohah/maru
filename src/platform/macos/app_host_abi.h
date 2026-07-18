@@ -7,7 +7,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 126u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 127u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -774,6 +774,9 @@ size_t maru_macos_app_session_take_file_panel_external_link_action(
 /* terminal/browser firstResponder가 입력 축을 되찾았음을 Zig focus owner에 반영한다. v126. */
 void maru_macos_app_session_focus_workspace_input(MaruAppHostSession *session);
 uint32_t maru_macos_app_session_take_workspace_focus_action(MaruAppHostSession *session);
+/* Zig file-tree FocusOwner가 요청한 Metal firstResponder pull과 Esc dock surface restore. v127. */
+uint32_t maru_macos_app_session_take_file_tree_focus_action(MaruAppHostSession *session);
+uint64_t maru_macos_app_session_take_file_tree_restore_surface_action(MaruAppHostSession *session);
 /* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit. v122. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* source editor 이탈 전에 이전 surface의 dirty snapshot을 강제 요청한다. 0=없음, 그 외=surface id. v122. */

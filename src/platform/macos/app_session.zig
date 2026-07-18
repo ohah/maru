@@ -11,6 +11,7 @@ const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
 const file_tree = maru.session.file_tree;
+const file_tree_navigation = maru.session.file_tree_navigation;
 const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
@@ -166,7 +167,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 126;
+pub const abi_version: u32 = 127;
+// 127: file tree keyboard focus. Metal firstResponder pull과 Esc의 dock surface restore one-shot을 추가한다.
+// focus/selection 정책은 Zig FocusOwner가 소유하고 Swift는 responder 전이만 실행한다. fixed-width struct offset 불변.
 // 126: 파일 탭 닫기. focus 기반 Cmd+W를 위해 workspace focus 동기 export를 추가하고, dirty 저장-후-닫기의
 // request-scoped sync/save/unlock one-shot과 terminal failure ack를 추가한다. 신규 export만 — fixed-width struct offset 불변.
 // 125: 파일 패널 외부 HTTP(S) 링크의 설정 기반 in-app/system 라우팅. open_file_panel_link +
@@ -1027,9 +1030,11 @@ const PendingClose = union(enum) {
     window, // macOS 빨간 닫기 버튼 — 창(세션) 전체
 };
 
+const FileTreeFocusOwner = struct { restore_surface: ?u64 };
 const FocusOwner = union(enum) {
     workspace,
     dock_surface: u64,
+    file_tree: FileTreeFocusOwner,
 };
 
 const FilePanelClosePhase = enum { syncing, confirm_dirty, confirm_conflict, saving };
@@ -2018,6 +2023,8 @@ pub const AppSession = struct {
     file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
     file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty,
     file_tree_scroll_rows: usize = 0,
+    // path+row-kind가 selection SSOT다. index는 rebuild에서 fallback/scroll 보정에만 쓰는 힌트이며 영속하지 않는다.
+    file_tree_selection: file_tree_navigation.Selection = .{},
     // fileTreeRowAt과 같은 visible-row index. hoverCursor가 갱신하고 GPU row 배경이 소비한다.
     file_tree_hovered_row: ?usize = null,
     file_tree_rows_dirty: bool = true,
@@ -2039,6 +2046,8 @@ pub const AppSession = struct {
     file_panel_close_request_id: u64 = 0,
     focus_owner: FocusOwner = .workspace,
     workspace_focus_pending: bool = false,
+    file_tree_focus_pending: bool = false,
+    file_tree_restore_surface_pending: ?u64 = null,
     file_panel_seen_generation: u64 = 0,
     debug_file_panel_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
@@ -2496,7 +2505,11 @@ pub const AppSession = struct {
     }
 
     fn dockVisible(self: *const AppSession) bool {
-        return self.dock_initialized and !self.chrome_minimal and !self.dock.collapsed and self.dock.entryCountTotal() > 0;
+        return self.dock_initialized and !self.chrome_minimal and !self.dock.collapsed and self.dockHasContent();
+    }
+
+    fn dockHasContent(self: *const AppSession) bool {
+        return self.dock.entryCountTotal() > 0 or (self.file_tree_initialized and self.file_tree.hasContent());
     }
 
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
@@ -2573,7 +2586,7 @@ pub const AppSession = struct {
                 self.clearFilePanelCloseWithoutUnlock();
             removed_input_owner = removed_input_owner or switch (self.focus_owner) {
                 .dock_surface => |focused| focused == entry.surface_id,
-                .workspace => false,
+                .workspace, .file_tree => false,
             };
         };
         self.hovered_file_panel_tab = null;
@@ -2601,7 +2614,7 @@ pub const AppSession = struct {
     /// tree/entry 상태는 그대로 두고 side만 바꾸며, side별 기본 크기를 다시 쓰도록 명시 크기는 비운다.
     /// 커맨드 팔릿에서 실행하므로 색/테마와 무관한 구조 전환이고, 모든 terminal pane의 grid를 즉시 갱신한다.
     fn toggleFilePanelDockSide(self: *AppSession) void {
-        if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return;
+        if (!self.dock_initialized or !self.dockHasContent()) return;
         self.dock.side = switch (self.dock.side) {
             .right => .bottom,
             .bottom => .right,
@@ -2622,7 +2635,7 @@ pub const AppSession = struct {
 
     fn dockCollapsedToggleRect(self: *const AppSession) ?maru.session.SplitRect {
         // 도크에 파일이 있으면 접힘·팽창 **둘 다** 표시 — titlebar 띠 우측 끝 단일 접기/펴기 토글(탭바 접기 버튼 대체).
-        if (!self.dock_initialized or self.chrome_minimal or self.dock.entryCountTotal() == 0 or self.cell_width_px == 0) return null;
+        if (!self.dock_initialized or self.chrome_minimal or !self.dockHasContent() or self.cell_width_px == 0) return null;
         const w = @min(2 * self.cell_width_px, self.backing_width_px);
         const h = @min(@max(self.cell_height_px, self.titlebar_strip_px), self.backing_height_px);
         if (w == 0 or h == 0) return null;
@@ -2635,7 +2648,7 @@ pub const AppSession = struct {
     }
 
     fn toggleDockCollapsed(self: *AppSession) void {
-        if (!self.dock_initialized or self.dock.entryCountTotal() == 0) return;
+        if (!self.dock_initialized or !self.dockHasContent()) return;
         self.dock.collapsed = !self.dock.collapsed;
         self.dock_resize_drag_active = false;
         self.dock_resize_drag_offset_px = 0;
@@ -5450,8 +5463,11 @@ pub const AppSession = struct {
         self.file_panel_close_unlock_actions_len = 0;
         self.file_tree_reload_actions_len = 0;
         self.hovered_file_panel_tab = null;
+        self.clearFileTreeSelection();
         self.focus_owner = .workspace;
         self.workspace_focus_pending = true;
+        self.file_tree_focus_pending = false;
+        self.file_tree_restore_surface_pending = null;
     }
 
     /// 창 병합 전에 트리 밖 도크 모델을 대상 창으로 옮긴다. dst 활성/layout을 우선하되 dst가 비었으면 src 값을
@@ -7441,6 +7457,7 @@ pub const AppSession = struct {
             .split_file_panel_vertical => self.splitFocusedDockGroup(.vertical),
             .close_file_panel_group => self.closeFocusedDockGroup(),
             .toggle_file_panel_dock_side => self.toggleFilePanelDockSide(),
+            .focus_file_tree => self.focusFileTree(),
             .close_focused => switch (self.focus_owner) {
                 .workspace => self.requestClose(.term_or_pane),
                 .dock_surface => |surface_id| if (self.dock.groupForSurfaceId(surface_id)) |group| {
@@ -7451,6 +7468,11 @@ pub const AppSession = struct {
                     self.focus_owner = .workspace;
                     self.workspace_focus_pending = false;
                     self.requestClose(.term_or_pane);
+                },
+                .file_tree => if (self.dock_initialized) {
+                    const group = self.dock.focusedGroup();
+                    if (group.active) |active| if (active < group.entries.items.len)
+                        self.requestFilePanelClose(group.entries.items[active].surface_id);
                 },
             },
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
@@ -8473,6 +8495,7 @@ pub const AppSession = struct {
                 }
             }
             try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
+            self.reconcileFileTreeSelection();
             const visible_rows = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
             self.file_tree_scroll_rows = @min(
                 self.file_tree_scroll_rows,
@@ -8501,6 +8524,179 @@ pub const AppSession = struct {
         return @min(self.file_tree_scroll_rows, self.file_tree_rows.items.len -| @as(usize, visible));
     }
 
+    fn fileTreeFocused(self: *const AppSession) bool {
+        return self.focus_owner == .file_tree;
+    }
+
+    fn clearFileTreeSelection(self: *AppSession) void {
+        self.file_tree_selection.clear();
+    }
+
+    fn setFileTreeSelection(self: *AppSession, index: usize) bool {
+        if (!self.file_tree_selection.set(self.file_tree_rows.items, index)) return false;
+        self.scrollFileTreeSelectionIntoView(index);
+        self.metal_dirty = true;
+        return true;
+    }
+
+    fn selectedFileTreeRow(self: *const AppSession) ?usize {
+        return self.file_tree_selection.index(self.file_tree_rows.items);
+    }
+
+    fn fileTreeSelectionPath(self: *const AppSession) ?[]const u8 {
+        return self.file_tree_selection.path();
+    }
+
+    fn reconcileFileTreeSelection(self: *AppSession) void {
+        if (self.file_tree_selection.kind == null) {
+            if (self.fileTreeFocused()) self.selectFirstFileTreeRow();
+            return;
+        }
+        const resolved = self.file_tree_selection.reconcile(self.file_tree_rows.items) orelse return;
+        self.scrollFileTreeSelectionIntoView(resolved);
+    }
+
+    fn selectFirstFileTreeRow(self: *AppSession) void {
+        for (self.file_tree_rows.items, 0..) |row, index| if (file_tree.rowIdentity(row) != null) {
+            _ = self.setFileTreeSelection(index);
+            return;
+        };
+    }
+
+    fn fileTreeVisibleRows(self: *const AppSession) usize {
+        if (self.cell_height_px == 0) return 0;
+        return self.dockGeometry().tree_content.h / self.cell_height_px;
+    }
+
+    fn scrollFileTreeSelectionIntoView(self: *AppSession, index: usize) void {
+        const visible = self.fileTreeVisibleRows();
+        if (visible == 0) return;
+        const current = self.fileTreeEffectiveScroll();
+        self.file_tree_scroll_rows = file_tree_navigation.scrollIntoView(current, index, visible);
+        if (self.file_tree_scroll_rows != current) self.file_tree_hovered_row = null;
+    }
+
+    fn focusFileTree(self: *AppSession) void {
+        if (!self.dock_initialized or !self.dockHasContent()) return;
+        if (self.dock.collapsed) self.toggleDockCollapsed();
+        const restore_surface: ?u64 = switch (self.focus_owner) {
+            .dock_surface => |surface_id| if (self.dock.entryForSurfaceId(surface_id) != null) surface_id else null,
+            .file_tree => |owner| owner.restore_surface,
+            .workspace => null,
+        };
+        self.focus_owner = .{ .file_tree = .{ .restore_surface = restore_surface } };
+        self.workspace_focus_pending = false;
+        self.file_tree_restore_surface_pending = null;
+        self.file_tree_focus_pending = true;
+        if (self.selectedFileTreeRow() == null) self.selectFirstFileTreeRow();
+        self.metal_dirty = true;
+    }
+
+    fn restoreFileTreeFocus(self: *AppSession) void {
+        const owner = switch (self.focus_owner) {
+            .file_tree => |owner| owner,
+            else => return,
+        };
+        self.file_tree_focus_pending = false;
+        if (owner.restore_surface) |surface_id| {
+            if (self.activateFilePanelSurfaceForRestore(surface_id)) {
+                self.focus_owner = .{ .dock_surface = surface_id };
+                self.file_tree_restore_surface_pending = surface_id;
+                self.workspace_focus_pending = false;
+                self.metal_dirty = true;
+                return;
+            }
+        }
+        self.focus_owner = .workspace;
+        self.file_tree_restore_surface_pending = null;
+        self.workspace_focus_pending = true;
+        self.metal_dirty = true;
+    }
+
+    fn activateFilePanelSurfaceForRestore(self: *AppSession, surface_id: u64) bool {
+        if (!self.dock_initialized or surface_id == 0) return false;
+        const group = self.dock.groupForSurfaceId(surface_id) orelse return false;
+        var target: ?usize = null;
+        for (group.entries.items, 0..) |entry, index| if (entry.surface_id == surface_id) {
+            target = index;
+            break;
+        };
+        const index = target orelse return false;
+        if (group.active != index) {
+            if (group.active) |old| if (old < group.entries.items.len)
+                self.markFilePanelDirtySyncPending(&group.entries.items[old]);
+            group.active = index;
+            self.file_tree_rows_dirty = true;
+        }
+        _ = self.dock.focusGroup(group);
+        self.touchFilePanelEntry(&group.entries.items[index]);
+        self.enforceFilePanelLiveViewLimit();
+        self.file_panel_mode_pending = surface_id;
+        return true;
+    }
+
+    pub fn takeFileTreeFocusAction(self: *AppSession) bool {
+        const pending = self.file_tree_focus_pending;
+        self.file_tree_focus_pending = false;
+        return pending;
+    }
+
+    pub fn takeFileTreeRestoreSurfaceAction(self: *AppSession) ?u64 {
+        const pending = self.file_tree_restore_surface_pending;
+        self.file_tree_restore_surface_pending = null;
+        return pending;
+    }
+
+    fn isFileTreeDefaultKey(event: terminal.KeyEvent) bool {
+        const no_modifiers = !event.modifiers.command and !event.modifiers.control and
+            !event.modifiers.option and !event.modifiers.shift;
+        if (no_modifiers) return switch (event.key) {
+            .arrow_up, .arrow_down, .arrow_left, .arrow_right, .enter, .home, .end, .page_up, .page_down, .escape => true,
+            .function => |n| n == 2,
+            else => false,
+        };
+        return event.key == .backspace and event.modifiers.command and !event.modifiers.control and
+            !event.modifiers.option and !event.modifiers.shift;
+    }
+
+    fn fileTreeNavigationIntent(event: terminal.KeyEvent) ?file_tree_navigation.Intent {
+        return switch (event.key) {
+            .arrow_up => .previous,
+            .arrow_down => .next,
+            .arrow_left => .collapse_or_parent,
+            .arrow_right => .expand_or_child,
+            .enter => .activate,
+            .home => .first,
+            .end => .last,
+            .page_up => .page_up,
+            .page_down => .page_down,
+            else => null,
+        };
+    }
+
+    fn handleFileTreeDefaultKey(self: *AppSession, event: terminal.KeyEvent) void {
+        if (event.key == .escape) {
+            self.restoreFileTreeFocus();
+            return;
+        }
+        if ((event.key == .function and event.key.function == 2) or
+            (event.key == .backspace and event.modifiers.command)) return; // mutation actions are implemented in the next slice.
+        if (self.selectedFileTreeRow() == null) self.selectFirstFileTreeRow();
+        const selected = self.selectedFileTreeRow() orelse return;
+        const intent = fileTreeNavigationIntent(event) orelse return;
+        switch (file_tree_navigation.navigate(
+            self.file_tree_rows.items,
+            selected,
+            intent,
+            self.fileTreeVisibleRows(),
+        )) {
+            .none => {},
+            .select => |index| _ = self.setFileTreeSelection(index),
+            .activate => |index| self.activateFileTreeRow(index),
+        }
+        self.metal_dirty = true;
+    }
+
     fn activateFileTreeRow(self: *AppSession, index: usize) void {
         if (index >= self.file_tree_rows.items.len) return;
         const row = self.file_tree_rows.items[index];
@@ -8519,7 +8715,16 @@ pub const AppSession = struct {
 
     fn openFileTreePath(self: *AppSession, path: []const u8, supported: bool) void {
         if (supported) {
+            const tree_owner: ?FileTreeFocusOwner = switch (self.focus_owner) {
+                .file_tree => |owner| owner,
+                else => null,
+            };
             _ = self.openFilePanelPath(path);
+            if (tree_owner) |owner| {
+                self.focus_owner = .{ .file_tree = owner };
+                self.file_tree_focus_pending = true;
+                self.workspace_focus_pending = false;
+            }
             return;
         }
         const owned = self.allocator.dupe(u8, path) catch return;
@@ -8666,6 +8871,8 @@ pub const AppSession = struct {
         if (!self.dock.focusGroup(group)) return false;
         self.focus_owner = .{ .dock_surface = surface_id };
         self.workspace_focus_pending = false;
+        self.file_tree_focus_pending = false;
+        self.file_tree_restore_surface_pending = null;
         self.metal_dirty = true;
         return true;
     }
@@ -8673,6 +8880,9 @@ pub const AppSession = struct {
     pub fn focusWorkspaceInput(self: *AppSession) void {
         self.focus_owner = .workspace;
         self.workspace_focus_pending = false;
+        self.file_tree_focus_pending = false;
+        self.file_tree_restore_surface_pending = null;
+        self.metal_dirty = true;
     }
 
     pub fn takeWorkspaceFocusAction(self: *AppSession) bool {
@@ -8786,7 +8996,7 @@ pub const AppSession = struct {
 
         const removed_owned_focus = switch (self.focus_owner) {
             .dock_surface => |focused| focused == surface_id,
-            .workspace => false,
+            .workspace, .file_tree => false,
         };
         if (removed_owned_focus) {
             if (group.active) |active| {
@@ -8800,6 +9010,11 @@ pub const AppSession = struct {
                 self.focus_owner = .workspace;
                 self.workspace_focus_pending = true;
             }
+        }
+        if (self.fileTreeFocused() and self.focus_owner.file_tree.restore_surface == surface_id) {
+            // tree는 project/recent history로 계속 조작할 수 있다. 사라진 WebView만 Esc restore capability에서 제거한다.
+            self.focus_owner = .{ .file_tree = .{ .restore_surface = null } };
+            self.file_tree_restore_surface_pending = null;
         }
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
@@ -13008,6 +13223,19 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // project tree focus는 terminal byte stream과 완전히 분리한다. 사용자 app binding이 최우선이고 explicit
+        // unbind/terminal macro는 소비만 하며, 둘 다 없을 때만 표준 tree key를 실행한다.
+        if (self.fileTreeFocused()) {
+            switch (self.loaded_config.keyBindingResolver().resolveFileTree(event, isFileTreeDefaultKey(event))) {
+                .app_action => |action| self.dispatchAppAction(action),
+                .tree_default => self.handleFileTreeDefaultKey(event),
+                .consumed => {},
+            }
+            self.total_app_key_events += 1;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
         // PageUp/PageDown는 메인 화면에선 Maru 스크롤백을 한 페이지씩 스크롤한다(Mac 네이티브 —
         // Terminal.app/iTerm2 동작). 셸의 기본 keymap엔 \e[5~/\e[6~가 unbound라, PTY로 보내면
         // zsh가 BEL을 울리고 남은 '~'를 입력줄에 그대로 박아 레이아웃이 깨진다(PTY 캡처로 확인:
@@ -13346,7 +13574,8 @@ pub const AppSession = struct {
     /// (그 키/IME가 Zig 경로). 옛 override(anyOverlayOpen or addr_edit만)는 rename·사이드바 검색을 빠뜨려 web pane 활성 중
     /// 그 편집이 웹뷰로 새고(리뷰 [0]), notice까지 세어 토스트가 편집 키를 뺏었다(리뷰 [3]) — 여기서 정정.
     pub fn terminalOwnsInput(self: *const AppSession) bool {
-        return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or self.sidebar_search_active;
+        return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
+            self.sidebar_search_active or self.fileTreeFocused();
     }
 
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
@@ -13971,7 +14200,13 @@ pub const AppSession = struct {
                     return;
                 }
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
+                    self.focusFileTree();
+                    _ = self.setFileTreeSelection(row_index);
                     self.activateFileTreeRow(row_index);
+                    return;
+                }
+                if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
+                    self.focusFileTree(); // header/빈 여백 클릭도 tree 입력 축을 얻는다.
                     return;
                 }
                 if (self.dockGroupDividerAtPoint(x_px, y_px)) |seg| {
@@ -14055,6 +14290,9 @@ pub const AppSession = struct {
                 // 반대로 도크 밖(workspace)은 여기서 return하지 않고 아래 pane 주소창·탭·터미널 hit-test로 흘러야 한다.
                 if (layout_math.pointInRect(x_px, y_px, self.dockGeometry().dock)) return;
             }
+            // tree 밖의 명시적 primary click은 workspace 입력 축을 되찾는다. TerminalView가 이미 firstResponder라
+            // AppKit responder 변화가 없을 수 있으므로 mouse policy도 같은 FocusOwner를 직접 갱신해야 한다.
+            if (self.fileTreeFocused()) self.focusWorkspaceInput();
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
         // 사이드바가 없어(폭 0) 경계 드래그 비활성(onResizeEdge가 x=0 근처를 잡아 의도치 않게 트리거되는 것 방지).
@@ -14623,7 +14861,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, confirm, notice, settings, rename, sidebar_search, find, palette, addr_edit };
+    const InputFocus = enum { terminal, file_tree, confirm, notice, settings, rename, sidebar_search, find, palette, addr_edit };
     fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -14640,6 +14878,7 @@ pub const AppSession = struct {
         // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
         // 비-terminal이면 sendTextAsKeys→handleKeyEvent→addr_edit 인터셉트로 글자를 append한다.
         if (self.addr_edit != null) return .addr_edit;
+        if (self.fileTreeFocused()) return .file_tree;
         return .terminal;
     }
 
@@ -14647,7 +14886,7 @@ pub const AppSession = struct {
     /// switch라 입력 대상 추가 시 컴파일러가 누락을 막는다.
     fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         switch (self.inputFocus()) {
-            .confirm, .notice => {}, // 확인/notice 모달은 조합을 표시하지 않는다(텍스트 입력 대상 아님)
+            .confirm, .notice, .file_tree => {}, // 확인/notice/tree는 조합을 표시하지 않는다(텍스트 입력 대상 아님)
             .settings => self.chrome_host.settings.setSearchPreedit(bytes), // 세팅 검색줄 조합(고정 버퍼 — OverlayInput과 별개)
             .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
@@ -14676,7 +14915,7 @@ pub const AppSession = struct {
     /// find/palette 조합을 놓쳤다(단일-출처 위반 → 조합 보호·표시 버그). inputFocus로 통일.
     fn imeComposingActive(self: *const AppSession) bool {
         return switch (self.inputFocus()) {
-            .confirm, .notice => false, // 확인/notice 모달은 조합 상태가 없다
+            .confirm, .notice, .file_tree => false, // 확인/notice/tree는 조합 상태가 없다
             .settings => self.chrome_host.settings.searchPreedit().len > 0,
             .rename => self.rename_input.preedit.items.len > 0,
             .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
@@ -14832,7 +15071,7 @@ pub const AppSession = struct {
         // null(패널 밖)이거나 터미널이면 아래 터미널 커서로 폴백.
         const props = self.buildChromeProps();
         const overlay_caret: ?chrome.draw.Rect = switch (self.inputFocus()) {
-            .confirm, .notice => null, // 조합을 안 받으므로 후보창 위치 무의미 — 아래 터미널 커서로 폴백(실제론 안 뜸)
+            .confirm, .notice, .file_tree => null, // 조합을 안 받으므로 후보창 위치 무의미 — 아래 터미널 커서로 폴백(실제론 안 뜸)
             // rename 인라인 편집기의 caret(사이드바 슬롯/탭/라벨)에 후보창을 띄운다 — renameCaretRect가 대상별 위치를
             // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
             .rename => self.renameCaretRect(),
@@ -14885,7 +15124,7 @@ pub const AppSession = struct {
     pub fn commitComposition(self: *AppSession) void {
         if (!self.surface_initialized) return;
         switch (self.inputFocus()) {
-            .confirm, .notice => {}, // 확인/notice 모달은 확정할 조합이 없다
+            .confirm, .notice, .file_tree => {}, // 확인/notice/tree는 확정할 조합이 없다
             .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
                 self.refreshSettingsFieldCount(); // 확정 글자로 검색 필터 재적용(setFieldCount가 selected clamp)
                 self.metal_dirty = true;
@@ -15003,7 +15242,9 @@ pub const AppSession = struct {
     /// 한다(이 분기를 빼면 find 조합 확정이 PTY로 새 입력칸이 빈다 — 회귀 테스트가 고정). 터미널 타이핑은
     /// "검색 종료(find_nav)"도 함께 처리한다(handleKeyEvent 3478과 동일 의미).
     fn routeCommittedText(self: *AppSession, bytes: []const u8) void {
-        if (self.inputFocus() == .terminal) {
+        const focus = self.inputFocus();
+        if (focus == .file_tree) return; // tree focus에서 평문/IME가 뒤 PTY로 새지 않는다.
+        if (focus == .terminal) {
             if (self.find_nav) self.find_nav = false;
             // 타이핑(글자 입력) 중 마우스 숨김(config). IME 확정 텍스트가 터미널로 갈 때 = 실제 글자 타이핑(ASCII·한글·
             // CJK 모두 이 경로 — macOS NSTextInputClient가 평범한 키 입력을 여기로 커밋, handleKeyEvent 우회). find/
@@ -15011,7 +15252,7 @@ pub const AppSession = struct {
             // 베이스: Ghostty mouse-hide-while-typing(press+utf8.len>0) — utf8 텍스트 produce가 곧 IME 확정이다(F1-6).
             if (self.loaded_config.config.input.mouse_hide_while_typing and bytes.len > 0) self.mouse_hide_pending = true;
             self.sendCommittedText(bytes);
-        } else if (self.inputFocus() == .addr_edit) {
+        } else if (focus == .addr_edit) {
             // 주소창 확정 텍스트는 **NFC 조합** 후 키 경로로(codepoint당 셀이라 NFD 자모 미조합 — imeSetPreedit과 동일 사유).
             // find/palette/rename/sidebar_search는 shaping/클러스터라 이 분기 밖(무해하나 불필요).
             if (maru.grapheme.composeHangul(self.allocator, bytes)) |composed| {
@@ -18579,6 +18820,7 @@ pub const AppSession = struct {
                     const start = self.fileTreeEffectiveScroll();
                     const visible: usize = @intCast(dg.tree_content.h / self.cell_height_px);
                     const end = @min(self.file_tree_rows.items.len, start + visible);
+                    const selected_index = self.selectedFileTreeRow();
                     for (self.file_tree_rows.items[start..end], start..) |row, index| {
                         const active = switch (row) {
                             .recent_file => |v| v.active,
@@ -18586,13 +18828,19 @@ pub const AppSession = struct {
                             else => false,
                         };
                         const hovered = self.file_tree_hovered_row == index;
-                        if (!active and !hovered) continue;
+                        const selected = selected_index != null and selected_index.? == index;
+                        if (!active and !hovered and !selected) continue;
                         self.appendBarBgQuad(.{
                             .x = dg.tree_content.x,
                             .y = dg.tree_content.y + @as(u32, @intCast(index - start)) * self.cell_height_px,
                             .w = dg.tree_content.w,
                             .h = self.cell_height_px,
-                        }, self.chromeQuadBg(if (active) self.sidebarActiveBg() else self.sidebarHoverBg()));
+                        }, if (selected and self.fileTreeFocused())
+                            packOpaqueRgb(self.appearance.theme.accent)
+                        else if (selected)
+                            self.chromeQuadBg(self.sidebarHoverBg())
+                        else
+                            self.chromeQuadBg(if (active) self.sidebarActiveBg() else self.sidebarHoverBg()));
                     }
                 }
                 if (dg.tree_divider.w > 0) self.appendBarBgQuad(dg.tree_divider, self.dividerColor());
@@ -33641,6 +33889,8 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     session.chrome_host = .{}; // inputFocus가 notice/find/palette.open을 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
     session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
+    session.sidebar_search_active = false;
+    session.focus_owner = .workspace; // inputFocus가 file-tree owner를 읽음([[devsession-undefined-test-field-trap]])
     session.find_matches = .empty; // toggleFind/showNotice가 clearRetainingCapacity 호출
     session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
     session.pending_confirm = .none; // showNotice→cancelPendingClose가 읽음([[devsession-undefined-test-field-trap]])
@@ -33690,6 +33940,7 @@ test "IME 라우팅: 세팅 모달 열림이면 inputFocus=.settings이라 조�
     session.rename = null; // inputFocus가 rename을 읽음
     session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.sidebar_search_active = false; // inputFocus가 읽음(설정 안 하면 UB로 .sidebar_search 오판)
+    session.focus_owner = .workspace; // inputFocus가 file-tree owner를 읽음([[devsession-undefined-test-field-trap]])
     session.find_matches = .empty;
     session.palette_filtered = .empty;
     session.metal_dirty = false;
@@ -33732,6 +33983,8 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
     session.chrome_host = .{}; // inputFocus가 읽음
     session.rename = null; // inputFocus가 rename을 읽음([[devsession-undefined-test-field-trap]])
     session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
+    session.sidebar_search_active = false;
+    session.focus_owner = .workspace; // inputFocus가 file-tree owner를 읽음([[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // [4e-2] scrollPage 게이트 activeTermIsTerminal이 tabs를 읽음 — 빈 트리=terminal 취급(byte-identical)
     session.ime_inserted = .empty; // imeBegin이 clearRetainingCapacity 호출
     defer session.chrome_host.deinit(std.testing.allocator);
@@ -34791,6 +35044,209 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
         @floatFromInt(geometry.tree.x + 1),
         @floatFromInt(geometry.tree.y + visible_rows * session.cell_height_px),
     ) == null);
+}
+
+test "file tree keyboard focus preserves identity navigates scrolls and restores responder target" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/repo/docs/a.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+    session.focus_owner = .{ .dock_surface = sid };
+
+    try session.file_tree.recordOpened("/repo/docs/a.md", "/repo");
+    const root_scan = session.file_tree.takeScanRequest().?;
+    allocator.free(root_scan);
+    try session.file_tree.applySnapshot("/repo", &.{
+        .{ .name = "docs", .kind = .directory },
+        .{ .name = "z.md", .kind = .file },
+    });
+    const docs_scan = session.file_tree.takeScanRequest().?;
+    allocator.free(docs_scan);
+    try session.file_tree.applySnapshot("/repo/docs", &.{
+        .{ .name = "a.md", .kind = .file },
+        .{ .name = "b.md", .kind = .file },
+    });
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+
+    // 클릭 hit-test 뒤 focus 전환이 rows를 rebuild하지 않는다. pending recent-row 삽입이 있어도 old index가
+    // 가리킨 A를 먼저 선택/활성화한 뒤 activate 경로의 rebuild에서 path+kind로 재해소한다.
+    const clicked_a = file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = "/repo/docs/a.md" }).?;
+    try session.file_tree.recordOpened("/repo/docs/b.md", "/repo");
+    session.file_tree_rows_dirty = true;
+    const tree_rect = session.dockGeometry().tree_content;
+    session.mouse(
+        1,
+        @floatFromInt(tree_rect.x + 1),
+        @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a - session.fileTreeEffectiveScroll())) * session.cell_height_px + 1),
+        0,
+        0,
+    );
+    try std.testing.expectEqualStrings("/repo/docs/a.md", session.fileTreeSelectionPath().?);
+    _ = session.takeFileTreeFocusAction();
+    session.focus_owner = .{ .dock_surface = sid };
+    session.clearFileTreeSelection();
+
+    // Cmd+Shift+E는 dock surface를 Esc restore target으로 고정하고 Metal responder pull을 한 번만 낸다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } });
+    try std.testing.expect(session.focus_owner == .file_tree);
+    try std.testing.expectEqual(@as(?u64, sid), session.focus_owner.file_tree.restore_surface);
+    try std.testing.expect(session.takeFileTreeFocusAction());
+    try std.testing.expect(!session.takeFileTreeFocusAction());
+    try std.testing.expect(session.terminalOwnsInput());
+    try std.testing.expectEqual(AppSession.InputFocus.file_tree, session.inputFocus());
+    try std.testing.expectEqual(file_tree.RowKind.root, session.file_tree_selection.kind.?);
+
+    // confirm overlay의 Esc가 tree의 restore Esc보다 우선한다. 모달을 닫아도 focus/selection은 그대로다.
+    session.requestResetAll();
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expect(session.focus_owner == .file_tree);
+    try std.testing.expectEqual(file_tree.RowKind.root, session.file_tree_selection.kind.?);
+
+    // Right: expanded root → first child, expanded directory → first file. active marker와 selection은 별개다.
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right });
+    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right });
+    try std.testing.expectEqualStrings("/repo/docs/a.md", session.fileTreeSelectionPath().?);
+
+    // watcher-style reorder 뒤에도 path+kind identity가 같은 파일을 따라간다(row index는 바뀜).
+    const old_index = session.selectedFileTreeRow().?;
+    try session.file_tree.applySnapshot("/repo/docs", &.{
+        .{ .name = "0.md", .kind = .file },
+        .{ .name = "a.md", .kind = .file },
+        .{ .name = "b.md", .kind = .file },
+    });
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+    try std.testing.expectEqualStrings("/repo/docs/a.md", session.fileTreeSelectionPath().?);
+    try std.testing.expect(session.selectedFileTreeRow().? != old_index);
+
+    // Left는 부모 이동 후 collapse, Right는 expand 후 첫 자식으로 이동한다.
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
+    try std.testing.expect(!session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right });
+    try std.testing.expect(session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right });
+    try std.testing.expectEqualStrings("/repo/docs/0.md", session.fileTreeSelectionPath().?);
+
+    // Up/Down/Enter/Page 키까지 L2 navigation 정책을 거쳐 선택·접힘·viewport를 함께 보정한다.
+    _ = try session.handleKeyEvent(.{ .key = .home });
+    _ = try session.handleKeyEvent(.{ .key = .arrow_down });
+    try std.testing.expectEqualStrings("/repo/docs", session.fileTreeSelectionPath().?);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_up });
+    try std.testing.expectEqualStrings("/repo", session.fileTreeSelectionPath().?);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_down });
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(!session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+    _ = try session.handleKeyEvent(.{ .key = .enter });
+    try std.testing.expect(session.file_tree_rows.items[session.selectedFileTreeRow().?].directory.expanded);
+
+    // End/PageUp/PageDown/Home 이동은 선택을 viewport 안으로 자동 보정한다.
+    _ = try session.handleKeyEvent(.{ .key = .end });
+    const end_index = session.selectedFileTreeRow().?;
+    const visible = session.fileTreeVisibleRows();
+    if (visible > 0) {
+        try std.testing.expect(end_index >= session.fileTreeEffectiveScroll());
+        try std.testing.expect(end_index < session.fileTreeEffectiveScroll() + visible);
+    }
+    _ = try session.handleKeyEvent(.{ .key = .page_up });
+    try std.testing.expect(session.selectedFileTreeRow().? <= end_index);
+    _ = try session.handleKeyEvent(.{ .key = .home });
+    try std.testing.expectEqual(@as(usize, 0), session.selectedFileTreeRow().?);
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
+    _ = try session.handleKeyEvent(.{ .key = .page_down });
+    try std.testing.expect(session.selectedFileTreeRow().? > 0);
+    _ = try session.handleKeyEvent(.{ .key = .home });
+
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expect(session.focus_owner == .dock_surface);
+    try std.testing.expectEqual(sid, session.takeFileTreeRestoreSurfaceAction().?);
+
+    // restore surface가 tree focus 중 사라지면 Esc는 stale id를 부활시키지 않고 workspace로 fallback한다.
+    session.focus_owner = .{ .dock_surface = sid };
+    session.dispatchAppAction(.focus_file_tree);
+    try std.testing.expect(session.closeFilePanelSurfaceNow(sid));
+    try std.testing.expect(session.focus_owner == .file_tree);
+    try std.testing.expect(session.dockVisible());
+    try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
+    try std.testing.expect(session.dock.singleGroup().?.active == null);
+    session.handleFileTreeDefaultKey(.{ .key = .escape });
+    try std.testing.expect(session.focus_owner == .workspace);
+    try std.testing.expect(session.takeWorkspaceFocusAction());
+    try std.testing.expect(session.takeFileTreeRestoreSurfaceAction() == null);
+
+    // 마지막 탭 뒤에도 recent/project tree가 남으므로 Cmd+Shift+E로 빈 group의 tree에 다시 진입할 수 있다.
+    try session.updateFileTree();
+    session.dispatchAppAction(.focus_file_tree);
+    try std.testing.expect(session.focus_owner == .file_tree);
+    try std.testing.expect(session.takeFileTreeFocusAction());
+    try std.testing.expect(session.focus_owner.file_tree.restore_surface == null);
+}
+
+test "file tree Enter opens existing or new B while Esc restores visible A" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, ".git", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.md", .data = "# a" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.md", .data = "# b" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const a_path = try std.fmt.allocPrint(allocator, "{s}/a.md", .{root});
+    defer allocator.free(a_path);
+    const b_path = try std.fmt.allocPrint(allocator, "{s}/b.md", .{root});
+    defer allocator.free(b_path);
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a_path));
+    const group = session.dock.singleGroup().?;
+    const a_sid = group.entries.items[0].surface_id;
+    const scan = session.file_tree.takeScanRequest().?;
+    allocator.free(scan);
+    try session.file_tree.applySnapshot(root, &.{
+        .{ .name = "a.md", .kind = .file },
+        .{ .name = "b.md", .kind = .file },
+    });
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+
+    // 새 B 탭을 Enter로 연 뒤에도 tree owner는 A를 restore target으로 보존한다.
+    session.focusFileTree();
+    const b_row = file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = b_path }).?;
+    _ = session.setFileTreeSelection(b_row);
+    session.handleFileTreeDefaultKey(.{ .key = .enter });
+    try std.testing.expect(session.focus_owner == .file_tree);
+    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    const b_sid = group.entries.items[1].surface_id;
+    try std.testing.expectEqual(@as(?usize, 1), group.active);
+    session.handleFileTreeDefaultKey(.{ .key = .escape });
+    try std.testing.expectEqual(@as(?usize, 0), group.active);
+    try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
+    try std.testing.expectEqual(@as(?u64, a_sid), session.file_panel_mode_pending);
+
+    // 이미 존재하는 B도 새 surface 없이 활성화하며 Esc는 다시 A를 visible target으로 되돌린다.
+    session.focusFileTree();
+    _ = session.setFileTreeSelection(file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = b_path }).?);
+    session.handleFileTreeDefaultKey(.{ .key = .enter });
+    try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    try std.testing.expectEqual(b_sid, group.entries.items[1].surface_id);
+    try std.testing.expectEqual(@as(?usize, 1), group.active);
+    session.handleFileTreeDefaultKey(.{ .key = .escape });
+    try std.testing.expectEqual(@as(?usize, 0), group.active);
+    try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
 }
 
 test "FP5 workspace restore prunes invalid file panel capabilities and degrades to an empty dock" {

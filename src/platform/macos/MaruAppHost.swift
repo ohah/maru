@@ -6116,6 +6116,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.filePanelFocusOverridden = false
             focusTerminalView(surface.window)
         }
+        // ABI v127: tree 정책/restore target은 Zig FocusOwner가 소유한다. Swift는 AppKit responder 전이만 실행한다.
+        if maru_macos_app_session_take_file_tree_focus_action(session) != 0 {
+            surface.focusedFilePanelSurfaceId = nil
+            surface.filePanelFocusOverridden = false
+            surface.lastFocusedWebSurfaceId = nil
+            focusTerminalView(surface.window)
+        }
+        let treeRestoreSid = maru_macos_app_session_take_file_tree_restore_surface_action(session)
+        if treeRestoreSid != 0 {
+            if let panel = surface.webPanels[treeRestoreSid], !panel.isHidden, panel.superview != nil {
+                surface.window?.makeFirstResponder(panel.webView)
+                surface.focusedFilePanelSurfaceId = treeRestoreSid
+                surface.filePanelFocusOverridden = false
+                surface.lastFocusedWebSurfaceId = treeRestoreSid
+            } else {
+                // entry는 남았지만 native surface가 이미 retire된 stale restore면 workspace로 fail-closed한다.
+                maru_macos_app_session_focus_workspace_input(session)
+                surface.focusedFilePanelSurfaceId = nil
+                surface.filePanelFocusOverridden = false
+                focusTerminalView(surface.window)
+            }
+        }
         for _ in 0 ..< 4 {
             var requestId: UInt64 = 0
             let dirtySyncSid = maru_macos_app_session_take_file_panel_dirty_sync_action_v2(session, &requestId)

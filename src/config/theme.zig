@@ -51,10 +51,10 @@ pub const render_frame_rate_max: u32 = 120;
 /// 위 두 문서를 함께 갱신한다. 첫 항목은 config 기본값(FontConfig.family)과 일치시킨다.
 pub const bundled_font_families = [_][]const u8{
     "JetBrains Mono",
+    "Jetendard",
     "Fira Code",
     "Cascadia Code",
     "Hack",
-    "Jetendard",
 };
 
 pub const FontConfig = struct {

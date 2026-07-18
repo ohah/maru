@@ -169,7 +169,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 129;
+pub const abi_version: u32 = 130;
+// 130: NativeMetalCell.reserved=32 carries the explicit file-dock-toggle render role from PaneFrame to the
+// Objective-C renderer. Layout is unchanged, but old renderers interpret unknown nonzero reserved values as
+// strip cells, so the producer/consumer capability version must advance together.
 // 129: Trash completion splits not-moved / moved-verified / moved-unverified and carries an optional last-known
 // destination path, so a post-move identity failure never triggers rollback of a nonexistent staged source.
 // New export signature only; fixed-width struct layouts stay unchanged.
@@ -381,6 +384,22 @@ const sidebar_header_row_h_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = 0xF0006; // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
+const header_icon_scale_numerator: u32 = 17;
+const header_icon_scale_denominator: u32 = 10;
+
+/// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 아래쪽 경계.
+/// dockCollapsedToggleRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
+fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
+    if (cell_height_px == 0) return titlebar_strip_px;
+    const origin_y = if (titlebar_strip_px > cell_height_px) (titlebar_strip_px - cell_height_px) / 2 else 0;
+    const raster_height_px = headerIconRasterExtentPx(cell_height_px);
+    const bottom = @as(u64, origin_y) + (@as(u64, cell_height_px) + raster_height_px + 1) / 2;
+    return @intCast(@min(bottom, std.math.maxInt(u32)));
+}
+
+fn headerIconRasterExtentPx(cell_extent_px: u32) u32 {
+    return @min(cell_extent_px * header_icon_scale_numerator / header_icon_scale_denominator, std.math.maxInt(u16));
+}
 // 검색 줄 레이아웃 — 렌더(buildSidebarHeaderDrawList)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
 // 끝(col 0)에 붙이지 않고 좌측 패딩 1칸을 둔다(사용자 피드백: 너무 붙음). 입력/placeholder/caret은 🔍(2칸)+공백(1) 뒤.
 const sidebar_search_icon_col: u16 = 1; // 🔍 좌측 패딩 1칸
@@ -2836,7 +2855,9 @@ pub const AppSession = struct {
         // 도크에 파일이 있으면 접힘·팽창 **둘 다** 표시 — titlebar 띠 우측 끝 단일 접기/펴기 토글(탭바 접기 버튼 대체).
         if (!self.dock_initialized or self.chrome_minimal or !self.dockHasContent() or self.cell_width_px == 0) return null;
         const w = @min(2 * self.cell_width_px, self.backing_width_px);
-        const h = @min(@max(self.cell_height_px, self.titlebar_strip_px), self.backing_height_px);
+        // 렌더러의 1.7× quad가 큰 글꼴에서 titlebar 띠 아래로 보일 수 있으므로 hit/hover rect도 실제
+        // visual bottom까지 포함한다. 가로는 2셀 rect 안에 1.7셀 glyph를 중앙 배치해 이미 전부 포함한다.
+        const h = @min(@max(dockToggleVisualBottomPx(self.cell_height_px, self.titlebar_strip_px), self.titlebar_strip_px), self.backing_height_px);
         if (w == 0 or h == 0) return null;
         // 창 우측 상단이 macOS 둥근 코너라, 토글을 코너에 flush로 두면 코너 마스크가 글리프를 자른다(신호등 옆 사이드바
         // ◧처럼 코너 클리어런스가 필요). 한 셀 여백으론 코너 반경(≈12px)을 못 벗어나 여전히 잘려(사용자 피드백) —
@@ -20630,7 +20651,9 @@ pub const AppSession = struct {
                 if (self.dockCollapsedToggleRect()) |r| {
                     const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                     if (coretext_frame_builder.buildFileDockToggleDrawList(self.allocator, dock_active_fg)) |ddl| {
-                        const gy = r.y + (r.h -| self.cell_height_px) / 2;
+                        // visual hit rect가 titlebar 아래로 확장돼도 glyph center는 titlebar 자체에 고정한다.
+                        // Metal은 이 origin을 그대로 소비하고 세로 위치를 다시 계산하지 않는다.
+                        const gy = r.y + (self.titlebar_strip_px -| self.cell_height_px) / 2;
                         const gx = r.x + self.cell_width_px / 2;
                         self.collectShaped(&collected, ddl, pane_frame_builder, .{ .dock_toggle = .{ .origin_x = gx, .origin_y = gy, .colors = tabbar_colors } });
                     } else |_| {}
@@ -22485,8 +22508,8 @@ pub const AppSession = struct {
         // raster_*_px>0이면 estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡는다(.m·레이아웃 불변). 터미널
         // 콘텐츠(.pane)의 ◧는 키우지 않도록 헤더 dest로 한정한다(펼침·접힘 토글 모두 .sidebar_header).
         if ((std.meta.activeTag(dest) == .sidebar_header or std.meta.activeTag(dest) == .dock_toggle) and self.cell_width_px > 0 and self.cell_height_px > 0) {
-            const rw: u16 = @intCast(@min(@as(u32, self.cell_width_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
-            const rh: u16 = @intCast(@min(@as(u32, self.cell_height_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
+            const rw: u16 = @intCast(headerIconRasterExtentPx(self.cell_width_px));
+            const rh: u16 = @intCast(headerIconRasterExtentPx(self.cell_height_px));
             for (pane.shaped.runs.glyphs) |*g| {
                 // ◧(접기)·⚙(view options)는 헤더 전용 심볼이라 coretext_smoke.m의 cover-fit(center_symbol)
                 // 경로를 이미 타므로, slot만 1.7×로 키우면 1.7× quad에 1:1로 들어가 선명해진다. '+'(U+002B)는
@@ -22556,7 +22579,14 @@ pub const AppSession = struct {
                 .overlay => |p| overlay_frame.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect },
                 .pane, .dock_toggle => |p| {
                     if (built_frames.append(self.allocator, rf)) |_| {
-                        pane_frames.append(self.allocator, .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect }) catch {};
+                        pane_frames.append(self.allocator, .{
+                            .frame = rf,
+                            .origin_x = p.origin_x,
+                            .origin_y = p.origin_y,
+                            .colors = p.colors,
+                            .clip_rect = p.clip_rect,
+                            .role = if (std.meta.activeTag(c.dest) == .dock_toggle) .dock_toggle else .normal,
+                        }) catch {};
                     } else |_| {
                         var v = rf;
                         v.deinit(self.allocator);
@@ -36032,6 +36062,17 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
 }
 
+test "dock toggle visual bottom covers 1.7x glyph when titlebar is below equal or above cell height" {
+    // strip < cell: renderer starts the cell at y=0, so visible bottom is 1.35ch.
+    try std.testing.expectEqual(@as(u32, 27), dockToggleVisualBottomPx(20, 10));
+    // strip == cell: 같은 경계이며 큰 글꼴에서도 glyph 아래쪽까지 hit rect가 포함한다.
+    try std.testing.expectEqual(@as(u32, 27), dockToggleVisualBottomPx(20, 20));
+    // strip > 1.7ch: glyph가 strip 안에 완전히 들어가므로 호출부의 max(strip, bottom)가 strip을 유지한다.
+    try std.testing.expectEqual(@as(u32, 37), dockToggleVisualBottomPx(20, 40));
+    // 제품 기본 근사(ch=18, strip=28)는 1.7x quad의 1px 남짓한 아래 돌출까지 포함한다.
+    try std.testing.expectEqual(@as(u32, 29), dockToggleVisualBottomPx(18, 28));
+}
+
 test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit-test·workspace 캡처" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -36137,6 +36178,11 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
             cell.origin_x >= dock_toggle.x and cell.origin_x < dock_toggle.x + dock_toggle.w and
             cell.origin_y < session.titlebar_strip_px)
         {
+            // maru_metal_renderer.m의 freely-placed dock-toggle 판정 계약. 왼쪽 헤더(origin 0,0)와
+            // 구분되는 명시적 role과 titlebar 배치를 함께 보존해야 1.7× PUA slot과 quad가 같은 경로를 소비한다.
+            try std.testing.expectEqual(metal_frame.native_cell_role_dock_toggle, cell.reserved);
+            try std.testing.expect(cell.origin_x > 0);
+            try std.testing.expect(cell.origin_y + session.cell_height_px <= session.titlebar_strip_px);
             saw_dock_toggle = true;
             break;
         }

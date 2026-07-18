@@ -18,7 +18,8 @@ pub const NativeMetalCell = extern struct {
     width: u16,
     // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR, 4=상단선/overline(SGR 53),
     // 5=우측선 — active pane 테두리, 6=strikethrough — SGR 9 중앙 가로선). renderer가 2~6을 cell의
-    // 한 변/중앙 ~2px 띠로 그린다. block 커서는 전체 사각형이라 0.
+    // 한 변/중앙 ~2px 띠로 그린다. block 커서는 전체 사각형이라 0. 32는 부분 사각형이 아니라
+    // 자유 배치 파일 도크 토글의 semantic render role이다(1.7x PUA 확대·titlebar 중앙 정렬).
     reserved: u16 = 0,
     codepoint: u32,
     slot_id: u32,
@@ -43,6 +44,21 @@ pub const NativeMetalCell = extern struct {
     origin_x: u32 = 0,
     origin_y: u32 = 0,
 };
+
+/// NativeMetalCell.reserved의 glyph semantic 값. 커서·선 장식과 같은 기존 ABI 필드를 쓰되, 숫자를
+/// producer와 Metal backend가 각자 재정의하지 않도록 renderer DTO가 단일 출처로 소유한다.
+pub const native_cell_role_dock_toggle: u16 = 32;
+
+pub const PaneFrameRole = enum { normal, dock_toggle };
+
+fn applyPaneFrameRole(cells: []NativeMetalCell, role: PaneFrameRole) void {
+    if (role != .dock_toggle) return;
+    // semantic role은 실제 atlas glyph에만 싣는다. cursor/underline 같은 장식 cell의 reserved를 덮으면
+    // 미래에 dock-toggle frame이 caret/decoration을 추가할 때 부분 사각형 의미가 조용히 사라진다.
+    for (cells) |*cell| {
+        if (cell.slot_id != 0 and cell.reserved == 0) cell.reserved = native_cell_role_dock_toggle;
+    }
+}
 
 /// 반전 블록 커서의 두 색. block은 커서 칸 배경(theme.cursor), text는 그 위 glyph를 그릴 색
 /// (theme.background) — 글자가 커서 위에서 배경색으로 반전돼 보이게 한다.
@@ -1150,6 +1166,9 @@ pub const PaneFrame = struct {
     origin_x: u32,
     origin_y: u32,
     colors: CellColors,
+    /// 이 frame의 glyph가 일반 pane인지 자유 배치 도크 토글인지 명시한다. Metal backend가
+    /// codepoint·좌표로 역할을 재추론하지 않도록 replace가 NativeMetalCell.reserved에 lower한다.
+    role: PaneFrameRole = .normal,
     /// 모달 오버레이 클리핑(px, w==0=없음) — finishOverlayFrame이 OverlayRaster.clip_rect에서 채우고,
     /// MetalFrameBuffer.view가 MetalFrame.modal_clip_*로 흘려 renderer가 모달 셀 draw에 scissor. 인프라(적용 후속).
     clip_rect: ?ClipPx = null,
@@ -1311,6 +1330,7 @@ pub const MetalFrameBuffer = struct {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+            applyPaneFrameRole(built.cells, pf.role);
             try cells_list.appendSlice(allocator, built.cells);
             if (i == pane_frames.len - 1) cursor_cells = built.cursor_cells; // 활성(마지막) panel의 커서가 끝에
         }
@@ -2762,6 +2782,50 @@ test "renormalizeGlyphCellUvs rescales glyph UVs to final atlas dims, preserves 
     };
     renormalizeGlyphCellUvs(&zero, 0, 0);
     try std.testing.expectEqual(@as(f32, 0.5), zero[0].u0); // baked 유지
+}
+
+test "PaneFrameRole lowers dock toggle provenance without classifying the same PUA in a normal pane" {
+    var dock = [_]NativeMetalCell{
+        .{
+            .row = 0,
+            .col = 0,
+            .width = 1,
+            .codepoint = 0xF0006,
+            .slot_id = 1,
+            .atlas_x_px = 0,
+            .atlas_y_px = 0,
+            .atlas_width_px = 13,
+            .atlas_height_px = 30,
+            .u0 = 0,
+            .v0 = 0,
+            .u1 = 1,
+            .v1 = 1,
+        },
+        .{
+            .row = 0,
+            .col = 0,
+            .width = 1,
+            .reserved = 9,
+            .codepoint = 0,
+            .slot_id = 0,
+            .atlas_x_px = 0,
+            .atlas_y_px = 0,
+            .atlas_width_px = 0,
+            .atlas_height_px = 0,
+            .u0 = -1,
+            .v0 = -1,
+            .u1 = -1,
+            .v1 = -1,
+        },
+    };
+    var pane = dock;
+
+    applyPaneFrameRole(&dock, .dock_toggle);
+    applyPaneFrameRole(&pane, .normal);
+
+    try std.testing.expectEqual(native_cell_role_dock_toggle, dock[0].reserved);
+    try std.testing.expectEqual(@as(u16, 0), pane[0].reserved);
+    try std.testing.expectEqual(@as(u16, 9), dock[1].reserved);
 }
 
 // 렌더러 슬라이스(web-panel.md §5): 탭/pane 드래그 시각물(drop 하이라이트·floating 고스트)을 **최상위 오버레이

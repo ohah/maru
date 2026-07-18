@@ -3,11 +3,12 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "metal_cell_policy.h"
 
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 129u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 130u
 #define MARU_FILE_TREE_TRASH_KIND_REGULAR 1u
 #define MARU_FILE_TREE_TRASH_KIND_DIRECTORY 2u
 #define MARU_FILE_TREE_TRASH_KIND_SYMLINK 3u
@@ -204,7 +205,8 @@ typedef struct MaruAppHostMetalCell {
     /* overlay 종류: 0=일반 cell, 2=커서 underline/hollow 하단, 3=커서 bar/hollow 좌측, 4=hollow 상단,
        5=hollow 우측(커서 강조선 — 셀 ~15%). 6=strikethrough·7=2중밑줄 둘째·9=밑줄·10=윗줄(SGR 텍스트 장식선 ~7.5%).
        8=OSC 133 거터(셀 왼쪽 바깥). 30=pane divider 세로선·31=divider 가로선(seam 중앙정렬 config 두께 divider_thickness_px, 커서와 분리).
-       renderer는 reserved에서 cell의 한 변/중앙 가는 띠만 칠한다(글리프를 안 가림). */
+       32=자유 배치 파일 도크 토글 semantic role(부분 사각형 아님, PUA 1.7x 확대·titlebar 중앙 정렬).
+       renderer는 2~31에서 cell의 한 변/중앙 가는 띠를 칠하고, 32는 glyph 역할로 소비한다. */
     uint16_t reserved;
     uint32_t codepoint;
     uint32_t slot_id;

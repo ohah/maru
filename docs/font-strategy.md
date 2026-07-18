@@ -143,6 +143,7 @@ font.family-italic = ""
 | `Fira Code` | Regular/Bold | OFL 1.1 | 합자(ligature) 매니아층 — 단, maru는 합자 렌더 보류라 모양만 쓰임(아래 "Ligature" 참고) |
 | `Cascadia Code` | Regular/Bold/Italic/BoldItalic | OFL 1.1 | Windows Terminal 출신, 크로스플랫폼 친화 |
 | `Hack` | Regular/Bold/Italic/BoldItalic | MIT(+DejaVu/Bitstream Vera) | 합자 없는 순수 가독성, `0/O`·`1/l/I` 구분 명확 |
+| `Jetendard` | Regular/Bold/Italic/BoldItalic | OFL 1.1 (RFN "Jetendard") | JetBrains Mono Nerd Font Mono 라틴 글리프 + Pretendard 한글/CJK를 결합한 균형형 모노스페이스 |
 
 동봉/등록 메커니즘:
 
@@ -156,9 +157,9 @@ font.family-italic = ""
 
 결정과 근거(`document-basis-and-decision`):
 
-- **Nerd Font 미동봉**: 풀 패치 Nerd Font는 패밀리당 ~8.7MB(아이콘이 본문의 ~7배)로 5종이면 ~40MB까지 부푼다. maru의 chrome 아이콘은 SVG 합성(`icon_glyph`)으로 폰트와 무관하게 그리고, 터미널 콘텐츠의 Nerd Font 아이콘은 Powerline separator를 합성(`powerline_glyph`)으로 커버한다. 그 밖의 심볼은 향후 "Symbols-Only Nerd Font" 폴백(단일 ~2MB) 한 개로 모든 폰트가 공유하게 두는 방향이 효율적이다(풀 패치 중복 동봉 대비 ~1/15). 현재는 미동봉 — 본문 폰트 4종 합계 ~4.9MB로 가볍게 유지.
+- **Nerd Font 미동봉**: 풀 패치 Nerd Font는 패밀리당 ~8.7MB(아이콘이 본문의 ~7배)로 5종이면 ~40MB까지 부푼다. maru의 chrome 아이콘은 SVG 합성(`icon_glyph`)으로 폰트와 무관하게 그리고, 터미널 콘텐츠의 Nerd Font 아이콘은 Powerline separator를 합성(`powerline_glyph`)으로 커버한다. 그 밖의 심볼은 향후 "Symbols-Only Nerd Font" 폴백(단일 ~2MB) 한 개로 모든 폰트가 공유하게 두는 방향이 효율적이다(풀 패치 중복 동봉 대비 ~1/15). Jetendard는 한글/CJK 품질을 위한 예외적인 번들 폰트로, R/B/I/BI 4종이 약 18MB를 차지한다.
 - **Iosevka 미동봉**: 후보였으나 글리프 커버리지가 방대해 변종당 ~10.5MB(4변종 ~43MB)로 "용량 절감" 의도와 충돌해 제외했다. compact 니치가 필요하면 Latin 서브셋(비라틴은 폴백) 또는 더 가벼운 대안을 별도 검토.
-- **변종 범위**: SGR 1(bold)/3(italic) 지원을 위해 가능한 한 R/B/I/BI 4종을 넣는다. Fira Code는 italic face가 존재하지 않아 R/B만 동봉(italic 요청 시 regular 대체 — 위 해석 규칙).
+- **변종 범위**: SGR 1(bold)/3(italic) 지원을 위해 가능한 한 R/B/I/BI 4종을 넣는다. Fira Code는 italic face가 존재하지 않아 R/B만 동봉(italic 요청 시 regular 대체 — 위 해석 규칙). Jetendard는 릴리스의 16종 중 R/B/I/BI만 동봉하며, italic의 한글/CJK는 원본 정책상 upright 글리프를 사용한다.
 
 ## Cell Width와 Font Metric
 

@@ -54,6 +54,7 @@ pub const bundled_font_families = [_][]const u8{
     "Fira Code",
     "Cascadia Code",
     "Hack",
+    "Jetendard",
 };
 
 pub const FontConfig = struct {

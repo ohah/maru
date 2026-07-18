@@ -14,6 +14,7 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 | Fira Code | 6.2 | OFL 1.1 | Copyright 2014–2021 The Fira Code Project Authors | <https://github.com/tonsky/FiraCode> |
 | Cascadia Code | v2407.24 | OFL 1.1 (RFN "Cascadia Code") | © 2021 Microsoft Corporation | <https://github.com/microsoft/cascadia-code> |
 | Hack | v3.003 | MIT + Bitstream Vera | © 2018 Source Foundry Authors / © 2003 Bitstream, Inc. | <https://github.com/source-foundry/Hack> |
+| Jetendard | v0.1.0 | OFL 1.1 (RFN "Jetendard") | Copyright © 2026 Jung Woong Park | <https://github.com/kuskhan/jetendard> |
 
 각 라이선스 전문은 폰트 옆(`assets/fonts/<Family>/OFL.txt` 또는 `LICENSE.md`)에 두고, 번들에도 패밀리명 프리픽스로 함께 들어간다(`Resources/Fonts/<Family>-OFL.txt` 등).
 
@@ -40,7 +41,7 @@ FP4부터 `web/dist/bundle.js`가 앱 `Resources/web/`에 포함된다. 직접 �
 
 ## 라이선스별 의무와 충족 방법
 
-### SIL Open Font License 1.1 (OFL) — JetBrains Mono · Fira Code · Cascadia Code
+### SIL Open Font License 1.1 (OFL) — JetBrains Mono · Fira Code · Cascadia Code · Jetendard
 
 OFL은 폰트 전용 자유 라이선스로, **앱에 임베드·번들·재배포(무료/상용 무관)가 명시적으로 허용된 사용 방식**이다. 로열티·사용료 없음. 의무는 셋:
 
@@ -49,7 +50,7 @@ OFL은 폰트 전용 자유 라이선스로, **앱에 임베드·번들·재배�
 2. **폰트 단독 판매 금지** — 폰트는 더 큰 소프트웨어 패키지의 일부로만 배포·판매할 수 있다(폰트 파일만 따로 팔 수 없다).
    - 충족: Maru 앱 번들의 일부로만 배포한다.
 3. **Reserved Font Name(RFN)** — RFN이 지정된 폰트는 **수정본**에 그 이름을 쓸 수 없다(수정본은 다른 이름으로, 역시 OFL로 배포).
-   - 충족: RFN이 걸린 건 Cascadia Code("Cascadia Code")뿐이고, 우리는 **무수정 원본**을 재배포하므로 이름을 그대로 쓴다. 향후 서브셋·패치 등 **수정**을 하려면 반드시 RFN과 다른 패밀리명으로 바꾸고 OFL로 배포한다.
+   - 충족: RFN이 걸린 Cascadia Code("Cascadia Code")와 Jetendard("Jetendard")는 각각 해당 이름으로 배포되는 릴리스 자산을 사용한다. 향후 이 자산을 다시 서브셋·패치하는 경우에는 반드시 RFN과 다른 패밀리명으로 바꾸고 OFL로 배포한다.
 
 ### MIT + Bitstream Vera — Hack
 
@@ -59,6 +60,10 @@ Hack는 두 부분으로 나뉜다:
 
 의무 요약: 저작권·라이선스 고지 유지 + (수정 시) Bitstream Vera RFN 회피. 임베드·번들 자체는 제약 없음.
 - 충족: `assets/fonts/Hack/LICENSE.md`(MIT + Bitstream Vera 전문, RFN 조항 포함)를 두고 번들에 동봉한다.
+
+### Jetendard의 파생 폰트 고지
+
+Jetendard는 JetBrains Mono Nerd Font Mono와 Pretendard를 결합해 만든 OFL 1.1 파생 폰트다. Maru는 upstream 릴리스 v0.1.0의 `Regular`·`Bold`·`Italic`·`BoldItalic` TTF와 upstream `LICENSE` 전문을 원본 그대로 번들한다. Jetendard 자체의 Reserved Font Name은 `Jetendard`이며, 자산을 다시 수정하지 않으므로 이 이름을 사용한다. 상위 프로젝트의 고지와 라이선스는 upstream 라이선스 문서가 참조하는 각 프로젝트의 원문을 따른다.
 
 ## About 화면 attribution(권장)
 

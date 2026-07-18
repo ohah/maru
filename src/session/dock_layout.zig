@@ -236,28 +236,32 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
 /// 탐색기 열의 실제 1px 경계를 양쪽으로 넓힌 마우스 target. tree가 좁은 창에서 숨겨졌으면 빈 rect다.
 pub fn treeDividerHitRect(g: Geometry, hit_slop: u32) Rect {
     if (g.tree_divider.w == 0 or g.tree_divider.h == 0) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    // 확장은 editor(WKWebView) 쪽만 넓힌다 — 그쪽은 WKWebView가 클릭을 삼켜 seam 통과 없이는 divider를 못 잡으므로.
+    // 탐색기(우측)는 네이티브 rows라 hit_slop만큼 넓히면 좌측에 붙은 파일명 첫 셀이 리사이즈에 가려 안 열린다
+    // → 우측은 divider 선(1px)까지만 잡고, 그 뒤 셀은 fileTreeRowAt으로 넘긴다.
     const start = @max(g.dock.x, g.tree_divider.x -| hit_slop);
-    const end = @min(g.dock.x + g.dock.w, g.tree_divider.x +| g.tree_divider.w +| hit_slop);
+    const end = @min(g.dock.x + g.dock.w, g.tree_divider.x +| g.tree_divider.w);
     return .{ .x = start, .y = g.tree_divider.y, .w = end -| start, .h = g.tree_divider.h };
 }
 
-/// 포인터 x를 도크 오른쪽 경계에서 잰 탐색기 폭(pt)으로 바꾼다. min/max clamp는 `compute`가 editor/tree
-/// 가독성 하한과 함께 단일 적용하므로, 호출자는 후보를 저장한 뒤 계산된 실효 폭을 다시 권위값으로 삼는다.
+/// 탐색기 폭은 도크 side와 무관하게 항상 도크 오른쪽 경계에서 잰다. 포인터→pt 변환은 `sizePtForPointer` 단일
+/// 출처를 재사용해 outer-dock resize와 rounding·센티널·clamp 규약이 갈리지 않게 한다(측정 시점 두 곳 중복 제거).
+/// min/max clamp는 `compute`가 editor/tree 가독성 하한과 함께 단일 적용하므로, 호출자는 후보를 저장한 뒤 계산된
+/// 실효 폭을 다시 권위값으로 삼는다.
 pub fn treeSizePtForPointer(g: Geometry, x_px: f64, scale_milli: u32) ?u32 {
-    if (!std.math.isFinite(x_px)) return null;
-    const raw = @as(f64, @floatFromInt(g.dock.x + g.dock.w)) - x_px;
-    const px: u32 = if (raw <= 0) 0 else @intFromFloat(@min(raw, @as(f64, @floatFromInt(std.math.maxInt(u32)))));
-    const scale = if (scale_milli == 0) 1000 else scale_milli;
-    return @intCast((@as(u64, px) * 1000) / scale);
+    return sizePtForPointer(g, .right, x_px, 0, scale_milli);
 }
 
-/// clamp 뒤 backing-px 폭을 다시 영속 pt로 만들 때는 올림한다. 내림하면 1.5x처럼 px/pt가 나누어떨어지지 않는
-/// 배율에서 `compute -> 저장 -> compute`마다 최대 1px씩 줄어든다. 올림값이 max를 1px 넘더라도 다음 compute의 같은
-/// max clamp가 원래 실효 폭을 복원하므로 고정점이다.
-pub fn treeSizePtForEffectiveWidth(width_px: u32, scale_milli: u32) u32 {
+/// clamp된 실효 backing-px 폭을 다시 영속 pt로 되돌린다. **내부·max 경계는 올림** — 내림하면 1.5x처럼 px/pt가
+/// 나누어떨어지지 않는 배율에서 `compute -> 저장 -> compute`마다 최대 1px씩 줄고, 올림값이 max를 1px 넘어도 다음
+/// compute의 같은 max clamp가 원래 실효 폭을 복원하므로 고정점이다. 단 **min 경계(width==min_px)** 만은 올림이
+/// min을 1px 넘겨 compute의 min clamp-up이 못 되돌리므로(하한에 영영 도달 못 함) **내림**해 정확히 min으로 복원한다.
+/// min_px=0이면 하한 경계가 없어(outer dock resize) 항상 올림이다.
+pub fn sizePtForEffectiveWidth(width_px: u32, min_px: u32, scale_milli: u32) u32 {
     const scale = if (scale_milli == 0) 1000 else scale_milli;
-    const numerator = @as(u64, width_px) * 1000 + (scale - 1);
-    return @intCast(@min(numerator / scale, std.math.maxInt(u32)));
+    const num = @as(u64, width_px) * 1000;
+    const rounded = if (min_px != 0 and width_px <= min_px) num / scale else (num + (scale - 1)) / scale;
+    return @intCast(@min(rounded, std.math.maxInt(u32)));
 }
 
 /// 한 DockTree leaf rect의 그룹별 chrome. global project tree 폭은 이미 `Geometry.editor`에서 빠졌으므로
@@ -310,7 +314,10 @@ pub fn sizePtForPointer(g: Geometry, side: dock_panel.Side, x_px: f64, y_px: f64
     };
     const px: u32 = if (raw <= 0) 0 else @intFromFloat(@min(raw, @as(f64, @floatFromInt(std.math.maxInt(u32)))));
     const scale = if (scale_milli == 0) 1000 else scale_milli;
-    return @intCast((@as(u64, px) * 1000) / scale);
+    // pt 0은 compute의 "미설정=기본값" 센티널이다. 라이브 드래그가 이 값을 만들면(포인터가 도크 반대 경계를 지나
+    // raw<=0) divider를 끝까지 줄였는데 최소가 아니라 기본 크기로 튄다 → 최소 1을 보장하고, 실제 하한 clamp는
+    // compute가 editor/tree 가독성 하한과 함께 적용한다.
+    return @max(@as(u32, 1), @as(u32, @intCast((@as(u64, px) * 1000) / scale)));
 }
 
 test "right and bottom dock geometry share terminal and chrome boundaries" {
@@ -401,7 +408,8 @@ test "narrow right dock preserves a readable editor and hides an unusable tree s
     const resized = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 150, .visible = true });
     try std.testing.expectEqual(@as(u32, 150), resized.tree.w);
     try std.testing.expectEqual(resized.tree.x, resized.tree_divider.x);
-    try std.testing.expectEqual(Rect{ .x = resized.tree.x - 5, .y = resized.tree.y, .w = 11, .h = resized.tree.h }, treeDividerHitRect(resized, 5));
+    // hit target은 editor(좌) 쪽으로만 hit_slop 넓히고 tree(우) 쪽은 divider 선(1px)까지만 — 파일명 첫 셀 보존.
+    try std.testing.expectEqual(Rect{ .x = resized.tree.x - 5, .y = resized.tree.y, .w = 6, .h = resized.tree.h }, treeDividerHitRect(resized, 5));
     try std.testing.expectEqual(@as(u32, 150), treeSizePtForPointer(resized, @floatFromInt(resized.tree.x), 1000).?);
 
     const too_wide = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 9999, .visible = true });
@@ -412,11 +420,34 @@ test "narrow right dock preserves a readable editor and hides an unusable tree s
     // 1.5x에서 max clamp된 470px은 313.33pt다. 313pt로 내리면 다음 frame에 469px로 줄지만, 314pt 올림은
     // 다시 같은 max 470px로 clamp되어 저장/복원 고정점을 만든다.
     const scaled_max = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1500, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = 9999, .visible = true });
-    const stable_pt = treeSizePtForEffectiveWidth(scaled_max.tree.w, 1500);
+    const stable_pt = sizePtForEffectiveWidth(scaled_max.tree.w, 0, 1500);
     const scaled_restored = compute(.{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 1500, .divider_px = 2, .side = .right, .size_pt = 500, .tree_size_pt = stable_pt, .visible = true });
     try std.testing.expectEqual(@as(u32, 470), scaled_max.tree.w);
     try std.testing.expectEqual(@as(u32, 314), stable_pt);
     try std.testing.expectEqual(scaled_max.tree.w, scaled_restored.tree.w);
+}
+
+test "tree resize reaches its floor and never snaps back to the default sentinel" {
+    // 1.25x·셀폭 7: min tree = 12*7 = 84px, 84*1000/1250 = 67.2로 px/pt가 안 나누어떨어진다.
+    const base = Input{ .backing_width_px = 1600, .backing_height_px = 900, .sidebar_width_px = 200, .titlebar_height_px = 40, .cell_width_px = 7, .cell_height_px = 14, .scale_milli = 1250, .divider_px = 2, .side = .right, .size_pt = 600, .visible = true };
+    const g = compute(base);
+    const min_tree_px = min_tree_cols * base.cell_width_px;
+
+    // #1: 포인터가 도크 오른쪽 경계 밖(raw<=0)이어도 pt는 센티널 0이 아니라 ≥1.
+    const past_edge = treeSizePtForPointer(g, @floatFromInt(g.dock.x + g.dock.w + 30), base.scale_milli).?;
+    try std.testing.expect(past_edge >= 1);
+    var at_min = base;
+    at_min.tree_size_pt = past_edge;
+    // 기본 18칸으로 튀지 않고 정확히 12칸 하한.
+    try std.testing.expectEqual(min_tree_px, compute(at_min).tree.w);
+
+    // #4: min 실효 폭 → 영속 pt(내림) → 다시 compute가 정확히 min을 복원(1px 더 넓게 멈추지 않음, 고정점).
+    const stable = sizePtForEffectiveWidth(min_tree_px, min_tree_px, base.scale_milli);
+    var restored = base;
+    restored.tree_size_pt = stable;
+    try std.testing.expectEqual(min_tree_px, compute(restored).tree.w);
+    // 올림(min 무시)이었다면 85px로 벌어져 하한을 못 밟는다 — 내림 분기가 실제로 갈리는지 대비 확인.
+    try std.testing.expect(sizePtForEffectiveWidth(min_tree_px, 0, base.scale_milli) > stable);
 }
 
 test "dock group divider hit target and pointer ratio share split bounds" {

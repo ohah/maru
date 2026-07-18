@@ -2,6 +2,13 @@ import { normalizeAssetReference } from "./asset-path";
 import { renderMarkdown } from "./markdown";
 import { sanitizeMermaidSvg } from "./rich-render";
 import { createMarkdownEditor } from "./editor";
+import {
+  encodeFileBridgeRequest,
+  type DirtyReport,
+  type FileBridgeRequest,
+  type FileMethod,
+  type OpenLinkRequest,
+} from "./file-bridge-request";
 import type { EditorView } from "@codemirror/view";
 
 export const viewerChannel = "maru.file.viewer.v1";
@@ -21,14 +28,6 @@ export function assetBase64BudgetAllowed(currentBytes: number, nextBytes: number
     currentBytes <= maxAssetBase64Bytes - nextBytes
   );
 }
-
-type FileMethod =
-  | "read"
-  | "readAsset"
-  | "write"
-  | "setDirty"
-  | "resolveExternalChange"
-  | "openLink";
 
 type BridgeResult = Record<string, unknown>;
 
@@ -54,8 +53,6 @@ type LinkActivation = {
   href: string;
   forceSystem: boolean;
 };
-
-type OpenLinkRequest = { href: string; forceSystem: boolean };
 
 type RendererReport = {
   channel: typeof viewerChannel;
@@ -133,6 +130,25 @@ export function isLinkActivation(value: unknown): value is LinkActivation {
     value.href.length <= 4096 &&
     typeof value.forceSystem === "boolean" &&
     (isLocalDocumentHref(value.href) || isExplicitHttpHref(value.href))
+  );
+}
+
+export function closeUnlockOwnsLock(
+  currentRequestId: number | null,
+  unlockRequestId: number,
+): boolean {
+  return (
+    currentRequestId !== null &&
+    Number.isSafeInteger(unlockRequestId) &&
+    unlockRequestId >= currentRequestId
+  );
+}
+
+export function closeLockCanAcquire(currentRequestId: number | null, requestId: number): boolean {
+  return (
+    Number.isSafeInteger(requestId) &&
+    requestId > 0 &&
+    (currentRequestId === null || requestId >= currentRequestId)
   );
 }
 
@@ -218,8 +234,38 @@ function isRendererReady(value: unknown): value is RendererReady {
 // JSON-RPC reply만 읽는다. 완료/오류에서 항상 node와 listener를 제거해 파일 bytes가 shell DOM에 남지 않는다.
 export function requestFileBridge(
   document: Document,
+  method: "read",
+  value?: undefined,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "readAsset" | "write",
+  value: string,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "setDirty",
+  value: DirtyReport,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "resolveExternalChange",
+  value: boolean,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "openLink",
+  value: OpenLinkRequest,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
   method: FileMethod,
-  value?: string | boolean | OpenLinkRequest,
+  value?: unknown,
   timeoutMs = 15_000,
 ): Promise<BridgeResult> {
   return new Promise((resolve, reject) => {
@@ -227,23 +273,52 @@ export function requestFileBridge(
     node.hidden = true;
     node.dataset.maruFileRequest = "pending";
     node.dataset.maruFileRequestId = String(++bridgeRequestId);
-    const request =
-      method === "read"
-        ? { method }
-        : method === "readAsset"
-          ? { method, path: value }
-          : method === "write"
-            ? { method, content: value }
-            : method === "setDirty"
-              ? { method, dirty: value }
-              : method === "resolveExternalChange"
-                ? { method, success: value }
-                : {
-                    method,
-                    href: (value as OpenLinkRequest).href,
-                    forceSystem: (value as OpenLinkRequest).forceSystem,
-                  };
-    node.textContent = JSON.stringify(request);
+    let request: FileBridgeRequest;
+    switch (method) {
+      case "read":
+        request = { method };
+        break;
+      case "readAsset":
+        if (typeof value !== "string") throw new TypeError("invalid readAsset payload");
+        request = { method, path: value };
+        break;
+      case "write":
+        if (typeof value !== "string") throw new TypeError("invalid write payload");
+        request = { method, content: value };
+        break;
+      case "setDirty":
+        if (
+          !isRecord(value) ||
+          typeof value.dirty !== "boolean" ||
+          !Number.isSafeInteger(value.revision) ||
+          !Number.isSafeInteger(value.request_id)
+        ) {
+          throw new TypeError("invalid setDirty payload");
+        }
+        request = {
+          method,
+          dirty: value.dirty,
+          revision: value.revision as number,
+          request_id: value.request_id as number,
+        };
+        break;
+      case "resolveExternalChange":
+        if (typeof value !== "boolean")
+          throw new TypeError("invalid resolveExternalChange payload");
+        request = { method, success: value };
+        break;
+      case "openLink":
+        if (
+          !isRecord(value) ||
+          typeof value.href !== "string" ||
+          typeof value.forceSystem !== "boolean"
+        ) {
+          throw new TypeError("invalid openLink payload");
+        }
+        request = { method, href: value.href, forceSystem: value.forceSystem };
+        break;
+    }
+    node.textContent = JSON.stringify(encodeFileBridgeRequest(request));
     document.documentElement.append(node);
 
     const cleanup = () => {
@@ -318,18 +393,53 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let editorRevision = 0;
   let mode: "read" | "source-edit" = "read";
   let mutationQueue = Promise.resolve();
+  let closeLockRequestId: number | null = null;
 
-  const syncDirty = async (next: boolean) => {
+  const setCloseLocked = (requestId: number | null) => {
+    closeLockRequestId = requestId;
+    if (editor !== null) editor.contentDOM.contentEditable = requestId === null ? "true" : "false";
+  };
+
+  const syncDirty = async (next: boolean, requestId = 0) => {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        await requestFileBridge(document, "setDirty", next);
+        await requestFileBridge(document, "setDirty", {
+          dirty: next,
+          revision: editorRevision,
+          request_id: requestId,
+        });
         return;
       } catch (error) {
         lastError = error;
       }
     }
     throw lastError;
+  };
+
+  const syncDirtyForClose = async (requestId: number): Promise<boolean> => {
+    // 오래 지연된 request가 더 최신 close owner를 덮지 못한다. 같은 request 재호출은 idempotent이고 새 request만
+    // 이전 owner를 supersede한다. 진행 중 IME marked text는 CM6 state transaction에 아직 없을 수 있으므로
+    // contentEditable을 끄기 전에 fail-closed한다(조합이 끝난 뒤 사용자가 다시 닫는다).
+    if (!closeLockCanAcquire(closeLockRequestId, requestId) || editor?.composing === true)
+      return false;
+    setCloseLocked(requestId);
+    const operation = mutationQueue.then(async () => {
+      const actual = editor?.state.doc.toString() !== savedContent;
+      dirty = actual;
+      await syncDirty(actual, requestId);
+      return true;
+    });
+    mutationQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await operation;
+    } catch {
+      if (closeLockRequestId === requestId) setCloseLocked(null);
+      return false;
+    }
   };
 
   const reportDirty = (next: boolean, force = false) => {
@@ -370,6 +480,37 @@ export function bootShell(document: Document, targetWindow: Window): void {
       return false;
     }
   };
+  const closeApi = targetWindow as Window & {
+    __maruSyncDirtyForClose?: (requestId: number) => Promise<boolean>;
+    __maruSaveForClose?: (
+      requestId: number,
+    ) => Promise<{ success: boolean; revision: number; dirty: boolean }>;
+    __maruUnlockFileClose?: (requestId: number) => Promise<boolean>;
+  };
+  closeApi.__maruSyncDirtyForClose = syncDirtyForClose;
+  closeApi.__maruSaveForClose = async (requestId: number) => {
+    if (!Number.isSafeInteger(requestId) || closeLockRequestId !== requestId) {
+      return { success: false, revision: editorRevision, dirty: true };
+    }
+    const success = await save();
+    const actual = editor?.state.doc.toString() !== savedContent;
+    if ((!success || actual) && closeLockRequestId === requestId) setCloseLocked(null);
+    return { success, revision: editorRevision, dirty: actual };
+  };
+  closeApi.__maruUnlockFileClose = async (requestId: number) => {
+    if (!closeUnlockOwnsLock(closeLockRequestId, requestId)) return false;
+    // close request ids never wrap/reuse. A newer cancelled request retires an older lock when its own sync was
+    // cancelled before reaching the page; an older stale unlock can never retire the current newer owner.
+    setCloseLocked(null);
+    try {
+      const actual = editor?.state.doc.toString() !== savedContent;
+      dirty = actual;
+      await syncDirty(actual);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   const ensureEditor = (): EditorView => {
     if (editor !== null) return editor;
@@ -382,6 +523,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       },
       () => void save(),
     );
+    if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
     return editor;
   };
 

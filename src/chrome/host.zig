@@ -42,6 +42,7 @@ pub const HostAction = union(enum) {
     notifications_mark_all_read, // 하단 "모두 읽음" — platform이 전체 읽음 처리(배지 0)
     notifications_clear_all, // 하단 "모두 지우기" — platform이 히스토리 전체 삭제
     confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
+    confirm_alternate, // 세 갈래 확인의 보조 선택(예: dirty 파일 변경사항 버리기)
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
     settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
     settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected] 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color picker·keybind 녹음)
@@ -206,6 +207,7 @@ pub const ChromeHost = struct {
                     // 확인 모달은 파괴적 동작(닫기) 게이트라 최우선. Enter/Y=accept·Esc/N=cancel, 그 외는 소비(.none).
                     return switch (confirm.handle(k, &self.confirm) orelse return .none) {
                         .confirmed => .confirm_accept,
+                        .alternate => .confirm_alternate,
                         .cancelled => .confirm_cancel,
                     };
                 }

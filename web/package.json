@@ -5,11 +5,12 @@
   "scripts": {
     "web:build": "bun run scripts/build.ts && bun run scripts/verify-build.ts",
     "web:test": "bun test",
+    "web:typecheck": "tsc -p tsconfig.bridge.json",
     "web:lint": "oxlint src scripts tests",
-    "web:fmt": "oxfmt --write src scripts tests package.json tsconfig.json",
-    "web:fmt-check": "oxfmt --check src scripts tests package.json tsconfig.json",
+    "web:fmt": "oxfmt --write src scripts tests package.json tsconfig.json tsconfig.bridge.json",
+    "web:fmt-check": "oxfmt --check src scripts tests package.json tsconfig.json tsconfig.bridge.json",
     "web:licenses": "bun run scripts/audit-licenses.ts",
-    "web:check": "bun run web:build && bun run web:test && bun run web:lint && bun run web:fmt-check && bun run web:licenses"
+    "web:check": "bun run web:build && bun run web:test && bun run web:typecheck && bun run web:lint && bun run web:fmt-check && bun run web:licenses"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",
@@ -36,7 +37,8 @@
     "@zntc/core": "0.1.3",
     "jsdom": "29.1.1",
     "oxfmt": "0.59.0",
-    "oxlint": "1.74.0"
+    "oxlint": "1.74.0",
+    "typescript": "5.9.3"
   },
   "engines": {
     "bun": ">=1.3.0",

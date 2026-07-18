@@ -781,7 +781,9 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           read: function () { return window.maru.request("maru.file.read"); },
           readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); },
           write: function (content) { return window.maru.request("maru.file.write", { content: content }); },
-          setDirty: function (dirty) { return window.maru.request("maru.file.setDirty", { dirty: dirty }); },
+          setDirty: function (dirty, revision, requestId) {
+            return window.maru.request("maru.file.setDirty", { dirty: dirty, revision: revision, request_id: requestId });
+          },
           openLink: function (href, forceSystem) {
             return window.maru.request("maru.file.openLink", { href: href, forceSystem: forceSystem });
           }
@@ -799,8 +801,10 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
             promise = window.maru.file.readAsset(request.path);
           } else if (request.method === "write" && typeof request.content === "string" && request.content.length <= 8388608) {
             promise = window.maru.file.write(request.content);
-          } else if (request.method === "setDirty" && typeof request.dirty === "boolean") {
-            promise = window.maru.file.setDirty(request.dirty);
+          } else if (request.method === "setDirty" && typeof request.dirty === "boolean" &&
+                     Number.isSafeInteger(request.revision) && request.revision >= 0 &&
+                     Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
+            promise = window.maru.file.setDirty(request.dirty, request.revision, request.request_id);
           } else if (request.method === "openLink" && typeof request.href === "string" && request.href.length <= 4096 && typeof request.forceSystem === "boolean") {
             promise = window.maru.file.openLink(request.href, request.forceSystem);
           } else {
@@ -2276,13 +2280,79 @@ final class MaruWebPanelView: NSView {
         )
     }
 
-    func requestFileDirtySync() {
+    func requestFileDirtySync(requestId: UInt64 = 0) {
         guard filePanelKind == 1, webView.url?.scheme == MaruAppSchemeHandler.scheme,
-              webView.url?.host == "app" else { return }
-        webView.evaluateJavaScript(
-            "window.dispatchEvent(new CustomEvent('maru:file-sync-dirty'))",
-            completionHandler: nil
-        )
+              webView.url?.host == "app" else {
+            if requestId != 0, let session = controller?.bridgeSession(for: surfaceId) {
+                maru_macos_app_session_fail_file_panel_dirty_sync(session, surfaceId, requestId)
+            }
+            return
+        }
+        if requestId == 0 {
+            webView.evaluateJavaScript(
+                "window.dispatchEvent(new CustomEvent('maru:file-sync-dirty'))",
+                completionHandler: nil
+            )
+            return
+        }
+        guard let session = controller?.bridgeSession(for: surfaceId) else { return }
+        webView.callAsyncJavaScript(
+            "return await window.__maruSyncDirtyForClose?.(requestId) === true",
+            arguments: ["requestId": requestId],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            guard let self, let current = self.controller?.bridgeSession(for: self.surfaceId), current == session else { return }
+            guard case .success(let value) = result, value as? Bool == true else {
+                maru_macos_app_session_fail_file_panel_dirty_sync(current, self.surfaceId, requestId)
+                return
+            }
+        }
+    }
+
+    func requestFileSaveForClose(requestId: UInt64) {
+        guard filePanelKind == 1,
+              webView.url?.scheme == MaruAppSchemeHandler.scheme,
+              webView.url?.host == "app",
+              let session = controller?.bridgeSession(for: surfaceId)
+        else {
+            if let session = controller?.bridgeSession(for: surfaceId) {
+                maru_macos_app_session_complete_file_panel_save_close(session, surfaceId, requestId, 0, 0)
+            }
+            return
+        }
+        webView.callAsyncJavaScript(
+            "return await window.__maruSaveForClose?.(requestId)",
+            arguments: ["requestId": requestId],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            guard let self, let current = self.controller?.bridgeSession(for: self.surfaceId), current == session else { return }
+            guard case .success(let value) = result, let report = value as? [String: Any],
+                  report["success"] as? Bool == true, report["dirty"] as? Bool == false,
+                  let revisionNumber = report["revision"] as? NSNumber
+            else {
+                maru_macos_app_session_complete_file_panel_save_close(current, self.surfaceId, requestId, 0, 0)
+                return
+            }
+            maru_macos_app_session_complete_file_panel_save_close(current, self.surfaceId, requestId, revisionNumber.uint64Value, 1)
+        }
+    }
+
+    func unlockFileClose(requestId: UInt64) {
+        guard filePanelKind == 1, let session = controller?.bridgeSession(for: surfaceId) else { return }
+        webView.callAsyncJavaScript(
+            "return await window.__maruUnlockFileClose?.(requestId) === true",
+            arguments: ["requestId": requestId],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            guard let self, let current = self.controller?.bridgeSession(for: self.surfaceId), current == session else { return }
+            guard case .success(let value) = result, value as? Bool == true else {
+                maru_macos_app_session_fail_file_panel_close_unlock(current, self.surfaceId, requestId)
+                return
+            }
+        }
     }
 
     func requestFileReload(conflict: Bool) {
@@ -2354,7 +2424,7 @@ final class MaruWebPanelView: NSView {
             const read = await window.maru.file.read();
             const content = read?.result?.content;
             if (typeof content !== 'string') return false;
-            const dirty = await window.maru.file.setDirty(true);
+            const dirty = await window.maru.file.setDirty(true, 0, 0);
             const written = await window.maru.file.write(content);
             return dirty?.result?.dirty === true && written?.result?.written_bytes === new TextEncoder().encode(content).length;
             """,
@@ -2964,6 +3034,7 @@ final class TerminalSurface {
     var latestFrameSummary = MaruAppHostFrameSummary()
     var appSessionStatus: Int32 = 0
     var lastWindowTitle = ""
+    var protectedTickFaultLatch = FilePanelProtectedTickFaultLatch()
 
     // Metal terminal view = 창 컨테이너(contentView)의 터미널 자식 뷰(Phase 4b-2). window가 살아 있는 동안 유효.
     var view: MaruMetalTerminalView? {
@@ -3192,8 +3263,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // Cmd+Q 종료 확인 모달이 떠 결정을 기다리는 중(applicationShouldTerminate가 .terminateLater 반환). 다음 tick
     // FrameSummary.quit_decision으로 결정이 오면 NSApp.reply로 종료를 진행/취소하고 false로 되돌린다. 중복 Cmd+Q 무시용.
     private var quitConfirmPending = false
-    // 창 닫기로 인한 종료(마지막 창을 Cmd+W/빨간 버튼으로 닫아 windowWillClose/closeWindowOrQuit이 NSApp.terminate를
-    // 부른 경우)는 이미 자기 게이트를 거쳤으므로 applicationShouldTerminate가 종료 확인을 다시 띄우지 않게 하는 래치.
+    // 마지막 창 닫기·세션 종료·confirm 수락 경로가 **모든 일반 창+quick의 파일 보호를 재확인한 뒤** 세우는
+    // 앱-전역 preflight 토큰. applicationShouldTerminate가 같은 종료 요청에 확인을 다시 띄우지 않게 한다.
     private var bypassQuitConfirm = false
     private var exitCode: Int32 = 0
     private var latestFrameSummary: MaruAppHostFrameSummary {
@@ -3369,18 +3440,74 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
         if smokeMode { return .terminateNow } // smoke 자동 종료는 무인이라 모달에 막히면 hang
-        if bypassQuitConfirm { return .terminateNow } // 창 닫기로 인한 종료 — 이미 처리됨, 재확인 안 함
+        if bypassQuitConfirm { return .terminateNow } // 앱-전역 파일 보호+종료 확인 preflight 완료 — 재확인 안 함
         if quitConfirmPending { return .terminateLater } // 이미 모달이 떠 결정 대기 중 — 중복 요청 무시
         // frame-loop tick이 아직 안 도는 런치 초기 에러(tickTimer==nil)거나 세션이 없으면, 모달을 띄워도 결정이
-        // 돌아올 수 없으므로 즉시 종료한다.
-        guard tickTimer != nil, let session = activeSurface?.appSession else { return .terminateNow }
+        // 돌아올 수 없으므로 즉시 종료한다. 일반 창이 0개여도 hidden quick은 살아 있을 수 있으므로 activeSurface를
+        // 요구하기 전에 전 세션 보호를 찾고, clean quick도 일반 종료 confirm 대상으로 삼는다.
+        guard tickTimer != nil else { return .terminateNow }
+        guard let target = protectedFilePanelSurface() ?? activeSurface ?? quick else { return .terminateNow }
+        guard let session = target.appSession else { return .terminateNow }
         quitConfirmPending = true
-        maru_macos_app_session_request_app_quit(session) // 항상 모달(실행 중 명령 무관)
+        maru_macos_app_session_request_app_quit(session) // dirty 파일이면 즉시 취소+notice, 아니면 일반 종료 confirm
+        if target.window?.isKeyWindow != true { target.window?.makeKeyAndOrderFront(nil) }
         // ⌘Q는 시스템 메뉴 keyEquivalent 경로라 maru keyDown/performKeyEquivalent를 안 거친다 — 브라우저 web 패널이
         // firstResponder를 쥔 채면 첫 Enter가 아직 WKWebView로 샐 수 있으므로, 모달을 연 즉시 터미널로 포커스를 전이한다
         // (다음 renderTick의 self-heal reconcile까지 안 기다림 — handleWebPanelChord의 동기 reconcile과 같은 규율).
-        reconcileWebFocus()
+        withSurface(target) { reconcileWebFocus() }
         return .terminateLater
+    }
+
+    /// 앱 전체 종료는 활성 창 하나가 아니라 모든 일반 창과 quick session을 없앤다. Zig가 소유하는 파일 상태 getter로
+    /// 전체를 순회해 첫 보호 세션을 돌려준다. 요청 시점뿐 아니라 confirm 확정 직전에도 다시 호출한다.
+    private func protectedFilePanelSurface() -> TerminalSurface? {
+        var surfaces = windows
+        if let quick { surfaces.append(quick) }
+        let protected = surfaces.map { surface in
+            guard let session = surface.appSession else { return false }
+            return maru_macos_app_session_has_protected_file_panels(session) != 0
+        }
+        guard let index = FilePanelTerminationPolicy.firstProtectedIndex(protected) else { return nil }
+        return surfaces[index]
+    }
+
+    /// 이미 일반 창/session close gate를 통과한 경로라도 앱 전체를 종료한다면 quick을 포함한 전 세션 파일 보호를
+    /// 다시 확인해야 한다. 보호 세션을 앞으로 가져오고 Zig의 공용 notice+cancel gate를 실행한다.
+    @discardableResult
+    private func blockGlobalTerminationForProtectedFilePanels() -> Bool {
+        guard let protected = protectedFilePanelSurface(), let session = protected.appSession else { return false }
+        protected.window?.makeKeyAndOrderFront(nil)
+        maru_macos_app_session_request_app_quit(session)
+        withSurface(protected) { reconcileWebFocus() }
+        return true
+    }
+
+    /// renderTick fault/SessionEnded를 이유로 native surface를 파괴하기 직전의 마지막 fail-closed 게이트. 정상적인
+    /// SessionEnded는 Zig가 이미 막지만, ABI/tick fault는 그 latch 바깥에서 올 수 있으므로 host도 Zig-owned predicate를
+    /// 읽는다. 보호 중이면 세션과 마지막 정상 frame을 유지하고 공용 notice를 요청한다. 다음 tick을 재시도해 일시 fault가
+    /// 풀리면 notice까지 렌더하고, 계속 실패해도 미저장 버퍼를 teardown하지 않는다.
+    private func holdProtectedSurfaceAfterTickFailure(
+        _ surface: TerminalSurface,
+        persistentTickFault: Bool = false
+    ) -> Bool {
+        guard let session = surface.appSession else {
+            _ = surface.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
+            return false
+        }
+        let protected = maru_macos_app_session_has_protected_file_panels(session) != 0
+        guard FilePanelTerminationPolicy.shouldHoldCurrentSurface(
+            tickSucceeded: false,
+            currentProtected: protected
+        ) else {
+            _ = surface.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
+            return false
+        }
+        if persistentTickFault,
+           !surface.protectedTickFaultLatch.record(tickSucceeded: false, currentProtected: true) { return true }
+        surface.window?.makeKeyAndOrderFront(nil)
+        maru_macos_app_session_request_app_quit(session)
+        withSurface(surface) { reconcileWebFocus() }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -3452,7 +3579,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 보존). 마지막이 아니면 그 창 세션만 닫고 앱은 계속한다(window는 AppKit이 이미 닫는 중).
         guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
         if windows.count <= 1 {
-            bypassQuitConfirm = true // 명시적 창 닫기에 따른 종료 — applicationShouldTerminate가 재확인하지 않게
+            if blockGlobalTerminationForProtectedFilePanels() {
+                // 창은 AppKit이 이미 닫는 중이다. 이 일반 세션만 정리하고 protected quick session과 frame loop를
+                // 유지한다. 보호가 해소된 뒤 quick이 종료될 때만 앱 전체 종료를 다시 시도한다.
+                teardownWindowSurface(surface)
+                return
+            }
+            bypassQuitConfirm = true // 모든 일반 창+quick 보호 preflight 완료
             NSApp.terminate(nil)
         } else {
             teardownWindowSurface(surface)
@@ -3808,8 +3941,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
         // 모달 override가 아닌 상태에서 terminal/browser가 포커스를 얻었으면 명시적인 축 전환이다.
+        let leftFilePanelFocus = surface.focusedFilePanelSurfaceId != nil
         surface.focusedFilePanelSurfaceId = nil
         surface.filePanelFocusOverridden = false
+        if leftFilePanelFocus { maru_macos_app_session_focus_workspace_input(session) }
         if rising, let focusedId, maru_macos_app_session_active_web_surface_id_any_kind(session) != focusedId {
             _ = maru_macos_app_session_activate_surface(session, focusedId)
         }
@@ -4276,7 +4411,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 셸 종료/fault로 한 창을 닫는다(tick 경로). 마지막 일반 창이면 앱 종료(정리·요약은 applicationWillTerminate —
     /// 원래 단일 창 동작 보존), 아니면 그 창만 정리하고 닫는다(앱은 계속).
     private func closeWindowOrQuit(_ surface: TerminalSurface) {
+        // tick 결과 판정과 실제 teardown 사이에도 predicate를 다시 읽는다. 현재 source가 보호 대상이면 다중 창 여부와
+        // 무관하게 이 surface 자체를 없애면 안 된다(다른 protected quick을 찾는 앱-전역 검사만으로는 부족).
+        if holdProtectedSurfaceAfterTickFailure(surface) { return }
         if windows.count <= 1 {
+            if blockGlobalTerminationForProtectedFilePanels() {
+                // 종료된 마지막 일반 세션만 정리하고 protected quick session은 살린다. windows가 비어도 아래 tick은
+                // quick을 계속 구동하며, quick이 해소·종료된 뒤에만 앱 종료를 다시 시도한다.
+                teardownWindowSurface(surface)
+                surface.window?.delegate = nil
+                surface.window?.close()
+                surface.window = nil
+                return
+            }
             // 마지막 창 → 앱 종료. 추가 tick이 재진입 terminate를 부르지 않게 타이머를 먼저 멈춘다(정리·요약은
             // applicationWillTerminate가 — primary가 살아 있어야 요약이 그 세션 기준. 원래 SessionEnded 경로의 안전장치).
             bypassQuitConfirm = true // 창 닫기/세션 종료에 따른 종료 — applicationShouldTerminate가 재확인하지 않게
@@ -4382,7 +4529,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // quick terminal이 보이면 그것도 tick한다(quick 셸 종료/fault는 quick만 닫고 앱은 계속). 각 surface를
     // explicitSurface로 지정해, 세션별 forwarder(window/appSession/메트릭/draw)가 그 surface를 대상으로 돈다.
     private func tickAppSession() {
-        guard !windows.isEmpty else { return }
+        guard !windows.isEmpty || quick != nil else { return }
 
         // 일반 창들을 순회 tick(컬렉션 변형은 루프 뒤에서 — closeWindowOrQuit이 windows를 바꾸므로). 셸이 정상
         // 종료(SessionEnded)/fault면 그 창을 닫되, 마지막 일반 창이면 앱 종료(D4 — closeWindowOrQuit이 판정).
@@ -4400,6 +4547,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let status = renderTick()
             explicitSurface = nil
             if status == Self.statusOK {
+                _ = surface.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
                 // 첫(메인) 창의 첫 tick에 launch 진단 요약을 한 번 남긴다.
                 if surface === windows.first, surface.latestFrameSummary.frame_loop_ticks <= 1 {
                     withSurface(surface) {
@@ -4409,13 +4557,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 continue
             }
             // SessionEnded는 우아한 종료(exitCode 0 유지), 그 외(tick_failed 등)는 세션 fault라 exitCode 1.
+            // 어떤 non-OK라도 native teardown 전에 Zig-owned 파일 보호 predicate를 확인한다. faulted protected
+            // surface는 유지해 일시 fault 회복을 재시도하고, clean surface만 아래 close 경로로 넘긴다.
             if status != Self.statusSessionEnded { exitCode = 1 }
+            if holdProtectedSurfaceAfterTickFailure(surface, persistentTickFault: true) { continue }
             toClose.append(surface)
         }
         // 닫을 창 처리(마지막 창이면 앱 종료 — 그 경우 아래 quick tick은 건너뛴다).
         for surface in toClose { closeWindowOrQuit(surface) }
-        if windows.isEmpty { return }
-
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
@@ -4424,8 +4573,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if let s = quick.appSession { maru_macos_app_session_set_last_window(s, 0) }
             let quickStatus = renderTick()
             explicitSurface = nil
-            if quickStatus != Self.statusOK {
-                tearDownQuickTerminal()
+            if quickStatus == Self.statusOK {
+                _ = quick.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
+            } else {
+                if quickStatus != Self.statusSessionEnded { exitCode = 1 }
+                if tearDownQuickTerminalIfUnprotected(persistentTickFault: true) {
+                    if windows.isEmpty && !blockGlobalTerminationForProtectedFilePanels() {
+                        bypassQuitConfirm = true
+                        tickTimer?.invalidate()
+                        tickTimer = nil
+                        NSApp.terminate(nil)
+                    }
+                }
             }
         }
         // 컨트롤 플레인 요청을 메인에서 drain한다(§5 단일 디스패치=메인 marshal). 살아있는 세션 목록(일반 창 + quick)을
@@ -5017,6 +5176,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func drainQuitDecision(_ summary: MaruAppHostFrameSummary) {
         switch summary.quit_decision {
         case 1: // accepted — 종료 진행
+            // custom confirm이 열린 뒤 다른 창에서 편집이 시작될 수 있으므로 실제 AppKit 종료 승인 직전에 전 세션을
+            // 다시 검사한다. 발견하면 일반 quit 결정을 폐기하고 해당 창에 notice를 띄운 뒤 fail-closed한다.
+            if let protected = protectedFilePanelSurface(), let session = protected.appSession {
+                protected.window?.makeKeyAndOrderFront(nil)
+                maru_macos_app_session_request_app_quit(session)
+                if quitConfirmPending {
+                    quitConfirmPending = false
+                    NSApp.reply(toApplicationShouldTerminate: false)
+                }
+                return
+            }
             if quitConfirmPending {
                 quitConfirmPending = false
                 bypassQuitConfirm = true // reply(true)가 부를 후속 terminate 경로에서 재확인 방지
@@ -5926,10 +6096,40 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 surface.lastFocusedWebSurfaceId = fileModeSid
             }
         }
-        while true {
-            let dirtySyncSid = maru_macos_app_session_take_file_panel_dirty_sync_action(session)
+        if maru_macos_app_session_take_workspace_focus_action(session) != 0 {
+            surface.focusedFilePanelSurfaceId = nil
+            surface.filePanelFocusOverridden = false
+            focusTerminalView(surface.window)
+        }
+        for _ in 0 ..< 4 {
+            var requestId: UInt64 = 0
+            let dirtySyncSid = maru_macos_app_session_take_file_panel_dirty_sync_action_v2(session, &requestId)
             guard dirtySyncSid != 0 else { break }
-            surface.webPanels[dirtySyncSid]?.requestFileDirtySync()
+            if let panel = surface.webPanels[dirtySyncSid] {
+                panel.requestFileDirtySync(requestId: requestId)
+            } else if requestId != 0 {
+                maru_macos_app_session_fail_file_panel_dirty_sync(session, dirtySyncSid, requestId)
+            }
+        }
+        while true {
+            var requestId: UInt64 = 0
+            let saveCloseSid = maru_macos_app_session_take_file_panel_save_close_action(session, &requestId)
+            guard saveCloseSid != 0 else { break }
+            if let panel = surface.webPanels[saveCloseSid] {
+                panel.requestFileSaveForClose(requestId: requestId)
+            } else {
+                maru_macos_app_session_complete_file_panel_save_close(session, saveCloseSid, requestId, 0, 0)
+            }
+        }
+        for _ in 0 ..< 4 {
+            var requestId: UInt64 = 0
+            let unlockSid = maru_macos_app_session_take_file_panel_close_unlock_action(session, &requestId)
+            guard unlockSid != 0 else { break }
+            if let panel = surface.webPanels[unlockSid] {
+                panel.unlockFileClose(requestId: requestId)
+            } else {
+                maru_macos_app_session_fail_file_panel_close_unlock(session, unlockSid, requestId)
+            }
         }
     }
 
@@ -6943,7 +7143,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             quickAutoHide = cfg.auto_hide != 0
             quickScreenMode = cfg.screen
             if quick != nil, cfg.chrome != quickCreatedChrome || cfg.minimal_tabs != quickCreatedMinimalTabs {
-                tearDownQuickTerminal()
+                // chrome shape는 세션 재생성이 필요하지만 dirty/source-edit 파일을 버리면서 라이브 적용할 수는 없다.
+                // 공용 보호 notice를 띄우고 현재 세션을 유지한다. 파일 상태가 해소된 다음 토글에서 재생성된다.
+                _ = tearDownQuickTerminalIfUnprotected()
             }
         }
         ensureQuickTerminal(cfg)
@@ -7155,8 +7357,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         hideQuickTerminalAnimated(panel)
     }
 
-    /// quick terminal을 닫고 정리한다(셸 종료/fault, 또는 앱 종료 시). 세션·렌더러를 해제하고 패널을 내린다.
-    private func tearDownQuickTerminal() {
+    /// 일반 실행 중 quick teardown의 유일한 진입점. 설정 재생성·tick fault/종료 모두 여기서 현재 session의
+    /// Zig-owned 파일 보호를 다시 읽는다. 보호 중이면 공용 notice만 요청하고 session/WKWebView/buffer를 유지한다.
+    @discardableResult
+    private func tearDownQuickTerminalIfUnprotected(persistentTickFault: Bool = false) -> Bool {
+        guard let quick else { return true }
+        guard let session = quick.appSession else {
+            tearDownQuickTerminalAfterGlobalPreflight()
+            return true
+        }
+        let protected = maru_macos_app_session_has_protected_file_panels(session) != 0
+        guard FilePanelTerminationPolicy.mayRecreateQuickSurface(currentProtected: protected) else {
+            _ = holdProtectedSurfaceAfterTickFailure(quick, persistentTickFault: persistentTickFault)
+            return false
+        }
+        tearDownQuickTerminalAfterGlobalPreflight()
+        return true
+    }
+
+    /// quick terminal을 실제로 파괴한다. 제품 실행 중에는 위 보호 wrapper만 호출하고, 앱 종료에서는
+    /// applicationShouldTerminate/drainQuitDecision의 all-session preflight를 통과한 뒤에만 직접 호출한다.
+    private func tearDownQuickTerminalAfterGlobalPreflight() {
         guard let surface = quick else { return }
         self.quick = nil
         quickAnimating = false
@@ -7252,7 +7473,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 전역 단축키를 먼저 OS에서 해제한다(세션이 사라져도 stale hot-key가 남지 않게). 이미 비었으면 no-op.
         unregisterGlobalHotkeys()
         // quick terminal(있으면)도 함께 정리한다.
-        tearDownQuickTerminal()
+        tearDownQuickTerminalAfterGlobalPreflight()
 
         // 남은 모든 일반 창 세션·렌더러를 닫고 파괴한다(앱 종료 경로). 보통 비-마지막 창은 이미 닫혔고 마지막
         // 창/앱 종료에서 여기로 온다 — 멀티 창이면 한 번에 전부 정리한다(leak 방지). teardownWindowSurface가

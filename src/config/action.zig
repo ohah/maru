@@ -23,6 +23,9 @@ pub const Action = union(enum) {
     split_file_panel_vertical,
     close_file_panel_group,
     toggle_file_panel_dock_side,
+    // 기본 Cmd+W. Zig가 소유한 입력 focus가 파일 도크면 활성 파일 탭, 아니면 기존 Term cascade를 닫는다.
+    // close_term은 사용자 명시 바인딩 호환을 위해 terminal 전용으로 남긴다.
+    close_focused,
     close_term,
     previous_term,
     next_term,
@@ -165,6 +168,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "split_file_panel_vertical")) return .split_file_panel_vertical;
     if (std.mem.eql(u8, value, "close_file_panel_group")) return .close_file_panel_group;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
+    if (std.mem.eql(u8, value, "close_focused")) return .close_focused;
     if (std.mem.eql(u8, value, "close_term")) return .close_term;
     if (std.mem.eql(u8, value, "previous_term")) return .previous_term;
     if (std.mem.eql(u8, value, "next_term")) return .next_term;
@@ -247,6 +251,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.split_file_panel_vertical, parseAction("split_file_panel_vertical").?);
     try std.testing.expectEqual(Action.close_file_panel_group, parseAction("close_file_panel_group").?);
     try std.testing.expectEqual(Action.toggle_file_panel_dock_side, parseAction("toggle_file_panel_dock_side").?);
+    try std.testing.expectEqual(Action.close_focused, parseAction("close_focused").?);
     try std.testing.expectEqual(Action.close_term, parseAction("close_term").?);
     try std.testing.expectEqual(Action.next_term, parseAction("next_term").?);
     try std.testing.expectEqual(Action.previous_term, parseAction("previous_term").?);

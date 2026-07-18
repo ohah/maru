@@ -30,6 +30,8 @@ pub const Entry = struct {
     /// FP6 two-phase dirty mirror. source editor가 비활성/읽기 모드로 넘어갈 때 true로 세우고 shell의 강제
     /// setDirty snapshot ack에서만 내린다. ack 전에는 non-dirty라도 live view eviction 대상이 아니다.
     dirty_sync_pending: bool = false,
+    /// shell이 보고한 CM6 문서 revision. close request의 request_id/revision ack와 함께 stale clean/save 완료를 거부한다.
+    editor_revision: u64 = 0,
     /// FSEvents가 디스크 변경을 알렸는데 source editor가 dirty라 자동 reload하지 못한 상태. 사용자의 buffer를
     /// 덮지 않으며 트리/헤더에 conflict를 표시하고 저장도 명시적 해결 전까지 거부한다.
     external_change: bool = false,
@@ -90,11 +92,12 @@ pub const PersistedState = struct {
 
 pub const DockGroup = struct {
     allocator: std.mem.Allocator,
+    runtime_id: u64,
     entries: std.ArrayList(Entry) = .empty,
     active: ?usize = null,
 
-    fn init(allocator: std.mem.Allocator) DockGroup {
-        return .{ .allocator = allocator };
+    fn init(allocator: std.mem.Allocator, runtime_id: u64) DockGroup {
+        return .{ .allocator = allocator, .runtime_id = runtime_id };
     }
 
     fn deinit(self: *DockGroup) void {
@@ -124,6 +127,25 @@ pub const DockGroup = struct {
         self.active = i;
         return i;
     }
+
+    /// 단일 파일 탭을 순서 보존으로 제거하고 소유권을 호출자에게 넘긴다. 호출자는 runtime surface/one-shot을
+    /// 정리한 뒤 `removed.path`를 allocator로 해제해야 한다. 활성 탭이면 오른쪽 이웃을 우선하고, 없으면 왼쪽을
+    /// 활성화한다. 비활성 탭 제거는 기존 활성 항목의 identity를 보존하도록 index만 보정한다.
+    pub fn remove(self: *DockGroup, index: usize) ?Entry {
+        if (index >= self.entries.items.len) return null;
+        const old_active = self.active;
+        const removed = self.entries.orderedRemove(index);
+        if (self.entries.items.len == 0) {
+            self.active = null;
+        } else if (old_active) |active| {
+            if (active == index) {
+                self.active = if (index < self.entries.items.len) index else self.entries.items.len - 1;
+            } else if (active > index) {
+                self.active = active - 1;
+            }
+        }
+        return removed;
+    }
 };
 
 /// 기존 workspace split 수학을 파일 그룹 leaf에 그대로 인스턴스화한다. 트리는 split 노드만 소유하고 DockPanel이
@@ -138,10 +160,11 @@ pub const DockPanel = struct {
     tree_size: u32 = 0,
     collapsed: bool = false,
     focused_group: *DockGroup,
+    next_group_id: u64 = 2,
 
     pub fn init(allocator: std.mem.Allocator) !DockPanel {
         const group = try allocator.create(DockGroup);
-        group.* = DockGroup.init(allocator);
+        group.* = DockGroup.init(allocator, 1);
         return .{ .allocator = allocator, .tree = .{ .leaf = group }, .focused_group = group };
     }
 
@@ -345,7 +368,10 @@ pub const DockPanel = struct {
     pub fn splitGroup(self: *DockPanel, target: *DockGroup, direction: split_tree.SplitDirection, ratio: f32) !*DockGroup {
         const group = try self.allocator.create(DockGroup);
         errdefer self.allocator.destroy(group);
-        group.* = DockGroup.init(self.allocator);
+        const runtime_id = self.next_group_id;
+        self.next_group_id +%= 1;
+        if (self.next_group_id == 0) self.next_group_id = 1;
+        group.* = DockGroup.init(self.allocator, runtime_id);
         errdefer group.deinit();
 
         const split = try self.allocator.create(DockTree.Split);
@@ -400,7 +426,7 @@ pub const DockPanel = struct {
                 total_entries = std.math.add(usize, total_entries, persisted_group.entries.len) catch return error.InvalidPersistedState;
                 if (total_entries > max_entries) return error.InvalidPersistedState;
                 const group = try allocator.create(DockGroup);
-                group.* = DockGroup.init(allocator);
+                group.* = DockGroup.init(allocator, @as(u64, @intCast(group_index)) + 1);
                 groups[group_index] = group;
                 initialized += 1;
                 try restoreEntries(group, persisted_group.entries);
@@ -408,6 +434,7 @@ pub const DockPanel = struct {
                     for (group.entries.items) |entry| if (prior_group.findPath(entry.path) != null) return error.InvalidPersistedState;
                 }
             }
+            panel.next_group_id = @as(u64, @intCast(state.groups.len)) + 1;
 
             const seen = try allocator.alloc(bool, groups.len);
             defer allocator.free(seen);
@@ -821,4 +848,43 @@ test "dock panel: live entry bound matches workspace persistence at 256 and reje
     var state = try panel.persistedState(std.testing.allocator);
     defer freePersistedState(std.testing.allocator, &state);
     try std.testing.expectEqual(max_entries, state.entries.len);
+}
+
+test "dock group: removing active prefers right then left and keeps an empty group" {
+    var panel = try DockPanel.init(std.testing.allocator);
+    defer panel.deinit();
+    const group = panel.singleGroup().?;
+    _ = try panel.open(group, "/tmp/a.md", .markdown);
+    _ = try panel.open(group, "/tmp/b.md", .markdown);
+    _ = try panel.open(group, "/tmp/c.md", .markdown);
+
+    group.active = 1;
+    var removed = group.remove(1).?;
+    try std.testing.expectEqualStrings("/tmp/b.md", removed.path);
+    std.testing.allocator.free(removed.path);
+    try std.testing.expectEqual(@as(?usize, 1), group.active);
+    try std.testing.expectEqualStrings("/tmp/c.md", group.entries.items[1].path);
+
+    removed = group.remove(1).?;
+    std.testing.allocator.free(removed.path);
+    try std.testing.expectEqual(@as(?usize, 0), group.active);
+    removed = group.remove(0).?;
+    std.testing.allocator.free(removed.path);
+    try std.testing.expectEqual(@as(?usize, null), group.active);
+    try std.testing.expectEqual(@as(usize, 0), group.entries.items.len);
+}
+
+test "dock group: removing background entry preserves active identity" {
+    var panel = try DockPanel.init(std.testing.allocator);
+    defer panel.deinit();
+    const group = panel.singleGroup().?;
+    _ = try panel.open(group, "/tmp/a.md", .markdown);
+    _ = try panel.open(group, "/tmp/b.md", .markdown);
+    _ = try panel.open(group, "/tmp/c.md", .markdown);
+    group.active = 2;
+    group.entries.items[2].surface_id = 77;
+    const removed = group.remove(0).?;
+    defer std.testing.allocator.free(removed.path);
+    try std.testing.expectEqual(@as(?usize, 1), group.active);
+    try std.testing.expectEqual(@as(u64, 77), group.entries.items[group.active.?].surface_id);
 }

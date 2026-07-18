@@ -255,6 +255,14 @@ pub export fn maru_macos_app_session_request_app_quit(session: ?*AppSession) voi
     app_session.requestAppQuit();
 }
 
+/// Cmd+Q가 모든 창을 함께 종료하기 전 각 세션의 dirty/pending/source-edit 파일 도크 상태를 검사하는 read-only
+/// getter. Swift는 종료 요청 시점과 사용자가 일반 종료 confirm을 확정한 시점에 모두 순회해, 그 사이 다른 창에서
+/// 편집이 시작된 경우도 fail-closed한다.
+pub export fn maru_macos_app_session_has_protected_file_panels(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return @intFromBool(app_session.hasProtectedFilePanelsForExit());
+}
+
 /// 호스트가 매 tick 주입하는 "이 세션이 앱의 마지막(유일) 일반 창인가"(1=마지막·0=아님). Zig 리프 세션은 형제
 /// NSWindow를 알 수 없으므로 platform(Swift)이 windows.count로 알려준다. 마지막 창일 때 ⌘W/사이드바·탭바 ✕로 세션을
 /// 닫으면 requestClose가 창 하나 닫기 대신 Cmd+Q와 동일한 "maru를 종료할까요?" 종료 확인을 띄운다(마지막 창 닫기=앱
@@ -945,6 +953,16 @@ pub export fn maru_macos_app_session_take_file_panel_external_link_action(
     return action.url.len;
 }
 
+pub export fn maru_macos_app_session_focus_workspace_input(session: ?*AppSession) void {
+    const app_session = session orelse return;
+    app_session.focusWorkspaceInput();
+}
+
+pub export fn maru_macos_app_session_take_workspace_focus_action(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeWorkspaceFocusAction()) 1 else 0;
+}
+
 pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppSession, surface_id_out: ?*u64) i32 {
     const app_session = session orelse return -1;
     const out = surface_id_out orelse return -1;
@@ -959,6 +977,45 @@ pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppS
 pub export fn maru_macos_app_session_take_file_panel_dirty_sync_action(session: ?*AppSession) u64 {
     const app_session = session orelse return 0;
     return app_session.takeFilePanelDirtySyncAction() orelse 0;
+}
+
+pub export fn maru_macos_app_session_take_file_panel_dirty_sync_action_v2(session: ?*AppSession, request_id_out: ?*u64) u64 {
+    const app_session = session orelse return 0;
+    const out = request_id_out orelse return 0;
+    const action = app_session.takeFilePanelDirtySyncActionV2() orelse return 0;
+    out.* = action.request_id;
+    return action.surface_id;
+}
+
+pub export fn maru_macos_app_session_fail_file_panel_dirty_sync(session: ?*AppSession, surface_id: u64, request_id: u64) void {
+    const app_session = session orelse return;
+    app_session.failFilePanelDirtySync(surface_id, request_id);
+}
+
+pub export fn maru_macos_app_session_take_file_panel_save_close_action(session: ?*AppSession, request_id_out: ?*u64) u64 {
+    const app_session = session orelse return 0;
+    const out = request_id_out orelse return 0;
+    const action = app_session.takeFilePanelSaveCloseAction() orelse return 0;
+    out.* = action.request_id;
+    return action.surface_id;
+}
+
+pub export fn maru_macos_app_session_complete_file_panel_save_close(session: ?*AppSession, surface_id: u64, request_id: u64, revision: u64, success: u32) void {
+    const app_session = session orelse return;
+    app_session.completeFilePanelSaveClose(surface_id, request_id, revision, success != 0);
+}
+
+pub export fn maru_macos_app_session_take_file_panel_close_unlock_action(session: ?*AppSession, request_id_out: ?*u64) u64 {
+    const app_session = session orelse return 0;
+    const out = request_id_out orelse return 0;
+    const action = app_session.takeFilePanelCloseUnlockAction() orelse return 0;
+    out.* = action.request_id;
+    return action.surface_id;
+}
+
+pub export fn maru_macos_app_session_fail_file_panel_close_unlock(session: ?*AppSession, surface_id: u64, request_id: u64) void {
+    const app_session = session orelse return;
+    app_session.failFilePanelCloseUnlock(surface_id, request_id);
 }
 
 // FP7 FSEvents adapter: restore가 root set을 교체했으면 1회 reset. 새 root는 아래 take_root로 drain한다. (v123)
@@ -1758,9 +1815,9 @@ const FileBridgeContext = struct {
         return self.session.writeFilePanel(self.surface_id, content);
     }
 
-    fn setDirty(raw: *anyopaque, dirty: bool) anyerror!void {
+    fn setDirty(raw: *anyopaque, report: maru.session.control_bridge.DirtyReport) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.setFilePanelDirty(self.surface_id, dirty);
+        return self.session.reportFilePanelDirty(self.surface_id, report);
     }
 
     fn resolveExternalChange(raw: *anyopaque, success: bool) anyerror!void {
@@ -4208,6 +4265,18 @@ test "macOS app exported session API reports null outputs as ABI errors" {
             &external_link_kind,
         ),
     );
+    // v126 focus/save-close additions: null session은 무동작/one-shot 없음.
+    maru_macos_app_session_focus_workspace_input(null);
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_workspace_focus_action(null));
+    var save_request_id: u64 = 99;
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_panel_save_close_action(null, &save_request_id));
+    var dirty_request_id: u64 = 99;
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_panel_dirty_sync_action_v2(null, &dirty_request_id));
+    maru_macos_app_session_fail_file_panel_dirty_sync(null, 1, 1);
+    maru_macos_app_session_complete_file_panel_save_close(null, 1, 1, 1, 1);
+    var unlock_request_id: u64 = 99;
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_panel_close_unlock_action(null, &unlock_request_id));
+    maru_macos_app_session_fail_file_panel_close_unlock(null, 1, 1);
     // v123 FP7 파일 트리: null session은 watcher/reload/external-open 신호 없음이며 changed event는 무동작.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_watch_reset(null));
     var file_tree_buf: [8]u8 = undefined;

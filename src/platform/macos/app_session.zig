@@ -63,7 +63,16 @@ const surface_move = maru.session.surface_move; // M3d-2a: cross-window 이동 �
 
 const FilePanelTestC = struct {
     extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;
+    extern "c" fn renameatx_np(
+        from_dir_fd: c_int,
+        from: [*:0]const u8,
+        to_dir_fd: c_int,
+        to: [*:0]const u8,
+        flags: c_uint,
+    ) c_int;
 };
+
+const rename_swap: c_uint = 0x00000002;
 
 // Metal DTO·view·owned 버퍼는 순수 모듈 metal_frame이 소유한다. ABI 표면으로 re-export만 한다.
 pub const MetalCell = metal_frame.NativeMetalCell;
@@ -157,7 +166,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 125;
+pub const abi_version: u32 = 126;
+// 126: 파일 탭 닫기. focus 기반 Cmd+W를 위해 workspace focus 동기 export를 추가하고, dirty 저장-후-닫기의
+// request-scoped sync/save/unlock one-shot과 terminal failure ack를 추가한다. 신규 export만 — fixed-width struct offset 불변.
 // 125: 파일 패널 외부 HTTP(S) 링크의 설정 기반 in-app/system 라우팅. open_file_panel_link +
 // take_file_panel_external_link_action export를 추가한다(구조체 layout 불변).
 // 124: FP8 다중 파일 그룹. native WKWebView firstResponder surface를 Zig DockPanel.focused_group에 동기하는
@@ -1016,6 +1027,40 @@ const PendingClose = union(enum) {
     window, // macOS 빨간 닫기 버튼 — 창(세션) 전체
 };
 
+const FocusOwner = union(enum) {
+    workspace,
+    dock_surface: u64,
+};
+
+const FilePanelClosePhase = enum { syncing, confirm_dirty, confirm_conflict, saving };
+// JavaScript bridge arguments are IEEE-754 numbers. Keep close request IDs inside the exact integer range so the
+// request echoed by CM6 cannot alias a different native request after conversion through NSNumber/JavaScript.
+const max_file_panel_close_request_id: u64 = 9_007_199_254_740_991;
+const PendingFilePanelClose = struct {
+    surface_id: u64,
+    surface_generation: u64,
+    request_id: u64,
+    expected_path: []u8,
+    state_generation: u64,
+    revision: u64 = 0,
+    phase: FilePanelClosePhase,
+};
+
+const PendingConfirm = union(enum) {
+    none,
+    close: PendingClose,
+    reset,
+    quit,
+    paste: u64,
+    file_conflict_reload: u64,
+    grant: u64,
+    file_panel_close,
+};
+
+pub const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
+pub const FilePanelSaveCloseAction = struct { surface_id: u64, request_id: u64 };
+pub const FilePanelCloseUnlockAction = struct { surface_id: u64, request_id: u64 };
+
 /// Cmd+Q 종료 확인 모달의 결정. host(Swift)가 FrameSummary.quit_decision으로 읽어 NSApp.reply로 종료를 진행/취소한다.
 /// 값은 ABI 약속이라(0/1/2) Swift drainQuitDecision의 case와 일치해야 한다.
 const QuitDecision = enum(u32) {
@@ -1184,6 +1229,7 @@ fn classifyAgent(name: ?[]const u8) AgentKind {
 /// 호버 중인 per-pane 탭 참조(어느 Pane의 몇 번째 Term 탭). 호버 ✕ 닫기 대상·렌더에 쓴다. Pane은 heap-pin
 /// 이라 포인터가 안정이고, 닫기 등으로 Pane이 사라지면 호출자가 hovered_tab을 null로 비운다.
 const TabRef = struct { pane: *Pane, tab: usize };
+const DockTabRef = struct { group_id: u64, tab: usize };
 const ScrollRef = struct { pane: *Pane, right: bool }; // #5b: 호버 중인 가로 스크롤 버튼(어느 pane의 ‹=false/›=true)
 /// Phase 7e-4: 호버 중인 browser 주소창 nav 버튼(어느 web surface의 back/forward/reload 존). pane 포인터가 아니라
 /// surface_id로 잡는다 — 렌더 "1c"가 이 surface의 밴드를 그릴 때 자기 버튼 존만 하이라이트하게(TabRef가 pane로 잡는 것과
@@ -1562,13 +1608,7 @@ pub const AppSession = struct {
     // 닫기 확인에서 "닫기"를 확정하면 실행할 보류된 닫기. null=보류 없음. requestClose가 실행 중 명령이 있으면 여기
     // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
     // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
-    pending_close: ?PendingClose = null,
-    // "Reset All Settings"(메뉴 reset_defaults·팝업 reset_settings) 확인 모달의 보류. true면 confirm_accept가
-    // resetAllSettings(전체 기본값 + config 파일 덮어쓰기)를 실행한다 — 파괴적이라 무확인 즉시 실행을 막는다. pending_close와 배타.
-    pending_reset: bool = false,
-    // Cmd+Q "maru를 종료할까요?" 확인 모달의 보류. true면 confirm_accept가 quit_decision=.accepted,
-    // confirm_cancel이 .cancelled로 latch한다. requestAppQuit이 세우며 pending_close/pending_reset과 배타(한 번에 한 모달).
-    pending_quit: bool = false,
+    pending_confirm: PendingConfirm = .none,
     // 붙여넣기 보호(input.paste-protection) 확인 모달의 보류. 위험한 붙여넣기(개행/ESC[201~ 인젝션)를 감지하면
     // 바로 PTY로 안 보내고 이 버퍼에 최종 payload(escape 적용 후)를 세션 소유로 보관한 뒤 확인 모달을 연다.
     // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.
@@ -1577,10 +1617,8 @@ pub const AppSession = struct {
     /// 위 payload가 향할 surface id(0=보류 없음). **모달을 띄운 시점의 대상**을 고정한다 — 확인하는 동안
     /// 사용자가 탭/pane을 옮기거나 다른 pane에 드롭해도 payload는 원래 pane으로 간다(예전엔 확정 시 activeSurface를
     /// 다시 읽어 엉뚱한 pane에 위험한 내용이 주입될 수 있었다 — code-review).
-    pending_paste_confirm_target: u64 = 0,
-    // FP7 외부 변경 충돌에서 사용자가 헤더 `!`를 눌러 "disk 내용으로 다시 읽기"를 확인 중인 도크 surface.
-    // surface id는 비재사용이고 entry lookup을 확정 시 다시 하므로 탭 전환과 무관하며, 취소/다른 모달 선점 시 null.
-    pending_file_conflict_reload: ?u64 = null,
+    // 파일 탭 닫기는 surface identity를 고정하고 dirty snapshot/save ack가 돌아올 때마다 같은 entry인지 재조회한다.
+    pending_file_panel_close: ?PendingFilePanelClose = null,
     // 붙여넣기 확인 모달 **미리보기**(붙여넣을 내용 앞부분)의 세션 소유 백킹. confirm.State.body가 이 버퍼로 만든
     // 줄 슬라이스를 가리킨다(message처럼 slice라 transient 버퍼면 dangling). Ghostty가 붙여넣기 내용을 확인창에
     // 보여주는 것의 셀-그리드 근사 — 앞 몇 줄만 담고 나머지는 "…N줄 더"로 요약(buildPastePreview).
@@ -1591,7 +1629,6 @@ pub const AppSession = struct {
     // 1e-confirm-2b: browser grant 확인 모달의 보류(§9.2 Model B). null=보류 없음, 값=확인 중인 grant의 async_id.
     // 다른 확인 모달(close/reset/quit/paste)과 배타(한 번에 한 모달). confirm_accept/cancel이 grant_confirm_decision에
     // latch하면 app_host_abi.drainGrantPrompts가 takeGrantDecision으로 폴해 grant 기록+재구동 or unauthorized한다.
-    pending_grant: ?u64 = null,
     // grant 확인 결정 latch: {async_id, approved}. app_host_abi가 takeGrantDecision으로 한 번 읽고 비운다(one-shot).
     grant_confirm_decision: ?GrantConfirmDecision = null,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
@@ -1743,6 +1780,10 @@ pub const AppSession = struct {
     // re-arm돼, 새 세션이 정상 종료하면 다시 판정한다(held→새 셸→쓰다 종료→정상 앱 종료). `termination_finished`는
     // 세우지 않는다(re-arm 위해). 단일 출처: macos-app-host-boundary.md "세션 자동 종료".
     startup_held: bool = false,
+    // 마지막 terminal이 종료됐지만 파일 도크에 dirty/pending/source-edit entry가 있어 세션 자동 종료를 보류한 상태.
+    // 보호 entry가 모두 해소되면 latchSessionEndOrHold가 다음 tick에 자동으로 재평가한다. startup_held와 달리 셸 실패
+    // 정책이 아니라 미저장 편집 보호 latch이며, 새 셸 생성 여부와 무관하다.
+    file_panel_exit_held: bool = false,
     // 마지막으로 관측된 Term 종료의 uptime(spawn→exit, ms) — 비정상 시작 사망 판정(holdOnStartupExit)이 grace
     // window와 비교한다. tick의 drain 관측(term.rt.spawned_at_ms 기준)이 갱신하고, 세션 종료 latch가 소비한다.
     last_exit_uptime_ms: i64 = 0,
@@ -1837,6 +1878,7 @@ pub const AppSession = struct {
     // 갱신하고, 탭 바 렌더가 이 탭에 호버 ✕(닫기 아이콘)를 그린다. mouse down이 이 탭의 ✕ zone이면 그 Term을
     // 닫는다(사이드바 hovered_slot의 per-pane Term 버전). pane은 heap-pin이라 frame 사이 포인터가 안정.
     hovered_tab: ?TabRef = null,
+    hovered_file_panel_tab: ?DockTabRef = null,
     hovered_scroll: ?ScrollRef = null, // #5b: 호버 중인 ‹/› 스크롤 버튼 — 렌더가 밝게 칠해 클릭 가능 표시
     // Phase 7e-4: 마우스가 호버 중인 browser 주소창 nav 버튼(없으면 null). hoverCursor가 밴드 버튼 존이면 세우고(그 위면
     // pointingHand), 렌더 "1c"가 이 surface·이 버튼 존에 hover 배경 quad를 그려 클릭 영역(3칸)을 드러낸다("버튼이 작아
@@ -1989,8 +2031,14 @@ pub const AppSession = struct {
     // source editor를 숨기기 전에 현재 dirty snapshot을 강제 요청하는 별도 FIFO. mode action은 새 활성 탭을
     // 가리키므로 이전 탭의 snapshot 전달에 재사용할 수 없다. 도크 entry 상한 크기의 고정 큐라 입력 hot path에서
     // 할당 실패로 dirty_sync_pending이 영구 고착되지 않는다.
-    file_panel_dirty_sync_actions: [dock_panel.max_entries]u64 = undefined,
+    file_panel_dirty_sync_actions: [dock_panel.max_entries]FilePanelDirtySyncAction = undefined,
     file_panel_dirty_sync_actions_len: usize = 0,
+    file_panel_save_close_pending: ?FilePanelSaveCloseAction = null,
+    file_panel_close_unlock_actions: [dock_panel.max_entries]FilePanelCloseUnlockAction = undefined,
+    file_panel_close_unlock_actions_len: usize = 0,
+    file_panel_close_request_id: u64 = 0,
+    focus_owner: FocusOwner = .workspace,
+    workspace_focus_pending: bool = false,
     file_panel_seen_generation: u64 = 0,
     debug_file_panel_opened: bool = false,
     // Phase 4e-3: web surface diff의 prev(직전 tick이 낸 layout **집합** 전체). computeWebSurfaceTransitions가 매 tick
@@ -2517,7 +2565,32 @@ pub const AppSession = struct {
         if (!self.dock_initialized or self.dock.groupCount() <= 1) return;
         const target = self.dock.focusedGroup();
         for (target.entries.items) |entry| if (filePanelEntryNeedsDirtyProtection(entry)) return;
+        var removed_input_owner = false;
+        for (target.entries.items) |entry| if (entry.surface_id != 0) {
+            self.removeFilePanelQueuedActions(entry.surface_id);
+            self.notifySurfaceClosed(entry.surface_id);
+            if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == entry.surface_id)
+                self.clearFilePanelCloseWithoutUnlock();
+            removed_input_owner = removed_input_owner or switch (self.focus_owner) {
+                .dock_surface => |focused| focused == entry.surface_id,
+                .workspace => false,
+            };
+        };
+        self.hovered_file_panel_tab = null;
         if (!self.dock.removeGroup(target)) return;
+        if (removed_input_owner) {
+            const successor = self.dock.focusedGroup();
+            if (successor.active) |active| {
+                const entry = &successor.entries.items[active];
+                if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+                self.focus_owner = .{ .dock_surface = entry.surface_id };
+                self.workspace_focus_pending = false;
+                self.file_panel_mode_pending = entry.surface_id;
+            } else {
+                self.focus_owner = .workspace;
+                self.workspace_focus_pending = true;
+            }
+        }
         self.dock_group_divider_drag = null;
         self.dock_group_divider_drag_offset_px = 0;
         self.file_tree_rows_dirty = true;
@@ -4788,6 +4861,7 @@ pub const AppSession = struct {
     /// 창 닫기(빨간 버튼)는 Swift 핸드셰이크가 달라 requestWindowClose가 따로 맡는다.
     fn requestClose(self: *AppSession, target: PendingClose) void {
         const scope = self.resolveCloseScope(target); // cascade 단일 출처(판정·실행 공유). 아래 두 분기가 이 범위를 함께 쓴다.
+        if (scope == .session and self.blockSessionExitForFilePanels()) return;
         // 마지막(유일) 창에서 세션 전체를 닫는 인앱 제스처는 곧 앱 종료다 — 창 하나 닫기보다 파괴적이라(열린 모든
         // 탭·pane이 함께 소멸) Cmd+Q와 **동일하게** 실행 중 명령 유무와 무관하게 "maru를 종료할까요?" 종료 확인을 띄운다
         // (사용자 결정 2026-07). `is_last_window`는 host가 주입한다(리프는 형제 창을 모름) — false면(멀티 창의 비-마지막
@@ -4797,22 +4871,18 @@ pub const AppSession = struct {
             return;
         }
         if (self.scopeHasRunningJob(scope)) {
-            self.pending_close = target;
-            self.pending_reset = false; // 리셋 보류와 배타(한 번에 한 모달)
             self.showConfirm(switch (target) {
                 .window => "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
                 else => "실행 중인 명령이 있습니다. 닫을까요?",
-            });
+            }, target);
         } else if (self.scopeHasWebBrowser(scope)) {
             // 브라우저 탭 닫기 확인(제보): web browser term은 실행 중 셸 명령이 없어(live_initialized=false) 위 게이트를
             // 안 타 조용히 닫혔다. 열린 웹 페이지 = 잃을 수 있는 상태라 running job과 병렬로 "닫을까요?"를 띄운다. accept는
             // 같은 pending_close→executeClose 경로.
-            self.pending_close = target;
-            self.pending_reset = false;
             self.showConfirm(switch (target) {
                 .window => "열린 브라우저 탭이 있습니다. 이 창을 닫을까요?",
                 else => "열린 브라우저 탭이 있습니다. 닫을까요?",
-            });
+            }, target);
         } else {
             self.executeClose(target);
         }
@@ -4827,7 +4897,7 @@ pub const AppSession = struct {
             .term => self.closeActiveTerm(),
             .pane => self.closeActivePane(),
             .tab => |idx| self.closeTab(idx),
-            .session => self.latchSessionClose(),
+            .session => if (!self.blockSessionExitForFilePanels()) self.latchSessionClose(),
         }
     }
 
@@ -4835,6 +4905,7 @@ pub const AppSession = struct {
     /// ended_seen + process_state=exited를 세우면, 다음 tick summary.ended를 본 Swift가 closeWindowOrQuit으로 실제 창을
     /// 닫는다(프로그래밍적 close라 windowShouldClose 재호출 없음 — 재확인 루프가 안 생긴다).
     fn latchSessionClose(self: *AppSession) void {
+        if (self.blockSessionExitForFilePanels()) return;
         self.ended_seen = true;
         self.activeSurface().process_state = .exited;
         self.metal_dirty = true;
@@ -4848,6 +4919,12 @@ pub const AppSession = struct {
     /// 즉시 죽어 앱이 시작하자마자 종료되던 루트커즈 수정 — 단일 출처: macos-app-host-boundary.md "세션 자동 종료".
     fn latchSessionEndOrHold(self: *AppSession, ended: ?app.RuntimePumpTermination, uptime_ms: i64) void {
         if (self.termination_finished or self.startup_held or !self.allTabsTerminated()) return;
+        if (self.hasProtectedFilePanelsForExit()) {
+            if (!self.file_panel_exit_held) self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
+            self.file_panel_exit_held = true;
+            return;
+        }
+        self.file_panel_exit_held = false;
         // config workspace.hold-on-startup-failure(기본 true)로 끌 수 있다 — false면 유지하지 않고 기존처럼 종료.
         if (self.loaded_config.config.workspace.hold_on_startup_failure and
             holdOnStartupExit(uptime_ms, self.total_output_events, exitAbnormal(ended), self.chrome_minimal))
@@ -4882,10 +4959,9 @@ pub const AppSession = struct {
     /// 확인 모달을 열고 true(deferred — Swift가 windowShouldClose에서 false 반환해 보류), 없으면 false(Swift가 평소대로
     /// 닫음 → windowWillClose가 정리). pending은 .window로 두고 confirm_accept가 latchSessionClose로 마무리한다.
     pub fn requestWindowClose(self: *AppSession) bool {
+        if (self.blockSessionExitForFilePanels()) return true;
         if (!self.closeTargetHasRunningJob(.window)) return false;
-        self.pending_close = .window;
-        self.pending_reset = false; // 리셋 보류와 배타(한 번에 한 모달)
-        self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?");
+        self.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
         return true;
     }
 
@@ -4896,12 +4972,11 @@ pub const AppSession = struct {
     /// summary의 quit_decision을 본 Swift가 NSApp.reply(toApplicationShouldTerminate:)로 종료를 진행/취소한다. 단일
     /// 출처: docs/macos-app-host-boundary.md "닫기 확인".
     pub fn requestAppQuit(self: *AppSession) void {
-        self.pending_close = null; // 닫기/리셋 보류와 배타(한 번에 한 모달)
-        self.pending_reset = false;
-        // showConfirmButtons가 chokepoint에서 기존 pending_quit을 supersede(취소)하므로, 자기 종료를 취소하지
-        // 않게 pending_quit/quit_decision은 모달을 연 **뒤** 세운다.
-        self.showConfirmButtons("maru를 종료할까요?", .{ .confirm = "종료", .cancel = "취소" });
-        self.pending_quit = true;
+        if (self.blockSessionExitForFilePanels()) {
+            self.quit_decision = .cancelled;
+            return;
+        }
+        self.showConfirmButtons(.quit, "maru를 종료할까요?", .{ .confirm = "종료", .cancel = "취소" });
         self.quit_decision = .none;
     }
 
@@ -4936,38 +5011,38 @@ pub const AppSession = struct {
     /// 확인 모달을 연다(공통 경로). 메시지는 세션 소유 버퍼로 복사(copyOverlayMessage)하고 다른 오버레이를 닫아 배타성을
     /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 버튼 라벨은 용도별로 host가 주입한다(confirm
     /// 컴포넌트는 범용). 다음 tick이 그린다. showConfirm(닫기)·requestResetAll(리셋)이 공유.
-    fn showConfirmButtons(self: *AppSession, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
-        // 종료 확인 모달(pending_quit)이 떠 있는 채로 새 모달(닫기/리셋)을 열면, 먼저 종료를 취소로 확정해
-        // host의 terminateLater 보류를 푼다 — 안 그러면 confirm_accept가 pending_quit을 최우선 분기해 사용자가
-        // 연 모달(예: "초기화")을 확정해도 엉뚱하게 앱이 종료되고, host가 reply를 못 받아 종료 보류가 안 풀린다.
-        // "한 번에 한 모달" 불변식을 UI 게이트가 아니라 이 chokepoint에서 강제한다(메뉴 마우스 클릭은 anyOverlayOpen
-        // 미게이트라 리셋이 종료 보류를 가로챌 수 있었다 — code-review medium). requestAppQuit은 이 호출 뒤에
-        // pending_quit을 세우므로 자기 종료를 취소하지 않는다.
-        if (self.pending_quit) {
-            self.pending_quit = false;
-            self.quit_decision = .cancelled; // 다음 tick에 host가 NSApp.reply(false) → 앱 유지
+    fn cancelPendingConfirm(self: *AppSession) void {
+        switch (self.pending_confirm) {
+            .quit => self.quit_decision = .cancelled,
+            .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = false },
+            .paste => self.pending_paste_confirm.clearRetainingCapacity(),
+            .file_panel_close => self.cancelFilePanelClose(),
+            .none, .close, .reset, .file_conflict_reload => {},
         }
-        // 1e-confirm-2b: 보류 중이던 grant 확인이 있으면 **거부로 마무리**한다 — 새 모달(닫기/종료/리셋 등)이 그 자리를
-        // 차지하므로(한 번에 한 모달). 안 그러면 confirm_accept가 pending_grant를 최우선 분기해 사용자가 연 모달을
-        // 확정해도 엉뚱하게 grant가 승인된다(pending_quit supersede와 동형). showGrantConfirm은 이 호출 뒤 세우므로 자기 것을 안 지운다.
-        if (self.pending_grant) |aid| {
-            self.pending_grant = null;
-            self.grant_confirm_decision = .{ .async_id = aid, .approved = false };
+        self.pending_confirm = .none;
+    }
+
+    fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
+        self.cancelPendingConfirm();
+        if (owner != .file_panel_close and self.pending_file_panel_close != null) {
+            self.cancelFilePanelClose();
         }
-        // 보류 중이던 붙여넣기 확인이 있으면 폐기한다 — 새 모달이 그 자리를 차지하므로(한 번에 한 모달). 붙여넣기
-        // 확인 자신은 이 호출 *뒤에* payload를 보관하므로(submitPaste 순서) 자기 것을 지우지 않는다.
         self.pending_paste_confirm.clearRetainingCapacity();
-        self.pending_paste_confirm_target = 0; // payload를 폐기했으면 대상도 없다("0=보류 없음" 계약)
-        self.pending_file_conflict_reload = null; // 새 확인 모달이 기존 conflict reload 확인을 선점한다.
         self.dismissMessageOverlays();
         self.clearAllHover(); // 모달 뒤(중앙 패널 밖)에 stale 호버 강조가 얼어붙지 않게 — hoverCursor는 모달 중 호버를 안 갱신
         self.chrome_host.confirm.show(copyOverlayMessage(&self.confirm_message_buf, message), buttons);
+        self.pending_confirm = owner;
         self.metal_dirty = true;
     }
 
+    fn showConfirmChoices(self: *AppSession, owner: PendingConfirm, message: []const u8, choices: chrome.components.confirm.Choices) void {
+        self.showConfirmButtons(owner, message, .{ .confirm = choices.primary, .cancel = choices.cancel });
+        self.chrome_host.confirm.showChoices(self.chrome_host.confirm.message, choices);
+    }
+
     /// 닫기 확인 모달(라벨 "닫기"/"취소"). 보류 대상은 caller(requestClose/requestWindowClose)가 pending_close에 둔다.
-    fn showConfirm(self: *AppSession, message: []const u8) void {
-        self.showConfirmButtons(message, .{ .confirm = "닫기", .cancel = "취소" });
+    fn showConfirm(self: *AppSession, message: []const u8, target: PendingClose) void {
+        self.showConfirmButtons(.{ .close = target }, message, .{ .confirm = "닫기", .cancel = "취소" });
     }
 
     /// 1e-confirm-2b: browser grant 확인 모달을 연다(§9.2 Model B, 라벨 "허용"/"거부"). **비파괴**: 이미 다른 오버레이/확인
@@ -4975,11 +5050,10 @@ pub const AppSession = struct {
     /// 가로채지 않는다. 이미 이 async_id를 보여주는 중이면 true(재-show 안 함, idempotent). 성공 시 pending_grant=async_id +
     /// 모달 표시 후 true. confirm_accept/cancel이 grant_confirm_decision에 latch → app_host_abi가 takeGrantDecision으로 폴.
     pub fn showGrantConfirm(self: *AppSession, message: []const u8, async_id: u64) bool {
-        if (self.pending_grant) |cur| return cur == async_id; // grant 확인 중: 내 것=유지(true)·남의 것=대기(false)
+        if (self.pending_confirm == .grant) return self.pending_confirm.grant == async_id;
         // 다른 모달/오버레이 점유(닫기·종료·리셋·붙여넣기 확인 or 세팅/find/palette 등) → 안 뜸(비파괴). 다음 tick 재시도.
-        if (self.anyOverlayOpen() or self.pending_close != null or self.pending_reset or self.pending_quit or self.pending_paste_confirm.items.len > 0) return false;
-        self.showConfirmButtons(message, .{ .confirm = "허용", .cancel = "거부" });
-        self.pending_grant = async_id; // 모달 연 뒤 세움(showConfirmButtons가 supersede 로직 도므로 순서 — requestAppQuit 선례)
+        if (self.anyOverlayOpen() or self.pending_confirm != .none) return false;
+        self.showConfirmButtons(.{ .grant = async_id }, message, .{ .confirm = "허용", .cancel = "거부" });
         return true;
     }
 
@@ -4994,16 +5068,13 @@ pub const AppSession = struct {
     /// 상태로 덮어쓰는 파괴적 동작이라 즉시 실행하지 않고 확인을 받는다(닫기 확인과 같은 메커니즘 — 더 파괴적인데
     /// 무확인이던 비대칭 제거, code-review #835). pending_reset=true로 두면 confirm_accept가 resetAllSettings를 실행한다(pending_close와 배타).
     pub fn requestResetAll(self: *AppSession) void {
-        self.pending_close = null; // 닫기 보류와 배타(한 번에 한 모달)
-        self.pending_reset = true;
-        self.showConfirmButtons("모든 설정을 기본값으로 되돌리고 config 파일을 덮어씁니다. 계속할까요?", .{ .confirm = "초기화", .cancel = "취소" });
+        self.showConfirmButtons(.reset, "모든 설정을 기본값으로 되돌리고 config 파일을 덮어씁니다. 계속할까요?", .{ .confirm = "초기화", .cancel = "취소" });
     }
 
     /// 보류한 닫기를 취소하고 확인 모달을 닫는다 — 표적이 더 이상 유효하지 않거나(트리 변경) 다른 오버레이가
     /// 선점할 때. pending_close가 없어도 모달은 닫아 단일-오버레이 불변식을 지킨다(showNotice가 호출).
     fn cancelPendingClose(self: *AppSession) void {
-        self.pending_close = null;
-        self.pending_reset = false;
+        self.cancelPendingConfirm();
         self.chrome_host.confirm.dismiss();
         self.metal_dirty = true;
     }
@@ -5019,7 +5090,10 @@ pub const AppSession = struct {
     /// 전에 `pending_close`를 null로 비우므로(재진입 방지), 닫기 실행 중 포커스 이동이 이걸 다시 건드리지 않는다.
     /// (옛 `invalidatePendingCloseOnReap`/`invalidatePendingCloseOnFocusChange` byte-identical 중복을 통합 — code-review.)
     fn invalidatePositionalPendingClose(self: *AppSession) void {
-        const p = self.pending_close orelse return;
+        const p = switch (self.pending_confirm) {
+            .close => |target| target,
+            else => return,
+        };
         switch (p) {
             .window => {}, // 창 전체 닫기는 reap/포커스 변화와 무관하게 유효(대상=세션 전체)
             else => self.cancelPendingClose(),
@@ -5335,6 +5409,51 @@ pub const AppSession = struct {
             entry.conflict_reload_pending or entry.mode == .source_edit;
     }
 
+    /// 창/세션 종료 전에 해소해야 하는 파일 편집 상태가 하나라도 있는지. source-edit는 native dirty가 최신 CM6
+    /// revision보다 늦을 수 있으므로 clean으로 보이더라도 보호한다. 모든 창을 함께 닫는 Cmd+Q는 Swift가 이 getter로
+    /// 각 세션을 순회하고, 확정 직전에도 다시 검사한다.
+    pub fn hasProtectedFilePanelsForExit(self: *const AppSession) bool {
+        if (self.pending_file_panel_close != null or self.file_panel_save_close_pending != null) return true;
+        if (!self.dock_initialized) return false;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| if (filePanelEntryNeedsDirtyProtection(entry)) return true;
+        }
+        return false;
+    }
+
+    fn blockSessionExitForFilePanels(self: *AppSession) bool {
+        if (!self.hasProtectedFilePanelsForExit()) return false;
+        self.showNotice("저장하지 않은 파일 탭을 먼저 저장하거나 닫아 주세요.");
+        return true;
+    }
+
+    fn hasFilePanelCloseTransition(self: *const AppSession) bool {
+        if (self.pending_file_panel_close != null or self.file_panel_save_close_pending != null or
+            self.file_panel_close_unlock_actions_len != 0) return true;
+        if (!self.dock_initialized) return false;
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| if (entry.dirty_sync_pending) return true;
+        }
+        return false;
+    }
+
+    fn resetFilePanelTransientStateForDockReplacement(self: *AppSession) void {
+        if (self.pending_confirm == .file_panel_close) {
+            self.pending_confirm = .none;
+            self.chrome_host.confirm.dismiss();
+        }
+        self.clearFilePanelCloseWithoutUnlock();
+        self.file_panel_mode_pending = null;
+        self.file_panel_dirty_sync_actions_len = 0;
+        self.file_panel_close_unlock_actions_len = 0;
+        self.file_tree_reload_actions_len = 0;
+        self.hovered_file_panel_tab = null;
+        self.focus_owner = .workspace;
+        self.workspace_focus_pending = true;
+    }
+
     /// 창 병합 전에 트리 밖 도크 모델을 대상 창으로 옮긴다. dst 활성/layout을 우선하되 dst가 비었으면 src 값을
     /// 채택한다. 같은 경로가 양쪽 dirty면 무경고 유실을 피하려 병합 자체를 거부하고, 한쪽만 dirty면 그 편집 surface를
     /// 보존한다. 모든 신규 path 복사를 먼저 끝낸 뒤 모델을 바꿔 OOM에서 양쪽이 불변이다.
@@ -5422,7 +5541,7 @@ pub const AppSession = struct {
             const group = dst.dock.groupAt(group_index).?;
             for (group.entries.items) |*entry| {
                 dst.touchFilePanelEntry(entry);
-                if (entry.dirty_sync_pending) dst.queueFilePanelDirtySyncAction(entry.surface_id);
+                if (entry.dirty_sync_pending) dst.queueFilePanelDirtySyncAction(entry.surface_id, 0);
             }
         }
         for (0..dst.dock.groupCount()) |group_index| {
@@ -5491,6 +5610,9 @@ pub const AppSession = struct {
             // 자기 merge = no-op(모든 워크스페이스가 이미 dst). src는 안 닫힌다.
             return .{ .moved_surfaces = out_ids[0..0], .from_window = @intCast(@intFromPtr(src)), .to_window = @intCast(@intFromPtr(dst)), .cross_window = false, .revoke_caps = false, .source_window_closed = false };
         }
+        // close lock/snapshot/save/unlock callback은 session pointer에 핀된다. reparent 중 이관하면 old callback이
+        // destination과 불일치해 사라지므로, 모든 입력 전이가 terminal ack로 끝날 때까지 모델 수술을 거부한다.
+        if (src.hasFilePanelCloseTransition() or dst.hasFilePanelCloseTransition()) return error.UnsupportedMove;
         // 범위 게이트(code-review [1]): merge는 src **모든** 워크스페이스를 옮기므로, 하나라도 범위 밖(pinned·그룹 마커·그룹
         // 멤버)이면 detach(비가역) **전에** 거부한다 → source·dst 완전 불변(그룹/pinned window merge는 M3d-2a-ii).
         for (0..src.tabs.items.len) |i| {
@@ -7319,6 +7441,18 @@ pub const AppSession = struct {
             .split_file_panel_vertical => self.splitFocusedDockGroup(.vertical),
             .close_file_panel_group => self.closeFocusedDockGroup(),
             .toggle_file_panel_dock_side => self.toggleFilePanelDockSide(),
+            .close_focused => switch (self.focus_owner) {
+                .workspace => self.requestClose(.term_or_pane),
+                .dock_surface => |surface_id| if (self.dock.groupForSurfaceId(surface_id)) |group| {
+                    if (group.active) |active| {
+                        if (active < group.entries.items.len) self.requestFilePanelClose(group.entries.items[active].surface_id);
+                    }
+                } else {
+                    self.focus_owner = .workspace;
+                    self.workspace_focus_pending = false;
+                    self.requestClose(.term_or_pane);
+                },
+            },
             // ⌘W Term cascade. 실행 중 명령이 있으면 requestClose가 확인 모달을 띄운다(없으면 즉시 닫음).
             .close_term => self.requestClose(.term_or_pane),
             .next_term => self.focusTermRelative(1),
@@ -8020,8 +8154,9 @@ pub const AppSession = struct {
                 for (group.entries.items, 0..) |*entry, i| {
                     if (entry.surface_id == 0) continue;
                     live += 1;
+                    const close_reserved = if (self.pending_file_panel_close) |pending| pending.surface_id == entry.surface_id else false;
                     if (entry.dirty or entry.dirty_sync_pending or entry.external_change or
-                        entry.conflict_reload_pending or group.active == i) continue;
+                        entry.conflict_reload_pending or close_reserved or group.active == i) continue;
                     if (candidate == null or entry.last_seen < candidate.?.last_seen) candidate = entry;
                 }
             }
@@ -8031,20 +8166,22 @@ pub const AppSession = struct {
         }
     }
 
-    fn queueFilePanelDirtySyncAction(self: *AppSession, surface_id: u64) void {
+    fn queueFilePanelDirtySyncAction(self: *AppSession, surface_id: u64, request_id: u64) void {
         if (surface_id == 0) return;
-        for (self.file_panel_dirty_sync_actions[0..self.file_panel_dirty_sync_actions_len]) |queued| {
-            if (queued == surface_id) return;
+        for (self.file_panel_dirty_sync_actions[0..self.file_panel_dirty_sync_actions_len]) |*queued| {
+            if (queued.surface_id != surface_id) continue;
+            if (request_id != 0) queued.request_id = request_id;
+            return;
         }
         if (self.file_panel_dirty_sync_actions_len >= self.file_panel_dirty_sync_actions.len) return;
-        self.file_panel_dirty_sync_actions[self.file_panel_dirty_sync_actions_len] = surface_id;
+        self.file_panel_dirty_sync_actions[self.file_panel_dirty_sync_actions_len] = .{ .surface_id = surface_id, .request_id = request_id };
         self.file_panel_dirty_sync_actions_len += 1;
     }
 
     fn removeFilePanelDirtySyncAction(self: *AppSession, surface_id: u64) void {
         var i: usize = 0;
         while (i < self.file_panel_dirty_sync_actions_len) : (i += 1) {
-            if (self.file_panel_dirty_sync_actions[i] != surface_id) continue;
+            if (self.file_panel_dirty_sync_actions[i].surface_id != surface_id) continue;
             const last = self.file_panel_dirty_sync_actions_len - 1;
             self.file_panel_dirty_sync_actions[i] = self.file_panel_dirty_sync_actions[last];
             self.file_panel_dirty_sync_actions_len = last;
@@ -8055,7 +8192,15 @@ pub const AppSession = struct {
     fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) void {
         if (entry.kind != .markdown or entry.mode != .source_edit or entry.surface_id == 0) return;
         entry.dirty_sync_pending = true;
-        self.queueFilePanelDirtySyncAction(entry.surface_id);
+        self.queueFilePanelDirtySyncAction(entry.surface_id, 0);
+    }
+
+    fn markFilePanelCloseDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry, request_id: u64) void {
+        // source→read 전환 뒤에도 CM6 buffer와 dirty 상태는 surface에 남는다. 닫기 transaction은 mode와 무관하게
+        // 최신 snapshot을 요구해야 read-mode dirty 탭이 즉시 닫히지 않는다.
+        if (entry.kind != .markdown or entry.surface_id == 0) return;
+        entry.dirty_sync_pending = true;
+        self.queueFilePanelDirtySyncAction(entry.surface_id, request_id);
     }
 
     pub const FilePanelOpenPathResult = enum(u32) {
@@ -8172,13 +8317,11 @@ pub const AppSession = struct {
     fn requestFileConflictReload(self: *AppSession, surface_id: u64) void {
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return;
         if (!entry.external_change) return;
-        self.pending_close = null;
-        self.pending_reset = false;
         self.showConfirmButtons(
+            .{ .file_conflict_reload = surface_id },
             "외부에서 파일이 변경되었습니다. 편집 중인 내용을 버리고 디스크에서 다시 읽을까요?",
             .{ .confirm = "다시 읽기", .cancel = "취소" },
         );
-        self.pending_file_conflict_reload = surface_id;
     }
 
     fn beginFileConflictReload(self: *AppSession, surface_id: u64) void {
@@ -8418,6 +8561,10 @@ pub const AppSession = struct {
             self.markFilePanelDirtySyncPending(&opened.group.entries.items[i]);
         self.assignDockSurfaceIds(&self.dock);
         self.enforceFilePanelLiveViewLimit();
+        const active_entry = &opened.group.entries.items[opened.index];
+        self.focus_owner = .{ .dock_surface = active_entry.surface_id };
+        self.workspace_focus_pending = false;
+        self.file_panel_mode_pending = active_entry.surface_id;
         self.dock.collapsed = false;
         if (self.surface_initialized) {
             for (self.tabs.items) |tab| self.resizeTabPanes(tab);
@@ -8517,8 +8664,242 @@ pub const AppSession = struct {
         if (!self.dock_initialized) return false;
         const group = self.dock.groupForSurfaceId(surface_id) orelse return false;
         if (!self.dock.focusGroup(group)) return false;
+        self.focus_owner = .{ .dock_surface = surface_id };
+        self.workspace_focus_pending = false;
         self.metal_dirty = true;
         return true;
+    }
+
+    pub fn focusWorkspaceInput(self: *AppSession) void {
+        self.focus_owner = .workspace;
+        self.workspace_focus_pending = false;
+    }
+
+    pub fn takeWorkspaceFocusAction(self: *AppSession) bool {
+        const pending = self.workspace_focus_pending;
+        self.workspace_focus_pending = false;
+        return pending;
+    }
+
+    fn removeFilePanelQueuedActions(self: *AppSession, surface_id: u64) void {
+        self.removeFilePanelDirtySyncAction(surface_id);
+        if (self.file_panel_mode_pending == surface_id) self.file_panel_mode_pending = null;
+        if (self.file_panel_save_close_pending) |pending| {
+            if (pending.surface_id == surface_id) self.file_panel_save_close_pending = null;
+        }
+        var unlock_i: usize = 0;
+        while (unlock_i < self.file_panel_close_unlock_actions_len) {
+            if (self.file_panel_close_unlock_actions[unlock_i].surface_id != surface_id) {
+                unlock_i += 1;
+                continue;
+            }
+            const last = self.file_panel_close_unlock_actions_len - 1;
+            self.file_panel_close_unlock_actions[unlock_i] = self.file_panel_close_unlock_actions[last];
+            self.file_panel_close_unlock_actions_len = last;
+        }
+        var i: usize = 0;
+        while (i < self.file_tree_reload_actions_len) {
+            if (self.file_tree_reload_actions[i].surface_id != surface_id) {
+                i += 1;
+                continue;
+            }
+            const last = self.file_tree_reload_actions_len - 1;
+            self.file_tree_reload_actions[i] = self.file_tree_reload_actions[last];
+            self.file_tree_reload_actions_len = last;
+        }
+    }
+
+    fn queueFilePanelCloseUnlock(self: *AppSession, surface_id: u64, request_id: u64) void {
+        if (surface_id == 0 or request_id == 0) return;
+        for (self.file_panel_close_unlock_actions[0..self.file_panel_close_unlock_actions_len]) |*queued| {
+            if (queued.surface_id != surface_id) continue;
+            // 같은 surface의 더 새 close가 이전 unlock drain 전에 취소되면 최신 owner만 풀면 된다. 이전 owner는
+            // 이미 새 sync가 대체했거나 이 unlock이 없어도 더 이상 입력을 막지 않는다.
+            queued.request_id = request_id;
+            return;
+        }
+        if (self.file_panel_close_unlock_actions_len >= self.file_panel_close_unlock_actions.len) return;
+        self.file_panel_close_unlock_actions[self.file_panel_close_unlock_actions_len] = .{ .surface_id = surface_id, .request_id = request_id };
+        self.file_panel_close_unlock_actions_len += 1;
+    }
+
+    pub fn takeFilePanelCloseUnlockAction(self: *AppSession) ?FilePanelCloseUnlockAction {
+        if (self.file_panel_close_unlock_actions_len == 0) return null;
+        self.file_panel_close_unlock_actions_len -= 1;
+        return self.file_panel_close_unlock_actions[self.file_panel_close_unlock_actions_len];
+    }
+
+    fn clearFilePanelCloseWithoutUnlock(self: *AppSession) void {
+        if (self.pending_file_panel_close) |pending| self.allocator.free(pending.expected_path);
+        self.pending_file_panel_close = null;
+        self.file_panel_save_close_pending = null;
+    }
+
+    /// close transaction의 모든 예약을 한 곳에서 회수한다. sync one-shot이 아직 queue에 있든 이미 WebKit으로
+    /// 넘어갔든 entry protection을 즉시 내리고 request-scoped unlock을 보낸다. 늦은 success/failure ack는
+    /// pending request id가 없어 닫기를 진행하지 못한다.
+    fn cancelFilePanelClose(self: *AppSession) void {
+        const pending = self.pending_file_panel_close orelse return;
+        // 보호 플래그는 unlock된 editor가 request_id=0 최신 snapshot을 보고할 때까지 유지한다. 여기서 내리면
+        // native clean이 stale인 상태에서 비활성 WKWebView가 LRU eviction되어 미저장 buffer를 잃을 수 있다.
+        self.removeFilePanelDirtySyncAction(pending.surface_id);
+        if (self.file_panel_save_close_pending) |save| {
+            if (save.surface_id == pending.surface_id and save.request_id == pending.request_id) {
+                self.file_panel_save_close_pending = null;
+            }
+        }
+        self.queueFilePanelCloseUnlock(pending.surface_id, pending.request_id);
+        self.clearFilePanelCloseWithoutUnlock();
+    }
+
+    /// request-scoped unlock 자체를 실행할 panel/JS가 사라졌을 때의 terminal ack. 같은 surface의 새 close가 이미
+    /// 시작됐으면 이전 request 실패는 무시하고, 아니면 clean으로 추정하지 않도록 dirty를 보수적으로 latch한 뒤
+    /// sync reservation만 회수한다.
+    pub fn failFilePanelCloseUnlock(self: *AppSession, surface_id: u64, request_id: u64) void {
+        if (self.pending_file_panel_close) |pending| {
+            if (pending.surface_id == surface_id and pending.request_id != request_id) return;
+        }
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return;
+        entry.dirty = true;
+        entry.dirty_sync_pending = false;
+        self.removeFilePanelDirtySyncAction(surface_id);
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+        self.showNotice("편집 상태를 다시 확인할 수 없어 파일 탭을 보호했습니다.");
+    }
+
+    fn closeFilePanelSurfaceNow(self: *AppSession, surface_id: u64) bool {
+        if (!self.dock_initialized or surface_id == 0) return false;
+        const group = self.dock.groupForSurfaceId(surface_id) orelse return false;
+        var index: ?usize = null;
+        for (group.entries.items, 0..) |entry, i| if (entry.surface_id == surface_id) {
+            index = i;
+            break;
+        };
+        const removed = group.remove(index orelse return false) orelse return false;
+        self.hovered_file_panel_tab = null;
+        self.removeFilePanelQueuedActions(surface_id);
+        if (self.pending_file_panel_close != null and self.pending_file_panel_close.?.surface_id == surface_id)
+            self.clearFilePanelCloseWithoutUnlock();
+        self.notifySurfaceClosed(surface_id);
+        self.allocator.free(removed.path);
+
+        const removed_owned_focus = switch (self.focus_owner) {
+            .dock_surface => |focused| focused == surface_id,
+            .workspace => false,
+        };
+        if (removed_owned_focus) {
+            if (group.active) |active| {
+                const next = &group.entries.items[active];
+                if (next.surface_id == 0) next.surface_id = self.surface_ids.next();
+                self.focus_owner = .{ .dock_surface = next.surface_id };
+                self.workspace_focus_pending = false;
+                self.touchFilePanelEntry(next);
+                self.file_panel_mode_pending = next.surface_id;
+            } else {
+                self.focus_owner = .workspace;
+                self.workspace_focus_pending = true;
+            }
+        }
+        self.file_tree_rows_dirty = true;
+        self.metal_dirty = true;
+        return true;
+    }
+
+    fn filePanelCloseEntry(self: *AppSession, pending: PendingFilePanelClose) ?*dock_panel.Entry {
+        if (pending.surface_generation != pending.surface_id) return null; // surface id는 앱 전역 비재사용이라 generation token 겸용.
+        const entry = self.dock.entryForSurfaceId(pending.surface_id) orelse return null;
+        if (!std.mem.eql(u8, entry.path, pending.expected_path) or
+            entry.external_change_generation != pending.state_generation) return null;
+        if (pending.phase != .syncing and entry.editor_revision != pending.revision) return null;
+        return entry;
+    }
+
+    fn abortStaleFilePanelClose(self: *AppSession) void {
+        self.cancelFilePanelClose();
+        self.showNotice("파일 탭 상태가 바뀌어 닫기를 취소했습니다.");
+    }
+
+    fn requestFilePanelClose(self: *AppSession, surface_id: u64) void {
+        if (self.pending_file_panel_close != null) return;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return;
+        // HTML과 안정된 native-clean Markdown read entry만 즉시 닫는다. source editor를 떠나도 CM6 buffer는 살아
+        // 있으므로 dirty/pending/conflict Markdown은 mode와 무관하게 revision-pinned coordinator를 거친다.
+        if (entry.kind == .markdown and filePanelEntryNeedsDirtyProtection(entry.*)) {
+            if (self.file_panel_close_request_id >= max_file_panel_close_request_id) {
+                self.showNotice("파일 닫기 요청 번호를 더 발급할 수 없어 탭을 닫지 않았습니다.");
+                return;
+            }
+            self.file_panel_close_request_id += 1;
+            const request_id = self.file_panel_close_request_id;
+            const expected_path = self.allocator.dupe(u8, entry.path) catch {
+                self.showNotice("파일 닫기 상태를 준비할 수 없어 탭을 닫지 않았습니다.");
+                return;
+            };
+            self.pending_file_panel_close = .{
+                .surface_id = surface_id,
+                .surface_generation = surface_id,
+                .request_id = request_id,
+                .expected_path = expected_path,
+                .state_generation = entry.external_change_generation,
+                .phase = .syncing,
+            };
+            self.markFilePanelCloseDirtySyncPending(entry, request_id);
+            return;
+        }
+        _ = self.closeFilePanelSurfaceNow(surface_id);
+    }
+
+    fn showFilePanelCloseChoices(self: *AppSession, pending: PendingFilePanelClose, entry: *const dock_panel.Entry) void {
+        self.pending_file_panel_close = pending;
+        if (entry.external_change) {
+            self.showConfirmButtons(.file_panel_close, "디스크에서 변경된 파일입니다. 변경사항을 버리고 닫을까요?", .{ .confirm = "변경사항 버리기", .cancel = "취소" });
+            var next = pending;
+            next.phase = .confirm_conflict;
+            self.pending_file_panel_close = next;
+        } else {
+            self.showConfirmChoices(.file_panel_close, "저장하지 않은 변경사항이 있습니다.", .{ .primary = "저장", .alternate = "변경사항 버리기", .cancel = "취소" });
+            var next = pending;
+            next.phase = .confirm_dirty;
+            self.pending_file_panel_close = next;
+        }
+    }
+
+    pub fn takeFilePanelSaveCloseAction(self: *AppSession) ?FilePanelSaveCloseAction {
+        const action = self.file_panel_save_close_pending orelse return null;
+        self.file_panel_save_close_pending = null;
+        const pending = self.pending_file_panel_close orelse return null;
+        if (pending.surface_id != action.surface_id or pending.request_id != action.request_id or
+            pending.phase != .saving) return null;
+        if (self.filePanelCloseEntry(pending) == null) {
+            self.abortStaleFilePanelClose();
+            return null;
+        }
+        return action;
+    }
+
+    pub fn completeFilePanelSaveClose(self: *AppSession, surface_id: u64, request_id: u64, revision: u64, success: bool) void {
+        const pending = self.pending_file_panel_close orelse return;
+        if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .saving) return;
+        if (self.filePanelCloseEntry(pending) == null) {
+            self.abortStaleFilePanelClose();
+            return;
+        }
+        if (!success) {
+            self.cancelFilePanelClose();
+            self.showNotice("파일을 저장할 수 없어 탭을 닫지 않았습니다.");
+            return;
+        }
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse {
+            self.cancelFilePanelClose();
+            return;
+        };
+        if (entry.editor_revision != revision or entry.dirty or entry.dirty_sync_pending or entry.external_change) {
+            self.cancelFilePanelClose();
+            self.showNotice("저장 후 편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
+            return;
+        }
+        _ = self.closeFilePanelSurfaceNow(surface_id);
     }
 
     /// workspace.v1은 외부 입력이므로, DockPanel의 구조 검증 뒤에도 라이브 open과 같은 파일 capability 검증을 다시
@@ -8660,6 +9041,161 @@ pub const AppSession = struct {
         InvalidReloadState,
     };
 
+    const PinnedFilePanelParent = struct {
+        dir: std.Io.Dir,
+        basename: []const u8,
+    };
+
+    /// 절대 경로의 부모를 root fd부터 component별 openat(NO_FOLLOW)으로 걷는다. 이후 원본 검사·temp 생성·commit은
+    /// 모두 이 동일 directory capability와 basename에 상대적으로 수행하므로, 검사 뒤 parent path가 symlink/다른
+    /// directory로 교체돼도 새 경로를 다시 열어 엉뚱한 파일을 덮지 않는다.
+    fn openPinnedFilePanelParent(io: std.Io, absolute_path: []const u8) FilePanelWriteError!PinnedFilePanelParent {
+        if (!std.fs.path.isAbsolute(absolute_path)) return error.NotFound;
+        const parent_path = std.fs.path.dirname(absolute_path) orelse return error.NotFound;
+        const basename = std.fs.path.basename(absolute_path);
+        if (basename.len == 0 or std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, "..")) return error.NotFound;
+
+        var current = std.Io.Dir.openDirAbsolute(io, "/", .{ .follow_symlinks = false }) catch return error.NotFound;
+        errdefer current.close(io);
+        var components = std.mem.tokenizeScalar(u8, if (parent_path.len > 0) parent_path[1..] else parent_path, '/');
+        while (components.next()) |component| {
+            if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.NotFound;
+            const next = current.openDir(io, component, .{ .follow_symlinks = false }) catch return error.NotFound;
+            current.close(io);
+            current = next;
+        }
+        return .{ .dir = current, .basename = basename };
+    }
+
+    fn swapPinnedFilePanelNames(parent: std.Io.Dir, from: []const u8, to: []const u8) bool {
+        if (builtin.os.tag != .macos) return false;
+        var from_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var to_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (from.len + 1 > from_buf.len or to.len + 1 > to_buf.len) return false;
+        @memcpy(from_buf[0..from.len], from);
+        from_buf[from.len] = 0;
+        @memcpy(to_buf[0..to.len], to);
+        to_buf[to.len] = 0;
+        return FilePanelTestC.renameatx_np(
+            @intCast(parent.handle),
+            @ptrCast(from_buf[0..from.len :0]),
+            @intCast(parent.handle),
+            @ptrCast(to_buf[0..to.len :0]),
+            rename_swap,
+        ) == 0;
+    }
+
+    fn pinnedFilePanelNameHasInode(io: std.Io, parent: std.Io.Dir, name: []const u8, inode: std.Io.File.INode) bool {
+        var file = openFilePanelRead(parent, name, false) catch return false;
+        defer file.close(io);
+        const stat = file.stat(io) catch return false;
+        return stat.kind == .file and stat.inode == inode;
+    }
+
+    fn swapPinnedFilePanelNamesIfPair(
+        io: std.Io,
+        parent: std.Io.Dir,
+        from: []const u8,
+        from_inode: std.Io.File.INode,
+        to: []const u8,
+        to_inode: std.Io.File.INode,
+    ) bool {
+        if (!pinnedFilePanelNameHasInode(io, parent, from, from_inode) or
+            !pinnedFilePanelNameHasInode(io, parent, to, to_inode)) return false;
+        return swapPinnedFilePanelNames(parent, from, to);
+    }
+
+    fn deletePinnedFilePanelNameIfInode(io: std.Io, parent: std.Io.Dir, name: []const u8, inode: std.Io.File.INode) void {
+        if (!pinnedFilePanelNameHasInode(io, parent, name, inode)) return;
+        parent.deleteFile(io, name) catch {};
+    }
+
+    /// 이미 핀한 parent와 original fd를 사용해 저장한다. macOS에서는 temp↔leaf를 RENAME_SWAP 한 뒤 양쪽 inode가
+    /// 예상한 original/replacement인지 검증한다. leaf가 검사 뒤 교체됐으면 swap을 되돌려 경쟁 파일을 보존하고
+    /// ExternalConflict로 실패한다. 다른 플랫폼의 헤드리스 빌드는 같은 pinned parent에서 std atomic replace를 쓴다.
+    fn writePinnedFilePanel(
+        io: std.Io,
+        parent: std.Io.Dir,
+        basename: []const u8,
+        original: std.Io.File,
+        original_stat: std.Io.File.Stat,
+        content: []const u8,
+    ) FilePanelWriteError!void {
+        if (builtin.os.tag != .macos) {
+            var atomic = parent.createFileAtomic(io, basename, .{
+                .permissions = original_stat.permissions,
+                .replace = true,
+            }) catch return error.WriteFailed;
+            defer atomic.deinit(io);
+            atomic.file.writeStreamingAll(io, content) catch return error.WriteFailed;
+            atomic.file.sync(io) catch return error.WriteFailed;
+            atomic.replace(io) catch return error.WriteFailed;
+            return;
+        }
+
+        var random: u64 = undefined;
+        io.random(std.mem.asBytes(&random));
+        var temp_name_buf: [40]u8 = undefined;
+        const temp_name = std.fmt.bufPrint(&temp_name_buf, ".maru-save-{x}", .{random}) catch return error.WriteFailed;
+        var replacement = parent.createFile(io, temp_name, .{
+            .exclusive = true,
+            .permissions = original_stat.permissions,
+        }) catch return error.WriteFailed;
+        defer replacement.close(io);
+        const created_stat = replacement.stat(io) catch return error.WriteFailed;
+        var temp_owned_inode: ?std.Io.File.INode = created_stat.inode;
+        defer if (temp_owned_inode) |inode| deletePinnedFilePanelNameIfInode(io, parent, temp_name, inode);
+
+        // rename-replace는 새 inode가 되므로 원본 ACL/xattr/owner를 temp fd로 먼저 복사한다. metadata 복사가 실패하면
+        // 원본을 그대로 두고 저장 자체를 실패시켜 quarantine·Finder tag 등을 조용히 잃지 않는다.
+        if (std.c.fcopyfile(original.handle, replacement.handle, null, .{
+            .ACL = true,
+            .STAT = true,
+            .XATTR = true,
+        }) != 0) return error.WriteFailed;
+        replacement.writeStreamingAll(io, content) catch return error.WriteFailed;
+        replacement.sync(io) catch return error.WriteFailed;
+        const replacement_stat = replacement.stat(io) catch return error.WriteFailed;
+
+        // 최초 commit도 이름만 믿지 않는다. temp가 우리가 만든 replacement이고 leaf가 처음 연 original인 pair가
+        // 직전까지 유지될 때만 swap한다. 외부 leaf/temp 교체를 관측하면 namespace를 전혀 바꾸지 않고 conflict.
+        if (!swapPinnedFilePanelNamesIfPair(
+            io,
+            parent,
+            temp_name,
+            replacement_stat.inode,
+            basename,
+            original_stat.inode,
+        )) return error.ExternalConflict;
+        // swap 뒤 temp 이름은 더 이상 우리가 만든 inode라고 가정할 수 없다. 양쪽 identity 검증 또는 성공한 rollback
+        // 전에는 defer가 임의 경쟁 파일을 지우지 않게 소유권을 내린다.
+        temp_owned_inode = null;
+        const committed_pair_valid = validate: {
+            var committed = openFilePanelRead(parent, basename, false) catch break :validate false;
+            defer committed.close(io);
+            var displaced = openFilePanelRead(parent, temp_name, false) catch break :validate false;
+            defer displaced.close(io);
+            const committed_stat = committed.stat(io) catch break :validate false;
+            const displaced_stat = displaced.stat(io) catch break :validate false;
+            break :validate committed_stat.kind == .file and displaced_stat.kind == .file and
+                committed_stat.inode == replacement_stat.inode and displaced_stat.inode == original_stat.inode;
+        };
+        if (!committed_pair_valid) {
+            // rollback 권위는 관측된 임의 inode가 아니라 original/replacement 고정 pair뿐이다. pair가 달라졌으면
+            // 경쟁자가 둔 temp를 leaf로 승격하지 않고 추가 namespace mutation 없이 conflict로 남긴다.
+            if (swapPinnedFilePanelNamesIfPair(
+                io,
+                parent,
+                temp_name,
+                original_stat.inode,
+                basename,
+                replacement_stat.inode,
+            )) temp_owned_inode = replacement_stat.inode;
+            return error.ExternalConflict;
+        }
+        temp_owned_inode = original_stat.inode; // 검증된 displaced original만 commit 완료 뒤 제거한다.
+    }
+
     /// 신뢰 shell이 핀한 Markdown 파일 하나만 원자 교체한다. 웹 요청에는 경로 인자가 없고 surface→entry 경로를
     /// 여기서 다시 해소한다. 원본 권한을 보존한 동일 디렉터리 임시 파일을 fsync한 뒤 rename-replace하므로 실패 시
     /// 기존 파일이 부분 내용으로 노출되지 않는다. dirty 최종값은 저장 중 재편집과 직렬화한 shell의 setDirty가 내리며,
@@ -8672,27 +9208,13 @@ pub const AppSession = struct {
         if (content.len > file_panel_bridge.max_file_bytes) return error.TooLarge;
         if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
 
-        const cwd = std.Io.Dir.cwd();
-        var original = openFilePanelRead(cwd, entry.path, false) catch return error.NotFound;
+        const pinned = try openPinnedFilePanelParent(self.io, entry.path);
+        defer pinned.dir.close(self.io);
+        var original = openFilePanelRead(pinned.dir, pinned.basename, false) catch return error.NotFound;
         defer original.close(self.io);
         const stat = original.stat(self.io) catch return error.NotFound;
         if (stat.kind != .file) return error.NotRegularFile;
-
-        var atomic = cwd.createFileAtomic(self.io, entry.path, .{
-            .permissions = stat.permissions,
-            .replace = true,
-        }) catch return error.WriteFailed;
-        defer atomic.deinit(self.io);
-        // rename-replace는 새 inode가 되므로 macOS에서 원본 ACL/xattr/owner를 temp fd로 먼저 복사한다. metadata
-        // 복사가 실패하면 원본을 그대로 두고 저장 자체를 실패시켜 quarantine·Finder tag 등을 조용히 잃지 않는다.
-        if (builtin.os.tag == .macos and std.c.fcopyfile(original.handle, atomic.file.handle, null, .{
-            .ACL = true,
-            .STAT = true,
-            .XATTR = true,
-        }) != 0) return error.WriteFailed;
-        atomic.file.writeStreamingAll(self.io, content) catch return error.WriteFailed;
-        atomic.file.sync(self.io) catch return error.WriteFailed;
-        atomic.replace(self.io) catch return error.WriteFailed;
+        try writePinnedFilePanel(self.io, pinned.dir, pinned.basename, original, stat, content);
         entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
         entry.self_write_hash = std.hash.Wyhash.hash(0, content);
         entry.self_write_verifications = 0;
@@ -8701,16 +9223,52 @@ pub const AppSession = struct {
 
     /// CM6 문서 변경 상태를 도크 모델에 미러한다. Markdown surface만 허용하고 값이 바뀔 때만 redraw한다.
     pub fn setFilePanelDirty(self: *AppSession, surface_id: u64, dirty: bool) FilePanelWriteError!void {
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        return self.reportFilePanelDirty(surface_id, .{ .dirty = dirty, .revision = entry.editor_revision +| 1, .request_id = 0 });
+    }
+
+    pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
-        const protected_clean_ack = entry.external_change and !dirty;
-        const changed = (!protected_clean_ack and entry.dirty != dirty) or entry.dirty_sync_pending;
-        if (!protected_clean_ack) entry.dirty = dirty;
-        entry.dirty_sync_pending = false;
-        self.removeFilePanelDirtySyncAction(surface_id);
+        var close_pending: ?PendingFilePanelClose = null;
+        if (report.request_id != 0) {
+            const pending = self.pending_file_panel_close orelse return;
+            if (pending.surface_id != surface_id or pending.phase != .syncing or pending.request_id != report.request_id) return;
+            if (self.filePanelCloseEntry(pending) == null) {
+                self.abortStaleFilePanelClose();
+                return;
+            }
+            close_pending = pending;
+        }
+        if (report.revision < entry.editor_revision) return;
+        entry.editor_revision = report.revision;
+        const protected_clean_ack = entry.external_change and !report.dirty;
+        const changed = (!protected_clean_ack and entry.dirty != report.dirty) or entry.dirty_sync_pending;
+        if (!protected_clean_ack) entry.dirty = report.dirty;
+        const close_match = close_pending != null;
+        if (self.pending_file_panel_close == null or self.pending_file_panel_close.?.surface_id != surface_id or close_match) {
+            entry.dirty_sync_pending = false;
+            self.removeFilePanelDirtySyncAction(surface_id);
+        }
         if (changed) self.metal_dirty = true;
         if (changed) self.file_tree_rows_dirty = true;
+        if (close_pending) |pending| {
+            var pinned = pending;
+            pinned.revision = report.revision;
+            if (!entry.dirty and !entry.external_change) {
+                _ = self.closeFilePanelSurfaceNow(surface_id);
+                return;
+            }
+            self.showFilePanelCloseChoices(pinned, entry);
+        }
+    }
+
+    pub fn failFilePanelDirtySync(self: *AppSession, surface_id: u64, request_id: u64) void {
+        const pending = self.pending_file_panel_close orelse return;
+        if (pending.surface_id != surface_id or pending.request_id != request_id or pending.phase != .syncing) return;
+        self.cancelFilePanelClose();
+        self.showNotice("편집 상태를 확인할 수 없어 탭을 닫지 않았습니다.");
     }
 
     pub fn filePanelMode(self: *AppSession, surface_id: u64) ?dock_panel.Mode {
@@ -8726,11 +9284,16 @@ pub const AppSession = struct {
     }
 
     pub fn takeFilePanelDirtySyncAction(self: *AppSession) ?u64 {
+        const action = self.takeFilePanelDirtySyncActionV2() orelse return null;
+        return action.surface_id;
+    }
+
+    pub fn takeFilePanelDirtySyncActionV2(self: *AppSession) ?FilePanelDirtySyncAction {
         if (self.file_panel_dirty_sync_actions_len == 0) return null;
         const i = self.file_panel_dirty_sync_actions_len - 1;
-        const surface_id = self.file_panel_dirty_sync_actions[i];
+        const action = self.file_panel_dirty_sync_actions[i];
         self.file_panel_dirty_sync_actions_len = i;
-        return surface_id;
+        return action;
     }
 
     /// 핀된 Markdown 경로의 lexical parent를 directory handle로 연 뒤, 상대 asset의 모든 하위 component를
@@ -11644,40 +12207,52 @@ pub const AppSession = struct {
             .notifications_clear_all => self.clearNotifications(), // 하단 "모두 지우기"
             .confirm_accept => { // Enter/Y — 보류한 동작 실행. pending을 먼저 비워(재진입 방지) 실행.
                 self.metal_dirty = true;
-                if (self.pending_grant) |aid| { // 1e-confirm-2b: browser grant 승인 — app_host_abi가 폴해 grant 기록+재구동.
-                    self.pending_grant = null;
-                    self.grant_confirm_decision = .{ .async_id = aid, .approved = true };
-                } else if (self.pending_quit) {
-                    self.pending_quit = false;
-                    self.quit_decision = .accepted; // 다음 tick summary로 Swift에 전달 → NSApp.reply(true)
-                } else if (self.pending_file_conflict_reload) |surface_id| {
-                    self.pending_file_conflict_reload = null;
-                    self.beginFileConflictReload(surface_id);
-                } else if (self.pending_reset) {
-                    self.pending_reset = false;
-                    self.resetAllSettings(); // 리셋 확인 — 전체 기본값 + config 파일 덮어쓰기
-                } else if (self.pending_paste_confirm.items.len > 0) {
-                    self.confirmPendingPaste(); // 붙여넣기 확인 — 보관 payload를 allow_unsafe로 재제출 후 버퍼 비움
-                } else {
-                    const target = self.pending_close;
-                    self.pending_close = null;
-                    if (target) |t| self.executeClose(t);
+                const owner = self.pending_confirm;
+                self.pending_confirm = .none;
+                switch (owner) {
+                    .file_panel_close => if (self.pending_file_panel_close) |pending| switch (pending.phase) {
+                        .confirm_dirty => {
+                            if (self.filePanelCloseEntry(pending) == null) {
+                                self.abortStaleFilePanelClose();
+                            } else {
+                                var saving = pending;
+                                saving.phase = .saving;
+                                self.pending_file_panel_close = saving;
+                                self.file_panel_save_close_pending = .{ .surface_id = pending.surface_id, .request_id = pending.request_id };
+                            }
+                        },
+                        .confirm_conflict => {
+                            if (self.filePanelCloseEntry(pending) != null)
+                                _ = self.closeFilePanelSurfaceNow(pending.surface_id)
+                            else
+                                self.abortStaleFilePanelClose();
+                        },
+                        .syncing, .saving => {},
+                    },
+                    .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
+                    .quit => self.quit_decision = .accepted,
+                    .file_conflict_reload => |surface_id| self.beginFileConflictReload(surface_id),
+                    .reset => self.resetAllSettings(),
+                    .paste => |target_id| self.confirmPendingPaste(target_id),
+                    .close => |target| self.executeClose(target),
+                    .none => {},
                 }
             },
+            .confirm_alternate => {
+                const owner = self.pending_confirm;
+                self.pending_confirm = .none;
+                if (owner == .file_panel_close) if (self.pending_file_panel_close) |pending| {
+                    if (pending.phase == .confirm_dirty) {
+                        if (self.filePanelCloseEntry(pending) != null)
+                            _ = self.closeFilePanelSurfaceNow(pending.surface_id)
+                        else
+                            self.abortStaleFilePanelClose();
+                    }
+                } else self.cancelPendingConfirm();
+                self.metal_dirty = true;
+            },
             .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/grant)을 버린다.
-                if (self.pending_grant) |aid| { // 1e-confirm-2b: browser grant 거부 → app_host_abi가 unauthorized로 마침.
-                    self.pending_grant = null;
-                    self.grant_confirm_decision = .{ .async_id = aid, .approved = false };
-                }
-                if (self.pending_quit) {
-                    self.pending_quit = false;
-                    self.quit_decision = .cancelled; // 다음 tick summary로 Swift에 전달 → NSApp.reply(false)
-                }
-                self.pending_close = null;
-                self.pending_reset = false;
-                self.pending_paste_confirm.clearRetainingCapacity(); // 취소한 붙여넣기 payload 폐기
-                self.pending_paste_confirm_target = 0; // 대상도 함께 리셋(필드 계약 "0=보류 없음" — 폐기했으면 대상도 없다)
-                self.pending_file_conflict_reload = null;
+                self.cancelPendingConfirm();
                 self.metal_dirty = true;
             },
             .settings_close => {}, // settings.hide는 컴포넌트가 이미(handle/바깥클릭) — platform 부수효과 없음
@@ -12979,6 +13554,7 @@ pub const AppSession = struct {
                     self.chrome_host.confirm.dismiss();
                     self.dispatchChromeAction(switch (act) {
                         .confirmed => .confirm_accept,
+                        .alternate => .confirm_alternate,
                         .cancelled => .confirm_cancel,
                     });
                 }
@@ -13412,6 +13988,20 @@ pub const AppSession = struct {
                 if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
                     const g = hit.geometry;
                     const group = hit.group;
+                    if (dock_layout.tabCloseIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
+                        if (index < group.entries.items.len) {
+                            const surface_id = group.entries.items[index].surface_id;
+                            if (surface_id != 0) {
+                                self.requestFilePanelClose(surface_id);
+                            } else if (group.remove(index)) |removed| {
+                                self.allocator.free(removed.path);
+                                self.hovered_file_panel_tab = null;
+                                self.file_tree_rows_dirty = true;
+                                self.metal_dirty = true;
+                            }
+                        }
+                        return;
+                    }
                     _ = self.dock.focusGroup(group);
                     if (group.active) |index| if (index < group.entries.items.len) {
                         const entry = &group.entries.items[index];
@@ -13434,6 +14024,14 @@ pub const AppSession = struct {
                             self.enforceFilePanelLiveViewLimit();
                             self.file_panel_mode_pending = entry.surface_id;
                             self.file_tree_rows_dirty = true;
+                            self.metal_dirty = true;
+                        }
+                        if (index < group.entries.items.len) {
+                            const entry = &group.entries.items[index];
+                            if (entry.surface_id == 0) entry.surface_id = self.surface_ids.next();
+                            self.focus_owner = .{ .dock_surface = entry.surface_id };
+                            self.workspace_focus_pending = false;
+                            self.file_panel_mode_pending = entry.surface_id;
                             self.metal_dirty = true;
                         }
                         return;
@@ -14645,11 +15243,10 @@ pub const AppSession = struct {
         if (needs_confirm) {
             // 위험 → 바로 실행 대신 확인. showConfirmButtons가 (paste 포함) 다른 보류를 비우므로 그 호출
             // *뒤에* 보관한다(requestAppQuit의 pending_quit 순서와 동형 — 자기 payload를 자기가 안 지움).
-            self.showConfirmButtons(paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+            self.showConfirmButtons(.{ .paste = target_id }, paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
             // 미리보기 주입: 붙여넣을 내용을 확인창에 함께 보여준다(Ghostty식). show가 body를 리셋하므로 그 뒤에 준다.
             self.chrome_host.confirm.body = self.buildPastePreview(payload);
             self.pending_paste_confirm.clearRetainingCapacity();
-            self.pending_paste_confirm_target = target_id; // **대상도 함께 보관** — 확정 시 활성 pane을 다시 읽지 않는다
             self.pending_paste_confirm.appendSlice(self.allocator, payload) catch {
                 // 보관 실패(OOM): 유령 확인(예 눌러도 아무것도 안 붙는)을 막으려 모달도 닫는다.
                 self.pending_paste_confirm.clearRetainingCapacity();
@@ -14669,10 +15266,9 @@ pub const AppSession = struct {
     /// 사용자가 이미 확인). **모달을 띄울 때 고정한 대상**으로 붙인다 — 확인하는 동안 사용자가 탭/pane을
     /// 옮겼어도 payload는 원래 pane으로 간다(그 사이 그 Term이 닫혔으면 submitPaste가 no-op으로 버린다).
     /// submitPaste는 allow_unsafe면 payload를 안 건드리므로 소비 후 버퍼를 비운다.
-    fn confirmPendingPaste(self: *AppSession) void {
-        self.submitPaste(self.pending_paste_confirm.items, true, self.pending_paste_confirm_target);
+    fn confirmPendingPaste(self: *AppSession, target_id: u64) void {
+        self.submitPaste(self.pending_paste_confirm.items, true, target_id);
         self.pending_paste_confirm.clearRetainingCapacity();
-        self.pending_paste_confirm_target = 0;
     }
 
     // 드롭 업로드 백그라운드 스레드에 넘기는 작업 묶음(모두 owned — 워커가 해제). io를 안 싣는다:
@@ -15173,6 +15769,12 @@ pub const AppSession = struct {
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
         self.setHoveredNavButton(self.navButtonHoverAt(x_px, y_px));
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
+        var hovered_dock_tab: ?DockTabRef = null;
+        if (self.dockVisible()) if (self.dockGroupAtPoint(x_px, y_px)) |hit| {
+            if (dock_layout.tabIndexAt(hit.geometry, self.cell_width_px, hit.group.entries.items.len, x_px, y_px)) |index|
+                hovered_dock_tab = .{ .group_id = hit.group.runtime_id, .tab = index };
+        };
+        self.setHoveredFilePanelTab(hovered_dock_tab);
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -16750,6 +17352,7 @@ pub const AppSession = struct {
         }
         self.app_window.tabs = self.surface_ptrs.items;
         self.app_window.active_tab = @min(win.active_tab, self.tabs.items.len - 1);
+        self.resetFilePanelTransientStateForDockReplacement();
         if (self.dock_initialized) self.dock.deinit();
         self.dock = new_dock;
         self.dock_initialized = true;
@@ -18259,10 +18862,15 @@ pub const AppSession = struct {
                             const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                             const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                             const active_entry = if (group.active) |i| if (i < group.entries.items.len) &group.entries.items[i] else null else null;
+                            const hovered_index: ?usize = if (self.hovered_file_panel_tab) |hovered|
+                                if (hovered.group_id == group.runtime_id and hovered.tab < group.entries.items.len) hovered.tab else null
+                            else
+                                null;
                             if (coretext_frame_builder.buildFileDockChromeDrawList(
                                 self.allocator,
                                 titles.items,
                                 group.active,
+                                hovered_index,
                                 display_path,
                                 if (active_entry) |entry| entry.kind else .markdown,
                                 if (active_entry) |entry| entry.mode else .read,
@@ -18820,6 +19428,14 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    fn setHoveredFilePanelTab(self: *AppSession, next: ?DockTabRef) void {
+        const same = (self.hovered_file_panel_tab == null and next == null) or
+            (self.hovered_file_panel_tab != null and next != null and self.hovered_file_panel_tab.?.group_id == next.?.group_id and self.hovered_file_panel_tab.?.tab == next.?.tab);
+        if (same) return;
+        self.hovered_file_panel_tab = next;
+        self.metal_dirty = true;
+    }
+
     fn setHoveredFileTreeRow(self: *AppSession, row: ?usize) void {
         if (usizeOptEql(self.file_tree_hovered_row, row)) return;
         self.file_tree_hovered_row = row;
@@ -18874,6 +19490,7 @@ pub const AppSession = struct {
     fn clearAllHover(self: *AppSession) void {
         self.setHoveredSlot(null);
         self.setHoveredTab(null);
+        self.setHoveredFilePanelTab(null);
         self.setHoveredFileTreeRow(null);
         self.setHoveredNavButton(null); // Phase 7e-4: 밴드 nav 버튼 호버(모달/알림 패널 열림 시 stale 하이라이트 방지)
         self.setHoveredHeaderRegion(.none);
@@ -21695,6 +22312,7 @@ pub const AppSession = struct {
             self.file_tree_initialized = false;
         }
 
+        self.clearFilePanelCloseWithoutUnlock();
         if (self.dock_initialized) {
             self.dock.deinit();
             self.dock_initialized = false;
@@ -26001,7 +26619,7 @@ test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused —
     session.chrome_host.settings.open = false;
 
     // 확인 모달도 같은 판정(anyOverlayOpen에 포함).
-    session.showConfirmButtons(AppSession.paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
+    session.showConfirmButtons(.{ .paste = session.activeSurface().id }, AppSession.paste_confirm_message, .{ .confirm = "붙여넣기", .cancel = "취소" });
     try std.testing.expectEqual(AppSession.DropRoute.refused, session.routeDropAtPoint(tx, ty));
     try std.testing.expectEqual(active_pane, session.activePane());
     session.chrome_host.confirm.dismiss();
@@ -26041,7 +26659,8 @@ test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 
     session.pasteText("danger\nrm -rf /", false);
     try std.testing.expect(session.chrome_host.confirm.open);
     try std.testing.expect(session.pending_paste_confirm.items.len > 0);
-    try std.testing.expectEqual(origin_id, session.pending_paste_confirm_target); // ★ 대상 고정
+    try std.testing.expect(session.pending_confirm == .paste);
+    try std.testing.expectEqual(origin_id, session.pending_confirm.paste); // ★ 대상 고정
 
     // 확인하는 동안 사용자가 다른 pane으로 이동(탭/pane 전환·다른 pane 클릭 등).
     session.focusPaneRelative(1);
@@ -26057,15 +26676,15 @@ test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 
     try std.testing.expect(session.pending_pastes.get(origin_id) != null); // origin으로 갔다
     try std.testing.expect(session.pending_pastes.get(other_id) == null); // 활성(other)으로는 안 갔다
     try std.testing.expectEqual(@as(usize, 0), session.pending_paste_confirm.items.len); // 소비됨
-    try std.testing.expectEqual(@as(u64, 0), session.pending_paste_confirm_target); // 대상도 리셋
+    try std.testing.expect(session.pending_confirm == .none); // 대상도 리셋
 
     // 대상 Term이 사라진 뒤의 확정은 **아무 데도 안 간다**(활성 pane으로 새지 않는다) — 고정 대상이 없으면 no-op.
     const gone: u64 = origin_id +% 1000; // 존재하지 않는 surface id
     session.pending_paste_confirm.clearRetainingCapacity();
     try session.pending_paste_confirm.appendSlice(allocator, "orphan\n");
-    session.pending_paste_confirm_target = gone;
+    session.pending_confirm = .{ .paste = gone };
     const before_count = session.pending_pastes.count();
-    session.confirmPendingPaste();
+    session.confirmPendingPaste(gone);
     try std.testing.expectEqual(before_count, session.pending_pastes.count()); // 새 큐가 안 생겼다 = 아무 데도 안 붙였다
 }
 
@@ -33024,6 +33643,7 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     session.addr_edit = null; // 7e-2b: inputFocus가 addr_edit을 읽음([[devsession-undefined-test-field-trap]])
     session.find_matches = .empty; // toggleFind/showNotice가 clearRetainingCapacity 호출
     session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
+    session.pending_confirm = .none; // showNotice→cancelPendingClose가 읽음([[devsession-undefined-test-field-trap]])
     session.metal_dirty = false;
     defer {
         session.chrome_host.deinit(std.testing.allocator);
@@ -34593,18 +35213,18 @@ test "invalidatePositionalPendingClose: 위치성 보류는 무효화, .window�
     defer session.deinit();
 
     // 위치성 보류(활성 탭/pane/Term 인덱스 기준)는 포커스가 옮겨가면 stale → 무효화(안전한 abort).
-    session.pending_close = .term_or_pane;
+    session.pending_confirm = .{ .close = .term_or_pane };
     session.invalidatePositionalPendingClose();
-    try std.testing.expect(session.pending_close == null);
+    try std.testing.expect(session.pending_confirm == .none);
 
-    session.pending_close = .{ .tab_index = 0 };
+    session.pending_confirm = .{ .close = .{ .tab_index = 0 } };
     session.invalidatePositionalPendingClose();
-    try std.testing.expect(session.pending_close == null);
+    try std.testing.expect(session.pending_confirm == .none);
 
     // 창 전체 닫기(.window)는 대상이 세션 전체라 포커스 이동과 무관하게 유지된다.
-    session.pending_close = .window;
+    session.pending_confirm = .{ .close = .window };
     session.invalidatePositionalPendingClose();
-    try std.testing.expect(session.pending_close != null);
+    try std.testing.expect(session.pending_confirm == .close);
 }
 
 test "latchSessionEndOrHold: 비정상 시작 사망은 창 유지(held)+re-arm+zombie reap, 정상 종료는 앱 종료" {
@@ -36780,7 +37400,7 @@ test "close-confirm: 셸이 프롬프트(OSC 133 input)면 확인 모달 없이 
     session.requestClose(.term_or_pane);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_close == null);
+    try std.testing.expect(session.pending_confirm == .none);
 }
 
 test "close-confirm: 명령 실행 중(OSC 133 command)이면 확인 모달을 띄우고 닫기를 보류한다" {
@@ -36798,7 +37418,7 @@ test "close-confirm: 명령 실행 중(OSC 133 command)이면 확인 모달을 �
     session.requestClose(.term_or_pane);
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
     try std.testing.expect(session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_close != null);
+    try std.testing.expect(session.pending_confirm == .close);
 }
 
 // Phase 7f/4g: 브라우저 web term은 셸 명령이 없어(rt.live_initialized=false → termHasRunningJob 즉시 false) running-job
@@ -36833,7 +37453,7 @@ test "close-confirm: 브라우저 web term은 실행 중 명령 없이도 확인
     const terms_before = pane.terms.items.len;
     session.requestClose(.term_or_pane);
     try std.testing.expect(session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_close != null);
+    try std.testing.expect(session.pending_confirm == .close);
     try std.testing.expectEqual(terms_before, pane.terms.items.len); // 아직 안 닫음(확정 대기)
 }
 
@@ -36857,16 +37477,16 @@ test "close-confirm: 마지막 창(is_last_window)에서 세션 닫기는 Cmd+Q�
     // 셸이 프롬프트(실행 중 명령 없음)여도 항상 뜬다(Cmd+Q 모델 — 종료는 창 하나 닫기보다 파괴적).
     session.is_last_window = true;
     session.requestClose(.term_or_pane);
-    try std.testing.expect(session.pending_quit);
+    try std.testing.expect(session.pending_confirm == .quit);
     try std.testing.expect(session.chrome_host.confirm.open);
     try std.testing.expect(!session.ended_seen); // 아직 안 닫음 — 확정 대기
-    try std.testing.expect(session.pending_close == null); // 닫기 보류가 아니라 종료 보류
+    try std.testing.expect(session.pending_confirm == .quit); // 닫기 보류가 아니라 종료 보류
     try std.testing.expectEqual(QuitDecision.none, session.quit_decision); // 결정 전
 
     // 모달 확정(Enter) → quit_decision=.accepted (host가 다음 tick summary로 받아 NSApp.terminate).
     session.dispatchChromeAction(.confirm_accept);
     try std.testing.expectEqual(QuitDecision.accepted, session.quit_decision);
-    try std.testing.expect(!session.pending_quit);
+    try std.testing.expect(session.pending_confirm == .none);
 }
 
 // 비-마지막 창(멀티 창의 한 창·is_last_window=false, 기본값)에서 세션 닫기는 앱 종료가 아니라 그 창만 닫기다 —
@@ -36885,7 +37505,7 @@ test "close-confirm: 비-마지막 창(is_last_window=false)에서 세션 닫기
     // is_last_window=false(멀티 창의 비-마지막 창·기본값) → 이 창만 닫기: 종료 확인 안 뜨고 세션 종료 latch.
     session.is_last_window = false;
     session.requestClose(.term_or_pane);
-    try std.testing.expect(!session.pending_quit);
+    try std.testing.expect(session.pending_confirm != .quit);
     try std.testing.expect(!session.chrome_host.confirm.open);
     try std.testing.expect(session.ended_seen); // 이 창(세션) 종료 latch — Swift가 이 창만 닫음
 }
@@ -37249,22 +37869,20 @@ test "close-confirm: 모달에서 Esc=취소(안 닫음)·Enter=확정(보류한
     defer session.deinit();
 
     // 모달이 뜨고 active_term 닫기가 보류된 상태를 직접 구성(requestClose의 모달-오픈 분기와 같은 상태).
-    session.pending_close = .active_term;
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     // Esc → 취소: 모달 닫힘, 보류 버림, 아무것도 안 닫힘(2개 유지).
     _ = try session.handleKeyEvent(.{ .key = .escape });
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_close == null);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
 
     // 다시 보류하고 Enter → 확정: active_term 닫힘(1개), 보류 비워짐, 모달 닫힘.
-    session.pending_close = .active_term;
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
     _ = try session.handleKeyEvent(.{ .key = .enter });
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_close == null);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
     try std.testing.expect(!session.ended_seen); // Term이 남아 세션 유지
 }
@@ -37301,21 +37919,21 @@ test "reset-confirm: 모달에서 Esc=취소(설정 유지)·Enter=확정(전체
     session.loaded_config.config.font.size = factory.font.size + 6;
     session.requestResetAll();
     try std.testing.expect(session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_reset);
+    try std.testing.expect(session.pending_confirm == .reset);
     try std.testing.expectEqual(factory.font.size + 6, session.loaded_config.config.font.size); // 아직 안 바뀜
 
     // Esc → 취소: 모달 닫힘, 보류 버림, config 그대로(리셋 안 됨).
     _ = try session.handleKeyEvent(.{ .key = .escape });
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(!session.pending_reset);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(factory.font.size + 6, session.loaded_config.config.font.size);
 
     // 다시 요청 후 Enter → 확정: resetAllSettings 실행 → config 기본값.
     session.requestResetAll();
-    try std.testing.expect(session.pending_reset);
+    try std.testing.expect(session.pending_confirm == .reset);
     _ = try session.handleKeyEvent(.{ .key = .enter });
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(!session.pending_reset);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size); // 기본값으로
 }
 
@@ -37341,22 +37959,22 @@ test "quit-confirm: 항상 모달 + Esc=cancelled·Enter=accepted를 quit_decisi
     // 게이트 없이 항상 모달이 뜬다(requestAppQuit엔 closeTargetHasRunningJob 검사가 없다). 결정 전엔 .none.
     session.requestAppQuit();
     try std.testing.expect(session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_quit);
+    try std.testing.expect(session.pending_confirm == .quit);
     try std.testing.expectEqual(QuitDecision.none, session.quit_decision);
 
     // Esc → 취소: 모달 닫힘, 보류 해제, quit_decision=.cancelled로 latch.
     _ = try session.handleKeyEvent(.{ .key = .escape });
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(!session.pending_quit);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
 
     // 재요청이 latch를 비우고(.none), Enter → 확정: quit_decision=.accepted(host가 NSApp.reply(true)).
     session.requestAppQuit();
     try std.testing.expectEqual(QuitDecision.none, session.quit_decision);
-    try std.testing.expect(session.pending_quit);
+    try std.testing.expect(session.pending_confirm == .quit);
     _ = try session.handleKeyEvent(.{ .key = .enter });
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(!session.pending_quit);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(QuitDecision.accepted, session.quit_decision);
 }
 
@@ -37392,19 +38010,19 @@ test "quit-confirm: 보류 중 리셋 모달이 열리면 종료를 cancelled로
 
     // 종료 확인 모달이 떠 보류 중(Swift는 terminateLater 대기).
     session.requestAppQuit();
-    try std.testing.expect(session.pending_quit);
+    try std.testing.expect(session.pending_confirm == .quit);
 
     // 보류 중 리셋 모달이 열린다(메뉴 reset_defaults 마우스 클릭 경로). chokepoint가 종료를 supersede:
     // pending_quit 해제 + quit_decision=.cancelled(→ host가 reply(false)로 종료 취소·앱 유지).
     session.requestResetAll();
-    try std.testing.expect(!session.pending_quit);
+    try std.testing.expect(session.pending_confirm != .quit);
     try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
-    try std.testing.expect(session.pending_reset);
+    try std.testing.expect(session.pending_confirm == .reset);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     // 리셋 모달 확정 → 앱 종료가 아니라 설정 리셋이 실행된다(quit_decision은 .cancelled 그대로, 다시 .accepted가 아님).
     _ = try session.handleKeyEvent(.{ .key = .enter });
-    try std.testing.expect(!session.pending_reset);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
     try std.testing.expectEqual(factory.font.size, session.loaded_config.config.font.size); // 기본값으로 리셋됨
 }
@@ -37573,7 +38191,7 @@ test "기본값 리셋 토스트는 아무 클릭으로나 닫히고 그 뒤 버
     session.requestResetAll();
     _ = try session.handleKeyEvent(.{ .key = .enter });
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(!session.pending_reset);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expect(session.chrome_host.notice.open); // 토스트가 떴다(이게 옛 회귀에서 클릭을 다 삼키던 원인)
 
     // ── 리셋 후 첫 클릭(탭 바 우반=탭 1): 토스트를 닫고 **소비**한다 — 탭은 아직 안 바뀐다(우클릭 paste·선택 누수 방지). ──
@@ -37778,8 +38396,7 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개(확정 닫기 검증용)
     try std.testing.expectEqual(@as(usize, 2), session.activePane().terms.items.len);
 
-    session.pending_close = .active_term;
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     // 확인 버튼(기본 포커스=confirm → focus_accent fill) 중심 좌표를 view가 그린 op에서 얻는다(buttonAtPoint과 동일 출처).
@@ -37809,19 +38426,18 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
     // 좌클릭(button==0) → 확정: 모달 닫힘, 보류 실행(active_term 닫혀 1개로).
     session.mouse(1, cx, cy, 0, 0);
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_close == null);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expectEqual(@as(usize, 1), session.activePane().terms.items.len);
 
     // (2) 좌클릭 패널 밖(좌상단 원점) → 취소(바깥 클릭 dismiss) → 모달 닫힘, 보류 버림.
-    session.pending_close = .active_term;
-    session.showConfirm("닫을까요?");
+    session.showConfirm("닫을까요?", .active_term);
     session.mouse(1, 1, 1, 0, 0);
     try std.testing.expect(!session.chrome_host.confirm.open);
-    try std.testing.expect(session.pending_close == null);
+    try std.testing.expect(session.pending_confirm == .none);
 
     // (3) 모달 중 hover는 화살표 커서만(.default) — 게이트 없으면 터미널 본문 지점은 iBeam(.text)이라 .default가
     //     게이트가 실제로 동작함을 증명한다(뒤 사이드바/탭/◧ 호버 부수효과 차단).
-    session.showConfirm("닫을까요?");
+    session.showConfirm("닫을까요?", .active_term);
     const term_x: f64 = @floatFromInt(session.sidebar_width_px + 200); // 터미널 본문(게이트 없으면 .text)
     try std.testing.expectEqual(CursorKind.default, session.hoverCursor(term_x, 300, 0));
 }
@@ -38841,25 +39457,23 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // Term 2개
     const pane = session.activePane();
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
-    session.pending_close = .active_term;
-    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?");
+    session.showConfirm("실행 중인 명령이 있습니다. 닫을까요?", .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     pane.terms.items[0].rt.terminated = true; // 배경 Term이 셸 종료
     session.reapTerminatedTerms();
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // T0 reap됨(트리 변경)
-    try std.testing.expect(session.pending_close == null); // 보류 취소
+    try std.testing.expect(session.pending_confirm == .none); // 보류 취소
     try std.testing.expect(!session.chrome_host.confirm.open); // 모달 닫힘
 
     // (b) .window 보류는 reap에도 유지된다(창 전체 표적이라 인덱스 stale 무관).
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } }); // 다시 Term 2개
     const pane2 = session.activePane();
     try std.testing.expectEqual(@as(usize, 2), pane2.terms.items.len);
-    session.pending_close = .window;
-    session.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?");
+    session.showConfirm("실행 중인 명령이 있습니다. 이 창을 닫을까요?", .window);
     pane2.terms.items[0].rt.terminated = true;
     session.reapTerminatedTerms();
-    try std.testing.expect(session.pending_close != null); // .window 유지
+    try std.testing.expect(session.pending_confirm == .close); // .window 유지
     try std.testing.expect(session.chrome_host.confirm.open); // 모달 유지
 }
 
@@ -38887,7 +39501,7 @@ test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 �
 
     // 실제 닫기 확인 경로의 메시지(한글)로 모달을 연다 — showConfirm이 copyOverlayMessage로 세션 버퍼에 복사.
     const msg = "실행 중인 명령이 있습니다. 닫을까요?";
-    session.showConfirm(msg);
+    session.showConfirm(msg, .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
     // buildChromeOverlayFrame과 같은 경로로 ChromeDraw 수집 → 셀 rasterize(여기까진 CoreText 무관 순수 단계).
@@ -43269,6 +43883,119 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     try std.testing.expectEqualStrings("# 저장\n한글", target_after);
 }
 
+test "file panel write pins parent capability and rolls back a raced leaf replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "parent");
+    try tmp.dir.writeFile(io, .{ .sub_path = "parent/doc.md", .data = "original" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/parent/doc.md", .{root});
+    defer allocator.free(path);
+
+    const pinned = try AppSession.openPinnedFilePanelParent(io, path);
+    defer pinned.dir.close(io);
+    var original = try AppSession.openFilePanelRead(pinned.dir, pinned.basename, false);
+    defer original.close(io);
+    const original_stat = try original.stat(io);
+
+    // path의 parent를 바꿔도 저장은 검사 때 핀한 directory에만 착지하고, 새 parent의 같은 basename은 불변이다.
+    try tmp.dir.rename("parent", tmp.dir, "moved", io);
+    try tmp.dir.createDirPath(io, "parent");
+    try tmp.dir.writeFile(io, .{ .sub_path = "parent/doc.md", .data = "competitor-parent" });
+    try AppSession.writePinnedFilePanel(io, pinned.dir, pinned.basename, original, original_stat, "saved-pinned");
+    const moved = try tmp.dir.readFileAlloc(io, "moved/doc.md", allocator, .limited(1024));
+    defer allocator.free(moved);
+    try std.testing.expectEqualStrings("saved-pinned", moved);
+    const replacement_parent = try tmp.dir.readFileAlloc(io, "parent/doc.md", allocator, .limited(1024));
+    defer allocator.free(replacement_parent);
+    try std.testing.expectEqualStrings("competitor-parent", replacement_parent);
+
+    // original fd를 연 뒤 같은 parent의 leaf inode가 바뀌면 swap 검증이 이를 감지하고 원상 복구한다.
+    const moved_path = try std.fmt.allocPrint(allocator, "{s}/moved/doc.md", .{root});
+    defer allocator.free(moved_path);
+    const moved_pinned = try AppSession.openPinnedFilePanelParent(io, moved_path);
+    defer moved_pinned.dir.close(io);
+    var moved_original = try AppSession.openFilePanelRead(moved_pinned.dir, moved_pinned.basename, false);
+    defer moved_original.close(io);
+    const moved_original_stat = try moved_original.stat(io);
+    try tmp.dir.deleteFile(io, "moved/doc.md");
+    try tmp.dir.writeFile(io, .{ .sub_path = "moved/doc.md", .data = "competitor-leaf" });
+    try std.testing.expectError(
+        error.ExternalConflict,
+        AppSession.writePinnedFilePanel(io, moved_pinned.dir, moved_pinned.basename, moved_original, moved_original_stat, "must-not-land"),
+    );
+    const competitor_leaf = try tmp.dir.readFileAlloc(io, "moved/doc.md", allocator, .limited(1024));
+    defer allocator.free(competitor_leaf);
+    try std.testing.expectEqualStrings("competitor-leaf", competitor_leaf);
+
+    try tmp.dir.symLink(io, "moved", "parent-link", .{});
+    const symlink_parent_path = try std.fmt.allocPrint(allocator, "{s}/parent-link/doc.md", .{root});
+    defer allocator.free(symlink_parent_path);
+    try std.testing.expectError(error.NotFound, AppSession.openPinnedFilePanelParent(io, symlink_parent_path));
+
+    // temp 이름이 initial commit 전에 교체되면 expected replacement/original pair가 아니므로 leaf는 불변이다.
+    try tmp.dir.createDirPath(io, "pair-race");
+    try tmp.dir.writeFile(io, .{ .sub_path = "pair-race/doc.md", .data = "pair-original" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "pair-race/temp", .data = "pair-replacement" });
+    var pair_dir = try tmp.dir.openDir(io, "pair-race", .{ .follow_symlinks = false });
+    defer pair_dir.close(io);
+    var pair_original = try AppSession.openFilePanelRead(pair_dir, "doc.md", false);
+    defer pair_original.close(io);
+    const pair_original_inode = (try pair_original.stat(io)).inode;
+    var pair_replacement = try AppSession.openFilePanelRead(pair_dir, "temp", false);
+    const pair_replacement_inode = (try pair_replacement.stat(io)).inode;
+    pair_replacement.close(io);
+    try pair_dir.deleteFile(io, "temp");
+    try pair_dir.writeFile(io, .{ .sub_path = "temp", .data = "temp-competitor" });
+    try std.testing.expect(!AppSession.swapPinnedFilePanelNamesIfPair(
+        io,
+        pair_dir,
+        "temp",
+        pair_replacement_inode,
+        "doc.md",
+        pair_original_inode,
+    ));
+    const pair_unchanged = try pair_dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
+    defer allocator.free(pair_unchanged);
+    try std.testing.expectEqualStrings("pair-original", pair_unchanged);
+
+    // 정상 swap 뒤 temp만 경쟁 inode로 바뀌면 fixed original/replacement rollback은 거부하고 경쟁 파일을 leaf로
+    // 승격하지 않는다. leaf에는 우리 replacement가, temp에는 competitor가 그대로 남는다.
+    try pair_dir.deleteFile(io, "temp");
+    try pair_dir.writeFile(io, .{ .sub_path = "temp", .data = "pair-replacement-2" });
+    var pair_replacement_2 = try AppSession.openFilePanelRead(pair_dir, "temp", false);
+    const pair_replacement_inode_2 = (try pair_replacement_2.stat(io)).inode;
+    pair_replacement_2.close(io);
+    try std.testing.expect(AppSession.swapPinnedFilePanelNamesIfPair(
+        io,
+        pair_dir,
+        "temp",
+        pair_replacement_inode_2,
+        "doc.md",
+        pair_original_inode,
+    ));
+    try pair_dir.deleteFile(io, "temp");
+    try pair_dir.writeFile(io, .{ .sub_path = "temp", .data = "post-swap-competitor" });
+    try std.testing.expect(!AppSession.swapPinnedFilePanelNamesIfPair(
+        io,
+        pair_dir,
+        "temp",
+        pair_original_inode,
+        "doc.md",
+        pair_replacement_inode_2,
+    ));
+    const pair_target = try pair_dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
+    defer allocator.free(pair_target);
+    try std.testing.expectEqualStrings("pair-replacement-2", pair_target);
+    const pair_temp = try pair_dir.readFileAlloc(io, "temp", allocator, .limited(1024));
+    defer allocator.free(pair_temp);
+    try std.testing.expectEqualStrings("post-swap-competitor", pair_temp);
+}
+
 test "FP6 file panel header toggles markdown mode and drains one action" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -43296,6 +44023,359 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
     try std.testing.expectEqual(surface_id, action.surface_id);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, action.mode);
     try std.testing.expect(session.takeFilePanelModeAction() == null);
+}
+
+test "file panel close syncs dirty state then handles clean discard save failure and conflict" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+
+    _ = try session.dock.open(group, "/tmp/close-clean.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    var sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+    session.requestFilePanelClose(sid);
+    var sync_action = session.takeFilePanelDirtySyncActionV2().?;
+    try std.testing.expectEqual(sid, sync_action.surface_id);
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 1, .request_id = sync_action.request_id });
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) == null);
+    try std.testing.expectEqual(@as(usize, 0), group.entries.items.len); // 마지막 탭이어도 group 유지
+
+    _ = try session.dock.open(group, "/tmp/close-dirty.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+    session.requestFilePanelClose(sid);
+    sync_action = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
+    try std.testing.expectEqual(FilePanelClosePhase.confirm_dirty, session.pending_file_panel_close.?.phase);
+    session.dispatchChromeAction(.confirm_cancel);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null);
+
+    session.requestFilePanelClose(sid);
+    sync_action = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 2, .request_id = sync_action.request_id });
+    session.dispatchChromeAction(.confirm_accept);
+    var save_action = session.takeFilePanelSaveCloseAction().?;
+    try std.testing.expectEqual(sid, save_action.surface_id);
+    session.completeFilePanelSaveClose(sid, save_action.request_id, 2, false);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null);
+
+    session.requestFilePanelClose(sid);
+    sync_action = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
+    session.dispatchChromeAction(.confirm_accept);
+    save_action = session.takeFilePanelSaveCloseAction().?;
+    const stale_save_request_id = save_action.request_id;
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 3 });
+    const saved_revision = session.dock.entryForSurfaceId(sid).?.editor_revision;
+    session.completeFilePanelSaveClose(sid, save_action.request_id, saved_revision - 1, true);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null); // stale save ack는 닫지 않는다.
+    try std.testing.expectEqual(sid, session.takeFilePanelCloseUnlockAction().?.surface_id);
+
+    session.requestFilePanelClose(sid);
+    sync_action = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = saved_revision + 1, .request_id = sync_action.request_id });
+    session.dispatchChromeAction(.confirm_accept);
+    save_action = session.takeFilePanelSaveCloseAction().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = saved_revision + 1 });
+    const final_revision = session.dock.entryForSurfaceId(sid).?.editor_revision;
+    session.completeFilePanelSaveClose(sid, stale_save_request_id, final_revision, true);
+    try std.testing.expectEqual(FilePanelClosePhase.saving, session.pending_file_panel_close.?.phase);
+    session.completeFilePanelSaveClose(sid, save_action.request_id, final_revision, true);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) == null);
+
+    _ = try session.dock.open(group, "/tmp/close-conflict.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+    group.entries.items[0].dirty = true;
+    group.entries.items[0].external_change = true;
+    session.requestFilePanelClose(sid);
+    sync_action = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync_action.request_id });
+    try std.testing.expectEqual(FilePanelClosePhase.confirm_conflict, session.pending_file_panel_close.?.phase);
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 2 });
+    session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null); // conflict discard도 stale revision 거부
+    _ = session.takeFilePanelCloseUnlockAction();
+    session.requestFilePanelClose(sid);
+    sync_action = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync_action.request_id });
+    session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) == null);
+}
+
+test "file panel read-mode dirty pending and conflict close through the snapshot coordinator" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+
+    _ = try session.dock.open(group, "/tmp/close-read-dirty.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+    const entry = &group.entries.items[0];
+    entry.mode = .read;
+    entry.dirty = true;
+    session.focus_owner = .{ .dock_surface = sid };
+
+    // close_focused도 X와 같은 requestFilePanelClose를 타며, read mode라는 이유로 즉시 제거하지 않는다.
+    session.dispatchAppAction(.close_focused);
+    var sync = session.takeFilePanelDirtySyncActionV2().?;
+    try std.testing.expectEqual(sid, sync.surface_id);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null);
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
+    try std.testing.expectEqual(FilePanelClosePhase.confirm_dirty, session.pending_file_panel_close.?.phase);
+    session.dispatchChromeAction(.confirm_cancel);
+    _ = session.takeFilePanelCloseUnlockAction();
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 2 });
+
+    // source→read 전환의 generic sync가 아직 pending이면 native clean이어도 새 close request가 그 snapshot을 supersede한다.
+    entry.dirty_sync_pending = true;
+    session.requestFilePanelClose(sid);
+    sync = session.takeFilePanelDirtySyncActionV2().?;
+    try std.testing.expect(sync.request_id != 0);
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = sync.request_id });
+    session.dispatchChromeAction(.confirm_cancel);
+    _ = session.takeFilePanelCloseUnlockAction();
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 4 });
+
+    // read mode external conflict는 저장 선택지를 열지 않고 discard/cancel 2-choice로 제한한다.
+    entry.external_change = true;
+    session.requestFilePanelClose(sid);
+    sync = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 5, .request_id = sync.request_id });
+    try std.testing.expectEqual(FilePanelClosePhase.confirm_conflict, session.pending_file_panel_close.?.phase);
+    session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) == null);
+}
+
+test "file panel exit protection gates window session quit and automatic terminal exit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/exit-protected.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit; // native-clean처럼 보여도 CM6 snapshot 전에는 종료 금지
+
+    try std.testing.expect(session.requestWindowClose());
+    try std.testing.expect(!session.ended_seen);
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.requestClose(.window);
+    try std.testing.expect(!session.ended_seen);
+    session.requestAppQuit();
+    try std.testing.expectEqual(QuitDecision.cancelled, session.quit_decision);
+    try std.testing.expect(session.pending_confirm == .none);
+
+    for (session.activePane().terms.items) |term| term.rt.terminated = true;
+    session.total_output_events = 1;
+    session.latchSessionEndOrHold(null, 999_999);
+    try std.testing.expect(session.file_panel_exit_held);
+    try std.testing.expect(!session.ended_seen);
+
+    group.entries.items[0].mode = .read;
+    group.entries.items[0].dirty = false;
+    group.entries.items[0].dirty_sync_pending = false;
+    _ = session.closeFilePanelSurfaceNow(sid);
+    session.latchSessionEndOrHold(null, 999_999);
+    try std.testing.expect(!session.file_panel_exit_held);
+    try std.testing.expect(session.ended_seen);
+}
+
+test "file panel close pins request identity and a superseding confirm unlocks without stale close" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+
+    _ = try session.dock.open(group, "/tmp/close-request-identity.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+
+    session.requestFilePanelClose(sid);
+    const first = session.takeFilePanelDirtySyncActionV2().?;
+    try std.testing.expectEqual(@as(u64, 1), first.request_id);
+
+    // 다른 요청의 snapshot은 모델 dirty/revision과 현재 close transaction을 전혀 바꾸지 않는다.
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 1, .request_id = first.request_id + 1 });
+    try std.testing.expectEqual(FilePanelClosePhase.syncing, session.pending_file_panel_close.?.phase);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null);
+    try std.testing.expectEqual(@as(u64, 0), session.dock.entryForSurfaceId(sid).?.editor_revision);
+
+    // 다른 destructive confirm이 single-owner slot을 선점하면 close lock과 coordinator를 함께 해제한다.
+    session.requestResetAll();
+    try std.testing.expect(session.pending_confirm == .reset);
+    try std.testing.expect(session.pending_file_panel_close == null);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid).?.dirty_sync_pending); // unlock snapshot ack까지 LRU 보호
+    const first_unlock = session.takeFilePanelCloseUnlockAction().?;
+    try std.testing.expectEqual(sid, first_unlock.surface_id);
+    try std.testing.expectEqual(first.request_id, first_unlock.request_id);
+
+    // old unlock이 drain되기 전에 같은 surface의 새 close가 시작돼도 이전 request 실패는 새 보호를 내리지 않는다.
+    session.dispatchChromeAction(.confirm_cancel);
+    session.requestFilePanelClose(sid);
+    const second = session.takeFilePanelDirtySyncActionV2().?;
+    session.failFilePanelCloseUnlock(sid, first_unlock.request_id);
+    try std.testing.expectEqual(second.request_id, session.pending_file_panel_close.?.request_id);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid).?.dirty_sync_pending);
+
+    // 이미 무효화된 request 1 ack가 늦게 와도 request 2 transaction을 완료하거나 탭을 닫지 않는다.
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 2, .request_id = first.request_id });
+    try std.testing.expectEqual(FilePanelClosePhase.syncing, session.pending_file_panel_close.?.phase);
+    try std.testing.expectEqual(@as(u64, 0), session.dock.entryForSurfaceId(sid).?.editor_revision);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid).?.dirty_sync_pending);
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 3, .request_id = second.request_id });
+    session.dispatchChromeAction(.confirm_cancel);
+    const second_unlock = session.takeFilePanelCloseUnlockAction().?;
+    try std.testing.expectEqual(second.request_id, second_unlock.request_id);
+    session.failFilePanelCloseUnlock(sid, second_unlock.request_id);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null);
+
+    // host가 panel/JavaScript를 찾지 못한 경로도 pending과 lock을 명시적으로 회수한다.
+    session.requestFilePanelClose(sid);
+    const third = session.takeFilePanelDirtySyncActionV2().?;
+    session.failFilePanelDirtySync(sid, third.request_id);
+    try std.testing.expect(session.pending_file_panel_close == null);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid).?.dirty_sync_pending);
+    const third_unlock = session.takeFilePanelCloseUnlockAction().?;
+    try std.testing.expectEqual(sid, third_unlock.surface_id);
+    try std.testing.expectEqual(third.request_id, third_unlock.request_id);
+    session.failFilePanelCloseUnlock(sid, third_unlock.request_id);
+    try std.testing.expect(!session.dock.entryForSurfaceId(sid).?.dirty_sync_pending);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid).?.dirty); // 실패 시 clean 추정 금지
+    try std.testing.expect(session.chrome_host.notice.open);
+
+    // 같은 surface/revision처럼 보여도 state generation이 바뀌면 전체 target identity가 달라 닫지 않는다.
+    session.requestFilePanelClose(sid);
+    const fourth = session.takeFilePanelDirtySyncActionV2().?;
+    session.dock.entryForSurfaceId(sid).?.external_change_generation +%= 1;
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .revision = 4, .request_id = fourth.request_id });
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null);
+    try std.testing.expect(session.pending_file_panel_close == null);
+
+    session.file_panel_close_request_id = max_file_panel_close_request_id;
+    const queued_before = session.file_panel_dirty_sync_actions_len;
+    session.requestFilePanelClose(sid);
+    try std.testing.expect(session.pending_file_panel_close == null); // JS-safe ID를 재사용/wrap하지 않는다.
+    try std.testing.expectEqual(queued_before, session.file_panel_dirty_sync_actions_len);
+}
+
+test "file panel dirty close alternate discards only the pinned tab" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+
+    _ = try session.dock.open(group, "/tmp/close-background-a.md", .markdown);
+    _ = try session.dock.open(group, "/tmp/close-background-b.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    group.active = 1;
+    const background_sid = group.entries.items[0].surface_id;
+    const active_sid = group.entries.items[1].surface_id;
+    group.entries.items[0].mode = .source_edit;
+
+    session.requestFilePanelClose(background_sid);
+    const action = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 1, .request_id = action.request_id });
+    try std.testing.expect(session.pending_confirm == .file_panel_close);
+    try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 2 }); // confirm 뒤 늦은 editor 전진
+    session.dispatchChromeAction(.confirm_alternate);
+    try std.testing.expect(session.dock.entryForSurfaceId(background_sid) != null); // stale snapshot discard 거부
+    const stale_unlock = session.takeFilePanelCloseUnlockAction().?;
+    try std.testing.expectEqual(action.request_id, stale_unlock.request_id);
+
+    session.requestFilePanelClose(background_sid);
+    const current = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(background_sid, .{ .dirty = true, .revision = 3, .request_id = current.request_id });
+    session.dispatchChromeAction(.confirm_alternate);
+    try std.testing.expect(session.dock.entryForSurfaceId(background_sid) == null);
+    try std.testing.expectEqual(active_sid, group.entries.items[group.active.?].surface_id);
+    try std.testing.expect(session.pending_file_panel_close == null);
+}
+
+test "file panel save action identity mismatch aborts and unlocks instead of sticking" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/save-drain-stale.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+    session.requestFilePanelClose(sid);
+    const sync = session.takeFilePanelDirtySyncActionV2().?;
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .revision = 1, .request_id = sync.request_id });
+    session.dispatchChromeAction(.confirm_accept);
+    const entry = session.dock.entryForSurfaceId(sid).?;
+    const old_path = entry.path;
+    entry.path = try allocator.dupe(u8, "/tmp/save-drain-other.md");
+    allocator.free(old_path); // coordinator는 독립 expected_path를 소유하므로 이제 old entry path가 없어도 안전하다.
+    try std.testing.expect(session.takeFilePanelSaveCloseAction() == null);
+    try std.testing.expect(session.pending_file_panel_close == null);
+    try std.testing.expect(session.dock.entryForSurfaceId(sid) != null);
+    const unlock = session.takeFilePanelCloseUnlockAction().?;
+    try std.testing.expectEqual(sync.request_id, unlock.request_id);
+    try std.testing.expect(session.chrome_host.notice.open);
+}
+
+test "dock replacement clears file close hover focus and one-shot transients" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/replace-pending.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+    session.focus_owner = .{ .dock_surface = sid };
+    session.hovered_file_panel_tab = .{ .group_id = group.runtime_id, .tab = 0 };
+    session.requestFilePanelClose(sid);
+    try std.testing.expect(session.pending_file_panel_close != null);
+
+    session.resetFilePanelTransientStateForDockReplacement();
+    try std.testing.expect(session.pending_file_panel_close == null);
+    try std.testing.expect(session.file_panel_save_close_pending == null);
+    try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
+    try std.testing.expectEqual(@as(usize, 0), session.file_panel_close_unlock_actions_len);
+    try std.testing.expect(session.hovered_file_panel_tab == null);
+    try std.testing.expect(session.focus_owner == .workspace);
+    try std.testing.expect(session.workspace_focus_pending);
+}
+
+test "file panel focus supersedes a queued workspace first-responder action" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/focus-successor.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+    session.workspace_focus_pending = true;
+    try std.testing.expect(session.focusFilePanelSurface(sid));
+    try std.testing.expect(!session.takeWorkspaceFocusAction());
+    try std.testing.expect(session.focus_owner == .dock_surface);
+    try std.testing.expectEqual(sid, session.focus_owner.dock_surface);
 }
 
 test "FP6 file panel live view LRU protects dirty entries and recreates with a fresh surface id" {
@@ -43396,6 +44476,34 @@ test "FP6 merge transfers dock dirty state and live surface ownership before sou
     try std.testing.expect(moved_entry.dirty);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, moved_entry.mode);
     try std.testing.expect(std.mem.indexOfScalar(u64, outcome.moved_surfaces, moved_sid) != null);
+}
+
+test "file panel close transition rejects window merge before model mutation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const group = src.dock.singleGroup().?;
+    _ = try src.dock.open(group, "/tmp/merge-close-lock.md", .markdown);
+    src.assignDockSurfaceIds(&src.dock);
+    const sid = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+    src.requestFilePanelClose(sid);
+    const request_id = src.pending_file_panel_close.?.request_id;
+    const src_tabs = src.tabs.items.len;
+    const dst_tabs = dst.tabs.items.len;
+    var moved_buf: [16]u64 = undefined;
+    try std.testing.expectError(error.UnsupportedMove, src.mergeSessionInto(dst, &moved_buf));
+    try std.testing.expectEqual(src_tabs, src.tabs.items.len);
+    try std.testing.expectEqual(dst_tabs, dst.tabs.items.len);
+    try std.testing.expectEqual(request_id, src.pending_file_panel_close.?.request_id);
+    try std.testing.expect(src.dock.entryForSurfaceId(sid).?.dirty_sync_pending);
+    try std.testing.expect(dst.dock.entryForSurfaceId(sid) == null);
 }
 
 test "FP8 merge flattens source split entries into destination focused group without losing live surfaces" {

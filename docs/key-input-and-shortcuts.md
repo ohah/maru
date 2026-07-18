@@ -155,10 +155,10 @@ Command+B      -> 초기에는 오류
 
 ### 파일 도크·트리 키 소유권과 우선순위
 
-Zig의 단일 `FocusOwner` tagged union이 어느 계층이 키를 소비하는지 판정한다. `.workspace`, `.dock_surface { surface_id, generation }`, `.file_tree { restore_target }`, confirm·rename 등 overlay owner를 표현하고 `file_tree_focus`는 파생 getter로만 노출한다. 구조 포커스인 `DockPanel.focused_group`은 입력 owner가 아니다. Swift/AppKit은 물리 keyCode와 firstResponder 전이만 ABI로 전달하고 도크/트리 정책을 중복 판정하지 않는다. 우선순위는 다음과 같다.
+Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_surface { surface_id }`, `.file_tree { restore_surface }`를 표현하고 `file_tree_focus`는 여기서 파생한다. confirm·rename 등 overlay/text input은 별도 `InputFocus`가 이 구조 축보다 먼저 선점하며 `handleKeyEvent`와 모든 IME 라우팅이 이 우선순위를 공유한다. `terminalOwnsInput`은 WebView에서 Metal responder를 회수해야 하는 interactive modal/text/tree만 같은 순서로 판정한다. 비인터랙티브 notice는 현재 responder가 다음 입력으로 dismiss하도록 이 getter에서만 제외하지만 `InputFocus.notice`가 IME를 뒤 입력 대상으로 누수시키지 않는다. 앱 전역 비재사용 surface id가 generation token을 겸한다. 구조 포커스인 `DockPanel.focused_group`은 입력 owner가 아니다. Swift/AppKit은 물리 keyCode와 firstResponder 전이만 ABI로 전달하고 도크/트리 정책을 중복 판정하지 않는다. 우선순위는 다음과 같다.
 
 1. confirm·notice·palette·rename 같은 modal/overlay input owner가 자신의 Enter/Esc/편집 키를 먼저 소비한다.
-2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveForContext(.file_tree)`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
+2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveFileTree`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
 3. `file_tree_focus`가 켜져 있으면 modifier 없는 `↑/↓/←/→`, `Enter`, `Home/End`, `PageUp/PageDown`, `Esc`, `F2`와 `⌘Backspace`를 트리가 소비한다. 이때 terminal key encoding과 CM6/WebKit에는 전달하지 않는다.
 4. 도크 WKWebView가 first responder면 편집기 허용 키는 WebKit에 양보하고, Zig app action으로 확정된 키만 소비한다.
 5. 나머지는 활성 terminal/browser pane의 기존 app-action/browser-nav/terminal encoding 경로로 간다.

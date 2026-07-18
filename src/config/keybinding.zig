@@ -225,6 +225,7 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+Shift+T: 새 워크스페이스
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'T' } }, .action = .new_web_tab }, // Cmd+Option+T: 활성 pane에 새 브라우저 Term(⌘T=new_term의 web 버전, ⌥로 구분)
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'O' } }, .action = .open_file_panel }, // Cmd+O: Markdown/HTML을 현재 창 도크에 열기(macOS Open 관례)
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'E' } }, .action = .focus_file_tree }, // Cmd+Shift+E: project tree keyboard focus
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_focused }, // Cmd+W: 파일 도크 focus면 파일 탭, 아니면 Term cascade
     // split(pane) 순환: ⌘]=다음, ⌘[=이전(활성 워크스페이스 안에서 wrap, 분할 없으면 무동작). shift 없는 대괄호라
     // char는 ]/[ 그대로다(브레이스 }/{ 는 shift일 때만). 워크스페이스 ⌘⇧]/⌘⇧[ · Term ⌘⌥]/⌘⌥[ 와 modifier로
@@ -391,6 +392,29 @@ pub const KeyBindingResolver = struct {
         }
 
         return .{ .terminal_input = try terminal.input.encodeKey(event, buffer, encode_options) };
+    }
+
+    pub const FileTreeResolution = union(enum) {
+        app_action: action_mod.Action,
+        tree_default,
+        consumed,
+    };
+
+    /// project tree context는 셸 바이트를 절대 내보내지 않는다. 사용자 app binding이 최우선이고, terminal macro나
+    /// explicit unbind는 chord를 소비해 tree 기본키도 막는다. 둘 다 없을 때 built-in app action, 그 다음 tree 기본키다.
+    pub fn resolveFileTree(self: KeyBindingResolver, event: terminal.KeyEvent, is_tree_default: bool) FileTreeResolution {
+        const chord = KeyChord.fromKeyEvent(event) orelse return .consumed;
+        for (self.app_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        }
+        for (self.terminal_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .consumed;
+        }
+        if (self.isUnbound(chord)) return .consumed;
+        for (default_app_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        }
+        return if (is_tree_default) .tree_default else .consumed;
     }
 
     /// chord가 사용자 unbind 목록에 있는가 — resolve가 빌트인 기본 테이블을 건너뛸지 정하는 데 쓴다.
@@ -665,6 +689,27 @@ test "built-in app binding resolves Cmd+W to close_focused without user config" 
         .modifiers = .{ .command = true },
     }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.close_focused, resolved.app_action);
+}
+
+test "file tree context honors app override and unbind without leaking terminal macros" {
+    const up = terminal.KeyEvent{ .key = .arrow_up };
+    const custom: KeyBindingResolver = .{
+        .app_bindings = &.{.{ .chord = try KeyChord.parse("Up"), .action = .new_tab }},
+    };
+    try std.testing.expectEqual(action_mod.Action.new_tab, custom.resolveFileTree(up, true).app_action);
+
+    const unbound: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Up")} };
+    try std.testing.expect(unbound.resolveFileTree(up, true) == .consumed);
+
+    const macro: KeyBindingResolver = .{
+        .terminal_bindings = &.{.{ .chord = try KeyChord.parse("Up"), .input = .{ .send_text = "leak" } }},
+    };
+    try std.testing.expect(macro.resolveFileTree(up, true) == .consumed);
+
+    const defaults: KeyBindingResolver = .{};
+    try std.testing.expect(defaults.resolveFileTree(up, true) == .tree_default);
+    const close = defaults.resolveFileTree(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }, false);
+    try std.testing.expectEqual(action_mod.Action.close_focused, close.app_action);
 }
 
 test "unbind skips the built-in default: Cmd chord becomes ignored, others fall through to the shell" {

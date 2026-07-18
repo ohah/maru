@@ -75,6 +75,144 @@ pub const Row = union(enum) {
     };
 };
 
+/// 렌더 row의 위치와 분리된 transient selection identity. async scan·접기·watcher rebuild 뒤에도
+/// 같은 대상이면 선택을 복원할 수 있도록 path와 의미 종류만 사용한다. `path`는 Row/Tree가 소유한 borrowed slice다.
+pub const RowKind = enum(u8) { recent_header, recent_file, root, directory, file };
+
+pub const RowIdentity = struct {
+    kind: RowKind,
+    path: []const u8,
+
+    pub fn eql(self: RowIdentity, other: RowIdentity) bool {
+        return self.kind == other.kind and std.mem.eql(u8, self.path, other.path);
+    }
+};
+
+pub fn rowIdentity(row: Row) ?RowIdentity {
+    return switch (row) {
+        .recent_header => .{ .kind = .recent_header, .path = "" },
+        .recent_file => |v| .{ .kind = .recent_file, .path = v.path },
+        .root => |v| .{ .kind = .root, .path = v.path },
+        .directory => |v| .{ .kind = .directory, .path = v.path },
+        .file => |v| .{ .kind = .file, .path = v.path },
+        .empty => null,
+    };
+}
+
+pub fn rowDepth(row: Row) ?u16 {
+    return switch (row) {
+        .recent_header, .root => 0,
+        .recent_file => |v| v.depth,
+        .directory => |v| v.depth,
+        .file => |v| v.depth,
+        .empty => null,
+    };
+}
+
+pub fn findIdentity(rows: []const Row, wanted: RowIdentity) ?usize {
+    for (rows, 0..) |row, index| if (rowIdentity(row)) |identity| {
+        if (identity.eql(wanted)) return index;
+    };
+    return null;
+}
+
+/// `index`의 논리 부모. project row는 앞쪽의 첫 얕은 project row, recent file은 recent header다.
+pub fn parentIndex(rows: []const Row, index: usize) ?usize {
+    if (index >= rows.len) return null;
+    const identity = rowIdentity(rows[index]) orelse return null;
+    if (identity.kind == .recent_file) {
+        var i = index;
+        while (i > 0) {
+            i -= 1;
+            if (rows[i] == .recent_header) return i;
+        }
+        return null;
+    }
+    if (identity.kind == .recent_header or identity.kind == .root) return null;
+    const depth = rowDepth(rows[index]) orelse return null;
+    var i = index;
+    while (i > 0) {
+        i -= 1;
+        const candidate = rowIdentity(rows[i]) orelse continue;
+        if (candidate.kind == .recent_header or candidate.kind == .recent_file) continue;
+        const candidate_depth = rowDepth(rows[i]) orelse continue;
+        if (candidate_depth < depth) return i;
+    }
+    return null;
+}
+
+/// 펼쳐진 directory/root 또는 recent header 바로 아래의 첫 자식. 다음 row가 더 깊거나 recent file일 때만 인정한다.
+pub fn firstChildIndex(rows: []const Row, index: usize) ?usize {
+    if (index >= rows.len or index + 1 >= rows.len) return null;
+    const identity = rowIdentity(rows[index]) orelse return null;
+    return switch (identity.kind) {
+        .recent_header => if (rows[index + 1] == .recent_file) index + 1 else null,
+        .root, .directory => blk: {
+            const depth = rowDepth(rows[index]) orelse break :blk null;
+            const next_identity = rowIdentity(rows[index + 1]) orelse break :blk null;
+            if (next_identity.kind == .recent_header or next_identity.kind == .recent_file) break :blk null;
+            const next_depth = rowDepth(rows[index + 1]) orelse break :blk null;
+            break :blk if (next_depth > depth) index + 1 else null;
+        },
+        else => null,
+    };
+}
+
+pub fn adjacentActionable(rows: []const Row, index: usize, direction: i8) ?usize {
+    if (rows.len == 0 or direction == 0) return null;
+    if (direction > 0) {
+        var i = @min(index +| 1, rows.len);
+        while (i < rows.len) : (i += 1) if (rowIdentity(rows[i]) != null) return i;
+    } else {
+        var i = @min(index, rows.len);
+        while (i > 0) {
+            i -= 1;
+            if (rowIdentity(rows[i]) != null) return i;
+        }
+    }
+    return null;
+}
+
+/// rebuild에서 identity가 사라졌을 때 조작 가능한 조상, 이전 위치의 다음 행, 이전 행 순으로 결정한다.
+pub fn reconcileIdentity(rows: []const Row, wanted: RowIdentity, previous_index: usize) ?usize {
+    return reconcileIdentityCounted(rows, wanted, previous_index, null);
+}
+
+fn reconcileIdentityCounted(rows: []const Row, wanted: RowIdentity, previous_index: usize, visits_out: ?*usize) ?usize {
+    var deepest_ancestor: ?usize = null;
+    var deepest_ancestor_len: usize = 0;
+    var recent_header: ?usize = null;
+    var next_neighbor: ?usize = null;
+    var previous_neighbor: ?usize = null;
+    var visits: usize = 0;
+    defer {
+        if (visits_out) |out| out.* = visits;
+    }
+
+    // exact·조상·이웃을 같은 순회에서 모아 frame-tick rebuild 비용을 O(materialized rows)로 고정한다.
+    for (rows, 0..) |row, index| {
+        visits += 1;
+        const identity = rowIdentity(row) orelse continue;
+        if (identity.eql(wanted)) return index;
+        if (identity.kind == .recent_header) recent_header = index;
+        if (index >= previous_index) {
+            if (next_neighbor == null) next_neighbor = index;
+        } else {
+            previous_neighbor = index;
+        }
+        if (wanted.kind != .recent_file and wanted.path.len > 0 and
+            (identity.kind == .root or identity.kind == .directory) and
+            identity.path.len < wanted.path.len and pathWithin(wanted.path, identity.path) and
+            identity.path.len > deepest_ancestor_len)
+        {
+            deepest_ancestor = index;
+            deepest_ancestor_len = identity.path.len;
+        }
+    }
+    if (wanted.kind == .recent_file and recent_header != null) return recent_header;
+    return deepest_ancestor orelse next_neighbor orelse previous_neighbor;
+}
+
 const Node = struct {
     name: []u8,
     path: []u8,
@@ -119,6 +257,12 @@ pub const Tree = struct {
         self.* = undefined;
     }
 
+    /// 아직 열거할 project root나 다시 열 수 있는 recent entry가 있는가. L4는 이 값으로 마지막 파일 탭을
+    /// 닫은 뒤에도 빈 editor group과 tree를 유지하되, 앱 시작의 완전히 빈 dock은 숨긴다.
+    pub fn hasContent(self: *const Tree) bool {
+        return self.roots.items.len > 0 or self.recent.items.len > 0;
+    }
+
     pub fn shouldExcludeName(name: []const u8) bool {
         for (default_exclusions) |excluded| if (std.ascii.eqlIgnoreCase(name, excluded)) return true;
         return false;
@@ -139,8 +283,14 @@ pub const Tree = struct {
     }
 
     fn ensureRoot(self: *Tree, root_path: []const u8) !void {
-        for (self.roots.items) |root| if (std.mem.eql(u8, root.path, root_path)) return;
-        if (self.roots.items.len >= max_roots) return error.TooManyRoots;
+        var nested_roots: usize = 0;
+        for (self.roots.items) |root| {
+            // 가장 짧은 공통 ancestor root만 유지한다. 겹친 root projection은 같은 path+row-kind를 두 번 만들어
+            // selection/toggle identity를 모호하게 하므로 child root는 기존 parent에 흡수하고, 새 parent는 child를 대체한다.
+            if (pathWithin(root_path, root.path)) return;
+            if (pathWithin(root.path, root_path)) nested_roots += 1;
+        }
+        if (self.roots.items.len - nested_roots >= max_roots) return error.TooManyRoots;
         const owned_path = try self.allocator.dupe(u8, root_path);
         errdefer self.allocator.free(owned_path);
         const owned_name = try self.allocator.dupe(u8, std.fs.path.basename(root_path));
@@ -152,6 +302,31 @@ pub const Tree = struct {
         try self.roots.ensureUnusedCapacity(self.allocator, 1);
         try self.scan_requests.ensureUnusedCapacity(self.allocator, 1);
         try self.watch_requests.ensureUnusedCapacity(self.allocator, 1);
+        var root_i: usize = 0;
+        while (root_i < self.roots.items.len) {
+            if (!pathWithin(self.roots.items[root_i].path, root_path)) {
+                root_i += 1;
+                continue;
+            }
+            var removed = self.roots.orderedRemove(root_i);
+            removed.deinit(self.allocator);
+        }
+        var request_i: usize = 0;
+        while (request_i < self.scan_requests.items.len) {
+            if (!pathWithin(self.scan_requests.items[request_i], root_path)) {
+                request_i += 1;
+                continue;
+            }
+            self.allocator.free(self.scan_requests.orderedRemove(request_i));
+        }
+        request_i = 0;
+        while (request_i < self.watch_requests.items.len) {
+            if (!pathWithin(self.watch_requests.items[request_i], root_path)) {
+                request_i += 1;
+                continue;
+            }
+            self.allocator.free(self.watch_requests.orderedRemove(request_i));
+        }
         self.roots.appendAssumeCapacity(.{
             .name = owned_name,
             .path = owned_path,
@@ -626,4 +801,93 @@ test "file tree path boundary does not confuse sibling prefixes" {
     try std.testing.expect(pathWithin("/repo/a.md", "/repo"));
     try std.testing.expect(!pathWithin("/repository/a.md", "/repo"));
     try std.testing.expect(pathWithin("/x", "/"));
+}
+
+test "file tree row identity survives reorder and falls back to visible ancestor" {
+    const before = [_]Row{
+        .{ .root = .{ .path = "/repo", .label = "repo", .expanded = true, .loading = false } },
+        .{ .directory = .{ .path = "/repo/docs", .label = "docs", .depth = 1, .expanded = true, .loading = false, .symlink = false } },
+        .{ .file = .{ .path = "/repo/docs/a.md", .label = "a.md", .depth = 2, .supported = true, .open = false, .active = false, .dirty = false, .external_change = false, .symlink = false } },
+        .{ .recent_header = .{ .collapsed = false, .count = 1 } },
+        .{ .recent_file = .{ .path = "/repo/docs/a.md", .label = "a.md", .depth = 1, .supported = true, .open = false, .active = false, .dirty = false, .external_change = false, .symlink = false } },
+    };
+    const selected = rowIdentity(before[2]).?;
+    const reordered = [_]Row{
+        before[0],
+        .{ .file = .{ .path = "/repo/z.md", .label = "z.md", .depth = 1, .supported = true, .open = false, .active = false, .dirty = false, .external_change = false, .symlink = false } },
+        before[1],
+        before[2],
+        before[3],
+        before[4],
+    };
+    try std.testing.expectEqual(@as(?usize, 3), reconcileIdentity(&reordered, selected, 2));
+
+    const collapsed = [_]Row{ before[0], before[1], before[3], before[4] };
+    try std.testing.expectEqual(@as(?usize, 1), reconcileIdentity(&collapsed, selected, 3));
+    try std.testing.expect(!rowIdentity(before[2]).?.eql(rowIdentity(before[4]).?)); // 같은 path라도 project/recent는 별개.
+}
+
+test "file tree parent child and actionable adjacency ignore empty rows" {
+    const rows = [_]Row{
+        .{ .root = .{ .path = "/repo", .label = "repo", .expanded = true, .loading = false } },
+        .{ .directory = .{ .path = "/repo/docs", .label = "docs", .depth = 1, .expanded = true, .loading = false, .symlink = false } },
+        .{ .file = .{ .path = "/repo/docs/a.md", .label = "a.md", .depth = 2, .supported = true, .open = false, .active = false, .dirty = false, .external_change = false, .symlink = false } },
+        .{ .empty = {} },
+        .{ .recent_header = .{ .collapsed = false, .count = 1 } },
+        .{ .recent_file = .{ .path = "/repo/docs/a.md", .label = "a.md", .depth = 1, .supported = true, .open = false, .active = false, .dirty = false, .external_change = false, .symlink = false } },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), firstChildIndex(&rows, 0));
+    try std.testing.expectEqual(@as(?usize, 2), firstChildIndex(&rows, 1));
+    try std.testing.expectEqual(@as(?usize, 1), parentIndex(&rows, 2));
+    try std.testing.expectEqual(@as(?usize, 4), parentIndex(&rows, 5));
+    try std.testing.expectEqual(@as(?usize, 4), adjacentActionable(&rows, 2, 1));
+    try std.testing.expectEqual(@as(?usize, 2), adjacentActionable(&rows, 4, -1));
+}
+
+test "file tree overlapping roots normalize to one ancestor so row identities stay unique" {
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try tree.recordOpened("/tmp/a/sub/y.md", "/tmp/a/sub");
+    try std.testing.expectEqual(@as(usize, 1), tree.roots.items.len);
+    try tree.recordOpened("/tmp/a/x.md", "/tmp/a"); // 새 parent가 기존 nested root를 흡수한다.
+    try std.testing.expectEqual(@as(usize, 1), tree.roots.items.len);
+    try std.testing.expectEqualStrings("/tmp/a", tree.roots.items[0].path);
+    try tree.recordOpened("/tmp/a/sub/z.md", "/tmp/a/sub"); // nested root 재추가도 parent에 흡수.
+    try std.testing.expectEqual(@as(usize, 1), tree.roots.items.len);
+}
+
+test "file tree content remains after the last open entry becomes recent history" {
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try std.testing.expect(!tree.hasContent());
+    try tree.recordOpened("/repo/a.md", "/repo");
+    try std.testing.expect(tree.hasContent());
+}
+
+test "missing deep selection reconcile visits maximum materialized rows once" {
+    const allocator = std.testing.allocator;
+    const rows = try allocator.alloc(Row, max_materialized_nodes);
+    defer allocator.free(rows);
+    for (rows) |*row| row.* = .{ .file = .{
+        .path = "/repo/existing.md",
+        .label = "existing.md",
+        .depth = 1,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+    } };
+    var deep_path: [std.fs.max_path_bytes]u8 = undefined;
+    deep_path[0] = '/';
+    for (deep_path[1..], 1..) |*byte, i| byte.* = if (i % 2 == 0) '/' else 'a';
+    var visits: usize = 0;
+    try std.testing.expectEqual(
+        @as(?usize, max_materialized_nodes / 2),
+        reconcileIdentityCounted(rows, .{ .kind = .file, .path = &deep_path }, max_materialized_nodes / 2, &visits),
+    );
+    try std.testing.expectEqual(max_materialized_nodes, visits);
 }

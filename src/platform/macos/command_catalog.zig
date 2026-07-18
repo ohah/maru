@@ -46,6 +46,7 @@ pub const entries = [_]Entry{
     .{ .action = .split_file_panel_vertical, .key = "split_file_panel_vertical", .title = "Split File Panel Down" },
     .{ .action = .close_file_panel_group, .key = "close_file_panel_group", .title = "Close File Panel Group" },
     .{ .action = .toggle_file_panel_dock_side, .key = "toggle_file_panel_dock_side", .title = "Move File Panel Right/Bottom" },
+    .{ .action = .focus_file_tree, .key = "focus_file_tree", .title = "Focus File Tree" },
     .{ .action = .focus_pane_left, .key = "focus_pane_left", .title = "Focus Pane Left" },
     .{ .action = .focus_pane_right, .key = "focus_pane_right", .title = "Focus Pane Right" },
     .{ .action = .focus_pane_up, .key = "focus_pane_up", .title = "Focus Pane Up" },

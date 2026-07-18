@@ -963,6 +963,16 @@ pub export fn maru_macos_app_session_take_workspace_focus_action(session: ?*AppS
     return if (app_session.takeWorkspaceFocusAction()) 1 else 0;
 }
 
+pub export fn maru_macos_app_session_take_file_tree_focus_action(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.takeFileTreeFocusAction()) 1 else 0;
+}
+
+pub export fn maru_macos_app_session_take_file_tree_restore_surface_action(session: ?*AppSession) u64 {
+    const app_session = session orelse return 0;
+    return app_session.takeFileTreeRestoreSurfaceAction() orelse 0;
+}
+
 pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppSession, surface_id_out: ?*u64) i32 {
     const app_session = session orelse return -1;
     const out = surface_id_out orelse return -1;
@@ -4268,6 +4278,8 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     // v126 focus/save-close additions: null session은 무동작/one-shot 없음.
     maru_macos_app_session_focus_workspace_input(null);
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_workspace_focus_action(null));
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_focus_action(null));
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_tree_restore_surface_action(null));
     var save_request_id: u64 = 99;
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_panel_save_close_action(null, &save_request_id));
     var dirty_request_id: u64 = 99;

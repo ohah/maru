@@ -1828,6 +1828,8 @@ pub const AppSession = struct {
     // 호버 중인 헤더 아이콘 영역(◧ toggle·⚙ view_options·+ new_workspace). 마우스가 그 아이콘 위면 rebuildSidebar가
     // 아이콘 뒤에 둥근 호버 배경(웹 버튼 hover처럼)을 그린다. 검색·빈 영역·아이콘 밖이면 null. 바뀔 때만 재빌드.
     hovered_header_region: ?chrome.components.sidebar.HeaderRegion = null,
+    /// 도크 접기/펴기 토글(우상단) 호버 — 호버 시에만 하이라이트 배경(평소 투명, 왼쪽 헤더 아이콘 동형). 도크 크롬은 매 프레임 재빌드라 재렌더만 필요.
+    dock_toggle_hovered: bool = false,
     // 접힘 펼치기 토글(◧, 신호등 옆) 호버 여부. 접힘 시엔 사이드바 폭 0이라 hovered_header_region 경로(inSidebar)가
     // 안 타므로 별도 추적한다. true면 rebuildSidebar가 토글 뒤에 둥근 호버 배경(헤더 아이콘과 같은 스타일)을 그린다.
     hovered_collapsed_toggle: bool = false,
@@ -2529,11 +2531,17 @@ pub const AppSession = struct {
     }
 
     fn dockCollapsedToggleRect(self: *const AppSession) ?maru.session.SplitRect {
-        if (!self.dock_initialized or self.chrome_minimal or !self.dock.collapsed or self.dock.entryCountTotal() == 0 or self.cell_width_px == 0) return null;
+        // 도크에 파일이 있으면 접힘·팽창 **둘 다** 표시 — titlebar 띠 우측 끝 단일 접기/펴기 토글(탭바 접기 버튼 대체).
+        if (!self.dock_initialized or self.chrome_minimal or self.dock.entryCountTotal() == 0 or self.cell_width_px == 0) return null;
         const w = @min(2 * self.cell_width_px, self.backing_width_px);
         const h = @min(@max(self.cell_height_px, self.titlebar_strip_px), self.backing_height_px);
         if (w == 0 or h == 0) return null;
-        return .{ .x = self.backing_width_px - w, .y = 0, .w = w, .h = h };
+        // 창 우측 상단이 macOS 둥근 코너라, 토글을 코너에 flush로 두면 코너 마스크가 글리프를 자른다(신호등 옆 사이드바
+        // ◧처럼 코너 클리어런스가 필요). 한 셀 여백으론 코너 반경(≈12px)을 못 벗어나 여전히 잘려(사용자 피드백) —
+        // **두 셀** 우측 여백을 둬 라운드가 끝난 직선 구간부터 아이콘이 오게 한다. render·hit·drag-region이 모두 이 rect를
+        // 쓰므로 함께 정합한다.
+        const margin = @min(2 * self.cell_width_px, self.backing_width_px -| w);
+        return .{ .x = self.backing_width_px -| w -| margin, .y = 0, .w = w, .h = h };
     }
 
     fn toggleDockCollapsed(self: *AppSession) void {
@@ -13322,10 +13330,6 @@ pub const AppSession = struct {
                             }
                         };
                     };
-                    if (dock_layout.collapseAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) {
-                        self.toggleDockCollapsed();
-                        return;
-                    }
                     if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px)) |index| {
                         if (group.active != index) {
                             if (group.active) |old| if (old < group.entries.items.len) {
@@ -15137,11 +15141,13 @@ pub const AppSession = struct {
         self.setHoveredHeaderRegion(.none); // 사이드바 밖 → 헤더 아이콘 호버 배경 지움
         if (self.dockCollapsedToggleRect()) |r| {
             if (layout_math.pointInRect(x_px, y_px, r)) {
+                self.setDockToggleHovered(true);
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
                 return .link;
             }
         }
+        self.setDockToggleHovered(false); // 토글 밖 → 호버 하이라이트 해제(실제 마우스는 터미널을 지나 이 경로를 밟음)
         // outer dock divider의 grab band는 일부가 dock/WKWebView 안쪽으로 겹친다. 내부 tree/group보다 먼저
         // 판정해야 그 겹친 구간도 resize cursor가 되고, 정확한 1px divider 위가 group miss로 사라지지 않는다.
         if (self.dockDividerAtPoint(x_px, y_px)) {
@@ -15177,8 +15183,7 @@ pub const AppSession = struct {
                 const g = hit.geometry;
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
-                if (dock_layout.collapseAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px) or
-                    dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px) != null) return .link;
+                if (dock_layout.tabIndexAt(g, self.cell_width_px, group.entries.items.len, x_px, y_px) != null) return .link;
                 if (layout_math.pointInRect(x_px, y_px, g.header)) {
                     if (group.active) |index| if (index < group.entries.items.len and
                         group.entries.items[index].external_change)
@@ -17897,9 +17902,11 @@ pub const AppSession = struct {
                 }
                 if (dg.tree_divider.w > 0) self.appendBarBgQuad(dg.tree_divider, self.dividerColor());
                 self.appendBarBgQuad(dg.divider, self.dividerColor());
-            } else if (self.dockCollapsedToggleRect()) |r| {
-                self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarBg()));
             }
+            // 접기/펴기 토글 배경 — 평소 투명(배경색과 동일), 호버 시에만 하이라이트(왼쪽 헤더 아이콘 동형). 사용자 피드백.
+            if (self.dock_toggle_hovered) if (self.dockCollapsedToggleRect()) |r| {
+                self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarHoverBg()));
+            };
 
             // panel 사이 divider 선(PR6) — split이면 각 경계에 seam 중심 셀 strip을 깐다. chrome(맨 아래)이 아니라
             // overlay로 넘겨 터미널 위·커서 아래에 그린다(seam 위라 터미널에 안 가리게). 단일 panel이면 빈 리스트.
@@ -18209,10 +18216,15 @@ pub const AppSession = struct {
                             } else |_| {}
                         }
                     }
-                } else if (self.dockCollapsedToggleRect()) |r| {
+                }
+                // 접기/펴기 토글 글리프 — 접힘·팽창 공통. 왼쪽 헤더 아이콘과 같게 1.7× 확대(.dock_toggle dest)하고 띠 세로 중앙에.
+                // 1칸 글리프를 2칸 rect 중앙에: origin_x를 반칸 밀어 글리프 셀 중심 = rect 중심(호버 배경과 동심 — 사용자 피드백).
+                if (self.dockCollapsedToggleRect()) |r| {
                     const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                     if (coretext_frame_builder.buildFileDockToggleDrawList(self.allocator, dock_active_fg)) |ddl| {
-                        self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{ .origin_x = r.x, .origin_y = r.y, .colors = tabbar_colors } });
+                        const gy = r.y + (r.h -| self.cell_height_px) / 2;
+                        const gx = r.x + self.cell_width_px / 2;
+                        self.collectShaped(&collected, ddl, pane_frame_builder, .{ .dock_toggle = .{ .origin_x = gx, .origin_y = gy, .colors = tabbar_colors } });
                     } else |_| {}
                 }
 
@@ -18647,6 +18659,10 @@ pub const AppSession = struct {
                 const rx: f64 = @floatFromInt(r.x);
                 if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 접힘 종 클릭 영역 — 창 드래그 아님
             }
+            if (self.dockCollapsedToggleRect()) |r| {
+                const rx: f64 = @floatFromInt(r.x);
+                if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 도크 접힘 펼치기 토글(우상단) — 창 드래그 아님(안 제외하면 클릭이 performDrag로 새 토글이 안 눌린다)
+            }
             return true;
         }
         return false;
@@ -18738,6 +18754,14 @@ pub const AppSession = struct {
         if (self.hovered_header_region == next) return;
         self.hovered_header_region = next;
         self.rebuildSidebar() catch {};
+        self.metal_dirty = true;
+    }
+
+    /// 도크 접기/펴기 토글 호버 상태 — 바뀔 때만 재렌더. 헤더 아이콘과 달리 rebuildSidebar 불요(도크 크롬은 매 프레임
+    /// collectShaped로 재빌드되고 호버 배경도 그 패스에서 dock_toggle_hovered를 읽어 그린다), metal_dirty만 세운다.
+    fn setDockToggleHovered(self: *AppSession, hovered: bool) void {
+        if (self.dock_toggle_hovered == hovered) return;
+        self.dock_toggle_hovered = hovered;
         self.metal_dirty = true;
     }
 
@@ -19993,6 +20017,8 @@ pub const AppSession = struct {
         sidebar_header,
         overlay: PanePlacement,
         pane: PanePlacement,
+        // 도크 접기/펴기 토글(우상단) — 위치는 .pane처럼 자유(origin_x/y)지만 아이콘 1.7× 확대(raster slot 키움)는 .sidebar_header와 공유한다. collectShaped 게이트가 이 태그도 확대 대상으로 본다.
+        dock_toggle: PanePlacement,
         floating: PanePlacement,
         // sticky command 배너(스크롤 시 명령줄 고정) — floating처럼 활성 터미널 '위'(맨 위 직전)에 한 frame.
         sticky: PanePlacement,
@@ -20041,7 +20067,7 @@ pub const AppSession = struct {
         // slot을 목표 px(셀×1.7)로 키워 그 크기로 직접 래스터한다 — 1.7× 텍스처가 1.7× quad에 1:1로 들어가 선명(≈0.33).
         // raster_*_px>0이면 estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡는다(.m·레이아웃 불변). 터미널
         // 콘텐츠(.pane)의 ◧는 키우지 않도록 헤더 dest로 한정한다(펼침·접힘 토글 모두 .sidebar_header).
-        if (std.meta.activeTag(dest) == .sidebar_header and self.cell_width_px > 0 and self.cell_height_px > 0) {
+        if ((std.meta.activeTag(dest) == .sidebar_header or std.meta.activeTag(dest) == .dock_toggle) and self.cell_width_px > 0 and self.cell_height_px > 0) {
             const rw: u16 = @intCast(@min(@as(u32, self.cell_width_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
             const rh: u16 = @intCast(@min(@as(u32, self.cell_height_px) * 17 / 10, @as(u32, std.math.maxInt(u16))));
             for (pane.shaped.runs.glyphs) |*g| {
@@ -20111,7 +20137,7 @@ pub const AppSession = struct {
                 .sidebar => sidebar_frame.* = rf,
                 .sidebar_header => sidebar_header_frame.* = rf,
                 .overlay => |p| overlay_frame.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect },
-                .pane => |p| {
+                .pane, .dock_toggle => |p| {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         pane_frames.append(self.allocator, .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect }) catch {};
                     } else |_| {
@@ -33655,13 +33681,18 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.metal_dirty = true;
     _ = try session.tick();
     var saw_dock_toggle = false;
+    const dock_toggle = session.dockCollapsedToggleRect().?; // 팽창 상태에도 표시(일원화).
     for (session.metal_buffer.cells) |cell| {
-        if (cell.codepoint == 0x25E7 and cell.origin_x == right.tab_bar.x and cell.origin_y == right.tab_bar.y) {
+        // 접기/펴기 토글 ◧(maru PUA 0xF0006, 렌더러가 1.7× 확대)는 탭바가 아니라 titlebar 띠 우측 끝(dockCollapsedToggleRect)에 세로 중앙 렌더된다.
+        if (cell.codepoint == 0xF0006 and
+            cell.origin_x >= dock_toggle.x and cell.origin_x < dock_toggle.x + dock_toggle.w and
+            cell.origin_y < session.titlebar_strip_px)
+        {
             saw_dock_toggle = true;
             break;
         }
     }
-    try std.testing.expect(saw_dock_toggle); // 실제 CoreText→Metal 셀 스트림에 도크 크롬 글리프가 들어감.
+    try std.testing.expect(saw_dock_toggle); // 실제 CoreText→Metal 셀 스트림에 도크 토글 글리프가 띠 우측에 들어감.
 
     session.dock_resize_drag_active = true;
     surfaces.clearRetainingCapacity();
@@ -33710,9 +33741,10 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
     try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges); // dock 본문 우측은 project-tree divider
 
-    // 보이는 접기 버튼→titlebar 토글 순서로 닫고 다시 열며, termRect가 즉시 회수/복구된다.
-    const collapse_x: f64 = @floatFromInt(bottom.tab_bar.x + bottom.tab_bar.w - 1);
-    const collapse_y: f64 = @floatFromInt(bottom.tab_bar.y + 1);
+    // titlebar 띠 우측 끝 단일 토글로 닫고 다시 연다(탭바 접기 버튼을 일원화 — 팽창 상태에도 토글 표시).
+    const collapse_toggle = session.dockCollapsedToggleRect().?;
+    const collapse_x: f64 = @floatFromInt(collapse_toggle.x + 1);
+    const collapse_y: f64 = @floatFromInt(collapse_toggle.y + 1);
     const dirty_surface_id = group.entries.items[1].surface_id;
     group.entries.items[1].mode = .source_edit;
     group.entries.items[1].dirty = true;
@@ -33732,6 +33764,12 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     }
     try std.testing.expect(preserved_dirty_surface);
     const toggle = session.dockCollapsedToggleRect().?;
+    // Fix A: 도크 접힘 토글 위는 창 드래그 영역이 아니다 — 아니면 클릭이 Swift performDrag로 새 토글이 안 눌린다.
+    try std.testing.expect(!session.isWindowDragRegion(@floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1)));
+    // 토글 바로 왼쪽 빈 띠는 드래그 영역(제외가 토글 폭에만 걸림을 확인).
+    try std.testing.expect(session.isWindowDragRegion(@floatFromInt(toggle.x -| 2), @floatFromInt(toggle.y + 1)));
+    // Fix B: 창 우측 코너에 flush 아님(둥근 코너 클리어런스 여백).
+    try std.testing.expect(toggle.x + toggle.w < session.backing_width_px);
     session.mouse(1, @floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1), 0, 0);
     try std.testing.expect(!session.dock.collapsed);
 

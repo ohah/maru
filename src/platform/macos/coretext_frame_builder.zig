@@ -739,7 +739,7 @@ pub fn buildPaneGripDrawList(
     };
 }
 
-/// FP3 파일 도크 크롬. 0행은 고정폭 우선 탭+우측 2칸 접기 버튼, 1행은 breadcrumb와 모드 선택이다.
+/// FP3 파일 도크 크롬. 0행은 고정폭 우선 탭(접기 버튼은 titlebar 띠 우측 dock 토글로 이동), 1행은 breadcrumb와 모드 선택이다.
 /// 탭 분할은 session/dock_layout.tabMetrics와 동일하게 18칸 상한을 쓰고, 넘칠 때만 균등 축소한다.
 pub fn buildFileDockChromeDrawList(
     allocator: std.mem.Allocator,
@@ -756,8 +756,8 @@ pub fn buildFileDockChromeDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
-    if (cols >= 3 and titles.len > 0) {
-        const tab_cols: u16 = cols - 2;
+    if (cols >= 1 and titles.len > 0) {
+        const tab_cols: u16 = cols;
         const count: u16 = @intCast(@min(titles.len, std.math.maxInt(u16)));
         const tab_width = @min(dock_layout.default_tab_cols, @max(@as(u16, 1), tab_cols / count));
         for (titles, 0..) |title, i| {
@@ -767,7 +767,6 @@ pub fn buildFileDockChromeDrawList(
             const style: terminal.Style = if (active != null and active.? == i) .{ .foreground = active_fg, .bold = true } else .{ .foreground = fg };
             _ = try appendEllipsizedTitle(allocator, &cells, title, 0, @intCast(start + 1), end, style, false, .head);
         }
-        try cells.append(allocator, .{ .row = 0, .col = cols - 1, .codepoint = 0x25E7, .width = 1, .style = .{ .foreground = active_fg } }); // ◧
         const control_cols: u16 = @intCast(@min(dock_layout.header_control_cols, cols));
         const control_start = cols - control_cols;
         if (control_start > 1)
@@ -895,9 +894,9 @@ pub fn buildFileTreeDrawList(
 pub fn buildFileDockToggleDrawList(allocator: std.mem.Allocator, fg: terminal.Color) !renderer.DrawList {
     const cells = try allocator.alloc(renderer.DrawCell, 1);
     errdefer allocator.free(cells);
-    cells[0] = .{ .row = 0, .col = 1, .codepoint = 0x25E7, .width = 1, .style = .{ .foreground = fg } };
+    cells[0] = .{ .row = 0, .col = 0, .codepoint = 0xF0006, .width = 1, .style = .{ .foreground = fg } }; // maru PUA 아이콘(sidebar-collapse ◧) — 렌더러가 이 codepoint를 1.7× 확대(app_session §20073, dest=.dock_toggle 게이트). 작은 Unicode 0x25E7 대신 써 왼쪽 헤더 아이콘과 동일 크기. col 0 단일 셀 — 호출부가 origin_x 반칸 밀어 rect 중앙 정렬.
     return .{
-        .size = .{ .cols = 2, .rows = 1 },
+        .size = .{ .cols = 1, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = cells,

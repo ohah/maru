@@ -918,10 +918,30 @@ pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surf
     };
 }
 
-// native WKWebView firstResponder surface를 FP8 DockPanel.focused_group에 반영한다. 1=파일 surface, 0=아님/null. (v124)
+// explicit file WKWebView primary-down을 FP8 DockPanel.focused_group/FocusOwner에 반영한다. 1=승인, 0=stale/아님. (v124)
 pub export fn maru_macos_app_session_focus_file_panel_surface(session: ?*AppSession, surface_id: u64) u32 {
     const app_session = session orelse return 0;
     return if (app_session.focusFilePanelSurface(surface_id)) 1 else 0;
+}
+
+pub export fn maru_macos_app_session_complete_pending_dock_focus(session: ?*AppSession, surface_id: u64) u32 {
+    const app_session = session orelse return 0;
+    return if (app_session.completePendingDockFocus(surface_id)) 1 else 0;
+}
+
+pub export fn maru_macos_app_session_pending_dock_focus_surface(session: ?*AppSession) u64 {
+    const app_session = session orelse return 0;
+    return app_session.pendingDockFocusSurface() orelse 0;
+}
+
+pub export fn maru_macos_app_session_focused_dock_surface(session: ?*AppSession) u64 {
+    const s = session orelse return 0;
+    return s.focusedDockSurface() orelse 0;
+}
+
+pub export fn maru_macos_app_session_take_pending_dock_focus_action(session: ?*AppSession) u64 {
+    const s = session orelse return 0;
+    return s.takePendingDockFocusAction() orelse 0;
 }
 
 pub export fn maru_macos_app_session_open_file_panel_link(
@@ -1522,6 +1542,8 @@ pub const WebSurfaceTransitionAbi = extern struct {
     surface_id: u64,
     panel_kind: u32,
     seam_edges: u32, // divider 맞닿는 가장자리 비트마스크(L=1·R=2·B=4). panel_kind 뒤 f64 정렬 pad 자리 → struct size 불변(ABI v103).
+    divider_grab_band_pt: u32,
+    reserved: u32 = 0,
     frame_pt_x: f64,
     frame_pt_y: f64,
     frame_pt_w: f64,
@@ -1556,6 +1578,7 @@ pub export fn maru_macos_app_session_web_surface_transition_at(
             .browser => 1,
         },
         .seam_edges = t.seam_edges,
+        .divider_grab_band_pt = t.divider_grab_band_pt,
         .frame_pt_x = t.frame_pt.x,
         .frame_pt_y = t.frame_pt.y,
         .frame_pt_w = t.frame_pt.w,
@@ -4110,6 +4133,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "gpu_quads"), @offsetOf(AppMetalFrame, "gpu_quads"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "gpu_shadows"), @offsetOf(AppMetalFrame, "gpu_shadows"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "modal_cells_start"), @offsetOf(AppMetalFrame, "modal_cells_start"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "overlay_cells_present"), @offsetOf(AppMetalFrame, "overlay_cells_present"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostGpuQuad), @sizeOf(AppGpuQuad));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostGpuQuad), @alignOf(AppGpuQuad));
     // 모든 필드가 4B라 @sizeOf만으론 필드 reorder(예: corner_radii↔border_widths)를 못 잡는다 — offset도 대조한다.
@@ -4160,6 +4184,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "surface_id"), @offsetOf(WebSurfaceTransitionAbi, "surface_id"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "panel_kind"), @offsetOf(WebSurfaceTransitionAbi, "panel_kind"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "seam_edges"), @offsetOf(WebSurfaceTransitionAbi, "seam_edges")); // v103: panel_kind 뒤 pad 자리(size 불변)
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "divider_grab_band_pt"), @offsetOf(WebSurfaceTransitionAbi, "divider_grab_band_pt"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_x"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_x"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_y"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_y"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_w"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_w"));
@@ -4328,6 +4353,10 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(usize, 0), file_panel_path_len);
     // v124 FP8 native file-panel focus sync: null session은 파일 surface가 아니므로 0.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_focus_file_panel_surface(null, 1));
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_complete_pending_dock_focus(null, 1));
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_pending_dock_focus_surface(null));
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_focused_dock_surface(null));
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_pending_dock_focus_action(null));
     // v125 외부 링크 action: null/stale ABI 입력은 열기·action 모두 0으로 닫는다.
     var external_link_buf: [8]u8 = undefined;
     var external_link_sid: u64 = 99;

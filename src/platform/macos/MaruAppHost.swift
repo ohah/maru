@@ -2127,10 +2127,8 @@ final class MaruWebPanelView: NSView {
     // show 전이가 갱신한다. hitTest가 그 가장자리 margin 안 클릭/hover를 통과시켜 아래 터미널 뷰의 divider 드래그·resize
     // 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭 분리 — 4e review 0 후속). 0이면 통과 없음(모든 가장자리 바깥 경계).
     var seamEdges: UInt32 = 0
-    // divider grab을 위해 seam 가장자리서 통과시킬 밴드 폭(pt). divider.hitTest 허용폭(cell/2+2 px)을 넉넉히 덮어 그 안
-    // 클릭이 아래 터미널 뷰 dividerAtPoint에 닿게 한다. (빈 흰 페이지라 이 밴드에 눌릴 웹 콘텐츠가 없어 무해 — Phase 5
-    // 실콘텐츠에선 seam-only + 정확 허용폭으로 좁힐 여지. 지금은 넓게 잡아 grab 편의를 우선.)
-    static let dividerGrabBand: CGFloat = 10
+    // ABI가 내려주는 logical-point grab 폭. 0이면 seam pass-through를 끈다(Zig divider thickness=0과 동조).
+    var dividerGrabBandPt: CGFloat = 0
 
     // Phase 7e-1a: browser(비신뢰, panelKind==1) 패널의 WKWebView nav 상태 — block-based KVO 관측값. url/canGoBack/
     // canGoForward 변화 시 여기 저장 + navStateDirty=true. tick drain(drainWebSurfaceTransition)이 dirty면 Zig
@@ -2555,14 +2553,21 @@ final class MaruWebPanelView: NSView {
         if controller?.isOverlayOpenForWebPanel(self) == true { return nil }
         // divider grab 분리(4e review 0 후속): seam 가장자리(Zig seam_edges) margin 안 클릭/hover는 nil로 통과시켜, 아래
         // 터미널 뷰가 event를 받아 dividerAtPoint로 드래그·resize 커서를 처리하게 한다 — WKWebView는 native라 자기 frame
-        // 클릭을 삼키므로, 이걸로 시각 gap은 작게(Zig seam inset) 두고 grab 폭만 넓힌다. point는 superview(=self.frame) 좌표,
-        // frame은 pt 좌하단(webFramePt y-flip)이라 bottom seam=minY. top은 탭 바라 seam_edges에 없다.
-        if seamEdges != 0 {
-            let m = Self.dividerGrabBand
-            let f = frame
+        // 클릭을 삼키므로, 이걸로 시각 gap은 작게(Zig seam inset) 두고 grab 폭만 넓힌다. point는 self-local 좌표이고
+        // bounds는 pt 좌하단 원점이라 bottom seam=minY다. top은 탭 바라 seam_edges에 없다.
+        if seamEdges != 0 && dividerGrabBandPt > 0 {
+            let m = dividerGrabBandPt
+            // hitTest point는 self-local 좌표이므로 superview 좌표인 frame이 아니라 bounds와 비교한다.
+            let f = bounds
             if (seamEdges & 1) != 0, point.x <= f.minX + m { return nil } // 왼쪽 세로 divider
             if (seamEdges & 2) != 0, point.x >= f.maxX - m { return nil } // 오른쪽 세로 divider
             if (seamEdges & 4) != 0, point.y <= f.minY + m { return nil } // 아래 가로 divider(좌하단 원점=minY가 아래)
+        }
+        // firstResponder identity가 이미 이 WKWebView인 재클릭도 새 사용자 intent다. passive tick reconcile로는
+        // 구분할 수 없으므로 실제 primary-down hit-test에서만 Zig direct-focus를 통지한다. seam/overlay는 위에서
+        // nil로 빠져 divider drag나 modal click이 dock focus를 훔치지 않는다.
+        if NSApp.currentEvent?.type == .leftMouseDown {
+            controller?.webPanelPrimaryDown(self)
         }
         return super.hitTest(point)
     }
@@ -3067,16 +3072,16 @@ final class TerminalSurface {
     // 컨테이너 서브뷰로도 살아 있지만, 빠른 조회·전이 매칭을 위해 세션별로 강참조를 든다(창이 닫히면 함께 해제).
     var webPanels: [UInt64: MaruWebPanelView] = [:]
 
-    // Phase 4g-1: 직전 tick에 firstResponder를 쥔 web 패널 surface_id(없으면 nil). 통합 reconcileWebFocus의 Direction 2가
-    // **rising edge**(nil/다른 값 → 이 id, = 사용자가 그 웹뷰를 새로 클릭해 포커스)에서만 Zig 활성 pane을 그 surface로
-    // 동기한다(activate_surface). 매 tick 무조건 동기하면 키보드 pane 전환(⌘⌥→)으로 Zig 활성만 바뀌고 webview는 stale
-    // 포커스인 경우와 싸워 브라우저로 되돌아간다 — edge 추적으로 "새 클릭"만 반영한다. (옛 lastOverlayOpen·
-    // stashedWebFocusSurfaceId는 reconcileWebFocus 불변식이 복원을 D1로 흡수해 불요 — 4g-1서 제거.)
-    var lastFocusedWebSurfaceId: UInt64?
     // FP6 도크는 workspace pane 활성축과 직교한다. 클릭한 도크 WKWebView를 별도 입력 소유자로 기억해 pane D1이
     // 즉시 포커스를 회수하지 않게 하고, 모달 override 뒤에는 같은 도크로 복원한다.
     var focusedFilePanelSurfaceId: UInt64?
     var filePanelFocusOverridden = false
+    // surface-less dock drop의 create batch가 같은 tick에 아직 publish되지 않았거나 transition marshal이
+    // 재시도될 때 mode/focus one-shot을 잃지 않는다. entry가 사라지면 Zig mode lookup으로 stale 폐기한다.
+    var pendingFilePanelModeAction: (surfaceId: UInt64, mode: Int32)?
+    // Mode refresh와 분리된 typed dock-focus retry. 아직 publish되지 않은 B의 focus intent가
+    // 무관한 A mode refresh에 덮이지 않도록 서로 다른 retained slot을 쓴다.
+    var pendingDockFocusActionSurfaceId: UInt64?
     // Trash adapter ownership is session/surface-local. An active-window change must not redirect an
     // asynchronous recycle completion to a different Zig AppSession.
     var fileTreeTrashInFlight = false
@@ -3756,6 +3761,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return fr.isDescendant(of: wp)
     }
 
+    // WKWebView의 명시적 primary-down만 direct focus intent로 승격한다. A lazy focus가 retained된 동안 이미
+    // responder인 file/browser B를 다시 클릭해도 이 event가 A token을 취소하므로, 늦은 A create가 focus를 되훔치지 못한다.
+    func webPanelPrimaryDown(_ wp: MaruWebPanelView) {
+        guard let surface = surfaceOwning(wp), let session = surface.appSession else { return }
+        if wp.filePanelKind == 0 {
+            // 이미 firstResponder인 workspace browser 재클릭도 A lazy dock focus보다 최신 intent다.
+            // surface 활성화가 모델에서 성공한 경우에만 workspace owner로 승격하고 retained A를 폐기한다.
+            guard maru_macos_app_session_activate_surface(session, wp.surfaceId) != 0 else { return }
+            maru_macos_app_session_focus_workspace_input(session)
+            surface.focusedFilePanelSurfaceId = nil
+        } else {
+            guard maru_macos_app_session_focus_file_panel_surface(session, wp.surfaceId) != 0 else { return }
+            surface.focusedFilePanelSurfaceId = wp.surfaceId
+        }
+        surface.filePanelFocusOverridden = false
+        surface.pendingDockFocusActionSurfaceId = nil
+    }
+
     // 이 웹 패널을 소유한 surface(창). 배경 창의 웹 패널 hitTest가 활성 창이 아니라 자기 창의 모달 상태로 판정하게
     // 한다(code-review [9]). webPanels dict의 surface_id·identity로 매칭해 일반 창·quick 패널을 모두 커버한다.
     private func surfaceOwning(_ wp: MaruWebPanelView) -> TerminalSurface? {
@@ -3918,16 +3941,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 쥐면 샌다(제보: ⌘Q 종료 모달 Enter 무응답; web pane 위 rename/검색이 웹뷰로 새던 14차 리뷰 [0]). 판정은 Zig
     // terminalOwnsInput 단일 출처(anyModalOverlayOpen ∪ addr_edit ∪ rename ∪ sidebar_search). 열린 내내 self-heal.
     //
-    // **override 없으면 불변식 2방향 동기(순서 중요)**:
-    //   Direction 2 — webview가 **새로 firstResponder(rising edge = 사용자 클릭)** 면 activate_surface로 Zig 활성 pane을 그
-    //     surface로 동기한다(제보: 브라우저 web 클릭 후 ⌘R 무동작). rising edge만 = 키보드 전환 후 stale 포커스와 안 싸우게.
-    //   Direction 1 — Zig 활성 pane에 firstResponder를 맞춘다(활성=web이면 그 webview, 아니면 터미널 뷰). D2가 클릭을 반영한
-    //     **뒤** 실행 → 키보드 pane/탭 전환·브라우저 탭 활성화가 포커스를 따라오게(키보드 갭·⌘R 게이트 stale 닫음). 모달
-    //     닫힘 후 복원도 D1이 한다(활성=browser면 webview 재포커스) — 별도 stash/restore 불요.
+    // **override 없으면 단방향 reconcile**: explicit primary-down/typed completion이 먼저 Zig owner를 갱신하고,
+    // 여기서는 그 모델만 읽어 firstResponder를 맞춘다. firstResponder 관측은 programmatic/accessibility 전이와 사용자
+    // click을 구별할 수 없으므로 정책 mutation 권한이 없다.
     func reconcileWebFocus() {
         guard let surface = activeSurface, let window = surface.window, let session = surface.appSession,
               let tv = (window.contentView as? MaruTerminalContainerView)?.terminalView else { return }
-        guard !surface.webPanels.isEmpty else { surface.lastFocusedWebSurfaceId = nil; return }
+        guard !surface.webPanels.isEmpty else { return }
 
         // override: 모달(notice 제외) 또는 터미널-라우팅 텍스트 입력(주소창 편집·rename·사이드바 검색) 중이면 터미널 뷰가
         // firstResponder여야 한다(그 키/IME가 Zig handleKeyEvent 경로) — Zig terminalOwnsInput 단일 출처. 옛 override는
@@ -3935,39 +3955,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if maru_macos_app_session_terminal_owns_input(session) != 0 {
             if window.firstResponder !== tv { window.makeFirstResponder(tv) } // tv 이미 바인딩(재downcast 회피, 리뷰 [8])
             if surface.focusedFilePanelSurfaceId != nil { surface.filePanelFocusOverridden = true }
-            surface.lastFocusedWebSurfaceId = nil // override 중 rising-edge 추적 리셋(해제 후 재평가)
             return
         }
 
-        // Direction 2: webview 새 포커스(클릭 rising edge) → Zig 활성 동기.
-        let focusedPanel = surface.webPanels.values.first(where: { isWebPanelFocused($0) })
-        let focusedId = focusedPanel?.surfaceId
-        let rising = focusedId != nil && focusedId != surface.lastFocusedWebSurfaceId
-        surface.lastFocusedWebSurfaceId = focusedId
-        if let focusedPanel, focusedPanel.filePanelKind != 0 {
-            surface.focusedFilePanelSurfaceId = focusedPanel.surfaceId
+        let dockId = maru_macos_app_session_focused_dock_surface(session)
+        if dockId != 0, let dock = surface.webPanels[dockId], dock.superview != nil, !dock.isHidden {
+            surface.focusedFilePanelSurfaceId = dockId
             surface.filePanelFocusOverridden = false
-            _ = maru_macos_app_session_focus_file_panel_surface(session, focusedPanel.surfaceId)
-            return // 도크 축 소유: workspace pane 활성화/D1 회수 대상이 아니다.
-        }
-        if surface.filePanelFocusOverridden,
-           let dockId = surface.focusedFilePanelSurfaceId,
-           let dock = surface.webPanels[dockId], dock.superview != nil, !dock.isHidden {
-            surface.filePanelFocusOverridden = false
-            window.makeFirstResponder(dock.webView)
-            surface.lastFocusedWebSurfaceId = dockId
+            if !isWebPanelFocused(dock) { window.makeFirstResponder(dock.webView) }
             return
         }
-        // 모달 override가 아닌 상태에서 terminal/browser가 포커스를 얻었으면 명시적인 축 전환이다.
-        let leftFilePanelFocus = surface.focusedFilePanelSurfaceId != nil
         surface.focusedFilePanelSurfaceId = nil
         surface.filePanelFocusOverridden = false
-        if leftFilePanelFocus { maru_macos_app_session_focus_workspace_input(session) }
-        if rising, let focusedId, maru_macos_app_session_active_web_surface_id_any_kind(session) != focusedId {
-            _ = maru_macos_app_session_activate_surface(session, focusedId)
-        }
 
-        // Direction 1: firstResponder = Zig 활성 pane(D2가 클릭 반영한 뒤 재조회).
+        // firstResponder = Zig가 승인한 활성 pane/dock surface.
         let activeWeb = maru_macos_app_session_active_web_surface_id_any_kind(session)
         if activeWeb != 0 {
             // 활성 = web term → 그 webview가 firstResponder(아직 아니면 전이). 브라우저 탭 활성화·모달 닫힘 복원 커버.
@@ -4091,7 +4092,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.sidebar_scroll_offset_px, // 사이드바 세로 스크롤량(px) — 카드를 위로 밀고 헤더 아래로 scissor 클립
             frame.divider_thickness_px,   // pane divider(reserved 30/31) 두께(px) — config split.divider-thickness(패스스루)
             frame.cursor_cells,           // 커서 blink 페이드: 커서 overlay suffix 길이(본문서 제외·별도 pass; 패스스루)
-            frame.cursor_fade_milli       // 커서 overlay 불투명도 ×1000 — blink 페이드 위상(cursor.blink-fade-ms; 패스스루)
+            frame.cursor_fade_milli,      // 커서 overlay 불투명도 ×1000 — blink 페이드 위상(cursor.blink-fade-ms; 패스스루)
+            frame.overlay_cells_present   // ABI v131: overlay가 cell index 0에서 시작해도 명시적으로 구분
         )
         if drew {
             lastDrawnGeneration = frame.generation
@@ -4421,7 +4423,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.webPanels[surfaceId] = nil
         }
         surface.webPanels.removeAll()
-        surface.lastFocusedWebSurfaceId = nil
         surface.focusedFilePanelSurfaceId = nil
         surface.filePanelFocusOverridden = false
     }
@@ -5962,6 +5963,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     if adopted.superview == nil { container.insertWebPanel(adopted) }
                     adopted.frame = frame
                     adopted.seamEdges = t.seam_edges
+                    adopted.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
                     adopted.isHidden = (t.visible == 0)
                 } else if let moved = detachWebPanelForReparent(t.surface_id) {
                     // 4e-4(web-panel §10): 다른 창에 살아있던 WKWebView를 훔쳐 **재부모화**(destroy+recreate 대신 = 스크롤·페이지·폼
@@ -5970,6 +5972,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     container.insertWebPanel(moved)
                     moved.frame = frame
                     moved.seamEdges = t.seam_edges
+                    moved.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
                     moved.isHidden = (t.visible == 0)
                     surface.webPanels[t.surface_id] = moved
                 } else {
@@ -5990,6 +5993,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         controller: self
                     )
                     v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
+                    v.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
                     container.insertWebPanel(v)
                     v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
                     surface.webPanels[t.surface_id] = v
@@ -6016,6 +6020,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 if let v = surface.webPanels[t.surface_id] {
                     v.frame = frame
                     v.seamEdges = t.seam_edges // split 변화로 맞닿는 divider 가장자리가 바뀔 수 있어 reframe서 갱신.
+                    v.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
                 }
             case Int(MaruAppHostWebSurfaceOpHide.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
@@ -6027,6 +6032,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     v.isHidden = false
                     v.frame = frame
                     v.seamEdges = t.seam_edges
+                    v.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
                 }
             default: break // None — 무동작
             }
@@ -6100,39 +6106,70 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
 
+        // Focus intent는 mode/focus retry보다 먼저 drain한다. surface-less create를 기다리던 오래된 dock request와
+        // 그 뒤 사용자가 누른 workspace/tree 전환이 같은 tick에 만나면 최신 구조 focus가 이긴다.
+        let workspaceFocus = maru_macos_app_session_take_workspace_focus_action(session) != 0
+        let treeFocus = maru_macos_app_session_take_file_tree_focus_action(session) != 0
+        let treeRestoreSid = maru_macos_app_session_take_file_tree_restore_surface_action(session)
+        let supersedesPendingDockFocus = workspaceFocus || treeFocus || treeRestoreSid != 0
+        if supersedesPendingDockFocus { surface.pendingDockFocusActionSurfaceId = nil }
+
         var fileModeSid: UInt64 = 0
         let fileMode = maru_macos_app_session_take_file_panel_mode_action(session, &fileModeSid)
-        if fileMode >= 0, let wp = surface.webPanels[fileModeSid] {
-            wp.applyFilePanelMode(fileMode)
-            // GPU 헤더 토글/탭 선택 직후 TerminalView가 mouse-down의 firstResponder다. JS focus만으로 AppKit
-            // responder가 넘어오지 않으므로 사용자 동작에서 발생한 one-shot에 한해 read/HTML/source 모두 도크
-            // 입력 축을 명시적으로 넘긴다(복원/초기 create는 포커스를 훔치지 않음).
-            if !wp.isHidden, let window = surface.window {
-                window.makeFirstResponder(wp.webView)
-                surface.focusedFilePanelSurfaceId = fileModeSid
-                surface.filePanelFocusOverridden = false
-                surface.lastFocusedWebSurfaceId = fileModeSid
+        if fileMode >= 0 {
+            surface.pendingFilePanelModeAction = (fileModeSid, fileMode)
+        }
+        if let pending = surface.pendingFilePanelModeAction {
+            let currentMode = maru_macos_app_session_file_panel_mode(session, pending.surfaceId)
+            if currentMode < 0 {
+                surface.pendingFilePanelModeAction = nil
+            } else if let wp = surface.webPanels[pending.surfaceId] {
+                wp.applyFilePanelMode(currentMode)
+                surface.pendingFilePanelModeAction = nil
             }
         }
-        if maru_macos_app_session_take_workspace_focus_action(session) != 0 {
+
+        let dockFocusSid = maru_macos_app_session_take_pending_dock_focus_action(session)
+        if dockFocusSid != 0, !supersedesPendingDockFocus {
+            surface.pendingDockFocusActionSurfaceId = dockFocusSid
+        }
+        if !supersedesPendingDockFocus, let pendingSurfaceId = surface.pendingDockFocusActionSurfaceId {
+            if maru_macos_app_session_pending_dock_focus_surface(session) != pendingSurfaceId {
+                surface.pendingDockFocusActionSurfaceId = nil
+            } else if let wp = surface.webPanels[pendingSurfaceId], !wp.isHidden, let window = surface.window {
+                    let accepted = isWebPanelFocused(wp) || window.makeFirstResponder(wp.webView)
+                    if accepted {
+                        let committed = maru_macos_app_session_complete_pending_dock_focus(session, pendingSurfaceId) != 0
+                        if committed {
+                            surface.focusedFilePanelSurfaceId = pendingSurfaceId
+                            surface.filePanelFocusOverridden = false
+                        } else {
+                            // A newer Zig focus intent or restore/merge barrier made this native
+                            // responder request stale. Return AppKit focus to the Metal view too.
+                            surface.focusedFilePanelSurfaceId = nil
+                            surface.filePanelFocusOverridden = false
+                            focusTerminalView(window)
+                        }
+                        surface.pendingDockFocusActionSurfaceId = nil
+                    }
+            }
+        }
+        if workspaceFocus {
             surface.focusedFilePanelSurfaceId = nil
             surface.filePanelFocusOverridden = false
             focusTerminalView(surface.window)
         }
         // ABI v127: tree 정책/restore target은 Zig FocusOwner가 소유한다. Swift는 AppKit responder 전이만 실행한다.
-        if maru_macos_app_session_take_file_tree_focus_action(session) != 0 {
+        if treeFocus {
             surface.focusedFilePanelSurfaceId = nil
             surface.filePanelFocusOverridden = false
-            surface.lastFocusedWebSurfaceId = nil
             focusTerminalView(surface.window)
         }
-        let treeRestoreSid = maru_macos_app_session_take_file_tree_restore_surface_action(session)
         if treeRestoreSid != 0 {
             if let panel = surface.webPanels[treeRestoreSid], !panel.isHidden, panel.superview != nil {
                 surface.window?.makeFirstResponder(panel.webView)
                 surface.focusedFilePanelSurfaceId = treeRestoreSid
                 surface.filePanelFocusOverridden = false
-                surface.lastFocusedWebSurfaceId = treeRestoreSid
             } else {
                 // entry는 남았지만 native surface가 이미 retire된 stale restore면 workspace로 fail-closed한다.
                 maru_macos_app_session_focus_workspace_input(session)

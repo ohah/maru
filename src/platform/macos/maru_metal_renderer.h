@@ -84,8 +84,8 @@ bool maru_metal_renderer_draw(
        NULL/0이면 안 그림(tui 테마는 셀 fill 유지). 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads,
     size_t gpu_quad_count,
-    /* C4b 모달: 모달(overlay) 셀이 cells에서 시작하는 인덱스(0=모달 없음). over quad(모달 배경)를 모달
-       텍스트 셀 '앞'에 끼우는 분할점. */
+    /* C4b overlay 셀이 cells에서 시작하는 순수 인덱스. 존재 여부는 마지막 overlay_cells_present가 명시하며,
+       over quad(모달 배경)를 텍스트 셀 '앞'에 끼우는 분할점이다. */
     size_t modal_cells_start,
     /* C4b 모달 클리핑(px, 좌상단, w==0=없음). 모달 셀 draw에 setScissorRect로 적용한다 — Metal은 좌하단 원점
        이라 y = drawable_h - (y+h)로 뒤집고 drawable 안으로 clamp. 부분 카드 픽셀 스크롤(알림 패널 등) 인프라. */
@@ -133,7 +133,9 @@ bool maru_metal_renderer_draw(
        그 불투명도×1000. 렌더러가 본문 셀 draw에서 이 suffix를 제외하고, cursor_fade_milli>0이면 별도 pass로
        opacity=cursor_fade_milli/1000에 그린다(셀 fragment의 opacity uniform). 끝에 2인자 추가해 인자 순서 불변. */
     size_t cursor_cells,
-    uint32_t cursor_fade_milli
+    uint32_t cursor_fade_milli,
+    /* ABI v131: modal_cells_start=0에서도 overlay 존재를 표현하는 명시 gate. */
+    uint32_t overlay_cells_present
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

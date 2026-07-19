@@ -1061,8 +1061,8 @@ pub const MetalFrame = extern struct {
     gpu_quad_count: usize = 0,
     gpu_shadows: ?[*]const GpuShadow = null,
     gpu_shadow_count: usize = 0,
-    // C4b 모달: 모달 셀이 cells 배열에서 시작하는 인덱스(0=모달 없음). draw가 over quad(모달 배경)를 이
-    // 경계 앞(모달 텍스트 셀 아래·터미널 위)에 끼운다.
+    // C4b overlay 셀이 cells 배열에서 시작하는 순수 인덱스. 존재 여부는 ABI v131 overlay_cells_present가
+    // 명시하며 draw가 over quad(모달 배경)를 이 경계 앞(모달 텍스트 셀 아래·터미널 위)에 끼운다.
     modal_cells_start: usize = 0,
     // kitty graphics(K2): 이미지 placement의 GPU 드로우 프리미티브(textured quad). 비면 null로 둬 렌더러가
     // 이미지 패스를 건너뛴다(이미지 없음 = 일반 경로). pass(0/1/2)로 셀배경/텍스트 전후에 그린다.
@@ -1122,6 +1122,8 @@ pub const MetalFrame = extern struct {
     // (premultiplied 출력 전체에 곱 — 반투명 커서가 아래 본문 셀에 정확히 합성). 0이면 커서 pass 생략(= blink off 위상).
     // float 대신 milli u32로 실어 extern ABI를 정수 유지(window_opacity_milli 선례). 끝에 추가해 기존 offset 불변(ABI v95).
     cursor_fade_milli: u32 = 1000,
+    // ABI v131: modal_cells_start=0을 "없음" sentinel로 재해석하지 않게 하는 명시 gate. 끝 필드라 기존 offset 불변.
+    overlay_cells_present: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -1261,6 +1263,7 @@ pub const MetalFrameBuffer = struct {
     // C4b 모달: 모달(overlay) 셀이 cells 배열에서 시작하는 인덱스. draw가 over quad(모달 배경)를 이 경계
     // '앞'에 끼워 모달 텍스트 셀 아래·터미널 위에 둔다. 0 = 모달 없음(분할 안 함).
     modal_cells_start: usize = 0,
+    overlay_cells_present: bool = false,
     // C4b 모달 클리핑: 모달 셀을 이 px 영역으로 scissor(없으면 null). view()가 MetalFrame.modal_clip_*로 투영.
     modal_clip: ?ClipPx = null,
 
@@ -1355,17 +1358,12 @@ pub const MetalFrameBuffer = struct {
         // 재빌드 없이 caret을 깜빡인다 — 터미널 커서와 같은 메커니즘 재활용. caret이 없으면(notice 등) 0.
         var overlay_cursor_cells: usize = 0;
         // C4b 모달: 최상위 오버레이 영역(모달 셀·드래그 시각물) 시작 인덱스. draw가 over quad(모달 배경)를 이 경계
-        // '앞'(오버레이 셀 아래·터미널 위)에 끼우고, 렌더러가 has_modal(=modal_cells_start>0 && <cell_count)로 이 셀들을
-        // **오버레이 레이어**(WKWebView 위)에 그린다. 0 = 오버레이 없음(draw가 분할 안 함 = terminal_end가 커서 suffix).
+        // '앞'(오버레이 셀 아래·터미널 위)에 끼우고, 렌더러가 explicit presence와 index로 이 셀들을
+        // **오버레이 레이어**(WKWebView 위)에 그린다. 0도 유효한 시작 index다.
         // 모달뿐 아니라 드래그 고스트·drop 하이라이트도 이 영역에 넣어 웹 pane 위에서도 보이게 한다(web-panel.md §5).
         //
-        // **알려진 sentinel 한계(리뷰 [7], 후속)**: `0`이 "오버레이 없음"과 "오버레이가 인덱스 0에서 시작"을 겸한다. 실무상
-        // 오버레이 영역 앞에는 늘 최소 1셀(탭 바 배경 등 pane_chrome, 또는 사이드바 헤더)이 있어 modal_cells_start≥1이라
-        // 이 겹침이 안 드러난다. **단 rich 테마(탭 바 배경=quad라 pane_chrome 셀 0) + 사이드바 접힘(헤더 셀 0) + 단일
-        // web pane(터미널 frame 0)** 조합에선 오버레이 앞 셀이 0이 될 수 있어, 그 창에서 탭 드래그 시 시각물이
-        // modal_cells_start=0으로 터미널 레이어에 그려져 WKWebView에 가릴 수 있다. 견고 수정(sentinel을 cell_count로
-        // 재정의하거나 has_overlay를 ABI로 명시)은 렌더러 게이트·replaceSidebar assert를 함께 건드려 GUI 손 테스트가
-        // 필요하므로 후속으로 둔다(이 좁은 config는 현재 미검증).
+        // ABI v131 explicit presence gate가 "없음"과 "index 0에서 시작"을 구분하므로 base cell이 없는 rich/web 조합도
+        // 같은 overlay pass를 탄다.
         var modal_cells_start: usize = 0;
         var modal_clip: ?ClipPx = null; // 모달 오버레이 클리핑(px) — overlay PaneFrame에서 흘러와 renderer scissor
         // 오버레이 영역이 존재하는가(모달 또는 드래그). 하나라도 있으면 modal_cells_start를 이 영역 시작으로 잡는다.
@@ -1453,6 +1451,7 @@ pub const MetalFrameBuffer = struct {
         // 아니므로 blink suffix에서 빠져 정적으로 그려진다(모달 열림과 동일). 오버레이 영역이 없으면 활성 panel의 터미널 커서.
         self.cursor_cells = if (has_overlay) overlay_cursor_cells else cursor_cells;
         self.modal_cells_start = modal_cells_start;
+        self.overlay_cells_present = has_overlay;
         self.modal_clip = modal_clip;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
@@ -1558,6 +1557,7 @@ pub const MetalFrameBuffer = struct {
             // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
             // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
             .modal_cells_start = self.modal_cells_start,
+            .overlay_cells_present = @intFromBool(self.overlay_cells_present),
             .modal_clip_x_px = if (self.modal_clip) |c| c.x else 0,
             .modal_clip_y_px = if (self.modal_clip) |c| c.y else 0,
             .modal_clip_w_px = if (self.modal_clip) |c| c.w else 0,
@@ -2830,7 +2830,7 @@ test "PaneFrameRole lowers dock toggle provenance without classifying the same P
 
 // 렌더러 슬라이스(web-panel.md §5): 탭/pane 드래그 시각물(drop 하이라이트·floating 고스트)을 **최상위 오버레이
 // 레이어**(WKWebView 위)로 라우팅한다. replace가 drag_overlay_cells를 오버레이 영역(modal_cells_start 뒤)에 넣어
-// 렌더러 has_modal(=modal_cells_start>0)로 오버레이 레이어에 그리게 하는지 — 순수 셀 조립 로직을 헤드리스로 단언한다
+// 렌더러가 explicit overlay presence + modal_cells_start로 오버레이 레이어에 그리게 하는지 헤드리스로 단언한다
 // (실제 GPU 합성·web 위 가시성은 손 테스트, PaneFrame 고스트 경로는 modal 경로와 동형이라 여기선 bg-only 셀로 검증).
 test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells_start 뒤)에 들어가 최상위 레이어로 라우팅" {
     const allocator = std.testing.allocator;
@@ -2840,7 +2840,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
         }
     }.make;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
-    // pane_chrome 1셀(탭 바 흉내 — 실제 드래그 중엔 항상 있어 modal_cells_start>0을 보장한다). drag 하이라이트 2셀.
+    // pane_chrome 1셀(탭 바 흉내)과 drag 하이라이트 2셀.
     const chrome = [_]NativeMetalCell{bgCell(0xFF112233)};
     const drag_cells = [_]NativeMetalCell{ bgCell(0x55445566), bgCell(0x55445566) };
 
@@ -2850,6 +2850,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
         defer buf.deinit(allocator);
         try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 1), buf.modal_cells_start); // has_modal=true → 오버레이 레이어
+        try std.testing.expectEqual(@as(u32, 1), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 0), buf.cursor_cells); // 드래그=caret 없음(정적 커서)
         try std.testing.expectEqual(@as(usize, 3), buf.cells.len); // chrome(1) + drag(2)
         try std.testing.expectEqual(@as(u32, 0x55445566), buf.cells[1].background); // 오버레이 영역 첫 셀=하이라이트
@@ -2860,7 +2861,18 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
         defer buf.deinit(allocator);
         try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), buf.modal_cells_start); // 오버레이 없음
+        try std.testing.expectEqual(@as(u32, 0), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 1), buf.cells.len); // chrome만
+    }
+    // (3) base cell이 0개여도 overlay 시작 index 0과 "없음"을 명시 gate로 구분한다.
+    {
+        var buf: MetalFrameBuffer = .{};
+        defer buf.deinit(allocator);
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        const frame = buf.view();
+        try std.testing.expectEqual(@as(usize, 0), frame.modal_cells_start);
+        try std.testing.expectEqual(@as(u32, 1), frame.overlay_cells_present);
+        try std.testing.expectEqual(@as(usize, 2), frame.cell_count);
     }
 }
 

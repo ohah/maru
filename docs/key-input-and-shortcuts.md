@@ -52,8 +52,8 @@ config는 다음 범주를 분리한다. 실제 형식은 `keybind = <chord> = <
   - close_tab (워크스페이스 cascade, 기본 없음)
   - close_focused (기본 Cmd+W — 입력 포커스 기준 파일 entry 또는 Term close cascade)
   - close_term (기본 없음 — 명시적 사용자 바인딩 호환용 terminal 전용)
-  - toggle_file_panel_focus (FP9 계획, 기본 Cmd+Shift+E — workspace와 파일 도크 왕복)
-  - focus_file_tree (현재 기본 Cmd+Shift+E, FP9 이후 기본 없음 — one-way tree focus action)
+  - toggle_file_panel_focus (기본 Cmd+Shift+E — workspace와 파일 도크 왕복)
+  - focus_file_tree (기본 chord 없음 — one-way tree focus action)
   - split_horizontal / split_vertical
   - next_pane / focus_pane_left …
 
@@ -157,7 +157,7 @@ Command+B      -> 초기에는 오류
 
 ### 파일 도크·트리 키 소유권과 우선순위
 
-Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_surface { surface_id }`, `.file_tree { restore_surface }`를 표현하고 `file_tree_focus`는 여기서 파생한다. confirm·rename 등 overlay/text input은 별도 `InputFocus`가 이 구조 축보다 먼저 선점하며 `handleKeyEvent`와 모든 IME 라우팅이 이 우선순위를 공유한다. `terminalOwnsInput`은 WebView에서 Metal responder를 회수해야 하는 interactive modal/text/tree만 같은 순서로 판정한다. 비인터랙티브 notice는 현재 responder가 다음 입력으로 dismiss하도록 이 getter에서만 제외하지만 `InputFocus.notice`가 IME를 뒤 입력 대상으로 누수시키지 않는다. 앱 전역 비재사용 surface id가 generation token을 겸한다. 구조 포커스인 `DockPanel.focused_group`은 입력 owner가 아니다. Swift/AppKit은 물리 keyCode와 firstResponder 전이만 ABI로 전달하고 도크/트리 정책을 중복 판정하지 않는다. 우선순위는 다음과 같다.
+Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_surface { surface_id }`, `.dock_group { runtime_id }`, `.file_tree { restore_surface }`를 표현하고 `file_tree_focus`는 여기서 파생한다. `.dock_group`은 surface가 없는 빈 editor leaf 또는 native surface publish 대기 leaf에 쓰며 Metal responder를 유지하고 terminal bytes를 차단한다. 이 상태의 `close_focused`는 no-op이고 split/focus border는 같은 runtime id를 소비한다. confirm·rename 등 overlay/text input은 별도 `InputFocus`가 이 구조 축보다 먼저 선점하며 `handleKeyEvent`와 모든 IME 라우팅이 이 우선순위를 공유한다. `terminalOwnsInput`은 WebView에서 Metal responder를 회수해야 하는 interactive modal/text/tree/dock-group만 같은 순서로 판정한다. 비인터랙티브 notice는 현재 responder가 다음 입력으로 dismiss하도록 이 getter에서만 제외하지만 `InputFocus.notice`가 IME를 뒤 입력 대상으로 누수시키지 않는다. 앱 전역 비재사용 surface id가 generation token을 겸한다. 구조 선택인 `DockPanel.focused_group`은 자체로 입력 owner가 아니며 `FocusOwner`와 같은 funnel에서 갱신한다. Swift/AppKit은 물리 keyCode와 firstResponder 전이만 ABI로 전달하고 도크/트리 정책을 중복 판정하지 않는다. 우선순위는 다음과 같다.
 
 1. confirm·notice·palette·rename 같은 modal/overlay input owner가 자신의 Enter/Esc/편집 키를 먼저 소비한다.
 2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveFileTree`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
@@ -170,7 +170,7 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_su
 | 키 | action/소유자 | 의미 |
 |---|---|---|
 | `⌘W` | `close_focused` | 도크 본문·트리 포커스면 포커스 group의 active 파일 탭, terminal/browser pane이면 기존 Term close cascade. dirty close는 [file-panel.md](file-panel.md) §3.2를 따른다. |
-| `⌘⇧E` | `toggle_file_panel_focus` (FP9 계획) | workspace terminal/browser에서 project tree로 들어가고, 파일 도크 본문/트리에서는 활성 workspace pane으로 돌아간다. 완전히 빈 도크는 picker를 열지 않고 no-op notice. 사용자 rebind/unbind 우선. |
+| `⌘⇧E` | `toggle_file_panel_focus` | workspace terminal/browser에서 project tree로 들어가고, 파일 도크 본문/트리에서는 활성 workspace pane으로 돌아간다. 완전히 빈 도크는 picker를 열지 않고 no-op notice. 사용자 rebind/unbind 우선. |
 | `↑/↓` | file tree | 이전/다음 조작 가능한 row. |
 | `←/→` | file tree | 접기/부모 또는 펼치기/첫 자식. |
 | `Enter` | file tree | directory toggle 또는 파일 열기. |

@@ -89,6 +89,8 @@ pub const SurfaceLayout = struct {
     /// top은 탭 바라 divider 없음). Swift가 WKWebView hitTest에서 그 가장자리 근처 클릭/hover를 **통과**시켜 아래 터미널
     /// 뷰의 divider 드래그·resize 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭을 분리 — WKWebView가 native라 안 삼키게).
     seam_edges: u8 = 0,
+    /// seam hit pass-through 폭(logical pt). 0이면 seam_edges가 있어도 native pass-through를 끈다.
+    divider_grab_band_pt: u32 = 0,
 };
 
 /// prev→cur surface 집합의 순수 diff(§6). Swift가 소비할 NSView 연산을 **전이(transition)**로 낸다 — 매 tick
@@ -157,7 +159,8 @@ pub fn surfaceDiff(
         } else if (p.visible and c.visible) {
             // 둘 다 보임 + rect 또는 seam_edges 변경(seam 변화는 거의 rect 변화 동반이나 방어적으로 함께 비교 — Swift가
             // frame·seamEdges를 reframe에서 갱신하므로 seam-only 변화도 놓치지 않는다).
-            if (!rectEql(p.content_rect, c.content_rect) or p.seam_edges != c.seam_edges) try diff.reframed.append(gpa, c);
+            if (!rectEql(p.content_rect, c.content_rect) or p.seam_edges != c.seam_edges or
+                p.divider_grab_band_pt != c.divider_grab_band_pt) try diff.reframed.append(gpa, c);
         }
         // hidden→hidden: 무동작(숨은 뷰에 frame set 안 함 — §3). rect는 다음 shown에서 실림.
     }
@@ -333,6 +336,27 @@ test "surfaceDiff: hidden→hidden은 rect가 바뀌어도 무동작(§3 숨은 
     var d = try surfaceDiff(testing.allocator, &prev, &cur);
     defer d.deinit(testing.allocator);
     try testing.expect(d.isEmpty()); // reframe도 hidden도 아님 — 숨은 채 rect만 대기
+}
+
+test "surfaceDiff: divider grab band-only visible change reframes; hidden latest is emitted on shown" {
+    const r: Rect = .{ .x = 1, .y = 2, .w = 300, .h = 200 };
+    const prev_visible = [_]SurfaceLayout{.{ .surface_id = 11, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_band_pt = 10 }};
+    const cur_visible = [_]SurfaceLayout{.{ .surface_id = 11, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_band_pt = 0 }};
+    var changed = try surfaceDiff(testing.allocator, &prev_visible, &cur_visible);
+    defer changed.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), changed.reframed.items.len);
+    try testing.expectEqual(@as(u32, 0), changed.reframed.items[0].divider_grab_band_pt);
+
+    const prev_hidden = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = false, .seam_edges = 2, .divider_grab_band_pt = 0 }};
+    const cur_hidden = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = false, .seam_edges = 2, .divider_grab_band_pt = 10 }};
+    var hidden = try surfaceDiff(testing.allocator, &prev_hidden, &cur_hidden);
+    defer hidden.deinit(testing.allocator);
+    try testing.expect(hidden.isEmpty());
+
+    const shown = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_band_pt = 10 }};
+    var show_diff = try surfaceDiff(testing.allocator, &cur_hidden, &shown);
+    defer show_diff.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 10), show_diff.shown.items[0].divider_grab_band_pt);
 }
 
 test "surfaceDiff: 빈 집합 → 빈 집합은 완전 무동작" {

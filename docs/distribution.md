@@ -66,7 +66,8 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 `.dmg` 경로(채널 2)에만 해당한다. formula 소스 빌드(채널 1)는 서명·공증이 없다.
 
 - **서명**: `Developer ID Application: Payhere Inc. (2MS57VWFU8)` 인증서로 codesign
-  (`--options runtime` hardened + `--timestamp`). 실행파일과 `.app` 번들을 서명한다.
+  (`--options runtime` hardened + `--timestamp`). 실행파일과 `.app` 번들을 서명한다. FP10c1부터 `Contents/Helpers/maru-mermaid-renderer`도 nested code이므로 main app보다 먼저 inside-out 서명하고 `codesign --verify --strict --deep`과 공증 smoke에서 누락을 실패시킨다.
+- **개발/CI helper 서명(FP10c1부터)**: 인증서 없는 `macos-app-bundle`도 release와 같은 `Contents/Helpers/maru-mermaid-renderer` layout을 만들고 helper→main executable→app 순서로 ad-hoc 서명한다. runtime bundle containment·regular/non-symlink·code validity 검사는 생략하지 않으며, Developer ID 채널에서만 main/helper Team ID 일치를 추가한다. `mise run macos-mermaid-helper-smoke`가 실제 ad-hoc bundle에서 누락·symlink·비정규 파일·signature mismatch를 거부하고 `zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json`을 남긴다. 이 task와 artifact는 FP10c1 구현 PR에서 추가되며 현재 문서 PR 시점에는 아직 존재하지 않는다.
 - **공증**: `xcrun notarytool submit --wait` → Apple 공증 → `stapler staple`로 티켓 부착.
   `.app`과 `.dmg` 양쪽을 공증·staple해, dmg에서 앱을 꺼내 복사해도 오프라인에서 Gatekeeper를 통과한다.
 - **자격증명 주입** — 비밀값(앱 전용 암호 등)은 **리포·빌드 스크립트에 절대 두지 않는다**:

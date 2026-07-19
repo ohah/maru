@@ -838,6 +838,13 @@ pub fn build(b: *std.Build) void {
                 "rg -q '^file_viewer_write=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_under_page_background=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_critical_style=true$' \"$summary\"; " ++
+                "rg -q '^file_panel_mode_unknown_rejected=true$' \"$summary\"; " ++
+                "rg -q '^web_role_scheme_app_worker_status=200$' \"$summary\"; " ++
+                "rg -q '^web_role_scheme_app_worker_self=true$' \"$summary\"; " ++
+                "rg -q '^web_role_scheme_render_worker_status=404$' \"$summary\"; " ++
+                "rg -q '^web_role_scheme_render_worker_csp=missing$' \"$summary\"; " ++
+                "rg -q '^web_role_scheme_render_document_status=200$' \"$summary\"; " ++
+                "rg -q '^web_role_scheme_render_document_none=true$' \"$summary\"; " ++
                 "rg -q '^renderer_bridge_type=undefined$' \"$summary\"; " ++
                 "rg -q '^renderer_handler_type=undefined$' \"$summary\"; " ++
                 "rg -q '^renderer_parent_accessible=false$' \"$summary\"",

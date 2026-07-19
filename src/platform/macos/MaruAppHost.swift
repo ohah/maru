@@ -525,19 +525,50 @@ final class MaruMetalOverlayView: NSView {
 //
 // 신뢰(markdown) 웹 패널의 `WKWebViewConfiguration`에만 등록되는 커스텀 스킴 핸들러. `maru-app://app/<path>` 요청을
 // 받으면 **Zig 정책**(`maru_macos_app_resolve_app_asset` — 5c-1 경로 샌드박스 + 5c-2a realpath symlink 탈출 방어)으로
-// asset root 아래 안전한 절대 경로를 얻어, 그 파일 바이트를 **엄격 CSP 헤더**(단일 출처=Zig `app_scheme.csp_header`)와
+// asset root 아래 안전한 절대 경로를 얻어, 그 파일 바이트를 **role별 엄격 CSP 헤더**(단일 출처=Zig AppAssetRole)와
 // 함께 응답한다. 거부(샌드박스·탈출·부재)는 정보 노출 없이 404. **정책 판정은 전부 Zig, 여기는 파일 읽기 + 응답 조립
 // 이라는 WebKit 어댑터만** 한다(docs/web-panel.md §10). 비신뢰(browser) 패널엔 이 핸들러를 애초에 등록하지 않는다
 // (origin 위장 탈취 1차 차단 — §7 ④·§8.1(c), 2차는 browser 패널의 maru-app:// 네비 차단).
+private final class MaruSchemeSmokeTask: NSObject, WKURLSchemeTask {
+    let request: URLRequest
+    private(set) var response: HTTPURLResponse?
+    private(set) var data = Data()
+    private(set) var finished = false
+    private(set) var failure: Error?
+
+    init(url: URL) {
+        self.request = URLRequest(url: url)
+        super.init()
+    }
+
+    func didReceive(_ response: URLResponse) {
+        self.response = response as? HTTPURLResponse
+    }
+
+    func didReceive(_ data: Data) {
+        self.data.append(data)
+    }
+
+    func didFinish() {
+        finished = true
+    }
+
+    func didFailWithError(_ error: Error) {
+        failure = error
+    }
+}
+
 @MainActor
 final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
     static let scheme = "maru-app"
     private let assetRoot: String // 번들 web asset root 절대 경로(Bundle.main.resourceURL/web 또는 MARU_WEB_APP_ROOT).
-    private let csp: String
+    private let appCSP: String
+    private let renderCSP: String
 
     init(assetRoot: String) {
         self.assetRoot = assetRoot
-        self.csp = Self.loadCSP()
+        self.appCSP = Self.loadCSP(role: MARU_APP_ASSET_ROLE_APP)
+        self.renderCSP = Self.loadCSP(role: MARU_APP_ASSET_ROLE_RENDER)
         super.init()
     }
 
@@ -571,13 +602,71 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
         return originAllowed(scheme: scheme, host: host, hasExplicitPort: url.port != nil, role: role)
     }
 
-    // CSP 문자열은 Zig `app_scheme.csp_header`가 단일 출처 — export로 1회 읽어 캐시한다(Swift에 중복 문자열 두지 않음).
-    private static func loadCSP() -> String {
+    static func assetRole(_ url: URL) -> Int32 {
+        guard let scheme = url.scheme, let host = url.host else { return -1 }
+        let schemeBytes = Array(scheme.utf8)
+        let hostBytes = Array(host.utf8)
+        return schemeBytes.withUnsafeBufferPointer { sp in
+            hostBytes.withUnsafeBufferPointer { hp in
+                maru_macos_app_asset_role_for_origin(sp.baseAddress, sp.count, hp.baseAddress, hp.count, url.port == nil ? 0 : 1)
+            }
+        }
+    }
+
+    struct RoleSchemeSmokeResult {
+        let appWorkerStatus: Int
+        let appWorkerCSP: String
+        let renderWorkerStatus: Int
+        let renderWorkerCSP: String
+        let renderDocumentStatus: Int
+        let renderDocumentCSP: String
+    }
+
+    /// Actual WKURLSchemeHandler adapter smoke. The temporary root keeps the inert worker fixture out of the
+    /// production bundle until FP10b creates the dedicated worker bundle.
+    static func roleSchemeSmoke(using webView: WKWebView) -> RoleSchemeSmokeResult? {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("maru-role-scheme-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try Data("self.onmessage=()=>{}".utf8).write(to: root.appendingPathComponent("live-preview-worker.js"))
+            try Data("<!doctype html><title>render</title>".utf8).write(to: root.appendingPathComponent("render.html"))
+            let handler = MaruAppSchemeHandler(assetRoot: root.path)
+            func run(_ rawURL: String) -> MaruSchemeSmokeTask? {
+                guard let url = URL(string: rawURL) else { return nil }
+                let task = MaruSchemeSmokeTask(url: url)
+                handler.webView(webView, start: task)
+                return task.finished ? task : nil
+            }
+            guard let appWorker = run("maru-app://app/live-preview-worker.js"),
+                  let renderWorker = run("maru-app://render/live-preview-worker.js"),
+                  let renderDocument = run("maru-app://render/render.html") else { return nil }
+            let appWorkerStatus = appWorker.response?.statusCode ?? -1
+            let appWorkerCSP = appWorker.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
+            let renderWorkerStatus = renderWorker.response?.statusCode ?? -1
+            let renderWorkerCSP = renderWorker.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
+            let renderDocumentStatus = renderDocument.response?.statusCode ?? -1
+            let renderDocumentCSP = renderDocument.response?.value(forHTTPHeaderField: "Content-Security-Policy") ?? "missing"
+            return RoleSchemeSmokeResult(
+                appWorkerStatus: appWorkerStatus,
+                appWorkerCSP: appWorkerCSP,
+                renderWorkerStatus: renderWorkerStatus,
+                renderWorkerCSP: renderWorkerCSP,
+                renderDocumentStatus: renderDocumentStatus,
+                renderDocumentCSP: renderDocumentCSP
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    // CSP 문자열은 Zig AppAssetRole이 단일 출처 — role별 export를 1회 읽어 캐시한다(Swift에 중복 문자열 두지 않음).
+    private static func loadCSP(role: UInt32) -> String {
         // 버퍼는 csp_header(현재 ~152B) 대비 넉넉히(1024B). 초과(-1)는 사실상 도달 불가지만 **조용히** default-deny로
         // 폴백하면 신뢰 패널이 자기 script/style을 CSP로 막아 blank가 되고 원인 불명이 되므로, 개발 빌드에서 소리내어
         // 실패시켜(assertionFailure) 버퍼를 키우도록 강제한다(리뷰11 [3]). 릴리스 폴백은 fail-closed(과제약이 안전).
         var buf = [UInt8](repeating: 0, count: 1024)
-        let n = maru_macos_app_csp_header(&buf, buf.count)
+        let n = maru_macos_app_csp_header(role, &buf, buf.count)
         guard n > 0 else {
             assertionFailure("maru_macos_app_csp_header 실패/초과(\(n)) — csp_header가 버퍼(\(buf.count)B)를 넘음. 버퍼를 키우세요.")
             return "default-src 'none'"
@@ -595,12 +684,17 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-        guard let url = urlSchemeTask.request.url, Self.originAllowed(url, role: 2) else {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+        let roleRaw = Self.assetRole(url)
+        guard roleRaw == Int32(MARU_APP_ASSET_ROLE_APP) || roleRaw == Int32(MARU_APP_ASSET_ROLE_RENDER) else {
             urlSchemeTask.didFailWithError(URLError(.badURL))
             return
         }
         // 요청 path(authority 뒤). 예: maru-app://app/index.html → "/index.html". 빈 경로("/")는 Zig가 index.html로 매핑.
-        guard let filePath = resolveAsset(url.path),
+        guard let filePath = resolveAsset(url.path, role: UInt32(roleRaw)),
               let data = FileManager.default.contents(atPath: filePath)
         else {
             // 거부(샌드박스·탈출·부재) → 404. 정보 노출 없이 균일 실패하되, **흰 HTML**로 응답해 신뢰 패널이 다크모드
@@ -612,7 +706,7 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
             respond(urlSchemeTask, url: url, status: 404, mime: "text/html; charset=utf-8", data: Data(Self.errorPageHTML("요청한 리소스를 찾을 수 없습니다 (404).").utf8), attachCSP: false)
             return
         }
-        respond(urlSchemeTask, url: url, status: 200, mime: Self.mimeType(forPath: filePath), data: data)
+        respond(urlSchemeTask, url: url, status: 200, mime: Self.mimeType(forPath: filePath), data: data, csp: roleRaw == Int32(MARU_APP_ASSET_ROLE_APP) ? appCSP : renderCSP)
     }
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
@@ -622,14 +716,14 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
     // FFI 마샬링 **단일 출처**(핸들러 인스턴스 + 스모크 검증이 공유 — 리뷰11 [6]). 요청 path → (Zig 반환 코드,
     // 성공(>0) 시 asset root 아래 안전한 절대 경로). 빈 path(`maru-app://app`처럼 authority만)는 Zig가 index.html로
     // 매핑하는 계약이지만 빈 Swift 배열은 baseAddress=nil이라 export가 NULL(-4)로 오판하므로 "/"로 정규화한다.
-    static func callResolve(root: String, _ reqPath: String) -> (code: Int64, path: String?) {
+    static func callResolve(root: String, _ reqPath: String, role: UInt32 = MARU_APP_ASSET_ROLE_APP) -> (code: Int64, path: String?) {
         let rootBytes = Array(root.utf8)
         let reqBytes = Array((reqPath.isEmpty ? "/" : reqPath).utf8)
         var out = [UInt8](repeating: 0, count: 4096)
         let n = rootBytes.withUnsafeBufferPointer { rp in
             reqBytes.withUnsafeBufferPointer { qp in
                 out.withUnsafeMutableBufferPointer { op in
-                    maru_macos_app_resolve_app_asset(rp.baseAddress, rp.count, qp.baseAddress, qp.count, op.baseAddress, op.count)
+                    maru_macos_app_resolve_app_asset(role, rp.baseAddress, rp.count, qp.baseAddress, qp.count, op.baseAddress, op.count)
                 }
             }
         }
@@ -638,11 +732,11 @@ final class MaruAppSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     // Zig 정책 호출: 요청 path → asset root 아래 안전한 절대 경로. 실패(음수: 거부·부재·탈출)면 nil.
-    private func resolveAsset(_ reqPath: String) -> String? {
-        Self.callResolve(root: assetRoot, reqPath).path
+    private func resolveAsset(_ reqPath: String, role: UInt32) -> String? {
+        Self.callResolve(root: assetRoot, reqPath, role: role).path
     }
 
-    private func respond(_ task: WKURLSchemeTask, url: URL, status: Int, mime: String, data: Data, attachCSP: Bool = true) {
+    private func respond(_ task: WKURLSchemeTask, url: URL, status: Int, mime: String, data: Data, attachCSP: Bool = true, csp: String = "") {
         var headers = [
             "Content-Type": mime,
             "Content-Length": "\(data.count)",
@@ -2050,16 +2144,14 @@ private func browserCtlExecuteScriptStream(
 //      받아 포커스된다. 모달이 **열려** 있으면 nil을 반환해 클릭이 아래 터미널 뷰로 통과하고(overlay hitTest=nil
 //      불변), Zig 모달 로직(바깥 클릭 dismiss·모달 요소 클릭)이 그대로 처리한다 — 웹뷰가 모달 위 클릭을 훔치지
 //      않게(§4). 본문 rect 밖(탭 바·divider·grip)은 애초에 이 프레임에 없어 늘 터미널이 받는다.
-//   2. **maru 키바인딩(performKeyEquivalent)**: 웹 포커스 중에도 ⌘T·⌘⇧P·⌘F·⌘,·⌘1.. 등이 먼저 잡혀야 한다.
-//      메커니즘은 **performKeyEquivalent override**(현 터미널 뷰·anyOverlayOpen 게이트와 **같은 패턴** — local
-//      event monitor 기각, 근거는 §4·PR 본문). 웹이 포커스일 때만 Cmd-조합을 controller.handleKeyDown으로 라우팅
-//      하는데, **모든 maru 앱 키바인딩은 Zig default_app_bindings의 단일 출처**라 keyDown 경로(key_down resolver)가
-//      전부 해석한다(⌘T=new_term·⌘⇧P=toggle_command_palette·⌘F=toggle_find …). 웹이 포커스가 아니면(터미널
-//      포커스) 이 override는 false만 반환해 **완전 무동작** — 터미널 IME/keyDown 경로는 손대지 않는다(무회귀).
+//   2. **maru 키바인딩(performKeyEquivalent)**: 웹 포커스 중에는 ABI v132 typed WebKeyRoute를 조회한다. app_action은
+//      같은 Zig resolver를 재평가하는 dispatchWebPanelAppAction이 현재 Action만 직접 실행하고, web_editor/pass-through는
+//      WebKit·메뉴에 양보하며 consume_unbound/unknown은 소비한다. 범용 handleKeyDown의 terminal copy/paste·scroll·macro
+//      전처리와 PTY write를 우회하고, route 뒤 config/mode가 달라졌으면 action 0회다. 웹이 포커스가 아니면 false만
+//      반환해 터미널 IME/keyDown 경로는 손대지 않는다.
 //
-// **범위**: 빈 흰 HTML(콘텐츠 없음)이라 웹 콘텐츠 입력은 얇지만 전이·preedit·keybinding **메커니즘**을 검증한다. 웹 소유
-// 키(⌘C/⌘V/⌘A 편집·⌘F 페이지 내 find §8)를 WebKit에 양보하는 **포커스 기준 분기**는 Phase 5(실콘텐츠). WKWebView
-// 내부 IME는 WebKit 소유(안 건드림). 콘텐츠·URL·브리지·스킴·CSP·데이터스토어 격리는 Phase 5. docs/web-panel.md §4·§10 4d.
+// **현행 범위**: browser와 file panel 실콘텐츠가 이 래퍼를 공유한다. Markdown live/source의 편집키는 WebKit, 앱 action과
+// explicit consume은 Zig가 소유한다. WKWebView 내부 IME는 계속 WebKit 소유다. docs/web-panel.md §4, docs/file-panel.md §6.
 @MainActor
 final class MaruWebPanelView: NSView {
     let webView: WKWebView
@@ -2101,7 +2193,7 @@ final class MaruWebPanelView: NSView {
     var fileHTMLAboutAttemptProbe: String?
     var fileHTMLPinnedProbe: String?
     private var fileHTMLProbeStarted = false
-    private var requestedFileMode: Int32 = 0 // 0=read, 1=source-edit. Zig dock entry가 단일 출처.
+    private var requestedFileMode: Int32 = 0 // 0=read, 1=source-edit, 2=live-preview. Zig dock entry가 단일 출처.
     // 5d BrowserControl fixture E2E(스모크, browser 패널): 0=초기 로드 대기, 1=data: URL navigate 완료 대기, 2=probe 완료.
     var browserFixtureStage = 0
     // executeScript 시작 뒤 top-level navigation/reload가 시작되면 callback의 WebKit error를 execution이 아니라
@@ -2276,13 +2368,20 @@ final class MaruWebPanelView: NSView {
 
     func applyFilePanelMode(_ rawMode: Int32) {
         guard filePanelKind == 1 else { return }
-        requestedFileMode = rawMode == 1 ? 1 : 0
+        guard Self.isKnownFilePanelMode(rawMode) else { return }
+        requestedFileMode = rawMode
         guard webView.url?.scheme == MaruAppSchemeHandler.scheme, webView.url?.host == "app" else { return }
-        let mode = requestedFileMode == 1 ? "source-edit" : "read"
+        let mode = requestedFileMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT) ? "source-edit" : (requestedFileMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW) ? "live-preview" : "read")
         webView.evaluateJavaScript(
             "window.dispatchEvent(new CustomEvent('maru:file-mode',{detail:{mode:'\(mode)'}}))",
             completionHandler: nil
         )
+    }
+
+    static func isKnownFilePanelMode(_ rawMode: Int32) -> Bool {
+        rawMode == Int32(MARU_FILE_PANEL_MODE_READ)
+            || rawMode == Int32(MARU_FILE_PANEL_MODE_SOURCE_EDIT)
+            || rawMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW)
     }
 
     func requestFileDirtySync(requestId: UInt64 = 0) {
@@ -2624,13 +2723,9 @@ final class MaruWebPanelView: NSView {
         }
     }
 
-    // 4d 키바인딩: 웹 포커스 중일 때만, **maru 앱 바인딩(app_action)인 Cmd-조합만** 가로채 maru로 라우팅한다(Zig
-    // resolver가 앱 액션·모달 토글을 소유). 앱 바인딩이 아닌 Cmd-조합(⌘Q 종료·⌘H 숨김·⌘M 최소화=메뉴 전용, ⌘C/⌘V/
-    // ⌘A=WebKit 편집, ⌘Backspace/←/→=terminal 매크로)은 false로 양보해 메뉴바 keyEquivalent → WebKit이 받게 한다 —
-    // 셸은 포커스가 아니므로 라우팅하지 않는다(옛 "모든 Cmd 조합 가로채 셸로" 버그로 ⌘Q가 종료 안 되고 ⌘Backspace가
-    // 셸로 새던 것 수정, code-review [1-3,5]). 판정은 Zig resolver를 side-effect 없이 조회(handleKeyEvent와 같은
-    // keyBindingResolver 단일 출처 — terminal 매크로가 셸로 새기 전에 가른다). 웹 포커스가 아니면 false만 반환 —
-    // 터미널 포커스 경로(메뉴 keyEquivalent + 터미널 뷰 keyDown/IME)를 손대지 않는다(무회귀).
+    // 웹 포커스 중에는 Zig typed WebKeyRoute만 소비한다. app action은 전용 direct dispatch, editable Markdown 기본과
+    // pass-through는 WebKit/메뉴, unbind·terminal macro와 unknown raw는 consume이다. Swift가 별도 키 목록을 갖지 않으며
+    // direct dispatch는 범용 terminal 전처리와 PTY write를 우회한다. 웹 포커스가 아니면 false라 터미널 IME/keyDown은 불변.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Phase 7e-4(+후속): browser nav 단축키(⌘←=back·⌘→=forward·⌘R=reload)는 **이 패널이 활성 pane의 browser 탭일
         // 때** 처리한다 — WKWebView 키보드 포커스(isWebPanelFocused) 유무와 무관하게. 브라우저 탭을 활성화해도 webView에
@@ -2653,20 +2748,20 @@ final class MaruWebPanelView: NSView {
             default: break
             }
         }
-        // 그 외 앱 액션 Cmd 조합(⌘T 등)은 웹 포커스일 때만 maru keyDown 경로로 라우팅한다(Zig resolver가 판정).
+        // 그 외 key equivalent는 웹 포커스일 때 Zig typed route가 단독 판정한다. 사용자 app rebind/unbind와
+        // Markdown 편집 기본키의 우선순위를 Swift keyCode 목록으로 복제하지 않는다.
         guard controller?.isWebPanelFocused(self) == true else { return false }
-        guard event.modifierFlags.contains(.command) else { return false }
-        // FP6 Markdown source editor owns standard document chords that Maru normally binds. 닫힌 keyCode 목록만
-        // 양보해 Cmd+T/팔릿/세팅 같은 앱 chrome은 계속 Maru가 처리한다. 사용자가 unbind한 조합은 아래 resolver가
-        // false라 원래처럼 WebKit에 양보된다.
-        if filePanelKind == 1, controller?.filePanelIsSourceEditing(surfaceId) == true,
-           event.modifierFlags.intersection([.command, .shift, .option, .control]).subtracting(.shift) == .command,
-           [UInt16(0), 2, 3, 5, 40].contains(event.keyCode) { // A/D/F/G/K
+        switch controller?.webPanelKeyRoute(self, event) ?? MARU_WEB_KEY_ROUTE_PASS_THROUGH {
+        case MARU_WEB_KEY_ROUTE_PASS_THROUGH, MARU_WEB_KEY_ROUTE_WEB_EDITOR:
             return false
+        case MARU_WEB_KEY_ROUTE_APP_ACTION:
+            controller?.dispatchWebPanelAppAction(self, event)
+            return true
+        case MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND:
+            return true
+        default: // future/invalid raw route: fail closed
+            return true
         }
-        guard controller?.isWebPanelAppChord(self, event) == true else { return false }
-        controller?.handleWebPanelChord(event)
-        return true
     }
 }
 
@@ -3476,7 +3571,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if target.window?.isKeyWindow != true { target.window?.makeKeyAndOrderFront(nil) }
         // ⌘Q는 시스템 메뉴 keyEquivalent 경로라 maru keyDown/performKeyEquivalent를 안 거친다 — 브라우저 web 패널이
         // firstResponder를 쥔 채면 첫 Enter가 아직 WKWebView로 샐 수 있으므로, 모달을 연 즉시 터미널로 포커스를 전이한다
-        // (다음 renderTick의 self-heal reconcile까지 안 기다림 — handleWebPanelChord의 동기 reconcile과 같은 규율).
+        // (다음 renderTick의 self-heal reconcile까지 안 기다림 — dispatchWebPanelAppAction의 동기 reconcile과 같은 규율).
         withSurface(target) { reconcileWebFocus() }
         return .terminateLater
     }
@@ -3846,28 +3941,29 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return maru_macos_app_session_any_overlay_open(session) != 0
     }
 
-    // 이 Cmd-조합이 maru 앱 바인딩(app_action)인가 — 웹 포커스 performKeyEquivalent가 가로챌지(true) 메뉴/WebKit에
-    // 양보할지(false) 판정한다. Zig resolver를 side-effect 없이 조회한다(PTY write 없음, handleKeyEvent와 같은
-    // keyBindingResolver 단일 출처). 웹 패널 포커스 시 그 창이 key라 activeSurface=소유 창이지만, 명시적으로 소유
-    // surface 세션을 써 멀티 창에서도 정확히 그 창의 바인딩으로 판정한다. 정규화 실패·세션 없음이면 false(양보).
-    func isWebPanelAppChord(_ wp: MaruWebPanelView, _ event: NSEvent) -> Bool {
+    // Zig resolver의 typed route를 그대로 전달한다. 정규화 실패·세션 없음은 pass-through(0), 알 수 없는 raw는
+    // 호출부가 consume한다.
+    func webPanelKeyRoute(_ wp: MaruWebPanelView, _ event: NSEvent) -> UInt32 {
         guard let session = surfaceOwning(wp)?.appSession ?? appSession,
-              var keyEvent = normalizedKeyEvent(from: event) else { return false }
-        return maru_macos_app_session_key_is_app_action(session, &keyEvent) != 0
+              var keyEvent = normalizedKeyEvent(from: event) else { return 0 }
+        return maru_macos_app_session_web_key_route(session, wp.surfaceId, &keyEvent)
     }
 
-    // 웹 포커스 중 눌린 Cmd-조합을 maru keyDown 경로로 라우팅한다(Zig resolver가 앱 액션·모달 토글을 해석). 곧바로
-    // reconcile을 돌려, 이 조합이 모달을 열었으면(⌘⇧P·⌘F·⌘,) firstResponder를 같은 이벤트 루프에서 터미널 뷰로
-    // 전이한다(다음 tick까지 기다리지 않아 조합 직후 타이핑/IME가 웹뷰로 새지 않게). handleKeyDown은 기존 경로 그대로.
-    func handleWebPanelChord(_ event: NSEvent) {
-        handleKeyDown(event)
+    // WebKeyRoute.app_action은 범용 handleKeyDown의 terminal 전처리(Cmd+C/V·scroll)를 우회하고, 같은 Zig resolver가
+    // 확정한 Action을 직접 dispatch한다. 모달을 열었으면 같은 이벤트 루프에서 responder도 되돌린다.
+    func dispatchWebPanelAppAction(_ wp: MaruWebPanelView, _ event: NSEvent) {
+        let owner = surfaceOwning(wp)
+        guard let session = owner?.appSession ?? appSession,
+              var keyEvent = normalizedKeyEvent(from: event) else { return }
+        syncLastWindowBeforeKeyDispatch(session, owner: owner ?? activeSurface)
+        _ = maru_macos_app_session_dispatch_web_app_action(session, wp.surfaceId, &keyEvent)
         reconcileWebFocus()
     }
 
     // Phase 7e-4: browser 패널 nav 단축키(⌘←/→/R)를 Zig 코어로 전달한다(performKeyEquivalent에서 code 마샬링 후 호출).
     // 정책(활성 판정·pending)은 Zig setBrowserNavAction, 실행은 그 세션 tick의 take_web_nav_action drain(클릭 경로 재사용).
     // **소유 창(surface)의 세션**에 세운다 — drain이 그 세션 tick에서 돌기 때문(멀티 창 오라우팅 방지, surfaceOwning과
-    // 같은 규율이되 surface_id 키로 조회). 못 찾으면 활성 세션 폴백(isWebPanelAppChord의 `?? appSession`과 대칭).
+    // 같은 규율이되 surface_id 키로 조회). 못 찾으면 활성 세션 폴백(webPanelKeyRoute의 `?? appSession`과 대칭).
     func dispatchBrowserNav(_ surfaceId: UInt64, _ code: UInt32) {
         guard let session = surfaceOwning(byId: surfaceId)?.appSession ?? appSession else { return }
         _ = maru_macos_app_session_browser_nav(session, surfaceId, code)
@@ -3891,11 +3987,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func activeWebSurfaceId() -> UInt64 {
         guard let session = appSession else { return 0 }
         return maru_macos_app_session_active_web_surface_id(session)
-    }
-
-    func filePanelIsSourceEditing(_ surfaceId: UInt64) -> Bool {
-        guard let session = surfaceOwning(byId: surfaceId)?.appSession ?? appSession else { return false }
-        return maru_macos_app_session_file_panel_mode(session, surfaceId) == 1
     }
 
     func focusedFilePanelSurfaceId() -> UInt64 {
@@ -6116,12 +6207,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         var fileModeSid: UInt64 = 0
         let fileMode = maru_macos_app_session_take_file_panel_mode_action(session, &fileModeSid)
-        if fileMode >= 0 {
+        if MaruWebPanelView.isKnownFilePanelMode(fileMode) {
             surface.pendingFilePanelModeAction = (fileModeSid, fileMode)
         }
         if let pending = surface.pendingFilePanelModeAction {
             let currentMode = maru_macos_app_session_file_panel_mode(session, pending.surfaceId)
-            if currentMode < 0 {
+            if !MaruWebPanelView.isKnownFilePanelMode(currentMode) {
                 surface.pendingFilePanelModeAction = nil
             } else if let wp = surface.webPanels[pending.surfaceId] {
                 wp.applyFilePanelMode(currentMode)
@@ -6923,10 +7014,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
 
-        // ⌘W가 세션(창)을 닫는 판정은 동기다 — 키 처리 직전에 마지막 창 여부를 갱신해, 두 번째 창을 갓 연 직후
-        // (다음 tick이 아직 sibling 세션의 값을 0으로 갱신하기 전) ⌘W가 와도 stale=true로 잘못 종료 확인을 띄우지
-        // 않게 한다(tick 주입의 프레임 갭 보강). quick(활성일 때)은 앱 종료 단위가 아니라 항상 0.
-        maru_macos_app_session_set_last_window(appSession, (activeSurface !== quick && windows.count <= 1) ? 1 : 0)
+        syncLastWindowBeforeKeyDispatch(appSession, owner: activeSurface)
         var keyEvent = event
         var summary = MaruAppHostFrameSummary()
         let status = maru_macos_app_session_key_down(appSession, &keyEvent, &summary)
@@ -6936,6 +7024,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if status == Self.statusOK {
             latestFrameSummary = summary
         }
+    }
+
+    // ⌘W가 세션(창)을 닫는 판정은 동기다 — terminal 입력과 WebKeyRoute.app_action 모두 실제 dispatch 직전에
+    // 마지막 창 여부를 같은 규칙으로 갱신한다. 두 번째 창을 갓 연 직후 다음 tick 전의 stale=true와, quick을
+    // 앱 종료 단위로 오인하는 일을 함께 막는다.
+    private func syncLastWindowBeforeKeyDispatch(_ session: OpaquePointer, owner: TerminalSurface?) {
+        maru_macos_app_session_set_last_window(session, (owner !== quick && windows.count <= 1) ? 1 : 0)
     }
 
     /// 현재 창의 backing 픽셀 + scale(천분율) — 세션 생성 시 셸을 처음부터 실제 크기로 spawn하는 데 쓴다
@@ -7791,6 +7886,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_write=\(wp?.fileViewerWriteProbe ?? "pending")
             file_viewer_under_page_background=\(fileViewerUnderPageBackground)
             file_viewer_critical_style=\(wp?.fileViewerCriticalStyleProbe ?? "pending")
+            file_panel_mode_unknown_rejected=\(!MaruWebPanelView.isKnownFilePanelMode(3) && !MaruWebPanelView.isKnownFilePanelMode(Int32.max))
             renderer_bridge_type=\(wp?.rendererBridgeProbe ?? "pending")
             renderer_handler_type=\(wp?.rendererHandlerProbe ?? "pending")
             renderer_parent_accessible=\(wp?.rendererParentAccessProbe ?? "pending")
@@ -7853,6 +7949,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_app_resolve_index=\(smokeResolve("/index.html"))
             web_app_resolve_traversal=\(smokeResolve("/../etc/passwd"))
             web_app_resolve_missing=\(smokeResolve("/nope.zzz"))
+
+            """
+        }
+        if smokeMode, let webView = activeSurface?.webPanels.values.first?.webView,
+           let roleSmoke = MaruAppSchemeHandler.roleSchemeSmoke(using: webView) {
+            summary += """
+            web_role_scheme_app_worker_status=\(roleSmoke.appWorkerStatus)
+            web_role_scheme_app_worker_self=\(roleSmoke.appWorkerCSP.contains("worker-src 'self'"))
+            web_role_scheme_render_worker_status=\(roleSmoke.renderWorkerStatus)
+            web_role_scheme_render_worker_csp=\(roleSmoke.renderWorkerCSP)
+            web_role_scheme_render_document_status=\(roleSmoke.renderDocumentStatus)
+            web_role_scheme_render_document_none=\(roleSmoke.renderDocumentCSP.contains("worker-src 'none'"))
 
             """
         }

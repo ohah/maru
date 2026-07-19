@@ -18,9 +18,40 @@ pub const max_groups: usize = 64;
 /// 새 값을 더하되, 트리·탭 소유 모델은 그대로 재사용한다(docs/file-panel.md §1).
 pub const EntryKind = enum { markdown, html };
 
-/// v1 모드. HTML 소스 편집 UI는 아직 없지만 상태/포맷은 mode를 kind와 직교하게 보존해 후속 추가가 모델 migration을
-/// 요구하지 않게 한다. 실제 UI가 허용할 조합은 FP6의 정책 배선이 제한한다.
-pub const Mode = enum { read, source_edit };
+/// 파일 도크 표시 모드. enum ordinal은 C ABI raw 값, workspaceName/parseWorkspaceName은 workspace 문자열 wire의
+/// 정책 SSOT다. 헤더의 시각 순서는 `dock_layout.header_mode_order`가 별도로 고정한다. HTML은 read만 허용하고
+/// Markdown의 두 편집 모드는 같은 dirty/save 수명 계약을 소비한다.
+pub const Mode = enum(u32) {
+    read = 0,
+    source_edit = 1,
+    live_preview = 2,
+
+    pub fn allowedFor(self: Mode, kind: EntryKind) bool {
+        return switch (kind) {
+            .markdown => true,
+            .html => self == .read,
+        };
+    }
+
+    pub fn isEditable(self: Mode) bool {
+        return self == .source_edit or self == .live_preview;
+    }
+
+    pub fn workspaceName(self: Mode) []const u8 {
+        return switch (self) {
+            .read => "read",
+            .source_edit => "source-edit",
+            .live_preview => "live-preview",
+        };
+    }
+
+    pub fn parseWorkspaceName(raw: []const u8) ?Mode {
+        inline for (std.enums.values(Mode)) |mode| {
+            if (std.mem.eql(u8, raw, mode.workspaceName())) return mode;
+        }
+        return null;
+    }
+};
 
 /// 파일 entry의 앱-런타임 전역 identity. path는 rename으로, surface_id는 LRU eviction/recreate로 바뀔 수 있어
 /// drag·비동기 ack가 위치를 다시 찾는 키로 쓸 수 없다. 0은 미할당 sentinel이며 발급한 값은 close 뒤에도 재사용하지 않는다.
@@ -651,7 +682,7 @@ pub const DockPanel = struct {
     fn restoreEntries(entry_ids: *EntryIdAllocator, group: *DockGroup, entries: []const PersistedEntry) !void {
         var active: ?usize = null;
         for (entries) |entry| {
-            if (entry.path.len == 0 or group.findPath(entry.path) != null) return error.InvalidPersistedState;
+            if (entry.path.len == 0 or group.findPath(entry.path) != null or !entry.mode.allowedFor(entry.kind)) return error.InvalidPersistedState;
             const i = try group.openLocal(try entry_ids.next(), entry.path, entry.kind);
             group.entries.items[i].mode = entry.mode;
             group.entries.items[i].dirty = false;
@@ -739,13 +770,16 @@ pub const DockPanel = struct {
         if ((group.entries.items.len > 0 and group.active == null) or
             (group.active != null and group.active.? >= group.entries.items.len) or
             group.entries.items.len > max_entries) return error.InvalidPersistedState;
+        for (group.entries.items) |entry| if (!entry.mode.allowedFor(entry.kind)) return error.InvalidPersistedState;
         const entries = try allocator.alloc(PersistedEntry, group.entries.items.len);
-        for (group.entries.items, 0..) |entry, i| entries[i] = .{
-            .path = entry.path,
-            .kind = entry.kind,
-            .mode = entry.mode,
-            .active = group.active != null and group.active.? == i,
-        };
+        for (group.entries.items, 0..) |entry, i| {
+            entries[i] = .{
+                .path = entry.path,
+                .kind = entry.kind,
+                .mode = entry.mode,
+                .active = group.active != null and group.active.? == i,
+            };
+        }
         return entries;
     }
 
@@ -1137,7 +1171,7 @@ test "dock panel: nested multi-group persistence restores focus entries and spli
     const a = panel.singleGroup().?;
     _ = try panel.open(a, "/tmp/a.md", .markdown);
     const b = try panel.splitGroup(a, .horizontal, 0.4);
-    _ = try panel.open(b, "/tmp/b.html", .html);
+    _ = try panel.open(b, "/tmp/b.md", .markdown);
     const c = try panel.splitGroup(b, .vertical, 0.7);
     _ = try panel.open(c, "/tmp/c.md", .markdown);
     b.entries.items[0].mode = .source_edit;
@@ -1259,4 +1293,29 @@ test "dock group: removing background entry preserves active identity" {
     defer std.testing.allocator.free(removed.path);
     try std.testing.expectEqual(@as(?usize, 1), group.active);
     try std.testing.expectEqual(@as(u64, 77), group.entries.items[group.active.?].surface_id);
+}
+
+test "dock mode policy keeps HTML read-only and both Markdown editors dirty-capable" {
+    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(Mode.read));
+    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(Mode.source_edit));
+    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(Mode.live_preview));
+    try std.testing.expect(Mode.read.allowedFor(.markdown));
+    try std.testing.expect(Mode.live_preview.allowedFor(.markdown));
+    try std.testing.expect(Mode.source_edit.allowedFor(.markdown));
+    try std.testing.expect(Mode.read.allowedFor(.html));
+    try std.testing.expect(!Mode.live_preview.allowedFor(.html));
+    try std.testing.expect(!Mode.source_edit.allowedFor(.html));
+    try std.testing.expect(!Mode.read.isEditable());
+    try std.testing.expect(Mode.live_preview.isEditable());
+    try std.testing.expect(Mode.source_edit.isEditable());
+    inline for (std.enums.values(Mode)) |mode| {
+        try std.testing.expectEqual(mode, Mode.parseWorkspaceName(mode.workspaceName()).?);
+    }
+    try std.testing.expect(Mode.parseWorkspaceName("future") == null);
+}
+
+test "dock panel: restore rejects a persisted HTML editor mode" {
+    var entry_ids: EntryIdAllocator = .{};
+    const entries = [_]PersistedEntry{.{ .path = "/tmp/a.html", .kind = .html, .mode = .live_preview, .active = true }};
+    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .entries = &entries }));
 }

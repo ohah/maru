@@ -55,7 +55,7 @@
 - **Phase 4 코딩 전 입력 responder spike 선행**(가장 깨지기 쉬운 IME 코드를 건드리므로): WKWebView 포커스 중 모달 열림 → responder 전이 → IME preedit → 복귀를 실측해 메커니즘(`performKeyEquivalent` override vs local event monitor)을 **착수 전에 확정**한다. 자동 테스트가 어려워 spike+수동이 유일 안전망이다.
 
 **spike 확정 결과(4d, 코드 실측 근거)**: 메커니즘을 **`performKeyEquivalent` override**로 확정한다(local event monitor 기각). 근거:
-  1. **모든 maru 앱 키바인딩은 Zig `default_app_bindings`(config/keybinding.zig)가 단일 출처**이고 keyDown 경로(`maru_macos_app_session_key_down` → `KeyBindingResolver.resolve` → `.app_action`)가 ⌘T=new_term·⌘⇧P=toggle_command_palette·⌘F=toggle_find·⌘,=toggle_settings·⌘1..=select_tab 등을 **전부** 해석한다(메뉴 keyEquivalent는 발견성용 병렬 경로일 뿐, keyDown resolver가 자기완결). 따라서 웹 포커스 중 Cmd-조합을 `handleKeyDown`으로 보내면 Zig가 모두 처리한다 — 메뉴/WebKit performKeyEquivalent 동작에 의존하지 않는다.
+  1. **모든 maru 앱 키바인딩은 Zig `default_app_bindings`(config/keybinding.zig)가 단일 출처**다. 초기 4d spike는 keyDown 재진입으로 이 가설을 검증했지만, FP10/ABI v132의 제품 계약은 typed `maru_macos_app_session_web_key_route` → `maru_macos_app_session_dispatch_web_app_action`이다. 후자는 같은 `KeyBindingResolver.resolveWebDetailed`을 다시 평가해 현재 `Action`만 직접 실행하므로 terminal copy/paste·scroll·macro 전처리와 PTY write를 우회한다. 메뉴 keyEquivalent는 발견성용 병렬 경로이고, WebKit 소유/explicit consume/app action 판정은 Zig resolver가 자기완결한다.
   2. **터미널 IME 무회귀**: 웹 래퍼(`MaruWebPanelView`)의 override는 **웹이 포커스일 때만** 동작하고(그 외엔 `false`만 반환) 터미널 뷰의 keyDown/`NSTextInputClient`/`performKeyEquivalent`를 **한 줄도 건드리지 않는다**. local event monitor는 매 keystroke(한글 조합 포함)를 앱 전역에서 가로채는 병렬 경로라 터미널 IME 폭발반경이 크고, 현행 performKeyEquivalent+`anyOverlayOpen` 패턴과도 이질적이라 기각.
   3. **모달 responder 전이**: 웹 포커스 중 모달이 열리면(`anyOverlayOpen` false→true 엣지) `makeFirstResponder(터미널 뷰)`로 전이해 모달 입력·IME preedit가 터미널 `NSTextInputClient`로 흐르고, 닫히면(true→false) 직전 웹뷰로 복원한다. 전이는 **기존** `becomeFirstResponder`(imeFocus true)/`resignFirstResponder`(commitComposition)를 그대로 태운다 — 새 IME 로직 없음. 엣지는 매 tick + 모달 여는 조합 직후 동기로 조정한다(조합 직후 타이핑이 웹뷰로 새지 않게).
   - **자동으로 못 잡는 부분(수동 필수)**: 실제 포커스 전이·한글 preedit 라우팅·복원·기존 터미널 IME 무회귀는 GUI 손 테스트만 확정한다(§11). smoke는 `web_panel_focused`(시작 시 웹이 firstResponder를 안 훔침 = false)만 결정적으로 단언한다.
@@ -218,12 +218,11 @@ Phase 4~5도 한 PR로 밀어 넣지 않는다. [control-plane.md] §11의 micro
   `resizeAppSessionFromWindow`를 쓰도록 수정. 픽셀 합성·입력 통과의 최종 눈 확인은 여전히 GUI 손 테스트가 닫는다).
 - 4d: responder/IME/drag는 착수 전 spike artifact를 남기고, 확인된 최소 계약만 자동 회귀로 고정한다. **(입력 responder 전이 spike 구현 완료 — 최소 범위, ABI 무변경·Swift 전용)**: 4c의 hitTest→nil 완전 통과를
   **focusable**로 전환하고(모달 닫힘=`super.hitTest`로 웹뷰가 클릭 받아 WKWebView firstResponder→WebKit 자체 IME; 모달
-  열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합
-  중에서도 **maru 앱 바인딩(app_action)인 것만** 가로채 `handleKeyDown`→Zig resolver로 라우팅한다 — ⌘T·⌘W·⌘1-9·⌘⇧P·⌘F·
-  ⌘,·⌘A·⌘K 등. 앱 바인딩이 **아닌** Cmd-조합은 `return false`로 **메뉴바 keyEquivalent → WebKit**에 양보한다: ⌘Q 종료·
-  ⌘H 숨김·⌘M 최소화(메뉴 전용) + ⌘C/⌘V(WebKit 편집) + ⌘Backspace/←/→(terminal 매크로). app_action 판정은
-  `maru_macos_app_session_key_is_app_action`(v100)가 **handleKeyEvent와 같은 `keyBindingResolver`를 side-effect 없이 조회** —
-  셸은 포커스가 아니므로 어느 것도 셸로 라우팅하지 않고, terminal 매크로 Cmd 조합도 write 전에 걸러 셸로 새지 않는다.
+  열림=`nil`로 아래 터미널 통과), **maru 키바인딩 가로채기 = `performKeyEquivalent` override**(웹 포커스 중 Cmd-조합을
+  ABI v132 typed `WebKeyRoute`로 조회한다. `app_action`만 가로채 같은 resolver의 `Action`을 전용 direct-dispatch ABI로 실행하고,
+  `web_editor`/`pass_through`는 메뉴바 keyEquivalent 또는 WebKit에 양보하며 `consume_unbound`와 unknown raw는 fail-closed 소비한다.
+  direct dispatch는 범용 `handleKeyDown`의 terminal copy/paste·scroll·macro 전처리와 PTY write를 타지 않고, route 뒤 config/mode가
+  달라졌으면 action 0회다. 따라서 사용자 rebind된 ⌘C/⌘V/⌘Backspace도 정확한 app action 하나만 실행하고 셸로 새지 않는다.
   옛 spike는 **모든** Cmd 조합을 가로채 셸로 흘려 ⌘Q가 종료 안 되고 키보드가 갇혔었다[code-review 4c/4d]. 웹 포커스가
   아니면 무동작이라 터미널 IME/keyDown 경로 무회귀 — §4 spike 확정 근거). **모달 responder 전이**는
   `reconcileWebModalFocus`가 `anyOverlayOpen` 엣지로 조정한다(웹 포커스 중
@@ -329,13 +328,15 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
   (batch) 상태, `maybeDebugOpenWebPanel` env 훅, `collectWebSurfaces`(pane 트리 walk → web Term 집합)·`marshalWebTransitions`·
   `computeWebSurfaceTransitions`·`webSurfaceTransitionsCount`/`webSurfaceTransitionAt`·`webFramePt` = 4a 3함수 소비). 4c의
   단일 `web_panel`·`active_pane_leaf_rect` 캐시·단일 `webSurfaceTransition`은 제거(per-Term 트리 walk가 대체).
-- **입력 responder 전이(4d, 구현 완료 — Swift 전용, ABI 무변경)**: `MaruAppHost.swift`만. `MaruWebPanelView`에 `weak controller` +
-  조건부 `hitTest`(모달 닫힘=super/열림=nil) + `performKeyEquivalent` override(웹 포커스 중 Cmd-조합→`handleWebPanelChord`).
-  컨트롤러: `isWebPanelFocused`(firstResponder가 wp 자손인지), `handleWebPanelChord`(`handleKeyDown`+즉시 reconcile),
+- **입력 responder 전이(4d 시작, FP10/ABI v132 현행)**: `MaruWebPanelView`에 `weak controller` + 조건부 `hitTest`(모달
+  닫힘=super/열림=nil) + `performKeyEquivalent` override가 있다. 현행 키 경로는 `webPanelKeyRoute`의 typed 4-state 결과를
+  소비하고, `app_action`이면 `dispatchWebPanelAppAction` → `maru_macos_app_session_dispatch_web_app_action`이 같은 resolver를
+  다시 평가한 현재 `Action`만 직접 실행한다. terminal 전처리·PTY write는 타지 않으며 stale config/mode면 action 0회다.
+  컨트롤러의 `isWebPanelFocused`,
   `reconcileWebModalFocus`(`anyOverlayOpen` 엣지→웹↔터미널 firstResponder 전이·복원, renderTick 매 tick 호출). 전이 추적 상태
   (`lastOverlayOpen`·`stashedWebFocusSurfaceId`)는 `TerminalSurface`(세션별 — 4e-3서 여러 web Term 중 복원 대상을 surface_id로
-  기억). 키바인딩 정책의 단일 출처는 여전히 Zig `config/keybinding.zig`의 `default_app_bindings`(Swift는 keyDown으로 넘기기만).
-  새 ABI 없음(`any_overlay_open` v80 재사용).
+  기억). 키바인딩 정책의 단일 출처는 Zig `KeyBindingResolver.resolveWebDetailed`이고 Swift는 raw route 상수만 소비한다.
+  4d의 `any_overlay_open` v80 재사용 뒤 FP10이 typed route/direct dispatch를 ABI v132에 추가했다.
 - **surface 생애주기·per-pane rect 순수 계산(4a, 구현 완료)**: `src/session/web_panel_layout.zig`(L2, OS-중립). 본문 rect(`contentRect` — pane rect − chrome inset), backing px·좌상단 → pt·좌하단 y-flip(`pxTopLeftToPtBottomLeft`), surface 생애주기 diff(`surfaceDiff` — created/destroyed/reframed/hidden/shown 전이)의 **단일 출처**다. 헤드리스 단위 테스트로 고정(§11)하고 `check-boundaries`가 L2 중립(app/pty/platform/AppKit import 0·OS 타입명 0)을 강제한다. y-flip 생산 적용(ABI export 또는 Swift 미러)은 이 함수를 단일 출처로 두고 4c가 배선한다.
 - surface 생애주기·per-pane rect ABI wiring(**4e-3 구현 완료 — batch**): `src/platform/macos/app_host_abi.{zig,h}` — 위 순수
   계산을 export/marshaling. v101에서 v99 단일 op(`maru_macos_app_session_web_surface_transition`)를 제거하고 **count+at**

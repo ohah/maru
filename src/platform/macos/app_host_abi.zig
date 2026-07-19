@@ -47,6 +47,18 @@ pub const Status = enum(c_int) {
 // 여기서는 ABI 표면으로 re-export만 한다.
 pub const EventKind = session_mod.EventKind;
 
+test "ABI v132 raw mode route and asset role values match the C header" {
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_READ), @intFromEnum(maru.session.dock_panel.Mode.read));
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_SOURCE_EDIT), @intFromEnum(maru.session.dock_panel.Mode.source_edit));
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_LIVE_PREVIEW), @intFromEnum(maru.session.dock_panel.Mode.live_preview));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_PASS_THROUGH), @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_APP_ACTION), @intFromEnum(maru.config.keybinding.WebKeyRoute.app_action));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND), @intFromEnum(maru.config.keybinding.WebKeyRoute.consume_unbound));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_WEB_EDITOR), @intFromEnum(maru.config.keybinding.WebKeyRoute.web_editor));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_APP), @intFromEnum(maru.session.app_scheme.AppAssetRole.app));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_RENDER), @intFromEnum(maru.session.app_scheme.AppAssetRole.render));
+}
+
 pub const KeyCode = enum(u32) {
     unknown = 0,
     enter = 1,
@@ -565,16 +577,23 @@ pub export fn maru_macos_app_session_any_overlay_open(session: ?*AppSession) c_i
     return if (app_session.anyOverlayOpen()) 1 else 0;
 }
 
-// 웹 패널 포커스 중 Cmd 조합이 maru 앱 바인딩(app_action)인지 **side-effect 없이** 조회한다(PTY write·상태 변경 0).
-// Swift 웹 performKeyEquivalent가 1이면 가로채 keyDown 경로로 라우팅(⌘T·⌘⇧P·⌘F·⌘A·⌘K …), 0이면 메뉴바 keyEquivalent
-// (⌘Q/H/M)·WebKit(⌘C/V) 편집·terminal 매크로(⌘Backspace/←/→)에 양보한다 — 옛 "웹 포커스 중 모든 Cmd 조합 가로채 셸로"
-// 버그(⌘Q 종료 안 됨·⌘Backspace가 셸로 샘) 수정. handleKeyEvent와 같은 keyBindingResolver 단일 출처. session/event
-// null이거나 event 변환 실패면 0(앱 바인딩 아님 → 양보). docs/web-panel.md §4.
-pub export fn maru_macos_app_session_key_is_app_action(session: ?*AppSession, event: ?*const KeyEvent) u32 {
+// WKWebView typed route를 side-effect·PTY write 없이 조회한다. 같은 Zig resolver가 app-action/consume-unbound/
+// web-editor/pass-through provenance를 보존하며, v132가 옛 v100 Bool 조회를 대체한다. null/event 변환 실패는
+// pass-through. 실제 app-action은 아래 전용 export가 resolver를 다시 평가한 뒤 terminal 전처리 없이 dispatch한다.
+pub export fn maru_macos_app_session_web_key_route(session: ?*AppSession, surface_id: u64, event: ?*const KeyEvent) u32 {
+    const app_session = session orelse return @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through);
+    const raw_event = (event orelse return @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through)).*;
+    const key_event = keyEventFromAbi(raw_event) catch return @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through);
+    return @intFromEnum(app_session.webKeyRoute(surface_id, key_event));
+}
+
+// route가 app-action이던 이벤트를 같은 resolver로 다시 검증해 현재 Action만 직접 실행한다. Swift의 범용 terminal
+// copy/paste·scroll·macro 전처리와 PTY write를 거치지 않으며 route 뒤 config/mode가 바뀌었으면 0으로 fail-close한다.
+pub export fn maru_macos_app_session_dispatch_web_app_action(session: ?*AppSession, surface_id: u64, event: ?*const KeyEvent) u32 {
     const app_session = session orelse return 0;
     const raw_event = (event orelse return 0).*;
     const key_event = keyEventFromAbi(raw_event) catch return 0;
-    return if (app_session.keyResolvesToAppAction(key_event)) 1 else 0;
+    return if (app_session.dispatchWebAppAction(surface_id, key_event)) 1 else 0;
 }
 
 // 진행 중 IME 조합을 확정(커밋)한다. Swift가 IME를 우회하는 특수키/단축키 직전에 호출해
@@ -912,10 +931,7 @@ pub export fn maru_macos_app_session_file_panel_entry(
 pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surface_id: u64) i32 {
     const app_session = session orelse return -1;
     const mode = app_session.filePanelMode(surface_id) orelse return -1;
-    return switch (mode) {
-        .read => 0,
-        .source_edit => 1,
-    };
+    return @intCast(@intFromEnum(mode));
 }
 
 // explicit file WKWebView primary-down을 FP8 DockPanel.focused_group/FocusOwner에 반영한다. 1=승인, 0=stale/아님. (v124)
@@ -1000,10 +1016,7 @@ pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppS
     const out = surface_id_out orelse return -1;
     const action = app_session.takeFilePanelModeAction() orelse return -1;
     out.* = action.surface_id;
-    return switch (action.mode) {
-        .read => 0,
-        .source_edit => 1,
-    };
+    return @intCast(@intFromEnum(action.mode));
 }
 
 pub export fn maru_macos_app_session_take_file_panel_dirty_sync_action(session: ?*AppSession) u64 {
@@ -1761,12 +1774,13 @@ fn pathIsUnder(p: []const u8, root: []const u8) bool {
 /// 성공 시 canonical 절대 경로를 `out`에 쓰고 슬라이스를 돌려준다(Swift가 그 파일을 읽어 CSP와 서빙). `root_abs`는 절대
 /// 경로(Swift가 Bundle asset root 전달). 빈 경로(`/`)는 `index.html`로 매핑한다. `io`는 platform I/O(Swift C-ABI 래퍼는
 /// 5c-2b에서 host io를 전달; 여기 테스트는 std.testing.io).
-pub fn resolveAppAsset(io: std.Io, root_abs: []const u8, request_path: []const u8, out: []u8) AppAssetError![]const u8 {
+pub fn resolveAppAsset(io: std.Io, role: maru.session.app_scheme.AppAssetRole, root_abs: []const u8, request_path: []const u8, out: []u8) AppAssetError![]const u8 {
     var clean_buf: [std.fs.max_path_bytes]u8 = undefined;
     const clean = maru.session.app_scheme.validateAppPath(request_path, &clean_buf) catch |e| switch (e) {
         error.Empty => "index.html", // 루트 요청(`/`·`""`) → index 문서
         else => return AppAssetError.Reject, // Traversal·InvalidChar·TooLong
     };
+    if (!role.pathAllowed(clean)) return AppAssetError.Reject;
     var join_buf: [std.fs.max_path_bytes]u8 = undefined;
     const candidate = std.fmt.bufPrint(&join_buf, "{s}/{s}", .{ root_abs, clean }) catch return AppAssetError.Reject;
     const dir = std.Io.Dir.cwd();
@@ -1784,6 +1798,22 @@ pub fn resolveAppAsset(io: std.Io, root_abs: []const u8, request_path: []const u
     if (!pathIsUnder(cand_real, root_real)) return AppAssetError.OutsideRoot; // symlink 탈출 방어(canonical 비교)
     const st = dir.statFile(io, cand_real, .{}) catch return AppAssetError.NotFound;
     if (st.kind != .file) return AppAssetError.NotFound; // 디렉터리·특수 파일은 서빙 안 함
+    // render role은 요청 manifest뿐 아니라 canonical 상대 경로도 정확히 같아야 한다. 그러면 허용 이름을 worker로
+    // 향하게 한 in-root symlink/case alias가 `script-src 'self'`로 worker bytes를 읽는 우회를 만들지 못한다.
+    if (role == .render) {
+        var expected_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const expected = std.fmt.bufPrint(&expected_buf, "{s}/{s}", .{ root_real, clean }) catch return AppAssetError.Reject;
+        if (!std.mem.eql(u8, cand_real, expected)) return AppAssetError.Reject;
+    }
+    // hardlink는 realpath가 alias 이름을 그대로 보존하므로 공식 worker inode와도 대조한다. app role도 공식 URL 외
+    // alias/case variant는 거부해 worker bundle의 공개 경로를 하나로 고정한다.
+    if (!std.mem.eql(u8, clean, "live-preview-worker.js")) {
+        var worker_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const worker_path = std.fmt.bufPrint(&worker_buf, "{s}/live-preview-worker.js", .{root_real}) catch return AppAssetError.Reject;
+        if (dir.statFile(io, worker_path, .{})) |worker_st| {
+            if (worker_st.kind == .file and worker_st.inode == st.inode) return AppAssetError.Reject;
+        } else |_| {}
+    }
     if (cand_real.len > out.len) return AppAssetError.Reject;
     @memcpy(out[0..cand_real.len], cand_real);
     return out[0..cand_real.len];
@@ -1795,6 +1825,7 @@ pub fn resolveAppAsset(io: std.Io, root_abs: []const u8, request_path: []const u
 // 경로 길이. **음수** = 에러 코드(-1 Reject=문자열 거부, -2 NotFound=부재/디렉터리, -3 OutsideRoot=symlink 탈출,
 // -4 null 포인터). io는 앱 전역 single-threaded(다른 export와 동일 출처).
 pub export fn maru_macos_app_resolve_app_asset(
+    role_raw: u32,
     root_ptr: ?[*]const u8,
     root_len: usize,
     req_ptr: ?[*]const u8,
@@ -1802,11 +1833,16 @@ pub export fn maru_macos_app_resolve_app_asset(
     out_ptr: ?[*]u8,
     out_cap: usize,
 ) i64 {
+    const role: maru.session.app_scheme.AppAssetRole = switch (role_raw) {
+        0 => .app,
+        1 => .render,
+        else => return -1,
+    };
     const rp = root_ptr orelse return -4;
     const qp = req_ptr orelse return -4;
     const op = out_ptr orelse return -4;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const resolved = resolveAppAsset(io, rp[0..root_len], qp[0..req_len], op[0..out_cap]) catch |e| return switch (e) {
+    const resolved = resolveAppAsset(io, role, rp[0..root_len], qp[0..req_len], op[0..out_cap]) catch |e| return switch (e) {
         error.Reject => -1,
         error.NotFound => -2,
         error.OutsideRoot => -3,
@@ -1814,15 +1850,34 @@ pub export fn maru_macos_app_resolve_app_asset(
     return @intCast(resolved.len);
 }
 
-// maru-app:// 응답 CSP 헤더 문자열(5c-2c). **단일 출처 = maru.session.app_scheme.csp_header** — Swift 핸들러가 문자열을
+// maru-app:// 응답 CSP 헤더 문자열(5c-2c). **단일 출처 = app_scheme.AppAssetRole.csp** — Swift 핸들러가 문자열을
 // 중복해 들지 않고 1회 읽어 캐시한다(doc↔code drift 방지, docs/web-panel.md §7.1 ③). out에 복사하고 길이를 돌려준다.
 // cap 부족이면 -1, out null이면 -2.
-pub export fn maru_macos_app_csp_header(out_ptr: ?[*]u8, out_cap: usize) i64 {
+pub export fn maru_macos_app_csp_header(role_raw: u32, out_ptr: ?[*]u8, out_cap: usize) i64 {
     const op = out_ptr orelse return -2;
-    const csp = maru.session.app_scheme.csp_header;
+    const role: maru.session.app_scheme.AppAssetRole = switch (role_raw) {
+        0 => .app,
+        1 => .render,
+        else => return -3,
+    };
+    const csp = role.csp();
     if (csp.len > out_cap) return -1;
     @memcpy(op[0..csp.len], csp);
     return @intCast(csp.len);
+}
+
+/// 요청 URL의 exact origin을 asset role로 바꾼다. 반환 0=app, 1=render, -1=거부/NULL.
+pub export fn maru_macos_app_asset_role_for_origin(
+    scheme_ptr: ?[*]const u8,
+    scheme_len: usize,
+    host_ptr: ?[*]const u8,
+    host_len: usize,
+    has_explicit_port: c_int,
+) i32 {
+    const sp = scheme_ptr orelse return -1;
+    const hp = host_ptr orelse return -1;
+    const role = maru.session.app_scheme.appAssetRoleForOrigin(sp[0..scheme_len], hp[0..host_len], has_explicit_port != 0) orelse return -1;
+    return @intCast(@intFromEnum(role));
 }
 
 /// Swift의 WKSecurityOrigin/URL 구성요소를 L2 exact-origin 정책으로 판정한다. role은
@@ -1984,12 +2039,19 @@ test "maru_macos_app_session_bridge_dispatch export: size query + fill and insuf
 
 test "maru_macos_app_csp_header export: 단일출처 복사 + cap 부족 -1 + null -2" {
     var buf: [512]u8 = undefined;
-    const n = maru_macos_app_csp_header(&buf, buf.len);
+    const n = maru_macos_app_csp_header(0, &buf, buf.len);
     try std.testing.expect(n > 0);
-    try std.testing.expectEqualStrings(maru.session.app_scheme.csp_header, buf[0..@intCast(n)]);
+    try std.testing.expectEqualStrings(maru.session.app_scheme.app_csp_header, buf[0..@intCast(n)]);
     var tiny: [4]u8 = undefined; // csp_header보다 작음 → -1
-    try std.testing.expectEqual(@as(i64, -1), maru_macos_app_csp_header(&tiny, tiny.len));
-    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_csp_header(null, 512));
+    try std.testing.expectEqual(@as(i64, -1), maru_macos_app_csp_header(1, &tiny, tiny.len));
+    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_csp_header(0, null, 512));
+    try std.testing.expectEqual(@as(i64, -3), maru_macos_app_csp_header(9, &buf, buf.len));
+}
+
+test "maru_macos_app_asset_role_for_origin export pins app and render" {
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_app_asset_role_for_origin("maru-app", 8, "app", 3, 0));
+    try std.testing.expectEqual(@as(i32, 1), maru_macos_app_asset_role_for_origin("maru-app", 8, "render", 6, 0));
+    try std.testing.expectEqual(@as(i32, -1), maru_macos_app_asset_role_for_origin("maru-app", 8, "app", 3, 1));
 }
 
 test "maru_macos_app_origin_allowed export: role and explicit port are exact" {
@@ -2011,13 +2073,13 @@ test "maru_macos_app_resolve_app_asset export: 정상=len>0, traversal=-1, 부�
 
     var out: [std.fs.max_path_bytes]u8 = undefined;
     // 정상: resolved 절대 경로 길이(양수)를 돌려주고 out에 canonical 경로를 씀.
-    const n = maru_macos_app_resolve_app_asset(root_abs.ptr, root_abs.len, "index.html", 10, &out, out.len);
+    const n = maru_macos_app_resolve_app_asset(0, root_abs.ptr, root_abs.len, "index.html", 10, &out, out.len);
     try std.testing.expect(n > 0);
     try std.testing.expect(std.mem.endsWith(u8, out[0..@intCast(n)], "/index.html"));
     // traversal → -1(Reject), 부재 → -2(NotFound), null root → -4.
-    try std.testing.expectEqual(@as(i64, -1), maru_macos_app_resolve_app_asset(root_abs.ptr, root_abs.len, "../x", 4, &out, out.len));
-    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_resolve_app_asset(root_abs.ptr, root_abs.len, "nope.html", 9, &out, out.len));
-    try std.testing.expectEqual(@as(i64, -4), maru_macos_app_resolve_app_asset(null, 0, "index.html", 10, &out, out.len));
+    try std.testing.expectEqual(@as(i64, -1), maru_macos_app_resolve_app_asset(0, root_abs.ptr, root_abs.len, "../x", 4, &out, out.len));
+    try std.testing.expectEqual(@as(i64, -2), maru_macos_app_resolve_app_asset(0, root_abs.ptr, root_abs.len, "nope.html", 9, &out, out.len));
+    try std.testing.expectEqual(@as(i64, -4), maru_macos_app_resolve_app_asset(0, null, 0, "index.html", 10, &out, out.len));
 }
 
 test "resolveAppAsset: 정상 파일 서빙 + 빈 경로 → index" {
@@ -2031,18 +2093,52 @@ test "resolveAppAsset: 정상 파일 서빙 + 빈 경로 → index" {
     const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
 
     var out: [std.fs.max_path_bytes]u8 = undefined;
-    const idx = try resolveAppAsset(io, root_abs, "index.html", &out);
+    const idx = try resolveAppAsset(io, .app, root_abs, "index.html", &out);
     try std.testing.expect(pathIsUnder(idx, root_abs));
     try std.testing.expect(std.mem.endsWith(u8, idx, "/index.html"));
 
     var out2: [std.fs.max_path_bytes]u8 = undefined;
-    const root_req = try resolveAppAsset(io, root_abs, "/", &out2); // 빈→index
+    const root_req = try resolveAppAsset(io, .app, root_abs, "/", &out2); // 빈→index
     try std.testing.expect(std.mem.endsWith(u8, root_req, "/index.html"));
 
     var out3: [std.fs.max_path_bytes]u8 = undefined;
-    const sub = try resolveAppAsset(io, root_abs, "sub/page.html", &out3);
+    const sub = try resolveAppAsset(io, .app, root_abs, "sub/page.html", &out3);
     try std.testing.expect(std.mem.endsWith(u8, sub, "/sub/page.html"));
     try std.testing.expect(pathIsUnder(sub, root_abs));
+}
+
+test "resolveAppAsset: live preview worker is served only to the app role" {
+    const io = std.testing.io;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "live-preview-worker.js", .data = "self.onmessage=()=>{}" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    const app_worker = try resolveAppAsset(io, .app, root_abs, "live-preview-worker.js", &out);
+    try std.testing.expect(std.mem.endsWith(u8, app_worker, "/live-preview-worker.js"));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "live-preview-worker.js", &out));
+}
+
+test "resolveAppAsset: worker symlink hardlink and case aliases are denied" {
+    const io = std.testing.io;
+    var root_tmp = std.testing.tmpDir(.{});
+    defer root_tmp.cleanup();
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "live-preview-worker.js", .data = "worker" });
+    try root_tmp.dir.symLink(io, "live-preview-worker.js", "bundle.js", .{});
+    try std.Io.Dir.hardLink(root_tmp.dir, "live-preview-worker.js", root_tmp.dir, "app.css", io, .{});
+    try std.Io.Dir.hardLink(root_tmp.dir, "live-preview-worker.js", root_tmp.dir, "worker-alias.js", io, .{});
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "bundle.js", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "app.css", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "worker-alias.js", &out));
+    _ = resolveAppAsset(io, .app, root_abs, "LIVE-PREVIEW-WORKER.JS", &out) catch |err| {
+        try std.testing.expect(err == AppAssetError.Reject or err == AppAssetError.NotFound);
+        return;
+    };
+    return error.TestUnexpectedResult;
 }
 
 test "resolveAppAsset: traversal(`..`)·whitelist 밖 → Reject(5c-1 문자열 단계)" {
@@ -2053,9 +2149,9 @@ test "resolveAppAsset: traversal(`..`)·whitelist 밖 → Reject(5c-1 문자열 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
     var out: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, root_abs, "../index.html", &out));
-    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, root_abs, "a/../../etc/passwd", &out));
-    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, root_abs, "%2e%2e/x", &out)); // `%` whitelist 밖
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "../index.html", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "a/../../etc/passwd", &out));
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "%2e%2e/x", &out)); // `%` whitelist 밖
 }
 
 test "resolveAppAsset: symlink 탈출 → OutsideRoot(realpath canonical 방어)" {
@@ -2077,7 +2173,7 @@ test "resolveAppAsset: symlink 탈출 → OutsideRoot(realpath canonical 방어)
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
     var out: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expectError(AppAssetError.OutsideRoot, resolveAppAsset(io, root_abs, "evil", &out));
+    try std.testing.expectError(AppAssetError.OutsideRoot, resolveAppAsset(io, .app, root_abs, "evil", &out));
 }
 
 test "resolveAppAsset: 부재 파일·디렉터리 → NotFound" {
@@ -2088,8 +2184,8 @@ test "resolveAppAsset: 부재 파일·디렉터리 → NotFound" {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
     var out: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expectError(AppAssetError.NotFound, resolveAppAsset(io, root_abs, "nonexistent.html", &out));
-    try std.testing.expectError(AppAssetError.NotFound, resolveAppAsset(io, root_abs, "adir", &out)); // 디렉터리는 서빙 안 함
+    try std.testing.expectError(AppAssetError.NotFound, resolveAppAsset(io, .app, root_abs, "nonexistent.html", &out));
+    try std.testing.expectError(AppAssetError.NotFound, resolveAppAsset(io, .app, root_abs, "adir", &out)); // 디렉터리는 서빙 안 함
 }
 
 // 전역(OS) 단축키가 라이브로 바뀌어(세팅 GUI 녹음/해제·reload·reset) OS 재등록이 필요하면 1(플래그 비움), 없으면 0.

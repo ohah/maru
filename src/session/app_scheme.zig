@@ -18,7 +18,27 @@ const std = @import("std");
 /// exact origin(`maru-app://render`) 하나만 허용한다. renderer frame은
 /// `sandbox=allow-scripts allow-same-origin`이지만 app/render host가 달라 shell과 cross-origin이고,
 /// 브리지 handler는 main-frame `maru-app://app`의 port 없는 origin만 받는다. `'unsafe-inline'`·외부 CDN은 열지 않는다.
-pub const csp_header = "default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
+pub const app_csp_header = "default-src 'none'; script-src 'self'; worker-src 'self'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src maru-app://render; base-uri 'none'; form-action 'none'";
+pub const render_csp_header = "default-src 'none'; script-src 'self'; worker-src 'none'; img-src 'self' data:; style-src 'self' 'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'";
+
+pub const AppAssetRole = enum(u32) {
+    app = 0,
+    render = 1,
+
+    pub fn csp(self: AppAssetRole) []const u8 {
+        return switch (self) {
+            .app => app_csp_header,
+            .render => render_csp_header,
+        };
+    }
+
+    pub fn pathAllowed(self: AppAssetRole, normalized_path: []const u8) bool {
+        if (self == .app) return true;
+        return std.mem.eql(u8, normalized_path, "render.html") or
+            std.mem.eql(u8, normalized_path, "bundle.js") or
+            std.mem.eql(u8, normalized_path, "app.css");
+    }
+};
 
 pub const AppOriginRole = enum(u32) {
     shell = 0,
@@ -35,6 +55,13 @@ pub fn appOriginAllowed(scheme: []const u8, host: []const u8, has_explicit_port:
         .renderer => std.ascii.eqlIgnoreCase(host, "render"),
         .asset => std.ascii.eqlIgnoreCase(host, "app") or std.ascii.eqlIgnoreCase(host, "render"),
     };
+}
+
+pub fn appAssetRoleForOrigin(scheme: []const u8, host: []const u8, has_explicit_port: bool) ?AppAssetRole {
+    if (has_explicit_port or !std.ascii.eqlIgnoreCase(scheme, "maru-app")) return null;
+    if (std.ascii.eqlIgnoreCase(host, "app")) return .app;
+    if (std.ascii.eqlIgnoreCase(host, "render")) return .render;
+    return null;
 }
 
 /// 경로 샌드박스 거부 사유(§7.1 ①). 전부 "안 서빙"으로 귀결되나, 진단·테스트용으로 구분한다. wire로 나가는 건
@@ -98,6 +125,22 @@ test "appOriginAllowed: exact shell/render hosts and no explicit port" {
     try std.testing.expect(!appOriginAllowed("maru-app", "app", true, .shell));
     try std.testing.expect(!appOriginAllowed("https", "app", false, .shell));
     try std.testing.expect(!appOriginAllowed("maru-app", "app.evil", false, .shell));
+}
+
+test "asset role pins exact origin CSP and keeps the worker app-only" {
+    try std.testing.expectEqual(AppAssetRole.app, appAssetRoleForOrigin("maru-app", "app", false).?);
+    try std.testing.expectEqual(AppAssetRole.render, appAssetRoleForOrigin("MARU-APP", "RENDER", false).?);
+    try std.testing.expect(appAssetRoleForOrigin("maru-app", "app", true) == null);
+    try std.testing.expect(appAssetRoleForOrigin("https", "app", false) == null);
+    try std.testing.expect(AppAssetRole.app.pathAllowed("live-preview-worker.js"));
+    try std.testing.expect(!AppAssetRole.render.pathAllowed("live-preview-worker.js"));
+    try std.testing.expect(!AppAssetRole.render.pathAllowed("LIVE-PREVIEW-WORKER.JS"));
+    try std.testing.expect(AppAssetRole.render.pathAllowed("bundle.js"));
+    try std.testing.expect(AppAssetRole.render.pathAllowed("render.html"));
+    try std.testing.expect(!AppAssetRole.render.pathAllowed("index.html"));
+    try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.app.csp(), "worker-src 'self'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.render.csp(), "worker-src 'none'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.render.csp(), "frame-src 'none'") != null);
 }
 
 // ── Phase 7e-2a: browser 웹 패널 주소창 스킴 정책(L2 순수 — 헤드리스·이식성) ────────────────────────────────
@@ -280,14 +323,16 @@ test "validateAppPath: TooLong(out 버퍼 초과) 방어" {
     try testing.expectError(SandboxError.TooLong, validateAppPath("abcdefgh", &small));
 }
 
-test "CSP: network stays closed and only the dedicated renderer frame origin is allowed" {
-    try testing.expect(std.mem.indexOf(u8, csp_header, "connect-src 'none'") != null);
-    try testing.expect(std.mem.indexOf(u8, csp_header, "frame-src maru-app://render") != null);
-    try testing.expect(std.mem.indexOf(u8, csp_header, "frame-src 'none'") == null);
-    try testing.expect(std.mem.indexOf(u8, csp_header, "'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='") != null);
-    try testing.expect(std.mem.indexOf(u8, csp_header, "unsafe-inline") == null);
-    try testing.expect(std.mem.indexOf(u8, csp_header, "http:") == null);
-    try testing.expect(std.mem.indexOf(u8, csp_header, "https:") == null);
+test "CSP: both roles close network and only app may frame the renderer" {
+    inline for (.{ app_csp_header, render_csp_header }) |csp| {
+        try testing.expect(std.mem.indexOf(u8, csp, "connect-src 'none'") != null);
+        try testing.expect(std.mem.indexOf(u8, csp, "'sha256-Xeh9es1AoJEyNnawqxMjG30+czqjDUSJ+JDkbXALfVg='") != null);
+        try testing.expect(std.mem.indexOf(u8, csp, "unsafe-inline") == null);
+        try testing.expect(std.mem.indexOf(u8, csp, "http:") == null);
+        try testing.expect(std.mem.indexOf(u8, csp, "https:") == null);
+    }
+    try testing.expect(std.mem.indexOf(u8, app_csp_header, "frame-src maru-app://render") != null);
+    try testing.expect(std.mem.indexOf(u8, render_csp_header, "frame-src 'none'") != null);
 }
 
 // ── resolveNavUrl(7e-2a 주소창 스킴 정책) adversarial ───────────────────────────────────────────────────────

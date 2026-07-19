@@ -1075,26 +1075,16 @@ pub const WorkspaceConfig = struct {
     /// (Ghostty `split-inherit-working-directory` 기본과 동일; tmux `split-window`·iTerm2 새 split도 현재 디렉터리
     /// 상속). `false`면 `root`에서 연다(상속할 cwd 없으면 마찬가지). loader가 `workspace.split-inherit-cwd` 키로 파싱.
     split_inherit_cwd: bool = true,
-    /// 종료 시 각 페인에서 돌던 claude 대화를 재시작 때 새 분기로 연다(`claude --resume <source-id> --fork-session`). **기본 false
-    /// (opt-in)** — workspace restore가 임의 명령을 자동 재실행하지 않는다는 정책의 allowlist 예외라, 위험모드
-    /// (`--dangerously-skip-permissions`) 재현을 사용자가 명시적으로 켜게 한다. 단일 출처: docs/workspace-restore.md
-    /// "에이전트 세션 자동 fork 복원". loader가 `workspace.restore-claude` 키로 파싱.
-    restore_claude: bool = false,
-    /// 종료 시 각 페인에서 돌던 codex 대화를 재시작 때 새 분기로 연다(`codex fork <id>`). **기본 false(opt-in)**,
-    /// restore_claude와 같은 정책. loader가 `workspace.restore-codex` 키로 파싱.
-    restore_codex: bool = false,
     /// 첫(유일) 셸이 spawn 직후 **비정상 종료**해 usable 세션에 도달하지 못하면 앱을 종료하지 않고 **창을 유지**할지
     /// (원인·복구를 보여주고 ⏎로 재시작). **기본 true** — 잘못된 shell.command/shell.args로 앱이 시작하자마자 조용히
     /// 꺼지던 것을 막는다(단일 출처: macos-app-host-boundary.md "세션 자동 종료"). false면 기존처럼 종료한다
     /// (Terminal.app "shell 종료 시 창 닫기" 취향). loader가 `workspace.hold-on-startup-failure` 키로 파싱.
     hold_on_startup_failure: bool = true,
 
-    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·restore·hold 토글은 스키마-주도.
-    pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / restore-claude / restore-codex / hold-on-startup-failure
+    // root는 절대경로/~ 특수 검증이라 loader 명시 핸들러 유지. inherit·hold 토글은 스키마-주도.
+    pub const schema = .{ // 키: workspace.tab-inherit-cwd / split-inherit-cwd / hold-on-startup-failure
         .tab_inherit_cwd = Meta{ .doc = "새 탭/Term이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
         .split_inherit_cwd = Meta{ .doc = "새 분할이 포커스 cwd 상속", .widget = .toggle, .section = .workspace },
-        .restore_claude = Meta{ .doc = "종료 후 claude 대화를 새 fork로 복원", .widget = .toggle, .section = .workspace },
-        .restore_codex = Meta{ .doc = "종료 후 codex 대화를 새 fork로 복원", .widget = .toggle, .section = .workspace },
         .hold_on_startup_failure = Meta{ .doc = "셸이 시작 직후 비정상 종료 시 창 유지(닫지 않음)", .widget = .toggle, .section = .workspace },
     };
 };
@@ -1116,11 +1106,6 @@ pub const ShellIntegrationConfig = struct {
 
 /// 데스크톱 알림 설정.
 pub const NotificationConfig = struct {
-    /// 터미널에서 도는 에이전트(claude/codex) 세션이 **비활성 탭/창**에서 완료(running→idle)될 때 macOS 알림을
-    /// 띄울지. 기본 true — 다른 일을 보는 동안 끝났음을 알린다(활성 탭은 화면으로 이미 보이므로 안 띄움).
-    /// loader가 `notifications.agent-complete` 키로 파싱.
-    agent_complete: bool = true,
-
     /// 셸/TUI가 보낸 OSC 9(iTerm2)/777(rxvt) 데스크톱 알림을 띄울지. 기본 true. false면 OSC 알림을 무시한다
     /// (데스크톱 배너·인앱 센터 둘 다 — 코어 pending만 비운다). loader가 `notifications.osc` 키로 파싱.
     osc: bool = true,
@@ -1135,8 +1120,7 @@ pub const NotificationConfig = struct {
     /// loader가 `notifications.history-limit` 키로 파싱(8~512, 상한은 메모리 가드).
     history_limit: u32 = 64,
 
-    pub const schema = .{ // 키: notifications.agent-complete / notifications.osc / notifications.update-check / notifications.history-limit
-        .agent_complete = Meta{ .doc = "비활성 탭 에이전트 완료 알림", .widget = .toggle, .section = .terminal },
+    pub const schema = .{ // 키: notifications.osc / notifications.update-check / notifications.history-limit
         .osc = Meta{ .doc = "OSC 9/777 데스크톱 알림", .widget = .toggle, .section = .terminal },
         .update_check = Meta{ .doc = "새 버전 출시 확인·안내", .widget = .toggle, .section = .terminal },
         .history_limit = Meta{ .doc = "알림 센터 보관 개수", .range = .{ 8, 512 }, .widget = .number, .section = .terminal },

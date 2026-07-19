@@ -70,9 +70,7 @@ pub const Surface = struct {
     command: []const u8 = "",
     cols: u16 = 0,
     rows: u16 = 0,
-    // claude/codex 세션 자동 fork 복원(opt-in allowlist 예외 — docs/workspace-restore.md "에이전트 세션 자동 fork 복원").
-    // agent_kind="" 또는 agent_session=""면 일반 셸 복원(최근 세션 추측 없음). agent_argv는 종료
-    // 시점 보존 argv(redact 후)로, 복원 spawn이 restore allowlist 옵션만 남겨 fork argv를 재구성한다.
+    // 구버전 workspace reader 호환 전용. 새 writer는 쓰지 않고 app layer도 실행에 사용하지 않는다.
     agent_kind: []const u8 = "",
     agent_session: []const u8 = "",
     agent_argv: []const []const u8 = &.{},
@@ -359,7 +357,7 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
 
 fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
     // custom-name(사용자 지정 이름)을 auto title 앞에 둔다 — 둘을 인접 배치해 사람이 읽기 쉽게. 리더(parseSurface)는
-    // key-addressed(순서 무관·이름 조회, LineFields)라 이 순서는 가독성용일 뿐이고, 구조 키 agent-argc만 필수다.
+    // key-addressed(순서 무관·이름 조회, LineFields)라 이 순서는 가독성용일 뿐이다.
     try w.writeAll("surface custom-name=\"");
     try writeEscaped(w, s.custom_name);
     try w.writeAll("\" title=\"");
@@ -368,18 +366,7 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
     try writeEscaped(w, s.cwd);
     try w.writeAll("\" command=\"");
     try writeEscaped(w, s.command);
-    try w.print("\" cols={d} rows={d} agent-kind=\"", .{ s.cols, s.rows });
-    try writeEscaped(w, s.agent_kind);
-    try w.writeAll("\" agent-session=\"");
-    try writeEscaped(w, s.agent_session);
-    try w.print("\" agent-argc={d}", .{s.agent_argv.len});
-    // agent-argc=N 뒤에 agent-arg="..."를 N개 — parsePane의 surfaces=N count+반복과 같은 self-delimiting 패턴.
-    for (s.agent_argv) |arg| {
-        try w.writeAll(" agent-arg=\"");
-        try writeEscaped(w, arg);
-        try w.writeAll("\"");
-    }
-    try w.writeAll("\n");
+    try w.print("\" cols={d} rows={d}\n", .{ s.cols, s.rows });
 }
 
 // ── R2: reader/parser ──────────────────────────────────────────────────────────
@@ -711,8 +698,9 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter) ParseError!Surface {
     const rows = try f.getUint("rows", u16, 24);
     const agent_kind = try f.getQuoted(a, "agent-kind", "");
     const agent_session = try f.getQuoted(a, "agent-session", "");
-    // agent-argc는 구조 키(반복 agent-arg 개수의 self-delimiting 기준) — 없으면 BadLine, 거대값은 방어 차단.
-    const argc = try f.requireUint("agent-argc", usize);
+    // 구버전 writer가 남긴 에이전트 복원 메타데이터는 한 릴리스 동안 읽되 실행에는 사용하지 않는다. 새 writer는
+    // 이 키들을 내보내지 않으므로 agent-argc가 없으면 0으로 본다.
+    const argc = try f.getUint("agent-argc", usize, 0);
     if (argc > max_agent_argv) return error.BadLine; // 손상/변조 방어(거대 루프 차단)
     var argv: std.ArrayList([]const u8) = .empty;
     for (f.fields) |field| { // 반복 키 agent-arg를 나온 순서대로 수집(key-addressed find는 첫 매치만이라 직접 순회)
@@ -915,7 +903,7 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
     try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\" pinned=0 background-color=0 accent-color=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
 }
 
 test "workspace serialize: split 트리(중첩) + 멀티 pane" {
@@ -967,7 +955,7 @@ test "workspace serialize: 멀티 창 + cwd/title escape" {
         if (std.mem.startsWith(u8, line, "window ")) window_lines += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), window_lines);
-    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"a \\\"b\\\"\" cwd=\"/tmp/x y\\n\" command=\"/bin/zsh\" cols=10 rows=5 agent-kind=\"\" agent-session=\"\" agent-argc=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"a \\\"b\\\"\" cwd=\"/tmp/x y\\n\" command=\"/bin/zsh\" cols=10 rows=5\n") != null);
 }
 
 test "workspace round-trip: serialize → parse → 다시 serialize 동일(중첩 split·멀티 창·escape)" {
@@ -1635,16 +1623,14 @@ test "workspace serialize: 선언적 — env/fd/pid/last-observed 필드 없음(
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/home/user/.secret-proj\"") != null);
 }
 
-test "workspace round-trip: agent_kind·agent_session·agent_argv 보존(escape 포함)" {
-    // claude/codex fork source 정보가 serialize→parse를 통해 그대로 round-trip되는지. argv 토큰은 공백·따옴표를
-    // 포함해도 한 줄·토큰별로 안전히 인코딩돼야 한다(agent-argc=N + agent-arg="..." 패턴, docs/workspace-restore.md).
-    const argv = [_][]const u8{ "claude", "--dangerously-skip-permissions", "--resume", "id a\"b" };
+test "workspace migration: 구 agent 메타데이터는 읽되 새 저장에서 생략" {
+    const argv = [_][]const u8{ "claude", "--resume", "legacy-id" };
     const surfaces = [_]Surface{.{
         .command = "/Users/me/.local/bin/claude",
         .cols = 80,
         .rows = 24,
         .agent_kind = "claude",
-        .agent_session = "23cb4875-83e6-4e9e-b37f-6e1112d5fff9",
+        .agent_session = "legacy-id",
         .agent_argv = &argv,
     }};
     const panes = [_]Pane{.{ .surfaces = &surfaces }};
@@ -1654,16 +1640,30 @@ test "workspace round-trip: agent_kind·agent_session·agent_argv 보존(escape 
 
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "agent-kind=\"claude\" agent-session=\"23cb4875-83e6-4e9e-b37f-6e1112d5fff9\" agent-argc=4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "agent-kind") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "agent-session") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "agent-arg") == null);
 
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
     const s = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0];
-    try std.testing.expectEqualStrings("claude", s.agent_kind);
-    try std.testing.expectEqualStrings("23cb4875-83e6-4e9e-b37f-6e1112d5fff9", s.agent_session);
-    try std.testing.expectEqual(@as(usize, 4), s.agent_argv.len);
-    try std.testing.expectEqualStrings("--dangerously-skip-permissions", s.agent_argv[1]);
-    try std.testing.expectEqualStrings("id a\"b", s.agent_argv[3]); // escape round-trip(따옴표 포함)
+    try std.testing.expectEqualStrings("", s.agent_kind);
+    try std.testing.expectEqualStrings("", s.agent_session);
+    try std.testing.expectEqual(@as(usize, 0), s.agent_argv.len);
+
+    const legacy =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\" pinned=0 background-color=0 accent-color=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=80 rows=24 agent-kind=\"claude\" agent-session=\"legacy-id\" agent-argc=3 agent-arg=\"claude\" agent-arg=\"--resume\" agent-arg=\"legacy-id\"\n";
+    var old = try parse(std.testing.allocator, legacy);
+    defer old.deinit();
+    const old_surface = old.workspace.windows[0].tabs[0].panes[0].surfaces[0];
+    try std.testing.expectEqualStrings("claude", old_surface.agent_kind);
+    try std.testing.expectEqualStrings("legacy-id", old_surface.agent_session);
+    try std.testing.expectEqual(@as(usize, 3), old_surface.agent_argv.len);
 }
 
 test "workspace parse: agent-argc 과대값은 graceful 차단(BadLine)" {

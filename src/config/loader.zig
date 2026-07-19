@@ -153,6 +153,17 @@ fn applyKey(
         config.shell.args = try list.toOwnedSlice(a);
         return;
     }
+    // 제거된 설정은 한 릴리스 동안 read-old/no-op으로 받아 기존 파일에 unknown-key 진단을 만들지 않는다. bool 문법은
+    // 계속 검증해 오타까지 조용히 삼키지는 않으며, 스키마/GUI/직렬화에는 노출하지 않는다.
+    if (std.mem.eql(u8, key, "workspace.restore-claude") or
+        std.mem.eql(u8, key, "workspace.restore-codex") or
+        std.mem.eql(u8, key, "notifications.agent-complete"))
+    {
+        if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
+            try diags.append(a, .{ .line = line_no, .message = "bool 값은 true 또는 false여야 함 — 무시" });
+        }
+        return;
+    }
     // 스키마-주도 스칼라(CS-1+CS-2: font.*·theme 색·cursor.*·input.*·quick-terminal.*·sidebar.*·notifications.*·
     // scrollback.*·bell.*·shell-integration.*·workspace.{tab,split}-inherit·shell.command). 매칭되면 파싱·적용하고 끝.
     // 미매칭이면 false → 아래 if-else(특수 5종 + 최상위 스칼라)로 폴백. 단일 출처: docs/config-schema.md.
@@ -1019,13 +1030,26 @@ test "parse: full config sets every field" {
     try std.testing.expectEqual(@as(u32, 12), p.config.window_padding_right);
     try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_top); // window.padding-y alias → top+bottom
     try std.testing.expectEqual(@as(u32, 6), p.config.window_padding_bottom);
-    try std.testing.expectEqual(false, p.config.notifications.agent_complete); // notifications.agent-complete 파싱(기본 true)
     try std.testing.expectEqual(false, p.config.notifications.osc); // notifications.osc 파싱(기본 true)
     try std.testing.expectEqual(@as(u32, 100), p.config.notifications.history_limit); // notifications.history-limit 파싱(기본 64)
     try std.testing.expectEqual(false, p.config.keyhint.enabled); // keyhint.enabled 파싱(기본 true)
     try std.testing.expectEqual(@as(u32, 250), p.config.keyhint.delay); // keyhint.delay 파싱(기본 400)
     try std.testing.expectEqual(theme.HintModifier.control, p.config.keyhint.modifier); // keyhint.modifier 파싱(기본 command, enum 토큰)
     try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+}
+
+test "parse: deprecated agent settings are accepted as no-op for compatibility" {
+    var parsed = try parse(std.testing.allocator,
+        \\workspace.restore-claude = true
+        \\workspace.restore-codex = false
+        \\notifications.agent-complete = true
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.diagnostics.len);
+
+    var invalid = try parse(std.testing.allocator, "workspace.restore-claude = yes");
+    defer invalid.deinit();
+    try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
 }
 
 test "parse: file panel external link target defaults in-app and accepts system" {

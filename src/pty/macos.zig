@@ -118,75 +118,6 @@ test "parseArgv0Basename: comm이 버전으로 바뀐 claude를 argv[0]으로 �
     try std.testing.expectEqual(@as(?[]const u8, null), parseArgv0Basename(&[_]u8{ 0, 0, 0, 0 }));
 }
 
-/// captureAgentArgv 캡처 결과 타입 — 비-macOS 스텁(session.zig)과 공유하려고 types.zig에 둔다.
-const ProcArgs = types.ProcArgs;
-
-/// str_buf의 `w` 위치에 src를 복사하고 그 슬라이스를 돌려준다(w 전진). 버퍼가 모자라면 null.
-fn copyInto(buf: []u8, w: *usize, src: []const u8) ?[]const u8 {
-    if (w.* + src.len > buf.len) return null;
-    @memcpy(buf[w.* .. w.* + src.len], src);
-    const out = buf[w.* .. w.* + src.len];
-    w.* += src.len;
-    return out;
-}
-
-/// KERN_PROCARGS2 버퍼에서 exec_path와 argv[0..argc]를 파싱해 str_buf로 복사하고 argv 슬라이스를 argv_out에
-/// 채운다(반환 슬라이스는 모두 str_buf 내부 — procargs_buf 수명에 안 묶여 캡처 후 안전). 레이아웃:
-/// [argc:int][exec_path\0][\0 패딩][argv0\0]…[argv(argc-1)\0][envp…]. str_buf·argv_out이 모자라면 거기까지만.
-/// 순수 함수(sysctl과 분리해 단위 테스트). argc=0이거나 토큰 0개면 null.
-fn parseProcArgs(data: []const u8, str_buf: []u8, argv_out: [][]const u8) ?ProcArgs {
-    if (data.len <= @sizeOf(c_int)) return null;
-    const argc: u32 = @as(u32, data[0]) | (@as(u32, data[1]) << 8) | (@as(u32, data[2]) << 16) | (@as(u32, data[3]) << 24);
-    if (argc == 0) return null;
-    var off: usize = @sizeOf(c_int);
-    const exec_start = off;
-    while (off < data.len and data[off] != 0) off += 1; // exec_path
-    var w: usize = 0;
-    const exec_path = copyInto(str_buf, &w, data[exec_start..off]) orelse return null;
-    while (off < data.len and data[off] == 0) off += 1; // argv 시작 전 null 패딩
-
-    var n: usize = 0;
-    while (n < argc and off < data.len) {
-        // argv_out·str_buf 부족은 **잘림**이다 — 부분 argv를 쓰면 꼬리의 위험모드 플래그가 silent하게 잘려
-        // 잘못 복원되므로, 부분 캡처 대신 null로 포기해 호출자가 일반 셸로 복원하게 한다(최근 세션 추측 없음).
-        if (n >= argv_out.len) return null;
-        const s = off;
-        while (off < data.len and data[off] != 0) off += 1;
-        argv_out[n] = copyInto(str_buf, &w, data[s..off]) orelse return null;
-        n += 1;
-        if (off < data.len) off += 1; // 토큰 구분 null 건너뜀
-    }
-    if (n == 0) return null;
-    return .{ .exec_path = exec_path, .argv = argv_out[0..n] };
-}
-
-test "parseProcArgs: exec_path + 전체 argv 캡처(str_buf로 복사, argc 게이트로 envp 제외)" {
-    const a = std.testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(a);
-    try buf.appendSlice(a, &[_]u8{ 3, 0, 0, 0 }); // argc=3 (LE int)
-    try buf.appendSlice(a, "/Users/x/.local/bin/claude"); // exec_path
-    try buf.append(a, 0);
-    try buf.appendSlice(a, &[_]u8{ 0, 0 }); // null 패딩
-    try buf.appendSlice(a, "claude"); // argv[0]
-    try buf.append(a, 0);
-    try buf.appendSlice(a, "--dangerously-skip-permissions"); // argv[1]
-    try buf.append(a, 0);
-    try buf.appendSlice(a, "--resume"); // argv[2]
-    try buf.append(a, 0);
-    try buf.appendSlice(a, "ANTHROPIC_API_KEY=secret"); // envp[0] — argc=3 게이트로 안 읽혀야 함
-    try buf.append(a, 0);
-
-    var str_buf: [512]u8 = undefined;
-    var argv_out: [8][]const u8 = undefined;
-    const r = parseProcArgs(buf.items, &str_buf, &argv_out) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqualStrings("/Users/x/.local/bin/claude", r.exec_path);
-    try std.testing.expectEqual(@as(usize, 3), r.argv.len); // envp는 argc 게이트로 제외
-    try std.testing.expectEqualStrings("claude", r.argv[0]);
-    try std.testing.expectEqualStrings("--dangerously-skip-permissions", r.argv[1]);
-    try std.testing.expectEqualStrings("--resume", r.argv[2]);
-}
-
 /// 포그라운드 pgid의 argv[1] 스크립트 basename(KERN_PROCARGS2). 정적 procargs_buf의 슬라이스다.
 fn foregroundScriptBasename(pgid: c_int) ?[]const u8 {
     var mib = [_]c_int{ ctl_kern, kern_procargs2, pgid };
@@ -298,7 +229,7 @@ pub const PtySession = struct {
         var argv_storage = try ArgvStorage.init(allocator, eff_command, eff_args);
         defer argv_storage.deinit();
 
-        var env_storage = try EnvStorage.init(allocator, request.env, request.env_overrides, request.term, request.zdotdir, request.ssh_integration_bin, request.pane_id, request.agent_mapping_id);
+        var env_storage = try EnvStorage.init(allocator, request.env, request.env_overrides, request.term, request.zdotdir, request.ssh_integration_bin, request.pane_id);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);
@@ -637,23 +568,6 @@ pub const PtySession = struct {
         return if (pgid > 0) pgid else null;
     }
 
-    /// 포그라운드 pgid(=에이전트 프로세스)의 exec_path + 전체 argv를 KERN_PROCARGS2로 캡처해 str_buf/argv_out에
-    /// 복사해 돌려준다 — workspace restore가 종료 시점에 claude/codex의 보존 argv를 캡처하는 용도
-    /// (docs/workspace-restore.md "에이전트 세션 자동 fork 복원"). 반환 슬라이스는 str_buf/argv_out 내부를 가리킨다
-    /// (정적 procargs_buf에 안 묶임 — 호출자가 따로 소유). **틱 스레드 전용**(procargs_buf 공유 —
-    /// foregroundProcessName과 같은 규약). 닫혔거나 fd 음수·pgid≤0·sysctl 실패·파싱 실패면 null.
-    pub fn captureAgentArgv(self: *PtySession, str_buf: []u8, argv_out: [][]const u8) ?ProcArgs {
-        if (self.closing.load(.acquire)) return null;
-        const fd = self.master_fd.load(.acquire);
-        if (fd < 0) return null;
-        const pgid = tcgetpgrp(fd);
-        if (pgid <= 0) return null;
-        var mib = [_]c_int{ ctl_kern, kern_procargs2, pgid };
-        var size: usize = procargs_buf.len;
-        if (sysctl(&mib, 3, &procargs_buf, &size, null, 0) != 0) return null;
-        return parseProcArgs(procargs_buf[0..size], str_buf, argv_out);
-    }
-
     fn activeMasterFd(self: *PtySession) !std.posix.fd_t {
         // close()는 master fd를 닫지 않고 closing 플래그만 올린다(close 주석 참고).
         // 그래서 닫힌 세션 여부는 fd 음수가 아니라 closing으로 판단한다.
@@ -902,7 +816,7 @@ const EnvStorage = struct {
         };
     }
 
-    fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, agent_mapping_id: ?u64) !EnvStorage {
+    fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
@@ -914,25 +828,19 @@ const EnvStorage = struct {
             // (예: 멀티플렉서 TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가 wrap 행 수를 잘못
             // 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다. 기본 xterm-256color는 Maru의 xterm식
             // (auto-wrap + deferred wrap) 동작과 맞는다. 단 사용자 config(`term =`)로 바꿀 수 있다.
-            try appendParentEnv(allocator, &entries, term, zdotdir, ssh_integration_bin, pane_id, agent_mapping_id);
+            try appendParentEnv(allocator, &entries, term, zdotdir, ssh_integration_bin, pane_id);
         } else {
             // 명시 env(테스트 등): 부모 상속·maru override 없이 그대로 쓴다(term 인자 무시 — 기존 동작 보존).
             for (env) |entry| try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, entry));
         }
 
-        // 사용자 config `env.<KEY>`를 부모/명시 env + 일반 maru override(TERM 등) 위에 적용한다. 단 아래 두 내부
+        // 사용자 config `env.<KEY>`를 부모/명시 env + 일반 maru override(TERM 등) 위에 적용한다. 단 아래 내부
         // selector는 Term identity의 단일 출처라 사용자 값보다 마지막에 다시 upsert한다.
         for (env_overrides) |ov| try upsertEnv(allocator, &entries, ov);
 
-        // control-plane selector와 agent hook mapping key는 사용자가 env.*로 덮어쓸 수 없는 내부 예약 키다. 특히
-        // MARU_AGENT_MAPPING_ID가 여러 Term/프로세스에서 같은 값으로 바뀌면 transcript 매핑이 다시 충돌한다.
+        // control-plane selector는 사용자가 env.*로 덮어쓸 수 없는 내부 예약 키다.
         if (pane_id) |pid| {
             const value = try std.fmt.allocPrint(allocator, "MARU_PANE_ID={d}", .{pid});
-            defer allocator.free(value);
-            try upsertEnv(allocator, &entries, value);
-        }
-        if (agent_mapping_id) |mapping_id| {
-            const value = try std.fmt.allocPrint(allocator, "MARU_AGENT_MAPPING_ID={d}", .{mapping_id});
             defer allocator.free(value);
             try upsertEnv(allocator, &entries, value);
         }
@@ -978,7 +886,7 @@ const EnvStorage = struct {
     // 기존 ZDOTDIR은 MARU_ZDOTDIR_PREV로 보존해 통합 .zshenv가 복원한다. ssh_integration_bin이 있으면(opt-in)
     // MARU_BIN/MARU_SSH_INTEGRATION을 주입해 통합 .zshenv가 ssh를 maru ssh로 라우팅하게 한다. entries 소유권·
     // errdefer는 호출자(init)가 가진다(materialize에서 굳힌다).
-    fn appendParentEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, agent_mapping_id: ?u64) !void {
+    fn appendParentEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64) !void {
         // 부모의 모든 env entry를 복사한다. 단 TERM/COLORTERM(+통합 시 ZDOTDIR/MARU_ZDOTDIR_PREV)은
         // 건너뛰고 아래에서 우리 값으로 넣는다(중복 키는 첫 항목이 이기므로 부모 것을 빼야 한다).
         var old_zdotdir: ?[]const u8 = null; // environ 슬라이스(프로세스 수명 동안 유효) — 루프 후 사용
@@ -1011,8 +919,6 @@ const EnvStorage = struct {
             // 팬 id를 주입할 거면 부모가 남긴 MARU_PANE_ID를 떨군다 — maru를 maru 팬 안에서 띄운 경우 바깥 팬의 id를
             // 상속하면 안 되므로(중복 키는 첫 항목이 이김). 이게 #1131 env-상속 오염을 원천 차단하는 지점이다.
             if (pane_id != null and std.mem.startsWith(u8, slice, "MARU_PANE_ID=")) continue;
-            // 에이전트 매핑 id도 바깥 maru Term 것을 상속하지 않고 이 Term의 새 key로 교체한다.
-            if (agent_mapping_id != null and std.mem.startsWith(u8, slice, "MARU_AGENT_MAPPING_ID=")) continue;
             // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
             try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, slice));
         }
@@ -1045,8 +951,8 @@ const EnvStorage = struct {
             try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "MARU_BIN={s}", .{bin}, 0));
             try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "MARU_SSH_INTEGRATION=1"));
         }
-        // MARU_PANE_ID와 MARU_AGENT_MAPPING_ID는 init tail에서 사용자 env override 뒤 최종 upsert한다. 여기서는
-        // 부모의 stale 값을 위에서 제거만 해 내부 selector가 정확히 한 번 들어가게 한다.
+        // MARU_PANE_ID는 init tail에서 사용자 env override 뒤 최종 upsert한다. 여기서는 부모의 stale 값을
+        // 위에서 제거만 해 내부 selector가 정확히 한 번 들어가게 한다.
     }
 
     // 두 init 경로 모두 owned envp를 만든다(빈 env면 부모 복사 + TERM 덮어쓰기, 명시 env면 그대로).
@@ -1339,7 +1245,7 @@ test "validateRequest rejects requests that cannot produce a reliable PTY" {
 }
 
 test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru's values" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
     defer storage.deinit();
 
     var term_count: usize = 0;
@@ -1379,7 +1285,7 @@ test "EnvStorage forces TERM_PROGRAM to ghostty (알림 식별 — 부모 값 �
     defer _ = unsetenv("TERM_PROGRAM");
     defer _ = unsetenv("TERM_PROGRAM_VERSION");
 
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
     defer storage.deinit();
 
     var tp_count: usize = 0;
@@ -1411,7 +1317,7 @@ test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COL
         _ = unsetenv("CLICOLOR_FORCE");
         _ = unsetenv("FORCE_COLOR");
     }
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     var i: usize = 0;
@@ -1425,7 +1331,7 @@ test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COL
 
 test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {
     // 명시 env면 term 인자는 무시된다(테스트가 완전한 env를 직접 준다).
-    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, &.{}, "xterm-ghostty", null, null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, &.{}, "xterm-ghostty", null, null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     try std.testing.expectEqualStrings("FOO=bar", std.mem.span(envp[0].?));
@@ -1451,7 +1357,7 @@ fn envValueCount(storage: *const EnvStorage, key_prefix: []const u8) struct { co
 
 test "EnvStorage env_overrides: 새 KEY는 추가, 기존 KEY(maru TERM)는 덮어쓴다 (부모 상속 위 upsert)" {
     // 부모 상속 경로(env=&.{}) + 사용자 override. FOO는 새 키라 추가, TERM은 maru가 먼저 넣은 값을 사용자가 덮어쓴다.
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{ "FOO=bar", "TERM=screen-256color" }, "xterm-256color", null, null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{ "FOO=bar", "TERM=screen-256color" }, "xterm-256color", null, null, null);
     defer storage.deinit();
 
     const foo = envValueCount(&storage, "FOO=");
@@ -1464,7 +1370,7 @@ test "EnvStorage env_overrides: 새 KEY는 추가, 기존 KEY(maru TERM)는 덮�
 }
 
 test "EnvStorage env_overrides: 명시 env 위에도 upsert (KEY 덮어쓰기·추가, 중복 없음)" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{ "A=1", "B=2" }, &.{ "B=3", "C=4" }, "xterm-ghostty", null, null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "A=1", "B=2" }, &.{ "B=3", "C=4" }, "xterm-ghostty", null, null, null);
     defer storage.deinit();
     try std.testing.expectEqual(@as(usize, 1), envValueCount(&storage, "A=").count);
     try std.testing.expectEqualStrings("1", envValueCount(&storage, "A=").last.?);
@@ -1512,7 +1418,7 @@ test "MacosLogin.build: 셸 경로·인자를 작은따옴표로 감싸 공백·
 }
 
 test "EnvStorage empty env uses the supplied TERM (configurable)" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-ghostty", null, null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-ghostty", null, null, null);
     defer storage.deinit();
     var found = false;
     const envp = storage.envpPtr();
@@ -1524,7 +1430,7 @@ test "EnvStorage empty env uses the supplied TERM (configurable)" {
 }
 
 test "EnvStorage injects ZDOTDIR for shell integration and preserves the old one" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", "/cache/maru/zsh", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", "/cache/maru/zsh", null, null);
     defer storage.deinit();
     var saw_zdotdir = false;
     const envp = storage.envpPtr();
@@ -1539,7 +1445,7 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
     // opt-in on: 통합 .zshenv가 ssh를 maru ssh로 라우팅하도록 두 키를 모두 주입한다(바이너리 경로 +
     // 게이트 플래그). 둘 중 하나라도 빠지면 .zshenv가 함수를 정의하지 않아 라우팅이 조용히 안 된다.
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, "/Applications/Maru.app/Contents/MacOS/maru", null, null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, "/Applications/Maru.app/Contents/MacOS/maru", null);
         defer storage.deinit();
         var saw_bin = false;
         var saw_flag = false;
@@ -1555,7 +1461,7 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
     }
     // opt-in off(기본): 두 키 모두 없어야 한다 — 평범한 ssh가 그대로 동작(graceful).
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
         defer storage.deinit();
         const envp = storage.envpPtr();
         var i: usize = 0;
@@ -1567,37 +1473,32 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
     }
 }
 
-test "EnvStorage separates MARU_PANE_ID surface selector from agent mapping id" {
+test "EnvStorage keeps MARU_PANE_ID as the surface selector" {
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, 42, 99);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, 42);
         defer storage.deinit();
         var saw_pane = false;
-        var saw_mapping = false;
         const envp = storage.envpPtr();
         var i: usize = 0;
         while (envp[i]) |entry| : (i += 1) {
             const value = std.mem.span(entry);
             if (std.mem.eql(u8, value, "MARU_PANE_ID=42")) saw_pane = true;
-            if (std.mem.eql(u8, value, "MARU_AGENT_MAPPING_ID=99")) saw_mapping = true;
         }
         try std.testing.expect(saw_pane);
-        try std.testing.expect(saw_mapping);
     }
     // 사용자 env override나 명시 env가 내부 selector를 위조해도 spawn request의 Term identity가 마지막에 이긴다.
     {
         var storage = try EnvStorage.init(
             std.testing.allocator,
-            &.{ "MARU_PANE_ID=7", "MARU_AGENT_MAPPING_ID=8" },
-            &.{ "MARU_PANE_ID=1", "MARU_AGENT_MAPPING_ID=1" },
+            &.{"MARU_PANE_ID=7"},
+            &.{"MARU_PANE_ID=1"},
             "xterm-256color",
             null,
             null,
             42,
-            99,
         );
         defer storage.deinit();
         var pane_count: usize = 0;
-        var mapping_count: usize = 0;
         const envp = storage.envpPtr();
         var i: usize = 0;
         while (envp[i]) |entry| : (i += 1) {
@@ -1606,23 +1507,17 @@ test "EnvStorage separates MARU_PANE_ID surface selector from agent mapping id" 
                 pane_count += 1;
                 try std.testing.expectEqualStrings("MARU_PANE_ID=42", value);
             }
-            if (std.mem.startsWith(u8, value, "MARU_AGENT_MAPPING_ID=")) {
-                mapping_count += 1;
-                try std.testing.expectEqualStrings("MARU_AGENT_MAPPING_ID=99", value);
-            }
         }
         try std.testing.expectEqual(@as(usize, 1), pane_count);
-        try std.testing.expectEqual(@as(usize, 1), mapping_count);
     }
-    // 둘 다 null이면 관련 env 없음.
+    // selector가 null이면 관련 env가 없다.
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
         defer storage.deinit();
         const envp = storage.envpPtr();
         var i: usize = 0;
         while (envp[i]) |entry| : (i += 1) {
             try std.testing.expect(!std.mem.startsWith(u8, std.mem.span(entry), "MARU_PANE_ID="));
-            try std.testing.expect(!std.mem.startsWith(u8, std.mem.span(entry), "MARU_AGENT_MAPPING_ID="));
         }
     }
 }

@@ -8,13 +8,30 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 133u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 134u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
 #define MARU_LIVE_PREVIEW_MAX_WORKERS 8u
 #define MARU_LIVE_PREVIEW_SOURCE_BYTES_PER_WORKER 8388608u
 #define MARU_LIVE_PREVIEW_RESULT_BYTES_PER_WORKER 2097152u
+#define MARU_MERMAID_PROTOCOL_MAX_SOURCE_BYTES 32768u
+#define MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES 524288u
+#define MARU_MERMAID_PROTOCOL_MAX_REQUEST_FRAME_BYTES 40960u
+#define MARU_MERMAID_PROTOCOL_MAX_RESULT_FRAME_BYTES 525312u
+#define MARU_MERMAID_MAX_PENDING_JOBS 32u
+#define MARU_MERMAID_MAX_PENDING_SOURCE_BYTES 1048576u
+#define MARU_MERMAID_MAX_ACCEPTED_SVG_BYTES 2097152u
+#define MARU_MERMAID_MAX_COMPLETIONS_PER_TICK 8u
+#define MARU_MERMAID_TAG_HELLO 0u
+#define MARU_MERMAID_TAG_HELLO_ACK 1u
+#define MARU_MERMAID_TAG_REQUEST 2u
+#define MARU_MERMAID_TAG_RESULT 3u
+#define MARU_MERMAID_RESULT_OK 0u
+#define MARU_MERMAID_RESULT_RENDER_ERROR 1u
+#define MARU_MERMAID_ACTION_NONE 0u
+#define MARU_MERMAID_ACTION_TERMINATE_HELPER 1u
+#define MARU_MERMAID_ACTION_START_JOB 2u
 #define MARU_WEB_KEY_ROUTE_PASS_THROUGH 0u
 #define MARU_WEB_KEY_ROUTE_APP_ACTION 1u
 #define MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND 2u
@@ -1277,6 +1294,92 @@ int32_t maru_macos_live_preview_budget_reconcile(
     uint64_t *out_surface_ids,
     size_t out_cap
 );
+
+/* ── FP10c1 Mermaid helper codec/coordinator ───────────────────────────────────────────────
+   wire layout과 queue/failure 정책은 Zig session 모듈이 단독 소유한다. Swift parent/helper는 이 DTO의
+   fixed-width identity와 opaque body bytes만 운반하며 frame header/endianness를 직접 해석하지 않는다. */
+
+typedef struct MaruMermaidRendererCapability {
+    uint64_t document_revision;
+    uint64_t projection_generation;
+    uint64_t widget_id;
+    uint64_t widget_generation;
+    uint64_t renderer_instance;
+} MaruMermaidRendererCapability;
+
+typedef struct MaruMermaidJobCapability {
+    uint64_t helper_instance;
+    uint64_t job_id;
+    MaruMermaidRendererCapability renderer;
+    uint64_t fence_id;
+    uint8_t source_hash[32];
+} MaruMermaidJobCapability;
+
+typedef struct MaruMermaidDecodedFrame {
+    uint32_t tag;
+    uint32_t status;
+    uint64_t helper_instance;
+    uint64_t nonce;
+    MaruMermaidJobCapability capability;
+    const uint8_t *body_ptr;
+    size_t body_len;
+} MaruMermaidDecodedFrame;
+
+typedef struct MaruMermaidCoordinatorAction {
+    uint32_t kind;
+    uint32_t spawn_helper;
+    uint64_t deadline_ms;
+    uint64_t hello_nonce;
+    MaruMermaidJobCapability capability;
+    const uint8_t *request_frame_ptr;
+    size_t request_frame_len;
+} MaruMermaidCoordinatorAction;
+
+typedef struct MaruMermaidCoordinatorSnapshot {
+    size_t pending_jobs;
+    size_t pending_source_bytes;
+    size_t accepted_results;
+    size_t accepted_svg_bytes;
+    uint64_t helper_instance;
+    uint64_t helper_starts;
+    uint64_t deadline_expirations;
+    uint64_t admission_copies;
+    uint32_t in_flight;
+    uint32_t disabled;
+    uint32_t action_handoff_pending;
+    uint32_t termination_in_progress;
+} MaruMermaidCoordinatorSnapshot;
+
+typedef struct MaruMermaidDecoder MaruMermaidDecoder;
+
+MaruMermaidDecoder *maru_mermaid_protocol_decoder_create(void);
+void maru_mermaid_protocol_decoder_destroy(MaruMermaidDecoder *decoder);
+int32_t maru_mermaid_protocol_decoder_feed(MaruMermaidDecoder *decoder, const uint8_t *bytes, size_t len);
+/* 1=frame, 0=incomplete, 음수=malformed/invalid pointer. body_ptr는 다음 feed/next 전까지만 유효하다. */
+int32_t maru_mermaid_protocol_decoder_next(MaruMermaidDecoder *decoder, MaruMermaidDecodedFrame *out_frame);
+int32_t maru_mermaid_protocol_decoder_finish(MaruMermaidDecoder *decoder);
+uint32_t maru_mermaid_protocol_matches_hello_ack(const MaruMermaidDecodedFrame *frame, uint64_t helper_instance, uint64_t nonce);
+
+/* 반환: 쓴 길이, -1=invalid, -2=output too small. */
+int64_t maru_mermaid_protocol_encode_hello(uint32_t ack, uint64_t helper_instance, uint64_t nonce, uint8_t *out, size_t out_cap);
+int64_t maru_mermaid_protocol_encode_request(const MaruMermaidJobCapability *capability, const uint8_t *source, size_t source_len, uint8_t *out, size_t out_cap);
+int64_t maru_mermaid_protocol_encode_result(const MaruMermaidJobCapability *capability, uint32_t status, const uint8_t *body, size_t body_len, uint8_t *out, size_t out_cap);
+
+/* 앱 전역 AppRuntime.mermaid_queue에 job을 제출한다. 0=accepted, 음수=closed validation/cap 거부. */
+int32_t maru_macos_mermaid_admit(uint64_t window_id, const MaruMermaidRendererCapability *renderer, uint64_t fence_id, const uint8_t *source, size_t source_len);
+/* 1=action, 0=none, -1=invalid out. request frame은 opaque이며 exact handoff ack 전까지 불변이다. */
+int32_t maru_macos_mermaid_drain_action(uint64_t now_ms, MaruMermaidCoordinatorAction *out_action);
+/* executor가 request frame을 owned storage로 복사한 exact ack. 1=current lease, 0=stale. */
+uint32_t maru_macos_mermaid_complete_action_handoff(uint64_t helper_instance, uint64_t job_id);
+/* decoded Result만 수용한다. 1=accepted, 2=render error, 0=stale, 음수=invalid/failure. */
+int32_t maru_macos_mermaid_complete_decoded(const MaruMermaidDecodedFrame *frame, uint64_t arrival_ms);
+/* transient는 integrity=0, bundle/signature/protocol/Hello mismatch는 integrity=1. 1=현재 helper 처리, 0=stale. */
+uint32_t maru_macos_mermaid_report_failure(uint64_t helper_instance, uint64_t now_ms, uint32_t integrity);
+uint32_t maru_macos_mermaid_expire_deadline(uint64_t now_ms);
+uint32_t maru_macos_mermaid_complete_termination(uint64_t helper_instance);
+/* physical adapter가 quiesce된 app 종료에서 queue/latch/lease를 최종 회수한다. */
+void maru_macos_mermaid_shutdown(void);
+void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 
 /* ── 세션 컨트롤 플레인 라이브 서버(Track C A2b) ──────────────────────────────────────────────
    앱 인스턴스 전역 컨트롤 소켓 + accept 스레드 + 메인 marshal. Swift는 (1) 시작 시 start를 한 번,

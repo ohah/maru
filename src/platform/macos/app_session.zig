@@ -170,7 +170,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 133;
+pub const abi_version: u32 = 134;
+// 134: FP10c1 Mermaid helper의 Zig 단일 codec과 앱 전역 bounded coordinator action/completion ABI를
+// 추가한다. Swift parent/helper는 wire layout이나 queue 정책을 복제하지 않고 opaque frame/DTO만 운반한다.
 // 133: 앱 전역 Markdown live-preview worker admission 후보/결과 ABI를 추가한다. max 8 workers와 worker별
 // 8/2 MiB cap의 곱으로 source/result 64/16 MiB를 고정하고 focused visible surface를 우선한다.
 // 132: Markdown live-preview raw mode(2), role-aware app asset/CSP, typed WebKeyRoute를 추가한다. Swift의 file mode·
@@ -1575,7 +1577,7 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
 
 // 앱 인스턴스 전역 런타임 coordinator (M3b — docs/window-surface-mobility.md §3·§8A.2). **모든 창(AppSession)이 이 한
 // 인스턴스를 공유**한다. M2b까지 흩어져 있던 앱 전역 소유 seam — `surface_ids`(M0a: surface_id 발급기)·`live_registry`
-// (M2b/M3a: LiveSurface 번들 소유자)·`routing`(M3b: 입력/resize/명령/이벤트 라우팅 표) — 을 하나의 `AppRuntime`으로
+// (M2b/M3a: LiveSurface 번들 소유자)·`routing`(M3b: 입력/resize/명령/이벤트 라우팅 표)과 FP10c1 `mermaid_queue` — 를 하나의 `AppRuntime`으로
 // 묶어 정식화한 것이다(흩어진 모듈-로컬 var → 한 coordinator). 세 자원 전부 창보다 오래 사는 앱 전역 수명이라, 창이
 // 여러 개여도 surface_id 하나로 registry·라우팅을 조회한다(멀티 창 id 비충돌·cross-window 이동 토대).
 //
@@ -1587,6 +1589,18 @@ fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usize) 
 // **스레드**: 메인 스레드 전용(surface_id.zig·세션 트리와 같은 계약 — createTerm/destroyTerm/입력/resize/tick pump는
 // 전부 메인 이벤트다). 리더는 interactive 모드서 core에 직접 write(setProcessing)라 `routing`을 안 건드린다(§8A.2 독립).
 var app_runtime: app.AppRuntime = .{};
+
+/// FP10c1 C ABI가 앱 전역 Mermaid 정책 인스턴스를 찾는 유일한 접근점. 새 handle을 만들지 않아 모든 창과
+/// Swift adapter가 `AppRuntime.mermaid_queue` 하나를 공유한다.
+pub fn mermaidCoordinator() *maru.session.mermaid_coordinator.MermaidCoordinatorState {
+    return &app_runtime.mermaid_queue;
+}
+
+/// 별도 helper smoke 프로세스가 같은 ABI를 반복 실행할 때만 쓴다. 제품 lifecycle은 app-lifetime latch를
+/// reset하지 않으며, 이 함수 호출은 `MARU_MERMAID_HELPER_SMOKE` harness에만 배선한다.
+pub fn resetMermaidCoordinatorForTesting() void {
+    app_runtime.mermaid_queue = .{};
+}
 
 // ── 컨트롤 플레인 collector 순수 매핑(Track C A1, 내부 상태 → wire enum) ──────────────────────────────────
 // docs/control-plane.md §3(엔티티 상태 수집)·control_surface.zig(wire enum은 내부 상태머신과 격리 — collector가

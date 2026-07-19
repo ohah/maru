@@ -423,8 +423,8 @@ typedef struct MaruAppHostMetalFrame {
        0이면 기존 동작(scissor 없음). 끝에 추가해 기존 offset 불변(ABI v86). */
     uint32_t sidebar_scroll_offset_px;
     /* pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
-       scale로 환산. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다(커서·focus 테두리 reserved 2~5의 셀 15%와
-       분리). 0=안 그림. 끝에 추가해 기존 offset 불변(ABI v94). */
+       scale로 환산. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다(커서 강조선 reserved 2~5·GPU quad
+       FocusOwner border와 분리). 0=안 그림. 끝에 추가해 기존 offset 불변(ABI v94). */
     uint32_t divider_thickness_px;
     /* 커서 overlay(터미널 블록/bar/underline·오버레이 caret)가 차지하는 cells suffix 길이 —
        cells[cell_count - cursor_cells .. cell_count]가 커서다. 렌더러가 이 suffix를 본문 draw에서 제외하고

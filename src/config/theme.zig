@@ -963,9 +963,9 @@ pub const Config = struct {
     /// opacity가 없으므로, 셰이더·ABI 불변으로 같은 시각 효과를 낸다. loader가 `window.unfocused-dim` 0~1 range 검증.
     /// (docs/configuration.md·settings-page.md F2-7)
     window_unfocused_dim: f32 = 0.0,
-    /// split pane 사이 divider(경계선)·활성 pane 테두리 두께(논리 pt). 기본 1.0(≈1x에서 1px, 2x Retina에서 2px — 얇은
+    /// split pane 사이 divider(경계선) 두께(논리 pt). 기본 1.0(≈1x에서 1px, 2x Retina에서 2px — 얇은
     /// 헤어라인). 0이면 divider를 안 그린다(숨김). 렌더러가 이 pt를 device px로 환산(× scale_milli/1000, letter-spacing과 동형)해
-    /// divider strip(reserved 30 세로·31 가로) 폭에만 쓴다 — 커서 강조선·활성 pane focus 테두리(reserved 2~5, 셀 ~15%)와 **분리**.
+    /// divider strip(reserved 30 세로·31 가로) 폭에만 쓴다 — 커서 강조선(reserved 2~5)·GPU quad `FocusOwner` border와 **분리**.
     /// 베이스/결정: 두께의 단일 표준이 없어 **고정 pt**(폰트 크기와 무관한 예측 가능한 헤어라인)를 택했다 — 옛 동작(셀폭 ×15%)은
     /// 폰트를 키우면 divider가 비례해 굵어졌다. loader가 `split.divider-thickness` 0~16 range로 검증. (docs/configuration.md)
     split_divider_thickness: f32 = 1.0,

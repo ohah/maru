@@ -100,8 +100,8 @@ pub const ResolvedAppearance = struct {
     // 비활성 split pane 디밍 강도(0.0~1.0, 기본 0.0=끔). app이 비활성 pane CellColors.dim_milli로 환산해 셀 색을
     // 배경 쪽으로 보간(근거는 theme.Config.window_unfocused_dim 주석 단일 출처). loader가 0~1 range 검증.
     unfocused_dim: f32 = 0.0,
-    // split pane divider·활성 pane 테두리 두께(논리 pt, 기본 1.0, 0=숨김). app metalFrame가 device px로 환산(× scale_milli/1000)해
-    // divider strip(reserved 30 세로·31 가로) 폭에만 쓴다 — 커서·focus 테두리(15%)와 분리(근거는 theme.Config.split_divider_thickness 주석 단일 출처).
+    // split pane divider 두께(논리 pt, 기본 1.0, 0=숨김). app metalFrame가 device px로 환산(× scale_milli/1000)해
+    // divider strip(reserved 30 세로·31 가로) 폭에만 쓴다 — 커서·FocusOwner border와 분리(근거는 theme.Config.split_divider_thickness 주석 단일 출처).
     // loader가 0~16 range 검증.
     split_divider_thickness: f32 = 1.0,
 };

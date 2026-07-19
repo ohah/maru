@@ -179,7 +179,7 @@ pub fn buildDrawListWithUnfocused(
                         // glyph cell 밖에 둬 atlas가 "A"와 "밑줄 A"를 따로 캐시하지 않게 한다. 셋은
                         // 독립 비트라 한 셀이 셋을 다 낼 수 있고, kind만 다른 같은 모양이라 한 헬퍼로 낸다.
                         if (cell.style.underline) {
-                            // double underline은 하단 선(reserved 2) + 둘째 선(reserved 7, 위)으로 2개 방출 —
+                            // double underline은 하단 텍스트 선(reserved 9) + 둘째 선(reserved 7, 위)으로 2개 방출 —
                             // .m이 셀당 한 띠만 그려서 두 줄을 두 overlay로 낸다. single은 하단 선만.
                             overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .underline) });
                             if (cell.style.underline_double) overlays.appendAssumeCapacity(.{ .line = lineOverlay(row, col, cell, .double_underline) });

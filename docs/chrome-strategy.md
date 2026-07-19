@@ -201,7 +201,7 @@ pub const ChromeHost = struct {
 | `sidebarBandCell`/`rebuildSidebar`/`buildSidebarTitleFrame` | `chrome/components/sidebar.zig` view + tui backend |
 | `BarMetrics`/per-pane 탭바 렌더(`view()` 인라인) | `chrome/components/tabbar.zig` (view + hitTest) |
 | `appendActiveTabDividers`/`dividerAtPoint`/`dividerHit` | `chrome/components/divider.zig` |
-| `appendMinimalTabIndicator`/`appendActivePaneBorder` | `chrome/components/pane_decor.zig` |
+| `appendMinimalTabIndicator` | `chrome/components/pane_decor.zig` |
 | 15개 상호작용 필드 + `resetHoverState` | `chrome/state.zig` `ChromeState` |
 | `sidebarBg/sidebarActiveBg/.../mutedForeground` 파생 | `chrome/tokens.zig` `Tokens.tui()` |
 | `handlePaletteKey`/`handleFindKey`/모달 라우팅/`toggle*` | `chrome/host.zig` `handleInput` |

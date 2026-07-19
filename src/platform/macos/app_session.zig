@@ -292,6 +292,8 @@ pub const abi_version: u32 = 134;
 // quick 패널 보임/숨김 사각형을 세션의 **현재** config로 매 호출 라이브 계산(위치별 가장자리 슬라이드·center 페이드, 순수
 // quick_terminal_geometry.compute + 단위 테스트). quick_terminal_config(세션-불변 스냅샷)와 달리 매 토글 재조회라 설정 GUI 변경이
 // 즉시 반영된다(퀵 터미널 위치·두께 라이브 반영, docs/config-gui.md §6.10). 새 export 1개 + 새 struct 추가 — 기존 struct offset·인자 순서 불변.
+// 주의: 아래 ABI 94 항목의 active-pane reserved 2~5 설명은 도입 당시의 역사 기록이다. 현재 2~5 producer는
+// cursor/hollow뿐이고 active content focus는 `appendFocusOwnerBorder`의 GPU quad가 단독 소유한다.
 // 95: MetalFrame.cursor_cells + cursor_fade_milli + maru_metal_renderer_draw 마지막 2인자(커서 blink **페이드**).
 // 옛 show_cursor(bool) suffix chop을 폐기하고, view()가 커서 suffix를 항상 노출한 뒤 렌더러가 cells[cell_count-cursor_cells..]를
 // 별도 pass로 cursor_fade_milli(/1000) 불투명도에 그린다(cell 셰이더 fragment에 opacity uniform buffer(1) 추가 — premultiplied
@@ -3305,35 +3307,64 @@ pub const AppSession = struct {
         return self.cell_height_px + 2 * @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
     }
 
-    /// panel leaf rect의 상단 탭 바와 window padding을 뺀 '셀 그리드 영역' 사각형. 먼저 leaf rect가 바보다
-    /// 충분히 높으면(바 + 최소 1칸) 상단 바 높이만큼 내려 자르고, 그 영역에 좌우·상하 window padding을 inset한다.
-    /// chrome(탭 바·divider)은 leaf rect 가장자리까지 꽉 차고 셀 그리드만 여백을 갖는다. 좌표 변환(pxToCell)·
-    /// resize·렌더 origin·IME(imeCursorRect)가 이 영역을 단일 출처로 쓰므로, padding을 여기 한 곳에 두면 grid
-    /// origin·hit-test·IME 후보창이 함께 안쪽으로 정합한다. saturate(-|)로 바/패딩이 leaf보다 커도 언더플로 없이
-    /// 0에 수렴 → gridFromRectPx가 clampGridSize 최소로 떨어진다.
-    fn paneTermRect(self: *const AppSession, rect: maru.session.SplitRect) maru.session.SplitRect {
+    const PaneGeometry = struct {
+        bar: ?maru.session.SplitRect,
+        body: maru.session.SplitRect,
+        grid: maru.session.SplitRect,
+    };
+
+    /// panel leaf 하나에서 tab bar, 실제 본문 외곽, terminal cell grid를 한 번만 투영한다. focus border는 body,
+    /// PTY resize·셀 렌더·hit-test·IME는 grid를 소비한다. bar/padding 판정이 accessor나 renderer에 복제되면 두 rect가
+    /// 서로 다른 frame을 가리킬 수 있으므로 이 함수가 기하 단일 출처다. 과대 padding은 zero-size grid의 origin까지
+    /// body 끝에 clamp해 IME/hit-test 좌표가 pane 밖으로 탈출하지 않게 한다.
+    fn paneGeometry(self: *const AppSession, rect: maru.session.SplitRect) PaneGeometry {
         const bar_h = self.paneBarHeightPx();
         const pad = self.window_padding_px;
-        const body: maru.session.SplitRect = if (bar_h > 0 and rect.h > bar_h)
+        const has_bar = bar_h > 0 and rect.h > bar_h;
+        const bar: ?maru.session.SplitRect = if (has_bar)
+            .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = bar_h }
+        else
+            null;
+        const body: maru.session.SplitRect = if (has_bar)
             .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h }
         else
             rect;
-        // 비대칭 inset: 좌상으로 left/top만큼 들이고, 폭/높이는 (left+right)/(top+bottom)만큼 줄인다.
-        return .{
-            .x = body.x +| pad.left,
-            .y = body.y +| pad.top,
-            .w = body.w -| (pad.left +| pad.right),
-            .h = body.h -| (pad.top +| pad.bottom),
+        const body_right = body.x +| body.w;
+        const body_bottom = body.y +| body.h;
+        const grid_x = @min(body.x +| pad.left, body_right);
+        const grid_y = @min(body.y +| pad.top, body_bottom);
+        const grid: maru.session.SplitRect = .{
+            .x = grid_x,
+            .y = grid_y,
+            .w = (body_right - grid_x) -| pad.right,
+            .h = (body_bottom - grid_y) -| pad.bottom,
         };
+        return .{ .bar = bar, .body = body, .grid = grid };
     }
 
-    /// panel leaf rect의 상단 탭 바 rect(못 그리면 null — 바 없을 만큼 작거나 cell 미상). paneTermRect의 보수.
+    /// 이미 순회 중인 frame leaf 하나에서 active pane의 기하를 최대 한 번 캡처한다. 이 함수는 layout이나 검색을
+    /// 시작하지 않으며 할당도 하지 않는다. caller가 가진 기존 chrome 순회에 projection을 융합하므로 focus border를
+    /// 위해 두 번째 leaf scan을 만들지 않는다. layout이 완주하지 못했으면 partial prefix를 신뢰하지 않고 null을 유지한다.
+    fn captureActivePaneGeometry(
+        self: *const AppSession,
+        layout_complete: bool,
+        active_pane: *Pane,
+        leaf_rect: PaneTree.LeafRect,
+        out: *?PaneGeometry,
+    ) void {
+        if (!layout_complete or out.* != null or leaf_rect.leaf != active_pane) return;
+        out.* = self.paneGeometry(leaf_rect.rect);
+    }
+
+    /// panel leaf rect의 상단 탭 바와 window padding을 뺀 '셀 그리드 영역'. `paneGeometry` accessor라
+    /// bar/padding 산술을 소유하지 않는다.
+    fn paneTermRect(self: *const AppSession, rect: maru.session.SplitRect) maru.session.SplitRect {
+        return self.paneGeometry(rect).grid;
+    }
+
+    /// panel leaf rect의 상단 탭 바 rect(못 그리면 null — 바 없을 만큼 작거나 cell 미상). `paneGeometry` accessor.
     fn paneBarRect(self: *const AppSession, rect: maru.session.SplitRect) ?maru.session.SplitRect {
-        const bar_h = self.paneBarHeightPx();
-        if (bar_h > 0 and rect.h > bar_h) {
-            return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = bar_h };
-        }
-        return null;
+        return self.paneGeometry(rect).bar;
     }
 
     /// pane 라벨 세그먼트(탭 바 좌측)가 차지할 컬럼 수. custom_name(사용자 rename)이 없으면 0(세그먼트 없음 —
@@ -3764,7 +3795,7 @@ pub const AppSession = struct {
     }
 
     /// 얇은 **세로선**을 overlay 셀로 그린다 — [y_start, y_end) 범위에 행마다(cell 높이 step) origin_x에 sentinel
-    /// 셀 1개씩, reserved로 cell의 한 변만 칠한다(divider=30 seam중앙 config두께 / pane 테두리 3=좌·5=우 셀15%).
+    /// 셀 1개씩, reserved=30으로 seam 중앙의 configured divider strip을 칠한다.
     fn appendVerticalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, y_start: u32, y_end: u32, reserved: u16, color: u32) void {
         const ch = self.cell_height_px;
         if (ch == 0) return;
@@ -3777,7 +3808,7 @@ pub const AppSession = struct {
     }
 
     /// 얇은 **가로선**을 overlay 셀로 그린다 — origin_y에 폭(width_px→floor cols, 최소 1)만큼 sentinel 셀 1개,
-    /// reserved로 cell의 한 변만 칠한다(divider=31 seam중앙 config두께 / pane 테두리 4=상·2=하 셀15%).
+    /// reserved=31로 seam 중앙의 configured divider strip을 칠한다.
     fn appendHorizontalLine(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), origin_x: u32, origin_y: u32, width_px: u32, reserved: u16, color: u32) void {
         const cw = self.cell_width_px;
         if (cw == 0) return;
@@ -3899,28 +3930,6 @@ pub const AppSession = struct {
             const color = self.chromeCellBg(if (i == active) self.sidebarActiveBg() else self.sidebarHoverBg()); // window.opacity(셀 premultiply)
             out.append(self.allocator, sentinelBgCell(@intCast(@min(col, u16_max)), 1, color, term_rect.x, term_rect.y)) catch return;
         }
-    }
-
-    /// minimal 세션에서 split이면 **활성 pane 둘레에 얇은 테두리**(focus accent)를 overlay 셀로 그린다 — 사이드바·탭
-    /// 바가 없는 minimal에선 커서 말고는 어느 pane이 입력을 받는지 단서가 없으므로(full은 탭 바 하이라이트가 보여줌).
-    /// 4변을 reserved 부분 사각형(커서 hollow와 같은 셀 ~15% 강조 띠: 3=좌·5=우·4=상·2=하)으로 그린다 — 좌/우는 행마다,
-    /// 상/하는 폭 전체 한 칸. 색은 divider와 같은 sidebarActiveBg. **focus accent는 divider 두께(split.divider-thickness)와
-    /// 분리** — divider를 0(숨김)으로 둬도 minimal 모드엔 탭 바·사이드바가 없어 이 테두리가 유일한 포커스 단서라 항상 그린다
-    /// (code-review: divider config와 결합하면 divider=0에서 focus 단서가 사라짐). chrome_minimal이 아니거나 단일 pane이면 무동작.
-    fn appendActivePaneBorder(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), rect: maru.session.SplitRect, pane_count: usize) void {
-        if (!self.chrome_minimal) return; // full은 활성 pane을 탭 바 하이라이트로 구분한다
-        if (pane_count <= 1) return; // split 아니면 전체가 활성 pane이라 테두리 불필요
-        const cw = self.cell_width_px;
-        const ch = self.cell_height_px;
-        if (cw == 0 or ch == 0 or rect.w == 0 or rect.h == 0) return;
-        const color = self.sidebarActiveBg();
-        const y_end = rect.y + rect.h;
-        // 4변 thin 테두리(커서 hollow와 같은 reserved 2~5 셀 15% 강조 띠 — divider config 두께와 분리, 항상 보임). 우측은
-        // cell 우측 띠(reserved=5)라 origin_x를 rect 우변 한 칸 안쪽에, 하단은 cell 하단 띠(reserved=2)라 origin_y를 한 칸 안쪽에.
-        self.appendVerticalLine(out, rect.x, rect.y, y_end, 3, color); // 좌
-        self.appendVerticalLine(out, rect.x + rect.w -| cw, rect.y, y_end, 5, color); // 우
-        self.appendHorizontalLine(out, rect.x, rect.y, rect.w, 4, color); // 상
-        self.appendHorizontalLine(out, rect.x, y_end -| ch, rect.w, 2, color); // 하
     }
 
     /// 마우스 (x,y)가 활성 탭 어느 divider의 드래그 밴드 안인가 — 맞으면 그 DividerSeg, 아니면 null. 밴드는 경계
@@ -4426,9 +4435,12 @@ pub const AppSession = struct {
 
     /// FocusOwner에서 정확히 한 content rect만 파생한다. confirm/notice/settings/rename/search/find/palette/address
     /// 같은 non-content InputFocus가 선점하면 underlying border를 0개로 만들어 모달 뒤 포커스 오인을 막는다.
-    fn appendFilePanelFocusBorder(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), active_term_rect: maru.session.SplitRect) void {
+    fn appendFocusOwnerBorder(self: *AppSession, out: *std.ArrayList(metal_frame.NativeMetalCell), active_workspace_body: ?maru.session.SplitRect) void {
+        // FocusOwner는 재시작/창 전환 뒤 복원할 구조 intent라 비-key 창에도 남는다. 실제 키를 받을 수 없는 창에서
+        // border까지 남기면 거짓 cue가 되므로 window focus를 별도 상태로 복제하지 않고 기존 단일 bool로 fail-close한다.
+        if (!self.window_focused) return;
         const rect: maru.session.SplitRect = switch (self.focus_owner) {
-            .workspace => if (self.inputFocus() == .terminal) active_term_rect else return,
+            .workspace => if (self.inputFocus() == .terminal) active_workspace_body orelse return else return,
             .dock_surface => |surface_id| blk: {
                 if (self.inputFocus() != .terminal) return;
                 const group = self.dock.groupForSurfaceId(surface_id) orelse return;
@@ -20681,8 +20693,12 @@ pub const AppSession = struct {
             // frame 빌드는 실 CoreText 브리지라 macOS에서만; 실패한 panel은 건너뛴다(세션 안 죽임).
             var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
             defer leaf_rects.deinit(self.allocator);
-            self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch {};
+            const leaf_layout_complete = blk: {
+                self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch break :blk false;
+                break :blk true;
+            };
             const active_pane = self.activePane();
+            var active_pane_geometry: ?PaneGeometry = null;
 
             // per-pane 상단 탭 바 chrome: 바 배경(전체) + 활성 Term 탭 하이라이트. 각 panel rect 상단 바에 origin
             // 박은 배경 셀로 만들어 터미널 셀 스트림에 prepend된다(C1). 바 base = chrome 색(sidebarBg). 활성 Term
@@ -20697,6 +20713,7 @@ pub const AppSession = struct {
             const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad, 0이면 tui 셀)
             const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(테마 accent — 포커스 surface 표시)
             for (leaf_rects.items) |lr| {
+                self.captureActivePaneGeometry(leaf_layout_complete, active_pane, lr, &active_pane_geometry);
                 const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
                 const bar = pb.full; // 바 배경·언더바는 전체 바(라벨 영역도 같은 chrome 배경)
                 // tui 밴드 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). rich는 아래에서
@@ -20732,7 +20749,7 @@ pub const AppSession = struct {
                     }
                 }
                 // 활성 pane 강조는 활성 탭 하단 앰버 언더바(appendActiveTabHighlight)로 일원화한다(사용자 요청) — 옛
-                // 앰버 사각 ring(pane rect 둘레 border quad)은 제거. chrome_minimal은 아래 appendActivePaneBorder(셀 테두리)가 따로 담당.
+                // 앰버 사각 ring은 제거했다. full/minimal 모두 아래 공용 FocusOwner body border 하나가 실제 입력 경계를 담당한다.
             }
 
             // Resolve the identity-backed selection once for this projected frame. Both the background
@@ -20828,26 +20845,25 @@ pub const AppSession = struct {
             self.appendDockDragOverlay(drag_overlay_cells);
             self.appendActiveTabDividers(&pane_overlay);
 
-            // 활성 panel의 origin(터미널 영역 = 바 아래). 못 구하면(빈 리스트 — OOM) 터미널 영역 전체의 바 아래로 폴백.
+            // 활성 panel의 origin(grid = 바+padding 아래). terminal frame은 기존처럼 OOM fallback을 유지하되, focus
+            // border는 현재 leaf identity를 증명한 body만 사용한다. layout 실패 때 전체 workspace를 focused로 보이는
+            // 거짓 cue보다 이번 frame border 0이 안전하며 다음 정상 frame에서 자동 복원된다.
             const active_fallback = self.paneTermRect(self.termRect());
             var active_origin_x: u32 = active_fallback.x;
             var active_origin_y: u32 = active_fallback.y;
             var active_term_rect: maru.session.SplitRect = active_fallback;
-            for (leaf_rects.items) |lr| {
-                if (lr.leaf == active_pane) {
-                    const t = self.paneTermRect(lr.rect);
-                    active_origin_x = t.x;
-                    active_origin_y = t.y;
-                    active_term_rect = t;
-                    break;
-                }
+            var active_workspace_body: ?maru.session.SplitRect = null;
+            if (active_pane_geometry) |geometry| {
+                active_origin_x = geometry.grid.x;
+                active_origin_y = geometry.grid.y;
+                active_term_rect = geometry.grid;
+                active_workspace_body = geometry.body;
             }
-            // minimal split: 활성 pane 둘레 얇은 테두리(full·단일 pane이면 무동작). divider 위에 얹어 focus를 보인다.
-            self.appendActivePaneBorder(&pane_overlay, active_term_rect, leaf_rects.items.len);
-            self.appendFilePanelFocusBorder(drag_overlay_cells, active_term_rect);
-            // 우상단 탭 점 인디케이터(full·단일이면 무동작) — 테두리 **뒤에** append해 정보 chip이 focus 테두리 위에
-            // 올라온다(활성 pane이 우상단일 때 테두리 상/우 선이 점을 가로지르던 코너 겹침 해소; chrome 프레임=아래,
-            // 정보 chip=위 z-order).
+            // minimal의 옛 grid ring은 아래 FocusOwner body border가 대체한다. 두 ring을 함께 그리면 padding 안쪽의
+            // grid ring이 실제 입력 경계처럼 보이므로 별도 active-pane outline은 만들지 않는다.
+            self.appendFocusOwnerBorder(drag_overlay_cells, active_workspace_body);
+            // 우상단 탭 점 인디케이터(full·단일이면 무동작). focus border는 별도 GPU quad overlay라 이 cell
+            // indicator와 grid-ring z-order 예외를 공유하지 않는다.
             self.appendMinimalTabIndicator(&pane_overlay);
 
             var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
@@ -35462,64 +35478,6 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
     }
 }
 
-test "minimal active pane border: 4 edges only in minimal split" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // refreshCellMetrics(cell 메트릭)
-    const allocator = std.testing.allocator;
-    var out: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
-    defer out.deinit(allocator);
-    const rect: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 400, .h = 600 };
-
-    // ① minimal: 단일 pane이면 무동작, split(>1)이면 4변 테두리(reserved 2/3/4/5 셀 15% — divider config와 분리)·색=sidebarActiveBg.
-    {
-        const session = try allocator.create(AppSession);
-        defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-            .abi_version = abi_version,
-            .cols = 40,
-            .rows = 5,
-            .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-            .chrome_minimal = 1,
-        });
-        defer session.deinit();
-        _ = try session.resize(800, 600, 1000);
-
-        out.clearRetainingCapacity();
-        session.appendActivePaneBorder(&out, rect, 1); // 단일 pane
-        try std.testing.expectEqual(@as(usize, 0), out.items.len);
-
-        out.clearRetainingCapacity();
-        session.appendActivePaneBorder(&out, rect, 2); // split
-        try std.testing.expect(out.items.len >= 6); // 좌/우(행마다 2) + 상/하 2
-        // 4변이 모두 그려졌는지(reserved 3=좌·5=우·4=상·2=하 셀 15% 강조 띠 — divider config 두께와 분리, 항상 보임) + 색=focus accent.
-        var seen = [_]bool{false} ** 6;
-        for (out.items) |c| {
-            try std.testing.expectEqual(session.sidebarActiveBg(), c.background);
-            if (c.reserved < seen.len) seen[c.reserved] = true;
-        }
-        try std.testing.expect(seen[2] and seen[3] and seen[4] and seen[5]);
-    }
-
-    // ② full(chrome_minimal=0): split이어도 테두리 없음(탭 바 하이라이트가 활성 pane을 보여줌).
-    {
-        const session = try allocator.create(AppSession);
-        defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-            .abi_version = abi_version,
-            .cols = 40,
-            .rows = 5,
-            .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-            .chrome_minimal = 0,
-        });
-        defer session.deinit();
-        _ = try session.resize(800, 600, 1000);
-        out.clearRetainingCapacity();
-        session.appendActivePaneBorder(&out, rect, 2);
-        try std.testing.expectEqual(@as(usize, 0), out.items.len); // full → 무동작
-    }
-}
-
 test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 init(loaded_config resolver) + PTY
     const allocator = std.testing.allocator;
@@ -36618,12 +36576,16 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     _ = try session.dock.open(group, "/tmp/focus-toggle.md", .markdown);
     session.assignDockSurfaceIds(&session.dock);
     const sid = group.entries.items[0].surface_id;
+    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount()); // baseline dock create
+    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
     session.dispatchAppAction(.toggle_file_panel_focus);
     try std.testing.expect(session.focus_owner == .file_tree);
     try std.testing.expect(session.takeFileTreeFocusAction());
+    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount()); // focus 왕복은 WebView reframe 0
     session.dispatchAppAction(.toggle_file_panel_focus);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.workspace_focus_pending);
+    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
 
     session.focus_owner = .{ .dock_surface = sid };
     session.workspace_focus_pending = false;
@@ -36690,6 +36652,10 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
     try std.testing.expectEqual(@as(?usize, 1), group.active); // background tab mouse-down은 click activation 전이다.
     try std.testing.expect(session.focus_owner == .workspace);
     const after_last_x: f64 = @floatFromInt(first.x + tab_width * 2 - 2);
+    session.window_padding_px = .{ .left = 9, .right = 13, .top = 5, .bottom = 7 };
+    const workspace_geometry = session.paneGeometry(session.termRect());
+    try std.testing.expect(workspace_geometry.body.x < workspace_geometry.grid.x);
+    try std.testing.expect(workspace_geometry.body.y < workspace_geometry.grid.y);
 
     // FP9-PERF: warm capacity 뒤 1,000회 pointer move/projected overlay는 allocator를 한 번도 부르지 않고,
     // drop zone 1 + focus border 4의 geometry quad 상한을 지킨다. FS/lock/thread API는 이 순수 경로에 없다.
@@ -36702,7 +36668,7 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
         session.dropQuadsByLayer(1);
         session.drag_overlay_cells_scratch.clearRetainingCapacity();
         session.appendDockDragOverlay(&session.drag_overlay_cells_scratch);
-        session.appendFilePanelFocusBorder(&session.drag_overlay_cells_scratch, session.active_pane_rect);
+        session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, workspace_geometry.body);
         var layer_one_quads: usize = 0;
         var floating_box_quads: usize = 0;
         for (session.gpu_quads.items) |quad| {
@@ -37046,7 +37012,7 @@ test "FP9 empty dock group owns chrome body focus without closing files or termi
     }
     session.dropQuadsByLayer(1);
     session.drag_overlay_cells_scratch.clearRetainingCapacity();
-    session.appendFilePanelFocusBorder(&session.drag_overlay_cells_scratch, session.active_pane_rect);
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, null); // dock_group owner는 workspace target을 소비하지 않는다
     var border_quads: usize = 0;
     for (session.gpu_quads.items) |quad| border_quads += @intFromBool(quad.layer == 1);
     try std.testing.expectEqual(@as(usize, 4), border_quads);
@@ -37108,6 +37074,7 @@ test "FP9 performance artifact: 64 groups and 256 entries keep projected drag bo
     _ = dock_drag.targetAtCounted(session.dock_drag_leaves[0..session.dock_drag_leaves_len], -100, -100, &leaf_counters);
     try std.testing.expect(leaf_counters.leaf_visits <= dock_panel.max_groups);
     const layout_builds_after_arm = session.dock_layout_build_count;
+    const workspace_body = session.paneGeometry(session.termRect()).body;
 
     var counting = std.testing.FailingAllocator.init(allocator, .{});
     session.allocator = counting.allocator();
@@ -37129,7 +37096,7 @@ test "FP9 performance artifact: 64 groups and 256 entries keep projected drag bo
         session.dropQuadsByLayer(1);
         session.drag_overlay_cells_scratch.clearRetainingCapacity();
         session.appendDockDragOverlay(&session.drag_overlay_cells_scratch);
-        session.appendFilePanelFocusBorder(&session.drag_overlay_cells_scratch, session.active_pane_rect);
+        session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, workspace_body);
         var layer_one_quads: usize = 0;
         for (session.gpu_quads.items) |quad| layer_one_quads += @intFromBool(quad.layer == 1);
         const geometry_count = layer_one_quads + session.drag_overlay_cells_scratch.items.len;
@@ -39854,9 +39821,9 @@ test "premultipliedRgba premultiplies rgb by alpha" {
     try std.testing.expectEqual(@as(u32, 0x00_00_00_00), premultipliedRgba(0x00FF_FFFF, 0)); // alpha 0 → 전부 0
 }
 
-// paneTermRect/paneBarRect가 leaf rect 상단에서 탭 바(cell 높이 1칸)를 떼는지 — 충분히 크면 바+터미널, 너무
-// 작으면 바 없음(터미널이 전체). 좌표/resize/렌더가 공유하는 '바 아래' 영역의 단일 출처라 헤드리스로 고정.
-test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
+// PaneGeometry가 leaf 하나에서 bar/body/grid를 한 번만 투영하는지 — focus border(body)와 terminal 좌표(grid)가
+// 같은 원본을 쓰고, tiny/minimal/과대 padding에서도 보수 관계와 body containment를 잃지 않는 SSOT 회귀다.
+test "paneGeometry owns bar body and contained grid for normal tiny minimal and oversized padding" {
     var session: AppSession = undefined;
     // paneBarHeightPx → buildChromeTokens가 appearance(theme·chrome_theme)를 읽으므로 undefined 세션에 명시 초기화한다
     // (chrome_theme=.tui → tab_bar_pad_y_px=3 → 바=cell+6). 이 테스트는 tui 셀 기하를 검증하므로 기본값(rich)과
@@ -39868,17 +39835,347 @@ test "paneTermRect reserves a top tab-bar strip; tiny rects get no bar" {
     session.window_padding_px = .{}; // paneTermRect가 이제 padding을 읽는다 — 바 기하만 격리(undefined UB 회피)
 
     const rect: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
-    const term = session.paneTermRect(rect);
-    try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, term); // 바 18(=cell 12 + pad 3*2) 아래
-    const bar = session.paneBarRect(rect).?;
+    var geometry = session.paneGeometry(rect);
+    const term = geometry.grid;
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, geometry.body); // 바 18(=cell 12 + pad 3*2) 아래
+    try std.testing.expectEqual(geometry.body, term); // padding 0이면 body=grid
+    const bar = geometry.bar.?;
     try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 0, .w = 800, .h = 18 }, bar);
     // 바 + 터미널 = leaf rect(틈 없음).
     try std.testing.expectEqual(rect.h, bar.h + term.h);
 
     // 바 높이 이하의 작은 rect는 바 없음 — 터미널이 leaf rect 전체, paneBarRect는 null.
     const tiny: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 100, .h = 12 };
-    try std.testing.expectEqual(tiny, session.paneTermRect(tiny));
-    try std.testing.expect(session.paneBarRect(tiny) == null);
+    geometry = session.paneGeometry(tiny);
+    try std.testing.expectEqual(tiny, geometry.body);
+    try std.testing.expectEqual(tiny, geometry.grid);
+    try std.testing.expect(geometry.bar == null);
+
+    // 비대칭 padding은 body를 움직이지 않고 grid만 inset한다.
+    session.window_padding_px = .{ .left = 10, .right = 20, .top = 4, .bottom = 8 };
+    geometry = session.paneGeometry(rect);
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 180, .y = 18, .w = 800, .h = 582 }, geometry.body);
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 190, .y = 22, .w = 770, .h = 570 }, geometry.grid);
+
+    // 과대 padding은 grid를 body 끝의 zero rect로 clamp한다. origin/end 어느 쪽도 body 밖으로 나가지 않는다.
+    session.window_padding_px = .{ .left = 2000, .right = 3000, .top = 4000, .bottom = 5000 };
+    geometry = session.paneGeometry(rect);
+    const body_right = geometry.body.x + geometry.body.w;
+    const body_bottom = geometry.body.y + geometry.body.h;
+    try std.testing.expectEqual(body_right, geometry.grid.x);
+    try std.testing.expectEqual(body_bottom, geometry.grid.y);
+    try std.testing.expectEqual(@as(u32, 0), geometry.grid.w);
+    try std.testing.expectEqual(@as(u32, 0), geometry.grid.h);
+    try std.testing.expect(geometry.grid.x + geometry.grid.w <= body_right);
+    try std.testing.expect(geometry.grid.y + geometry.grid.h <= body_bottom);
+
+    // rich는 tab bar padding이 더 크지만 같은 보수 관계를 유지한다.
+    session.appearance = config_mod.resolveAppearance(.{ .chrome_theme = .rich }) catch unreachable;
+    session.window_padding_px = .{};
+    geometry = session.paneGeometry(rect);
+    const rich_bar = geometry.bar.?;
+    try std.testing.expectEqual(rect.x, rich_bar.x);
+    try std.testing.expectEqual(rect.y, rich_bar.y);
+    try std.testing.expectEqual(rect.w, rich_bar.w);
+    try std.testing.expectEqual(rect.h, rich_bar.h + geometry.body.h);
+    try std.testing.expectEqual(rect.y + rich_bar.h, geometry.body.y);
+    try std.testing.expectEqual(geometry.body, geometry.grid);
+
+    // minimal은 tab bar 정책 자체가 꺼져 body=leaf다. padding은 여전히 grid에만 적용된다.
+    session.chrome_minimal = true;
+    session.window_padding_px = .{ .left = 3, .right = 5, .top = 7, .bottom = 11 };
+    geometry = session.paneGeometry(rect);
+    try std.testing.expect(geometry.bar == null);
+    try std.testing.expectEqual(rect, geometry.body);
+    try std.testing.expectEqual(maru.session.SplitRect{ .x = 183, .y = 7, .w = 792, .h = 582 }, geometry.grid);
+}
+
+test "FP9 active-pane projection rejects partial layout OOM and recovers" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.window_focused = true;
+    session.focus_owner = .workspace;
+
+    // 실제 SplitTree.layout이 append 뒤 후속 grow에서 실패하는 partial-prefix를 만든다. leaf는 트리 소유가 아니므로
+    // 같은 유효 pane pointer를 반복한 synthetic tree로 PTY 32개를 만들지 않고 allocator failure만 격리한다.
+    const active = session.activePane();
+    var tree: PaneTree.Node = .{ .leaf = active };
+    for (1..32) |_| {
+        const split = try allocator.create(PaneTree.Split);
+        split.* = .{
+            .direction = .horizontal,
+            .ratio = 0.5,
+            .a = .{ .leaf = active },
+            .b = tree,
+        };
+        tree = .{ .split = split };
+    }
+    defer PaneTree.deinit(allocator, tree);
+
+    var saw_partial_oom = false;
+    for (0..16) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var partial: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer partial.deinit(failing.allocator());
+        if (PaneTree.layout(failing.allocator(), tree, session.termRect(), &partial)) |_| {} else |err| {
+            if (err == error.OutOfMemory and partial.items.len > 0) {
+                saw_partial_oom = true;
+                var rejected: ?AppSession.PaneGeometry = null;
+                for (partial.items) |leaf| session.captureActivePaneGeometry(false, active, leaf, &rejected);
+                try std.testing.expect(rejected == null);
+                session.dropQuadsByLayer(1);
+                session.drag_overlay_cells_scratch.clearRetainingCapacity();
+                session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, if (rejected) |g| g.body else null);
+                var failed_border_quads: usize = 0;
+                for (session.gpu_quads.items) |quad| failed_border_quads += @intFromBool(quad.layer == 1);
+                try std.testing.expectEqual(@as(usize, 0), failed_border_quads);
+                try std.testing.expectEqual(@as(usize, 0), session.drag_overlay_cells_scratch.items.len);
+                break;
+            }
+        }
+    }
+    try std.testing.expect(saw_partial_oom);
+
+    // layout 자체는 완료됐어도 active identity가 slice에 없으면 같은 fail-close를 적용하고 stale body를 재사용하지 않는다.
+    var foreign_pane: Pane = undefined;
+    var identity_rejected: ?AppSession.PaneGeometry = null;
+    session.captureActivePaneGeometry(true, active, .{
+        .leaf = &foreign_pane,
+        .rect = session.termRect(),
+    }, &identity_rejected);
+    try std.testing.expect(identity_rejected == null);
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, if (identity_rejected) |g| g.body else null);
+    var identity_border_quads: usize = 0;
+    for (session.gpu_quads.items) |quad| identity_border_quads += @intFromBool(quad.layer == 1);
+    try std.testing.expectEqual(@as(usize, 0), identity_border_quads);
+    try std.testing.expectEqual(@as(usize, 0), session.drag_overlay_cells_scratch.items.len);
+
+    // 다음 정상 projection은 같은 tree를 완주한 뒤 body를 복원하고 정확히 border 4 + sentinel 1을 만든다.
+    var complete: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer complete.deinit(allocator);
+    try PaneTree.layout(allocator, tree, session.termRect(), &complete);
+    var recovered: ?AppSession.PaneGeometry = null;
+    for (complete.items) |leaf| session.captureActivePaneGeometry(true, active, leaf, &recovered);
+    try std.testing.expect(recovered != null);
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, recovered.?.body);
+    var border_quads: usize = 0;
+    for (session.gpu_quads.items) |quad| border_quads += @intFromBool(quad.layer == 1);
+    try std.testing.expectEqual(@as(usize, 4), border_quads);
+    try std.testing.expectEqual(@as(usize, 1), session.drag_overlay_cells_scratch.items.len);
+}
+
+test "FP9 active-pane projection adds no layout scan or allocation at workspace pane cap" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const active = session.activePane();
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    session.allocator = counting.allocator();
+    var existing_chrome_leaf_visits: usize = 0;
+    for (0..1000) |frame| {
+        var projection: ?AppSession.PaneGeometry = null;
+        // production처럼 기존 chrome leaf 방문 안에서 capture를 호출한다. capture API에는 tree/layout/allocator가 없어
+        // 별도 layout call이나 내부 leaf scan을 만들 수 없고, 첫 active match 뒤에는 고정 비교 한 번뿐이다.
+        for (0..maru.session.workspace.max_panes_per_tab) |leaf_index| {
+            existing_chrome_leaf_visits += 1;
+            session.captureActivePaneGeometry(true, active, .{
+                .leaf = active,
+                .rect = .{
+                    .x = @intCast(leaf_index),
+                    .y = @intCast(frame % 64),
+                    .w = 800,
+                    .h = 600,
+                },
+            }, &projection);
+        }
+        try std.testing.expect(projection != null);
+    }
+    session.allocator = allocator;
+    try std.testing.expectEqual(@as(usize, 1000) * maru.session.workspace.max_panes_per_tab, existing_chrome_leaf_visits);
+    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expect(!counting.has_induced_failure);
+}
+
+test "FP9 workspace focus border uses pane body and fails closed for non-key or unknown leaf" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.window_padding_px = .{ .left = 10, .right = 20, .top = 4, .bottom = 8 };
+    _ = try session.resize(1400, 900, 1000);
+
+    var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaves.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
+    const active = session.activePane();
+    var active_geometry: ?AppSession.PaneGeometry = null;
+    for (leaves.items) |leaf| {
+        if (leaf.leaf == active) active_geometry = session.paneGeometry(leaf.rect);
+    }
+    const geometry = active_geometry orelse return error.MissingActivePaneGeometry;
+    try std.testing.expect(geometry.body.x < geometry.grid.x);
+    try std.testing.expect(geometry.body.y < geometry.grid.y);
+    const thickness = session.buildChromeTokens().border.line_thickness_px;
+    session.appearance.split_divider_thickness = 0; // focus border 두께/표시는 divider 설정과 독립이다.
+
+    // 실제 frame path가 같은 active leaf의 body를 넘기는지 고정한다. direct helper test만으로는 caller가 다시 grid를
+    // 넘기는 회귀를 잡지 못하므로 tick 결과의 layer-1 quad를 먼저 확인한다.
+    session.metal_dirty = true;
+    _ = try session.tick();
+    var frame_border_quads: usize = 0;
+    var frame_saw_body_top = false;
+    var frame_saw_body_bottom = false;
+    var frame_saw_body_left = false;
+    var frame_saw_body_right = false;
+    var frame_saw_grid_top = false;
+    for (session.gpu_quads.items) |quad| if (quad.layer == 1) {
+        frame_border_quads += 1;
+        frame_saw_body_top = frame_saw_body_top or (quad.x == @as(f32, @floatFromInt(geometry.body.x)) and
+            quad.y == @as(f32, @floatFromInt(geometry.body.y)) and
+            quad.w == @as(f32, @floatFromInt(geometry.body.w)) and
+            quad.h == @as(f32, @floatFromInt(thickness)));
+        frame_saw_body_bottom = frame_saw_body_bottom or (quad.x == @as(f32, @floatFromInt(geometry.body.x)) and
+            quad.y == @as(f32, @floatFromInt(geometry.body.y + geometry.body.h - thickness)) and
+            quad.w == @as(f32, @floatFromInt(geometry.body.w)) and
+            quad.h == @as(f32, @floatFromInt(thickness)));
+        frame_saw_body_left = frame_saw_body_left or (quad.x == @as(f32, @floatFromInt(geometry.body.x)) and
+            quad.y == @as(f32, @floatFromInt(geometry.body.y + thickness)) and
+            quad.w == @as(f32, @floatFromInt(thickness)) and
+            quad.h == @as(f32, @floatFromInt(geometry.body.h - 2 * thickness)));
+        frame_saw_body_right = frame_saw_body_right or (quad.x == @as(f32, @floatFromInt(geometry.body.x + geometry.body.w - thickness)) and
+            quad.y == @as(f32, @floatFromInt(geometry.body.y + thickness)) and
+            quad.w == @as(f32, @floatFromInt(thickness)) and
+            quad.h == @as(f32, @floatFromInt(geometry.body.h - 2 * thickness)));
+        frame_saw_grid_top = frame_saw_grid_top or (quad.x == @as(f32, @floatFromInt(geometry.grid.x)) and
+            quad.y == @as(f32, @floatFromInt(geometry.grid.y)) and
+            quad.w == @as(f32, @floatFromInt(geometry.grid.w)) and
+            quad.h == @as(f32, @floatFromInt(thickness)));
+    };
+    try std.testing.expectEqual(@as(usize, 4), frame_border_quads);
+    try std.testing.expect(frame_saw_body_top);
+    try std.testing.expect(frame_saw_body_bottom);
+    try std.testing.expect(frame_saw_body_left);
+    try std.testing.expect(frame_saw_body_right);
+    try std.testing.expect(!frame_saw_grid_top);
+
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, geometry.body);
+    var saw_body_top = false;
+    var saw_grid_top = false;
+    var border_quads: usize = 0;
+    for (session.gpu_quads.items) |quad| if (quad.layer == 1) {
+        border_quads += 1;
+        saw_body_top = saw_body_top or (quad.x == @as(f32, @floatFromInt(geometry.body.x)) and
+            quad.y == @as(f32, @floatFromInt(geometry.body.y)) and
+            quad.w == @as(f32, @floatFromInt(geometry.body.w)) and
+            quad.h == @as(f32, @floatFromInt(thickness)));
+        saw_grid_top = saw_grid_top or (quad.x == @as(f32, @floatFromInt(geometry.grid.x)) and
+            quad.y == @as(f32, @floatFromInt(geometry.grid.y)) and
+            quad.w == @as(f32, @floatFromInt(geometry.grid.w)) and
+            quad.h == @as(f32, @floatFromInt(thickness)));
+    };
+    try std.testing.expectEqual(@as(usize, 4), border_quads);
+    try std.testing.expect(saw_body_top);
+    try std.testing.expect(!saw_grid_top);
+    try std.testing.expectEqual(@as(usize, 1), session.drag_overlay_cells_scratch.items.len); // overlay presence sentinel
+
+    // 비-key window와 active-leaf lookup 실패(null)는 잘못된 전체-domain focus cue를 만들지 않는다.
+    session.window_focused = false;
+    session.dropQuadsByLayer(1);
+    session.drag_overlay_cells_scratch.clearRetainingCapacity();
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, geometry.body);
+    var non_key_border_quads: usize = 0;
+    for (session.gpu_quads.items) |quad| non_key_border_quads += @intFromBool(quad.layer == 1);
+    try std.testing.expectEqual(@as(usize, 0), non_key_border_quads);
+    try std.testing.expectEqual(@as(usize, 0), session.drag_overlay_cells_scratch.items.len);
+    session.window_focused = true;
+    session.appendFocusOwnerBorder(&session.drag_overlay_cells_scratch, null);
+    var unknown_leaf_border_quads: usize = 0;
+    for (session.gpu_quads.items) |quad| unknown_leaf_border_quads += @intFromBool(quad.layer == 1);
+    try std.testing.expectEqual(@as(usize, 0), unknown_leaf_border_quads);
+    try std.testing.expectEqual(@as(usize, 0), session.drag_overlay_cells_scratch.items.len);
+}
+
+test "FP9 production frame follows active pane body across horizontal and vertical split" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.appearance.chrome_theme = .rich;
+    session.window_padding_px = .{ .left = 11, .right = 17, .top = 5, .bottom = 9 };
+    _ = try session.resize(1400, 900, 1000);
+    try session.splitActivePane(.horizontal);
+    session.window_focused = true;
+    session.focus_owner = .workspace;
+
+    var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaves.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
+    var horizontal_geometry: ?AppSession.PaneGeometry = null;
+    for (leaves.items) |leaf| {
+        if (leaf.leaf == session.activePane()) horizontal_geometry = session.paneGeometry(leaf.rect);
+    }
+    const horizontal = horizontal_geometry orelse return error.MissingHorizontalActivePaneGeometry;
+    try std.testing.expect(horizontal.body.x < horizontal.grid.x);
+    session.metal_dirty = true;
+    _ = try session.tick();
+    const thickness = session.buildChromeTokens().border.line_thickness_px;
+    var horizontal_quads: usize = 0;
+    var horizontal_top = false;
+    for (session.gpu_quads.items) |quad| if (quad.layer == 1) {
+        horizontal_quads += 1;
+        horizontal_top = horizontal_top or (quad.x == @as(f32, @floatFromInt(horizontal.body.x)) and
+            quad.y == @as(f32, @floatFromInt(horizontal.body.y)) and
+            quad.w == @as(f32, @floatFromInt(horizontal.body.w)) and
+            quad.h == @as(f32, @floatFromInt(thickness)));
+    };
+    try std.testing.expectEqual(@as(usize, 4), horizontal_quads);
+    try std.testing.expect(horizontal_top);
+
+    const root_split = switch (session.activeTab().tree) {
+        .split => |split| split,
+        .leaf => return error.MissingSplitRoot,
+    };
+    root_split.direction = .vertical;
+    try session.resizeActiveTabPanes();
+    session.recomputeActivePaneRect();
+    leaves.clearRetainingCapacity();
+    try session.activeTabLeafRects(allocator, session.termRect(), &leaves);
+    var vertical_geometry: ?AppSession.PaneGeometry = null;
+    for (leaves.items) |leaf| {
+        if (leaf.leaf == session.activePane()) vertical_geometry = session.paneGeometry(leaf.rect);
+    }
+    const vertical = vertical_geometry orelse return error.MissingVerticalActivePaneGeometry;
+    try std.testing.expect(vertical.body.y > horizontal.body.y);
+    try std.testing.expect(vertical.body.x < horizontal.body.x);
+    try std.testing.expect(vertical.body.y < vertical.grid.y);
+    session.metal_dirty = true;
+    _ = try session.tick();
+    var vertical_quads: usize = 0;
+    var vertical_top = false;
+    for (session.gpu_quads.items) |quad| if (quad.layer == 1) {
+        vertical_quads += 1;
+        vertical_top = vertical_top or (quad.x == @as(f32, @floatFromInt(vertical.body.x)) and
+            quad.y == @as(f32, @floatFromInt(vertical.body.y)) and
+            quad.w == @as(f32, @floatFromInt(vertical.body.w)) and
+            quad.h == @as(f32, @floatFromInt(thickness)));
+    };
+    try std.testing.expectEqual(@as(usize, 4), vertical_quads);
+    try std.testing.expect(vertical_top);
 }
 
 // per-pane 탭 바가 실제로 예약·렌더되는지 — 실 init/resize/tick이 도는 macOS 경로라 게이트. 터미널 영역이

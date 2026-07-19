@@ -40,7 +40,7 @@ pub const Style = struct {
     // characters)·xterm ctlseqs 동일. 렌더는 underline과 같은 부분-사각형(중앙 띠)을 재사용한다.
     strikethrough: bool = false,
     // SGR 53/55(overline): 셀 상단을 가로지르는 선. 베이스 ECMA-48 SGR 53(overlined)·xterm ctlseqs.
-    // 렌더는 셀 상단 부분-사각형(reserved=4 — active pane 상단 테두리와 같은 모양)을 재사용한다.
+    // 렌더는 셀 상단의 가는 텍스트 장식선(reserved=10)을 사용한다(hollow cursor 상단 reserved=4와 분리).
     overline: bool = false,
     // SGR 7/27(reverse video): 렌더 시 전경/배경을 맞바꾼다(default 색은 theme 값으로 풀어 스왑).
     reverse: bool = false,

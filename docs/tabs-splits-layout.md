@@ -270,10 +270,10 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   재부모화하므로 새 PTY가 불필요·낭비) 그 단일 leaf를 떼어온 Pane으로 채운다(`tree = leaf(pane)`). 새 워크스페이스는
   **탭 목록 끝에 붙고 활성**이 된다 — "빈 사이드바 영역=카드 목록 아래=끝"이라 드롭 위치와 일치한다(슬롯 중간 삽입·pinned
   clamp는 두지 않는다; 순서 조정은 기존 사이드바 카드 드래그가 맡는다).
-- **소스 정리(공통)**: 두 경우 모두 소스 트리에서 `removeLeaf`로 그 leaf를 떼고 형제로 collapse한다(④와 동일 경로).
-  **no-op 가드(베이스/결정)**: 소스 Pane이 그 워크스페이스의 **유일한 Pane**(split 안 된 단독)이면 떼어내봤자 빈
-  워크스페이스만 남으므로 드롭을 **무시**한다 — 단독 워크스페이스를 끄는 건 워크스페이스 순서 재정렬(사이드바 카드
-  드래그)의 몫이지 분리가 아니다.
+- **소스 정리**: 소스에 형제 Pane이 있으면 `removeLeaf`로 그 leaf를 떼고 형제로 collapse한다(④와 동일 경로).
+  소스 Pane이 워크스페이스의 **유일한 Pane**일 때 다른 워크스페이스 카드에 합치면, Pane을 대상 트리에 그대로
+  재부모화하고 비게 된 소스 워크스페이스를 제거한다. surface/PTY는 파괴하거나 재시작하지 않는다. 반면 유일한 Pane을
+  사이드바 빈 영역에 떨어뜨리는 **분리**는 같은 단독 워크스페이스를 다시 만드는 무의미한 동작이므로 계속 무시한다.
 - **미리보기·하이라이트·resize 재사용**: 드래그 중 floating 미리보기는 `buildFloatingTabFrame`을 pane 라벨
   (custom_name orelse 활성 Term 라벨)로 재사용해 커서를 따라간다. **드롭 타겟 하이라이트**는 사이드바 밴드 경로
   (`sidebar.view`)에 `drop_slot`을 더해 `.drop_zone` 색 밴드로 그린다 — 합칠 **카드 슬롯**(displaySlotOf) 또는 빈
@@ -285,7 +285,9 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   `promotePaneToNewWorkspace`), **합치기(merge)** 는 `move_pane_to_workspace:N`(0-based; 팔릿 "Move Pane to Workspace
   1..9" → `mergePaneIntoWorkspace(activePane, N)`)로 노출한다. 드래그는 떨어뜨린 카드로 타겟을 정하지만 키는 **번호로
   타겟을 명시**한다(`select_tab:N`·tmux `join-pane -t N`과 같은 선례 — 단일 표준 키가 없는 동작을 번호 타겟으로 단일화).
-  자기/범위 밖/단독 pane이면 두 액션 모두 no-op. 기본 단축키는 macOS 단일 관례가 없어 rename·split과 같은 규칙으로
+  자기/범위 밖이면 두 액션 모두 no-op이다. 단독 pane은 `move_pane_to_new_workspace`만 no-op이고,
+  `move_pane_to_workspace:N`은 대상에 합친 뒤 빈 소스 워크스페이스를 제거한다. 기본 단축키는 macOS 단일 관례가 없어
+  rename·split과 같은 규칙으로
   **bindable 액션만 정의하고 기본 키는 두지 않는다**(발견성은 커맨드 팔릿·드래그; [필수 프로젝트 규칙](project-rules.md)의
   베이스 명시 규칙). 검증은 트리 detach/insert·no-op 가드·드롭 타겟 하이라이트 슬롯·grip 드래그 end-to-end·두 액션
   dispatch를 헤드리스 단위로, grip 글리프 렌더는 제품 스크린샷으로 고정한다.

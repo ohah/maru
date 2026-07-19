@@ -37,7 +37,7 @@
 //! **항상** 실린다(생략이 곧 null과 헷갈리지 않도록). cwd·git_branch·url은 반대로 **없으면 필드 생략**(absent=미가용).
 //!
 //! **agent/at_prompt/panel_kind/trust wire enum 결정**: 이 DTO는 collector가 채우는 **wire 스키마**라, 내부 상태머신
-//! (session_model.AgentKind·agent_transcript.AgentState)에 의존하지 않고 자체 wire enum을 둔다 — 내부 enum을 리팩터해도
+//! (session_model.AgentKind·agent_observer.State)에 의존하지 않고 자체 wire enum을 둔다 — 내부 enum을 리팩터해도
 //! wire가 조용히 바뀌지 않게(경계 격리). L4 collector가 내부 상태 → 이 wire enum으로 매핑한다(§3 상태 수집 문단).
 //! wire 문자열은 exhaustive switch로 못박아(내부 rename이 wire를 안 흔들게) 고정한다.
 //!
@@ -79,11 +79,8 @@ pub const PanelKind = enum { markdown, browser };
 /// `TerminalMeta.agent`가 null(필드 생략)이라 kind가 항상 실제 에이전트다(collector가 none이면 null로 매핑).
 pub const AgentKind = enum { claude, codex };
 
-/// 에이전트 상태(wire). 내부 `agent_transcript.AgentState`와 같은 4상(collector가 매핑 — agentInfoWire).
-/// `interrupted`(사용자 ESC 중단)를 **별도 값으로 싣는다**: idle로 접으면 클라이언트가 `running → idle` 전이를
-/// "턴 완료"로 읽어 **가짜 완료**를 보고한다(중단된 턴을 완료로 착각해 후속 단계를 진행 — code-review).
-/// `idle`=턴이 완료됨 / `interrupted`=사용자가 끊어서 멈춤(완료 아님) / `running`=진행 중 / `unknown`=판정 불가.
-pub const AgentState = enum { unknown, running, idle, interrupted };
+/// 에이전트 상태(wire). `blocked`는 사용자 입력/승인을 기다리는 보이는 UI, `idle`은 입력 가능한 UI다.
+pub const AgentState = enum { unknown, running, blocked, idle };
 
 /// 포그라운드 에이전트 정보(§3 `agent(kind/state)`). 에이전트가 있을 때만 `TerminalMeta.agent`에 실린다.
 pub const AgentInfo = struct {
@@ -225,8 +222,8 @@ fn agentStateWire(s: AgentState) []const u8 {
     return switch (s) {
         .unknown => "unknown",
         .running => "running",
+        .blocked => "blocked",
         .idle => "idle",
-        .interrupted => "interrupted", // 사용자 ESC 중단 — idle(턴 완료)과 구분해 실어야 가짜 완료 보고가 없다
     };
 }
 
@@ -799,17 +796,15 @@ fn idEqlNum(id: cp.Id, n: i64) bool {
 // 모듈 헤더 계약: "wire 문자열은 exhaustive switch로 못박아(내부 rename이 wire를 안 흔들게) 고정한다". 기존
 // 테스트는 agent kind=claude·state=running만 실었다 — agentKindWire(.codex)·agentStateWire(.idle|.unknown)
 // 분기는 어떤 테스트도 안 밟아, 내부 enum rename이 이 wire 문자열을 조용히 바꿔도 잡히지 않았다. 그 wire 상수를 못박는다.
-test "wire enum 안정성: agent state=interrupted가 별도 문자열로 실린다(idle로 접히지 않음)" {
-    // 이 PR의 유일한 **외부 계약 변경**. idle로 접으면 클라이언트가 running→idle을 "턴 완료"로 읽어 사용자가
-    // 끊은 턴을 **가짜 완료**로 보고한다(자동화가 후속 단계를 진행) — 그래서 4번째 값으로 싣는다.
-    const dto = termSurface(7, "s", .{ .agent = .{ .kind = .claude, .state = .interrupted }, .at_prompt = .unknown });
+test "wire enum 안정성: agent state=blocked가 별도 문자열로 실린다" {
+    const dto = termSurface(7, "s", .{ .agent = .{ .kind = .claude, .state = .blocked }, .at_prompt = .unknown });
     const wire = try serializeSurface(testing.allocator, dto);
     defer testing.allocator.free(wire);
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, wire, .{});
     defer parsed.deinit();
     const ag = parsed.value.object.get("agent").?.object;
     try testing.expectEqualStrings("claude", ag.get("kind").?.string);
-    try testing.expectEqualStrings("interrupted", ag.get("state").?.string); // ★ "idle"이 아니다
+    try testing.expectEqualStrings("blocked", ag.get("state").?.string);
 }
 
 test "wire enum 안정성: agent kind=codex, state=idle/unknown이 문서화된 wire 문자열로 직렬화된다" {

@@ -125,7 +125,6 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.env = &.{ "EDITOR=nvim", "MY_VAR=a b c" }; // 내부 공백 보존도 함께 검증
     cfg.shell.command = "/opt/homebrew/bin/fish";
     cfg.shell.args = &.{ "-i", "-l" };
-    cfg.notifications.agent_complete = false;
     cfg.scrollback.lines = 5000;
     cfg.bell.audible = false;
     cfg.shell_integration.ssh = true;
@@ -146,6 +145,9 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const kvs = try configKeyValues(arena.allocator(), cfg);
+    try std.testing.expect(valueForKey(kvs, "workspace.restore-claude") == null);
+    try std.testing.expect(valueForKey(kvs, "workspace.restore-codex") == null);
+    try std.testing.expect(valueForKey(kvs, "notifications.agent-complete") == null);
     const text = try loader.updateConfigText(a, "", kvs); // 빈 원본 → 전 키 append
     defer a.free(text);
 
@@ -188,7 +190,6 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(@as(usize, 2), got.shell.args.len);
     try std.testing.expectEqualStrings("-i", got.shell.args[0]);
     try std.testing.expectEqualStrings("-l", got.shell.args[1]); // shell.args join↔split round-trip
-    try std.testing.expectEqual(false, got.notifications.agent_complete);
     try std.testing.expectEqual(@as(u32, 5000), got.scrollback.lines);
     try std.testing.expectEqual(false, got.bell.audible);
     try std.testing.expectEqual(true, got.shell_integration.ssh);

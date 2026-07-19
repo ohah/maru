@@ -89,7 +89,7 @@ pub const AgentInfo = struct {
 };
 
 /// terminal surface 전용 메타(§3). collector가 app_session Model 트리 + core.currentCwd + termGitBranch +
-/// agent_transcript + semantic_state(+alt 오버라이드)에서 채운다(수집 로직은 L4, 여긴 스키마만).
+/// agent observer의 터미널 관측 결과에서 채운다(수집 로직은 L4, 여긴 스키마만).
 pub const TerminalMeta = struct {
     /// OSC 7 작업 디렉터리. 없으면 wire에서 생략.
     cwd: ?[]const u8 = null,

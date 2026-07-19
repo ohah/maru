@@ -16,7 +16,7 @@
 //! **payload 표현 결정:** request `params`, response `result`, error `data`는 dispatch(후속 slice)가 해석하는
 //! **불투명 JSON**이라 여기선 `std.json.Value`로 그대로 담는다(스키마를 미리 못박지 않는다 — §4.1 "닫힌 하드코딩
 //! 테이블이 아니다"). 그래서 parse 결과(`ParsedMessage`)는 std.json arena를 소유하고(`deinit` 필수), 그 안의
-//! 슬라이스·Value는 arena 수명에 묶인다(agent_transcript.zig의 parseFromSlice(Value) 패턴과 동일).
+//! 슬라이스·Value는 arena 수명에 묶인다.
 //!
 //! **alloc 전략 결정(범위 애매점 보고 대상):** std.json.parseFromSlice가 arena 소유를 강요하므로, parse는
 //! `gpa`를 받아 arena를 소유한 `ParsedMessage`를 돌려주고 caller가 `deinit`한다(leaky 변형은 두지 않는다 — 컨트롤

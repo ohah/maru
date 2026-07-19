@@ -177,4 +177,4 @@ redaction(구현됨, `src/redact.zig` + `observability/trace.zig`):
 - **trace fixture 가드**: `trace.guardFixture`가 output을 재조립해 스캔하므로, 비밀이 read 경계로 두 output 이벤트에 쪼개져도(`API_TOKEN`/`=값`) 재결합해 `SensitiveContent`로 거부한다(직렬화 텍스트 스캔은 놓침). cwd 값 내 비밀도.
 - **판정 범위**: 인라인 할당(공백 허용)·dash 플래그·공백분리 할당을 잡는다. substring-on-key라 `monkey=` 류도 걸린다(deny-by-default — false negative보다 안전).
 - **익명화**(`trace.anonymizeTrace` / `maru trace anonymize`): keyword 가드가 못 잡는 PII/인프라를 일반화한다 — 홈 경로 세그먼트·IPv4·`user@host.domain`·알려진 유저명(env HOME/USER)을 자리표시자로. 구조 보존이라 결과가 여전히 파싱·재생 가능하고 멱등이다. 가드(secret 차단)와 짝: 익명화는 값 일반화.
-- `keyIsSensitive`가 env·argv redaction과 같은 토큰 목록을 공유한다(agent_resume가 위임).
+- `keyIsSensitive`가 env·fixture redaction과 같은 토큰 목록을 공유한다.

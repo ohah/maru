@@ -1,4 +1,3 @@
-pub const agent_resume = @import("app/agent_resume.zig");
 pub const app_runtime = @import("app/app_runtime.zig");
 pub const artifact_io = @import("app/artifact_io.zig");
 pub const headless_demo = @import("app/headless_demo.zig");

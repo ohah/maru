@@ -729,7 +729,7 @@ pub export fn maru_macos_app_session_take_bell_badge(session: ?*AppSession) u32 
     return if (app_session.takeBellBadge()) 1 else 0;
 }
 
-// 세팅 GUI에서 notifications.agent-complete/osc를 켠 경우 macOS 알림 권한 요청을 Swift에 맡기는 1회성 신호.
+// 세팅 GUI에서 notifications.osc를 켠 경우 macOS 알림 권한 요청을 Swift에 맡기는 1회성 신호.
 // 권한 UI/API는 OS 소유라 Swift가 처리하고, Zig는 "사용자가 데스크톱 알림을 켰다"는 의도만 latch한다. (ABI v92)
 pub export fn maru_macos_app_session_take_notification_authorization_request(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;

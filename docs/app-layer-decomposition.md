@@ -7,7 +7,7 @@
 S2로 세션 모델(`Term`/`Pane`/`Tab`)은 `src/session/session_model.zig`로 갔지만, 그 모델이 의존하는 **중립 모델이 아직 `src/app`에 남아** `session→app` 의존이 잔류한다(`session_model`이 `app/surface.zig`·`split_tree.zig`·`workspace.zig`를 참조). `src/app`은 **중립 모델 + OS-중립 런타임**이 섞인 혼합 레이어다(코드 분류는 §3.2 표):
 
 - **session 모델**(session/chrome이 의존): `split_tree`·`workspace`·`surface`·`window`·`core_command`
-- **런타임/표시 유틸**(순수하나 app/platform만 의존 → app 잔류): `label`(라벨 해석, `app_session`만 호출)·`agent_resume`(restore argv, platform용)·`artifact_io`(trace/failure 파일 I/O, `host`·`frame_loop` 등 런타임용)
+- **런타임/표시 유틸**(순수하나 app/platform만 의존 → app 잔류): `label`(라벨 해석, `app_session`만 호출)·`artifact_io`(trace/failure 파일 I/O, `host`·`frame_loop` 등 런타임용)
 - **OS-중립 런타임**(`pty` 참조): `live_pty`·`runtime`·`runtime_pump`·`frame_loop`·`host`·`pty_reader`·`live_pty_registry`
 
 > **분류 기준 정정(D1 착수 중 빌드가 잡음):** "`pty` 미참조 = 중립 모델"은 거짓이었다 — `artifact_io` 등은 순수(import 0)지만 session *모델*이 아니라 런타임 유틸이다. 올바른 기준은 **"누가 의존하느냐"**: session/chrome이 쓰면 session 모델(이동), app/platform만 쓰면 유틸(잔류).
@@ -40,7 +40,7 @@ S2로 세션 모델(`Term`/`Pane`/`Tab`)은 `src/session/session_model.zig`로 �
 | 단계 | 옮길 것 / 할 것 | 비고 | 위험 |
 |---|---|---|---|
 | **D0** | 선결 결정(§2)을 layering §2 4층 표·§3.2에 명문화. 코드 0 | doc-first(S2-1과 같은 결) | 없음 |
-| **D1** | session 모델 `split_tree`·`workspace`를 `src/session/`로(`session_model`·`divider`가 의존) | git mv + barrel(`SplitTree`·`SplitDirection`·`SplitRect`·`splitRect`·`clampRatio` re-export 동반)·참조(`divider`·`app_session`). `label`·`agent_resume`·`artifact_io`는 유틸이라 **app 잔류** | 낮음 |
+| **D1** | session 모델 `split_tree`·`workspace`를 `src/session/`로(`session_model`·`divider`가 의존) | git mv + barrel(`SplitTree`·`SplitDirection`·`SplitRect`·`splitRect`·`clampRatio` re-export 동반)·참조(`divider`·`app_session`). `label`·`artifact_io`는 유틸이라 **app 잔류** | 낮음 |
 | **D2** | `surface`·`window`·`core_command`(`terminal`만 참조)를 `src/session/`로 | 런타임 참조처(`live_pty`·`runtime`·`runtime_pump`·`frame_loop`·`host` 등 10+)의 import 경로 갱신. 동작 보존 | 중 |
 | **D3** | `check-boundaries`에 **`session`의 `app` 금지** 추가 + `session→app` 잔여 0 확인 | 의존 소거를 가드로 고정 | 낮음 |
 
@@ -57,4 +57,4 @@ S2로 세션 모델(`Term`/`Pane`/`Tab`)은 `src/session/session_model.zig`로 �
 - **작업량**: D2의 import 경로 변경이 런타임 10+ 파일(기계적·저위험, 동작 보존).
 - **본질적 단점 없음**: L4(런타임)→L2(모델) 참조는 정상 방향(§3.2). 순수 이동이라 동작 변화 0, `/code-review max`로 확인.
 - **선결 미합의 시 중간 상태**: D1만 하면 `surface`가 남아 `session→app`이 잔존(절반 정리). §2 결정 후 D1~D3을 **묶어** 진행해야 의존이 0으로 닫힌다.
-- **범위 밖**: `agent_transcript`(이미 session)와 `agent_session`(platform, 파일 I/O)의 경계는 유지 — 이번 대상 아님. 런타임(`live_pty` 등) 자체는 `src/app`에 잔류(L4 공통 런타임).
+- **후속 변경**: provider transcript/session 파일 I/O 경로는 터미널 관측 기반 observer 전환에서 제거됐다. 런타임(`live_pty` 등) 자체는 `src/app`에 잔류(L4 공통 런타임).

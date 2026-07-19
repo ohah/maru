@@ -18,13 +18,12 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
   각 surface의 shell_entry
   사용자가 명시한 startup_recipe
   사용자가 명시한 safe env overrides
-  claude/codex fork source 정보(opt-in — agent_kind·session_id·redact된 argv; 아래 allowlist 절)
 
 저장하지 않는 것:
   live PTY handle
   child process id
   임의의 전체 env dump
-  임의 명령의 last_observed_command 자동 재실행 정보(claude/codex는 allowlist 예외 — 아래 절)
+  임의 명령의 last_observed_command 자동 재실행 정보
   web Term(인앱 브라우저/마크다운 패널) — 아래 절
 ```
 

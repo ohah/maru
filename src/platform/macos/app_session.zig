@@ -33,8 +33,7 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
-const agent_session = @import("agent_session.zig"); // workspace migration 전까지 저장된 provider session 해석에 사용
-const agent_hooks = @import("agent_hooks.zig"); // provider 훅으로 팬↔세션 트랜스크립트 경로 매핑
+const agent_hook_cleanup = @import("agent_hook_cleanup.zig"); // 구버전 Maru provider hook 1회 정리
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -162,7 +161,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 
 // 93: tick(frame_loop_rate_hz) 입력 추가 — Swift의 단일 전역 NSTimer cadence를 각 AppSession tick에 주입해
 // 멀티 창/quick 세션이 같은 wall-clock 기준으로 blink/fade/poll/sync timeout을 계산하게 한다.
-// 92: take_notification_authorization_request(세팅 GUI에서 notifications.agent-complete/osc를 켤 때 macOS 데스크톱
+// 92: take_notification_authorization_request(세팅 GUI에서 notifications.osc를 켤 때 macOS 데스크톱
 // 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz).
 // Swift frame-loop NSTimer가 config를 읽어 cadence를 정한다.
 // 98: Phase 4b-2 — maru_metal_renderer_draw 시그니처에 overlay_layer(CAMetalLayer*) 2번째 인자 추가(모달을
@@ -1044,75 +1043,9 @@ const TermRuntime = struct {
     // 이 Term의 셸을 spawn한 시각(ns, `std.Io.Clock.awake` 단조 시계 — 코드베이스 선례). 종료 시 uptime(=exit−spawn)을
     // 재 비정상 시작 사망(grace window) 판정에 쓴다. createTerm이 스탬프. 0이면 미스탬프(테스트 등)로 취급 — uptime 판정 생략.
     spawned_at_ns: i128 = 0,
-    // 훅 매핑 파일의 불투명 key. surface.id와 달리 Term마다 새 난수라 별도 maru 프로세스의 같은 surface 숫자와
-    // 충돌하지 않는다. 자식에는 MARU_AGENT_MAPPING_ID로 주입하며 MARU_PANE_ID는 control-plane selector다.
-    agent_mapping_id: u64 = 0,
-    // workspace restore가 provider-native fork를 띄운 뒤 새 훅 매핑을 기다리는 상태. source는 첫 훅 전에 앱이 다시
-    // 종료돼도 원본 대화를 잃지 않게 하고, confirmed는 poll에서 확인한 fork id를 cwd/매핑 파일 부재와 무관하게
-    // 종료 저장까지 보존한다. kind는 agent 전환 시 다른 provider에 source를 넘기지 않는 불변식이다.
-    restored_agent_kind: ?app.agent_resume.Kind = null,
-    restored_agent_source: [agent_restore_session_max]u8 = undefined,
-    restored_agent_source_len: usize = 0,
-    restored_agent_confirmed: [agent_restore_session_max]u8 = undefined,
-    restored_agent_confirmed_len: usize = 0,
     // 100ms probe에서 foreground pgid 변화만 싸게 감지해 kind를 즉시 재분류한다. 0=null/미관측.
     agent_observer_pgid: i32 = 0,
 };
-
-const agent_restore_session_max: usize = 256;
-
-const RestoredAgentFork = struct {
-    kind: app.agent_resume.Kind,
-    source_session: []const u8,
-};
-
-/// source와 현재 매핑을 비교한다. null/같은 id면 아직 provider 훅이 새 fork를 알리지 않은 것이고, 다른 id만 새 fork다.
-fn restoredForkMappedSession(source: []const u8, current: ?[]const u8) ?[]const u8 {
-    const id = current orelse return null;
-    if (source.len > 0 and std.mem.eql(u8, source, id)) return null;
-    return id;
-}
-
-/// 종료 저장용 선택. provider kind가 같을 때 새 매핑 → 이미 확인한 fork → source 순서로 고른다. kind가 바뀌었으면
-/// 옛 provider source/confirmed를 절대 쓰지 않고 현재 매핑만 사용한다.
-fn restoredForkSessionForSave(pending_kind: ?app.agent_resume.Kind, current_kind: app.agent_resume.Kind, source: []const u8, confirmed: []const u8, current: ?[]const u8) ?[]const u8 {
-    if (pending_kind == null or pending_kind.? != current_kind) return current;
-    return restoredForkMappedSession(source, current) orelse if (confirmed.len > 0) confirmed else source;
-}
-
-fn newAgentMappingId(io: std.Io, surface_id: u64) u64 {
-    var id: u64 = undefined;
-    io.random(@ptrCast(&id));
-    if (id != 0) return id;
-    // entropy를 제공하지 않는 테스트 Io에서도 0 sentinel은 피한다. 제품 Threaded Io는 CSPRNG를 쓰며 이 fallback은
-    // 타지 않는다. fallback도 pid+surface 조합이라 동시에 실행 중인 프로세스끼리는 겹치지 않는다.
-    id = (@as(u64, @intCast(std.c.getpid())) << 32) ^ surface_id;
-    return if (id == 0) 1 else id;
-}
-
-fn clearRestoredAgentFork(term: *Term) void {
-    term.rt.restored_agent_kind = null;
-    term.rt.restored_agent_source_len = 0;
-    term.rt.restored_agent_confirmed_len = 0;
-}
-
-/// 실제 provider가 종료돼 셸로 돌아간 전환만 restore pending을 끝낸다. restore 직후의 초기 `.none -> provider`는
-/// source fallback을 유지해야 하므로 지우지 않는다.
-fn agentExitClearsRestoredFork(previous: AgentKind, current: AgentKind) bool {
-    return previous != .none and current == .none;
-}
-
-fn confirmRestoredAgentFork(term: *Term, id: []const u8) bool {
-    if (id.len == 0 or id.len > term.rt.restored_agent_confirmed.len) return false;
-    const old = term.rt.restored_agent_confirmed[0..term.rt.restored_agent_confirmed_len];
-    if (std.mem.eql(u8, old, id)) return false;
-    @memcpy(term.rt.restored_agent_confirmed[0..id.len], id);
-    term.rt.restored_agent_confirmed_len = id.len;
-    // 첫 provider 훅으로 새 fork가 확인된 뒤에는 이 Term의 random mapping이 다시 source id를 가리켜도 현재 세션으로
-    // 받아들인다. source equality는 최초 fork 확인 전의 stale mapping만 거르는 pending 조건이다.
-    term.rt.restored_agent_source_len = 0;
-    return true;
-}
 
 /// 닫기 확인이 보류한 닫기 **진입점**(어떤 UI 동작이 닫기를 요청했나). 진입점마다 cascade 정책이 달라, 확정 시 같은
 /// 판단을 다시 하려고 어느 경로였는지 기억한다. 진입점 → 실제 teardown 범위(CloseScope) 변환은 resolveCloseScope가
@@ -1194,17 +1127,7 @@ const CloseScope = union(enum) {
 /// 정의·심볼(claude=✶, codex=◆) 단일 출처: src/session/session_model.zig.
 const AgentKind = maru.session.session_model.AgentKind;
 
-/// 에이전트 완료 알림 한 건(owned). title=`{✶|◆} {Claude|Codex} · {끝난 Term 라벨}`(종류 없으면 워크스페이스
-/// 폴백), body=마지막 답변 평탄화 미리보기(또는 "완료") — 형식 단일 출처는 enqueueAgentCompletion. agent_notifications
-/// 큐에 쌓였다가 pendingNotification()이 드레인하며 title/body를 해제한다(surface_id는 POD라 해제 불요).
-/// surface_id=알림을 낸 Term의 surface.id — 알림 클릭이 그 터미널로 점프하도록 식별자에 싣는다(activateSurfaceById).
-const AgentNotification = struct { title: []u8, body: []u8, surface_id: u64 };
-
-/// 동시에 쌓일 수 있는 완료 알림 상한(폭주 가드). 보통 한 tick에 0~1건이라 넉넉하다 — 넘으면 가장 오래된 걸 버린다.
-const agent_notification_cap: usize = 16;
-
-/// 인앱 알림 센터에 보관하는 알림 한 건(owned title/body). agent_notifications(드레인되면 사라지는 OS 배너 큐)와
-/// 달리 사용자가 종 아이콘으로 다시 열람하는 히스토리다. 에이전트 완료·OSC 9/777 둘 다 pendingNotification()이
+/// 인앱 알림 센터에 보관하는 알림 한 건(owned title/body). OSC 9/777이 pendingNotification()으로
 /// 드레인하는 단일 funnel에서 push된다. surface_id로 클릭 시 그 터미널로 점프(activateSurfaceById). timestamp_ns는
 /// 상대시간("N분 전") 표시용, is_read=목록에서 클릭하면 true(안읽음 점/배지 계산), is_agent=에이전트/OSC 구분.
 const NotificationHistoryItem = struct {
@@ -1856,7 +1779,7 @@ pub const AppSession = struct {
     /// Dock 배지 1회성 신호 — dispatchBell이 BEL+dock-badge+언포커스 시 켜고 Swift take_bell_badge가 drain해
     /// NSApp.dockTile.badgeLabel을 세운다(포커스 복귀 시 Swift가 지움). (F2-4)
     bell_badge_pending: bool = false,
-    /// 세팅 GUI에서 데스크톱 알림 토글(notifications.agent-complete/osc)을 켰을 때 macOS 알림 권한 요청을 Swift에
+    /// 세팅 GUI에서 데스크톱 알림 토글(notifications.osc)을 켰을 때 macOS 알림 권한 요청을 Swift에
     /// 맡기는 1회성 신호. 권한 UI/API는 OS 리소스라 Swift가 처리하고, Zig는 "사용자가 알림을 켰다"는 의도만 보낸다.
     notification_authorization_pending: bool = false,
     /// Shift+Enter를 Option+Enter처럼 `\x1b\r`(Meta+Enter)로 보낼지(config input.shift-enter=newline 캐시).
@@ -2378,10 +2301,6 @@ pub const AppSession = struct {
     // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
     notification_title_out: []u8 = &.{},
     notification_body_out: []u8 = &.{},
-    // 에이전트 세션 완료(running→idle) 알림 큐(owned title/body). pendingNotification()이 OSC 9/777보다 먼저
-    // 드레인해 Swift 알림으로 띄운다. running→idle 전환은 한 번만 일어나 자연 디바운스되고, 비활성 탭/창에서
-    // 끝났을 때만 enqueue된다(docs/agent-session.md "알림"). 한 tick에 여러 탭 완료를 안 잃게 큐(상한 가드).
-    agent_notifications: std.ArrayList(AgentNotification) = .empty,
     // 인앱 알림 센터 히스토리(owned). pendingNotification()이 드레인하는 알림을 여기에도 보관해 종 아이콘으로 다시
     // 열람한다(2단계). 최신이 뒤(append). notification_unread는 안 읽은 개수 캐시 — push/read/cap-drop 3곳에서만
     // 증감(직접 조작 금지). 매번 순회하지 않게 캐시해 배지 렌더를 싸게 한다.
@@ -2592,9 +2511,8 @@ pub const AppSession = struct {
         // init 끝에 free하지 않고 보관한다(새 탭 Cmd+T spawn에도 필요) — deinit에서 푼다. 바로 store해
         // 이후 init 실패도 errdefer self.deinit()가 정리하게 한다.
         self.new_tab_zdotdir = integ_dir;
-        // 에이전트 세션 훅 등록 + 매핑 dir 정리(best-effort, 실패해도 무해). 첫 팬 spawn 전에 해 훅이 준비되게 한다 —
-        // provider 훅이 MARU_AGENT_MAPPING_ID로 세션 트랜스크립트 경로를 남기고 pollAgentState가 읽는다.
-        agent_hooks.setup(io, allocator);
+        // 구버전 Maru가 user config에 남긴 provider hook을 marker 기반으로 한 번만 정리한다. 실패는 다음 시작에 재시도.
+        agent_hook_cleanup.cleanupOnce(io, allocator);
         // opt-in ssh 라우팅(`shell-integration.ssh`): 통합 .zshenv가 로드될 때(integ_dir != null = zsh 통합)만
         // ssh() 함수가 정의되므로 그때만 의미가 있다. 켜졌으면 현재 maru 실행 파일 경로를 잡아 두고 spawn 때
         // MARU_BIN/MARU_SSH_INTEGRATION으로 주입한다(같은 바이너리가 `maru ssh`를 처리 — main.zig). 경로
@@ -4432,7 +4350,6 @@ pub const AppSession = struct {
             cfg.queue_capacity,
             "Maru",
             commandName(cfg.command_kind),
-            null,
         );
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
@@ -4531,7 +4448,6 @@ pub const AppSession = struct {
             cfg.queue_capacity,
             "Maru",
             commandName(cfg.command_kind),
-            null,
         );
         errdefer self.destroyPane(new_pane);
         try tab.panes.append(self.allocator, new_pane);
@@ -4575,32 +4491,14 @@ pub const AppSession = struct {
         queue_capacity: usize,
         title: []const u8,
         command: []const u8,
-        restored_fork: ?RestoredAgentFork,
     ) !*Term {
         const term = try self.allocator.create(Term);
         errdefer self.allocator.destroy(term);
         term.* = .{};
 
         const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
-        // 훅 매핑 key는 surface.id가 아니라 Term마다 새로 만든 불투명 난수다. surface allocator가 프로세스마다 같은
-        // 숫자에서 시작해도 별도 maru 프로세스끼리 매핑 파일을 덮지 않는다. 0은 "미설정" sentinel이라 제외한다.
-        const mapping_id = newAgentMappingId(self.io, id);
-        term.rt.agent_mapping_id = mapping_id;
-        // spawn/attach 부분 실패 뒤 provider 훅이 파일을 남겼어도 이 Term 소유 random mapping은 회수한다. 뒤에 선언되는
-        // PTY 정리 errdefer가 먼저 실행돼 자식 종료 훅까지 끝난 다음 이 제거가 실행된다.
-        errdefer agent_hooks.removeMapping(self.io, mapping_id);
-        // restore fork면 provider kind와 source를 spawn 전에 보존한다. Claude의 빠른 SessionStart와 Codex의 지연된 첫
-        // UserPromptSubmit 어느 쪽이 와도 아래 unique mapping key와 함께 source→fork 전환을 판정한다.
-        if (restored_fork) |fork| {
-            if (fork.source_session.len <= term.rt.restored_agent_source.len) {
-                term.rt.restored_agent_kind = fork.kind;
-                @memcpy(term.rt.restored_agent_source[0..fork.source_session.len], fork.source_session);
-                term.rt.restored_agent_source_len = fork.source_session.len;
-            }
-        }
         var req = request;
         req.pane_id = id; // 컨트롤 플레인 self selector는 계속 surface.id
-        req.agent_mapping_id = mapping_id; // 에이전트 훅 전용 MARU_AGENT_MAPPING_ID
         // M3a: surface·live_pty 소유를 앱 전역 registry의 `LiveSurface` 번들로. `create`가 안정 heap 슬롯을 잡아 Term은
         // 그 두 필드 포인터만 든다 — reader가 잡는 `&live_pty.reader`·`&surface.core` 주소를 슬롯이 고정한다(Term-inline과
         // 같은 heap-pin). generation=0으로 시작(M2a는 보존만 — respawn 시 증가는 미도입, §8 M0a). id는 앱 전역 유일이라
@@ -4708,11 +4606,6 @@ pub const AppSession = struct {
             self.live_registry.remove(surface_id) catch {};
             term.rt.live_initialized = false;
         }
-        // random mapping key는 이 Term만 소유한다. PTY join 뒤 지워 Stop 훅이 teardown 중 다시 쓴 파일까지 회수한다.
-        if (term.rt.agent_mapping_id != 0) {
-            agent_hooks.removeMapping(self.io, term.rt.agent_mapping_id);
-            term.rt.agent_mapping_id = 0;
-        }
         // git 브랜치 캐시·auto_title(Term-owned)만 여기서 해제 — custom_name·surface는 번들 deinit이 소유한다(M3a §8A.1).
         if (term.git_branch) |b| self.allocator.free(b);
         if (term.git_branch_cwd) |c| self.allocator.free(c);
@@ -4765,14 +4658,13 @@ pub const AppSession = struct {
         queue_capacity: usize,
         title: []const u8,
         command: []const u8,
-        restored_fork: ?RestoredAgentFork,
     ) !*Pane {
         const pane = try self.allocator.create(Pane);
         errdefer self.allocator.destroy(pane);
         pane.* = .{};
         errdefer pane.terms.deinit(self.allocator);
 
-        const term = try self.createTerm(request, size, queue_capacity, title, command, restored_fork);
+        const term = try self.createTerm(request, size, queue_capacity, title, command);
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         pane.active_term = 0;
@@ -4806,7 +4698,7 @@ pub const AppSession = struct {
         tab.* = .{};
         errdefer tab.panes.deinit(self.allocator); // 실패 시 panes 리스트 backing 해제(pane은 아래 errdefer가)
 
-        const pane = try self.createPane(request, size, queue_capacity, title, command, null);
+        const pane = try self.createPane(request, size, queue_capacity, title, command);
         errdefer self.destroyPane(pane);
 
         try tab.panes.append(self.allocator, pane);
@@ -7840,20 +7732,6 @@ pub const AppSession = struct {
             .decrease_font_size => self.adjustFontSize(-font_size_step),
             .reset_font_size => self.resetFontSize(),
             .reset_settings => self.requestResetAll(), // 통합 리셋 — 확인 모달 후 전체 기본값 + config 파일 덮어쓰기
-            // 에이전트 세션 훅 **강제 재등록**(자동등록 실패·경로 바뀜·훅 삭제 복구). agent_hooks.reregister는 기존 maru
-            // 훅을 제거하고 현재 command로 다시 넣는다(stale 복구) — **매핑은 안 지운다**(돌고 있는 팬 상태 보존). 훅은 세션
-            // 이벤트(SessionStart/UserPromptSubmit/Stop)에 발화하므로, 재등록 후 에이전트를 새로 시작하거나 프롬프트를 한 번
-            // 보내야 매핑이 생긴다(notice로 안내).
-            .reregister_agent_hooks => {
-                agent_hooks.reregister(self.io, self.allocator);
-                self.showNotice("에이전트 세션 훅을 재등록했습니다(claude·codex). 에이전트를 새로 시작하거나 프롬프트를 한 번 보내면 반영됩니다.");
-            },
-            // 에이전트 세션 훅 **언인스톨**(claude/codex config에서 maru 훅만 제거, 다른 훅·키는 보존). 훅이 전역 config에
-            // 영구 잔존하는 게 싫을 때 수동으로 뗀다.
-            .unregister_agent_hooks => {
-                agent_hooks.unregister(self.io, self.allocator);
-                self.showNotice("에이전트 세션 훅을 제거했습니다(claude·codex). 이후 팬별 상태 매핑은 안 되고 cwd 추측도 없으니 사이드바 상태가 안 뜰 수 있습니다.");
-            },
             // 절대 폰트 크기(config 바인딩 `set_font_size:N`). setFontSize가 [6,72]pt로 클램프.
             .set_font_size => |size| self.setFontSize(size),
         }
@@ -11950,8 +11828,7 @@ pub const AppSession = struct {
     }
 
     fn isDesktopNotificationSettingKey(key: []const u8) bool {
-        return std.mem.eql(u8, key, "notifications.agent-complete") or
-            std.mem.eql(u8, key, "notifications.osc");
+        return std.mem.eql(u8, key, "notifications.osc");
     }
 
     /// 선택된 세팅 행의 bool config 값을 뒤집고 라이브 적용한다(즉시 반영). raw config(loaded_config.config)를 키로
@@ -17849,29 +17726,16 @@ pub const AppSession = struct {
     /// UNUserNotificationCenter로 띄운다. 코어 pending을 비워(한 번 쓰고 소비) 다음 tick에 같은 알림이 또
     /// 뜨지 않게 한다. 알림은 OS 리소스라 native(Swift)만 띄우고 코어/여기는 데이터만 넘긴다(경계). 클립보드와
     /// 달리 env 게이트 없음 — 알림은 OS authorization이 게이트하는 저위험 표면(iTerm2/Ghostty도 기본 허용).
-    /// foreground_banner: 앱이 전면(willPresent 호출)일 때도 OS 배너로 띄울지. 에이전트 완료는 "지금 안 보는 탭"
-    /// (enqueue 게이트 !is_current)이라 true — 전면이어도 배너로 알려야 유용. OSC 9/777은 활성(보이는) surface가
-    /// 보낸 것이라 사용자가 이미 그 화면을 보고 있을 가능성이 커 false — 전면이면 배너 없이 알림 센터 목록에만 남긴다
+    /// foreground_banner: 앱이 전면(willPresent 호출)일 때도 OS 배너로 띄울지. OSC 9/777을 현재 보고 있는 surface가
+    /// 보냈다면 false로 두고, background surface가 보냈다면 true로 둔다
     /// (자기 화면 알림 노이즈 억제). "전면에서 배너를 띄울지"는 알림 종류가 결정하는 정책이라 Zig가 정하고, 실제
     /// 표시 스타일 적용은 Swift willPresent(OS 표면)가 한다(경계).
     /// pendingNotification/drainOscNotificationFrom 공유 반환 타입 — Zig는 동일 필드 익명 struct도 서로 다른 타입으로
     /// 봐서 두 함수가 같은 익명 struct를 못 쓰므로 named로 둔다. surface_id로 클릭 점프(activateSurfaceById), foreground_banner는
-    /// 전면 배너 여부(에이전트=1, OSC=0). Swift ABI 래퍼(app_host_abi.zig)가 필드를 out 인자로 꺼낸다.
+    /// 전면 배너 여부. Swift ABI 래퍼(app_host_abi.zig)가 필드를 out 인자로 꺼낸다.
     pub const PendingNotification = struct { title: []const u8, body: []const u8, surface_id: u64, foreground_banner: bool };
 
     pub fn pendingNotification(self: *AppSession) ?PendingNotification {
-        // 에이전트 완료 알림(running→idle)을 OSC 9/777보다 먼저 드레인한다 — 큐의 owned 버퍼를 그대로 반환하고
-        // 직전 반환 버퍼는 여기서 해제(다음 pendingNotification/destroy까지 유효 규약은 동일).
-        if (self.agent_notifications.items.len > 0) {
-            const n = self.agent_notifications.orderedRemove(0);
-            if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
-            if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
-            self.notification_title_out = n.title;
-            self.notification_body_out = n.body;
-            // 인앱 히스토리에도 보관(dupe — 위 버퍼는 OS 배너용으로 move됐다). 에이전트 완료라 is_agent=true.
-            _ = self.pushNotificationHistory(self.notification_title_out, self.notification_body_out, n.surface_id, true);
-            return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = n.surface_id, .foreground_banner = true };
-        }
         if (!self.surface_initialized) return null;
         // OSC 9/777: 발신 surface의 코어가 자기 시퀀스를 파싱한다(reader 스레드가 core_mutex 아래 적용). 예전엔
         // activeSurface().core만 drain해 **비활성 pane/Term이 보낸 OSC 알림이 영영 안 나왔다** — 모든 Term의 코어를
@@ -18756,6 +18620,7 @@ pub const AppSession = struct {
     }
 
     fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !maru.session.workspace.Tab {
+        _ = self;
         var panes: std.ArrayList(maru.session.workspace.Pane) = .empty;
         for (tab.panes.items) |pane| {
             var surfaces: std.ArrayList(maru.session.workspace.Surface) = .empty;
@@ -18764,7 +18629,6 @@ pub const AppSession = struct {
                 // (workspace.Surface에 kind 필드가 없어 web 콘텐츠를 영속할 수 없다; Phase 5서 포맷에 kind 추가 전까지).
                 if (term.kind == .web) continue;
                 const core = &term.surface.core;
-                const agent = self.captureAgentForRestore(arena, term);
                 try surfaces.append(arena, .{
                     // custom_name = 사용자 rename(owned, 없으면 ""), title = 자동 제목(OSC). 둘은 별도 필드로 저장한다.
                     .custom_name = try arena.dupe(u8, term.surface.custom_name orelse ""),
@@ -18773,10 +18637,6 @@ pub const AppSession = struct {
                     .command = try arena.dupe(u8, term.surface.command orelse ""),
                     .cols = core.size.cols,
                     .rows = core.size.rows,
-                    // claude/codex 세션 자동 fork 복원(opt-in). agent_kind 빈값이면 일반 셸 복원(docs/workspace-restore.md).
-                    .agent_kind = agent.kind,
-                    .agent_session = agent.session,
-                    .agent_argv = agent.argv,
                 });
             }
             // web-only pane(모든 Term이 web): surfaces가 비면 buildWorkspacePane이 error.EmptyPane로 **전체 복원을
@@ -18792,9 +18652,6 @@ pub const AppSession = struct {
                     .command = try arena.dupe(u8, ""),
                     .cols = c.size.cols,
                     .rows = c.size.rows,
-                    .agent_kind = try arena.dupe(u8, ""),
-                    .agent_session = try arena.dupe(u8, ""),
-                    .agent_argv = &.{},
                 });
             }
             // active_term 보정(리뷰 [0]): web Term을 스킵했으므로 저장 active_term은 verbatim이 아니라 **원래 active_term
@@ -18833,83 +18690,6 @@ pub const AppSession = struct {
             .tree = try tree.toOwnedSlice(arena),
             .panes = try panes.toOwnedSlice(arena),
         };
-    }
-
-    /// (workspace restore) captureAgentForRestore 결과 — claude/codex 세션 자동 fork 정보(빈값이면 일반 셸 복원).
-    const AgentRestoreInfo = struct {
-        kind: []const u8 = "",
-        session: []const u8 = "",
-        argv: []const []const u8 = &.{},
-    };
-
-    /// 이 Term이 claude/codex이고 해당 토글이 켜졌으면, 종료 시점에 새 fork의 source가 될 정보(agent_kind·
-    /// session_id·보존 argv)를 캡처한다(아니면 빈값=일반 셸 복원). exec_path+argv는 KERN_PROCARGS2(captureAgentArgv —
-    /// **틱이 멈춘 종료 시점 호출이라 정적 procargs_buf 공유 안전**), session_id는 훅 매핑의 트랜스크립트 경로에서 뽑는다
-    /// (captureAgentSessionId → readMapping → sessionIdFromTranscript; cwd+mtime 추측 없이 팬별 정확).
-    /// argv[0]은 exec_path 절대경로로 교체하고 민감 인라인 토큰은 redact한다. 결과는 arena 소유. 단일 출처:
-    /// docs/workspace-restore.md "에이전트 세션 자동 fork 복원".
-    fn captureAgentForRestore(self: *AppSession, arena: std.mem.Allocator, term: *Term) AgentRestoreInfo {
-        const kind: app.agent_resume.Kind = switch (term.agent_kind) {
-            .none => return .{},
-            .claude => if (self.loaded_config.config.workspace.restore_claude) .claude else return .{},
-            .codex => if (self.loaded_config.config.workspace.restore_codex) .codex else return .{},
-        };
-        if (!term.rt.live_initialized) return .{};
-
-        // 1) exec_path + 전체 argv 캡처(틱이 멈춘 종료 시점이라 정적 procargs_buf 공유 안전).
-        var str_buf: [16 * 1024]u8 = undefined;
-        var argv_raw: [maru.session.workspace.max_agent_argv][]const u8 = undefined;
-        const cap = term.rt.live_pty.session.captureAgentArgv(&str_buf, &argv_raw) orelse return .{};
-        if (cap.argv.len == 0) return .{};
-        // stale agent_kind 방어: 캡처된 실제 프로그램(node 래퍼면 argv[1] 스크립트, 아니면 exec_path)이 기대 kind와
-        // 일치하는지 재확인한다 — agent_kind는 ~0.5s 폴 캐시라, claude 종료 직후 셸이 idle이거나 다른 명령이 뜬
-        // 순간 종료하면 셸/그 명령의 argv를 잡을 수 있다(그 경우 classifyAgent=none → 빈값, 일반 셸 복원).
-        const prog_path = if (cap.argv.len >= 2 and app.agent_resume.isInterpreterPath(cap.exec_path)) cap.argv[1] else cap.exec_path;
-        if (classifyAgent(std.fs.path.basename(prog_path)) != term.agent_kind) return .{};
-
-        // 2) argv[0]을 exec_path(절대경로)로 교체 → 민감 인라인 토큰 redact.
-        var combined: [maru.session.workspace.max_agent_argv][]const u8 = undefined;
-        var m: usize = 0;
-        combined[m] = cap.exec_path;
-        m += 1;
-        for (cap.argv[1..]) |a| {
-            if (m >= combined.len) break;
-            combined[m] = a;
-            m += 1;
-        }
-        var redacted_buf: [maru.session.workspace.max_agent_argv][]const u8 = undefined;
-        const redacted = app.agent_resume.redactArgv(combined[0..m], &redacted_buf);
-
-        // 3) arena로 소유 이전(str_buf/combined는 지역이라 종료 시점 이후 무효).
-        const argv_out = arena.alloc([]const u8, redacted.len) catch return .{};
-        for (redacted, 0..) |a, i| argv_out[i] = arena.dupe(u8, a) catch return .{};
-
-        return .{
-            .kind = arena.dupe(u8, kind.toString()) catch return .{},
-            .session = self.captureAgentSessionId(arena, term, kind),
-            .argv = argv_out,
-        };
-    }
-
-    /// captureAgentForRestore의 session id 부분 — 종료 시점에 이 팬의 **정확한 세션 트랜스크립트 경로**(훅 매핑)를 읽어
-    /// 그 세션 id를 뽑는다(claude=파일명 uuid, codex=첫 줄 session_meta.id). Term별 임의 mapping id라 cwd+mtime 추측도
-    /// 프로세스 간 surface id 충돌도 없다. 매핑이 없으면 일반 세션은 ""(셸 복원), restore fork는 확인한 fork id 또는
-    /// 첫 훅 전 source id를 유지한다. agent_session.Kind는 app.agent_resume.Kind와 같은 타입이라 변환 없이 넘긴다.
-    fn captureAgentSessionId(self: *AppSession, arena: std.mem.Allocator, term: *Term, kind: app.agent_resume.Kind) []const u8 {
-        if (term.rt.restored_agent_kind) |pending_kind| if (pending_kind != kind) clearRestoredAgentFork(term);
-        const pending_kind = term.rt.restored_agent_kind;
-        const fork_source = term.rt.restored_agent_source[0..term.rt.restored_agent_source_len];
-        const fork_confirmed = term.rt.restored_agent_confirmed[0..term.rt.restored_agent_confirmed_len];
-        var tp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        var id_buf: [agent_restore_session_max]u8 = undefined;
-        const mapped: ?[]const u8 = if (term.rt.agent_mapping_id == 0)
-            null
-        else if (agent_hooks.readMapping(self.io, self.allocator, term.rt.agent_mapping_id, kind, null, &tp_buf)) |transcript_path|
-            agent_session.sessionIdFromTranscript(self.io, self.allocator, kind, transcript_path, &id_buf)
-        else
-            null;
-        const id = restoredForkSessionForSave(pending_kind, kind, fork_source, fork_confirmed, mapped) orelse return "";
-        return arena.dupe(u8, id) catch "";
     }
 
     /// PaneTree 노드를 preorder로 평탄화한다 — leaf(*Pane)는 그 Pane의 tab.panes 인덱스로, split은 방향+ratio(천분율)
@@ -19225,51 +19005,13 @@ pub const AppSession = struct {
     /// 복원 surface 하나로 spawn 준비(createPane/createTerm 공통). new_tab_config에 저장 grid를 얹고, 사용 가능한
     /// (존재하는 디렉터리) cwd면 그걸 쓴다 — 마지막 create 호출만 두 함수가 다르다. 모델의 command(argv[0])·title은
     /// v1 복원에선 쓰지 않는다(기본 셸·"Maru"로 spawn; 정확한 argv·제목 복원은 후속) — 저장은 향후 복원용으로만.
-    fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface, args_buf: [][]const u8) struct { req: maru.pty.SpawnRequest, size: terminal.Size, restored_fork: ?RestoredAgentFork } {
+    fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface) struct { req: maru.pty.SpawnRequest, size: terminal.Size } {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
-        // claude/codex 세션 자동 복원(opt-in) — 정확한 agent source 정보가 있으면 기본 셸 대신 새 fork로 띄운다.
-        if (self.agentRestoreRequest(sm, size, args_buf)) |req| return .{
-            .req = req,
-            .size = size,
-            .restored_fork = .{
-                .kind = app.agent_resume.Kind.fromString(sm.agent_kind).?,
-                .source_session = sm.agent_session,
-            },
-        };
         var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
         if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
-        return .{ .req = req, .size = size, .restored_fork = null };
-    }
-
-    /// (workspace restore) sm이 claude/codex 에이전트이고 해당 토글이 켜졌으면 fork SpawnRequest를 만든다(아니면
-    /// null → 기본 셸). command=보존 argv[0](exec_path 절대경로), args=정확한 source session_id에서 새 session으로
-    /// fork하는 argv. 정확한 id가 없으면 최근 세션을 추측하지 않고 null로 기본 셸을 띄운다. 셸이 아니라 바이너리 직접 exec이라
-    /// 에이전트 바이너리 자체는 PATH 무관하게 뜨지만, 에이전트가 spawn하는 하위 도구(git·rg 등)의 PATH는 login 셸이
-    /// 아니라 maru 프로세스 env 기준이라 다를 수 있다(behavioral 한계 — 후속). args 슬라이스는 호출자 스택의 args_buf를
-    /// 가리킨다 — createTermFromSurface가 동기 spawn하므로 spawn까지 유효. 단일 출처: docs/workspace-restore.md "에이전트 세션 자동 fork 복원".
-    fn agentRestoreRequest(self: *AppSession, sm: maru.session.workspace.Surface, size: terminal.Size, args_buf: [][]const u8) ?maru.pty.SpawnRequest {
-        const kind = app.agent_resume.Kind.fromString(sm.agent_kind) orelse return null;
-        const enabled = switch (kind) {
-            .claude => self.loaded_config.config.workspace.restore_claude,
-            .codex => self.loaded_config.config.workspace.restore_codex,
-        };
-        if (!enabled or sm.agent_session.len == 0 or sm.agent_session.len > agent_restore_session_max or sm.agent_argv.len == 0 or sm.agent_argv[0].len == 0) return null;
-        const args = app.agent_resume.rebuildAgentArgv(kind, sm.agent_argv, sm.agent_session, args_buf);
-        if (args.len == 0) return null;
-        var req: maru.pty.SpawnRequest = .{
-            .command = sm.agent_argv[0], // exec_path 절대경로(PATH 의존 제거)
-            .args = args,
-            .login = false, // 셸 아닌 에이전트 바이너리 직접 exec
-            .size = size,
-        };
-        req.term = self.loaded_config.config.term;
-        req.env_overrides = self.loaded_config.config.env;
-        req.zdotdir = self.new_tab_zdotdir;
-        req.ssh_integration_bin = self.new_tab_ssh_bin;
-        if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c;
-        return req;
+        return .{ .req = req, .size = size };
     }
 
     /// 직렬화 모델의 custom_name(""=없음)을 라이브 owned `?[]const u8`(null=없음)로 변환한다 — 비면 null,
@@ -19280,10 +19022,9 @@ pub const AppSession = struct {
     }
 
     fn createPaneFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Pane {
-        var args_buf: [maru.session.workspace.max_agent_argv + 4][]const u8 = undefined;
-        const rs = self.restoreSpawn(sm, &args_buf);
+        const rs = self.restoreSpawn(sm);
         const cfg = self.new_tab_config;
-        const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind), rs.restored_fork);
+        const pane = try self.createPane(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
         errdefer self.destroyPane(pane);
         // 첫 Term(=이 surface)의 사용자 rename 복원. 실패 시 errdefer destroyPane이 정리한다.
         pane.activeTerm().surface.custom_name = try self.dupeCustomName(sm.custom_name);
@@ -19291,10 +19032,9 @@ pub const AppSession = struct {
     }
 
     fn createTermFromSurface(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
-        var args_buf: [maru.session.workspace.max_agent_argv + 4][]const u8 = undefined;
-        const rs = self.restoreSpawn(sm, &args_buf);
+        const rs = self.restoreSpawn(sm);
         const cfg = self.new_tab_config;
-        const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind), rs.restored_fork);
+        const term = try self.createTerm(rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
         errdefer self.destroyTerm(term);
         term.surface.custom_name = try self.dupeCustomName(sm.custom_name);
         return term;
@@ -19513,7 +19253,6 @@ pub const AppSession = struct {
                             term.agent_stabilizer.reset();
                             term.agent_screen_generation = 0;
                             term.agent_last_output_ms = 0;
-                            if (agentExitClearsRestoredFork(prev, term.agent_kind)) clearRestoredAgentFork(term);
                         }
                     }
                     if (observer_probe and term.agent_kind != .none) self.pollAgentState(term, displayed);
@@ -23944,11 +23683,6 @@ pub const AppSession = struct {
         self.clipboard_read_target_buf.deinit(self.allocator);
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
         if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
-        for (self.agent_notifications.items) |n| {
-            self.allocator.free(n.title);
-            self.allocator.free(n.body);
-        }
-        self.agent_notifications.deinit(self.allocator);
         for (self.notification_history.items) |n| {
             self.allocator.free(n.title);
             self.allocator.free(n.body);
@@ -24105,11 +23839,6 @@ pub const AppSession = struct {
                     if (term.rt.live_initialized or term.kind == .web) {
                         self.live_registry.remove(term.surface.id) catch {}; // 번들/sentinel deinit(custom_name + surface.deinit + 슬롯)
                         term.rt.live_initialized = false;
-                    }
-                    // pass 1에서 PTY/reader join이 끝났으므로 Stop 훅이 마지막으로 쓴 Term 전용 매핑까지 안전하게 지운다.
-                    if (term.rt.agent_mapping_id != 0) {
-                        agent_hooks.removeMapping(self.io, term.rt.agent_mapping_id);
-                        term.rt.agent_mapping_id = 0;
                     }
                     self.allocator.destroy(term);
                 }
@@ -37242,125 +36971,6 @@ test "workspace 복원 text → parse → applyWorkspaceWindow (R4b ABI 경로)"
     try std.testing.expectEqualStrings("", cap.tabs[0].panes[1].custom_name); // 빈 custom_name = 이름 없음
 }
 
-test "restoredForkMappedSession: source와 다른 id만 새 fork로 인정" {
-    try std.testing.expect(restoredForkMappedSession("source", null) == null);
-    try std.testing.expect(restoredForkMappedSession("source", "source") == null);
-    try std.testing.expectEqualStrings("forked", restoredForkMappedSession("source", "forked").?);
-}
-
-test "confirmed restore fork 이후 random mapping은 source 재매핑도 현재 세션으로 인정" {
-    var term: Term = .{};
-    term.rt.restored_agent_kind = .claude;
-    @memcpy(term.rt.restored_agent_source[0..6], "source");
-    term.rt.restored_agent_source_len = 6;
-
-    try std.testing.expect(confirmRestoredAgentFork(&term, "forked"));
-    try std.testing.expectEqual(@as(usize, 0), term.rt.restored_agent_source_len);
-    const remapped = restoredForkMappedSession(term.rt.restored_agent_source[0..term.rt.restored_agent_source_len], "source").?;
-    try std.testing.expectEqualStrings("source", remapped);
-    try std.testing.expect(confirmRestoredAgentFork(&term, remapped));
-    try std.testing.expectEqualStrings("source", term.rt.restored_agent_confirmed[0..term.rt.restored_agent_confirmed_len]);
-}
-
-test "restore pending은 provider 종료에서만 clear하고 초기 감지는 유지" {
-    try std.testing.expect(!agentExitClearsRestoredFork(.none, .claude));
-    try std.testing.expect(!agentExitClearsRestoredFork(.none, .codex));
-    try std.testing.expect(!agentExitClearsRestoredFork(.claude, .codex));
-    try std.testing.expect(agentExitClearsRestoredFork(.claude, .none));
-    try std.testing.expect(agentExitClearsRestoredFork(.codex, .none));
-}
-
-test "restoredForkSessionForSave: source → confirmed → 최신 mapping 순서와 provider kind를 지킨다" {
-    try std.testing.expectEqualStrings("source", restoredForkSessionForSave(.claude, .claude, "source", "", null).?);
-    try std.testing.expectEqualStrings("source", restoredForkSessionForSave(.claude, .claude, "source", "", "source").?);
-    // OSC 7/current cwd와 mapping 파일이 없어도 poll에서 확인한 fork id를 잃지 않는다.
-    try std.testing.expectEqualStrings("forked", restoredForkSessionForSave(.claude, .claude, "source", "forked", null).?);
-    try std.testing.expectEqualStrings("latest", restoredForkSessionForSave(.claude, .claude, "source", "forked", "latest").?);
-    // Claude pending 뒤 Codex로 바뀌면 Claude id를 Codex source로 직렬화하지 않는다.
-    try std.testing.expect(restoredForkSessionForSave(.claude, .codex, "claude-source", "claude-fork", null) == null);
-    try std.testing.expectEqualStrings("codex-current", restoredForkSessionForSave(.claude, .codex, "claude-source", "claude-fork", "codex-current").?);
-}
-
-test "captureAgentSessionId: cwd와 mapping 파일이 없어도 confirmed fork를 저장하고 kind 전환은 폐기" {
-    var session: AppSession = undefined;
-    session.io = std.testing.io;
-    session.allocator = std.testing.allocator;
-    var term: Term = .{};
-    term.rt.restored_agent_kind = .claude;
-    @memcpy(term.rt.restored_agent_source[0..6], "source");
-    term.rt.restored_agent_source_len = 6;
-    try std.testing.expect(confirmRestoredAgentFork(&term, "forked"));
-
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    try std.testing.expectEqualStrings("forked", session.captureAgentSessionId(arena, &term, .claude));
-
-    // 같은 Term에서 provider가 바뀌면 Claude source/confirmed를 Codex session으로 저장하지 않는다.
-    try std.testing.expectEqualStrings("", session.captureAgentSessionId(arena, &term, .codex));
-    try std.testing.expect(term.rt.restored_agent_kind == null);
-    try std.testing.expectEqual(@as(usize, 0), term.rt.restored_agent_source_len);
-    try std.testing.expectEqual(@as(usize, 0), term.rt.restored_agent_confirmed_len);
-}
-
-test "agentRestoreRequest: 토글 게이팅 + 정확한 id일 때만 provider-native fork" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // session.init이 실 PTY spawn
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    // codex처럼 node 래퍼 형태(exec_path=node, argv[1]=스크립트)로 저장된 surface — capture가 만드는 모양.
-    const sm = maru.session.workspace.Surface{
-        .agent_kind = "claude",
-        .agent_session = "sid-123",
-        .agent_argv = &[_][]const u8{ "/usr/bin/node", "/opt/claude/cli.js", "--dangerously-skip-permissions" },
-    };
-    var args_buf: [maru.session.workspace.max_agent_argv + 4][]const u8 = undefined;
-
-    // 토글 off(기본 false) → null(일반 셸 복원).
-    try std.testing.expectEqual(@as(?maru.pty.SpawnRequest, null), session.agentRestoreRequest(sm, terminal.Size.default, &args_buf));
-
-    // 토글 on → fork SpawnRequest. node 래퍼라 스크립트를 보존하고 위험모드 + --resume <id> --fork-session을 재구성한다.
-    session.loaded_config.config.workspace.restore_claude = true;
-    const req = session.agentRestoreRequest(sm, terminal.Size.default, &args_buf).?;
-    try std.testing.expectEqualStrings("/usr/bin/node", req.command); // exec_path(인터프리터)가 command
-    try std.testing.expectEqual(@as(usize, 5), req.args.len);
-    try std.testing.expectEqualStrings("/opt/claude/cli.js", req.args[0]); // 스크립트 보존(`node /script …`)
-    try std.testing.expectEqualStrings("--dangerously-skip-permissions", req.args[1]); // 위험모드 보존
-    try std.testing.expectEqualStrings("--resume", req.args[2]);
-    try std.testing.expectEqualStrings("sid-123", req.args[3]);
-    try std.testing.expectEqualStrings("--fork-session", req.args[4]);
-    try std.testing.expectEqual(false, req.login); // 셸 아닌 바이너리 직접 exec
-
-    // exact id가 없으면 --continue로 최근 세션을 추측하지 않고 일반 셸 복원(null)으로 돌아간다.
-    const missing_id = maru.session.workspace.Surface{
-        .agent_kind = "claude",
-        .agent_session = "",
-        .agent_argv = sm.agent_argv,
-    };
-    try std.testing.expectEqual(@as(?maru.pty.SpawnRequest, null), session.agentRestoreRequest(missing_id, terminal.Size.default, &args_buf));
-
-    // codex 토글은 별개 — claude만 켠 상태에서 codex surface는 게이트로 null.
-    const sm_codex = maru.session.workspace.Surface{ .agent_kind = "codex", .agent_session = "cid", .agent_argv = &[_][]const u8{ "/usr/bin/codex", "resume", "old" } };
-    try std.testing.expectEqual(@as(?maru.pty.SpawnRequest, null), session.agentRestoreRequest(sm_codex, terminal.Size.default, &args_buf));
-
-    // codex 토글을 켜면 같은 source를 resume하지 않고 fork한다.
-    session.loaded_config.config.workspace.restore_codex = true;
-    const codex_req = session.agentRestoreRequest(sm_codex, terminal.Size.default, &args_buf).?;
-    try std.testing.expectEqualStrings("/usr/bin/codex", codex_req.command);
-    try std.testing.expectEqual(@as(usize, 2), codex_req.args.len);
-    try std.testing.expectEqualStrings("fork", codex_req.args[0]);
-    try std.testing.expectEqualStrings("cid", codex_req.args[1]);
-}
-
 test "usableRestoreCwd: 절대경로 형식 필터(존재·디렉터리는 childExec graceful이 담당)" {
     // 절대 경로면 존재·디렉터리 여부와 무관하게 통과한다 — 없는 경로·파일도. 자식이 chdir 실패 시 $HOME으로
     // 폴백하므로(pty/macos childExec), 여기선 형식만 거른다(TOCTOU 추측 제거).
@@ -43091,7 +42701,7 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
     }
 }
 
-test "settings notification toggle: 데스크톱 알림을 켤 때 macOS 권한 요청 신호를 한 번 세운다" {
+test "settings notifications.osc toggle requests macOS authorization once" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -43105,39 +42715,29 @@ test "settings notification toggle: 데스크톱 알림을 켤 때 macOS 권한 
     });
     defer session.deinit();
 
-    session.loaded_config.config.notifications.agent_complete = false; // 꺼진 상태에서 켬 전이를 만든다.
+    session.loaded_config.config.notifications.osc = false;
     session.toggleSettings();
-
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const sections = try session.buildSectionList(scratch.allocator());
-    var terminal_idx: ?usize = null;
-    for (sections, 0..) |s, i| if (s.section == .terminal) {
-        terminal_idx = i;
+    for (sections, 0..) |section, i| if (section.section == .terminal) {
+        session.chrome_host.settings.section = i;
         break;
     };
-    try std.testing.expect(terminal_idx != null);
-    session.chrome_host.settings.section = terminal_idx.?;
     session.refreshSettingsFieldCount();
-
-    const cf = try session.currentSectionFields(scratch.allocator());
-    var notification_idx: ?usize = null;
-    for (cf.bools, 0..) |b, i| if (std.mem.eql(u8, b.key, "notifications.agent-complete")) {
-        notification_idx = i;
-        try std.testing.expect(!b.value);
+    const fields = try session.currentSectionFields(scratch.allocator());
+    var found = false;
+    for (fields.bools, 0..) |field, i| if (std.mem.eql(u8, field.key, "notifications.osc")) {
+        session.chrome_host.settings.selected = i;
+        found = true;
         break;
     };
-    try std.testing.expect(notification_idx != null);
-    session.chrome_host.settings.selected = notification_idx.?;
+    try std.testing.expect(found);
+
     try std.testing.expect(!session.takeNotificationAuthorizationRequest());
-
-    session.toggleSelectedSetting(); // off -> on: 데스크톱 알림 권한 요청 신호.
-    try std.testing.expect(session.loaded_config.config.notifications.agent_complete);
+    session.toggleSelectedSetting();
+    try std.testing.expect(session.loaded_config.config.notifications.osc);
     try std.testing.expect(session.takeNotificationAuthorizationRequest());
-    try std.testing.expect(!session.takeNotificationAuthorizationRequest()); // one-shot drain.
-
-    session.toggleSelectedSetting(); // on -> off: 권한 요청 불필요.
-    try std.testing.expect(!session.loaded_config.config.notifications.agent_complete);
     try std.testing.expect(!session.takeNotificationAuthorizationRequest());
 }
 

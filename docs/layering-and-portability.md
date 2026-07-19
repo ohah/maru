@@ -90,7 +90,7 @@ flowchart TD
 
 | `src/app` → session 이동(모델, **session/chrome이 의존**) | `src/app` 잔류 |
 |---|---|
-| `split_tree`·`workspace`·`surface`·`window`·`core_command` | **유틸**(순수하나 app/platform만 씀, 모델 아님): `label`·`agent_resume`·`artifact_io` · **런타임**(`pty` 참조): `live_pty`·`runtime`·`runtime_pump`·`frame_loop`·`host`·`pty_reader`·`live_pty_registry` |
+| `split_tree`·`workspace`·`surface`·`window`·`core_command` | **유틸**(순수하나 app/platform만 씀, 모델 아님): `label`·`artifact_io` · **런타임**(`pty` 참조): `live_pty`·`runtime`·`runtime_pump`·`frame_loop`·`host`·`pty_reader`·`live_pty_registry` |
 
 **목표:** 중립 모델을 session core(`src/session/`)로 모으고 `src/app`엔 런타임 어댑터만 남겨, `session→app` 의존을 **0으로** 만든다(session은 terminal·renderer 계약만 의존). 이식 시 모델 전부가 OS-중립으로 재사용된다.
 
@@ -102,7 +102,7 @@ flowchart TD
 
 | 단계 | 옮길 것 | 비고 |
 |---|---|---|
-| A1 | `split_tree`·`workspace`·`label`·`agent_resume`·`artifact_io`(이미 순수, import 0) | 가장 쉬움 — 파일 이동 + barrel/참조 경로만 |
+| A1 | `split_tree`·`workspace`·`label`·`artifact_io`(이미 순수, import 0) | 가장 쉬움 — 파일 이동 + barrel/참조 경로만 |
 | A2 | `surface`·`window`·`core_command`(`terminal`만 참조) | `session→terminal`(이미 있음). 런타임 참조처(`live_pty` 등) import 갱신 |
 | A3 | `session→app` 잔여 의존 0 확인 + `check-boundaries`에 `session`의 `app` 금지 추가 | 의존 소거를 가드로 고정 |
 

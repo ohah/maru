@@ -5754,7 +5754,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    // 세팅 GUI에서 notifications.agent-complete/osc를 켠 경우, 사용자가 지금 데스크톱 알림을 원한다고 명시한 것이다.
+    // 세팅 GUI에서 notifications.osc를 켠 경우, 사용자가 지금 데스크톱 알림을 원한다고 명시한 것이다.
     // 단순히 requestAuthorization를 다시 부르면 안 된다 — 시작 시 ensureNotificationAuthorization이 매 tick 선요청하며
     // OS의 1회성 권한 팝업을 이미 소비했으므로, 거부 상태의 사용자에겐 UI 없이 false만 돌아와 무력하다. 그래서 현재
     // 권한 상태를 먼저 보고(getNotificationSettings) 분기한다: notDetermined면 요청(팝업), denied면 macOS가 재팝업을

@@ -694,7 +694,7 @@ uint32_t maru_macos_app_session_take_bell(MaruAppHostSession *session);
 /* Dock 배지 1회성 신호(config bell.dock-badge). BEL이 창 포커스 없을 때 울리면 1, 아니면 0. Swift가 매 tick 호출해
    1이면 NSApp.dockTile.badgeLabel을 ●로 세운다(포커스 복귀 시 Swift가 지움). take_bell과 같은 1회성. session null=0. v76. */
 uint32_t maru_macos_app_session_take_bell_badge(MaruAppHostSession *session);
-/* 세팅 GUI에서 데스크톱 알림 토글(notifications.agent-complete/osc)을 켠 경우 macOS 알림 권한 요청을 Swift에 맡기는
+/* 세팅 GUI에서 데스크톱 알림 토글(notifications.osc)을 켠 경우 macOS 알림 권한 요청을 Swift에 맡기는
    1회성 신호. pending이면 1(플래그 비움), 없으면 0. Swift가 tick마다 호출해 1이면 UNUserNotificationCenter 권한 요청을
    시도한다. session null=0. v92. */
 uint32_t maru_macos_app_session_take_notification_authorization_request(MaruAppHostSession *session);

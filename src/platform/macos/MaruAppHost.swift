@@ -6193,8 +6193,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    // open_file_panel 액션의 AppKit 어댑터. 확장자 필터는 UX용이고 최종 허용·파일 종류 판정은 Zig
-    // open_file_panel_path가 맡는다. 취소는 one-shot을 이미 비웠으므로 무동작이다.
+    // open_file_panel 액션과 완전히 빈 도크의 우상단 launcher가 공유하는 AppKit 어댑터. 확장자 필터는
+    // UX용이고 최종 허용·파일 종류 판정은 Zig open_file_panel_path가 맡는다. 취소는 one-shot을 이미
+    // 비웠으므로 무동작이다.
     private func drainFilePanelPick() {
         guard let session = appSession else { return }
         guard maru_macos_app_session_take_file_panel_pick_request(session) != 0 else { return }

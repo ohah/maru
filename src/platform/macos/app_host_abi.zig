@@ -876,7 +876,8 @@ pub export fn maru_macos_app_session_provide_picked_file(session: ?*AppSession, 
     return @intFromEnum(Status.ok);
 }
 
-// open_file_panel(Cmd+O/팔릿/메뉴)이 요청한 Markdown/HTML NSOpenPanel one-shot. (v121)
+// open_file_panel(Cmd+O/팔릿/메뉴) 또는 완전히 빈 도크의 우상단 launcher가 요청한 Markdown/HTML
+// NSOpenPanel one-shot. 어느 producer든 AppSession.requestFilePanelPick의 같은 boolean latch로 합류한다. (v121)
 pub export fn maru_macos_app_session_take_file_panel_pick_request(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
     return if (app_session.takeFilePanelPickRequest()) 1 else 0;

@@ -388,7 +388,7 @@ const header_icon_scale_numerator: u32 = 17;
 const header_icon_scale_denominator: u32 = 10;
 
 /// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 아래쪽 경계.
-/// dockCollapsedToggleRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
+/// filePanelDockControlRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
 fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
     if (cell_height_px == 0) return titlebar_strip_px;
     const origin_y = if (titlebar_strip_px > cell_height_px) (titlebar_strip_px - cell_height_px) / 2 else 0;
@@ -2851,9 +2851,10 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn dockCollapsedToggleRect(self: *const AppSession) ?maru.session.SplitRect {
-        // 도크에 파일이 있으면 접힘·팽창 **둘 다** 표시 — titlebar 띠 우측 끝 단일 접기/펴기 토글(탭바 접기 버튼 대체).
-        if (!self.dock_initialized or self.chrome_minimal or !self.dockHasContent() or self.cell_width_px == 0) return null;
+    fn filePanelDockControlRect(self: *const AppSession) ?maru.session.SplitRect {
+        // titlebar 띠의 파일 도크 진입점은 빈 시작 상태에도 유지한다. 내용이 있으면 접기/펴기, 없으면 기존
+        // open_file_panel과 같은 파일 선택 요청을 내므로 사용자가 첫 파일을 열 진입점을 잃지 않는다.
+        if (!self.dock_initialized or self.chrome_minimal or self.cell_width_px == 0) return null;
         const w = @min(2 * self.cell_width_px, self.backing_width_px);
         // 렌더러의 1.7× quad가 큰 글꼴에서 titlebar 띠 아래로 보일 수 있으므로 hit/hover rect도 실제
         // visual bottom까지 포함한다. 가로는 2셀 rect 안에 1.7셀 glyph를 중앙 배치해 이미 전부 포함한다.
@@ -2867,9 +2868,25 @@ pub const AppSession = struct {
         return .{ .x = self.backing_width_px -| w -| margin, .y = 0, .w = w, .h = h };
     }
 
-    fn toggleDockCollapsed(self: *AppSession) void {
-        if (!self.dock_initialized or !self.dockHasContent()) return;
-        self.dock.collapsed = !self.dock.collapsed;
+    const FilePanelDockControlAction = enum { request_file_picker, collapse, expand };
+
+    fn filePanelDockControlAction(self: *const AppSession) ?FilePanelDockControlAction {
+        if (!self.dock_initialized) return null;
+        if (!self.dockHasContent()) return .request_file_picker;
+        return if (self.dock.collapsed) .expand else .collapse;
+    }
+
+    fn activateFilePanelDockControl(self: *AppSession) void {
+        switch (self.filePanelDockControlAction() orelse return) {
+            // 완전히 빈 dock 본문은 시작부터 터미널 폭을 차지하지 않는다. 대신 같은 우상단 컨트롤이 파일 선택기를
+            // 요청하고, maru_macos_app_session_open_file_panel_path -> openFilePanelPath가 성공해야 실제 dock을 펼친다.
+            .request_file_picker => {
+                self.requestFilePanelPick();
+                return;
+            },
+            .collapse => self.dock.collapsed = true,
+            .expand => self.dock.collapsed = false,
+        }
         self.dock_resize_drag_active = false;
         self.dock_resize_drag_offset_px = 0;
         self.dock_tree_resize_drag_active = false;
@@ -2878,6 +2895,10 @@ pub const AppSession = struct {
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
         self.metal_dirty = true;
+    }
+
+    fn requestFilePanelPick(self: *AppSession) void {
+        self.file_panel_pick_pending = true;
     }
 
     /// 사이드바와 파일 도크를 뺀 터미널 영역. split 레이아웃·resize·렌더·hit-test가
@@ -7722,7 +7743,7 @@ pub const AppSession = struct {
             .new_web_tab => if (!self.tabsBlocked()) {
                 self.newWebTermInActivePane(.browser) catch {};
             },
-            .open_file_panel => self.file_panel_pick_pending = true,
+            .open_file_panel => self.requestFilePanelPick(),
             .split_file_panel_horizontal => self.splitFocusedDockGroup(.horizontal),
             .split_file_panel_vertical => self.splitFocusedDockGroup(.vertical),
             .close_file_panel_group => self.closeFocusedDockGroup(),
@@ -9424,7 +9445,7 @@ pub const AppSession = struct {
 
     fn focusFileTree(self: *AppSession) void {
         if (!self.dock_initialized or !self.dockHasContent()) return;
-        if (self.dock.collapsed) self.toggleDockCollapsed();
+        if (self.dock.collapsed) self.activateFilePanelDockControl();
         const restore_surface: ?u64 = switch (self.focus_owner) {
             .dock_surface => |surface_id| if (self.dock.entryForSurfaceId(surface_id) != null) surface_id else null,
             .file_tree => |owner| owner.restore_surface,
@@ -15603,9 +15624,9 @@ pub const AppSession = struct {
             }
         }
         if (kind == 1 and button == 0) {
-            if (self.dockCollapsedToggleRect()) |r| {
+            if (self.filePanelDockControlRect()) |r| {
                 if (layout_math.pointInRect(x_px, y_px, r)) {
-                    self.toggleDockCollapsed();
+                    self.activateFilePanelDockControl();
                     return;
                 }
             }
@@ -17510,7 +17531,7 @@ pub const AppSession = struct {
         }
         self.setHoveredSlot(null); // 터미널 영역으로 나가면 사이드바 호버 해제
         self.setHoveredHeaderRegion(.none); // 사이드바 밖 → 헤더 아이콘 호버 배경 지움
-        if (self.dockCollapsedToggleRect()) |r| {
+        if (self.filePanelDockControlRect()) |r| {
             if (layout_math.pointInRect(x_px, y_px, r)) {
                 self.setDockToggleHovered(true);
                 self.setHoveredTab(null);
@@ -20314,7 +20335,7 @@ pub const AppSession = struct {
                 self.appendBarBgQuad(dg.divider, self.dividerColor());
             }
             // 접기/펴기 토글 배경 — 평소 투명(배경색과 동일), 호버 시에만 하이라이트(왼쪽 헤더 아이콘 동형). 사용자 피드백.
-            if (self.dock_toggle_hovered) if (self.dockCollapsedToggleRect()) |r| {
+            if (self.dock_toggle_hovered) if (self.filePanelDockControlRect()) |r| {
                 self.appendBarBgQuad(r, self.chromeQuadBg(self.sidebarHoverBg()));
             };
 
@@ -20648,7 +20669,7 @@ pub const AppSession = struct {
                 }
                 // 접기/펴기 토글 글리프 — 접힘·팽창 공통. 왼쪽 헤더 아이콘과 같게 1.7× 확대(.dock_toggle dest)하고 띠 세로 중앙에.
                 // 1칸 글리프를 2칸 rect 중앙에: origin_x를 반칸 밀어 글리프 셀 중심 = rect 중심(호버 배경과 동심 — 사용자 피드백).
-                if (self.dockCollapsedToggleRect()) |r| {
+                if (self.filePanelDockControlRect()) |r| {
                     const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                     if (coretext_frame_builder.buildFileDockToggleDrawList(self.allocator, dock_active_fg)) |ddl| {
                         // visual hit rect가 titlebar 아래로 확장돼도 glyph center는 titlebar 자체에 고정한다.
@@ -21090,7 +21111,7 @@ pub const AppSession = struct {
                 const rx: f64 = @floatFromInt(r.x);
                 if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 접힘 종 클릭 영역 — 창 드래그 아님
             }
-            if (self.dockCollapsedToggleRect()) |r| {
+            if (self.filePanelDockControlRect()) |r| {
                 const rx: f64 = @floatFromInt(r.x);
                 if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w))) return false; // 도크 접힘 펼치기 토글(우상단) — 창 드래그 아님(안 제외하면 클릭이 performDrag로 새 토글이 안 눌린다)
             }
@@ -36073,6 +36094,62 @@ test "dock toggle visual bottom covers 1.7x glyph when titlebar is below equal o
     try std.testing.expectEqual(@as(u32, 29), dockToggleVisualBottomPx(18, 28));
 }
 
+test "empty file dock keeps its launcher visible and requests the shared file picker" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    try std.testing.expect(!session.dockHasContent());
+    try std.testing.expect(!session.dockVisible());
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.request_file_picker, session.filePanelDockControlAction().?);
+    const launcher = session.filePanelDockControlRect() orelse return error.MissingDockLauncher;
+    try std.testing.expect(!session.isWindowDragRegion(
+        @floatFromInt(launcher.x + 1),
+        @floatFromInt(launcher.y + 1),
+    ));
+
+    session.metal_dirty = true;
+    _ = try session.tick();
+    var saw_launcher = false;
+    for (session.metal_buffer.cells) |cell| {
+        if (cell.codepoint == 0xF0006 and cell.reserved == metal_frame.native_cell_role_dock_toggle and
+            cell.origin_x >= launcher.x and cell.origin_x < launcher.x + launcher.w and
+            cell.origin_y < session.titlebar_strip_px)
+        {
+            saw_launcher = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_launcher);
+
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    try std.testing.expect(session.takeFilePanelPickRequest());
+    try std.testing.expect(!session.takeFilePanelPickRequest());
+    try std.testing.expect(!session.dockVisible());
+
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/launcher-transition.md", .markdown);
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, session.filePanelDockControlAction().?);
+    session.activateFilePanelDockControl();
+    try std.testing.expect(session.dock.collapsed);
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, session.filePanelDockControlAction().?);
+    session.activateFilePanelDockControl();
+    try std.testing.expect(!session.dock.collapsed);
+
+    session.chrome_minimal = true;
+    try std.testing.expect(session.filePanelDockControlRect() == null);
+}
+
 test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit-test·workspace 캡처" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -36171,9 +36248,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.metal_dirty = true;
     _ = try session.tick();
     var saw_dock_toggle = false;
-    const dock_toggle = session.dockCollapsedToggleRect().?; // 팽창 상태에도 표시(일원화).
+    const dock_toggle = session.filePanelDockControlRect().?; // 팽창 상태에도 표시(일원화).
     for (session.metal_buffer.cells) |cell| {
-        // 접기/펴기 토글 ◧(maru PUA 0xF0006, 렌더러가 1.7× 확대)는 탭바가 아니라 titlebar 띠 우측 끝(dockCollapsedToggleRect)에 세로 중앙 렌더된다.
+        // 파일 도크 컨트롤 ◧(maru PUA 0xF0006, 렌더러가 1.7× 확대)는 탭바가 아니라 titlebar 띠 우측 끝(filePanelDockControlRect)에 세로 중앙 렌더된다.
         if (cell.codepoint == 0xF0006 and
             cell.origin_x >= dock_toggle.x and cell.origin_x < dock_toggle.x + dock_toggle.w and
             cell.origin_y < session.titlebar_strip_px)
@@ -36237,7 +36314,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expectEqual(@as(u8, 2), surfaces.items[2].seam_edges); // dock 본문 우측은 project-tree divider
 
     // titlebar 띠 우측 끝 단일 토글로 닫고 다시 연다(탭바 접기 버튼을 일원화 — 팽창 상태에도 토글 표시).
-    const collapse_toggle = session.dockCollapsedToggleRect().?;
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.collapse, session.filePanelDockControlAction().?);
+    const collapse_toggle = session.filePanelDockControlRect().?;
     const collapse_x: f64 = @floatFromInt(collapse_toggle.x + 1);
     const collapse_y: f64 = @floatFromInt(collapse_toggle.y + 1);
     const dirty_surface_id = group.entries.items[1].surface_id;
@@ -36258,7 +36336,8 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         try std.testing.expectEqual(@as(u32, 0), surface.content_rect.h);
     }
     try std.testing.expect(preserved_dirty_surface);
-    const toggle = session.dockCollapsedToggleRect().?;
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.expand, session.filePanelDockControlAction().?);
+    const toggle = session.filePanelDockControlRect().?;
     // Fix A: 도크 접힘 토글 위는 창 드래그 영역이 아니다 — 아니면 클릭이 Swift performDrag로 새 토글이 안 눌린다.
     try std.testing.expect(!session.isWindowDragRegion(@floatFromInt(toggle.x + 1), @floatFromInt(toggle.y + 1)));
     // 토글 바로 왼쪽 빈 띠는 드래그 영역(제외가 토글 폭에만 걸림을 확인).

@@ -931,7 +931,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         guard let session = controller?.bridgeSession(for: surfaceId) else { return nil }
         // write/dirty/openLink는 side effect라 size-query가 dispatch를 두 번 실행하면 안 된다. 응답은 작은 고정 JSON이므로
         // 단일 1 KiB fill 호출로 끝낸다. read/readAsset만 아래 query/fill 재계산 경로를 쓴다.
-        if method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.openLink" {
+        if method == "maru.file.beginDocument" || method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.resolveExternalChange" || method == "maru.file.openLink" {
             var out = [UInt8](repeating: 0, count: 1024)
             let written = reqBytes.withUnsafeBufferPointer { rp in
                 out.withUnsafeMutableBufferPointer { op in
@@ -978,11 +978,15 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         },
         hello: function () { return window.maru.request("hello"); },
         file: {
-          read: function () { return window.maru.request("maru.file.read"); },
+          beginDocument: function (documentId) { return window.maru.request("maru.file.beginDocument", { document_id: documentId }); },
+          read: function (editorEpoch) { return window.maru.request("maru.file.read", { editor_epoch: editorEpoch }); },
           readAsset: function (path) { return window.maru.request("maru.file.readAsset", { path: path }); },
-          write: function (content) { return window.maru.request("maru.file.write", { content: content }); },
-          setDirty: function (dirty, revision, requestId) {
-            return window.maru.request("maru.file.setDirty", { dirty: dirty, revision: revision, request_id: requestId });
+          write: function (editorEpoch, content) { return window.maru.request("maru.file.write", { editor_epoch: editorEpoch, content: content }); },
+          setDirty: function (dirty, editorEpoch, revision, requestId) {
+            return window.maru.request("maru.file.setDirty", { dirty: dirty, editor_epoch: editorEpoch, revision: revision, request_id: requestId });
+          },
+          resolveExternalChange: function (editorEpoch, success) {
+            return window.maru.request("maru.file.resolveExternalChange", { editor_epoch: editorEpoch, success: success });
           },
           openLink: function (href, forceSystem) {
             return window.maru.request("maru.file.openLink", { href: href, forceSystem: forceSystem });
@@ -996,15 +1000,26 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           try { request = JSON.parse(node.textContent || "{}"); }
           catch (_) { node.textContent = JSON.stringify({ error: "invalid request" }); finish(node); return; }
           var promise;
-          if (request.method === "read") { promise = window.maru.file.read(); }
+          if (request.method === "beginDocument" && Number.isSafeInteger(request.document_id) && request.document_id > 0) {
+            promise = window.maru.file.beginDocument(request.document_id);
+          }
+          else if (request.method === "read" && Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0) {
+            promise = window.maru.file.read(request.editor_epoch);
+          }
           else if (request.method === "readAsset" && typeof request.path === "string" && request.path.length <= 4096) {
             promise = window.maru.file.readAsset(request.path);
-          } else if (request.method === "write" && typeof request.content === "string" && request.content.length <= 8388608) {
-            promise = window.maru.file.write(request.content);
+          } else if (request.method === "write" && Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
+                     typeof request.content === "string" && request.content.length <= 8388608) {
+            promise = window.maru.file.write(request.editor_epoch, request.content);
           } else if (request.method === "setDirty" && typeof request.dirty === "boolean" &&
+                     Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
                      Number.isSafeInteger(request.revision) && request.revision >= 0 &&
                      Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
-            promise = window.maru.file.setDirty(request.dirty, request.revision, request.request_id);
+            promise = window.maru.file.setDirty(request.dirty, request.editor_epoch, request.revision, request.request_id);
+          } else if (request.method === "resolveExternalChange" &&
+                     Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
+                     typeof request.success === "boolean") {
+            promise = window.maru.file.resolveExternalChange(request.editor_epoch, request.success);
           } else if (request.method === "openLink" && typeof request.href === "string" && request.href.length <= 4096 && typeof request.forceSystem === "boolean") {
             promise = window.maru.file.openLink(request.href, request.forceSystem);
           } else {
@@ -2257,6 +2272,242 @@ private func browserCtlExecuteScriptStream(
 //
 // **현행 범위**: browser와 file panel 실콘텐츠가 이 래퍼를 공유한다. Markdown live/source의 편집키는 WebKit, 앱 action과
 // explicit consume은 Zig가 소유한다. WKWebView 내부 IME는 계속 WebKit 소유다. docs/web-panel.md §4, docs/file-panel.md §6.
+/// FP10d 전용 제품 E2E coordinator. 제품 WebView host는 mode 적용·입력 전달만 맡고, smoke의 비동기
+/// ready→edit→save→disk 관측 수명과 retry/epoch는 이 타입이 단독 소유한다. `isSmokeMode` didFinish에서만 시작된다.
+@MainActor
+final class FilePanelEditingSmokeProbe {
+    weak var panel: MaruWebPanelView?
+    var editor = "pending"
+    var liveWorker = "pending"
+    var liveWorkerFailure = "pending"
+    var liveFragments = "pending"
+    var liveFragmentsDesired = "pending"
+    var liveFragmentsMounted = "pending"
+    var defaultMode = "pending"
+    var edit = "pending"
+    var cmdSRoute = "pending"
+    var diskSaved = "pending"
+    var write = "pending"
+
+    private var navigationEpoch: UInt64 = 0
+    private var saveStartedEpoch: UInt64?
+    nonisolated private static let marker = "FP10d actual Cmd+S marker"
+    nonisolated private static let diskProbeTailBytes = 4096
+
+    init(panel: MaruWebPanelView) {
+        self.panel = panel
+    }
+
+    func invalidateNavigation() {
+        navigationEpoch &+= 1
+        saveStartedEpoch = nil
+        editor = "pending"
+        liveWorker = "pending"
+        liveWorkerFailure = "pending"
+        liveFragments = "pending"
+        liveFragmentsDesired = "pending"
+        liveFragmentsMounted = "pending"
+        defaultMode = "pending"
+        edit = "pending"
+        cmdSRoute = "pending"
+        diskSaved = "pending"
+        write = "pending"
+    }
+
+    func start(requestedMode: Int32) {
+        // didStartProvisionalNavigation이 실제 문서 수명 경계를 소유한다. 테스트용 직접 start도 stale
+        // callback을 허용하지 않도록 navigation이 없었던 최초 호출만 같은 초기화를 수행한다.
+        if navigationEpoch == 0 { invalidateNavigation() }
+        let epoch = navigationEpoch
+        defaultMode = requestedMode == Int32(MARU_FILE_PANEL_MODE_LIVE_PREVIEW)
+            ? "live-preview" : "unexpected-\(requestedMode)"
+        captureEditor(epoch: epoch, attemptsRemaining: 24)
+    }
+
+    private func captureEditor(epoch: UInt64, attemptsRemaining: Int) {
+        guard epoch == navigationEpoch, let panel else { return }
+        let script = """
+        JSON.stringify({
+          editor: document.querySelector('.cm-content')?.textContent?.includes('FP4 viewer fixture') === true,
+          worker: document.getElementById('viewer-status')?.dataset.liveWorker || 'pending',
+          failure: document.getElementById('viewer-status')?.dataset.liveWorkerFailure || 'none',
+          fragments: document.querySelectorAll('.maru-live-fragment-frame[data-fragment-rendered="true"]').length,
+          desired: document.getElementById('viewer-status')?.dataset.liveFragmentsDesired || 'pending',
+          mounted: document.getElementById('viewer-status')?.dataset.liveFragmentsMounted || 'pending'
+        })
+        """
+        panel.webView.evaluateJavaScript(script) { [weak self] value, _ in
+            guard let self, epoch == self.navigationEpoch,
+                  let raw = value as? String, let data = raw.data(using: .utf8),
+                  let probe = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            let editorReady = probe["editor"] as? Bool ?? false
+            let worker = probe["worker"] as? String ?? "pending"
+            let fragments = probe["fragments"] as? Int ?? 0
+            self.editor = String(editorReady)
+            self.liveWorker = worker
+            self.liveWorkerFailure = probe["failure"] as? String ?? "none"
+            self.liveFragments = String(fragments)
+            self.liveFragmentsDesired = probe["desired"] as? String ?? "pending"
+            self.liveFragmentsMounted = probe["mounted"] as? String ?? "pending"
+            if editorReady, worker == "running", fragments > 0 {
+                self.startEditingSave(epoch: epoch)
+                return
+            }
+            guard attemptsRemaining > 1 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.captureEditor(epoch: epoch, attemptsRemaining: attemptsRemaining - 1)
+            }
+        }
+    }
+
+    private func startEditingSave(epoch: UInt64) {
+        guard epoch == navigationEpoch, saveStartedEpoch != epoch, let panel else { return }
+        saveStartedEpoch = epoch
+        guard let window = panel.webView.window, window.makeFirstResponder(panel.webView) else {
+            edit = "false"
+            return
+        }
+        panel.webView.callAsyncJavaScript(
+            """
+            const content = document.querySelector('.cm-content');
+            if (!(content instanceof HTMLElement)) return false;
+            content.focus();
+            const selection = window.getSelection();
+            if (selection === null) return false;
+            const range = document.createRange();
+            range.selectNodeContents(content);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return true;
+            """,
+            arguments: [:],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            guard let self, epoch == self.navigationEpoch else { return }
+            guard case .success(let value) = result, value as? Bool == true else {
+                self.edit = "false"
+                return
+            }
+            self.postEditorText(epoch: epoch)
+        }
+    }
+
+    private func postEditorText(epoch: UInt64) {
+        guard epoch == navigationEpoch, let panel, let window = panel.webView.window else {
+            edit = "false"
+            return
+        }
+        for character in "\n\n\(Self.marker)\n" {
+            let text = String(character)
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: text,
+                charactersIgnoringModifiers: text,
+                isARepeat: false,
+                keyCode: character == "\n" ? 36 : 0
+            ) else {
+                edit = "false"
+                return
+            }
+            window.firstResponder?.keyDown(with: event)
+        }
+        captureEdit(epoch: epoch, attemptsRemaining: 20)
+    }
+
+    private func captureEdit(epoch: UInt64, attemptsRemaining: Int) {
+        guard epoch == navigationEpoch, let panel else { return }
+        panel.webView.callAsyncJavaScript(
+            "return document.querySelector('.cm-content')?.textContent?.includes(marker) === true;",
+            arguments: ["marker": Self.marker],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            guard let self, epoch == self.navigationEpoch else { return }
+            if case .success(let value) = result, value as? Bool == true {
+                self.edit = "true"
+                self.postSaveShortcut(epoch: epoch)
+                return
+            }
+            guard attemptsRemaining > 1 else {
+                self.edit = "false"
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.captureEdit(epoch: epoch, attemptsRemaining: attemptsRemaining - 1)
+            }
+        }
+    }
+
+    private func postSaveShortcut(epoch: UInt64) {
+        guard epoch == navigationEpoch, let panel, let controller = panel.controller,
+              let window = panel.webView.window,
+              let event = NSEvent.keyEvent(
+                  with: .keyDown,
+                  location: .zero,
+                  modifierFlags: [.command],
+                  timestamp: ProcessInfo.processInfo.systemUptime,
+                  windowNumber: window.windowNumber,
+                  context: nil,
+                  characters: "s",
+                  charactersIgnoringModifiers: "s",
+                  isARepeat: false,
+                  keyCode: 1
+              ) else {
+            cmdSRoute = "unavailable"
+            return
+        }
+        cmdSRoute = controller.webPanelKeyRoute(panel, event) == MARU_WEB_KEY_ROUTE_WEB_EDITOR
+            ? "web-editor" : "wrong-route"
+        window.sendEvent(event)
+        captureDisk(epoch: epoch, attemptsRemaining: 30)
+    }
+
+    private func captureDisk(epoch: UInt64, attemptsRemaining: Int) {
+        guard epoch == navigationEpoch,
+              let path = ProcessInfo.processInfo.environment["MARU_FILE_PANEL"] else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let saved = Self.diskTailContainsMarker(path: path)
+            DispatchQueue.main.async {
+                guard let self, epoch == self.navigationEpoch else { return }
+                if saved {
+                    self.diskSaved = "true"
+                    self.write = "true"
+                    return
+                }
+                guard attemptsRemaining > 1 else {
+                    self.diskSaved = "false"
+                    self.write = "false"
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.captureDisk(epoch: epoch, attemptsRemaining: attemptsRemaining - 1)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func diskTailContainsMarker(path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        do {
+            let size = try handle.seekToEnd()
+            let start = size > UInt64(diskProbeTailBytes) ? size - UInt64(diskProbeTailBytes) : 0
+            try handle.seek(toOffset: start)
+            let data = try handle.read(upToCount: diskProbeTailBytes) ?? Data()
+            return data.range(of: Data(marker.utf8)) != nil
+        } catch {
+            return false
+        }
+    }
+}
+
 @MainActor
 final class MaruWebPanelView: NSView {
     let webView: WKWebView
@@ -2285,15 +2536,8 @@ final class MaruWebPanelView: NSView {
     var fileViewerTextProbe: String?
     var fileViewerImagesProbe: String?
     var fileViewerLoadedImagesProbe: String?
-    var fileViewerEditorProbe: String?
-    var fileViewerLiveWorkerProbe: String?
-    var fileViewerLiveWorkerFailureProbe: String?
-    var fileViewerLiveFragmentsProbe: String?
-    var fileViewerLiveFragmentsDesiredProbe: String?
-    var fileViewerLiveFragmentsMountedProbe: String?
-    var fileViewerWriteProbe: String?
+    private(set) lazy var fileEditingSmokeProbe = FilePanelEditingSmokeProbe(panel: self)
     var fileViewerCriticalStyleProbe: String?
-    private var fileEditingProbeStarted = false
     var rendererBridgeProbe: String?
     var rendererHandlerProbe: String?
     var rendererParentAccessProbe: String?
@@ -2305,6 +2549,13 @@ final class MaruWebPanelView: NSView {
     private var fileHTMLProbeStarted = false
     private var requestedFileMode: Int32 = 0 // 0=read, 1=source-edit, 2=live-preview. Zig dock entry가 단일 출처.
     private var livePreviewPageReady = false
+    // 일반 탭 이탈 dirty snapshot은 close request와 달리 request_id가 없다. 소비한 Zig one-shot을 WebKit hydration
+    // 사이에서 잃지 않도록 view가 한 개의 pending intent와 epoch만 보존하고, 성공한 page→native ACK 뒤에만 내린다.
+    private var fileDirtySyncPending = false
+    private var fileDirtySyncEpoch: UInt64 = 0
+    private var fileDirtySyncInFlight = false
+    private var fileDirtySyncSmokeArmed = false
+    var fileDirtySyncRecoveryProbe: String?
     // 5d BrowserControl fixture E2E(스모크, browser 패널): 0=초기 로드 대기, 1=data: URL navigate 완료 대기, 2=probe 완료.
     var browserFixtureStage = 0
     // executeScript 시작 뒤 top-level navigation/reload가 시작되면 callback의 WebKit error를 execution이 아니라
@@ -2342,6 +2593,10 @@ final class MaruWebPanelView: NSView {
     var navCanGoForward = false
     var navStateDirty = false
     private var initialTrustedURL: URL?
+    // Markdown shell URL의 query에 싣는 surface-local document identity. WebContent reload마다 증가하고 Zig의
+    // beginDocument가 idempotent bind하므로 이전 page의 늦은 begin/read가 현재 hash baseline을 바꾸지 못한다.
+    private var trustedDocumentId: UInt64 = 1
+    private static let maxTrustedDocumentId: UInt64 = 9_007_199_254_740_991 // JavaScript Number.MAX_SAFE_INTEGER
     // KVO 관측 토큰 — deinit(뷰 dealloc)까지 프로퍼티로 붙잡아 관측을 유지한다(NSKeyValueObservation은 해제 시
     // 자동 invalidate). browser 패널만 등록한다.
     private var navObservers: [NSKeyValueObservation] = []
@@ -2424,7 +2679,7 @@ final class MaruWebPanelView: NSView {
             config.userContentController.addScriptMessageHandler(MaruBridgeHandler(surfaceId: surfaceId, controller: controller), contentWorld: world, name: "maru")
             config.userContentController.addUserScript(WKUserScript(source: MaruBridgeHandler.shim, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world))
             bridgeWorldLocal = world
-            appURL = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html") // 신뢰 origin = maru-app://app(5b가 pin).
+            appURL = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html?document=1") // query는 origin을 바꾸지 않는다.
         }
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
         if filePanelKind == 1, #available(macOS 12.0, *) {
@@ -2477,6 +2732,23 @@ final class MaruWebPanelView: NSView {
         webView.loadFileURL(url, allowingReadAccessTo: access)
     }
 
+    private func loadFreshTrustedDocument() -> Bool {
+        guard filePanelKind == 1, trustedDocumentId < Self.maxTrustedDocumentId,
+              let url = URL(string: "\(MaruAppSchemeHandler.scheme)://app/index.html?document=\(trustedDocumentId + 1)")
+        else { return false }
+        trustedDocumentId += 1
+        webView.load(URLRequest(url: url))
+        return true
+    }
+
+    private func trustedDocumentId(in url: URL) -> UInt64? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        let values = (components.queryItems ?? []).filter { $0.name == "document" }
+        guard values.count == 1, let raw = values[0].value, let value = UInt64(raw),
+              value > 0, value <= Self.maxTrustedDocumentId else { return nil }
+        return value
+    }
+
     func applyFilePanelMode(_ rawMode: Int32) {
         guard filePanelKind == 1 else { return }
         guard Self.isKnownFilePanelMode(rawMode) else { return }
@@ -2514,18 +2786,23 @@ final class MaruWebPanelView: NSView {
     }
 
     func requestFileDirtySync(requestId: UInt64 = 0) {
-        guard filePanelKind == 1, webView.url?.scheme == MaruAppSchemeHandler.scheme,
-              webView.url?.host == "app" else {
-            if requestId != 0, let session = controller?.bridgeSession(for: surfaceId) {
-                maru_macos_app_session_fail_file_panel_dirty_sync(session, surfaceId, requestId)
+        if requestId == 0 {
+            guard filePanelKind == 1 else { return }
+            // Zig가 이미 꺼낸 one-shot은 provisional navigation 동안 URL이 nil/about:blank여도 잃으면 안 된다.
+            // pending 하나가 surface의 모든 반복 tab-leave를 합치고 didFinish가 exact origin에서 재개한다.
+            guard !fileDirtySyncPending else { return }
+            fileDirtySyncPending = true
+            if webView.url?.scheme == MaruAppSchemeHandler.scheme, webView.url?.host == "app" {
+                resumeFileDirtySyncIfPending()
             }
             return
         }
-        if requestId == 0 {
-            webView.evaluateJavaScript(
-                "window.dispatchEvent(new CustomEvent('maru:file-sync-dirty'))",
-                completionHandler: nil
-            )
+
+        guard filePanelKind == 1, webView.url?.scheme == MaruAppSchemeHandler.scheme,
+              webView.url?.host == "app" else {
+            if let session = controller?.bridgeSession(for: surfaceId) {
+                maru_macos_app_session_fail_file_panel_dirty_sync(session, surfaceId, requestId)
+            }
             return
         }
         guard let session = controller?.bridgeSession(for: surfaceId) else { return }
@@ -2539,6 +2816,56 @@ final class MaruWebPanelView: NSView {
             guard case .success(let value) = result, value as? Bool == true else {
                 maru_macos_app_session_fail_file_panel_dirty_sync(current, self.surfaceId, requestId)
                 return
+            }
+        }
+    }
+
+    private func resumeFileDirtySyncIfPending() {
+        guard fileDirtySyncPending, !fileDirtySyncInFlight else { return }
+        fileDirtySyncEpoch &+= 1
+        fileDirtySyncInFlight = true
+        attemptFileDirtySync(epoch: fileDirtySyncEpoch, attemptsRemaining: 40)
+    }
+
+    private func attemptFileDirtySync(epoch: UInt64, attemptsRemaining: Int) {
+        guard fileDirtySyncPending, epoch == fileDirtySyncEpoch else { return }
+        webView.callAsyncJavaScript(
+            """
+            if (typeof window.__maruSyncDirty !== 'function') return 'missing';
+            return await window.__maruSyncDirty() === true ? 'success' : 'failed';
+            """,
+            arguments: [:],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            guard let self, self.fileDirtySyncPending, epoch == self.fileDirtySyncEpoch else { return }
+            if case .success(let value) = result, value as? String == "success" {
+                // page 함수는 setDirty bridge ACK를 await한 뒤에만 true다. native pending도 이미 내려간 시점이다.
+                self.fileDirtySyncInFlight = false
+                self.fileDirtySyncPending = false
+                if self.fileDirtySyncSmokeArmed {
+                    self.fileDirtySyncSmokeArmed = false
+                    self.fileDirtySyncRecoveryProbe = "true"
+                }
+                return
+            }
+            // hook 설치 전만 100ms×40회 재시도한다. 설치된 hook/bridge 자체가 실패했거나 WebContent가 종료된
+            // 경우에는 반복 I/O를 만들지 않고 fail-close하고, 다음 navigation didFinish가 같은 intent를 재개한다.
+            guard case .success(let value) = result, value as? String == "missing",
+                  attemptsRemaining > 1 else {
+                self.fileDirtySyncInFlight = false
+                if self.fileDirtySyncSmokeArmed {
+                    self.fileDirtySyncSmokeArmed = false
+                    if case .success(let value) = result {
+                        self.fileDirtySyncRecoveryProbe = "failed-\(value as? String ?? "value")"
+                    } else {
+                        self.fileDirtySyncRecoveryProbe = "failed-eval"
+                    }
+                }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.attemptFileDirtySync(epoch: epoch, attemptsRemaining: attemptsRemaining - 1)
             }
         }
     }
@@ -2654,60 +2981,11 @@ final class MaruWebPanelView: NSView {
         }
     }
 
-    /// FP10b 실 WKWebView gate. 기존 reader를 먼저 고정한 다음 live mode로 전환해 전용 worker→fragment iframe
-    /// MessageChannel 경로를 관측하고, 같은 CM6 buffer를 isolated bridge로 명시 저장한다.
+    /// Zig entry가 정한 mode를 그대로 넘긴다. ready/edit/save/disk orchestration은 전용 smoke coordinator 책임이다.
     private func startFileEditingProbe() {
-        guard !fileEditingProbeStarted, let world = bridgeWorld else { return }
-        fileEditingProbeStarted = true
-        applyFilePanelMode(2)
-        webView.callAsyncJavaScript(
-            """
-            const read = await window.maru.file.read();
-            const content = read?.result?.content;
-            if (typeof content !== 'string') return false;
-            const dirty = await window.maru.file.setDirty(true, 0, 0);
-            const written = await window.maru.file.write(content);
-            return dirty?.result?.dirty === true && written?.result?.written_bytes === new TextEncoder().encode(content).length;
-            """,
-            arguments: [:],
-            in: nil,
-            in: world
-        ) { [weak self] result in
-            if case .success(let v) = result { self?.fileViewerWriteProbe = String(v as? Bool ?? false) }
-        }
-        captureFileEditorProbe(attemptsRemaining: 24)
+        guard controller?.isFileEditingSmokeMode == true else { return }
+        fileEditingSmokeProbe.start(requestedMode: requestedFileMode)
     }
-
-    private func captureFileEditorProbe(attemptsRemaining: Int) {
-        let script = """
-        JSON.stringify({
-          editor: document.querySelector('.cm-content')?.textContent?.includes('FP4 viewer fixture') === true,
-          worker: document.getElementById('viewer-status')?.dataset.liveWorker || 'pending',
-          failure: document.getElementById('viewer-status')?.dataset.liveWorkerFailure || 'none',
-          fragments: document.querySelectorAll('.maru-live-fragment-frame[data-fragment-rendered="true"]').length
-          ,desired: document.getElementById('viewer-status')?.dataset.liveFragmentsDesired || 'pending'
-          ,mounted: document.getElementById('viewer-status')?.dataset.liveFragmentsMounted || 'pending'
-        })
-        """
-        webView.evaluateJavaScript(script) { [weak self] value, _ in
-            guard let self, let raw = value as? String, let data = raw.data(using: .utf8),
-                  let probe = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-            let editorReady = probe["editor"] as? Bool ?? false
-            let worker = probe["worker"] as? String ?? "pending"
-            let fragments = probe["fragments"] as? Int ?? 0
-            self.fileViewerEditorProbe = String(editorReady)
-            self.fileViewerLiveWorkerProbe = worker
-            self.fileViewerLiveWorkerFailureProbe = probe["failure"] as? String ?? "none"
-            self.fileViewerLiveFragmentsProbe = String(fragments)
-            self.fileViewerLiveFragmentsDesiredProbe = probe["desired"] as? String ?? "pending"
-            self.fileViewerLiveFragmentsMountedProbe = probe["mounted"] as? String ?? "pending"
-            guard (!editorReady || worker != "running" || fragments == 0), attemptsRemaining > 1 else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                self?.captureFileEditorProbe(attemptsRemaining: attemptsRemaining - 1)
-            }
-        }
-    }
-
     // Phase 7f-1: 팝업 adopt init — `WKUIDelegate.createWebViewWith`가 넘긴 configuration으로 새 WKWebView를 만들어
     // 채택한다. `window.opener`·named window·`postMessage` 링크는 **그 config로 만든 webview**로만 성립하므로(WebKit
     // 계약 — 넘어온 config를 그대로 써야 하고 수정 금지), 자기 config를 짓는 위 init과 갈라진다. 팝업은 임의 외부
@@ -2920,6 +3198,13 @@ final class MaruWebPanelView: NSView {
 extension MaruWebPanelView: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         navigationGeneration &+= 1
+        if filePanelKind == 1 {
+            // 새 document에서는 이전 page Promise와 retry callback을 무효화한다. pending intent 자체는 보존해
+            // didFinish exact-origin에서 한 번만 재개한다.
+            fileDirtySyncEpoch &+= 1
+            fileDirtySyncInFlight = false
+            if controller?.isFileEditingSmokeMode == true { fileEditingSmokeProbe.invalidateNavigation() }
+        }
         if panelKind == 1, filePanelKind == 0 {
             controller?.browserDidStartNavigation(surfaceId)
         }
@@ -2984,6 +3269,20 @@ extension MaruWebPanelView: WKNavigationDelegate {
             decisionHandler(initialFromShell ? .allow : .cancel)
             return
         }
+        if filePanelKind == 1 {
+            // Markdown main document id는 host만 발급한다. 이미 준비된 document의 reload/programmatic same-URL
+            // navigation도 fresh id URL로 치환해 서로 다른 WebContent document가 epoch를 공유하지 않게 한다.
+            guard trustedDocumentId(in: url) == trustedDocumentId else {
+                decisionHandler(.cancel)
+                return
+            }
+            if livePreviewPageReady {
+                livePreviewPageReady = false
+                decisionHandler(.cancel)
+                DispatchQueue.main.async { [weak self] in _ = self?.loadFreshTrustedDocument() }
+                return
+            }
+        }
         decisionHandler(.allow)
     }
 
@@ -2995,8 +3294,16 @@ extension MaruWebPanelView: WKNavigationDelegate {
             livePreviewPageReady = true
             applyFilePanelMode(requestedFileMode)
             controller?.livePreviewNavigationDidFinish(surfaceId)
+            resumeFileDirtySyncIfPending()
         }
         guard controller?.isSmokeMode == true else { return }
+        if filePanelKind == 1, fileDirtySyncRecoveryProbe == nil {
+            // didFinish 직후 file read/CM6 hydration과 경쟁시켜, 일반 tab-leave sync가 page hook 준비 전에도
+            // completion형 retry를 거쳐 clean ACK로 회복하는 실제 WKWebView 경로를 고정한다.
+            fileDirtySyncSmokeArmed = true
+            fileDirtySyncRecoveryProbe = "pending"
+            requestFileDirtySync()
+        }
         if filePanelKind == 2 {
             guard fileHTMLProbeStarted == false else { return }
             fileHTMLProbeStarted = true
@@ -3057,7 +3364,9 @@ extension MaruWebPanelView: WKNavigationDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         if filePanelKind == 1 {
             livePreviewPageReady = false
-            if controller?.filePanelDidTerminateWebContent(surfaceId, panel: self) != false { webView.reload() }
+            if controller?.filePanelDidTerminateWebContent(surfaceId, panel: self) == true {
+                _ = loadFreshTrustedDocument()
+            }
             return
         }
         guard panelKind == 1, filePanelKind == 0 else { return }
@@ -3719,6 +4028,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var smokeMode = false
     // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
     var isSmokeMode: Bool { smokeMode }
+    // 실제 Markdown bytes를 변경하는 probe는 일반 smoke duration과 분리한 명시 opt-in이다. 공식 build target만
+    // 복사 fixture와 함께 켜며, 사용자가 임의 MARU_FILE_PANEL 경로로 smoke를 띄워도 문서를 수정하지 않는다.
+    var isFileEditingSmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_FILE_PANEL_EDIT_SMOKE"] == "1"
+    }
     // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 딱 1회 kick하는 one-shot 가드 + 결과 저장.
     // 배경 스레드(소켓 클라이언트)가 채우고 메인(writeSummary)이 읽으므로 lock으로 보호한다(nonisolated(unsafe) — lock이
     // 안전 보장). 기본 "pending"(kick 전/미완). didKick은 메인(tick)만 만져 main-actor 유지.
@@ -4321,6 +4635,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // WebContent crash는 worker termination ack와 동등하다. slot을 회수한 뒤 다른 visible candidate를
         // 승격하고, reload didFinish가 여전히 desired면 새 page에 reservation을 다시 적용한다.
         let currentPanel = surfaceOwning(byId: surfaceId)?.webPanels[surfaceId]
+        // retirement tombstone의 종료는 worker slot만 회수하고 현재 replacement의 Zig editor state를 건드리지 않는다.
+        // registry의 exact current panel일 때만 native document-loss latch를 보낸다.
+        let isCurrentPanel = currentPanel === panel
+        let nativeAccepted: Bool
+        if isCurrentPanel, let session = bridgeSession(for: surfaceId) {
+            nativeAccepted = maru_macos_app_session_file_panel_document_terminated(session, surfaceId) != 0
+        } else {
+            nativeAccepted = false
+        }
         let decision = livePreviewRetirement.webContentTerminated(
             surfaceId,
             panel: panel,
@@ -4330,7 +4653,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         decision.retiredPanel?.controller = nil
         livePreviewTransitionState.invalidate(surfaceId)
         reconcileLivePreviewBudget()
-        return !decision.suppressReload
+        return isCurrentPanel && nativeAccepted && !decision.suppressReload
     }
 
     func reconcileLivePreviewBudget() {
@@ -6656,7 +6979,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
             case Int(MaruAppHostWebSurfaceOpHide.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
-                    v.requestFileDirtySync()
                     v.isHidden = true
                     reconcileLivePreviewBudget()
                 }
@@ -8430,13 +8752,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             file_viewer_text=\(wp?.fileViewerTextProbe ?? "pending")
             file_viewer_images=\(wp?.fileViewerImagesProbe ?? "pending")
             file_viewer_loaded_images=\(wp?.fileViewerLoadedImagesProbe ?? "pending")
-            file_viewer_editor_hydrated=\(wp?.fileViewerEditorProbe ?? "pending")
-            file_viewer_live_worker=\(wp?.fileViewerLiveWorkerProbe ?? "pending")
-            file_viewer_live_worker_failure=\(wp?.fileViewerLiveWorkerFailureProbe ?? "pending")
-            file_viewer_live_fragments=\(wp?.fileViewerLiveFragmentsProbe ?? "pending")
-            file_viewer_live_fragments_desired=\(wp?.fileViewerLiveFragmentsDesiredProbe ?? "pending")
-            file_viewer_live_fragments_mounted=\(wp?.fileViewerLiveFragmentsMountedProbe ?? "pending")
-            file_viewer_write=\(wp?.fileViewerWriteProbe ?? "pending")
+            file_viewer_editor_hydrated=\(wp?.fileEditingSmokeProbe.editor ?? "pending")
+            file_viewer_live_worker=\(wp?.fileEditingSmokeProbe.liveWorker ?? "pending")
+            file_viewer_live_worker_failure=\(wp?.fileEditingSmokeProbe.liveWorkerFailure ?? "pending")
+            file_viewer_live_fragments=\(wp?.fileEditingSmokeProbe.liveFragments ?? "pending")
+            file_viewer_live_fragments_desired=\(wp?.fileEditingSmokeProbe.liveFragmentsDesired ?? "pending")
+            file_viewer_live_fragments_mounted=\(wp?.fileEditingSmokeProbe.liveFragmentsMounted ?? "pending")
+            file_viewer_default_mode=\(wp?.fileEditingSmokeProbe.defaultMode ?? "pending")
+            file_viewer_edit=\(wp?.fileEditingSmokeProbe.edit ?? "pending")
+            file_viewer_cmd_s_route=\(wp?.fileEditingSmokeProbe.cmdSRoute ?? "pending")
+            file_viewer_disk_saved=\(wp?.fileEditingSmokeProbe.diskSaved ?? "pending")
+            file_viewer_write=\(wp?.fileEditingSmokeProbe.write ?? "pending")
+            file_viewer_dirty_sync_recovered=\(wp?.fileDirtySyncRecoveryProbe ?? "pending")
             file_viewer_under_page_background=\(fileViewerUnderPageBackground)
             file_viewer_critical_style=\(wp?.fileViewerCriticalStyleProbe ?? "pending")
             file_panel_mode_unknown_rejected=\(!MaruWebPanelView.isKnownFilePanelMode(3) && !MaruWebPanelView.isKnownFilePanelMode(Int32.max))

@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 134u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 135u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
@@ -1253,11 +1253,13 @@ int64_t maru_macos_app_bridge_dispatch(
     size_t out_cap
 );
 
-/* 파일 패널용 session-scoped bridge. surface_id가 핀한 markdown entry에 file.read/readAsset, pathless file.write,
-   request-scoped file.setDirty{dirty,revision,request_id}, file.openLink{href,forceSystem}를 제공한다. read 계열은
+/* 파일 패널용 session-scoped bridge. surface_id가 핀한 markdown entry에
+   file.beginDocument{document_id}/read{editor_epoch}/readAsset, pathless file.write{editor_epoch,content},
+   request-scoped file.setDirty{dirty,editor_epoch,revision,request_id},
+   file.resolveExternalChange{editor_epoch,success}, file.openLink{href,forceSystem}를 제공한다. read 계열은
    out=NULL,out_cap=0 size query 뒤 exact buffer로 재호출한다.
    mutation 계열은 side effect 중복을 막기 위해 충분한 고정 buffer로 한 번만 호출한다. 기존 hello도 처리한다.
-   음수: -2=NULL/잘못된 query, -3=OOM. v122/v125/v126. */
+   음수: -2=NULL/잘못된 query, -3=OOM. v122/v125/v126/v135. */
 int64_t maru_macos_app_session_bridge_dispatch(
     MaruAppHostSession *session,
     uint64_t surface_id,
@@ -1265,6 +1267,13 @@ int64_t maru_macos_app_session_bridge_dispatch(
     size_t req_len,
     uint8_t *out_ptr,
     size_t out_cap
+);
+
+/* 현재 markdown WebContent document가 종료됐음을 Zig 수명 정책에 전달한다. exact current panel 검증은 Swift,
+   dirty/recovery latch와 stale document 차단은 Zig가 소유한다. 0=stale/부재, 1=safe reload, 2=recovery latch. v135. */
+uint32_t maru_macos_app_session_file_panel_document_terminated(
+    MaruAppHostSession *session,
+    uint64_t surface_id
 );
 
 /* 검증과 no-follow open을 한 Zig operation으로 묶어 같은 fd bytes만 반환한다. 반환은 byte 수, 실패는 음수. */

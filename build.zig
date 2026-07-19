@@ -947,10 +947,18 @@ pub fn build(b: *std.Build) void {
         macos_app_step.dependOn(&macos_app_run.step);
 
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
+        const macos_app_smoke_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "mkdir -p zig-out/maru-macos-app; " ++
+                "cp tests/fixtures/file-panel/fp4-viewer.md zig-out/maru-macos-app/fp10d-live-preview.md; " ++
+                "cp tests/fixtures/file-panel/fixture.svg zig-out/maru-macos-app/fixture.svg",
+        });
+        macos_app_smoke_fixture.setCwd(b.path("."));
         const macos_app_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app"});
         macos_app_smoke.setCwd(b.path("."));
         macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "9000");
-        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("tests/fixtures/file-panel/fp4-viewer.md"));
+        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL_EDIT_SMOKE", "1");
+        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/fp10d-live-preview.md"));
         // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
         // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.
         // **절대 경로**로 준다(리뷰11 [4]) — resolveAppAsset는 cwd 기준으로 realpath하므로 상대 경로는 실행 cwd가 repo
@@ -958,6 +966,7 @@ pub fn build(b: *std.Build) void {
         macos_app_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         macos_app_smoke.step.dependOn(&macos_app_compile.step);
         macos_app_smoke.step.dependOn(&file_panel_web_build.step);
+        macos_app_smoke.step.dependOn(&macos_app_smoke_fixture.step);
         const macos_app_smoke_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "summary=zig-out/maru-macos-app/app.summary.txt; " ++
@@ -975,7 +984,13 @@ pub fn build(b: *std.Build) void {
                 "rg -q '^file_viewer_live_fragments=[1-8]$' \"$summary\"; " ++
                 "rg -q '^file_viewer_live_fragments_desired=[1-8]$' \"$summary\"; " ++
                 "rg -q '^file_viewer_live_fragments_mounted=[1-8]$' \"$summary\"; " ++
+                "rg -q '^file_viewer_default_mode=live-preview$' \"$summary\"; " ++
+                "rg -q '^file_viewer_edit=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_cmd_s_route=web-editor$' \"$summary\"; " ++
+                "rg -q '^file_viewer_disk_saved=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_write=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_dirty_sync_recovered=true$' \"$summary\"; " ++
+                "rg -q 'FP10d actual Cmd\\+S marker' zig-out/maru-macos-app/fp10d-live-preview.md; " ++
                 "rg -q '^file_viewer_under_page_background=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_critical_style=true$' \"$summary\"; " ++
                 "rg -q '^file_panel_mode_unknown_rejected=true$' \"$summary\"; " ++

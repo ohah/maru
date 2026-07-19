@@ -35,7 +35,7 @@ Term별 observer는 다음 입력을 함께 사용한다.
    멈췄다는 사실만으로 `idle`로 내리지 않는다. 느린 API·긴 도구 실행은 조용할 수 있기 때문이다.
 
 screen/OSC/provider 패턴은 코드에 하드코딩된 거대한 switch 대신 작은 manifest 데이터로 둔다. manifest는
-`agent`, `state`, `all/any/none` 문자열 조건, `visible_idle`, `visible_blocker`, `visible_running` 메타만 표현한다.
+`agent`, `state`, `all/any/none` 문자열 조건, 화면 하단 거리, `visible_idle`, `visible_blocker`, `visible_running` 메타만 표현한다.
 정규식·임의 코드 실행·외부 다운로드는 v1에 넣지 않는다. 빌드에 포함된 manifest만 사용하며 fixture가 근거다.
 
 ## 상태 모델과 우선순위
@@ -47,13 +47,16 @@ screen/OSC/provider 패턴은 코드에 하드코딩된 거대한 switch 대신 
 - **idle**: 현재 화면이 새 prompt/input box 등 입력 가능한 agent chrome을 명시적으로 보여 줌.
 - **unknown**: agent는 foreground지만 현재 관측값만으로 위 셋을 안전하게 고를 수 없음.
 
-우선순위는 `visible blocker > visible idle > visible running > recent PTY activity > previous stable state > unknown`이다.
-화면의 명시 신호가 활동 추정보다 우선하므로 ESC로 작업을 끊고 prompt가 돌아오면 과거 output activity가 남아 있어도
-즉시 `idle`이 된다. blocked 화면도 PTY가 잠깐 출력한 직후 `running`에 묻히지 않는다.
+현재 화면의 blocker가 최우선이다. 같은 화면 tail에 idle/running 문구가 함께 있으면 고정 문자열 우선순위가 아니라
+**더 아래에 보이는 하단 chrome**을 현재 증거로 택한다. prompt보다 아래의 `Esc to interrupt` footer는 running이고,
+과거 footer보다 아래에 새 prompt가 돌아오면 idle이다. 화면 규칙은 provider별 하단 4~6줄 안에서만 유효하므로 tail 위쪽의
+과거 prompt나 `Conversation interrupted` 문구는 새 작업 상태를 덮지 않는다. 화면 근거가 없을 때만 OSC progress/title,
+recent PTY activity 순으로 보조한다.
 
-명시 화면 신호가 없는 `running → idle` 추정은 100ms 간격 3회 확인하되 700ms를 넘기지 않는다. 이는 화면 갱신
-중간 프레임을 idle로 오인하는 것을 줄이기 위한 안정화이며, 명시 `visible_idle`은 지연하지 않는다. 입력 box가 보이는
-idle과 권한 prompt인 blocked는 현재 화면 신호이므로 timeout 추정으로 만들지 않는다.
+명시 증거는 즉시 publish한다. 화면 재그리기의 짧은 공백에는 직전 상태를 최대 700ms 유지하지만, 그 안에 같은 상태의
+근거가 다시 오지 않으면 `unknown`으로 내린다. 침묵이나 timeout으로 `idle`을 만들지 않으며, `running`·`blocked`도
+무기한 보존하지 않는다. 따라서 느린 작업은 명시 UI/OSC가 없으면 일시적으로 `unknown`일 수 있지만, ESC 뒤 사라진
+running 문구가 영구 고착되지는 않는다.
 
 `interrupted`는 새 observer의 상태가 아니다. 터미널은 ESC가 provider의 turn 중단인지 메뉴 닫기인지 일반화해 알 수
 없고, provider별 내부 이벤트를 읽지 않는다는 경계와 충돌한다. 대신 중단 후 실제 화면이 idle이면 `idle`, 질문 화면이면
@@ -108,11 +111,14 @@ visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트
 
 - Maru가 만든 marker와 command만 제거하고 같은 배열의 사용자 hook 순서와 나머지 JSON은 보존한다.
 - 파싱 실패, 권한 오류, 4MiB 초과 파일은 무접촉하고 구조화 로그만 남긴다.
-- 변경 전 `.maru-backup`을 만들며 기존 백업을 덮어쓰지 않는다.
+- 변경 전 `.maru-backup`을 만들며 기존 백업을 덮어쓰지 않는다. 일반 파일의 POSIX mode·ACL·확장 속성을 backup과
+  replacement에 보존하고, symlink나 비정규 파일은 자동 변경하지 않고 다음 시작에 재시도한다.
+- marker 문자열만 우연히 포함한 사용자 값은 제거 근거가 아니다. 과거 Maru command 구조까지 일치한 hook group만 지운다.
 - cleanup 완료 여부는 Maru config/runtime marker로 기록한다. 실패는 다음 시작에 재시도한다.
 - 기존 `Re-register/Unregister Agent Session Hooks` command와 action/config 문법은 제거한다.
-- `<config>/maru/agent-sessions/` 잔여 mapping은 민감하지 않은 Maru 생성물이며, cleanup 성공 뒤 Maru marker 형식 파일만
-  정리한다. 디렉터리 전체를 무조건 삭제하지 않는다.
+- `<config>/maru/agent-sessions/` 잔여 mapping은 session id와 transcript path를 포함할 수 있는 민감한 과거 생성물이다.
+  cleanup 성공 뒤 Maru payload 형식 파일만 정리하고 디렉터리 전체를 무조건 삭제하지 않는다.
+- `MARU_AGENT_MAPPING_ID`는 상위 프로세스 상속·명시 env·사용자 env override 어느 경로에서도 자식에 전달하지 않는다.
 
 ### workspace restore
 
@@ -140,10 +146,11 @@ workspace 파일을 깨뜨리지 않으면서 provider 세션 자동 실행을 �
 ## 검증
 
 - 순수 fixture: claude/codex 각각 idle/running/blocked, scrollback의 과거 blocker 무시, OSC-only 보조, 상충 신호 우선순위.
-- 전이 테스트: output activity→running, visible idle 즉시 전환, plain idle 3회 확인/700ms cap, process exit/kind change reset.
+- 전이 테스트: output activity→running, visible idle 즉시 전환, evidence loss 700ms grace 뒤 unknown, process exit/kind change reset.
 - ESC 회귀: running 화면에서 ESC 뒤 idle fixture가 오면 다음 publish가 running이 아니며 완료 알림도 생성하지 않음.
 - 다중 Term: background blocked가 workspace 대표가 되고, running Term의 탭 플래그와 dirty gate가 정확히 갱신됨.
-- migration: 사용자 hook 보존·Maru marker만 제거·parse/read 실패 무접촉·재시도·백업 no-clobber.
+- migration: 사용자 hook 보존·Maru command만 제거·marker collision no-op·parse/read 실패 무접촉·재시도·백업 no-clobber·
+  0600/ACL/xattr 보존·symlink 거부·옛 mapping env 차단.
 - workspace: 옛 agent 필드 parse 성공+무시, 새 저장에 필드 없음, cwd/shell/일반 layout round-trip 불변.
 - 수동 E2E: 실제 claude/codex에서 prompt, 작업, 권한 질문, ESC 중단, pane/Term 전환을 반복해 카드와 control 상태 확인.
 

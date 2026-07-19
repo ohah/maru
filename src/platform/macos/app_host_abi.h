@@ -8,10 +8,13 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 132u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 133u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
+#define MARU_LIVE_PREVIEW_MAX_WORKERS 8u
+#define MARU_LIVE_PREVIEW_SOURCE_BYTES_PER_WORKER 8388608u
+#define MARU_LIVE_PREVIEW_RESULT_BYTES_PER_WORKER 2097152u
 #define MARU_WEB_KEY_ROUTE_PASS_THROUGH 0u
 #define MARU_WEB_KEY_ROUTE_APP_ACTION 1u
 #define MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND 2u
@@ -1244,6 +1247,34 @@ int64_t maru_macos_app_session_bridge_dispatch(
     const uint8_t *req_ptr,
     size_t req_len,
     uint8_t *out_ptr,
+    size_t out_cap
+);
+
+/* 검증과 no-follow open을 한 Zig operation으로 묶어 같은 fd bytes만 반환한다. 반환은 byte 수, 실패는 음수. */
+int64_t maru_macos_app_read_app_asset(
+    uint32_t role,
+    const uint8_t *root_ptr,
+    size_t root_len,
+    const uint8_t *request_path_ptr,
+    size_t request_path_len,
+    uint8_t *out_ptr,
+    size_t out_cap
+);
+
+/* FP10b 앱 전역 live-preview worker 후보. priority: 1=visible, 2=focused. 숨김/non-live는 제출하지 않는다. */
+typedef struct MaruAppHostLivePreviewCandidate {
+    uint64_t surface_id;
+    uint32_t priority;
+    uint32_t reserved;
+} MaruAppHostLivePreviewCandidate;
+
+/* 현재 visible 후보를 제출하면 Zig LivePreviewBudget이 최대 8개의 desired surface_id를 out에 쓴다.
+   focused 우선, 나머지는 직전 selection을 유지한다. 실제 running/enabling reservation은 Swift reducer가
+   revoke-first로 전이한다. 반환은 쓴 개수, 잘못된 포인터/priority는 -1. v133. */
+int32_t maru_macos_live_preview_budget_reconcile(
+    const MaruAppHostLivePreviewCandidate *candidates,
+    size_t candidate_count,
+    uint64_t *out_surface_ids,
     size_t out_cap
 );
 

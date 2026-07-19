@@ -170,7 +170,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 132;
+pub const abi_version: u32 = 133;
+// 133: 앱 전역 Markdown live-preview worker admission 후보/결과 ABI를 추가한다. max 8 workers와 worker별
+// 8/2 MiB cap의 곱으로 source/result 64/16 MiB를 고정하고 focused visible surface를 우선한다.
 // 132: Markdown live-preview raw mode(2), role-aware app asset/CSP, typed WebKeyRoute를 추가한다. Swift의 file mode·
 // editor shortcut·origin CSP 분기를 Zig 정책으로 일원화한다. export signature가 바뀌므로 ABI를 증가한다.
 // 131: WebSurfaceTransition에 divider_grab_band_pt를 내려 Swift의 하드코딩 10pt를 제거하고,

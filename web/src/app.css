@@ -74,6 +74,21 @@ body {
   border-right-color: color-mix(in srgb, CanvasText 14%, Canvas);
 }
 
+.maru-live-fragment {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 2.25rem;
+  overflow: hidden;
+}
+
+.maru-live-fragment-frame {
+  display: block;
+  width: 100%;
+  height: 4rem;
+  border: 0;
+  background: Canvas;
+}
+
 #app {
   box-sizing: border-box;
   max-width: 76rem;
@@ -81,6 +96,18 @@ body {
   margin: 0 auto;
   padding: 1.5rem 2rem 4rem;
   line-height: 1.6;
+}
+
+body[data-renderer-mode="fragment"] {
+  overflow: hidden;
+}
+
+body[data-renderer-mode="fragment"] #app {
+  width: 100%;
+  max-width: none;
+  min-height: 1px;
+  margin: 0;
+  padding: 0.35rem 0;
 }
 
 img {

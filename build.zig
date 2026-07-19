@@ -719,9 +719,9 @@ pub fn build(b: *std.Build) void {
                 // FP4: zntc가 만든 실 file-panel bundle(index/render HTML·SRI bundle·CSS)을 Resources/web/에 복사한다.
                 // 스킴 핸들러가 Bundle.main.resourceURL/web 아래만 서빙한다(경로 샌드박스·realpath 탈출 방어=Zig 정책).
                 "mkdir -p zig-out/Maru.app/Contents/Resources/web; " ++
-                // `-R` + `web/.`: 중첩 하위 디렉터리까지 복사한다. resolveAppAsset는 `sub/page.html` 같은 중첩 경로를
-                // 서빙하도록 구현·테스트돼 있으므로(리뷰11 [5]), Phase 7이 `web/assets/…`를 추가해도 번들에 담기게 한다
-                // (flat `cp web/*`는 서브디렉터리서 'is a directory' 에러로 번들 실패·누락).
+                // scheme same-fd reader의 flat-only closed-set과 build output을 일치시킨다. 새 nested asset은 조용히
+                // 번들된 뒤 404가 되지 않고 여기서 즉시 실패하며, 채택하려면 descriptor component-walk 설계를 먼저 한다.
+                "[ -z \"$(find web/dist -mindepth 1 -type d -print -quit)\" ] || { echo 'error: web/dist must remain flat for maru-app scheme safety' >&2; exit 1; }; " ++
                 "cp -R web/dist/. zig-out/Maru.app/Contents/Resources/web/; " ++
                 "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
         });
@@ -814,7 +814,7 @@ pub fn build(b: *std.Build) void {
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app"});
         macos_app_smoke.setCwd(b.path("."));
-        macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "6000");
+        macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "9000");
         macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("tests/fixtures/file-panel/fp4-viewer.md"));
         // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
         // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.
@@ -835,6 +835,11 @@ pub fn build(b: *std.Build) void {
                 "rg -q '^file_viewer_images=1$' \"$summary\"; " ++
                 "rg -q '^file_viewer_loaded_images=1$' \"$summary\"; " ++
                 "rg -q '^file_viewer_editor_hydrated=true$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_worker=running$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_worker_failure=none$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_fragments=[1-8]$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_fragments_desired=[1-8]$' \"$summary\"; " ++
+                "rg -q '^file_viewer_live_fragments_mounted=[1-8]$' \"$summary\"; " ++
                 "rg -q '^file_viewer_write=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_under_page_background=true$' \"$summary\"; " ++
                 "rg -q '^file_viewer_critical_style=true$' \"$summary\"; " ++

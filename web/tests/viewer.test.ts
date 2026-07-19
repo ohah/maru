@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Text, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { JSDOM } from "jsdom";
+import { fragmentChannel } from "../src/renderer-capability";
 import {
   assetBase64BudgetAllowed,
   assetDataUrl,
@@ -352,6 +353,58 @@ describe("file viewer bridge boundary", () => {
 });
 
 describe("bridge-free renderer", () => {
+  test("accepts fragment HTML only through a load-scoped capability MessagePort", async () => {
+    const dom = new JSDOM('<!doctype html><main id="app"></main>', {
+      url: "maru-app://render/render.html",
+    });
+    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    const capability = {
+      documentRevision: 3,
+      projectionGeneration: 4,
+      widgetId: 5,
+      widgetGeneration: 6,
+      rendererInstance: 7,
+    };
+    const channel = new MessageChannel();
+    const rendered = new Promise<unknown>((resolve) => {
+      channel.port1.onmessage = (event) => {
+        if ((event.data as { type?: string }).type === "fragment-ready") {
+          channel.port1.postMessage({
+            channel: fragmentChannel,
+            type: "fragment-render",
+            capability,
+            html: '<p>isolated fragment <a href="next.md">next</a></p>',
+          });
+        } else resolve(event.data);
+      };
+      channel.port1.start();
+    });
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent("message", {
+        source: dom.window.parent,
+        data: { channel: fragmentChannel, type: "fragment-init", capability },
+        ports: [channel.port2] as unknown as readonly MessagePort[],
+      }),
+    );
+
+    await expect(rendered).resolves.toMatchObject({
+      channel: fragmentChannel,
+      type: "fragment-rendered",
+      capability,
+    });
+    expect(dom.window.document.querySelector("#app")?.textContent).toBe("isolated fragment next");
+    const link = dom.window.document.querySelector("a")!;
+    const click = new dom.window.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    channel.port1.close();
+    dom.window.close();
+  });
+
   test("renders sanitized markdown from its parent message without exposing window.maru", () => {
     const dom = new JSDOM('<!doctype html><main id="app"></main>', {
       url: "maru-app://render/render.html",

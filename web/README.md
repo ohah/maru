@@ -14,7 +14,7 @@ mise run web:licenses
 mise run web:check
 ```
 
-`web:build`는 `@zntc/core` NAPI API를 `write:false`로 호출하고 diagnostics가 하나라도 있거나 output이 정확히 `bundle.js` 하나가 아니면 bytes를 쓰기 전에 실패한다. 성공한 Safari 16 대상 ESM만 `web/dist/`에 쓴 뒤 SHA-384 SRI를 `index.html`·`render.html`과 `integrity.json`에 기록하고 실제 bundle bytes와 다시 대조한다. production dependency graph만 순회한 `THIRD_PARTY_NOTICES.txt`도 생성하며, 고지 전문이 없는 새 runtime package는 fail-closed다. `dist/`는 생성물이라 커밋하지 않고 `build.zig`가 앱 bundle 전에 재생성한다.
+`web:build`는 `@zntc/core` NAPI API를 `write:false`로 호출하고 diagnostics가 하나라도 있거나 각 entry output이 정확히 하나가 아니면 bytes를 쓰기 전에 실패한다. 성공한 Safari 16 대상 ESM만 shell `bundle.js`와 worker `live-preview-worker.js`의 닫힌 이름으로 `web/dist/`에 쓴다. SHA-384 SRI는 두 bundle을 `integrity.json`에 기록하고 실제 bytes와 다시 대조하며, HTML은 shell bundle만 SRI로 로드한다. production dependency graph만 순회한 `THIRD_PARTY_NOTICES.txt`도 생성하며, 고지 전문이 없는 새 runtime package는 fail-closed다. `dist/`는 생성물이라 커밋하지 않고 `build.zig`가 앱 bundle 전에 재생성한다.
 
 ## 고정된 선택
 

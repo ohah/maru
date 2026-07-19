@@ -4689,11 +4689,10 @@ pub const AppSession = struct {
     /// 활성 탭의 한 pane을 통째로 떼어 **다른** 워크스페이스(target_index)에 합친다(grip 핸들을 그 카드에 드롭).
     /// target의 활성 pane을 좌우(`split_horizontal`)로 나눠 들어온 pane을 우측·활성으로 둔다(⌘D 관례 — 카드는
     /// 방향 정보가 없어 기본 좌우). 트리 수술은 moveTermToNewSplit과 같은 모양(replaceLeaf로 target leaf → split)
-    /// 이되 새 pane을 만들지 않고 떼어온 pane을 재사용한다. 단독 pane 워크스페이스이거나 target이 자기 워크스페이스/
-    /// 범위 밖이면 무동작. 단일 출처: docs/tabs-splits-layout.md.
+    /// 이되 새 pane을 만들지 않고 떼어온 pane을 재사용한다. 소스의 마지막 pane이면 빈 소스 워크스페이스를 함께
+    /// 제거한다. target이 자기 워크스페이스거나 범위 밖이면 무동작. 단일 출처: docs/tabs-splits-layout.md.
     fn mergePaneIntoWorkspace(self: *AppSession, pane: *Pane, target_index: usize) void {
         const src_tab = self.activeTab();
-        if (src_tab.panes.items.len <= 1) return; // 단독 pane — 무동작
         const src_index = self.app_window.active_tab;
         if (target_index == src_index or target_index >= self.tabs.items.len) return; // 자기/범위 밖 — 무동작
         const target_tab = self.tabs.items[target_index];
@@ -4716,17 +4715,55 @@ pub const AppSession = struct {
             self.allocator.destroy(split);
             return;
         }
-        // 3) infallible: src에서 떼고(형제로 collapse) 두 탭 대표 surface 재바인딩 + target.panes에 pane 추가.
-        _ = self.detachPaneFromTab(src_tab, pane);
+        // 3) infallible: src에서 떼고 두 탭 대표 surface 재바인딩 + target.panes에 pane 추가. 마지막 pane이면
+        // 빈 workspace를 남기지 않고 Tab shell만 제거한다(Pane/Term/surface/PTY는 target이 그대로 승계).
+        const source_workspace_removed = src_tab.panes.items.len == 1;
+        if (source_workspace_removed) {
+            self.cancelPointerGesture();
+            _ = self.inheritGroupMarker(src_index);
+            _ = self.reestablishTopLevelBoundaryOnMove(src_index);
+            _ = self.tabs.orderedRemove(src_index);
+            _ = self.surface_ptrs.orderedRemove(src_index);
+            self.app_window.tabs = self.surface_ptrs.items;
+        } else {
+            _ = self.detachPaneFromTab(src_tab, pane);
+            self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
+        }
         self.hovered_tab = null;
         self.hovered_nav_button = null; // Phase 7e-4: 밴드 nav 버튼 호버도 함께 정리
-        self.surface_ptrs.items[src_index] = src_tab.activeTerm().surface;
         target_tab.panes.appendAssumeCapacity(pane);
         target_tab.active_pane = target_tab.panes.items.len - 1;
-        self.surface_ptrs.items[target_index] = target_tab.activeTerm().surface;
+        const landed_index = if (source_workspace_removed and target_index > src_index) target_index - 1 else target_index;
+        self.surface_ptrs.items[landed_index] = target_tab.activeTerm().surface;
+        if (source_workspace_removed) {
+            // src_tab은 이제 collection 밖의 빈 workspace shell이다. tree의 leaf와 panes 항목은 target이 소유하므로
+            // destroyTabStandalone/destroyPane을 쓰지 않고 컨테이너와 owned sidebar metadata만 정리한다.
+            if (self.renamingWorkspace(src_tab) or self.renamingGroup(src_tab)) {
+                self.rename = null;
+                self.rename_input.clear();
+            }
+            if (self.context_menu_target) |t| {
+                const hit = switch (t) {
+                    .workspace => |w| w == src_tab,
+                    .group => |g| g == src_tab,
+                    else => false,
+                };
+                if (hit) {
+                    self.context_menu_target = null;
+                    self.chrome_host.context_menu.hide();
+                }
+            }
+            if (src_tab.custom_name) |n| self.allocator.free(n);
+            if (src_tab.group_start) |g| self.allocator.free(g);
+            PaneTree.deinit(self.allocator, src_tab.tree); // leaf는 해제하지 않으며 split은 단독 pane이라 없음
+            src_tab.panes.deinit(self.allocator);
+            self.allocator.destroy(src_tab);
+            self.normalizePinnedFromGroups();
+            self.floatLocalPinsAllGroups();
+        }
         // 4) 소스 resize(형제 확장) 후 target을 활성으로 전환(switchTab이 target resize+좌표+사이드바 재빌드).
-        self.resizeTabPanes(src_tab);
-        _ = self.switchTab(target_index);
+        if (!source_workspace_removed) self.resizeTabPanes(src_tab);
+        _ = self.switchTab(landed_index);
         self.metal_dirty = true;
     }
 
@@ -8335,8 +8372,8 @@ pub const AppSession = struct {
             // 활성 pane을 통째로 새 단독 워크스페이스로 분리(grip 드래그→사이드바 빈 영역의 키보드/팔릿 버전).
             // 단독 pane 워크스페이스면 promotePaneToNewWorkspace가 no-op. tabsBlocked(chrome 최소)면 막는다.
             .move_pane_to_new_workspace => if (!self.tabsBlocked()) self.promotePaneToNewWorkspace(self.activePane()),
-            // 활성 pane을 N번 워크스페이스에 합치기(merge — 드래그를 그 카드에 드롭하는 것의 키보드 버전). 자기/범위
-            // 밖/단독 pane이면 mergePaneIntoWorkspace가 no-op. index는 0-based(select_tab과 동일).
+            // 활성 pane을 N번 워크스페이스에 합치기(merge — 드래그를 그 카드에 드롭하는 것의 키보드 버전). 마지막
+            // pane이면 빈 소스 워크스페이스도 제거한다. 자기/범위 밖이면 no-op. index는 0-based(select_tab과 동일).
             .move_pane_to_workspace => |n| if (!self.tabsBlocked()) self.mergePaneIntoWorkspace(self.activePane(), n),
             // 전체 선택(⌘A) — 활성 surface 코어의 selection을 스크롤백+화면 전체로. clipboard 쓰기는 네이티브.
             .select_all => {
@@ -39425,7 +39462,7 @@ test "mergePaneIntoWorkspace: 활성 pane을 다른 워크스페이스에 합친
     try std.testing.expectEqual(pane_b.activeTerm().surface, session.surface_ptrs.items[1]);
 }
 
-test "mergePaneIntoWorkspace: 자기 워크스페이스/범위 밖/단독 pane이면 무동작" {
+test "mergePaneIntoWorkspace: 단독 pane도 대상에 합치고 빈 소스 워크스페이스를 제거한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -39442,14 +39479,55 @@ test "mergePaneIntoWorkspace: 자기 워크스페이스/범위 밖/단독 pane�
     session.backing_height_px = 600;
     session.window_padding_px = .{};
 
-    // 단독 pane 워크스페이스 → 무동작(다른 ws가 있어도).
     _ = try session.newTab(); // tabs [ws0, ws1], 활성 ws1(단독 pane)
+    const target_tab = session.tabs.items[1];
+    const target_original_pane = target_tab.activePane();
     try std.testing.expect(session.switchTab(0));
-    session.mergePaneIntoWorkspace(session.activePane(), 1); // src 단독 pane → no-op
-    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len);
-    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[1].panes.items.len);
+    const moved_pane = session.activePane();
+    const moved_surface = moved_pane.activeTerm().surface;
+    session.mergePaneIntoWorkspace(moved_pane, 1);
 
-    // split으로 2 pane 만든 뒤: target=자기(활성) → no-op, 범위 밖 → no-op.
+    // 소스 workspace는 사라지고 target이 index 0으로 당겨진다. Pane/Surface 포인터는 그대로라 PTY 재시작이 없다.
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab);
+    try std.testing.expectEqual(target_tab, session.tabs.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), target_tab.panes.items.len);
+    try std.testing.expectEqual(moved_pane, target_tab.activePane());
+    try std.testing.expectEqual(moved_surface, target_tab.activeTerm().surface);
+    try std.testing.expectEqual(moved_surface, session.surface_ptrs.items[0]);
+    switch (target_tab.tree) {
+        .split => |sp| {
+            try std.testing.expect(sp.direction == .horizontal);
+            switch (sp.a) {
+                .leaf => |l| try std.testing.expectEqual(target_original_pane, l),
+                .split => return error.TestExpectedLeaf,
+            }
+            switch (sp.b) {
+                .leaf => |l| try std.testing.expectEqual(moved_pane, l),
+                .split => return error.TestExpectedLeaf,
+            }
+        },
+        .leaf => return error.TestExpectedSplit,
+    }
+}
+
+test "mergePaneIntoWorkspace: 자기 워크스페이스/범위 밖이면 무동작" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+
     try session.splitActivePane(.horizontal);
     const pane_b = session.activePane();
     session.mergePaneIntoWorkspace(pane_b, session.app_window.active_tab); // 자기 자신
@@ -39505,7 +39583,7 @@ test "grip 드래그: 사이드바 빈 영역 드롭 → 새 워크스페이스 
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len); // 소스 collapse
 }
 
-test "grip 드래그: 다른 워크스페이스 카드에 드롭 → 그 워크스페이스에 합치기" {
+test "grip 드래그: 단독 pane을 다른 워크스페이스 카드에 드롭 → 합치고 빈 소스 제거" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -39523,14 +39601,16 @@ test "grip 드래그: 다른 워크스페이스 카드에 드롭 → 그 워크�
 
     _ = try session.newTab(); // tabs [ws0, ws1]
     try std.testing.expect(session.switchTab(0)); // 활성 ws0
-    try session.splitActivePane(.horizontal); // ws0: pane 2개, 활성 = 우(b)
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try session.activeTabLeafRects(allocator, session.termRect(), &lr);
-    const pane_b = session.activePane();
-    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+    const moved_pane = session.activePane();
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    try std.testing.expect(pb.grip_cols > 0);
 
-    session.mouse(1, @floatFromInt(pb.full.x + 1), @floatFromInt(pb.full.y + 1), 0, 0); // grip down → arm
+    const grip_x: f64 = @floatFromInt(pb.full.x + pb.grip_cols * session.cell_width_px / 2);
+    const grip_y: f64 = @floatFromInt(pb.full.y + pb.full.h / 2);
+    session.mouse(1, grip_x, grip_y, 0, 0); // grip down → arm
     try std.testing.expect(session.pointerGestureIs(.pane));
 
     // ws1 카드(slot 1) 중앙에 up → 합치기. visible_tabs=[0,1]이라 slot 1 = ws1.
@@ -39539,11 +39619,10 @@ test "grip 드래그: 다른 워크스페이스 카드에 드롭 → 그 워크�
     session.mouse(2, sx, card_y, 0, 0);
     session.mouse(3, sx, card_y, 0, 0);
 
-    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len); // 워크스페이스 수 그대로(합치기)
-    try std.testing.expectEqual(@as(usize, 1), session.tabs.items[0].panes.items.len); // ws0 1 pane(소스 collapse)
-    try std.testing.expectEqual(@as(usize, 2), session.tabs.items[1].panes.items.len); // ws1 2 pane(합쳐짐)
-    try std.testing.expectEqual(@as(usize, 1), session.app_window.active_tab); // 활성 = target ws1
-    try std.testing.expectEqual(pane_b, session.tabs.items[1].activePane()); // 합쳐진 pane이 활성(우측)
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len); // 빈 소스 ws0 제거, target만 남음
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items[0].panes.items.len); // target에 단독 pane 합쳐짐
+    try std.testing.expectEqual(@as(usize, 0), session.app_window.active_tab); // 당겨진 target 활성
+    try std.testing.expectEqual(moved_pane, session.tabs.items[0].activePane()); // 합쳐진 pane이 활성(우측)
 }
 
 test "grip 드래그: 드래그 중 드롭 타겟 하이라이트 슬롯 추적(카드/빈 영역/밖/자기)" {
@@ -39629,7 +39708,7 @@ test "move_pane_to_new_workspace 액션: 활성 pane을 새 워크스페이스�
     try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
 }
 
-test "move_pane_to_workspace:N 액션: 활성 pane을 N번 워크스페이스에 합치기(dispatch 경로) + 자기/단독 no-op" {
+test "move_pane_to_workspace:N 액션: 활성 pane을 N번 워크스페이스에 합치기(dispatch 경로) + 자기/범위 밖 no-op" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);

@@ -34,11 +34,13 @@ cmux 같은 유연한 레이아웃:
     얇은 4갈래 스파클이 작은 gutter 크기에서 다이아보다 작고 흐려 보인다는 사용자 피드백 반영(SVG arms를 두껍게 → `svg_to_coverage.py` 재생성,
     잉크 ≈diamond). **색은 종류**를 따른다 —
     claude=Anthropic 공식 코랄 `#CC785C`, codex=OpenAI 청록 `#10A37F`(`term.agent_kind` 기준 단일 출처). **진행/완료**는 카드
-    **상태줄**(running=**`▁▅▇▃ 진행중` codex식 이퀄라이저 스피너**, idle=`✓ {답변}`)이 구분한다 — running 스피너는 블록 문자
+    **상태줄**(running=**`▁▅▇▃ 진행중` 이퀄라이저 스피너**, blocked=`? 입력 대기`, idle=`✓ 대기중`,
+    unknown=`· 상태 확인 중`)이 구분한다 — running 스피너는 블록 문자
     `▁▂▃▄▅▆▇█`(U+2581~2588, `renderer/block_glyph.zig` 절차 합성) 4칸 바운싱 바로, 각 바 높이는 삼각 파형(`spinner_wave`)을
     서로 다른 위상(`spinner_bar_phase=[0,4,8,12]`)으로 읽어 파도친다. `agent_spin_frame`(약 133ms마다 +1 mod 14, 파형 길이)으로
     진행한다. **위상은 사이드바 카드 파형이 실제로 보일 때만 돈다**(`anyAgentRunning`): 접힘·chrome_minimal이면 사이드바가 없어
-    돌지 않고, 검색 필터로 숨은 탭도 카드가 없다(재투영 낭비 회피, code-review high #1 + max). running 판정은 **탭 안 어느
+    돌지 않고, 검색 필터로 숨은 탭도 카드가 없다(재투영 낭비 회피, code-review high #1 + max). 대표 상태는
+    **blocked > running > idle > unknown** 순으로 사용자 조치가 필요한 Term을 먼저 드러낸다. running 판정은 **탭 안 어느
     pane/Term이든**(`tabHasRunningAgent`) — 활성 Term만 보던 옛 게이트에서 확장(백그라운드 Term도 카드 파형 트리거). **브랜드색**
     (색칠 루프가 아이콘과 같은 패턴으로 스피너 codepoint[블록 ▁~█]를 칠하되 **상태줄 row[카드 마지막 줄]로 좁혀** 이름/경로의 블록
     글자가 안 오염, #2 / 색·kind는 `tabAgentKind`로 running Term 우선)이라 "진행중"에 색 표현이 있다. **상단 탭 바**는 파형 대신

@@ -2,14 +2,15 @@
 
 > 단일 출처(design). Maru의 알림은 **두 면**을 가진다 — ① OS 데스크톱 배너(macOS 알림 센터), ② 앱 안 알림 센터
 > (maru chrome 오버레이). 둘은 같은 알림 소스를 공유하고, "정책·데이터·역조회는 Zig, OS 표시·창 활성화는 Swift"
-> 경계를 따른다. 에이전트 완료 알림의 신호원·트리거는 [agent-session.md](agent-session.md) "알림" 절이 단일 출처다.
+> 경계를 따른다. 에이전트 상태는 [agent-session.md](agent-session.md)가 단일 출처이며, terminal observer만으로 완료와
+> ESC 중단을 구분할 수 없으므로 에이전트 완료 알림은 deprecated no-op이다.
 
 ## 1. 알림 소스
 
 | 소스 | 트리거 | 발신 surface | 단일 출처 |
 |---|---|---|---|
 | **OSC 9 / OSC 777** | 셸/TUI가 `ESC ] 9 ; … ST`(iTerm2) 또는 `ESC ] 777 ; notify ; … ST`(rxvt)를 출력 | **시퀀스를 출력한 그 surface**(background split pane·가로탭 포함) — 코어가 각 surface에서 파싱 | `src/terminal/osc.zig` `dispatchNotify9/777` + `app_session.zig` `drainOscNotificationFrom` |
-| **에이전트 완료** | claude/codex 세션이 `running → idle` 전환, 그리고 **지금 그 안에 있는 Term이 아님**(`!is_current`, **Term 단위** — 포커스 창의 활성 탭·활성 pane·활성 Term 하나만 억제) | **완료한 Term의 surface**(background split pane·가로탭 포함) | `app_session.zig` `pollAgentKinds`(모든 pane×Term poll) → `enqueueAgentCompletion` |
+| **에이전트 완료** | emit하지 않음. `running → idle`은 완료와 ESC 중단을 모두 포함하므로 완료로 해석하지 않는다 | 해당 없음 | `notifications.agent-complete`는 deprecated no-op |
 
 두 소스는 `AppSession.pendingNotification()` 한 funnel로 합류한다(에이전트 큐를 OSC보다 먼저 드레인). 반환은
 `{ title, body, surface_id, foreground_banner }`(`PendingNotification`) — Swift가 tick마다 poll한다.
@@ -23,7 +24,7 @@ Term의 코어를 훑어 첫 pending을 그 surface.id로 실어 보낸다. 이�
 pane의 활성 Term) 변화에만 — 안 보이는 Term 변화로 헛 재렌더하지 않는다. reader 스레드가 `core_mutex` 아래 OSC pending·
 cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아래에서 읽어 owned 버퍼로 복사한다(torn read/UAF 방지).
 
-종류별 표시는 config `notifications.*`가 각 발화 지점에서 게이트한다 — `agent-complete`(에이전트 완료, `enqueueAgentCompletion`)·
+종류별 표시는 config `notifications.*`가 각 발화 지점에서 게이트한다 — `agent-complete`는 deprecated no-op이고,
 `osc`(OSC 9/777, `pendingNotification`)를 끄면 데스크톱 배너·인앱 센터 둘 다 안 만든다. 인앱 센터 보관 개수는
 `history-limit`(8~512, 기본 64). 단일 출처는 [config 스키마](configuration.md)다(스키마-주도라 세팅 화면에도 자동 노출).
 
@@ -37,7 +38,6 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   쓴다 — 단일 워크스페이스·단일 Term 사용자는 예전 제목과 동일하게 보인다. `›`(U+203A)는 계층(탭⊃팬), `·`(U+00B7)는
   상위 구분자로 알림 전체에서 일관되게 쓴다. 라벨은 borrowed(auto_title=메인 스레드 캐시·custom_name=세션 소유·
   surface.title=정적, reader 미접근)라 즉시 소비하고, OSC 경로는 `lockCore` 밖 메인 스레드 상태만 읽어 코어 락과 무관하다.
-- **에이전트 완료**: `{✶|◆} {Claude|Codex} · {위치}`(예: `✶ Claude · 배포 › 작업1`). 심볼·종류 뒤에 위치를 붙인다.
 - **OSC 9/777**: `{위치} · {앱 title}`(앱이 준 title이 있을 때, 예: `배포 › 작업1 · Build finished`), title이 없으면
   (OSC 9은 title 없음) `{위치}`만. body는 앱이 보낸 메시지 그대로 둔다. 위치를 **접두**해 앱 제목/메시지를 보존한다.
 
@@ -52,7 +52,7 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 띄우고, 코어/Zig는 데이터만 넘긴다(클립보드·벨과 같은 경계). 번들 ID가 없으면(dev shell) 알림 API를 못 써 조용히
 건너뛴다 — **배너는 `.app` 번들에서만 뜬다**.
 
-세팅 GUI에서 `notifications.agent-complete` 또는 `notifications.osc`를 켜면 Zig가
+세팅 GUI에서 `notifications.osc`를 켜면 Zig가
 `take_notification_authorization_request` 1회성 신호를 세우고, Swift가 다음 tick에 drain해 **현재 권한 상태를 보고
 분기**한다(`getNotificationSettings`) — 단순히 `requestAuthorization`을 재호출하면 안 되기 때문이다. 아직 결정 전
 (`notDetermined`)이면 `requestAuthorization`으로 macOS 권한 팝업을 띄우고, 이미 허용된 상태면 무동작이다. **거부 상태
@@ -84,7 +84,6 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 ### 전면 배너 게이트
 
 앱이 전면일 때 OS는 `willPresent`를 부른다. `foreground_banner`(Zig 결정)로 표시 스타일을 가른다:
-- **에이전트 완료(=1)**: "지금 그 안에 있지 않은 Term"이 대상이라(is_current 게이트) 전면에서도 `[.banner, .sound]`로 알린다.
 - **OSC 9/777**: 발신 Term이 **지금 보고 있는 그 Term이면 =0** — 사용자가 그 화면을 보고 있어 전면이면 `[.list]`로 알림
   센터 목록에만 남긴다(자기 화면 배너 노이즈 억제). **그 외(background split pane·가로탭·비활성 탭)면 =1** — 안 보는
   곳이라 전면에서도 배너로 알린다(`drainOscNotificationFrom`이 `focused_term` 비교로 결정 — 에이전트 is_current와 대칭).
@@ -202,7 +201,7 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 
 - **단위(Zig 헤드리스)**: `notifications.zig`(state·handle·itemAt 2행·view ops·panelRect clamp), 히스토리 ring buffer
   (push 상한·unread 증감·markRead·formatRelativeTime), `acceptNotification` 역순 매핑, `activateSurfaceById` 역조회,
-  **제목 위치 접두**(custom_name 세팅 시 에이전트 완료 title=`{✶|◆} {종류} · {탭 › 팬}`, OSC title=`{탭 › 팬} · {앱 title}`;
+  **제목 위치 접두**(OSC title=`{탭 › 팬} · {앱 title}`;
   탭 라벨==Term 라벨이면 dedup으로 하나만),
   **비활성 pane/Term OSC drain**(`pendingNotification`이 background split pane Term에 먹인 OSC 9를 그 surface_id로 돌려주고
   그 id로 점프가 비활성 pane을 포커스 — 모든 surface를 훑는지),
@@ -214,9 +213,9 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
   패널 열림) 헤드리스 스크린샷으로 종 우상단 빨강 원 + 흰 숫자(1~9)·10+ "9" cap·◧ 비침범을 확인하고, **빈 상태 패널**은
   `MARU_OPEN_NOTIFICATIONS_EMPTY=1`로 헤더 밴드 + 일러스트(아이콘·제목·부제)를 확인한다. 접힘 종은 `MARU_COLLAPSE_SIDEBAR`로
   ◧↔종 띠 세로 정렬·좌측 텍스트 배지 확인. 빨강 원은 GpuQuad **layer 4**(bg strip 뒤·헤더 글리프 앞)로 흰 숫자 아래에 그려진다.
-- **수동 E2E**(`.app` 번들): OSC/에이전트 알림 → 배너 클릭 → 발신 터미널 점프 / 멀티 윈도우 토큰 라우팅 / 종 클릭 →
-  카드 패널 → 항목 클릭 점프 / 안읽음 배지·점. **background split pane·가로탭에서 에이전트 완료 또는 OSC 알림 →
-  클릭이 탭뿐 아니라 그 pane/Term까지 포커스**(이 경로가 예전엔 알림 자체가 안 나 검증 불가였다).
+- **수동 E2E**(`.app` 번들): OSC 알림 → 배너 클릭 → 발신 터미널 점프 / 멀티 윈도우 토큰 라우팅 / 종 클릭 →
+  카드 패널 → 항목 클릭 점프 / 안읽음 배지·점. background split pane·가로탭의 OSC 알림 클릭이 탭뿐 아니라 그
+  pane/Term까지 포커스하는지 확인한다.
 
 ## 6. 범위 밖 (후속)
 

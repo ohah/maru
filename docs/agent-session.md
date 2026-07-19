@@ -1,284 +1,154 @@
-# 에이전트 세션 감지·상태 (JSONL 트랜스크립트)
+# 에이전트 상태 감지(터미널 관측)
 
-> 단일 출처(design). 터미널에서 도는 claude/codex의 **진행 상태(running/idle)·마지막 답변·완료 알림**을 사이드바
-> 카드에 표시한다. 에이전트는 지금처럼 **터미널 TUI**로 돌고, Maru는 그들이 디스크에 남기는 **세션 JSONL
-> 트랜스크립트**를 *읽기만* 한다(ACP/백그라운드 프로세스 불필요 — UX 변화 없음). 사이드바 카드 자체는
-> [tabs-splits-layout.md](tabs-splits-layout.md)의 "에이전트 아이콘"을 확장한다.
+> 단일 출처(design). Maru는 터미널에서 실행되는 대화형 에이전트의 종류와 상태를 **터미널이 이미 소유한
+> 관측값만으로** 판정한다. 사용자 홈의 provider 설정을 수정하거나 세션 트랜스크립트를 읽지 않는다.
 
-## Context
+## 목표와 비목표
 
-이미 구현된 것(merge됨): 포그라운드 프로세스 감지로 **어느 에이전트가 도는지**(claude/codex, node 래퍼 포함)
-판정해 사이드바에 아이콘 표시(`pollAgentKinds`/`classifyAgent`/`Term.agent_kind`). 이 문서는 그 위에 **진행
-상태·마지막 답변·알림**을 얹는다. 신호원은 에이전트의 세션 JSONL이다.
+목표는 claude/codex가 어느 Term에서 실행 중인지, 작업 중인지, 사용자 입력을 기다리는지, 입력 가능한 idle
+화면인지 사이드바와 컨트롤 플레인에 표시하는 것이다. 에이전트 TUI는 기존처럼 PTY foreground에서 그대로 실행된다.
 
-### 세션 파일 찾기 = **훅 매핑**(팬별 정확)
+다음은 의도적으로 제공하지 않는다.
 
-라이브 상태 poll이 "이 팬의 세션 트랜스크립트가 어느 파일인가"를 아는 방법은 **에이전트 공식 훅**이다
-(`src/platform/macos/agent_hooks.zig`):
+- provider 훅 설치·신뢰·매핑과 트랜스크립트 JSONL 해석
+- 마지막 답변 미리보기
+- provider session id를 저장하거나 자동 resume/fork하는 workspace restore
+- 에이전트 내부 단계, tool call, API 대기 원인을 정확히 복원하는 기능
 
-1. maru가 각 Term 셸에 control-plane selector `MARU_PANE_ID=<surface.id>`와 훅 전용
-   `MARU_AGENT_MAPPING_ID=<Term별 random id>`를 따로 주입한다. 후자는 별도 Maru 프로세스끼리도 충돌하지 않는다.
-2. maru가 시작 시 claude(`~/.claude/settings.json`)·codex(`~/.codex/hooks.json`)의 `hooks`에 **SessionStart·
-   UserPromptSubmit·Stop** 훅을 등록한다(원자적·idempotent·백업; 파싱 실패 시 무접촉). Claude는 SessionStart에서
-   즉시 매핑하지만, Codex 0.144.5 무프롬프트 fork는 첫 UserPromptSubmit/Stop에서 새 id를 알렸다. 훅 command는 인라인 셸
-   한 줄 — stdin(JSON payload = `transcript_path` 포함)을 `<config>/maru/agent-sessions/$MARU_AGENT_MAPPING_ID`로
-   덤프한다(jq 등 의존성 0). v1 `MARU_PANE_MAP_HOOK`은 Codex의 positional hook state를 깨지 않도록 **같은 배열
-   index에서** v2로 한 번 교체하고, 구버전 Maru 프로세스는
-   `MARU_PANE_ID` 폴백으로 계속 동작한다. **매 턴 이벤트(UserPromptSubmit/Stop)** 덕에 등록 이전 세션도 다음 활동에 매핑된다.
-3. `pollAgentState`가 `term.rt.agent_mapping_id`로 그 파일을 읽어 `transcript_path`를 뽑아 `poll`이 **그 파일을
-   직접** tail-read한다. 매핑이 없으면 state=unknown(**cwd 추측·mtime 폴백 없음** — 훅-only 결정).
+터미널 밖의 private 상태를 읽지 않는 대신 설치가 필요 없고, 같은 cwd의 여러 세션·중첩 프로세스·provider 포맷
+변경에 결합되지 않는다. 상태는 **화면에 드러난 사용자 관점**이며 provider 내부 상태의 증명은 아니다.
 
-**왜 훅인가**: cwd+mtime 추측은 같은 폴더 다중 세션에서 섞이고, `CLAUDE_CODE_SESSION_ID` env는 상속·`CHILD_SESSION`
-상시라 취약하며 codex는 세션 id를 env로 아예 안 낸다(전부 실측 확인). Anthropic·OpenAI 문서 모두 "트랜스크립트
-포맷은 internal, 버전마다 바뀐다"고 경고 → 직접 추측은 근본적으로 취약. 훅은 에이전트가 `transcript_path`를 **공식
-채널로** 알려주고 maru가 자기 키(`MARU_AGENT_MAPPING_ID`)로 정확히 잇는다(읽기→쓰기). 토큰·오염 0. cmux·Claude Squad가
-쓰는 "런치 제어/워크트리 격리"의 passive-터미널 판본. 자동등록이 실패하거나 훅이 stale하면 커맨드 팔레트 **Re-register Agent
-Session Hooks**로 수동 복구(`reregister_agent_hooks` 액션 → `agent_hooks.reregister` — **force 재등록, 매핑은 안 지움**;
-시작 시 `agent_hooks.setup`은 stale 매핑도 정리(pruneStaleMappings — 아래)하므로 복구엔 안 쓴다). 전역 config에서 떼려면 **Unregister**(`agent_hooks.unregister`).
+## 관측 입력
 
-**restore도 훅 경로**: workspace restore가 종료 시점에 fork source **session id**를 캡처하는 것도 **훅 매핑**을 쓴다
-(`captureAgentSessionId` → `readMapping(term.rt.agent_mapping_id)` → `sessionIdFromTranscript` — claude=파일명 uuid, codex=첫 줄
-`session_meta.payload.id`). cwd+mtime 추측이 없어 **같은 폴더 다중 세션도 팬별 source가 정확하다**. 옛 cwd+mtime/날짜-스캔
-탐색(`resolveClaude`/`resolveCodex`/`resolveSessionId`)은 훅으로 대체돼 **제거**됐다. 복원은 같은 id를 직접 resume하지 않고
-Claude `--resume <source-id> --fork-session` / Codex `fork <source-id>`로 새 id를 만든다. 정확한 source id가 없으면
-`--continue`/`--last`로 추측하지 않고 일반 셸로 복원한다([workspace-restore.md](workspace-restore.md) "에이전트 세션 자동 fork 복원").
+Term별 observer는 다음 입력을 함께 사용한다.
 
-**restore fork의 훅 대기**: 새 Term의 random mapping key에는 과거 파일이 없으므로 provider 훅이 source와 **다른 id**를
-쓸 때까지 상태는 unknown이다. 원본 session이 다른 터미널에서 계속 running/idle로 바뀌어도 복원 카드에 섞이지 않는다.
-Claude는 SessionStart, Codex는 첫 프롬프트 제출에서 풀린다. 첫 훅 전 종료는 source를 유지하고, poll-confirmed fork id는
-runtime에 남겨 OSC 7이 없는 direct-exec agent도 다음 source로 저장한다. 최초 fork 확인 뒤에는 random mapping을 현재
-세션의 단일 출처로 보므로 사용자가 같은 Term에서 원본 source를 직접 resume해도 그 최신 세션을 저장한다. provider가 종료돼
-셸로 돌아가거나 agent 종류가 바뀌면 이전 kind의 pending id를 버린다.
+1. **foreground process group**: 실행 파일과 process tree로 agent kind를 판정한다. claude가 `comm`을 버전 문자열로
+   바꾸거나 node/bun 래퍼 아래 실행되는 경우 argv/process tree를 확인한다. agent process가 사라지면 상태도 즉시
+   `unknown`으로 리셋한다.
+2. **live screen tail**: 현재 viewport의 마지막 bounded 행을 공백 정규화해 provider별 manifest와 매칭한다.
+   scrollback 전체를 읽지 않으며 현재 화면에 없는 과거 문구는 상태 근거로 쓰지 않는다.
+3. **OSC metadata**: 터미널 코어가 이미 파싱한 title과 progress를 문자열 입력으로 제공한다. progress는
+   [ConEmu specific OSC](https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC)가 정의한
+   OSC `9;4;state[;progress]` 본문을 bounded 문자열로 보존한 값이다. 기존처럼 알림으로 발사하지 않고 observer의
+   보조 입력으로만 쓴다. OSC는 agent가 실제로 보낸 값일 때만 신호이며 Maru가 provider 훅을 주입해 만들지 않는다.
+4. **PTY output activity**: agent가 foreground인 동안 새 output이 지속되면 `running` 근거다. 다만 출력이 잠시
+   멈췄다는 사실만으로 `idle`로 내리지 않는다. 느린 API·긴 도구 실행은 조용할 수 있기 때문이다.
 
-**안전·한계(코드리뷰 반영)**:
-- **config 편집 안전**: 첫 등록만 JSON을 병합(백업 `<config>.maru-backup`), 이후 마커로 skip해 무접촉. v1→v2와 force 재등록도 기존 Maru hook의 배열 index에서 교체해 뒤 사용자 hook의 Codex state key를 보존한다. **읽기 오류**(EACCES·>4MB)와 파일 없음을 구분해 — 읽을 수 없으면 손대지 않는다(minimal로 덮어쓰지 않음). 파싱 실패·최상위 비-object도 무접촉.
-- **복구/제거**: 자동등록 실패·**경로가 바뀐 stale 훅**은 팔릿 **Re-register**(force — 기존 maru 훅을 같은 위치에서 교체, **매핑은 안 지움**)로 고친다. 전역 config에서 떼려면 **Unregister**(maru 훅만 제거). 훅은 전역 `~/.claude`·`~/.codex`에 남아 maru 밖에서도 발화하나, 두 mapping env가 없으면 stdin만 소비(`/dev/null`)해 무해.
-- **경로 방어**: `transcript_path`는 매핑 파일(팬 셸 아무 프로세스나 쓸 수 있음)에서 오므로 **절대경로+`.jsonl`+`..` 없음**만 허용(traversal 방지, 옛 `isBasenameSafe` 대체).
-- **중첩 에이전트 한계**: 한 팬 안에서 claude 안 claude(중첩)를 띄우면 자식이 `MARU_AGENT_MAPPING_ID`를 상속해 그 팬 매핑을 자기 트랜스크립트로 덮는다. 바깥 에이전트의 다음 활동(UserPromptSubmit/Stop)에 매핑이 다시 올바르게 쓰이므로 **일시적**이지만, 중첩이 도는 동안엔 카드가 중첩 세션 상태를 보일 수 있다(드문 엣지).
-- **Codex 훅 신뢰(trust) 게이트 — codex 진행중이 "잘 안 뜨는" 흔한 원인**: Codex(OpenAI)는 보안상 사용자 훅(`~/.codex/hooks.json`)을 **내용 해시로 신뢰 검토**하고, **신뢰 전엔 훅을 발화하지 않는다**. 고정된 upstream 소스에서 hook key가 현재 event/group/handler **배열 index 기반**이고([discovery.rs L511-L523](https://github.com/openai/codex/blob/56395bddaf26eb2829387ca6a417bf9128e5b239/codex-rs/hooks/src/engine/discovery.rs#L511-L523)), 비관리 훅은 `trusted_hash == current_hash`일 때만 trusted다([L627-L638](https://github.com/openai/codex/blob/56395bddaf26eb2829387ca6a417bf9128e5b239/codex-rs/hooks/src/engine/discovery.rs#L627-L638)). 그래서 maru가 훅을 정확히 등록해도 **사용자가 그 프로젝트에서 훅을 신뢰하기 전엔** 매핑이 안 써져 `agent_state=unknown`이다. **claude에는 이 게이트가 없다**. `setup`은 현재 v2 마커가 있으면 무접촉이라 한 번 신뢰한 hash를 유지한다. 단, surface-id를 쓰던 v1 훅은 random mapping id v2로 **한 번 교체**되므로 그 업데이트 직후에는 Codex가 재검토를 요구할 수 있다. maru의 세션당 1회 안내는 config 전체에 `trusted_hash`가 전혀 없는지만 보는 **coarse hint**다. 현재 Maru 훅의 hash/key를 계산하지 않으므로 다른 훅의 hash나 v1 stale hash가 있으면 감지하지 못하며, 정확한 Modified/Untrusted 판정과 재검토는 Codex 자체 UI에 맡긴다. maru는 내부 hash를 대신 기록해 보안 게이트를 우회하지 않는다. managed 훅은 `/etc/codex`·MDM 시스템 범위라 per-user로 만들지 않는다.
-- **훅-only 창**: 팬 spawn 직후 첫 훅 발화 전, 또는 훅 미발화 세션은 state=unknown(cwd 추측 폴백 없음 — 훅-only 결정).
-  특히 Codex 무프롬프트 fork는 첫 UserPromptSubmit 전까지 의도적으로 unknown이며, 그 이벤트부터 새 transcript를 읽는다.
-- **매핑된 트랜스크립트 부재 = 세션 gone(stale 매핑 자가정리)**: `transcript_path`는 **세션 내내 고정**이다(claude 확인: auto-compaction·`/compact`·`--continue`/`--resume` 모두 같은 파일에 append; 새 파일은 **새 세션·`/clear`**만). 따라서 매핑이 가리키는 파일이 **없어졌다(`FileNotFound`)**는 건 회전이 아니라 **그 세션이 사라진 것**(수동 삭제·30일 retention·`/clear`로 옛 UUID 유기 등)이다. `poll`은 이 경우를 일반 unknown(불완전 tail — 일시적, 직전 상태 보존)과 **구분**해 `missing`으로 신호하고, `pollAgentState`는 직전이 running/idle이었으면 그 팬의 **stale 매핑 파일을 파기**(`removeMapping`)하고 상태를 unknown으로 **리셋**한다 — 안 그러면 unknown의 "직전 상태 보존" 계약 때문에 삭제된 running 세션이 **스피너가 영영 안 풀린다**. 새 세션은 다음 provider 훅(Claude SessionStart, Codex UserPromptSubmit/Stop)이 새 UUID로 매핑을 다시 쓰므로 자가회복. running→unknown 리셋이라 **완료 알림은 안 뜬다**(사라진 세션은 완료가 아님).
-  - **SessionEnd 훅은 안 쓴다(결정)**: 세션 종료 시 매핑을 훅으로 지우는 대안도 있으나, 깨끗한 종료는 **포그라운드=셸 감지(kind=none)** 로 이미 카드가 안 뜬다. Term teardown은 PTY join 뒤 자기 random mapping 파일을 지우고, 비정상 종료 잔여물은 시작 시 `pruneStaleMappings`와 위 `missing` 자가정리가 처리한다. per-event 삭제 command를 위해 `buildCommand`를 event별로 나눠 사용자 `settings.json` 접촉면을 넓히는 비용 대비 이득이 없어 **maru-side 자가정리로 일원화**한다.
-- **매핑 dir은 인스턴스 공유 → 통째 wipe 금지**: 매핑 dir(`<config>/maru/agent-sessions`)은 **모든 maru 인스턴스가 공유**하지만 파일 key는 Term별 random id라 별도 프로세스의 같은 surface 숫자도 충돌하지 않는다. `MARU_PANE_ID`와 `MARU_AGENT_MAPPING_ID`는 내부 예약 env라 사용자 `env.*`가 덮어쓸 수 없다. 정상 Term teardown은 자기 파일만 지우고, 시작 시 **`pruneStaleMappings`**는 crash 뒤 남은 파일 중 가리킨 트랜스크립트가 없어진·손상된 것만 지우며 살아있는 매핑은 보존한다. 옛 `clearMappings`처럼 dir을 통째 지우면 다른 프로세스의 라이브 세션을 파괴하므로 금지한다.
+screen/OSC/provider 패턴은 코드에 하드코딩된 거대한 switch 대신 작은 manifest 데이터로 둔다. manifest는
+`agent`, `state`, `all/any/none` 문자열 조건, `visible_idle`, `visible_blocker`, `visible_running` 메타만 표현한다.
+정규식·임의 코드 실행·외부 다운로드는 v1에 넣지 않는다. 빌드에 포함된 manifest만 사용하며 fixture가 근거다.
 
-## 왜 JSONL인가 (방식 결정)
+## 상태 모델과 우선순위
 
-| 방식 | running/idle | 마지막 답변 | 알림 | 백그라운드 | UX |
-|---|---|---|---|---|---|
-| 터미널 모니터링(스피너) | ✅ 실시간 | ❌ 렌더 바이트라 텍스트 불가 | ✅ | 불필요 | 무변화 |
-| **JSONL 트랜스크립트** | ✅ 마지막-엔트리 의미 | ✅ | ✅ | 불필요 | 무변화 |
-| ACP | ✅ 구조화 | ✅ | ✅ | **필요(에이전트 직접 spawn)** | **큼(TUI→패널)** |
+`agent_state(term) ∈ {unknown, running, blocked, idle}`이다. `agent_kind == none`이면 agent DTO 자체를 생략한다.
 
-**결정:** JSONL을 주 신호로 한다 — 터미널 워크플로(에이전트를 터미널에서 돌림)를 유지한 채 상태·답변·알림을 다
-얻고, 느린 API에도 견디며(아래), 포맷이 공식 문서화/오픈소스라 라이선스가 안전하기 때문. (선택) 터미널 스피너를
-실시간 보조로 둘 수 있다. ACP는 에이전트를 maru가 백그라운드로 직접 모는 *별개 surface*라 본 목표와 불일치 — 제외.
+- **running**: 화면/OSC가 작업 중 UI를 명시하거나, agent foreground에서 PTY output activity가 관측됨.
+- **blocked**: 현재 화면이 권한 확인, 선택, 질문 등 사용자 응답을 명시적으로 요구함.
+- **idle**: 현재 화면이 새 prompt/input box 등 입력 가능한 agent chrome을 명시적으로 보여 줌.
+- **unknown**: agent는 foreground지만 현재 관측값만으로 위 셋을 안전하게 고를 수 없음.
 
-## 데이터 소스 (실 세션 파일로 검증)
+우선순위는 `visible blocker > visible idle > visible running > recent PTY activity > previous stable state > unknown`이다.
+화면의 명시 신호가 활동 추정보다 우선하므로 ESC로 작업을 끊고 prompt가 돌아오면 과거 output activity가 남아 있어도
+즉시 `idle`이 된다. blocked 화면도 PTY가 잠깐 출력한 직후 `running`에 묻히지 않는다.
 
-### claude
-- 경로: `~/.claude/projects/<cwd-인코딩>/<session-uuid>.jsonl`. **cwd 인코딩** = 절대경로의 `/`→`-`
-  (예: `/Users/x/Documents/workspace/maru` → `-Users-x-Documents-workspace-maru`). 라이브 poll·restore **둘 다** 이 경로를
-  **훅 매핑**(위 Context)이 정확히 준다 — cwd 인코딩은 훅 payload의 경로 안에 이미 들어 있어 maru가 인코딩할 일이 없다.
-- 엔트리(줄): `{type, message?, timestamp, ...}`. `type` ∈ `user`/`assistant`/`system`/`attachment`/
-  `file-history-snapshot`/`queue-operation`/`mode`/`permission-mode`/`pr-link`/…. **대화** 엔트리는
-  `user`/`assistant`(나머지는 메타 — 무시). 단 `isMeta:true`인 `user`(local-command caveat·hook 주입)는
-  대화가 아니라 메타다 — 완료된 턴 뒤에 붙어도 false running으로 뒤집히면 안 되므로 제외한다(실측 함정).
-- **완료 판정(실측 정밀화)**: 마지막 *대화* 엔트리가 `assistant`이고 `message.stop_reason`가 **턴-종료 사유**
-  (`end_turn`/`stop_sequence`/`max_tokens`)면 idle. `tool_use`(도구 결과 대기)·`null`·모르는 값은 **running**
-  으로 보수 판정 — 모르는 값을 idle로 보면 느린 API 중 false idle이 생긴다(allowlist 근거: Anthropic Messages
-  API stop_reason). 실 세션 분포 검증: 한 세션에서 `tool_use` 2860건 vs `end_turn` 111건(도구 호출마다 tool_use).
-- **메타 꼬리 주의(실측 함정)**: 파일의 *물리적 마지막 줄*은 대화가 아니라 메타(`mode`/`permission-mode`/
-  `pr-link`)인 경우가 잦다. 그래서 "마지막 줄"이 아니라 "마지막 *대화* 엔트리"를 본다 — tail에서 메타 꼬리를
-  건너뛴다. 정확한 필드는 `transcript_path`(statusline 훅)로 포맷 확인 후 고정 JSONL fixture로 못박았다.
-- 검증: user 엔트리가 **제출 즉시** 기록되고 assistant는 응답 시 기록(실측 user 02:18:09 → assistant 02:18:53,
-  **44초 갭**). 그 44초 동안 마지막 대화 엔트리 = user → running.
+명시 화면 신호가 없는 `running → idle` 추정은 100ms 간격 3회 확인하되 700ms를 넘기지 않는다. 이는 화면 갱신
+중간 프레임을 idle로 오인하는 것을 줄이기 위한 안정화이며, 명시 `visible_idle`은 지연하지 않는다. 입력 box가 보이는
+idle과 권한 prompt인 blocked는 현재 화면 신호이므로 timeout 추정으로 만들지 않는다.
 
-### codex
-- 경로: `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl`. **날짜 분할**이라 cwd로 디렉터리를
-  못 찾는다 → 각 rollout 첫 줄 `session_meta.payload.cwd`로 매핑(최근 파일들을 stat해 cwd 일치 + 최신).
-- 엔트리(줄): `{type, payload, timestamp}`. `type` ∈ `response_item`(payload.type: `message`/`reasoning`/
-  `function_call`/`function_call_output`) / `event_msg`(payload.type: `agent_message`/`token_count`/
-  **`task_complete`**).
-- **완료 판정(명시적)**: `event_msg` + `payload.type == "task_complete"`. claude보다 깔끔(추론 불필요).
-- **마지막 답변**: `event_msg`/`agent_message`(또는 `response_item`/`message`).
-- 검증: function_call_output 09:55:14 → reasoning 09:55:25(**11초 갭**, API 대기) → agent_message → task_complete.
-  그 11초 동안 마지막 ≠ task_complete → running.
+`interrupted`는 새 observer의 상태가 아니다. 터미널은 ESC가 provider의 turn 중단인지 메뉴 닫기인지 일반화해 알 수
+없고, provider별 내부 이벤트를 읽지 않는다는 경계와 충돌한다. 대신 중단 후 실제 화면이 idle이면 `idle`, 질문 화면이면
+`blocked`, 판정할 수 없으면 `unknown`으로 표시한다. 따라서 `idle`은 더 이상 “턴 완료가 증명됨”을 뜻하지 않고
+“현재 입력 가능한 화면이 보임”을 뜻한다.
 
-## 상태 모델 (느린 API 견딤)
+## agent kind 판정
 
-`agent_state(term) ∈ {none, running, idle, interrupted}`:
-- **none** = 그 Term 포그라운드가 에이전트가 아님(`agent_kind == .none`).
-- **running** = 에이전트 포그라운드 **AND** 세션의 마지막 *대화* 엔트리가 **미완료**(claude: user거나 end_turn 아닌
-  assistant / codex: 마지막 `event_msg`가 `task_complete` 아님).
-- **idle** = 에이전트 포그라운드 **AND** 완료 마커가 마지막(claude end_turn / codex task_complete).
-- **interrupted** = 에이전트 포그라운드 **AND** 마지막 대화 엔트리가 **사용자 인터럽트(ESC)**. 진행 중이
-  **아니므로** 스피너·탭 ●는 꺼지고, **완료도 아니므로** "에이전트 완료" 알림은 쏘지 않는다(사용자가 직접 ESC를
-  눌러 이미 그 자리에 있다). 상태줄은 `· 중단됨`. 판별(실측 기반, `agent_transcript.zig`가 단일 출처):
-  - **claude**: `user` 엔트리에 top-level `interruptedMessageId`가 있거나 **본문이 `[Request interrupted`로 시작**.
-    둘을 **OR**로 보는 이유: 실측 인터럽트 엔트리의 약 **11%가 필드 없이** 본문만 남긴다(같은 버전에서도 섞인다).
-    필드만 보면 그 비율만큼 고착이 그대로 재현되고, 본문만 보면 문구 변경에 취약하다.
-  - **codex**: `event_msg`/`turn_aborted`(reason `interrupted`).
-  - **인터럽트 latch**: 마커를 본 뒤 따라오는 *꼬리* 엔트리는 상태를 뒤집지 못한다. 실측상 claude는 ESC 직후
-    `assistant`/`stop_sequence`("No response requested.")를, codex는 `turn_aborted` 다음 줄에 중단된 명령의
-    `exec_command_end`를 붙이는 판이 있다 — latch가 없으면 각각 **가짜 완료**와 **running 복귀(고착)**가 된다.
-    latch는 **새 프롬프트/새 턴**(claude: 일반 `user` / codex: `user_message`·`task_started`)에서 풀린다.
+종류 판정은 foreground process group이 단일 출처다. 화면 문구만으로 claude/codex를 추측하지 않는다.
 
-핵심: **mtime을 쓰지 않는다**(느린 API 중엔 파일이 안 써져서 false idle). 대신 **마지막 대화 엔트리의 의미**
-(턴 완료 여부)를 본다 — API가 44초든 5분이든 "턴 미완료"는 구조적 사실이라 false idle이 없다. **포그라운드 체크**를
-AND로 묶어 crash/Ctrl-C(마지막이 user로 남았지만 프로세스는 죽음) false-running을 막는다.
+- process-group leader가 알려진 실행 파일이면 바로 분류한다.
+- leader가 node/bun/런처이면 같은 group의 argv/script basename을 확인한다.
+- `comm`이 숫자로 시작하는 버전 문자열이면 argv[0] basename을 사용한다.
+- tmux/ssh 너머 원격 process tree가 로컬에서 보이지 않으면 kind/state는 `none/unknown`으로 남긴다. OSC title만으로
+  agent kind를 승격하지 않는다.
 
-> **인터럽트를 별도 상태로 두는 이유(회귀)**: **루트코즈는 파서의 오독**이다 — 인터럽트 엔트리가 claude에선 `user`
-> 타입(=새 프롬프트와 같은 모양), codex에선 `task_complete`가 아닌 이벤트라 옛 파서가 둘 다 **running**으로 접었다.
-> ESC는 에이전트 프로세스를 **죽이지 않으므로** 포그라운드 AND 체크(crash/Ctrl-C 방어)도 안 걸린다. mtime 게이트는
-> **루트코즈가 아니라 증상을 영구화하는 증폭기**다: 잘못 접힌 running 뒤로 트랜스크립트가 더 자라지 않아 재파싱조차
-> 막힌다(파서가 옳게 판정하면 mtime 게이트는 문제가 아니다 — 인터럽트 엔트리 append 자체가 mtime을 갱신해 그 시점에
-> 재파싱된다). 같은 위험을 "트랜스크립트 삭제" 케이스에선 이미 `missing` 자가정리로 막아뒀는데, 인터럽트에선 놓쳤다.
->
-> 컨트롤 플레인 wire(`control_surface.AgentState`)는 **`interrupted`를 별도 값으로 싣는다**(4상). `idle`로 접으면
-> 클라이언트가 `running → idle` 전이를 "턴 완료"로 읽어 **가짜 완료**를 보고한다(끊은 턴을 완료로 착각해 후속 단계를
-> 진행). "진행 중이 아님"만 알고 싶으면 `state != running`을 보면 된다.
+v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifest 구조는 provider 추가를 허용하지만 새 종류는
+아이콘·상태 fixture·수동 검증을 갖춘 별도 PR로 추가한다.
 
-## 성능 (큰 파일 안전)
+## 사이드바와 알림
 
-긴 대화는 JSONL이 수백 MB가 될 수 있다. **절대 전체를 안 읽는다**:
-- 상태/완료(codex): 파일 끝에서 **tail**(끝 64KB만 seek). codex는 마지막 엔트리가 `task_complete`(명시적 완료)라 끝부분만으로 충분. O(1).
-- 상태/완료(claude): claude는 마지막 `assistant` 턴 뒤에 대량 비-대화 엔트리(attachment·file-history-snapshot 등)를 append해 마지막 대화 턴이 끝에서 수백 KB까지 밀릴 수 있다(실측 ~800KB). 그래서 끝에서 **256KB부터 지수 확장(→2×→…→8MB 상한)하며 마지막 대화 엔트리를 찾는 `readTailScan`**을 쓴다(`agent_session.zig`). 활성 세션의 흔한 경우는 첫 청크로 끝나고, 멀 때만 확장. 8MB까지 못 찾으면 unknown(사실상 죽은 세션). 파서가 잘린 선두 줄을 skip하므로 청크 경계 처리가 불필요하다.
-- 마지막 답변: 같은 tail 버퍼에서 마지막 assistant/agent_message 추출. O(1).
-- 세션 찾기: 디렉터리 `stat`/엔트리 나열(claude=enc(cwd) 디렉터리 최신 `.jsonl`) 또는 최근 rollout 첫 줄 읽기(codex). codex는 날짜 분할(`YYYY/MM/DD`)이라 **최신 날짜 하나만 보면 자정·월말·연말을 넘긴 세션을 놓치므로**, 연(top)·월(top)·day(존재 기준 최대 14개)를 **최신순으로 평탄 순회**하며 cwd 일치 최신 rollout을 찾는다(첫 매칭=전역 최신). O(최근 day·파일 수).
-- 한 *줄*이 거대한 경우(초대형 메시지): tail 상한 내에서 잘라 미리보기(truncate). 폴링은 사이드바 빌드 주기에
-  맞춰 ≈0.5~1s, mtime이 안 바뀌면 재파싱 skip.
+카드 상태줄은 다음처럼 표시한다.
 
-## 아키텍처 / 레이어 (이식성)
+- `running`: 브랜드색 `▁▅▇▃ 진행중`; pane/Term 탭에는 기존 정적 `●` 플래그
+- `blocked`: 경고색 `? 입력 대기`; 애니메이션과 `●` 플래그 없음
+- `idle`: `✓ 대기중`; 마지막 답변은 표시하지 않음
+- `unknown`: `· 상태 확인 중`; 종류 아이콘은 유지
 
-[portability](layering-and-portability.md) 4층 위상에 맞춘다:
-- **session core(OS-중립)**: `AgentTranscript` 인터페이스 — `state()`, `lastAnswer()`, `pollForCompletion()`.
-  JSONL 줄 파싱·상태 판정은 순수 함수(헤드리스 테스트). 에이전트별 스키마 어댑터(claude/codex)도 여기(파싱은
-  OS 무관).
-- **platform adapter(macos)**: 세션 파일 *위치*(`~/.claude/projects`, `~/.codex/sessions`)·디렉터리 나열·tail
-  read만 macOS 경로. (Linux/Win 포팅 시 경로만 교체.)
-- **chrome(렌더)**: 상태를 사이드바 카드 줄/아이콘으로 lower(기존 `buildSidebarTitleFrame` 확장).
-- **platform(Swift)**: 완료 알림(macOS 알림 API)만 네이티브.
+워크스페이스 카드의 상태는 탭 안 모든 pane/Term을 훑어 `blocked > running > idle > unknown` 순으로 대표한다.
+사용자 조치가 필요한 Term을 작업 중 Term보다 먼저 보여 주기 위함이다. 같은 우선순위가 여러 개면 기존 순회 순서를
+유지하고, 색은 그 상태를 제공한 Term의 kind를 쓴다.
 
-기존 `Term.agent_kind`(어느 에이전트) 옆에 `Term.agent_state`(running/idle)와 캐시(세션 경로·마지막 mtime·마지막
-답변)를 둔다. `pollAgentKinds`가 상태도 함께 polling(throttle 공유).
+완료 알림은 `running → idle`만으로 보내지 않는다. 새 `idle`은 완료뿐 아니라 ESC 중단 뒤 prompt 복귀도 포함하므로
+그 전이를 완료로 해석하면 가짜 알림이 된다. 구조화된 완료 신호가 없는 v1에서는 `notifications.agent-complete`를
+deprecated no-op으로 두고 UI/설정에서 제거한다. OSC 9/777 알림은 별개로 유지한다.
 
-## 사이드바 통합 (결정)
+## 컨트롤 플레인 계약
 
-카드를 **최대 4줄**로: line0=이름, (git면) line1=`├ 브랜치`·line2=경로, **line3=상태줄**.
-- **상태줄(진행중 표시 + 답변 미리보기 겸용)**: running이면 **`▁▅▇▃ 진행중`**(codex식 이퀄라이저 스피너), idle이면
-  `✓ {마지막 답변 첫 줄}`(완료 답변 미리보기 — 카드 폭으로 말줄임). 별도 미리보기 줄을 안 둬도 상태줄이 둘을 겸한다.
-- **running 스피너 + 솔리드 아이콘**(사용자 피드백, 펄스 폐기): 옛 "아이콘 밝기 펄스"(`blink_visible` 500ms 변조)는 작은
-  아이콘에선 작업 중인지 알기 어려웠다. 이제 **아이콘은 항상 솔리드 브랜드색**(큰 별/다이아 — 종류·presence를 또렷이)이고,
-  **작업 중 애니메이션은 상태줄 스피너**가 담당한다 — `● 진행중` 대신 **codex "working" 파형(이퀄라이저)의 축소판인 4칸
-  바운싱 바**(블록 문자 `▁▂▃▄▅▆▇█` U+2581~2588, `renderer/block_glyph.zig` 절차 합성)를 쓴다. 각 바 높이는 삼각 파형
-  (`spinner_wave`, 주기 14)을 서로 다른 위상(`spinner_bar_phase=[0,4,8,12]`)으로 읽어 파도처럼 흐른다.
-  `agent_spin_frame`(running일 때 약 133ms마다 +1 mod 14, 사이드바 재투영)으로 진행. **스피너는 브랜드색**
-  (코랄/청록 — 색칠 루프가 아이콘과 같은 패턴으로 칠함)이라 "진행중"에 색 표현이 생긴다(사용자 요청). idle은 스피너 없이 `✓`.
-  (옛 브라유 회전 dot `⠋⠙⠹⠸⠼⠴⠦⠧`은 "작은 점 왔다갔다"라는 피드백으로 codex 스피너식 파형으로 교체 — codex의 인라인
-  글리프 스피너 자체도 사실 같은 브라유[10프레임]이고, 눈에 띄는 애니메이션은 이 블록 파형이라 그쪽을 좁은 카드 폭에 맞춰 축소.)
-  - **트레이드오프(폭, 수용됨)**: running 상태줄이 1칸(옛 브라유)→**4칸**으로 넓어졌다. 아주 좁은 사이드바(~12–14칸)에서는
-    `▁▅▇▃ 진행중`이 카드 폭을 넘어 **끝에서 말줄임**되어 막대+`…`만 남고 "진행중" 라벨이 잘릴 수 있다(옛 1칸 스피너는 그 폭에서도
-    라벨이 붙었다). 기본 사이드바 폭에선 문제없고 사이드바를 매우 좁게 드래그한 경우에만 해당하는 엣지라 **4칸을 그대로 수용**한다
-    (사용자 결정 — 좁은 폭 우선순위보다 codex식 파형 표현을 택함). 필요하면 후속으로 폭 적응(좁으면 바 수 축소·라벨 우선)을 검토.
-  - **범위 = 워크스페이스(탭) 단위**(사용자 요청): 상태줄·gutter 아이콘·브랜드색은 활성 Term만이 아니라 **탭 안 어느 pane/Term이든**
-    running이면 표시한다(`tabHasRunningAgent`/`tabAgentKind` — running Term 우선, 없으면 활성 Term 폴백). 에이전트를 백그라운드
-    pane/split·비활성 가로탭에서 돌려도 카드에 파형이 뜬다(옛 "활성 Term만" 한계 해소 — `pollAgentKinds`가 모든 pane×Term을 갱신).
-    running Term의 kind로 아이콘/색을 고르므로 활성 Term이 셸(none)이어도 백그라운드 claude/codex가 카드에 종류색으로 보인다.
-    - **의도된 기준 분리(수용됨, 사용자 결정 A)**: 같은 카드에서 **이름·브랜치(저장소)·경로는 활성 Term** 기준, **스피너·아이콘·색은
-      워크스페이스 전체**(아무 pane/Term) 기준으로 **갈린다**. 근거: 사이드바는 **비활성 워크스페이스의 상태까지 한눈에** 보는 유일한
-      곳이라(탭바는 활성 워크스페이스만) 백그라운드 Term 에이전트도 "이 워크스페이스가 바쁨"으로 떠야 개요가 산다. **활성 Term과
-      running Term이 다른**(다른 repo이거나 같은 repo의 다른 하위 디렉터리·브랜치) 경우에만 repo/경로(활성)와 스피너(다른 Term)가
-      시각적으로 어긋난다 — 개요 가치를 위해 수용.
-      (대안 B[스피너도 활성 Term으로 통일]는 카드 내부는 일관되나 백그라운드 에이전트가 사이드바 목록에서 사라져 개요가 약해져 기각.)
-      추가 수용 사항(code-review high): ① 상태줄은 어느 Term이든 running이면 파형이 우선이라, 활성 Term이 방금 끝낸 답변 미리보기
-      (`✓ {답변}`)가 **백그라운드 에이전트가 도는 동안 가려진다**(모든 running이 끝나면 다시 보임). ② 한 pane의 가로 Term 탭이
-      claude+codex **혼재**면 탭바 플래그(●) 색이 pane 대표 kind 하나로 통일된다(다른 kind 탭은 색이 어긋남 — 드묾).
-  - **상단 탭바 running 표시 = 1칸 정적 플래그 ●**(사용자 요청 "여기도"): 사이드바 카드는 전용 상태줄이 있어 애니메이션 파형을
-    쓰지만, **탭 바(pane 라벨·Term 탭)는 등폭이라 폭이 귀하다** — 4칸 파형을 붙이면 식별용 이름이 잘린다(code-review max #1).
-    그래서 **tmux/screen 창-목록 활동 플래그(1글자)·zellij/iTerm2 탭 활동 점 관례**를 따라, running pane 라벨과 running Term 탭 앞에
-    `● `(U+25CF + 공백, `flagPrefixedLabel`) **정적 1칸 플래그**를 붙이고 ● 셀을 브랜드색으로 칠한다(`recolorAgentFlagCells`, pane
-    대표 kind). **정적이라 매 프레임 재투영이 필요 없고**(상태 변화 시에만 `pollAgentKinds`가 dirty), 종류색(코랄/청록)으로 종류도
-    드러난다. 편집(rename) 중인 라벨/탭엔 붙이지 않는다. (혼재 claude+codex pane의 플래그 색은 pane 대표 kind로 통일 — 드문 트레이드오프.)
-  - **재렌더 게이트 확장**(`agentDisplayVisible`): 정적 플래그·워크스페이스 단위 카드가 생기며, 상태/종류 변화 시 `metal_dirty`를
-    올리는 게이트를 "활성 Term만"에서 **탭 단위**(보이는 사이드바 카드 or 활성 탭의 탭 바)로 넓혔다 — 백그라운드 Term이 running으로
-    바뀌어도 그 탭 카드/탭바 플래그가 제때 갱신된다. 사이드바 파형 애니메이션(`anyAgentRunning`, 130ms)은 카드 전용이라 그대로.
-- 인코딩은 4줄 수용(`sidebar_line_base=32`, `line_index` 0~3 → 4줄). 구현: `lines: [3]`→`[4]`, 슬롯 높이
-  3.8×→~4.6×(4줄+여백). 비-git·비-에이전트 탭은 줄이 적어 같은 슬롯에 블록 세로 중앙 정렬(빈 줄 없음).
+`agent.state` wire 값은 `running | blocked | idle | unknown`이다. `idle` 의미는 “턴 완료”에서 “입력 가능한 agent
+화면”으로 바뀐다. `blocked`를 추가하고 `interrupted`는 더 이상 emit하지 않는다. 이 API는 아직 내부 소비 단계이므로
+별도 version negotiation을 추가하지 않고 문서·CLI fixture를 함께 갱신한다. 소비자는 알 수 없는 enum을 `unknown`으로
+처리해야 한다.
 
-## 알림 (결정)
+상태 변경 이벤트는 observer가 안정화된 상태를 publish할 때만 발생한다. PTY byte마다 이벤트를 내지 않으며, 같은 상태의
+visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트 정책을 논의한다.
 
-- `running → idle`(완료 마커) 전환 시 **macOS 알림**. **제목 = `{심볼} {Claude|Codex} · {끝난 Term 라벨}`**
-  (심볼은 사이드바 에이전트 아이콘과 같은 ✶ claude/◆ codex — macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목
-  prefix로 종류를 구분; 라벨은 **끝난 그 Term**의 termLabel이라 background split/가로탭 완료도 그 세션을 정확히 가리킨다).
-  **본문 = 마지막 답변 미리보기(여러 줄을 한 줄로 평탄화 — `copyPreviewFlattened`, 알림 배너가 답변을 더 많이 보임;
-  사이드바 상태줄은 같은 문자열을 카드 폭으로 다시 말줄임)** 또는 답변이 없으면 "완료". 종류 없음이면 워크스페이스 라벨 폴백.
-  **활성(현재 보고 있는) 탭은 알림 안 함 — 비활성 탭/창에서 끝났을 때만 알림**(사용자 결정). **구현은 기존 OSC
-  9/777 알림 경로를 재사용**한다 — `pendingNotification`(Swift가 tick마다 poll)에 에이전트 완료 큐를 합류시켜
-  Swift `UNUserNotificationCenter`로 띄운다. 설계 초안의 `notify(title, body)` ABI 신설 대신 이미 있는 drain ABI를
-  쓰므로 **새 ABI/Swift 코드가 없다**(더 단순·검증된 경로). 디바운스는 **전환 edge 자체**(idle 유지 중엔 mtime-skip
-  으로 재진입 안 해 한 번만 발화 — 별도 timestamp 기억 불필요). 켜기/끄기 config(`notifications.agent-complete`).
+## 마이그레이션과 하위호환
 
-## PR 분해
+### provider 훅 정리
 
-- **PR0(이 문서)**: 설계 단일 출처(doc-first). ✅ 완료.
-- **PR1**: session core 순수 파싱 + **claude 어댑터** ✅ **완료** — `src/session/agent_transcript.zig`
-  (`session.zig` 파사드 노출). `parseClaudeTail`(tail 바이트→`AgentState{unknown,running,idle}`+답변 미리보기),
-  는 OS-중립 순수 함수(std만 의존, `tests/boundary/imports.zig` 가드). **⚠️ 세션 파일 위치는 이후 훅 매핑(위 Context)으로
-  대체돼, cwd→디렉터리 인코딩(`encodeClaudeProjectDir`)·mtime 최신 인라인 선택은 제거됐다** — 이 항목은 히스토리 보존용. 고정 JSONL fixture로 헤드리스 테스트(running=user/tool_use, idle=end_turn,
-  느린 API 갭, end_turn 뒤 tool_result/메타 꼬리/isMeta user, 잘린 선두 줄 skip, UTF-8 경계 말줄임, cwd→디렉터리).
-  파일 I/O(세션 찾기·tail read·디렉터리 나열)와 사이드바 배선은 PR3(platform).
-- **PR2**: **codex 어댑터** ✅ **완료** — 같은 `src/session/agent_transcript.zig`에 `parseCodexTail`(완료=명시적
-  `event_msg`/`task_complete`, 답변=`last_agent_message`, `token_count` 무시, 그 밖 turn 엔트리=running),
-  `parseCodexId`(첫 줄 `session_meta.payload.id` — fork source). **⚠️ cwd로 세션을 찾던 `parseCodexCwd`/날짜-스캔은 훅
-  매핑으로 대체돼 제거됨**(위 Context). claude와 `AgentState`/`Status`·tail 규약·헬퍼 공유. fixture 테스트(idle/token_count 무시/진행 신호/메타뿐/잘린 선두 줄).
-- **PR3**: platform tail-read + 사이드바 **상태 표시** ✅ **완료** — `src/platform/macos/agent_session.zig`(L4:
-  세션 파일 찾기·디렉터리 나열·tail read; claude=enc(cwd) 디렉터리 최신 .jsonl을 `readTailScan`(끝 256KB→8MB 지수
-  확장)으로 마지막 대화 턴까지 읽음, codex=연·월·day를 최신순 평탄 순회(자정 넘김 대응)해 첫 줄 cwd 일치 최신
-  rollout을 끝 64KB tail로 읽음; mtime 안 바뀌면 재파싱 skip). `pollAgentKinds`가 활성 Term의
-  `agent_state`를 갱신(cwd=OSC7 `currentCwd()`, 세션 코어로 판정). 사이드바 카드 4번째 **상태줄**(running=`▁▅▇▃ 진행중`
-  이퀄라이저 스피너[브랜드색], idle=`✓ {답변}`) + 아이콘은 **솔리드 브랜드색**(옛 밝기 펄스 폐기 — 위 "running 스피너" 절) + 슬롯 높이 3.8×→**4.6×**
-  (`lines:[3]→[4]`). Metal `.m` 디코더는 이미 4줄 지원(`line_count*4`)이라 무변경. temp-dir 통합 테스트(claude/codex
-  최신 선택·cwd 매칭·mtime skip)는 macOS. **실 세션 육안 검증은 수동**(아래 한계).
-- **PR4**: **완료 알림** ✅ **완료** — `running → idle` 전환을 **비활성 탭/창**에서 관측하면 macOS 알림을 띄운다
-  (제목=`{✶|◆} {Claude|Codex} · {끝난 Term 라벨}`, 본문=마지막 답변 평탄화 미리보기 또는 "완료" — 위 "알림" 절이
-  단일 출처). **기존 OSC 9/777 알림 ABI를 재사용**(`pendingNotification`
-  /`maru_macos_app_session_pending_notification` v52 + Swift `UNUserNotificationCenter`) — **새 ABI/Swift 불필요**
-  (설계 초안의 `notify(title,body)` 추가 대신 이미 있는 drain 경로에 합류). `pollAgentState`가 전환 edge에서
-  `enqueueAgentCompletion`(owned 큐, 상한 가드), `pendingNotification`이 OSC보다 먼저 드레인. 디바운스=전환 edge
-  자체(idle 유지 중 mtime-skip으로 재진입 없음). "보고 있는 탭"=포커스 창(`window_focused`, focusChanged)의 활성
-  탭은 제외. config `notifications.agent-complete`(기본 true). 헤드리스 테스트(enqueue→OSC보다 먼저 드레인·답변
-  폴백·config 파싱).
-- **PR5(선택)**: **마지막 답변 미리보기**(길이/위치 결정 후).
+업데이트 후 첫 시작에서 과거 Maru marker가 있는 claude/codex user config를 **한 번만 자동 정리**한다.
+
+- Maru가 만든 marker와 command만 제거하고 같은 배열의 사용자 hook 순서와 나머지 JSON은 보존한다.
+- 파싱 실패, 권한 오류, 4MiB 초과 파일은 무접촉하고 구조화 로그만 남긴다.
+- 변경 전 `.maru-backup`을 만들며 기존 백업을 덮어쓰지 않는다.
+- cleanup 완료 여부는 Maru config/runtime marker로 기록한다. 실패는 다음 시작에 재시도한다.
+- 기존 `Re-register/Unregister Agent Session Hooks` command와 action/config 문법은 제거한다.
+- `<config>/maru/agent-sessions/` 잔여 mapping은 민감하지 않은 Maru 생성물이며, cleanup 성공 뒤 Maru marker 형식 파일만
+  정리한다. 디렉터리 전체를 무조건 삭제하지 않는다.
+
+### workspace restore
+
+기존 workspace의 `agent_kind`, `agent_session`, `agent_argv` 필드는 **읽을 수는 있지만 무시**한다. 복원은 해당 Term의
+정상 `shell_entry`와 cwd만 연다. 새 workspace 저장에는 이 세 필드를 쓰지 않는다(read-old/write-new). 이 방식은 오래된
+workspace 파일을 깨뜨리지 않으면서 provider 세션 자동 실행을 제거하고, 한 번 새로 저장하면 private session id와 argv가
+자연스럽게 사라지게 한다. `workspace.restore-claude`와 `workspace.restore-codex` 설정은 deprecated no-op으로 한 릴리스
+읽은 뒤 제거 대상으로 두되, UI에서는 즉시 숨긴다.
+
+## 성능과 관측 가능성
+
+- screen snapshot은 변경 sequence가 바뀐 Term만 읽고 idle 안정 상태에서는 재스캔을 건너뛴다.
+- screen tail은 행·바이트 상한을 두고, 매 poll heap 전체 화면 복사를 피한다.
+- process probe는 foreground pgid 변화 시 즉시, 식별된 agent는 낮은 주기로 재확인한다.
+- debug event는 kind, 이전/새 상태, 선택된 manifest rule id, visible flags, activity age만 남긴다. 화면 텍스트·OSC 원문·
+  cwd·argv 전체는 로그에 남기지 않는다.
+- observer domain snapshot을 사이드바, control plane, 테스트가 함께 소비한다. UI별 판정 로직을 만들지 않는다.
+
+## 구현 분해
+
+1. **문서 PR**: 이 계약과 workspace/control-plane/sidebar/notification 정책을 먼저 일치시킨다.
+2. **observer PR**: OS-중립 manifest matcher·상태 안정화·fixture, Term runtime 배선, 사이드바/control-plane 상태를 구현한다.
+3. **migration PR**: transcript/hook/session-fork 코드를 제거하고, 1회 hook cleanup과 workspace read-old/write-new를 구현한다.
 
 ## 검증
 
-- **헤드리스 단위(Linux CI 포함)**: 고정 JSONL fixture로 — 상태 판정(running/idle/done), **느린 API 갭**
-  (마지막=user/미완료 → running), tail 큰 파일(끝 N KB만), cwd→세션 매핑(claude 인코딩·codex session_meta),
-  마지막 답변 추출, 완료 감지. 파싱은 순수 함수라 OS 무관.
-- **수동(macOS)**: 실 claude/codex로 상태 전환·알림 육안.
-- **⚠️ maru를 Claude Code **자식 세션** 안에서 띄우지 말 것**: maru 앱을 Claude Code 세션의 subprocess로
-  실행하면(예: 이 저장소를 Claude Code로 작업하다 `zig build macos-app`으로 띄움), 그 maru의 팬 셸과 그 안에서
-  실행하는 claude가 **`CLAUDE_CODE_CHILD_SESSION=1`·`CLAUDE_CODE_SESSION_ID`를 상속**한다. 자식 세션 claude는
-  **트랜스크립트를 `projects/`에 persist하지 않아**(소스: `transcript_path = sessionFile ?? 계산경로`, 자식 세션은
-  `sessionFile=null` → 존재하지 않는 계산 경로 반환), 훅 매핑이 **phantom 경로**(파일 없음)를 가리켜 사이드바 카드의
-  에이전트 상태줄이 안 뜬다. 이는 **환경 오염이지 기능 결함이 아니다**. 반드시 **일반 터미널**(Claude Code 밖)에서
-  띄워 검증하거나, 부득이 자식 맥락이면 `env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID …`로 벗기고
-  실행한다. 확인: `ps eww -p <claude-pid> | grep CLAUDE_CODE_CHILD_SESSION`(정상 세션이면 없음).
+- 순수 fixture: claude/codex 각각 idle/running/blocked, scrollback의 과거 blocker 무시, OSC-only 보조, 상충 신호 우선순위.
+- 전이 테스트: output activity→running, visible idle 즉시 전환, plain idle 3회 확인/700ms cap, process exit/kind change reset.
+- ESC 회귀: running 화면에서 ESC 뒤 idle fixture가 오면 다음 publish가 running이 아니며 완료 알림도 생성하지 않음.
+- 다중 Term: background blocked가 workspace 대표가 되고, running Term의 탭 플래그와 dirty gate가 정확히 갱신됨.
+- migration: 사용자 hook 보존·Maru marker만 제거·parse/read 실패 무접촉·재시도·백업 no-clobber.
+- workspace: 옛 agent 필드 parse 성공+무시, 새 저장에 필드 없음, cwd/shell/일반 layout round-trip 불변.
+- 수동 E2E: 실제 claude/codex에서 prompt, 작업, 권한 질문, ESC 중단, pane/Term 전환을 반복해 카드와 control 상태 확인.
 
-## 규칙 / 베이스
+## 한계
 
-- **doc-first**: PR0이 이 문서(단일 출처).
-- **document-basis-and-decision**: claude 포맷은 공식 문서(`code.claude.com/docs`, statusline 훅의 `transcript_path`),
-  codex는 오픈소스(`openai/codex`, Apache-2.0)를 베이스로 인용. mtime 대신 마지막-엔트리-의미를 택한 근거(느린 API)
-  를 코드·docs에 기록.
-- **clean-room**: 데이터 포맷(JSONL)은 저작권 대상이 아니며, Maru가 *자체* 파서로 읽는다. 참고용 OSS 파서
-  (`simonw/claude-code-transcripts` 등)는 *포맷 이해*용으로만 보고 코드는 복사하지 않는다.
-- **헛방어 금지**: 스키마 필드 누락/버전차는 한 곳(파서)에서만 처리(없으면 none으로 폴백), 산발적 방어 없음.
-- **no-external-ref**: 외부 터미널(cmux/Warp) 형태만 참고, 산출물·용어는 Maru 독립.
-
-## 결정된 UX (사용자 확정)
-
-1. **상태 표시**: 솔리드 브랜드색 아이콘(종류·presence) **+** 4번째 상태줄의 running 이퀄라이저 스피너(`▁▅▇▃ 진행중`, codex식 파형, 브랜드색). (옛 "아이콘 밝기 펄스"는 작아서 안 보인다는 사용자 피드백으로 스피너로 대체.)
-2. **답변 미리보기**: 카드 상태줄에 idle 시 마지막 답변 첫 줄 1줄(말줄임).
-3. **알림**: 비활성 탭에서 완료될 때만(활성 탭은 안 함).
+provider가 UI 문구·OSC를 바꾸면 manifest fixture 갱신이 필요하다. 텍스트 기반 판정은 false positive/negative가 가능하므로
+모호할 때는 `unknown`으로 실패한다. terminal observer 하나로 provider 내부 완료 의미, 마지막 답변, 정확한 session id를
+동시에 얻을 수 없다는 제한을 제품 계약으로 숨기지 않는다.

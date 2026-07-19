@@ -234,7 +234,7 @@ fn validateDockState(dock: dock_panel.PersistedState) !void {
             total_entries = std.math.add(usize, total_entries, group.entries.len) catch return error.InvalidDockState;
             if (total_entries > max_dock_entries) return error.InvalidDockState;
             for (group.entries, 0..) |entry, entry_index| {
-                if (entry.path.len == 0) return error.InvalidDockState;
+                if (entry.path.len == 0 or !entry.mode.allowedFor(entry.kind)) return error.InvalidDockState;
                 active_entries += @intFromBool(entry.active);
                 for (group.entries[0..entry_index]) |existing| if (std.mem.eql(u8, existing.path, entry.path)) return error.InvalidDockState;
                 for (dock.groups[0..group_index]) |prior_group| {
@@ -255,7 +255,7 @@ fn validateDockState(dock: dock_panel.PersistedState) !void {
     if (dock.entries.len > max_dock_entries) return error.InvalidDockState;
     var active_entries: usize = 0;
     for (dock.entries, 0..) |entry, i| {
-        if (entry.path.len == 0) return error.InvalidDockState;
+        if (entry.path.len == 0 or !entry.mode.allowedFor(entry.kind)) return error.InvalidDockState;
         active_entries += @intFromBool(entry.active);
         for (dock.entries[0..i]) |existing| {
             if (std.mem.eql(u8, existing.path, entry.path)) return error.InvalidDockState;
@@ -286,20 +286,14 @@ fn writeDockEntry(w: *std.Io.Writer, entry: dock_panel.PersistedEntry) !void {
     // 외부 quoted 값 안의 self-delimiting payload: kind:mode:active:path-byte-len:path. path를 마지막에 두고 길이를
     // 앞에 써 `:`·공백·개행·따옴표가 들어간 macOS 파일명도 별도 delimiter escape 없이 정확히 왕복한다. 바깥
     // writeEscaped가 workspace 라인 문법만 보호한다.
-    const mode = switch (entry.mode) {
-        .read => "read",
-        .source_edit => "source-edit",
-    };
+    const mode = entry.mode.workspaceName();
     try w.print(" dock-entry=\"{s}:{s}:{d}:{d}:", .{ @tagName(entry.kind), mode, @intFromBool(entry.active), entry.path.len });
     try writeEscaped(w, entry.path);
     try w.writeByte('"');
 }
 
 fn writeDockEntryV2(w: *std.Io.Writer, group_index: usize, entry: dock_panel.PersistedEntry) !void {
-    const mode = switch (entry.mode) {
-        .read => "read",
-        .source_edit => "source-edit",
-    };
+    const mode = entry.mode.workspaceName();
     try w.print(" dock-entry-v2=\"{d}:{s}:{s}:{d}:{d}:", .{ group_index, @tagName(entry.kind), mode, @intFromBool(entry.active), entry.path.len });
     try writeEscaped(w, entry.path);
     try w.writeByte('"');
@@ -544,12 +538,7 @@ fn parseDockEntry(encoded: []const u8) DockEntryParseError!dock_panel.PersistedE
         .html
     else
         return error.UnsupportedDockValue;
-    const mode: dock_panel.Mode = if (std.mem.eql(u8, mode_raw, "read"))
-        .read
-    else if (std.mem.eql(u8, mode_raw, "source-edit"))
-        .source_edit
-    else
-        return error.UnsupportedDockValue;
+    const mode = dock_panel.Mode.parseWorkspaceName(mode_raw) orelse return error.UnsupportedDockValue;
     const active = if (std.mem.eql(u8, active_raw, "0"))
         false
     else if (std.mem.eql(u8, active_raw, "1"))
@@ -1715,7 +1704,7 @@ test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기
 
 test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하고 트리 dirty는 쓰지 않는다" {
     const dock_entries = [_]dock_panel.PersistedEntry{
-        .{ .path = "/Users/me/a:b \"한글\".md", .kind = .markdown, .mode = .source_edit, .active = true },
+        .{ .path = "/Users/me/a:b \"한글\".md", .kind = .markdown, .mode = .live_preview, .active = true },
         .{ .path = "/Users/me/line\nname.html", .kind = .html, .mode = .read, .active = false },
     };
     const windows = [_]Window{.{
@@ -1742,7 +1731,7 @@ test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하�
     try std.testing.expectEqual(@as(usize, 2), dock.entries.len);
     try std.testing.expectEqualStrings(dock_entries[0].path, dock.entries[0].path);
     try std.testing.expectEqual(dock_panel.EntryKind.markdown, dock.entries[0].kind);
-    try std.testing.expectEqual(dock_panel.Mode.source_edit, dock.entries[0].mode);
+    try std.testing.expectEqual(dock_panel.Mode.live_preview, dock.entries[0].mode);
     try std.testing.expect(dock.entries[0].active);
     try std.testing.expectEqualStrings(dock_entries[1].path, dock.entries[1].path);
     try std.testing.expect(!dock.entries[1].active);
@@ -1790,7 +1779,7 @@ test "workspace dock FP1: 미래 kind나 mode는 도크만 기본값으로 강�
     try std.testing.expectEqual(@as(usize, 0), parsed_kind.workspace.windows[0].dock.entries.len);
 
     const future_mode = header ++ "\n" ++
-        "window tabs=0 active-tab=0 dock-entry=\"markdown:live-preview:1:9:/tmp/a.md\"\n";
+        "window tabs=0 active-tab=0 dock-entry=\"markdown:split-preview:1:9:/tmp/a.md\"\n";
     var parsed_mode = try parse(std.testing.allocator, future_mode);
     defer parsed_mode.deinit();
     try std.testing.expectEqual(@as(usize, 0), parsed_mode.workspace.windows[0].dock.entries.len);

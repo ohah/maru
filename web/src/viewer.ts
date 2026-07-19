@@ -10,6 +10,8 @@ import {
   type OpenLinkRequest,
 } from "./file-bridge-request";
 import type { EditorView } from "@codemirror/view";
+import type { Text } from "@codemirror/state";
+import { EditorRevisionClock, isEditableFileMode, type FilePanelMode } from "./live-preview-state";
 
 export const viewerChannel = "maru.file.viewer.v1";
 export const maxAssetRequests = 64;
@@ -388,12 +390,17 @@ export function bootShell(document: Document, targetWindow: Window): void {
 
   let editor: EditorView | null = null;
   let savedContent = "";
+  let savedDocument: Text | null = null;
   let contentLoaded = false;
   let dirty = false;
-  let editorRevision = 0;
-  let mode: "read" | "source-edit" = "read";
+  const revisions = new EditorRevisionClock();
+  let mode: FilePanelMode = "read";
   let mutationQueue = Promise.resolve();
   let closeLockRequestId: number | null = null;
+  let applyingDiskContent = false;
+
+  const currentDocumentIsDirty = (): boolean =>
+    editor !== null && (savedDocument === null || !editor.state.doc.eq(savedDocument));
 
   const setCloseLocked = (requestId: number | null) => {
     closeLockRequestId = requestId;
@@ -406,7 +413,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       try {
         await requestFileBridge(document, "setDirty", {
           dirty: next,
-          revision: editorRevision,
+          revision: revisions.documentRevision,
           request_id: requestId,
         });
         return;
@@ -425,7 +432,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       return false;
     setCloseLocked(requestId);
     const operation = mutationQueue.then(async () => {
-      const actual = editor?.state.doc.toString() !== savedContent;
+      const actual = currentDocumentIsDirty();
       dirty = actual;
       await syncDirty(actual, requestId);
       return true;
@@ -449,7 +456,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       .then(async () => {
         // save가 queue 앞에서 savedContent 기준점을 바꿀 수 있으므로 예약 당시의 boolean을 재사용하지 않고
         // 실행 시점 문서로 다시 계산한다. 그러면 save 중 입력/undo가 어떤 순서여도 마지막 native dirty가 맞다.
-        const actual = editor?.state.doc.toString() !== savedContent;
+        const actual = currentDocumentIsDirty();
         dirty = actual;
         await syncDirty(actual);
       })
@@ -460,13 +467,15 @@ export function bootShell(document: Document, targetWindow: Window): void {
 
   const save = async (): Promise<boolean> => {
     if (editor === null) return false;
-    const content = editor.state.doc.toString();
+    const documentSnapshot = editor.state.doc;
+    const content = documentSnapshot.toString();
     const operation = mutationQueue.then(async () => {
       await requestFileBridge(document, "write", content);
       savedContent = content;
+      savedDocument = documentSnapshot;
       // Native write는 dirty를 임의로 내리지 않는다. 저장 중 문서가 다시 바뀌었는지 같은 직렬 queue에서 판정해
       // 최종 값 하나를 보내므로 write 완료와 재편집 사이에 eviction 가능한 false 구간이 생기지 않는다.
-      const nextDirty = editor?.state.doc.toString() !== savedContent;
+      const nextDirty = currentDocumentIsDirty();
       dirty = nextDirty;
       await syncDirty(nextDirty);
     });
@@ -490,12 +499,12 @@ export function bootShell(document: Document, targetWindow: Window): void {
   closeApi.__maruSyncDirtyForClose = syncDirtyForClose;
   closeApi.__maruSaveForClose = async (requestId: number) => {
     if (!Number.isSafeInteger(requestId) || closeLockRequestId !== requestId) {
-      return { success: false, revision: editorRevision, dirty: true };
+      return { success: false, revision: revisions.documentRevision, dirty: true };
     }
     const success = await save();
-    const actual = editor?.state.doc.toString() !== savedContent;
+    const actual = currentDocumentIsDirty();
     if ((!success || actual) && closeLockRequestId === requestId) setCloseLocked(null);
-    return { success, revision: editorRevision, dirty: actual };
+    return { success, revision: revisions.documentRevision, dirty: actual };
   };
   closeApi.__maruUnlockFileClose = async (requestId: number) => {
     if (!closeUnlockOwnsLock(closeLockRequestId, requestId)) return false;
@@ -503,7 +512,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
     // cancelled before reaching the page; an older stale unlock can never retire the current newer owner.
     setCloseLocked(null);
     try {
-      const actual = editor?.state.doc.toString() !== savedContent;
+      const actual = currentDocumentIsDirty();
       dirty = actual;
       await syncDirty(actual);
       return true;
@@ -517,24 +526,26 @@ export function bootShell(document: Document, targetWindow: Window): void {
     editor = createMarkdownEditor(
       editorHost,
       savedContent,
-      (content) => {
-        editorRevision += 1;
-        reportDirty(content !== savedContent);
+      (update) => {
+        if (applyingDiskContent) return;
+        revisions.documentChanged();
+        reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
       },
       () => void save(),
     );
+    savedDocument = editor.state.doc;
     if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
     return editor;
   };
 
-  const applyMode = (next: "read" | "source-edit") => {
+  const applyMode = (next: FilePanelMode) => {
     mode = next;
-    if (mode === "source-edit") {
+    if (isEditableFileMode(mode)) {
       frame.hidden = true;
       editorHost.hidden = false;
       if (contentLoaded) ensureEditor().focus();
     } else {
-      if (editor !== null) reportDirty(editor.state.doc.toString() !== savedContent, true);
+      if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
       frame.hidden = false;
       editorHost.hidden = true;
       frame.contentWindow?.postMessage(
@@ -552,10 +563,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener("maru:file-mode", (event) => {
     const detail = (event as CustomEvent<unknown>).detail;
     if (!isRecord(detail)) return;
-    if (detail.mode === "read" || detail.mode === "source-edit") applyMode(detail.mode);
+    if (detail.mode === "read" || detail.mode === "source-edit" || detail.mode === "live-preview")
+      applyMode(detail.mode);
   });
   targetWindow.addEventListener("maru:file-sync-dirty", () => {
-    if (editor !== null) reportDirty(editor.state.doc.toString() !== savedContent, true);
+    if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
   });
 
   const loadFromDisk = async (
@@ -563,20 +575,28 @@ export function bootShell(document: Document, targetWindow: Window): void {
     abortIfDirty = false,
     abortIfEditedDuringRead = false,
   ) => {
-    const revisionBeforeRead = editorRevision;
+    const revisionBeforeRead = revisions.documentRevision;
     const result = await requestFileBridge(document, "read");
     if (typeof result.content !== "string") throw new Error("invalid file content");
     // clean auto-reload를 bridge read 대기 중 사용자가 편집하기 시작했다면 buffer를 절대 덮지 않는다.
     if (abortIfDirty && dirty) throw new Error("file became dirty during external reload");
-    if (abortIfEditedDuringRead && editorRevision !== revisionBeforeRead) {
+    if (abortIfEditedDuringRead && revisions.documentRevision !== revisionBeforeRead) {
       throw new Error("file was edited during external reload");
     }
     savedContent = result.content;
     contentLoaded = true;
     if (editor !== null) {
-      editor.dispatch({
-        changes: { from: 0, to: editor.state.doc.length, insert: result.content },
-      });
+      applyingDiskContent = true;
+      try {
+        editor.dispatch({
+          changes: { from: 0, to: editor.state.doc.length, insert: result.content },
+        });
+        savedDocument = editor.state.doc;
+      } finally {
+        applyingDiskContent = false;
+      }
+    } else {
+      savedDocument = null;
     }
     dirty = false;
     if (syncNative) await syncDirty(false);
@@ -584,7 +604,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       { channel: viewerChannel, type: "render", markdown: result.content },
       "*",
     );
-    if (mode === "source-edit") applyMode(mode);
+    if (isEditableFileMode(mode)) applyMode(mode);
   };
 
   targetWindow.addEventListener("maru:file-reload", (event) => {

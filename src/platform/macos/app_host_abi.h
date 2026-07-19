@@ -8,7 +8,16 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 131u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 132u
+#define MARU_FILE_PANEL_MODE_READ 0u
+#define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
+#define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
+#define MARU_WEB_KEY_ROUTE_PASS_THROUGH 0u
+#define MARU_WEB_KEY_ROUTE_APP_ACTION 1u
+#define MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND 2u
+#define MARU_WEB_KEY_ROUTE_WEB_EDITOR 3u
+#define MARU_APP_ASSET_ROLE_APP 0u
+#define MARU_APP_ASSET_ROLE_RENDER 1u
 #define MARU_FILE_TREE_TRASH_KIND_REGULAR 1u
 #define MARU_FILE_TREE_TRASH_KIND_DIRECTORY 2u
 #define MARU_FILE_TREE_TRASH_KIND_SYMLINK 3u
@@ -624,11 +633,13 @@ int32_t maru_macos_app_session_set_focus(MaruAppHostSession *session, int32_t fo
 /* 세팅 등 chrome 오버레이/keybind 녹음 열림(1) — Swift performKeyEquivalent가 메뉴바 keyEquivalent를 양보할지 판정
    (1이면 ⌘조합을 keyDown 경로로 보내 모달 입력 차단·chord 녹음이 동작). */
 int32_t maru_macos_app_session_any_overlay_open(MaruAppHostSession *session);
-/* 웹 패널 포커스 중 Cmd 조합이 maru 앱 바인딩(app_action)인지 side-effect 없이 조회한다(PTY write 없음). Swift 웹
-   performKeyEquivalent가 1이면 가로채 keyDown 경로로 라우팅(⌘T·⌘⇧P·⌘F·⌘A·⌘K …), 0이면 메뉴바 keyEquivalent(⌘Q/H/M)·
-   WebKit(⌘C/V) 편집·terminal 매크로(⌘Backspace/←/→)에 양보한다 — 옛 "모든 Cmd 조합 가로채 셸로" 버그(⌘Q 종료 안 됨)
-   수정. handleKeyEvent와 같은 keyBindingResolver 단일 출처. session/event null이거나 변환 실패면 0. v100. */
-uint32_t maru_macos_app_session_key_is_app_action(MaruAppHostSession *session, const MaruAppHostKeyEvent *event);
+/* WKWebView typed key route: 0=pass-through, 1=app-action, 2=consume-unbound, 3=web-editor. side-effect와 PTY
+   write 없이 같은 Zig resolver의 provenance를 반환한다. unknown은 Swift가 consume하고 null/event 변환 실패는
+   pass-through다. v132가 옛 v100 Bool app-action 조회를 대체한다. */
+uint32_t maru_macos_app_session_web_key_route(MaruAppHostSession *session, uint64_t surface_id, const MaruAppHostKeyEvent *event);
+/* route가 app-action일 때 같은 Zig resolver를 다시 평가해 현재 Action만 terminal copy/paste·scroll·macro 전처리와
+   PTY write 없이 직접 dispatch한다. route 뒤 상태가 달라졌으면 실행하지 않고 0. 성공=1. v132. */
+uint32_t maru_macos_app_session_dispatch_web_app_action(MaruAppHostSession *session, uint64_t surface_id, const MaruAppHostKeyEvent *event);
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
 int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
@@ -761,7 +772,7 @@ uint32_t maru_macos_app_session_file_panel_entry(
     const uint8_t **out_path,
     size_t *out_len
 );
-/* 도크 entry의 mode(0=read, 1=source-edit). 도크가 아니면 -1. v122. */
+/* 도크 entry의 mode(0=read, 1=source-edit, 2=live-preview). 도크가 아니면 -1. v132. */
 int32_t maru_macos_app_session_file_panel_mode(MaruAppHostSession *session, uint64_t surface_id);
 /* explicit file WKWebView primary-down을 Zig FocusOwner/DockPanel group에 반영한다. 1=승인, 0=stale/아님. v124. */
 uint32_t maru_macos_app_session_focus_file_panel_surface(MaruAppHostSession *session, uint64_t surface_id);
@@ -793,7 +804,7 @@ uint32_t maru_macos_app_session_take_workspace_focus_action(MaruAppHostSession *
 /* Zig file-tree FocusOwner가 요청한 Metal firstResponder pull과 Esc dock surface restore. v127. */
 uint32_t maru_macos_app_session_take_file_tree_focus_action(MaruAppHostSession *session);
 uint64_t maru_macos_app_session_take_file_tree_restore_surface_action(MaruAppHostSession *session);
-/* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit. v122. */
+/* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit, 2=live-preview. v132. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* PendingDockFocus의 native firstResponder action을 mode refresh와 독립적으로 drain한다. 0=없음. v131. */
 uint64_t maru_macos_app_session_take_pending_dock_focus_action(MaruAppHostSession *session);
@@ -1180,6 +1191,7 @@ uint32_t maru_macos_app_session_has_web_surface(MaruAppHostSession *session, uin
    정책(경로 샌드박스·realpath symlink 탈출 방어)은 Zig 소유, Swift는 반환 경로를 읽어 CSP와 함께 서빙만 한다.
    반환: >=0 = out에 쓴 canonical 절대 경로 길이. 음수 = 에러(-1 Reject, -2 NotFound, -3 OutsideRoot, -4 NULL). */
 int64_t maru_macos_app_resolve_app_asset(
+    uint32_t role,
     const uint8_t *root_ptr,
     size_t root_len,
     const uint8_t *req_ptr,
@@ -1188,8 +1200,16 @@ int64_t maru_macos_app_resolve_app_asset(
     size_t out_cap
 );
 
-/* maru-app:// 응답 CSP 헤더(5c-2c, 단일 출처=Zig app_scheme.csp_header). out에 복사하고 길이 반환. cap 부족=-1, NULL=-2. */
-int64_t maru_macos_app_csp_header(uint8_t *out_ptr, size_t out_cap);
+/* role(0=app, 1=render)별 maru-app:// CSP. cap 부족=-1, NULL=-2, role 거부=-3. v132. */
+int64_t maru_macos_app_csp_header(uint32_t role, uint8_t *out_ptr, size_t out_cap);
+/* exact URL origin을 asset role(0=app, 1=render)로 변환. 거부/NULL=-1. v132. */
+int maru_macos_app_asset_role_for_origin(
+    const uint8_t *scheme_ptr,
+    size_t scheme_len,
+    const uint8_t *host_ptr,
+    size_t host_len,
+    int has_explicit_port
+);
 int maru_macos_app_origin_allowed(
     const uint8_t *scheme_ptr,
     size_t scheme_len,

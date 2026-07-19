@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { Text, Transaction } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { JSDOM } from "jsdom";
 import {
   assetBase64BudgetAllowed,
@@ -251,6 +253,101 @@ describe("file viewer bridge boundary", () => {
     expect(requests).toEqual([
       { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
     ]);
+  });
+
+  test("trusted shell dirty callback keeps large IME input off full serialization and write paths", async () => {
+    const dom = new JSDOM(
+      '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
+      { pretendToBeVisual: true, url: "maru-app://app/index.html" },
+    );
+    const previous = new Map<string, PropertyDescriptor | undefined>();
+    const installGlobal = (name: string, value: unknown) => {
+      previous.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    };
+    installGlobal("window", dom.window);
+    installGlobal("document", dom.window.document);
+    installGlobal("navigator", dom.window.navigator);
+    installGlobal("MutationObserver", dom.window.MutationObserver);
+    installGlobal("DOMRect", dom.window.DOMRect);
+    installGlobal("requestAnimationFrame", dom.window.requestAnimationFrame.bind(dom.window));
+    installGlobal("cancelAnimationFrame", dom.window.cancelAnimationFrame.bind(dom.window));
+
+    const requests: unknown[] = [];
+    const initial = "a".repeat(8 * 1024 * 1024);
+    dom.window.document.addEventListener("maru:file-request", () => {
+      const node = dom.window.document.querySelector<HTMLElement>(
+        '[data-maru-file-request="pending"]',
+      );
+      if (node === null) return;
+      const request = JSON.parse(node.textContent ?? "null") as { method?: string };
+      requests.push(request);
+      const result = request.method === "read" ? { content: initial } : { ok: true };
+      node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result });
+      node.dataset.maruFileRequest = "done";
+      dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
+    });
+
+    const textPrototype = Text.prototype as Text & { toString: () => string };
+    const originalToString = textPrototype.toString;
+    let editor: EditorView | null = null;
+    try {
+      bootShell(dom.window.document, dom.window as unknown as Window);
+      const frame = dom.window.document.querySelector<HTMLIFrameElement>("#renderer");
+      dom.window.dispatchEvent(
+        new dom.window.MessageEvent("message", {
+          source: frame?.contentWindow,
+          data: {
+            channel: viewerChannel,
+            type: "renderer-ready",
+            bridgeType: "undefined",
+            handlerType: "undefined",
+            parentAccessible: false,
+          },
+        }),
+      );
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(
+        dom.window.document.querySelector("#viewer-status")?.getAttribute("data-file-read"),
+      ).toBe("true");
+
+      dom.window.dispatchEvent(
+        new dom.window.CustomEvent("maru:file-mode", { detail: { mode: "live-preview" } }),
+      );
+      const editorHost = dom.window.document.querySelector<HTMLElement>("#editor");
+      editor = editorHost === null ? null : EditorView.findFromDOM(editorHost);
+      expect(editor).not.toBeNull();
+
+      let serializations = 0;
+      textPrototype.toString = function (this: Text) {
+        serializations += 1;
+        return originalToString.call(this);
+      };
+      editor?.dispatch({
+        changes: { from: 0, to: 1, insert: "b" },
+        annotations: Transaction.userEvent.of("input.type.compose"),
+      });
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+
+      expect(serializations).toBe(0);
+      expect(
+        requests.filter((request) => (request as { method?: string }).method === "write"),
+      ).toEqual([]);
+      expect(requests).toContainEqual({
+        method: "setDirty",
+        dirty: true,
+        revision: 1,
+        request_id: 0,
+      });
+    } finally {
+      editor?.destroy();
+      textPrototype.toString = originalToString;
+      for (const [name, descriptor] of previous) {
+        if (descriptor === undefined) delete (globalThis as Record<string, unknown>)[name];
+        else Object.defineProperty(globalThis, name, descriptor);
+      }
+      dom.window.close();
+    }
   });
 });
 

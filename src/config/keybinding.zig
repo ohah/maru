@@ -198,6 +198,30 @@ pub const ResolvedKey = union(enum) {
     ignored,
 };
 
+/// WKWebView가 first responder일 때 Swift가 그대로 소비하는 typed route. raw ordinal은 app-host ABI 계약이다.
+pub const WebKeyRoute = enum(u32) {
+    pass_through = 0,
+    app_action = 1,
+    consume_unbound = 2,
+    web_editor = 3,
+};
+
+const WebResolution = union(enum) {
+    pass_through,
+    app_action: action_mod.Action,
+    consume_unbound,
+    web_editor,
+
+    fn route(self: WebResolution) WebKeyRoute {
+        return switch (self) {
+            .pass_through => .pass_through,
+            .app_action => .app_action,
+            .consume_unbound => .consume_unbound,
+            .web_editor => .web_editor,
+        };
+    }
+};
+
 /// 빌트인 기본 terminal 바인딩 — macOS 줄 편집 관례를 셸 시퀀스로 매핑한다(Ghostty 기본 keybind와
 /// 동작 일치). 흩어진 특수 케이스(Swift 하드코딩, ad-hoc 분기) 대신 한 테이블(데이터)로 둔다.
 /// resolve 순서: 사용자 config 바인딩(override 가능) → 이 빌트인 → "안 묶인 Cmd → ignored" fallthrough.
@@ -417,6 +441,36 @@ pub const KeyBindingResolver = struct {
         return if (is_tree_default) .tree_default else .consumed;
     }
 
+    /// Web context는 PTY 바이트를 절대 내보내지 않는다. 사용자 app rebind가 최우선이고 terminal macro와 explicit
+    /// unbind는 소비한다. Markdown 편집 모드에서는 WebKit의 표준 편집 chord가 built-in app/terminal default보다
+    /// 먼저 소유하며, 그 밖의 built-in app action만 앱으로 되돌린다.
+    pub fn resolveWeb(self: KeyBindingResolver, event: terminal.KeyEvent, editable: bool) WebKeyRoute {
+        return self.resolveWebDetailed(event, editable).route();
+    }
+
+    pub fn resolveWebAppAction(self: KeyBindingResolver, event: terminal.KeyEvent, editable: bool) ?action_mod.Action {
+        return switch (self.resolveWebDetailed(event, editable)) {
+            .app_action => |action| action,
+            else => null,
+        };
+    }
+
+    fn resolveWebDetailed(self: KeyBindingResolver, event: terminal.KeyEvent, editable: bool) WebResolution {
+        const chord = KeyChord.fromKeyEvent(event) orelse return .pass_through;
+        for (self.app_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        }
+        for (self.terminal_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .consume_unbound;
+        }
+        if (self.isUnbound(chord)) return .consume_unbound;
+        if (editable and isWebEditorDefault(chord)) return .web_editor;
+        for (default_app_bindings) |binding| {
+            if (binding.chord.eql(chord)) return .{ .app_action = binding.action };
+        }
+        return .pass_through;
+    }
+
     /// chord가 사용자 unbind 목록에 있는가 — resolve가 빌트인 기본 테이블을 건너뛸지 정하는 데 쓴다.
     fn isUnbound(self: KeyBindingResolver, chord: KeyChord) bool {
         for (self.unbinds) |unbound| {
@@ -425,6 +479,19 @@ pub const KeyBindingResolver = struct {
         return false;
     }
 };
+
+fn isWebEditorDefault(chord: KeyChord) bool {
+    if (!chord.modifiers.command) return true;
+    if (chord.modifiers.control or chord.modifiers.option) return false;
+    return switch (chord.key) {
+        .char => |c| if (c > 0x7f) false else switch (std.ascii.toUpper(@as(u8, @intCast(c)))) {
+            'A', 'C', 'F', 'S', 'V', 'X', 'Z' => true,
+            else => false,
+        },
+        .backspace, .delete, .arrow_left, .arrow_right, .arrow_up, .arrow_down, .home, .end => true,
+        else => false,
+    };
+}
 
 const ModifierName = enum { control, option, shift, command };
 
@@ -732,6 +799,36 @@ test "file tree context honors app override and unbind without leaking terminal 
     try std.testing.expect(defaults.resolveFileTree(up, true) == .tree_default);
     const close = defaults.resolveFileTree(.{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } }, false);
     try std.testing.expectEqual(action_mod.Action.close_focused, close.app_action);
+}
+
+test "web context gives editable defaults to WebKit after user override and unbind" {
+    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(WebKeyRoute.pass_through));
+    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(WebKeyRoute.app_action));
+    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(WebKeyRoute.consume_unbound));
+    try std.testing.expectEqual(@as(u32, 3), @intFromEnum(WebKeyRoute.web_editor));
+    const save = terminal.KeyEvent{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } };
+    const find = terminal.KeyEvent{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } };
+    const close = terminal.KeyEvent{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } };
+    const defaults: KeyBindingResolver = .{};
+    try std.testing.expectEqual(WebKeyRoute.web_editor, defaults.resolveWeb(save, true));
+    try std.testing.expectEqual(WebKeyRoute.web_editor, defaults.resolveWeb(find, true));
+    try std.testing.expectEqual(WebKeyRoute.app_action, defaults.resolveWeb(close, true));
+    try std.testing.expectEqual(WebKeyRoute.app_action, defaults.resolveWeb(find, false));
+
+    const rebound: KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+S"), .action = .new_tab }} };
+    try std.testing.expectEqual(WebKeyRoute.app_action, rebound.resolveWeb(save, true));
+    try std.testing.expectEqual(action_mod.Action.new_tab, rebound.resolveWebAppAction(save, true).?);
+    const unbound: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Cmd+S")} };
+    try std.testing.expectEqual(WebKeyRoute.consume_unbound, unbound.resolveWeb(save, true));
+    const macro: KeyBindingResolver = .{ .terminal_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+S"), .input = .{ .send_text = "leak" } }} };
+    try std.testing.expectEqual(WebKeyRoute.consume_unbound, macro.resolveWeb(save, true));
+}
+
+test "web context keeps terminal navigation defaults inside an editable WebView" {
+    const resolver: KeyBindingResolver = .{};
+    try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(.{ .key = .backspace, .modifiers = .{ .command = true } }, true));
+    try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(.{ .key = .arrow_left, .modifiers = .{ .command = true } }, true));
+    try std.testing.expectEqual(WebKeyRoute.pass_through, resolver.resolveWeb(.{ .key = .arrow_left, .modifiers = .{ .command = true } }, false));
 }
 
 test "unbind skips the built-in default: Cmd chord becomes ignored, others fall through to the shell" {

@@ -770,10 +770,13 @@ pub fn buildFileDockChromeDrawList(
         if (dock_layout.headerCellLayout(cols, active_dirty, active_external_change)) |header| {
             if (header.control_start > 1)
                 _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, header.control_start, .{ .foreground = fg }, false, .head);
-            if (header.mode_mid > header.control_start + 1)
-                _ = try appendEllipsizedTitle(allocator, &cells, "렌더", 1, header.control_start + 1, header.mode_mid, .{ .foreground = active_fg, .bold = active_kind == .markdown and active_mode == .read }, false, .head);
-            if (active_kind == .markdown and header.mode_end > header.mode_mid + 1)
-                _ = try appendEllipsizedTitle(allocator, &cells, "편집", 1, header.mode_mid + 1, header.mode_end, .{ .foreground = active_fg, .bold = active_mode == .source_edit }, false, .head);
+            if (active_kind == .markdown) {
+                inline for (dock_layout.header_modes) |descriptor| {
+                    const range = dock_layout.headerModeCellRange(header, descriptor.mode).?;
+                    if (range.end > range.start + 1)
+                        _ = try appendEllipsizedTitle(allocator, &cells, descriptor.label, 1, range.start + 1, range.end, .{ .foreground = active_fg, .bold = active_mode == descriptor.mode }, false, .head);
+                }
+            }
             if (header.dirty_col) |col|
                 try cells.append(allocator, .{ .row = 1, .col = col, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●
             if (header.conflict_col) |col|

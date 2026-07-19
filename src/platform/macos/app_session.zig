@@ -170,7 +170,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 131;
+pub const abi_version: u32 = 132;
+// 132: Markdown live-preview raw mode(2), role-aware app asset/CSP, typed WebKeyRoute를 추가한다. Swift의 file mode·
+// editor shortcut·origin CSP 분기를 Zig 정책으로 일원화한다. export signature가 바뀌므로 ABI를 증가한다.
 // 131: WebSurfaceTransition에 divider_grab_band_pt를 내려 Swift의 하드코딩 10pt를 제거하고,
 // MetalFrame 끝에 overlay_cells_present를 추가해 index 0 overlay를 명시적으로 구분한다.
 // 130: NativeMetalCell.reserved=32 carries the explicit file-dock-toggle render role from PaneFrame to the
@@ -6188,7 +6190,7 @@ pub const AppSession = struct {
 
     fn filePanelEntryNeedsDirtyProtection(entry: dock_panel.Entry) bool {
         return entry.dirty or entry.dirty_sync_pending or entry.external_change or
-            entry.conflict_reload_pending or entry.mode == .source_edit or entry.mutation_pending_id != 0;
+            entry.conflict_reload_pending or entry.mode.isEditable() or entry.mutation_pending_id != 0;
     }
 
     /// 창/세션 종료 전에 해소해야 하는 파일 편집 상태가 하나라도 있는지. source-edit는 native dirty가 최신 CM6
@@ -6294,7 +6296,7 @@ pub const AppSession = struct {
                 var cloned = entry;
                 cloned.path = try dst.allocator.dupe(u8, entry.path);
                 // queued reload/hash action은 source backend 수명에 묶인다. conflict/dirty 자체는 보존하되 pending만 재시도 상태로.
-                cloned.dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit;
+                cloned.dirty_sync_pending = entry.dirty_sync_pending or entry.mode.isEditable();
                 cloned.conflict_reload_pending = false;
                 cloned.conflict_reload_generation = 0;
                 cloned.self_write_grace_ticks = 0;
@@ -6317,7 +6319,7 @@ pub const AppSession = struct {
                     const owned_path = retired.path;
                     var replacement = entry;
                     replacement.path = owned_path;
-                    replacement.dirty_sync_pending = entry.dirty_sync_pending or entry.mode == .source_edit;
+                    replacement.dirty_sync_pending = entry.dirty_sync_pending or entry.mode.isEditable();
                     replacement.conflict_reload_pending = false;
                     replacement.conflict_reload_generation = 0;
                     replacement.self_write_grace_ticks = 0;
@@ -9063,7 +9065,7 @@ pub const AppSession = struct {
     }
 
     fn markFilePanelDirtySyncPending(self: *AppSession, entry: *dock_panel.Entry) void {
-        if (entry.kind != .markdown or entry.mode != .source_edit or entry.surface_id == 0) return;
+        if (entry.kind != .markdown or !entry.mode.isEditable() or entry.surface_id == 0) return;
         entry.dirty_sync_pending = true;
         self.queueFilePanelDirtySyncAction(entry.surface_id, 0);
     }
@@ -9509,7 +9511,7 @@ pub const AppSession = struct {
             for (group.entries.items) |entry| {
                 if (!file_tree_mutation.pathWithin(entry.path, path)) continue;
                 if (entry.mutation_pending_id != 0 and entry.mutation_pending_id != request_id) return true;
-                const editor_locked = if (entry.mode == .source_edit) blk: {
+                const editor_locked = if (entry.mode.isEditable()) blk: {
                     for (self.file_tree_mutation_editor_locks[0..self.file_tree_mutation_editor_locks_len]) |lock| {
                         if (lock.mutation_id == request_id and lock.surface_id == entry.surface_id and lock.acknowledged) break :blk true;
                     }
@@ -10283,7 +10285,7 @@ pub const AppSession = struct {
         for (0..self.dock.groupCount()) |group_index| {
             const group = self.dock.groupAtConst(group_index).?;
             for (group.entries.items) |entry| {
-                if (file_tree_mutation.pathWithin(entry.path, source) and entry.mode == .source_edit) {
+                if (file_tree_mutation.pathWithin(entry.path, source) and entry.mode.isEditable()) {
                     if (entry.surface_id == 0) return error.SurfaceMissing;
                     needed += 1;
                 }
@@ -10297,7 +10299,7 @@ pub const AppSession = struct {
         for (0..self.dock.groupCount()) |group_index| {
             const group = self.dock.groupAt(group_index).?;
             for (group.entries.items) |*entry| {
-                if (!file_tree_mutation.pathWithin(entry.path, source) or entry.mode != .source_edit) continue;
+                if (!file_tree_mutation.pathWithin(entry.path, source) or !entry.mode.isEditable()) continue;
                 self.file_panel_close_request_id += 1;
                 const request_id = self.file_panel_close_request_id;
                 self.file_tree_mutation_editor_locks[self.file_tree_mutation_editor_locks_len] = .{
@@ -15395,21 +15397,33 @@ pub const AppSession = struct {
         return self.last_summary;
     }
 
-    /// 웹 패널 포커스 중 Swift performKeyEquivalent가 "이 Cmd 조합이 maru 앱 바인딩(app_action)인가"를 **side-effect
-    /// 없이** 묻는다 — app_action이면 Swift가 가로채 keyDown 경로(handleKeyEvent)로 라우팅하고(⌘T·⌘W·⌘1-9·⌘⇧P·⌘F·⌘,·
-    /// ⌘A·⌘K …), 아니면 메뉴바 keyEquivalent(⌘Q/H/M 종료·숨김·최소화)·WebKit(⌘C/V 편집)에 양보한다. 실제 handleKeyEvent와
-    /// **같은 resolver**(loaded_config.keyBindingResolver)를 쓰되 PTY write·상태 변경이 전혀 없다(순수 조회) — terminal
-    /// 매크로 Cmd 조합(⌘Backspace/←/→ 줄편집=terminal_input)이 셸로 새기 **전에** 가르는 게 요점이다. encode_options는
-    /// app_action 판정에 무관(terminal_input fallback 인코딩에만 쓰임)하므로 기본값. resolve 에러(터미널 매크로 바이트
-    /// 초과 등)면 app_action 아님(false). 웹 소유 키(⌘A/⌘F 등)를 실 콘텐츠에서 WebKit에 양보하는 포커스-분기는 Phase 5
-    /// (4c/4d 빈 web 패널은 app_action을 maru가 처리해도 무해). docs/web-panel.md §4.
-    pub fn keyResolvesToAppAction(self: *AppSession, event: terminal.KeyEvent) bool {
-        var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
-        const resolved = self.loaded_config.keyBindingResolver().resolve(event, &buffer, .{}) catch return false;
-        return switch (resolved) {
-            .app_action => true,
-            else => false,
-        };
+    /// 웹 패널 포커스 중 Swift performKeyEquivalent가 같은 resolver의 typed provenance를 **side-effect 없이** 묻는다.
+    /// 사용자 app rebind, explicit unbind/terminal macro consume, editable WebKit default, built-in app action 순서를
+    /// 보존하며 PTY write·상태 변경은 0이다. app_action은 Swift가 범용 handleKeyDown에 재진입시키지 않고 아래
+    /// dispatchWebAppAction으로 직접 실행해 terminal copy/paste·scroll·macro 전처리를 우회한다.
+    fn webContextIsEditable(self: *AppSession, surface_id: u64) bool {
+        return if (self.dock_initialized)
+            if (self.dock.entryForSurfaceId(surface_id)) |entry|
+                entry.kind == .markdown and entry.mode.isEditable()
+            else
+                false
+        else
+            false;
+    }
+
+    pub fn webKeyRoute(self: *AppSession, surface_id: u64, event: terminal.KeyEvent) config_mod.keybinding.WebKeyRoute {
+        return self.loaded_config.keyBindingResolver().resolveWeb(event, self.webContextIsEditable(surface_id));
+    }
+
+    /// WebKeyRoute.app_action 실행 전용 경로. Swift terminal key 전처리를 다시 타지 않고 같은 resolver가 돌려준
+    /// Action을 직접 dispatch한다. route 조회 뒤 config가 바뀌었으면 현재 resolver가 app action일 때만 실행한다.
+    pub fn dispatchWebAppAction(self: *AppSession, surface_id: u64, event: terminal.KeyEvent) bool {
+        const action = self.loaded_config.keyBindingResolver().resolveWebAppAction(event, self.webContextIsEditable(surface_id)) orelse return false;
+        self.total_app_key_events += 1;
+        self.dispatchAppAction(action);
+        self.writeSummaryFromState();
+        self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+        return true;
     }
 
     /// macOS Option을 Meta로 쓰는지(config input.option-as-meta 캐시). Swift keyDown이 ABI로 읽어 Option-단독 키를
@@ -37307,9 +37321,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     const collapse_toggle = session.filePanelDockControlRect().?;
     const collapse_x: f64 = @floatFromInt(collapse_toggle.x + 1);
     const collapse_y: f64 = @floatFromInt(collapse_toggle.y + 1);
-    const dirty_surface_id = group.entries.items[1].surface_id;
-    group.entries.items[1].mode = .source_edit;
-    group.entries.items[1].dirty = true;
+    const dirty_surface_id = group.entries.items[0].surface_id;
+    group.entries.items[0].mode = .source_edit;
+    group.entries.items[0].dirty = true;
     session.mouse(1, collapse_x, collapse_y, 0, 0);
     try std.testing.expect(session.dock.collapsed);
     try std.testing.expectEqual(@as(u32, 0), session.dockGeometry().dock.h);
@@ -37703,7 +37717,9 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
 
     // 왕복 action은 dock surface에서 workspace로 돌아간다.
     try std.testing.expect(!session.anyOverlayOpen());
-    try std.testing.expect(session.keyResolvesToAppAction(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } }));
+    session.dock.entryForSurfaceId(sid).?.mode = .live_preview;
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.web_editor, session.webKeyRoute(sid, .{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }));
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(sid, .{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } }));
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'e' }, .modifiers = .{ .command = true, .shift = true } });
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.takeWorkspaceFocusAction());
@@ -45675,6 +45691,50 @@ test "handleKeyEvent applies user config keybindings (resolver wired from loaded
     try std.testing.expectEqual(@as(usize, 3), session.activePane().terms.items.len);
 }
 
+test "web app action dispatch bypasses terminal preprocessing and rejects a stale route" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    var user_binds = [_]config_mod.AppBinding{
+        .{ .chord = try config_mod.KeyChord.parse("Cmd+C"), .action = .new_tab },
+        .{ .chord = try config_mod.KeyChord.parse("Cmd+V"), .action = .new_term },
+        .{ .chord = try config_mod.KeyChord.parse("Cmd+Backspace"), .action = .new_term },
+    };
+    session.loaded_config.keybindings = &user_binds;
+    const copy: terminal.KeyEvent = .{ .key = .{ .char = 'c' }, .modifiers = .{ .command = true } };
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(0, copy));
+    const tabs_before = session.tabs.items.len;
+    try std.testing.expect(session.dispatchWebAppAction(0, copy));
+    try std.testing.expectEqual(tabs_before + 1, session.tabs.items.len);
+
+    // route 조회 뒤 config가 reload됐다고 가정한다. Swift는 이미 이벤트를 consume하지만 현재 resolver가 더는 app
+    // action을 내지 않으므로 stale Action을 실행하지 않는다.
+    const paste: terminal.KeyEvent = .{ .key = .{ .char = 'v' }, .modifiers = .{ .command = true } };
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(0, paste));
+    session.loaded_config.keybindings = &.{};
+    const terms_before_stale = session.activePane().terms.items.len;
+    try std.testing.expect(!session.dispatchWebAppAction(0, paste));
+    try std.testing.expectEqual(terms_before_stale, session.activePane().terms.items.len);
+
+    session.loaded_config.keybindings = &user_binds;
+    try std.testing.expect(session.dispatchWebAppAction(0, paste));
+    const line_edit: terminal.KeyEvent = .{ .key = .backspace, .modifiers = .{ .command = true } };
+    try std.testing.expectEqual(config_mod.keybinding.WebKeyRoute.app_action, session.webKeyRoute(0, line_edit));
+    try std.testing.expect(session.dispatchWebAppAction(0, line_edit));
+    try std.testing.expectEqual(terms_before_stale + 2, session.activePane().terms.items.len);
+    try std.testing.expectEqual(@as(u64, 3), session.total_app_key_events);
+    try std.testing.expectEqual(@as(u64, 0), session.total_terminal_input_events);
+}
+
 // Term 생명주기: ⌘T가 활성 pane에 Term을 쌓고, ⌘]/⌘[가 Term을 wrap 순환하고, ⌘W가 Term →(마지막이면)
 // pane →(마지막이면) 워크스페이스 순으로 cascade close하는지 — 실 PTY teardown이라 macOS 게이트. 키 경로 전체.
 test "Term lifecycle: Cmd+T adds, Cmd+Opt+]/[ cycle, Cmd+W cascades Term to workspace" {
@@ -47368,7 +47428,7 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
     const surface_id = entry.surface_id;
     try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
 
-    const control = dock_layout.headerControlRect(session.dockGeometry(), session.cell_width_px).?;
+    const control = dock_layout.headerModeRect(session.dockGeometry(), session.cell_width_px, .markdown, .source_edit, false, false).?;
     session.mouse(
         1,
         @floatFromInt(control.x + control.w / 2),

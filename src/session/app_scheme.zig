@@ -4,8 +4,8 @@
 //! 내부 커스텀 스킴이다(외부 웹사이트용 아님 — 그건 `browser` 패널의 http/https). 단일 출처 [web-panel.md] §7.1.
 //!
 //! **이 모듈 = 순수 문자열 검증(헤드리스·이식성)**: `WKURLSchemeHandler`(platform)가 준 요청 경로(percent-decoded)를
-//! 검증해 asset root 아래 **안전한 상대 경로**로 정규화하거나 거부한다. 실 FS realpath + symlink 탈출 거부는 platform
-//! (macOS)이 이 결과를 root에 join한 뒤 한다(§7.1 ② — 문자열로 못 잡는 symlink는 realpath가 잡는다). 여기선 I/O 없음.
+//! 검증해 asset root 아래 **안전한 상대 경로**로 정규화하거나 거부한다. 제품 macOS reader는 role별 flat allowlist를
+//! 추가 적용하고 root-relative no-follow open한 같은 fd에서 fstat/read한다. 이 모듈 자체에는 I/O가 없다.
 //!
 //! **위협: 경로 탈출(traversal).** `maru-app://app/../../etc/passwd` 같은 요청이 번들 밖을 읽으면 정보 노출. 기존
 //! `sanitizeDropFilename`(cli/ssh.zig)은 basename+셸 문자 필터만이라 재사용 못 한다(realpath/symlink·segment `..`
@@ -33,6 +33,9 @@ pub const AppAssetRole = enum(u32) {
     }
 
     pub fn pathAllowed(self: AppAssetRole, normalized_path: []const u8) bool {
+        // FP10b same-fd reader는 bundle root의 flat closed set만 descriptor-relative no-follow open한다.
+        // 중간 component를 허용하지 않아 ancestor symlink 교체가 trusted origin read로 이어질 수 없다.
+        if (std.mem.indexOfScalar(u8, normalized_path, '/') != null) return false;
         if (self == .app) return true;
         return std.mem.eql(u8, normalized_path, "render.html") or
             std.mem.eql(u8, normalized_path, "bundle.js") or
@@ -85,8 +88,8 @@ inline fn isAllowedByte(c: u8) bool {
 }
 
 /// `maru-app://<host>/<path>`의 `<path>`(percent-decoded, 선행 `/` 포함 가능)를 검증해 **asset root 아래 안전한 상대
-/// 경로**로 정규화한다. platform이 이 결과를 번들 asset root에 join → realpath → root prefix 재확인(symlink 탈출 거부)
-/// 후 서빙한다. 반환 슬라이스는 `out` 소유(호출자가 살려 둔다).
+/// 경로**로 정규화한다. 제품 platform은 이 결과에 flat role allowlist를 적용한 뒤 bundle root에서 no-follow open한다.
+/// 반환 슬라이스는 `out` 소유(호출자가 살려 둔다).
 ///
 /// 규칙: whitelist 밖 문자 → `InvalidChar`; segment `..` → `Traversal`; `.`·빈 segment(`//`·선행/후행 `/`) 접기;
 /// 결과 빈 경로 → `Empty`(호출자가 index로). 반환 경로는 **절대 `..`를 포함하지 않고** 선행 `/`도 없다(항상 상대).
@@ -138,6 +141,7 @@ test "asset role pins exact origin CSP and keeps the worker app-only" {
     try std.testing.expect(AppAssetRole.render.pathAllowed("bundle.js"));
     try std.testing.expect(AppAssetRole.render.pathAllowed("render.html"));
     try std.testing.expect(!AppAssetRole.render.pathAllowed("index.html"));
+    try std.testing.expect(!AppAssetRole.app.pathAllowed("assets/icon.png"));
     try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.app.csp(), "worker-src 'self'") != null);
     try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.render.csp(), "worker-src 'none'") != null);
     try std.testing.expect(std.mem.indexOf(u8, AppAssetRole.render.csp(), "frame-src 'none'") != null);

@@ -12,6 +12,14 @@ import {
 import type { EditorView } from "@codemirror/view";
 import type { Text } from "@codemirror/state";
 import { EditorRevisionClock, isEditableFileMode, type FilePanelMode } from "./live-preview-state";
+import {
+  capabilitiesEqual,
+  fragmentChannel,
+  isFragmentInit,
+  isFragmentRender,
+  type RendererCapability,
+} from "./renderer-capability";
+import { LivePreviewEditorController } from "./live-preview-editor";
 
 export const viewerChannel = "maru.file.viewer.v1";
 export const maxAssetRequests = 64;
@@ -389,12 +397,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
   if (frame === null || editorHost === null) return;
 
   let editor: EditorView | null = null;
+  let livePreviewController: LivePreviewEditorController | null = null;
   let savedContent = "";
   let savedDocument: Text | null = null;
   let contentLoaded = false;
   let dirty = false;
   const revisions = new EditorRevisionClock();
   let mode: FilePanelMode = "read";
+  let livePreviewAdmitted = false;
   let mutationQueue = Promise.resolve();
   let closeLockRequestId: number | null = null;
   let applyingDiskContent = false;
@@ -528,12 +538,40 @@ export function bootShell(document: Document, targetWindow: Window): void {
       savedContent,
       (update) => {
         if (applyingDiskContent) return;
-        revisions.documentChanged();
-        reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
+        const baseRevision = revisions.documentRevision;
+        let targetRevision = baseRevision;
+        if (update.docChanged) {
+          targetRevision = revisions.documentChanged();
+          reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
+        }
+        livePreviewController?.handleUpdate(update, baseRevision, targetRevision);
       },
       () => void save(),
     );
     savedDocument = editor.state.doc;
+    const workerConstructor =
+      "Worker" in targetWindow
+        ? ((targetWindow as Window & { Worker: typeof Worker }).Worker ?? null)
+        : null;
+    livePreviewController = new LivePreviewEditorController(
+      editor,
+      revisions,
+      workerConstructor,
+      (state, reason) => {
+        if (status === null) return;
+        status.dataset.liveWorker = state;
+        if (reason !== undefined) status.dataset.liveWorkerFailure = reason;
+        if (state === "recovering") status.textContent = "라이브 프리뷰를 복구하는 중입니다.";
+        else if (state === "disabled")
+          status.textContent = "라이브 프리뷰를 사용할 수 없어 소스를 유지합니다.";
+        else if (status.textContent?.includes("라이브 프리뷰")) status.textContent = "";
+      },
+      (desired, mounted) => {
+        if (status === null) return;
+        status.dataset.liveFragmentsDesired = String(desired);
+        status.dataset.liveFragmentsMounted = String(mounted);
+      },
+    );
     if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
     return editor;
   };
@@ -543,8 +581,13 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (isEditableFileMode(mode)) {
       frame.hidden = true;
       editorHost.hidden = false;
-      if (contentLoaded) ensureEditor().focus();
+      if (contentLoaded) {
+        ensureEditor().focus();
+        if (mode === "live-preview" && livePreviewAdmitted) livePreviewController?.enable();
+        else livePreviewController?.disable();
+      }
     } else {
+      livePreviewController?.disable();
       if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
       frame.hidden = false;
       editorHost.hidden = true;
@@ -565,6 +608,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (!isRecord(detail)) return;
     if (detail.mode === "read" || detail.mode === "source-edit" || detail.mode === "live-preview")
       applyMode(detail.mode);
+  });
+  targetWindow.addEventListener("maru:file-live-preview-active", (event) => {
+    const detail = (event as CustomEvent<unknown>).detail;
+    if (!isRecord(detail) || typeof detail.active !== "boolean") return;
+    livePreviewAdmitted = detail.active;
+    if (mode !== "live-preview" || !contentLoaded) return;
+    if (livePreviewAdmitted) livePreviewController?.enable();
+    else livePreviewController?.disable();
   });
   targetWindow.addEventListener("maru:file-sync-dirty", () => {
     if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
@@ -595,6 +646,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
       } finally {
         applyingDiskContent = false;
       }
+      livePreviewController?.resync();
     } else {
       savedDocument = null;
     }
@@ -716,6 +768,15 @@ export function bootShell(document: Document, targetWindow: Window): void {
       frame.contentWindow?.postMessage(response, "*");
     });
   });
+  targetWindow.addEventListener(
+    "pagehide",
+    () => {
+      livePreviewController?.destroy();
+      editor?.destroy();
+      editor = null;
+    },
+    { once: true },
+  );
 }
 
 export function bootRenderer(document: Document, targetWindow: Window): void {
@@ -724,12 +785,29 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
   let generation = 0;
   let requestSequence = 0;
   const pending = new Map<string, (value: AssetResult) => void>();
+  let fragmentPort: MessagePort | null = null;
+  let fragmentCapability: RendererCapability | null = null;
+
+  const revokeFragment = () => {
+    fragmentPort?.close();
+    fragmentPort = null;
+    fragmentCapability = null;
+  };
 
   root.addEventListener("click", (event) => {
+    // Live fragment renderer는 asset/link capability가 없다. shell의 isolated trusted-click 경로가 붙기 전까지
+    // 모든 fragment activation은 inert이며 부모 window로 action을 내보내지 않는다.
     if (!(event instanceof targetWindow.MouseEvent) || event.button !== 0) return;
     const target = event.target;
     if (!(target instanceof targetWindow.Element)) return;
     const link = target.closest<HTMLAnchorElement>("a[href]");
+    if (fragmentPort !== null) {
+      if (link !== null && root.contains(link)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
     const href = link?.getAttribute("href");
     if (
       link === null ||
@@ -761,6 +839,45 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
 
   targetWindow.addEventListener("message", (event) => {
     if (event.source !== targetWindow.parent || !isRecord(event.data)) return;
+    if (isFragmentInit(event.data)) {
+      const port = event.ports[0];
+      if (port === undefined || event.ports.length !== 1) return;
+      revokeFragment();
+      fragmentCapability = event.data.capability;
+      fragmentPort = port;
+      document.body.dataset.rendererMode = "fragment";
+      root.setAttribute("aria-live", "off");
+      root.innerHTML = "";
+      port.onmessage = (portEvent) => {
+        if (
+          fragmentCapability === null ||
+          !isFragmentRender(portEvent.data) ||
+          !capabilitiesEqual(portEvent.data.capability, fragmentCapability)
+        ) {
+          return;
+        }
+        root.innerHTML = portEvent.data.html;
+        const measured = Math.max(
+          1,
+          Math.ceil(root.getBoundingClientRect().height),
+          root.scrollHeight,
+        );
+        port.postMessage({
+          channel: fragmentChannel,
+          type: "fragment-rendered",
+          capability: fragmentCapability,
+          height: measured,
+        });
+      };
+      port.start();
+      port.postMessage({
+        channel: fragmentChannel,
+        type: "fragment-ready",
+        capability: fragmentCapability,
+      });
+      return;
+    }
+    if (fragmentPort !== null) return;
     if (event.data.channel !== viewerChannel) return;
     if (event.data.type === "ping") {
       const ready: RendererReady = {
@@ -822,4 +939,5 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     ...rendererCapabilityTypes(targetWindow),
   };
   targetWindow.parent.postMessage(ready, "*");
+  targetWindow.addEventListener("pagehide", revokeFragment, { once: true });
 }

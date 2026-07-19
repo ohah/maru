@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { emitZntcBundle } from "../scripts/zntc-bundle";
 
 test("zntc diagnostics fail closed before an invalid bundle reaches disk", async () => {
@@ -15,6 +16,36 @@ test("zntc diagnostics fail closed before an invalid bundle reaches disk", async
 
     await expect(emitZntcBundle(entry, dist)).rejects.toThrow("unresolved_import");
     await expect(readFile(join(dist, "bundle.js"))).rejects.toThrow();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("live preview worker bundle selects DOM-free worker package exports", async () => {
+  const root = await mkdtemp(join(tmpdir(), "maru-zntc-worker-"));
+  const entry = join(import.meta.dir, "..", "src", "live-preview-worker.ts");
+  try {
+    const emitted = await emitZntcBundle(entry, root, "live-preview-worker.js", ["worker"]);
+    const worker = new Worker(pathToFileURL(join(root, emitted.name)).href, { type: "module" });
+    const result = await new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("worker response timeout")), 2_000);
+      worker.onmessage = (event) => {
+        clearTimeout(timer);
+        resolve(event.data);
+      };
+      worker.onerror = (event) => {
+        clearTimeout(timer);
+        reject(event.error ?? new Error(event.message));
+      };
+      worker.postMessage({ type: "seed", documentRevision: 0, source: "# worker" });
+    });
+    worker.terminate();
+    expect(result).toEqual({
+      type: "result",
+      documentRevision: 0,
+      projectionGeneration: 0,
+      fragments: [],
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

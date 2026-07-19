@@ -132,5 +132,5 @@ export async function buildRuntimeNotices(packageRoot: string): Promise<string> 
       }),
   );
 
-  return `Maru File Panel - Third-Party Notices\n\nThis file covers the production dependency graph embedded in Resources/web/bundle.js.\nDevelopment-only tools are excluded.\n\n${sections.join("\n")}`;
+  return `Maru File Panel - Third-Party Notices\n\nThis file covers the production dependency graph embedded in Resources/web/bundle.js and live-preview-worker.js.\nDevelopment-only tools are excluded.\n\n${sections.join("\n")}`;
 }

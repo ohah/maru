@@ -13,7 +13,12 @@ function formatDiagnostic(diagnostic: { code?: string; text: string }): string {
     : `[${diagnostic.code}] ${diagnostic.text}`;
 }
 
-export async function emitZntcBundle(entry: string, outdir: string): Promise<EmittedBundle> {
+export async function emitZntcBundle(
+  entry: string,
+  outdir: string,
+  outputName = "bundle.js",
+  conditions?: string[],
+): Promise<EmittedBundle> {
   // write:false is the fail-closed boundary. zntc 0.1.3 can return diagnostics and
   // an output file together, so no bytes may reach dist before errors are checked.
   const result = await build({
@@ -23,6 +28,7 @@ export async function emitZntcBundle(entry: string, outdir: string): Promise<Emi
     platform: "browser",
     target: ["safari16"],
     jobs: 1,
+    conditions,
     outdir,
     // zntc 0.1.3 syntax minifier can emit a bundle that its own safari16 target accepts but the macOS
     // JavaScriptCore parser rejects once the CM6 graph is present. Identifier/whitespace minification remains
@@ -45,9 +51,13 @@ export async function emitZntcBundle(entry: string, outdir: string): Promise<Emi
   }
 
   const output = result.outputFiles[0];
-  const name = basename(output.path);
-  if (name !== output.path || name !== "bundle.js") {
+  const emittedName = basename(output.path);
+  if (emittedName !== output.path || emittedName !== "bundle.js") {
     throw new Error(`unexpected zntc output path: ${output.path}`);
+  }
+  const name = basename(outputName);
+  if (name !== outputName || !/^[a-z0-9-]+\.js$/.test(name)) {
+    throw new Error(`invalid deterministic bundle name: ${outputName}`);
   }
 
   await mkdir(outdir, { recursive: true });

@@ -2,6 +2,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, type ViewUpdate } from "@codemirror/view";
+import { livePreviewEditorExtension } from "./live-preview-editor";
 
 export function createMarkdownEditor(
   parent: HTMLElement,
@@ -17,6 +18,7 @@ export function createMarkdownEditor(
         lineNumbers(),
         history(),
         markdown(),
+        livePreviewEditorExtension,
         EditorView.lineWrapping,
         keymap.of([
           {
@@ -30,9 +32,7 @@ export function createMarkdownEditor(
           ...defaultKeymap,
           ...historyKeymap,
         ]),
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) onChange(update);
-        }),
+        EditorView.updateListener.of(onChange),
       ],
     }),
   });

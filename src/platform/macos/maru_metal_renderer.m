@@ -341,16 +341,16 @@ static void maru_fill_cell_quad(
     float px_right = px_left + cw * span;
     float px_top = py_top;
     float px_bottom = py_top + cell_h;
-    // 커서·테두리·장식선 부분 사각형(reserved). 셀의 한 변 또는 중앙에 가는 띠를 그린다.
+    // 커서·장식선 부분 사각형(reserved). 셀의 한 변 또는 중앙에 가는 띠를 그린다.
     //   강조선(셀 높이/폭 ~15%): 2=underline 커서·hollow 하단, 3=bar 커서·hollow 좌측,
     //   4=hollow 상단, 5=hollow 우측, 8=OSC 133 거터 바(셀 왼쪽 바깥). block(0)은 전체 cell.
     //   pane divider(config 두께 divider_thickness_px, seam 중앙정렬·셀 clamp): 30=세로선·31=가로선. 커서 강조선(2~5, 15%)과
-    //   분리해 divider만 config로 두께 조절(split.divider-thickness). 활성 pane focus 테두리는 divider와 분리돼 2~5(셀 15%)를 쓴다.
+    //   분리해 divider만 config로 두께 조절(split.divider-thickness). FocusOwner border는 이 cell 경로가 아닌 GPU quad다.
     //   텍스트 장식선(SGR)은 글자에 붙는 가는 선이라 강조선(15%)의 절반인 ~7.5%로 가늘게 그린다 —
     //   9=밑줄(SGR 4)·링크 hover 하단, 10=윗줄(SGR 53) 상단, 6=취소선(SGR 9) 중앙, 7=2중밑줄(SGR 21) 둘째 선.
     //   베이스: Ghostty는 폰트 메트릭 underline_thickness(=max(1,ceil(face.underlineThickness)))를 쓰지만,
     //   maru는 폰트 메트릭을 .m에 전달하지 않으므로 cell_h 비례 근사를 쓰되 텍스트 장식선은 그 가는 밑줄에
-    //   맞춰 절반으로 둔다. 커서·창 테두리·divider는 강조 요소라 15%를 유지한다(텍스트만 가늘게).
+    //   맞춰 절반으로 둔다. 커서·divider는 강조 요소라 15%를 유지한다(텍스트만 가늘게).
     const float text_line = fmaxf(1.0f, cell_h * 0.075f); // 텍스트 장식선(밑줄·윗줄·취소선·2중선) 공통 두께
     if (cell.reserved == 2) {
         const float thickness = fmaxf(2.0f, cell_h * 0.15f);

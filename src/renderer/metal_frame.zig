@@ -16,8 +16,8 @@ pub const NativeMetalCell = extern struct {
     row: u16,
     col: u16,
     width: u16,
-    // overlay 종류(0=일반 cell, 2=커서 underline, 3=커서 bar — DECSCUSR, 4=상단선/overline(SGR 53),
-    // 5=우측선 — active pane 테두리, 6=strikethrough — SGR 9 중앙 가로선). renderer가 2~6을 cell의
+    // overlay 종류(0=일반 cell, 2=커서 underline/hollow 하단, 3=커서 bar/hollow 좌측, 4=hollow 상단,
+    // 5=hollow 우측, 6=strikethrough — SGR 9 중앙 가로선). renderer가 2~6을 cell의
     // 한 변/중앙 ~2px 띠로 그린다. block 커서는 전체 사각형이라 0. 32는 부분 사각형이 아니라
     // 자유 배치 파일 도크 토글의 semantic render role이다(1.7x PUA 확대·titlebar 중앙 정렬).
     reserved: u16 = 0,
@@ -570,10 +570,10 @@ pub fn buildNativeCellsSplit(
                 .col = l.col,
                 .width = l.width,
                 .reserved = switch (l.kind) {
-                    .underline => 9, // 하단(가는 텍스트 밑줄 — 커서·테두리 reserved 2와 분리)
+                    .underline => 9, // 하단(가는 텍스트 밑줄 — 커서 underline/hollow reserved 2와 분리)
                     .double_underline => 7, // 하단 2중선 둘째 선(SGR 21)
                     .strikethrough => 6, // 중앙
-                    .overline => 10, // 상단(가는 텍스트 윗줄 — 테두리 reserved 4와 분리)
+                    .overline => 10, // 상단(가는 텍스트 윗줄 — hollow cursor reserved 4와 분리)
                 },
                 .codepoint = ' ',
                 .slot_id = 0,
@@ -1109,7 +1109,7 @@ pub const MetalFrame = extern struct {
     sidebar_scroll_offset_px: u32 = 0,
     // pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
     // scale_milli로 환산(metalFrame가 스탬프). renderer가 divider strip 폭을 이 값으로 정하되 seam 중앙정렬·셀 clamp한다
-    // (커서 강조선·활성 pane focus 테두리 reserved 2~5의 셀 15%와 분리라 divider만 config로 조절). 0이면 divider 안 그림(숨김).
+    // (커서 강조선 reserved 2~5·GPU quad FocusOwner border와 분리라 divider만 config로 조절). 0이면 divider 안 그림(숨김).
     // 끝에 추가해 기존 offset 불변(ABI v94).
     divider_thickness_px: u32 = 0,
     // 커서 overlay(터미널 블록/bar/underline 또는 오버레이 caret)가 차지하는 cells **suffix** 길이 —
@@ -1912,9 +1912,9 @@ test "a strikethrough overlay projects a reserved=6 center-line cell, independen
     try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), cells[1].background); // 전경색(흰색)
 }
 
-test "an overline overlay projects a reserved=4 top-line cell" {
+test "an overline overlay projects a reserved=10 top-line cell" {
     const allocator = std.testing.allocator;
-    // SGR 53 overline은 reserved=10(셀 상단 가는 선 — 테두리 reserved=4와 분리된 텍스트 윗줄)으로 투영된다.
+    // SGR 53 overline은 reserved=10(셀 상단 가는 선 — hollow cursor reserved=4와 분리된 텍스트 윗줄)으로 투영된다.
     // strikethrough(reserved=6, 중앙)·밑줄(reserved=9, 하단)과 독립이라 같은 모양을 안 다툰다.
     var overlays = [_]renderer.DrawOverlay{
         .{ .line = .{ .row = 0, .col = 0, .width = 1, .color = .default, .kind = .overline } },

@@ -82,7 +82,7 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 
 ## 파일 도크 FP9 drag·focus overlay 예산
 
-이 절은 [파일 패널 FP9](file-panel.md#33-파일-탭-드래그도크-내부-분할)의 drag hot path 수치와 실패 조건의 단일 출처다. 구현 전에는 문서 gate이며, 구현 PR이 동일 상수와 64-group/256-entry fixture를 소비하는 perf artifact를 추가해야 완료로 본다.
+이 절은 [파일 패널 FP9](file-panel.md#33-파일-탭-드래그도크-내부-분할)의 drag hot path 수치와 실패 조건의 단일 출처다. FP9 구현은 동일 상수와 64-group/256-entry fixture를 소비하는 1,000회 perf artifact로 이 gate를 자동 검증한다.
 
 | 경로 | hard gate | 실패 조건·구현 제약 |
 | --- | --- | --- |

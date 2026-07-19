@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 130u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 131u
 #define MARU_FILE_TREE_TRASH_KIND_REGULAR 1u
 #define MARU_FILE_TREE_TRASH_KIND_DIRECTORY 2u
 #define MARU_FILE_TREE_TRASH_KIND_SYMLINK 3u
@@ -350,8 +350,8 @@ typedef struct MaruAppHostMetalFrame {
     size_t gpu_quad_count;
     const MaruAppHostGpuShadow *gpu_shadows;
     size_t gpu_shadow_count;
-    /* C4b 모달: 모달 셀이 cells에서 시작하는 인덱스(0=모달 없음). 렌더러가 over quad(모달 배경)를 모달
-       텍스트 셀 '앞'에 끼우는 분할점. */
+    /* C4b overlay 셀이 cells에서 시작하는 순수 인덱스. 존재 여부는 마지막 overlay_cells_present가 명시하며,
+       렌더러가 over quad(모달 배경)를 텍스트 셀 '앞'에 끼우는 분할점이다. */
     size_t modal_cells_start;
     /* kitty graphics(K2): 이미지 placement 드로우 프리미티브. NULL/0이면 이미지 없음(렌더 무동작). */
     const MaruAppHostGpuImage *gpu_images;
@@ -405,6 +405,8 @@ typedef struct MaruAppHostMetalFrame {
        (cursor.blink-fade-ms). 렌더러가 커서 suffix pass의 fragment opacity로 /1000해 곱한다(premultiplied 출력 전체에
        곱 — 반투명 커서가 아래 본문 셀에 정확히 합성). 0=커서 pass 생략(blink off 위상). 끝에 추가(ABI v95). */
     uint32_t cursor_fade_milli;
+    /* ABI v131: overlay 셀이 index 0에서 시작해도 "없음"과 구별하는 명시 gate. modal_cells_start는 순수 index다. */
+    uint32_t overlay_cells_present;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);
@@ -761,8 +763,12 @@ uint32_t maru_macos_app_session_file_panel_entry(
 );
 /* 도크 entry의 mode(0=read, 1=source-edit). 도크가 아니면 -1. v122. */
 int32_t maru_macos_app_session_file_panel_mode(MaruAppHostSession *session, uint64_t surface_id);
-/* native WKWebView firstResponder surface를 FP8 도크 focused group으로 동기한다. 1=파일 surface, 0=아님. v124. */
+/* explicit file WKWebView primary-down을 Zig FocusOwner/DockPanel group에 반영한다. 1=승인, 0=stale/아님. v124. */
 uint32_t maru_macos_app_session_focus_file_panel_surface(MaruAppHostSession *session, uint64_t surface_id);
+uint32_t maru_macos_app_session_complete_pending_dock_focus(MaruAppHostSession *session, uint64_t surface_id);
+uint64_t maru_macos_app_session_pending_dock_focus_surface(MaruAppHostSession *session);
+/* Zig FocusOwner가 승인한 dock_surface만 반환한다. 그 외=0. v131. */
+uint64_t maru_macos_app_session_focused_dock_surface(MaruAppHostSession *session);
 /* Markdown isolated bridge 또는 로컬 HTML의 사용자 링크 활성화를 source surface에 고정해 처리한다.
    force_system!=0이면 config보다 우선해 시스템 브라우저를 쓴다. 1=수락, 0=invalid/stale/busy. v125. */
 uint32_t maru_macos_app_session_open_file_panel_link(
@@ -789,6 +795,8 @@ uint32_t maru_macos_app_session_take_file_tree_focus_action(MaruAppHostSession *
 uint64_t maru_macos_app_session_take_file_tree_restore_surface_action(MaruAppHostSession *session);
 /* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit. v122. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
+/* PendingDockFocus의 native firstResponder action을 mode refresh와 독립적으로 drain한다. 0=없음. v131. */
+uint64_t maru_macos_app_session_take_pending_dock_focus_action(MaruAppHostSession *session);
 /* source editor 이탈 전에 이전 surface의 dirty snapshot을 강제 요청한다. 0=없음, 그 외=surface id. v122. */
 uint64_t maru_macos_app_session_take_file_panel_dirty_sync_action(MaruAppHostSession *session);
 uint64_t maru_macos_app_session_take_file_panel_dirty_sync_action_v2(MaruAppHostSession *session, uint64_t *request_id_out);
@@ -1078,6 +1086,8 @@ typedef struct MaruAppHostWebSurfaceTransition {
     uint64_t surface_id; /* 앱 전역 unique·비재사용(§3) — 전이 매칭 안정 키 */
     uint32_t panel_kind; /* 0=markdown, 1=browser */
     uint32_t seam_edges; /* divider 맞닿는 가장자리 비트마스크: left=1, right=2, bottom=4 (hitTest 통과용) */
+    uint32_t divider_grab_band_pt; /* seam native pass-through 폭(logical pt), 0=비활성 */
+    uint32_t reserved;
     double frame_pt_x;
     double frame_pt_y;
     double frame_pt_w;

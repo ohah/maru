@@ -48,6 +48,7 @@ pub const session_model = @import("session/session_model.zig");
 pub const split_tree = @import("session/split_tree.zig");
 pub const dock_panel = @import("session/dock_panel.zig"); // FP1: 창 레벨 파일 도크의 OS-중립 소유 모델 + 단일 그룹 영속 DTO
 pub const dock_layout = @import("session/dock_layout.zig"); // FP3: right/bottom 도크·terminal·chrome rect와 resize 순수 기하
+pub const dock_drag = @import("session/dock_drag.zig"); // FP9: 파일 탭 drag gesture·dock-local target snapshot(terminal drag와 typed 격리)
 pub const file_panel_bridge = @import("session/file_panel_bridge.zig"); // FP4: readAsset 상대 경로·읽기 상한·MIME 순수 정책
 pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일 트리 snapshot·접힘·멀티루트·최근 파일 모델
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책

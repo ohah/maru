@@ -23,7 +23,11 @@ pub const Action = union(enum) {
     split_file_panel_vertical,
     close_file_panel_group,
     toggle_file_panel_dock_side,
-    // project tree에 transient keyboard focus를 주고 Metal view를 first responder로 만든다. 기본 Cmd+Shift+E.
+    // workspace terminal/browser pane과 파일 도크(tree 포함) 사이를 왕복한다. 기본 Cmd+Shift+E이며 command
+    // catalog/settings에 노출되어 사용자 rebind/unbind가 가능하다.
+    toggle_file_panel_focus,
+    // project tree에 transient keyboard focus를 주고 Metal view를 first responder로 만든다. one-way 호환 action이라
+    // 남기되 기본 chord는 FP9의 toggle_file_panel_focus로 이전한다.
     focus_file_tree,
     // project tree mutations. 생성은 선택한 directory 또는 file의 parent에, rename/delete는 project
     // directory/file row에만 적용된다. F2/Cmd+Backspace와 context menu도 이 action funnel을 공유한다.
@@ -168,6 +172,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "split_file_panel_vertical")) return .split_file_panel_vertical;
     if (std.mem.eql(u8, value, "close_file_panel_group")) return .close_file_panel_group;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
+    if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;
     if (std.mem.eql(u8, value, "focus_file_tree")) return .focus_file_tree;
     if (std.mem.eql(u8, value, "new_file")) return .new_file;
     if (std.mem.eql(u8, value, "new_directory")) return .new_directory;

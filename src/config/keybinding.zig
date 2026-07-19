@@ -225,7 +225,7 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+Shift+T: 새 워크스페이스
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'T' } }, .action = .new_web_tab }, // Cmd+Option+T: 활성 pane에 새 브라우저 Term(⌘T=new_term의 web 버전, ⌥로 구분)
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'O' } }, .action = .open_file_panel }, // Cmd+O: Markdown/HTML을 현재 창 도크에 열기(macOS Open 관례)
-    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'E' } }, .action = .focus_file_tree }, // Cmd+Shift+E: project tree keyboard focus
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'E' } }, .action = .toggle_file_panel_focus }, // Cmd+Shift+E: workspace pane <-> file dock focus
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'W' } }, .action = .close_focused }, // Cmd+W: 파일 도크 focus면 파일 탭, 아니면 Term cascade
     // split(pane) 순환: ⌘]=다음, ⌘[=이전(활성 워크스페이스 안에서 wrap, 분할 없으면 무동작). shift 없는 대괄호라
     // char는 ]/[ 그대로다(브레이스 }/{ 는 shift일 때만). 워크스페이스 ⌘⇧]/⌘⇧[ · Term ⌘⌥]/⌘⌥[ 와 modifier로
@@ -689,6 +689,28 @@ test "built-in app binding resolves Cmd+W to close_focused without user config" 
         .modifiers = .{ .command = true },
     }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.close_focused, resolved.app_action);
+}
+
+test "file panel focus toggle owns Cmd+Shift+E and remains rebindable/unbindable" {
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const defaults: KeyBindingResolver = .{};
+    const resolved = try defaults.resolve(.{
+        .key = .{ .char = 'e' },
+        .modifiers = .{ .command = true, .shift = true },
+    }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.toggle_file_panel_focus, resolved.app_action);
+
+    const rebound: KeyBindingResolver = .{ .app_bindings = &.{.{ .chord = try KeyChord.parse("Cmd+E"), .action = .toggle_file_panel_focus }} };
+    try std.testing.expectEqual(action_mod.Action.toggle_file_panel_focus, (try rebound.resolve(.{
+        .key = .{ .char = 'e' },
+        .modifiers = .{ .command = true },
+    }, &buffer, .{})).app_action);
+
+    const unbound: KeyBindingResolver = .{ .unbinds = &.{try KeyChord.parse("Cmd+Shift+E")} };
+    try std.testing.expect((try unbound.resolve(.{
+        .key = .{ .char = 'e' },
+        .modifiers = .{ .command = true, .shift = true },
+    }, &buffer, .{})) == .ignored);
 }
 
 test "file tree context honors app override and unbind without leaking terminal macros" {

@@ -18,6 +18,16 @@ pub const min_editor_cols: u32 = 28;
 /// Artifact의 editor tab처럼 파일 수가 적을 때 바 전체를 균등분할하지 않고 읽을 수 있는 고정폭 세그먼트를 쓴다.
 /// 탭이 많아 공간이 모자랄 때만 균등 축소한다(가로 스크롤은 후속).
 pub const default_tab_cols: u16 = 18;
+/// WKWebView 안쪽 divider grab band의 logical point 폭. Zig가 ABI로 내려 Swift hitTest와 Metal divider
+/// hit rect가 같은 값을 소비한다.
+pub const divider_grab_band_pt: u32 = 10;
+
+/// logical point SSOT를 backing pixel hit band로 올림 변환한다. Swift는 pt 값을 직접 소비하고 Zig hit-test는
+/// 이 함수만 써 1x/분수/2x scale에서도 WebView가 양보한 띠와 resize target 사이 dead band가 생기지 않는다.
+pub fn dividerGrabBandPx(scale_milli: u32) u32 {
+    const scale = if (scale_milli == 0) 1000 else scale_milli;
+    return @intCast((@as(u64, divider_grab_band_pt) * scale + 999) / 1000);
+}
 
 pub const Geometry = struct {
     terminal: Rect,
@@ -75,6 +85,36 @@ pub fn tabCellLayout(tab_cols: u16, entry_count: usize, index: usize) ?TabCellLa
 /// 최소 6칸으로 줄여도 토글 hit target은 유지한다.
 pub const header_control_cols: u32 = 18;
 
+pub const HeaderCellLayout = struct {
+    control_start: u16,
+    mode_mid: u16,
+    mode_end: u16,
+    dirty_col: ?u16,
+    conflict_col: ?u16,
+};
+
+/// Header render/background/hit-test가 공유하는 cell 권위. 각 status는 glyph 1칸+간격 1칸을 우측에서
+/// 예약하며 mode rect는 status 시작 전까지만 끝난다.
+pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCellLayout {
+    if (cols < 6) return null;
+    const control_cols: u16 = @intCast(@min(header_control_cols, cols));
+    const control_start = cols - control_cols;
+    var cursor = cols;
+    var dirty_col: ?u16 = null;
+    var conflict_col: ?u16 = null;
+    if (dirty and cursor >= 2) {
+        cursor -= 2;
+        dirty_col = cursor;
+    }
+    if (external_change and cursor >= 2) {
+        cursor -= 2;
+        conflict_col = cursor;
+    }
+    const mode_end = @max(control_start, cursor);
+    const mode_mid = control_start + (mode_end - control_start) / 2;
+    return .{ .control_start = control_start, .mode_mid = mode_mid, .mode_end = mode_end, .dirty_col = dirty_col, .conflict_col = conflict_col };
+}
+
 pub fn headerControlRect(g: Geometry, cell_width_px: u32) ?Rect {
     if (cell_width_px == 0 or g.header.w < cell_width_px * 6) return null;
     const cols = @min(header_control_cols, g.header.w / cell_width_px);
@@ -84,33 +124,51 @@ pub fn headerControlRect(g: Geometry, cell_width_px: u32) ?Rect {
 
 /// Markdown 헤더의 Artifact식 `렌더 | 편집` 두 선택지. 전체 control을 토글 버튼 하나로 취급하지 않고
 /// 보이는 절반과 클릭되는 절반이 같은 rect를 공유한다.
-pub fn headerModeRect(g: Geometry, cell_width_px: u32, mode: dock_panel.Mode) ?Rect {
+pub fn headerModeRect(g: Geometry, cell_width_px: u32, kind: dock_panel.EntryKind, mode: dock_panel.Mode, dirty: bool, external_change: bool) ?Rect {
+    if (kind != .markdown) return null;
     const control = headerControlRect(g, cell_width_px) orelse return null;
-    const half = control.w / 2;
-    if (half == 0) return null;
-    return switch (mode) {
-        .read => .{ .x = control.x, .y = control.y, .w = half, .h = control.h },
-        .source_edit => .{ .x = control.x + half, .y = control.y, .w = control.w - half, .h = control.h },
+    const cols: u16 = @intCast(g.header.w / cell_width_px);
+    const layout = headerCellLayout(cols, dirty, external_change) orelse return null;
+    const start_col = switch (mode) {
+        .read => layout.control_start,
+        .source_edit => layout.mode_mid,
     };
+    const end_col = switch (mode) {
+        .read => layout.mode_mid,
+        .source_edit => layout.mode_end,
+    };
+    if (end_col <= start_col) return null;
+    return .{ .x = g.header.x + @as(u32, start_col) * cell_width_px, .y = control.y, .w = @as(u32, end_col - start_col) * cell_width_px, .h = control.h };
 }
 
-pub fn headerModeAt(g: Geometry, cell_width_px: u32, x_px: f64, y_px: f64) ?dock_panel.Mode {
+pub fn headerModeAt(g: Geometry, cell_width_px: u32, kind: dock_panel.EntryKind, dirty: bool, external_change: bool, x_px: f64, y_px: f64) ?dock_panel.Mode {
     inline for (.{ dock_panel.Mode.read, dock_panel.Mode.source_edit }) |mode| {
-        if (headerModeRect(g, cell_width_px, mode)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return mode;
+        if (headerModeRect(g, cell_width_px, kind, mode, dirty, external_change)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return mode;
     }
     return null;
 }
 
 /// 헤더 draw-list의 external-change `!` 한 칸과 같은 rect. mode 토글의 넓은 control rect보다 먼저
 /// hit-test해, 충돌 표식을 누르면 편집 모드가 바뀌는 대신 명시적 disk reload 확인으로 라우팅한다.
-pub fn headerConflictRect(g: Geometry, cell_width_px: u32) ?Rect {
-    if (cell_width_px == 0 or g.header.w < cell_width_px * 4) return null;
+pub fn headerConflictRect(g: Geometry, cell_width_px: u32, dirty: bool) ?Rect {
+    if (cell_width_px == 0) return null;
+    const cols: u16 = @intCast(g.header.w / cell_width_px);
+    const layout = headerCellLayout(cols, dirty, true) orelse return null;
+    const col = layout.conflict_col orelse return null;
     return .{
-        .x = g.header.x + g.header.w - cell_width_px * 4,
+        .x = g.header.x + @as(u32, col) * cell_width_px,
         .y = g.header.y,
         .w = cell_width_px,
         .h = g.header.h,
     };
+}
+
+pub fn headerDirtyRect(g: Geometry, cell_width_px: u32, external_change: bool) ?Rect {
+    if (cell_width_px == 0) return null;
+    const cols: u16 = @intCast(g.header.w / cell_width_px);
+    const layout = headerCellLayout(cols, true, external_change) orelse return null;
+    const col = layout.dirty_col orelse return null;
+    return .{ .x = g.header.x + @as(u32, col) * cell_width_px, .y = g.header.y, .w = cell_width_px, .h = g.header.h };
 }
 
 pub fn tabMetrics(g: Geometry, cell_width_px: u32, entry_count: usize) ?TabMetrics {
@@ -426,16 +484,32 @@ test "dock header control rect is right-aligned and bounded on narrow docks" {
     const control = headerControlRect(g, 10).?;
     try std.testing.expectEqual(g.header.x + g.header.w, control.x + control.w);
     try std.testing.expectEqual(@as(u32, header_control_cols * 10), control.w);
-    const conflict = headerConflictRect(g, 10).?;
-    try std.testing.expectEqual(g.header.x + g.header.w - 40, conflict.x);
+    const conflict = headerConflictRect(g, 10, false).?;
+    try std.testing.expectEqual(g.header.x + g.header.w - 20, conflict.x);
     try std.testing.expectEqual(@as(u32, 10), conflict.w);
     try std.testing.expect(conflict.x >= control.x);
-    const read = headerModeRect(g, 10, .read).?;
-    const edit = headerModeRect(g, 10, .source_edit).?;
+    const read = headerModeRect(g, 10, .markdown, .read, false, false).?;
+    const edit = headerModeRect(g, 10, .markdown, .source_edit, false, false).?;
     try std.testing.expectEqual(control.x, read.x);
     try std.testing.expectEqual(read.x + read.w, edit.x);
     try std.testing.expectEqual(control.x + control.w, edit.x + edit.w);
-    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(g, 10, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(g, 10, .markdown, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(g, 10, .html, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
+
+    inline for (.{ false, true }) |dirty| inline for (.{ false, true }) |external| {
+        const cells = headerCellLayout(@intCast(g.header.w / 10), dirty, external).?;
+        const source = headerModeRect(g, 10, .markdown, .source_edit, dirty, external).?;
+        try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_mid) * 10, source.x);
+        try std.testing.expectEqual(g.header.x + @as(u32, cells.mode_end) * 10, source.x + source.w);
+        if (dirty) {
+            const status = headerDirtyRect(g, 10, external).?;
+            try std.testing.expect(headerModeAt(g, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
+        }
+        if (external) {
+            const status = headerConflictRect(g, 10, dirty).?;
+            try std.testing.expect(headerModeAt(g, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
+        }
+    };
 }
 
 test "dock group geometry gives every split leaf its own tab header and content" {
@@ -515,4 +589,12 @@ test "dock group divider hit target and pointer ratio share split bounds" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), groupDividerRatio(horizontal, 400, 100).?, 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.05), groupDividerRatio(horizontal, -1000, 100).?, 0.0001);
     try std.testing.expectEqual(@as(?f32, null), groupDividerRatio(horizontal, std.math.nan(f64), 0));
+}
+
+test "dock divider grab band rounds logical points up at fractional backing scales" {
+    try std.testing.expectEqual(@as(u32, 10), dividerGrabBandPx(0));
+    try std.testing.expectEqual(@as(u32, 10), dividerGrabBandPx(1000));
+    try std.testing.expectEqual(@as(u32, 13), dividerGrabBandPx(1250));
+    try std.testing.expectEqual(@as(u32, 15), dividerGrabBandPx(1500));
+    try std.testing.expectEqual(@as(u32, 20), dividerGrabBandPx(2000));
 }

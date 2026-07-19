@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const surface_id = @import("../session/surface_id.zig");
+const dock_panel = @import("../session/dock_panel.zig");
 const live_surface_registry = @import("../session/live_surface_registry.zig");
 const runtime_mod = @import("runtime.zig");
 const live_pty = @import("live_pty.zig");
@@ -31,6 +32,10 @@ const live_pty = @import("live_pty.zig");
 pub const AppRuntime = struct {
     /// surface_id·pty_id 발급기 — 앱 전역 단조·비재사용(M0a). 모든 창이 공유해 멀티 창에서도 id가 유일하다.
     surface_ids: surface_id.SurfaceIdAllocator = .{},
+
+    /// 파일 도크 entry의 앱 전역 opaque identity 발급기. path rename과 WKWebView eviction을 넘어 같은 entry를
+    /// 추적하며 모든 AppSession이 공유한다. surface_id와 의미/수명은 달라 별도 typed allocator로 둔다.
+    entry_ids: dock_panel.EntryIdAllocator = .{},
 
     /// live surface 소유자(M2b/M3a) — `LiveSurface` 번들(4e-1: `union(SurfaceKind)` — terminal arm=surface + live_pty,
     /// web arm=sentinel surface)을 surface_id 키드 heap 슬롯으로 소유한다.

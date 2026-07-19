@@ -767,21 +767,18 @@ pub fn buildFileDockChromeDrawList(
             if ((active != null and active.? == i) or (hovered != null and hovered.? == i))
                 try cells.append(allocator, .{ .row = 0, .col = tab.close_col, .codepoint = 0x00D7, .width = 1, .style = style });
         }
-        const control_cols: u16 = @intCast(@min(dock_layout.header_control_cols, cols));
-        const control_start = cols - control_cols;
-        if (control_start > 1)
-            _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, control_start, .{ .foreground = fg }, false, .head);
-        const state_cols: u16 = (if (active_dirty) @as(u16, 2) else 0) + (if (active_external_change) @as(u16, 2) else 0);
-        const mode_end = cols -| state_cols;
-        const mode_mid = control_start + (cols - control_start) / 2;
-        if (mode_mid > control_start + 1)
-            _ = try appendEllipsizedTitle(allocator, &cells, "렌더", 1, control_start + 1, mode_mid, .{ .foreground = active_fg, .bold = active_kind == .markdown and active_mode == .read }, false, .head);
-        if (active_kind == .markdown and mode_end > mode_mid + 1)
-            _ = try appendEllipsizedTitle(allocator, &cells, "편집", 1, mode_mid + 1, mode_end, .{ .foreground = active_fg, .bold = active_mode == .source_edit }, false, .head);
-        if (active_dirty and cols >= 2)
-            try cells.append(allocator, .{ .row = 1, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●
-        if (active_external_change and cols >= 4)
-            try cells.append(allocator, .{ .row = 1, .col = cols - 4, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg, .bold = true } });
+        if (dock_layout.headerCellLayout(cols, active_dirty, active_external_change)) |header| {
+            if (header.control_start > 1)
+                _ = try appendEllipsizedTitle(allocator, &cells, active_path, 1, 1, header.control_start, .{ .foreground = fg }, false, .head);
+            if (header.mode_mid > header.control_start + 1)
+                _ = try appendEllipsizedTitle(allocator, &cells, "렌더", 1, header.control_start + 1, header.mode_mid, .{ .foreground = active_fg, .bold = active_kind == .markdown and active_mode == .read }, false, .head);
+            if (active_kind == .markdown and header.mode_end > header.mode_mid + 1)
+                _ = try appendEllipsizedTitle(allocator, &cells, "편집", 1, header.mode_mid + 1, header.mode_end, .{ .foreground = active_fg, .bold = active_mode == .source_edit }, false, .head);
+            if (header.dirty_col) |col|
+                try cells.append(allocator, .{ .row = 1, .col = col, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } }); // ●
+            if (header.conflict_col) |col|
+                try cells.append(allocator, .{ .row = 1, .col = col, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg, .bold = true } });
+        }
     }
     return .{
         .size = .{ .cols = @max(cols, 1), .rows = 2 },
@@ -1039,6 +1036,31 @@ pub fn buildFloatingTabDrawList(
         .dirty = .{ .start_row = 0, .end_row = 0 },
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
+/// Dock drag 전용 floating title. 배경 박스는 AppSession의 단일 GpuQuad가 소유하므로 여기서는 실제 제목
+/// glyph만 만든다. 좌측 1-cell padding은 col offset으로 표현하고 공백 채움/명시 background를 만들지 않아
+/// 제목 길이가 Metal background geometry 수를 늘리지 않는다.
+pub fn buildFloatingTabTitleDrawList(
+    allocator: std.mem.Allocator,
+    title: []const u8,
+    cols: u16,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    const style: terminal.Style = .{ .foreground = fg };
+    if (cols > 1) _ = try appendEllipsizedTitle(allocator, &cells, title, 0, 1, cols, style, false, .head);
+    const overlays = try allocator.alloc(renderer.DrawOverlay, 0);
+    errdefer allocator.free(overlays);
+    const owned_cells = try cells.toOwnedSlice(allocator);
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = owned_cells,
+        .overlays = overlays,
     };
 }
 
@@ -2333,6 +2355,21 @@ test "buildFloatingTabDrawList fills a one-row box with the title" {
     defer exact.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 8), exact.cells.len);
     for (exact.cells) |c| try std.testing.expect(c.codepoint != title_ellipsis_glyph);
+}
+
+test "buildFloatingTabTitleDrawList emits glyph-only transparent title cells" {
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 0xEE, .g = 0xEE, .b = 0xEE } };
+    var dl = try buildFloatingTabTitleDrawList(allocator, "abcdefghijklmnopqrstuvwx", 24, fg);
+    defer dl.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 24), dl.size.cols);
+    try std.testing.expect(dl.cells.len <= 23);
+    try std.testing.expectEqual(@as(u16, 1), dl.cells[0].col);
+    try std.testing.expectEqual(title_ellipsis_glyph, dl.cells[dl.cells.len - 1].codepoint);
+    for (dl.cells) |cell| {
+        try std.testing.expectEqual(terminal.Color.default, cell.style.background);
+        try std.testing.expect(cell.codepoint != ' ');
+    }
 }
 
 test "buildFromDrawList shapes a synthesized sidebar draw list into glyph cells (shared atlas seam)" {

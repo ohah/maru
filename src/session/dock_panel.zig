@@ -22,7 +22,25 @@ pub const EntryKind = enum { markdown, html };
 /// 요구하지 않게 한다. 실제 UI가 허용할 조합은 FP6의 정책 배선이 제한한다.
 pub const Mode = enum { read, source_edit };
 
+/// 파일 entry의 앱-런타임 전역 identity. path는 rename으로, surface_id는 LRU eviction/recreate로 바뀔 수 있어
+/// drag·비동기 ack가 위치를 다시 찾는 키로 쓸 수 없다. 0은 미할당 sentinel이며 발급한 값은 close 뒤에도 재사용하지 않는다.
+pub const EntryId = u64;
+
+/// AppRuntime이 인스턴스 하나를 소유하고 각 DockPanel에 주입하는 순수 L2 발급기. 메인 actor 전용이며, wrap 시
+/// 0이나 과거 값을 재발급하는 대신 fail-closed한다.
+pub const EntryIdAllocator = struct {
+    next_id: EntryId = 1,
+
+    pub fn next(self: *EntryIdAllocator) !EntryId {
+        if (self.next_id == 0 or self.next_id == std.math.maxInt(EntryId)) return error.EntryIdExhausted;
+        const id = self.next_id;
+        self.next_id += 1;
+        return id;
+    }
+};
+
 pub const Entry = struct {
+    id: EntryId,
     path: []u8,
     kind: EntryKind,
     mode: Mode = .read,
@@ -117,7 +135,8 @@ pub const DockGroup = struct {
     }
 
     /// 파일 경로는 한 그룹에서 유일하다. 이미 열린 경로면 entry를 늘리지 않고 기존 탭만 활성화한다.
-    fn openLocal(self: *DockGroup, path: []const u8, kind: EntryKind) !usize {
+    fn openLocal(self: *DockGroup, entry_id: EntryId, path: []const u8, kind: EntryKind) !usize {
+        if (entry_id == 0) return error.InvalidEntryId;
         if (path.len == 0) return error.InvalidPath;
         if (self.findPath(path)) |i| {
             self.active = i;
@@ -125,7 +144,7 @@ pub const DockGroup = struct {
         }
         const owned = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned);
-        try self.entries.append(self.allocator, .{ .path = owned, .kind = kind });
+        try self.entries.append(self.allocator, .{ .id = entry_id, .path = owned, .kind = kind });
         const i = self.entries.items.len - 1;
         self.active = i;
         return i;
@@ -155,8 +174,24 @@ pub const DockGroup = struct {
 /// 각 `*DockGroup` leaf의 주소 안정성과 해제를 책임진다.
 pub const DockTree = split_tree.SplitTree(*DockGroup);
 
+pub const DockDropEdge = enum { left, right, top, bottom };
+
+/// 탭 바 boundary는 source 제거 전 보이는 0...N 좌표다. split은 editor 전체 X자 방향 zone의 결과다.
+pub const DockDropTarget = union(enum) {
+    tab_bar: usize,
+    split: DockDropEdge,
+};
+
+pub const DropResult = struct {
+    changed: bool,
+    source_successor_entry_id: ?EntryId,
+    destination_active_entry_id: EntryId,
+    destination_surface_id: ?u64,
+};
+
 pub const DockPanel = struct {
     allocator: std.mem.Allocator,
+    entry_ids: *EntryIdAllocator,
     tree: DockTree.Node,
     side: Side = .right,
     size: u32 = 0,
@@ -165,10 +200,10 @@ pub const DockPanel = struct {
     focused_group: *DockGroup,
     next_group_id: u64 = 2,
 
-    pub fn init(allocator: std.mem.Allocator) !DockPanel {
+    pub fn init(allocator: std.mem.Allocator, entry_ids: *EntryIdAllocator) !DockPanel {
         const group = try allocator.create(DockGroup);
         group.* = DockGroup.init(allocator, 1);
-        return .{ .allocator = allocator, .tree = .{ .leaf = group }, .focused_group = group };
+        return .{ .allocator = allocator, .entry_ids = entry_ids, .tree = .{ .leaf = group }, .focused_group = group };
     }
 
     pub fn deinit(self: *DockPanel) void {
@@ -247,6 +282,11 @@ pub const DockPanel = struct {
         return findGroupForSurfaceId(self.tree, surface_id);
     }
 
+    pub fn groupForRuntimeId(self: *DockPanel, runtime_id: u64) ?*DockGroup {
+        if (runtime_id == 0) return null;
+        return findGroupForRuntimeId(self.tree, runtime_id);
+    }
+
     /// runtime surface id로 파일 entry를 찾는다. FP8 다중 그룹에서도 같은 API가 재귀 tree 전체를 찾는다.
     pub fn entryForSurfaceId(self: *DockPanel, surface_id: u64) ?*Entry {
         if (surface_id == 0) return null;
@@ -261,9 +301,20 @@ pub const DockPanel = struct {
     };
 
     pub const PathLocation = struct { group: *DockGroup, index: usize };
+    pub const EntryLocation = struct { group: *DockGroup, index: usize };
+    pub const EntryLookupCounters = struct { entry_visits: usize = 0 };
 
     pub fn pathLocation(self: *DockPanel, path: []const u8) ?PathLocation {
         return findPath(self.tree, path);
+    }
+
+    pub fn entryLocation(self: *DockPanel, entry_id: EntryId) ?EntryLocation {
+        return self.entryLocationCounted(entry_id, null);
+    }
+
+    pub fn entryLocationCounted(self: *DockPanel, entry_id: EntryId, counters: ?*EntryLookupCounters) ?EntryLocation {
+        if (entry_id == 0) return null;
+        return findEntryId(self.tree, entry_id, counters);
     }
 
     /// 경로 유일성은 그룹이 아니라 창 도크 전체 불변식이다. FP8 분할 뒤에도 같은 파일을 다른 그룹 target으로 다시
@@ -279,7 +330,8 @@ pub const DockPanel = struct {
         }
         if (entryCount(self.tree) >= max_entries) return error.TooManyEntries;
         const previous_active = target.active;
-        const index = try target.openLocal(path, kind);
+        const entry_id = try self.entry_ids.next();
+        const index = try target.openLocal(entry_id, path, kind);
         self.focused_group = target;
         return .{ .group = target, .index = index, .created = true, .previous_active = previous_active };
     }
@@ -295,6 +347,19 @@ pub const DockPanel = struct {
         return switch (node) {
             .leaf => |group| if (group.findPath(path)) |index| .{ .group = group, .index = index } else null,
             .split => |sp| findPath(sp.a, path) orelse findPath(sp.b, path),
+        };
+    }
+
+    fn findEntryId(node: DockTree.Node, entry_id: EntryId, counters: ?*EntryLookupCounters) ?EntryLocation {
+        return switch (node) {
+            .leaf => |group| blk: {
+                for (group.entries.items, 0..) |entry, index| {
+                    if (counters) |stats| stats.entry_visits += 1;
+                    if (entry.id == entry_id) break :blk .{ .group = group, .index = index };
+                }
+                break :blk null;
+            },
+            .split => |sp| findEntryId(sp.a, entry_id, counters) orelse findEntryId(sp.b, entry_id, counters),
         };
     }
 
@@ -367,13 +432,131 @@ pub const DockPanel = struct {
         };
     }
 
+    fn findGroupForRuntimeId(node: DockTree.Node, runtime_id: u64) ?*DockGroup {
+        return switch (node) {
+            .leaf => |group| if (group.runtime_id == runtime_id) group else null,
+            .split => |sp| findGroupForRuntimeId(sp.a, runtime_id) orelse findGroupForRuntimeId(sp.b, runtime_id),
+        };
+    }
+
+    fn activeEntryId(group: *const DockGroup) ?EntryId {
+        const index = group.active orelse return null;
+        if (index >= group.entries.items.len) return null;
+        return group.entries.items[index].id;
+    }
+
+    fn activeSurfaceId(group: *const DockGroup) ?u64 {
+        const index = group.active orelse return null;
+        if (index >= group.entries.items.len) return null;
+        const surface_id = group.entries.items[index].surface_id;
+        return if (surface_id == 0) null else surface_id;
+    }
+
+    fn indexForEntryId(group: *const DockGroup, entry_id: EntryId) ?usize {
+        for (group.entries.items, 0..) |entry, index| if (entry.id == entry_id) return index;
+        return null;
+    }
+
+    fn pendingGroupRuntimeId(self: *const DockPanel) !u64 {
+        if (self.next_group_id == 0 or self.next_group_id == std.math.maxInt(u64)) return error.GroupIdExhausted;
+        return self.next_group_id;
+    }
+
+    /// 단일 entry drop transaction. 모든 allocation/capacity reserve를 source detach 전에 끝내므로 오류가 나면
+    /// entry/dirty/surface/tree/active/focus가 그대로다. 성공 commit 구간은 orderedRemove/insertAssumeCapacity와
+    /// 미리 만든 tree node 교체뿐이라 실패하지 않는다.
+    pub fn commitEntryDrop(
+        self: *DockPanel,
+        entry_id: EntryId,
+        target_group_id: u64,
+        target: DockDropTarget,
+    ) !DropResult {
+        const source = self.entryLocation(entry_id) orelse return error.EntryNotFound;
+        const destination = self.groupForRuntimeId(target_group_id) orelse return error.GroupNotFound;
+
+        switch (target) {
+            .tab_bar => |boundary| {
+                if (boundary > destination.entries.items.len) return error.InvalidDropTarget;
+                if (source.group == destination) {
+                    const active_id = activeEntryId(source.group) orelse return error.InvalidModel;
+                    if (boundary == source.index or boundary == source.index + 1) {
+                        return .{
+                            .changed = false,
+                            .source_successor_entry_id = active_id,
+                            .destination_active_entry_id = active_id,
+                            .destination_surface_id = activeSurfaceId(source.group),
+                        };
+                    }
+                    const adjusted = boundary - @intFromBool(boundary > source.index);
+                    const moved = source.group.entries.orderedRemove(source.index);
+                    source.group.entries.insertAssumeCapacity(adjusted, moved);
+                    source.group.active = indexForEntryId(source.group, active_id) orelse unreachable;
+                    return .{
+                        .changed = true,
+                        .source_successor_entry_id = active_id,
+                        .destination_active_entry_id = active_id,
+                        .destination_surface_id = activeSurfaceId(source.group),
+                    };
+                }
+
+                try destination.entries.ensureUnusedCapacity(self.allocator, 1);
+                const moved = source.group.remove(source.index) orelse unreachable;
+                destination.entries.insertAssumeCapacity(boundary, moved);
+                destination.active = boundary;
+                self.focused_group = destination;
+                return .{
+                    .changed = true,
+                    .source_successor_entry_id = activeEntryId(source.group),
+                    .destination_active_entry_id = moved.id,
+                    .destination_surface_id = if (moved.surface_id == 0) null else moved.surface_id,
+                };
+            },
+            .split => |edge| {
+                if (self.groupCount() >= max_groups) return error.TooManyGroups;
+                const runtime_id = try self.pendingGroupRuntimeId();
+                const group = try self.allocator.create(DockGroup);
+                errdefer self.allocator.destroy(group);
+                group.* = DockGroup.init(self.allocator, runtime_id);
+                errdefer group.deinit();
+                try group.entries.ensureTotalCapacity(self.allocator, 1);
+
+                const split = try self.allocator.create(DockTree.Split);
+                errdefer self.allocator.destroy(split);
+                const direction: split_tree.SplitDirection = switch (edge) {
+                    .left, .right => .horizontal,
+                    .top, .bottom => .vertical,
+                };
+                const new_first = edge == .left or edge == .top;
+                split.* = .{
+                    .direction = direction,
+                    .ratio = 0.5,
+                    .a = if (new_first) .{ .leaf = group } else .{ .leaf = destination },
+                    .b = if (new_first) .{ .leaf = destination } else .{ .leaf = group },
+                };
+
+                self.next_group_id += 1; // 모든 fallible 준비가 끝난 no-fail commit에서만 ID를 소비한다.
+                const moved = source.group.remove(source.index) orelse unreachable;
+                group.entries.appendAssumeCapacity(moved);
+                group.active = 0;
+                std.debug.assert(DockTree.replaceLeaf(&self.tree, destination, .{ .split = split }));
+                self.focused_group = group;
+                return .{
+                    .changed = true,
+                    .source_successor_entry_id = activeEntryId(source.group),
+                    .destination_active_entry_id = moved.id,
+                    .destination_surface_id = if (moved.surface_id == 0) null else moved.surface_id,
+                };
+            },
+        }
+    }
+
     /// FP8 UI가 쓸 additive 연산을 FP1 모델에서 먼저 고정한다. target leaf는 a에 남고 새 빈 그룹은 b가 된다.
     pub fn splitGroup(self: *DockPanel, target: *DockGroup, direction: split_tree.SplitDirection, ratio: f32) !*DockGroup {
+        if (!containsGroup(self.tree, target)) return error.GroupNotFound;
+        if (self.groupCount() >= max_groups) return error.TooManyGroups;
         const group = try self.allocator.create(DockGroup);
         errdefer self.allocator.destroy(group);
-        const runtime_id = self.next_group_id;
-        self.next_group_id +%= 1;
-        if (self.next_group_id == 0) self.next_group_id = 1;
+        const runtime_id = try self.pendingGroupRuntimeId();
         group.* = DockGroup.init(self.allocator, runtime_id);
         errdefer group.deinit();
 
@@ -385,7 +568,8 @@ pub const DockPanel = struct {
             .a = .{ .leaf = target },
             .b = .{ .leaf = group },
         };
-        if (!DockTree.replaceLeaf(&self.tree, target, .{ .split = split })) return error.GroupNotFound;
+        self.next_group_id += 1; // allocation 실패는 runtime id cursor까지 byte-identical하게 보존한다.
+        std.debug.assert(DockTree.replaceLeaf(&self.tree, target, .{ .split = split }));
         self.focused_group = group;
         return group;
     }
@@ -404,10 +588,10 @@ pub const DockPanel = struct {
 
     /// workspace.v1 DTO에서 라이브 소유 모델을 복구한다. 단일 그룹 legacy 표현과 FP8 preorder 표현은 상호 배타다.
     /// dirty/runtime handle은 persisted DTO에 없으므로 항상 초기값으로 돌아온다.
-    pub fn restore(allocator: std.mem.Allocator, state: PersistedState) !DockPanel {
+    pub fn restore(allocator: std.mem.Allocator, entry_ids: *EntryIdAllocator, state: PersistedState) !DockPanel {
         if (state.entries.len > max_entries or state.groups.len > max_groups) return error.InvalidPersistedState;
         if (state.groups.len != 0 and state.entries.len != 0) return error.InvalidPersistedState;
-        var panel = try DockPanel.init(allocator);
+        var panel = try DockPanel.init(allocator, entry_ids);
         errdefer panel.deinit();
         panel.side = state.side;
         panel.size = state.size;
@@ -432,7 +616,7 @@ pub const DockPanel = struct {
                 group.* = DockGroup.init(allocator, @as(u64, @intCast(group_index)) + 1);
                 groups[group_index] = group;
                 initialized += 1;
-                try restoreEntries(group, persisted_group.entries);
+                try restoreEntries(entry_ids, group, persisted_group.entries);
                 for (groups[0..group_index]) |prior_group| {
                     for (group.entries.items) |entry| if (prior_group.findPath(entry.path) != null) return error.InvalidPersistedState;
                 }
@@ -459,16 +643,16 @@ pub const DockPanel = struct {
 
         if (state.tree.len != 0) return error.InvalidPersistedState;
         const group = panel.singleGroup().?;
-        try restoreEntries(group, state.entries);
+        try restoreEntries(entry_ids, group, state.entries);
         panel.focused_group = group;
         return panel;
     }
 
-    fn restoreEntries(group: *DockGroup, entries: []const PersistedEntry) !void {
+    fn restoreEntries(entry_ids: *EntryIdAllocator, group: *DockGroup, entries: []const PersistedEntry) !void {
         var active: ?usize = null;
         for (entries) |entry| {
             if (entry.path.len == 0 or group.findPath(entry.path) != null) return error.InvalidPersistedState;
-            const i = try group.openLocal(entry.path, entry.kind);
+            const i = try group.openLocal(try entry_ids.next(), entry.path, entry.kind);
             group.entries.items[i].mode = entry.mode;
             group.entries.items[i].dirty = false;
             if (entry.active) {
@@ -591,8 +775,181 @@ pub fn freePersistedState(allocator: std.mem.Allocator, state: *PersistedState) 
     state.* = .{};
 }
 
+test "entry id allocator: monotonic nonzero and exhaustion fails closed" {
+    var ids: EntryIdAllocator = .{};
+    try std.testing.expectEqual(@as(EntryId, 1), try ids.next());
+    try std.testing.expectEqual(@as(EntryId, 2), try ids.next());
+    ids.next_id = std.math.maxInt(EntryId);
+    try std.testing.expectError(error.EntryIdExhausted, ids.next());
+    try std.testing.expectEqual(std.math.maxInt(EntryId), ids.next_id);
+}
+
+test "dock panel drop: same-group visible boundaries preserve active identity" {
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
+    defer panel.deinit();
+    const group = panel.singleGroup().?;
+    _ = try panel.open(group, "/tmp/a.md", .markdown);
+    _ = try panel.open(group, "/tmp/b.md", .markdown);
+    _ = try panel.open(group, "/tmp/c.md", .markdown);
+    group.active = 2;
+    const a = group.entries.items[0].id;
+    const b = group.entries.items[1].id;
+    const c = group.entries.items[2].id;
+
+    const no_op = try panel.commitEntryDrop(b, group.runtime_id, .{ .tab_bar = 2 });
+    try std.testing.expect(!no_op.changed);
+    try std.testing.expectEqualSlices(EntryId, &.{ a, b, c }, &.{ group.entries.items[0].id, group.entries.items[1].id, group.entries.items[2].id });
+
+    const moved = try panel.commitEntryDrop(a, group.runtime_id, .{ .tab_bar = 3 });
+    try std.testing.expect(moved.changed);
+    try std.testing.expectEqualSlices(EntryId, &.{ b, c, a }, &.{ group.entries.items[0].id, group.entries.items[1].id, group.entries.items[2].id });
+    try std.testing.expectEqual(c, group.entries.items[group.active.?].id);
+    try std.testing.expectEqual(c, moved.destination_active_entry_id);
+}
+
+test "dock panel drop: cross-group active and background moves preserve entry state" {
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
+    defer panel.deinit();
+    const source = panel.singleGroup().?;
+    _ = try panel.open(source, "/tmp/a.md", .markdown);
+    _ = try panel.open(source, "/tmp/b.md", .markdown);
+    _ = try panel.open(source, "/tmp/c.md", .markdown);
+    const destination = try panel.splitGroup(source, .horizontal, 0.5);
+    _ = try panel.open(destination, "/tmp/d.md", .markdown);
+    source.active = 1;
+    const a = source.entries.items[0].id;
+    const b = source.entries.items[1].id;
+    const c = source.entries.items[2].id;
+    source.entries.items[0].dirty = true;
+    source.entries.items[0].surface_id = 77;
+
+    const background = try panel.commitEntryDrop(a, destination.runtime_id, .{ .tab_bar = 0 });
+    try std.testing.expect(background.changed);
+    try std.testing.expectEqual(b, background.source_successor_entry_id.?);
+    try std.testing.expectEqual(a, background.destination_active_entry_id);
+    try std.testing.expectEqual(@as(?u64, 77), background.destination_surface_id);
+    try std.testing.expect(destination.entries.items[0].dirty);
+    try std.testing.expectEqual(a, destination.entries.items[0].id);
+    try std.testing.expectEqual(b, source.entries.items[source.active.?].id);
+
+    const active = try panel.commitEntryDrop(b, destination.runtime_id, .{ .tab_bar = destination.entries.items.len });
+    try std.testing.expectEqual(c, active.source_successor_entry_id.?);
+    try std.testing.expectEqual(b, destination.entries.items[destination.active.?].id);
+    try std.testing.expectEqual(c, source.entries.items[source.active.?].id);
+}
+
+test "dock panel drop: four direction zones create deterministic preorder and keep empty source" {
+    const cases = [_]struct { edge: DockDropEdge, new_first: bool, direction: split_tree.SplitDirection }{
+        .{ .edge = .left, .new_first = true, .direction = .horizontal },
+        .{ .edge = .right, .new_first = false, .direction = .horizontal },
+        .{ .edge = .top, .new_first = true, .direction = .vertical },
+        .{ .edge = .bottom, .new_first = false, .direction = .vertical },
+    };
+    for (cases) |case| {
+        var entry_ids: EntryIdAllocator = .{};
+        var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
+        defer panel.deinit();
+        const source = panel.singleGroup().?;
+        _ = try panel.open(source, "/tmp/a.md", .markdown);
+        const entry_id = source.entries.items[0].id;
+        _ = try panel.commitEntryDrop(entry_id, source.runtime_id, .{ .split = case.edge });
+
+        try std.testing.expectEqual(@as(usize, 2), panel.groupCount());
+        try std.testing.expectEqual(@as(usize, 0), source.entries.items.len);
+        const moved_group = panel.entryLocation(entry_id).?.group;
+        try std.testing.expectEqual(case.new_first, panel.groupAt(0).? == moved_group);
+        try std.testing.expectEqual(case.direction, panel.tree.split.direction);
+        try std.testing.expectEqual(moved_group, panel.focusedGroup());
+    }
+}
+
+test "dock panel drop: group cap rejects before mutating entry or tree" {
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
+    defer panel.deinit();
+    const source = panel.singleGroup().?;
+    _ = try panel.open(source, "/tmp/a.md", .markdown);
+    const entry_id = source.entries.items[0].id;
+    var target = source;
+    while (panel.groupCount() < max_groups) target = try panel.splitGroup(target, .horizontal, 0.5);
+    const before_tree = panel.tree;
+    var leaves: std.ArrayList(DockTree.LeafRect) = .empty;
+    defer leaves.deinit(std.testing.allocator);
+    try leaves.ensureTotalCapacity(std.testing.allocator, max_groups);
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    panel.allocator = counting.allocator();
+    try std.testing.expectError(error.TooManyGroups, panel.commitEntryDrop(entry_id, target.runtime_id, .{ .split = .right }));
+    try DockTree.layout(counting.allocator(), panel.tree, .{ .x = 0, .y = 0, .w = 6400, .h = 1200 }, &leaves);
+    panel.allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expect(!counting.has_induced_failure);
+    try std.testing.expectEqual(before_tree.split, panel.tree.split);
+    try std.testing.expectEqual(entry_id, source.entries.items[0].id);
+    try std.testing.expectEqual(@as(usize, max_groups), panel.groupCount());
+}
+
+test "dock panel drop: destination reserve OOM leaves source destination active and focus unchanged" {
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
+    defer panel.deinit();
+    const source = panel.singleGroup().?;
+    _ = try panel.open(source, "/tmp/oom.md", .markdown);
+    const entry_id = source.entries.items[0].id;
+    source.entries.items[0].dirty = true;
+    source.entries.items[0].surface_id = 91;
+    const destination = try panel.splitGroup(source, .horizontal, 0.5);
+    const focused_before = panel.focusedGroup();
+    const next_group_before = panel.next_group_id;
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    panel.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, panel.commitEntryDrop(entry_id, destination.runtime_id, .{ .tab_bar = 0 }));
+    panel.allocator = std.testing.allocator;
+
+    try std.testing.expectEqual(@as(usize, 1), source.entries.items.len);
+    try std.testing.expectEqual(entry_id, source.entries.items[0].id);
+    try std.testing.expect(source.entries.items[0].dirty);
+    try std.testing.expectEqual(@as(u64, 91), source.entries.items[0].surface_id);
+    try std.testing.expectEqual(@as(?usize, 0), source.active);
+    try std.testing.expectEqual(@as(usize, 0), destination.entries.items.len);
+    try std.testing.expectEqual(focused_before, panel.focusedGroup());
+    try std.testing.expectEqual(next_group_before, panel.next_group_id);
+}
+
+test "dock panel drop: every split allocation failure preserves model and runtime id cursor" {
+    inline for (0..3) |fail_index| {
+        var entry_ids: EntryIdAllocator = .{};
+        var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
+        defer panel.deinit();
+        const source = panel.singleGroup().?;
+        _ = try panel.open(source, "/tmp/split-oom.md", .markdown);
+        const entry_id = source.entries.items[0].id;
+        source.entries.items[0].dirty_sync_pending = true;
+        source.entries.items[0].surface_id = 92;
+        const focused_before = panel.focusedGroup();
+        const next_group_before = panel.next_group_id;
+
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        panel.allocator = failing.allocator();
+        try std.testing.expectError(error.OutOfMemory, panel.commitEntryDrop(entry_id, source.runtime_id, .{ .split = .left }));
+        panel.allocator = std.testing.allocator;
+
+        try std.testing.expectEqual(@as(usize, 1), panel.groupCount());
+        try std.testing.expectEqual(@as(usize, 1), source.entries.items.len);
+        try std.testing.expectEqual(entry_id, source.entries.items[0].id);
+        try std.testing.expect(source.entries.items[0].dirty_sync_pending);
+        try std.testing.expectEqual(@as(u64, 92), source.entries.items[0].surface_id);
+        try std.testing.expectEqual(@as(?usize, 0), source.active);
+        try std.testing.expectEqual(focused_before, panel.focusedGroup());
+        try std.testing.expectEqual(next_group_before, panel.next_group_id);
+    }
+}
+
 test "dock panel: single group owns entries and reopening a path activates instead of duplicating" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
 
     const group = panel.singleGroup().?;
@@ -615,7 +972,8 @@ test "dock panel: single group owns entries and reopening a path activates inste
 }
 
 test "dock panel: entryForSurfaceId searches nested groups and rejects zero" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
     const first = panel.singleGroup().?;
     _ = try panel.open(first, "/tmp/a.md", .markdown);
@@ -631,7 +989,8 @@ test "dock panel: entryForSurfaceId searches nested groups and rejects zero" {
 }
 
 test "dock panel: replaceLeaf split lays out two file groups in the dock rect" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
 
     const first = panel.singleGroup().?;
@@ -650,7 +1009,8 @@ test "dock panel: replaceLeaf split lays out two file groups in the dock rect" {
 }
 
 test "dock panel: nested three-group tree emits dividers and removeLeaf restores siblings" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
 
     const a = panel.singleGroup().?;
@@ -676,7 +1036,8 @@ test "dock panel: nested three-group tree emits dividers and removeLeaf restores
 }
 
 test "dock panel: bottom placement uses the same group tree across a wide dock rect" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
     panel.side = .bottom;
 
@@ -694,11 +1055,12 @@ test "dock panel: bottom placement uses the same group tree across a wide dock r
 }
 
 test "dock panel: persisted single group restores entries but deliberately resets dirty" {
+    var entry_ids: EntryIdAllocator = .{};
     const entries = [_]PersistedEntry{
         .{ .path = "/tmp/a.md", .kind = .markdown, .mode = .source_edit, .active = true },
         .{ .path = "/tmp/b.html", .kind = .html, .mode = .read, .active = false },
     };
-    var panel = try DockPanel.restore(std.testing.allocator, .{
+    var panel = try DockPanel.restore(std.testing.allocator, &entry_ids, .{
         .side = .bottom,
         .size = 360,
         .tree_size = 190,
@@ -719,7 +1081,8 @@ test "dock panel: persisted single group restores entries but deliberately reset
 }
 
 test "dock panel: live state exports legacy single group and FP8 multi-group preorder DTO" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
     panel.side = .bottom;
     panel.size = 480;
@@ -764,11 +1127,12 @@ test "dock panel: live state exports legacy single group and FP8 multi-group pre
     const ambiguous = [_]PersistedEntry{
         .{ .path = "/tmp/a.md", .kind = .markdown, .active = false },
     };
-    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, .{ .entries = &ambiguous }));
+    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .entries = &ambiguous }));
 }
 
 test "dock panel: nested multi-group persistence restores focus entries and split ratios" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
     const a = panel.singleGroup().?;
     _ = try panel.open(a, "/tmp/a.md", .markdown);
@@ -781,7 +1145,7 @@ test "dock panel: nested multi-group persistence restores focus entries and spli
 
     var state = try panel.persistedState(std.testing.allocator);
     defer freePersistedState(std.testing.allocator, &state);
-    var restored = try DockPanel.restore(std.testing.allocator, state);
+    var restored = try DockPanel.restore(std.testing.allocator, &entry_ids, state);
     defer restored.deinit();
 
     try std.testing.expectEqual(@as(usize, 3), restored.groupCount());
@@ -798,6 +1162,7 @@ test "dock panel: nested multi-group persistence restores focus entries and spli
 }
 
 test "dock panel: multi-group restore rejects duplicate path and duplicate leaf" {
+    var entry_ids: EntryIdAllocator = .{};
     const a_entries = [_]PersistedEntry{.{ .path = "/tmp/a.md", .kind = .markdown, .active = true }};
     const b_entries = [_]PersistedEntry{.{ .path = "/tmp/a.md", .kind = .markdown, .active = true }};
     const groups = [_]PersistedGroup{ .{ .entries = &a_entries }, .{ .entries = &b_entries } };
@@ -806,7 +1171,7 @@ test "dock panel: multi-group restore rejects duplicate path and duplicate leaf"
         .{ .leaf = 0 },
         .{ .leaf = 1 },
     };
-    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, .{ .groups = &groups, .tree = &tree }));
+    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .groups = &groups, .tree = &tree }));
 
     const distinct_b = [_]PersistedEntry{.{ .path = "/tmp/b.md", .kind = .markdown, .active = true }};
     const distinct_groups = [_]PersistedGroup{ .{ .entries = &a_entries }, .{ .entries = &distinct_b } };
@@ -815,11 +1180,12 @@ test "dock panel: multi-group restore rejects duplicate path and duplicate leaf"
         .{ .leaf = 0 },
         .{ .leaf = 0 },
     };
-    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, .{ .groups = &distinct_groups, .tree = &duplicate_leaf }));
+    try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .groups = &distinct_groups, .tree = &duplicate_leaf }));
 }
 
 test "dock panel: reopening a path in another group activates the original entry without duplicating it" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
 
     const first = panel.singleGroup().?;
@@ -836,7 +1202,8 @@ test "dock panel: reopening a path in another group activates the original entry
 }
 
 test "dock panel: live entry bound matches workspace persistence at 256 and rejects 257" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
     const group = panel.singleGroup().?;
 
@@ -854,7 +1221,8 @@ test "dock panel: live entry bound matches workspace persistence at 256 and reje
 }
 
 test "dock group: removing active prefers right then left and keeps an empty group" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
     const group = panel.singleGroup().?;
     _ = try panel.open(group, "/tmp/a.md", .markdown);
@@ -878,7 +1246,8 @@ test "dock group: removing active prefers right then left and keeps an empty gro
 }
 
 test "dock group: removing background entry preserves active identity" {
-    var panel = try DockPanel.init(std.testing.allocator);
+    var entry_ids: EntryIdAllocator = .{};
+    var panel = try DockPanel.init(std.testing.allocator, &entry_ids);
     defer panel.deinit();
     const group = panel.singleGroup().?;
     _ = try panel.open(group, "/tmp/a.md", .markdown);

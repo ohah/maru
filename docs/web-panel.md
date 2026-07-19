@@ -63,20 +63,21 @@
 
 ### 4.1 웹↔터미널 포커스 동기 불변식 (4g — 흩어진 포커스 패치 통합, 계획)
 
-**문제(관측)**: Phase 7 손 테스트에서 포커스 버그가 **반복** 나왔다 — ⑴ 브라우저 보던 중 ⌘Q 종료 모달이 Enter로 안 닫힘 ⑵ 주소창 편집→터미널 클릭 시 포커스가 브라우저로 튐 ⑶ 터미널→브라우저 web 클릭 후 ⌘R 무동작 ⑷ 브라우저 탭을 활성화해도 webview에 포커스가 안 가 ⌘R 게이트가 stale ⑸ (남은 갭) 키보드 pane 전환(⌘⌥→)이 webview 포커스를 안 옮김. **다섯이 전부 하나의 근본**이다: **WKWebView 네이티브 `firstResponder`와 Zig 활성-pane 모델 사이에 단일 권위 있는 양방향 동기가 없어** 둘이 어긋난다. 지금은 케이스별로 기웠다(`reconcileWebModalFocus`·`reconcileWebFocusActivation`·`cancelAddrEdit` focus-restore·⌘R `activeWebSurfaceId` 게이트) — 옳은 레이어지만 파편화라 하나 고치면 옆에서 또 터진다.
+**문제(관측)**: Phase 7 손 테스트에서 포커스 버그가 **반복** 나왔다 — ⑴ 브라우저 보던 중 ⌘Q 종료 모달이 Enter로 안 닫힘 ⑵ 주소창 편집→터미널 클릭 시 포커스가 브라우저로 튐 ⑶ 터미널→브라우저 web 클릭 후 ⌘R 무동작 ⑷ 브라우저 탭을 활성화해도 webview에 포커스가 안 가 ⌘R 게이트가 stale ⑸ 키보드 pane 전환(⌘⌥→)이 webview 포커스를 안 옮김. 근본 원인은 WKWebView 네이티브 `firstResponder` 관측을 사용자 intent와 동일시하거나 Zig 활성 모델과 병렬 권위로 둔 데 있다. programmatic/accessibility focus도 같은 관측을 만들므로 passive reconcile은 정책을 바꿀 수 없다.
 
-**불변식(단일 출처)**: **`firstResponder` ⟺ Zig 활성 pane**.
+**불변식(단일 출처)**: **명시적 primary-down/typed completion → Zig owner → `firstResponder`**.
 - 활성 pane의 활성 term이 **web term** → 그 **webview**가 firstResponder.
 - 활성 pane의 활성 term이 **terminal** → **터미널 뷰**가 firstResponder.
 - **override(우선순위)**: **모달 열림**(notice 제외) 또는 **터미널-라우팅 텍스트 입력**(주소창 편집·rename·사이드바 검색) → **터미널 뷰**(그 입력은 Zig `handleKeyEvent` 경로라 터미널 뷰가 소유). 이 판정은 Zig `terminalOwnsInput`(=`anyModalOverlayOpen ∪ addr_edit ∪ rename ∪ sidebar_search`) **단일 출처**다(4g-3 통합, ABI `terminal_owns_input`). 모달/편집이 끝나면 불변식이 복원한다(별도 focus-restore pending 불요). 비-모달 notice(토스트)는 제외 — 지나가는 토스트가 입력 responder를 뺏으면 안 되고, Zig 키 intercept(rename/addr_edit/sidebar_search)도 같은 `anyModalOverlayOpen` 게이트를 쓴다.
 
-**두 방향 동기(매 tick `reconcileWebFocus`, 순서 중요)**:
-1. **Direction 2 — webview 클릭 → Zig 활성**: webview가 **새로 firstResponder가 된 rising edge**(= 사용자가 그 web 콘텐츠를 클릭)면 `activate_surface`로 Zig 활성 pane을 그 surface로 동기한다. **rising edge인 이유**: 키보드 전환 후 webview가 stale 포커스로 남은 경우(활성=terminal인데 webview 포커스)와 싸우지 않게 — "새 클릭"만 반영한다.
-2. **Direction 1 — Zig 활성 → firstResponder**: 활성 pane에 firstResponder를 맞춘다(활성=web이면 그 webview, 활성=terminal이면 터미널 뷰, 이미 맞으면 no-op). Direction 2가 클릭을 반영한 **뒤** 실행해, 키보드 pane/탭 전환이 포커스를 따라오게(갭 ⑸ 닫음) + 브라우저 탭 활성화가 webview를 포커스(갭 ⑷ 닫음).
+**입력·reconcile 순서**:
+1. **명시적 입력 → Zig 활성**: `MaruWebPanelView.hitTest`가 overlay/seam을 제외한 실제 primary-down에서만 `webPanelPrimaryDown`을 호출한다. file panel은 `focus_file_panel_surface`, workspace browser는 `activate_surface` 뒤 `focus_workspace_input`을 호출한다. 이미 firstResponder인 같은 WebView 재클릭도 새 intent로 전달된다. programmatic/accessibility focus와 매 tick 관측은 이 권한이 없다.
+2. **typed dock completion → Zig 활성**: surface publish를 기다리는 file dock은 `.dock_group`에서 text/paste를 fail-close하고, `PendingDockFocus`의 EntryId/surface/epoch/revision 검증과 native firstResponder 성공 뒤에만 `.dock_surface`로 승격한다.
+3. **Zig 활성 → firstResponder**: 매 tick `reconcileWebFocus`는 `focused_dock_surface`와 `active_web_surface_id_any_kind`만 읽어 해당 webview 또는 터미널 뷰로 맞춘다. firstResponder 관측으로 `activate_surface`, `focus_workspace_input`, Swift file-focus 상태를 갱신하지 않는다.
 
 **이 하나가 흩어진 것을 대체(subsume)한다**:
 - `reconcileWebModalFocus`(모달→터미널) = override 규칙.
-- `reconcileWebFocusActivation`(클릭→활성) = Direction 2.
+- `reconcileWebFocusActivation`(클릭→활성) = explicit `webPanelPrimaryDown`.
 - `cancelAddrEdit`의 `addr_focus_restore_pending`(편집 종료 시 webview 복원) = addr_edit override 해제 후 Direction 1이 복원(pending 불요·단순화).
 - ⌘R `activeWebSurfaceId` 게이트 = Direction 1이 브라우저 탭 활성 시 webview를 포커스하므로 `isWebPanelFocused`가 신뢰 가능해져 원 게이트로 회귀 가능(belt-and-suspenders로 유지 가능).
 
@@ -84,7 +85,7 @@
 
 **분해**:
 - **4g-0 (Zig — 구현 완료)**: `activeWebSurfaceIdAnyKind` getter(활성 term이 web[browser·markdown]이면 surface_id, 아니면 0, ABI v112) + 헤드리스 테스트(터미널=0·browser/markdown=id·browser-only는 markdown서 0=핵심 구분).
-- **4g-1 (Swift — 구현 완료, GUI 손 테스트 통과)**: 통합 `reconcileWebFocus`(override → Direction 2 rising-edge → Direction 1) 구현, `reconcileWebModalFocus`·`reconcileWebFocusActivation` **대체·삭제**. override용 `addr_edit_surface` getter(ABI v113). 미사용 `lastOverlayOpen`·`stashedWebFocusSurfaceId` 제거. 손 테스트: 모달 Enter·터미널/브라우저 클릭·키보드 pane/탭 전환(새로 닫은 갭)·주소 편집·팝업·터미널 IME 무회귀 전부 통과.
+- **4g-1 (Swift — 구현 완료, GUI 손 테스트 통과)**: explicit `webPanelPrimaryDown`/typed completion이 Zig owner를 먼저 바꾸고, 통합 `reconcileWebFocus`는 override 뒤 Zig owner→firstResponder 단방향으로만 맞춘다. `reconcileWebModalFocus`·`reconcileWebFocusActivation`과 passive rising-edge cache는 **대체·삭제**했다. override용 `addr_edit_surface` getter(ABI v113). 손 테스트: 모달 Enter·터미널/브라우저 클릭·키보드 pane/탭 전환·주소 편집·팝업·터미널 IME 무회귀 전부 통과.
 - **4g-2 (정리 — 완료)**: **검토 결론**: `addr_focus_restore_pending`(주소 편집 종료 후 webview 복원)·⌘R `activeWebSurfaceId` 게이트는 불변식 Direction 1에 **subsume**되지만(D1이 복원·브라우저 탭 활성 시 webview 포커스), **제거 시 ABI export 제거+체인+손 테스트인데 동작 이득 0**(D1과 same-tick 복원)이라 **belt-and-suspenders로 유지**(harmless 중복 — 즉시 복원 fast-path/견고한 게이트, D1이 authority; 향후 저우선 cleanup서 제거 가능). ⌘R KVO `assumeIsolated`(13차 리뷰 [7] PLAUSIBLE)=**유지**(WKWebView nav KVO는 WebKit 메인 스레드 갱신·off-main 미관측 + 코드베이스 확립 패턴[NSColorSampler 등 7곳] + 근거 없는 방어 지양; 실 크래시 관측 시 dispatch 전환). 주석에 근거 명시.
 - **4g-3 (14차 리뷰 후속 — 완료)**: override 판정을 `anyOverlayOpen ∪ addr_edit`에서 **`terminalOwnsInput` 단일 출처**로 교체(ABI `addr_edit_surface`→`terminal_owns_input`, v113→v114). 옛 override는 ⑴ **rename·사이드바 검색을 빠뜨려** web pane 활성 중 그 편집 키가 웹뷰로 샜고(리뷰 [0]) ⑵ **notice까지 세어** 비-모달 토스트가 편집 responder를 뺏었다(리뷰 [3]). 겸사로 Zig 키 intercept 3개(rename/addr_edit/sidebar_search)도 `anyOverlayOpen`→`anyModalOverlayOpen`으로 일치, 주소창 편집 chord 처리는 **⌘A/C/V/X/Z를 제외**해 ⌘V가 편집을 통째 날리던 회귀 수정([1], 소비 no-op으로 편집 보존·실 붙여넣기는 후속), 잘못된 주소 무효 시 편집 유지 docstring 정정([5]), `focusTerminalView` 재downcast→바인딩된 `tv` 재사용([8]). **헤드리스**: 브라우저 web term 닫기 확인([4]) + `terminal_owns_input(null)=0` ABI 테스트. **GUI 손 테스트 필요**: web pane 위 rename/사이드바 검색이 웹뷰로 안 새는지, 주소창서 ⌘V가 편집을 안 지우는지, 모달 Enter·키보드 pane 전환 무회귀.
 - **4g-4 (파일 도크 교차 영역 입력 회귀 — 완료, 2026-07-18)**: 도크가 열린 mouse-down 경로의 `dockGroupAtPoint(...) orelse return`이 도크 밖 클릭까지 함수 전체에서 종료해, workspace browser는 보이지만 주소창·탭·터미널을 조작할 수 없었다. group hit는 조건부로 처리하고 **실제 dock rect 안** Metal 클릭만 소비하도록 바꿔 바깥 클릭은 workspace hit-test로 흐른다. 도크를 연 browser 주소창 클릭→`addr_edit_surface`/`terminalOwnsInput`→문자 입력까지 red→green 통합 테스트로 고정했다.

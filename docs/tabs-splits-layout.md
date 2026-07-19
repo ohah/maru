@@ -228,6 +228,12 @@ Node = leaf(Pane)
   비면 collapse). 탭 바에 드롭하면 그 pane으로 Term 이동(PR-E2), 본문에 드롭하면 split 생성으로 갈린다. 드래그
   중에는 드롭 타겟 zone을 **반투명 하이라이트**(④b — `premultipliedRgba`로 미리 곱해 터미널이 비침)로 미리 보이고,
   끌리는 탭은 **floating 탭 미리보기**(박스+제목)가 커서를 따라간다(`buildFloatingTabFrame`, 맨 위 frame).
+  **도메인 경계**: `tab_drag_*`는 `termRect()` 안의 terminal pane tree만 target으로 탐색한다. 오른쪽/하단 파일 도크와
+  terminal↔dock outer divider는 drop target이 아니며, 그 위에서는 하이라이트를 지우고 mouse-up을 no-op으로 끝낸다.
+  반대로 파일 탭도 terminal pane으로 들어오지 않는다. 파일 도크 내부 재정렬·그룹 이동·split 계약은
+  [파일 패널 §3.3](file-panel.md#33-파일-탭-드래그도크-내부-분할)을 단일 출처로 둔다.
+  단 현행 terminal 탭은 source pane 안에서 pointer x를 따라 live reorder하므로, 도크에 놓아도 cross-domain 이동은 0이지만
+  도크로 나가기 전에 이미 보인 source 내부 순서는 유지한다. 즉 cross-domain drop의 no-op은 원래 순서로 rollback한다는 뜻이 아니다.
   **호버 커서(②)**: divider=↔/↕ resize, 사이드바 경계=↔, pane grip=✋ openHand(드래그 손잡이), 탭/"+"=손가락(pointingHand), 터미널=I-beam.
 
 ### Pane을 워크스페이스로 분리·합치기 (드래그, 구현됨)
@@ -353,3 +359,5 @@ quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 - 레이아웃 계산(사이드바 너비·터미널 영역·grid cols, split sub-사각형 분할)은 헤드리스 Zig 단위로 고정한다.
 - 사이드바/split의 시각 렌더와 클릭/드래그 인터랙션은 macOS smoke(스크립트 가능 부분) + `macos-app`
   수동 검증. 클릭/드래그 좌표→탭/panel 히트 테스트는 Zig라 헤드리스 단위로 검증한다.
+- terminal 탭 drag가 dock rect·outer divider에서 preview 없이 취소되고 파일 탭 drag가 `termRect()`에서 취소되는 양 방향
+  도메인 격리를 헤드리스 hit-test와 macOS 수동 drag로 함께 검증한다.

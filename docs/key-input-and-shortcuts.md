@@ -52,6 +52,8 @@ config는 다음 범주를 분리한다. 실제 형식은 `keybind = <chord> = <
   - close_tab (워크스페이스 cascade, 기본 없음)
   - close_focused (기본 Cmd+W — 입력 포커스 기준 파일 entry 또는 Term close cascade)
   - close_term (기본 없음 — 명시적 사용자 바인딩 호환용 terminal 전용)
+  - toggle_file_panel_focus (FP9 계획, 기본 Cmd+Shift+E — workspace와 파일 도크 왕복)
+  - focus_file_tree (현재 기본 Cmd+Shift+E, FP9 이후 기본 없음 — one-way tree focus action)
   - split_horizontal / split_vertical
   - next_pane / focus_pane_left …
 
@@ -159,7 +161,7 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_su
 
 1. confirm·notice·palette·rename 같은 modal/overlay input owner가 자신의 Enter/Esc/편집 키를 먼저 소비한다.
 2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveFileTree`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
-3. `file_tree_focus`가 켜져 있으면 modifier 없는 `↑/↓/←/→`, `Enter`, `Home/End`, `PageUp/PageDown`, `Esc`, `F2`와 `⌘Backspace`를 트리가 소비한다. 이때 terminal key encoding과 CM6/WebKit에는 전달하지 않는다.
+3. `file_tree_focus`가 켜져 있으면 modifier 없는 `↑/↓/←/→`, `Enter`, `Home/End`, `PageUp/PageDown`, `Esc`, `F2`와 `⌘Backspace`를 트리가 소비한다. 이때 terminal key encoding과 CM6/WebKit에는 전달하지 않는다. 단 app action resolver가 확정한 `toggle_file_panel_focus`는 이 tree-local 기본키보다 먼저 실행돼 workspace로 돌아갈 수 있다.
 4. 도크 WKWebView가 first responder면 편집기 허용 키는 WebKit에 양보하고, Zig app action으로 확정된 키만 소비한다.
 5. 나머지는 활성 terminal/browser pane의 기존 app-action/browser-nav/terminal encoding 경로로 간다.
 
@@ -168,7 +170,7 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_su
 | 키 | action/소유자 | 의미 |
 |---|---|---|
 | `⌘W` | `close_focused` | 도크 본문·트리 포커스면 포커스 group의 active 파일 탭, terminal/browser pane이면 기존 Term close cascade. dirty close는 [file-panel.md](file-panel.md) §3.2를 따른다. |
-| `⌘⇧E` | `focus_file_tree` | project tree에 keyboard focus를 주고 Metal view를 first responder로 만든다. WebView에서 호출해도 Zig focus가 권위다. |
+| `⌘⇧E` | `toggle_file_panel_focus` (FP9 계획) | workspace terminal/browser에서 project tree로 들어가고, 파일 도크 본문/트리에서는 활성 workspace pane으로 돌아간다. 완전히 빈 도크는 picker를 열지 않고 no-op notice. 사용자 rebind/unbind 우선. |
 | `↑/↓` | file tree | 이전/다음 조작 가능한 row. |
 | `←/→` | file tree | 접기/부모 또는 펼치기/첫 자식. |
 | `Enter` | file tree | directory toggle 또는 파일 열기. |
@@ -178,7 +180,7 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_su
 | `F2` | file tree | 허용된 project row의 inline rename 시작. |
 | `⌘Backspace` | file tree | 허용된 project row를 확인 뒤 macOS 휴지통으로 이동. |
 
-`⌘Backspace`는 tree focus에서만 `delete_file_tree_entry`가 이기며, 그 밖의 terminal focus에서는 기존 빌트인 `Ctrl+U` 바이트를 유지한다. `close_term`은 명시적 사용자 binding 호환을 위해 남지만 기본 `⌘W`는 `close_focused` 하나만 소유한다. Esc 복원은 저장된 `{surface_id, generation}`을 재검증하고 stale이면 활성 terminal/browser pane으로 fallback한다. selection과 focus는 transient라 workspace restore 입력이 아니다.
+`⌘Backspace`는 tree focus에서만 `delete_file_tree_entry`가 이기며, 그 밖의 terminal focus에서는 기존 빌트인 `Ctrl+U` 바이트를 유지한다. `close_term`은 명시적 사용자 binding 호환을 위해 남지만 기본 `⌘W`는 `close_focused` 하나만 소유한다. `focus_file_tree`는 하위버전 adapter가 아니라 one-way tree 진입용 action으로 남고 FP9부터 기본 chord는 `toggle_file_panel_focus`가 소유한다. Esc 복원은 저장된 `{surface_id, generation}`을 재검증하고 stale이면 활성 terminal/browser pane으로 fallback한다. selection과 focus는 transient라 workspace restore 입력이 아니다. focus border의 시각 계약은 [file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)가 소유한다.
 
 ## 터미널 입력 매크로
 

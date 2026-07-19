@@ -78,6 +78,14 @@ run = "zig build macos-app-host-abi-lib"
 description = "Type-check the Swift macOS app host"
 run = "zig build macos-app-host-swift-check"
 
+[tasks.macos-mermaid-helper-build]
+description = "Build the isolated Mermaid renderer helper"
+run = "zig build macos-mermaid-helper-build"
+
+[tasks.macos-mermaid-helper-smoke]
+description = "Run the isolated Mermaid helper lifecycle smoke"
+run = "zig build macos-mermaid-helper-smoke"
+
 [tasks.macos-app-build]
 description = "Build the runnable macOS Swift app host dev shell"
 run = "zig build macos-app-build"

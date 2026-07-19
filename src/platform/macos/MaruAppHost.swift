@@ -3590,6 +3590,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // removeFromSuperview/deinit은 Worker의 동기 종료 증거가 아니므로 이 tombstone 없이는 8-slot을 일찍 반환한다.
     private var livePreviewRetirement = LivePreviewRetirementCoordinator<MaruWebPanelView>()
     private var livePreviewOutput = [UInt64](repeating: 0, count: Int(MARU_LIVE_PREVIEW_MAX_WORKERS))
+    // FP10c1: 앱 전역 Zig mermaid_queue action을 실행할 유일한 native adapter. Mermaid fence admission과
+    // frame-tick pump는 FP10c2의 pending-work/perf gate 전까지 배선하지 않는다.
+    private let mermaidRenderCoordinator = MermaidRenderCoordinator()
     // 알림 클릭 라우팅 토큰 채번기(makeTerminalSurface가 단조 증가로 부여 — 창마다 유일). 0은 미설정 sentinel이라 1부터.
     private var nextSurfaceToken: UInt64 = 1
     // 앱-전역 "메인/첫 일반 창" 별칭(= windows.first). 앱 요약·종료처럼 특정 한 창이 기준일 때 쓴다. 창별
@@ -4020,6 +4023,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         tickTimer = nil
         smokeTimer?.invalidate()
         smokeTimer = nil
+        mermaidRenderCoordinator.shutdown()
+        // physical control/I/O executor가 완전히 quiesce된 뒤 Zig app-global queue/latch/lease를
+        // 최종 종료한다. 이 순서만 leased request frame의 pointer 수명을 안전하게 끝낸다.
+        maru_macos_mermaid_shutdown()
         // 컨트롤 플레인 서버를 세션 teardown '전에' 멈춘다 — accept 스레드를 join하고 대기 중 요청을 cancel해, 이후
         // shutdownAppSession이 세션을 해제할 때 accept 스레드가 (marshal 큐 밖에서) 세션을 만지지 않게 한다. tick은
         // 이미 멈춰(위) 더 이상 drain되지 않는다. idempotent(미시작이면 무동작).
@@ -5238,6 +5245,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         drainConsoleBuffers() // §9.5.9: capture-active 패널의 page ring을 throttled로 서버 버퍼에 옮김(네비 넘어 보존).
         maybeRunBrowserControlSmoke() // 5e-2b-2 테스트 전용(MARU_TEST_BROWSER_CAP): 소켓 browser.* E2E를 1회 kick(무설정=무동작).
         maybeRunGrantSmoke() // 1e-confirm-1c-2 테스트 전용(MARU_TEST_GRANT_DECISION): 무-cap browser.navigate가 grant 흐름으로 성공하는지 1회 kick.
+        // FP10c1은 helper foundation만 설치하고 제품 admission/render는 inert다. FP10c2가 pending-work
+        // gate와 byte/tick 성능 artifact를 함께 연결할 때만 coordinator pump를 frame loop에 배선한다.
         restartFrameLoopTicksIfNeeded()
     }
 

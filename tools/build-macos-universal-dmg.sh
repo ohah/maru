@@ -48,11 +48,16 @@ for bin in maru-macos-app maru; do
         "$work/x86.app/Contents/MacOS/$bin" \
         -output "$app/Contents/MacOS/$bin"
 done
+lipo -create \
+    "$work/arm.app/Contents/Helpers/maru-mermaid-renderer" \
+    "$work/x86.app/Contents/Helpers/maru-mermaid-renderer" \
+    -output "$app/Contents/Helpers/maru-mermaid-renderer"
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")
 echo "    universal archs: $(lipo -archs "$app/Contents/MacOS/maru-macos-app")"
 
 echo "==> codesign (Developer ID, hardened runtime, timestamp)"
 # 중첩 실행파일을 먼저 서명하고 마지막에 번들을 서명한다.
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/Helpers/maru-mermaid-renderer"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/MacOS/maru-macos-app"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app"

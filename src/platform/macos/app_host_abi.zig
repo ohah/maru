@@ -15,6 +15,7 @@ const control_result = maru.session.control_result; // 5f-5b: executeScript proc
 const control_surface = maru.session.control_surface; // 1c: Surface DTO/CollectorSnapshot
 const control_capability = maru.session.control_capability; // 1e: capability fd resolve(라이브 auth 배선)
 const control_pane_grant = maru.session.control_pane_grant; // 1e-confirm: pane-bound confirm-grant store(Model B, §9.2)
+const build_options = @import("build_options");
 
 const c = @cImport({
     @cInclude("app_host_abi.h");
@@ -2111,6 +2112,414 @@ test "live preview budget ABI validates and prioritizes focused surface" {
     try std.testing.expectEqualSlices(u64, &.{ 2, 1 }, out[0..2]);
     candidates[0].priority = 9;
     try std.testing.expectEqual(@as(i32, -1), maru_macos_live_preview_budget_reconcile(&candidates, candidates.len, &out, out.len));
+}
+
+const mermaid_protocol = maru.session.mermaid_protocol;
+const mermaid_coordinator = maru.session.mermaid_coordinator;
+
+pub const MermaidRendererCapabilityAbi = extern struct {
+    document_revision: u64,
+    projection_generation: u64,
+    widget_id: u64,
+    widget_generation: u64,
+    renderer_instance: u64,
+};
+
+pub const MermaidJobCapabilityAbi = extern struct {
+    helper_instance: u64,
+    job_id: u64,
+    renderer: MermaidRendererCapabilityAbi,
+    fence_id: u64,
+    source_hash: [32]u8,
+};
+
+pub const MermaidDecodedFrameAbi = extern struct {
+    tag: u32,
+    status: u32,
+    helper_instance: u64,
+    nonce: u64,
+    capability: MermaidJobCapabilityAbi,
+    body_ptr: ?[*]const u8,
+    body_len: usize,
+};
+
+pub const MermaidCoordinatorActionAbi = extern struct {
+    kind: u32,
+    spawn_helper: u32,
+    deadline_ms: u64,
+    hello_nonce: u64,
+    capability: MermaidJobCapabilityAbi,
+    request_frame_ptr: ?[*]const u8,
+    request_frame_len: usize,
+};
+
+pub const MermaidCoordinatorSnapshotAbi = extern struct {
+    pending_jobs: usize,
+    pending_source_bytes: usize,
+    accepted_results: usize,
+    accepted_svg_bytes: usize,
+    helper_instance: u64,
+    helper_starts: u64,
+    deadline_expirations: u64,
+    admission_copies: u64,
+    in_flight: u32,
+    disabled: u32,
+    action_handoff_pending: u32,
+    termination_in_progress: u32,
+};
+
+const MermaidDecoder = mermaid_protocol.StreamingDecoder;
+
+pub export fn maru_mermaid_protocol_decoder_create() ?*MermaidDecoder {
+    const decoder = allocator.create(MermaidDecoder) catch return null;
+    decoder.* = .{};
+    return decoder;
+}
+
+pub export fn maru_mermaid_protocol_decoder_destroy(decoder: ?*MermaidDecoder) void {
+    allocator.destroy(decoder orelse return);
+}
+
+pub export fn maru_mermaid_protocol_decoder_feed(decoder: ?*MermaidDecoder, bytes: ?[*]const u8, len: usize) i32 {
+    const value = decoder orelse return -1;
+    if (len > 0 and bytes == null) return -1;
+    value.feed(if (bytes) |ptr| ptr[0..len] else &.{}) catch return -2;
+    return 0;
+}
+
+pub export fn maru_mermaid_protocol_decoder_next(decoder: ?*MermaidDecoder, out_frame: ?*MermaidDecodedFrameAbi) i32 {
+    const value = decoder orelse return -1;
+    const out = out_frame orelse return -1;
+    const message = value.next() catch return -2;
+    const frame = message orelse return 0;
+    out.* = decodedFrameAbi(frame);
+    return 1;
+}
+
+pub export fn maru_mermaid_protocol_decoder_finish(decoder: ?*MermaidDecoder) i32 {
+    const value = decoder orelse return -1;
+    value.finish() catch return -2;
+    return 0;
+}
+
+pub export fn maru_mermaid_protocol_matches_hello_ack(
+    frame: ?*const MermaidDecodedFrameAbi,
+    helper_instance: u64,
+    nonce: u64,
+) u32 {
+    const value = frame orelse return 0;
+    return @intFromBool(value.tag == @intFromEnum(mermaid_protocol.Tag.hello_ack) and
+        value.helper_instance == helper_instance and value.nonce == nonce);
+}
+
+pub export fn maru_mermaid_protocol_encode_hello(
+    ack: u32,
+    helper_instance: u64,
+    nonce: u64,
+    out: ?[*]u8,
+    out_cap: usize,
+) i64 {
+    const dest = out orelse return -1;
+    const hello: mermaid_protocol.Hello = .{ .helper_instance = helper_instance, .nonce = nonce };
+    const message: mermaid_protocol.Message = if (ack == 0) .{ .hello = hello } else if (ack == 1) .{ .hello_ack = hello } else return -1;
+    const len = mermaid_protocol.encode(message, dest[0..out_cap]) catch |err| return encodeErrorCode(err);
+    return @intCast(len);
+}
+
+pub export fn maru_mermaid_protocol_encode_request(
+    capability: ?*const MermaidJobCapabilityAbi,
+    source: ?[*]const u8,
+    source_len: usize,
+    out: ?[*]u8,
+    out_cap: usize,
+) i64 {
+    const cap = capability orelse return -1;
+    if (source_len > 0 and source == null) return -1;
+    const dest = out orelse return -1;
+    const len = mermaid_protocol.encode(.{ .request = .{
+        .capability = capabilityFromAbi(cap.*),
+        .source = if (source) |ptr| ptr[0..source_len] else &.{},
+    } }, dest[0..out_cap]) catch |err| return encodeErrorCode(err);
+    return @intCast(len);
+}
+
+pub export fn maru_mermaid_protocol_encode_result(
+    capability: ?*const MermaidJobCapabilityAbi,
+    status: u32,
+    body: ?[*]const u8,
+    body_len: usize,
+    out: ?[*]u8,
+    out_cap: usize,
+) i64 {
+    const cap = capability orelse return -1;
+    if (body_len > 0 and body == null) return -1;
+    const dest = out orelse return -1;
+    const result_status = std.enums.fromInt(mermaid_protocol.ResultStatus, status) orelse return -1;
+    const len = mermaid_protocol.encode(.{ .result = .{
+        .capability = capabilityFromAbi(cap.*),
+        .status = result_status,
+        .body = if (body) |ptr| ptr[0..body_len] else &.{},
+    } }, dest[0..out_cap]) catch |err| return encodeErrorCode(err);
+    return @intCast(len);
+}
+
+pub export fn maru_macos_mermaid_admit(
+    window_id: u64,
+    renderer: ?*const MermaidRendererCapabilityAbi,
+    fence_id: u64,
+    source: ?[*]const u8,
+    source_len: usize,
+) i32 {
+    const renderer_value = renderer orelse return -1;
+    if (source_len > 0 and source == null) return -1;
+    _ = session_mod.mermaidCoordinator().admit(.{
+        .window_id = window_id,
+        .renderer = rendererFromAbi(renderer_value.*),
+        .fence_id = fence_id,
+        .source = if (source) |ptr| ptr[0..source_len] else &.{},
+    }) catch return -2;
+    return 0;
+}
+
+pub export fn maru_macos_mermaid_drain_action(now_ms: u64, out_action: ?*MermaidCoordinatorActionAbi) i32 {
+    const out = out_action orelse return -1;
+    const action = session_mod.mermaidCoordinator().drainAction(now_ms) orelse return 0;
+    out.* = std.mem.zeroes(MermaidCoordinatorActionAbi);
+    switch (action) {
+        .terminate_helper => |helper_instance| {
+            out.kind = 1;
+            out.capability.helper_instance = helper_instance;
+        },
+        .start_job => |start| {
+            out.kind = 2;
+            out.spawn_helper = @intFromBool(start.spawn_helper);
+            out.deadline_ms = start.deadline_ms;
+            out.hello_nonce = start.hello_nonce;
+            out.capability = capabilityToAbi(start.capability);
+            out.request_frame_ptr = start.request_frame.ptr;
+            out.request_frame_len = start.request_frame.len;
+        },
+    }
+    return 1;
+}
+
+pub export fn maru_macos_mermaid_complete_action_handoff(helper_instance: u64, job_id: u64) u32 {
+    return @intFromBool(session_mod.mermaidCoordinator().completeActionHandoff(helper_instance, job_id));
+}
+
+pub export fn maru_macos_mermaid_complete_decoded(frame: ?*const MermaidDecodedFrameAbi, arrival_ms: u64) i32 {
+    const decoded = frame orelse return -1;
+    if (decoded.tag != @intFromEnum(mermaid_protocol.Tag.result)) return -1;
+    if (decoded.body_len > 0 and decoded.body_ptr == null) return -1;
+    const status = std.enums.fromInt(mermaid_protocol.ResultStatus, decoded.status) orelse return -1;
+    return switch (session_mod.mermaidCoordinator().completeResult(
+        capabilityFromAbi(decoded.capability),
+        status,
+        if (decoded.body_ptr) |ptr| ptr[0..decoded.body_len] else &.{},
+        arrival_ms,
+    )) {
+        .accepted => 1,
+        .render_error => 2,
+        .stale => 0,
+        .invalid_body => -2,
+        .accepted_capacity_exceeded => -3,
+        .deadline_expired => -4,
+    };
+}
+
+pub export fn maru_macos_mermaid_report_failure(helper_instance: u64, now_ms: u64, integrity: u32) u32 {
+    const handled = if (integrity == 0)
+        session_mod.mermaidCoordinator().transientFailure(helper_instance, now_ms)
+    else if (integrity == 1)
+        session_mod.mermaidCoordinator().integrityFailure(helper_instance)
+    else
+        false;
+    return @intFromBool(handled);
+}
+
+pub export fn maru_macos_mermaid_expire_deadline(now_ms: u64) u32 {
+    return @intFromBool(session_mod.mermaidCoordinator().expireDeadline(now_ms));
+}
+
+pub export fn maru_macos_mermaid_complete_termination(helper_instance: u64) u32 {
+    return @intFromBool(session_mod.mermaidCoordinator().completeTermination(helper_instance));
+}
+
+pub export fn maru_macos_mermaid_shutdown() void {
+    session_mod.mermaidCoordinator().shutdown();
+}
+
+pub export fn maru_macos_mermaid_snapshot(out_snapshot: ?*MermaidCoordinatorSnapshotAbi) void {
+    const out = out_snapshot orelse return;
+    const snap = session_mod.mermaidCoordinator().snapshot();
+    out.* = .{
+        .pending_jobs = snap.pending_jobs,
+        .pending_source_bytes = snap.pending_source_bytes,
+        .accepted_results = snap.accepted_results,
+        .accepted_svg_bytes = snap.accepted_svg_bytes,
+        .helper_instance = snap.helper_instance,
+        .helper_starts = snap.helper_starts,
+        .deadline_expirations = snap.deadline_expirations,
+        .admission_copies = snap.admission_copies,
+        .in_flight = @intFromBool(snap.in_flight),
+        .disabled = @intFromBool(snap.disabled),
+        .action_handoff_pending = @intFromBool(snap.action_handoff_pending),
+        .termination_in_progress = @intFromBool(snap.termination_in_progress),
+    };
+}
+
+fn maruMacosMermaidTestReset() callconv(.c) void {
+    session_mod.resetMermaidCoordinatorForTesting();
+}
+
+comptime {
+    if (build_options.mermaid_test_api) {
+        @export(&maruMacosMermaidTestReset, .{ .name = "maru_macos_mermaid_test_reset" });
+    }
+}
+
+fn decodedFrameAbi(message: mermaid_protocol.Message) MermaidDecodedFrameAbi {
+    var out = std.mem.zeroes(MermaidDecodedFrameAbi);
+    out.tag = @intFromEnum(message);
+    switch (message) {
+        .hello, .hello_ack => |hello| {
+            out.helper_instance = hello.helper_instance;
+            out.nonce = hello.nonce;
+        },
+        .request => |request| {
+            out.capability = capabilityToAbi(request.capability);
+            out.helper_instance = request.capability.helper_instance;
+            out.body_ptr = request.source.ptr;
+            out.body_len = request.source.len;
+        },
+        .result => |result| {
+            out.status = @intFromEnum(result.status);
+            out.capability = capabilityToAbi(result.capability);
+            out.helper_instance = result.capability.helper_instance;
+            out.body_ptr = if (result.body.len == 0) null else result.body.ptr;
+            out.body_len = result.body.len;
+        },
+    }
+    return out;
+}
+
+fn rendererFromAbi(value: MermaidRendererCapabilityAbi) mermaid_protocol.RendererCapability {
+    return .{
+        .document_revision = value.document_revision,
+        .projection_generation = value.projection_generation,
+        .widget_id = value.widget_id,
+        .widget_generation = value.widget_generation,
+        .renderer_instance = value.renderer_instance,
+    };
+}
+
+fn rendererToAbi(value: mermaid_protocol.RendererCapability) MermaidRendererCapabilityAbi {
+    return .{
+        .document_revision = value.document_revision,
+        .projection_generation = value.projection_generation,
+        .widget_id = value.widget_id,
+        .widget_generation = value.widget_generation,
+        .renderer_instance = value.renderer_instance,
+    };
+}
+
+fn capabilityFromAbi(value: MermaidJobCapabilityAbi) mermaid_protocol.JobCapability {
+    return .{
+        .helper_instance = value.helper_instance,
+        .job_id = value.job_id,
+        .renderer = rendererFromAbi(value.renderer),
+        .fence_id = value.fence_id,
+        .source_hash = value.source_hash,
+    };
+}
+
+fn capabilityToAbi(value: mermaid_protocol.JobCapability) MermaidJobCapabilityAbi {
+    return .{
+        .helper_instance = value.helper_instance,
+        .job_id = value.job_id,
+        .renderer = rendererToAbi(value.renderer),
+        .fence_id = value.fence_id,
+        .source_hash = value.source_hash,
+    };
+}
+
+fn encodeErrorCode(err: anyerror) i64 {
+    return if (err == error.OutputTooSmall) -2 else -1;
+}
+
+test "Mermaid codec ABI keeps header constants and opaque frame behavior aligned" {
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_PROTOCOL_MAX_SOURCE_BYTES), mermaid_protocol.max_source_bytes);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES), mermaid_protocol.max_svg_bytes);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_PROTOCOL_MAX_REQUEST_FRAME_BYTES), mermaid_protocol.max_request_frame_bytes);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_PROTOCOL_MAX_RESULT_FRAME_BYTES), mermaid_protocol.max_result_frame_bytes);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_PENDING_JOBS), mermaid_coordinator.max_pending_jobs);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_PENDING_SOURCE_BYTES), mermaid_coordinator.max_pending_source_bytes);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_ACCEPTED_SVG_BYTES), mermaid_coordinator.max_accepted_svg_bytes);
+    try std.testing.expectEqual(@as(usize, c.MARU_MERMAID_MAX_COMPLETIONS_PER_TICK), mermaid_coordinator.max_completion_drain_per_tick);
+    try std.testing.expectEqual(@sizeOf(c.MaruMermaidRendererCapability), @sizeOf(MermaidRendererCapabilityAbi));
+    try std.testing.expectEqual(@sizeOf(c.MaruMermaidJobCapability), @sizeOf(MermaidJobCapabilityAbi));
+    try std.testing.expectEqual(@sizeOf(c.MaruMermaidDecodedFrame), @sizeOf(MermaidDecodedFrameAbi));
+    try std.testing.expectEqual(@sizeOf(c.MaruMermaidCoordinatorAction), @sizeOf(MermaidCoordinatorActionAbi));
+    try std.testing.expectEqual(@sizeOf(c.MaruMermaidCoordinatorSnapshot), @sizeOf(MermaidCoordinatorSnapshotAbi));
+
+    var bytes: [64]u8 = undefined;
+    const len = maru_mermaid_protocol_encode_hello(0, 7, 9, &bytes, bytes.len);
+    try std.testing.expect(len > 0);
+    const decoder = maru_mermaid_protocol_decoder_create() orelse return error.OutOfMemory;
+    defer maru_mermaid_protocol_decoder_destroy(decoder);
+    try std.testing.expectEqual(@as(i32, 0), maru_mermaid_protocol_decoder_feed(decoder, &bytes, @intCast(len)));
+    var frame: MermaidDecodedFrameAbi = undefined;
+    try std.testing.expectEqual(@as(i32, 1), maru_mermaid_protocol_decoder_next(decoder, &frame));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TAG_HELLO), frame.tag);
+    try std.testing.expectEqual(@as(u64, 7), frame.helper_instance);
+    try std.testing.expectEqual(@as(u64, 9), frame.nonce);
+
+    var ack_bytes: [64]u8 = undefined;
+    const ack_len = maru_mermaid_protocol_encode_hello(1, 7, 9, &ack_bytes, ack_bytes.len);
+    try std.testing.expect(ack_len > 0);
+    try std.testing.expectEqual(@as(i32, 0), maru_mermaid_protocol_decoder_feed(decoder, &ack_bytes, @intCast(ack_len)));
+    try std.testing.expectEqual(@as(i32, 1), maru_mermaid_protocol_decoder_next(decoder, &frame));
+    try std.testing.expectEqual(@as(u32, 1), maru_mermaid_protocol_matches_hello_ack(&frame, 7, 9));
+    try std.testing.expectEqual(@as(u32, 0), maru_mermaid_protocol_matches_hello_ack(&frame, 7, 10));
+}
+
+test "Mermaid coordinator ABI uses the AppRuntime singleton and rejects stale completion" {
+    maruMacosMermaidTestReset();
+    defer maruMacosMermaidTestReset();
+    const renderer: MermaidRendererCapabilityAbi = .{
+        .document_revision = 1,
+        .projection_generation = 2,
+        .widget_id = 3,
+        .widget_generation = 4,
+        .renderer_instance = 5,
+    };
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_mermaid_admit(1, &renderer, 6, "graph TD".ptr, "graph TD".len));
+    var action: MermaidCoordinatorActionAbi = undefined;
+    try std.testing.expectEqual(@as(i32, 1), maru_macos_mermaid_drain_action(10, &action));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_ACTION_START_JOB), action.kind);
+    try std.testing.expectEqual(@as(u32, 1), action.spawn_helper);
+    const request = try mermaid_protocol.decodeExact(action.request_frame_ptr.?[0..action.request_frame_len]);
+    try std.testing.expectEqualStrings("graph TD", request.request.source);
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_mermaid_complete_action_handoff(action.capability.helper_instance, action.capability.job_id));
+
+    var stale = std.mem.zeroes(MermaidDecodedFrameAbi);
+    stale.tag = c.MARU_MERMAID_TAG_RESULT;
+    stale.status = c.MARU_MERMAID_RESULT_RENDER_ERROR;
+    stale.capability = action.capability;
+    stale.capability.job_id += 1;
+    try std.testing.expectEqual(@as(i32, 0), maru_macos_mermaid_complete_decoded(&stale, 11));
+    var snap: MermaidCoordinatorSnapshotAbi = undefined;
+    maru_macos_mermaid_snapshot(&snap);
+    try std.testing.expectEqual(@as(u32, 1), snap.in_flight);
+    maru_macos_mermaid_shutdown();
+    maru_macos_mermaid_snapshot(&snap);
+    try std.testing.expectEqual(@as(u32, 1), snap.disabled);
+    try std.testing.expectEqual(@as(usize, 0), snap.pending_jobs);
+    try std.testing.expectEqual(@as(usize, 0), snap.accepted_results);
+    try std.testing.expectEqual(@as(u64, 0), snap.helper_instance);
+    try std.testing.expectEqual(@as(u32, 0), snap.in_flight);
+    try std.testing.expectEqual(@as(u32, 0), snap.action_handoff_pending);
+    try std.testing.expectEqual(@as(u32, 0), snap.termination_in_progress);
 }
 
 test "maru_macos_app_bridge_dispatch export: hello=len>0, 미지원=method_not_found 응답, null=-2" {

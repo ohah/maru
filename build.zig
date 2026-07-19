@@ -300,6 +300,8 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -526,6 +528,13 @@ pub fn build(b: *std.Build) void {
     const build_options_mod = blk: {
         const opts = b.addOptions();
         opts.addOption([]const u8, "version", build_zig_zon.version);
+        opts.addOption(bool, "mermaid_test_api", false);
+        break :blk opts.createModule();
+    };
+    const build_options_test_mod = blk: {
+        const opts = b.addOptions();
+        opts.addOption([]const u8, "version", build_zig_zon.version);
+        opts.addOption(bool, "mermaid_test_api", true);
         break :blk opts.createModule();
     };
 
@@ -537,11 +546,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
-                .{ .name = "build_options", .module = build_options_mod },
+                .{ .name = "build_options", .module = build_options_test_mod },
             },
         }),
     });
     macos_app_host_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+    const objc_macos_flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" };
     if (target.result.os.tag == .macos) {
         // macOS에서는 app session이 실제 CoreText로 frame을 만들므로 계약 테스트도 그
         // ObjC 브리지와 framework를 링크해야 한다. Linux 빌드는 tick의 macOS 분기가
@@ -585,7 +595,6 @@ pub fn build(b: *std.Build) void {
         // -iwithsysroot /usr/include: framework 헤더 내부의 angle include(<libDER/DERItem.h>)가
         // sysroot의 usr/include를 검색하게 한다. cross-compile에서 Zig는 usr/include를 default
         // system include로 자동 추가하지 않아 이 명시가 필요하다.
-        const objc_macos_flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" };
         macos_app_host_abi_lib.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             // UBSan 계측을 끈다. 이 .a는 Zig가 아니라 swiftc가 최종 링크하므로 Zig의
@@ -611,6 +620,37 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         const macos_swift_target = swiftMacOSTarget(b, target.result);
 
+        // Smoke parent만 reset export가 있는 별도 ABI variant를 링크한다. 제품 static library에는
+        // app-lifetime latch/nonce/queue를 초기화하는 symbol이 존재하지 않는다.
+        const macos_mermaid_smoke_abi_lib = b.addLibrary(.{
+            .name = "maru-macos-mermaid-smoke-abi",
+            .linkage = .static,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_host_abi.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "build_options", .module = build_options_test_mod },
+                },
+            }),
+        });
+        macos_mermaid_smoke_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
+        macos_mermaid_smoke_abi_lib.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = objc_macos_flags,
+        });
+        macos_mermaid_smoke_abi_lib.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/maru_metal_renderer.m"),
+            .flags = objc_macos_flags,
+        });
+
+        const macos_mermaid_product_symbol_check = b.addSystemCommand(&.{
+            "sh", "-eu", "-c", "if nm -gU \"$1\" | rg -q 'maru_macos_mermaid_test_reset'; then echo 'error: smoke reset leaked into product ABI' >&2; exit 1; fi", "sh",
+        });
+        macos_mermaid_product_symbol_check.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+
         // Swift 제품 host는 Zig compiler가 직접 만들 수 없으므로 xcrun swiftc를 build graph의
         // system command로 둔다. 대신 입력은 C header와 Zig static library로 제한해서
         // Swift가 Zig 내부 타입이나 allocator-owned storage에 묶이지 않게 한다.
@@ -628,6 +668,8 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -652,6 +694,9 @@ pub fn build(b: *std.Build) void {
             // 독립 expression 경계를 검증한다(eval/Function 실행 없음).
             "-framework",
             "JavaScriptCore",
+            // FP10c1: 번들 helper의 code-sign validity/Team ID를 spawn 전에 검증한다.
+            "-framework",
+            "Security",
             // Retina HiDPI: bare 실행파일(.app 번들 없음)에 Info.plist를 __TEXT,__info_plist
             // 섹션으로 임베드해 NSHighResolutionCapable을 켠다. 없으면 macOS가 창을 1x backing
             // store로 렌더해 window.backingScaleFactor가 1.0이 되고 Retina에서 흐려진다.
@@ -675,6 +720,88 @@ pub fn build(b: *std.Build) void {
         const macos_app_build_step = b.step("macos-app-build", "Build the runnable macOS Swift app host app shell");
         macos_app_build_step.dependOn(&macos_app_compile.step);
 
+        // FP10c1 Mermaid renderer는 앱 편집 WKWebView와 프로세스를 분리한다. parent/helper 모두 같은 Zig
+        // static library codec을 링크하므로 Swift에 wire serializer가 생기지 않는다.
+        const macos_mermaid_helper_compile = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-target",
+            macos_swift_target,
+            "-import-objc-header",
+        });
+        macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
+        macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
+        macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MaruMermaidRenderer.swift"));
+        macos_mermaid_helper_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        macos_mermaid_helper_compile.addArgs(&.{
+            "-framework", "AppKit",
+            "-framework", "CoreText",
+            "-framework", "CoreGraphics",
+            "-framework", "Metal",
+            "-framework", "QuartzCore",
+            "-framework", "WebKit",
+            "-framework", "JavaScriptCore",
+            "-o",         "zig-out/bin/maru-mermaid-renderer",
+        });
+        macos_mermaid_helper_compile.setCwd(b.path("."));
+        macos_mermaid_helper_compile.step.dependOn(&macos_app_mkdir.step);
+        macos_mermaid_helper_compile.step.dependOn(&install_macos_app_host_abi_lib.step);
+
+        const macos_mermaid_helper_build_step = b.step("macos-mermaid-helper-build", "Build the isolated Mermaid renderer helper");
+        macos_mermaid_helper_build_step.dependOn(&macos_mermaid_helper_compile.step);
+
+        const macos_mermaid_smoke_compile = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-target",
+            macos_swift_target,
+            "-import-objc-header",
+        });
+        macos_mermaid_smoke_compile.addFileArg(b.path("tests/macos_mermaid_helper_smoke.h"));
+        macos_mermaid_smoke_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
+        macos_mermaid_smoke_compile.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
+        macos_mermaid_smoke_compile.addFileArg(b.path("tests/macos_mermaid_helper_smoke.swift"));
+        macos_mermaid_smoke_compile.addFileArg(macos_mermaid_smoke_abi_lib.getEmittedBin());
+        macos_mermaid_smoke_compile.addArgs(&.{
+            "-framework", "AppKit",
+            "-framework", "CoreText",
+            "-framework", "CoreGraphics",
+            "-framework", "Metal",
+            "-framework", "QuartzCore",
+            "-framework", "WebKit",
+            "-framework", "JavaScriptCore",
+            "-framework", "Security",
+            "-o",         "zig-out/bin/maru-mermaid-helper-smoke",
+        });
+        macos_mermaid_smoke_compile.setCwd(b.path("."));
+        macos_mermaid_smoke_compile.step.dependOn(&macos_app_mkdir.step);
+        macos_mermaid_smoke_compile.step.dependOn(&macos_mermaid_smoke_abi_lib.step);
+        macos_mermaid_smoke_compile.step.dependOn(&macos_mermaid_product_symbol_check.step);
+
+        const macos_mermaid_smoke_run = b.addSystemCommand(&.{"./zig-out/bin/maru-mermaid-helper-smoke"});
+        macos_mermaid_smoke_run.setCwd(b.path("."));
+        macos_mermaid_smoke_run.setEnvironmentVariable("MARU_MERMAID_HELPER_PATH", b.pathFromRoot("zig-out/bin/maru-mermaid-renderer"));
+        macos_mermaid_smoke_run.step.dependOn(&macos_mermaid_helper_compile.step);
+        macos_mermaid_smoke_run.step.dependOn(&macos_mermaid_smoke_compile.step);
+        const macos_mermaid_smoke_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json; " ++
+                "test -f \"$summary\"; " ++
+                "rg -q '\"passed\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"helper_starts_at_most_three\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"termination_acknowledged_exactly\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"no_read_shutdown_bounded\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"closed_pipe_eof_once\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"delayed_start_physical_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"path_aba_result_commit_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"path_aba_capability_frames_zero\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"shutdown_barrier_no_late_callbacks\"[[:space:]]*:[[:space:]]*true' \"$summary\"",
+        });
+        macos_mermaid_smoke_assert.setCwd(b.path("."));
+        macos_mermaid_smoke_assert.step.dependOn(&macos_mermaid_smoke_run.step);
+        const macos_mermaid_helper_smoke_step = b.step("macos-mermaid-helper-smoke", "Run the isolated Mermaid helper lifecycle smoke");
+        macos_mermaid_helper_smoke_step.dependOn(&macos_mermaid_smoke_assert.step);
+
         // web/dist는 생성물이라 git에 넣지 않는다. 앱 bundle/smoke가 stale 또는 빈 asset을 복사하지 않도록 zntc+SRI
         // 검증을 명시적 선행 step으로 둔다. Bun 버전은 .mise.toml, lock graph는 web/bun.lock이 고정한다.
         const file_panel_web_build = b.addSystemCommand(&.{ "bun", "run", "--cwd", "web", "web:build" });
@@ -694,8 +821,9 @@ pub fn build(b: *std.Build) void {
                 // 기본 폰트(JetBrains Mono)는 항상 있어야 한다(config 기본값 theme.zig). 누락이면 self-contained 보장이 깨진다.
                 "[ -f assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf ] || { echo 'error: default font assets/fonts/JetBrainsMono missing' >&2; exit 1; }; " ++
                 "rm -rf zig-out/Maru.app; " ++
-                "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Resources/Fonts; " ++
+                "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Helpers zig-out/Maru.app/Contents/Resources/Fonts; " ++
                 "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
+                "cp zig-out/bin/maru-mermaid-renderer zig-out/Maru.app/Contents/Helpers/maru-mermaid-renderer; " ++
                 // 형제 `maru` CLI도 번들에 넣는다 — 커맨드 팝업 "Install CLI"가 GUI 바이너리 옆 형제 maru를
                 // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
                 "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
@@ -723,10 +851,16 @@ pub fn build(b: *std.Build) void {
                 // 번들된 뒤 404가 되지 않고 여기서 즉시 실패하며, 채택하려면 descriptor component-walk 설계를 먼저 한다.
                 "[ -z \"$(find web/dist -mindepth 1 -type d -print -quit)\" ] || { echo 'error: web/dist must remain flat for maru-app scheme safety' >&2; exit 1; }; " ++
                 "cp -R web/dist/. zig-out/Maru.app/Contents/Resources/web/; " ++
-                "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo",
+                "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo; " ++
+                // 개발/CI bundle도 release와 같은 inside-out 순서를 검증한다. ad-hoc 서명이라 비밀/인증서는 필요 없다.
+                "codesign --force --sign - zig-out/Maru.app/Contents/Helpers/maru-mermaid-renderer; " ++
+                "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru; " ++
+                "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
+                "codesign --force --sign - zig-out/Maru.app",
         });
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
+        macos_app_bundle.step.dependOn(&macos_mermaid_helper_compile.step);
         macos_app_bundle.step.dependOn(&file_panel_web_build.step);
         macos_app_bundle.step.dependOn(b.getInstallStep()); // zig-out/bin/maru(CLI) 빌드·설치 보장 — 번들 cp의 선행조건
 
@@ -764,6 +898,7 @@ pub fn build(b: *std.Build) void {
                 "echo '==> codesign app (Developer ID, hardened runtime, timestamp)'; " ++
                 // 중첩 바이너리(형제 maru CLI)를 먼저 개별 서명한다(inside-out) — 번들 서명은 main executable만 봉인하므로
                 // 추가 실행파일은 따로 서명해야 hardened runtime 공증을 통과한다.
+                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/maru-mermaid-renderer; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/MacOS/maru; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
                 "codesign --verify --strict zig-out/Maru.app; " ++

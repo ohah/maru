@@ -25,7 +25,7 @@ src/
   config.zig            action/config facade
   pty.zig               process/PTY facade
   renderer.zig          render facade
-  session.zig           OS-중립 세션 코어 facade(L2) — 세션 모델·입력/재정렬 수학·IME 판정·agent transcript
+  session.zig           OS-중립 세션 코어 facade(L2) — 세션 모델·입력/재정렬 수학·IME 판정·agent observer
   terminal.zig          terminal-core facade
   terminfo_cache.zig    maru 자체 terminfo 로컬 캐시 단일 출처(경로·버전·컴파일 셸 명령). pty 자동 컴파일 + cli/terminfo 서브커맨드가 공유(top-level 중립 — color.zig 결)
   text_escape.zig       라인 기반 텍스트 포맷(maru.workspace.v1·maru.trace.v1·snapshot)의 따옴표 escape 규칙 단일 출처. 어느 facade에도 속하지 않는 중립 leaf

@@ -20004,7 +20004,8 @@ pub const AppSession = struct {
         const now_ms = self.awakeMs();
         const activity_age_ms = now_ms -| term.agent_last_output_ms;
         const output_active = term.agent_last_output_ms != 0 and activity_age_ms <= agent_activity_window_ms;
-        if (generation == term.agent_screen_generation and term.agent_state == .idle and !output_active) return;
+        if (generation == term.agent_screen_generation and term.agent_state == .idle and !output_active and
+            !term.agent_stabilizer.needsExpiryProbe()) return;
         term.surface.lockCore(self.io);
         const core = &term.surface.core;
         const screen = core.dumpRecentUtf8(self.allocator, 12, 16 * 1024) catch null;

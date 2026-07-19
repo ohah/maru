@@ -18,10 +18,13 @@ extern "c" fn openpty(
 // Used by the session-close grace window between escalation signals.
 extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
 
-// 포그라운드 프로세스 감지(foregroundProcessName) — tcgetpgrp: 터미널 포그라운드 pgid, proc_name: libproc(libSystem
-// 내장, 추가 링크 불요)로 pid의 프로세스 이름. macOS 전용(pty/macos.zig 자체가 macOS 전용).
+// 포그라운드 프로세스 감지(foregroundProcessNames) — tcgetpgrp: 터미널 포그라운드 pgid,
+// proc_listpgrppids: 그 그룹의 실제 구성원, proc_name: 각 pid의 프로세스 이름. 모두 macOS 공개 libSystem/libproc API다.
+// login(1) wrapper가 group leader로 남는 제품 spawn 경로에서는 leader 하나만 보면 실제 agent child를 놓치므로 그룹을 열거한다.
 extern "c" fn tcgetpgrp(fd: c_int) c_int;
 extern "c" fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
+extern "c" fn proc_listpgrppids(pgrpid: c_int, buffer: ?*anyopaque, buffersize: c_int) c_int;
+extern "c" fn getpgid(pid: c_int) c_int;
 // KERN_PROCARGS2: pid의 argv/envp 덤프(공개 macOS sysctl — ps·libproc도 같은 방식). codex처럼 `#!/usr/bin/env node`
 // 스크립트로 도는 에이전트는 proc_name이 "node"라 미감지되므로, comm이 인터프리터면 argv[1] 스크립트 basename
 // ("codex")으로 분류한다. clean-room: 공개 sysctl API 사용(코드 표현 복사 아님).
@@ -30,7 +33,7 @@ const ctl_kern: c_int = 1;
 const kern_procargs2: c_int = 49;
 // KERN_PROCARGS2 sysctl 버퍼(argv+envp 전체를 담아야 sysctl이 성공 — 부족하면 ENOMEM). kern.argmax(=1MB) 상한이라
 // 256KB면 현실 거의 모든 argv+envp를 담는다(초과 시 ENOMEM → comm 폴백). **틱 스레드 전용**(pollAgentKinds 단일
-// 호출 경로)이라 단일 정적 버퍼를 공유한다 — 다른 스레드에서 foregroundProcessName을 부르면 동기화 필요.
+// 호출 경로)이라 단일 정적 버퍼를 공유한다 — 다른 스레드에서 foregroundProcessNames를 부르면 동기화 필요.
 var procargs_buf: [256 * 1024]u8 = undefined;
 
 /// comm이 스크립트 인터프리터면 true — 그때만 argv[1](스크립트 경로)로 에이전트를 식별한다. 정확 일치라
@@ -516,27 +519,44 @@ pub const PtySession = struct {
         return .{ .cols = window_size.col, .rows = window_size.row };
     }
 
-    /// 이 PTY의 **포그라운드 프로세스 그룹 리더의 프로세스 이름**을 out에 채워 반환한다(없으면 null). 셸 안에서
-    /// `claude`/`codex`를 실행하면 그게 포그라운드가 되므로, 어느 에이전트가 도는지 식별하는 데 쓴다. tcgetpgrp로
-    /// 터미널 포그라운드 pgid를 얻고(=그룹 리더 pid — 파이프라인이면 첫 단계라 비-리더 단계는 못 봄, v1 한계),
-    /// libproc proc_name으로 이름을 얻는다(libSystem 내장, 추가 링크 불요). 닫혔거나 fd 음수·pgid≤0·proc_name 실패면
-    /// null. proc_name은 NUL-종단 이름을 복사하고 strlen(=복사 바이트)을 반환하므로 out[0..n]은 NUL 없는 깨끗한 이름.
-    /// out은 ≥ 2*MAXCOMLEN(32) 바이트여야 한다(작으면 proc_name이 0 반환 → null). 호출자가 [256]u8로 넘긴다.
-    /// **틱 스레드에서만 호출**(close는 closing만 올리고 fd는 reader join 후 deinit에서만 닫혀 fd 재사용 레이스 없음).
-    pub fn foregroundProcessName(self: *PtySession, out: []u8) ?[]const u8 {
-        if (self.closing.load(.acquire)) return null;
+    /// 이 PTY의 foreground process group 구성원 이름을 bounded fixed buffer에 채운다. 제품 spawn은 login(1)이
+    /// group leader로 남고 실제 shell/agent가 같은 group의 child가 될 수 있어 leader PID 하나만 조회하면 안 된다.
+    /// proc_listpgrppids 뒤 getpgid를 다시 확인해 열거와 이름 조회 사이 PID 재사용도 다른 그룹 이름으로 오인하지 않는다.
+    /// comm이 interpreter/버전 문자열이면 argv basename으로 해소하지만, provider 판정은 app 계층이 맡는다.
+    /// **틱 스레드에서만 호출**(정적 procargs_buf 공유, close와 fd lifecycle 규약은 foregroundProcessGroup과 동일).
+    pub fn foregroundProcessNames(self: *PtySession, out: []types.ForegroundProcessName) usize {
+        if (out.len == 0 or self.closing.load(.acquire)) return 0;
         const fd = self.master_fd.load(.acquire);
-        if (fd < 0) return null;
+        if (fd < 0) return 0;
         const pgid = tcgetpgrp(fd);
-        if (pgid <= 0) return null;
-        const n = proc_name(pgid, out.ptr, @intCast(out.len));
-        if (n <= 0) return null; // 0=실패(버퍼<32 포함). proc_name은 ≤ buffersize-1만 반환하므로 out[0..n]은 항상 buf 내.
+        if (pgid <= 0) return 0;
+
+        var pids: [64]c_int = undefined;
+        const listed = proc_listpgrppids(pgid, &pids, @intCast(@sizeOf(@TypeOf(pids))));
+        if (listed <= 0) return 0;
+        const pid_count = @min(@as(usize, @intCast(listed)), pids.len);
+        var count: usize = 0;
+        for (pids[0..pid_count]) |pid| {
+            if (count == out.len) break;
+            if (pid <= 0 or getpgid(pid) != pgid) continue;
+            const dst = &out[count];
+            const name = resolveProcessName(pid, &dst.bytes) orelse continue;
+            dst.pid = pid;
+            dst.len = @intCast(name.len);
+            count += 1;
+        }
+        return count;
+    }
+
+    fn resolveProcessName(pid: c_int, out: []u8) ?[]const u8 {
+        const n = proc_name(pid, out.ptr, @intCast(out.len));
+        if (n <= 0) return null; // 0=실패(버퍼<32 포함). proc_name은 항상 buffersize보다 짧다.
         const comm = out[0..@intCast(n)];
         // comm이 인터프리터(node 등)면 argv[1] 스크립트 basename으로 교체 — codex 등 `#!/usr/bin/env node` 스크립트
         // 에이전트는 comm="node"라 안 잡히므로. 스크립트 basename은 정적 procargs_buf 슬라이스라 out으로 복사해 반환한다
         // (호출자가 다음 호출 전에 동기 소비 — out과 procargs_buf는 별개 버퍼라 겹침 없음).
         if (isInterpreterName(comm)) {
-            if (foregroundScriptBasename(pgid)) |script| {
+            if (foregroundScriptBasename(pid)) |script| {
                 const m = @min(script.len, out.len);
                 if (m > 0) {
                     std.mem.copyForwards(u8, out[0..m], script[0..m]);
@@ -547,7 +567,7 @@ pub const PtySession = struct {
             // comm이 **버전 문자열처럼**(숫자로 시작, 예 "2.1.197") 보이면 argv[0] basename으로 교체 — Claude Code(v2.1.197+)
             // 처럼 에이전트가 실행 중 자기 process.title(=comm)을 버전으로 바꾸면 comm="claude"가 아니라 "2.1.197"로 읽혀
             // 감지가 실패한다(실측). argv[0]은 그대로 "claude"라 그걸 쓴다(node 인터프리터 폴백과 같은 패턴, argv[0] 인덱스만 다름).
-            if (foregroundArgv0Basename(pgid)) |a0| {
+            if (foregroundArgv0Basename(pid)) |a0| {
                 const m = @min(a0.len, out.len);
                 if (m > 0) {
                     std.mem.copyForwards(u8, out[0..m], a0[0..m]);
@@ -1238,6 +1258,36 @@ test "reapIfExited: 살아있는 자식엔 null, 종료한 자식엔 상태를 �
     }
     try std.testing.expectEqual(types.ExitStatus{ .exited = 7 }, status.?);
     dead.deinit(); // exited=true라 close는 shutdownChild를 건너뛴다(double-reap 없음)
+}
+
+// 제품과 같은 login wrapper 아래 실제 child를 띄워, foreground PGID를 PID로 가정하지 않고 현재 구성원을
+// 돌려주는지 검증한다. login leader가 exec/exit해 PGID와 같은 PID가 사라져도 group은 child가 있는 동안 유효하다.
+test "foregroundProcessNames: login group leader가 사라져도 같은 foreground group의 child를 열거한다" {
+    const allocator = std.testing.allocator;
+    var session = try PtySession.spawn(allocator, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", "sleep 1" },
+        .login = true,
+        .size = .{ .cols = 20, .rows = 3 },
+    });
+    defer session.deinit();
+
+    var names: [16]types.ForegroundProcessName = undefined;
+    var count: usize = 0;
+    var saw_group_child = false;
+    var attempt: usize = 0;
+    while (attempt < 2000) : (attempt += 1) {
+        count = session.foregroundProcessNames(&names);
+        const pgid = session.foregroundProcessGroup() orelse 0;
+        for (names[0..count]) |*name| {
+            if (name.pid != pgid and std.mem.eql(u8, name.slice(), "sleep")) saw_group_child = true;
+        }
+        if (saw_group_child) break;
+        sleepMillis(1); // login이 command child를 fork/exec할 시간을 bounded하게 기다린다.
+    }
+
+    try std.testing.expect(count >= 1);
+    try std.testing.expect(saw_group_child);
 }
 
 test "validateRequest rejects requests that cannot produce a reliable PTY" {

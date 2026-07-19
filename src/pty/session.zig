@@ -82,11 +82,11 @@ const UnsupportedPtySession = struct {
         return error.UnsupportedPlatform;
     }
 
-    /// 비-macOS 스텁 — macOS 백엔드의 foregroundProcessName(에이전트 감지)과 구조 동기(이식성 목표). 항상 null.
-    pub fn foregroundProcessName(self: *UnsupportedPtySession, out: []u8) ?[]const u8 {
+    /// 비-macOS 스텁 — macOS backend의 foregroundProcessNames와 구조 동기. 지원 backend가 없어 빈 목록이다.
+    pub fn foregroundProcessNames(self: *UnsupportedPtySession, out: []types.ForegroundProcessName) usize {
         _ = self;
         _ = out;
-        return null;
+        return 0;
     }
 
     pub fn foregroundProcessGroup(self: *UnsupportedPtySession) ?i32 {

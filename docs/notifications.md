@@ -20,7 +20,7 @@
 poll해 background pane/Term 완료가 아예 알림 안 됐다), OSC는 `pendingNotification`이 `activeSurface().core`만이 아니라 모든
 Term의 코어를 훑어 첫 pending을 그 surface.id로 실어 보낸다. 이래야 알림의 `surface_id`가 **발신 Term**을 가리켜, 클릭이
 탭뿐 아니라 그 split pane·가로탭까지 정확히 점프한다(`activateSurfaceById`, §2 클릭 절). 비용 가드: 에이전트
-`foregroundProcessName` syscall은 ≈0.5s throttle, `metal_dirty`(재렌더)는 **사이드바에 보이는** Term(워크스페이스별 활성
+`foregroundProcessNames` process-group 조회는 ≈0.5s throttle, `metal_dirty`(재렌더)는 **사이드바에 보이는** Term(워크스페이스별 활성
 pane의 활성 Term) 변화에만 — 안 보이는 Term 변화로 헛 재렌더하지 않는다. reader 스레드가 `core_mutex` 아래 OSC pending·
 cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아래에서 읽어 owned 버퍼로 복사한다(torn read/UAF 방지).
 

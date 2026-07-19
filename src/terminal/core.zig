@@ -1,6 +1,10 @@
 const std = @import("std");
 const input = @import("input.zig");
 const types = @import("types.zig");
+
+// Agent observer가 fullscreen TUI의 trailing blank padding을 건너뛸 때 읽는 최대 행 수. 실제 UTF-8 복사 상한과
+// 별개로 cell 탐색도 bounded해, 비정상적으로 큰 grid에서 한 번의 observer poll이 전체 화면을 훑지 않게 한다.
+const recent_text_blank_scan_rows: usize = 256;
 const osc = @import("osc.zig"); // OSC host-reply 핸들러(색·팔레트·클립보드·hyperlink·semantic) — 목적별 분리(구조와 파일 분리)
 const parser = @import("parser.zig"); // VT 파서(write feed + escape/CSI/OSC/DCS/APC dispatch + UTF-8) — 목적별 분리
 const screen = @import("screen.zig"); // 화면 storage + 활성 화면 연산(grid·cursor·scroll·print·resize·snapshot) — 목적별 분리
@@ -1511,18 +1515,50 @@ pub const TerminalCore = struct {
         return output.toOwnedSlice(allocator);
     }
 
-    /// 활성 화면의 마지막 `max_rows`만 일반 텍스트로 직렬화한다. 관측/진단용 bounded API라 스크롤백과
+    /// 활성 화면의 물리적 마지막 `max_rows`만 일반 텍스트로 직렬화한다. 관측/진단용 bounded API라 스크롤백과
     /// 전체 화면을 복사하지 않으며, UTF-8 codepoint 경계를 보존한 채 `max_bytes` 전에 멈춘다.
     pub fn dumpRecentUtf8(self: *const TerminalCore, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) ![]u8 {
+        return self.dumpRowsEndingAtUtf8(allocator, max_rows, max_bytes, self.size.rows);
+    }
+
+    /// 활성 화면의 마지막 **텍스트 콘텐츠**를 기준으로 `max_rows`만 직렬화한다. fullscreen TUI가 resize 뒤 아래 행을
+    /// 비워 두는 경우(실측 Codex)에도 observer가 물리적 bottom 공백만 읽지 않게 하는 전용 API다. trailing blank 탐색은
+    /// cell scan일 뿐 복사하지 않고, 실제 UTF-8 직렬화는 dumpRecentUtf8와 같은 행·바이트 상한을 지킨다.
+    pub fn dumpRecentTextUtf8(self: *const TerminalCore, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) ![]u8 {
+        var last_row_exclusive: usize = self.size.rows;
+        const scan_floor = last_row_exclusive - @min(last_row_exclusive, recent_text_blank_scan_rows);
+        var found_text = false;
+        while (last_row_exclusive > scan_floor) {
+            const row_start = self.index(last_row_exclusive - 1, 0);
+            const cells = self.screen.cells[row_start..][0..self.size.cols];
+            var has_text = false;
+            for (cells) |cell| {
+                if (cell.codepoint != ' ') {
+                    has_text = true;
+                    break;
+                }
+            }
+            if (has_text) {
+                found_text = true;
+                break;
+            }
+            last_row_exclusive -= 1;
+        }
+        // scan 상한 안에 text anchor가 없으면 물리적 bottom을 써 오래된 위쪽 문구를 현재 근거로 끌어오지 않는다.
+        if (!found_text) last_row_exclusive = self.size.rows;
+        return self.dumpRowsEndingAtUtf8(allocator, max_rows, max_bytes, last_row_exclusive);
+    }
+
+    fn dumpRowsEndingAtUtf8(self: *const TerminalCore, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize, last_row_exclusive: usize) ![]u8 {
         var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(allocator);
         if (max_rows == 0 or max_bytes == 0) return output.toOwnedSlice(allocator);
 
         const worst_row_bytes = @as(usize, self.size.cols) *| 4 +| 1;
         const byte_bounded_rows = @max(1, max_bytes / @max(1, worst_row_bytes));
-        const selected_rows = @min(@as(usize, self.size.rows), @min(max_rows, byte_bounded_rows));
-        const first_row = self.size.rows - selected_rows;
-        for (first_row..self.size.rows) |row| {
+        const selected_rows = @min(last_row_exclusive, @min(max_rows, byte_bounded_rows));
+        const first_row = last_row_exclusive - selected_rows;
+        for (first_row..last_row_exclusive) |row| {
             if (row != first_row) {
                 if (output.items.len == max_bytes) break;
                 try output.append(allocator, '\n');
@@ -4277,6 +4313,30 @@ test "dumpRecentUtf8 bounds rows and bytes without splitting UTF-8" {
     defer std.testing.allocator.free(bounded);
     try std.testing.expect(bounded.len <= 5);
     try std.testing.expect(std.unicode.Utf8View.init(bounded) != error.InvalidUtf8);
+}
+
+test "dumpRecentTextUtf8 anchors at last text row while dumpRecentUtf8 keeps physical bottom" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 8 });
+    defer core.deinit();
+    try core.write("header\r\nstatus"); // text는 row 0..1, row 2..7은 resize 뒤 TUI가 남긴 blank padding을 흉내 낸다.
+
+    const recent = try core.dumpRecentTextUtf8(std.testing.allocator, 2, 128);
+    defer std.testing.allocator.free(recent);
+    try std.testing.expectEqualStrings("header  \nstatus  ", recent);
+
+    const physical = try core.dumpRecentUtf8(std.testing.allocator, 2, 128);
+    defer std.testing.allocator.free(physical);
+    try std.testing.expectEqualStrings("        \n        ", physical);
+}
+
+test "dumpRecentTextUtf8 bounds trailing blank cell scan" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = recent_text_blank_scan_rows + 2 });
+    defer core.deinit();
+    try core.write("x"); // text가 scan 상한보다 위에 있으면 오래된 근거를 끌어오지 않고 blank tail로 안전하게 실패한다.
+
+    const recent = try core.dumpRecentTextUtf8(std.testing.allocator, 2, 64);
+    defer std.testing.allocator.free(recent);
+    try std.testing.expectEqualStrings("  \n  ", recent);
 }
 
 test "G3 charset: ESC ( 0 dec_special (G0), SO/SI invoke G1/G0, ESC ( B restores, RIS resets" {

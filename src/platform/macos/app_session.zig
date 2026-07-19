@@ -1241,14 +1241,27 @@ fn startsWithCi(haystack: []const u8, prefix: []const u8) bool {
     return haystack.len >= prefix.len and std.ascii.eqlIgnoreCase(haystack[0..prefix.len], prefix);
 }
 
-/// 포그라운드 프로세스 이름을 에이전트 종류로 분류한다(대소문자 무시 prefix 일치). 이름은 pty의 foregroundProcessName이
-/// 준다 — comm이 인터프리터(node)면 argv[1] 스크립트, comm이 **버전 문자열**(Claude Code v2.1.197+가 실행 중 process.title을
-/// "2.1.197"로 바꿈)이면 argv[0]("claude")로 되짚어 준다(src/pty/macos.zig). 그래도 파이프라인 비-리더 단계면 감지 못 함.
+/// 포그라운드 process group 구성원 이름 하나를 에이전트 종류로 분류한다(대소문자 무시 prefix 일치).
+/// PTY backend가 comm이 interpreter면 argv[1], 버전 문자열이면 argv[0]으로 먼저 해소한다.
 fn classifyAgent(name: ?[]const u8) AgentKind {
     const n = name orelse return .none;
     if (startsWithCi(n, "claude")) return .claude;
     if (startsWithCi(n, "codex")) return .codex;
     return .none;
+}
+
+/// login/shell wrapper를 건너뛰고 같은 foreground group 안의 실제 agent 구성원을 찾는다. OS 열거와 provider 정책을
+/// 섞지 않도록 PTY는 이름 목록만 준다. 서로 다른 provider가 같은 group에 동시에 보이면 열거 순서로 임의 선택하지 않고
+/// none으로 실패해 오분류를 피한다. 같은 provider의 wrapper/native 중복은 하나로 취급한다.
+fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProcessName) AgentKind {
+    var found: AgentKind = .none;
+    for (processes) |*process| {
+        const kind = classifyAgent(process.slice());
+        if (kind == .none) continue;
+        if (found != .none and found != kind) return .none;
+        found = kind;
+    }
+    return found;
 }
 
 /// 한 panel(split leaf = 화면의 한 분할 영역). 탭 모델로 **여러 Term(터미널)을 가로 탭으로** 담는 컨테이너다
@@ -19960,7 +19973,7 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         // 모든 pane × 모든 Term을 보되 syscall은 ≈0.5s로 throttle한다. 화면에 카드/탭바가 실제로 보이는 탭만
         // 상태 변화 시 dirty해, background observer가 불필요한 프레임을 만들지 않는다.
-        var buf: [256]u8 = undefined;
+        var processes: [64]maru.pty.types.ForegroundProcessName = undefined;
         for (self.tabs.items, 0..) |tab, ti| {
             const displayed = self.agentDisplayVisible(ti); // 스피너/플래그/아이콘 재렌더 게이트(카드 or 활성 탭 탭바) — 탭 내 모든 Term 공유
             for (tab.panes.items) |pane| {
@@ -19971,8 +19984,8 @@ pub const AppSession = struct {
                     if (observer_probe) term.rt.agent_observer_pgid = pgid;
                     if (periodic_kind_probe or pgid_changed) {
                         const prev = term.agent_kind;
-                        const raw_fg = term.rt.live_pty.session.foregroundProcessName(&buf);
-                        term.agent_kind = classifyAgent(raw_fg);
+                        const process_count = term.rt.live_pty.session.foregroundProcessNames(&processes);
+                        term.agent_kind = classifyAgentProcesses(processes[0..process_count]);
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
                         if (term.agent_kind != prev) {
                             if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
@@ -20008,7 +20021,7 @@ pub const AppSession = struct {
             !term.agent_stabilizer.needsExpiryProbe()) return;
         term.surface.lockCore(self.io);
         const core = &term.surface.core;
-        const screen = core.dumpRecentUtf8(self.allocator, 12, 16 * 1024) catch null;
+        const screen = core.dumpRecentTextUtf8(self.allocator, 12, 16 * 1024) catch null;
         const title_len = @min(core.windowTitle().len, title_buf.len);
         @memcpy(title_buf[0..title_len], core.windowTitle()[0..title_len]);
         const progress_len = @min(core.agentProgress().len, progress_buf.len);
@@ -25028,7 +25041,7 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex"));
     try std.testing.expectEqual(AgentKind.codex, classifyAgent("codex-cli")); // 부분일치
     try std.testing.expectEqual(AgentKind.none, classifyAgent("zsh"));
-    try std.testing.expectEqual(AgentKind.none, classifyAgent("node")); // "node"는 에이전트명 아님 — foregroundProcessName이 argv[1]("codex")로 먼저 해소
+    try std.testing.expectEqual(AgentKind.none, classifyAgent("node")); // "node"는 에이전트명 아님 — foregroundProcessNames가 argv[1]("codex")로 먼저 해소
     try std.testing.expectEqual(AgentKind.none, classifyAgent(null));
     try std.testing.expectEqual(AgentKind.none, classifyAgent(""));
     // 아이콘 코드포인트 매핑(독립 아이콘 셀에 쓰임).
@@ -25037,6 +25050,33 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(@as(u21, 0x25C6), agentSymbolCodepoint(.codex)); // 알림용 실제 ◆
     try std.testing.expectEqual(@as(u21, 0xF0007), agentIconCodepoint(.claude)); // 사이드바 PUA sparkle
     try std.testing.expectEqual(@as(u21, 0xF0008), agentIconCodepoint(.codex)); // 사이드바 PUA diamond
+}
+
+test "classifyAgentProcesses: login/shell leader를 건너뛰고 같은 foreground group의 agent를 찾는다" {
+    var processes: [3]maru.pty.types.ForegroundProcessName = undefined;
+    const fixtures = [_][]const u8{ "login", "zsh", "claude" };
+    for (&processes, fixtures, 1..) |*process, fixture, pid| {
+        process.pid = @intCast(pid);
+        process.len = @intCast(fixture.len);
+        @memcpy(process.bytes[0..fixture.len], fixture);
+    }
+    try std.testing.expectEqual(AgentKind.claude, classifyAgentProcesses(&processes));
+
+    const codex = "codex";
+    processes[2].len = @intCast(codex.len);
+    @memcpy(processes[2].bytes[0..codex.len], codex);
+    try std.testing.expectEqual(AgentKind.codex, classifyAgentProcesses(&processes));
+
+    processes[2].len = 3;
+    @memcpy(processes[2].bytes[0..3], "vim");
+    try std.testing.expectEqual(AgentKind.none, classifyAgentProcesses(&processes));
+
+    // 같은 group에 서로 다른 provider가 동시에 보이는 비정상/중첩 경로는 proc_list 순서에 따라 임의 선택하지 않는다.
+    processes[1].len = 5;
+    @memcpy(processes[1].bytes[0..5], "codex");
+    processes[2].len = 6;
+    @memcpy(processes[2].bytes[0..6], "claude");
+    try std.testing.expectEqual(AgentKind.none, classifyAgentProcesses(&processes));
 }
 
 test "dimRgb: 색을 45%로 낮춘다(0 아님 — 글자 안 사라짐; 현재 pane grip muted에 쓰임)" {

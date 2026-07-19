@@ -83,13 +83,17 @@ SplitView)을 쓰지 않는다. 이유:
   Zig가 소유하고, Swift는 backing px 클릭/드래그 좌표만 ABI로 넘긴다(스크롤·마우스 선택과 같은 규율).
 - 비-macOS(Linux CI)에서도 레이아웃 로직을 헤드리스 단위로 검증할 수 있다.
 
-레이아웃: 창 drawable을 `[사이드바 strip | 터미널 영역]`으로 나눈 뒤, 터미널 영역을 다시 **window padding**만큼
-안으로 들인다(좌우 각 `padding_x`, 상하 각 `padding_y` — 셀과 가장자리 사이 inset, config `window.padding-x/y`,
-기본 8/4 pt). 따라서 터미널 영역 origin = `(sidebar_width + padding_x, padding_y)`, grid cols =
-`(drawable_width - sidebar_width - 2·padding_x) / cell_width`, rows = `(drawable_height - 2·padding_y) / cell_height`
-(grid 메트릭은 이미 Zig가 권위 있게 소유; `gridFromBacking`·`termRect`가 같은 inset을 쓰는 단일 출처라 렌더
-origin·마우스 hit-test·IME가 자동 정합한다). split이 생기면 이 **padding 적용된** 터미널 영역을 SplitTree에 따라
-sub-사각형으로 나눠 각 surface를 그린다(padding은 바깥 영역에 한 번만, split 사이엔 divider만).
+레이아웃: 창 drawable을 먼저 `[사이드바 strip | workspace terminal domain | 선택적 파일 도크]`로 나누고,
+`termRect()`는 sidebar·titlebar strip·파일 도크를 제외한 **padding 전 raw terminal domain**을 돌려준다. SplitTree는 이
+raw rect를 leaf rect로 나눈다. 각 leaf에서는 L4 `AppSession.paneGeometry(leaf_rect)`가 `PaneGeometry { bar, body, grid }`를
+한 번 계산한다. `body`는 상단 pane tab bar만 제거한 실제 본문 외곽이고, `grid`는 body에 `window.padding-x/y`(기본 좌우
+8pt·상하 4pt)를 saturating inset하되 과대 값에서도 origin/end를 body 내부에 clamp한 셀 그리드 rect다. `bar`가 없으면 body=leaf다. PTY grid·셀 렌더 origin·마우스 cell
+hit-test·IME 후보창은 `.grid`를 공유하고, 실제 입력 영역을 표시하는 focus border는 `.body`를 공유해 padding을 border
+안쪽에 남긴다. WKWebView frame은 이 window-padding grid의 소비자가 아니며, 기존
+`web_panel_layout.contentRect(leaf_rect, ChromeInset)`가 pane tab bar·browser address band·split seam 노출을 합성한다.
+따라서 split divider와 pane 외곽은 padding 때문에 안쪽으로 밀리지 않고 terminal 셀 그리드만 각 pane 본문 경계에서 여백을
+갖는다. `paneBarRect`/`paneTermRect`는 `PaneGeometry` accessor일 뿐 bar/padding 산술을 복제하지 않는다. focus border의
+상태·z-order·테마, 비-key/OOM fail-close와 browser frame 비변경 계약은 [file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
 
 ## SplitTree(panel) 모델
 
@@ -177,7 +181,8 @@ Node = leaf(Pane)
   자식 종료(`.exited`)에만 일어난다** — `.read_error`(자식 생존 미검증 PTY I/O 오류)는 이 cascade를 타지 않아 산 셸이
   달린 탭이 유지된다(`terminationClosesWorkspace` 게이트; 단일 출처: `pty-operating-model.md` "read_error vs 검증된 exit").
 - **per-pane 탭 바 렌더(PR-C)**: 각 pane(leaf rect) 상단에 가로 탭 바 strip(높이 = cell 1칸)을 예약하고 그
-  아래를 터미널 영역으로 쓴다(`paneTermRect`/`paneBarRect` 단일 출처 — 좌표·resize·split·렌더가 공유). 바는
+  아래를 `PaneGeometry.body`로 쓰고 window padding을 inset한 `.grid`를 셀 그리드 영역으로 쓴다(`paneGeometry`가
+  단일 출처이고 `paneBarRect`/`paneTermRect`는 accessor — 좌표·resize·split·렌더가 공유). 바는
   터미널 셀 스트림에 origin 박힌 셀로 그려진다(`metal_frame.replace`의 `pane_chrome_cells`, 렌더러·ABI 무변경).
   **PR-C1**: 바 배경만(활성 강조색·비활성 chrome 색). **PR-C2**: Term 제목 glyph를 탭으로. **PR-D**: 호버 ✕·활성
   하이라이트·클릭. **PR-E**: 탭 드래그(pane 내/간). **PR-F**: "+" 버튼.

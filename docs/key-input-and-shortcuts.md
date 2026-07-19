@@ -162,7 +162,7 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_su
 1. confirm·notice·palette·rename 같은 modal/overlay input owner가 자신의 Enter/Esc/편집 키를 먼저 소비한다.
 2. context-aware resolver가 사용자 app action rebind, explicit unbind, context default, terminal/global fallback의 provenance를 보존해 판정한다. `resolveFileTree`는 사용자 action을 먼저 반환하고 explicit unbind면 그 chord를 소비하되 tree default를 실행하지 않으며, 둘 다 없을 때만 tree default를 적용한다. terminal macro와 global-only action은 tree context에서 실행하지 않는다.
 3. `file_tree_focus`가 켜져 있으면 modifier 없는 `↑/↓/←/→`, `Enter`, `Home/End`, `PageUp/PageDown`, `Esc`, `F2`와 `⌘Backspace`를 트리가 소비한다. 이때 terminal key encoding과 CM6/WebKit에는 전달하지 않는다. 단 app action resolver가 확정한 `toggle_file_panel_focus`는 이 tree-local 기본키보다 먼저 실행돼 workspace로 돌아갈 수 있다.
-4. 도크 WKWebView가 first responder면 편집기 허용 키는 WebKit에 양보하고, Zig app action으로 확정된 키만 소비한다.
+4. 도크 WKWebView가 first responder이면 ABI v132 `WebKeyRoute(u32)`가 Bool `key_is_app_action`을 대체한다: `0=pass_through`, `1=app_action`, `2=consume_unbound`, `3=web_editor`; unknown은 fail-closed consume, null/변환 실패는 pass-through다. resolver는 사용자 app rebind → explicit unbind → Markdown editable context default → 기존 app default/terminal fallback 순서로 provenance를 보존한다. `live-preview`/`source-edit`의 `web_editor`는 `⌘S/F/A/C/V/X/Z/⇧Z`와 텍스트 탐색·선택·삭제를 WebKit에 양보하고, `consume_unbound`는 WebKit/PTY 어디에도 보내지 않는다. `app_action`은 같은 이벤트 루프에서 기존 Zig `handleKeyDown`으로 재진입한다. `read`와 HTML은 편집기 소유가 아니며 `⌘S`를 저장으로 오인해 소비하지 않는다. C header 상수·Zig `enum(u32)` compile-time test·Swift exhaustive switch가 raw 값 하나를 공유하고 Swift의 별도 key/mode 목록은 제거한다.
 5. 나머지는 활성 terminal/browser pane의 기존 app-action/browser-nav/terminal encoding 경로로 간다.
 
 기본 바인딩과 의미:
@@ -171,6 +171,8 @@ Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`, `.dock_su
 |---|---|---|
 | `⌘W` | `close_focused` | 도크 본문·트리 포커스면 포커스 group의 active 파일 탭, terminal/browser pane이면 기존 Term close cascade. dirty close는 [file-panel.md](file-panel.md) §3.2를 따른다. |
 | `⌘⇧E` | `toggle_file_panel_focus` | workspace terminal/browser에서 project tree로 들어가고, 파일 도크 본문/트리에서는 활성 workspace pane으로 돌아간다. 완전히 빈 도크는 picker를 열지 않고 no-op notice. 사용자 rebind/unbind 우선. |
+| `⌘S` | Markdown CM6 | 라이브·소스에서 현재 revision을 pathless atomic write로 저장한다. 성공한 같은 revision에서만 dirty를 내리며 autosave는 없다. |
+| `⌘F` | Markdown CM6 | 라이브·소스에서는 Maru의 작은 CM6 search extension이 문서 검색을 연다. 검색은 explicit 사용자 동작에서만 source 문자열을 만들 수 있으며 새 runtime package는 추가하지 않는다. read/HTML/terminal에서는 기존 context resolver 의미를 유지한다. |
 | `↑/↓` | file tree | 이전/다음 조작 가능한 row. |
 | `←/→` | file tree | 접기/부모 또는 펼치기/첫 자식. |
 | `Enter` | file tree | directory toggle 또는 파일 열기. |

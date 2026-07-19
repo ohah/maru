@@ -56,9 +56,11 @@ const claude_rules = [_]Rule{
 
 const codex_rules = [_]Rule{
     .{ .id = "action_required_title", .state = .blocked, .priority = 1000, .region = .title, .all = &.{"action required"}, .visible_blocker = true },
-    .{ .id = "confirmation_prompt", .state = .blocked, .priority = 990, .region = .screen, .any = &.{ "press enter to confirm or esc to cancel", "allow command?", "enter to submit answer", "enter to submit all" }, .max_lines_from_bottom = 6, .visible_blocker = true },
+    .{ .id = "confirmation_prompt", .state = .blocked, .priority = 990, .region = .screen, .any = &.{ "press enter to confirm or esc to cancel", "press enter to confirm or esc to go back", "press enter to continue", "allow command?", "enter to submit answer", "enter to submit all" }, .max_lines_from_bottom = 6, .visible_blocker = true },
     .{ .id = "interrupted_prompt", .state = .idle, .priority = 885, .region = .screen, .all = &.{"conversation interrupted"}, .max_lines_from_bottom = 4, .visible_idle = true },
-    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{ "›", "❯" }, .none = &.{"allow command?"}, .max_lines_from_bottom = 4, .visible_idle = true },
+    // Codex는 turn 실행 중에도 아래 composer를 열어 steering 입력을 받는다. 따라서 prompt가 더 아래에 있어도
+    // `esc to interrupt`가 현재 tail에 함께 보이면 idle 근거가 아니다(실제 0.144.5 UI).
+    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{ "›", "❯" }, .none = &.{ "allow command?", "esc to interrupt" }, .max_lines_from_bottom = 4, .visible_idle = true },
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     .{ .id = "working_title", .state = .running, .priority = 800, .region = .title, .any = &braille_frames, .visible_running = true },
@@ -211,6 +213,16 @@ test "codex working title and action-required title are distinct" {
     try std.testing.expectEqual(State.blocked, detect(.codex, .{ .osc_title = "Action Required" }).state);
 }
 
+test "codex startup selection screens are blocked until the user confirms" {
+    const update = detect(.codex, .{ .screen = "1. Update now\n2. Skip\nPress enter to continue" });
+    try std.testing.expectEqual(State.blocked, update.state);
+    try std.testing.expect(update.visible_blocker);
+
+    const hooks = detect(.codex, .{ .screen = "Hooks need review\n3. Continue without trusting\nPress enter to confirm or esc to go back" });
+    try std.testing.expectEqual(State.blocked, hooks.state);
+    try std.testing.expect(hooks.visible_blocker);
+}
+
 test "codex interruption screen becomes idle even after output activity" {
     const d = detect(.codex, .{ .screen = "■ Conversation interrupted\n› ", .output_active = true });
     try std.testing.expectEqual(State.idle, d.state);
@@ -224,9 +236,17 @@ test "current running footer beats a prior prompt or interruption in the screen 
     try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_progress = "4;2", .osc_title = "✳" }).state);
 }
 
+test "codex steering composer below a working footer remains running" {
+    const d = detect(.codex, .{ .screen = "Working (8s · esc to interrupt)\n› Add a follow-up" });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(d.visible_running);
+}
+
 test "current prompt below a stale running footer becomes idle" {
     try std.testing.expectEqual(State.idle, detect(.claude, .{ .screen = "Working… esc to interrupt\nanswer\n❯ " }).state);
-    try std.testing.expectEqual(State.idle, detect(.codex, .{ .screen = "Working\nEsc to interrupt\n› " }).state);
+    // Codex는 현재 `esc to interrupt`가 있으면 아래 prompt도 steering composer라 running이다. footer가 사라지고 과거
+    // Working 텍스트만 남은 뒤 새 prompt가 보일 때 idle로 복귀한다.
+    try std.testing.expectEqual(State.idle, detect(.codex, .{ .screen = "Working\nanswer\n› " }).state);
 }
 
 test "prompt outside the bounded bottom region is not current idle evidence" {

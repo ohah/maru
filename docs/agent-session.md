@@ -25,7 +25,8 @@ Term별 observer는 다음 입력을 함께 사용한다.
 1. **foreground process group**: 실행 파일과 process tree로 agent kind를 판정한다. claude가 `comm`을 버전 문자열로
    바꾸거나 node/bun 래퍼 아래 실행되는 경우 argv/process tree를 확인한다. agent process가 사라지면 상태도 즉시
    `unknown`으로 리셋한다.
-2. **live screen tail**: 현재 viewport의 마지막 bounded 행을 공백 정규화해 provider별 manifest와 매칭한다.
+2. **live screen tail**: 현재 viewport의 마지막 텍스트 콘텐츠를 기준으로 bounded 행을 공백 정규화해 provider별 manifest와 매칭한다.
+   fullscreen TUI가 resize 뒤 아래쪽에 빈 행을 남겨도 trailing blank padding은 tail 위치 계산에서 제외한다.
    scrollback 전체를 읽지 않으며 현재 화면에 없는 과거 문구는 상태 근거로 쓰지 않는다.
 3. **OSC metadata**: 터미널 코어가 이미 파싱한 title과 progress를 문자열 입력으로 제공한다. progress는
    [ConEmu specific OSC](https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC)가 정의한
@@ -130,7 +131,9 @@ workspace 파일을 깨뜨리지 않으면서 provider 세션 자동 실행을 �
 
 ## 성능과 관측 가능성
 
-- screen snapshot은 변경 sequence가 바뀐 Term만 읽고 idle 안정 상태에서는 재스캔을 건너뛴다.
+- screen snapshot은 변경 sequence가 바뀐 Term만 읽고 idle 안정 상태에서는 재스캔을 건너뛴다. trailing blank 행은
+  최대 256행 cell scan으로만 건너뛰며 실제 UTF-8 복사는 마지막 콘텐츠 기준 bounded 행에 한정한다. 그보다 큰 blank
+  padding은 오래된 화면 근거를 끌어오지 않고 `unknown`으로 안전하게 실패한다.
 - screen tail은 행·바이트 상한을 두고, 매 poll heap 전체 화면 복사를 피한다.
 - process probe는 foreground pgid 변화 시 즉시, 식별된 agent는 낮은 주기로 재확인한다.
 - debug event는 kind, 이전/새 상태, 선택된 manifest rule id, visible flags, activity age만 남긴다. 화면 텍스트·OSC 원문·

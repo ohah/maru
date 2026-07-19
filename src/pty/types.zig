@@ -49,6 +49,19 @@ pub const PtyHandle = struct {
     size: terminal.Size,
 };
 
+/// 포그라운드 process group 구성원 한 명의 식별용 이름이다. PTY backend는 OS 프로세스 열거와
+/// comm/argv 해소까지만 맡고, 이 이름이 claude/codex인지 같은 제품 정책은 app 계층이 판정한다.
+/// 고정 버퍼라 주기적 observer poll에서 allocator와 raw argv 로그를 만들지 않는다.
+pub const ForegroundProcessName = struct {
+    pid: i32 = 0,
+    len: u8 = 0,
+    bytes: [128]u8 = undefined,
+
+    pub fn slice(self: *const ForegroundProcessName) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
 pub const SpawnRequest = struct {
     // command는 shell을 거치지 않고 execve에 직접 넘길 실행 파일 경로다.
     // 이렇게 두면 테스트에서 shell quoting과 process spawning 책임을 분리할 수 있다.

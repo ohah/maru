@@ -49,7 +49,9 @@ describe("markdown editor hot path", () => {
         const event = new dom.window.KeyboardEvent("keydown", {
           key: "s",
           code: "KeyS",
-          metaKey: true,
+          // CodeMirror의 `Mod`는 제품 macOS에서는 Meta, Linux CI에서는 Control로 해석된다. 테스트도
+          // 실행 플랫폼의 modifier를 사용해야 같은 keymap entry 자체를 검증한다.
+          ...(process.platform === "darwin" ? { metaKey: true } : { ctrlKey: true }),
           bubbles: true,
           cancelable: true,
         });

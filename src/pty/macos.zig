@@ -627,6 +627,16 @@ pub const PtySession = struct {
         return comm;
     }
 
+    /// 현재 foreground process group id. observer가 값 변화만 매 100ms 확인하고, 실제 proc_name 재조회는
+    /// 변화 시 또는 저주기 재검증 때 수행한다.
+    pub fn foregroundProcessGroup(self: *PtySession) ?i32 {
+        if (self.closing.load(.acquire)) return null;
+        const fd = self.master_fd.load(.acquire);
+        if (fd < 0) return null;
+        const pgid = tcgetpgrp(fd);
+        return if (pgid > 0) pgid else null;
+    }
+
     /// 포그라운드 pgid(=에이전트 프로세스)의 exec_path + 전체 argv를 KERN_PROCARGS2로 캡처해 str_buf/argv_out에
     /// 복사해 돌려준다 — workspace restore가 종료 시점에 claude/codex의 보존 argv를 캡처하는 용도
     /// (docs/workspace-restore.md "에이전트 세션 자동 fork 복원"). 반환 슬라이스는 str_buf/argv_out 내부를 가리킨다

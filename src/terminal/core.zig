@@ -367,6 +367,9 @@ pub const TerminalCore = struct {
     notification_pending: bool = false,
     notification_title: std.ArrayListUnmanaged(u8) = .empty,
     notification_body: std.ArrayListUnmanaged(u8) = .empty,
+    // ConEmu OSC 9;4 progress의 최신 payload. 에이전트 관측기가 터미널이 이미 받은 공개 프로토콜 신호를
+    // 읽을 뿐이며, 알림으로 발사하지 않는다. bounded OSC parser가 입력 크기를 제한하고 마지막 값만 보관한다.
+    agent_progress: std.ArrayListUnmanaged(u8) = .empty,
     // G3 charset: G0/G1 G-set 지정과 GL 호출. `ESC ( <f>`→G0, `ESC ) <f>`→G1(f='0'=dec_special·'B'=ascii).
     // SI(0x0f)→GL=G0, SO(0x0e)→GL=G1. print 시 GL의 charset으로 codepoint를 변환한다. RIS에서 전부 초기화.
     charset_g0: Charset = .ascii,
@@ -425,6 +428,9 @@ pub const TerminalCore = struct {
     // title/cwd 버퍼는 core_mutex 아래에서만 읽어 mutex가 가시성 보장 — bumpTitleGeneration 참조, code-review [7]).
     // windowTitle이 title??cwd_basename이라 title/cwd 중 하나만 바뀌어도 bump하되, 각 setter가 값 동일 시 bump를 생략한다(P4-1).
     title_generation: std.atomic.Value(u32) = .init(0),
+    // PTY write가 들어올 때마다 증가하는 observer용 sequence. 화면 tail/title/progress가 그대로인 안정 idle Term은
+    // 이 값으로 재직렬화를 건너뛴다. atomic이라 tick이 lock 전에 값만 싸게 확인할 수 있다.
+    observer_generation: std.atomic.Value(u64) = .init(0),
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},
@@ -552,6 +558,7 @@ pub const TerminalCore = struct {
         @memset(&self.palette_override, null); // OSC 4 팔레트 재정의도 공장 초기화(xterm RIS가 팔레트를 리셋).
         self.default_fg_override = null; // OSC 10/11 전경/배경 색 설정도 공장 초기화(theme 기본 복귀).
         self.default_bg_override = null;
+        self.agent_progress.clearRetainingCapacity(); // 이전 프로그램의 progress를 상태 근거로 재사용하지 않는다.
         self.alternate_scroll = true; // DEC 1007 공장 기본값(켜짐) — 프로그램이 끈 뒤 RIS면 복원.
         self.origin_mode = false; // DECOM도 공장 기본(off — 화면 절대 좌표)으로 복원.
         self.dirty = fullDirty(self.size);
@@ -609,6 +616,7 @@ pub const TerminalCore = struct {
         self.clipboard_read_target.deinit(self.allocator);
         self.notification_title.deinit(self.allocator);
         self.notification_body.deinit(self.allocator);
+        self.agent_progress.deinit(self.allocator);
         if (self.placement_views.len > 0) self.allocator.free(self.placement_views);
         if (self.image_views.len > 0) self.allocator.free(self.image_views);
         self.* = undefined;
@@ -1123,7 +1131,12 @@ pub const TerminalCore = struct {
     /// owner_dbg 확인은 public 진입 계약이라 여기 둔다(reader 노출 시 core_mutex 보유 강제 §6-5).
     pub fn write(self: *TerminalCore, bytes: []const u8) !void {
         self.owner_dbg.assertOwnedBySelf();
+        if (bytes.len > 0) _ = self.observer_generation.fetchAdd(1, .release);
         return parser.feed(self, bytes);
+    }
+
+    pub fn observerGeneration(self: *const TerminalCore) u64 {
+        return self.observer_generation.load(.acquire);
     }
 
     /// OSC 10/11로 설정된 전경/배경 색 override(없으면 null = theme 기본). app이 렌더러 default 색과 화면
@@ -1207,6 +1220,17 @@ pub const TerminalCore = struct {
         self.notification_pending = false;
         self.notification_title.clearRetainingCapacity();
         self.notification_body.clearRetainingCapacity();
+    }
+
+    /// 마지막 ConEmu OSC 9;4 progress payload(`4;state[;value]`). 없으면 빈 슬라이스다.
+    pub fn agentProgress(self: *const TerminalCore) []const u8 {
+        return self.agent_progress.items;
+    }
+
+    /// observer가 최신 progress event를 복사한 뒤 소비한다. 상태 자체는 observer가 안정화해 보존하므로, 완료 시점의
+    /// `4;0`이 다음 작업의 PTY activity를 영구히 idle로 덮는 stale metadata가 되지 않는다.
+    pub fn clearAgentProgress(self: *TerminalCore) void {
+        self.agent_progress.clearRetainingCapacity();
     }
 
     /// G12 BEL: pending 벨이 있으면 true를 돌려주고 플래그를 비운다(한 번 울리고 소비). platform이 매 tick
@@ -1484,6 +1508,37 @@ pub const TerminalCore = struct {
             }
         }
 
+        return output.toOwnedSlice(allocator);
+    }
+
+    /// 활성 화면의 마지막 `max_rows`만 일반 텍스트로 직렬화한다. 관측/진단용 bounded API라 스크롤백과
+    /// 전체 화면을 복사하지 않으며, UTF-8 codepoint 경계를 보존한 채 `max_bytes` 전에 멈춘다.
+    pub fn dumpRecentUtf8(self: *const TerminalCore, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) ![]u8 {
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(allocator);
+        if (max_rows == 0 or max_bytes == 0) return output.toOwnedSlice(allocator);
+
+        const worst_row_bytes = @as(usize, self.size.cols) *| 4 +| 1;
+        const byte_bounded_rows = @max(1, max_bytes / @max(1, worst_row_bytes));
+        const selected_rows = @min(@as(usize, self.size.rows), @min(max_rows, byte_bounded_rows));
+        const first_row = self.size.rows - selected_rows;
+        for (first_row..self.size.rows) |row| {
+            if (row != first_row) {
+                if (output.items.len == max_bytes) break;
+                try output.append(allocator, '\n');
+            }
+            const row_start = self.index(row, 0);
+            var codepoints: types.RowCodepoints = .{
+                .cells = self.screen.cells[row_start..][0..self.size.cols],
+                .graphemes = self.grapheme_store.items,
+            };
+            while (codepoints.next()) |codepoint| {
+                var buffer: [4]u8 = undefined;
+                const len = try std.unicode.utf8Encode(codepoint, &buffer);
+                if (output.items.len + len > max_bytes) return output.toOwnedSlice(allocator);
+                try output.appendSlice(allocator, buffer[0..len]);
+            }
+        }
         return output.toOwnedSlice(allocator);
     }
 
@@ -4188,6 +4243,11 @@ test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ign
     // ConEmu 서브커맨드는 알림으로 오발사 안 함: 9;4 progress(진행바 폭탄 방지)·9;1 sleep.
     try core.write("\x1b]9;4;1;50\x1b\\");
     try std.testing.expect(core.pendingNotification() == null);
+    try std.testing.expectEqualStrings("4;1;50", core.agentProgress());
+    try core.write("\x1b]9;4;0\x1b\\");
+    try std.testing.expectEqualStrings("4;0", core.agentProgress());
+    core.clearAgentProgress();
+    try std.testing.expectEqualStrings("", core.agentProgress());
     try core.write("\x1b]9;1;420\x1b\\");
     try std.testing.expect(core.pendingNotification() == null);
 
@@ -4202,6 +4262,21 @@ test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ign
     // OSC 777의 notify 외 서브타입은 무시.
     try core.write("\x1b]777;precmd\x1b\\");
     try std.testing.expect(core.pendingNotification() == null);
+}
+
+test "dumpRecentUtf8 bounds rows and bytes without splitting UTF-8" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 3 });
+    defer core.deinit();
+    try core.write("one\r\ntwo\r\n한글");
+
+    const rows = try core.dumpRecentUtf8(std.testing.allocator, 2, 64);
+    defer std.testing.allocator.free(rows);
+    try std.testing.expectEqualStrings("two \n한글", rows);
+
+    const bounded = try core.dumpRecentUtf8(std.testing.allocator, 3, 5);
+    defer std.testing.allocator.free(bounded);
+    try std.testing.expect(bounded.len <= 5);
+    try std.testing.expect(std.unicode.Utf8View.init(bounded) != error.InvalidUtf8);
 }
 
 test "G3 charset: ESC ( 0 dec_special (G0), SO/SI invoke G1/G0, ESC ( B restores, RIS resets" {

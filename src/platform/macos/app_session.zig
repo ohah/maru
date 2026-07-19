@@ -33,7 +33,7 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
-const agent_session = @import("agent_session.zig"); // L4 — 에이전트 세션 트랜스크립트 파일 찾기 + tail read
+const agent_session = @import("agent_session.zig"); // workspace migration 전까지 저장된 provider session 해석에 사용
 const agent_hooks = @import("agent_hooks.zig"); // provider 훅으로 팬↔세션 트랜스크립트 경로 매핑
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
@@ -447,10 +447,9 @@ const scrollbar_alpha_idle: u8 = 0x4D; // idle(faint) — ~30%
 // 커서 깜빡임 반주기는 config(`cursor.blink-interval-ms`, 기본 500ms)에서 온다 — blinkIntervalTicks()가
 // Swift host의 실제 frame-loop cadence에 맞춰 tick으로 환산한다(F1-4b). 일반 터미널 관례(on 500ms / off 500ms)가 기본값.
 const agent_poll_interval_ms: u32 = 500; // 포그라운드 프로세스(에이전트) polling 주기.
+const agent_observer_interval_ms: u32 = 100; // 화면/OSC/activity 상태 판정 주기.
+const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은 recent activity로 본다.
 const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
-// 에이전트 마지막 답변 미리보기를 담는 Term inline 버퍼 크기(바이트). 한 줄 미리보기라 충분하고, 사이드바가
-// 카드 폭으로 다시 말줄임하므로 여기선 넉넉히만 잡는다(UTF-8 경계로 잘려 들어옴).
-// agent_answer_max(idle 답변 inline 버퍼 길이)는 Term과 함께 session core로 이동 — src/session/session_model.zig.
 // synchronized output(DECSET 2026) ESU-유실 복구 deadline. BSU(2026h) 후 ESU(2026l)가
 // 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
 // sync를 강제 해제하고 투영한다. 베이스: ESU-유실 안전장치(Ghostty termio sync_reset_ms=1000·xterm.js
@@ -1056,6 +1055,8 @@ const TermRuntime = struct {
     restored_agent_source_len: usize = 0,
     restored_agent_confirmed: [agent_restore_session_max]u8 = undefined,
     restored_agent_confirmed_len: usize = 0,
+    // 100ms probe에서 foreground pgid 변화만 싸게 감지해 kind를 즉시 재분류한다. 0=null/미관측.
+    agent_observer_pgid: i32 = 0,
 };
 
 const agent_restore_session_max: usize = 256;
@@ -1606,12 +1607,12 @@ fn atPromptWire(semantic: terminal.SemanticPrompt, alt_active: bool) control_sur
     };
 }
 
-/// 내부 `session_model.AgentKind`/`agent_transcript.AgentState` → 컨트롤 플레인 agent DTO(§3). `none`이면 null
+/// 내부 `session_model.AgentKind`/`agent_observer.State` → 컨트롤 플레인 agent DTO(§3). `none`이면 null
 /// (에이전트 없음 → wire에서 필드 생략, control_surface가 처리). 내부 rename이 wire를 조용히 흔들지 않도록(§3 경계
 /// 격리) exhaustive switch로 wire enum을 못박는다.
 fn agentInfoWire(
     kind: maru.session.session_model.AgentKind,
-    state: maru.session.agent_transcript.AgentState,
+    state: maru.session.agent_observer.State,
 ) ?control_surface.AgentInfo {
     const wire_kind: control_surface.AgentKind = switch (kind) {
         .none => return null,
@@ -1621,10 +1622,8 @@ fn agentInfoWire(
     const wire_state: control_surface.AgentState = switch (state) {
         .unknown => .unknown,
         .running => .running,
+        .blocked => .blocked,
         .idle => .idle,
-        // 인터럽트(ESC)는 **별도 wire 값**으로 싣는다(사용자 결정). idle로 접으면 클라이언트가 running→idle을
-        // "턴 완료"로 읽어 가짜 완료를 보고한다 — 사용자가 끊은 것을 완료로 착각해 후속 단계를 진행한다.
-        .interrupted => .interrupted,
     };
     return .{ .kind = wire_kind, .state = wire_state };
 }
@@ -2487,9 +2486,7 @@ pub const AppSession = struct {
     // 에이전트 감지 polling 카운터 — 매 tick tcgetpgrp+proc_name(syscall)은 비싸므로 N tick마다(≈0.5s) 각 Term의
     // 포그라운드 프로세스명을 polling해 agent_kind를 갱신한다(claude/codex/none).
     agent_poll_ticks: u32 = 0,
-    // Codex 훅 미신뢰 안내를 **세션당 1회**만 띄웠는지(모달 notice 반복 방지). Codex는 훅을 신뢰해야 발화하는데(진행중
-    // 안 뜨는 흔한 원인), codex-kind Term이 처음 감지되고 훅이 미신뢰면 1회 안내한다(agent_hooks.codexHookNeedsTrust).
-    codex_hook_hint_shown: bool = false,
+    agent_observer_poll_ticks: u32 = 0,
     // synchronized output(2026) hold가 이어진 tick 수(활성 surface 기준). sync_timeout_ms에 해당하는 tick 수를 넘으면 ESU
     // 유실로 보고 강제 투영해 freeze를 푼다. sync가 꺼지면 0으로 리셋한다.
     sync_hold_ticks: u32 = 0,
@@ -5052,13 +5049,35 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 카드 아이콘·색의 대표 에이전트 종류 — running Term 우선(그 kind로 아이콘·브랜드색), 없으면 활성 Term kind
-    /// (idle "✓"·none 카드를 옛대로 유지). 여러 Term이 running이면 첫 번째(claude/codex 혼재는 드묾).
+    const AgentRepresentative = struct { term: *Term, state: maru.session.agent_observer.State };
+
+    fn agentStatePriority(state: maru.session.agent_observer.State) u8 {
+        return switch (state) {
+            .blocked => 3,
+            .running => 2,
+            .idle => 1,
+            .unknown => 0,
+        };
+    }
+
+    /// 워크스페이스 대표 상태. 사용자 조치가 필요한 blocked를 running보다 먼저, 그 뒤 idle/unknown 순으로 고른다.
+    /// 같은 우선순위면 활성 Term을 유지해 카드 라벨과 종류가 불필요하게 흔들리지 않는다.
+    fn tabAgentRepresentative(tab: *Tab) ?AgentRepresentative {
+        var best: ?AgentRepresentative = if (tab.activeTerm().agent_kind != .none)
+            .{ .term = tab.activeTerm(), .state = tab.activeTerm().agent_state }
+        else
+            null;
+        for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (term.agent_kind == .none) continue;
+            if (best == null or agentStatePriority(term.agent_state) > agentStatePriority(best.?.state))
+                best = .{ .term = term, .state = term.agent_state };
+        };
+        return best;
+    }
+
+    /// 카드 아이콘·색의 대표 에이전트 종류는 대표 상태와 같은 Term에서 가져온다.
     fn tabAgentKind(tab: *Tab) AgentKind {
-        // 첫 running pane의 대표 kind(=그 pane 첫 running Term) — paneAgentKind에 running-우선 규칙을 위임(중복 제거,
-        // code-review high). paneHasRunningAgent가 true면 paneAgentKind는 폴백 없이 running kind를 돌려준다.
-        for (tab.panes.items) |p| if (paneHasRunningAgent(p)) return paneAgentKind(p);
-        return tab.activeTerm().agent_kind;
+        return if (tabAgentRepresentative(tab)) |representative| representative.term.agent_kind else .none;
     }
 
     /// pane 라벨(탭바) 색의 대표 에이전트 종류 — running Term 우선, 없으면 활성 Term kind.
@@ -16133,6 +16152,15 @@ pub const AppSession = struct {
         return self.ticksForMs(agent_poll_interval_ms);
     }
 
+    fn agentObserverIntervalTicks(self: *const AppSession) u32 {
+        return self.ticksForMs(agent_observer_interval_ms);
+    }
+
+    fn awakeMs(self: *const AppSession) u64 {
+        const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        return if (now_ns <= 0) 0 else @intCast(@divFloor(now_ns, std.time.ns_per_ms));
+    }
+
     fn syncTimeoutTicks(self: *const AppSession) u32 {
         return self.ticksForMs(sync_timeout_ms);
     }
@@ -19454,190 +19482,89 @@ pub const AppSession = struct {
     /// syscall은 비싸므로 agent_poll_interval_ms(≈0.5s)마다. 변화가 있으면 metal_dirty로 재렌더(심볼 표시 갱신).
     fn pollAgentKinds(self: *AppSession) void {
         self.agent_poll_ticks += 1;
-        if (self.agent_poll_ticks < self.agentPollIntervalTicks()) return;
-        self.agent_poll_ticks = 0;
+        self.agent_observer_poll_ticks += 1;
+        const periodic_kind_probe = self.agent_poll_ticks >= self.agentPollIntervalTicks();
+        const observer_probe = self.agent_observer_poll_ticks >= self.agentObserverIntervalTicks();
+        if (!periodic_kind_probe and !observer_probe) return;
+        if (periodic_kind_probe) self.agent_poll_ticks = 0;
+        if (observer_probe) self.agent_observer_poll_ticks = 0;
         if (!self.surface_initialized) return;
-        // **모든 pane × 모든 Term**을 poll한다 — background split pane·가로탭(Term)에서 끝난 에이전트도 완료 알림을
-        // 내고, 클릭이 그 Term으로 점프하려면(activateSurfaceById) 발신 Term의 surface_id가 필요하기 때문이다. 예전엔
-        // 탭당 활성 pane의 활성 Term 하나만 poll해(사이드바가 그 Term만 보여줘서), 비활성 pane/Term에서 끝난 에이전트는
-        // 완료 알림 자체가 안 났고 docs/notifications.md "split panel+가로탭까지 포커스" 능력이 사실상 트리거되지 않았다.
-        // 비용 가드: foregroundProcessName syscall은 agent_poll_interval_ms(≈0.5s)로 throttle되고, metal_dirty(재렌더)는
-        // **화면에 running 표시가 실제로 보이는 탭**의 변화에만 올린다(agentDisplayVisible: 보이는 사이드바 카드 or 활성 탭의
-        // 탭 바). 카드 스피너·아이콘이 워크스페이스 단위가 되고 탭 바에 Term 플래그(●)가 생겨, 옛 "활성 Term만" 게이트에서
-        // **탭 단위**로 확장했다(백그라운드 pane/Term 상태 변화도 그 탭 카드/탭바에 반영되므로). 둘 다 안 보이면 재렌더 안 함.
-        // is_current(완료 알림 억제 게이트)는 **Term 단위**다 — 사용자가 지금 실제로 그 안에 있는 Term 하나(포커스 창의
-        // 활성 탭·활성 pane·활성 Term)뿐 억제하고, 그 외 모든 Term(비활성 탭·활성 탭의 background split·background 가로탭)은
-        // 완료 시 알림한다. 탭 단위로 묶으면 같은 탭의 다른 pane에서 끝난 에이전트를 알림으로 열람·점프할 길이 막혀 직관에
-        // 어긋난다(사용자 피드백). 창이 비포커스면 어떤 Term도 "지금 보는" 게 아니라(null) 전부 알림한다.
+        // 모든 pane × 모든 Term을 보되 syscall은 ≈0.5s로 throttle한다. 화면에 카드/탭바가 실제로 보이는 탭만
+        // 상태 변화 시 dirty해, background observer가 불필요한 프레임을 만들지 않는다.
         var buf: [256]u8 = undefined;
-        const focused_term: ?*Term = if (self.window_focused) self.activeTab().activePane().activeTerm() else null;
         for (self.tabs.items, 0..) |tab, ti| {
             const displayed = self.agentDisplayVisible(ti); // 스피너/플래그/아이콘 재렌더 게이트(카드 or 활성 탭 탭바) — 탭 내 모든 Term 공유
-            // 카드 답변 미리보기는 **활성 Term**만 보여주므로, 답변 변화 dirty는 좁게(카드 보임 + 그 활성 Term)로 짝짓는다.
-            const card_visible = !self.sidebar_collapsed and !self.chrome_minimal and self.displaySlotOf(ti) != null;
-            const shown_term = tab.activePane().activeTerm();
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                    const prev = term.agent_kind;
-                    const raw_fg = term.rt.live_pty.session.foregroundProcessName(&buf);
-                    term.agent_kind = classifyAgent(raw_fg);
-                    if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("fg='{s}' kind={s} live={} term=0x{x}", .{ raw_fg orelse "(null)", @tagName(term.agent_kind), term.rt.live_initialized, @intFromPtr(term) });
-                    if (term.agent_kind != prev) {
-                        if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
-                        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
-                        // kind가 바뀌면(새 에이전트 시작/종료/claude↔codex 직접 전환) 상태 캐시를 **전부** 리셋한다 —
-                        // 옛 세션의 mtime/상태/답변이 새 에이전트로 새지 않게. 특히 agent_state를 unknown으로 되돌려야
-                        // 직접 전환(claude .running → codex) 때 stale한 prev_state로 가짜 running→idle 알림이 안 뜬다.
-                        term.agent_session_mtime = 0;
-                        term.agent_state = .unknown;
-                        term.agent_answer_len = 0;
-                        if (agentExitClearsRestoredFork(prev, term.agent_kind)) clearRestoredAgentFork(term);
-                        // Codex가 새로 감지됐는데 훅이 미신뢰면(진행중 안 뜨는 흔한 원인) 세션당 1회 안내한다 — Codex는 보안상
-                        // 훅을 신뢰해야 발화한다(docs/agent-session.md의 pinned upstream 근거). claude는 이 게이트가 없어
-                        // codex만. 이 감지는 trusted_hash 전무만 보는 coarse hint이고 정확한 hash 판정은 Codex가 소유한다.
-                        if (term.agent_kind == .codex and !self.codex_hook_hint_shown and agent_hooks.codexHookNeedsTrust(self.io, self.allocator)) {
-                            self.codex_hook_hint_shown = true;
-                            self.showNotice("Codex 진행 표시가 안 뜨나요? Codex는 보안상 훅을 신뢰(trust)해야 진행 상태를 알립니다 — Codex에서 maru 훅을 승인/신뢰하면 사이드바에 진행중이 뜹니다.");
+                    const pgid = if (observer_probe) term.rt.live_pty.session.foregroundProcessGroup() orelse 0 else term.rt.agent_observer_pgid;
+                    const pgid_changed = observer_probe and pgid != term.rt.agent_observer_pgid;
+                    if (observer_probe) term.rt.agent_observer_pgid = pgid;
+                    if (periodic_kind_probe or pgid_changed) {
+                        const prev = term.agent_kind;
+                        const raw_fg = term.rt.live_pty.session.foregroundProcessName(&buf);
+                        term.agent_kind = classifyAgent(raw_fg);
+                        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
+                        if (term.agent_kind != prev) {
+                            if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
+                            if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
+                            // 새 프로세스의 화면/OSC/activity를 이전 상태와 섞지 않는다.
+                            term.agent_state = .unknown;
+                            term.agent_stabilizer.reset();
+                            term.agent_screen_generation = 0;
+                            term.agent_last_output_ms = 0;
+                            if (agentExitClearsRestoredFork(prev, term.agent_kind)) clearRestoredAgentFork(term);
                         }
                     }
-                    const is_current = focused_term != null and term == focused_term.?; // 지금 그 안에 있는 그 Term만 억제
-                    const answer_visible = card_visible and term == shown_term; // 카드 답변 미리보기(활성 Term)
-                    if (term.agent_kind != .none) self.pollAgentState(term, tab, is_current, displayed, answer_visible);
+                    if (observer_probe and term.agent_kind != .none) self.pollAgentState(term, displayed);
                 }
             }
         }
     }
 
-    /// 에이전트 포그라운드인 Term의 진행 상태(running/idle)를 세션 JSONL tail로 갱신한다. 세션 파일 위치 I/O는
-    /// agent_session(L4)이, 바이트→상태 판정은 session core가 한다. cwd(OSC 7)를 모르면(아직 미보고) 보류한다 —
-    /// 잘못된 cwd로 엉뚱한 세션을 읽지 않게. mtime이 직전과 같으면 agent_session.poll이 재파싱을 건너뛴다.
-    /// `is_current`=사용자가 지금 그 안에 있는 그 Term(포커스 창의 활성 탭·활성 pane·활성 Term) — 그게 아닌데(비활성 탭·
-    /// background split·background 가로탭) running→idle로 끝나면 완료 알림을 큐에 넣는다(Term 단위 — 같은 탭 다른 pane도 알림).
-    /// `spinner_visible`=이 Term의 running 표시(카드 스피너/아이콘·탭바 플래그)가 화면에 보이는가(agentDisplayVisible: 보이는
-    /// 사이드바 카드 or 활성 탭의 탭 바) — **상태 변화** dirty 게이트. `answer_visible`=이 Term의 답변 미리보기가 카드에 보이는가
-    /// (카드 보임 + 이 Term이 그 워크스페이스 활성 Term) — **답변 변화** dirty 게이트. 상태는 넓게·답변은 좁게 분리해, 안 보이는
-    /// background Term의 답변 길이만 늘어도 헛 재렌더하지 않는다(code-review high — 탭 단위로 넓힌 게이트의 부작용 차단).
-    fn pollAgentState(self: *AppSession, term: *Term, tab: *Tab, is_current: bool, spinner_visible: bool, answer_visible: bool) void {
-        const kind: agent_session.Kind = switch (term.agent_kind) {
+    /// foreground process와 터미널이 이미 소유한 bounded 화면 tail·OSC title/progress·최근 PTY 출력을 결합한다.
+    /// raw 화면/제목은 로그에 남기지 않고, 순수 observer의 rule id와 최종 상태만 진단한다.
+    fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
+        const agent: maru.session.agent_observer.Agent = switch (term.agent_kind) {
             .none => return,
             .claude => .claude,
             .codex => .codex,
         };
-        if (term.rt.restored_agent_kind) |pending_kind| if (pending_kind != kind) clearRestoredAgentFork(term);
-        const prev_state = term.agent_state;
-        // 이 팬 에이전트의 세션 트랜스크립트 **경로** — Claude는 SessionStart, Codex는 현재 실측상 첫
-        // UserPromptSubmit/Stop 훅이 `MARU_AGENT_MAPPING_ID`(Term별 불투명 key)로 남긴다. 같은 cwd 다중 세션과
-        // 별도 maru 프로세스도 key가 겹치지 않는다. 매핑이 아직 없으면 null → unknown.
-        var tp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const transcript_path = if (term.rt.agent_mapping_id == 0) null else agent_hooks.readMapping(self.io, self.allocator, term.rt.agent_mapping_id, kind, null, &tp_buf);
-        // restore fork는 최초 provider 훅이 source와 다른 id를 쓸 때까지 원본 transcript를 읽지 않는다. 한 번 확인한 뒤에는
-        // random mapping을 현재 세션의 단일 출처로 받아 source 재매핑도 허용한다. confirmed id는 runtime에 남겨 OSC 7이
-        // 없는 direct-exec agent도 종료 시 정확한 id를 저장한다.
-        if (term.rt.restored_agent_kind != null) {
-            const path = transcript_path orelse return;
-            var id_buf: [agent_restore_session_max]u8 = undefined;
-            const mapped = agent_session.sessionIdFromTranscript(self.io, self.allocator, kind, path, &id_buf) orelse return;
-            const source = term.rt.restored_agent_source[0..term.rt.restored_agent_source_len];
-            const forked = restoredForkMappedSession(source, mapped) orelse return;
-            if (confirmRestoredAgentFork(term, forked)) {
-                term.agent_session_mtime = 0;
-                term.agent_state = .unknown;
-                term.agent_answer_len = 0;
-            }
-        }
-        const r = agent_session.poll(self.io, self.allocator, kind, term.agent_session_mtime, &term.agent_answer_buf, transcript_path);
-        if (r.missing) {
-            // 매핑된 트랜스크립트가 삭제됨 = 세션 gone(경로는 세션 내내 고정이라 회전 아님 — docs/agent-session.md).
-            // 직전이 **관측된 상태**(running/idle/interrupted 중 하나)였으면(=살아있던 세션) stale 매핑을 파기하고
-            // 상태를 unknown으로 리셋한다 — 안 그러면 unknown의 "직전 상태 보존" 계약 때문에 삭제된 세션의 표시가
-            // 영영 안 걷힌다. 새 세션은 다음 provider 훅이 새 매핑을 쓰므로 자가회복. →unknown이라 완료 알림은 안 뜬다.
-            // `!= .unknown`으로 쓴다 — 상태를 늘릴 때마다 or-체인을 손봐야 하면 또 빠뜨린다(interrupted를 실제로
-            // 빠뜨려 "· 중단됨"이 화면에 남고 stale 매핑도 안 지워졌다 — code-review).
-            if (prev_state != .unknown) {
-                if (term.rt.agent_mapping_id != 0) agent_hooks.removeMapping(self.io, term.rt.agent_mapping_id);
-                if (spinner_visible) self.metal_dirty = true; // 스피너/아이콘 표시 중이었으면 재렌더로 걷어냄
-                if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent transcript gone → 매핑 파기·상태 리셋", .{});
-            }
-            term.agent_state = .unknown;
-            term.agent_answer_len = 0;
-            term.agent_session_mtime = 0;
-            return;
-        }
-        const new_state = r.state orelse {
-            term.agent_session_mtime = r.mtime; // null = mtime 동일 — 갱신 무해, 직전 상태 유지(재파싱 skip)
-            return;
-        };
-        // unknown(세션 못 찾음 / tail에 완전한 엔트리 없음)은 **직전 상태를 보존**한다(AgentState.unknown 계약).
-        // running을 unknown으로 덮으면 사이드바가 깜빡이고, running→idle 전환 edge를 놓쳐 완료 알림이 누락된다.
-        // mtime을 갱신하지 않아 다음 poll에 다시 시도한다(거대 단일 줄/쓰는 중이던 경우 곧 완전한 줄이 보임).
-        if (new_state == .unknown) return;
-        term.agent_session_mtime = r.mtime;
-        const new_answer_len: usize = if (new_state == .idle) r.answer_len else 0;
-        const state_changed = new_state != term.agent_state;
-        const answer_changed = new_answer_len != term.agent_answer_len;
-        if (state_changed or answer_changed) {
-            // **상태 변화**는 카드 스피너/아이콘·탭바 플래그(탭 단위 표시)라 `spinner_visible`로, **답변 변화**는 카드 답변
-            // 미리보기(활성 Term + 카드 보임)뿐이라 좁은 `answer_visible`로 dirty한다 — 안 보이는 background Term의 답변 길이만
-            // 늘어도(카드엔 활성 Term 답변, 탭바엔 정적 ●라 화면 무변화) 전체 재렌더하지 않게(code-review high — 넓힌 게이트 부작용 차단).
-            if ((state_changed and spinner_visible) or (answer_changed and answer_visible)) self.metal_dirty = true;
-            if (state_changed and diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent state: {s}", .{@tagName(new_state)});
-        }
-        term.agent_state = new_state;
-        term.agent_answer_len = new_answer_len;
-        // 완료 알림: running→idle 전환을 처음 관측했고(전환 edge가 자연 디바운스 — idle 유지 중엔 mtime-skip으로
-        // 재진입 안 함), "보고 있는" 탭이 아니며, config가 켜졌을 때만. unknown→idle(원래 idle이던 세션)은 알림 안 함.
-        // **running→interrupted는 알림 없음**(사용자 결정): 인터럽트는 완료가 아니고, 사용자가 직접 ESC를 눌러
-        // 이미 그 자리에 있다. 스피너·탭 ●는 `== .running` 판정이라 interrupted에서 자동으로 꺼진다(별도 처리 불필요).
-        // 반대로 **interrupted→idle은 알림을 쏜다**: 인터럽트 뒤 사용자가 다시 프롬프트를 내고 그 턴이 완료됐는데
-        // running 관측이 poll 창(0.5s) 사이에 끼어 안 잡히면, prev가 interrupted라 알림이 통째로 사라진다
-        // (code-review — "끝나면 알려줘"가 조용히 실패). 완료 마커가 나온 것 자체가 완료 사실이다.
-        const completed_edge = (prev_state == .running or prev_state == .interrupted) and new_state == .idle;
-        if (completed_edge and !is_current and self.loaded_config.config.notifications.agent_complete) {
-            self.enqueueAgentCompletion(tab, term);
-        }
-    }
+        var title_buf: [256]u8 = undefined;
+        var progress_buf: [64]u8 = undefined;
+        const generation = term.surface.core.observerGeneration();
+        const now_ms = self.awakeMs();
+        const activity_age_ms = now_ms -| term.agent_last_output_ms;
+        const output_active = term.agent_last_output_ms != 0 and activity_age_ms <= agent_activity_window_ms;
+        if (generation == term.agent_screen_generation and term.agent_state == .idle and !output_active) return;
+        term.surface.lockCore(self.io);
+        const core = &term.surface.core;
+        const screen = core.dumpRecentUtf8(self.allocator, 12, 16 * 1024) catch null;
+        const title_len = @min(core.windowTitle().len, title_buf.len);
+        @memcpy(title_buf[0..title_len], core.windowTitle()[0..title_len]);
+        const progress_len = @min(core.agentProgress().len, progress_buf.len);
+        @memcpy(progress_buf[0..progress_len], core.agentProgress()[0..progress_len]);
+        core.clearAgentProgress();
+        term.surface.unlockCore(self.io);
+        defer if (screen) |owned| self.allocator.free(owned);
 
-    /// 완료 알림 한 건을 큐에 넣는다 — title=`{✶|◆} {Claude|Codex} · {위치=탭 › 팬}`(아래), body=마지막 답변
-    /// 평탄화 미리보기 또는 "완료". owned dup 실패는 조용히 버린다(best-effort — 알림은 부가 기능). 큐가 상한이면
-    /// 가장 오래된 걸 버려 폭주를 막는다.
-    fn enqueueAgentCompletion(self: *AppSession, tab: *Tab, term: *Term) void {
-        // 제목 = **에이전트 심볼 + 종류(Claude/Codex)** + **위치(탭 › 팬)** — 어느 대화가 어느 터미널에서 끝났는지 식별
-        // (사용자 요청). 심볼은 사이드바 에이전트 아이콘과 **의미가 같은** 종류 표시(✶ claude=선버스트, ◆ codex)로
-        // 알림에서도 종류가 한눈에 구분된다(macOS 알림 왼쪽 큰 아이콘은 앱 아이콘 고정이라 제목 prefix로 구분).
-        // 알림 제목은 OS 폰트라 **실제 유니코드 `agentSymbolCodepoint`**(✶◆)를 쓴다 — 사이드바는 maru 합성
-        // `agentIconCodepoint`(PUA sparkle/diamond)로, 둘은 의미 1:1이되 OS vs maru 렌더 차이로 codepoint가 갈린다.
-        // 위치는 workspaceLabel(탭)과 termLabel(끝난 term)을 `notificationLocation`이 `탭 › 팬`으로 조립한다(둘이 같으면
-        // 하나만 — 단일 Term 탭이면 예전 `· {Term 라벨}` 제목과 동일). background split/가로탭 Term 완료도 그 세션을
-        // 정확히 가리킨다. 종류 없음(이론상 미발생)이면 워크스페이스 폴백.
-        const agent_name: []const u8 = switch (term.agent_kind) {
-            .claude => "Claude",
-            .codex => "Codex",
-            .none => "",
-        };
-        var loc_buf: [notification_location_buf_len]u8 = undefined;
-        const location = notificationLocation(&loc_buf, tab, term);
-        const title = if (agent_name.len > 0)
-            // {u}=심볼 codepoint를 UTF-8로(agentSymbolCodepoint 단일 출처) + 종류명 + 위치(탭 › 팬).
-            std.fmt.allocPrint(self.allocator, "{u} {s} · {s}", .{ agentSymbolCodepoint(term.agent_kind), agent_name, location }) catch return
-        else
-            self.allocator.dupe(u8, workspaceLabel(tab)) catch return;
-        const body_src: []const u8 = if (term.agent_answer_len > 0) term.agent_answer_buf[0..term.agent_answer_len] else "완료";
-        const body = self.allocator.dupe(u8, body_src) catch {
-            self.allocator.free(title);
-            return;
-        };
-        if (self.agent_notifications.items.len >= agent_notification_cap) {
-            const dropped = self.agent_notifications.orderedRemove(0);
-            self.allocator.free(dropped.title);
-            self.allocator.free(dropped.body);
+        term.agent_screen_generation = generation;
+        const detection = maru.session.agent_observer.detect(agent, .{
+            .screen = screen orelse "",
+            .osc_title = title_buf[0..title_len],
+            .osc_progress = progress_buf[0..progress_len],
+            .output_active = output_active,
+        });
+        const previous = term.agent_state;
+        const current = term.agent_stabilizer.observe(detection, now_ms);
+        term.agent_state = current;
+        if (current != previous) {
+            if (displayed) self.metal_dirty = true;
+            if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
+                "agent previous={s} state={s} rule={s} idle={} blocker={} running={} activity_age_ms={d}",
+                .{ @tagName(previous), @tagName(current), detection.rule_id, detection.visible_idle, detection.visible_blocker, detection.visible_running, activity_age_ms },
+            );
         }
-        // surface_id는 알림 클릭 시 그 Term으로 점프하기 위한 식별자다(term은 heap-pin이라 닫히기 전까지 유효하지만
-        // 여기선 id 값만 복사하므로 수명 의존이 없다 — 클릭 시점에 id로 재조회한다).
-        self.agent_notifications.append(self.allocator, .{ .title = title, .body = body, .surface_id = term.surface.id }) catch {
-            self.allocator.free(title);
-            self.allocator.free(body);
-        };
     }
 
     /// 모든 Term의 자동 제목 캐시(auto_title)를 core_mutex 하에 갱신한다 — termLabel(렌더 스레드)이 reader 스레드의
@@ -19861,6 +19788,7 @@ pub const AppSession = struct {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized) continue;
                     const ds = try term.rt.pump.drainAvailable();
+                    if (ds.output_events > 0) term.agent_last_output_ms = self.awakeMs();
                     drain_summary.output_events += ds.output_events;
                     drain_summary.exit_events += ds.exit_events;
                     // Term별로 종료를 한 번만 finish(reader join + child reap). 세션 종료는 '모든' Term이 끝났을 때.
@@ -22423,39 +22351,29 @@ pub const AppSession = struct {
         }
     }
 
-    /// 사이드바 카드 4번째 줄(상태줄) 텍스트를 owned 슬라이스로 만든다 — **워크스페이스(탭) 단위**: 어느 pane/Term이든
-    /// running이면 "▁▅▇▃ 진행중"(codex식 파형, 백그라운드 Term 포함). 아니면 활성 Term의 상태(idle "✓ {답변}"·none "")로
-    /// 폴백한다. running 판정을 활성 Term에 국한하지 않는 게 agentStatusLine과의 차이(사용자 요청).
-    fn workspaceStatusLine(self: *AppSession, tab: *Tab, running: bool) ![]const u8 {
-        if (running) return self.runningStatusLine(); // 어느 Term이든 running(호출부가 tabHasRunningAgent로 1회 계산해 전달)
-        return self.agentStatusLine(tab.activeTerm());
+    /// 사이드바 상태줄은 워크스페이스 대표 상태(blocked > running > idle > unknown)를 표시한다.
+    fn workspaceStatusLine(self: *AppSession, tab: *Tab) ![]const u8 {
+        const representative = tabAgentRepresentative(tab) orelse return self.allocator.dupe(u8, "");
+        return self.agentStatusLine(representative.term);
     }
 
     /// 리네임 caret 줄 수 계산용 — workspaceStatusLine이 non-empty 상태줄을 낼지 텍스트 생성 없이 순수 판정한다(caret은
-    /// 파형 문자열이 필요 없고, runningStatusLine 할당·spinner 조회를 피한다). running이면 항상 파형, 아니면 활성 Term이
-    /// 에이전트(kind≠none)이고 상태를 읽었으면(state≠unknown) 상태줄이 생긴다. **위 workspaceStatusLine/agentStatusLine의
-    /// non-empty 조건과 반드시 동기** — 저 로직(none·unknown만 "")이 바뀌면 여기도 바꾼다(카드 줄 수↔caret 정렬 결합).
+    /// 파형 문자열이 필요 없고, runningStatusLine 할당·spinner 조회를 피한다). 에이전트가 있으면 unknown도
+    /// "상태 확인 중"을 표시한다. 위 workspaceStatusLine의 non-empty 조건과 반드시 동기다.
     fn workspaceHasStatusLine(tab: *Tab) bool {
-        if (tabHasRunningAgent(tab)) return true;
-        const term = tab.activeTerm();
-        return term.agent_kind != .none and term.agent_state != .unknown;
+        return tabAgentRepresentative(tab) != null;
     }
 
     /// 한 Term의 상태줄 텍스트(owned). 에이전트 아니면(none) "" — 그 줄은 생략된다. running이면 "▁▅▇▃ 진행중"(파형),
-    /// idle이면 "✓ {답변 미리보기}"(없으면 "✓ 완료"). 답변은 Term inline 버퍼(copyPreviewFlattened, 알림 본문과 공유)에서.
-    /// 사이드바는 이걸 직접 쓰지 않고 workspaceStatusLine(탭 단위)을 쓴다 — 이 함수는 running=활성/단일 Term 관점(폴백·재사용).
+    /// blocked/idle/unknown도 오해 없는 짧은 상태 문구로 표시한다.
+    /// 사이드바는 workspaceStatusLine이 고른 대표 Term을 이 함수로 넘긴다.
     fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
         if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
         return switch (term.agent_state) {
             .running => self.runningStatusLine(), // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처)
-            .idle => if (term.agent_answer_len > 0)
-                std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{term.agent_answer_buf[0..term.agent_answer_len]}) // ✓ {답변}
-            else
-                self.allocator.dupe(u8, "\u{2713} 완료"), // ✓ 완료(답변 텍스트 없음)
-            // 사용자 인터럽트(ESC) — 완료가 아니라 사용자가 끊었다. 진행 중이 아니므로 파형(스피너)을 걷고,
-            // "완료"라고 하지도 않는다(오해). 기호는 번들 폰트가 확실히 커버하는 ·(U+00B7)로 둔다.
-            .interrupted => self.allocator.dupe(u8, "\u{00b7} 중단됨"),
-            .unknown => self.allocator.dupe(u8, ""), // 트랜스크립트 못 읽음 — 상태줄 생략(아이콘만)
+            .blocked => self.allocator.dupe(u8, "? 입력 대기"),
+            .idle => self.allocator.dupe(u8, "\u{2713} 대기중"),
+            .unknown => self.allocator.dupe(u8, "\u{00b7} 상태 확인 중"),
         };
     }
 
@@ -22789,7 +22707,7 @@ pub const AppSession = struct {
                 // **상태줄은 rename 중에도 표시** — 편집하는 워크스페이스가 running이면 파형 스피너를 보여준다(사용자 요청:
                 // "리네임하면 애니메이션이 안 보인다"). 캐럿은 이름줄에만 있어 간섭 없고, "편집 이름 + 상태줄" 레이아웃은
                 // non-git 에이전트 워크스페이스(브랜치/경로 없이 상태줄만)와 동형이라 안전하다. 브랜치/경로는 편집 집중 위해 계속 숨김.
-                try status_lines.append(self.allocator, try self.workspaceStatusLine(tab, running));
+                try status_lines.append(self.allocator, try self.workspaceStatusLine(tab));
                 try pins.append(self.allocator, false);
             } else {
                 const base = workspaceLabel(tab);
@@ -22831,7 +22749,7 @@ pub const AppSession = struct {
                 // 상태줄은 **탭 단위** — running이면(어느 pane/Term이든) 파형 스피너, 아니면 활성 Term 상태(위에서 계산한 running 재사용).
                 // **빈 상태줄(에이전트 아님)엔 indent를 붙이지 않는다** — 안 그러면 공백-only 줄이 돼 buildSidebarDrawList가
                 // 빈 줄로 생략하지 못하고 **없던 4번째 줄이 렌더**된다(사용자 제보 버그). 빈 줄은 반드시 ""로 유지.
-                const status_raw = try self.workspaceStatusLine(tab, running);
+                const status_raw = try self.workspaceStatusLine(tab);
                 try status_lines.append(self.allocator, if (indent.len == 0 or status_raw.len == 0) status_raw else blk: {
                     defer self.allocator.free(status_raw);
                     break :blk try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ indent, status_raw });
@@ -31141,7 +31059,7 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
     try std.testing.expectEqual(@as(u32, 24 + block_off_c + 2 * AppSession.sidebarLineStep(ch)), cells3[0].origin_y); // 헤더24 + block_off + 2줄*step(여유)
 }
 
-test "workspaceStatusLine: running=파형 스피너 prefix, idle=✓, none=빈 문자열; tabAgentKind 폴백" {
+test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중, unknown=상태 확인" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -31161,7 +31079,7 @@ test "workspaceStatusLine: running=파형 스피너 prefix, idle=✓, none=빈 �
     term.agent_kind = .claude;
     term.agent_state = .running;
     {
-        const s = try session.workspaceStatusLine(tab, AppSession.tabHasRunningAgent(tab));
+        const s = try session.workspaceStatusLine(tab);
         defer allocator.free(s);
         try std.testing.expect(std.mem.endsWith(u8, s, "진행중"));
         const first_len = std.unicode.utf8ByteSequenceLength(s[0]) catch 1;
@@ -31170,20 +31088,34 @@ test "workspaceStatusLine: running=파형 스피너 prefix, idle=✓, none=빈 �
     }
     try std.testing.expectEqual(AgentKind.claude, AppSession.tabAgentKind(tab));
 
-    // idle + 답변 없음: "✓ 완료"(✓로 시작).
-    term.agent_state = .idle;
-    term.agent_answer_len = 0;
+    // blocked는 running보다 높은 대표 상태다.
+    term.agent_state = .blocked;
     {
-        const s = try session.workspaceStatusLine(tab, AppSession.tabHasRunningAgent(tab));
+        const s = try session.workspaceStatusLine(tab);
         defer allocator.free(s);
-        try std.testing.expect(std.mem.startsWith(u8, s, "\u{2713}")); // ✓
+        try std.testing.expectEqualStrings("? 입력 대기", s);
+    }
+
+    // idle은 완료로 단정하지 않고 입력 가능한 대기 상태로 표시한다.
+    term.agent_state = .idle;
+    {
+        const s = try session.workspaceStatusLine(tab);
+        defer allocator.free(s);
+        try std.testing.expectEqualStrings("\u{2713} 대기중", s);
+    }
+
+    term.agent_state = .unknown;
+    {
+        const s = try session.workspaceStatusLine(tab);
+        defer allocator.free(s);
+        try std.testing.expectEqualStrings("\u{00b7} 상태 확인 중", s);
     }
 
     // none: 상태줄 빈 문자열(그 줄 생략). tabAgentKind 폴백도 none.
     term.agent_kind = .none;
     term.agent_state = .idle;
     {
-        const s = try session.workspaceStatusLine(tab, AppSession.tabHasRunningAgent(tab));
+        const s = try session.workspaceStatusLine(tab);
         defer allocator.free(s);
         try std.testing.expectEqual(@as(usize, 0), s.len);
     }
@@ -31324,53 +31256,6 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
     session.advanceAgentSpinner();
     try std.testing.expectEqual(@as(u8, (f0 + 2) % wave_len), session.agent_spin_frame);
     try std.testing.expect(!session.chrome_dirty);
-}
-
-test "에이전트 완료 알림: enqueue 후 pendingNotification이 OSC보다 먼저 큐를 드레인" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    const tab = session.tabs.items[0];
-    const term = tab.activePane().activeTerm();
-    term.agent_kind = .claude; // 배지 제목 경로(✶ Claude · …)를 실제로 검증
-    // 탭·Term 라벨을 rename으로 명시해 제목 위치(탭 › 팬)를 결정적으로 검증한다(deinit이 custom_name을 free).
-    tab.custom_name = try allocator.dupe(u8, "배포");
-    term.surface.custom_name = try allocator.dupe(u8, "작업1");
-    // 완료 답변을 채우고 비활성 탭 완료를 모사해 enqueue(실제 경로 함수 사용).
-    const ans = "PR 머지 완료";
-    @memcpy(term.agent_answer_buf[0..ans.len], ans);
-    term.agent_answer_len = ans.len;
-    session.enqueueAgentCompletion(tab, term);
-    try std.testing.expectEqual(@as(usize, 1), session.agent_notifications.items.len);
-
-    // pendingNotification이 OSC 9/777보다 먼저 에이전트 큐를 드레인하고, body=답변. 큐가 비워진다.
-    const n = session.pendingNotification() orelse return error.TestExpectedNotification;
-    try std.testing.expectEqualStrings(ans, n.body);
-    // title = "{✶ agentSymbolCodepoint} Claude · {탭 › 팬}" — 배지 글리프·종류·위치(어느 탭·어느 팬) 식별.
-    try std.testing.expectEqualStrings("\u{2736} Claude · 배포 › 작업1", n.title); // ✶ + 종류 + 위치(탭 › 팬)
-    try std.testing.expectEqual(@as(usize, 0), session.agent_notifications.items.len);
-    // 큐가 비면 OSC 경로로 떨어지고, controlled_smoke엔 OSC 알림이 없어 null.
-    try std.testing.expect(session.pendingNotification() == null);
-
-    // 답변이 비면 body="완료"로 폴백.
-    term.agent_answer_len = 0;
-    session.enqueueAgentCompletion(tab, term);
-    const n2 = session.pendingNotification() orelse return error.TestExpectedNotification;
-    try std.testing.expectEqualStrings("완료", n2.body);
-    // 알림에 surface_id가 실린다(클릭 라우팅용) — 활성 탭의 활성 Term surface.id와 일치.
-    try std.testing.expectEqual(session.activeSurface().id, n2.surface_id);
-    // 에이전트 완료는 "안 보는 탭"이 대상이라 앱 전면에서도 배너로 띄운다(foreground_banner=true).
-    try std.testing.expect(n2.foreground_banner);
 }
 
 test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조회해 그 자리로 활성화한다" {
@@ -39806,6 +39691,36 @@ fn initSmokeSessionTwoTerms(allocator: std.mem.Allocator) !*AppSession {
     return session;
 }
 
+test "agent representative prioritizes blocked over running over active idle" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const tab = session.activeTab();
+    const background = tab.activePane().terms.items[0];
+    const active = tab.activeTerm();
+    active.agent_kind = .claude;
+    active.agent_state = .idle;
+    background.agent_kind = .codex;
+    background.agent_state = .running;
+    try std.testing.expectEqual(AgentKind.codex, AppSession.tabAgentKind(tab));
+    {
+        const line = try session.workspaceStatusLine(tab);
+        defer allocator.free(line);
+        try std.testing.expect(std.mem.endsWith(u8, line, "진행중"));
+    }
+
+    background.agent_state = .blocked;
+    try std.testing.expectEqual(AgentKind.codex, AppSession.tabAgentKind(tab));
+    {
+        const line = try session.workspaceStatusLine(tab);
+        defer allocator.free(line);
+        try std.testing.expectEqualStrings("? 입력 대기", line);
+    }
+}
+
 /// 테스트 유틸 — 세션의 모든 Term 코어를 "프롬프트에 idle"(OSC 133 input) 상태로 표시한다. controlled_smoke는
 /// OSC 133을 안 쏘므로 코어가 unknown이라 닫기 확인이 보수적으로 뜬다(cursorIsAtPrompt=false). 닫기를 **메커니즘**
 /// 으로만 쓰는(닫기 확인 자체가 검증 대상이 아닌) 탭/pane/Term 수명 테스트가, 프로덕션의 통합 셸 idle 상태를 흉내 내
@@ -39991,12 +39906,12 @@ test "collector atPromptWire: semantic_state(+alt) → at_prompt 3상(unknown≠
 }
 
 // ── 순수 매핑 2) agent 내부→wire(§3): none=null(생략), kind/state 조합 ──
-test "collector agentInfoWire: interrupted는 별도 wire 값(idle로 접지 않음 — 가짜 완료 방지)" {
-    const i = agentInfoWire(.claude, .interrupted).?;
-    try std.testing.expectEqual(control_surface.AgentState.interrupted, i.state); // ★ .idle이 아니다
-    const j = agentInfoWire(.codex, .interrupted).?;
-    try std.testing.expectEqual(control_surface.AgentState.interrupted, j.state);
-    try std.testing.expect(agentInfoWire(.none, .interrupted) == null); // none이면 여전히 wire 생략
+test "collector agentInfoWire: blocked는 별도 wire 값" {
+    const i = agentInfoWire(.claude, .blocked).?;
+    try std.testing.expectEqual(control_surface.AgentState.blocked, i.state);
+    const j = agentInfoWire(.codex, .blocked).?;
+    try std.testing.expectEqual(control_surface.AgentState.blocked, j.state);
+    try std.testing.expect(agentInfoWire(.none, .blocked) == null);
 }
 
 test "collector agentInfoWire: none→null, claude/codex × running/idle/unknown 매핑(내부→wire 격리)" {

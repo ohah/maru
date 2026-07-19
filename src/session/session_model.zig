@@ -7,12 +7,12 @@
 //!
 //! 이 레이어엔 OS 타입(Metal·CoreText·AppKit·PTY)이 식별자로 새지 않는다 — tests/boundary/imports.zig가 강제.
 //! `surface`(터미널 그리드/스크롤백)·`split_tree`(레이아웃 트리)는 이미 OS-중립인 src/app 모듈이고, `agent_state`는
-//! 중립 판정 결과(agent_transcript.AgentState)다.
+//! 중립 판정 결과(agent_observer.State)다.
 
 const std = @import("std");
 const surface_mod = @import("surface.zig");
 const split_tree = @import("split_tree.zig");
-const agent_transcript = @import("agent_transcript.zig");
+const agent_observer = @import("agent_observer.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
 const control_surface = @import("control_surface.zig"); // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
 
@@ -29,10 +29,6 @@ pub const PanelKind = control_surface.PanelKind;
 /// Term 포그라운드에서 도는 에이전트 CLI 종류. 사이드바에 심볼로 표시(claude=✶, codex=◆).
 /// platform이 PTY proc_name 폴링(pollAgentKinds)으로 채우는 파생값이고, 모델은 라벨 표시에만 쓴다.
 pub const AgentKind = enum(u8) { none = 0, claude, codex };
-
-/// idle 에이전트 답변 미리보기(여러 줄 평탄화 — copyPreviewFlattened)를 담는 inline 버퍼 길이(alloc 회피 —
-/// 사이드바는 폭에 맞춰 다시 말줄임, 알림 본문은 더 많이 보임). 알림 배너 ~2줄을 채우게 256으로 둔다.
-pub const agent_answer_max: usize = 256;
 
 /// 세션 모델 생성자 — 런타임 부착 타입 `Rt`로 parametrize한다(platform=`TermRuntime`).
 /// `const Model = session_model.Model(TermRuntime); const Term = Model.Term;` 식으로 platform이
@@ -63,12 +59,12 @@ pub fn Model(comptime Rt: type) type {
             git_branch_cwd: ?[]const u8 = null,
             /// 포그라운드가 어떤 에이전트 CLI인지(파생값). pollAgentKinds가 ≈0.5s마다 proc_name으로 갱신.
             agent_kind: AgentKind = .none,
-            /// 에이전트 세션 진행 상태(파생값) — pollAgentState가 세션 JSONL tail로 판정. mtime=세션 파일 mtime(나노초,
-            /// 안 바뀌면 재파싱 skip). answer_buf/_len=idle일 때 마지막 답변 첫 줄(inline 버퍼). owned 포인터 없음.
-            agent_state: agent_transcript.AgentState = .unknown,
-            agent_session_mtime: i128 = 0,
-            agent_answer_buf: [agent_answer_max]u8 = undefined,
-            agent_answer_len: usize = 0,
+            /// 터미널 observer가 foreground/screen/OSC/activity로 판정한 현재 상태와 전이 안정화 상태.
+            agent_state: agent_observer.State = .unknown,
+            agent_stabilizer: agent_observer.Stabilizer = .{},
+            /// observer가 마지막으로 읽은 TerminalCore write sequence와 마지막 PTY activity 시각(ms, awake clock).
+            agent_screen_generation: u64 = 0,
+            agent_last_output_ms: u64 = 0,
             /// 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 core.windowTitle()을 복사해 채운다. destroyTerm이 해제.
             auto_title: std.ArrayListUnmanaged(u8) = .empty,
             /// syncAutoTitles가 마지막으로 auto_title에 반영한 core.title_generation(P4-1). 코어의 현재 generation과 같으면
@@ -313,8 +309,7 @@ test "session model: 헤드리스 — fake Rt로 Term/Pane/Tab/PaneTree 구성(P
     // Term을 PTY 없이 만든다(surface는 undefined로 두고 모델 메타만 단언 — 모델은 런타임을 모른다).
     var t1: M.Term = .{ .agent_kind = .claude };
     try std.testing.expectEqual(AgentKind.claude, t1.agent_kind);
-    try std.testing.expectEqual(@as(usize, 0), t1.agent_answer_len);
-    try std.testing.expectEqual(agent_transcript.AgentState.unknown, t1.agent_state);
+    try std.testing.expectEqual(agent_observer.State.unknown, t1.agent_state);
 
     // Pane이 *Term을 가로 탭으로 들고 activeTerm을 반환한다.
     var pane: M.Pane = .{};

@@ -151,6 +151,13 @@ pub fn dispatchNotify777(self: *TerminalCore, body: []const u8) void {
 /// 보수적으로 소비해 progress 등 완성 서브커맨드의 오발사를 확실히 막는다(순수 텍스트·단일 숫자 알림만 발사).
 pub fn dispatchNotify9(self: *TerminalCore, body: []const u8) void {
     if (body.len == 0) return;
+    // ConEmu 공개 OSC 9;4 progress: `4;state[;value]`. 상태 관측용 최신값만 보관하고 데스크톱 알림은
+    // 만들지 않는다. https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC
+    if (std.mem.startsWith(u8, body, "4;")) {
+        self.agent_progress.clearRetainingCapacity();
+        self.agent_progress.appendSlice(self.allocator, body) catch self.agent_progress.clearRetainingCapacity();
+        return;
+    }
     if (looksLikeConemu9(body)) return; // `<숫자>;...` → ConEmu 서브커맨드(소비, 알림 안 함)
     setNotification(self, "", body); // iTerm2: title 없음, body=메시지 전체
 }

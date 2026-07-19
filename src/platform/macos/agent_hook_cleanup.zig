@@ -52,7 +52,10 @@ fn cleanupAt(io: std.Io, allocator: std.mem.Allocator, claude: []const u8, codex
     try cleanupConfigAt(io, allocator, claude, "claude");
     try cleanupConfigAt(io, allocator, codex, "codex");
     try cleanupMappingsAt(io, allocator, mappings);
-    try atomicWrite(io, done, "ok\n", false);
+    atomicWrite(io, done, "ok\n", false) catch |err| switch (err) {
+        error.PathAlreadyExists => {}, // 동시에 시작한 다른 창/프로세스가 먼저 완료 marker를 썼다.
+        else => return err,
+    };
 }
 
 fn cleanupConfigAt(io: std.Io, allocator: std.mem.Allocator, path: []const u8, provider: []const u8) !void {
@@ -133,7 +136,10 @@ fn backupNoClobber(io: std.Io, path: []const u8, raw: []const u8) !void {
     var backup_buf: [max_path]u8 = undefined;
     const backup = try std.fmt.bufPrint(&backup_buf, "{s}.maru-backup", .{path});
     if (pathExists(io, backup)) return;
-    try atomicWrite(io, backup, raw, false);
+    atomicWrite(io, backup, raw, false) catch |err| switch (err) {
+        error.PathAlreadyExists => return, // stat 뒤 race: 먼저 만든 백업을 보존한다.
+        else => return err,
+    };
 }
 
 fn atomicWrite(io: std.Io, path: []const u8, data: []const u8, replace: bool) !void {
@@ -141,7 +147,10 @@ fn atomicWrite(io: std.Io, path: []const u8, data: []const u8, replace: bool) !v
     defer atomic.deinit(io);
     try atomic.file.writeStreamingAll(io, data);
     try atomic.file.sync(io);
-    try atomic.replace(io);
+    if (replace)
+        try atomic.replace(io)
+    else
+        try atomic.link(io);
 }
 
 fn pathExists(io: std.Io, path: []const u8) bool {

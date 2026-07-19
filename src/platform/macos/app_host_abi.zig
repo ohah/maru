@@ -2003,9 +2003,14 @@ const FileBridgeContext = struct {
     session: *AppSession,
     surface_id: u64,
 
-    fn read(raw: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
+    fn beginDocument(raw: *anyopaque, document_id: u64) anyerror!u64 {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.readFilePanel(gpa, self.surface_id);
+        return self.session.beginFilePanelDocument(self.surface_id, document_id);
+    }
+
+    fn read(raw: *anyopaque, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8 {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.readFilePanel(gpa, self.surface_id, editor_epoch);
     }
 
     fn readAsset(raw: *anyopaque, gpa: std.mem.Allocator, path: []const u8) anyerror![]u8 {
@@ -2013,9 +2018,9 @@ const FileBridgeContext = struct {
         return self.session.readFilePanelAsset(gpa, self.surface_id, path);
     }
 
-    fn write(raw: *anyopaque, content: []const u8) anyerror!void {
+    fn write(raw: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.writeFilePanel(self.surface_id, content);
+        return self.session.writeFilePanel(self.surface_id, editor_epoch, content);
     }
 
     fn setDirty(raw: *anyopaque, report: maru.session.control_bridge.DirtyReport) anyerror!void {
@@ -2023,9 +2028,9 @@ const FileBridgeContext = struct {
         return self.session.reportFilePanelDirty(self.surface_id, report);
     }
 
-    fn resolveExternalChange(raw: *anyopaque, success: bool) anyerror!void {
+    fn resolveExternalChange(raw: *anyopaque, editor_epoch: u64, success: bool) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        return self.session.completeFileConflictReload(self.surface_id, success);
+        return self.session.completeFileConflictReloadForDocument(self.surface_id, editor_epoch, success);
     }
 
     fn openLink(raw: *anyopaque, href: []const u8, force_system: bool) anyerror!void {
@@ -2050,6 +2055,7 @@ pub export fn maru_macos_app_session_bridge_dispatch(
     var context: FileBridgeContext = .{ .session = app_session, .surface_id = surface_id };
     const access: maru.session.control_bridge.FileAccess = .{
         .context = &context,
+        .begin_document_fn = FileBridgeContext.beginDocument,
         .read_fn = FileBridgeContext.read,
         .read_asset_fn = FileBridgeContext.readAsset,
         .write_fn = FileBridgeContext.write,
@@ -2068,6 +2074,13 @@ pub export fn maru_macos_app_session_bridge_dispatch(
     if (reply.len > out_cap) return @intCast(reply.len);
     @memcpy(op[0..reply.len], reply);
     return @intCast(reply.len);
+}
+
+/// WebKit process termination is a document-lifetime event, not a renderer-worker event. Swift calls this only
+/// after confirming that the callback panel is still the exact surface owner; Zig owns the conservative dirty latch.
+pub export fn maru_macos_app_session_file_panel_document_terminated(session: ?*AppSession, surface_id: u64) u32 {
+    const app_session = session orelse return 0;
+    return app_session.filePanelDocumentTerminated(surface_id);
 }
 
 pub const LivePreviewCandidateAbi = extern struct {
@@ -2551,6 +2564,10 @@ test "maru_macos_app_session_bridge_dispatch export: size query + fill and insuf
     try std.testing.expect(std.mem.indexOf(u8, out, "server_version") != null);
     try std.testing.expectEqual(@as(i64, -2), maru_macos_app_session_bridge_dispatch(null, 7, hello.ptr, hello.len, null, 0));
     try std.testing.expectEqual(@as(i64, -2), maru_macos_app_session_bridge_dispatch(&session, 7, hello.ptr, hello.len, null, 1));
+}
+
+test "file panel document termination ABI rejects a null session" {
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_file_panel_document_terminated(null, 1));
 }
 
 test "maru_macos_app_csp_header export: 단일출처 복사 + cap 부족 -1 + null -2" {

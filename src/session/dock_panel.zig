@@ -26,6 +26,15 @@ pub const Mode = enum(u32) {
     source_edit = 1,
     live_preview = 2,
 
+    /// 새 entry의 시작 모드는 kind 정책에서 한 번만 정한다. 복원 entry는 workspace에 저장된 mode를 그대로
+    /// 덮어쓰므로 이 기본값과 독립이고, HTML은 실행 가능한 문서라 계속 read-only로 시작한다.
+    pub fn defaultFor(kind: EntryKind) Mode {
+        return switch (kind) {
+            .markdown => .live_preview,
+            .html => .read,
+        };
+    }
+
     pub fn allowedFor(self: Mode, kind: EntryKind) bool {
         return switch (kind) {
             .markdown => true,
@@ -74,13 +83,29 @@ pub const Entry = struct {
     id: EntryId,
     path: []u8,
     kind: EntryKind,
-    mode: Mode = .read,
+    /// 런타임 entry 생성자는 신규 정책(`Mode.defaultFor`)인지 복원된 명시 mode인지 반드시 선택한다.
+    /// wire 호환용 `.read` fallback은 `PersistedEntry`에만 남겨 둘을 조용히 섞지 않는다.
+    mode: Mode,
     dirty: bool = false,
     /// FP6 two-phase dirty mirror. source editor가 비활성/읽기 모드로 넘어갈 때 true로 세우고 shell의 강제
     /// setDirty snapshot ack에서만 내린다. ack 전에는 non-dirty라도 live view eviction 대상이 아니다.
     dirty_sync_pending: bool = false,
     /// shell이 보고한 CM6 문서 revision. close request의 request_id/revision ack와 함께 stale clean/save 완료를 거부한다.
     editor_revision: u64 = 0,
+    /// 같은 surface에서 WebContent document가 교체돼 revision clock이 0으로 돌아가도 이전 document의 ACK가 새
+    /// 편집 상태를 덮지 못하게 하는 런타임 generation. bridge beginDocument만 증가시키며 workspace에는 저장하지 않는다.
+    editor_epoch: u64 = 0,
+    /// document id는 신뢰 shell URL이 가진 surface-local 단조 navigation identity다. 같은 document의 begin 재시도는
+    /// idempotent하게 같은 epoch를 받고, 이전 document의 늦은 begin/read는 거부한다. surface id 교체 시 새 수명으로 본다.
+    editor_surface_id: u64 = 0,
+    editor_document_id: u64 = 0,
+    editor_document_active: bool = false,
+    /// dirty/pending document를 잃은 WebContent reload는 disk hydration으로 clean을 추정할 수 없다. 명시적 복구 UX가
+    /// 생길 때까지 save/clean ACK/eviction/mutation을 fail-close하는 catastrophic recovery latch다.
+    editor_recovery_required: bool = false,
+    /// 마지막 성공 Markdown read/save의 디스크 content token. 저장 직전 같은 inode의 in-place 외부 변경도 감지한다.
+    disk_content_hash: u64 = 0,
+    disk_content_hash_valid: bool = false,
     /// FSEvents가 디스크 변경을 알렸는데 source editor가 dirty라 자동 reload하지 못한 상태. 사용자의 buffer를
     /// 덮지 않으며 트리/헤더에 conflict를 표시하고 저장도 명시적 해결 전까지 거부한다.
     external_change: bool = false,
@@ -175,7 +200,12 @@ pub const DockGroup = struct {
         }
         const owned = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned);
-        try self.entries.append(self.allocator, .{ .id = entry_id, .path = owned, .kind = kind });
+        try self.entries.append(self.allocator, .{
+            .id = entry_id,
+            .path = owned,
+            .kind = kind,
+            .mode = Mode.defaultFor(kind),
+        });
         const i = self.entries.items.len - 1;
         self.active = i;
         return i;
@@ -998,11 +1028,29 @@ test "dock panel: single group owns entries and reopening a path activates inste
     try std.testing.expectEqual(@as(usize, 0), (try panel.open(group, "/tmp/a.md", .markdown)).index);
     try std.testing.expectEqual(@as(?usize, 0), group.active);
     try std.testing.expectEqual(@as(usize, 2), group.entries.items.len);
+    try std.testing.expectEqual(Mode.live_preview, group.entries.items[0].mode);
+    try std.testing.expectEqual(Mode.read, group.entries.items[1].mode);
 
     group.entries.items[0].mode = .source_edit;
     group.entries.items[0].dirty = true;
     try std.testing.expectEqual(Mode.source_edit, group.entries.items[0].mode);
     try std.testing.expect(group.entries.items[0].dirty);
+}
+
+test "dock panel mode defaults are kind-owned while restore preserves an explicit mode" {
+    try std.testing.expectEqual(Mode.live_preview, Mode.defaultFor(.markdown));
+    try std.testing.expectEqual(Mode.read, Mode.defaultFor(.html));
+
+    var entry_ids: EntryIdAllocator = .{};
+    const persisted = [_]PersistedEntry{.{
+        .path = "/tmp/restored.md",
+        .kind = .markdown,
+        .mode = .source_edit,
+        .active = true,
+    }};
+    var restored = try DockPanel.restore(std.testing.allocator, &entry_ids, .{ .entries = &persisted });
+    defer restored.deinit();
+    try std.testing.expectEqual(Mode.source_edit, restored.singleGroup().?.entries.items[0].mode);
 }
 
 test "dock panel: entryForSurfaceId searches nested groups and rejects zero" {

@@ -170,7 +170,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 134;
+pub const abi_version: u32 = 135;
+// 135: Markdown document id를 begin/read에 묶고 WebContent termination latch ABI를 추가해 stale page의
+// hash/dirty 오염과 bridge ACK 전 편집 유실을 fail-close한다.
 // 134: FP10c1 Mermaid helper의 Zig 단일 codec과 앱 전역 bounded coordinator action/completion ABI를
 // 추가한다. Swift parent/helper는 wire layout이나 queue 정책을 복제하지 않고 opaque frame/DTO만 운반한다.
 // 133: 앱 전역 Markdown live-preview worker admission 후보/결과 ABI를 추가한다. max 8 workers와 worker별
@@ -1082,7 +1084,7 @@ const FocusOwner = union(enum) {
 const FilePanelClosePhase = enum { syncing, confirm_dirty, confirm_conflict, saving };
 // JavaScript bridge arguments are IEEE-754 numbers. Keep close request IDs inside the exact integer range so the
 // request echoed by CM6 cannot alias a different native request after conversion through NSNumber/JavaScript.
-const max_file_panel_close_request_id: u64 = 9_007_199_254_740_991;
+const max_file_panel_close_request_id = maru.session.control_bridge.max_js_safe_integer;
 const PendingFilePanelClose = struct {
     surface_id: u64,
     surface_generation: u64,
@@ -9515,7 +9517,7 @@ pub const AppSession = struct {
             self.allocator.free(old_owned);
             if (item.new_kind) |kind| if (entry.kind != kind) {
                 entry.kind = kind;
-                entry.mode = .read;
+                entry.mode = dock_panel.Mode.defaultFor(kind);
             };
             if (old_surface != 0) {
                 retired_focus = retired_focus or switch (self.focus_owner) {
@@ -11227,6 +11229,8 @@ pub const AppSession = struct {
         TooLarge,
         InvalidUtf8,
         MutationPending,
+        StaleDocument,
+        RecoveryRequired,
         OutOfMemory,
     };
 
@@ -11274,18 +11278,30 @@ pub const AppSession = struct {
     }
 
     /// surface가 핀한 Markdown 파일을 읽는다. web 쪽에서 경로를 지정할 수 없고, 단일 파일 상한은 8 MiB다.
-    pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64) FilePanelReadError![]u8 {
+    pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
+        if (entry.editor_recovery_required) return error.RecoveryRequired;
         if (entry.mutation_pending_id != 0) return error.MutationPending;
 
         const cwd = std.Io.Dir.cwd();
         const file = try openFilePanelRead(cwd, entry.path, true);
         defer file.close(self.io);
+        const before = file.stat(self.io) catch return error.NotFound;
         const bytes = try self.readOpenedFile(gpa, file);
         errdefer gpa.free(bytes);
+        const after = file.stat(self.io) catch return error.NotFound;
+        if (before.kind != .file or after.kind != .file or before.inode != after.inode or before.size != after.size or
+            !std.meta.eql(before.mtime, after.mtime) or !std.meta.eql(before.ctime, after.ctime)) return error.NotFound;
         if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+        // size-query/fill 사이에 새 document가 시작되거나 WebContent가 종료됐으면 이전 read가 새 save baseline을
+        // 덮지 못한다. byte 반환과 token commit을 같은 epoch/active 검사로 묶는다.
+        if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
+        if (entry.editor_recovery_required) return error.RecoveryRequired;
+        entry.disk_content_hash = std.hash.Wyhash.hash(0, bytes);
+        entry.disk_content_hash_valid = true;
         return bytes;
     }
 
@@ -11300,7 +11316,98 @@ pub const AppSession = struct {
         ExternalConflict,
         InvalidReloadState,
         MutationPending,
+        StaleDocument,
+        IdentityExhausted,
+        RecoveryRequired,
     };
+
+    /// 신뢰 shell document가 새로 생길 때마다 발급하는 generation. surface id는 WebContent reload에서 유지되므로
+    /// revision만으로는 이전 document와 새 document를 구분할 수 없다.
+    pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .markdown) return error.WrongKind;
+        if (document_id == 0) return error.StaleDocument;
+
+        // stale/멱등 begin은 close transaction을 포함한 어떤 상태도 바꾸지 않는다. 동일 active document의
+        // 재시도는 namespace mutation 중에도 새 문서를 만들지 않으므로 기존 epoch만 반환할 수 있다.
+        if (entry.editor_surface_id == surface_id) {
+            if (document_id < entry.editor_document_id or
+                (document_id == entry.editor_document_id and !entry.editor_document_active)) return error.StaleDocument;
+            if (document_id == entry.editor_document_id) return entry.editor_epoch;
+        }
+        if (entry.mutation_pending_id != 0) return error.MutationPending;
+        if (entry.editor_epoch >= maru.session.control_bridge.max_js_safe_integer) return error.IdentityExhausted;
+
+        // document_id는 surface-local이다. LRU/rename으로 새 surface id가 생기면 이전 WebView의 request는 이미
+        // surface lookup에서 거부되므로 새 surface는 1부터 다시 시작할 수 있다.
+        if (entry.editor_surface_id != surface_id) {
+            entry.editor_surface_id = surface_id;
+            entry.editor_document_id = 0;
+            entry.editor_document_active = false;
+        }
+        // 여기부터는 실제 새 document 승인이다. 이전 close의 lock/snapshot 예약은 새 page가 소유할 수 없으므로
+        // 이 전이에서만 취소한다.
+        if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
+            self.cancelFilePanelClose();
+
+        const had_editor_document = entry.editor_document_active;
+        entry.editor_document_id = document_id;
+        entry.editor_document_active = true;
+        entry.editor_epoch += 1;
+        entry.editor_revision = 0;
+        // 새 document가 자신의 epoch-scoped read를 끝내기 전에는 이전 document의 disk token으로 저장할 수 없다.
+        entry.disk_content_hash_valid = false;
+        // 새 document 교체는 crash와 같은 데이터 수명 경계다. editable mode에서는 마지막 CM6 transaction이 아직
+        // native dirty ACK에 도달하지 않았을 수 있으므로 native mirror가 clean이어도 보수적으로 recovery한다.
+        // read mode도 이전 editable buffer의 dirty/pending 보호가 남아 있으면 동일하게 latch한다.
+        if (had_editor_document and (entry.mode.isEditable() or entry.dirty or entry.dirty_sync_pending)) {
+            entry.editor_recovery_required = true;
+            entry.dirty = true;
+            entry.dirty_sync_pending = true;
+            self.showNotice("편집 중 웹 콘텐츠가 다시 시작되어 자동 복구 전까지 파일 작업을 차단했습니다.");
+        }
+        return entry.editor_epoch;
+    }
+
+    /// 정확히 현재 surface의 editable WebContent가 종료되면 page→native dirty ACK 직전 편집도 보존 대상으로 본다.
+    /// 새 document begin 전까지 active=false로 이전 page의 모든 read/write/ACK를 즉시 무효화한다.
+    pub fn filePanelDocumentTerminated(self: *AppSession, surface_id: u64) u32 {
+        if (!self.dock_initialized) return 0;
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return 0;
+        if (entry.kind != .markdown) return 0;
+        // LRU/rename이 새 surface id를 발급한 뒤 첫 begin 전이면 Entry에 남은 active flag는 이전 surface 문서다.
+        // 새 WebView의 조기 종료를 그 문서 손실로 오인하지 않고 safe reload만 허용한다.
+        if (entry.editor_surface_id != surface_id) return 1;
+        // 최초 begin 전 crash는 잃을 editor가 없어 reload만 허용한다. 이미 종료 처리한 document의 중복 callback은
+        // 다시 reload하지 않는다.
+        if (!entry.editor_document_active) return if (entry.editor_document_id == 0) 1 else 0;
+        entry.editor_document_active = false;
+        // read 전환은 CM6 buffer를 파괴하지 않으며 dirty snapshot ACK 전 pending 보호도 유지한다. 현재 표시 mode만
+        // 보고 safe reload로 분류하면 source/live→read 직후 crash에서 편집을 잃으므로 보호 상태도 함께 본다.
+        if (!entry.mode.isEditable() and !entry.dirty and !entry.dirty_sync_pending) return 1;
+        entry.editor_recovery_required = true;
+        entry.dirty = true;
+        entry.dirty_sync_pending = true;
+        if (self.pending_file_panel_close) |pending| if (pending.surface_id == surface_id)
+            self.cancelFilePanelClose();
+        self.showNotice("편집 중 웹 콘텐츠가 종료되어 자동 복구 전까지 파일 작업을 차단했습니다.");
+        self.metal_dirty = true;
+        return 2;
+    }
+
+    pub fn completeFileConflictReloadForDocument(
+        self: *AppSession,
+        surface_id: u64,
+        editor_epoch: u64,
+        success: bool,
+    ) FilePanelWriteError!void {
+        const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
+        if (entry.editor_recovery_required) return error.RecoveryRequired;
+        return self.completeFileConflictReload(surface_id, success);
+    }
 
     const PinnedFilePanelParent = struct {
         dir: std.Io.Dir,
@@ -11371,6 +11478,25 @@ pub const AppSession = struct {
         parent.deleteFile(io, name) catch {};
     }
 
+    fn stableOpenedFileHash(io: std.Io, file: std.Io.File, expected_inode: std.Io.File.INode) FilePanelWriteError!u64 {
+        const before = file.stat(io) catch return error.ExternalConflict;
+        if (before.kind != .file or before.inode != expected_inode or before.size > file_panel_bridge.max_file_bytes)
+            return error.ExternalConflict;
+        var hash = std.hash.Wyhash.init(0);
+        var read_storage: [64 * 1024]u8 = undefined;
+        var chunk: [64 * 1024]u8 = undefined;
+        var reader = file.reader(io, &read_storage);
+        while (true) {
+            const len = reader.interface.readSliceShort(&chunk) catch return error.ExternalConflict;
+            hash.update(chunk[0..len]);
+            if (len < chunk.len) break;
+        }
+        const after = file.stat(io) catch return error.ExternalConflict;
+        if (before.inode != after.inode or before.size != after.size or !std.meta.eql(before.mtime, after.mtime) or
+            !std.meta.eql(before.ctime, after.ctime)) return error.ExternalConflict;
+        return hash.final();
+    }
+
     /// 이미 핀한 parent와 original fd를 사용해 저장한다. macOS에서는 temp↔leaf를 RENAME_SWAP 한 뒤 양쪽 inode가
     /// 예상한 original/replacement인지 검증한다. leaf가 검사 뒤 교체됐으면 swap을 되돌려 경쟁 파일을 보존하고
     /// ExternalConflict로 실패한다. 다른 플랫폼의 헤드리스 빌드는 같은 pinned parent에서 std atomic replace를 쓴다.
@@ -11380,6 +11506,7 @@ pub const AppSession = struct {
         basename: []const u8,
         original: std.Io.File,
         original_stat: std.Io.File.Stat,
+        expected_content_hash: u64,
         content: []const u8,
     ) FilePanelWriteError!void {
         if (builtin.os.tag != .macos) {
@@ -11417,6 +11544,13 @@ pub const AppSession = struct {
         replacement.writeStreamingAll(io, content) catch return error.WriteFailed;
         replacement.sync(io) catch return error.WriteFailed;
         const replacement_stat = replacement.stat(io) catch return error.WriteFailed;
+
+        // temp 작성 중 같은 inode가 외부에서 in-place 수정됐는지도 content token으로 잡는다. stat-before/hash/
+        // stat-after가 안정된 동일 inode만 허용하고, 여기서 swap까지의 최소 namespace gap만 플랫폼 한계로 남긴다.
+        var current = openFilePanelRead(parent, basename, false) catch return error.ExternalConflict;
+        defer current.close(io);
+        const current_hash = try stableOpenedFileHash(io, current, original_stat.inode);
+        if (current_hash != expected_content_hash) return error.ExternalConflict;
 
         // 최초 commit도 이름만 믿지 않는다. temp가 우리가 만든 replacement이고 leaf가 처음 연 original인 pair가
         // 직전까지 유지될 때만 swap한다. 외부 leaf/temp 교체를 관측하면 namespace를 전혀 바꾸지 않고 conflict.
@@ -11461,14 +11595,17 @@ pub const AppSession = struct {
     /// 여기서 다시 해소한다. 원본 권한을 보존한 동일 디렉터리 임시 파일을 fsync한 뒤 rename-replace하므로 실패 시
     /// 기존 파일이 부분 내용으로 노출되지 않는다. dirty 최종값은 저장 중 재편집과 직렬화한 shell의 setDirty가 내리며,
     /// write 자체는 true를 false로 바꾸지 않아 저장 완료와 재편집 사이 eviction race를 만들지 않는다.
-    pub fn writeFilePanel(self: *AppSession, surface_id: u64, content: []const u8) FilePanelWriteError!void {
+    pub fn writeFilePanel(self: *AppSession, surface_id: u64, editor_epoch: u64, content: []const u8) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
+        if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
+        if (entry.editor_recovery_required) return error.RecoveryRequired;
         if (entry.mutation_pending_id != 0) return error.MutationPending;
         if (entry.external_change) return error.ExternalConflict;
         if (content.len > file_panel_bridge.max_file_bytes) return error.TooLarge;
         if (!std.unicode.utf8ValidateSlice(content)) return error.InvalidContent;
+        if (!entry.disk_content_hash_valid) return error.ExternalConflict;
 
         const pinned = try openPinnedFilePanelParent(self.io, entry.path);
         defer pinned.dir.close(self.io);
@@ -11476,9 +11613,11 @@ pub const AppSession = struct {
         defer original.close(self.io);
         const stat = original.stat(self.io) catch return error.NotFound;
         if (stat.kind != .file) return error.NotRegularFile;
-        try writePinnedFilePanel(self.io, pinned.dir, pinned.basename, original, stat, content);
+        try writePinnedFilePanel(self.io, pinned.dir, pinned.basename, original, stat, entry.disk_content_hash, content);
         entry.self_write_grace_ticks = @intCast(@min(self.ticksForMs(2_000), std.math.maxInt(u16)));
         entry.self_write_hash = std.hash.Wyhash.hash(0, content);
+        entry.disk_content_hash = entry.self_write_hash;
+        entry.disk_content_hash_valid = true;
         entry.self_write_verifications = 0;
         self.metal_dirty = true;
     }
@@ -11486,13 +11625,19 @@ pub const AppSession = struct {
     /// CM6 문서 변경 상태를 도크 모델에 미러한다. Markdown surface만 허용하고 값이 바뀔 때만 redraw한다.
     pub fn setFilePanelDirty(self: *AppSession, surface_id: u64, dirty: bool) FilePanelWriteError!void {
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
-        return self.reportFilePanelDirty(surface_id, .{ .dirty = dirty, .revision = entry.editor_revision +| 1, .request_id = 0 });
+        return self.reportFilePanelDirty(surface_id, .{ .dirty = dirty, .editor_epoch = entry.editor_epoch, .revision = entry.editor_revision +| 1, .request_id = 0 });
     }
 
     pub fn reportFilePanelDirty(self: *AppSession, surface_id: u64, report: maru.session.control_bridge.DirtyReport) FilePanelWriteError!void {
         if (!self.dock_initialized) return error.SurfaceNotFound;
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .markdown) return error.WrongKind;
+        // 기존 headless policy fixtures만 zero/zero sentinel을 쓴다. 제품 빌드에는 이 seam 자체가 없고 JSON bridge도
+        // non-positive epoch을 거부한다.
+        const test_unbound = builtin.is_test and report.editor_epoch == 0 and entry.editor_epoch == 0 and !entry.editor_document_active;
+        if (!test_unbound and (!entry.editor_document_active or report.editor_epoch != entry.editor_epoch))
+            return error.StaleDocument;
+        if (entry.editor_recovery_required) return error.RecoveryRequired;
         const mutation_lock = if (report.request_id != 0) self.fileTreeMutationEditorLock(surface_id, report.request_id) else null;
         if (entry.mutation_pending_id != 0 and mutation_lock == null) return error.MutationPending;
         var close_pending: ?PendingFilePanelClose = null;
@@ -11505,7 +11650,7 @@ pub const AppSession = struct {
             }
             close_pending = pending;
         }
-        if (report.revision < entry.editor_revision) return;
+        if (report.revision < entry.editor_revision) return error.StaleDocument;
         entry.editor_revision = report.revision;
         const protected_clean_ack = entry.external_change and !report.dirty;
         const changed = (!protected_clean_ack and entry.dirty != report.dirty) or entry.dirty_sync_pending;
@@ -37573,11 +37718,14 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     defer allocator.free(watched);
     try std.testing.expectEqualStrings(root, watched);
     const dirty_sid = session.dock.singleGroup().?.entries.items[0].surface_id;
+    const dirty_epoch = try session.beginFilePanelDocument(dirty_sid, 1);
+    const dirty_initial = try session.readFilePanel(allocator, dirty_sid, dirty_epoch);
+    allocator.free(dirty_initial);
     try session.setFilePanelDirty(dirty_sid, true);
     session.fileTreeChanged(dirty_path);
     try std.testing.expect(session.dock.singleGroup().?.entries.items[0].external_change);
     try std.testing.expect(session.takeFileTreeReloadAction() == null);
-    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(dirty_sid, "# mine"));
+    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(dirty_sid, dirty_epoch, "# mine"));
 
     session.requestFileConflictReload(dirty_sid);
     try std.testing.expect(session.chrome_host.confirm.open);
@@ -37620,8 +37768,11 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(clean_path));
     const clean_sid = session.dock.singleGroup().?.entries.items[1].surface_id;
+    const clean_epoch = try session.beginFilePanelDocument(clean_sid, 1);
+    const initial_clean = try session.readFilePanel(allocator, clean_sid, clean_epoch);
+    allocator.free(initial_clean);
     try session.setFilePanelDirty(clean_sid, true);
-    try session.writeFilePanel(clean_sid, "# saved");
+    try session.writeFilePanel(clean_sid, clean_epoch, "# saved");
     try session.setFilePanelDirty(clean_sid, false); // 정상 순서: clean ack가 200ms FSEvent보다 먼저 도착한다.
     try session.setFilePanelDirty(clean_sid, true); // 그 사이 재편집해도 자기 저장 event는 conflict가 아니다.
     session.fileTreeChanged(clean_path);
@@ -37651,8 +37802,10 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     session.chrome_host.confirm.dismiss();
     session.dispatchChromeAction(.confirm_accept);
     _ = session.takeFileTreeReloadAction();
+    const reloaded_clean = try session.readFilePanel(allocator, clean_sid, clean_epoch);
+    allocator.free(reloaded_clean);
     try session.completeFileConflictReload(clean_sid, true);
-    try session.writeFilePanel(clean_sid, "# saved again");
+    try session.writeFilePanel(clean_sid, clean_epoch, "# saved again");
     try session.setFilePanelDirty(clean_sid, false);
     try session.setFilePanelDirty(clean_sid, true);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = clean_path, .data = "# external inside grace" });
@@ -47527,15 +47680,17 @@ test "FP4 file panel read: surface-pinned markdown and bounded relative asset" {
     const group = session.dock.singleGroup().?;
     _ = try session.dock.open(group, doc_path, .markdown);
     group.entries.items[0].surface_id = 701;
+    group.entries.items[0].editor_epoch = 1;
+    group.entries.items[0].editor_document_active = true;
 
-    const content = try session.readFilePanel(allocator, 701);
+    const content = try session.readFilePanel(allocator, 701, 1);
     defer allocator.free(content);
     try std.testing.expectEqualStrings("# FP4\n\n![diagram](images/a.png)\n", content);
     const asset = try session.readFilePanelAsset(allocator, 701, "./images//a.png");
     defer allocator.free(asset);
     try std.testing.expectEqualStrings("PNG", asset);
     try std.testing.expectError(error.InvalidPath, session.readFilePanelAsset(allocator, 701, "../secret"));
-    try std.testing.expectError(error.SurfaceNotFound, session.readFilePanel(allocator, 999));
+    try std.testing.expectError(error.SurfaceNotFound, session.readFilePanel(allocator, 999, 1));
 }
 
 test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected" {
@@ -47560,13 +47715,15 @@ test "FP4 file panel read: exact 8 MiB is allowed and limit plus one is rejected
     const group = session.dock.singleGroup().?;
     _ = try session.dock.open(group, doc_path, .markdown);
     group.entries.items[0].surface_id = 751;
+    group.entries.items[0].editor_epoch = 1;
+    group.entries.items[0].editor_document_active = true;
 
-    const exact = try session.readFilePanel(allocator, 751);
+    const exact = try session.readFilePanel(allocator, 751, 1);
     defer allocator.free(exact);
     try std.testing.expectEqual(file_panel_bridge.max_file_bytes, exact.len);
 
     try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = payload });
-    try std.testing.expectError(error.TooLarge, session.readFilePanel(allocator, 751));
+    try std.testing.expectError(error.TooLarge, session.readFilePanel(allocator, 751, 1));
 }
 
 test "FP4 file panel read: FIFOs are rejected without blocking" {
@@ -47595,10 +47752,12 @@ test "FP4 file panel read: FIFOs are rejected without blocking" {
     const group = session.dock.singleGroup().?;
     _ = try session.dock.open(group, fifo_doc_path, .markdown);
     group.entries.items[0].surface_id = 776;
+    group.entries.items[0].editor_epoch = 1;
+    group.entries.items[0].editor_document_active = true;
     _ = try session.dock.open(group, doc_path, .markdown);
     group.entries.items[1].surface_id = 777;
 
-    try std.testing.expectError(error.NotRegularFile, session.readFilePanel(allocator, 776));
+    try std.testing.expectError(error.NotRegularFile, session.readFilePanel(allocator, 776, 1));
     try std.testing.expectError(error.NotRegularFile, session.readFilePanelAsset(allocator, 777, "pipe.png"));
 }
 
@@ -47638,7 +47797,7 @@ test "FP4 file panel readAsset: symlink escape and html surfaces are denied" {
 
     try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape.png"));
     try std.testing.expectError(error.OutsideRoot, session.readFilePanelAsset(allocator, 801, "escape-dir/secret.png"));
-    try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802));
+    try std.testing.expectError(error.WrongKind, session.readFilePanel(allocator, 802, 1));
     try std.testing.expectError(error.WrongKind, session.readFilePanelAsset(allocator, 802, "escape.png"));
 }
 
@@ -47674,23 +47833,302 @@ test "FP6 file panel write atomically replaces only the pinned markdown and pres
     _ = try session.dock.open(group, link_path, .markdown);
     group.entries.items[2].surface_id = 903;
 
+    const doc_epoch = try session.beginFilePanelDocument(901, 1);
+    const initial_doc = try session.readFilePanel(allocator, 901, doc_epoch);
+    allocator.free(initial_doc);
     try session.setFilePanelDirty(901, true);
     try std.testing.expect(group.entries.items[0].dirty);
-    try session.writeFilePanel(901, "# 저장\n한글");
+    try session.writeFilePanel(901, doc_epoch, "# 저장\n한글");
     try std.testing.expect(group.entries.items[0].dirty); // shell ack 전 write가 eviction 보호를 내리지 않는다.
     try session.setFilePanelDirty(901, false);
     try std.testing.expect(!group.entries.items[0].dirty);
     const after = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
     defer allocator.free(after);
     try std.testing.expectEqualStrings("# 저장\n한글", after);
-    try std.testing.expectError(error.WrongKind, session.writeFilePanel(902, "escape"));
+    try std.testing.expectError(error.WrongKind, session.writeFilePanel(902, 0, "escape"));
     const html_after = try tmp.dir.readFileAlloc(io, "page.html", allocator, .limited(1024));
     defer allocator.free(html_after);
     try std.testing.expectEqualStrings("<p>before</p>", html_after);
-    try std.testing.expectError(error.NotFound, session.writeFilePanel(903, "symlink replacement"));
+    const link_epoch = try session.beginFilePanelDocument(903, 1);
+    const link_doc = try session.readFilePanel(allocator, 903, link_epoch);
+    allocator.free(link_doc);
+    try std.testing.expectError(error.NotFound, session.writeFilePanel(903, link_epoch, "symlink replacement"));
     const target_after = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(1024));
     defer allocator.free(target_after);
     try std.testing.expectEqualStrings("# 저장\n한글", target_after);
+}
+
+test "file panel save rejects same-inode external content changed after hydration" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "hydrated" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try tmp.dir.realPathFile(io, "doc.md", &path_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
+    const sid = session.dock.singleGroup().?.entries.items[0].surface_id;
+    const epoch = try session.beginFilePanelDocument(sid, 1);
+    const hydrated = try session.readFilePanel(allocator, sid, epoch);
+    defer allocator.free(hydrated);
+
+    // FSEvent가 아직 도착하지 않은 같은-inode truncate/write도 마지막 read token과 달라 저장할 수 없다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "external" });
+    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(sid, epoch, "mine"));
+    const preserved = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(64));
+    defer allocator.free(preserved);
+    try std.testing.expectEqualStrings("external", preserved);
+}
+
+test "file panel document epoch rejects stale reload reports and latches dirty crash recovery" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/editor-epoch.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const sid = group.entries.items[0].surface_id;
+
+    const first = try session.beginFilePanelDocument(sid, 1);
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .editor_epoch = first, .revision = 10 });
+    group.entries.items[0].mode = .read; // clean read-only document replacement은 recovery 없이 허용한다.
+    const second = try session.beginFilePanelDocument(sid, 2);
+    try std.testing.expect(second > first);
+    try std.testing.expectError(error.StaleDocument, session.reportFilePanelDirty(sid, .{
+        .dirty = false,
+        .editor_epoch = first,
+        .revision = 11,
+    }));
+    try session.reportFilePanelDirty(sid, .{ .dirty = true, .editor_epoch = second, .revision = 1 });
+    group.entries.items[0].mode = .live_preview;
+    try std.testing.expect(group.entries.items[0].dirty);
+
+    const third = try session.beginFilePanelDocument(sid, 3);
+    try std.testing.expect(third > second);
+    try std.testing.expect(group.entries.items[0].editor_recovery_required);
+    try std.testing.expectError(error.RecoveryRequired, session.reportFilePanelDirty(sid, .{
+        .dirty = false,
+        .editor_epoch = third,
+        .revision = 1,
+    }));
+    try std.testing.expect(group.entries.items[0].dirty);
+    try std.testing.expect(group.entries.items[0].dirty_sync_pending);
+}
+
+test "file panel first document pending is not recovery and begin is document-id idempotent" {
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/first-document.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const entry = &group.entries.items[0];
+    const sid = entry.surface_id;
+
+    entry.dirty_sync_pending = true; // renderer/hydration 전의 정상 tab-leave intent
+    const first = try session.beginFilePanelDocument(sid, 1);
+    try std.testing.expect(!entry.editor_recovery_required);
+    try std.testing.expectEqual(first, try session.beginFilePanelDocument(sid, 1));
+    try session.reportFilePanelDirty(sid, .{ .dirty = false, .editor_epoch = first, .revision = 0 });
+    try std.testing.expect(!entry.dirty_sync_pending);
+    try std.testing.expectError(error.StaleDocument, session.beginFilePanelDocument(sid, 0));
+    const replacement = try session.beginFilePanelDocument(sid, 2);
+    try std.testing.expect(replacement > first);
+    try std.testing.expect(entry.editor_recovery_required); // editable clean mirror도 unacked transaction 가능성을 보존한다.
+}
+
+test "file panel editor epoch exhaustion fails closed before accepting a document" {
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/exhausted-editor-epoch.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const entry = &group.entries.items[0];
+    entry.editor_surface_id = entry.surface_id;
+    entry.editor_epoch = maru.session.control_bridge.max_js_safe_integer;
+    entry.disk_content_hash = 123;
+    entry.disk_content_hash_valid = true;
+    session.requestFilePanelClose(entry.surface_id);
+    const pending_request_id = session.pending_file_panel_close.?.request_id;
+    const sync_actions = session.file_panel_dirty_sync_actions_len;
+
+    try std.testing.expectError(error.IdentityExhausted, session.beginFilePanelDocument(entry.surface_id, 1));
+    try std.testing.expectEqual(maru.session.control_bridge.max_js_safe_integer, entry.editor_epoch);
+    try std.testing.expectEqual(@as(u64, 0), entry.editor_document_id);
+    try std.testing.expect(!entry.editor_document_active);
+    try std.testing.expectEqual(@as(u64, 123), entry.disk_content_hash);
+    try std.testing.expect(entry.disk_content_hash_valid);
+    try std.testing.expectEqual(pending_request_id, session.pending_file_panel_close.?.request_id);
+    try std.testing.expectEqual(sync_actions, session.file_panel_dirty_sync_actions_len);
+    try std.testing.expectEqual(@as(usize, 0), session.file_panel_close_unlock_actions_len);
+}
+
+test "file panel document begin changes pending close only for an accepted replacement" {
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/begin-close-identity.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const entry = &group.entries.items[0];
+    const sid = entry.surface_id;
+    const epoch = try session.beginFilePanelDocument(sid, 2);
+
+    session.requestFilePanelClose(sid);
+    const pending_request_id = session.pending_file_panel_close.?.request_id;
+    const sync_actions = session.file_panel_dirty_sync_actions_len;
+    const unlock_actions = session.file_panel_close_unlock_actions_len;
+
+    try std.testing.expectError(error.StaleDocument, session.beginFilePanelDocument(sid, 1));
+    try std.testing.expectEqual(pending_request_id, session.pending_file_panel_close.?.request_id);
+    try std.testing.expectEqual(sync_actions, session.file_panel_dirty_sync_actions_len);
+    try std.testing.expectEqual(unlock_actions, session.file_panel_close_unlock_actions_len);
+
+    try std.testing.expectEqual(epoch, try session.beginFilePanelDocument(sid, 2));
+    try std.testing.expectEqual(pending_request_id, session.pending_file_panel_close.?.request_id);
+    try std.testing.expectEqual(sync_actions, session.file_panel_dirty_sync_actions_len);
+    try std.testing.expectEqual(unlock_actions, session.file_panel_close_unlock_actions_len);
+
+    const replacement = try session.beginFilePanelDocument(sid, 3);
+    try std.testing.expect(replacement > epoch);
+    try std.testing.expect(session.pending_file_panel_close == null);
+    try std.testing.expectEqual(@as(usize, 0), session.file_panel_dirty_sync_actions_len);
+    const unlock = session.takeFilePanelCloseUnlockAction().?;
+    try std.testing.expectEqual(sid, unlock.surface_id);
+    try std.testing.expectEqual(pending_request_id, unlock.request_id);
+}
+
+test "file panel termination invalidates current document and latches unacked edits" {
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/terminated-document.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const entry = &group.entries.items[0];
+    const sid = entry.surface_id;
+    const first = try session.beginFilePanelDocument(sid, 1);
+
+    // native dirty ACK가 아직 오지 않은 clean mirror에서도 editable document crash는 보수적으로 보호한다.
+    try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(sid));
+    try std.testing.expect(!entry.editor_document_active);
+    try std.testing.expect(entry.editor_recovery_required);
+    try std.testing.expect(entry.dirty);
+    try std.testing.expect(entry.dirty_sync_pending);
+    try std.testing.expectEqual(@as(u32, 0), session.filePanelDocumentTerminated(sid)); // 같은 종료 callback은 1회만 latch
+    try std.testing.expectError(error.StaleDocument, session.reportFilePanelDirty(sid, .{
+        .dirty = false,
+        .editor_epoch = first,
+        .revision = 1,
+    }));
+    try std.testing.expectError(error.StaleDocument, session.beginFilePanelDocument(sid, 1));
+    const replacement = try session.beginFilePanelDocument(sid, 2);
+    try std.testing.expectError(error.RecoveryRequired, session.reportFilePanelDirty(sid, .{
+        .dirty = false,
+        .editor_epoch = replacement,
+        .revision = 0,
+    }));
+
+    _ = try session.dock.open(group, "/tmp/read-document.md", .markdown);
+    const read_entry = &group.entries.items[1];
+    read_entry.mode = .read;
+    session.assignDockSurfaceIds(&session.dock);
+    _ = try session.beginFilePanelDocument(read_entry.surface_id, 1);
+    try std.testing.expectEqual(@as(u32, 1), session.filePanelDocumentTerminated(read_entry.surface_id));
+    try std.testing.expect(!read_entry.editor_recovery_required);
+    try std.testing.expect(!read_entry.dirty);
+
+    _ = try session.dock.open(group, "/tmp/dirty-read-document.md", .markdown);
+    const dirty_read = &group.entries.items[2];
+    dirty_read.mode = .read;
+    session.assignDockSurfaceIds(&session.dock);
+    _ = try session.beginFilePanelDocument(dirty_read.surface_id, 1);
+    dirty_read.dirty = true;
+    try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(dirty_read.surface_id));
+    try std.testing.expect(dirty_read.editor_recovery_required);
+
+    _ = try session.dock.open(group, "/tmp/pending-read-document.md", .markdown);
+    const pending_read = &group.entries.items[3];
+    pending_read.mode = .read;
+    session.assignDockSurfaceIds(&session.dock);
+    _ = try session.beginFilePanelDocument(pending_read.surface_id, 1);
+    pending_read.dirty_sync_pending = true;
+    try std.testing.expectEqual(@as(u32, 2), session.filePanelDocumentTerminated(pending_read.surface_id));
+    try std.testing.expect(pending_read.editor_recovery_required);
+}
+
+test "file panel stale document read cannot replace current disk hash baseline" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "A" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try tmp.dir.realPathFile(io, "doc.md", &path_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(path));
+    const entry = &session.dock.singleGroup().?.entries.items[0];
+    // 이 테스트는 stale read가 현재 hash baseline을 덮지 않는지만 검증한다. editable document 교체는
+    // ACK 직전 입력 손실 가능성 때문에 별도 fail-close 회귀 테스트가 담당하므로 clean read mode로 고정한다.
+    entry.mode = .read;
+    const sid = entry.surface_id;
+    const first = try session.beginFilePanelDocument(sid, 1);
+    const first_bytes = try session.readFilePanel(allocator, sid, first);
+    allocator.free(first_bytes);
+    const second = try session.beginFilePanelDocument(sid, 2);
+    const second_bytes = try session.readFilePanel(allocator, sid, second);
+    allocator.free(second_bytes);
+    const current_hash = entry.disk_content_hash;
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "doc.md", .data = "B" });
+    try std.testing.expectError(error.StaleDocument, session.readFilePanel(allocator, sid, first));
+    try std.testing.expectEqual(current_hash, entry.disk_content_hash);
+    try std.testing.expectError(error.ExternalConflict, session.writeFilePanel(sid, second, "mine"));
+    const preserved = try tmp.dir.readFileAlloc(io, "doc.md", allocator, .limited(16));
+    defer allocator.free(preserved);
+    try std.testing.expectEqualStrings("B", preserved);
+}
+
+test "file panel new surface termination before begin does not consume old clean document identity" {
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const group = session.dock.singleGroup().?;
+    _ = try session.dock.open(group, "/tmp/recreated-surface.md", .markdown);
+    session.assignDockSurfaceIds(&session.dock);
+    const entry = &group.entries.items[0];
+    const old_surface = entry.surface_id;
+    const old_epoch = try session.beginFilePanelDocument(old_surface, 1);
+    entry.mode = .read;
+    try session.reportFilePanelDirty(old_surface, .{ .dirty = false, .editor_epoch = old_epoch, .revision = 1 });
+
+    entry.surface_id = session.surface_ids.next();
+    const new_surface = entry.surface_id;
+    try std.testing.expectEqual(@as(u32, 1), session.filePanelDocumentTerminated(new_surface));
+    try std.testing.expect(!entry.editor_recovery_required);
+    try std.testing.expect(!entry.dirty);
+    try std.testing.expect(!entry.dirty_sync_pending);
+    try std.testing.expectEqual(@as(u32, 0), session.filePanelDocumentTerminated(old_surface));
+    const new_epoch = try session.beginFilePanelDocument(new_surface, 1);
+    try std.testing.expect(new_epoch > old_epoch);
+    try std.testing.expectEqual(new_surface, entry.editor_surface_id);
 }
 
 test "file panel write pins parent capability and rolls back a raced leaf replacement" {
@@ -47716,7 +48154,7 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     try tmp.dir.rename("parent", tmp.dir, "moved", io);
     try tmp.dir.createDirPath(io, "parent");
     try tmp.dir.writeFile(io, .{ .sub_path = "parent/doc.md", .data = "competitor-parent" });
-    try AppSession.writePinnedFilePanel(io, pinned.dir, pinned.basename, original, original_stat, "saved-pinned");
+    try AppSession.writePinnedFilePanel(io, pinned.dir, pinned.basename, original, original_stat, std.hash.Wyhash.hash(0, "original"), "saved-pinned");
     const moved = try tmp.dir.readFileAlloc(io, "moved/doc.md", allocator, .limited(1024));
     defer allocator.free(moved);
     try std.testing.expectEqualStrings("saved-pinned", moved);
@@ -47736,7 +48174,7 @@ test "file panel write pins parent capability and rolls back a raced leaf replac
     try tmp.dir.writeFile(io, .{ .sub_path = "moved/doc.md", .data = "competitor-leaf" });
     try std.testing.expectError(
         error.ExternalConflict,
-        AppSession.writePinnedFilePanel(io, moved_pinned.dir, moved_pinned.basename, moved_original, moved_original_stat, "must-not-land"),
+        AppSession.writePinnedFilePanel(io, moved_pinned.dir, moved_pinned.basename, moved_original, moved_original_stat, std.hash.Wyhash.hash(0, "saved-pinned"), "must-not-land"),
     );
     const competitor_leaf = try tmp.dir.readFileAlloc(io, "moved/doc.md", allocator, .limited(1024));
     defer allocator.free(competitor_leaf);
@@ -47818,7 +48256,7 @@ test "FP6 file panel header toggles markdown mode and drains one action" {
     session.assignDockSurfaceIds(&session.dock);
     const entry = &group.entries.items[0];
     const surface_id = entry.surface_id;
-    try std.testing.expectEqual(dock_panel.Mode.read, entry.mode);
+    try std.testing.expectEqual(dock_panel.Mode.live_preview, entry.mode);
 
     const control = dock_layout.headerModeRect(session.dockGeometry(), session.cell_width_px, .markdown, .source_edit, false, false).?;
     session.mouse(
@@ -48222,18 +48660,32 @@ test "FP6 file panel live view LRU protects dirty entries and recreates with a f
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
     const b_sid = group.entries.items[group.findPath(b).?].surface_id;
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(c));
+    // Markdown now starts in live mode. Leaving clean B therefore requests an exact editor snapshot before
+    // eviction; acknowledge that snapshot, then the existing non-dirty LRU policy may retire B.
+    try std.testing.expectEqual(b_sid, session.takeFilePanelDirtySyncAction().?);
+    try session.setFilePanelDirty(b_sid, false);
+    session.enforceFilePanelLiveViewLimit();
     try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // dirty 보호
     try std.testing.expectEqual(@as(u64, 0), group.entries.items[group.findPath(b).?].surface_id); // non-dirty LRU
-    try std.testing.expect(group.entries.items[group.findPath(c).?].surface_id != 0);
+    const c_sid = group.entries.items[group.findPath(c).?].surface_id;
+    try std.testing.expect(c_sid != 0);
 
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(b));
     const recreated = group.entries.items[group.findPath(b).?].surface_id;
     try std.testing.expect(recreated != 0 and recreated != b_sid); // 앱 전역 id 비재사용
     try std.testing.expectEqual(a_sid, group.entries.items[group.findPath(a).?].surface_id); // 재선택 뒤에도 dirty 보호
+    // B를 다시 열며 떠난 C도 live snapshot을 요구한다. 실제 adapter처럼 ack하고 LRU를 다시 적용한다.
+    try std.testing.expectEqual(c_sid, session.takeFilePanelDirtySyncAction().?);
+    try session.setFilePanelDirty(c_sid, false);
+    session.enforceFilePanelLiveViewLimit();
 
     // source editor를 떠나는 순간에는 async setDirty snapshot ack 전까지 pending이 fail-closed 보호한다.
     try session.setFilePanelDirty(a_sid, false);
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(a));
+    // Recreated B also starts live and requests a snapshot when focus returns to A. Retire that independent
+    // transition before exercising A's source-edit snapshot below so the assertion observes only A's action.
+    try std.testing.expectEqual(recreated, session.takeFilePanelDirtySyncAction().?);
+    try session.setFilePanelDirty(recreated, false);
     const a_entry = &group.entries.items[group.findPath(a).?];
     a_entry.mode = .source_edit;
     a_entry.dirty_sync_pending = false;
@@ -48433,6 +48885,10 @@ test "FP9 merge remaps destination focus one-shots when dirty source replaces cl
     const newer_surface = dst.dock.singleGroup().?.entries.items[1].surface_id;
     source.dirty = true;
     source.mode = .source_edit;
+    // The scenario is specifically dirty source versus a confirmed clean duplicate. New Markdown entries
+    // default to live mode, whose not-yet-snapshotted editor must fail closed, so pin the destination to the
+    // persisted read state this merge case is meant to exercise.
+    destination.mode = .read;
     const source_id = source.id;
     const source_surface = source.surface_id;
     const retired_surface = destination.surface_id;

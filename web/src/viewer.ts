@@ -3,11 +3,15 @@ import { renderMarkdown } from "./markdown";
 import { sanitizeMermaidSvg } from "./rich-render";
 import { createMarkdownEditor } from "./editor";
 import {
+  type BeginDocumentRequest,
   encodeFileBridgeRequest,
   type DirtyReport,
   type FileBridgeRequest,
   type FileMethod,
   type OpenLinkRequest,
+  type ReadRequest,
+  type ResolveExternalChangeRequest,
+  type WriteRequest,
 } from "./file-bridge-request";
 import type { EditorView } from "@codemirror/view";
 import type { Text } from "@codemirror/state";
@@ -245,13 +249,25 @@ function isRendererReady(value: unknown): value is RendererReady {
 export function requestFileBridge(
   document: Document,
   method: "read",
-  value?: undefined,
+  value: ReadRequest,
   timeoutMs?: number,
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
-  method: "readAsset" | "write",
+  method: "beginDocument",
+  value: BeginDocumentRequest,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "readAsset",
   value: string,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "write",
+  value: WriteRequest,
   timeoutMs?: number,
 ): Promise<BridgeResult>;
 export function requestFileBridge(
@@ -263,7 +279,7 @@ export function requestFileBridge(
 export function requestFileBridge(
   document: Document,
   method: "resolveExternalChange",
-  value: boolean,
+  value: ResolveExternalChangeRequest,
   timeoutMs?: number,
 ): Promise<BridgeResult>;
 export function requestFileBridge(
@@ -286,36 +302,71 @@ export function requestFileBridge(
     let request: FileBridgeRequest;
     switch (method) {
       case "read":
-        request = { method };
+        if (
+          !isRecord(value) ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0
+        )
+          throw new TypeError("invalid read payload");
+        request = { method, editor_epoch: value.editor_epoch as number };
+        break;
+      case "beginDocument":
+        if (!isRecord(value) || !Number.isSafeInteger(value.document_id) || value.document_id <= 0)
+          throw new TypeError("invalid beginDocument payload");
+        request = { method, document_id: value.document_id as number };
         break;
       case "readAsset":
         if (typeof value !== "string") throw new TypeError("invalid readAsset payload");
         request = { method, path: value };
         break;
       case "write":
-        if (typeof value !== "string") throw new TypeError("invalid write payload");
-        request = { method, content: value };
+        if (
+          !isRecord(value) ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0 ||
+          typeof value.content !== "string"
+        )
+          throw new TypeError("invalid write payload");
+        request = {
+          method,
+          editor_epoch: value.editor_epoch as number,
+          content: value.content,
+        };
         break;
       case "setDirty":
         if (
           !isRecord(value) ||
           typeof value.dirty !== "boolean" ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0 ||
           !Number.isSafeInteger(value.revision) ||
-          !Number.isSafeInteger(value.request_id)
+          value.revision < 0 ||
+          !Number.isSafeInteger(value.request_id) ||
+          value.request_id < 0
         ) {
           throw new TypeError("invalid setDirty payload");
         }
         request = {
           method,
           dirty: value.dirty,
+          editor_epoch: value.editor_epoch as number,
           revision: value.revision as number,
           request_id: value.request_id as number,
         };
         break;
       case "resolveExternalChange":
-        if (typeof value !== "boolean")
+        if (
+          !isRecord(value) ||
+          !Number.isSafeInteger(value.editor_epoch) ||
+          value.editor_epoch <= 0 ||
+          typeof value.success !== "boolean"
+        )
           throw new TypeError("invalid resolveExternalChange payload");
-        request = { method, success: value };
+        request = {
+          method,
+          editor_epoch: value.editor_epoch as number,
+          success: value.success,
+        };
         break;
       case "openLink":
         if (
@@ -390,6 +441,12 @@ export function assetDataUrl(
   }
 }
 
+/// Save completion compares the persistent CM6 Text snapshot, not revision equality. A later edit keeps dirty;
+/// an edit followed by undo may advance the monotonic revision while returning to the exact saved content.
+export function documentIsDirtyAgainstSnapshot(current: Text, saved: Text | null): boolean {
+  return saved === null || !current.eq(saved);
+}
+
 export function bootShell(document: Document, targetWindow: Window): void {
   const frame = document.querySelector<HTMLIFrameElement>("#renderer");
   const editorHost = document.querySelector<HTMLElement>("#editor");
@@ -402,15 +459,23 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let savedDocument: Text | null = null;
   let contentLoaded = false;
   let dirty = false;
+  let editorEpoch: number | null = null;
   const revisions = new EditorRevisionClock();
   let mode: FilePanelMode = "read";
   let livePreviewAdmitted = false;
-  let mutationQueue = Promise.resolve();
+  let rendererReady = false;
+  // didFinish의 native dirty-sync가 shell beginDocument+initial read보다 먼저 올 수 있다. 모든 mutation은 이
+  // hydration barrier 뒤에서 기다리고, start 자체는 queue 밖에서 barrier를 해소해 순환 대기를 만들지 않는다.
+  let settleDocumentInitialization: () => void = () => {};
+  let mutationQueue = new Promise<void>((resolve) => {
+    settleDocumentInitialization = resolve;
+  });
+  let dirtySyncInFlight: Promise<boolean> | null = null;
   let closeLockRequestId: number | null = null;
   let applyingDiskContent = false;
 
   const currentDocumentIsDirty = (): boolean =>
-    editor !== null && (savedDocument === null || !editor.state.doc.eq(savedDocument));
+    editor !== null && documentIsDirtyAgainstSnapshot(editor.state.doc, savedDocument);
 
   const setCloseLocked = (requestId: number | null) => {
     closeLockRequestId = requestId;
@@ -418,11 +483,13 @@ export function bootShell(document: Document, targetWindow: Window): void {
   };
 
   const syncDirty = async (next: boolean, requestId = 0) => {
+    if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         await requestFileBridge(document, "setDirty", {
           dirty: next,
+          editor_epoch: editorEpoch,
           revision: revisions.documentRevision,
           request_id: requestId,
         });
@@ -459,6 +526,31 @@ export function bootShell(document: Document, targetWindow: Window): void {
     }
   };
 
+  const syncDirtyNow = (): Promise<boolean> => {
+    // 탭 이탈 snapshot은 editor hydration 전에도 clean=false가 아니라 **편집 불가능한 clean**으로 ACK할 수 있다.
+    // 함수 자체를 boot 시 설치해 native one-shot이 listener 등록/CM6 생성 사이에서 유실되지 않게 하고, 실제 dirty
+    // 판정과 bridge ack는 다른 mutation과 같은 직렬 queue에서 수행한다.
+    if (dirtySyncInFlight !== null) return dirtySyncInFlight;
+    const operation = mutationQueue.then(async () => {
+      const actual = currentDocumentIsDirty();
+      dirty = actual;
+      await syncDirty(actual);
+    });
+    mutationQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    const result = operation.then(
+      () => true,
+      () => false,
+    );
+    dirtySyncInFlight = result;
+    void result.then(() => {
+      if (dirtySyncInFlight === result) dirtySyncInFlight = null;
+    });
+    return result;
+  };
+
   const reportDirty = (next: boolean, force = false) => {
     if (!force && next === dirty) return;
     dirty = next;
@@ -476,11 +568,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
   };
 
   const save = async (): Promise<boolean> => {
-    if (editor === null) return false;
+    if (editor === null || editorEpoch === null) return false;
     const documentSnapshot = editor.state.doc;
     const content = documentSnapshot.toString();
     const operation = mutationQueue.then(async () => {
-      await requestFileBridge(document, "write", content);
+      await requestFileBridge(document, "write", { editor_epoch: editorEpoch, content });
       savedContent = content;
       savedDocument = documentSnapshot;
       // Native write는 dirty를 임의로 내리지 않는다. 저장 중 문서가 다시 바뀌었는지 같은 직렬 queue에서 판정해
@@ -500,12 +592,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
     }
   };
   const closeApi = targetWindow as Window & {
+    __maruSyncDirty?: () => Promise<boolean>;
     __maruSyncDirtyForClose?: (requestId: number) => Promise<boolean>;
     __maruSaveForClose?: (
       requestId: number,
     ) => Promise<{ success: boolean; revision: number; dirty: boolean }>;
     __maruUnlockFileClose?: (requestId: number) => Promise<boolean>;
   };
+  closeApi.__maruSyncDirty = syncDirtyNow;
   closeApi.__maruSyncDirtyForClose = syncDirtyForClose;
   closeApi.__maruSaveForClose = async (requestId: number) => {
     if (!Number.isSafeInteger(requestId) || closeLockRequestId !== requestId) {
@@ -591,14 +685,15 @@ export function bootShell(document: Document, targetWindow: Window): void {
       if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
       frame.hidden = false;
       editorHost.hidden = true;
-      frame.contentWindow?.postMessage(
-        {
-          channel: viewerChannel,
-          type: "render",
-          markdown: editor?.state.doc.toString() ?? savedContent,
-        },
-        "*",
-      );
+      if (rendererReady)
+        frame.contentWindow?.postMessage(
+          {
+            channel: viewerChannel,
+            type: "render",
+            markdown: editor?.state.doc.toString() ?? savedContent,
+          },
+          "*",
+        );
     }
     document.body.dataset.fileMode = mode;
   };
@@ -617,17 +712,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (livePreviewAdmitted) livePreviewController?.enable();
     else livePreviewController?.disable();
   });
-  targetWindow.addEventListener("maru:file-sync-dirty", () => {
-    if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
-  });
-
   const loadFromDisk = async (
     syncNative: boolean,
     abortIfDirty = false,
     abortIfEditedDuringRead = false,
   ) => {
     const revisionBeforeRead = revisions.documentRevision;
-    const result = await requestFileBridge(document, "read");
+    if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
+    const result = await requestFileBridge(document, "read", { editor_epoch: editorEpoch });
     if (typeof result.content !== "string") throw new Error("invalid file content");
     // clean auto-reload를 bridge read 대기 중 사용자가 편집하기 시작했다면 buffer를 절대 덮지 않는다.
     if (abortIfDirty && dirty) throw new Error("file became dirty during external reload");
@@ -652,10 +744,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
     }
     dirty = false;
     if (syncNative) await syncDirty(false);
-    frame.contentWindow?.postMessage(
-      { channel: viewerChannel, type: "render", markdown: result.content },
-      "*",
-    );
+    if (rendererReady)
+      frame.contentWindow?.postMessage(
+        { channel: viewerChannel, type: "render", markdown: result.content },
+        "*",
+      );
     if (isEditableFileMode(mode)) applyMode(mode);
   };
 
@@ -665,7 +758,13 @@ export function bootShell(document: Document, targetWindow: Window): void {
     mutationQueue = mutationQueue
       .then(async () => {
         await loadFromDisk(false, !conflict, true);
-        if (conflict) await requestFileBridge(document, "resolveExternalChange", true);
+        if (conflict) {
+          if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
+          await requestFileBridge(document, "resolveExternalChange", {
+            editor_epoch: editorEpoch,
+            success: true,
+          });
+        }
         if (status !== null) {
           status.dataset.fileRead = "true";
           status.textContent = "";
@@ -673,7 +772,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
       })
       .catch(async () => {
         try {
-          await requestFileBridge(document, "resolveExternalChange", false);
+          if (editorEpoch !== null)
+            await requestFileBridge(document, "resolveExternalChange", {
+              editor_epoch: editorEpoch,
+              success: false,
+            });
         } catch {}
         if (status !== null) {
           status.dataset.fileRead = "false";
@@ -687,13 +790,32 @@ export function bootShell(document: Document, targetWindow: Window): void {
     if (started) return;
     started = true;
     if (status !== null) status.dataset.rendererLoaded = "true";
-    try {
+    const operation = (async () => {
+      const documentId = Number(new URL(targetWindow.location.href).searchParams.get("document"));
+      if (!Number.isSafeInteger(documentId) || documentId <= 0)
+        throw new Error("invalid editor document id");
+      const documentResult = await requestFileBridge(document, "beginDocument", {
+        document_id: documentId,
+      });
+      if (
+        !Number.isSafeInteger(documentResult.editor_epoch) ||
+        (documentResult.editor_epoch as number) <= 0
+      )
+        throw new Error("invalid editor document epoch");
+      editorEpoch = documentResult.editor_epoch as number;
       await loadFromDisk(false);
+    })();
+    try {
+      await operation;
       if (status !== null) status.dataset.fileRead = "true";
       if (status !== null) status.textContent = "";
     } catch {
       if (status !== null) status.dataset.fileRead = "false";
       if (status !== null) status.textContent = "파일을 읽을 수 없습니다.";
+    } finally {
+      // 실패도 barrier를 해소한다. 뒤의 mutation은 editorEpoch null 검사로 false/error가 되어 native 보호를
+      // 유지하며, 영구 대기 Promise를 남기지 않는다.
+      settleDocumentInitialization();
     }
   };
   frame.addEventListener(
@@ -711,13 +833,22 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener("message", (event) => {
     if (event.source !== frame.contentWindow) return;
     if (isRendererReady(event.data)) {
+      rendererReady = true;
       if (status !== null) {
         status.dataset.rendererScriptReady = "true";
         status.dataset.rendererBridgeType = event.data.bridgeType;
         status.dataset.rendererHandlerType = event.data.handlerType;
         status.dataset.rendererParentAccessible = String(event.data.parentAccessible);
       }
-      void start();
+      if (contentLoaded)
+        frame.contentWindow?.postMessage(
+          {
+            channel: viewerChannel,
+            type: "render",
+            markdown: editor?.state.doc.toString() ?? savedContent,
+          },
+          "*",
+        );
       return;
     }
     if (isRendererReport(event.data)) {
@@ -768,6 +899,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
       frame.contentWindow?.postMessage(response, "*");
     });
   });
+  // 파일 document 수명은 renderer handshake와 독립이다. renderer가 실패해도 begin/read barrier를 terminal하게
+  // 해소해 native dirty-sync Promise가 영구 in-flight로 남지 않으며, renderer-ready는 현재 snapshot만 뒤늦게 받는다.
+  void start();
   targetWindow.addEventListener(
     "pagehide",
     () => {

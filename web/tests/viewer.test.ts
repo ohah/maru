@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Text, Transaction } from "@codemirror/state";
+import { EditorState, Text, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { JSDOM } from "jsdom";
 import { fragmentChannel } from "../src/renderer-capability";
@@ -9,6 +9,7 @@ import {
   assetRequestCountAllowed,
   bootRenderer,
   bootShell,
+  documentIsDirtyAgainstSnapshot,
   isLinkActivation,
   closeLockCanAcquire,
   closeUnlockOwnsLock,
@@ -21,6 +22,20 @@ import {
 } from "../src/viewer";
 
 describe("file viewer bridge boundary", () => {
+  test("save cleanliness follows the CM6 Text snapshot even when revisions advance", () => {
+    const saved = EditorState.create({ doc: "saved" }).doc;
+    const edited = EditorState.create({ doc: saved }).update({
+      changes: { from: saved.length, insert: " edit" },
+    }).state.doc;
+    const undoneContentAtNewerRevision = EditorState.create({ doc: edited }).update({
+      changes: { from: saved.length, to: edited.length, insert: "" },
+    }).state.doc;
+
+    expect(documentIsDirtyAgainstSnapshot(edited, saved)).toBe(true);
+    expect(documentIsDirtyAgainstSnapshot(undoneContentAtNewerRevision, saved)).toBe(false);
+    expect(documentIsDirtyAgainstSnapshot(saved, null)).toBe(true);
+  });
+
   test("close lock acquisition is monotonic and same-request idempotent", () => {
     expect(closeLockCanAcquire(null, 1)).toBe(true);
     expect(closeLockCanAcquire(2, 2)).toBe(true);
@@ -42,17 +57,82 @@ describe("file viewer bridge boundary", () => {
     const document = dom.window.document;
     document.addEventListener("maru:file-request", () => {
       const node = document.querySelector<HTMLElement>('[data-maru-file-request="pending"]');
-      expect(node?.textContent).toBe('{"method":"read"}');
+      expect(node?.textContent).toBe('{"method":"read","editor_epoch":1}');
       if (node === null) return;
       node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: "# FP4" } });
       node.dataset.maruFileRequest = "done";
       document.dispatchEvent(new dom.window.Event("maru:file-response"));
     });
 
-    await expect(requestFileBridge(document, "read", undefined, 100)).resolves.toEqual({
+    await expect(requestFileBridge(document, "read", { editor_epoch: 1 }, 100)).resolves.toEqual({
       content: "# FP4",
     });
     expect(document.querySelector("[data-maru-file-request]")).toBeNull();
+  });
+
+  test("dirty snapshot request before editor hydration completes with a clean native ack", async () => {
+    const dom = new JSDOM(
+      '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
+      { url: "maru-app://app/index.html?document=1" },
+    );
+    let pendingRead: HTMLElement | null = null;
+    const requests: unknown[] = [];
+    dom.window.document.addEventListener("maru:file-request", () => {
+      const node = dom.window.document.querySelector<HTMLElement>(
+        '[data-maru-file-request="pending"]',
+      );
+      if (node === null) return;
+      const request = JSON.parse(node.textContent ?? "null") as { method?: string };
+      requests.push(request);
+      if (request.method === "beginDocument") {
+        node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { editor_epoch: 7 } });
+        node.dataset.maruFileRequest = "done";
+        dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
+        return;
+      }
+      if (request.method === "read") {
+        pendingRead = node;
+        return;
+      }
+      node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } });
+      node.dataset.maruFileRequest = "done";
+      dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
+    });
+
+    bootShell(dom.window.document, dom.window as unknown as Window);
+    const page = dom.window as unknown as Window & { __maruSyncDirty?: () => Promise<boolean> };
+    const sync = page.__maruSyncDirty?.();
+    const duplicateSync = page.__maruSyncDirty?.();
+    expect(duplicateSync).toBe(sync);
+    // renderer-ready가 없어도 shell document hydration은 독립적으로 시작돼 dirty-sync가 영구 대기하지 않는다.
+    for (let turn = 0; turn < 2; turn += 1) await Promise.resolve();
+    expect(pendingRead).not.toBeNull();
+
+    // Complete the deliberately delayed initial read. Initial hydration and dirty snapshot share the same
+    // mutation queue, so the snapshot cannot overtake the single DOM mailbox request or be lost.
+    const readNode = pendingRead as unknown as HTMLElement;
+    readNode.textContent = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: "# delayed hydration" },
+    });
+    readNode.dataset.maruFileRequest = "done";
+    dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
+    await expect(sync).resolves.toBe(true);
+    await expect(duplicateSync).resolves.toBe(true);
+    expect(requests).toContainEqual({
+      method: "setDirty",
+      dirty: false,
+      editor_epoch: 7,
+      revision: 0,
+      request_id: 0,
+    });
+    expect(
+      requests.filter((request) => (request as { method?: string }).method === "setDirty"),
+    ).toHaveLength(1);
+
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    dom.window.close();
   });
 
   test("write, dirty, link, and external reload ack mailbox requests expose only their exact parameters", async () => {
@@ -68,8 +148,14 @@ describe("file viewer bridge boundary", () => {
       document.dispatchEvent(new dom.window.Event("maru:file-response"));
     });
 
-    await requestFileBridge(document, "write", "# 저장", 100);
-    await requestFileBridge(document, "setDirty", { dirty: true, revision: 1, request_id: 0 }, 100);
+    await requestFileBridge(document, "beginDocument", { document_id: 1 }, 100);
+    await requestFileBridge(document, "write", { editor_epoch: 4, content: "# 저장" }, 100);
+    await requestFileBridge(
+      document,
+      "setDirty",
+      { dirty: true, editor_epoch: 4, revision: 1, request_id: 0 },
+      100,
+    );
     await requestFileBridge(
       document,
       "openLink",
@@ -79,18 +165,91 @@ describe("file viewer bridge boundary", () => {
     await requestFileBridge(
       document,
       "setDirty",
-      { dirty: false, revision: 7, request_id: 11 },
+      { dirty: false, editor_epoch: 4, revision: 7, request_id: 11 },
       100,
     );
-    await requestFileBridge(document, "resolveExternalChange", false, 100);
+    await requestFileBridge(
+      document,
+      "resolveExternalChange",
+      { editor_epoch: 4, success: false },
+      100,
+    );
     expect(requests).toEqual([
-      { method: "write", content: "# 저장" },
-      { method: "setDirty", dirty: true, revision: 1, request_id: 0 },
+      { method: "beginDocument", document_id: 1 },
+      { method: "write", editor_epoch: 4, content: "# 저장" },
+      { method: "setDirty", dirty: true, editor_epoch: 4, revision: 1, request_id: 0 },
       { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
-      { method: "setDirty", dirty: false, revision: 7, request_id: 11 },
-      { method: "resolveExternalChange", success: false },
+      { method: "setDirty", dirty: false, editor_epoch: 4, revision: 7, request_id: 11 },
+      { method: "resolveExternalChange", editor_epoch: 4, success: false },
     ]);
     expect(JSON.stringify(requests)).not.toContain("path");
+  });
+
+  test("mutation requests reject invalid numeric identities before creating a DOM mailbox", async () => {
+    const dom = new JSDOM("<!doctype html><html><body></body></html>");
+    const document = dom.window.document;
+    let requestEvents = 0;
+    document.addEventListener("maru:file-request", () => {
+      requestEvents += 1;
+    });
+
+    await expect(
+      requestFileBridge(document, "write", { editor_epoch: 0, content: "# stale" }, 100),
+    ).rejects.toThrow("invalid write payload");
+    await expect(
+      requestFileBridge(document, "write", { editor_epoch: -1, content: "# stale" }, 100),
+    ).rejects.toThrow("invalid write payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "setDirty",
+        { dirty: true, editor_epoch: 0, revision: 0, request_id: 0 },
+        100,
+      ),
+    ).rejects.toThrow("invalid setDirty payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "setDirty",
+        { dirty: true, editor_epoch: -1, revision: 0, request_id: 0 },
+        100,
+      ),
+    ).rejects.toThrow("invalid setDirty payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "setDirty",
+        { dirty: true, editor_epoch: 1, revision: -1, request_id: 0 },
+        100,
+      ),
+    ).rejects.toThrow("invalid setDirty payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "setDirty",
+        { dirty: true, editor_epoch: 1, revision: 0, request_id: -1 },
+        100,
+      ),
+    ).rejects.toThrow("invalid setDirty payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "resolveExternalChange",
+        { editor_epoch: 0, success: false },
+        100,
+      ),
+    ).rejects.toThrow("invalid resolveExternalChange payload");
+    await expect(
+      requestFileBridge(
+        document,
+        "resolveExternalChange",
+        { editor_epoch: -1, success: false },
+        100,
+      ),
+    ).rejects.toThrow("invalid resolveExternalChange payload");
+
+    expect(requestEvents).toBe(0);
+    expect(document.querySelector("[data-maru-file-request]")).toBeNull();
   });
 
   test("asset request schema accepts only normalized bounded paths and ids", () => {
@@ -210,7 +369,7 @@ describe("file viewer bridge boundary", () => {
   test("trusted shell forwards only its renderer frame link activation to the pinned bridge", async () => {
     const dom = new JSDOM(
       '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
-      { url: "maru-app://app/index.html" },
+      { url: "maru-app://app/index.html?document=1" },
     );
     const requests: unknown[] = [];
     dom.window.document.addEventListener("maru:file-request", () => {
@@ -252,6 +411,7 @@ describe("file viewer bridge boundary", () => {
     await Promise.resolve();
 
     expect(requests).toEqual([
+      { method: "beginDocument", document_id: 1 },
       { method: "openLink", href: "../guide/next.md#usage", forceSystem: false },
     ]);
   });
@@ -259,7 +419,7 @@ describe("file viewer bridge boundary", () => {
   test("trusted shell dirty callback keeps large IME input off full serialization and write paths", async () => {
     const dom = new JSDOM(
       '<!doctype html><p id="viewer-status"></p><iframe id="renderer"></iframe><main id="editor"></main>',
-      { pretendToBeVisual: true, url: "maru-app://app/index.html" },
+      { pretendToBeVisual: true, url: "maru-app://app/index.html?document=1" },
     );
     const previous = new Map<string, PropertyDescriptor | undefined>();
     const installGlobal = (name: string, value: unknown) => {
@@ -283,7 +443,12 @@ describe("file viewer bridge boundary", () => {
       if (node === null) return;
       const request = JSON.parse(node.textContent ?? "null") as { method?: string };
       requests.push(request);
-      const result = request.method === "read" ? { content: initial } : { ok: true };
+      const result =
+        request.method === "beginDocument"
+          ? { editor_epoch: 9 }
+          : request.method === "read"
+            ? { content: initial }
+            : { ok: true };
       node.textContent = JSON.stringify({ jsonrpc: "2.0", id: 1, result });
       node.dataset.maruFileRequest = "done";
       dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
@@ -337,6 +502,7 @@ describe("file viewer bridge boundary", () => {
       expect(requests).toContainEqual({
         method: "setDirty",
         dirty: true,
+        editor_epoch: 9,
         revision: 1,
         request_id: 0,
       });

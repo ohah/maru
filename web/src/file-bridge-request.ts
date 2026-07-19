@@ -1,12 +1,22 @@
-export type DirtyReport = { dirty: boolean; revision: number; request_id: number };
+export type DirtyReport = {
+  dirty: boolean;
+  editor_epoch: number;
+  revision: number;
+  request_id: number;
+};
+export type BeginDocumentRequest = { document_id: number };
+export type ReadRequest = { editor_epoch: number };
+export type WriteRequest = { editor_epoch: number; content: string };
+export type ResolveExternalChangeRequest = { editor_epoch: number; success: boolean };
 export type OpenLinkRequest = { href: string; forceSystem: boolean };
 
 export type FileBridgeRequest =
-  | { method: "read" }
+  | ({ method: "read" } & ReadRequest)
+  | ({ method: "beginDocument" } & BeginDocumentRequest)
   | { method: "readAsset"; path: string }
-  | { method: "write"; content: string }
+  | ({ method: "write" } & WriteRequest)
   | ({ method: "setDirty" } & DirtyReport)
-  | { method: "resolveExternalChange"; success: boolean }
+  | ({ method: "resolveExternalChange" } & ResolveExternalChangeRequest)
   | ({ method: "openLink" } & OpenLinkRequest);
 
 export type FileMethod = FileBridgeRequest["method"];
@@ -14,20 +24,31 @@ export type FileMethod = FileBridgeRequest["method"];
 export function encodeFileBridgeRequest(request: FileBridgeRequest): Record<string, unknown> {
   switch (request.method) {
     case "read":
-      return { method: request.method };
+      return { method: request.method, editor_epoch: request.editor_epoch };
+    case "beginDocument":
+      return { method: request.method, document_id: request.document_id };
     case "readAsset":
       return { method: request.method, path: request.path };
     case "write":
-      return { method: request.method, content: request.content };
+      return {
+        method: request.method,
+        editor_epoch: request.editor_epoch,
+        content: request.content,
+      };
     case "setDirty":
       return {
         method: request.method,
         dirty: request.dirty,
+        editor_epoch: request.editor_epoch,
         revision: request.revision,
         request_id: request.request_id,
       };
     case "resolveExternalChange":
-      return { method: request.method, success: request.success };
+      return {
+        method: request.method,
+        editor_epoch: request.editor_epoch,
+        success: request.success,
+      };
     case "openLink":
       return {
         method: request.method,

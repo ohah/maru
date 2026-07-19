@@ -21,14 +21,18 @@ const file_policy = @import("file_panel_bridge.zig");
 /// reply를 받고, 소켓 hello는 id 없는 notification이다(별개 dispatch라 충돌 없음).
 pub const hello_method = "hello";
 pub const file_read_method = "maru.file.read";
+pub const file_begin_document_method = "maru.file.beginDocument";
 pub const file_read_asset_method = "maru.file.readAsset";
 pub const file_write_method = "maru.file.write";
 pub const file_set_dirty_method = "maru.file.setDirty";
 pub const file_resolve_external_change_method = "maru.file.resolveExternalChange";
 pub const file_open_link_method = "maru.file.openLink";
+/// 모든 bridge 정수는 JavaScript `Number`를 왕복하므로 이 상한 안에서만 identity가 정확하다.
+pub const max_js_safe_integer: u64 = 9_007_199_254_740_991;
 
 pub const DirtyReport = struct {
     dirty: bool,
+    editor_epoch: u64 = 0,
     revision: u64,
     request_id: u64 = 0,
 };
@@ -37,31 +41,36 @@ pub const DirtyReport = struct {
 /// callback error는 경로/존재 정보를 노출하지 않는 균일 `internal_error`로 접는다.
 pub const FileAccess = struct {
     context: *anyopaque,
-    read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8,
+    begin_document_fn: *const fn (context: *anyopaque, document_id: u64) anyerror!u64,
+    read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8,
     read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
-    write_fn: *const fn (context: *anyopaque, content: []const u8) anyerror!void,
+    write_fn: *const fn (context: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, report: DirtyReport) anyerror!void,
-    resolve_external_change_fn: *const fn (context: *anyopaque, success: bool) anyerror!void,
+    resolve_external_change_fn: *const fn (context: *anyopaque, editor_epoch: u64, success: bool) anyerror!void,
     open_link_fn: *const fn (context: *anyopaque, href: []const u8, force_system: bool) anyerror!void,
 
-    fn read(self: FileAccess, gpa: std.mem.Allocator) anyerror![]u8 {
-        return self.read_fn(self.context, gpa);
+    fn beginDocument(self: FileAccess, document_id: u64) anyerror!u64 {
+        return self.begin_document_fn(self.context, document_id);
+    }
+
+    fn read(self: FileAccess, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8 {
+        return self.read_fn(self.context, gpa, editor_epoch);
     }
 
     fn readAsset(self: FileAccess, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8 {
         return self.read_asset_fn(self.context, gpa, normalized_path);
     }
 
-    fn write(self: FileAccess, content: []const u8) anyerror!void {
-        return self.write_fn(self.context, content);
+    fn write(self: FileAccess, editor_epoch: u64, content: []const u8) anyerror!void {
+        return self.write_fn(self.context, editor_epoch, content);
     }
 
     fn setDirty(self: FileAccess, report: DirtyReport) anyerror!void {
         return self.set_dirty_fn(self.context, report);
     }
 
-    fn resolveExternalChange(self: FileAccess, success: bool) anyerror!void {
-        return self.resolve_external_change_fn(self.context, success);
+    fn resolveExternalChange(self: FileAccess, editor_epoch: u64, success: bool) anyerror!void {
+        return self.resolve_external_change_fn(self.context, editor_epoch, success);
     }
 
     fn openLink(self: FileAccess, href: []const u8, force_system: bool) anyerror!void {
@@ -126,9 +135,14 @@ pub fn dispatchBridgeWithFileAccess(
     if (std.mem.eql(u8, req.method, hello_method)) return serializeHelloResult(gpa, req.id, server_version);
 
     const access = file_access orelse return errorResponse(gpa, req.id, .method_not_found);
+    if (std.mem.eql(u8, req.method, file_begin_document_method)) {
+        const document_id = positiveIntegerParam(req.params, "document_id") catch return errorResponse(gpa, req.id, .invalid_params);
+        const editor_epoch = access.beginDocument(document_id) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileDocumentResult(gpa, req.id, editor_epoch);
+    }
     if (std.mem.eql(u8, req.method, file_read_method)) {
-        if (req.params != null) return errorResponse(gpa, req.id, .invalid_params);
-        const content = access.read(gpa) catch return errorResponse(gpa, req.id, .internal_error);
+        const editor_epoch = positiveIntegerParam(req.params, "editor_epoch") catch return errorResponse(gpa, req.id, .invalid_params);
+        const content = access.read(gpa, editor_epoch) catch return errorResponse(gpa, req.id, .internal_error);
         defer gpa.free(content);
         if (!std.unicode.utf8ValidateSlice(content)) return errorResponse(gpa, req.id, .internal_error);
         return serializeFileReadResult(gpa, req.id, content);
@@ -143,10 +157,11 @@ pub fn dispatchBridgeWithFileAccess(
         return serializeFileAssetResult(gpa, req.id, file_policy.mimeForPath(normalized), bytes);
     }
     if (std.mem.eql(u8, req.method, file_write_method)) {
-        const content = singleStringParam(req.params, "content") catch return errorResponse(gpa, req.id, .invalid_params);
+        const write = writeParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        const content = write.content;
         if (content.len > file_policy.max_file_bytes or !std.unicode.utf8ValidateSlice(content))
             return errorResponse(gpa, req.id, .invalid_params);
-        access.write(content) catch return errorResponse(gpa, req.id, .internal_error);
+        access.write(write.editor_epoch, content) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "written_bytes", content.len);
     }
     if (std.mem.eql(u8, req.method, file_set_dirty_method)) {
@@ -155,9 +170,9 @@ pub fn dispatchBridgeWithFileAccess(
         return serializeFileMutationResult(gpa, req.id, "dirty", report.dirty);
     }
     if (std.mem.eql(u8, req.method, file_resolve_external_change_method)) {
-        const success = singleBoolParam(req.params, "success") catch return errorResponse(gpa, req.id, .invalid_params);
-        access.resolveExternalChange(success) catch return errorResponse(gpa, req.id, .internal_error);
-        return serializeFileMutationResult(gpa, req.id, "success", success);
+        const resolution = resolveExternalChangeParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        access.resolveExternalChange(resolution.editor_epoch, resolution.success) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "success", resolution.success);
     }
     if (std.mem.eql(u8, req.method, file_open_link_method)) {
         const params = openLinkParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
@@ -192,13 +207,14 @@ fn dirtyReportParam(params: ?std.json.Value) error{InvalidParams}!DirtyReport {
         .object => |obj| obj,
         else => return error.InvalidParams,
     };
-    if (obj.count() != 3) return error.InvalidParams;
+    if (obj.count() != 4) return error.InvalidParams;
     const dirty = switch (obj.get("dirty") orelse return error.InvalidParams) {
         .bool => |value| value,
         else => return error.InvalidParams,
     };
     return .{
         .dirty = dirty,
+        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
         .revision = try nonNegativeInteger(obj.get("revision") orelse return error.InvalidParams),
         .request_id = try nonNegativeInteger(obj.get("request_id") orelse return error.InvalidParams),
     };
@@ -206,32 +222,81 @@ fn dirtyReportParam(params: ?std.json.Value) error{InvalidParams}!DirtyReport {
 
 fn nonNegativeInteger(value: std.json.Value) error{InvalidParams}!u64 {
     return switch (value) {
-        .integer => |integer| if (integer >= 0) @intCast(integer) else error.InvalidParams,
+        .integer => |integer| if (integer >= 0 and integer <= max_js_safe_integer) @intCast(integer) else error.InvalidParams,
         else => error.InvalidParams,
     };
 }
 
-fn singleStringParam(params: ?std.json.Value, key: []const u8) error{InvalidParams}![]const u8 {
+fn positiveInteger(value: std.json.Value) error{InvalidParams}!u64 {
+    const integer = try nonNegativeInteger(value);
+    return if (integer > 0) integer else error.InvalidParams;
+}
+
+fn positiveIntegerParam(params: ?std.json.Value, key: []const u8) error{InvalidParams}!u64 {
     const obj = switch (params orelse return error.InvalidParams) {
         .object => |obj| obj,
         else => return error.InvalidParams,
     };
     if (obj.count() != 1) return error.InvalidParams;
-    return switch (obj.get(key) orelse return error.InvalidParams) {
+    return positiveInteger(obj.get(key) orelse return error.InvalidParams);
+}
+
+test "bridge integer domain matches JavaScript exact integer range" {
+    try testing.expectEqual(max_js_safe_integer, try nonNegativeInteger(.{ .integer = max_js_safe_integer }));
+    try testing.expectEqual(max_js_safe_integer, try positiveInteger(.{ .integer = max_js_safe_integer }));
+    try testing.expectError(error.InvalidParams, nonNegativeInteger(.{ .integer = max_js_safe_integer + 1 }));
+    try testing.expectError(error.InvalidParams, positiveInteger(.{ .integer = 0 }));
+    try testing.expectError(error.InvalidParams, nonNegativeInteger(.{ .integer = -1 }));
+}
+
+test "dispatchBridge: JavaScript safe integer boundary reaches provider exactly once" {
+    var fake: FakeFileAccess = .{};
+    const valid = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"editor_epoch\":9007199254740991,\"revision\":9007199254740991,\"request_id\":9007199254740991}}";
+    const valid_resp = try dispatchBridgeWithFileAccess(testing.allocator, valid, "0.1.0", fake.access());
+    defer testing.allocator.free(valid_resp);
+    try testing.expectEqual(@as(usize, 1), fake.dirty_calls);
+    try testing.expectEqual(max_js_safe_integer, fake.last_dirty_report.?.editor_epoch);
+    try testing.expectEqual(max_js_safe_integer, fake.last_dirty_report.?.revision);
+    try testing.expectEqual(max_js_safe_integer, fake.last_dirty_report.?.request_id);
+
+    const invalid = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"editor_epoch\":9007199254740992,\"revision\":0,\"request_id\":0}}";
+    const invalid_resp = try dispatchBridgeWithFileAccess(testing.allocator, invalid, "0.1.0", fake.access());
+    defer testing.allocator.free(invalid_resp);
+    var parsed = try parseValue(testing.allocator, invalid_resp);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, -32602), parsed.value.object.get("error").?.object.get("code").?.integer);
+    try testing.expectEqual(@as(usize, 1), fake.dirty_calls);
+}
+
+fn writeParam(params: ?std.json.Value) error{InvalidParams}!struct { editor_epoch: u64, content: []const u8 } {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 2) return error.InvalidParams;
+    const content = switch (obj.get("content") orelse return error.InvalidParams) {
         .string => |value| value,
-        else => error.InvalidParams,
+        else => return error.InvalidParams,
+    };
+    return .{
+        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
+        .content = content,
     };
 }
 
-fn singleBoolParam(params: ?std.json.Value, key: []const u8) error{InvalidParams}!bool {
+fn resolveExternalChangeParam(params: ?std.json.Value) error{InvalidParams}!struct { editor_epoch: u64, success: bool } {
     const obj = switch (params orelse return error.InvalidParams) {
         .object => |obj| obj,
         else => return error.InvalidParams,
     };
-    if (obj.count() != 1) return error.InvalidParams;
-    return switch (obj.get(key) orelse return error.InvalidParams) {
+    if (obj.count() != 2) return error.InvalidParams;
+    const success = switch (obj.get("success") orelse return error.InvalidParams) {
         .bool => |value| value,
-        else => error.InvalidParams,
+        else => return error.InvalidParams,
+    };
+    return .{
+        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
+        .success = success,
     };
 }
 
@@ -254,6 +319,17 @@ fn serializeFileReadResult(gpa: std.mem.Allocator, id: cp.Id, content: []const u
     cp.beginResult(&s, id) catch return error.OutOfMemory;
     s.objectField("content") catch return error.OutOfMemory;
     s.write(content) catch return error.OutOfMemory;
+    cp.endResult(&s) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn serializeFileDocumentResult(gpa: std.mem.Allocator, id: cp.Id, editor_epoch: u64) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    cp.beginResult(&s, id) catch return error.OutOfMemory;
+    s.objectField("editor_epoch") catch return error.OutOfMemory;
+    s.write(editor_epoch) catch return error.OutOfMemory;
     cp.endResult(&s) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
@@ -320,6 +396,9 @@ test "dispatchBridge: hello round-trip → protocol + server_version" {
 }
 
 const FakeFileAccess = struct {
+    editor_epoch: u64 = 0,
+    document_id: u64 = 0,
+    read_epoch: u64 = 0,
     read_calls: usize = 0,
     asset_calls: usize = 0,
     last_asset_path: [128]u8 = undefined,
@@ -327,16 +406,28 @@ const FakeFileAccess = struct {
     fail: bool = false,
     last_write: [256]u8 = undefined,
     last_write_len: usize = 0,
+    write_calls: usize = 0,
     dirty: bool = false,
+    dirty_calls: usize = 0,
     last_dirty_report: ?DirtyReport = null,
     external_change_resolved: ?bool = null,
+    resolve_calls: usize = 0,
     last_open_link: [std.fs.max_path_bytes]u8 = undefined,
     last_open_link_len: usize = 0,
     last_open_link_force_system: bool = false,
 
-    fn read(context: *anyopaque, gpa: std.mem.Allocator) anyerror![]u8 {
+    fn beginDocument(context: *anyopaque, document_id: u64) anyerror!u64 {
+        const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        if (self.fail) return error.BeginFailed;
+        self.document_id = document_id;
+        self.editor_epoch += 1;
+        return self.editor_epoch;
+    }
+
+    fn read(context: *anyopaque, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8 {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
         self.read_calls += 1;
+        self.read_epoch = editor_epoch;
         if (self.fail) return error.ReadFailed;
         return gpa.dupe(u8, "# fixture\n\n안전한 본문");
     }
@@ -350,8 +441,9 @@ const FakeFileAccess = struct {
         return gpa.dupe(u8, &.{ 0x89, 0x50, 0x4e, 0x47 });
     }
 
-    fn write(context: *anyopaque, content: []const u8) anyerror!void {
+    fn write(context: *anyopaque, _: u64, content: []const u8) anyerror!void {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        self.write_calls += 1;
         if (self.fail or content.len > self.last_write.len) return error.WriteFailed;
         @memcpy(self.last_write[0..content.len], content);
         self.last_write_len = content.len;
@@ -359,13 +451,15 @@ const FakeFileAccess = struct {
 
     fn setDirty(context: *anyopaque, report: DirtyReport) anyerror!void {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        self.dirty_calls += 1;
         if (self.fail) return error.DirtyFailed;
         self.dirty = report.dirty;
         self.last_dirty_report = report;
     }
 
-    fn resolveExternalChange(context: *anyopaque, success: bool) anyerror!void {
+    fn resolveExternalChange(context: *anyopaque, _: u64, success: bool) anyerror!void {
         const self: *FakeFileAccess = @ptrCast(@alignCast(context));
+        self.resolve_calls += 1;
         if (self.fail) return error.ResolveFailed;
         self.external_change_resolved = success;
     }
@@ -381,6 +475,7 @@ const FakeFileAccess = struct {
     fn access(self: *FakeFileAccess) FileAccess {
         return .{
             .context = self,
+            .begin_document_fn = beginDocument,
             .read_fn = read,
             .read_asset_fn = readAsset,
             .write_fn = write,
@@ -391,15 +486,16 @@ const FakeFileAccess = struct {
     }
 };
 
-test "dispatchBridge: file.read is no-arg, provider-scoped, and returns UTF-8 content" {
+test "dispatchBridge: file.read is epoch-scoped and returns UTF-8 content" {
     var fake: FakeFileAccess = .{};
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"maru.file.read\"}";
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"maru.file.read\",\"params\":{\"editor_epoch\":4}}";
     const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
     defer testing.allocator.free(resp);
     var p = try parseValue(testing.allocator, resp);
     defer p.deinit();
     try testing.expectEqualStrings("# fixture\n\n안전한 본문", p.value.object.get("result").?.object.get("content").?.string);
     try testing.expectEqual(@as(usize, 1), fake.read_calls);
+    try testing.expectEqual(@as(u64, 4), fake.read_epoch);
 
     const with_params = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"maru.file.read\",\"params\":{}}";
     const bad = try dispatchBridgeWithFileAccess(testing.allocator, with_params, "0.1.0", fake.access());
@@ -414,6 +510,18 @@ test "dispatchBridge: file.read is no-arg, provider-scoped, and returns UTF-8 co
     var ap = try parseValue(testing.allocator, absent);
     defer ap.deinit();
     try testing.expectEqual(@as(i64, -32601), ap.value.object.get("error").?.object.get("code").?.integer);
+}
+
+test "dispatchBridge: file.beginDocument binds a positive document id" {
+    var fake: FakeFileAccess = .{};
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"maru.file.beginDocument\",\"params\":{\"document_id\":9}}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
+    defer testing.allocator.free(resp);
+    var parsed = try parseValue(testing.allocator, resp);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("result").?.object.get("editor_epoch").?.integer);
+    try testing.expectEqual(@as(u64, 1), fake.editor_epoch);
+    try testing.expectEqual(@as(u64, 9), fake.document_id);
 }
 
 test "dispatchBridge: file.readAsset normalizes path and base64 encodes bytes" {
@@ -448,24 +556,27 @@ test "dispatchBridge: file.readAsset rejects malformed and traversal params befo
 
 test "dispatchBridge: file.write and revision-scoped dirty are pinned provider mutations with exact params" {
     var fake: FakeFileAccess = .{};
-    const dirty_req = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":7,\"request_id\":9}}";
+    const dirty_req = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"editor_epoch\":3,\"revision\":7,\"request_id\":9}}";
     const dirty_resp = try dispatchBridgeWithFileAccess(testing.allocator, dirty_req, "0.1.0", fake.access());
     defer testing.allocator.free(dirty_resp);
     try testing.expect(fake.dirty);
-    try testing.expectEqual(DirtyReport{ .dirty = true, .revision = 7, .request_id = 9 }, fake.last_dirty_report.?);
+    try testing.expectEqual(DirtyReport{ .dirty = true, .editor_epoch = 3, .revision = 7, .request_id = 9 }, fake.last_dirty_report.?);
 
-    const write_req = "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"maru.file.write\",\"params\":{\"content\":\"# 저장\\n\"}}";
+    const write_req = "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"maru.file.write\",\"params\":{\"editor_epoch\":3,\"content\":\"# 저장\\n\"}}";
     const write_resp = try dispatchBridgeWithFileAccess(testing.allocator, write_req, "0.1.0", fake.access());
     defer testing.allocator.free(write_resp);
     try testing.expectEqualStrings("# 저장\n", fake.last_write[0..fake.last_write_len]);
     try testing.expect(fake.dirty); // write와 dirty ack는 별도 직렬 mutation이다.
 
-    const resolve_req = "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"success\":false}}";
+    const resolve_req = "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"editor_epoch\":3,\"success\":false}}";
     const resolve_resp = try dispatchBridgeWithFileAccess(testing.allocator, resolve_req, "0.1.0", fake.access());
     defer testing.allocator.free(resolve_resp);
     try testing.expectEqual(@as(?bool, false), fake.external_change_resolved);
+    try testing.expectEqual(@as(usize, 1), fake.dirty_calls);
+    try testing.expectEqual(@as(usize, 1), fake.write_calls);
+    try testing.expectEqual(@as(usize, 1), fake.resolve_calls);
 
-    const bad = "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"maru.file.write\",\"params\":{\"content\":\"x\",\"path\":\"/tmp/escape.md\"}}";
+    const bad = "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"maru.file.write\",\"params\":{\"editor_epoch\":3,\"content\":\"x\",\"path\":\"/tmp/escape.md\"}}";
     const bad_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad, "0.1.0", fake.access());
     defer testing.allocator.free(bad_resp);
     var parsed = try parseValue(testing.allocator, bad_resp);
@@ -478,6 +589,7 @@ test "dispatchBridge: file.write and revision-scoped dirty are pinned provider m
         "{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":-1,\"request_id\":0}}",
         "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":7,\"request_id\":0,\"extra\":false}}",
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"revision\":7.5,\"request_id\":0}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"maru.file.setDirty\",\"params\":{\"dirty\":true,\"editor_epoch\":0,\"revision\":7,\"request_id\":0}}",
     }) |invalid| {
         const invalid_resp = try dispatchBridgeWithFileAccess(testing.allocator, invalid, "0.1.0", fake.access());
         defer testing.allocator.free(invalid_resp);
@@ -486,12 +598,29 @@ test "dispatchBridge: file.write and revision-scoped dirty are pinned provider m
         try testing.expectEqual(@as(i64, -32602), invalid_parsed.value.object.get("error").?.object.get("code").?.integer);
     }
 
-    const bad_resolve = "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"success\":true,\"extra\":false}}";
+    const bad_resolve = "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"editor_epoch\":3,\"success\":true,\"extra\":false}}";
     const bad_resolve_resp = try dispatchBridgeWithFileAccess(testing.allocator, bad_resolve, "0.1.0", fake.access());
     defer testing.allocator.free(bad_resolve_resp);
     var bad_resolve_parsed = try parseValue(testing.allocator, bad_resolve_resp);
     defer bad_resolve_parsed.deinit();
     try testing.expectEqual(@as(i64, -32602), bad_resolve_parsed.value.object.get("error").?.object.get("code").?.integer);
+
+    const zero_write = "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"maru.file.write\",\"params\":{\"editor_epoch\":0,\"content\":\"x\"}}";
+    const zero_write_resp = try dispatchBridgeWithFileAccess(testing.allocator, zero_write, "0.1.0", fake.access());
+    defer testing.allocator.free(zero_write_resp);
+    var zero_write_parsed = try parseValue(testing.allocator, zero_write_resp);
+    defer zero_write_parsed.deinit();
+    try testing.expectEqual(@as(i64, -32602), zero_write_parsed.value.object.get("error").?.object.get("code").?.integer);
+
+    const zero_resolve = "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"maru.file.resolveExternalChange\",\"params\":{\"editor_epoch\":0,\"success\":true}}";
+    const zero_resolve_resp = try dispatchBridgeWithFileAccess(testing.allocator, zero_resolve, "0.1.0", fake.access());
+    defer testing.allocator.free(zero_resolve_resp);
+    var zero_resolve_parsed = try parseValue(testing.allocator, zero_resolve_resp);
+    defer zero_resolve_parsed.deinit();
+    try testing.expectEqual(@as(i64, -32602), zero_resolve_parsed.value.object.get("error").?.object.get("code").?.integer);
+    try testing.expectEqual(@as(usize, 1), fake.dirty_calls);
+    try testing.expectEqual(@as(usize, 1), fake.write_calls);
+    try testing.expectEqual(@as(usize, 1), fake.resolve_calls);
 }
 
 test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutation" {
@@ -526,7 +655,7 @@ test "dispatchBridge: file.openLink is an exact-parameter pinned provider mutati
 
 test "dispatchBridge: provider failures are uniform internal errors" {
     var fake: FakeFileAccess = .{ .fail = true };
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"maru.file.read\"}";
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"maru.file.read\",\"params\":{\"editor_epoch\":1}}";
     const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", fake.access());
     defer testing.allocator.free(resp);
     var p = try parseValue(testing.allocator, resp);

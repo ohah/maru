@@ -80,6 +80,19 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 - rename admission은 `PathRemapPlan` 구성보다 먼저 처리해 queue-full cap+1의 plan allocation은 0이다. main actor는 최대 entry 256+recent 32의 영향 경로를 한 contiguous snapshot으로 복사하고, descendant join과 새 path allocation은 worker가 수행한다. perf artifact는 256-entry parent rename의 main-actor allocation count(1), copied bytes, submit 시간을 남긴다.
 - keyboard navigation은 현재 materialized row projection만 순회한다. 키 입력 한 번의 비용은 row 상한 16,384 안에서 bounded이고 FS I/O·worker wait·WKWebView 생성은 0이다. directory rename으로 여러 pin path가 바뀌면 비활성 WKWebView는 lazy 재생성하고 보이는 view recreate queue(상한 8)는 tick당 1개만 drain한다. 같은 surface generation은 정확히 한 번만 재생성하며 실제 macOS smoke가 8-view parent rename의 frame gap과 app-host RSS delta를 artifact로 남긴다.
 
+## 파일 도크 FP9 drag·focus overlay 예산
+
+이 절은 [파일 패널 FP9](file-panel.md#33-파일-탭-드래그도크-내부-분할)의 drag hot path 수치와 실패 조건의 단일 출처다. 구현 전에는 문서 gate이며, 구현 PR이 동일 상수와 64-group/256-entry fixture를 소비하는 perf artifact를 추가해야 완료로 본다.
+
+| 경로 | hard gate | 실패 조건·구현 제약 |
+| --- | --- | --- |
+| pointer move | layout snapshot build ≤ 1, leaf visit ≤ 64, entry visit ≤ 256, allocator call = 0, lock acquisition = 0, FS I/O = 0, worker/thread hop = 0 | `groupCount()+groupAt(index)` 중첩 순회나 target별 layout 재계산, path/title 복사, 새 draw-list allocation이 한 번이라도 발생하면 실패한다. |
+| projected frame | layout snapshot build = 0, allocator call = 0, lock acquisition = 0, FS I/O = 0, worker/thread hop = 0 | render/preview/hit-test는 pointer event가 만든 같은 snapshot을 읽고 frame tick에서 재구성하지 않는다. |
+| drag/focus overlay | pointer move와 일반 projected frame에서 FP9 귀속 CoreText shape/raster call = 0. drop zone은 quad ≤ 1, focus inside border는 quad ≤ 4, floating tab box는 quad ≤ 5와 drag 시작 때 한 번 캐시한 title glyph quad ≤ 24 | title은 drag 시작 또는 실제 제목 변경 때만 shape/cache한다. pointer move는 캐시된 glyph/box의 placement만 바꾼다. perimeter 길이에 비례한 cell 생성이나 매-frame title shaping/raster가 발생하면 실패한다. drag+focus 동시 최악의 FP9 geometry quad는 ≤ 10이다. |
+| surface transition | preview는 create/destroy/reframe/show/hide = 0. live-surface commit은 create/destroy = 0이며 §3.3의 bounded reframe/show/hide를 지킨다. surface-less commit은 lazy create ≤ 1, destroy = 0이다. | live와 surface-less artifact를 분리한다. lazy create 실패는 workspace focus와 재시도 가능 entry를 유지해야 하며 transition 상한을 맞추려고 표시를 억제하면 실패한다. |
+
+계측은 1,000회 pointer move와 projected frame을 반복해 누적값과 event/frame별 최댓값을 함께 남긴다. cap+1 admission은 split/group allocation 0과 다음 layout frame allocation 0도 단언한다.
+
 **PID 귀속 조사 결론(2026-07-14)**: public `libproc`의 PID identity/RSS 읽기 자체는 가능했다. 반면 공개 WebKit API는 WKWebView별 WebContent PID를 주지 않고, 조사에 사용한 `launchctl print pid/<pid>`의 resource coalition은 출력 포맷이 안정 API가 아니며 여러 webview/workspace/window churn에서도 후보 집합이 실행 중 바뀌었다. 따라서 coalition 후보 합은 후보 완전성이나 특정 WKWebView 귀속을 증명하지 못하고, 위 `app+WebContent RSS delta`의 실패 gate로 승격하지 않는다. 조사용 POC 코드와 test-only 훅은 결론을 얻은 뒤 제거했으며 제품/CI 계약으로 남기지 않는다. 정식 Track 5는 private WebKit PID API나 불안정한 `launchctl` 파싱을 채택하지 않고, 공개·안정된 귀속 수단이 생기기 전에는 app-host RSS만으로 combined 예산을 통과했다고 간주하거나 hello 16 MiB capability를 열지 않는다.
 
 ### 16 MiB 초과 후속 연구 gate

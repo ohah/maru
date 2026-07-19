@@ -47923,6 +47923,7 @@ test "file panel document epoch rejects stale reload reports and latches dirty c
 }
 
 test "file panel first document pending is not recovery and begin is document-id idempotent" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
@@ -47946,6 +47947,7 @@ test "file panel first document pending is not recovery and begin is document-id
 }
 
 test "file panel editor epoch exhaustion fails closed before accepting a document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
@@ -47974,6 +47976,7 @@ test "file panel editor epoch exhaustion fails closed before accepting a documen
 }
 
 test "file panel document begin changes pending close only for an accepted replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
@@ -48010,6 +48013,7 @@ test "file panel document begin changes pending close only for an accepted repla
 }
 
 test "file panel termination invalidates current document and latches unacked edits" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
@@ -48106,6 +48110,7 @@ test "file panel stale document read cannot replace current disk hash baseline" 
 }
 
 test "file panel new surface termination before begin does not consume old clean document identity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);

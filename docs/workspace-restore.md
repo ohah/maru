@@ -52,95 +52,16 @@ workspace restore가 이것을 자동 재실행하면 위험하다.
 - repo별 기본 command는 사용자가 `startup_recipe`로 명시한 경우에만 실행 후보가 된다.
 - destructive할 수 있는 `startup_recipe` 자동 실행은 나중에 confirmation이나 allowlist가 필요하다.
 
-## 에이전트 세션 자동 fork 복원 (claude/codex allowlist 예외)
+## 에이전트 세션은 자동 복원하지 않는다
 
-위 "임의 명령 자동 재실행 금지"의 **명시적 예외**다. opt-in 토글이 켜졌을 때 종료 전 대화 맥락을 provider가 제공하는
-**새 분기(fork)** 로 다시 연다. 임의 셸 명령(`rm -rf`·`deploy-prod`)을 재실행하는 것이 아니며, 원래 CLI를 시작할 때
-사용한 positional prompt도 다시 제출하지 않는다.
+Workspace restore는 provider 세션 id·트랜스크립트·argv를 수집하지 않으며 claude/codex를 자동 resume/fork하지
+않는다. 에이전트는 계정·권한·네트워크·외부 세션 상태를 가진 대화형 프로그램이므로, 사용자가 명시하지 않은 재실행은
+일반 명령 재실행 금지와 같은 경계를 따른다. 복원되는 것은 해당 Term의 `shell_entry`, cwd, 레이아웃뿐이다.
 
-복원 명령은 정확히 다음 둘이다(자동 prompt 없음).
-
-```text
-claude --resume <source-id> --fork-session
-codex fork <source-id>
-```
-
-직접 `resume`으로 같은 id를 다시 열지 않는 이유는 **다른 터미널이 그 원본 세션을 여전히 사용 중일 수 있기 때문**이다.
-실제 Claude Code 2.1.209·Codex CLI 0.144.5로 원본 TUI를 열어 둔 채 검증했을 때, 직접 resume은 둘 다 같은 id와
-transcript에 후속 메시지를 기록했다. 반대로 위 fork 명령으로 동시에 만든 A/B는 서로 다른 id를 받았고 각 분기의 고유
-메시지가 상대 transcript나 원본에 나타나지 않았다. 따라서 외부 터미널 생존 여부를 감지하거나 lock/daemon을 두지 않고도
-provider-native fork 하나로 격리한다.
-
-공식 근거도 같은 방향이다. Claude Code 세션 문서는 같은 session을 두 터미널에서 fork 없이 열면 메시지가 한 transcript에
-interleave되고 `--fork-session`은 원본을 바꾸지 않는 새 분기라고 설명한다([Claude Code sessions](https://code.claude.com/docs/en/sessions)).
-Codex 쪽은 OpenAI contributor가 동일 session의 두 client 동시 사용이 현재 지원되지 않는다고 issue에서 설명했다([openai/codex #21513](https://github.com/openai/codex/issues/21513)).
-실행 문법은 배포된 각 CLI의 `--help`(`claude --fork-session`, `codex fork`)와 위 실측을 함께 gate로 삼는다.
-
-수동 provider gate는 계정·네트워크 사용을 명시적으로 허용한 환경에서 다음 순서로 재실행한다. 각 실행에는 서로 다른
-`MARU_AGENT_MAPPING_ID`를 주고, `<config>/maru/agent-sessions/<mapping-id>` payload의 `session_id`와
-`transcript_path`를 비교한다.
-
-1. 원본 TUI를 열고 source marker를 한 번 제출한 뒤 계속 살아 있게 둔다.
-2. 다른 터미널에서 Claude `claude --resume <source-id>` / Codex `codex resume <source-id>`를 열어 mapping payload의
-   id가 source와 같고 direct marker가 같은 transcript에 기록되는지 확인한다.
-3. 다시 서로 다른 두 터미널에서 Claude `claude --resume <source-id> --fork-session` / Codex
-   `codex fork <source-id>`를 A/B로 연다. A/B mapping id와 provider session id는 모두 서로 달라야 한다.
-4. A/B에 서로 다른 marker를 제출하고, 각 `transcript_path`에서 자기 marker만 검색된다. 원본·상대 fork에는 없어야 한다.
-5. prompt 없이 연 fork는 transcript에 새 user/task 레코드를 추가하지 않아야 한다. Claude는 SessionStart mapping을,
-   Codex는 첫 UserPromptSubmit/Stop 전에는 mapping이 없고 제출 뒤 새 id가 생기는지를 함께 기록한다.
-
-### 무엇을 저장하나
-
-- `agent_kind`: `claude` | `codex`(그 외는 일반 셸 복원).
-- `session_id`: 새 fork의 **source가 될** 그 페인 에이전트의 세션 식별자. **새로 만들지 않고 이미 디스크에 있는 값을 읽는다** — 종료 시점에
-  **훅 매핑**(`readMapping(term.rt.agent_mapping_id)` → 정확한 `transcript_path`)에서 뽑는다(`sessionIdFromTranscript`): claude는
-  파일명 `<uuid>.jsonl`, codex는 첫 줄 `session_meta.payload.id`. 훅이 팬별 경로를 정확히 주므로 cwd+mtime 추측이 없다
-  (docs/agent-session.md "세션 파일 찾기 = 훅 매핑"). 매핑이 없으면 빈 값이며 자동 agent 복원 대신 일반 셸로 복원한다.
-- 보존 `argv`: 종료 시점 에이전트의 전체 argv를 redact해 저장한다. 복원할 때는 provider 전체 옵션 문법을 복제하지 않고
-  권한·모델·실행 위치처럼 arity가 명확한 restore allowlist만 새 fork에 재주입한다. 미인식/variadic 옵션과 positional
-  prompt는 제거한다.
-
-### 다중 세션·외부 터미널과 source session_id
-
-같은 cwd에 세션이 여럿이면 claude `--continue`·codex `resume --last`는 "가장 최근 1개"만 추측한다. 정확한 id로
-직접 resume해도 다른 터미널이 같은 원본을 사용 중이면 두 클라이언트가 한 transcript/head를 공유한다. 그래서 훅 매핑으로
-페인별 **정확한 source id**를 얻은 뒤, 각 복원 surface가 그 source에서 **새 id로 fork**한다. 매핑을 못 얻으면 최근 세션을
-추측하지 않고 일반 셸로 복원한다.
-
-### fork 직후 훅 타이밍
-
-- Claude Code 2.1.209는 무프롬프트 fork의 `SessionStart`에서 새 session id를 즉시 알렸다.
-- Codex CLI 0.144.5는 무프롬프트 `codex fork`에서 새 id/transcript를 만들지만 `SessionStart` 훅을 발화하지 않았고,
-  첫 `UserPromptSubmit`과 `Stop`에서 새 id를 알렸다. 무프롬프트 상태에는 새 user/task 레코드가 없었다.
-- 각 Term은 surface.id와 별개의 임의 `agent_mapping_id`를 받아 별도 Maru 프로세스끼리도 매핑 파일을 공유하지 않는다.
-  두 id env는 내부 예약 키라 사용자 `env.*` override보다 spawn request 값이 우선하고, Term teardown은 PTY join 뒤 자기
-  mapping 파일만 제거한다.
-  provider 훅이 source와 다른 id를 쓸 때까지 transcript 상태는 unknown이다. 첫 훅 전에 앱이 다시 종료되면 사용자 턴이
-  없는 source id를 유지한다. poll이 새 id를 확인하면 runtime에 보존하므로 provider가 OSC 7을 내지 않거나 종료 시 매핑
-  파일을 읽지 못해도 fork id를 다음 source로 저장한다. 최초 확인 뒤에는 현재 random mapping이 source id로 돌아와도
-  사용자가 직접 연 현재 세션으로 받아들인다. provider가 종료돼 셸로 돌아가거나 agent 종류가 바뀌면 이전 provider의
-  source/confirmed id는 폐기한다.
-
-### 위험모드(권한 플래그) 재현
-
-claude `--resume --fork-session`은 대화 맥락만 분기하고 `--dangerously-skip-permissions` 같은 권한 모드는 복원하지 않는다(런타임
-플래그라 세션에 저장되지 않음). restore allowlist에 든 권한 플래그를 재주입해 직전 권한 모드를 재현한다. 이는 **새 위험을 만드는
-게 아니라 직전 상태 복원**이다 — 그래서 토글 기본값을 OFF(opt-in)로 두어 위험모드 자동 재현을 사용자가 명시적으로
-켜게 한다.
-
-### redaction 경계
-
-- `session_id`는 자격증명이 아니라 **불투명한 로컬 식별자**이고 이미 `~/.claude`·`~/.codex`에 평문으로 있다. 같은
-  사용자 홈의 또 다른 로컬 파일(workspace 저장본)에 둘 뿐 권한 경계가 늘지 않으므로 redaction 대상이 아니다.
-- 보존 `argv`는 redact한다. 토큰성 key(`TOKEN`·`SECRET`·`KEY`·`AUTH`·`PASSWORD`·`CREDENTIAL` 등 —
-  [프로젝트 규칙](project-rules.md) "민감정보 redaction 기준" 단일 출처)를 가진 `--key=value` 토큰은 **드롭**
-  (deny-by-default). redaction 뒤에도 복원 allowlist 밖 옵션은 재실행하지 않는다.
-- env는 여전히 통째로 저장하지 않는다 — session_id는 트랜스크립트 파일에서 얻으므로 자식 env를 덤프하지 않는다.
-
-### config 토글
-
-- `workspace.restore-claude` / `workspace.restore-codex` — 각각 독립, **기본 false(opt-in)**.
-- 토글이 꺼지면 그 종류는 캡처·복원 양쪽 다 비활성(일반 셸로 복원).
+구버전 workspace의 `agent_kind`, `agent_session`, `agent_argv` 필드는 파서 호환을 위해 읽되 무시한다. 새 저장에는
+이 필드를 쓰지 않는 read-old/write-new 방식으로, 기존 파일을 열 수 있으면서 한 번 저장한 파일에서는 provider 식별자와
+argv가 자연스럽게 사라진다. `workspace.restore-claude`와 `workspace.restore-codex`는 한 릴리스 동안 deprecated
+no-op으로 읽고 UI에서는 숨긴다. 상태 표시의 새 경계는 [에이전트 상태 감지](agent-session.md)가 단일 출처다.
 
 ## command 관련 용어
 
@@ -161,7 +82,7 @@ claude `--resume --fork-session`은 대화 맥락만 분기하고 `--dangerously
 - shell integration이 관측한 마지막 command다.
 - 최근 작업 세션 UI나 힌트에는 쓸 수 있지만 자동 재실행 대상은 아니다.
 - 이 값을 저장할 경우에도 민감정보 redaction과 사용자 동의가 필요하다.
-- 단, claude/codex는 위 "에이전트 세션 자동 fork 복원" allowlist 예외로 별도 관리한다(임의 명령 재실행이 아니라 provider가 지원하는 대화 분기).
+- claude/codex도 예외가 아니며 사용자가 셸에서 직접 다시 실행한다.
 
 ## 저장 모델 초안
 
@@ -377,13 +298,5 @@ restore가 실패해도 workspace 전체를 버리지 않는다.
 - `shell_entry`와 `startup_recipe argv`가 round-trip되는 테스트.
 - `last_observed_command`가 자동 실행 후보로 저장되지 않는 테스트.
 - cwd가 없을 때 surface별 restore failure artifact를 남기는 테스트.
-- claude/codex `agent_kind`·`session_id`·보존 `argv`가 round-trip되는 테스트.
-- 토큰성 key(`--api-key=…` 등)를 가진 argv 토큰이 redact(드롭)되는 테스트.
-- Claude가 `--resume <source-id> --fork-session`, Codex가 `fork <source-id>`로 재구성되는 테스트.
-- 저장 argv의 기존 resume/fork 토큰·positional prompt·미인식/variadic 옵션이 제거되고 권한·모델 allowlist만 보존되는 테스트.
-- `session_id`를 못 찾을 때 최근 세션을 추측하지 않고 일반 셸로 복원하는 테스트.
-- `MARU_PANE_ID=surface.id`와 Term별 `MARU_AGENT_MAPPING_ID`가 별도 env로 주입되고 사용자 env override로 바뀌지 않는 테스트.
-- 최초 fork 확인 전 source와 같은 mapping은 대기하고, 확인 뒤 source 재매핑은 현재 세션으로 인정하는 테스트.
-- 첫 훅 전 source, poll-confirmed fork, 최신 mapping 순서로 저장하며 provider kind가 바뀌면 옛 id를 쓰지 않는 테스트.
-- provider 종료 시 restore pending을 비우되 초기 `.none -> provider` 감지에는 source fallback을 유지하는 테스트.
-- Term-owned mapping 제거가 다른 random mapping 파일을 건드리지 않는 테스트.
+- 구버전 `agent_kind`·`agent_session`·`agent_argv`를 파싱하되 복원 실행에는 쓰지 않는 테스트.
+- 새 저장에는 agent 필드가 없고 shell/cwd/layout round-trip만 유지되는 테스트.

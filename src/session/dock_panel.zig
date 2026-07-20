@@ -106,6 +106,12 @@ pub const Entry = struct {
     /// 마지막 성공 Markdown read/save의 디스크 content token. 저장 직전 같은 inode의 in-place 외부 변경도 감지한다.
     disk_content_hash: u64 = 0,
     disk_content_hash_valid: bool = false,
+    /// Materialized explorer row에서 새 Markdown entry를 만든 경우 최초 hydration이 같은 regular file을
+    /// 읽는지 확인하는 transient identity. workspace에는 저장하지 않으며 첫 exact-fd read 뒤 해제한다.
+    initial_file_identity_device: u64 = 0,
+    initial_file_identity_inode: u64 = 0,
+    initial_file_identity_kind: u8 = 0,
+    initial_file_identity_pending: bool = false,
     /// FSEvents가 디스크 변경을 알렸는데 source editor가 dirty라 자동 reload하지 못한 상태. 사용자의 buffer를
     /// 덮지 않으며 트리/헤더에 conflict를 표시하고 저장도 명시적 해결 전까지 거부한다.
     external_change: bool = false,
@@ -161,6 +167,8 @@ pub const PersistedState = struct {
     /// 12셀로 clamp하며, 창이 좁으면 tree를 숨긴다.
     tree_size: u32 = 0,
     collapsed: bool = false,
+    /// Explorer launcher로 한 번 열린 도크인지. content와 분리해 explicit-empty 도크도 재시작 뒤 유지한다.
+    presented: bool = false,
     entries: []const PersistedEntry = &.{},
     groups: []const PersistedGroup = &.{},
     tree: []const PersistedTreeNode = &.{},
@@ -258,6 +266,7 @@ pub const DockPanel = struct {
     size: u32 = 0,
     tree_size: u32 = 0,
     collapsed: bool = false,
+    presented: bool = false,
     focused_group: *DockGroup,
     next_group_id: u64 = 2,
 
@@ -387,6 +396,7 @@ pub const DockPanel = struct {
             const previous_active = found.group.active;
             found.group.active = found.index;
             self.focused_group = found.group;
+            self.presented = true;
             return .{ .group = found.group, .index = found.index, .created = false, .previous_active = previous_active };
         }
         if (entryCount(self.tree) >= max_entries) return error.TooManyEntries;
@@ -394,6 +404,7 @@ pub const DockPanel = struct {
         const entry_id = try self.entry_ids.next();
         const index = try target.openLocal(entry_id, path, kind);
         self.focused_group = target;
+        self.presented = true;
         return .{ .group = target, .index = index, .created = true, .previous_active = previous_active };
     }
 
@@ -701,6 +712,7 @@ pub const DockPanel = struct {
         panel.size = state.size;
         panel.tree_size = state.tree_size;
         panel.collapsed = state.collapsed;
+        panel.presented = state.presented;
 
         if (state.groups.len != 0) {
             if (state.tree.len != state.groups.len * 2 - 1 or state.focused_group >= state.groups.len) return error.InvalidPersistedState;
@@ -811,7 +823,7 @@ pub const DockPanel = struct {
         if (self.hasRedundantEmptyGroup()) return error.InvalidPersistedState;
         if (self.singleGroup()) |group| {
             const entries = try persistEntries(allocator, group);
-            return .{ .side = self.side, .size = self.size, .tree_size = self.tree_size, .collapsed = self.collapsed, .entries = entries };
+            return .{ .side = self.side, .size = self.size, .tree_size = self.tree_size, .collapsed = self.collapsed, .presented = self.presented, .entries = entries };
         }
 
         const group_count = self.groupCount();
@@ -837,6 +849,7 @@ pub const DockPanel = struct {
             .size = self.size,
             .tree_size = self.tree_size,
             .collapsed = self.collapsed,
+            .presented = self.presented,
             .groups = groups,
             .tree = nodes,
             .focused_group = focused_group,

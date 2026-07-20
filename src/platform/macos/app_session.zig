@@ -170,7 +170,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 136;
+pub const abi_version: u32 = 137;
+// 137: Explorer presented state + directory picker replace/add root one-shots. fixed-width struct layout 불변.
 // 136: WebSurfaceTransition의 단일 divider grab 폭을 최종 padded frame과 실제 Zig hit target 교집합에서
 // 계산한 left/right/bottom별 f64 pt 폭으로 교체한다. native pass-through가 resize target 밖 dead strip을 만들지 않는다.
 // 135: Markdown document id를 begin/read에 묶고 WebContent termination latch ABI를 추가해 stale page의
@@ -1371,10 +1372,41 @@ const PendingFileTreeDelete = struct {
     identity: ?file_tree.Identity = null,
     parent_identity: ?file_tree.Identity = null,
     root_identity: ?file_tree.Identity = null,
+    root_generation: u64 = 0,
 
     fn path(self: *const PendingFileTreeDelete) []const u8 {
         return self.path_buf[0..self.path_len];
     }
+};
+
+pub const FileTreeRootOperation = enum(u32) { none = 0, replace = 1, add = 2 };
+pub const FileTreeRootOutcome = enum(u8) {
+    none,
+    picker_requested,
+    picker_canceled,
+    busy,
+    invalid_path,
+    request_id_exhausted,
+    allocation_failed,
+    backend_busy,
+    validation_failed,
+    stale_generation,
+    identity_missing,
+    identity_changed,
+    model_stage_failed,
+    watcher_stage_failed,
+    row_stage_failed,
+    root_missing,
+    committed_replace,
+    committed_add,
+    committed_remove,
+};
+const PendingFileTreeRootValidation = struct {
+    request_id: u64,
+    expected_root_generation: u64,
+    operation: FileTreeRootOperation,
+    round: u8 = 0,
+    identity: ?file_tree.Identity = null,
 };
 
 pub const FileTreeTrashAction = struct {
@@ -2191,6 +2223,7 @@ pub const AppSession = struct {
     // File-tree rows are rebuildable, so this context target stores the same copied identity used by the
     // inline editor rather than a Row pointer/index. The shared chrome menu is selected by this flag.
     file_tree_context_target: ?PendingFileTreeDelete = null,
+    file_tree_background_menu: bool = false,
     // view options(⚙) 메뉴 — chrome_host.context_menu 상태를 공유하되, 이게 true면 rename 컨텍스트 메뉴가 아니라
     // 사이드바 표시 토글(브랜치·폴더) 메뉴다(buildContextMenuItems/acceptContextMenu가 이 플래그로 분기). 체크박스
     // 패널처럼 토글해도 닫히지 않고 열린 채 라벨(체크마크)만 갱신한다 — 바깥 클릭/Esc로 닫는다(closeContextMenu).
@@ -2293,6 +2326,11 @@ pub const AppSession = struct {
     file_tree_reload_actions: [dock_panel.max_entries]FileTreeReloadAction = undefined,
     file_tree_reload_actions_len: usize = 0,
     file_tree_watch_reset_pending: bool = false,
+    file_tree_root_pick_pending: FileTreeRootOperation = .none,
+    file_tree_root_picker_inflight: FileTreeRootOperation = .none,
+    file_tree_root_validation: ?PendingFileTreeRootValidation = null,
+    file_tree_root_request_id: u64 = 0,
+    file_tree_root_outcome: FileTreeRootOutcome = .none,
     file_tree_external_open: ?[]u8 = null,
     file_tree_mutation_request_id: u64 = 0,
     pending_file_tree_delete: ?PendingFileTreeDelete = null,
@@ -2766,7 +2804,7 @@ pub const AppSession = struct {
     }
 
     fn dockVisible(self: *const AppSession) bool {
-        return self.dock_initialized and !self.chrome_minimal and !self.dock.collapsed and self.dockHasContent();
+        return self.dock_initialized and !self.chrome_minimal and self.dock.presented and !self.dock.collapsed;
     }
 
     fn dockHasContent(self: *const AppSession) bool {
@@ -3256,7 +3294,7 @@ pub const AppSession = struct {
     /// tree/entry 상태는 그대로 두고 side만 바꾸며, side별 기본 크기를 다시 쓰도록 명시 크기는 비운다.
     /// 커맨드 팔릿에서 실행하므로 색/테마와 무관한 구조 전환이고, 모든 terminal pane의 grid를 즉시 갱신한다.
     fn toggleFilePanelDockSide(self: *AppSession) void {
-        if (!self.dock_initialized or !self.dockHasContent()) return;
+        if (!self.dock_initialized or !self.dock.presented) return;
         self.invalidateDockDragGeometry();
         self.dock.side = switch (self.dock.side) {
             .right => .bottom,
@@ -3287,21 +3325,19 @@ pub const AppSession = struct {
         return .{ .x = self.backing_width_px -| w -| margin, .y = 0, .w = w, .h = h };
     }
 
-    const FilePanelDockControlAction = enum { request_file_picker, collapse, expand };
+    const FilePanelDockControlAction = enum { open, collapse, expand };
 
     fn filePanelDockControlAction(self: *const AppSession) ?FilePanelDockControlAction {
         if (!self.dock_initialized) return null;
-        if (!self.dockHasContent()) return .request_file_picker;
+        if (!self.dock.presented) return .open;
         return if (self.dock.collapsed) .expand else .collapse;
     }
 
     fn activateFilePanelDockControl(self: *AppSession) void {
         switch (self.filePanelDockControlAction() orelse return) {
-            // 완전히 빈 dock 본문은 시작부터 터미널 폭을 차지하지 않는다. 대신 같은 우상단 컨트롤이 파일 선택기를
-            // 요청하고, maru_macos_app_session_open_file_panel_path -> openFilePanelPath가 성공해야 실제 dock을 펼친다.
-            .request_file_picker => {
-                self.requestFilePanelPick();
-                return;
+            .open => {
+                self.dock.presented = true;
+                self.dock.collapsed = false;
             },
             .collapse => self.dock.collapsed = true,
             .expand => self.dock.collapsed = false,
@@ -3315,6 +3351,106 @@ pub const AppSession = struct {
 
     fn requestFilePanelPick(self: *AppSession) void {
         self.file_panel_pick_pending = true;
+    }
+
+    fn reportFileTreeRootOutcome(self: *AppSession, outcome: FileTreeRootOutcome, message: ?[]const u8) void {
+        self.file_tree_root_outcome = outcome;
+        if (message) |text| self.showNotice(text);
+    }
+
+    pub fn fileTreeRootOutcome(self: *const AppSession) FileTreeRootOutcome {
+        return self.file_tree_root_outcome;
+    }
+
+    fn requestFileTreeRootPick(self: *AppSession, operation: FileTreeRootOperation) void {
+        if (operation == .none or self.fileTreeNamespaceMutationBusy()) {
+            self.reportFileTreeRootOutcome(.busy, "파일 변경 또는 폴더 선택이 끝난 뒤 다시 시도하세요.");
+            return;
+        }
+        self.file_tree_root_pick_pending = operation;
+        self.reportFileTreeRootOutcome(.picker_requested, null);
+    }
+
+    fn removeFileTreeRoot(self: *AppSession, path: []const u8) void {
+        if (self.fileTreeNamespaceMutationBusy()) {
+            self.reportFileTreeRootOutcome(.busy, "파일 변경 또는 폴더 선택이 끝난 뒤 다시 시도하세요.");
+            return;
+        }
+        var candidate = self.file_tree.cloneForRootTransaction() catch {
+            self.reportFileTreeRootOutcome(.allocation_failed, "탐색기 루트 제거 상태를 준비할 수 없습니다.");
+            return;
+        };
+        defer candidate.deinit();
+        const removed = candidate.removeExplicitRoot(path) catch {
+            self.reportFileTreeRootOutcome(.model_stage_failed, "탐색기 루트를 제거할 수 없습니다.");
+            return;
+        };
+        if (!removed) {
+            self.reportFileTreeRootOutcome(.root_missing, "선택한 탐색기 루트가 더 이상 존재하지 않습니다.");
+            return;
+        }
+        self.resetFileTreeWatchRootsFor(&candidate, null) catch {
+            self.reportFileTreeRootOutcome(.watcher_stage_failed, "폴더 감시를 갱신할 수 없어 루트 제거를 취소했습니다.");
+            return;
+        };
+        var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
+        defer candidate_rows.deinit(self.allocator);
+        self.prepareFileTreeRowStaging(&candidate_rows, 0) catch {
+            self.reportFileTreeRootOutcome(.row_stage_failed, "탐색기 행 상태를 준비할 수 없어 루트 제거를 취소했습니다.");
+            return;
+        };
+        self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
+        self.commitFileTreeCandidate(&candidate, &candidate_rows);
+        self.reportFileTreeRootOutcome(.committed_remove, null);
+        self.file_tree_scroll_rows = 0;
+        self.invalidateDockDragGeometry();
+        self.metal_dirty = true;
+    }
+
+    pub fn takeFileTreeRootPickRequest(self: *AppSession) FileTreeRootOperation {
+        const operation = self.file_tree_root_pick_pending;
+        self.file_tree_root_pick_pending = .none;
+        if (operation != .none) self.file_tree_root_picker_inflight = operation;
+        return operation;
+    }
+
+    pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
+        const operation = self.file_tree_root_picker_inflight;
+        self.file_tree_root_picker_inflight = .none;
+        if (operation == .none or path.len == 0) {
+            self.reportFileTreeRootOutcome(.picker_canceled, null);
+            return;
+        }
+        if (path.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) {
+            self.reportFileTreeRootOutcome(.invalid_path, "선택한 폴더 경로가 올바르지 않습니다.");
+            return;
+        }
+        if (self.file_tree_root_request_id == std.math.maxInt(u64)) {
+            self.reportFileTreeRootOutcome(.request_id_exhausted, "폴더 선택 요청 번호를 더 발급할 수 없습니다.");
+            return;
+        }
+        const owned = self.allocator.dupe(u8, path) catch {
+            self.reportFileTreeRootOutcome(.allocation_failed, "폴더 선택 상태를 준비할 수 없습니다.");
+            return;
+        };
+        self.file_tree_root_request_id += 1;
+        const pending: PendingFileTreeRootValidation = .{
+            .request_id = self.file_tree_root_request_id,
+            .expected_root_generation = self.file_tree.rootGeneration(),
+            .operation = operation,
+        };
+        if (!self.file_tree_backend.submitRootValidation(
+            owned,
+            pending.request_id,
+            pending.expected_root_generation,
+            @intFromEnum(operation),
+            0,
+        )) {
+            self.allocator.free(owned);
+            self.reportFileTreeRootOutcome(.backend_busy, "폴더 검증 작업이 바빠 요청을 시작하지 못했습니다.");
+            return;
+        }
+        self.file_tree_root_validation = pending;
     }
 
     /// 사이드바와 파일 도크를 뺀 터미널 영역. split 레이아웃·resize·렌더·hit-test가
@@ -5878,6 +6014,7 @@ pub const AppSession = struct {
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.file_tree_context_target = null;
+        self.file_tree_background_menu = false;
         self.view_options_menu = false;
         self.terminal_context_menu = false;
         // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayFrame이 둘을 한 오버레이
@@ -6384,6 +6521,11 @@ pub const AppSession = struct {
         if (dst.dock.entryCountTotal() + unique > dock_panel.max_entries) return error.UnsupportedMove;
         try dg.entries.ensureUnusedCapacity(dst.allocator, unique);
 
+        // File-tab emptiness alone is not workspace emptiness: an explicit (including explicit-empty)
+        // explorer or recent history is destination authority and must survive a window merge.
+        const dst_was_empty = dst.dock.entryCountTotal() == 0 and !dst.dock.presented and
+            dst.file_tree.rootMode() == .inferred and !dst.file_tree.hasContent();
+
         var staged: std.ArrayList(dock_panel.Entry) = .empty;
         defer {
             for (staged.items) |entry| dst.allocator.free(entry.path);
@@ -6406,7 +6548,59 @@ pub const AppSession = struct {
             };
         }
 
-        const dst_was_empty = dst.dock.entryCountTotal() == 0;
+        // Explorer authority participates in the same transaction as dock entry ownership. An empty
+        // destination adopts the source workspace roots/history; otherwise the destination keeps its
+        // root mode and folds transferred open files into its own recent/inferred model. All watcher
+        // and row allocations finish before either dock is mutated.
+        var src_tree_candidate = try src.file_tree.clone();
+        defer src_tree_candidate.deinit();
+        var dst_tree_candidate = if (dst_was_empty) try src.file_tree.clone() else try dst.file_tree.clone();
+        defer dst_tree_candidate.deinit();
+        if (!dst_was_empty) for (0..src.dock.groupCount()) |group_index| {
+            const sg = src.dock.groupAt(group_index).?;
+            for (sg.entries.items) |entry| {
+                const parent = std.fs.path.dirname(entry.path) orelse continue;
+                // In inferred mode the source tree already owns the project-root decision made by
+                // projectRootForFile when the file was opened. Replacing that authority with dirname
+                // here would shrink `/repo/sub/file.md` from `/repo` to `/repo/sub` after merge.
+                var inferred_root = parent;
+                if (dst_tree_candidate.rootMode() == .inferred and src.file_tree.rootMode() == .inferred) {
+                    var source_authority: ?[]const u8 = null;
+                    for (0..src.file_tree.rootCount()) |root_index| {
+                        const source_root = src.file_tree.rootAt(root_index).?;
+                        if (!file_tree.Tree.pathWithinRoot(entry.path, source_root)) continue;
+                        if (source_authority == null or source_root.len > source_authority.?.len) source_authority = source_root;
+                    }
+                    if (source_authority) |root| inferred_root = root;
+                }
+                try dst_tree_candidate.recordOpened(entry.path, inferred_root);
+            }
+        };
+        try src_tree_candidate.resetWatchRequests(&.{});
+        var dst_watch_extras: [dock_panel.max_entries * 2][]const u8 = undefined;
+        var dst_watch_count: usize = 0;
+        for (0..dst.dock.groupCount()) |group_index| {
+            const group = dst.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
+                dst_watch_extras[dst_watch_count] = parent;
+                dst_watch_count += 1;
+            };
+        }
+        for (0..src.dock.groupCount()) |group_index| {
+            const group = src.dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| if (std.fs.path.dirname(entry.path)) |parent| {
+                dst_watch_extras[dst_watch_count] = parent;
+                dst_watch_count += 1;
+            };
+        }
+        try dst_tree_candidate.resetWatchRequests(dst_watch_extras[0..dst_watch_count]);
+        var src_tree_rows: std.ArrayList(file_tree.Row) = .empty;
+        defer src_tree_rows.deinit(src.allocator);
+        var dst_tree_rows: std.ArrayList(file_tree.Row) = .empty;
+        defer dst_tree_rows.deinit(dst.allocator);
+        try src.prepareFileTreeRowStaging(&src_tree_rows, 0);
+        try dst.prepareFileTreeRowStaging(&dst_tree_rows, unique);
+
         const target_was_empty = dg.entries.items.len == 0;
         const src_focused = src.dock.focusedGroup();
         const src_active_path: ?[]const u8 = if (src_focused.active) |i| if (i < src_focused.entries.items.len) src_focused.entries.items[i].path else null else null;
@@ -6473,7 +6667,9 @@ pub const AppSession = struct {
             dst.dock.size = src.dock.size;
             dst.dock.tree_size = src.dock.tree_size;
             dst.dock.collapsed = src.dock.collapsed;
+            dst.dock.presented = src.dock.presented;
         }
+        if (dst.dock.entryCountTotal() > 0) dst.dock.presented = true;
 
         for (0..src.dock.groupCount()) |group_index| {
             const sg = src.dock.groupAt(group_index).?;
@@ -6498,8 +6694,10 @@ pub const AppSession = struct {
             if (group.active) |i| if (i < group.entries.items.len) dst.touchFilePanelEntry(&group.entries.items[i]);
         }
         dst.enforceFilePanelLiveViewLimit();
-        src.rebuildFileTreeFromDock() catch {};
-        dst.rebuildFileTreeFromDock() catch {};
+        src.buildPreparedFileTreeRows(&src_tree_candidate, &src_tree_rows);
+        dst.buildPreparedFileTreeRows(&dst_tree_candidate, &dst_tree_rows);
+        src.commitFileTreeCandidate(&src_tree_candidate, &src_tree_rows);
+        dst.commitFileTreeCandidate(&dst_tree_candidate, &dst_tree_rows);
         src.metal_dirty = true;
         dst.metal_dirty = true;
     }
@@ -9099,7 +9297,7 @@ pub const AppSession = struct {
     fn assignOneVisibleDockSurfaceId(self: *AppSession) void {
         if (!self.dock_initialized) return;
         for (0..self.dock.groupCount()) |group_index| {
-            const group = self.dock.groupAt(group_index).?;
+            const group = self.dock.groupAtConst(group_index).?;
             const active = group.active orelse continue;
             if (active >= group.entries.items.len) continue;
             const entry = &group.entries.items[active];
@@ -9292,6 +9490,97 @@ pub const AppSession = struct {
         return pending;
     }
 
+    fn resetFileTreeWatchRootsFor(self: *const AppSession, tree: *file_tree.Tree, extra_open_path: ?[]const u8) !void {
+        return resetFileTreeWatchRootsForDock(tree, if (self.dock_initialized) &self.dock else null, extra_open_path);
+    }
+
+    fn resetFileTreeWatchRootsForDock(
+        tree: *file_tree.Tree,
+        dock: ?*const dock_panel.DockPanel,
+        extra_open_path: ?[]const u8,
+    ) !void {
+        var extras: [dock_panel.max_entries + 1][]const u8 = undefined;
+        var count: usize = 0;
+        if (dock) |panel| for (0..panel.groupCount()) |group_index| {
+            const group = panel.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| {
+                const parent = std.fs.path.dirname(entry.path) orelse continue;
+                extras[count] = parent;
+                count += 1;
+            }
+        };
+        if (extra_open_path) |path| if (std.fs.path.dirname(path)) |parent| {
+            extras[count] = parent;
+            count += 1;
+        };
+        try tree.resetWatchRequests(extras[0..count]);
+    }
+
+    fn buildFileTreeRowsForDock(
+        allocator: std.mem.Allocator,
+        dock: *const dock_panel.DockPanel,
+        tree: *const file_tree.Tree,
+        open_states: *std.ArrayList(file_tree.OpenState),
+        rows: *std.ArrayList(file_tree.Row),
+    ) !void {
+        try open_states.ensureTotalCapacity(allocator, dock.entryCountTotal());
+        for (0..dock.groupCount()) |group_index| {
+            const group = dock.groupAtConst(group_index).?;
+            for (group.entries.items, 0..) |entry, i| open_states.appendAssumeCapacity(.{
+                .path = entry.path,
+                .active = group.active != null and group.active.? == i,
+                .dirty = entry.dirty,
+                .external_change = entry.external_change,
+            });
+        }
+        try rows.ensureTotalCapacity(allocator, file_tree.max_materialized_nodes + file_tree.max_recent + file_tree.max_roots + 1);
+        try tree.buildRows(allocator, open_states.items, rows);
+    }
+
+    fn refreshFileTreeWatchRoots(self: *AppSession) !void {
+        if (!self.file_tree_initialized) return;
+        try self.resetFileTreeWatchRootsFor(&self.file_tree, null);
+        self.file_tree_watch_reset_pending = true;
+    }
+
+    fn prepareFileTreeRowStaging(self: *AppSession, rows: *std.ArrayList(file_tree.Row), extra_entries: usize) !void {
+        try self.file_tree_open_states.ensureTotalCapacity(self.allocator, self.dock.entryCountTotal() + extra_entries);
+        try rows.ensureTotalCapacity(self.allocator, file_tree.max_materialized_nodes + file_tree.max_recent + file_tree.max_roots + 1);
+    }
+
+    /// prepareFileTreeRowStaging 뒤에만 호출한다. capacity가 고정돼 도크 commit 이후에도 allocation/OOM 없이
+    /// live open/dirty/active 상태를 후보 Tree row로 투영한다.
+    fn buildPreparedFileTreeRows(self: *AppSession, tree: *const file_tree.Tree, rows: *std.ArrayList(file_tree.Row)) void {
+        self.file_tree_open_states.clearRetainingCapacity();
+        for (0..self.dock.groupCount()) |group_index| {
+            const group = self.dock.groupAtConst(group_index).?;
+            for (group.entries.items, 0..) |entry, i| self.file_tree_open_states.appendAssumeCapacity(.{
+                .path = entry.path,
+                .active = group.active != null and group.active.? == i,
+                .dirty = entry.dirty,
+                .external_change = entry.external_change,
+            });
+        }
+        tree.buildRows(self.allocator, self.file_tree_open_states.items, rows) catch unreachable;
+    }
+
+    /// root/watch/rows의 모든 allocation이 끝난 뒤 세 authority를 한 번에 무실패 교체한다.
+    fn commitFileTreeCandidate(self: *AppSession, candidate: *file_tree.Tree, candidate_rows: *std.ArrayList(file_tree.Row)) void {
+        self.clearFileTreeSelection();
+        const old_tree = self.file_tree;
+        const old_rows = self.file_tree_rows;
+        self.file_tree = candidate.*;
+        self.file_tree_rows = candidate_rows.*;
+        candidate.* = old_tree;
+        candidate_rows.* = old_rows;
+        candidate_rows.deinit(self.allocator);
+        candidate_rows.* = .empty;
+        candidate.deinit();
+        candidate.* = file_tree.Tree.init(self.allocator);
+        self.file_tree_rows_dirty = false;
+        self.file_tree_watch_reset_pending = true;
+    }
+
     fn requestFileConflictReload(self: *AppSession, surface_id: u64) void {
         const entry = self.dock.entryForSurfaceId(surface_id) orelse return;
         if (!entry.external_change) return;
@@ -9365,14 +9654,139 @@ pub const AppSession = struct {
         };
     }
 
-    /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 여기서 하는
-    /// 작업은 mutex 아래 owned queue 이동 + 메모리 정렬/row projection뿐이며 FS API는 worker에만 있다.
+    /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 blocking
+    /// path lookup/read는 worker에만 있고, main actor는 queue/snapshot 작업과 result descriptor close만 수행한다.
     fn updateFileTree(self: *AppSession) !void {
         if (!self.file_tree_initialized) return;
         var changed = false;
         while (self.file_tree_backend.takeResult()) |owned_result| {
             var result = owned_result;
-            defer result.deinit(self.allocator);
+            defer result.deinit(self.allocator, self.io);
+            if (result.kind == .root_validation) {
+                root_result: {
+                    const pending = self.file_tree_root_validation orelse break :root_result;
+                    if (pending.request_id != result.request_id or
+                        pending.expected_root_generation != result.expected_root_generation or
+                        @intFromEnum(pending.operation) != result.root_operation or
+                        pending.round != result.root_validation_round) break :root_result;
+                    if (self.file_tree.rootGeneration() != pending.expected_root_generation) {
+                        self.file_tree_root_validation = null;
+                        self.reportFileTreeRootOutcome(.stale_generation, "탐색기 루트가 바뀌어 폴더 선택 결과를 취소했습니다.");
+                        break :root_result;
+                    }
+                    if (!result.ok) {
+                        self.file_tree_root_validation = null;
+                        self.reportFileTreeRootOutcome(.validation_failed, "선택한 폴더를 열 수 없습니다.");
+                        break :root_result;
+                    }
+                    if (pending.round == 0) {
+                        const identity = result.identity orelse {
+                            self.file_tree_root_validation = null;
+                            self.reportFileTreeRootOutcome(.identity_missing, "선택한 폴더 identity를 확인할 수 없습니다.");
+                            break :root_result;
+                        };
+                        const canonical = self.allocator.dupe(u8, result.path) catch {
+                            self.file_tree_root_validation = null;
+                            self.reportFileTreeRootOutcome(.allocation_failed, "폴더 재검증 상태를 준비할 수 없습니다.");
+                            break :root_result;
+                        };
+                        if (!self.file_tree_backend.submitRootValidation(
+                            canonical,
+                            pending.request_id,
+                            pending.expected_root_generation,
+                            @intFromEnum(pending.operation),
+                            1,
+                        )) {
+                            self.allocator.free(canonical);
+                            self.file_tree_root_validation = null;
+                            self.reportFileTreeRootOutcome(.backend_busy, "폴더 재검증 작업을 시작하지 못했습니다.");
+                            break :root_result;
+                        }
+                        self.file_tree_root_validation.?.round = 1;
+                        self.file_tree_root_validation.?.identity = identity;
+                        break :root_result;
+                    }
+                    const expected_identity = pending.identity orelse {
+                        self.file_tree_root_validation = null;
+                        self.reportFileTreeRootOutcome(.identity_missing, "폴더 재검증 상태가 유효하지 않습니다.");
+                        break :root_result;
+                    };
+                    const actual_identity = result.identity orelse {
+                        self.file_tree_root_validation = null;
+                        self.reportFileTreeRootOutcome(.identity_missing, "폴더 identity가 사라져 변경을 취소했습니다.");
+                        break :root_result;
+                    };
+                    const validated_dir = result.validated_dir orelse {
+                        self.file_tree_root_validation = null;
+                        self.reportFileTreeRootOutcome(.identity_missing, "폴더 검증 capability가 사라져 변경을 취소했습니다.");
+                        break :root_result;
+                    };
+                    if (!expected_identity.eql(actual_identity)) {
+                        self.file_tree_root_validation = null;
+                        self.reportFileTreeRootOutcome(.identity_changed, "선택한 폴더가 검증 중 교체되어 변경을 취소했습니다.");
+                        break :root_result;
+                    }
+                    self.file_tree_root_validation = null;
+                    var candidate = self.file_tree.cloneForRootTransaction() catch {
+                        self.reportFileTreeRootOutcome(.allocation_failed, "탐색기 루트 변경 상태를 준비할 수 없습니다.");
+                        break :root_result;
+                    };
+                    defer candidate.deinit();
+                    const roots = [_][]const u8{result.path};
+                    switch (pending.operation) {
+                        .replace => candidate.replaceExplicitRoots(&roots) catch {
+                            self.reportFileTreeRootOutcome(.model_stage_failed, "탐색기 루트를 교체할 수 없습니다.");
+                            break :root_result;
+                        },
+                        .add => candidate.addExplicitRoot(result.path) catch {
+                            self.reportFileTreeRootOutcome(.model_stage_failed, "작업공간에 폴더를 추가할 수 없습니다.");
+                            break :root_result;
+                        },
+                        .none => break :root_result,
+                    }
+                    if (result.identity) |identity| _ = candidate.pinRootIdentity(result.path, identity);
+                    self.resetFileTreeWatchRootsFor(&candidate, null) catch {
+                        self.reportFileTreeRootOutcome(.watcher_stage_failed, "폴더 감시를 갱신할 수 없어 루트 변경을 취소했습니다.");
+                        break :root_result;
+                    };
+                    var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
+                    defer candidate_rows.deinit(self.allocator);
+                    self.prepareFileTreeRowStaging(&candidate_rows, 0) catch {
+                        self.reportFileTreeRootOutcome(.row_stage_failed, "탐색기 행 상태를 준비할 수 없어 루트 변경을 취소했습니다.");
+                        break :root_result;
+                    };
+                    self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
+                    const validated_scan_path = candidate.takeScanRequestForPath(result.path) orelse {
+                        self.reportFileTreeRootOutcome(.model_stage_failed, "검증된 탐색기 루트의 첫 scan을 준비할 수 없습니다.");
+                        break :root_result;
+                    };
+                    if (!self.file_tree_backend.submitValidatedRootScan(
+                        validated_scan_path,
+                        candidate.rootGeneration(),
+                        validated_dir,
+                    )) {
+                        candidate.requeueScan(validated_scan_path) catch {};
+                        self.allocator.free(validated_scan_path);
+                        self.reportFileTreeRootOutcome(.backend_busy, "검증된 폴더 scan을 시작하지 못해 변경을 취소했습니다.");
+                        break :root_result;
+                    }
+                    result.validated_dir = null; // first scan worker now owns the descriptor capability.
+                    self.commitFileTreeCandidate(&candidate, &candidate_rows);
+                    self.reportFileTreeRootOutcome(switch (pending.operation) {
+                        .replace => .committed_replace,
+                        .add => .committed_add,
+                        .none => .model_stage_failed,
+                    }, null);
+                    self.dock.presented = true;
+                    self.dock.collapsed = false;
+                    self.file_tree_scroll_rows = 0;
+                    self.clearFileTreeSelection();
+                    self.file_tree_rows_dirty = true;
+                    self.invalidateDockDragGeometry();
+                    changed = true;
+                }
+                break; // at most one root validation/revalidation completion per frame tick.
+            }
             if (result.kind == .file_hash) {
                 if (self.dock_initialized) hash_groups: for (0..self.dock.groupCount()) |group_index| {
                     const group = self.dock.groupAt(group_index).?;
@@ -9396,6 +9810,10 @@ pub const AppSession = struct {
                 changed = true;
                 continue;
             }
+            // Directory results belong to the exact root snapshot that queued them. Comparing only
+            // the path is insufficient for A -> B -> A because the same bytes can name a new root
+            // authority after two replacements.
+            if (result.expected_root_generation != self.file_tree.rootGeneration()) continue;
             if (!result.ok) {
                 self.file_tree.failSnapshot(result.path);
                 changed = true;
@@ -9415,6 +9833,10 @@ pub const AppSession = struct {
             });
             self.file_tree.applySnapshotWithIdentity(result.path, result.identity, self.file_tree_entry_inputs.items) catch |err| switch (err) {
                 error.NotFound => {}, // watcher refresh 중 부모가 사라졌거나 root가 이관된 정상 race.
+                error.IdentityMismatch => {
+                    self.file_tree.failSnapshot(result.path);
+                    self.showNotice("탐색기 폴더가 다른 디렉터리로 바뀌어 갱신을 중단했습니다. 폴더를 다시 여세요.");
+                },
                 else => {
                     self.file_tree.failSnapshot(result.path);
                     self.file_tree.requeueScan(result.path) catch {};
@@ -9428,7 +9850,7 @@ pub const AppSession = struct {
         var submitted: usize = 0;
         while (submitted < file_tree_backend.max_inflight) {
             const path = self.file_tree.takeScanRequest() orelse break;
-            if (!self.file_tree_backend.submit(path)) {
+            if (!self.file_tree_backend.submit(path, self.file_tree.rootGeneration())) {
                 self.file_tree.requeueScan(path) catch {};
                 self.allocator.free(path);
                 break;
@@ -9466,12 +9888,20 @@ pub const AppSession = struct {
 
     fn openCreatedFilePanel(self: *AppSession, path: []const u8, root: []const u8) void {
         const open_kind = file_panel_bridge.openKindForPath(path) orelse return;
-        self.file_tree.recordOpened(path, root) catch return;
+        var candidate = self.file_tree.clone() catch return;
+        defer candidate.deinit();
+        candidate.recordOpened(path, root) catch return;
+        self.resetFileTreeWatchRootsFor(&candidate, path) catch return;
+        var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
+        defer candidate_rows.deinit(self.allocator);
+        self.prepareFileTreeRowStaging(&candidate_rows, 1) catch return;
         const kind: dock_panel.EntryKind = switch (open_kind) {
             .markdown => .markdown,
             .html => .html,
         };
         const opened = self.dock.open(self.dock.focusedGroup(), path, kind) catch return;
+        self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
+        self.commitFileTreeCandidate(&candidate, &candidate_rows);
         if (opened.created) self.invalidateDockDragGeometry();
         if (opened.previous_active) |i| if (i < opened.group.entries.items.len and i != opened.index)
             self.markFilePanelDirtySyncPending(&opened.group.entries.items[i]);
@@ -10092,7 +10522,13 @@ pub const AppSession = struct {
     }
 
     fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
-        return self.file_tree_edit_inflight or self.file_tree_delete_inflight or
+        return self.fileTreeFileMutationBusy() or
+            self.file_tree_root_pick_pending != .none or self.file_tree_root_picker_inflight != .none or
+            self.file_tree_root_validation != null;
+    }
+
+    fn fileTreeFileMutationBusy(self: *const AppSession) bool {
+        return self.pending_file_tree_delete != null or self.file_tree_edit_inflight or self.file_tree_delete_inflight or
             self.file_tree_mutation_waiting_request != null or self.file_tree_trash_queue_len != 0 or
             self.file_tree_manual_recovery_paths_len != 0 or self.file_tree_manual_recovery_unknown;
     }
@@ -10155,7 +10591,7 @@ pub const AppSession = struct {
     }
 
     fn focusFileTree(self: *AppSession) void {
-        if (!self.dock_initialized or !self.dockHasContent()) return;
+        if (!self.dock_initialized or !self.dock.presented) return;
         self.cancelPendingDockFocus();
         if (self.dock.collapsed) self.activateFilePanelDockControl();
         const restore_surface: ?u64 = switch (self.focus_owner) {
@@ -10267,7 +10703,7 @@ pub const AppSession = struct {
         return out;
     }
 
-    fn copyPendingFileTreeDelete(target: file_tree_mutation.Target) ?PendingFileTreeDelete {
+    fn copyPendingFileTreeDelete(target: file_tree_mutation.Target, root_generation: u64) ?PendingFileTreeDelete {
         if (target.path.len > std.fs.max_path_bytes) return null;
         var out = PendingFileTreeDelete{
             .row_kind = target.kind,
@@ -10275,6 +10711,7 @@ pub const AppSession = struct {
             .identity = target.identity,
             .parent_identity = target.parent_identity,
             .root_identity = target.root_identity,
+            .root_generation = root_generation,
         };
         @memcpy(out.path_buf[0..target.path.len], target.path);
         out.path_len = target.path.len;
@@ -10485,6 +10922,7 @@ pub const AppSession = struct {
             }
         }
         self.file_tree_rows_dirty = true;
+        self.refreshFileTreeWatchRoots() catch {};
         self.metal_dirty = true;
         return true;
     }
@@ -10660,13 +11098,17 @@ pub const AppSession = struct {
                 "이 항목은 삭제할 수 없습니다.");
             return;
         };
-        self.pending_file_tree_delete = copyPendingFileTreeDelete(target) orelse return;
+        self.pending_file_tree_delete = copyPendingFileTreeDelete(target, self.file_tree.rootGeneration()) orelse return;
         self.showConfirmButtons(.file_tree_delete, "선택한 항목을 macOS 휴지통으로 이동할까요?", .{ .confirm = "휴지통으로 이동", .cancel = "취소" });
     }
 
     fn confirmFileTreeDelete(self: *AppSession) void {
         const pending = self.pending_file_tree_delete orelse return;
         self.pending_file_tree_delete = null;
+        if (pending.root_generation != self.file_tree.rootGeneration()) {
+            self.showNotice("탐색기 루트가 바뀌어 삭제를 취소했습니다.");
+            return;
+        }
         const target: file_tree_mutation.Target = .{
             .kind = pending.row_kind,
             .path = pending.path(),
@@ -10800,7 +11242,7 @@ pub const AppSession = struct {
             .root => |v| _ = self.file_tree.toggleDirectory(v.path) catch false,
             .directory => |v| _ = self.file_tree.toggleDirectory(v.path) catch false,
             .recent_file => |v| self.openFileTreePath(v.path, v.supported),
-            .file => |v| self.openFileTreePath(v.path, v.supported),
+            .file => |v| self.openProjectedFileTreePath(v.path, v.supported, v.identity),
             .empty => {},
         }
         self.file_tree_rows_dirty = true;
@@ -10827,6 +11269,41 @@ pub const AppSession = struct {
         self.file_tree_external_open = owned;
     }
 
+    fn openProjectedFileTreePath(
+        self: *AppSession,
+        path: []const u8,
+        supported: bool,
+        expected_leaf_identity: ?file_tree.Identity,
+    ) void {
+        const leaf_identity = expected_leaf_identity orelse return;
+        const root = self.file_tree.rootCapabilityForPath(path) orelse return;
+        var validated = file_tree_backend.openValidatedFileTreeRow(
+            self.allocator,
+            self.io,
+            root.path,
+            root.identity,
+            path,
+            leaf_identity,
+        ) orelse return;
+        defer validated.deinit(self.io);
+        if (supported) {
+            const tree_owner: ?FileTreeFocusOwner = switch (self.focus_owner) {
+                .file_tree => |owner| owner,
+                else => null,
+            };
+            _ = self.openFilePanelPathFromValidatedRow(path, validated.file, leaf_identity);
+            if (tree_owner) |owner| {
+                self.focus_owner = .{ .file_tree = owner };
+                self.file_tree_focus_pending = true;
+                self.workspace_focus_pending = false;
+            }
+            return;
+        }
+        // The exact regular-file capability stays open through admission into the native one-shot.
+        // Subsequent same-UID namespace mutation after this queue boundary is the external opener's race.
+        self.openFileTreePath(path, false);
+    }
+
     pub fn takeFileTreeExternalOpen(self: *AppSession) ?[]u8 {
         const path = self.file_tree_external_open orelse return null;
         self.file_tree_external_open = null;
@@ -10840,16 +11317,54 @@ pub const AppSession = struct {
     /// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
     /// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
     pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
-        if (self.fileTreeNamespaceMutationBusy() or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
+        if (self.fileTreeFileMutationBusy() or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
             !std.unicode.utf8ValidateSlice(path)) return .failed;
         const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
         const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
         if (stat.kind != .file) return .failed;
+        return self.openFilePanelPathAfterValidation(path, open_kind, null);
+    }
+
+    fn openFilePanelPathFromValidatedRow(
+        self: *AppSession,
+        path: []const u8,
+        file: std.Io.File,
+        identity: file_tree.Identity,
+    ) FilePanelOpenPathResult {
+        if (self.fileTreeFileMutationBusy() or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
+            !std.unicode.utf8ValidateSlice(path)) return .failed;
+        const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
+        const stat = file.stat(self.io) catch return .failed;
+        if (stat.kind != .file) return .failed;
+        return self.openFilePanelPathAfterValidation(path, open_kind, identity);
+    }
+
+    fn openFilePanelPathAfterValidation(
+        self: *AppSession,
+        path: []const u8,
+        open_kind: file_panel_bridge.OpenKind,
+        initial_identity: ?file_tree.Identity,
+    ) FilePanelOpenPathResult {
         if (self.file_tree_initialized) {
             const root = file_tree_backend.projectRootForFile(self.allocator, self.io, path) catch return .failed;
             defer self.allocator.free(root);
-            self.file_tree.recordOpened(path, root) catch return .failed;
-            self.file_tree_rows_dirty = true;
+            var candidate = self.file_tree.clone() catch return .failed;
+            defer candidate.deinit();
+            candidate.recordOpened(path, root) catch return .failed;
+            self.resetFileTreeWatchRootsFor(&candidate, path) catch return .failed;
+            var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
+            defer candidate_rows.deinit(self.allocator);
+            self.prepareFileTreeRowStaging(&candidate_rows, 1) catch return .failed;
+            const group = self.dock.focusedGroup();
+            const kind: dock_panel.EntryKind = switch (open_kind) {
+                .markdown => .markdown,
+                .html => .html,
+            };
+            const opened = self.dock.open(group, path, kind) catch return .failed;
+            self.pinInitialFilePanelIdentity(opened, initial_identity);
+            self.buildPreparedFileTreeRows(&candidate, &candidate_rows);
+            self.commitFileTreeCandidate(&candidate, &candidate_rows);
+            return self.finishOpenFilePanel(opened);
         }
         const group = self.dock.focusedGroup();
         const kind: dock_panel.EntryKind = switch (open_kind) {
@@ -10857,6 +11372,26 @@ pub const AppSession = struct {
             .html => .html,
         };
         const opened = self.dock.open(group, path, kind) catch return .failed;
+        self.pinInitialFilePanelIdentity(opened, initial_identity);
+        return self.finishOpenFilePanel(opened);
+    }
+
+    fn pinInitialFilePanelIdentity(
+        self: *AppSession,
+        opened: dock_panel.DockPanel.OpenResult,
+        identity: ?file_tree.Identity,
+    ) void {
+        _ = self;
+        if (!opened.created or opened.group.entries.items[opened.index].kind != .markdown) return;
+        const expected = identity orelse return;
+        const entry = &opened.group.entries.items[opened.index];
+        entry.initial_file_identity_device = expected.device;
+        entry.initial_file_identity_inode = expected.inode;
+        entry.initial_file_identity_kind = expected.kind;
+        entry.initial_file_identity_pending = true;
+    }
+
+    fn finishOpenFilePanel(self: *AppSession, opened: dock_panel.DockPanel.OpenResult) FilePanelOpenPathResult {
         if (opened.created) self.invalidateDockDragGeometry(); // tab count/width snapshot invalidation barrier
         if (opened.previous_active) |i| if (i < opened.group.entries.items.len and i != opened.index)
             self.markFilePanelDirtySyncPending(&opened.group.entries.items[i]);
@@ -11490,6 +12025,36 @@ pub const AppSession = struct {
         return bytes;
     }
 
+    fn openedFileIdentity(self: *AppSession, file: std.Io.File) FilePanelReadError!file_tree.Identity {
+        if (comptime builtin.os.tag == .macos) {
+            var stat: std.posix.Stat = undefined;
+            if (std.c.fstat(file.handle, &stat) != 0) return error.NotFound;
+            return .{
+                .device = @intCast(stat.dev),
+                .inode = @intCast(stat.ino),
+                .kind = @intFromEnum(if (std.posix.S.ISREG(stat.mode))
+                    file_tree.IdentityKind.regular
+                else if (std.posix.S.ISDIR(stat.mode))
+                    file_tree.IdentityKind.directory
+                else if (std.posix.S.ISLNK(stat.mode))
+                    file_tree.IdentityKind.symlink
+                else
+                    file_tree.IdentityKind.other),
+            };
+        }
+        const stat = file.stat(self.io) catch return error.NotFound;
+        return .{
+            .device = 0,
+            .inode = @intCast(stat.inode),
+            .kind = @intFromEnum(switch (stat.kind) {
+                .file => file_tree.IdentityKind.regular,
+                .directory => file_tree.IdentityKind.directory,
+                .sym_link => file_tree.IdentityKind.symlink,
+                else => file_tree.IdentityKind.other,
+            }),
+        };
+    }
+
     /// surface가 핀한 Markdown 파일을 읽는다. web 쪽에서 경로를 지정할 수 없고, 단일 파일 상한은 8 MiB다.
     pub fn readFilePanel(self: *AppSession, gpa: std.mem.Allocator, surface_id: u64, editor_epoch: u64) FilePanelReadError![]u8 {
         if (!self.dock_initialized) return error.SurfaceNotFound;
@@ -11500,8 +12065,17 @@ pub const AppSession = struct {
         if (entry.mutation_pending_id != 0) return error.MutationPending;
 
         const cwd = std.Io.Dir.cwd();
-        const file = try openFilePanelRead(cwd, entry.path, true);
+        const file = try openFilePanelRead(cwd, entry.path, !entry.initial_file_identity_pending);
         defer file.close(self.io);
+        if (entry.initial_file_identity_pending) {
+            const actual = try self.openedFileIdentity(file);
+            const expected: file_tree.Identity = .{
+                .device = entry.initial_file_identity_device,
+                .inode = entry.initial_file_identity_inode,
+                .kind = entry.initial_file_identity_kind,
+            };
+            if (!actual.eql(expected)) return error.NotFound;
+        }
         const before = file.stat(self.io) catch return error.NotFound;
         const bytes = try self.readOpenedFile(gpa, file);
         errdefer gpa.free(bytes);
@@ -11513,6 +12087,10 @@ pub const AppSession = struct {
         // 덮지 못한다. byte 반환과 token commit을 같은 epoch/active 검사로 묶는다.
         if (!entry.editor_document_active or entry.editor_epoch != editor_epoch) return error.StaleDocument;
         if (entry.editor_recovery_required) return error.RecoveryRequired;
+        entry.initial_file_identity_pending = false;
+        entry.initial_file_identity_device = 0;
+        entry.initial_file_identity_inode = 0;
+        entry.initial_file_identity_kind = 0;
         entry.disk_content_hash = std.hash.Wyhash.hash(0, bytes);
         entry.disk_content_hash_valid = true;
         return bytes;
@@ -14793,8 +15371,26 @@ pub const AppSession = struct {
             self.context_menu_items_buf[n] = "휴지통으로 이동";
             n += 1;
         }
+        if (target.row_kind == .root) {
+            self.context_menu_items_buf[n] = "파일 열기…";
+            n += 1;
+            self.context_menu_items_buf[n] = "폴더 열기…";
+            n += 1;
+            self.context_menu_items_buf[n] = "작업공간에 폴더 추가…";
+            n += 1;
+            self.context_menu_items_buf[n] = "작업공간에서 폴더 제거";
+            n += 1;
+        }
         self.context_menu_items_len = n;
         return self.context_menu_items_buf[0..n];
+    }
+
+    fn buildFileTreeBackgroundMenuItems(self: *AppSession) []const []const u8 {
+        self.context_menu_items_buf[0] = "파일 열기…";
+        self.context_menu_items_buf[1] = "폴더 열기…";
+        self.context_menu_items_buf[2] = "작업공간에 폴더 추가…";
+        self.context_menu_items_len = 3;
+        return self.context_menu_items_buf[0..3];
     }
 
     /// 터미널 본문 (x,y backing px)에 복사/붙여넣기 컨텍스트 메뉴를 띄운다(input.right-click=menu). 항목 선택은
@@ -14818,6 +15414,7 @@ pub const AppSession = struct {
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.file_tree_context_target = null;
+        self.file_tree_background_menu = false;
         self.view_options_menu = false;
         self.terminal_context_menu = false;
         self.metal_dirty = true;
@@ -14854,17 +15451,42 @@ pub const AppSession = struct {
             self.metal_dirty = true;
             return;
         }
+        if (self.file_tree_background_menu) {
+            const selected = self.chrome_host.context_menu.selected;
+            self.closeContextMenu();
+            switch (selected) {
+                0 => self.requestFilePanelPick(),
+                1 => self.requestFileTreeRootPick(.replace),
+                2 => self.requestFileTreeRootPick(.add),
+                else => {},
+            }
+            return;
+        }
         if (self.file_tree_context_target) |target| {
             const sel = self.chrome_host.context_menu.selected;
             const create_allowed = !(target.symlink and (target.row_kind == .root or target.row_kind == .directory));
             self.file_tree_context_target = null;
             self.chrome_host.context_menu.hide();
+            if (target.root_generation != self.file_tree.rootGeneration()) {
+                self.showNotice("탐색기 루트가 바뀌어 명령을 취소했습니다.");
+                return;
+            }
             const current_index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = target.row_kind, .path = target.path() }) orelse {
                 self.showNotice("선택한 항목이 변경되어 명령을 취소했습니다.");
                 return;
             };
             _ = self.setFileTreeSelection(current_index);
-            if (create_allowed and sel == 0) self.startFileTreeEdit(.create_file) else if (create_allowed and sel == 1)
+            if (target.row_kind == .root) {
+                switch (sel) {
+                    0 => self.startFileTreeEdit(.create_file),
+                    1 => self.startFileTreeEdit(.create_directory),
+                    2 => self.requestFilePanelPick(),
+                    3 => self.requestFileTreeRootPick(.replace),
+                    4 => self.requestFileTreeRootPick(.add),
+                    5 => self.removeFileTreeRoot(target.path()),
+                    else => {},
+                }
+            } else if (create_allowed and sel == 0) self.startFileTreeEdit(.create_file) else if (create_allowed and sel == 1)
                 self.startFileTreeEdit(.create_directory)
             else {
                 const base: usize = if (create_allowed) 2 else 0;
@@ -16534,7 +17156,7 @@ pub const AppSession = struct {
                 if (fileTreeMutationTarget(self.file_tree_rows.items[row_index])) |tree_target| {
                     _ = self.setFileTreeSelection(row_index);
                     self.focusFileTree();
-                    if (copyPendingFileTreeDelete(tree_target)) |copied| {
+                    if (copyPendingFileTreeDelete(tree_target, self.file_tree.rootGeneration())) |copied| {
                         self.file_tree_context_target = copied;
                         const items = self.buildFileTreeContextMenuItems();
                         if (items.len > 0) {
@@ -16544,6 +17166,13 @@ pub const AppSession = struct {
                     }
                     return;
                 }
+            }
+            if (self.dockVisible() and layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree)) {
+                self.file_tree_background_menu = true;
+                const items = self.buildFileTreeBackgroundMenuItems();
+                self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
+                self.metal_dirty = true;
+                return;
             }
             if (self.renameTargetAt(x_px, y_px)) |target| {
                 self.context_menu_target = target;
@@ -16852,6 +17481,11 @@ pub const AppSession = struct {
                     return;
                 }
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
+                    if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
+                        self.focusFileTree();
+                        self.requestFilePanelPick();
+                        return;
+                    }
                     self.focusFileTree();
                     _ = self.setFileTreeSelection(row_index);
                     self.activateFileTreeRow(row_index);
@@ -16859,6 +17493,8 @@ pub const AppSession = struct {
                 }
                 if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                     self.focusFileTree(); // header/빈 여백 클릭도 tree 입력 축을 얻는다.
+                    if (!self.file_tree.hasContent() and layout_math.pointInRect(x_px, y_px, dg.tree_content))
+                        self.requestFilePanelPick();
                     return;
                 }
                 if (self.dockGroupDividerAtPoint(x_px, y_px)) |seg| {
@@ -16884,6 +17520,7 @@ pub const AppSession = struct {
                                 self.hovered_file_panel_tab = null;
                                 self.normalizeEmptyDockGroups();
                                 self.file_tree_rows_dirty = true;
+                                self.refreshFileTreeWatchRoots() catch {};
                                 self.metal_dirty = true;
                             }
                         }
@@ -19907,7 +20544,12 @@ pub const AppSession = struct {
         var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
         for (self.tabs.items) |tab| try tabs.append(arena, try self.captureWorkspaceTab(arena, tab));
         const dock = if (self.dock_initialized) try self.dock.persistedState(arena) else dock_panel.PersistedState{};
-        return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock };
+        const explorer_roots: ?[]const []const u8 = if (self.file_tree_initialized and self.file_tree.rootMode() == .explicit) blk: {
+            const roots = try arena.alloc([]const u8, self.file_tree.rootCount());
+            for (roots, 0..) |*root, i| root.* = try arena.dupe(u8, self.file_tree.rootAt(i).?);
+            break :blk roots;
+        } else null;
+        return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots } };
     }
 
     fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Tab) !maru.session.workspace.Tab {
@@ -20131,6 +20773,50 @@ pub const AppSession = struct {
         _ = new_dock.pruneEmptyGroups();
         self.assignDockSurfaceIds(&new_dock);
 
+        // Explorer roots, watcher union, projected rows, and backend lifetime are staged before the
+        // first live tab/dock teardown. Missing or inaccessible persisted roots degrade only that root;
+        // allocation failure leaves the whole current session untouched.
+        var new_file_tree = file_tree.Tree.init(self.allocator);
+        var new_file_tree_owned = true;
+        errdefer if (new_file_tree_owned) new_file_tree.deinit();
+        for (0..new_dock.groupCount()) |group_index| {
+            const group = new_dock.groupAtConst(group_index).?;
+            for (group.entries.items) |entry| {
+                const root = try file_tree_backend.projectRootForFile(self.allocator, self.io, entry.path);
+                defer self.allocator.free(root);
+                try new_file_tree.recordOpened(entry.path, root);
+            }
+        }
+        if (win.explorer.roots) |roots| {
+            var validated: [file_tree.max_roots]file_tree_backend.ValidatedRoot = undefined;
+            var validated_len: usize = 0;
+            defer for (validated[0..validated_len]) |*root| root.deinit(self.allocator, self.io);
+            for (roots) |root_path| {
+                const root = try file_tree_backend.validateRootSnapshot(self.allocator, self.io, root_path) orelse continue;
+                validated[validated_len] = root;
+                validated_len += 1;
+            }
+            var canonical: [file_tree.max_roots][]const u8 = undefined;
+            for (validated[0..validated_len], 0..) |root, i| canonical[i] = root.path;
+            try new_file_tree.replaceExplicitRoots(canonical[0..validated_len]);
+            for (validated[0..validated_len]) |root| _ = new_file_tree.pinRootIdentity(root.path, root.identity);
+        }
+        try resetFileTreeWatchRootsForDock(&new_file_tree, &new_dock, null);
+        var new_file_tree_backend = try file_tree_backend.Backend.init(self.allocator, self.io);
+        var new_file_tree_backend_owned = true;
+        errdefer if (new_file_tree_backend_owned) new_file_tree_backend.deinit();
+        var new_file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty;
+        defer new_file_tree_open_states.deinit(self.allocator);
+        var new_file_tree_rows: std.ArrayList(file_tree.Row) = .empty;
+        defer new_file_tree_rows.deinit(self.allocator);
+        try buildFileTreeRowsForDock(
+            self.allocator,
+            &new_dock,
+            &new_file_tree,
+            &new_file_tree_open_states,
+            &new_file_tree_rows,
+        );
+
         // 1) 새 탭들을 먼저 다 빌드한다(아직 self.tabs에 안 넣음 — 실패하면 기존 세션 그대로 유지).
         var new_tabs: std.ArrayList(*Tab) = .empty;
         defer new_tabs.deinit(self.allocator);
@@ -20159,7 +20845,24 @@ pub const AppSession = struct {
         self.dock = new_dock;
         self.dock_initialized = true;
         new_dock_owned = false;
-        self.rebuildFileTreeFromDock() catch {};
+        var old_file_tree = self.file_tree;
+        var old_file_tree_backend = self.file_tree_backend;
+        var old_file_tree_open_states = self.file_tree_open_states;
+        var old_file_tree_rows = self.file_tree_rows;
+        self.file_tree = new_file_tree;
+        self.file_tree_backend = new_file_tree_backend;
+        self.file_tree_open_states = new_file_tree_open_states;
+        self.file_tree_rows = new_file_tree_rows;
+        new_file_tree_owned = false;
+        new_file_tree_backend_owned = false;
+        new_file_tree_open_states = .empty;
+        new_file_tree_rows = .empty;
+        old_file_tree_backend.deinit();
+        old_file_tree.deinit();
+        old_file_tree_open_states.deinit(self.allocator);
+        old_file_tree_rows.deinit(self.allocator);
+        self.file_tree_rows_dirty = false;
+        self.file_tree_watch_reset_pending = true;
         // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
         // 연속"을 가정한다. 저장 순서를 그대로 복원하면(재정렬 안 함) #685 이전 빌드가 만든 [P,u,P,u]처럼 섞인
         // workspace가 들어와 드래그/토글 clamp가 엉뚱한 슬롯에 떨어진다. 여기서 stable-partition으로 고정을 전부
@@ -36996,7 +37699,7 @@ test "dock toggle visual bottom covers 1.7x glyph when titlebar is below equal o
     try std.testing.expectEqual(@as(u32, 29), dockToggleVisualBottomPx(18, 28));
 }
 
-test "empty file dock keeps its launcher visible and requests the shared file picker" {
+test "empty file dock launcher presents explorer and empty content requests the shared file picker" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -37013,7 +37716,7 @@ test "empty file dock keeps its launcher visible and requests the shared file pi
 
     try std.testing.expect(!session.dockHasContent());
     try std.testing.expect(!session.dockVisible());
-    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.request_file_picker, session.filePanelDockControlAction().?);
+    try std.testing.expectEqual(AppSession.FilePanelDockControlAction.open, session.filePanelDockControlAction().?);
     const launcher = session.filePanelDockControlRect() orelse return error.MissingDockLauncher;
     try std.testing.expect(!session.isWindowDragRegion(
         @floatFromInt(launcher.x + 1),
@@ -37035,9 +37738,12 @@ test "empty file dock keeps its launcher visible and requests the shared file pi
     try std.testing.expect(saw_launcher);
 
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    try std.testing.expect(!session.takeFilePanelPickRequest());
+    try std.testing.expect(session.dockVisible());
+    const tree_content = session.dockGeometry().tree_content;
+    session.mouse(1, @floatFromInt(tree_content.x + 1), @floatFromInt(tree_content.y + 1), 0, 0);
     try std.testing.expect(session.takeFilePanelPickRequest());
     try std.testing.expect(!session.takeFilePanelPickRequest());
-    try std.testing.expect(!session.dockVisible());
 
     const group = session.dock.singleGroup().?;
     _ = try session.dock.open(group, "/tmp/launcher-transition.md", .markdown);
@@ -37050,6 +37756,699 @@ test "empty file dock keeps its launcher visible and requests the shared file pi
 
     session.chrome_minimal = true;
     try std.testing.expect(session.filePanelDockControlRect() == null);
+}
+
+test "file tree root picker is a typed one-shot and cancel or invalid path preserves roots" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try session.file_tree.replaceExplicitRoots(&.{"/before"});
+    const generation = session.file_tree.rootGeneration();
+
+    session.requestFileTreeRootPick(.replace);
+    try std.testing.expectEqual(FileTreeRootOutcome.picker_requested, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
+    try std.testing.expectEqual(FileTreeRootOperation.none, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(&.{}); // AppKit cancel
+    try std.testing.expectEqual(FileTreeRootOutcome.picker_canceled, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(generation, session.file_tree.rootGeneration());
+    try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
+
+    session.requestFileTreeRootPick(.add);
+    try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick("relative");
+    try std.testing.expectEqual(FileTreeRootOutcome.invalid_path, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(generation, session.file_tree.rootGeneration());
+    try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
+}
+
+fn testWaitForFileTreeRootCompletion(session: *AppSession) !void {
+    var attempts: usize = 0;
+    while (session.file_tree_root_validation != null and attempts < 2_000) : (attempts += 1) {
+        try session.updateFileTree();
+        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    if (session.file_tree_root_validation != null) return error.TestUnexpectedResult;
+    try session.updateFileTree();
+}
+
+test "file tree root picker replaces adds repeats and rejects stale completion without touching dirty dock entries" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "root-a", .default_dir);
+    try tmp.dir.createDir(session.io, "root-b", .default_dir);
+    try tmp.dir.createDir(session.io, "root-c", .default_dir);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "outside.md", .data = "# dirty" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const root_a = try std.fs.path.join(allocator, &.{ tmp_root, "root-a" });
+    defer allocator.free(root_a);
+    const root_b = try std.fs.path.join(allocator, &.{ tmp_root, "root-b" });
+    defer allocator.free(root_b);
+    const root_c = try std.fs.path.join(allocator, &.{ tmp_root, "root-c" });
+    defer allocator.free(root_c);
+    const outside = try std.fs.path.join(allocator, &.{ tmp_root, "outside.md" });
+    defer allocator.free(outside);
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(outside));
+    const entry = session.dock.pathLocation(outside).?.group.entries.items.ptr;
+    entry[0].dirty = true;
+    entry[0].external_change = true;
+    const entry_id = entry[0].id;
+    const surface_id = entry[0].surface_id;
+
+    session.requestFileTreeRootPick(.replace);
+    try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(root_a);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
+    try std.testing.expectEqualStrings(root_a, session.file_tree.rootAt(0).?);
+
+    session.requestFileTreeRootPick(.add);
+    try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(root_b);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_add, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(@as(usize, 2), session.file_tree.rootCount());
+
+    session.requestFileTreeRootPick(.replace);
+    try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(root_c);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
+    try std.testing.expectEqualStrings(root_c, session.file_tree.rootAt(0).?);
+
+    // A completion issued against C must not publish after an intervening root generation change.
+    session.requestFileTreeRootPick(.replace);
+    try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(root_a);
+    try session.file_tree.replaceExplicitRoots(&.{root_b});
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expectEqual(FileTreeRootOutcome.stale_generation, session.fileTreeRootOutcome());
+    try std.testing.expectEqualStrings(root_b, session.file_tree.rootAt(0).?);
+
+    const preserved = session.dock.pathLocation(outside).?.group.entries.items[0];
+    try std.testing.expectEqual(entry_id, preserved.id);
+    try std.testing.expectEqual(surface_id, preserved.surface_id);
+    try std.testing.expect(preserved.dirty and preserved.external_change);
+    var saw_outside_safety_root = false;
+    while (session.file_tree.takeWatchRequest()) |watch| {
+        defer allocator.free(watch);
+        if (std.mem.eql(u8, watch, tmp_root)) saw_outside_safety_root = true;
+    }
+    try std.testing.expect(saw_outside_safety_root);
+}
+
+test "file tree root validation completion projects live dock open close state and watcher safety roots" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "initial-root", .default_dir);
+    try tmp.dir.createDir(session.io, "selected-root", .default_dir);
+    try tmp.dir.createDir(session.io, "closed-parent", .default_dir);
+    try tmp.dir.createDir(session.io, "live-parent", .default_dir);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "closed-parent/closed.md", .data = "# closed" });
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "live-parent/live.md", .data = "# live" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const initial_root = try std.fs.path.join(allocator, &.{ tmp_root, "initial-root" });
+    defer allocator.free(initial_root);
+    const selected_root = try std.fs.path.join(allocator, &.{ tmp_root, "selected-root" });
+    defer allocator.free(selected_root);
+    const closed_parent = try std.fs.path.join(allocator, &.{ tmp_root, "closed-parent" });
+    defer allocator.free(closed_parent);
+    const live_parent = try std.fs.path.join(allocator, &.{ tmp_root, "live-parent" });
+    defer allocator.free(live_parent);
+    const closed_path = try std.fs.path.join(allocator, &.{ closed_parent, "closed.md" });
+    defer allocator.free(closed_path);
+    const live_path = try std.fs.path.join(allocator, &.{ live_parent, "live.md" });
+    defer allocator.free(live_path);
+
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(closed_path));
+    const closed_surface = session.dock.pathLocation(closed_path).?.group.entries.items[0].surface_id;
+    // Keep the namespace explicit so opening an outside file during validation does not itself change
+    // root_generation and turn this freshness case into the separate stale-generation case.
+    try session.file_tree.replaceExplicitRoots(&.{initial_root});
+    const validation_generation = session.file_tree.rootGeneration();
+    session.requestFileTreeRootPick(.replace);
+    try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(selected_root);
+    try std.testing.expect(session.file_tree_root_validation != null);
+
+    try std.testing.expect(session.closeFilePanelSurfaceNow(closed_surface));
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(live_path));
+    try std.testing.expectEqual(validation_generation, session.file_tree.rootGeneration());
+    try testWaitForFileTreeRootCompletion(session);
+
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
+    try std.testing.expectEqual(@as(usize, 1), session.dock.entryCountTotal());
+    try std.testing.expect(session.dock.pathLocation(closed_path) == null);
+    try std.testing.expect(session.dock.pathLocation(live_path) != null);
+    var saw_closed_row = false;
+    var saw_live_row = false;
+    for (session.file_tree_rows.items) |row| switch (row) {
+        .recent_file => |recent| {
+            if (std.mem.eql(u8, recent.path, closed_path)) {
+                saw_closed_row = true;
+                try std.testing.expect(!recent.open);
+            } else if (std.mem.eql(u8, recent.path, live_path)) {
+                saw_live_row = true;
+                try std.testing.expect(recent.open and recent.active);
+            }
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_closed_row and saw_live_row);
+
+    var saw_selected_root = false;
+    var saw_live_safety_root = false;
+    var saw_closed_safety_root = false;
+    while (session.file_tree.takeWatchRequest()) |watch| {
+        defer allocator.free(watch);
+        saw_selected_root = saw_selected_root or std.mem.eql(u8, watch, selected_root);
+        saw_live_safety_root = saw_live_safety_root or std.mem.eql(u8, watch, live_parent);
+        saw_closed_safety_root = saw_closed_safety_root or std.mem.eql(u8, watch, closed_parent);
+    }
+    try std.testing.expect(saw_selected_root);
+    try std.testing.expect(saw_live_safety_root);
+    try std.testing.expect(!saw_closed_safety_root);
+}
+
+test "file tree retained first scan is published but stale namespace row activation is rejected" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "selected", .default_dir);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "selected/same.md", .data = "# original" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const selected = try std.fs.path.join(allocator, &.{ tmp_root, "selected" });
+    defer allocator.free(selected);
+
+    session.requestFileTreeRootPick(.replace);
+    try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(selected);
+
+    var attempts: usize = 0;
+    while ((session.file_tree_root_validation == null or session.file_tree_root_validation.?.round == 0) and attempts < 2_000) : (attempts += 1) {
+        try session.updateFileTree();
+        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(session.file_tree_root_validation != null);
+    try std.testing.expectEqual(@as(u8, 1), session.file_tree_root_validation.?.round);
+    attempts = 0;
+    while (session.file_tree_backend.resultCountForTest() == 0 and attempts < 2_000) : (attempts += 1) {
+        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(session.file_tree_backend.resultCountForTest() > 0);
+
+    // Round 2 has captured selected's descriptor. Replace the same pathname before AppSession consumes it.
+    try tmp.dir.rename("selected", tmp.dir, "moved", session.io);
+    try tmp.dir.createDir(session.io, "selected", .default_dir);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "selected/same.md", .data = "# replacement" });
+    try session.updateFileTree();
+    try std.testing.expectEqual(FileTreeRootOutcome.committed_replace, session.fileTreeRootOutcome());
+
+    attempts = 0;
+    while (session.file_tree_backend.resultCountForTest() == 0 and attempts < 2_000) : (attempts += 1) {
+        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(session.file_tree_backend.resultCountForTest() > 0);
+    try session.updateFileTree();
+
+    var row_index: ?usize = null;
+    for (session.file_tree_rows.items, 0..) |row, index| switch (row) {
+        .file => |file| if (std.mem.eql(u8, file.label, "same.md")) {
+            row_index = index;
+        },
+        else => {},
+    };
+    try std.testing.expect(row_index != null); // exact first scan came from the retained old descriptor.
+    session.activateFileTreeRow(row_index.?);
+    try std.testing.expectEqual(@as(usize, 0), session.dock.entryCountTotal());
+    try std.testing.expect(session.peekFileTreeExternalOpen() == null);
+}
+
+test "file tree markdown activation pins first hydration identity across leaf replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "root", .default_dir);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "root/doc.md", .data = "# original" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const root = try std.fs.path.join(allocator, &.{ tmp_root, "root" });
+    defer allocator.free(root);
+    const doc = try std.fs.path.join(allocator, &.{ root, "doc.md" });
+    defer allocator.free(doc);
+    const root_identity = try testFileTreeIdentity(root);
+    const doc_identity = try testFileTreeIdentity(doc);
+
+    try session.file_tree.replaceExplicitRoots(&.{root});
+    _ = session.file_tree.pinRootIdentity(root, root_identity);
+    const scan = session.file_tree.takeScanRequest().?;
+    allocator.free(scan);
+    try session.file_tree.applySnapshotWithIdentity(root, root_identity, &.{.{
+        .name = "doc.md",
+        .kind = .file,
+        .identity = doc_identity,
+    }});
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+    const row = file_tree.findIdentity(session.file_tree_rows.items, .{ .kind = .file, .path = doc }).?;
+    session.activateFileTreeRow(row);
+    const entry = session.dock.pathLocation(doc).?.group.entries.items.ptr;
+    try std.testing.expect(entry[0].initial_file_identity_pending);
+
+    try tmp.dir.rename("root/doc.md", tmp.dir, "root/moved.md", session.io);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "root/doc.md", .data = "# replacement" });
+    const epoch = try session.beginFilePanelDocument(entry[0].surface_id, 1);
+    try std.testing.expectError(error.NotFound, session.readFilePanel(allocator, entry[0].surface_id, epoch));
+    try std.testing.expect(entry[0].initial_file_identity_pending);
+}
+
+test "pending file tree root validation rejects merge and workspace restore before either session mutates" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(src.io, "selected-root", .default_dir);
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(src.io, &tmp_buf)];
+    const selected_root = try std.fs.path.join(allocator, &.{ tmp_root, "selected-root" });
+    defer allocator.free(selected_root);
+
+    _ = try src.dock.open(src.dock.singleGroup().?, "/tmp/root-pending-src.html", .html);
+    _ = try dst.dock.open(dst.dock.singleGroup().?, "/tmp/root-pending-dst.html", .html);
+    src.assignDockSurfaceIds(&src.dock);
+    dst.assignDockSurfaceIds(&dst.dock);
+    try src.file_tree.replaceExplicitRoots(&.{"/source-before"});
+    try dst.file_tree.replaceExplicitRoots(&.{"/destination-before"});
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var replacement = try dst.captureWorkspaceWindow(arena.allocator(), false, null);
+    const replacement_entries = [_]dock_panel.PersistedEntry{.{
+        .path = "/tmp/root-pending-replacement.html",
+        .kind = .html,
+        .active = true,
+    }};
+    replacement.dock = .{ .presented = true, .entries = &replacement_entries };
+
+    const src_tab = src.tabs.items[0];
+    const dst_tab = dst.tabs.items[0];
+    const src_tabs = src.tabs.items.len;
+    const dst_tabs = dst.tabs.items.len;
+    const src_entries = src.dock.entryCountTotal();
+    const dst_entries = dst.dock.entryCountTotal();
+    const src_generation = src.file_tree.rootGeneration();
+    const dst_generation = dst.file_tree.rootGeneration();
+
+    src.requestFileTreeRootPick(.replace);
+    try std.testing.expectEqual(FileTreeRootOperation.replace, src.takeFileTreeRootPickRequest());
+    src.provideFileTreeRootPick(selected_root);
+    try std.testing.expect(src.file_tree_root_validation != null);
+
+    var moved_buf: [16]u64 = undefined;
+    try std.testing.expectError(error.UnsupportedMove, src.mergeSessionInto(dst, &moved_buf));
+    try std.testing.expectError(error.UnsupportedMove, src.applyWorkspaceWindow(replacement));
+
+    try std.testing.expect(src.file_tree_root_validation != null);
+    try std.testing.expectEqual(src_tabs, src.tabs.items.len);
+    try std.testing.expectEqual(dst_tabs, dst.tabs.items.len);
+    try std.testing.expectEqual(src_tab, src.tabs.items[0]);
+    try std.testing.expectEqual(dst_tab, dst.tabs.items[0]);
+    try std.testing.expectEqual(src_entries, src.dock.entryCountTotal());
+    try std.testing.expectEqual(dst_entries, dst.dock.entryCountTotal());
+    try std.testing.expectEqual(src_generation, src.file_tree.rootGeneration());
+    try std.testing.expectEqual(dst_generation, dst.file_tree.rootGeneration());
+    try std.testing.expectEqualStrings("/source-before", src.file_tree.rootAt(0).?);
+    try std.testing.expectEqualStrings("/destination-before", dst.file_tree.rootAt(0).?);
+    try std.testing.expect(src.dock.pathLocation("/tmp/root-pending-src.html") != null);
+    try std.testing.expect(dst.dock.pathLocation("/tmp/root-pending-dst.html") != null);
+    try std.testing.expect(src.dock.pathLocation("/tmp/root-pending-replacement.html") == null);
+}
+
+test "file tree header and populated blank left click are inert while right click exposes root actions" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+    try session.file_tree.replaceExplicitRoots(&.{"/project"});
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+    const content = session.dockGeometry().tree_content;
+    try std.testing.expect(session.file_tree_rows.items.len >= 2);
+
+    const header_x: f64 = @floatFromInt(content.x + 2);
+    const header_y: f64 = @floatFromInt(content.y + session.cell_height_px + 2);
+    session.mouse(1, header_x, header_y, 0, 0);
+    try std.testing.expect(!session.takeFilePanelPickRequest());
+
+    const blank_y_px = content.y + @as(u32, @intCast(session.file_tree_rows.items.len)) * session.cell_height_px + 2;
+    try std.testing.expect(blank_y_px < content.y + content.h);
+    const blank_y: f64 = @floatFromInt(blank_y_px);
+    session.mouse(1, header_x, blank_y, 0, 0);
+    try std.testing.expect(!session.takeFilePanelPickRequest());
+
+    session.mouse(1, header_x, header_y, 2, 0);
+    try std.testing.expect(session.file_tree_background_menu);
+    try std.testing.expectEqual(@as(usize, 3), session.contextMenuItems().len);
+    session.chrome_host.context_menu.selected = 1;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(FileTreeRootOperation.replace, session.takeFileTreeRootPickRequest());
+    session.provideFileTreeRootPick(&.{});
+
+    session.mouse(1, header_x, blank_y, 2, 0);
+    try std.testing.expect(session.file_tree_background_menu);
+    try std.testing.expectEqualStrings("작업공간에 폴더 추가…", session.contextMenuItems()[2]);
+    session.closeContextMenu();
+}
+
+test "file tree row staging OOM leaves live root rows and watcher authority unchanged" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try session.file_tree.replaceExplicitRoots(&.{"/before"});
+    try session.file_tree.resetWatchRequests(&.{"/safety"});
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+    const live_generation = session.file_tree.rootGeneration();
+    try std.testing.expectEqualStrings("/before", session.file_tree_rows.items[0].root.path);
+
+    var candidate = try session.file_tree.cloneForRootTransaction();
+    defer candidate.deinit();
+    try candidate.replaceExplicitRoots(&.{"/after"});
+    try candidate.resetWatchRequests(&.{"/other-safety"});
+    var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
+    defer candidate_rows.deinit(allocator);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    session.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, session.prepareFileTreeRowStaging(&candidate_rows, 0));
+    session.allocator = allocator;
+
+    try std.testing.expectEqual(live_generation, session.file_tree.rootGeneration());
+    try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
+    try std.testing.expectEqualStrings("/before", session.file_tree_rows.items[0].root.path);
+    const first_watch = session.file_tree.takeWatchRequest().?;
+    defer allocator.free(first_watch);
+    try std.testing.expectEqualStrings("/before", first_watch);
+    const second_watch = session.file_tree.takeWatchRequest().?;
+    defer allocator.free(second_watch);
+    try std.testing.expectEqualStrings("/safety", second_watch);
+}
+
+test "file tree scan completion is fenced across A to B to A root generations" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "a", .default_dir);
+    try tmp.dir.createDir(session.io, "b", .default_dir);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "a/stale.md", .data = "stale" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const root_a = try std.fs.path.join(allocator, &.{ tmp_root, "a" });
+    defer allocator.free(root_a);
+    const root_b = try std.fs.path.join(allocator, &.{ tmp_root, "b" });
+    defer allocator.free(root_b);
+
+    try session.file_tree.replaceExplicitRoots(&.{root_a});
+    const old_generation = session.file_tree.rootGeneration();
+    try session.updateFileTree(); // submits A at old_generation
+    try session.file_tree.replaceExplicitRoots(&.{root_b});
+    try session.file_tree.replaceExplicitRoots(&.{root_a});
+    try std.testing.expect(session.file_tree.rootGeneration() != old_generation);
+    const current_request = session.file_tree.takeScanRequest().?;
+    allocator.free(current_request); // isolate the old in-flight completion; do not submit current A.
+
+    var attempts: usize = 0;
+    while (!session.file_tree_backend.isIdleForTest() and attempts < 2_000) : (attempts += 1) {
+        try session.updateFileTree();
+        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(session.file_tree_backend.isIdleForTest());
+    try session.updateFileTree();
+    try std.testing.expectEqual(@as(usize, 2), session.file_tree_rows.items.len); // root + recent header, no stale child
+    try std.testing.expect(session.file_tree_rows.items[0].root.loading);
+}
+
+test "file tree stale root menu delete confirmation and busy removal are fail closed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+    try session.file_tree.replaceExplicitRoots(&.{"/before"});
+    session.file_tree_rows_dirty = true;
+    try session.updateFileTree();
+    const content = session.dockGeometry().tree_content;
+    session.mouse(1, @floatFromInt(content.x + 2), @floatFromInt(content.y + 2), 2, 0);
+    try std.testing.expect(session.file_tree_context_target != null);
+    try std.testing.expectEqual(@as(usize, 6), session.contextMenuItems().len);
+    try session.file_tree.replaceExplicitRoots(&.{"/after"});
+    session.chrome_host.context_menu.selected = 5;
+    session.acceptContextMenu();
+    try std.testing.expectEqualStrings("/after", session.file_tree.rootAt(0).?);
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.chrome_host.notice.dismiss();
+
+    const target: file_tree_mutation.Target = .{ .kind = .file, .path = "/after/file.md" };
+    session.pending_file_tree_delete = AppSession.copyPendingFileTreeDelete(target, session.file_tree.rootGeneration()).?;
+    try session.file_tree.replaceExplicitRoots(&.{"/newer"});
+    session.confirmFileTreeDelete();
+    try std.testing.expect(session.pending_file_tree_delete == null);
+    try std.testing.expectEqual(@as(usize, 0), session.file_tree_mutation_backend.pendingCount());
+    try std.testing.expectEqualStrings("/newer", session.file_tree.rootAt(0).?);
+
+    session.pending_file_tree_delete = AppSession.copyPendingFileTreeDelete(target, session.file_tree.rootGeneration()).?;
+    session.removeFileTreeRoot("/newer");
+    try std.testing.expectEqual(FileTreeRootOutcome.busy, session.fileTreeRootOutcome());
+    try std.testing.expectEqualStrings("/newer", session.file_tree.rootAt(0).?);
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.pending_file_tree_delete = null;
+}
+
+test "workspace restore validates explicit roots and atomically rebuilds explorer watchers and rows" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "workspace", .default_dir);
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "outside.md", .data = "# restore" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const explicit_root = try std.fs.path.join(allocator, &.{ tmp_root, "workspace" });
+    defer allocator.free(explicit_root);
+    const outside = try std.fs.path.join(allocator, &.{ tmp_root, "outside.md" });
+    defer allocator.free(outside);
+    const missing = try std.fs.path.join(allocator, &.{ tmp_root, "missing" });
+    defer allocator.free(missing);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var win = try session.captureWorkspaceWindow(arena.allocator(), false, null);
+    const entries = [_]dock_panel.PersistedEntry{.{ .path = outside, .kind = .markdown, .mode = .read, .active = true }};
+    const roots = [_][]const u8{ explicit_root, missing };
+    win.dock = .{ .presented = true, .entries = &entries };
+    win.explorer = .{ .roots = &roots };
+    try session.applyWorkspaceWindow(win);
+
+    try std.testing.expect(session.dock.presented);
+    try std.testing.expectEqual(@as(usize, 1), session.dock.entryCountTotal());
+    try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
+    try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
+    try std.testing.expectEqualStrings(explicit_root, session.file_tree.rootAt(0).?);
+    try std.testing.expect(session.file_tree_rows.items.len >= 2);
+    try std.testing.expectEqualStrings(explicit_root, session.file_tree_rows.items[0].root.path);
+    const watch = session.file_tree.takeWatchRequest().?;
+    defer allocator.free(watch);
+    try std.testing.expectEqualStrings(tmp_root, watch); // outside open entry is the safety superset.
+    try std.testing.expect(session.file_tree.takeWatchRequest() == null);
+}
+
+test "workspace restore allocation failures preserve the complete live tab dock and explorer projection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "old-root", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "new-root", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old.md", .data = "# old" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new.md", .data = "# new" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(std.testing.io, &tmp_buf)];
+    const old_root = try std.fs.path.join(allocator, &.{ tmp_root, "old-root" });
+    defer allocator.free(old_root);
+    const new_root = try std.fs.path.join(allocator, &.{ tmp_root, "new-root" });
+    defer allocator.free(new_root);
+    const old_path = try std.fs.path.join(allocator, &.{ tmp_root, "old.md" });
+    defer allocator.free(old_path);
+    const new_path = try std.fs.path.join(allocator, &.{ tmp_root, "new.md" });
+    defer allocator.free(new_path);
+
+    // A real terminal tab drives apply through its complete stage/build/capacity/swap path. Keep the
+    // model minimal because each failure index must spawn and tear down a fresh controlled PTY. The
+    // dock entry deliberately sits outside the explicit root so restore also stages the safety watcher.
+    const surfaces = [_]maru.session.workspace.Surface{.{ .cwd = tmp_root, .cols = 40, .rows = 24 }};
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{
+        .custom_name = "replacement",
+        .tree = &tree,
+        .panes = &panes,
+    }};
+    const entries = [_]dock_panel.PersistedEntry{.{
+        .path = new_path,
+        .kind = .markdown,
+        .mode = .read,
+        .active = true,
+    }};
+    const roots = [_][]const u8{new_root};
+    const replacement: maru.session.workspace.Window = .{
+        .tabs = &tabs,
+        .dock = .{ .presented = true, .entries = &entries },
+        .explorer = .{ .roots = &roots },
+    };
+
+    const Harness = struct {
+        fn prepare(session: *AppSession, backing_allocator: std.mem.Allocator, before_root: []const u8, before_path: []const u8) !void {
+            const opened = try session.dock.open(session.dock.singleGroup().?, before_path, .markdown);
+            opened.group.entries.items[opened.index].mode = .read;
+            session.assignDockSurfaceIds(&session.dock);
+            try session.file_tree.replaceExplicitRoots(&.{before_root});
+            try AppSession.buildFileTreeRowsForDock(
+                backing_allocator,
+                &session.dock,
+                &session.file_tree,
+                &session.file_tree_open_states,
+                &session.file_tree_rows,
+            );
+            session.file_tree_rows_dirty = false;
+            try session.file_tree.resetWatchRequests(&.{std.fs.path.dirname(before_path).?});
+            std.debug.assert(opened.group.entries.items[opened.index].surface_id != 0);
+        }
+
+        fn expectPreserved(
+            session: *AppSession,
+            before_tab: *Tab,
+            before_surface: *maru.session.Surface,
+            before_entry_id: u64,
+            before_root: []const u8,
+            before_watch: []const u8,
+            before_generation: u64,
+            before_rows_ptr: [*]file_tree.Row,
+            before_rows_len: usize,
+        ) !void {
+            try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+            try std.testing.expect(session.tabs.items[0] == before_tab);
+            try std.testing.expect(session.activeSurface() == before_surface);
+            const entry = session.dock.entryLocation(before_entry_id).?;
+            try std.testing.expectEqualStrings(before_root, session.file_tree.rootAt(0).?);
+            try std.testing.expectEqual(before_generation, session.file_tree.rootGeneration());
+            try std.testing.expectEqual(file_tree.RootMode.explicit, session.file_tree.rootMode());
+            try std.testing.expectEqual(@as(usize, 1), session.dock.entryCountTotal());
+            try std.testing.expect(entry.group.entries.items[entry.index].surface_id != 0);
+            try std.testing.expectEqual(before_rows_len, session.file_tree_rows.items.len);
+            try std.testing.expect(session.file_tree_rows.items.ptr == before_rows_ptr);
+            try std.testing.expectEqualStrings(before_root, session.file_tree_rows.items[0].root.path);
+            try std.testing.expectEqualStrings(before_watch, session.file_tree.peekWatchRequest().?);
+        }
+    };
+
+    // Reuse the same live session after every rejected candidate. This keeps the test exhaustive up to
+    // the no-fail commit boundary without paying full AppSession/PTY startup for every allocation index.
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    var session_live = true;
+    defer if (session_live) session.deinit();
+    try Harness.prepare(session, allocator, old_root, old_path);
+    const before_tab = session.tabs.items[0];
+    const before_surface = session.activeSurface();
+    const before_entry_id = session.dock.singleGroup().?.entries.items[0].id;
+    const before_generation = session.file_tree.rootGeneration();
+    const before_rows_ptr = session.file_tree_rows.items.ptr;
+    const before_rows_len = session.file_tree_rows.items.len;
+    var saw_rollback = false;
+    var saw_commit = false;
+    for (0..512) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        session.allocator = failing.allocator();
+        var apply_error: ?anyerror = null;
+        session.applyWorkspaceWindow(replacement) catch |err| {
+            apply_error = err;
+        };
+        if (apply_error) |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            try Harness.expectPreserved(
+                session,
+                before_tab,
+                before_surface,
+                before_entry_id,
+                old_root,
+                tmp_root,
+                before_generation,
+                before_rows_ptr,
+                before_rows_len,
+            );
+            saw_rollback = true;
+            session.allocator = allocator; // rejected candidate retained no object backed by `failing`.
+        } else {
+            // Post-commit best-effort projection work may intentionally catch OOM. In that case apply has
+            // already completed the no-fail swap, so it must be wholly new rather than a mixed half-state.
+            try std.testing.expectEqualStrings(new_root, session.file_tree.rootAt(0).?);
+            try std.testing.expectEqualStrings("replacement", session.tabs.items[0].custom_name.?);
+            try std.testing.expect(session.dock.pathLocation(new_path) != null);
+            failing.fail_index = std.math.maxInt(usize);
+            session.deinit(); // committed backends/terms retain failing.allocator(); tear down before it leaves scope.
+            session_live = false;
+            saw_commit = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_rollback);
+    try std.testing.expect(saw_commit);
 }
 
 test "FP9 focus toggle: empty notice and workspace-dock round trip use one configurable action" {
@@ -37512,13 +38911,13 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     try std.testing.expect(session.completePendingDockFocus(a_surface));
     try std.testing.expect(session.focus_owner == .dock_surface and session.focus_owner.dock_surface == a_surface);
 
-    // 마지막 전역 entry까지 닫으면 모델 루트 하나만 남고 보이지 않는 dock owner 대신 workspace로 돌아간다.
+    // 마지막 전역 entry까지 닫으면 모델 루트 하나만 남고 input은 workspace로 돌아가지만, 한 번 연 빈 도크는 유지한다.
     try std.testing.expect(session.closeFilePanelSurfaceNow(a_surface));
     try std.testing.expectEqual(@as(usize, 1), session.dock.groupCount());
     try std.testing.expectEqual(@as(usize, 0), session.dock.singleGroup().?.entries.items.len);
     try std.testing.expect(session.focus_owner == .workspace);
     try std.testing.expect(session.workspace_focus_pending);
-    try std.testing.expect(!session.dockVisible());
+    try std.testing.expect(session.dockVisible());
 }
 
 test "FP9 empty model root click stays workspace-owned while tree history keeps dock visible" {
@@ -38697,9 +40096,9 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expect(session.completePendingDockFocus(a_sid));
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
-    try session.file_tree.applySnapshot(root, &.{
-        .{ .name = "a.md", .kind = .file },
-        .{ .name = "b.md", .kind = .file },
+    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{
+        .{ .name = "a.md", .kind = .file, .identity = try testFileTreeIdentity(a_path) },
+        .{ .name = "b.md", .kind = .file, .identity = try testFileTreeIdentity(b_path) },
     });
     session.file_tree_rows_dirty = true;
     try session.updateFileTree();
@@ -49445,6 +50844,8 @@ test "FP6 merge transfers dock dirty state and live surface ownership before sou
     defer allocator.free(dst_path);
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, src.openFilePanelPath(src_path));
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, dst.openFilePanelPath(dst_path));
+    try src.file_tree.replaceExplicitRoots(&.{"/source-workspace"});
+    try dst.file_tree.replaceExplicitRoots(&.{"/destination-workspace"});
     try std.testing.expect(src.completePendingDockFocus(src.dock.singleGroup().?.entries.items[0].surface_id));
     try std.testing.expect(dst.completePendingDockFocus(dst.dock.singleGroup().?.entries.items[0].surface_id));
     const src_group = src.dock.singleGroup().?;
@@ -49463,6 +50864,9 @@ test "FP6 merge transfers dock dirty state and live surface ownership before sou
     try std.testing.expectEqual(@as(usize, 0), src.dock.entryCountTotal());
     try std.testing.expect(!src.hasWebSurface(moved_sid));
     try std.testing.expect(dst.hasWebSurface(moved_sid));
+    try std.testing.expectEqual(file_tree.RootMode.explicit, dst.file_tree.rootMode());
+    try std.testing.expectEqualStrings("/destination-workspace", dst.file_tree.rootAt(0).?);
+    try std.testing.expectEqualStrings("/source-workspace", src.file_tree.rootAt(0).?);
     const moved_entry = dst.dock.entryForSurfaceId(moved_sid).?;
     try std.testing.expect(moved_entry.dirty);
     try std.testing.expectEqual(dock_panel.Mode.source_edit, moved_entry.mode);
@@ -49484,6 +50888,79 @@ test "FP6 merge transfers dock dirty state and live surface ownership before sou
     try std.testing.expectEqual(paste_queues, dst.pending_pastes.count());
     try std.testing.expect(dst.dock.entryLocation(moved_entry_id) != null);
     try std.testing.expect(dst.completePendingDockFocus(moved_sid));
+}
+
+test "FP6 merge into empty dock adopts source explorer authority and presentation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+    _ = try src.dock.open(src.dock.singleGroup().?, "/tmp/adopt-root.md", .markdown);
+    src.assignDockSurfaceIds(&src.dock);
+    try src.file_tree.replaceExplicitRoots(&.{"/source-explicit"});
+    src.dock.presented = true;
+    dst.dock.presented = false;
+
+    var moved_buf: [16]u64 = undefined;
+    _ = try src.mergeSessionInto(dst, &moved_buf);
+    try std.testing.expect(dst.dock.presented);
+    try std.testing.expectEqual(file_tree.RootMode.explicit, dst.file_tree.rootMode());
+    try std.testing.expectEqualStrings("/source-explicit", dst.file_tree.rootAt(0).?);
+    try std.testing.expectEqual(@as(usize, 1), dst.dock.entryCountTotal());
+}
+
+test "FP6 merge with no destination file tabs preserves configured destination explorer root" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+    _ = try src.dock.open(src.dock.singleGroup().?, "/tmp/source-only.md", .markdown);
+    src.assignDockSurfaceIds(&src.dock);
+    try src.file_tree.replaceExplicitRoots(&.{"/source-root"});
+    try dst.file_tree.replaceExplicitRoots(&.{"/destination-root"});
+    dst.dock.presented = true;
+
+    var moved_buf: [16]u64 = undefined;
+    _ = try src.mergeSessionInto(dst, &moved_buf);
+    try std.testing.expectEqual(file_tree.RootMode.explicit, dst.file_tree.rootMode());
+    try std.testing.expectEqualStrings("/destination-root", dst.file_tree.rootAt(0).?);
+    try std.testing.expectEqual(@as(usize, 1), dst.dock.entryCountTotal());
+}
+
+test "FP6 merge preserves source project-root authority in an inferred destination" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    const source_path = "/repo/sub/file.md";
+    const destination_path = "/destination/open.md";
+    _ = try src.dock.open(src.dock.singleGroup().?, source_path, .markdown);
+    _ = try dst.dock.open(dst.dock.singleGroup().?, destination_path, .markdown);
+    src.assignDockSurfaceIds(&src.dock);
+    dst.assignDockSurfaceIds(&dst.dock);
+    try src.file_tree.recordOpened(source_path, "/repo");
+    try dst.file_tree.recordOpened(destination_path, "/destination");
+
+    var moved_buf: [16]u64 = undefined;
+    _ = try src.mergeSessionInto(dst, &moved_buf);
+    try std.testing.expectEqual(file_tree.RootMode.inferred, dst.file_tree.rootMode());
+    try std.testing.expectEqual(@as(usize, 2), dst.file_tree.rootCount());
+    try std.testing.expect(dst.file_tree.containsRootPath("/destination"));
+    try std.testing.expect(dst.file_tree.containsRootPath("/repo"));
+    try std.testing.expect(!dst.file_tree.containsRootPath("/repo/sub"));
 }
 
 test "file panel close transition rejects window merge before model mutation" {

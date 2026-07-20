@@ -39,6 +39,9 @@ pub const max_line_fields = max_agent_argv + 256;
 /// 수보다 충분히 크고 max_line_fields의 반복 키 예산 안에 있다.
 pub const max_dock_entries = dock_panel.max_entries;
 pub const max_dock_groups = dock_panel.max_groups;
+pub const max_explorer_roots: usize = 256;
+pub const max_explorer_root_payload_bytes: usize = 1_049_860;
+pub const max_explorer_root_raw_bytes: usize = 2_099_720;
 
 pub const SplitDirection = split_tree.SplitDirection;
 
@@ -136,6 +139,11 @@ pub const Frame = struct {
     h: i32,
 };
 
+/// null=inferred legacy mode, non-null=explicit snapshot(빈 slice도 유효한 explicit-empty).
+pub const ExplorerPersistedState = struct {
+    roots: ?[]const []const u8 = null,
+};
+
 /// 한 OS 창 = 한 AppSession. 탭들 + 활성 탭.
 pub const Window = struct {
     active_tab: usize = 0,
@@ -153,6 +161,7 @@ pub const Window = struct {
     // 창 레벨 파일 도크. 단일 그룹은 FP1 flat `dock-entry`, 다중 그룹은 FP8 additive preorder 키를 같은 window
     // 라인에 둔다. 기본값은 키를 전부 생략해 옛 파일 고정점과 양방향 호환을 유지한다.
     dock: dock_panel.PersistedState = .{},
+    explorer: ExplorerPersistedState = .{},
     tabs: []const Tab,
 };
 
@@ -198,6 +207,7 @@ pub fn windowFrame(ws: Workspace, index: usize) ?Frame {
 
 fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     try validateDockState(win.dock);
+    try validateExplorerState(win.explorer);
     try w.print("window tabs={d} active-tab={d}", .{ win.tabs.len, win.active_tab });
     // 활성(key) 창 마커(M3e §8A.8). false면 키 생략(additive·key-addressed — 옛 파일/비활성 창의 라인 문자열을 안
     // 바꿔 round-trip 고정점·양쪽 호환, group-collapsed와 동일). true면 active-window=1 스칼라로 쓴다.
@@ -212,6 +222,17 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     if (win.dock.size != 0) try w.print(" dock-size={d}", .{win.dock.size});
     if (win.dock.tree_size != 0) try w.print(" dock-tree-size={d}", .{win.dock.tree_size});
     if (win.dock.collapsed) try w.writeAll(" dock-collapsed=1");
+    const explorer_has_roots = if (win.explorer.roots) |roots| roots.len != 0 else false;
+    if (win.dock.presented and !dockStateHasEntries(win.dock) and !explorer_has_roots)
+        try w.writeAll(" dock-presented=1");
+    if (win.explorer.roots) |roots| {
+        try w.print(" dock-tree-roots=\"{d}:", .{roots.len});
+        for (roots) |root| {
+            try w.print("{d}:", .{root.len});
+            try writeEscaped(w, root);
+        }
+        try w.writeByte('"');
+    }
     for (win.dock.entries) |entry| try writeDockEntry(w, entry);
     if (win.dock.groups.len != 0) {
         try w.print(" dock-group-count={d} dock-focused-group={d}", .{ win.dock.groups.len, win.dock.focused_group });
@@ -222,6 +243,26 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     }
     try w.writeByte('\n');
     for (win.tabs) |tab| try writeTab(w, tab);
+}
+
+fn dockStateHasEntries(dock: dock_panel.PersistedState) bool {
+    if (dock.entries.len != 0) return true;
+    for (dock.groups) |group| if (group.entries.len != 0) return true;
+    return false;
+}
+
+fn validateExplorerState(explorer: ExplorerPersistedState) !void {
+    const roots = explorer.roots orelse return;
+    if (roots.len > max_explorer_roots) return error.InvalidExplorerState;
+    var payload_len: usize = std.fmt.count("{d}:", .{roots.len});
+    for (roots, 0..) |root, i| {
+        if (root.len == 0 or root.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(root) or
+            !std.unicode.utf8ValidateSlice(root)) return error.InvalidExplorerState;
+        for (roots[0..i]) |prior| if (std.mem.eql(u8, prior, root)) return error.InvalidExplorerState;
+        payload_len = std.math.add(usize, payload_len, std.fmt.count("{d}:", .{root.len})) catch return error.InvalidExplorerState;
+        payload_len = std.math.add(usize, payload_len, root.len) catch return error.InvalidExplorerState;
+        if (payload_len > max_explorer_root_payload_bytes) return error.InvalidExplorerState;
+    }
 }
 
 fn validateDockState(dock: dock_panel.PersistedState) !void {
@@ -428,6 +469,10 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
     const dock_size = try f.getUint("dock-size", u32, 0);
     const dock_tree_size = try f.getUint("dock-tree-size", u32, 0);
     const dock_collapsed = (try f.getUint("dock-collapsed", u8, 0)) != 0;
+    const dock_presented_requested = (try f.getUint("dock-presented", u8, 0)) != 0;
+    const explorer_roots_field = f.find("dock-tree-roots");
+    const explorer_parse = parseExplorerRoots(a, explorer_roots_field);
+    const explorer_roots = explorer_parse.roots;
     const dock: dock_panel.PersistedState = dock_parse: {
         if (f.find("dock-group-count") != null) {
             const group_count = try f.requireUint("dock-group-count", usize);
@@ -516,11 +561,79 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter) ParseError!Window {
         break :dock_parse parsed_state;
     };
 
+    var dock_with_presented = dock;
+    dock_with_presented.presented = dock_presented_requested or dockStateHasEntries(dock) or
+        (explorer_roots != null and explorer_roots.?.len > 0) or
+        (explorer_roots_field != null and !explorer_parse.valid);
     var tabs: std.ArrayList(Tab) = .empty;
     var i: usize = 0;
     while (i < tab_count) : (i += 1) try tabs.append(a, try parseTab(a, lines));
-    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock, .tabs = try tabs.toOwnedSlice(a) };
+    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .tabs = try tabs.toOwnedSlice(a) };
 }
+
+const ExplorerRootsParse = struct { roots: ?[]const []const u8, valid: bool };
+
+fn parseExplorerRoots(a: std.mem.Allocator, maybe_field: ?LineFields.Field) ExplorerRootsParse {
+    const field = maybe_field orelse return .{ .roots = null, .valid = true };
+    if (!field.is_quoted or field.raw.len > max_explorer_root_raw_bytes) return .{ .roots = &.{}, .valid = false };
+    var cursor = ExplorerQuotedCursor{ .raw = field.raw };
+    const count = cursor.parseLength() catch return .{ .roots = &.{}, .valid = false };
+    if (count > max_explorer_roots) return .{ .roots = &.{}, .valid = false };
+    const roots = a.alloc([]const u8, count) catch return .{ .roots = &.{}, .valid = false };
+    for (roots, 0..) |*root, index| {
+        const len = cursor.parseLength() catch return .{ .roots = &.{}, .valid = false };
+        if (len == 0 or len > std.fs.max_path_bytes) return .{ .roots = &.{}, .valid = false };
+        const path = a.alloc(u8, len) catch return .{ .roots = &.{}, .valid = false };
+        for (path) |*byte| byte.* = (cursor.next() catch return .{ .roots = &.{}, .valid = false }) orelse
+            return .{ .roots = &.{}, .valid = false };
+        if (!std.fs.path.isAbsolute(path) or !std.unicode.utf8ValidateSlice(path)) return .{ .roots = &.{}, .valid = false };
+        for (roots[0..index]) |prior| if (std.mem.eql(u8, prior, path)) return .{ .roots = &.{}, .valid = false };
+        root.* = path;
+    }
+    if ((cursor.next() catch return .{ .roots = &.{}, .valid = false }) != null)
+        return .{ .roots = &.{}, .valid = false };
+    return .{ .roots = roots, .valid = true };
+}
+
+const ExplorerQuotedCursor = struct {
+    raw: []const u8,
+    pos: usize = 0,
+    decoded: usize = 0,
+
+    fn next(self: *ExplorerQuotedCursor) error{ InvalidEscape, PayloadTooLarge }!?u8 {
+        if (self.pos >= self.raw.len) return null;
+        var value = self.raw[self.pos];
+        self.pos += 1;
+        if (value == '\\') {
+            if (self.pos >= self.raw.len) return error.InvalidEscape;
+            value = switch (self.raw[self.pos]) {
+                '\\' => '\\',
+                '"' => '"',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                else => return error.InvalidEscape,
+            };
+            self.pos += 1;
+        }
+        self.decoded = std.math.add(usize, self.decoded, 1) catch return error.PayloadTooLarge;
+        if (self.decoded > max_explorer_root_payload_bytes) return error.PayloadTooLarge;
+        return value;
+    }
+
+    fn parseLength(self: *ExplorerQuotedCursor) error{ InvalidLength, InvalidEscape, PayloadTooLarge }!usize {
+        var value: usize = 0;
+        var digits: usize = 0;
+        while (true) {
+            const byte = (try self.next()) orelse return error.InvalidLength;
+            if (byte == ':') return if (digits == 0) error.InvalidLength else value;
+            if (byte < '0' or byte > '9') return error.InvalidLength;
+            value = std.math.mul(usize, value, 10) catch return error.InvalidLength;
+            value = std.math.add(usize, value, byte - '0') catch return error.InvalidLength;
+            digits += 1;
+        }
+    }
+};
 
 const DockEntryParseError = error{ BadLine, UnsupportedDockValue };
 
@@ -1702,6 +1815,118 @@ test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기
     try std.testing.expectEqual(@as(usize, 0), dock.entries.len);
 }
 
+test "workspace Explorer v137: packed explicit roots and empty presented dock round trip" {
+    const roots = [_][]const u8{ "/Users/me/project one", "/tmp/quote\"root" };
+    const windows = [_]Window{.{
+        .dock = .{ .presented = true },
+        .explorer = .{ .roots = &roots },
+        .tabs = &.{},
+    }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "dock-tree-roots="));
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-presented") == null); // roots에서 presented 파생
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    const win = parsed.workspace.windows[0];
+    try std.testing.expect(win.dock.presented);
+    try std.testing.expect(win.explorer.roots != null);
+    try std.testing.expectEqual(@as(usize, 2), win.explorer.roots.?.len);
+    try std.testing.expectEqualStrings(roots[0], win.explorer.roots.?[0]);
+    try std.testing.expectEqualStrings(roots[1], win.explorer.roots.?[1]);
+
+    const empty_windows = [_]Window{.{
+        .dock = .{ .presented = true },
+        .explorer = .{ .roots = &.{} },
+        .tabs = &.{},
+    }};
+    const empty_text = try serialize(std.testing.allocator, .{ .windows = &empty_windows });
+    defer std.testing.allocator.free(empty_text);
+    try std.testing.expect(std.mem.indexOf(u8, empty_text, "dock-presented=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, empty_text, "dock-tree-roots=\"0:\"") != null);
+    var empty_parsed = try parse(std.testing.allocator, empty_text);
+    defer empty_parsed.deinit();
+    try std.testing.expect(empty_parsed.workspace.windows[0].dock.presented);
+    try std.testing.expectEqual(@as(usize, 0), empty_parsed.workspace.windows[0].explorer.roots.?.len);
+
+    const explicit_empty_without_presentation = header ++ "\n" ++
+        "window tabs=0 active-tab=0 dock-tree-roots=\"0:\"\n";
+    var hidden_empty = try parse(std.testing.allocator, explicit_empty_without_presentation);
+    defer hidden_empty.deinit();
+    try std.testing.expect(!hidden_empty.workspace.windows[0].dock.presented);
+    try std.testing.expectEqual(@as(usize, 0), hidden_empty.workspace.windows[0].explorer.roots.?.len);
+}
+
+test "workspace Explorer v137: malformed packed roots degrade only explorer metadata" {
+    const text = header ++ "\n" ++
+        "window tabs=1 active-tab=0 dock-presented=1 dock-entry=\"markdown:read:1:12:/tmp/kept.md\" dock-tree-roots=\"2:4:/tmp999:/bad\"\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"kept tab\" pinned=0 background-color=0 accent-color=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"kept pane\"\n" ++
+        "surface custom-name=\"kept surface\" title=\"shell\" cwd=\"/work\" command=\"/bin/zsh\" cols=80 rows=24 agent-kind=\"\" agent-session=\"\" agent-argc=0\n";
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows.len);
+    const win = parsed.workspace.windows[0];
+    try std.testing.expect(win.dock.presented);
+    try std.testing.expect(win.explorer.roots != null);
+    try std.testing.expectEqual(@as(usize, 0), win.explorer.roots.?.len);
+    try std.testing.expectEqual(@as(usize, 1), win.dock.entries.len);
+    try std.testing.expectEqualStrings("/tmp/kept.md", win.dock.entries[0].path);
+    try std.testing.expectEqual(@as(usize, 1), win.tabs.len);
+    try std.testing.expectEqualStrings("kept tab", win.tabs[0].custom_name);
+    try std.testing.expectEqual(@as(usize, 1), win.tabs[0].panes.len);
+    try std.testing.expectEqualStrings("kept pane", win.tabs[0].panes[0].custom_name);
+    try std.testing.expectEqual(@as(usize, 1), win.tabs[0].panes[0].surfaces.len);
+    try std.testing.expectEqualStrings("/work", win.tabs[0].panes[0].surfaces[0].cwd);
+    try std.testing.expectEqualStrings("/bin/zsh", win.tabs[0].panes[0].surfaces[0].command);
+
+    const inferred_presented = header ++ "\n" ++
+        "window tabs=0 active-tab=0 dock-tree-roots=\"1:9:relative!\"\n";
+    var parsed_without_flag = try parse(std.testing.allocator, inferred_presented);
+    defer parsed_without_flag.deinit();
+    try std.testing.expect(parsed_without_flag.workspace.windows[0].dock.presented);
+    try std.testing.expectEqual(@as(usize, 0), parsed_without_flag.workspace.windows[0].explorer.roots.?.len);
+}
+
+test "workspace Explorer v137: root count path and raw caps fail closed" {
+    var too_many: [max_explorer_roots + 1][]const u8 = .{"/same"} ** (max_explorer_roots + 1);
+    const too_many_windows = [_]Window{.{ .explorer = .{ .roots = &too_many }, .tabs = &.{} }};
+    try std.testing.expectError(error.InvalidExplorerState, serialize(std.testing.allocator, .{ .windows = &too_many_windows }));
+
+    var long_path: [std.fs.max_path_bytes + 1]u8 = @splat('a');
+    long_path[0] = '/';
+    const long_roots = [_][]const u8{&long_path};
+    const long_windows = [_]Window{.{ .explorer = .{ .roots = &long_roots }, .tabs = &.{} }};
+    try std.testing.expectError(error.InvalidExplorerState, serialize(std.testing.allocator, .{ .windows = &long_windows }));
+
+    const raw = try std.testing.allocator.alloc(u8, max_explorer_root_raw_bytes + 1);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, '0');
+    const text = try std.fmt.allocPrint(std.testing.allocator, "{s}\nwindow tabs=0 active-tab=0 dock-tree-roots=\"{s}\"\n", .{ header, raw });
+    defer std.testing.allocator.free(text);
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.workspace.windows[0].dock.presented);
+    try std.testing.expectEqual(@as(usize, 0), parsed.workspace.windows[0].explorer.roots.?.len);
+}
+
+test "workspace Explorer v137: streaming decoded cap and allocation failure degrade to explicit empty" {
+    const decoded = try std.testing.allocator.alloc(u8, max_explorer_root_payload_bytes + 1);
+    defer std.testing.allocator.free(decoded);
+    @memset(decoded, 'a');
+    var cursor = ExplorerQuotedCursor{ .raw = decoded };
+    for (0..max_explorer_root_payload_bytes) |_| try std.testing.expect((try cursor.next()) != null);
+    try std.testing.expectError(error.PayloadTooLarge, cursor.next());
+
+    const field: LineFields.Field = .{ .key = "dock-tree-roots", .raw = "1:4:/tmp", .is_quoted = true };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const roots = parseExplorerRoots(failing.allocator(), field).roots.?;
+    try std.testing.expectEqual(@as(usize, 0), roots.len);
+    try std.testing.expect(failing.has_induced_failure);
+}
+
 test "workspace dock FP1: flat 반복 키가 path kind mode active를 왕복하고 트리 dirty는 쓰지 않는다" {
     const dock_entries = [_]dock_panel.PersistedEntry{
         .{ .path = "/Users/me/a:b \"한글\".md", .kind = .markdown, .mode = .live_preview, .active = true },
@@ -1802,6 +2027,65 @@ test "workspace dock FP1: 공유 entry 상한 256은 writer-reader 왕복하고 
 
     const invalid_windows = [_]Window{.{ .dock = .{ .entries = &entries }, .tabs = &.{} }};
     try std.testing.expectError(error.InvalidDockState, serialize(std.testing.allocator, .{ .windows = &invalid_windows }));
+}
+
+test "workspace Explorer v137: max groups nodes entries and roots stay below legacy 512-field budget" {
+    var entry_paths: [max_dock_entries][32]u8 = undefined;
+    var entries: [max_dock_entries]dock_panel.PersistedEntry = undefined;
+    for (&entries, 0..) |*entry, i| {
+        entry.* = .{
+            .path = try std.fmt.bufPrint(&entry_paths[i], "/dock/{d}.md", .{i}),
+            .kind = .markdown,
+            .active = i % 4 == 0,
+        };
+    }
+    var groups: [max_dock_groups]dock_panel.PersistedGroup = undefined;
+    for (&groups, 0..) |*group, i| group.* = .{ .entries = entries[i * 4 .. i * 4 + 4] };
+    var nodes: [max_dock_groups * 2 - 1]dock_panel.PersistedTreeNode = undefined;
+    var node_index: usize = 0;
+    const Builder = struct {
+        fn append(out: []dock_panel.PersistedTreeNode, index: *usize, first: usize, count: usize) void {
+            if (count == 1) {
+                out[index.*] = .{ .leaf = first };
+                index.* += 1;
+                return;
+            }
+            out[index.*] = .{ .split = .{ .direction = .horizontal, .ratio_milli = 500 } };
+            index.* += 1;
+            append(out, index, first, 1);
+            append(out, index, first + 1, count - 1);
+        }
+    };
+    Builder.append(&nodes, &node_index, 0, max_dock_groups);
+    try std.testing.expectEqual(nodes.len, node_index);
+
+    var root_paths: [max_explorer_roots][32]u8 = undefined;
+    var roots: [max_explorer_roots][]const u8 = undefined;
+    for (&roots, 0..) |*root, i| root.* = try std.fmt.bufPrint(&root_paths[i], "/root/{d}", .{i});
+    const windows = [_]Window{.{
+        .dock = .{ .groups = &groups, .tree = &nodes },
+        .explorer = .{ .roots = &roots },
+        .tabs = &.{},
+    }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = lines.next();
+    const window_line = lines.next().?;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const fields = try LineFields.parse(arena.allocator(), window_line);
+    try std.testing.expect(fields.fields.len + 1 < 512); // +1 reserves the independently optional dock-presented field.
+    try std.testing.expectEqual(@as(usize, 127), std.mem.count(u8, window_line, "dock-node="));
+    try std.testing.expectEqual(@as(usize, 256), std.mem.count(u8, window_line, "dock-entry-v2="));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, window_line, "dock-tree-roots="));
+    // Old key-addressed readers consume their known structural scalars and skip both Explorer fields.
+    try std.testing.expectEqual(@as(usize, 0), try fields.requireUint("tabs", usize));
+    try std.testing.expectEqual(@as(usize, 0), try fields.getUint("active-tab", usize, 0));
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(max_dock_groups, parsed.workspace.windows[0].dock.groups.len);
+    try std.testing.expectEqual(max_explorer_roots, parsed.workspace.windows[0].explorer.roots.?.len);
 }
 
 test "workspace dock FP8: nested group tree and focused group round-trip on one window line" {

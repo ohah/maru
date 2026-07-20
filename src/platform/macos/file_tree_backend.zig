@@ -22,14 +22,20 @@ pub const OwnedEntry = struct {
 };
 
 pub const Result = struct {
-    kind: enum { directory, file_hash } = .directory,
+    kind: ResultKind = .directory,
     path: []u8,
     entries: std.ArrayList(OwnedEntry) = .empty,
     file_hash: u64 = 0,
     identity: ?file_tree.Identity = null,
     ok: bool = false,
+    request_id: u64 = 0,
+    expected_root_generation: u64 = 0,
+    root_operation: u32 = 0,
+    root_validation_round: u8 = 0,
+    validated_dir: ?std.Io.Dir = null,
 
-    pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Result, allocator: std.mem.Allocator, io: std.Io) void {
+        if (self.validated_dir) |dir| dir.close(io);
         allocator.free(self.path);
         for (self.entries.items) |entry| allocator.free(entry.name);
         self.entries.deinit(allocator);
@@ -41,9 +47,26 @@ const Job = struct {
     state: *State,
     path: []u8,
     kind: ResultKind,
+    request_id: u64 = 0,
+    expected_root_generation: u64 = 0,
+    root_operation: u32 = 0,
+    root_validation_round: u8 = 0,
+    validated_dir: ?std.Io.Dir = null,
 };
 
-const ResultKind = enum { directory, file_hash };
+pub const ResultKind = enum { directory, file_hash, root_validation };
+
+pub const ValidatedRoot = struct {
+    path: []u8,
+    identity: file_tree.Identity,
+    dir: ?std.Io.Dir,
+
+    pub fn deinit(self: *ValidatedRoot, allocator: std.mem.Allocator, io: std.Io) void {
+        if (self.dir) |dir| dir.close(io);
+        allocator.free(self.path);
+        self.* = undefined;
+    }
+};
 
 const State = struct {
     allocator: std.mem.Allocator,
@@ -74,15 +97,45 @@ pub const Backend = struct {
     }
 
     /// true일 때만 path 소유권이 backend로 이동한다. false면 호출자가 tree에 재예약한 뒤 free한다.
-    pub fn submit(self: *Backend, path: []u8) bool {
-        return self.submitJob(path, .directory);
+    pub fn submit(self: *Backend, path: []u8, expected_root_generation: u64) bool {
+        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, null);
+    }
+
+    /// Successful root publish transfers its still-open no-follow directory capability to the first
+    /// scan. On false the caller retains both path and dir ownership.
+    pub fn submitValidatedRootScan(self: *Backend, path: []u8, expected_root_generation: u64, dir: std.Io.Dir) bool {
+        return self.submitJobMeta(path, .directory, 0, expected_root_generation, 0, 0, dir);
     }
 
     pub fn submitFileHash(self: *Backend, path: []u8) bool {
         return self.submitJob(path, .file_hash);
     }
 
+    pub fn submitRootValidation(
+        self: *Backend,
+        path: []u8,
+        request_id: u64,
+        expected_root_generation: u64,
+        root_operation: u32,
+        root_validation_round: u8,
+    ) bool {
+        return self.submitJobMeta(path, .root_validation, request_id, expected_root_generation, root_operation, root_validation_round, null);
+    }
+
     fn submitJob(self: *Backend, path: []u8, kind: ResultKind) bool {
+        return self.submitJobMeta(path, kind, 0, 0, 0, 0, null);
+    }
+
+    fn submitJobMeta(
+        self: *Backend,
+        path: []u8,
+        kind: ResultKind,
+        request_id: u64,
+        expected_root_generation: u64,
+        root_operation: u32,
+        root_validation_round: u8,
+        validated_dir: ?std.Io.Dir,
+    ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.inflight >= max_inflight) {
@@ -97,7 +150,16 @@ pub const Backend = struct {
             finishWithoutResult(state);
             return false;
         };
-        job.* = .{ .state = state, .path = path, .kind = kind };
+        job.* = .{
+            .state = state,
+            .path = path,
+            .kind = kind,
+            .request_id = request_id,
+            .expected_root_generation = expected_root_generation,
+            .root_operation = root_operation,
+            .root_validation_round = root_validation_round,
+            .validated_dir = validated_dir,
+        };
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.destroy(job);
             finishWithoutResult(state);
@@ -117,9 +179,17 @@ pub const Backend = struct {
     fn worker(job: *Job) void {
         const state = job.state;
         var result = switch (job.kind) {
-            .directory => scanDirectory(state.allocator, state.io, job.path),
+            .directory => if (job.validated_dir) |dir|
+                scanOpenedDirectory(state.allocator, state.io, job.path, dir)
+            else
+                scanDirectory(state.allocator, state.io, job.path),
             .file_hash => hashFile(state.allocator, state.io, job.path),
+            .root_validation => validateRoot(state.allocator, state.io, job.path),
         };
+        result.request_id = job.request_id;
+        result.expected_root_generation = job.expected_root_generation;
+        result.root_operation = job.root_operation;
+        result.root_validation_round = job.root_validation_round;
         state.allocator.destroy(job);
 
         state.mutex.lockUncancelable(state.io);
@@ -130,7 +200,7 @@ pub const Backend = struct {
             state.results[state.results_len] = result;
             state.results_len += 1;
         } else {
-            result.deinit(state.allocator);
+            result.deinit(state.allocator, state.io);
         }
         state.inflight -= 1;
         state.mutex.unlock(state.io);
@@ -149,12 +219,28 @@ pub const Backend = struct {
         return result;
     }
 
+    pub fn isIdleForTest(self: *Backend) bool {
+        if (!builtin.is_test) @compileError("isIdleForTest is test-only");
+        const state = self.state orelse return true;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        return state.inflight == 0 and state.results_len == 0;
+    }
+
+    pub fn resultCountForTest(self: *Backend) usize {
+        if (!builtin.is_test) @compileError("resultCountForTest is test-only");
+        const state = self.state orelse return 0;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        return state.results_len;
+    }
+
     pub fn deinit(self: *Backend) void {
         const state = self.state orelse return;
         self.state = null;
         state.mutex.lockUncancelable(state.io);
         state.shutting_down = true;
-        for (state.results[0..state.results_len]) |*result| result.deinit(state.allocator);
+        for (state.results[0..state.results_len]) |*result| result.deinit(state.allocator, state.io);
         state.results_len = 0;
         state.mutex.unlock(state.io);
         // worker는 heap State ref를 보유한다. 느리거나 멈춘 FS I/O를 main actor에서 기다리지 않고 마지막 worker가 정리한다.
@@ -181,15 +267,156 @@ pub fn projectRootForFile(allocator: std.mem.Allocator, io: std.Io, file_path: [
     return allocator.dupe(u8, parent);
 }
 
+fn validateRoot(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Result {
+    var result = Result{ .kind = .root_validation, .path = owned_path };
+    const validated = (validateRootSnapshot(allocator, io, owned_path) catch return result) orelse return result;
+    allocator.free(result.path);
+    result.path = validated.path;
+    result.identity = validated.identity;
+    result.validated_dir = validated.dir;
+    result.ok = true;
+    return result;
+}
+
+/// Workspace restore uses the same canonical directory+identity policy as the async picker before
+/// publishing a replacement session. Invalid/missing/inaccessible roots are explorer-local damage and
+/// return null; allocator failure remains transactional and aborts the whole restore.
+pub fn validateRootSnapshot(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?ValidatedRoot {
+    return validateRootSnapshotImpl(allocator, io, path, false);
+}
+
+fn validateRootSnapshotImpl(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    force_identity_failure: bool,
+) !?ValidatedRoot {
+    if (path.len == 0 or path.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(path) or
+        !std.unicode.utf8ValidateSlice(path)) return null;
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_len = std.Io.Dir.realPathFileAbsolute(io, path, &real_buf) catch return null;
+    var dir = openCanonicalDirectoryNoFollow(io, real_buf[0..real_len]) orelse return null;
+    var transferred = false;
+    defer if (!transferred) dir.close(io);
+    if (builtin.is_test and force_identity_failure) return null;
+    const identity = directoryIdentity(io, dir) catch return null;
+    if (identity.kind != @intFromEnum(file_tree.IdentityKind.directory)) return null;
+    const owned_path = try allocator.dupe(u8, real_buf[0..real_len]);
+    transferred = true;
+    return .{ .path = owned_path, .identity = identity, .dir = dir };
+}
+
+fn openCanonicalDirectoryNoFollow(io: std.Io, absolute_path: []const u8) ?std.Io.Dir {
+    if (!std.fs.path.isAbsolute(absolute_path)) return null;
+    var current = std.Io.Dir.openDirAbsolute(io, "/", .{ .follow_symlinks = false }) catch return null;
+    var transferred = false;
+    defer if (!transferred) current.close(io);
+    var components = std.mem.tokenizeScalar(u8, if (absolute_path.len > 0) absolute_path[1..] else absolute_path, '/');
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return null;
+        const next = current.openDir(io, component, .{ .follow_symlinks = false }) catch return null;
+        current.close(io);
+        current = next;
+    }
+    transferred = true;
+    return current;
+}
+
+pub const ValidatedFileTreeRow = struct {
+    file: std.Io.File,
+
+    pub fn deinit(self: *ValidatedFileTreeRow, io: std.Io) void {
+        self.file.close(io);
+        self.* = undefined;
+    }
+};
+
+/// Materialized tree row activation is authorized by the exact root and regular-file identities that
+/// produced the row. Every parent component and the leaf are opened descriptor-relative without
+/// following symlinks; the returned leaf fd remains live through the caller's open transaction.
+pub fn openValidatedFileTreeRow(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    root_path: []const u8,
+    expected_root_identity: file_tree.Identity,
+    path: []const u8,
+    expected_leaf_identity: file_tree.Identity,
+) ?ValidatedFileTreeRow {
+    if (expected_leaf_identity.kind != @intFromEnum(file_tree.IdentityKind.regular)) return null;
+    if (!file_tree.Tree.pathWithinRoot(path, root_path) or std.mem.eql(u8, path, root_path)) return null;
+    var validated = (validateRootSnapshot(allocator, io, root_path) catch return null) orelse return null;
+    defer validated.deinit(allocator, io);
+    if (!std.mem.eql(u8, validated.path, root_path) or !validated.identity.eql(expected_root_identity)) return null;
+
+    var current = validated.dir orelse return null;
+    validated.dir = null;
+    defer current.close(io);
+    const relative = if (root_path.len == 1) path[1..] else path[root_path.len + 1 ..];
+    const leaf = std.fs.path.basename(relative);
+    if (leaf.len == 0 or std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..")) return null;
+    if (std.fs.path.dirname(relative)) |parent| {
+        var components = std.mem.tokenizeScalar(u8, parent, '/');
+        while (components.next()) |component| {
+            if (std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return null;
+            const next = current.openDir(io, component, .{ .follow_symlinks = false }) catch return null;
+            current.close(io);
+            current = next;
+        }
+    }
+    const leaf_z = allocator.dupeZ(u8, leaf) catch return null;
+    defer allocator.free(leaf_z);
+    const fd = std.posix.openat(current.handle, leaf_z, .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0) catch return null;
+    var file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    var file_transferred = false;
+    defer if (!file_transferred) file.close(io);
+    const actual = identityOfFile(io, file) catch return null;
+    if (!actual.eql(expected_leaf_identity)) return null;
+    file_transferred = true;
+    return .{ .file = file };
+}
+
+fn identityAt(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, leaf: []const u8) !file_tree.Identity {
+    if (comptime builtin.os.tag != .macos) {
+        const stat = try dir.statFile(io, leaf, .{ .follow_symlinks = false });
+        return .{ .device = 0, .inode = @intCast(stat.inode), .kind = kindTag(stat.kind) };
+    }
+    const leaf_z = try allocator.dupeZ(u8, leaf);
+    defer allocator.free(leaf_z);
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstatat(dir.handle, leaf_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;
+    return identityFromStat(stat);
+}
+
+fn identityOfFile(io: std.Io, file: std.Io.File) !file_tree.Identity {
+    if (comptime builtin.os.tag == .macos) {
+        var stat: std.posix.Stat = undefined;
+        if (std.c.fstat(file.handle, &stat) != 0) return error.StatFailed;
+        return identityFromStat(stat);
+    }
+    const stat = try file.stat(io);
+    return .{ .device = 0, .inode = @intCast(stat.inode), .kind = kindTag(stat.kind) };
+}
+
 fn scanDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Result {
+    const result = Result{ .path = owned_path };
+    const dir = std.Io.Dir.cwd().openDir(io, owned_path, .{ .iterate = true }) catch return result;
+    return scanOpenedDirectory(allocator, io, owned_path, dir);
+}
+
+fn scanOpenedDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8, dir: std.Io.Dir) Result {
     var result = Result{ .path = owned_path };
-    var dir = std.Io.Dir.cwd().openDir(io, owned_path, .{ .iterate = true }) catch return result;
-    defer dir.close(io);
-    const dir_identity = directoryIdentity(io, dir) catch return result;
+    var owned_dir = dir;
+    defer owned_dir.close(io);
+    const dir_identity = directoryIdentity(io, owned_dir) catch return result;
     result.identity = dir_identity;
 
     result.entries.ensureTotalCapacity(allocator, file_tree.max_children_per_directory) catch return result;
-    var it = dir.iterate();
+    var it = owned_dir.iterate();
     while (result.entries.items.len < file_tree.max_children_per_directory) {
         const entry = (it.next(io) catch return result) orelse break;
         if (file_tree.Tree.shouldExcludeName(entry.name) or !std.unicode.utf8ValidateSlice(entry.name)) continue;
@@ -309,7 +536,7 @@ test "file tree backend scans off-model with exclusions and symlink kinds" {
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
     const owned = try allocator.dupe(u8, root);
     var result = scanDirectory(allocator, io, owned);
-    defer result.deinit(allocator);
+    defer result.deinit(allocator, io);
     try std.testing.expect(result.ok);
     var saw_git = false;
     var saw_env = false;
@@ -363,6 +590,151 @@ test "file tree backend chooses nearest git ancestor and otherwise parent" {
     try std.testing.expectEqualStrings(plain_parent, plain_root);
 }
 
+test "file tree root validation canonicalizes a directory alias and rejects a regular file" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "actual", .default_dir);
+    try tmp.dir.symLink(io, "actual", "alias", .{ .is_directory = true });
+    try tmp.dir.writeFile(io, .{ .sub_path = "plain.txt", .data = "not a directory" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const alias = try std.fs.path.join(allocator, &.{ root, "alias" });
+    const actual = try std.fs.path.join(allocator, &.{ root, "actual" });
+    defer allocator.free(actual);
+    var valid = validateRoot(allocator, io, alias);
+    defer valid.deinit(allocator, io);
+    try std.testing.expect(valid.ok);
+    try std.testing.expectEqualStrings(actual, valid.path);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.directory)), valid.identity.?.kind);
+
+    const file = try std.fs.path.join(allocator, &.{ root, "plain.txt" });
+    var invalid = validateRoot(allocator, io, file);
+    defer invalid.deinit(allocator, io);
+    try std.testing.expect(!invalid.ok);
+}
+
+fn openFdCountForTest() usize {
+    var count: usize = 0;
+    for (0..4096) |raw_fd| {
+        const fd: c_int = @intCast(raw_fd);
+        if (std.c.fcntl(fd, std.c.F.GETFD, @as(c_int, 0)) >= 0) count += 1;
+    }
+    return count;
+}
+
+test "nullable root validation closes descriptors on component and identity failures" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "actual", .default_dir);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const missing = try std.fs.path.join(allocator, &.{ root, "actual/missing/child" });
+    defer allocator.free(missing);
+    const actual = try std.fs.path.join(allocator, &.{ root, "actual" });
+    defer allocator.free(actual);
+
+    const before = openFdCountForTest();
+    for (0..64) |_| try std.testing.expect(openCanonicalDirectoryNoFollow(io, missing) == null);
+    for (0..64) |_| try std.testing.expect((try validateRootSnapshotImpl(allocator, io, actual, true)) == null);
+    try std.testing.expectEqual(before, openFdCountForTest());
+}
+
+test "validated root directory capability binds the first scan across namespace replacement" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "selected", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "selected/original.md", .data = "old" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const selected = try std.fs.path.join(allocator, &.{ tmp_root, "selected" });
+    defer allocator.free(selected);
+
+    var validated = (try validateRootSnapshot(allocator, io, selected)).?;
+    defer validated.deinit(allocator, io);
+    const retained_dir = validated.dir.?;
+    validated.dir = null;
+
+    try tmp.dir.rename("selected", tmp.dir, "moved", io);
+    try tmp.dir.createDir(io, "selected", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "selected/replacement.md", .data = "new" });
+
+    const owned_path = try allocator.dupe(u8, validated.path);
+    var result = scanOpenedDirectory(allocator, io, owned_path, retained_dir);
+    defer result.deinit(allocator, io);
+    try std.testing.expect(result.ok);
+    var saw_original = false;
+    var saw_replacement = false;
+    for (result.entries.items) |entry| {
+        if (std.mem.eql(u8, entry.name, "original.md")) saw_original = true;
+        if (std.mem.eql(u8, entry.name, "replacement.md")) saw_replacement = true;
+    }
+    try std.testing.expect(saw_original);
+    try std.testing.expect(!saw_replacement);
+}
+
+test "validated file tree row capability remains bound across leaf replacement and rejects symlinks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/same.md", .data = "old" });
+    try tmp.dir.symLink(io, "same.md", "root/link.md", .{});
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(io, &tmp_buf)];
+    const root = try std.fs.path.join(allocator, &.{ tmp_root, "root" });
+    defer allocator.free(root);
+    const same = try std.fs.path.join(allocator, &.{ root, "same.md" });
+    defer allocator.free(same);
+    const link = try std.fs.path.join(allocator, &.{ root, "link.md" });
+    defer allocator.free(link);
+
+    var validated_root = (try validateRootSnapshot(allocator, io, root)).?;
+    defer validated_root.deinit(allocator, io);
+    const old_file = try std.Io.Dir.cwd().openFile(io, same, .{ .follow_symlinks = false });
+    defer old_file.close(io);
+    const old_identity = try identityOfFile(io, old_file);
+    var capability = openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        same,
+        old_identity,
+    ) orelse return error.TestUnexpectedResult;
+    defer capability.deinit(io);
+
+    try tmp.dir.rename("root/same.md", tmp.dir, "root/moved.md", io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/same.md", .data = "new" });
+    try std.testing.expect((try identityOfFile(io, capability.file)).eql(old_identity));
+    const replacement = try std.Io.Dir.cwd().openFile(io, same, .{ .follow_symlinks = false });
+    defer replacement.close(io);
+    try std.testing.expect(!(try identityOfFile(io, replacement)).eql(old_identity));
+
+    const link_z = try allocator.dupeZ(u8, link);
+    defer allocator.free(link_z);
+    var link_stat: std.posix.Stat = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, link_z.ptr, &link_stat, std.posix.AT.SYMLINK_NOFOLLOW));
+    try std.testing.expect(openValidatedFileTreeRow(
+        allocator,
+        io,
+        root,
+        validated_root.identity,
+        link,
+        identityFromStat(link_stat),
+    ) == null);
+}
+
 test "file tree backend rejects mutual directory symlink cycles" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -377,7 +749,7 @@ test "file tree backend rejects mutual directory symlink cycles" {
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
     const expanded_b = try std.fs.path.join(allocator, &.{ root, "a/to-b" });
     var result = scanDirectory(allocator, io, expanded_b);
-    defer result.deinit(allocator);
+    defer result.deinit(allocator, io);
     try std.testing.expect(result.ok);
     for (result.entries.items) |entry| if (std.mem.eql(u8, entry.name, "to-a")) {
         try std.testing.expectEqual(file_tree.Kind.symlink_file, entry.kind);

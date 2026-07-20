@@ -6131,6 +6131,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
             drainFilePanelPick() // open_file_panel(Cmd+O/메뉴/팔릿): Markdown/HTML을 현재 창 도크에 연다(FP5).
+            drainFileTreeRootPick() // Explorer 폴더 열기/작업공간 추가: directory-only picker, 정책 검증은 Zig worker.
             drainFileTreeActions() // FP7 FSEvents roots + clean reload + unsupported external open.
             drainColorSample() // HSV picker `i`(스포이드): NSColorSampler로 화면 색을 추출해 picker에 반영(비동기).
             drainSidebarConfig() // view options(⚙) 토글이 바뀌었으면 config 파일에 반영(persist).
@@ -7223,6 +7224,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_macos_app_session_open_file_panel_path(session, p.baseAddress, p.count)
         }
         if result != 1 { NSSound.beep() }
+    }
+
+    private func drainFileTreeRootPick() {
+        guard let session = appSession else { return }
+        let operation = maru_macos_app_session_take_file_tree_root_pick_request(session)
+        guard operation == MARU_FILE_TREE_ROOT_PICK_REPLACE || operation == MARU_FILE_TREE_ROOT_PICK_ADD else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.message = operation == MARU_FILE_TREE_ROOT_PICK_REPLACE
+            ? "탐색기에서 열 폴더를 고르세요"
+            : "작업공간에 추가할 폴더를 고르세요"
+        guard panel.runModal() == .OK, let path = panel.url?.path else {
+            _ = maru_macos_app_session_provide_file_tree_root_pick(session, nil, 0)
+            return
+        }
+        let bytes = Array(path.utf8)
+        _ = bytes.withUnsafeBufferPointer { buf in
+            maru_macos_app_session_provide_file_tree_root_pick(session, buf.baseAddress, buf.count)
+        }
     }
 
     private func drainFileTreeActions() {

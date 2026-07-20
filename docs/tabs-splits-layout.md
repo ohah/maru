@@ -75,6 +75,8 @@ Maru 레이아웃 모델 (Window → Workspace → SplitTree → Pane → Term)
   mirror나 변환표는 canonical layout에 들어가지 않는다.
 - **불변식**: workspace/split 재배치는 runtime을 재시작하지 않는다. layout 모델은 live PTY 포인터를 직접 소유하지 않고
   opaque runtime binding을 사용한다. renderer는 runtime 위치와 무관하게 surface snapshot을 소비한다.
+- **v1 owner는 하나**: runtime 하나는 manifest의 canonical Term 한 곳에만 배치한다. 추가 GUI/CLI/SSH 화면은 layout 복제가
+  아니라 observer subscription이다. collaborative writer와 persisted Mirror Term은 실제 수요 전까지 구현하지 않는다.
 
 ## 렌더링 결정: Maru가 직접 그린다(native 최소)
 

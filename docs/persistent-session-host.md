@@ -28,6 +28,16 @@ runtime ID다. tmux가 설치돼 있지 않아도 생성·재접속·복구·외
 이 범위는 좁은 의미로 terminal multiplexer의 PTY 소유·detach/attach 기능을 수행하지만, tmux의 window/pane UI,
 prefix key, status line, copy mode, 설정 언어, command language, tmux wire 호환은 구현하지 않는다.
 
+### terminal multiplexer 기능 경계
+
+| 분류 | v1 결정 |
+| --- | --- |
+| 취함 | GUI와 독립된 PTY/child 소유, detach/reattach, host-side screen·scrollback, client N개 관찰, SSH attach, resize·`SIGWINCH` 전달 |
+| Maru 모델로 대체 | session/window/pane 계층은 Window/Workspace/Pane/Term, 연결키는 `runtime_id`, layout은 `workspace.v1`, 화면 전달은 MRSH snapshot/delta |
+| 제외 | prefix/status/command/config 언어, control-mode/wire 호환, 여러 writable client, 여러 Term의 동일 runtime 영속 복제, client 크기 조정 정책 |
+
+외부 terminal attach에 필요한 multiplexer 동작은 취하되 Maru가 이미 소유한 layout/UI를 다시 만들지 않는 경계다.
+
 ## 2. 목표와 비목표
 
 ### 목표
@@ -49,7 +59,13 @@ prefix key, status line, copy mode, 설정 언어, command language, tmux wire �
 - Claude/Codex provider session id·transcript·argv를 저장해 resume/fork하는 것. 영속성은 provider 복원이 아니라
   **같은 살아 있는 PTY/process를 계속 소유**하는 데서만 나온다.
 - tmux server/socket/control-mode 프로토콜과 호환되는 것.
-- v1에서 여러 writable client가 동시에 한 PTY 크기와 입력을 소유하는 것.
+- v1에서 여러 writable client가 동시에 한 PTY에 입력하는 것. 여러 사람이 함께 쓰는 collaborative input, 사용자별 cursor,
+  입력 병합·귀속·승인/revoke UX는 실제 수요가 확인될 때 별도 설계한다.
+- v1에서 서로 다른 Unix account가 같은 runtime을 공유하는 것. SSH attach도 session host를 소유한 동일 login UID로 실행하며,
+  cross-UID 초대 token·ACL·broker socket은 추가하지 않는다.
+- v1에서 하나의 runtime을 여러 Window/Workspace/Pane의 영속 Term으로 복제하는 것. canonical owner Term은 하나이며 추가
+  화면은 manifest 배치가 아닌 client subscription이다.
+- 여러 client 크기에서 largest/smallest/latest를 고르는 layout 정책. canonical PTY 크기는 controller 한 명이 소유한다.
 - v1에서 전체 Maru workspace를 텍스트 TUI로 완전히 재현하는 것.
 - WKWebView process, browser JS heap, file panel의 미저장 editor buffer를 session host에 넣는 것.
 - 원격 TCP/HTTP 포트를 열거나 계정·클라우드 relay를 추가하는 것.
@@ -193,8 +209,10 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>"
   뒤 manifest 위치만 바꾼다. 성공한 이동은 `workspace-binding-id`, `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
 - app-wide Quit은 모든 Window의 GUI subscription을 끊는 detach다. 비마지막 Window/Workspace/Term의 명시적 close는 기존
   destructive close 의미를 유지해 해당 runtime 종료 확인을 거친다. 창 하나를 닫았다는 이유로 다른 창 runtime은 건드리지 않는다.
-- 한 runtime을 두 Window/Workspace의 writable Term으로 동시에 표시하지 않는다. observer는 manifest 배치가 아니라 client
-  subscription이므로 CLI나 진단 UI에서 별도로 붙는다.
+- 한 runtime의 **canonical owner Term은 manifest 전체에서 정확히 한 곳**이다. 같은 `runtime-handle`을 두
+  Window/Workspace/Pane에 반복해 owner나 read-only mirror로 저장하지 않는다. observer는 manifest 배치가 아니라 client
+  subscription이므로 CLI나 진단 UI에서 별도로 붙는다. Maru 내부 mirror UX가 실제로 필요해지면 owner의 terminate/알림 위치와
+  독립 viewport를 정한 non-owning surface kind로 별도 설계하며 v1 wire를 느슨하게 중복 허용해 대신하지 않는다.
 - 정상 제품 경로는 macOS single app instance가 layout writer다. 두 GUI process가 같은 manifest를 열 수 있는 디버그/테스트
   상황에는 `workspace-binding-id`가 아니라 manifest 파일 writer lease 하나를 둔다. lease를 못 얻은 process는 layout을
   자동 restore·checkpoint하거나 controller를 탈취하지 않고 진단 후 read-only runtime attach만 할 수 있다.
@@ -417,21 +435,59 @@ ssh workbox maru runtime list
 ssh -t workbox maru attach <runtime-id>
 ```
 
+이때 SSH는 로컬 terminal과 원격 `maru attach` 사이의 인증·암호화·PTY transport만 담당한다. 원격 CLI는 그 서버의 동일 UID로
+실행되어 원격 `~/Library/Caches/maru/session-host/control.sock`에 연결한다. MRSH socket이나 session host는 network에 노출되지
+않는다. `runtime list/attach`는 이미 살아 있는 원격 host/runtime 조회이므로 SSH 요청이 빈 host나 새 shell을 자동 생성하지 않는다.
+
+외부 terminal adapter의 resize 계약은 GUI와 같은 `runtime.resize`를 사용한다.
+
+1. attach 직후 controlling TTY의 `TIOCGWINSZ`로 최초 `cols/rows`를 읽어 controller 요청에 포함한다.
+2. local/SSH terminal의 `SIGWINCH` handler는 allocation·IPC·`ioctl`을 하지 않고 signal-safe flag 또는 self-pipe로 event loop만
+   깨운다.
+3. event loop가 최신 `TIOCGWINSZ`를 읽고 같은 크기는 제거하며, 연속 변화는 최신 값으로 coalesce한 뒤 증가하는
+   `client_sequence`와 함께 `runtime.resize`를 보낸다.
+4. observer는 자기 TTY의 `SIGWINCH`로 canonical PTY를 바꾸지 않는다. host의 `runtime.resized`를 받아 현재 canonical 크기를
+   crop/letterbox하고, takeover 성공 직후에만 자기 최초 크기를 보낸다.
+5. detach, SSH EOF, signal 종료에서는 raw mode·signal handler를 복원하고 stream만 닫는다. runtime/child에는 종료 신호를
+   보내지 않는다.
+
 직접 TCP, HTTP, cloud relay는 비범위다. 추후 `maru attach --remote workbox ...`가 필요하면 내부 transport는 SSH를 재사용한다.
 
 ## 9. 다중 client와 resize
 
-v1은 runtime당 controller 한 명을 강제한다.
+여기서 client는 GUI process나 CLI process이고, attach 하나는 그 connection 안의 `stream_id` subscription이다. 한
+`Maru.app`의 여러 Window는 connection 하나를 공유해도 Term별 stream은 구분한다. v1은 runtime당 controller 한 명과 observer
+여러 명을 허용한다.
+
+권한을 `is_controller` boolean 하나로 wire/type에 굳히지 않고 capability로 표현한다.
+
+| capability | 의미 | v1 부여 규칙 |
+| --- | --- | --- |
+| `observe` | metadata, snapshot, delta, bounded scrollback 조회 | controller와 모든 observer |
+| `input` | binary terminal input 전송 | controller 한 명만 |
+| `resize` | canonical PTY size 변경 | `input`과 같은 controller 한 명만 |
+| `terminate` | runtime 종료 요청 | attach 역할에 암묵 부여하지 않고 별도 auth와 `runtime end` 확인을 거침 |
 
 - controller만 terminal input과 PTY resize를 보낸다.
 - 추가 client는 observer(read-only)다.
-- `--take-over`는 기존 controller에 revocation 이벤트를 보낸 뒤 제어권을 원자적으로 이전한다.
+- `--take-over`는 기존 controller에 revocation 이벤트를 보낸 뒤 `input + resize` capability를 원자적으로 이전한다.
 - controller가 끊기면 자동으로 임의 observer에게 write 권한을 주지 않는다.
 - client가 하나도 없을 때 PTY는 마지막 검증된 cols/rows를 유지한다.
-- 새 controller attach의 첫 resize가 PTY와 `TerminalCore`에 같은 순서로 적용된다.
+- 새 controller attach/takeover의 첫 resize가 PTY와 `TerminalCore`에 같은 순서로 적용된다.
 - 서로 다른 크기의 observer는 canonical PTY size를 바꾸지 않고 letterbox/crop/reflow 정책을 client 표시층에서 처리한다.
+- host는 resize를 runtime별 직렬 mutation queue에서 처리한다. controller/sequence/범위를 검증하고
+  `terminal.clampGridSize`와 같은 규칙으로 clamp한 뒤 `TerminalCore`와 PTY `TIOCSWINSZ`를 모두 적용한다. 두 적용이 성공하기
+  전에는 새 canonical size나 `runtime.resized`를 publish하지 않으며 partial apply는 다른 output/client에 관측되지 않아야 한다.
+- 적용 성공 response는 `{cols, rows, client_sequence, resize_generation, changed}`를 돌려준다. host는 controller별 마지막
+  sequence 이하 요청을 다시 적용하지 않는다. 실제 크기가 바뀌면 모든 subscription에
+  `runtime.resized {runtime_id, cols, rows, resize_generation, reason}`을 보내며 observer도 이 이벤트로 표시 크기를 맞춘다.
+- `TIOCSWINSZ`가 foreground process group에 유발한 `SIGWINCH` 뒤 child가 내는 repaint output은 resize transaction 뒤에
+  `TerminalCore`로 적용되고 같은 generation 기반 delta로 전파된다. client가 generation/sequence gap을 발견하면 기존 규칙대로
+  fresh snapshot을 요청한다.
 
-여러 writable client나 collaborative typing은 입력 순서, terminal size, selection, capability revocation의 별도 설계 없이는 열지 않는다.
+여러 writable client는 PTY byte stream만 놓고 보면 가능하지만 v1에서는 열지 않는다. 향후 실제 협업 수요가 확인되면 여러
+stream에 `input`만 명시적으로 부여하고 `resize`는 한 stream에 유지할 수 있다. 그 전까지 input frame 원자성, paste 상한,
+arrival ordering, 사용자 표시·승인/revoke, cross-UID 인증을 구현하거나 테스트 범위에 넣지 않는다.
 
 ## 10. IPC와 control-plane 경계
 
@@ -470,7 +526,7 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 | --- | ---: | --- |
 | `hello` / `hello_ack` | 1 / 2 | JSON version range, client kind, capabilities / selected version, `host_id`, capabilities |
 | `request` / `response` | 3 / 4 | JSON command params / result or typed error |
-| `event` | 5 | JSON lifecycle/metadata/controller/notification event |
+| `event` | 5 | JSON lifecycle/metadata/controller/`runtime.resized`/notification event |
 | `snapshot_chunk` | 6 | versioned binary neutral-screen snapshot chunk |
 | `delta_chunk` | 7 | versioned binary delta with base/new generation and monotonic sequence |
 | `input_bytes` | 8 | controller가 보낸 raw input bytes |
@@ -498,9 +554,9 @@ capabilities:[...]}`를 보내고 host는 선택 version, `host_id`, 지원 capa
 | `host.info` | 없음 | host/runtime/client/capability summary |
 | `runtime.list` / `runtime.get` | filter 또는 `runtime_id` | 권한 범위 안 redacted metadata |
 | `runtime.spawn` | 128-bit `operation_id`, argv, cwd, env allowlist, cols/rows | idempotent하게 새 `runtime_handle`; 같은 operation 재시도는 같은 결과 |
-| `runtime.attach` | `runtime_id`, observer/controller/takeover, cols/rows | attach metadata, `stream_id`, snapshot generation 또는 `controller_busy` |
+| `runtime.attach` | `runtime_id`, observer/controller/takeover, cols/rows | attach metadata, `stream_id`, granted capabilities, snapshot generation 또는 `controller_busy` |
 | `runtime.detach` | `stream_id` | 해당 subscription/controller release, runtime 유지 |
-| `runtime.resize` | `stream_id`, cols/rows, client sequence | controller만 PTY와 `TerminalCore`에 순서대로 적용 |
+| `runtime.resize` | `stream_id`, cols/rows, `client_sequence` | controller만 PTY와 `TerminalCore`에 적용하고 applied size/`resize_generation` 응답; 변경은 `runtime.resized` broadcast |
 | `runtime.snapshot` | `stream_id`, expected generation | fresh snapshot chunk stream |
 | `scrollback.page` | `runtime_id`, generation, line range | bounded binary page 또는 `invalid_generation` |
 | `controller.takeover` / `controller.release` | `runtime_id`/`stream_id` | 기존 controller revoke event 뒤 원자 이전 / 명시 release |
@@ -522,8 +578,9 @@ CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하�
 - socket directory는 user-only 0700, socket은 0600, peer credential same-uid 검증을 기본으로 한다.
 - `runtime_handle`은 secret이 아니므로 그것만으로 output/read/write를 허용하지 않는다.
 - GUI 재접속은 app이 시작한 host/client capability로 인증한다.
-- 외부 `maru attach`에 same-uid만으로 전체 output을 허용할지, signed client/interactive TTY/명시 grant를 추가할지는
-  **CLI attach 구현 전 사용자 결정 gate**다. 기존 control-plane의 same-uid 신뢰 차등을 조용히 약화하지 않는다.
+- v1 외부 `maru attach`는 host와 **동일 login UID만** 허용한다. SSH도 SSH 계정 인증 뒤 그 UID로 실행된 원격 CLI만
+  host-local socket에 연결한다. 다른 Unix account, 공유 group socket, 초대 token, signed-client grant는 비범위이며 필요성이
+  확인되기 전 socket 권한을 넓히지 않는다.
 - socket/token/capability, raw output, cwd, command는 trace fixture에 그대로 넣지 않는다. redaction은
   `docs/project-rules.md`의 단일 기준을 쓴다.
 - SSH attach는 SSH 계정 인증 뒤 host-local socket을 사용하고 daemon이 network port를 listen하지 않는다.
@@ -645,11 +702,14 @@ stale/missing/orphan matrix, 실제 signed `.app`을 종료한 뒤 OSC 배너→
 
 - `maru host status`, `maru runtime list/get/end`, `maru attach`, `Ctrl-\` 다음 `d` detach chord, observer, `--take-over`를 구현하고
   parser/`--help`/`--json` fixture를 같은 PR에서 갱신한다.
-- same-uid attach 권한 결정을 사용자와 확정하고 보안 테스트를 추가한다.
+- same-login-UID 허용과 다른 UID 거부를 socket credential 보안 테스트로 고정한다.
+- 외부/SSH PTY adapter의 최초 `TIOCGWINSZ`, signal-safe `SIGWINCH` wake, resize coalesce/sequence, takeover 최초 resize,
+  `runtime.resized` observer 반영, detach 때 raw mode 복원을 구현한다.
 - SSH `ssh -t host maru attach ...` 실제 smoke를 추가한다.
 
 종료 gate: PTY-backed 외부 terminal harness와 최소 1개 실제 terminal emulator에서 무인 attach/input/detach/reattach,
-controller resize ownership, unauthorized 거부, localhost SSH smoke. 접근성/SSH test account 등 runner 사전 조건이 없으면 P5를
+controller resize ownership, observer resize 무효, resize ACK/broadcast, unauthorized 거부, localhost SSH smoke.
+접근성/SSH test account 등 runner 사전 조건이 없으면 P5를
 미완료로 둔다.
 
 ### P6 — 전체 workspace TUI와 외부 adapter 검토
@@ -693,6 +753,10 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
 - multi-workspace runtime 중복 bind, stale handle, partial missing, orphan recovery.
 - quick tail 위치/개수/손상, hide/show/quit/relaunch/config 변경의 runtime 불변과 exact notification attach.
 - terminal input mode/alternate screen/resize/Unicode/grapheme/kitty graphics가 reconnect snapshot에서 회귀하지 않음.
+- controller/observer capability 부여, stale `client_sequence` 무효, resize burst coalesce, core/PTY partial failure 비관측,
+  `runtime.resized` generation 연속성, SSH PTY `SIGWINCH`와 raw-mode 복원.
+- manifest의 runtime owner 중복 거부와 client observer subscription N개 허용을 함께 검증해 layout binding과 view attach를
+  혼동하지 않음. collaborative writer, cross-UID grant, persisted Mirror Term은 v1 테스트·완료 범위에 넣지 않음.
 - GUI 0 상태 OSC 9/777 배너·bounded history·notification click cold launch attach, `notifications.osc=false` 무발화.
 - capability·raw output·민감 path가 fixture에 남지 않는 redaction gate.
 
@@ -703,9 +767,8 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
 
 다음은 이 설계 PR 리뷰에서 방향을 확인하되, 확인되지 않으면 해당 단계 구현을 시작하지 않는다.
 
-1. 외부 `maru attach`의 v1 신뢰 경계: same login UID 전부 허용 또는 signed client/명시 grant 추가.
-2. host launch 방식: 앱이 spawn한 detached helper와 launchd-managed agent의 배포·업데이트·로그아웃 의미 비교.
+1. host launch 방식: 앱이 spawn한 detached helper와 launchd-managed agent의 배포·업데이트·로그아웃 의미 비교.
 
 tmux-CC layout driver 제거, Maru-owned session host, `keep-alive-after-quit=true` 완성 후 기본값, provider session
 resume/fork 비도입, 기존 `maru.workspace.v1`의 binding scalar+`quick-window` tail, §10의 command/framing/stream 계약은 이
-문서의 확정 결정이다. 위 두 항목은 그 방향 안에서 보안·배포를 결정하는 gate다.
+문서의 확정 결정이다. v1 외부 attach는 same-login-UID로 확정했고, 위 항목은 그 방향 안에서 host 배포를 결정하는 gate다.

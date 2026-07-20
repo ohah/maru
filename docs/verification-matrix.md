@@ -64,6 +64,11 @@ GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/a
 
 파일 패널 FP10 행의 5-field renderer capability 서술은 당시 구현 이력이다. 현재 검증 계약은 FP11a에서 `editor_epoch`를 추가한 `RendererCapability` 6-field 공용 alias이며, epoch를 포함한 어느 필드든 stale이면 fragment 재사용·DOM 높이 변경이 0이어야 한다.
 
+### 파일 탐색기 후속 두 PR gate (계획, ABI v137부터)
+
+- **PR 1 — open/root UX**: `DockPanel.presented`와 `Tree.mode/roots/root_generation`, picker 없는 첫 open, 논리적으로 빈 tree만의 file picker, VS Code형 replace/add/remove, single-field workspace wire, mutation-busy/stale request 거부, 열린 dirty entry의 safety watcher 보존을 headless·ABI·Swift type-check로 검증한다. 최대 group/node/entry 상태의 512-field budget과 frozen legacy reader skip, OOM/cap+1 atomicity, typed notice/trace reason을 필수 artifact로 둔다. 제품 macOS gate는 launcher→빈 dock, empty background picker, header/채워진 여백 no-op, header/root context menu, cancel과 invalid/stale completion 무변경을 확인한다.
+- **PR 2 — scrollbar/icons**: 중립 scrollbar geometry와 `IconKind` classifier를 boundary test에 등록하고 overflow-only thumb, top/bottom track/drag, fade, selection reveal, gesture/generation 취소, 좁은 row 겹침 방지를 자동 검증한다. icon asset manifest/hash/`--check`, attribution, SVG→coverage→C/Zig registry 동기화와 generic fallback을 required gate로 둔다. [성능 예산](performance-budget.md#파일-탐색기-scrollbaricon-예산)의 16,384-row/1,000-event counter artifact와 `mise run perf`도 required다. 제품 macOS gate는 light/dark 및 focused/unfocused 단색 대비, 트랙패드/휠/drag와 divider/WebView 입력 무회귀를 확인한다.
+
 | 영역 | 불가 이유 | 현재 한계 | 손해 | 예정 검증 경로 |
 | --- | --- | --- | --- | --- |
 | 실제 외부 오라클 실행 | Ghostty 다리·로컬 기본 `check`만 opt-in/환경 의존 | `mise run oracle-ext`(libvterm)와 `mise run oracle-alacritty`(Alacritty alacritty_terminal)는 CI `oracles` 잡이 매 푸시/PR에서 강제한다(golden == reference). `mise run oracle-ghostty`(Ghostty libghostty-vt)는 무거운 빌드 탓에 CI에서 제외돼 로컬 opt-in만이다. 셋 다 로컬 기본 `check`에는 미포함이고(각 reference 설치/빌드 필요), xterm 직접 실행은 비현실적이라 없다. | Ghostty 다리는 로컬 opt-in을 돌리지 않으면 golden이 검증되지 않는다. libvterm·Alacritty는 CI가 강제하지만 로컬 `check`만으로는 확인되지 않는다. | escape fixture가 늘면 세 reference로 golden을 생성/교차검증하고, Ghostty 다리의 CI 편입도 검토한다. |

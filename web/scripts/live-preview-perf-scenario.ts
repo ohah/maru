@@ -1,4 +1,5 @@
-import { Text } from "@codemirror/state";
+import { EditorSelection, Text } from "@codemirror/state";
+import { forceParsing } from "@codemirror/language";
 import type { ViewUpdate } from "@codemirror/view";
 import { JSDOM } from "jsdom";
 import { createMarkdownEditor } from "../src/editor";
@@ -8,6 +9,10 @@ import {
   projectionFallbackReasons,
 } from "../src/live-preview-diagnostics";
 import { maxLivePreviewProjectionCodeUnits } from "../src/live-preview-protocol";
+import {
+  maxLivePreviewProjectionEntries,
+  maxLivePreviewTableCells,
+} from "../src/live-preview-projection";
 import { startMathDelimiterScanProbe } from "../src/markdown-language";
 import { EditorRevisionClock } from "../src/live-preview-state";
 import type { LivePreviewPerfCounters } from "./live-preview-perf-model";
@@ -79,6 +84,381 @@ function installDom(dom: JSDOM): () => void {
   };
 }
 
+async function runTableInteractionProbe(dom: JSDOM): Promise<
+  Readonly<{
+    table_intent_events: number;
+    table_cm6_transactions: number;
+    table_source_transactions: number;
+    table_appended_rows: number;
+    table_zero_effect_rejections: number;
+    table_cell_cap: number;
+    table_cap_plus_one_transactions: number;
+    table_multirange_transactions: number;
+    table_context_record_checks: number;
+    table_context_cells_retained_max: number;
+    table_queue_max_retained: number;
+    table_external_actions: number;
+    table_bridge_calls: number;
+    table_iframe_create: number;
+    table_iframe_destroy: number;
+    table_copied_bytes: number;
+    table_event_record_checks_max: number;
+    table_projection_record_count: number;
+    table_non_table_record_count: number;
+    table_projection_record_checks_max: number;
+    table_group_build_record_checks_max: number;
+    table_group_cell_arrays_created_max: number;
+  }>
+> {
+  const host = dom.window.document.createElement("aside");
+  const capHost = dom.window.document.createElement("aside");
+  dom.window.document.body.append(host, capHost);
+  const source = "| A | B |\n| - | - |\n| c | d |";
+  const revisions = new EditorRevisionClock();
+  let controller: EditableProjectionController | null = null;
+  let sourceTransactions = 0;
+  const editor = createMarkdownEditor(
+    host,
+    source,
+    (update) => {
+      if (update.docChanged) {
+        revisions.documentChanged();
+        sourceTransactions += 1;
+      }
+      controller?.handleUpdate(update);
+    },
+    () => {},
+  );
+  const results: LivePreviewDispatchResult[] = [];
+  let maxCellsRetained = 0;
+  let maxEventRecordChecks = 0;
+  let maxProjectionRecordChecks = 0;
+  let maxGroupBuildRecordChecks = 0;
+  let maxGroupCellArraysCreated = 0;
+  let bridgeCalls = 0;
+  let documentQueue = Promise.resolve();
+  const scheduleDocumentOperation = <T>(operation: () => T): Promise<T> => {
+    const scheduled = documentQueue.then(operation);
+    documentQueue = scheduled.then(
+      () => undefined,
+      () => undefined,
+    );
+    return scheduled;
+  };
+  controller = new EditableProjectionController(editor, 1, revisions);
+  controller.enable();
+  const coordinator = new LivePreviewIntentCoordinator({
+    scheduleDocumentOperation,
+    currentContext: (intent) => {
+      if (controller === null) return null;
+      const identity = controller.interactionIdentity();
+      const interaction = controller.interactionContextForIntent(intent);
+      maxCellsRetained = Math.max(maxCellsRetained, interaction.currentTableCells.length);
+      return {
+        view: editor,
+        guard: {
+          ...identity,
+          mode: "live-preview",
+          closeLockRequestId: null,
+          composing: false,
+          readonly: false,
+        },
+        currentEntry: interaction.currentEntry,
+        currentTableCells: interaction.currentTableCells,
+      };
+    },
+    hrefAllowed: () => false,
+    openExternalAction: async () => {
+      bridgeCalls += 1;
+    },
+    onDispatch: (result) => results.push(result),
+  });
+  const keyEvent = (key: "Tab" | "Enter", shiftKey = false) => ({
+    key,
+    shiftKey,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    trusted: true,
+    composing: false,
+    repeat: false,
+  });
+  const enqueueKey = async (key: "Tab" | "Enter", shiftKey = false): Promise<void> => {
+    if (controller === null) throw new Error("table perf controller missing");
+    const metricsBefore = controller.metrics();
+    const capture = controller.tableKeyCapture(keyEvent(key, shiftKey));
+    if (!capture.owned || capture.intent === null)
+      throw new Error("table perf key capture bypassed the product resolver");
+    const completed = coordinator.metrics().completed;
+    if (!coordinator.enqueue(capture.intent))
+      throw new Error("table perf coordinator rejected an in-cap intent");
+    for (let turn = 0; turn < 20 && coordinator.metrics().completed === completed; turn += 1)
+      await Promise.resolve();
+    if (coordinator.metrics().completed !== completed + 1)
+      throw new Error("table perf coordinator did not complete an intent");
+    maxEventRecordChecks = Math.max(
+      maxEventRecordChecks,
+      controller.metrics().interactionRangeChecks - metricsBefore.interactionRangeChecks,
+    );
+    maxProjectionRecordChecks = Math.max(
+      maxProjectionRecordChecks,
+      controller.metrics().diffedDecorations - metricsBefore.diffedDecorations,
+    );
+    maxGroupBuildRecordChecks = Math.max(
+      maxGroupBuildRecordChecks,
+      controller.metrics().tableGroupBuildRecordChecks - metricsBefore.tableGroupBuildRecordChecks,
+    );
+    maxGroupCellArraysCreated = Math.max(
+      maxGroupCellArraysCreated,
+      controller.metrics().tableGroupCellArraysCreated - metricsBefore.tableGroupCellArraysCreated,
+    );
+  };
+
+  const capColumns = maxLivePreviewTableCells / 2;
+  const nonTableEntryCount = maxLivePreviewProjectionEntries - maxLivePreviewTableCells;
+  if (nonTableEntryCount % 3 !== 0)
+    throw new Error("table perf exact-entry fixture is not divisible into emphasis records");
+  const capPrefix = "*x* ".repeat(nonTableEntryCount / 3);
+  const capHeader = `| ${Array.from({ length: capColumns }, (_, index) => `h${index}`).join(" | ")} |`;
+  const capDelimiter = `| ${Array.from({ length: capColumns }, () => "---").join(" | ")} |`;
+  const capData = `| ${Array.from({ length: capColumns }, () => "x").join(" | ")} |`;
+  const capTable = `${capHeader}\n${capDelimiter}\n${capData}`;
+  const capTableFrom = capPrefix.length + 2;
+  const capLastCellPosition =
+    capTableFrom + capHeader.length + 1 + capDelimiter.length + 1 + capData.lastIndexOf("x");
+  const capSource = `${capPrefix}\n\n${capTable}`;
+  const capRevisions = new EditorRevisionClock();
+  let capController: EditableProjectionController | null = null;
+  const capEditor = createMarkdownEditor(
+    capHost,
+    capSource,
+    (update) => {
+      if (update.docChanged) capRevisions.documentChanged();
+      capController?.handleUpdate(update);
+    },
+    () => {},
+  );
+  capEditor.dispatch({ selection: EditorSelection.cursor(capLastCellPosition) });
+  if (!forceParsing(capEditor, capEditor.state.doc.length, 1_000))
+    throw new Error("table perf exact-entry syntax fixture did not prewarm");
+  capController = new EditableProjectionController(capEditor, 2, capRevisions);
+  capController.enable();
+  const capResults: LivePreviewDispatchResult[] = [];
+  const capCoordinator = new LivePreviewIntentCoordinator({
+    scheduleDocumentOperation: async (operation) => operation(),
+    currentContext: (intent) => {
+      if (capController === null) return null;
+      const identity = capController.interactionIdentity();
+      const interaction = capController.interactionContextForIntent(intent);
+      maxCellsRetained = Math.max(maxCellsRetained, interaction.currentTableCells.length);
+      return {
+        view: capEditor,
+        guard: {
+          ...identity,
+          mode: "live-preview",
+          closeLockRequestId: null,
+          composing: false,
+          readonly: false,
+        },
+        currentEntry: interaction.currentEntry,
+        currentTableCells: interaction.currentTableCells,
+      };
+    },
+    hrefAllowed: () => false,
+    openExternalAction: async () => {
+      bridgeCalls += 1;
+    },
+    onDispatch: (result) => capResults.push(result),
+  });
+  const enqueueCapNavigation = async (shiftKey: boolean): Promise<void> => {
+    if (capController === null) throw new Error("table perf exact-cap controller missing");
+    const metricsBefore = capController.metrics();
+    const selectionBefore = capEditor.state.selection.main.head;
+    const capture = capController.tableKeyCapture(keyEvent("Tab", shiftKey));
+    if (!capture.owned || capture.intent === null)
+      throw new Error(
+        `table perf exact-cap navigation capture missing: ${JSON.stringify({
+          selection: capEditor.state.selection.main.head,
+          metrics: metricsBefore,
+        })}`,
+      );
+    const completed = capCoordinator.metrics().completed;
+    if (!capCoordinator.enqueue(capture.intent))
+      throw new Error("table perf exact-cap navigation admission failed");
+    for (let turn = 0; turn < 20 && capCoordinator.metrics().completed === completed; turn += 1)
+      await Promise.resolve();
+    if (
+      capCoordinator.metrics().completed !== completed + 1 ||
+      capResults.at(-1)?.cm6Transactions !== 1
+    ) {
+      throw new Error("table perf exact-cap navigation did not commit once");
+    }
+    const metricsAfter = capController.metrics();
+    if (
+      metricsAfter.tableGroupBuildRecordChecks !== metricsBefore.tableGroupBuildRecordChecks ||
+      metricsAfter.tableGroupCellArraysCreated !== metricsBefore.tableGroupCellArraysCreated
+    ) {
+      throw new Error("table perf exact-cap navigation rebuilt an unchanged table index");
+    }
+    maxEventRecordChecks = Math.max(
+      maxEventRecordChecks,
+      metricsAfter.interactionRangeChecks - metricsBefore.interactionRangeChecks,
+    );
+    maxProjectionRecordChecks = Math.max(
+      maxProjectionRecordChecks,
+      metricsAfter.diffedDecorations - metricsBefore.diffedDecorations,
+    );
+    maxGroupBuildRecordChecks = Math.max(
+      maxGroupBuildRecordChecks,
+      metricsAfter.tableGroupBuildRecordChecks - metricsBefore.tableGroupBuildRecordChecks,
+    );
+    maxGroupCellArraysCreated = Math.max(
+      maxGroupCellArraysCreated,
+      metricsAfter.tableGroupCellArraysCreated - metricsBefore.tableGroupCellArraysCreated,
+    );
+    const selectionAfter = capEditor.state.selection.main.head;
+    if (
+      (shiftKey && selectionAfter >= selectionBefore) ||
+      (!shiftKey && selectionAfter <= selectionBefore)
+    )
+      throw new Error("table perf exact-cap navigation moved in the wrong direction");
+  };
+
+  const copyPadding = `\n\n${"plain ".repeat(
+    Math.ceil(maxLivePreviewProjectionCodeUnits / 6) + 1,
+  )}`;
+  editor.dispatch({ changes: { from: editor.state.doc.length, insert: copyPadding } });
+  sourceTransactions = 0;
+  const measuredSourceLength = editor.state.doc.length;
+  if (measuredSourceLength <= maxLivePreviewProjectionCodeUnits)
+    throw new Error("table perf document-copy fixture is too small");
+
+  let iframeCreate = 0;
+  let iframeDestroy = 0;
+  const countIframes = (node: Node): number => {
+    if (!(node instanceof dom.window.Element)) return 0;
+    return Number(node.matches("iframe")) + node.querySelectorAll("iframe").length;
+  };
+  const consumeIframeRecords = (records: readonly MutationRecord[]) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) iframeCreate += countIframes(node);
+      for (const node of record.removedNodes) iframeDestroy += countIframes(node);
+    }
+  };
+  const iframeObserver = new dom.window.MutationObserver(consumeIframeRecords);
+  iframeObserver.observe(host, { childList: true, subtree: true });
+  iframeObserver.observe(capHost, { childList: true, subtree: true });
+  const copyProbe = startDocumentCopyProbe();
+  let copiedBytes: number | null = null;
+
+  let capPlusOneTransactions = 0;
+  let multirangeTransactions = 0;
+  try {
+    editor.dispatch({ selection: EditorSelection.cursor(source.indexOf("A")) });
+    await enqueueKey("Tab");
+    await enqueueKey("Enter");
+    await enqueueKey("Enter");
+    await enqueueKey("Tab", true);
+    await enqueueKey("Tab");
+    await enqueueKey("Tab");
+
+    if (controller === null) throw new Error("table perf controller retired");
+    const currentHead = editor.state.selection.main.head;
+    const currentCapture = controller.tableKeyCapture(keyEvent("Tab"));
+    if (!currentCapture.owned || currentCapture.intent === null)
+      throw new Error("table perf multi-range source capture missing");
+    editor.dispatch({
+      selection: EditorSelection.create(
+        [EditorSelection.cursor(source.indexOf("A")), EditorSelection.cursor(currentHead)],
+        1,
+      ),
+    });
+    const multirangeIdentity = controller.interactionIdentity();
+    const multirangeIntent: LivePreviewIntent = {
+      ...currentCapture.intent,
+      ...multirangeIdentity,
+    };
+    const multiChecksBefore = controller.metrics().interactionRangeChecks;
+    const beforeMulti = coordinator.metrics().completed;
+    if (!coordinator.enqueue(multirangeIntent))
+      throw new Error("table perf rejected the multi-range probe");
+    for (let turn = 0; turn < 20 && coordinator.metrics().completed === beforeMulti; turn += 1)
+      await Promise.resolve();
+    multirangeTransactions = results.at(-1)?.cm6Transactions ?? -1;
+    maxEventRecordChecks = Math.max(
+      maxEventRecordChecks,
+      controller.metrics().interactionRangeChecks - multiChecksBefore,
+    );
+
+    if (capController === null) throw new Error("table perf exact-cap controller missing");
+    await enqueueCapNavigation(true);
+    await enqueueCapNavigation(false);
+    const capChecksBefore = capController.metrics().interactionRangeChecks;
+    const capCapture = capController.tableKeyCapture(keyEvent("Tab"));
+    if (!capCapture.owned || capCapture.intent === null)
+      throw new Error("table perf exact-cap key capture missing");
+    if (!capCoordinator.enqueue(capCapture.intent))
+      throw new Error("table perf exact-cap coordinator admission failed");
+    for (let turn = 0; turn < 20 && capCoordinator.metrics().completed < 3; turn += 1)
+      await Promise.resolve();
+    capPlusOneTransactions = capResults[2]?.cm6Transactions ?? -1;
+    maxEventRecordChecks = Math.max(
+      maxEventRecordChecks,
+      capController.metrics().interactionRangeChecks - capChecksBefore,
+    );
+
+    await Promise.resolve();
+    consumeIframeRecords(iframeObserver.takeRecords());
+    copiedBytes = copyProbe.stop();
+
+    const allResults = [...results, ...capResults];
+    return {
+      table_intent_events: allResults.length,
+      table_cm6_transactions: allResults.reduce((sum, result) => sum + result.cm6Transactions, 0),
+      table_source_transactions: sourceTransactions,
+      table_appended_rows: (editor.state.doc.length - measuredSourceLength) / "\n|   |   |".length,
+      table_zero_effect_rejections: allResults.reduce(
+        (sum, result) => sum + Number(result.result.type !== "committed"),
+        0,
+      ),
+      table_cell_cap: maxCellsRetained,
+      table_cap_plus_one_transactions: capPlusOneTransactions,
+      table_multirange_transactions: multirangeTransactions,
+      table_context_record_checks:
+        controller.metrics().interactionRangeChecks +
+        capController.metrics().interactionRangeChecks,
+      table_context_cells_retained_max: maxCellsRetained,
+      table_queue_max_retained: Math.max(
+        coordinator.metrics().maxRetained,
+        capCoordinator.metrics().maxRetained,
+      ),
+      table_external_actions: allResults.reduce((sum, result) => sum + result.externalActions, 0),
+      table_bridge_calls: bridgeCalls,
+      table_iframe_create: iframeCreate,
+      table_iframe_destroy: iframeDestroy,
+      table_copied_bytes: copiedBytes,
+      table_event_record_checks_max: maxEventRecordChecks,
+      table_projection_record_count: capController.metrics().projectionRecordCount,
+      table_non_table_record_count:
+        capController.metrics().projectionRecordCount -
+        capController.metrics().tableCellRecordCount,
+      table_projection_record_checks_max: maxProjectionRecordChecks,
+      table_group_build_record_checks_max: maxGroupBuildRecordChecks,
+      table_group_cell_arrays_created_max: maxGroupCellArraysCreated,
+    };
+  } finally {
+    if (copiedBytes === null) copyProbe.stop();
+    iframeObserver.disconnect();
+    coordinator.destroy();
+    capCoordinator.destroy();
+    controller?.destroy();
+    capController?.destroy();
+    editor.destroy();
+    capEditor.destroy();
+    host.remove();
+    capHost.remove();
+  }
+}
 async function runInteractionProbe(dom: JSDOM): Promise<
   Readonly<{
     intent_events: number;
@@ -196,6 +576,7 @@ async function runInteractionProbe(dom: JSDOM): Promise<
         view: editor,
         guard: intent === composingIntent ? { ...guard, composing: true } : guard,
         currentEntry: controller?.entryForIntent(intent) ?? null,
+        currentTableCells: [],
       }),
       hrefAllowed,
       openExternalAction: async (intent, action) => {
@@ -248,6 +629,7 @@ async function runInteractionProbe(dom: JSDOM): Promise<
             readonly: false,
           },
           currentEntry: controller?.entryForIntent(intent) ?? null,
+          currentTableCells: [],
         }),
         hrefAllowed,
         openExternalAction: async (intent, action) => {
@@ -381,6 +763,7 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
   denseHost.remove();
   const denseMathScannedCodeUnits = denseMathProbe.stop();
   const interactionCounters = await runInteractionProbe(dom);
+  const tableInteractionCounters = await runTableInteractionProbe(dom);
 
   const mathScanProbe = startMathDelimiterScanProbe();
   const editor = createMarkdownEditor(
@@ -444,6 +827,7 @@ export async function runLivePreviewBaselineScenario(): Promise<LivePreviewPerfC
     retained_html_bytes: 0,
     generated_outside_retention: 0,
     ...interactionCounters,
+    ...tableInteractionCounters,
     projection_fallback_counts: Object.fromEntries(
       projectionFallbackReasons.map((reason) => [reason, measuredFallbackCounts[reason]]),
     ),

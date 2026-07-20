@@ -12,7 +12,7 @@ import { startDocumentCopyProbe } from "../scripts/live-preview-perf-scenario";
 function artifact(): LivePreviewPerfArtifact {
   return {
     schema_version: livePreviewPerfSchemaVersion,
-    scenario: "fp11c-8mib-1000-editable-projection-interactions",
+    scenario: "fp11d-8mib-1000-editable-projection-table-interactions",
     counters: {
       visited_code_units: 64_000,
       visited_syntax_nodes: 8_000,
@@ -39,6 +39,28 @@ function artifact(): LivePreviewPerfArtifact {
       intent_queue_max_retained: 8,
       intent_queue_dropped: 1,
       intent_bridge_calls: 2,
+      table_intent_events: 10,
+      table_cm6_transactions: 8,
+      table_source_transactions: 2,
+      table_appended_rows: 2,
+      table_zero_effect_rejections: 2,
+      table_cell_cap: 256,
+      table_cap_plus_one_transactions: 0,
+      table_multirange_transactions: 0,
+      table_context_record_checks: 200,
+      table_context_cells_retained_max: 256,
+      table_queue_max_retained: 1,
+      table_external_actions: 0,
+      table_bridge_calls: 0,
+      table_iframe_create: 0,
+      table_iframe_destroy: 0,
+      table_copied_bytes: 0,
+      table_event_record_checks_max: 18,
+      table_projection_record_count: 4_096,
+      table_non_table_record_count: 3_840,
+      table_projection_record_checks_max: 4_096,
+      table_group_build_record_checks_max: 16,
+      table_group_cell_arrays_created_max: 1,
       projection_fallback_counts: Object.fromEntries(
         projectionFallbackReasons.map((reason) => [
           reason,
@@ -56,7 +78,7 @@ describe("live preview performance artifact", () => {
     expect(probe.stop()).toBeGreaterThan(0);
   });
 
-  test("requires the closed FP11c schema and exact interaction effect counters", () => {
+  test("requires the closed FP11d schema and exact interaction effect counters", () => {
     const current = artifact();
     expect(() => validateLivePreviewPerfArtifact(current)).not.toThrow();
     for (const name of [
@@ -66,6 +88,13 @@ describe("live preview performance artifact", () => {
       "retained_html_bytes",
       "generated_outside_retention",
       "intent_dual_effects",
+      "table_cap_plus_one_transactions",
+      "table_multirange_transactions",
+      "table_external_actions",
+      "table_bridge_calls",
+      "table_iframe_create",
+      "table_iframe_destroy",
+      "table_copied_bytes",
     ] as const) {
       expect(() =>
         validateLivePreviewPerfArtifact({
@@ -122,6 +151,21 @@ describe("live preview performance artifact", () => {
       ["intent_queue_max_retained", 9],
       ["intent_queue_dropped", 0],
       ["intent_bridge_calls", 3],
+      ["table_intent_events", 7],
+      ["table_cm6_transactions", 5],
+      ["table_source_transactions", 1],
+      ["table_appended_rows", 1],
+      ["table_zero_effect_rejections", 1],
+      ["table_cell_cap", 255],
+      ["table_context_record_checks", 0],
+      ["table_context_cells_retained_max", 255],
+      ["table_queue_max_retained", 2],
+      ["table_event_record_checks_max", 33],
+      ["table_projection_record_count", 4_095],
+      ["table_non_table_record_count", 3_839],
+      ["table_projection_record_checks_max", 4_095],
+      ["table_group_build_record_checks_max", 4_097],
+      ["table_group_cell_arrays_created_max", 2],
     ] as const) {
       expect(() =>
         validateLivePreviewPerfArtifact({

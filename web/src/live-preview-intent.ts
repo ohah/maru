@@ -43,7 +43,7 @@ export type LivePreviewIntent =
       Readonly<{
         type: "move-table-cell";
         input: "keyboard";
-        direction: "forward" | "backward";
+        direction: "forward" | "backward" | "down";
         gestureNonce: null;
       }>)
   | (IntentIdentity &
@@ -134,7 +134,9 @@ export function isLivePreviewIntent(value: unknown): value is LivePreviewIntent 
       return (
         hasExactKeys(value, [...commonKeys, "direction", "input"].sort()) &&
         value.input === "keyboard" &&
-        (value.direction === "forward" || value.direction === "backward") &&
+        (value.direction === "forward" ||
+          value.direction === "backward" ||
+          value.direction === "down") &&
         value.gestureNonce === null
       );
     case "append-table-row":

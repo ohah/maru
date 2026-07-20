@@ -506,23 +506,107 @@ export function buildEditableProjection(
         }
 
         if (node.name === "Table") {
-          const staged: Array<Extract<ProjectionEntry, { type: "table-cell" }>> = [];
-          const rows = directChildren(node.node).filter(
+          type TableCellEntry = Extract<ProjectionEntry, { type: "table-cell" }>;
+          const staged: Array<Omit<TableCellEntry, "rowCount">> = [];
+          const tableChildren = directChildren(node.node);
+          const rows = tableChildren.filter(
             (child) => child.name === "TableHeader" || child.name === "TableRow",
           );
-          for (const [row, rowNode] of rows.entries()) {
-            const cells = directChildren(rowNode.node).filter(
-              (child) => child.name === "TableCell",
+          let columnCount: number | null = null;
+          if (rows.length === 0) {
+            fallback("ambiguous-syntax", node.from, node.to);
+            return false;
+          }
+          const lastDataRow = rows.findLast((row) => row.name === "TableRow");
+          const lastPhysicalLine = state.doc.lineAt(Math.max(node.from, node.to - 1));
+          const appendAnchor =
+            lastDataRow ??
+            tableChildren.find(
+              (child) =>
+                child.name === "TableDelimiter" &&
+                child.from >= lastPhysicalLine.from &&
+                child.to <= lastPhysicalLine.to,
             );
-            for (const [column, cell] of cells.entries()) {
+          if (appendAnchor === undefined) {
+            fallback("ambiguous-syntax", node.from, node.to);
+            return false;
+          }
+          const appendLine = state.doc.lineAt(appendAnchor.from);
+          const appendPrefixFrom = appendLine.from;
+          const appendPrefixTo = appendAnchor.from;
+          for (const [row, rowNode] of rows.entries()) {
+            const children = directChildren(rowNode.node);
+            const delimiters = children.filter((child) => child.name === "TableDelimiter");
+            if (
+              delimiters.length < 1 ||
+              delimiters.some(
+                (delimiter, index) =>
+                  delimiter.to - delimiter.from !== 1 ||
+                  state.sliceDoc(delimiter.from, delimiter.to) !== "|" ||
+                  (index > 0 && (delimiters[index - 1]?.to ?? delimiter.from) > delimiter.from),
+              )
+            ) {
+              fallback("ambiguous-syntax", node.from, node.to);
+              return false;
+            }
+            const hasLeadingDelimiter = delimiters[0]?.from === rowNode.from;
+            const hasTrailingDelimiter = delimiters.at(-1)?.to === rowNode.to;
+            const currentColumnCount =
+              delimiters.length + 1 - Number(hasLeadingDelimiter) - Number(hasTrailingDelimiter);
+            if (currentColumnCount <= 0) {
+              fallback("ambiguous-syntax", node.from, node.to);
+              return false;
+            }
+            if (columnCount === null) columnCount = currentColumnCount;
+            else if (columnCount !== currentColumnCount) {
+              // A rectangular TableProjection is required before key navigation can own this table. Keeping the
+              // whole table as source avoids inventing a row/column mapping for ragged GFM input.
+              fallback("ambiguous-syntax", node.from, node.to);
+              return false;
+            }
+            const ranges: Array<Readonly<{ from: number; to: number }>> = [];
+            for (let column = 0; column < currentColumnCount; column += 1) {
               if (staged.length >= maxLivePreviewTableCells) {
                 fallback("table-limit", node.from, node.to);
                 return false;
               }
-              staged.push({ type: "table-cell", from: cell.from, to: cell.to, row, column });
+              const from = hasLeadingDelimiter
+                ? (delimiters[column]?.to ?? rowNode.to)
+                : column === 0
+                  ? rowNode.from
+                  : (delimiters[column - 1]?.to ?? rowNode.to);
+              const to = hasLeadingDelimiter
+                ? (delimiters[column + 1]?.from ?? rowNode.to)
+                : (delimiters[column]?.from ?? rowNode.to);
+              if (from > to || from < rowNode.from || to > rowNode.to) {
+                fallback("ambiguous-syntax", node.from, node.to);
+                return false;
+              }
+              ranges.push({ from, to });
+              staged.push({
+                type: "table-cell",
+                tableFrom: node.from,
+                tableTo: node.to,
+                appendPrefixFrom,
+                appendPrefixTo,
+                from,
+                to,
+                row,
+                column,
+                columnCount: currentColumnCount,
+              });
+            }
+            const syntaxCells = children.filter((child) => child.name === "TableCell");
+            if (
+              syntaxCells.some(
+                (cell) => !ranges.some((range) => range.from <= cell.from && cell.to <= range.to),
+              )
+            ) {
+              fallback("ambiguous-syntax", node.from, node.to);
+              return false;
             }
           }
-          for (const cell of staged) emit(cell);
+          for (const cell of staged) emit({ ...cell, rowCount: rows.length });
           return false;
         }
 

@@ -43,7 +43,19 @@ describe("FP11 live preview contract harness", () => {
         destinationFrom: 22,
         destinationTo: 28,
       },
-      { type: "table-cell", from: 41, to: 45, row: 1, column: 2 },
+      {
+        type: "table-cell",
+        from: 41,
+        to: 45,
+        tableFrom: 40,
+        tableTo: 60,
+        appendPrefixFrom: 40,
+        appendPrefixTo: 40,
+        row: 1,
+        column: 2,
+        rowCount: 2,
+        columnCount: 3,
+      },
       { type: "hidden-syntax", role: "heading-marker", from: 0, to: 1 },
     ];
     const canonical = [...entries].sort(compareProjectionEntries);

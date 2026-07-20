@@ -17,13 +17,15 @@ import type { EditorView, ViewUpdate } from "@codemirror/view";
 import type { Text } from "@codemirror/state";
 import { EditorRevisionClock, isEditableFileMode, type FilePanelMode } from "./live-preview-state";
 import {
+  atomicRendererChannel,
   capabilitiesEqual,
-  fragmentChannel,
-  isFragmentInit,
-  isFragmentRender,
+  isAtomicRendererInit,
+  isAtomicRendererRender,
   type RendererCapability,
 } from "./renderer-capability";
 import { EditableProjectionController } from "./editable-projection-view";
+import { AtomicProjectionController } from "./live-preview-editor";
+import type { AssetGrant } from "./atomic-projection";
 import { createLivePreviewDiagnosticsSnapshot } from "./live-preview-diagnostics";
 import {
   LivePreviewIntentCoordinator,
@@ -452,18 +454,46 @@ export function assetDataUrl(
   targetWindow: Window,
 ): string | null {
   const raster = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
-  if (raster.has(mime)) return `data:${mime};base64,${dataBase64}`;
-  if (mime !== "image/svg+xml") return null;
-
   try {
     const binary = targetWindow.atob(dataBase64);
     const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    if (!assetMimeMatchesMagic(mime, bytes)) return null;
+    if (raster.has(mime)) return `data:${mime};base64,${dataBase64}`;
+    if (mime !== "image/svg+xml") return null;
     const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     const sanitized = sanitizeMermaidSvg(source, targetWindow);
     const encoded = bytesToBase64(new TextEncoder().encode(sanitized), targetWindow);
     return `data:image/svg+xml;base64,${encoded}`;
   } catch {
     return null;
+  }
+}
+
+export function assetMimeMatchesMagic(mime: string, bytes: Uint8Array): boolean {
+  const starts = (...prefix: number[]) =>
+    bytes.length >= prefix.length && prefix.every((value, index) => bytes[index] === value);
+  if (mime === "image/png") return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+  if (mime === "image/jpeg") return starts(0xff, 0xd8, 0xff);
+  if (mime === "image/gif") {
+    const header = String.fromCharCode(...bytes.subarray(0, 6));
+    return header === "GIF87a" || header === "GIF89a";
+  }
+  if (mime === "image/webp") {
+    return (
+      String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" &&
+      String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP"
+    );
+  }
+  if (mime === "image/avif") {
+    const header = String.fromCharCode(...bytes.subarray(4, Math.min(bytes.length, 32)));
+    return header.startsWith("ftyp") && (header.includes("avif") || header.includes("avis"));
+  }
+  if (mime !== "image/svg+xml") return false;
+  try {
+    const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trimStart();
+    return source.startsWith("<svg") || /^<\?xml[^>]*>\s*<svg\b/i.test(source);
+  } catch {
+    return false;
   }
 }
 
@@ -481,6 +511,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
 
   let editor: EditorView | null = null;
   let livePreviewController: EditableProjectionController | null = null;
+  let atomicProjectionController: AtomicProjectionController | null = null;
+  let atomicProjectionAdmitted = false;
   const livePreviewDiagnostics = createLivePreviewDiagnosticsSnapshot();
   let savedContent = "";
   let savedDocument: Text | null = null;
@@ -500,6 +532,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
   let closeLockRequestId: number | null = null;
   let applyingDiskContent = false;
   let pendingDiskUpdate: ViewUpdate | null = null;
+  let assetBase64Bytes = 0;
+  let assetRequests = 0;
   let liveIntentCm6Transactions = 0;
   let liveIntentExternalActions = 0;
   let liveIntentDualEffects = 0;
@@ -747,11 +781,13 @@ export function bootShell(document: Document, targetWindow: Window): void {
           pendingDiskUpdate = update;
           return;
         }
+        const baseRevision = revisions.documentRevision;
         if (update.docChanged) {
           livePreviewIntentCoordinator?.clearPending();
           revisions.documentChanged();
           reportDirty(savedDocument === null || !update.state.doc.eq(savedDocument));
         }
+        atomicProjectionController?.handleUpdate(update, baseRevision, revisions.documentRevision);
         livePreviewController?.handleUpdate(update);
       },
       () => void save(),
@@ -761,7 +797,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
       editor,
       editorEpoch,
       revisions,
-      ({ state, metrics }) => {
+      ({ state, metrics, atomicEntries }) => {
+        const identity = livePreviewController?.interactionIdentity();
+        if (identity !== undefined)
+          atomicProjectionController?.submitEntries(
+            identity.documentRevision,
+            identity.projectionGeneration,
+            atomicEntries,
+          );
         if (status === null) return;
         livePreviewController?.writeDiagnostics(livePreviewDiagnostics);
         const diagnostics = livePreviewDiagnostics;
@@ -780,6 +823,47 @@ export function bootShell(document: Document, targetWindow: Window): void {
       },
       enqueueLivePreviewIntent,
     );
+    const currentEditorEpoch = editorEpoch;
+    atomicProjectionController = new AtomicProjectionController(
+      editor,
+      currentEditorEpoch,
+      revisions,
+      targetWindow.Worker ?? null,
+      async (grant: AssetGrant) => {
+        if (grant.editorEpoch !== currentEditorEpoch) return null;
+        assetRequests += 1;
+        if (!assetRequestCountAllowed(assetRequests)) return null;
+        const result = await requestFileBridge(document, "readAsset", grant.normalizedPath);
+        if (typeof result.mime !== "string" || typeof result.data_base64 !== "string") return null;
+        if (!assetBase64BudgetAllowed(assetBase64Bytes, result.data_base64.length)) return null;
+        assetBase64Bytes += result.data_base64.length;
+        const svg = result.mime === "image/svg+xml";
+        if (
+          (grant.expectedMimeFamily === "svg-image" && !svg) ||
+          (grant.expectedMimeFamily === "raster-image" && svg)
+        )
+          return null;
+        return assetDataUrl(result.mime, result.data_base64, targetWindow);
+      },
+      (state, reason) => {
+        if (status === null) return;
+        status.dataset.liveAtomicState = state;
+        if (reason !== undefined) status.dataset.liveAtomicFailure = reason;
+      },
+      (metrics) => {
+        livePreviewController?.updateAtomicDiagnostics(metrics);
+        if (status === null) return;
+        livePreviewController?.writeDiagnostics(livePreviewDiagnostics);
+        status.dataset.liveAtomicDesired = String(metrics.desired);
+        status.dataset.liveAtomicMounted = String(metrics.mounted);
+        status.dataset.liveAtomicStaleTotal = String(metrics.staleCapabilityTotal);
+        status.dataset.liveProjectionAtomicFallbacks = String(
+          livePreviewDiagnostics.fallbackCounts["atomic-not-enabled"],
+        );
+      },
+      enqueueLivePreviewIntent,
+    );
+    if (atomicProjectionAdmitted && mode === "live-preview") atomicProjectionController.enable();
     if (closeLockRequestId !== null) editor.contentDOM.contentEditable = "false";
     return editor;
   };
@@ -792,10 +876,17 @@ export function bootShell(document: Document, targetWindow: Window): void {
       editorHost.hidden = false;
       if (contentLoaded) {
         ensureEditor().focus();
-        if (mode === "live-preview") livePreviewController?.enable();
-        else livePreviewController?.disable();
+        if (mode === "live-preview") {
+          livePreviewController?.enable();
+          if (atomicProjectionAdmitted) atomicProjectionController?.enable();
+          else atomicProjectionController?.disable();
+        } else {
+          atomicProjectionController?.disable();
+          livePreviewController?.disable();
+        }
       }
     } else {
+      atomicProjectionController?.disable();
       livePreviewController?.disable();
       if (editor !== null) reportDirty(currentDocumentIsDirty(), true);
       frame.hidden = false;
@@ -822,8 +913,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
   targetWindow.addEventListener("maru:file-live-preview-active", (event) => {
     const detail = (event as CustomEvent<unknown>).detail;
     if (!isRecord(detail) || typeof detail.active !== "boolean") return;
-    // FP11b 일반 text projection은 worker/widget admission을 소비하지 않는다. 이 신호는 FP11e atomic
-    // renderer가 물리 slot을 연결할 때까지 관측만 하며, false가 CM6 decoration을 source로 되돌리면 안 된다.
+    atomicProjectionAdmitted = detail.active;
+    if (atomicProjectionAdmitted && mode === "live-preview") atomicProjectionController?.enable();
+    else atomicProjectionController?.disable();
     if (status !== null) status.dataset.liveAtomicAdmitted = String(detail.active);
   });
   const loadFromDisk = async (
@@ -857,8 +949,14 @@ export function bootShell(document: Document, targetWindow: Window): void {
         }
       }
       savedDocument = editor.state.doc;
+      const reloadBaseRevision = revisions.documentRevision;
       if (!editor.state.doc.eq(previousDocument)) revisions.documentChanged();
       if (pendingDiskUpdate !== null) {
+        atomicProjectionController?.handleUpdate(
+          pendingDiskUpdate,
+          reloadBaseRevision,
+          revisions.documentRevision,
+        );
         livePreviewController?.handleUpdate(pendingDiskUpdate);
         pendingDiskUpdate = null;
       }
@@ -950,8 +1048,6 @@ export function bootShell(document: Document, targetWindow: Window): void {
     { once: true },
   );
 
-  let assetBase64Bytes = 0;
-  let assetRequests = 0;
   let assetQueue = Promise.resolve();
   targetWindow.addEventListener("message", (event) => {
     if (event.source !== frame.contentWindow) return;
@@ -1031,6 +1127,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
     "pagehide",
     () => {
       livePreviewIntentCoordinator?.destroy();
+      atomicProjectionController?.destroy();
       livePreviewController?.destroy();
       editor?.destroy();
       editor = null;
@@ -1045,23 +1142,59 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
   let generation = 0;
   let requestSequence = 0;
   const pending = new Map<string, (value: AssetResult) => void>();
-  let fragmentPort: MessagePort | null = null;
-  let fragmentCapability: RendererCapability | null = null;
+  let atomicPort: MessagePort | null = null;
+  let atomicCapability: RendererCapability | null = null;
+  let atomicRenderConsumed = false;
 
-  const revokeFragment = () => {
-    fragmentPort?.close();
-    fragmentPort = null;
-    fragmentCapability = null;
+  const revokeAtomic = () => {
+    atomicPort?.close();
+    atomicPort = null;
+    atomicCapability = null;
+    atomicRenderConsumed = false;
+  };
+
+  const waitForAtomicImages = async (images: readonly HTMLImageElement[]): Promise<boolean> => {
+    if (images.length === 0) return true;
+    const settled = Promise.all(
+      images.map(
+        (image) =>
+          new Promise<boolean>((resolve) => {
+            if (image.complete) {
+              resolve(image.naturalWidth > 0);
+              return;
+            }
+            if (typeof image.decode === "function") {
+              void image.decode().then(
+                () => resolve(true),
+                () => resolve(false),
+              );
+              return;
+            }
+            const done = (loaded: boolean) => {
+              image.removeEventListener("load", loadedImage);
+              image.removeEventListener("error", failedImage);
+              resolve(loaded);
+            };
+            const loadedImage = () => done(true);
+            const failedImage = () => done(false);
+            image.addEventListener("load", loadedImage, { once: true });
+            image.addEventListener("error", failedImage, { once: true });
+          }),
+      ),
+    ).then((values) => values.every(Boolean));
+    const timeout = new Promise<false>((resolve) =>
+      targetWindow.setTimeout(() => resolve(false), 1_500),
+    );
+    return Promise.race([settled, timeout]);
   };
 
   root.addEventListener("click", (event) => {
-    // Live fragment renderer는 asset/link capability가 없다. shell의 isolated trusted-click 경로가 붙기 전까지
-    // 모든 fragment activation은 inert이며 부모 window로 action을 내보내지 않는다.
+    // Atomic renderer는 pointer/action capability가 없다. 위젯 outer overlay가 source selection만 소유한다.
     if (!(event instanceof targetWindow.MouseEvent) || event.button !== 0) return;
     const target = event.target;
     if (!(target instanceof targetWindow.Element)) return;
     const link = target.closest<HTMLAnchorElement>("a[href]");
-    if (fragmentPort !== null) {
+    if (document.body.dataset.rendererMode === "atomic") {
       if (link !== null && root.contains(link)) {
         event.preventDefault();
         event.stopPropagation();
@@ -1099,45 +1232,78 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
 
   targetWindow.addEventListener("message", (event) => {
     if (event.source !== targetWindow.parent || !isRecord(event.data)) return;
-    if (isFragmentInit(event.data)) {
+    if (isAtomicRendererInit(event.data)) {
       const port = event.ports[0];
       if (port === undefined || event.ports.length !== 1) return;
-      revokeFragment();
-      fragmentCapability = event.data.capability;
-      fragmentPort = port;
-      document.body.dataset.rendererMode = "fragment";
+      revokeAtomic();
+      atomicCapability = event.data.capability;
+      atomicPort = port;
+      atomicRenderConsumed = false;
+      document.body.dataset.rendererMode = "atomic";
       root.setAttribute("aria-live", "off");
       root.innerHTML = "";
-      port.onmessage = (portEvent) => {
+      port.onmessage = async (portEvent) => {
         if (
-          fragmentCapability === null ||
-          !isFragmentRender(portEvent.data) ||
-          !capabilitiesEqual(portEvent.data.capability, fragmentCapability)
+          atomicCapability === null ||
+          atomicRenderConsumed ||
+          !isAtomicRendererRender(portEvent.data) ||
+          !capabilitiesEqual(portEvent.data.capability, atomicCapability)
         ) {
           return;
         }
-        root.innerHTML = portEvent.data.html;
+        atomicRenderConsumed = true;
+        const capability = atomicCapability;
+        const renderPort = port;
+        root.innerHTML = portEvent.data.payload;
+        const assets = new Map(
+          portEvent.data.assets.map((asset) => [asset.opaqueId, asset.dataUrl]),
+        );
+        for (const image of root.querySelectorAll<HTMLImageElement>("img[data-maru-asset-id]")) {
+          const opaqueId = Number(image.dataset.maruAssetId);
+          const dataUrl = assets.get(opaqueId);
+          if (dataUrl !== undefined) image.src = dataUrl;
+          delete image.dataset.maruAssetId;
+        }
+        const images = [...root.querySelectorAll<HTMLImageElement>("img")];
+        if (!(await waitForAtomicImages(images))) return;
+        await new Promise<void>((resolve) =>
+          (
+            targetWindow.requestAnimationFrame ??
+            ((callback) => targetWindow.setTimeout(callback, 0))
+          )(() => resolve()),
+        );
+        if (
+          atomicPort !== renderPort ||
+          atomicCapability === null ||
+          !capabilitiesEqual(atomicCapability, capability)
+        )
+          return;
         const measured = Math.max(
           1,
           Math.ceil(root.getBoundingClientRect().height),
           root.scrollHeight,
         );
-        port.postMessage({
-          channel: fragmentChannel,
-          type: "fragment-rendered",
-          capability: fragmentCapability,
+        renderPort.postMessage({
+          channel: atomicRendererChannel,
+          type: "atomic-rendered",
+          capability,
           height: measured,
         });
+        renderPort.close();
+        if (atomicPort === renderPort) {
+          atomicPort = null;
+          atomicCapability = null;
+        }
       };
       port.start();
       port.postMessage({
-        channel: fragmentChannel,
-        type: "fragment-ready",
-        capability: fragmentCapability,
+        channel: atomicRendererChannel,
+        type: "atomic-ready",
+        capability: atomicCapability,
       });
       return;
     }
-    if (fragmentPort !== null) return;
+    if (document.body.dataset.rendererMode === "atomic") return;
     if (event.data.channel !== viewerChannel) return;
     if (event.data.type === "ping") {
       const ready: RendererReady = {
@@ -1199,5 +1365,5 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     ...rendererCapabilityTypes(targetWindow),
   };
   targetWindow.parent.postMessage(ready, "*");
-  targetWindow.addEventListener("pagehide", revokeFragment, { once: true });
+  targetWindow.addEventListener("pagehide", revokeAtomic, { once: true });
 }

@@ -6,104 +6,192 @@ import {
   insertedBytes,
   isLivePreviewRequest,
   isProjectionResult,
-  maxLivePreviewProjectionCodeUnits,
   maxLivePreviewResultBytes,
   maxLivePreviewSourceBytes,
   maxLivePreviewWorkers,
   projectionResultIsCurrent,
 } from "../src/live-preview-protocol";
+import { atomicProjectionBatchWireBytes } from "../src/atomic-projection";
 
-describe("live preview worker protocol", () => {
-  test("accepts bounded seed/apply/project and rejects gaps, invalid ranges, and cap+1", () => {
-    expect(isLivePreviewRequest({ type: "seed", documentRevision: 0, source: "# seed" })).toBe(
-      true,
-    );
+const atomic = {
+  editorEpoch: 1,
+  documentRevision: 3,
+  projectionGeneration: 5,
+  requestNonce: 7,
+  kind: "image",
+  from: 0,
+  to: 4,
+} as const;
+
+describe("atomic live preview worker protocol", () => {
+  test("accepts exact seed/apply/project identities and rejects duplicate or mismatched nonces", () => {
+    expect(
+      isLivePreviewRequest({ type: "seed", editorEpoch: 1, documentRevision: 0, source: "seed" }),
+    ).toBe(true);
+    expect(
+      isLivePreviewRequest({
+        type: "project",
+        editorEpoch: 1,
+        documentRevision: 3,
+        projectionGeneration: 5,
+        requests: [atomic],
+      }),
+    ).toBe(true);
     expect(
       isLivePreviewRequest({
         type: "apply",
+        editorEpoch: 1,
         baseRevision: 2,
         targetRevision: 3,
         changes: [{ from: 0, to: 1, insert: "A" }],
-        projectionGeneration: 4,
-        visibleRanges: [
-          { from: 0, to: 8, active: false },
-          { from: 2, to: 2, active: true },
-        ],
+        projectionGeneration: 5,
+        requests: [atomic],
       }),
     ).toBe(true);
     expect(
       isLivePreviewRequest({
         type: "project",
+        editorEpoch: 1,
         documentRevision: 3,
         projectionGeneration: 5,
-        visibleRanges: [{ from: 0, to: 8, active: false }],
-      }),
-    ).toBe(true);
-    expect(
-      isLivePreviewRequest({
-        type: "project",
-        documentRevision: 3,
-        projectionGeneration: 5,
-        visibleRanges: [],
+        requests: [atomic, atomic],
       }),
     ).toBe(false);
     expect(
       isLivePreviewRequest({
         type: "project",
+        editorEpoch: 2,
         documentRevision: 3,
         projectionGeneration: 5,
-        visibleRanges: [{ from: 0, to: 8, active: true }],
-      }),
-    ).toBe(false);
-    expect(
-      isLivePreviewRequest({
-        type: "apply",
-        baseRevision: 3,
-        targetRevision: 3,
-        changes: [],
-        projectionGeneration: 4,
-        visibleRanges: [],
-      }),
-    ).toBe(false);
-    expect(
-      isLivePreviewRequest({
-        type: "project",
-        documentRevision: 3,
-        projectionGeneration: 5,
-        visibleRanges: [
-          { from: 0, to: 8, active: false },
-          { from: 9, to: 10, active: false },
-        ],
-      }),
-    ).toBe(false);
-    expect(
-      isLivePreviewRequest({
-        type: "project",
-        documentRevision: 3,
-        projectionGeneration: 5,
-        visibleRanges: [{ from: 0, to: maxLivePreviewProjectionCodeUnits + 1, active: false }],
-      }),
-    ).toBe(false);
-    expect(
-      isLivePreviewRequest({
-        type: "apply",
-        baseRevision: 2,
-        targetRevision: 3,
-        changes: [{ from: 4, to: 3, insert: "x" }],
-        projectionGeneration: 4,
-        visibleRanges: [],
+        requests: [atomic],
       }),
     ).toBe(false);
     expect(
       isLivePreviewRequest({
         type: "seed",
+        editorEpoch: 1,
         documentRevision: 1,
         source: "x".repeat(maxLivePreviewSourceBytes + 1),
       }),
     ).toBe(false);
   });
 
-  test("applies ordered changes and rejects overlap or an out-of-bounds edit", () => {
+  test("validates result capability, payload budget, and one terminal outcome per nonce", () => {
+    const projected = {
+      request: atomic,
+      sourceHash: "0123456789abcdef",
+      sanitizedPayload: "<p>safe</p>",
+      assetGrants: [],
+    } as const;
+    const result = {
+      type: "result",
+      editorEpoch: 1,
+      documentRevision: 3,
+      projectionGeneration: 5,
+      results: [projected],
+      rejected: [],
+    } as const;
+    expect(isProjectionResult(result)).toBe(true);
+    expect(projectionResultIsCurrent(result, 1, 3, 5)).toBe(true);
+    expect(projectionResultIsCurrent(result, 2, 3, 5)).toBe(false);
+    expect(
+      isProjectionResult({
+        ...result,
+        rejected: [{ requestNonce: atomic.requestNonce, reason: "rich-source-limit" }],
+      }),
+    ).toBe(false);
+    expect(
+      isProjectionResult({
+        ...result,
+        results: [{ ...projected, sanitizedPayload: "x".repeat(maxLivePreviewResultBytes + 1) }],
+      }),
+    ).toBe(false);
+  });
+
+  test("counts envelope, grant, and rejection metadata in exact whole-batch admission", () => {
+    const grant = {
+      editorEpoch: 1,
+      assetNonce: 71,
+      opaqueId: 1,
+      normalizedPath: `${"a".repeat(4_000)}.png`,
+      expectedMimeFamily: "raster-image" as const,
+    };
+    const base = {
+      request: atomic,
+      sourceHash: "0123456789abcdef",
+      sanitizedPayload: "",
+      assetGrants: [grant],
+    };
+    const singleOverhead = atomicProjectionBatchWireBytes([base], []);
+    const exact = {
+      ...base,
+      sanitizedPayload: "x".repeat(maxLivePreviewResultBytes - singleOverhead),
+    };
+    expect(atomicProjectionBatchWireBytes([exact], [])).toBe(maxLivePreviewResultBytes);
+    expect(
+      isProjectionResult({
+        type: "result",
+        editorEpoch: 1,
+        documentRevision: 3,
+        projectionGeneration: 5,
+        results: [exact],
+        rejected: [],
+      }),
+    ).toBe(true);
+    expect(
+      isProjectionResult({
+        type: "result",
+        editorEpoch: 1,
+        documentRevision: 3,
+        projectionGeneration: 5,
+        results: [{ ...exact, sanitizedPayload: `${exact.sanitizedPayload}x` }],
+        rejected: [],
+      }),
+    ).toBe(false);
+
+    const rejection = { requestNonce: atomic.requestNonce + 1, reason: "rich-source-limit" };
+    expect(
+      isProjectionResult({
+        type: "result",
+        editorEpoch: 1,
+        documentRevision: 3,
+        projectionGeneration: 5,
+        results: [exact],
+        rejected: [rejection],
+      }),
+    ).toBe(false);
+    const mixedOverhead = atomicProjectionBatchWireBytes([base], [rejection]);
+    const exactMixed = {
+      ...base,
+      sanitizedPayload: "x".repeat(maxLivePreviewResultBytes - mixedOverhead),
+    };
+    expect(atomicProjectionBatchWireBytes([exactMixed], [rejection])).toBe(
+      maxLivePreviewResultBytes,
+    );
+    expect(
+      isProjectionResult({
+        type: "result",
+        editorEpoch: 1,
+        documentRevision: 3,
+        projectionGeneration: 5,
+        results: [exactMixed],
+        rejected: [rejection],
+      }),
+    ).toBe(true);
+    expect(
+      isProjectionResult({
+        type: "result",
+        editorEpoch: 1,
+        documentRevision: 3,
+        projectionGeneration: 5,
+        results: [{ ...exactMixed, sanitizedPayload: `${exactMixed.sanitizedPayload}x` }],
+        rejected: [rejection],
+      }),
+    ).toBe(false);
+  });
+
+  test("applies ordered UTF-16-safe changes within the retained source cap", () => {
+    expect(insertedBytes([{ from: 0, to: 0, insert: "한" }])).toBe(3);
     expect(
       applySourceChanges("abcdef", [
         { from: 1, to: 2, insert: "B" },
@@ -116,50 +204,11 @@ describe("live preview worker protocol", () => {
         { from: 3, to: 5, insert: "y" },
       ]),
     ).toBeNull();
-    expect(applySourceChanges("abc", [{ from: 0, to: 4, insert: "" }])).toBeNull();
-  });
-
-  test("bounds inserted UTF-8 bytes and rejects oversized or stale results", () => {
-    expect(insertedBytes([{ from: 0, to: 0, insert: "한" }])).toBe(3);
-    const result = {
-      type: "result",
-      documentRevision: 7,
-      projectionGeneration: 9,
-      fragments: [{ from: 0, to: 4, kind: "heading", html: "<h1>x</h1>" }],
-    } as const;
-    expect(isProjectionResult(result)).toBe(true);
-    expect(projectionResultIsCurrent(result, 7, 9)).toBe(true);
-    expect(projectionResultIsCurrent(result, 8, 9)).toBe(false);
-    expect(
-      isProjectionResult({
-        ...result,
-        fragments: Array.from({ length: 9 }, (_, index) => ({
-          from: index,
-          to: index + 1,
-          kind: "paragraph",
-        })),
-      }),
-    ).toBe(false);
-  });
-
-  test("keeps authoritative worker source bytes at or below the cap", () => {
-    const exact = "x".repeat(maxLivePreviewSourceBytes);
-    expect(
-      applySourceChangesBounded(exact, maxLivePreviewSourceBytes, [
-        { from: exact.length, to: exact.length, insert: "y" },
-      ]),
-    ).toBeNull();
-    const replaced = applySourceChangesBounded("한a", 4, [{ from: 0, to: 1, insert: "b" }]);
-    expect(replaced).toEqual({ source: "ba", sourceBytes: 2 });
-    const emoji = "😀".repeat(maxLivePreviewSourceBytes / 4);
-    expect(
-      applySourceChangesBounded(emoji, maxLivePreviewSourceBytes, [
-        { from: 0, to: 1, insert: "" },
-        { from: emoji.length, to: emoji.length, insert: "xx" },
-      ]),
-    ).toBeNull();
-    const wholeEmoji = applySourceChangesBounded("😀a", 5, [{ from: 0, to: 2, insert: "한" }]);
-    expect(wholeEmoji).toEqual({ source: "한a", sourceBytes: 4 });
+    expect(applySourceChangesBounded("😀a", 5, [{ from: 0, to: 1, insert: "" }])).toBeNull();
+    expect(applySourceChangesBounded("😀a", 5, [{ from: 0, to: 2, insert: "한" }])).toEqual({
+      source: "한a",
+      sourceBytes: 4,
+    });
   });
 
   test("matches the C ABI live-preview limit snapshot", async () => {

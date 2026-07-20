@@ -8,16 +8,17 @@ import {
   type ApplyRequest,
   type LivePreviewRequest,
   type LivePreviewResponse,
-  type ProjectionRange,
   type ProjectionResult,
   type SourceChange,
 } from "./live-preview-protocol";
+import type { AtomicProjectionRequest } from "./atomic-projection";
 
 export type LivePreviewSnapshot = Readonly<{
+  editorEpoch: number;
   documentRevision: number;
   projectionGeneration: number;
   source: string;
-  visibleRanges: readonly ProjectionRange[];
+  requests: readonly AtomicProjectionRequest[];
 }>;
 
 export type LivePreviewWorkerState = "running" | "recovering" | "disabled" | "disposed";
@@ -44,19 +45,21 @@ type InFlight = Readonly<{
 
 type PendingApply = {
   type: "apply";
+  editorEpoch: number;
   baseRevision: number;
   targetRevision: number;
   changes: ChangeSet;
   insertedByteCount: number;
   projectionGeneration: number;
-  visibleRanges: readonly ProjectionRange[];
+  requests: readonly AtomicProjectionRequest[];
 };
 
 type PendingProject = Readonly<{
   type: "project";
+  editorEpoch: number;
   documentRevision: number;
   projectionGeneration: number;
-  visibleRanges: readonly ProjectionRange[];
+  requests: readonly AtomicProjectionRequest[];
 }>;
 
 type Pending = PendingApply | PendingProject;
@@ -114,6 +117,7 @@ export class LivePreviewWorkerClient {
   private failureTimes: number[] = [];
   private currentDocumentRevision = 0;
   private currentProjectionGeneration = 0;
+  private currentEditorEpoch = 0;
   private state: LivePreviewWorkerState = "running";
   private workerEpoch = 0;
 
@@ -137,7 +141,7 @@ export class LivePreviewWorkerClient {
     targetRevision: number,
     changes: ChangeSet,
     projectionGeneration: number,
-    visibleRanges: readonly ProjectionRange[],
+    requests: readonly AtomicProjectionRequest[],
   ): void {
     if (this.state === "disabled" || this.state === "disposed") return;
     const previousDocumentRevision = this.currentDocumentRevision;
@@ -171,17 +175,18 @@ export class LivePreviewWorkerClient {
       this.pending.targetRevision = targetRevision;
       this.pending.insertedByteCount = composed.insertedBytes;
       this.pending.projectionGeneration = projectionGeneration;
-      this.pending.visibleRanges = visibleRanges;
+      this.pending.requests = requests;
       return;
     }
     const apply: PendingApply = {
       type: "apply",
+      editorEpoch: this.currentEditorEpoch,
       baseRevision,
       targetRevision,
       changes,
       insertedByteCount: measurement.insertedBytes,
       projectionGeneration,
-      visibleRanges,
+      requests,
     };
     if (this.inFlight === null && this.worker !== null) this.sendApply(apply);
     else this.pending = apply;
@@ -190,21 +195,28 @@ export class LivePreviewWorkerClient {
   submitProjection(
     documentRevision: number,
     projectionGeneration: number,
-    visibleRanges: readonly ProjectionRange[],
+    requests: readonly AtomicProjectionRequest[],
   ): void {
     if (this.state === "disabled" || this.state === "disposed") return;
     this.currentDocumentRevision = documentRevision;
     this.currentProjectionGeneration = projectionGeneration;
     if (this.pending?.type === "apply") {
       this.pending.projectionGeneration = projectionGeneration;
-      this.pending.visibleRanges = visibleRanges;
+      this.pending.requests = requests;
+      return;
+    }
+    // A selection-only generation whose settled atomic records are reusable needs no worker roundtrip. Updating
+    // the current identity is sufficient to make an older in-flight result stale at the client boundary.
+    if (requests.length === 0) {
+      this.pending = null;
       return;
     }
     const project: PendingProject = {
       type: "project",
+      editorEpoch: this.currentEditorEpoch,
       documentRevision,
       projectionGeneration,
-      visibleRanges,
+      requests,
     };
     if (this.inFlight === null && this.worker !== null) this.send(project);
     else this.pending = project;
@@ -229,6 +241,7 @@ export class LivePreviewWorkerClient {
     }
     this.currentDocumentRevision = snapshot.documentRevision;
     this.currentProjectionGeneration = snapshot.projectionGeneration;
+    this.currentEditorEpoch = snapshot.editorEpoch;
     this.state = "running";
     this.onState(this.state);
     let worker: WorkerPort;
@@ -253,12 +266,14 @@ export class LivePreviewWorkerClient {
     this.worker = worker;
     this.pending = {
       type: "project",
+      editorEpoch: snapshot.editorEpoch,
       documentRevision: snapshot.documentRevision,
       projectionGeneration: snapshot.projectionGeneration,
-      visibleRanges: snapshot.visibleRanges,
+      requests: snapshot.requests,
     };
     this.send({
       type: "seed",
+      editorEpoch: snapshot.editorEpoch,
       documentRevision: snapshot.documentRevision,
       source: snapshot.source,
     });
@@ -290,6 +305,7 @@ export class LivePreviewWorkerClient {
     if (
       projectionResultIsCurrent(
         value,
+        this.currentEditorEpoch,
         this.currentDocumentRevision,
         this.currentProjectionGeneration,
       )
@@ -310,12 +326,15 @@ export class LivePreviewWorkerClient {
       }
       this.pending = {
         type: "project",
+        editorEpoch: snapshot.editorEpoch,
         documentRevision: snapshot.documentRevision,
         projectionGeneration: snapshot.projectionGeneration,
-        visibleRanges: snapshot.visibleRanges,
+        requests: snapshot.requests,
       };
+      this.currentEditorEpoch = snapshot.editorEpoch;
       this.send({
         type: "seed",
+        editorEpoch: snapshot.editorEpoch,
         documentRevision: snapshot.documentRevision,
         source: snapshot.source,
       });
@@ -333,8 +352,9 @@ export class LivePreviewWorkerClient {
       baseRevision: pending.baseRevision,
       targetRevision: pending.targetRevision,
       changes: serializeChanges(pending.changes),
+      editorEpoch: pending.editorEpoch,
       projectionGeneration: pending.projectionGeneration,
-      visibleRanges: pending.visibleRanges,
+      requests: pending.requests,
     };
     this.send(request);
   }

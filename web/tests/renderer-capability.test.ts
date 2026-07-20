@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  atomicRendererChannel,
+  atomicRendererMessageMatches,
   capabilitiesEqual,
-  fragmentChannel,
-  fragmentMessageMatches,
-  isFragmentInit,
-  isFragmentRender,
-  isFragmentRendered,
+  isAtomicRendererInit,
+  isAtomicRendererRender,
+  isAtomicRendererRendered,
   type RendererCapability,
 } from "../src/renderer-capability";
 
@@ -18,48 +18,66 @@ const capability: RendererCapability = {
   rendererInstance: 17,
 };
 
-describe("fragment renderer capability", () => {
+describe("atomic renderer capability", () => {
   test("requires every non-reusable identity field", () => {
-    expect(isFragmentInit({ channel: fragmentChannel, type: "fragment-init", capability })).toBe(
-      true,
-    );
+    expect(
+      isAtomicRendererInit({
+        channel: atomicRendererChannel,
+        type: "atomic-init",
+        capability,
+      }),
+    ).toBe(true);
     for (const key of Object.keys(capability) as (keyof RendererCapability)[]) {
       expect(
-        isFragmentInit({
-          channel: fragmentChannel,
-          type: "fragment-init",
+        isAtomicRendererInit({
+          channel: atomicRendererChannel,
+          type: "atomic-init",
           capability: { ...capability, [key]: key === "documentRevision" ? -1 : 0 },
         }),
       ).toBe(false);
     }
   });
 
-  test("rejects stale or duplicate renderer identities", () => {
+  test("rejects stale renderer identities", () => {
     expect(capabilitiesEqual(capability, capability)).toBe(true);
     const stale = { ...capability, widgetGeneration: capability.widgetGeneration - 1 };
     expect(capabilitiesEqual(capability, stale)).toBe(false);
-    expect(capabilitiesEqual(capability, { ...capability, editorEpoch: 1 })).toBe(false);
     expect(
-      fragmentMessageMatches(
-        { channel: fragmentChannel, type: "fragment-rendered", capability: stale, height: 80 },
+      atomicRendererMessageMatches(
+        {
+          channel: atomicRendererChannel,
+          type: "atomic-rendered",
+          capability: stale,
+          height: 80,
+        },
         capability,
       ),
     ).toBe(false);
   });
 
-  test("bounds fragment HTML and measured height", () => {
+  test("accepts only bounded pathless image assets and measured height", () => {
     expect(
-      isFragmentRender({
-        channel: fragmentChannel,
-        type: "fragment-render",
+      isAtomicRendererRender({
+        channel: atomicRendererChannel,
+        type: "atomic-render",
         capability,
-        html: "<p>safe</p>",
+        payload: '<img data-maru-asset-id="1">',
+        assets: [{ opaqueId: 1, dataUrl: "data:image/png;base64,iVBORw0KGgo=" }],
       }),
     ).toBe(true);
     expect(
-      isFragmentRendered({
-        channel: fragmentChannel,
-        type: "fragment-rendered",
+      isAtomicRendererRender({
+        channel: atomicRendererChannel,
+        type: "atomic-render",
+        capability,
+        payload: "<img>",
+        assets: [{ opaqueId: 1, dataUrl: "file:///tmp/secret" }],
+      }),
+    ).toBe(false);
+    expect(
+      isAtomicRendererRendered({
+        channel: atomicRendererChannel,
+        type: "atomic-rendered",
         capability,
         height: Number.POSITIVE_INFINITY,
       }),

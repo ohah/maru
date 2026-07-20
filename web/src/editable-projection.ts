@@ -484,8 +484,8 @@ export function buildEditableProjection(
         }
 
         if (node.name === "Image") {
-          emit({ type: "atomic", role: "image", from: node.from, to: node.to });
-          fallback("atomic-not-enabled", node.from, node.to);
+          if (selectionTouches(node.from, node.to)) recordSourceRange(node.from, node.to);
+          else emit({ type: "atomic", role: "image", from: node.from, to: node.to });
           return false;
         }
 
@@ -495,13 +495,9 @@ export function buildEditableProjection(
             info !== undefined &&
             info.to - info.from <= 64 &&
             state.sliceDoc(info.from, info.to).trim().toLowerCase() === "mermaid";
-          emit({
-            type: "atomic",
-            role: isMermaid ? "mermaid" : "fenced-code",
-            from: node.from,
-            to: node.to,
-          });
-          fallback("atomic-not-enabled", node.from, node.to);
+          if (selectionTouches(node.from, node.to)) recordSourceRange(node.from, node.to);
+          else if (isMermaid) fallback("renderer-unavailable", node.from, node.to);
+          else emit({ type: "atomic", role: "fenced-code", from: node.from, to: node.to });
           return false;
         }
 
@@ -612,8 +608,8 @@ export function buildEditableProjection(
 
         const mathRole = atomicRoleForNode(node.name);
         if (mathRole !== null) {
-          emit({ type: "atomic", role: mathRole, from: node.from, to: node.to });
-          fallback("atomic-not-enabled", node.from, node.to);
+          if (selectionTouches(node.from, node.to)) recordSourceRange(node.from, node.to);
+          else emit({ type: "atomic", role: mathRole, from: node.from, to: node.to });
           return false;
         }
       },

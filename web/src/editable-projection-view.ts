@@ -10,6 +10,7 @@ import { Decoration, EditorView, type DecorationSet, type ViewUpdate } from "@co
 import { buildEditableProjection, editableProjectionWindow } from "./editable-projection";
 import {
   LivePreviewDiagnosticsStore,
+  type DiagnosticsCommit,
   type LivePreviewDiagnostics,
 } from "./live-preview-diagnostics";
 import {
@@ -18,7 +19,12 @@ import {
   type ProjectionEntry,
 } from "./live-preview-projection";
 import type { EditorRevisionClock } from "./live-preview-state";
+import type { AtomicWidgetMetrics } from "./live-preview-diagnostics";
 import type { LivePreviewIntent } from "./live-preview-intent";
+import { atomicProjectionTransaction } from "./live-preview-editor";
+import { maxAtomicProjectionRequests } from "./atomic-projection";
+
+type AtomicEntry = Extract<ProjectionEntry, { type: "atomic" }>;
 
 type DecorationPatch = Readonly<{
   remove: ReadonlySet<Decoration>;
@@ -76,9 +82,10 @@ type TableInteractionGroup = Readonly<{
   cells: readonly TableCellEntry[];
 }>;
 
-type ProjectionCommit = Readonly<{
+export type ProjectionCommit = Readonly<{
   state: EditableProjectionControllerState;
   metrics: EditableProjectionControllerMetrics;
+  atomicEntries: readonly Extract<ProjectionEntry, { type: "atomic" }>[];
 }>;
 
 type IntentSink = (intent: LivePreviewIntent) => void;
@@ -346,6 +353,12 @@ export class EditableProjectionController {
   private documentRevision = 0;
   private projectionGeneration = 0;
   private nextGestureNonce = 1;
+  private lastDiagnosticsCommit: DiagnosticsCommit | null = null;
+  private atomicDesiredWidgets = 0;
+  private atomicMountedWidgets = 0;
+  private atomicRichSourceLimit = 0;
+  private atomicRendererUnavailable = 0;
+  private atomicStaleCapability = 0;
 
   private identityForIntent() {
     return {
@@ -593,7 +606,12 @@ export class EditableProjectionController {
     this.records = [];
     this.tableGroups = [];
     this.tableCellRecordCount = 0;
-    this.diagnostics.commit({
+    this.atomicDesiredWidgets = 0;
+    this.atomicMountedWidgets = 0;
+    this.atomicRichSourceLimit = 0;
+    this.atomicRendererUnavailable = 0;
+    this.atomicStaleCapability = 0;
+    this.lastDiagnosticsCommit = {
       documentRevision: projection.documentRevision,
       projectionGeneration: projection.projectionGeneration,
       decorationCount: 0,
@@ -601,7 +619,8 @@ export class EditableProjectionController {
       mountedWidgets: 0,
       activeSourceRangeCount: 0,
       activeSourceRanges: [],
-    });
+    };
+    this.commitDiagnostics();
     this.publish("disabled");
   }
 
@@ -618,7 +637,9 @@ export class EditableProjectionController {
     if (
       this.destroyed ||
       update.transactions.some(
-        (transaction) => transaction.annotation(editableProjectionTransaction) === true,
+        (transaction) =>
+          transaction.annotation(editableProjectionTransaction) === true ||
+          transaction.annotation(atomicProjectionTransaction) === true,
       )
     ) {
       return;
@@ -657,6 +678,21 @@ export class EditableProjectionController {
 
   writeDiagnostics(target: LivePreviewDiagnostics): void {
     this.diagnostics.writeSnapshot(target);
+  }
+
+  updateAtomicDiagnostics(metrics: AtomicWidgetMetrics): void {
+    if (
+      metrics.editorEpoch !== this.editorEpoch ||
+      metrics.documentRevision !== this.documentRevision ||
+      metrics.projectionGeneration !== this.projectionGeneration
+    )
+      return;
+    this.atomicDesiredWidgets = metrics.desired;
+    this.atomicMountedWidgets = metrics.mounted;
+    this.atomicRichSourceLimit = metrics.richSourceLimit;
+    this.atomicRendererUnavailable = metrics.rendererUnavailable;
+    this.atomicStaleCapability = metrics.staleCapability;
+    this.commitDiagnostics();
   }
 
   interactionIdentity(): Readonly<{
@@ -783,7 +819,7 @@ export class EditableProjectionController {
       (count, record) => count + Number(record.decoration !== null),
       0,
     );
-    this.diagnostics.commit({
+    this.lastDiagnosticsCommit = {
       documentRevision: identity.documentRevision,
       projectionGeneration: identity.projectionGeneration,
       decorationCount,
@@ -792,11 +828,42 @@ export class EditableProjectionController {
       activeSourceRangeCount: projection.activeSourceRangeCount,
       activeSourceRanges: projection.activeSourceRanges,
       fallbackCounts: projection.fallbackCounts,
-    });
+    };
+    this.commitDiagnostics();
     this.publish("running");
   }
 
+  private commitDiagnostics(): void {
+    const commit = this.lastDiagnosticsCommit;
+    if (commit === null) return;
+    this.diagnostics.commit({
+      ...commit,
+      desiredWidgets: this.atomicDesiredWidgets,
+      mountedWidgets: this.atomicMountedWidgets,
+      fallbackCounts: {
+        ...commit.fallbackCounts,
+        "rich-source-limit":
+          (commit.fallbackCounts?.["rich-source-limit"] ?? 0) + this.atomicRichSourceLimit,
+        "renderer-unavailable":
+          (commit.fallbackCounts?.["renderer-unavailable"] ?? 0) + this.atomicRendererUnavailable,
+        "stale-capability":
+          (commit.fallbackCounts?.["stale-capability"] ?? 0) + this.atomicStaleCapability,
+      },
+    });
+  }
+
   private publish(state: EditableProjectionControllerState): void {
-    this.onCommit({ state, metrics: this.metrics() });
+    const atomicEntries: AtomicEntry[] = [];
+    if (state === "running") {
+      for (const { entry } of this.records) {
+        if (entry.type === "atomic") atomicEntries.push(entry);
+        if (atomicEntries.length === maxAtomicProjectionRequests) break;
+      }
+    }
+    this.onCommit({
+      state,
+      metrics: this.metrics(),
+      atomicEntries,
+    });
   }
 }

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { EditorState, Text, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { JSDOM } from "jsdom";
-import { fragmentChannel } from "../src/renderer-capability";
+import { atomicRendererChannel } from "../src/renderer-capability";
 import {
   assetBase64BudgetAllowed,
   assetDataUrl,
@@ -459,7 +459,7 @@ describe("file viewer bridge boundary", () => {
         },
       }),
     );
-    await Promise.resolve();
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
 
     expect(
       requests.filter((request) => (request as { method?: string }).method === "openLink"),
@@ -563,7 +563,7 @@ describe("file viewer bridge boundary", () => {
       expect(status?.dataset.liveAtomicAdmitted).toBe("false");
       expect(status?.dataset.liveGeneralFragments).toBe("0");
       expect(workerConstructions).toBe(0);
-      expect(dom.window.document.querySelector(".maru-live-fragment-frame")).toBeNull();
+      expect(dom.window.document.querySelector(".maru-live-atomic-frame")).toBeNull();
 
       diskContent = "# external\n\n**updated**";
       dom.window.dispatchEvent(
@@ -615,9 +615,17 @@ describe("file viewer bridge boundary", () => {
 });
 
 describe("bridge-free renderer", () => {
-  test("accepts fragment HTML only through a load-scoped capability MessagePort", async () => {
+  test("accepts pathless atomic HTML only through a load-scoped capability MessagePort", async () => {
     const dom = new JSDOM('<!doctype html><main id="app"></main>', {
       url: "maru-app://render/render.html",
+    });
+    let finishDecode: () => void = () => {};
+    const decoded = new Promise<void>((resolve) => {
+      finishDecode = resolve;
+    });
+    Object.defineProperty(dom.window.HTMLImageElement.prototype, "decode", {
+      configurable: true,
+      value: () => decoded,
     });
     bootRenderer(dom.window.document, dom.window as unknown as Window);
     const capability = {
@@ -629,33 +637,59 @@ describe("bridge-free renderer", () => {
       rendererInstance: 7,
     };
     const channel = new MessageChannel();
+    let renderedSettled = false;
+    let renderedCount = 0;
     const rendered = new Promise<unknown>((resolve) => {
       channel.port1.onmessage = (event) => {
-        if ((event.data as { type?: string }).type === "fragment-ready") {
+        if ((event.data as { type?: string }).type === "atomic-ready") {
           channel.port1.postMessage({
-            channel: fragmentChannel,
-            type: "fragment-render",
+            channel: atomicRendererChannel,
+            type: "atomic-render",
             capability,
-            html: '<p>isolated fragment <a href="next.md">next</a></p>',
+            payload:
+              '<p>isolated atomic <a href="next.md">next</a><img data-maru-asset-id="1"></p>',
+            assets: [{ opaqueId: 1, dataUrl: "data:image/png;base64,iVBORw0KGgo=" }],
           });
-        } else resolve(event.data);
+          channel.port1.postMessage({
+            channel: atomicRendererChannel,
+            type: "atomic-render",
+            capability,
+            payload: "<p>duplicate must not replace the first render</p>",
+            assets: [],
+          });
+        } else {
+          renderedCount += 1;
+          renderedSettled = true;
+          resolve(event.data);
+        }
       };
       channel.port1.start();
     });
     dom.window.dispatchEvent(
       new dom.window.MessageEvent("message", {
         source: dom.window.parent,
-        data: { channel: fragmentChannel, type: "fragment-init", capability },
+        data: { channel: atomicRendererChannel, type: "atomic-init", capability },
         ports: [channel.port2] as unknown as readonly MessagePort[],
       }),
     );
 
+    for (
+      let turn = 0;
+      turn < 10 && dom.window.document.querySelector("#app")?.textContent === "";
+      turn += 1
+    )
+      await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+    expect(renderedSettled).toBe(false);
+    expect(dom.window.document.querySelector("#app")?.textContent).toBe("isolated atomic next");
+    finishDecode();
     await expect(rendered).resolves.toMatchObject({
-      channel: fragmentChannel,
-      type: "fragment-rendered",
+      channel: atomicRendererChannel,
+      type: "atomic-rendered",
       capability,
     });
-    expect(dom.window.document.querySelector("#app")?.textContent).toBe("isolated fragment next");
+    expect(dom.window.document.querySelector("#app")?.textContent).toBe("isolated atomic next");
+    expect(dom.window.document.querySelector("img")?.src).toStartWith("data:image/png;base64,");
+    expect(renderedCount).toBe(1);
     const link = dom.window.document.querySelector("a")!;
     const click = new dom.window.MouseEvent("click", {
       bubbles: true,
@@ -692,9 +726,10 @@ describe("bridge-free renderer", () => {
   test("allows raster data URLs and sanitizes SVG before creating a data URL", () => {
     const dom = new JSDOM("");
     const targetWindow = dom.window as unknown as Window;
-    expect(assetDataUrl("image/png", "iVBORw==", targetWindow)).toBe(
-      "data:image/png;base64,iVBORw==",
+    expect(assetDataUrl("image/png", "iVBORw0KGgo=", targetWindow)).toBe(
+      "data:image/png;base64,iVBORw0KGgo=",
     );
+    expect(assetDataUrl("image/jpeg", "iVBORw0KGgo=", targetWindow)).toBeNull();
     const unsafeSvg =
       '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><text>safe</text></svg>';
     const encoded = dom.window.btoa(unsafeSvg);

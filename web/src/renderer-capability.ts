@@ -1,7 +1,8 @@
+import { maxAtomicAssetGrants } from "./atomic-projection";
 import { maxLivePreviewResultBytes } from "./live-preview-protocol";
 import { isNonNegativeSafeInteger, isPositiveSafeInteger } from "./live-preview-identity";
 
-export const fragmentChannel = "maru.file.fragment.v1";
+export const atomicRendererChannel = "maru.file.atomic.v1";
 
 export type RendererCapability = Readonly<{
   editorEpoch: number;
@@ -12,28 +13,31 @@ export type RendererCapability = Readonly<{
   rendererInstance: number;
 }>;
 
-export type FragmentInit = Readonly<{
-  channel: typeof fragmentChannel;
-  type: "fragment-init";
+export type AtomicRenderAsset = Readonly<{ opaqueId: number; dataUrl: string }>;
+
+export type AtomicRendererInit = Readonly<{
+  channel: typeof atomicRendererChannel;
+  type: "atomic-init";
   capability: RendererCapability;
 }>;
 
-export type FragmentRender = Readonly<{
-  channel: typeof fragmentChannel;
-  type: "fragment-render";
+export type AtomicRendererRender = Readonly<{
+  channel: typeof atomicRendererChannel;
+  type: "atomic-render";
   capability: RendererCapability;
-  html: string;
+  payload: string;
+  assets: readonly AtomicRenderAsset[];
 }>;
 
-export type FragmentReady = Readonly<{
-  channel: typeof fragmentChannel;
-  type: "fragment-ready";
+export type AtomicRendererReady = Readonly<{
+  channel: typeof atomicRendererChannel;
+  type: "atomic-ready";
   capability: RendererCapability;
 }>;
 
-export type FragmentRendered = Readonly<{
-  channel: typeof fragmentChannel;
-  type: "fragment-rendered";
+export type AtomicRendererRendered = Readonly<{
+  channel: typeof atomicRendererChannel;
+  type: "atomic-rendered";
   capability: RendererCapability;
   height: number;
 }>;
@@ -65,40 +69,55 @@ export function capabilitiesEqual(left: RendererCapability, right: RendererCapab
   );
 }
 
-export function isFragmentInit(value: unknown): value is FragmentInit {
+export function isAtomicRendererInit(value: unknown): value is AtomicRendererInit {
   return (
     isRecord(value) &&
-    value.channel === fragmentChannel &&
-    value.type === "fragment-init" &&
+    value.channel === atomicRendererChannel &&
+    value.type === "atomic-init" &&
     isRendererCapability(value.capability)
   );
 }
 
-export function isFragmentRender(value: unknown): value is FragmentRender {
+function atomicAssetValid(value: unknown): value is AtomicRenderAsset {
   return (
     isRecord(value) &&
-    value.channel === fragmentChannel &&
-    value.type === "fragment-render" &&
-    isRendererCapability(value.capability) &&
-    typeof value.html === "string" &&
-    new TextEncoder().encode(value.html).byteLength <= maxLivePreviewResultBytes
+    isPositiveSafeInteger(value.opaqueId) &&
+    typeof value.dataUrl === "string" &&
+    /^data:image\/(?:png|jpeg|gif|webp|avif|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(value.dataUrl)
   );
 }
 
-export function isFragmentReady(value: unknown): value is FragmentReady {
+export function isAtomicRendererRender(value: unknown): value is AtomicRendererRender {
+  if (
+    !isRecord(value) ||
+    value.channel !== atomicRendererChannel ||
+    value.type !== "atomic-render" ||
+    !isRendererCapability(value.capability) ||
+    typeof value.payload !== "string" ||
+    new TextEncoder().encode(value.payload).byteLength > maxLivePreviewResultBytes ||
+    !Array.isArray(value.assets) ||
+    value.assets.length > maxAtomicAssetGrants ||
+    !value.assets.every(atomicAssetValid)
+  ) {
+    return false;
+  }
+  return new Set(value.assets.map(({ opaqueId }) => opaqueId)).size === value.assets.length;
+}
+
+export function isAtomicRendererReady(value: unknown): value is AtomicRendererReady {
   return (
     isRecord(value) &&
-    value.channel === fragmentChannel &&
-    value.type === "fragment-ready" &&
+    value.channel === atomicRendererChannel &&
+    value.type === "atomic-ready" &&
     isRendererCapability(value.capability)
   );
 }
 
-export function isFragmentRendered(value: unknown): value is FragmentRendered {
+export function isAtomicRendererRendered(value: unknown): value is AtomicRendererRendered {
   return (
     isRecord(value) &&
-    value.channel === fragmentChannel &&
-    value.type === "fragment-rendered" &&
+    value.channel === atomicRendererChannel &&
+    value.type === "atomic-rendered" &&
     isRendererCapability(value.capability) &&
     typeof value.height === "number" &&
     Number.isFinite(value.height) &&
@@ -107,8 +126,8 @@ export function isFragmentRendered(value: unknown): value is FragmentRendered {
   );
 }
 
-export function fragmentMessageMatches(
-  value: FragmentReady | FragmentRendered,
+export function atomicRendererMessageMatches(
+  value: AtomicRendererReady | AtomicRendererRendered,
   current: RendererCapability,
 ): boolean {
   return capabilitiesEqual(value.capability, current);

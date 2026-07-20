@@ -179,8 +179,9 @@ describe("CM6 editable Markdown projection", () => {
     expect(
       result.entries.filter(({ type, role }) => type === "atomic" && role === "math"),
     ).toHaveLength(2);
-    expect(hasEntry(result.entries, { type: "atomic", role: "mermaid" })).toBe(true);
-    expect(result.fallbackCounts["atomic-not-enabled"]).toBe(4);
+    expect(hasEntry(result.entries, { type: "atomic", role: "mermaid" })).toBe(false);
+    expect(result.fallbackCounts["atomic-not-enabled"]).toBe(0);
+    expect(result.fallbackCounts["renderer-unavailable"]).toBe(1);
     expect(JSON.stringify(result)).not.toContain("<iframe");
     expect(JSON.stringify(result)).not.toContain("<img");
   });
@@ -200,19 +201,19 @@ describe("CM6 editable Markdown projection", () => {
       ).toBe(false);
     }
     expect(
-      project("$inline$\n\n$$\nblock\n$$").entries.filter(
+      project("$inline$\n\n$$\nblock\n$$\n\nplain").entries.filter(
         ({ type, role }) => type === "atomic" && role === "math",
       ),
     ).toHaveLength(2);
 
     const exactProbe = startMathDelimiterScanProbe();
-    const exact = project(`$${"a".repeat(maxMathDelimiterScanCodeUnits - 1)}$`);
+    const exact = project(`$${"a".repeat(maxMathDelimiterScanCodeUnits - 1)}$x`);
     const exactScanned = exactProbe.stop();
     expect(exact.entries.some(({ type, role }) => type === "atomic" && role === "math")).toBe(true);
     expect(exactScanned).toBeLessThanOrEqual(maxMathDelimiterScanCodeUnits);
 
     const overProbe = startMathDelimiterScanProbe();
-    const over = project(`$${"a".repeat(maxMathDelimiterScanCodeUnits)}$`);
+    const over = project(`$${"a".repeat(maxMathDelimiterScanCodeUnits)}$x`);
     const overScanned = overProbe.stop();
     expect(over.entries.some(({ type, role }) => type === "atomic" && role === "math")).toBe(false);
     expect(overScanned).toBe(maxMathDelimiterScanCodeUnits);

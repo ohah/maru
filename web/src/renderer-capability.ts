@@ -1,8 +1,10 @@
 import { maxLivePreviewResultBytes } from "./live-preview-protocol";
+import { isNonNegativeSafeInteger, isPositiveSafeInteger } from "./live-preview-identity";
 
 export const fragmentChannel = "maru.file.fragment.v1";
 
 export type RendererCapability = Readonly<{
+  editorEpoch: number;
   documentRevision: number;
   projectionGeneration: number;
   widgetId: number;
@@ -40,23 +42,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isSafeIdentity(value: unknown, allowZero: boolean): value is number {
-  return Number.isSafeInteger(value) && (allowZero ? Number(value) >= 0 : Number(value) > 0);
-}
-
 export function isRendererCapability(value: unknown): value is RendererCapability {
   return (
     isRecord(value) &&
-    isSafeIdentity(value.documentRevision, true) &&
-    isSafeIdentity(value.projectionGeneration, false) &&
-    isSafeIdentity(value.widgetId, false) &&
-    isSafeIdentity(value.widgetGeneration, false) &&
-    isSafeIdentity(value.rendererInstance, false)
+    isPositiveSafeInteger(value.editorEpoch) &&
+    isNonNegativeSafeInteger(value.documentRevision) &&
+    isPositiveSafeInteger(value.projectionGeneration) &&
+    isPositiveSafeInteger(value.widgetId) &&
+    isPositiveSafeInteger(value.widgetGeneration) &&
+    isPositiveSafeInteger(value.rendererInstance)
   );
 }
 
 export function capabilitiesEqual(left: RendererCapability, right: RendererCapability): boolean {
   return (
+    left.editorEpoch === right.editorEpoch &&
     left.documentRevision === right.documentRevision &&
     left.projectionGeneration === right.projectionGeneration &&
     left.widgetId === right.widgetId &&

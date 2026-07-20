@@ -627,6 +627,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
 
   const ensureEditor = (): EditorView => {
     if (editor !== null) return editor;
+    if (editorEpoch === null) throw new Error("editor document epoch is unavailable");
     editor = createMarkdownEditor(
       editorHost,
       savedContent,
@@ -649,6 +650,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
         : null;
     livePreviewController = new LivePreviewEditorController(
       editor,
+      editorEpoch,
       revisions,
       workerConstructor,
       (state, reason) => {

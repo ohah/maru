@@ -10,6 +10,7 @@ import {
 } from "../src/renderer-capability";
 
 const capability: RendererCapability = {
+  editorEpoch: 2,
   documentRevision: 3,
   projectionGeneration: 7,
   widgetId: 11,
@@ -37,6 +38,7 @@ describe("fragment renderer capability", () => {
     expect(capabilitiesEqual(capability, capability)).toBe(true);
     const stale = { ...capability, widgetGeneration: capability.widgetGeneration - 1 };
     expect(capabilitiesEqual(capability, stale)).toBe(false);
+    expect(capabilitiesEqual(capability, { ...capability, editorEpoch: 1 })).toBe(false);
     expect(
       fragmentMessageMatches(
         { channel: fragmentChannel, type: "fragment-rendered", capability: stale, height: 80 },

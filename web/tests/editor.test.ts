@@ -1,37 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { EditorState, Text, Transaction } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
-import { JSDOM } from "jsdom";
 import { createMarkdownEditor } from "../src/editor";
-
-function withEditorDom<T>(run: (dom: JSDOM) => T): T {
-  const dom = new JSDOM("<!doctype html><html><body><main></main></body></html>", {
-    pretendToBeVisual: true,
-  });
-  const previous = new Map<string, PropertyDescriptor | undefined>();
-  const globals: Array<[string, unknown]> = [
-    ["window", dom.window],
-    ["document", dom.window.document],
-    ["navigator", dom.window.navigator],
-    ["MutationObserver", dom.window.MutationObserver],
-    ["DOMRect", dom.window.DOMRect],
-    ["requestAnimationFrame", dom.window.requestAnimationFrame.bind(dom.window)],
-    ["cancelAnimationFrame", dom.window.cancelAnimationFrame.bind(dom.window)],
-  ];
-  try {
-    for (const [name, value] of globals) {
-      previous.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
-      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
-    }
-    return run(dom);
-  } finally {
-    for (const [name, descriptor] of previous) {
-      if (descriptor === undefined) delete (globalThis as Record<string, unknown>)[name];
-      else Object.defineProperty(globalThis, name, descriptor);
-    }
-    dom.window.close();
-  }
-}
+import { withEditorDom } from "./editor-dom";
 
 describe("markdown editor hot path", () => {
   test("Mod-s stays in the CM6 keymap and invokes the explicit save callback", () => {
@@ -137,5 +108,13 @@ describe("markdown editor hot path", () => {
       }),
     ).toThrow("fixture failure");
     expect(Object.getOwnPropertyDescriptor(globalThis, "window")).toEqual(before);
+  });
+
+  test("editor DOM fixture remains installed until asynchronous work settles", async () => {
+    await withEditorDom(async (dom) => {
+      await new Promise<void>((resolve) => dom.window.requestAnimationFrame(() => resolve()));
+      expect(globalThis.document).toBe(dom.window.document);
+      expect(dom.window.document.querySelector("main")).not.toBeNull();
+    });
   });
 });

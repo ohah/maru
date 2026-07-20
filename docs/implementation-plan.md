@@ -494,9 +494,11 @@ TDD 방식:
 - **quick terminal 인디케이터+테두리 코너 겹침 수정(z-order, 당시 구현 기록)**: 옛 minimal grid ring과 탭 점 인디케이터가 겹칠 때 인디케이터를 뒤에 append해 위로 올렸다. 현재 grid ring은 위 FP9 대체에 따라 제거됐으므로 이 z-order 예외도 제품 경로에는 남지 않는다.
 - **영속 terminal runtime 후속(설계 확정, 구현 전)**: tmux-CC layout driver 대신 `TermRuntimeBackend` seam →
   `maru-sessiond` → 다중 workspace crash-safe manifest → 개별 `maru attach` 순서로 진행한다. 앱 종료 후 PTY 유지,
-  `runtime_handle`/`surface_id` 분리, 외부 terminal attach, multi-client resize owner와 단계별 gate는
-  [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다. quick terminal의
-  `chrome=minimal` 사이드바/탭 UI 없는 전용 모드는 별개이며 구현 완료다.
+  기존 `maru.workspace.v1`의 `workspace-binding-id`/`runtime-handle` optional scalar와 singleton `quick-window` tail,
+  멀티윈도우 writer lease, `runtime_handle`/`surface_id` 분리, `MRSH` framed JSON-control/binary-stream protocol,
+  `maru host status`·`runtime list/get/end`·`attach`, multi-client resize owner와 무인 TDD/E2E gate는
+  [영속 터미널 세션 호스트](persistent-session-host.md)를 단일 출처로 둔다. quick terminal의 현재
+  `chrome=minimal` UI는 유지하되 hide/relaunch/config 재구성이 같은 host runtime에 reattach하도록 P4에서 배선한다.
 
 이 단계에서 다루지 않고 별도로 확장하는 입력 영역:
 
@@ -809,8 +811,8 @@ TDD 방식:
   3. **9단계 Workspace restore** — 이제 자연히 window-aware.
   4. **chrome 고급화** — 확정된 atlas 소유권 위에서 점진(C1 rounded-rect부터).
   5. **영속 session host / 10단계 Plugin** — 독립 / 먼 미래. session host는 tmux-CC layout driver가 아니라
-     Maru runtime backend이며 [영속 터미널 세션 호스트](persistent-session-host.md)의 P1~P6 순서를 따른다.
-     외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
+     Maru runtime backend이며 [영속 터미널 세션 호스트](persistent-session-host.md)의 제품 완료 범위 P1~P5를 따른다.
+     P6 전체 workspace TUI/외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 
 ## Provider session continuity 잔여 제거(persistent-session P1)

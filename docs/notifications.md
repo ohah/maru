@@ -27,7 +27,8 @@
   history를 인앱 알림 이력으로 가져간다.
 - 배너 클릭 cold launch는 tmux/provider ID가 아니라 Maru `runtime_handle`로 attach한다.
 - 구조화된 완료 신호가 없는 agent completion은 계속 deprecated no-op이다. host가 `running → idle`을 완료로 추측하지 않는다.
-- 실제 `.app` 종료 상태의 OSC 발화→배너→클릭→정확한 runtime attach가 자동/수동 artifact로 증명돼야 P4 완료다.
+- pre-authorized macOS runner에서 실제 signed `.app` 종료 상태의 OSC 발화→배너→클릭→정확한 runtime attach가 **무인 자동
+  artifact**로 증명돼야 P4 완료다. runner가 없으면 수동 클릭으로 대체하지 않고 P4와 기본값 전환을 미완료로 둔다.
 
 **모든 pane·Term을 본다(핵심)**: 두 소스 모두 활성(보이는) surface만이 아니라 **모든 탭의 모든 split pane·모든 가로탭
 (Term)**을 본다 — 에이전트는 `pollAgentKinds`가 탭당 활성 Term 하나만이 아니라 모든 Term을 poll하고(예전엔 활성 Term만
@@ -93,7 +94,9 @@ cwd를 쓰므로, main이 background Term의 코어를 읽을 땐 `lockCore` 아
 - **delegate 타이밍**: `UNUserNotificationCenterDelegate`는 `applicationDidFinishLaunching`에서 **launch 완료 전**
   등록한다(Apple 요구사항 — 앱이 꺼진 상태에서 알림 클릭으로 켜진 콜드 런치의 첫 `didReceive`를 놓치지 않게).
 - **quick 패널**: 알림 대상이 quick 터미널이고 숨김이면 `showQuickTerminalAnimated`로 띄운다(화면 밖에 있는 패널을
-  그냥 `makeKeyAndOrderFront`하면 보이지 않는 창이 키를 가져간다).
+  그냥 `makeKeyAndOrderFront`하면 보이지 않는 창이 키를 가져간다). persistent-session P4 뒤 앱이 종료된 상태에서는
+  notification의 `runtime_handle`을 workspace manifest 마지막 `quick-window` tail에서 찾아 panel/AppSession을 lazy 생성하고,
+  새 shell 없이 attach한 뒤 정확한 Workspace/Pane/Term을 활성화한다. normal Window binding으로 fallback하지 않는다.
 
 ### 전면 배너 게이트
 

@@ -142,8 +142,9 @@ Node = leaf(Pane)
 5. **PR4 — 탭 close**(active_tab clamp).
 6. **split 단계(별도, 큼)**: SplitTree 모델 → 멀티-panel 렌더 → split 키/드래그 drop-zone.
 7. **영속 terminal runtime backend(별도, 큼)**: `TermRuntimeBackend` seam → `maru-sessiond` → crash-safe manifest →
-   개별 `maru attach` 순서. 구체 단계와 gate는 [영속 터미널 세션 호스트](persistent-session-host.md) §13을 따른다.
-   tmux-CC 양방향 layout 매핑은 이 단계의 완료 조건이 아니다.
+   개별 `maru attach` 순서. 기존 단일 `maru.workspace.v1`의 Workspace/Term에 Maru binding scalar를 붙이고 cross-window
+   이동은 binding을 보존한다. 제품 완료 범위 P1~P5와 무인 gate는 [영속 터미널 세션 호스트](persistent-session-host.md)
+   §13~14를 따른다. tmux-CC 양방향 layout 매핑과 P6 전체 workspace TUI는 이 단계의 완료 조건이 아니다.
 
 ### split 키·방향·포커스 (구현됨, PR3b-1b)
 

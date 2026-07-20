@@ -25,6 +25,17 @@ pub const Seg = struct {
     pos: u32,
 };
 
+/// WebView pass-through projection도 hit-test와 같은 normal-axis 폭을 써야 하므로 공개한 순수 SSOT.
+/// 0 cell은 hit target이 없음을 뜻한다.
+pub fn hitHalfExtentPx(orientation: Orientation, cell_width_px: u32, cell_height_px: u32) f64 {
+    const cell = switch (orientation) {
+        .vertical_line => cell_width_px,
+        .horizontal_line => cell_height_px,
+    };
+    if (cell == 0) return 0;
+    return @as(f64, @floatFromInt(cell)) / 2 + 2;
+}
+
 /// 마우스 (x,y)가 어느 seg의 드래그 밴드 안인가 — 맞으면 그 index, 아니면 null. 밴드: normal 축은 경계 pos ± (cell
 /// 절반 + 2px 여유, 잡기 쉽게), 교차 축은 bounds 범위. 렌더 선(view)과 같은 seg라 "보이는 선 == 잡히는 선".
 /// 셀 0·비유한이면 매치 없음. 단일 panel(segs 빈)이면 항상 null. (옛 app_session.dividerHit 수학 이전.)
@@ -34,13 +45,13 @@ pub fn hitTest(segs: []const Seg, cell_width_px: u32, cell_height_px: u32, x_px:
         const pos: f64 = @floatFromInt(seg.pos);
         const hit = switch (seg.orientation) {
             .vertical_line => blk: { // 세로선: x가 경계 근처, y가 bounds.y..y+h
-                const half = @as(f64, @floatFromInt(cell_width_px)) / 2 + 2;
+                const half = hitHalfExtentPx(.vertical_line, cell_width_px, cell_height_px);
                 const y0: f64 = @floatFromInt(seg.bounds.y);
                 const y1: f64 = y0 + @as(f64, @floatFromInt(seg.bounds.h));
                 break :blk @abs(x_px - pos) <= half and y_px >= y0 and y_px < y1;
             },
             .horizontal_line => blk: { // 가로선: y가 경계 근처, x가 bounds.x..x+w
-                const half = @as(f64, @floatFromInt(cell_height_px)) / 2 + 2;
+                const half = hitHalfExtentPx(.horizontal_line, cell_width_px, cell_height_px);
                 const x0: f64 = @floatFromInt(seg.bounds.x);
                 const x1: f64 = x0 + @as(f64, @floatFromInt(seg.bounds.w));
                 break :blk @abs(y_px - pos) <= half and x_px >= x0 and x_px < x1;

@@ -325,11 +325,12 @@ pub fn paneRegion(p: props.ChromeProps) Region {
     };
 }
 
-/// palette 패널 가로 레이아웃(사이드바 오른쪽, 상단-중앙) — **palette 전용**(find는 활성 pane 우상단 findLayout으로
+/// palette 패널 가로 레이아웃(전체 작업영역, 상단-중앙) — **palette 전용**(find는 활성 pane 우상단 findLayout으로
 /// 분리). 폭은 panelSize 공유. clamp로 panel_w ≤ term_w_px라 중앙배치 뺄셈이 안전. y는 상단에서 두 줄 아래.
 pub fn panelLayout(p: props.ChromeProps) ?PanelLayout {
     const m = p.metrics;
     const workspace = props.workspaceRect(m);
+    if (workspace.w == 0 or workspace.h == 0) return null;
     const term_w_px = workspace.w;
     const sz = panelSize(p, term_w_px) orelse return null;
     const x = @as(i32, @intCast(workspace.x)) + @as(i32, @intCast((term_w_px - sz.panel_w) / 2));
@@ -454,6 +455,21 @@ test "panelLayout: term_cols 0이면 null, 아니면 사이드바 오른쪽 상�
     try std.testing.expectEqual(@as(u32, 8), lay.cw);
     try std.testing.expectEqual(@as(u32, 16), lay.ch);
     try std.testing.expect(lay.panel_cols >= 1 and lay.panel_cols <= 60);
+}
+
+test "panelLayout: authoritative zero-height workspace fails closed" {
+    try std.testing.expectEqual(@as(?PanelLayout, null), panelLayout(.{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 200,
+        .backing_width_px = 1200,
+        .backing_height_px = 800,
+        .workspace_x_px = 200,
+        .workspace_y_px = 800,
+        .workspace_width_px = 1000,
+        .workspace_height_px = 0,
+        .workspace_present = true,
+    } }));
 }
 
 test "panelLayout: rich 패딩이면 확장 박스(panel_w + 2*pad)가 터미널 영역 안 — 사이드바 침범·화면밖 방지" {

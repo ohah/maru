@@ -2581,8 +2581,11 @@ final class MaruWebPanelView: NSView {
     // show 전이가 갱신한다. hitTest가 그 가장자리 margin 안 클릭/hover를 통과시켜 아래 터미널 뷰의 divider 드래그·resize
     // 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭 분리 — 4e review 0 후속). 0이면 통과 없음(모든 가장자리 바깥 경계).
     var seamEdges: UInt32 = 0
-    // ABI가 내려주는 logical-point grab 폭. 0이면 seam pass-through를 끈다(Zig divider thickness=0과 동조).
-    var dividerGrabBandPt: CGFloat = 0
+    // Zig가 최종 padded frame과 실제 resize target의 교집합에서 계산해 내린 edge별 logical-point 폭.
+    // 0이면 해당 edge pass-through를 끈다.
+    var dividerGrabLeftPt: CGFloat = 0
+    var dividerGrabRightPt: CGFloat = 0
+    var dividerGrabBottomPt: CGFloat = 0
 
     // Phase 7e-1a: browser(비신뢰, panelKind==1) 패널의 WKWebView nav 상태 — block-based KVO 관측값. url/canGoBack/
     // canGoForward 변화 시 여기 저장 + navStateDirty=true. tick drain(drainWebSurfaceTransition)이 dirty면 Zig
@@ -3076,15 +3079,18 @@ final class MaruWebPanelView: NSView {
         if controller?.isOverlayOpenForWebPanel(self) == true { return nil }
         // divider grab 분리(4e review 0 후속): seam 가장자리(Zig seam_edges) margin 안 클릭/hover는 nil로 통과시켜, 아래
         // 터미널 뷰가 event를 받아 dividerAtPoint로 드래그·resize 커서를 처리하게 한다 — WKWebView는 native라 자기 frame
-        // 클릭을 삼키므로, 이걸로 시각 gap은 작게(Zig seam inset) 두고 grab 폭만 넓힌다. point는 self-local 좌표이고
-        // bounds는 pt 좌하단 원점이라 bottom seam=minY다. top은 탭 바라 seam_edges에 없다.
-        if seamEdges != 0 && dividerGrabBandPt > 0 {
-            let m = dividerGrabBandPt
-            // hitTest point는 self-local 좌표이므로 superview 좌표인 frame이 아니라 bounds와 비교한다.
-            let f = bounds
-            if (seamEdges & 1) != 0, point.x <= f.minX + m { return nil } // 왼쪽 세로 divider
-            if (seamEdges & 2) != 0, point.x >= f.maxX - m { return nil } // 오른쪽 세로 divider
-            if (seamEdges & 4) != 0, point.y <= f.minY + m { return nil } // 아래 가로 divider(좌하단 원점=minY가 아래)
+        // 클릭을 삼키므로, 이걸로 시각 gap은 작게(Zig seam inset) 두고 grab 폭만 넓힌다. AppKit hitTest 입력은
+        // **superview 좌표**이므로 같은 좌표계의 frame과 비교한다. bounds와 섞으면 origin이 0이 아닌 도크에서 본문 전체가
+        // seam으로 오판돼 클릭·휠이 아래 Metal view로 샌다. top은 탭 바라 seam_edges에 없다.
+        if WebPanelHitTestGeometry.isInDividerGrabBand(
+            pointInSuperview: point,
+            frameInSuperview: frame,
+            seamEdges: seamEdges,
+            leftBand: dividerGrabLeftPt,
+            rightBand: dividerGrabRightPt,
+            bottomBand: dividerGrabBottomPt
+        ) {
+            return nil
         }
         // firstResponder identity가 이미 이 WKWebView인 재클릭도 새 사용자 intent다. passive tick reconcile로는
         // 구분할 수 없으므로 실제 primary-down hit-test에서만 Zig direct-focus를 통지한다. seam/overlay는 위에서
@@ -6915,7 +6921,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     if adopted.superview == nil { container.insertWebPanel(adopted) }
                     adopted.frame = frame
                     adopted.seamEdges = t.seam_edges
-                    adopted.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
+                    adopted.dividerGrabLeftPt = CGFloat(t.divider_grab_left_pt)
+                    adopted.dividerGrabRightPt = CGFloat(t.divider_grab_right_pt)
+                    adopted.dividerGrabBottomPt = CGFloat(t.divider_grab_bottom_pt)
                     adopted.isHidden = (t.visible == 0)
                 } else if let moved = detachWebPanelForReparent(t.surface_id) {
                     // 4e-4(web-panel §10): 다른 창에 살아있던 WKWebView를 훔쳐 **재부모화**(destroy+recreate 대신 = 스크롤·페이지·폼
@@ -6924,7 +6932,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     container.insertWebPanel(moved)
                     moved.frame = frame
                     moved.seamEdges = t.seam_edges
-                    moved.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
+                    moved.dividerGrabLeftPt = CGFloat(t.divider_grab_left_pt)
+                    moved.dividerGrabRightPt = CGFloat(t.divider_grab_right_pt)
+                    moved.dividerGrabBottomPt = CGFloat(t.divider_grab_bottom_pt)
                     moved.isHidden = (t.visible == 0)
                     surface.webPanels[t.surface_id] = moved
                 } else {
@@ -6945,7 +6955,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         controller: self
                     )
                     v.seamEdges = t.seam_edges // divider grab 통과용(hitTest) — 어느 가장자리가 divider에 맞닿나.
-                    v.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
+                    v.dividerGrabLeftPt = CGFloat(t.divider_grab_left_pt)
+                    v.dividerGrabRightPt = CGFloat(t.divider_grab_right_pt)
+                    v.dividerGrabBottomPt = CGFloat(t.divider_grab_bottom_pt)
                     container.insertWebPanel(v)
                     v.isHidden = (t.visible == 0) // 같은 pane 비활성 탭으로 만들어진 web Term은 hidden 생성(상태만 유지).
                     surface.webPanels[t.surface_id] = v
@@ -6975,7 +6987,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 if let v = surface.webPanels[t.surface_id] {
                     v.frame = frame
                     v.seamEdges = t.seam_edges // split 변화로 맞닿는 divider 가장자리가 바뀔 수 있어 reframe서 갱신.
-                    v.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
+                    v.dividerGrabLeftPt = CGFloat(t.divider_grab_left_pt)
+                    v.dividerGrabRightPt = CGFloat(t.divider_grab_right_pt)
+                    v.dividerGrabBottomPt = CGFloat(t.divider_grab_bottom_pt)
                 }
             case Int(MaruAppHostWebSurfaceOpHide.rawValue):
                 if let v = surface.webPanels[t.surface_id] {
@@ -6987,7 +7001,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     v.isHidden = false
                     v.frame = frame
                     v.seamEdges = t.seam_edges
-                    v.dividerGrabBandPt = CGFloat(t.divider_grab_band_pt)
+                    v.dividerGrabLeftPt = CGFloat(t.divider_grab_left_pt)
+                    v.dividerGrabRightPt = CGFloat(t.divider_grab_right_pt)
+                    v.dividerGrabBottomPt = CGFloat(t.divider_grab_bottom_pt)
                     reconcileLivePreviewBudget()
                 }
             default: break // None — 무동작

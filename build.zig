@@ -299,6 +299,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/WebPanelHitTestGeometry.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
@@ -667,6 +668,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/FilePanelTerminationPolicy.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/WebPanelHitTestGeometry.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/BrowserResultTransferRegistry.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
@@ -1082,6 +1084,22 @@ pub fn build(b: *std.Build) void {
         const run_file_panel_termination_policy_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_file_panel_termination_policy_tests.addFileArg(file_panel_termination_policy_test_bin);
         test_step.dependOn(&run_file_panel_termination_policy_tests.step);
+
+        const web_panel_hit_test_geometry_tests = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        web_panel_hit_test_geometry_tests.addFileArg(b.path("src/platform/macos/WebPanelHitTestGeometry.swift"));
+        web_panel_hit_test_geometry_tests.addFileArg(b.path("tests/macos_web_panel_hit_test_geometry.swift"));
+        web_panel_hit_test_geometry_tests.addArgs(&.{ "-framework", "AppKit" });
+        web_panel_hit_test_geometry_tests.addArg("-o");
+        const web_panel_hit_test_geometry_test_bin = web_panel_hit_test_geometry_tests.addOutputFileArg("maru-web-panel-hit-test-geometry-tests");
+        const run_web_panel_hit_test_geometry_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_web_panel_hit_test_geometry_tests.addFileArg(web_panel_hit_test_geometry_test_bin);
+        test_step.dependOn(&run_web_panel_hit_test_geometry_tests.step);
 
         const browser_result_registry_tests = b.addSystemCommand(&.{
             "xcrun",

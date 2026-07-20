@@ -109,7 +109,7 @@ pub const WebSurfaceTransition = struct {
     // 이 web 본문 rect가 divider에 맞닿는 가장자리 비트마스크(L=1·R=2·B=4) — create/show/reframe에 실어 Swift hitTest가
     // 그 가장자리 근처 클릭/hover를 통과시켜 넓은 divider grab을 준다(§10 4e review 0 후속: gap↔grab 분리). destroy/hide 무의미.
     seam_edges: u8 = 0,
-    divider_grab_band_pt: u32 = 0,
+    divider_grab_bands_pt: web_panel_layout.DividerGrabBandsPt = .{},
 };
 
 /// Phase 7e-1a: browser(비신뢰) 웹 패널의 WKWebView nav 상태 스냅샷(per-surface). Swift KVO(MaruWebPanelView)가
@@ -170,7 +170,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 135;
+pub const abi_version: u32 = 136;
+// 136: WebSurfaceTransition의 단일 divider grab 폭을 최종 padded frame과 실제 Zig hit target 교집합에서
+// 계산한 left/right/bottom별 f64 pt 폭으로 교체한다. native pass-through가 resize target 밖 dead strip을 만들지 않는다.
 // 135: Markdown document id를 begin/read에 묶고 WebContent termination latch ABI를 추가해 stale page의
 // hash/dirty 오염과 bridge ACK 전 편집 유실을 fail-close한다.
 // 134: FP10c1 Mermaid helper의 Zig 단일 codec과 앱 전역 bounded coordinator action/completion ABI를
@@ -3331,16 +3333,7 @@ pub const AppSession = struct {
             .{ .x = rect.x, .y = rect.y + bar_h, .w = rect.w, .h = rect.h - bar_h }
         else
             rect;
-        const body_right = body.x +| body.w;
-        const body_bottom = body.y +| body.h;
-        const grid_x = @min(body.x +| pad.left, body_right);
-        const grid_y = @min(body.y +| pad.top, body_bottom);
-        const grid: maru.session.SplitRect = .{
-            .x = grid_x,
-            .y = grid_y,
-            .w = (body_right - grid_x) -| pad.right,
-            .h = (body_bottom - grid_y) -| pad.bottom,
-        };
+        const grid = layout_math.insetRect(body, pad);
         return .{ .bar = bar, .body = body, .grid = grid };
     }
 
@@ -4007,19 +4000,11 @@ pub const AppSession = struct {
 
     fn dockDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-        const g = self.dockGeometry();
-        if (g.divider.w == 0 or g.divider.h == 0) return false;
-        const grab: f64 = @floatFromInt(self.dockDividerGrabBandPx());
-        const x0: f64 = @floatFromInt(g.divider.x);
-        const y0: f64 = @floatFromInt(g.divider.y);
-        const x1: f64 = @floatFromInt(g.divider.x + g.divider.w);
-        const y1: f64 = @floatFromInt(g.divider.y + g.divider.h);
-        return switch (self.dock.side) {
-            .right => x_px >= x0 - grab and x_px < x1 + grab and y_px >= y0 and y_px < y1,
-            // bottom dock의 안쪽(+y)은 곧 파일 탭바라 확장하면 탭/접기 클릭을 전부 resize가 삼킨다. WKWebView
-            // 본문은 tab+header 아래라 outer seam에 직접 닿지 않으므로 terminal 쪽(-y)+실제 divider까지만 잡는다.
-            .bottom => y_px >= y0 - grab and y_px < y1 and x_px >= x0 and x_px < x1,
-        };
+        return layout_math.pointInRect(
+            x_px,
+            y_px,
+            dock_layout.outerDividerHitRect(self.dockGeometry(), self.dock.side, self.dockDividerGrabBandPx()),
+        );
     }
 
     fn setDockSizeFromPointer(self: *AppSession, x_px: f64, y_px: f64) void {
@@ -4049,8 +4034,8 @@ pub const AppSession = struct {
 
     fn dockTreeDividerAtPoint(self: *const AppSession, g: dock_layout.Geometry, x_px: f64, y_px: f64) bool {
         if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px) or !self.dockVisible()) return false;
-        // ABI divider_grab_band_pt를 받은 MaruWebPanelView가 editor 쪽 이벤트를 Metal로 통과시키므로 Zig target도
-        // 같은 SSOT의 backing 폭을 받아야 한다. 더 좁으면 WebView는 nil을 반환했지만 resize는 시작하지 않는 dead band다.
+        // ABI edge별 divider grab 폭은 이 실제 target과 final WebView frame의 교집합에서만 계산된다. Zig target이
+        // 더 좁으면 WebView는 nil을 반환했지만 resize는 시작하지 않는 dead band가 되므로 이 rect가 권위다.
         // geometry는 호출자가 이미 계산한 것을 받아 hover/mouse-down에서 이중 compute를 피한다.
         const hit = dock_layout.treeDividerHitRect(g, self.dockDividerGrabBandPx());
         return hit.w > 0 and layout_math.pointInRect(x_px, y_px, hit);
@@ -11807,6 +11792,32 @@ pub const AppSession = struct {
         return self.activeTabHasWebTerm() or self.dockHasLiveSurface();
     }
 
+    fn dividerTargetRect(rect: maru.session.SplitRect) web_panel_layout.RectF64 {
+        return .{
+            .x = @floatFromInt(rect.x),
+            .y = @floatFromInt(rect.y),
+            .w = @floatFromInt(rect.w),
+            .h = @floatFromInt(rect.h),
+        };
+    }
+
+    fn dividerBandPt(self: *const AppSession, content: maru.session.SplitRect, target: web_panel_layout.RectF64, edge: web_panel_layout.DividerEdge) f64 {
+        const px = web_panel_layout.dividerPassThroughBandPx(content, target, edge);
+        return px * 1000.0 / @as(f64, @floatFromInt(@max(@as(u32, 1), self.scale_milli)));
+    }
+
+    /// Workspace SplitTree divider의 실제 chrome hit-test 폭과 같은 분수 px target. leaf bounds로 교차축과
+    /// 해당 leaf 쪽 절반만 제한해도 content edge와의 교집합은 실제 parent-bounds target과 동일하다.
+    fn paneDividerTarget(self: *const AppSession, leaf: maru.session.SplitRect, edge: web_panel_layout.DividerEdge) web_panel_layout.RectF64 {
+        const orientation: chrome.components.divider.Orientation = if (edge == .bottom) .horizontal_line else .vertical_line;
+        const half = chrome.components.divider.hitHalfExtentPx(orientation, self.cell_width_px, self.cell_height_px);
+        return switch (edge) {
+            .left => .{ .x = @as(f64, @floatFromInt(leaf.x)) - half, .y = @floatFromInt(leaf.y), .w = 2 * half, .h = @floatFromInt(leaf.h) },
+            .right => .{ .x = @as(f64, @floatFromInt(leaf.x +| leaf.w)) - half, .y = @floatFromInt(leaf.y), .w = 2 * half, .h = @floatFromInt(leaf.h) },
+            .bottom => .{ .x = @floatFromInt(leaf.x), .y = @as(f64, @floatFromInt(leaf.y +| leaf.h)) - half, .w = @floatFromInt(leaf.w), .h = 2 * half },
+        };
+    }
+
     /// Phase 4e-3: 활성 워크스페이스 탭의 pane 트리를 walk해 이번 tick의 web Term 집합(cur)을 만든다(§6). 각 web Term은
     /// **자기 pane leaf rect**에서 탭 바(top inset)를 뺀 본문 rect(4a `contentRect`, §5 탭 바 노출)에 고정되고, visible은
     /// **자기 pane의 활성 Term인가**다(4c의 활성 pane 추종을 완전 제거 — 각 웹뷰가 제 pane에 붙박인다). 비활성 워크스페이스
@@ -11861,12 +11872,31 @@ pub const AppSession = struct {
                         inset.bottom = seam; // 아래 가로 divider
                         seam_edges |= 4;
                     }
+                    const content_rect = layout_math.insetRect(web_panel_layout.contentRect(lr.rect, inset), self.window_padding_px);
+                    var grab_bands: web_panel_layout.DividerGrabBandsPt = .{};
+                    if ((seam_edges & 1) != 0) {
+                        grab_bands.left = self.dividerBandPt(content_rect, self.paneDividerTarget(lr.rect, .left), .left);
+                    }
+                    if ((seam_edges & 2) != 0) {
+                        const target = if (at_right_dock)
+                            dividerTargetRect(dock_layout.outerDividerHitRect(dg, .right, self.dockDividerGrabBandPx()))
+                        else
+                            self.paneDividerTarget(lr.rect, .right);
+                        grab_bands.right = self.dividerBandPt(content_rect, target, .right);
+                    }
+                    if ((seam_edges & 4) != 0) {
+                        const target = if (at_bottom_dock)
+                            dividerTargetRect(dock_layout.outerDividerHitRect(dg, .bottom, self.dockDividerGrabBandPx()))
+                        else
+                            self.paneDividerTarget(lr.rect, .bottom);
+                        grab_bands.bottom = self.dividerBandPt(content_rect, target, .bottom);
+                    }
                     try out.append(self.allocator, .{
                         .surface_id = term.surfaceId(),
                         .panel_kind = term.web_panel_kind,
                         .seam_edges = seam_edges,
-                        .divider_grab_band_pt = if (seam_edges != 0) dock_layout.divider_grab_band_pt else 0,
-                        .content_rect = web_panel_layout.contentRect(lr.rect, inset),
+                        .divider_grab_bands_pt = grab_bands,
+                        .content_rect = content_rect,
                         // AppKit은 mouse-down을 받은 Metal view에 drag/up을 계속 전달한다. 따라서 도크 resize 중에도
                         // WKWebView를 숨길 필요 없이 surfaceDiff의 reframe으로 라이브 추종할 수 있다.
                         .visible = i == lr.leaf.active_term,
@@ -11889,7 +11919,7 @@ pub const AppSession = struct {
                 else
                     .{ .x = 0, .y = 0, .w = 0, .h = 0 };
                 const content_rect: web_panel_layout.Rect = if (has_layout)
-                    dock_layout.groupGeometry(parent, leaf_rect).content
+                    layout_math.insetRect(dock_layout.groupGeometry(parent, leaf_rect).content, self.window_padding_px)
                 else
                     .{ .x = 0, .y = 0, .w = 0, .h = 0 };
                 var seam_edges: u8 = 0;
@@ -11905,6 +11935,26 @@ pub const AppSession = struct {
                     if (leaf_rect.x + leaf_rect.w < parent.editor.x + parent.editor.w or parent.tree_divider.w > 0) seam_edges |= 2;
                     if (leaf_rect.y + leaf_rect.h < parent.editor.y + parent.editor.h) seam_edges |= 4;
                 }
+                var grab_bands: web_panel_layout.DividerGrabBandsPt = .{};
+                const hit_slop = self.dockDividerGrabBandPx();
+                if ((seam_edges & 1) != 0) {
+                    const target = if (leaf_rect.x > parent.editor.x)
+                        dock_layout.groupDividerHitRectAt(.horizontal, leaf_rect, leaf_rect.x, hit_slop)
+                    else
+                        dock_layout.outerDividerHitRect(parent, .right, hit_slop);
+                    grab_bands.left = self.dividerBandPt(content_rect, dividerTargetRect(target), .left);
+                }
+                if ((seam_edges & 2) != 0) {
+                    const target = if (leaf_rect.x + leaf_rect.w < parent.editor.x + parent.editor.w)
+                        dock_layout.groupDividerHitRectAt(.horizontal, leaf_rect, leaf_rect.x +| leaf_rect.w, hit_slop)
+                    else
+                        dock_layout.treeDividerHitRect(parent, hit_slop);
+                    grab_bands.right = self.dividerBandPt(content_rect, dividerTargetRect(target), .right);
+                }
+                if ((seam_edges & 4) != 0) {
+                    const target = dock_layout.groupDividerHitRectAt(.vertical, leaf_rect, leaf_rect.y +| leaf_rect.h, hit_slop);
+                    grab_bands.bottom = self.dividerBandPt(content_rect, dividerTargetRect(target), .bottom);
+                }
                 for (group.entries.items, 0..) |entry, i| {
                     if (entry.surface_id == 0) continue;
                     try out.append(self.allocator, .{
@@ -11914,7 +11964,7 @@ pub const AppSession = struct {
                             .html => .browser,
                         },
                         .seam_edges = seam_edges,
-                        .divider_grab_band_pt = if (seam_edges != 0 and self.dividerThicknessPx() != 0) dock_layout.divider_grab_band_pt else 0,
+                        .divider_grab_bands_pt = if (self.dividerThicknessPx() != 0) grab_bands else .{},
                         .content_rect = content_rect,
                         .visible = self.dockVisible() and group.active != null and group.active.? == i,
                     });
@@ -12246,13 +12296,13 @@ pub const AppSession = struct {
         for (diff.destroyed.items) |sid| // 먼저 파괴(id 비재사용이라 create와 충돌 없지만 명료성).
             try self.web_surface_transitions.append(self.allocator, .{ .op = .destroy, .surface_id = sid });
         for (diff.created.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = s.visible, .seam_edges = s.seam_edges, .divider_grab_band_pt = s.divider_grab_band_pt, .frame_pt = self.webFramePt(s.content_rect) });
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .create, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = s.visible, .seam_edges = s.seam_edges, .divider_grab_bands_pt = s.divider_grab_bands_pt, .frame_pt = self.webFramePt(s.content_rect) });
         for (diff.hidden.items) |sid|
             try self.web_surface_transitions.append(self.allocator, .{ .op = .hide, .surface_id = sid });
         for (diff.shown.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .divider_grab_band_pt = s.divider_grab_band_pt, .frame_pt = self.webFramePt(s.content_rect) });
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .show, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .divider_grab_bands_pt = s.divider_grab_bands_pt, .frame_pt = self.webFramePt(s.content_rect) });
         for (diff.reframed.items) |s|
-            try self.web_surface_transitions.append(self.allocator, .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .divider_grab_band_pt = s.divider_grab_band_pt, .frame_pt = self.webFramePt(s.content_rect) });
+            try self.web_surface_transitions.append(self.allocator, .{ .op = .reframe, .surface_id = s.surface_id, .panel_kind = s.panel_kind, .visible = true, .seam_edges = s.seam_edges, .divider_grab_bands_pt = s.divider_grab_bands_pt, .frame_pt = self.webFramePt(s.content_rect) });
     }
 
     /// Phase 4e-3: 이번 tick의 web surface 전이 batch를 계산해 self.web_surface_transitions에 채운다(§6·§10 4e-3).
@@ -23922,11 +23972,12 @@ pub const AppSession = struct {
 
     /// chrome 컴포넌트가 읽는 불변 메트릭(props seam). 매 frame 세션 실측값에서 빌드한다 — chrome은 terminal/
     /// config 타입을 모르므로 plain u32만 넘긴다. 오버레이는 터미널과 같은 셀(self.cell_width_px — CoreText 실측)을
-    /// 쓴다. sidebar/backing은 실 px 그대로. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
+    /// 쓴다. sidebar/backing은 실 px 그대로. workspace는 dock geometry의 terminal+divider+dock 전체 영역이며,
+    /// 전역 모달이 terminal-only 중심으로 치우치지 않게 한다. sidebar_width_px는 런타임 가변(드래그)이라 토큰이 아닌 여기로.
     /// 셀/화면 메트릭만(토큰·shape 없이) — 휠/키 스크롤처럼 metrics만 필요한 경로가 buildChromeProps의 토큰 빌드를
     /// 피하게 한다. buildChromeProps도 이걸 재사용해 metrics를 단일 출처로 둔다.
     fn buildCellMetrics(self: *const AppSession) chrome.props.CellMetrics {
-        const workspace = self.termRect();
+        const workspace = self.dockGeometry().workspace;
         return .{
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
@@ -23939,6 +23990,7 @@ pub const AppSession = struct {
             .workspace_y_px = workspace.y,
             .workspace_width_px = workspace.w,
             .workspace_height_px = workspace.h,
+            .workspace_present = true,
             .chrome_minimal = self.chrome_minimal,
         };
     }
@@ -36801,6 +36853,10 @@ test "FP9 dock tab drag: same-group reorder, dock-local split, and terminal-doma
     const workspace_geometry = session.paneGeometry(session.termRect());
     try std.testing.expect(workspace_geometry.body.x < workspace_geometry.grid.x);
     try std.testing.expect(workspace_geometry.body.y < workspace_geometry.grid.y);
+    // padding 설정 변경은 보이는 WebView frame을 한 번 reframe한다. 이 정당한 layout 전이를 먼저 drain해야 아래
+    // drag-preview transition 0 불변식을 설정 변경과 섞지 않는다(숨은 entry는 다음 show 때 최신 rect를 받음).
+    try std.testing.expectEqual(@as(usize, 1), session.webSurfaceTransitionsCount());
+    try std.testing.expectEqual(@as(usize, 0), session.webSurfaceTransitionsCount());
 
     // FP9-PERF: warm capacity 뒤 1,000회 pointer move/projected overlay는 allocator를 한 번도 부르지 않고,
     // drop zone 1 + focus border 4의 geometry quad 상한을 지킨다. FS/lock/thread API는 이 순수 경로에 없다.
@@ -37357,6 +37413,35 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expect(!surfaces.items[1].visible and surfaces.items[2].visible);
     try std.testing.expectEqual(web_panel_layout.PanelKind.browser, surfaces.items[2].panel_kind);
     try std.testing.expectEqual(@as(u8, 3), surfaces.items[2].seam_edges); // outer dock 좌측 + project-tree 우측 seam
+    const workspace_seam = session.dividerThicknessPx() + @max(@as(u32, 1), session.scale_milli / 1000);
+    const workspace_web_chrome = web_panel_layout.contentRect(right.terminal, .{
+        .top = 2 * session.paneBarHeightPx(), // browser = pane tab bar + address band
+        .right = workspace_seam,
+    });
+    try std.testing.expectEqual(layout_math.insetRect(workspace_web_chrome, session.window_padding_px), surfaces.items[0].content_rect);
+    try std.testing.expectEqual(layout_math.insetRect(right.content, session.window_padding_px), surfaces.items[2].content_rect);
+    // Native가 양보하는 edge band의 내부점은 반드시 같은 Zig resize target이어야 한다. 단일 10pt를 final frame에
+    // 다시 붙이면 padding만큼 target 밖 dead strip이 생겼던 회귀를 producer 실제 기하로 막는다.
+    const scale: f64 = @as(f64, @floatFromInt(session.scale_milli)) / 1000.0;
+    const workspace_surface = surfaces.items[0];
+    const workspace_band_px = workspace_surface.divider_grab_bands_pt.right * scale;
+    if (workspace_band_px > 0) try std.testing.expect(session.dockDividerAtPoint(
+        @as(f64, @floatFromInt(workspace_surface.content_rect.x + workspace_surface.content_rect.w)) - workspace_band_px / 2,
+        @floatFromInt(workspace_surface.content_rect.y + workspace_surface.content_rect.h / 2),
+    ));
+    const dock_surface = surfaces.items[2];
+    const dock_left_band_px = dock_surface.divider_grab_bands_pt.left * scale;
+    const dock_right_band_px = dock_surface.divider_grab_bands_pt.right * scale;
+    try std.testing.expect(dock_left_band_px > 0 and dock_right_band_px > 0);
+    try std.testing.expect(session.dockDividerAtPoint(
+        @as(f64, @floatFromInt(dock_surface.content_rect.x)) + dock_left_band_px / 2,
+        @floatFromInt(dock_surface.content_rect.y + dock_surface.content_rect.h / 2),
+    ));
+    try std.testing.expect(session.dockTreeDividerAtPoint(
+        right,
+        @as(f64, @floatFromInt(dock_surface.content_rect.x + dock_surface.content_rect.w)) - dock_right_band_px / 2,
+        @floatFromInt(dock_surface.content_rect.y + dock_surface.content_rect.h / 2),
+    ));
     try std.testing.expect(session.webSurfacesPresent());
     try std.testing.expect(session.hasWebSurface(group.entries.items[1].surface_id));
 
@@ -37472,10 +37557,11 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     const bottom = session.dockGeometry();
     try std.testing.expect(bottom.dock.h > 0 and bottom.terminal.h + bottom.divider.h + bottom.dock.h == 900 - session.titlebar_strip_px);
     const chrome_workspace = chrome.props.workspaceRect(session.buildCellMetrics());
-    try std.testing.expectEqual(bottom.terminal.x, chrome_workspace.x);
-    try std.testing.expectEqual(bottom.terminal.y, chrome_workspace.y);
-    try std.testing.expectEqual(bottom.terminal.w, chrome_workspace.w);
-    try std.testing.expectEqual(bottom.terminal.h, chrome_workspace.h);
+    try std.testing.expectEqual(bottom.workspace.x, chrome_workspace.x);
+    try std.testing.expectEqual(bottom.workspace.y, chrome_workspace.y);
+    try std.testing.expectEqual(bottom.workspace.w, chrome_workspace.w);
+    try std.testing.expectEqual(bottom.workspace.h, chrome_workspace.h);
+    try std.testing.expectEqual(bottom.terminal.h + bottom.divider.h + bottom.dock.h, chrome_workspace.h);
     surfaces.clearRetainingCapacity();
     try session.collectWebSurfaces(&surfaces);
     try std.testing.expectEqual(@as(u8, 4), surfaces.items[0].seam_edges); // workspace 하단이 dock divider에 맞닿음
@@ -37555,10 +37641,31 @@ test "FP8 file panel groups render simultaneously drag divider persist tree and 
     try session.collectWebSurfaces(&surfaces);
     try std.testing.expectEqual(@as(usize, 2), surfaces.items.len);
     try std.testing.expect(surfaces.items[0].visible and surfaces.items[1].visible);
-    try std.testing.expectEqual(left_g.content, surfaces.items[0].content_rect);
-    try std.testing.expectEqual(right_g.content, surfaces.items[1].content_rect);
+    try std.testing.expectEqual(layout_math.insetRect(left_g.content, session.window_padding_px), surfaces.items[0].content_rect);
+    try std.testing.expectEqual(layout_math.insetRect(right_g.content, session.window_padding_px), surfaces.items[1].content_rect);
     try std.testing.expectEqual(@as(u8, 3), surfaces.items[0].seam_edges); // outer-left + internal-right divider
     try std.testing.expectEqual(@as(u8, 3), surfaces.items[1].seam_edges); // internal-left + project-tree-right divider
+    const band_scale: f64 = @as(f64, @floatFromInt(session.scale_milli)) / 1000.0;
+    const left_surface = surfaces.items[0];
+    const right_surface = surfaces.items[1];
+    const internal_from_left_px = left_surface.divider_grab_bands_pt.right * band_scale;
+    const internal_from_right_px = right_surface.divider_grab_bands_pt.left * band_scale;
+    try std.testing.expect(internal_from_left_px > 0 and internal_from_right_px > 0);
+    try std.testing.expect(session.dockGroupDividerAtPoint(
+        @as(f64, @floatFromInt(left_surface.content_rect.x + left_surface.content_rect.w)) - internal_from_left_px / 2,
+        @floatFromInt(left_surface.content_rect.y + left_surface.content_rect.h / 2),
+    ) != null);
+    try std.testing.expect(session.dockGroupDividerAtPoint(
+        @as(f64, @floatFromInt(right_surface.content_rect.x)) + internal_from_right_px / 2,
+        @floatFromInt(right_surface.content_rect.y + right_surface.content_rect.h / 2),
+    ) != null);
+    const tree_band_px = right_surface.divider_grab_bands_pt.right * band_scale;
+    try std.testing.expect(tree_band_px > 0);
+    try std.testing.expect(session.dockTreeDividerAtPoint(
+        parent,
+        @as(f64, @floatFromInt(right_surface.content_rect.x + right_surface.content_rect.w)) - tree_band_px / 2,
+        @floatFromInt(right_surface.content_rect.y + right_surface.content_rect.h / 2),
+    ));
     try std.testing.expect(session.focusFilePanelSurface(first.entries.items[0].surface_id));
     try std.testing.expectEqual(first, session.dock.focusedGroup());
     try std.testing.expect(session.focusFilePanelSurface(second.entries.items[0].surface_id));

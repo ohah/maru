@@ -50,6 +50,45 @@ pub fn contentRect(pane_rect: Rect, inset: ChromeInset) Rect {
 /// 포인트 사각형(pt, 좌하단 origin — WKWebView frame 좌표계). 정수 backing px와 달리 분수 pt라 f64.
 pub const RectPt = struct { x: f64, y: f64, w: f64, h: f64 };
 
+/// divider hit target처럼 분수 backing-px 경계를 가질 수 있는 사각형. native pass-through는 최종 WebView
+/// content rect와 **실제 Zig resize target의 교집합**만 양보해야 하므로 정수 rect로 반올림하지 않는다.
+pub const RectF64 = struct { x: f64, y: f64, w: f64, h: f64 };
+
+pub const DividerEdge = enum { left, right, bottom };
+
+/// `content` 가장자리에서 안쪽으로 연속된 `target` 교집합 폭(backing px). target이 content의 교차축 전체를
+/// 덮지 않거나 가장자리에 직접 닿지 않으면 0으로 fail-close한다. 이 값만 native hit-test에 내려
+/// "WebKit이 양보한 모든 점은 Zig resize target"을 보장한다.
+pub fn dividerPassThroughBandPx(content: Rect, target: RectF64, edge: DividerEdge) f64 {
+    if (content.w == 0 or content.h == 0 or target.w <= 0 or target.h <= 0) return 0;
+    const cx0: f64 = @floatFromInt(content.x);
+    const cy0: f64 = @floatFromInt(content.y);
+    const cx1 = cx0 + @as(f64, @floatFromInt(content.w));
+    const cy1 = cy0 + @as(f64, @floatFromInt(content.h));
+    const tx1 = target.x + target.w;
+    const ty1 = target.y + target.h;
+    return switch (edge) {
+        .left => if (target.y <= cy0 and ty1 >= cy1 and target.x <= cx0 and tx1 > cx0)
+            @max(0, @min(cx1, tx1) - cx0)
+        else
+            0,
+        .right => if (target.y <= cy0 and ty1 >= cy1 and target.x < cx1 and tx1 >= cx1)
+            @max(0, cx1 - @max(cx0, target.x))
+        else
+            0,
+        .bottom => if (target.x <= cx0 and tx1 >= cx1 and target.y < cy1 and ty1 >= cy1)
+            @max(0, cy1 - @max(cy0, target.y))
+        else
+            0,
+    };
+}
+
+pub const DividerGrabBandsPt = struct {
+    left: f64 = 0,
+    right: f64 = 0,
+    bottom: f64 = 0,
+};
+
 /// backing px·좌상단 rect를 pt·좌하단(WKWebView frame) rect로 변환한다(§3·§11). scale = scale_milli/1000
 /// (backing px per point). y-flip: 좌상단 px에서 rect의 **아래 가장자리**는 컨테이너 위에서 y+h만큼 내려간
 /// 곳이고, 좌하단 pt origin.y는 컨테이너 아래에서 잰 그 거리 = (window_height_px − y − h)/scale이다. x/w/h는
@@ -89,8 +128,9 @@ pub const SurfaceLayout = struct {
     /// top은 탭 바라 divider 없음). Swift가 WKWebView hitTest에서 그 가장자리 근처 클릭/hover를 **통과**시켜 아래 터미널
     /// 뷰의 divider 드래그·resize 커서가 잡게 한다(작은 시각 gap과 넓은 grab 폭을 분리 — WKWebView가 native라 안 삼키게).
     seam_edges: u8 = 0,
-    /// seam hit pass-through 폭(logical pt). 0이면 seam_edges가 있어도 native pass-through를 끈다.
-    divider_grab_band_pt: u32 = 0,
+    /// 최종 content rect와 실제 Zig divider hit target의 가장자리별 교집합 폭(logical pt). 0이면 그 edge의
+    /// native pass-through를 끈다. 단일 전역 폭을 쓰면 비대칭 padding에서 dead strip이 생기므로 edge별이다.
+    divider_grab_bands_pt: DividerGrabBandsPt = .{},
 };
 
 /// prev→cur surface 집합의 순수 diff(§6). Swift가 소비할 NSView 연산을 **전이(transition)**로 낸다 — 매 tick
@@ -160,7 +200,7 @@ pub fn surfaceDiff(
             // 둘 다 보임 + rect 또는 seam_edges 변경(seam 변화는 거의 rect 변화 동반이나 방어적으로 함께 비교 — Swift가
             // frame·seamEdges를 reframe에서 갱신하므로 seam-only 변화도 놓치지 않는다).
             if (!rectEql(p.content_rect, c.content_rect) or p.seam_edges != c.seam_edges or
-                p.divider_grab_band_pt != c.divider_grab_band_pt) try diff.reframed.append(gpa, c);
+                !std.meta.eql(p.divider_grab_bands_pt, c.divider_grab_bands_pt)) try diff.reframed.append(gpa, c);
         }
         // hidden→hidden: 무동작(숨은 뷰에 frame set 안 함 — §3). rect는 다음 shown에서 실림.
     }
@@ -256,6 +296,42 @@ test "pxToPt: scale_milli==0은 clamp(@max 1)로 유한 좌표(inf/NaN 방지)" 
     try testing.expect(std.math.isFinite(got.h));
 }
 
+test "divider pass-through band is only the contiguous content-edge intersection with the Zig target" {
+    const content: Rect = .{ .x = 108, .y = 54, .w = 376, .h = 288 };
+    const full_height_target = RectF64{ .x = 100, .y = 50, .w = 20, .h = 300 };
+    try testing.expectApproxEqAbs(@as(f64, 12), dividerPassThroughBandPx(content, full_height_target, .left), 1e-9);
+
+    const right_target = RectF64{ .x = 476, .y = 50, .w = 24, .h = 300 };
+    try testing.expectApproxEqAbs(@as(f64, 8), dividerPassThroughBandPx(content, right_target, .right), 1e-9);
+
+    const bottom_target = RectF64{ .x = 100, .y = 330, .w = 400, .h = 20 };
+    try testing.expectApproxEqAbs(@as(f64, 12), dividerPassThroughBandPx(content, bottom_target, .bottom), 1e-9);
+
+    // 교차축 일부만 덮거나 content edge에서 떨어진 target은 uniform native band로 표현하면 dead strip을
+    // 만들므로 0으로 fail-close한다.
+    try testing.expectEqual(@as(f64, 0), dividerPassThroughBandPx(content, .{ .x = 100, .y = 60, .w = 20, .h = 100 }, .left));
+    try testing.expectEqual(@as(f64, 0), dividerPassThroughBandPx(content, .{ .x = 90, .y = 50, .w = 10, .h = 300 }, .left));
+}
+
+test "divider pass-through remains a subset of the target across scale and padding cases" {
+    const cases = [_]struct { scale_milli: u32, padding_px: u32 }{
+        .{ .scale_milli = 1000, .padding_px = 0 },
+        .{ .scale_milli = 1500, .padding_px = 6 },
+        .{ .scale_milli = 2000, .padding_px = 40 }, // grab target보다 큰 padding → band 0
+    };
+    for (cases) |case| {
+        const target_width_px = 10.0 * @as(f64, @floatFromInt(case.scale_milli)) / 1000.0;
+        const content = Rect{ .x = 100 + case.padding_px, .y = 20, .w = 200, .h = 100 };
+        const target = RectF64{ .x = 100, .y = 20, .w = target_width_px, .h = 100 };
+        const band = dividerPassThroughBandPx(content, target, .left);
+        try testing.expect(band >= 0 and band <= target_width_px);
+        if (band > 0) {
+            const native_pass_point = @as(f64, @floatFromInt(content.x)) + band / 2;
+            try testing.expect(native_pass_point >= target.x and native_pass_point < target.x + target.w);
+        }
+    }
+}
+
 // ── ③ surface diff ──
 fn layout(sid: u64, rect: Rect, visible: bool) SurfaceLayout {
     return .{ .surface_id = sid, .panel_kind = .markdown, .content_rect = rect, .visible = visible };
@@ -340,23 +416,23 @@ test "surfaceDiff: hidden→hidden은 rect가 바뀌어도 무동작(§3 숨은 
 
 test "surfaceDiff: divider grab band-only visible change reframes; hidden latest is emitted on shown" {
     const r: Rect = .{ .x = 1, .y = 2, .w = 300, .h = 200 };
-    const prev_visible = [_]SurfaceLayout{.{ .surface_id = 11, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_band_pt = 10 }};
-    const cur_visible = [_]SurfaceLayout{.{ .surface_id = 11, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_band_pt = 0 }};
+    const prev_visible = [_]SurfaceLayout{.{ .surface_id = 11, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_bands_pt = .{ .right = 10 } }};
+    const cur_visible = [_]SurfaceLayout{.{ .surface_id = 11, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2 }};
     var changed = try surfaceDiff(testing.allocator, &prev_visible, &cur_visible);
     defer changed.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), changed.reframed.items.len);
-    try testing.expectEqual(@as(u32, 0), changed.reframed.items[0].divider_grab_band_pt);
+    try testing.expectEqual(@as(f64, 0), changed.reframed.items[0].divider_grab_bands_pt.right);
 
-    const prev_hidden = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = false, .seam_edges = 2, .divider_grab_band_pt = 0 }};
-    const cur_hidden = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = false, .seam_edges = 2, .divider_grab_band_pt = 10 }};
+    const prev_hidden = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = false, .seam_edges = 2 }};
+    const cur_hidden = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = false, .seam_edges = 2, .divider_grab_bands_pt = .{ .right = 10 } }};
     var hidden = try surfaceDiff(testing.allocator, &prev_hidden, &cur_hidden);
     defer hidden.deinit(testing.allocator);
     try testing.expect(hidden.isEmpty());
 
-    const shown = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_band_pt = 10 }};
+    const shown = [_]SurfaceLayout{.{ .surface_id = 12, .panel_kind = .markdown, .content_rect = r, .visible = true, .seam_edges = 2, .divider_grab_bands_pt = .{ .right = 10 } }};
     var show_diff = try surfaceDiff(testing.allocator, &cur_hidden, &shown);
     defer show_diff.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 10), show_diff.shown.items[0].divider_grab_band_pt);
+    try testing.expectEqual(@as(f64, 10), show_diff.shown.items[0].divider_grab_bands_pt.right);
 }
 
 test "surfaceDiff: 빈 집합 → 빈 집합은 완전 무동작" {

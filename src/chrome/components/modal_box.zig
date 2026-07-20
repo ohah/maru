@@ -1,5 +1,5 @@
 //! ModalBox — 중앙 모달 박스의 **공유 레이아웃 프리미티브**(디자인 시스템). notice(알림)·confirm(예/아니오 확인)·
-//! 향후 모달이 같은 박스 기하를 재사용한다: 폭 clamp(터미널 영역=사이드바 오른쪽), soft-lock 방지 가드, 중앙 배치,
+//! 향후 모달이 같은 박스 기하를 재사용한다: 폭 clamp(전체 작업영역=사이드바·titlebar 제외, dock 포함), soft-lock 방지 가드, 중앙 배치,
 //! 둥근 배경 quad + focus 테두리, 콘텐츠 셀 좌표 계산. 컴포넌트는 `layout`으로 Box(rect+콘텐츠 좌표)를 얻고, `frame`
 //! 으로 배경/테두리를, `text`/`fillCells`/`centerX`/`rowY`로 콘텐츠를 그 안에 배치한다 — 클램프/중앙배치 로직을
 //! 복붙하지 않고 한 곳(여기)에서만 둔다. State·handle(입력)·콘텐츠 구성(줄/버튼)은 각 컴포넌트가 소유한다.
@@ -29,8 +29,8 @@ pub const Box = struct {
 };
 
 /// 콘텐츠 크기(셀 단위)로 박스 rect·중앙배치·폭 clamp·soft-lock 가드를 계산한다(**기하 단일 출처**). null=생략
-/// (term_cols==0, 터미널 영역이 한 셀보다 좁음 — 중앙배치 뺄셈 언더플로 방지). 박스는 콘텐츠 사방에 여백
-/// (좌우 modal_margin_cells열 + 위아래 1행)을 둔다. 폭은 **터미널 영역(사이드바 오른쪽)으로 clamp**한다 — 넘으면
+/// (term_cols==0, 작업영역이 한 셀보다 좁음 — 중앙배치 뺄셈 언더플로 방지). 박스는 콘텐츠 사방에 여백
+/// (좌우 modal_margin_cells열 + 위아래 1행)을 둔다. 폭은 **전체 작업영역(terminal+divider+dock)으로 clamp**한다 — 넘으면
 /// 사이드바 침범/우측 오버플로. content_cols는 호출자가 **EAW 표시폭**(overlay_input.displayCols, 한글/CJK=2칸)으로
 /// 재서 넘겨야 placeText 배치 폭과 맞아 한글이 안 잘린다(코드포인트 수로 재면 2배 과소측정돼 클리핑).
 pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *const tokens.Tokens) ?Box {
@@ -38,6 +38,7 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
     const cw = @max(m.cell_width_px, 1);
     const ch = @max(m.cell_height_px, 1);
     const workspace = props.workspaceRect(m);
+    if (workspace.w == 0 or workspace.h == 0) return null;
     const term_w_px = workspace.w;
     const term_cols = term_w_px / cw;
     if (term_cols == 0) return null;
@@ -260,4 +261,43 @@ test "modal_box: 박스가 뷰포트보다 높으면 y를 0으로 clamp (상단/
     const p2 = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 } };
     const box2 = layout(20, 6, p2, &tk).?;
     try std.testing.expect(box2.rect.y > 0); // 중앙
+}
+
+test "modal_box: explicit workspace centers the modal across terminal and file dock" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const workspace = props.PaneRect{ .x = 200, .y = 40, .w = 1200, .h = 860 };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 10,
+        .cell_height_px = 20,
+        .sidebar_width_px = 200,
+        .backing_width_px = 1400,
+        .backing_height_px = 900,
+        .workspace_x_px = workspace.x,
+        .workspace_y_px = workspace.y,
+        .workspace_width_px = workspace.w,
+        .workspace_height_px = workspace.h,
+        .workspace_present = true,
+    } };
+    const box = layout(20, 4, p, &tk).?;
+    try std.testing.expectEqual(@as(i32, @intCast(workspace.x + workspace.w / 2)), box.rect.x + @divTrunc(@as(i32, @intCast(box.rect.w)), 2));
+    try std.testing.expectEqual(@as(i32, @intCast(workspace.y + workspace.h / 2)), box.rect.y + @divTrunc(@as(i32, @intCast(box.rect.h)), 2));
+}
+
+test "modal_box: authoritative zero-size workspace fails closed instead of using legacy backing" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 10,
+        .cell_height_px = 20,
+        .sidebar_width_px = 200,
+        .backing_width_px = 1400,
+        .backing_height_px = 900,
+        .workspace_x_px = 200,
+        .workspace_y_px = 900,
+        .workspace_width_px = 1200,
+        .workspace_height_px = 0,
+        .workspace_present = true,
+    } };
+    try std.testing.expectEqual(@as(?Box, null), layout(20, 4, p, &tk));
 }

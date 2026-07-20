@@ -16,6 +16,21 @@ const SplitRect = split_tree.Rect;
 /// gridFromBacking이 left+right·top+bottom을 grid에서 빼고, paneTermRect가 좌상으로 left/top만큼 들인다.
 pub const PaddingPx = struct { left: u32 = 0, right: u32 = 0, top: u32 = 0, bottom: u32 = 0 };
 
+/// 사각형 안쪽에 4방 padding을 적용한다. terminal grid와 WKWebView frame이 같은 산술을 소비해 두 콘텐츠의
+/// 여백이 어긋나지 않게 한다. 과대한 값은 origin/end를 원본 rect 안으로 clamp하고 크기를 0으로 saturate한다.
+pub fn insetRect(rect: SplitRect, padding: PaddingPx) SplitRect {
+    const right = rect.x +| rect.w;
+    const bottom = rect.y +| rect.h;
+    const x = @min(rect.x +| padding.left, right);
+    const y = @min(rect.y +| padding.top, bottom);
+    return .{
+        .x = x,
+        .y = y,
+        .w = (right - x) -| padding.right,
+        .h = (bottom - y) -| padding.bottom,
+    };
+}
+
 /// 드래그한 Term을 다른 pane '본문'에 떨어뜨릴 때의 가장자리 절반(④ split 재배치). left/right=좌우 split,
 /// top/bottom=상하 split.
 pub const PaneDropZone = enum { left, right, top, bottom };
@@ -157,6 +172,20 @@ test "pointInRect uses half-open bounds (탭 바·divider·pane hit-test 공유)
     try std.testing.expect(!pointInRect(180, 12, bar)); // y = y+h 제외
     try std.testing.expect(!pointInRect(179, 0, bar)); // 좌측 밖
     try std.testing.expect(!pointInRect(std.math.nan(f64), 0, bar)); // 비유한
+}
+
+test "insetRect applies asymmetric content padding and clamps an oversized inset inside the source" {
+    const rect: SplitRect = .{ .x = 100, .y = 50, .w = 400, .h = 300 };
+    try std.testing.expectEqual(
+        SplitRect{ .x = 108, .y = 54, .w = 376, .h = 288 },
+        insetRect(rect, .{ .left = 8, .right = 16, .top = 4, .bottom = 8 }),
+    );
+
+    const clamped = insetRect(rect, .{ .left = 1000, .right = 2000, .top = 3000, .bottom = 4000 });
+    try std.testing.expectEqual(rect.x + rect.w, clamped.x);
+    try std.testing.expectEqual(rect.y + rect.h, clamped.y);
+    try std.testing.expectEqual(@as(u32, 0), clamped.w);
+    try std.testing.expectEqual(@as(u32, 0), clamped.h);
 }
 
 // paneDropZone이 rect를 X자 4등분해 가장 가까운 가장자리를 고르는지(④ split 재배치 drop-zone). 순수 함수.

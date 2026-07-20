@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 135u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 136u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
@@ -1117,8 +1117,9 @@ typedef struct MaruAppHostWebSurfaceTransition {
     uint64_t surface_id; /* 앱 전역 unique·비재사용(§3) — 전이 매칭 안정 키 */
     uint32_t panel_kind; /* 0=markdown, 1=browser */
     uint32_t seam_edges; /* divider 맞닿는 가장자리 비트마스크: left=1, right=2, bottom=4 (hitTest 통과용) */
-    uint32_t divider_grab_band_pt; /* seam native pass-through 폭(logical pt), 0=비활성 */
-    uint32_t reserved;
+    double divider_grab_left_pt;   /* 최종 frame left와 실제 Zig resize target의 교집합 폭(pt) */
+    double divider_grab_right_pt;  /* 최종 frame right와 실제 Zig resize target의 교집합 폭(pt) */
+    double divider_grab_bottom_pt; /* 최종 frame bottom과 실제 Zig resize target의 교집합 폭(pt) */
     double frame_pt_x;
     double frame_pt_y;
     double frame_pt_w;

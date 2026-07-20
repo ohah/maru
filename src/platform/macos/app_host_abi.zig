@@ -1563,8 +1563,9 @@ pub const WebSurfaceTransitionAbi = extern struct {
     surface_id: u64,
     panel_kind: u32,
     seam_edges: u32, // divider 맞닿는 가장자리 비트마스크(L=1·R=2·B=4). panel_kind 뒤 f64 정렬 pad 자리 → struct size 불변(ABI v103).
-    divider_grab_band_pt: u32,
-    reserved: u32 = 0,
+    divider_grab_left_pt: f64,
+    divider_grab_right_pt: f64,
+    divider_grab_bottom_pt: f64,
     frame_pt_x: f64,
     frame_pt_y: f64,
     frame_pt_w: f64,
@@ -1599,7 +1600,9 @@ pub export fn maru_macos_app_session_web_surface_transition_at(
             .browser => 1,
         },
         .seam_edges = t.seam_edges,
-        .divider_grab_band_pt = t.divider_grab_band_pt,
+        .divider_grab_left_pt = t.divider_grab_bands_pt.left,
+        .divider_grab_right_pt = t.divider_grab_bands_pt.right,
+        .divider_grab_bottom_pt = t.divider_grab_bands_pt.bottom,
         .frame_pt_x = t.frame_pt.x,
         .frame_pt_y = t.frame_pt.y,
         .frame_pt_w = t.frame_pt.w,
@@ -4831,7 +4834,9 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "surface_id"), @offsetOf(WebSurfaceTransitionAbi, "surface_id"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "panel_kind"), @offsetOf(WebSurfaceTransitionAbi, "panel_kind"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "seam_edges"), @offsetOf(WebSurfaceTransitionAbi, "seam_edges")); // v103: panel_kind 뒤 pad 자리(size 불변)
-    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "divider_grab_band_pt"), @offsetOf(WebSurfaceTransitionAbi, "divider_grab_band_pt"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "divider_grab_left_pt"), @offsetOf(WebSurfaceTransitionAbi, "divider_grab_left_pt"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "divider_grab_right_pt"), @offsetOf(WebSurfaceTransitionAbi, "divider_grab_right_pt"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "divider_grab_bottom_pt"), @offsetOf(WebSurfaceTransitionAbi, "divider_grab_bottom_pt"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_x"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_x"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_y"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_y"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_w"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_w"));

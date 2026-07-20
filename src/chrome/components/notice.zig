@@ -110,7 +110,7 @@ test "notice view: 닫힘이면 ops 0, 열림이면 quad+text(modal)" {
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqualStrings("file corrupt", out.items[1].text.runs[0].text);
-    // 모달 박스는 터미널 영역(사이드바 오른쪽) 안, 화면 중앙쯤. 박스 기하 엣지케이스(soft-lock 가드·폭 clamp·
+    // 모달 박스는 전체 작업영역(사이드바·titlebar 제외, dock 포함) 안, 화면 중앙쯤. 박스 기하 엣지케이스(soft-lock 가드·폭 clamp·
     // rich 패딩 침범)는 modal_box.zig 테스트가 단일 출처로 커버한다(notice/confirm 공유 — 여기선 위임만 확인).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
     try std.testing.expect(out.items[0].quad.rect.w > 0);

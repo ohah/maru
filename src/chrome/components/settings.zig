@@ -436,7 +436,7 @@ const title_rows: u32 = 2; // 제목(0) + 힌트 줄(1 — "⇥ 섹션 ⇄ 설�
 /// (패널이 화면을 넘치지 않게). palette.max_visible과 같은 윈도잉 취지(여긴 뷰포트 적응형).
 fn maxVisible(p: props.ChromeProps) usize {
     const ch = @max(p.metrics.cell_height_px, 1);
-    const avail = props.workspaceRect(p.metrics).h / ch; // 도크를 뺀 화면에 들어가는 총 행
+    const avail = props.workspaceRect(p.metrics).h / ch; // dock까지 포함한 전체 작업영역에 들어가는 총 행
     return @max(@as(usize, 4), @as(usize, avail) -| 7); // 제목 2 + 위아래 여백 2 + 여유 3
 }
 

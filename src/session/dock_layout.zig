@@ -18,18 +18,20 @@ pub const min_editor_cols: u32 = 28;
 /// Artifact의 editor tab처럼 파일 수가 적을 때 바 전체를 균등분할하지 않고 읽을 수 있는 고정폭 세그먼트를 쓴다.
 /// 탭이 많아 공간이 모자랄 때만 균등 축소한다(가로 스크롤은 후속).
 pub const default_tab_cols: u16 = 18;
-/// WKWebView 안쪽 divider grab band의 logical point 폭. Zig가 ABI로 내려 Swift hitTest와 Metal divider
-/// hit rect가 같은 값을 소비한다.
+/// dock Zig divider target을 넓히는 최대 logical-point 폭. native에는 이 값을 그대로 내리지 않고,
+/// `AppSession.collectWebSurfaces`가 최종 padded frame과 이 target의 edge별 교집합만 ABI로 전달한다.
 pub const divider_grab_band_pt: u32 = 10;
 
-/// logical point SSOT를 backing pixel hit band로 올림 변환한다. Swift는 pt 값을 직접 소비하고 Zig hit-test는
-/// 이 함수만 써 1x/분수/2x scale에서도 WebView가 양보한 띠와 resize target 사이 dead band가 생기지 않는다.
+/// 위 최대 logical 폭을 Zig backing-pixel target으로 올림 변환한다. native pass-through는 이 target과
+/// final WebView frame의 교집합만 소비해 1x/분수/2x에서도 resize target 밖 dead band를 만들지 않는다.
 pub fn dividerGrabBandPx(scale_milli: u32) u32 {
     const scale = if (scale_milli == 0) 1000 else scale_milli;
     return @intCast((@as(u64, divider_grab_band_pt) * scale + 999) / 1000);
 }
 
 pub const Geometry = struct {
+    /// 사이드바와 titlebar strip만 제외한 전체 작업영역. terminal·divider·dock의 합이며 전역 모달 중심의 권위다.
+    workspace: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     terminal: Rect,
     dock: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -273,7 +275,7 @@ pub fn compute(in: Input) Geometry {
         .w = in.backing_width_px -| in.sidebar_width_px,
         .h = in.backing_height_px -| in.titlebar_height_px,
     };
-    if (!in.visible or available.w == 0 or available.h == 0) return .{ .terminal = available };
+    if (!in.visible or available.w == 0 or available.h == 0) return .{ .workspace = available, .terminal = available };
 
     const scale = if (in.scale_milli == 0) 1000 else in.scale_milli;
     const requested_pt = if (in.size_pt != 0) in.size_pt else switch (in.side) {
@@ -293,11 +295,12 @@ pub fn compute(in: Input) Geometry {
             const min_terminal = @max(2 * in.cell_width_px, layout_math.ptToPx(320, scale));
             const max_dock = available.w -| divider -| min_terminal;
             const dock_w = @min(@max(requested_px, @min(min_dock, max_dock)), max_dock);
-            if (dock_w == 0) break :right .{ .terminal = available };
+            if (dock_w == 0) break :right .{ .workspace = available, .terminal = available };
             const term_w = available.w -| divider -| dock_w;
             const dock_x = available.x + term_w + divider;
             const dock = Rect{ .x = dock_x, .y = available.y, .w = dock_w, .h = available.h };
             break :right fromDock(
+                available,
                 .{ .x = available.x, .y = available.y, .w = term_w, .h = available.h },
                 dock,
                 .{ .x = available.x + term_w, .y = available.y, .w = divider, .h = available.h },
@@ -313,11 +316,12 @@ pub fn compute(in: Input) Geometry {
             const min_terminal = @max(2 * in.cell_height_px, layout_math.ptToPx(180, scale));
             const max_dock = available.h -| divider -| min_terminal;
             const dock_h = @min(@max(requested_px, @min(min_dock, max_dock)), max_dock);
-            if (dock_h == 0) break :bottom .{ .terminal = available };
+            if (dock_h == 0) break :bottom .{ .workspace = available, .terminal = available };
             const term_h = available.h -| divider -| dock_h;
             const dock_y = available.y + term_h + divider;
             const dock = Rect{ .x = available.x, .y = dock_y, .w = available.w, .h = dock_h };
             break :bottom fromDock(
+                available,
                 .{ .x = available.x, .y = available.y, .w = available.w, .h = term_h },
                 dock,
                 .{ .x = available.x, .y = available.y + term_h, .w = available.w, .h = divider },
@@ -331,7 +335,7 @@ pub fn compute(in: Input) Geometry {
     };
 }
 
-fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32, tree_size_pt: u32) Geometry {
+fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32, tree_size_pt: u32) Geometry {
     const tab_h = @min(chrome_h, dock.h);
     const header_h = @min(chrome_h, dock.h -| tab_h);
     const body_y = dock.y + tab_h + header_h;
@@ -349,6 +353,7 @@ fn fromDock(terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_
     // (x=dock.x+content_w)이라 에디터 chrome과 세로로 겹치지 않는다(사용자 피드백: 트리가 갭 없이 위로 올라와야).
     const tree_header_h = @min(chrome_h, dock.h);
     return .{
+        .workspace = workspace,
         .terminal = terminal,
         .dock = dock,
         .divider = divider,
@@ -377,6 +382,25 @@ pub fn treeDividerHitRect(g: Geometry, hit_slop: u32) Rect {
     return .{ .x = start, .y = g.tree_divider.y, .w = end -| start, .h = g.tree_divider.h };
 }
 
+/// terminal↔dock 외곽 divider의 실제 mouse target. render 선보다 넓은 영역과 bottom 쪽 비대칭 정책을
+/// `dockDividerAtPoint`와 WebView native pass-through projection이 함께 소비한다.
+pub fn outerDividerHitRect(g: Geometry, side: dock_panel.Side, hit_slop: u32) Rect {
+    if (g.divider.w == 0 or g.divider.h == 0) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    return switch (side) {
+        .right => blk: {
+            const start = @max(g.workspace.x, g.divider.x -| hit_slop);
+            const end = @min(g.workspace.x +| g.workspace.w, g.divider.x +| g.divider.w +| hit_slop);
+            break :blk .{ .x = start, .y = g.divider.y, .w = end -| start, .h = g.divider.h };
+        },
+        // dock 쪽은 tab/header라 WebView와 맞닿지 않고, 클릭을 훔치지 않도록 terminal 쪽만 확장한다.
+        .bottom => blk: {
+            const start = @max(g.workspace.y, g.divider.y -| hit_slop);
+            const end = @min(g.workspace.y +| g.workspace.h, g.divider.y +| g.divider.h);
+            break :blk .{ .x = g.divider.x, .y = start, .w = g.divider.w, .h = end -| start };
+        },
+    };
+}
+
 /// 탐색기 폭은 도크 side와 무관하게 항상 도크 오른쪽 경계에서 잰다. 포인터→pt 변환은 `sizePtForPointer` 단일
 /// 출처를 재사용해 outer-dock resize와 rounding·센티널·clamp 규약이 갈리지 않게 한다(측정 시점 두 곳 중복 제거).
 /// min/max clamp는 `compute`가 editor/tree 가독성 하한과 함께 단일 적용하므로, 호출자는 후보를 저장한 뒤 계산된
@@ -403,6 +427,7 @@ pub fn groupGeometry(parent: Geometry, leaf: Rect) Geometry {
     const tab_h = @min(parent.tab_bar.h, leaf.h);
     const header_h = @min(parent.header.h, leaf.h -| tab_h);
     return .{
+        .workspace = parent.workspace,
         .terminal = parent.terminal,
         .dock = leaf,
         .editor = leaf,
@@ -416,16 +441,22 @@ pub fn groupGeometry(parent: Geometry, leaf: Rect) Geometry {
 /// 1px 경계선을 포인터로 잡기 쉽게 양쪽 hit_slop만큼 확장한다. 실제 divider draw는 pos 한 줄이고 hit rect만
 /// 넓다. bounds 밖으로는 saturating clamp해 인접 도크/terminal 입력을 훔치지 않는다.
 pub fn groupDividerHitRect(seg: dock_panel.DockTree.DividerSeg, hit_slop: u32) Rect {
-    return switch (seg.direction) {
+    return groupDividerHitRectAt(seg.direction, seg.bounds, seg.pos, hit_slop);
+}
+
+/// leaf edge projection이 pointer-bearing `DividerSeg`를 만들지 않고도 실제 group divider target과 같은 기하를
+/// 소비하게 하는 값 전용 코어. `groupDividerHitRect`와 WebView pass-through가 공유한다.
+pub fn groupDividerHitRectAt(direction: @import("split_tree.zig").SplitDirection, bounds: Rect, pos: u32, hit_slop: u32) Rect {
+    return switch (direction) {
         .horizontal => blk: {
-            const start = @max(seg.bounds.x, seg.pos -| hit_slop);
-            const end = @min(seg.bounds.x + seg.bounds.w, seg.pos +| hit_slop +| 1);
-            break :blk .{ .x = start, .y = seg.bounds.y, .w = end -| start, .h = seg.bounds.h };
+            const start = @max(bounds.x, pos -| hit_slop);
+            const end = @min(bounds.x + bounds.w, pos +| hit_slop +| 1);
+            break :blk .{ .x = start, .y = bounds.y, .w = end -| start, .h = bounds.h };
         },
         .vertical => blk: {
-            const start = @max(seg.bounds.y, seg.pos -| hit_slop);
-            const end = @min(seg.bounds.y + seg.bounds.h, seg.pos +| hit_slop +| 1);
-            break :blk .{ .x = seg.bounds.x, .y = start, .w = seg.bounds.w, .h = end -| start };
+            const start = @max(bounds.y, pos -| hit_slop);
+            const end = @min(bounds.y + bounds.h, pos +| hit_slop +| 1);
+            break :blk .{ .x = bounds.x, .y = start, .w = bounds.w, .h = end -| start };
         },
     };
 }
@@ -456,6 +487,7 @@ pub fn sizePtForPointer(g: Geometry, side: dock_panel.Side, x_px: f64, y_px: f64
 test "right and bottom dock geometry share terminal and chrome boundaries" {
     const base = Input{ .backing_width_px = 1600, .backing_height_px = 1000, .sidebar_width_px = 240, .titlebar_height_px = 40, .cell_width_px = 10, .cell_height_px = 20, .scale_milli = 2000, .divider_px = 4, .side = .right, .size_pt = 300, .visible = true };
     const right = compute(base);
+    try std.testing.expectEqual(Rect{ .x = 240, .y = 40, .w = 1360, .h = 960 }, right.workspace);
     try std.testing.expectEqual(@as(u32, 600), right.dock.w);
     try std.testing.expectEqual(right.divider.x + right.divider.w, right.dock.x);
     try std.testing.expectEqual(right.tab_bar.y + right.tab_bar.h, right.header.y);
@@ -465,6 +497,7 @@ test "right and bottom dock geometry share terminal and chrome boundaries" {
     try std.testing.expectEqual(right.tree.h, right.tree_header.h + right.tree_content.h);
 
     const bottom = compute(.{ .backing_width_px = base.backing_width_px, .backing_height_px = base.backing_height_px, .sidebar_width_px = base.sidebar_width_px, .titlebar_height_px = base.titlebar_height_px, .cell_width_px = base.cell_width_px, .cell_height_px = base.cell_height_px, .scale_milli = base.scale_milli, .divider_px = base.divider_px, .side = .bottom, .size_pt = 200, .visible = true });
+    try std.testing.expectEqual(right.workspace, bottom.workspace);
     try std.testing.expectEqual(@as(u32, 400), bottom.dock.h);
     try std.testing.expectEqual(bottom.divider.y + bottom.divider.h, bottom.dock.y);
     try std.testing.expectEqual(base.sidebar_width_px, bottom.dock.x);

@@ -17,11 +17,13 @@ pub const CellMetrics = struct {
     // 더한다 — 밴드 view는 슬롯 상대 좌표라 상단 헤더를 모른다(lowerSidebar의 rect.y/slot_h 행 역산과 일치).
     backing_width_px: u32,
     backing_height_px: u32,
-    // 사이드바·titlebar·전역 파일 도크를 뺀 workspace rect. 0이면 레거시 backing-sidebar로 폴백.
+    // 사이드바·titlebar만 뺀 전체 workspace rect. terminal·divider·전역 파일 도크를 모두 포함하며,
+    // 전역 모달/palette 중심의 권위다. workspace_present=false인 옛 호출자만 레거시 backing-sidebar로 폴백.
     workspace_x_px: u32 = 0,
     workspace_y_px: u32 = 0,
     workspace_width_px: u32 = 0,
     workspace_height_px: u32 = 0,
+    workspace_present: bool = false, // zero-size 권위 rect와 legacy 미지정 sentinel을 구분한다.
     // minimal 세션(사이드바·pane 탭 바 숨김)인지. C2/C3 사이드바·탭바 컴포넌트가 렌더 게이트로 읽는다
     // (chrome-strategy.md §5.5 계획). sidebar_width_px==0으로 완전 파생되진 않는다(탭 바도 숨기므로) — 별도 신호.
     chrome_minimal: bool = false,
@@ -47,13 +49,26 @@ pub const ShapeTokens = struct {
 pub const PaneRect = struct { x: u32 = 0, y: u32 = 0, w: u32 = 0, h: u32 = 0 };
 
 pub fn workspaceRect(m: CellMetrics) PaneRect {
-    if (m.workspace_width_px > 0 and m.workspace_height_px > 0) return .{
+    if (m.workspace_present) return .{
         .x = m.workspace_x_px,
         .y = m.workspace_y_px,
         .w = m.workspace_width_px,
         .h = m.workspace_height_px,
     };
     return .{ .x = m.sidebar_width_px, .y = 0, .w = m.backing_width_px -| m.sidebar_width_px, .h = m.backing_height_px };
+}
+
+test "workspaceRect distinguishes an authoritative zero-size workspace from legacy omission" {
+    const base = CellMetrics{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 200, .backing_width_px = 1200, .backing_height_px = 800 };
+    try @import("std").testing.expectEqual(PaneRect{ .x = 200, .y = 0, .w = 1000, .h = 800 }, workspaceRect(base));
+
+    var authoritative = base;
+    authoritative.workspace_x_px = 200;
+    authoritative.workspace_y_px = 40;
+    authoritative.workspace_width_px = 0;
+    authoritative.workspace_height_px = 0;
+    authoritative.workspace_present = true;
+    try @import("std").testing.expectEqual(PaneRect{ .x = 200, .y = 40, .w = 0, .h = 0 }, workspaceRect(authoritative));
 }
 
 pub const ChromeProps = struct {

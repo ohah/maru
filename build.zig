@@ -568,6 +568,18 @@ pub fn build(b: *std.Build) void {
     }
     const run_macos_app_host_abi_tests = b.addRunArtifact(macos_app_host_abi_tests);
 
+    // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
+    // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
+    // 회귀나 flaky test가 탐색기 artifact의 신호를 가리므로 전용 step으로 분리한다.
+    const macos_file_explorer_perf_tests = b.addTest(.{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"file tree production hot paths emit bounded counter artifact"},
+    });
+    const run_macos_file_explorer_perf_tests = b.addRunArtifact(macos_file_explorer_perf_tests);
+    run_macos_file_explorer_perf_tests.setCwd(b.path("."));
+    const test_macos_file_explorer_perf_step = b.step("test-macos-file-explorer-perf", "Run the macOS AppSession file-explorer performance artifact gate");
+    test_macos_file_explorer_perf_step.dependOn(&run_macos_file_explorer_perf_tests.step);
+
     const macos_app_host_abi_lib = b.addLibrary(.{
         .name = "maru-macos-app-host-abi",
         .linkage = .static,

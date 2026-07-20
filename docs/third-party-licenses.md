@@ -31,6 +31,17 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 - **상표 주의**: `mark-github.svg`는 GitHub 로고 마크다. 라이선스(MIT)와 별개로 GitHub 상표이므로, GitHub(리포·프로필)로 연결하는 표시 용도로만 쓴다(<https://github.com/logos> 가이드라인). 현재 용도(사이드바 카드의 GitHub 리포 표시)는 이 범위 안이다.
 - 배포물 내 고지 노출은 아래 "About 화면 attribution"과 같은 후속으로 묶는다(현재는 리포 내 라이선스 파일 + 이 문서로 기록).
 
+### Maru 자작 Explorer 아이콘
+
+아래 19종은 이 Explorer scrollbar/icon 작업에서 처음 만든 **Maru 원본 자산**이며 외부 SVG를 복사·변형하지 않았다. 자산 세트 이름/버전은 `Maru Explorer Icons v1`, source는 이 저장소의 해당 파일, 라이선스는 Maru 본체와 같은 MIT([LICENSE](../LICENSE)), 저작권자는 Maru contributors다. 따라서 third-party 고지 대상은 아니지만 provenance가 모호해지지 않도록 여기에 고정한다.
+
+| 분류 | 파일 |
+| --- | --- |
+| 공통/파일 형식 | `recent.svg`, `folder-open.svg`, `file.svg`, `file-code.svg`, `test.svg`, `document.svg`, `image.svg`, `file-config.svg`, `archive.svg`, `package.svg`, `web.svg`, `data.svg` |
+| 의미 폴더 | `folder-source.svg`, `folder-test.svg`, `folder-docs.svg`, `folder-assets.svg`, `folder-config.svg`, `folder-dependency.svg`, `folder-output.svg` |
+
+`tools/svg_to_coverage.py`의 manifest는 각 exact path/codepoint/SHA-256을 커밋된 Zig 데이터에 기록한다. 기본 Zig test는 외부 도구 없이 실제 SVG SHA-256과 C/Zig registry를 검증하고, `mise run icons:check`는 `rsvg-convert`/Pillow가 있는 개발 환경에서 SVG→coverage 재생성 drift까지 확인하는 opt-in gate다.
+
 ## 파일 패널 웹 런타임
 
 FP4부터 `web/dist/bundle.js`가 앱 `Resources/web/`에 포함된다. 직접 런타임 의존성은 DOMPurify, Mermaid, remark/unified·rehype 계열, KaTeX, Prism 계열과 CodeMirror 6이며 exact 버전은 `web/package.json`·`bun.lock`이 단일 출처다. 실제 번들에 들어갈 수 있는 transitive production graph의 이름·버전·SPDX와 license/notice 전문은 build가 `Resources/web/THIRD_PARTY_NOTICES.txt`로 생성한다.

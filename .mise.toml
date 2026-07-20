@@ -78,6 +78,10 @@ run = "zig build macos-app-host-abi-lib"
 description = "Type-check the Swift macOS app host"
 run = "zig build macos-app-host-swift-check"
 
+[tasks.macos-file-explorer-perf]
+description = "Run the macOS AppSession file-explorer performance artifact gate"
+run = "zig build test-macos-file-explorer-perf"
+
 [tasks.macos-mermaid-helper-build]
 description = "Build the isolated Mermaid renderer helper"
 run = "zig build macos-mermaid-helper-build"
@@ -177,6 +181,10 @@ run = "zig fmt --check build.zig src tests tools"
 [tasks.check-boundaries]
 description = "Check facade import boundaries"
 run = "zig build check-boundaries"
+
+[tasks."icons:check"]
+description = "Regenerate explorer icon coverage in memory and fail on SVG/hash/C/Zig registry drift"
+run = "python3 tools/svg_to_coverage.py --check"
 
 [tasks.check]
 description = "Check format, tests, boundaries, and build"

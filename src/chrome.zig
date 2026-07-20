@@ -13,6 +13,7 @@ pub const props = @import("chrome/props.zig");
 pub const input = @import("chrome/input.zig");
 pub const state = @import("chrome/state.zig");
 pub const host = @import("chrome/host.zig");
+pub const file_tree_icon = @import("chrome/file_tree_icon.zig");
 
 pub const ChromeHost = host.ChromeHost;
 pub const ChromeState = state.ChromeState;
@@ -39,6 +40,7 @@ pub const components = struct {
     pub const color = @import("chrome/components/color.zig"); // 설정 폼 위젯 — 색 스와치 + 16색 프리셋(CS-4-2)
     pub const settings = @import("chrome/components/settings.zig"); // schema-주도 세팅 모달(CS-4-4)
     pub const shortcut_hints = @import("chrome/components/shortcut_hints.zig"); // 모디파이어 홀드 단축키 힌트 HUD(패시브 — 입력 비소비, KH-1)
+    pub const file_tree_scrollbar = @import("chrome/components/file_tree_scrollbar.zig"); // 탐색기 render/hit/track/drag 공용 순수 geometry
 };
 
 test {

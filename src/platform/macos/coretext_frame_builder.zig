@@ -6,6 +6,7 @@ const renderer = maru.renderer;
 const terminal = maru.terminal;
 const tabbar = maru.chrome.components.tabbar; // C4b-4: 탭 셀 경계 단일 소스(제목·✕가 hit-test·밴드와 같은 분할)
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
+const file_tree_icon = maru.chrome.file_tree_icon;
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
 const file_tree = maru.session.file_tree;
@@ -892,12 +893,17 @@ pub fn buildFileTreeDrawList(
         // that row (marker, title, dirty/conflict state) must therefore use the paired contrast color;
         // retaining per-row muted/active colors makes light accents unreadable.
         if (selected) style.foreground = selection.?.foreground;
-        const indent: u16 = @min(file_tree_inset_cols +| depth *| 2, cols -| 1);
-        if (indent < cols) try cells.append(allocator, .{ .row = r, .col = indent, .codepoint = marker, .width = 1, .style = style });
-        const state_cols: u16 = (if (dirty) @as(u16, 2) else 0) + (if (conflict) @as(u16, 2) else 0);
+        const state_cols: u16 = if (conflict) 4 else if (dirty) 2 else 0;
         const end = cols -| state_cols;
-        if (indent +| 2 < end)
-            _ = try appendEllipsizedTitle(allocator, &cells, label, r, indent + 2, end, style, false, .head);
+        const indent: u16 = @min(file_tree_inset_cols +| depth *| 2, cols -| 1);
+        if (indent < end) try cells.append(allocator, .{ .row = r, .col = indent, .codepoint = marker, .width = 1, .style = style });
+        const icon = file_tree_icon.codepointFromRaw(file_tree.rowIconKind(row));
+        const icon_col = indent +| 2;
+        if (icon) |cp| if (icon_col < end)
+            try cells.append(allocator, .{ .row = r, .col = icon_col, .codepoint = cp, .width = 1, .style = style });
+        const label_col = if (icon != null) icon_col +| 2 else icon_col;
+        if (label_col < end)
+            _ = try appendEllipsizedTitle(allocator, &cells, label, r, label_col, end, style, false, .head);
         if (dirty and cols >= 2)
             try cells.append(allocator, .{ .row = r, .col = cols - 2, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = if (selected) selection.?.foreground else active_fg } });
         if (conflict and cols >= 4)
@@ -1500,6 +1506,19 @@ test "icon_codepoints.h(C 게이트)와 Zig 등록 아이콘 집합이 일치한
     try std.testing.expectEqual(renderer.icon_glyph.registeredIconCount(), c_count); // 개수 동일 → set 동일
 }
 
+test "every semantic file tree icon lowers to a registered synthesized glyph" {
+    inline for (std.meta.fields(file_tree_icon.IconKind)) |field| {
+        const kind: file_tree_icon.IconKind = @enumFromInt(field.value);
+        const cp = file_tree_icon.codepoint(kind);
+        if (kind == .none) {
+            try std.testing.expect(cp == null);
+        } else {
+            try std.testing.expect(cp != null);
+            try std.testing.expect(renderer.icon_glyph.isRegisteredIcon(cp.?));
+        }
+    }
+}
+
 test "buildPaneTabBarDrawList lays Term titles horizontally into equal-width tab segments" {
     const allocator = std.testing.allocator;
     // cols=20 → 우측 "+" zone 3칸 떼고 탭 영역 17, 2탭 → tab_w=8. 탭 0은 col [0,8), 탭 1은 [8,16). 각 탭 1칸 좌패딩 뒤 제목.
@@ -2095,6 +2114,76 @@ test "file tree focused selection applies its theme contrast color to every row 
         if (cell.codepoint == '!') saw_conflict = true;
     }
     try std.testing.expect(saw_marker and saw_label and saw_dirty and saw_conflict);
+}
+
+test "file tree icons occupy one cell between disclosure and label without state overlap" {
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const selected_fg: terminal.Color = .{ .rgb = .{ .r = 0x10, .g = 0x20, .b = 0x30 } };
+    const rows = [_]file_tree.Row{.{ .file = .{
+        .path = "/tmp/README.md",
+        .label = "README.md",
+        .depth = 1,
+        .supported = true,
+        .open = true,
+        .active = false,
+        .dirty = true,
+        .external_change = true,
+        .symlink = false,
+        .icon_kind = @intFromEnum(file_tree_icon.IconKind.document),
+    } }};
+    var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 16, dim, dim, .{
+        .index = 0,
+        .foreground = selected_fg,
+    });
+    defer dl.deinit(allocator);
+    var saw_icon = false;
+    var saw_label = false;
+    for (dl.cells) |cell| {
+        try std.testing.expect(cell.col < 16);
+        try std.testing.expectEqual(selected_fg, cell.style.foreground);
+        if (cell.codepoint == 0xF0011) {
+            saw_icon = true;
+            try std.testing.expectEqual(@as(u16, 5), cell.col);
+        }
+        if (cell.codepoint == 'R') {
+            saw_label = true;
+            try std.testing.expectEqual(@as(u16, 7), cell.col);
+        }
+    }
+    try std.testing.expect(saw_icon and saw_label);
+
+    var narrow = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 7, dim, dim, null);
+    defer narrow.deinit(allocator);
+    for (narrow.cells, 0..) |cell, i| {
+        try std.testing.expect(cell.col < 7);
+        for (narrow.cells[i + 1 ..]) |other| try std.testing.expect(cell.row != other.row or cell.col != other.col);
+    }
+}
+
+test "file tree disclosure icon label and state cells never overlap at narrow widths" {
+    const allocator = std.testing.allocator;
+    for (1..18) |cols_usize| for (0..5) |depth| for (0..4) |state| {
+        const rows = [_]file_tree.Row{.{ .file = .{
+            .path = "/tmp/a.zig",
+            .label = "a.zig",
+            .depth = @intCast(depth),
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = state & 1 != 0,
+            .external_change = state & 2 != 0,
+            .symlink = false,
+            .icon_kind = @intFromEnum(file_tree_icon.IconKind.code),
+        } }};
+        const cols: u16 = @intCast(cols_usize);
+        var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, cols, .default, .default, null);
+        defer dl.deinit(allocator);
+        for (dl.cells, 0..) |cell, i| {
+            try std.testing.expect(cell.col < cols);
+            for (dl.cells[i + 1 ..]) |other| try std.testing.expect(cell.row != other.row or cell.col != other.col);
+        }
+    };
 }
 
 // 활성 탭(행/세그먼트) 제목은 active_fg + bold, 나머지는 fg + regular로 그려지는지 — 활성 탭 글자 강조.

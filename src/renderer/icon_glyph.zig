@@ -8,8 +8,8 @@
 //! **등록된 codepoint만**(`isRegisteredIcon`) 가로채고, 미등록 PUA는 폰트로 폴백한다 — 터미널 콘텐츠의 Nerd Fonts
 //! MDI 글리프가 blank가 되지 않게. C 셰이핑 게이트(coretext_smoke.m `maru_is_synthesized_glyph`)도 같은 등록 집합을
 //! 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다(어긋나면 그 글리프가 blank). 등록된
-//! ~10개(현재 0xF0001~0xF000A)가 Nerd Fonts MDI와 정확히 겹칠 때만 maru 아이콘으로 가로채진다 — 아이콘 폰트 라우팅
-//! 인프라를 안 만든 대가의 좁은(10 codepoint) 트레이드오프.
+//! 생성 manifest에 등록된 작은 집합만 Nerd Fonts MDI와 정확히 겹칠 때 maru 아이콘으로 가로채진다 — 아이콘 폰트
+//! 라우팅 인프라를 안 만든 대가를 registry membership으로 좁게 한정한다.
 
 const std = @import("std");
 const gp = @import("glyph_pixels.zig");
@@ -89,6 +89,7 @@ test "icon_glyph: isRegisteredIcon은 coverage 있는 cp만 true(범위 내 미�
     try std.testing.expect(isRegisteredIcon(0xF0001)); // git_branch(등록)
     try std.testing.expect(isRegisteredIcon(0xF0009)); // mark_github(등록)
     try std.testing.expect(isRegisteredIcon(0xF000A)); // folder(등록)
+    try std.testing.expect(isRegisteredIcon(0xF001E)); // explorer folder-output(등록)
     try std.testing.expect(!isRegisteredIcon(0xF0050)); // 범위 내 미등록(Nerd Fonts MDI 등) — false
     try std.testing.expect(!isRegisteredIcon(0x251C)); // 범위 밖
 }
@@ -110,4 +111,22 @@ test "icon_glyph: 미등록 PUA는 null(폰트 경로로 폴백)" {
     var pixels: [36 * 18 * 4]u8 = undefined;
     // 미등록 cp는 null → synthesizeGlyph가 그대로 반환 → 폰트 경로(Nerd Fonts MDI 등). 0(빈 ink)이 아니다.
     try std.testing.expectEqual(@as(?u32, null), fillCoverage(0xF0050, w, h, bpr, &pixels));
+}
+
+test "icon_glyph: committed SVG assets match the generated manifest without external tools" {
+    try std.testing.expectEqual(data.icons.len, data.asset_manifest.len);
+    for (data.asset_manifest, 0..) |asset, index| {
+        try std.testing.expectEqual(data.icons[index].cp, asset.cp);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(
+            std.testing.io,
+            asset.path,
+            std.testing.allocator,
+            .limited(256 * 1024),
+        );
+        defer std.testing.allocator.free(bytes);
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        const actual = std.fmt.bytesToHex(digest, .lower);
+        try std.testing.expectEqualStrings(asset.sha256, &actual);
+    }
 }

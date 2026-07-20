@@ -14,6 +14,8 @@ const dock_drag = maru.session.dock_drag;
 const file_tree = maru.session.file_tree;
 const file_tree_navigation = maru.session.file_tree_navigation;
 const file_tree_mutation = maru.session.file_tree_mutation;
+const file_tree_icon = chrome.file_tree_icon;
+const file_tree_scrollbar = chrome.components.file_tree_scrollbar;
 const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
@@ -1521,9 +1523,26 @@ const PointerGestureOwner = union(enum) {
     pane_divider: struct { split: *PaneTree.Split, seg: chrome.components.divider.Seg },
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
+    file_tree_scrollbar: struct {
+        geometry: file_tree_scrollbar.Geometry,
+        grab_y: f32,
+        root_generation: u64,
+        projection_generation: u64,
+    },
     address_selection,
 };
 const file_tree_trash_capacity: usize = 16;
+
+const FileTreePerfCounters = struct {
+    row_visits: usize = 0,
+    classifier_calls: usize = 0,
+    pointer_events: usize = 0,
+    geometry_builds: usize = 0,
+    projected_frames: usize = 0,
+    thumb_quads: usize = 0,
+    allocator_calls: usize = 0,
+    dock_layout_rebuilds: usize = 0,
+};
 
 /// OS 클립보드 1회성 동작 신호(input.right-click paste·menu). Zig가 우클릭/터미널 메뉴에서 세우고, Swift가 매 tick
 /// take_clipboard_action으로 drain해 실행한다(copy=copySelectionToPasteboard, paste=pastePasteboardText). ABI는
@@ -2318,6 +2337,12 @@ pub const AppSession = struct {
     file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
     file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty,
     file_tree_scroll_rows: usize = 0,
+    file_tree_scrollbar_idle_ticks: u32 = default_scrollbar_visible_ticks + default_scrollbar_fade_ticks,
+    file_tree_scrollbar_last_rows: usize = 0,
+    file_tree_scrollbar_hovered: bool = false,
+    file_tree_scrollbar_geometry: ?file_tree_scrollbar.Geometry = null,
+    file_tree_projection_generation: u64 = 1,
+    file_tree_perf_counters: ?*FileTreePerfCounters = null,
     // path+row-kind가 selection SSOT다. index는 rebuild에서 fallback/scroll 보정에만 쓰는 힌트이며 영속하지 않는다.
     file_tree_selection: file_tree_navigation.Selection = .{},
     // fileTreeRowAt과 같은 visible-row index. hoverCursor가 갱신하고 GPU row 배경이 소비한다.
@@ -3060,7 +3085,7 @@ pub const AppSession = struct {
     /// divider gesture도 먼저 취소해 late drag/up이 해제된 노드를 역참조하지 못하게 한다.
     fn invalidateDockDragGeometry(self: *AppSession) void {
         switch (self.pointer_gesture_owner) {
-            .dock_tab, .dock_outer_divider, .dock_tree_divider, .dock_group_divider => self.cancelPointerGesture(),
+            .dock_tab, .dock_outer_divider, .dock_tree_divider, .dock_group_divider, .file_tree_scrollbar => self.cancelPointerGesture(),
             else => self.cancelDockEntryDrag(),
         }
         self.advanceDockLayoutGeneration();
@@ -9535,6 +9560,54 @@ pub const AppSession = struct {
         }
         try rows.ensureTotalCapacity(allocator, file_tree.max_materialized_nodes + file_tree.max_recent + file_tree.max_roots + 1);
         try tree.buildRows(allocator, open_states.items, rows);
+        classifyFileTreeRows(rows.items);
+    }
+
+    fn classifyFileTreeRows(rows: []file_tree.Row) void {
+        classifyFileTreeRowsCounted(rows, null);
+    }
+
+    fn classifyFileTreeRowsCounted(rows: []file_tree.Row, counters: ?*FileTreePerfCounters) void {
+        for (rows) |*row| switch (row.*) {
+            .recent_header => |*v| {
+                if (counters) |value| {
+                    value.row_visits += 1;
+                    value.classifier_calls += 1;
+                }
+                v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_header, "", !v.collapsed));
+            },
+            .recent_file => |*v| {
+                if (counters) |value| {
+                    value.row_visits += 1;
+                    value.classifier_calls += 1;
+                }
+                v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_file, v.label, false));
+            },
+            .root => |*v| {
+                if (counters) |value| {
+                    value.row_visits += 1;
+                    value.classifier_calls += 1;
+                }
+                v.icon_kind = @intFromEnum(file_tree_icon.classify(.root, v.label, v.expanded));
+            },
+            .directory => |*v| {
+                if (counters) |value| {
+                    value.row_visits += 1;
+                    value.classifier_calls += 1;
+                }
+                v.icon_kind = @intFromEnum(file_tree_icon.classify(.directory, v.label, v.expanded));
+            },
+            .file => |*v| {
+                if (counters) |value| {
+                    value.row_visits += 1;
+                    value.classifier_calls += 1;
+                }
+                v.icon_kind = @intFromEnum(file_tree_icon.classify(.file, v.label, false));
+            },
+            .empty => {
+                if (counters) |value| value.row_visits += 1;
+            },
+        };
     }
 
     fn refreshFileTreeWatchRoots(self: *AppSession) !void {
@@ -9562,6 +9635,7 @@ pub const AppSession = struct {
             });
         }
         tree.buildRows(self.allocator, self.file_tree_open_states.items, rows) catch unreachable;
+        classifyFileTreeRows(rows.items);
     }
 
     /// root/watch/rows의 모든 allocation이 끝난 뒤 세 authority를 한 번에 무실패 교체한다.
@@ -9577,6 +9651,7 @@ pub const AppSession = struct {
         candidate_rows.* = .empty;
         candidate.deinit();
         candidate.* = file_tree.Tree.init(self.allocator);
+        self.advanceFileTreeProjectionGeneration();
         self.file_tree_rows_dirty = false;
         self.file_tree_watch_reset_pending = true;
     }
@@ -9874,6 +9949,7 @@ pub const AppSession = struct {
                 }
             }
             try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
+            classifyFileTreeRows(self.file_tree_rows.items);
             self.reconcileFileTreeSelection();
             const visible_rows = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
             self.file_tree_scroll_rows = @min(
@@ -9881,6 +9957,7 @@ pub const AppSession = struct {
                 self.file_tree_rows.items.len -| @as(usize, visible_rows),
             );
             self.file_tree_hovered_row = null;
+            self.advanceFileTreeProjectionGeneration();
             self.file_tree_rows_dirty = false;
             self.metal_dirty = true;
         }
@@ -10513,6 +10590,7 @@ pub const AppSession = struct {
         if (!self.dockVisible() or self.cell_height_px == 0) return null;
         const tree_rect = self.dockGeometry().tree_content;
         if (!layout_math.pointInRect(x_px, y_px, tree_rect)) return null;
+        if (self.fileTreeScrollbarGeometry()) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
         const local: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(tree_rect.y))) /
             @as(f64, @floatFromInt(self.cell_height_px)));
         const visible_rows = tree_rect.h / self.cell_height_px;
@@ -10536,6 +10614,102 @@ pub const AppSession = struct {
     fn fileTreeEffectiveScroll(self: *const AppSession) usize {
         const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
         return @min(self.file_tree_scroll_rows, self.file_tree_rows.items.len -| @as(usize, visible));
+    }
+
+    fn fileTreeScrollbarGeometry(self: *const AppSession) ?file_tree_scrollbar.Geometry {
+        return self.file_tree_scrollbar_geometry;
+    }
+
+    fn refreshFileTreeScrollbarGeometry(self: *AppSession) void {
+        if (self.file_tree_perf_counters) |counters| {
+            counters.projected_frames += 1;
+            counters.geometry_builds += 1;
+        }
+        self.file_tree_scrollbar_geometry = self.computeFileTreeScrollbarGeometry();
+    }
+
+    fn advanceFileTreeProjectionGeneration(self: *AppSession) void {
+        self.file_tree_projection_generation +%= 1;
+        if (self.file_tree_projection_generation == 0) self.file_tree_projection_generation = 1;
+        self.file_tree_scrollbar_geometry = null;
+        self.file_tree_scrollbar_hovered = false;
+        if (self.pointerGestureIs(.file_tree_scrollbar)) self.cancelPointerGesture();
+    }
+
+    fn computeFileTreeScrollbarGeometry(self: *const AppSession) ?file_tree_scrollbar.Geometry {
+        if (!self.dockVisible() or self.cell_height_px == 0) return null;
+        const rect = self.dockGeometry().tree_content;
+        const visible: usize = @intCast(rect.h / self.cell_height_px);
+        return file_tree_scrollbar.compute(
+            self.file_tree_rows.items.len,
+            visible,
+            self.fileTreeEffectiveScroll(),
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+        );
+    }
+
+    fn setFileTreeScrollbarHovered(self: *AppSession, hovered: bool) void {
+        if (self.file_tree_scrollbar_hovered == hovered) return;
+        self.file_tree_scrollbar_hovered = hovered;
+        self.metal_dirty = true;
+    }
+
+    fn setFileTreeScrollRows(self: *AppSession, rows: usize) void {
+        const current = self.fileTreeEffectiveScroll();
+        const geometry = self.fileTreeScrollbarGeometry() orelse return;
+        const next = @min(rows, geometry.max_scroll);
+        if (next == current) return;
+        self.file_tree_scroll_rows = next;
+        self.file_tree_scrollbar_geometry = geometry.withScroll(next);
+        self.file_tree_hovered_row = null;
+        self.file_tree_scrollbar_idle_ticks = 0;
+        self.file_tree_scrollbar_last_rows = next;
+        self.metal_dirty = true;
+    }
+
+    fn beginFileTreeScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
+        const geometry = self.fileTreeScrollbarGeometry() orelse return false;
+        if (!geometry.trackContains(x_px, y_px)) return false;
+        const on_thumb = geometry.thumbContains(x_px, y_px);
+        const grab_y = if (on_thumb) @as(f32, @floatCast(y_px)) - geometry.thumb_y else geometry.thumb_h / 2;
+        if (!on_thumb) self.setFileTreeScrollRows(file_tree_scrollbar.scrollForTrackClick(geometry, y_px));
+        const current = self.fileTreeScrollbarGeometry() orelse return false;
+        self.beginPointerGesture(.{ .file_tree_scrollbar = .{
+            .geometry = current,
+            .grab_y = grab_y,
+            .root_generation = self.file_tree.rootGeneration(),
+            .projection_generation = self.file_tree_projection_generation,
+        } });
+        self.file_tree_scrollbar_idle_ticks = 0;
+        self.metal_dirty = true;
+        return true;
+    }
+
+    fn dragFileTreeScrollbarTo(self: *AppSession, y_px: f64) void {
+        const drag = switch (self.pointer_gesture_owner) {
+            .file_tree_scrollbar => |value| value,
+            else => return,
+        };
+        if (self.file_tree_perf_counters) |counters| counters.pointer_events += 1;
+        if (!std.math.isFinite(y_px)) {
+            self.cancelPointerGesture();
+            return;
+        }
+        const current = self.fileTreeScrollbarGeometry() orelse {
+            self.cancelPointerGesture();
+            return;
+        };
+        if (drag.root_generation != self.file_tree.rootGeneration() or
+            drag.projection_generation != self.file_tree_projection_generation or
+            !drag.geometry.sameSnapshot(current))
+        {
+            self.cancelPointerGesture();
+            return;
+        }
+        self.setFileTreeScrollRows(file_tree_scrollbar.scrollForPointer(drag.geometry, y_px, drag.grab_y));
     }
 
     fn fileTreeFocused(self: *const AppSession) bool {
@@ -16749,9 +16923,8 @@ pub const AppSession = struct {
             const next = @as(i64, @intCast(self.fileTreeEffectiveScroll())) - @as(i64, lines);
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
             if (clamped != self.file_tree_scroll_rows) {
-                self.file_tree_scroll_rows = clamped;
+                self.setFileTreeScrollRows(clamped);
                 self.setHoveredFileTreeRow(self.fileTreeRowAt(x_px, y_px));
-                self.metal_dirty = true;
             }
             return;
         }
@@ -17433,6 +17606,10 @@ pub const AppSession = struct {
         // 스크롤바 thumb 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 마우스 y를 view_offset으로
         // 매핑(스크롤), up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그(또는 일반 클릭)를 시작한다. 다른
         // 드래그 가드처럼 x가 영역 밖으로 나가도 캡처를 유지한다(thumb를 잡았으면 끝까지 따라간다).
+        if (self.pointerGestureIs(.file_tree_scrollbar) and (kind == 2 or kind == 3)) {
+            if (kind == 2) self.dragFileTreeScrollbarTo(y_px) else self.finishPointerGesture();
+            return;
+        }
         if (self.pointerGestureIs(.scrollbar) and (kind == 2 or kind == 3)) {
             if (kind == 2) self.dragScrollbarTo(y_px) else {
                 self.finishPointerGesture();
@@ -17498,6 +17675,7 @@ pub const AppSession = struct {
                     self.metal_dirty = true;
                     return;
                 }
+                if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
                     if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
                         self.focusFileTree();
@@ -19310,6 +19488,7 @@ pub const AppSession = struct {
         // 스크롤바 hover 강조를 매 이동 갱신한다(어느 zone이든 — 아래 early return 전에 항상). scrollbarGrabAt이
         // 영역+스크롤백 유무를 본다(우측 얇은 띠). 커서 종류는 안 바꾼다(얇은 띠라 iBeam 깜빡임 방지) — 강조만.
         self.setScrollbarHovered(self.scrollbarGrabAt(x_px, y_px) != null);
+        self.setFileTreeScrollbarHovered(if (self.fileTreeScrollbarGeometry()) |geometry| geometry.trackContains(x_px, y_px) else false);
         // Phase 7e-4: browser 주소창 밴드 nav 버튼 호버도 매 이동 갱신한다(스크롤바 호버처럼 아래 early return 전에 항상 —
         // 사이드바/탭 바로 나가면 밴드 밖이라 null이 되어 stale 하이라이트가 안 남는다). 밴드는 chrome 영역이라 어느
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
@@ -20879,6 +21058,7 @@ pub const AppSession = struct {
         old_file_tree.deinit();
         old_file_tree_open_states.deinit(self.allocator);
         old_file_tree_rows.deinit(self.allocator);
+        self.advanceFileTreeProjectionGeneration();
         self.file_tree_rows_dirty = false;
         self.file_tree_watch_reset_pending = true;
         // 고정-prefix 불변식 강제(복원): clampMoveToGroup/countPinnedTabs는 "고정 탭이 앞쪽 [0, pinned_count)에
@@ -21160,6 +21340,7 @@ pub const AppSession = struct {
         try self.resizeActiveTabPanes();
         self.recomputeActivePaneRect(); // backing/grid가 바뀌었으니 활성 panel rect(좌표 origin)도 갱신
         self.last_resize_size = size;
+        self.refreshFileTreeScrollbarGeometry();
         // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
         self.metal_dirty = true;
         self.writeSummaryFromState();
@@ -21632,6 +21813,7 @@ pub const AppSession = struct {
         const core_snap = self.readActiveSnapshot(drain_summary.output_events == 0 and self.appearance.blink_text);
         if (drain_summary.output_events > 0) self.resetCursorBlink() else self.updateCursorBlink(core_snap);
         self.dispatchBell(); // BEL 1회 drain → audible/visual/dock-badge 분배(아래 frame이 flash·페이드 그림)
+        self.refreshFileTreeScrollbarGeometry(); // frame당 geometry build 1회; fade/render는 같은 snapshot만 소비한다.
         self.updateScrollbarFade(); // 스크롤바 fade: view_offset 변화/hover/드래그로 full↔faint(appendScrollbar 전에 갱신)
         // 활성 surface가 직전 tick과 바뀌면 sync 게이트 baseline 3개(last_rendered_esu·last_rendered_view_offset·
         // sync_hold_ticks)가 전부 단일 AppSession 필드라 이전 surface 값이 남는다. 비교 대상(sync_esu_count·view_offset·
@@ -21877,6 +22059,7 @@ pub const AppSession = struct {
             self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.appendSidebarScrollbar(); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
+            self.appendFileTreeScrollbar(); // 탐색기 overflow-only thumb — render/hit/drag 공용 geometry
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
@@ -22324,6 +22507,7 @@ pub const AppSession = struct {
                     };
                     if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
                         const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
+                        const tree_content_cols: u16 = @intCast(@min(dg.tree_content.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
                         const visible_rows: u16 = @intCast(@min(dg.tree_content.h / self.cell_height_px, @as(u32, std.math.maxInt(u16))));
                         const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                         const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
@@ -22336,36 +22520,49 @@ pub const AppSession = struct {
                                 } });
                             } else |_| {}
                         }
-                        if (tree_cols > 0 and visible_rows > 0) {
-                            const tree_edit_text = if (self.rename) |renaming|
-                                if (renaming == .file_tree) self.renameEditText(self.allocator) catch null else null
+                        if (tree_content_cols > 0 and visible_rows > 0) {
+                            const reserved_cols: u16 = if (self.fileTreeScrollbarGeometry() != null)
+                                @intCast(@min(
+                                    file_tree_scrollbar.reservedColumns(dg.tree_content.w, self.cell_width_px),
+                                    @as(u32, std.math.maxInt(u16)),
+                                ))
                             else
-                                null;
-                            defer if (tree_edit_text) |owned| self.allocator.free(owned);
-                            const tree_edit: ?coretext_frame_builder.FileTreeEdit = if (self.rename) |renaming|
-                                if (renaming == .file_tree and tree_edit_text != null) .{
-                                    .identity = .{ .kind = renaming.file_tree.row_kind, .path = renaming.file_tree.path() },
-                                    .text = tree_edit_text.?,
-                                } else null
-                            else
-                                null;
-                            if (coretext_frame_builder.buildFileTreeDrawList(
-                                self.allocator,
-                                self.file_tree_rows.items,
-                                tree_edit,
-                                self.fileTreeEffectiveScroll(),
-                                visible_rows,
-                                tree_cols,
-                                dock_fg,
-                                dock_active_fg,
-                                file_tree_selection_paint,
-                            )) |tdl| {
-                                self.collectShaped(&collected, tdl, pane_frame_builder, .{ .pane = .{
-                                    .origin_x = dg.tree_content.x,
-                                    .origin_y = dg.tree_content.y,
-                                    .colors = tabbar_colors,
-                                } });
-                            } else |_| {}
+                                0;
+                            const content_cols = tree_content_cols -| reserved_cols;
+                            file_tree_rows: {
+                                // If an externally damaged/tiny layout cannot fit one full content cell beside the
+                                // scrollbar, draw no row glyphs instead of letting the track cover the only cell.
+                                if (content_cols == 0) break :file_tree_rows;
+                                const tree_edit_text = if (self.rename) |renaming|
+                                    if (renaming == .file_tree) self.renameEditText(self.allocator) catch null else null
+                                else
+                                    null;
+                                defer if (tree_edit_text) |owned| self.allocator.free(owned);
+                                const tree_edit: ?coretext_frame_builder.FileTreeEdit = if (self.rename) |renaming|
+                                    if (renaming == .file_tree and tree_edit_text != null) .{
+                                        .identity = .{ .kind = renaming.file_tree.row_kind, .path = renaming.file_tree.path() },
+                                        .text = tree_edit_text.?,
+                                    } else null
+                                else
+                                    null;
+                                if (coretext_frame_builder.buildFileTreeDrawList(
+                                    self.allocator,
+                                    self.file_tree_rows.items,
+                                    tree_edit,
+                                    self.fileTreeEffectiveScroll(),
+                                    visible_rows,
+                                    content_cols,
+                                    dock_fg,
+                                    dock_active_fg,
+                                    file_tree_selection_paint,
+                                )) |tdl| {
+                                    self.collectShaped(&collected, tdl, pane_frame_builder, .{ .pane = .{
+                                        .origin_x = dg.tree_content.x,
+                                        .origin_y = dg.tree_content.y,
+                                        .colors = tabbar_colors,
+                                    } });
+                                } else |_| {}
+                            }
                         }
                     }
                 }
@@ -23690,6 +23887,20 @@ pub const AppSession = struct {
             self.sidebar_scrollbar_idle_ticks += 1;
             if (self.sidebar_scrollbar_idle_ticks > visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
         }
+        if (self.fileTreeScrollbarGeometry() == null) {
+            self.file_tree_scrollbar_idle_ticks = fade_done_ticks;
+            self.file_tree_scrollbar_last_rows = self.fileTreeEffectiveScroll();
+        } else if (self.fileTreeEffectiveScroll() != self.file_tree_scrollbar_last_rows) {
+            self.file_tree_scrollbar_last_rows = self.fileTreeEffectiveScroll();
+            if (self.file_tree_scrollbar_idle_ticks != 0) self.metal_dirty = true;
+            self.file_tree_scrollbar_idle_ticks = 0;
+        } else if (self.file_tree_scrollbar_hovered or self.pointerGestureIs(.file_tree_scrollbar)) {
+            if (self.file_tree_scrollbar_idle_ticks != 0) self.metal_dirty = true;
+            self.file_tree_scrollbar_idle_ticks = 0;
+        } else if (self.file_tree_scrollbar_idle_ticks < fade_done_ticks) {
+            self.file_tree_scrollbar_idle_ticks += 1;
+            if (self.file_tree_scrollbar_idle_ticks > visible_ticks) self.metal_dirty = true;
+        }
     }
 
     /// down 좌표가 활성 pane 스크롤바(thumb 또는 트랙)에 있으면 잡은 grab offset(y_px - thumb_top, px)을 돌려준다.
@@ -23950,6 +24161,31 @@ pub const AppSession = struct {
             .gradient_kind = 0,
             .layer = 3, // over — 셀·밴드 위. dropQuadsByLayer(3)가 per-frame 비움(pane 스크롤바와 짝).
         }) catch {};
+    }
+
+    fn appendFileTreeScrollbar(self: *AppSession) void {
+        const geometry = self.fileTreeScrollbarGeometry() orelse return;
+        const emphasized = self.file_tree_scrollbar_hovered or self.pointerGestureIs(.file_tree_scrollbar);
+        const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.file_tree_scrollbar_idle_ticks);
+        const color = packRgbAlpha(self.mutedForeground(), alpha);
+        const radius = geometry.track_w * 0.5;
+        self.gpu_quads.append(self.allocator, .{
+            .x = geometry.track_x,
+            .y = geometry.thumb_y,
+            .w = geometry.track_w,
+            .h = geometry.thumb_h,
+            .corner_radii = .{ radius, radius, radius, radius },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = color,
+            .fill_color1 = color,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 3,
+        }) catch {
+            if (self.file_tree_perf_counters) |counters| counters.allocator_calls += 1;
+            return;
+        };
+        if (self.file_tree_perf_counters) |counters| counters.thumb_quads += 1;
     }
 
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
@@ -38171,6 +38407,152 @@ test "file tree header and populated blank left click are inert while right clic
     try std.testing.expect(session.file_tree_background_menu);
     try std.testing.expectEqualStrings("작업공간에 폴더 추가…", session.contextMenuItems()[2]);
     session.closeContextMenu();
+}
+
+test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
+    for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
+    session.refreshFileTreeScrollbarGeometry();
+    const top = session.fileTreeScrollbarGeometry().?;
+    try std.testing.expectEqual(@as(usize, 0), top.scroll_rows);
+    const tree_content = session.dockGeometry().tree_content;
+    const total_cols = tree_content.w / session.cell_width_px;
+    const reserved_cols = file_tree_scrollbar.reservedColumns(tree_content.w, session.cell_width_px);
+    const last_content_right = tree_content.x + (total_cols -| reserved_cols) * session.cell_width_px;
+    try std.testing.expect(@as(f32, @floatFromInt(last_content_right)) <= top.track_x);
+    try std.testing.expect(session.beginFileTreeScrollbarGesture(
+        top.track_x + top.track_w / 2,
+        top.track_y + top.track_h - 1,
+    ));
+    try std.testing.expect(session.pointerGestureIs(.file_tree_scrollbar));
+    try std.testing.expect(session.fileTreeEffectiveScroll() > 0);
+    session.dragFileTreeScrollbarTo(top.track_y);
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
+    session.dragFileTreeScrollbarTo(std.math.nan(f64));
+    try std.testing.expect(session.pointerGestureIs(.none));
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
+
+    // Root authority is part of the drag snapshot. A late move after replacement must not commit.
+    const restarted = session.fileTreeScrollbarGeometry().?;
+    try std.testing.expect(session.beginFileTreeScrollbarGesture(restarted.track_x, restarted.thumb_y));
+    try session.file_tree.replaceExplicitRoots(&.{"/different"});
+    session.dragFileTreeScrollbarTo(top.track_y + top.track_h);
+    try std.testing.expect(session.pointerGestureIs(.none));
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
+
+    session.refreshFileTreeScrollbarGeometry();
+    const current = session.fileTreeScrollbarGeometry().?;
+    try std.testing.expect(session.beginFileTreeScrollbarGesture(current.track_x, current.thumb_y));
+    session.advanceFileTreeProjectionGeneration();
+    try std.testing.expect(session.pointerGestureIs(.none));
+
+    session.file_tree_rows.clearRetainingCapacity();
+    session.file_tree_rows.appendAssumeCapacity(.empty);
+    session.refreshFileTreeScrollbarGeometry();
+    try std.testing.expect(session.fileTreeScrollbarGeometry() == null);
+}
+
+test "file tree production hot paths emit bounded counter artifact" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.ensureTotalCapacity(allocator, file_tree.max_materialized_nodes);
+    for (0..file_tree.max_materialized_nodes) |_| session.file_tree_rows.appendAssumeCapacity(.{ .file = .{
+        .path = "/repo/src/main.zig",
+        .label = "main.zig",
+        .depth = 1,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+    } });
+
+    var counters: FileTreePerfCounters = .{};
+    AppSession.classifyFileTreeRowsCounted(session.file_tree_rows.items, &counters);
+    try std.testing.expectEqual(file_tree.max_materialized_nodes, counters.row_visits);
+    try std.testing.expectEqual(counters.row_visits, counters.classifier_calls);
+    for (session.file_tree_rows.items) |row|
+        try std.testing.expectEqual(@intFromEnum(file_tree_icon.IconKind.code), file_tree.rowIconKind(row));
+
+    session.refreshFileTreeScrollbarGeometry();
+    const geometry = session.fileTreeScrollbarGeometry().?;
+    try session.gpu_quads.ensureUnusedCapacity(allocator, 1);
+    try std.testing.expect(session.beginFileTreeScrollbarGesture(geometry.track_x, geometry.thumb_y));
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    session.allocator = counting.allocator();
+    session.file_tree_perf_counters = &counters;
+    const pointer_layout_builds = session.dock_layout_build_count;
+    for (0..1000) |event| {
+        const y = geometry.track_y + @as(f32, @floatFromInt(event % @as(usize, @intFromFloat(geometry.track_h))));
+        session.dragFileTreeScrollbarTo(y);
+    }
+    counters.dock_layout_rebuilds = session.dock_layout_build_count - pointer_layout_builds;
+    try std.testing.expectEqual(pointer_layout_builds, session.dock_layout_build_count);
+    session.finishPointerGesture();
+
+    for (0..1000) |_| {
+        session.dropQuadsByLayer(3);
+        session.refreshFileTreeScrollbarGeometry();
+        session.appendFileTreeScrollbar();
+    }
+    session.file_tree_perf_counters = null;
+    session.allocator = allocator;
+    counters.allocator_calls = counting.allocations;
+
+    try std.testing.expectEqual(@as(usize, 1000), counters.pointer_events);
+    try std.testing.expectEqual(@as(usize, 1000), counters.projected_frames);
+    try std.testing.expectEqual(counters.projected_frames, counters.geometry_builds);
+    try std.testing.expectEqual(counters.projected_frames, counters.thumb_quads);
+    try std.testing.expectEqual(@as(usize, 0), counters.allocator_calls);
+    try std.testing.expectEqual(@as(usize, 0), counters.dock_layout_rebuilds);
+
+    const report = try std.fmt.allocPrint(allocator,
+        \\maru.file-explorer-perf.v1
+        \\rows={d}
+        \\row_visits={d}
+        \\classifier_calls={d}
+        \\pointer_events={d}
+        \\projected_frames={d}
+        \\geometry_builds={d}
+        \\thumb_quads={d}
+        \\allocator_calls={d}
+        \\dock_layout_rebuilds={d}
+        \\
+    , .{
+        file_tree.max_materialized_nodes,
+        counters.row_visits,
+        counters.classifier_calls,
+        counters.pointer_events,
+        counters.projected_frames,
+        counters.geometry_builds,
+        counters.thumb_quads,
+        counters.allocator_calls,
+        counters.dock_layout_rebuilds,
+    });
+    defer allocator.free(report);
+    try std.Io.Dir.cwd().createDirPath(session.io, "tests/artifacts/perf");
+    try std.Io.Dir.cwd().writeFile(session.io, .{
+        .sub_path = "tests/artifacts/perf/file-explorer.txt",
+        .data = report,
+    });
 }
 
 test "file tree row staging OOM leaves live root rows and watcher authority unchanged" {

@@ -10,23 +10,54 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  # 기본 게이트: 의존성 없이 fmt-check, unit, e2e, recorded oracle, stress,
-  # facade import 경계, build 를 한 번에 검증한다(.mise.toml 의 check 태스크).
+  # 기본 게이트: fmt-check, unit, e2e, recorded oracle, stress, facade import 경계와 build를
+  # 한 번에 검증한다. SVG hash/C·Zig registry는 외부 도구 없이 Zig test가 검증한다.
   check:
     name: check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
       - run: mise run check
       - name: Upload check artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: maru-check-artifacts
           path: tests/artifacts/**
           if-no-files-found: warn
+          retention-days: 14
+
+  # AppSession 제품 glue는 macOS에서만 활성화된다. Ubuntu의 기본 test가 이 경로를
+  # skip하므로 별도 PR job에서 16,384-row/1,000-event 탐색기 artifact를 실행한다.
+  file-explorer-macos:
+    name: file explorer macOS product path
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      - run: mise run macos-file-explorer-perf
+      - name: Upload file explorer performance artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-file-explorer-macos-artifacts
+          path: tests/artifacts/perf/file-explorer.txt
+          if-no-files-found: error
           retention-days: 14
 
   # 외부 reference 오라클(opt-in). 손으로 기록한 golden을 실제 VT 구현과 대조한다.
@@ -37,8 +68,13 @@ jobs:
     name: external oracles (libvterm, Alacritty)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
 
       - name: Install libvterm
         run: sudo apt-get update && sudo apt-get install -y libvterm-dev
@@ -53,7 +89,7 @@ jobs:
         run: mise run oracle-alacritty
       - name: Upload external oracle artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: maru-external-oracle-artifacts
           path: tests/artifacts/**

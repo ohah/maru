@@ -65,9 +65,9 @@ pub const OpenState = struct {
 };
 
 pub const Row = union(enum) {
-    recent_header: struct { collapsed: bool, count: u8 },
+    recent_header: struct { collapsed: bool, count: u8, icon_kind: u8 = 0 },
     recent_file: FileRow,
-    root: struct { path: []const u8, label: []const u8, expanded: bool, loading: bool, identity: ?Identity = null },
+    root: struct { path: []const u8, label: []const u8, expanded: bool, loading: bool, identity: ?Identity = null, icon_kind: u8 = 0 },
     directory: DirectoryRow,
     file: FileRow,
     empty: void,
@@ -80,6 +80,7 @@ pub const Row = union(enum) {
         loading: bool,
         symlink: bool,
         identity: ?Identity = null,
+        icon_kind: u8 = 0,
     };
 
     pub const FileRow = struct {
@@ -93,8 +94,22 @@ pub const Row = union(enum) {
         external_change: bool,
         symlink: bool,
         identity: ?Identity = null,
+        icon_kind: u8 = 0,
     };
 };
+
+/// L3 classifier result stored on the immutable row snapshot without importing the upper layer.
+/// Zero means unclassified/none; AppSession annotates every newly projected row exactly once.
+pub fn rowIconKind(row: Row) u8 {
+    return switch (row) {
+        .recent_header => |v| v.icon_kind,
+        .recent_file => |v| v.icon_kind,
+        .root => |v| v.icon_kind,
+        .directory => |v| v.icon_kind,
+        .file => |v| v.icon_kind,
+        .empty => 0,
+    };
+}
 
 /// 렌더 row의 위치와 분리된 transient selection identity. async scan·접기·watcher rebuild 뒤에도
 /// 같은 대상이면 선택을 복원할 수 있도록 path와 의미 종류만 사용한다. `path`는 Row/Tree가 소유한 borrowed slice다.

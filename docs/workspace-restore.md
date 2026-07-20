@@ -8,6 +8,12 @@ workspace restore는 "실행 중이던 shell process를 그대로 냉동했다�
 
 운영체제의 process, PTY file descriptor, foreground job은 앱을 끄면 사라진다. 이것을 그대로 저장할 수 없다.
 
+> 이 설명은 **현재 구현의 선언적 restore**에 대한 것이다. 향후
+> [영속 터미널 세션 호스트](persistent-session-host.md)가 구현되면 `Maru.app` GUI가 PTY를 저장하는 것이 아니라,
+> 별도 `maru-sessiond` 프로세스가 live PTY·child·`TerminalCore`를 계속 소유하고 새 GUI가 `runtime_handle`로 attach한다.
+> 이 연속성은 host와 runtime이 살아 있을 때만 성립한다. host/runtime 종료 뒤 provider resume/fork나 동일 세션 복구는
+> 제공하지 않으며, 이 문서로 새 shell을 여는 동작도 기존 실행 세션의 연속으로 설명하지 않는다.
+
 Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 
 ```text
@@ -28,6 +34,22 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 ```
 
 **web Term(4e)은 저장하지 않는다.** `workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고(포맷에 kind 추가는 Phase 5), sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn되므로 `captureWorkspaceTab`이 web Term을 **스킵**한다. 한 pane이 web Term만 가진 경우(모든 terminal Term을 닫음) surfaces가 비면 복원이 `error.EmptyPane`으로 전체를 중단하므로, 그 pane엔 **기본 셸 placeholder 하나**를 넣어 기본 로그인 셸로 복원한다(브라우저 콘텐츠·URL은 어차피 미영속). web 콘텐츠 영속은 Phase 5(콘텐츠·브리지)와 함께 포맷에 kind를 더해 다룬다. **구현 완료(2026-07-20, ABI v137)**: Explorer UX 보강은 기존 window line에 열린 빈 도크용 `dock-presented=1`과 explicit root의 단일 length-framed `dock-tree-roots` field를 추가했다. root field가 없으면 inferred이고 `0:` payload는 explicit-empty다. 유효한 `0:`만으로는 도크 표시를 파생하지 않지만, 손상된 root field는 explicit-empty로 강등하면서 field 존재가 나타낸 표시 의도를 보존하며 terminal과 dock entry를 폐기하지 않는다. 복원은 root를 canonical/no-follow identity로 검증하고 missing/invalid root만 버린 뒤 rows와 safety watcher를 함께 stage하며, root validation이 pending이면 restore를 거부한다. 전체 apply의 fail-index OOM 검증은 기존 tab/dock/root/rows/watch를 원자적으로 보존한다(상세 단일 출처=[file-panel.md](file-panel.md) §5·§7). Markdown entry mode와 dirty content 미영속 계약은 그대로다.
+
+## 영속 session host와의 관계 (계획, 미구현)
+
+workspace restore와 persistent-session attach는 서로 대체하지 않는다.
+
+| 상태 | 시작 동작 |
+| --- | --- |
+| 같은 `host_id/runtime_id`가 살아 있음 | 새 shell을 spawn하지 않고 기존 runtime attach |
+| manifest에는 있으나 runtime이 없음 | 종료 placeholder. 자동 command·provider resume/fork 없음 |
+| host가 없음·종료됨·재부팅됨 | 기존 handle은 ended. 새 shell을 열 수는 있지만 동일 session continuation 아님 |
+| host에만 runtime이 남음 | 삭제하지 않고 `Recovered Sessions`에서 복구 |
+
+현재 `maru.workspace.v1`에는 `runtime_handle`/`workspace_binding_id`가 없다. 구현 PR은 key-addressed optional scalar로
+안전하게 표현 가능한지 먼저 증명하고, 구조 변경이 필요하면 v2 migration/fallback 영향을 사용자와 논의한다. 또한 정상 종료
+한 번에만 저장하는 현재 방식은 GUI crash 직전 layout을 잃을 수 있으므로, 영속 session 기본 전환 전에 구조 mutation을
+atomic incremental checkpoint로 저장해야 한다. 세부 소유권·ID·접속 실패 행렬은 persistent-session 문서를 따른다.
 
 ## 자동 복구와 명령 재실행은 다르다
 
@@ -61,6 +83,10 @@ Workspace restore는 provider 세션 id·트랜스크립트·argv를 수집하�
 이 필드를 쓰지 않는 read-old/write-new 방식으로, 기존 파일을 열 수 있으면서 한 번 저장한 파일에서는 provider 식별자와
 argv가 자연스럽게 사라진다. `workspace.restore-claude`와 `workspace.restore-codex`는 한 릴리스 동안 deprecated
 no-op으로 읽고 UI에서는 숨긴다. 상태 표시의 새 경계는 [에이전트 상태 감지](agent-session.md)가 단일 출처다.
+
+이 호환 reader/no-op/과거 hook cleanup은 아직 코드에 남아 있다. persistent-session 계획 P1에서 실제 코드를 제거하고,
+그 PR이 통과할 때 이 단락과 `configuration.md`를 “deprecated”가 아니라 “제거됨”으로 함께 갱신한다. host/runtime 종료를
+이 legacy provider 경로로 복구하는 fallback은 만들지 않는다.
 
 ## command 관련 용어
 

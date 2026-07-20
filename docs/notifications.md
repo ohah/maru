@@ -15,6 +15,20 @@
 두 소스는 `AppSession.pendingNotification()` 한 funnel로 합류한다(에이전트 큐를 OSC보다 먼저 드레인). 반환은
 `{ title, body, surface_id, foreground_banner }`(`PendingNotification`) — Swift가 tick마다 poll한다.
 
+### 영속 session host와 GUI 종료 상태 (계획, 미구현)
+
+현재 funnel은 `AppSession`/Swift가 살아 있어야 하므로 앱을 완전히 종료하면 알림을 전달하지 못한다.
+[영속 터미널 세션 호스트](persistent-session-host.md) P4는 다음 경계를 추가하며, 이 gate 전에는
+`session.keep-alive-after-quit=true`를 기본값으로 바꾸지 않는다.
+
+- OSC 9/777 parsing과 bounded pending event는 `TerminalCore`와 함께 `maru-sessiond`가 소유한다.
+- GUI가 붙어 있으면 현재 `PendingNotification` funnel로 변환하되, 새 GUI `surface_id`는 현재 `runtime_handle` binding에서 찾는다.
+- GUI가 없으면 signed app bundle의 macOS notification sink가 OS 배너를 게시하고, 다음 GUI가 host의 bounded pending
+  history를 인앱 알림 이력으로 가져간다.
+- 배너 클릭 cold launch는 tmux/provider ID가 아니라 Maru `runtime_handle`로 attach한다.
+- 구조화된 완료 신호가 없는 agent completion은 계속 deprecated no-op이다. host가 `running → idle`을 완료로 추측하지 않는다.
+- 실제 `.app` 종료 상태의 OSC 발화→배너→클릭→정확한 runtime attach가 자동/수동 artifact로 증명돼야 P4 완료다.
+
 **모든 pane·Term을 본다(핵심)**: 두 소스 모두 활성(보이는) surface만이 아니라 **모든 탭의 모든 split pane·모든 가로탭
 (Term)**을 본다 — 에이전트는 `pollAgentKinds`가 탭당 활성 Term 하나만이 아니라 모든 Term을 poll하고(예전엔 활성 Term만
 poll해 background pane/Term 완료가 아예 알림 안 됐다), OSC는 `pendingNotification`이 `activeSurface().core`만이 아니라 모든

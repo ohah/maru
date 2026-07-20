@@ -18,6 +18,16 @@
 터미널 밖의 private 상태를 읽지 않는 대신 설치가 필요 없고, 같은 cwd의 여러 세션·중첩 프로세스·provider 포맷
 변경에 결합되지 않는다. 상태는 **화면에 드러난 사용자 관점**이며 provider 내부 상태의 증명은 아니다.
 
+## 영속 session host와의 관계
+
+[영속 터미널 세션 호스트](persistent-session-host.md)가 구현되면 Claude/Codex가 이어지는 이유는 provider session ID를
+저장·resume/fork해서가 아니라, 그 프로세스가 붙은 동일 PTY runtime을 `maru-sessiond`가 계속 소유하기 때문이다.
+host 또는 agent process가 끝나면 그 실행 세션도 끝난 것이며 provider 복구는 하지 않는다.
+
+현재 한 릴리스 호환을 위해 남아 있는 workspace legacy agent 필드, restore 설정 no-op, 과거 hook cleanup은
+persistent-session P1에서 제거한다. 실제 코드 제거 PR이 이 문서의 마이그레이션 절을 함께 “제거됨”으로 갱신하기 전에는
+완료로 표시하지 않는다. live foreground process/screen observer와 `Term.agent_kind/agent_state`는 session restore가 아니므로 유지한다.
+
 ## 관측 입력
 
 Term별 observer는 다음 입력을 함께 사용한다.

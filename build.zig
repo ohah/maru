@@ -731,6 +731,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
         macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
+        macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MermaidRendererPage.swift"));
         macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MaruMermaidRenderer.swift"));
         macos_mermaid_helper_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_mermaid_helper_compile.addArgs(&.{
@@ -759,6 +760,7 @@ pub fn build(b: *std.Build) void {
         });
         macos_mermaid_smoke_compile.addFileArg(b.path("tests/macos_mermaid_helper_smoke.h"));
         macos_mermaid_smoke_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
+        macos_mermaid_smoke_compile.addFileArg(b.path("src/platform/macos/MermaidRendererPage.swift"));
         macos_mermaid_smoke_compile.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
         macos_mermaid_smoke_compile.addFileArg(b.path("tests/macos_mermaid_helper_smoke.swift"));
         macos_mermaid_smoke_compile.addFileArg(macos_mermaid_smoke_abi_lib.getEmittedBin());
@@ -788,6 +790,7 @@ pub fn build(b: *std.Build) void {
             "summary=zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json; " ++
                 "test -f \"$summary\"; " ++
                 "rg -q '\"passed\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
+                "rg -q '\"blank_document_base_url_is_nil\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
                 "rg -q '\"helper_starts_at_most_three\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
                 "rg -q '\"termination_acknowledged_exactly\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++
                 "rg -q '\"no_read_shutdown_bounded\"[[:space:]]*:[[:space:]]*true' \"$summary\"; " ++

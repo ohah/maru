@@ -32,22 +32,6 @@ struct MaruMermaidRenderer {
         RunLoop.current.run()
     }
 
-    private static func makeBridgeFreeWebView() -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        // userContentController에 handler를 하나도 추가하지 않는 것이 앱 bridge 부재의 구조적 보장이다.
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.loadHTMLString(
-            """
-            <!doctype html><meta charset="utf-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; connect-src 'none'; img-src data:; style-src 'unsafe-inline'">
-            <body></body>
-            """,
-            baseURL: URL(string: "maru-mermaid://renderer/")
-        )
-        return webView
-    }
-
     private static func consume(_ data: Data) {
         guard let decoder, decoder.feed(data) else { Darwin.exit(4) }
         while true {
@@ -74,7 +58,7 @@ struct MaruMermaidRenderer {
                     }
                     // HelloAck는 WebKit cold-start와 무관한 process/protocol liveness다. ACK 뒤에만
                     // ephemeral bridge-free renderer를 만들고, 그동안 들어온 Request는 main queue에서 대기한다.
-                    retainedWebView = makeBridgeFreeWebView()
+                    retainedWebView = MermaidRendererPage.makeWebView()
                 case UInt32(MARU_MERMAID_TAG_REQUEST):
                     guard helperInstance == frame.helper_instance else { Darwin.exit(6) }
                     let source = frame.body_ptr.map {

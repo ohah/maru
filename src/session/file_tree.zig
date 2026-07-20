@@ -40,7 +40,22 @@ pub const EntryInput = struct {
 };
 
 pub const IdentityKind = enum(u8) { regular = 1, directory = 2, symlink = 3, other = 4 };
-pub const Identity = struct { device: u64, inode: u64, kind: u8 };
+pub const Identity = struct {
+    device: u64,
+    inode: u64,
+    kind: u8,
+
+    pub fn eql(self: Identity, other: Identity) bool {
+        return self.device == other.device and self.inode == other.inode and self.kind == other.kind;
+    }
+};
+
+pub const RootMode = enum(u8) { inferred, explicit };
+
+pub const RootCapability = struct {
+    path: []const u8,
+    identity: Identity,
+};
 
 pub const OpenState = struct {
     path: []const u8,
@@ -236,10 +251,34 @@ const Node = struct {
         allocator.free(self.path);
         self.* = undefined;
     }
+
+    fn clone(self: *const Node, allocator: std.mem.Allocator) !Node {
+        var copy: Node = .{
+            .name = try allocator.dupe(u8, self.name),
+            .path = undefined,
+            .kind = self.kind,
+            .identity = self.identity,
+            .loaded = self.loaded,
+            .expanded = self.expanded,
+            .loading = self.loading,
+        };
+        errdefer allocator.free(copy.name);
+        copy.path = try allocator.dupe(u8, self.path);
+        errdefer allocator.free(copy.path);
+        errdefer {
+            for (copy.children.items) |*child| child.deinit(allocator);
+            copy.children.deinit(allocator);
+        }
+        try copy.children.ensureTotalCapacity(allocator, self.children.items.len);
+        for (self.children.items) |*child| copy.children.appendAssumeCapacity(try child.clone(allocator));
+        return copy;
+    }
 };
 
 pub const Tree = struct {
     allocator: std.mem.Allocator,
+    root_mode: RootMode = .inferred,
+    root_generation: u64 = 1,
     roots: std.ArrayList(Node) = .empty,
     recent: std.ArrayList([]u8) = .empty, // oldest → newest; row projection reverses it.
     recent_collapsed: bool = false,
@@ -264,10 +303,103 @@ pub const Tree = struct {
         self.* = undefined;
     }
 
+    /// 루트 교체·파일 열기처럼 여러 L3/L4 상태를 함께 바꾸는 호출자가 실패 가능한 준비를 별도 후보에서
+    /// 끝낸 뒤 무실패 swap할 수 있도록 현재 snapshot을 깊은 복제한다. 파일시스템 I/O는 하지 않는다.
+    pub fn clone(self: *const Tree) !Tree {
+        var copy = Tree.init(self.allocator);
+        errdefer copy.deinit();
+        copy.root_mode = self.root_mode;
+        copy.root_generation = self.root_generation;
+        copy.recent_collapsed = self.recent_collapsed;
+
+        try copy.roots.ensureTotalCapacity(self.allocator, self.roots.items.len);
+        for (self.roots.items) |*root| copy.roots.appendAssumeCapacity(try root.clone(self.allocator));
+        try clonePathList(self.allocator, self.recent.items, &copy.recent);
+        try clonePathList(self.allocator, self.scan_requests.items, &copy.scan_requests);
+        try clonePathList(self.allocator, self.watch_requests.items, &copy.watch_requests);
+        if (self.reveal_path) |path| copy.reveal_path = try self.allocator.dupe(u8, path);
+        return copy;
+    }
+
+    /// replace/add/remove는 기존 materialized subtree를 곧 버리므로 16K node 전체를 복제하지 않는다.
+    /// root metadata(identity 포함)와 recent만 O(root+recent)로 복제하고 모든 root를 lazy rescan한다.
+    pub fn cloneForRootTransaction(self: *const Tree) !Tree {
+        var copy = Tree.init(self.allocator);
+        errdefer copy.deinit();
+        copy.root_mode = self.root_mode;
+        copy.root_generation = self.root_generation;
+        copy.recent_collapsed = self.recent_collapsed;
+        try copy.roots.ensureTotalCapacity(self.allocator, self.roots.items.len);
+        try copy.scan_requests.ensureTotalCapacity(self.allocator, self.roots.items.len);
+        for (self.roots.items) |root| {
+            const path = try self.allocator.dupe(u8, root.path);
+            errdefer self.allocator.free(path);
+            const name = try self.allocator.dupe(u8, root.name);
+            errdefer self.allocator.free(name);
+            const scan = try self.allocator.dupe(u8, root.path);
+            errdefer self.allocator.free(scan);
+            copy.roots.appendAssumeCapacity(.{
+                .name = name,
+                .path = path,
+                .kind = .directory,
+                .identity = root.identity,
+                .expanded = true,
+                .loading = true,
+            });
+            copy.scan_requests.appendAssumeCapacity(scan);
+        }
+        try clonePathList(self.allocator, self.recent.items, &copy.recent);
+        if (self.reveal_path) |path| copy.reveal_path = try self.allocator.dupe(u8, path);
+        return copy;
+    }
+
     /// 아직 열거할 project root나 다시 열 수 있는 recent entry가 있는가. L4는 이 값으로 마지막 파일 탭을
     /// 닫은 뒤에도 빈 editor group과 tree를 유지하되, 앱 시작의 완전히 빈 dock은 숨긴다.
     pub fn hasContent(self: *const Tree) bool {
         return self.roots.items.len > 0 or self.recent.items.len > 0;
+    }
+
+    pub fn rootMode(self: *const Tree) RootMode {
+        return self.root_mode;
+    }
+
+    pub fn rootGeneration(self: *const Tree) u64 {
+        return self.root_generation;
+    }
+
+    pub fn rootCount(self: *const Tree) usize {
+        return self.roots.items.len;
+    }
+
+    pub fn rootAt(self: *const Tree, index: usize) ?[]const u8 {
+        return if (index < self.roots.items.len) self.roots.items[index].path else null;
+    }
+
+    /// 파일 행을 열기 직전에 L4가 namespace capability를 재검증할 수 있도록, 해당 path를
+    /// 소유하는 가장 구체적인 pinned root를 돌려준다. identity가 아직 없는 inferred/lazy root는
+    /// 권한으로 사용할 수 없으므로 fail closed한다.
+    pub fn rootCapabilityForPath(self: *const Tree, path: []const u8) ?RootCapability {
+        var best: ?RootCapability = null;
+        for (self.roots.items) |root| {
+            const identity = root.identity orelse continue;
+            if (!pathWithin(path, root.path)) continue;
+            if (best == null or root.path.len > best.?.path.len) best = .{
+                .path = root.path,
+                .identity = identity,
+            };
+        }
+        return best;
+    }
+
+    /// root picker worker가 canonical directory fd에서 얻은 identity를 publish 후보에 고정한다.
+    /// 이후 첫 scan이 같은 path의 교체를 감지하면 snapshot을 적용하지 않는다.
+    pub fn pinRootIdentity(self: *Tree, path: []const u8, identity: Identity) bool {
+        for (self.roots.items) |*root| {
+            if (!std.mem.eql(u8, root.path, path)) continue;
+            root.identity = identity;
+            return true;
+        }
+        return false;
     }
 
     pub fn shouldExcludeName(name: []const u8) bool {
@@ -281,9 +413,36 @@ pub const Tree = struct {
         if (file_path.len == 0 or root_path.len == 0 or !std.fs.path.isAbsolute(file_path) or
             !std.fs.path.isAbsolute(root_path)) return error.InvalidPath;
         const reveal = try self.allocator.dupe(u8, file_path);
-        errdefer self.allocator.free(reveal);
-        try self.ensureRoot(root_path);
-        try self.pushRecent(file_path);
+        var recent_owned: ?[]u8 = null;
+        var recent_index: ?usize = null;
+        for (self.recent.items, 0..) |path, i| if (std.mem.eql(u8, path, file_path)) {
+            recent_index = i;
+            break;
+        };
+        if (recent_index == null) {
+            recent_owned = self.allocator.dupe(u8, file_path) catch |err| {
+                self.allocator.free(reveal);
+                return err;
+            };
+        }
+        self.recent.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+            self.allocator.free(reveal);
+            if (recent_owned) |owned| self.allocator.free(owned);
+            return err;
+        };
+        if (self.root_mode == .inferred) self.ensureRoot(root_path) catch |err| {
+            self.allocator.free(reveal);
+            if (recent_owned) |owned| self.allocator.free(owned);
+            return err;
+        };
+        if (recent_index) |i| {
+            const owned = self.recent.orderedRemove(i);
+            self.recent.appendAssumeCapacity(owned);
+        } else {
+            if (self.recent.items.len >= max_recent) self.allocator.free(self.recent.orderedRemove(0));
+            self.recent.appendAssumeCapacity(recent_owned.?);
+            recent_owned = null;
+        }
         if (self.reveal_path) |old| self.allocator.free(old);
         self.reveal_path = reveal;
         self.continueReveal() catch {};
@@ -343,6 +502,133 @@ pub const Tree = struct {
         });
         self.scan_requests.appendAssumeCapacity(scan_path);
         self.watch_requests.appendAssumeCapacity(watch_path);
+        self.bumpRootGeneration();
+    }
+
+    fn bumpRootGeneration(self: *Tree) void {
+        self.root_generation +%= 1;
+        if (self.root_generation == 0) self.root_generation = 1;
+    }
+
+    /// Canonical absolute roots로 explicit snapshot을 원자 교체한다. 기존 expanded snapshot은 root 변경의
+    /// correctness 권위가 아니므로 버리고 새 lazy scan을 예약한다.
+    pub fn replaceExplicitRoots(self: *Tree, paths: []const []const u8) !void {
+        if (paths.len > max_roots) return error.TooManyRoots;
+        var staged_roots: std.ArrayList(Node) = .empty;
+        var staged_scans: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (staged_roots.items) |*root| root.deinit(self.allocator);
+            staged_roots.deinit(self.allocator);
+            for (staged_scans.items) |path| self.allocator.free(path);
+            staged_scans.deinit(self.allocator);
+        }
+        try staged_roots.ensureTotalCapacity(self.allocator, paths.len);
+        try staged_scans.ensureTotalCapacity(self.allocator, paths.len);
+        for (paths) |path| {
+            if (path.len == 0 or path.len > std.fs.max_path_bytes or !std.fs.path.isAbsolute(path) or
+                !std.unicode.utf8ValidateSlice(path)) return error.InvalidPath;
+            var covered = false;
+            for (staged_roots.items) |root| if (pathWithin(path, root.path)) {
+                covered = true;
+                break;
+            };
+            if (covered) continue;
+            var i: usize = 0;
+            while (i < staged_roots.items.len) {
+                if (!pathWithin(staged_roots.items[i].path, path)) {
+                    i += 1;
+                    continue;
+                }
+                var removed = staged_roots.orderedRemove(i);
+                removed.deinit(self.allocator);
+                self.allocator.free(staged_scans.orderedRemove(i));
+            }
+            const owned_path = try self.allocator.dupe(u8, path);
+            errdefer self.allocator.free(owned_path);
+            const owned_name = try self.allocator.dupe(u8, std.fs.path.basename(path));
+            errdefer self.allocator.free(owned_name);
+            const scan_path = try self.allocator.dupe(u8, path);
+            errdefer self.allocator.free(scan_path);
+            var preserved_identity: ?Identity = null;
+            for (self.roots.items) |root| if (std.mem.eql(u8, root.path, path)) {
+                preserved_identity = root.identity;
+                break;
+            };
+            staged_roots.appendAssumeCapacity(.{
+                .name = owned_name,
+                .path = owned_path,
+                .kind = .directory,
+                .identity = preserved_identity,
+                .expanded = true,
+                .loading = true,
+            });
+            staged_scans.appendAssumeCapacity(scan_path);
+        }
+        for (self.roots.items) |*root| root.deinit(self.allocator);
+        self.roots.deinit(self.allocator);
+        for (self.scan_requests.items) |path| self.allocator.free(path);
+        self.scan_requests.deinit(self.allocator);
+        self.roots = staged_roots;
+        self.scan_requests = staged_scans;
+        staged_roots = .empty;
+        staged_scans = .empty;
+        self.root_mode = .explicit;
+        self.bumpRootGeneration();
+    }
+
+    pub fn addExplicitRoot(self: *Tree, path: []const u8) !void {
+        var paths: [max_roots + 1][]const u8 = undefined;
+        for (self.roots.items, 0..) |root, i| paths[i] = root.path;
+        paths[self.roots.items.len] = path;
+        try self.replaceExplicitRoots(paths[0 .. self.roots.items.len + 1]);
+    }
+
+    pub fn removeExplicitRoot(self: *Tree, path: []const u8) !bool {
+        var paths: [max_roots][]const u8 = undefined;
+        var n: usize = 0;
+        var found = false;
+        for (self.roots.items) |root| {
+            if (std.mem.eql(u8, root.path, path)) {
+                found = true;
+                continue;
+            }
+            paths[n] = root.path;
+            n += 1;
+        }
+        if (!found) return false;
+        try self.replaceExplicitRoots(paths[0..n]);
+        return true;
+    }
+
+    /// Native watcher를 explorer roots + 열린 entry parents의 canonical union으로 재구성할 one-shot 목록.
+    /// 모든 allocation을 stage한 뒤 swap해 OOM이면 기존 native watcher 요청 상태를 보존한다.
+    pub fn resetWatchRequests(self: *Tree, extra_roots: []const []const u8) !void {
+        var staged: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (staged.items) |path| self.allocator.free(path);
+            staged.deinit(self.allocator);
+        }
+        try staged.ensureTotalCapacity(self.allocator, self.roots.items.len + extra_roots.len);
+        for (self.roots.items) |root| try appendNormalizedWatchRoot(self.allocator, &staged, root.path);
+        for (extra_roots) |path| try appendNormalizedWatchRoot(self.allocator, &staged, path);
+        for (self.watch_requests.items) |path| self.allocator.free(path);
+        self.watch_requests.deinit(self.allocator);
+        self.watch_requests = staged;
+        staged = .empty;
+    }
+
+    fn appendNormalizedWatchRoot(allocator: std.mem.Allocator, roots: *std.ArrayList([]u8), path: []const u8) !void {
+        if (path.len == 0 or !std.fs.path.isAbsolute(path)) return error.InvalidPath;
+        for (roots.items) |root| if (pathWithin(path, root)) return;
+        var i: usize = 0;
+        while (i < roots.items.len) {
+            if (!pathWithin(roots.items[i], path)) {
+                i += 1;
+                continue;
+            }
+            allocator.free(roots.orderedRemove(i));
+        }
+        roots.appendAssumeCapacity(try allocator.dupe(u8, path));
     }
 
     fn pushRecent(self: *Tree, file_path: []const u8) !void {
@@ -419,6 +705,15 @@ pub const Tree = struct {
     pub fn takeScanRequest(self: *Tree) ?[]u8 {
         if (self.scan_requests.items.len == 0) return null;
         return self.scan_requests.orderedRemove(0);
+    }
+
+    /// A root picker commit transfers its retained directory capability to the exact first scan path.
+    /// Removing by bytes keeps other existing roots queued in stable order for multi-root add.
+    pub fn takeScanRequestForPath(self: *Tree, path: []const u8) ?[]u8 {
+        for (self.scan_requests.items, 0..) |request, index| {
+            if (std.mem.eql(u8, request, path)) return self.scan_requests.orderedRemove(index);
+        }
+        return null;
     }
 
     /// 새 multi-root만 한 번 반환한다. Swift FSEvents adapter가 복사한 뒤 free한다.
@@ -501,6 +796,10 @@ pub const Tree = struct {
     }
 
     pub fn applySnapshotWithIdentity(self: *Tree, directory_path: []const u8, identity: ?Identity, inputs: []const EntryInput) !void {
+        const node = self.findNode(directory_path) orelse return error.NotFound;
+        if (node.identity) |expected| if (identity) |actual| {
+            if (!expected.eql(actual)) return error.IdentityMismatch;
+        };
         try self.applySnapshotLimited(directory_path, inputs, max_materialized_nodes);
         if (identity) |value| (self.findNode(directory_path) orelse return error.NotFound).identity = value;
     }
@@ -716,6 +1015,11 @@ pub const Tree = struct {
         return count;
     }
 };
+
+fn clonePathList(allocator: std.mem.Allocator, source: []const []u8, out: *std.ArrayList([]u8)) !void {
+    try out.ensureTotalCapacity(allocator, source.len);
+    for (source) |path| out.appendAssumeCapacity(try allocator.dupe(u8, path));
+}
 
 fn validBasename(name: []const u8) bool {
     return name.len > 0 and !std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..") and
@@ -961,4 +1265,85 @@ test "missing deep selection reconcile visits maximum materialized rows once" {
         reconcileIdentityCounted(rows, .{ .kind = .file, .path = &deep_path }, max_materialized_nodes / 2, &visits),
     );
     try std.testing.expectEqual(max_materialized_nodes, visits);
+}
+
+test "file tree explicit roots replace add remove and outside open stays recent-only" {
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    const initial_generation = tree.rootGeneration();
+    try tree.replaceExplicitRoots(&.{"/project/a"});
+    try std.testing.expectEqual(RootMode.explicit, tree.rootMode());
+    try std.testing.expect(tree.rootGeneration() != initial_generation);
+    try tree.addExplicitRoot("/project/b");
+    try std.testing.expectEqual(@as(usize, 2), tree.rootCount());
+    try tree.recordOpened("/outside/readme.md", "/outside");
+    try std.testing.expectEqual(@as(usize, 2), tree.rootCount());
+    try std.testing.expectEqualStrings("/outside/readme.md", tree.recentAt(0).?);
+    try std.testing.expect(try tree.removeExplicitRoot("/project/a"));
+    try std.testing.expectEqual(@as(usize, 1), tree.rootCount());
+    try tree.replaceExplicitRoots(&.{});
+    try std.testing.expectEqual(@as(usize, 0), tree.rootCount());
+    try std.testing.expect(tree.hasContent()); // recent는 explicit root 교체와 독립이다.
+}
+
+test "file tree explicit root cap plus one is atomic" {
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+
+    var buffers: [max_roots + 1][32]u8 = undefined;
+    var paths: [max_roots + 1][]const u8 = undefined;
+    for (&buffers, 0..) |*buffer, index| {
+        paths[index] = try std.fmt.bufPrint(buffer, "/project-{d}", .{index});
+    }
+    try tree.replaceExplicitRoots(paths[0..max_roots]);
+    const generation = tree.rootGeneration();
+    try std.testing.expectEqual(max_roots, tree.rootCount());
+    try std.testing.expectError(error.TooManyRoots, tree.addExplicitRoot(paths[max_roots]));
+    try std.testing.expectEqual(generation, tree.rootGeneration());
+    try std.testing.expectEqual(max_roots, tree.rootCount());
+    try std.testing.expectEqualStrings(paths[0], tree.rootAt(0).?);
+    try std.testing.expectEqualStrings(paths[max_roots - 1], tree.rootAt(max_roots - 1).?);
+}
+
+test "file tree watcher requests normalize explorer and open-entry safety roots" {
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/project"});
+    try tree.resetWatchRequests(&.{ "/project/sub", "/outside", "/outside/deeper" });
+    const first = tree.takeWatchRequest().?;
+    defer allocator.free(first);
+    const second = tree.takeWatchRequest().?;
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings("/project", first);
+    try std.testing.expectEqualStrings("/outside", second);
+    try std.testing.expect(tree.takeWatchRequest() == null);
+}
+
+test "file tree transaction clone is independent and pinned root rejects replacement identity" {
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/project"});
+    const pinned: Identity = .{ .device = 7, .inode = 11, .kind = @intFromEnum(IdentityKind.directory) };
+    try std.testing.expect(tree.pinRootIdentity("/project", pinned));
+    try tree.applySnapshotWithIdentity("/project", pinned, &.{.{ .name = "docs", .kind = .directory }});
+
+    var candidate = try tree.clone();
+    defer candidate.deinit();
+    try candidate.addExplicitRoot("/outside");
+    try std.testing.expectEqual(@as(usize, 1), tree.rootCount());
+    try std.testing.expectEqual(@as(usize, 2), candidate.rootCount());
+
+    const replaced: Identity = .{ .device = 7, .inode = 12, .kind = @intFromEnum(IdentityKind.directory) };
+    try std.testing.expectError(error.IdentityMismatch, candidate.applySnapshotWithIdentity("/project", replaced, &.{}));
+    try std.testing.expect(try candidate.removeExplicitRoot("/outside"));
+    try std.testing.expectError(error.IdentityMismatch, candidate.applySnapshotWithIdentity("/project", replaced, &.{}));
+    try std.testing.expectError(error.IdentityMismatch, tree.applySnapshotWithIdentity("/project", replaced, &.{}));
+    var rows: std.ArrayList(Row) = .empty;
+    defer rows.deinit(allocator);
+    try tree.buildRows(allocator, &.{}, &rows);
+    try std.testing.expectEqualStrings("docs", rows.items[1].directory.label);
 }

@@ -479,12 +479,16 @@ pub const TerminalCore = struct {
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
         const grid = clampGridSize(size);
         const cells = try allocator.alloc(types.Cell, cellCount(grid));
+        errdefer allocator.free(cells);
         @memset(cells, .{});
         const wrapped = try allocator.alloc(bool, grid.rows);
+        errdefer allocator.free(wrapped);
         @memset(wrapped, false);
         const prompt_marks = try allocator.alloc(types.RowPrompt, grid.rows);
+        errdefer allocator.free(prompt_marks);
         @memset(prompt_marks, .{});
         const tabstops = try allocator.alloc(bool, grid.cols);
+        errdefer allocator.free(tabstops);
         for (tabstops, 0..) |*t, c| t.* = (c % 8 == 0); // 기본 탭스톱: 8칸마다(col 0,8,16,…)
 
         return .{

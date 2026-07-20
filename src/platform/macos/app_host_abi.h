@@ -8,10 +8,13 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 136u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 137u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
+#define MARU_FILE_TREE_ROOT_PICK_NONE 0u
+#define MARU_FILE_TREE_ROOT_PICK_REPLACE 1u
+#define MARU_FILE_TREE_ROOT_PICK_ADD 2u
 #define MARU_LIVE_PREVIEW_MAX_WORKERS 8u
 #define MARU_LIVE_PREVIEW_SOURCE_BYTES_PER_WORKER 8388608u
 #define MARU_LIVE_PREVIEW_RESULT_BYTES_PER_WORKER 2097152u
@@ -781,6 +784,9 @@ uint32_t maru_macos_app_session_take_file_pick_request(MaruAppHostSession *sessi
 int32_t maru_macos_app_session_provide_picked_file(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
 /* open_file_panel(Cmd+O/팔릿/메뉴)이 요청한 Markdown/HTML NSOpenPanel one-shot. v121. */
 uint32_t maru_macos_app_session_take_file_panel_pick_request(MaruAppHostSession *session);
+/* Explorer root directory picker one-shot. 0=none, 1=replace roots, 2=add root. cancel은 len=0 provide. v137. */
+uint32_t maru_macos_app_session_take_file_tree_root_pick_request(MaruAppHostSession *session);
+int32_t maru_macos_app_session_provide_file_tree_root_pick(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
 /* 절대경로를 현재 창 도크에 연다. 반환 0=지원하지 않는 확장자(외부 열기 유지), 1=열림/기존 탭 활성화,
    2=지원 확장자지만 경로·파일·용량/할당 실패. 종류·regular-file·중복 정책은 Zig 단일 출처. v121. */
 uint32_t maru_macos_app_session_open_file_panel_path(MaruAppHostSession *session, const uint8_t *bytes, size_t len);

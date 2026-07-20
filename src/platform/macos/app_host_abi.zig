@@ -912,6 +912,18 @@ pub export fn maru_macos_app_session_take_file_panel_pick_request(session: ?*App
     return if (app_session.takeFilePanelPickRequest()) 1 else 0;
 }
 
+pub export fn maru_macos_app_session_take_file_tree_root_pick_request(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return @intFromEnum(app_session.takeFileTreeRootPickRequest());
+}
+
+pub export fn maru_macos_app_session_provide_file_tree_root_pick(session: ?*AppSession, bytes: ?[*]const u8, len: usize) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
+    app_session.provideFileTreeRootPick(slice);
+    return @intFromEnum(Status.ok);
+}
+
 // 절대경로를 현재 창 도크에 연다. 0=지원하지 않는 확장자, 1=열림/기존 탭 활성화, 2=지원 확장자지만 실패. (v121)
 pub export fn maru_macos_app_session_open_file_panel_path(session: ?*AppSession, bytes: ?[*]const u8, len: usize) u32 {
     const app_session = session orelse return @intFromEnum(AppSession.FilePanelOpenPathResult.failed);
@@ -4906,6 +4918,9 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(AppSessionConfig)); // 10 u32(abi/cols/rows/queue/cmd/chrome_minimal/minimal_tabs + width_px/height_px/scale_milli)
     try std.testing.expectEqual(@as(usize, 176), @sizeOf(AppFrameSummary)); // quit_decision(u32,v90)+web_surfaces_present(u32,v102)가 168→176 정렬 패딩을 채워 176 불변
     try std.testing.expectEqual(@as(usize, 8), @alignOf(AppFrameSummary));
+    try std.testing.expectEqual(@as(u32, @intFromEnum(session_mod.FileTreeRootOperation.none)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_NONE));
+    try std.testing.expectEqual(@as(u32, @intFromEnum(session_mod.FileTreeRootOperation.replace)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_REPLACE));
+    try std.testing.expectEqual(@as(u32, @intFromEnum(session_mod.FileTreeRootOperation.add)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_ADD));
 }
 
 test "FP7 watch-root ABI short output reports required length without consuming one-shot" {
@@ -4939,6 +4954,33 @@ test "FP7 watch-root ABI short output reports required length without consuming 
     defer std.testing.allocator.free(out);
     try std.testing.expectEqual(required, maru_macos_app_session_take_file_tree_watch_root(session, out.ptr, out.len));
     try std.testing.expectEqual(@as(usize, 0), maru_macos_app_session_take_file_tree_watch_root(session, out.ptr, out.len));
+}
+
+test "Explorer v137 root picker ABI drains typed operations and cancel or invalid input is inert" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    defer maru_macos_app_session_destroy(session);
+
+    session.?.file_tree_root_pick_pending = .replace;
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_TREE_ROOT_PICK_REPLACE), maru_macos_app_session_take_file_tree_root_pick_request(session));
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_TREE_ROOT_PICK_NONE), maru_macos_app_session_take_file_tree_root_pick_request(session));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_provide_file_tree_root_pick(session, null, 0));
+    try std.testing.expectEqual(session_mod.FileTreeRootOperation.none, session.?.file_tree_root_picker_inflight);
+
+    session.?.file_tree_root_pick_pending = .add;
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_TREE_ROOT_PICK_ADD), maru_macos_app_session_take_file_tree_root_pick_request(session));
+    const generation = session.?.file_tree.rootGeneration();
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_provide_file_tree_root_pick(session, "relative", "relative".len));
+    try std.testing.expectEqual(generation, session.?.file_tree.rootGeneration());
+    try std.testing.expect(session.?.file_tree_root_validation == null);
 }
 
 test "Metal key-down ABI repairs stale dock focus before routing Cmd+W" {
@@ -5047,6 +5089,9 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     // v121 FP5 파일 패널: null session은 one-shot 없음, open 실패, entry 없음으로 안전하게 접힌다.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_panel_pick_request(null));
     try std.testing.expectEqual(@as(u32, 2), maru_macos_app_session_open_file_panel_path(null, "x", 1));
+    // v137 탐색기 root picker: null session은 요청 없음, provide는 typed null_out이다.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_root_pick_request(null));
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_provide_file_tree_root_pick(null, null, 0));
     var file_panel_path: ?[*]const u8 = undefined;
     var file_panel_path_len: usize = 99;
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_file_panel_entry(null, 1, &file_panel_path, &file_panel_path_len));
